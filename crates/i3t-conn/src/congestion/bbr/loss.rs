@@ -139,8 +139,19 @@ impl Ledger {
         }
     }
 
+    /// 路断过（在途的包很久没有任何回音）：断之前和断的时候发出的包，之后报告的丢失都和发多少无关，一律不记，
+    /// 从 `now` 起重新记账。背景丢包率留着，它是路径的性质，和这一次断路无关。
+    pub(super) fn restart(&mut self, now: Instant, kind: EpochKind, window: u64) {
+        self.epochs = VecDeque::from([Epoch::new(now, kind, window)]);
+        self.pool = None;
+    }
+
     /// 记一次丢包。试探的那一段丢包第一次超过门限时返回 `true`，调用方可以马上停止试探，不必等这一段结清。
     pub(super) fn on_lost(&mut self, sent: Instant, bytes: u64, mtu: u64) -> bool {
+        // 不属于留着的任何一段的丢包（那一段已经结清，或者是断路之前发的）不记，也不拿来估计一片丢多少。
+        if self.epoch_of(sent).is_none() {
+            return false;
+        }
         let seen = bytes.clamp(mtu, MAX_BURST_PACKETS * mtu);
         self.burst = if self.burst == 0 { seen } else { (7 * self.burst + seen) / 8 };
         let (threshold, burst) = (self.threshold_permille(), self.burst);
@@ -447,6 +458,22 @@ mod tests {
         // 攒到 2000 个包还是只有这么几次，说明丢包确实少，就按量到的算。
         baseline.record(&drained(500_000, 0, 0), MTU);
         assert_eq!((baseline.recorded, baseline.samples[1]), (2, 10));
+    }
+
+    #[test]
+    fn after_an_outage_losses_of_earlier_packets_are_not_charged() {
+        let start = Instant::now();
+        let mut ledger = Ledger::new(start, 100_000);
+        ledger.on_sent(100_000);
+        // 路断了，100ms 时恢复。之前发的包这时才陆续判为丢失。
+        ledger.restart(start + 100 * MS, EpochKind::Steady, 100_000);
+        assert!(!ledger.on_lost(start + 10 * MS, 50_000, MTU));
+        assert_eq!(ledger.burst, 0, "也不拿来估计一片丢多少");
+        assert_eq!((ledger.epochs.len(), ledger.epochs[0].lost), (1, 0));
+        // 恢复之后发的包照常记账。
+        ledger.on_sent(10_000);
+        assert!(!ledger.on_lost(start + 120 * MS, 1_000, MTU));
+        assert_eq!(ledger.epochs[0].lost, 1_000);
     }
 
     #[test]

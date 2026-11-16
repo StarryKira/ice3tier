@@ -398,6 +398,7 @@ impl Sim {
     /// 发送方能发就发，照着 QUIC 库 `poll_transmit` 的检查顺序。
     fn pump(&mut self, flow: usize) {
         let now = self.base + self.now;
+        let mut sent_any = false;
         loop {
             let state = &mut self.flows[flow];
             if !state.has_data() {
@@ -434,8 +435,13 @@ impl Sim {
             }
             self.flows[flow].cc.sent(now, batch);
             self.record_state(flow);
+            sent_any = true;
         }
-        self.arm_probe(flow);
+        // 和 RFC 9002 一样，探测超时只在发出或者确认了包的时候重新计时。没发出东西也重新计时的话，
+        // 路断着的时候每次醒来都把它往后推，探测包永远发不出去。
+        if sent_any {
+            self.arm_probe(flow);
+        }
     }
 
     /// 处理同一时刻到达的一批确认。
@@ -473,6 +479,7 @@ impl Sim {
         }
         self.record_state(flow);
         self.detect_lost(flow);
+        self.arm_probe(flow);
         self.pump(flow);
     }
 
@@ -529,6 +536,7 @@ impl Sim {
             let now = self.base + self.now;
             self.send_packet(flow, MTU, false);
             self.flows[flow].cc.sent(now, MTU);
+            self.arm_probe(flow);
         }
     }
 

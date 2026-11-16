@@ -241,6 +241,63 @@ fn a_path_that_is_both_longer_and_narrower_settles_in_two_seconds() {
 }
 
 #[test]
+fn losses_while_the_path_is_down_are_not_taken_for_congestion() {
+    let mut sim = Sim::new(Link::new(100, 50), 7);
+    sim.add_bbr(App::Bulk, Duration::ZERO);
+    // 路断了 1.5 秒，什么都过不去，之后原样恢复。
+    sim.relink_at(secs(4), Link::new(100, 50).loss_percent(100));
+    sim.relink_at(ms(5500), Link::new(100, 50));
+    sim.run(secs(9));
+    assert_eq!(sim.bbr(0).inflight_hi, None, "断路时丢掉的包不该给在途量定上限");
+    assert!(sim.mbit(0, secs(7), secs(9)) > 95.0, "恢复之后的吞吐 {}", sim.mbit(0, secs(7), secs(9)));
+}
+
+#[test]
+fn a_longer_path_after_an_outage_is_filled_within_a_second() {
+    // 直连断了，路径层过了两秒改走经 relay 的路：往返从 30ms 变成 100ms，带宽不变。
+    let mut sim = Sim::new(Link::new(100, 30), 7);
+    sim.add_bbr(App::Bulk, Duration::ZERO);
+    sim.relink_at(secs(4), Link::new(100, 30).loss_percent(100));
+    sim.relink_at(secs(6), Link::new(100, 100));
+    sim.run(secs(10));
+    assert!((ms(100)..ms(102)).contains(&min_rtt(&sim, 0)));
+    assert_eq!(sim.bbr(0).inflight_hi, None);
+    assert!(sim.mbit(0, secs(7), ms(8500)) > 95.0, "换路一秒之后的吞吐 {}", sim.mbit(0, secs(7), ms(8500)));
+    // 抬高的下限两秒之后复核一次，那一次往返时间探测少发一些。
+    assert!(sim.mbit(0, secs(7), secs(10)) > 85.0, "{}", sim.mbit(0, secs(7), secs(10)));
+}
+
+#[test]
+fn silence_counts_from_the_first_unanswered_send_not_from_the_last_ack() {
+    let start = Instant::now();
+    let mut bbr = new_bbr(start);
+    let now = feed(&mut bbr, start, ms(50), 500);
+    // 应用三秒没有数据，之后发出的包 50ms 后被确认：中间的空闲不算没有回音。
+    let resume = now + secs(3);
+    bbr.sent(resume, MTU);
+    assert_eq!(bbr.take_silence(resume + ms(50)), ms(50));
+    // 接着发出去的包两秒没有回音（路断了），这才算。
+    bbr.sent(resume + ms(100), MTU);
+    bbr.sent(resume + ms(200), MTU);
+    let silence = bbr.take_silence(resume + ms(2100));
+    assert_eq!(silence, secs(2));
+    assert!(silence > bbr.outage_after());
+    assert_eq!(bbr.take_silence(resume + ms(2200)), Duration::ZERO, "这之后还没有发过");
+}
+
+#[test]
+fn a_much_higher_floor_drops_the_in_flight_bound_learnt_on_the_old_path() {
+    let start = Instant::now();
+    let mut bbr = new_bbr(start);
+    let now = feed(&mut bbr, start, ms(30), 500);
+    bbr.inflight_hi = Some(40 * MTU);
+    bbr.replace_floor(now, ms(36));
+    assert_eq!(bbr.inflight_hi, Some(40 * MTU), "高出不到四分之一，还是原来那条路");
+    bbr.replace_floor(now, ms(100));
+    assert_eq!(bbr.inflight_hi, None);
+}
+
+#[test]
 fn the_floor_is_not_probed_while_samples_keep_touching_it() {
     let sim = bulk(Link::new(20, 50), 20);
     assert!(!entered(&sim, 0, Duration::ZERO, secs(20)).contains(&"probe-rtt"), "向下的那一轮里量到的往返时间就贴着下限");

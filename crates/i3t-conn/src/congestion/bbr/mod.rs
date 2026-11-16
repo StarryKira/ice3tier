@@ -3,9 +3,14 @@
 //! # 是哪一种
 //!
 //! 状态机和两个滤波器是 BBRv1 的（启动、排空、带宽探测的增益循环、往返时间探测；带宽取最近 10 轮送达速率的最大值，
-//! 往返时间下限取一个时间窗口里的最小值），再加上 BBRv2 对丢包的处理：一轮里丢包率超过门限，就给在途量设一个上限，
-//! 之后只在向上试探时一点一点抬高它。v1 完全不看丢包，在缓冲浅的窄带宽上会成倍超发；v2 的固定 2% 门限在随机丢包
-//! 高于 2% 的路径上又会一路降速。这里的门限是 2% 加上这条路径的背景丢包率（见 [`loss`]）。
+//! 往返时间下限取一个时间窗口里的最小值），再加上 BBRv2 对丢包的处理中的在途量上限（inflight_hi）：一轮里丢包率
+//! 超过门限，就把上限缩到"这一轮的窗口减去丢掉的"，一次最多缩到 0.7 倍；之后只在向上试探时抬高它，每轮的步子翻倍。
+//! BBRv2 的另一半（inflight_lo、bw_lo：非试探阶段一有丢包就压低的短期下限）没有做：它在随机丢包的路径上会一直往下压。
+//! v1 完全不看丢包，在缓冲浅的窄带宽上会成倍超发；v2 的固定 2% 门限在随机丢包高于 2% 的路径上又会一路降速。
+//! 这里的门限是 2% 加上这条路径的背景丢包率（见 [`loss`]）。
+//!
+//! 在途的数据很久（至少 1 秒、并且至少四个往返时间下限）没有任何回音时，算路断过一次，断的时候发出的包的丢失不算账：
+//! 那是路径层在换路或者等路恢复，和发多少无关。
 //!
 //! # 和标准 BBR 的差别：只控制在途量
 //!
@@ -27,10 +32,19 @@
 //!   排队也以旧的窗口为限，不会无限增长。丢包被藏起来、只看得到延迟变大的路径（比如经 TCP 中转）上也是如此。
 //! - 往返时间下限偏小时，标准 BBR 仍按估计的速率发，这里则会发得不够，带宽估计跟着一路降下去。所以多了两条规则。
 //!   一是下限不会被单独一个偏低的样本压下去。二是实际的往返时间连续几轮远高于"按窗口和带宽估计算出来该有的值"，
-//!   就提前做一次往返时间探测：把在途量降下来之后量到的往返时间如果仍然那么高，是路径变长了，下限换成新的；
-//!   如果回落了，是带宽估计偏高，旧的带宽样本作废。
+//!   就提前做一次往返时间探测：把在途量降下来之后量到的往返时间如果仍然那么高，是路径变长了，下限换成新的，
+//!   按原来那条路定下的在途量上限也作废；如果回落了，是带宽估计偏高，旧的带宽样本作废。
 //! - 和把缓冲填满的连接（Cubic 之类）共用瓶颈时，拿到的份额比标准 BBR 少：往返时间超过下限两倍之后，
 //!   在途量不再跟着放大。
+//!
+//! # QUIC 库的接口带来的其他限制
+//!
+//! - 确认时库只给"这个包是什么时候发的"，不给包号；发送时也只说"这一批在什么时刻发出"。送达速率的记录因此按
+//!   发送时刻对上，同一时刻发出的一批共用一条（见 [`sampler`]）。
+//! - "应用没有数据可发"不是按包标记的：库只在确认到达时告诉控制器，上一次组包时是不是既没发出东西、也没被窗口挡住。
+//!   流的接收窗口挡住发送时也算没有数据可发，所以单条流被接收窗口限速时，样本都带着应用受限的标记，只能抬高带宽估计。
+//! - 一次丢包检测里判丢的包一起报告，只带其中最晚的那个的发送时刻，丢包就按这个时刻记账（见 [`loss`]）。
+//! - 换路发生在库的下面，库和控制器都得不到通知，只能从往返时间和送达速率的变化自己发现（上一节）。
 //!
 //! # 没有做的
 //!
@@ -102,6 +116,10 @@ const INFLATION_HOLDOFF: Duration = Duration::from_secs(2);
 /// 局域网）上，收发两端一批一批处理包、定时器唤醒的间隔都比往返时间长，在途量只有"带宽 × 往返时间"的话连一批
 /// 都装不下，窗口就成了瓶颈。库自己的发送节奏是 2ms 一批，取相同的值。代价是这类路径上最多多排 2ms 的队。
 const MIN_RTT_FLOOR: Duration = Duration::from_millis(2);
+
+/// 在途有数据、却至少这么久（并且至少四个往返时间下限）没有收到任何确认，算路断过一次。
+/// 正常的尾部丢包靠探测超时恢复，安静的时间是两三个往返时间；拥塞时确认照样一直在来，只是来得晚。
+const OUTAGE: Duration = Duration::from_secs(1);
 
 /// 日志里每隔多久记一次估计值。
 const REPORT_INTERVAL: Duration = Duration::from_secs(1);
@@ -222,6 +240,8 @@ pub(crate) struct Bbr {
     inflated_rtt: Option<Duration>,
     last_inflation_probe: Option<Instant>,
     in_flight: u64,
+    /// 上一批确认之后第一次发送的时刻。从那时起发出去的数据还没有任何回音。
+    unanswered_since: Option<Instant>,
     next_report: Instant,
     rng: XorShift,
 }
@@ -257,6 +277,7 @@ impl Bbr {
             inflated_rtt: None,
             last_inflation_probe: None,
             in_flight: 0,
+            unanswered_since: None,
             next_report: now + REPORT_INTERVAL,
             rng: XorShift::new(seed),
         }
@@ -278,6 +299,7 @@ impl Bbr {
     }
 
     fn sent(&mut self, now: Instant, bytes: u64) {
+        self.unanswered_since.get_or_insert(now);
         self.sampler.on_sent(now);
         self.ledger.on_sent(bytes);
     }
@@ -289,6 +311,14 @@ impl Bbr {
 
     fn end_acks(&mut self, now: Instant, in_flight: u64, app_limited: bool) {
         self.in_flight = in_flight;
+        let silence = self.take_silence(now);
+        let outage = silence > self.outage_after();
+        if outage {
+            // 路断了，或者路径层换了一条路。断的时候发出去的包会在这批确认之后被判丢失，那不是发得太多。
+            tracing::debug!(?silence, "在途的数据很久没有回音，算路断过一次，那之前发出的包的丢失不当作拥塞");
+            self.ledger.restart(now, self.epoch_kind(), self.window);
+            self.epoch_stale = false;
+        }
         while let Some(verdict) = self.ledger.settle(self.mtu) {
             self.apply_verdict(verdict);
         }
@@ -303,8 +333,11 @@ impl Bbr {
                     self.bw.update(self.sampler.round(), rate);
                 }
             }
-            self.batch_squares = self.batch_squares * 7 / 8 + u128::from(sample.acked) * u128::from(sample.acked);
-            self.batch_bytes = self.batch_bytes * 7 / 8 + u128::from(sample.acked);
+            // 断路之后的第一批确认是攒了很久的一大批，不是平时确认成批到达的样子。
+            if !outage {
+                self.batch_squares = self.batch_squares * 7 / 8 + u128::from(sample.acked) * u128::from(sample.acked);
+                self.batch_bytes = self.batch_bytes * 7 / 8 + u128::from(sample.acked);
+            }
             self.round_min_rtt = Some(self.round_min_rtt.map_or(sample.rtt, |rtt| rtt.min(sample.rtt)));
             self.update_queue_rtt(now, &sample);
             if sample.round_ended {
@@ -559,7 +592,7 @@ impl Bbr {
         let window = self.bounded_by_inflight_hi(bytes_in(bw, min_rtt.max(MIN_RTT_FLOOR)) / 2).max(MIN_WINDOW_PACKETS * self.mtu);
         if sample.app_limited && self.in_flight <= window {
             // 应用发得少，在途量本来就比探测时还低，样本里没有自己造成的排队，用不着专门去量。
-            self.min_rtt.replace(now, sample.rtt);
+            self.replace_floor(now, sample.rtt);
             return;
         }
         let why =
@@ -573,7 +606,7 @@ impl Bbr {
         let stage = match probe.stage {
             ProbeStage::Draining if self.in_flight <= probe.window => ProbeStage::Settling { since: now },
             ProbeStage::Settling { since } if sample.sent >= since => {
-                self.min_rtt.replace(now, sample.rtt);
+                self.replace_floor(now, sample.rtt);
                 ProbeStage::Measuring { until: now + PROBE_RTT_DURATION }
             }
             ProbeStage::Measuring { until } if now >= until => {
@@ -601,6 +634,31 @@ impl Bbr {
         } else {
             self.enter(State::Startup, "往返时间探测结束");
         }
+    }
+
+    /// 用一个里面没有自己排队的样本换掉往返时间的下限。
+    ///
+    /// 下限被大幅抬高，多半是换了一条更长的路。在途量上限是在原来那条路上按丢包定下的字节数，路变长之后它会把窗口
+    /// 卡在新的 BDP 之下很多；被卡住时量到的送达速率又会把带宽估计拉低，要好几秒才试探得回来。所以这时作废它，
+    /// 新的路上发得太多的话会重新丢包、重新定下来。
+    fn replace_floor(&mut self, now: Instant, rtt: Duration) {
+        if self.min_rtt.replace(now, rtt)
+            && let Some(hi) = self.inflight_hi.take()
+        {
+            tracing::debug!(inflight_hi = hi, ?rtt, "往返时间的下限被大幅抬高，路径多半变了，按原来的路定下的在途量上限作废");
+        }
+    }
+
+    /// 发出去的数据等了多久才有回音，并且从这一批确认起重新计时。
+    ///
+    /// 从上一批确认之后第一次发送算起，而不是从上一批确认算起：应用没有数据可发的那段时间不算在里面。
+    fn take_silence(&mut self, now: Instant) -> Duration {
+        self.unanswered_since.take().map_or(Duration::ZERO, |since| now.saturating_duration_since(since))
+    }
+
+    /// 在途的数据多久没有回音算路断过一次。
+    fn outage_after(&self) -> Duration {
+        self.min_rtt.get().map_or(OUTAGE, |floor| OUTAGE.max(floor * 4))
     }
 
     /// 按往返时间下限算的 BDP：路径上只有自己时装得下的量。

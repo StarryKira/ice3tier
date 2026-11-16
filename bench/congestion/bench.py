@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """拥塞控制的对比测试：在本机的实验环境里起真实的 i3t 节点，经出口下载，比较 Cubic 和自己的 BBR。
 
-    python3 bench/congestion/bench.py [场景名...] [--out 结果目录]
+    python3 bench/congestion/bench.py [场景名...] [--out 结果目录] [--reps 次数] [--conditions ...]
 
 场景：matrix（单条下载，各种往返时间 / 丢包 / 带宽）、share（两条连接共用一个瓶颈）、
-switch（下载途中换路）、ratedrop（下载途中带宽从 100 降到 20 Mbit/s）、tcprelay（一端只能用 TCP 连 relay）。
-不写场景名就全跑。
+switch（下载途中换路）、ratedrop（下载途中带宽从 100 降到 20 Mbit/s）、tcprelay（一端只能用 TCP 连 relay）、
+applimited（几百条小流断断续续地取数据，之后再大量下载）。不写场景名就全跑。
 
 拓扑：web 是下载源，b 是出口节点（发送方，拥塞控制用环境变量 I3T_CONGESTION 指定），a 是入口节点（接收方）。
 网络条件加在 a 的上联线上，web 和 b 之间不加限制，所以瓶颈就是 b → a 这条 QUIC 连接经过的那条线。
+各主机默认关掉分段卸载，瓶颈处一个包一个包地排队、丢包（见 `PER_PACKET`）。
 
 要先构建可执行文件，并用环境变量 I3T_BIN_DIR 指到它们所在的目录（默认 target/release）。
 """
@@ -61,9 +62,11 @@ Server(("0.0.0.0", 80), Handler).serve_forever()
 
 # 经本机的 SOCKS5 入口做一件事，结果在标准输出打一行 JSON。
 #   download <出口的虚拟 IP> <目标 IP> <秒数> [条数]：同时开几条下载（默认一条），记下每 100ms 一共收到的字节数；
-#   echo <出口的虚拟 IP> <目标 IP> <秒数> <间隔秒>：反复发小请求，记下每次从发起到收完用了多久。
+#   echo <出口的虚拟 IP> <目标 IP> <秒数> <间隔秒>：反复发小请求，记下每次是第几秒发起的、从发起到收完用了多久；
+#   swarm <出口的虚拟 IP> <目标 IP> <秒数> <并发数> <每次取多少字节>：每个并发各自反复"建一条流、取一小块、
+#     歇 0～2 秒"，像一个大部分时间空闲、偶尔回一段话的模型网关。记下每次用了多久。
 CLIENT = r"""
-import json, select, socket, sys, time
+import json, random, select, socket, sys, threading, time
 
 def connect(user, target):
     sock = socket.create_connection(("127.0.0.1", 1080), timeout=30)
@@ -98,9 +101,36 @@ if mode == "download":
     except OSError as err:
         error = repr(err)
     print(json.dumps({"buckets": buckets, "error": error}))
+elif mode == "swarm":
+    workers, size = int(sys.argv[5]), int(sys.argv[6])
+    deadline = time.monotonic() + seconds
+    samples, errors, lock = [], [0], threading.Lock()
+    def work():
+        time.sleep(random.uniform(0, 2))
+        while time.monotonic() < deadline:
+            began = time.monotonic()
+            try:
+                sock = connect(user, target)
+                sock.sendall(f"GET /bytes/{size} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".encode())
+                while sock.recv(65536):
+                    pass
+                sock.close()
+                with lock:
+                    samples.append(round((time.monotonic() - began) * 1000, 1))
+            except (OSError, AssertionError):
+                with lock:
+                    errors[0] += 1
+            time.sleep(random.uniform(0, 2))
+    threads = [threading.Thread(target=work, daemon=True) for _ in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=seconds + 60)
+    print(json.dumps({"samples": samples, "errors": errors[0]}))
 else:
     interval, samples, errors = float(sys.argv[5]), [], 0
-    deadline = time.monotonic() + seconds
+    start = time.monotonic()
+    deadline = start + seconds
     while time.monotonic() < deadline:
         began = time.monotonic()
         try:
@@ -109,7 +139,7 @@ else:
             while sock.recv(4096):
                 pass
             sock.close()
-            samples.append(round((time.monotonic() - began) * 1000, 1))
+            samples.append([round(began - start, 2), round((time.monotonic() - began) * 1000, 1)])
         except (OSError, AssertionError):
             errors += 1
         time.sleep(max(0.0, interval - (time.monotonic() - began)))
@@ -117,11 +147,36 @@ else:
 """
 
 METER = re.compile(r"拥塞控制统计.*?conn=(\d+) algorithm=(\w+) sent=(\d+) acked=(\d+) lost=(\d+)(?: window=(\d+) rtt_us=(\d+) rtt_max_us=(\d+) min_rtt_us=(\d+))?")
+# 自己的控制器每秒一行的估计值。日志里没有连接编号，只在发送方只有一条传数据的连接时有意义。
+ESTIMATE = re.compile(r"拥塞控制的估计 .*? bw=(\d+).*? window=(\d+)")
+
+# 节点的日志级别：拥塞控制的统计在 debug 级别。设环境变量 I3T_BENCH_TRACE=1 时连阶段变化（trace）也记下来。
+LOG_LEVEL = "info,i3t_conn::congestion=" + ("trace" if os.environ.get("I3T_BENCH_TRACE") == "1" else "debug")
+
+
+# 默认关掉每台主机发送方向的分段卸载。开着的时候，连接一次交给内核的一批包（最多 10 个）是一个大包，限速器的队列上限
+# 按包数算，随机丢包也是整批地丢：缓冲比设的深好几倍（Cubic 在 20 Mbit/s 上排出 800ms 的队），丢包成片。
+# 真实的网卡在发出之前就把它们切开了，瓶颈处看到的是一个一个的包。`--gso` 保留卸载，看成片丢包时的表现。
+PER_PACKET = True
+
+
+class BenchLab(Lab):
+    """建出来的主机按 `per_packet` 关掉分段卸载。不限速也不丢包的时候比的是 CPU，保留卸载。"""
+
+    def __init__(self, per_packet: bool = True) -> None:
+        super().__init__()
+        self.per_packet = per_packet and PER_PACKET
+
+    def host(self, name: str) -> Host:
+        host = super().host(name)
+        if self.per_packet:
+            host.run("ethtool", "-K", "up0", "gso", "off", "tx-udp-segmentation", "off")
+        return host
 
 
 def start_node(node: Node, netmap: dict, algorithm: str | None = None) -> None:
     """启动一个节点。`algorithm` 是它作为发送方时用的拥塞控制；日志只留拥塞控制的统计，免得影响吞吐。"""
-    env = {"I3T_LOG": "info,i3t_conn::congestion=debug"}
+    env = {"I3T_LOG": LOG_LEVEL}
     if algorithm:
         env["I3T_CONGESTION"] = algorithm
     saved = {name: os.environ.get(name) for name in env}
@@ -174,8 +229,9 @@ def meter(node: Node) -> list[dict]:
         if not found:
             continue
         conn, algorithm, sent, acked, lost, window, rtt, rtt_max, min_rtt = found.groups()
-        entry = conns.setdefault(conn, {"algorithm": algorithm, "rtt_ms": [], "rtt_max_ms": [], "window": []})
+        entry = conns.setdefault(conn, {"algorithm": algorithm, "rtt_ms": [], "rtt_max_ms": [], "window": [], "totals": []})
         entry.update(sent=int(sent), acked=int(acked), lost=int(lost))
+        entry["totals"].append((int(sent), int(lost)))
         if window:
             entry["window"].append(int(window))
             entry["rtt_ms"].append(int(rtt) / 1000)
@@ -183,6 +239,18 @@ def meter(node: Node) -> list[dict]:
             entry["min_rtt_ms"] = int(min_rtt) / 1000
     # 只要真正传过数据的连接。
     return [entry for entry in conns.values() if entry.get("sent", 0) > 1_000_000]
+
+
+def loss_series(conn: dict) -> list[float]:
+    """每秒的丢包率（%）：相邻两行统计之间丢掉的字节占发出的字节的比例。"""
+    totals = [(0, 0)] + conn.get("totals", [])
+    return [round(100 * (lost - lost0) / (sent - sent0), 1) if sent > sent0 else 0.0
+            for (sent0, lost0), (sent, lost) in zip(totals, totals[1:])]
+
+
+def estimates(node: Node) -> list[dict]:
+    """自己的控制器每秒记下的估计值：带宽（Mbit/s）和窗口（字节）。"""
+    return [{"bw_mbit": round(int(bw) * 8 / 1e6, 1), "window": int(window)} for bw, window in ESTIMATE.findall(node.read_log())]
 
 
 def mbit(buckets: list[int], start: float, end: float) -> float:
@@ -209,7 +277,14 @@ def summarize(download: dict, sender: Node, seconds: float, warmup: float) -> di
         "min_rtt_ms": conn.get("min_rtt_ms"),
         "error": download.get("error"),
         "series": series(download["buckets"]),
+        "loss_series": loss_series(conn),
+        "rtt_series": [round(value) for value in conn.get("rtt_ms", [])],
     }
+
+
+def after(samples: list[list[float]], warmup: float) -> list[float]:
+    """小请求的耗时（ms），只要开始得不早于第 `warmup` 秒的：最开始的那些还要等连接建立，量的不是排队。"""
+    return [ms for began, ms in samples if began >= warmup]
 
 
 def percentile(samples: list[float], fraction: float) -> float | None:
@@ -247,25 +322,26 @@ CONDITIONS = [
 ]
 
 
-def matrix(out: Path, seconds: float = 15, warmup: float = 3, conditions=CONDITIONS, echo: bool = True) -> list[dict]:
-    """单条下载。每种条件、每种拥塞控制各用一套全新的节点。"""
+def matrix(out: Path, seconds: float = 15, warmup: float = 3, conditions=CONDITIONS, echo: bool = True, reps: int = 1) -> list[dict]:
+    """单条下载。每种条件、每种拥塞控制、每一次重复各用一套全新的节点；两种拥塞控制交替着跑，免得机器的状态偏向一边。"""
     rows = []
     for rtt, loss, rate, streams in conditions:
-        for algorithm in ALGORITHMS:
-            with tempfile.TemporaryDirectory(prefix="i3t-cc-") as work, Lab() as lab:
-                a, b, web = pair(lab, Path(work), algorithm)
-                a.host.shape(Shape(rtt_ms=rtt, loss_pct=loss, rate_mbit=rate))
-                bulk = client(a, "download", b.virtual_ip, web.ip, seconds, streams)
-                pings = client(a, "echo", b.virtual_ip, web.ip, seconds, 0.2) if echo else None
-                row = summarize(finish(bulk), b, seconds, warmup)
-                latency = finish(pings)["samples"] if pings else []
-                drops = bottleneck_drops(a.host)
-                save_log(out, f"matrix-{rtt:g}-{loss:g}-{rate:g}-{streams}-{algorithm}", b)
-            row.update(rtt=rtt, loss=loss, rate=rate, streams=streams, algorithm=algorithm, drops=drops,
-                       echo_p50=percentile(latency, 0.5), echo_p99=percentile(latency, 0.99))
-            print(json.dumps(row, ensure_ascii=False), flush=True)
-            rows.append(row)
-            time.sleep(0.3)
+        for rep in range(reps):
+            for algorithm in ALGORITHMS:
+                with tempfile.TemporaryDirectory(prefix="i3t-cc-") as work, BenchLab(per_packet=bool(rate or loss)) as lab:
+                    a, b, web = pair(lab, Path(work), algorithm)
+                    a.host.shape(Shape(rtt_ms=rtt, loss_pct=loss, rate_mbit=rate))
+                    bulk = client(a, "download", b.virtual_ip, web.ip, seconds, streams)
+                    pings = client(a, "echo", b.virtual_ip, web.ip, seconds, 0.2) if echo else None
+                    row = summarize(finish(bulk), b, seconds, warmup)
+                    latency = after(finish(pings)["samples"], warmup) if pings else []
+                    drops = bottleneck_drops(a.host)
+                    save_log(out, f"matrix-{rtt:g}-{loss:g}-{rate:g}-{streams}-{algorithm}-{rep}", b)
+                row.update(rtt=rtt, loss=loss, rate=rate, streams=streams, algorithm=algorithm, rep=rep, drops=drops,
+                           echo_p50=percentile(latency, 0.5), echo_p99=percentile(latency, 0.99))
+                print(json.dumps(row, ensure_ascii=False), flush=True)
+                rows.append(row)
+                time.sleep(0.3)
     return rows
 
 
@@ -273,7 +349,7 @@ def share(out: Path, seconds: float = 40, late: float = 8) -> list[dict]:
     """两条连接（两个出口 b1、b2 各自往 a 发）共用 a 的上联线：50ms、100 Mbit/s。第二条晚 `late` 秒开始。"""
     rows = []
     for first, second in (("bbr", "bbr"), ("bbr", "cubic"), ("cubic", "bbr"), ("cubic", "cubic")):
-        with tempfile.TemporaryDirectory(prefix="i3t-cc-") as tmp, Lab() as lab:
+        with tempfile.TemporaryDirectory(prefix="i3t-cc-") as tmp, BenchLab() as lab:
             work = Path(tmp)
             web = lab.host("web")
             start_source(web)
@@ -329,7 +405,7 @@ def switch(out: Path, seconds: float = 30) -> list[dict]:
     rows = []
     for scenario in ("relay-to-direct", "direct-to-relay", "rtt-step"):
         for algorithm in ALGORITHMS:
-            with tempfile.TemporaryDirectory(prefix="i3t-cc-") as tmp, Lab() as lab:
+            with tempfile.TemporaryDirectory(prefix="i3t-cc-") as tmp, BenchLab() as lab:
                 work = Path(tmp)
                 web = lab.host("web")
                 start_source(web)
@@ -369,11 +445,12 @@ def ratedrop(out: Path, seconds: float = 30) -> list[dict]:
     """下载途中带宽从 100 降到 20 Mbit/s（第 10 秒），第 20 秒恢复。往返 50ms。"""
     rows = []
     for algorithm in ALGORITHMS:
-        with tempfile.TemporaryDirectory(prefix="i3t-cc-") as work, Lab() as lab:
+        with tempfile.TemporaryDirectory(prefix="i3t-cc-") as work, BenchLab() as lab:
             a, b, web = pair(lab, Path(work), algorithm)
             a.host.shape(Shape(rtt_ms=50, rate_mbit=100))
             bulk = client(a, "download", b.virtual_ip, web.ip, seconds)
             time.sleep(10)
+            sent_before = sum(conn["sent"] for conn in meter(b))
             lost_before = sum(conn["lost"] for conn in meter(b))
             reshape(lab, a.host, Shape(rtt_ms=50, rate_mbit=20))
             time.sleep(10)
@@ -383,7 +460,11 @@ def ratedrop(out: Path, seconds: float = 30) -> list[dict]:
             row = summarize(got, b, seconds, 3)
             save_log(out, f"ratedrop-{algorithm}", b)
         conn = during[-1] if during else {}
-        row.update(algorithm=algorithm, lost_bytes_during_low=sum(c["lost"] for c in during) - lost_before,
+        sent_low = sum(c["sent"] for c in during) - sent_before
+        lost_low = sum(c["lost"] for c in during) - lost_before
+        row.update(algorithm=algorithm, lost_bytes_during_low=lost_low,
+                   loss_pct_during_low=round(100 * lost_low / sent_low, 2) if sent_low else None,
+                   settle_s=settle_time(row["series"], 10, 20, 20),
                    rtt_series=[round(value) for value in conn.get("rtt_ms", [])])
         print(json.dumps(row, ensure_ascii=False), flush=True)
         rows.append(row)
@@ -391,12 +472,20 @@ def ratedrop(out: Path, seconds: float = 30) -> list[dict]:
     return rows
 
 
+def settle_time(per_second: list[float], start: int, end: int, rate: float) -> int | None:
+    """带宽在第 `start` 秒变成 `rate` 之后，过几秒吞吐进入并一直留在 `rate` 的 85%～105% 之间（到第 `end` 秒为止）。"""
+    for offset in range(end - start):
+        if all(0.85 * rate <= value <= 1.05 * rate for value in per_second[start + offset:end]):
+            return offset
+    return None
+
+
 def tcprelay(out: Path, seconds: float = 20) -> list[dict]:
     """a 用不了 UDP，用 TCP 连 relay；b 用 UDP。a 的线（也就是那一段 TCP）往返 50ms、丢包 1%，不限速。"""
     rows = []
     for loss in (0, 1):
         for algorithm in ALGORITHMS:
-            with tempfile.TemporaryDirectory(prefix="i3t-cc-") as tmp, Lab() as lab:
+            with tempfile.TemporaryDirectory(prefix="i3t-cc-") as tmp, BenchLab() as lab:
                 work = Path(tmp)
                 web = lab.host("web")
                 start_source(web)
@@ -408,11 +497,12 @@ def tcprelay(out: Path, seconds: float = 20) -> list[dict]:
                 start_node(b, b.netmap(peers=[a.as_peer(endpoints=False, attached=[(r, 5)])], relays=[r.as_relay()], me={"exit": {}}), algorithm)
                 a.host.shape(Shape(rtt_ms=50, loss_pct=loss))
                 wait_until(lambda: "中转会话建立（TCP）" in a.read_log(), timeout=30, what="a 用 TCP 挂上 relay")
-                idle = finish(client(a, "echo", b.virtual_ip, web.ip, 4, 0.2))["samples"]
+                idle = after(finish(client(a, "echo", b.virtual_ip, web.ip, 4, 0.2))["samples"], 0)
                 bulk = client(a, "download", b.virtual_ip, web.ip, seconds)
                 pings = client(a, "echo", b.virtual_ip, web.ip, seconds, 0.2)
                 row = summarize(finish(bulk), b, seconds, 3)
                 echo = finish(pings)
+                echo["samples"] = after(echo["samples"], 3)
                 save_log(out, f"tcprelay-{loss}-{algorithm}", b)
             row.update(loss=loss, algorithm=algorithm, echo_idle_p50=percentile(idle, 0.5),
                        echo_p50=percentile(echo["samples"], 0.5), echo_p99=percentile(echo["samples"], 0.99),
@@ -423,8 +513,36 @@ def tcprelay(out: Path, seconds: float = 20) -> list[dict]:
     return rows
 
 
+def applimited(out: Path, seconds: float = 20, workers: int = 200, size: int = 10000) -> list[dict]:
+    """应用发得少：`workers` 个并发各自反复建一条流取 `size` 字节、歇 0～2 秒，往返 50ms、100 Mbit/s。
+    看这期间发送方的窗口和带宽估计有没有被撑大；之后大量下载 10 秒，看能不能马上用满链路。"""
+    rows = []
+    for algorithm in ALGORITHMS:
+        with tempfile.TemporaryDirectory(prefix="i3t-cc-") as work, BenchLab() as lab:
+            a, b, web = pair(lab, Path(work), algorithm)
+            a.host.shape(Shape(rtt_ms=50, rate_mbit=100))
+            swarm = finish(client(a, "swarm", b.virtual_ip, web.ip, seconds, workers, size), timeout=seconds + 120)
+            idle = meter(b)
+            idle_estimates = estimates(b)
+            bulk = summarize(finish(client(a, "download", b.virtual_ip, web.ip, 10)), b, 10, 2)
+            save_log(out, f"applimited-{algorithm}", b)
+        conn = idle[-1] if idle else {}
+        offered = len(swarm["samples"]) * size * 8 / 1e6 / seconds
+        row = {"algorithm": algorithm, "requests": len(swarm["samples"]), "errors": swarm["errors"], "offered_mbit": round(offered, 1),
+               "request_p50": percentile(swarm["samples"], 0.5), "request_p99": percentile(swarm["samples"], 0.99),
+               "window_max": max(conn.get("window", [0]) or [0]), "window_last": (conn.get("window") or [0])[-1],
+               "bw_max_mbit": max((item["bw_mbit"] for item in idle_estimates), default=None),
+               "loss_pct": round(100 * conn["lost"] / conn["sent"], 2) if conn.get("sent") else None,
+               "bulk_mbit": bulk["mbit"], "bulk_series": bulk["series"], "bulk_error": bulk["error"]}
+        print(json.dumps(row, ensure_ascii=False), flush=True)
+        rows.append(row)
+        time.sleep(0.3)
+    return rows
+
+
 def save_log(out: Path, name: str, node: Node) -> None:
-    lines = [line for line in node.read_log().splitlines() if any(mark in line for mark in ("拥塞控制", "路变了", "ERROR", "WARN"))]
+    marks = ("拥塞控制", "拥塞", "在途量上限", "持续丢包", "路变了", "ERROR", "WARN")
+    lines = [line for line in node.read_log().splitlines() if any(mark in line for mark in marks)]
     (out / f"{name}.log").write_text("\n".join(lines) + "\n")
 
 
@@ -433,17 +551,29 @@ def cap_mbit(rtt: float) -> float | None:
     return STREAM_WINDOW * 8 / 1e6 / (rtt / 1000) if rtt else None
 
 
+def median(rows: list[dict], key: str) -> float | None:
+    values = [row[key] for row in rows if row.get(key) is not None]
+    return round(statistics.median(values), 2) if values else None
+
+
 def report(results: dict) -> str:
     lines = []
     if rows := results.get("matrix"):
         lines += ["## 单条下载", "",
                   "| 往返 ms | 丢包 % | 带宽 Mbit/s | 下载条数 | 拥塞控制 | 吞吐 Mbit/s | 发送方丢包率 % | 平滑往返 ms（平均 / 最大） | 小请求往返 ms（p50 / p99） | 出错 |",
                   "|---|---|---|---|---|---|---|---|---|---|"]
+        # 同一条件重复跑了几次时，每格取中位数；吞吐后面括号里是最小到最大。
+        groups: dict[tuple, list[dict]] = {}
         for row in rows:
-            cap = cap_mbit(row["rtt"])
-            note = f"（单条流的窗口上限 {cap:.0f}）" if cap and row["streams"] == 1 and (not row["rate"] or cap < row["rate"] * 1.2) else ""
-            lines.append(f"| {row['rtt']:g} | {row['loss']:g} | {format(row['rate'], 'g') if row['rate'] else '不限'} | {row['streams']} | {row['algorithm']} | {row['mbit']}{note} | {row['loss_pct']} | "
-                         f"{row['rtt_ms']} / {row['rtt_max_ms']} | {row['echo_p50']} / {row['echo_p99']} | {row['error'] or '无'} |")
+            groups.setdefault((row["rtt"], row["loss"], row["rate"], row["streams"], row["algorithm"]), []).append(row)
+        for (rtt, loss, rate, streams, algorithm), runs in groups.items():
+            cap = cap_mbit(rtt)
+            note = f"（单条流的窗口上限 {cap:.0f}）" if cap and streams == 1 and (not rate or cap < rate * 1.2) else ""
+            spread = f" ({min(run['mbit'] for run in runs)}–{max(run['mbit'] for run in runs)})" if len(runs) > 1 else ""
+            errors = [run["error"] for run in runs if run["error"]]
+            lines.append(f"| {rtt:g} | {loss:g} | {format(rate, 'g') if rate else '不限'} | {streams} | {algorithm} | {median(runs, 'mbit')}{spread}{note} | "
+                         f"{median(runs, 'loss_pct')} | {median(runs, 'rtt_ms')} / {median(runs, 'rtt_max_ms')} | "
+                         f"{median(runs, 'echo_p50')} / {median(runs, 'echo_p99')} | {'；'.join(errors) or '无'} |")
         lines.append("")
     if rows := results.get("share"):
         lines += ["## 两条连接共用 100 Mbit/s、50ms 的瓶颈", "",
@@ -459,10 +589,11 @@ def report(results: dict) -> str:
         lines.append("")
     if rows := results.get("ratedrop"):
         lines += ["## 带宽 100 → 20（第 10 秒）→ 100（第 20 秒）Mbit/s，往返 50ms", "",
-                  "| 拥塞控制 | 每秒吞吐 Mbit/s | 每秒的平滑往返 ms（前 20 秒） | 低带宽期间丢的字节 | 全程丢包率 % | 出错 |", "|---|---|---|---|---|---|"]
+                  "| 拥塞控制 | 每秒吞吐 Mbit/s | 每秒的平滑往返 ms（前 20 秒） | 每秒丢包率 % | 降速后几秒稳定在 17～21 | 低带宽期间丢包率 % | 全程丢包率 % | 出错 |",
+                  "|---|---|---|---|---|---|---|---|"]
         for row in rows:
             lines.append(f"| {row['algorithm']} | {' '.join(f'{value:.0f}' for value in row['series'])} | {' '.join(str(value) for value in row['rtt_series'])} | "
-                         f"{row['lost_bytes_during_low']} | {row['loss_pct']} | {row['error'] or '无'} |")
+                         f"{' '.join(f'{value:g}' for value in row['loss_series'])} | {row['settle_s']} | {row['loss_pct_during_low']} | {row['loss_pct']} | {row['error'] or '无'} |")
         lines.append("")
     if rows := results.get("tcprelay"):
         lines += ["## 一端经 TCP 连 relay（那一段往返 50ms）", "",
@@ -471,19 +602,35 @@ def report(results: dict) -> str:
             lines.append(f"| {row['loss']} | {row['algorithm']} | {row['mbit']} | {row['loss_pct']} | {row['echo_idle_p50']} | "
                          f"{row['echo_p50']} / {row['echo_p99']} / {row['echo_max']} | {row['error'] or ('小请求失败 %d 次' % row['echo_errors'] if row['echo_errors'] else '无')} |")
         lines.append("")
+    if rows := results.get("applimited"):
+        lines += ["## 应用发得少：几百条小流断断续续地取数据（往返 50ms、100 Mbit/s），之后大量下载", "",
+                  "| 拥塞控制 | 请求数 | 平均负载 Mbit/s | 请求耗时 ms（p50 / p99） | 这期间窗口最大 / 最后（字节） | 这期间带宽估计最大 Mbit/s | 丢包率 % | 之后大量下载 Mbit/s（每秒） | 出错 |",
+                  "|---|---|---|---|---|---|---|---|---|"]
+        for row in rows:
+            errors = [f"小流失败 {row['errors']} 次"] * bool(row["errors"]) + [row["bulk_error"]] * bool(row["bulk_error"])
+            lines.append(f"| {row['algorithm']} | {row['requests']} | {row['offered_mbit']} | {row['request_p50']} / {row['request_p99']} | "
+                         f"{row['window_max']} / {row['window_last']} | {row['bw_max_mbit']} | {row['loss_pct']} | "
+                         f"{row['bulk_mbit']}（{' '.join(f'{value:.0f}' for value in row['bulk_series'])}） | {'；'.join(errors) or '无'} |")
+        lines.append("")
     return "\n".join(lines)
 
 
-SCENARIOS = {"matrix": matrix, "share": share, "switch": switch, "ratedrop": ratedrop, "tcprelay": tcprelay}
+SCENARIOS = {"matrix": matrix, "share": share, "switch": switch, "ratedrop": ratedrop, "tcprelay": tcprelay, "applimited": applimited}
 
 
 def main() -> int:
+    global ALGORITHMS, PER_PACKET
     lablib.enter()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("scenarios", nargs="*", help=f"要跑的场景，默认全部：{' '.join(SCENARIOS)}")
     parser.add_argument("--out", type=Path, default=Path(tempfile.gettempdir()) / "i3t-congestion-bench", help="结果和日志放在哪里")
     parser.add_argument("--conditions", help="matrix 只跑这些条件，写法是 往返/丢包/带宽[/同时几条下载]，逗号分隔，例如 50/1/100,150/0/1000/8")
+    parser.add_argument("--reps", type=int, default=1, help="matrix 每种条件重复几次，表里取中位数")
+    parser.add_argument("--algorithms", default=",".join(ALGORITHMS), help="只比这几种拥塞控制，逗号分隔")
+    parser.add_argument("--gso", action="store_true", help="保留分段卸载：一批包在瓶颈处是一个大包，丢包成片")
     args = parser.parse_args()
+    ALGORITHMS = tuple(args.algorithms.split(","))
+    PER_PACKET = not args.gso
     if unknown := [name for name in args.scenarios if name not in SCENARIOS]:
         parser.error(f"没有这些场景：{' '.join(unknown)}")
     args.out.mkdir(parents=True, exist_ok=True)
@@ -493,7 +640,9 @@ def main() -> int:
         if name == "matrix" and args.conditions:
             chosen = [(*parts[:3], int(parts[3]) if len(parts) > 3 else 1)
                       for parts in ([float(part) for part in item.split("/")] for item in args.conditions.split(","))]
-            results[name] = matrix(args.out, conditions=chosen)
+            results[name] = matrix(args.out, conditions=chosen, reps=args.reps)
+        elif name == "matrix":
+            results[name] = matrix(args.out, reps=args.reps)
         else:
             results[name] = SCENARIOS[name](args.out)
         (args.out / f"{name}.json").write_text(json.dumps(results[name], ensure_ascii=False, indent=1))

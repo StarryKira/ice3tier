@@ -16,6 +16,12 @@ use self::bbr::BbrConfig;
 use self::meter::Metered;
 
 /// 连接用哪种拥塞控制。
+///
+/// 默认用 [`bbr`]，依据是 `bench/congestion` 在本机实验环境里的对比（起真实的节点经出口下载）：往返 50ms、
+/// 随机丢包 1% 的 100 Mbit/s 链路上 Cubic 只有 2～3 Mbit/s，BBR 是 83～90；没有丢包时两者的吞吐只差 3%，
+/// Cubic 却把瓶颈处的缓冲排满（往返多出 80～100ms，自己丢 1.8%），BBR 不丢包、只多几毫秒；带宽骤降、换路、
+/// 经 TCP 中转的那一段丢包时，BBR 几秒之内跟上，小消息的往返都在一秒之内。不如 Cubic 的地方：和 Cubic 共用一个
+/// 缓冲很深的瓶颈时只拿到约四分之一。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Algorithm {
     /// QUIC 库自带的 Cubic。
