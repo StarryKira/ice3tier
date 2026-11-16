@@ -8,12 +8,23 @@ publish = false
 description = "ice3tier 的入口：SOCKS5、HTTP CONNECT、端口转发的监听、用户名解析、凭据"
 
 [dependencies]
+base64.workspace = true
 i3t-conn = { path = "../i3t-conn" }
 i3t-flow = { path = "../i3t-flow" }
 i3t-model = { path = "../i3t-model" }
 i3t-proto = { path = "../i3t-proto" }
+ipnet.workspace = true
+ring.workspace = true
+socket2 = "0.6.5"
+subtle = "2.6.1"
 thiserror.workspace = true
 tokio.workspace = true
+tracing = "0.1.44"
+
+[dev-dependencies]
+i3t-flow = { path = "../i3t-flow", features = ["test-util"] }
+# 暂停时钟，测首批数据的等待时限。
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
