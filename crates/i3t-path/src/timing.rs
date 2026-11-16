@@ -77,16 +77,17 @@ pub(crate) const HANDSHAKE_TRIES: u8 = 4;
 /// 走在 TCP 里的握手，每一步等回答等多久。TCP 里的帧不会丢、只会迟到，所以不重发，只是等得久一些：
 /// 丢包的链路上一次重传就是一两秒，按 UDP 的节奏（半秒一次、两秒放弃）会在链路只是慢的时候白白放弃。
 /// 两步加起来要比 relay 给握手留的时间（10 秒）短。
+///
+/// 保活没有回答时不这样等，照样尽快拆掉重连。真实链路上量过（晚高峰，丢包两成）：卡住的 TCP 三分之二
+/// 等 20 秒也不恢复，而新拨一条通常不到 1 秒就握上手；能自己恢复的那三分之一，恢复得也不比重连快。
 pub(crate) const TCP_HANDSHAKE_STEP: Duration = Duration::from_secs(4);
-/// 走在 TCP 里的会话，保活连续没有回答之后再等多久才放弃这条 TCP。这期间它不能用（路会换到别处），
-/// 但连接留着：TCP 自己在重传，多半过一会儿就通了，那时不用重新握手。要比 relay 上会话的有效期（30 秒）短。
-pub(crate) const TCP_STALL_LIMIT: Duration = Duration::from_secs(20);
 /// UDP 和 TCP 同时试的时候，UDP 这么久还没握上手就先用 TCP。
 pub(crate) const UDP_HEAD_START: Duration = Duration::from_secs(1);
 /// 走着 TCP 的节点多久再试一次 UDP。
 pub(crate) const UDP_RETRY: Duration = Duration::from_secs(30);
 /// 连不上的 relay 隔多久重试：从 1 秒起每次加倍，到这个数为止。
-pub(crate) const RELAY_RETRY_MAX: Duration = Duration::from_secs(30);
+/// 试一次只是一个 TCP 连接加几个 UDP 包，而一个 relay 都连不上的节点和别人是断开的，所以不让它等太久。
+pub(crate) const RELAY_RETRY_MAX: Duration = Duration::from_secs(10);
 /// 没有挂靠的 relay 多久测一次延迟（白皮书 §7.3）。
 pub(crate) const RELAY_SURVEY: Duration = Duration::from_secs(60);
 /// 测量结果的有效期，过期作废（白皮书 §7.3）。

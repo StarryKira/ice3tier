@@ -11,7 +11,7 @@ use i3t_model::netmap::Relay;
 use i3t_proto::session::{Accepted, Auth, Echo, Frame, Init, Nonce, Ping, RefusalReason, Refused};
 use i3t_proto::{NodeId, PublicKey};
 
-use crate::attach::{Answer, Event, Send, Session, Step};
+use crate::attach::{Event, Send, Session, Step};
 use crate::estimate::{Estimate, Quality};
 use crate::timing::{ESTIMATE_TTL, PROBE_INTERVAL, RELAY_RETRY_MAX, RELAY_SURVEY, Rtt, SETTLE, UDP_HEAD_START, UDP_RETRY};
 
@@ -293,8 +293,8 @@ impl RelayLink {
             }
             return;
         }
-        if self.tcp.as_ref().is_some_and(|tcp| tcp.session.is_up() || tcp.session.is_stalled()) {
-            // 走着 TCP（或者它卡住了，还在等它恢复）：定期再试 UDP，通了就换回去。
+        if self.tcp.as_ref().is_some_and(|tcp| tcp.session.is_up()) {
+            // 走着 TCP：定期再试 UDP，通了就换回去。
             if self.udp.is_idle() && now >= self.udp_retry_at && self.udp_addr().is_some() {
                 self.udp_retry_at = now + UDP_RETRY;
                 self.start_udp(now, who, wire);
@@ -429,8 +429,7 @@ impl RelayLink {
                     tracing::debug!(relay = %self.id, reason, "到 relay 的 UDP 握手失败");
                 }
             }
-            // UDP 上的会话不会"卡住"：保活没有回答就是断了。
-            Some(Event::Held | Event::Stalled | Event::Resumed) | None => {}
+            Some(Event::Held) | None => {}
         }
     }
 
@@ -457,17 +456,6 @@ impl RelayLink {
                     self.session_lost();
                 }
             }
-            Some(Event::Stalled) => {
-                // 连接留着，等它恢复；这期间 [`leg`](Self::leg) 不再报它，路会换到别处。
-                tracing::info!(relay = %self.id, "到 relay 的 TCP 卡住了（保活连续没有回应），先不用它，等它恢复");
-                if self.leg().is_none() {
-                    self.session_lost();
-                }
-            }
-            Some(Event::Resumed) => {
-                tracing::info!(relay = %self.id, "到 relay 的 TCP 又通了，会话还在，不用重新握手");
-                self.session_up(now);
-            }
             Some(Event::Held) | None => {}
         }
     }
@@ -491,7 +479,7 @@ impl RelayLink {
                 }
             }
             Frame::Pong(pong) => {
-                if let Answer::Alive(observed) | Answer::Resumed(observed) = self.udp.on_pong(pong, now) {
+                if let Some(observed) = self.udp.on_pong(pong, now) {
                     self.observed = Some((observed, now));
                 }
             }
@@ -552,11 +540,11 @@ impl RelayLink {
         let step = match frame {
             Frame::Challenge(challenge) => tcp.session.on_challenge(challenge, now),
             Frame::Ok(ok) if genuine => tcp.session.on_ok(ok, now),
-            // TCP 上看到的地址是那条 TCP 的，不是 UDP 的候选端点，不记。
-            Frame::Pong(pong) => match tcp.session.on_pong(pong, now) {
-                Answer::Resumed(_) => Step { send: None, event: Some(Event::Resumed) },
-                Answer::Alive(_) | Answer::Ignored => Step::default(),
-            },
+            Frame::Pong(pong) => {
+                // TCP 上看到的地址是那条 TCP 的，不是 UDP 的候选端点，不记。
+                tcp.session.on_pong(pong, now);
+                Step::default()
+            }
             Frame::Error(_) | Frame::Ok(_) | Frame::Init(_) | Frame::Auth(_) | Frame::Ping(_) => Step::default(),
         };
         self.apply_tcp(step, now, who, wire);
@@ -863,48 +851,15 @@ mod tests {
             }
         }
 
-        /// 从 `from` 起 relay 在 TCP 上什么也不回答了（链路卡住了）。每 50ms 推进一次，返回会话被判为卡住、不能用了的时刻。
-        /// 这时连接还留着。
+        /// 从 `from` 起 relay 在 TCP 上什么也不回答了（链路卡住了）。每 50ms 推进一次，返回会话被判为断开的时刻。
         fn stall_tcp(&mut self, from: Duration) -> Duration {
             let mut at = from;
             while self.link.leg().is_some() {
                 at += 50 * MS;
-                assert!(at < from + Duration::from_secs(30), "保活没有回答，会话早该判为卡住了");
+                assert!(at < from + Duration::from_secs(30), "保活没有回答，会话早该断了");
                 self.poll(at);
             }
             at
-        }
-
-        /// 同 [`stall_tcp`](Self::stall_tcp)，但一直卡到节点放弃这条 TCP、开始重连。返回开始重连的时刻。
-        fn stall_tcp_to_death(&mut self, from: Duration) -> Duration {
-            let connects = self.wire.tcp_connects;
-            let mut at = self.stall_tcp(from);
-            while self.wire.tcp_connects == connects {
-                at += 50 * MS;
-                assert!(at < from + Duration::from_secs(60), "卡了这么久，早该放弃这条 TCP 重连了");
-                self.poll(at);
-            }
-            at
-        }
-
-        /// 到 relay 的 TCP 在 `at` 被对面断开。返回节点开始重连的时刻。
-        fn break_tcp(&mut self, at: Duration) -> Duration {
-            let connects = self.wire.tcp_connects;
-            self.link.on_tcp_closed(self.start + at);
-            let mut now = at;
-            while self.wire.tcp_connects == connects {
-                now += 50 * MS;
-                assert!(now < at + Duration::from_secs(5), "连接断了应该马上重连");
-                self.poll(now);
-            }
-            now
-        }
-
-        /// 回答 TCP 上最近发的那个保活。
-        fn answer_last_tcp_ping(&mut self, at: Duration) {
-            let ping = self.wire.tcp.iter().rev().find_map(|frame| if let Frame::Ping(ping) = frame { Some(*ping) } else { None });
-            let ping = ping.expect("应该发过保活");
-            self.tcp_frame(Frame::Pong(Pong { nonce: ping.nonce, observed: addr("203.0.113.7:5555") }), at);
         }
 
         /// 重连的 TCP 连上之后把握手走完。返回建好的时刻。
@@ -1000,8 +955,8 @@ mod tests {
     fn a_tcp_session_that_dies_is_rebuilt_over_tcp_alone_without_waiting_for_udp() {
         let mut setup = Setup::new(&["198.51.100.9:20330"], &["198.51.100.9:20330"]);
         let up = setup.fall_back_to_tcp();
-        let died = setup.break_tcp(up + Duration::from_secs(3));
-        assert_eq!(setup.wire.tcp_connects, 2);
+        let died = setup.stall_tcp(up);
+        assert_eq!(setup.wire.tcp_connects, 2, "断开的那一刻就开始重连");
         let inits = setup.udp_inits();
 
         setup.tcp_connected(died + 10 * MS);
@@ -1025,60 +980,17 @@ mod tests {
     fn a_reconnect_over_tcp_does_not_wait_for_a_udp_attempt_that_happens_to_be_under_way() {
         let mut setup = Setup::new(&["198.51.100.9:20330"], &["198.51.100.9:20330"]);
         let up = setup.fall_back_to_tcp();
-        // 走着 TCP 时定期试 UDP。UDP 的握手刚发出去，TCP 就被对面断开了。
+        // 走着 TCP 时定期试 UDP。TCP 在那之前不久卡住，于是会话断开的时候 UDP 的握手正进行到一半。
         let inits = setup.udp_inits();
-        let retrying = up + UDP_RETRY + 100 * MS;
-        setup.keep_tcp_alive(up, retrying);
-        assert!(setup.udp_inits() > inits, "UDP 的握手应该正在进行");
-        let died = setup.break_tcp(retrying);
+        let stalled = up + UDP_RETRY - PROBE_INTERVAL + 100 * MS;
+        setup.keep_tcp_alive(up, stalled);
+        let died = setup.stall_tcp(stalled);
         let under_way = setup.udp_inits();
+        assert!(under_way > inits && died < up + UDP_RETRY + Duration::from_secs(2), "UDP 的握手应该正在进行");
 
         let again = setup.reconnect_tcp(died);
         assert!(again < died + UDP_HEAD_START, "不等那次 UDP 握手");
         assert_eq!(setup.udp_inits(), under_way, "那次 UDP 握手放下了，不会和 TCP 的握手互相顶掉");
-    }
-
-    #[test]
-    fn a_stalled_tcp_session_is_set_aside_not_torn_down_and_comes_back_without_a_handshake() {
-        let mut setup = Setup::new(&["198.51.100.9:20330"], &["198.51.100.9:20330"]);
-        let up = setup.fall_back_to_tcp();
-        let frames_before = |setup: &Setup| setup.wire.tcp.iter().filter(|frame| matches!(frame, Frame::Init(_) | Frame::Auth(_))).count();
-        let handshakes = frames_before(&setup);
-
-        // 链路卡住：保活连续没有回答。这条 TCP 不能用了，但没有被关掉，也没有去连一条新的。
-        let stalled = setup.stall_tcp(up);
-        assert_eq!(setup.link.leg(), None, "卡住的 TCP 不报出去，路会换到别处");
-        assert_eq!((setup.wire.tcp_closes, setup.wire.tcp_connects), (0, 1));
-        assert!(!setup.link.is_settled(setup.start + stalled));
-
-        // 卡了 8 秒之后通了：之前排在后面的保活得到了回答。会话还在，不用重新握手。
-        let resumed = stalled + Duration::from_secs(8);
-        for step in 1..=160u32 {
-            setup.poll(stalled + 50 * MS * step);
-        }
-        setup.answer_last_tcp_ping(resumed);
-        assert_eq!(setup.link.leg(), Some(Leg::Tcp));
-        assert_eq!((setup.wire.tcp_closes, setup.wire.tcp_connects, frames_before(&setup)), (0, 1, handshakes));
-        // 它算是"断过又好了"：保持够久之后流量才会换回来。
-        assert!(!setup.link.is_settled(setup.start + resumed + SETTLE - MS));
-        assert!(setup.link.is_settled(setup.start + resumed + SETTLE));
-        // 之后照常保活。
-        setup.keep_tcp_alive(resumed, resumed + Duration::from_secs(12));
-        assert_eq!(setup.link.leg(), Some(Leg::Tcp));
-    }
-
-    #[test]
-    fn a_tcp_session_that_stays_stalled_is_given_up_and_redialled() {
-        let mut setup = Setup::new(&["198.51.100.9:20330"], &["198.51.100.9:20330"]);
-        let up = setup.fall_back_to_tcp();
-        let stalled = setup.stall_tcp(up);
-        let died = setup.stall_tcp_to_death(stalled);
-        let waited = died - stalled;
-        assert!(
-            (crate::timing::TCP_STALL_LIMIT..crate::timing::TCP_STALL_LIMIT + Duration::from_secs(1)).contains(&waited),
-            "等了 {waited:?}"
-        );
-        assert_eq!((setup.wire.tcp_closes, setup.wire.tcp_connects), (1, 2));
     }
 
     #[test]
@@ -1112,7 +1024,7 @@ mod tests {
     fn a_relay_that_cannot_be_reached_over_tcp_either_gets_both_transports_tried_again() {
         let mut setup = Setup::new(&["198.51.100.9:20330"], &["198.51.100.9:20330"]);
         let up = setup.fall_back_to_tcp();
-        let died = setup.break_tcp(up + Duration::from_secs(3));
+        let died = setup.stall_tcp(up);
         let inits = setup.udp_inits();
         // 重连的 TCP 一直连不上：这一轮算失败，下一轮 UDP 和 TCP 又一起试。
         let mut at = died;
@@ -1131,7 +1043,7 @@ mod tests {
         // 好好的 40 秒（8 个保活都有回答），然后卡住：3 个保活没有回答，会话断开。
         let stalled = up + PROBE_INTERVAL * 8 + Duration::from_secs(1);
         setup.keep_tcp_alive(up, stalled);
-        let died = setup.stall_tcp_to_death(stalled);
+        let died = setup.stall_tcp(stalled);
         let again = setup.reconnect_tcp(died);
 
         let quality = setup.link.quality(setup.start + again).expect("重连之后马上就有估计");
@@ -1161,7 +1073,7 @@ mod tests {
 
         // 断了一次：重连上来之后要保持够久才算数。
         setup.keep_tcp_alive(up, up + Duration::from_secs(20));
-        let died = setup.break_tcp(up + Duration::from_secs(20));
+        let died = setup.stall_tcp(up + Duration::from_secs(20));
         assert!(!setup.link.is_settled(setup.start + died));
         let again = setup.reconnect_tcp(died);
         assert!(!setup.link.is_settled(setup.start + again + SETTLE - MS));
@@ -1189,7 +1101,7 @@ mod tests {
     fn switching_from_tcp_back_to_udp_does_not_restart_the_settling_time() {
         let mut setup = Setup::new(&["198.51.100.9:20330"], &["198.51.100.9:20330"]);
         let up = setup.fall_back_to_tcp();
-        let died = setup.break_tcp(up + Duration::from_secs(3));
+        let died = setup.stall_tcp(up);
         let again = setup.reconnect_tcp(died);
         // 重连之后走着 TCP，直到下一次试 UDP 的握手发出去；这一次 UDP 通了。
         let at = again + UDP_RETRY + 100 * MS;
@@ -1423,9 +1335,9 @@ mod tests {
         let delay = |failures| retry_delay(failures).as_secs_f64();
         assert!((1.0..=1.2).contains(&delay(1)));
         assert!((2.0..=2.4).contains(&delay(2)));
-        assert!((16.0..=19.2).contains(&delay(5)));
-        assert!((30.0..=36.0).contains(&delay(6)));
-        assert!((30.0..=36.0).contains(&delay(60)));
+        assert!((8.0..=9.6).contains(&delay(4)));
+        assert!((10.0..=12.0).contains(&delay(5)));
+        assert!((10.0..=12.0).contains(&delay(60)));
         assert!(jitter(Duration::from_millis(300)) <= Duration::from_millis(300));
     }
 }
