@@ -348,16 +348,17 @@ fn kind_of(message: &ToNode) -> &'static str {
     }
 }
 
+/// 测试用的假 controller，本 crate 里别的模块的测试也用它。
 #[cfg(test)]
-mod tests {
+pub(crate) mod testing {
     use i3t_proto::PublicKey;
     use tokio::net::TcpListener;
     use tokio_rustls::TlsAcceptor;
-    use tokio_rustls::server::TlsStream as ServerStream;
+    pub(crate) use tokio_rustls::server::TlsStream as ServerStream;
 
     use super::*;
 
-    fn netmap(version: u64) -> Netmap {
+    pub(crate) fn netmap(version: u64) -> Netmap {
         serde_json::from_value(serde_json::json!({
             "version": version,
             "network": { "name": "home", "domain": "home.i3t", "cidr": "10.66.0.0/16" },
@@ -367,14 +368,14 @@ mod tests {
     }
 
     /// 一个只会接受连接的假 controller。测试里拿到每条连接之后自己决定说什么。
-    struct FakeController {
-        listener: TcpListener,
-        acceptor: TlsAcceptor,
-        info: ControllerInfo,
+    pub(crate) struct FakeController {
+        pub(crate) listener: TcpListener,
+        pub(crate) acceptor: TlsAcceptor,
+        pub(crate) info: ControllerInfo,
     }
 
     impl FakeController {
-        async fn start() -> Self {
+        pub(crate) async fn start() -> Self {
             let key = NodeKey::generate().unwrap();
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let info = ControllerInfo { address: listener.local_addr().unwrap().to_string(), key: key.public() };
@@ -383,7 +384,7 @@ mod tests {
         }
 
         /// 接受下一条连接，返回它和节点在握手里出示的公钥。
-        async fn accept(&self) -> (ServerStream<TcpStream>, PublicKey) {
+        pub(crate) async fn accept(&self) -> (ServerStream<TcpStream>, PublicKey) {
             let (tcp, _) = self.listener.accept().await.unwrap();
             let stream = self.acceptor.accept(tcp).await.unwrap();
             let certs = stream.get_ref().1.peer_certificates().unwrap();
@@ -392,9 +393,15 @@ mod tests {
         }
     }
 
-    async fn expect<T: DeserializeOwned>(stream: &mut ServerStream<TcpStream>) -> T {
+    pub(crate) async fn expect<T: DeserializeOwned>(stream: &mut ServerStream<TcpStream>) -> T {
         timeout(Duration::from_secs(5), read_message(stream)).await.expect("等节点的消息超时").unwrap().expect("节点关闭了连接")
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::{FakeController, expect, netmap};
+    use super::*;
 
     fn link(controller: &FakeController, key: Arc<NodeKey>, state: StateDir) -> (ControlLink, watch::Sender<Hello>) {
         let hello = Hello { version: "0.1.0".into(), platform: "test".into(), ..Hello::default() };
