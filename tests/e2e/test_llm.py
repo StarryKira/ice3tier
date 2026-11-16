@@ -500,6 +500,38 @@ def tcp_only_exit(lab: Lab, work: Path, t: Checks) -> None:
               f"停顿长度 p50 {episodes['length_ms_p50']:.0f}ms、最长 {episodes['length_ms_max']:.0f}ms")
 
 
+def tcp_only_exit_heavy(lab: Lab, work: Path, t: Checks) -> None:
+    """出口只能经 TCP 连入口、这一段丢包 1%，负载比一条 TCP 带得动的大得多：约 220 条流、下行每秒 2MB 多。只在点名时运行。
+
+    共用的连接在这里带不动是已知的（一条 TCP 在这样的链路上只有每秒几百 KB），所以节点对没有开独占 TCP 时只记录结果，
+    不算失败；开了之后每条流都要完成。
+    """
+    gw = Gateway(lab, work)
+    header(gw)
+    shape = Shape(rtt_ms=50, loss_pct=1)
+    shape_between(gw.entry.host, gw.home, shape)
+    gw.exit.host.block_udp()
+    if not waited(lambda: "到 relay 的中转会话建立（TCP）" in gw.exit.read_log(), 60):
+        t.check("出口的 UDP 断了之后改经 TCP 连上入口", False, tail(gw.exit.read_log(), 10))
+        return
+    print(f"  入口和出口之间：只有 TCP，往返 {shape.rtt_ms:g}ms，每个方向丢包 {shape.loss_pct:g}%", flush=True)
+    groups = [
+        sse("heavy_tokens", 200, arrival={"ramp_s": 5}, think_ms=500, tokens=3000, rate=100),
+        ws("heavy_voice", 20, arrival={"ramp_s": 5}, turns=1, think_ms=300, tokens=1500, rate=50, binary=True, event_bytes=640,
+           client_binary_ms=20, client_binary_bytes=640),
+    ]
+    heavy = gw.load("heavy_tcp", 120, groups, label="只有 TCP，丢包 1%，重负载", stall_ms=250).wait()
+    print(*key_numbers(heavy), sep="\n")
+    lanes_on = PAIR_SETTING.get("lane", "off") != "off"
+    if lanes_on:
+        if not all_as_expected(t, heavy, "重负载"):
+            evidence(heavy, gw.watched())
+    else:
+        done = sum(entry["count"] - entry["failed"] for entry in heavy["groups"])
+        total = sum(entry["count"] for entry in heavy["groups"])
+        print(f"  节点对没有开独占 TCP：{total} 条流里 {done} 条按期望结束（只记录，不算失败）", flush=True)
+
+
 def waited(condition, timeout: float, interval: float = 0.5) -> bool:
     try:
         wait_until(condition, timeout=timeout, interval=interval)
@@ -671,7 +703,10 @@ SCENARIOS = {
     "tcp_only_exit": tcp_only_exit,
     "route_change_mid_stream": route_change_mid_stream,
     "exit_restart": exit_restart,
+    "tcp_only_exit_heavy": tcp_only_exit_heavy,
 }
+# 不点名就不跑的场景：耗时长，或者在默认的传输上本来就过不了。
+ON_REQUEST = {"tcp_only_exit_heavy"}
 
 
 def main() -> int:
@@ -687,7 +722,7 @@ def main() -> int:
         parser.error(f"没有这些场景：{'、'.join(unknown)}")
     LONG, PAIR_SETTING = args.long, json.loads(args.pair)
     lablib.enter()
-    names = args.names or list(SCENARIOS)
+    names = args.names or [name for name in SCENARIOS if name not in ON_REQUEST]
     t = Checks()
     began = time.monotonic()
     for name in names:
