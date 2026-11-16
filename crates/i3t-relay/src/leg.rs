@@ -28,7 +28,10 @@ use crate::relay::{Inner, Source, Via};
 use crate::session::SESSION_TTL;
 
 /// 连上来之后多久之内必须握手成功。没有会话的 TCP 不值得留着。
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+///
+/// 握手是两个往返。只能走 TCP 的节点往往就在丢包的链路上，一次重传一两秒，所以留 10 秒；
+/// 占着连接不握手的人被每个来源的条数上限挡着，这个时间长一点不给他们多少便宜。
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// 同时最多接多少条 TCP。每个走 TCP 的节点只有一条，这个数对个人用的网络绰绰有余；
 /// 它挡的是有人开一大堆连接又不握手。
 const MAX_LEGS: usize = 1024;

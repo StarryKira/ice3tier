@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use i3t_proto::session::{Accepted, Challenge, Cookie, Echo, Nonce, Pong};
 
 use crate::estimate::{Estimate, Quality, Train};
-use crate::timing::{HANDSHAKE_RETRY, HANDSHAKE_TRIES, MAX_TIMEOUTS, PROBE_INTERVAL, Rtt, SILENCE};
+use crate::timing::{HANDSHAKE_RETRY, HANDSHAKE_TRIES, MAX_TIMEOUTS, PROBE_INTERVAL, Rtt, SILENCE, TCP_HANDSHAKE_STEP, TCP_STALL_LIMIT};
 
 /// 回显对不上的"没有会话"最多这么频繁地引出一个核实用的 PING。真的 relay 给中转帧回错误帧本来就是一秒一个；
 /// 伪造的再多，本节点也只是每秒多发一个 PING。
@@ -34,6 +34,10 @@ pub(crate) enum Event {
     Up { observed: SocketAddr },
     /// 会话没了，或者握手失败。
     Down { reason: &'static str },
+    /// 走在 TCP 里的会话卡住了：保活连续没有回答。会话还留着，但现在不能用。
+    Stalled,
+    /// 卡住的会话又有回音了，可以接着用。
+    Resumed,
     /// 收到了 CHALLENGE，但握手被要求停在这里（见 [`Session::start`] 的 `hold`）。
     Held,
 }
@@ -42,6 +46,17 @@ pub(crate) enum Event {
 pub(crate) struct Step {
     pub(crate) send: Option<Send>,
     pub(crate) event: Option<Event>,
+}
+
+/// 一个 PONG 对会话意味着什么。两种有用的情况都带着 relay 看到的本节点地址。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Answer {
+    /// 不是在等的回答。
+    Ignored,
+    /// 会话照常。
+    Alive(SocketAddr),
+    /// 卡住的会话又有回音了。
+    Resumed(SocketAddr),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +86,12 @@ enum State {
         awaiting: Option<(Nonce, Instant)>,
         missed: u8,
     },
+    /// 走在 TCP 里的会话，保活连续没有回答。`since` 是判为卡住的时刻。
+    Stalled {
+        nonce: Nonce,
+        since: Instant,
+        last_ping: Instant,
+    },
 }
 
 /// 到一个 relay、走一种传输（UDP 或 TCP）的中转会话。
@@ -86,16 +107,27 @@ pub(crate) struct Session {
     interval: Duration,
     /// 上一次因为一个核对不了的"没有会话"提前发 PING 的时刻。
     checked: Option<Instant>,
+    /// 这个会话走在 TCP 里：帧不会丢，只会迟到。握手不重发、等得更久；保活没有回答时先当作卡住，不马上拆掉。
+    reliable: bool,
 }
 
 impl Session {
+    /// 走 UDP 的会话。
     pub(crate) const fn new() -> Self {
-        Self::resuming(Estimate::new())
+        Self {
+            state: State::Idle,
+            estimate: Estimate::new(),
+            train: Train::new(),
+            training: false,
+            interval: PROBE_INTERVAL,
+            checked: None,
+            reliable: false,
+        }
     }
 
-    /// 同一段链路上重新建的会话：接着用上一个会话留下的测量值（见 [`measured`](Self::measured)）。
-    pub(crate) const fn resuming(estimate: Estimate) -> Self {
-        Self { state: State::Idle, estimate, train: Train::new(), training: false, interval: PROBE_INTERVAL, checked: None }
+    /// 走在 TCP 里的会话。`estimate` 是同一段链路上一个会话留下的测量值，接着用（见 [`measured`](Self::measured)）。
+    pub(crate) const fn over_tcp(estimate: Estimate) -> Self {
+        Self { state: State::Idle, estimate, train: Train::new(), training: false, interval: PROBE_INTERVAL, checked: None, reliable: true }
     }
 
     /// 这段链路上测到的全部结果。会话没了之后链路还是那一段，留给下一个会话接着用。
@@ -113,6 +145,11 @@ impl Session {
 
     pub(crate) const fn is_up(&self) -> bool {
         matches!(self.state, State::Up { .. })
+    }
+
+    /// 会话卡住了，还在等它恢复（见 [`Event::Stalled`]）。
+    pub(crate) const fn is_stalled(&self) -> bool {
+        matches!(self.state, State::Stalled { .. })
     }
 
     /// 没有在握手，也没有会话。
@@ -196,22 +233,31 @@ impl Session {
     }
 
     /// PONG。返回 relay 看到的本节点地址；随机数对不上时返回 `None`。
-    pub(crate) fn on_pong(&mut self, pong: &Pong, now: Instant) -> Option<SocketAddr> {
-        let State::Up { nonce: session, last_ping, awaiting, .. } = self.state else { return None };
-        match awaiting {
-            Some((nonce, sent)) if pong.nonce == nonce => {
-                self.estimate.sample(now.saturating_duration_since(sent), now);
-                self.state = State::Up { nonce: session, last_ping, awaiting: None, missed: 0 };
-                Some(pong.observed)
+    pub(crate) fn on_pong(&mut self, pong: &Pong, now: Instant) -> Answer {
+        match self.state {
+            State::Up { nonce: session, last_ping, awaiting, .. } => match awaiting {
+                Some((nonce, sent)) if pong.nonce == nonce => {
+                    self.estimate.sample(now.saturating_duration_since(sent), now);
+                    self.state = State::Up { nonce: session, last_ping, awaiting: None, missed: 0 };
+                    Answer::Alive(pong.observed)
+                }
+                // 不是在回答保活，那就看是不是探测包列里的一个。
+                Some(_) | None if self.train.on_reply(&pong.nonce, now, &mut self.estimate) => Answer::Alive(pong.observed),
+                Some(_) | None => Answer::Ignored,
+            },
+            // 卡住的会话上来了一个回答，是哪个保活的都行：TCP 又在往前走了。迟到的那些保活要是还记着，顺便记下延迟。
+            State::Stalled { nonce, .. } => {
+                self.train.on_reply(&pong.nonce, now, &mut self.estimate);
+                self.state = State::Up { nonce, last_ping: now, awaiting: None, missed: 0 };
+                Answer::Resumed(pong.observed)
             }
-            // 不是在回答保活，那就看是不是探测包列里的一个。
-            Some(_) | None => self.train.on_reply(&pong.nonce, now, &mut self.estimate).then_some(pong.observed),
+            State::Idle | State::AwaitChallenge { .. } | State::Held { .. } | State::AwaitOk { .. } => Answer::Ignored,
         }
     }
 
     /// 这是不是会话握手时的随机数：relay 回给会话主人的错误帧回显它，回显对得上才是这个 relay 说的。
     pub(crate) fn is_session_echo(&self, echo: &Echo) -> bool {
-        matches!(self.state, State::Up { nonce, .. } if nonce == *echo)
+        matches!(self.state, State::Up { nonce, .. } | State::Stalled { nonce, .. } if nonce == *echo)
     }
 
     /// relay 说本节点在它那里没有会话，错误帧回显的是 `echo`。
@@ -219,6 +265,10 @@ impl Session {
     /// 回显的是一个还在等回答（或者刚超时）的保活 PING 的随机数：这是 relay 对那个 PING 的回答，会话确实没了。
     /// 别的回显核对不了，只当作提示：马上发一个 PING 去问，relay 怎么回答它才算数。
     pub(crate) fn on_no_session(&mut self, echo: &Echo, now: Instant) -> Step {
+        if self.is_stalled() {
+            // 卡住期间 relay 那边的会话过期了。伪造不了：卡住的会话只在 TCP 里有。
+            return self.fail("relay 说本节点没有会话");
+        }
         let State::Up { nonce, last_ping, awaiting, missed } = self.state else { return Step::default() };
         if awaiting.is_some_and(|(pinged, _)| pinged == *echo) || self.train.expects(echo) {
             return self.fail("relay 说本节点没有会话");
@@ -236,7 +286,7 @@ impl Session {
     pub(crate) fn poll(&mut self, now: Instant, urgent: bool) -> Step {
         match self.state {
             State::Idle | State::Held { .. } => Step::default(),
-            State::AwaitChallenge { nonce, sent, tries, hold } => match retry(sent, tries, now) {
+            State::AwaitChallenge { nonce, sent, tries, hold } => match self.retry(sent, tries, now) {
                 Retry::Wait => Step::default(),
                 Retry::Again => {
                     self.state = State::AwaitChallenge { nonce, sent: now, tries: tries + 1, hold };
@@ -244,7 +294,7 @@ impl Session {
                 }
                 Retry::GiveUp => self.fail("握手没有回应"),
             },
-            State::AwaitOk { nonce, cookie, sent, tries } => match retry(sent, tries, now) {
+            State::AwaitOk { nonce, cookie, sent, tries } => match self.retry(sent, tries, now) {
                 Retry::Wait => Step::default(),
                 Retry::Again => {
                     self.state = State::AwaitOk { nonce, cookie, sent: now, tries: tries + 1 };
@@ -253,6 +303,30 @@ impl Session {
                 Retry::GiveUp => self.fail("握手的最后一步没有回应"),
             },
             State::Up { nonce, last_ping, awaiting, missed } => self.keep_alive(now, urgent, nonce, last_ping, awaiting, missed),
+            State::Stalled { since, .. } if now.saturating_duration_since(since) >= TCP_STALL_LIMIT => {
+                self.fail("TCP 卡住之后一直没有恢复")
+            }
+            // 卡住期间照保活的间隔接着问。问得再勤也没有用：它们都排在卡住的那一段后面。
+            State::Stalled { nonce, since, last_ping } if now.saturating_duration_since(last_ping) >= self.interval => {
+                self.state = State::Stalled { nonce, since, last_ping: now };
+                Step { send: Some(Send::Ping { nonce: i3t_underlay::random_bytes() }), event: None }
+            }
+            State::Stalled { .. } => Step::default(),
+        }
+    }
+
+    /// 握手的一步发出去之后该怎么办。走 UDP 的隔一会儿重发，发够了次数放弃；走 TCP 的只等，等得更久。
+    fn retry(&self, sent: Instant, tries: u8, now: Instant) -> Retry {
+        let waited = now.saturating_duration_since(sent);
+        if self.reliable {
+            return if waited < TCP_HANDSHAKE_STEP { Retry::Wait } else { Retry::GiveUp };
+        }
+        if waited < HANDSHAKE_RETRY {
+            Retry::Wait
+        } else if tries < HANDSHAKE_TRIES {
+            Retry::Again
+        } else {
+            Retry::GiveUp
         }
     }
 
@@ -277,6 +351,11 @@ impl Session {
             }
             None => (since_ping >= self.interval || (urgent && since_ping >= SILENCE), missed),
         };
+        if missed >= MAX_TIMEOUTS && self.reliable {
+            // TCP 里的保活不会丢，只是卡在重传后面。先不拆：这条连接现在不能用，但多半过一会儿就通了。
+            self.state = State::Stalled { nonce: session, since: now, last_ping: now };
+            return Step { send: None, event: Some(Event::Stalled) };
+        }
         if missed >= MAX_TIMEOUTS {
             return self.fail("保活连续没有回应");
         }
@@ -301,16 +380,6 @@ enum Retry {
     Wait,
     Again,
     GiveUp,
-}
-
-fn retry(sent: Instant, tries: u8, now: Instant) -> Retry {
-    if now.saturating_duration_since(sent) < HANDSHAKE_RETRY {
-        Retry::Wait
-    } else if tries < HANDSHAKE_TRIES {
-        Retry::Again
-    } else {
-        Retry::GiveUp
-    }
 }
 
 #[cfg(test)]
@@ -435,9 +504,13 @@ mod tests {
         let Some(Send::Ping { nonce }) = session.poll(up + PROBE_INTERVAL, false).send else { panic!("该发保活了") };
 
         let moved: SocketAddr = "203.0.113.7:4001".parse().unwrap();
-        assert_eq!(session.on_pong(&Pong { nonce: [0; 8], observed: moved }, up + PROBE_INTERVAL + 5 * MS), None, "随机数不对");
-        assert_eq!(session.on_pong(&Pong { nonce, observed: moved }, up + PROBE_INTERVAL + 60 * MS), Some(moved));
-        assert_eq!(session.on_pong(&Pong { nonce, observed: moved }, up + PROBE_INTERVAL + 70 * MS), None, "同一个 PONG 不算两次");
+        assert_eq!(session.on_pong(&Pong { nonce: [0; 8], observed: moved }, up + PROBE_INTERVAL + 5 * MS), Answer::Ignored, "随机数不对");
+        assert_eq!(session.on_pong(&Pong { nonce, observed: moved }, up + PROBE_INTERVAL + 60 * MS), Answer::Alive(moved));
+        assert_eq!(
+            session.on_pong(&Pong { nonce, observed: moved }, up + PROBE_INTERVAL + 70 * MS),
+            Answer::Ignored,
+            "同一个 PONG 不算两次"
+        );
         assert_eq!(session.rtt().map(Rtt::get), Some(25 * MS), "握手的两个往返都是 20ms，再加上一个 60ms 的样本");
     }
 
@@ -465,7 +538,7 @@ mod tests {
         session.poll(up + PROBE_INTERVAL, false);
         let Some(Send::Ping { nonce }) = session.poll(up + PROBE_INTERVAL + timeout, false).send else { panic!("该重发保活了") };
         assert!(session.in_doubt());
-        assert!(session.on_pong(&Pong { nonce, observed: observed() }, up + PROBE_INTERVAL + timeout + 5 * MS).is_some());
+        assert_ne!(session.on_pong(&Pong { nonce, observed: observed() }, up + PROBE_INTERVAL + timeout + 5 * MS), Answer::Ignored);
         assert!(session.is_up() && !session.in_doubt());
     }
 
@@ -530,7 +603,7 @@ mod tests {
             if let Some(Send::Ping { nonce }) = session.poll(now, false).send {
                 pings.push(nonce);
                 if pings.len() % 3 != 0 {
-                    assert_eq!(session.on_pong(&Pong { nonce, observed: observed() }, now + 20 * MS), Some(observed()));
+                    assert_eq!(session.on_pong(&Pong { nonce, observed: observed() }, now + 20 * MS), Answer::Alive(observed()));
                 }
             }
         }

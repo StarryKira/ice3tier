@@ -74,6 +74,13 @@ pub(crate) const PUNCH_ATTEMPT: Duration = Duration::from_millis(1500);
 /// 中转会话握手的每一步等多久重发，一共发几次。
 pub(crate) const HANDSHAKE_RETRY: Duration = Duration::from_millis(500);
 pub(crate) const HANDSHAKE_TRIES: u8 = 4;
+/// 走在 TCP 里的握手，每一步等回答等多久。TCP 里的帧不会丢、只会迟到，所以不重发，只是等得久一些：
+/// 丢包的链路上一次重传就是一两秒，按 UDP 的节奏（半秒一次、两秒放弃）会在链路只是慢的时候白白放弃。
+/// 两步加起来要比 relay 给握手留的时间（10 秒）短。
+pub(crate) const TCP_HANDSHAKE_STEP: Duration = Duration::from_secs(4);
+/// 走在 TCP 里的会话，保活连续没有回答之后再等多久才放弃这条 TCP。这期间它不能用（路会换到别处），
+/// 但连接留着：TCP 自己在重传，多半过一会儿就通了，那时不用重新握手。要比 relay 上会话的有效期（30 秒）短。
+pub(crate) const TCP_STALL_LIMIT: Duration = Duration::from_secs(20);
 /// UDP 和 TCP 同时试的时候，UDP 这么久还没握上手就先用 TCP。
 pub(crate) const UDP_HEAD_START: Duration = Duration::from_secs(1);
 /// 走着 TCP 的节点多久再试一次 UDP。

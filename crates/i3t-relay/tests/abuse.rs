@@ -17,7 +17,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
 
 /// 和 relay 里的握手时限一样。
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 等 relay 的后台任务把 TCP 监听起来，然后从 `local` 这个地址连上去。
 async fn connect_from(local: &str, relay: &TestRelay) -> TcpStream {
