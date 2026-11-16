@@ -10,10 +10,14 @@
 //! | [`session`] | 节点和 relay 之间的中转会话 |
 //! | [`probe`] | 节点之间的探测 |
 //! | [`addr`] | 地址查询 |
+//! | [`backbone`] | relay 之间的骨干延迟矩阵，以及 relay 的过载和下线通知 |
+//! | [`beacon`] | 局域网发现的信标 |
 //! | [`flow`] | 建流请求与应答 |
 //! | [`tcp_frame`] | UDP 用不了的节点把同样的包装进一条 TCP 时的分帧 |
 
 pub mod addr;
+pub mod backbone;
+pub mod beacon;
 pub mod datagram;
 pub mod flow;
 pub mod key;

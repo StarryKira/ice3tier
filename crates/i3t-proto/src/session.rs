@@ -352,6 +352,10 @@ pub enum RefusalReason {
     NoSession,
     /// 要转发的包的目的节点在这个 relay 上没有会话。帧里的节点编号是目的节点。收到的节点应该换一个 relay。
     PeerUnattached,
+    /// 多级中转的包没法按它写的路径往下送：下一个 relay 和这个 relay 之间没有骨干连接（帧里的节点编号是下一个 relay），
+    /// 或者路径比网络允许的级数长（帧里的节点编号是这个 relay 自己）。只有路径上的第一个 relay 会回这个，
+    /// 后面的 relay 不知道来源节点在哪里。收到的节点应该换一条路径。
+    RouteUnavailable,
 }
 
 impl RefusalReason {
@@ -359,6 +363,7 @@ impl RefusalReason {
         match self {
             Self::NoSession => 1,
             Self::PeerUnattached => 2,
+            Self::RouteUnavailable => 3,
         }
     }
 
@@ -366,6 +371,7 @@ impl RefusalReason {
         match code {
             1 => Some(Self::NoSession),
             2 => Some(Self::PeerUnattached),
+            3 => Some(Self::RouteUnavailable),
             _ => None,
         }
     }
@@ -553,6 +559,9 @@ mod tests {
         let no_session = Refused { reason: RefusalReason::NoSession, node: node(5) };
         assert_eq!(no_session.to_bytes(), [0x0c, 1, 0, 0, 0, 5]);
         assert_eq!(Frame::parse(&no_session.to_bytes()), Some(Frame::Error(no_session)));
+        let unroutable = Refused { reason: RefusalReason::RouteUnavailable, node: node(8) };
+        assert_eq!(unroutable.to_bytes(), [0x0c, 3, 0, 0, 0, 8]);
+        assert_eq!(Refused::parse(&unroutable.to_bytes()), Some(unroutable));
         assert_eq!(Refused::parse(&[0x0c, 9, 0, 0, 0, 5]), None, "不认识的原因码");
         assert_eq!(Refused::parse(&[0x0c, 1, 0, 0, 0, 0]), None, "节点编号是 0");
     }
