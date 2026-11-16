@@ -15,7 +15,7 @@
 //! relay → 节点  PONG       0x07 | 随机数 8 | 地址 7 或 19                                      最长 28 字节
 //!
 //! 拒绝
-//! relay → 节点  ERROR      0x0c | 原因 1 | 节点编号 4                                            6 字节
+//! relay → 节点  ERROR      0x0c | 原因 1 | 节点编号 4 | 回显 8                                   14 字节
 //! ```
 //!
 //! 整数都是大端。地址的编码是：地址族 1 字节（4 或 6）、地址 4 或 16 字节、端口 2 字节。
@@ -31,6 +31,22 @@
 //!   对"来源地址 + 节点编号 + 时间片"算出来的，算完就忘。AUTH 把 cookie 带回来，relay 重算一遍对得上，
 //!   才说明对方确实收得到发往这个地址的包，这之后才去验签名、建会话。
 //! - CHALLENGE 和 PONG 把请求里的随机数抄回去，不在路径上的人伪造不了。OK 带 relay 的签名。
+//! - ERROR 不比引出它的请求长：比 [`Refused::LEN`] 短的请求，relay 不回 ERROR。
+//!
+//! # ERROR 的回显
+//!
+//! ERROR 会让节点拆掉会话或者换路，伪造来源地址的人又很容易冒充 relay 发它。所以 ERROR 回显 8 个字节，
+//! 节点只认回显对得上的（[`Echo`]）：
+//!
+//! | 原因 | 引出它的请求 | 回显 |
+//! |---|---|---|
+//! | [`RefusalReason::NoSession`] | PING | PING 里的随机数 |
+//! | [`RefusalReason::NoSession`] | 中转帧 | 去掉中转头之后的前 8 个字节，不够的补 0 |
+//! | [`RefusalReason::PeerUnattached`]、[`RefusalReason::RouteUnavailable`] | 中转帧 | 这个会话握手时节点给的随机数（AUTH 里的那个） |
+//!
+//! 后两种只发给拥有会话的那个来源，所以 relay 回显的是只有它们两个知道的东西。中转帧引出的 `NoSession` 发给的是没有会话的来源，
+//! relay 手上没有可以回显的秘密，节点也没法核对一个连接包的开头，所以它只是个提示：节点立刻发一个保活 PING，
+//! relay 对这个 PING 的回答（PONG，或者回显它的随机数的 ERROR）才算数。
 //!
 //! # 签的是什么
 //!
@@ -40,8 +56,6 @@
 //! |---|---|---|---|
 //! | AUTH | 节点 | [`Auth::PURPOSE`] | [`Auth::signed_message`]：relay 编号、节点编号、随机数、cookie |
 //! | OK | relay | [`Accepted::PURPOSE`] | [`Accepted::signed_message`]：relay 编号、节点编号、随机数、有效期、地址 |
-//!
-//! ERROR 没有认证：它只让节点去重新握手或者换一个 relay，两件事节点自己都会限速。
 //!
 //! 帧的类型里 `0x02`～`0x07` 是握手和保活。ERROR 排在地址查询之后的 `0x0c`：这一段只有六个值，放不下第七种帧。
 
@@ -61,9 +75,12 @@ pub const KIND_ERROR: u8 = 0x0c;
 pub type Nonce = [u8; NONCE_LEN];
 /// relay 发给节点、节点在 AUTH 里带回来的地址证明。内容只有 relay 自己看得懂。
 pub type Cookie = [u8; COOKIE_LEN];
+/// ERROR 回显的、引出它的请求里不在路径上的人猜不到的字节。取什么见模块文档。
+pub type Echo = [u8; ECHO_LEN];
 
 pub const NONCE_LEN: usize = 8;
 pub const COOKIE_LEN: usize = 16;
+pub const ECHO_LEN: usize = 8;
 /// Ed25519 签名的长度。这个 crate 不依赖密码学库，所以签名在这里只是 64 个字节。
 pub const SIGNATURE_LEN: usize = 64;
 
@@ -377,7 +394,10 @@ impl RefusalReason {
     }
 }
 
-/// ERROR：relay 没有照办。没有认证，relay 按来源地址限速地发。
+/// ERROR：relay 没有照办。relay 按来源地址限速地发。
+///
+/// 帧里还有回显的 8 个字节（见模块文档），它们不在这个结构里：同一个拒绝可以回答不同的请求，
+/// 编码时用 [`to_bytes_echoing`](Self::to_bytes_echoing) 给出，收到时用 [`echo`](Self::echo) 从帧里取。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Refused {
     pub reason: RefusalReason,
@@ -386,20 +406,50 @@ pub struct Refused {
 }
 
 impl Refused {
-    pub const LEN: usize = 1 + 1 + NodeId::WIRE_LEN;
+    pub const LEN: usize = 1 + 1 + NodeId::WIRE_LEN + ECHO_LEN;
 
+    /// 编码成回显 `echo` 的 ERROR 帧。
+    #[must_use]
+    pub const fn to_bytes_echoing(self, echo: &Echo) -> [u8; Self::LEN] {
+        let [n0, n1, n2, n3] = self.node.to_be_bytes();
+        let [e0, e1, e2, e3, e4, e5, e6, e7] = *echo;
+        [KIND_ERROR, self.reason.code(), n0, n1, n2, n3, e0, e1, e2, e3, e4, e5, e6, e7]
+    }
+
+    /// 编码成回显的字节全是 0 的 ERROR 帧：它不在回答任何请求，节点核对不出来，最多当作提示。
     #[must_use]
     pub const fn to_bytes(self) -> [u8; Self::LEN] {
-        let [n0, n1, n2, n3] = self.node.to_be_bytes();
-        [KIND_ERROR, self.reason.code(), n0, n1, n2, n3]
+        self.to_bytes_echoing(&[0; ECHO_LEN])
     }
 
-    /// 不是一个完整的 ERROR，或者原因码不认识时返回 `None`。
+    /// 不是一个完整的 ERROR，或者原因码不认识时返回 `None`。回显的字节用 [`echo`](Self::echo) 取。
     #[must_use]
     pub fn parse(datagram: &[u8]) -> Option<Self> {
-        let &[KIND_ERROR, code, n0, n1, n2, n3] = datagram else { return None };
+        let (&[KIND_ERROR, code, n0, n1, n2, n3], _echo) = Self::split(datagram)? else { return None };
         Some(Self { reason: RefusalReason::from_code(code)?, node: NodeId::from_be_bytes([n0, n1, n2, n3])? })
     }
+
+    /// 一个完整的 ERROR 帧回显的字节。不是 ERROR 帧时返回 `None`。
+    #[must_use]
+    pub fn echo(datagram: &[u8]) -> Option<Echo> {
+        Self::parse(datagram)?;
+        Self::split(datagram).map(|(_, echo)| *echo)
+    }
+
+    fn split(datagram: &[u8]) -> Option<(&[u8; Self::LEN - ECHO_LEN], &Echo)> {
+        let bytes: &[u8; Self::LEN] = datagram.try_into().ok()?;
+        let (head, echo) = bytes.split_first_chunk::<{ Self::LEN - ECHO_LEN }>()?;
+        Some((head, echo.try_into().ok()?))
+    }
+}
+
+/// 中转帧引出的 ERROR 回显什么：去掉中转头之后的前 8 个字节，不够的补 0。
+#[must_use]
+pub fn payload_echo(payload: &[u8]) -> Echo {
+    let mut echo = [0; ECHO_LEN];
+    let len = payload.len().min(ECHO_LEN);
+    echo[..len].copy_from_slice(&payload[..len]);
+    echo
 }
 
 /// 任意一种中转会话帧。
@@ -451,8 +501,7 @@ const _: () = {
     assert!(Challenge::LEN <= Init::LEN);
     assert!(Accepted::MAX_LEN <= Auth::LEN);
     assert!(Pong::MAX_LEN <= Ping::LEN);
-    // ERROR 由 PING 或者一个中转帧（最短就是一个中转头）引出。
-    assert!(Refused::LEN <= crate::datagram::RelayHeader::LEN);
+    // ERROR 由 PING 或者一个中转帧引出。中转帧可以比 ERROR 短，relay 不回答那样的帧。
     assert!(Refused::LEN <= Ping::LEN);
     // 填充之前的内容装得进规定的长度。
     assert!(REQUEST_HEAD_LEN <= Init::LEN && REQUEST_HEAD_LEN <= Ping::LEN);
@@ -554,16 +603,32 @@ mod tests {
     #[test]
     fn error_has_the_documented_layout_and_round_trips() {
         let refused = Refused { reason: RefusalReason::PeerUnattached, node: node(0x0102_0304) };
-        assert_eq!(refused.to_bytes(), [0x0c, 2, 1, 2, 3, 4]);
-        assert_eq!(Refused::parse(&refused.to_bytes()), Some(refused));
+        let bytes = refused.to_bytes_echoing(&NONCE);
+        assert_eq!(bytes, [0x0c, 2, 1, 2, 3, 4, 1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(Refused::parse(&bytes), Some(refused));
+        assert_eq!(Refused::echo(&bytes), Some(NONCE));
+        assert_eq!(Frame::parse(&bytes), Some(Frame::Error(refused)), "回显的字节不影响帧的含义");
         let no_session = Refused { reason: RefusalReason::NoSession, node: node(5) };
-        assert_eq!(no_session.to_bytes(), [0x0c, 1, 0, 0, 0, 5]);
-        assert_eq!(Frame::parse(&no_session.to_bytes()), Some(Frame::Error(no_session)));
+        assert_eq!(no_session.to_bytes(), [0x0c, 1, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0], "不回答任何请求的 ERROR 回显全 0");
         let unroutable = Refused { reason: RefusalReason::RouteUnavailable, node: node(8) };
-        assert_eq!(unroutable.to_bytes(), [0x0c, 3, 0, 0, 0, 8]);
         assert_eq!(Refused::parse(&unroutable.to_bytes()), Some(unroutable));
-        assert_eq!(Refused::parse(&[0x0c, 9, 0, 0, 0, 5]), None, "不认识的原因码");
-        assert_eq!(Refused::parse(&[0x0c, 1, 0, 0, 0, 0]), None, "节点编号是 0");
+
+        let mut unknown = bytes;
+        unknown[1] = 9;
+        assert_eq!(Refused::parse(&unknown), None, "不认识的原因码");
+        assert_eq!(Refused::echo(&unknown), None);
+        let mut zero = bytes;
+        zero[2..6].fill(0);
+        assert_eq!(Refused::parse(&zero), None, "节点编号是 0");
+        assert_eq!(Refused::parse(&bytes[..Refused::LEN - 1]), None, "没有回显的旧格式不认");
+        assert_eq!(Refused::parse(&[&bytes[..], &[0]].concat()), None);
+    }
+
+    #[test]
+    fn a_relayed_frame_is_echoed_by_its_first_eight_payload_bytes() {
+        assert_eq!(payload_echo(&[0xc1, 1, 2, 3, 4, 5, 6, 7, 8, 9]), [0xc1, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(payload_echo(&[0xc1, 1, 2]), [0xc1, 1, 2, 0, 0, 0, 0, 0], "不够的补 0");
+        assert_eq!(payload_echo(&[]), [0; ECHO_LEN]);
     }
 
     #[test]
@@ -579,9 +644,8 @@ mod tests {
             assert!(ok.len() <= auth.len());
             assert!(Pong { nonce: NONCE, observed }.to_bytes().len() <= ping.len());
         }
-        // ERROR 由 PING 或者一个中转帧引出，最短的中转帧只有一个中转头。
+        // ERROR 由 PING 或者一个中转帧引出。比它短的中转帧 relay 不回答，所以这里只看 PING。
         assert!(error.len() <= ping.len());
-        assert!(error.len() <= crate::datagram::RelayHeader::LEN);
     }
 
     #[test]
