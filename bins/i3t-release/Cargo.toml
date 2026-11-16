@@ -12,6 +12,12 @@ anyhow.workspace = true
 clap.workspace = true
 i3t-crypto = { path = "../../crates/i3t-crypto" }
 i3t-model = { path = "../../crates/i3t-model" }
+i3t-proto = { path = "../../crates/i3t-proto" }
+i3t-update = { path = "../../crates/i3t-update" }
+serde_json.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

@@ -1,0 +1,206 @@
+# 推一个 v 开头的标签就发布：编译各平台的程序，给清单签名，建 GitHub Release。
+# 做法和取舍写在 docs/releasing.md。
+#
+# 签名密钥只出现在 sign 这一个 job 的一个步骤里。那个 job 不检出代码、不编译、不运行第三方的 action，
+# 只运行前面编好的 i3t-release。没有配置密钥时照样编译和上传，但只建草稿，等人离线签完名再公开。
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # 这个版本的节点需要的 controller 最低版本，写进清单。节点从哪个版本起不兼容旧的 controller，就在发那个版本之前改这里。
+  MIN_CONTROLLER: "0.1.0"
+  # 额外信任的一把发布公钥，编译进节点（仓库变量，不是密钥）。项目自己不设；改了代码另行发布的人设成自己的公钥。
+  I3T_RELEASE_EXTRA_KEY: ${{ vars.I3T_RELEASE_EXTRA_KEY }}
+
+jobs:
+  check:
+    name: tag matches the version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compare the tag with the version of the node program
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(cargo metadata --no-deps --locked --format-version 1 | jq -r '.packages[] | select(.name == "i3t") | .version')
+          if [ "v$version" != "$TAG" ]; then
+            # 节点装上之后报的是程序里的版本号。它和清单里的对不上的话，自检会拒绝这个包。
+            echo "::error::标签是 $TAG，但 bins/i3t 的版本号是 $version。两者要一致（标签多一个 v）。"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          case $version in
+            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+  build:
+    name: build (${{ matrix.platform }})
+    needs: check
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          # platform 是发布文件名里的平台名，要和节点自己报的一致：std::env::consts 的 OS-ARCH。
+          - { platform: linux-x86_64, os: ubuntu-latest, target: x86_64-unknown-linux-gnu, linux_arch: x86_64 }
+          - { platform: linux-aarch64, os: ubuntu-latest, target: aarch64-unknown-linux-gnu, linux_arch: aarch64 }
+          - { platform: windows-x86_64, os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { platform: macos-aarch64, os: macos-latest, target: aarch64-apple-darwin }
+          - { platform: macos-x86_64, os: macos-latest, target: x86_64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v4
+      # 发布的编译不用缓存：缓存是别的流水线写的，不该进到要签名的程序里。
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build (Linux, portable glibc)
+        if: runner.os == 'Linux'
+        env:
+          LINUX_ARCH: ${{ matrix.linux_arch }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          python3 -m venv "$RUNNER_TEMP/zig"
+          "$RUNNER_TEMP/zig/bin/pip" install ziglang cargo-zigbuild
+          export PATH="$RUNNER_TEMP/zig/bin:$PATH"
+          scripts/build-linux.sh "$LINUX_ARCH"
+          echo "OUT_DIR=target/dist/$TARGET/release" >> "$GITHUB_ENV"
+      - name: Build (Windows, macOS)
+        if: runner.os != 'Linux'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo build --release --locked --target "$TARGET" -p i3t -p i3t-controller-bin -p i3tctl
+          echo "OUT_DIR=target/$TARGET/release" >> "$GITHUB_ENV"
+      - name: Name the programs after the platform
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          case $PLATFORM in windows-*) exe=.exe ;; *) exe= ;; esac
+          mkdir dist
+          for program in i3t i3t-controller i3tctl; do
+            cp "$OUT_DIR/$program$exe" "dist/$program-$PLATFORM$exe"
+          done
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  tool:
+    name: build the release tool
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # 和节点用同一份代码、同一个 I3T_RELEASE_EXTRA_KEY 编译，所以它"编译进去的公钥"就是这次发布的节点认的公钥。
+      - run: cargo build --release --locked -p i3t-release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: i3t-release
+          path: target/release/i3t-release
+          if-no-files-found: error
+
+  sign:
+    name: sign the manifest
+    needs: [check, build, tool]
+    runs-on: ubuntu-latest
+    # 给这个环境配上"需要审批人"，每次签名就要有人点一下才会进行。密钥可以放成这个环境的密钥，也可以放成仓库的密钥。
+    environment: release-signing
+    permissions: {}
+    outputs:
+      signed: ${{ steps.sign.outputs.signed }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: i3t-release
+          path: tool
+      - name: Write and sign the manifest
+        id: sign
+        env:
+          SIGNING_KEY: ${{ secrets.I3T_RELEASE_SIGNING_KEY }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "::warning::没有配置 I3T_RELEASE_SIGNING_KEY：这次只上传没有签名的文件并建成草稿。离线签名的做法见 docs/releasing.md。"
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          chmod +x tool/i3t-release
+          umask 077
+          key="$RUNNER_TEMP/release.key"
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$SIGNING_KEY" > "$key"
+          tool/i3t-release manifest --version "$VERSION" --dir dist --key "$key" --min-controller "$MIN_CONTROLLER"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+      # 不带 --key：用的是编译进去的公钥。签名用错了钥匙的话在这里就失败，不会发出一个节点不认的版本。
+      - name: Verify with the keys the nodes trust
+        if: steps.sign.outputs.signed == 'true'
+        run: tool/i3t-release verify --dir dist
+      - uses: actions/upload-artifact@v4
+        if: steps.sign.outputs.signed == 'true'
+        with:
+          name: manifest
+          path: |
+            dist/manifest.json
+            dist/manifest.json.sig
+          if-no-files-found: error
+
+  publish:
+    name: create the GitHub Release
+    needs: [check, build, sign]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        if: needs.sign.outputs.signed == 'true'
+        with:
+          name: manifest
+          path: dist
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          SIGNED: ${{ needs.sign.outputs.signed }}
+          PRERELEASE: ${{ needs.check.outputs.prerelease }}
+        run: |
+          flags=(--title "$TAG" --generate-notes --verify-tag)
+          if [ "$PRERELEASE" = true ]; then
+            flags+=(--prerelease)
+          fi
+          if [ "$SIGNED" != true ]; then
+            # 没有清单的发布不能公开：controller 查"最新版"时会取不到清单。草稿不公开，也不会成为 latest。
+            flags+=(--draft)
+          elif [ "$PRERELEASE" = true ]; then
+            flags+=(--latest=false)
+          else
+            flags+=(--latest)
+          fi
+          gh release create "$TAG" dist/* "${flags[@]}"
