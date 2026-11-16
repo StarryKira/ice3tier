@@ -1,0 +1,29 @@
+[Unit]
+Description=ice3tier node
+Documentation=https://github.com/fuqiuluo/ice3tier
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# 程序放在状态目录里，服务账号对它可写，节点自己更新时不需要提权。
+ExecStart=/var/lib/i3t/bin/i3t run
+Environment=I3T_STATE_DIR=/var/lib/i3t
+User=i3t
+Group=i3t
+StateDirectory=i3t
+StateDirectoryMode=0700
+Restart=always
+RestartSec=2
+LimitNOFILE=1048576
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
