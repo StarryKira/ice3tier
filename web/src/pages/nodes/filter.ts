@@ -1,4 +1,4 @@
-import { type Node } from '@/api/types'
+import { type GroupId, type Node } from '@/api/types'
 import { parseIpv4 } from '@/lib/cidr'
 
 /**
@@ -11,7 +11,8 @@ export type RoleFilter = 'relay' | 'exit'
 export interface NodeFilters {
   search: string
   status: StatusFilter
-  tags: string[]
+  /** 分组的编号：改名之后链接还是同一个分组。 */
+  groups: GroupId[]
   roles: RoleFilter[]
   platforms: string[]
 }
@@ -24,7 +25,10 @@ export function parseFilters(params: URLSearchParams): NodeFilters {
   return {
     search: params.get('q') ?? '',
     status: status !== null && STATUSES.includes(status) ? status : 'all',
-    tags: params.getAll('tag'),
+    groups: params
+      .getAll('group')
+      .map(Number)
+      .filter((id) => Number.isInteger(id) && id > 0),
     roles: params.getAll('role').filter((role): role is RoleFilter => (ROLES as readonly string[]).includes(role)),
     platforms: params.getAll('platform'),
   }
@@ -34,7 +38,7 @@ export function writeFilters(filters: NodeFilters): URLSearchParams {
   const params = new URLSearchParams()
   if (filters.search.trim() !== '') params.set('q', filters.search.trim())
   if (filters.status !== 'all') params.set('status', filters.status)
-  for (const tag of filters.tags) params.append('tag', tag)
+  for (const group of filters.groups) params.append('group', String(group))
   for (const role of filters.roles) params.append('role', role)
   for (const platform of filters.platforms) params.append('platform', platform)
   return params
@@ -44,17 +48,19 @@ export function hasActiveFilters(filters: NodeFilters): boolean {
   return (
     filters.search.trim() !== '' ||
     filters.status !== 'all' ||
-    filters.tags.length > 0 ||
+    filters.groups.length > 0 ||
     filters.roles.length > 0 ||
     filters.platforms.length > 0
   )
 }
 
-/** 搜索匹配名字、全名、虚拟 IP 和标签。 */
+/** 搜索匹配名字、全名、虚拟 IP 和分组的名字。 */
 function matchesSearch(node: Node, search: string): boolean {
   const needle = search.trim().toLowerCase()
   if (needle === '') return true
-  return [node.name, node.fqdn, node.virtual_ip, ...node.tags].some((value) => value.toLowerCase().includes(needle))
+  return [node.name, node.fqdn, node.virtual_ip, ...node.groups.map((group) => group.name)].some((value) =>
+    value.toLowerCase().includes(needle),
+  )
 }
 
 /** 条件之间是"并且"：每加一个条件，结果只会更少。同一类里选了几个平台则是"其中之一"，因为一个节点只有一个平台。 */
@@ -62,7 +68,7 @@ export function matchesFilters(node: Node, filters: NodeFilters): boolean {
   if (!matchesSearch(node, filters.search)) return false
   if (filters.status === 'online' && !node.online) return false
   if (filters.status === 'offline' && node.online) return false
-  if (!filters.tags.every((tag) => node.tags.includes(tag))) return false
+  if (!filters.groups.every((id) => node.groups.some((group) => group.id === id))) return false
   if (filters.roles.includes('relay') && node.relay === null) return false
   if (filters.roles.includes('exit') && node.exit === null) return false
   if (filters.platforms.length > 0 && !filters.platforms.includes(node.platform)) return false

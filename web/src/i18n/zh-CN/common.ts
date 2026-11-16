@@ -96,6 +96,12 @@ export const errors = {
     no_update: '没有可用的更新',
     internal: 'controller 内部错误',
   },
+  /** 分组的错误（§18.1）：码加上 `what` 才说得清。 */
+  group: {
+    notFound: '分组不存在',
+    nameTaken: '已有同名的分组',
+    builtin: '内置分组 All 不能修改',
+  },
 }
 
 export const confirm = {
@@ -108,9 +114,9 @@ export const validate = {
   nameCharset: '只能包含字母、数字和连字符',
   nameHyphen: '不能以连字符开头或结尾',
   nameAllDigits: '不能全是数字',
-  tagRequired: '标签不能为空',
-  tagTooLong: (max: number) => `最多 ${max} 个字符`,
-  tagCharset: '只能包含字母、数字、连字符和下划线',
+  groupRequired: '名字不能为空',
+  groupTooLong: (max: number) => `最多 ${max} 个字符`,
+  groupCharset: '只能包含字母、数字、连字符和下划线',
   titleRequired: '名字不能为空',
   titleTooLong: (max: number) => `最多 ${max} 个字符`,
   cidrRequired: '地址段不能为空',
@@ -146,21 +152,8 @@ export const time = {
   days: (n: number) => `${n} 天`,
 }
 
-export const tags = {
-  remove: (tag: string) => `移除标签 ${tag}`,
-  more: (n: number, list: string) => `另有 ${n} 个：${list}`,
-  allIsBuiltin: 'all 是内置标签，所有节点都有',
-  placeholder: '选择或输入新标签',
-  suggestions: '标签',
-  create: (tag: string) => `新建标签 ${tag}`,
-  searchPlaceholder: '搜索或输入新标签',
-  pick: '选择标签',
-  noneFound: '没有匹配的标签',
-  builtinAll: '内置：全部节点',
-}
-
 export const select = {
   nodePlaceholder: '选择节点',
-  nodeSearch: '搜索名字、虚拟 IP 或标签',
+  nodeSearch: '搜索名字、虚拟 IP 或分组',
   nodeEmpty: '没有匹配的节点',
 }

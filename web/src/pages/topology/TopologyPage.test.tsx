@@ -38,7 +38,7 @@ function setup(extra: Routes = {}) {
       makeNode(3, 'nas', { online: false }),
     ],
     'GET /networks/1/tokens': [],
-    'GET /networks/1/access/graph': { tags: [], rules: [], unconnected: [], unacknowledged: [] },
+    'GET /networks/1/access/graph': { groups: [], rules: [], unconnected: [], unacknowledged: [] },
     'GET /update': makeOverview(),
     ...extra,
   })

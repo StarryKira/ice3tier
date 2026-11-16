@@ -48,6 +48,7 @@ function refLabel(ref: LogRef, names: ReadonlyMap<string, string>, networks: rea
       return s.refLabels.network(ref.id, networks.find((network) => network.id === ref.id)?.name ?? null)
     case 'node':
       return s.refLabels.node(ref.id, names.get(`node:${ref.id}`) ?? null)
+    case 'group':
     case 'token':
     case 'rule':
     case 'credential':

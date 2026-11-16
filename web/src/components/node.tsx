@@ -54,7 +54,7 @@ export function NodeSelect({ nodes, value, onChange, placeholder, disabledReason
       value: node.id,
       label: node.name,
       hint: node.online ? node.virtual_ip : `${node.virtual_ip} · ${t.common.offline}`,
-      keywords: node.tags.join(' '),
+      keywords: node.groups.map((group) => group.name).join(' '),
       leading: <OnlineDot online={node.online} />,
       disabled: reason !== null,
       disabledReason: reason ?? undefined,

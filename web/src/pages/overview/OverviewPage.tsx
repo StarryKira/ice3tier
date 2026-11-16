@@ -14,7 +14,7 @@ import { GettingStarted } from './GettingStarted'
 const o = t.overview
 
 /**
- * 总览：整个面板是访问地图——看一个节点（或者一个标签）能和谁互访、靠的是哪几条规则。
+ * 总览：整个面板是访问地图——看一个节点（或者一个分组）能和谁互访、靠的是哪几条规则。
  * 右上角一句话说整个网络的状态，有问题时点开是那几件事。节点不足两个时，整页是引导。
  */
 export function OverviewPage() {

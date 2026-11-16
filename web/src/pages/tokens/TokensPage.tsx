@@ -7,13 +7,13 @@ import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
 import { type EnrollTokenInfo } from '@/api/types'
 import { useConfirm } from '@/components/confirm'
+import { GroupChip } from '@/components/groups'
 import { NodeLink } from '@/components/node'
 import { Notice } from '@/components/notice'
 import { Page, PageHeader } from '@/components/page'
 import { EmptyState, ErrorState, SkeletonRows } from '@/components/states'
 import { RelativeTime, StatusText } from '@/components/status'
 import { Table, TableNote, Td, Th, Tr } from '@/components/table'
-import { TagChip } from '@/components/tags'
 import { Button } from '@/components/ui/button'
 import { Segmented } from '@/components/ui/segmented'
 import { Tooltip } from '@/components/ui/tooltip'
@@ -142,7 +142,7 @@ export function TokensPage() {
                 {list.map((token) => {
                   const view = tokenView(token, now)
                   const label = tokenLabel(token)
-                  const hasPreset = token.tags.length > 0 || token.virtual_ip !== null || token.successor_of !== null
+                  const hasPreset = token.groups.length > 0 || token.virtual_ip !== null || token.successor_of !== null
                   return (
                     <Tr
                       key={token.id}
@@ -165,8 +165,8 @@ export function TokensPage() {
                       <Td>
                         {hasPreset ? (
                           <span className="inline-flex flex-wrap items-center gap-1.5 text-[13px]">
-                            {token.tags.map((tag) => (
-                              <TagChip key={tag} tag={tag} />
+                            {token.groups.map((group) => (
+                              <GroupChip key={group.id} name={group.name} />
                             ))}
                             {token.virtual_ip !== null ? <span>{k.presetIp(token.virtual_ip)}</span> : null}
                             {token.successor_of !== null ? (

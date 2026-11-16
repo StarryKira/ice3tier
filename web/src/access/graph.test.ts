@@ -1,18 +1,35 @@
 import { describe, expect, it } from 'vitest'
 
-import { type AccessEdge, type AccessGraph, type NodeAccess, type NodeRef, type Rule } from '@/api/types'
+import {
+  type AccessEdge,
+  type AccessGraph,
+  type Group,
+  type GroupRef,
+  type NodeAccess,
+  type NodeRef,
+  type Rule,
+} from '@/api/types'
 
 import { borderPoint, curveBetween, loopAround } from './geometry'
+import { buildGroupGraph, groupPointId, layoutSignature, UNGROUPED_ID } from './groupGraph'
 import { buildNodeGraph, SIDE_LIMIT } from './nodeGraph'
 import { accessDiff, isAllToAll, sameRule } from './reach'
-import { buildTagGraph, layoutSignature, tagPointId, UNTAGGED_ID } from './tagGraph'
 
 function ref(id: number, name = `node-${id}`): NodeRef {
   return { id, name, virtual_ip: `10.66.0.${id}` }
 }
 
-function rule(id: number, src: string, dst: string, extra: Partial<Rule> = {}): Rule {
+const ALL: GroupRef = { id: 1, name: 'All' }
+const HOME: GroupRef = { id: 2, name: 'home' }
+const LAPTOPS: GroupRef = { id: 3, name: 'laptops' }
+const SERVERS: GroupRef = { id: 4, name: 'servers' }
+
+function rule(id: number, src: GroupRef, dst: GroupRef, extra: Partial<Rule> = {}): Rule {
   return { id, name: '', src, dst, direction: 'both', enabled: true, ...extra }
+}
+
+function group(of: GroupRef, nodes: NodeRef[]): Group {
+  return { ...of, builtin: of.id === ALL.id, nodes, rules: [] }
 }
 
 const gw = ref(1, 'gw-hk')
@@ -21,16 +38,16 @@ const laptop = ref(3, 'laptop')
 const office = ref(4, 'office-pc')
 const spare = ref(5, 'spare')
 
-const DEFAULT_RULE = rule(1, 'all', 'all', { name: 'default' })
+const DEFAULT_RULE = rule(1, ALL, ALL, { name: 'default' })
 
-/** 接口应答的样子：tags 里总有 all，其余按字典序。 */
+/** 接口应答的样子：groups 里 All 在最前面，其余按名字。 */
 function graphOf(overrides: Partial<AccessGraph> = {}): AccessGraph {
   return {
-    tags: [
-      { tag: 'all', nodes: [gw, nas, laptop, office, spare] },
-      { tag: 'home', nodes: [nas] },
-      { tag: 'laptops', nodes: [laptop, office] },
-      { tag: 'servers', nodes: [gw, nas] },
+    groups: [
+      group(ALL, [gw, nas, laptop, office, spare]),
+      group(HOME, [nas]),
+      group(LAPTOPS, [laptop, office]),
+      group(SERVERS, [gw, nas]),
     ],
     rules: [DEFAULT_RULE],
     unconnected: [],
@@ -39,64 +56,69 @@ function graphOf(overrides: Partial<AccessGraph> = {}): AccessGraph {
   }
 }
 
-describe('按标签的视图', () => {
-  it('每个标签一个点，带着成员；all 排在最前面、画在最上面', () => {
-    const shape = buildTagGraph(graphOf())
-    const tags = shape.points.filter((point) => point.kind === 'tag')
-    expect(tags.map((point) => point.tag)).toEqual(['all', 'home', 'laptops', 'servers'])
-    expect(tags.map((point) => point.members.length)).toEqual([5, 1, 2, 2])
-    expect(tags.map((point) => point.id)).toEqual(['tag:all', 'tag:home', 'tag:laptops', 'tag:servers'])
+describe('按分组的视图', () => {
+  it('每个分组一个点，带着成员；All 排在最前面、画在最上面', () => {
+    const shape = buildGroupGraph(graphOf())
+    const groups = shape.points.filter((point) => point.kind === 'group')
+    expect(groups.map((point) => point.group?.name)).toEqual(['All', 'home', 'laptops', 'servers'])
+    expect(groups.map((point) => point.members.length)).toEqual([5, 1, 2, 2])
+    expect(groups.map((point) => point.id)).toEqual(['group:1', 'group:2', 'group:3', 'group:4'])
 
-    const all = tags[0]
-    for (const other of tags.slice(1)) expect(all?.y).toBeLessThan(other.y)
+    const all = groups[0]
+    for (const other of groups.slice(1)) expect(all?.y).toBeLessThan(other.y)
   })
 
-  it('接口没有把 all 放在第一个时也一样', () => {
+  it('接口没有把 All 放在第一个时也一样', () => {
     const graph = graphOf()
-    graph.tags = [...graph.tags.slice(1), ...graph.tags.slice(0, 1)]
-    expect(buildTagGraph(graph).points[0]?.tag).toBe('all')
+    graph.groups = [...graph.groups.slice(1), ...graph.groups.slice(0, 1)]
+    expect(buildGroupGraph(graph).points[0]?.group).toMatchObject({ name: 'All', builtin: true })
   })
 
-  it('没有任何标签的节点合成一个"未打标签"的点，不连线', () => {
-    const shape = buildTagGraph(graphOf())
-    const untagged = shape.points.find((point) => point.kind === 'untagged')
-    expect(untagged?.id).toBe(UNTAGGED_ID)
-    expect(untagged?.members).toEqual([spare])
-    expect(shape.lines.some((line) => line.source === UNTAGGED_ID || line.target === UNTAGGED_ID)).toBe(false)
+  it('只在 All 里的节点合成一个点，不连线', () => {
+    const shape = buildGroupGraph(graphOf())
+    const ungrouped = shape.points.find((point) => point.kind === 'ungrouped')
+    expect(ungrouped?.id).toBe(UNGROUPED_ID)
+    expect(ungrouped?.group).toBeNull()
+    expect(ungrouped?.members).toEqual([spare])
+    expect(shape.lines.some((line) => line.source === UNGROUPED_ID || line.target === UNGROUPED_ID)).toBe(false)
   })
 
-  it('每个节点都有标签时没有"未打标签"的点', () => {
-    const graph = graphOf({
-      tags: [
-        { tag: 'all', nodes: [gw, nas] },
-        { tag: 'servers', nodes: [gw, nas] },
-      ],
-    })
-    expect(buildTagGraph(graph).points.map((point) => point.id)).toEqual(['tag:all', 'tag:servers'])
+  it('每个节点都在别的分组里时没有"只在 All 里"的点', () => {
+    const graph = graphOf({ groups: [group(ALL, [gw, nas]), group(SERVERS, [gw, nas])] })
+    expect(buildGroupGraph(graph).points.map((point) => point.id)).toEqual(['group:1', 'group:4'])
   })
 
-  it('只有 all 一个标签时它在正中，不重复画一个"未打标签"', () => {
-    const shape = buildTagGraph(graphOf({ tags: [{ tag: 'all', nodes: [gw, nas] }] }))
+  it('没有成员的分组照样有一个点：它是一样单独的东西，不随成员消失', () => {
+    const graph = graphOf({ groups: [group(ALL, [gw]), group(SERVERS, [gw]), group(HOME, [])] })
+    expect(buildGroupGraph(graph).points.map((point) => [point.id, point.members.length])).toEqual([
+      ['group:1', 1],
+      ['group:4', 1],
+      ['group:2', 0],
+    ])
+  })
+
+  it('只有 All 一个分组时它在正中，不重复画一个"只在 All 里"', () => {
+    const shape = buildGroupGraph(graphOf({ groups: [group(ALL, [gw, nas])] }))
     expect(shape.points).toHaveLength(1)
-    expect(shape.points[0]).toMatchObject({ tag: 'all', x: 0, y: 0 })
+    expect(shape.points[0]).toMatchObject({ group: { name: 'All' }, x: 0, y: 0 })
   })
 
-  it('空的网络：一个没有成员的 all，一条默认规则画成环', () => {
-    const shape = buildTagGraph(graphOf({ tags: [{ tag: 'all', nodes: [] }] }))
+  it('空的网络：一个没有成员的 All，一条默认规则画成环', () => {
+    const shape = buildGroupGraph(graphOf({ groups: [group(ALL, [])] }))
     expect(shape.points).toHaveLength(1)
     expect(shape.points[0]?.members).toEqual([])
     expect(shape.lines).toHaveLength(1)
-    expect(shape.lines[0]).toMatchObject({ ruleId: 1, loop: true, source: 'tag:all', target: 'tag:all' })
+    expect(shape.lines[0]).toMatchObject({ ruleId: 1, loop: true, source: 'group:1', target: 'group:1' })
   })
 
   it('每条规则一条线，带着方向、是否启用和两端的点', () => {
-    const shape = buildTagGraph(
+    const shape = buildGroupGraph(
       graphOf({
         rules: [
           DEFAULT_RULE,
-          rule(2, 'laptops', 'servers', { name: 'ssh', direction: 'one_way' }),
-          rule(3, 'servers', 'servers'),
-          rule(4, 'laptops', 'home', { name: 'media', enabled: false }),
+          rule(2, LAPTOPS, SERVERS, { name: 'ssh', direction: 'one_way' }),
+          rule(3, SERVERS, SERVERS),
+          rule(4, LAPTOPS, HOME, { name: 'media', enabled: false }),
         ],
       }),
     )
@@ -104,26 +126,34 @@ describe('按标签的视图', () => {
     expect(shape.lines[1]).toMatchObject({
       ruleId: 2,
       name: 'ssh',
-      source: tagPointId('laptops'),
-      target: tagPointId('servers'),
+      source: groupPointId(LAPTOPS.id),
+      target: groupPointId(SERVERS.id),
       direction: 'one_way',
       enabled: true,
       loop: false,
     })
-    // 同一个标签自己到自己：画成环。
+    // 同一个分组自己到自己：画成环。
     expect(shape.lines[0]?.loop).toBe(true)
     expect(shape.lines[2]?.loop).toBe(true)
     // 停用的规则照样画（虚线），不丢。
     expect(shape.lines[3]).toMatchObject({ enabled: false, direction: 'both' })
   })
 
-  it('同一对标签之间的几条线各有编号，方向相反的也算同一对', () => {
-    const shape = buildTagGraph(
+  it('分组改名之后规则照样连着：线按编号找点', () => {
+    const renamed = { ...LAPTOPS, name: 'notebooks' }
+    const graph = graphOf({ rules: [rule(2, renamed, SERVERS)] })
+    graph.groups = graph.groups.map((entry) => (entry.id === LAPTOPS.id ? { ...entry, name: 'notebooks' } : entry))
+    const shape = buildGroupGraph(graph)
+    expect(shape.lines[0]).toMatchObject({ source: 'group:3', target: 'group:4', src: renamed })
+  })
+
+  it('同一对分组之间的几条线各有编号，方向相反的也算同一对', () => {
+    const shape = buildGroupGraph(
       graphOf({
         rules: [
-          rule(2, 'laptops', 'servers', { direction: 'one_way' }),
-          rule(3, 'servers', 'laptops', { direction: 'one_way' }),
-          rule(4, 'laptops', 'home'),
+          rule(2, LAPTOPS, SERVERS, { direction: 'one_way' }),
+          rule(3, SERVERS, LAPTOPS, { direction: 'one_way' }),
+          rule(4, LAPTOPS, HOME),
         ],
       }),
     )
@@ -134,39 +164,43 @@ describe('按标签的视图', () => {
     ])
   })
 
-  it('规则用到的标签下已经没有节点时，这条线不画（两端没有点可连）', () => {
-    const shape = buildTagGraph(graphOf({ rules: [DEFAULT_RULE, rule(2, 'laptops', 'gone')] }))
+  it('规则用到的分组不在列表里（列表还没刷新）时，这条线不画', () => {
+    const shape = buildGroupGraph(graphOf({ rules: [DEFAULT_RULE, rule(2, LAPTOPS, { id: 99, name: 'gone' })] }))
     expect(shape.lines.map((line) => line.ruleId)).toEqual([1])
   })
 
-  it('还没确认新配置的节点：按标签数出来', () => {
-    const shape = buildTagGraph(graphOf({ unacknowledged: [office, spare] }))
+  it('还没确认新配置的节点：按分组数出来', () => {
+    const shape = buildGroupGraph(graphOf({ unacknowledged: [office, spare] }))
     const pending = Object.fromEntries(shape.points.map((point) => [point.id, point.pending]))
-    expect(pending).toEqual({ 'tag:all': 2, 'tag:home': 0, 'tag:laptops': 1, 'tag:servers': 0, untagged: 1 })
+    expect(pending).toEqual({ 'group:1': 2, 'group:2': 0, 'group:3': 1, 'group:4': 0, ungrouped: 1 })
   })
 
   it('点的位置互不重合', () => {
-    const shape = buildTagGraph(graphOf())
+    const shape = buildGroupGraph(graphOf())
     const seen = new Set(shape.points.map((point) => `${point.x},${point.y}`))
     expect(seen.size).toBe(shape.points.length)
   })
 
-  it('布局的指纹只跟有哪些点有关：规则和成员数变了不重新排版', () => {
-    const before = layoutSignature(buildTagGraph(graphOf()))
-    const moreRules = layoutSignature(buildTagGraph(graphOf({ rules: [DEFAULT_RULE, rule(2, 'laptops', 'servers')] })))
+  it('布局的指纹只跟有哪些点有关：规则、成员数和名字变了不重新排版', () => {
+    const before = layoutSignature(buildGroupGraph(graphOf()))
+    const moreRules = layoutSignature(buildGroupGraph(graphOf({ rules: [DEFAULT_RULE, rule(2, LAPTOPS, SERVERS)] })))
     expect(moreRules).toBe(before)
 
+    const renamed = graphOf()
+    renamed.groups = renamed.groups.map((entry) => ({ ...entry, name: `${entry.name}-2` }))
+    expect(layoutSignature(buildGroupGraph(renamed))).toBe(before)
+
     const graph = graphOf()
-    graph.tags.push({ tag: 'zoo', nodes: [spare] })
-    expect(layoutSignature(buildTagGraph(graph))).not.toBe(before)
+    graph.groups.push(group({ id: 9, name: 'zoo' }, [spare]))
+    expect(layoutSignature(buildGroupGraph(graph))).not.toBe(before)
   })
 })
 
 describe('按节点的视图', () => {
   const rules = [
     DEFAULT_RULE,
-    rule(2, 'laptops', 'servers', { name: 'ssh', direction: 'one_way' }),
-    rule(3, 'servers', 'servers'),
+    rule(2, LAPTOPS, SERVERS, { name: 'ssh', direction: 'one_way' }),
+    rule(3, SERVERS, SERVERS),
   ]
 
   function edge(node: NodeRef, ...ruleIds: number[]): AccessEdge {
@@ -260,87 +294,93 @@ describe('按节点的视图', () => {
 })
 
 describe('一次改动的影响', () => {
-  const tags = graphOf().tags
-  const ssh = rule(2, 'laptops', 'servers', { direction: 'one_way' })
+  const groups = graphOf().groups
+  const ssh = rule(2, LAPTOPS, SERVERS, { direction: 'one_way' })
 
   it('默认规则开着：5 个节点两两互通，一共 10 对', () => {
-    const diff = accessDiff(tags, [DEFAULT_RULE], [DEFAULT_RULE])
+    const diff = accessDiff(groups, [DEFAULT_RULE], [DEFAULT_RULE])
     expect(diff).toEqual({ gained: 0, lost: 0, connectedBefore: 10, connectedAfter: 10 })
   })
 
   it('默认规则开着时再加规则，不多出任何一对', () => {
-    expect(accessDiff(tags, [DEFAULT_RULE], [DEFAULT_RULE, ssh]).gained).toBe(0)
+    expect(accessDiff(groups, [DEFAULT_RULE], [DEFAULT_RULE, ssh]).gained).toBe(0)
   })
 
   it('停用默认规则、没有别的规则：所有节点互不可达', () => {
-    const diff = accessDiff(tags, [DEFAULT_RULE], [{ ...DEFAULT_RULE, enabled: false }])
+    const diff = accessDiff(groups, [DEFAULT_RULE], [{ ...DEFAULT_RULE, enabled: false }])
     expect(diff.lost).toBe(10)
     expect(diff.connectedAfter).toBe(0)
   })
 
   it('收紧之后加一条规则：新增的对数是两边成员数的乘积', () => {
     // laptops（laptop、office-pc）→ servers（gw-hk、nas-home）：2 × 2 = 4 对。
-    const diff = accessDiff(tags, [], [ssh])
+    const diff = accessDiff(groups, [], [ssh])
     expect(diff).toEqual({ gained: 4, lost: 0, connectedBefore: 0, connectedAfter: 4 })
   })
 
-  it('同一个标签自己到自己：成员之间两两一对', () => {
+  it('同一个分组自己到自己：成员之间两两一对', () => {
     // servers 里两个节点：1 对。
-    expect(accessDiff(tags, [], [rule(3, 'servers', 'servers')]).gained).toBe(1)
-    // 只有一个成员的标签自己到自己，没有任何一对。
-    expect(accessDiff(tags, [], [rule(4, 'home', 'home')]).gained).toBe(0)
+    expect(accessDiff(groups, [], [rule(3, SERVERS, SERVERS)]).gained).toBe(1)
+    // 只有一个成员的分组自己到自己，没有任何一对。
+    expect(accessDiff(groups, [], [rule(4, HOME, HOME)]).gained).toBe(0)
   })
 
   it('停用的规则不算', () => {
-    expect(accessDiff(tags, [], [{ ...ssh, enabled: false }]).gained).toBe(0)
+    expect(accessDiff(groups, [], [{ ...ssh, enabled: false }]).gained).toBe(0)
   })
 
   it('双向改成单向：这些节点对少了一个方向，算作失去访问，但仍然连着', () => {
     const both = { ...ssh, direction: 'both' as const }
-    const diff = accessDiff(tags, [both], [ssh])
+    const diff = accessDiff(groups, [both], [ssh])
     expect(diff.lost).toBe(4)
     expect(diff.gained).toBe(0)
     expect(diff.connectedAfter).toBe(4)
   })
 
   it('一对节点被两条规则连着时，去掉其中一条不算失去', () => {
-    const home = rule(5, 'laptops', 'home', { direction: 'one_way' })
+    const home = rule(5, LAPTOPS, HOME, { direction: 'one_way' })
     // laptops → home（nas-home）被 ssh 盖住了：nas-home 也在 servers 里。
-    expect(accessDiff(tags, [ssh, home], [ssh]).lost).toBe(0)
+    expect(accessDiff(groups, [ssh, home], [ssh]).lost).toBe(0)
   })
 
-  it('规则用到的标签下没有节点时没有影响', () => {
-    expect(accessDiff(tags, [], [rule(6, 'laptops', 'nobody')]).gained).toBe(0)
+  it('规则用到的分组里没有节点时没有影响', () => {
+    const empty = [...groups, group({ id: 8, name: 'nobody' }, [])]
+    expect(accessDiff(empty, [], [rule(6, LAPTOPS, { id: 8, name: 'nobody' })]).gained).toBe(0)
   })
 
-  it('节点很多时按标签的组合算，不逐对算', () => {
+  it('节点很多时按分组的组合算，不逐对算', () => {
     const many = Array.from({ length: 2000 }, (_, index) => ref(index + 1))
-    const bigTags = [
-      { tag: 'all', nodes: many },
-      { tag: 'a', nodes: many.slice(0, 1000) },
-      { tag: 'b', nodes: many.slice(1000) },
-    ]
-    const diff = accessDiff(bigTags, [], [rule(1, 'a', 'b')])
+    const a = { id: 2, name: 'a' }
+    const b = { id: 3, name: 'b' }
+    const big = [group(ALL, many), group(a, many.slice(0, 1000)), group(b, many.slice(1000))]
+    const diff = accessDiff(big, [], [rule(1, a, b)])
     expect(diff.gained).toBe(1000 * 1000)
   })
 })
 
 describe('规则之间的比较', () => {
+  const DEV = { id: 5, name: 'dev' }
+  const SRV = { id: 6, name: 'srv' }
+
   it('双向规则两边对调还是同一条；单向的不是', () => {
-    expect(sameRule(rule(1, 'dev', 'srv'), rule(2, 'srv', 'dev'))).toBe(true)
-    expect(sameRule(rule(1, 'dev', 'srv'), rule(2, 'dev', 'srv'))).toBe(true)
+    expect(sameRule(rule(1, DEV, SRV), rule(2, SRV, DEV))).toBe(true)
+    expect(sameRule(rule(1, DEV, SRV), rule(2, DEV, SRV))).toBe(true)
     const oneWay = { direction: 'one_way' as const }
-    expect(sameRule(rule(1, 'dev', 'srv', oneWay), rule(2, 'srv', 'dev', oneWay))).toBe(false)
-    expect(sameRule(rule(1, 'dev', 'srv', oneWay), rule(2, 'dev', 'srv', oneWay))).toBe(true)
+    expect(sameRule(rule(1, DEV, SRV, oneWay), rule(2, SRV, DEV, oneWay))).toBe(false)
+    expect(sameRule(rule(1, DEV, SRV, oneWay), rule(2, DEV, SRV, oneWay))).toBe(true)
   })
 
   it('方向不同就不是同一条', () => {
-    expect(sameRule(rule(1, 'dev', 'srv'), rule(2, 'dev', 'srv', { direction: 'one_way' }))).toBe(false)
+    expect(sameRule(rule(1, DEV, SRV), rule(2, DEV, SRV, { direction: 'one_way' }))).toBe(false)
   })
 
-  it('认得出默认的 all ⇄ all', () => {
+  it('按编号比，不按名字：改过名的分组还是同一个', () => {
+    expect(sameRule(rule(1, DEV, SRV), rule(2, { ...DEV, name: 'develop' }, SRV))).toBe(true)
+  })
+
+  it('认得出默认的 All ⇄ All', () => {
     expect(isAllToAll(DEFAULT_RULE)).toBe(true)
-    expect(isAllToAll(rule(2, 'all', 'servers'))).toBe(false)
+    expect(isAllToAll(rule(2, ALL, SERVERS))).toBe(false)
   })
 })
 

@@ -40,6 +40,7 @@ export const settings = {
     refLabels: {
       network: (id: number, name: string | null) => (name === null ? `网络 #${id}` : `网络 ${name}`),
       node: (id: number, name: string | null) => (name === null ? `节点 #${id}` : `节点 ${name}`),
+      group: (id: number) => `分组 #${id}`,
       token: (id: number) => `令牌 #${id}`,
       rule: (id: number) => `规则 #${id}`,
       credential: (id: number) => `凭据 #${id}`,
@@ -57,7 +58,7 @@ export const settings = {
       listener: '监听器',
       forward: '端口转发',
       pair: '节点对',
-      tag: '标签',
+      group: '分组',
       update: '节点更新',
     }),
     actions: known({
@@ -94,7 +95,10 @@ export const settings = {
       'forward.delete': '删除端口转发',
       'pair.set': '设置节点对',
       'pair.delete': '移除节点对',
-      'tag.rename': '标签改名',
+      'group.create': '新建分组',
+      'group.rename': '分组改名',
+      'group.delete': '删除分组',
+      'group.members': '分组成员变更',
       'update.settings': '修改更新设置',
       'update.release': '发现新版本',
       'update.pause': '暂停版本',

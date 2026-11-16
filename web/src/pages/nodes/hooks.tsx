@@ -1,5 +1,4 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useMemo } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
@@ -7,12 +6,6 @@ import { type Network, type Node } from '@/api/types'
 import { useConfirm } from '@/components/confirm'
 import { t } from '@/i18n'
 import { COOLDOWN_DAYS } from '@/lib/product'
-
-/** 网络里已经在用的标签（节点上的、规则里提到的），给标签选择器当候选。 */
-export function useKnownTags(network: Network): string[] {
-  const graph = useQuery({ ...q.graph(network.id), refetchInterval: false })
-  return useMemo(() => (graph.data?.tags ?? []).map((entry) => entry.tag), [graph.data])
-}
 
 /**
  * 删除节点：危险级别的确认，正文写清具体的后果。

@@ -1,7 +1,7 @@
 import { ArrowLeftRight, ArrowRight } from 'lucide-react'
 
 import { type Direction, type Rule } from '@/api/types'
-import { TagChip } from '@/components/tags'
+import { GroupChip } from '@/components/groups'
 import { t } from '@/i18n'
 import { cn } from '@/lib/utils'
 
@@ -28,9 +28,9 @@ export function RuleSentence({
 }) {
   return (
     <span className={cn('inline-flex items-center gap-1.5', className)}>
-      <TagChip tag={rule.src} muted={muted} />
+      <GroupChip name={rule.src.name} muted={muted} />
       <DirectionMark direction={rule.direction} />
-      <TagChip tag={rule.dst} muted={muted} />
+      <GroupChip name={rule.dst.name} muted={muted} />
     </span>
   )
 }

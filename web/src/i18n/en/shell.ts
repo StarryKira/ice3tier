@@ -21,6 +21,7 @@ export const nav: Messages['nav'] = {
   overview: 'Overview',
   nodes: 'Nodes',
   access: 'Access control',
+  groups: 'Groups',
   groupAccess: 'Traffic',
   exits: 'Exits',
   listeners: 'Listeners',

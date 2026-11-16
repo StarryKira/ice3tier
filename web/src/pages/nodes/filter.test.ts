@@ -21,21 +21,21 @@ const node = (id: number, name: string, extra: Partial<Node> = {}): Node => make
 
 const RELAY = { udp: ['203.0.113.7:20330'], tcp: [], region: 'hk', bandwidth_mbps: null }
 const EXIT = makeExitSettings()
-const NONE: NodeFilters = { search: '', status: 'all', tags: [], roles: [], platforms: [] }
+const NONE: NodeFilters = { search: '', status: 'all', groups: [], roles: [], platforms: [] }
+const SERVERS = { id: 3, name: 'Servers' }
+const HOME = { id: 4, name: 'home' }
 
 describe('节点列表的筛选写在地址里', () => {
   it('写进去再读出来是原样', () => {
     const filters: NodeFilters = {
       search: 'nas',
       status: 'offline',
-      tags: ['servers', 'home'],
+      groups: [3, 4],
       roles: ['relay', 'exit'],
       platforms: ['linux-x86_64'],
     }
     const params = writeFilters(filters)
-    expect(params.toString()).toBe(
-      'q=nas&status=offline&tag=servers&tag=home&role=relay&role=exit&platform=linux-x86_64',
-    )
+    expect(params.toString()).toBe('q=nas&status=offline&group=3&group=4&role=relay&role=exit&platform=linux-x86_64')
     expect(parseFilters(params)).toEqual(filters)
   })
 
@@ -43,20 +43,21 @@ describe('节点列表的筛选写在地址里', () => {
     expect(writeFilters(NONE).toString()).toBe('')
     expect(hasActiveFilters(NONE)).toBe(false)
     expect(hasActiveFilters({ ...NONE, search: '  ' })).toBe(false)
-    expect(hasActiveFilters({ ...NONE, tags: ['servers'] })).toBe(true)
+    expect(hasActiveFilters({ ...NONE, groups: [3] })).toBe(true)
   })
 
   it('地址里手写的、不认识的值当作没写', () => {
-    const parsed = parseFilters(new URLSearchParams('status=broken&role=admin&role=exit'))
+    const parsed = parseFilters(new URLSearchParams('status=broken&role=admin&role=exit&group=x&group=0&group=7'))
     expect(parsed.status).toBe('all')
     expect(parsed.roles).toEqual(['exit'])
+    expect(parsed.groups).toEqual([7])
   })
 })
 
 describe('筛选节点', () => {
-  const nas = node(2, 'nas-home', { tags: ['servers', 'home'], exit: EXIT })
+  const nas = node(2, 'nas-home', { groups: [HOME, SERVERS], exit: EXIT })
 
-  it('搜索匹配名字、全名、虚拟 IP 和标签，不分大小写', () => {
+  it('搜索匹配名字、全名、虚拟 IP 和分组的名字，不分大小写', () => {
     for (const search of ['NAS', 'home.i3t', '10.66.0.2', 'serv']) {
       expect(matchesFilters(nas, { ...NONE, search }), search).toBe(true)
     }
@@ -64,8 +65,8 @@ describe('筛选节点', () => {
   })
 
   it('条件之间是"并且"', () => {
-    expect(matchesFilters(nas, { ...NONE, tags: ['servers', 'home'], roles: ['exit'] })).toBe(true)
-    expect(matchesFilters(nas, { ...NONE, tags: ['servers', 'laptops'] })).toBe(false)
+    expect(matchesFilters(nas, { ...NONE, groups: [3, 4], roles: ['exit'] })).toBe(true)
+    expect(matchesFilters(nas, { ...NONE, groups: [3, 5] })).toBe(false)
     expect(matchesFilters(nas, { ...NONE, roles: ['exit', 'relay'] })).toBe(false)
   })
 
@@ -173,9 +174,14 @@ describe('时间的写法', () => {
 })
 
 describe('规则在文字里的叫法', () => {
-  it('有名字用名字，没有就写成两个标签加方向', () => {
-    expect(ruleLabel({ name: 'ssh', src: 'laptops', dst: 'servers', direction: 'one_way' })).toBe('ssh')
-    expect(ruleLabel({ name: '', src: 'laptops', dst: 'servers', direction: 'one_way' })).toBe('laptops → servers')
-    expect(ruleLabel({ name: '  ', src: 'dev', dst: 'srv', direction: 'both' })).toBe('dev ⇄ srv')
+  const laptops = { id: 2, name: 'laptops' }
+  const servers = { id: 3, name: 'servers' }
+
+  it('有名字用名字，没有就写成两个分组加方向', () => {
+    expect(ruleLabel({ name: 'ssh', src: laptops, dst: servers, direction: 'one_way' })).toBe('ssh')
+    expect(ruleLabel({ name: '', src: laptops, dst: servers, direction: 'one_way' })).toBe('laptops → servers')
+    expect(ruleLabel({ name: '  ', src: { id: 5, name: 'dev' }, dst: servers, direction: 'both' })).toBe(
+      'dev ⇄ servers',
+    )
   })
 })

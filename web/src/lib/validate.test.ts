@@ -3,20 +3,19 @@ import { describe, expect, it } from 'vitest'
 import { t } from '@/i18n'
 
 import {
+  MAX_GROUP_NAME_LEN,
   MAX_NAME_LEN,
-  MAX_TAG_LEN,
   MAX_TITLE_LEN,
   normalizeCidrList,
-  normalizeTag,
   parseOptionalPositiveInt,
   parsePortList,
   splitList,
   validateCidrList,
+  validateGroupName,
   validateName,
   validateNetworkCidr,
   validatePort,
   validateSocketAddr,
-  validateTag,
   validateTitle,
   validateVirtualIp,
 } from './validate'
@@ -64,27 +63,41 @@ describe('网络和节点的名字', () => {
   })
 })
 
-describe('标签', () => {
-  it('字母、数字、连字符、下划线', () => {
-    for (const tag of ['servers', 'home_lab', 'dev-2', '42', 'a'.repeat(MAX_TAG_LEN)]) {
-      expect(validateTag(tag), tag).toBeNull()
+describe('分组的名字', () => {
+  it('字母（任何文字的）、数字、连字符、下划线；全是数字也行', () => {
+    for (const name of ['servers', 'Home_Lab', 'dev-2', '42', '服务器', 'Büro', 'a'.repeat(MAX_GROUP_NAME_LEN)]) {
+      expect(validateGroupName(name), name).toBeNull()
     }
   })
 
-  it('转成小写，去掉首尾空白', () => {
-    expect(normalizeTag('  Servers ')).toBe('servers')
-    expect(validateTag('  Servers ')).toBeNull()
+  it('字母和数字按 Unicode 的属性认，和 controller 的 char::is_alphanumeric 一样', () => {
+    // 罗马数字（Nl）、阿拉伯-印度数字（Nd）、上标的 2（No）、带圈的 1（No）、组合用的希腊字母 ypogegrammeni（Alphabetic 但不是 L）。
+    for (const name of ['Ⅻ', '٣٤', 'x²', '①', 'a\u0345', 'ǅ']) {
+      expect(validateGroupName(name), name).toBeNull()
+    }
+    // 组合用的重音符号不是字母（不是 Alphabetic）；标点、符号也不是。
+    for (const name of ['e\u0301', 'a·b', 'a+b', '$']) {
+      expect(validateGroupName(name), name).toBe(v.groupCharset)
+    }
   })
 
-  it('不能是空的，最长 32 个字符', () => {
-    expect(MAX_TAG_LEN).toBe(32)
-    expect(validateTag('  ')).toBe(v.tagRequired)
-    expect(validateTag('a'.repeat(33))).toBe(v.tagTooLong(32))
+  it('大小写保留，首尾的空白不算', () => {
+    expect(validateGroupName('  Servers ')).toBeNull()
+  })
+
+  it('不能是空的，最长 32 个字符（按 Unicode 的字符数，不按字节，也不按 UTF-16 的单元）', () => {
+    expect(MAX_GROUP_NAME_LEN).toBe(32)
+    expect(validateGroupName('  ')).toBe(v.groupRequired)
+    expect(validateGroupName('a'.repeat(33))).toBe(v.groupTooLong(32))
+    expect(validateGroupName('组'.repeat(32))).toBeNull()
+    // 𝐀（数学粗体 A）在 UTF-16 里占两个单元，仍然算一个字符。
+    expect(validateGroupName('𝐀'.repeat(32))).toBeNull()
+    expect(validateGroupName('𝐀'.repeat(33))).toBe(v.groupTooLong(32))
   })
 
   it('别的字符不行', () => {
-    for (const tag of ['a b', 'a.b', '服务器', 'a,b']) {
-      expect(validateTag(tag), tag).toBe(v.tagCharset)
+    for (const name of ['a b', 'a.b', 'a,b', 'a/b', 'a😀']) {
+      expect(validateGroupName(name), name).toBe(v.groupCharset)
     }
   })
 })

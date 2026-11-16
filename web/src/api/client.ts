@@ -19,13 +19,26 @@ export class ApiError extends Error {
   readonly code: string
   /** controller 给的原话；它没有给（连不上、不是约定的应答）时是 `null`。 */
   readonly server: string | null
+  /** 比 `code` 更具体的一层（文档 §2）；controller 说不出来、或者它比这个字段旧时是 `null`。 */
+  readonly what: string | null
+  /** 请求里出问题的那一项；不是某一项的问题时是 `null`。 */
+  readonly field: string | null
 
-  constructor(status: number, code: string, message: string, server: string | null = null) {
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    server: string | null = null,
+    what: string | null = null,
+    field: string | null = null,
+  ) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
     this.server = server
+    this.what = what
+    this.field = field
   }
 
   is(...codes: KnownErrorCode[]): boolean {
@@ -99,7 +112,15 @@ async function toApiError(response: Response): Promise<ApiError> {
     parsed = undefined
   }
   if (isErrorBody(parsed)) {
-    return new ApiError(response.status, parsed.error.code, parsed.error.message, parsed.error.message)
+    const { code, message, what, field } = parsed.error
+    return new ApiError(
+      response.status,
+      code,
+      message,
+      message,
+      typeof what === 'string' ? what : null,
+      typeof field === 'string' ? field : null,
+    )
   }
   // 不是 controller 写的应答（例如开发时代理报的 502）：按状态码说一句。
   return new ApiError(response.status, `http_${response.status}`, t.errors.http(response.status))
@@ -157,6 +178,18 @@ function codeText(code: string): string | undefined {
 }
 
 /**
+ * 码加上 `what` 才说得清的几种（文档 §18.1 分组的错误）。`what` 是 `group`、`builtin` 时只会是分组的事，
+ * 所以不必知道是哪个请求。分组名字的写法不对（`what` 是 `empty`、`too_long`、`malformed`）不在这里：
+ * 别的名字也用这几个 `what`，由分组的表单自己写（`groupNameFailure`）。
+ */
+function specificText(error: ApiError): string | undefined {
+  if (error.code === 'not_found' && error.what === 'group') return t.errors.group.notFound
+  if (error.code === 'name_taken' && error.what === 'group') return t.errors.group.nameTaken
+  if (error.code === 'invalid_request' && error.what === 'builtin') return t.errors.group.builtin
+  return undefined
+}
+
+/**
  * 把任何抛出来的东西写成一句可以显示的话，用当前的语言。管理 API 的错误按错误码写界面自己的话，
  * 不用 controller 的原话（它是中文的，见 {@link errorDetail}）。
  */
@@ -164,7 +197,7 @@ export function errorMessage(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.code === 'network') return t.errors.network
     if (error.code === 'bad_response') return t.errors.badResponse
-    return codeText(error.code) ?? t.errors.http(error.status)
+    return specificText(error) ?? codeText(error.code) ?? t.errors.http(error.status)
   }
   if (error instanceof Error && error.message !== '') return error.message
   return t.errors.unknown
@@ -176,6 +209,7 @@ export function errorMessage(error: unknown): string {
  */
 export function errorDetail(error: unknown): string | null {
   if (!(error instanceof ApiError) || error.server === null) return null
+  if (specificText(error) !== undefined) return null
   const known = codeText(error.code) !== undefined
   if (known && !VAGUE_CODES.includes(error.code)) return null
   return error.server === errorMessage(error) ? null : error.server

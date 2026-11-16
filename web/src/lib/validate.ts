@@ -18,11 +18,8 @@ import {
  */
 
 export const MAX_NAME_LEN = 63
-export const MAX_TAG_LEN = 32
+export const MAX_GROUP_NAME_LEN = 32
 export const MAX_TITLE_LEN = 64
-
-/** 内置标签：每个节点都有，不能打在节点上，规则里可以用。 */
-export const ALL_TAG = 'all'
 
 /** 网络和节点的名字。 */
 export function validateName(raw: string): string | null {
@@ -35,16 +32,17 @@ export function validateName(raw: string): string | null {
   return null
 }
 
-/** 标签的规范写法：去掉首尾空白，转成小写。 */
-export function normalizeTag(raw: string): string {
-  return raw.trim().toLowerCase()
-}
-
-export function validateTag(raw: string): string | null {
-  const tag = normalizeTag(raw)
-  if (tag === '') return t.validate.tagRequired
-  if (tag.length > MAX_TAG_LEN) return t.validate.tagTooLong(MAX_TAG_LEN)
-  if (!/^[a-z0-9_-]+$/.test(tag)) return t.validate.tagCharset
+/**
+ * 分组的名字（文档 §18）：去掉首尾空白之后 1 到 32 个字符，字母（任何文字的）、数字、连字符、下划线。
+ * 和 controller 一样按 Unicode 数字符（码点，不是 UTF-16 的单元），字母和数字按 Unicode 的属性认
+ * （Rust 的 `char::is_alphanumeric`：Alphabetic 或者 Numeric），所以要用 `\p{Alphabetic}` 而不是 `\p{L}`。
+ * 大小写保留；不分大小写的重名（包括内置的 `All`）由 controller 判断，它知道网络里现在有哪些分组。
+ */
+export function validateGroupName(raw: string): string | null {
+  const name = raw.trim()
+  if (name === '') return t.validate.groupRequired
+  if (Array.from(name).length > MAX_GROUP_NAME_LEN) return t.validate.groupTooLong(MAX_GROUP_NAME_LEN)
+  if (!/^[\p{Alphabetic}\p{N}_-]+$/u.test(name)) return t.validate.groupCharset
   return null
 }
 

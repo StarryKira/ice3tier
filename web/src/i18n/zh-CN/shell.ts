@@ -20,6 +20,7 @@ export const nav = {
   overview: '总览',
   nodes: '节点',
   access: '访问控制',
+  groups: '分组',
   groupAccess: '接入',
   exits: '出口',
   listeners: '监听器',

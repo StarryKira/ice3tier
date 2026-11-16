@@ -3,8 +3,8 @@ import type { Messages } from '../messages'
 export const addNode: Messages['addNode'] = {
   title: 'Add node',
   optionsTitle: 'Options',
-  tagsLabel: 'Tags',
-  tagsHint: 'Applied when the node joins',
+  groupsLabel: 'Groups',
+  groupsHint: 'Applied when the node joins',
   declareLabel: 'Declare',
   declareRelay: 'Can relay',
   declareRelayHint: 'Needs a publicly reachable port',
@@ -20,11 +20,11 @@ export const addNode: Messages['addNode'] = {
   ipHint: 'Assigned automatically if empty',
   successorLabel: 'Replace offline node',
   successorClear: 'Clear',
-  successorHint: "For reinstalls: takes over the old node's IP, name, tags and settings; the old node is deleted",
+  successorHint: "For reinstalls: takes over the old node's IP, name, groups and settings; the old node is deleted",
   successorPlaceholder: 'Select an offline node',
   successorEmpty: 'No offline nodes',
   successorNoIp: "Keeps the replaced node's virtual IP",
-  lockedNote: 'Token created: tags, expiry, virtual IP and replacement are fixed',
+  lockedNote: 'Token created: groups, expiry, virtual IP and replacement are fixed',
 
   platformLabel: 'Platform',
   platform: {

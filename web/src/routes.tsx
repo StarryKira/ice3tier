@@ -13,6 +13,7 @@ import { Card } from '@/components/ui/card'
 import { CredentialsPage } from '@/pages/credentials/CredentialsPage'
 import { ExitsPage } from '@/pages/exits/ExitsPage'
 import { ForwardsPage } from '@/pages/forwards/ForwardsPage'
+import { GroupsPage } from '@/pages/groups/GroupsPage'
 import { ListenersPage } from '@/pages/listeners/ListenersPage'
 import { networkPath } from '@/pages/networks/context'
 import { pickCurrentNetwork } from '@/pages/networks/current'
@@ -78,6 +79,7 @@ export function AppRoutes() {
             <Route path="nodes" element={<NodesPage />} />
             <Route path="nodes/:node" element={<NodeDetailPage />} />
             <Route path="access" element={<Lazy page={AccessPage} />} />
+            <Route path="groups" element={<GroupsPage />} />
             <Route path="exits" element={<ExitsPage />} />
             <Route path="listeners" element={<ListenersPage />} />
             <Route path="credentials" element={<CredentialsPage />} />

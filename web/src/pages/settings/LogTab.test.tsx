@@ -113,9 +113,9 @@ describe('操作记录', () => {
   it('地址里带来的条件直接生效；什么都筛不出来时可以一键清除', async () => {
     const user = userEvent.setup()
     const api = setup()
-    renderWithApp(<LogTab />, { route: '/settings/log?action=tag&q=x' })
+    renderWithApp(<LogTab />, { route: '/settings/log?action=group&q=x' })
     expect(await screen.findByText(s.noMatches)).toBeVisible()
-    expect(api.callsTo('GET /log')[0]?.query.get('action')).toBe('tag')
+    expect(api.callsTo('GET /log')[0]?.query.get('action')).toBe('group')
     expect(screen.getByRole('searchbox', { name: s.searchPlaceholder })).toHaveValue('x')
     const [clear] = screen.getAllByRole('button', { name: t.common.clearFilters })
     if (clear === undefined) throw new Error('没有"清除筛选"')
@@ -164,4 +164,34 @@ describe('操作记录', () => {
     expect(within(row).getByTestId('log-action')).toHaveTextContent('gadget.spin')
     expect(within(row).queryByTestId('log-detail')).not.toBeInTheDocument()
   })
+
+  const GROUP_ENTRY: LogEntry = {
+    id: 7,
+    at: 1_794_000_000,
+    network: 1,
+    action: 'group.members',
+    detail: '分组 #3 servers：加入 laptop',
+    refs: [
+      { kind: 'group', id: 3 },
+      { kind: 'node', id: 2 },
+    ],
+  }
+
+  for (const locale of ['zh-CN', 'en'] as const) {
+    it(`分组的操作按代码写（${locale}）；分组做成链接，去分组页上的那一行`, async () => {
+      setLocale(locale, { remember: false })
+      fakeApi({
+        'GET /log': [GROUP_ENTRY],
+        'GET /networks': [NETWORK],
+        'GET /networks/1/nodes': [makeNode(2, 'laptop')],
+      })
+      renderWithApp(<LogTab />, { route: '/settings/log' })
+      const row = await screen.findByTestId('log-row-7')
+      expect(within(row).getByTestId('log-action')).toHaveTextContent(t.settings.log.actions['group.members'])
+      expect(within(row).getByRole('link', { name: t.settings.log.refLabels.group(3) })).toHaveAttribute(
+        'href',
+        '/n/1/groups?focus=3',
+      )
+    })
+  }
 })

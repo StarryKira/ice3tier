@@ -2,8 +2,8 @@ import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 
-import { type AccessGraph, type CreatedEnrollToken, type EnrollTokenInfo, type Node } from '@/api/types'
-import { t } from '@/i18n'
+import { type CreatedEnrollToken, type EnrollTokenInfo, type Group, type Node } from '@/api/types'
+import { setLocale, t } from '@/i18n'
 import { makeNode, makeToken } from '@/test/fixtures'
 import { apiFailure, fakeApi, type FakeApi, NETWORK, renderWithApp, type Routes } from '@/test/harness'
 
@@ -16,15 +16,11 @@ vi.mock('@/lib/polling', () => ({ LIVE_INTERVAL: 10_000, WAITING_INTERVAL: 40, G
 const TOKEN = 'i3t-AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE_first'
 const SECOND_TOKEN = 'i3t-AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI_second'
 
-const GRAPH: AccessGraph = {
-  tags: [
-    { tag: 'all', nodes: [] },
-    { tag: 'servers', nodes: [] },
-  ],
-  rules: [],
-  unconnected: [],
-  unacknowledged: [],
-}
+const GROUPS: Group[] = [
+  { id: 1, name: 'All', builtin: true, nodes: [], rules: [] },
+  { id: 3, name: 'home_lab', builtin: false, nodes: [], rules: [] },
+  { id: 2, name: 'Servers', builtin: false, nodes: [], rules: [] },
+]
 
 function tokenInfo(id: number): EnrollTokenInfo {
   const now = Math.floor(Date.now() / 1000)
@@ -51,7 +47,7 @@ function emptyNetwork(extra: Routes = {}): FakeApi {
   const api = fakeApi({
     'GET /networks/1/nodes': [],
     'GET /networks/1/tokens': [],
-    'GET /networks/1/access/graph': GRAPH,
+    'GET /networks/1/groups': GROUPS,
     'POST /networks/1/tokens': () => {
       api.use({ 'GET /networks/1/tokens': [tokenInfo(7)] })
       return created(7, TOKEN)
@@ -127,7 +123,7 @@ describe('添加节点', () => {
     expect(screen.getByText(t.addNode.shownOnce)).toBeVisible()
     expect(screen.getByText(t.addNode.waiting)).toBeVisible()
     // 声明是命令的参数，不写在令牌上。
-    expect(api.callsTo('POST /networks/1/tokens')[0]?.body).toEqual({ expires_in_secs: 86_400, tags: [] })
+    expect(api.callsTo('POST /networks/1/tokens')[0]?.body).toEqual({ expires_in_secs: 86_400, groups: [] })
 
     await user.click(screen.getByRole('button', { name: t.addNode.copyCommand }))
     expect(await navigator.clipboard.readText()).toBe(`echo ${TOKEN} | i3t join --can-relay`)
@@ -135,16 +131,25 @@ describe('添加节点', () => {
     expect(await navigator.clipboard.readText()).toBe(TOKEN)
   })
 
-  it('标签写在令牌上：生成时一起交给 controller，转成小写', async () => {
-    const user = userEvent.setup()
-    const api = emptyNetwork()
-    renderWithApp(<AddNodeFlow network={NETWORK} />)
-    const tags = screen.getByRole('combobox', { name: containing(t.addNode.tagsLabel) })
-    await user.type(tags, 'Servers{Enter}')
-    await user.type(tags, 'home_lab{Enter}')
-    await generate(user)
-    expect(api.callsTo('POST /networks/1/tokens')[0]?.body).toMatchObject({ tags: ['home_lab', 'servers'] })
-  })
+  for (const locale of ['zh-CN', 'en'] as const) {
+    it(`分组写在令牌上：只从已有的分组里选，生成时按编号交给 controller（${locale}）`, async () => {
+      setLocale(locale, { remember: false })
+      const user = userEvent.setup()
+      const api = emptyNetwork()
+      renderWithApp(<AddNodeFlow network={NETWORK} />)
+      const groups = screen.getByRole('combobox', { name: containing(t.addNode.groupsLabel) })
+      // 输入只是筛选：没有同名的分组时什么也不会新建。
+      await user.type(groups, 'nope')
+      expect(await screen.findByText(t.groups.picker.noneFound)).toBeVisible()
+      await user.type(groups, '{Enter}')
+      await user.clear(groups)
+      await user.type(groups, 'serv{Enter}')
+      await user.type(groups, 'home{Enter}')
+      expect(screen.getByRole('link', { name: t.groups.picker.manage })).toHaveAttribute('href', '/n/1/groups')
+      await generate(user)
+      expect(api.callsTo('POST /networks/1/tokens')[0]?.body).toMatchObject({ groups: [3, 2] })
+    })
+  }
 
   it('生成之后还能改"可以承担"：命令变，令牌不变，不再发请求', async () => {
     const user = userEvent.setup()
@@ -162,7 +167,7 @@ describe('添加节点', () => {
     renderWithApp(<AddNodeFlow network={NETWORK} />)
     expect(screen.queryByText(t.addNode.lockedNote)).not.toBeInTheDocument()
     await generate(user)
-    expect(screen.getByRole('combobox', { name: containing(t.addNode.tagsLabel) })).toBeDisabled()
+    expect(screen.getByRole('combobox', { name: containing(t.addNode.groupsLabel) })).toBeDisabled()
     expect(screen.getByLabelText(t.addNode.ttlLabel)).toBeDisabled()
     expect(screen.getByLabelText(containing(t.addNode.ipLabel))).toBeDisabled()
     expect(screen.getByText(t.addNode.lockedNote)).toBeVisible()

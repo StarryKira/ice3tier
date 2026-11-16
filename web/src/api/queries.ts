@@ -5,7 +5,7 @@ import { LIVE_INTERVAL } from '@/lib/polling'
 
 import { ApiError, errorDetail, errorMessage } from './client'
 import { api } from './endpoints'
-import { type LogEntry, type LogQuery, type NetworkId, type NodeId } from './types'
+import { type GroupId, type LogEntry, type LogQuery, type NetworkId, type NodeId } from './types'
 
 /**
  * 服务器上的状态都经过 TanStack Query。这里是全部的查询键和查询的写法；页面里只写 `useQuery(q.nodes(network))`。
@@ -27,6 +27,8 @@ export const keys = {
   nodeAccess: (network: NetworkId, node: NodeId) => ['n', network, 'node', node, 'access'] as const,
   nodeListeners: (network: NetworkId, node: NodeId) => ['n', network, 'node', node, 'listeners'] as const,
   tokens: (network: NetworkId, all = false) => ['n', network, 'tokens', all ? 'all' : 'pending'] as const,
+  groups: (network: NetworkId) => ['n', network, 'groups'] as const,
+  group: (network: NetworkId, group: GroupId) => ['n', network, 'group', group] as const,
   rules: (network: NetworkId) => ['n', network, 'rules'] as const,
   graph: (network: NetworkId) => ['n', network, 'graph'] as const,
   check: (network: NetworkId, from: NodeId, to: NodeId) => ['n', network, 'check', from, to] as const,
@@ -97,6 +99,16 @@ export const q = {
       queryFn: () => api.tokens(network, all),
       refetchInterval: LIVE_INTERVAL,
     }),
+  /** 成员数随别处的改动（节点加入、删掉）变化，跟着轮询。 */
+  groups: (network: NetworkId) =>
+    queryOptions({
+      queryKey: keys.groups(network),
+      queryFn: () => api.groups(network),
+      refetchInterval: LIVE_INTERVAL,
+    }),
+  /** 一个分组的成员和用到它的规则：删除之前现取一次，说出会影响什么。 */
+  group: (network: NetworkId, group: GroupId) =>
+    queryOptions({ queryKey: keys.group(network, group), queryFn: () => api.group(network, group), staleTime: 0 }),
   rules: (network: NetworkId) => queryOptions({ queryKey: keys.rules(network), queryFn: () => api.rules(network) }),
   graph: (network: NetworkId) =>
     queryOptions({

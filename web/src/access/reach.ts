@@ -1,49 +1,56 @@
-import { type Rule, type TagMembers } from '@/api/types'
+import { type Group, type GroupId, type GroupRef, type Rule } from '@/api/types'
+import { isAllGroup } from '@/lib/groups'
 
 /**
- * 按标签和规则算"谁能访问谁"，用来在保存之前说出一次改动的影响（"有 4 对节点将失去访问"）。
+ * 按分组和规则算"谁能访问谁"，用来在保存之前说出一次改动的影响（"有 4 对节点将失去访问"）。
  *
- * 算法和 controller 的一样：节点 x 能访问节点 y，当且仅当有一条启用的规则，x 带着它的 src、y 带着它的 dst；
- * 双向的规则反过来也算。每个节点都带着内置标签 all。
+ * 算法和 controller 的一样：节点 x 能访问节点 y，当且仅当有一条启用的规则，x 在它的 src 里、y 在它的 dst 里；
+ * 双向的规则反过来也算。每个节点都在内置分组 All 里。
  *
- * 不逐对节点去算：标签集合相同的节点对任何规则都是同一种结果，所以先把节点按标签集合归成组，
- * 再按"组对组"算，对数是两组大小的乘积。组数只跟标签的组合数有关，千级节点也是一瞬间。
+ * 不逐对节点去算：所在分组相同的节点对任何规则都是同一种结果，所以先把节点按"在哪些分组里"归成组，
+ * 再按"组对组"算，对数是两组大小的乘积。组数只跟分组的组合数有关，千级节点也是一瞬间。
  */
 
-export type RuleLike = Pick<Rule, 'src' | 'dst' | 'direction' | 'enabled'>
+/** 规则里算影响要用到的：两头只看编号。 */
+export interface RuleLike {
+  src: Pick<GroupRef, 'id'>
+  dst: Pick<GroupRef, 'id'>
+  direction: Rule['direction']
+  enabled: boolean
+}
 
-interface Group {
-  tags: ReadonlySet<string>
+interface Cohort {
+  groups: ReadonlySet<GroupId>
   size: number
 }
 
-/** 把节点按"带着哪些标签"归组。`tags` 是关系图接口给的每个标签的成员，其中总有 all。 */
-function groupNodes(tags: readonly TagMembers[]): Group[] {
-  const byNode = new Map<number, string[]>()
-  for (const entry of tags) {
-    for (const node of entry.nodes) {
+/** 把节点按"在哪些分组里"归组。`groups` 是关系图接口给的每个分组的成员，其中 All 包含全部节点。 */
+function cohorts(groups: readonly Pick<Group, 'id' | 'nodes'>[]): Cohort[] {
+  const byNode = new Map<number, GroupId[]>()
+  for (const group of groups) {
+    for (const node of group.nodes) {
       const list = byNode.get(node.id)
-      if (list === undefined) byNode.set(node.id, [entry.tag])
-      else list.push(entry.tag)
+      if (list === undefined) byNode.set(node.id, [group.id])
+      else list.push(group.id)
     }
   }
-  const bySignature = new Map<string, Group>()
+  const bySignature = new Map<string, Cohort>()
   for (const list of byNode.values()) {
-    const signature = [...list].sort().join('\u0000')
-    const group = bySignature.get(signature)
-    if (group === undefined) bySignature.set(signature, { tags: new Set(list), size: 1 })
-    else group.size += 1
+    const signature = [...list].sort((a, b) => a - b).join(',')
+    const cohort = bySignature.get(signature)
+    if (cohort === undefined) bySignature.set(signature, { groups: new Set(list), size: 1 })
+    else cohort.size += 1
   }
   return [...bySignature.values()]
 }
 
 /** `from` 组的节点能不能访问 `to` 组的节点。 */
-function allows(rules: readonly RuleLike[], from: Group, to: Group): boolean {
+function allows(rules: readonly RuleLike[], from: Cohort, to: Cohort): boolean {
   return rules.some(
     (rule) =>
       rule.enabled &&
-      ((from.tags.has(rule.src) && to.tags.has(rule.dst)) ||
-        (rule.direction === 'both' && from.tags.has(rule.dst) && to.tags.has(rule.src))),
+      ((from.groups.has(rule.src.id) && to.groups.has(rule.dst.id)) ||
+        (rule.direction === 'both' && from.groups.has(rule.dst.id) && to.groups.has(rule.src.id))),
   )
 }
 
@@ -59,16 +66,16 @@ export interface AccessDiff {
 
 /** 规则从 `before` 变成 `after`，访问关系有什么变化。一对节点不分先后，只数一次。 */
 export function accessDiff(
-  tags: readonly TagMembers[],
+  groups: readonly Pick<Group, 'id' | 'nodes'>[],
   before: readonly RuleLike[],
   after: readonly RuleLike[],
 ): AccessDiff {
-  const groups = groupNodes(tags)
+  const list = cohorts(groups)
   const diff: AccessDiff = { gained: 0, lost: 0, connectedAfter: 0, connectedBefore: 0 }
-  for (let i = 0; i < groups.length; i += 1) {
-    for (let j = i; j < groups.length; j += 1) {
-      const a = groups[i]
-      const b = groups[j]
+  for (let i = 0; i < list.length; i += 1) {
+    for (let j = i; j < list.length; j += 1) {
+      const a = list[i]
+      const b = list[j]
       if (a === undefined || b === undefined) continue
       const pairs = i === j ? (a.size * (a.size - 1)) / 2 : a.size * b.size
       if (pairs === 0) continue
@@ -83,17 +90,16 @@ export function accessDiff(
   return diff
 }
 
+type Ends = Pick<RuleLike, 'src' | 'dst' | 'direction'>
+
 /** 两条规则说的是不是同一件事。双向规则两边对调之后还是同一条。 */
-export function sameRule(
-  a: Pick<Rule, 'src' | 'dst' | 'direction'>,
-  b: Pick<Rule, 'src' | 'dst' | 'direction'>,
-): boolean {
+export function sameRule(a: Ends, b: Ends): boolean {
   if (a.direction !== b.direction) return false
-  if (a.src === b.src && a.dst === b.dst) return true
-  return a.direction === 'both' && a.src === b.dst && a.dst === b.src
+  if (a.src.id === b.src.id && a.dst.id === b.dst.id) return true
+  return a.direction === 'both' && a.src.id === b.dst.id && a.dst.id === b.src.id
 }
 
-/** 一条规则是不是默认的那条 all ⇄ all（方向不论：两边都是 all 时单向和双向等价）。 */
+/** 一条规则是不是默认的那条 All ⇄ All（方向不论：两边都是 All 时单向和双向等价）。 */
 export function isAllToAll(rule: Pick<Rule, 'src' | 'dst'>): boolean {
-  return rule.src === 'all' && rule.dst === 'all'
+  return isAllGroup(rule.src) && isAllGroup(rule.dst)
 }

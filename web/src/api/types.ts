@@ -10,6 +10,8 @@ export type Timestamp = number
 
 export type NetworkId = number
 export type NodeId = number
+/** 分组的编号在整个 controller 里唯一，删掉之后不复用。 */
+export type GroupId = number
 
 /** 43 个字符的 base64url。 */
 export type PublicKey = string
@@ -55,13 +57,26 @@ export type KnownErrorCode =
   | 'internal'
 
 export interface ErrorBody {
-  error: { code: string; message: string }
+  error: {
+    code: string
+    message: string
+    /** 比 `code` 更具体的一层（文档 §2）：找不到的东西、哪里不对。说不出来、或者 controller 比这个字段旧时是 `null` 或没有。 */
+    what?: string | null
+    /** 请求里出问题的那一项；分组编号的列表里是 `groups[序号]`。 */
+    field?: string | null
+  }
 }
 
 export interface NodeRef {
   id: NodeId
   name: string
   virtual_ip: string
+}
+
+/** 指代一个分组：编号和它现在的名字。节点、注册令牌的 `groups`，规则的 `src`、`dst` 用它。 */
+export interface GroupRef {
+  id: GroupId
+  name: string
 }
 
 export interface Status {
@@ -78,7 +93,7 @@ export interface Status {
 }
 
 /** 操作记录能指向的东西。以后可能增加，不认识的种类界面忽略。 */
-export type LogRefKind = 'network' | 'node' | 'token' | 'rule' | 'credential' | 'listener' | 'forward'
+export type LogRefKind = 'network' | 'node' | 'group' | 'token' | 'rule' | 'credential' | 'listener' | 'forward'
 
 export interface LogRef {
   /** 一般是 {@link LogRefKind} 之一；比这个界面新的 controller 可能写别的。 */
@@ -237,7 +252,8 @@ export interface Node {
   name: string
   fqdn: string
   virtual_ip: string
-  tags: string[]
+  /** 它所在的分组，按名字排。内置的 `All` 不列出：每个节点都在里面。 */
+  groups: GroupRef[]
   declared: Declared
   relay: RelaySettings | null
   exit: ExitSettings | null
@@ -288,7 +304,8 @@ export interface NodeDetail extends Node {
 
 export interface UpdateNode {
   name?: string
-  tags?: string[]
+  /** 整个替换节点所在的分组：已有分组的编号。`[]` 表示只在 `All` 里。 */
+  groups?: GroupId[]
   virtual_ip?: string
   dial_out_only?: boolean
   /** 写 `null` 表示改回用网络的默认值。 */
@@ -360,7 +377,8 @@ export interface EnrollTokenInfo {
   network: NetworkId
   created_at: Timestamp
   expires_at: Timestamp
-  tags: string[]
+  /** 用它加入的节点自动加入的分组，按名字排，不含 `All`。分组被删掉时也从令牌上去掉。 */
+  groups: GroupRef[]
   virtual_ip: string | null
   successor_of: NodeId | null
   /** 令牌文本的开头 18 个字符，不是秘密，用来认出是哪一个。这个字段出现之前生成的令牌是 `""`。 */
@@ -373,7 +391,8 @@ export interface EnrollTokenInfo {
 
 export interface CreateEnrollToken {
   expires_in_secs?: number
-  tags?: string[]
+  /** 已有分组的编号。 */
+  groups?: GroupId[]
   virtual_ip?: string
   successor_of?: NodeId
 }
@@ -383,32 +402,30 @@ export interface CreatedEnrollToken extends EnrollTokenInfo {
   token: string
 }
 
+/** 分组 `src` 里的节点可以访问分组 `dst` 里的节点。规则记的是编号，分组改名之后照常生效。 */
 export interface Rule {
   id: number
   name: string
-  src: string
-  dst: string
+  src: GroupRef
+  dst: GroupRef
   direction: Direction
   enabled: boolean
 }
 
 export interface CreateRule {
   name?: string
-  src: string
-  dst: string
+  /** 两个已有分组的编号；可以是 `All`，可以是同一个。 */
+  src: GroupId
+  dst: GroupId
   direction?: Direction
   enabled?: boolean
 }
 
-export type UpdateRule = Partial<Omit<Rule, 'id'>>
-
-export interface TagMembers {
-  tag: string
-  nodes: NodeRef[]
-}
+export type UpdateRule = Partial<CreateRule>
 
 export interface AccessGraph {
-  tags: TagMembers[]
+  /** 全部分组，和 `GET …/groups` 一样：`All` 在最前面，其余按名字排。 */
+  groups: Group[]
   rules: Rule[]
   unconnected: NodeRef[]
   unacknowledged: NodeRef[]
@@ -1012,18 +1029,43 @@ export interface ExitView {
   observed: ExitObserved[]
 }
 
-/* 标签（文档 §18）。 */
+/* 分组（文档 §18）。 */
 
-export interface RenameTag {
-  from: string
-  to: string
+/** 列表、单个分组、新建、改名和每次增减成员的应答都是它；访问关系图的 `groups` 也是。 */
+export interface Group {
+  id: GroupId
+  /** 写的时候的大小写。在一个网络里不分大小写唯一。 */
+  name: string
+  /** 内置的 `All`：每个节点都在里面，不能改名、删除，也不能增减成员。 */
+  builtin: boolean
+  /** 成员，按编号排。`All` 的成员是网络里的全部节点。 */
+  nodes: NodeRef[]
+  /** `src` 或 `dst` 是它的规则（包括停用的），按编号排。删除这个分组时它们被一起删掉。 */
+  rules: Rule[]
 }
 
-/** 各改了几处。 */
-export interface RenamedTag {
-  from: string
-  to: string
-  nodes: number
-  rules: number
-  tokens: number
+export interface CreateGroup {
+  name: string
+}
+
+export interface UpdateGroup {
+  name?: string
+}
+
+/** 批量增减成员。已经在里面的再加入、本来就不在的移出都什么也不做；要么全部做到，要么一个都不改。 */
+export interface GroupMembers {
+  add?: NodeId[]
+  remove?: NodeId[]
+}
+
+/** 删掉一个分组的应答：删掉了什么。 */
+export interface DeletedGroup {
+  id: GroupId
+  name: string
+  /** 原来的成员。 */
+  nodes: NodeRef[]
+  /** 一起删掉的规则，删之前的样子。 */
+  rules: Rule[]
+  /** 预设了它、现在不再预设的注册令牌的编号。 */
+  tokens: number[]
 }

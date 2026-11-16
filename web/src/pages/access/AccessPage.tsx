@@ -5,7 +5,7 @@ import { useSearchParams } from 'react-router'
 
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
-import { type AccessGraph, type Network, type NodeId, type Rule } from '@/api/types'
+import { type AccessGraph, type GroupId, type Network, type NodeId, type Rule } from '@/api/types'
 import { InfoTip } from '@/components/info-tip'
 import { NodeLink, NodeSelect } from '@/components/node'
 import { Notice } from '@/components/notice'
@@ -16,23 +16,24 @@ import { Card, CardHeader } from '@/components/ui/card'
 import { Segmented } from '@/components/ui/segmented'
 import { t } from '@/i18n'
 import { formatList } from '@/lib/format'
+import { allGroupId } from '@/lib/groups'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { cn } from '@/lib/utils'
 import { useNetwork } from '@/pages/networks/context'
 
 import { AccessCheck } from './AccessCheck'
+import { GroupGraphView } from './GroupGraphView'
+import { GroupPanel } from './GroupPanel'
 import { NodeGraphView } from './NodeGraphView'
 import { RuleDialog, type RuleDraft } from './RuleDialog'
 import { RuleList } from './RuleList'
-import { TagGraphView } from './TagGraphView'
-import { TagPanel } from './TagPanel'
 
 const g = t.access.graph
 
-type View = 'tags' | 'node'
+type View = 'groups' | 'node'
 type Editor = { rule: Rule | null; draft?: RuleDraft } | null
 
-function numberParam(params: URLSearchParams, key: string): NodeId | null {
+function numberParam(params: URLSearchParams, key: string): number | null {
   const raw = params.get(key)
   if (raw === null) return null
   const value = Number(raw)
@@ -140,7 +141,7 @@ export function AccessPage() {
   const nodes = useQuery(q.nodes(network.id))
   const [params, setParams] = useSearchParams()
 
-  const view: View = params.get('view') === 'node' ? 'node' : 'tags'
+  const view: View = params.get('view') === 'node' ? 'node' : 'groups'
   const focus = numberParam(params, 'node')
   const checking = params.get('check') === '1'
   const checkFrom = numberParam(params, 'from')
@@ -149,9 +150,9 @@ export function AccessPage() {
   const [panel, setPanel] = useState<'rules' | 'graph'>('rules')
   const [editor, setEditor] = useState<Editor>(null)
   const [hovered, setHovered] = useState<number | null>(null)
-  // 从操作记录点过来的（`?rule=<编号>`）那条规则一开始就选中；`?tag=` 展开那个标签。
+  // 从操作记录点过来的（`?rule=<编号>`）那条规则一开始就选中；`?group=<编号>` 亮出那个分组。
   const [selected, setSelected] = useState<number | null>(() => numberParam(params, 'rule'))
-  const [openTag, setOpenTag] = useState<string | null>(() => params.get('tag'))
+  const [activeGroup, setActiveGroup] = useState<GroupId | null>(() => numberParam(params, 'group'))
 
   const update = (changes: Record<string, string | null>) => {
     const next = new URLSearchParams(params)
@@ -163,12 +164,13 @@ export function AccessPage() {
   }
 
   const restore = useAction(network.id, {
-    mutationFn: () =>
-      api.createRule(network.id, { name: 'default', src: 'all', dst: 'all', direction: 'both', enabled: true }),
+    mutationFn: (all: GroupId) =>
+      api.createRule(network.id, { name: 'default', src: all, dst: all, direction: 'both', enabled: true }),
     success: t.access.restored,
   })
 
   const data = graph.data
+  const all = allGroupId(data?.groups)
   const enabledCount = data?.rules.filter((rule) => rule.enabled).length ?? 0
 
   return (
@@ -194,6 +196,7 @@ export function AccessPage() {
         <AccessCheck
           network={network}
           nodes={nodes.data ?? []}
+          all={all}
           from={checkFrom}
           to={checkTo}
           onChange={(from, to) =>
@@ -234,7 +237,11 @@ export function AccessPage() {
                     title={t.access.emptyTitle}
                     action={
                       <>
-                        <Button pending={restore.isPending} onClick={() => restore.mutate()}>
+                        <Button
+                          pending={restore.isPending}
+                          disabled={all === undefined}
+                          onClick={() => all !== undefined && restore.mutate(all)}
+                        >
                           {t.access.restoreDefault}
                         </Button>
                         <Button variant="primary" onClick={() => setEditor({ rule: null })}>
@@ -257,8 +264,8 @@ export function AccessPage() {
               </Card>
 
               <Card>
-                <CardHeader title={t.access.tagsPanel.title} tip={t.access.tagsPanel.hint} />
-                <TagPanel network={network} graph={data} open={openTag} onOpenChange={setOpenTag} />
+                <CardHeader title={t.access.groupsPanel.title} />
+                <GroupPanel network={network} graph={data} active={activeGroup} />
               </Card>
             </div>
 
@@ -270,9 +277,9 @@ export function AccessPage() {
                     aria-label={g.viewLabel}
                     size="sm"
                     value={view}
-                    onChange={(next) => update({ view: next === 'tags' ? null : next })}
+                    onChange={(next) => update({ view: next === 'groups' ? null : next })}
                     options={[
-                      { value: 'tags', label: g.byTag },
+                      { value: 'groups', label: g.byGroup },
                       { value: 'node', label: g.byNode },
                     ]}
                   />
@@ -284,28 +291,28 @@ export function AccessPage() {
                 </Notice>
               ) : null}
 
-              {view === 'tags' ? (
+              {view === 'groups' ? (
                 <>
-                  <Canvas data-testid="tag-graph">
-                    <TagGraphView
+                  <Canvas data-testid="group-graph">
+                    <GroupGraphView
                       graph={data}
                       highlightedRule={hovered ?? selected}
-                      activeTag={openTag}
+                      activeGroup={activeGroup}
                       onRuleClick={setSelected}
                       onRuleOpen={(id) => {
                         const rule = data.rules.find((candidate) => candidate.id === id)
                         if (rule !== undefined) setEditor({ rule })
                       }}
                       onRuleHover={setHovered}
-                      onTagClick={(tag) => {
-                        setOpenTag(tag)
+                      onGroupClick={(group) => {
+                        setActiveGroup(group)
                         setPanel('rules')
                       }}
                     />
                   </Canvas>
                   <div className="flex items-center gap-2 pt-3">
                     <Legend />
-                    <InfoTip>{g.tagHint}</InfoTip>
+                    <InfoTip>{g.edgeHint}</InfoTip>
                   </div>
                 </>
               ) : (

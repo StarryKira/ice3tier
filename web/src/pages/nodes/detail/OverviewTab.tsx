@@ -28,6 +28,7 @@ import { Combobox } from '@/components/combobox'
 import { CopyText } from '@/components/copy'
 import { DateTimeValue, DetailList, DetailRow } from '@/components/detail-list'
 import { Flag } from '@/components/flag'
+import { GroupsLink } from '@/components/groups'
 import { IceStack } from '@/components/layout/BrandMark'
 import { NodeLink } from '@/components/node'
 import { nodeName } from '@/lib/nodes'
@@ -46,7 +47,7 @@ import { platformLabel } from '@/lib/platform'
 import { countryName } from '@/lib/region'
 import { MAX_PINNED_RELAYS } from '@/lib/product'
 
-import { NodeTagsEditor } from '../actions'
+import { NodeGroupsEditor } from '../actions'
 import { ExitRow, ForwardTargetRow, RelayRow } from './Capabilities'
 
 const d = t.nodes.detail
@@ -407,14 +408,14 @@ export function OverviewTab({ network, node, onEditIp, onWaiting }: OverviewTabP
   const onForward = useCallback((value: boolean) => report('forward', value), [report])
 
   return (
-    // 两栏一样宽，每块都是同一种卡片：左边是它是什么（信息、连接），右边是能改的（标签、能力、高级）。
+    // 两栏一样宽，每块都是同一种卡片：左边是它是什么（信息、连接），右边是能改的（分组、能力、高级）。
     <div className="grid grid-cols-1 items-start gap-5 @4xl:grid-cols-2">
       <InfoCard network={network} node={node} onEditIp={onEditIp} />
       <div className="space-y-5">
         <BoxCard>
-          <BoxCardHeader title={d.tags} />
+          <BoxCardHeader title={d.groups} action={<GroupsLink network={network.id} />} />
           <BoxCardBody className="py-4">
-            <NodeTagsEditor network={network} node={node} aria-label={d.tags} />
+            <NodeGroupsEditor network={network} node={node} aria-label={d.groups} />
           </BoxCardBody>
         </BoxCard>
 

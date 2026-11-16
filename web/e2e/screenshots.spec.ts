@@ -34,6 +34,8 @@ function counted(sentence: (n: number) => string): RegExp {
 
 /** 用界面或接口加进来的节点，按用途起了名字。 */
 const nodes: Record<string, NodeHandle> = {}
+/** 准备数据时建的分组的编号，按名字。 */
+const groups: Record<string, number> = {}
 /** 经出口下载的目标：这台机器局域网地址上的一个 HTTP 服务。没有私有地址的机器上不造用量。 */
 let target: HttpServer
 let busy: TcpServer
@@ -151,7 +153,7 @@ test('空的网络：每个页面没有数据时的样子', async () => {
   await page.getByRole('button', { name: t.addNode.done }).click()
 
   await goTo(page, t.nav.access)
-  await expect(page.getByTestId('tag-graph')).toBeVisible()
+  await expect(page.getByTestId('group-graph')).toBeVisible()
   await shot('access-default-rule-only')
 
   for (const [name, file, marker] of [
@@ -197,9 +199,16 @@ test('准备数据', async () => {
   const net = '/networks/1'
   // gw-hk 是第一个节点，已经声明了 relay；再补上出口和转发目标的声明。声明在节点重启后才上报，所以这里在它启动之前就改好了的不算，
   // 直接用加入时的参数准备其余几个。
-  nodes.nas = await controller.enroll({ tags: ['servers', 'home'], flags: ['--can-forward', '--can-exit'] })
-  nodes.laptop = await controller.enroll({ tags: ['laptops'] })
-  nodes.office = await controller.enroll({ tags: ['laptops'] })
+  for (const name of ['servers', 'home', 'laptops']) {
+    groups[name] = (await controller.api<{ id: number }>('POST', `${net}/groups`, { name })).id
+  }
+  const group = (name: string) => groups[name] ?? 0
+  nodes.nas = await controller.enroll({
+    groups: [group('servers'), group('home')],
+    flags: ['--can-forward', '--can-exit'],
+  })
+  nodes.laptop = await controller.enroll({ groups: [group('laptops')] })
+  nodes.office = await controller.enroll({ groups: [group('laptops')] })
   nodes.spare = await controller.enroll()
   // nas 以为自己在容器里：它不能自己更新，界面上要写出做法。
   await controller.run(nodes.nas, { env: { container: 'podman' } })
@@ -213,7 +222,7 @@ test('准备数据', async () => {
   await controller.api('PATCH', '/update', { source: release.root })
   await controller.api('POST', '/update/check')
 
-  await controller.api('PATCH', `${net}/nodes/1`, { name: 'gw-hk', tags: ['servers'] })
+  await controller.api('PATCH', `${net}/nodes/1`, { name: 'gw-hk', groups: [group('servers')] })
   await controller.api('PATCH', `${net}/nodes/2`, { name: 'nas-home' })
   await controller.api('PATCH', `${net}/nodes/3`, { name: 'laptop', pinned_relays: [] })
   await controller.api('PATCH', `${net}/nodes/4`, { name: 'office-pc', routing: 'lowest_cost' })
@@ -233,12 +242,22 @@ test('准备数据', async () => {
   })
   await controller.api('PATCH', `${net}/nodes/3`, { pinned_relays: [1] })
 
-  await controller.api('POST', `${net}/rules`, { name: 'ssh', src: 'laptops', dst: 'servers', direction: 'one_way' })
-  await controller.api('POST', `${net}/rules`, { name: '', src: 'servers', dst: 'servers', direction: 'both' })
+  await controller.api('POST', `${net}/rules`, {
+    name: 'ssh',
+    src: group('laptops'),
+    dst: group('servers'),
+    direction: 'one_way',
+  })
+  await controller.api('POST', `${net}/rules`, {
+    name: '',
+    src: group('servers'),
+    dst: group('servers'),
+    direction: 'both',
+  })
   await controller.api('POST', `${net}/rules`, {
     name: 'media',
-    src: 'laptops',
-    dst: 'home',
+    src: group('laptops'),
+    dst: group('home'),
     direction: 'both',
     enabled: false,
   })
@@ -344,7 +363,7 @@ test('准备数据', async () => {
   })
 
   await controller.api('PUT', `${net}/pairs/2/3`, { keep_alive: true })
-  await controller.api('POST', `${net}/tokens`, { tags: ['servers'], expires_in_secs: 3600 })
+  await controller.api('POST', `${net}/tokens`, { groups: [group('servers')], expires_in_secs: 3600 })
   await controller.api('POST', `${net}/tokens`, { virtual_ip: '10.66.0.50', expires_in_secs: 7 * 86400 })
   await controller.api('POST', '/networks', { name: 'lab' })
 
@@ -419,14 +438,14 @@ test('有数据时：总览、节点', async () => {
   await page.getByRole('checkbox', { name: t.nodes.selectOne('laptop') }).check()
   await page.getByRole('checkbox', { name: t.nodes.selectOne('office-pc') }).check()
   await shot('nodes-selection-bar', { fullPage: false })
-  await page.getByRole('button', { name: t.nodes.batchTag }).click()
-  await expect(page.getByRole('dialog', { name: t.nodes.batchTagTitle(2) })).toBeVisible()
-  await shot('nodes-batch-tag', { fullPage: false })
+  await page.getByRole('button', { name: t.nodes.batchAddGroup }).click()
+  await expect(page.getByRole('dialog', { name: t.nodes.batchAddTitle(2) })).toBeVisible()
+  await shot('nodes-batch-group', { fullPage: false })
   await page.getByRole('button', { name: t.common.cancel, exact: true }).click()
   await page.getByRole('button', { name: t.nodes.batchCancel }).click()
 
   await page.getByRole('button', { name: t.nodes.add }).click()
-  await page.getByRole('combobox', { name: t.addNode.tagsLabel }).fill('servers')
+  await page.getByRole('combobox', { name: t.addNode.groupsLabel }).fill('serv')
   await page.keyboard.press('Enter')
   await page.getByRole('checkbox', { name: new RegExp(literal(t.addNode.declareExit)) }).check()
   await page.getByRole('button', { name: t.addNode.generate }).click()
@@ -542,11 +561,11 @@ test('有数据时：拓扑和路径诊断', async () => {
 
 test('有数据时：访问控制', async () => {
   await goTo(page, t.nav.access)
-  await expect(page.getByTestId('tag-graph')).toBeVisible()
+  await expect(page.getByTestId('group-graph')).toBeVisible()
   await expect(page.getByTestId('rule-row-2')).toBeVisible()
   await shot('access-all-open')
 
-  // 停用默认规则，按标签收紧。
+  // 停用默认规则，按分组收紧。
   await page.getByRole('switch', { name: t.access.ruleSwitch('default') }).click()
   await expect(page.getByRole('alertdialog')).toBeVisible()
   await shot('access-disable-default-confirm', { fullPage: false })
@@ -554,17 +573,6 @@ test('有数据时：访问控制', async () => {
   await expect(page.getByTestId('unconnected')).toContainText(counted(t.access.graph.unconnected))
   await clearToasts(page)
   await shot('access-tightened')
-
-  const p = t.access.tagsPanel
-  await page.getByRole('button', { name: p.toggle('servers', false) }).click()
-  await shot('access-tag-panel-open')
-  await page.getByRole('button', { name: p.renameTitle('servers') }).click()
-  const rename = page.getByRole('dialog', { name: p.renameTitle('servers') })
-  await rename.getByRole('textbox', { name: p.renameLabel }).fill('home')
-  await expect(rename.getByText(counted((n) => p.renameMerge('home', n)))).toBeVisible()
-  await shot('access-tag-rename', { fullPage: false })
-  await rename.getByRole('button', { name: t.common.cancel, exact: true }).click()
-  await page.getByRole('button', { name: t.common.discardConfirm }).click()
 
   const rd = t.access.dialog
   await page.getByRole('button', { name: t.access.newRule }).click()
@@ -597,7 +605,40 @@ test('有数据时：访问控制', async () => {
   await expect(page.getByTestId('check-laptop-nas-home')).toContainText(c.allowed)
   await shot('access-check')
   await page.getByRole('button', { name: c.close }).click()
-  await page.getByRole('radio', { name: t.access.graph.byTag }).click()
+  await page.getByRole('radio', { name: t.access.graph.byGroup }).click()
+})
+
+test('有数据时：分组', async () => {
+  const g = t.groups
+  await goTo(page, t.nav.groups)
+  await expect(page.getByTestId('group-row-servers')).toBeVisible()
+  await shot('groups')
+
+  await page.getByRole('button', { name: g.membersOf('servers') }).click()
+  await expect(page.getByTestId('group-members-servers')).toBeVisible()
+  await shot('groups-members')
+
+  await page.getByRole('button', { name: g.create }).click()
+  const create = page.getByRole('dialog', { name: g.createTitle })
+  await create.getByRole('textbox', { name: g.nameLabel }).fill('my group')
+  await create.getByRole('button', { name: g.createSubmit }).click()
+  await expect(create.getByText(t.validate.groupCharset)).toBeVisible()
+  await shot('groups-create-invalid', { fullPage: false })
+  await create.getByRole('button', { name: t.common.cancel, exact: true }).click()
+  await page.getByRole('button', { name: t.common.discardConfirm }).click()
+
+  await page.getByRole('button', { name: t.common.actionsFor('home') }).click()
+  await page.getByRole('menuitem', { name: g.menuDelete }).click()
+  await expect(page.getByRole('alertdialog', { name: g.deleteTitle('home') })).toBeVisible()
+  await shot('groups-delete-confirm', { fullPage: false })
+  await page.getByRole('button', { name: t.common.cancel, exact: true }).click()
+
+  // 节点详情里选分组：只从已有的里面选，All 总在最前面。
+  await page.goto(`${controller.baseUrl}/n/1/nodes/3`)
+  await page.getByRole('combobox', { name: t.nodes.detail.groups }).click()
+  await expect(page.getByRole('listbox', { name: g.picker.options })).toBeVisible()
+  await shot('node-detail-group-picker', { fullPage: false })
+  await page.keyboard.press('Escape')
 })
 
 test('有数据时：接入', async () => {
@@ -757,7 +798,7 @@ test('窄一些的笔记本宽度', async () => {
   await expect(page.getByTestId('rule-row-2')).toBeVisible()
   await shot('narrow-access-rules')
   await page.getByRole('radio', { name: t.access.tabGraph }).click()
-  await expect(page.getByTestId('tag-graph')).toBeVisible()
+  await expect(page.getByTestId('group-graph')).toBeVisible()
   await shot('narrow-access-graph')
   await goTo(page, t.nav.forwards)
   await expect(page.getByTestId('forward-row-web')).toBeVisible()
@@ -922,6 +963,28 @@ test('英文：长度最要紧的几页', async ({ browser }) => {
   await expect(english.getByRole('dialog', { name: en.addNode.title })).toBeVisible()
   await enShot('add-node-dialog', { fullPage: false })
   await english.getByRole('button', { name: en.addNode.done }).click()
+
+  await english.goto(`${controller.baseUrl}/n/1/groups`)
+  await expect(english.getByTestId('group-row-servers')).toBeVisible()
+  await english.getByRole('button', { name: en.groups.membersOf('servers') }).click()
+  await enShot('groups')
+  await english.getByRole('button', { name: en.common.actionsFor('home') }).click()
+  await english.getByRole('menuitem', { name: en.groups.menuDelete }).click()
+  await expect(english.getByRole('alertdialog', { name: en.groups.deleteTitle('home') })).toBeVisible()
+  await enShot('groups-delete-confirm', { fullPage: false })
+  await english.getByRole('button', { name: en.common.cancel, exact: true }).click()
+  await english.goto(`${controller.baseUrl}/n/1/nodes`)
+  await english.getByRole('checkbox', { name: en.nodes.selectOne('laptop') }).check()
+  await english.getByRole('checkbox', { name: en.nodes.selectOne('office-pc') }).check()
+  await english.getByRole('button', { name: en.nodes.batchRemoveGroup }).click()
+  await expect(english.getByRole('dialog', { name: en.nodes.batchRemoveTitle(2) })).toBeVisible()
+  await enShot('nodes-batch-group', { fullPage: false })
+  await english.getByRole('button', { name: en.common.cancel, exact: true }).click()
+  await english.goto(`${controller.baseUrl}/n/1/nodes/3`)
+  await english.getByRole('combobox', { name: en.nodes.detail.groups }).click()
+  await expect(english.getByRole('listbox', { name: en.groups.picker.options })).toBeVisible()
+  await enShot('node-detail-group-picker', { fullPage: false })
+  await english.keyboard.press('Escape')
 
   await english.goto(`${controller.baseUrl}/n/1/exits`)
   await expect(english.getByTestId('exit-row-nas-home')).toBeVisible()

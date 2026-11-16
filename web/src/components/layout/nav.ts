@@ -1,5 +1,6 @@
 import {
   ArrowLeftRight,
+  Boxes,
   DoorOpen,
   KeyRound,
   LayoutDashboard,
@@ -66,6 +67,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
       item('overview', () => t.nav.overview, LayoutDashboard),
       item('nodes', () => t.nav.nodes, Server),
       item('access', () => t.nav.access, ShieldCheck),
+      item('groups', () => t.nav.groups, Boxes),
     ],
   },
   {

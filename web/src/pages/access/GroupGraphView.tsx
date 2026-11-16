@@ -14,9 +14,16 @@ import {
 import { Clock } from 'lucide-react'
 import { useEffect, useMemo } from 'react'
 
-import { type AccessGraph } from '@/api/types'
+import { type AccessGraph, type GroupId } from '@/api/types'
 import { curveBetween, loopAround, type Rect } from '@/access/geometry'
-import { buildTagGraph, layoutSignature, type RuleLine, TAG_NODE, type TagPoint, UNTAGGED_ID } from '@/access/tagGraph'
+import {
+  buildGroupGraph,
+  GROUP_NODE,
+  type GroupPoint,
+  layoutSignature,
+  type RuleLine,
+  UNGROUPED_ID,
+} from '@/access/groupGraph'
 import { ruleLabel } from '@/lib/rules'
 import { t, useLocale } from '@/i18n'
 import { cn } from '@/lib/utils'
@@ -26,29 +33,32 @@ import { useEdgeColors } from '@/access/colors'
 
 const g = t.access.graph
 
-type TagFlowNode = Node<{ point: TagPoint; active: boolean }, 'tag'>
+// 不叫 `group`：那是画图的库自带的一种点，会带上它自己的框和底色。
+type GroupFlowNode = Node<{ point: GroupPoint; active: boolean }, 'groupPoint'>
 type RuleFlowEdge = Edge<{ line: RuleLine; highlighted: boolean; showLabel: boolean }, 'rule'>
 
 /** 连线不从固定的接口出发，而是按两个点的位置算，所以接口藏在点的正中，只是让画图的库认这条线。 */
 const HIDDEN_HANDLE = { left: '50%', top: '50%', opacity: 0, pointerEvents: 'none' } as const
 
-function TagNodeView({ data }: NodeProps<TagFlowNode>) {
+function GroupNodeView({ data }: NodeProps<GroupFlowNode>) {
   const { point, active } = data
-  const untagged = point.kind === 'untagged'
+  const ungrouped = point.group === null
   return (
     <div
-      style={{ width: TAG_NODE.width, height: TAG_NODE.height }}
+      style={{ width: GROUP_NODE.width, height: GROUP_NODE.height }}
       className={cn(
         'flex flex-col justify-center rounded-lg border border-border-strong bg-card px-3.5 transition-colors',
-        untagged && 'border-dashed bg-transparent',
+        ungrouped && 'border-dashed bg-transparent',
         active && 'border-primary outline-2 outline-offset-0 outline-primary',
       )}
     >
       <Handle type="target" position={Position.Top} style={HIDDEN_HANDLE} isConnectable={false} />
       <Handle type="source" position={Position.Top} style={HIDDEN_HANDLE} isConnectable={false} />
-      <span className="truncate text-sm font-semibold">{untagged ? g.untagged(point.members.length) : point.tag}</span>
+      <span className="truncate text-sm font-semibold">
+        {point.group === null ? g.ungrouped(point.members.length) : point.group.name}
+      </span>
       <span className="flex items-center gap-1.5 text-xs text-muted-foreground tabular">
-        {untagged ? g.untaggedSub : g.members(point.members.length)}
+        {ungrouped ? g.ungroupedSub : g.members(point.members.length)}
         {point.pending > 0 ? (
           <span className="inline-flex items-center gap-0.5 text-warn" title={g.unackedBadge(point.pending)}>
             <Clock className="size-3" aria-hidden />
@@ -65,8 +75,8 @@ function rectOf(node: ReturnType<typeof useInternalNode>): Rect | null {
   return {
     x: node.internals.positionAbsolute.x,
     y: node.internals.positionAbsolute.y,
-    width: node.measured.width ?? TAG_NODE.width,
-    height: node.measured.height ?? TAG_NODE.height,
+    width: node.measured.width ?? GROUP_NODE.width,
+    height: node.measured.height ?? GROUP_NODE.height,
   }
 }
 
@@ -109,60 +119,62 @@ function RuleEdgeView({ id, source, target, data, markerStart, markerEnd, style 
   )
 }
 
-const nodeTypes = { tag: TagNodeView }
+const nodeTypes = { groupPoint: GroupNodeView }
 const edgeTypes = { rule: RuleEdgeView }
 
 /** 线不多时名字一直显示；多了只在选中或鼠标停着时显示，免得糊成一片。 */
 const ALWAYS_LABEL_UP_TO = 10
 
-interface TagGraphViewProps {
+interface GroupGraphViewProps {
   graph: AccessGraph
   highlightedRule: number | null
-  activeTag: string | null
+  activeGroup: GroupId | null
   onRuleClick: (ruleId: number) => void
   onRuleOpen: (ruleId: number) => void
   onRuleHover: (ruleId: number | null) => void
-  onTagClick: (tag: string) => void
+  onGroupClick: (group: GroupId) => void
 }
 
 /**
- * 访问关系图的标签视图：每个标签是一个点，每条规则是一条线。
- * 双向规则两头都有箭头，单向规则只有指向目的标签的箭头，停用的规则画虚线：颜色之外总有线型和箭头。
+ * 访问关系图的分组视图：每个分组是一个点，每条规则是一条线。
+ * 双向规则两头都有箭头，单向规则只有指向目的分组的箭头，停用的规则画虚线：颜色之外总有线型和箭头。
  */
-export function TagGraphView({
+export function GroupGraphView({
   graph,
   highlightedRule,
-  activeTag,
+  activeGroup,
   onRuleClick,
   onRuleOpen,
   onRuleHover,
-  onTagClick,
-}: TagGraphViewProps) {
+  onGroupClick,
+}: GroupGraphViewProps) {
   // 点和线上的文字（读屏的说明）在下面算好存着，换语言时要重新算。
   const locale = useLocale()
   const colors = useEdgeColors()
-  const shape = useMemo(() => buildTagGraph(graph), [graph])
+  const shape = useMemo(() => buildGroupGraph(graph), [graph])
   const signature = layoutSignature(shape)
 
-  const toNodes = (current: readonly TagFlowNode[]): TagFlowNode[] =>
+  const toNodes = (current: readonly GroupFlowNode[]): GroupFlowNode[] =>
     shape.points.map((point) => ({
       id: point.id,
-      type: 'tag',
-      // 用户拖动过的位置保留着；标签的集合变了（signature 变了）才重新排。
+      type: 'groupPoint',
+      // 用户拖动过的位置保留着；分组的集合变了（signature 变了）才重新排。
       position: current.find((node) => node.id === point.id)?.position ?? { x: point.x, y: point.y },
-      data: { point, active: point.kind === 'tag' && point.tag === activeTag },
+      data: { point, active: point.group !== null && point.group.id === activeGroup },
       ariaLabel:
-        point.kind === 'untagged' ? g.untagged(point.members.length) : g.tagNodeLabel(point.tag, point.members.length),
-      selectable: point.id !== UNTAGGED_ID,
+        point.group === null
+          ? g.ungrouped(point.members.length)
+          : g.groupNodeLabel(point.group.name, point.members.length),
+      selectable: point.id !== UNGROUPED_ID,
     }))
 
-  const [nodes, setNodes, onNodesChange] = useNodesState<TagFlowNode>(toNodes([]))
+  const [nodes, setNodes, onNodesChange] = useNodesState<GroupFlowNode>(toNodes([]))
 
   useEffect(() => {
     setNodes((current) => toNodes(current))
     // toNodes 用到的都列在下面了；语言变了，点上的说明也要换。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shape, activeTag, setNodes, locale])
+  }, [shape, activeGroup, setNodes, locale])
 
   useEffect(() => {
     setNodes(toNodes([]))
@@ -199,9 +211,9 @@ export function TagGraphView({
   )
 
   return (
-    <GraphCanvas<TagFlowNode, RuleFlowEdge>
+    <GraphCanvas<GroupFlowNode, RuleFlowEdge>
       key={signature}
-      label={g.canvasTag}
+      label={g.canvasGroup}
       nodes={nodes}
       edges={edges}
       onNodesChange={onNodesChange}
@@ -211,7 +223,7 @@ export function TagGraphView({
       onEdgeDoubleClick={(_event, edge) => edge.data !== undefined && onRuleOpen(edge.data.line.ruleId)}
       onEdgeMouseEnter={(_event, edge) => edge.data !== undefined && onRuleHover(edge.data.line.ruleId)}
       onEdgeMouseLeave={() => onRuleHover(null)}
-      onNodeClick={(_event, node) => node.data.point.kind === 'tag' && onTagClick(node.data.point.tag)}
+      onNodeClick={(_event, node) => node.data.point.group !== null && onGroupClick(node.data.point.group.id)}
       onEdgesChange={(changes) => {
         // 用键盘选中一条线（聚焦后按回车）时，和点击一样让对应的规则亮起来。
         for (const change of changes) {

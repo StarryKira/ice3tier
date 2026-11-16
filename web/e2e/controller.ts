@@ -225,9 +225,9 @@ export class Controller {
   }
 
   /** 生成一个令牌并用它加入：准备数据时用，不经过界面。 */
-  async enroll(options: { tags?: string[]; flags?: string[] } = {}, network = 1): Promise<NodeHandle> {
+  async enroll(options: { groups?: number[]; flags?: string[] } = {}, network = 1): Promise<NodeHandle> {
     const created = await this.api<{ token: string }>('POST', `/networks/${network}/tokens`, {
-      tags: options.tags ?? [],
+      groups: options.groups ?? [],
     })
     return this.join(`echo ${created.token} | i3t join ${(options.flags ?? []).join(' ')}`)
   }

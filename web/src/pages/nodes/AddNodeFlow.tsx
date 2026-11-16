@@ -6,12 +6,12 @@ import { Link } from 'react-router'
 import { errorDetail, errorMessage } from '@/api/client'
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
-import { type CreatedEnrollToken, type Network, type Node, type NodeId } from '@/api/types'
+import { type CreatedEnrollToken, type GroupRef, type Network, type Node, type NodeId } from '@/api/types'
 import { CodeBlock, CopyButton } from '@/components/copy'
+import { GroupPicker, GroupsLink } from '@/components/groups'
 import { NodeSelect } from '@/components/node'
 import { nodePath } from '@/lib/nodes'
 import { Notice } from '@/components/notice'
-import { TagInput } from '@/components/tags'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Field, FormError } from '@/components/ui/field'
@@ -81,7 +81,7 @@ interface AddNodeFlowProps {
  * 让人先看懂命令的结构。节点一加入，等待区自己变成结果，不用去刷新列表。
  *
  * "可以承担"的三个勾选是命令的参数，不属于令牌，所以生成令牌之后仍然可以改；
- * 标签、有效期、预设 IP、继任写在令牌上，生成之后变为只读。
+ * 分组、有效期、预设 IP、继任写在令牌上，生成之后变为只读。分组只能从已有的里面选，要新建就去分组页。
  */
 export function AddNodeFlow({ network, intro, onStateChange, onNavigate }: AddNodeFlowProps) {
   const now = useNow()
@@ -90,7 +90,7 @@ export function AddNodeFlow({ network, intro, onStateChange, onNavigate }: AddNo
 
   const [platform, setPlatform] = useState<PlatformId>('linux-x86_64')
   const [declare, setDeclare] = useState<JoinDeclarations>(NO_DECLARATIONS)
-  const [tags, setTags] = useState<string[]>([])
+  const [groups, setGroups] = useState<GroupRef[]>([])
   const [ttl, setTtl] = useState<number>(DEFAULT_TOKEN_TTL)
   const [virtualIp, setVirtualIp] = useState('')
   const [successorOf, setSuccessorOf] = useState<NodeId | null>(null)
@@ -108,9 +108,7 @@ export function AddNodeFlow({ network, intro, onStateChange, onNavigate }: AddNo
     refetchInterval: waiting ? WAITING_INTERVAL : false,
     enabled: waiting,
   })
-  const graph = useQuery({ ...q.graph(network.id), refetchInterval: false })
-
-  const knownTags = useMemo(() => (graph.data?.tags ?? []).map((entry) => entry.tag), [graph.data])
+  const known = useQuery({ ...q.groups(network.id), refetchInterval: false })
   const offlineNodes = useMemo(() => (nodes.data ?? []).filter((node) => !node.online), [nodes.data])
 
   const ipProblem = virtualIp.trim() === '' ? null : validateVirtualIp(virtualIp, network.cidr)
@@ -122,7 +120,7 @@ export function AddNodeFlow({ network, intro, onStateChange, onNavigate }: AddNo
       const current = await api.nodes(network.id)
       const token = await api.createToken(network.id, {
         expires_in_secs: ttl,
-        tags,
+        groups: groups.map((group) => group.id),
         virtual_ip: successorOf === null && virtualIp.trim() !== '' ? virtualIp.trim() : undefined,
         successor_of: successorOf ?? undefined,
       })
@@ -187,8 +185,23 @@ export function AddNodeFlow({ network, intro, onStateChange, onNavigate }: AddNo
       {intro}
 
       <section aria-label={t.addNode.optionsTitle} className="space-y-4">
-        <Field label={t.addNode.tagsLabel} hint={t.addNode.tagsHint} optional={t.common.optional}>
-          {(props) => <TagInput {...props} value={tags} onChange={setTags} suggestions={knownTags} disabled={locked} />}
+        <Field
+          label={t.addNode.groupsLabel}
+          hint={
+            locked ? (
+              t.addNode.groupsHint
+            ) : (
+              <span className="flex flex-wrap items-center justify-between gap-x-3">
+                {t.addNode.groupsHint}
+                <GroupsLink network={network.id} onClick={onNavigate} />
+              </span>
+            )
+          }
+          optional={t.common.optional}
+        >
+          {(props) => (
+            <GroupPicker {...props} value={groups} onChange={setGroups} groups={known.data ?? []} disabled={locked} />
+          )}
         </Field>
 
         <div>

@@ -12,7 +12,7 @@ import {
   Position,
   ReactFlow,
 } from '@xyflow/react'
-import { ChevronsUpDown, Server, Tag } from 'lucide-react'
+import { Boxes, ChevronsUpDown, Server } from 'lucide-react'
 import { useMemo } from 'react'
 import { Link, useSearchParams } from 'react-router'
 
@@ -23,14 +23,15 @@ import {
   type MapFlow,
   type MapRule,
   type MapTarget,
-  nodeTags,
+  mapTargetId,
 } from '@/access/map'
 import { q } from '@/api/queries'
-import { type AccessGraph, type Network, type Node } from '@/api/types'
+import { type AccessGraph, type GroupId, type Network, type Node } from '@/api/types'
 import { ErrorState } from '@/components/states'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Segmented } from '@/components/ui/segmented'
 import { t, useLocale } from '@/i18n'
+import { allGroupId, nodeGroupIds } from '@/lib/groups'
 import { useResolvedTheme } from '@/lib/theme'
 import { cn } from '@/lib/utils'
 import { networkPath } from '@/pages/networks/context'
@@ -39,9 +40,9 @@ import { AttentionChip } from './Attention'
 
 const m = t.overview.map
 
-type View = 'node' | 'tag'
+type View = 'node' | 'group'
 
-/** 左边那一块：选中的节点或标签，点开换一个。 */
+/** 左边那一块：选中的节点或分组，点开换一个。 */
 interface SubjectData extends Record<string, unknown> {
   view: View
   title: string
@@ -60,7 +61,7 @@ interface PillData extends Record<string, unknown> {
 
 interface TargetData extends Record<string, unknown> {
   target: MapTarget
-  onOpen: (tag: string) => void
+  onOpen: (group: GroupId) => void
 }
 
 interface NoteData extends Record<string, unknown> {
@@ -83,7 +84,7 @@ const HIDDEN_HANDLE = '!size-1 !min-h-0 !min-w-0 !border-0 !bg-transparent'
 
 /** 图标放在一个浅灰的圆角方块里；节点带一个在线与否的小圆点。 */
 function IconBox({ kind, online }: { kind: View; online: boolean | null }) {
-  const Icon = kind === 'node' ? Server : Tag
+  const Icon = kind === 'node' ? Server : Boxes
   return (
     <span className="relative flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
       <Icon className="size-[18px]" strokeWidth={1.75} aria-hidden />
@@ -105,7 +106,7 @@ function SubjectView({ data }: NodeProps<SubjectNode>) {
     <div style={{ width: MAP_SIZE.subject.width, height: MAP_SIZE.subject.height }}>
       <DropdownMenu>
         <DropdownMenuTrigger
-          aria-label={`${data.view === 'node' ? m.pickNode : m.pickTag}（${data.title}）`}
+          aria-label={`${data.view === 'node' ? m.pickNode : m.pickGroup}（${data.title}）`}
           className="nodrag nopan flex size-full items-center gap-3 rounded-xl border bg-card px-3 text-left shadow-card transition-colors outline-none hover:border-border-strong focus-visible:ring-2 focus-visible:ring-ring data-[state=open]:border-border-strong"
         >
           <IconBox kind={data.view} online={data.online} />
@@ -176,13 +177,13 @@ function TargetView({ data }: NodeProps<TargetNode>) {
       <Handle type="target" position={Position.Left} className={HIDDEN_HANDLE} isConnectable={false} />
       <button
         type="button"
-        onClick={() => data.onOpen(target.tag)}
-        aria-label={m.tagLabel(target.tag, target.members)}
+        onClick={() => data.onOpen(target.group.id)}
+        aria-label={m.groupLabel(target.group.name, target.members)}
         className="nodrag nopan flex size-full items-center gap-3 rounded-xl border bg-card px-3 text-left shadow-card transition-colors hover:border-border-strong"
       >
-        <IconBox kind="tag" online={null} />
+        <IconBox kind="group" online={null} />
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm leading-5 font-medium">{target.tag}</span>
+          <span className="block truncate text-sm leading-5 font-medium">{target.group.name}</span>
           <span className="block truncate text-[13px] leading-[18px] text-muted-foreground tabular">
             {m.members(target.members)}
           </span>
@@ -260,13 +261,16 @@ function buildFlow(
   network: Network,
   view: View,
   node: Node | undefined,
-  tag: string,
+  group: GroupId | undefined,
   pick: (key: string) => void,
-  openTag: (tag: string) => void,
+  openGroup: (group: GroupId) => void,
 ): { nodes: MapNode[]; edges: MapEdge[] } {
-  const members = new Map(graph.tags.map((entry) => [entry.tag, entry.nodes.length]))
-  const subjectName = view === 'node' ? (node?.name ?? '') : tag
-  const map = buildAccessMap(graph, view === 'node' ? nodeTags(node?.tags ?? []) : new Set([tag]))
+  const subjectGroup = graph.groups.find((entry) => entry.id === group)
+  const subjectName = view === 'node' ? (node?.name ?? '') : (subjectGroup?.name ?? '')
+  const map = buildAccessMap(
+    graph,
+    view === 'node' ? nodeGroupIds(node ?? { groups: [] }, graph.groups) : new Set(group === undefined ? [] : [group]),
+  )
   const layout = layoutAccessMap(map, (direction) => (direction === 'both' ? m.both : m.oneWay))
 
   const options: SubjectData['options'] =
@@ -278,12 +282,12 @@ function buildFlow(
           online: entry.online,
           selected: entry.id === node?.id,
         }))
-      : graph.tags.map((entry) => ({
-          key: entry.tag,
-          title: entry.tag,
+      : graph.groups.map((entry) => ({
+          key: String(entry.id),
+          title: entry.name,
           subtitle: m.members(entry.nodes.length),
           online: null,
-          selected: entry.tag === tag,
+          selected: entry.id === group,
         }))
 
   const subject: SubjectNode = {
@@ -293,7 +297,7 @@ function buildFlow(
     data: {
       view,
       title: subjectName,
-      subtitle: view === 'node' ? (node?.virtual_ip ?? '') : m.members(members.get(tag) ?? 0),
+      subtitle: view === 'node' ? (node?.virtual_ip ?? '') : m.members(subjectGroup?.nodes.length ?? 0),
       online: view === 'node' ? (node?.online ?? false) : null,
       options,
       onPick: pick,
@@ -304,10 +308,10 @@ function buildFlow(
 
   const flowText = (entry: MapRule) =>
     entry.flow === 'both'
-      ? m.flowBoth(subjectName, entry.other)
+      ? m.flowBoth(subjectName, entry.other.name)
       : entry.flow === 'out'
-        ? m.flowOut(subjectName, entry.other)
-        : m.flowIn(subjectName, entry.other)
+        ? m.flowOut(subjectName, entry.other.name)
+        : m.flowIn(subjectName, entry.other.name)
 
   const pills: PillNode[] = map.rules.map((entry) => {
     const place = layout.pills.get(entry.id) ?? { x: 0, y: 0, width: MAP_SIZE.pill.min }
@@ -332,7 +336,7 @@ function buildFlow(
       id: entry.id,
       type: 'target',
       position: { x: place.x, y: place.y },
-      data: { target: entry, onOpen: openTag },
+      data: { target: entry, onOpen: openGroup },
       draggable: false,
       selectable: false,
     }
@@ -346,7 +350,7 @@ function buildFlow(
         id: `out:${entry.id}`,
         type: 'flow',
         source: entry.id,
-        target: `target:${entry.other}`,
+        target: mapTargetId(entry.other.id),
         data,
         focusable: false,
       },
@@ -368,8 +372,8 @@ function buildFlow(
 }
 
 /**
- * 总览的访问地图：整个面板是一块点阵的画布。左上角换视角（节点、标签），右上角是整个网络的状态。
- * 看哪个写在地址里（`view`、`node`、`tag`），刷新、分享都还是这一个。
+ * 总览的访问地图：整个面板是一块点阵的画布。左上角换视角（节点、分组），右上角是整个网络的状态。
+ * 看哪个写在地址里（`view`、`node`、`group`：分组的编号），刷新、分享都还是这一个。
  */
 export function AccessMap({ network, nodes }: { network: Network; nodes: readonly Node[] }) {
   const locale = useLocale()
@@ -377,12 +381,14 @@ export function AccessMap({ network, nodes }: { network: Network; nodes: readonl
   const [params, setParams] = useSearchParams()
   const graph = useQuery(q.graph(network.id))
 
-  const view: View = params.get('view') === 'tag' ? 'tag' : 'node'
+  const view: View = params.get('view') === 'group' ? 'group' : 'node'
   const nodeParam = Number(params.get('node'))
   const node = nodes.find((entry) => entry.id === nodeParam) ?? defaultNode(nodes)
-  const tags = graph.data?.tags.map((entry) => entry.tag) ?? []
-  const tagParam = params.get('tag') ?? ''
-  const tag = tags.includes(tagParam) ? tagParam : tags.includes('all') ? 'all' : (tags[0] ?? 'all')
+  const groupParam = Number(params.get('group'))
+  // 地址里的分组不在了（删掉了）时看 All。
+  const group = graph.data?.groups.some((entry) => entry.id === groupParam)
+    ? groupParam
+    : allGroupId(graph.data?.groups)
 
   const update = (next: Record<string, string>) => {
     setParams(
@@ -394,16 +400,16 @@ export function AccessMap({ network, nodes }: { network: Network; nodes: readonl
       { replace: true },
     )
   }
-  const pick = (key: string) => update(view === 'node' ? { node: key } : { tag: key })
-  const openTag = (name: string) => update({ view: 'tag', tag: name })
+  const pick = (key: string) => update(view === 'node' ? { node: key } : { group: key })
+  const openGroup = (id: GroupId) => update({ view: 'group', group: String(id) })
 
   const flow = useMemo(
-    () => (graph.data === undefined ? null : buildFlow(graph.data, nodes, network, view, node, tag, pick, openTag)),
-    // pick、openTag 只读地址里的参数，参数变了这里会跟着重算；语言变了文字要重算。
+    () => (graph.data === undefined ? null : buildFlow(graph.data, nodes, network, view, node, group, pick, openGroup)),
+    // pick、openGroup 只读地址里的参数，参数变了这里会跟着重算；语言变了文字要重算。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [graph.data, nodes, network, view, node, tag, locale],
+    [graph.data, nodes, network, view, node, group, locale],
   )
-  const subjectKey = view === 'node' ? `node:${node?.id ?? ''}` : `tag:${tag}`
+  const subjectKey = view === 'node' ? `node:${node?.id ?? ''}` : `group:${group ?? ''}`
 
   return (
     <div className="relative min-h-0 flex-1">
@@ -455,11 +461,11 @@ export function AccessMap({ network, nodes }: { network: Network; nodes: readonl
               ),
             },
             {
-              value: 'tag',
+              value: 'group',
               label: (
                 <>
-                  <Tag className="size-3.5" strokeWidth={1.75} aria-hidden />
-                  {m.byTag}
+                  <Boxes className="size-3.5" strokeWidth={1.75} aria-hidden />
+                  {m.byGroup}
                 </>
               ),
             },

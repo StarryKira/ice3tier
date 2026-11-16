@@ -3,7 +3,7 @@ import { ArrowLeftRight, CircleCheck, CircleX, X } from 'lucide-react'
 
 import { errorMessage } from '@/api/client'
 import { q } from '@/api/queries'
-import { type Network, type Node, type NodeId } from '@/api/types'
+import { type GroupId, type Network, type Node, type NodeId } from '@/api/types'
 import { NodeSelect } from '@/components/node'
 import { ruleLabel } from '@/lib/rules'
 import { Button } from '@/components/ui/button'
@@ -53,6 +53,8 @@ function Verdict({ network, from, to }: { network: Network; from: Node; to: Node
 interface AccessCheckProps {
   network: Network
   nodes: readonly Node[]
+  /** 内置分组 All 的编号：没有分组的节点，新建规则时预填它。 */
+  all: GroupId | undefined
   from: NodeId | null
   to: NodeId | null
   onChange: (from: NodeId | null, to: NodeId | null) => void
@@ -64,7 +66,7 @@ interface AccessCheckProps {
  * 访问检查：选两个节点，立即出结果。方向有意义，所以两个方向各答一次。
  * 图上的每个结论在这里都能用文字得到。
  */
-export function AccessCheck({ network, nodes, from, to, onChange, onClose, onCreateRule }: AccessCheckProps) {
+export function AccessCheck({ network, nodes, all, from, to, onChange, onClose, onCreateRule }: AccessCheckProps) {
   const fromNode = nodes.find((node) => node.id === from)
   const toNode = nodes.find((node) => node.id === to)
   const same = from !== null && from === to
@@ -77,7 +79,8 @@ export function AccessCheck({ network, nodes, from, to, onChange, onClose, onCre
     enabled: fromNode !== undefined && toNode !== undefined && !same,
   })
   const denied = forward.data?.allowed === false || backward.data?.allowed === false
-  const tagsOf = (node: Node) => (node.tags.length === 0 ? c.noTags : formatList(node.tags))
+  const groupsOf = (node: Node) =>
+    node.groups.length === 0 ? c.noGroups : formatList(node.groups.map((group) => group.name))
 
   return (
     <Card className="mb-10 border-b pb-8" data-testid="access-check">
@@ -122,12 +125,14 @@ export function AccessCheck({ network, nodes, from, to, onChange, onClose, onCre
               {denied ? (
                 <div className="mt-2 flex flex-wrap items-center justify-between gap-3 border-t pt-3 text-[13px]">
                   <p className="flex flex-wrap gap-x-4 text-muted-foreground">
-                    <span>{c.tagsOf(fromNode.name, tagsOf(fromNode))}</span>
-                    <span>{c.tagsOf(toNode.name, tagsOf(toNode))}</span>
+                    <span>{c.groupsOf(fromNode.name, groupsOf(fromNode))}</span>
+                    <span>{c.groupsOf(toNode.name, groupsOf(toNode))}</span>
                   </p>
                   <Button
                     size="sm"
-                    onClick={() => onCreateRule({ src: fromNode.tags[0] ?? 'all', dst: toNode.tags[0] ?? 'all' })}
+                    onClick={() =>
+                      onCreateRule({ src: fromNode.groups[0]?.id ?? all, dst: toNode.groups[0]?.id ?? all })
+                    }
                   >
                     {c.createRule}
                   </Button>

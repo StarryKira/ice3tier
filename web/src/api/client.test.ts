@@ -4,7 +4,7 @@ import { setLocale, t } from '@/i18n'
 import { en } from '@/i18n/en'
 
 import { ApiError, configureClient, errorDetail, errorMessage, request } from './client'
-import { fieldError, formError, formErrorDetail, formFailure } from './formErrors'
+import { fieldError, formError, formErrorDetail, formFailure, groupNameFailure } from './formErrors'
 
 function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...headers } })
@@ -83,8 +83,8 @@ describe('请求怎么发', () => {
     expect(lastCall().init.body).toBe('{}')
     expect(lastCall().headers['Content-Type']).toBe('application/json')
 
-    await request('PATCH', '/networks/1/nodes/2', { body: { tags: ['servers'] } })
-    expect(lastCall().init.body).toBe('{"tags":["servers"]}')
+    await request('PATCH', '/networks/1/nodes/2', { body: { groups: [3] } })
+    expect(lastCall().init.body).toBe('{"groups":[3]}')
 
     await request('PUT', '/networks/1/nodes/2/exit', { body: { ports: null } })
     expect(lastCall().init.body).toBe('{"ports":null}')
@@ -212,6 +212,55 @@ describe('401', () => {
     await failure(request('POST', '/networks', { body: { name: 'home' } }))
     expect(onUnauthorized).not.toHaveBeenCalled()
   })
+})
+
+describe('分组的错误（码加上 what）', () => {
+  function groupError(status: number, code: string, what: string | null, field: string | null): ApiError {
+    return new ApiError(status, code, '原话', '原话', what, field)
+  }
+
+  it('what 和 field 从应答里读出来；没有时是 null', async () => {
+    fetchMock.mockResolvedValue(
+      json(404, { error: { code: 'not_found', message: '没有分组 #99', what: 'group', field: 'groups[1]' } }),
+    )
+    const error = await failure(request('PATCH', '/networks/1/nodes/2', { body: { groups: [3, 99] } }))
+    expect([error.what, error.field]).toEqual(['group', 'groups[1]'])
+
+    fetchMock.mockResolvedValue(apiError(404, 'not_found', '没有节点 #9'))
+    const older = await failure(request('GET', '/networks/1/nodes/9'))
+    expect([older.what, older.field]).toEqual([null, null])
+  })
+
+  for (const locale of ['zh-CN', 'en'] as const) {
+    it(`不存在、重名、内置的 All：按码写当前语言的话，不再附原话（${locale}）`, () => {
+      setLocale(locale, { remember: false })
+      const missing = groupError(404, 'not_found', 'group', null)
+      expect(errorMessage(missing)).toBe(t.errors.group.notFound)
+      expect(errorDetail(missing)).toBeNull()
+      expect(errorMessage(groupError(409, 'name_taken', 'group', 'name'))).toBe(t.errors.group.nameTaken)
+      const builtin = groupError(400, 'invalid_request', 'builtin', 'group')
+      expect(errorMessage(builtin)).toBe(t.errors.group.builtin)
+      expect(errorDetail(builtin)).toBeNull()
+      // 别的东西不存在、别的名字被占用：还是原来的写法。
+      expect(errorMessage(groupError(404, 'not_found', 'node', null))).toBe(t.errors.codes.not_found)
+      expect(errorMessage(groupError(409, 'name_taken', null, 'name'))).toBe(t.errors.codes.name_taken)
+    })
+
+    it(`分组的表单：名字的写法不对、重名写在名字下面，和提交之前的校验一样的话（${locale}）`, () => {
+      setLocale(locale, { remember: false })
+      const name = (what: string) => groupNameFailure(groupError(400, 'invalid_request', what, 'name'))
+      expect(name('empty')).toEqual({ field: 'name', message: t.validate.groupRequired, detail: null })
+      expect(fieldError(name('too_long'), 'name')).toBe(t.validate.groupTooLong(32))
+      expect(fieldError(name('malformed'), 'name')).toBe(t.validate.groupCharset)
+      expect(fieldError(groupNameFailure(groupError(409, 'name_taken', 'group', 'name')), 'name')).toBe(
+        t.errors.group.nameTaken,
+      )
+      // 动了内置的 All、说不清是哪一项的：写在表单底部。
+      const builtin = groupNameFailure(groupError(400, 'invalid_request', 'builtin', 'group'))
+      expect(formError(builtin)).toBe(t.errors.group.builtin)
+      expect(groupNameFailure(null)).toBeNull()
+    })
+  }
 })
 
 describe('errorMessage', () => {

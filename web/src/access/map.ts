@@ -1,12 +1,12 @@
-import { type AccessGraph, type Direction, type Rule } from '@/api/types'
+import { type AccessGraph, type Direction, type GroupId, type GroupRef, type Rule } from '@/api/types'
 
 /**
  * 总览的访问地图要画的东西。纯函数，不依赖画图的库，方便测试。
  *
- * 三列：左边是看的那一个（一个节点，或者一个标签）；中间是和它有关的规则，一条一个胶囊；
- * 右边是规则另一头的标签，写着有几个节点。左边连到每个胶囊，每个胶囊连到它另一头的标签。
+ * 三列：左边是看的那一个（一个节点，或者一个分组）；中间是和它有关的规则，一条一个胶囊；
+ * 右边是规则另一头的分组，写着有几个节点。左边连到每个胶囊，每个胶囊连到它另一头的分组。
  *
- * 一条规则和"它"有关：规则的一头是它所在的标签。节点在它自己的每个标签里，也总在 all 里。
+ * 一条规则和"它"有关：规则的一头是它所在的分组。节点在它自己的每个分组里，也总在 All 里。
  * 流向从"它"这边看：`out` 是它能访问对面，`in` 是对面能访问它，`both` 是双向。
  */
 
@@ -17,14 +17,14 @@ export interface MapRule {
   id: string
   rule: Rule
   flow: MapFlow
-  /** 规则另一头的标签。 */
-  other: string
+  /** 规则另一头的分组。 */
+  other: GroupRef
 }
 
 export interface MapTarget {
   id: string
-  tag: string
-  /** 标签里有几个节点。 */
+  group: GroupRef
+  /** 分组里有几个节点。 */
   members: number
 }
 
@@ -33,14 +33,14 @@ export interface AccessMap {
   targets: MapTarget[]
 }
 
-export const mapTargetId = (tag: string): string => `target:${tag}`
+export const mapTargetId = (group: GroupId): string => `target:${group}`
 
-/** `tags` 是"它"所在的标签：节点的标签加上 all，或者只是那一个标签。 */
-export function buildAccessMap(graph: AccessGraph, tags: ReadonlySet<string>): AccessMap {
+/** `groups` 是"它"所在的分组的编号：节点的分组加上 All（`nodeGroupIds`），或者只是那一个分组。 */
+export function buildAccessMap(graph: AccessGraph, groups: ReadonlySet<GroupId>): AccessMap {
   const rules: MapRule[] = []
   for (const rule of graph.rules) {
-    const fromHere = tags.has(rule.src)
-    const toHere = tags.has(rule.dst)
+    const fromHere = groups.has(rule.src.id)
+    const toHere = groups.has(rule.dst.id)
     if (!fromHere && !toHere) continue
     const other = fromHere ? rule.dst : rule.src
     const flow: MapFlow = rule.direction === 'both' ? 'both' : fromHere ? 'out' : 'in'
@@ -49,18 +49,13 @@ export function buildAccessMap(graph: AccessGraph, tags: ReadonlySet<string>): A
   // 启用的在前；同样启用或停用的，保持规则列表的顺序。
   rules.sort((a, b) => Number(b.rule.enabled) - Number(a.rule.enabled))
 
-  const members = new Map(graph.tags.map((entry) => [entry.tag, entry.nodes.length]))
+  const members = new Map(graph.groups.map((group) => [group.id, group.nodes.length]))
   const targets: MapTarget[] = []
   for (const entry of rules) {
-    if (targets.some((target) => target.tag === entry.other)) continue
-    targets.push({ id: mapTargetId(entry.other), tag: entry.other, members: members.get(entry.other) ?? 0 })
+    if (targets.some((target) => target.group.id === entry.other.id)) continue
+    targets.push({ id: mapTargetId(entry.other.id), group: entry.other, members: members.get(entry.other.id) ?? 0 })
   }
   return { rules, targets }
-}
-
-/** 节点所在的标签：它自己的，加上 all。 */
-export function nodeTags(tags: readonly string[]): Set<string> {
-  return new Set([...tags, 'all'])
 }
 
 /** 画图用的尺寸。胶囊的宽度按名字估一个，画的时候就用这个宽度，估短了名字截断。 */

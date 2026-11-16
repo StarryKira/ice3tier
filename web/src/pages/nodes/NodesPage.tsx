@@ -1,13 +1,15 @@
 import { useQuery } from '@tanstack/react-query'
 import {
+  Boxes,
   CircleArrowUp,
+  CircleMinus,
+  CirclePlus,
   EllipsisVertical,
   ListFilter,
   Pencil,
   Plus,
   Search,
   Server,
-  Tags,
   Trash2,
   X,
 } from 'lucide-react'
@@ -16,8 +18,10 @@ import { Link, useNavigate, useSearchParams } from 'react-router'
 
 import { errorMessage } from '@/api/client'
 import { api } from '@/api/endpoints'
+import { formError, formErrorDetail, formFailure } from '@/api/formErrors'
 import { q, useAction } from '@/api/queries'
-import { type Network, type Node } from '@/api/types'
+import { type Group, type GroupId, type Network, type Node } from '@/api/types'
+import { Combobox } from '@/components/combobox'
 import { useConfirm } from '@/components/confirm'
 import { CopyText } from '@/components/copy'
 import { ForceUpdateDialog } from '@/components/force-update'
@@ -28,7 +32,7 @@ import { EmptyState, ErrorState, NoMatches, SkeletonRows } from '@/components/st
 import { Flag } from '@/components/flag'
 import { IssueIcon, RelativeTime, StatusDot } from '@/components/status'
 import { SortTh, Table, TableFooter, Td, Th, Toolbar, Tr } from '@/components/table'
-import { TagInput, TagList } from '@/components/tags'
+import { GroupList, GroupsLink } from '@/components/groups'
 import { VersionCell } from '@/components/update'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -44,7 +48,6 @@ import { Field } from '@/components/ui/field'
 import { fieldBase } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Segmented } from '@/components/ui/segmented'
-import { Switch } from '@/components/ui/switch'
 import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
@@ -56,8 +59,8 @@ import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { cn } from '@/lib/utils'
 import { useNetwork } from '@/pages/networks/context'
 
-import { NodeTagsDialog, RenameNodeDialog } from './actions'
-import { useDeleteNode, useKnownTags } from './hooks'
+import { NodeGroupsDialog, RenameNodeDialog } from './actions'
+import { useDeleteNode } from './hooks'
 import { AddNodeDialog } from './AddNodeDialog'
 import {
   DEFAULT_SORT,
@@ -98,7 +101,7 @@ export function RoleBadges({ node, attached }: { node: Node; attached?: number }
   )
 }
 
-type RowDialog = { kind: 'rename' | 'tags' | 'update'; node: Node } | null
+type RowDialog = { kind: 'rename' | 'groups' | 'update'; node: Node } | null
 
 /**
  * 菜单里的"立即更新"。没有新版本时不出现；有新版本但现在不能点时置灰，原因写在下面一行
@@ -137,71 +140,79 @@ function toggled<T>(list: readonly T[], item: T, on: boolean): T[] {
   return on ? [...list.filter((other) => other !== item), item] : list.filter((other) => other !== item)
 }
 
-interface BatchTagDialogProps {
+interface BatchGroupDialogProps {
   network: Network
   nodes: readonly Node[]
-  open: boolean
+  mode: 'add' | 'remove'
   onClose: (done: boolean) => void
 }
 
-/** 批量打标签。默认是追加：原有的标签保留；选了覆盖，提交前要确认一次。 */
-function BatchTagDialog({ network, nodes, open, onClose }: BatchTagDialogProps) {
-  const confirm = useConfirm()
-  const known = useKnownTags(network)
-  const [tags, setTags] = useState<string[]>([])
-  const [overwrite, setOverwrite] = useState(false)
+/**
+ * 把选中的节点一起加入一个已有的分组，或者从一个分组移除：一个请求，要么全部做到，要么一个都不改。
+ * 移除时只列选中的节点里至少有一个在里面的分组。
+ */
+function BatchGroupDialog({ network, nodes, mode, onClose }: BatchGroupDialogProps) {
+  const groups = useQuery(q.groups(network.id))
+  const [group, setGroup] = useState<GroupId | null>(null)
+  const adding = mode === 'add'
+  const choices = (groups.data ?? []).filter(
+    (candidate) =>
+      !candidate.builtin && (adding || nodes.some((node) => node.groups.some((ref) => ref.id === candidate.id))),
+  )
+  const chosen = choices.find((candidate) => candidate.id === group)
 
   const apply = useAction(network.id, {
-    mutationFn: async () => {
-      let ok = 0
-      const failures: string[] = []
-      for (const node of nodes) {
-        const next = overwrite ? tags : [...new Set([...node.tags, ...tags])].sort()
-        try {
-          await api.updateNode(network.id, node.id, { tags: next })
-          ok += 1
-        } catch (error) {
-          failures.push(errorMessage(error))
-        }
-      }
-      return { ok, failures }
+    mutationFn: (target: Group) => {
+      const ids = nodes.map((node) => node.id)
+      return api.setGroupMembers(network.id, target.id, adding ? { add: ids } : { remove: ids })
     },
+    success: (_data, target) =>
+      adding ? t.nodes.batchAdded(nodes.length, target.name) : t.nodes.batchRemoved(nodes.length, target.name),
+    toastError: false,
   })
-
-  const submit = async () => {
-    if (overwrite) {
-      const confirmed = await confirm({
-        title: t.nodes.batchOverwriteTitle(nodes.length),
-        body: t.nodes.batchOverwriteBody,
-        confirmLabel: t.nodes.batchOverwriteConfirm,
-      })
-      if (!confirmed) return
-    }
-    const { ok, failures } = await apply.mutateAsync()
-    if (failures.length === 0) toast.success(t.nodes.batchTagged(ok))
-    else toast.error(t.nodes.batchTagFailed(ok, failures.length, failures[0] ?? ''))
-    onClose(true)
-  }
+  const failure = formFailure(apply.error, {})
+  const nothing = adding ? t.nodes.filterNoGroups : t.nodes.batchNotInGroups
 
   return (
     <FormDialog
-      open={open}
+      open
       onClose={() => onClose(false)}
-      title={t.nodes.batchTagTitle(nodes.length)}
+      title={adding ? t.nodes.batchAddTitle(nodes.length) : t.nodes.batchRemoveTitle(nodes.length)}
       size="sm"
-      dirty={tags.length > 0}
-      submitLabel={t.nodes.batchTagSubmit}
+      dirty={group !== null}
+      submitLabel={adding ? t.nodes.batchAddSubmit : t.nodes.batchRemoveSubmit}
       pending={apply.isPending}
-      canSubmit={tags.length > 0 || overwrite}
-      onSubmit={() => void submit()}
+      canSubmit={chosen !== undefined}
+      error={formError(failure)}
+      errorDetail={formErrorDetail(failure)}
+      onSubmit={() => {
+        if (chosen !== undefined) apply.mutate(chosen, { onSuccess: () => onClose(true) })
+      }}
     >
-      <Field label={t.nodes.batchTagLabel}>
-        {(props) => <TagInput {...props} value={tags} onChange={setTags} suggestions={known} autoFocus />}
+      <Field
+        label={t.nodes.batchGroupLabel}
+        hint={adding ? <GroupsLink network={network.id} onClick={() => onClose(false)} /> : t.nodes.batchRemoveNote}
+      >
+        {(props) => (
+          <Combobox<GroupId>
+            {...props}
+            value={group}
+            onChange={(id) => {
+              setGroup(id)
+              apply.reset()
+            }}
+            options={choices.map((candidate) => ({
+              value: candidate.id,
+              label: candidate.name,
+              hint: t.access.graph.members(candidate.nodes.length),
+            }))}
+            placeholder={groups.isSuccess && choices.length === 0 ? nothing : t.groups.picker.pickOne}
+            searchPlaceholder={t.groups.picker.search}
+            emptyText={t.groups.picker.noneFound}
+            disabled={choices.length === 0}
+          />
+        )}
       </Field>
-      <label className="flex items-center gap-2.5 text-sm">
-        <Switch checked={overwrite} onCheckedChange={setOverwrite} />
-        {t.nodes.batchOverwrite}
-      </label>
     </FormDialog>
   )
 }
@@ -212,7 +223,7 @@ export function NodesPage() {
   const navigate = useNavigate()
   const confirm = useConfirm()
   const nodes = useQuery(q.nodes(network.id))
-  const knownTags = useKnownTags(network)
+  const groups = useQuery(q.groups(network.id))
   const deleteNode = useDeleteNode(network)
 
   const [params, setParams] = useSearchParams()
@@ -223,7 +234,7 @@ export function NodesPage() {
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set())
   const [adding, setAdding] = useState(false)
   const [dialog, setDialog] = useState<RowDialog>(null)
-  const [batchTagging, setBatchTagging] = useState(false)
+  const [batchGroup, setBatchGroup] = useState<'add' | 'remove' | null>(null)
 
   // 搜索框自己的内容；停顿一会儿才写进 URL。
   const [searchText, setSearchText] = useState(filters.search)
@@ -268,7 +279,8 @@ export function NodesPage() {
     () => [...new Set(all.map((node) => node.platform))].filter((platform) => platform !== '').sort(),
     [all],
   )
-  const tagChoices = useMemo(() => knownTags.filter((tag) => tag !== 'all'), [knownTags])
+  const groupChoices = useMemo(() => (groups.data ?? []).filter((group) => !group.builtin), [groups.data])
+  const groupName = (id: GroupId) => groupChoices.find((group) => group.id === id)?.name ?? `#${id}`
 
   const visible = useMemo(
     () =>
@@ -298,7 +310,7 @@ export function NodesPage() {
 
   const clearFilters = () => {
     setSearchText('')
-    applyFilters({ search: '', status: 'all', tags: [], roles: [], platforms: [] })
+    applyFilters({ search: '', status: 'all', groups: [], roles: [], platforms: [] })
   }
 
   const batchDelete = useAction(network.id, {
@@ -356,7 +368,7 @@ export function NodesPage() {
     { value: 'offline', label: t.nodes.filterOffline },
   ]
 
-  const facetCount = filters.tags.length + filters.roles.length + filters.platforms.length
+  const facetCount = filters.groups.length + filters.roles.length + filters.platforms.length
   const chips: { label: string; remove: () => void }[] = [
     ...(filters.search.trim() !== ''
       ? [
@@ -369,9 +381,9 @@ export function NodesPage() {
           },
         ]
       : []),
-    ...filters.tags.map((tag) => ({
-      label: t.nodes.chipTag(tag),
-      remove: () => applyFilters({ tags: toggled(filters.tags, tag, false) }),
+    ...filters.groups.map((id) => ({
+      label: t.nodes.chipGroup(groupName(id)),
+      remove: () => applyFilters({ groups: toggled(filters.groups, id, false) }),
     })),
     ...filters.roles.map((role) => ({
       label: t.nodes.chipRole(roleLabel(role)),
@@ -463,18 +475,18 @@ export function NodesPage() {
                 <PopoverContent className="w-72 space-y-3 p-3">
                   <fieldset>
                     <legend className="mb-1 px-1.5 text-xs font-medium text-muted-foreground">
-                      {t.nodes.filterTags}
+                      {t.nodes.filterGroups}
                     </legend>
-                    {tagChoices.length === 0 ? (
-                      <p className="px-1.5 py-1 text-[13px] text-muted-foreground">{t.nodes.filterNoTags}</p>
+                    {groupChoices.length === 0 ? (
+                      <p className="px-1.5 py-1 text-[13px] text-muted-foreground">{t.nodes.filterNoGroups}</p>
                     ) : (
                       <div className="max-h-40 overflow-y-auto">
-                        {tagChoices.map((tag) => (
+                        {groupChoices.map((group) => (
                           <FilterToggle
-                            key={tag}
-                            label={tag}
-                            checked={filters.tags.includes(tag)}
-                            onChange={(on) => applyFilters({ tags: toggled(filters.tags, tag, on) })}
+                            key={group.id}
+                            label={group.name}
+                            checked={filters.groups.includes(group.id)}
+                            onChange={(on) => applyFilters({ groups: toggled(filters.groups, group.id, on) })}
                           />
                         ))}
                       </div>
@@ -563,7 +575,7 @@ export function NodesPage() {
                   <SortTh active={sort.key === 'ip'} direction={sort.direction} onSort={() => onSort('ip')}>
                     {t.nodes.colAddress}
                   </SortTh>
-                  <Th>{t.nodes.colTags}</Th>
+                  <Th>{t.nodes.colGroups}</Th>
                   <SortTh active={sort.key === 'seen'} direction={sort.direction} onSort={() => onSort('seen')}>
                     {t.nodes.colSeen}
                   </SortTh>
@@ -628,20 +640,20 @@ export function NodesPage() {
                       <Td>
                         <button
                           type="button"
-                          onClick={() => setDialog({ kind: 'tags', node })}
-                          aria-label={t.nodes.editTagsOf(node.name)}
+                          onClick={() => setDialog({ kind: 'groups', node })}
+                          aria-label={t.nodes.editGroupsOf(node.name)}
                           className={cn(
                             '-mx-1.5 rounded-md px-1.5 py-1 text-left hover:bg-muted',
-                            node.tags.length === 0 && 'text-[13px] text-muted-foreground',
+                            node.groups.length === 0 && 'text-[13px] text-muted-foreground',
                           )}
                         >
-                          {node.tags.length === 0 ? (
+                          {node.groups.length === 0 ? (
                             <span className="inline-flex items-center gap-1">
                               <Plus className="size-3" aria-hidden />
-                              {t.nodes.addTags}
+                              {t.nodes.addGroups}
                             </span>
                           ) : (
-                            <TagList tags={node.tags} />
+                            <GroupList groups={node.groups} />
                           )}
                         </button>
                       </Td>
@@ -685,9 +697,9 @@ export function NodesPage() {
                               <Pencil aria-hidden />
                               {t.nodes.menuRename}
                             </DropdownMenuItem>
-                            <DropdownMenuItem onSelect={() => setDialog({ kind: 'tags', node })}>
-                              <Tags aria-hidden />
-                              {t.nodes.menuTags}
+                            <DropdownMenuItem onSelect={() => setDialog({ kind: 'groups', node })}>
+                              <Boxes aria-hidden />
+                              {t.nodes.menuGroups}
                             </DropdownMenuItem>
                             <UpdateMenuItem node={node} onSelect={() => setDialog({ kind: 'update', node })} />
                             <DropdownMenuSeparator />
@@ -740,9 +752,13 @@ export function NodesPage() {
           <span className="mr-2 font-medium tabular" aria-live="polite">
             {t.nodes.selected(selectedNodes.length)}
           </span>
-          <Button size="sm" onClick={() => setBatchTagging(true)}>
-            <Tags aria-hidden />
-            {t.nodes.batchTag}
+          <Button size="sm" onClick={() => setBatchGroup('add')}>
+            <CirclePlus aria-hidden />
+            {t.nodes.batchAddGroup}
+          </Button>
+          <Button size="sm" onClick={() => setBatchGroup('remove')}>
+            <CircleMinus aria-hidden />
+            {t.nodes.batchRemoveGroup}
           </Button>
           <Button
             size="sm"
@@ -774,11 +790,11 @@ export function NodesPage() {
           onClose={() => setDialog(null)}
         />
       ) : null}
-      {dialog?.kind === 'tags' ? (
-        <NodeTagsDialog
+      {dialog?.kind === 'groups' ? (
+        <NodeGroupsDialog
           key={dialog.node.id}
           network={network}
-          // 对话框开着时节点的标签在变：用列表里最新的那一份。
+          // 对话框开着时节点的分组在变：用列表里最新的那一份。
           node={all.find((node) => node.id === dialog.node.id) ?? dialog.node}
           open
           onClose={() => setDialog(null)}
@@ -791,13 +807,13 @@ export function NodesPage() {
           onClose={() => setDialog(null)}
         />
       ) : null}
-      {batchTagging ? (
-        <BatchTagDialog
+      {batchGroup !== null ? (
+        <BatchGroupDialog
           network={network}
           nodes={selectedNodes}
-          open
+          mode={batchGroup}
           onClose={(done) => {
-            setBatchTagging(false)
+            setBatchGroup(null)
             if (done) setSelected(new Set())
           }}
         />

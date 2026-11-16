@@ -14,7 +14,7 @@ import { clearToasts, expectToast, goTo, goToAdmin, literal, signIn, t } from '.
  * - 凭据经一个要求凭据的监听器用过之后有用量；改上限让它用完，吊销，再彻底删掉。
  * - 出口配了配额，经它下载一个文件之后，出口页有本账期的用量。
  * - 端口写 0 的转发显示节点挑定的端口，并且真的能连；监听在被占用的端口上的转发显示"端口被占用"。
- * - 操作记录按操作筛，记录里的对象是链接；标签改名。
+ * - 操作记录按操作筛，记录里的对象是链接。
  *
  * 下载的目标是这台机器上一个临时的 HTTP 服务，监听在它的局域网地址上：出口把它当局域网目标，不连外网。
  */
@@ -27,7 +27,6 @@ interface ApiNode {
   id: number
   name: string
   virtual_ip: string
-  tags: string[]
   last_seen_at: number | null
 }
 
@@ -126,7 +125,7 @@ test('准备：出口 gw 和入口 laptop 跑起来；还有一个只注册过�
   test.setTimeout(120_000)
   await controller.api('POST', '/networks', { name: 'home' })
   const gw = await controller.enroll({ flags: ['--can-exit', '--can-forward'] })
-  const laptop = await controller.enroll({ tags: ['laptops'] })
+  const laptop = await controller.enroll()
   await controller.api('PATCH', `${NET}/nodes/1`, { name: 'gw' })
   await controller.api('PATCH', `${NET}/nodes/2`, { name: 'laptop' })
   nodes.gw = { handle: gw, id: 1, ip: '10.66.0.1' }
@@ -145,23 +144,6 @@ test('准备：出口 gw 和入口 laptop 跑起来；还有一个只注册过�
   await expect(page.getByTestId(`node-row-${spare?.name ?? ''}`).getByTestId('never-connected')).toHaveText(
     t.nodes.never,
   )
-})
-
-test('标签改名：整个网络里一起改', async () => {
-  await goTo(page, t.nav.access)
-  const p = t.access.tagsPanel
-  await page.getByRole('button', { name: p.toggle('laptops', false) }).click()
-  await page.getByRole('button', { name: p.renameTitle('laptops') }).click()
-  const dialog = page.getByRole('dialog', { name: p.renameTitle('laptops') })
-  await expect(dialog.getByText(p.renameLead)).toBeVisible()
-  await dialog.getByRole('textbox', { name: p.renameLabel }).fill('notebooks')
-  await dialog.getByRole('button', { name: p.renameSubmit, exact: true }).click()
-  await expectToast(page, p.renamed('laptops', 'notebooks'))
-  await expect(dialog).toBeHidden()
-  const listed = await controller.api<ApiNode[]>('GET', `${NET}/nodes`)
-  expect(listed.find((node) => node.id === nodes.laptop.id)?.tags).toEqual(['notebooks'])
-  await expect(page.getByRole('button', { name: p.toggle('notebooks', true) })).toBeVisible()
-  await clearToasts(page)
 })
 
 test('出口配额：在节点详情里配上，下载之后出口页有本账期的用量', async () => {

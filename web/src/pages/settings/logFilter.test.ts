@@ -65,12 +65,13 @@ describe('交给 controller 的条件', () => {
   it('只有搜索词时不算 controller 那边的条件', () => {
     expect(hasServerFilter({ ...EMPTY_LOG_FILTER, search: 'x' })).toBe(false)
     expect(isFiltered({ ...EMPTY_LOG_FILTER, search: 'x' })).toBe(true)
-    expect(hasServerFilter({ ...EMPTY_LOG_FILTER, action: 'tag' })).toBe(true)
+    expect(hasServerFilter({ ...EMPTY_LOG_FILTER, action: 'group' })).toBe(true)
   })
 
   it('对象的写法和 controller 认的一样', () => {
     expect(parseRef('forward:12')).toEqual({ kind: 'forward', id: 12 })
     expect(parseRef(' token:1 ')).toEqual({ kind: 'token', id: 1 })
+    expect(parseRef('group:7')).toEqual({ kind: 'group', id: 7 })
     expect(parseRef('node')).toBeNull()
     expect(parseRef('route:1')).toBeNull()
   })
@@ -99,6 +100,7 @@ describe('记录里提到的东西，点了去哪里', () => {
   it('网络里的东西去它所在的页面，列表页上那一行亮出来', () => {
     expect(refTarget({ kind: 'node', id: 3 }, 1)).toBe('/n/1/nodes/3')
     expect(refTarget({ kind: 'rule', id: 2 }, 1)).toBe('/n/1/access?rule=2')
+    expect(refTarget({ kind: 'group', id: 9 }, 1)).toBe('/n/1/groups?focus=9')
     expect(refTarget({ kind: 'credential', id: 5 }, 1)).toBe('/n/1/credentials?focus=5')
     expect(refTarget({ kind: 'listener', id: 6 }, 1)).toBe('/n/1/listeners?focus=6')
     expect(refTarget({ kind: 'forward', id: 7 }, 1)).toBe('/n/1/forwards?focus=7')

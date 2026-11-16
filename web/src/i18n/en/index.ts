@@ -1,9 +1,10 @@
 import type { Messages } from '../messages'
 import { access, rules } from './access'
 import { addNode } from './addNode'
-import { common, confirm, errors, select, tags, time, validate } from './common'
+import { common, confirm, errors, select, time, validate } from './common'
 import { capability, declare } from './declare'
 import { credentials, exits, forwards, listen, listeners, pairs, serviceClass, tokens } from './entry'
+import { groups } from './groups'
 import { networks } from './networks'
 import { nodes } from './nodes'
 import { overview } from './overview'
@@ -19,7 +20,6 @@ export const en: Messages = {
   confirm,
   validate,
   time,
-  tags,
   select,
   signIn,
   nav,
@@ -31,6 +31,7 @@ export const en: Messages = {
   networks,
   nodes,
   addNode,
+  groups,
   rules,
   access,
   overview,

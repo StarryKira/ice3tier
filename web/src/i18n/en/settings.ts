@@ -37,6 +37,7 @@ export const settings: Messages['settings'] = {
     refLabels: {
       network: (id, name) => (name === null ? `Network #${id}` : `Network ${name}`),
       node: (id, name) => (name === null ? `Node #${id}` : `Node ${name}`),
+      group: (id) => `Group #${id}`,
       token: (id) => `Token #${id}`,
       rule: (id) => `Rule #${id}`,
       credential: (id) => `Credential #${id}`,
@@ -54,7 +55,7 @@ export const settings: Messages['settings'] = {
       listener: 'Listener',
       forward: 'Port forward',
       pair: 'Node pair',
-      tag: 'Tag',
+      group: 'Group',
       update: 'Node update',
     },
     actions: {
@@ -91,7 +92,10 @@ export const settings: Messages['settings'] = {
       'forward.delete': 'Port forward deleted',
       'pair.set': 'Node pair set',
       'pair.delete': 'Node pair removed',
-      'tag.rename': 'Tag renamed',
+      'group.create': 'Group created',
+      'group.rename': 'Group renamed',
+      'group.delete': 'Group deleted',
+      'group.members': 'Group members changed',
       'update.settings': 'Update settings changed',
       'update.release': 'New release found',
       'update.pause': 'Version paused',

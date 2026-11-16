@@ -1,0 +1,57 @@
+/** 分组：分组页，以及节点、注册令牌上选分组的控件。 */
+export const groups = {
+  title: '分组',
+  subtitle: '访问规则在分组之间生效',
+  create: '新建分组',
+  loadFailed: '无法加载分组',
+  colName: '名字',
+  colNodes: '节点',
+  colRules: '规则',
+  builtin: '内置',
+  builtinTip: '包含所有节点，不能改名或删除',
+  members: '成员',
+  membersOf: (name: string) => `${name} 的成员`,
+  membersHide: '收起成员',
+  allMembers: '所有节点都在 All 里',
+  noMembers: '没有节点',
+  addMember: '添加节点',
+  addMemberTo: (name: string) => `向 ${name} 添加节点`,
+  noCandidates: '所有节点都已在这个分组里',
+  removeMember: (node: string, group: string) => `从 ${group} 移除 ${node}`,
+  added: (node: string, group: string) => `${node} 已添加到 ${group}`,
+  removed: (node: string, group: string) => `${node} 已从 ${group} 移除`,
+  menuRename: '改名…',
+  menuDelete: '删除…',
+  nameLabel: '名字',
+  createTitle: '新建分组',
+  createSubmit: '新建分组',
+  created: (name: string) => `分组 ${name} 已创建`,
+  renameTitle: (name: string) => `给 ${name} 改名`,
+  renameSubmit: '改名',
+  renamed: (from: string, to: string) => `分组 ${from} 已改名为 ${to}`,
+  deleteTitle: (name: string) => `删除分组 ${name}？`,
+  deleteImpact: (nodes: number, rules: number) => {
+    const parts = [
+      nodes > 0 ? `它将从 ${nodes} 个节点上移除。` : null,
+      rules > 0 ? `用到它的 ${rules} 条规则一并删除，依靠它们的访问随之撤销。` : null,
+    ].filter((part): part is string => part !== null)
+    return parts.length === 0 ? null : parts.join('')
+  },
+  deleteConfirm: '删除分组',
+  deleted: (name: string) => `分组 ${name} 已删除`,
+  focusMissing: (id: number) => `分组 #${id} 已删除`,
+
+  /** 节点、注册令牌上的分组：只能从已有的分组里选，输入只是筛选。 */
+  picker: {
+    placeholder: '选择分组',
+    pickOne: '选择一个分组',
+    search: '搜索分组',
+    options: '分组',
+    remove: (group: string) => `移除分组 ${group}`,
+    allTip: '所有节点都在 All 里，不能移除',
+    noneFound: '没有匹配的分组',
+    noGroups: '还没有别的分组',
+    more: (n: number, list: string) => `另有 ${n} 个：${list}`,
+    manage: '管理分组',
+  },
+}

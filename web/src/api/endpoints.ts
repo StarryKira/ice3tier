@@ -7,9 +7,11 @@ import {
   type CreatedCredential,
   type CreatedEnrollToken,
   type CreateEnrollToken,
+  type CreateGroup,
   type CreateNetwork,
   type CreateRule,
   type Credential,
+  type DeletedGroup,
   type EnrollTokenInfo,
   type ExitInput,
   type ExitView,
@@ -17,6 +19,9 @@ import {
   type ForceUpdate,
   type Forward,
   type ForwardInput,
+  type Group,
+  type GroupId,
+  type GroupMembers,
   type Listener,
   type ListenerInput,
   type LogEntry,
@@ -35,8 +40,6 @@ import {
   type PathView,
   type RelayEnabled,
   type RelayInput,
-  type RenamedTag,
-  type RenameTag,
   type ResumeUpdate,
   type RouteMatrix,
   type RouteTable,
@@ -44,6 +47,7 @@ import {
   type Status,
   type Succeed,
   type UpdateCredential,
+  type UpdateGroup,
   type UpdateNetwork,
   type UpdateNode,
   type UpdateOverview,
@@ -148,9 +152,25 @@ export const api = {
   exits: (network: NetworkId) => request<ExitView[]>('GET', `${net(network)}/exits`),
   exit: (network: NetworkId, node: NodeId) => request<ExitView>('GET', `${net(network)}/exits/${node}`),
 
-  /** 节点上的、规则里的、还没用掉的注册令牌预设的，一起改。新名字原来就有人用时两组合成一组。 */
-  renameTag: (network: NetworkId, body: RenameTag) =>
-    request<RenamedTag>('POST', `${net(network)}/tags/rename`, { body }),
+  /** `All` 在最前面，其余按名字排（不分大小写）。每个带着成员和用到它的规则。 */
+  groups: (network: NetworkId) => request<Group[]>('GET', `${net(network)}/groups`),
+  createGroup: (network: NetworkId, body: CreateGroup) => request<Group>('POST', `${net(network)}/groups`, { body }),
+  /** 删除之前用它说出会影响什么：成员和一起删掉的规则。 */
+  group: (network: NetworkId, group: GroupId) => request<Group>('GET', `${net(network)}/groups/${group}`),
+  /** 改名不改变谁能访问谁：规则记的是编号。 */
+  updateGroup: (network: NetworkId, group: GroupId, body: UpdateGroup) =>
+    request<Group>('PATCH', `${net(network)}/groups/${group}`, { body }),
+  /** 从成员上去掉、从预设了它的令牌上去掉、删掉用到它的规则，在同一个事务里。应答是 200，不是 204。 */
+  deleteGroup: (network: NetworkId, group: GroupId) =>
+    request<DeletedGroup>('DELETE', `${net(network)}/groups/${group}`),
+  /** 一次加入、移出几个节点：要么全部做到，要么一个都不改。 */
+  setGroupMembers: (network: NetworkId, group: GroupId, body: GroupMembers) =>
+    request<Group>('PATCH', `${net(network)}/groups/${group}/nodes`, { body }),
+  addGroupMember: (network: NetworkId, group: GroupId, node: NodeId) =>
+    request<Group>('PUT', `${net(network)}/groups/${group}/nodes/${node}`),
+  /** 应答是改完之后的分组，不是 204。 */
+  removeGroupMember: (network: NetworkId, group: GroupId, node: NodeId) =>
+    request<Group>('DELETE', `${net(network)}/groups/${group}/nodes/${node}`),
 
   pairs: (network: NetworkId) => request<PairView[]>('GET', `${net(network)}/pairs`),
   setPair: (network: NetworkId, a: NodeId, b: NodeId, body: PairInput) =>

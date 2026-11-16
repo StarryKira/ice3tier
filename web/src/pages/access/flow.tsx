@@ -95,7 +95,7 @@ export function GraphCanvas<N extends Node, E extends Edge>(props: ReactFlowProp
       deleteKeyCode={null}
       {...rest}
     >
-      {/* 左上角：标签沿一个圆排开，四个角是空的；左下角留给"未打标签"的那个点，右下角有画图库的署名。 */}
+      {/* 左上角：分组沿一个圆排开，四个角是空的；左下角留给"只在 All 里"的那个点，右下角有画图库的署名。 */}
       <Controls showInteractive={false} position="top-left" />
       <FitOnResize />
       {children}

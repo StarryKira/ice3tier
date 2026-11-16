@@ -1,19 +1,18 @@
+import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 
 import { fieldError, formError, formErrorDetail, formFailure } from '@/api/formErrors'
 import { api } from '@/api/endpoints'
-import { useAction } from '@/api/queries'
-import { type Network, type Node } from '@/api/types'
+import { q, useAction } from '@/api/queries'
+import { type GroupRef, type Network, type Node } from '@/api/types'
 import { FormDialog } from '@/components/form-dialog'
-import { TagInput } from '@/components/tags'
+import { GroupPicker, GroupsLink } from '@/components/groups'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogBody, DialogContent, DialogFooter } from '@/components/ui/dialog'
 import { Field } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { t } from '@/i18n'
 import { validateName } from '@/lib/validate'
-
-import { useKnownTags } from './hooks'
 
 interface NodeDialogProps {
   network: Network
@@ -72,7 +71,7 @@ export function RenameNodeDialog({ network, node, open, onClose }: NodeDialogPro
   )
 }
 
-interface NodeTagsEditorProps {
+interface NodeGroupsEditorProps {
   network: Network
   node: Node
   id?: string
@@ -81,36 +80,37 @@ interface NodeTagsEditorProps {
   autoFocus?: boolean
 }
 
-/** 节点的标签。页面上的单个控件：改了立即生效，弹一条提示。 */
-export function NodeTagsEditor({ network, node, ...props }: NodeTagsEditorProps) {
-  const known = useKnownTags(network)
+/** 节点所在的分组：只能从已有的分组里选。页面上的单个控件：改了立即生效，弹一条提示。 */
+export function NodeGroupsEditor({ network, node, ...props }: NodeGroupsEditorProps) {
+  const groups = useQuery(q.groups(network.id))
   const save = useAction(network.id, {
-    mutationFn: (tags: string[]) => api.updateNode(network.id, node.id, { tags }),
-    success: t.nodes.tagsSaved,
+    mutationFn: (next: GroupRef[]) => api.updateNode(network.id, node.id, { groups: next.map((group) => group.id) }),
+    success: t.nodes.groupsSaved,
   })
-  // 请求还在路上时先显示刚选的，免得标签闪回去再出现。
-  const value = save.isPending ? save.variables : node.tags
+  // 请求还在路上时先显示刚选的，免得分组闪回去再出现。
+  const value = save.isPending ? save.variables : node.groups
   return (
-    <TagInput
+    <GroupPicker
       {...props}
       value={value}
-      onChange={(tags) => save.mutate(tags)}
-      suggestions={known}
+      onChange={(next) => save.mutate(next)}
+      groups={groups.data ?? []}
       disabled={save.isPending}
     />
   )
 }
 
-export function NodeTagsDialog({ network, node, open, onClose }: NodeDialogProps) {
+export function NodeGroupsDialog({ network, node, open, onClose }: NodeDialogProps) {
   return (
     <Dialog open={open} onOpenChange={(next) => (next ? undefined : onClose())}>
-      <DialogContent title={t.nodes.tagsTitle(node.name)} description={t.nodes.tagsHint} size="sm">
+      <DialogContent title={t.nodes.groupsTitle(node.name)} description={t.nodes.groupsHint} size="sm">
         <DialogBody>
-          <NodeTagsEditor network={network} node={node} aria-label={t.nodes.tagsTitle(node.name)} autoFocus />
+          <NodeGroupsEditor network={network} node={node} aria-label={t.nodes.groupsTitle(node.name)} autoFocus />
         </DialogBody>
-        <DialogFooter>
+        <DialogFooter className="justify-between">
+          <GroupsLink network={network.id} onClick={onClose} />
           <Button variant="primary" onClick={onClose}>
-            {t.nodes.tagsDone}
+            {t.nodes.groupsDone}
           </Button>
         </DialogFooter>
       </DialogContent>

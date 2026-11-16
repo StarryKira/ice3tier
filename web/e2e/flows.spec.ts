@@ -6,7 +6,7 @@ import { clearToasts, expectToast, goTo, goToAdmin, literal, t } from './helpers
 
 /**
  * 从一个空的 controller 开始，把主要的流程照着用户的做法走一遍：
- * 登录 → 建网络 → 生成注册令牌、拿到加入命令 → 节点加入 → 打标签 → 加规则、关系图跟着变 →
+ * 登录 → 建网络 → 建分组 → 生成注册令牌、拿到加入命令 → 节点加入 → 编辑节点的分组 → 加规则、关系图跟着变 →
  * 启用出口（节点没有声明时怎么说、声明之后怎么变）→ 签发凭据（只显示一次）→ 建、删端口转发 → 退出。
  *
  * 都是真的：真的 controller，界面给出的那一行加入命令原样交给 shell 执行，节点是真的 `i3t`。
@@ -17,7 +17,7 @@ interface ApiNode {
   id: number
   name: string
   virtual_ip: string
-  tags: string[]
+  groups: { id: number; name: string }[]
   online: boolean
   declared: { exit: boolean; relay: boolean; forward: boolean }
   exit: { ports: number[] | null } | null
@@ -28,7 +28,7 @@ const NET = '/networks/1'
 let controller: Controller
 let page: Page
 
-/** 两个节点：`server` 是带 servers 标签、声明了可以作为转发目标的那个；`laptop` 是后加入的。 */
+/** 两个节点：`server` 是在 servers 分组里、声明了可以作为转发目标的那个；`laptop` 是后加入的。 */
 let server: { handle: NodeHandle; id: number; name: string; ip: string }
 let laptop: { handle: NodeHandle; id: number; name: string; ip: string }
 
@@ -43,7 +43,7 @@ function joinCommand(): Locator {
 /** 关系图上的一条规则线。画图的库把线画成带说明文字的一组 SVG。 */
 function ruleEdge(label: string, enabled: boolean): Locator {
   const state = enabled ? t.access.graph.edgeEnabled : t.access.graph.edgeDisabled
-  return page.getByTestId('tag-graph').locator(`[aria-label="${t.access.graph.edgeLabel(label, state)}"]`)
+  return page.getByTestId('group-graph').locator(`[aria-label="${t.access.graph.edgeLabel(label, state)}"]`)
 }
 
 /**
@@ -54,8 +54,8 @@ function nodeOption(node: { ip: string }): Locator {
   return page.getByRole('option', { name: new RegExp(`${node.ip.replaceAll('.', '\\.')}(?!\\d)`) })
 }
 
-function tagPoint(tag: string, members: number): Locator {
-  return page.getByTestId('tag-graph').locator(`[aria-label="${t.access.graph.tagNodeLabel(tag, members)}"]`)
+function groupPoint(group: string, members: number): Locator {
+  return page.getByTestId('group-graph').locator(`[aria-label="${t.access.graph.groupNodeLabel(group, members)}"]`)
 }
 
 test.describe.configure({ mode: 'serial' })
@@ -117,9 +117,29 @@ test('建第一个网络', async () => {
   await expect(page).toHaveURL(/\/n\/1\/overview$/)
   const networks = await controller.api<{ name: string; cidr: string }[]>('GET', '/networks')
   expect(networks).toMatchObject([{ name: 'home', cidr: '10.66.0.0/16' }])
-  // 新网络自带默认规则。
-  const rules = await controller.api<{ src: string; dst: string; enabled: boolean }[]>('GET', `${NET}/rules`)
-  expect(rules).toMatchObject([{ src: 'all', dst: 'all', enabled: true }])
+  // 新网络自带内置分组 All 和默认规则 All ⇄ All。
+  const rules = await controller.api<{ src: { name: string }; dst: { name: string }; enabled: boolean }[]>(
+    'GET',
+    `${NET}/rules`,
+  )
+  expect(rules).toMatchObject([{ src: { name: 'All' }, dst: { name: 'All' }, enabled: true }])
+  await clearToasts(page)
+})
+
+test('建两个分组：servers、laptops', async () => {
+  const g = t.groups
+  await goTo(page, t.nav.groups)
+  await expect(page.getByTestId('group-row-All')).toContainText(g.builtin)
+  for (const name of ['servers', 'laptops']) {
+    await page.getByRole('button', { name: g.create }).click()
+    const dialog = page.getByRole('dialog', { name: g.createTitle })
+    await dialog.getByRole('textbox', { name: g.nameLabel }).fill(name)
+    await dialog.getByRole('button', { name: g.createSubmit }).click()
+    await expectToast(page, g.created(name))
+    await expect(dialog).toBeHidden()
+  }
+  const groups = await controller.api<{ name: string; builtin: boolean }[]>('GET', `${NET}/groups`)
+  expect(groups.map((group) => group.name)).toEqual(['All', 'laptops', 'servers'])
   await clearToasts(page)
 })
 
@@ -135,8 +155,8 @@ test('生成注册令牌，拿到加入命令，节点加入后出现在界面�
   await expect(dialog.getByRole('button', { name: t.addNode.copyCommand })).toBeDisabled()
   expect(await controller.api<unknown[]>('GET', `${NET}/tokens`)).toHaveLength(0)
 
-  // 标签写在令牌上；"可以承担"是命令的参数。
-  await dialog.getByRole('combobox', { name: t.addNode.tagsLabel }).fill('servers')
+  // 分组写在令牌上，只能从已有的里面选；"可以承担"是命令的参数。
+  await dialog.getByRole('combobox', { name: t.addNode.groupsLabel }).fill('serv')
   await page.keyboard.press('Enter')
   await dialog.getByRole('checkbox', { name: t.addNode.declareForward }).check()
   await expect(joinCommand()).toHaveText(`echo ${t.addNode.tokenPlaceholder} | i3t join --can-forward`)
@@ -145,8 +165,8 @@ test('生成注册令牌，拿到加入命令，节点加入后出现在界面�
   await expect(joinCommand()).toHaveText(/^echo i3t-[A-Za-z0-9_-]+ \| i3t join --can-forward$/)
   await expect(dialog.getByText(t.addNode.shownOnce)).toBeVisible()
   await expect(dialog.getByText(t.addNode.waiting)).toBeVisible()
-  const tokens = await controller.api<{ tags: string[] }[]>('GET', `${NET}/tokens`)
-  expect(tokens).toMatchObject([{ tags: ['servers'] }])
+  const tokens = await controller.api<{ groups: { name: string }[] }[]>('GET', `${NET}/tokens`)
+  expect(tokens).toMatchObject([{ groups: [{ name: 'servers' }] }])
 
   // 复制出去的就是屏幕上的那一行。
   await dialog.getByRole('button', { name: t.addNode.copyCommand }).click()
@@ -162,7 +182,7 @@ test('生成注册令牌，拿到加入命令，节点加入后出现在界面�
   if (joined === undefined) throw new Error('controller 上没有节点')
   expect(joined).toMatchObject({
     virtual_ip: '10.66.0.1',
-    tags: ['servers'],
+    groups: [{ name: 'servers' }],
     declared: { exit: false, relay: false, forward: true },
   })
   server = { handle, id: joined.id, name: joined.name, ip: joined.virtual_ip }
@@ -217,55 +237,55 @@ test('在「注册」页新建令牌：关掉对话框后令牌留在列表里�
   await expect(page.getByText(t.tokens.emptyTitle)).toBeVisible()
 })
 
-test('给节点打标签', async () => {
+test('在节点列表上编辑节点的分组：只能选已有的', async () => {
   await goTo(page, t.nav.nodes)
   const row = page.getByTestId(`node-row-${laptop.name}`)
-  await expect(row.getByText(t.nodes.addTags)).toBeVisible()
-  await row.getByRole('button', { name: t.nodes.editTagsOf(laptop.name) }).click()
+  await expect(row.getByText(t.nodes.addGroups)).toBeVisible()
+  await row.getByRole('button', { name: t.nodes.editGroupsOf(laptop.name) }).click()
 
-  const dialog = page.getByRole('dialog', { name: t.nodes.tagsTitle(laptop.name) })
+  const dialog = page.getByRole('dialog', { name: t.nodes.groupsTitle(laptop.name) })
   const input = dialog.getByRole('combobox')
-  // 内置的 all 不能打在节点上。
-  await input.fill('all')
+  // 输入只是筛选：没有这个分组时什么也不会新建。
+  await input.fill('nope')
+  await expect(page.getByText(t.groups.picker.noneFound)).toBeVisible()
   await page.keyboard.press('Enter')
-  await expect(dialog.getByText(t.tags.allIsBuiltin)).toBeVisible()
-  // 写法不对的标签在这里就拦下。
-  await input.fill('my.tag')
-  await page.keyboard.press('Enter')
-  await expect(dialog.getByText(t.validate.tagCharset)).toBeVisible()
+  await input.fill('')
 
-  // 改了立即生效，不用点保存。大写转成小写。
-  await input.fill('Laptops')
+  // 改了立即生效，不用点保存。
+  await input.fill('lap')
   await page.keyboard.press('Enter')
-  await expectToast(page, t.nodes.tagsSaved)
-  await expect(dialog.getByRole('button', { name: t.tags.remove('laptops') })).toBeVisible()
-  await dialog.getByRole('button', { name: t.nodes.tagsDone }).click()
+  await expectToast(page, t.nodes.groupsSaved)
+  await expect(dialog.getByRole('button', { name: t.groups.picker.remove('laptops') })).toBeVisible()
+  await dialog.getByRole('button', { name: t.nodes.groupsDone }).click()
 
   await expect(row).toContainText('laptops')
   const node = (await apiNodes()).find((candidate) => candidate.id === laptop.id)
-  expect(node?.tags).toEqual(['laptops'])
+  expect(node?.groups.map((group) => group.name)).toEqual(['laptops'])
+  const groups = await controller.api<{ id: number; name: string }[]>('GET', `${NET}/groups`)
+  expect(groups).toHaveLength(3)
   await clearToasts(page)
 
-  // 按标签筛选：只剩它。筛选写在地址里。
+  // 按分组筛选：只剩它。筛选写在地址里，写的是分组的编号。
+  const laptops = groups.find((group) => group.name === 'laptops')?.id ?? 0
   await page.getByRole('button', { name: t.nodes.filter }).click()
   await page.getByRole('checkbox', { name: 'laptops' }).check()
   await page.keyboard.press('Escape')
   await expect(page.getByTestId(`node-row-${server.name}`)).toBeHidden()
   await expect(row).toBeVisible()
-  await expect(page).toHaveURL(/[?&]tag=laptops/)
+  await expect(page).toHaveURL(new RegExp(`[?&]group=${laptops}(?!\\d)`))
   await page.getByRole('button', { name: t.nodes.clearAll }).click()
   await expect(page.getByTestId(`node-row-${server.name}`)).toBeVisible()
 })
 
-test('加一条规则，关系图跟着变；停用默认规则后按标签收紧', async () => {
+test('加一条规则，关系图跟着变；停用默认规则后按分组收紧', async () => {
   await goTo(page, t.nav.access)
-  await expect(page.getByTestId('tag-graph')).toBeVisible()
-  // 现在：三个标签，一条默认规则画成 all 上的一个环。
-  await expect(tagPoint('all', 2)).toBeVisible()
-  await expect(tagPoint('servers', 1)).toBeVisible()
-  await expect(tagPoint('laptops', 1)).toBeVisible()
+  await expect(page.getByTestId('group-graph')).toBeVisible()
+  // 现在：三个分组，一条默认规则画成 All 上的一个环。
+  await expect(groupPoint('All', 2)).toBeVisible()
+  await expect(groupPoint('servers', 1)).toBeVisible()
+  await expect(groupPoint('laptops', 1)).toBeVisible()
   await expect(ruleEdge('default', true)).toHaveCount(1)
-  await expect(page.getByTestId('tag-graph').locator('.react-flow__edge')).toHaveCount(1)
+  await expect(page.getByTestId('group-graph').locator('.react-flow__edge')).toHaveCount(1)
 
   const d = t.access.dialog
   await page.getByRole('button', { name: t.access.newRule }).click()
@@ -289,15 +309,14 @@ test('加一条规则，关系图跟着变；停用默认规则后按标签收�
   await expect(dialog).toBeHidden()
 
   // 列表里多了一行，图上多了一条线。
-  const rules = await controller.api<{ id: number; name: string; src: string; dst: string; direction: string }[]>(
-    'GET',
-    `${NET}/rules`,
-  )
+  const rules = await controller.api<
+    { id: number; name: string; src: { name: string }; dst: { name: string }; direction: string }[]
+  >('GET', `${NET}/rules`)
   const ssh = rules.find((rule) => rule.name === 'ssh')
-  expect(ssh).toMatchObject({ src: 'laptops', dst: 'servers', direction: 'one_way' })
+  expect(ssh).toMatchObject({ src: { name: 'laptops' }, dst: { name: 'servers' }, direction: 'one_way' })
   await expect(page.getByTestId(`rule-row-${ssh?.id ?? 0}`)).toBeVisible()
   await expect(ruleEdge('ssh', true)).toHaveCount(1)
-  await expect(page.getByTestId('tag-graph').locator('.react-flow__edge')).toHaveCount(2)
+  await expect(page.getByTestId('group-graph').locator('.react-flow__edge')).toHaveCount(2)
   // 界面上说出来：默认规则开着时别的规则不起限制作用。
   await expect(page.getByText(t.access.allOpenNotice)).toBeVisible()
   await clearToasts(page)
@@ -334,7 +353,7 @@ test('加一条规则，关系图跟着变；停用默认规则后按标签收�
   const nodeGraph = page.getByTestId('node-graph')
   await expect(nodeGraph.getByText(laptop.name, { exact: true })).toBeVisible()
   await expect(nodeGraph.getByText(server.name, { exact: true })).toHaveCount(1)
-  await page.getByRole('radio', { name: t.access.graph.byTag }).click()
+  await page.getByRole('radio', { name: t.access.graph.byGroup }).click()
 })
 
 test('启用出口：节点没有声明时说明原因和要执行的命令，声明一到开关自己变为可用', async () => {

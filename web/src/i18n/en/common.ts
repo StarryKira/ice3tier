@@ -96,6 +96,11 @@ export const errors: Messages['errors'] = {
     no_update: 'No update available',
     internal: 'Internal controller error',
   },
+  group: {
+    notFound: 'Group not found',
+    nameTaken: 'A group with this name exists',
+    builtin: "The built-in group All can't be changed",
+  },
 }
 
 export const confirm: Messages['confirm'] = {
@@ -108,9 +113,9 @@ export const validate: Messages['validate'] = {
   nameCharset: 'Use letters, digits and hyphens only',
   nameHyphen: "Can't start or end with a hyphen",
   nameAllDigits: "Can't be all digits",
-  tagRequired: 'Tag is required',
-  tagTooLong: (max) => `Up to ${max} characters`,
-  tagCharset: 'Use letters, digits, hyphens and underscores only',
+  groupRequired: 'Name is required',
+  groupTooLong: (max) => `Up to ${max} characters`,
+  groupCharset: 'Use letters, digits, hyphens and underscores only',
   titleRequired: 'Name is required',
   titleTooLong: (max) => `Up to ${max} characters`,
   cidrRequired: 'Range is required',
@@ -145,21 +150,8 @@ export const time: Messages['time'] = {
   days: (n) => plural(n, 'day', 'days'),
 }
 
-export const tags: Messages['tags'] = {
-  remove: (tag) => `Remove tag ${tag}`,
-  more: (n, list) => `${n} more: ${list}`,
-  allIsBuiltin: '"all" is built in and covers every node',
-  placeholder: 'Select or type a new tag',
-  suggestions: 'Tags',
-  create: (tag) => `Create tag ${tag}`,
-  searchPlaceholder: 'Search or type a new tag',
-  pick: 'Select a tag',
-  noneFound: 'No matching tags',
-  builtinAll: 'Built-in: all nodes',
-}
-
 export const select: Messages['select'] = {
   nodePlaceholder: 'Select a node',
-  nodeSearch: 'Search name, virtual IP or tag',
+  nodeSearch: 'Search name, virtual IP or group',
   nodeEmpty: 'No matching nodes',
 }

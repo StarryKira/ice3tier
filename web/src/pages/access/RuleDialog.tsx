@@ -3,25 +3,25 @@ import { useMemo, useState } from 'react'
 import { api } from '@/api/endpoints'
 import { formError, formErrorDetail, formFailure } from '@/api/formErrors'
 import { useAction } from '@/api/queries'
-import { type AccessGraph, type Direction, type Network, type Rule } from '@/api/types'
+import { type AccessGraph, type Direction, type GroupId, type GroupRef, type Network, type Rule } from '@/api/types'
 import { accessDiff, type RuleLike, sameRule } from '@/access/reach'
 import { Combobox, type ComboOption } from '@/components/combobox'
 import { FormDialog } from '@/components/form-dialog'
+import { GroupChip } from '@/components/groups'
 import { Notice } from '@/components/notice'
 import { ruleLabel } from '@/lib/rules'
-import { TagChip } from '@/components/tags'
 import { Field } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Segmented } from '@/components/ui/segmented'
 import { Switch } from '@/components/ui/switch'
 import { t } from '@/i18n'
-import { ALL_TAG, normalizeTag, validateTag, validateTitle } from '@/lib/validate'
+import { validateTitle } from '@/lib/validate'
 
 const d = t.access.dialog
 
 export interface RuleDraft {
-  src?: string
-  dst?: string
+  src?: GroupId
+  dst?: GroupId
 }
 
 interface RuleDialogProps {
@@ -29,71 +29,77 @@ interface RuleDialogProps {
   graph: AccessGraph
   /** 要编辑的规则；新建时是 `null`。 */
   rule: Rule | null
-  /** 新建时预填的两个标签（从访问检查的"新建规则"带过来）。 */
+  /** 新建时预填的两个分组（从访问检查的"新建规则"带过来）。 */
   draft?: RuleDraft
   open: boolean
   onClose: () => void
 }
 
 /**
- * 新建和编辑规则：一个小对话框，一屏。规则摆成一句话的形状——标签 a、方向、标签 b——
- * 下面用白话把它的意思说出来，再说保存之后有什么影响。
+ * 新建和编辑规则：一个小对话框，一屏。规则摆成一句话的形状——分组 a、方向、分组 b——
+ * 下面用白话把它的意思说出来，再说保存之后有什么影响。分组只能从已有的里面选。
  */
 export function RuleDialog({ network, graph, rule, draft, open, onClose }: RuleDialogProps) {
-  const [src, setSrc] = useState<string | null>(rule?.src ?? draft?.src ?? null)
-  const [dst, setDst] = useState<string | null>(rule?.dst ?? draft?.dst ?? null)
+  const [src, setSrc] = useState<GroupId | null>(rule?.src.id ?? draft?.src ?? null)
+  const [dst, setDst] = useState<GroupId | null>(rule?.dst.id ?? draft?.dst ?? null)
   const [direction, setDirection] = useState<Direction>(rule?.direction ?? 'both')
   const [name, setName] = useState(rule?.name ?? '')
   const [enabled, setEnabled] = useState(rule?.enabled ?? true)
   const [touched, setTouched] = useState(false)
 
   const save = useAction(network.id, {
-    mutationFn: (body: { src: string; dst: string; direction: Direction; name: string; enabled: boolean }) =>
+    mutationFn: (body: { src: GroupId; dst: GroupId; direction: Direction; name: string; enabled: boolean }) =>
       rule === null ? api.createRule(network.id, body) : api.updateRule(network.id, rule.id, body),
     success: (saved) => (rule === null ? d.created(ruleLabel(saved)) : d.saved(ruleLabel(saved))),
     toastError: false,
   })
   const failure = formFailure(save.error, {})
 
-  const memberCount = (tag: string) => graph.tags.find((entry) => entry.tag === tag)?.nodes.length ?? 0
-  const options = useMemo<ComboOption<string>[]>(
+  const groupOf = (id: GroupId) => graph.groups.find((group) => group.id === id)
+  const memberCount = (id: GroupId) => groupOf(id)?.nodes.length ?? 0
+  // 规则写成 `a ⇄ b` 时用的名字；列表里没有（刚删掉）时写编号。
+  const refOf = (id: GroupId): GroupRef => ({ id, name: groupOf(id)?.name ?? `#${id}` })
+  const options = useMemo<ComboOption<GroupId>[]>(
     () =>
-      graph.tags.map((entry) => ({
-        value: entry.tag,
-        label: entry.tag,
-        hint: entry.tag === ALL_TAG ? t.tags.builtinAll : t.access.graph.members(entry.nodes.length),
+      graph.groups.map((group) => ({
+        value: group.id,
+        label: group.name,
+        hint: t.access.graph.members(group.nodes.length),
       })),
-    [graph.tags],
+    [graph.groups],
   )
-  const create = { label: t.tags.create, validate: validateTag, normalize: normalizeTag }
 
   const others = graph.rules.filter((other) => other.id !== rule?.id)
   const duplicate =
-    src !== null && dst !== null ? others.find((other) => sameRule(other, { src, dst, direction })) : undefined
+    src !== null && dst !== null
+      ? others.find((other) => sameRule(other, { src: { id: src }, dst: { id: dst }, direction }))
+      : undefined
 
   // 影响：把这条规则换成现在填的样子，前后一比。
   const impact = useMemo(() => {
     if (src === null || dst === null) return null
-    const proposed: RuleLike = { src, dst, direction, enabled }
-    return accessDiff(graph.tags, graph.rules, [...others, proposed])
+    const proposed: RuleLike = { src: { id: src }, dst: { id: dst }, direction, enabled }
+    return accessDiff(graph.groups, graph.rules, [...others, proposed])
     // others 由 graph.rules 和 rule 推出，不必单独列。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [graph.tags, graph.rules, rule?.id, src, dst, direction, enabled])
+  }, [graph.groups, graph.rules, rule?.id, src, dst, direction, enabled])
 
   const nameProblem = validateTitle(name, false)
   const dirty =
     rule === null
       ? src !== (draft?.src ?? null) || dst !== (draft?.dst ?? null) || name !== '' || direction !== 'both'
-      : src !== rule.src ||
-        dst !== rule.dst ||
+      : src !== rule.src.id ||
+        dst !== rule.dst.id ||
         direction !== rule.direction ||
         name !== rule.name ||
         enabled !== rule.enabled
 
+  const nodesOf = (id: GroupId) =>
+    groupOf(id)?.builtin === true ? d.nodesOfAll(memberCount(id)) : d.nodesOf(refOf(id).name, memberCount(id))
   let sentence: string | null = null
   if (src !== null && dst !== null) {
-    const a = d.nodesOf(src, memberCount(src))
-    const b = d.nodesOf(dst, memberCount(dst))
+    const a = nodesOf(src)
+    const b = nodesOf(dst)
     if (src === dst) sentence = d.sentenceSame(a)
     else sentence = direction === 'both' ? d.sentenceBoth(a, b) : d.sentenceOneWay(a, b)
   }
@@ -113,8 +119,11 @@ export function RuleDialog({ network, graph, rule, draft, open, onClose }: RuleD
     save.mutate({ src, dst, direction, name: name.trim(), enabled }, { onSuccess: onClose })
   }
 
-  const fallbackName = src !== null && dst !== null ? ruleLabel({ name: '', src, dst, direction }) : 'a ⇄ b'
-  const emptyTags = [src, dst].filter((tag): tag is string => tag !== null && tag !== ALL_TAG && memberCount(tag) === 0)
+  const fallbackName =
+    src !== null && dst !== null ? ruleLabel({ name: '', src: refOf(src), dst: refOf(dst), direction }) : 'a ⇄ b'
+  const emptyGroups = [...new Set([src, dst])].filter(
+    (id): id is GroupId => id !== null && groupOf(id)?.builtin !== true && memberCount(id) === 0,
+  )
 
   return (
     <FormDialog
@@ -131,17 +140,16 @@ export function RuleDialog({ network, graph, rule, draft, open, onClose }: RuleD
       onSubmit={submit}
     >
       <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-start gap-3">
-        <Field label={d.srcLabel} error={touched && src === null ? d.tagRequired : null}>
+        <Field label={d.srcLabel} error={touched && src === null ? d.groupRequired : null}>
           {(props) => (
             <Combobox
               {...props}
               value={src}
               onChange={setSrc}
               options={options}
-              placeholder={t.tags.pick}
-              searchPlaceholder={t.tags.searchPlaceholder}
-              emptyText={t.tags.noneFound}
-              create={create}
+              placeholder={t.groups.picker.pickOne}
+              searchPlaceholder={t.groups.picker.search}
+              emptyText={t.groups.picker.noneFound}
             />
           )}
         </Field>
@@ -159,23 +167,22 @@ export function RuleDialog({ network, graph, rule, draft, open, onClose }: RuleD
             />
           )}
         </Field>
-        <Field label={d.dstLabel} error={touched && dst === null ? d.tagRequired : null}>
+        <Field label={d.dstLabel} error={touched && dst === null ? d.groupRequired : null}>
           {(props) => (
             <Combobox
               {...props}
               value={dst}
               onChange={setDst}
               options={options}
-              placeholder={t.tags.pick}
-              searchPlaceholder={t.tags.searchPlaceholder}
-              emptyText={t.tags.noneFound}
-              create={create}
+              placeholder={t.groups.picker.pickOne}
+              searchPlaceholder={t.groups.picker.search}
+              emptyText={t.groups.picker.noneFound}
             />
           )}
         </Field>
       </div>
 
-      {/* 两个标签都选好了才有这一块：用一句话说出规则的意思，再说保存之后的影响。 */}
+      {/* 两个分组都选好了才有这一块：用一句话说出规则的意思，再说保存之后的影响。 */}
       <div aria-live="polite">
         {sentence === null ? null : (
           <div className="rounded-md bg-muted/70 px-4 py-3 text-sm">
@@ -202,11 +209,11 @@ export function RuleDialog({ network, graph, rule, draft, open, onClose }: RuleD
       </div>
 
       {duplicate !== undefined ? <Notice tone="danger">{d.duplicate(ruleLabel(duplicate))}</Notice> : null}
-      {emptyTags.map((tag) => (
-        <Notice key={tag} tone="warn">
+      {emptyGroups.map((id) => (
+        <Notice key={id} tone="warn">
           <span className="inline-flex flex-wrap items-center gap-1.5">
-            <TagChip tag={tag} />
-            {d.emptyTag}
+            <GroupChip name={refOf(id).name} />
+            {d.emptyGroup}
           </span>
         </Notice>
       ))}

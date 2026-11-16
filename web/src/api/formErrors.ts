@@ -1,3 +1,6 @@
+import { t } from '@/i18n'
+import { MAX_GROUP_NAME_LEN } from '@/lib/validate'
+
 import { ApiError, errorDetail, errorMessage } from './client'
 import { type KnownErrorCode } from './types'
 
@@ -28,6 +31,28 @@ export function formFailure<F extends string>(
     if (field !== undefined) return { field, message, detail }
   }
   return { field: null, message, detail }
+}
+
+/**
+ * 新建、改名分组被拒绝时（文档 §18.1）：名字的写法不对、被占用，写在名字下面，用和提交之前的校验一样的话；
+ * 别的写在表单底部。
+ */
+export function groupNameFailure(error: unknown): FormFailure<'name'> | null {
+  if (error instanceof ApiError) {
+    if (error.code === 'name_taken') return { field: 'name', message: errorMessage(error), detail: null }
+    if (error.code === 'invalid_request' && error.field === 'name') {
+      const message =
+        error.what === 'empty'
+          ? t.validate.groupRequired
+          : error.what === 'too_long'
+            ? t.validate.groupTooLong(MAX_GROUP_NAME_LEN)
+            : error.what === 'malformed'
+              ? t.validate.groupCharset
+              : null
+      if (message !== null) return { field: 'name', message, detail: null }
+    }
+  }
+  return formFailure(error, {})
 }
 
 /** 某个字段该显示的服务器错误。 */

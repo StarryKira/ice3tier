@@ -18,7 +18,7 @@ export interface LogFilter {
 
 export const EMPTY_LOG_FILTER: LogFilter = { network: null, action: null, ref: null, search: '' }
 
-export const LOG_REF_KINDS = ['network', 'node', 'token', 'rule', 'credential', 'listener', 'forward'] as const
+export const LOG_REF_KINDS = ['network', 'node', 'group', 'token', 'rule', 'credential', 'listener', 'forward'] as const
 
 export function isRefKind(kind: string): kind is LogRefKind {
   return (LOG_REF_KINDS as readonly string[]).includes(kind)
@@ -109,6 +109,8 @@ export function refTarget(ref: LogRef, network: NetworkId | null): string | null
   switch (kind) {
     case 'node':
       return networkPath(network, `nodes/${ref.id}`)
+    case 'group':
+      return `${networkPath(network, 'groups')}?focus=${ref.id}`
     case 'rule':
       return `${networkPath(network, 'access')}?rule=${ref.id}`
     case 'token':

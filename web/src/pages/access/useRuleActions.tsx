@@ -29,7 +29,7 @@ export function useRuleActions(network: Network, graph: AccessGraph) {
 
   const without = (rule: Rule) =>
     accessDiff(
-      graph.tags,
+      graph.groups,
       graph.rules,
       graph.rules.filter((other) => other.id !== rule.id),
     )

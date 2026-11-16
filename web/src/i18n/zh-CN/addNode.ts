@@ -2,8 +2,8 @@
 export const addNode = {
   title: '添加节点',
   optionsTitle: '选项',
-  tagsLabel: '标签',
-  tagsHint: '节点加入时自动带上',
+  groupsLabel: '分组',
+  groupsHint: '节点加入时生效',
   declareLabel: '声明',
   declareRelay: '可作为 relay',
   declareRelayHint: '需要公网可达的端口',
@@ -19,11 +19,11 @@ export const addNode = {
   ipHint: '留空自动分配',
   successorLabel: '继任已下线节点',
   successorClear: '清除',
-  successorHint: '用于重装：接手旧节点的虚拟 IP、名字、标签和配置，旧节点随即删除',
+  successorHint: '用于重装：接手旧节点的虚拟 IP、名字、分组和配置，旧节点随即删除',
   successorPlaceholder: '选择已下线的节点',
   successorEmpty: '没有已下线的节点',
   successorNoIp: '沿用被继任节点的虚拟 IP',
-  lockedNote: '令牌已创建，标签、有效期、虚拟 IP 和继任不能再改',
+  lockedNote: '令牌已创建，分组、有效期、虚拟 IP 和继任不能再改',
 
   platformLabel: '平台',
   platform: {
