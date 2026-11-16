@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "bins/*", "bench/pretest"]
+members = ["crates/*", "bins/*", "bench/pretest", "bench/llmgw"]
 
 [workspace.package]
 # 整个项目一个版本号，用 scripts/bump-version.sh 修改。
