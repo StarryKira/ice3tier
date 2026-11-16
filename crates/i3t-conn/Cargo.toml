@@ -8,12 +8,22 @@ publish = false
 description = "ice3tier 的连接层：端到端连接的契约，以及跑在路由层上的 QUIC 实现"
 
 [dependencies]
+bytes.workspace = true
 i3t-crypto = { path = "../i3t-crypto" }
 i3t-model = { path = "../i3t-model" }
 i3t-path = { path = "../i3t-path" }
 i3t-proto = { path = "../i3t-proto" }
+i3t-relay = { path = "../i3t-relay" }
+i3t-underlay = { path = "../i3t-underlay" }
+quinn.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tracing-subscriber.workspace = true
