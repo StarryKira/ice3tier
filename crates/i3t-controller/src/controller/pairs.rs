@@ -1,6 +1,6 @@
 //! 节点对设置。
 
-use i3t_model::admin::{NetworkId, PairInput, PairSetting};
+use i3t_model::admin::{LogRef, NetworkId, PairInput, PairSetting};
 use i3t_proto::NodeId;
 
 use super::nodes::require_node;
@@ -32,7 +32,8 @@ impl Controller {
             require_node(store, network, a)?;
             require_node(store, network, b)?;
             store.set_pair(a, b, input.keep_alive)?;
-            store.log(now, Some(network), "pair.set", &format!("节点 #{a} 和 #{b}：连接常驻 {}", input.keep_alive))?;
+            let detail = format!("节点 #{a} 和 #{b}：连接常驻 {}", input.keep_alive);
+            store.log_refs(now, Some(network), "pair.set", &detail, &[LogRef::node(a), LogRef::node(b)])?;
             Ok::<_, Error>(())
         })?;
         inner.refresh(network, Seeds::of([a, b]), None)?;
@@ -54,7 +55,13 @@ impl Controller {
             if !store.delete_pair(a, b)? {
                 return Err(Error::NotFound(Entity::PairSetting));
             }
-            store.log(now, Some(network), "pair.delete", &format!("节点 #{a} 和 #{b}：去掉节点对设置"))?;
+            store.log_refs(
+                now,
+                Some(network),
+                "pair.delete",
+                &format!("节点 #{a} 和 #{b}：去掉节点对设置"),
+                &[LogRef::node(a), LogRef::node(b)],
+            )?;
             Ok(())
         })?;
         inner.refresh(network, Seeds::of([a, b]), None)?;

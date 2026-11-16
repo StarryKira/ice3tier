@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use i3t_model::admin::{Listener, ListenerInput, NetworkId};
 use i3t_model::netmap::{self, DefaultAction, ListenerProtocol};
 use i3t_proto::NodeId;
+use i3t_proto::flow::Class;
 use ipnet::IpNet;
 use rusqlite::{OptionalExtension, Row, named_params, params};
 
@@ -46,7 +47,11 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Listener> {
             require_credential: row.get("require_credential")?,
             default_action,
             fixed_exit: row.get::<_, Option<SqlNode>>("fixed_exit")?.map(|node| node.0),
+            class: row.get::<_, Option<Json<Class>>>("class")?.map(|json| json.0),
+            optimistic: row.get("optimistic")?,
         },
+        // 状态不存，由 controller 按节点的上报现填。
+        status: None,
     })
 }
 
@@ -58,8 +63,9 @@ impl Store {
         let config = &input.config;
         let (action, exit) = default_action_columns(config.default_action);
         self.conn.execute(
-            "INSERT INTO listeners (node_id, name, bind, protocol, allow_from, require_credential, default_action, default_exit, fixed_exit)
-             VALUES (:node, :name, :bind, :protocol, :allow_from, :require_credential, :action, :exit, :fixed_exit)",
+            "INSERT INTO listeners (node_id, name, bind, protocol, allow_from, require_credential, default_action, default_exit, fixed_exit,
+                                    class, optimistic)
+             VALUES (:node, :name, :bind, :protocol, :allow_from, :require_credential, :action, :exit, :fixed_exit, :class, :optimistic)",
             named_params! {
                 ":node": SqlNode(input.node),
                 ":name": config.name,
@@ -70,6 +76,8 @@ impl Store {
                 ":action": action,
                 ":exit": exit,
                 ":fixed_exit": config.fixed_exit.map(SqlNode),
+                ":class": config.class.map(Json),
+                ":optimistic": config.optimistic,
             },
         )?;
         Ok(row_id(self.conn.last_insert_rowid())?)
@@ -110,7 +118,7 @@ impl Store {
         self.conn.execute(
             "UPDATE listeners SET node_id = :node, name = :name, bind = :bind, protocol = :protocol, allow_from = :allow_from,
                                   require_credential = :require_credential, default_action = :action, default_exit = :exit,
-                                  fixed_exit = :fixed_exit
+                                  fixed_exit = :fixed_exit, class = :class, optimistic = :optimistic
              WHERE id = :id",
             named_params! {
                 ":id": id,
@@ -123,6 +131,8 @@ impl Store {
                 ":action": action,
                 ":exit": exit,
                 ":fixed_exit": config.fixed_exit.map(SqlNode),
+                ":class": config.class.map(Json),
+                ":optimistic": config.optimistic,
             },
         )?;
         Ok(())
@@ -164,6 +174,8 @@ mod tests {
                 require_credential: true,
                 default_action,
                 fixed_exit,
+                class: Some(Class::Reliable),
+                optimistic: Some(false),
             },
         }
     }
@@ -176,7 +188,7 @@ mod tests {
             let new = input(nodes[0], &format!("l{index}"), action, Some(nodes[1]));
             let id = store.insert_listener(&new).unwrap();
             let stored = store.listener(network, id).unwrap().unwrap();
-            assert_eq!(stored, Listener { id, node: nodes[0], config: new.config });
+            assert_eq!(stored, Listener { id, node: nodes[0], config: new.config, status: None });
         }
         assert_eq!(store.listeners(network).unwrap().len(), 4);
         assert!(store.insert_listener(&input(nodes[0], "l0", None, None)).is_err(), "同一个节点上监听器的名字不能重复");
@@ -190,8 +202,10 @@ mod tests {
         let mut replacement = input(nodes[1], "b", Some(DefaultAction::Local), Some(nodes[0]));
         replacement.config.protocol = ListenerProtocol::Http;
         replacement.config.require_credential = false;
+        replacement.config.class = None;
+        replacement.config.optimistic = None;
         store.update_listener(id, &replacement).unwrap();
-        assert_eq!(store.listener(network, id).unwrap(), Some(Listener { id, node: nodes[1], config: replacement.config }));
+        assert_eq!(store.listener(network, id).unwrap(), Some(Listener { id, node: nodes[1], config: replacement.config, status: None }));
         store.delete_listener(id).unwrap();
         assert_eq!(store.listener(network, id).unwrap(), None);
     }

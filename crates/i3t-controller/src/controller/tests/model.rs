@@ -35,6 +35,8 @@ fn listener(node: NodeId, name: &str, bind: &str, require_credential: bool) -> L
             require_credential,
             default_action: None,
             fixed_exit: None,
+            class: None,
+            optimistic: None,
         },
     }
 }
@@ -49,6 +51,7 @@ fn forward(listen_node: NodeId, target_node: NodeId) -> ForwardInput {
         target_addr: "127.0.0.1:80".parse().unwrap(),
         allow_from: Vec::new(),
         enabled: true,
+        class: None,
     }
 }
 
@@ -121,7 +124,7 @@ fn things_in_another_network_are_not_found_through_this_one() {
     let their_rule = controller.rules(office.id).unwrap()[0].id;
     not_found(controller.delete_rule(home.id, their_rule).unwrap_err());
     let their_credential =
-        controller.create_credential(office.id, &CreateCredential { name: "c".to_owned(), max_concurrent: None }).unwrap();
+        controller.create_credential(office.id, &CreateCredential { name: "c".to_owned(), max_concurrent: None, max_bytes: None }).unwrap();
     not_found(controller.delete_credential(home.id, their_credential.credential.id).unwrap_err());
     let their_token = controller.create_token(office.id, &CreateEnrollToken::default()).unwrap();
     not_found(controller.delete_token(home.id, their_token.info.id).unwrap_err());
@@ -150,7 +153,7 @@ fn things_in_another_network_are_not_found_through_this_one() {
     assert!(controller.listeners(home.id, None).unwrap().is_empty());
     assert!(controller.forwards(home.id).unwrap().is_empty());
     assert!(controller.credentials(home.id).unwrap().is_empty());
-    assert!(controller.tokens(home.id).unwrap().is_empty());
+    assert!(controller.tokens(home.id, false).unwrap().is_empty());
 }
 
 #[test]
@@ -206,7 +209,7 @@ fn the_broadcast_address_is_never_handed_out() {
     let secret = lab.secret(network.id, &CreateEnrollToken::default());
     let key = lab.fresh_key();
     assert_eq!(lab.enroll(key, &secret, Declared::default()).err(), Some(Rejection::RangeExhausted));
-    assert_eq!(lab.controller.tokens(network.id).unwrap().len(), 1, "没用成的令牌还在");
+    assert_eq!(lab.controller.tokens(network.id, false).unwrap().len(), 1, "没用成的令牌还在");
 }
 
 #[test]
@@ -479,7 +482,7 @@ fn a_successor_enrolled_by_token_inherits_identity_and_configuration() {
         (new.id, new_key, old_view.virtual_ip)
     );
     assert!(seen_by_other.relays.is_empty());
-    assert!(lab.controller.tokens(network.id).unwrap().is_empty());
+    assert!(lab.controller.tokens(network.id, false).unwrap().is_empty());
 }
 
 #[test]
@@ -528,7 +531,7 @@ fn tokens_are_one_time_expire_and_can_be_withdrawn() {
 
     let expired = lab.secret(network.id, &CreateEnrollToken { expires_in_secs: Some(0), ..CreateEnrollToken::default() });
     assert_eq!(lab.enroll(second_key, &expired, Declared::default()).err(), Some(Rejection::BadToken));
-    assert_eq!(lab.controller.tokens(network.id).unwrap().len(), 1, "过期的令牌不再列出，other_secret 还在");
+    assert_eq!(lab.controller.tokens(network.id, false).unwrap().len(), 1, "过期的令牌不再列出，other_secret 还在");
 
     let withdrawn = lab.controller.create_token(network.id, &CreateEnrollToken::default()).unwrap();
     lab.controller.delete_token(network.id, withdrawn.info.id).unwrap();
@@ -584,8 +587,10 @@ fn changes_are_written_to_the_operation_log_without_secrets() {
     let secret = created.token.parse::<EnrollToken>().unwrap().secret;
     let key = lab.fresh_key();
     let node = lab.enroll(key, &secret, Declared::default()).unwrap();
-    let credential =
-        lab.controller.create_credential(network.id, &CreateCredential { name: "phone".to_owned(), max_concurrent: None }).unwrap();
+    let credential = lab
+        .controller
+        .create_credential(network.id, &CreateCredential { name: "phone".to_owned(), max_concurrent: None, max_bytes: None })
+        .unwrap();
     rename(&lab, network.id, node.id, "laptop");
     lab.controller.delete_node(network.id, node.id).unwrap();
 

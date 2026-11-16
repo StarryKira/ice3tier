@@ -3,14 +3,14 @@
 use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, SocketAddr};
 
-use i3t_model::admin::{NetworkId, Node, NodeDetail, RelaySettings, Timestamp, UpdateNode};
+use i3t_model::admin::{LogRef, NetworkId, Node, NodeDetail, RelaySettings, Timestamp, UpdateNode};
 use i3t_model::control::ToNode;
 use i3t_model::netmap::ExitRole;
 use i3t_proto::NodeId;
 
 use super::{COOLDOWN_SECS, Controller, Inner, Seeds, address, naming};
 use crate::error::{Capability, Entity, Error};
-use crate::store::{CooldownKind, NetworkRecord, NodeRecord, Store};
+use crate::store::{CooldownKind, NetworkRecord, NodeRecord, Store, is_pending};
 
 /// 一个 relay 每种协议最多填几个公网地址，一个节点最多固定几个挂靠 relay。都只是防止填错。
 const MAX_RELAY_ADDRESSES: usize = 8;
@@ -41,7 +41,6 @@ impl Controller {
             node: inner.node_view(&network, &record, inner.clock.now()),
             endpoints: record.endpoints,
             observed_endpoint: record.observed,
-            attached: record.attached,
             mapping_varies: live.and_then(|live| live.mapping_varies),
             flows: live.map_or(0, |live| live.flows),
             tx_bytes: live.map_or(0, |live| live.tx_bytes),
@@ -81,7 +80,7 @@ impl Controller {
             node.routing = request.routing.unwrap_or(node.routing);
             node.reach = request.reach.unwrap_or(node.reach);
             store.update_node(&node)?;
-            store.log(now, Some(network.id), "node.update", &describe_update(&before, &node))?;
+            store.log_refs(now, Some(network.id), "node.update", &describe_update(&before, &node), &[LogRef::node(id)])?;
             Ok::<_, Error>((before, node))
         })?;
         // relay 的名字写在全网每个节点的 netmap 里；别的改动只影响 netmap 里有它的节点。
@@ -158,7 +157,7 @@ impl Controller {
             let mut node = require_node(store, network.id, id)?;
             change(&mut node)?;
             store.update_node(&node)?;
-            store.log(now, Some(network.id), action, &format!("节点 {}", node.name))?;
+            store.log_refs(now, Some(network.id), action, &format!("节点 {}", node.name), &[LogRef::node(id)])?;
             Ok::<_, Error>(node)
         })?;
         tracing::info!(node = %id, name = %node.name, action, "修改节点的能力");
@@ -189,7 +188,13 @@ impl Controller {
             store.add_cooldown(network, CooldownKind::Name, &node.name, until)?;
             unpin_everywhere(store, network, id)?;
             store.delete_node(id)?;
-            store.log(now, Some(network), "node.delete", &format!("删除节点 {}（{}）", node.name, node.virtual_ip))?;
+            store.log_refs(
+                now,
+                Some(network),
+                "node.delete",
+                &format!("删除节点 {}（{}）", node.name, node.virtual_ip),
+                &[LogRef::node(id)],
+            )?;
             Ok::<_, Error>(node)
         })?;
         tracing::info!(node = %id, name = %node.name, "删除节点，吊销它的公钥");
@@ -230,7 +235,8 @@ impl Controller {
             node.tags.extend(old.tags.iter().cloned());
             store.update_node(&node)?;
             inherit(store, network.id, &old, &node)?;
-            store.log(now, Some(network.id), "node.succeed", &format!("节点 {former} 继任 {}（{}）", old.name, old.virtual_ip))?;
+            let detail = format!("节点 {former} 继任 {}（{}）", old.name, old.virtual_ip);
+            store.log_refs(now, Some(network.id), "node.succeed", &detail, &[LogRef::node(id), LogRef::node(predecessor)])?;
             Ok::<_, Error>(node)
         })?;
         tracing::info!(node = %id, %predecessor, name = %node.name, "节点继任");
@@ -264,6 +270,7 @@ impl Inner {
         self.sync.remove(&id);
         self.dirty.remove(&id);
         self.routes.remove(&id);
+        self.usage.forget(id);
         self.drop_route_queries(id);
         self.updates.forget(id);
         for sync in self.sync.values_mut() {
@@ -304,7 +311,7 @@ pub(super) fn check_address(store: &Store, network: &NetworkRecord, address: Ipv
 /// 给新节点挑虚拟 IP：地址段里最小的空闲地址。在用的、冷却期里的、还没用掉的注册令牌预设的都不算空闲。
 pub(super) fn allocate_address(store: &Store, network: &NetworkRecord, now: Timestamp) -> Result<Ipv4Addr, Error> {
     let in_use = store.nodes(network.id)?.into_iter().map(|node| node.virtual_ip);
-    let reserved = store.tokens(network.id)?.into_iter().filter(|token| token.expires_at > now).filter_map(|token| token.virtual_ip);
+    let reserved = store.tokens(network.id)?.into_iter().filter(|token| is_pending(token, now)).filter_map(|token| token.virtual_ip);
     let unavailable: BTreeSet<Ipv4Addr> = in_use.chain(reserved).chain(store.cooling_addresses(network.id, now)?).collect();
     address::lowest_free(network.cidr, &unavailable).ok_or(Error::RangeExhausted(network.cidr))
 }

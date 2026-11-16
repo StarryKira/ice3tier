@@ -1,5 +1,6 @@
 //! 规则、netmap 和下发顺序的测试。都跑在 [`super::testing::Lab`] 上，不经过网络。
 
+mod limits;
 mod model;
 mod netmaps;
 mod ordering;

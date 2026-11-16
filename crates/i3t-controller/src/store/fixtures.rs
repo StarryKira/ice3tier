@@ -15,6 +15,7 @@ pub(crate) fn home() -> NewNetwork {
         max_relay_hops: 2,
         reach: Reach::Any,
         created_at: 1_000,
+        class: None,
     }
 }
 

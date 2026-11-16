@@ -83,7 +83,7 @@ fn two_networks_never_see_each_other() {
     let theirs = lab.join_offline(office.id, &["shared"], CAN_DO_ALL);
     let their_relay = lab.join_offline(office.id, &["shared"], CAN_DO_ALL);
     lab.controller.enable_relay(office.id, their_relay, relay_at("203.0.113.9:20330")).unwrap();
-    lab.controller.create_credential(office.id, &CreateCredential { name: "c".to_owned(), max_concurrent: None }).unwrap();
+    lab.controller.create_credential(office.id, &CreateCredential { name: "c".to_owned(), max_concurrent: None, max_bytes: None }).unwrap();
     add_rule(&lab, home.id, "shared", "shared", Direction::Both);
 
     let netmap = lab.netmap(ours);
@@ -150,10 +150,14 @@ fn credentials_go_only_to_nodes_with_a_listener_that_requires_them() {
             require_credential,
             default_action: None,
             fixed_exit: Some(plain),
+            class: None,
+            optimistic: None,
         },
     };
-    let created =
-        lab.controller.create_credential(network.id, &CreateCredential { name: "phone".to_owned(), max_concurrent: Some(4) }).unwrap();
+    let created = lab
+        .controller
+        .create_credential(network.id, &CreateCredential { name: "phone".to_owned(), max_concurrent: Some(4), max_bytes: None })
+        .unwrap();
     assert!(lab.netmap(gateway).credentials.is_empty());
 
     let on_gateway = lab.controller.create_listener(network.id, listener(gateway, "192.168.1.5:8080", true)).unwrap();
@@ -190,6 +194,7 @@ fn a_forward_is_delivered_to_both_ends_only_while_the_listener_may_access_the_ta
         target_addr: "192.168.1.10:5432".parse().unwrap(),
         allow_from: vec!["127.0.0.0/8".parse().unwrap()],
         enabled: true,
+        class: None,
     };
     let created = lab.controller.create_forward(network.id, input.clone()).unwrap();
     assert_eq!(created.status, i3t_model::admin::ForwardStatus::AccessDenied);
@@ -246,7 +251,7 @@ fn peer_details_follow_least_privilege() {
     lab.settle(&mut [&mut exit]);
 
     let seen_by_user = lab.netmap(user).peer(exit.id).cloned().unwrap();
-    assert_eq!(seen_by_user.exit, Some(netmap::PeerExit { lan: true }));
+    assert_eq!(seen_by_user.exit, Some(netmap::PeerExit { lan: true, class: None }));
     assert!(seen_by_user.keep_alive);
     assert_eq!(seen_by_user.attached, vec![Attachment { relay, rtt_ms: 30 }]);
     let expected: Vec<std::net::SocketAddr> =
@@ -348,7 +353,7 @@ fn a_restart_keeps_identity_versions_and_the_admin_token() {
     assert_eq!(reopened.controller.public_key(), controller_key);
     let mut lab = Lab::around(reopened.controller);
     let node = lab.controller.node(network.id, a.id).unwrap().node;
-    assert!(!node.online && node.last_seen_at.is_some());
+    assert!(!node.online && node.last_seen_at.is_none(), "只注册过、从来没有带着 Hello 连上来过的节点没有最近在线的时间");
     let a = lab.connect(a_key, Declared::default()).unwrap();
     assert_eq!(a.netmap().version, version, "内容没变，重启之后版本号也不变");
     assert_eq!(a.netmap(), &expected);

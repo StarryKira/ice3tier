@@ -25,19 +25,20 @@ pub(crate) mod testing;
 #[cfg(test)]
 mod tests;
 mod update;
+mod usage;
 mod views;
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use i3t_crypto::{NodeKey, tls};
 use i3t_model::Netmap;
 use i3t_model::admin::{LogEntry, NetworkId, Node, NodeRef, Status, Timestamp};
-use i3t_model::control::ToNode;
+use i3t_model::control::{ForwardReport, ListenerReport, ToNode};
 use i3t_model::update::{UpdateStatus, Version};
 use i3t_proto::{NodeId, PublicKey};
 use tokio::sync::{Notify, mpsc};
@@ -45,7 +46,7 @@ use tokio::sync::{Notify, mpsc};
 use crate::error::{Entity, Error};
 use crate::netmap::NetworkView;
 use crate::secret;
-use crate::store::{DIGEST_LEN, NetworkRecord, NodeRecord, Store};
+use crate::store::{DIGEST_LEN, LogFilter, NetworkRecord, NodeRecord, Store};
 use crate::sync::NodeSync;
 
 pub use protocol::Admitted;
@@ -100,6 +101,8 @@ impl Default for Timing {
 pub struct Controller {
     key: NodeKey,
     public_addr: String,
+    /// 从数据目录打开时是那个目录。
+    data_dir: Option<PathBuf>,
     timing: Timing,
     /// 管理令牌的哈希。每个管理请求都要查它，所以不放在大锁里。
     admin_token: Mutex<Option<[u8; DIGEST_LEN]>>,
@@ -131,6 +134,8 @@ pub(crate) struct Inner {
     pub(crate) dirty: BTreeMap<NodeId, Deferred>,
     /// 各个节点最近上报的路由表。节点离线之后留着，界面上显示成过期的；controller 重启就没有了。
     pub(crate) routes: BTreeMap<NodeId, routes::Reported>,
+    /// 出口和用出口的节点报的计数，算健康和交叉核对用。节点离线之后留着；controller 重启就没有了。
+    pub(crate) usage: usage::Usage,
     /// 已经发给节点、还在等回答的路由查询。
     pub(crate) route_queries: BTreeMap<u64, routes::PendingQuery>,
     /// 节点更新：已知的发布、包、设置、轮次。
@@ -157,6 +162,15 @@ pub(crate) struct Live {
     pub(crate) update: Option<UpdateStatus>,
     /// 这次连接上发给它的更新指令。
     pub(crate) order: Option<rollout::Order>,
+    /// 这条连接是 `i3t join` 注册时的那一条，不是节点真的跑起来连上的：它不算"最近在线"。
+    pub(crate) enrolling: bool,
+    /// 这次连接上最近一次上报的时刻；还没有上报过时是 `None`。
+    pub(crate) reported_at: Option<Instant>,
+    /// 最近一次上报里的监听器和端口转发的状态。
+    pub(crate) listeners: Vec<ListenerReport>,
+    pub(crate) forwards: Vec<ForwardReport>,
+    /// 最近一次上报里各个凭据（按编号）现在的连接数。
+    pub(crate) credential_connections: BTreeMap<u32, u32>,
 }
 
 pub(crate) struct Deferred {
@@ -176,7 +190,8 @@ impl Controller {
         fs::create_dir_all(data_dir).map_err(|source| Error::Io { path: data_dir.to_owned(), source })?;
         let key = load_or_create_key(&data_dir.join(KEY_FILE))?;
         let store = Store::open(&data_dir.join(DATABASE_FILE))?;
-        let controller = Self::new(store, key, public_addr, Timing::default())?.with_release_cache(data_dir.join(update::CACHE_DIR));
+        let mut controller = Self::new(store, key, public_addr, Timing::default())?.with_release_cache(data_dir.join(update::CACHE_DIR));
+        controller.data_dir = Some(data_dir.to_owned());
         let admin_token = if controller.has_admin_token() { None } else { Some(controller.issue_admin_token()?) };
         Ok(Opened { controller, admin_token })
     }
@@ -198,6 +213,7 @@ impl Controller {
             live: BTreeMap::new(),
             dirty: BTreeMap::new(),
             routes: BTreeMap::new(),
+            usage: usage::Usage::default(),
             route_queries: BTreeMap::new(),
             updates,
             counters: metrics::Counters::default(),
@@ -209,6 +225,7 @@ impl Controller {
         Ok(Self {
             key,
             public_addr,
+            data_dir: None,
             timing,
             admin_token: Mutex::new(admin_token),
             inner: Mutex::new(inner),
@@ -284,6 +301,7 @@ impl Controller {
             nodes: inner.store.node_count(None)?,
             online: count(inner.live.len()),
             newer_version: newer.cloned(),
+            data_dir: self.data_dir.as_ref().map(|dir| dir.display().to_string()),
         })
     }
 
@@ -294,6 +312,15 @@ impl Controller {
     /// 读存储失败。
     pub fn oplog(&self, limit: u32) -> Result<Vec<LogEntry>, Error> {
         Ok(self.lock().store.oplog(limit)?)
+    }
+
+    /// 符合条件的操作记录，新的在前。
+    ///
+    /// # Errors
+    ///
+    /// 读存储失败。
+    pub fn oplog_filtered(&self, filter: &LogFilter) -> Result<Vec<LogEntry>, Error> {
+        Ok(self.lock().store.oplog_filtered(filter)?)
     }
 
     /// 一个节点当前版本的 netmap，和发给它的那一份相同。节点不存在时返回 `None`。
@@ -380,6 +407,8 @@ impl Inner {
     /// 管理 API 里的节点：存储里的记录，加上它现在在不在线、netmap 发到了第几版。
     pub(crate) fn node_view(&self, network: &NetworkRecord, record: &NodeRecord, now: Timestamp) -> Node {
         let online = self.is_online(record.id);
+        // 只是注册时连上过（`i3t join`）不算在线过：节点真的跑起来连上了才有"最近在线"。
+        let running = self.live.get(&record.id).is_some_and(|live| !live.enrolling);
         let state = self.sync.get(&record.id).map_or(record.netmap, |sync| sync.state);
         Node {
             id: record.id,
@@ -399,13 +428,14 @@ impl Inner {
             platform: record.platform.clone(),
             version: record.version.clone(),
             online,
-            last_seen_at: if online { Some(now) } else { record.last_seen_at },
+            last_seen_at: if running { Some(now) } else { record.last_seen_at },
             created_at: record.created_at,
             netmap_version: state.version,
             sent_version: state.sent,
             acked_version: state.acked,
             hostname: record.hostname.clone(),
             update: self.node_update(record),
+            attached: record.attached.clone(),
         }
     }
 

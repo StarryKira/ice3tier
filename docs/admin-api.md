@@ -4,8 +4,24 @@
 
 对应的 Rust 类型在 `crates/i3t-model/src/admin.rs`，实现在 `crates/i3t-controller/src/admin.rs`。文档和代码不一致时以代码为准，并请修正文档。
 
-> **本次新增**（节点更新、路由视图、指标、内嵌的 WebUI）。正文里新加的地方都标了「新增」，这里是清单：
+> **本次新增**（限额、用量和状态）。正文里新加的地方都标了「新增」（上一次加的节点更新等也标着「新增」，见下面第二个清单）。这一次的清单：
 >
+> - 新接口：`PATCH /networks/{network}/credentials/{id}`（改上限、清零用量，第 9 节）；`GET /networks/{network}/exits`、`GET /networks/{network}/exits/{node}`（出口的设置、用量、健康，第 17 节）；`GET /networks/{network}/nodes/{node}/listeners`（节点上全部监听的状态，含节点自己开的回环入口，第 5 节）；`POST /networks/{network}/tags/rename`（标签改名，第 18 节）。
+> - 已有接口新的查询参数：`GET /log` 的 `before`、`network`、`action`、`ref`（翻页和过滤，第 3 节）；`GET /networks/{network}/tokens` 的 `all`（连用掉的和过期的也列出，第 6 节）。
+> - 新的字段：`Status.data_dir`；`Network.class`（`POST`、`PATCH /networks` 也收）；`Overview.flows`、`tx_bytes`、`rx_bytes`；`Node.attached`（以前只在节点详情里，现在列表里也有，详情的 JSON 没有变）；`NodeRoute.age_secs`、`since_secs`；出口设置（`Node.exit`、`PUT …/exit`）的 `quota_bytes`、`quota_reset_day`、`family`、`connects_per_minute`、`class`；`EnrollTokenInfo.prefix`、`state`、`used_at`、`used_by`；`Credential.prefix`、`max_bytes`、`state`、`revoked_at`、`usage`（`POST …/credentials` 也收 `max_bytes`）；`Listener.class`、`optimistic`、`status`；`Forward.class`、`listen`（`ForwardInput` 也收 `class`）；`LogEntry.refs`；`PUT …/relay` 的应答多了 `reachability`。
+> - 新的取值：`ExitRole.family` 是 `"any"`、`"ipv4"`、`"ipv6"`；服务等级（`class`）是 `"auto"`、`"interactive"`、`"reliable"`、`"bulk"`；新的结构 `ListenStatus`（第 11.1 节）、`ExitView`（第 17 节）、`NodeListeners`（第 5 节）、`RelayEnabled`（第 5.5 节）、`RenamedTag`（第 18 节）。
+> - 操作记录多了四种 `action`：`credential.update`、`credential.revoke`、`credential.exhausted`（凭据的流量上限用完了，controller 自己记的）、`tag.rename`。`credential.delete` 现在是"彻底删掉一个已经吊销的凭据"。
+> - 行为上的变化：
+>   - `DELETE /networks/{network}/credentials/{id}` 第一次是吊销：凭据留在列表里，`state` 是 `"revoked"`；对已经吊销的再删一次才彻底删掉（第 9 节）。
+>   - 端口转发的监听端口可以写 0，由监听节点挑一个空闲的、重启不变（监听在虚拟 IP 上的除外），挑定的端口在 `listen.local` 里（第 11 节）。端口写 0 的转发之间不算冲突。
+>   - 用掉的注册令牌不再从数据库里删掉；用掉的和过期的令牌留 30 天（第 6 节）。`GET …/tokens` 不带参数时和以前一样只列还能用的。
+>   - `Node.last_seen_at` 只在节点真的跑起来（带着 Hello）连上过之后才有；只用 `i3t join` 注册过的节点是 `null`（第 5 节）。
+>   - 新签发的注册令牌文本的开头变了（`i3t-eyJzIjoi…`，一次性密钥排在最前面），格式和以前兼容。
+>   - 启用 relay（`PUT …/relay`）多等最多 3 秒：controller 要从自己这边试连填的地址（第 5.5 节）。
+>
+> 已有接口的路径、请求体和应答里原有的字段都没有变；凭据的 `DELETE` 改成先吊销，见上。
+>
+> **上一次新增**（节点更新、路由视图、指标、内嵌的 WebUI）。清单：
 > - 新接口：`GET /update`、`PATCH /update`、`POST /update/check`、`POST /update/resume`、`POST /update/force`（第 14 节）；`GET`、`POST /networks/{network}/nodes/{node}/update`（第 14 节）；`GET /networks/{network}/routes`、`GET /networks/{network}/path`（第 15 节）；`GET /metrics`（不在 `/api/v1` 下面，第 16 节）。
 > - `Node` 多了两个字段：`hostname`、`update`（第 5 节）。节点详情 `NodeDetail` 随之也有。
 > - `Status` 多了一个字段：`newer_version`（第 3 节）。
@@ -140,7 +156,8 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   "networks": 1,
   "nodes": 3,
   "online": 2,
-  "newer_version": "0.3.0"
+  "newer_version": "0.3.0",
+  "data_dir": "/var/lib/i3t-controller"
 }
 ```
 
@@ -151,17 +168,34 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `public_addr` | 节点连 controller 用的 `主机:端口`，写在每个注册令牌里 |
 | `networks`、`nodes`、`online` | 全部网络的数量、全部节点的数量、在线节点的数量 |
 | `newer_version` | 「新增」已知的最新正式版比 controller 自己新时，是那个版本号；否则 `null`。controller 不会自己更新，界面据此提醒管理员手动更新 |
+| `data_dir` | 「新增」controller 的数据目录（数据库、密钥、更新包的缓存都在里面），备份时拷贝它。controller 不是从数据目录打开的（只在测试里）时是 `null` |
 
 ### GET /log
 
 操作记录，新的在前。修改类的操作和 controller 自动做的改动（例如节点撤回声明导致能力关闭）都记在这里。
 
-查询参数：`limit`，可省略，最多返回多少条，默认 100，上限 1000。
+查询参数，都可省略：
+
+| 参数 | 含义 |
+|---|---|
+| `limit` | 最多返回多少条，默认 100，上限 1000 |
+| `before` | 「新增」只要编号比它小的。翻页：下一页写上一页最后一条的 `id` |
+| `network` | 「新增」只要这个网络的（网络编号） |
+| `action` | 「新增」只要这种操作，或者以它加一个点开头的操作：`node` 包括 `node.update`、`node.relay.enable` 等，`credential.create` 只是它自己 |
+| `ref` | 「新增」只要提到这样东西的，写成 `<种类>:<编号>`，例如 `node:3`、`credential:1`。种类见下面的 `refs`。写法不对是 `400 invalid_request` |
+
+几个条件同时写时要都满足。
 
 ```json
 [
-  { "id": 19, "at": 1794798564, "network": 1, "action": "pair.set", "detail": "节点 #2 和 #1：连接常驻 true" },
-  { "id": 18, "at": 1794798564, "network": 1, "action": "forward.create", "detail": "转发 #1：节点 #2 的 127.0.0.1:8080 → 节点 #1 的 192.168.1.10:80（启用）" }
+  {
+    "id": 19, "at": 1794798564, "network": 1, "action": "pair.set", "detail": "节点 #2 和 #1：连接常驻 true",
+    "refs": [{ "kind": "node", "id": 2 }, { "kind": "node", "id": 1 }]
+  },
+  {
+    "id": 18, "at": 1794798564, "network": 1, "action": "forward.create", "detail": "转发 #1：节点 #2 的 127.0.0.1:8080 → 节点 #1 的 192.168.1.10:80（启用）",
+    "refs": [{ "kind": "forward", "id": 1 }, { "kind": "node", "id": 2 }, { "kind": "node", "id": 1 }]
+  }
 ]
 ```
 
@@ -172,8 +206,9 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `network` | 属于哪个网络；和网络无关的操作是 `null` |
 | `action` | 做了什么，见下 |
 | `detail` | 给人看的说明 |
+| `refs` | 「新增」这条记录说的是哪些东西，界面可以据此做成链接。每一项是 `{ "kind": 种类, "id": 编号 }`，种类是 `"network"`、`"node"`、`"token"`、`"rule"`、`"credential"`、`"listener"`、`"forward"`（以后可能增加，不认识的种类请忽略）。东西后来被删掉了，编号还在。这个字段出现之前的记录是 `[]` |
 
-`action` 的取值：`admin.token`、`network.create`、`network.update`、`network.delete`、`node.enroll`、`node.update`、`node.delete`、`node.succeed`、`node.relay.enable`、`node.relay.disable`、`node.relay.withdrawn`、`node.exit.enable`、`node.exit.disable`、`node.exit.withdrawn`、`node.forward.withdrawn`、`token.create`、`token.delete`、`rule.create`、`rule.update`、`rule.delete`、`credential.create`、`credential.delete`、`listener.create`、`listener.update`、`listener.delete`、`forward.create`、`forward.update`、`forward.delete`、`pair.set`、`pair.delete`，以及「新增」`update.settings`、`update.release`（发布源上有了新的正式版）、`update.pause`（节点更新失败，版本被暂停；它记在那个节点所在的网络上）、`update.resume`、`update.force`（记在节点所在的网络上）、`update.force_all`。带 `withdrawn` 的三种是节点撤回了本地声明、controller 随之关闭能力时记的。最多保留最近的一万条。
+`action` 的取值：`admin.token`、`network.create`、`network.update`、`network.delete`、`node.enroll`、`node.update`、`node.delete`、`node.succeed`、`node.relay.enable`、`node.relay.disable`、`node.relay.withdrawn`、`node.exit.enable`、`node.exit.disable`、`node.exit.withdrawn`、`node.forward.withdrawn`、`token.create`、`token.delete`、`rule.create`、`rule.update`、`rule.delete`、`credential.create`、`credential.delete`、`listener.create`、`listener.update`、`listener.delete`、`forward.create`、`forward.update`、`forward.delete`、`pair.set`、`pair.delete`，以及「新增」`update.settings`、`update.release`（发布源上有了新的正式版）、`update.pause`（节点更新失败，版本被暂停；它记在那个节点所在的网络上）、`update.resume`、`update.force`（记在节点所在的网络上）、`update.force_all`，以及「新增」`credential.update`（改上限、清零用量）、`credential.revoke`（吊销）、`credential.exhausted`（凭据的流量上限用完了，controller 自己记的）、`tag.rename`。`credential.delete` 现在是彻底删掉一个已经吊销的凭据。带 `withdrawn` 的三种是节点撤回了本地声明、controller 随之关闭能力时记的。最多保留最近的一万条。
 
 ## 4. 网络
 
@@ -189,7 +224,8 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   "max_relay_hops": 2,
   "reach": "any",
   "created_at": 1794798564,
-  "nodes": 3
+  "nodes": 3,
+  "class": null
 }
 ```
 
@@ -204,6 +240,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `reach` | 对可用路径的限制 |
 | `created_at` | 创建时间 |
 | `nodes` | 网络里有多少个节点 |
+| `class` | 「新增」网络的默认服务等级：`"auto"`、`"interactive"`、`"reliable"`、`"bulk"`；`null` 表示 `auto`。一条流的等级按这个顺序取第一个有的：代理用户名里的 `+c-` 标记、监听器（或端口转发）的 `class`、出口的 `class`（只有经出口出去的流）、网络的 `class` |
 
 ### GET /networks
 
@@ -224,6 +261,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `routing` | 否 | 默认 `"direct_first"` |
 | `max_relay_hops` | 否 | 默认 2 |
 | `reach` | 否 | 默认 `"any"` |
+| `class` | 否 | 「新增」默认 `null`（`auto`） |
 
 应答：`201`，`Network`。
 错误：`name_taken`、`range_overlaps`、`invalid_request`。
@@ -240,7 +278,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 { "routing": "lowest_cost" }
 ```
 
-可以写的字段：`cidr`、`routing`、`max_relay_hops`、`reach`，都可省略。网络里已经有节点时，新的 `cidr` 必须包含原来的（地址段只能扩大）。
+可以写的字段：`cidr`、`routing`、`max_relay_hops`、`reach`、「新增」`class`，都可省略。`class` 写 `null` 表示改回 `auto`。网络里已经有节点时，新的 `cidr` 必须包含原来的（地址段只能扩大）。
 
 应答：`Network`。
 错误：`range_overlaps`、`range_not_superset`、`invalid_request`。
@@ -278,7 +316,10 @@ controller 自己的情况。也用来检查地址和令牌对不对。
       "a": { "id": 2, "name": "laptop", "virtual_ip": "10.66.0.2" },
       "b": { "id": 3, "name": "node-3", "virtual_ip": "10.66.0.3" }
     }
-  ]
+  ],
+  "flows": 12,
+  "tx_bytes": 1048576,
+  "rx_bytes": 20971520
 }
 ```
 
@@ -290,6 +331,8 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `pending_tokens` | 还没被用掉、也没过期的注册令牌数 |
 | `online_nodes` | 在线的节点，`NodeRef` 的数组 |
 | `unreachable_pairs` | 两端都在线、但至少一端上报"没有可用的路"的节点对：直连不通，也没有 relay 可走。`a` 的编号小于 `b` |
+| `flows` | 「新增」在线节点最近一次上报的活跃流之和。一条流两端的节点各报一次，所以算了两次 |
+| `tx_bytes`、`rx_bytes` | 「新增」在线节点最近一次上报的流量之和（各自启动以来经它的流发出和收到的字节数，入口和出口两侧都算）。经过两个节点的流量两边各算一次 |
 
 `unreachable_pairs` 不为空而 `relays` 是 0 时，界面应当提示启用一个 relay。
 
@@ -317,7 +360,12 @@ controller 自己的情况。也用来检查地址和令牌对不对。
     "ports": [80, 443],
     "lan": true,
     "bandwidth_mbps": null,
-    "upstream_socks5": null
+    "upstream_socks5": null,
+    "quota_bytes": null,
+    "quota_reset_day": 1,
+    "family": "any",
+    "connects_per_minute": null,
+    "class": null
   },
   "dial_out_only": false,
   "routing": null,
@@ -339,7 +387,8 @@ controller 自己的情况。也用来检查地址和令牌对不对。
     "ordered": { "version": "0.3.0", "timing": "idle" },
     "waiting": null,
     "failure": null
-  }
+  },
+  "attached": []
 }
 ```
 
@@ -361,13 +410,14 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `pinned_relays` | 管理员固定的挂靠 relay（节点编号）；空表示节点自己挑 |
 | `platform`、`version` | 节点上报的平台和程序版本 |
 | `online` | 现在是不是连着 controller |
-| `last_seen_at` | 最近一次在线的时间；在线时就是现在；从来没有连上过是 `null` |
+| `last_seen_at` | 最近一次在线的时间；在线时就是现在；从来没有连上过是 `null`。「新增」只用 `i3t join` 注册过、还没有真的跑起来（`i3t run`）连上过的节点也是 `null`：注册时的那一次连接不算 |
 | `created_at` | 加入的时间 |
 | `netmap_version` | 这个节点的配置（netmap）现在是第几版。内容变了才加一 |
 | `sent_version` | 最近一次发给它的版本 |
 | `acked_version` | 它确认已经应用的版本。小于 `netmap_version` 说明它还在用旧的配置（例如不在线） |
 | `hostname` | 「新增」节点上报的主机名，原样；旧版本的节点不报，是 `""`。主机名后来变了，`name` 不跟着变 |
 | `update` | 「新增」这个节点的程序更新：能不能自己更新、有没有新版本、进行到哪一步。结构是 `NodeUpdate`，见第 14 节 |
+| `attached` | 「新增」节点挂靠的 relay（节点编号）和到它们的往返延迟（毫秒），取自它最近的上报；离线时是它离线前报的。以前只在节点详情里有，现在列表里也有：数"有几个节点挂靠在这个 relay 上"只要一次 `GET …/nodes` |
 
 **能力的启用。** relay、出口和端口转发的目标都要节点先在本地声明（`declared` 里对应的字段是 `true`），管理员才能启用。没有声明时，启用的请求得到 `409 not_declared`，`message` 里写着要在节点上执行的命令（`i3t set can-relay on`、`i3t set can-exit on`、`i3t set can-forward on`）。界面上应当在 `declared` 里对应字段是 `false` 时把开关置灰并显示这个做法。节点撤回声明时，已经启用的能力随之关闭（`relay` 或 `exit` 变回 `null`，指向它的端口转发被停用），并在操作记录里留下 `node.*.withdrawn`；节点再声明回来，能力不会自己打开。
 
@@ -426,7 +476,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 |---|---|
 | `endpoints` | 节点上报的 UDP 候选端点 |
 | `observed_endpoint` | controller 看到的来源 IP 加上节点自报的 UDP 端口；节点没报端口时是 `null` |
-| `attached` | 节点挂靠的 relay（节点编号）和到它们的往返延迟（毫秒）。延迟只在变化明显时更新 |
+| `attached` | 节点挂靠的 relay（节点编号）和到它们的往返延迟（毫秒）。延迟只在变化明显时更新。「新增」现在它是 `Node` 的字段，详情里还在同一个位置 |
 | `mapping_varies` | 映射出来的端口是不是随对端变化。`true` 时这台机器所在的网络基本打不了洞，界面应当提示。不在线或者还不知道时是 `null` |
 | `flows` | 正在进行的流的数量 |
 | `tx_bytes`、`rx_bytes` | 节点启动以来发出和收到的字节数 |
@@ -479,7 +529,31 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 
 `udp` 和 `tcp` 至少要有一个地址；地址不能是 `0.0.0.0`，端口不能是 0。
 
-应答：`Node`（`relay` 字段是刚写入的设置）。
+应答：`Node`（`relay` 字段是刚写入的设置），「新增」加上同一层的 `reachability`（这个结构叫 `RelayEnabled`）：
+
+```json
+{
+  "id": 1, "name": "node-1", "relay": { "udp": ["203.0.113.7:20330"], "tcp": ["203.0.113.7:20330"], "region": "hk", "bandwidth_mbps": 200 },
+  "…": "Node 的其余字段",
+  "reachability": [
+    { "protocol": "udp", "addr": "203.0.113.7:20330", "reachable": true, "rtt_ms": 23, "error": null },
+    { "protocol": "tcp", "addr": "203.0.113.7:20330", "reachable": false, "rtt_ms": null, "error": "Connection refused (os error 111)" }
+  ]
+}
+```
+
+「新增」启用之后 controller 从自己这边把填的每个地址试一遍，最多等 3 秒左右才应答：UDP 是向那个地址发地址查询（节点的端口总在回答），收到对得上的应答就算通；TCP 是建一次连接就关（relay 的 TCP 监听要等节点收到新配置才开，所以在 3 秒之内会重试）。
+
+| 字段 | 含义 |
+|---|---|
+| `protocol` | `"udp"` 或 `"tcp"` |
+| `addr` | 填的地址 |
+| `reachable` | 从 controller 这边通不通 |
+| `rtt_ms` | UDP 是地址查询的往返时间，TCP 是建连接的时间；不通是 `null` |
+| `error` | 不通的原因；通是 `null` |
+
+这只是参考，不挡着启用：controller 和别的节点不在同一个网络位置上，它连不上不等于别人连不上（比如 controller 和 relay 在同一个局域网里，填的是公网地址），反过来也一样。界面可以据此提示"从 controller 这边连不上这个地址，请确认公网地址和端口放行"。
+
 错误：`not_declared`、`invalid_request`。
 
 ### DELETE /networks/{network}/nodes/{node}/relay
@@ -493,17 +567,25 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 把节点启用为出口，或者改它的出口设置。
 
 ```json
-{ "ports": [80, 443], "lan": true, "bandwidth_mbps": null, "upstream_socks5": null }
+{
+  "ports": [80, 443], "lan": true, "bandwidth_mbps": 50, "upstream_socks5": null,
+  "quota_bytes": 500000000000, "quota_reset_day": 1, "family": "ipv4", "connects_per_minute": 120, "class": null
+}
 ```
 
 | 字段 | 必填 | 含义 |
 |---|---|---|
 | `ports` | 否 | 互联网目标允许的端口。**省略**时是 `[80, 443]`；写 `null` 表示不限制。局域网目标不受它限制 |
 | `lan` | 否 | 允许经它访问它所在的局域网（本机网卡直连的网段）。默认 `false` |
-| `bandwidth_mbps` | 否 | 带宽上限；`null` 或省略表示不限 |
+| `bandwidth_mbps` | 否 | 带宽上限（Mbit/s）；`null` 或省略表示不限。「新增」现在由出口执行：出口替别人搬运的互联网和局域网目标的流量，两个方向各受这个上限，所有的流和 UDP 报文共用；流超出时被放慢，UDP 报文超出时被丢掉。访问出口节点自己的服务、下发给它的端口转发不受限 |
 | `upstream_socks5` | 否 | 把流交给节点本机的这个 SOCKS5 代理（`地址:端口`）去连目标；`null` 或省略表示自己直接连 |
+| `quota_bytes` | 否 | 「新增」每个账期的流量配额（字节），算的是出口替别人搬运的互联网和局域网目标的流量，两个方向相加，流和 UDP 都算；`null` 或省略表示不限。用完之后新的请求被拒绝（客户端看到 SOCKS5 的 `0x02` 或 HTTP 的 `429`），正在搬运的流在超出的那一刻被断开，直到下一个账期。用量由出口自己记、重启不丢，上报给 controller，见第 17 节 |
+| `quota_reset_day` | 否 | 「新增」账期从每个月的哪一天开始（UTC 的 0 点），1 到 28，默认 1 |
+| `family` | 否 | 「新增」互联网目标只连哪一种地址：`"any"`（默认）、`"ipv4"`、`"ipv6"`。域名解析出来的地址里只取这一种；目标是另一种地址、或者域名没有这种地址时拒绝 |
+| `connects_per_minute` | 否 | 「新增」建连预算：同一个发起节点每分钟最多让出口向同一个互联网或局域网目标（主机加端口）新建多少条连接；`null` 或省略表示不限。可以一下子用完一分钟的额度，之后按每分钟这么多恢复。超出时请求被拒绝（SOCKS5 的 `0x01`、HTTP 的 `429`） |
+| `class` | 否 | 「新增」经这个出口的流的默认服务等级，见第 4 节 `Network.class` 的先后顺序；`null` 表示没有 |
 
-请求体写 `{}` 就是用默认设置启用。
+请求体写 `{}` 就是用默认设置启用。「新增」带宽上限、配额、建连预算都不能写 0（不限制就不写）。
 
 应答：`Node`（`exit` 字段是刚写入的设置）。
 错误：`not_declared`、`invalid_request`。
@@ -541,12 +623,16 @@ controller 自己的情况。也用来检查地址和令牌对不对。
     {
       "peer": { "id": 1, "name": "node-1", "virtual_ip": "10.66.0.1" },
       "route": { "via": "direct", "addr": "203.0.113.7:20330" },
-      "rtt_ms": 12
+      "rtt_ms": 12,
+      "age_secs": 4,
+      "since_secs": 3600
     },
     {
       "peer": { "id": 3, "name": "node-3", "virtual_ip": "10.66.0.3" },
       "route": { "via": "none" },
-      "rtt_ms": null
+      "rtt_ms": null,
+      "age_secs": 4,
+      "since_secs": 40
     }
   ]
 }
@@ -560,7 +646,38 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `"direct"` | `addr` | 直连，对端的地址 |
 | `"relay"` | `relays` | 经 relay，按经过的顺序列出节点编号，例如 `{ "via": "relay", "relays": [1] }` |
 
-`rtt_ms` 是这条路上最近测到的往返延迟，没有时是 `null`。节点不在线时 `online` 是 `false`，`routes` 是空的。只有节点上报过的对端才在表里。
+`rtt_ms` 是这条路上最近测到的往返延迟，没有时是 `null`。「新增」`age_secs` 是这份数据多少秒之前的（节点最近一次上报到现在）；`since_secs` 是 controller 看到这条路换上来已经多少秒了（从节点第一次报这条路算起，只是延迟变了不算换路；controller 重启之后从头算）。经 relay 那一段走的是 UDP 还是 TCP，节点现在报不出来，所以没有。节点不在线时 `online` 是 `false`，`routes` 是空的。只有节点上报过的对端才在表里。
+
+### GET /networks/{network}/nodes/{node}/listeners「新增」
+
+节点上的全部监听，取自它最近的上报：controller 下发的代理监听器、节点按本机配置文件自己开的回环入口（`local-socks5`、`local-http`）、端口转发的监听一侧。应答是 `NodeListeners`：
+
+```json
+{
+  "node": { "id": 2, "name": "laptop", "virtual_ip": "10.66.0.2" },
+  "online": true,
+  "reported_secs_ago": 4,
+  "listeners": [
+    { "id": 1, "builtin": false, "name": "lan", "bind": "192.168.1.5:1080", "protocol": "socks5",
+      "state": "listening", "local": "192.168.1.5:1080", "connections": 2, "bytes_up": 1024, "bytes_down": 40960 },
+    { "id": null, "builtin": true, "name": "local-socks5", "bind": "127.0.0.1:1080", "protocol": "socks5",
+      "state": "port_in_use", "detail": "Address already in use (os error 98)", "connections": 0, "bytes_up": 0, "bytes_down": 0 }
+  ],
+  "forwards": [
+    { "id": 3, "bind": "127.0.0.1:0", "protocol": "tcp",
+      "state": "listening", "local": "127.0.0.1:41873", "connections": 0, "bytes_up": 0, "bytes_down": 0 }
+  ]
+}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `online` | 节点在不在线。不在线时两个列表都是空的 |
+| `reported_secs_ago` | 节点最近一次上报是多少秒之前；这次连接上还没有上报过是 `null` |
+| `listeners[].id` | controller 上的监听器编号；节点自己开的回环入口没有，是 `null` |
+| `listeners[].builtin` | 节点按本机配置文件自己开的回环入口（不是 controller 下发的） |
+| `forwards[].id` | 端口转发的编号 |
+| 其余 | `bind` 是配置里写的地址，状态、连接数、流量的写法见 11.1 节的 `ListenStatus` |
 
 ### GET /networks/{network}/nodes/{node}/access
 
@@ -603,7 +720,11 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   "expires_at": 1794802164,
   "tags": ["servers"],
   "virtual_ip": null,
-  "successor_of": null
+  "successor_of": null,
+  "prefix": "i3t-eyJzIjoiSmFY",
+  "state": "used",
+  "used_at": 1794798700,
+  "used_by": { "id": 4, "name": "nas", "virtual_ip": "10.66.0.4" }
 }
 ```
 
@@ -614,11 +735,17 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `created_at`、`expires_at` | 生成和过期的时间 |
 | `tags` | 用它加入的节点自动带上的标签 |
 | `virtual_ip` | 预设的虚拟 IP；`null` 表示自动分配 |
-| `successor_of` | 用它加入的节点继任这个节点（节点编号）；`null` 表示是一个普通的新节点 |
+| `successor_of` | 用它加入的节点继任这个节点（节点编号）；`null` 表示是一个普通的新节点。继任的令牌用掉之后是 `null`（被继任的节点随即被删掉了） |
+| `prefix` | 「新增」令牌文本的开头 18 个字符，不是秘密（露出的不到 30 位），用来认出是哪一个令牌：界面显示成 `i3t-eyJzIjoiSmFY…`，和管理员手里的令牌文本的开头对得上。这个字段出现之前生成的令牌是 `""` |
+| `state` | 「新增」`"pending"`（还能用）、`"used"`（已经有节点用它加入了）、`"expired"`（没被用过，已经过期） |
+| `used_at` | 「新增」被用掉的时间；没用过是 `null` |
+| `used_by` | 「新增」用它加入的节点（`NodeRef`）；没用过、或者那个节点后来被删掉了是 `null` |
 
 ### GET /networks/{network}/tokens
 
 还没被用掉、也没过期的令牌。应答是 `EnrollTokenInfo` 的数组。令牌的文本查不回来。
+
+「新增」查询参数 `all=true`：连用掉的和过期的也列出来（它们在用掉或过期 30 天之后被清掉），按编号排。不写时和以前一样只有 `state` 是 `"pending"` 的。
 
 ### POST /networks/{network}/tokens
 
@@ -654,7 +781,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 
 ### DELETE /networks/{network}/tokens/{id}
 
-收回一个还没用掉的令牌。应答：`204`。
+收回一个还没用掉的令牌（「新增」对用掉的、过期的令牌，就是删掉这条记录）。应答：`204`。
 
 ## 7. 访问规则
 
@@ -762,36 +889,72 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 `Credential`：
 
 ```json
-{ "id": 1, "name": "phone", "max_concurrent": 8, "created_at": 1794798564 }
+{
+  "id": 1, "name": "phone", "max_concurrent": 8, "created_at": 1794798564,
+  "prefix": "I7bRtu", "max_bytes": 10000000000, "state": "active", "revoked_at": null,
+  "usage": { "bytes": 123456789, "connections": 2, "last_used_at": 1794799000 }
+}
 ```
 
-`max_concurrent` 是同时进行的连接数上限，`null` 表示不限。
+| 字段 | 含义 |
+|---|---|
+| `max_concurrent` | 同时进行的连接数上限（每个入口各自数），`null` 表示不限 |
+| `prefix` | 「新增」令牌的开头 6 个字符，不是秘密，用来认出是哪一个凭据（和调用者填在密码字段里的对得上）。这个字段出现之前签发的凭据是 `""` |
+| `max_bytes` | 「新增」流量上限（字节）：经各个入口用它搬运的字节数（客户端发出的和收到的相加）到了这个数，它就停用，直到上限调高或者用量清零。`null` 表示不限 |
+| `state` | 「新增」`"active"`、`"exhausted"`（流量上限用完了：入口拒绝它的新连接，客户端看到 SOCKS5 的 `0x02` 或 HTTP 的 `429`；正在进行的连接也被断开）、`"revoked"`（吊销了：入口不再认它） |
+| `revoked_at` | 「新增」吊销的时间；没有吊销是 `null` |
+| `usage.bytes` | 「新增」签发（或者上次清零）以来经它搬运的字节数。各个入口每 10 秒上报一次，所以有十几秒的滞后；从用完到被拦下，最多多用一个上报周期的量 |
+| `usage.connections` | 「新增」现在在线的入口上正在进行的连接数（UDP ASSOCIATE 算一条） |
+| `usage.last_used_at` | 「新增」最近一次有连接用它的时间；从来没有用过是 `null` |
 
 ### GET /networks/{network}/credentials
 
-应答是 `Credential` 的数组。令牌查不回来。
+应答是 `Credential` 的数组，「新增」包括吊销了的。令牌查不回来。
 
 ### POST /networks/{network}/credentials
 
 ```json
-{ "name": "phone", "max_concurrent": 8 }
+{ "name": "phone", "max_concurrent": 8, "max_bytes": 10000000000 }
 ```
 
-`name` 必填，在网络里唯一；`max_concurrent` 可省略，不能是 0。
+`name` 必填，在网络里唯一（吊销了的凭据还占着名字，见下）；`max_concurrent`、「新增」`max_bytes` 可省略，不能是 0。
 
 应答：`201`，`Credential` 的全部字段加上 `token`：
 
 ```json
-{ "id": 1, "name": "phone", "max_concurrent": 8, "created_at": 1794798564, "token": "I7bRtukVyLJzSGhIbQPcl8bjl9ZjLvFsI2PTJUaKnKU" }
+{
+  "id": 1, "name": "phone", "max_concurrent": 8, "created_at": 1794798564, "prefix": "I7bRtu", "max_bytes": 10000000000,
+  "state": "active", "revoked_at": null, "usage": { "bytes": 0, "connections": 0, "last_used_at": null },
+  "token": "I7bRtukVyLJzSGhIbQPcl8bjl9ZjLvFsI2PTJUaKnKU"
+}
 ```
 
 `token` **只在这个应答里出现一次**。
 
 错误：`name_taken`、`invalid_request`。
 
+### PATCH /networks/{network}/credentials/{id}「新增」
+
+改上限、清零用量，不用重新签发令牌；新的设置随即下发给各个入口。
+
+```json
+{ "max_concurrent": null, "max_bytes": 20000000000, "reset_usage": true }
+```
+
+| 字段 | 含义 |
+|---|---|
+| `max_concurrent` | 新的并发上限；写 `null` 表示不限 |
+| `max_bytes` | 新的流量上限；写 `null` 表示不限 |
+| `reset_usage` | `true` 时把 `usage.bytes` 清零（比如开始一个新的计费周期） |
+
+全部可省略，省略表示不改。`max_concurrent` 和 `max_bytes` 是"写 `null` 有含义"的字段。
+
+应答：`Credential`。
+错误：`invalid_request`（上限是 0；凭据已经吊销）、`not_found`。
+
 ### DELETE /networks/{network}/credentials/{id}
 
-吊销一个凭据。应答：`204`。
+吊销一个凭据：入口不再认它。「新增」记录留着，`state` 是 `"revoked"`，看得到它用过多少；对已经吊销的凭据再删一次，记录才被彻底删掉，名字才能给新的凭据用。正在进行的连接不因吊销而断开（和别的配置变更一样不打断手上的流）。应答：`204`。
 
 ## 10. 监听器
 
@@ -809,7 +972,10 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   "allow_from": ["192.168.1.0/24"],
   "require_credential": true,
   "default_action": { "action": "exit", "node": 1 },
-  "fixed_exit": null
+  "fixed_exit": null,
+  "class": null,
+  "optimistic": null,
+  "status": { "state": "listening", "local": "192.168.1.5:1080", "connections": 2, "bytes_up": 1024, "bytes_down": 40960 }
 }
 ```
 
@@ -824,6 +990,9 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `require_credential` | 要求调用者在密码字段里带凭据。`bind` 不是回环地址时必须是 `true` |
 | `default_action` | 调用者没有写用户名、目标又不是组网地址时怎么办，见下。`null` 时按 `bind` 取默认：回环地址是就地出站，其他地址是拒绝 |
 | `fixed_exit` | 固定出口（节点编号）：这个监听器上的流量都从这个节点出去；`null` 表示不固定 |
+| `class` | 「新增」这个监听器上的流的默认服务等级（`"auto"`、`"interactive"`、`"reliable"`、`"bulk"`）。用户名里写了 `+c-` 时以用户名为准；`null` 时看出口和网络的默认值 |
+| `optimistic` | 「新增」乐观回复：`true` 时不等对端的应答就告诉客户端连上了（省一个全程往返，失败只能表现为随后被断开），`false` 时一律等（客户端拿到准确的错误码）。`null` 时按目标的种类：互联网目标不等，组网目标（节点的服务、局域网）等 |
+| `status` | 「新增」节点最近一次报的这个监听器的状态、连接数和流量，写法见 11.1 节的 `ListenStatus`。节点不在线、还没有报过，或者版本太旧不报时是 `null`。只读，创建和替换时不用写 |
 
 `default_action` 有三种：
 
@@ -847,7 +1016,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 { "node": 2, "name": "local", "bind": "127.0.0.1:1080", "protocol": "http" }
 ```
 
-`node`、`name`、`bind`、`protocol` 必填；`allow_from` 默认 `[]`，`require_credential` 默认 `false`，`default_action` 和 `fixed_exit` 默认 `null`。
+`node`、`name`、`bind`、`protocol` 必填；`allow_from` 默认 `[]`，`require_credential` 默认 `false`，`default_action`、`fixed_exit`、「新增」`class`、`optimistic` 默认 `null`。
 
 应答：`201`，`Listener`。
 错误：`invalid_request`（非回环地址却不要求凭据、端口是 0、名字是空的）、`name_taken`（这个节点上已经有同名的监听器）、`conflict`（这个节点上已经有监听器监听在同一个地址）、`not_found`（节点或引用的出口节点不在这个网络里）。
@@ -879,7 +1048,9 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   "target_addr": "192.168.1.10:80",
   "allow_from": [],
   "enabled": true,
-  "status": "active"
+  "status": "active",
+  "class": null,
+  "listen": { "state": "listening", "local": "127.0.0.1:8080", "connections": 1, "bytes_up": 512, "bytes_down": 8192 }
 }
 ```
 
@@ -889,12 +1060,14 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `name` | 名字，可以是空的 |
 | `protocol` | `"tcp"` 或 `"udp"` |
 | `listen_node` | 监听节点 |
-| `bind` | 监听节点上的监听地址，端口不能是 0。IP 是监听节点的虚拟 IP 时不占用操作系统的端口，只对组网里被允许访问它的节点可达（这时监听节点和目标节点通常是同一个） |
+| `bind` | 监听节点上的监听地址。IP 是监听节点的虚拟 IP 时不占用操作系统的端口，只对组网里被允许访问它的节点可达。「新增」端口可以写 0：监听节点自己挑一个空闲的端口，挑定之后重启也不变，挑的是哪个看 `listen.local`；监听在虚拟 IP 上的不能写 0。「新增」监听在虚拟 IP 上、目标是别的节点的 TCP 转发现在可以用：监听节点替发起节点到目标节点开一条流再接起来，访问规则两段都要允许（发起节点能访问监听节点，监听节点能访问目标节点）；UDP 的也一样，监听节点到目标节点另开一个数据报上下文接力 |
 | `target_node` | 目标节点。必须声明过"可以作为端口转发的目标"才能启用 |
 | `target_addr` | 目标节点去连的地址，不能是 `0.0.0.0`，端口不能是 0 |
 | `allow_from` | 来源白名单；空表示不限制 |
 | `enabled` | 开关 |
 | `status` | 现在的状态，只读，见下 |
+| `class` | 「新增」这条转发上的流的服务等级；`null` 时用网络的默认值 |
+| `listen` | 「新增」监听节点最近一次报的这条转发的监听状态、连接数和流量，写法见 11.1 节的 `ListenStatus`。节点不在线或者还没有报过时是 `null`。只读 |
 
 `status` 按 controller 知道的算，排在前面的优先：
 
@@ -907,7 +1080,29 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `"target_offline"` | 目标节点不在线 |
 | `"active"` | 已经下发，两端都在线 |
 
-"端口被占用""目标连不上"这两种状态要节点上报，目前节点协议里没有，所以这里没有。
+「新增」"端口被占用"这类监听上的状态在 `listen` 里，不在 `status` 里（`status` 的取值没有变）：界面可以在 `status` 是 `"active"` 时再看 `listen.state`。"目标连不上"现在还没有。
+
+### 11.1 ListenStatus「新增」
+
+一个监听（代理监听器、端口转发的监听一侧）现在的样子，由监听节点每 10 秒上报一次：
+
+```json
+{ "state": "listening", "local": "127.0.0.1:41873", "connections": 1, "bytes_up": 512, "bytes_down": 8192 }
+```
+
+| `state` | 别的字段 | 含义 |
+|---|---|---|
+| `"listening"` | `local` | 正在监听。`local` 是实际绑定的地址：配置里端口写 0 时，这里是节点挑定的端口 |
+| `"port_in_use"` | `detail` | 端口已经被别的程序占着。节点不去抢，每 10 秒再试一次 |
+| `"failed"` | `detail` | 别的原因没有绑上（地址不在这台机器上、没有权限等），`detail` 是系统给的原因。同样会重试 |
+| `"virtual"` | — | 监听在节点虚拟 IP 上的端口转发：不占操作系统的端口 |
+| `"unsupported"` | `detail` | 这种配置节点不支持，`detail` 说明为什么（现在只有一种：监听在虚拟 IP 上而端口写 0，controller 本来就不收这样的配置） |
+| `"unknown"` | — | 比 controller 新的节点报的、这个版本的 controller 不认识的状态 |
+
+| 字段 | 含义 |
+|---|---|
+| `connections` | 现在的连接数；UDP 的端口转发是会话数 |
+| `bytes_up`、`bytes_down` | 节点这次运行以来客户端发进来的、发回给客户端的字节数（节点重启从零算） |
 
 ### GET /networks/{network}/forwards
 
@@ -930,10 +1125,10 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 }
 ```
 
-`protocol`、`listen_node`、`bind`、`target_node`、`target_addr` 必填；`name` 默认 `""`，`allow_from` 默认 `[]`，`enabled` 默认 `true`。
+`protocol`、`listen_node`、`bind`、`target_node`、`target_addr` 必填；`name` 默认 `""`，`allow_from` 默认 `[]`，`enabled` 默认 `true`，「新增」`class` 默认 `null`。
 
 应答：`201`，`Forward`。
-错误：`not_declared`（`enabled` 是 `true` 而目标节点没有声明）、`conflict`（监听节点上同一个地址已经有一条同协议的转发）、`invalid_request`、`not_found`（节点不在这个网络里）。
+错误：`not_declared`（`enabled` 是 `true` 而目标节点没有声明）、`conflict`（监听节点上同一个地址已经有一条同协议的转发；端口写 0 的不算）、`invalid_request`（「新增」监听在虚拟 IP 上而端口写 0）、`not_found`（节点不在这个网络里）。
 
 ### PUT /networks/{network}/forwards/{id}
 
@@ -995,7 +1190,8 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | GET、POST | `/networks/{network}/rules` | 列出、新建规则 |
 | PATCH、DELETE | `/networks/{network}/rules/{id}` | 修改、删除规则 |
 | GET、POST | `/networks/{network}/credentials` | 列出、签发凭据 |
-| DELETE | `/networks/{network}/credentials/{id}` | 吊销凭据 |
+| PATCH | `/networks/{network}/credentials/{id}` | 「新增」改凭据的上限、清零用量 |
+| DELETE | `/networks/{network}/credentials/{id}` | 吊销凭据；对吊销了的再删一次就彻底删掉 |
 | GET、POST | `/networks/{network}/listeners` | 列出、新建监听器 |
 | PUT、DELETE | `/networks/{network}/listeners/{id}` | 替换、删除监听器 |
 | GET、POST | `/networks/{network}/forwards` | 列出、新建端口转发 |
@@ -1011,10 +1207,14 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | GET、POST | `/networks/{network}/nodes/{node}/update` | 「新增」一个节点的更新情况；让它立即更新 |
 | GET | `/networks/{network}/routes` | 「新增」整个网络的路由矩阵 |
 | GET | `/networks/{network}/path` | 「新增」两个节点之间两个方向的当前路径 |
+| GET | `/networks/{network}/nodes/{node}/listeners` | 「新增」节点上全部监听的状态（含节点自己开的回环入口） |
+| GET | `/networks/{network}/exits` | 「新增」启用了的出口：设置、用量、健康、用它的节点看到的 |
+| GET | `/networks/{network}/exits/{node}` | 「新增」一个出口 |
+| POST | `/networks/{network}/tags/rename` | 「新增」在整个网络里把一个标签改名 |
 
 不在 `/api/v1` 下面的：`GET /metrics`（「新增」，第 16 节）。
 
-目前没有的：主动测试（连通性测试）、流量与配额的统计。
+目前没有的：主动测试（连通性测试）、按时间的流量曲线。
 
 ## 14. 节点更新「新增」
 
@@ -1346,3 +1546,72 @@ Prometheus 的文本格式（`Content-Type: text/plain; version=0.0.4`）。**�
 | `i3t_controller_release_checks_total` | counter | 启动以来查发布源的次数 |
 | `i3t_controller_release_check_failures_total` | counter | 其中没有成功的次数 |
 | `i3t_controller_package_bytes_sent_total` | counter | 启动以来发给节点的更新包的字节数 |
+
+## 17. 出口「新增」
+
+出口节点每 10 秒上报它替别人连目标的计数（这次运行以来的累计）、配额用到了哪里、是不是在排空；用它的节点各自上报它们经这个出口看到的计数。controller 两份都留着，界面可以对照着看（出口报的和用它的节点看到的对不上，说明中间有问题）。这些只在 controller 的内存里：节点离线之后留着最后报的那一份，controller 重启之后等节点重新上报。
+
+### GET /networks/{network}/exits
+
+网络里启用了出口的节点，按编号排。应答是 `ExitView` 的数组：
+
+```json
+[
+  {
+    "node": { "id": 1, "name": "gw", "virtual_ip": "10.66.0.1" },
+    "online": true,
+    "settings": { "ports": [80, 443], "lan": false, "bandwidth_mbps": 50, "upstream_socks5": null,
+                  "quota_bytes": 500000000000, "quota_reset_day": 1, "family": "any", "connects_per_minute": null, "class": null },
+    "health": "ok",
+    "recent_requests": 120,
+    "recent_failures": 0,
+    "usage": {
+      "active": 3, "total": 4211, "bytes_to_target": 52428800, "bytes_from_target": 1073741824,
+      "failed_by_target": 12, "refused": 3, "failed_by_exit": 0, "aborted": 5, "draining": false,
+      "quota": { "limit_bytes": 500000000000, "used_bytes": 1126170624, "period_start": 1793491200, "period_end": 1796083200 }
+    },
+    "reported_secs_ago": 4,
+    "observed": [
+      {
+        "by": { "id": 2, "name": "laptop", "virtual_ip": "10.66.0.2" },
+        "exit": 1, "flows": 4180, "bytes_up": 52000000, "bytes_down": 1070000000,
+        "failed_by_target": 12, "refused": 3, "failed_by_exit": 0, "unreachable": 1,
+        "reported_secs_ago": 7
+      }
+    ]
+  }
+]
+```
+
+| 字段 | 含义 |
+|---|---|
+| `settings` | 出口的设置，和 `Node.exit` 一样（第 5.6 节） |
+| `health` | `"ok"`、`"degraded"`、`"unknown"`。只看出口自己报的、归因于它自己的失败（解析器出错、出口内部出错）：最近 5 分钟里至少 3 次、并且占请求的一成以上是 `"degraded"`。目标的问题（域名不存在、连接被拒绝、超时）和被拒绝（访问规则、出站策略、排空、配额、建连预算）都不算。出口不在线、或者最近 5 分钟里没有请求是 `"unknown"` |
+| `recent_requests`、`recent_failures` | 最近 5 分钟里出口报的建流请求数，和其中归因于出口自己的失败数。出口刚启动、只报过一次时都是 0 |
+| `usage` | 出口最近一次报的计数（`ExitReport`），没有报过是 `null`。`active` 是现在正在处理的流；其余是出口这次运行以来的累计：`total` 收到的建流请求（含 UDP 的数据报上下文），`bytes_to_target`、`bytes_from_target` 搬运的字节数，`failed_by_target`、`refused`、`failed_by_exit` 没建成的请求按归因分，`aborted` 建成之后没有正常结束的。`draining` 是它正在排空。`quota` 在配了配额时是本账期的配额、已用（可能略超过配额：超出的那一段流是在用完的那一刻被断开的）、账期的开始和结束（Unix 秒，按出口节点自己的时钟）；没配配额是 `null` |
+| `reported_secs_ago` | `usage` 是多少秒之前报的 |
+| `observed` | 用过这个出口的节点各自看到的：`by` 是哪个节点；`flows` 它经这个出口发起的流，`bytes_up`、`bytes_down` 它发出、收到的字节数，`failed_by_target`、`refused`、`failed_by_exit` 出口回的拒绝按归因分，`unreachable` 到出口开流就失败了（出口根本没看到）；`exit` 是这个出口的编号。都是那个节点这次运行以来的累计。`reported_secs_ago` 是多少秒之前报的 |
+
+### GET /networks/{network}/exits/{node}
+
+一个出口，应答是 `ExitView`。错误：`not_found`（节点不在这个网络里，或者没有启用出口）。
+
+## 18. 标签「新增」
+
+### POST /networks/{network}/tags/rename
+
+在整个网络里把一个标签改名：节点上的、规则里的（`src` 和 `dst`）、还没用掉的注册令牌预设的。节点上已经有新名字的，两个合成一个。
+
+```json
+{ "from": "laptops", "to": "phones" }
+```
+
+应答：
+
+```json
+{ "from": "laptops", "to": "phones", "nodes": 3, "rules": 1, "tokens": 0 }
+```
+
+`nodes`、`rules`、`tokens` 是各改了几处。新名字原来没有人用时，谁能访问谁不变；原来就有人用时，两组节点合成了一组，访问关系按合并之后的算，随即下发。
+
+错误：`invalid_request`（标签的写法不对；`from` 或 `to` 是内置的 `all`；两个一样）。

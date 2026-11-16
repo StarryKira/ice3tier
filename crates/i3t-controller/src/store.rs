@@ -30,7 +30,8 @@ pub use credential::CredentialRecord;
 pub use forward::ForwardRecord;
 pub use network::{NetworkRecord, NewNetwork};
 pub use node::{NetmapState, NewNode, NodeRecord};
-pub use token::{NewToken, TokenRecord};
+pub use oplog::LogFilter;
+pub use token::{NewToken, RETENTION_SECS, TokenRecord, is_pending, token_at};
 
 /// SHA-256 的长度。令牌和 netmap 的摘要都是它。
 pub const DIGEST_LEN: usize = 32;

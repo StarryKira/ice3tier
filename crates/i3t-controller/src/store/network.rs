@@ -2,6 +2,7 @@
 
 use i3t_model::admin::{NetworkId, Timestamp};
 use i3t_model::netmap::{Reach, RoutingMode};
+use i3t_proto::flow::Class;
 use ipnet::Ipv4Net;
 use rusqlite::{OptionalExtension, Row, params};
 
@@ -17,6 +18,8 @@ pub struct NetworkRecord {
     pub max_relay_hops: u8,
     pub reach: Reach,
     pub created_at: Timestamp,
+    /// 网络的默认服务等级。
+    pub class: Option<Class>,
 }
 
 impl NetworkRecord {
@@ -35,6 +38,7 @@ impl NetworkRecord {
             max_relay_hops: row.get("max_relay_hops")?,
             reach: row.get::<_, Json<Reach>>("reach")?.0,
             created_at: row.get::<_, Unsigned>("created_at")?.0,
+            class: row.get::<_, Option<Json<Class>>>("class")?.map(|json| json.0),
         })
     }
 }
@@ -47,6 +51,7 @@ pub struct NewNetwork {
     pub max_relay_hops: u8,
     pub reach: Reach,
     pub created_at: Timestamp,
+    pub class: Option<Class>,
 }
 
 impl Store {
@@ -55,8 +60,16 @@ impl Store {
     /// 写数据库失败，包括名字和已有的网络重复。
     pub fn insert_network(&self, new: &NewNetwork) -> Result<NetworkId, StoreError> {
         self.conn.execute(
-            "INSERT INTO networks (name, cidr, routing, max_relay_hops, reach, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![new.name, Text(new.cidr), Json(new.routing), new.max_relay_hops, Json(new.reach), Unsigned(new.created_at)],
+            "INSERT INTO networks (name, cidr, routing, max_relay_hops, reach, created_at, class) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                new.name,
+                Text(new.cidr),
+                Json(new.routing),
+                new.max_relay_hops,
+                Json(new.reach),
+                Unsigned(new.created_at),
+                new.class.map(Json)
+            ],
         )?;
         Ok(NetworkId(row_id(self.conn.last_insert_rowid())?))
     }
@@ -93,8 +106,15 @@ impl Store {
     /// 写数据库失败。
     pub fn update_network(&self, network: &NetworkRecord) -> Result<(), StoreError> {
         self.conn.execute(
-            "UPDATE networks SET cidr = ?2, routing = ?3, max_relay_hops = ?4, reach = ?5 WHERE id = ?1",
-            params![SqlNetwork(network.id), Text(network.cidr), Json(network.routing), network.max_relay_hops, Json(network.reach)],
+            "UPDATE networks SET cidr = ?2, routing = ?3, max_relay_hops = ?4, reach = ?5, class = ?6 WHERE id = ?1",
+            params![
+                SqlNetwork(network.id),
+                Text(network.cidr),
+                Json(network.routing),
+                network.max_relay_hops,
+                Json(network.reach),
+                network.class.map(Json)
+            ],
         )?;
         Ok(())
     }
@@ -126,7 +146,13 @@ mod tests {
         assert_eq!(store.network_by_name("home").unwrap(), Some(record.clone()));
         assert_eq!(store.networks().unwrap(), vec![record.clone()]);
 
-        let updated = NetworkRecord { routing: RoutingMode::LowestCost, reach: Reach::RelayOnly, max_relay_hops: 3, ..record };
+        let updated = NetworkRecord {
+            routing: RoutingMode::LowestCost,
+            reach: Reach::RelayOnly,
+            max_relay_hops: 3,
+            class: Some(Class::Bulk),
+            ..record
+        };
         store.update_network(&updated).unwrap();
         assert_eq!(store.network(first).unwrap(), Some(updated));
 

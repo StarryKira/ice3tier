@@ -1,6 +1,6 @@
 //! 端口转发的增删改，和每条转发现在的状态。
 
-use i3t_model::admin::{Forward, ForwardInput, ForwardStatus, NetworkId};
+use i3t_model::admin::{Forward, ForwardInput, ForwardStatus, LogRef, NetworkId, RefKind};
 
 use super::nodes::{is_connectable, require_node};
 use super::{Controller, Inner, Seeds, naming};
@@ -32,7 +32,7 @@ impl Controller {
         let record = inner.store.atomically(|store| {
             let config = check(store, network, None, input)?;
             let id = store.insert_forward(network, &config)?;
-            store.log(now, Some(network), "forward.create", &describe(id, &config))?;
+            store.log_refs(now, Some(network), "forward.create", &describe(id, &config), &refs(id, &config))?;
             Ok::<_, Error>(ForwardRecord { id, config })
         })?;
         inner.refresh(network, Seeds::of([record.config.listen_node, record.config.target_node]), None)?;
@@ -52,7 +52,7 @@ impl Controller {
             let before = store.forward(network, id)?.ok_or(Error::NotFound(Entity::Forward))?;
             let config = check(store, network, Some(id), input)?;
             store.update_forward(id, &config)?;
-            store.log(now, Some(network), "forward.update", &describe(id, &config))?;
+            store.log_refs(now, Some(network), "forward.update", &describe(id, &config), &refs(id, &config))?;
             Ok::<_, Error>((before, ForwardRecord { id, config }))
         })?;
         let ends = [before.config.listen_node, before.config.target_node, record.config.listen_node, record.config.target_node];
@@ -70,7 +70,7 @@ impl Controller {
         let record = inner.store.atomically(|store| {
             let record = store.forward(network, id)?.ok_or(Error::NotFound(Entity::Forward))?;
             store.delete_forward(id)?;
-            store.log(now, Some(network), "forward.delete", &describe(id, &record.config))?;
+            store.log_refs(now, Some(network), "forward.delete", &describe(id, &record.config), &refs(id, &record.config))?;
             Ok::<_, Error>(record)
         })?;
         inner.refresh(network, Seeds::of([record.config.listen_node, record.config.target_node]), None)?;
@@ -112,6 +112,8 @@ impl Inner {
             allow_from: config.allow_from.clone(),
             enabled: config.enabled,
             status,
+            class: config.class,
+            listen: self.forward_listen_status(config.listen_node, record.id),
         }
     }
 }
@@ -119,28 +121,37 @@ impl Inner {
 /// 检查一条转发的配置。`replacing` 是正在被替换的那一条，查冲突时不和它自己比。
 fn check(store: &Store, network: NetworkId, replacing: Option<u32>, mut config: ForwardInput) -> Result<ForwardInput, Error> {
     config.name = naming::title("端口转发", &config.name, false)?;
-    require_node(store, network, config.listen_node)?;
+    let listener = require_node(store, network, config.listen_node)?;
     let target = require_node(store, network, config.target_node)?;
     // 目标节点要自己声明过才行：controller 不能把一台没有声明的机器的回环和局域网转发出去。
     if config.enabled && !target.declared.forward {
         return Err(Error::NotDeclared { node: target.name, capability: Capability::Forward });
     }
-    if config.bind.port() == 0 {
-        return Err(Error::invalid("监听端口不能是 0"));
+    // 端口写 0 是让监听节点自己挑一个空闲的端口（挑定之后重启不变，挑的是哪个看它的上报）。
+    // 虚拟 IP 上的转发不占操作系统的端口，没有"空闲的端口"可挑，要写明。
+    if config.bind.port() == 0 && config.bind.ip() == std::net::IpAddr::V4(listener.virtual_ip) {
+        return Err(Error::invalid("监听在虚拟 IP 上的端口转发要写明端口，不能是 0"));
     }
     if !is_connectable(&config.target_addr) {
         return Err(Error::invalid(format!("目标地址 {} 不是一个能连上的地址", config.target_addr)));
     }
+    // 端口写 0 的各挑各的端口，不算冲突。
     let clash = store.forwards(network)?.into_iter().find(|other| {
         Some(other.id) != replacing
             && other.config.listen_node == config.listen_node
             && other.config.protocol == config.protocol
             && other.config.bind == config.bind
+            && config.bind.port() != 0
     });
     match clash {
         Some(other) => Err(Error::Conflict(format!("监听节点上的转发 #{} 已经监听在 {}", other.id, other.config.bind))),
         None => Ok(config),
     }
+}
+
+/// 操作记录里一条转发说到的东西：它自己和两端的节点。
+fn refs(id: u32, config: &ForwardInput) -> [LogRef; 3] {
+    [LogRef::new(RefKind::Forward, id), LogRef::node(config.listen_node), LogRef::node(config.target_node)]
 }
 
 fn describe(id: u32, config: &ForwardInput) -> String {

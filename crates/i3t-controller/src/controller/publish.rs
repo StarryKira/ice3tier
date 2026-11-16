@@ -193,7 +193,10 @@ impl Inner {
     /// 节点不再在线：去掉它的连接，记下最近在线的时间，并且不再等它确认。
     pub(crate) fn drop_session(&mut self, node: NodeId) {
         let Some(live) = self.live.remove(&node) else { return };
-        if let Err(err) = self.store.set_node_last_seen(node, self.clock.now()) {
+        // 注册时那一条连接不算"最近在线"。
+        if !live.enrolling
+            && let Err(err) = self.store.set_node_last_seen(node, self.clock.now())
+        {
             // 只影响界面上的"最近在线"，不值得让调用方的操作失败。
             tracing::warn!(%node, "记录节点最近在线的时间失败：{err}");
         }

@@ -1,7 +1,7 @@
 //! 给一个节点算它的 netmap。
 //!
 //! 最小权限：对端只列和它有访问关系的节点；relay 列全网的（relay 不受访问规则约束）；
-//! 全网节点的编号和公钥只给 relay（认证中转会话要用）；凭据只给有监听器要求凭据的节点。
+//! 全网节点的编号和公钥只给 relay（认证中转会话要用）；凭据只给有监听器要求凭据的节点，吊销了的不给。
 //!
 //! 这里算出来的内容不带版本号。版本号由下发的一方管：内容的摘要变了才加一。
 
@@ -124,6 +124,7 @@ impl NetworkView {
                 bind: forward.config.bind,
                 target: forward.config.target_node,
                 allow_from: forward.config.allow_from.clone(),
+                class: forward.config.class,
             })
             .collect();
         let forward_targets = deliverable()
@@ -139,12 +140,16 @@ impl NetworkView {
         let listeners: Vec<_> =
             self.listeners.iter().filter(|listener| listener.node == id).map(|listener| listener.config.clone()).collect();
         let credentials = if listeners.iter().any(|listener| listener.require_credential) {
+            // 吊销了的不下发：入口不再认它。用完了的照样下发，带着标记：入口要据此断开它正在进行的连接。
             self.credentials
                 .iter()
+                .filter(|record| !record.is_revoked())
                 .map(|record| Credential {
                     name: record.credential.name.clone(),
                     token: record.token,
                     max_concurrent: record.credential.max_concurrent,
+                    id: record.credential.id,
+                    exhausted: record.is_exhausted(),
                 })
                 .collect()
         } else {
@@ -177,6 +182,7 @@ impl NetworkView {
                 routing: self.network.routing,
                 max_relay_hops: self.network.max_relay_hops,
                 reach: self.network.reach,
+                class: self.network.class,
             },
             me: LocalNode {
                 id,
@@ -215,7 +221,7 @@ impl NetworkView {
             endpoints: if self.reach_of(peer) == Reach::RelayOnly { Vec::new() } else { candidate_endpoints(peer) },
             attached,
             // 出口的提示只给能用它的节点。
-            exit: peer.exit.as_ref().filter(|_| relation.outbound).map(|exit| PeerExit { lan: exit.lan }),
+            exit: peer.exit.as_ref().filter(|_| relation.outbound).map(|exit| PeerExit { lan: exit.lan, class: exit.class }),
             dial_out_only: peer.dial_out_only,
             keep_alive: self.pairs.iter().any(|pair| pair.a == low && pair.b == high && pair.keep_alive),
         }

@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use i3t_model::admin::{ForwardInput, NetworkId};
 use i3t_model::netmap::ForwardProtocol;
 use i3t_proto::NodeId;
+use i3t_proto::flow::Class;
 use ipnet::IpNet;
 use rusqlite::{OptionalExtension, Row, named_params, params};
 
@@ -30,6 +31,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<ForwardRecord> {
             target_addr: row.get::<_, Text<SocketAddr>>("target_addr")?.0,
             allow_from: row.get::<_, Json<Vec<IpNet>>>("allow_from")?.0,
             enabled: row.get("enabled")?,
+            class: row.get::<_, Option<Json<Class>>>("class")?.map(|json| json.0),
         },
     })
 }
@@ -40,8 +42,8 @@ impl Store {
     /// 写数据库失败。
     pub fn insert_forward(&self, network: NetworkId, config: &ForwardInput) -> Result<u32, StoreError> {
         self.conn.execute(
-            "INSERT INTO forwards (network_id, name, protocol, listen_node, bind, target_node, target_addr, allow_from, enabled)
-             VALUES (:network, :name, :protocol, :listen_node, :bind, :target_node, :target_addr, :allow_from, :enabled)",
+            "INSERT INTO forwards (network_id, name, protocol, listen_node, bind, target_node, target_addr, allow_from, enabled, class)
+             VALUES (:network, :name, :protocol, :listen_node, :bind, :target_node, :target_addr, :allow_from, :enabled, :class)",
             named_params! {
                 ":network": SqlNetwork(network),
                 ":name": config.name,
@@ -52,6 +54,7 @@ impl Store {
                 ":target_addr": Text(config.target_addr),
                 ":allow_from": Json(&config.allow_from),
                 ":enabled": config.enabled,
+                ":class": config.class.map(Json),
             },
         )?;
         Ok(row_id(self.conn.last_insert_rowid())?)
@@ -86,7 +89,8 @@ impl Store {
     pub fn update_forward(&self, id: u32, config: &ForwardInput) -> Result<(), StoreError> {
         self.conn.execute(
             "UPDATE forwards SET name = :name, protocol = :protocol, listen_node = :listen_node, bind = :bind,
-                                 target_node = :target_node, target_addr = :target_addr, allow_from = :allow_from, enabled = :enabled
+                                 target_node = :target_node, target_addr = :target_addr, allow_from = :allow_from, enabled = :enabled,
+                                 class = :class
              WHERE id = :id",
             named_params! {
                 ":id": id,
@@ -98,6 +102,7 @@ impl Store {
                 ":target_addr": Text(config.target_addr),
                 ":allow_from": Json(&config.allow_from),
                 ":enabled": config.enabled,
+                ":class": config.class.map(Json),
             },
         )?;
         Ok(())
@@ -136,6 +141,7 @@ mod tests {
             target_addr: "192.168.1.10:80".parse().unwrap(),
             allow_from: Vec::new(),
             enabled: true,
+            class: None,
         }
     }
 
@@ -151,6 +157,7 @@ mod tests {
             bind: "0.0.0.0:5353".parse().unwrap(),
             allow_from: vec!["10.0.0.0/8".parse().unwrap()],
             enabled: false,
+            class: Some(i3t_proto::flow::Class::Interactive),
             ..original
         };
         store.update_forward(id, &replacement).unwrap();

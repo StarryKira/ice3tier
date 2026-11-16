@@ -130,6 +130,8 @@ pub enum Entity {
     Forward,
     PairSetting,
     PausedVersion,
+    /// 启用了出口的节点。
+    Exit,
 }
 
 impl fmt::Display for Entity {
@@ -144,6 +146,7 @@ impl fmt::Display for Entity {
             Self::Forward => "端口转发",
             Self::PairSetting => "节点对设置",
             Self::PausedVersion => "被暂停的版本",
+            Self::Exit => "出口",
         })
     }
 }

@@ -3,7 +3,8 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use i3t_model::netmap::{Reach, RoutingMode};
+use i3t_model::netmap::{IpFamily, Reach, RoutingMode};
+use i3t_proto::flow::Class;
 use ipnet::{IpNet, Ipv4Net};
 
 #[derive(Parser)]
@@ -41,7 +42,19 @@ pub enum Command {
         /// 最多看多少条
         #[arg(long, default_value_t = 30)]
         limit: u32,
+        /// 只看这种操作，或者以它开头的，例如 node、credential.create
+        #[arg(long)]
+        action: Option<String>,
+        /// 只看提到这样东西的，写成 <种类>:<编号>，例如 node:3、credential:1
+        #[arg(long = "ref", value_name = "KIND:ID")]
+        reference: Option<String>,
+        /// 只看编号比它小的（翻页）
+        #[arg(long)]
+        before: Option<u64>,
     },
+    /// 在当前网络里把一个标签改名：节点上的、规则里的、还没用掉的注册令牌里的
+    #[command(subcommand)]
+    Tag(TagCommand),
     /// 网络
     #[command(subcommand)]
     Network(NetworkCommand),
@@ -123,6 +136,15 @@ pub struct NetworkSettings {
     /// 对可用路径的限制
     #[arg(long)]
     pub reach: Option<ReachArg>,
+    /// 默认的服务等级；default 表示 auto
+    #[arg(long)]
+    pub class: Option<Inherit<ClassArg>>,
+}
+
+#[derive(Subcommand)]
+pub enum TagCommand {
+    /// 把 FROM 改名为 TO
+    Rename { from: String, to: String },
 }
 
 #[derive(Subcommand)]
@@ -165,6 +187,8 @@ pub enum NodeCommand {
     Routes { node: String },
     /// 这个节点能访问谁、谁能访问它、各是哪条规则允许的
     Access { node: String },
+    /// 节点上的全部监听：下发的监听器、它自己开的回环入口、端口转发；状态、连接数、流量
+    Listeners { node: String },
 }
 
 #[derive(Subcommand)]
@@ -206,15 +230,36 @@ pub enum ExitCommand {
         /// 把流交给节点本机的这个 SOCKS5 代理去连目标
         #[arg(long)]
         upstream_socks5: Option<SocketAddr>,
+        /// 每个账期的流量配额，例如 500G、2T；不写表示不限
+        #[arg(long)]
+        quota: Option<ByteSize>,
+        /// 账期从每月的哪一天开始（UTC），1 到 28
+        #[arg(long, default_value_t = 1)]
+        reset_day: u8,
+        /// 只连这种地址
+        #[arg(long, default_value = "any")]
+        family: FamilyArg,
+        /// 同一个发起节点每分钟最多让它向同一个目标新建多少条连接；不写表示不限
+        #[arg(long)]
+        connects_per_minute: Option<u32>,
+        /// 经它出去的流的默认服务等级
+        #[arg(long)]
+        class: Option<ClassArg>,
     },
     /// 停用出口
     Disable { node: String },
+    /// 启用了的出口：设置、它自己报的计数和配额、健康、用它的节点看到的
+    List,
 }
 
 #[derive(Subcommand)]
 pub enum TokenCommand {
     /// 列出还没用掉的注册令牌
-    List,
+    List {
+        /// 连用掉的和过期的也列出来
+        #[arg(long)]
+        all: bool,
+    },
     /// 生成一个注册令牌。令牌文本只显示这一次，在要加入的机器上交给 i3t join
     Create {
         /// 多久之后过期，例如 30m、24h、7d
@@ -269,8 +314,24 @@ pub enum CredentialCommand {
         /// 同时进行的连接数上限；不写表示不限
         #[arg(long)]
         max_concurrent: Option<u32>,
+        /// 流量上限，例如 10G；不写表示不限
+        #[arg(long)]
+        max_bytes: Option<ByteSize>,
     },
-    /// 吊销一个凭据
+    /// 改一个凭据的上限，不用重新签发令牌
+    Set {
+        id: u32,
+        /// 同时进行的连接数上限；none 表示不限
+        #[arg(long)]
+        max_concurrent: Option<Limit<u32>>,
+        /// 流量上限，例如 10G；none 表示不限
+        #[arg(long)]
+        max_bytes: Option<Limit<ByteSize>>,
+        /// 用量清零
+        #[arg(long)]
+        reset_usage: bool,
+    },
+    /// 吊销一个凭据；对已经吊销的再执行一次就彻底删掉
     Delete { id: u32 },
 }
 
@@ -302,6 +363,12 @@ pub enum ListenerCommand {
         /// 这个监听器上的流量都从这个节点出去
         #[arg(long, value_name = "NODE")]
         fixed_exit: Option<String>,
+        /// 这个监听器上的流的默认服务等级
+        #[arg(long)]
+        class: Option<ClassArg>,
+        /// 乐观回复：on 时不等对端的应答就告诉客户端连上了，off 时一律等；不写按目标的种类
+        #[arg(long, value_name = "on|off")]
+        optimistic: Option<OnOff>,
     },
     /// 删掉一个监听器
     Delete { id: u32 },
@@ -311,7 +378,7 @@ pub enum ListenerCommand {
 pub enum ForwardCommand {
     /// 列出端口转发和它们的状态
     List,
-    /// 在 LISTEN_NODE 的 BIND 上监听，转发到 TARGET_NODE 去连的 TARGET_ADDR。
+    /// 在 LISTEN_NODE 的 BIND 上监听，转发到 TARGET_NODE 去连的 TARGET_ADDR。BIND 的端口写 0 由监听节点挑一个空闲的。
     /// 目标节点要先在本地声明（i3t set can-forward on）
     Add {
         listen_node: String,
@@ -329,6 +396,9 @@ pub enum ForwardCommand {
         /// 先建成停用的
         #[arg(long)]
         disabled: bool,
+        /// 这条转发上的流的服务等级
+        #[arg(long)]
+        class: Option<ClassArg>,
     },
     /// 启用一条转发
     Enable { id: u32 },
@@ -413,6 +483,103 @@ impl From<RoutingArg> for RoutingMode {
             RoutingArg::DirectFirst => Self::DirectFirst,
             RoutingArg::LowestCost => Self::LowestCost,
         }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum ClassArg {
+    Auto,
+    /// 尾延迟最重要
+    Interactive,
+    /// 一个报文都不丢
+    Reliable,
+    /// 吞吐优先
+    Bulk,
+}
+
+impl From<ClassArg> for Class {
+    fn from(arg: ClassArg) -> Self {
+        match arg {
+            ClassArg::Auto => Self::Auto,
+            ClassArg::Interactive => Self::Interactive,
+            ClassArg::Reliable => Self::Reliable,
+            ClassArg::Bulk => Self::Bulk,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum FamilyArg {
+    Any,
+    Ipv4,
+    Ipv6,
+}
+
+impl From<FamilyArg> for IpFamily {
+    fn from(arg: FamilyArg) -> Self {
+        match arg {
+            FamilyArg::Any => Self::Any,
+            FamilyArg::Ipv4 => Self::Ipv4,
+            FamilyArg::Ipv6 => Self::Ipv6,
+        }
+    }
+}
+
+/// 字节数：数字加可选的单位 K、M、G、T（按 1000 进位，和网络流量的计法一样）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ByteSize(pub u64);
+
+impl std::str::FromStr for ByteSize {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let text = s.trim().trim_end_matches(['B', 'b']);
+        let (digits, scale) = match text.char_indices().last() {
+            Some((index, unit)) if unit.is_ascii_alphabetic() => {
+                let scale: u64 = match unit.to_ascii_uppercase() {
+                    'K' => 1_000,
+                    'M' => 1_000_000,
+                    'G' => 1_000_000_000,
+                    'T' => 1_000_000_000_000,
+                    _ => return Err("单位要是 K、M、G 或 T，例如 500M、10G".to_owned()),
+                };
+                (&text[..index], scale)
+            }
+            _ => (text, 1),
+        };
+        let count: u64 = digits.trim().parse().map_err(|_| "要写成数字加单位，例如 500M、10G".to_owned())?;
+        count.checked_mul(scale).map(Self).ok_or_else(|| "太大了".to_owned())
+    }
+}
+
+/// 一个可以清掉的上限：写一个值，或者写 `none` 表示不限。
+#[derive(Clone, Copy)]
+pub enum Limit<T> {
+    None,
+    Value(T),
+}
+
+impl<T: std::str::FromStr<Err: std::fmt::Display>> std::str::FromStr for Limit<T> {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "none" { Ok(Self::None) } else { s.parse().map(Self::Value).map_err(|err| format!("{err}；或者写 none")) }
+    }
+}
+
+impl<T> Limit<T> {
+    /// 管理 API 里的写法：`None` 表示不限。
+    pub fn into_option<U: From<T>>(self) -> Option<U> {
+        match self {
+            Self::None => None,
+            Self::Value(value) => Some(U::from(value)),
+        }
+    }
+}
+
+impl From<ByteSize> for u64 {
+    fn from(size: ByteSize) -> Self {
+        size.0
     }
 }
 
@@ -564,6 +731,30 @@ mod tests {
         assert!(matches!(parse(&["path", "a", "b"]), Command::Path { .. }));
         assert!(matches!(parse(&["routes"]), Command::Routes));
         assert!(Cli::try_parse_from(["i3tctl", "update", "set", "--auto", "maybe"]).is_err());
+    }
+
+    #[test]
+    fn sizes_limits_and_the_new_commands_parse() {
+        assert_eq!("500M".parse::<ByteSize>(), Ok(ByteSize(500_000_000)));
+        assert_eq!("2t".parse::<ByteSize>(), Ok(ByteSize(2_000_000_000_000)));
+        assert_eq!("1234".parse::<ByteSize>(), Ok(ByteSize(1234)));
+        assert_eq!("10GB".parse::<ByteSize>(), Ok(ByteSize(10_000_000_000)));
+        assert!("10X".parse::<ByteSize>().is_err() && "lots".parse::<ByteSize>().is_err());
+        assert!(matches!("none".parse::<Limit<ByteSize>>(), Ok(Limit::None)));
+        assert!(matches!("1K".parse::<Limit<ByteSize>>(), Ok(Limit::Value(ByteSize(1000)))));
+        let parse = |args: &[&str]| Cli::try_parse_from([&["i3tctl"], args].concat()).unwrap().command;
+        assert!(matches!(
+            parse(&["credential", "set", "3", "--max-bytes", "none", "--reset-usage"]),
+            Command::Credential(CredentialCommand::Set { id: 3, reset_usage: true, .. })
+        ));
+        assert!(matches!(
+            parse(&["exit", "enable", "gw", "--quota", "1G", "--family", "ipv4"]),
+            Command::Exit(ExitCommand::Enable { quota: Some(ByteSize(1_000_000_000)), .. })
+        ));
+        assert!(matches!(parse(&["tag", "rename", "a", "b"]), Command::Tag(TagCommand::Rename { .. })));
+        assert!(matches!(parse(&["token", "list", "--all"]), Command::Token(TokenCommand::List { all: true })));
+        assert!(matches!(parse(&["log", "--ref", "node:3", "--action", "node"]), Command::Log { .. }));
+        assert!(matches!(parse(&["node", "listeners", "gw"]), Command::Node(NodeCommand::Listeners { .. })));
     }
 
     #[test]

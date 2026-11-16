@@ -904,6 +904,7 @@ name = "i3t-exit"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
+ "bytes",
  "dns-lookup",
  "i3t-access",
  "i3t-conn",

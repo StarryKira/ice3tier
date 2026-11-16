@@ -42,6 +42,7 @@ mod error;
 pub mod frame;
 pub mod netmap;
 pub mod node_server;
+mod reachability;
 pub mod release;
 mod secret;
 mod server;

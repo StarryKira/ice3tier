@@ -10,6 +10,7 @@ use super::{Controller, Inner, count, node_ref};
 use crate::access::{ALL, AccessMap};
 use crate::error::{Entity, Error};
 use crate::netmap::NetworkView;
+use crate::store::is_pending;
 
 impl Controller {
     /// 一个网络的总览。
@@ -22,6 +23,7 @@ impl Controller {
         let view = inner.view(network)?;
         let now = inner.clock.now();
         let online_nodes: Vec<NodeRef> = view.nodes.values().filter(|node| inner.is_online(node.id)).map(node_ref).collect();
+        let live = inner.live.values().filter(|live| live.network == network);
         Ok(Overview {
             network,
             nodes: count(view.nodes.len()),
@@ -32,9 +34,12 @@ impl Controller {
             listeners: count(view.listeners.len()),
             forwards: count(view.forwards.len()),
             credentials: count(view.credentials.len()),
-            pending_tokens: count(inner.store.tokens(network)?.iter().filter(|token| token.expires_at > now).count()),
+            pending_tokens: count(inner.store.tokens(network)?.iter().filter(|token| is_pending(token, now)).count()),
             unreachable_pairs: inner.unreachable_pairs(&view),
             online_nodes,
+            flows: live.clone().map(|live| u64::from(live.flows)).sum(),
+            tx_bytes: live.clone().map(|live| live.tx_bytes).fold(0, u64::saturating_add),
+            rx_bytes: live.map(|live| live.rx_bytes).fold(0, u64::saturating_add),
         })
     }
 

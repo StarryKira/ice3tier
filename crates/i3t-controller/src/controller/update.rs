@@ -373,7 +373,13 @@ impl Controller {
         let node = inner.forget_update_failure(node)?;
         inner.updates.forced.insert(id, Forced { timing, skips_relay_queue: true });
         let now = inner.clock.now();
-        inner.store.log(now, Some(network), "update.force", &format!("让节点 {} 立即更新（{}）", node.name, describe_timing(timing)))?;
+        inner.store.log_refs(
+            now,
+            Some(network),
+            "update.force",
+            &format!("让节点 {} 立即更新（{}）", node.name, describe_timing(timing)),
+            &[i3t_model::admin::LogRef::node(node.id)],
+        )?;
         tracing::info!(node = %id, name = %node.name, ?timing, "管理员让这个节点立即更新");
         inner.roll_out()?;
         self.wake_if_needed(&inner);
@@ -598,7 +604,7 @@ impl Inner {
             });
             write_meta(&self.store, PAUSED_META, &self.updates.paused)?;
             let detail = format!("节点 {} 更新到 {version} 失败（{reason}），暂停这个版本的自动更新", node.name);
-            self.store.log(now, Some(node.network), "update.pause", &detail)?;
+            self.store.log_refs(now, Some(node.network), "update.pause", &detail, &[i3t_model::admin::LogRef::node(node.id)])?;
             tracing::warn!(%version, node = %node.id, "暂停这个版本对其余节点的自动更新，等管理员看过之后继续");
         }
         Ok(())

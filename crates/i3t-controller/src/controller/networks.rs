@@ -1,6 +1,6 @@
 //! 网络的增删改查。
 
-use i3t_model::admin::{CreateNetwork, Direction, Network, NetworkId, Rule, UpdateNetwork};
+use i3t_model::admin::{CreateNetwork, Direction, LogRef, Network, NetworkId, RefKind, Rule, UpdateNetwork};
 use i3t_model::netmap::{Reach, RoutingMode};
 use ipnet::Ipv4Net;
 
@@ -60,6 +60,7 @@ impl Controller {
                 max_relay_hops,
                 reach: request.reach.unwrap_or(Reach::Any),
                 created_at: now,
+                class: request.class,
             })?;
             let default_rule = Rule {
                 id: 0,
@@ -70,7 +71,8 @@ impl Controller {
                 enabled: true,
             };
             store.insert_rule(id, &default_rule)?;
-            store.log(now, Some(id), "network.create", &format!("新建网络 {name}，地址段 {cidr}"))?;
+            let refs = [LogRef::new(RefKind::Network, id.0)];
+            store.log_refs(now, Some(id), "network.create", &format!("新建网络 {name}，地址段 {cidr}"), &refs)?;
             Ok(id)
         })?;
         tracing::info!(network = %id, %name, "新建网络");
@@ -100,8 +102,10 @@ impl Controller {
             }
             network.routing = request.routing.unwrap_or(network.routing);
             network.reach = request.reach.unwrap_or(network.reach);
+            network.class = request.class.unwrap_or(network.class);
             store.update_network(&network)?;
-            store.log(now, Some(id), "network.update", &format!("修改网络 {} 的设置", network.name))?;
+            let refs = [LogRef::new(RefKind::Network, id.0)];
+            store.log_refs(now, Some(id), "network.update", &format!("修改网络 {} 的设置", network.name), &refs)?;
             Ok::<_, Error>(network)
         })?;
         inner.refresh(id, Seeds::All, None)?;
@@ -123,7 +127,7 @@ impl Controller {
                 return Err(Error::NetworkNotEmpty(network.name));
             }
             store.delete_network(id)?;
-            store.log(now, None, "network.delete", &format!("删除网络 {}", network.name))?;
+            store.log_refs(now, None, "network.delete", &format!("删除网络 {}", network.name), &[LogRef::new(RefKind::Network, id.0)])?;
             tracing::info!(network = %id, name = %network.name, "删除网络");
             Ok(())
         })
@@ -142,6 +146,7 @@ impl Inner {
             reach: record.reach,
             created_at: record.created_at,
             nodes: self.store.node_count(Some(record.id))?,
+            class: record.class,
         })
     }
 }

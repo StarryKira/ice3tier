@@ -256,7 +256,8 @@ async fn a_node_can_be_inspected_changed_and_deleted() {
 
     let listed: Vec<model::Node> = api.ok(Method::GET, &base, None).await;
     assert_eq!(listed.iter().map(|node| node.id).collect::<Vec<_>>(), vec![node.id, relay.id]);
-    assert!(listed[0].online && listed[0].last_seen_at.is_some());
+    // 节点只是用令牌注册过（这条连接是注册的那一条），还没有带着 Hello 连上来过：没有"最近在线"。
+    assert!(listed[0].online && listed[0].last_seen_at.is_none());
     assert_eq!((listed[0].key, listed[0].virtual_ip), (node.key, "10.66.0.1".parse::<Ipv4Addr>().unwrap()));
     assert_eq!(listed[0].fqdn, format!("{}.home.i3t", listed[0].name));
     assert_eq!((listed[0].netmap_version, listed[0].sent_version, listed[0].acked_version), (2, 2, 0));
@@ -316,7 +317,11 @@ async fn a_node_can_be_inspected_changed_and_deleted() {
     let exit: model::Node = api.ok(Method::PUT, &format!("{relay_path}/exit"), Some(json!({ "lan": true }))).await;
     assert_eq!(
         serde_json::to_value(exit.exit.unwrap()).unwrap(),
-        json!({ "ports": [80, 443], "lan": true, "bandwidth_mbps": null, "upstream_socks5": null })
+        json!({
+            "ports": [80, 443], "lan": true, "bandwidth_mbps": null, "upstream_socks5": null,
+            // 后来加的出口设置，没写的取默认值。
+            "quota_bytes": null, "quota_reset_day": 1, "family": "any", "connects_per_minute": null, "class": null
+        })
     );
     let pinned: model::Node = api.ok(Method::PATCH, &path, Some(json!({ "pinned_relays": [relay.id] }))).await;
     assert_eq!(pinned.pinned_relays, vec![relay.id]);
@@ -449,6 +454,10 @@ async fn credentials_listeners_forwards_and_pairs_round_trip() {
     let listener_id = created_listener["id"].as_u64().unwrap();
     let mut expected = listener.clone();
     expected["id"] = json!(listener_id);
+    // 后来加的字段：等级、乐观回复（请求里没写，是 null），节点报的状态（还没报，是 null）。
+    expected["class"] = json!(null);
+    expected["optimistic"] = json!(null);
+    expected["status"] = json!(null);
     assert_eq!(created_listener, expected, "监听器的应答就是请求的字段加上 id");
     let open = json!({ "node": gateway.id, "name": "open", "bind": "0.0.0.0:8080", "protocol": "http" });
     let refused = api.fails(Method::POST, &format!("{base}/listeners"), Some(open), StatusCode::BAD_REQUEST).await;
@@ -498,16 +507,18 @@ async fn credentials_listeners_forwards_and_pairs_round_trip() {
         .await;
     assert_eq!(same.code, model::ErrorCode::InvalidRequest);
 
-    for path in [
-        pair_path,
-        format!("{base}/forwards/{forward_id}"),
-        format!("{base}/listeners/{listener_id}"),
-        format!("{base}/credentials/{}", created["id"]),
-    ] {
+    for path in [pair_path, format!("{base}/forwards/{forward_id}"), format!("{base}/listeners/{listener_id}")] {
         let (status, body) = api.call(Method::DELETE, &path, None).await;
         assert_eq!((status, body), (StatusCode::NO_CONTENT, Value::Null), "{path}");
         api.fails(Method::DELETE, &path, None, StatusCode::NOT_FOUND).await;
     }
+    // 凭据第一次删是吊销（记录留着），第二次才彻底删掉。
+    let credential = format!("{base}/credentials/{}", created["id"]);
+    for _ in 0..2 {
+        let (status, body) = api.call(Method::DELETE, &credential, None).await;
+        assert_eq!((status, body), (StatusCode::NO_CONTENT, Value::Null), "{credential}");
+    }
+    api.fails(Method::DELETE, &credential, None, StatusCode::NOT_FOUND).await;
 }
 
 #[tokio::test]
@@ -828,4 +839,207 @@ async fn the_static_directory_is_served_at_the_root_when_configured() {
     api.ok::<model::Status>(Method::GET, "/status", None).await;
     let unknown = api.fails(Method::GET, "/no-such-endpoint", None, StatusCode::NOT_FOUND).await;
     assert_eq!(unknown.code, model::ErrorCode::NotFound, "/api/v1 下面不存在的路径不会落到静态文件上");
+}
+
+/// 一个假的节点 UDP 端口：回答地址查询；和同一个端口号上的 TCP 监听。
+async fn answering_relay() -> std::net::SocketAddr {
+    use i3t_proto::addr::{Query, Reply};
+    let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = udp.local_addr().unwrap();
+    let tcp = tokio::net::TcpListener::bind(addr).await.unwrap();
+    tokio::spawn(async move {
+        let mut buf = [0; 64];
+        while let Ok((len, from)) = udp.recv_from(&mut buf).await {
+            if let Some(query) = Query::parse(&buf[..len]) {
+                let _ = udp.send_to(&Reply { nonce: query.nonce, observed: from }.to_bytes(), from).await;
+            }
+        }
+    });
+    tokio::spawn(async move { while tcp.accept().await.is_ok() {} });
+    addr
+}
+
+#[tokio::test]
+async fn enabling_a_relay_answers_with_a_reachability_check_that_only_advises() {
+    let mut api = Api::new();
+    let network = api.network("home").await;
+    let relay = api.join(network.id, CAN_DO_ALL).await;
+    let good = answering_relay().await;
+    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap();
+    let body = json!({ "udp": [good, closed], "tcp": [good, closed] });
+    let enabled: model::RelayEnabled = api.ok(Method::PUT, &format!("/networks/{}/nodes/{}/relay", network.id, relay.id), Some(body)).await;
+    assert!(enabled.node.relay.is_some(), "连不上的地址不挡着启用");
+    let summary: Vec<(model::Transport, std::net::SocketAddr, bool)> =
+        enabled.reachability.iter().map(|check| (check.protocol, check.addr, check.reachable)).collect();
+    assert_eq!(
+        summary,
+        [
+            (model::Transport::Udp, good, true),
+            (model::Transport::Udp, closed, false),
+            (model::Transport::Tcp, good, true),
+            (model::Transport::Tcp, closed, false)
+        ]
+    );
+    assert!(enabled.reachability[0].rtt_ms.is_some() && enabled.reachability[1].error.is_some());
+}
+
+#[tokio::test]
+async fn credentials_get_limits_usage_a_prefix_and_a_visible_revoked_state_over_the_api() {
+    let mut api = Api::new();
+    let network = api.network("home").await;
+    let base = format!("/networks/{}", network.id);
+    let gateway = api.join(network.id, Declared::default()).await;
+    let listener = json!({ "node": gateway.id, "name": "lan", "bind": "0.0.0.0:3128", "protocol": "http", "require_credential": true });
+    api.ok::<model::Listener>(Method::POST, &format!("{base}/listeners"), Some(listener)).await;
+
+    let created: model::CreatedCredential =
+        api.ok(Method::POST, &format!("{base}/credentials"), Some(json!({ "name": "phone", "max_bytes": 1000 }))).await;
+    let id = created.credential.id;
+    assert_eq!((created.credential.prefix.as_str(), created.credential.max_bytes), (&created.token[..6], Some(1000)));
+    let usage = model::CredentialUsage::default();
+    assert_eq!((created.credential.state, created.credential.usage), (model::CredentialState::Active, usage));
+
+    let report = Report {
+        run: 5,
+        credentials: vec![i3t_model::control::CredentialUsage { id, bytes: 1500, connections: 1, last_used_secs_ago: Some(3) }],
+        ..Report::default()
+    };
+    api.controller.handle(gateway.session, REMOTE, ToController::Report(report)).unwrap();
+    let listed: Vec<model::Credential> = api.ok(Method::GET, &format!("{base}/credentials"), None).await;
+    assert_eq!((listed[0].usage.bytes, listed[0].usage.connections, listed[0].state), (1500, 1, model::CredentialState::Exhausted));
+    assert!(api.controller.netmap_of(gateway.id).unwrap().unwrap().credentials[0].exhausted);
+
+    let patched: model::Credential =
+        api.ok(Method::PATCH, &format!("{base}/credentials/{id}"), Some(json!({ "max_bytes": null, "max_concurrent": 2 }))).await;
+    assert_eq!((patched.max_bytes, patched.max_concurrent, patched.state), (None, Some(2), model::CredentialState::Active));
+    let reset: model::Credential = api.ok(Method::PATCH, &format!("{base}/credentials/{id}"), Some(json!({ "reset_usage": true }))).await;
+    assert_eq!(reset.usage.bytes, 0);
+    api.fails(Method::PATCH, &format!("{base}/credentials/{id}"), Some(json!({ "max_concurrent": 0 })), StatusCode::BAD_REQUEST).await;
+
+    let (status, _) = api.call(Method::DELETE, &format!("{base}/credentials/{id}"), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let listed: Vec<model::Credential> = api.ok(Method::GET, &format!("{base}/credentials"), None).await;
+    assert_eq!(listed[0].state, model::CredentialState::Revoked, "吊销之后看得到，不会消失");
+    assert!(api.controller.netmap_of(gateway.id).unwrap().unwrap().credentials.is_empty());
+    api.call(Method::DELETE, &format!("{base}/credentials/{id}"), None).await;
+    let listed: Vec<model::Credential> = api.ok(Method::GET, &format!("{base}/credentials"), None).await;
+    assert!(listed.is_empty());
+}
+
+#[tokio::test]
+async fn tokens_can_be_listed_with_the_used_and_expired_ones_and_carry_a_prefix() {
+    let mut api = Api::new();
+    let network = api.network("home").await;
+    let path = format!("/networks/{}/tokens", network.id);
+    let pending: model::CreatedEnrollToken = api.ok(Method::POST, &path, Some(json!({}))).await;
+    assert!(pending.token.starts_with(&pending.info.prefix));
+    let member = api.join(network.id, Declared::default()).await;
+
+    let only_pending: Vec<model::EnrollTokenInfo> = api.ok(Method::GET, &path, None).await;
+    assert_eq!(only_pending.iter().map(|token| token.id).collect::<Vec<_>>(), [pending.info.id]);
+    let all: Vec<model::EnrollTokenInfo> = api.ok(Method::GET, &format!("{path}?all=true"), None).await;
+    assert_eq!(all.len(), 2);
+    let used = all.iter().find(|token| token.id != pending.info.id).unwrap();
+    assert_eq!((used.state, used.used_by.as_ref().map(|node| node.id)), (model::TokenState::Used, Some(member.id)));
+}
+
+#[tokio::test]
+async fn the_log_pages_filters_and_names_what_each_entry_is_about() {
+    let mut api = Api::new();
+    let network = api.network("home").await;
+    let a = api.join(network.id, Declared::default()).await;
+    let b = api.join(network.id, Declared::default()).await;
+    api.ok::<model::Node>(Method::PATCH, &format!("/networks/{}/nodes/{}", network.id, a.id), Some(json!({ "name": "renamed" }))).await;
+
+    let about_a: Vec<model::LogEntry> = api.ok(Method::GET, &format!("/log?ref=node:{}", a.id), None).await;
+    assert_eq!(about_a.iter().map(|entry| entry.action.as_str()).collect::<Vec<_>>(), ["node.update", "node.enroll"]);
+    assert!(about_a.iter().all(|entry| entry.refs.contains(&model::LogRef::node(a.id))));
+    let nodes_only: Vec<model::LogEntry> = api.ok(Method::GET, "/log?action=node", None).await;
+    assert!(nodes_only.iter().all(|entry| entry.action.starts_with("node.")));
+    assert_eq!(nodes_only.len(), 3);
+    let first_page: Vec<model::LogEntry> = api.ok(Method::GET, &format!("/log?limit=2&network={}", network.id), None).await;
+    let next_page: Vec<model::LogEntry> =
+        api.ok(Method::GET, &format!("/log?limit=2&network={}&before={}", network.id, first_page[1].id), None).await;
+    assert!(next_page.iter().all(|entry| entry.id < first_page[1].id));
+    assert!(next_page.iter().all(|entry| entry.network == Some(network.id)));
+    let bad = api.fails(Method::GET, "/log?ref=planet:1", None, StatusCode::BAD_REQUEST).await;
+    assert!(bad.message.contains("ref"), "{}", bad.message);
+    let _ = b;
+}
+
+#[tokio::test]
+async fn status_overview_node_list_routes_and_tags_carry_what_the_web_ui_asked_for() {
+    let mut api = Api::new();
+    let network = api.network("home").await;
+    let base = format!("/networks/{}", network.id);
+    let relay = api.join(network.id, CAN_DO_ALL).await;
+    let member = api.join(network.id, Declared::default()).await;
+
+    let status: Value = api.ok(Method::GET, "/status", None).await;
+    assert!(status.get("data_dir").is_some_and(Value::is_null), "内存里的 controller 没有数据目录：{status}");
+
+    let attached = vec![i3t_model::netmap::Attachment { relay: relay.id, rtt_ms: 9 }];
+    let routes = vec![RouteEntry { peer: relay.id, route: Route::Relay { relays: vec![relay.id] }, rtt_ms: Some(9) }];
+    let report =
+        Report { flows: 4, tx_bytes: 10, rx_bytes: 20, attached: attached.clone(), routes, routes_full: true, ..Report::default() };
+    api.controller.handle(member.session, REMOTE, ToController::Report(report)).unwrap();
+
+    let nodes: Vec<model::Node> = api.ok(Method::GET, &format!("{base}/nodes"), None).await;
+    assert_eq!(nodes.iter().find(|node| node.id == member.id).unwrap().attached, attached);
+    let overview: model::Overview = api.ok(Method::GET, &format!("{base}/overview"), None).await;
+    assert_eq!((overview.flows, overview.tx_bytes, overview.rx_bytes), (4, 10, 20));
+    let table: model::RouteTable = api.ok(Method::GET, &format!("{base}/nodes/{}/routes", member.id), None).await;
+    assert!(table.routes[0].age_secs <= 1 && table.routes[0].since_secs <= 1);
+
+    api.ok::<model::Node>(Method::PATCH, &format!("{base}/nodes/{}", member.id), Some(json!({ "tags": ["laptops"] }))).await;
+    let renamed: model::RenamedTag =
+        api.ok(Method::POST, &format!("{base}/tags/rename"), Some(json!({ "from": "laptops", "to": "phones" }))).await;
+    assert_eq!((renamed.nodes, renamed.rules, renamed.tokens), (1, 0, 0));
+    let node: model::NodeDetail = api.ok(Method::GET, &format!("{base}/nodes/{}", member.id), None).await;
+    assert_eq!(node.node.tags, ["phones"]);
+    api.fails(Method::POST, &format!("{base}/tags/rename"), Some(json!({ "from": "all", "to": "x" })), StatusCode::BAD_REQUEST).await;
+
+    let class: model::Network = api.ok(Method::PATCH, &base, Some(json!({ "class": "interactive" }))).await;
+    assert_eq!(class.class, Some(i3t_proto::flow::Class::Interactive));
+}
+
+#[tokio::test]
+async fn exits_and_listen_status_are_served_from_what_the_nodes_report() {
+    let mut api = Api::new();
+    let network = api.network("home").await;
+    let base = format!("/networks/{}", network.id);
+    let exit = api.join(network.id, CAN_DO_ALL).await;
+    let laptop = api.join(network.id, Declared::default()).await;
+    api.ok::<model::Node>(Method::PUT, &format!("{base}/nodes/{}/exit", exit.id), Some(json!({ "quota_bytes": 5000, "family": "ipv4" })))
+        .await;
+    let forward = json!({ "protocol": "tcp", "listen_node": laptop.id, "bind": "127.0.0.1:0", "target_node": exit.id, "target_addr": "127.0.0.1:22" });
+    let created: model::Forward = api.ok(Method::POST, &format!("{base}/forwards"), Some(forward)).await;
+    assert_eq!(created.bind.port(), 0, "端口写 0 由节点挑");
+
+    let exit_report = i3t_model::control::ExitReport { total: 3, refused: 1, ..Default::default() };
+    api.controller
+        .handle(exit.session, REMOTE, ToController::Report(Report { run: 1, exit: Some(Box::new(exit_report)), ..Report::default() }))
+        .unwrap();
+    let forwards = vec![i3t_model::control::ForwardReport {
+        id: created.id,
+        bind: "127.0.0.1:0".parse().unwrap(),
+        protocol: i3t_model::netmap::ForwardProtocol::Tcp,
+        state: i3t_model::control::ListenState::Listening { local: "127.0.0.1:43210".parse().unwrap() },
+        traffic: i3t_model::control::ListenTraffic::default(),
+    }];
+    api.controller.handle(laptop.session, REMOTE, ToController::Report(Report { run: 2, forwards, ..Report::default() })).unwrap();
+
+    let exits: Vec<model::ExitView> = api.ok(Method::GET, &format!("{base}/exits"), None).await;
+    assert_eq!(exits.len(), 1);
+    assert_eq!((exits[0].settings.quota_bytes, exits[0].usage.as_ref().map(|usage| usage.total)), (Some(5000), Some(3)));
+    let one: model::ExitView = api.ok(Method::GET, &format!("{base}/exits/{}", exit.id), None).await;
+    assert_eq!(one.node.id, exit.id);
+    api.fails(Method::GET, &format!("{base}/exits/{}", laptop.id), None, StatusCode::NOT_FOUND).await;
+
+    let listed: Value = api.ok(Method::GET, &format!("{base}/forwards"), None).await;
+    assert_eq!(listed[0]["listen"]["state"], json!("listening"));
+    assert_eq!(listed[0]["listen"]["local"], json!("127.0.0.1:43210"));
+    let on_node: model::NodeListeners = api.ok(Method::GET, &format!("{base}/nodes/{}/listeners", laptop.id), None).await;
+    assert_eq!(on_node.forwards.len(), 1);
+    assert_eq!(on_node.forwards[0].id, created.id);
 }

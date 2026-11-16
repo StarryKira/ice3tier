@@ -1,11 +1,11 @@
 //! 把管理 API 的应答打印成给人看的样子。`--json` 时不经过这里。
 
 use i3t_model::admin::{
-    AccessCheck, AccessGraph, CreatedCredential, CreatedEnrollToken, Credential, Direction, EnrollTokenInfo, ForcedUpdates, Forward,
-    Listener, LogEntry, Network, Node, NodeAccess, NodeDetail, NodeRef, NodeUpdate, Overview, PairSetting, PathLeg, PathSource, PathView,
-    RouteMatrix, RouteTable, Rule, Status, Timestamp, UpdateOverview, UpdateWait,
+    AccessCheck, AccessGraph, CreatedCredential, CreatedEnrollToken, Credential, Direction, EnrollTokenInfo, ExitView, ForcedUpdates,
+    Forward, ListenStatus, Listener, LogEntry, Network, Node, NodeAccess, NodeDetail, NodeListeners, NodeRef, NodeUpdate, Overview,
+    PairSetting, PathLeg, PathSource, PathView, RenamedTag, RouteMatrix, RouteTable, Rule, Status, Timestamp, UpdateOverview, UpdateWait,
 };
-use i3t_model::control::Route;
+use i3t_model::control::{ListenState, Route};
 use i3t_model::netmap::DefaultAction;
 use i3t_model::update::{FailureKind, UpdateStatus, UpdateTiming};
 
@@ -42,11 +42,120 @@ pub fn overview(overview: &Overview) {
 }
 
 pub fn log(entries: &[LogEntry]) {
-    let mut table = Table::new(&["TIME", "NETWORK", "ACTION", "DETAIL"]);
+    let mut table = Table::new(&["ID", "TIME", "NETWORK", "ACTION", "DETAIL"]);
     for entry in entries {
-        table.row(vec![time(entry.at), optional(entry.network), entry.action.clone(), entry.detail.clone()]);
+        table.row(vec![entry.id.to_string(), time(entry.at), optional(entry.network), entry.action.clone(), entry.detail.clone()]);
     }
     table.print();
+}
+
+pub fn renamed_tag(renamed: &RenamedTag) {
+    println!(
+        "标签 {} 改名为 {}：{} 个节点，{} 条规则，{} 个注册令牌",
+        renamed.from, renamed.to, renamed.nodes, renamed.rules, renamed.tokens
+    );
+}
+
+/// 字节数写成好读的样子（按 1000 进位，和 `--quota`、`--max-bytes` 的写法一样）。
+fn bytes(count: u64) -> String {
+    const UNITS: [(u64, &str); 4] = [(1_000_000_000_000, "T"), (1_000_000_000, "G"), (1_000_000, "M"), (1_000, "K")];
+    match UNITS.iter().find(|(scale, _)| count >= *scale) {
+        Some((scale, unit)) => format!("{}.{}{unit}", count / scale, count % scale * 10 / scale),
+        None => count.to_string(),
+    }
+}
+
+fn listen_cells(status: Option<&ListenStatus>) -> (String, String, String) {
+    let Some(status) = status else { return ("-".to_owned(), "-".to_owned(), "-".to_owned()) };
+    let state = match &status.state {
+        ListenState::Listening { local } => format!("listening {local}"),
+        ListenState::PortInUse { detail } => format!("port_in_use（{detail}）"),
+        ListenState::Failed { detail } => format!("failed（{detail}）"),
+        ListenState::Virtual => "virtual".to_owned(),
+        ListenState::Unsupported { detail } => format!("unsupported（{detail}）"),
+        ListenState::Unknown => "unknown".to_owned(),
+    };
+    let traffic = format!("{}/{}", bytes(status.traffic.bytes_up), bytes(status.traffic.bytes_down));
+    (state, status.traffic.connections.to_string(), traffic)
+}
+
+pub fn node_listeners(view: &NodeListeners) {
+    if !view.online {
+        println!("节点 {} 不在线，没有监听的状态", view.node.name);
+        return;
+    }
+    let mut table = Table::new(&["ID", "NAME", "BIND", "PROTOCOL", "CONNECTIONS", "UP/DOWN", "STATE"]);
+    for listener in &view.listeners {
+        let (state, connections, traffic) = listen_cells(Some(&listener.status));
+        let id = if listener.builtin { "本机".to_owned() } else { optional(listener.id) };
+        table.row(vec![id, listener.name.clone(), listener.bind.to_string(), label(&listener.protocol), connections, traffic, state]);
+    }
+    for forward in &view.forwards {
+        let (state, connections, traffic) = listen_cells(Some(&forward.status));
+        let name = format!("forward-{}", forward.id);
+        table.row(vec![forward.id.to_string(), name, forward.bind.to_string(), label(&forward.protocol), connections, traffic, state]);
+    }
+    table.print();
+}
+
+pub fn exits(exits: &[ExitView]) {
+    for exit in exits {
+        let settings = &exit.settings;
+        println!(
+            "出口 {}（#{}，{}）  健康 {}",
+            exit.node.name,
+            exit.node.id,
+            if exit.online { "在线" } else { "离线" },
+            label(&exit.health)
+        );
+        println!("  最近 5 分钟   {} 个请求，出口自己的失败 {} 个", exit.recent_requests, exit.recent_failures);
+        println!(
+            "  设置          端口 {}，局域网 {}，带宽 {}，地址族 {}，建连预算 {}",
+            settings.ports.as_ref().map_or_else(|| "不限".to_owned(), list),
+            yes_no(settings.lan),
+            settings.bandwidth_mbps.map_or_else(|| "不限".to_owned(), |mbps| format!("{mbps} Mbps")),
+            label(&settings.family),
+            settings.connects_per_minute.map_or_else(|| "不限".to_owned(), |count| format!("每分钟 {count} 次"))
+        );
+        if let Some(usage) = &exit.usage {
+            println!(
+                "  它自己报的    {} 个请求，目标的问题 {}，被拒绝 {}，出口自己的问题 {}；发往目标 {}，从目标收到 {}{}",
+                usage.total,
+                usage.failed_by_target,
+                usage.refused,
+                usage.failed_by_exit,
+                bytes(usage.bytes_to_target),
+                bytes(usage.bytes_from_target),
+                if usage.draining { "；正在排空" } else { "" }
+            );
+            if let Some(quota) = usage.quota {
+                println!(
+                    "  配额          本账期已用 {} / {}，{} 到 {}",
+                    bytes(quota.used_bytes),
+                    bytes(quota.limit_bytes),
+                    time(quota.period_start),
+                    time(quota.period_end)
+                );
+            }
+        }
+        for seen in &exit.observed {
+            let counts = &seen.counts;
+            println!(
+                "  {} 看到的     {} 条流，发出 {}，收到 {}，目标的问题 {}，被拒绝 {}，出口的问题 {}，连不上出口 {}",
+                seen.by.name,
+                counts.flows,
+                bytes(counts.bytes_up),
+                bytes(counts.bytes_down),
+                counts.failed_by_target,
+                counts.refused,
+                counts.failed_by_exit,
+                counts.unreachable
+            );
+        }
+    }
+    if exits.is_empty() {
+        println!("这个网络里没有启用了的出口");
+    }
 }
 
 pub fn networks(networks: &[Network]) {
@@ -149,10 +258,7 @@ pub fn node_detail(detail: &NodeDetail) {
     println!("  netmap        第 {} 版，已发 {}，已确认 {}", node.netmap_version, node.sent_version, node.acked_version);
     println!("  候选端点      {}", list(&detail.endpoints));
     println!("  看到的地址    {}", optional(detail.observed_endpoint));
-    println!(
-        "  挂靠的 relay  {}",
-        list(detail.attached.iter().map(|attachment| format!("#{}({}ms)", attachment.relay, attachment.rtt_ms)))
-    );
+    println!("  挂靠的 relay  {}", list(node.attached.iter().map(|attachment| format!("#{}({}ms)", attachment.relay, attachment.rtt_ms))));
     if detail.mapping_varies == Some(true) {
         println!("  注意          这台机器所在的网络映射端口随对端变化，基本打不了洞");
     }
@@ -377,11 +483,14 @@ pub fn node_access(access: &NodeAccess) {
 }
 
 pub fn tokens(tokens: &[EnrollTokenInfo]) {
-    let mut table = Table::new(&["ID", "EXPIRES", "VIRTUAL-IP", "SUCCESSOR-OF", "TAGS"]);
+    let mut table = Table::new(&["ID", "PREFIX", "STATE", "EXPIRES", "USED-BY", "VIRTUAL-IP", "SUCCESSOR-OF", "TAGS"]);
     for token in tokens {
         table.row(vec![
             token.id.to_string(),
+            if token.prefix.is_empty() { "-".to_owned() } else { format!("{}…", token.prefix) },
+            label(&token.state),
             time(token.expires_at),
+            optional(token.used_by.as_ref().map(|node| format!("{}（#{}）", node.name, node.id))),
             optional(token.virtual_ip),
             optional(token.successor_of.map(|node| format!("#{node}"))),
             list(&token.tags),
@@ -421,16 +530,35 @@ const fn arrow(direction: Direction) -> &'static str {
 }
 
 pub fn credentials(credentials: &[Credential]) {
-    let mut table = Table::new(&["ID", "MAX-CONCURRENT", "CREATED", "NAME"]);
+    let mut table =
+        Table::new(&["ID", "PREFIX", "STATE", "MAX-CONCURRENT", "MAX-BYTES", "USED", "CONNECTIONS", "LAST-USED", "CREATED", "NAME"]);
     for credential in credentials {
         table.row(vec![
             credential.id.to_string(),
+            credential.prefix.clone(),
+            label(&credential.state),
             optional(credential.max_concurrent),
+            optional(credential.max_bytes.map(bytes)),
+            bytes(credential.usage.bytes),
+            credential.usage.connections.to_string(),
+            optional(credential.usage.last_used_at.map(time)),
             time(credential.created_at),
             credential.name.clone(),
         ]);
     }
     table.print();
+}
+
+pub fn credential(credential: &Credential) {
+    println!(
+        "凭据 #{} {}（{}）：并发上限 {}，流量上限 {}，已用 {}",
+        credential.id,
+        credential.name,
+        label(&credential.state),
+        optional(credential.max_concurrent),
+        optional(credential.max_bytes.map(bytes)),
+        bytes(credential.usage.bytes)
+    );
 }
 
 pub fn created_credential(created: &CreatedCredential) {
@@ -479,14 +607,19 @@ fn listener_row(listener: &Listener) -> Vec<String> {
 }
 
 pub fn forwards(forwards: &[Forward]) {
-    let mut table = Table::new(&["ID", "PROTOCOL", "LISTEN", "TARGET", "STATUS", "ALLOW-FROM", "NAME"]);
+    let mut table =
+        Table::new(&["ID", "PROTOCOL", "LISTEN", "TARGET", "STATUS", "LISTEN-STATE", "CONNECTIONS", "UP/DOWN", "ALLOW-FROM", "NAME"]);
     for forward in forwards {
+        let (state, connections, traffic) = listen_cells(forward.listen.as_ref());
         table.row(vec![
             forward.id.to_string(),
             label(&forward.protocol),
             format!("#{} {}", forward.listen_node, forward.bind),
             format!("#{} {}", forward.target_node, forward.target_addr),
             label(&forward.status),
+            state,
+            connections,
+            traffic,
             list(&forward.allow_from),
             forward.name.clone(),
         ]);

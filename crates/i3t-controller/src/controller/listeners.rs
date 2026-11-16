@@ -1,11 +1,11 @@
 //! 代理监听器的增删改。
 
-use i3t_model::admin::{Listener, ListenerInput, NetworkId};
+use i3t_model::admin::{Listener, ListenerInput, LogRef, NetworkId, RefKind};
 use i3t_model::netmap::DefaultAction;
 use i3t_proto::NodeId;
 
 use super::nodes::require_node;
-use super::{Controller, Seeds, naming};
+use super::{Controller, Inner, Seeds, naming};
 use crate::error::{Entity, Error};
 use crate::store::Store;
 
@@ -18,7 +18,8 @@ impl Controller {
     pub fn listeners(&self, network: NetworkId, node: Option<NodeId>) -> Result<Vec<Listener>, Error> {
         let inner = self.lock();
         inner.require_network(network)?;
-        Ok(inner.store.listeners(network)?.into_iter().filter(|listener| node.is_none_or(|node| listener.node == node)).collect())
+        let listeners = inner.store.listeners(network)?.into_iter().filter(|listener| node.is_none_or(|node| listener.node == node));
+        Ok(listeners.map(|listener| inner.with_status(listener)).collect())
     }
 
     /// # Errors
@@ -31,17 +32,18 @@ impl Controller {
         let listener = inner.store.atomically(|store| {
             let input = check(store, network, None, input)?;
             let id = store.insert_listener(&input)?;
-            store.log(
+            store.log_refs(
                 now,
                 Some(network),
                 "listener.create",
                 &format!("节点 #{} 上新建监听器 {}（{}）", input.node, input.config.name, input.config.bind),
+                &[LogRef::new(RefKind::Listener, id), LogRef::node(input.node)],
             )?;
-            Ok::<_, Error>(Listener { id, node: input.node, config: input.config })
+            Ok::<_, Error>(Listener { id, node: input.node, config: input.config, status: None })
         })?;
         inner.refresh(network, Seeds::of([listener.node]), None)?;
         self.wake_if_needed(&inner);
-        Ok(listener)
+        Ok(inner.with_status(listener))
     }
 
     /// 整个替换一个监听器。
@@ -56,12 +58,19 @@ impl Controller {
             let before = store.listener(network, id)?.ok_or(Error::NotFound(Entity::Listener))?;
             let input = check(store, network, Some(id), input)?;
             store.update_listener(id, &input)?;
-            store.log(now, Some(network), "listener.update", &format!("修改监听器 {}（{}）", input.config.name, input.config.bind))?;
-            Ok::<_, Error>((before, Listener { id, node: input.node, config: input.config }))
+            let detail = format!("修改监听器 {}（{}）", input.config.name, input.config.bind);
+            store.log_refs(
+                now,
+                Some(network),
+                "listener.update",
+                &detail,
+                &[LogRef::new(RefKind::Listener, id), LogRef::node(input.node)],
+            )?;
+            Ok::<_, Error>((before, Listener { id, node: input.node, config: input.config, status: None }))
         })?;
         inner.refresh(network, Seeds::of([before.node, listener.node]), None)?;
         self.wake_if_needed(&inner);
-        Ok(listener)
+        Ok(inner.with_status(listener))
     }
 
     /// # Errors
@@ -73,17 +82,26 @@ impl Controller {
         let listener = inner.store.atomically(|store| {
             let listener = store.listener(network, id)?.ok_or(Error::NotFound(Entity::Listener))?;
             store.delete_listener(id)?;
-            store.log(
+            store.log_refs(
                 now,
                 Some(network),
                 "listener.delete",
                 &format!("删除监听器 {}（{}）", listener.config.name, listener.config.bind),
+                &[LogRef::new(RefKind::Listener, id), LogRef::node(listener.node)],
             )?;
             Ok::<_, Error>(listener)
         })?;
         inner.refresh(network, Seeds::of([listener.node]), None)?;
         self.wake_if_needed(&inner);
         Ok(())
+    }
+}
+
+impl Inner {
+    /// 带上节点最近一次报的这个监听器的状态。
+    fn with_status(&self, listener: Listener) -> Listener {
+        let status = self.listener_status(listener.node, &listener.config.name);
+        Listener { status, ..listener }
     }
 }
 

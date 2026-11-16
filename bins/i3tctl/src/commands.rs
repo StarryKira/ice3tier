@@ -5,7 +5,8 @@ use std::net::Ipv4Addr;
 use anyhow::{Context, anyhow, bail};
 use i3t_model::admin::{
     CreateCredential, CreateEnrollToken, CreateNetwork, CreateRule, Direction, ForceUpdate, Forward, ForwardInput, ListenerInput, Network,
-    NetworkId, Node, PairInput, RelaySettings, ResumeUpdate, Succeed, UpdateNetwork, UpdateNode, UpdateRule, UpdateSettings,
+    NetworkId, Node, PairInput, RelaySettings, RenameTag, ResumeUpdate, Succeed, UpdateCredential, UpdateNetwork, UpdateNode, UpdateRule,
+    UpdateSettings,
 };
 use i3t_model::netmap::{DefaultAction, ExitRole, ForwardProtocol, Listener, ListenerProtocol};
 use i3t_model::update::UpdateTiming;
@@ -17,7 +18,7 @@ use serde_json::Value;
 
 use crate::cli::{
     AccessCommand, Cli, Command, CredentialCommand, ExitCommand, ForwardCommand, ListenerCommand, NetworkCommand, NetworkSettings,
-    NodeCommand, PairCommand, RelayCommand, RuleCommand, TokenCommand, UpdateCommand,
+    NodeCommand, PairCommand, RelayCommand, RuleCommand, TagCommand, TokenCommand, UpdateCommand,
 };
 use crate::client::{Client, decode};
 use crate::render;
@@ -31,7 +32,20 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             let network = session.network().await?;
             session.show(session.get(&format!("/networks/{}/overview", network.id)).await?, render::overview)
         }
-        Command::Log { limit } => session.show_list(session.get(&format!("/log?limit={limit}")).await?, render::log),
+        Command::Log { limit, action, reference, before } => {
+            let mut query = format!("/log?limit={limit}");
+            for (name, value) in [("action", action), ("ref", reference), ("before", before.map(|id| id.to_string()))] {
+                if let Some(value) = value {
+                    query.push_str(&format!("&{name}={value}"));
+                }
+            }
+            session.show_list(session.get(&query).await?, render::log)
+        }
+        Command::Tag(TagCommand::Rename { from, to }) => {
+            let network = session.network().await?.id;
+            let request = RenameTag { from, to };
+            session.show(session.send(Method::POST, &format!("/networks/{network}/tags/rename"), &request).await?, render::renamed_tag)
+        }
         Command::Network(command) => session.network_command(command).await,
         Command::Node(command) => session.node_command(command).await,
         Command::Relay(command) => session.relay_command(command).await,
@@ -131,8 +145,10 @@ impl Session {
         match command {
             NetworkCommand::List => self.show_list(self.get("/networks").await?, render::networks),
             NetworkCommand::Create { name, settings } => {
-                let NetworkSettings { cidr, routing, max_relay_hops, reach } = settings;
-                let request = CreateNetwork { name, cidr, routing: routing.map(Into::into), max_relay_hops, reach: reach.map(Into::into) };
+                let NetworkSettings { cidr, routing, max_relay_hops, reach, class } = settings;
+                let class = class.and_then(crate::cli::Inherit::into_override);
+                let request =
+                    CreateNetwork { name, cidr, routing: routing.map(Into::into), max_relay_hops, reach: reach.map(Into::into), class };
                 self.show(self.send(Method::POST, "/networks", &request).await?, render::network)
             }
             NetworkCommand::Show => {
@@ -141,8 +157,9 @@ impl Session {
             }
             NetworkCommand::Set { settings } => {
                 let network = self.network().await?;
-                let NetworkSettings { cidr, routing, max_relay_hops, reach } = settings;
-                let request = UpdateNetwork { cidr, routing: routing.map(Into::into), max_relay_hops, reach: reach.map(Into::into) };
+                let NetworkSettings { cidr, routing, max_relay_hops, reach, class } = settings;
+                let class = class.map(crate::cli::Inherit::into_override);
+                let request = UpdateNetwork { cidr, routing: routing.map(Into::into), max_relay_hops, reach: reach.map(Into::into), class };
                 self.show(self.send(Method::PATCH, &format!("/networks/{}", network.id), &request).await?, render::network)
             }
             NetworkCommand::Delete { network } => {
@@ -213,6 +230,10 @@ impl Session {
                 let node = self.node(network, &node).await?;
                 self.show(self.get(&format!("{nodes}/{}/access", node.id)).await?, render::node_access)
             }
+            NodeCommand::Listeners { node } => {
+                let node = self.node(network, &node).await?;
+                self.show(self.get(&format!("{nodes}/{}/listeners", node.id)).await?, render::node_listeners)
+            }
         }
     }
 
@@ -237,9 +258,19 @@ impl Session {
     async fn exit_command(&self, command: ExitCommand) -> anyhow::Result<()> {
         let network = self.network().await?.id;
         match command {
-            ExitCommand::Enable { node, ports, lan, bandwidth, upstream_socks5 } => {
+            ExitCommand::Enable { node, ports, lan, bandwidth, upstream_socks5, quota, reset_day, family, connects_per_minute, class } => {
                 let node = self.node(network, &node).await?;
-                let settings = ExitRole { ports: ports.0, lan, bandwidth_mbps: bandwidth, upstream_socks5 };
+                let settings = ExitRole {
+                    ports: ports.0,
+                    lan,
+                    bandwidth_mbps: bandwidth,
+                    upstream_socks5,
+                    quota_bytes: quota.map(|quota| quota.0),
+                    quota_reset_day: reset_day,
+                    family: family.into(),
+                    connects_per_minute,
+                    class: class.map(Into::into),
+                };
                 self.show(
                     self.send(Method::PUT, &format!("/networks/{network}/nodes/{}/exit", node.id), &settings).await?,
                     render::node_changed,
@@ -249,6 +280,7 @@ impl Session {
                 let node = self.node(network, &node).await?;
                 self.show(self.delete(&format!("/networks/{network}/nodes/{}/exit", node.id)).await?, render::node_changed)
             }
+            ExitCommand::List => self.show_list(self.get(&format!("/networks/{network}/exits")).await?, render::exits),
         }
     }
 
@@ -256,7 +288,10 @@ impl Session {
         let network = self.network().await?.id;
         let tokens = format!("/networks/{network}/tokens");
         match command {
-            TokenCommand::List => self.show_list(self.get(&tokens).await?, render::tokens),
+            TokenCommand::List { all } => {
+                let path = if all { format!("{tokens}?all=true") } else { tokens };
+                self.show_list(self.get(&path).await?, render::tokens)
+            }
             TokenCommand::Create { expires, tags, ip, successor_of } => {
                 let successor_of = match successor_of {
                     Some(reference) => Some(self.node(network, &reference).await?.id),
@@ -303,13 +338,21 @@ impl Session {
         let credentials = format!("/networks/{network}/credentials");
         match command {
             CredentialCommand::List => self.show_list(self.get(&credentials).await?, render::credentials),
-            CredentialCommand::Create { name, max_concurrent } => {
-                let request = CreateCredential { name, max_concurrent };
+            CredentialCommand::Create { name, max_concurrent, max_bytes } => {
+                let request = CreateCredential { name, max_concurrent, max_bytes: max_bytes.map(|size| size.0) };
                 self.show(self.send(Method::POST, &credentials, &request).await?, render::created_credential)
+            }
+            CredentialCommand::Set { id, max_concurrent, max_bytes, reset_usage } => {
+                let request = UpdateCredential {
+                    max_concurrent: max_concurrent.map(crate::cli::Limit::into_option),
+                    max_bytes: max_bytes.map(crate::cli::Limit::into_option),
+                    reset_usage,
+                };
+                self.show(self.send(Method::PATCH, &format!("{credentials}/{id}"), &request).await?, render::credential)
             }
             CredentialCommand::Delete { id } => {
                 self.delete(&format!("{credentials}/{id}")).await?;
-                self.done(&format!("已吊销凭据 #{id}"));
+                self.done(&format!("已吊销凭据 #{id}（记录留着；对吊销了的再删一次就彻底删掉）"));
                 Ok(())
             }
         }
@@ -326,7 +369,18 @@ impl Session {
                 };
                 self.show_list(self.get(&path).await?, render::listeners)
             }
-            ListenerCommand::Add { node, name, bind, http, allow_from, require_credential, default_action, fixed_exit } => {
+            ListenerCommand::Add {
+                node,
+                name,
+                bind,
+                http,
+                allow_from,
+                require_credential,
+                default_action,
+                fixed_exit,
+                class,
+                optimistic,
+            } => {
                 let node = self.node(network, &node).await?.id;
                 let default_action = match default_action.as_deref() {
                     None => None,
@@ -344,7 +398,17 @@ impl Session {
                     None => None,
                 };
                 let protocol = if http { ListenerProtocol::Http } else { ListenerProtocol::Socks5 };
-                let config = Listener { name, bind, protocol, allow_from, require_credential, default_action, fixed_exit };
+                let config = Listener {
+                    name,
+                    bind,
+                    protocol,
+                    allow_from,
+                    require_credential,
+                    default_action,
+                    fixed_exit,
+                    class: class.map(Into::into),
+                    optimistic: optimistic.map(|on| on.0),
+                };
                 self.show(self.send(Method::POST, &listeners, &ListenerInput { node, config }).await?, render::listener)
             }
             ListenerCommand::Delete { id } => {
@@ -360,7 +424,7 @@ impl Session {
         let forwards = format!("/networks/{network}/forwards");
         match command {
             ForwardCommand::List => self.show_list(self.get(&forwards).await?, render::forwards),
-            ForwardCommand::Add { listen_node, bind, target_node, target_addr, udp, name, allow_from, disabled } => {
+            ForwardCommand::Add { listen_node, bind, target_node, target_addr, udp, name, allow_from, disabled, class } => {
                 let input = ForwardInput {
                     name,
                     protocol: if udp { ForwardProtocol::Udp } else { ForwardProtocol::Tcp },
@@ -370,6 +434,7 @@ impl Session {
                     target_addr,
                     allow_from,
                     enabled: !disabled,
+                    class: class.map(Into::into),
                 };
                 self.show(self.send(Method::POST, &forwards, &input).await?, render::forward)
             }
@@ -396,6 +461,7 @@ impl Session {
             target_addr: forward.target_addr,
             allow_from: forward.allow_from,
             enabled,
+            class: forward.class,
         };
         self.show(self.send(Method::PUT, &format!("{forwards}/{id}"), &input).await?, render::forward)
     }

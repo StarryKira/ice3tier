@@ -3,18 +3,20 @@
 //! 这里不碰 socket：连接由 [`crate::node_server`] 管，它把收到的消息交到这里，从发送队列里取要发的消息。
 //! 节点是谁由连接的 TLS 握手确定，所以这里的入口拿到的公钥和节点编号都是认证过的。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 
+use i3t_model::admin::LogRef;
 use i3t_model::control::{Hello, MAX_PACKAGE_CHUNK, Report, Signal, ToController, ToNode};
 use i3t_model::netmap::Attachment;
 use i3t_model::update::{Platform, Version};
 use i3t_proto::{NodeId, PublicKey};
 use tokio::sync::mpsc;
 
+use super::usage::UsageReport;
 use super::{Controller, Inner, Live, Seeds};
 use crate::error::{Error, Rejection, error_chain};
 use crate::netmap::MAX_ENDPOINTS;
@@ -49,7 +51,7 @@ impl Controller {
         let mut inner = self.lock();
         let known = inner.store.node_by_key(&key).map_err(Error::from);
         let outcome = match known {
-            Ok(Some(node)) => inner.admit(node, hello, remote, outbox),
+            Ok(Some(node)) => inner.admit(node, Joined { hello, remote, outbox, enrolling: false }),
             Ok(None) => {
                 tracing::warn!(key = ?key, %remote, "拒绝连接：这把公钥没有注册");
                 return Err(Rejection::UnknownKey);
@@ -179,15 +181,19 @@ impl PackageRange {
     }
 }
 
+/// 一条刚连上来、要被接受的连接。
+pub(super) struct Joined<'a> {
+    pub(super) hello: &'a Hello,
+    pub(super) remote: IpAddr,
+    pub(super) outbox: mpsc::Sender<ToNode>,
+    /// 这是 `i3t join` 注册时的那一条连接：节点只是拿了配置就走，还没有真的跑起来。
+    pub(super) enrolling: bool,
+}
+
 impl Inner {
     /// 让一个节点上线：记下它的自我介绍，登记连接，发给它当前的 netmap。
-    pub(super) fn admit(
-        &mut self,
-        mut node: NodeRecord,
-        hello: &Hello,
-        remote: IpAddr,
-        outbox: mpsc::Sender<ToNode>,
-    ) -> Result<Admitted, Error> {
+    pub(super) fn admit(&mut self, mut node: NodeRecord, joined: Joined<'_>) -> Result<Admitted, Error> {
+        let Joined { hello, remote, outbox, enrolling } = joined;
         let seeds = self.apply_hello(&mut node, hello, remote)?;
         let conn = self.next_conn();
         let live = Live {
@@ -201,14 +207,20 @@ impl Inner {
             protocol: hello.protocol,
             update: None,
             order: None,
+            enrolling,
+            reported_at: None,
+            listeners: Vec::new(),
+            forwards: Vec::new(),
+            credential_connections: BTreeMap::new(),
         };
         self.drop_route_queries(node.id);
         if self.live.insert(node.id, live).is_some() {
             // 旧连接的发送队列随着被替换掉而关闭，那条连接自己会结束。
             tracing::info!(node = %node.id, "同一个节点的新连接顶替了旧连接");
         }
-        tracing::info!(node = %node.id, name = %node.name, %remote, version = %node.version, platform = %node.platform, "节点上线");
-        let outcome = self.store.set_node_last_seen(node.id, self.clock.now()).map_err(Error::from);
+        tracing::info!(node = %node.id, name = %node.name, %remote, version = %node.version, platform = %node.platform, enrolling, "节点上线");
+        // 注册时那一条连接不算"最近在线"：节点真的跑起来、带着 Hello 连上来才算。
+        let outcome = if enrolling { Ok(()) } else { self.store.set_node_last_seen(node.id, self.clock.now()).map_err(Error::from) };
         let outcome = outcome.and_then(|()| self.refresh(node.network, seeds, Some(node.id)));
         if let Err(err) = outcome {
             self.live.remove(&node.id);
@@ -254,13 +266,15 @@ impl Inner {
             node.relay = None;
             whole_network = true;
             tracing::warn!(node = %node.id, name = %node.name, "节点撤回了可以作为 relay 的声明，关闭它的 relay");
-            self.store.log(now, Some(node.network), "node.relay.withdrawn", &format!("节点 {} 撤回了声明，relay 已关闭", node.name))?;
+            let detail = format!("节点 {} 撤回了声明，relay 已关闭", node.name);
+            self.store.log_refs(now, Some(node.network), "node.relay.withdrawn", &detail, &[LogRef::node(node.id)])?;
         }
         if node.exit.is_some() && !node.declared.exit {
             node.exit = None;
             affected.extend(self.holders_of(node.id));
             tracing::warn!(node = %node.id, name = %node.name, "节点撤回了可以作为出口的声明，关闭它的出口");
-            self.store.log(now, Some(node.network), "node.exit.withdrawn", &format!("节点 {} 撤回了声明，出口已关闭", node.name))?;
+            let detail = format!("节点 {} 撤回了声明，出口已关闭", node.name);
+            self.store.log_refs(now, Some(node.network), "node.exit.withdrawn", &detail, &[LogRef::node(node.id)])?;
         }
         if !node.declared.forward {
             let pointing_here = self.store.forwards(node.network)?.into_iter().filter(|forward| forward.config.target_node == node.id);
@@ -271,7 +285,7 @@ impl Inner {
                 affected.extend(listeners);
                 tracing::warn!(node = %node.id, name = %node.name, disabled, "节点没有声明可以作为端口转发的目标，停用指向它的转发");
                 let detail = format!("节点 {} 没有声明可以作为端口转发的目标，指向它的 {disabled} 条转发已停用", node.name);
-                self.store.log(now, Some(node.network), "node.forward.withdrawn", &detail)?;
+                self.store.log_refs(now, Some(node.network), "node.forward.withdrawn", &detail, &[LogRef::node(node.id)])?;
             }
         }
         if *node != before {
@@ -297,6 +311,10 @@ impl Inner {
             live.tx_bytes = report.tx_bytes;
             live.rx_bytes = report.rx_bytes;
         }
+        let Report { run, credentials, exit, exits, listeners, forwards, .. } = report;
+        self.usage_reported(&node, UsageReport { run, credentials, exit, exits, listeners, forwards })?;
+        let report =
+            Report { credentials: Vec::new(), exits: Vec::new(), listeners: Vec::new(), forwards: Vec::new(), exit: None, ..report };
         self.routes_reported(id, report.routes, report.routes_full);
         if let Some(status) = report.update {
             self.update_reported(&node, status)?;

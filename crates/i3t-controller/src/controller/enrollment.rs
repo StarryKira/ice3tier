@@ -2,17 +2,17 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 
-use i3t_model::admin::{CreateEnrollToken, CreatedEnrollToken, EnrollTokenInfo, NetworkId, Timestamp};
+use i3t_model::admin::{CreateEnrollToken, CreatedEnrollToken, EnrollTokenInfo, LogRef, NetworkId, RefKind, Timestamp, TokenState};
 use i3t_model::control::{EnrollToken, Hello, ToNode};
 use i3t_proto::{NodeId, PublicKey};
 use tokio::sync::mpsc;
 
 use super::nodes::{allocate_address, check_address, check_node_name, inherit, require_node};
-use super::protocol::clip;
+use super::protocol::{Joined, clip};
 use super::{Admitted, Controller, Inner, naming};
 use crate::error::{Entity, Error, Rejection, error_chain};
 use crate::secret;
-use crate::store::{DIGEST_LEN, NewNode, NewToken, NodeRecord, Store, TokenRecord};
+use crate::store::{DIGEST_LEN, NewNode, NewToken, NodeRecord, Store, TokenRecord, is_pending, token_at};
 
 /// 注册令牌默认一天之后过期。
 const DEFAULT_TOKEN_LIFETIME_SECS: u64 = 24 * 60 * 60;
@@ -30,16 +30,17 @@ impl<E: Into<Error>> From<E> for EnrollFailure {
 }
 
 impl Controller {
-    /// 一个网络里还没被用掉、也没过期的注册令牌。
+    /// 一个网络里还没被用掉、也没过期的注册令牌；`all` 时还有用掉的和过期的（留 30 天）。
     ///
     /// # Errors
     ///
     /// 没有这个网络，或者读存储失败。
-    pub fn tokens(&self, network: NetworkId) -> Result<Vec<EnrollTokenInfo>, Error> {
+    pub fn tokens(&self, network: NetworkId, all: bool) -> Result<Vec<EnrollTokenInfo>, Error> {
         let inner = self.lock();
         inner.require_network(network)?;
         let now = inner.clock.now();
-        Ok(inner.store.tokens(network)?.into_iter().filter(|token| token.expires_at > now).collect())
+        let tokens = inner.store.tokens(network)?.into_iter().filter(|token| all || is_pending(token, now));
+        Ok(tokens.map(|token| token_at(token, now)).collect())
     }
 
     /// 生成一个注册令牌。返回的令牌文本只有这一次能拿到。
@@ -53,13 +54,15 @@ impl Controller {
             return Err(Error::invalid("继任的节点继承原节点的虚拟 IP，不能同时预设另一个"));
         }
         let secret = secret::generate()?;
+        let token = EnrollToken { secret: secret.clone(), controller: self.public_addr.clone(), key: self.public_key() }.to_string();
+        let prefix: String = token.chars().take(EnrollToken::VISIBLE_PREFIX_LEN).collect();
         let mut inner = self.lock();
         let network = inner.require_network(network)?;
         let now = inner.clock.now();
         let info = inner.store.atomically(|store| {
             if let Some(virtual_ip) = request.virtual_ip {
                 check_address(store, &network, virtual_ip, now)?;
-                if store.tokens(network.id)?.iter().any(|token| token.expires_at > now && token.virtual_ip == Some(virtual_ip)) {
+                if store.tokens(network.id)?.iter().any(|token| is_pending(token, now) && token.virtual_ip == Some(virtual_ip)) {
                     return Err(Error::Conflict(format!("虚拟 IP {virtual_ip} 已经预设在另一个还没用掉的注册令牌上")));
                 }
             }
@@ -69,6 +72,7 @@ impl Controller {
             let new = NewToken {
                 network: network.id,
                 secret_hash: secret::sha256(secret.as_bytes()),
+                prefix: prefix.clone(),
                 created_at: now,
                 expires_at: now.saturating_add(request.expires_in_secs.unwrap_or(DEFAULT_TOKEN_LIFETIME_SECS)),
                 tags: tags.into_iter().collect(),
@@ -76,7 +80,13 @@ impl Controller {
                 successor_of: request.successor_of,
             };
             let id = store.insert_token(&new)?;
-            store.log(now, Some(network.id), "token.create", &format!("生成注册令牌 #{id}"))?;
+            store.log_refs(
+                now,
+                Some(network.id),
+                "token.create",
+                &format!("生成注册令牌 #{id}（{prefix}…）"),
+                &[LogRef::new(RefKind::Token, id)],
+            )?;
             Ok(EnrollTokenInfo {
                 id,
                 network: new.network,
@@ -85,10 +95,13 @@ impl Controller {
                 tags: new.tags,
                 virtual_ip: new.virtual_ip,
                 successor_of: new.successor_of,
+                prefix: new.prefix,
+                state: TokenState::Pending,
+                used_at: None,
+                used_by: None,
             })
         })?;
-        let token = EnrollToken { controller: self.public_addr.clone(), key: self.public_key(), secret };
-        Ok(CreatedEnrollToken { info, token: token.to_string() })
+        Ok(CreatedEnrollToken { info, token })
     }
 
     /// 收回一个还没用掉的注册令牌。
@@ -102,7 +115,7 @@ impl Controller {
         inner.store.atomically(|store| {
             store.token(id)?.filter(|token| token.network == network).ok_or(Error::NotFound(Entity::Token))?;
             store.delete_token(id)?;
-            store.log(now, Some(network), "token.delete", &format!("收回注册令牌 #{id}"))?;
+            store.log_refs(now, Some(network), "token.delete", &format!("收回注册令牌 #{id}"), &[LogRef::new(RefKind::Token, id)])?;
             Ok(())
         })
     }
@@ -152,7 +165,7 @@ impl Inner {
         if let Some(existing) = self.store.node_by_key(&key)? {
             // 上一次注册其实成功了，只是回答没送到：节点拿着同一个令牌重试，当作它来报到。
             return if existing.enrolled_with == Some(secret_hash) {
-                Ok(self.admit(existing, hello, remote, outbox)?)
+                Ok(self.admit(existing, Joined { hello, remote, outbox, enrolling: true })?)
             } else {
                 Err(EnrollFailure::Rejected(Rejection::KeyAlreadyEnrolled))
             };
@@ -168,7 +181,7 @@ impl Inner {
         if let Some(predecessor) = predecessor {
             self.forget_node(predecessor);
         }
-        Ok(self.admit(node, hello, remote, outbox)?)
+        Ok(self.admit(node, Joined { hello, remote, outbox, enrolling: true })?)
     }
 }
 
@@ -213,8 +226,8 @@ fn create_node(
         created_at: now,
         enrolled_with: Some(secret_hash),
     };
-    // 令牌先删：它预设的虚拟 IP 在分配时算作"被令牌占着"，不删就轮不到自己用。
-    store.delete_token(token.id)?;
+    // 令牌先标成用掉：它预设的虚拟 IP 在分配时算作"被令牌占着"，不标就轮不到自己用。
+    store.consume_token(token.id, now)?;
     if let Some(old) = &predecessor {
         store.park_node(old.id)?;
         new.name = Some(old.name.clone());
@@ -235,6 +248,7 @@ fn create_node(
         };
     }
     let id = store.insert_node(&new)?;
+    store.set_token_user(token.id, id)?;
     let node = store.node(id)?.ok_or(Error::NotFound(Entity::Node))?;
     let detail = match &predecessor {
         Some(old) => {
@@ -243,6 +257,6 @@ fn create_node(
         }
         None => format!("节点 {}（{}）用令牌 #{} 加入", node.name, node.virtual_ip, token.id),
     };
-    store.log(now, Some(network.id), "node.enroll", &detail)?;
+    store.log_refs(now, Some(network.id), "node.enroll", &detail, &[LogRef::node(id), LogRef::new(RefKind::Token, token.id)])?;
     Ok((node, predecessor.map(|old| old.id)))
 }

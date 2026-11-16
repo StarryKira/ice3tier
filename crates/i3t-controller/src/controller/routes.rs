@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use i3t_model::admin::{MatrixEntry, MatrixNode, NetworkId, NodeRoute, PathLeg, PathSource, PathView, RouteMatrix, RouteTable};
-use i3t_model::control::{RouteAnswer, RouteEntry, ToNode};
+use i3t_model::control::{Route, RouteAnswer, RouteEntry, ToNode};
 use i3t_proto::NodeId;
 use tokio::sync::oneshot;
 
@@ -27,6 +27,8 @@ const ANSWER_TIMEOUT: Duration = Duration::from_secs(3);
 #[derive(Debug)]
 pub(crate) struct Reported {
     pub(crate) entries: BTreeMap<NodeId, RouteEntry>,
+    /// 每一条路 controller 第一次看到它的时刻：路换了才重新算，只是延迟变了不算。
+    since: BTreeMap<NodeId, Instant>,
     /// 最近一次上报的时刻。没有变化的条目节点不重复报，所以整张表都是"截至这个时刻"的。
     pub(crate) at: Instant,
     /// 是节点的哪一条连接报的。不是它现在这条连接报的，就是过期的：它离线了，或者重新连上来之后还没有上报。
@@ -58,10 +60,19 @@ impl Controller {
         let inner = self.lock();
         let record = inner.require_node(network, id)?;
         let peers = inner.store.nodes(network)?;
+        let now = Instant::now();
         let routes = inner.current_routes(id).map(|reported| {
+            let age_secs = now.saturating_duration_since(reported.at).as_secs();
             let known = reported.entries.values().filter_map(|entry| {
                 let peer = peers.iter().find(|peer| peer.id == entry.peer)?;
-                Some(NodeRoute { peer: node_ref(peer), route: entry.route.clone(), rtt_ms: entry.rtt_ms })
+                let since = reported.since.get(&entry.peer).map_or(reported.at, |since| *since);
+                Some(NodeRoute {
+                    peer: node_ref(peer),
+                    route: entry.route.clone(),
+                    rtt_ms: entry.rtt_ms,
+                    age_secs,
+                    since_secs: now.saturating_duration_since(since).as_secs(),
+                })
             });
             known.collect()
         });
@@ -152,7 +163,14 @@ impl Inner {
     /// 记下节点上报的路由。`full` 时整个替换，否则只更新报上来的条目。
     pub(super) fn routes_reported(&mut self, id: NodeId, routes: Vec<RouteEntry>, full: bool) {
         let (Some(sync), Some(live)) = (self.sync.get(&id), self.live.get(&id)) else { return };
-        let reported = self.routes.entry(id).or_insert_with(|| Reported { entries: BTreeMap::new(), at: Instant::now(), conn: live.conn });
+        let now = Instant::now();
+        let reported = self.routes.entry(id).or_insert_with(|| Reported {
+            entries: BTreeMap::new(),
+            since: BTreeMap::new(),
+            at: now,
+            conn: live.conn,
+        });
+        let before: BTreeMap<NodeId, Route> = reported.entries.iter().map(|(peer, entry)| (*peer, entry.route.clone())).collect();
         // 上一条连接留下的表，节点没有说完整的也要先清掉：增量是相对于这条连接上报过的内容说的。
         if full || reported.conn != live.conn {
             reported.entries.clear();
@@ -160,8 +178,17 @@ impl Inner {
         reported.conn = live.conn;
         // 只记到它 netmap 里的对端的路由：别的编号它本来就不该知道，记下来只会让表无限长。
         reported.entries.retain(|peer, _| sync.knows(*peer));
-        reported.entries.extend(routes.into_iter().filter(|entry| sync.knows(entry.peer)).map(|entry| (entry.peer, entry)));
-        reported.at = Instant::now();
+        for entry in routes.into_iter().filter(|entry| sync.knows(entry.peer)) {
+            if before.get(&entry.peer) == Some(&entry.route) {
+                reported.since.entry(entry.peer).or_insert(now);
+            } else {
+                reported.since.insert(entry.peer, now);
+            }
+            reported.entries.insert(entry.peer, entry);
+        }
+        let entries = &reported.entries;
+        reported.since.retain(|peer, _| entries.contains_key(peer));
+        reported.at = now;
     }
 
     /// 问 `from`"到 `to` 现在会怎么走"。问不了（不在线，或者它的版本不懂这条消息）时返回 `None`。

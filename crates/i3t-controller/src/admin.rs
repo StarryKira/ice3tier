@@ -20,7 +20,8 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use i3t_model::admin::{
     API_PREFIX, ApiError, CreateCredential, CreateEnrollToken, CreateNetwork, CreateRule, ErrorBody, ErrorCode, ForceUpdate, ForwardInput,
-    ListenerInput, NetworkId, PairInput, RelaySettings, ResumeUpdate, Succeed, UpdateNetwork, UpdateNode, UpdateRule, UpdateSettings,
+    ListenerInput, LogRef, NetworkId, PairInput, RelayEnabled, RelaySettings, RenameTag, ResumeUpdate, Succeed, UpdateCredential,
+    UpdateNetwork, UpdateNode, UpdateRule, UpdateSettings,
 };
 use i3t_model::netmap::ExitRole;
 use i3t_proto::NodeId;
@@ -30,7 +31,9 @@ use serde::de::DeserializeOwned;
 
 use crate::controller::Controller;
 use crate::error::{Error, error_chain};
+use crate::reachability;
 use crate::server::blocking;
+use crate::store::LogFilter;
 use crate::webui::WebUi;
 
 /// 操作记录一次最多取多少条，和不写 `limit` 时取多少条。
@@ -61,6 +64,10 @@ pub fn router(controller: Arc<Controller>, webui: &WebUi) -> Router {
         .route(&format!("{network}/nodes/{{node}}/routes"), get(routes))
         .route(&format!("{network}/nodes/{{node}}/access"), get(node_access))
         .route(&format!("{network}/nodes/{{node}}/update"), get(show_node_update).post(force_node_update))
+        .route(&format!("{network}/nodes/{{node}}/listeners"), get(node_listeners))
+        .route(&format!("{network}/exits"), get(list_exits))
+        .route(&format!("{network}/exits/{{node}}"), get(show_exit))
+        .route(&format!("{network}/tags/rename"), post(rename_tag))
         .route(&format!("{network}/routes"), get(route_matrix))
         .route(&format!("{network}/path"), get(path))
         .route(&format!("{network}/tokens"), get(list_tokens).post(create_token))
@@ -68,7 +75,7 @@ pub fn router(controller: Arc<Controller>, webui: &WebUi) -> Router {
         .route(&format!("{network}/rules"), get(list_rules).post(create_rule))
         .route(&format!("{network}/rules/{{id}}"), axum::routing::patch(update_rule).delete(delete_rule))
         .route(&format!("{network}/credentials"), get(list_credentials).post(create_credential))
-        .route(&format!("{network}/credentials/{{id}}"), axum::routing::delete(delete_credential))
+        .route(&format!("{network}/credentials/{{id}}"), axum::routing::patch(update_credential).delete(delete_credential))
         .route(&format!("{network}/listeners"), get(list_listeners).post(create_listener))
         .route(&format!("{network}/listeners/{{id}}"), put(replace_listener).delete(delete_listener))
         .route(&format!("{network}/forwards"), get(list_forwards).post(create_forward))
@@ -254,6 +261,18 @@ async fn deleted(controller: &App, call: impl FnOnce(&Controller) -> Result<(), 
 #[derive(Deserialize)]
 struct LogQuery {
     limit: Option<u32>,
+    before: Option<u64>,
+    network: Option<NetworkId>,
+    action: Option<String>,
+    /// `node:3` 这样的写法。
+    #[serde(rename = "ref")]
+    reference: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TokenQuery {
+    #[serde(default)]
+    all: bool,
 }
 
 #[derive(Deserialize)]
@@ -322,8 +341,42 @@ async fn status(State(app): State<App>) -> Reply {
 }
 
 async fn log(State(app): State<App>, Query(query): Query<LogQuery>) -> Reply {
-    let limit = query.limit.unwrap_or(DEFAULT_LOG_LIMIT).min(MAX_LOG_LIMIT);
-    ok(&app, move |controller| controller.oplog(limit)).await
+    let reference = match query.reference.as_deref().map(str::parse::<LogRef>).transpose() {
+        Ok(reference) => reference,
+        Err(error) => return Err(Failure::bad_request(format!("查询参数 ref 不对：{error}"))),
+    };
+    let filter = LogFilter {
+        limit: query.limit.unwrap_or(DEFAULT_LOG_LIMIT).min(MAX_LOG_LIMIT),
+        before: query.before,
+        network: query.network,
+        action: query.action.filter(|action| !action.is_empty()),
+        reference,
+    };
+    ok(&app, move |controller| controller.oplog_filtered(&filter)).await
+}
+
+async fn node_listeners(State(app): State<App>, Path((network, node)): Path<(NetworkId, NodeId)>) -> Reply {
+    ok(&app, move |controller| controller.node_listeners(network, node)).await
+}
+
+async fn list_exits(State(app): State<App>, Path(network): Path<NetworkId>) -> Reply {
+    ok(&app, move |controller| controller.exits(network)).await
+}
+
+async fn show_exit(State(app): State<App>, Path((network, node)): Path<(NetworkId, NodeId)>) -> Reply {
+    ok(&app, move |controller| controller.exit(network, node)).await
+}
+
+async fn rename_tag(State(app): State<App>, Path(network): Path<NetworkId>, Body(request): Body<RenameTag>) -> Reply {
+    ok(&app, move |controller| controller.rename_tag(network, &request)).await
+}
+
+async fn update_credential(
+    State(app): State<App>,
+    Path((network, id)): Path<(NetworkId, u32)>,
+    Body(request): Body<UpdateCredential>,
+) -> Reply {
+    ok(&app, move |controller| controller.update_credential(network, id, &request)).await
 }
 
 async fn list_networks(State(app): State<App>) -> Reply {
@@ -366,12 +419,16 @@ async fn delete_node(State(app): State<App>, Path((network, node)): Path<(Networ
     deleted(&app, move |controller| controller.delete_node(network, node)).await
 }
 
+/// 启用之后从 controller 这边试连填的地址，结果和节点一起回给调用方。试连只是参考，连不上也照样启用。
 async fn enable_relay(
     State(app): State<App>,
     Path((network, node)): Path<(NetworkId, NodeId)>,
     Body(settings): Body<RelaySettings>,
 ) -> Reply {
-    ok(&app, move |controller| controller.enable_relay(network, node, settings)).await
+    let node = blocking(&app, move |controller| controller.enable_relay(network, node, settings)).await?;
+    let (udp, tcp) = node.relay.as_ref().map(|relay| (relay.udp.clone(), relay.tcp.clone())).unwrap_or_default();
+    let reachability = reachability::check(&udp, &tcp).await;
+    Ok(Json(RelayEnabled { node, reachability }).into_response())
 }
 
 async fn disable_relay(State(app): State<App>, Path((network, node)): Path<(NetworkId, NodeId)>) -> Reply {
@@ -398,8 +455,8 @@ async fn node_access(State(app): State<App>, Path((network, node)): Path<(Networ
     ok(&app, move |controller| controller.node_access(network, node)).await
 }
 
-async fn list_tokens(State(app): State<App>, Path(network): Path<NetworkId>) -> Reply {
-    ok(&app, move |controller| controller.tokens(network)).await
+async fn list_tokens(State(app): State<App>, Path(network): Path<NetworkId>, Query(query): Query<TokenQuery>) -> Reply {
+    ok(&app, move |controller| controller.tokens(network, query.all)).await
 }
 
 async fn create_token(State(app): State<App>, Path(network): Path<NetworkId>, Body(request): Body<CreateEnrollToken>) -> Reply {
