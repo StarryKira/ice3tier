@@ -777,6 +777,7 @@ dependencies = [
  "clap",
  "i3t-agent",
  "i3t-model",
+ "rlimit",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -854,6 +855,8 @@ version = "0.1.1"
 dependencies = [
  "axum",
  "base64 0.23.1",
+ "hyper",
+ "hyper-util",
  "i3t-crypto",
  "i3t-metrics",
  "i3t-model",
@@ -1885,6 +1888,15 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rlimit"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f35ee2729c56bb610f6dba436bf78135f728b7373bdffae2ec815b2d3eb98cc3"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
