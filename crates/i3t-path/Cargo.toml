@@ -8,12 +8,17 @@ publish = false
 description = "ice3tier 的路由层：包怎么送到对端，中转会话、探测、打洞、选路与换路"
 
 [dependencies]
+bytes.workspace = true
 i3t-crypto = { path = "../i3t-crypto" }
 i3t-model = { path = "../i3t-model" }
 i3t-proto = { path = "../i3t-proto" }
 i3t-underlay = { path = "../i3t-underlay" }
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
