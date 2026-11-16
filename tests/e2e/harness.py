@@ -387,3 +387,36 @@ def dns_a_records(response: bytes, query: bytes) -> list[str]:
             addresses.append(socket.inet_ntoa(response[at + 10:at + 14]))
         at += 10 + length
     return addresses
+
+
+# 下面是限额与用量的场景（test_limits.py）用的。
+
+def eventually_value(action, ok, timeout: float = 30, interval: float = 0.5):
+    """反复执行 `action`，直到 `ok(结果)` 为真或者超时；返回最后一次的结果。节点每 10 秒上报一次，等上报的东西要用它。"""
+    deadline = time.monotonic() + timeout
+    while True:
+        result = action()
+        if ok(result) or time.monotonic() > deadline:
+            return result
+        time.sleep(interval)
+
+
+def timed_download(node: Node, url: str, *, via: Node | None = None, user: str | None = None, timeout: float = 60):
+    """从 `node` 所在的机器经它的本机 SOCKS5 入口下载 `url`，返回 (curl 的退出码, 下载的字节数, 用了多少秒)。
+
+    `user` 是代理的用户名；不写时用 `via` 的虚拟 IP。
+    """
+    name = user if user is not None else (via.virtual_ip if via else "")
+    auth = f"{name}@" if name else ""
+    done = node.host.run("curl", "-sS", "--max-time", str(timeout), "-x", f"socks5h://{auth}127.0.0.1:1080", "-o", "/dev/null",
+                         "-w", "%{size_download} %{time_total}", url, check=False, timeout=timeout + 5)
+    size, seconds = (done.stdout.split() + ["0", "0"])[:2]
+    return done.returncode, int(float(size)), float(seconds)
+
+
+def hold_port(host: Host, port: int) -> None:
+    """在 `host` 上占住一个 TCP 端口（别的程序在监听它），直到实验环境关闭。"""
+    code = "import socket, time\ns = socket.socket()\ns.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n" \
+           f"s.bind(('127.0.0.1', {port}))\ns.listen()\ntime.sleep(3600)\n"
+    host.spawn(sys.executable, "-c", code)
+    wait_until(lambda: f"127.0.0.1:{port} " in host.run("ss", "-lnt").stdout, what=f"{host.name} 上的 {port} 端口被占住")
