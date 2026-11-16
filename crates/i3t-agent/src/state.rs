@@ -4,7 +4,7 @@
 //! |---|---|
 //! | `node.key` | 节点私钥，PKCS#8 的 PEM，只有属主可读 |
 //! | `controller.json` | controller 的地址和公钥，注册时从令牌里得到 |
-//! | `local.json` | 本机的设置：本地声明、端口 |
+//! | `config.toml` | 使用者手改的配置，见 [`crate::config`] |
 //! | `netmap.json` | 最后一份成功应用的 netmap。controller 不在线时节点靠它照常工作 |
 //!
 //! 所有文件都是先写临时文件再改名，所以断电不会留下写了一半的文件。
@@ -16,14 +16,13 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use i3t_crypto::NodeKey;
 use i3t_model::Netmap;
-use i3t_model::control::Declared;
 use i3t_proto::PublicKey;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 const KEY_FILE: &str = "node.key";
 const CONTROLLER_FILE: &str = "controller.json";
-const LOCAL_FILE: &str = "local.json";
+const CONFIG_FILE: &str = "config.toml";
 const NETMAP_FILE: &str = "netmap.json";
 
 /// 节点默认绑定的端口。
@@ -35,26 +34,6 @@ pub struct ControllerInfo {
     /// `主机:端口`，主机可以是域名。
     pub address: String,
     pub key: PublicKey,
-}
-
-/// 只在本机决定、不由 controller 下发的设置。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LocalSettings {
-    /// 这台机器声明自己可以承担什么。启用与否由管理员在 WebUI 上决定，没有声明的启用不了。
-    #[serde(default)]
-    pub declared: Declared,
-    #[serde(default = "default_port")]
-    pub port: u16,
-}
-
-impl Default for LocalSettings {
-    fn default() -> Self {
-        Self { declared: Declared::default(), port: DEFAULT_PORT }
-    }
-}
-
-const fn default_port() -> u16 {
-    DEFAULT_PORT
 }
 
 #[derive(Debug, Clone)]
@@ -122,20 +101,10 @@ impl StateDir {
         self.write_json(CONTROLLER_FILE, controller)
     }
 
-    /// 本机的设置；文件不存在时是默认值。
-    ///
-    /// # Errors
-    ///
-    /// 文件读不了或者解析不了。
-    pub fn local(&self) -> anyhow::Result<LocalSettings> {
-        Ok(self.read_json(LOCAL_FILE)?.unwrap_or_default())
-    }
-
-    /// # Errors
-    ///
-    /// 写入失败。
-    pub fn save_local(&self, local: &LocalSettings) -> anyhow::Result<()> {
-        self.write_json(LOCAL_FILE, local)
+    /// 配置文件默认放在状态目录里。
+    #[must_use]
+    pub fn config_path(&self) -> PathBuf {
+        self.root.join(CONFIG_FILE)
     }
 
     /// # Errors
@@ -235,26 +204,20 @@ mod tests {
     }
 
     #[test]
-    fn settings_default_until_saved_and_survive_reopening() {
+    fn controller_info_is_absent_until_saved_and_survives_reopening() {
         let (_dir, state) = state();
-        assert_eq!(state.local().unwrap(), LocalSettings::default());
         assert_eq!(state.controller().unwrap(), None);
-
-        let local = LocalSettings { declared: Declared { exit: true, relay: false, forward: true }, port: 20444 };
         let controller = ControllerInfo { address: "ctl.example.com:20331".to_owned(), key: PublicKey::from_bytes([5; 32]) };
-        state.save_local(&local).unwrap();
         state.save_controller(&controller).unwrap();
-
         let reopened = StateDir::open(state.path()).unwrap();
-        assert_eq!(reopened.local().unwrap(), local);
         assert_eq!(reopened.controller().unwrap(), Some(controller));
     }
 
     #[test]
     fn a_corrupt_file_is_an_error_not_a_silent_default() {
         let (_dir, state) = state();
-        fs::write(state.path().join(LOCAL_FILE), b"{ not json").unwrap();
-        assert!(state.local().is_err());
+        fs::write(state.path().join(CONTROLLER_FILE), b"{ not json").unwrap();
+        assert!(state.controller().is_err());
         fs::write(state.path().join(KEY_FILE), b"garbage").unwrap();
         assert!(state.key().is_err());
     }
@@ -262,8 +225,9 @@ mod tests {
     #[test]
     fn no_temporary_file_is_left_behind() {
         let (_dir, state) = state();
-        state.save_local(&LocalSettings::default()).unwrap();
+        let controller = ControllerInfo { address: "c:1".to_owned(), key: PublicKey::from_bytes([5; 32]) };
+        state.save_controller(&controller).unwrap();
         let names: Vec<_> = fs::read_dir(state.path()).unwrap().map(|entry| entry.unwrap().file_name()).collect();
-        assert_eq!(names, [LOCAL_FILE]);
+        assert_eq!(names, [CONTROLLER_FILE]);
     }
 }

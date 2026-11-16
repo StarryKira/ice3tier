@@ -18,6 +18,8 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
+toml = "1.2.1"
+toml_edit = "0.25.19"
 tracing = "0.1.44"
 
 [lints]
