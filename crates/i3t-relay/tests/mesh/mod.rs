@@ -186,6 +186,8 @@ pub struct View<'a> {
     pub relay_clients: Option<&'a [&'a Node]>,
     /// 本节点的选路模式：`"lowest_cost"`，不写就是默认模式。
     pub routing: Option<&'static str>,
+    /// 本节点能用哪些路：`"relay_only"`、`"direct_only"`，不写就是都能用。
+    pub reach: Option<&'static str>,
     /// 网络的最大中转级数，不写是 2。
     pub max_relay_hops: Option<u8>,
     /// relay 的带宽上限，Mbit/s。
@@ -396,6 +398,7 @@ fn build_netmap(me: NodeId, view: &View<'_>) -> Arc<Netmap> {
             "name": format!("node-{me}"),
             "virtual_ip": virtual_ip(me),
             "routing": view.routing,
+            "reach": view.reach,
             "relay": view.relay_clients.map(|_| serde_json::json!({ "bandwidth_mbps": view.bandwidth_mbps })),
         },
         "peers": peers,

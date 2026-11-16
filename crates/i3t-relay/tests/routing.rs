@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use i3t_model::control::Route;
 use i3t_model::netmap::RoutingMode;
-use i3t_path::DirectKind;
+use i3t_path::{DirectKind, RelayLeg};
 use i3t_proto::backbone::RelayState;
 use i3t_relay::DropReason;
 use i3t_underlay::lan::{GROUP_V4, Interfaces, LanConfig};
@@ -71,6 +71,7 @@ async fn a_stream_is_carried_over_a_two_relay_route() {
     assert!(report.reason.contains("延迟优先") && report.reason.contains(&format!("经 relay {} → {}", r1.id, r2.id)), "{}", report.reason);
     let [only] = &report.candidates[..] else { panic!("只有一条走得通的候选：{:?}", report.candidates) };
     assert!(only.current && only.cost_ms > 0.0);
+    assert_eq!((report.relay_leg, only.relay_leg), (Some(RelayLeg::Udp), Some(RelayLeg::Udp)), "到第一个 relay 走的是 UDP");
     let hops: Vec<_> = only.legs.iter().map(|leg| (leg.from, leg.to)).collect();
     assert_eq!(hops, [(a.id, r1.id), (r1.id, r2.id), (r2.id, d.id)]);
     assert!(a.paths.routes().iter().any(|entry| entry.peer == d.id && entry.rtt_ms.is_some()));
@@ -337,6 +338,7 @@ async fn a_tcp_only_node_weighs_its_own_tcp_legs_and_moves_off_the_one_that_stal
         candidate.unwrap_or_else(|| panic!("候选里应该有 {route:?}：{report:?}")).clone()
     };
     let (smooth, stalls) = (leg(&via_r1), leg(&via_r2));
+    assert_eq!((report.relay_leg, smooth.relay_leg, stalls.relay_leg), (Some(RelayLeg::Tcp), Some(RelayLeg::Tcp), Some(RelayLeg::Tcp)));
     assert!(stalls.cost_ms > smooth.cost_ms + 20.0, "停顿的那条 TCP 应该贵得多：{report:?}");
     assert!(stalls.legs[0].jitter_ms > smooth.legs[0].jitter_ms + 5.0, "停顿测出来是抖动：{report:?}");
 
@@ -441,6 +443,24 @@ impl FakeGateway {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_relay_only_node_publishes_no_endpoints_but_still_knows_its_own_public_addresses() {
+    let (a, r) = (Node::start(1), Node::start(9));
+    r.apply(&View { relay_clients: Some(&[&a]), ..View::default() });
+    r.wait_relay_enabled().await;
+    a.apply(&View { relays: &[&r], reach: Some("relay_only"), ..View::default() });
+    // relay 看到的就是 A 的回环地址和端口。
+    eventually("relay 看到的地址出现在本节点的公网地址里", SOON, || a.paths.public_addresses() == [a.addr()]).await;
+    assert!(a.paths.endpoints().is_empty(), "只经 relay 的节点不向对端公布地址");
+
+    // 可以直连的节点两样都有。
+    let b = Node::start(2);
+    r.apply(&View { relay_clients: Some(&[&a, &b]), ..View::default() });
+    b.apply(&View { relays: &[&r], ..View::default() });
+    eventually("可以直连的节点也知道", SOON, || b.paths.public_addresses() == [b.addr()]).await;
+    assert_eq!(b.paths.endpoints(), [b.addr()]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_port_mapped_on_the_gateway_becomes_a_candidate_endpoint_and_is_removed_on_shutdown() {
     let gateway = FakeGateway::start().await;
     let a = Node::start(1);
@@ -451,6 +471,7 @@ async fn a_port_mapped_on_the_gateway_becomes_a_candidate_endpoint_and_is_remove
 
     let mapped = SocketAddr::new(IpAddr::V4(EXTERNAL), port);
     eventually("映射出来的地址出现在候选端点里", SOON, || a.paths.endpoints().contains(&mapped)).await;
+    eventually("也在本节点的公网地址里", SOON, || a.paths.public_addresses().contains(&mapped)).await;
     assert_eq!(gateway.maps.lock().unwrap().first(), Some(&(1, port, 7200)), "映射的是节点那个唯一的 UDP 端口");
 
     // 节点停下之前把映射删掉（有效期 0）。

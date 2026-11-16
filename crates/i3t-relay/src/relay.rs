@@ -12,7 +12,7 @@ use i3t_model::Netmap;
 use i3t_path::RelayStatus;
 use i3t_proto::backbone::{Link, RelayState, Row};
 use i3t_proto::datagram::{self, MAX_RELAY_HOPS, RelayHeader, RouteHeader};
-use i3t_proto::session::{Accepted, Auth, Challenge, Frame, Pong, RefusalReason, Refused};
+use i3t_proto::session::{self, Accepted, Auth, Challenge, Echo, Frame, Nonce, Pong, RefusalReason, Refused};
 use i3t_proto::{Datagram, MAX_CONN_PACKET_LEN, NodeId, PublicKey};
 use i3t_underlay::tcp_leg::FrameSender;
 use i3t_underlay::{Ecn, Transmit, UdpPort, addr_query};
@@ -22,7 +22,7 @@ use tokio::task::JoinHandle;
 use crate::cookie::CookieJar;
 use crate::counters::{Counters, DropReason, RelayCounters};
 use crate::leg;
-use crate::limit::{Bandwidth, RefusalLimiter};
+use crate::limit::{Bandwidth, HandshakeLimiter, RefusalLimiter};
 use crate::session::{Binding, Origin, SESSION_TTL, Sessions};
 
 /// 一个中转帧最长多少字节。再长的不是正常节点发的。
@@ -65,7 +65,12 @@ pub(crate) struct Inner {
     state: RwLock<State>,
     /// 带宽上限单独一把锁：转发时只读会话表，但要改令牌桶。
     bandwidth: Mutex<Option<Bandwidth>>,
+    /// 给中转帧回错误帧的限速。
     refusals: Mutex<RefusalLimiter>,
+    /// 给 PING 回错误帧的限速。和上面分开：节点收到中转帧引出的错误帧之后会立刻发一个 PING 来核实（见
+    /// [`i3t_proto::session`] 的"ERROR 的回显"），对它的回答不能因为刚回过一个错误帧就被压下去。
+    keepalive_refusals: Mutex<RefusalLimiter>,
+    handshakes: Mutex<HandshakeLimiter>,
     counters: Counters,
     local: OnceLock<LocalDelivery>,
     /// TCP 中转腿靠它知道 relay 被停用了。
@@ -125,10 +130,10 @@ enum NextHop {
     Session(Binding),
 }
 
-/// 一段数据报不转发的原因，以及要不要告诉发来的一方。
+/// 一段数据报不转发的原因，以及要不要告诉发来的一方（错误帧的内容和它回显的字节）。
 struct Refusal {
     reason: DropReason,
-    reply: Option<Refused>,
+    reply: Option<(Refused, Echo)>,
 }
 
 impl Refusal {
@@ -158,6 +163,8 @@ impl Relay {
             state: RwLock::new(state),
             bandwidth: Mutex::new(None),
             refusals: Mutex::new(RefusalLimiter::default()),
+            keepalive_refusals: Mutex::new(RefusalLimiter::default()),
+            handshakes: Mutex::new(HandshakeLimiter::new(now)),
             counters: Counters::default(),
             local: OnceLock::new(),
             enabled: watch::Sender::new(false),
@@ -466,6 +473,8 @@ impl Inner {
             tracing::info!(%node, "中转会话过期：{} 秒没有收到保活", SESSION_TTL.as_secs());
         }
         self.refusals.lock().expect("relay refusal mutex poisoned").sweep(now);
+        self.keepalive_refusals.lock().expect("relay refusal mutex poisoned").sweep(now);
+        self.handshakes.lock().expect("relay handshake mutex poisoned").sweep(now);
     }
 
     /// 一条 TCP 断了，绑定在它上面的会话跟着关闭。
@@ -536,7 +545,8 @@ impl Inner {
                     self.reply(source, &Pong { nonce: ping.nonce, observed: source.addr }.to_bytes());
                 } else {
                     self.counters.dropped(DropReason::NoSession, 1);
-                    self.refuse(source, Refused { reason: RefusalReason::NoSession, node: ping.node }, now);
+                    let refused = Refused { reason: RefusalReason::NoSession, node: ping.node };
+                    self.refuse(source, &self.keepalive_refusals, (refused, ping.nonce), session::Ping::LEN, now);
                 }
                 None
             }
@@ -547,7 +557,7 @@ impl Inner {
         }
     }
 
-    /// AUTH：先验 cookie（便宜，证明来源地址是真的），再验签名（贵），都过了才建会话。
+    /// AUTH：先验 cookie（便宜，证明来源地址是真的），再按来源限速，再验签名（贵），都过了才建会话。
     fn authenticate(&self, source: &Source<'_>, auth: &Auth, now: Instant) -> Option<NodeId> {
         let node = auth.node;
         let (me, client_key) = {
@@ -564,10 +574,16 @@ impl Inner {
             tracing::debug!(%node, from = %source.addr, "握手被忽略：cookie 不是发给这个地址的，或者已经过期");
             return None;
         }
+        if !self.handshakes.lock().expect("relay handshake mutex poisoned").allow(source.addr.ip(), now) {
+            self.counters.dropped(DropReason::TooManyHandshakes, 1);
+            tracing::debug!(%node, from = %source.addr, "握手被忽略：这个来源这一阵发来的 AUTH 太多，不再为它验签名");
+            return None;
+        }
         let message = Auth::signed_message(me, node, &auth.nonce, &auth.cookie);
         if i3t_crypto::verify(&client_key, Auth::PURPOSE, &message, &Signature::from_bytes(auth.signature)).is_err() {
             self.counters.dropped(DropReason::BadSignature, 1);
-            tracing::warn!(%node, from = %source.addr, "握手被忽略：签名不对");
+            // 不用 warn：拿到 cookie 的人可以照着限速不停地发，每次一条 warn 就是刷屏。计数器里看得到。
+            tracing::debug!(%node, from = %source.addr, "握手被忽略：签名不对");
             return None;
         }
         {
@@ -576,7 +592,7 @@ impl Inner {
             if !state.enabled || !state.clients.contains_key(&node) {
                 return None;
             }
-            state.sessions.open(node, source.binding(), now);
+            state.sessions.open(node, source.binding(), auth.nonce, now);
         }
         self.counters.session_opened();
         let valid_for = u16::try_from(SESSION_TTL.as_secs()).unwrap_or(u16::MAX);
@@ -601,8 +617,12 @@ impl Inner {
         }
         let now = Instant::now();
         let (hop, src, header_len) = match Datagram::parse(first) {
-            Ok(Datagram::Relayed { header, .. }) => (self.next_hop(source, header, now), header.src, RelayHeader::LEN),
-            Ok(Datagram::Routed { header, .. }) => (self.next_hop_on_route(source, &header, now), header.src, header.encoded_len()),
+            Ok(Datagram::Relayed { header, packet }) => {
+                (self.next_hop(source, header, &session::payload_echo(packet), now), header.src, RelayHeader::LEN)
+            }
+            Ok(Datagram::Routed { header, packet }) => {
+                (self.next_hop_on_route(source, &header, &session::payload_echo(packet), now), header.src, header.encoded_len())
+            }
             _ => {
                 self.counters.dropped(DropReason::Malformed, packets);
                 return;
@@ -611,7 +631,7 @@ impl Inner {
         match hop {
             Ok(NextHop::Local) => self.deliver_locally(src, run, stride, header_len),
             Ok(NextHop::Session(binding)) => {
-                if self.admit(run.len(), now) {
+                if self.admit(src, run.len(), now) {
                     self.send(&binding, ecn, run, stride);
                 } else {
                     self.counters.dropped(DropReason::RateLimited, packets);
@@ -619,49 +639,54 @@ impl Inner {
             }
             Err(Refusal { reason, reply }) => {
                 self.counters.dropped(reason, packets);
-                if let Some(refused) = reply {
-                    self.refuse(source, refused, now);
+                if let Some(reply) = reply {
+                    self.refuse(source, &self.refusals, reply, first.len(), now);
                 }
             }
         }
     }
 
     /// 架构文档 §5.2 的核对：来源节点有会话，并且数据报就是从会话绑定的地方来的；目的节点也有会话。
-    fn next_hop(&self, source: &Source<'_>, header: RelayHeader, now: Instant) -> Result<NextHop, Refusal> {
+    ///
+    /// `payload` 是这个数据报去掉中转头之后的前几个字节，来源没有会话时错误帧回显它；有会话时回显会话握手的随机数。
+    fn next_hop(&self, source: &Source<'_>, header: RelayHeader, payload: &Echo, now: Instant) -> Result<NextHop, Refusal> {
         let state = self.read();
         if !state.enabled {
             return Err(Refusal::silent(DropReason::Disabled));
         }
-        if !state.sessions.owned_by(header.src, source.origin(), now) {
+        let Some(nonce) = state.sessions.owned_nonce(header.src, source.origin(), now) else {
             let reply = Refused { reason: RefusalReason::NoSession, node: header.src };
-            return Err(Refusal { reason: DropReason::NoSession, reply: Some(reply) });
-        }
+            return Err(Refusal { reason: DropReason::NoSession, reply: Some((reply, *payload)) });
+        };
         if header.dst == state.me {
             return Ok(NextHop::Local);
         }
         let unattached = Refusal {
             reason: DropReason::PeerUnattached,
-            reply: Some(Refused { reason: RefusalReason::PeerUnattached, node: header.dst }),
+            reply: Some((Refused { reason: RefusalReason::PeerUnattached, node: header.dst }, nonce)),
         };
         state.sessions.binding(header.dst, now).cloned().map(NextHop::Session).ok_or(unattached)
     }
 
     /// 多级中转的包往哪里送。先核对它是从该来的地方来的，再看路径本身，最后找下一站。
     ///
-    /// 只有排第一的 relay 会回错误帧：那时发来的一方就是来源节点，而且它的会话已经核对过。
+    /// 只有排第一的 relay 会回错误帧：那时发来的一方就是来源节点，而且它的会话已经核对过（错误帧回显那个会话握手的随机数）。
     /// 排在后面的 relay 不知道来源节点在哪里，不照办就只是丢掉。
-    fn next_hop_on_route(&self, source: &Source<'_>, header: &RouteHeader, now: Instant) -> Result<NextHop, Refusal> {
+    fn next_hop_on_route(&self, source: &Source<'_>, header: &RouteHeader, payload: &Echo, now: Instant) -> Result<NextHop, Refusal> {
         let state = self.read();
         if !state.enabled {
             return Err(Refusal::silent(DropReason::Disabled));
         }
         let Some(around) = header.relays.around(state.me) else { return Err(Refusal::silent(DropReason::NotOnRoute)) };
-        let first_hop = match around.previous {
-            None if state.sessions.owned_by(header.src, source.origin(), now) => true,
-            None => {
-                let reply = Refused { reason: RefusalReason::NoSession, node: header.src };
-                return Err(Refusal { reason: DropReason::NoSession, reply: Some(reply) });
-            }
+        // 排第一时是来源节点的会话握手的随机数；排在后面时是 `None`，不回错误帧。
+        let session_nonce: Option<Nonce> = match around.previous {
+            None => match state.sessions.owned_nonce(header.src, source.origin(), now) {
+                Some(nonce) => Some(nonce),
+                None => {
+                    let reply = Refused { reason: RefusalReason::NoSession, node: header.src };
+                    return Err(Refusal { reason: DropReason::NoSession, reply: Some((reply, *payload)) });
+                }
+            },
             // 骨干只走 UDP（白皮书 §7.2：TCP 只用于节点到 relay），所以前一个 relay 的会话必须是绑定在这个 UDP 地址上的。
             Some(previous) => {
                 let from_neighbour = state.relays.contains(&previous)
@@ -670,12 +695,12 @@ impl Inner {
                 if !from_neighbour {
                     return Err(Refusal::silent(DropReason::NoBackbone));
                 }
-                false
+                None
             }
         };
         let refusal = |reason: DropReason, refused: RefusalReason, node: NodeId| Refusal {
             reason,
-            reply: first_hop.then_some(Refused { reason: refused, node }),
+            reply: session_nonce.map(|nonce| (Refused { reason: refused, node }, nonce)),
         };
         let relays = header.relays.as_slice();
         if relays.len() > state.max_relay_hops {
@@ -700,8 +725,8 @@ impl Inner {
         }
     }
 
-    fn admit(&self, bytes: usize, now: Instant) -> bool {
-        self.bandwidth.lock().expect("relay bandwidth mutex poisoned").as_mut().is_none_or(|bandwidth| bandwidth.admit(bytes, now))
+    fn admit(&self, src: NodeId, bytes: usize, now: Instant) -> bool {
+        self.bandwidth.lock().expect("relay bandwidth mutex poisoned").as_mut().is_none_or(|bandwidth| bandwidth.admit(src, bytes, now))
     }
 
     fn send(&self, binding: &Binding, ecn: Option<Ecn>, run: &[u8], stride: usize) {
@@ -746,13 +771,21 @@ impl Inner {
         }
     }
 
-    /// 回一个错误帧，按来源地址限速。
-    fn refuse(&self, source: &Source<'_>, refused: Refused, now: Instant) {
-        if !self.refusals.lock().expect("relay refusal mutex poisoned").allow(source.addr, now) {
+    /// 回一个回显 `echo` 的错误帧，按来源地址用 `limiter` 限速。引出它的请求有 `request_len` 字节：比错误帧短就不回，
+    /// 应答不能比请求大。
+    fn refuse(
+        &self,
+        source: &Source<'_>,
+        limiter: &Mutex<RefusalLimiter>,
+        (refused, echo): (Refused, Echo),
+        request_len: usize,
+        now: Instant,
+    ) {
+        if request_len < Refused::LEN || !limiter.lock().expect("relay refusal mutex poisoned").allow(source.addr, now) {
             return;
         }
         tracing::debug!(from = %source.addr, node = %refused.node, reason = ?refused.reason, "拒绝转发，回一个错误帧");
-        self.reply(source, &refused.to_bytes());
+        self.reply(source, &refused.to_bytes_echoing(&echo));
     }
 }
 

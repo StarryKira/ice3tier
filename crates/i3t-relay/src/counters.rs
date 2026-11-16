@@ -15,6 +15,8 @@ pub enum DropReason {
     BadCookie,
     /// AUTH 的签名不对。
     BadSignature,
+    /// cookie 对，但同一个来源（或者全体）这一阵发来的 AUTH 太多，这一个没有验签名。
+    TooManyHandshakes,
     /// 来源节点没有会话，或者数据报不是从会话绑定的地方来的。
     NoSession,
     /// 目的节点没有会话。
@@ -34,7 +36,7 @@ pub enum DropReason {
 }
 
 impl DropReason {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Disabled,
         Self::Malformed,
         Self::UnknownClient,
@@ -48,6 +50,7 @@ impl DropReason {
         Self::NotOnRoute,
         Self::HopLimit,
         Self::NoBackbone,
+        Self::TooManyHandshakes,
     ];
 
     const fn index(self) -> usize {
@@ -65,6 +68,7 @@ impl DropReason {
             Self::NotOnRoute => 10,
             Self::HopLimit => 11,
             Self::NoBackbone => 12,
+            Self::TooManyHandshakes => 13,
         }
     }
 }
@@ -156,7 +160,7 @@ mod tests {
         for (index, reason) in DropReason::ALL.into_iter().enumerate() {
             assert_eq!(snapshot.dropped(reason), widen(index + 1));
         }
-        assert_eq!(snapshot.dropped_total(), 91);
+        assert_eq!(snapshot.dropped_total(), 105);
         assert_eq!((snapshot.forwarded_packets, snapshot.forwarded_bytes), (3, 4200));
         assert_eq!((snapshot.sessions, snapshot.sessions_opened), (2, 1));
     }

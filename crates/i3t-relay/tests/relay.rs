@@ -14,7 +14,6 @@ use common::{Client, RELAY_ID, Role, SILENCE, TcpClient, TestRelay, WAIT, node, 
 use i3t_crypto::NodeKey;
 use i3t_proto::Datagram;
 use i3t_proto::backbone::RelayState;
-use i3t_proto::datagram::RelayHeader;
 use i3t_proto::session::{Auth, Frame, Init, Ping, Pong, RefusalReason, Refused};
 use i3t_relay::DropReason;
 use tokio::net::{TcpStream, UdpSocket};
@@ -72,8 +71,9 @@ async fn a_sender_without_a_session_is_refused_with_a_rate_limited_error() {
     let frame = relayed(b.id, stranger.id, b"payload");
     stranger.send(&frame, &relay).await;
     let reply = stranger.recv().await;
-    assert!(reply.len() <= RelayHeader::LEN, "错误帧不能比引出它的帧大");
+    assert!(reply.len() <= frame.len(), "错误帧不能比引出它的帧大");
     assert_eq!(Frame::parse(&reply), Some(Frame::Error(Refused { reason: RefusalReason::NoSession, node: stranger.id })));
+    assert_eq!(Refused::echo(&reply), Some(*b"payload\0"), "回显去掉中转头之后的前 8 个字节，不够的补 0");
 
     // 紧接着再发：照样不转发，但这一秒里不再回错误帧。
     stranger.send(&frame, &relay).await;
@@ -82,9 +82,41 @@ async fn a_sender_without_a_session_is_refused_with_a_rate_limited_error() {
     assert_eq!(relay.relay().counters().dropped(DropReason::NoSession), 2);
     assert_eq!(relay.relay().counters().forwarded_packets, 0);
 
-    // 没有会话时的 PING 也是同样的回答（换一个来源地址，避开上面的限速）。
+    // 没有会话时的 PING 也是同样的回答，回显 PING 的随机数。
     a.send(&Ping { node: a.id, nonce: [1; 8] }.to_bytes(), &relay).await;
-    assert_eq!(Frame::parse(&a.recv().await), Some(Frame::Error(Refused { reason: RefusalReason::NoSession, node: a.id })));
+    let reply = a.recv().await;
+    assert_eq!(Frame::parse(&reply), Some(Frame::Error(Refused { reason: RefusalReason::NoSession, node: a.id })));
+    assert_eq!(Refused::echo(&reply), Some([1; 8]));
+}
+
+#[tokio::test]
+async fn a_relayed_frame_shorter_than_an_error_gets_no_error() {
+    let (a, b) = (Client::new(1).await, Client::new(2).await);
+    let relay = TestRelay::start(&[&a, &b]);
+    let short = relayed(b.id, a.id, b"tiny");
+    assert!(short.len() < Refused::LEN);
+    a.send(&short, &relay).await;
+    a.expect_silence().await;
+    assert_eq!(relay.relay().counters().dropped(DropReason::NoSession), 1, "照样不转发，只是不回应");
+    // 长一个字节就够了。
+    a.send(&relayed(b.id, a.id, b"tiny!"), &relay).await;
+    assert!(Refused::echo(&a.recv().await).is_some());
+}
+
+#[tokio::test]
+async fn a_refused_keepalive_is_answered_even_right_after_a_refused_relayed_frame() {
+    let (a, b) = (Client::new(1).await, Client::new(2).await);
+    let relay = TestRelay::start(&[&a, &b]);
+    // 节点以为自己有会话（relay 重启过）：中转帧引出一个错误帧，节点马上发 PING 核实，relay 对 PING 的回答不能被压下去。
+    a.send(&relayed(b.id, a.id, &[0x41; 1200]), &relay).await;
+    assert!(Refused::echo(&a.recv().await).is_some());
+    a.send(&Ping { node: a.id, nonce: [9; 8] }.to_bytes(), &relay).await;
+    let reply = a.recv().await;
+    assert_eq!(Frame::parse(&reply), Some(Frame::Error(Refused { reason: RefusalReason::NoSession, node: a.id })));
+    assert_eq!(Refused::echo(&reply), Some([9; 8]));
+    // 接着再来一个 PING：这一秒里不再回。
+    a.send(&Ping { node: a.id, nonce: [10; 8] }.to_bytes(), &relay).await;
+    a.expect_silence().await;
 }
 
 #[tokio::test]
@@ -106,10 +138,12 @@ async fn a_spoofed_source_node_is_refused() {
 async fn frames_for_a_destination_without_a_session_are_refused() {
     let (a, b) = (Client::new(1).await, Client::new(2).await);
     let relay = TestRelay::start(&[&a, &b]);
-    a.attach(&relay).await;
+    let ok = a.attach(&relay).await;
 
     a.send(&relayed(b.id, a.id, b"anyone there"), &relay).await;
-    assert_eq!(Frame::parse(&a.recv().await), Some(Frame::Error(Refused { reason: RefusalReason::PeerUnattached, node: b.id })));
+    let reply = a.recv().await;
+    assert_eq!(Frame::parse(&reply), Some(Frame::Error(Refused { reason: RefusalReason::PeerUnattached, node: b.id })));
+    assert_eq!(Refused::echo(&reply), Some(ok.nonce), "回显会话握手时节点给的随机数：伪造来源地址的人不知道它");
     assert_eq!(relay.relay().counters().dropped(DropReason::PeerUnattached), 1);
 }
 
