@@ -109,6 +109,8 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Run { r#static } => {
             let config = Config::load(&state.config_path())?;
             init_logging(config.log.level.as_str());
+            #[cfg(unix)]
+            raise_open_file_limit();
             // 程序文件在哪里要趁早查：更新换过文件之后，系统报出来的就不是原来的位置了。
             let program = Program::detect(version)?;
             let source = r#static.map_or(Source::Controller, Source::Static);
@@ -165,6 +167,20 @@ fn init_logging(level: &str) {
     });
     // 输出到文件或者日志服务时不带颜色的控制符。
     tracing_subscriber::fmt().with_env_filter(filter).with_ansi(std::io::stderr().is_terminal()).with_writer(std::io::stderr).init();
+}
+
+/// 把能同时打开的文件数的软上限抬到硬上限。
+///
+/// 经过本节点的每条流在入口或者出口上占一个文件描述符（客户端的连接、到目标的连接），每个数据报上下文占一个 UDP 端口。
+/// 直接在终端里执行 `i3t run` 时软上限常常只有 1024，一千来条流就会让整个节点打不开新的连接。
+/// 硬上限是系统允许这个用户自己抬到的数，抬上去不需要特权。装成系统服务时单元文件里另外设了 `LimitNOFILE`，这里只是兜底。
+/// macOS 的硬上限常常写着"不限"，实际能抬到的是 `kern.maxfilesperproc`，`rlimit` 会按它取。
+#[cfg(unix)]
+fn raise_open_file_limit() {
+    match rlimit::increase_nofile_limit(u64::MAX) {
+        Ok(limit) => tracing::info!(limit, "能同时打开的文件数的上限"),
+        Err(error) => tracing::warn!(%error, "抬不高能同时打开的文件数的上限，流多的时候可能打不开新的连接"),
+    }
 }
 
 /// 收到 Ctrl-C，或者（Unix 上）收到 SIGTERM 时完成。
@@ -232,5 +248,27 @@ fn default_state_dir() -> anyhow::Result<PathBuf> {
     match dir {
         Some(dir) => Ok(dir),
         None => bail!("找不到放状态目录的位置，请用 --state-dir 指定一个目录"),
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use rlimit::Resource;
+
+    #[test]
+    fn the_soft_open_file_limit_is_raised_as_far_as_the_hard_limit_allows() {
+        let (_, hard) = Resource::NOFILE.get().unwrap();
+        let low = hard.min(256);
+        Resource::NOFILE.set(low, hard).unwrap();
+
+        super::raise_open_file_limit();
+
+        let (soft, still_hard) = Resource::NOFILE.get().unwrap();
+        assert_eq!(still_hard, hard, "硬上限不动");
+        if cfg!(target_os = "linux") {
+            assert_eq!(soft, hard);
+        } else {
+            assert!(soft > low || low == hard, "软上限应该抬上去了：{low} -> {soft}（硬上限 {hard}）");
+        }
     }
 }

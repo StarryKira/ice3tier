@@ -25,6 +25,7 @@ mod metrics;
 pub mod node;
 mod persist;
 pub mod program;
+mod route_detail;
 mod runtime;
 pub mod selfcheck;
 pub mod state;

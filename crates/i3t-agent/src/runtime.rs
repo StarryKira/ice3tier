@@ -9,8 +9,8 @@ use i3t_conn::{Endpoint, RouteChange};
 use i3t_exit::{Exit, ExitStats, Os, Outbound};
 use i3t_model::Netmap;
 use i3t_model::control::{
-    CredentialUsage, ExitObservation, ExitReport, ForwardReport, ListenTraffic, ListenerReport, QuotaUsage, Report, Route, RouteAnswer,
-    RouteSince, SelfUpdate,
+    BackboneRow, CredentialUsage, ExitObservation, ExitReport, ForwardReport, ListenTraffic, ListenerReport, QuotaUsage, Report, Route,
+    RouteAnswer, RouteSince, SelfUpdate,
 };
 use i3t_model::update::UpdateStatus;
 use i3t_proto::NodeId;
@@ -20,6 +20,7 @@ use crate::control::LinkState;
 use crate::flows::{self, RelayActivity, Sample};
 use crate::node::BUILTIN_LISTENERS;
 use crate::program::Program;
+use crate::route_detail;
 use crate::status::listen_state;
 
 /// 一个运行着的节点。
@@ -160,6 +161,7 @@ impl Runtime {
             exits: self.exit_observations(),
             listeners,
             forwards,
+            route_kinds: self.endpoint.path_reports().iter().filter_map(route_detail::kind).collect(),
         }
     }
 
@@ -198,11 +200,22 @@ impl Runtime {
         let entry = self.endpoint.routes().into_iter().find(|entry| entry.peer == peer);
         let known = self.netmap.borrow().peer(peer).is_some();
         match entry {
-            Some(entry) => RouteAnswer { peer, route: Some(entry.route), rtt_ms: entry.rtt_ms, since: self.history.since(peer) },
+            Some(entry) => RouteAnswer {
+                peer,
+                route: Some(entry.route),
+                rtt_ms: entry.rtt_ms,
+                since: self.history.since(peer),
+                detail: self.endpoint.path_report(peer).as_ref().map(route_detail::detail),
+            },
             // 在 netmap 里、路由层还没有它的条目（刚下发）：对它还没有路。
-            None if known => RouteAnswer { peer, route: Some(Route::None), rtt_ms: None, since: None },
-            None => RouteAnswer { peer, route: None, rtt_ms: None, since: None },
+            None if known => RouteAnswer { peer, route: Some(Route::None), rtt_ms: None, since: None, detail: None },
+            None => RouteAnswer { peer, route: None, rtt_ms: None, since: None, detail: None },
         }
+    }
+
+    /// 回答"手上的骨干矩阵"：路由层现有的每一行。
+    pub(crate) fn backbone(&self) -> Vec<BackboneRow> {
+        route_detail::backbone(&self.endpoint.backbone())
     }
 }
 

@@ -1,11 +1,13 @@
 //! 连 controller 的那条长连接。
 //!
 //! 节点用它做这些事：第一次加入时注册（[`enroll`]）；收 netmap 并确认；定期上报；转发信令；
-//! 收更新的指令、取更新包（[`Packages`]）；回答"到某个对端现在怎么走"的查询。
+//! 收更新的指令、取更新包（[`Packages`]）；回答"到某个对端现在怎么走"和"手上的骨干矩阵"的查询。
 //! 连接断了就带退避地重连，这期间节点按手上最后一份 netmap 照常工作。
-//! 被吊销，或者 controller 不认这个节点时，不再重连。
+//! 被吊销，或者 controller 明说不认这个节点（`Rejected`）时，不再重连。controller 说它自己出了错（`TryLater`）时
+//! 照常带退避地重连：那不是不认这个节点。
 //!
 //! 上报里的路由表：每次连上之后的第一次上报是完整的，之后只带变化的条目（延迟的小幅波动不算变化）。
+//! 每条路的细节（[`Report::route_kinds`]）跟着它的条目走：条目要报的时候细节也报，细节变了条目也重报。
 //! 这件事在这里做，因为只有这里知道一条连接从哪里开始。
 //!
 //! 收到解析不了的一帧（多半是更新版本的 controller 才有的消息）就跳过，连接接着用。
@@ -17,7 +19,7 @@ use std::time::Duration;
 use anyhow::{Context, anyhow, bail, ensure};
 use i3t_crypto::{NodeKey, tls};
 use i3t_model::Netmap;
-use i3t_model::control::{Hello, MAX_FRAME_LEN, Report, RouteAnswer, RouteEntry, Signal, ToController, ToNode};
+use i3t_model::control::{BackboneRow, Hello, MAX_FRAME_LEN, Report, RouteAnswer, RouteEntry, RouteKind, Signal, ToController, ToNode};
 use i3t_model::update::{Platform, SignedManifest, UpdateTiming, Version};
 use i3t_proto::NodeId;
 use i3t_update::{ChunkRequest, PackageSource, SourceError};
@@ -66,6 +68,7 @@ pub async fn enroll(controller: &ControllerInfo, key: &NodeKey, secret: &str, he
             Ok(*netmap)
         }
         Some(ToNode::Rejected { reason }) => bail!("controller 拒绝了注册：{reason}"),
+        Some(ToNode::TryLater { reason }) => bail!("controller 暂时处理不了注册请求，令牌没有用掉，请稍后再试：{reason}"),
         Some(other) => bail!("controller 对注册请求的回答不对：{}", kind_of(&other)),
         None => bail!("controller 没有回答就关闭了连接"),
     }
@@ -210,6 +213,8 @@ pub struct LinkSetup {
     pub report: Box<dyn Fn() -> Report + Send + Sync>,
     /// controller 问"到这个对端现在怎么走"时调用。
     pub route: Box<dyn Fn(NodeId) -> RouteAnswer + Send + Sync>,
+    /// controller 问"手上的骨干矩阵"时调用。
+    pub backbone: Box<dyn Fn() -> Vec<BackboneRow> + Send + Sync>,
     /// 通知它一下，就不等下一次定时上报，马上报一次。
     /// 候选端点或者挂靠的 relay 变了的时候用：对端要靠这些才找得到本节点，晚报十秒就晚通十秒。
     pub report_now: Arc<Notify>,
@@ -320,8 +325,8 @@ struct Worker {
 /// 一条连接期间的状态。连接断了就整个丢掉，等回答的人因此知道被打断了。
 #[derive(Default)]
 struct Session {
-    /// 这条连接上报过的路由表：下一次只报和它不同的条目。
-    reported_routes: BTreeMap<NodeId, RouteEntry>,
+    /// 这条连接上报过的路由表和每条路的细节：下一次只报和它不同的条目。
+    reported_routes: BTreeMap<NodeId, (RouteEntry, Option<RouteKind>)>,
     /// 发出去、还在等回答的取包请求。
     chunks: BTreeMap<u64, oneshot::Sender<Result<Vec<u8>, SourceError>>>,
     next_request: u64,
@@ -415,6 +420,8 @@ impl Worker {
                         }
                         ToNode::Revoked => return Ok(Ended::Revoked),
                         ToNode::Rejected { reason } => return Ok(Ended::Rejected(reason)),
+                        // controller 自己出了错，不是不认这个节点：当作连接断了，带退避地重连。
+                        ToNode::TryLater { reason } => bail!("controller 这一次接待不了本节点，稍后重连：{reason}"),
                         ToNode::Heartbeat => {}
                         ToNode::Update { manifest, timing } => self.pass_on(UpdateCommand::Update { manifest, timing }),
                         ToNode::UpdateCancel => self.pass_on(UpdateCommand::Cancel),
@@ -424,6 +431,11 @@ impl Worker {
                             let answer = (self.setup.route)(peer);
                             tracing::debug!(%peer, route = ?answer.route, "回答 controller 的路由查询");
                             write_message(&mut writer, &ToController::RouteAnswer { request, answer }).await?;
+                        }
+                        ToNode::BackboneQuery { request } => {
+                            let rows = (self.setup.backbone)();
+                            tracing::debug!(rows = rows.len(), "回答 controller 的骨干矩阵查询");
+                            write_message(&mut writer, &ToController::BackboneAnswer { request, rows }).await?;
                         }
                     }
                 }
@@ -463,7 +475,7 @@ impl Worker {
     async fn report<W: AsyncWrite + Unpin>(&self, writer: &mut W, session: &mut Session) -> anyhow::Result<()> {
         let mut report = (self.setup.report)();
         report.routes_full = !session.reported;
-        report.routes = session.routes_to_report(report.routes);
+        (report.routes, report.route_kinds) = session.routes_to_report(report.routes, report.route_kinds);
         session.reported = true;
         write_message(writer, &ToController::Report(report)).await
     }
@@ -502,18 +514,37 @@ impl Session {
         }
     }
 
-    /// 从完整的路由表里挑出这次要报的条目，并记下报过什么。
-    fn routes_to_report(&mut self, current: Vec<RouteEntry>) -> Vec<RouteEntry> {
-        if !self.reported {
-            self.reported_routes = current.iter().map(|entry| (entry.peer, entry.clone())).collect();
-            return current;
+    /// 从完整的路由表和细节里挑出这次要报的条目和它们的细节，并记下报过什么。
+    ///
+    /// 细节说的对端不在路由表里的不报：controller 只认和条目一起来的细节。
+    fn routes_to_report(&mut self, current: Vec<RouteEntry>, kinds: Vec<RouteKind>) -> (Vec<RouteEntry>, Vec<RouteKind>) {
+        let kinds: BTreeMap<NodeId, RouteKind> = kinds.into_iter().map(|kind| (kind.peer, kind)).collect();
+        let current: Vec<(RouteEntry, Option<RouteKind>)> = current
+            .into_iter()
+            .map(|entry| {
+                let kind = kinds.get(&entry.peer).copied();
+                (entry, kind)
+            })
+            .collect();
+        let first = !self.reported;
+        if first {
+            self.reported_routes.clear();
         }
         // 不在表里了的对端不用报：它已经不在 netmap 里，controller 那边自己会去掉。
-        self.reported_routes.retain(|peer, _| current.iter().any(|entry| entry.peer == *peer));
-        let changed: Vec<RouteEntry> =
-            current.into_iter().filter(|entry| self.reported_routes.get(&entry.peer).is_none_or(|before| differs(before, entry))).collect();
-        self.reported_routes.extend(changed.iter().map(|entry| (entry.peer, entry.clone())));
-        changed
+        self.reported_routes.retain(|peer, _| current.iter().any(|(entry, _)| entry.peer == *peer));
+        let changed: Vec<(RouteEntry, Option<RouteKind>)> = current
+            .into_iter()
+            .filter(|(entry, kind)| {
+                first
+                    || self
+                        .reported_routes
+                        .get(&entry.peer)
+                        .is_none_or(|(before, before_kind)| differs(before, entry) || before_kind != kind)
+            })
+            .collect();
+        self.reported_routes.extend(changed.iter().map(|(entry, kind)| (entry.peer, (entry.clone(), *kind))));
+        let kinds = changed.iter().filter_map(|(_, kind)| *kind).collect();
+        (changed.into_iter().map(|(entry, _)| entry).collect(), kinds)
     }
 }
 
@@ -641,6 +672,8 @@ fn kind_of(message: &ToNode) -> &'static str {
         ToNode::PackageChunk { .. } => "package_chunk",
         ToNode::PackageUnavailable { .. } => "package_unavailable",
         ToNode::RouteQuery { .. } => "route_query",
+        ToNode::TryLater { .. } => "try_later",
+        ToNode::BackboneQuery { .. } => "backbone_query",
     }
 }
 
@@ -740,7 +773,8 @@ mod tests {
             initial: Arc::new(netmap(1)),
             hello: hello_rx,
             report: Box::new(|| Report { flows: 3, ..Report::default() }),
-            route: Box::new(|peer| RouteAnswer { peer, route: None, rtt_ms: None, since: None }),
+            route: Box::new(|peer| RouteAnswer { peer, route: None, rtt_ms: None, since: None, detail: None }),
+            backbone: Box::new(Vec::new),
             report_now: Arc::new(Notify::new()),
             state,
             timing,
@@ -954,13 +988,106 @@ mod tests {
         let controller = FakeController::start().await;
         let (_dir, state) = temp_state();
         let (mut setup, _hello) = setup(&controller, state, QUIET);
-        setup.route = Box::new(|peer| RouteAnswer { peer, route: Some(Route::None), rtt_ms: Some(5), since: None });
+        setup.route = Box::new(|peer| RouteAnswer { peer, route: Some(Route::None), rtt_ms: Some(5), since: None, detail: None });
         let _link = ControlLink::spawn(setup);
         let (mut stream, _) = controller.accept().await;
         let _: ToController = expect(&mut stream).await;
         write_message(&mut stream, &ToNode::RouteQuery { request: 41, peer: peer(7) }).await.unwrap();
         let ToController::RouteAnswer { request, answer } = expect_other(&mut stream).await else { panic!("应该回答路由查询") };
         assert_eq!((request, answer.peer, answer.route, answer.rtt_ms), (41, peer(7), Some(Route::None), Some(5)));
+    }
+
+    #[tokio::test]
+    async fn a_backbone_query_is_answered_from_the_assembly() {
+        let controller = FakeController::start().await;
+        let (_dir, state) = temp_state();
+        let (mut setup, _hello) = setup(&controller, state, QUIET);
+        let row = BackboneRow { relay: peer(9), state: Default::default(), load_percent: 7, age_ms: 300, links: Vec::new() };
+        let rows = vec![row];
+        let expected = rows.clone();
+        setup.backbone = Box::new(move || rows.clone());
+        let _link = ControlLink::spawn(setup);
+        let (mut stream, _) = controller.accept().await;
+        let _: ToController = expect(&mut stream).await;
+        write_message(&mut stream, &ToNode::BackboneQuery { request: 12 }).await.unwrap();
+        assert_eq!(expect_other(&mut stream).await, ToController::BackboneAnswer { request: 12, rows: expected });
+    }
+
+    #[tokio::test]
+    async fn route_details_travel_with_their_entries_and_a_changed_detail_is_reported_again() {
+        use i3t_model::control::DirectKind;
+
+        let controller = FakeController::start().await;
+        let (_dir, state) = temp_state();
+        let (mut setup, _hello) = setup(&controller, state, QUIET);
+        let direct = |raw: u32| RouteEntry {
+            peer: peer(raw),
+            route: Route::Direct { addr: "203.0.113.5:20330".parse().unwrap() },
+            rtt_ms: Some(10),
+        };
+        let kind = |raw: u32, direct: DirectKind| RouteKind { peer: peer(raw), direct: Some(direct), relay_leg: None };
+        let table = Arc::new(std::sync::Mutex::new((vec![direct(2), direct(3)], vec![kind(2, DirectKind::Lan), kind(7, DirectKind::Lan)])));
+        let current = Arc::clone(&table);
+        setup.report = Box::new(move || {
+            let (routes, route_kinds) = current.lock().unwrap().clone();
+            Report { routes, route_kinds, ..Report::default() }
+        });
+        let report_now = Arc::clone(&setup.report_now);
+        let _link = ControlLink::spawn(setup);
+        let (mut stream, _) = controller.accept().await;
+        let _: ToController = expect(&mut stream).await;
+
+        let first = expect_report(&mut stream).await;
+        assert_eq!(first.routes.len(), 2);
+        assert_eq!(first.route_kinds, [kind(2, DirectKind::Lan)], "没有条目的对端的细节不报");
+
+        // 路和延迟都没变，只是直连的类型变了：这一条连同细节再报一次。
+        table.lock().unwrap().1 = vec![kind(2, DirectKind::Punched)];
+        report_now.notify_one();
+        let changed = expect_report(&mut stream).await;
+        assert_eq!((changed.routes, changed.route_kinds), (vec![direct(2)], vec![kind(2, DirectKind::Punched)]));
+
+        // 细节没了也算变化：controller 要知道原来的那一份不再对。
+        table.lock().unwrap().1 = Vec::new();
+        report_now.notify_one();
+        let gone = expect_report(&mut stream).await;
+        assert_eq!((gone.routes, gone.route_kinds), (vec![direct(2)], Vec::new()));
+        report_now.notify_one();
+        let quiet = expect_report(&mut stream).await;
+        assert!(quiet.routes.is_empty() && quiet.route_kinds.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_controller_that_cannot_take_the_node_right_now_is_dialled_again() {
+        let controller = FakeController::start().await;
+        let (_dir, state) = temp_state();
+        let (link, _hello) = link(&controller, state);
+        let (mut stream, _) = controller.accept().await;
+        let _: ToController = expect(&mut stream).await;
+        write_message(&mut stream, &ToNode::TryLater { reason: "存储暂时不可用".into() }).await.unwrap();
+        drop(stream);
+
+        let (mut again, _) =
+            timeout(Duration::from_secs(5), controller.accept()).await.expect("controller 自己出错时节点要重连，不能就此停下");
+        assert!(matches!(expect::<ToController>(&mut again).await, ToController::Hello(_)));
+        assert!(!matches!(*link.state().borrow(), LinkState::Rejected | LinkState::Revoked));
+        write_message(&mut again, &ToNode::Snapshot(Box::new(netmap(3)))).await.unwrap();
+        let mut states = link.state();
+        timeout(Duration::from_secs(5), states.wait_for(|state| *state == LinkState::Online)).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn enrolment_that_the_controller_cannot_handle_right_now_says_to_try_again() {
+        let controller = FakeController::start().await;
+        let info = controller.info.clone();
+        tokio::spawn(async move {
+            let (mut stream, _) = controller.accept().await;
+            let _: ToController = expect(&mut stream).await;
+            write_message(&mut stream, &ToNode::TryLater { reason: "存储暂时不可用".into() }).await.unwrap();
+        });
+        let err = enroll(&info, &NodeKey::generate().unwrap(), "x", Hello::default()).await.unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("稍后再试") && message.contains("存储暂时不可用"), "{message}");
     }
 
     /// 取一段包：`version` 的 linux 包里从 `offset` 起的 `len` 字节。

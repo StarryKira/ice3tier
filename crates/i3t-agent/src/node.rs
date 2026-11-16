@@ -149,7 +149,11 @@ pub async fn run(state: StateDir, source: Source, program: Program, shutdown: im
         })
         .with_context(|| format!("绑定端口 {}", config.port))?,
     );
-    let outbound = Outbound::new(local_rx.clone(), Os);
+    // 出口不替别人连本节点自己对外的地址（反射地址、路由器映射出来的地址），这些地址数据面最清楚。
+    let outbound = Outbound::new(local_rx.clone(), Os).with_own_endpoints({
+        let endpoint = Arc::downgrade(&endpoint);
+        move || endpoint.upgrade().map(|endpoint| endpoint.endpoints()).unwrap_or_default()
+    });
     let quota = state.exit_quota().unwrap_or_else(|error| {
         // 读不出来只是这个账期的用量从零记起，不值得让节点起不来。
         tracing::warn!("上次存下的出口配额用量读不出来，从零开始记：{error:#}");
@@ -214,6 +218,10 @@ pub async fn run(state: StateDir, source: Source, program: Program, shutdown: im
                 route: Box::new({
                     let runtime = Arc::clone(&runtime);
                     move |peer| runtime.route_to(peer)
+                }),
+                backbone: Box::new({
+                    let runtime = Arc::clone(&runtime);
+                    move || runtime.backbone()
                 }),
                 report_now: Arc::clone(&report_now),
                 state,
