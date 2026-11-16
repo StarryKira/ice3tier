@@ -1,18 +1,28 @@
-//! 建流请求与应答。
+//! 建流请求与应答，以及数据报上下文里的数据报。
 //!
 //! 每条用户连接是端到端连接上的一条双向流。发起方在流上先写一个 OPEN 头，后面直接跟调用者的数据；
 //! 接受方先写一个 REPLY 头，后面直接跟目标发回来的数据。多字节整数都是大端。
 //!
+//! UDP 应用的数据不走流：发起方用另一种 OPEN 在一条流上建立一个数据报上下文，之后的数据报带着上下文号，
+//! 走连接上的数据报通道。那条流一直开着，它就是上下文的寿命：任何一方正常结束或者重置它，上下文就结束。
+//!
 //! ```text
-//! OPEN
+//! OPEN（流）
 //! +------+------+======+========+============+
 //! | 0x01 | 标志 | 目标 | 凭据名 | 客户端地址 |
 //! +------+------+======+========+============+
+//!
+//! OPEN（数据报上下文）
+//! +------+------+----------+========+============+
+//! | 0x02 | 标志 | 上下文号 | 凭据名 | 客户端地址 |
+//! +------+------+----------+========+============+
 //!
 //! 标志        bit 0～1  服务等级：0 auto，1 interactive，2 reliable，3 bulk
 //!             bit 2     后面有凭据名
 //!             bit 3     后面有客户端地址
 //!             bit 4～7  必须是 0
+//!
+//! 上下文号    4 字节，发起方挑的，在它到这个对端还开着的上下文里不重复
 //!
 //! 目标        类型 1 字节，后面的内容随类型：
 //!             0x01  互联网，IPv4        地址 4 字节 | 端口 2 字节
@@ -40,10 +50,51 @@
 //! 流里的下一个字节就是数据，不会读过头；对端乱写也不能让读的一方多分配内存。
 //!
 //! 流的异常结束用连接层的重置来传递，带一个原因码，见 [`Reason`]。
+//!
+//! # 数据报
+//!
+//! 数据报上下文的 OPEN 里没有目标。一个上下文在接受方那边是一个 UDP 端口，发往不同目标的数据报都从它出去
+//! （所以目标看到的来源地址不随目标变），目标写在每个数据报里；接受方发回来的数据报在同一个位置写的是来源。
+//! 发起方读到成功的 REPLY 之后才开始发数据报：那时接受方已经认得这个上下文号了。
+//!
+//! 下面是连接的数据报通道上一个数据报的全部内容。等级是 reliable 的上下文不用数据报通道，
+//! 每个数据报单独开一条单向流，流的全部内容就是这样一帧（不分片）。
+//!
+//! ```text
+//! 不分片
+//! +------+----------+======+======+
+//! | 标志 | 上下文号 | 目标 | 载荷 |
+//! +------+----------+======+======+
+//!    1        4
+//!
+//! 分片
+//! +------+----------+--------+--------+------+==================+
+//! | 标志 | 上下文号 | 报文号 | 片序号 | 片数 | 内容的这一片      |
+//! +------+----------+--------+--------+------+==================+
+//!    1        4         2        1       1
+//!
+//! 标志        bit 0     收的一方：0 是上下文的接受方，1 是上下文的发起方
+//!             bit 1     这是一个分片
+//!             bit 2～7  必须是 0
+//! 目标        和 OPEN 里的目标同一种编码。发起方发的是这个数据报要去哪里，接受方发的是它从哪里来
+//! 报文号      同一个报文的各片相同。每个上下文的每个方向各自从 0 往上数，到头了回到 0
+//! 片序号      从 0 开始
+//! 片数        2～255
+//! ```
+//!
+//! 「目标 + 载荷」叫做内容，最长 [`MAX_DATAGRAM_BODY_LEN`] 字节。一帧装得下就不分片；装不下时把内容切成几片，
+//! 除了最后一片都把帧填满，收的一方按片序号拼回去再解析。分片只发生在两个端点之间，relay 看到的只是连接的包。
+//!
+//! 连接层只看首字节的 bit 0：一个节点既可能是某些上下文的发起方，也可能是另一些上下文的接受方，
+//! 两种数据报要交给不同的人处理（[`Recipient::peek`]）。
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
+
+mod dgram;
+
+pub use dgram::{DatagramHeader, Fragment, FrameError, Frames, MAX_DATAGRAM_BODY_LEN, Recipient, SplitError};
 
 /// 域名最长多少字节。DNS 的名字写成文本最长就是这么多。
 pub const MAX_DOMAIN_LEN: usize = 253;
@@ -53,6 +104,7 @@ pub const MAX_CREDENTIAL_LEN: usize = 64;
 pub const MAX_DETAIL_LEN: usize = u8::MAX as usize;
 
 const KIND_OPEN_STREAM: u8 = 0x01;
+const KIND_OPEN_DATAGRAMS: u8 = 0x02;
 
 const FLAG_CLASS: u8 = 0b0000_0011;
 const FLAG_CREDENTIAL: u8 = 0b0000_0100;
@@ -109,17 +161,19 @@ macro_rules! wire_enum {
 }
 
 wire_enum! {
-    /// 服务等级：同一条连接上流与流之间谁先发。现在只是带过去并记进日志。
+    /// 服务等级：同一条连接上流与流之间谁先发，以及 UDP 应用的数据怎么送。
+    ///
+    /// 流在任何等级下都是可靠的，等级只决定调度上的先后。真正可以选择"丢"的只有数据报。
     #[derive(Default)]
     pub enum Class: u8 {
-        /// 开始按 interactive 对待，流量大了之后让位。
+        /// 开始按 interactive 对待，流量大了之后让位。数据报走不可靠的通道。
         #[default]
         Auto = 0,
-        /// 尾延迟最重要。
+        /// 尾延迟最重要：调度优先。数据报走不可靠的通道，过期即丢。
         Interactive = 1,
-        /// 一个报文都不丢，延迟次之。对流来说和 `Auto` 的区别只在调度上。
+        /// 一个报文都不丢，延迟次之：普通调度。数据报每个单独开一条单向流，由连接重传，互相不阻塞。
         Reliable = 2,
-        /// 吞吐优先，调度上让位。
+        /// 吞吐优先，调度上让位。对数据报没有意义，按 `Auto` 处理。
         Bulk = 3,
     }
 }
@@ -293,6 +347,9 @@ pub enum Target {
 }
 
 impl Target {
+    /// 编码之后最长多少字节：域名目标。
+    pub const MAX_LEN: usize = 1 + 1 + MAX_DOMAIN_LEN + 2;
+
     /// 目标是哪一类。用在日志里：流日志默认不记目标地址。
     #[must_use]
     pub const fn kind(&self) -> &'static str {
@@ -302,6 +359,38 @@ impl Target {
             Self::Lan { .. } => "lan",
             Self::Forward { .. } => "forward",
         }
+    }
+
+    /// 把目标追加到 `buf` 末尾。OPEN 里和每个数据报里用的是同一种编码。
+    pub fn encode(&self, buf: &mut Vec<u8>) {
+        match self {
+            Self::Internet { host: Host::Ip(ip), port } => {
+                put_endpoint(buf, TARGET_INTERNET_V4, TARGET_INTERNET_V6, SocketAddr::new(*ip, *port));
+            }
+            Self::Internet { host: Host::Name(name), port } => {
+                buf.push(TARGET_INTERNET_NAME);
+                put_short(buf, name.as_str());
+                buf.extend_from_slice(&port.to_be_bytes());
+            }
+            Self::Node { port } => {
+                buf.push(TARGET_NODE);
+                buf.extend_from_slice(&port.to_be_bytes());
+            }
+            Self::Lan { addr } => put_endpoint(buf, TARGET_LAN_V4, TARGET_LAN_V6, *addr),
+            Self::Forward { id } => {
+                buf.push(TARGET_FORWARD);
+                buf.extend_from_slice(&id.to_be_bytes());
+            }
+        }
+    }
+
+    /// 解析 `buf` 开头的一个目标。数据报的内容就是一个目标后面跟着载荷，所以 [`Decoded::Complete`] 里的 `len` 之后是载荷。
+    ///
+    /// # Errors
+    ///
+    /// 已经读到的部分不是一个合法的目标。
+    pub fn decode(buf: &[u8]) -> Result<Decoded<Self>, DecodeError> {
+        Reader::run(buf, Reader::target)
     }
 }
 
@@ -314,6 +403,24 @@ pub struct Origin {
     pub client: Option<SocketAddr>,
 }
 
+impl Origin {
+    /// 标志里说明后面有哪几项的那两位。
+    fn flags(&self) -> u8 {
+        let credential = if self.credential.is_some() { FLAG_CREDENTIAL } else { 0 };
+        let client = if self.client.is_some() { FLAG_CLIENT } else { 0 };
+        credential | client
+    }
+
+    fn encode(&self, buf: &mut Vec<u8>) {
+        if let Some(name) = &self.credential {
+            put_short(buf, truncated(name, MAX_CREDENTIAL_LEN));
+        }
+        if let Some(client) = self.client {
+            put_endpoint(buf, FAMILY_V4, FAMILY_V6, client);
+        }
+    }
+}
+
 /// 建流请求。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Open {
@@ -324,46 +431,13 @@ pub struct Open {
 
 impl Open {
     /// 编码之后最长多少字节：域名目标，带最长的凭据名和 IPv6 的客户端地址。
-    pub const MAX_LEN: usize = 2 + (1 + 1 + MAX_DOMAIN_LEN + 2) + (1 + MAX_CREDENTIAL_LEN) + (1 + V6_ENDPOINT_LEN);
+    pub const MAX_LEN: usize = 2 + Target::MAX_LEN + (1 + MAX_CREDENTIAL_LEN) + (1 + V6_ENDPOINT_LEN);
 
     /// 把头追加到 `buf` 末尾。调用者的首批数据直接接在后面。
     pub fn encode(&self, buf: &mut Vec<u8>) {
-        let credential = self.origin.credential.as_deref().map(|name| truncated(name, MAX_CREDENTIAL_LEN));
-        let mut flags = self.class.to_wire();
-        if credential.is_some() {
-            flags |= FLAG_CREDENTIAL;
-        }
-        if self.origin.client.is_some() {
-            flags |= FLAG_CLIENT;
-        }
-        buf.extend_from_slice(&[KIND_OPEN_STREAM, flags]);
-
-        match &self.target {
-            Target::Internet { host: Host::Ip(ip), port } => {
-                put_endpoint(buf, TARGET_INTERNET_V4, TARGET_INTERNET_V6, SocketAddr::new(*ip, *port));
-            }
-            Target::Internet { host: Host::Name(name), port } => {
-                buf.push(TARGET_INTERNET_NAME);
-                put_short(buf, name.as_str());
-                buf.extend_from_slice(&port.to_be_bytes());
-            }
-            Target::Node { port } => {
-                buf.push(TARGET_NODE);
-                buf.extend_from_slice(&port.to_be_bytes());
-            }
-            Target::Lan { addr } => put_endpoint(buf, TARGET_LAN_V4, TARGET_LAN_V6, *addr),
-            Target::Forward { id } => {
-                buf.push(TARGET_FORWARD);
-                buf.extend_from_slice(&id.to_be_bytes());
-            }
-        }
-
-        if let Some(name) = credential {
-            put_short(buf, name);
-        }
-        if let Some(client) = self.origin.client {
-            put_endpoint(buf, FAMILY_V4, FAMILY_V6, client);
-        }
+        buf.extend_from_slice(&[KIND_OPEN_STREAM, self.class.to_wire() | self.origin.flags()]);
+        self.target.encode(buf);
+        self.origin.encode(buf);
     }
 
     /// 解析从流的开头读到的字节。
@@ -372,60 +446,92 @@ impl Open {
     ///
     /// 已经读到的部分不是一个合法的 OPEN 头。这时应该用 [`Reason::ProtocolError`] 重置这条流。
     pub fn decode(buf: &[u8]) -> Result<Decoded<Self>, DecodeError> {
-        Reader::run(buf, |reader| {
-            let [kind, flags, target] = reader.array()?;
-            if kind != KIND_OPEN_STREAM {
-                return Err(DecodeError::UnknownKind(kind).into());
-            }
-            if flags & FLAG_RESERVED != 0 {
-                return Err(DecodeError::ReservedFlags(flags).into());
-            }
-            let class = Class::from_wire(flags & FLAG_CLASS).expect("两位能表示的四个值都是已定义的等级");
-
-            let target = match target {
-                TARGET_INTERNET_V4 => internet(reader.endpoint_v4()?),
-                TARGET_INTERNET_V6 => internet(reader.endpoint_v6()?),
-                TARGET_INTERNET_NAME => {
-                    let len = usize::from(reader.u8()?);
-                    if len == 0 || len > MAX_DOMAIN_LEN {
-                        return Err(DecodeError::InvalidDomain(InvalidDomainName::Length(len)).into());
-                    }
-                    // 域名和后面的端口一次要齐，少读一趟。
-                    let (name, port) = reader.bytes(len + 2)?.split_at(len);
-                    DomainName::validate(name).map_err(DecodeError::InvalidDomain)?;
-                    let name = str::from_utf8(name).expect("校验过的域名只有 ASCII").to_owned();
-                    Target::Internet { host: Host::Name(DomainName(name)), port: u16::from_be_bytes([port[0], port[1]]) }
-                }
-                TARGET_NODE => Target::Node { port: u16::from_be_bytes(reader.array()?) },
-                TARGET_LAN_V4 => Target::Lan { addr: reader.endpoint_v4()? },
-                TARGET_LAN_V6 => Target::Lan { addr: reader.endpoint_v6()? },
-                TARGET_FORWARD => Target::Forward { id: u32::from_be_bytes(reader.array()?) },
-                other => return Err(DecodeError::UnknownTarget(other).into()),
-            };
-
-            let credential = if flags & FLAG_CREDENTIAL != 0 {
-                let len = usize::from(reader.u8()?);
-                if len > MAX_CREDENTIAL_LEN {
-                    return Err(DecodeError::CredentialTooLong(len).into());
-                }
-                let name = str::from_utf8(reader.bytes(len)?).map_err(|_| DecodeError::NotUtf8)?;
-                Some(name.to_owned())
-            } else {
-                None
-            };
-            let client = if flags & FLAG_CLIENT != 0 {
-                Some(match reader.u8()? {
-                    FAMILY_V4 => reader.endpoint_v4()?,
-                    FAMILY_V6 => reader.endpoint_v6()?,
-                    other => return Err(DecodeError::UnknownAddressFamily(other).into()),
-                })
-            } else {
-                None
-            };
-
-            Ok(Self { target, class, origin: Origin { credential, client } })
+        Reader::run(buf, |reader| match reader.kind_and_flags()? {
+            (KIND_OPEN_STREAM, flags) => Self::after_kind(reader, flags),
+            (kind, _) => Err(DecodeError::UnknownKind(kind).into()),
         })
     }
+
+    /// 类型和标志已经读走，读剩下的部分。
+    fn after_kind(reader: &mut Reader<'_>, flags: u8) -> Result<Self, Halt> {
+        let class = class_of(flags)?;
+        let target = reader.target()?;
+        Ok(Self { target, class, origin: reader.origin(flags)? })
+    }
+}
+
+/// 建立数据报上下文的请求。
+///
+/// 和 [`Open`] 的区别是没有目标：目标写在每个数据报里（见模块文档）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenDatagrams {
+    /// 上下文号。之后两个方向的数据报都带着它。
+    pub context: u32,
+    pub class: Class,
+    pub origin: Origin,
+}
+
+impl OpenDatagrams {
+    /// 编码之后最长多少字节：带最长的凭据名和 IPv6 的客户端地址。
+    pub const MAX_LEN: usize = 2 + 4 + (1 + MAX_CREDENTIAL_LEN) + (1 + V6_ENDPOINT_LEN);
+
+    /// 把头追加到 `buf` 末尾。
+    pub fn encode(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&[KIND_OPEN_DATAGRAMS, self.class.to_wire() | self.origin.flags()]);
+        buf.extend_from_slice(&self.context.to_be_bytes());
+        self.origin.encode(buf);
+    }
+
+    /// 解析从流的开头读到的字节。
+    ///
+    /// # Errors
+    ///
+    /// 已经读到的部分不是一个合法的数据报上下文的 OPEN 头。这时应该用 [`Reason::ProtocolError`] 重置这条流。
+    pub fn decode(buf: &[u8]) -> Result<Decoded<Self>, DecodeError> {
+        Reader::run(buf, |reader| match reader.kind_and_flags()? {
+            (KIND_OPEN_DATAGRAMS, flags) => Self::after_kind(reader, flags),
+            (kind, _) => Err(DecodeError::UnknownKind(kind).into()),
+        })
+    }
+
+    fn after_kind(reader: &mut Reader<'_>, flags: u8) -> Result<Self, Halt> {
+        let class = class_of(flags)?;
+        let context = u32::from_be_bytes(reader.array()?);
+        Ok(Self { context, class, origin: reader.origin(flags)? })
+    }
+}
+
+/// 对端开过来的一条流上的第一样东西：它要一条流，还是要建立一个数据报上下文。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Opening {
+    Stream(Open),
+    Datagrams(OpenDatagrams),
+}
+
+impl Opening {
+    /// 编码之后最长多少字节。
+    pub const MAX_LEN: usize = Open::MAX_LEN;
+
+    /// 解析从流的开头读到的字节。接受方还不知道对端发的是哪一种 OPEN 时用它。
+    ///
+    /// # Errors
+    ///
+    /// 已经读到的部分不是任何一种合法的 OPEN 头。这时应该用 [`Reason::ProtocolError`] 重置这条流。
+    pub fn decode(buf: &[u8]) -> Result<Decoded<Self>, DecodeError> {
+        Reader::run(buf, |reader| match reader.kind_and_flags()? {
+            (KIND_OPEN_STREAM, flags) => Open::after_kind(reader, flags).map(Self::Stream),
+            (KIND_OPEN_DATAGRAMS, flags) => OpenDatagrams::after_kind(reader, flags).map(Self::Datagrams),
+            (kind, _) => Err(DecodeError::UnknownKind(kind).into()),
+        })
+    }
+}
+
+/// 标志里的服务等级。保留位不是 0 的标志在这里拒绝。
+fn class_of(flags: u8) -> Result<Class, DecodeError> {
+    if flags & FLAG_RESERVED != 0 {
+        return Err(DecodeError::ReservedFlags(flags));
+    }
+    Ok(Class::from_wire(flags & FLAG_CLASS).expect("两位能表示的四个值都是已定义的等级"))
 }
 
 fn internet(addr: SocketAddr) -> Target {
@@ -547,6 +653,59 @@ impl<'a> Reader<'a> {
 
     fn u8(&mut self) -> Result<u8, Halt> {
         self.array::<1>().map(|[byte]| byte)
+    }
+
+    /// OPEN 开头的类型和标志。
+    fn kind_and_flags(&mut self) -> Result<(u8, u8), Halt> {
+        let [kind, flags] = self.array()?;
+        Ok((kind, flags))
+    }
+
+    fn target(&mut self) -> Result<Target, Halt> {
+        Ok(match self.u8()? {
+            TARGET_INTERNET_V4 => internet(self.endpoint_v4()?),
+            TARGET_INTERNET_V6 => internet(self.endpoint_v6()?),
+            TARGET_INTERNET_NAME => {
+                let len = usize::from(self.u8()?);
+                if len == 0 || len > MAX_DOMAIN_LEN {
+                    return Err(DecodeError::InvalidDomain(InvalidDomainName::Length(len)).into());
+                }
+                // 域名和后面的端口一次要齐，少读一趟。
+                let (name, port) = self.bytes(len + 2)?.split_at(len);
+                DomainName::validate(name).map_err(DecodeError::InvalidDomain)?;
+                let name = str::from_utf8(name).expect("校验过的域名只有 ASCII").to_owned();
+                Target::Internet { host: Host::Name(DomainName(name)), port: u16::from_be_bytes([port[0], port[1]]) }
+            }
+            TARGET_NODE => Target::Node { port: u16::from_be_bytes(self.array()?) },
+            TARGET_LAN_V4 => Target::Lan { addr: self.endpoint_v4()? },
+            TARGET_LAN_V6 => Target::Lan { addr: self.endpoint_v6()? },
+            TARGET_FORWARD => Target::Forward { id: u32::from_be_bytes(self.array()?) },
+            other => return Err(DecodeError::UnknownTarget(other).into()),
+        })
+    }
+
+    /// 标志说有的那几项来源说明。
+    fn origin(&mut self, flags: u8) -> Result<Origin, Halt> {
+        let credential = if flags & FLAG_CREDENTIAL != 0 {
+            let len = usize::from(self.u8()?);
+            if len > MAX_CREDENTIAL_LEN {
+                return Err(DecodeError::CredentialTooLong(len).into());
+            }
+            let name = str::from_utf8(self.bytes(len)?).map_err(|_| DecodeError::NotUtf8)?;
+            Some(name.to_owned())
+        } else {
+            None
+        };
+        let client = if flags & FLAG_CLIENT != 0 {
+            Some(match self.u8()? {
+                FAMILY_V4 => self.endpoint_v4()?,
+                FAMILY_V6 => self.endpoint_v6()?,
+                other => return Err(DecodeError::UnknownAddressFamily(other).into()),
+            })
+        } else {
+            None
+        };
+        Ok(Origin { credential, client })
     }
 
     fn endpoint_v4(&mut self) -> Result<SocketAddr, Halt> {
@@ -876,6 +1035,120 @@ mod tests {
             assert_eq!(status.attribution(), Some(Attribution::Exit), "{status:?}");
             assert!(!status.is_ok());
         }
+    }
+
+    fn datagram_samples() -> Vec<OpenDatagrams> {
+        vec![
+            OpenDatagrams { context: 0, class: Class::Auto, origin: Origin::default() },
+            OpenDatagrams {
+                context: 0x0102_0304,
+                class: Class::Reliable,
+                origin: Origin { credential: Some("gateway-01".into()), client: Some("192.0.2.9:50000".parse().unwrap()) },
+            },
+            OpenDatagrams {
+                context: u32::MAX,
+                class: Class::Interactive,
+                origin: Origin { credential: None, client: Some("[2001:db8::9]:50001".parse().unwrap()) },
+            },
+        ]
+    }
+
+    fn encoded_datagrams(open: &OpenDatagrams) -> Vec<u8> {
+        let mut buf = Vec::new();
+        open.encode(&mut buf);
+        buf
+    }
+
+    #[test]
+    fn datagram_open_has_the_documented_layout() {
+        let request = OpenDatagrams {
+            context: 0x0102_0304,
+            class: Class::Reliable,
+            origin: Origin { credential: Some("gw".into()), client: Some("192.0.2.9:513".parse().unwrap()) },
+        };
+        #[rustfmt::skip]
+        let expected = [
+            0x02, 0b0000_1110,
+            1, 2, 3, 4,
+            2, b'g', b'w',
+            4, 192, 0, 2, 9, 0x02, 0x01,
+        ];
+        assert_eq!(encoded_datagrams(&request), expected);
+        assert_eq!(encoded_datagrams(&datagram_samples()[0]), [0x02, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn datagram_open_round_trips_and_is_read_incrementally() {
+        for request in datagram_samples() {
+            let header = encoded_datagrams(&request);
+            assert!(header.len() <= OpenDatagrams::MAX_LEN);
+            let mut stream = header.clone();
+            stream.extend_from_slice(b"nothing follows a datagram open, but a reader must not care");
+            assert_eq!(read_incrementally(&stream, OpenDatagrams::decode), Ok((request.clone(), header.len())), "{request:?}");
+            for len in 0..header.len() {
+                assert!(matches!(OpenDatagrams::decode(&header[..len]), Ok(Decoded::Incomplete { .. })), "{request:?} 前 {len} 字节");
+            }
+        }
+        let longest = OpenDatagrams {
+            context: 7,
+            class: Class::Bulk,
+            origin: Origin { credential: Some("c".repeat(MAX_CREDENTIAL_LEN)), client: Some("[2001:db8::9]:1".parse().unwrap()) },
+        };
+        assert_eq!(encoded_datagrams(&longest).len(), OpenDatagrams::MAX_LEN);
+    }
+
+    #[test]
+    fn malformed_datagram_open_is_rejected() {
+        let cases: [(&[u8], DecodeError); 5] = [
+            (&[0x01, 0, 0, 0, 0, 1], DecodeError::UnknownKind(0x01)),
+            (&[0x03, 0], DecodeError::UnknownKind(0x03)),
+            (&[0x02, 0b0010_0000], DecodeError::ReservedFlags(0b0010_0000)),
+            (&[0x02, 0b0100, 0, 0, 0, 1, 65], DecodeError::CredentialTooLong(65)),
+            (&[0x02, 0b1000, 0, 0, 0, 1, 9], DecodeError::UnknownAddressFamily(9)),
+        ];
+        for (bytes, error) in cases {
+            assert_eq!(OpenDatagrams::decode(bytes), Err(error), "{bytes:02x?}");
+        }
+    }
+
+    #[test]
+    fn the_acceptor_tells_the_two_kinds_of_open_apart_by_the_first_byte() {
+        for request in samples() {
+            let bytes = encoded(&request);
+            assert_eq!(read_incrementally(&bytes, Opening::decode), Ok((Opening::Stream(request), bytes.len())));
+        }
+        for request in datagram_samples() {
+            let bytes = encoded_datagrams(&request);
+            assert!(bytes.len() <= Opening::MAX_LEN);
+            assert_eq!(read_incrementally(&bytes, Opening::decode), Ok((Opening::Datagrams(request), bytes.len())));
+        }
+        assert_eq!(Opening::decode(&[0x00, 0]), Err(DecodeError::UnknownKind(0x00)));
+        assert_eq!(Opening::decode(&[0x03, 0]), Err(DecodeError::UnknownKind(0x03)));
+        assert_eq!(Opening::decode(&[0x01, 0x10]), Err(DecodeError::ReservedFlags(0x10)));
+        assert_eq!(Opening::decode(&[0x02]), Ok(Decoded::Incomplete { more: 1 }));
+    }
+
+    #[test]
+    fn a_datagram_body_is_a_target_followed_by_the_payload() {
+        for request in samples() {
+            let mut body = Vec::new();
+            request.target.encode(&mut body);
+            assert!(body.len() <= Target::MAX_LEN);
+            // OPEN 里的目标和数据报里的目标是同一种编码。
+            assert_eq!(encoded(&open(request.target.clone()))[2..], body[..]);
+            let target_len = body.len();
+            body.extend_from_slice(b"payload");
+            assert_eq!(Target::decode(&body), Ok(Decoded::Complete { value: request.target.clone(), len: target_len }));
+            assert_eq!(&body[target_len..], b"payload");
+            for len in 0..target_len {
+                assert!(matches!(Target::decode(&body[..len]), Ok(Decoded::Incomplete { .. })), "{:?} 前 {len} 字节", request.target);
+            }
+        }
+        let mut longest = Vec::new();
+        Target::Internet { host: name(&"a".repeat(MAX_DOMAIN_LEN)), port: 53 }.encode(&mut longest);
+        assert_eq!(longest.len(), Target::MAX_LEN);
+        assert_eq!(Target::decode(&[0x09, 1, 2]), Err(DecodeError::UnknownTarget(0x09)));
+        assert_eq!(Target::decode(&[0x03, 2, b'a', b' ', 0, 53]), Err(DecodeError::InvalidDomain(InvalidDomainName::Byte(b' '))));
     }
 
     #[test]
