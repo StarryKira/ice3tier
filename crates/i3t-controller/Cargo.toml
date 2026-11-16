@@ -10,6 +10,8 @@ description = "ice3tier 的 controller：存储、注册、访问规则编译、
 [dependencies]
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "query"] }
 base64.workspace = true
+hyper = { version = "1.12.0", features = ["http1", "server"] }
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
 i3t-crypto = { path = "../i3t-crypto" }
 i3t-metrics = { path = "../i3t-metrics" }
 i3t-model = { path = "../i3t-model" }
@@ -24,6 +26,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
+tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.7.1", default-features = false, features = ["fs"] }
 tracing.workspace = true
 ureq = { version = "3.5.2", default-features = false, features = ["rustls"] }
@@ -33,4 +36,3 @@ workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-tower = { version = "0.5.3", features = ["util"] }

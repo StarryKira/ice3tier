@@ -379,4 +379,6 @@ async fn updates_routes_and_paths_can_be_driven_from_the_command_line() {
     assert!(path.contains("没有数据") && path.contains("这是它最近上报的"), "{path}");
     assert_eq!(fixture.json(&["path", "node-2", "laptop"]).await["forward"]["source"], "report");
     assert!(fixture.fails(&["path", "laptop", "laptop"]).await.contains("invalid_request"));
+    assert!(fixture.ok(&["backbone"]).await.contains("这个网络里还没有 relay"));
+    assert_eq!(fixture.json(&["backbone"]).await["relays"], serde_json::json!([]));
 }

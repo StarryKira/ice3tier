@@ -8,7 +8,7 @@
 //! | [`Controller`] | 存储之上的全部规则，和 netmap 的下发。节点协议和管理 API 都只是它的入口 |
 //! | [`node_server`]、[`frame`] | 节点协议的服务端和分帧 |
 //! | [`addr_server`] | 地址查询的应答 |
-//! | [`admin`] | 管理 API |
+//! | [`admin`] | 管理 API：路由和处理函数；HTTP 的服务端在 `admin_server` 里 |
 //! | [`release`] | 发布源：从哪里取发布清单和节点的更新包 |
 //! | [`webui`] | WebUI 的静态文件从哪里来 |
 //! | [`Server`] | 把上面这些装在一起跑 |
@@ -37,9 +37,11 @@
 pub mod access;
 pub mod addr_server;
 pub mod admin;
+mod admin_server;
 mod controller;
 mod error;
 pub mod frame;
+mod gate;
 pub mod netmap;
 pub mod node_server;
 mod reachability;

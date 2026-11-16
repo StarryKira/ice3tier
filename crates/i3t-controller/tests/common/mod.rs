@@ -310,7 +310,9 @@ impl Node {
                 | ToNode::UpdateCancel
                 | ToNode::PackageChunk { .. }
                 | ToNode::PackageUnavailable { .. }
-                | ToNode::RouteQuery { .. } => {}
+                | ToNode::RouteQuery { .. }
+                | ToNode::TryLater { .. }
+                | ToNode::BackboneQuery { .. } => {}
             }
             return Some(message);
         }

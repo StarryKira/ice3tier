@@ -16,7 +16,11 @@ use i3t_controller::webui::{Asset, WebUi};
 use i3t_controller::{Admitted, Controller, Timing, admin};
 use i3t_crypto::NodeKey;
 use i3t_model::admin as model;
-use i3t_model::control::{Declared, EnrollToken, Hello, Report, Route, RouteEntry, SelfUpdate, ToController, ToNode};
+use i3t_model::control::{
+    BackboneLink, BackboneRow, Declared, DirectKind, EnrollToken, Hello, PathCandidate, PathDetail, PathSegment, RelayState, Report, Route,
+    RouteAnswer, RouteEntry, RouteKind, SelfUpdate, ToController, ToNode,
+};
+use i3t_model::netmap::RoutingMode;
 use i3t_model::update::{FailureKind, UpdateStatus, UpdateTiming};
 use i3t_proto::{NodeId, PublicKey};
 use serde::de::DeserializeOwned;
@@ -40,7 +44,19 @@ struct Member {
     id: NodeId,
     key: PublicKey,
     session: Admitted,
-    _inbox: mpsc::Receiver<ToNode>,
+    inbox: mpsc::Receiver<ToNode>,
+}
+
+impl Member {
+    /// 等 controller 发来的下一条查询（路由的或者骨干矩阵的），跳过别的消息。
+    async fn next_query(&mut self) -> ToNode {
+        loop {
+            let message = tokio::time::timeout(common::PATIENCE, self.inbox.recv()).await.unwrap().unwrap();
+            if matches!(message, ToNode::RouteQuery { .. } | ToNode::BackboneQuery { .. }) {
+                return message;
+            }
+        }
+    }
 }
 
 impl Api {
@@ -126,7 +142,7 @@ impl Api {
             let report = Report { update: Some(UpdateStatus::Idle), ..Report::default() };
             self.controller.handle(session, REMOTE, ToController::Report(report)).unwrap();
         }
-        Member { id: session.node, key, session, _inbox: inbox }
+        Member { id: session.node, key, session, inbox }
     }
 }
 
@@ -789,7 +805,8 @@ async fn the_route_matrix_and_the_path_between_two_nodes_are_served() {
         json!({
             "from": { "id": b.id.get(), "name": "node-2", "virtual_ip": "10.66.0.2" },
             "to": { "id": a.id.get(), "name": "node-1", "virtual_ip": "10.66.0.1" },
-            "source": "none", "route": null, "rtt_ms": null, "age_secs": null, "since": null
+            "source": "none", "route": null, "rtt_ms": null, "age_secs": null, "since": null,
+            "direct": null, "relay_leg": null, "mode": null, "reason": null, "candidates": null
         })
     );
 
@@ -801,6 +818,96 @@ async fn the_route_matrix_and_the_path_between_two_nodes_are_served() {
     let no_query = api.fails(Method::GET, &format!("/networks/{}/path", network.id), None, StatusCode::BAD_REQUEST).await;
     assert_eq!(no_query.code, model::ErrorCode::InvalidRequest);
     api.fails(Method::GET, "/networks/99/routes", None, StatusCode::NOT_FOUND).await;
+}
+
+#[tokio::test]
+async fn path_candidates_route_details_and_the_backbone_are_served() {
+    let mut api = Api::new();
+    let network = api.network("home").await;
+    let modern = modern_hello("0.2.0", Declared::default());
+    let mut relay = api.join_as(network.id, &Hello { declared: CAN_DO_ALL, ..modern.clone() }).await;
+    let mut a = api.join_as(network.id, &modern).await;
+    let mut b = api.join_as(network.id, &modern).await;
+    let settings = model::RelaySettings { udp: vec!["203.0.113.7:20330".parse().unwrap()], ..model::RelaySettings::default() };
+    api.controller.enable_relay(network.id, relay.id, settings).unwrap();
+    let direct = Route::Direct { addr: "198.51.100.9:20330".parse().unwrap() };
+    let report = Report {
+        routes: vec![RouteEntry { peer: b.id, route: direct.clone(), rtt_ms: Some(12) }],
+        route_kinds: vec![RouteKind { peer: b.id, direct: Some(DirectKind::Lan), relay_leg: None }],
+        routes_full: true,
+        ..Report::default()
+    };
+    api.controller.handle(a.session, REMOTE, ToController::Report(report)).unwrap();
+
+    // 路由表和矩阵里有直连的类型。
+    let (_, table) = api.call(Method::GET, &format!("/networks/{}/nodes/{}/routes", network.id, a.id), None).await;
+    assert_eq!((&table["routes"][0]["direct"], &table["routes"][0]["relay_leg"]), (&json!("lan"), &json!(null)));
+    let (_, matrix) = api.call(Method::GET, &format!("/networks/{}/routes", network.id), None).await;
+    assert_eq!(matrix["entries"][0]["direct"], json!("lan"));
+
+    // 路径：a 现答，带着候选路径；b 只答路，不带细节（像旧版本的节点那样）。
+    let request = api.request(Method::GET, &format!("/networks/{}/path?from={}&to={}", network.id, a.id, b.id), None);
+    let asking = tokio::spawn(api.router.clone().oneshot(request));
+    let ToNode::RouteQuery { request: to_a, .. } = a.next_query().await else { panic!("a 应该被问到路由") };
+    let ToNode::RouteQuery { request: to_b, .. } = b.next_query().await else { panic!("b 应该被问到路由") };
+    let segment = PathSegment { from: a.id, to: b.id, rtt_us: 12_400, jitter_us: 300, loss_permille: 1 };
+    let detail = PathDetail {
+        mode: Some(RoutingMode::DirectFirst),
+        direct: Some(DirectKind::Lan),
+        relay_leg: None,
+        reason: "直连可用".to_owned(),
+        candidates: vec![PathCandidate { route: direct.clone(), cost_us: 13_600, legs: vec![segment], load_percent: 0, current: true }],
+    };
+    let answer = RouteAnswer { peer: b.id, route: Some(direct.clone()), rtt_ms: Some(12), since: None, detail: Some(detail) };
+    api.controller.handle(a.session, REMOTE, ToController::RouteAnswer { request: to_a, answer }).unwrap();
+    let plain = RouteAnswer { peer: a.id, route: Some(Route::None), rtt_ms: None, since: None, detail: None };
+    api.controller.handle(b.session, REMOTE, ToController::RouteAnswer { request: to_b, answer: plain }).unwrap();
+    let response = asking.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let view: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let forward = &view["forward"];
+    assert_eq!((&forward["mode"], &forward["direct"], &forward["reason"]), (&json!("direct_first"), &json!("lan"), &json!("直连可用")));
+    assert_eq!(
+        forward["candidates"],
+        json!([{
+            "route": { "via": "direct", "addr": "198.51.100.9:20330" }, "cost_us": 13_600, "load_percent": 0, "current": true,
+            "legs": [{ "from": a.id.get(), "to": b.id.get(), "rtt_us": 12_400, "jitter_us": 300, "loss_permille": 1 }]
+        }])
+    );
+    let reverse = &view["reverse"];
+    assert_eq!(
+        (&reverse["source"], &reverse["mode"], &reverse["candidates"]),
+        (&json!("query"), &json!(null), &json!(null)),
+        "不说细节的节点：不知道"
+    );
+
+    // 骨干矩阵：问在线的节点，relay 的那一行从挂靠它的节点来。
+    let request = api.request(Method::GET, &format!("/networks/{}/backbone", network.id), None);
+    let asking = tokio::spawn(api.router.clone().oneshot(request));
+    let row = BackboneRow {
+        relay: relay.id,
+        state: RelayState::Draining,
+        load_percent: 40,
+        age_ms: 900,
+        links: vec![BackboneLink { to: relay.id, rtt_ms: None, jitter_ms: 0, loss_permille: 1000 }],
+    };
+    for (member, rows) in [(&mut relay, Vec::new()), (&mut a, vec![row]), (&mut b, Vec::new())] {
+        let ToNode::BackboneQuery { request } = member.next_query().await else { panic!("应该被问到骨干矩阵") };
+        api.controller.handle(member.session, REMOTE, ToController::BackboneAnswer { request, rows }).unwrap();
+    }
+    let response = asking.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let view: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(
+        view["relays"],
+        json!([{
+            "relay": { "id": relay.id.get(), "name": "node-1", "virtual_ip": "10.66.0.1" }, "online": true, "state": "draining",
+            "load_percent": 40, "age_ms": 900, "reported_by": a.id.get(),
+            "links": [{ "to": relay.id.get(), "rtt_ms": null, "jitter_ms": 0, "loss_permille": 1000 }]
+        }])
+    );
+    assert_eq!(view["answered"].as_array().map(Vec::len), Some(3));
+    api.fails(Method::GET, "/networks/99/backbone", None, StatusCode::NOT_FOUND).await;
 }
 
 #[tokio::test]

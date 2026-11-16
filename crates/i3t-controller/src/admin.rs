@@ -70,6 +70,7 @@ pub fn router(controller: Arc<Controller>, webui: &WebUi) -> Router {
         .route(&format!("{network}/tags/rename"), post(rename_tag))
         .route(&format!("{network}/routes"), get(route_matrix))
         .route(&format!("{network}/path"), get(path))
+        .route(&format!("{network}/backbone"), get(backbone))
         .route(&format!("{network}/tokens"), get(list_tokens).post(create_token))
         .route(&format!("{network}/tokens/{{id}}"), axum::routing::delete(delete_token))
         .route(&format!("{network}/rules"), get(list_rules).post(create_rule))
@@ -333,6 +334,11 @@ async fn route_matrix(State(app): State<App>, Path(network): Path<NetworkId>) ->
 
 async fn path(State(app): State<App>, Path(network): Path<NetworkId>, Query(query): Query<CheckQuery>) -> Reply {
     let view = app.path(network, query.from, query.to).await?;
+    Ok(Json(view).into_response())
+}
+
+async fn backbone(State(app): State<App>, Path(network): Path<NetworkId>) -> Reply {
+    let view = app.backbone(network).await?;
     Ok(Json(view).into_response())
 }
 

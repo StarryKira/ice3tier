@@ -140,7 +140,9 @@ impl Controller {
         self.wake_if_needed(&inner);
         outcome.map_err(|failure| match failure {
             EnrollFailure::Rejected(rejection) => {
-                tracing::warn!(key = ?key, %remote, reason = %rejection, "拒绝注册");
+                if let Some(suppressed) = self.refusal_log.allow() {
+                    tracing::warn!(key = ?key, %remote, reason = %rejection, suppressed, "拒绝注册");
+                }
                 rejection
             }
             EnrollFailure::Internal(err) => {

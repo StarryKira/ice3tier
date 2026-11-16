@@ -6,7 +6,7 @@
 //!   不满足的节点从不下发，管理员强制也不行。
 //! - **等节点先上报**：节点连上来之后，要等它的第一次上报到了才给它下发。上报里有它的更新状态，
 //!   它可能正带着"这个版本在我这里失败过"回来；不等的话会先把同一个版本又发给它一遍。
-//! - **自动更新**（时机是"空闲时"）：开关开着，这个版本没有被暂停，这个节点没有在这个版本上失败过。
+//! - **自动更新**（时机是"空闲时"）：开关开着，这个版本在节点所在的网络里没有被暂停，这个节点没有在这个版本上失败过。
 //!   节点自己等到没有流才换程序。
 //! - **强制更新**（"立刻"或者"排空后"）：管理员点的，不看开关、暂停和以前的失败。
 //! - **包**：要更新的节点所用平台的包取回来之前不下发，先去取。
@@ -96,7 +96,7 @@ impl Inner {
         let forced = self.updates.forced.get(&node.id);
         let failed_this_version =
             node.update_failure.as_ref().is_some_and(|failure| failure.version == version && failure.kind == FailureKind::VersionRejected);
-        let automatic = self.updates.auto_update() && !self.updates.is_paused(&version) && !failed_this_version;
+        let automatic = self.updates.auto_update() && !self.updates.is_paused_in(&version, node.network) && !failed_this_version;
         let wanted = forced.map(|forced| forced.timing).or(automatic.then_some(UpdateTiming::Idle)).filter(|_| can_be_ordered);
 
         let waiting = wanted.and_then(|timing| {
@@ -159,6 +159,7 @@ impl Inner {
         }
         tracing::info!(node = %node.id, name = %node.name, running = %node.version, %version, ?timing, relay = node.relay.is_some(), "给节点下发更新指令");
         self.counters.orders_sent += 1;
+        self.updates.offered.insert(node.id, version.clone());
         if let Some(live) = self.live.get_mut(&node.id) {
             live.order = Some(Order { version, timing, failed: false });
         }

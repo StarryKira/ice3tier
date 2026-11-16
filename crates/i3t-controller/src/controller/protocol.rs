@@ -53,7 +53,9 @@ impl Controller {
         let outcome = match known {
             Ok(Some(node)) => inner.admit(node, Joined { hello, remote, outbox, enrolling: false }),
             Ok(None) => {
-                tracing::warn!(key = ?key, %remote, "拒绝连接：这把公钥没有注册");
+                if let Some(suppressed) = self.refusal_log.allow() {
+                    tracing::warn!(key = ?key, %remote, suppressed, "拒绝连接：这把公钥没有注册");
+                }
                 return Err(Rejection::UnknownKey);
             }
             Err(err) => Err(err),
@@ -84,6 +86,10 @@ impl Controller {
             }
             ToController::RouteAnswer { request, answer } => {
                 inner.route_answered(session.node, request, answer);
+                Ok(())
+            }
+            ToController::BackboneAnswer { request, rows } => {
+                inner.backbone_answered(session.node, request, rows);
                 Ok(())
             }
             ToController::Report(report) => inner.report(session.node, report),
@@ -250,15 +256,9 @@ impl Inner {
         node.version = clip(&hello.version);
         node.hostname = hello.hostname.chars().filter(|ch| !ch.is_control()).take(MAX_HOSTNAME).collect();
         node.self_update = hello.self_update;
-        // 它已经在跑那个失败过的版本（或者更新的）了：多半是手动换的程序。那条失败不再有意义。
-        let outgrown = node
-            .update_failure
-            .as_ref()
-            .is_some_and(|failure| node.version.parse::<Version>().is_ok_and(|running| running >= failure.version));
-        if outgrown {
-            node.update_failure = None;
-            self.store.set_node_update_failure(node.id, None)?;
-        }
+        // 节点自报的版本号不清它的失败记录，哪怕它说自己已经在跑那个版本（或者更新的）：否则它报一个高版本、
+        // 再报回原来的版本，就能把同一次失败报成"新的"，让管理员已经继续的版本再被暂停一次。
+        // 已经用不上的失败记录在管理 API 里不显示（见 `Inner::node_update`），管理员点"立即更新"时清掉。
 
         let mut whole_network = false;
         let mut affected = BTreeSet::from([node.id]);
@@ -315,7 +315,7 @@ impl Inner {
         self.usage_reported(&node, UsageReport { run, credentials, exit, exits, listeners, forwards })?;
         let report =
             Report { credentials: Vec::new(), exits: Vec::new(), listeners: Vec::new(), forwards: Vec::new(), exit: None, ..report };
-        self.routes_reported(id, report.routes, report.routes_full);
+        self.routes_reported(id, report.routes, report.route_kinds, report.routes_full);
         if let Some(status) = report.update {
             self.update_reported(&node, status)?;
         }

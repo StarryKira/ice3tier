@@ -91,10 +91,12 @@ pub enum Command {
     /// 节点程序的更新：设置、查发布源、让节点立即更新
     #[command(subcommand)]
     Update(UpdateCommand),
-    /// A 和 B 之间两个方向现在各走哪条路。先问两个节点，问不到的方向用它最近上报的
+    /// A 和 B 之间两个方向现在各走哪条路，以及发送方考虑过的候选路径和代价。先问两个节点，问不到的方向用它最近上报的
     Path { a: String, b: String },
     /// 整个网络的路由矩阵：每个节点到它的各个对端现在怎么走，取自各节点最近的上报
     Routes,
+    /// relay 之间的延迟矩阵：每个 relay 的状态、负载，和它到别的 relay 的延迟、抖动、丢包。现问几个在线的节点
+    Backbone,
 }
 
 #[derive(Subcommand)]
@@ -730,6 +732,7 @@ mod tests {
         ));
         assert!(matches!(parse(&["path", "a", "b"]), Command::Path { .. }));
         assert!(matches!(parse(&["routes"]), Command::Routes));
+        assert!(matches!(parse(&["backbone"]), Command::Backbone));
         assert!(Cli::try_parse_from(["i3tctl", "update", "set", "--auto", "maybe"]).is_err());
     }
 

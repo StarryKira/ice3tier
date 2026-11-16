@@ -9,8 +9,11 @@
 //! 查发布源和取包都要走网络，不能拿着 controller 的锁做。所以这两件事是"拿锁取出要做什么 → 放开锁去做 → 再拿锁记下结果"三段，
 //! 入口是 [`Controller::check_release`] 和 [`Controller::fetch_packages`]，由后台任务和管理 API 在阻塞线程上调用。
 //!
-//! 设置、已知的发布和被暂停的版本存在数据库里，重启之后还在。管理员强制的更新和 relay 的轮次只在内存里：
+//! 设置、已知的发布和被暂停的版本存在数据库里，重启之后还在。管理员强制的更新、relay 的轮次和下发过的版本只在内存里：
 //! controller 重启之后，还没有做完的强制更新要重新点。
+//!
+//! 暂停只信得过的失败：节点报的失败只有在 controller 确实让它装过这个版本时才暂停，并且只暂停它所在的网络。
+//! 见 [`Inner::version_rejected`]。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -66,7 +69,7 @@ struct StoredRelease {
     checked_at: Timestamp,
 }
 
-/// 一个被暂停自动更新的版本，和导致暂停的那次失败。
+/// 一个网络里被暂停自动更新的版本，和导致暂停的那次失败。同一个版本在不同的网络里各有各的一条。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Paused {
     pub(crate) version: Version,
@@ -105,6 +108,11 @@ pub(crate) struct Updates {
     pub(crate) forced: BTreeMap<NodeId, Forced>,
     /// 每个网络里现在轮到哪个 relay 更新。
     pub(crate) relay_turns: BTreeMap<NetworkId, Turn>,
+    /// 这次运行以来给各个节点下发过的版本，自动的和强制的都算。节点说某个版本不能用时，只有这里有记录才暂停自动更新。
+    ///
+    /// 只在内存里：controller 在下发和节点报告失败之间重启的话，这次失败不暂停，只记在节点头上。这时同一网络里下一个
+    /// 失败的节点会让它暂停，代价是多一个节点试装一次（失败的节点会自己换回旧程序）。
+    pub(crate) offered: BTreeMap<NodeId, Version>,
     /// 到这个时刻要再看一遍该让谁更新（等 relay 重新上线之后站稳）。
     pub(crate) next_rollout: Option<Instant>,
     /// 设置变了之后要尽快查一次发布源。
@@ -125,6 +133,7 @@ impl Updates {
             packages: BTreeMap::new(),
             forced: BTreeMap::new(),
             relay_turns: BTreeMap::new(),
+            offered: BTreeMap::new(),
             next_rollout: None,
             check_requested: false,
         };
@@ -160,13 +169,20 @@ impl Updates {
         self.release.as_ref().filter(|release| release.manifest.min_controller <= self.version)
     }
 
+    /// 这个版本是不是在某个网络里被暂停着。
     pub(crate) fn is_paused(&self, version: &Version) -> bool {
         self.paused.iter().any(|paused| paused.version == *version)
+    }
+
+    /// 这个版本在 `network` 里的自动更新是不是被暂停了。
+    pub(crate) fn is_paused_in(&self, version: &Version, network: NetworkId) -> bool {
+        self.paused.iter().any(|paused| paused.version == *version && paused.network == network)
     }
 
     /// 一个节点不存在了。
     pub(super) fn forget(&mut self, node: NodeId) {
         self.forced.remove(&node);
+        self.offered.remove(&node);
         self.relay_turns.retain(|_, turn| turn.holder != node);
     }
 
@@ -327,7 +343,7 @@ impl Controller {
         self.release_wake.notified().await;
     }
 
-    /// 继续一个被暂停的版本的自动更新。失败过的那个节点仍然不会被自动更新到这个版本。
+    /// 继续一个被暂停的版本的自动更新，所有网络里的都继续。失败过的那些节点仍然不会被自动更新到这个版本。
     ///
     /// # Errors
     ///
@@ -480,6 +496,8 @@ impl Inner {
                     self.store.log(now, None, "update.release", &format!("发布源上最新的正式版是 {version}"))?;
                     self.updates.release = Some(release.clone());
                     self.updates.packages.clear();
+                    // 只有当前的发布会被暂停，别的版本的下发记录用不上了。
+                    self.updates.offered.retain(|_, offered| *offered == version);
                     if let Some(cache_dir) = &self.updates.cache_dir {
                         release::prune_cache(cache_dir, &version);
                     }
@@ -578,7 +596,15 @@ impl Inner {
         self.roll_out()
     }
 
-    /// 节点说某个版本在它那台机器上不能用：记在它头上，并暂停这个版本对其余节点的自动更新。
+    /// 节点说某个版本在它那台机器上不能用：记在它头上；信得过的话，暂停这个版本在它所在网络里的自动更新。
+    ///
+    /// 一个节点的一句话影响不了别的网络，也不能一再生效：
+    ///
+    /// - controller 这次运行以来确实让它装过这个版本，它的失败才暂停自动更新。没让它装过的节点说什么都只记在它自己头上，
+    ///   另记一条操作记录给管理员看；
+    /// - 暂停只在它所在的网络生效，别的网络照常更新；
+    /// - 同一个节点在同一个版本上只失败一次：记录在 controller 上，节点自报的版本号清不掉，管理员点"立即更新"才清。
+    ///   所以管理员继续之后，同一个节点不能把这个版本再暂停一次。
     fn version_rejected(&mut self, node: &NodeRecord, version: &Version, reason: &str) -> Result<(), Error> {
         self.order_failed(node.id, Some(version));
         // 节点每次上报都带着同一条失败，重启之后也还带着。记过的就不是新闻，不能因此把管理员已经继续的版本再暂停一次。
@@ -593,8 +619,17 @@ impl Inner {
         self.counters.version_failures += 1;
         tracing::warn!(node = %node.id, name = %node.name, %version, %reason, "节点说这个版本在它那里不能用，以后不再自动让它装这个版本");
 
+        let offered = self.updates.offered.get(&node.id) == Some(version);
+        if !offered {
+            tracing::warn!(node = %node.id, name = %node.name, %version, "controller 没有让这个节点装过这个版本，它的失败不暂停自动更新");
+            let detail =
+                format!("节点 {} 说版本 {version} 在它那里不能用（{reason}）；controller 没有让它装过这个版本，不因此暂停", node.name);
+            self.store.log_refs(now, Some(node.network), "update.failure", &detail, &[i3t_model::admin::LogRef::node(node.id)])?;
+            return Ok(());
+        }
+        self.updates.offered.remove(&node.id);
         let is_current = self.updates.release.as_ref().is_some_and(|release| release.manifest.version == *version);
-        if is_current && !self.updates.is_paused(version) {
+        if is_current && !self.updates.is_paused_in(version, node.network) {
             self.updates.paused.push(Paused {
                 version: version.clone(),
                 node: node.id,
@@ -603,9 +638,9 @@ impl Inner {
                 at: now,
             });
             write_meta(&self.store, PAUSED_META, &self.updates.paused)?;
-            let detail = format!("节点 {} 更新到 {version} 失败（{reason}），暂停这个版本的自动更新", node.name);
+            let detail = format!("节点 {} 更新到 {version} 失败（{reason}），暂停这个版本在这个网络里的自动更新", node.name);
             self.store.log_refs(now, Some(node.network), "update.pause", &detail, &[i3t_model::admin::LogRef::node(node.id)])?;
-            tracing::warn!(%version, node = %node.id, "暂停这个版本对其余节点的自动更新，等管理员看过之后继续");
+            tracing::warn!(%version, node = %node.id, network = %node.network, "暂停这个版本在这个网络里的自动更新，等管理员看过之后继续");
         }
         Ok(())
     }
@@ -673,7 +708,11 @@ impl Inner {
             status: live.and_then(|live| live.update.clone()).unwrap_or_default(),
             ordered: order.map(|order| UpdateOrder { version: order.version.clone(), timing: order.timing }),
             waiting: plan.waiting,
-            failure: node.update_failure.clone(),
+            // 节点已经在跑失败过的那个版本（或者更新的）了，多半是手动换的程序：那条失败不再值得显示。记录本身留着，见 `apply_hello`。
+            failure: node
+                .update_failure
+                .clone()
+                .filter(|failure| !node.version.parse::<Version>().is_ok_and(|running| running >= failure.version)),
         }
     }
 

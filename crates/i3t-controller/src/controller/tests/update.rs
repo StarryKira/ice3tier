@@ -699,6 +699,10 @@ fn settings_the_known_release_pauses_and_failures_survive_a_restart() {
     let mut lab = Lab::around(controller);
     let network = lab.network("home").id;
     let node = lab.join_as(network, &modern_hello(OLD));
+    // 自动更新关着：管理员让它立即更新，它装失败了。只有 controller 让它装过的版本，它的失败才暂停自动更新。
+    node.report_update(&lab.controller, UpdateStatus::Idle);
+    lab.controller.force_update(network, node.id, UpdateTiming::Now).unwrap();
+    lab.controller.fetch_packages().unwrap();
     node.report_update(&lab.controller, failed(NEW, FailureKind::VersionRejected));
     let before = lab.controller.update_overview().unwrap();
     assert_eq!(before.paused.len(), 1);
@@ -726,6 +730,80 @@ fn settings_the_known_release_pauses_and_failures_survive_a_restart() {
     let store = Store::open(&dir.path().join("controller.db")).unwrap();
     let controller = Controller::new(store, NodeKey::generate().unwrap(), "ctl.example.com:20331".to_owned(), Timing::default()).unwrap();
     assert_eq!(controller.update_overview().unwrap().release, None);
+}
+
+#[test]
+fn a_failure_for_a_version_the_node_was_never_given_does_not_pause_anything_but_is_on_record() {
+    let mut fleet = Fleet::new();
+    fleet.release();
+    let mut waiting = fleet.node(OLD);
+    assert!(fleet.last_order(&mut waiting).is_some());
+    // 已经是新版本的节点没有被要求装它，却说它在自己那里不能用。
+    let liar = fleet.node(NEW);
+    liar.report_update(fleet.controller(), failed(NEW, FailureKind::VersionRejected));
+
+    assert!(fleet.controller().update_overview().unwrap().paused.is_empty(), "一个没让它装过这个版本的节点暂停不了更新");
+    waiting.receive();
+    assert_eq!(waiting.cancels, 0, "别的节点照常更新");
+    let log = fleet.controller().oplog(10).unwrap();
+    let entry = log.iter().find(|entry| entry.action == "update.failure").expect("这次报告记进了操作记录");
+    assert!(entry.detail.contains("没有让它装过"), "{}", entry.detail);
+    assert_eq!(
+        fleet.controller().lock().store.node(liar.id).unwrap().unwrap().update_failure.map(|failure| failure.version),
+        Some(version(NEW))
+    );
+}
+
+#[test]
+fn a_pause_holds_only_in_the_network_of_the_node_that_failed() {
+    let mut fleet = Fleet::new();
+    fleet.release();
+    let other = fleet.lab.network("lab").id;
+    let mut victim = fleet.node(OLD);
+    let mut elsewhere = fleet.lab.join_as(other, &modern_hello(OLD));
+    fleet.first_report(&mut elsewhere, UpdateStatus::Idle);
+    assert!(fleet.last_order(&mut victim).is_some() && fleet.last_order(&mut elsewhere).is_some());
+
+    victim.report_update(fleet.controller(), failed(NEW, FailureKind::VersionRejected));
+    let paused = fleet.controller().update_overview().unwrap().paused;
+    assert_eq!(
+        paused.iter().map(|paused| (paused.version.clone(), paused.network)).collect::<Vec<_>>(),
+        [(version(NEW), Some(fleet.network))]
+    );
+    elsewhere.receive();
+    assert_eq!(elsewhere.cancels, 0, "另一个网络里的节点不受这次失败影响");
+    let mut late = fleet.lab.join_as(other, &modern_hello(OLD));
+    fleet.first_report(&mut late, UpdateStatus::Idle);
+    assert!(fleet.last_order(&mut late).is_some(), "另一个网络里新连上来的节点照常更新");
+    let mut late_here = fleet.node(OLD);
+    assert_eq!(fleet.last_order(&mut late_here), None, "失败的节点所在的网络暂停了");
+
+    fleet.controller().resume_update(&version(NEW)).unwrap();
+    assert!(fleet.controller().update_overview().unwrap().paused.is_empty());
+    assert!(fleet.last_order(&mut late_here).is_some());
+}
+
+#[test]
+fn a_node_cannot_wipe_its_own_failure_to_pause_the_version_again_after_a_resume() {
+    let mut fleet = Fleet::new();
+    fleet.release();
+    let mut node = fleet.node(OLD);
+    assert!(fleet.last_order(&mut node).is_some());
+    node.report_update(fleet.controller(), failed(NEW, FailureKind::VersionRejected));
+    assert_eq!(fleet.controller().update_overview().unwrap().paused.len(), 1);
+    fleet.controller().resume_update(&version(NEW)).unwrap();
+    let mut other = fleet.node(OLD);
+    assert!(fleet.last_order(&mut other).is_some());
+
+    // 它先说自己已经是新版本，再换回旧版本带着同一个版本的失败回来。
+    let node = fleet.restarted(&node, &modern_hello(NEW), UpdateStatus::Idle);
+    assert_eq!(fleet.update_of(&node).failure, None, "已经用不上的失败不显示");
+    let mut node = fleet.restarted(&node, &modern_hello(OLD), failed(NEW, FailureKind::VersionRejected));
+    assert!(fleet.controller().update_overview().unwrap().paused.is_empty(), "同一个节点在同一个版本上只能让它暂停一次");
+    assert_eq!(fleet.last_order(&mut node), None, "它自己仍然不会被自动更新到这个版本");
+    other.receive();
+    assert_eq!(other.cancels, 0);
+    assert_eq!(fleet.update_of(&node).failure.map(|failure| failure.version), Some(version(NEW)), "失败记录还在，管理员看得到");
 }
 
 #[test]

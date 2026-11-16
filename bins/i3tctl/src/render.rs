@@ -1,13 +1,15 @@
 //! 把管理 API 的应答打印成给人看的样子。`--json` 时不经过这里。
 
 use i3t_model::admin::{
-    AccessCheck, AccessGraph, CreatedCredential, CreatedEnrollToken, Credential, Direction, EnrollTokenInfo, ExitView, ForcedUpdates,
-    Forward, ListenStatus, Listener, LogEntry, Network, Node, NodeAccess, NodeDetail, NodeListeners, NodeRef, NodeUpdate, Overview,
-    PairSetting, PathLeg, PathSource, PathView, RenamedTag, RouteMatrix, RouteTable, Rule, Status, Timestamp, UpdateOverview, UpdateWait,
+    AccessCheck, AccessGraph, BackboneView, CreatedCredential, CreatedEnrollToken, Credential, Direction, EnrollTokenInfo, ExitView,
+    ForcedUpdates, Forward, ListenStatus, Listener, LogEntry, Network, Node, NodeAccess, NodeDetail, NodeListeners, NodeRef, NodeUpdate,
+    Overview, PairSetting, PathLeg, PathSource, PathView, RenamedTag, RouteMatrix, RouteTable, Rule, Status, Timestamp, UpdateOverview,
+    UpdateWait,
 };
-use i3t_model::control::{ListenState, Route};
+use i3t_model::control::{DirectKind, LegTransport, ListenState, PathSegment, Route};
 use i3t_model::netmap::DefaultAction;
 use i3t_model::update::{FailureKind, UpdateStatus, UpdateTiming};
+use i3t_proto::NodeId;
 
 use crate::table::{NONE, Table, label, list, optional, yes_no};
 
@@ -270,12 +272,28 @@ pub fn routes(table: &RouteTable) {
         println!("节点 {} 不在线，没有路由表", table.node.name);
         return;
     }
-    let mut rows = Table::new(&["PEER", "VIRTUAL-IP", "VIA", "RTT-MS", "DETAIL"]);
+    let mut rows = Table::new(&["PEER", "VIRTUAL-IP", "VIA", "RTT-MS", "KIND", "DETAIL"]);
     for entry in &table.routes {
         let (via, detail) = route_cells(&entry.route);
-        rows.row(vec![entry.peer.name.clone(), entry.peer.virtual_ip.to_string(), via.to_owned(), optional(entry.rtt_ms), detail]);
+        rows.row(vec![
+            entry.peer.name.clone(),
+            entry.peer.virtual_ip.to_string(),
+            via.to_owned(),
+            optional(entry.rtt_ms),
+            kind_cell(&entry.route, entry.direct, entry.relay_leg),
+            detail,
+        ]);
     }
     rows.print();
+}
+
+/// 一条路的细节在表格里的一格：直连是怎么建立的，或者到第一个 relay 的那一段走 UDP 还是 TCP。节点没有说时是短横。
+fn kind_cell(route: &Route, direct: Option<DirectKind>, relay_leg: Option<LegTransport>) -> String {
+    match route {
+        Route::Direct { .. } => optional(direct.map(|kind| label(&kind))),
+        Route::Relay { .. } => optional(relay_leg.map(|leg| label(&leg))),
+        Route::None => NONE.to_owned(),
+    }
 }
 
 /// 一条路在表格里的两格：走法，和具体的地址或者经过的 relay。
@@ -289,7 +307,7 @@ fn route_cells(route: &Route) -> (&'static str, String) {
 
 pub fn route_matrix(matrix: &RouteMatrix) {
     let name = |id| matrix.nodes.iter().find(|node| node.node.id == id).map_or_else(|| format!("#{id}"), |node| node.node.name.clone());
-    let mut rows = Table::new(&["FROM", "TO", "VIA", "RTT-MS", "AGE-S", "STALE", "DETAIL"]);
+    let mut rows = Table::new(&["FROM", "TO", "VIA", "RTT-MS", "AGE-S", "STALE", "KIND", "DETAIL"]);
     for entry in &matrix.entries {
         let (via, detail) = route_cells(&entry.route);
         rows.row(vec![
@@ -299,6 +317,7 @@ pub fn route_matrix(matrix: &RouteMatrix) {
             optional(entry.rtt_ms),
             entry.age_secs.to_string(),
             yes_no(entry.stale),
+            kind_cell(&entry.route, entry.direct, entry.relay_leg),
             detail,
         ]);
     }
@@ -311,9 +330,10 @@ pub fn route_matrix(matrix: &RouteMatrix) {
 }
 
 pub fn path(view: &PathView) {
-    let mut rows = Table::new(&["FROM", "TO", "VIA", "RTT-MS", "SOURCE", "AGE-S", "DETAIL"]);
+    let mut rows = Table::new(&["FROM", "TO", "VIA", "RTT-MS", "SOURCE", "AGE-S", "KIND", "DETAIL"]);
     for leg in [&view.forward, &view.reverse] {
         let (via, detail) = leg.route.as_ref().map_or((NONE, NONE.to_owned()), route_cells);
+        let kind = leg.route.as_ref().map_or_else(|| NONE.to_owned(), |route| kind_cell(route, leg.direct, leg.relay_leg));
         rows.row(vec![
             leg.from.name.clone(),
             leg.to.name.clone(),
@@ -321,6 +341,7 @@ pub fn path(view: &PathView) {
             optional(leg.rtt_ms),
             label(&leg.source),
             optional(leg.age_secs),
+            kind,
             detail,
         ]);
     }
@@ -329,6 +350,93 @@ pub fn path(view: &PathView) {
         if let Some(note) = path_note(leg) {
             println!("{} → {}：{note}", leg.from.name, leg.to.name);
         }
+    }
+    for leg in [&view.forward, &view.reverse] {
+        path_candidates(view, leg);
+    }
+}
+
+/// 发送方考虑过的候选路径：每条一行，现在走的那条打星号。节点没有说的时候不打印。
+fn path_candidates(view: &PathView, leg: &PathLeg) {
+    let Some(candidates) = &leg.candidates else { return };
+    let mode = optional(leg.mode.as_ref().map(label));
+    println!("\n{} → {} 的候选路径（选路模式 {mode}）：", leg.from.name, leg.to.name);
+    if let Some(reason) = leg.reason.as_deref().filter(|reason| !reason.is_empty()) {
+        println!("  为什么是现在这条：{reason}");
+    }
+    if candidates.is_empty() {
+        println!("  还没有任何测量值");
+        return;
+    }
+    let name = |id: NodeId| {
+        [&view.forward.from, &view.forward.to]
+            .into_iter()
+            .find(|node| node.id == id)
+            .map_or_else(|| format!("#{id}"), |node| node.name.clone())
+    };
+    let mut rows = Table::new(&["", "VIA", "COST-MS", "LOAD%", "LEGS"]);
+    for candidate in candidates {
+        let (via, detail) = route_cells(&candidate.route);
+        let legs = candidate.legs.iter().map(|segment| leg_text(segment, &name)).collect::<Vec<_>>().join("；");
+        rows.row(vec![
+            if candidate.current { "*" } else { "" }.to_owned(),
+            format!("{via} {detail}"),
+            millis(candidate.cost_us),
+            candidate.load_percent.to_string(),
+            legs,
+        ]);
+    }
+    rows.print();
+}
+
+/// 一段的测量值：`laptop→#9 20.4ms ±0.5 丢 1.2%`。
+fn leg_text(segment: &PathSegment, name: &impl Fn(NodeId) -> String) -> String {
+    let loss = format!("{}.{}%", segment.loss_permille / 10, segment.loss_permille % 10);
+    format!(
+        "{}→{} {}ms ±{} 丢 {loss}",
+        name(segment.from),
+        name(segment.to),
+        millis(u64::from(segment.rtt_us)),
+        millis(u64::from(segment.jitter_us))
+    )
+}
+
+/// 微秒写成带一位小数的毫秒。
+fn millis(micros: u64) -> String {
+    format!("{}.{}", micros / 1000, micros % 1000 / 100)
+}
+
+pub fn backbone(view: &BackboneView) {
+    if view.relays.is_empty() {
+        println!("这个网络里还没有 relay");
+        return;
+    }
+    let name = |id: NodeId| {
+        view.relays.iter().find(|relay| relay.relay.id == id).map_or_else(|| format!("#{id}"), |relay| relay.relay.name.clone())
+    };
+    let mut rows = Table::new(&["RELAY", "ONLINE", "STATE", "LOAD%", "AGE-MS", "FROM", "LINKS"]);
+    for relay in &view.relays {
+        let links = relay.links.iter().map(|link| match link.rtt_ms {
+            Some(rtt) => {
+                format!("{} {rtt}ms ±{} 丢 {}.{}%", name(link.to), link.jitter_ms, link.loss_permille / 10, link.loss_permille % 10)
+            }
+            None => format!("{} 不通", name(link.to)),
+        });
+        rows.row(vec![
+            relay.relay.name.clone(),
+            yes_no(relay.online),
+            optional(relay.state.as_ref().map(label)),
+            optional(relay.load_percent),
+            optional(relay.age_ms),
+            optional(relay.reported_by.map(|from| {
+                view.answered.iter().find(|node| node.id == from).map_or_else(|| format!("#{from}"), |node| node.name.clone())
+            })),
+            list(links),
+        ]);
+    }
+    rows.print();
+    if view.answered.is_empty() {
+        println!("\n没有问到任何节点：网络里没有在线的、版本够新的节点，所以每个 relay 的行都是空的");
     }
 }
 
@@ -700,6 +808,19 @@ fn time(at: Timestamp) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_measurements_are_shown_in_milliseconds_and_percent() {
+        assert_eq!((millis(41_250), millis(999), millis(0)), ("41.2".to_owned(), "0.9".to_owned(), "0.0".to_owned()));
+        let (laptop, relay) = (NodeId::new(1).unwrap(), NodeId::new(9).unwrap());
+        let segment = PathSegment { from: laptop, to: relay, rtt_us: 20_400, jitter_us: 500, loss_permille: 12 };
+        let name = |id: NodeId| if id == laptop { "laptop".to_owned() } else { format!("#{id}") };
+        assert_eq!(leg_text(&segment, &name), "laptop→#9 20.4ms ±0.5 丢 1.2%");
+        let direct = Route::Direct { addr: "203.0.113.9:20330".parse().unwrap() };
+        assert_eq!(kind_cell(&direct, Some(DirectKind::Punched), None), "punched");
+        assert_eq!(kind_cell(&Route::Relay { relays: vec![relay] }, Some(DirectKind::Lan), Some(LegTransport::Tcp)), "tcp");
+        assert_eq!(kind_cell(&direct, None, Some(LegTransport::Tcp)), "-", "节点没有说的时候是短横");
+    }
 
     #[test]
     fn timestamps_are_shown_as_utc_dates() {

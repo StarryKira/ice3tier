@@ -5,13 +5,19 @@
 //! - **上报**：节点连上之后的第一次上报带着完整的路由表，之后只报变化的条目。这里存每个节点最近的一份，
 //!   节点离线之后留着（界面上标成过期），controller 重启就没有了。
 //! - **现问**：controller 给发送方发一条查询，它用当前的测量值回答。问不到（不在线、版本太旧、没有按时回答）时退回到上报的那一份。
+//!   回答里带着选路的细节：模式、候选路径和它们的代价、为什么是现在这条。这些随时在变，又只有看路径的时候才用得到，
+//!   所以不随上报走，只在问的时候现取。
+//! - **骨干矩阵**：relay 之间的延迟，每个 relay 自己测、签好名发给别的 relay 和挂靠它的节点。controller 也是现问：
+//!   问几个在线的节点手上的矩阵，每个 relay 取最新的那一行。查询和回答用的是同一套编号和等待（[`PendingQuery`]）。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use i3t_model::admin::{MatrixEntry, MatrixNode, NetworkId, NodeRoute, PathLeg, PathSource, PathView, RouteMatrix, RouteTable};
-use i3t_model::control::{Route, RouteAnswer, RouteEntry, ToNode};
+use i3t_model::admin::{
+    BackboneRelay, BackboneView, MatrixEntry, MatrixNode, NetworkId, NodeRoute, PathLeg, PathSource, PathView, RouteMatrix, RouteTable,
+};
+use i3t_model::control::{BackboneRow, PathDetail, Route, RouteAnswer, RouteEntry, RouteKind, ToNode};
 use i3t_proto::NodeId;
 use tokio::sync::oneshot;
 
@@ -22,11 +28,17 @@ use crate::store::NodeRecord;
 
 /// 等节点回答一次路由查询最多等多久。节点是拿手上现成的结论答的，正常只要一个往返。
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(3);
+/// 现问骨干矩阵时最多问几个节点。relay 手上没有它自己的那一行（挂靠它的节点手上有），所以先问 relay，再问挂靠了 relay 的节点。
+const MAX_BACKBONE_ASKED: usize = 4;
+/// 一个方向最多转给管理 API 这么多条候选路径。节点自己报的本来就不超过这个数，这里只是不全信它。
+const MAX_CANDIDATES: usize = 16;
 
 /// 一个节点最近上报的路由表。
 #[derive(Debug)]
 pub(crate) struct Reported {
     pub(crate) entries: BTreeMap<NodeId, RouteEntry>,
+    /// 各条路的细节：直连的类型、到第一个 relay 的那一段的传输。节点说不出来（或者版本太旧不报）的对端不在里面。
+    kinds: BTreeMap<NodeId, RouteKind>,
     /// 每一条路 controller 第一次看到它的时刻：路换了才重新算，只是延迟变了不算。
     since: BTreeMap<NodeId, Instant>,
     /// 最近一次上报的时刻。没有变化的条目节点不重复报，所以整张表都是"截至这个时刻"的。
@@ -35,13 +47,32 @@ pub(crate) struct Reported {
     conn: u64,
 }
 
-/// 一条发出去、还在等回答的路由查询。
+/// 一条发出去、还在等回答的查询。
 #[derive(Debug)]
 pub(crate) struct PendingQuery {
     /// 问的是谁。只有它的回答算数。
     node: NodeId,
-    reply: oneshot::Sender<RouteAnswer>,
+    reply: Reply,
 }
+
+/// 回答交给谁。问的是什么，答的就得是什么。
+#[derive(Debug)]
+enum Reply {
+    Route(oneshot::Sender<RouteAnswer>),
+    Backbone(oneshot::Sender<Vec<BackboneRow>>),
+}
+
+impl Reply {
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Route(reply) => reply.is_closed(),
+            Self::Backbone(reply) => reply.is_closed(),
+        }
+    }
+}
+
+/// 一个节点对骨干矩阵查询的回答，还在路上。
+type PendingRows = oneshot::Receiver<Vec<BackboneRow>>;
 
 /// 两个方向各自在等的回答。问不了的方向是 `None`。
 #[derive(Debug)]
@@ -66,12 +97,15 @@ impl Controller {
             let known = reported.entries.values().filter_map(|entry| {
                 let peer = peers.iter().find(|peer| peer.id == entry.peer)?;
                 let since = reported.since.get(&entry.peer).map_or(reported.at, |since| *since);
+                let kind = reported.kinds.get(&entry.peer);
                 Some(NodeRoute {
                     peer: node_ref(peer),
                     route: entry.route.clone(),
                     rtt_ms: entry.rtt_ms,
                     age_secs,
                     since_secs: now.saturating_duration_since(since).as_secs(),
+                    direct: kind.and_then(|kind| kind.direct),
+                    relay_leg: kind.and_then(|kind| kind.relay_leg),
                 })
             });
             known.collect()
@@ -94,7 +128,19 @@ impl Controller {
             let age_secs = now.saturating_duration_since(reported.at).as_secs();
             let stale = inner.current_routes(from).is_none();
             let listed = reported.entries.values().filter(|entry| members.contains(&entry.peer));
-            listed.map(move |entry| MatrixEntry { from, to: entry.peer, route: entry.route.clone(), rtt_ms: entry.rtt_ms, age_secs, stale })
+            listed.map(move |entry| {
+                let kind = reported.kinds.get(&entry.peer);
+                MatrixEntry {
+                    from,
+                    to: entry.peer,
+                    route: entry.route.clone(),
+                    rtt_ms: entry.rtt_ms,
+                    age_secs,
+                    stale,
+                    direct: kind.and_then(|kind| kind.direct),
+                    relay_leg: kind.and_then(|kind| kind.relay_leg),
+                }
+            })
         });
         Ok(RouteMatrix {
             entries: entries.collect(),
@@ -151,6 +197,74 @@ impl Controller {
         let (from, to) = (inner.require_node(network, from)?, inner.require_node(network, to)?);
         Ok(PathView { forward: inner.path_leg(&from, &to, forward), reverse: inner.path_leg(&to, &from, reverse) })
     }
+
+    /// 网络里 relay 之间的延迟矩阵：现问几个在线的节点，每个 relay 取最新的那一行。最多等几秒。
+    ///
+    /// # Errors
+    ///
+    /// 没有这个网络，或者读存储失败。
+    pub async fn backbone(self: &Arc<Self>, network: NetworkId) -> Result<BackboneView, Error> {
+        let asked = blocking(self, move |controller| controller.ask_backbone(network)).await?;
+        // 查询是同时发出去的，所以一个一个等、共用一个截止时间，总共也只等这么久。
+        let deadline = tokio::time::Instant::now() + ANSWER_TIMEOUT;
+        let mut answers = Vec::with_capacity(asked.len());
+        for (node, pending) in asked {
+            if let Ok(Ok(rows)) = tokio::time::timeout_at(deadline, pending).await {
+                answers.push((node, rows));
+            }
+        }
+        blocking(self, move |controller| controller.backbone_view(network, &answers)).await
+    }
+
+    /// [`Controller::backbone`] 的前一半：挑几个在线、懂这条查询的节点，各发一条查询。relay 排在前面，其次是挂靠了 relay 的节点。
+    fn ask_backbone(&self, network: NetworkId) -> Result<Vec<(NodeId, PendingRows)>, Error> {
+        let mut inner = self.lock();
+        inner.require_network(network)?;
+        let mut nodes: Vec<NodeRecord> = inner.store.nodes(network)?;
+        nodes.retain(|node| inner.live.get(&node.id).is_some_and(Live::understands_backbone));
+        nodes.sort_by_key(|node| (node.relay.is_none(), node.attached.is_empty(), node.id));
+        let asked = nodes.iter().take(MAX_BACKBONE_ASKED).filter_map(|node| Some((node.id, inner.ask_backbone_of(node.id)?)));
+        Ok(asked.collect())
+    }
+
+    /// [`Controller::backbone`] 的后一半：把各个节点的回答合成一张表，每个 relay 取最新的那一行。
+    fn backbone_view(&self, network: NetworkId, answers: &[(NodeId, Vec<BackboneRow>)]) -> Result<BackboneView, Error> {
+        let inner = self.lock();
+        inner.require_network(network)?;
+        let nodes = inner.store.nodes(network)?;
+        let relays: BTreeSet<NodeId> = nodes.iter().filter(|node| node.relay.is_some()).map(|node| node.id).collect();
+        let mut freshest: BTreeMap<NodeId, (NodeId, BackboneRow)> = BTreeMap::new();
+        for (from, rows) in answers {
+            // 回答来自认证过的节点，但只收这个网络里的 relay 的行和链路：别的编号节点本来就不该知道。
+            for mut row in rows.iter().filter(|row| relays.contains(&row.relay)).cloned() {
+                row.links.retain(|link| relays.contains(&link.to));
+                if freshest.get(&row.relay).is_none_or(|(_, kept)| row.age_ms < kept.age_ms) {
+                    freshest.insert(row.relay, (*from, row));
+                }
+            }
+        }
+        let rows = nodes.iter().filter(|node| node.relay.is_some()).map(|node| {
+            let found = freshest.remove(&node.id);
+            BackboneRelay {
+                relay: node_ref(node),
+                online: inner.is_online(node.id),
+                state: found.as_ref().map(|(_, row)| row.state),
+                load_percent: found.as_ref().map(|(_, row)| row.load_percent),
+                age_ms: found.as_ref().map(|(_, row)| row.age_ms),
+                reported_by: found.as_ref().map(|(from, _)| *from),
+                links: found.map(|(_, row)| row.links).unwrap_or_default(),
+            }
+        });
+        let answered = answers.iter().filter_map(|(from, _)| nodes.iter().find(|node| node.id == *from).map(node_ref));
+        Ok(BackboneView { relays: rows.collect(), answered: answered.collect() })
+    }
+}
+
+impl Live {
+    /// 节点协议第 2 版起，节点会回答骨干矩阵的查询，回答路由查询时带着选路的细节。
+    const fn understands_backbone(&self) -> bool {
+        self.protocol >= 2
+    }
 }
 
 impl Inner {
@@ -160,12 +274,15 @@ impl Inner {
         self.routes.get(&id).filter(|reported| reported.conn == conn)
     }
 
-    /// 记下节点上报的路由。`full` 时整个替换，否则只更新报上来的条目。
-    pub(super) fn routes_reported(&mut self, id: NodeId, routes: Vec<RouteEntry>, full: bool) {
+    /// 记下节点上报的路由和它们的细节。`full` 时整个替换，否则只更新报上来的条目。
+    ///
+    /// `kinds` 和 `routes` 是同一批对端：报上来的条目没有细节，就是节点现在说不出来，原来记的那一份也不再对。
+    pub(super) fn routes_reported(&mut self, id: NodeId, routes: Vec<RouteEntry>, kinds: Vec<RouteKind>, full: bool) {
         let (Some(sync), Some(live)) = (self.sync.get(&id), self.live.get(&id)) else { return };
         let now = Instant::now();
         let reported = self.routes.entry(id).or_insert_with(|| Reported {
             entries: BTreeMap::new(),
+            kinds: BTreeMap::new(),
             since: BTreeMap::new(),
             at: now,
             conn: live.conn,
@@ -174,11 +291,17 @@ impl Inner {
         // 上一条连接留下的表，节点没有说完整的也要先清掉：增量是相对于这条连接上报过的内容说的。
         if full || reported.conn != live.conn {
             reported.entries.clear();
+            reported.kinds.clear();
         }
         reported.conn = live.conn;
         // 只记到它 netmap 里的对端的路由：别的编号它本来就不该知道，记下来只会让表无限长。
         reported.entries.retain(|peer, _| sync.knows(*peer));
+        let kinds: BTreeMap<NodeId, RouteKind> = kinds.into_iter().map(|kind| (kind.peer, kind)).collect();
         for entry in routes.into_iter().filter(|entry| sync.knows(entry.peer)) {
+            match kinds.get(&entry.peer) {
+                Some(kind) => reported.kinds.insert(entry.peer, *kind),
+                None => reported.kinds.remove(&entry.peer),
+            };
             if before.get(&entry.peer) == Some(&entry.route) {
                 reported.since.entry(entry.peer).or_insert(now);
             } else {
@@ -188,6 +311,7 @@ impl Inner {
         }
         let entries = &reported.entries;
         reported.since.retain(|peer, _| entries.contains_key(peer));
+        reported.kinds.retain(|peer, _| entries.contains_key(peer));
         reported.at = now;
     }
 
@@ -196,31 +320,62 @@ impl Inner {
         if !self.live.get(&from).is_some_and(Live::understands_updates) {
             return None;
         }
+        let (reply, answer) = oneshot::channel();
+        self.query(from, |request| ToNode::RouteQuery { request, peer: to }, Reply::Route(reply))?;
+        Some(answer)
+    }
+
+    /// 问 `node` 手上的骨干矩阵。问不了（不在线，或者它的版本不懂这条消息）时返回 `None`。
+    fn ask_backbone_of(&mut self, node: NodeId) -> Option<PendingRows> {
+        if !self.live.get(&node).is_some_and(Live::understands_backbone) {
+            return None;
+        }
+        let (reply, answer) = oneshot::channel();
+        self.query(node, |request| ToNode::BackboneQuery { request }, Reply::Backbone(reply))?;
+        Some(answer)
+    }
+
+    /// 给节点发一条查询，记下谁在等回答。发不出去时返回 `None`。
+    fn query(&mut self, node: NodeId, message: impl FnOnce(u64) -> ToNode, reply: Reply) -> Option<()> {
         // 没有人等的查询顺手清掉：节点一直不回答的话，它们不会自己消失。
         self.route_queries.retain(|_, pending| !pending.reply.is_closed());
         let request = self.next_request();
-        let (reply, answer) = oneshot::channel();
-        if !self.send(from, ToNode::RouteQuery { request, peer: to }) {
+        if !self.send(node, message(request)) {
             return None;
         }
         self.counters.route_queries += 1;
-        self.route_queries.insert(request, PendingQuery { node: from, reply });
-        Some(answer)
+        self.route_queries.insert(request, PendingQuery { node, reply });
+        Some(())
     }
 
     /// 节点回答了一条路由查询。
     pub(super) fn route_answered(&mut self, node: NodeId, request: u64, answer: RouteAnswer) {
-        match self.route_queries.remove(&request) {
-            Some(pending) if pending.node == node => {
-                // 问的人等不及已经走了也没有关系。
-                let _dropped = pending.reply.send(answer);
-            }
-            Some(pending) => {
-                tracing::debug!(%node, asked = %pending.node, request, "丢掉一条路由查询的回答：不是被问的那个节点答的");
-                self.route_queries.insert(request, pending);
-            }
-            None => tracing::debug!(%node, request, "丢掉一条路由查询的回答：没有在等这个编号（多半是等得太久已经放弃了）"),
+        if let Some(Reply::Route(reply)) = self.take_query(node, request, |reply| matches!(reply, Reply::Route(_))) {
+            // 问的人等不及已经走了也没有关系。
+            let _dropped = reply.send(answer);
         }
+    }
+
+    /// 节点回答了一条骨干矩阵的查询。
+    pub(super) fn backbone_answered(&mut self, node: NodeId, request: u64, rows: Vec<BackboneRow>) {
+        if let Some(Reply::Backbone(reply)) = self.take_query(node, request, |reply| matches!(reply, Reply::Backbone(_))) {
+            // 问的人等不及已经走了也没有关系。
+            let _dropped = reply.send(rows);
+        }
+    }
+
+    /// 取出 `node` 对第 `request` 条查询的回答要交给谁。不是被问的那个节点答的、答的不是问的那种，都不算数，查询接着等。
+    fn take_query(&mut self, node: NodeId, request: u64, expected: impl Fn(&Reply) -> bool) -> Option<Reply> {
+        let Some(pending) = self.route_queries.remove(&request) else {
+            tracing::debug!(%node, request, "丢掉一条查询的回答：没有在等这个编号（多半是等得太久已经放弃了）");
+            return None;
+        };
+        if pending.node != node || !expected(&pending.reply) {
+            tracing::debug!(%node, asked = %pending.node, request, "丢掉一条查询的回答：不是被问的那个节点答的，或者答非所问");
+            self.route_queries.insert(request, pending);
+            return None;
+        }
+        Some(pending.reply)
     }
 
     /// 节点不在线了：发给它的查询不会有回答了。
@@ -237,19 +392,44 @@ impl Inner {
             rtt_ms,
             age_secs,
             since,
+            direct: None,
+            relay_leg: None,
+            mode: None,
+            reason: None,
+            candidates: None,
+        };
+        let reported = self.routes.get(&from.id);
+        // 上报里的细节只在说的是同一条路时才用得上。
+        let reported_kind = |route: &Route| {
+            let reported = reported?;
+            reported.entries.get(&to.id).filter(|entry| entry.route == *route)?;
+            reported.kinds.get(&to.id).copied()
         };
         match answer {
-            Some(RouteAnswer { route: Some(route), rtt_ms, since, .. }) => leg(PathSource::Query, Some(route), rtt_ms, Some(0), since),
-            Some(RouteAnswer { route: None, .. }) => leg(PathSource::NotPeers, None, None, Some(0), None),
-            None => {
-                let reported = self.routes.get(&from.id).and_then(|reported| Some((reported.entries.get(&to.id)?, reported.at)));
-                match reported {
-                    Some((entry, at)) => {
-                        leg(PathSource::Report, Some(entry.route.clone()), entry.rtt_ms, Some(at.elapsed().as_secs()), None)
-                    }
-                    None => leg(PathSource::None, None, None, None, None),
+            Some(RouteAnswer { route: Some(route), rtt_ms, since, detail, .. }) => {
+                let kind = reported_kind(&route);
+                let leg = leg(PathSource::Query, Some(route), rtt_ms, Some(0), since);
+                match detail {
+                    Some(detail) => with_detail(leg, detail),
+                    None => PathLeg { direct: kind.and_then(|kind| kind.direct), relay_leg: kind.and_then(|kind| kind.relay_leg), ..leg },
                 }
             }
+            Some(RouteAnswer { route: None, .. }) => leg(PathSource::NotPeers, None, None, Some(0), None),
+            None => match reported.and_then(|reported| Some((reported.entries.get(&to.id)?, reported.at))) {
+                Some((entry, at)) => {
+                    let kind = reported_kind(&entry.route);
+                    let leg = leg(PathSource::Report, Some(entry.route.clone()), entry.rtt_ms, Some(at.elapsed().as_secs()), None);
+                    PathLeg { direct: kind.and_then(|kind| kind.direct), relay_leg: kind.and_then(|kind| kind.relay_leg), ..leg }
+                }
+                None => leg(PathSource::None, None, None, None, None),
+            },
         }
     }
+}
+
+/// 把节点现答的选路细节填进一个方向。
+fn with_detail(leg: PathLeg, detail: PathDetail) -> PathLeg {
+    let PathDetail { mode, direct, relay_leg, reason, mut candidates } = detail;
+    candidates.truncate(MAX_CANDIDATES);
+    PathLeg { direct, relay_leg, mode, reason: Some(reason), candidates: Some(candidates), ..leg }
 }

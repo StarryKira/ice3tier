@@ -4,7 +4,19 @@
 
 对应的 Rust 类型在 `crates/i3t-model/src/admin.rs`，实现在 `crates/i3t-controller/src/admin.rs`。文档和代码不一致时以代码为准，并请修正文档。
 
-> **本次新增**（限额、用量和状态）。正文里新加的地方都标了「新增」（上一次加的节点更新等也标着「新增」，见下面第二个清单）。这一次的清单：
+> **最新一次新增**（路径诊断、骨干矩阵、连接上的防护）。正文里新加的地方也标着「新增」，和前两次的一样；这一次的清单：
+>
+> - 新接口：`GET /networks/{network}/backbone`（relay 之间的延迟矩阵，第 15 节）。
+> - 新的字段：`NodeRoute.direct`、`relay_leg`（第 5 节）；`MatrixEntry.direct`、`relay_leg`，`PathLeg.direct`、`relay_leg`、`mode`、`reason`、`candidates`（第 15 节）。新的结构 `PathCandidate`、`PathSegment`、`BackboneView`、`BackboneRelay`、`BackboneLink`（第 15 节）。新加的字段在应答里总是有，不知道的时候是 `null`。
+> - 操作记录多了一种 `action`：`update.failure`（节点说某个版本不能用，但 controller 没有让它装过这个版本，所以不暂停，第 14 节）。
+> - 行为上的变化：
+>   - 版本的暂停按网络算，并且只认 controller 确实让那个节点装过的版本的失败（第 14 节）。`paused` 里同一个版本可以出现多次，每个网络一条；`POST /update/resume` 一次继续全部网络里的这个版本。
+>   - 管理端口的连接有了上限和时限（1.1 节）：请求头 10 秒之内没有读完、或者连接空闲 10 秒，连接被关掉；同一个来源地址最多 32 条连接，全部最多 128 条，满了挤掉最老的。
+>   - 节点更新失败之后，它自报的版本号不再清掉它的失败记录；节点已经在跑那个版本（或者更新的）时，`NodeUpdate.failure` 照旧显示成 `null`（第 14 节）。
+>
+> 已有接口的路径、请求体和应答里原有的字段都没有变。
+>
+> **上一次新增**（限额、用量和状态）。这一次的清单：
 >
 > - 新接口：`PATCH /networks/{network}/credentials/{id}`（改上限、清零用量，第 9 节）；`GET /networks/{network}/exits`、`GET /networks/{network}/exits/{node}`（出口的设置、用量、健康，第 17 节）；`GET /networks/{network}/nodes/{node}/listeners`（节点上全部监听的状态，含节点自己开的回环入口，第 5 节）；`POST /networks/{network}/tags/rename`（标签改名，第 18 节）。
 > - 已有接口新的查询参数：`GET /log` 的 `before`、`network`、`action`、`ref`（翻页和过滤，第 3 节）；`GET /networks/{network}/tokens` 的 `all`（连用掉的和过期的也列出，第 6 节）。
@@ -21,7 +33,7 @@
 >
 > 已有接口的路径、请求体和应答里原有的字段都没有变；凭据的 `DELETE` 改成先吊销，见上。
 >
-> **上一次新增**（节点更新、路由视图、指标、内嵌的 WebUI）。清单：
+> **再上一次新增**（节点更新、路由视图、指标、内嵌的 WebUI）。清单：
 > - 新接口：`GET /update`、`PATCH /update`、`POST /update/check`、`POST /update/resume`、`POST /update/force`（第 14 节）；`GET`、`POST /networks/{network}/nodes/{node}/update`（第 14 节）；`GET /networks/{network}/routes`、`GET /networks/{network}/path`（第 15 节）；`GET /metrics`（不在 `/api/v1` 下面，第 16 节）。
 > - `Node` 多了两个字段：`hostname`、`update`（第 5 节）。节点详情 `NodeDetail` 随之也有。
 > - `Status` 多了一个字段：`newer_version`（第 3 节）。
@@ -50,6 +62,7 @@
   - 都没有：`/api/v1` 和 `/metrics` 之外的 `GET` 一律回 `200` 和一个 HTML 说明页，内容是"这次构建没有带 WebUI"和补救的办法。
 - 「新增」`GET /metrics` 是 Prometheus 的文本格式，不要令牌，见第 16 节。
 - 没有推送接口。界面需要实时数据时轮询（节点每 10 秒上报一次，轮询得比这更勤没有意义）。
+- 「新增」连接的上限和时限：请求头要在 10 秒之内读完，连接空闲（等下一个请求）10 秒也会被关掉，浏览器和 HTTP 库会自己重新连。同一个来源地址（IPv6 按 /64 算）最多同时 32 条连接，全部最多 128 条；满了时挤掉同一个来源（或者占得最多的那个来源）最老的一条连接，新来的总是能连上。请求体最大 2 MB。管理端口在回环地址上时，本机的所有程序是同一个来源。
 
 ### 1.2 请求和应答
 
@@ -208,7 +221,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `detail` | 给人看的说明 |
 | `refs` | 「新增」这条记录说的是哪些东西，界面可以据此做成链接。每一项是 `{ "kind": 种类, "id": 编号 }`，种类是 `"network"`、`"node"`、`"token"`、`"rule"`、`"credential"`、`"listener"`、`"forward"`（以后可能增加，不认识的种类请忽略）。东西后来被删掉了，编号还在。这个字段出现之前的记录是 `[]` |
 
-`action` 的取值：`admin.token`、`network.create`、`network.update`、`network.delete`、`node.enroll`、`node.update`、`node.delete`、`node.succeed`、`node.relay.enable`、`node.relay.disable`、`node.relay.withdrawn`、`node.exit.enable`、`node.exit.disable`、`node.exit.withdrawn`、`node.forward.withdrawn`、`token.create`、`token.delete`、`rule.create`、`rule.update`、`rule.delete`、`credential.create`、`credential.delete`、`listener.create`、`listener.update`、`listener.delete`、`forward.create`、`forward.update`、`forward.delete`、`pair.set`、`pair.delete`，以及「新增」`update.settings`、`update.release`（发布源上有了新的正式版）、`update.pause`（节点更新失败，版本被暂停；它记在那个节点所在的网络上）、`update.resume`、`update.force`（记在节点所在的网络上）、`update.force_all`，以及「新增」`credential.update`（改上限、清零用量）、`credential.revoke`（吊销）、`credential.exhausted`（凭据的流量上限用完了，controller 自己记的）、`tag.rename`。`credential.delete` 现在是彻底删掉一个已经吊销的凭据。带 `withdrawn` 的三种是节点撤回了本地声明、controller 随之关闭能力时记的。最多保留最近的一万条。
+`action` 的取值：`admin.token`、`network.create`、`network.update`、`network.delete`、`node.enroll`、`node.update`、`node.delete`、`node.succeed`、`node.relay.enable`、`node.relay.disable`、`node.relay.withdrawn`、`node.exit.enable`、`node.exit.disable`、`node.exit.withdrawn`、`node.forward.withdrawn`、`token.create`、`token.delete`、`rule.create`、`rule.update`、`rule.delete`、`credential.create`、`credential.delete`、`listener.create`、`listener.update`、`listener.delete`、`forward.create`、`forward.update`、`forward.delete`、`pair.set`、`pair.delete`，以及「新增」`update.settings`、`update.release`（发布源上有了新的正式版）、`update.pause`（节点更新失败，版本被暂停；它记在那个节点所在的网络上）、`update.resume`、`update.force`（记在节点所在的网络上）、`update.force_all`，以及「新增」`credential.update`（改上限、清零用量）、`credential.revoke`（吊销）、`credential.exhausted`（凭据的流量上限用完了，controller 自己记的）、`tag.rename`，以及「新增」`update.failure`（节点说某个版本在它那里不能用，但 controller 没有让它装过这个版本，所以不暂停；记在那个节点所在的网络上）。`credential.delete` 现在是彻底删掉一个已经吊销的凭据。带 `withdrawn` 的三种是节点撤回了本地声明、controller 随之关闭能力时记的。最多保留最近的一万条。
 
 ## 4. 网络
 
@@ -625,14 +638,18 @@ controller 自己的情况。也用来检查地址和令牌对不对。
       "route": { "via": "direct", "addr": "203.0.113.7:20330" },
       "rtt_ms": 12,
       "age_secs": 4,
-      "since_secs": 3600
+      "since_secs": 3600,
+      "direct": "punched",
+      "relay_leg": null
     },
     {
       "peer": { "id": 3, "name": "node-3", "virtual_ip": "10.66.0.3" },
       "route": { "via": "none" },
       "rtt_ms": null,
       "age_secs": 4,
-      "since_secs": 40
+      "since_secs": 40,
+      "direct": null,
+      "relay_leg": null
     }
   ]
 }
@@ -646,7 +663,14 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `"direct"` | `addr` | 直连，对端的地址 |
 | `"relay"` | `relays` | 经 relay，按经过的顺序列出节点编号，例如 `{ "via": "relay", "relays": [1] }` |
 
-`rtt_ms` 是这条路上最近测到的往返延迟，没有时是 `null`。「新增」`age_secs` 是这份数据多少秒之前的（节点最近一次上报到现在）；`since_secs` 是 controller 看到这条路换上来已经多少秒了（从节点第一次报这条路算起，只是延迟变了不算换路；controller 重启之后从头算）。经 relay 那一段走的是 UDP 还是 TCP，节点现在报不出来，所以没有。节点不在线时 `online` 是 `false`，`routes` 是空的。只有节点上报过的对端才在表里。
+`rtt_ms` 是这条路上最近测到的往返延迟，没有时是 `null`。「新增」`age_secs` 是这份数据多少秒之前的（节点最近一次上报到现在）；`since_secs` 是 controller 看到这条路换上来已经多少秒了（从节点第一次报这条路算起，只是延迟变了不算换路；controller 重启之后从头算）。节点不在线时 `online` 是 `false`，`routes` 是空的。只有节点上报过的对端才在表里。
+
+「新增」每条路的细节，节点说不出来（或者版本太旧不报）时是 `null`：
+
+| 字段 | 含义 |
+|---|---|
+| `direct` | 走直连时，这条直连是怎么建立起来的：`"lan"`（同一个局域网）、`"ipv6"`（对端的 IPv6 地址）、`"reachable"`（对端的这个地址本来就连得上：公网地址、端口转发、端口映射，没有用到打洞）、`"punched"`（交换打洞信令之后打通的）。比 controller 新的节点报了这里不认识的类型时是 `"unknown"`。不是直连时是 `null` |
+| `relay_leg` | 经 relay 时，节点到第一个 relay 的那一段走的是 `"udp"` 还是 `"tcp"`（UDP 用不了时的 TCP 中转）。现在的节点还报不出来，总是 `null`；以后的节点会报 |
 
 ### GET /networks/{network}/nodes/{node}/listeners「新增」
 
@@ -1211,6 +1235,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | GET | `/networks/{network}/exits` | 「新增」启用了的出口：设置、用量、健康、用它的节点看到的 |
 | GET | `/networks/{network}/exits/{node}` | 「新增」一个出口 |
 | POST | `/networks/{network}/tags/rename` | 「新增」在整个网络里把一个标签改名 |
+| GET | `/networks/{network}/backbone` | 「新增」relay 之间的延迟矩阵 |
 
 不在 `/api/v1` 下面的：`GET /metrics`（「新增」，第 16 节）。
 
@@ -1240,6 +1265,10 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 - **强制更新**不看开关、暂停和以前的失败。
 - **relay 一个一个来**：同一个网络里一次只让一个 relay 更新，它更新完、重新连上来再过 30 秒，才轮到下一个。轮到的那个 relay 离线期间别的 relay 一直等。单独对一个 relay 点"立即更新"不排这个队；"全部更新"里的 relay 照样排队。网络里唯一的 relay 会等到没有人经它转发才更新（这一条是节点自己判断的，时机是 `idle` 时生效）。
 - **暂停**：节点报告"这个版本在我这台机器上不能用"（自检不通过，或者装上之后连不上 controller、已经换回旧程序）时，controller 记下这次失败，暂停这个版本对其余节点的自动更新，还没换上去的节点被叫停。管理员看过之后用 `POST /update/resume` 继续；失败过的那个节点仍然不会被自动更新到这个版本，要对它点"立即更新"才会再试。
+- 「新增」**暂停只认信得过的失败，只管失败的节点所在的网络**，免得一个出了问题的节点（甚至另一个网络里的节点）把所有网络的更新卡住：
+  - 只有 controller 确实让这个节点装过这个版本（自动的或者强制的指令），它的失败才会让这个版本暂停。没让它装过的节点报的失败只记在它自己头上（它不会被自动更新到这个版本），另外记一条 `update.failure` 操作记录。controller 让节点装过哪个版本只记在内存里：controller 在下发和节点报告失败之间重启的话，这次失败不暂停，同一个网络里下一个失败的节点会让它暂停。
+  - 暂停只在失败的节点所在的网络里生效，别的网络照常更新。`paused` 里每个网络一条。
+  - 同一个节点在同一个版本上只能让它暂停一次：失败记录留在 controller 上，节点自己报的版本号清不掉它（节点已经在跑那个版本或者更新的版本时，`failure` 照旧显示成 `null`）。管理员对它点"立即更新"才清掉，这之后它要是又失败了，算新的失败。
 - "没装成但不怪版本"的失败（包取不到、磁盘出错）不暂停，下一次查发布源时自动再试。
 - 离线的节点不用特别处理：它重新连上来的时候和别的节点一样过一遍这些规矩。
 - 发布要求的 controller 最低版本比 controller 自己新时，这个版本不下发给任何节点。
@@ -1296,7 +1325,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `release.packages` | 发布里各个平台的节点程序，按平台名排。`state` 见下表；`error` 是最近一次取这个包失败的原因，没有失败是 `null` |
 | `checked_at` | 最近一次查发布源的时间；还没有查过是 `null` |
 | `check_error` | 最近一次查发布源失败的原因（连不上、清单的签名不对、最新版是预发布版）；成功是 `null`。失败时 `release` 保持上一次查到的 |
-| `paused` | 被暂停自动更新的版本，和导致暂停的那次失败。`node` 是报告失败的节点，它后来被删掉了的话是 `null`；`network` 是它所在的网络；`reason` 是节点报的原因；`at` 是时间 |
+| `paused` | 被暂停自动更新的版本，和导致暂停的那次失败。`node` 是报告失败的节点，它后来被删掉了的话是 `null`；`network` 是它所在的网络，「新增」暂停只在这个网络里生效，同一个版本在几个网络里都被暂停时有几条；`reason` 是节点报的原因；`at` 是时间 |
 | `nodes` | 全部网络的节点按更新情况数出来的数。一个节点只算在一项里，按这个顺序取第一个符合的：`updating`（已经下发了指令，还没有结束）、`up_to_date`（没有可以更新到的版本）、`failed`（有新版本，但它上一次装这个版本失败了）、`manual`（有新版本，但它不能自己更新，要手动更新）、`outdated`（有新版本，可以更新）。`total` 是总数 |
 
 `packages[].state`：
@@ -1334,7 +1363,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 
 ### POST /update/resume
 
-继续一个被暂停的版本的自动更新。
+继续一个被暂停的版本的自动更新。「新增」这个版本在几个网络里被暂停，就一起继续。
 
 ```json
 { "version": "0.3.0" }
@@ -1452,9 +1481,12 @@ controller 自己的情况。也用来检查地址和令牌对不对。
     { "id": 3, "name": "node-3", "virtual_ip": "10.66.0.3", "online": false }
   ],
   "entries": [
-    { "from": 1, "to": 2, "route": { "via": "direct", "addr": "198.51.100.7:20330" }, "rtt_ms": 12, "age_secs": 4, "stale": false },
-    { "from": 2, "to": 1, "route": { "via": "direct", "addr": "203.0.113.7:20330" }, "rtt_ms": 13, "age_secs": 7, "stale": false },
-    { "from": 3, "to": 1, "route": { "via": "relay", "relays": [1] }, "rtt_ms": 40, "age_secs": 5210, "stale": true }
+    { "from": 1, "to": 2, "route": { "via": "direct", "addr": "198.51.100.7:20330" }, "rtt_ms": 12, "age_secs": 4, "stale": false,
+      "direct": "lan", "relay_leg": null },
+    { "from": 2, "to": 1, "route": { "via": "direct", "addr": "203.0.113.7:20330" }, "rtt_ms": 13, "age_secs": 7, "stale": false,
+      "direct": "lan", "relay_leg": null },
+    { "from": 3, "to": 1, "route": { "via": "relay", "relays": [1] }, "rtt_ms": 40, "age_secs": 5210, "stale": true,
+      "direct": null, "relay_leg": null }
   ]
 }
 ```
@@ -1466,6 +1498,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `entries[].route`、`rtt_ms` | 走的路和这条路上最近测到的往返延迟（毫秒，没有是 `null`） |
 | `entries[].age_secs` | 这一格是多少秒之前的：`from` 最近一次上报到现在过了多久。节点每 10 秒上报一次（路由表没有变化时不重复报内容，但上报本身就说明"没有变"），在线的节点一般不超过 10 |
 | `entries[].stale` | `true` 表示这一格不是 `from` 现在这次连接报的：它不在线（这是它离线之前最后报的），或者刚重新连上还没有上报。界面应当把它标成过期 |
+| `entries[].direct`、`relay_leg` | 「新增」直连的类型、到第一个 relay 的那一段的传输，和节点路由表里的同名字段一样（第 5 节）；不知道时是 `null` |
 
 矩阵的着色可以直接按 `route.via` 来：`direct` 直连、`relay` 且 `relays` 只有一个是一级中转、多于一个是多级中转、`none` 不可达。controller 重启之后矩阵是空的，节点重新连上来上报了才有。
 
@@ -1484,7 +1517,30 @@ controller 先向两端各问一次"到对端现在会怎么走"，节点用当�
     "route": { "via": "direct", "addr": "203.0.113.7:20330" },
     "rtt_ms": 12,
     "age_secs": 0,
-    "since": { "secs_ago": 340, "reason": "直连打通了" }
+    "since": { "secs_ago": 340, "reason": "直连打通了" },
+    "direct": "punched",
+    "relay_leg": null,
+    "mode": "direct_first",
+    "reason": "直连可用",
+    "candidates": [
+      {
+        "route": { "via": "direct", "addr": "203.0.113.7:20330" },
+        "cost_us": 12900,
+        "legs": [ { "from": 2, "to": 1, "rtt_us": 12400, "jitter_us": 120, "loss_permille": 0 } ],
+        "load_percent": 0,
+        "current": true
+      },
+      {
+        "route": { "via": "relay", "relays": [3] },
+        "cost_us": 49500,
+        "legs": [
+          { "from": 2, "to": 3, "rtt_us": 21300, "jitter_us": 400, "loss_permille": 2 },
+          { "from": 3, "to": 1, "rtt_us": 26000, "jitter_us": 0, "loss_permille": 0 }
+        ],
+        "load_percent": 12,
+        "current": false
+      }
+    ]
   },
   "reverse": {
     "from": { "id": 1, "name": "node-1", "virtual_ip": "10.66.0.1" },
@@ -1493,7 +1549,12 @@ controller 先向两端各问一次"到对端现在会怎么走"，节点用当�
     "route": { "via": "relay", "relays": [3] },
     "rtt_ms": 48,
     "age_secs": 6,
-    "since": null
+    "since": null,
+    "direct": null,
+    "relay_leg": null,
+    "mode": null,
+    "reason": null,
+    "candidates": null
   }
 }
 ```
@@ -1508,6 +1569,20 @@ controller 先向两端各问一次"到对端现在会怎么走"，节点用当�
 | `rtt_ms` | 这条路上最近测到的往返延迟，没有是 `null` |
 | `age_secs` | 这份数据是多少秒之前的。刚问到的是 0；没有数据是 `null` |
 | `since` | 这条路是多久之前换上的（`secs_ago`，秒）、为什么换（`reason`，节点的路由层给的一句话）。只有 `source` 是 `"query"`、并且节点这次启动以来换过这条路时才有，否则 `null` |
+| `direct`、`relay_leg` | 「新增」直连的类型、到第一个 relay 的那一段的传输，写法见第 5 节的路由表。现问到的取自发送方的回答，否则取自它的上报（只在上报的是同一条路时）；不知道时是 `null` |
+| `mode` | 「新增」发送方用的选路模式：`"direct_first"`（默认：直连可用就走直连，否则经一个 relay）或 `"lowest_cost"`（按代价取最低的，切换有迟滞）。只有 `source` 是 `"query"`、并且发送方的版本会说时才有，否则 `null`；比 controller 新的节点报了不认识的模式时也是 `null` |
+| `reason` | 「新增」发送方的路由层说的"为什么是现在这条路"，给人看的一句话。有没有同 `mode` |
+| `candidates` | 「新增」发送方考虑过的候选路径（`PathCandidate`），按代价从低到高，最多 16 条。有没有同 `mode`：`null` 是不知道，`[]` 是发送方手上还没有任何测量值（没有测过的路不在里面）。默认模式不按代价选，但代价照样算出来给人看 |
+
+「新增」`PathCandidate`：
+
+| 字段 | 含义 |
+|---|---|
+| `route` | 这条路，写法同 `route` |
+| `cost_us` | 按白皮书的代价公式算出来的代价，微秒：各段的延迟、抖动（四倍）、丢包的恢复代价相加，每经过一个 relay 加 1 毫秒，负载高的 relay 另外加惩罚 |
+| `legs` | 各段的测量值（`PathSegment`），按经过的顺序：`from`、`to` 是这一段两头的节点编号，`rtt_us` 是往返延迟（微秒），`jitter_us` 是抖动（微秒），`loss_permille` 是丢包率（千分之几）。目的节点到它挂靠的 relay 的那一段是对端上报的，只有延迟，抖动和丢包是 0 |
+| `load_percent` | 路径上负载最高的 relay 的带宽占用百分比；直连和没有设带宽上限的 relay 是 0 |
+| `current` | 现在走的就是这一条。最多一条是 `true` |
 
 `source`：
 
@@ -1518,9 +1593,52 @@ controller 先向两端各问一次"到对端现在会怎么走"，节点用当�
 | `"not_peers"` | 发送方说对端不在它的配置里：访问规则没有把这两个节点连通（或者配置还没有下发到）。`route` 是 `null` |
 | `"none"` | 没有数据：发送方没有上报过到这个对端的路，现在也问不到 |
 
-节点回答的是它的路由层手上现成的结论，不会为了回答去探测或者建立连接。两个节点之间从来没有通过信的话，结论多半是 `{ "via": "none" }` 或者一条还没有验证过直连的 relay 路径。候选路径的列表、每一段的延迟和丢包、直连的类型（局域网、打洞等）现在都还没有。
+节点回答的是它的路由层手上现成的结论，不会为了回答去探测或者建立连接。两个节点之间从来没有通过信的话，结论多半是 `{ "via": "none" }` 或者一条还没有验证过直连的 relay 路径。
 
 错误：`invalid_request`（缺 `from` 或 `to`，或者两个是同一个节点）、`not_found`（节点不在这个网络里）。
+
+### GET /networks/{network}/backbone「新增」
+
+relay 之间的延迟矩阵。每个 relay 自己测它到别的 relay 的延迟、抖动和丢包，连同自己的状态和负载签好名，定期发给别的 relay 和挂靠它的节点；这就是矩阵的一行。controller 不存这些，每次现问：最多问 4 个在线、版本够新的节点（先问 relay，再问挂靠了 relay 的节点；relay 手上没有它自己的那一行），每个 relay 取最新的那一行。最多等 3 秒左右。
+
+```json
+{
+  "relays": [
+    {
+      "relay": { "id": 3, "name": "hk-relay", "virtual_ip": "10.66.0.3" },
+      "online": true,
+      "state": "serving",
+      "load_percent": 12,
+      "age_ms": 1800,
+      "reported_by": 2,
+      "links": [ { "to": 5, "rtt_ms": 150, "jitter_ms": 2, "loss_permille": 5 } ]
+    },
+    {
+      "relay": { "id": 5, "name": "la-relay", "virtual_ip": "10.66.0.5" },
+      "online": false,
+      "state": null,
+      "load_percent": null,
+      "age_ms": null,
+      "reported_by": null,
+      "links": []
+    }
+  ],
+  "answered": [ { "id": 2, "name": "laptop", "virtual_ip": "10.66.0.2" } ]
+}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `relays` | 网络里启用了 relay 的节点，按编号排，每个一行 |
+| `relays[].relay`、`online` | 这个 relay（`NodeRef`），和它现在连不连着 controller |
+| `relays[].state` | 它自己说的状态：`"serving"`（正常）、`"overloaded"`（转发的流量到了带宽上限，节点会改走别的 relay）、`"draining"`（即将下线：升级、关机、被停用）；比 controller 新的节点报了不认识的状态时是 `"unknown"`。问到的节点手上都没有这一行时是 `null` |
+| `relays[].load_percent` | 它的带宽占用百分比；没有设带宽上限的 relay 是 0。没有这一行时是 `null` |
+| `relays[].age_ms` | 这一行是多少毫秒之前的（回答的节点收到它到现在）。节点不留超过两分钟的行，所以不会更旧。没有这一行时是 `null` |
+| `relays[].reported_by` | 这一行是从哪个节点问来的（节点编号）；没有这一行时是 `null` |
+| `relays[].links` | 它到别的 relay 的链路（`BackboneLink`）：`to` 是另一个 relay 的节点编号，`rtt_ms` 是往返延迟（毫秒，`null` 表示连不上），`jitter_ms` 是抖动（毫秒），`loss_permille` 是丢包率（千分之几）。只有这个网络里的 relay |
+| `answered` | 这次回答了的节点。是空的时候（没有在线的、版本够新的节点）每个 relay 的行都是 `null` |
+
+错误：`not_found`（没有这个网络）。
 
 ## 16. 指标「新增」
 

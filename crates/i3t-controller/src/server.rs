@@ -10,7 +10,7 @@ use tokio::sync::watch;
 use crate::controller::Controller;
 use crate::error::{Error, error_chain};
 use crate::webui::WebUi;
-use crate::{addr_server, admin, node_server};
+use crate::{addr_server, admin, admin_server, node_server};
 
 /// 后台工作出错之后多久再试。
 const RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -83,7 +83,7 @@ impl Server {
     ///
     /// # Errors
     ///
-    /// 管理 API 的服务出错。
+    /// 现在不会出错：接受连接失败只记日志、过一会儿再接。留着 `Result` 是为了以后启动时还要做的事。
     pub async fn run(self, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<(), Error> {
         let (stop, stopped) = watch::channel(false);
         tokio::spawn(async move {
@@ -97,16 +97,10 @@ impl Server {
         let maintenance = tokio::spawn(maintain(Arc::clone(&self.controller), stopped.clone()));
         let releases = self.follow_releases.then(|| tokio::spawn(follow_releases(Arc::clone(&self.controller), stopped.clone())));
         let router = admin::router(Arc::clone(&self.controller), &self.webui);
-        let mut admin_stopped = stopped.clone();
-        let admin = axum::serve(self.admin, router.into_make_service_with_connect_info::<SocketAddr>())
-            .with_graceful_shutdown(async move {
-                // 发送端没了也算收到了停止的信号。
-                let _ = admin_stopped.changed().await;
-            })
-            .await;
+        admin_server::serve(self.admin, router, stopped.clone()).await;
 
         // 管理 API 停了：正常情况是收到了关闭的信号，这时等节点的连接收尾（把在线的节点记为离线）。
-        // 它要是因为出错而停，别的任务还在等一个不会来的信号，直接结束它们。
+        // 关闭的信号要是没来（发送端没了），别的任务还在等一个不会来的信号，直接结束它们。
         addresses.abort();
         maintenance.abort();
         if let Some(releases) = releases {
@@ -120,7 +114,7 @@ impl Server {
         } else {
             nodes.abort();
         }
-        admin.map_err(Error::Socket)
+        Ok(())
     }
 }
 

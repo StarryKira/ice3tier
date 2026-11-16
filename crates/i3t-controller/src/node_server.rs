@@ -2,8 +2,14 @@
 //!
 //! 这里只管连接：握手、读写、心跳、超时。每条消息怎么处理在 [`Controller`] 里。
 //!
-//! 一条连接上的顺序：节点先发 `Enroll` 或 `Hello`；controller 回 `Snapshot`，不认它时回 `Rejected` 然后断开。
-//! 之后节点上报、确认、发信令，controller 下发 netmap、转信令。
+//! 一条连接上的顺序：节点先发 `Enroll` 或 `Hello`；controller 回 `Snapshot`，不认它时回 `Rejected` 然后断开，
+//! 自己出了错时回 `TryLater` 然后断开（节点会按退避重连）。之后节点上报、确认、发信令，controller 下发 netmap、转信令。
+//!
+//! 报到之前的连接谁都能开，所以它们占的名额按来源地址记账（[`crate::gate`]）：一个来源占不满，满了挤掉最老的，
+//! 不拒绝新来的。连上之后 [`CLIENT_HELLO_TIMEOUT`] 之内要收到 TLS 的 ClientHello，从连上算起 [`Timing::handshake_timeout`]
+//! 之内要完成握手并发来第一条消息。
+//!
+//! [`Timing::handshake_timeout`]: crate::Timing::handshake_timeout
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -14,21 +20,29 @@ use i3t_model::control::{MAX_FRAME_LEN, ToController, ToNode};
 use i3t_proto::PublicKey;
 use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Semaphore, mpsc, watch};
+use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
-use tokio::time::{Instant, sleep_until, timeout};
-use tokio_rustls::TlsAcceptor;
+use tokio::time::{Instant, sleep_until, timeout, timeout_at};
+use tokio_rustls::LazyConfigAcceptor;
 use tokio_rustls::server::TlsStream;
 
 use crate::controller::{Admitted, Controller};
 use crate::error::{Rejection, error_chain};
 use crate::frame::{FrameError, read_frame, write_frame};
+use crate::gate::{Gate, Limits, Pass, Throttle};
 use crate::server::blocking;
 
 /// 还没报到的连接上，一帧最长这么多字节。`Enroll` 和 `Hello` 都只有几百字节。
 const FIRST_FRAME_LIMIT: usize = 64 * 1024;
-/// 同时最多有这么多条还没报到的连接。再多的直接关掉：正常的节点会重试，扫描和洪泛占不住资源。
-const MAX_PENDING_CONNECTIONS: usize = 256;
+/// 还没报到的连接的名额：每个来源最多 16 条，全部最多 256 条，满了挤掉最老的（见 [`crate::gate`]）。
+///
+/// 正常的节点连上来几个往返就报到完了，同一个家用 NAT 后面的节点在 controller 重启之后带着随机的退避陆续连回来，
+/// 同时在握手的远到不了 16 条。
+const PENDING: Limits = Limits { per_source: 16, total: 256 };
+/// 连上之后这么久还没有收到 TLS 的 ClientHello 就断开。正常的节点连上就发；只连不说话的连接不值得等满整个握手时限。
+pub const CLIENT_HELLO_TIMEOUT: Duration = Duration::from_secs(3);
+/// 接受连接失败（多半是文件描述符用完了）的日志多久最多记一条。
+const ACCEPT_ERROR_LOG_EVERY: Duration = Duration::from_secs(10);
 /// 每个节点的发送队列有多少格。满了说明节点不读，controller 会断开它。
 const OUTBOX_CAPACITY: usize = 64;
 /// 一帧写这么久还没写完，就认为连接已经死了。
@@ -46,28 +60,26 @@ pub async fn serve(
     listener: TcpListener,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let acceptor = TlsAcceptor::from(tls);
-    let pending = Arc::new(Semaphore::new(MAX_PENDING_CONNECTIONS));
+    let pending = Gate::new("还没报到的节点连接", PENDING);
+    let accept_errors = Throttle::new(ACCEPT_ERROR_LOG_EVERY);
     let mut connections = JoinSet::new();
     loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {
                 Ok((stream, remote)) => {
-                    let Ok(permit) = Arc::clone(&pending).try_acquire_owned() else {
-                        tracing::warn!(%remote, "拒绝连接：还没报到的连接太多");
-                        continue;
-                    };
+                    let pass = pending.admit(remote.ip());
                     let connection = Connection { controller: Arc::clone(&controller), remote, shutdown: shutdown.clone() };
-                    let acceptor = acceptor.clone();
+                    let tls = Arc::clone(&tls);
                     connections.spawn(async move {
-                        let Some(established) = connection.establish(&acceptor, stream).await else { return };
-                        drop(permit);
+                        let Some(established) = connection.establish(tls, stream, pass).await else { return };
                         connection.run(established).await;
                     });
                 }
                 Err(err) => {
                     // 多半是文件描述符用完了。歇一下再接，免得空转。
-                    tracing::warn!("接受连接失败：{err}");
+                    if let Some(suppressed) = accept_errors.allow() {
+                        tracing::warn!(suppressed, "接受连接失败：{err}");
+                    }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             },
@@ -97,11 +109,22 @@ struct Established {
 }
 
 impl Connection {
-    /// 握手，读第一条消息，让 controller 决定认不认这个节点。不认时回 `Rejected` 并返回 `None`。
-    async fn establish(&self, acceptor: &TlsAcceptor, stream: TcpStream) -> Option<Established> {
+    /// 握手，读第一条消息，让 controller 决定认不认这个节点。不认时回 `Rejected`（或者 `TryLater`）并返回 `None`。
+    ///
+    /// `pass` 是这条连接在报到之前占的名额，读到第一条消息就交还；在那之前被挤掉的话直接断开。
+    async fn establish(&self, tls: Arc<rustls::ServerConfig>, stream: TcpStream, mut pass: Pass) -> Option<Established> {
         let remote = self.remote;
-        let handshake = timeout(self.controller.timing().handshake_timeout, handshake(acceptor, stream));
-        let (key, first, reader, mut writer) = match handshake.await {
+        let deadline = Instant::now() + self.controller.timing().handshake_timeout;
+        let handshake = timeout_at(deadline, handshake(tls, stream));
+        let outcome = tokio::select! {
+            outcome = handshake => outcome,
+            () = pass.evicted() => {
+                tracing::debug!(%remote, "还没报到的连接太多，这一条被挤掉了");
+                return None;
+            }
+        };
+        drop(pass);
+        let (key, first, reader, mut writer) = match outcome {
             Ok(Ok(parts)) => parts,
             Ok(Err(reason)) => {
                 tracing::debug!(%remote, %reason, "连接没有完成报到");
@@ -123,8 +146,11 @@ impl Connection {
             | ToController::Signal { .. }
             | ToController::Heartbeat
             | ToController::PackageRequest { .. }
-            | ToController::RouteAnswer { .. } => {
-                tracing::warn!(key = ?key, remote = %ip, "拒绝连接：第一条消息不是 enroll 也不是 hello");
+            | ToController::RouteAnswer { .. }
+            | ToController::BackboneAnswer { .. } => {
+                if let Some(suppressed) = controller.refusal_log.allow() {
+                    tracing::warn!(key = ?key, remote = %ip, suppressed, "拒绝连接：第一条消息不是 enroll 也不是 hello");
+                }
                 Err(Rejection::UnexpectedFirstMessage)
             }
         })
@@ -132,7 +158,7 @@ impl Connection {
         match admitted {
             Ok(session) => Some(Established { session, reader, writer, outbox: inbox }),
             Err(rejection) => {
-                let reply = ToNode::Rejected { reason: rejection.to_string() };
+                let reply = rejection.reply();
                 if let Ok(Err(err)) = timeout(WRITE_TIMEOUT, write_frame(&mut writer, &reply)).await {
                     tracing::debug!(%remote, "拒绝的原因没能发给对方：{}", error_chain(&err));
                 }
@@ -198,11 +224,17 @@ impl Connection {
 }
 
 /// TLS 握手，取出对端的公钥，读第一条消息。失败时返回给日志看的原因。
-async fn handshake(acceptor: &TlsAcceptor, stream: TcpStream) -> Result<(PublicKey, ToController, Reader, Writer), String> {
+///
+/// ClientHello 要在 [`CLIENT_HELLO_TIMEOUT`] 之内到；整个过程的时限由调用的一方管。
+async fn handshake(tls: Arc<rustls::ServerConfig>, stream: TcpStream) -> Result<(PublicKey, ToController, Reader, Writer), String> {
     if let Err(err) = stream.set_nodelay(true) {
         tracing::debug!("设置 TCP_NODELAY 失败：{err}");
     }
-    let stream = acceptor.accept(stream).await.map_err(|err| format!("TLS 握手失败：{err}"))?;
+    let hello = timeout(CLIENT_HELLO_TIMEOUT, LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream))
+        .await
+        .map_err(|_| format!("{CLIENT_HELLO_TIMEOUT:?} 之内没有收到 TLS 的 ClientHello"))?
+        .map_err(|err| format!("TLS 握手失败：{err}"))?;
+    let stream = hello.into_stream(tls).await.map_err(|err| format!("TLS 握手失败：{err}"))?;
     let key = {
         let (_, session) = stream.get_ref();
         let certificate = session.peer_certificates().and_then(|chain| chain.first()).ok_or("对端没有出示证书")?;

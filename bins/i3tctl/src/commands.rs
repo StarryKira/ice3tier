@@ -67,6 +67,10 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             let network = session.network().await?.id;
             session.show(session.get(&format!("/networks/{network}/routes")).await?, render::route_matrix)
         }
+        Command::Backbone => {
+            let network = session.network().await?.id;
+            session.show(session.get(&format!("/networks/{network}/backbone")).await?, render::backbone)
+        }
     }
 }
 

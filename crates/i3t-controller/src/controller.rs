@@ -44,6 +44,7 @@ use i3t_proto::{NodeId, PublicKey};
 use tokio::sync::{Notify, mpsc};
 
 use crate::error::{Entity, Error};
+use crate::gate::Throttle;
 use crate::netmap::NetworkView;
 use crate::secret;
 use crate::store::{DIGEST_LEN, LogFilter, NetworkRecord, NodeRecord, Store};
@@ -62,6 +63,8 @@ const ADMIN_TOKEN_META: &str = "admin_token_hash";
 
 /// 删掉的节点的虚拟 IP 和名字多久之后才能再分出去。
 const COOLDOWN_SECS: u64 = 90 * 24 * 60 * 60;
+/// 拒绝没有注册的公钥、无效的令牌这一类日志多久最多记一条。谁都能拿一把新生成的公钥连上来，不限的话日志会被刷满。
+const REFUSAL_LOG_EVERY: Duration = Duration::from_secs(10);
 
 /// controller 里的几个时间。默认值是协议约定的，测试里会改短。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +116,8 @@ pub struct Controller {
     release_wake: Notify,
     /// 设置变了、要尽快重新查发布源时叫醒查发布源的后台任务。
     check_wake: Notify,
+    /// 给还没认出来的连接的拒绝日志限速。
+    pub(crate) refusal_log: Throttle,
 }
 
 /// [`Controller::open`] 的结果。
@@ -232,6 +237,7 @@ impl Controller {
             wake: Notify::new(),
             release_wake: Notify::new(),
             check_wake: Notify::new(),
+            refusal_log: Throttle::new(REFUSAL_LOG_EVERY),
         })
     }
 

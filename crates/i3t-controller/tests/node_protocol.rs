@@ -430,7 +430,7 @@ async fn a_route_query_goes_to_the_node_and_its_answer_comes_back_to_the_caller(
     let asking = tokio::spawn(async move { controller.path(network.id, from, to).await.unwrap() });
     let ToNode::RouteQuery { request, peer } = next_other(&mut asked).await else { panic!("应该收到路由查询") };
     assert_eq!(peer, to);
-    let answer = RouteAnswer { peer, route: Some(Route::Relay { relays: vec![to] }), rtt_ms: Some(31), since: None };
+    let answer = RouteAnswer { peer, route: Some(Route::Relay { relays: vec![to] }), rtt_ms: Some(31), since: None, detail: None };
     asked.send(ToController::RouteAnswer { request, answer }).await;
 
     let view = timeout(PATIENCE, asking).await.unwrap().unwrap();

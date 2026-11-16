@@ -41,6 +41,8 @@ pub(crate) struct Member {
     pub(crate) chunks: Vec<(u64, Result<Vec<u8>, String>)>,
     /// 收到的路由查询：编号和问的对端。
     pub(crate) queries: Vec<(u64, NodeId)>,
+    /// 收到的骨干矩阵查询的编号。
+    pub(crate) backbone_queries: Vec<u64>,
     /// 还没确认的版本。测试要自己控制确认的时机时用。
     unacked: Option<u64>,
 }
@@ -163,6 +165,7 @@ impl Member {
             cancels: 0,
             chunks: Vec::new(),
             queries: Vec::new(),
+            backbone_queries: Vec::new(),
             unacked: None,
         };
         member.receive();
@@ -189,6 +192,8 @@ impl Member {
                 ToNode::PackageChunk { request, data } => self.chunks.push((request, Ok(data))),
                 ToNode::PackageUnavailable { request, reason } => self.chunks.push((request, Err(reason))),
                 ToNode::RouteQuery { request, peer } => self.queries.push((request, peer)),
+                ToNode::BackboneQuery { request } => self.backbone_queries.push(request),
+                ToNode::TryLater { reason } => panic!("已经报到的连接上不应该收到 try_later：{reason}"),
             }
         }
         received

@@ -5,6 +5,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
 use i3t_model::admin::{ErrorCode, Timestamp};
+use i3t_model::control::ToNode;
 use ipnet::Ipv4Net;
 
 use crate::store::StoreError;
@@ -204,6 +205,25 @@ pub enum Rejection {
     Internal,
 }
 
+impl Rejection {
+    /// 发给节点的回答。controller 自己出的错不是"不认这个节点"：节点收到 `Rejected` 会就此停下、等人重新加入，
+    /// 所以这时回 `TryLater`，让它按退避重连。
+    #[must_use]
+    pub fn reply(&self) -> ToNode {
+        let reason = self.to_string();
+        match self {
+            Self::Internal => ToNode::TryLater { reason },
+            Self::BadToken
+            | Self::UnknownKey
+            | Self::KeyAlreadyEnrolled
+            | Self::PredecessorOnline
+            | Self::AddressUnavailable(_)
+            | Self::RangeExhausted
+            | Self::UnexpectedFirstMessage => ToNode::Rejected { reason },
+        }
+    }
+}
+
 /// 把错误连同它的来源链写成一行，日志里用。
 pub(crate) fn error_chain(error: &dyn std::error::Error) -> String {
     let mut text = error.to_string();
@@ -232,6 +252,14 @@ mod tests {
             let message = error.to_string();
             assert!(message.contains("nas-01") && message.contains(command), "{message}");
             assert_eq!(error.code(), ErrorCode::NotDeclared);
+        }
+    }
+
+    #[test]
+    fn only_an_internal_error_tells_the_node_to_try_again_later() {
+        assert!(matches!(Rejection::Internal.reply(), ToNode::TryLater { reason } if reason.contains("稍后再试")));
+        for definite in [Rejection::UnknownKey, Rejection::BadToken, Rejection::KeyAlreadyEnrolled, Rejection::RangeExhausted] {
+            assert!(matches!(definite.reply(), ToNode::Rejected { .. }), "{definite:?}");
         }
     }
 }

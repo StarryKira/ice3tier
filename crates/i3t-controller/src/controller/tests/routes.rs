@@ -3,12 +3,16 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use i3t_model::admin::{NetworkId, PathSource, UpdateNode};
-use i3t_model::control::{Declared, Hello, Report, Route, RouteAnswer, RouteEntry, RouteSince, ToController};
+use i3t_model::admin::{NetworkId, PathSource, RelaySettings, UpdateNode};
+use i3t_model::control::{
+    BackboneLink, BackboneRow, Declared, DirectKind, Hello, LegTransport, PathCandidate, PathDetail, PathSegment, RelayState, Report,
+    Route, RouteAnswer, RouteEntry, RouteKind, RouteSince, ToController,
+};
+use i3t_model::netmap::RoutingMode;
 use i3t_model::update::UpdateStatus;
 use i3t_proto::NodeId;
 
-use super::super::testing::{Lab, Member, hello, modern_hello};
+use super::super::testing::{CAN_DO_ALL, Lab, Member, hello, modern_hello};
 use super::super::{COOLDOWN_SECS, Controller};
 
 fn direct(peer: NodeId, rtt_ms: u32) -> RouteEntry {
@@ -112,11 +116,15 @@ async fn a_path_is_asked_from_both_ends_and_falls_back_to_the_last_report() {
         route: Some(Route::Direct { addr: "198.51.100.9:20330".parse().unwrap() }),
         rtt_ms: Some(8),
         since: Some(since.clone()),
+        detail: None,
     };
     a.send(&controller, ToController::RouteAnswer { request: to_a, answer });
     b.send(
         &controller,
-        ToController::RouteAnswer { request: to_b, answer: RouteAnswer { peer: a.id, route: None, rtt_ms: None, since: None } },
+        ToController::RouteAnswer {
+            request: to_b,
+            answer: RouteAnswer { peer: a.id, route: None, rtt_ms: None, since: None, detail: None },
+        },
     );
     let view = asking.await.unwrap();
     assert_eq!((view.forward.from.id, view.forward.to.id, view.reverse.from.id), (a.id, b.id, b.id));
@@ -143,7 +151,7 @@ async fn a_path_is_asked_from_both_ends_and_falls_back_to_the_last_report() {
         tokio::time::sleep(Duration::from_millis(100)).await;
         b.receive();
         let request = b.queries.last().unwrap().0;
-        let forged = RouteAnswer { peer: old.id, route: Some(Route::None), rtt_ms: None, since: None };
+        let forged = RouteAnswer { peer: old.id, route: Some(Route::None), rtt_ms: None, since: None, detail: None };
         a.send(&controller, ToController::RouteAnswer { request, answer: forged.clone() });
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!asking.is_finished(), "a 替 b 答的不算");
@@ -155,6 +163,163 @@ async fn a_path_is_asked_from_both_ends_and_falls_back_to_the_last_report() {
 
     assert!(controller.path(network, a.id, a.id).await.is_err());
     assert!(controller.path(network, a.id, NodeId::new(99).unwrap()).await.is_err());
+}
+
+fn kind(peer: NodeId, direct: Option<DirectKind>, relay_leg: Option<LegTransport>) -> RouteKind {
+    RouteKind { peer, direct, relay_leg }
+}
+
+fn report_with_kinds(member: &Member, controller: &Controller, routes: Vec<RouteEntry>, kinds: Vec<RouteKind>, full: bool) {
+    let report = Report { routes, route_kinds: kinds, routes_full: full, update: Some(UpdateStatus::Idle), ..Report::default() };
+    member.send(controller, ToController::Report(report));
+}
+
+#[test]
+fn route_lists_say_how_a_direct_path_was_made_and_how_the_first_relay_leg_travels() {
+    let (lab, network, a, b, old) = three_nodes();
+    let kinds = vec![kind(b.id, Some(DirectKind::Punched), None), kind(old.id, None, Some(LegTransport::Tcp))];
+    report_with_kinds(&a, &lab.controller, vec![direct(b.id, 12), via(old.id, b.id)], kinds, true);
+    // 旧版本的节点不报细节。
+    report(&b, &lab.controller, vec![direct(a.id, 13)], true);
+
+    let table = lab.controller.routes(network, a.id).unwrap();
+    let details: Vec<_> = table.routes.iter().map(|route| (route.peer.id, route.direct, route.relay_leg)).collect();
+    assert_eq!(details, [(b.id, Some(DirectKind::Punched), None), (old.id, None, Some(LegTransport::Tcp))]);
+    let matrix = lab.controller.route_matrix(network).unwrap();
+    let cells: Vec<_> = matrix.entries.iter().map(|entry| (entry.from, entry.to, entry.direct, entry.relay_leg)).collect();
+    assert_eq!(
+        cells,
+        [(a.id, b.id, Some(DirectKind::Punched), None), (a.id, old.id, None, Some(LegTransport::Tcp)), (b.id, a.id, None, None)]
+    );
+
+    // 只带变化的上报：这一条的细节说不出来了，原来记的那一份也不再对；没提到的保持原样。
+    report_with_kinds(&a, &lab.controller, vec![direct(old.id, 9)], Vec::new(), false);
+    let table = lab.controller.routes(network, a.id).unwrap();
+    let details: Vec<_> = table.routes.iter().map(|route| (route.peer.id, route.direct, route.relay_leg)).collect();
+    assert_eq!(details, [(b.id, Some(DirectKind::Punched), None), (old.id, None, None)]);
+    // 细节说的对端不在这次报的条目里：不记。
+    report_with_kinds(&a, &lab.controller, Vec::new(), vec![kind(old.id, Some(DirectKind::Lan), None)], false);
+    assert_eq!(lab.controller.routes(network, a.id).unwrap().routes[1].direct, None);
+}
+
+#[tokio::test]
+async fn a_path_shows_the_candidates_the_sender_weighed_and_why_it_chose_one() {
+    let (lab, network, mut a, mut b, old) = three_nodes();
+    report_with_kinds(&b, &lab.controller, vec![direct(a.id, 13)], vec![kind(a.id, Some(DirectKind::Lan), None)], true);
+    let controller = std::sync::Arc::new(lab.controller);
+    let asking = tokio::spawn({
+        let controller = std::sync::Arc::clone(&controller);
+        let (from, to) = (a.id, b.id);
+        async move { controller.path(network, from, to).await.unwrap() }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    a.receive();
+    let request = a.queries.last().unwrap().0;
+    let relay = old.id;
+    let candidate = |route: Route, cost_us: u64, current: bool| PathCandidate {
+        route,
+        cost_us,
+        legs: vec![PathSegment { from: a.id, to: b.id, rtt_us: 12_400, jitter_us: 300, loss_permille: 2 }],
+        load_percent: 0,
+        current,
+    };
+    let chosen = Route::Relay { relays: vec![relay] };
+    let detail = PathDetail {
+        mode: Some(RoutingMode::LowestCost),
+        direct: None,
+        relay_leg: Some(LegTransport::Udp),
+        reason: "经 relay 代价最低".to_owned(),
+        candidates: vec![
+            candidate(chosen.clone(), 30_000, true),
+            candidate(Route::Direct { addr: "198.51.100.9:20330".parse().unwrap() }, 45_000, false),
+        ],
+    };
+    let answer = RouteAnswer { peer: b.id, route: Some(chosen.clone()), rtt_ms: Some(30), since: None, detail: Some(detail) };
+    a.send(&controller, ToController::RouteAnswer { request, answer });
+    // b 不回答：退回到它上报的那一份，直连的类型取自上报。
+    b.receive();
+    let view = asking.await.unwrap();
+
+    let forward = &view.forward;
+    assert_eq!((forward.mode, forward.relay_leg, forward.direct), (Some(RoutingMode::LowestCost), Some(LegTransport::Udp), None));
+    assert_eq!(forward.reason.as_deref(), Some("经 relay 代价最低"));
+    let candidates = forward.candidates.as_ref().unwrap();
+    assert_eq!(
+        candidates.iter().map(|candidate| (candidate.cost_us, candidate.current)).collect::<Vec<_>>(),
+        [(30_000, true), (45_000, false)]
+    );
+    assert_eq!(candidates[0].route, chosen);
+    let reverse = &view.reverse;
+    assert_eq!((reverse.source, reverse.direct), (PathSource::Report, Some(DirectKind::Lan)));
+    assert_eq!((reverse.mode, reverse.reason.clone(), reverse.candidates.clone()), (None, None, None), "上报里没有候选，只有现问才有");
+}
+
+#[tokio::test]
+async fn the_backbone_is_asked_from_online_nodes_and_each_relay_keeps_its_freshest_row() {
+    let mut lab = Lab::new();
+    let network = lab.network("home").id;
+    let relay_hello = Hello { declared: CAN_DO_ALL, ..modern_hello("0.2.0") };
+    let (mut r1, mut r2) = (lab.join_as(network, &relay_hello), lab.join_as(network, &relay_hello));
+    let mut silent = lab.join_as(network, &relay_hello);
+    let mut node = lab.join_as(network, &modern_hello("0.2.0"));
+    let mut ancient = lab.join_as(network, &hello(Declared::default()));
+    for relay in [&r1, &r2, &silent] {
+        let settings = RelaySettings { udp: vec!["203.0.113.7:20330".parse().unwrap()], ..RelaySettings::default() };
+        lab.controller.enable_relay(network, relay.id, settings).unwrap();
+    }
+    lab.settle(&mut [&mut r1, &mut r2, &mut silent, &mut node, &mut ancient]);
+    let controller = std::sync::Arc::new(lab.controller);
+
+    let asking = tokio::spawn({
+        let controller = std::sync::Arc::clone(&controller);
+        async move { controller.backbone(network).await.unwrap() }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    for member in [&mut r1, &mut r2, &mut silent, &mut node, &mut ancient] {
+        member.receive();
+    }
+    assert!(ancient.backbone_queries.is_empty(), "不懂这条查询的旧节点不问");
+    assert_eq!([&r1, &r2, &silent, &node].map(|member| member.backbone_queries.len()), [1, 1, 1, 1], "先问 relay，再问别的节点");
+
+    let row = |relay: NodeId, age_ms: u64, to: NodeId, rtt_ms: u32| BackboneRow {
+        relay,
+        state: RelayState::Serving,
+        load_percent: 5,
+        age_ms,
+        links: vec![BackboneLink { to, rtt_ms: Some(rtt_ms), jitter_ms: 1, loss_permille: 0 }],
+    };
+    let stranger = NodeId::new(99).unwrap();
+    // r1 手上有 r2 的行（没有它自己的）；node 手上 r1、r2 的都有，r1 的比 r2 给的新，r2 的比 r1 给的旧。
+    let answer = |member: &Member, rows: Vec<BackboneRow>| {
+        let request = member.backbone_queries[0];
+        member.send(&controller, ToController::BackboneAnswer { request, rows });
+    };
+    answer(&r1, vec![row(r2.id, 300, r1.id, 20), row(stranger, 1, r1.id, 1)]);
+    answer(&r2, vec![row(r1.id, 900, r2.id, 21)]);
+    answer(&node, vec![row(r1.id, 100, r2.id, 22), row(r2.id, 800, r1.id, 23), row(r1.id, 50, stranger, 1)]);
+    // r1 冒名替 silent 回答：不算数。silent 自己一直不回答。
+    r1.send(&controller, ToController::BackboneAnswer { request: silent.backbone_queries[0], rows: vec![row(silent.id, 1, r1.id, 1)] });
+    let view = asking.await.unwrap();
+
+    let rows: Vec<_> = view
+        .relays
+        .iter()
+        .map(|relay| {
+            (relay.relay.id, relay.reported_by, relay.age_ms, relay.links.iter().map(|link| (link.to, link.rtt_ms)).collect::<Vec<_>>())
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (r1.id, Some(node.id), Some(50), vec![]),
+            (r2.id, Some(r1.id), Some(300), vec![(r1.id, Some(20))]),
+            (silent.id, None, None, vec![]),
+        ],
+        "每个 relay 取最新的一行；不在这个网络里的 relay 和链路不收"
+    );
+    assert_eq!((view.relays[0].state, view.relays[0].load_percent, view.relays[2].state), (Some(RelayState::Serving), Some(5), None));
+    assert!(view.relays.iter().all(|relay| relay.online));
+    assert_eq!(view.answered.iter().map(|node| node.id).collect::<Vec<_>>(), [r1.id, r2.id, node.id]);
 }
 
 #[test]
