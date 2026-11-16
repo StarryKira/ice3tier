@@ -1,0 +1,202 @@
+//! 一个端口上收到的 UDP 数据报怎么分类，以及经 relay 转发时加在包前面的中转头。
+//!
+//! 节点只用一个 UDP 端口。端到端连接的包和路径层自己的帧都从这里进来，靠首字节区分：
+//!
+//! - QUIC 包的首字节一定带 `0x40` 这一位（RFC 9000 §17.2、§17.3 的 Fixed Bit）。带这一位的数据报是对端直连发来的连接包，
+//!   整个交给连接层。这要求两端都不启用 RFC 9287 的"把这一位随机化"。
+//! - 不带这一位的是路径层的帧，首字节是帧的类型，取值在 `0x00`～`0x3f` 之间。
+//!   `0x80`～`0xbf` 不分配给任何帧：QUIC 的版本协商包可能落在这一段（它的这一位是随机填的）。
+//!   两端的 QUIC 版本相同时不会有这种包，收到就按不认识的帧丢掉。
+//!
+//! 现在只有一种帧，经 relay 转发的包：
+//!
+//! ```text
+//! 0      1              5              9
+//! +------+--------------+--------------+------------------
+//! | 0x01 | 目的节点编号 | 来源节点编号 | 连接层的包 ...
+//! +------+--------------+--------------+------------------
+//! ```
+//!
+//! relay 只看前 9 个字节：按目的节点查出它挂上来的地址，把整个数据报原样转出去，不改一个字节。
+//! 来源节点编号是给目的节点看的，它据此知道这个包属于和谁的连接。relay 要核对来源节点就是这个数据报所属的中转会话的主人，
+//! 不然任何节点都能冒别人的名字往外发包。
+
+use crate::node::NodeId;
+
+/// 连接层的一个包最长多少字节。
+///
+/// 直连和经 relay 这两条路必须装得下同样大的包。连接是按当前那条路探测最大包长的，
+/// 如果直连能发的包比经 relay 的大，换到 relay 那条路之后大包就发不出去了。所以两条路都按"加上中转头"来算：
+/// 1400 加中转头、UDP 头和 IPv6 头是 1457 字节，以太网（1500）和 PPPoE（1492）都装得下。
+/// 更小的链路靠连接层自己的路径 MTU 探测，它从 1200 起步往上试，这里是它的上限。
+pub const MAX_CONN_PACKET_LEN: u16 = 1400;
+
+const QUIC_FIXED_BIT: u8 = 0x40;
+const KIND_RELAYED: u8 = 0x01;
+
+const _: () = {
+    const UDP_HEADER: usize = 8;
+    const IPV6_HEADER: usize = 40;
+    const PPPOE_MTU: usize = 1492;
+    assert!(MAX_CONN_PACKET_LEN as usize + RelayHeader::LEN + UDP_HEADER + IPV6_HEADER <= PPPOE_MTU);
+    // 帧的类型不能和 QUIC 包的首字节混淆。
+    assert!(KIND_RELAYED < QUIC_FIXED_BIT);
+};
+
+/// 经 relay 转发的包前面的头。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelayHeader {
+    /// 包要送到哪个节点。
+    pub dst: NodeId,
+    /// 包是哪个节点发出的。
+    pub src: NodeId,
+}
+
+impl RelayHeader {
+    /// 编码之后占的字节数：类型 1 字节，两个节点编号各 4 字节。
+    pub const LEN: usize = 1 + 2 * NodeId::WIRE_LEN;
+
+    #[must_use]
+    pub const fn to_bytes(self) -> [u8; Self::LEN] {
+        let [d0, d1, d2, d3] = self.dst.to_be_bytes();
+        let [s0, s1, s2, s3] = self.src.to_be_bytes();
+        [KIND_RELAYED, d0, d1, d2, d3, s0, s1, s2, s3]
+    }
+
+    /// `bytes` 的首字节已经确认是 [`KIND_RELAYED`]。
+    const fn from_bytes(bytes: &[u8; Self::LEN]) -> Result<Self, DatagramError> {
+        let [_, d0, d1, d2, d3, s0, s1, s2, s3] = *bytes;
+        match (NodeId::from_be_bytes([d0, d1, d2, d3]), NodeId::from_be_bytes([s0, s1, s2, s3])) {
+            (Some(dst), Some(src)) => Ok(Self { dst, src }),
+            _ => Err(DatagramError::ZeroNodeId),
+        }
+    }
+}
+
+/// 一个 UDP 数据报（或 TCP 中转里的一帧）解析出来的内容。借用原来的缓冲区，不拷贝。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Datagram<'a> {
+    /// 对端直连发来的连接包，就是整个数据报。
+    Conn(&'a [u8]),
+    /// 经 relay 转发的包。`packet` 是去掉中转头之后的连接包。
+    Relayed { header: RelayHeader, packet: &'a [u8] },
+}
+
+impl<'a> Datagram<'a> {
+    /// # Errors
+    ///
+    /// 数据报是空的、帧的类型不认识、中转头不完整或者里面的节点编号是 0。
+    /// 这些数据报都应该直接丢掉，不回应。
+    pub fn parse(datagram: &'a [u8]) -> Result<Self, DatagramError> {
+        let &first = datagram.first().ok_or(DatagramError::Empty)?;
+        if first & QUIC_FIXED_BIT != 0 {
+            return Ok(Self::Conn(datagram));
+        }
+        match first {
+            KIND_RELAYED => {
+                let (head, packet) = datagram
+                    .split_first_chunk::<{ RelayHeader::LEN }>()
+                    .ok_or(DatagramError::TruncatedRelayHeader { len: datagram.len() })?;
+                Ok(Self::Relayed { header: RelayHeader::from_bytes(head)?, packet })
+            }
+            kind => Err(DatagramError::UnknownKind(kind)),
+        }
+    }
+}
+
+/// 只取出一个经 relay 转发的数据报要去的节点，别的都不看。不是这种数据报时返回 `None`。
+///
+/// relay 用它决定往哪里转。内核一次交上来的一批数据报可能来自不同的节点、发往不同的节点，
+/// 所以要对每一个数据报调用，不能看了第一个就把整批转给同一个目的地。
+#[must_use]
+pub fn relayed_dst(datagram: &[u8]) -> Option<NodeId> {
+    match datagram.split_first_chunk::<{ 1 + NodeId::WIRE_LEN }>()? {
+        (&[KIND_RELAYED, d0, d1, d2, d3], _) => NodeId::from_be_bytes([d0, d1, d2, d3]),
+        _ => None,
+    }
+}
+
+/// 数据报解析不了的原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum DatagramError {
+    #[error("数据报是空的")]
+    Empty,
+    #[error("不认识的帧类型 {0:#04x}")]
+    UnknownKind(u8),
+    #[error("中转头要 {} 字节，整个数据报只有 {len} 字节", RelayHeader::LEN)]
+    TruncatedRelayHeader { len: usize },
+    #[error("中转头里的节点编号是 0")]
+    ZeroNodeId,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(raw: u32) -> NodeId {
+        NodeId::new(raw).unwrap()
+    }
+
+    fn relayed(dst: u32, src: u32, packet: &[u8]) -> Vec<u8> {
+        let mut datagram = RelayHeader { dst: node(dst), src: node(src) }.to_bytes().to_vec();
+        datagram.extend_from_slice(packet);
+        datagram
+    }
+
+    #[test]
+    fn packets_with_the_quic_fixed_bit_go_to_the_connection_untouched() {
+        for first in [0x40, 0x7f, 0xc0, 0xff] {
+            let datagram = [first, 1, 2, 3];
+            assert_eq!(Datagram::parse(&datagram), Ok(Datagram::Conn(&datagram)));
+            assert_eq!(relayed_dst(&datagram), None);
+        }
+    }
+
+    #[test]
+    fn relayed_frame_has_the_documented_layout() {
+        let datagram = relayed(2, 0x0a0b_0c0d, b"quic");
+        assert_eq!(datagram, [0x01, 0, 0, 0, 2, 0x0a, 0x0b, 0x0c, 0x0d, b'q', b'u', b'i', b'c']);
+    }
+
+    #[test]
+    fn relayed_frame_round_trips() {
+        let datagram = relayed(7, 9, b"payload");
+        let expected = Datagram::Relayed { header: RelayHeader { dst: node(7), src: node(9) }, packet: b"payload" };
+        assert_eq!(Datagram::parse(&datagram), Ok(expected));
+        assert_eq!(relayed_dst(&datagram), Some(node(7)));
+    }
+
+    #[test]
+    fn relayed_frame_may_carry_an_empty_packet() {
+        let datagram = relayed(7, 9, b"");
+        assert!(matches!(Datagram::parse(&datagram), Ok(Datagram::Relayed { packet: [], .. })));
+    }
+
+    #[test]
+    fn truncated_relay_header_is_rejected() {
+        let datagram = relayed(7, 9, b"");
+        for len in 1..RelayHeader::LEN {
+            assert_eq!(Datagram::parse(&datagram[..len]), Err(DatagramError::TruncatedRelayHeader { len }));
+        }
+        // 目的节点那 4 个字节不全时，relay 的快速路径也不能给出结果。
+        for len in 0..=NodeId::WIRE_LEN {
+            assert_eq!(relayed_dst(&datagram[..len]), None);
+        }
+    }
+
+    #[test]
+    fn zero_node_ids_are_rejected() {
+        assert_eq!(Datagram::parse(&[0x01, 0, 0, 0, 0, 0, 0, 0, 9]), Err(DatagramError::ZeroNodeId));
+        assert_eq!(Datagram::parse(&[0x01, 0, 0, 0, 7, 0, 0, 0, 0]), Err(DatagramError::ZeroNodeId));
+        assert_eq!(relayed_dst(&[0x01, 0, 0, 0, 0, 0, 0, 0, 9]), None);
+    }
+
+    #[test]
+    fn empty_and_unknown_datagrams_are_rejected() {
+        assert_eq!(Datagram::parse(&[]), Err(DatagramError::Empty));
+        for kind in [0x00, 0x02, 0x3f, 0x80, 0xbf] {
+            assert_eq!(Datagram::parse(&[kind, 0, 0, 0, 1, 0, 0, 0, 2]), Err(DatagramError::UnknownKind(kind)));
+            assert_eq!(relayed_dst(&[kind, 0, 0, 0, 1, 0, 0, 0, 2]), None);
+        }
+    }
+}
