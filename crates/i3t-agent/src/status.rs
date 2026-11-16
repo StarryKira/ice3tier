@@ -6,12 +6,13 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
 use i3t_access::ListenState;
-use i3t_model::control::{self, CredentialUsage, ExitReport, Route, RouteSince, SelfUpdate};
+use i3t_model::control::{self, CredentialUsage, ExitReport, LaneReport, Route, RouteSince, SelfUpdate};
 use i3t_model::netmap::Attachment;
 use i3t_model::update::UpdateStatus;
 use serde::{Deserialize, Serialize};
 
 use crate::control::LinkState;
+use crate::lanes;
 use crate::runtime::{Runtime, exit_report};
 
 /// 一个运行着的节点现在的样子。
@@ -44,6 +45,8 @@ pub struct LiveStatus {
     pub exit: Option<ExitReport>,
     /// 入口上各个接入凭据这次运行以来的用量。
     pub credentials: Vec<CredentialUsage>,
+    /// 独占 TCP（lane）。没有为任何对端打开、也从来没用过时没有。
+    pub lanes: Option<LaneReport>,
 }
 
 /// 和 controller 的那条长连接。
@@ -157,6 +160,8 @@ impl LiveStatus {
         });
         let exit = runtime.exit.stats();
         let counters = runtime.endpoint.relay_counters();
+        let lanes = lanes::report(&runtime.lanes.status());
+        let lanes_used = !lanes.peers.is_empty() || lanes.total != control::LaneCounts::default();
         Self {
             version: runtime.program.version.to_string(),
             uptime_secs: runtime.started.elapsed().as_secs(),
@@ -181,6 +186,7 @@ impl LiveStatus {
             }),
             exit: netmap.me.exit.is_some().then(|| exit_report(&exit)),
             credentials: runtime.credential_usage(),
+            lanes: lanes_used.then_some(lanes),
         }
     }
 }

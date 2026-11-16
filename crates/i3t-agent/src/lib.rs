@@ -8,6 +8,7 @@
 //! | [`control`] | 连 controller 的那条长连接：注册、收 netmap、上报、转发信令、取更新包、回答路由查询 |
 //! | [`join`] | 用注册令牌加入网络 |
 //! | [`node`] | 把各层装成一个运行着的节点 |
+//! | `lanes` | 独占 TCP（lane）：和共用的连接装成一个连接层，跟着 netmap 拨谁、接谁 |
 //! | [`drain`] | 排空：更新之前不再接新的流 |
 //! | [`selfcheck`] | 新程序的自检（`i3t self-check`） |
 //! | [`status`]、[`local`] | 运行着的节点的状态，和本机问它的接口（`i3t status`、`i3t routes`、`/metrics`） |
@@ -20,6 +21,7 @@ pub mod drain;
 mod flows;
 mod http;
 pub mod join;
+mod lanes;
 pub mod local;
 mod metrics;
 pub mod node;

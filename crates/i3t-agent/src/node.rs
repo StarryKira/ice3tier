@@ -12,7 +12,8 @@
 //! 1. 启动时先问更新库上一次更新怎么样了：新程序没被确认过太多次或者太久，这时已经换回旧程序，本进程直接要求重启。
 //! 2. 每次连上 controller 就向更新库确认一次：新程序连上了 controller 才算更新成功。
 //! 3. controller 的指示交给 [`update`](crate::update)，包经长连接取，状态的每次变化马上上报。
-//! 4. 更新进行到"排空中"时不再接新的流（见 [`drain`](crate::drain)）：入口和出口都明确拒绝新的请求，监听照常开着。
+//! 4. 更新进行到"排空中"时不再接新的流（见 [`drain`](crate::drain)）：入口和出口都明确拒绝新的请求，监听照常开着；
+//!    对端不再在和本节点之间的独占 TCP 上开新的流。
 //! 5. 程序文件换好之后把最后的状态报上去，然后返回 [`Outcome::Restart`]。
 
 use std::ffi::OsString;
@@ -38,10 +39,11 @@ use crate::control::{ControlLink, LinkSetup, LinkState, Timing};
 use crate::drain::Drain;
 use crate::flows;
 use crate::join::hello;
+use crate::lanes::NodeLanes;
 use crate::local::LocalServers;
 use crate::persist::{self, StatePorts};
 use crate::program::Program;
-use crate::runtime::{Parts, Runtime};
+use crate::runtime::{NodeAccess, NodeExit, Parts, Runtime};
 use crate::state::StateDir;
 use crate::update::Driver;
 
@@ -163,15 +165,17 @@ pub async fn run(state: StateDir, source: Source, program: Program, shutdown: im
     let quota =
         quota.map_or_else(QuotaState::default, |record| QuotaState { period_start: record.period_start, used_bytes: record.used_bytes });
     let ports = Arc::new(StatePorts::open(state.clone()));
-    let access = Arc::new(Access::new(Arc::clone(&endpoint), outbound.clone(), local_rx.clone()).with_port_book(ports));
+    // 入口和出口用的连接层：共用的连接，加上按节点对的设置给 TCP 流用的独占 TCP。
+    let lanes = Arc::new(NodeLanes::new(&key, Arc::clone(&endpoint))?);
+    let connector = lanes.connector();
+    let access = Arc::new(Access::new(Arc::clone(&connector), outbound.clone(), local_rx.clone()).with_port_book(ports));
     // 出口接力 UDP 端口转发时和入口共用一个开数据报上下文的：对端发回来的数据报只由入口的那一个分发。
-    let exit = Arc::new(
-        Exit::new(local_rx.clone(), outbound, Arc::clone(&endpoint)).with_quota_state(quota).with_opener(access.datagram_opener()),
-    );
+    let exit = Arc::new(Exit::new(local_rx.clone(), outbound, connector).with_quota_state(quota).with_opener(access.datagram_opener()));
+    let follow_lanes = tokio::spawn(Arc::clone(&lanes).follow(local_rx.clone()));
 
     let serve_exit = tokio::spawn({
-        let (endpoint, exit) = (Arc::clone(&endpoint), Arc::clone(&exit));
-        async move { i3t_flow::serve(&*endpoint, exit).await }
+        let (acceptor, exit) = (lanes.acceptor(), Arc::clone(&exit));
+        async move { i3t_flow::serve(&*acceptor, exit).await }
     });
     let save_quota = tokio::spawn(persist::save_quota(state.clone(), Arc::clone(&exit)));
     let state_for_quota = state.clone();
@@ -191,6 +195,7 @@ pub async fn run(state: StateDir, source: Source, program: Program, shutdown: im
         self_update,
         controller: controller.as_ref().map(|controller| controller.address.clone()),
         endpoint: Arc::clone(&endpoint),
+        lanes: Arc::clone(&lanes),
         exit: Arc::clone(&exit),
         access: Arc::clone(&access),
         netmap: local_rx,
@@ -245,6 +250,7 @@ pub async fn run(state: StateDir, source: Source, program: Program, shutdown: im
                 link: &mut link,
                 link_state: &link_state_tx,
                 endpoint: &endpoint,
+                lanes: &lanes,
                 exit: &exit,
                 access: &access,
                 local: &local_tx,
@@ -274,6 +280,7 @@ pub async fn run(state: StateDir, source: Source, program: Program, shutdown: im
     persist::save_quota_now(&state_for_quota, &exit);
     count_flows.abort();
     follow_routes.abort();
+    follow_lanes.abort();
     serve_access.abort();
     serve_exit.abort();
     endpoint.close().await;
@@ -308,8 +315,9 @@ struct Managed<'a> {
     /// 长连接的状态转到这里，给本机状态接口和指标看。
     link_state: &'a watch::Sender<LinkState>,
     endpoint: &'a Arc<Endpoint>,
-    exit: &'a Exit,
-    access: &'a Access<Endpoint, Outbound<Os>>,
+    lanes: &'a NodeLanes,
+    exit: &'a NodeExit,
+    access: &'a NodeAccess,
     local: &'a watch::Sender<Arc<Netmap>>,
     config: &'a Config,
     drain: &'a mut Drain,
@@ -327,7 +335,7 @@ impl Managed<'_> {
         updates: Option<impl Future<Output = i3t_update::RestartRequired>>,
         shutdown: impl Future<Output = ()>,
     ) -> anyhow::Result<Outcome> {
-        let Self { link, link_state, endpoint, exit, access, local, config, drain, updater, mut awaiting_confirmation } = self;
+        let Self { link, link_state, endpoint, lanes, exit, access, local, config, drain, updater, mut awaiting_confirmation } = self;
         let signals = link.signal_sender();
         endpoint.set_signal_hook(move |to, signal| {
             // 信令是尽力而为的：队列满了就丢，路径层自己会重试。
@@ -372,6 +380,8 @@ impl Managed<'_> {
                     let detail = drain.detail();
                     exit.set_draining(detail.clone());
                     access.set_draining(detail);
+                    // 对端不再在和本节点之间的 lane 上开新的流；已经开过来的照样被出口和入口按排空拒绝。
+                    lanes.set_draining(draining);
                 }
                 Some((from, signal)) = link.next_signal() => endpoint.deliver_signal(from, signal),
                 Ok(()) = states.changed() => {

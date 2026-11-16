@@ -1,7 +1,7 @@
 //! 把正在运行的节点的状态打印成给人看的样子：`i3t status` 的下半段，和 `i3t routes`。
 
 use i3t_agent::status::{Link, LiveStatus};
-use i3t_model::control::Route;
+use i3t_model::control::{LaneReport, Route};
 use i3t_model::update::{FailureKind, UpdateStatus};
 
 /// 没有值的地方显示的短横。
@@ -53,11 +53,47 @@ pub fn status(live: &LiveStatus) {
     });
     table(&["NAME", "BIND", "ACTIVE", "UP/DOWN", "STATE"], &rows.collect::<Vec<_>>());
 
+    if let Some(lanes) = &live.lanes {
+        print_lanes(live, lanes);
+    }
+
     println!("\n路由：");
     if live.routes.is_empty() {
         println!("  （没有对端）");
     }
     route_table(live);
+}
+
+/// 独占 TCP：每个打开了它的对端一行。
+fn print_lanes(live: &LiveStatus, lanes: &LaneReport) {
+    println!("\n独占 TCP（只承载 TCP 流；和对端之间共用的连接照常在，它的路见下面的路由表）：");
+    let name =
+        |peer: u32| live.routes.iter().find(|route| route.peer == peer).map_or_else(|| format!("#{peer}"), |route| route.name.clone());
+    let rows = lanes.peers.iter().map(|peer| {
+        let counts = &peer.counts;
+        vec![
+            name(peer.peer.get()),
+            if peer.dials { "dial" } else { "accept" }.to_owned(),
+            if peer.control { "up" } else { "down" }.to_owned(),
+            format!("{}/{}/{}", peer.idle, peer.ready, peer.parked_at_peer),
+            counts.in_use.to_string(),
+            format!("{}({})", counts.claims, counts.claims_waited),
+            counts.fallbacks.to_string(),
+            counts.dial_failures.to_string(),
+            format!("{}/{}/{}", counts.sealed_bytes, counts.passthrough_bytes, counts.spliced_bytes),
+        ]
+    });
+    let header =
+        ["PEER", "ROLE", "CONTROL", "IDLE/READY/PARKED", "IN-USE", "CLAIMS(WAITED)", "FALLBACKS", "DIAL-FAIL", "SEALED/PASS/SPLICED"];
+    table(&header, &rows.collect::<Vec<_>>());
+    let failures = &lanes.handshake_failures;
+    let failed = failures.deadline + failures.unknown_key + failures.tls + failures.protocol + failures.busy;
+    if failed > 0 {
+        println!(
+            "  拨进来没握手成功 {failed} 次：超时 {}，不认识的公钥 {}，TLS {}，协议 {}，太多 {}",
+            failures.deadline, failures.unknown_key, failures.tls, failures.protocol, failures.busy
+        );
+    }
 }
 
 pub fn routes(live: &LiveStatus) {

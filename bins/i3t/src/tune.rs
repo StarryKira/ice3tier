@@ -117,7 +117,14 @@ pub(crate) fn survey(sysctl: &impl Sysctl, port: u16) -> Vec<Finding> {
         check(
             "net.ipv4.tcp_slow_start_after_idle",
             Want::Exactly("0"),
-            "经过节点的 TCP 连接（出口到目标的、UDP 用不了时到 relay 的）安静一会儿之后不把发送窗口收回去。流式的应答停一下再来时，不用从头慢启动",
+            "经过节点的 TCP 连接（出口到目标的、UDP 用不了时到 relay 的、独占 TCP）安静一会儿之后不把发送窗口收回去。流式的应答停一下再来时，不用从头慢启动",
+        ),
+        check(
+            "net.ipv4.tcp_tw_reuse",
+            Want::Exactly("1"),
+            "打开了独占 TCP 的节点每条用户连接用一条新的 TCP，用完就关。拨号的一方每秒关掉几百条时，留在 TIME_WAIT 里的连接占着本地端口\
+             （到同一个对端地址只有两万多个），新的拨号会因为端口用完而失败。1 让拨出去的连接复用 TIME_WAIT 里的端口（靠 TCP 时间戳判断安全）；\
+             默认的 2 只对回环地址这样做",
         ),
     ];
 
@@ -272,6 +279,7 @@ mod tests {
             ("net.core.rmem_max", "212992"),
             ("net.core.wmem_max", "212992"),
             ("net.ipv4.tcp_slow_start_after_idle", "1"),
+            ("net.ipv4.tcp_tw_reuse", "2"),
             ("net.ipv4.tcp_congestion_control", "cubic"),
             ("net.ipv4.tcp_available_congestion_control", "reno cubic bbr"),
             ("net.ipv4.ip_local_reserved_ports", ""),
@@ -284,11 +292,12 @@ mod tests {
     }
 
     #[test]
-    fn an_untuned_machine_gets_the_four_changes() {
+    fn an_untuned_machine_gets_the_five_changes() {
         let findings = survey(&stock(), 20330);
         assert_eq!(verdict_of(&findings, "net.core.rmem_max"), &Verdict::Change("4194304".to_owned()));
         assert_eq!(verdict_of(&findings, "net.core.wmem_max"), &Verdict::Change("4194304".to_owned()));
         assert_eq!(verdict_of(&findings, "net.ipv4.tcp_slow_start_after_idle"), &Verdict::Change("0".to_owned()));
+        assert_eq!(verdict_of(&findings, "net.ipv4.tcp_tw_reuse"), &Verdict::Change("1".to_owned()), "默认的 2 只对回环生效");
         assert_eq!(verdict_of(&findings, "net.ipv4.tcp_congestion_control"), &Verdict::Change("bbr".to_owned()));
         assert_eq!(verdict_of(&findings, "net.ipv4.ip_local_reserved_ports"), &Verdict::Fine, "20330 不在随机端口的范围里，不用保留");
     }
@@ -337,7 +346,7 @@ mod tests {
         let mut machine = stock();
         let findings = survey(&machine, 40000);
         let changed = apply(&mut machine, &findings).unwrap();
-        assert_eq!(changed.len(), 5);
+        assert_eq!(changed.len(), 6);
         assert!(survey(&machine, 40000).iter().all(|finding| finding.verdict == Verdict::Fine));
     }
 

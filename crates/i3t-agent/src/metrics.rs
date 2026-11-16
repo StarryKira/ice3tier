@@ -4,13 +4,15 @@
 //!
 //! 现在有的：流（入口、出口各有多少在进行，出口一共收到过多少）、字节数、没建成的请求按归因分类、
 //! 出口的配额，按凭据的用量，经各个出口出去的流（发起这一侧看到的），relay 的转发和丢弃、
-//! 到每个对端走的是哪一种路和延迟、和 controller 的连接、更新的状态。
+//! 到每个对端走的是哪一种路和延迟、独占 TCP（lane）的水位和计数、和 controller 的连接、更新的状态。
 //! 白皮书说的"不做交叉组合"：按凭据和按出口是两组各自独立的数，没有"某个凭据经某个出口"这样的组合。
 
 use i3t_conn::DropReason;
+use i3t_lane::LaneStatus;
 use i3t_metrics::Exposition;
 use i3t_model::control::Route;
 use i3t_model::update::UpdateStatus;
+use i3t_proto::NodeId;
 
 use crate::control::LinkState;
 use crate::runtime::Runtime;
@@ -121,8 +123,55 @@ pub(crate) fn render(runtime: &Runtime) -> String {
         }
     }
 
+    lane_metrics(&mut out, &runtime.lanes.status(), &name_of);
+
     out.gauge("i3t_update_state", "程序更新进行到哪一步", &[("state", update_label(&runtime.update.borrow()))], 1.0);
     out.finish()
+}
+
+/// 独占 TCP（lane）：每个打开了它的对端一组，加上全节点的握手失败。
+fn lane_metrics(out: &mut Exposition, status: &LaneStatus, name_of: &impl Fn(NodeId) -> String) {
+    for peer in &status.peers {
+        let name = name_of(peer.peer);
+        let label = [("peer", name.as_str())];
+        let counts = &peer.counts;
+        out.gauge(
+            "i3t_lane_control_up",
+            "和每个对端之间的控制 lane 在不在：在是 1，不在时新的 TCP 流走共用的连接",
+            &label,
+            f64::from(u8::from(peer.control)),
+        );
+        let help = "空闲的 lane：parked_here 是对端停在本节点的，ready 是本节点拨好留给自己的，parked_at_peer 是本节点停在对端的";
+        for (pool, value) in [("parked_here", peer.idle), ("ready", peer.ready), ("parked_at_peer", peer.parked_at_peer)] {
+            out.gauge("i3t_lane_idle", help, &[("peer", name.as_str()), ("pool", pool)], as_gauge(value));
+        }
+        out.gauge("i3t_lane_in_use", "正在承载流的 lane", &label, as_gauge(counts.in_use));
+        out.gauge("i3t_lane_dialling", "正在拨号（连接或握手）的 lane", &label, as_gauge(counts.dialling));
+        out.counter("i3t_lane_claims_total", "从对端停在本节点的 lane 里取用的次数", &label, counts.claims);
+        out.counter("i3t_lane_claims_waited_total", "取用时池是空的、要等补拨的次数", &label, counts.claims_waited);
+        let waited = u64::try_from(counts.claim_wait.as_millis()).unwrap_or(u64::MAX);
+        out.counter("i3t_lane_claim_wait_milliseconds_total", "取用时一共等了多少毫秒", &label, waited);
+        out.counter("i3t_lane_claims_failed_total", "取不到 lane 的次数", &label, counts.claims_failed);
+        out.counter("i3t_lane_fallbacks_total", "本来要走 lane、取不到改走共用连接的 TCP 流", &label, counts.fallbacks);
+        out.counter("i3t_lane_dial_failures_total", "本节点拨 lane 失败的次数", &label, counts.dial_failures);
+        out.counter("i3t_lane_refused_total", "握手成功、但因为用途或数量不对被关掉的 lane", &label, counts.refused);
+        let help = "lane 上搬运的流数据字节数（两个方向合计）：sealed 在 TLS 里，passthrough 不再加密、在程序里搬，spliced 由内核直接搬";
+        for (mode, value) in [("sealed", counts.sealed_bytes), ("passthrough", counts.passthrough_bytes), ("spliced", counts.spliced_bytes)]
+        {
+            out.counter("i3t_lane_bytes_total", help, &[("peer", name.as_str()), ("mode", mode)], value);
+        }
+    }
+    let failures = &status.handshake_failures;
+    let help = "拨进来、没有握手成功的连接，按原因分";
+    for (reason, value) in [
+        ("deadline", failures.deadline),
+        ("unknown_key", failures.unknown_key),
+        ("tls", failures.tls),
+        ("protocol", failures.protocol),
+        ("busy", failures.busy),
+    ] {
+        out.counter("i3t_lane_handshake_failures_total", help, &[("reason", reason)], value);
+    }
 }
 
 /// 把一个数当作状态量的值。这里用到的都是小数目（流数、会话数、版本号），放不进 `u32` 时停在最大值。

@@ -8,8 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use i3t_access::PortBook;
-use i3t_exit::{Exit, QuotaState};
+use i3t_exit::QuotaState;
 
+use crate::runtime::NodeExit;
 use crate::state::{QuotaRecord, StateDir};
 
 /// 出口的用量多久存一次。节点被杀掉时最多丢这么久的计数。
@@ -47,7 +48,7 @@ impl PortBook for StatePorts {
 }
 
 /// 每隔一会儿把出口的用量存下来（有变化才写），直到任务被取消。
-pub(crate) async fn save_quota(state: StateDir, exit: Arc<Exit>) {
+pub(crate) async fn save_quota(state: StateDir, exit: Arc<NodeExit>) {
     let mut saved = None;
     let mut tick = tokio::time::interval(QUOTA_SAVE_INTERVAL);
     loop {
@@ -61,7 +62,7 @@ pub(crate) async fn save_quota(state: StateDir, exit: Arc<Exit>) {
 }
 
 /// 节点停下之前最后存一次。
-pub(crate) fn save_quota_now(state: &StateDir, exit: &Exit) {
+pub(crate) fn save_quota_now(state: &StateDir, exit: &NodeExit) {
     let current = exit.quota_state();
     if current.used_bytes > 0 {
         save(state, current);

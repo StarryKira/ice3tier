@@ -1,6 +1,7 @@
 //! 节点上"活跃的流"有多少：自动更新等的就是它变成零（白皮书 §10.5）。
 //!
 //! 算的是以这个节点为起点或终点的流：入口上正在进行的连接，加上出口正在处理的流和数据报上下文。
+//! 走独占 TCP（lane）的流也在其中；正在承载流的 lane 至少和它们一样多（见 [`Sample::active`]），空闲的 lane 不算。
 //! 替别人中转一般不算：relay 重启时挂靠它的节点会换到别的 relay 上，连接不断。
 //! 例外是本节点是网络里**唯一的** relay：没有别的路可换，重启会断掉经它中转的连接，所以它正在替人转发时算作不空闲。
 //! 这一条 controller 不用管，节点自己知道：等空闲的更新在唯一的 relay 上自然会等到没有人经它转发。
@@ -49,6 +50,8 @@ pub(crate) struct Sample {
     pub(crate) ingress: usize,
     /// 出口正在处理的流和数据报上下文。
     pub(crate) exit: usize,
+    /// 正在承载流的 lane。
+    pub(crate) lanes: usize,
     /// 本节点是唯一的 relay，并且正在替人转发。
     pub(crate) sole_relay_forwarding: bool,
 }
@@ -56,7 +59,9 @@ pub(crate) struct Sample {
 impl Sample {
     /// 更新要等它变成零的那个数。
     pub(crate) fn active(self) -> usize {
-        self.ingress.saturating_add(self.exit).saturating_add(usize::from(self.sole_relay_forwarding))
+        // lane 上的流在入口或出口已经算过一次；lane 只是保证它没算到的那一刻（例如流刚交给 lane、还没进出口的计数）也不空闲。
+        let streams = self.ingress.saturating_add(self.exit).max(self.lanes);
+        streams.saturating_add(usize::from(self.sole_relay_forwarding))
     }
 }
 
@@ -116,8 +121,11 @@ mod tests {
 
     #[test]
     fn relaying_only_adds_to_the_count_for_a_sole_relay() {
-        assert_eq!(Sample { ingress: 2, exit: 3, sole_relay_forwarding: false }.active(), 5);
-        assert_eq!(Sample { ingress: 0, exit: 0, sole_relay_forwarding: true }.active(), 1);
+        assert_eq!(Sample { ingress: 2, exit: 3, lanes: 0, sole_relay_forwarding: false }.active(), 5);
+        assert_eq!(Sample { ingress: 0, exit: 0, lanes: 0, sole_relay_forwarding: true }.active(), 1);
+        // lane 上的流已经在入口或出口算过，不重复算；它们都还没算到时 lane 也让节点不空闲。
+        assert_eq!(Sample { ingress: 2, exit: 0, lanes: 2, sole_relay_forwarding: false }.active(), 2);
+        assert_eq!(Sample { ingress: 0, exit: 0, lanes: 1, sole_relay_forwarding: false }.active(), 1);
         assert_eq!(Sample::default().active(), 0);
     }
 

@@ -18,10 +18,16 @@ use tokio::sync::{broadcast, watch};
 
 use crate::control::LinkState;
 use crate::flows::{self, RelayActivity, Sample};
+use crate::lanes::{self, NodeLanes};
 use crate::node::BUILTIN_LISTENERS;
 use crate::program::Program;
 use crate::route_detail;
 use crate::status::listen_state;
+
+/// 节点里的出口：流经共用的连接或者 lane 进来。
+pub(crate) type NodeExit = Exit<Os, lanes::Connector>;
+/// 节点里的入口：TCP 流按节点对的设置走 lane 或者共用的连接。
+pub(crate) type NodeAccess = Access<lanes::Connector, Outbound<Os>>;
 
 /// 一个运行着的节点。
 pub(crate) struct Runtime {
@@ -32,8 +38,9 @@ pub(crate) struct Runtime {
     /// controller 的地址；静态模式下没有。
     pub(crate) controller: Option<String>,
     pub(crate) endpoint: Arc<Endpoint>,
-    pub(crate) exit: Arc<Exit>,
-    pub(crate) access: Arc<Access<Endpoint, Outbound<Os>>>,
+    pub(crate) lanes: Arc<NodeLanes>,
+    pub(crate) exit: Arc<NodeExit>,
+    pub(crate) access: Arc<NodeAccess>,
     /// 各层实际在用的 netmap（按本机配置调整过的）。
     pub(crate) netmap: watch::Receiver<Arc<Netmap>>,
     /// 这次运行的编号，上报里带着，controller 靠它知道累计的计数是不是从头开始了。
@@ -54,8 +61,9 @@ pub(crate) struct Parts {
     pub(crate) self_update: SelfUpdate,
     pub(crate) controller: Option<String>,
     pub(crate) endpoint: Arc<Endpoint>,
-    pub(crate) exit: Arc<Exit>,
-    pub(crate) access: Arc<Access<Endpoint, Outbound<Os>>>,
+    pub(crate) lanes: Arc<NodeLanes>,
+    pub(crate) exit: Arc<NodeExit>,
+    pub(crate) access: Arc<NodeAccess>,
     pub(crate) netmap: watch::Receiver<Arc<Netmap>>,
     pub(crate) link: Option<watch::Receiver<LinkState>>,
     pub(crate) update: watch::Receiver<UpdateStatus>,
@@ -64,13 +72,14 @@ pub(crate) struct Parts {
 
 impl Runtime {
     pub(crate) fn new(parts: Parts) -> Self {
-        let Parts { program, self_update, controller, endpoint, exit, access, netmap, link, update, flows } = parts;
+        let Parts { program, self_update, controller, endpoint, lanes, exit, access, netmap, link, update, flows } = parts;
         Self {
             program,
             self_update,
             started: Instant::now(),
             controller,
             endpoint,
+            lanes,
             exit,
             access,
             netmap,
@@ -94,9 +103,10 @@ impl Runtime {
             .chain(status.forwards.iter().map(|forward| forward.active.get()))
             .sum();
         let exit = usize::try_from(self.exit.stats().active).unwrap_or(usize::MAX);
+        let lanes = usize::try_from(self.lanes.status().total.in_use).unwrap_or(usize::MAX);
         let forwarding =
             self.relay_activity.lock().expect("relay activity mutex poisoned").observe(&self.endpoint.relay_counters(), Instant::now());
-        Sample { ingress, exit, sole_relay_forwarding: forwarding && flows::is_only_relay(&self.netmap.borrow()) }
+        Sample { ingress, exit, lanes, sole_relay_forwarding: forwarding && flows::is_only_relay(&self.netmap.borrow()) }
     }
 
     /// 报给 controller 的内容。`routes` 是完整的路由表，长连接自己挑要发的条目。
@@ -162,6 +172,7 @@ impl Runtime {
             listeners,
             forwards,
             route_kinds: self.endpoint.path_reports().iter().filter_map(route_detail::kind).collect(),
+            lanes: Some(Box::new(lanes::report(&self.lanes.status()))),
         }
     }
 
