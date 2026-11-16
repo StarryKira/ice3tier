@@ -420,3 +420,206 @@ def hold_port(host: Host, port: int) -> None:
            f"s.bind(('127.0.0.1', {port}))\ns.listen()\ntime.sleep(3600)\n"
     host.spawn(sys.executable, "-c", code)
     wait_until(lambda: f"127.0.0.1:{port} " in host.run("ss", "-lnt").stdout, what=f"{host.name} 上的 {port} 端口被占住")
+
+
+# 下面是独占 TCP（lane）的场景（test_lane.py）用的。
+
+# 一个按路径决定怎么回答的 HTTP 服务，同时听明文和 TLS。数据是按长度做种子的伪随机字节，测试那边算得出它的摘要，
+# 收到的字节一个不差才对得上。参数：监听地址、明文端口、TLS 端口、证书、私钥。
+#   GET  /blob/<n>         n 字节
+#   POST /digest           回答请求体的 SHA-256（十六进制）
+#   GET  /reset/<n>        说有 10n 字节，发出 n 字节之后用 RST 断开（上游在回答中途出了事）
+#   GET  /slow/<s>/<n>     n 字节：先发一半，静默 s 秒，再发另一半
+BLOB_SERVER = r"""
+import hashlib, http.server, random, socket, socketserver, ssl, struct, sys, threading, time
+def blob(n):
+    return random.Random(n).randbytes(n)
+class Handler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def answer(self, length):
+        self.send_response(200)
+        self.send_header("Content-Length", str(length))
+        self.end_headers()
+    def do_GET(self):
+        parts = self.path.strip("/").split("/")
+        if parts[0] == "blob":
+            body = blob(int(parts[1]))
+            self.answer(len(body))
+            self.wfile.write(body)
+        elif parts[0] == "reset":
+            n = int(parts[1])
+            self.answer(10 * n)
+            self.wfile.write(blob(n))
+            self.wfile.flush()
+            time.sleep(0.5)
+            # 不发 TLS 的 close_notify，也不发 FIN：直接 RST。
+            self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            self.connection.close()
+            self.close_connection = True
+        elif parts[0] == "slow":
+            seconds, n = float(parts[1]), int(parts[2])
+            body = blob(n)
+            self.answer(n)
+            self.wfile.write(body[:n // 2])
+            self.wfile.flush()
+            time.sleep(seconds)
+            self.wfile.write(body[n // 2:])
+        else:
+            self.send_error(404)
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        digest = hashlib.sha256()
+        while length > 0:
+            chunk = self.rfile.read(min(length, 1 << 16))
+            if not chunk:
+                break
+            digest.update(chunk)
+            length -= len(chunk)
+        body = digest.hexdigest().encode()
+        self.answer(len(body))
+        self.wfile.write(body)
+    def log_message(self, *args):
+        pass
+class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 1024
+bind, plain, secure, cert, key = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4], sys.argv[5]
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain(cert, key)
+tls = Server((bind, secure), Handler)
+tls.socket = context.wrap_socket(tls.socket, server_side=True)
+threading.Thread(target=tls.serve_forever, daemon=True).start()
+Server((bind, plain), Handler).serve_forever()
+"""
+
+
+def blob_digest(size: int) -> str:
+    """`BLOB_SERVER` 的 /blob/<size> 回答的字节的 SHA-256。"""
+    import hashlib
+    import random
+
+    return hashlib.sha256(random.Random(size).randbytes(size)).hexdigest()
+
+
+def start_blob_server(host: Host, work: Path) -> Path:
+    """在 `host` 上起 `BLOB_SERVER`，明文在 80、TLS 在 443（出口默认只放行这两个端口）。返回给客户端用的证书。"""
+    cert, key = work / f"{host.name}-cert.pem", work / f"{host.name}-key.pem"
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-days", "2",
+                    "-subj", f"/CN={host.ip}", "-addext", f"subjectAltName=IP:{host.ip}", "-keyout", str(key), "-out", str(cert)],
+                   check=True, capture_output=True)
+    host.spawn(sys.executable, "-c", BLOB_SERVER, "0.0.0.0", "80", "443", str(cert), str(key))
+    wait_until(lambda: ":443 " in host.run("ss", "-lnt").stdout and ":80 " in host.run("ss", "-lnt").stdout,
+               what=f"{host.name} 上的数据服务启动")
+    return cert
+
+
+def fetch(node: Node, url: str, *, via: Node | None, cert: Path | None = None, proxy: str = "socks5", timeout: float = 60,
+          upload: Path | None = None) -> tuple[int, str, str]:
+    """从 `node` 所在的机器经它的本机代理入口取 `url`，返回 (curl 的退出码, 应答体, curl 的错误输出)。
+
+    应答体比 1KB 长、或者不是文本时换成它的 SHA-256（十六进制）。`upload` 是要 POST 上去的文件。
+    """
+    user = f"{via.virtual_ip}@" if via else ""
+    if proxy == "socks5":
+        proxy_args = f"-x socks5h://{user}127.0.0.1:1080"
+    else:
+        proxy_args = f"-p -x http://{user.rstrip('@') + ':x@' if via else ''}127.0.0.1:1081"
+    tls = f"--cacert {cert}" if cert else ""
+    body = f"--data-binary @{upload} -H 'Content-Type: application/octet-stream'" if upload else ""
+    answer = node.state / "answer"
+    script = (f"curl -sS --max-time {timeout} {proxy_args} {tls} {body} -o {answer} '{url}'; code=$?; "
+              f"if [ $(stat -c %s {answer} 2>/dev/null || echo 0) -le 1024 ] && iconv -f utf-8 -t utf-8 {answer} >/dev/null 2>&1; "
+              f"then cat {answer}; elif [ -e {answer} ]; then sha256sum {answer} | cut -d' ' -f1; fi; rm -f {answer}; echo $code >&2")
+    done = node.host.run("bash", "-c", script, check=False, timeout=timeout + 10)
+    lines = done.stderr.strip().splitlines()
+    code = int(lines[-1]) if lines and lines[-1].isdigit() else -1
+    return code, done.stdout.strip(), "\n".join(lines[:-1])
+
+
+def blob_file(node: Node, size: int) -> Path:
+    """`node` 的状态目录里一个内容和 /blob/<size> 一样的文件，上传用。"""
+    import random
+
+    path = node.state / f"blob-{size}"
+    if not path.exists():
+        path.write_bytes(random.Random(size).randbytes(size))
+    return path
+
+
+def node_metrics(node: Node) -> str:
+    """节点本机的 /metrics。"""
+    return node.host.run("curl", "-sS", "--max-time", "5", "http://127.0.0.1:20333/metrics", check=False).stdout
+
+
+def metric(text: str, name: str, **labels: str) -> float:
+    """`text`（Prometheus 文本）里名字是 `name`、标签都对得上的样本之和。"""
+    import re
+
+    total = 0.0
+    pattern = re.compile(rf"^{re.escape(name)}(\{{(.*?)\}})? (\S+)$")
+    for line in text.splitlines():
+        match = pattern.match(line)
+        if not match:
+            continue
+        found = dict(re.findall(r'(\w+)="([^"]*)"', match.group(2) or ""))
+        if all(found.get(key) == value for key, value in labels.items()):
+            total += float(match.group(3))
+    return total
+
+
+LANE_COUNTERS = ("claims", "claims_waited", "claims_failed", "fallbacks", "dial_failures", "refused")
+
+
+def lane_counts(node: Node, peer: Node | None = None) -> dict[str, float]:
+    """`node` 上和 `peer`（不写时是全部对端）之间的独占 TCP 的计数和水位，读自它的 /metrics。"""
+    text = node_metrics(node)
+    labels = {"peer": peer.name} if peer else {}
+    counts = {name: metric(text, f"i3t_lane_{name}_total", **labels) for name in LANE_COUNTERS}
+    counts["claim_wait_ms"] = metric(text, "i3t_lane_claim_wait_milliseconds_total", **labels)
+    counts["in_use"] = metric(text, "i3t_lane_in_use", **labels)
+    counts["dialling"] = metric(text, "i3t_lane_dialling", **labels)
+    counts["control_up"] = metric(text, "i3t_lane_control_up", **labels)
+    for pool in ("parked_here", "ready", "parked_at_peer"):
+        counts[pool] = metric(text, "i3t_lane_idle", pool=pool, **labels)
+    for mode in ("sealed", "passthrough", "spliced"):
+        counts[f"{mode}_bytes"] = metric(text, "i3t_lane_bytes_total", mode=mode, **labels)
+    counts["carried_bytes"] = counts["sealed_bytes"] + counts["passthrough_bytes"] + counts["spliced_bytes"]
+    for reason in ("deadline", "unknown_key", "tls", "protocol", "busy"):
+        counts[f"handshake_{reason}"] = metric(text, "i3t_lane_handshake_failures_total", reason=reason)
+    return counts
+
+
+def lane_line(node: Node, peer: Node | None = None) -> str:
+    """一行给人看的独占 TCP 计数。"""
+    c = lane_counts(node, peer)
+    return (f"{node.name}：控制 {c['control_up']:.0f}，空闲 {c['parked_here']:.0f}/{c['ready']:.0f}/{c['parked_at_peer']:.0f}，"
+            f"在用 {c['in_use']:.0f}，取用 {c['claims']:.0f}（等过 {c['claims_waited']:.0f}，共 {c['claim_wait_ms']:.0f}ms，"
+            f"没取到 {c['claims_failed']:.0f}），改走共用 {c['fallbacks']:.0f}，拨号失败 {c['dial_failures']:.0f}，拒绝 {c['refused']:.0f}，"
+            f"字节 加密 {c['sealed_bytes'] / 1e6:.1f}MB / 程序搬 {c['passthrough_bytes'] / 1e6:.1f}MB / 内核搬 {c['spliced_bytes'] / 1e6:.1f}MB")
+
+
+def lane_peer(node: Node, *, lane: str, **options) -> dict:
+    """别的节点的 netmap 里打开了独占 TCP 的 `node`。"""
+    return {**node.as_peer(**options), "lane": lane}
+
+
+def set_nat_timeouts(nat: Host, udp_s: int, tcp_s: int) -> None:
+    """把 NAT 回收 UDP 和 TCP 映射的时间调短，像家用路由器那样。"""
+    nat.run("sysctl", "-qw", f"net.netfilter.nf_conntrack_udp_timeout={udp_s}", f"net.netfilter.nf_conntrack_udp_timeout_stream={udp_s}",
+            f"net.netfilter.nf_conntrack_tcp_timeout_established={tcp_s}")
+
+
+def block_tcp_port(host: Host, port: int, blocked: bool = True) -> None:
+    """`host` 不接受别人连它的 TCP 端口 `port`（直接丢掉，像防火墙那样），别的流量不受影响。"""
+    host.run("nft", "delete", "table", "inet", "notcp", check=False)
+    if blocked:
+        rules = f"""
+table inet notcp {{
+    chain in {{
+        type filter hook input priority filter;
+        iifname != "lo" tcp dport {port} drop
+    }}
+}}
+"""
+        host.run("nft", "-f", "-", input=rules)

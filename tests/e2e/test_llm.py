@@ -8,6 +8,7 @@
 
 --long   sse_long_thinking 的静默从 75 秒改成 10 分钟。
 --pair   按节点对的设置，原样合进入口和出口互相看到的对端条目（静态 netmap 的 peers）。见 apply_pair_setting。
+         例如 '{"lane": "always"}' 让入口和出口之间的 TCP 流走独占 TCP；这时每次负载之后打出两边的 lane 计数。
 --keep   留下每个场景的工作目录：节点日志、场景文件、每次负载的结果 JSON 和表。
 
 需要 I3T_BIN_DIR 下有 i3t 和 i3t-llmgw（cargo build --release -p i3t -p i3t-llmgw）。
@@ -29,7 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lab as lablib  # noqa: E402
-from harness import Checks, Node, binary, current_route, route_changes, shape_between, tail  # noqa: E402
+from harness import Checks, Node, binary, current_route, lane_line, route_changes, shape_between, tail  # noqa: E402
 from lab import Host, Lab, Nat, NatKind, Shape, wait_until  # noqa: E402
 
 # 家用路由器回收 UDP 映射比连接的保活（15 秒）慢一点、比连接的空闲超时（30 秒）快；TCP 的映射也设得短，
@@ -127,6 +128,9 @@ class Load:
         print("\n".join("  | " + line for line in text.rstrip().splitlines()), flush=True)
         if not self.out.exists():
             raise RuntimeError(f"负载端没有写出结果（退出码 {self.proc.returncode}）：{text[-1500:]}")
+        if "lane" in PAIR_SETTING:
+            # 节点对打开了独占 TCP：这次负载之后两边的 lane 计数（从启动累计），看流是不是真的走了 lane、有没有改走共用的连接。
+            print(f"  | 独占 TCP {lane_line(self.gw.entry, self.gw.exit)}\n  | 独占 TCP {lane_line(self.gw.exit, self.gw.entry)}", flush=True)
         return json.loads(self.out.read_text())
 
 
