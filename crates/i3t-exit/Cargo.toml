@@ -8,6 +8,7 @@ publish = false
 description = "ice3tier 的出口：访问控制、出站策略、解析域名、连接目标"
 
 [dependencies]
+bytes.workspace = true
 dns-lookup = "4.0.2"
 i3t-access = { path = "../i3t-access" }
 i3t-conn = { path = "../i3t-conn" }
@@ -27,6 +28,8 @@ i3t-flow = { path = "../i3t-flow", features = ["test-util"] }
 ring.workspace = true
 # 测试里要读回保活的参数，读的接口在这个特性后面。
 socket2.workspace = true
+# 暂停时钟，测限速。
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

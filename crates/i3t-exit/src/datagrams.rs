@@ -11,23 +11,29 @@
 //! 回来的报文只收"往它发过报文的地址"发来的：别的地址发到这个端口上的东西和发起节点没有关系，不替它们转。
 //!
 //! 上下文没有报文往来超过 [`IDLE_TIMEOUT`] 就回收，发起方下次要用时再开。
+//!
+//! 监听在本节点虚拟 IP 上、目标是别的节点的 UDP 端口转发要接力：目标第一次出现时，本节点到转发的目标节点开一个自己的
+//! 数据报上下文（访问规则两段都要允许），之后发往这个端口的报文都从那个上下文转过去，回来的报文报成从这个端口来的。
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use i3t_conn::contract::DatagramSender;
-use i3t_conn::{RecvStream, SendStream};
-use i3t_flow::datagram::{Context, ContextEnd, ContextSender, OutboundSocket, Received};
+use bytes::Bytes;
+use i3t_conn::contract::{DatagramSender, Datagrams};
+use i3t_conn::{Connector, RecvStream, SendStream};
+use i3t_flow::datagram::{Context, ContextEnd, ContextSender, Opener, OutboundSocket, Received};
 use i3t_model::Netmap;
 use i3t_model::netmap::ForwardProtocol;
 use i3t_proto::NodeId;
-use i3t_proto::flow::{Host, Reason, Reply, Status, Target};
-use tokio::sync::watch;
+use i3t_proto::flow::{Class, Host, Origin, Reason, Reply, Status, Target};
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio::task::JoinHandle;
 use tokio::time;
 
-use crate::handler::{access_revoked, forward_on_virtual_ip, virtual_forward_target};
+use crate::handler::{access_revoked, check_allow_list, forward_on_virtual_ip, virtual_forward_target};
+use crate::limits::Limits;
 use crate::outbound::Outbound;
 use crate::stats::Counters;
 use crate::system::System;
@@ -47,6 +53,9 @@ const VERDICT_TTL: Duration = Duration::from_secs(60);
 
 /// 一个 UDP 报文最长这么多，收的缓冲区按它开。
 const MAX_UDP_PAYLOAD: usize = 65_535;
+
+/// 接力的上下文送回来、等着交给发起节点的报文最多排这么多个。
+const ONWARD_BACKLOG: usize = 64;
 
 /// 每个对端开着多少个上下文。
 #[derive(Debug, Default)]
@@ -89,9 +98,24 @@ impl Drop for ContextSlot<'_> {
 /// 一个目标检查之后的结论。
 #[derive(Debug, Clone, Copy)]
 enum Outcome {
-    /// 可以发，报文实际发到这个地址。
-    Allowed(SocketAddr),
+    /// 可以发，报文实际发到 `real`。`exit_traffic` 为真时这是出口流量（互联网或局域网目标），要过带宽和配额。
+    Allowed {
+        real: SocketAddr,
+        exit_traffic: bool,
+    },
+    /// 监听在本节点虚拟 IP 上、目标是 `node` 的 UDP 端口转发：经本节点到 `node` 的上下文接力。
+    Onward {
+        forward: u32,
+        node: NodeId,
+    },
     Refused,
+}
+
+/// 往它发过报文的一个地址：从它回来的报文报成什么来源，以及那是不是出口流量。
+#[derive(Debug, Clone)]
+struct Source {
+    target: Target,
+    exit_traffic: bool,
 }
 
 #[derive(Debug)]
@@ -107,7 +131,7 @@ struct Destinations {
     netmap_version: u64,
     verdicts: HashMap<Target, Verdict>,
     /// 往它发过报文的地址，以及从它回来的报文报成什么来源。
-    sources: HashMap<SocketAddr, Target>,
+    sources: HashMap<SocketAddr, Source>,
 }
 
 impl Destinations {
@@ -154,16 +178,36 @@ pub(crate) enum Ended {
 }
 
 /// 一个开着的上下文。
-pub(crate) struct Session<'a, S> {
+pub(crate) struct Session<'a, S, C: Datagrams> {
     pub outbound: &'a Outbound<S>,
     pub netmap: watch::Receiver<Arc<Netmap>>,
     pub counters: &'a Counters,
+    pub limits: &'a Limits,
+    /// 接力 UDP 端口转发时到目标节点开上下文用的；没有时这种转发上的报文被拒绝。
+    pub opener: Option<&'a Opener<C>>,
     pub peer: NodeId,
+    /// 发起方的上下文的等级和来源说明，接力时原样带过去。
+    pub class: Class,
+    pub origin: Origin,
     pub socket: OutboundSocket,
     pub idle_timeout: Duration,
 }
 
-impl<S: System> Session<'_, S> {
+/// 到一个端口转发的目标节点的接力上下文。它的任务把回来的报文放进会话的队列；丢掉它，任务就正常关掉上下文
+/// （目标节点看到的是正常结束，不算异常）。
+struct OnwardLeg<T> {
+    /// 回来的报文报成从哪里来：开它时发起节点发往的那个虚拟 IP 上的端口。
+    source: Target,
+    sender: ContextSender<T>,
+    task: JoinHandle<()>,
+    /// 丢掉它就是叫任务关掉上下文。
+    _stop: oneshot::Sender<()>,
+}
+
+/// 接力回来的一个报文：报成从哪里来（发起节点当初发往的那个虚拟 IP 上的端口），和内容。
+type Returned = (Target, Bytes);
+
+impl<S: System, C: Connector + Datagrams> Session<'_, S, C> {
     /// 在上下文和它的 UDP 端口之间搬运报文，直到上下文结束。返回时上下文和端口都已经关掉。
     pub(crate) async fn run<Snd: SendStream, Rcv: RecvStream, T: DatagramSender>(
         self,
@@ -174,6 +218,8 @@ impl<S: System> Session<'_, S> {
         let mut destinations = Destinations::default();
         let mut tally = Tally::default();
         let mut buf = vec![0; MAX_UDP_PAYLOAD];
+        let mut legs: HashMap<u32, OnwardLeg<C::Sender>> = HashMap::new();
+        let (returns, mut returned) = mpsc::channel::<Returned>(ONWARD_BACKLOG);
         let idle = time::sleep(self.idle_timeout);
         tokio::pin!(idle);
         loop {
@@ -184,8 +230,19 @@ impl<S: System> Session<'_, S> {
                     return (Ended::Revoked, tally);
                 }
                 received = context.recv() => match received {
-                    Ok(datagram) => self.send_to_target(&datagram, &mut destinations, &mut tally).await,
+                    Ok(datagram) => self.send_to_target(&datagram, &mut destinations, &mut tally, Onward { legs: &mut legs, returns: &returns }).await,
                     Err(end) => return (Ended::Peer(end), tally),
+                },
+                Some((source, payload)) = returned.recv() => match sender.send(&source, &payload).await {
+                    Ok(()) => {
+                        tally.from_target += 1;
+                        self.counters.datagram_from_target(payload.len());
+                        true
+                    }
+                    Err(error) => {
+                        tracing::debug!(peer = %self.peer, %error, "接力回来的一个报文没有送回发起节点");
+                        false
+                    }
                 },
                 received = self.socket.recv_from(&mut buf) => match received {
                     Ok((len, from)) => self.return_from_target(from, &buf[..len], &sender, &destinations, &mut tally).await,
@@ -208,7 +265,7 @@ impl<S: System> Session<'_, S> {
     }
 
     /// 把发起节点发来的一个报文发往它的目标。返回有没有发出去。
-    async fn send_to_target(&self, datagram: &Received, destinations: &mut Destinations, tally: &mut Tally) -> bool {
+    async fn send_to_target(&self, datagram: &Received, destinations: &mut Destinations, tally: &mut Tally, onward: Onward<'_, C>) -> bool {
         let netmap = Arc::clone(&self.netmap.borrow());
         destinations.follow(&netmap);
         let now = Instant::now();
@@ -216,11 +273,12 @@ impl<S: System> Session<'_, S> {
             Some(outcome) => outcome,
             None => {
                 let outcome = match self.check(&netmap, &datagram.target).await {
-                    Ok(Destination { addr, source }) => {
+                    Ok(Checked::Address(Destination { addr, source, exit_traffic })) => {
                         let real = self.outbound.udp_route(addr);
-                        destinations.sources.insert(real, source);
-                        Outcome::Allowed(real)
+                        destinations.sources.insert(real, Source { target: source, exit_traffic });
+                        Outcome::Allowed { real, exit_traffic }
                     }
+                    Ok(Checked::Onward { forward, node }) => Outcome::Onward { forward, node },
                     Err(reply) => {
                         self.counters.failed(reply.status);
                         tracing::info!(
@@ -237,11 +295,20 @@ impl<S: System> Session<'_, S> {
                 outcome
             }
         };
-        let Outcome::Allowed(real) = outcome else {
-            tally.refused += 1;
-            self.counters.datagram_refused();
-            return false;
+        let (real, exit_traffic) = match outcome {
+            Outcome::Allowed { real, exit_traffic } => (real, exit_traffic),
+            Outcome::Onward { forward, node } => return self.relay_onward(datagram, forward, node, tally, onward).await,
+            Outcome::Refused => {
+                tally.refused += 1;
+                self.counters.datagram_refused();
+                return false;
+            }
         };
+        if exit_traffic && !self.limits.admit_datagram(true, datagram.payload.len()) {
+            self.counters.datagram_limited();
+            tracing::trace!(peer = %self.peer, "丢掉一个发往目标的数据报：出口的带宽不够，或者配额用完了");
+            return false;
+        }
         match self.socket.send_to(&datagram.payload, real).await {
             Ok(()) => {
                 tally.to_target += 1;
@@ -268,7 +335,12 @@ impl<S: System> Session<'_, S> {
             tracing::trace!(peer = %self.peer, "丢掉 UDP 端口上收到的一个报文：没有往它的来源发过报文");
             return false;
         };
-        match sender.send(source, payload).await {
+        if source.exit_traffic && !self.limits.admit_datagram(false, payload.len()) {
+            self.counters.datagram_limited();
+            tracing::trace!(peer = %self.peer, "丢掉目标发回来的一个数据报：出口的带宽不够，或者配额用完了");
+            return false;
+        }
+        match sender.send(&source.target, payload).await {
             Ok(()) => {
                 tally.from_target += 1;
                 self.counters.datagram_from_target(payload.len());
@@ -281,8 +353,62 @@ impl<S: System> Session<'_, S> {
         }
     }
 
+    /// 经接力上下文把报文转给端口转发的目标节点。上下文还没有（或者已经结束了）就新开一个；开不成时这个报文丢掉。
+    async fn relay_onward(&self, datagram: &Received, forward: u32, node: NodeId, tally: &mut Tally, onward: Onward<'_, C>) -> bool {
+        let Onward { legs, returns } = onward;
+        // 转发改了监听的端口（编号没变）时，回来的报文要报新的来源，所以也重开。
+        if legs.get(&forward).is_none_or(|leg| leg.task.is_finished() || leg.source != datagram.target) {
+            let Some(opener) = self.opener else { return false };
+            // 开上下文要等目标节点答应；这期间这个会话后面的报文排在它自己的队列里。
+            let mut context = match opener.open(node, self.class, self.origin.clone()).await {
+                Ok(context) => context,
+                Err(error) => {
+                    tracing::info!(peer = %self.peer, %node, forward, ?error, "到端口转发的目标节点开数据报上下文失败，这个报文丢掉");
+                    legs.remove(&forward);
+                    return false;
+                }
+            };
+            tracing::debug!(peer = %self.peer, %node, forward, "接力 UDP 端口转发的上下文建立");
+            let (source, returns) = (datagram.target.clone(), returns.clone());
+            let sender = context.sender();
+            let (stop, mut stopped) = oneshot::channel::<()>();
+            let task = tokio::spawn({
+                let source = source.clone();
+                async move {
+                    loop {
+                        tokio::select! {
+                            received = context.recv() => match received {
+                                Ok(received) => {
+                                    if returns.send((source.clone(), received.payload)).await.is_err() {
+                                        return context.close().await;
+                                    }
+                                }
+                                Err(_) => return,
+                            },
+                            _ = &mut stopped => return context.close().await,
+                        }
+                    }
+                }
+            });
+            legs.insert(forward, OnwardLeg { source, sender, task, _stop: stop });
+        }
+        let Some(leg) = legs.get(&forward) else { return false };
+        match leg.sender.send(&Target::Forward { id: forward }, &datagram.payload).await {
+            Ok(()) => {
+                tally.to_target += 1;
+                self.counters.datagram_to_target(datagram.payload.len());
+                true
+            }
+            Err(error) => {
+                tracing::debug!(peer = %self.peer, %node, forward, %error, "一个报文没有转给端口转发的目标节点，下一个报文重新开上下文");
+                legs.remove(&forward);
+                false
+            }
+        }
+    }
+
     /// 检查一个目标。访问规则、本节点的能力和出站策略都和流的一样。
-    async fn check(&self, netmap: &Netmap, target: &Target) -> Result<Destination, Reply> {
+    async fn check(&self, netmap: &Netmap, target: &Target) -> Result<Checked, Reply> {
         let Some(initiator) = netmap.peer(self.peer).filter(|initiator| initiator.inbound) else {
             return Err(Reply::new(Status::AccessDenied, "访问规则不允许发起节点访问这个节点"));
         };
@@ -290,10 +416,25 @@ impl<S: System> Session<'_, S> {
             Target::Internet { host, port } => {
                 let addr = self.outbound.udp_internet(netmap, host, *port).await?;
                 // 目标写的是域名时，回来的报文报的是解析出来的地址。
-                return Ok(Destination { addr, source: Target::Internet { host: Host::Ip(addr.ip()), port: addr.port() } });
+                let source = Target::Internet { host: Host::Ip(addr.ip()), port: addr.port() };
+                return Ok(Checked::Address(Destination { addr, source, exit_traffic: true }));
             }
-            Target::Lan { addr } => self.outbound.lan_target(netmap, *addr)?,
+            Target::Lan { addr } => {
+                let addr = self.outbound.lan_target(netmap, *addr)?;
+                return Ok(Checked::Address(Destination { addr, source: target.clone(), exit_traffic: true }));
+            }
             Target::Node { port } => match forward_on_virtual_ip(netmap, *port, ForwardProtocol::Udp) {
+                Some(forward) if forward.target != netmap.me.id => {
+                    // 访问规则两段：发起节点能访问本节点（上面查过），本节点能访问目标节点。目标节点还会按编号再查一遍。
+                    check_allow_list(initiator, forward)?;
+                    if !netmap.peer(forward.target).is_some_and(|target| target.outbound) {
+                        return Err(Reply::new(
+                            Status::UnknownForward,
+                            "这条端口转发的目标节点不在本节点的 netmap 里，或者访问规则不允许本节点访问它",
+                        ));
+                    }
+                    return Ok(Checked::Onward { forward: forward.id, node: forward.target });
+                }
                 Some(forward) => virtual_forward_target(netmap, initiator, forward)?,
                 None => self.outbound.udp_node(*port)?,
             },
@@ -309,8 +450,20 @@ impl<S: System> Session<'_, S> {
                 }
             }
         };
-        Ok(Destination { addr, source: target.clone() })
+        Ok(Checked::Address(Destination { addr, source: target.clone(), exit_traffic: false }))
     }
+}
+
+/// 发送时要用到的接力上下文：已经开着的，和回来的报文排的队。
+struct Onward<'a, C: Datagrams> {
+    legs: &'a mut HashMap<u32, OnwardLeg<C::Sender>>,
+    returns: &'a mpsc::Sender<Returned>,
+}
+
+/// 一个目标检查之后去哪里。
+enum Checked {
+    Address(Destination),
+    Onward { forward: u32, node: NodeId },
 }
 
 /// 一个通过了检查的目标。
@@ -319,6 +472,8 @@ struct Destination {
     addr: SocketAddr,
     /// 从它回来的报文带给发起节点的来源。
     source: Target,
+    /// 这是出口流量（互联网或局域网目标）。
+    exit_traffic: bool,
 }
 
 impl Ended {
@@ -362,10 +517,12 @@ mod tests {
         let mut destinations = Destinations::default();
         let now = Instant::now();
 
-        destinations.remember(target(53), Outcome::Allowed(real), now);
+        let allowed = Outcome::Allowed { real, exit_traffic: false };
+        let source = || Source { target: target(53), exit_traffic: false };
+        destinations.remember(target(53), allowed, now);
         destinations.remember(target(54), Outcome::Refused, now);
-        destinations.sources.insert(real, target(53));
-        assert!(matches!(destinations.verdict(&target(53), now), Some(Outcome::Allowed(addr)) if addr == real));
+        destinations.sources.insert(real, source());
+        assert!(matches!(destinations.verdict(&target(53), now), Some(Outcome::Allowed { real: addr, .. }) if addr == real));
         assert!(matches!(destinations.verdict(&target(54), now + VERDICT_TTL - Duration::from_millis(1)), Some(Outcome::Refused)));
         assert!(destinations.verdict(&target(54), now + VERDICT_TTL).is_none(), "过了时限要重新检查");
         assert!(destinations.verdict(&target(55), now).is_none());
@@ -378,12 +535,12 @@ mod tests {
         assert!(destinations.verdict(&target(53), now).is_none() && destinations.sources.is_empty());
 
         // netmap 换了一版：结论和可以收的来源都作废。
-        destinations.remember(target(53), Outcome::Allowed(real), now);
-        destinations.sources.insert(real, target(53));
+        destinations.remember(target(53), allowed, now);
+        destinations.sources.insert(real, source());
         let mut netmap = netmap();
         destinations.follow(&netmap);
         assert!(destinations.verdicts.is_empty() && destinations.sources.is_empty());
-        destinations.remember(target(53), Outcome::Allowed(real), now);
+        destinations.remember(target(53), allowed, now);
         destinations.follow(&netmap);
         assert_eq!(destinations.verdicts.len(), 1, "同一版 netmap 不清");
         netmap.version += 1;
@@ -403,6 +560,7 @@ mod tests {
                 routing: Default::default(),
                 max_relay_hops: 2,
                 reach: Default::default(),
+                class: None,
             },
             me: LocalNode {
                 id: node(2),

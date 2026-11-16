@@ -83,7 +83,7 @@ pub fn peer(raw: u32, exit: Option<PeerExit>) -> Peer {
 
 /// `me` 号节点的 netmap：另外两个节点都是它的对端，互相都能访问。gw 是出口（局域网开关关着），默认只放行 80 和 443。
 pub fn netmap(me: u32) -> Netmap {
-    let exit_of = |raw: u32| (raw == GW).then_some(PeerExit { lan: false });
+    let exit_of = |raw: u32| (raw == GW).then_some(PeerExit { lan: false, class: None });
     Netmap {
         version: 1,
         network: Network {
@@ -93,6 +93,7 @@ pub fn netmap(me: u32) -> Netmap {
             routing: Default::default(),
             max_relay_hops: 2,
             reach: Default::default(),
+            class: None,
         },
         me: LocalNode {
             id: node(me),
@@ -124,12 +125,20 @@ pub fn listener(name: &str, protocol: ListenerProtocol, bind: &str) -> Listener 
         require_credential: false,
         default_action: None,
         fixed_exit: None,
+        class: None,
+        optimistic: None,
     }
 }
 
 pub fn credential(name: &str, token: &str, max_concurrent: Option<u32>) -> Credential {
     let hash = digest::digest(&digest::SHA256, token.as_bytes());
-    Credential { name: name.into(), token: TokenHash::from_bytes(hash.as_ref().try_into().unwrap()), max_concurrent }
+    Credential {
+        name: name.into(),
+        token: TokenHash::from_bytes(hash.as_ref().try_into().unwrap()),
+        max_concurrent,
+        id: 1,
+        exhausted: false,
+    }
 }
 
 /// 找到 netmap 里的一个对端来改。
@@ -266,7 +275,7 @@ pub struct Node {
     pub id: NodeId,
     pub system: FakeSystem,
     pub access: Arc<Access<MemoryConnector, Outbound<FakeSystem>>>,
-    pub exit: Arc<Exit<FakeSystem>>,
+    pub exit: Arc<Exit<FakeSystem, MemoryConnector>>,
     netmap: watch::Sender<Arc<Netmap>>,
 }
 
@@ -279,10 +288,12 @@ impl Node {
     pub fn start_with_udp_idle(mesh: &MemoryMesh, netmap: Netmap, udp_idle: Option<Duration>) -> Self {
         let id = netmap.me.id;
         let (connector, acceptor) = mesh.join(id);
+        let connector = Arc::new(connector);
         let (sender, receiver) = watch::channel(Arc::new(netmap));
         let system = FakeSystem::default();
         let outbound = Outbound::new(receiver.clone(), system.clone());
-        let (mut exit, mut access) = (Exit::new(receiver.clone(), outbound.clone()), Access::new(Arc::new(connector), outbound, receiver));
+        let mut access = Access::new(Arc::clone(&connector), outbound.clone(), receiver.clone());
+        let mut exit = Exit::new(receiver, outbound, connector).with_opener(access.datagram_opener());
         if let Some(udp_idle) = udp_idle {
             exit = exit.with_datagram_idle_timeout(udp_idle);
             access = access.with_udp_idle_timeout(udp_idle);

@@ -5,7 +5,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use i3t_flow::Summary;
 use i3t_proto::flow::{Attribution, Status};
 
+use crate::limits::QuotaUsage;
+
 /// 出口到现在为止的计数。流的字节数在每条流结束时才加进来，数据报的随到随加。
+///
+/// 配额的用量（`quota`）是例外：它是随搬随记的，并且只算出口流量（互联网和局域网目标）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ExitStats {
     /// 正在处理的流和数据报上下文：从读到 OPEN 到结束。
@@ -22,6 +26,8 @@ pub struct ExitStats {
     pub datagrams_from_target: u64,
     /// 因为目标没有通过检查（访问规则、出站策略等）而丢掉的数据报。每个这样的目标另外在下面按原因计一次。
     pub datagrams_refused: u64,
+    /// 出口的带宽不够、或者配额用完而丢掉的数据报，两个方向都算。
+    pub datagrams_limited: u64,
     /// 没有建成的请求里，归因于目标的：域名不存在、拒绝连接、不可达、超时。
     pub failed_by_target: u64,
     /// 没有建成的请求里，被访问规则或者出站策略拒绝的。
@@ -30,6 +36,12 @@ pub struct ExitStats {
     pub failed_by_exit: u64,
     /// 建成之后没有正常结束的流和数据报上下文：某一头异常断开、连接断了，或者访问权限被收回。
     pub aborted: u64,
+    /// 因为节点正在排空而拒绝的请求。它们同时算在 `refused` 里。
+    pub drained: u64,
+    /// 节点现在正在排空。
+    pub draining: bool,
+    /// 配了配额时，本账期用到了哪里。
+    pub quota: Option<QuotaUsage>,
 }
 
 #[derive(Debug, Default)]
@@ -41,10 +53,12 @@ pub(crate) struct Counters {
     datagrams_to_target: AtomicU64,
     datagrams_from_target: AtomicU64,
     datagrams_refused: AtomicU64,
+    datagrams_limited: AtomicU64,
     failed_by_target: AtomicU64,
     refused: AtomicU64,
     failed_by_exit: AtomicU64,
     aborted: AtomicU64,
+    drained: AtomicU64,
 }
 
 impl Counters {
@@ -75,6 +89,20 @@ impl Counters {
         }
     }
 
+    /// 一条接力到端口转发目标节点的流结束了。
+    pub(crate) fn spliced(&self, to_target: u64, from_target: u64, clean: bool) {
+        self.bytes_to_target.fetch_add(to_target, Ordering::Relaxed);
+        self.bytes_from_target.fetch_add(from_target, Ordering::Relaxed);
+        if !clean {
+            self.aborted.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// 因为排空拒绝了一个请求。
+    pub(crate) fn drained(&self) {
+        self.drained.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// 一个建成的数据报上下文没有正常结束。
     pub(crate) fn aborted(&self) {
         self.aborted.fetch_add(1, Ordering::Relaxed);
@@ -98,6 +126,11 @@ impl Counters {
         self.datagrams_refused.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// 因为带宽或者配额丢掉了一个数据报。
+    pub(crate) fn datagram_limited(&self) {
+        self.datagrams_limited.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub(crate) fn snapshot(&self) -> ExitStats {
         ExitStats {
             active: self.active.load(Ordering::Relaxed),
@@ -107,10 +140,14 @@ impl Counters {
             datagrams_to_target: self.datagrams_to_target.load(Ordering::Relaxed),
             datagrams_from_target: self.datagrams_from_target.load(Ordering::Relaxed),
             datagrams_refused: self.datagrams_refused.load(Ordering::Relaxed),
+            datagrams_limited: self.datagrams_limited.load(Ordering::Relaxed),
             failed_by_target: self.failed_by_target.load(Ordering::Relaxed),
             refused: self.refused.load(Ordering::Relaxed),
             failed_by_exit: self.failed_by_exit.load(Ordering::Relaxed),
             aborted: self.aborted.load(Ordering::Relaxed),
+            drained: self.drained.load(Ordering::Relaxed),
+            draining: false,
+            quota: None,
         }
     }
 }

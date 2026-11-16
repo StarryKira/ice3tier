@@ -9,10 +9,13 @@
 //! 所以装配时把同一个 [`Outbound`] 既交给 [`Exit`]，也交给入口。
 //!
 //! [`System`] 是和操作系统之间的接缝（网卡地址、域名解析、TCP 连接），正常运行时用 [`Os`]。
+//!
+//! 出口上的约束（带宽上限、配额与账期、建连预算、出站地址族）按 netmap 里本节点的出口设置执行，见 `limits` 模块。
 
 mod datagrams;
 mod dns_cache;
 mod handler;
+mod limits;
 mod outbound;
 mod policy;
 mod stats;
@@ -20,6 +23,7 @@ mod system;
 mod upstream;
 
 pub use handler::Exit;
+pub use limits::{Period, QuotaState, QuotaUsage};
 pub use outbound::Outbound;
 pub use stats::ExitStats;
 pub use system::{Os, ResolveError, System};

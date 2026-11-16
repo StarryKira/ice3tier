@@ -224,7 +224,7 @@ async fn a_lan_target_needs_the_lan_switch_and_a_directly_attached_subnet() {
     assert_eq!(world.gw.exit.stats().total, 0);
 
     // 入口以为开着，出口自己知道没开：出口拒绝。局域网目标要等出口的应答，所以客户端拿到的还是错误码。
-    world.laptop.update(|netmap| peer_mut(netmap, GW).exit = Some(PeerExit { lan: true })).await;
+    world.laptop.update(|netmap| peer_mut(netmap, GW).exit = Some(PeerExit { lan: true, class: None })).await;
     assert_eq!(lan_target().await.failed(), 2);
     assert_eq!(world.gw.exit.stats().refused, 1);
     assert!(world.gw.system.connected().is_empty());
@@ -245,7 +245,7 @@ async fn a_lan_target_needs_the_lan_switch_and_a_directly_attached_subnet() {
 }
 
 fn tcp_forward(id: u32, bind: &str, target: u32) -> Forward {
-    Forward { id, protocol: ForwardProtocol::Tcp, bind: bind.parse().unwrap(), target: node(target), allow_from: Vec::new() }
+    Forward { id, protocol: ForwardProtocol::Tcp, bind: bind.parse().unwrap(), target: node(target), allow_from: Vec::new(), class: None }
 }
 
 #[tokio::test]

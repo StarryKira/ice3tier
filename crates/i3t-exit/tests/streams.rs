@@ -255,12 +255,13 @@ async fn a_busy_port_is_a_reported_state_and_the_listener_comes_up_once_the_port
                 bind: taken,
                 target: common::node(NAS),
                 allow_from: Vec::new(),
+                class: None,
             });
         })
         .await;
     let busy = status.listeners.iter().find(|listener| listener.name == "busy").unwrap();
-    assert!(matches!(&busy.state, ListenState::Failed { reason } if !reason.is_empty()), "{:?}", busy.state);
-    assert!(matches!(status.forwards[0].state, ListenState::Failed { .. }), "{:?}", status.forwards[0].state);
+    assert!(matches!(&busy.state, ListenState::PortInUse { reason } if !reason.is_empty()), "{:?}", busy.state);
+    assert!(matches!(status.forwards[0].state, ListenState::PortInUse { .. }), "{:?}", status.forwards[0].state);
 
     // 别的监听器不受影响。
     let mut stream = socks5(world.socks().await, Some(("gw", "")), PUBLIC_IP, 443).await.connected();
@@ -271,7 +272,7 @@ async fn a_busy_port_is_a_reported_state_and_the_listener_comes_up_once_the_port
     let status = world.laptop.update(|_| {}).await;
     let busy = status.listeners.iter().find(|listener| listener.name == "busy").unwrap();
     assert_eq!(busy.state, ListenState::Listening { local: taken });
-    assert!(matches!(status.forwards[0].state, ListenState::Failed { .. }));
+    assert!(matches!(status.forwards[0].state, ListenState::PortInUse { .. }));
     let mut stream = socks5(taken, Some(("gw", "")), PUBLIC_IP, 443).await.connected();
     assert_echo(&mut stream).await;
 }

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use i3t_access::{EgressPolicy, LocalEgress};
 use i3t_model::Netmap;
-use i3t_model::netmap::{self, ExitRole, Network};
+use i3t_model::netmap::{self, ExitRole, IpFamily, Network};
 use i3t_proto::flow::{Host, Reply, Status};
 use ipnet::IpNet;
 use socket2::{SockRef, TcpKeepalive};
@@ -90,7 +90,17 @@ impl<S: System> Outbound<S> {
         if role.ports.as_ref().is_some_and(|ports| !ports.contains(&port)) {
             return Err(Reply::new(Status::PolicyDenied, format!("出口不允许目标端口 {port}")));
         }
-        let addresses = self.resolve(host).await?;
+        let resolved = self.resolve(host).await?;
+        // 出口只连某一种地址时，先按地址族挑：另一种地址根本不会去连，也就不用为它拒绝整个请求。
+        let addresses: Vec<IpAddr> = resolved.iter().copied().filter(|&ip| role.family.admits(ip)).collect();
+        if addresses.is_empty() {
+            let wanted = match role.family {
+                IpFamily::Ipv4 => "IPv4",
+                IpFamily::Ipv6 => "IPv6",
+                IpFamily::Any => "可以连",
+            };
+            return Err(Reply::new(Status::PolicyDenied, format!("出口只连 {wanted} 地址，这个目标没有这种地址")));
+        }
         // 域名可以解析到任何地方，所以要看解析之后的地址；只要有一个不该连，整个请求都拒绝，
         // 不然对方可以把一个内网地址夹在几个公网地址中间碰运气。
         let interfaces = self.interfaces()?;
@@ -355,6 +365,9 @@ const fn rank(status: Status) -> u8 {
         | Status::AccessDenied
         | Status::NotEnabled
         | Status::UnknownForward
+        | Status::Draining
+        | Status::QuotaExhausted
+        | Status::RateLimited
         | Status::ResolverFailure
         | Status::InternalError => 0,
     }
@@ -400,6 +413,7 @@ mod tests {
             routing: Default::default(),
             max_relay_hops: 2,
             reach: Default::default(),
+            class: None,
         };
         let interfaces: Vec<IpNet> =
             vec!["127.0.0.1/8".parse().unwrap(), "198.20.0.5/24".parse().unwrap(), "2400:db00::5/64".parse().unwrap()];
