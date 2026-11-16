@@ -8,12 +8,25 @@ publish = false
 description = "ice3tier 的出口：访问控制、出站策略、解析域名、连接目标"
 
 [dependencies]
+dns-lookup = "4.0.2"
+i3t-access = { path = "../i3t-access" }
 i3t-conn = { path = "../i3t-conn" }
 i3t-flow = { path = "../i3t-flow" }
 i3t-model = { path = "../i3t-model" }
 i3t-proto = { path = "../i3t-proto" }
+if-addrs = "0.15.0"
+ipnet.workspace = true
+socket2 = "0.6.5"
 thiserror.workspace = true
 tokio.workspace = true
+tracing = "0.1.44"
+
+[dev-dependencies]
+base64.workspace = true
+i3t-flow = { path = "../i3t-flow", features = ["test-util"] }
+ring.workspace = true
+# 测试里要读回保活的参数，读的接口在这个特性后面。
+socket2 = { version = "0.6.5", features = ["all"] }
 
 [lints]
 workspace = true

@@ -1,0 +1,94 @@
+//! 出口要向操作系统要的三样东西：本机网卡上的地址、域名解析、TCP 连接。
+
+use std::future::Future;
+use std::io;
+use std::net::{IpAddr, SocketAddr};
+
+use if_addrs::IfAddr;
+use ipnet::IpNet;
+use tokio::net::TcpStream;
+
+/// 出口和操作系统之间的接缝。
+///
+/// 正常运行时用 [`Os`]。测试里换成假的：给出想要的网卡和解析结果，把"公网地址"引到本机的测试服务上。
+/// 策略检查全部在这一层之上做，所以换掉它不会绕过任何检查。
+pub trait System: Send + Sync + 'static {
+    /// 本机所有网卡上的地址，各自带着前缀长度：地址用来连本机自己的服务，网段用来判断一个目标是不是在直连的局域网里。
+    ///
+    /// # Errors
+    ///
+    /// 系统不给。这时出口没法判断目标是不是在本机的内网里，会拒绝请求。
+    fn interfaces(&self) -> io::Result<Vec<IpNet>>;
+
+    /// 在本机解析一个域名。
+    fn resolve(&self, name: &str) -> impl Future<Output = Result<Vec<IpAddr>, ResolveError>> + Send;
+
+    /// 建一条到 `addr` 的 TCP 连接。连接的选项（NODELAY、保活）由调用者设置。
+    fn connect(&self, addr: SocketAddr) -> impl Future<Output = io::Result<TcpStream>> + Send;
+}
+
+/// 域名解析失败的原因。两种情况的归因不同：域名不存在算目标的，解析器出问题算出口自己的。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolveError {
+    #[error("域名不存在")]
+    NotFound,
+    #[error("解析器出错：{0}")]
+    Failed(String),
+}
+
+/// 真正的操作系统。
+///
+/// 域名用系统的解析器（`getaddrinfo`）解析，所以 hosts 文件、本机的 DNS 配置都照常生效，结果和这台机器上别的程序看到的一样。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Os;
+
+impl System for Os {
+    fn interfaces(&self) -> io::Result<Vec<IpNet>> {
+        let interfaces = if_addrs::get_if_addrs()?;
+        let nets = interfaces.into_iter().filter_map(|interface| {
+            let (ip, prefix_len) = match interface.addr {
+                IfAddr::V4(addr) => (IpAddr::V4(addr.ip), addr.prefixlen),
+                IfAddr::V6(addr) => (IpAddr::V6(addr.ip), addr.prefixlen),
+            };
+            IpNet::new(ip, prefix_len).ok()
+        });
+        Ok(nets.collect())
+    }
+
+    async fn resolve(&self, name: &str) -> Result<Vec<IpAddr>, ResolveError> {
+        let name = name.to_owned();
+        // getaddrinfo 是阻塞的。
+        let lookup = tokio::task::spawn_blocking(move || dns_lookup::lookup_host(&name).map(Iterator::collect::<Vec<IpAddr>>));
+        match lookup.await {
+            Ok(Ok(addrs)) => Ok(addrs),
+            Ok(Err(error)) => match error.kind() {
+                dns_lookup::LookupErrorKind::NoName | dns_lookup::LookupErrorKind::NoData => Err(ResolveError::NotFound),
+                _ => Err(ResolveError::Failed(io::Error::from(error).to_string())),
+            },
+            Err(error) => Err(ResolveError::Failed(error.to_string())),
+        }
+    }
+
+    async fn connect(&self, addr: SocketAddr) -> io::Result<TcpStream> {
+        TcpStream::connect(addr).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_loopback_interface_is_listed_with_its_prefix() {
+        let interfaces = Os.interfaces().unwrap();
+        let loopback = interfaces.iter().find(|net| net.addr() == IpAddr::from([127, 0, 0, 1])).expect("本机应该有回环网卡");
+        assert_eq!(loopback.prefix_len(), 8);
+        assert!(loopback.contains(&IpAddr::from([127, 9, 9, 9])));
+    }
+
+    #[tokio::test]
+    async fn localhost_resolves_to_a_loopback_address() {
+        let addrs = Os.resolve("localhost").await.unwrap();
+        assert!(!addrs.is_empty() && addrs.iter().all(IpAddr::is_loopback), "{addrs:?}");
+    }
+}
