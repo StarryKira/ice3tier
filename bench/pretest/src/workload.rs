@@ -5,8 +5,8 @@
 //! 等它传完测的就不是这段时间的吞吐了。
 
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
@@ -48,10 +48,15 @@ pub struct LlmShape {
 #[derive(Clone, Copy, Debug)]
 enum Request {
     /// 客户端一直写。服务端从收到第一个字节起计时，到点回一份收据。
-    Upload { secs: u32, warmup_secs: u32 },
+    Upload {
+        secs: u32,
+        warmup_secs: u32,
+    },
     /// 服务端一直写，客户端读到自己的截止时间为止。
     Download,
-    Echo { msg_size: u32 },
+    Echo {
+        msg_size: u32,
+    },
     Llm(LlmShape),
 }
 
@@ -94,8 +99,7 @@ impl Request {
             2 => Self::Download,
             3 => Self::Echo { msg_size: narrow(0)? },
             4 => {
-                let ((ttft_ms, tokens), (interval_ms, token_size), (silent_after, silent_ms)) =
-                    (halves(1), halves(2), halves(3));
+                let ((ttft_ms, tokens), (interval_ms, token_size), (silent_after, silent_ms)) = (halves(1), halves(2), halves(3));
                 Self::Llm(LlmShape { body_len: word(0), ttft_ms, tokens, interval_ms, token_size, silent_after, silent_ms })
             }
             other => bail!("不认识的请求类型 {other}"),
@@ -671,10 +675,7 @@ mod tests {
             (back.body_len, back.ttft_ms, back.tokens, back.interval_ms),
             (shape.body_len, shape.ttft_ms, shape.tokens, shape.interval_ms)
         );
-        assert_eq!(
-            (back.token_size, back.silent_after, back.silent_ms),
-            (shape.token_size, shape.silent_after, shape.silent_ms)
-        );
+        assert_eq!((back.token_size, back.silent_after, back.silent_ms), (shape.token_size, shape.silent_after, shape.silent_ms));
     }
 
     #[test]

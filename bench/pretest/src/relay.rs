@@ -161,13 +161,8 @@ impl Relay {
         let packets = run.len().div_ceil(stride) as u64;
         match self.next_hop(dst) {
             Some(NextHop::Udp(destination)) => {
-                let transmit = Transmit {
-                    destination,
-                    ecn: None,
-                    contents: run,
-                    segment_size: (run.len() > stride).then_some(stride),
-                    src_ip: None,
-                };
+                let transmit =
+                    Transmit { destination, ecn: None, contents: run, segment_size: (run.len() > stride).then_some(stride), src_ip: None };
                 match self.send_udp(&transmit) {
                     Ok(()) => self.count_forwarded(packets, run.len()),
                     // 发送缓冲满了就丢，relay 不替任何人排队。
@@ -267,12 +262,7 @@ impl Relay {
 /// 这样的一段可以用一次带分段卸载的发送转出去，不用逐个包调内核。
 fn same_destination_run(data: &[u8], stride: usize, max_segments: usize) -> usize {
     let dst = wire::data_dst_bytes(data);
-    let segments = data
-        .chunks(stride)
-        .take(max_segments.max(1))
-        .take_while(|segment| wire::data_dst_bytes(segment) == dst)
-        .count()
-        .max(1);
+    let segments = data.chunks(stride).take(max_segments.max(1)).take_while(|segment| wire::data_dst_bytes(segment) == dst).count().max(1);
     (segments * stride).min(data.len())
 }
 

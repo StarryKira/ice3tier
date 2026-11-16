@@ -14,19 +14,19 @@ i3t-conn = { path = "../i3t-conn" }
 i3t-flow = { path = "../i3t-flow" }
 i3t-model = { path = "../i3t-model" }
 i3t-proto = { path = "../i3t-proto" }
-if-addrs = "0.15.0"
+if-addrs.workspace = true
 ipnet.workspace = true
-socket2 = "0.6.5"
+socket2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tracing = "0.1.44"
+tracing.workspace = true
 
 [dev-dependencies]
 base64.workspace = true
 i3t-flow = { path = "../i3t-flow", features = ["test-util"] }
 ring.workspace = true
 # 测试里要读回保活的参数，读的接口在这个特性后面。
-socket2 = { version = "0.6.5", features = ["all"] }
+socket2.workspace = true
 
 [lints]
 workspace = true

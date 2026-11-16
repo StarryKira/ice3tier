@@ -24,7 +24,7 @@ use serde::Serialize;
 use crate::path::{PathConfig, PathCounters, PathSocket, Route};
 use crate::quic::{Cipher, Congestion, QuicOpts, QuicStats};
 use crate::relay::RelayConfig;
-use crate::stats::{ProcessUsage, LatencyRecorder, LatencySummary};
+use crate::stats::{LatencyRecorder, LatencySummary, ProcessUsage};
 use crate::transport::{Connector, KcpMode, KcpOpts};
 use crate::wire::NodeId;
 use crate::workload::{BulkOpts, BulkReport, Direction, EchoOpts, EchoReport, LlmOpts, LlmReport};
@@ -580,8 +580,7 @@ async fn run_per_stream(args: &RunArgs, connector: Connector) -> anyhow::Result<
         Workload::Bulk => Outcome::Bulk { bulk: workload::run_bulk(&connector, load.bulk()).await? },
         Workload::Echo => Outcome::Echo { echo: workload::run_echo(&connector, load.echo()).await? },
         Workload::Mixed => {
-            let (bulk, echo) =
-                tokio::join!(workload::run_bulk(&connector, load.bulk()), workload::run_echo(&connector, load.echo()));
+            let (bulk, echo) = tokio::join!(workload::run_bulk(&connector, load.bulk()), workload::run_echo(&connector, load.echo()));
             Outcome::Mixed { bulk: bulk?, echo: echo? }
         }
         Workload::Llm => Outcome::Llm { llm: workload::run_llm(&connector, load.llm()).await? },
@@ -590,19 +589,10 @@ async fn run_per_stream(args: &RunArgs, connector: Connector) -> anyhow::Result<
             for _ in 0..load.rounds {
                 new_connection.record_ns(workload::first_echo_ns(&connector).await?);
             }
-            Outcome::Setup {
-                setup: SetupReport { rounds: load.rounds, new_connection_ms: new_connection.summary(), new_stream_ms: None },
-            }
+            Outcome::Setup { setup: SetupReport { rounds: load.rounds, new_connection_ms: new_connection.summary(), new_stream_ms: None } }
         }
     };
-    Ok(RunReport {
-        role: "client",
-        transport: args.transport,
-        outcome,
-        quic: None,
-        path: None,
-        usage: ProcessUsage::of_this_process(),
-    })
+    Ok(RunReport { role: "client", transport: args.transport, outcome, quic: None, path: None, usage: ProcessUsage::of_this_process() })
 }
 
 async fn connect_quic(endpoint: &Endpoint, peer: NodeId) -> anyhow::Result<quinn::Connection> {
@@ -635,15 +625,9 @@ async fn run_quic(args: &RunArgs) -> anyhow::Result<RunReport> {
         Workload::Bulk => Outcome::Bulk { bulk: workload::run_bulk(&connector, load.bulk()).await? },
         Workload::Echo => Outcome::Echo { echo: workload::run_echo(&connector, load.echo()).await? },
         Workload::Mixed => {
-            let echo_connector = if load.split {
-                Arc::new(Connector::Quic(connect_quic(&endpoint, peer).await?))
-            } else {
-                Arc::clone(&connector)
-            };
-            let (bulk, echo) = tokio::join!(
-                workload::run_bulk(&connector, load.bulk()),
-                workload::run_echo(&echo_connector, load.echo())
-            );
+            let echo_connector =
+                if load.split { Arc::new(Connector::Quic(connect_quic(&endpoint, peer).await?)) } else { Arc::clone(&connector) };
+            let (bulk, echo) = tokio::join!(workload::run_bulk(&connector, load.bulk()), workload::run_echo(&echo_connector, load.echo()));
             Outcome::Mixed { bulk: bulk?, echo: echo? }
         }
         Workload::Llm => Outcome::Llm { llm: workload::run_llm(&connector, load.llm()).await? },

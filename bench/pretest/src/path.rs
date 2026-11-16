@@ -255,12 +255,7 @@ impl AsyncUdpSocket for PathSocket {
         }
     }
 
-    fn poll_recv(
-        &self,
-        cx: &mut Context<'_>,
-        bufs: &mut [IoSliceMut<'_>],
-        meta: &mut [RecvMeta],
-    ) -> Poll<io::Result<usize>> {
+    fn poll_recv(&self, cx: &mut Context<'_>, bufs: &mut [IoSliceMut<'_>], meta: &mut [RecvMeta]) -> Poll<io::Result<usize>> {
         if let Some(leg) = &self.tcp
             && let Poll::Ready(count) = leg.poll_recv(cx, bufs, meta, self.peer)
         {
@@ -357,13 +352,7 @@ impl TcpLeg {
         }
     }
 
-    fn poll_recv(
-        &self,
-        cx: &mut Context<'_>,
-        bufs: &mut [IoSliceMut<'_>],
-        meta: &mut [RecvMeta],
-        peer: NodeId,
-    ) -> Poll<usize> {
+    fn poll_recv(&self, cx: &mut Context<'_>, bufs: &mut [IoSliceMut<'_>], meta: &mut [RecvMeta], peer: NodeId) -> Poll<usize> {
         let mut inbound = self.inbound.lock().expect("tcp inbound mutex poisoned");
         let mut count = 0;
         for (buf, one_meta) in bufs.iter_mut().zip(meta.iter_mut()) {
@@ -380,11 +369,7 @@ impl TcpLeg {
 /// 把队列里的帧写进 TCP。队列空了才 flush，这样一批包合成一次写。
 ///
 /// `register` 给出时先写一帧登记，relay 靠它知道这条 TCP 属于哪个节点。
-pub async fn write_frames(
-    writer: OwnedWriteHalf,
-    mut queue: mpsc::Receiver<Bytes>,
-    register: Option<NodeId>,
-) -> io::Result<()> {
+pub async fn write_frames(writer: OwnedWriteHalf, mut queue: mpsc::Receiver<Bytes>, register: Option<NodeId>) -> io::Result<()> {
     let mut writer = BufWriter::with_capacity(64 * 1024, writer);
     if let Some(id) = register {
         write_frame(&mut writer, &wire::register_frame(id)).await?;

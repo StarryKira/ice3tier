@@ -57,8 +57,13 @@ impl fmt::Display for NodeId {
 pub enum Frame {
     /// 直连的 QUIC 包，整个数据报原样交给 QUIC。
     Quic,
-    Data { dst: NodeId, src: NodeId },
-    Register { id: NodeId },
+    Data {
+        dst: NodeId,
+        src: NodeId,
+    },
+    Register {
+        id: NodeId,
+    },
 }
 
 impl Frame {

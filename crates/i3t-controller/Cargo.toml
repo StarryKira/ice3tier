@@ -21,13 +21,13 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tokio-rustls = { version = "0.26.6", default-features = false }
+tokio-rustls.workspace = true
 tower-http = { version = "0.7.1", default-features = false, features = ["fs"] }
-tracing = "0.1.44"
+tracing.workspace = true
 
 [lints]
 workspace = true
 
 [dev-dependencies]
-tempfile = "3.27.0"
+tempfile.workspace = true
 tower = { version = "0.5.3", features = ["util"] }

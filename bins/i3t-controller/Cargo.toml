@@ -16,8 +16,8 @@ i3t-controller = { path = "../../crates/i3t-controller" }
 anyhow.workspace = true
 clap = { workspace = true, features = ["env"] }
 tokio.workspace = true
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

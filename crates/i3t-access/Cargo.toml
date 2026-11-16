@@ -15,11 +15,11 @@ i3t-model = { path = "../i3t-model" }
 i3t-proto = { path = "../i3t-proto" }
 ipnet.workspace = true
 ring.workspace = true
-socket2 = "0.6.5"
+socket2.workspace = true
 subtle = "2.6.1"
 thiserror.workspace = true
 tokio.workspace = true
-tracing = "0.1.44"
+tracing.workspace = true
 
 [dev-dependencies]
 i3t-flow = { path = "../i3t-flow", features = ["test-util"] }

@@ -11,10 +11,10 @@ description = "ice3tier 的流层：建流请求与应答、两个方向的搬�
 i3t-conn = { path = "../i3t-conn" }
 i3t-model = { path = "../i3t-model" }
 i3t-proto = { path = "../i3t-proto" }
-socket2 = "0.6.5"
+socket2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tracing = "0.1.44"
+tracing.workspace = true
 
 [features]
 # 内存里的连接层（`i3t_flow::memory`），给本 crate 和上层 crate 的测试用。

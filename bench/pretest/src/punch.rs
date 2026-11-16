@@ -26,16 +26,34 @@ const STALE_AFTER: Duration = Duration::from_secs(30);
 #[serde(tag = "t", rename_all = "snake_case")]
 enum Message {
     /// 节点 → 汇合点：我在这个会话里。`nonce` 用来区分同一个会话里的两个节点。
-    Register { session: String, nonce: u64 },
+    Register {
+        session: String,
+        nonce: u64,
+    },
     /// 汇合点 → 节点：你的公网地址；对端已经到了的话带上它的公网地址。
-    Registered { you: SocketAddr, peer: Option<SocketAddr> },
+    Registered {
+        you: SocketAddr,
+        peer: Option<SocketAddr>,
+    },
     /// 节点 → 汇合点的任意端口：只问自己的公网地址。
     WhoAmI,
-    YouAre { you: SocketAddr },
-    Probe { nonce: u64 },
-    ProbeAck { nonce: u64 },
-    Ping { seq: u32, sent_ns: u64 },
-    Pong { seq: u32, sent_ns: u64 },
+    YouAre {
+        you: SocketAddr,
+    },
+    Probe {
+        nonce: u64,
+    },
+    ProbeAck {
+        nonce: u64,
+    },
+    Ping {
+        seq: u32,
+        sent_ns: u64,
+    },
+    Pong {
+        seq: u32,
+        sent_ns: u64,
+    },
 }
 
 impl Message {
