@@ -87,6 +87,13 @@ curl -x socks5h://<家里那台的节点名>@127.0.0.1:1080 https://example.com
 curl -x socks5h://127.0.0.1:1080 http://nas.home.i3t:8080/
 ```
 
+不会用代理的工具可以让 `i3t connect` 替它连，比如 ssh：
+
+```sh
+ssh -o ProxyCommand='i3t connect %h %p' nas                 # 连网络里叫 nas 的节点
+ssh -o ProxyCommand='i3t connect --via home %h %p' 192.168.1.10   # 经 home 这个出口连它局域网里的机器
+```
+
 节点的本机设置在状态目录的 `config.toml` 里，每一项都有注释。`i3t status` 查看节点的状态，`i3t routes` 查看到各个对端现在怎么走。
 
 ## 构建

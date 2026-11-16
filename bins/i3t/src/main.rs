@@ -1,8 +1,10 @@
 //! `i3t`：ice3tier 的节点程序。
 
+mod connect;
 mod show;
 
 use std::io::{IsTerminal, Read};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -14,6 +16,8 @@ use i3t_agent::node::{self, Outcome, Source};
 use i3t_agent::program::Program;
 use i3t_agent::state::StateDir;
 use i3t_agent::{RESTART_EXIT_CODE, Version, local, selfcheck};
+
+use crate::connect::Destination;
 
 /// 这个程序的版本号：报给 controller 的、`i3t --version` 显示的、更新时和发布清单比的都是它。
 ///
@@ -67,6 +71,15 @@ enum Command {
     Routes,
     /// 显示本节点的公钥；还没有密钥时先生成一把
     Key,
+    /// 把标准输入输出接到网络里的一个地址上，给 ssh 之类的工具用：ssh -o ProxyCommand='i3t connect %h %p' nas
+    Connect {
+        /// 目标：节点的名字、全名或虚拟 IP；加了 --via 时是从出口的网络里看到的地址
+        host: String,
+        port: u16,
+        /// 从这个出口节点的网络出去（名字或虚拟 IP），访问它那边的局域网或者互联网
+        #[arg(long, value_name = "出口")]
+        via: Option<String>,
+    },
     /// 自检：读一遍现有的配置和状态，和 controller 握一次手。更新时由正在运行的旧程序调用，也可以手动运行
     SelfCheck,
 }
@@ -141,6 +154,17 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             None => bail!("节点没有在运行。路由表要问正在运行的节点：先用 i3t run 启动它"),
         },
         Command::Key => println!("{}", state.key_or_generate()?.public()),
+        Command::Connect { host, port, via } => {
+            let config = Config::load(&state.config_path())?;
+            let Some(listen) = config.proxy.socks5.addr() else {
+                bail!("配置文件里把 SOCKS5 入口关掉了（proxy.socks5 = \"off\"），i3t connect 要经它出去");
+            };
+            let runtime = current_thread()?;
+            let result = runtime.block_on(connect::connect(reachable_locally(listen), &Destination { host, port, via }));
+            // 读标准输入的那个线程可能还卡在读上，它是取消不了的：不等它，直接退出。
+            runtime.shutdown_background();
+            result?;
+        }
         Command::SelfCheck => {
             // 不初始化日志：调用它的旧程序把标准错误的最后一段当作失败的原因报给 controller，那里只该有原因本身。
             if let Err(failure) = current_thread()?.block_on(selfcheck::self_check(&state, &version)) {
@@ -151,6 +175,16 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// 从本机连一个监听地址该用的地址：绑在"所有地址"上的监听，连它的回环地址。
+fn reachable_locally(listen: SocketAddr) -> SocketAddr {
+    let ip = match listen.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    SocketAddr::new(ip, listen.port())
 }
 
 /// 只做一两次网络往返的子命令用的运行时。

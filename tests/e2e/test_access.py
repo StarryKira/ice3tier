@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lab as lablib  # noqa: E402
-from harness import Checks, Controller, Node, start_whoami, tail  # noqa: E402
+from harness import Checks, Controller, Node, binary, start_whoami, tail  # noqa: E402
 from lab import Lab, NatKind, wait_until  # noqa: E402
 
 
@@ -21,6 +21,13 @@ def socks(node: Node, url: str, user: str = "", timeout: float = 8):
     """从 `node` 所在的机器经它的本机 SOCKS5 入口访问 `url`；`user` 是代理的用户名。"""
     auth = f"{user}@" if user else ""
     return node.host.run("curl", "-sS", "--max-time", str(timeout), "-x", f"socks5h://{auth}127.0.0.1:1080", url, check=False, timeout=timeout + 5)
+
+
+def connect(node: Node, host: str, port: int, *, via: str = "", timeout: float = 15):
+    """用 `i3t connect` 从 `node` 连到 `host:port`，发一个 HTTP 请求，返回进程的结果（标准输出是对面的应答）。"""
+    exit_args = ("--via", via) if via else ()
+    return node.host.run(binary("i3t"), "--state-dir", str(node.state), "connect", host, str(port), *exit_args,
+                         input="GET / HTTP/1.0\r\n\r\n", check=False, timeout=timeout)
 
 
 def eventually(action, ok, timeout: float = 25):
@@ -52,6 +59,13 @@ def node_service(lab: Lab, work: Path, t: Checks) -> None:
     t.check("只监听 127.0.0.1 的服务到不了", loopback_only.returncode != 0)
     as_exit = socks(a, "http://11.0.0.2/", user=b.virtual_ip)
     t.check("b 没有启用出口，不能经它上网", as_exit.returncode != 0)
+
+    piped = connect(a, "b.lab.i3t", 8080)
+    t.check("i3t connect 把标准输入输出接到 b 上的服务", piped.returncode == 0 and piped.stdout.endswith(b.host.ip),
+            f"{piped.returncode} {piped.stdout!r} {piped.stderr.strip()}")
+    refused = connect(a, b.virtual_ip, 8081)
+    t.check("i3t connect 连不上时以失败退出，标准输出上什么都没有", refused.returncode != 0 and refused.stdout == "",
+            f"{refused.returncode} {refused.stdout!r} {refused.stderr.strip()}")
     if t.failures:
         print(tail(a.read_log()), tail(b.read_log()), sep="\n  ---\n")
 
@@ -111,6 +125,9 @@ def lan_behind_exit(lab: Lab, work: Path, t: Checks) -> None:
     controller.ctl("exit", "enable", str(b.id), "--lan")
     seen = eventually(lambda: socks(a, url, user=b.virtual_ip), lambda r: r.returncode == 0)
     t.check("打开开关之后可以访问，局域网里的机器看到的来源是出口在局域网里的地址", seen.stdout == b.host.ip, f"{seen.stdout!r} {seen.stderr.strip()}")
+    piped = connect(a, printer.ip, 80, via=b.virtual_ip)
+    t.check("i3t connect --via 经出口连到它局域网里的机器", piped.returncode == 0 and piped.stdout.endswith(b.host.ip),
+            f"{piped.returncode} {piped.stdout!r} {piped.stderr.strip()}")
     if t.failures:
         print(tail(a.read_log()), tail(b.read_log()), sep="\n  ---\n")
 
