@@ -8,7 +8,7 @@ use i3t_crypto::NodeKey;
 use i3t_model::Netmap;
 use i3t_model::control::{RouteEntry, Signal};
 use i3t_model::netmap::Attachment;
-use i3t_path::{PathConfig, Paths, RouteChange};
+use i3t_path::{BackboneRow, PathConfig, PathReport, Paths, RouteChange};
 use i3t_proto::NodeId;
 use i3t_proto::flow::Recipient;
 use i3t_relay::{Relay, RelayCounters};
@@ -21,6 +21,9 @@ use crate::manager::{DATAGRAM_BACKLOG, DatagramHandle, DatagramQueues, Manager};
 use crate::quic::{self, QuicConfigError};
 use crate::socket::PathSocket;
 use crate::stream::{RecvHalf, SendHalf};
+
+/// relay 宣布自己要停之后，还继续转发多久。挂靠它的节点收到通知就会换路，这段时间是留给它们换的。
+const RELAY_LEAVE_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// 对端开过来、上层还没有取走的流最多排多少条。满了之后那条连接上新的流先不接，压力传回对端。
 const INCOMING_BACKLOG: usize = 256;
@@ -147,6 +150,24 @@ impl Endpoint {
         self.paths.attached()
     }
 
+    /// 到每个对端考虑过哪些路径、各自测到的代价，以及为什么选了现在这条。给路由视图和路径诊断用。
+    #[must_use]
+    pub fn path_reports(&self) -> Vec<PathReport> {
+        self.paths.path_reports()
+    }
+
+    /// 同 [`path_reports`](Self::path_reports)，只取一个对端的；这个对端不在 netmap 里时是 `None`。
+    #[must_use]
+    pub fn path_report(&self, peer: NodeId) -> Option<PathReport> {
+        self.paths.path_report(peer)
+    }
+
+    /// 本节点手上的 relay 骨干延迟矩阵，每个 relay 一行。
+    #[must_use]
+    pub fn backbone(&self) -> Vec<BackboneRow> {
+        self.paths.backbone()
+    }
+
     /// 订阅换路事件。每一次换路都有一条，带着给人看的原因。
     #[must_use]
     pub fn route_changes(&self) -> broadcast::Receiver<RouteChange> {
@@ -181,7 +202,14 @@ impl Endpoint {
 
     /// 关闭：所有连接带着关闭帧结束，[`Acceptor::accept`] 返回 `None`，之后的 [`Connector::open`] 失败。
     pub async fn close(&self) {
+        if self.relay.is_enabled() {
+            // 先告诉挂靠在本节点上的节点"我要停了"，再继续转发一小会儿，让它们把路换到别的 relay 上。
+            self.relay.announce_shutdown();
+            tokio::time::sleep(RELAY_LEAVE_GRACE).await;
+        }
         self.manager.close().await;
+        // 路径层最后收：它要撤掉在路由器上自动申请的端口映射。
+        self.paths.shutdown().await;
     }
 }
 
