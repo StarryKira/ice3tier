@@ -1,0 +1,18 @@
+[package]
+name = "i3t-controller"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "ice3tier 的 controller：存储、注册、访问规则编译、netmap、节点协议、管理 API"
+
+[dependencies]
+i3t-crypto = { path = "../i3t-crypto" }
+i3t-model = { path = "../i3t-model" }
+i3t-proto = { path = "../i3t-proto" }
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

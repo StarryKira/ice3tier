@@ -1,0 +1,19 @@
+[package]
+name = "i3t-crypto"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "ice3tier 的节点密钥、签名，以及按公钥互相认证的 TLS 配置"
+
+[dependencies]
+base64.workspace = true
+i3t-proto = { path = "../i3t-proto" }
+rcgen.workspace = true
+ring.workspace = true
+rustls.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

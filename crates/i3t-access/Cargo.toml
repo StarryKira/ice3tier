@@ -1,0 +1,19 @@
+[package]
+name = "i3t-access"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "ice3tier 的入口：SOCKS5、HTTP CONNECT、端口转发的监听、用户名解析、凭据"
+
+[dependencies]
+i3t-conn = { path = "../i3t-conn" }
+i3t-flow = { path = "../i3t-flow" }
+i3t-model = { path = "../i3t-model" }
+i3t-proto = { path = "../i3t-proto" }
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

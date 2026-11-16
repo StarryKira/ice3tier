@@ -7,11 +7,19 @@
 //! | [`node`] | 节点编号 |
 //! | [`key`] | 节点公钥 |
 //! | [`datagram`] | 一个端口上收到的 UDP 数据报怎么分类；经 relay 转发时加在包前面的中转头 |
+//! | [`session`] | 节点和 relay 之间的中转会话 |
+//! | [`probe`] | 节点之间的探测 |
+//! | [`addr`] | 地址查询 |
+//! | [`flow`] | 建流请求与应答 |
 //! | [`tcp_frame`] | UDP 用不了的节点把同样的包装进一条 TCP 时的分帧 |
 
+pub mod addr;
 pub mod datagram;
+pub mod flow;
 pub mod key;
 pub mod node;
+pub mod probe;
+pub mod session;
 pub mod tcp_frame;
 
 pub use datagram::{Datagram, DatagramError, MAX_CONN_PACKET_LEN, RelayHeader};

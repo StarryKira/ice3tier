@@ -1,0 +1,19 @@
+[package]
+name = "i3t-relay"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "ice3tier 的 relay：中转会话、包转发、限速"
+
+[dependencies]
+i3t-crypto = { path = "../i3t-crypto" }
+i3t-model = { path = "../i3t-model" }
+i3t-proto = { path = "../i3t-proto" }
+i3t-underlay = { path = "../i3t-underlay" }
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

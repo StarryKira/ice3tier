@@ -7,10 +7,12 @@
 //! |---|---|
 //! | [`netmap`] | 一个节点运行所需要的全部配置 |
 //! | [`control`] | 节点和 controller 之间的消息 |
+//! | [`admin`] | 管理 API 的数据结构 |
 //!
 //! 兼容性的规矩：新增的字段都带 `#[serde(default)]`，收的一方忽略不认识的字段。
 //! 这样节点和 controller 的版本可以不一样（节点更新是分批的，§10.5）。
 
+pub mod admin;
 pub mod control;
 pub mod netmap;
 

@@ -1,0 +1,18 @@
+[package]
+name = "i3t-flow"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "ice3tier 的流层：建流请求与应答、两个方向的搬运"
+
+[dependencies]
+i3t-conn = { path = "../i3t-conn" }
+i3t-model = { path = "../i3t-model" }
+i3t-proto = { path = "../i3t-proto" }
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
