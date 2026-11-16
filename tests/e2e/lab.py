@@ -197,8 +197,10 @@ class Lab:
         """给命名空间 `name` 一条到 core 的线和一个公网地址，返回这个地址。"""
         index = self._next_public
         self._next_public += 1
-        # 每台公网主机一个 /30：core 一侧 .1，主机一侧 .2。地址取自文档专用的 198.18.0.0/15。
-        base = ipaddress.IPv4Address("198.18.0.0") + 4 * index
+        # 每台公网主机一个 /30：core 一侧 .1，主机一侧 .2。
+        # 地址必须是普通的公网单播地址：出口的出站策略不放行文档、基准测试这类保留地址段。
+        # 这些地址只存在于测试自己的命名空间里，不会和真实的互联网混在一起。
+        base = ipaddress.IPv4Address("11.0.0.0") + 4 * index
         core_ip, host_ip = str(base + 1), str(base + 2)
         port = f"c-{name}"[:15]
         sh("ip", "link", "add", "up0", "netns", name, "type", "veth", "peer", "name", port, "netns", "core")
