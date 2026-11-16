@@ -19,7 +19,10 @@ use i3t_proto::{NodeId, PublicKey};
 use ipnet::{IpNet, Ipv4Net};
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::control::{Declared, ExitObservation, ExitReport, ListenState, ListenTraffic, Route, RouteSince, SelfUpdate};
+use crate::control::{
+    BackboneLink, Declared, DirectKind, ExitObservation, ExitReport, LegTransport, ListenState, ListenTraffic, PathCandidate, RelayState,
+    Route, RouteSince, SelfUpdate,
+};
 use crate::netmap::{Attachment, ExitRole, ForwardProtocol, ListenerProtocol, Reach, RoutingMode};
 use crate::update::{FailureKind, UpdateStatus, UpdateTiming, Version};
 
@@ -546,6 +549,12 @@ pub struct NodeRoute {
     /// controller 看到这条路换上来已经多少秒了：从它第一次报这条路算起。controller 重启之后从头算。
     #[serde(default)]
     pub since_secs: u64,
+    /// 走直连时，这条直连是怎么建立起来的；节点没有说（版本太旧，或者它也不知道）时是 `null`。
+    #[serde(default)]
+    pub direct: Option<DirectKind>,
+    /// 经 relay 时，节点到第一个 relay 的那一段走的是 UDP 还是 TCP；节点没有说时是 `null`。
+    #[serde(default)]
+    pub relay_leg: Option<LegTransport>,
 }
 
 /// 整个网络的路由矩阵：每个节点到它的各个对端现在怎么走，取自各节点最近的上报（白皮书 §7.7）。
@@ -575,6 +584,12 @@ pub struct MatrixEntry {
     pub age_secs: u64,
     /// 这一格不是 `from` 现在这次连接报的，已经过期：它不在线（这是它离线之前最后报的），或者刚重新连上还没有上报。
     pub stale: bool,
+    /// 同 [`NodeRoute::direct`]。
+    #[serde(default)]
+    pub direct: Option<DirectKind>,
+    /// 同 [`NodeRoute::relay_leg`]。
+    #[serde(default)]
+    pub relay_leg: Option<LegTransport>,
 }
 
 /// 两个节点之间两个方向的当前路径。
@@ -600,6 +615,51 @@ pub struct PathLeg {
     pub age_secs: Option<u64>,
     /// 这条路是多久之前换上的、为什么换。只有现问到、并且节点这次启动以来换过路时才有。
     pub since: Option<RouteSince>,
+    /// 走直连时，这条直连是怎么建立起来的。现问到的取自回答，否则取自上报；都没有时是 `null`。
+    #[serde(default)]
+    pub direct: Option<DirectKind>,
+    /// 经 relay 时，发送方到第一个 relay 的那一段走的是 UDP 还是 TCP；不知道时是 `null`。
+    #[serde(default)]
+    pub relay_leg: Option<LegTransport>,
+    /// 发送方用的选路模式。只有现问到、并且发送方的版本会说时才有。
+    #[serde(default)]
+    pub mode: Option<RoutingMode>,
+    /// 发送方的路由层说的"为什么是现在这条路"。有没有同 `mode`。
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// 发送方考虑过的候选路径，按代价从低到高，现在走的那条标着 `current`。有没有同 `mode`：`null` 是不知道，
+    /// 空数组是发送方手上还没有任何测量值。
+    #[serde(default)]
+    pub candidates: Option<Vec<PathCandidate>>,
+}
+
+/// 网络里 relay 之间的延迟矩阵（白皮书 §7.7），每个 relay 一行。
+///
+/// 这些行是 relay 自己测、自己签名之后发给别的 relay 和挂靠它的节点的；controller 现问几个在线的节点，取每个 relay 最新的那一行。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackboneView {
+    /// 网络里启用了 relay 的节点，按编号排。
+    pub relays: Vec<BackboneRelay>,
+    /// 这次回答了的节点。没有一个回答时（没有在线的、版本够新的节点）每个 relay 的行都是空的。
+    pub answered: Vec<NodeRef>,
+}
+
+/// 骨干矩阵里一个 relay 的那一行。问到的节点手上都没有这一行时，`state`、`load_percent`、`age_ms`、`reported_by` 都是 `null`，
+/// `links` 是空的。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackboneRelay {
+    pub relay: NodeRef,
+    /// 这个 relay 现在连着 controller。
+    pub online: bool,
+    pub state: Option<RelayState>,
+    /// 带宽占用的百分比；没有设上限的 relay 是 0。
+    pub load_percent: Option<u8>,
+    /// 这一行是多少毫秒之前的：回答的节点收到它到现在过了多久。超过两分钟的行节点不再留，所以不会更旧。
+    pub age_ms: Option<u64>,
+    /// 这一行是从哪个节点问来的。
+    pub reported_by: Option<NodeId>,
+    /// 它到别的 relay 的链路。`to` 是 relay 的节点编号。
+    pub links: Vec<BackboneLink>,
 }
 
 /// 一段路径的数据是从哪里来的。
@@ -1214,6 +1274,27 @@ mod tests {
             online: true,
         };
         assert_eq!(serde_json::to_value(&node).unwrap(), json!({ "id": 2, "name": "laptop", "virtual_ip": "10.66.0.2", "online": true }));
+    }
+
+    #[test]
+    fn route_views_from_an_older_controller_read_without_the_path_details() {
+        let laptop = json!({ "id": 2, "name": "laptop", "virtual_ip": "10.66.0.2" });
+        let leg: PathLeg = serde_json::from_value(json!({
+            "from": laptop, "to": laptop, "source": "report", "route": { "via": "none" }, "rtt_ms": null, "age_secs": 3, "since": null
+        }))
+        .unwrap();
+        assert_eq!((leg.direct, leg.relay_leg, leg.mode, leg.reason.clone(), leg.candidates.clone()), (None, None, None, None, None));
+        let wire = serde_json::to_value(&leg).unwrap();
+        for field in ["direct", "relay_leg", "mode", "reason", "candidates"] {
+            assert_eq!(wire[field], json!(null), "新的字段总是写出来，不知道时是 null：{field}");
+        }
+        let entry: MatrixEntry = serde_json::from_value(
+            json!({ "from": 1, "to": 2, "route": { "via": "none" }, "rtt_ms": null, "age_secs": 0, "stale": false }),
+        )
+        .unwrap();
+        assert_eq!((entry.direct, entry.relay_leg), (None, None));
+        let route: NodeRoute = serde_json::from_value(json!({ "peer": laptop, "route": { "via": "none" }, "rtt_ms": null })).unwrap();
+        assert_eq!((route.direct, route.relay_leg), (None, None));
     }
 
     #[test]

@@ -6,7 +6,8 @@
 //! 一条连接上的顺序：
 //!
 //! 1. 节点先发 [`ToController::Enroll`]（第一次加入）或 [`ToController::Hello`]（已经注册过）。
-//! 2. controller 回 [`ToNode::Snapshot`]；不认这个节点时回 [`ToNode::Rejected`] 然后断开。
+//! 2. controller 回 [`ToNode::Snapshot`]；不认这个节点时回 [`ToNode::Rejected`] 然后断开；
+//!    自己出了错、这一次接待不了时回 [`ToNode::TryLater`] 然后断开，节点按退避重连。
 //! 3. 之后节点定期发 [`ToController::Report`]，配置有变化时 controller 再发 `Snapshot`，节点应用之后回 [`ToController::Ack`]。
 //!
 //! 保活：节点每 10 秒发一次 `Report`，它同时就是心跳。controller 连续 20 秒没有东西要发时发一个 [`ToNode::Heartbeat`]。
@@ -38,7 +39,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use i3t_proto::{NodeId, PublicKey};
 use serde::{Deserialize, Serialize};
 
-use crate::netmap::{Attachment, ForwardProtocol, ListenerProtocol, Netmap};
+use crate::netmap::{Attachment, ForwardProtocol, ListenerProtocol, Netmap, RoutingMode};
 use crate::update::{Platform, SelfUpdateBlocker, SignedManifest, UpdateStatus, UpdateTiming, Version};
 
 /// 一帧最长多少字节。netmap 随对端数量增长，千级节点时在几百 KB。
@@ -49,7 +50,9 @@ pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 /// - 0：最初的一版。收到不认识的消息会断开连接。
 /// - 1：认识 [`ToNode::Update`]、[`ToNode::UpdateCancel`]、[`ToNode::PackageChunk`]、[`ToNode::PackageUnavailable`]、
 ///   [`ToNode::RouteQuery`]；从这一版起，解析不了的一帧只是被跳过。
-pub const PROTOCOL_REVISION: u32 = 1;
+/// - 2：认识 [`ToNode::TryLater`]、[`ToNode::BackboneQuery`]；回答路由查询时带 [`RouteAnswer::detail`]，
+///   上报时带 [`Report::route_kinds`]。
+pub const PROTOCOL_REVISION: u32 = 2;
 
 /// 取更新包时一段最多多少字节。同一条连接上还有别的消息要走，所以不能大。
 pub const MAX_PACKAGE_CHUNK: u32 = 256 * 1024;
@@ -145,6 +148,12 @@ pub enum ToController {
         request: u64,
         answer: RouteAnswer,
     },
+    /// 对 [`ToNode::BackboneQuery`] 的回答：节点手上骨干矩阵的每一行。
+    BackboneAnswer {
+        request: u64,
+        #[serde(default)]
+        rows: Vec<BackboneRow>,
+    },
 }
 
 /// controller 发给节点的消息。
@@ -188,6 +197,18 @@ pub enum ToNode {
         /// controller 编的号，回答里原样带回。
         request: u64,
         peer: NodeId,
+    },
+    /// controller 这一次接待不了这个节点：是它自己出了错（例如存储暂时不可用），不是不认这个节点。
+    /// 节点按退避重连，不能像 [`ToNode::Rejected`] 那样就此停下。
+    ///
+    /// controller 发完就关闭连接，所以不认识这条消息的旧节点同样会重连。
+    TryLater {
+        reason: String,
+    },
+    /// 问节点手上的 relay 骨干矩阵（白皮书 §7.7），节点用 [`ToController::BackboneAnswer`] 回答。
+    /// 只发给 [`Hello::protocol`] 至少是 2 的节点。
+    BackboneQuery {
+        request: u64,
     },
 }
 
@@ -320,6 +341,10 @@ pub struct Report {
     /// 本节点负责监听的端口转发的状态。
     #[serde(default)]
     pub forwards: Vec<ForwardReport>,
+    /// `routes` 里各条路的细节（直连是怎么建立的、经 relay 时第一段走 UDP 还是 TCP），和 `routes` 是同一批对端：
+    /// `routes` 只带变化的条目时这里也一样。节点说不出细节的对端不在里面。旧版本的节点不报。
+    #[serde(default)]
+    pub route_kinds: Vec<RouteKind>,
 }
 
 /// 一个接入凭据在一个入口上的用量。
@@ -489,6 +514,153 @@ pub struct RouteAnswer {
     /// 这条路是什么时候、因为什么换上的。节点这次启动以来没有换过时是 `None`。
     #[serde(default)]
     pub since: Option<RouteSince>,
+    /// 选路的细节：模式、考虑过的候选路径和各自的代价、为什么是现在这条。旧版本的节点不报，对端不在 netmap 里时也没有。
+    #[serde(default)]
+    pub detail: Option<PathDetail>,
+}
+
+/// 一条路的细节。说不出来的项是 `None`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteKind {
+    pub peer: NodeId,
+    /// 走直连时，这条直连是怎么建立起来的。
+    #[serde(default)]
+    pub direct: Option<DirectKind>,
+    /// 经 relay 时，本节点到第一个 relay 的那一段走的是 UDP 还是 TCP。
+    #[serde(default)]
+    pub relay_leg: Option<LegTransport>,
+}
+
+/// 直连是怎么建立起来的（白皮书 §7.7）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectKind {
+    /// 同一个局域网。
+    Lan,
+    /// 对端的 IPv6 地址。
+    Ipv6,
+    /// 对端的这个地址本来就连得上（公网地址、端口转发、端口映射），没有用到打洞。
+    Reachable,
+    /// 交换打洞信令之后打通的。
+    Punched,
+    /// 比这个程序新的节点报的、这里不认识的类型。
+    #[serde(other)]
+    Unknown,
+}
+
+/// 到 relay 的那一段用的传输。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegTransport {
+    Udp,
+    /// UDP 用不了时，经 relay 的 TCP 监听。
+    Tcp,
+    /// 比这个程序新的节点报的、这里不认识的传输。
+    #[serde(other)]
+    Unknown,
+}
+
+/// 发送方对一个对端的选路情况：它用什么模式、考虑过哪些路、各自多少代价、为什么是现在这条。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathDetail {
+    /// 发送方用的选路模式。比这个程序新的节点报了不认识的模式时是 `None`。
+    #[serde(default, deserialize_with = "known")]
+    pub mode: Option<RoutingMode>,
+    /// 现在走直连时，这条直连是怎么建立起来的。
+    #[serde(default)]
+    pub direct: Option<DirectKind>,
+    /// 现在经 relay 时，第一段走的是 UDP 还是 TCP。节点说不出来时是 `None`。
+    #[serde(default)]
+    pub relay_leg: Option<LegTransport>,
+    /// 路由层说的"为什么是现在这条路"，给人看的。
+    #[serde(default)]
+    pub reason: String,
+    /// 考虑过的候选路径，按代价从低到高。没有任何测量值的路不在里面。
+    #[serde(default)]
+    pub candidates: Vec<PathCandidate>,
+}
+
+/// 一条考虑过的候选路径。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathCandidate {
+    pub route: Route,
+    /// 按白皮书 §7.4 算出来的代价，微秒。默认模式不拿它做选择，但照样算出来给人看。
+    pub cost_us: u64,
+    /// 各段的测量值，按经过的顺序。
+    #[serde(default)]
+    pub legs: Vec<PathSegment>,
+    /// 路径上负载最高的 relay 的带宽占用百分比。
+    #[serde(default)]
+    pub load_percent: u8,
+    /// 现在走的就是这一条。
+    #[serde(default)]
+    pub current: bool,
+}
+
+/// 路径上一段的测量值。目的节点到它挂靠的 relay 的那一段只知道延迟，抖动和丢包都是 0。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathSegment {
+    pub from: NodeId,
+    pub to: NodeId,
+    /// 往返延迟，微秒。
+    pub rtt_us: u32,
+    /// 抖动，微秒。
+    #[serde(default)]
+    pub jitter_us: u32,
+    /// 丢包率，千分之几。
+    #[serde(default)]
+    pub loss_permille: u16,
+}
+
+/// 骨干矩阵的一行：一个 relay 自己报的状态、负载，和它到别的 relay 的链路。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackboneRow {
+    pub relay: NodeId,
+    #[serde(default)]
+    pub state: RelayState,
+    /// 带宽占用的百分比；没有设上限的 relay 是 0。
+    #[serde(default)]
+    pub load_percent: u8,
+    /// 回答的节点是多少毫秒之前收到这一行的。
+    pub age_ms: u64,
+    #[serde(default)]
+    pub links: Vec<BackboneLink>,
+}
+
+/// 骨干矩阵里一个 relay 到另一个 relay 的链路。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackboneLink {
+    pub to: NodeId,
+    /// 往返延迟，毫秒；`None` 表示连不上。
+    pub rtt_ms: Option<u32>,
+    /// 抖动，毫秒。
+    #[serde(default)]
+    pub jitter_ms: u32,
+    /// 丢包率，千分之几。
+    #[serde(default)]
+    pub loss_permille: u16,
+}
+
+/// relay 现在能不能接新的转发，是它自己在骨干矩阵的行里说的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayState {
+    /// 正常。
+    #[default]
+    Serving,
+    /// 转发的流量到了带宽上限。
+    Overloaded,
+    /// 即将下线（升级、关机、被停用）。
+    Draining,
+    /// 比这个程序新的节点报的、这里不认识的状态。
+    #[serde(other)]
+    Unknown,
+}
+
+/// 读不懂的值读成 `None`，不让整条消息因此解析失败：比这个程序新的节点可能报了这里还没有的取值。
+fn known<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned>(deserializer: D) -> Result<Option<T>, D::Error> {
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw.and_then(|value| serde_json::from_value(value).ok()))
 }
 
 /// 一条路是多久之前换上的，以及换的原因。
@@ -666,6 +838,7 @@ mod tests {
             route: Some(Route::Direct { addr: "1.2.3.4:20330".parse().unwrap() }),
             rtt_ms: Some(12),
             since: Some(RouteSince { secs_ago: 30, reason: "直连打通了".to_owned() }),
+            detail: None,
         };
         let wire = serde_json::to_value(ToController::RouteAnswer { request: 9, answer: answer.clone() }).unwrap();
         assert_eq!(
@@ -673,11 +846,83 @@ mod tests {
             serde_json::json!({
                 "type": "route_answer", "request": 9,
                 "answer": { "peer": 4, "route": { "via": "direct", "addr": "1.2.3.4:20330" }, "rtt_ms": 12,
-                            "since": { "secs_ago": 30, "reason": "直连打通了" } }
+                            "since": { "secs_ago": 30, "reason": "直连打通了" }, "detail": null }
             })
         );
         let unknown: RouteAnswer = serde_json::from_value(serde_json::json!({ "peer": 4, "route": null })).unwrap();
-        assert_eq!(unknown, RouteAnswer { peer, route: None, rtt_ms: None, since: None });
+        assert_eq!(unknown, RouteAnswer { peer, route: None, rtt_ms: None, since: None, detail: None });
+    }
+
+    #[test]
+    fn a_route_answer_carries_the_candidates_and_tolerates_values_added_later() {
+        let (me, relay, peer) = (NodeId::new(1).unwrap(), NodeId::new(9).unwrap(), NodeId::new(4).unwrap());
+        let detail = PathDetail {
+            mode: Some(RoutingMode::LowestCost),
+            direct: None,
+            relay_leg: Some(LegTransport::Tcp),
+            reason: "经 relay 代价最低".to_owned(),
+            candidates: vec![PathCandidate {
+                route: Route::Relay { relays: vec![relay] },
+                cost_us: 41_500,
+                legs: vec![
+                    PathSegment { from: me, to: relay, rtt_us: 20_250, jitter_us: 500, loss_permille: 3 },
+                    PathSegment { from: relay, to: peer, rtt_us: 19_000, jitter_us: 0, loss_permille: 0 },
+                ],
+                load_percent: 12,
+                current: true,
+            }],
+        };
+        let answer =
+            RouteAnswer { peer, route: Some(Route::Relay { relays: vec![relay] }), rtt_ms: Some(39), since: None, detail: Some(detail) };
+        let wire = serde_json::to_value(&answer).unwrap();
+        assert_eq!(wire["detail"]["mode"], "lowest_cost");
+        assert_eq!(wire["detail"]["relay_leg"], "tcp");
+        assert_eq!(
+            wire["detail"]["candidates"][0]["legs"][0],
+            serde_json::json!({ "from": 1, "to": 9, "rtt_us": 20_250, "jitter_us": 500, "loss_permille": 3 })
+        );
+        assert_eq!(serde_json::from_value::<RouteAnswer>(wire).unwrap(), answer);
+
+        let newer: PathDetail = serde_json::from_value(serde_json::json!({
+            "mode": "some_new_mode", "direct": "some_new_kind", "relay_leg": "quic", "reason": "", "candidates": []
+        }))
+        .unwrap();
+        assert_eq!((newer.mode, newer.direct, newer.relay_leg), (None, Some(DirectKind::Unknown), Some(LegTransport::Unknown)));
+    }
+
+    #[test]
+    fn backbone_queries_answers_and_try_later_have_stable_json_shapes() {
+        let relay = NodeId::new(9).unwrap();
+        assert_eq!(
+            serde_json::to_value(ToNode::BackboneQuery { request: 5 }).unwrap(),
+            serde_json::json!({ "type": "backbone_query", "request": 5 })
+        );
+        let try_later = serde_json::to_value(ToNode::TryLater { reason: "存储出错".to_owned() }).unwrap();
+        assert_eq!(try_later, serde_json::json!({ "type": "try_later", "reason": "存储出错" }));
+        let row = BackboneRow {
+            relay,
+            state: RelayState::Overloaded,
+            load_percent: 97,
+            age_ms: 1200,
+            links: vec![BackboneLink { to: NodeId::new(3).unwrap(), rtt_ms: None, jitter_ms: 0, loss_permille: 1000 }],
+        };
+        let wire = serde_json::to_value(ToController::BackboneAnswer { request: 5, rows: vec![row.clone()] }).unwrap();
+        assert_eq!(wire["rows"][0]["state"], "overloaded");
+        assert_eq!(wire["rows"][0]["links"][0], serde_json::json!({ "to": 3, "rtt_ms": null, "jitter_ms": 0, "loss_permille": 1000 }));
+        assert_eq!(serde_json::from_value::<ToController>(wire).unwrap(), ToController::BackboneAnswer { request: 5, rows: vec![row] });
+        let later: BackboneRow = serde_json::from_value(serde_json::json!({ "relay": 9, "state": "resting", "age_ms": 0 })).unwrap();
+        assert_eq!((later.state, later.load_percent, later.links.len()), (RelayState::Unknown, 0, 0));
+    }
+
+    #[test]
+    fn route_kinds_are_optional_in_a_report() {
+        let old: Report = serde_json::from_value(serde_json::json!({ "routes": [], "routes_full": true })).unwrap();
+        assert!(old.route_kinds.is_empty());
+        let kind = RouteKind { peer: NodeId::new(4).unwrap(), direct: Some(DirectKind::Punched), relay_leg: None };
+        let report = Report { route_kinds: vec![kind], ..Report::default() };
+        let wire = serde_json::to_value(&report).unwrap();
+        assert_eq!(wire["route_kinds"], serde_json::json!([{ "peer": 4, "direct": "punched", "relay_leg": null }]));
+        assert_eq!(serde_json::from_value::<Report>(wire).unwrap(), report);
     }
 
     #[test]
