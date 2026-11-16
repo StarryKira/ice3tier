@@ -5,7 +5,7 @@ import { t } from '@/i18n'
 import { nodeIssues } from '@/lib/nodeIssues'
 import { ruleLabel } from '@/lib/rules'
 import { formatRelative, formatRemaining } from '@/lib/time'
-import { makeNode } from '@/test/fixtures'
+import { makeExitSettings, makeNode } from '@/test/fixtures'
 
 import {
   DEFAULT_SORT,
@@ -20,7 +20,7 @@ import {
 const node = (id: number, name: string, extra: Partial<Node> = {}): Node => makeNode(id, name, extra)
 
 const RELAY = { udp: ['203.0.113.7:20330'], tcp: [], region: 'hk', bandwidth_mbps: null }
-const EXIT = { ports: [80, 443], lan: false, bandwidth_mbps: null, upstream_socks5: null }
+const EXIT = makeExitSettings()
 const NONE: NodeFilters = { search: '', status: 'all', tags: [], roles: [], platforms: [] }
 
 describe('节点列表的筛选写在地址里', () => {

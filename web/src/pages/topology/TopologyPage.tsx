@@ -22,13 +22,14 @@ import { LINE_COLORS } from '@/topology/colors'
 import { buildTopology, type Selection } from '@/topology/graph'
 import { nextPick, type Pair, readPair, writePair } from '@/topology/pair'
 
+import { BackboneView } from './BackboneView'
 import { MatrixLegend, MatrixView } from './MatrixView'
 import { PairPanel } from './PairPanel'
 import { TopologyGraph } from './TopologyGraph'
 
 const g = t.topology
 
-type View = 'graph' | 'matrix'
+type View = 'graph' | 'matrix' | 'backbone'
 
 function GraphLegend() {
   const line = (color: string, dash?: string, width = 1.6) => (
@@ -76,13 +77,15 @@ function GraphLegend() {
 /**
  * 拓扑：节点、relay 和它们之间现在走的路（白皮书 §7.7）。两种看法共用同一份路由矩阵：
  * 实时图（看得快）和路由矩阵（精确）。选中的一对节点写在地址里，两种看法之间、和路径诊断之间来回切换时跟着走。
+ * 第三个标签页"骨干"是另一份数据：relay 之间测的延迟，每次现问节点。
  */
 export function TopologyPage() {
   useDocumentTitle(g.title)
   const network = useNetwork()
   const [params, setParams] = useSearchParams()
   const [adding, setAdding] = useState(false)
-  const view: View = params.get('view') === 'matrix' ? 'matrix' : 'graph'
+  const requested = params.get('view')
+  const view: View = requested === 'matrix' || requested === 'backbone' ? requested : 'graph'
   const pair = readPair(params)
 
   const matrix = useQuery(q.matrix(network.id))
@@ -129,12 +132,14 @@ export function TopologyPage() {
       <PageHeader title={g.title} description={g.description} />
       <Card>
         <div className="flex flex-wrap items-end justify-between gap-3 border-b px-5 py-3.5">
-          <PairPicker
-            nodes={nodes.data ?? []}
-            pair={pair}
-            onChange={setPair}
-            labels={{ a: g.pickA, b: g.pickB, swap: g.swap }}
-          />
+          {view === 'backbone' ? null : (
+            <PairPicker
+              nodes={nodes.data ?? []}
+              pair={pair}
+              onChange={setPair}
+              labels={{ a: g.pickA, b: g.pickB, swap: g.swap }}
+            />
+          )}
           <div className="ml-auto flex flex-col items-end gap-1.5">
             <Segmented<View>
               aria-label={g.viewLabel}
@@ -143,13 +148,16 @@ export function TopologyPage() {
               options={[
                 { value: 'graph', label: g.viewGraph },
                 { value: 'matrix', label: g.viewMatrix },
+                { value: 'backbone', label: g.viewBackbone },
               ]}
             />
-            <p className="text-xs text-muted-foreground">{t.common.updatedEvery(REPORT_INTERVAL_SECS)}</p>
+            {view === 'backbone' ? null : (
+              <p className="text-xs text-muted-foreground">{t.common.updatedEvery(REPORT_INTERVAL_SECS)}</p>
+            )}
           </div>
         </div>
 
-        {nodeA !== undefined && nodeB !== undefined ? (
+        {view === 'backbone' ? null : nodeA !== undefined && nodeB !== undefined ? (
           <div className="flex items-center justify-between gap-3 border-b bg-accent/40 px-5 py-2 text-sm">
             <span className="font-medium" data-testid="watching">
               {g.watching(nodeA.name, nodeB.name)}
@@ -163,7 +171,12 @@ export function TopologyPage() {
           <p className="border-b px-5 py-2 text-[13px] text-muted-foreground">{g.pickHint}</p>
         )}
 
-        {matrix.isError && matrix.data === undefined ? (
+        {view === 'backbone' ? (
+          // 骨干是另一份数据（relay 之间测的），和选中的那一对节点无关，也不看路由矩阵。
+          <div className="p-5">
+            <BackboneView network={network} name={name} />
+          </div>
+        ) : matrix.isError && matrix.data === undefined ? (
           <ErrorState title={g.loadFailed} error={matrix.error} onRetry={() => void matrix.refetch()} />
         ) : shape === null || matrix.data === undefined ? (
           <SkeletonBlock lines={8} />

@@ -5,7 +5,7 @@ import { Link } from 'react-router'
 import { errorMessage } from '@/api/client'
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
-import { type Network, type Node, type NodeDetail, type RelayInput } from '@/api/types'
+import { type Network, type Node, type NodeDetail, type Reachability, type RelayInput } from '@/api/types'
 import { useConfirm } from '@/components/confirm'
 import { CodeBlock } from '@/components/copy'
 import { DeclareHowTo } from '@/components/declare'
@@ -15,8 +15,10 @@ import { Button } from '@/components/ui/button'
 import { Field, FormError } from '@/components/ui/field'
 import { Input, Textarea } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
+import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
 import { exitUsage } from '@/lib/commands'
+import { attachedCount } from '@/lib/nodes'
 import { type Capability, DEFAULT_NODE_PORT, MAX_RELAY_ADDRESSES } from '@/lib/product'
 import { cn } from '@/lib/utils'
 import { parseOptionalPositiveInt, splitList, validateSocketAddr } from '@/lib/validate'
@@ -138,6 +140,41 @@ function relayFormFrom(node: NodeDetail): RelayFormState {
   return { udp: observed, tcp: observed, region: '', bandwidth: '' }
 }
 
+/**
+ * 启用 relay 之后 controller 从自己这边试连的结果。这是一条建议，不是错误：relay 已经启用了，
+ * controller 和节点不在同一个网络位置上，它连不上不等于节点连不上。
+ */
+function ReachabilityNotice({ results, onDismiss }: { results: Reachability[]; onDismiss: () => void }) {
+  const failed = results.some((result) => !result.reachable)
+  return (
+    <Notice
+      tone={failed ? 'warn' : 'info'}
+      title={d.reachTitle}
+      className="mt-3"
+      action={
+        <Button size="sm" variant="ghost" onClick={onDismiss}>
+          {d.reachDismiss}
+        </Button>
+      }
+    >
+      <ul className="space-y-0.5" data-testid="relay-reachability">
+        {results.map((result) => (
+          <li key={`${result.protocol}-${result.addr}`} className={result.reachable ? 'text-ok' : 'text-warn'}>
+            {result.reachable
+              ? d.reachOk(
+                  result.protocol.toUpperCase(),
+                  result.addr,
+                  result.rtt_ms === null ? '—' : t.common.ms(result.rtt_ms),
+                )
+              : d.reachFail(result.protocol.toUpperCase(), result.addr, result.error ?? '—')}
+          </li>
+        ))}
+      </ul>
+      <p className="mt-1.5">{failed ? d.reachSomeFail : d.reachAllOk}</p>
+    </Notice>
+  )
+}
+
 function addressListProblem(raw: string): string | null {
   const items = splitList(raw)
   if (items.length > MAX_RELAY_ADDRESSES) return d.relayFormTooMany(MAX_RELAY_ADDRESSES)
@@ -155,6 +192,7 @@ export function RelayRow({ network, node, onWaiting }: CapabilityRowProps) {
   const [editing, setEditing] = useState(false)
   const [form, setForm] = useState<RelayFormState>(() => relayFormFrom(node))
   const [submitted, setSubmitted] = useState(false)
+  const [reachability, setReachability] = useState<Reachability[] | null>(null)
   const enabled = node.relay !== null
 
   const save = useAction(network.id, {
@@ -162,6 +200,7 @@ export function RelayRow({ network, node, onWaiting }: CapabilityRowProps) {
     success: enabled ? d.relaySavedToast : d.relayEnabledToast(node.name),
     toastError: false,
   })
+  const attached = attachedCount(nodes.data ?? [], node.id)
   const disable = useAction(network.id, {
     mutationFn: () => api.disableRelay(network.id, node.id),
     success: d.relayDisabledToast(node.name),
@@ -175,6 +214,7 @@ export function RelayRow({ network, node, onWaiting }: CapabilityRowProps) {
   const openForm = () => {
     setForm(relayFormFrom(node))
     setSubmitted(false)
+    setReachability(null)
     save.reset()
     setEditing(true)
   }
@@ -189,7 +229,12 @@ export function RelayRow({ network, node, onWaiting }: CapabilityRowProps) {
         region: form.region.trim(),
         bandwidth_mbps: bandwidth.value,
       },
-      { onSuccess: () => setEditing(false) },
+      {
+        onSuccess: (saved) => {
+          setEditing(false)
+          setReachability(saved.reachability.length > 0 ? saved.reachability : null)
+        },
+      },
     )
   }
 
@@ -204,6 +249,7 @@ export function RelayRow({ network, node, onWaiting }: CapabilityRowProps) {
       body: (
         <>
           <p>{only ? d.relayOffOnly(node.name) : d.relayOffGeneric}</p>
+          {attached > 0 ? <p>{d.relayOffAttached(attached)}</p> : null}
           {pinnedBy > 0 ? <p>{d.relayOffPinned(pinnedBy)}</p> : null}
         </>
       ),
@@ -211,6 +257,7 @@ export function RelayRow({ network, node, onWaiting }: CapabilityRowProps) {
     })
     if (confirmed) {
       setEditing(false)
+      setReachability(null)
       disable.mutate()
     }
   }
@@ -248,7 +295,18 @@ export function RelayRow({ network, node, onWaiting }: CapabilityRowProps) {
           ) : null}
         </p>
         <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-muted-foreground">
-          <span>{facts.join(' · ')}</span>
+          <span>
+            {facts.map((fact) => `${fact} · `).join('')}
+            <Tooltip content={d.relayAttachedTip}>
+              <span
+                tabIndex={0}
+                className="cursor-help rounded-sm underline decoration-dotted underline-offset-4"
+                data-testid="relay-attached"
+              >
+                {d.relayAttached(attached)}
+              </span>
+            </Tooltip>
+          </span>
           {editing ? null : (
             <Button variant="link" size="sm" onClick={openForm}>
               {d.relayEdit}
@@ -285,6 +343,9 @@ export function RelayRow({ network, node, onWaiting }: CapabilityRowProps) {
         <p role="status" className="mt-2 text-[13px] font-medium text-ok">
           {t.declare.arrived('relay')}
         </p>
+      ) : null}
+      {reachability !== null && !editing ? (
+        <ReachabilityNotice results={reachability} onDismiss={() => setReachability(null)} />
       ) : null}
       {editing ? (
         <form
@@ -353,6 +414,11 @@ export function RelayRow({ network, node, onWaiting }: CapabilityRowProps) {
             </Field>
           </div>
           <p className="text-[13px] text-muted-foreground">{d.relayPortReminder(DEFAULT_NODE_PORT)}</p>
+          {save.isPending ? (
+            <p role="status" className="text-[13px] text-relay">
+              {d.relayChecking}
+            </p>
+          ) : null}
           <FormError message={save.isError ? errorMessage(save.error) : null} />
           <div className="flex justify-end gap-2">
             <Button onClick={() => setEditing(false)} disabled={save.isPending}>

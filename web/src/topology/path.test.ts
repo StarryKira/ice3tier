@@ -4,7 +4,7 @@ import { type PathLeg } from '@/api/types'
 import { t } from '@/i18n'
 import { direct, viaRelays } from '@/test/fixtures'
 
-import { describeLeg } from './path'
+import { describeCandidates, describeLeg } from './path'
 
 const p = t.path
 
@@ -43,7 +43,12 @@ describe('describeLeg：路径诊断里一个方向怎么说', () => {
       text: '直连',
       hops: ['laptop', 'nas'],
       addr: '203.0.113.7:20330',
+      detail: null,
+      detailHint: null,
     })
+    // 旧的 controller 不写选路模式、原因和候选路径：都不显示。
+    expect(view.mode).toBeNull()
+    expect(view.reason).toBeNull()
   })
 
   it('现问到、这次启动以来没换过路：照实说', () => {
@@ -84,5 +89,74 @@ describe('describeLeg：路径诊断里一个方向怎么说', () => {
       state: 'unknown',
       sourceLabel: p.source.unknown,
     })
+  })
+})
+
+describe('现问到时的细节：直连的方式、选路模式、原因', () => {
+  it('直连写出方式；模式和原因是发送方的路由层说的', () => {
+    const view = describeLeg(leg({ direct: 'punched', mode: 'lowest_cost', reason: '直连可用' }), name)
+    expect(view.route?.detail).toBe(t.routes.directKind.punched)
+    expect(view.route?.detailHint).toBe(t.routes.directKindHint.punched)
+    expect(view.mode).toEqual({ label: p.modeLabel(p.mode.lowest_cost ?? ''), hint: p.modeHint.lowest_cost })
+    expect(view.reason).toBe(p.reason('直连可用'))
+  })
+
+  it('经 relay、第一段退回 TCP：写出来，悬停说明为什么', () => {
+    const view = describeLeg(leg({ route: viaRelays(3), relay_leg: 'tcp' }), name)
+    expect(view.route?.detail).toBe(t.routes.relayLeg('TCP'))
+    expect(view.route?.detailHint).toBe(t.routes.relayLegTcpHint)
+  })
+
+  it('直连的方式只跟着直连走：经 relay 时不写直连的方式', () => {
+    expect(describeLeg(leg({ route: viaRelays(3), direct: 'lan' }), name).route?.detail).toBeNull()
+  })
+})
+
+describe('describeCandidates：考虑过的路', () => {
+  it('不知道（不是现问到的、或者旧的节点）：不画这张表', () => {
+    expect(describeCandidates(leg({}), name)).toEqual({ state: 'unknown' })
+    expect(describeCandidates(leg({ candidates: null }), name)).toEqual({ state: 'unknown' })
+  })
+
+  it('问到了但手上还没有测量值', () => {
+    expect(describeCandidates(leg({ candidates: [] }), name)).toEqual({ state: 'empty' })
+  })
+
+  it('按 controller 给的顺序；代价、每一段、负载写成人看的单位；现在走的标出来', () => {
+    const view = describeCandidates(
+      leg({
+        candidates: [
+          {
+            route: direct('203.0.113.7:20330'),
+            cost_us: 12_900,
+            legs: [{ from: 2, to: 1, rtt_us: 12_400, jitter_us: 120, loss_permille: 0 }],
+            load_percent: 0,
+            current: true,
+          },
+          {
+            route: viaRelays(3),
+            cost_us: 49_500,
+            legs: [
+              { from: 2, to: 3, rtt_us: 21_300, jitter_us: 400, loss_permille: 2 },
+              { from: 3, to: 1, rtt_us: 26_000, jitter_us: 0, loss_permille: 0 },
+            ],
+            load_percent: 12,
+            current: false,
+          },
+        ],
+      }),
+      name,
+    )
+    if (view.state !== 'list') throw new Error('应该是一张表')
+    expect(view.rows.map((row) => [row.text, row.cost, row.load, row.current])).toEqual([
+      ['直连', '12.9 ms', '—', true],
+      ['经 hk', '49.5 ms', '12%', false],
+    ])
+    expect(view.rows[1]?.legs).toEqual([
+      p.legLine('laptop', 'hk', '21.3 ms', '0.40 ms', '0.2%'),
+      p.legLine('hk', 'nas', '26.0 ms', '0.00 ms', '0%'),
+    ])
+    expect(view.rows[0]?.tone).toBe('ok')
+    expect(view.rows[1]?.tone).toBe('relay')
   })
 })

@@ -25,6 +25,29 @@ export const routes = {
   symbolNone: '✕',
   symbolEmpty: '·',
   legendLabel: '图例',
+  /** 直连是怎么建立起来的。 */
+  directKind: {
+    lan: '局域网',
+    ipv6: 'IPv6',
+    reachable: '端口可达',
+    punched: '打洞',
+    unknown: '方式不明',
+  },
+  directKindHint: {
+    lan: '两个节点在同一个局域网里。',
+    ipv6: '用的是对端的 IPv6 地址。',
+    reachable: '对端的这个地址本来就连得上（公网地址、端口转发、端口映射），没有用到打洞。',
+    punched: '交换打洞信令之后打通的。',
+    unknown: '节点报了一个这个界面不认识的方式。',
+  },
+  /** 经 relay 时到第一个 relay 的那一段。 */
+  legTransport: { udp: 'UDP', tcp: 'TCP', unknown: '传输不明' },
+  relayLeg: (transport: string) => `第一段走 ${transport}`,
+  relayLegTcpHint: 'UDP 用不了，到 relay 的那一段退回了 TCP。',
+  withDetail: (route: string, detail: string) => `${route}（${detail}）`,
+  /** 微秒写成毫秒。 */
+  ms: (value: string) => `${value} ms`,
+  percent: (value: string) => `${value}%`,
 }
 
 export const topology = {
@@ -33,6 +56,7 @@ export const topology = {
   viewLabel: '拓扑的视图',
   viewGraph: '实时图',
   viewMatrix: '路由矩阵',
+  viewBackbone: '骨干',
   pickA: '节点 A',
   pickB: '节点 B',
   swap: '交换 A 和 B',
@@ -77,6 +101,45 @@ export const topology = {
   cellLabel: (from: string, to: string, what: string) => `${from} → ${to}：${what}`,
   cellSelf: '同一个节点',
   cellEmpty: '没有连接',
+
+  /** relay 之间的延迟矩阵。 */
+  backbone: {
+    lead: 'relay 之间的延迟、抖动和丢包。每个 relay 自己测、签好名发给别的 relay 和挂靠它的节点；controller 每次现问几个在线的节点，取每个 relay 最新的那一行。行是测的那个 relay，列是对面的 relay。',
+    caption: '骨干矩阵：每一格是行上的 relay 到列上的 relay 的链路',
+    from: '测的 relay ↓  对面 →',
+    query: '再问一次',
+    querying: '正在问节点…',
+    queryingHint: 'controller 现问最多 4 个在线的节点，最多等 3 秒左右。',
+    queried: (age: string) => `${age}问的`,
+    loadFailed: '骨干矩阵没有取到',
+    noRelaysTitle: '这个网络里没有 relay',
+    noRelaysBody: '启用了 relay 的节点之间才有骨干链路。在节点详情的"能力"里把一台公网能连上的机器启用为 relay。',
+    oneRelay: '只有一个 relay：没有 relay 之间的链路可以看，下面只有它自己的状态和负载。',
+    nobody: '没有在线的、版本够新的节点能回答，每个 relay 的行都是空的。',
+    answered: (names: string) => `这次回答的节点：${names}`,
+    state: {
+      serving: '正常',
+      overloaded: '满载',
+      draining: '即将下线',
+      unknown: '状态不明',
+    } as Record<string, string>,
+    stateHint: {
+      serving: '能接新的转发。',
+      overloaded: '转发的流量到了带宽上限，节点会改走别的 relay。',
+      draining: '即将下线（升级、关机、被停用），节点会改走别的 relay。',
+      unknown: '它报了一个这个界面不认识的状态。',
+    } as Record<string, string>,
+    noRow: '没有这一行',
+    noRowHint: '问到的节点手上都没有这个 relay 的行：它可能刚上线，或者和别的 relay、挂靠它的节点都没有联系。',
+    offline: '离线',
+    load: (percent: number) => `负载 ${percent}%`,
+    rowAge: (age: string) => `${age}的数据`,
+    reportedBy: (name: string) => `从 ${name} 问来`,
+    unreachable: '连不上',
+    noLink: '没有数据',
+    cell: (rtt: number, jitter: number, loss: string) => `${rtt} ms，抖动 ${jitter} ms，丢包 ${loss}`,
+    cellLabel: (from: string, to: string, what: string) => `${from} → ${to}：${what}`,
+  },
 }
 
 export const path = {
@@ -118,6 +181,25 @@ export const path = {
   toAccess: '去访问检查',
   toTopology: '在拓扑上看',
   neverTalked: '两个节点之间从来没有通过信的话，结论多半是"无路可走"或者一条还没有验证过直连的 relay 路径。',
-  gaps: '候选路径的列表、每一段的延迟和丢包、直连的类型（局域网、打洞等）controller 现在还不提供。',
+  gaps: '直连的方式、选路模式、原因和候选路径，只有现问到、并且发送方的版本够新时才有；上报的数据里只有直连的方式。',
+  mode: { direct_first: '默认', lowest_cost: '延迟优先' } as Record<string, string>,
+  modeLabel: (mode: string) => `选路模式：${mode}`,
+  modeHint: {
+    direct_first: '直连可用就走直连，否则经一个 relay。下面的代价照样算出来给你看，但不按它选。',
+    lowest_cost: '按代价取最低的那条；换路有迟滞，差一点不会来回换。',
+  } as Record<string, string>,
+  reason: (text: string) => `为什么是这条：${text}`,
+  candidatesTitle: (from: string, to: string) => `${from} → ${to} 考虑过的路`,
+  candidatesLead:
+    '按代价从低到高。代价是各段的延迟、四倍的抖动、丢包的恢复代价相加，每经过一个 relay 加 1 毫秒，负载高的 relay 另外加惩罚。',
+  candidatesEmpty: '发送方手上还没有任何测量值：没有测过的路不在这里。',
+  colRoute: '路径',
+  colCost: '代价',
+  colLegs: '每一段：延迟 · 抖动 · 丢包',
+  colLoad: 'relay 负载',
+  current: '现在走的',
+  legLine: (from: string, to: string, rtt: string, jitter: string, loss: string) =>
+    `${from} → ${to}：${rtt} · ±${jitter} · 丢 ${loss}`,
+  legPeerOnly: '这一段是对端上报的，只有延迟。',
   offline: (name: string) => `${name} 不在线：它那个方向用的是它离线之前最后报的数据。`,
 }

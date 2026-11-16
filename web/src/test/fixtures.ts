@@ -1,4 +1,17 @@
-import { type MatrixEntry, type Node, type NodeUpdate, type Route, type Status, type UpdateOverview } from '@/api/types'
+import {
+  type Credential,
+  type EnrollTokenInfo,
+  type ExitSettings,
+  type ExitView,
+  type Forward,
+  type Listener,
+  type MatrixEntry,
+  type Node,
+  type NodeUpdate,
+  type Route,
+  type Status,
+  type UpdateOverview,
+} from '@/api/types'
 
 /** 测试里用到的节点、controller 的情况：字段全的默认值，测试只写它关心的那几项。 */
 
@@ -41,6 +54,7 @@ export function makeNode(id: number, name: string, extra: Partial<Node> = {}): N
     acked_version: 1,
     hostname: name,
     update: IDLE_UPDATE,
+    attached: [],
     ...extra,
   }
 }
@@ -54,6 +68,7 @@ export function makeStatus(extra: Partial<Status> = {}): Status {
     nodes: 0,
     online: 0,
     newer_version: null,
+    data_dir: '/var/lib/i3t-controller',
     ...extra,
   }
 }
@@ -80,4 +95,103 @@ export const noRoute: Route = { via: 'none' }
 
 export function makeEntry(from: number, to: number, route: Route, extra: Partial<MatrixEntry> = {}): MatrixEntry {
   return { from, to, route, rtt_ms: 10, age_secs: 4, stale: false, ...extra }
+}
+
+/** 出口的默认设置，和 `PUT …/exit` 写 `{}` 时一样。 */
+export function makeExitSettings(extra: Partial<ExitSettings> = {}): ExitSettings {
+  return {
+    ports: [80, 443],
+    lan: false,
+    bandwidth_mbps: null,
+    upstream_socks5: null,
+    quota_bytes: null,
+    quota_reset_day: 1,
+    family: 'any',
+    connects_per_minute: null,
+    class: null,
+    ...extra,
+  }
+}
+
+export function makeExitView(id: number, name: string, extra: Partial<ExitView> = {}): ExitView {
+  return {
+    node: { id, name, virtual_ip: `10.66.0.${id}` },
+    online: true,
+    settings: makeExitSettings(),
+    health: 'ok',
+    recent_requests: 0,
+    recent_failures: 0,
+    usage: null,
+    reported_secs_ago: null,
+    observed: [],
+    ...extra,
+  }
+}
+
+export function makeCredential(id: number, name: string, extra: Partial<Credential> = {}): Credential {
+  return {
+    id,
+    name,
+    max_concurrent: null,
+    created_at: 1_794_000_000,
+    prefix: 'I7bRtu',
+    max_bytes: null,
+    state: 'active',
+    revoked_at: null,
+    usage: { bytes: 0, connections: 0, last_used_at: null },
+    ...extra,
+  }
+}
+
+export function makeListener(id: number, node: number, name: string, extra: Partial<Listener> = {}): Listener {
+  return {
+    id,
+    node,
+    name,
+    bind: '127.0.0.1:1088',
+    protocol: 'socks5',
+    allow_from: [],
+    require_credential: false,
+    default_action: null,
+    fixed_exit: null,
+    class: null,
+    optimistic: null,
+    status: null,
+    ...extra,
+  }
+}
+
+export function makeForward(id: number, name: string, extra: Partial<Forward> = {}): Forward {
+  return {
+    id,
+    name,
+    protocol: 'tcp',
+    listen_node: 1,
+    bind: '127.0.0.1:8080',
+    target_node: 2,
+    target_addr: '127.0.0.1:80',
+    allow_from: [],
+    enabled: true,
+    status: 'active',
+    class: null,
+    listen: null,
+    ...extra,
+  }
+}
+
+export function makeToken(id: number, extra: Partial<EnrollTokenInfo> = {}): EnrollTokenInfo {
+  return {
+    id,
+    network: 1,
+    created_at: 1_794_000_000,
+    expires_at: 1_794_086_400,
+    tags: [],
+    virtual_ip: null,
+    successor_of: null,
+    prefix: 'i3t-eyJzIjoiSmFY',
+    state: 'pending',
+    used_at: null,
+    used_by: null,
+    ...extra,
+  }
 }

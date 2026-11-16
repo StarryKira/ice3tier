@@ -23,6 +23,15 @@ export type Direction = 'both' | 'one_way'
 export type ListenerProtocol = 'socks5' | 'http'
 export type ForwardProtocol = 'tcp' | 'udp'
 
+/**
+ * 服务等级（文档 §4 `Network.class`）。一条流的等级按这个顺序取第一个有的：代理用户名里的 `+c-` 标记、
+ * 监听器（或端口转发）的、出口的（只有经出口出去的流）、网络的；都没有时是 `auto`。
+ */
+export type ServiceClass = 'auto' | 'interactive' | 'reliable' | 'bulk'
+
+/** 出口连互联网目标时只用哪一种地址。 */
+export type IpFamily = 'any' | 'ipv4' | 'ipv6'
+
 /** 文档 §2 列出的错误码。以后可能增加，所以收到的值按字符串处理，不认识的按 HTTP 状态显示。 */
 export type KnownErrorCode =
   | 'unauthorized'
@@ -64,6 +73,18 @@ export interface Status {
   online: number
   /** 已知的最新正式版比 controller 自己新时是那个版本号，否则 `null`。controller 不会自己更新。 */
   newer_version: Version | null
+  /** controller 的数据目录，备份时拷贝它。不是从数据目录打开的（只在测试里）时是 `null`。 */
+  data_dir: string | null
+}
+
+/** 操作记录能指向的东西。以后可能增加，不认识的种类界面忽略。 */
+export type LogRefKind = 'network' | 'node' | 'token' | 'rule' | 'credential' | 'listener' | 'forward'
+
+export interface LogRef {
+  /** 一般是 {@link LogRefKind} 之一；比这个界面新的 controller 可能写别的。 */
+  kind: string
+  /** 东西后来被删掉了，编号还在。 */
+  id: number
 }
 
 export interface LogEntry {
@@ -72,6 +93,21 @@ export interface LogEntry {
   network: NetworkId | null
   action: string
   detail: string
+  /** 这条记录说的是哪些东西。这个字段出现之前的记录是 `[]`。 */
+  refs: LogRef[]
+}
+
+/** `GET /log` 的查询参数，都可省略；几个条件同时写时要都满足。 */
+export interface LogQuery {
+  /** 默认 100，上限 1000。 */
+  limit?: number
+  /** 只要编号比它小的：翻页时写上一页最后一条的 `id`。 */
+  before?: number
+  network?: NetworkId
+  /** 这种操作，或者以它加一个点开头的操作：`node` 包括 `node.relay.enable`。 */
+  action?: string
+  /** `<种类>:<编号>`，例如 `node:3`。 */
+  ref?: string
 }
 
 export interface Network {
@@ -84,6 +120,8 @@ export interface Network {
   reach: Reach
   created_at: Timestamp
   nodes: number
+  /** 网络的默认服务等级；`null` 表示 `auto`。 */
+  class: ServiceClass | null
 }
 
 export interface CreateNetwork {
@@ -92,6 +130,7 @@ export interface CreateNetwork {
   routing?: RoutingMode
   max_relay_hops?: number
   reach?: Reach
+  class?: ServiceClass | null
 }
 
 export interface UpdateNetwork {
@@ -99,6 +138,8 @@ export interface UpdateNetwork {
   routing?: RoutingMode
   max_relay_hops?: number
   reach?: Reach
+  /** 写 `null` 表示改回 `auto`。 */
+  class?: ServiceClass | null
 }
 
 export interface NodePair {
@@ -119,6 +160,11 @@ export interface Overview {
   pending_tokens: number
   online_nodes: NodeRef[]
   unreachable_pairs: NodePair[]
+  /** 在线节点最近一次上报的活跃流之和。一条流两端的节点各报一次，所以算了两次。 */
+  flows: number
+  /** 在线节点最近一次上报的流量之和（各自启动以来）。经过两个节点的流量两边各算一次。 */
+  tx_bytes: number
+  rx_bytes: number
 }
 
 export interface Declared {
@@ -141,12 +187,33 @@ export interface RelayInput {
   bandwidth_mbps?: number | null
 }
 
+/** controller 从自己这边试连一个 relay 地址的结果。只是参考：它和节点不在同一个网络位置上。 */
+export interface Reachability {
+  protocol: 'udp' | 'tcp'
+  addr: string
+  reachable: boolean
+  /** UDP 是地址查询的往返时间，TCP 是建连接的时间；不通是 `null`。 */
+  rtt_ms: number | null
+  /** 不通的原因；通是 `null`。 */
+  error: string | null
+}
+
 export interface ExitSettings {
   /** `null` 表示不限制端口。 */
   ports: number[] | null
   lan: boolean
+  /** 出口替别人搬运的流量，两个方向各受这个上限。 */
   bandwidth_mbps: number | null
   upstream_socks5: string | null
+  /** 每个账期的流量配额（字节），两个方向相加；`null` 表示不限。 */
+  quota_bytes: number | null
+  /** 账期从每个月的哪一天开始（UTC 的 0 点），1 到 28。 */
+  quota_reset_day: number
+  family: IpFamily
+  /** 同一个发起节点每分钟最多让出口向同一个目标新建多少条连接；`null` 表示不限。 */
+  connects_per_minute: number | null
+  /** 经这个出口的流的默认服务等级；`null` 表示没有，看网络的。 */
+  class: ServiceClass | null
 }
 
 export interface ExitInput {
@@ -155,6 +222,12 @@ export interface ExitInput {
   lan?: boolean
   bandwidth_mbps?: number | null
   upstream_socks5?: string | null
+  /** 带宽上限、配额、建连预算都不能写 0：不限制就写 `null` 或者不写。 */
+  quota_bytes?: number | null
+  quota_reset_day?: number
+  family?: IpFamily
+  connects_per_minute?: number | null
+  class?: ServiceClass | null
 }
 
 export interface Node {
@@ -183,6 +256,8 @@ export interface Node {
   /** 节点上报的主机名，原样；旧版本的节点不报，是 `""`。主机名后来变了，`name` 不跟着变。 */
   hostname: string
   update: NodeUpdate
+  /** 节点挂靠的 relay 和到它们的往返延迟，取自它最近的上报；离线时是它离线前报的。 */
+  attached: Attachment[]
 }
 
 export interface Attachment {
@@ -190,10 +265,14 @@ export interface Attachment {
   rtt_ms: number
 }
 
+/** 启用（或修改）relay 的应答：节点，加上 controller 从自己这边试连填的每个地址的结果。 */
+export interface RelayEnabled extends Node {
+  reachability: Reachability[]
+}
+
 export interface NodeDetail extends Node {
   endpoints: string[]
   observed_endpoint: string | null
-  attached: Attachment[]
   mapping_varies: boolean | null
   flows: number
   tx_bytes: number
@@ -218,10 +297,34 @@ export interface Succeed {
 
 export type Route = { via: 'none' } | { via: 'direct'; addr: string } | { via: 'relay'; relays: NodeId[] }
 
-export interface NodeRoute {
+/**
+ * 直连是怎么建立起来的：同一个局域网、对端的 IPv6 地址、对端的地址本来就连得上（公网地址、端口转发、端口映射）、
+ * 打洞打通的。`unknown` 是比 controller 新的节点报的类型。
+ */
+export type DirectKind = 'lan' | 'ipv6' | 'reachable' | 'punched' | 'unknown'
+
+/** 经 relay 时，到第一个 relay 的那一段走的传输。TCP 是 UDP 用不了时的退路。 */
+export type LegTransport = 'udp' | 'tcp' | 'unknown'
+
+/**
+ * 每条路的细节（文档 §5、§15）。controller 的文档说它们总是写出来、不知道时是 `null`；
+ * 比这个界面旧的 controller 不写这几个字段，所以这里是可省略的，读的时候缺了按 `null` 算。
+ */
+export interface RouteDetail {
+  /** 走直连时，直连是怎么建立起来的；不是直连或者不知道时是 `null`。 */
+  direct?: DirectKind | null
+  /** 经 relay 时第一段的传输；现在的节点还报不出来，总是 `null`。 */
+  relay_leg?: LegTransport | null
+}
+
+export interface NodeRoute extends RouteDetail {
   peer: NodeRef
   route: Route
   rtt_ms: number | null
+  /** 这份数据是多少秒之前的：节点最近一次上报到现在。 */
+  age_secs: number
+  /** controller 看到这条路换上来已经多少秒了。只是延迟变了不算换路；controller 重启之后从头算。 */
+  since_secs: number
 }
 
 export interface RouteTable {
@@ -242,6 +345,9 @@ export interface NodeAccess {
   acknowledged: boolean
 }
 
+/** `unknown` 是比这个界面新的 controller 才有的取值。 */
+export type TokenState = 'pending' | 'used' | 'expired' | 'unknown'
+
 export interface EnrollTokenInfo {
   id: number
   network: NetworkId
@@ -250,6 +356,12 @@ export interface EnrollTokenInfo {
   tags: string[]
   virtual_ip: string | null
   successor_of: NodeId | null
+  /** 令牌文本的开头 18 个字符，不是秘密，用来认出是哪一个。这个字段出现之前生成的令牌是 `""`。 */
+  prefix: string
+  state: TokenState
+  used_at: Timestamp | null
+  /** 用它加入的节点；没用过、或者那个节点后来被删掉了是 `null`。 */
+  used_by: NodeRef | null
 }
 
 export interface CreateEnrollToken {
@@ -302,16 +414,43 @@ export interface AccessCheck {
   rules: Rule[]
 }
 
+/** `exhausted`：流量上限用完了。`revoked`：吊销了，记录还留着。`unknown` 是比这个界面新的 controller 才有的取值。 */
+export type CredentialState = 'active' | 'exhausted' | 'revoked' | 'unknown'
+
+export interface CredentialUsage {
+  /** 签发（或者上次清零）以来经它搬运的字节数，两个方向相加。各个入口每 10 秒上报一次。 */
+  bytes: number
+  /** 现在在线的入口上正在进行的连接数。 */
+  connections: number
+  last_used_at: Timestamp | null
+}
+
 export interface Credential {
   id: number
   name: string
+  /** 同时进行的连接数上限（每个入口各自数）；`null` 表示不限。 */
   max_concurrent: number | null
   created_at: Timestamp
+  /** 令牌的开头 6 个字符，不是秘密。这个字段出现之前签发的凭据是 `""`。 */
+  prefix: string
+  /** 流量上限（字节）；`null` 表示不限。 */
+  max_bytes: number | null
+  state: CredentialState
+  revoked_at: Timestamp | null
+  usage: CredentialUsage
 }
 
 export interface CreateCredential {
   name: string
   max_concurrent?: number
+  max_bytes?: number
+}
+
+/** 改上限、清零用量，不用重新签发。省略的字段不改；两个上限写 `null` 表示不限。 */
+export interface UpdateCredential {
+  max_concurrent?: number | null
+  max_bytes?: number | null
+  reset_usage?: boolean
 }
 
 /** `token` 只在创建的应答里出现这一次。 */
@@ -320,6 +459,29 @@ export interface CreatedCredential extends Credential {
 }
 
 export type DefaultAction = { action: 'local' } | { action: 'reject' } | { action: 'exit'; node: NodeId }
+
+/**
+ * 一个监听现在的样子（文档 §11.1）。`listening` 的 `local` 是实际绑定的地址：端口写 0 时是节点挑定的端口。
+ * `unknown` 是比 controller 新的节点报的、它不认识的状态。
+ */
+export type ListenState =
+  | { state: 'listening'; local: string }
+  | { state: 'port_in_use'; detail: string }
+  | { state: 'failed'; detail: string }
+  | { state: 'virtual' }
+  | { state: 'unsupported'; detail: string }
+  | { state: 'unknown' }
+
+export interface ListenTraffic {
+  /** 现在的连接数；UDP 的端口转发是会话数。 */
+  connections: number
+  /** 节点这次运行以来客户端发进来的、发回给客户端的字节数。 */
+  bytes_up: number
+  bytes_down: number
+}
+
+/** 由监听节点每 10 秒上报一次。 */
+export type ListenStatus = ListenState & ListenTraffic
 
 export interface Listener {
   id: number
@@ -331,6 +493,12 @@ export interface Listener {
   require_credential: boolean
   default_action: DefaultAction | null
   fixed_exit: NodeId | null
+  /** 用户名里写了等级时以用户名为准；`null` 时看出口和网络的默认值。 */
+  class: ServiceClass | null
+  /** 乐观回复：`true` 不等对端的应答，`false` 一律等，`null` 按目标的种类（互联网目标不等，组网目标等）。 */
+  optimistic: boolean | null
+  /** 节点不在线、还没有报过，或者版本太旧不报时是 `null`。 */
+  status: ListenStatus | null
 }
 
 export interface ListenerInput {
@@ -342,6 +510,36 @@ export interface ListenerInput {
   require_credential?: boolean
   default_action?: DefaultAction | null
   fixed_exit?: NodeId | null
+  class?: ServiceClass | null
+  optimistic?: boolean | null
+}
+
+/** 节点上的一个代理监听：controller 下发的，或者节点按本机配置文件自己开的回环入口（`builtin`）。 */
+export type NodeListener = {
+  /** 节点自己开的回环入口没有编号。 */
+  id: number | null
+  builtin: boolean
+  name: string
+  bind: string
+  protocol: ListenerProtocol
+} & ListenStatus
+
+/** 一条端口转发的监听一侧。 */
+export type NodeForwardListen = {
+  id: number
+  bind: string
+  protocol: ForwardProtocol
+} & ListenStatus
+
+/** 节点上的全部监听，取自它最近的上报。 */
+export interface NodeListeners {
+  node: NodeRef
+  /** 不在线时两个列表都是空的。 */
+  online: boolean
+  /** 这次连接上还没有上报过是 `null`。 */
+  reported_secs_ago: number | null
+  listeners: NodeListener[]
+  forwards: NodeForwardListen[]
 }
 
 export type ForwardStatus =
@@ -358,17 +556,23 @@ export interface Forward {
   allow_from: string[]
   enabled: boolean
   status: ForwardStatus
+  /** `null` 时用网络的默认值。 */
+  class: ServiceClass | null
+  /** 监听节点最近一次报的监听状态。"端口被占用"这类情况在这里，不在 `status` 里。 */
+  listen: ListenStatus | null
 }
 
 export interface ForwardInput {
   name?: string
   protocol: ForwardProtocol
   listen_node: NodeId
+  /** 端口可以写 0，由监听节点挑一个空闲的、重启不变；监听在虚拟 IP 上的不能写 0。 */
   bind: string
   target_node: NodeId
   target_addr: string
   allow_from?: string[]
   enabled?: boolean
+  class?: ServiceClass | null
 }
 
 export interface PairSetting {
@@ -531,7 +735,7 @@ export interface MatrixNode extends NodeRef {
 }
 
 /** 矩阵里的一格：`from` 到 `to` 这个方向现在怎么走。 */
-export interface MatrixEntry {
+export interface MatrixEntry extends RouteDetail {
   from: NodeId
   to: NodeId
   route: Route
@@ -560,7 +764,30 @@ export interface RouteSince {
   reason: string
 }
 
-export interface PathLeg {
+/** 路径上一段的测量值。目的节点到它挂靠的 relay 的那一段只知道延迟，抖动和丢包是 0。 */
+export interface PathSegment {
+  from: NodeId
+  to: NodeId
+  rtt_us: number
+  jitter_us: number
+  /** 千分之几。 */
+  loss_permille: number
+}
+
+/** 发送方考虑过的一条候选路径。 */
+export interface PathCandidate {
+  route: Route
+  /** 代价，微秒：各段的延迟、抖动（四倍）、丢包的恢复代价相加，每经过一个 relay 加 1 毫秒，负载高的 relay 另外加惩罚。 */
+  cost_us: number
+  /** 按经过的顺序。 */
+  legs: PathSegment[]
+  /** 路径上负载最高的 relay 的带宽占用百分比；直连和没有设上限的 relay 是 0。 */
+  load_percent: number
+  /** 现在走的就是这一条。最多一条是 `true`。 */
+  current: boolean
+}
+
+export interface PathLeg extends RouteDetail {
   from: NodeRef
   to: NodeRef
   source: PathSource
@@ -570,6 +797,44 @@ export interface PathLeg {
   age_secs: number | null
   /** 只有 `source` 是 `query`、并且节点这次启动以来换过这条路时才有。 */
   since: RouteSince | null
+  /** 发送方用的选路模式。只有现问到、并且发送方的版本会说时才有。 */
+  mode?: RoutingMode | null
+  /** 发送方的路由层说的"为什么是现在这条路"。有没有同 `mode`。 */
+  reason?: string | null
+  /** 发送方考虑过的候选路径，按代价从低到高，最多 16 条。`null` 是不知道，`[]` 是它手上还没有任何测量值。 */
+  candidates?: PathCandidate[] | null
+}
+
+/** relay 自己说的状态。`unknown` 是比 controller 新的节点报的。 */
+export type RelayState = 'serving' | 'overloaded' | 'draining' | 'unknown'
+
+/** 骨干矩阵里一个 relay 到另一个 relay 的链路。 */
+export interface BackboneLink {
+  to: NodeId
+  /** `null` 表示连不上。 */
+  rtt_ms: number | null
+  jitter_ms: number
+  loss_permille: number
+}
+
+/** 骨干矩阵的一行。问到的节点手上都没有这一行时，后面几项是 `null`，`links` 是空的。 */
+export interface BackboneRelay {
+  relay: NodeRef
+  online: boolean
+  state: RelayState | null
+  load_percent: number | null
+  /** 回答的节点收到这一行到现在多少毫秒；不会超过两分钟。 */
+  age_ms: number | null
+  /** 这一行是从哪个节点问来的。 */
+  reported_by: NodeId | null
+  links: BackboneLink[]
+}
+
+/** relay 之间的延迟矩阵（文档 §15）。controller 每次现问几个节点，最多等 3 秒左右。 */
+export interface BackboneView {
+  relays: BackboneRelay[]
+  /** 这次回答了的节点。是空的时候每个 relay 的行都是空的。 */
+  answered: NodeRef[]
 }
 
 export interface PathView {
@@ -577,4 +842,83 @@ export interface PathView {
   forward: PathLeg
   /** `to` 到 `from`。 */
   reverse: PathLeg
+}
+
+/* 出口（文档 §17）。计数只在 controller 的内存里：节点离线之后留着最后报的那一份，controller 重启之后等节点重新上报。 */
+
+/**
+ * 只看出口自己报的、归因于它自己的失败（解析器出错、出口内部出错）：最近 5 分钟里至少 3 次、并且占请求的一成以上是
+ * `degraded`。不在线、或者最近 5 分钟里没有请求是 `unknown`。
+ */
+export type ExitHealth = 'ok' | 'degraded' | 'unknown'
+
+/** 本账期的配额。时间按出口节点自己的时钟。 */
+export interface QuotaUsage {
+  limit_bytes: number
+  /** 可能略超过配额：超出的那一段流是在用完的那一刻被断开的。 */
+  used_bytes: number
+  period_start: Timestamp
+  period_end: Timestamp
+}
+
+/** 出口最近一次报的计数。`active` 是现在的；其余是它这次运行以来的累计。 */
+export interface ExitReport {
+  active: number
+  /** 收到的建流请求，含 UDP 的数据报上下文。 */
+  total: number
+  bytes_to_target: number
+  bytes_from_target: number
+  failed_by_target: number
+  refused: number
+  failed_by_exit: number
+  /** 建成之后没有正常结束的。 */
+  aborted: number
+  draining: boolean
+  /** 没配配额是 `null`。 */
+  quota: QuotaUsage | null
+}
+
+/** 一个用过这个出口的节点自己看到的，是它这次运行以来的累计。 */
+export interface ExitObserved {
+  by: NodeRef
+  exit: NodeId
+  flows: number
+  bytes_up: number
+  bytes_down: number
+  failed_by_target: number
+  refused: number
+  failed_by_exit: number
+  /** 到出口开流就失败了，出口根本没看到。 */
+  unreachable: number
+  reported_secs_ago: number
+}
+
+export interface ExitView {
+  node: NodeRef
+  online: boolean
+  settings: ExitSettings
+  health: ExitHealth
+  /** 最近 5 分钟里出口报的建流请求数，和其中归因于出口自己的失败数。 */
+  recent_requests: number
+  recent_failures: number
+  /** 没有报过是 `null`。 */
+  usage: ExitReport | null
+  reported_secs_ago: number | null
+  observed: ExitObserved[]
+}
+
+/* 标签（文档 §18）。 */
+
+export interface RenameTag {
+  from: string
+  to: string
+}
+
+/** 各改了几处。 */
+export interface RenamedTag {
+  from: string
+  to: string
+  nodes: number
+  rules: number
+  tokens: number
 }

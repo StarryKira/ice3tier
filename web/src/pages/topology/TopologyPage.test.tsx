@@ -97,3 +97,75 @@ describe('拓扑的路由矩阵', () => {
     expect(screen.getByRole('button', { name: g.addNode })).toBeVisible()
   })
 })
+
+describe('骨干：relay 之间的延迟', () => {
+  const BACKBONE = {
+    relays: [
+      {
+        relay: { id: 1, name: 'hk', virtual_ip: '10.66.0.1' },
+        online: true,
+        state: 'overloaded',
+        load_percent: 97,
+        age_ms: 1800,
+        reported_by: 2,
+        links: [{ to: 4, rtt_ms: 150, jitter_ms: 2, loss_permille: 5 }],
+      },
+      {
+        relay: { id: 4, name: 'la', virtual_ip: '10.66.0.4' },
+        online: false,
+        state: null,
+        load_percent: null,
+        age_ms: null,
+        reported_by: null,
+        links: [],
+      },
+    ],
+    answered: [{ id: 2, name: 'laptop', virtual_ip: '10.66.0.2' }],
+  }
+
+  it('路由矩阵旁边一个标签页：行是测的 relay，带状态和负载；格子里是延迟', async () => {
+    const user = userEvent.setup()
+    const api = setup({ 'GET /networks/1/backbone': BACKBONE })
+    renderWithApp(<TopologyPage />, { network: NETWORK, route: '/n/1/topology' })
+    await user.click(await screen.findByRole('radio', { name: g.viewBackbone }))
+    const row = await screen.findByTestId('backbone-row-1')
+    expect(row).toHaveTextContent(g.backbone.state.overloaded ?? '')
+    expect(row).toHaveTextContent(g.backbone.load(97))
+    expect(row).toHaveTextContent(g.backbone.reportedBy('laptop'))
+    expect(screen.getByTestId('backbone-cell-1-4')).toHaveAccessibleName(
+      g.backbone.cellLabel('hk', 'la', g.backbone.cell(150, 2, '0.5%')),
+    )
+    expect(screen.getByTestId('backbone-row-4')).toHaveTextContent(g.backbone.noRow)
+    expect(screen.getByText(g.backbone.answered('laptop'))).toBeVisible()
+    // 选节点对的那一栏和骨干无关，不出现。
+    expect(screen.queryByRole('combobox', { name: g.pickA })).not.toBeInTheDocument()
+
+    // 每次都要现问：不轮询，有"再问一次"。
+    expect(api.callsTo('GET /networks/1/backbone')).toHaveLength(1)
+    await user.click(screen.getByRole('button', { name: g.backbone.query }))
+    expect(api.callsTo('GET /networks/1/backbone')).toHaveLength(2)
+  })
+
+  it('没有 relay：说怎么启用', async () => {
+    setup({ 'GET /networks/1/backbone': { relays: [], answered: [] } })
+    renderWithApp(<TopologyPage />, { network: NETWORK, route: '/n/1/topology?view=backbone' })
+    expect(await screen.findByText(g.backbone.noRelaysTitle)).toBeVisible()
+  })
+
+  it('格子里写出到 relay 退回了 TCP；直连的方式在悬停文字里', async () => {
+    setup({
+      'GET /networks/1/routes': {
+        ...MATRIX,
+        entries: [
+          makeEntry(2, 3, viaRelays(1), { rtt_ms: 40, relay_leg: 'tcp' }),
+          makeEntry(3, 2, direct('192.168.1.2:20330'), { rtt_ms: 5, direct: 'lan' }),
+        ],
+      },
+    })
+    renderWithApp(<TopologyPage />, { network: NETWORK, route: '/n/1/topology?view=matrix' })
+    const relayed = await screen.findByTestId('cell-2-3')
+    expect(relayed).toHaveTextContent('TCP')
+    expect(relayed).toHaveAccessibleName(/经 hk（第一段走 TCP）/)
+    expect(screen.getByTestId('cell-3-2')).toHaveAccessibleName(/直连（局域网）/)
+  })
+})

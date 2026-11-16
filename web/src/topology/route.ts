@@ -1,4 +1,4 @@
-import { type MatrixEntry, type NodeId, type Route, type RouteMatrix } from '@/api/types'
+import { type MatrixEntry, type NodeId, type Route, type RouteDetail, type RouteMatrix } from '@/api/types'
 import { type Tone } from '@/components/status'
 import { t } from '@/i18n'
 import { formatAge } from '@/lib/time'
@@ -62,9 +62,36 @@ export function routeText(route: Route, name: (id: NodeId) => string): string {
   }
 }
 
-/** 矩阵一格的完整说法：路、对端地址、延迟、多久之前的、过没过期。悬停和读屏都用它。 */
+/**
+ * 一条路的细节：直连是怎么建立起来的（"局域网""打洞"），经 relay 时第一段走什么传输（"第一段走 TCP"）。
+ * 节点说不出来、或者 controller 比这个界面旧不写这两个字段时是 `null`，界面上就不写。
+ */
+export function routeDetail(route: Route, detail: RouteDetail): string | null {
+  const direct = detail.direct ?? null
+  const leg = detail.relay_leg ?? null
+  if (route.via === 'direct' && direct !== null) return t.routes.directKind[direct]
+  if (route.via === 'relay' && leg !== null) return t.routes.relayLeg(t.routes.legTransport[leg])
+  return null
+}
+
+/** 细节的一句解释，给悬停用。 */
+export function routeDetailHint(route: Route, detail: RouteDetail): string | null {
+  const direct = detail.direct ?? null
+  if (route.via === 'direct' && direct !== null) return t.routes.directKindHint[direct]
+  if (route.via === 'relay' && detail.relay_leg === 'tcp') return t.routes.relayLegTcpHint
+  return null
+}
+
+/** "直连（局域网）""经 hk-1（第一段走 TCP）"；没有细节时和 {@link routeText} 一样。 */
+export function routeTextWithDetail(route: Route, detail: RouteDetail, name: (id: NodeId) => string): string {
+  const text = routeText(route, name)
+  const extra = routeDetail(route, detail)
+  return extra === null ? text : t.routes.withDetail(text, extra)
+}
+
+/** 矩阵一格的完整说法：路（和它的细节）、对端地址、延迟、多久之前的、过没过期。悬停和读屏都用它。 */
 export function entryText(entry: MatrixEntry, name: (id: NodeId) => string): string {
-  const parts = [routeText(entry.route, name)]
+  const parts = [routeTextWithDetail(entry.route, entry, name)]
   if (entry.route.via === 'direct') parts.push(t.routes.addr(entry.route.addr))
   if (entry.rtt_ms !== null) parts.push(t.routes.rtt(entry.rtt_ms))
   parts.push(t.routes.age(formatAge(entry.age_secs)))
@@ -87,4 +114,16 @@ export const cellKey = (from: NodeId, to: NodeId): string => `${from}>${to}`
 
 export function indexEntries(entries: readonly MatrixEntry[]): Map<string, MatrixEntry> {
   return new Map(entries.map((entry) => [cellKey(entry.from, entry.to), entry]))
+}
+
+/** 微秒写成毫秒：不到 1 毫秒两位小数，不到 100 毫秒一位，再大取整。 */
+export function formatMicros(us: number): string {
+  const ms = us / 1000
+  const digits = ms < 1 ? 2 : ms < 100 ? 1 : 0
+  return t.routes.ms(ms.toFixed(digits))
+}
+
+/** 千分之几写成百分数：千分之 5 是 0.5%。 */
+export function formatPermille(permille: number): string {
+  return t.routes.percent(permille % 10 === 0 ? String(permille / 10) : (permille / 10).toFixed(1))
 }

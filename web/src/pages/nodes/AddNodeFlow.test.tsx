@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { type AccessGraph, type CreatedEnrollToken, type EnrollTokenInfo, type Node } from '@/api/types'
 import { t } from '@/i18n'
-import { makeNode } from '@/test/fixtures'
+import { makeNode, makeToken } from '@/test/fixtures'
 import { apiFailure, fakeApi, type FakeApi, NETWORK, renderWithApp, type Routes } from '@/test/harness'
 
 import { AddNodeDialog } from './AddNodeDialog'
@@ -28,7 +28,7 @@ const GRAPH: AccessGraph = {
 
 function tokenInfo(id: number): EnrollTokenInfo {
   const now = Math.floor(Date.now() / 1000)
-  return { id, network: 1, created_at: now, expires_at: now + 86_400, tags: [], virtual_ip: null, successor_of: null }
+  return makeToken(id, { created_at: now, expires_at: now + 86_400 })
 }
 
 function created(id: number, token: string): CreatedEnrollToken {

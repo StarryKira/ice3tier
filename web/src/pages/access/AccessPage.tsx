@@ -154,8 +154,9 @@ export function AccessPage() {
   const [panel, setPanel] = useState<'rules' | 'graph'>('rules')
   const [editor, setEditor] = useState<Editor>(null)
   const [hovered, setHovered] = useState<number | null>(null)
-  const [selected, setSelected] = useState<number | null>(null)
-  const [openTag, setOpenTag] = useState<string | null>(null)
+  // 从操作记录点过来的（`?rule=<编号>`）那条规则一开始就选中；`?tag=` 展开那个标签。
+  const [selected, setSelected] = useState<number | null>(() => numberParam(params, 'rule'))
+  const [openTag, setOpenTag] = useState<string | null>(() => params.get('tag'))
 
   const update = (changes: Record<string, string | null>) => {
     const next = new URLSearchParams(params)

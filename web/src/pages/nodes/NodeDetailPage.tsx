@@ -1,5 +1,14 @@
 import { useQuery } from '@tanstack/react-query'
-import { ChevronRight, CircleArrowUp, EllipsisVertical, Pencil, Replace, ServerOff, Trash2 } from 'lucide-react'
+import {
+  ChevronRight,
+  CircleArrowUp,
+  EllipsisVertical,
+  History,
+  Pencil,
+  Replace,
+  ServerOff,
+  Trash2,
+} from 'lucide-react'
 import { useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 
@@ -24,15 +33,18 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
 import { nodeIssues } from '@/lib/nodeIssues'
+import { attachedCount } from '@/lib/nodes'
 import { forceAbility, isUpdating } from '@/lib/nodeUpdate'
 import { LIVE_INTERVAL, WAITING_INTERVAL } from '@/lib/polling'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { networkPath, useNetwork } from '@/pages/networks/context'
+import { logPathFor } from '@/pages/settings/logFilter'
 
 import { RenameNodeDialog } from './actions'
 import { useDeleteNode } from './hooks'
 import { AccessTab } from './detail/AccessTab'
 import { EditIpDialog, SucceedDialog } from './detail/dialogs'
+import { ListenTab } from './detail/ListenTab'
 import { OverviewTab } from './detail/OverviewTab'
 import { RelatedTab } from './detail/RelatedTab'
 import { RoutesTab } from './detail/RoutesTab'
@@ -40,7 +52,7 @@ import { UpdateTab } from './detail/UpdateTab'
 import { RoleBadges } from './NodesPage'
 
 const d = t.nodes.detail
-const TABS = ['overview', 'routes', 'access', 'related', 'update'] as const
+const TABS = ['overview', 'routes', 'access', 'listen', 'related', 'update'] as const
 type Tab = (typeof TABS)[number]
 
 /**
@@ -142,7 +154,7 @@ export function NodeDetailPage() {
                 <Pencil aria-hidden />
               </Button>
             </Tooltip>
-            <RoleBadges node={node} />
+            <RoleBadges node={node} attached={attachedCount(nodes.data ?? [], node.id)} />
             {issue !== undefined ? <IssueIcon message={issue.message} tone={issue.tone} /> : null}
           </h1>
           <p className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
@@ -177,6 +189,10 @@ export function NodeDetailPage() {
                 <Replace aria-hidden />
                 {d.succeed}
               </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => void navigate(logPathFor({ kind: 'node', id: node.id }, network.id))}>
+                <History aria-hidden />
+                {d.nodeLog}
+              </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 danger
@@ -204,6 +220,7 @@ export function NodeDetailPage() {
           <TabsTrigger value="overview">{d.tabOverview}</TabsTrigger>
           <TabsTrigger value="routes">{d.tabRoutes}</TabsTrigger>
           <TabsTrigger value="access">{d.tabAccess}</TabsTrigger>
+          <TabsTrigger value="listen">{d.tabListen}</TabsTrigger>
           <TabsTrigger value="related">{d.tabRelated}</TabsTrigger>
           <TabsTrigger value="update">
             {t.updates.detail.tab}
@@ -218,6 +235,9 @@ export function NodeDetailPage() {
         </TabsContent>
         <TabsContent value="access">
           <AccessTab network={network} node={node} />
+        </TabsContent>
+        <TabsContent value="listen">
+          <ListenTab network={network} node={node} />
         </TabsContent>
         <TabsContent value="related">
           <RelatedTab network={network} node={node} />

@@ -104,7 +104,8 @@ test('路由矩阵：每个方向一格，点一格选中这一对', async () =>
   await expect(page.getByTestId('watching')).toHaveText('正在看 hk ⇄ nas')
   await expect(matrix.locator('[data-testid^="cell-"]')).toHaveCount(6)
   const cell = page.getByTestId(`cell-${nodes.laptop.id}-${nodes.hk.id}`)
-  await expect(cell).toHaveAccessibleName(/^laptop → hk：直连，对端地址 .+的上报$/)
+  // 节点说得出直连的方式时（新的节点）写在括号里，旧的节点不写。
+  await expect(cell).toHaveAccessibleName(/^laptop → hk：直连(（[^）]+）)?，对端地址 .+的上报$/)
   await cell.click()
   await expect(page.getByTestId('watching')).toHaveText('正在看 laptop ⇄ hk')
   await expect(cell).toHaveAttribute('aria-pressed', 'true')

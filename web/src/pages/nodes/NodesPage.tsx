@@ -22,7 +22,7 @@ import { useConfirm } from '@/components/confirm'
 import { CopyText } from '@/components/copy'
 import { ForceUpdateDialog } from '@/components/force-update'
 import { FormDialog } from '@/components/form-dialog'
-import { nodePath } from '@/lib/nodes'
+import { attachedCount, nodePath } from '@/lib/nodes'
 import { Page, PageHeader } from '@/components/page'
 import { EmptyState, ErrorState, NoMatches, SkeletonRows } from '@/components/states'
 import { IssueIcon, OnlineDot, RelativeTime } from '@/components/status'
@@ -81,13 +81,15 @@ const SEARCH_DEBOUNCE_MS = 300
 const ROLE_LABEL: Record<RoleFilter, string> = { relay: t.nodes.roleRelay, exit: t.nodes.roleExit }
 
 /** 角色的小徽标，跟在名字后面。 */
-export function RoleBadges({ node }: { node: Node }) {
+/** 角色的小徽标。`attached` 给了时，relay 的徽标上写着有几个节点挂靠在它上面。 */
+export function RoleBadges({ node, attached }: { node: Node; attached?: number }) {
   return (
     <>
       {node.relay !== null ? (
-        <Tooltip content={t.nodes.roleRelayTip}>
-          <Badge tone="relay" tabIndex={0}>
+        <Tooltip content={attached === undefined ? t.nodes.roleRelayTip : t.nodes.roleRelayAttached(attached)}>
+          <Badge tone="relay" tabIndex={0} data-testid={`relay-badge-${node.name}`}>
             {t.nodes.roleRelay}
+            {attached !== undefined && attached > 0 ? <span className="tabular opacity-80">· {attached}</span> : null}
           </Badge>
         </Tooltip>
       ) : null}
@@ -618,7 +620,7 @@ export function NodesPage() {
                           >
                             {node.name}
                           </Link>
-                          <RoleBadges node={node} />
+                          <RoleBadges node={node} attached={attachedCount(all, node.id)} />
                           {issue !== undefined ? <IssueIcon message={issue.message} tone={issue.tone} /> : null}
                         </div>
                       </Td>
@@ -652,7 +654,15 @@ export function NodesPage() {
                         {node.online ? (
                           <span className="font-medium text-ok">{t.common.online}</span>
                         ) : node.last_seen_at === null ? (
-                          <span className="text-muted-foreground">{t.nodes.never}</span>
+                          <Tooltip content={t.nodes.neverTip}>
+                            <span
+                              tabIndex={0}
+                              className="rounded-sm text-muted-foreground"
+                              data-testid="never-connected"
+                            >
+                              {t.nodes.never}
+                            </span>
+                          </Tooltip>
                         ) : (
                           <RelativeTime at={node.last_seen_at} className="text-muted-foreground" />
                         )}

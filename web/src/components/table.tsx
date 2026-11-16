@@ -7,7 +7,8 @@ import { cn } from '@/lib/utils'
 /** 全站一种表格：第一列是名字，操作在最后一列的菜单里，数字右对齐。 */
 export function Table({ className, ...props }: ComponentProps<'table'>) {
   return (
-    <div className="overflow-x-auto">
+    // relative：读屏用的 sr-only 文字是绝对定位的，不在这里面定位的话会跑到滚动区域外面，把整页撑宽。
+    <div className="relative overflow-x-auto">
       <table className={cn('w-full border-collapse text-sm', className)} {...props} />
     </div>
   )

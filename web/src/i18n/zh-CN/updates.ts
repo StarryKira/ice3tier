@@ -40,6 +40,14 @@ export const updates = {
         ? `其余有新版本的节点会在空闲时更新到 ${version}。`
         : `其余有新版本的节点会在空闲时更新到 ${version}。${node} 不会再被自动更新到这个版本，要对它点"立即更新"才会再试。`,
     resumeConfirm: '继续更新',
+    titleMany: (version: string, networks: number) =>
+      `${version} 在 ${networks} 个网络里都有节点更新失败，这些网络暂停了这个版本的自动更新。`,
+    scope: (networks: string) => `暂停只在网络 ${networks} 里生效，别的网络照常更新。`,
+    entry: (network: string, node: string) => `网络 ${network}：${node} 上失败`,
+    entryNodeGone: (network: string) => `网络 ${network}：一个后来删掉的节点上失败`,
+    networkGone: (id: number) => `#${id}（已删除）`,
+    resumeBodyMany: (version: string, networks: string) =>
+      `这个版本在网络 ${networks} 里被暂停，会一起继续：这些网络里其余有新版本的节点会在空闲时更新到 ${version}。失败过的节点不会再被自动更新到它，要对它们点"立即更新"才会再试。`,
     resumed: (version: string) => `已继续 ${version} 的自动更新`,
   },
 

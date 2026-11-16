@@ -11,6 +11,7 @@ import {
   type ListenerProtocol,
   type Network,
   type NodeId,
+  type ServiceClass,
 } from '@/api/types'
 import { CodeBlock } from '@/components/copy'
 import { FormDialog } from '@/components/form-dialog'
@@ -21,6 +22,7 @@ import { Input, Textarea } from '@/components/ui/input'
 import { RadioCards } from '@/components/ui/radio-cards'
 import { Segmented } from '@/components/ui/segmented'
 import { Switch } from '@/components/ui/switch'
+import { ClassSelect } from '@/components/usage'
 import { t } from '@/i18n'
 import { formatSocketAddr, isLoopbackHost, parseIpv4, parseSocketAddr } from '@/lib/cidr'
 import { listenerUsage } from '@/lib/commands'
@@ -32,6 +34,16 @@ const d = t.listeners.dialog
 
 type Where = 'local' | 'others'
 type ActionKind = DefaultAction['action']
+/** 乐观回复的三种：按目标（`null`）、一律不等（`true`）、一律等（`false`）。 */
+type Optimistic = 'auto' | 'on' | 'off'
+
+function optimisticFrom(value: boolean | null): Optimistic {
+  return value === null ? 'auto' : value ? 'on' : 'off'
+}
+
+function optimisticTo(value: Optimistic): boolean | null {
+  return value === 'auto' ? null : value === 'on'
+}
 
 interface ListenerDialogProps {
   network: Network
@@ -69,6 +81,8 @@ export function ListenerDialog({ network, listener, node: presetNode, open, onCl
   const [action, setAction] = useState<ActionKind | null>(initialAction?.action ?? null)
   const [exitNode, setExitNode] = useState<NodeId | null>(initialAction?.action === 'exit' ? initialAction.node : null)
   const [fixedExit, setFixedExit] = useState<NodeId | null>(listener?.fixed_exit ?? null)
+  const [serviceClass, setServiceClass] = useState<ServiceClass | null>(listener?.class ?? null)
+  const [optimistic, setOptimistic] = useState<Optimistic>(optimisticFrom(listener?.optimistic ?? null))
   const [touched, setTouched] = useState(false)
   const [dirty, setDirty] = useState(false)
 
@@ -130,6 +144,8 @@ export function ListenerDialog({ network, listener, node: presetNode, open, onCl
         require_credential: mustRequire || requireCredential,
         default_action: defaultAction,
         fixed_exit: fixedExit,
+        class: serviceClass,
+        optimistic: optimisticTo(optimistic),
       },
       { onSuccess: onClose },
     )
@@ -325,6 +341,45 @@ export function ListenerDialog({ network, listener, node: presetNode, open, onCl
           </div>
         )}
       </Field>
+
+      <div className="space-y-4 border-t pt-4">
+        <p className="text-[13px] font-semibold">{d.advanced}</p>
+        <Field label={d.classLabel} hint={d.classHint}>
+          {(props) => (
+            <ClassSelect
+              {...props}
+              value={serviceClass}
+              inheritLabel={d.classInherit}
+              onChange={change(setServiceClass)}
+            />
+          )}
+        </Field>
+        <Field
+          label={d.optimisticLabel}
+          hint={
+            optimistic === 'auto'
+              ? d.optimisticAutoHint
+              : optimistic === 'on'
+                ? d.optimisticOnHint
+                : d.optimisticOffHint
+          }
+        >
+          {() => (
+            <Segmented
+              aria-label={d.optimisticLabel}
+              size="sm"
+              value={optimistic}
+              onChange={change(setOptimistic)}
+              options={[
+                { value: 'auto', label: d.optimisticAuto },
+                { value: 'on', label: d.optimisticOn },
+                { value: 'off', label: d.optimisticOff },
+              ]}
+              className="w-fit"
+            />
+          )}
+        </Field>
+      </div>
 
       <div>
         <p className="mb-1.5 text-[13px] font-medium">{d.usage}</p>

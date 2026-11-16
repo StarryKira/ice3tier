@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
-import { ChevronRight, X } from 'lucide-react'
-import { useEffect, useRef } from 'react'
+import { ChevronRight, Pencil, X } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
 
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
@@ -9,9 +9,12 @@ import { useConfirm } from '@/components/confirm'
 import { NodeLink, NodeSelect } from '@/components/node'
 import { ruleLabel } from '@/lib/rules'
 import { TagChip } from '@/components/tags'
+import { Button } from '@/components/ui/button'
 import { t } from '@/i18n'
 import { cn } from '@/lib/utils'
 import { ALL_TAG } from '@/lib/validate'
+
+import { RenameTagDialog } from './RenameTagDialog'
 
 const p = t.access.tagsPanel
 
@@ -32,6 +35,7 @@ export function TagPanel({ network, graph, open, onOpenChange }: TagPanelProps) 
   const nodes = useQuery(q.nodes(network.id))
   const all = nodes.data ?? []
   const rows = useRef(new Map<string, HTMLLIElement>())
+  const [renaming, setRenaming] = useState<string | null>(null)
 
   useEffect(() => {
     if (open !== null) rows.current.get(open)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
@@ -133,15 +137,26 @@ export function TagPanel({ network, graph, open, onOpenChange }: TagPanelProps) 
                     </ul>
                   )}
                   {builtin ? null : (
-                    <div className="w-64">
-                      <NodeSelect
-                        nodes={candidates}
-                        value={null}
-                        onChange={(id) => add(entry.tag, id)}
-                        placeholder={candidates.length === 0 ? p.noCandidates : p.addMember}
-                        disabled={candidates.length === 0 || setTags.isPending}
-                        aria-label={p.addMemberTo(entry.tag)}
-                      />
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="w-64">
+                        <NodeSelect
+                          nodes={candidates}
+                          value={null}
+                          onChange={(id) => add(entry.tag, id)}
+                          placeholder={candidates.length === 0 ? p.noCandidates : p.addMember}
+                          disabled={candidates.length === 0 || setTags.isPending}
+                          aria-label={p.addMemberTo(entry.tag)}
+                        />
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setRenaming(entry.tag)}
+                        aria-label={p.renameFor(entry.tag)}
+                      >
+                        <Pencil aria-hidden />
+                        {p.rename}
+                      </Button>
                     </div>
                   )}
                 </div>
@@ -150,6 +165,15 @@ export function TagPanel({ network, graph, open, onOpenChange }: TagPanelProps) 
           )
         })}
       </ul>
+      {renaming !== null ? (
+        <RenameTagDialog
+          network={network}
+          graph={graph}
+          tag={renaming}
+          onClose={() => setRenaming(null)}
+          onRenamed={(to) => onOpenChange(to)}
+        />
+      ) : null}
     </div>
   )
 }

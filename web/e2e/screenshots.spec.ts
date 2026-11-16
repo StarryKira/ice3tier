@@ -1,4 +1,8 @@
+import { execFile } from 'node:child_process'
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer as createHttpServer, type Server as HttpServer } from 'node:http'
+import { createServer as createTcpServer, type Server as TcpServer } from 'node:net'
+import { networkInterfaces } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -23,6 +27,42 @@ let release: ReleaseSource
 let counter = 0
 /** 用界面或接口加进来的节点，按用途起了名字。 */
 const nodes: Record<string, NodeHandle> = {}
+/** 经出口下载的目标：这台机器局域网地址上的一个 HTTP 服务。没有私有地址的机器上不造用量。 */
+let target: HttpServer
+let busy: TcpServer
+let targetPort = 0
+let busyPort = 0
+let lanIp: string | undefined
+
+function listenOn(server: HttpServer | TcpServer, host: string): Promise<number> {
+  return new Promise((done, fail) => {
+    server.once('error', fail)
+    server.listen(0, host, () => {
+      const address = server.address()
+      if (address !== null && typeof address === 'object') done(address.port)
+      else fail(new Error('拿不到端口'))
+    })
+  })
+}
+
+/** 一个现在空闲的端口：占一下就放开。 */
+async function freePort(): Promise<number> {
+  const server = createTcpServer()
+  const port = await listenOn(server, '127.0.0.1')
+  await new Promise((done) => server.close(done))
+  return port
+}
+
+/** 经一个 SOCKS5 入口下载 4 MB。异步地等：目标就在这个进程里。 */
+function download(proxy: string): Promise<void> {
+  return new Promise((done) => {
+    execFile(
+      'curl',
+      ['-s', '-m', '20', '-o', '/dev/null', '-x', proxy, `http://${lanIp ?? ''}:${targetPort}/blob`],
+      () => done(),
+    )
+  })
+}
 
 async function shot(name: string, options: { fullPage?: boolean } = {}): Promise<void> {
   counter += 1
@@ -47,11 +87,23 @@ test.beforeAll(async ({ browser }) => {
   kit = releaseKit()
   controller = await Controller.start({ bins: kit.oldBins })
   page = await browser.newPage()
+  const blob = Buffer.alloc(4 * 1024 * 1024, 'i')
+  target = createHttpServer((_request, response) => response.end(blob))
+  targetPort = await listenOn(target, '0.0.0.0')
+  busy = createTcpServer()
+  busyPort = await listenOn(busy, '127.0.0.1')
+  lanIp = Object.values(networkInterfaces())
+    .flat()
+    .find(
+      (address) => address?.family === 'IPv4' && !address.internal && address.address.startsWith('192.168.'),
+    )?.address
 })
 
 test.afterAll(async () => {
   await page.close()
   controller.stop()
+  target.close()
+  busy.close()
 })
 
 test('登录和第一个网络', async () => {
@@ -159,7 +211,13 @@ test('准备数据', async () => {
     region: 'hk',
     bandwidth_mbps: 200,
   })
-  await controller.api('PUT', `${net}/nodes/2/exit`, { ports: [80, 443], lan: true })
+  await controller.api('PUT', `${net}/nodes/2/exit`, {
+    ports: [80, 443],
+    lan: true,
+    quota_bytes: 16 * 1024 * 1024,
+    quota_reset_day: 1,
+    connects_per_minute: 120,
+  })
   await controller.api('PATCH', `${net}/nodes/3`, { pinned_relays: [1] })
 
   await controller.api('POST', `${net}/rules`, { name: 'ssh', src: 'laptops', dst: 'servers', direction: 'one_way' })
@@ -172,8 +230,14 @@ test('准备数据', async () => {
     enabled: false,
   })
 
-  await controller.api('POST', `${net}/credentials`, { name: 'phone', max_concurrent: 8 })
-  await controller.api('POST', `${net}/credentials`, { name: 'tablet' })
+  const phone = await controller.api<{ token: string }>('POST', `${net}/credentials`, {
+    name: 'phone',
+    max_concurrent: 8,
+    max_bytes: 64 * 1024 * 1024,
+  })
+  const tablet = await controller.api<{ token: string }>('POST', `${net}/credentials`, { name: 'tablet' })
+  const old = await controller.api<{ id: number }>('POST', `${net}/credentials`, { name: 'old-laptop' })
+  await controller.api('DELETE', `${net}/credentials/${old.id}`)
 
   await controller.api('POST', `${net}/listeners`, {
     node: 1,
@@ -236,6 +300,36 @@ test('准备数据', async () => {
     target_addr: '127.0.0.1:80',
   })
 
+  // 端口写 0 的，和监听在一个被占着的端口上的。
+  await controller.api('POST', `${net}/forwards`, {
+    name: 'picked',
+    protocol: 'tcp',
+    listen_node: 3,
+    bind: '127.0.0.1:0',
+    target_node: 2,
+    target_addr: `127.0.0.1:${targetPort}`,
+  })
+  await controller.api('POST', `${net}/forwards`, {
+    name: 'busy',
+    protocol: 'tcp',
+    listen_node: 3,
+    bind: `127.0.0.1:${busyPort}`,
+    target_node: 2,
+    target_addr: `127.0.0.1:${targetPort}`,
+  })
+  // laptop 上一个要求凭据的入口，只收本机来的连接；用两个凭据经它从 nas-home 出去下载，造出用量。
+  const proxyPort = await freePort()
+  await controller.api('POST', `${net}/listeners`, {
+    node: 3,
+    name: 'guests',
+    bind: `0.0.0.0:${proxyPort}`,
+    protocol: 'socks5',
+    allow_from: ['127.0.0.0/8'],
+    require_credential: true,
+    default_action: { action: 'exit', node: 2 },
+    class: 'bulk',
+  })
+
   await controller.api('PUT', `${net}/pairs/2/3`, { keep_alive: true })
   await controller.api('POST', `${net}/tokens`, { tags: ['servers'], expires_in_secs: 3600 })
   await controller.api('POST', `${net}/tokens`, { virtual_ip: '10.66.0.50', expires_in_secs: 7 * 86400 })
@@ -250,6 +344,40 @@ test('准备数据', async () => {
       timeout: 30_000,
     })
     .toBeGreaterThan(0)
+
+  if (lanIp !== undefined) {
+    // 等 guests 监听上，再下载：一次经 laptop 本机的入口，两次各用一个凭据经 guests。
+    await expect
+      .poll(
+        async () =>
+          (await controller.api<{ name: string; status: { state: string } | null }[]>('GET', `${net}/listeners`)).find(
+            (listener) => listener.name === 'guests',
+          )?.status?.state,
+        { timeout: 30_000 },
+      )
+      .toBe('listening')
+    await download(`socks5h://10.66.0.2@127.0.0.1:${nodes.laptop.socksPort ?? 0}`)
+    await download(`socks5h://10.66.0.2:${phone.token}@127.0.0.1:${proxyPort}`)
+    await download(`socks5h://10.66.0.2:${tablet.token}@127.0.0.1:${proxyPort}`)
+    await expect
+      .poll(
+        async () =>
+          (await controller.api<{ name: string; usage: { bytes: number } }[]>('GET', `${net}/credentials`)).find(
+            (credential) => credential.name === 'tablet',
+          )?.usage.bytes ?? 0,
+        { timeout: 40_000 },
+      )
+      .toBeGreaterThan(0)
+    // tablet 的上限比它已经用掉的少：用完了。
+    const credentials = await controller.api<{ id: number; name: string }[]>('GET', `${net}/credentials`)
+    const tabletId = credentials.find((credential) => credential.name === 'tablet')?.id ?? 0
+    await controller.api('PATCH', `${net}/credentials/${tabletId}`, { max_bytes: 1024 * 1024 })
+    await expect
+      .poll(async () => (await controller.api<{ usage: unknown }[]>('GET', `${net}/exits`))[0]?.usage ?? null, {
+        timeout: 30_000,
+      })
+      .not.toBeNull()
+  }
 })
 
 test('有数据时：总览、节点', async () => {
@@ -302,6 +430,12 @@ test('有数据时：节点详情', async () => {
   await page.getByRole('link', { name: 'gw-hk', exact: true }).click()
   await expect(page.getByTestId('capability-relay')).toBeVisible()
   await shot('node-detail-relay')
+  // 保存 relay 的设置：controller 从自己这边试连填的地址（203.0.113.7 是文档用的地址，连不上），写出建议。
+  await page.getByTestId('capability-relay').getByRole('button', { name: '修改设置' }).click()
+  await page.getByRole('button', { name: '保存 relay 设置' }).click()
+  await expect(page.getByTestId('relay-reachability')).toBeVisible({ timeout: 15_000 })
+  await clearToasts(page)
+  await shot('node-detail-relay-reachability')
 
   await goTo(page, '节点')
   await page.getByRole('link', { name: 'nas-home', exact: true }).click()
@@ -322,6 +456,10 @@ test('有数据时：节点详情', async () => {
   await page.getByRole('tab', { name: '访问' }).click()
   await expect(page.getByText(/它可以访问的节点/)).toBeVisible()
   await shot('node-detail-access')
+
+  await page.getByRole('tab', { name: '监听' }).click()
+  await expect(page.getByTestId('node-listen-local-socks5')).toBeVisible({ timeout: 20_000 })
+  await shot('node-detail-listen')
 
   await page.getByRole('tab', { name: '关联配置' }).click()
   await expect(page.getByText('和它有关的端口转发')).toBeVisible()
@@ -404,6 +542,13 @@ test('有数据时：访问控制', async () => {
 
   await page.getByRole('button', { name: '展开标签 servers 的成员' }).click()
   await shot('access-tag-panel-open')
+  await page.getByRole('button', { name: '给标签 servers 改名' }).click()
+  const rename = page.getByRole('dialog', { name: '给标签 servers 改名' })
+  await rename.getByRole('textbox', { name: '新名字' }).fill('home')
+  await expect(rename.getByText(/两组节点会合成一组/)).toBeVisible()
+  await shot('access-tag-rename', { fullPage: false })
+  await rename.getByRole('button', { name: '取消', exact: true }).click()
+  await page.getByRole('button', { name: '放弃改动' }).click()
 
   await page.getByRole('button', { name: '新建规则' }).click()
   const dialog = page.getByRole('dialog', { name: '新建规则' })
@@ -439,6 +584,9 @@ test('有数据时：接入', async () => {
   await goTo(page, '出口')
   await expect(page.getByTestId('exit-row-nas-home')).toBeVisible()
   await shot('exits')
+  await page.getByRole('button', { name: '出口 nas-home 的计数和用它的节点看到的' }).click()
+  await expect(page.getByTestId('exit-crosscheck-nas-home')).toBeVisible()
+  await shot('exits-crosscheck')
   await page.getByRole('button', { name: '启用出口' }).click()
   await expect(page.getByRole('dialog', { name: '启用出口' })).toBeVisible()
   await shot('exits-enable-dialog', { fullPage: false })
@@ -457,6 +605,14 @@ test('有数据时：接入', async () => {
   await goTo(page, '接入凭据')
   await expect(page.getByTestId('credential-row-phone')).toBeVisible()
   await shot('credentials')
+  await page.getByRole('button', { name: 'phone 的操作' }).click()
+  await page.getByRole('menuitem', { name: /修改上限/ }).click()
+  const limits = page.getByRole('dialog', { name: '修改凭据 phone 的上限' })
+  await limits.getByRole('textbox', { name: /^流量上限/ }).fill('1')
+  await limits.getByRole('combobox', { name: '流量上限的单位' }).selectOption('MB')
+  await shot('credentials-edit-limits', { fullPage: false })
+  await limits.getByRole('button', { name: '取消', exact: true }).click()
+  await page.getByRole('button', { name: '放弃改动' }).click()
   await page.getByRole('button', { name: '签发凭据' }).click()
   await page.getByRole('dialog', { name: '签发凭据' }).getByLabel('名字').fill('guest')
   await page.getByRole('button', { name: '签发', exact: true }).click()
@@ -484,6 +640,9 @@ test('有数据时：管理区和设置', async () => {
   await goToAdmin(page, '注册')
   await expect(page.getByTestId('token-row-7')).toBeVisible()
   await shot('tokens')
+  await page.getByRole('radio', { name: '全部' }).click()
+  await expect(page.getByTestId('token-row-1')).toBeVisible()
+  await shot('tokens-history')
 
   await goToAdmin(page, '节点对')
   await expect(page.getByTestId('pair-row-nas-home-laptop')).toBeVisible()
@@ -533,6 +692,15 @@ test('有数据时：管理区和设置', async () => {
   await page.getByRole('link', { name: '操作记录' }).click()
   await expect(page.getByRole('columnheader', { name: '说明' })).toBeVisible()
   await shot('settings-log')
+  await page.getByRole('combobox', { name: '按操作筛选' }).selectOption('credential')
+  await page
+    .locator('[data-testid^="log-row-"]')
+    .first()
+    .getByRole('button', { name: /^只看和凭据/ })
+    .first()
+    .click()
+  await expect(page.getByTestId('log-ref-filter')).toBeVisible()
+  await shot('settings-log-filtered')
   await page.getByRole('link', { name: '关于' }).click()
   await expect(page.getByText('controller 公钥')).toBeVisible()
   await shot('settings-about')
@@ -570,6 +738,15 @@ test('窄一些的笔记本宽度', async () => {
   await goTo(page, '端口转发')
   await expect(page.getByTestId('forward-row-web')).toBeVisible()
   await shot('narrow-forwards')
+  await goTo(page, '出口')
+  await expect(page.getByTestId('exit-row-nas-home')).toBeVisible()
+  await shot('narrow-exits')
+  await goTo(page, '接入凭据')
+  await expect(page.getByTestId('credential-row-phone')).toBeVisible()
+  await shot('narrow-credentials')
+  await goTo(page, '监听器')
+  await expect(page.getByTestId('listener-row-guests')).toBeVisible()
+  await shot('narrow-listeners')
   await page.goto(`${controller.baseUrl}/n/1/topology?a=3&b=2`)
   await expect(page.getByTestId('pair-panel')).toBeVisible()
   await shot('narrow-topology-pair')

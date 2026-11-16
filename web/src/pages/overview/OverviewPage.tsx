@@ -12,10 +12,16 @@ import { ErrorState, SkeletonBlock } from '@/components/states'
 import { RelativeTime } from '@/components/status'
 import { Button } from '@/components/ui/button'
 import { Card, CardHeader } from '@/components/ui/card'
+import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
+import { formatBytes } from '@/lib/format'
+import { listenView } from '@/lib/listenState'
+import { nodeName } from '@/lib/nodes'
 import { GUIDE_INTERVAL } from '@/lib/polling'
+import { quotaView } from '@/lib/usage'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { cn } from '@/lib/utils'
+import { exitHealthView } from '@/pages/exits/exitView'
 import { forwardLabel, forwardStatusView } from '@/pages/forwards/status'
 import { networkPath, useNetwork } from '@/pages/networks/context'
 import { AddNodeDialog } from '@/pages/nodes/AddNodeDialog'
@@ -24,8 +30,7 @@ import { GettingStarted } from './GettingStarted'
 
 const o = t.overview
 
-/** "最近的操作"取多少条来挑：操作记录不分网络，要多取一些才凑得出这个网络的最近几条。 */
-const RECENT_FETCH = 100
+/** "最近的操作"：controller 按网络筛好，只取这么几条。 */
 const RECENT_SHOWN = 5
 const PAIRS_SHOWN = 10
 
@@ -36,18 +41,28 @@ interface AttentionItem {
   detail?: ReactNode
 }
 
-function Stat({ label, value, hint, to }: { label: string; value: ReactNode; hint?: string; to: string }) {
-  return (
+interface StatProps {
+  label: string
+  value: ReactNode
+  hint?: string
+  /** 悬停说明这个数是怎么来的。 */
+  tip?: string
+  to: string
+}
+
+function Stat({ label, value, hint, tip, to }: StatProps) {
+  const link = (
     <Link
       to={to}
       aria-label={o.stats.open(label)}
       className="rounded-lg border bg-card px-4 py-3.5 shadow-card transition-colors hover:border-primary/50"
     >
       <span className="block text-[13px] text-muted-foreground">{label}</span>
-      <span className="mt-1 block text-2xl leading-tight font-semibold tabular">{value}</span>
-      {hint !== undefined ? <span className="block text-xs text-muted-foreground">{hint}</span> : null}
+      <span className="mt-1 block truncate text-2xl leading-tight font-semibold tabular">{value}</span>
+      {hint !== undefined ? <span className="block truncate text-xs text-muted-foreground tabular">{hint}</span> : null}
     </Link>
   )
+  return tip === undefined ? link : <Tooltip content={tip}>{link}</Tooltip>
 }
 
 /** 没有 relay 时两端互不可达：这是唯一需要用户再做事的情况，展开一段补救的步骤。 */
@@ -106,7 +121,10 @@ export function OverviewPage() {
   const guideNodes = useQuery({ ...q.nodes(network.id), refetchInterval: GUIDE_INTERVAL, enabled: few })
   const overview = useQuery({ ...q.overview(network.id), enabled: !few })
   const forwards = useQuery({ ...q.forwards(network.id), enabled: !few })
-  const log = useQuery({ ...q.log(RECENT_FETCH), enabled: !few })
+  const exits = useQuery({ ...q.exits(network.id), enabled: !few })
+  const credentials = useQuery({ ...q.credentials(network.id), enabled: !few })
+  const listeners = useQuery({ ...q.listeners(network.id), enabled: !few })
+  const log = useQuery({ ...q.log({ network: network.id, limit: RECENT_SHOWN }), enabled: !few })
 
   if (nodes.isError && nodes.data === undefined) {
     return (
@@ -190,6 +208,59 @@ export function OverviewPage() {
       })
     }
   }
+  for (const exit of exits.data ?? []) {
+    const quota = exit.usage?.quota
+    const view = quota === undefined || quota === null ? null : quotaView(quota)
+    const health = exitHealthView(exit)
+    const text =
+      view?.exhausted === true
+        ? o.quotaExhausted(exit.node.name, view.resets)
+        : view?.nearly === true
+          ? o.quotaNearly(exit.node.name, view.percent ?? 0)
+          : exit.health === 'degraded'
+            ? o.exitDegraded(exit.node.name, health.detail)
+            : null
+    if (text === null) continue
+    attention.push({
+      key: `exit:${exit.node.id}`,
+      text,
+      action: (
+        <Button asChild size="sm">
+          <Link to={`${networkPath(network.id, 'exits')}?focus=${exit.node.id}`}>{o.view}</Link>
+        </Button>
+      ),
+    })
+  }
+  for (const credential of credentials.data ?? []) {
+    if (credential.state !== 'exhausted') continue
+    attention.push({
+      key: `credential:${credential.id}`,
+      text: o.credentialExhausted(credential.name),
+      action: (
+        <Button asChild size="sm">
+          <Link to={`${networkPath(network.id, 'credentials')}?focus=${credential.id}`}>{o.view}</Link>
+        </Button>
+      ),
+    })
+  }
+  for (const listener of listeners.data ?? []) {
+    const host = all.find((node) => node.id === listener.node)
+    const view = listenView(listener.status, {
+      node: nodeName(all, listener.node),
+      bind: listener.bind,
+      online: host?.online ?? false,
+    })
+    if (!view.needsAttention) continue
+    attention.push({
+      key: `listener:${listener.id}`,
+      text: o.listenerBroken(listener.name, view.detail ?? view.label),
+      action: (
+        <Button asChild size="sm">
+          <Link to={`${networkPath(network.id, 'listeners')}?focus=${listener.id}`}>{o.view}</Link>
+        </Button>
+      ),
+    })
+  }
   for (const forward of forwards.data ?? []) {
     const view = forwardStatusView(forward, all)
     if (!view.needsAttention) continue
@@ -198,7 +269,13 @@ export function OverviewPage() {
       text: o.forwardBlocked(forwardLabel(forward), view.detail),
       action: (
         <Button asChild size="sm">
-          <Link to={networkPath(network.id, view.linkToRules ? 'access' : 'forwards')}>
+          <Link
+            to={
+              view.linkToRules
+                ? networkPath(network.id, 'access')
+                : `${networkPath(network.id, 'forwards')}?focus=${forward.id}`
+            }
+          >
             {view.linkToRules ? o.viewRules : o.view}
           </Link>
         </Button>
@@ -206,7 +283,7 @@ export function OverviewPage() {
     })
   }
 
-  const recent = (log.data ?? []).filter((entry) => entry.network === network.id).slice(0, RECENT_SHOWN)
+  const recent = log.data ?? []
   const healthy = attention.length === 0
   const allOffline = data.online === 0
   const StatusIcon = !healthy ? TriangleAlert : allOffline ? CircleMinus : CircleCheck
@@ -254,8 +331,21 @@ export function OverviewPage() {
         </Card>
       ) : null}
 
-      <section aria-label={o.title} className="mb-6 grid grid-cols-3 gap-3 lg:grid-cols-6">
+      <section aria-label={o.title} className="mb-6 grid grid-cols-2 gap-3 md:grid-cols-4">
         <Stat label={o.stats.online} value={`${data.online} / ${data.nodes}`} to={networkPath(network.id, 'nodes')} />
+        <Stat
+          label={o.stats.flows}
+          value={data.flows}
+          hint={o.stats.flowsHint}
+          to={networkPath(network.id, 'topology')}
+        />
+        <Stat
+          label={o.stats.traffic}
+          value={formatBytes(data.tx_bytes + data.rx_bytes)}
+          hint={o.stats.trafficHint(formatBytes(data.tx_bytes), formatBytes(data.rx_bytes))}
+          tip={o.stats.trafficTip}
+          to={networkPath(network.id, 'nodes')}
+        />
         <Stat
           label={o.stats.relays}
           value={data.relays}
@@ -295,7 +385,7 @@ export function OverviewPage() {
             title={o.recentTitle}
             action={
               <Button asChild size="sm" variant="ghost">
-                <Link to="/settings/log">{o.recentAll}</Link>
+                <Link to={`/settings/log?network=${network.id}`}>{o.recentAll}</Link>
               </Button>
             }
           />

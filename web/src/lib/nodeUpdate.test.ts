@@ -8,6 +8,7 @@ import { nodeIssues } from './nodeIssues'
 import {
   describeUpdate,
   forceAbility,
+  groupPaused,
   isUpdating,
   NO_UPDATE_CONTEXT,
   selfUpdateBlock,
@@ -276,5 +277,20 @@ describe('发布源', () => {
     expect(validateSource('dir', 'releases')).toBe(u.source.dirInvalid)
     expect(validateSource('dir', '/srv/ice3tier/releases')).toBeNull()
     expect(validateSource('dir', 'D:\\releases')).toBeNull()
+  })
+})
+
+describe('被暂停的版本按版本归在一起', () => {
+  const laptop = { id: 2, name: 'laptop', virtual_ip: '10.66.0.2' }
+  const entry = (version: string, network: number, at: number) => ({ version, node: laptop, network, reason: 'x', at })
+
+  it('同一个版本在几个网络里被暂停：一组，按时间先后', () => {
+    const groups = groupPaused([entry('0.3.0', 2, 200), entry('0.2.9', 1, 50), entry('0.3.0', 1, 100)])
+    expect(groups.map((group) => group.version)).toEqual(['0.2.9', '0.3.0'])
+    expect(groups[1]?.entries.map((item) => item.network)).toEqual([1, 2])
+  })
+
+  it('没有暂停：没有组', () => {
+    expect(groupPaused([])).toEqual([])
   })
 })

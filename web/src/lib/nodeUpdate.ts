@@ -1,4 +1,11 @@
-import { type Node, type NodeUpdate, type ReleaseInfo, type SelfUpdateBlocker, type Version } from '@/api/types'
+import {
+  type Node,
+  type NodeUpdate,
+  type PausedVersion,
+  type ReleaseInfo,
+  type SelfUpdateBlocker,
+  type Version,
+} from '@/api/types'
 import { type Tone } from '@/components/status'
 import { t } from '@/i18n'
 
@@ -230,4 +237,22 @@ export function isUpdating(update: NodeUpdate): boolean {
     update.waiting !== null ||
     !['idle', 'confirmed', 'failed', 'unknown'].includes(update.status.state)
   )
+}
+
+export interface PausedGroup {
+  version: Version
+  /** 每个暂停了这个版本的网络一条，按时间先后。 */
+  entries: PausedVersion[]
+}
+
+/**
+ * 被暂停的版本按版本归在一起：暂停按网络算，同一个版本在几个网络里被暂停时 `paused` 里有几条，
+ * 而"继续"一次继续全部网络里的这个版本，所以界面上一个版本一条横幅。版本按第一次暂停的时间排。
+ */
+export function groupPaused(paused: readonly PausedVersion[]): PausedGroup[] {
+  const groups = new Map<Version, PausedVersion[]>()
+  for (const entry of [...paused].sort((a, b) => a.at - b.at)) {
+    groups.set(entry.version, [...(groups.get(entry.version) ?? []), entry])
+  }
+  return [...groups].map(([version, entries]) => ({ version, entries }))
 }

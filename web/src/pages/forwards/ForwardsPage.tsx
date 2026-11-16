@@ -8,6 +8,7 @@ import { q, useAction } from '@/api/queries'
 import { type Forward, type ForwardInput } from '@/api/types'
 import { useConfirm } from '@/components/confirm'
 import { CodeBlock, CopyText } from '@/components/copy'
+import { TrafficText } from '@/components/usage'
 import { NodeLink } from '@/components/node'
 import { nodeName } from '@/lib/nodes'
 import { Notice } from '@/components/notice'
@@ -30,13 +31,15 @@ import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
 import { copyText } from '@/lib/clipboard'
+import { parseSocketAddr } from '@/lib/cidr'
 import { declareCommand } from '@/lib/commands'
-import { REPORT_INTERVAL_SECS } from '@/lib/product'
+import { FOCUSED_ROW, useFocusRow } from '@/lib/useFocusRow'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
+import { cn } from '@/lib/utils'
 import { networkPath, useNetwork } from '@/pages/networks/context'
 
 import { ForwardDialog, type ListenScope } from './ForwardDialog'
-import { forwardLabel, forwardStatusView } from './status'
+import { forwardAddress, forwardLabel, forwardStatusView, type ForwardStatusView } from './status'
 
 const f = t.forwards
 
@@ -52,7 +55,36 @@ function toInput(forward: Forward, enabled: boolean): ForwardInput {
     target_addr: forward.target_addr,
     allow_from: forward.allow_from,
     enabled,
+    // PUT 是整个替换：不写的字段回到默认值，所以开关的时候要把等级原样带上。
+    class: forward.class,
   }
+}
+
+/** 监听那一格：节点、地址和协议。端口写 0 的显示节点挑定的那个。 */
+function ListenCell({ forward, view }: { forward: Forward; view: ForwardStatusView }) {
+  const port = parseSocketAddr(forward.bind)?.port
+  const picked = view.listen?.picked ?? null
+  return (
+    <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+      {port === 0 && picked !== null && view.listen?.local != null ? (
+        <span className="inline-flex items-center gap-1.5" data-testid={`forward-picked-${forward.id}`}>
+          <CopyText value={view.listen.local} className="text-xs" />
+          <Tooltip content={f.pickedHint}>
+            <span tabIndex={0} className="cursor-help rounded-sm text-xs text-muted-foreground">
+              {f.picked(picked)}
+            </span>
+          </Tooltip>
+        </span>
+      ) : port === 0 ? (
+        <span className="text-xs text-muted-foreground">
+          <code className="font-mono">{forward.bind}</code> · {f.pickedPending}
+        </span>
+      ) : (
+        <CopyText value={forward.bind} className="text-xs text-muted-foreground" />
+      )}
+      <Badge className="text-[11px]">{forward.protocol === 'tcp' ? f.dialog.tcp : f.dialog.udp}</Badge>
+    </div>
+  )
 }
 
 export function ForwardsPage() {
@@ -62,6 +94,7 @@ export function ForwardsPage() {
   const forwards = useQuery(q.forwards(network.id))
   const nodes = useQuery(q.nodes(network.id))
   const [editor, setEditor] = useState<Editor>(null)
+  const focus = useFocusRow(forwards.data)
 
   // 启用和停用没有单独的接口：取出这条转发，把 enabled 改掉再整个放回去。
   const setEnabled = useAction(network.id, {
@@ -82,9 +115,15 @@ export function ForwardsPage() {
   const noTargets = nodes.isSuccess && all.length > 0 && !all.some((node) => node.declared.forward)
 
   const onDelete = async (forward: Forward) => {
+    const connections = forward.listen?.connections ?? 0
     const confirmed = await confirm({
       title: f.deleteTitle(forwardLabel(forward)),
-      body: f.deleteBody(nodeName(all, forward.listen_node), forward.bind),
+      body: (
+        <>
+          <p>{f.deleteBody(nodeName(all, forward.listen_node), forward.bind)}</p>
+          {connections > 0 ? <p>{f.deleteActive(connections)}</p> : null}
+        </>
+      ),
       confirmLabel: f.deleteConfirm,
     })
     if (confirmed) remove.mutate(forward)
@@ -104,6 +143,11 @@ export function ForwardsPage() {
           )
         }
       />
+      {focus.missing ? (
+        <Notice className="mb-4" tone="warn">
+          {f.focusMissing(focus.focus ?? 0)}
+        </Notice>
+      ) : null}
       <Card>
         {forwards.isError ? (
           <ErrorState title={f.loadFailed} error={forwards.error} onRetry={() => void forwards.refetch()} />
@@ -163,7 +207,7 @@ export function ForwardsPage() {
                   <Th>{f.colListen}</Th>
                   <Th className="w-6 px-0" />
                   <Th>{f.colTarget}</Th>
-                  <Th>{f.colProtocol}</Th>
+                  <Th>{f.colUse}</Th>
                   <Th>{f.colEnabled}</Th>
                   <Th className="w-12">
                     <span className="sr-only">{t.common.moreActions}</span>
@@ -176,16 +220,20 @@ export function ForwardsPage() {
                   const view = forwardStatusView(forward, all)
                   const label = forwardLabel(forward)
                   const blocked = forward.status === 'target_not_declared'
-                  const hasDetail = forward.status !== 'active'
+                  const hasDetail = view.tone !== 'ok'
+                  const focused = focus.focus === forward.id
+                  const traffic = view.listen?.traffic ?? null
                   return (
                     <Fragment key={forward.id}>
                       <Tr
+                        ref={focus.rowRef(forward.id)}
                         dimmed={!forward.enabled}
-                        className={hasDetail ? 'border-b-0' : undefined}
+                        className={cn(hasDetail && 'border-b-0', focused && FOCUSED_ROW)}
                         data-testid={`forward-row-${label}`}
+                        data-status={forward.status}
                       >
                         <Td data-keep>
-                          <StatusText tone={view.tone} className="text-[13px] whitespace-nowrap">
+                          <StatusText tone={view.tone} className="text-[13px]">
                             {view.label}
                           </StatusText>
                         </Td>
@@ -201,9 +249,7 @@ export function ForwardsPage() {
                             network={network.id}
                             node={{ id: forward.listen_node, name: nodeName(all, forward.listen_node) }}
                           />
-                          <div className="mt-0.5">
-                            <CopyText value={forward.bind} className="text-xs text-muted-foreground" />
-                          </div>
+                          <ListenCell forward={forward} view={view} />
                         </Td>
                         <Td className="px-0 text-muted-foreground">
                           <ArrowRight className="size-4" aria-label={f.dialog.arrow} />
@@ -217,8 +263,24 @@ export function ForwardsPage() {
                             <CopyText value={forward.target_addr} className="text-xs text-muted-foreground" />
                           </div>
                         </Td>
-                        <Td>
-                          <Badge>{forward.protocol === 'tcp' ? f.dialog.tcp : f.dialog.udp}</Badge>
+                        <Td className="text-[13px]">
+                          {traffic === null ? (
+                            <span className="text-muted-foreground">—</span>
+                          ) : (
+                            <>
+                              <span className="block tabular">
+                                {forward.protocol === 'udp'
+                                  ? t.listen.sessions(traffic.connections)
+                                  : t.listen.connections(traffic.connections)}
+                              </span>
+                              <TrafficText
+                                up={traffic.bytes_up}
+                                down={traffic.bytes_down}
+                                tip={t.listen.trafficTip}
+                                className="text-xs text-muted-foreground"
+                              />
+                            </>
+                          )}
                         </Td>
                         <Td data-keep>
                           <Tooltip content={blocked ? f.toggleBlocked : undefined}>
@@ -248,7 +310,7 @@ export function ForwardsPage() {
                               </DropdownMenuItem>
                               <DropdownMenuItem
                                 onSelect={() =>
-                                  void copyText(forward.bind).then((ok) =>
+                                  void copyText(forwardAddress(forward, view)).then((ok) =>
                                     ok ? toast.success(f.addressCopied) : toast.error(t.common.copyFailed),
                                   )
                                 }
@@ -267,7 +329,7 @@ export function ForwardsPage() {
                       </Tr>
                       {/* 原因和下一步单独占一行，是一句完整的话，不挤在状态那一格里。 */}
                       {hasDetail ? (
-                        <tr className="border-b last:border-b-0">
+                        <tr className={cn('border-b last:border-b-0', focused && FOCUSED_ROW)}>
                           <td colSpan={8} className="px-4 pt-0 pb-3 text-[13px] leading-snug text-muted-foreground">
                             {view.detail}{' '}
                             {view.linkToRules ? (
@@ -286,9 +348,7 @@ export function ForwardsPage() {
                 })}
               </tbody>
             </Table>
-            <p className="border-t px-4 py-2.5 text-[13px] text-muted-foreground">
-              {f.statusCaveat} {t.common.updatedEvery(REPORT_INTERVAL_SECS)}。
-            </p>
+            <p className="border-t px-4 py-2.5 text-[13px] text-muted-foreground">{f.statusCaveat}</p>
           </>
         )}
       </Card>

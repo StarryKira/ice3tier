@@ -56,6 +56,8 @@ export const networks = {
   reachDirectOnlyDesc: '不使用 relay。打不通直连的节点对之间不可达。',
   reachRelayOnly: '只经 relay（relay-only）',
   reachRelayOnlyDesc: '不建立直连，不向对端暴露公网地址。所有流量都经 relay，延迟更高。',
+  classLabel: '默认服务等级',
+  classHint: '这个网络里的流默认用这个等级。代理用户名里的 +c- 标记、监听器、端口转发和出口自己的设置都优先于它。',
   saveSettings: '保存设置',
   settingsSaved: '设置已保存，已下发给网络里的节点',
 

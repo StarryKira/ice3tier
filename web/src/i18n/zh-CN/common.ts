@@ -50,6 +50,11 @@ export const common = {
   updatedEvery: (secs: number) => `节点每 ${secs} 秒上报一次，这里随之更新`,
   mbps: 'Mbit/s',
   ms: (n: number) => `${n} ms`,
+  percent: (n: number) => `${n}%`,
+  trafficUpDown: (up: string, down: string) => `↑ ${up} · ↓ ${down}`,
+  trafficUpDownLabel: (up: string, down: string) => `发出 ${up}，收到 ${down}`,
+  usageOf: (used: string, limit: string) => `${used} / ${limit}`,
+  reportedAgo: (age: string) => `更新于 ${age}`,
 }
 
 export const errors = {
@@ -95,6 +100,8 @@ export const validate = {
   portListItem: (item: string) => `「${item}」不是一个端口。`,
   portListEmpty: '至少填一个端口，或者改选"不限制"。',
   positiveInt: '请填一个大于 0 的整数，或者留空表示不限。',
+  byteSize: '请填一个大于 0 的数，或者留空表示不限。',
+  dayOfMonth: (max: number) => `请填 1 到 ${max} 之间的一个数。`,
   required: '这一项要填。',
   pickNode: '请选一个节点。',
 }
@@ -110,6 +117,7 @@ export const time = {
   minutes: (n: number) => `${n} 分钟`,
   hours: (n: number) => `${n} 小时`,
   days: (n: number) => `${n} 天`,
+  monthDay: (month: number, day: number) => `${month} 月 ${day} 日`,
 }
 
 export const tags = {

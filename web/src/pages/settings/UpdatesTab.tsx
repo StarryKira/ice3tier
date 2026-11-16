@@ -4,7 +4,7 @@ import { useId, useMemo, useState } from 'react'
 
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
-import { type ForcedUpdates, type Network, type Node, type PausedVersion, type UpdateOverview } from '@/api/types'
+import { type ForcedUpdates, type Network, type Node, type UpdateOverview } from '@/api/types'
 import { useConfirm } from '@/components/confirm'
 import { ForceAllDialog, ForceUpdateDialog } from '@/components/force-update'
 import { NodeLink } from '@/components/node'
@@ -24,7 +24,7 @@ import { Switch } from '@/components/ui/switch'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
 import { formatBytes } from '@/lib/format'
-import { forceAbility, isUpdating } from '@/lib/nodeUpdate'
+import { forceAbility, groupPaused, isUpdating, type PausedGroup } from '@/lib/nodeUpdate'
 import { LIVE_INTERVAL, WAITING_INTERVAL } from '@/lib/polling'
 import { type SourceKind, sourceKind, validateSource } from '@/lib/releaseSource'
 import { formatRelative } from '@/lib/time'
@@ -41,28 +41,44 @@ function busy(overview: UpdateOverview | undefined): boolean {
   )
 }
 
-function PausedBanner({ paused }: { paused: PausedVersion }) {
+/**
+ * 一个被暂停的版本：暂停按网络算，每个网络一条失败；"继续"一次继续全部网络里的这个版本。
+ * 原因折着，点开是每个网络里哪个节点、什么时候、报了什么。
+ */
+function PausedBanner({ group, networks }: { group: PausedGroup; networks: readonly Network[] }) {
   const confirm = useConfirm()
   const [open, setOpen] = useState(false)
   const reasonId = useId()
+  const { version, entries } = group
+  const networkName = (id: number | null) =>
+    id === null ? '—' : (networks.find((network) => network.id === id)?.name ?? u.paused.networkGone(id))
+  const names = [...new Set(entries.map((entry) => networkName(entry.network)))].join('、')
+  const [first] = entries
   const resume = useAction('all', {
-    mutationFn: () => api.resumeUpdate({ version: paused.version }),
-    success: u.paused.resumed(paused.version),
+    mutationFn: () => api.resumeUpdate({ version }),
+    success: u.paused.resumed(version),
   })
   const onResume = async () => {
     const ok = await confirm({
-      title: u.paused.resumeTitle(paused.version),
-      body: u.paused.resumeBody(paused.version, paused.node?.name ?? null),
+      title: u.paused.resumeTitle(version),
+      body:
+        entries.length === 1
+          ? u.paused.resumeBody(version, first?.node?.name ?? null)
+          : u.paused.resumeBodyMany(version, names),
       confirmLabel: u.paused.resumeConfirm,
     })
     if (ok) resume.mutate()
   }
+  const title =
+    entries.length > 1
+      ? u.paused.titleMany(version, entries.length)
+      : first?.node == null
+        ? u.paused.titleNodeGone(version)
+        : u.paused.title(version, first.node.name)
   return (
     <Notice
       tone="danger"
-      title={
-        paused.node === null ? u.paused.titleNodeGone(paused.version) : u.paused.title(paused.version, paused.node.name)
-      }
+      title={title}
       action={
         <div className="flex items-center gap-2">
           <Button size="sm" aria-expanded={open} aria-controls={reasonId} onClick={() => setOpen(!open)}>
@@ -74,12 +90,21 @@ function PausedBanner({ paused }: { paused: PausedVersion }) {
         </div>
       }
     >
-      <div id={reasonId} hidden={!open} data-testid={`paused-reason-${paused.version}`}>
-        <p>
-          {u.paused.reported} · <RelativeTime at={paused.at} />
-        </p>
-        <p className="mt-0.5 font-mono text-[13px] break-all text-foreground">{paused.reason}</p>
-      </div>
+      <p data-testid={`paused-scope-${version}`}>{u.paused.scope(names)}</p>
+      <ul id={reasonId} hidden={!open} data-testid={`paused-reason-${version}`} className="mt-1.5 space-y-2">
+        {entries.map((entry) => (
+          <li key={`${entry.network ?? 0}:${entry.at}`}>
+            <p>
+              {entry.node === null
+                ? u.paused.entryNodeGone(networkName(entry.network))
+                : u.paused.entry(networkName(entry.network), entry.node.name)}
+              {' · '}
+              {u.paused.reported} · <RelativeTime at={entry.at} />
+            </p>
+            <p className="mt-0.5 font-mono text-[13px] break-all text-foreground">{entry.reason}</p>
+          </li>
+        ))}
+      </ul>
     </Notice>
   )
 }
@@ -510,6 +535,8 @@ export function UpdatesTab() {
   })
   const [forcingAll, setForcingAll] = useState(false)
   const [result, setResult] = useState<ForcedUpdates | null>(null)
+  // 暂停按网络算，横幅里写网络的名字。
+  const networks = useQuery(q.networks())
 
   if (overview.isError && overview.data === undefined) {
     return (
@@ -529,8 +556,8 @@ export function UpdatesTab() {
 
   return (
     <div className="space-y-5" data-testid="updates-tab">
-      {data.paused.map((paused) => (
-        <PausedBanner key={paused.version} paused={paused} />
+      {groupPaused(data.paused).map((group) => (
+        <PausedBanner key={group.version} group={group} networks={networks.data ?? []} />
       ))}
       <ReleaseCard overview={data} />
       <AutoUpdateCard overview={data} />

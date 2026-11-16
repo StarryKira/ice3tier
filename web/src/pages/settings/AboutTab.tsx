@@ -14,7 +14,7 @@ import { WEB_VERSION } from '@/lib/version'
 const s = t.settings
 const v = t.version
 
-/** 关于：两边的版本、controller 的身份、指标的地址、备份的做法。 */
+/** 关于：两边的版本、controller 的身份、指标的地址、数据目录和备份的做法。 */
 export function AboutTab() {
   const status = useQuery(q.status())
   return (
@@ -70,6 +70,16 @@ export function AboutTab() {
             <InfoRow label={v.metrics}>
               <CopyText value={`${window.location.origin}${METRICS_PATH}`} />
               <span className="mt-0.5 block text-[13px] text-muted-foreground">{v.metricsHint}</span>
+            </InfoRow>
+            <InfoRow label={s.about.dataDir}>
+              {status.data.data_dir === null ? (
+                <span className="text-muted-foreground">{s.about.dataDirNone}</span>
+              ) : (
+                <>
+                  <CopyText value={status.data.data_dir} wrap />
+                  <span className="mt-0.5 block text-[13px] text-muted-foreground">{s.about.dataDirHint}</span>
+                </>
+              )}
             </InfoRow>
             <InfoRow label={s.about.backup}>{s.about.backupBody}</InfoRow>
             <InfoRow label={s.about.offline}>{s.about.offlineBody}</InfoRow>

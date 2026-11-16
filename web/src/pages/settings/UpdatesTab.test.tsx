@@ -203,3 +203,45 @@ describe('设置里的「节点更新」', () => {
     expect(await screen.findByRole('button', { name: u.nodes.updateAll })).toBeDisabled()
   })
 })
+
+describe('暂停按网络算', () => {
+  it('同一个版本在两个网络里被暂停：一条横幅，写明是哪两个网络；继续一次继续全部', async () => {
+    const user = userEvent.setup()
+    const twice: UpdateOverview = {
+      ...OVERVIEW,
+      paused: [
+        ...OVERVIEW.paused,
+        {
+          version: '0.3.0',
+          node: { id: 7, name: 'pi', virtual_ip: '10.67.0.7' },
+          network: 2,
+          reason: '缺一个库',
+          at: 1_794_000_300,
+        },
+      ],
+    }
+    const api = setup({
+      'GET /update': twice,
+      'GET /networks': [
+        { ...NETWORK, nodes: 3 },
+        { ...NETWORK, id: 2, name: 'lab', cidr: '10.67.0.0/16', nodes: 1 },
+      ],
+      'POST /update/resume': { ...OVERVIEW, paused: [] },
+    })
+    renderWithApp(<UpdatesTab />)
+    expect(await screen.findByText(u.paused.titleMany('0.3.0', 2))).toBeVisible()
+    expect(await screen.findByTestId('paused-scope-0.3.0')).toHaveTextContent(u.paused.scope('home、lab'))
+    await user.click(screen.getByRole('button', { name: u.paused.reason }))
+    const reasons = screen.getByTestId('paused-reason-0.3.0')
+    expect(reasons).toHaveTextContent(u.paused.entry('home', 'laptop'))
+    expect(reasons).toHaveTextContent(u.paused.entry('lab', 'pi'))
+    expect(reasons).toHaveTextContent('缺一个库')
+
+    await user.click(screen.getByRole('button', { name: u.paused.resume }))
+    const question = await screen.findByRole('alertdialog', { name: u.paused.resumeTitle('0.3.0') })
+    expect(question).toHaveTextContent(u.paused.resumeBodyMany('0.3.0', 'home、lab'))
+    await user.click(within(question).getByRole('button', { name: u.paused.resumeConfirm }))
+    await waitFor(() => expect(api.callsTo('POST /update/resume')).toHaveLength(1))
+    expect(api.callsTo('POST /update/resume')[0]?.body).toEqual({ version: '0.3.0' })
+  })
+})

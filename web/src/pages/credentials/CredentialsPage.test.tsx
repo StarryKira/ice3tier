@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 
 import { type CreatedCredential, type Credential, type Listener } from '@/api/types'
 import { t } from '@/i18n'
+import { makeCredential, makeListener } from '@/test/fixtures'
 import { apiFailure, fakeApi, type FakeApi, NETWORK, renderWithApp, type Routes } from '@/test/harness'
 
 import { CredentialsPage } from './CredentialsPage'
@@ -11,19 +12,13 @@ import { CredentialsPage } from './CredentialsPage'
 const c = t.credentials
 const SECRET = 'i3tc-c2VjcmV0LXNob3duLW9ubHktb25jZS1hYmNkZWZnaGlqa2xtbm8'
 
-const PHONE: Credential = { id: 1, name: 'phone', max_concurrent: 8, created_at: 1_794_000_000 }
+const PHONE: Credential = makeCredential(1, 'phone', { max_concurrent: 8 })
 
-const LAN_LISTENER: Listener = {
-  id: 3,
-  node: 1,
-  name: 'lan',
+const LAN_LISTENER: Listener = makeListener(3, 1, 'lan', {
   bind: '192.168.1.5:1080',
-  protocol: 'socks5',
   allow_from: ['192.168.1.0/24'],
   require_credential: true,
-  default_action: null,
-  fixed_exit: null,
-}
+})
 
 /** 一个会记住签发过哪些凭据的 controller。列表接口和真的一样，从不返回令牌。 */
 function controller(existing: Credential[] = [], extra: Routes = {}): FakeApi {
@@ -33,13 +28,12 @@ function controller(existing: Credential[] = [], extra: Routes = {}): FakeApi {
     'GET /networks/1/listeners': [],
     'GET /networks/1/nodes': [],
     'POST /networks/1/credentials': (call) => {
-      const body = call.body as { name: string; max_concurrent?: number }
-      const credential: Credential = {
-        id: stored.length + 1,
-        name: body.name,
+      const body = call.body as { name: string; max_concurrent?: number; max_bytes?: number }
+      const credential: Credential = makeCredential(stored.length + 1, body.name, {
         max_concurrent: body.max_concurrent ?? null,
+        max_bytes: body.max_bytes ?? null,
         created_at: 1_794_000_100,
-      }
+      })
       stored.push(credential)
       return { ...credential, token: SECRET } satisfies CreatedCredential
     },
@@ -201,5 +195,138 @@ describe('凭据列表', () => {
     await user.click(within(question).getByRole('button', { name: c.revokeConfirm }))
     await waitFor(() => expect(api.callsTo('DELETE /networks/1/credentials/1')).toHaveLength(1))
     expect(await screen.findByText(c.revoked('phone'))).toBeVisible()
+  })
+})
+
+const GB = 1024 ** 3
+
+describe('用量、状态和上限', () => {
+  const USED = makeCredential(1, 'phone', {
+    prefix: 'I7bRtu',
+    max_concurrent: 8,
+    max_bytes: 10 * GB,
+    usage: { bytes: 2 * GB, connections: 3, last_used_at: 1_794_000_900 },
+  })
+  const EXHAUSTED = makeCredential(2, 'tablet', {
+    prefix: 'Qx81Za',
+    max_bytes: GB,
+    state: 'exhausted',
+    usage: { bytes: GB, connections: 0, last_used_at: 1_794_000_900 },
+  })
+  const REVOKED = makeCredential(3, 'old', {
+    prefix: 'Zz00aa',
+    state: 'revoked',
+    revoked_at: 1_794_000_800,
+    usage: { bytes: 5 * GB, connections: 0, last_used_at: 1_794_000_700 },
+  })
+
+  it('每一行：前缀、状态、并发、流量的进度条、最后使用', async () => {
+    controller([USED, EXHAUSTED, REVOKED])
+    renderWithApp(<CredentialsPage />, { network: NETWORK })
+    const row = await screen.findByTestId('credential-row-phone')
+    expect(within(row).getByText('I7bRtu••••')).toBeVisible()
+    expect(within(row).getByText(c.state.active)).toBeVisible()
+    expect(within(row).getByText('3 / 8')).toBeVisible()
+    expect(within(row).getByRole('meter', { name: `phone ${c.colTraffic}` })).toHaveAttribute('aria-valuenow', '20')
+    expect(within(row).getByText('2.0 GB / 10.0 GB')).toBeVisible()
+
+    // 用完了的：原因和怎么恢复写在下面一行。
+    expect(within(screen.getByTestId('credential-row-tablet')).getByText(c.state.exhausted)).toBeVisible()
+    expect(screen.getByText(c.state.exhaustedDetail)).toBeVisible()
+    // 吊销了的还在列表里，看得到用过多少。
+    const revoked = screen.getByTestId('credential-row-old')
+    expect(within(revoked).getByText(c.state.revoked)).toBeVisible()
+    expect(within(revoked).getByText('5.0 GB')).toBeVisible()
+  })
+
+  it('改上限：只交改过的那一项；清空就是不限', async () => {
+    const user = userEvent.setup()
+    const api = controller([USED], { 'PATCH /networks/1/credentials/1': () => USED })
+    renderWithApp(<CredentialsPage />, { network: NETWORK })
+    await user.click(await screen.findByRole('button', { name: t.common.actionsFor('phone') }))
+    await user.click(await screen.findByRole('menuitem', { name: c.menuEdit }))
+    const dialog = await screen.findByRole('dialog', { name: c.editTitle('phone') })
+    expect(within(dialog).getByText(c.editUsed('2.0 GB'))).toBeVisible()
+
+    const bytes = within(dialog).getByRole('textbox', { name: new RegExp(`^${c.maxBytesLabel}`) })
+    expect(bytes).toHaveValue('10')
+    await user.clear(bytes)
+    await user.type(bytes, '1')
+    // 比已经用掉的还少：保存之前就说它会马上停用。
+    expect(within(dialog).getByText(c.editWillExhaust)).toBeVisible()
+    await user.clear(bytes)
+    await user.type(bytes, '20')
+    await user.click(within(dialog).getByRole('button', { name: c.editSubmit }))
+    await waitFor(() => expect(api.callsTo('PATCH /networks/1/credentials/1')).toHaveLength(1))
+    expect(api.callsTo('PATCH /networks/1/credentials/1')[0]?.body).toEqual({ max_bytes: 20 * GB })
+
+    await user.click(await screen.findByRole('button', { name: t.common.actionsFor('phone') }))
+    await user.click(await screen.findByRole('menuitem', { name: c.menuEdit }))
+    const again = await screen.findByRole('dialog', { name: c.editTitle('phone') })
+    await user.clear(within(again).getByRole('textbox', { name: new RegExp(`^${c.maxLabel}`) }))
+    await user.click(within(again).getByRole('button', { name: c.editSubmit }))
+    await waitFor(() => expect(api.callsTo('PATCH /networks/1/credentials/1')).toHaveLength(2))
+    expect(api.callsTo('PATCH /networks/1/credentials/1')[1]?.body).toEqual({ max_concurrent: null })
+  })
+
+  it('清零用量要确认；用完了的说清零之后恢复', async () => {
+    const user = userEvent.setup()
+    const api = controller([EXHAUSTED], { 'PATCH /networks/1/credentials/2': () => EXHAUSTED })
+    renderWithApp(<CredentialsPage />, { network: NETWORK })
+    await user.click(await screen.findByRole('button', { name: t.common.actionsFor('tablet') }))
+    await user.click(await screen.findByRole('menuitem', { name: c.menuReset }))
+    const question = await screen.findByRole('alertdialog', { name: c.resetTitle('tablet') })
+    expect(within(question).getByText(c.resetRestores)).toBeVisible()
+    await user.click(within(question).getByRole('button', { name: c.resetConfirm }))
+    await waitFor(() => expect(api.callsTo('PATCH /networks/1/credentials/2')).toHaveLength(1))
+    expect(api.callsTo('PATCH /networks/1/credentials/2')[0]?.body).toEqual({ reset_usage: true })
+  })
+
+  it('删除分两步：有效的先吊销（危险确认），吊销了的才能彻底删掉', async () => {
+    const user = userEvent.setup()
+    const api = controller([USED, REVOKED], {
+      'DELETE /networks/1/credentials/1': undefined,
+      'DELETE /networks/1/credentials/3': undefined,
+    })
+    renderWithApp(<CredentialsPage />, { network: NETWORK })
+
+    await user.click(await screen.findByRole('button', { name: t.common.actionsFor('phone') }))
+    expect(screen.queryByRole('menuitem', { name: c.menuRemove })).not.toBeInTheDocument()
+    await user.click(await screen.findByRole('menuitem', { name: c.menuRevoke }))
+    const revoke = await screen.findByRole('alertdialog', { name: c.revokeTitle('phone') })
+    // 危险确认：焦点在"取消"上，回车不会误删。
+    expect(within(revoke).getByRole('button', { name: t.common.cancel })).toHaveFocus()
+    await user.click(within(revoke).getByRole('button', { name: c.revokeConfirm }))
+    await waitFor(() => expect(api.callsTo('DELETE /networks/1/credentials/1')).toHaveLength(1))
+
+    await user.click(await screen.findByRole('button', { name: t.common.actionsFor('old') }))
+    expect(screen.queryByRole('menuitem', { name: c.menuRevoke })).not.toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: new RegExp(c.menuEdit) })).toHaveAttribute('aria-disabled', 'true')
+    await user.click(await screen.findByRole('menuitem', { name: c.menuRemove }))
+    const remove = await screen.findByRole('alertdialog', { name: c.removeTitle('old') })
+    expect(within(remove).getByText(c.removeBody('old'))).toBeVisible()
+    await user.click(within(remove).getByRole('button', { name: c.removeConfirm }))
+    await waitFor(() => expect(api.callsTo('DELETE /networks/1/credentials/3')).toHaveLength(1))
+    expect(await screen.findByText(c.removed('old'))).toBeVisible()
+  })
+
+  it('签发时可以带流量上限', async () => {
+    const user = userEvent.setup()
+    const api = controller([USED])
+    renderWithApp(<CredentialsPage />, { network: NETWORK })
+    await user.click(await screen.findByRole('button', { name: c.issue }))
+    const dialog = await screen.findByRole('dialog', { name: c.createTitle })
+    await user.type(within(dialog).getByLabelText(c.nameLabel), 'guest')
+    await user.type(within(dialog).getByRole('textbox', { name: new RegExp(`^${c.maxBytesLabel}`) }), '512')
+    await user.selectOptions(within(dialog).getByRole('combobox', { name: c.unitLabel }), 'MB')
+    await user.click(within(dialog).getByRole('button', { name: c.submit }))
+    await screen.findByTestId('secret-dialog')
+    expect(api.callsTo('POST /networks/1/credentials')[0]?.body).toEqual({ name: 'guest', max_bytes: 512 * 1024 ** 2 })
+  })
+
+  it('从操作记录点过来、凭据已经彻底删掉了：说一句', async () => {
+    controller([USED])
+    renderWithApp(<CredentialsPage />, { network: NETWORK, route: '/n/1/credentials?focus=9' })
+    expect(await screen.findByText(c.focusMissing(9))).toBeVisible()
   })
 })

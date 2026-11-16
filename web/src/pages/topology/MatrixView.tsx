@@ -174,6 +174,12 @@ export function MatrixView({ matrix, pair, onPick }: MatrixViewProps) {
                       >
                         <span aria-hidden>{CLASS_SYMBOL[cls]}</span>
                         {entry.rtt_ms !== null ? <span className="font-normal">{entry.rtt_ms}</span> : null}
+                        {/* 到 relay 退回 TCP 是值得知道的事：格子里写出来，别的细节在悬停文字里。 */}
+                        {entry.route.via === 'relay' && entry.relay_leg === 'tcp' ? (
+                          <span aria-hidden className="text-[10px] font-semibold text-warn">
+                            {t.routes.legTransport.tcp}
+                          </span>
+                        ) : null}
                       </button>
                     </Tooltip>
                   </td>

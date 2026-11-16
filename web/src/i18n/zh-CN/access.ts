@@ -91,6 +91,22 @@ export const access = {
     lastBody: (tag: string, rules: string) =>
       `之后没有节点带 ${tag} 了，而规则 ${rules} 还在用它。这些规则会不起作用，靠它们获得的访问随之失效。`,
     lastConfirm: '摘掉标签',
+    rename: '改名…',
+    renameFor: (tag: string) => `给标签 ${tag} 改名`,
+    renameTitle: (tag: string) => `给标签 ${tag} 改名`,
+    renameLead: '整个网络里一起改：节点上的、访问规则里的、还没用掉的注册令牌预设的。',
+    renameLabel: '新名字',
+    renameUses: (nodes: number, rules: number) => `现在有 ${nodes} 个节点带着它，${rules} 条规则用到它。`,
+    renameSame: '和现在的一样。',
+    renameAll: 'all 是内置标签，不能改成它。',
+    renameMerge: (to: string, nodes: number) =>
+      `${to} 已经有 ${nodes} 个节点在用：两组节点会合成一组，访问关系按合并之后的算，随即下发。合起来之后拆不回去。`,
+    renameMergeRules: (to: string) =>
+      `规则里已经用到 ${to}：改名之后这些规则也管到原来带这个标签的节点，访问关系按合并之后的算。`,
+    renameNoEffect: '新名字原来没有人用：谁能访问谁不变。',
+    renameSubmit: '改名',
+    renamed: (from: string, to: string, nodes: number, rules: number, tokens: number) =>
+      `标签 ${from} 已改名为 ${to}：${nodes} 个节点、${rules} 条规则、${tokens} 个令牌跟着改了`,
     empty: '还没有标签。在节点页给节点打上标签，就可以在规则里用它。',
   },
 

@@ -6,7 +6,14 @@ import { Link } from 'react-router'
 import { fieldError, formError, formFailure } from '@/api/formErrors'
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
-import { type Forward, type ForwardInput, type ForwardProtocol, type Network, type NodeId } from '@/api/types'
+import {
+  type Forward,
+  type ForwardInput,
+  type ForwardProtocol,
+  type Network,
+  type NodeId,
+  type ServiceClass,
+} from '@/api/types'
 import { DeclareHowTo } from '@/components/declare'
 import { FormDialog } from '@/components/form-dialog'
 import { NodeSelect } from '@/components/node'
@@ -17,9 +24,11 @@ import { Input, Textarea } from '@/components/ui/input'
 import { RadioCards } from '@/components/ui/radio-cards'
 import { Segmented } from '@/components/ui/segmented'
 import { Switch } from '@/components/ui/switch'
+import { ClassSelect } from '@/components/usage'
 import { t } from '@/i18n'
 import { formatSocketAddr, isLoopbackHost, parseIpv4, parseSocketAddr } from '@/lib/cidr'
 import { WAITING_INTERVAL } from '@/lib/polling'
+import { classLabel } from '@/lib/serviceClass'
 import { normalizeCidrList, splitList, validateCidrList, validatePort, validateTitle } from '@/lib/validate'
 import { networkPath } from '@/pages/networks/context'
 
@@ -68,7 +77,8 @@ export function ForwardDialog({ network, forward, scope: presetScope, open, onCl
     bindParsed !== null && initialScope() === 'open' ? bindParsed.host : '0.0.0.0',
   )
   const [allowFrom, setAllowFrom] = useState(forward?.allow_from.join('\n') ?? '')
-  const [port, setPort] = useState(bindParsed?.port.toString() ?? '')
+  // 端口写 0 的转发由监听节点挑端口；编辑时输入框留空，表示还是让它挑。
+  const [port, setPort] = useState(bindParsed === null || bindParsed.port === 0 ? '' : String(bindParsed.port))
   const [protocol, setProtocol] = useState<ForwardProtocol>(forward?.protocol ?? 'tcp')
   const [targetKind, setTargetKind] = useState<'self' | 'lan'>(
     targetParsed !== null && !isLoopbackHost(targetParsed.host) ? 'lan' : 'self',
@@ -79,6 +89,7 @@ export function ForwardDialog({ network, forward, scope: presetScope, open, onCl
   const [targetPort, setTargetPort] = useState(targetParsed?.port.toString() ?? '')
   const [name, setName] = useState(forward?.name ?? '')
   const [enabled, setEnabled] = useState(forward?.enabled ?? true)
+  const [serviceClass, setServiceClass] = useState<ServiceClass | null>(forward?.class ?? null)
   const [touched, setTouched] = useState(false)
   const [dirty, setDirty] = useState(false)
 
@@ -101,7 +112,8 @@ export function ForwardDialog({ network, forward, scope: presetScope, open, onCl
     openAddress:
       scope === 'open' && parseIpv4(bindHost) === null && !bindHost.includes(':') ? t.validate.ipFormat : null,
     allowFrom: scope === 'open' ? validateCidrList(splitList(allowFrom)) : null,
-    port: validatePort(port),
+    // 留空让节点自己挑；监听在虚拟 IP 上的不行（controller 不收）。
+    port: port.trim() === '' ? (scope === 'mesh' ? d.portMeshRequired : null) : validatePort(port),
     targetIp:
       targetKind === 'lan'
         ? parseIpv4(targetHost) === null
@@ -119,12 +131,13 @@ export function ForwardDialog({ network, forward, scope: presetScope, open, onCl
   const save = useAction(network.id, {
     mutationFn: (input: ForwardInput) =>
       forward === null ? api.createForward(network.id, input) : api.replaceForward(network.id, forward.id, input),
-    success: (saved) =>
-      forward !== null
-        ? d.saved
-        : saved.enabled
-          ? d.created(all.find((node) => node.id === saved.listen_node)?.name ?? '', saved.bind)
-          : d.createdDisabled,
+    success: (saved) => {
+      const listenName = all.find((node) => node.id === saved.listen_node)?.name ?? ''
+      if (forward !== null) return d.saved
+      if (!saved.enabled) return d.createdDisabled
+      // 端口是节点挑的：这时还不知道是哪个，列表里那一行等它报上来再写出地址。
+      return parseSocketAddr(saved.bind)?.port === 0 ? d.createdPicked(listenName) : d.created(listenName, saved.bind)
+    },
     toastError: false,
   })
   const failure = formFailure(save.error, { conflict: 'port', not_declared: 'targetNode' } as const)
@@ -150,6 +163,7 @@ export function ForwardDialog({ network, forward, scope: presetScope, open, onCl
         target_addr: targetAddr,
         allow_from: scope === 'open' ? normalizeCidrList(splitList(allowFrom)) : [],
         enabled: enabled && targetDeclared,
+        class: serviceClass,
       },
       { onSuccess: onClose },
     )
@@ -225,15 +239,19 @@ export function ForwardDialog({ network, forward, scope: presetScope, open, onCl
               </Field>
             </>
           ) : null}
-          <div className="grid grid-cols-[8rem_minmax(0,1fr)] gap-4">
-            <Field label={d.port} hint={d.portHint} error={shown(problems.port) ?? fieldError(failure, 'port')}>
+          <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-4">
+            <Field
+              label={d.port}
+              hint={scope === 'mesh' ? d.portMeshHint : d.portHint}
+              error={shown(problems.port) ?? fieldError(failure, 'port')}
+            >
               {(props) => (
                 <Input
                   {...props}
                   name="listen-port"
                   inputMode="numeric"
-                  className="font-mono"
-                  placeholder="8080"
+                  className="w-32 font-mono"
+                  placeholder={scope === 'mesh' ? '8080' : d.portPlaceholder}
                   value={port}
                   onChange={(event) => change(setPort)(event.target.value)}
                 />
@@ -371,6 +389,16 @@ export function ForwardDialog({ network, forward, scope: presetScope, open, onCl
           {forward === null ? d.enabled : d.enabledEdit}
         </label>
       </div>
+      <Field label={d.classLabel} hint={d.classHint}>
+        {(props) => (
+          <ClassSelect
+            {...props}
+            value={serviceClass}
+            inheritLabel={t.serviceClass.inheritNetwork(classLabel(network.class ?? 'auto'))}
+            onChange={change(setServiceClass)}
+          />
+        )}
+      </Field>
     </FormDialog>
   )
 }

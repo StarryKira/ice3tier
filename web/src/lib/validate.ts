@@ -1,5 +1,7 @@
 import { t } from '@/i18n'
 
+import { type ByteUnit, unitBytes } from './format'
+
 import {
   cidrContainsAddress,
   isNetworkOrBroadcast,
@@ -130,4 +132,26 @@ export function parseOptionalPositiveInt(raw: string): { value: number | null; e
   if (text === '') return { value: null, error: null }
   if (!/^\d{1,9}$/.test(text) || Number(text) < 1) return { value: null, error: t.validate.positiveInt }
   return { value: Number(text), error: null }
+}
+
+/**
+ * 可以留空的流量上限：一个正数（可以带小数）乘上单位。留空返回 `null`。
+ * 结果按字节取整，至少 1 字节，因为 controller 不收 0。
+ */
+export function parseOptionalBytes(raw: string, unit: ByteUnit): { value: number | null; error: string | null } {
+  const text = raw.trim()
+  if (text === '') return { value: null, error: null }
+  if (!/^\d{1,9}(\.\d{1,3})?$/.test(text) || Number(text) <= 0) return { value: null, error: t.validate.byteSize }
+  return { value: Math.max(1, Math.round(Number(text) * unitBytes(unit))), error: null }
+}
+
+/** 出口账期从每个月的哪一天开始：1 到 28，每个月都有这一天。 */
+export const MAX_QUOTA_RESET_DAY = 28
+
+export function parseResetDay(raw: string): { value: number; error: string | null } {
+  const text = raw.trim()
+  const day = Number(text)
+  if (!/^\d{1,2}$/.test(text) || day < 1 || day > MAX_QUOTA_RESET_DAY)
+    return { value: 1, error: t.validate.dayOfMonth(MAX_QUOTA_RESET_DAY) }
+  return { value: day, error: null }
 }

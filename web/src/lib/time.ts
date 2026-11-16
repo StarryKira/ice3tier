@@ -74,6 +74,23 @@ export function formatAge(secs: number): string {
   return t.time.daysAgo(Math.floor(secs / DAY))
 }
 
+/** 一段时长（秒），写成"不到 1 分钟""3 分钟""2 小时""5 天"。给"这条路走了多久"这类用。 */
+export function formatDuration(secs: number): string {
+  if (secs < MINUTE) return t.time.lessThanMinute
+  if (secs < HOUR) return t.time.minutes(Math.floor(secs / MINUTE))
+  if (secs < DAY) return t.time.hours(Math.floor(secs / HOUR))
+  return t.time.days(Math.floor(secs / DAY))
+}
+
+/**
+ * 按 UTC 写的"12 月 1 日"。出口的账期从每个月某一天的 UTC 0 点算起，用 UTC 的日期写，
+ * 和设置里填的那一天对得上；不然在 UTC 以西的时区会显示成前一天。
+ */
+export function formatUtcDay(at: Timestamp): string {
+  const date = new Date(at * 1000)
+  return t.time.monthDay(date.getUTCMonth() + 1, date.getUTCDate())
+}
+
 export function nowSeconds(): Timestamp {
   return Math.floor(Date.now() / 1000)
 }

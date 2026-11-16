@@ -25,6 +25,7 @@ const STATUS: Status = {
   nodes: 0,
   online: 0,
   newer_version: null,
+  data_dir: null,
 }
 
 /** 登录之后的页面：写出现在的地址，并且带着令牌去取一次数据。 */

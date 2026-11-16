@@ -2,7 +2,7 @@ import { access, rules } from './access'
 import { addNode } from './addNode'
 import { common, confirm, errors, select, tags, time, validate } from './common'
 import { capability, declare } from './declare'
-import { credentials, exits, forwards, listeners, pairs, tokens } from './entry'
+import { credentials, exits, forwards, listen, listeners, pairs, serviceClass, tokens } from './entry'
 import { networks } from './networks'
 import { nodes } from './nodes'
 import { overview } from './overview'
@@ -37,6 +37,8 @@ export const zhCN = {
   credentials,
   listeners,
   forwards,
+  listen,
+  serviceClass,
   pairs,
   tokens,
   settings,

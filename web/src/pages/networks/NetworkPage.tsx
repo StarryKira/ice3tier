@@ -6,7 +6,7 @@ import { Link, useNavigate } from 'react-router'
 import { fieldError, formError, formFailure } from '@/api/formErrors'
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
-import { type Network, type Reach, type RoutingMode, type UpdateNetwork } from '@/api/types'
+import { type Network, type Reach, type RoutingMode, type ServiceClass, type UpdateNetwork } from '@/api/types'
 import { useConfirm } from '@/components/confirm'
 import { CopyText } from '@/components/copy'
 import { FormDialog } from '@/components/form-dialog'
@@ -19,6 +19,7 @@ import { Card, CardBody, CardHeader } from '@/components/ui/card'
 import { Field, FormError } from '@/components/ui/field'
 import { Input, NativeSelect } from '@/components/ui/input'
 import { RadioCards } from '@/components/ui/radio-cards'
+import { ClassSelect } from '@/components/usage'
 import { t } from '@/i18n'
 import { cidrContains, formatCidr, parseCidr } from '@/lib/cidr'
 import { MAX_RELAY_HOPS } from '@/lib/product'
@@ -92,6 +93,8 @@ function SettingsForm({ network }: { network: Network }) {
   const [routing, setRouting] = useState<RoutingMode>(network.routing)
   const [hops, setHops] = useState(network.max_relay_hops)
   const [reach, setReach] = useState<Reach>(network.reach)
+  // `null` 和 `auto` 是一回事；表单里一律写成 `auto`。
+  const [serviceClass, setServiceClass] = useState<ServiceClass>(network.class ?? 'auto')
   const routingLabel = useId()
   const reachLabel = useId()
 
@@ -101,12 +104,17 @@ function SettingsForm({ network }: { network: Network }) {
     toastError: false,
   })
 
-  const dirty = routing !== network.routing || hops !== network.max_relay_hops || reach !== network.reach
+  const dirty =
+    routing !== network.routing ||
+    hops !== network.max_relay_hops ||
+    reach !== network.reach ||
+    serviceClass !== (network.class ?? 'auto')
   const overriding = (nodes.data ?? []).filter((node) => node.routing !== null).length
   const reset = () => {
     setRouting(network.routing)
     setHops(network.max_relay_hops)
     setReach(network.reach)
+    setServiceClass(network.class ?? 'auto')
     save.reset()
   }
 
@@ -115,7 +123,7 @@ function SettingsForm({ network }: { network: Network }) {
       noValidate
       onSubmit={(event) => {
         event.preventDefault()
-        if (dirty) save.mutate({ routing, max_relay_hops: hops, reach })
+        if (dirty) save.mutate({ routing, max_relay_hops: hops, reach, class: serviceClass })
       }}
     >
       <CardBody className="space-y-6">
@@ -170,6 +178,16 @@ function SettingsForm({ network }: { network: Network }) {
             ]}
           />
         </div>
+        <Field label={n.classLabel} hint={n.classHint}>
+          {(props) => (
+            <ClassSelect
+              {...props}
+              value={serviceClass}
+              inheritLabel={null}
+              onChange={(value) => setServiceClass(value ?? 'auto')}
+            />
+          )}
+        </Field>
         <FormError message={save.isError ? formError(formFailure(save.error, {})) : null} />
       </CardBody>
       <footer className="flex items-center justify-end gap-2 border-t bg-muted/40 px-5 py-3">
@@ -319,7 +337,7 @@ export function NetworkPage() {
           <CardHeader title={n.routing} className="border-b-0 pb-0" />
           {/* key：切换网络或者保存之后，表单从最新的设置重新开始。 */}
           <SettingsForm
-            key={`${network.id}:${network.routing}:${network.max_relay_hops}:${network.reach}`}
+            key={`${network.id}:${network.routing}:${network.max_relay_hops}:${network.reach}:${network.class ?? 'auto'}`}
             network={network}
           />
         </Card>

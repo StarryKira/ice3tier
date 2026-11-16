@@ -111,7 +111,10 @@ function InfoCard({ network, node, onEditIp }: TabProps & { onEditIp: () => void
                 {d.onlineNow}
               </span>
             ) : node.last_seen_at === null ? (
-              <span className="text-muted-foreground">{t.nodes.never}</span>
+              <span className="text-muted-foreground">
+                {t.nodes.never}
+                <span className="mt-0.5 block text-[13px]">{t.nodes.neverTip}</span>
+              </span>
             ) : (
               <RelativeTime at={node.last_seen_at} />
             )}

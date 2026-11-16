@@ -1,12 +1,14 @@
 import { useQuery } from '@tanstack/react-query'
-import { Plus, Ticket, Undo2 } from 'lucide-react'
+import { Plus, Ticket, Trash2, Undo2 } from 'lucide-react'
 import { useState } from 'react'
+import { useSearchParams } from 'react-router'
 
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
 import { type EnrollTokenInfo } from '@/api/types'
 import { useConfirm } from '@/components/confirm'
-import { nodeName } from '@/lib/nodes'
+import { NodeLink } from '@/components/node'
+import { Notice } from '@/components/notice'
 import { Page, PageHeader } from '@/components/page'
 import { EmptyState, ErrorState, SkeletonRows } from '@/components/states'
 import { RelativeTime, StatusText } from '@/components/status'
@@ -14,46 +16,72 @@ import { Table, Td, Th, Tr } from '@/components/table'
 import { TagChip } from '@/components/tags'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
+import { Segmented } from '@/components/ui/segmented'
+import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
-import { LIVE_INTERVAL } from '@/lib/polling'
-import { formatRemaining } from '@/lib/time'
+import { nodeName } from '@/lib/nodes'
+import { FOCUSED_ROW, useFocusRow } from '@/lib/useFocusRow'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { useNow } from '@/lib/useNow'
+import { cn } from '@/lib/utils'
 import { useNetwork } from '@/pages/networks/context'
 import { AddNodeDialog } from '@/pages/nodes/AddNodeDialog'
 
+import { sortTokens, tokenLabel, tokenView } from './tokenState'
+
 const k = t.tokens
+
+type Show = 'pending' | 'all'
 
 /**
  * 注册令牌。放在侧栏底部的管理区：令牌是为了加节点而存在的配置，不是网络里的一个对象；主路径是"添加节点"。
  * "新建令牌"打开的就是"添加节点"对话框：单独一个令牌没有用，用户总是需要令牌和命令一起。
+ *
+ * 默认只列还能用的；切到"全部"连最近 30 天里用掉的、过期的也列出，看得到是哪个节点用掉的。
  */
 export function TokensPage() {
   useDocumentTitle(k.title)
   const network = useNetwork()
   const confirm = useConfirm()
   const now = useNow()
-  // 令牌随时可能被别处的机器用掉，跟着轮询。
-  const tokens = useQuery({ ...q.tokens(network.id), refetchInterval: LIVE_INTERVAL })
+  const [params, setParams] = useSearchParams()
+  const show: Show = params.get('show') === 'all' ? 'all' : 'pending'
+  const tokens = useQuery(q.tokens(network.id, show === 'all'))
   const nodes = useQuery(q.nodes(network.id))
   const [adding, setAdding] = useState(false)
+  const focus = useFocusRow(tokens.data)
 
-  const revoke = useAction(network.id, {
+  const remove = useAction(network.id, {
     mutationFn: (token: EnrollTokenInfo) => api.deleteToken(network.id, token.id),
-    success: (_data, token) => k.revoked(token.id),
+    success: (_data, token) =>
+      tokenView(token, now).removal === 'revoke' ? k.revoked(tokenLabel(token)) : k.forgotten(tokenLabel(token)),
   })
 
-  const onRevoke = async (token: EnrollTokenInfo) => {
-    const confirmed = await confirm({
-      tone: 'danger',
-      title: k.revokeTitle(token.id),
-      body: k.revokeBody,
-      confirmLabel: k.revokeConfirm,
-    })
-    if (confirmed) revoke.mutate(token)
+  const onRemove = async (token: EnrollTokenInfo) => {
+    const label = tokenLabel(token)
+    // 还能用的令牌收回之后拿着它的机器就加入不了了，不能撤回；用掉的和过期的只是删掉一条记录。
+    const confirmed =
+      tokenView(token, now).removal === 'revoke'
+        ? await confirm({
+            tone: 'danger',
+            title: k.revokeTitle(label),
+            body: k.revokeBody,
+            confirmLabel: k.revokeConfirm,
+          })
+        : await confirm({ title: k.forgetTitle(label), body: k.forgetBody, confirmLabel: k.forgetConfirm })
+    if (confirmed) remove.mutate(token)
   }
 
-  const empty = tokens.isSuccess && tokens.data.length === 0
+  const setShow = (next: Show) => {
+    const updated = new URLSearchParams(params)
+    if (next === 'all') updated.set('show', 'all')
+    else updated.delete('show')
+    updated.delete('focus')
+    setParams(updated, { replace: true })
+  }
+
+  const list = sortTokens(tokens.data ?? [])
+  const empty = tokens.isSuccess && list.length === 0
 
   return (
     <Page>
@@ -61,22 +89,37 @@ export function TokensPage() {
         title={k.title}
         description={k.description}
         actions={
-          empty ? undefined : (
-            <Button variant="primary" onClick={() => setAdding(true)}>
-              <Plus aria-hidden />
-              {k.create}
-            </Button>
-          )
+          <Button variant="primary" onClick={() => setAdding(true)}>
+            <Plus aria-hidden />
+            {k.create}
+          </Button>
         }
       />
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <Segmented
+          aria-label={k.showLabel}
+          value={show}
+          onChange={setShow}
+          options={[
+            { value: 'pending', label: k.showPending },
+            { value: 'all', label: k.showAll },
+          ]}
+        />
+        <p className="text-[13px] text-muted-foreground">{k.historyNote}</p>
+      </div>
+      {focus.missing ? (
+        <Notice className="mb-4" tone="warn">
+          {k.focusMissing(focus.focus ?? 0)}
+        </Notice>
+      ) : null}
       <Card>
         {tokens.isError ? (
           <ErrorState title={k.loadFailed} error={tokens.error} onRetry={() => void tokens.refetch()} />
         ) : empty ? (
           <EmptyState
             icon={Ticket}
-            title={k.emptyTitle}
-            description={k.emptyBody}
+            title={show === 'all' ? k.emptyAllTitle : k.emptyTitle}
+            description={show === 'all' ? k.emptyAllBody : k.emptyBody}
             action={
               <Button variant="primary" onClick={() => setAdding(true)}>
                 <Plus aria-hidden />
@@ -93,17 +136,34 @@ export function TokensPage() {
                   <Th>{k.colPreset}</Th>
                   <Th>{k.colStatus}</Th>
                   <Th>{k.colCreated}</Th>
-                  <Th className="w-28" />
+                  <Th className="w-32" />
                 </tr>
               </thead>
               <tbody>
                 {tokens.isPending ? <SkeletonRows columns={5} rows={2} /> : null}
-                {(tokens.data ?? []).map((token) => {
-                  const remaining = formatRemaining(token.expires_at, now)
+                {list.map((token) => {
+                  const view = tokenView(token, now)
+                  const label = tokenLabel(token)
                   const hasPreset = token.tags.length > 0 || token.virtual_ip !== null || token.successor_of !== null
                   return (
-                    <Tr key={token.id} data-testid={`token-row-${token.id}`}>
-                      <Td className="font-mono text-[13px] font-medium tabular">{k.tokenId(token.id)}</Td>
+                    <Tr
+                      key={token.id}
+                      ref={focus.rowRef(token.id)}
+                      dimmed={token.state !== 'pending'}
+                      className={cn(focus.focus === token.id && FOCUSED_ROW)}
+                      data-testid={`token-row-${token.id}`}
+                      data-state={token.state}
+                    >
+                      <Td>
+                        <Tooltip content={token.prefix === '' ? undefined : k.prefixTip}>
+                          <span
+                            tabIndex={token.prefix === '' ? undefined : 0}
+                            className="rounded-sm font-mono text-[13px] font-medium tabular"
+                          >
+                            {label}
+                          </span>
+                        </Tooltip>
+                      </Td>
                       <Td>
                         {hasPreset ? (
                           <span className="inline-flex flex-wrap items-center gap-1.5 text-[13px]">
@@ -119,35 +179,61 @@ export function TokensPage() {
                           <span className="text-[13px] text-muted-foreground">{k.presetNone}</span>
                         )}
                       </Td>
-                      <Td className="text-[13px]">
-                        {remaining === null ? (
-                          <StatusText tone="idle">{k.expired}</StatusText>
-                        ) : (
-                          <StatusText tone="relay">{k.unused(remaining)}</StatusText>
-                        )}
+                      <Td className="text-[13px]" data-keep>
+                        <span className="inline-flex flex-wrap items-center gap-x-1.5">
+                          <StatusText tone={view.tone}>{view.label}</StatusText>
+                          {view.usedBy !== null ? (
+                            <>
+                              <span className="text-muted-foreground" aria-hidden>
+                                {k.usedArrow}
+                              </span>
+                              <NodeLink
+                                network={network.id}
+                                node={view.usedBy}
+                                online={nodes.data?.find((node) => node.id === view.usedBy?.id)?.online}
+                              />
+                            </>
+                          ) : null}
+                        </span>
+                        {view.usedByDeleted ? (
+                          <span className="block text-xs text-muted-foreground">{k.usedByDeleted}</span>
+                        ) : null}
+                        {view.usedAt !== null ? (
+                          <RelativeTime at={view.usedAt} className="mt-0.5 block w-fit text-xs text-muted-foreground" />
+                        ) : null}
                       </Td>
                       <Td className="text-[13px] text-muted-foreground">
                         <RelativeTime at={token.created_at} />
                       </Td>
-                      <Td className="text-right">
-                        <Button
-                          size="sm"
-                          variant="danger-outline"
-                          aria-label={k.revokeFor(token.id)}
-                          onClick={() => void onRevoke(token)}
-                        >
-                          <Undo2 aria-hidden />
-                          {k.revoke}
-                        </Button>
+                      <Td className="text-right" data-keep>
+                        {view.removal === 'revoke' ? (
+                          <Button
+                            size="sm"
+                            variant="danger-outline"
+                            aria-label={k.revokeFor(label)}
+                            onClick={() => void onRemove(token)}
+                          >
+                            <Undo2 aria-hidden />
+                            {k.revoke}
+                          </Button>
+                        ) : (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            aria-label={k.forgetFor(label)}
+                            onClick={() => void onRemove(token)}
+                          >
+                            <Trash2 aria-hidden />
+                            {k.forget}
+                          </Button>
+                        )}
                       </Td>
                     </Tr>
                   )
                 })}
               </tbody>
             </Table>
-            <p className="border-t px-4 py-2.5 text-[13px] text-muted-foreground">
-              {k.textHidden} {k.usedNote}
-            </p>
+            <p className="border-t px-4 py-2.5 text-[13px] text-muted-foreground">{k.textHidden}</p>
           </>
         )}
       </Card>

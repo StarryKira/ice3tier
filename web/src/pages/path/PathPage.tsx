@@ -10,17 +10,19 @@ import { Page, PageHeader } from '@/components/page'
 import { PairPicker } from '@/components/pair-picker'
 import { ErrorState } from '@/components/states'
 import { StatusText } from '@/components/status'
+import { Table, Td, Th, Tr } from '@/components/table'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardBody } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
 import { formatAge } from '@/lib/time'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { useNow } from '@/lib/useNow'
 import { networkPath, useNetwork } from '@/pages/networks/context'
 import { type Pair, pairPath, readPair, writePair } from '@/topology/pair'
-import { describeLeg } from '@/topology/path'
+import { describeCandidates, describeLeg } from '@/topology/path'
 
 const p = t.path
 
@@ -45,6 +47,18 @@ function LegCard({ leg, name, testId }: { leg: PathLeg; name: (id: NodeId) => st
               <StatusText tone={view.route.tone} className="text-base">
                 {view.route.text}
               </StatusText>
+              {view.route.detail !== null ? (
+                <Tooltip content={view.route.detailHint ?? undefined}>
+                  <Badge
+                    tone={leg.relay_leg === 'tcp' ? 'warn' : 'neutral'}
+                    tabIndex={view.route.detailHint === null ? undefined : 0}
+                    className="ml-2"
+                    data-testid={`${testId}-detail`}
+                  >
+                    {view.route.detail}
+                  </Badge>
+                </Tooltip>
+              ) : null}
               {view.rtt !== null ? (
                 <span className="ml-2 text-sm text-muted-foreground tabular">{view.rtt}</span>
               ) : null}
@@ -69,6 +83,18 @@ function LegCard({ leg, name, testId }: { leg: PathLeg; name: (id: NodeId) => st
           </>
         )}
         <div className="space-y-1 text-[13px]">
+          {view.reason !== null ? (
+            <p className="font-medium" data-testid={`${testId}-reason`}>
+              {view.reason}
+            </p>
+          ) : null}
+          {view.mode !== null ? (
+            <Tooltip content={view.mode.hint}>
+              <span tabIndex={0} className="w-fit rounded-sm text-muted-foreground">
+                {view.mode.label}
+              </span>
+            </Tooltip>
+          ) : null}
           {view.age !== null ? <p className="text-warn">{view.age}</p> : null}
           {view.since !== null ? (
             <p data-testid={`${testId}-since`}>{view.since}</p>
@@ -80,6 +106,71 @@ function LegCard({ leg, name, testId }: { leg: PathLeg; name: (id: NodeId) => st
           {p.sender(leg.from.name)}：{view.sourceHint}
         </p>
       </CardBody>
+    </Card>
+  )
+}
+
+/**
+ * 一个方向考虑过的路：按代价从低到高，现在走的那条标出来，每一段的延迟、抖动、丢包都写着。
+ * 不是现问到的方向没有这张表（`unknown`），不画。
+ */
+function Candidates({ leg, name, testId }: { leg: PathLeg; name: (id: NodeId) => string; testId: string }) {
+  const view = describeCandidates(leg, name)
+  if (view.state === 'unknown') return null
+  return (
+    <Card data-testid={testId}>
+      <header className="border-b px-5 py-3">
+        <h2 className="text-[15px] font-semibold">{p.candidatesTitle(leg.from.name, leg.to.name)}</h2>
+        <p className="mt-0.5 text-[13px] text-muted-foreground">{p.candidatesLead}</p>
+      </header>
+      {view.state === 'empty' ? (
+        <p className="px-5 py-4 text-sm text-muted-foreground">{p.candidatesEmpty}</p>
+      ) : (
+        <Table aria-label={p.candidatesTitle(leg.from.name, leg.to.name)}>
+          <thead>
+            <tr>
+              <Th>{p.colRoute}</Th>
+              <Th numeric>{p.colCost}</Th>
+              <Th>{p.colLegs}</Th>
+              <Th numeric>{p.colLoad}</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {view.rows.map((row) => (
+              <Tr
+                key={row.key}
+                className={row.current ? 'bg-accent/50' : undefined}
+                aria-current={row.current ? 'true' : undefined}
+                data-current={row.current || undefined}
+              >
+                <Td>
+                  <StatusText tone={row.tone} className="text-[13px]">
+                    {row.text}
+                  </StatusText>
+                  {row.current ? (
+                    <Badge tone="accent" className="ml-2">
+                      {p.current}
+                    </Badge>
+                  ) : null}
+                </Td>
+                <Td numeric className="text-[13px] font-medium">
+                  {row.cost}
+                </Td>
+                <Td className="text-xs text-muted-foreground tabular">
+                  <ul className="space-y-0.5">
+                    {row.legs.map((line) => (
+                      <li key={line}>{line}</li>
+                    ))}
+                  </ul>
+                </Td>
+                <Td numeric className="text-[13px]">
+                  {row.load}
+                </Td>
+              </Tr>
+            ))}
+          </tbody>
+        </Table>
+      )}
     </Card>
   )
 }
@@ -106,7 +197,7 @@ function Querying() {
 /**
  * 路径诊断：选两个节点，controller 现问两端"到对端现在怎么走"，两个方向分开显示（路是发送方选的，经常不一样）。
  * 每个方向写清数据是现问到的、上报的、还是根本不是对端，以及多久之前的、为什么换到这条路。
- * 候选路径和每一段的测量值接口还没有给，页面上照实说。
+ * 现问到的方向还有选路模式、原因和考虑过的候选路径（每一段的延迟、抖动、丢包），放在两张卡片下面。
  */
 export function PathPage() {
   useDocumentTitle(p.title)
@@ -202,6 +293,8 @@ export function PathPage() {
               <LegCard leg={path.data.forward} name={name} testId="path-forward" />
               <LegCard leg={path.data.reverse} name={name} testId="path-reverse" />
             </div>
+            <Candidates leg={path.data.forward} name={name} testId="candidates-forward" />
+            <Candidates leg={path.data.reverse} name={name} testId="candidates-reverse" />
           </>
         )}
         <div className="space-y-1 text-[13px] text-muted-foreground">

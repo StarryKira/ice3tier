@@ -1,11 +1,11 @@
-import { QueryClient, queryOptions, useMutation, useQueryClient } from '@tanstack/react-query'
+import { infiniteQueryOptions, QueryClient, queryOptions, useMutation, useQueryClient } from '@tanstack/react-query'
 
 import { toast } from '@/components/ui/toast'
 import { LIVE_INTERVAL } from '@/lib/polling'
 
 import { ApiError, errorMessage } from './client'
 import { api } from './endpoints'
-import { type NetworkId, type NodeId } from './types'
+import { type LogEntry, type LogQuery, type NetworkId, type NodeId } from './types'
 
 /**
  * 服务器上的状态都经过 TanStack Query。这里是全部的查询键和查询的写法；页面里只写 `useQuery(q.nodes(network))`。
@@ -15,7 +15,9 @@ import { type NetworkId, type NodeId } from './types'
  */
 export const keys = {
   status: ['status'] as const,
-  log: (limit: number) => ['log', limit] as const,
+  /** 操作记录不分网络，作废时按前缀 `['log']` 一起作废。 */
+  log: (query: LogQuery) => ['log', query] as const,
+  logPages: (query: Omit<LogQuery, 'before' | 'limit'>, size: number) => ['log', 'pages', size, query] as const,
   networks: ['networks'] as const,
   scope: (network: NetworkId) => ['n', network] as const,
   overview: (network: NetworkId) => ['n', network, 'overview'] as const,
@@ -23,7 +25,8 @@ export const keys = {
   node: (network: NetworkId, node: NodeId) => ['n', network, 'node', node] as const,
   routes: (network: NetworkId, node: NodeId) => ['n', network, 'node', node, 'routes'] as const,
   nodeAccess: (network: NetworkId, node: NodeId) => ['n', network, 'node', node, 'access'] as const,
-  tokens: (network: NetworkId) => ['n', network, 'tokens'] as const,
+  nodeListeners: (network: NetworkId, node: NodeId) => ['n', network, 'node', node, 'listeners'] as const,
+  tokens: (network: NetworkId, all = false) => ['n', network, 'tokens', all ? 'all' : 'pending'] as const,
   rules: (network: NetworkId) => ['n', network, 'rules'] as const,
   graph: (network: NetworkId) => ['n', network, 'graph'] as const,
   check: (network: NetworkId, from: NodeId, to: NodeId) => ['n', network, 'check', from, to] as const,
@@ -31,8 +34,10 @@ export const keys = {
   listeners: (network: NetworkId) => ['n', network, 'listeners'] as const,
   forwards: (network: NetworkId) => ['n', network, 'forwards'] as const,
   pairs: (network: NetworkId) => ['n', network, 'pairs'] as const,
+  exits: (network: NetworkId) => ['n', network, 'exits'] as const,
   matrix: (network: NetworkId) => ['n', network, 'matrix'] as const,
   path: (network: NetworkId, from: NodeId, to: NodeId) => ['n', network, 'path', from, to] as const,
+  backbone: (network: NetworkId) => ['n', network, 'backbone'] as const,
   /** 更新的设置和现状是全局的，不在某个网络下面。 */
   update: ['update'] as const,
   /** 所有网络下的查询：全局的修改（全部更新、暂停和继续）会改到每个网络里的节点。 */
@@ -43,7 +48,18 @@ export const keys = {
 export const q = {
   status: () =>
     queryOptions({ queryKey: keys.status, queryFn: ({ signal }) => api.status(undefined, signal), staleTime: 30_000 }),
-  log: (limit: number) => queryOptions({ queryKey: keys.log(limit), queryFn: () => api.log(limit) }),
+  log: (query: LogQuery) => queryOptions({ queryKey: keys.log(query), queryFn: () => api.log(query) }),
+  /**
+   * 一页一页往前翻的操作记录：下一页从上一页最后一条的编号往前取。
+   * 一页不满说明没有更早的了。
+   */
+  logPages: (query: Omit<LogQuery, 'before' | 'limit'>, size: number) =>
+    infiniteQueryOptions({
+      queryKey: keys.logPages(query, size),
+      queryFn: ({ pageParam }) => api.log({ ...query, limit: size, before: pageParam }),
+      initialPageParam: undefined as number | undefined,
+      getNextPageParam: (last: LogEntry[]) => (last.length < size ? undefined : last.at(-1)?.id),
+    }),
   networks: () => queryOptions({ queryKey: keys.networks, queryFn: api.networks }),
   overview: (network: NetworkId) =>
     queryOptions({
@@ -67,7 +83,20 @@ export const q = {
     }),
   nodeAccess: (network: NetworkId, node: NodeId) =>
     queryOptions({ queryKey: keys.nodeAccess(network, node), queryFn: () => api.nodeAccess(network, node) }),
-  tokens: (network: NetworkId) => queryOptions({ queryKey: keys.tokens(network), queryFn: () => api.tokens(network) }),
+  /** 节点上的监听：状态、连接数和流量都来自节点的上报。 */
+  nodeListeners: (network: NetworkId, node: NodeId) =>
+    queryOptions({
+      queryKey: keys.nodeListeners(network, node),
+      queryFn: () => api.nodeListeners(network, node),
+      refetchInterval: LIVE_INTERVAL,
+    }),
+  /** 令牌随时可能被别处的机器用掉，跟着轮询。 */
+  tokens: (network: NetworkId, all = false) =>
+    queryOptions({
+      queryKey: keys.tokens(network, all),
+      queryFn: () => api.tokens(network, all),
+      refetchInterval: LIVE_INTERVAL,
+    }),
   rules: (network: NetworkId) => queryOptions({ queryKey: keys.rules(network), queryFn: () => api.rules(network) }),
   graph: (network: NetworkId) =>
     queryOptions({
@@ -77,10 +106,20 @@ export const q = {
     }),
   check: (network: NetworkId, from: NodeId, to: NodeId) =>
     queryOptions({ queryKey: keys.check(network, from, to), queryFn: () => api.accessCheck(network, from, to) }),
+  /** 用量和状态（用完、吊销）随入口的上报变化。 */
   credentials: (network: NetworkId) =>
-    queryOptions({ queryKey: keys.credentials(network), queryFn: () => api.credentials(network) }),
+    queryOptions({
+      queryKey: keys.credentials(network),
+      queryFn: () => api.credentials(network),
+      refetchInterval: LIVE_INTERVAL,
+    }),
+  /** 每个监听器带着节点报的状态。 */
   listeners: (network: NetworkId) =>
-    queryOptions({ queryKey: keys.listeners(network), queryFn: () => api.listeners(network) }),
+    queryOptions({
+      queryKey: keys.listeners(network),
+      queryFn: () => api.listeners(network),
+      refetchInterval: LIVE_INTERVAL,
+    }),
   forwards: (network: NetworkId) =>
     queryOptions({
       queryKey: keys.forwards(network),
@@ -88,6 +127,9 @@ export const q = {
       refetchInterval: LIVE_INTERVAL,
     }),
   pairs: (network: NetworkId) => queryOptions({ queryKey: keys.pairs(network), queryFn: () => api.pairs(network) }),
+  /** 出口的设置、用量、健康，和用它的节点看到的。 */
+  exits: (network: NetworkId) =>
+    queryOptions({ queryKey: keys.exits(network), queryFn: () => api.exits(network), refetchInterval: LIVE_INTERVAL }),
   matrix: (network: NetworkId) =>
     queryOptions({
       queryKey: keys.matrix(network),
@@ -102,6 +144,14 @@ export const q = {
     queryOptions({
       queryKey: keys.path(network, from, to),
       queryFn: ({ signal }) => api.path(network, from, to, signal),
+      staleTime: Number.POSITIVE_INFINITY,
+      refetchOnWindowFocus: false,
+    }),
+  /** relay 之间的延迟矩阵。和路径一样每次都要现问节点：不轮询，页面上有"再问一次"。 */
+  backbone: (network: NetworkId) =>
+    queryOptions({
+      queryKey: keys.backbone(network),
+      queryFn: ({ signal }) => api.backbone(network, signal),
       staleTime: Number.POSITIVE_INFINITY,
       refetchOnWindowFocus: false,
     }),

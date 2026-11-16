@@ -9,27 +9,54 @@ import { nodeName } from '@/lib/nodes'
 import { EmptyState, ErrorState, SkeletonRows } from '@/components/states'
 import { StatusText } from '@/components/status'
 import { Table, Td, Th, Tr } from '@/components/table'
+import { Badge } from '@/components/ui/badge'
 import { Card } from '@/components/ui/card'
+import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
 import { REPORT_INTERVAL_SECS } from '@/lib/product'
+import { formatAge, formatDuration } from '@/lib/time'
 import { pairPath } from '@/topology/pair'
+import { routeDetail, routeDetailHint } from '@/topology/route'
 
 const d = t.nodes.detail
 
 /**
  * 一条路径的写法。直连是绿色，经 relay 是蓝色：中转是正常的工作状态，不用警告色。只有无路可走是红色。
  */
-function PathCell({ route, relayNames }: { route: NodeRoute['route']; relayNames: (ids: number[]) => string }) {
+function PathCell({ entry, relayNames }: { entry: NodeRoute; relayNames: (ids: number[]) => string }) {
+  const route = entry.route
+  // 直连的方式、到第一个 relay 的传输：节点说得出来时写在后面，悬停有解释。
+  const detail = routeDetail(route, entry)
+  const hint = routeDetailHint(route, entry)
+  const extra =
+    detail === null ? null : (
+      <Tooltip content={hint ?? undefined}>
+        <Badge
+          tone={entry.relay_leg === 'tcp' ? 'warn' : 'neutral'}
+          tabIndex={hint === null ? undefined : 0}
+          className="ml-2"
+          data-testid={`route-detail-${entry.peer.id}`}
+        >
+          {detail}
+        </Badge>
+      </Tooltip>
+    )
   switch (route.via) {
     case 'direct':
       return (
         <div>
           <StatusText tone="ok">{d.viaDirect}</StatusText>
+          {extra}
           <div className="mt-0.5 font-mono text-xs text-muted-foreground">{d.viaDirectAddr(route.addr)}</div>
         </div>
       )
     case 'relay':
-      return <StatusText tone="relay">{d.viaRelay(relayNames(route.relays))}</StatusText>
+      return (
+        <div>
+          <StatusText tone="relay">{d.viaRelay(relayNames(route.relays))}</StatusText>
+          {extra}
+        </div>
+      )
     case 'none':
       return (
         <div>
@@ -45,12 +72,17 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
   const routes = useQuery(q.routes(network.id, node.id))
   const nodes = useQuery(q.nodes(network.id))
   const relayNames = (ids: number[]) => ids.map((id) => nodeName(nodes.data ?? [], id)).join(' → ')
+  // 一份上报里的各行一样新；取最新的那个写在表的右上角，比它旧得多的行单独标出来。
+  const rows = routes.data?.routes ?? []
+  const freshest = rows.length === 0 ? null : Math.min(...rows.map((entry) => entry.age_secs))
 
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
         <p className="text-sm text-muted-foreground">{d.routesLead}</p>
-        <p className="text-[13px] text-muted-foreground">{t.common.updatedEvery(REPORT_INTERVAL_SECS)}</p>
+        <p className="text-[13px] text-muted-foreground" data-testid="routes-updated">
+          {freshest === null ? t.common.updatedEvery(REPORT_INTERVAL_SECS) : d.routesUpdated(formatAge(freshest))}
+        </p>
       </div>
       <Card>
         {routes.isError ? (
@@ -67,13 +99,23 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
                 <Th>{d.colPath}</Th>
                 <Th numeric>{d.colRtt}</Th>
                 <Th>
+                  <Tooltip content={d.colSinceTip}>
+                    <span
+                      tabIndex={0}
+                      className="cursor-help rounded-sm underline decoration-dotted underline-offset-4"
+                    >
+                      {d.colSince}
+                    </span>
+                  </Tooltip>
+                </Th>
+                <Th>
                   <span className="sr-only">{t.common.moreActions}</span>
                 </Th>
               </tr>
             </thead>
             <tbody>
-              {routes.isPending ? <SkeletonRows columns={3} rows={3} /> : null}
-              {(routes.data?.routes ?? []).map((entry) => (
+              {routes.isPending ? <SkeletonRows columns={5} rows={3} /> : null}
+              {rows.map((entry) => (
                 <Tr key={entry.peer.id}>
                   <Td>
                     <NodeLink
@@ -84,7 +126,7 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
                     <div className="mt-0.5 font-mono text-xs text-muted-foreground">{entry.peer.virtual_ip}</div>
                   </Td>
                   <Td>
-                    <PathCell route={entry.route} relayNames={relayNames} />
+                    <PathCell entry={entry} relayNames={relayNames} />
                   </Td>
                   <Td numeric>
                     {entry.rtt_ms === null ? (
@@ -92,6 +134,12 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
                     ) : (
                       t.common.ms(entry.rtt_ms)
                     )}
+                  </Td>
+                  <Td className="text-[13px] whitespace-nowrap tabular" data-testid={`route-since-${entry.peer.id}`}>
+                    {formatDuration(entry.since_secs)}
+                    {freshest !== null && entry.age_secs - freshest > 2 * REPORT_INTERVAL_SECS ? (
+                      <span className="block text-xs text-warn">{d.rowStale(formatAge(entry.age_secs))}</span>
+                    ) : null}
                   </Td>
                   <Td className="text-right text-[13px] whitespace-nowrap">
                     <Link

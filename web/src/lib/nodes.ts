@@ -11,3 +11,9 @@ export function nodePath(network: number, node: NodeId): string {
 export function nodeName(nodes: readonly Pick<Node, 'id' | 'name'>[], id: NodeId): string {
   return nodes.find((node) => node.id === id)?.name ?? t.common.nodeMissing(id)
 }
+
+/** 挂靠在这个 relay 上的节点数：数的是各节点最近一次上报的挂靠（离线的节点是它离线前报的）。 */
+export function attachedCount(nodes: readonly Pick<Node, 'id' | 'attached'>[], relay: NodeId): number {
+  return nodes.filter((node) => node.id !== relay && node.attached.some((attachment) => attachment.relay === relay))
+    .length
+}

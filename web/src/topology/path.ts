@@ -1,9 +1,18 @@
-import { type NodeId, type PathLeg, type PathSource } from '@/api/types'
+import { type NodeId, type PathCandidate, type PathLeg, type PathSource } from '@/api/types'
 import { type Tone } from '@/components/status'
 import { t } from '@/i18n'
 import { formatAge } from '@/lib/time'
 
-import { CLASS_TONE, classify, type RouteClass, routeText } from './route'
+import {
+  CLASS_TONE,
+  classify,
+  formatMicros,
+  formatPermille,
+  type RouteClass,
+  routeDetail,
+  routeDetailHint,
+  routeText,
+} from './route'
 
 const p = t.path
 
@@ -31,7 +40,14 @@ export interface LegView {
     hops: string[]
     /** 直连时对端的地址。 */
     addr: string | null
+    /** 直连的方式、或者到第一个 relay 的传输；不知道时是 `null`。 */
+    detail: string | null
+    detailHint: string | null
   } | null
+  /** "选路模式：默认"和它的说明。只有现问到、发送方的版本会说时才有。 */
+  mode: { label: string; hint: string } | null
+  /** "为什么是这条：直连可用"。有没有同 `mode`。 */
+  reason: string | null
   rtt: string | null
   /** "6 秒前的数据"。刚问到的不写（是现在）；没有数据时是 `null`。 */
   age: string | null
@@ -63,13 +79,19 @@ export function describeLeg(leg: PathLeg, name: (id: NodeId) => string): LegView
             ...(leg.route.via === 'none' ? [] : [leg.to.name]),
           ],
           addr: leg.route.via === 'direct' ? leg.route.addr : null,
+          detail: routeDetail(leg.route, leg),
+          detailHint: routeDetailHint(leg.route, leg),
         }
   const age = leg.age_secs === null || state === 'query' ? null : p.age(formatAge(leg.age_secs))
   let since: string | null = null
   if (leg.since !== null) since = p.since(formatAge(leg.since.secs_ago), leg.since.reason)
   else if (state === 'query' && route !== null) since = p.sinceUnknown
+  const mode = leg.mode ?? null
+  const reason = leg.reason ?? null
   return {
     state,
+    mode: mode === null ? null : { label: p.modeLabel(p.mode[mode] ?? mode), hint: p.modeHint[mode] ?? '' },
+    reason: reason === null || reason === '' ? null : p.reason(reason),
     sourceLabel: p.source[state] ?? state,
     sourceTone: SOURCE_TONE[state],
     sourceHint: p.sourceHint[state] ?? '',
@@ -77,5 +99,55 @@ export function describeLeg(leg: PathLeg, name: (id: NodeId) => string): LegView
     rtt: leg.rtt_ms === null ? null : t.routes.rtt(leg.rtt_ms),
     age,
     since,
+  }
+}
+
+export interface CandidateRow {
+  key: string
+  text: string
+  tone: Tone
+  /** 代价，写成毫秒。 */
+  cost: string
+  /** 每一段一句："laptop → hk：21.3 ms · ±0.40 ms · 丢 0.2%"。 */
+  legs: string[]
+  /** 路径上负载最高的 relay 的带宽占用；直连写"—"。 */
+  load: string
+  current: boolean
+}
+
+export type CandidatesView =
+  /** 不知道：不是现问到的，或者发送方的版本不会说。 */
+  | { state: 'unknown' }
+  /** 问到了，但它手上还没有任何测量值。 */
+  | { state: 'empty' }
+  | { state: 'list'; rows: CandidateRow[] }
+
+/** 一个方向的候选路径表。按 controller 给的顺序（代价从低到高），现在走的那条标出来。 */
+export function describeCandidates(leg: PathLeg, name: (id: NodeId) => string): CandidatesView {
+  const candidates: PathCandidate[] | null = leg.candidates ?? null
+  if (candidates === null) return { state: 'unknown' }
+  if (candidates.length === 0) return { state: 'empty' }
+  return {
+    state: 'list',
+    rows: candidates.map((candidate, index) => {
+      const cls = classify(candidate.route)
+      return {
+        key: `${index}:${routeText(candidate.route, String)}`,
+        text: routeText(candidate.route, name),
+        tone: CLASS_TONE[cls],
+        cost: formatMicros(candidate.cost_us),
+        legs: candidate.legs.map((segment) =>
+          p.legLine(
+            name(segment.from),
+            name(segment.to),
+            formatMicros(segment.rtt_us),
+            formatMicros(segment.jitter_us),
+            formatPermille(segment.loss_permille),
+          ),
+        ),
+        load: candidate.route.via === 'relay' ? t.routes.percent(String(candidate.load_percent)) : '—',
+        current: candidate.current,
+      }
+    }),
   }
 }

@@ -27,9 +27,20 @@ export const overview = {
   relayOffline: (name: string) => `relay ${name} 离线，挂靠在它上面的节点暂时用不了它。`,
   exitOffline: (name: string) => `出口 ${name} 离线，指定从它出去的连接会失败。`,
   forwardBlocked: (name: string, reason: string) => `端口转发 ${name} 没有生效：${reason}`,
+  listenerBroken: (name: string, reason: string) => `监听器 ${name} 没有在监听：${reason}`,
+  quotaNearly: (name: string, percent: number) => `出口 ${name} 的流量配额已用 ${percent}%。`,
+  quotaExhausted: (name: string, resets: string) =>
+    `出口 ${name} 本账期的流量配额已经用完，经它出去的新请求会被拒绝，${resets}。`,
+  exitDegraded: (name: string, detail: string) => `出口 ${name} 有问题：${detail}`,
+  credentialExhausted: (name: string) => `凭据 ${name} 的流量上限用完了，用它的新连接会被拒绝。`,
 
   stats: {
     online: '在线节点',
+    flows: '活跃的流',
+    flowsHint: '两端各算一次',
+    traffic: '流量',
+    trafficHint: (tx: string, rx: string) => `↑ ${tx} · ↓ ${rx}`,
+    trafficTip: '在线节点各自启动以来发出（↑）和收到（↓）的合计。经过两个节点的流量两边各算一次。',
     relays: 'relay',
     relaysHint: '已启用',
     exits: '出口',

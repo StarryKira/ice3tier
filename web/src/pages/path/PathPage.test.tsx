@@ -107,3 +107,66 @@ describe('路径诊断', () => {
     expect(api.callsTo('GET /networks/1/path')[1]?.query.toString()).toBe('from=1&to=2')
   })
 })
+
+describe('现问到时的细节：方式、模式、原因、候选路径', () => {
+  const DETAILED: PathView = {
+    forward: {
+      ...VIEW.forward,
+      direct: 'punched',
+      relay_leg: null,
+      mode: 'direct_first',
+      reason: '直连可用',
+      candidates: [
+        {
+          route: direct('203.0.113.7:20330'),
+          cost_us: 12_900,
+          legs: [{ from: 2, to: 1, rtt_us: 12_400, jitter_us: 120, loss_permille: 0 }],
+          load_percent: 0,
+          current: true,
+        },
+        {
+          route: viaRelays(3),
+          cost_us: 49_500,
+          legs: [
+            { from: 2, to: 3, rtt_us: 21_300, jitter_us: 400, loss_permille: 2 },
+            { from: 3, to: 1, rtt_us: 26_000, jitter_us: 0, loss_permille: 0 },
+          ],
+          load_percent: 12,
+          current: false,
+        },
+      ],
+    },
+    reverse: { ...VIEW.reverse, direct: null, relay_leg: 'tcp', mode: null, reason: null, candidates: null },
+  }
+
+  it('每个方向写直连的方式、第一段的传输、选路模式和原因；候选路径一张表，现在走的标出来', async () => {
+    setup({ 'GET /networks/1/path': DETAILED })
+    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=1' })
+    const forward = await screen.findByTestId('path-forward')
+    expect(within(forward).getByTestId('path-forward-detail')).toHaveTextContent(t.routes.directKind.punched)
+    expect(within(forward).getByTestId('path-forward-reason')).toHaveTextContent(p.reason('直连可用'))
+    expect(forward).toHaveTextContent(p.modeLabel(p.mode.direct_first ?? ''))
+    expect(within(screen.getByTestId('path-reverse')).getByTestId('path-reverse-detail')).toHaveTextContent(
+      t.routes.relayLeg('TCP'),
+    )
+
+    const table = within(screen.getByTestId('candidates-forward')).getByRole('table', {
+      name: p.candidatesTitle('laptop', 'nas'),
+    })
+    const rows = within(table).getAllByRole('row').slice(1)
+    expect(rows).toHaveLength(2)
+    expect(rows[0]).toHaveAttribute('aria-current', 'true')
+    expect(rows[0]).toHaveTextContent(p.current)
+    expect(rows[0]).toHaveTextContent('12.9 ms')
+    expect(rows[1]).toHaveTextContent(p.legLine('laptop', 'hk', '21.3 ms', '0.40 ms', '0.2%'))
+    expect(rows[1]).toHaveTextContent('12%')
+    // 上报来的方向不知道考虑过哪些路：没有这张表。
+    expect(screen.queryByTestId('candidates-reverse')).not.toBeInTheDocument()
+  })
+
+  it('问到了但发送方手上还没有测量值：照实说', async () => {
+    setup({ 'GET /networks/1/path': { ...DETAILED, forward: { ...DETAILED.forward, candidates: [] } } })
+    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=1' })
+    expect(await screen.findByText(p.candidatesEmpty)).toBeVisible()
+  })
+})

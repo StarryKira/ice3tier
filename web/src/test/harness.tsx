@@ -99,6 +99,7 @@ export const NETWORK: Network = {
   reach: 'any',
   created_at: 1_794_000_000,
   nodes: 0,
+  class: null,
 }
 
 interface RenderOptions {

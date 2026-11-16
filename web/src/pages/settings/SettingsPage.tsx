@@ -1,24 +1,20 @@
 import { useQuery } from '@tanstack/react-query'
-import { History, LogOut, Search } from 'lucide-react'
-import { useMemo, useState } from 'react'
-import { Link, Navigate, NavLink, useNavigate, useParams } from 'react-router'
+import { LogOut } from 'lucide-react'
+import { Navigate, NavLink, useNavigate, useParams } from 'react-router'
 
 import { q } from '@/api/queries'
 import { session } from '@/auth/session'
 import { CodeBlock } from '@/components/copy'
 import { Page, PageHeader } from '@/components/page'
-import { EmptyState, ErrorState, NoMatches, SkeletonRows } from '@/components/states'
-import { RelativeTime, StatusDot } from '@/components/status'
-import { Table, Td, Th, Tr } from '@/components/table'
+import { StatusDot } from '@/components/status'
 import { Button } from '@/components/ui/button'
 import { Card, CardBody, CardHeader } from '@/components/ui/card'
-import { NativeSelect } from '@/components/ui/input'
 import { t } from '@/i18n'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { cn } from '@/lib/utils'
-import { networkPath } from '@/pages/networks/context'
 
 import { AboutTab } from './AboutTab'
+import { LogTab } from './LogTab'
 import { UpdatesTab } from './UpdatesTab'
 
 const s = t.settings
@@ -60,152 +56,6 @@ function SessionTab() {
         </CardBody>
       </Card>
     </div>
-  )
-}
-
-/** 一次取多少条操作记录。接口一次最多给一千条。 */
-const LOG_STEPS = [100, 300, 1000] as const
-
-function LogTab() {
-  const [step, setStep] = useState(0)
-  const limit = LOG_STEPS[step] ?? 100
-  const log = useQuery({ ...q.log(limit), placeholderData: (previous) => previous })
-  const networks = useQuery(q.networks())
-  const [search, setSearch] = useState('')
-  const [network, setNetwork] = useState('all')
-  const [kind, setKind] = useState('all')
-
-  const entries = useMemo(() => log.data ?? [], [log.data])
-  const rows = useMemo(() => {
-    const needle = search.trim().toLowerCase()
-    return entries.filter((entry) => {
-      if (network === 'global' && entry.network !== null) return false
-      if (network !== 'all' && network !== 'global' && entry.network !== Number(network)) return false
-      if (kind !== 'all' && !entry.action.startsWith(`${kind}.`)) return false
-      if (
-        needle !== '' &&
-        !`${entry.detail} ${s.log.actions[entry.action] ?? entry.action}`.toLowerCase().includes(needle)
-      )
-        return false
-      return true
-    })
-  }, [entries, search, network, kind])
-
-  const filtered = search.trim() !== '' || network !== 'all' || kind !== 'all'
-  const clear = () => {
-    setSearch('')
-    setNetwork('all')
-    setKind('all')
-  }
-
-  const networkLabel = (id: number | null) => {
-    if (id === null) return <span className="text-muted-foreground">{s.log.global}</span>
-    const found = networks.data?.find((candidate) => candidate.id === id)
-    return found === undefined ? (
-      <span className="text-muted-foreground">{s.log.deletedNetwork(id)}</span>
-    ) : (
-      <Link to={networkPath(found.id)} className="rounded-sm hover:text-primary hover:underline">
-        {found.name}
-      </Link>
-    )
-  }
-
-  return (
-    <Card>
-      <CardHeader title={s.log.title} description={s.log.description} />
-      {log.isError && log.data === undefined ? (
-        <ErrorState title={s.log.loadFailed} error={log.error} onRetry={() => void log.refetch()} />
-      ) : log.isSuccess && entries.length === 0 ? (
-        <EmptyState icon={History} title={s.log.emptyTitle} />
-      ) : (
-        <>
-          <div className="flex flex-wrap items-center gap-2.5 border-b px-4 py-3">
-            <div className="relative w-64">
-              <Search
-                className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground"
-                aria-hidden
-              />
-              <input
-                type="search"
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder={s.log.searchPlaceholder}
-                aria-label={s.log.searchPlaceholder}
-                autoComplete="off"
-                className="h-9 w-full rounded-md border border-input bg-card pr-3 pl-8.5 text-sm placeholder:text-muted-foreground/80"
-              />
-            </div>
-            <NativeSelect
-              value={network}
-              onChange={(event) => setNetwork(event.target.value)}
-              aria-label={s.log.filterNetwork}
-              className="w-40"
-            >
-              <option value="all">{s.log.allNetworks}</option>
-              {(networks.data ?? []).map((candidate) => (
-                <option key={candidate.id} value={candidate.id}>
-                  {candidate.name}
-                </option>
-              ))}
-              <option value="global">{s.log.global}</option>
-            </NativeSelect>
-            <NativeSelect
-              value={kind}
-              onChange={(event) => setKind(event.target.value)}
-              aria-label={s.log.filterKind}
-              className="w-36"
-            >
-              <option value="all">{s.log.allKinds}</option>
-              {Object.entries(s.log.kinds).map(([id, label]) => (
-                <option key={id} value={id}>
-                  {label}
-                </option>
-              ))}
-            </NativeSelect>
-          </div>
-          <Table>
-            <thead>
-              <tr>
-                <Th className="w-36">{s.log.colTime}</Th>
-                <Th className="w-28">{s.log.colNetwork}</Th>
-                <Th className="w-52">{s.log.colAction}</Th>
-                <Th>{s.log.colDetail}</Th>
-              </tr>
-            </thead>
-            <tbody>
-              {log.isPending ? <SkeletonRows columns={4} rows={6} /> : null}
-              {rows.map((entry) => (
-                <Tr key={entry.id}>
-                  <Td className="text-[13px] whitespace-nowrap text-muted-foreground">
-                    <RelativeTime at={entry.at} />
-                  </Td>
-                  <Td className="text-[13px]">{networkLabel(entry.network)}</Td>
-                  <Td className="text-[13px] font-medium">
-                    {s.log.actions[entry.action] ?? (
-                      <code className="font-mono text-xs font-normal">{entry.action}</code>
-                    )}
-                  </Td>
-                  <Td className="text-[13px] text-muted-foreground">{entry.detail}</Td>
-                </Tr>
-              ))}
-            </tbody>
-          </Table>
-          {log.isSuccess && rows.length === 0 ? <NoMatches message={s.log.noMatches} onClear={clear} /> : null}
-          <footer className="flex items-center justify-between gap-4 border-t px-4 py-2.5 text-[13px] text-muted-foreground">
-            <span className="tabular">
-              {filtered ? s.log.showing(rows.length, entries.length) : s.log.showing(entries.length, entries.length)}
-            </span>
-            {entries.length >= limit && step < LOG_STEPS.length - 1 ? (
-              <Button size="sm" pending={log.isFetching} onClick={() => setStep(step + 1)}>
-                {s.log.loadMore}
-              </Button>
-            ) : entries.length >= limit ? (
-              <span>{s.log.noMore}</span>
-            ) : null}
-          </footer>
-        </>
-      )}
-    </Card>
   )
 }
 
