@@ -175,7 +175,9 @@ impl Publisher {
             .unwrap()
             .with_release_keys(self.keys())
             .unwrap()
-            .with_release_cache(cache.to_owned());
+            .with_release_cache(cache.to_owned())
+            // 测试里发布的版本号是写死的，controller 的版本也固定下来，不随这个包的版本号变。
+            .with_version("0.1.0".parse().unwrap());
         controller.set_update_settings(&UpdateSettings { source: Some(Some(self.source())), ..UpdateSettings::default() }).unwrap();
         controller
     }

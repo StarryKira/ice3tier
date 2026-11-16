@@ -287,7 +287,9 @@ async fn updates_routes_and_paths_can_be_driven_from_the_command_line() {
     .unwrap()
     .with_release_keys(TrustedKeys::from(release_key.public()))
     .unwrap()
-    .with_release_cache(cache.path().to_owned());
+    .with_release_cache(cache.path().to_owned())
+    // 下面发布的版本号是写死的，controller 的版本也固定下来，不随这个包的版本号变。
+    .with_version("0.1.0".parse().unwrap());
     let fixture = Fixture::serve(controller).await;
     fixture.ok(&["network", "create", "home"]).await;
 
