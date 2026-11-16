@@ -30,7 +30,8 @@ pub async fn join(state: &StateDir, token: &str, options: JoinOptions) -> anyhow
 
     let config_path = state.config_path();
     Config::write_template_if_missing(&config_path)?;
-    let declared = [(Capability::Exit, options.can_exit), (Capability::Relay, options.can_relay), (Capability::Forward, options.can_forward)];
+    let declared =
+        [(Capability::Exit, options.can_exit), (Capability::Relay, options.can_relay), (Capability::Forward, options.can_forward)];
     for (capability, _) in declared.into_iter().filter(|&(_, on)| on) {
         Config::set_declared(&config_path, capability, true)?;
     }

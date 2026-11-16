@@ -556,10 +556,9 @@ mod tests {
 
     #[tokio::test]
     async fn revocation_and_rejection_stop_the_link_for_good() {
-        for (message, expected) in [
-            (ToNode::Revoked, LinkState::Revoked),
-            (ToNode::Rejected { reason: "不认识这个公钥".into() }, LinkState::Rejected),
-        ] {
+        for (message, expected) in
+            [(ToNode::Revoked, LinkState::Revoked), (ToNode::Rejected { reason: "不认识这个公钥".into() }, LinkState::Rejected)]
+        {
             let controller = FakeController::start().await;
             let (_dir, state) = temp_state();
             let (link, _hello) = link(&controller, Arc::new(NodeKey::generate().unwrap()), state);

@@ -282,7 +282,9 @@ pub enum DefaultAction {
     Local,
     Reject,
     /// 固定走某个出口节点。
-    Exit { node: NodeId },
+    Exit {
+        node: NodeId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

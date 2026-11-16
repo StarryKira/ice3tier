@@ -79,13 +79,21 @@ impl FromStr for EnrollToken {
 pub enum ToController {
     /// 用一次性的注册令牌加入网络。`token` 是令牌里的那个一次性密钥（[`EnrollToken::secret`]），不是整段令牌文本。
     /// 节点的公钥不在消息里：它来自这条连接的 TLS 握手。
-    Enroll { token: String, hello: Hello },
+    Enroll {
+        token: String,
+        hello: Hello,
+    },
     Hello(Hello),
     Report(Report),
     /// 节点已经应用了这个版本的 netmap。
-    Ack { version: u64 },
+    Ack {
+        version: u64,
+    },
     /// 请 controller 把一条信令转给另一个节点。网络里没有 relay 时信令走这里。
-    Signal { to: NodeId, signal: Signal },
+    Signal {
+        to: NodeId,
+        signal: Signal,
+    },
     Heartbeat,
 }
 
@@ -94,11 +102,16 @@ pub enum ToController {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToNode {
     Snapshot(Box<Netmap>),
-    Signal { from: NodeId, signal: Signal },
+    Signal {
+        from: NodeId,
+        signal: Signal,
+    },
     /// 节点被吊销：立即关闭全部连接和中转会话，不再重连。
     Revoked,
     /// controller 不接受这个节点（令牌无效、公钥没有注册等）。
-    Rejected { reason: String },
+    Rejected {
+        reason: String,
+    },
     Heartbeat,
 }
 
@@ -169,9 +182,13 @@ pub struct RouteEntry {
 pub enum Route {
     /// 没有可用的路。
     None,
-    Direct { addr: SocketAddr },
+    Direct {
+        addr: SocketAddr,
+    },
     /// 经 relay，按经过的顺序列出。
-    Relay { relays: Vec<NodeId> },
+    Relay {
+        relays: Vec<NodeId>,
+    },
 }
 
 /// 节点之间的信令：建立直连之前要交换的东西。

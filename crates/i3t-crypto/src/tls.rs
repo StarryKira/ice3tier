@@ -217,7 +217,10 @@ mod tests {
     const ALPN: &[u8] = b"test/1";
 
     /// 在内存里把一次握手跑完，返回两边各自看到的结果。
-    fn handshake(client: ClientConfig, server: ServerConfig) -> (Result<ClientConnection, rustls::Error>, Result<ServerConnection, rustls::Error>) {
+    fn handshake(
+        client: ClientConfig,
+        server: ServerConfig,
+    ) -> (Result<ClientConnection, rustls::Error>, Result<ServerConnection, rustls::Error>) {
         let name = ServerName::try_from(CERT_NAME).unwrap();
         let mut client = ClientConnection::new(Arc::new(client), name).unwrap();
         let mut server = ServerConnection::new(Arc::new(server)).unwrap();

@@ -45,11 +45,7 @@ impl NodeKey {
     ///
     /// 不是 `PRIVATE KEY` 的 PEM，或者里面不是 Ed25519 私钥。
     pub fn from_pem(pem: &str) -> Result<Self, KeyError> {
-        let body = pem
-            .trim()
-            .strip_prefix(PEM_HEADER)
-            .and_then(|rest| rest.strip_suffix(PEM_FOOTER))
-            .ok_or(KeyError::NotPem)?;
+        let body = pem.trim().strip_prefix(PEM_HEADER).and_then(|rest| rest.strip_suffix(PEM_FOOTER)).ok_or(KeyError::NotPem)?;
         let base64: String = body.split_whitespace().collect();
         let der = STANDARD.decode(base64).map_err(|_| KeyError::NotPem)?;
         Self::from_pkcs8_der(&der)
@@ -74,8 +70,7 @@ impl NodeKey {
 
     #[must_use]
     pub fn public(&self) -> PublicKey {
-        let bytes: [u8; PublicKey::LEN] =
-            self.pair.public_key().as_ref().try_into().expect("Ed25519 公钥固定是 32 字节，这是算法的定义");
+        let bytes: [u8; PublicKey::LEN] = self.pair.public_key().as_ref().try_into().expect("Ed25519 公钥固定是 32 字节，这是算法的定义");
         PublicKey::from_bytes(bytes)
     }
 
@@ -83,8 +78,7 @@ impl NodeKey {
     #[must_use]
     pub fn sign(&self, purpose: &str, message: &[u8]) -> Signature {
         let signature = self.pair.sign(&signed_bytes(purpose, message));
-        let bytes: [u8; Signature::LEN] =
-            signature.as_ref().try_into().expect("Ed25519 签名固定是 64 字节，这是算法的定义");
+        let bytes: [u8; Signature::LEN] = signature.as_ref().try_into().expect("Ed25519 签名固定是 64 字节，这是算法的定义");
         Signature(bytes)
     }
 
@@ -130,9 +124,7 @@ impl fmt::Debug for Signature {
 ///
 /// 签名不对：消息被改过、用途标签不同，或者不是这把密钥签的。
 pub fn verify(key: &PublicKey, purpose: &str, message: &[u8], signature: &Signature) -> Result<(), BadSignature> {
-    UnparsedPublicKey::new(&ED25519, key.as_bytes())
-        .verify(&signed_bytes(purpose, message), signature.as_bytes())
-        .map_err(|_| BadSignature)
+    UnparsedPublicKey::new(&ED25519, key.as_bytes()).verify(&signed_bytes(purpose, message), signature.as_bytes()).map_err(|_| BadSignature)
 }
 
 /// 真正被签名的字节：固定前缀、用途标签的长度和内容、消息。标签带长度，所以"标签 + 消息"的拼接没有歧义。
