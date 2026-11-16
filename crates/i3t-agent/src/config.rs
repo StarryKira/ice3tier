@@ -38,6 +38,10 @@ forward = false
 socks5 = "127.0.0.1:1080"
 http = "127.0.0.1:1081"
 
+# 本机的指标接口，Prometheus 的文本格式：http://<这里的地址>/metrics。只能绑回环地址。不需要就写 "off"。
+[metrics]
+listen = "127.0.0.1:20333"
+
 [log]
 # 日志级别：error、warn、info、debug、trace。
 level = "info"
@@ -52,6 +56,8 @@ pub struct Config {
     pub declare: Declare,
     #[serde(default)]
     pub proxy: Proxy,
+    #[serde(default)]
+    pub metrics: Metrics,
     #[serde(default)]
     pub log: Log,
 }
@@ -125,6 +131,14 @@ impl Config {
                 );
             }
         }
+        if let ProxyBind::At(addr) = self.metrics.listen
+            && !addr.ip().is_loopback()
+        {
+            bail!(
+                "metrics.listen = \"{addr}\" 不是回环地址。指标接口不带认证，只能写 127.0.0.1 或 [::1]。\n\
+                 要从别的机器抓指标，请在这台机器上用反向代理或者 SSH 端口转发把它转出去。"
+            );
+        }
         if let (ProxyBind::At(socks5), ProxyBind::At(http)) = (self.proxy.socks5, self.proxy.http)
             && socks5 == http
         {
@@ -136,7 +150,13 @@ impl Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { port: default_port(), declare: Declare::default(), proxy: Proxy::default(), log: Log::default() }
+        Self {
+            port: default_port(),
+            declare: Declare::default(),
+            proxy: Proxy::default(),
+            metrics: Metrics::default(),
+            log: Log::default(),
+        }
     }
 }
 
@@ -224,7 +244,7 @@ fn default_http() -> ProxyBind {
     ProxyBind::At(SocketAddr::from(([127, 0, 0, 1], 1081)))
 }
 
-/// 一个代理入口绑在哪里，或者不开。配置文件里写地址，或者写 `"off"`。
+/// 一个只给本机用的入口（代理、指标接口）绑在哪里，或者不开。配置文件里写地址，或者写 `"off"`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProxyBind {
     Off,
@@ -251,6 +271,25 @@ impl<'de> Deserialize<'de> for ProxyBind {
             serde::de::Error::custom(format!("\"{text}\" 不是一个地址。写成 \"127.0.0.1:1080\" 这样的“地址:端口”，或者写 \"off\" 表示不开"))
         })
     }
+}
+
+/// 本机的指标接口。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Metrics {
+    /// 绑在哪里，或者不开。写法和代理入口一样：地址，或者 `"off"`。
+    #[serde(default = "default_metrics")]
+    pub listen: ProxyBind,
+}
+
+impl Default for Metrics {
+    fn default() -> Self {
+        Self { listen: default_metrics() }
+    }
+}
+
+fn default_metrics() -> ProxyBind {
+    ProxyBind::At(SocketAddr::from(([127, 0, 0, 1], 20333)))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -337,6 +376,16 @@ mod tests {
     fn a_non_loopback_proxy_is_refused_with_a_pointer_to_the_right_place() {
         let error = error_of("[proxy]\nsocks5 = \"0.0.0.0:1080\"\n");
         assert!(error.contains("回环地址") && error.contains("监听器"), "{error}");
+    }
+
+    #[test]
+    fn the_metrics_endpoint_can_be_moved_or_switched_off_but_not_exposed() {
+        assert_eq!(Config::default().metrics.listen.addr(), Some("127.0.0.1:20333".parse().unwrap()));
+        let moved = Config::parse("[metrics]\nlisten = \"[::1]:9100\"\n").unwrap();
+        assert_eq!(moved.metrics.listen.addr(), Some("[::1]:9100".parse().unwrap()));
+        assert_eq!(Config::parse("[metrics]\nlisten = \"off\"\n").unwrap().metrics.listen, ProxyBind::Off);
+        let error = error_of("[metrics]\nlisten = \"0.0.0.0:20333\"\n");
+        assert!(error.contains("回环地址") && error.contains("metrics.listen"), "{error}");
     }
 
     #[test]

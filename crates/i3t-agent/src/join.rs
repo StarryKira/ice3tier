@@ -2,10 +2,11 @@
 
 use anyhow::Context;
 use i3t_model::Netmap;
-use i3t_model::control::{EnrollToken, Hello};
+use i3t_model::control::{EnrollToken, Hello, PROTOCOL_REVISION};
 
 use crate::config::{Capability, Config};
 use crate::control;
+use crate::program::Program;
 use crate::state::{ControllerInfo, StateDir};
 
 /// 加入时在命令行上给出的本地声明。没有给的保持配置文件里原来的值。
@@ -24,7 +25,7 @@ pub struct JoinOptions {
 /// # Errors
 ///
 /// 令牌不对、状态目录写不了、连不上 controller 或者 controller 拒绝。
-pub async fn join(state: &StateDir, token: &str, options: JoinOptions) -> anyhow::Result<Netmap> {
+pub async fn join(state: &StateDir, token: &str, options: JoinOptions, program: &Program) -> anyhow::Result<Netmap> {
     let token: EnrollToken = token.parse().context("这不是一个注册令牌。令牌以 i3t- 开头，在 WebUI 的“添加节点”里生成")?;
     let key = state.key_or_generate()?;
 
@@ -38,7 +39,7 @@ pub async fn join(state: &StateDir, token: &str, options: JoinOptions) -> anyhow
     let config = Config::load(&config_path)?;
 
     let controller = ControllerInfo { address: token.controller.clone(), key: token.key };
-    let netmap = control::enroll(&controller, &key, &token.secret, hello(&config)).await?;
+    let netmap = control::enroll(&controller, &key, &token.secret, hello(&config, program)).await?;
     state.save_controller(&controller)?;
     state.save_netmap(&netmap)?;
     Ok(netmap)
@@ -46,22 +47,35 @@ pub async fn join(state: &StateDir, token: &str, options: JoinOptions) -> anyhow
 
 /// 这个节点现在的自我介绍。
 #[must_use]
-pub fn hello(config: &Config) -> Hello {
+pub fn hello(config: &Config, program: &Program) -> Hello {
     Hello {
-        version: env!("CARGO_PKG_VERSION").to_owned(),
+        version: program.version.to_string(),
         platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         declared: config.declare.into(),
         port: config.port,
+        hostname: hostname(),
+        protocol: PROTOCOL_REVISION,
+        self_update: Some(program.self_update()),
     }
+}
+
+/// 这台机器的主机名。controller 用它给新节点起名字；系统给的不是合法的文字时当作没有。
+fn hostname() -> String {
+    gethostname::gethostname().into_string().unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
-    use i3t_model::control::{ToController, ToNode};
+    use i3t_model::control::{SelfUpdate, ToController, ToNode};
+    use i3t_model::update::{Platform, SelfUpdateBlocker, Version};
 
     use super::*;
     use crate::control::testing::{FakeController, expect, netmap};
     use crate::control::write_message;
+
+    fn program() -> Program {
+        Program { version: Version::new(0, 4, 2), path: "/opt/i3t/i3t".into(), blocker: None }
+    }
 
     fn token_for(controller: &FakeController) -> String {
         EnrollToken { controller: controller.info.address.clone(), key: controller.info.key, secret: "s3cret".to_owned() }.to_string()
@@ -83,16 +97,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = StateDir::open(dir.path()).unwrap();
         let options = JoinOptions { can_exit: true, ..JoinOptions::default() };
-        let received = join(&state, &token, options).await.unwrap();
+        let received = join(&state, &token, options, &program()).await.unwrap();
         let (secret, hello) = server.await.unwrap();
 
         assert_eq!(received.version, 1);
         assert_eq!(secret, "s3cret");
         assert!(hello.declared.exit && !hello.declared.relay);
         assert_eq!(hello.port, 20330);
+        assert_eq!((hello.version.as_str(), hello.protocol, hello.self_update), ("0.4.2", PROTOCOL_REVISION, Some(SelfUpdate::ABLE)));
         assert_eq!(state.controller().unwrap(), Some(expected_controller));
         assert_eq!(state.netmap().unwrap().unwrap().version, 1);
         assert!(Config::load(&state.config_path()).unwrap().declare.exit);
+    }
+
+    #[test]
+    fn hello_says_who_the_program_is_and_why_it_cannot_update_itself() {
+        let blocked = Program { blocker: Some(SelfUpdateBlocker::ReadOnlyDir), ..program() };
+        let hello = hello(&Config::default(), &blocked);
+        assert_eq!(hello.self_update, Some(SelfUpdate { able: false, blocker: Some(SelfUpdateBlocker::ReadOnlyDir) }));
+        assert_eq!(hello.platform, Platform::current().as_str(), "平台名和发布清单里的写法一致，controller 靠它挑包");
+        assert_eq!(hello.hostname, gethostname::gethostname().to_string_lossy());
     }
 
     #[tokio::test]
@@ -106,7 +130,7 @@ mod tests {
         });
         let dir = tempfile::tempdir().unwrap();
         let state = StateDir::open(dir.path()).unwrap();
-        let error = join(&state, &token, JoinOptions::default()).await.unwrap_err();
+        let error = join(&state, &token, JoinOptions::default(), &program()).await.unwrap_err();
         assert!(format!("{error:#}").contains("令牌过期"));
         assert_eq!(state.controller().unwrap(), None);
         assert!(state.netmap().unwrap().is_none());
@@ -116,7 +140,7 @@ mod tests {
     async fn text_that_is_not_a_token_is_explained() {
         let dir = tempfile::tempdir().unwrap();
         let state = StateDir::open(dir.path()).unwrap();
-        let error = join(&state, "hello", JoinOptions::default()).await.unwrap_err();
+        let error = join(&state, "hello", JoinOptions::default(), &program()).await.unwrap_err();
         assert!(format!("{error:#}").contains("i3t-"));
     }
 }

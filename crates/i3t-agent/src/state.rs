@@ -6,6 +6,8 @@
 //! | `controller.json` | controller 的地址和公钥，注册时从令牌里得到 |
 //! | `config.toml` | 使用者手改的配置，见 [`crate::config`] |
 //! | `netmap.json` | 最后一份成功应用的 netmap。controller 不在线时节点靠它照常工作 |
+//! | `local.json` | 正在运行的节点的本机状态接口在哪里、凭什么问它。节点启动时写，退出时删 |
+//! | `update/` | 归 `i3t-update` 管：取了一半的更新包、待确认的版本、失败过的版本 |
 //!
 //! 所有文件都是先写临时文件再改名，所以断电不会留下写了一半的文件。
 
@@ -24,6 +26,7 @@ const KEY_FILE: &str = "node.key";
 const CONTROLLER_FILE: &str = "controller.json";
 const CONFIG_FILE: &str = "config.toml";
 const NETMAP_FILE: &str = "netmap.json";
+const LOCAL_FILE: &str = "local.json";
 
 /// 节点默认绑定的端口。
 pub const DEFAULT_PORT: u16 = 20330;
@@ -34,6 +37,23 @@ pub struct ControllerInfo {
     /// `主机:端口`，主机可以是域名。
     pub address: String,
     pub key: PublicKey,
+}
+
+/// 正在运行的节点的本机状态接口：地址，和问它要带的令牌。
+///
+/// 这个文件和节点私钥放在同一个目录里、权限一样，所以"谁能问节点的状态"和"谁能读节点的私钥"是同一批人：
+/// 运行节点的那个用户（和 root）。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalEndpoint {
+    pub addr: std::net::SocketAddr,
+    pub token: String,
+}
+
+/// 令牌不能进日志。
+impl std::fmt::Debug for LocalEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalEndpoint").field("addr", &self.addr).finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +139,35 @@ impl StateDir {
     /// 写入失败。
     pub fn save_netmap(&self, netmap: &Netmap) -> anyhow::Result<()> {
         self.write_json(NETMAP_FILE, netmap)
+    }
+
+    /// 正在运行的节点留下的本机状态接口；没有节点在运行（或者它没能开出这个接口）时是 `None`。
+    ///
+    /// # Errors
+    ///
+    /// 文件读不了或者解析不了。
+    pub fn local(&self) -> anyhow::Result<Option<LocalEndpoint>> {
+        self.read_json(LOCAL_FILE)
+    }
+
+    /// # Errors
+    ///
+    /// 写入失败。
+    pub fn save_local(&self, local: &LocalEndpoint) -> anyhow::Result<()> {
+        self.write_json(LOCAL_FILE, local)
+    }
+
+    /// 节点退出时删掉本机状态接口的记录。本来就没有的话什么都不做。
+    ///
+    /// # Errors
+    ///
+    /// 文件在但是删不掉。
+    pub fn remove_local(&self) -> anyhow::Result<()> {
+        let path = self.root.join(LOCAL_FILE);
+        match fs::remove_file(&path) {
+            Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err).with_context(|| format!("删除 {}", path.display())),
+            _ => Ok(()),
+        }
     }
 
     fn read_json<T: DeserializeOwned>(&self, name: &str) -> anyhow::Result<Option<T>> {
@@ -211,6 +260,24 @@ mod tests {
         state.save_controller(&controller).unwrap();
         let reopened = StateDir::open(state.path()).unwrap();
         assert_eq!(reopened.controller().unwrap(), Some(controller));
+    }
+
+    #[test]
+    fn the_local_endpoint_record_is_private_and_goes_away_cleanly() {
+        let (_dir, state) = state();
+        assert_eq!(state.local().unwrap(), None);
+        state.remove_local().unwrap();
+        let local = LocalEndpoint { addr: "127.0.0.1:40123".parse().unwrap(), token: "s3cret-token".to_owned() };
+        state.save_local(&local).unwrap();
+        assert_eq!(state.local().unwrap(), Some(local.clone()));
+        assert!(!format!("{local:?}").contains("s3cret-token"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(state.path().join(LOCAL_FILE)).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        state.remove_local().unwrap();
+        assert_eq!(state.local().unwrap(), None);
     }
 
     #[test]

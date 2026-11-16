@@ -1,0 +1,97 @@
+//! 新程序的自检：`i3t self-check` 做的事。约定见 `i3t_update::self_check`。
+//!
+//! 更新的时候，正在运行的旧程序把新程序放到自己旁边，运行它的这个子命令，退出码是 0 才会换上去。
+//! 新程序要在这台机器上证明三件事：自己就是清单上说的那个版本；读得了现有的配置和状态；
+//! 能和 controller 完成一次握手。
+//!
+//! 这时旧程序还在运行，所以这里只读不写，不绑节点的端口，握手做到双方互相认证完就断开、不报到。
+
+use anyhow::Context;
+use i3t_crypto::NodeKey;
+use i3t_model::update::Version;
+use i3t_update::SelfCheckFailure;
+
+use crate::config::Config;
+use crate::control;
+use crate::state::{ControllerInfo, StateDir};
+
+/// 握手要用的东西：能把它们读出来，就说明现有的配置和状态这个程序都读得懂。
+struct Loaded {
+    key: NodeKey,
+    controller: ControllerInfo,
+}
+
+/// 自检。`running` 是这个程序自己的版本。
+///
+/// # Errors
+///
+/// 三件事里的哪一件没有做成。调用方把它写到标准错误，以非 0 退出。
+pub async fn self_check(state: &StateDir, running: &Version) -> Result<(), SelfCheckFailure> {
+    i3t_update::self_check(running, || load(state), async |loaded: Loaded| control::probe(&loaded.controller, &loaded.key).await).await
+}
+
+/// 把节点运行要读的东西都读一遍：配置文件、私钥、controller 的地址、最后一份 netmap。
+fn load(state: &StateDir) -> anyhow::Result<Loaded> {
+    const NOT_JOINED: &str = "这台机器还没有加入网络";
+    Config::load(&state.config_path())?;
+    let key = state.key()?.context(NOT_JOINED)?;
+    let controller = state.controller()?.context(NOT_JOINED)?;
+    state.netmap()?.context(NOT_JOINED)?;
+    Ok(Loaded { key, controller })
+}
+
+#[cfg(test)]
+mod tests {
+    use i3t_model::control::ToController;
+
+    use super::*;
+    use crate::control::read_message;
+    use crate::control::testing::{FakeController, netmap};
+
+    fn joined(controller: &FakeController) -> (tempfile::TempDir, StateDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateDir::open(dir.path()).unwrap();
+        state.key_or_generate().unwrap();
+        state.save_controller(&controller.info).unwrap();
+        state.save_netmap(&netmap(3)).unwrap();
+        (dir, state)
+    }
+
+    #[tokio::test]
+    async fn a_joined_node_that_reaches_its_controller_passes_without_introducing_itself() {
+        let controller = FakeController::start().await;
+        let (_dir, state) = joined(&controller);
+        let expected = state.key().unwrap().unwrap().public();
+        let server = tokio::spawn(async move {
+            let (mut stream, key) = controller.accept().await;
+            assert_eq!(key, expected, "握手用的是节点自己的密钥");
+            assert!(read_message::<_, ToController>(&mut stream).await.unwrap().is_none(), "自检不发 hello");
+        });
+        self_check(&state, &Version::new(0, 2, 0)).await.unwrap();
+        server.await.unwrap();
+        let names: Vec<_> = std::fs::read_dir(state.path()).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+        assert_eq!(names.len(), 3, "自检不往状态目录里写东西：{names:?}");
+    }
+
+    #[tokio::test]
+    async fn state_the_program_cannot_read_fails_the_check_before_any_connection() {
+        let controller = FakeController::start().await;
+        let (_dir, state) = joined(&controller);
+        std::fs::write(state.config_path(), "port = \"not a number\"\n").unwrap();
+        let failure = self_check(&state, &Version::new(0, 2, 0)).await.unwrap_err();
+        assert!(matches!(&failure, SelfCheckFailure::State(reason) if reason.contains("config.toml")), "{failure}");
+
+        let empty = tempfile::tempdir().unwrap();
+        let failure = self_check(&StateDir::open(empty.path()).unwrap(), &Version::new(0, 2, 0)).await.unwrap_err();
+        assert!(matches!(&failure, SelfCheckFailure::State(reason) if reason.contains("还没有加入网络")), "{failure}");
+    }
+
+    #[tokio::test]
+    async fn a_controller_that_cannot_be_reached_fails_the_check() {
+        let controller = FakeController::start().await;
+        let (_dir, state) = joined(&controller);
+        drop(controller);
+        let failure = self_check(&state, &Version::new(0, 2, 0)).await.unwrap_err();
+        assert!(matches!(failure, SelfCheckFailure::Handshake(_)), "{failure}");
+    }
+}

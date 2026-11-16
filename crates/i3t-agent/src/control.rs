@@ -1,23 +1,32 @@
 //! 连 controller 的那条长连接。
 //!
-//! 节点用它做四件事：第一次加入时注册（[`enroll`]）；收 netmap 并确认；定期上报；转发信令。
+//! 节点用它做这些事：第一次加入时注册（[`enroll`]）；收 netmap 并确认；定期上报；转发信令；
+//! 收更新的指令、取更新包（[`Packages`]）；回答"到某个对端现在怎么走"的查询。
 //! 连接断了就带退避地重连，这期间节点按手上最后一份 netmap 照常工作。
 //! 被吊销，或者 controller 不认这个节点时，不再重连。
+//!
+//! 上报里的路由表：每次连上之后的第一次上报是完整的，之后只带变化的条目（延迟的小幅波动不算变化）。
+//! 这件事在这里做，因为只有这里知道一条连接从哪里开始。
+//!
+//! 收到解析不了的一帧（多半是更新版本的 controller 才有的消息）就跳过，连接接着用。
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail, ensure};
 use i3t_crypto::{NodeKey, tls};
 use i3t_model::Netmap;
-use i3t_model::control::{Hello, MAX_FRAME_LEN, Report, Signal, ToController, ToNode};
+use i3t_model::control::{Hello, MAX_FRAME_LEN, Report, RouteAnswer, RouteEntry, Signal, ToController, ToNode};
+use i3t_model::update::{Platform, SignedManifest, UpdateTiming, Version};
 use i3t_proto::NodeId;
+use i3t_update::{ChunkRequest, PackageSource, SourceError};
 use rustls::pki_types::ServerName;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{Notify, mpsc, watch};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 use tokio_rustls::TlsConnector;
@@ -31,6 +40,16 @@ pub const ALPN: &[u8] = b"i3t-ctl/1";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// 信令是尽力而为的：排队超过这个数说明另一头处理不过来，新的直接丢掉，发起方会重试。
 const SIGNAL_QUEUE: usize = 64;
+/// controller 的更新指令最多排这么多条。它们是一条顶替一条的，正常情况下只有一条在排。
+const ORDER_QUEUE: usize = 8;
+/// 交给长连接的请求（取包、马上上报）最多排这么多条。
+const REQUEST_QUEUE: usize = 16;
+/// 等 controller 给一段包最多等多久。到时候按链路中断处理，下载的一方会从同一个位置再要。
+const CHUNK_TIMEOUT: Duration = Duration::from_secs(30);
+/// 自检时等 controller 关闭探测用的连接最多等多久。
+const PROBE_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+/// 路由上的延迟变化不超过这个数（毫秒）、也不超过原来的四分之一时，不算变化，不重新上报。
+const RTT_NOISE_MS: u32 = 10;
 
 /// 用注册令牌里的一次性密钥加入网络，返回 controller 给这个节点的第一份 netmap。
 ///
@@ -49,6 +68,98 @@ pub async fn enroll(controller: &ControllerInfo, key: &NodeKey, secret: &str, he
         Some(ToNode::Rejected { reason }) => bail!("controller 拒绝了注册：{reason}"),
         Some(other) => bail!("controller 对注册请求的回答不对：{}", kind_of(&other)),
         None => bail!("controller 没有回答就关闭了连接"),
+    }
+}
+
+/// 和 controller 握一次手就断开，不报到：新程序的自检用它确认"这台机器上的这个程序连得上 controller"。
+///
+/// 握手是双向认证的 TLS：本节点按公钥认 controller，controller 收下本节点的证书。之后不发 `Hello`，直接正常关闭，
+/// 并等 controller 也关闭。不报到是因为这时旧程序还连着：报到的话 controller 会以为节点重连了，把旧程序的连接挤掉。
+///
+/// # Errors
+///
+/// 连不上 controller、controller 的公钥不对，或者 controller 拒绝了这次握手。
+pub async fn probe(controller: &ControllerInfo, key: &NodeKey) -> anyhow::Result<()> {
+    let mut stream = connect(controller, key).await?;
+    stream.shutdown().await.context("关闭探测用的连接")?;
+    // TLS 1.3 里客户端先完成握手：controller 要是不收本节点的证书，要到这里读的时候才看得到它的拒绝。
+    let mut rest = [0; 64];
+    match timeout(PROBE_CLOSE_TIMEOUT, stream.read(&mut rest)).await {
+        // controller 关了连接（没有发关闭通知就断开也算）：握手是成了的。
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => Ok(()),
+        Ok(Err(err)) => Err(err).context("controller 拒绝了握手"),
+        // 握手已经完成，只是 controller 迟迟不关连接。它没有拒绝，算通过。
+        Err(_) => Ok(()),
+    }
+}
+
+/// controller 对更新的指示。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateCommand {
+    /// 更新到这份清单说的版本。
+    Update { manifest: SignedManifest, timing: UpdateTiming },
+    /// 上一次要求的更新不要做了。
+    Cancel,
+}
+
+/// 经长连接从 controller 取更新包。可以克隆，带进别的任务里用。
+///
+/// 链路的任何问题（没连上、断了、controller 迟迟不回答）都报成"被打断"，下载的一方过一会儿从同一个位置再要；
+/// 只有 controller 明说给不了的才是"给不了"。
+#[derive(Debug, Clone)]
+pub struct Packages {
+    requests: mpsc::Sender<Request>,
+}
+
+impl PackageSource for Packages {
+    async fn fetch(&self, request: ChunkRequest<'_>) -> Result<Vec<u8>, SourceError> {
+        let (reply, answer) = oneshot::channel();
+        let chunk =
+            Chunk { version: request.version.clone(), platform: request.platform.clone(), offset: request.offset, len: request.len };
+        let interrupted = |reason: &str| SourceError::Interrupted(reason.to_owned());
+        self.requests.send(Request::Chunk { chunk, reply }).await.map_err(|_| interrupted("和 controller 的长连接已经停止"))?;
+        match timeout(CHUNK_TIMEOUT, answer).await {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(_)) => Err(interrupted("和 controller 的连接断了")),
+            Err(_) => Err(interrupted("controller 迟迟没有给这一段")),
+        }
+    }
+}
+
+/// 要 controller 给的一段包。
+#[derive(Debug)]
+struct Chunk {
+    version: Version,
+    platform: Platform,
+    offset: u64,
+    len: u32,
+}
+
+/// 别的任务交给长连接去做的事。
+#[derive(Debug)]
+enum Request {
+    Chunk {
+        chunk: Chunk,
+        reply: oneshot::Sender<Result<Vec<u8>, SourceError>>,
+    },
+    /// 马上上报一次，写出去之后告诉我。
+    Report {
+        written: oneshot::Sender<()>,
+    },
+}
+
+impl Request {
+    /// 没有连着 controller，这件事现在做不了：取包的会过一会儿从同一个位置再要，等上报写出去的不用再等。
+    fn turn_away(self) {
+        match self {
+            Self::Chunk { reply, .. } => {
+                // 要的人不等了也无妨。
+                let _gone = reply.send(Err(SourceError::Interrupted("还没有连上 controller".to_owned())));
+            }
+            // 丢掉 `written`：等的人看到的是"没有写出去"。
+            Self::Report { .. } => {}
+        }
     }
 }
 
@@ -95,8 +206,10 @@ pub struct LinkSetup {
     pub initial: Arc<Netmap>,
     /// 当前的自我介绍。本地声明变了就往里放一个新值，长连接会把它发给 controller。
     pub hello: watch::Receiver<Hello>,
-    /// 每次上报时调用，取当前要报的内容。
+    /// 每次上报时调用，取当前要报的内容。`routes` 里放完整的路由表：哪些条目要发由长连接自己算。
     pub report: Box<dyn Fn() -> Report + Send + Sync>,
+    /// controller 问"到这个对端现在怎么走"时调用。
+    pub route: Box<dyn Fn(NodeId) -> RouteAnswer + Send + Sync>,
     /// 通知它一下，就不等下一次定时上报，马上报一次。
     /// 候选端点或者挂靠的 relay 变了的时候用：对端要靠这些才找得到本节点，晚报十秒就晚通十秒。
     pub report_now: Arc<Notify>,
@@ -111,6 +224,8 @@ pub struct ControlLink {
     state: watch::Receiver<LinkState>,
     signals: mpsc::Receiver<(NodeId, Signal)>,
     outgoing: mpsc::Sender<(NodeId, Signal)>,
+    orders: Option<mpsc::Receiver<UpdateCommand>>,
+    requests: mpsc::Sender<Request>,
     task: JoinHandle<()>,
 }
 
@@ -121,8 +236,40 @@ impl ControlLink {
         let (state_tx, state) = watch::channel(LinkState::Offline);
         let (signals_tx, signals) = mpsc::channel(SIGNAL_QUEUE);
         let (outgoing, outgoing_rx) = mpsc::channel(SIGNAL_QUEUE);
-        let worker = Worker { setup, netmap: netmap_tx, state: state_tx, signals: signals_tx, outgoing: outgoing_rx };
-        Self { netmap, state, signals, outgoing, task: tokio::spawn(worker.run()) }
+        let (orders_tx, orders) = mpsc::channel(ORDER_QUEUE);
+        let (requests, requests_rx) = mpsc::channel(REQUEST_QUEUE);
+        let worker = Worker {
+            setup,
+            netmap: netmap_tx,
+            state: state_tx,
+            signals: signals_tx,
+            outgoing: outgoing_rx,
+            orders: orders_tx,
+            requests: requests_rx,
+        };
+        Self { netmap, state, signals, outgoing, orders: Some(orders), requests, task: tokio::spawn(worker.run()) }
+    }
+
+    /// controller 对更新的指示从这里出来。只能取走一次，交给管更新的那个任务；没有人取的话指示被丢掉。
+    pub fn take_update_commands(&mut self) -> Option<mpsc::Receiver<UpdateCommand>> {
+        self.orders.take()
+    }
+
+    /// 经这条长连接取更新包的句柄。
+    #[must_use]
+    pub fn packages(&self) -> Packages {
+        Packages { requests: self.requests.clone() }
+    }
+
+    /// 马上上报一次，等它写出去；没有连着的话不等，返回 `false`。
+    ///
+    /// 进程要退出（更新之后重启）之前用它把最后的状态送到 controller：之后就没有机会了。
+    pub async fn report_and_wait(&self, limit: Duration) -> bool {
+        let (written, done) = oneshot::channel();
+        if self.requests.send(Request::Report { written }).await.is_err() {
+            return false;
+        }
+        matches!(timeout(limit, done).await, Ok(Ok(())))
     }
 
     /// 当前的 netmap，controller 每下发一份就更新一次。
@@ -166,6 +313,20 @@ struct Worker {
     state: watch::Sender<LinkState>,
     signals: mpsc::Sender<(NodeId, Signal)>,
     outgoing: mpsc::Receiver<(NodeId, Signal)>,
+    orders: mpsc::Sender<UpdateCommand>,
+    requests: mpsc::Receiver<Request>,
+}
+
+/// 一条连接期间的状态。连接断了就整个丢掉，等回答的人因此知道被打断了。
+#[derive(Default)]
+struct Session {
+    /// 这条连接上报过的路由表：下一次只报和它不同的条目。
+    reported_routes: BTreeMap<NodeId, RouteEntry>,
+    /// 发出去、还在等回答的取包请求。
+    chunks: BTreeMap<u64, oneshot::Sender<Result<Vec<u8>, SourceError>>>,
+    next_request: u64,
+    /// 是不是已经做过这条连接上的第一次上报。
+    reported: bool,
 }
 
 impl Worker {
@@ -191,16 +352,43 @@ impl Worker {
             if was_online {
                 backoff = timing.backoff_min;
             }
-            tokio::time::sleep(jittered(backoff)).await;
+            self.idle(jittered(backoff)).await;
             backoff = (backoff * 2).min(timing.backoff_max);
         }
     }
 
+    /// 没连着的时候等 `pause`。这期间来的请求不排着等下一条连接，马上告诉对方做不了。
+    async fn idle(&mut self, pause: Duration) {
+        let resume = tokio::time::sleep(pause);
+        tokio::pin!(resume);
+        loop {
+            tokio::select! {
+                () = &mut resume => return,
+                Some(request) = self.requests.recv() => request.turn_away(),
+            }
+        }
+    }
+
+    /// 连 controller。连上之前来的请求同样马上告诉对方做不了：连接可能要等到超时才知道连不上。
+    async fn connect(&mut self) -> anyhow::Result<TlsStream<TcpStream>> {
+        let connecting = connect(&self.setup.controller, &self.setup.key);
+        tokio::pin!(connecting);
+        loop {
+            tokio::select! {
+                stream = &mut connecting => return stream,
+                Some(request) = self.requests.recv() => request.turn_away(),
+            }
+        }
+    }
+
     async fn session(&mut self, was_online: &mut bool) -> anyhow::Result<Ended> {
-        let stream = connect(&self.setup.controller, &self.setup.key).await?;
+        let stream = self.connect().await?;
         let (reader, mut writer) = tokio::io::split(stream);
         let hello = self.setup.hello.borrow_and_update().clone();
         write_message(&mut writer, &ToController::Hello(hello)).await?;
+        let mut session = Session::default();
+        // 报到之后马上上报一次：完整的路由表，和更新的状态。controller 等这一次到了才会给节点下发更新指令。
+        self.report(&mut writer, &mut session).await?;
 
         // 读一帧不能被打断（长度和内容分两次读），所以交给单独的任务，这里只从队列里取完整的消息。
         let mut inbound = spawn_reader(reader);
@@ -228,16 +416,36 @@ impl Worker {
                         ToNode::Revoked => return Ok(Ended::Revoked),
                         ToNode::Rejected { reason } => return Ok(Ended::Rejected(reason)),
                         ToNode::Heartbeat => {}
+                        ToNode::Update { manifest, timing } => self.pass_on(UpdateCommand::Update { manifest, timing }),
+                        ToNode::UpdateCancel => self.pass_on(UpdateCommand::Cancel),
+                        ToNode::PackageChunk { request, data } => session.answer(request, Ok(data)),
+                        ToNode::PackageUnavailable { request, reason } => session.answer(request, Err(SourceError::Unavailable(reason))),
+                        ToNode::RouteQuery { request, peer } => {
+                            let answer = (self.setup.route)(peer);
+                            tracing::debug!(%peer, route = ?answer.route, "回答 controller 的路由查询");
+                            write_message(&mut writer, &ToController::RouteAnswer { request, answer }).await?;
+                        }
                     }
                 }
                 Some((to, signal)) = self.outgoing.recv() => {
                     write_message(&mut writer, &ToController::Signal { to, signal }).await?;
                 }
-                _ = report_at.tick() => {
-                    write_message(&mut writer, &ToController::Report((self.setup.report)())).await?;
-                }
+                Some(request) = self.requests.recv() => match request {
+                    Request::Chunk { chunk, reply } => {
+                        let request = session.expect(reply);
+                        let Chunk { version, platform, offset, len } = chunk;
+                        write_message(&mut writer, &ToController::PackageRequest { request, version, platform, offset, len }).await?;
+                    }
+                    Request::Report { written } => {
+                        self.report(&mut writer, &mut session).await?;
+                        report_at.reset();
+                        // 等的人不等了也无妨。
+                        let _gone = written.send(());
+                    }
+                },
+                _ = report_at.tick() => self.report(&mut writer, &mut session).await?,
                 () = self.setup.report_now.notified() => {
-                    write_message(&mut writer, &ToController::Report((self.setup.report)())).await?;
+                    self.report(&mut writer, &mut session).await?;
                     report_at.reset();
                 }
                 Ok(()) = self.setup.hello.changed() => {
@@ -251,6 +459,21 @@ impl Worker {
         }
     }
 
+    /// 上报一次。这条连接上的第一次带完整的路由表，之后只带变化的条目。
+    async fn report<W: AsyncWrite + Unpin>(&self, writer: &mut W, session: &mut Session) -> anyhow::Result<()> {
+        let mut report = (self.setup.report)();
+        report.routes_full = !session.reported;
+        report.routes = session.routes_to_report(report.routes);
+        session.reported = true;
+        write_message(writer, &ToController::Report(report)).await
+    }
+
+    fn pass_on(&self, command: UpdateCommand) {
+        if self.orders.try_send(command).is_err() {
+            tracing::warn!("没有人在处理更新的指示（或者积压太多），丢掉一条");
+        }
+    }
+
     fn apply(&self, netmap: Netmap) {
         if let Err(err) = self.setup.state.save_netmap(&netmap) {
             // 存不下来不影响这次运行，只是下次启动拿不到这一版。
@@ -258,6 +481,51 @@ impl Worker {
         }
         tracing::info!(version = netmap.version, peers = netmap.peers.len(), relays = netmap.relays.len(), "应用新的 netmap");
         self.netmap.send_replace(Arc::new(netmap));
+    }
+}
+
+impl Session {
+    /// 记下一个在等回答的取包请求，返回给它编的号。
+    fn expect(&mut self, reply: oneshot::Sender<Result<Vec<u8>, SourceError>>) -> u64 {
+        // 要的人等不及走了的，顺手清掉。
+        self.chunks.retain(|_, reply| !reply.is_closed());
+        self.next_request += 1;
+        self.chunks.insert(self.next_request, reply);
+        self.next_request
+    }
+
+    fn answer(&mut self, request: u64, outcome: Result<Vec<u8>, SourceError>) {
+        match self.chunks.remove(&request) {
+            // 要的人不等了也无妨。
+            Some(reply) => drop(reply.send(outcome)),
+            None => tracing::debug!(request, "controller 回答了一个没有人在等的取包请求"),
+        }
+    }
+
+    /// 从完整的路由表里挑出这次要报的条目，并记下报过什么。
+    fn routes_to_report(&mut self, current: Vec<RouteEntry>) -> Vec<RouteEntry> {
+        if !self.reported {
+            self.reported_routes = current.iter().map(|entry| (entry.peer, entry.clone())).collect();
+            return current;
+        }
+        // 不在表里了的对端不用报：它已经不在 netmap 里，controller 那边自己会去掉。
+        self.reported_routes.retain(|peer, _| current.iter().any(|entry| entry.peer == *peer));
+        let changed: Vec<RouteEntry> =
+            current.into_iter().filter(|entry| self.reported_routes.get(&entry.peer).is_none_or(|before| differs(before, entry))).collect();
+        self.reported_routes.extend(changed.iter().map(|entry| (entry.peer, entry.clone())));
+        changed
+    }
+}
+
+/// 一条路由和上次报的比，有没有值得再报一次的变化：路换了，或者延迟变了不少。
+fn differs(before: &RouteEntry, now: &RouteEntry) -> bool {
+    if before.route != now.route {
+        return true;
+    }
+    match (before.rtt_ms, now.rtt_ms) {
+        (Some(before), Some(now)) => before.abs_diff(now) > RTT_NOISE_MS.max(before / 4),
+        (None, None) => false,
+        (Some(_), None) | (None, Some(_)) => true,
     }
 }
 
@@ -277,12 +545,20 @@ impl Drop for Reader {
 }
 
 /// 把完整的消息一条条放进队列。连接结束或出错时放进一个错误然后退出。
+///
+/// 帧是完整的、只是内容解析不了的时候不算出错：多半是更新版本的 controller 才有的消息，跳过它接着读。
 fn spawn_reader<R: AsyncRead + Unpin + Send + 'static>(mut reader: R) -> Reader {
     let (tx, messages) = mpsc::channel(16);
     let task = tokio::spawn(async move {
         loop {
-            let message = match read_message(&mut reader).await {
-                Ok(Some(message)) => Ok(message),
+            let message = match read_frame(&mut reader).await {
+                Ok(Some(frame)) => match serde_json::from_slice(&frame) {
+                    Ok(message) => Ok(message),
+                    Err(err) => {
+                        tracing::debug!("忽略 controller 发来的一条解析不了的消息：{err}");
+                        continue;
+                    }
+                },
                 Ok(None) => Err(anyhow!("controller 关闭了连接")),
                 Err(err) => Err(err),
             };
@@ -329,6 +605,14 @@ pub async fn write_message<W: AsyncWrite + Unpin, T: Serialize>(writer: &mut W, 
 ///
 /// 读失败、长度超过上限，或者内容不是期望的 JSON。
 pub async fn read_message<R: AsyncRead + Unpin, T: DeserializeOwned>(reader: &mut R) -> anyhow::Result<Option<T>> {
+    match read_frame(reader).await? {
+        Some(frame) => serde_json::from_slice(&frame).map(Some).context("解析消息"),
+        None => Ok(None),
+    }
+}
+
+/// 读一帧的内容，不解析。对端在两帧之间正常关闭连接时返回 `None`。
+async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Result<Option<Vec<u8>>> {
     let len = match reader.read_u32().await {
         Ok(len) => usize::try_from(len).context("消息长度超出了这台机器的地址范围")?,
         Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
@@ -337,7 +621,7 @@ pub async fn read_message<R: AsyncRead + Unpin, T: DeserializeOwned>(reader: &mu
     ensure!(len <= MAX_FRAME_LEN, "对端声称的消息长度 {len} 超过上限 {MAX_FRAME_LEN}");
     let mut body = vec![0; len];
     reader.read_exact(&mut body).await.context("读消息内容")?;
-    serde_json::from_slice(&body).map(Some).context("解析消息")
+    Ok(Some(body))
 }
 
 /// 退避时间上下浮动一半，免得一批节点在 controller 重启之后同时连回来。
@@ -352,6 +636,11 @@ fn kind_of(message: &ToNode) -> &'static str {
         ToNode::Revoked => "revoked",
         ToNode::Rejected { .. } => "rejected",
         ToNode::Heartbeat => "heartbeat",
+        ToNode::Update { .. } => "update",
+        ToNode::UpdateCancel => "update_cancel",
+        ToNode::PackageChunk { .. } => "package_chunk",
+        ToNode::PackageUnavailable { .. } => "package_unavailable",
+        ToNode::RouteQuery { .. } => "route_query",
     }
 }
 
@@ -403,38 +692,75 @@ pub(crate) mod testing {
     pub(crate) async fn expect<T: DeserializeOwned>(stream: &mut ServerStream<TcpStream>) -> T {
         timeout(Duration::from_secs(5), read_message(stream)).await.expect("等节点的消息超时").unwrap().expect("节点关闭了连接")
     }
+
+    /// 等下一条不是上报的消息。节点随时可能上报（报到之后马上一次，之后定时），不关心上报的测试用它跳过去。
+    pub(crate) async fn expect_other(stream: &mut ServerStream<TcpStream>) -> ToController {
+        loop {
+            match expect(stream).await {
+                ToController::Report(_) => {}
+                other => return other,
+            }
+        }
+    }
+
+    /// 等下一次上报，跳过别的消息。
+    pub(crate) async fn expect_report(stream: &mut ServerStream<TcpStream>) -> Report {
+        loop {
+            if let ToController::Report(report) = expect(stream).await {
+                return report;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::testing::{FakeController, expect, netmap};
+    use i3t_model::control::Route;
+    use i3t_model::update::{ManifestSignature, UpdateStatus};
+
+    use super::testing::{FakeController, expect, expect_other, expect_report, netmap};
     use super::*;
 
-    fn link(controller: &FakeController, key: Arc<NodeKey>, state: StateDir) -> (ControlLink, watch::Sender<Hello>) {
+    const FAST: Timing = Timing {
+        report_interval: Duration::from_millis(50),
+        idle_timeout: Duration::from_millis(400),
+        backoff_min: Duration::from_millis(10),
+        backoff_max: Duration::from_millis(40),
+    };
+
+    /// 定时上报要很久以后才到：收到的上报只能是报到时的那一次，或者测试自己要的。
+    const QUIET: Timing = Timing { report_interval: Duration::from_secs(3600), idle_timeout: Duration::from_secs(3600), ..FAST };
+
+    fn setup(controller: &FakeController, state: StateDir, timing: Timing) -> (LinkSetup, watch::Sender<Hello>) {
         let hello = Hello { version: "0.1.0".into(), platform: "test".into(), ..Hello::default() };
         let (hello_tx, hello_rx) = watch::channel(hello);
         let setup = LinkSetup {
             controller: controller.info.clone(),
-            key,
+            key: Arc::new(NodeKey::generate().unwrap()),
             initial: Arc::new(netmap(1)),
             hello: hello_rx,
             report: Box::new(|| Report { flows: 3, ..Report::default() }),
+            route: Box::new(|peer| RouteAnswer { peer, route: None, rtt_ms: None, since: None }),
             report_now: Arc::new(Notify::new()),
             state,
-            timing: Timing {
-                report_interval: Duration::from_millis(50),
-                idle_timeout: Duration::from_millis(400),
-                backoff_min: Duration::from_millis(10),
-                backoff_max: Duration::from_millis(40),
-            },
+            timing,
         };
-        (ControlLink::spawn(setup), hello_tx)
+        (setup, hello_tx)
+    }
+
+    fn link(controller: &FakeController, state: StateDir) -> (ControlLink, watch::Sender<Hello>) {
+        let (setup, hello) = setup(controller, state, FAST);
+        (ControlLink::spawn(setup), hello)
     }
 
     fn temp_state() -> (tempfile::TempDir, StateDir) {
         let dir = tempfile::tempdir().unwrap();
         let state = StateDir::open(dir.path()).unwrap();
         (dir, state)
+    }
+
+    fn peer(raw: u32) -> NodeId {
+        NodeId::new(raw).unwrap()
     }
 
     #[tokio::test]
@@ -487,14 +813,14 @@ mod tests {
     async fn snapshots_are_applied_saved_and_acknowledged() {
         let controller = FakeController::start().await;
         let (_dir, state) = temp_state();
-        let (link, _hello) = link(&controller, Arc::new(NodeKey::generate().unwrap()), state.clone());
+        let (link, _hello) = link(&controller, state.clone());
         let mut netmaps = link.netmap();
         assert_eq!(netmaps.borrow().version, 1);
 
         let (mut stream, _) = controller.accept().await;
         assert!(matches!(expect::<ToController>(&mut stream).await, ToController::Hello(_)));
         write_message(&mut stream, &ToNode::Snapshot(Box::new(netmap(2)))).await.unwrap();
-        assert_eq!(expect::<ToController>(&mut stream).await, ToController::Ack { version: 2 });
+        assert_eq!(expect_other(&mut stream).await, ToController::Ack { version: 2 });
 
         netmaps.changed().await.unwrap();
         assert_eq!(netmaps.borrow().version, 2);
@@ -506,66 +832,247 @@ mod tests {
     async fn signals_travel_both_ways_and_a_changed_hello_is_resent() {
         let controller = FakeController::start().await;
         let (_dir, state) = temp_state();
-        let (mut link, hello) = link(&controller, Arc::new(NodeKey::generate().unwrap()), state);
+        let (mut link, hello) = link(&controller, state);
         let (mut stream, _) = controller.accept().await;
         let _: ToController = expect(&mut stream).await;
 
-        let peer = NodeId::new(2).unwrap();
         let request = Signal::PunchRequest { endpoints: vec!["203.0.113.5:20330".parse().unwrap()] };
-        write_message(&mut stream, &ToNode::Signal { from: peer, signal: request.clone() }).await.unwrap();
-        assert_eq!(link.next_signal().await, Some((peer, request)));
+        write_message(&mut stream, &ToNode::Signal { from: peer(2), signal: request.clone() }).await.unwrap();
+        assert_eq!(link.next_signal().await, Some((peer(2), request)));
 
         let reply = Signal::PunchReply { endpoints: Vec::new() };
-        link.signal_sender().send((peer, reply.clone())).await.unwrap();
-        assert_eq!(expect::<ToController>(&mut stream).await, ToController::Signal { to: peer, signal: reply });
+        link.signal_sender().send((peer(2), reply.clone())).await.unwrap();
+        assert_eq!(expect_other(&mut stream).await, ToController::Signal { to: peer(2), signal: reply });
 
         hello.send_modify(|hello| hello.declared.exit = true);
-        let ToController::Hello(resent) = expect(&mut stream).await else { panic!("声明变了之后应该重发 hello") };
+        let ToController::Hello(resent) = expect_other(&mut stream).await else { panic!("声明变了之后应该重发 hello") };
         assert!(resent.declared.exit);
     }
 
     #[tokio::test]
-    async fn reports_are_sent_periodically() {
+    async fn the_node_reports_right_after_hello_and_then_periodically() {
         let controller = FakeController::start().await;
         let (_dir, state) = temp_state();
-        let (_link, _hello) = link(&controller, Arc::new(NodeKey::generate().unwrap()), state);
+        let (_link, _hello) = link(&controller, state);
         let (mut stream, _) = controller.accept().await;
-        let _: ToController = expect(&mut stream).await;
-        let ToController::Report(report) = expect(&mut stream).await else { panic!("应该收到上报") };
-        assert_eq!(report.flows, 3);
+        assert!(matches!(expect::<ToController>(&mut stream).await, ToController::Hello(_)));
+        // 不等 controller 说话：报到之后的下一条就是上报。controller 要靠它才知道节点的更新状态。
+        let ToController::Report(first) = expect(&mut stream).await else { panic!("报到之后应该马上上报") };
+        assert_eq!((first.flows, first.routes_full), (3, true));
+        let later = expect_report(&mut stream).await;
+        assert!(!later.routes_full, "之后的定时上报只带变化的路由");
     }
 
     #[tokio::test]
-    async fn a_report_can_be_requested_ahead_of_schedule() {
+    async fn a_report_can_be_requested_ahead_of_schedule_and_waited_for() {
         let controller = FakeController::start().await;
         let (_dir, state) = temp_state();
-        let hello = Hello::default();
-        let (_hello_tx, hello_rx) = watch::channel(hello);
-        let report_now = Arc::new(Notify::new());
-        let setup = LinkSetup {
-            controller: controller.info.clone(),
-            key: Arc::new(NodeKey::generate().unwrap()),
-            initial: Arc::new(netmap(1)),
-            hello: hello_rx,
-            report: Box::new(|| Report { flows: 9, ..Report::default() }),
-            report_now: Arc::clone(&report_now),
-            state,
-            // 定时上报要很久以后才到，收到的只能是提前要的那一次。
-            timing: Timing { report_interval: Duration::from_secs(3600), ..Timing::default() },
-        };
+        let (setup, _hello) = setup(&controller, state, QUIET);
+        let report_now = Arc::clone(&setup.report_now);
+        let link = ControlLink::spawn(setup);
+        assert!(!link.report_and_wait(Duration::from_secs(5)).await, "还没连上：不排着等，马上说没有写出去");
+
+        let (mut stream, _) = controller.accept().await;
+        let _: ToController = expect(&mut stream).await;
+        assert!(expect_report(&mut stream).await.routes_full);
+        report_now.notify_one();
+        assert_eq!(expect_report(&mut stream).await.flows, 3);
+        assert!(link.report_and_wait(Duration::from_secs(5)).await);
+        assert_eq!(expect_report(&mut stream).await.flows, 3);
+    }
+
+    #[tokio::test]
+    async fn the_first_report_of_every_connection_has_the_whole_route_table_and_later_ones_only_the_changes() {
+        let controller = FakeController::start().await;
+        let (_dir, state) = temp_state();
+        let (mut setup, _hello) = setup(&controller, state, QUIET);
+        let entry =
+            |raw: u32, rtt_ms: u32| RouteEntry { peer: peer(raw), route: Route::Relay { relays: vec![peer(9)] }, rtt_ms: Some(rtt_ms) };
+        let table = Arc::new(std::sync::Mutex::new(vec![entry(2, 100), entry(3, 20)]));
+        let current = Arc::clone(&table);
+        setup.report = Box::new(move || Report { routes: current.lock().unwrap().clone(), ..Report::default() });
+        let report_now = Arc::clone(&setup.report_now);
+        let _link = ControlLink::spawn(setup);
+        let peers = |report: &Report| report.routes.iter().map(|entry| entry.peer.get()).collect::<Vec<_>>();
+
+        let (mut stream, _) = controller.accept().await;
+        let _: ToController = expect(&mut stream).await;
+        let first = expect_report(&mut stream).await;
+        assert_eq!((first.routes_full, peers(&first)), (true, vec![2, 3]));
+
+        // 什么都没变：不带路由。延迟的小幅波动也不算变化。
+        *table.lock().unwrap() = vec![entry(2, 110), entry(3, 24)];
+        report_now.notify_one();
+        let quiet = expect_report(&mut stream).await;
+        assert_eq!((quiet.routes_full, peers(&quiet)), (false, vec![]));
+
+        // 一条路换了，一条的延迟变了不少，多了一个对端，少了一个对端。
+        let direct = RouteEntry { peer: peer(2), route: Route::Direct { addr: "203.0.113.5:20330".parse().unwrap() }, rtt_ms: Some(100) };
+        *table.lock().unwrap() = vec![direct.clone(), entry(4, 50)];
+        report_now.notify_one();
+        let changed = expect_report(&mut stream).await;
+        assert_eq!((changed.routes_full, peers(&changed)), (false, vec![2, 4]));
+        assert_eq!(changed.routes[0], direct);
+        *table.lock().unwrap() = vec![direct, entry(4, 90)];
+        report_now.notify_one();
+        assert_eq!(peers(&expect_report(&mut stream).await), vec![4], "延迟从 50 变到 90 值得再报");
+
+        // 重新连上之后的第一次上报又是完整的。
+        drop(stream);
+        let (mut again, _) = controller.accept().await;
+        let _: ToController = expect(&mut again).await;
+        let full = expect_report(&mut again).await;
+        assert_eq!((full.routes_full, peers(&full)), (true, vec![2, 4]));
+    }
+
+    #[tokio::test]
+    async fn update_commands_are_passed_on_and_unknown_messages_are_skipped() {
+        let controller = FakeController::start().await;
+        let (_dir, state) = temp_state();
+        let (mut link, _hello) = link(&controller, state);
+        let mut commands = link.take_update_commands().unwrap();
+        assert!(link.take_update_commands().is_none(), "只有一个任务管更新");
+        let (mut stream, _) = controller.accept().await;
+        let _: ToController = expect(&mut stream).await;
+
+        // 更新版本的 controller 才有的消息：跳过，连接接着用。
+        write_message(&mut stream, &serde_json::json!({ "type": "added_in_a_newer_version", "x": 1 })).await.unwrap();
+        write_message(&mut stream, &serde_json::json!({ "type": "update", "timing": "some_new_timing", "manifest": {} })).await.unwrap();
+        let manifest = SignedManifest { manifest: "{}".to_owned(), signature: ManifestSignature::from_bytes([7; 64]) };
+        write_message(&mut stream, &ToNode::Update { manifest: manifest.clone(), timing: UpdateTiming::AfterDrain }).await.unwrap();
+        write_message(&mut stream, &ToNode::UpdateCancel).await.unwrap();
+
+        let received = timeout(Duration::from_secs(5), commands.recv()).await.unwrap();
+        assert_eq!(received, Some(UpdateCommand::Update { manifest, timing: UpdateTiming::AfterDrain }));
+        assert_eq!(timeout(Duration::from_secs(5), commands.recv()).await.unwrap(), Some(UpdateCommand::Cancel));
+        assert_eq!(*link.state().borrow(), LinkState::Offline, "还没有收到 netmap；重要的是连接没有因为不认识的消息断开重连");
+        assert!(timeout(Duration::from_millis(200), controller.listener.accept()).await.is_err(), "没有重连");
+    }
+
+    #[tokio::test]
+    async fn a_route_query_is_answered_from_the_assembly() {
+        let controller = FakeController::start().await;
+        let (_dir, state) = temp_state();
+        let (mut setup, _hello) = setup(&controller, state, QUIET);
+        setup.route = Box::new(|peer| RouteAnswer { peer, route: Some(Route::None), rtt_ms: Some(5), since: None });
         let _link = ControlLink::spawn(setup);
         let (mut stream, _) = controller.accept().await;
         let _: ToController = expect(&mut stream).await;
-        report_now.notify_one();
-        let ToController::Report(report) = expect(&mut stream).await else { panic!("应该收到上报") };
-        assert_eq!(report.flows, 9);
+        write_message(&mut stream, &ToNode::RouteQuery { request: 41, peer: peer(7) }).await.unwrap();
+        let ToController::RouteAnswer { request, answer } = expect_other(&mut stream).await else { panic!("应该回答路由查询") };
+        assert_eq!((request, answer.peer, answer.route, answer.rtt_ms), (41, peer(7), Some(Route::None), Some(5)));
+    }
+
+    /// 取一段包：`version` 的 linux 包里从 `offset` 起的 `len` 字节。
+    async fn fetch(packages: &Packages, offset: u64, len: u32) -> Result<Vec<u8>, SourceError> {
+        let (version, platform) = (Version::new(0, 2, 0), "linux-x86_64".parse().unwrap());
+        packages.fetch(ChunkRequest { version: &version, platform: &platform, offset, len }).await
+    }
+
+    #[tokio::test]
+    async fn packages_are_fetched_over_the_link_and_a_lost_link_reads_as_interrupted() {
+        let controller = FakeController::start().await;
+        let (_dir, state) = temp_state();
+        let (setup, _hello) = setup(&controller, state, QUIET);
+        let link = ControlLink::spawn(setup);
+        let packages = link.packages();
+        assert!(matches!(fetch(&packages, 0, 4).await, Err(SourceError::Interrupted(_))), "还没连上：过一会儿再要，不算失败");
+
+        let (mut stream, _) = controller.accept().await;
+        let _: ToController = expect(&mut stream).await;
+        let (first, second) = (
+            tokio::spawn({
+                let packages = packages.clone();
+                async move { fetch(&packages, 0, 4).await }
+            }),
+            {
+                let packages = packages.clone();
+                tokio::spawn(async move { fetch(&packages, 4, 4).await })
+            },
+        );
+        let mut asked = Vec::new();
+        for _ in 0..2 {
+            let ToController::PackageRequest { request, version, platform, offset, len } = expect_other(&mut stream).await else {
+                panic!("应该收到取包的请求")
+            };
+            assert_eq!((version.to_string().as_str(), platform.as_str(), len), ("0.2.0", "linux-x86_64", 4));
+            asked.push((request, offset));
+        }
+        // 回答的先后和要的先后不一样也对得上；多余的、没人等的回答被忽略。
+        asked.sort_by_key(|&(_, offset)| std::cmp::Reverse(offset));
+        write_message(&mut stream, &ToNode::PackageChunk { request: 999, data: vec![9] }).await.unwrap();
+        for (request, offset) in &asked {
+            let data = if *offset == 0 { b"abcd".to_vec() } else { b"efgh".to_vec() };
+            write_message(&mut stream, &ToNode::PackageChunk { request: *request, data }).await.unwrap();
+        }
+        assert_eq!(first.await.unwrap().unwrap(), b"abcd");
+        assert_eq!(second.await.unwrap().unwrap(), b"efgh");
+
+        // controller 明说给不了。
+        let refused = tokio::spawn({
+            let packages = packages.clone();
+            async move { fetch(&packages, 8, 4).await }
+        });
+        let ToController::PackageRequest { request, .. } = expect_other(&mut stream).await else { panic!("应该收到取包的请求") };
+        write_message(&mut stream, &ToNode::PackageUnavailable { request, reason: "没有这个平台的包".into() }).await.unwrap();
+        assert_eq!(refused.await.unwrap(), Err(SourceError::Unavailable("没有这个平台的包".into())));
+
+        // 要到一半连接断了：被打断，不是给不了。
+        let cut_off = tokio::spawn({
+            let packages = packages.clone();
+            async move { fetch(&packages, 8, 4).await }
+        });
+        let _request = expect_other(&mut stream).await;
+        drop(stream);
+        assert!(matches!(cut_off.await.unwrap(), Err(SourceError::Interrupted(_))));
+    }
+
+    #[tokio::test]
+    async fn the_self_check_probe_authenticates_both_ways_and_says_nothing() {
+        let controller = FakeController::start().await;
+        let key = NodeKey::generate().unwrap();
+        let (info, public) = (controller.info.clone(), key.public());
+        let server = tokio::spawn(async move {
+            let (mut stream, seen_key) = controller.accept().await;
+            assert_eq!(seen_key, public, "controller 认出了节点的公钥");
+            // 节点什么都不发就关了连接：没有 hello，旧程序的连接不会被顶替。
+            assert!(read_message::<_, ToController>(&mut stream).await.unwrap().is_none());
+        });
+        probe(&info, &key).await.unwrap();
+        server.await.unwrap();
+
+        // controller 的公钥不对：握手不成，自检不通过。
+        let controller = FakeController::start().await;
+        let mut wrong = controller.info.clone();
+        wrong.key = NodeKey::generate().unwrap().public();
+        tokio::spawn(async move {
+            let (tcp, _) = controller.listener.accept().await.unwrap();
+            let _ = controller.acceptor.accept(tcp).await;
+        });
+        assert!(probe(&wrong, &key).await.is_err());
+        // 连不上。
+        let nobody = ControllerInfo { address: "127.0.0.1:1".to_owned(), key: public };
+        assert!(probe(&nobody, &key).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn the_report_carries_whatever_the_assembly_puts_in_it() {
+        let controller = FakeController::start().await;
+        let (_dir, state) = temp_state();
+        let (mut setup, _hello) = setup(&controller, state, QUIET);
+        setup.report =
+            Box::new(|| Report { update: Some(UpdateStatus::WaitingForIdle { version: Version::new(0, 2, 0) }), ..Report::default() });
+        let _link = ControlLink::spawn(setup);
+        let (mut stream, _) = controller.accept().await;
+        let _: ToController = expect(&mut stream).await;
+        assert_eq!(expect_report(&mut stream).await.update, Some(UpdateStatus::WaitingForIdle { version: Version::new(0, 2, 0) }));
     }
 
     #[tokio::test]
     async fn the_link_reconnects_after_the_connection_drops() {
         let controller = FakeController::start().await;
         let (_dir, state) = temp_state();
-        let (link, _hello) = link(&controller, Arc::new(NodeKey::generate().unwrap()), state);
+        let (link, _hello) = link(&controller, state);
         let (mut first, _) = controller.accept().await;
         let _: ToController = expect(&mut first).await;
         drop(first);
@@ -581,7 +1088,7 @@ mod tests {
     async fn a_silent_controller_is_dropped_and_dialled_again() {
         let controller = FakeController::start().await;
         let (_dir, state) = temp_state();
-        let (_link, _hello) = link(&controller, Arc::new(NodeKey::generate().unwrap()), state);
+        let (_link, _hello) = link(&controller, state);
         // 第一条连接上 controller 一句话都不说，但也不关。
         let (_silent, _) = controller.accept().await;
         let (mut second, _) = timeout(Duration::from_secs(5), controller.accept()).await.expect("空闲超时之后应该重连");
@@ -595,7 +1102,7 @@ mod tests {
         {
             let controller = FakeController::start().await;
             let (_dir, state) = temp_state();
-            let (link, _hello) = link(&controller, Arc::new(NodeKey::generate().unwrap()), state);
+            let (link, _hello) = link(&controller, state);
             let (mut stream, _) = controller.accept().await;
             let _: ToController = expect(&mut stream).await;
             write_message(&mut stream, &message).await.unwrap();
@@ -617,5 +1124,13 @@ mod tests {
         assert!(read_message::<_, ToNode>(&mut truncated).await.is_err());
         let mut empty: &[u8] = &[];
         assert!(read_message::<_, ToNode>(&mut empty).await.unwrap().is_none());
+    }
+
+    #[test]
+    fn small_rtt_changes_are_not_worth_reporting() {
+        let entry = |rtt_ms| RouteEntry { peer: peer(2), route: Route::None, rtt_ms };
+        assert!(!differs(&entry(Some(20)), &entry(Some(29))) && differs(&entry(Some(20)), &entry(Some(31))));
+        assert!(!differs(&entry(Some(200)), &entry(Some(249))) && differs(&entry(Some(200)), &entry(Some(251))));
+        assert!(differs(&entry(None), &entry(Some(1))) && differs(&entry(Some(1)), &entry(None)) && !differs(&entry(None), &entry(None)));
     }
 }

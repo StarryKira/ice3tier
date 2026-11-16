@@ -16,6 +16,10 @@ StateDirectory=i3t
 StateDirectoryMode=0700
 Restart=always
 RestartSec=2
+# 节点自己更新：换好程序文件之后以 75 退出，意思是"请重启我"。它不是出错，所以不算失败；
+# 就算以后有人把上面的 Restart= 改成 on-failure，这个退出码也照样重启，更新才不会停在半路。
+SuccessExitStatus=75
+RestartForceExitStatus=75
 LimitNOFILE=1048576
 
 NoNewPrivileges=yes

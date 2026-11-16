@@ -1,0 +1,146 @@
+//! 节点的指标，Prometheus 的文本格式（白皮书 §13）。
+//!
+//! 各层的计数都是它们自己的原子变量，这里只在被抓的时候读一遍、排成文本，没有后台任务。
+//!
+//! 现在有的：流（入口、出口各有多少在进行，出口一共收到过多少）、字节数、没建成的请求按归因分类、
+//! relay 的转发和丢弃、到每个对端走的是哪一种路和延迟、和 controller 的连接、更新的状态。
+//! 白皮书说的"按凭据、按出口分别统计"还没有：入口模块现在不分凭据和出口记数。
+
+use i3t_conn::DropReason;
+use i3t_metrics::Exposition;
+use i3t_model::control::Route;
+use i3t_model::update::UpdateStatus;
+
+use crate::control::LinkState;
+use crate::runtime::Runtime;
+
+/// 当前的指标，可以直接作为 `/metrics` 的应答。
+pub(crate) fn render(runtime: &Runtime) -> String {
+    let mut out = Exposition::new();
+    let netmap = runtime.netmap.borrow().clone();
+    out.gauge("i3t_info", "节点程序的版本", &[("version", &runtime.program.version.to_string())], 1.0);
+    out.gauge("i3t_uptime_seconds", "这个进程运行了多久", &[], runtime.started.elapsed().as_secs_f64());
+    out.gauge("i3t_netmap_version", "正在用的配置（netmap）是第几版", &[], as_gauge(netmap.version));
+
+    // 静态模式下没有这条连接，也就没有这个指标。
+    if let Some(link) = &runtime.link {
+        let online = *link.borrow() == LinkState::Online;
+        out.gauge("i3t_controller_link_up", "和 controller 的长连接：连着是 1，没连着是 0", &[], f64::from(u8::from(online)));
+    }
+
+    let sample = runtime.sample_flows();
+    let help = "正在进行的流：ingress 是入口上的连接，exit 是替别的节点连目标的流和数据报上下文";
+    out.gauge("i3t_flows_active", help, &[("side", "ingress")], as_gauge(sample.ingress));
+    out.gauge("i3t_flows_active", help, &[("side", "exit")], as_gauge(sample.exit));
+    out.gauge(
+        "i3t_flows_blocking_update",
+        "更新要等它变成零的那个数：活跃的流，唯一的 relay 正在转发时再加一",
+        &[],
+        as_gauge(*runtime.flows.borrow()),
+    );
+
+    let stats = runtime.exit.stats();
+    out.counter("i3t_exit_flows_total", "出口收到过的建流请求", &[], stats.total);
+    let help = "出口搬运的字节数";
+    out.counter("i3t_exit_bytes_total", help, &[("direction", "to_target")], stats.bytes_to_target);
+    out.counter("i3t_exit_bytes_total", help, &[("direction", "from_target")], stats.bytes_from_target);
+    let help = "出口没有建成的请求，按归因分：target 是目标的问题，refused 是被规则或策略拒绝，exit 是出口自己的问题";
+    out.counter("i3t_exit_failures_total", help, &[("attribution", "target")], stats.failed_by_target);
+    out.counter("i3t_exit_failures_total", help, &[("attribution", "refused")], stats.refused);
+    out.counter("i3t_exit_failures_total", help, &[("attribution", "exit")], stats.failed_by_exit);
+    out.counter("i3t_exit_flows_aborted_total", "建成之后没有正常结束的流", &[], stats.aborted);
+    out.counter("i3t_drain_refused_total", "因为节点正在排空而拒绝的请求", &[], runtime.gate.refused());
+
+    let relay = runtime.endpoint.relay_counters();
+    out.gauge("i3t_relay_enabled", "本节点是不是启用成了 relay", &[], f64::from(u8::from(netmap.me.relay.is_some())));
+    out.gauge("i3t_relay_sessions", "relay 上现在的中转会话数", &[], as_gauge(relay.sessions));
+    out.counter("i3t_relay_sessions_opened_total", "relay 上握手成功过的次数", &[], relay.sessions_opened);
+    out.counter("i3t_relay_forwarded_packets_total", "relay 转发出去的包数", &[], relay.forwarded_packets);
+    out.counter("i3t_relay_forwarded_bytes_total", "relay 转发出去的字节数，含中转头", &[], relay.forwarded_bytes);
+    for reason in DropReason::ALL {
+        let label = snake_case(&format!("{reason:?}"));
+        out.counter("i3t_relay_dropped_total", "relay 没有照办的包和握手，按原因分", &[("reason", &label)], relay.dropped(reason));
+    }
+
+    let routes = runtime.endpoint.routes();
+    let name_of = |peer| netmap.peer(peer).map_or_else(|| format!("#{peer}"), |peer| peer.name.clone());
+    for entry in &routes {
+        let via = match entry.route {
+            Route::None => "none",
+            Route::Direct { .. } => "direct",
+            Route::Relay { .. } => "relay",
+        };
+        out.gauge("i3t_peer_route", "到每个对端现在走的是哪一种路", &[("peer", &name_of(entry.peer)), ("via", via)], 1.0);
+    }
+    for entry in &routes {
+        if let Some(rtt_ms) = entry.rtt_ms {
+            out.gauge(
+                "i3t_peer_rtt_ms",
+                "到每个对端的路上最近测到的往返延迟（毫秒）",
+                &[("peer", &name_of(entry.peer))],
+                f64::from(rtt_ms),
+            );
+        }
+    }
+
+    out.gauge("i3t_update_state", "程序更新进行到哪一步", &[("state", update_label(&runtime.update.borrow()))], 1.0);
+    out.finish()
+}
+
+/// 把一个数当作状态量的值。这里用到的都是小数目（流数、会话数、版本号），放不进 `u32` 时停在最大值。
+fn as_gauge(value: impl TryInto<u32>) -> f64 {
+    f64::from(value.try_into().unwrap_or(u32::MAX))
+}
+
+/// `PeerUnattached` → `peer_unattached`。丢弃原因的名字取自它的 Debug 写法：relay 加了新的原因，这里不用跟着改。
+fn snake_case(name: &str) -> String {
+    let mut snake = String::with_capacity(name.len() + 4);
+    for (index, ch) in name.chars().enumerate() {
+        if ch.is_ascii_uppercase() && index > 0 {
+            snake.push('_');
+        }
+        snake.push(ch.to_ascii_lowercase());
+    }
+    snake
+}
+
+/// 更新状态在 JSON 里的 `state` 字段的写法，指标里用同一个。
+fn update_label(status: &UpdateStatus) -> &'static str {
+    match status {
+        UpdateStatus::Idle => "idle",
+        UpdateStatus::Downloading { .. } => "downloading",
+        UpdateStatus::Verifying { .. } => "verifying",
+        UpdateStatus::SelfCheck { .. } => "self_check",
+        UpdateStatus::WaitingForIdle { .. } => "waiting_for_idle",
+        UpdateStatus::Draining { .. } => "draining",
+        UpdateStatus::Installing { .. } => "installing",
+        UpdateStatus::Restarting { .. } => "restarting",
+        UpdateStatus::Confirmed { .. } => "confirmed",
+        UpdateStatus::Failed { .. } => "failed",
+        UpdateStatus::Unknown => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use i3t_model::update::Version;
+
+    use super::*;
+
+    #[test]
+    fn drop_reasons_become_snake_case_labels() {
+        assert_eq!(snake_case("PeerUnattached"), "peer_unattached");
+        assert_eq!(snake_case("Disabled"), "disabled");
+        let labels: Vec<String> = DropReason::ALL.iter().map(|reason| snake_case(&format!("{reason:?}"))).collect();
+        assert!(labels.contains(&"rate_limited".to_owned()), "{labels:?}");
+        assert!(labels.iter().all(|label| label.bytes().all(|byte| byte.is_ascii_lowercase() || byte == b'_')), "{labels:?}");
+    }
+
+    #[test]
+    fn update_labels_match_the_json_spelling() {
+        let version = Version::new(0, 2, 0);
+        for status in [UpdateStatus::Idle, UpdateStatus::WaitingForIdle { version: version.clone() }, UpdateStatus::SelfCheck { version }] {
+            assert_eq!(serde_json::to_value(&status).unwrap()["state"], update_label(&status));
+        }
+    }
+}

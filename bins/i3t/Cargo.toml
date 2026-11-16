@@ -11,6 +11,7 @@ description = "ice3tier 的节点程序"
 anyhow.workspace = true
 clap = { workspace = true, features = ["env"] }
 i3t-agent = { path = "../../crates/i3t-agent" }
+i3t-model = { path = "../../crates/i3t-model" }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
