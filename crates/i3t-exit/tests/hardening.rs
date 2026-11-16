@@ -24,7 +24,7 @@ use tokio::time::sleep;
 const QUIET: Duration = Duration::from_millis(200);
 
 /// 出口给每个发起节点的同时处理的流数。
-const MAX_STREAMS_PER_PEER: usize = 1024;
+const MAX_STREAMS_PER_PEER: usize = 16_384;
 
 fn public(port: u16) -> String {
     format!("{PUBLIC_IP}:{port}")
