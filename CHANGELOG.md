@@ -1,6 +1,6 @@
 # 更新记录
 
-每完成一批功能升一次版本。节点、controller、命令行和 WebUI 用同一个版本号，用 `scripts/bump-version.sh` 修改。
+每次迭代升一个小版本：只动最后一位（0.1.1、0.1.2……）。节点、controller、命令行和 WebUI 用同一个版本号，用 `scripts/bump-version.sh` 修改。
 
 ## 0.1.3 （2026-11-16）
 

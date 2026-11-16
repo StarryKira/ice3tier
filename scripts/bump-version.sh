@@ -4,7 +4,7 @@
 #   scripts/bump-version.sh <新版本>      例如 scripts/bump-version.sh 0.1.1
 #   scripts/bump-version.sh --check       只检查各处的版本是不是一致（CI 用）
 #
-# 每完成一批功能就升一次版本，并在 CHANGELOG.md 最上面加一节说明这一版有什么。
+# 每次迭代升一个小版本，只动最后一位（0.1.1、0.1.2……），并在 CHANGELOG.md 最上面加一节说明这一版有什么。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
