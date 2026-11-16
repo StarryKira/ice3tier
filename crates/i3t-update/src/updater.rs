@@ -236,7 +236,7 @@ impl Updater {
     pub fn confirm(&self) -> Result<Option<Version>, UpdateError> {
         let _transition = self.transition();
         let mut state = self.state.load()?;
-        if !state.pending.as_ref().is_some_and(|pending| pending.version == self.running) {
+        if state.pending.as_ref().is_none_or(|pending| pending.version != self.running) {
             return Ok(None);
         }
         state.pending = None;
