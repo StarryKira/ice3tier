@@ -21,7 +21,7 @@ pub(crate) enum Failure {
     TimedOut,
     /// 到不了出口节点，或者出口节点自己出了问题。
     ExitUnavailable,
-    /// 凭据的并发连接数到了上限。
+    /// 凭据的并发连接数到了上限，或者本节点在出口上同时开着的流到了出口给每个节点的上限。
     TooManyConnections,
     /// 节点正在排空，不接新的连接：入口自己，或者请求要去的出口。客户端应该换一个，或者稍后再试。
     Draining,
@@ -66,10 +66,11 @@ impl From<Status> for Failure {
             Status::Unreachable => Self::NetworkUnreachable,
             Status::TimedOut => Self::TimedOut,
             Status::AccessDenied | Status::NotEnabled | Status::PolicyDenied | Status::UnknownForward => Self::Denied,
-            // 这三种只有能用这个出口的调用者才会看到（出口先查访问规则），说清楚不会帮人枚举节点。
+            // 这几种只有能用这个出口的调用者才会看到（出口先查访问规则），说清楚不会帮人枚举节点。
             Status::Draining => Self::Draining,
             Status::QuotaExhausted => Self::LimitReached,
             Status::RateLimited => Self::RateLimited,
+            Status::TooManyStreams => Self::TooManyConnections,
             // 拒绝里写着"成功"是对端的错，和它别的内部错误一样对待。
             Status::Ok | Status::ResolverFailure | Status::InternalError => Self::ExitUnavailable,
         }
@@ -110,6 +111,8 @@ mod tests {
         assert_eq!(Failure::from(Status::RateLimited).socks5(), ReplyCode::GeneralFailure);
         assert_eq!(Failure::from(Status::RateLimited).http(), Response::TooManyRequests);
         assert_eq!(Failure::LimitReached.http(), Response::TooManyRequests);
+        assert_eq!(Failure::from(Status::TooManyStreams).socks5(), ReplyCode::GeneralFailure);
+        assert_eq!(Failure::from(Status::TooManyStreams).http(), Response::TooManyRequests);
     }
 
     #[test]

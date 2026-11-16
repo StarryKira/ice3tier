@@ -528,6 +528,10 @@ async fn serve<C: Connector + Datagrams, E: LocalEgress>(
     if let Err(error) = stream.set_nodelay(true) {
         tracing::debug!(%error, "设置不了 TCP_NODELAY");
     }
+    // 流没有空闲时限，客户端悄悄消失（断电、换了网络）时靠内核保活发现，这条连接经过的流和出口上的连接才会释放。
+    if let Err(error) = i3t_flow::keep_alive(&stream) {
+        tracing::debug!(%error, "客户端连接打不开内核保活，客户端悄悄消失时这条连接要等到有数据要发才会发现");
+    }
     match key {
         Key::Listener { name, bind, protocol } => {
             let current =

@@ -3,11 +3,16 @@
 //! - 会话按客户端的地址（IP 加端口）分。一个会话没有报文往来超过空闲时限（默认 60 秒）就回收，客户端再发报文时重新建。
 //! - 一条转发同时最多 [`MAX_SESSIONS`] 个会话。UDP 的来源地址可以随便伪造，没有这个上限的话，
 //!   往监听端口上乱发报文就能让本节点和目标节点开出无数个上下文。到了上限，新来的客户端要等旧的会话回收。
+//!   这个数是目标节点给本节点的上下文名额（`i3t_exit` 里每个对端 128 个）的一半：一条对外开放的转发被人占满时，
+//!   本节点到那个节点的别的 UDP（SOCKS5 的 UDP 关联、别的转发）还有名额。
+//! - 回环以外的同一个来源（IPv4 的一个地址、IPv6 的一个 /64）在一条转发上最多 [`MAX_SESSIONS_PER_HOST`] 个会话：
+//!   互联网上的一台主机换着来源端口发，占不满一条转发，别人还连得上。回环上的来源是本机的程序，不受这一条限制：
+//!   本机的 DNS 解析器这类程序每个请求换一个来源端口，限得太紧它们就用不了。伪造来源地址的人挡不住，要挡得配来源白名单。
 //! - 目标节点按转发编号找到要发往的地址；它回来的报文从监听端口发回那个客户端。
 //! - 来源白名单逐个报文检查。UDP 没有地方回错误，不通过的报文只是丢掉。
 
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -27,7 +32,10 @@ use crate::session::{Shared, origin_address};
 use crate::usage::Tally;
 
 /// 一条转发同时最多多少个会话。
-pub(crate) const MAX_SESSIONS: usize = 256;
+pub(crate) const MAX_SESSIONS: usize = 64;
+
+/// 回环以外的同一个来源在一条转发上同时最多多少个会话。
+pub(crate) const MAX_SESSIONS_PER_HOST: usize = 16;
 
 /// 最多为多少个被拒绝的来源地址各记一行日志。
 const MAX_LOGGED_REFUSALS: usize = 64;
@@ -73,6 +81,11 @@ pub(crate) async fn serve<C: Connector + Datagrams, E: Send + Sync + 'static>(
                 tracing::debug!(%from, "丢掉了一个 UDP 报文：这条端口转发的会话到了上限（{MAX_SESSIONS} 个），等旧的会话空闲回收");
                 continue;
             }
+            let host = SourceHost::of(from);
+            if host.is_some() && sessions.keys().filter(|client| SourceHost::of(**client) == host).count() >= MAX_SESSIONS_PER_HOST {
+                tracing::debug!(%from, "丢掉了一个 UDP 报文：这个来源在这条端口转发上的会话到了上限（{MAX_SESSIONS_PER_HOST} 个）");
+                continue;
+            }
             if !netmap.peer(forward.target).is_some_and(|peer| peer.outbound) {
                 tracing::debug!(target = %forward.target, "丢掉了一个 UDP 报文：目标节点不在 netmap 里，或者访问规则不允许本节点访问它");
                 continue;
@@ -96,6 +109,24 @@ pub(crate) async fn serve<C: Connector + Datagrams, E: Send + Sync + 'static>(
         let queued = sessions.get(&from).is_some_and(|queue| queue.try_send(owned(&buf[..len])).is_ok());
         if !queued {
             tracing::trace!(%from, "丢掉了一个 UDP 报文：到目标节点的上下文还没开好，或者来不及发");
+        }
+    }
+}
+
+/// 按什么算"同一个来源"：IPv4 是一个地址，IPv6 是一个 /64（一台主机通常拿到的就是一整段）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SourceHost(IpAddr);
+
+impl SourceHost {
+    /// 回环上的来源是本机的程序，不按来源限制，返回 `None`。
+    fn of(client: SocketAddr) -> Option<Self> {
+        match client.ip().to_canonical() {
+            ip if ip.is_loopback() => None,
+            IpAddr::V4(ip) => Some(Self(IpAddr::V4(ip))),
+            IpAddr::V6(ip) => {
+                let [a, b, c, d, ..] = ip.segments();
+                Some(Self(IpAddr::V6(Ipv6Addr::new(a, b, c, d, 0, 0, 0, 0))))
+            }
         }
     }
 }
@@ -171,5 +202,22 @@ impl Session {
         };
         context.close().await;
         tracing::info!(target = %forward.target, sent, received, end, "UDP 端口转发的会话结束");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_source_is_an_ipv4_address_or_an_ipv6_slash_64_and_loopback_is_not_counted() {
+        let of = |text: &str| SourceHost::of(text.parse().unwrap());
+        assert_eq!(of("203.0.113.7:1000"), of("203.0.113.7:2000"));
+        assert_ne!(of("203.0.113.7:1000"), of("203.0.113.8:1000"));
+        assert_eq!(of("[2001:db8:1:2::1]:1000"), of("[2001:db8:1:2:ffff::9]:2000"), "同一个 /64");
+        assert_ne!(of("[2001:db8:1:2::1]:1000"), of("[2001:db8:1:3::1]:1000"));
+        assert_eq!(of("[::ffff:203.0.113.7]:1000"), of("203.0.113.7:1"), "双栈 socket 上的 IPv4 客户端按 IPv4 算");
+        assert_eq!(of("127.0.0.1:1000"), None);
+        assert_eq!(of("[::1]:1000"), None);
     }
 }

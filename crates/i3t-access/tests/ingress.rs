@@ -381,6 +381,49 @@ async fn a_port_forward_turns_each_connection_into_a_flow_for_its_id() {
     .expect("连接结束之后计数应该归零");
 }
 
+/// 本进程里一条 TCP 连接（按本端和对端的端口找）的保活计时器还有多久到；没有在走的保活计时器时是 `None`。
+/// 读的是 `/proc/net/tcp`，所以只有 Linux 上有。
+#[cfg(target_os = "linux")]
+fn keepalive_timer(local: SocketAddr, remote: SocketAddr) -> Option<Duration> {
+    let table = std::fs::read_to_string("/proc/net/tcp").unwrap();
+    let port = |field: &str| u16::from_str_radix(field.rsplit(':').next().unwrap(), 16).unwrap();
+    table.lines().skip(1).find_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if port(fields[1]) != local.port() || port(fields[2]) != remote.port() {
+            return None;
+        }
+        // 第 6 列是"计时器种类:还有多久"，种类 2 是保活，时间的单位是 1/100 秒。
+        let (kind, when) = fields[5].split_once(':').unwrap();
+        (kind == "02").then(|| Duration::from_millis(u64::from_str_radix(when, 16).unwrap() * 10))
+    })
+}
+
+/// 流没有空闲时限，客户端悄悄消失时只能靠内核保活发现：入口接受的每条客户端连接都要打开它。
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn accepted_client_connections_probe_an_idle_client_with_keepalives() {
+    let mut netmap = netmap();
+    netmap.me.listeners = vec![listener("socks", ListenerProtocol::Socks5, "127.0.0.1:0")];
+    netmap.me.forwards = vec![forward(7, ForwardProtocol::Tcp, "127.0.0.1:0")];
+    let world = World::start(netmap).await;
+
+    for server in [world.listener("socks").await, world.forward(7).await] {
+        // 客户端连上之后什么都不发：这正是要靠保活判断死活的静默连接。
+        let client = TcpStream::connect(server).await.unwrap();
+        let client_addr = client.local_addr().unwrap();
+        let timer = timeout(PATIENCE, async {
+            loop {
+                if let Some(timer) = keepalive_timer(server, client_addr) {
+                    return timer;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        });
+        let timer = timer.await.unwrap_or_else(|_| panic!("入口接受的 {server} 上的连接没有打开保活"));
+        assert!(timer <= i3t_flow::KEEPALIVE, "静默 {:?} 之后就开始探测，现在还要等 {timer:?}", i3t_flow::KEEPALIVE);
+    }
+}
+
 #[tokio::test]
 async fn forwards_that_take_no_socket_are_reported_as_such() {
     let mut netmap = netmap();

@@ -451,6 +451,32 @@ async fn a_udp_forward_refuses_sources_outside_its_allow_list_and_targets_it_may
     assert_eq!(world.next_target().await, Target::Forward { id: 8 });
 }
 
+/// 一条转发同时最多这么多个会话，是目标节点给本节点的上下文名额（128）的一半。
+const MAX_SESSIONS: usize = 64;
+
+/// 回环以外的同一个来源在一条转发上最多这么多个会话。
+const MAX_SESSIONS_PER_HOST: usize = 16;
+
+/// 从 `ip` 上的 `count` 个不同端口各往 `to` 发一个报文，返回这些 socket（留着它们，会话才有人回）。
+async fn clients_from(ip: IpAddr, count: usize, to: SocketAddr) -> Vec<UdpSocket> {
+    let mut clients = Vec::new();
+    for _ in 0..count {
+        let client = UdpSocket::bind((ip, 0)).await.unwrap();
+        client.send_to(b"x", to).await.unwrap();
+        clients.push(client);
+    }
+    clients
+}
+
+/// 数一数对端又收到了几个数据报上下文的 OPEN，直到一阵子没有新的。
+async fn count_opens(world: &mut World) -> usize {
+    let mut opened = 0;
+    while timeout(QUIET, world.opens.recv()).await.is_ok() {
+        opened += 1;
+    }
+    opened
+}
+
 #[tokio::test]
 async fn a_udp_forward_holds_a_bounded_number_of_sessions() {
     let mut netmap = netmap();
@@ -459,19 +485,37 @@ async fn a_udp_forward_holds_a_bounded_number_of_sessions() {
     let mut world = World::start_with_udp_idle(netmap, Duration::from_secs(60)).await;
     let listening = world.forward(7);
 
-    // 256 个不同的来源地址，各占一个会话。
-    let mut clients = Vec::new();
-    for _ in 0..256 {
-        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        client.send_to(b"x", listening).await.unwrap();
-        clients.push(client);
-    }
-    let extra = UdpSocket::bind((IpAddr::from([127, 0, 0, 1]), 0)).await.unwrap();
-    extra.send_to(b"one too many", listening).await.unwrap();
+    // 回环上的来源不按来源限制：本机的程序每个请求换一个端口也照样用得上，直到整条转发的上限。
+    let _clients = clients_from(IpAddr::from([127, 0, 0, 1]), MAX_SESSIONS + 1, listening).await;
+    assert_eq!((count_opens(&mut world).await, world.sessions(7)), (MAX_SESSIONS, MAX_SESSIONS), "到了上限之后新的来源不再建会话");
+}
 
-    let mut opened = 0;
-    while timeout(QUIET, world.opens.recv()).await.is_ok() {
-        opened += 1;
-    }
-    assert_eq!((opened, world.sessions(7)), (256, 256), "到了上限之后新的来源不再建会话");
+#[tokio::test]
+async fn one_host_on_the_network_cannot_take_a_whole_udp_forward() {
+    let Some(lan) = non_loopback_address() else {
+        eprintln!("这台机器没有非回环的地址，跳过");
+        return;
+    };
+    let mut netmap = netmap();
+    netmap.me.forwards = vec![Forward { bind: "0.0.0.0:0".parse().unwrap(), ..udp_forward(7) }];
+    let mut world = World::start_with_udp_idle(netmap, Duration::from_secs(60)).await;
+    let listening = SocketAddr::new(lan, world.forward(7).port());
+
+    // 同一台主机换着来源端口发：只占得到它的那一份。
+    let _from_one_host = clients_from(lan, MAX_SESSIONS_PER_HOST + 4, listening).await;
+    assert_eq!(count_opens(&mut world).await, MAX_SESSIONS_PER_HOST);
+
+    // 转发还有空位，别的来源照样建得起会话。
+    let other = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    other.send_to(b"still room", SocketAddr::new([127, 0, 0, 1].into(), listening.port())).await.unwrap();
+    assert_eq!(count_opens(&mut world).await, 1);
+    assert_eq!(world.sessions(7), MAX_SESSIONS_PER_HOST + 1);
+}
+
+/// 这台机器的一个非回环 IPv4 地址；没有（只有回环网卡的环境）时是 `None`。
+fn non_loopback_address() -> Option<IpAddr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    // 不真的发包：connect 一个 UDP socket 只是让系统选出一个出口地址。
+    socket.connect("192.0.2.1:9").ok()?;
+    socket.local_addr().ok().map(|addr| addr.ip()).filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
 }
