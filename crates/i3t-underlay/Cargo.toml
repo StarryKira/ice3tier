@@ -8,9 +8,15 @@ publish = false
 description = "ice3tier 的可达层：一个 UDP 端口的批量收发、本机地址、地址查询、端口映射、局域网发现"
 
 [dependencies]
+bytes.workspace = true
 i3t-proto = { path = "../i3t-proto" }
+if-addrs.workspace = true
+quinn-udp = { version = "0.5.16", default-features = false, features = ["tracing"] }
+ring.workspace = true
+socket2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true
