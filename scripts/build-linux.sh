@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# 构建能在较旧的 Linux 发行版上运行的可执行文件（要求 glibc 2.28 及以上，约等于 2018 年之后的系统）。
+#
+# 需要先装好 zig 和 cargo-zigbuild，例如：pip install ziglang cargo-zigbuild
+#
+#   scripts/build-linux.sh [x86_64|aarch64]
+#
+# 产物在 target/dist/<目标>/release/ 下：i3t、i3t-controller、i3tctl。
+set -euo pipefail
+
+arch=${1:-x86_64}
+case $arch in
+    x86_64 | aarch64) ;;
+    *) echo "不支持的架构：$arch（可以写 x86_64 或 aarch64）" >&2; exit 1 ;;
+esac
+
+command -v cargo-zigbuild >/dev/null || { echo "找不到 cargo-zigbuild。安装：pip install ziglang cargo-zigbuild" >&2; exit 1; }
+
+cd "$(dirname "$0")/.."
+target="$arch-unknown-linux-gnu"
+rustup target add "$target" >/dev/null
+CARGO_TARGET_DIR=target/dist cargo zigbuild --release --target "$target.2.28" -p i3t -p i3t-controller-bin -p i3tctl
+ls -l "target/dist/$target/release/"{i3t,i3t-controller,i3tctl}
