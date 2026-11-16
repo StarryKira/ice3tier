@@ -94,6 +94,8 @@ ssh -o ProxyCommand='i3t connect %h %p' nas                 # 连网络里叫 na
 ssh -o ProxyCommand='i3t connect --via home %h %p' 192.168.1.10   # 经 home 这个出口连它局域网里的机器
 ```
 
+Linux 上可以用 `i3t tune` 检查会影响节点表现的内核参数（UDP 缓冲的上限、TCP 的拥塞控制等），它只列出建议；`sudo i3t tune --apply` 才会改。
+
 节点的本机设置在状态目录的 `config.toml` 里，每一项都有注释。`i3t status` 查看节点的状态，`i3t routes` 查看到各个对端现在怎么走。
 
 ## 构建

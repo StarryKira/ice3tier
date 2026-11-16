@@ -2,6 +2,8 @@
 
 mod connect;
 mod show;
+#[cfg(target_os = "linux")]
+mod tune;
 
 use std::io::{IsTerminal, Read};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -79,6 +81,12 @@ enum Command {
         /// 从这个出口节点的网络出去（名字或虚拟 IP），访问它那边的局域网或者互联网
         #[arg(long, value_name = "出口")]
         via: Option<String>,
+    },
+    /// 检查会影响节点表现的内核参数（只支持 Linux）：UDP 缓冲、TCP 的拥塞控制、端口保留。只看不改
+    Tune {
+        /// 把建议的值写进内核并记下来，重启之后还在。要 root 权限
+        #[arg(long)]
+        apply: bool,
     },
     /// 自检：读一遍现有的配置和状态，和 controller 握一次手。更新时由正在运行的旧程序调用，也可以手动运行
     SelfCheck,
@@ -165,6 +173,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             runtime.shutdown_background();
             result?;
         }
+        Command::Tune { apply } => {
+            let config = Config::load(&state.config_path())?;
+            tune(config.port, apply)?;
+        }
         Command::SelfCheck => {
             // 不初始化日志：调用它的旧程序把标准错误的最后一段当作失败的原因报给 controller，那里只该有原因本身。
             if let Err(failure) = current_thread()?.block_on(selfcheck::self_check(&state, &version)) {
@@ -175,6 +187,16 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(target_os = "linux")]
+fn tune(port: u16, apply: bool) -> anyhow::Result<()> {
+    tune::run(port, apply)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn tune(_port: u16, _apply: bool) -> anyhow::Result<()> {
+    bail!("i3t tune 只支持 Linux：它检查的是 Linux 的内核参数")
 }
 
 /// 从本机连一个监听地址该用的地址：绑在"所有地址"上的监听，连它的回环地址。
