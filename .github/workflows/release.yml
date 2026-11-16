@@ -65,6 +65,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # controller 在编译时把 web/dist 嵌进程序，所以要先把 WebUI 构建出来；没有它的话发布的 controller 只有一个说明页。
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Build the WebUI
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
       - name: Build (Linux, portable glibc)
         if: runner.os == 'Linux'
         env:

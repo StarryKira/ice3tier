@@ -37,10 +37,14 @@ mod quic;
 mod socket;
 mod stream;
 
-pub use contract::{Acceptor, Connector, Incoming, OpenError, RecvStream, SendStream, StreamAborted, StreamCode};
+pub use contract::{
+    Acceptor, Connector, Datagram, DatagramSendError, DatagramSender, Datagrams, Incoming, OpenError, Priority, RecvStream, SendStream,
+    StreamAborted, StreamCode,
+};
 pub use endpoint::{Endpoint, EndpointConfig, EndpointError};
 pub use i3t_path::RouteChange;
 pub use i3t_relay::{DropReason, RelayCounters};
 pub use i3t_underlay::{Direction, PacketFilter};
+pub use manager::DatagramHandle;
 pub use quic::QuicConfigError;
 pub use stream::{DROPPED_STREAM_CODE, RecvHalf, SendHalf};
