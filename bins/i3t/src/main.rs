@@ -48,6 +48,8 @@ enum Command {
     },
     /// 查看本机的状态
     Status,
+    /// 显示本节点的公钥；还没有密钥时先生成一把
+    Key,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -91,6 +93,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Command::Status => print_status(&state)?,
+        Command::Key => println!("{}", state.key_or_generate()?.public()),
     }
     Ok(())
 }
