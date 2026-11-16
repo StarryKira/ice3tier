@@ -19,7 +19,7 @@ use crate::relays::Leg;
 use crate::routing::{self, Candidate, Destination, DirectLink, Entry, Graph, PathId, Why};
 use crate::table::{FrameHeader, Hop, Shared};
 use crate::tcp::TcpLegHandle;
-use crate::timing::SWITCH_WINDOWS;
+use crate::timing::{SETTLE, SWITCH_WINDOWS};
 
 /// 到路径上第一个 relay 的那一段走的是什么。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +79,22 @@ impl View<'_> {
         self.shared.local_relay.get().is_some_and(|local| local.has_session(peer))
     }
 
+    /// 经 `relay` 到 `peer` 的那个会话信得过，可以把流量换过去。
+    ///
+    /// - `relay` 是别的节点：看本节点到它的会话，没有断过，或者断了重连之后已经保持了 [`SETTLE`] 那么久。
+    /// - `relay` 是本节点自己：看对端在本节点的 relay 上的会话。relay 这一头不记得它以前断没断过，
+    ///   所以一律要它已经保持了 [`SETTLE`] 那么久。
+    ///
+    /// 一条时好时坏的链路，会话断了重连之后头几秒看起来总是好的；等它保持够久再把流量换过去，
+    /// 免得流量跟着它一断一连地来回换。原来的路断了、只剩它能走的时候不管这一条。
+    fn settled(&self, peer: NodeId, relay: NodeId) -> bool {
+        if relay == self.shared.me {
+            let age = self.shared.local_relay.get().and_then(|local| local.session_age(peer));
+            return age.is_some_and(|age| age >= SETTLE);
+        }
+        self.relays.get(&relay).is_some_and(|entry| entry.link.is_settled(self.now))
+    }
+
     fn is_broken(&self, from: NodeId, to: NodeId) -> bool {
         // 两个编号相同的记录表示 `from` 不肯转发任何多级路径。
         self.broken.iter().any(|&(first, next, _)| first == from && (next == to || next == first))
@@ -103,11 +119,19 @@ impl View<'_> {
         if !self.allow_relay {
             return direct.map(PathId::Direct);
         }
-        let mut order: Vec<NodeId> = relay_candidates(self.shared.me, id, peer).collect();
+        // 现在走着的 relay（默认模式只经一个）。
+        let current = match peer.route {
+            RouteKey::Relay { path, .. } => Some(path.first()),
+            RouteKey::Direct(_) | RouteKey::None => None,
+        };
         // 通知过下线或者过载的 relay、刚说过"对端没挂在我这里"的 relay 排到后面，但不是完全不用：
-        // 只有它一个可走时，对端可能只是还没来得及挂上去。排序是稳定的，同一档里顺序不变。
-        let refused = |relay: &NodeId| peer.unattached.iter().any(|(held, _)| held == relay);
-        order.sort_by_key(|relay| (self.avoided(*relay), refused(relay)));
+        // 只有它一个可走时，对端可能只是还没来得及挂上去。
+        let refused = |relay: NodeId| peer.unattached.iter().any(|(held, _)| *held == relay);
+        let order = rank_relays(relay_candidates(self.shared.me, id, peer, current).collect(), current, |relay| RelayStanding {
+            avoided: self.avoided(relay),
+            refused: refused(relay),
+            settled: self.settled(id, relay),
+        });
         routing::direct_first(direct, order, |relay| self.usable(id, relay))
     }
 
@@ -128,8 +152,11 @@ impl View<'_> {
             entries.extend_from_slice(self.entries);
             let local = self.local_session(id);
             if local {
-                // 对端挂在本节点自己的 relay 上：包直接交给它的会话，本节点这一头没有延迟，也没有会断的会话。
-                entries.push(Entry { relay: me, segment: Segment::from_rtt_ms(0.0), settled: true });
+                // 对端挂在本节点自己的 relay 上：包直接交给它的会话，本节点这一头没有延迟。
+                // 这条路上会断的是对端连过来的那个会话；它到本节点的延迟只有对端把本节点列进了挂靠表才知道，
+                // 不知道的时候下面按最小的算，那样的数不能拿来和别的路比代价。
+                let measured = peer.attached.iter().any(|attachment| attachment.relay == me);
+                entries.push(Entry { relay: me, segment: Segment::from_rtt_ms(0.0), settled: measured && self.settled(id, me) });
             }
             for attachment in peer.attached.iter().filter(|attachment| attachment.relay != id && (attachment.relay != me || local)) {
                 exits.push((attachment.relay, Some(Segment::from_rtt_ms(f64::from(attachment.rtt_ms)))));
@@ -229,11 +256,42 @@ impl View<'_> {
 /// 2. **本节点自己。** 本节点是 relay、对端在它上面有会话时，经那个会话直接送过去，同样不绕路。
 ///    对端的挂靠表是按它自己的延迟排的，别的 relay 排在前面也不该先用。
 /// 3. **对端挂靠的 relay**，按它上报的延迟从低到高。只有前两条都走不通时才用。
+///    `current` 是现在走着的 relay：它还在对端的挂靠表里、延迟又没有明显高过表里最低的那个时，排在这一组的最前面。
+///    对端到两个 relay 的延迟相近时，它上报的顺序会随着测量的起伏来回变，不该让路跟着变。
 ///
 /// 前两个候选不适用时（对端不是 relay、本节点不是 relay 或者对端没挂在它上面）在选路时自然落空。
-pub(super) fn relay_candidates(me: NodeId, id: NodeId, peer: &PeerState) -> impl Iterator<Item = NodeId> + '_ {
-    let listed = peer.attached.iter().map(|attachment| attachment.relay).filter(move |relay| *relay != id && *relay != me);
-    [id, me].into_iter().chain(listed)
+pub(super) fn relay_candidates(me: NodeId, id: NodeId, peer: &PeerState, current: Option<NodeId>) -> impl Iterator<Item = NodeId> + '_ {
+    let listed = || peer.attached.iter().filter(move |attachment| attachment.relay != id && attachment.relay != me);
+    let lowest = listed().map(|attachment| attachment.rtt_ms).min();
+    // "明显更高"的标准和换挂靠对象时一样：高出 max(10ms, 20%)。
+    let close_enough = |rtt_ms: u32| lowest.is_some_and(|lowest| rtt_ms <= lowest.saturating_add((lowest / 5).max(10)));
+    let kept =
+        listed().find(|attachment| Some(attachment.relay) == current && close_enough(attachment.rtt_ms)).map(|attachment| attachment.relay);
+    let others = listed().map(|attachment| attachment.relay).filter(move |relay| Some(*relay) != kept);
+    [id, me].into_iter().chain(kept).chain(others)
+}
+
+/// 默认模式下一个候选 relay 此刻的情况，决定它往后排多少。
+#[derive(Debug, Clone, Copy)]
+pub(super) struct RelayStanding {
+    /// 它通知过即将下线或者过载。
+    pub(super) avoided: bool,
+    /// 它刚说过对端没挂在它上面。
+    pub(super) refused: bool,
+    /// 经它的那个会话已经保持了一段时间（见 [`View::settled`]）。
+    pub(super) settled: bool,
+}
+
+/// 把默认模式的候选 relay 排成该先试哪个。`order` 是 [`relay_candidates`] 给的优先顺序，`current` 是现在走着的。
+///
+/// 有毛病的往后排，但不去掉：只剩它能走的时候还得用。先看 `avoided`，再看 `refused`，最后是会话刚连上的；
+/// 现在走着的那个不因为"刚连上"往后排（已经在它上面了，没有"换过去"的问题）。排序是稳定的，同一档里顺序不变。
+pub(super) fn rank_relays(mut order: Vec<NodeId>, current: Option<NodeId>, standing: impl Fn(NodeId) -> RelayStanding) -> Vec<NodeId> {
+    order.sort_by_key(|&relay| {
+        let RelayStanding { avoided, refused, settled } = standing(relay);
+        (avoided, refused, Some(relay) != current && !settled)
+    });
+    order
 }
 
 /// 一条路径写给人看：`relay 8 → 9`。
@@ -443,9 +501,56 @@ mod tests {
     }
 
     #[test]
+    fn a_relay_whose_session_just_connected_is_tried_after_the_ones_that_have_held() {
+        let (itself, mine, listed) = (node(4), node(1), node(8));
+        let order = vec![itself, mine, listed];
+        let healthy = RelayStanding { avoided: false, refused: false, settled: true };
+        let fresh = RelayStanding { settled: false, ..healthy };
+        let ranked = |current: Option<NodeId>, fresh_ones: &[NodeId]| {
+            rank_relays(order.clone(), current, |relay| if fresh_ones.contains(&relay) { fresh } else { healthy })
+        };
+
+        // 到对端自己（它是 relay）的会话刚重连上：先不换回去，留在对端挂靠的 relay 上。
+        assert_eq!(ranked(Some(listed), &[itself]), [mine, listed, itself]);
+        // 它保持够久之后回到最前面。
+        assert_eq!(ranked(Some(listed), &[]), [itself, mine, listed]);
+        // 已经走着的那个不因为刚连上往后排：刚启动时所有会话都是新的，选中的第一个不该马上又被换掉。
+        assert_eq!(ranked(Some(itself), &[itself, mine, listed]), [itself, mine, listed]);
+        assert_eq!(ranked(None, &[itself, mine, listed]), [itself, mine, listed], "全都是新的：按原来的优先顺序");
+        // 通知过下线的排得比刚连上的还靠后。
+        let standing = |relay| {
+            if relay == itself {
+                RelayStanding { avoided: true, ..healthy }
+            } else if relay == mine {
+                fresh
+            } else {
+                healthy
+            }
+        };
+        assert_eq!(rank_relays(order.clone(), None, standing), [listed, mine, itself]);
+    }
+
+    #[test]
+    fn the_relay_in_use_stays_first_among_the_peers_relays_unless_it_became_clearly_slower() {
+        let (me, peer) = (node(1), node(2));
+        let listed = |rtts: &[(u32, u32)], current: u32| {
+            let mut state = peer_attached_to(&[]);
+            state.attached = rtts.iter().map(|&(relay, rtt_ms)| Attachment { relay: node(relay), rtt_ms }).collect();
+            relay_candidates(me, peer, &state, Some(node(current))).skip(2).collect::<Vec<_>>()
+        };
+        // 对端到两个 relay 的延迟差不多，这一次上报把顺序换了：现在走着的 9 还是排在前面。
+        assert_eq!(listed(&[(8, 340), (9, 350)], 9), [node(9), node(8)]);
+        assert_eq!(listed(&[(8, 3), (9, 12)], 9), [node(9), node(8)], "差不到 10ms 也不算明显");
+        // 9 明显变慢了（高出 20% 以上）：按对端上报的顺序来。
+        assert_eq!(listed(&[(8, 340), (9, 440)], 9), [node(8), node(9)]);
+        // 现在走着的 relay 已经不在对端的挂靠表里了：同样按上报的顺序。
+        assert_eq!(listed(&[(8, 340), (7, 350)], 9), [node(8), node(7)]);
+    }
+
+    #[test]
     fn the_peer_itself_and_this_nodes_own_relay_come_before_the_relays_the_peer_lists() {
         let (me, peer) = (node(1), node(2));
-        let order = |attached: &[u32]| relay_candidates(me, peer, &peer_attached_to(attached)).collect::<Vec<_>>();
+        let order = |attached: &[u32]| relay_candidates(me, peer, &peer_attached_to(attached), None).collect::<Vec<_>>();
         // 对端只列了别的 relay：它自己和本节点仍然排在前面。
         assert_eq!(order(&[8, 9]), [peer, me, node(8), node(9)]);
         // 对端把本节点（或者它自己）列在后面也一样，而且不重复出现。

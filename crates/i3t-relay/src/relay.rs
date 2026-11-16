@@ -204,6 +204,13 @@ impl Relay {
         self.inner.read().sessions.binding(client, Instant::now()).is_some()
     }
 
+    /// `client` 现在的会话已经保持了多久；没有会话是 `None`。断了重连之后从头算。
+    #[must_use]
+    pub fn session_age(&self, client: NodeId) -> Option<Duration> {
+        let now = Instant::now();
+        self.inner.read().sessions.opened(client, now).map(|opened| now.saturating_duration_since(opened))
+    }
+
     /// `client` 的会话是不是绑定在 UDP 地址 `from` 上。
     /// 收包的一方用它判断"发给本节点的中转帧"是不是真的来自它自称的那个节点。
     #[must_use]
@@ -287,6 +294,10 @@ impl i3t_path::LocalRelay for Relay {
 
     fn has_session(&self, client: NodeId) -> bool {
         Self::has_session(self, client)
+    }
+
+    fn session_age(&self, client: NodeId) -> Option<Duration> {
+        Self::session_age(self, client)
     }
 
     fn session_at(&self, client: NodeId, from: SocketAddr) -> bool {

@@ -899,7 +899,7 @@ impl Control {
         if self.allow_relay {
             // 能通到活跃对端的 relay 都连着（对端自己是 relay 的话也包括它）：走 relay 时要经它们，走直连时它们是随时能退回去的备用路。
             for (&id, peer) in self.peers.iter().filter(|(id, _)| active.contains(id)) {
-                wanted.extend(relay_candidates(self.shared.me, id, peer));
+                wanted.extend(relay_candidates(self.shared.me, id, peer, None));
             }
         }
         if lowest_cost {

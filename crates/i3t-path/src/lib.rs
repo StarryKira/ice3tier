@@ -42,6 +42,7 @@ mod tcp;
 mod timing;
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use i3t_model::control::{Route, RouteEntry};
 use i3t_model::netmap::Attachment;
@@ -66,6 +67,10 @@ pub trait LocalRelay: Send + Sync + 'static {
 
     /// `client` 现在在本节点的 relay 上有没有会话。
     fn has_session(&self, client: NodeId) -> bool;
+
+    /// `client` 在本节点的 relay 上的会话已经保持了多久；没有会话是 `None`。断了重连之后从头算。
+    /// 选路靠它分辨"刚连上来、还看不出稳不稳"的会话。
+    fn session_age(&self, client: NodeId) -> Option<Duration>;
 
     /// `client` 的会话是不是绑定在 UDP 地址 `from` 上。
     fn session_at(&self, client: NodeId, from: SocketAddr) -> bool;

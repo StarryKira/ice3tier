@@ -185,8 +185,8 @@ async fn a_relay_that_announces_shutdown_is_left_at_once_and_the_stream_survives
         relay.wait_relay_enabled().await;
     }
     // 默认模式：经对端挂靠的 relay 里排第一的那个，两个方向都是 R1。
-    a.apply(&View { peers: &[Peer::via(&d, &[(&r1, 1), (&r2, 2)])], relays: &[&r1, &r2, &r3], ..View::default() });
-    d.apply(&View { peers: &[Peer::via(&a, &[(&r1, 1), (&r2, 2)])], relays: &[&r1, &r2, &r3], ..View::default() });
+    a.apply(&View { peers: &[Peer::via(&d, &[(&r1, 1), (&r2, 50)])], relays: &[&r1, &r2, &r3], ..View::default() });
+    d.apply(&View { peers: &[Peer::via(&a, &[(&r1, 1), (&r2, 50)])], relays: &[&r1, &r2, &r3], ..View::default() });
     d.spawn_echo();
     let transfer = Transfer::start(&a, &d, 200).await;
     transfer.expect_progress(100).await;
@@ -226,8 +226,8 @@ async fn an_overloaded_relay_is_left_at_once_and_not_rejoined_the_moment_it_reco
     for relay in [&r1, &r2] {
         relay.wait_relay_enabled().await;
     }
-    a.apply(&View { peers: &[Peer::via(&d, &[(&r1, 1), (&r2, 2)])], relays: &[&r1, &r2], ..View::default() });
-    d.apply(&View { peers: &[Peer::via(&a, &[(&r1, 1), (&r2, 2)])], relays: &[&r1, &r2], ..View::default() });
+    a.apply(&View { peers: &[Peer::via(&d, &[(&r1, 1), (&r2, 50)])], relays: &[&r1, &r2], ..View::default() });
+    d.apply(&View { peers: &[Peer::via(&a, &[(&r1, 1), (&r2, 50)])], relays: &[&r1, &r2], ..View::default() });
     a.paths.activate(d.id);
     let via = |relay: &Node| Route::Relay { relays: vec![relay.id] };
     a.wait_route(&d, "经 R1", |route| *route == via(&r1)).await;
@@ -327,9 +327,8 @@ async fn a_tcp_only_node_weighs_its_own_tcp_legs_and_moves_off_the_one_that_stal
 
     // D 也挂上了 R1，离两个 relay 一样近：A 往哪边走只取决于它自己那一段。顺畅的 TCP 在代价上明显便宜，
     // 连续三个评估窗口之后 A 换过去。只比平滑延迟的话两条差不多（都是回环），换不过去。
-    // 因为代价换路还要到 R1 的会话先保持满半分钟，所以这里等得比别处久。
     a.apply(&View { peers: &[Peer::via(&d, &[(&r1, 5), (&r2, 5)])], ..lowest_cost });
-    a.wait_route_within(Duration::from_secs(75), &d, "经 R1（顺畅的那条 TCP）", |route| *route == via_r1).await;
+    a.wait_route(&d, "经 R1（顺畅的那条 TCP）", |route| *route == via_r1).await;
     let reasons = drain_reasons(&mut changes, &d);
     assert!(reasons.iter().any(|reason| reason.contains("连续 3 个评估窗口")), "是按代价换的，不是 R2 断了：{reasons:?}");
     let report = a.paths.path_report(d.id).unwrap();

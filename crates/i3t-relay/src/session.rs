@@ -38,6 +38,8 @@ impl Binding {
 #[derive(Debug)]
 struct Session {
     binding: Binding,
+    /// 这个会话是什么时候握手成功的。
+    opened: Instant,
     expires: Instant,
 }
 
@@ -50,7 +52,12 @@ pub(crate) struct Sessions {
 impl Sessions {
     /// 握手成功：给 `node` 建会话，或者把它已有的会话改绑到新的来源上。
     pub(crate) fn open(&mut self, node: NodeId, binding: Binding, now: Instant) {
-        self.by_node.insert(node, Session { binding, expires: now + SESSION_TTL });
+        self.by_node.insert(node, Session { binding, opened: now, expires: now + SESSION_TTL });
+    }
+
+    /// `node` 现在的会话是什么时候握手成功的。重新握手（换了来源，或者断了重连）之后是新的时刻。
+    pub(crate) fn opened(&self, node: NodeId, now: Instant) -> Option<Instant> {
+        self.live(node, now).map(|session| session.opened)
     }
 
     /// `node` 有没有会话，并且就是绑定在 `origin` 上的。转发之前靠它核对来源：
@@ -174,6 +181,22 @@ mod tests {
         assert!(!sessions.owned_by(node(1), Origin::Tcp(7), now));
         assert!(matches!(sessions.binding(node(1), now), Some(Binding::Udp(_))));
         assert_eq!(sessions.len(), 1);
+    }
+
+    #[test]
+    fn keepalive_does_not_change_when_a_session_was_opened_but_a_new_handshake_does() {
+        let start = Instant::now();
+        let mut sessions = Sessions::default();
+        assert_eq!(sessions.opened(node(1), start), None);
+        sessions.open(node(1), tcp(7), start);
+
+        let later = start + Duration::from_secs(20);
+        assert!(sessions.refresh(node(1), Origin::Tcp(7), later));
+        assert_eq!(sessions.opened(node(1), later), Some(start));
+        // 断了重连：是一个新的会话。
+        sessions.open(node(1), tcp(8), later);
+        assert_eq!(sessions.opened(node(1), later), Some(later));
+        assert_eq!(sessions.opened(node(1), later + SESSION_TTL), None, "过期的会话不算");
     }
 
     #[test]
