@@ -41,7 +41,7 @@
 
 ## 构建
 
-需要 Rust 1.85 或更新的版本。
+需要 Rust 1.88 或更新的稳定版。
 
 ```sh
 cargo build --release
