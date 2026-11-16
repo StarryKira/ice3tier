@@ -1,0 +1,9 @@
+# 内部文档，不进入版本库
+/docs/internal/
+
+/target/
+__pycache__/
+node_modules/
+/web/dist/
+*.local
+.DS_Store

@@ -1,0 +1,30 @@
+# One test per line: <label> <arguments of i3t-pretest>. {S} is replaced by the server address.
+# Lines starting with # are skipped.
+quic-cubic-down-s1 run quic --connect {S}:20330 --cc cubic --workload bulk --secs 10 --dir down
+quic-cubic-up-s1 run quic --connect {S}:20330 --cc cubic --workload bulk --secs 10 --dir up
+quic-cubic-down-s8 run quic --connect {S}:20330 --cc cubic --workload bulk --secs 10 --dir down --streams 8
+quic-cubic-up-s8 run quic --connect {S}:20330 --cc cubic --workload bulk --secs 10 --dir up --streams 8
+quic-bbr-down-s1 run quic --connect {S}:20333 --cc bbr --workload bulk --secs 10 --dir down
+quic-bbr-up-s1 run quic --connect {S}:20333 --cc bbr --workload bulk --secs 10 --dir up
+quic-nogso-down-s1 run quic --connect {S}:20334 --cc cubic --no-gso --workload bulk --secs 10 --dir down
+quic-nogso-up-s1 run quic --connect {S}:20334 --cc cubic --no-gso --workload bulk --secs 10 --dir up
+tcp-down-s1 run tcp --connect {S}:20330 --workload bulk --secs 10 --dir down
+tcp-up-s1 run tcp --connect {S}:20330 --workload bulk --secs 10 --dir up
+tcp-down-s8 run tcp --connect {S}:20330 --workload bulk --secs 10 --dir down --streams 8
+tcp-up-s8 run tcp --connect {S}:20330 --workload bulk --secs 10 --dir up --streams 8
+kcp-down-s1 run kcp --connect {S}:20331 --workload bulk --secs 10 --dir down
+kcp-up-s1 run kcp --connect {S}:20331 --workload bulk --secs 10 --dir up
+echo-quic run quic --connect {S}:20330 --workload echo --secs 20
+echo-tcp run tcp --connect {S}:20330 --workload echo --secs 20
+echo-kcp run kcp --connect {S}:20331 --workload echo --secs 20
+setup-quic run quic --connect {S}:20330 --workload setup --rounds 30
+setup-tcp run tcp --connect {S}:20330 --workload setup --rounds 30
+mixed-quic-shared run quic --connect {S}:20330 --cc cubic --workload mixed --secs 15 --warmup 5
+mixed-quic-split run quic --connect {S}:20330 --cc cubic --workload mixed --secs 15 --warmup 5 --split
+relay-quic-down-s1 run quic --relay {S}:20340 --route relay --workload bulk --secs 10 --dir down
+relay-quic-echo run quic --relay {S}:20340 --route relay --workload echo --secs 20
+relaytcp-quic-down-s1 run quic --relay-tcp {S}:20340 --route relay-tcp --workload bulk --secs 10 --dir down
+relaytcp-quic-mixed run quic --relay-tcp {S}:20340 --route relay-tcp --workload mixed --secs 15 --warmup 5
+switch-quic-mixed run quic --id 3 --peer 4 --connect {S}:20336 --relay {S}:20340 --route relay --switch 6:direct,12:relay --workload mixed --secs 18 --warmup 2 --series
+llm-quic run quic --connect {S}:20335 --idle-secs 0 --workload llm --concurrency 500 --requests 1000 --silent-every 20 --silent-ms 60000
+llm-tcp run tcp --connect {S}:20330 --workload llm --concurrency 500 --requests 1000 --silent-every 20 --silent-ms 60000
