@@ -1,0 +1,248 @@
+@import 'tailwindcss';
+@import '@xyflow/react/dist/style.css' layer(base);
+
+/*
+ * 颜色和圆角都是变量，名字沿用 shadcn/ui 的那一套（background、primary、muted……），
+ * 另加几个状态色。状态色的用法是固定的：
+ *   ok     绿  正常：在线、直连、转发正常
+ *   idle   灰  不活动或者不知道：离线、未启用
+ *   relay  蓝  正常，只是不是最短的那种：经 relay、进行中
+ *   warn   琥珀 能用，但有一件事值得知道
+ *   danger 红  不能用
+ * 颜色从不单独承担含义，旁边总有文字或形状。
+ */
+:root {
+  --background: #f4f6f8;
+  --foreground: #16202b;
+  --card: #ffffff;
+  --card-foreground: #16202b;
+  --popover: #ffffff;
+  --popover-foreground: #16202b;
+  --primary: #17596b;
+  --primary-hover: #114654;
+  --primary-foreground: #ffffff;
+  --secondary: #edf0f3;
+  --secondary-foreground: #16202b;
+  --muted: #eef1f4;
+  --muted-foreground: #566170;
+  --accent: #e4f0f3;
+  --accent-foreground: #0f4350;
+  --destructive: #b3261e;
+  --destructive-hover: #931c15;
+  --destructive-foreground: #ffffff;
+  --border: #dde2e8;
+  --border-strong: #c3cbd5;
+  --input: #c3cbd5;
+  --ring: #2b8aa3;
+
+  --ok: #15734a;
+  --ok-soft: #e1f3ea;
+  --ok-dot: #1f9d63;
+  --idle: #5f6b7a;
+  --idle-soft: #eceff3;
+  --idle-dot: #9aa5b1;
+  --relay: #2459ad;
+  --relay-soft: #e3ecfa;
+  --relay-dot: #3b78d8;
+  --warn: #855400;
+  --warn-soft: #fbf1db;
+  --warn-line: #e3c373;
+  --warn-dot: #d39a1c;
+  --danger: #a8231c;
+  --danger-soft: #fbe9e7;
+  --danger-line: #eeb4ae;
+  --danger-dot: #d0362d;
+
+  --radius: 0.5rem;
+}
+
+@theme inline {
+  --font-sans:
+    'Inter', 'HarmonyOS Sans SC', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', 'Source Han Sans SC', system-ui,
+    -apple-system, 'Segoe UI', sans-serif;
+  --font-mono:
+    'JetBrains Mono', 'SF Mono', ui-monospace, 'Cascadia Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-hover: var(--destructive-hover);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+  --color-ok-dot: var(--ok-dot);
+  --color-idle: var(--idle);
+  --color-idle-soft: var(--idle-soft);
+  --color-idle-dot: var(--idle-dot);
+  --color-relay: var(--relay);
+  --color-relay-soft: var(--relay-soft);
+  --color-relay-dot: var(--relay-dot);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-warn-line: var(--warn-line);
+  --color-warn-dot: var(--warn-dot);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-danger-line: var(--danger-line);
+  --color-danger-dot: var(--danger-dot);
+
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 2px);
+  --radius-xl: calc(var(--radius) + 6px);
+
+  --shadow-pop: 0 8px 28px -6px rgb(22 32 43 / 0.18), 0 2px 6px -2px rgb(22 32 43 / 0.08);
+  --shadow-card: 0 1px 2px rgb(22 32 43 / 0.04);
+
+  --animate-rise: rise 160ms ease-out;
+  --animate-fade: fade 140ms ease-out;
+  --animate-flash: flash 1400ms ease-out;
+
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  @keyframes fade {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  @keyframes flash {
+    0% {
+      box-shadow: 0 0 0 0 rgb(43 138 163 / 0.55);
+    }
+    100% {
+      box-shadow: 0 0 0 10px rgb(43 138 163 / 0);
+    }
+  }
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* 桌面优先：窄于 960 像素时出现横向滚动条，而不是把表格挤坏。手机不在目标之内。 */
+  body {
+    margin: 0;
+    min-width: 960px;
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-size: 0.875rem;
+    line-height: 1.55;
+  }
+
+  /* 键盘聚焦时总有一圈看得见的轮廓；鼠标点击不出现。 */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
+  button,
+  [role='button'],
+  [role='switch'],
+  [role='radio'],
+  [role='tab'],
+  [role='menuitem'],
+  [role='option'],
+  summary {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  [aria-disabled='true'],
+  [data-disabled] {
+    cursor: not-allowed;
+  }
+
+  code,
+  kbd,
+  pre {
+    font-family: var(--font-mono);
+  }
+
+  ::selection {
+    background: rgb(43 138 163 / 0.25);
+  }
+}
+
+@utility tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 系统设置了"减少动态效果"时，动画只留下结果。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* 关系图：去掉库自带的那层视觉风格，只留行为。 */
+.react-flow {
+  --xy-background-color: transparent;
+  --xy-node-border-radius: var(--radius);
+  --xy-edge-stroke: var(--border-strong);
+  --xy-attribution-background-color: transparent;
+  font-family: var(--font-sans);
+}
+
+.react-flow__node:focus-visible,
+.react-flow__edge:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 3px;
+  border-radius: var(--radius);
+}
+
+.react-flow__attribution {
+  font-size: 10px;
+  opacity: 0.6;
+}
+
+.react-flow__controls {
+  box-shadow: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.react-flow__controls-button {
+  border-bottom-color: var(--border);
+  color: var(--muted-foreground);
+}

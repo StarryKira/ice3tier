@@ -1,0 +1,333 @@
+import { screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { describe, expect, it, vi } from 'vitest'
+
+import { type AccessGraph, type CreatedEnrollToken, type EnrollTokenInfo, type Node } from '@/api/types'
+import { t } from '@/i18n'
+import { apiFailure, fakeApi, type FakeApi, NETWORK, renderWithApp, type Routes } from '@/test/harness'
+
+import { AddNodeDialog } from './AddNodeDialog'
+import { AddNodeFlow } from './AddNodeFlow'
+
+// 等节点加入时页面每隔几秒取一次；测试里取得勤一些，不用真的等。
+vi.mock('@/lib/polling', () => ({ LIVE_INTERVAL: 10_000, WAITING_INTERVAL: 40, GUIDE_INTERVAL: 5_000 }))
+
+const TOKEN = 'i3t-AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE_first'
+const SECOND_TOKEN = 'i3t-AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI_second'
+
+const GRAPH: AccessGraph = {
+  tags: [
+    { tag: 'all', nodes: [] },
+    { tag: 'servers', nodes: [] },
+  ],
+  rules: [],
+  unconnected: [],
+  unacknowledged: [],
+}
+
+function tokenInfo(id: number): EnrollTokenInfo {
+  const now = Math.floor(Date.now() / 1000)
+  return { id, network: 1, created_at: now, expires_at: now + 86_400, tags: [], virtual_ip: null, successor_of: null }
+}
+
+function created(id: number, token: string): CreatedEnrollToken {
+  return { ...tokenInfo(id), token }
+}
+
+function node(id: number, name: string): Node {
+  return {
+    id,
+    network: 1,
+    key: 'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE',
+    name,
+    fqdn: `${name}.home.i3t`,
+    virtual_ip: `10.66.0.${id}`,
+    tags: [],
+    declared: { exit: false, relay: false, forward: false },
+    relay: null,
+    exit: null,
+    dial_out_only: false,
+    routing: null,
+    reach: null,
+    pinned_relays: [],
+    platform: 'linux-x86_64',
+    version: '0.1.0',
+    online: false,
+    last_seen_at: null,
+    created_at: 1_794_000_000,
+    netmap_version: 1,
+    sent_version: 0,
+    acked_version: 0,
+  }
+}
+
+/** 一个空网络的 controller：还没有节点，也没有令牌；生成令牌之后令牌出现在"没用掉的"列表里。 */
+function emptyNetwork(extra: Routes = {}): FakeApi {
+  const api = fakeApi({
+    'GET /networks/1/nodes': [],
+    'GET /networks/1/tokens': [],
+    'GET /networks/1/access/graph': GRAPH,
+    'POST /networks/1/tokens': () => {
+      api.use({ 'GET /networks/1/tokens': [tokenInfo(7)] })
+      return created(7, TOKEN)
+    },
+    ...extra,
+  })
+  return api
+}
+
+function command(): HTMLElement {
+  return screen.getByTestId('join-command')
+}
+
+async function generate(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+  await user.click(screen.getByRole('button', { name: t.addNode.generate }))
+  await waitFor(() => expect(command()).toHaveTextContent(TOKEN))
+}
+
+describe('添加节点', () => {
+  it('令牌生成之前：命令里是占位符，让人先看懂结构；没有东西可以复制', () => {
+    emptyNetwork()
+    renderWithApp(<AddNodeFlow network={NETWORK} />)
+    expect(command()).toHaveTextContent('echo <注册令牌> | i3t join')
+    expect(screen.getByRole('button', { name: t.addNode.copyCommand })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: t.addNode.copyToken })).not.toBeInTheDocument()
+    expect(screen.queryByText(t.addNode.waiting)).not.toBeInTheDocument()
+  })
+
+  it('打开界面不会自己生成令牌：要点了按钮才发请求', () => {
+    const api = emptyNetwork()
+    renderWithApp(<AddNodeFlow network={NETWORK} />)
+    expect(api.callsTo('POST /networks/1/tokens')).toHaveLength(0)
+  })
+
+  it('勾选"可以承担"，命令跟着变', async () => {
+    const user = userEvent.setup()
+    emptyNetwork()
+    renderWithApp(<AddNodeFlow network={NETWORK} />)
+    await user.click(screen.getByRole('checkbox', { name: /可以作为 relay/ }))
+    expect(command()).toHaveTextContent('echo <注册令牌> | i3t join --can-relay')
+    await user.click(screen.getByRole('checkbox', { name: /可以作为端口转发的目标/ }))
+    await user.click(screen.getByRole('checkbox', { name: /可以作为出口/ }))
+    expect(command()).toHaveTextContent('echo <注册令牌> | i3t join --can-exit --can-relay --can-forward')
+    await user.click(screen.getByRole('checkbox', { name: /可以作为 relay/ }))
+    expect(command()).toHaveTextContent('echo <注册令牌> | i3t join --can-exit --can-forward')
+  })
+
+  it('换平台，命令跟着变', async () => {
+    const user = userEvent.setup()
+    emptyNetwork()
+    renderWithApp(<AddNodeFlow network={NETWORK} />)
+    await user.click(screen.getByRole('radio', { name: 'Windows' }))
+    expect(command()).toHaveTextContent('echo <注册令牌> | .\\i3t.exe join')
+    expect(screen.getByText(/curl\.exe -fLo i3t\.exe/)).toBeVisible()
+  })
+
+  it('生成之后：真正的令牌出现在命令里，可以整行复制；说明只显示这一次；开始等节点', async () => {
+    const user = userEvent.setup()
+    const api = emptyNetwork()
+    renderWithApp(<AddNodeFlow network={NETWORK} />)
+    await user.click(screen.getByRole('checkbox', { name: /可以作为 relay/ }))
+    await generate(user)
+
+    expect(command()).toHaveTextContent(`echo ${TOKEN} | i3t join --can-relay`)
+    expect(screen.getByText(t.addNode.shownOnce)).toBeVisible()
+    expect(screen.getByText(t.addNode.waiting)).toBeVisible()
+    // 声明是命令的参数，不写在令牌上。
+    expect(api.callsTo('POST /networks/1/tokens')[0]?.body).toEqual({ expires_in_secs: 86_400, tags: [] })
+
+    await user.click(screen.getByRole('button', { name: t.addNode.copyCommand }))
+    expect(await navigator.clipboard.readText()).toBe(`echo ${TOKEN} | i3t join --can-relay`)
+    await user.click(screen.getByRole('button', { name: t.addNode.copyToken }))
+    expect(await navigator.clipboard.readText()).toBe(TOKEN)
+  })
+
+  it('标签写在令牌上：生成时一起交给 controller，转成小写', async () => {
+    const user = userEvent.setup()
+    const api = emptyNetwork()
+    renderWithApp(<AddNodeFlow network={NETWORK} />)
+    const tags = screen.getByRole('combobox', { name: /标签/ })
+    await user.type(tags, 'Servers{Enter}')
+    await user.type(tags, 'home_lab{Enter}')
+    await generate(user)
+    expect(api.callsTo('POST /networks/1/tokens')[0]?.body).toMatchObject({ tags: ['home_lab', 'servers'] })
+  })
+
+  it('生成之后还能改"可以承担"：命令变，令牌不变，不再发请求', async () => {
+    const user = userEvent.setup()
+    const api = emptyNetwork()
+    renderWithApp(<AddNodeFlow network={NETWORK} />)
+    await generate(user)
+    await user.click(screen.getByRole('checkbox', { name: /可以作为出口/ }))
+    expect(command()).toHaveTextContent(`echo ${TOKEN} | i3t join --can-exit`)
+    expect(api.callsTo('POST /networks/1/tokens')).toHaveLength(1)
+  })
+
+  it('写在令牌上的选项生成之后不能再改，并说明为什么', async () => {
+    const user = userEvent.setup()
+    emptyNetwork()
+    renderWithApp(<AddNodeFlow network={NETWORK} />)
+    expect(screen.queryByText(t.addNode.lockedNote)).not.toBeInTheDocument()
+    await generate(user)
+    expect(screen.getByRole('combobox', { name: /标签/ })).toBeDisabled()
+    expect(screen.getByLabelText(t.addNode.ttlLabel)).toBeDisabled()
+    expect(screen.getByLabelText(/预设虚拟 IP/)).toBeDisabled()
+    expect(screen.getByText(t.addNode.lockedNote)).toBeVisible()
+  })
+
+  it('预设的虚拟 IP 不在地址段里：输入框下面就说，不让生成', async () => {
+    const user = userEvent.setup()
+    const api = emptyNetwork()
+    renderWithApp(<AddNodeFlow network={NETWORK} />)
+    const ip = screen.getByLabelText(/预设虚拟 IP/)
+    await user.type(ip, '10.99.0.5')
+    expect(screen.getByText(t.validate.ipOutOfRange('10.66.0.0/16'))).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: t.addNode.generate })).toBeDisabled()
+
+    await user.clear(ip)
+    await user.type(ip, '10.66.0.50')
+    await generate(user)
+    expect(api.callsTo('POST /networks/1/tokens')[0]?.body).toMatchObject({ virtual_ip: '10.66.0.50' })
+  })
+
+  it('controller 拒绝生成：按钮恢复，原因写在按钮下面', async () => {
+    const user = userEvent.setup()
+    emptyNetwork({
+      'POST /networks/1/tokens': () => apiFailure(409, 'address_taken', '虚拟 IP 10.66.0.50 已经分给了节点 nas-01'),
+    })
+    renderWithApp(<AddNodeFlow network={NETWORK} />)
+    await user.click(screen.getByRole('button', { name: t.addNode.generate }))
+    expect(await screen.findByText('虚拟 IP 10.66.0.50 已经分给了节点 nas-01')).toBeVisible()
+    expect(screen.getByRole('button', { name: t.addNode.generate })).toBeEnabled()
+    expect(command()).toHaveTextContent('echo <注册令牌> | i3t join')
+  })
+
+  it('节点用令牌加入之后，等待区自己变成结果；令牌不再显示', async () => {
+    const user = userEvent.setup()
+    const api = emptyNetwork()
+    renderWithApp(<AddNodeFlow network={NETWORK} />)
+    await generate(user)
+
+    // 节点执行了加入命令：令牌用掉了，网络里多出一个节点。
+    api.use({ 'GET /networks/1/tokens': [], 'GET /networks/1/nodes': [node(5, 'nas-01')] })
+    expect(await screen.findByTestId('node-joined')).toHaveTextContent('nas-01 已加入 · 10.66.0.5')
+    expect(screen.queryByText(t.addNode.waiting)).not.toBeInTheDocument()
+    expect(screen.queryByText(t.addNode.shownOnce)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: t.addNode.copyToken })).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: t.addNode.viewNode })).toHaveAttribute('href', '/n/1/nodes/5')
+  })
+
+  it('结果在最下面：节点加入时把它带进视野，免得对话框比屏幕高时看不到', async () => {
+    const user = userEvent.setup()
+    const api = emptyNetwork()
+    const scroll = vi.spyOn(Element.prototype, 'scrollIntoView')
+    renderWithApp(<AddNodeFlow network={NETWORK} />)
+    await generate(user)
+    // 还在等的时候不动：用户这时要看的是上面的命令。
+    const before = scroll.mock.contexts.length
+
+    api.use({ 'GET /networks/1/tokens': [], 'GET /networks/1/nodes': [node(5, 'nas-01')] })
+    const result = await screen.findByTestId('node-joined')
+    await waitFor(() => {
+      const scrolled = scroll.mock.contexts.slice(before) as Element[]
+      expect(scrolled.some((element) => element.contains(result))).toBe(true)
+    })
+  })
+
+  it('"再添加一台"回到生成之前：令牌清掉，勾选保留', async () => {
+    const user = userEvent.setup()
+    const api = emptyNetwork()
+    renderWithApp(<AddNodeFlow network={NETWORK} />)
+    await user.click(screen.getByRole('checkbox', { name: /可以作为 relay/ }))
+    await generate(user)
+    api.use({ 'GET /networks/1/tokens': [], 'GET /networks/1/nodes': [node(5, 'nas-01')] })
+    await screen.findByTestId('node-joined')
+
+    await user.click(screen.getByRole('button', { name: t.addNode.addAnother }))
+    expect(command()).toHaveTextContent('echo <注册令牌> | i3t join --can-relay')
+    expect(document.body).not.toHaveTextContent(TOKEN)
+    expect(screen.getByRole('button', { name: t.addNode.generate })).toBeEnabled()
+  })
+
+  it('网络里本来就有的节点不会被当成新加入的', async () => {
+    const user = userEvent.setup()
+    emptyNetwork({ 'GET /networks/1/nodes': [node(2, 'laptop')] })
+    renderWithApp(<AddNodeFlow network={NETWORK} />)
+    await generate(user)
+    // 多等几轮轮询。
+    await new Promise((done) => setTimeout(done, 150))
+    expect(screen.queryByTestId('node-joined')).not.toBeInTheDocument()
+    expect(screen.getByText(t.addNode.waiting)).toBeVisible()
+  })
+
+  it('令牌在别处被收回：不再等，给"重新生成"', async () => {
+    const user = userEvent.setup()
+    const api = emptyNetwork()
+    renderWithApp(<AddNodeFlow network={NETWORK} />)
+    await generate(user)
+    api.use({ 'GET /networks/1/tokens': [] })
+    expect(await screen.findByText(t.addNode.gone)).toBeVisible()
+    expect(screen.queryByText(t.addNode.waiting)).not.toBeInTheDocument()
+  })
+
+  it('重新生成会先收回刚才那个令牌', async () => {
+    const user = userEvent.setup()
+    const api = emptyNetwork()
+    renderWithApp(<AddNodeFlow network={NETWORK} />)
+    await generate(user)
+
+    api.use({
+      'DELETE /networks/1/tokens/7': undefined,
+      'POST /networks/1/tokens': () => {
+        api.use({ 'GET /networks/1/tokens': [tokenInfo(8)] })
+        return created(8, SECOND_TOKEN)
+      },
+    })
+    await user.click(screen.getByRole('button', { name: t.addNode.regenerate }))
+    await waitFor(() => expect(command()).toHaveTextContent(SECOND_TOKEN))
+    expect(document.body).not.toHaveTextContent(TOKEN)
+
+    const order = api.calls.filter((call) => call.method !== 'GET').map((call) => `${call.method} ${call.path}`)
+    expect(order).toEqual(['POST /networks/1/tokens', 'DELETE /networks/1/tokens/7', 'POST /networks/1/tokens'])
+  })
+})
+
+describe('"添加节点"对话框', () => {
+  it('令牌还没用掉时点"完成"要先问一句；回答"继续等"则令牌还在', async () => {
+    const user = userEvent.setup()
+    emptyNetwork()
+    const onClose = vi.fn()
+    renderWithApp(<AddNodeDialog network={NETWORK} open onClose={onClose} />)
+    await generate(user)
+
+    await user.click(screen.getByRole('button', { name: t.addNode.done }))
+    const question = await screen.findByRole('alertdialog', { name: t.addNode.closeWhileWaitingTitle })
+    expect(question).toBeVisible()
+    await user.click(screen.getByRole('button', { name: t.addNode.closeWhileWaitingCancel }))
+    expect(onClose).not.toHaveBeenCalled()
+    expect(command()).toHaveTextContent(TOKEN)
+
+    await user.click(screen.getByRole('button', { name: t.addNode.done }))
+    await user.click(await screen.findByRole('button', { name: t.addNode.closeWhileWaitingConfirm }))
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('没生成令牌时点"完成"直接关', async () => {
+    const user = userEvent.setup()
+    emptyNetwork()
+    const onClose = vi.fn()
+    renderWithApp(<AddNodeDialog network={NETWORK} open onClose={onClose} />)
+    await user.click(screen.getByRole('button', { name: t.addNode.done }))
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('关闭时不收回令牌：命令可能已经复制走了', async () => {
+    const user = userEvent.setup()
+    const api = emptyNetwork()
+    renderWithApp(<AddNodeDialog network={NETWORK} open onClose={() => undefined} />)
+    await generate(user)
+    await user.click(screen.getByRole('button', { name: t.addNode.done }))
+    await user.click(await screen.findByRole('button', { name: t.addNode.closeWhileWaitingConfirm }))
+    expect(api.calls.some((call) => call.method === 'DELETE')).toBe(false)
+  })
+})

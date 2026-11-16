@@ -1,0 +1,147 @@
+import { t } from '@/i18n'
+
+import { type ErrorBody, type KnownErrorCode } from './types'
+
+/** 管理 API 所有路径的前缀。WebUI 和 API 同源，所以这里没有主机名。 */
+export const API_PREFIX = '/api/v1'
+
+/**
+ * 一次失败的请求。
+ *
+ * `code` 给程序看：服务器给的错误码原样放在这里；连不上时是 `network`；应答不是约定的格式时是 `http_<状态码>`。
+ * `message` 给人看，可以直接显示：服务器给了就用服务器的，没给就按状态码写一句。
+ */
+export class ApiError extends Error {
+  readonly status: number
+  readonly code: string
+
+  constructor(status: number, code: string, message: string) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.code = code
+  }
+
+  is(...codes: KnownErrorCode[]): boolean {
+    return (codes as string[]).includes(this.code)
+  }
+
+  /** 连不上 controller（请求根本没有得到应答）。 */
+  get isNetwork(): boolean {
+    return this.code === 'network'
+  }
+}
+
+interface ClientHooks {
+  /** 现在登录用的管理令牌；没登录时是 `null`。 */
+  getToken: () => string | null
+  /** 带着令牌的请求得到了 401：令牌作废了，要回到登录页。 */
+  onUnauthorized: () => void
+  /** 每次请求之后报告 controller 连不连得上，用来显示和撤掉"连接断开"的横幅。 */
+  onReachability: (reachable: boolean) => void
+}
+
+let hooks: ClientHooks = {
+  getToken: () => null,
+  onUnauthorized: () => undefined,
+  onReachability: () => undefined,
+}
+
+export function configureClient(next: Partial<ClientHooks>): void {
+  hooks = { ...hooks, ...next }
+}
+
+export type Query = Record<string, string | number | undefined>
+
+export interface RequestOptions {
+  body?: unknown
+  query?: Query
+  /** 用这个令牌而不是已登录的那个。登录页检查令牌时用；这时 401 不会触发退出。 */
+  token?: string
+  signal?: AbortSignal
+}
+
+type Method = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+
+function buildUrl(path: string, query?: Query): string {
+  const search = new URLSearchParams()
+  for (const [key, value] of Object.entries(query ?? {})) {
+    if (value !== undefined) search.set(key, String(value))
+  }
+  const suffix = search.size > 0 ? `?${search.toString()}` : ''
+  return `${API_PREFIX}${path}${suffix}`
+}
+
+function isErrorBody(value: unknown): value is ErrorBody {
+  if (typeof value !== 'object' || value === null || !('error' in value)) return false
+  const { error } = value
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    typeof error.code === 'string' &&
+    'message' in error &&
+    typeof error.message === 'string'
+  )
+}
+
+async function toApiError(response: Response): Promise<ApiError> {
+  let parsed: unknown
+  try {
+    parsed = await response.json()
+  } catch {
+    parsed = undefined
+  }
+  if (isErrorBody(parsed)) {
+    return new ApiError(response.status, parsed.error.code, parsed.error.message)
+  }
+  // 不是 controller 写的应答（例如开发时代理报的 502）：按状态码说一句。
+  return new ApiError(response.status, `http_${response.status}`, t.errors.http(response.status))
+}
+
+/**
+ * 发一个请求，返回解析好的应答体。`204` 返回 `undefined`。
+ *
+ * 失败时抛出 {@link ApiError}；被 `signal` 取消时抛出原来的 `AbortError`。
+ */
+export async function request<T>(method: Method, path: string, options: RequestOptions = {}): Promise<T> {
+  const token = options.token ?? hooks.getToken()
+  const headers: Record<string, string> = { Accept: 'application/json' }
+  if (token !== null) headers.Authorization = `Bearer ${token}`
+
+  let body: string | undefined
+  if (method !== 'GET' && method !== 'DELETE') {
+    // 文档 §1.2：POST、PUT、PATCH 都要带 JSON 请求体，没有要写的字段时写 {}。
+    headers['Content-Type'] = 'application/json'
+    body = JSON.stringify(options.body ?? {})
+  }
+
+  let response: Response
+  try {
+    response = await fetch(buildUrl(path, options.query), { method, headers, body, signal: options.signal })
+  } catch (cause) {
+    if (cause instanceof DOMException && cause.name === 'AbortError') throw cause
+    hooks.onReachability(false)
+    throw new ApiError(0, 'network', t.errors.network)
+  }
+  hooks.onReachability(true)
+
+  if (!response.ok) {
+    const error = await toApiError(response)
+    if (response.status === 401 && options.token === undefined) hooks.onUnauthorized()
+    throw error
+  }
+  if (response.status === 204) return undefined as T
+  try {
+    return (await response.json()) as T
+  } catch {
+    throw new ApiError(response.status, 'bad_response', t.errors.badResponse)
+  }
+}
+
+/** 把任何抛出来的东西写成一句可以显示的话。 */
+export function errorMessage(error: unknown): string {
+  if (error instanceof ApiError) return error.message
+  if (error instanceof Error && error.message !== '') return error.message
+  return t.errors.unknown
+}

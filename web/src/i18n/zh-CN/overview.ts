@@ -1,0 +1,76 @@
+/** 总览，以及节点不足两个时的引导。 */
+export const overview = {
+  title: '总览',
+  loadFailed: '总览没有取到',
+  statusOk: (online: number, total: number) => `一切正常：${total} 个节点里 ${online} 个在线。`,
+  statusAllOffline: (total: number) => `${total} 个节点都不在线。`,
+  statusIssues: (n: number) => `有 ${n} 件事需要处理。`,
+  statusSub: (online: number, total: number) => `${total} 个节点里 ${online} 个在线。`,
+  attention: '需要处理',
+  howToFix: '怎么解决',
+  hideFix: '收起',
+  view: '查看',
+  viewNode: '查看节点',
+  viewRules: '去看访问规则',
+
+  unreachableNoRelay: (a: string, b: string) => `${a} 和 ${b} 之间不能直连，网络里没有 relay，它们现在互不可达。`,
+  unreachableWithRelay: (a: string, b: string) =>
+    `${a} 和 ${b} 之间现在无路可走：直连不通，也没有哪个 relay 两边都连得上。`,
+  viewRoutes: '查看路由',
+  fix: {
+    why: '这两台机器都在打不通直连的网络后面，需要一台公网能连上的机器帮它们中转。',
+    optionA:
+      '把现有的某一台设为 relay：它得有公网 IP，端口能从外面连上。先在那台机器上声明，再到它的节点页打开 relay。',
+    optionB: '或者再加一台有公网 IP 的机器，添加时勾上"可以作为 relay"，然后在它的节点页打开 relay。',
+    addNode: '添加节点',
+  },
+  relayOffline: (name: string) => `relay ${name} 离线，挂靠在它上面的节点暂时用不了它。`,
+  exitOffline: (name: string) => `出口 ${name} 离线，指定从它出去的连接会失败。`,
+  forwardBlocked: (name: string, reason: string) => `端口转发 ${name} 没有生效：${reason}`,
+
+  stats: {
+    online: '在线节点',
+    relays: 'relay',
+    relaysHint: '已启用',
+    exits: '出口',
+    exitsHint: '已启用',
+    rules: '访问规则',
+    forwards: '端口转发',
+    listeners: '监听器',
+    credentials: '接入凭据',
+    tokens: '待用的注册令牌',
+    open: (label: string) => `去${label}页`,
+  },
+
+  unreachableTitle: '无路可走的节点对',
+  unreachableLead: '两端都在线、访问规则也允许，但节点上报"没有可用的路"。',
+  unreachableNone: '两端都在线的节点对里，没有哪一对上报"无路可走"。',
+  unreachableNoneHint: '这里只说节点自己上报的情况。每个节点实际走直连还是经 relay，在节点详情的「路由」页。',
+
+  recentTitle: '最近的操作',
+  recentAll: '全部',
+  recentEmpty: '这个网络还没有操作记录。',
+
+  guide: {
+    title: '把前两个节点连起来',
+    lead: '这个网络里还不到两个节点。照着左边做，把两台机器加进来；右边会随着它们的加入自己变。',
+    step1: '添加第一个节点',
+    step2: '添加第二个节点',
+    step3: '看它们能不能互通',
+    done: '已完成',
+    current: '当前步骤',
+    step2Tip: '如果其中一台机器有公网 IP，勾上"可以作为 relay"。两台机器之间打不通直连时要靠它中转。',
+    step3Body:
+      '两个节点都加入并上线之后，这一页会换成总览：两端都在线却无路可走的节点对会列在那里。每个节点实际走直连还是经 relay，在它的详情页的「路由」里。由 controller 主动发起的连通性测试还在计划中。',
+    live: '实况',
+    slotFirst: '第一个节点',
+    slotSecond: '第二个节点',
+    waitingFirst: '等待第一个节点加入…',
+    waitingSecond: '等待第二个节点加入…',
+    notYet: '轮到上一步完成之后',
+    joinedOnline: '在线',
+    joinedOffline: '已加入，还不在线',
+    joinedOfflineHint: '在这台机器上执行 i3t run。',
+    skip: '节点也可以用命令行加入，这一页一样会发现。',
+  },
+}

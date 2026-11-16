@@ -1,0 +1,98 @@
+import { useQuery } from '@tanstack/react-query'
+import { lazy, Suspense } from 'react'
+import { Navigate, Route, Routes } from 'react-router'
+
+import { q } from '@/api/queries'
+
+import { RequireAuth } from '@/auth/RequireAuth'
+import { SignInPage } from '@/auth/SignInPage'
+import { AppLayout } from '@/components/layout/AppLayout'
+import { Page } from '@/components/page'
+import { SkeletonBlock } from '@/components/states'
+import { Card } from '@/components/ui/card'
+import { CredentialsPage } from '@/pages/credentials/CredentialsPage'
+import { ExitsPage } from '@/pages/exits/ExitsPage'
+import { ForwardsPage } from '@/pages/forwards/ForwardsPage'
+import { ListenersPage } from '@/pages/listeners/ListenersPage'
+import { networkPath } from '@/pages/networks/context'
+import { pickCurrentNetwork } from '@/pages/networks/current'
+import { NetworkLayout } from '@/pages/networks/NetworkLayout'
+import { NetworkPage } from '@/pages/networks/NetworkPage'
+import { WelcomePage } from '@/pages/networks/WelcomePage'
+import { NodeDetailPage } from '@/pages/nodes/NodeDetailPage'
+import { NodesPage } from '@/pages/nodes/NodesPage'
+import { NotFoundPage } from '@/pages/NotFoundPage'
+import { OverviewPage } from '@/pages/overview/OverviewPage'
+import { PairsPage } from '@/pages/pairs/PairsPage'
+import { PlannedPage } from '@/pages/planned/PlannedPage'
+import { SettingsPage } from '@/pages/settings/SettingsPage'
+import { TokensPage } from '@/pages/tokens/TokensPage'
+
+// 访问控制页带着画图的库，单独成块：别的页面用不到它。
+const AccessPage = lazy(() => import('@/pages/access/AccessPage').then((module) => ({ default: module.AccessPage })))
+
+function PageFallback() {
+  return (
+    <Page>
+      <Card>
+        <SkeletonBlock lines={6} />
+      </Card>
+    </Page>
+  )
+}
+
+/**
+ * 全部路由。地址的形状：网络在路径里（`/n/<网络编号>/…`），对象的编号在路径里，
+ * 筛选、搜索、选中的一对节点在查询参数里；浏览器的前进后退能还原这些状态。
+ *
+ * 计划中的页面是 `<PlannedPage id="…" />`：接口有了之后，把那一行换成真正的页面组件。
+ */
+export function AppRoutes() {
+  return (
+    <Routes>
+      <Route path="/login" element={<SignInPage />} />
+      <Route element={<RequireAuth />}>
+        <Route path="/welcome" element={<WelcomePage />} />
+        <Route element={<AppLayout />}>
+          {/* 外壳会算出"当前网络"；首页只是把人送到它的总览。 */}
+          <Route index element={<HomeRedirect />} />
+          <Route path="n/:network" element={<NetworkLayout />}>
+            <Route index element={<Navigate to="overview" replace />} />
+            <Route path="overview" element={<OverviewPage />} />
+            <Route path="nodes" element={<NodesPage />} />
+            <Route path="nodes/:node" element={<NodeDetailPage />} />
+            <Route
+              path="access"
+              element={
+                <Suspense fallback={<PageFallback />}>
+                  <AccessPage />
+                </Suspense>
+              }
+            />
+            <Route path="exits" element={<ExitsPage />} />
+            <Route path="listeners" element={<ListenersPage />} />
+            <Route path="credentials" element={<CredentialsPage />} />
+            <Route path="forwards" element={<ForwardsPage />} />
+            <Route path="topology" element={<PlannedPage id="topology" />} />
+            <Route path="diagnosis" element={<PlannedPage id="diagnosis" />} />
+            <Route path="tests" element={<PlannedPage id="tests" />} />
+            <Route path="tokens" element={<TokensPage />} />
+            <Route path="pairs" element={<PairsPage />} />
+            <Route path="network" element={<NetworkPage />} />
+            <Route path="*" element={<NotFoundPage />} />
+          </Route>
+          <Route path="settings" element={<SettingsPage />} />
+          <Route path="settings/:tab" element={<SettingsPage />} />
+          <Route path="*" element={<NotFoundPage />} />
+        </Route>
+      </Route>
+    </Routes>
+  )
+}
+
+function HomeRedirect() {
+  // 外壳已经取到了网络列表才会渲染到这里，所以缓存里一定有。
+  const networks = useQuery(q.networks())
+  const current = pickCurrentNetwork(networks.data ?? [])
+  return current === undefined ? <Navigate to="/welcome" replace /> : <Navigate to={networkPath(current.id)} replace />
+}
