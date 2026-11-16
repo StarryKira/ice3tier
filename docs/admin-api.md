@@ -2034,7 +2034,7 @@ Prometheus 的文本格式（`Content-Type: text/plain; version=0.0.4`）。**�
 
 | 字段 | 含义 |
 |---|---|
-| `up`、`down` | `Transfer`：`a` 到 `b`、`b` 到 `a`。`bytes` 搬了多少，`ms` 从第一个字节到最后一个字节用了多久，`bits_per_second` 平均速率，`stopped_by` 为什么停：`bytes`（到了字节上限）、`time`（到了时长上限）、`finished`。没有量（或者量不了）的方向是 `null` |
+| `up`、`down` | `Transfer`：`a` 到 `b`、`b` 到 `a`。`bytes` 搬了多少，`ms` 从第一个字节到最后一个字节用了多久，`bits_per_second` 速率：不算开头起步的那一段（字节上限或者时长上限的四分之一，先到为止），所以不等于 `bytes` 除以 `ms`；对端是不报这一段的旧版本、或者搬运没过完起步就结束了时，是整次搬运的平均，`stopped_by` 为什么停：`bytes`（到了字节上限）、`time`（到了时长上限）、`finished`。没有量（或者量不了）的方向是 `null` |
 | `failure` | 发起方报的量不了的原因码 |
 | `transport` | 用的传输，现在总是 `"quic"` |
 | `congestion` | 连接的拥塞控制：`"bbr"` 或 `"cubic"` |

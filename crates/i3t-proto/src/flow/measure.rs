@@ -3,7 +3,8 @@
 //! 发起方向对端开一条流，OPEN 的类型是 `0x03`，接受方是节点内建的测量服务，不是出口。格式在上一级模块的文档里：
 //!
 //! - **方式** 1 是"收"：发起方往流里写，测量服务读完丢掉。发起方写完（或者到了自己的上限）就正常结束发送方向；
-//!   测量服务到了它自己的上限就叫停这个方向。之后测量服务写一个 [`MeasureSummary`]（它收到了多少、用了多久、为什么停）并正常结束。
+//!   测量服务到了它自己的上限就叫停这个方向。之后测量服务写一个 [`MeasureSummary`]（它收到了多少、用了多久、为什么停，
+//!   后面可以跟着去掉起步之后的那一段）并正常结束。
 //! - **方式** 2 是"发"：测量服务往回写，最多写字节上限那么多、最多写时长上限那么久，然后正常结束。发起方不写任何东西。
 //! - **测试编号** 和主动测试的探测（[`crate::probe::TestPing`]）里的是同一个。测量服务只接受它知道的、还在时间窗里的测试，
 //!   并且只接受指令里那个对端开来的流。
@@ -86,13 +87,43 @@ impl OpenMeasure {
     }
 }
 
-/// 测量服务在"收"的方式下最后写回的一段：它收到了多少、从第一个字节到最后一个字节用了多久、为什么停。
+/// 测量服务在"收"的方式下最后写回的一段：它收到了多少、从第一个字节到最后一个字节用了多久、为什么停，
+/// 后面可以跟着去掉起步之后的那一段（[`MeasureSteady`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MeasureSummary {
     pub bytes: u64,
     /// 从收到第一个字节到收到最后一个字节，毫秒。
     pub millis: u32,
     pub end: MeasureEnd,
+    /// 去掉开头起步的那一段之后的数。搬运没有过完起步就结束了的时候没有；较早的版本不写这一段，读的一方读不到就当作没有。
+    pub steady: Option<MeasureSteady>,
+}
+
+/// 一次搬运去掉开头起步的那一段之后：收到多少、用了多久。连接刚开始发的时候速率是从很低爬上来的，
+/// 把那一段算进去，量到的吞吐就偏低，而且偏多少取决于这条连接之前有没有发过数据。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeasureSteady {
+    pub bytes: u64,
+    /// 从起步结束到收到最后一个字节，毫秒。
+    pub millis: u32,
+}
+
+impl MeasureSteady {
+    pub const LEN: usize = 8 + 4;
+
+    #[must_use]
+    pub fn to_bytes(self) -> [u8; Self::LEN] {
+        let mut bytes = [0; Self::LEN];
+        bytes[..8].copy_from_slice(&self.bytes.to_be_bytes());
+        bytes[8..].copy_from_slice(&self.millis.to_be_bytes());
+        bytes
+    }
+
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8; Self::LEN]) -> Self {
+        let [b0, b1, b2, b3, b4, b5, b6, b7, millis @ ..] = *bytes;
+        Self { bytes: u64::from_be_bytes([b0, b1, b2, b3, b4, b5, b6, b7]), millis: u32::from_be_bytes(millis) }
+    }
 }
 
 /// 一个方向的搬运为什么停。
@@ -107,22 +138,24 @@ pub enum MeasureEnd {
 }
 
 impl MeasureSummary {
+    /// 前面固定的那一段有多长。后面可有可无的一段是 [`MeasureSteady::LEN`]。
     pub const LEN: usize = 8 + 4 + 1;
+    pub const MAX_LEN: usize = Self::LEN + MeasureSteady::LEN;
 
-    #[must_use]
-    pub fn to_bytes(self) -> [u8; Self::LEN] {
-        let mut bytes = [0; Self::LEN];
-        bytes[..8].copy_from_slice(&self.bytes.to_be_bytes());
-        bytes[8..12].copy_from_slice(&self.millis.to_be_bytes());
-        bytes[12] = match self.end {
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.bytes.to_be_bytes());
+        out.extend_from_slice(&self.millis.to_be_bytes());
+        out.push(match self.end {
             MeasureEnd::Finished => 0,
             MeasureEnd::Bytes => 1,
             MeasureEnd::Time => 2,
-        };
-        bytes
+        });
+        if let Some(steady) = self.steady {
+            out.extend_from_slice(&steady.to_bytes());
+        }
     }
 
-    /// 不认识的结束原因返回 `None`。
+    /// 解析前面固定的那一段，`steady` 留空。不认识的结束原因返回 `None`。
     #[must_use]
     pub fn from_bytes(bytes: &[u8; Self::LEN]) -> Option<Self> {
         let (count, rest) = bytes.split_first_chunk::<8>()?;
@@ -133,7 +166,7 @@ impl MeasureSummary {
             2 => MeasureEnd::Time,
             _ => return None,
         };
-        Some(Self { bytes: u64::from_be_bytes(*count), millis: u32::from_be_bytes(*millis), end })
+        Some(Self { bytes: u64::from_be_bytes(*count), millis: u32::from_be_bytes(*millis), end, steady: None })
     }
 }
 
@@ -186,10 +219,22 @@ mod tests {
     }
 
     #[test]
-    fn a_summary_round_trips() {
+    fn a_summary_round_trips_with_and_without_the_steady_part() {
         for end in [MeasureEnd::Finished, MeasureEnd::Bytes, MeasureEnd::Time] {
-            let summary = MeasureSummary { bytes: 1 << 33, millis: 5000, end };
-            assert_eq!(MeasureSummary::from_bytes(&summary.to_bytes()), Some(summary));
+            let plain = MeasureSummary { bytes: 1 << 33, millis: 5000, end, steady: None };
+            let mut wire = Vec::new();
+            plain.encode(&mut wire);
+            assert_eq!(wire.len(), MeasureSummary::LEN);
+            assert_eq!(MeasureSummary::from_bytes(wire.as_slice().try_into().unwrap()), Some(plain));
+
+            let steady = MeasureSteady { bytes: 1 << 32, millis: 3750 };
+            let mut wire = Vec::new();
+            MeasureSummary { steady: Some(steady), ..plain }.encode(&mut wire);
+            assert_eq!(wire.len(), MeasureSummary::MAX_LEN);
+            let (head, tail) = wire.split_at(MeasureSummary::LEN);
+            // 前面那一段和不带的时候一模一样：只认识它的读者照样读得懂。
+            assert_eq!(MeasureSummary::from_bytes(head.try_into().unwrap()), Some(plain));
+            assert_eq!(MeasureSteady::from_bytes(tail.try_into().unwrap()), steady);
         }
         assert_eq!(MeasureSummary::from_bytes(&[0; 12].into_iter().chain([7]).collect::<Vec<_>>().try_into().unwrap()), None);
     }

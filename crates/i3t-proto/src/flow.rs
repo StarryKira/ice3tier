@@ -102,7 +102,7 @@ mod dgram;
 mod measure;
 
 pub use dgram::{DatagramHeader, Fragment, FrameError, Frames, MAX_DATAGRAM_BODY_LEN, Recipient, SplitError};
-pub use measure::{MeasureEnd, MeasureMode, MeasureSummary, OpenMeasure};
+pub use measure::{MeasureEnd, MeasureMode, MeasureSteady, MeasureSummary, OpenMeasure};
 
 /// 域名最长多少字节。DNS 的名字写成文本最长就是这么多。
 pub const MAX_DOMAIN_LEN: usize = 253;

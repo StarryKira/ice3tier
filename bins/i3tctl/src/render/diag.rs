@@ -209,7 +209,7 @@ fn throughput_lines(paths: &[&PathResult], name: &impl Fn(NodeId) -> String) {
     if let Some((_, throughput)) = measured.iter().find(|(_, throughput)| !throughput.measured.congestion.is_empty()) {
         let measured = &throughput.measured;
         println!(
-            "  用的是 {} + {}，每个方向最多 {}MB 或 {}ms，先到为止；测量期间这一对节点之间别的流量也走同一条路",
+            "  用的是 {} + {}，每个方向最多 {}MB 或 {}ms，先到为止，速率不算开头起步的四分之一；测量期间这一对节点之间别的流量也走同一条路",
             measured.transport,
             measured.congestion,
             measured.limit_bytes / 1_000_000,

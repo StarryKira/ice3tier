@@ -378,17 +378,23 @@ fn decision(decision: &RouteDecision) -> Decision {
 
 #[cfg(test)]
 mod tests {
+    use i3t_flow::measure::Steady;
+
     use super::*;
 
     #[test]
     fn a_transfer_reports_its_rate_in_whole_bits_per_second() {
-        let measured = Measured { bytes: 1_000_000, elapsed: Duration::from_millis(800), end: MeasureEnd::Bytes };
-        let transfer = transfer(measured);
+        let measured = Measured { bytes: 1_000_000, elapsed: Duration::from_millis(800), end: MeasureEnd::Bytes, steady: None };
+        let whole = transfer(measured);
         assert_eq!(
-            (transfer.bytes, transfer.ms, transfer.bits_per_second, transfer.stopped_by),
+            (whole.bytes, whole.ms, whole.bits_per_second, whole.stopped_by),
             (1_000_000, 800, Some(10_000_000), TransferEnd::Bytes)
         );
-        let instant = Measured { bytes: 10, elapsed: Duration::ZERO, end: MeasureEnd::Finished };
+        // 有起步之后的那一段时速率按它算；字节数和用时仍然是整次搬运的。
+        let steady = Steady { bytes: 750_000, elapsed: Duration::from_millis(300) };
+        let warmed = transfer(Measured { steady: Some(steady), ..measured });
+        assert_eq!((warmed.bytes, warmed.ms, warmed.bits_per_second), (1_000_000, 800, Some(20_000_000)));
+        let instant = Measured { bytes: 10, elapsed: Duration::ZERO, end: MeasureEnd::Finished, steady: None };
         assert_eq!(super::transfer(instant).bits_per_second, None, "用时太短算不出速率");
     }
 

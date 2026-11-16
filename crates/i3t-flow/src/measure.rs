@@ -6,12 +6,14 @@
 //!   本机的开关），接的话调用 [`MeasureRequest::serve`]。接受方的上限（[`MeasureLimits`]）由它自己定，不管发起方要多少：
 //!   字节数和时长到了就停，另有一个总的时限，发起方不发数据、不读数据都占不住它。
 //! - 数据是全零的块。连接本身是加密的，量到的就是真实负载的吞吐。
+//! - 速率不算开头起步的那一段（[`WARM_UP`]）：连接刚开始发的时候速率是从很低爬上来的，把它算进去，
+//!   先量的那条路径就比后量的低一截，而它们可能是同一条路。字节数和用时仍然是整次搬运的。
 
 use std::time::{Duration, Instant};
 
 use i3t_conn::{Connector, Priority, RecvStream, SendStream, StreamCode};
 use i3t_proto::NodeId;
-use i3t_proto::flow::{MeasureEnd, MeasureMode, MeasureSummary, OpenMeasure, Reason, Reply};
+use i3t_proto::flow::{MeasureEnd, MeasureMode, MeasureSteady, MeasureSummary, OpenMeasure, Reason, Reply};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time;
 
@@ -23,6 +25,9 @@ const CHUNK: usize = 64 * 1024;
 const SUMMARY_WAIT: Duration = Duration::from_secs(5);
 /// 除了时长上限，接受方另外给流留的余量：建流、慢启动之前的空档、收尾。过了这个总时限一律重置。
 const GRACE: Duration = Duration::from_secs(3);
+/// 一次搬运开头多大一部分算起步：字节上限或者时长上限的四分之一，先到为止。
+/// 往返 150 毫秒的路上爬到 100 Mbit/s 大约要 1 秒、4 MB，20 MB、5 秒的上限下四分之一正好盖住。
+pub const WARM_UP: u32 = 4;
 
 /// 接受方自己的上限。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,16 +51,70 @@ pub struct Measured {
     /// 从第一个字节到最后一个字节。
     pub elapsed: Duration,
     pub end: MeasureEnd,
+    /// 去掉起步之后的那一段。搬运没有过完起步就结束了、或者对端是不报这一段的旧版本时没有。
+    pub steady: Option<Steady>,
+}
+
+/// 一次搬运去掉开头起步的那一段之后：收到多少、用了多久。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Steady {
+    pub bytes: u64,
+    pub elapsed: Duration,
 }
 
 impl Measured {
-    /// 每秒多少比特。用时太短（不到 1 毫秒）时算不出来，是 `None`。
+    /// 每秒多少比特：有起步之后的那一段就按它算，没有就按整次搬运算。用时太短（不到 1 毫秒）时算不出来，是 `None`。
     #[must_use]
     pub fn bits_per_second(&self) -> Option<f64> {
-        let seconds = self.elapsed.as_secs_f64();
+        let (bytes, elapsed) = self.steady.map_or((self.bytes, self.elapsed), |steady| (steady.bytes, steady.elapsed));
+        let seconds = elapsed.as_secs_f64();
         // 一次测量最多几十 MB，放得进 u32；真放不下时停在最大值，算出来的只会偏低。
-        let bits = f64::from(u32::try_from(self.bytes).unwrap_or(u32::MAX)) * 8.0;
+        let bits = f64::from(u32::try_from(bytes).unwrap_or(u32::MAX)) * 8.0;
         (seconds >= 0.001).then(|| bits / seconds)
+    }
+}
+
+/// 收的一侧数一次搬运：一共多少、从第一个字节起多久，以及起步在哪里结束。
+#[derive(Debug)]
+struct Meter {
+    limits: MeasureLimits,
+    bytes: u64,
+    first: Option<Instant>,
+    last: Instant,
+    /// 起步结束的时刻，和那时已经收到多少。
+    warmed: Option<(Instant, u64)>,
+}
+
+impl Meter {
+    fn new(limits: MeasureLimits, now: Instant) -> Self {
+        Self { limits, bytes: 0, first: None, last: now, warmed: None }
+    }
+
+    /// 在 `now` 收到了 `read` 个字节。
+    fn record(&mut self, read: usize, now: Instant) {
+        let first = *self.first.get_or_insert(now);
+        self.last = now;
+        self.bytes = self.bytes.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        let warm =
+            self.bytes >= self.limits.bytes / u64::from(WARM_UP) || now.saturating_duration_since(first) >= self.limits.duration / WARM_UP;
+        if self.warmed.is_none() && warm {
+            self.warmed = Some((now, self.bytes));
+        }
+    }
+
+    /// 从第一个字节算起过了多久；还没有收到字节时是 `None`。
+    fn since_first(&self) -> Option<Duration> {
+        self.first.map(|first| first.elapsed())
+    }
+
+    fn measured(&self, end: MeasureEnd) -> Measured {
+        let elapsed = self.first.map_or(Duration::ZERO, |first| self.last.saturating_duration_since(first));
+        // 起步结束之后一个字节也没有再来（搬运太短），就没有"之后的那一段"。
+        let steady = self
+            .warmed
+            .filter(|(_, before)| self.bytes > *before)
+            .map(|(at, before)| Steady { bytes: self.bytes - before, elapsed: self.last.saturating_duration_since(at) });
+        Measured { bytes: self.bytes, elapsed, end, steady }
     }
 }
 
@@ -121,7 +180,7 @@ impl<S: SendStream, R: RecvStream> MeasureRequest<S, R> {
                 if let Ok(Err(error)) = failed {
                     tracing::debug!(peer = %self.peer, %error, "测量流中途断了");
                 }
-                Measured { bytes: 0, elapsed: Duration::ZERO, end: MeasureEnd::Time }
+                Measured { bytes: 0, elapsed: Duration::ZERO, end: MeasureEnd::Time, steady: None }
             }
         }
     }
@@ -130,13 +189,11 @@ impl<S: SendStream, R: RecvStream> MeasureRequest<S, R> {
 /// "收"：读到发起方结束、字节数或者时长到了为止，然后写回收了多少。
 async fn sink(send: &mut impl SendStream, recv: &mut impl RecvStream, limits: MeasureLimits) -> std::io::Result<Measured> {
     let mut buf = vec![0; CHUNK];
-    let mut bytes = 0u64;
     let started = Instant::now();
-    let (mut first, mut last) = (None, started);
+    let mut meter = Meter::new(limits, started);
     let end = loop {
         // 发起方迟迟不发第一个字节时也按时长算：从接受这条流算起。
-        let since = first.unwrap_or(started);
-        let wait = limits.duration.saturating_sub(since.elapsed());
+        let wait = limits.duration.saturating_sub(meter.since_first().unwrap_or_else(|| started.elapsed()));
         // 数据一直读得到时等待不会超时，所以每一轮都先看一眼时间。
         if wait.is_zero() {
             break MeasureEnd::Time;
@@ -145,11 +202,8 @@ async fn sink(send: &mut impl SendStream, recv: &mut impl RecvStream, limits: Me
             Err(_) => break MeasureEnd::Time,
             Ok(Ok(0)) => break MeasureEnd::Finished,
             Ok(Ok(read)) => {
-                let now = Instant::now();
-                first.get_or_insert(now);
-                last = now;
-                bytes = bytes.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
-                if bytes >= limits.bytes {
+                meter.record(read, Instant::now());
+                if meter.bytes >= limits.bytes {
                     break MeasureEnd::Bytes;
                 }
             }
@@ -160,11 +214,17 @@ async fn sink(send: &mut impl SendStream, recv: &mut impl RecvStream, limits: Me
         // 到了上限：叫发起方别再发了。
         recv.stop(StreamCode(Reason::Cancelled.to_wire()));
     }
-    let elapsed = first.map_or(Duration::ZERO, |first| last.saturating_duration_since(first));
-    let millis = u32::try_from(elapsed.as_millis()).unwrap_or(u32::MAX);
-    send.write_all(&MeasureSummary { bytes, millis, end }.to_bytes()).await?;
+    let measured = meter.measured(end);
+    let steady = measured.steady.map(|steady| MeasureSteady { bytes: steady.bytes, millis: millis(steady.elapsed) });
+    let mut summary = Vec::with_capacity(MeasureSummary::MAX_LEN);
+    MeasureSummary { bytes: measured.bytes, millis: millis(measured.elapsed), end, steady }.encode(&mut summary);
+    send.write_all(&summary).await?;
     send.shutdown().await?;
-    Ok(Measured { bytes, elapsed, end })
+    Ok(measured)
+}
+
+fn millis(duration: Duration) -> u32 {
+    u32::try_from(duration.as_millis()).unwrap_or(u32::MAX)
 }
 
 /// "发"：写到字节数或者时长到了为止，然后正常结束。
@@ -189,7 +249,8 @@ async fn source(send: &mut impl SendStream, limits: MeasureLimits) -> std::io::R
         }
     };
     send.shutdown().await?;
-    Ok(Measured { bytes, elapsed: started.elapsed(), end })
+    // 发的一侧不知道对端什么时候收到的，起步之后的那一段由收的一侧自己数。
+    Ok(Measured { bytes, elapsed: started.elapsed(), end, steady: None })
 }
 
 /// 到 `peer` 开一条测量流，按 `open` 量一个方向，返回量到的结果。
@@ -257,15 +318,30 @@ async fn upload(send: &mut impl SendStream, recv: &mut impl RecvStream, open: &O
     }
     // 对端叫停之后这里的结束可能失败，那也没有关系：它已经不读了。
     let _ended = send.shutdown().await;
-    let mut summary = [0; MeasureSummary::LEN];
-    time::timeout(SUMMARY_WAIT, recv.read_exact(&mut summary)).await.map_err(|_| FlowError::Deadline(SUMMARY_WAIT))?.map_err(|error| {
-        match error.kind() {
-            std::io::ErrorKind::UnexpectedEof => FlowError::Truncated,
-            _ => FlowError::Read(error),
-        }
+    let summary = time::timeout(SUMMARY_WAIT, read_summary(recv)).await.map_err(|_| FlowError::Deadline(SUMMARY_WAIT))??;
+    Ok(Measured {
+        bytes: summary.bytes,
+        elapsed: Duration::from_millis(u64::from(summary.millis)),
+        end: summary.end,
+        steady: summary.steady.map(|steady| Steady { bytes: steady.bytes, elapsed: Duration::from_millis(u64::from(steady.millis)) }),
+    })
+}
+
+/// 读对端写回的那一段：前面固定的部分一定有；后面"起步之后"的部分较早的版本不写，流在那里就结束了。
+async fn read_summary(recv: &mut impl RecvStream) -> Result<MeasureSummary, FlowError> {
+    let mut head = [0; MeasureSummary::LEN];
+    recv.read_exact(&mut head).await.map_err(|error| match error.kind() {
+        std::io::ErrorKind::UnexpectedEof => FlowError::Truncated,
+        _ => FlowError::Read(error),
     })?;
-    let summary = MeasureSummary::from_bytes(&summary).ok_or(FlowError::Truncated)?;
-    Ok(Measured { bytes: summary.bytes, elapsed: Duration::from_millis(u64::from(summary.millis)), end: summary.end })
+    let summary = MeasureSummary::from_bytes(&head).ok_or(FlowError::Truncated)?;
+    let mut tail = [0; MeasureSteady::LEN];
+    let steady = match recv.read_exact(&mut tail).await {
+        Ok(_) => Some(MeasureSteady::from_bytes(&tail)),
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => None,
+        Err(error) => return Err(FlowError::Read(error)),
+    };
+    Ok(MeasureSummary { steady, ..summary })
 }
 
 /// 下行：读到对端结束、字节数够了，或者从第一个字节算起时长到了为止，自己数。
@@ -273,24 +349,20 @@ async fn upload(send: &mut impl SendStream, recv: &mut impl RecvStream, open: &O
 /// 时长按收到的一侧算：对端写进发送缓冲就算写完了，它停笔的时候缓冲里还有一截在路上，按它的时钟停会把那一截也算进来。
 async fn download(recv: &mut impl RecvStream, open: &OpenMeasure) -> Result<Measured, FlowError> {
     let mut buf = vec![0; CHUNK];
-    let mut bytes = 0u64;
-    let limit = Duration::from_millis(u64::from(open.millis));
-    let (mut first, mut last) = (None, Instant::now());
+    let limits = MeasureLimits { bytes: open.bytes, duration: Duration::from_millis(u64::from(open.millis)) };
+    let mut meter = Meter::new(limits, Instant::now());
     let end = loop {
-        let left = first.map_or(limit + GRACE, |first: Instant| limit.saturating_sub(first.elapsed()));
+        let left = meter.since_first().map_or(limits.duration + GRACE, |since| limits.duration.saturating_sub(since));
         if left.is_zero() {
             break MeasureEnd::Time;
         }
         match time::timeout(left, recv.read(&mut buf)).await {
             Err(_) => break MeasureEnd::Time,
             // 对端结束了：字节数没够的话，是它那边的时长上限先到了。
-            Ok(Ok(0)) => break if bytes >= open.bytes { MeasureEnd::Bytes } else { MeasureEnd::Time },
+            Ok(Ok(0)) => break if meter.bytes >= limits.bytes { MeasureEnd::Bytes } else { MeasureEnd::Time },
             Ok(Ok(read)) => {
-                let now = Instant::now();
-                first.get_or_insert(now);
-                last = now;
-                bytes = bytes.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
-                if bytes >= open.bytes {
+                meter.record(read, Instant::now());
+                if meter.bytes >= limits.bytes {
                     break MeasureEnd::Bytes;
                 }
             }
@@ -301,6 +373,92 @@ async fn download(recv: &mut impl RecvStream, open: &OpenMeasure) -> Result<Meas
         // 时长到了，后面还在路上的不要了。
         recv.stop(StreamCode(Reason::Cancelled.to_wire()));
     }
-    let elapsed = first.map_or(Duration::ZERO, |first| last.saturating_duration_since(first));
-    Ok(Measured { bytes, elapsed, end })
+    Ok(meter.measured(end))
+}
+
+#[cfg(test)]
+mod tests {
+    use i3t_conn::Acceptor;
+    use i3t_proto::NodeId;
+
+    use super::*;
+    use crate::memory::MemoryMesh;
+
+    /// 对端写回 `wire` 然后结束，这一端读到的是什么。
+    async fn summary_read_from(wire: &[u8]) -> Result<MeasureSummary, FlowError> {
+        let mesh = MemoryMesh::new();
+        let (connector, _) = mesh.join(NodeId::new(1).expect("1 is a valid node id"));
+        let (_, acceptor) = mesh.join(NodeId::new(2).expect("2 is a valid node id"));
+        let (_near_send, mut near_recv) = connector.open(NodeId::new(2).expect("2 is a valid node id")).await.expect("open");
+        let mut far = acceptor.accept().await.expect("accept");
+        far.send.write_all(wire).await.expect("write");
+        far.send.shutdown().await.expect("finish");
+        read_summary(&mut near_recv).await
+    }
+
+    #[tokio::test]
+    async fn a_summary_from_an_older_peer_without_the_steady_part_is_still_read() {
+        let plain = MeasureSummary { bytes: 20_000_000, millis: 2500, end: MeasureEnd::Bytes, steady: None };
+        let mut old = Vec::new();
+        plain.encode(&mut old);
+        assert_eq!(summary_read_from(&old).await.expect("the fixed part alone is a whole summary"), plain);
+
+        let full = MeasureSummary { steady: Some(MeasureSteady { bytes: 15_000_000, millis: 1200 }), ..plain };
+        let mut new = Vec::new();
+        full.encode(&mut new);
+        assert_eq!(summary_read_from(&new).await.expect("with the steady part"), full);
+
+        assert!(matches!(summary_read_from(&old[..5]).await, Err(FlowError::Truncated)), "固定的那一段不全就是坏的");
+    }
+
+    const LIMITS: MeasureLimits = MeasureLimits { bytes: 4000, duration: Duration::from_secs(4) };
+
+    fn at(start: Instant, millis: u64) -> Instant {
+        start + Duration::from_millis(millis)
+    }
+
+    #[test]
+    fn the_rate_leaves_out_the_first_quarter_of_the_bytes() {
+        let start = Instant::now();
+        let mut meter = Meter::new(LIMITS, start);
+        // 起步很慢：前 1000 个字节用了 800 毫秒，之后每 100 毫秒 1000 个。
+        meter.record(500, at(start, 0));
+        meter.record(500, at(start, 800));
+        meter.record(1000, at(start, 900));
+        meter.record(1000, at(start, 1000));
+        meter.record(1000, at(start, 1100));
+        let measured = meter.measured(MeasureEnd::Bytes);
+        assert_eq!((measured.bytes, measured.elapsed), (4000, Duration::from_millis(1100)), "字节数和用时是整次搬运的");
+        assert_eq!(measured.steady, Some(Steady { bytes: 3000, elapsed: Duration::from_millis(300) }));
+        assert_eq!(measured.bits_per_second(), Some(80_000.0), "速率按起步之后的那一段算");
+    }
+
+    #[test]
+    fn on_a_slow_path_the_warm_up_ends_after_a_quarter_of_the_time() {
+        let start = Instant::now();
+        let mut meter = Meter::new(LIMITS, start);
+        for step in 0..=40 {
+            meter.record(10, at(start, step * 100));
+        }
+        let measured = meter.measured(MeasureEnd::Time);
+        // 四分之一的时长是 1 秒：第 1000 毫秒那一次读到的还算起步，之后的 30 次算数。
+        assert_eq!(measured.steady, Some(Steady { bytes: 300, elapsed: Duration::from_secs(3) }));
+    }
+
+    #[test]
+    fn a_transfer_that_ends_inside_the_warm_up_is_reported_whole() {
+        let start = Instant::now();
+        let mut meter = Meter::new(LIMITS, start);
+        meter.record(300, at(start, 0));
+        meter.record(300, at(start, 100));
+        let short = meter.measured(MeasureEnd::Finished);
+        assert_eq!((short.bytes, short.steady), (600, None));
+        assert_eq!(short.bits_per_second(), Some(48_000.0), "没有起步之后的那一段，就按整次搬运算");
+
+        // 起步刚好在最后一次读到时结束：之后没有字节，也没有那一段。
+        meter.record(400, at(start, 200));
+        assert_eq!(meter.measured(MeasureEnd::Finished).steady, None);
+        let nothing = Meter::new(LIMITS, start).measured(MeasureEnd::Time);
+        assert_eq!((nothing.bytes, nothing.elapsed, nothing.steady), (0, Duration::ZERO, None));
+    }
 }
