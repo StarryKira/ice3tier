@@ -55,8 +55,8 @@ function InfoCard({ network, node, onEditIp }: TabProps & { onEditIp: () => void
   return (
     <Card>
       <CardHeader title={d.info} />
-      <CardBody className="py-2">
-        <dl className="divide-y">
+      <CardBody>
+        <dl>
           <InfoRow label={d.name}>
             <CopyText value={node.name} mono={false} />
           </InfoRow>
@@ -106,7 +106,7 @@ function InfoCard({ network, node, onEditIp }: TabProps & { onEditIp: () => void
           </InfoRow>
           <InfoRow label={d.lastSeen}>
             {node.online ? (
-              <span className="inline-flex items-center gap-1.5 font-medium text-ok">
+              <span className="inline-flex items-center gap-2">
                 <OnlineDot online />
                 {d.onlineNow}
               </span>
@@ -134,9 +134,9 @@ function InfoCard({ network, node, onEditIp }: TabProps & { onEditIp: () => void
         </dl>
       </CardBody>
 
-      <CardHeader title={d.live} description={node.online ? undefined : d.liveOffline} className="border-t" />
-      <CardBody className="py-2">
-        <dl className="divide-y">
+      <CardHeader title={d.live} description={node.online ? undefined : d.liveOffline} className="mt-10" />
+      <CardBody>
+        <dl>
           <InfoRow label={d.endpoints}>
             {node.endpoints.length === 0 ? (
               <span className="text-muted-foreground">{d.endpointsNone}</span>
@@ -195,7 +195,7 @@ function InfoCard({ network, node, onEditIp }: TabProps & { onEditIp: () => void
         </dl>
         {/* 在有 relay 的网络里这只是一条说明，不是告警：它不需要用户做任何事。 */}
         {node.mapping_varies === true ? (
-          <Notice tone={hasRelay ? 'relay' : 'warn'} className="my-3">
+          <Notice tone={hasRelay ? 'relay' : 'warn'} className="mt-3">
             {hasRelay ? d.mappingVaries : d.mappingVariesNoRelay}
           </Notice>
         ) : null}
@@ -223,17 +223,14 @@ function AdvancedCard({ network, node }: TabProps) {
   return (
     <Card>
       <details className="group">
-        <summary className="flex list-none items-center justify-between gap-4 rounded-lg px-5 py-3.5 [&::-webkit-details-marker]:hidden">
+        <summary className="flex list-none items-center justify-between gap-4 rounded-md [&::-webkit-details-marker]:hidden">
           <span>
-            <span className="block text-[15px] font-semibold">{d.advanced}</span>
+            <span className="block text-base font-semibold">{d.advanced}</span>
             <span className="mt-0.5 block text-[13px] text-muted-foreground">{d.advancedHint}</span>
           </span>
-          <ChevronDown
-            className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180"
-            aria-hidden
-          />
+          <ChevronDown className="size-4 shrink-0 text-faint transition-transform group-open:rotate-180" aria-hidden />
         </summary>
-        <div className="space-y-5 border-t px-5 py-4">
+        <div className="mt-5 space-y-6">
           <div className="grid grid-cols-[minmax(0,1fr)_13rem] items-start gap-x-4 gap-y-1">
             <div>
               <label htmlFor={routingId} className="text-sm font-medium">
@@ -302,10 +299,7 @@ function AdvancedCard({ network, node }: TabProps) {
                 const relay = (nodes.data ?? []).find((other) => other.id === id)
                 const name = nodeName(nodes.data ?? [], id)
                 return (
-                  <li
-                    key={id}
-                    className="inline-flex h-7 items-center gap-1 rounded-md border bg-card pr-1 pl-2.5 text-sm"
-                  >
+                  <li key={id} className="inline-flex h-7 items-center gap-1 rounded-md bg-muted pr-1 pl-2.5 text-sm">
                     {name}
                     {relay?.relay == null ? <Badge tone="warn">{d.pinnedNotRelay}</Badge> : null}
                     <button
@@ -313,7 +307,7 @@ function AdvancedCard({ network, node }: TabProps) {
                       disabled={save.isPending}
                       onClick={() => setPinned(node.pinned_relays.filter((other) => other !== id))}
                       aria-label={d.pinnedRemove(name)}
-                      className="flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                      className="flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
                     >
                       <X className="size-3.5" aria-hidden />
                     </button>
@@ -372,9 +366,9 @@ export function OverviewTab({ network, node, onEditIp, onWaiting }: OverviewTabP
   const onForward = useCallback((value: boolean) => report('forward', value), [report])
 
   return (
-    <div className="grid grid-cols-1 items-start gap-5 @4xl:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]">
+    <div className="grid grid-cols-1 items-start gap-x-14 gap-y-12 @4xl:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]">
       <InfoCard network={network} node={node} onEditIp={onEditIp} />
-      <div className="space-y-5">
+      <div className="space-y-12">
         <Card>
           <CardHeader
             title={<span id={tagsLabelId}>{d.tags}</span>}
@@ -387,12 +381,12 @@ export function OverviewTab({ network, node, onEditIp, onWaiting }: OverviewTabP
 
         <Card>
           <CardHeader title={d.capabilities} description={d.capabilitiesHint} />
-          <div className="divide-y">
+          <div className="divide-y border-y">
             <RelayRow network={network} node={node} onWaiting={onRelay} />
             <ExitRow network={network} node={node} onWaiting={onExit} />
             <ForwardTargetRow network={network} node={node} onWaiting={onForward} />
           </div>
-          <p className="border-t px-5 py-3 text-[13px] text-muted-foreground">
+          <p className="pt-3 text-[13px] text-muted-foreground">
             {d.withdrawnNote(`${t.capability.relay.name} 和${t.capability.exit.name}`)}
           </p>
         </Card>

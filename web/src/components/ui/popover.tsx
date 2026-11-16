@@ -21,7 +21,7 @@ function PopoverContent({
         sideOffset={sideOffset}
         collisionPadding={8}
         className={cn(
-          'z-50 animate-fade rounded-lg border bg-popover text-popover-foreground shadow-pop outline-none',
+          'z-50 animate-fade rounded-lg bg-popover text-popover-foreground shadow-pop outline-none',
           className,
         )}
         {...props}

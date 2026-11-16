@@ -7,13 +7,14 @@ import { q } from '@/api/queries'
 import { type LogEntry, type LogRef, type Network } from '@/api/types'
 import { EmptyState, ErrorState, NoMatches, SkeletonRows } from '@/components/states'
 import { RelativeTime } from '@/components/status'
-import { Table, Td, Th, Tr } from '@/components/table'
+import { Table, TableFooter, Td, Th, Toolbar, Tr } from '@/components/table'
 import { Button } from '@/components/ui/button'
 import { Card, CardHeader } from '@/components/ui/card'
-import { NativeSelect } from '@/components/ui/input'
+import { fieldBase, NativeSelect } from '@/components/ui/input'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
 import { networkPath } from '@/pages/networks/context'
+import { cn } from '@/lib/utils'
 
 import {
   actionKind,
@@ -163,10 +164,10 @@ export function LogTab() {
         <EmptyState icon={History} title={s.emptyTitle} />
       ) : (
         <>
-          <div className="flex flex-wrap items-center gap-2.5 border-b px-4 py-3">
+          <Toolbar>
             <div className="relative w-60">
               <Search
-                className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground"
+                className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-faint"
                 aria-hidden
               />
               <input
@@ -176,7 +177,7 @@ export function LogTab() {
                 placeholder={s.searchPlaceholder}
                 aria-label={s.searchPlaceholder}
                 autoComplete="off"
-                className="h-9 w-full rounded-md border border-input bg-card pr-3 pl-8.5 text-sm placeholder:text-muted-foreground/80"
+                className={cn(fieldBase, 'h-9 pr-3 pl-8.5')}
               />
             </div>
             <NativeSelect
@@ -224,7 +225,7 @@ export function LogTab() {
             </NativeSelect>
             {filter.ref !== null ? (
               <span
-                className="inline-flex h-7 items-center gap-1 rounded-md border bg-accent/50 pr-1 pl-2.5 text-[13px]"
+                className="inline-flex h-7 items-center gap-1 rounded-md bg-muted pr-1 pl-2.5 text-[13px]"
                 data-testid="log-ref-filter"
               >
                 {s.refChip(refLabel(filter.ref, names, allNetworks))}
@@ -232,7 +233,7 @@ export function LogTab() {
                   type="button"
                   onClick={() => setFilter({ ...filter, ref: null })}
                   aria-label={s.refRemove(refLabel(filter.ref, names, allNetworks))}
-                  className="flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                  className="flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
                 >
                   <X className="size-3.5" aria-hidden />
                 </button>
@@ -243,7 +244,7 @@ export function LogTab() {
                 {t.common.clearFilters}
               </Button>
             ) : null}
-          </div>
+          </Toolbar>
           <Table aria-busy={log.isFetching && !log.isFetchingNextPage ? true : undefined}>
             <thead>
               <tr>
@@ -283,7 +284,7 @@ export function LogTab() {
               onClear={() => setFilter(EMPTY_LOG_FILTER)}
             />
           ) : null}
-          <footer className="flex items-center justify-between gap-4 border-t px-4 py-2.5 text-[13px] text-muted-foreground">
+          <TableFooter className="gap-4">
             <span className="tabular" data-testid="log-count">
               {s.showing(rows.length, entries.length)}
             </span>
@@ -294,7 +295,7 @@ export function LogTab() {
             ) : entries.length > 0 ? (
               <span>{s.noMore}</span>
             ) : null}
-          </footer>
+          </TableFooter>
         </>
       )}
     </Card>

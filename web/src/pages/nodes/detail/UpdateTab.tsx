@@ -21,11 +21,11 @@ export function UpdateTab({ node }: { node: NodeDetail }) {
   const { update } = node
 
   return (
-    <div className="grid grid-cols-1 items-start gap-5 @4xl:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]">
+    <div className="grid grid-cols-1 items-start gap-x-14 gap-y-12 @4xl:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]">
       <Card>
         <CardHeader title={u.detail.tab} />
-        <CardBody className="py-2">
-          <dl className="divide-y">
+        <CardBody>
+          <dl>
             <InfoRow label={u.detail.current}>
               <span className="tabular">{node.version === '' ? '—' : node.version}</span>
               <span className="ml-2 text-[13px] text-muted-foreground">{node.platform}</span>
@@ -61,7 +61,7 @@ export function UpdateTab({ node }: { node: NodeDetail }) {
               )}
             </InfoRow>
           </dl>
-          <p className="py-3 text-[13px] text-muted-foreground">
+          <p className="pt-4 text-[13px] text-muted-foreground">
             {u.detail.history}{' '}
             <Link to="/settings/updates" className="text-primary hover:underline">
               {u.detail.goSettings}

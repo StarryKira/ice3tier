@@ -74,18 +74,18 @@ function NodeView({ network, graph, focus, onFocus }: NodeViewProps) {
 
   return (
     <>
-      <div className="flex flex-wrap items-center gap-3 border-b px-5 py-3">
+      <div className="mb-3 flex flex-wrap items-center gap-3">
         <div className="w-72">
           <NodeSelect nodes={nodes.data ?? []} value={focus} onChange={onFocus} aria-label={g.nodePickLabel} />
         </div>
         {focus === null ? <p className="text-[13px] text-muted-foreground">{g.nodePick}</p> : null}
       </div>
       {focus !== null && access.data !== undefined && !access.data.acknowledged ? (
-        <div className="border-b px-5 py-3">
-          <Notice tone="warn">{g.nodePending}</Notice>
-        </div>
+        <Notice tone="warn" className="mb-3">
+          {g.nodePending}
+        </Notice>
       ) : null}
-      <div className="h-[460px]" data-testid="node-graph">
+      <div className="h-[460px] rounded-lg bg-sidebar" data-testid="node-graph">
         {focus === null ? (
           <EmptyState icon={ScanSearch} title={g.nodePick} className="h-full justify-center" />
         ) : access.isError ? (
@@ -107,7 +107,7 @@ function NodeView({ network, graph, focus, onFocus }: NodeViewProps) {
       </div>
       {/* 图的文字版：两侧各是谁。 */}
       {focus !== null && access.data !== undefined ? (
-        <dl className="grid grid-cols-2 gap-x-6 border-t px-5 py-3 text-[13px]">
+        <dl className="grid grid-cols-2 gap-x-6 pt-4 text-[13px]">
           <div>
             <dt className="font-medium">
               {g.reachableBy}（{access.data.reachable_by.length}）
@@ -210,13 +210,9 @@ export function AccessPage() {
       ) : null}
 
       {graph.isError && data === undefined ? (
-        <Card>
-          <ErrorState title={t.access.loadFailed} error={graph.error} onRetry={() => void graph.refetch()} />
-        </Card>
+        <ErrorState title={t.access.loadFailed} error={graph.error} onRetry={() => void graph.refetch()} />
       ) : data === undefined ? (
-        <Card>
-          <SkeletonBlock lines={6} />
-        </Card>
+        <SkeletonBlock lines={6} />
       ) : (
         <>
           <Segmented
@@ -227,10 +223,10 @@ export function AccessPage() {
               { value: 'rules', label: t.access.tabRules },
               { value: 'graph', label: t.access.tabGraph },
             ]}
-            className="mb-4 @4xl:hidden"
+            className="mb-6 @4xl:hidden"
           />
-          <div className="grid grid-cols-1 items-start gap-5 @4xl:grid-cols-[minmax(0,27rem)_minmax(0,1fr)]">
-            <div className={cn('space-y-5', panel === 'graph' && 'hidden @4xl:block')}>
+          <div className="grid grid-cols-1 items-start gap-x-12 gap-y-10 @4xl:grid-cols-[minmax(0,26rem)_minmax(0,1fr)]">
+            <div className={cn('space-y-12', panel === 'graph' && 'hidden @4xl:block')}>
               <Card>
                 <CardHeader
                   title={t.access.rulesTitle}
@@ -288,14 +284,14 @@ export function AccessPage() {
                 }
               />
               {data.unacknowledged.length > 0 ? (
-                <div className="border-b px-5 py-3">
-                  <Notice tone="warn">{g.unacked(data.unacknowledged.map((node) => node.name).join('、'))}</Notice>
-                </div>
+                <Notice tone="warn" className="mb-3">
+                  {g.unacked(data.unacknowledged.map((node) => node.name).join('、'))}
+                </Notice>
               ) : null}
 
               {view === 'tags' ? (
                 <>
-                  <div className="h-[520px]" data-testid="tag-graph">
+                  <div className="h-[520px] rounded-lg bg-sidebar" data-testid="tag-graph">
                     <TagGraphView
                       graph={data}
                       highlightedRule={hovered ?? selected}
@@ -312,7 +308,7 @@ export function AccessPage() {
                       }}
                     />
                   </div>
-                  <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-1.5 border-t px-5 py-3">
+                  <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-1.5 pt-3">
                     <Legend />
                     <p className="text-xs text-muted-foreground">{g.tagHint}</p>
                   </div>
@@ -321,7 +317,7 @@ export function AccessPage() {
                 <NodeView network={network} graph={data} focus={focus} onFocus={(id) => update({ node: String(id) })} />
               )}
 
-              <div className="border-t px-5 py-3 text-[13px]" data-testid="unconnected">
+              <div className="mt-6 border-t pt-4 text-[13px]" data-testid="unconnected">
                 {nodes.data?.length === 0 ? (
                   <p className="text-muted-foreground">{g.noNodes}</p>
                 ) : data.unconnected.length === 0 ? (
@@ -339,7 +335,7 @@ export function AccessPage() {
                   </>
                 )}
               </div>
-              <p className="border-t px-5 py-2.5 text-xs text-muted-foreground">{g.textEquivalent}</p>
+              <p className="pt-3 text-xs text-muted-foreground">{g.textEquivalent}</p>
             </Card>
           </div>
         </>

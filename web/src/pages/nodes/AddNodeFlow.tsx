@@ -46,13 +46,13 @@ function Step({ index, title, children }: { index: number; title: string; childr
     <li className="grid grid-cols-[1.75rem_minmax(0,1fr)] gap-x-3">
       <span
         aria-hidden
-        className="flex size-7 items-center justify-center rounded-md bg-accent font-mono text-[13px] font-semibold text-accent-foreground"
+        className="flex size-7 items-center justify-center rounded-full bg-muted text-[13px] font-semibold text-foreground tabular"
       >
         {index}
       </span>
       <div className="min-w-0 pb-1">
         <h3 className="flex h-7 items-center text-sm font-semibold">{title}</h3>
-        <div className="mt-1.5 space-y-2">{children}</div>
+        <div className="mt-2 space-y-2.5">{children}</div>
       </div>
     </li>
   )
@@ -213,9 +213,11 @@ export function AddNodeFlow({ network, intro, onStateChange, onNavigate }: AddNo
           <p className="mt-2 text-[13px] text-muted-foreground">{t.addNode.declareNote}</p>
         </div>
 
-        <details className="group rounded-md border px-3.5 py-2.5">
-          <summary className="rounded-sm text-[13px] font-medium">{t.addNode.advanced}</summary>
-          <div className="mt-3 grid grid-cols-2 gap-4 pb-1">
+        <details className="group">
+          <summary className="w-fit rounded-sm text-[13px] font-medium text-muted-foreground hover:text-foreground">
+            {t.addNode.advanced}
+          </summary>
+          <div className="mt-4 grid grid-cols-2 gap-4 pb-1">
             <Field label={t.addNode.ttlLabel}>
               {(props) => (
                 <NativeSelect
@@ -282,7 +284,7 @@ export function AddNodeFlow({ network, intro, onStateChange, onNavigate }: AddNo
         {locked ? <p className="text-[13px] text-muted-foreground">{t.addNode.lockedNote}</p> : null}
       </section>
 
-      <ol className="space-y-5">
+      <ol className="space-y-7 border-t pt-6">
         <Step index={1} title={t.addNode.step1}>
           <span id={platformLabelId} className="sr-only">
             {t.addNode.platformLabel}
@@ -359,7 +361,7 @@ export function AddNodeFlow({ network, intro, onStateChange, onNavigate }: AddNo
             disabledReason={t.addNode.copyDisabled}
             label={t.addNode.joinCommandLabel}
             testId="join-command"
-            className={cn(created !== null && joined === null && 'border-ring/60 bg-accent/40')}
+            className={cn(created !== null && joined === null && 'bg-accent')}
           >
             {joinCommand}
           </CodeBlock>
@@ -378,20 +380,20 @@ export function AddNodeFlow({ network, intro, onStateChange, onNavigate }: AddNo
       </ol>
 
       {created !== null ? (
-        <section ref={outcomeRef} aria-live="polite" className="scroll-my-5 rounded-lg border px-4 py-3.5">
+        <section ref={outcomeRef} aria-live="polite" className="scroll-my-5 border-t pt-5">
           {joined !== null ? (
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <p className="flex items-center gap-1.5 text-sm font-semibold text-ok" data-testid="node-joined">
-                  <CircleCheck className="size-4" aria-hidden />
+                <p className="flex items-center gap-2 text-sm font-semibold" data-testid="node-joined">
+                  <CircleCheck className="size-4 text-ok" aria-hidden />
                   {t.addNode.joined(joined.name, joined.virtual_ip)}
                 </p>
                 {joined.hostname !== '' ? (
-                  <p className="mt-0.5 text-[13px] text-muted-foreground" data-testid="node-joined-hostname">
+                  <p className="mt-0.5 pl-6 text-[13px] text-muted-foreground" data-testid="node-joined-hostname">
                     {t.addNode.joinedHostname(joined.hostname)}
                   </p>
                 ) : null}
-                <p className="mt-0.5 text-[13px] text-muted-foreground">{t.addNode.joinedHint}</p>
+                <p className="mt-0.5 pl-6 text-[13px] text-muted-foreground">{t.addNode.joinedHint}</p>
               </div>
               <div className="flex items-center gap-2">
                 <Button onClick={addAnother}>{t.addNode.addAnother}</Button>

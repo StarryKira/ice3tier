@@ -33,9 +33,9 @@ export function WelcomePage() {
   }
 
   return (
-    <main className="flex min-h-screen flex-col items-center px-6 pt-[12vh] pb-10">
-      <BrandMark className="mb-8" />
-      <Card className="w-full max-w-lg">
+    <main className="flex min-h-screen flex-col items-center px-6 pt-[14vh] pb-10">
+      <Card className="w-full max-w-md">
+        <BrandMark className="mb-12" />
         {networks.isPending ? (
           <SkeletonBlock lines={5} />
         ) : networks.isError ? (
@@ -45,10 +45,10 @@ export function WelcomePage() {
             onRetry={() => void networks.refetch()}
           />
         ) : (
-          <form onSubmit={submit} noValidate className="space-y-5 p-7">
+          <form onSubmit={submit} noValidate className="space-y-5">
             <div>
-              <h1 className="text-lg font-semibold">{t.networks.welcomeTitle}</h1>
-              <p className="mt-1.5 text-sm text-muted-foreground">{t.networks.welcomeLead}</p>
+              <h1 className="text-xl font-semibold tracking-tight">{t.networks.welcomeTitle}</h1>
+              <p className="mt-1.5 text-[13px] leading-relaxed text-muted-foreground">{t.networks.welcomeLead}</p>
             </div>
             {form.fields}
             <FormError message={form.error} />

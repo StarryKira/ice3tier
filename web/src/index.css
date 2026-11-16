@@ -2,66 +2,75 @@
 @import '@xyflow/react/dist/style.css' layer(base);
 
 /*
- * 颜色和圆角都是变量，名字沿用 shadcn/ui 的那一套（background、primary、muted……），
- * 另加几个状态色。状态色的用法是固定的：
- *   ok     绿  正常：在线、直连、转发正常
- *   idle   灰  不活动或者不知道：离线、未启用
- *   relay  蓝  正常，只是不是最短的那种：经 relay、进行中
- *   warn   琥珀 能用，但有一件事值得知道
- *   danger 红  不能用
+ * 界面的视觉系统：全部的颜色、字、圆角、阴影都在这一处。规则写在 web/README.md 的「界面的样子」里。
+ *
+ * 颜色只有三类：
+ *   中性灰  文字、线、底色。界面上绝大多数东西是它。
+ *   强调色  一个蓝：主按钮、选中、焦点、链接。别的地方不用。
+ *   状态色  只在一个小圆点、一根细线或者一句要人注意的话上出现：
+ *     ok     绿  正常：在线、直连、转发正常（只用圆点和线，字照常是黑的）
+ *     idle   灰  不活动或者不知道：离线、未启用（空心圆）
+ *     relay  紫  正常，只是绕了一段：经 relay、进行中
+ *     warn   琥珀 能用，但有一件事值得知道
+ *     danger 红  不能用
  * 颜色从不单独承担含义，旁边总有文字或形状。
  */
 :root {
-  --background: #f4f6f8;
-  --foreground: #16202b;
+  --background: #ffffff;
+  --foreground: #18181b;
   --card: #ffffff;
-  --card-foreground: #16202b;
+  --card-foreground: #18181b;
   --popover: #ffffff;
-  --popover-foreground: #16202b;
-  --primary: #17596b;
-  --primary-hover: #114654;
+  --popover-foreground: #18181b;
+  --sidebar: #f7f7f8;
+
+  --primary: #2a5bd7;
+  --primary-hover: #2149b8;
   --primary-foreground: #ffffff;
-  --secondary: #edf0f3;
-  --secondary-foreground: #16202b;
-  --muted: #eef1f4;
-  --muted-foreground: #566170;
-  --accent: #e4f0f3;
-  --accent-foreground: #0f4350;
-  --destructive: #b3261e;
-  --destructive-hover: #931c15;
+  --secondary: #f4f4f5;
+  --secondary-foreground: #18181b;
+  --muted: #f4f4f5;
+  --muted-foreground: #6b6b74;
+  --faint: #8b8b94;
+  --accent: #eff3fe;
+  --accent-foreground: #2149b8;
+  --destructive: #c0262d;
+  --destructive-hover: #a31f25;
   --destructive-foreground: #ffffff;
-  --border: #dde2e8;
-  --border-strong: #c3cbd5;
-  --input: #c3cbd5;
-  --ring: #2b8aa3;
+  --border: #ececef;
+  --border-strong: #d9d9de;
+  --input: #d9d9de;
+  --ring: #2a5bd7;
 
-  --ok: #15734a;
-  --ok-soft: #e1f3ea;
-  --ok-dot: #1f9d63;
-  --idle: #5f6b7a;
-  --idle-soft: #eceff3;
-  --idle-dot: #9aa5b1;
-  --relay: #2459ad;
-  --relay-soft: #e3ecfa;
-  --relay-dot: #3b78d8;
-  --warn: #855400;
-  --warn-soft: #fbf1db;
-  --warn-line: #e3c373;
-  --warn-dot: #d39a1c;
-  --danger: #a8231c;
-  --danger-soft: #fbe9e7;
-  --danger-line: #eeb4ae;
-  --danger-dot: #d0362d;
+  --ok: #1a7f4b;
+  --ok-soft: #eaf6ef;
+  --ok-dot: #22a35a;
+  --idle: #6b6b74;
+  --idle-soft: #f4f4f5;
+  --idle-dot: #a1a1aa;
+  --relay: #5b45b5;
+  --relay-soft: #f3f0fd;
+  --relay-dot: #7c66dc;
+  --warn: #8a5a00;
+  --warn-soft: #fdf6e3;
+  --warn-line: #f0d9a0;
+  --warn-dot: #e0a100;
+  --danger: #b42318;
+  --danger-soft: #fdeeed;
+  --danger-line: #f5c2be;
+  --danger-dot: #e5484d;
 
-  --radius: 0.5rem;
+  --radius: 0.375rem;
 }
 
 @theme inline {
+  /* 系统字体：界面常常离线使用，不从网上取字体，也不打包字体文件。中文落在系统自带的黑体上。 */
   --font-sans:
-    'Inter', 'HarmonyOS Sans SC', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', 'Source Han Sans SC', system-ui,
-    -apple-system, 'Segoe UI', sans-serif;
+    system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei UI', 'Microsoft YaHei',
+    'Noto Sans CJK SC', 'Noto Sans SC', 'Source Han Sans SC', Roboto, 'Helvetica Neue', Arial, sans-serif;
   --font-mono:
-    'JetBrains Mono', 'SF Mono', ui-monospace, 'Cascadia Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+    ui-monospace, 'SF Mono', SFMono-Regular, 'Cascadia Mono', 'JetBrains Mono', Menlo, Consolas, 'Liberation Mono',
+    monospace;
 
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -69,6 +78,7 @@
   --color-card-foreground: var(--card-foreground);
   --color-popover: var(--popover);
   --color-popover-foreground: var(--popover-foreground);
+  --color-sidebar: var(--sidebar);
   --color-primary: var(--primary);
   --color-primary-hover: var(--primary-hover);
   --color-primary-foreground: var(--primary-foreground);
@@ -76,6 +86,7 @@
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
+  --color-faint: var(--faint);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
@@ -109,8 +120,9 @@
   --radius-lg: calc(var(--radius) + 2px);
   --radius-xl: calc(var(--radius) + 6px);
 
-  --shadow-pop: 0 8px 28px -6px rgb(22 32 43 / 0.18), 0 2px 6px -2px rgb(22 32 43 / 0.08);
-  --shadow-card: 0 1px 2px rgb(22 32 43 / 0.04);
+  /* 阴影只给浮在页面上面的东西（菜单、弹出层、对话框、通知）。页面里的东西不投影。 */
+  --shadow-pop: 0 12px 32px -8px rgb(24 24 27 / 0.16), 0 0 0 1px rgb(24 24 27 / 0.06);
+  --shadow-card: 0 1px 2px rgb(24 24 27 / 0.08);
 
   --animate-rise: rise 160ms ease-out;
   --animate-fade: fade 140ms ease-out;
@@ -136,10 +148,10 @@
   }
   @keyframes flash {
     0% {
-      box-shadow: 0 0 0 0 rgb(43 138 163 / 0.55);
+      background-color: rgb(42 91 215 / 0.12);
     }
     100% {
-      box-shadow: 0 0 0 10px rgb(43 138 163 / 0);
+      background-color: transparent;
     }
   }
 }
@@ -162,7 +174,17 @@
     color: var(--foreground);
     font-family: var(--font-sans);
     font-size: 0.875rem;
-    line-height: 1.55;
+    line-height: 1.5;
+  }
+
+  /* 表格里的数一律等宽对齐。 */
+  table {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 图标一种粗细：比库默认的细一点，和文字的笔画接近。 */
+  svg.lucide {
+    stroke-width: 1.75;
   }
 
   /* 键盘聚焦时总有一圈看得见的轮廓；鼠标点击不出现。 */
@@ -195,7 +217,7 @@
   }
 
   ::selection {
-    background: rgb(43 138 163 / 0.25);
+    background: rgb(42 91 215 / 0.18);
   }
 }
 
@@ -214,10 +236,10 @@
   }
 }
 
-/* 关系图：去掉库自带的那层视觉风格，只留行为。 */
+/* 关系图：去掉库自带的那层视觉风格，只留行为。线、点、字都用上面的变量。 */
 .react-flow {
   --xy-background-color: transparent;
-  --xy-node-border-radius: var(--radius);
+  --xy-node-border-radius: var(--radius-lg);
   --xy-edge-stroke: var(--border-strong);
   --xy-attribution-background-color: transparent;
   font-family: var(--font-sans);
@@ -227,22 +249,28 @@
 .react-flow__edge:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 3px;
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
 }
 
 .react-flow__attribution {
   font-size: 10px;
-  opacity: 0.6;
+  opacity: 0.45;
 }
 
 .react-flow__controls {
-  box-shadow: none;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  box-shadow: 0 0 0 1px var(--border);
+  border-radius: var(--radius-md);
   overflow: hidden;
 }
 
 .react-flow__controls-button {
+  width: 28px;
+  height: 28px;
+  background: var(--card);
   border-bottom-color: var(--border);
   color: var(--muted-foreground);
+}
+
+.react-flow__controls-button:hover {
+  background: var(--muted);
 }

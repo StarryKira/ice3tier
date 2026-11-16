@@ -43,10 +43,9 @@ function TopoNodeView({ data }: NodeProps<TopoFlowNode>) {
     <div
       style={{ width: point.width, height: point.height }}
       className={cn(
-        'flex cursor-pointer flex-col justify-center rounded-lg border bg-card px-3 shadow-card transition-opacity hover:border-primary/60',
-        point.relay && 'border-relay/40 bg-relay-soft',
-        !node.online && 'border-dashed border-border-strong bg-muted/70 shadow-none',
-        point.picked !== null && 'border-2 border-primary ring-2 ring-ring/30',
+        'flex cursor-pointer flex-col justify-center rounded-lg border border-border-strong bg-card px-3 transition-[opacity,border-color] hover:border-foreground/40',
+        !node.online && 'border-dashed bg-transparent',
+        point.picked !== null && 'border-primary outline-2 outline-offset-0 outline-primary',
         dimmed && 'opacity-35',
       )}
     >
@@ -69,9 +68,9 @@ function TopoNodeView({ data }: NodeProps<TopoFlowNode>) {
           </span>
         ) : null}
       </span>
-      <span className="flex items-center gap-1.5 truncate font-mono text-[11px] text-muted-foreground">
+      <span className="flex items-center gap-1.5 truncate text-[11px] text-muted-foreground tabular">
         {node.virtual_ip}
-        {point.relay ? <span className="font-sans font-medium text-relay">{g.relayBadge}</span> : null}
+        {point.relay ? <span className="font-medium text-relay">{g.relayBadge}</span> : null}
       </span>
     </div>
   )
@@ -100,7 +99,7 @@ function LineEdgeView({ id, source, target, data, markerEnd, style }: EdgeProps<
           <span
             style={{ transform: `translate(-50%, -50%) translate(${path.label.x}px, ${path.label.y}px)` }}
             className={cn(
-              'pointer-events-none absolute rounded-sm bg-background px-1 text-[11px] leading-4 tabular',
+              'pointer-events-none absolute rounded-sm bg-sidebar px-1 text-[11px] leading-4 tabular',
               data.strong ? 'font-medium text-foreground' : 'text-muted-foreground',
             )}
           >
@@ -137,7 +136,7 @@ interface TopologyGraphProps {
 }
 
 /**
- * 拓扑的实时图。颜色之外总有线型：直连实线，经 relay 的那一段蓝色实线，过期的灰色虚线，不可达红色点线；
+ * 拓扑的实时图。颜色之外总有线型：直连实线，经 relay 的那一段紫色实线，过期的灰色虚线，不可达红色点线；
  * 选中的那一对 A → B 是粗实线，B → A 是粗虚线，都带箭头，其余的变暗。
  */
 export function TopologyGraph({ shape, rtt, onPick }: TopologyGraphProps) {

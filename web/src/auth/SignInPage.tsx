@@ -65,14 +65,14 @@ export function SignInPage() {
   }
 
   return (
-    <main className="flex min-h-screen flex-col items-center px-6 pt-[14vh] pb-10">
-      <BrandMark className="mb-2" />
-      <p className="mb-8 text-sm text-muted-foreground">{t.signIn.tagline}</p>
-      <Card className="w-full max-w-md">
-        <form onSubmit={(event) => void submit(event)} noValidate className="space-y-5 p-7">
+    <main className="flex min-h-screen flex-col items-center px-6 pt-[16vh] pb-10">
+      <Card className="w-full max-w-sm">
+        <BrandMark />
+        <p className="mt-2 mb-12 text-[13px] text-muted-foreground">{t.signIn.tagline}</p>
+        <form onSubmit={(event) => void submit(event)} noValidate className="space-y-5">
           <div>
-            <h1 className="text-lg font-semibold">{t.signIn.title}</h1>
-            <p className="mt-1.5 text-sm text-muted-foreground">{t.signIn.lead}</p>
+            <h1 className="text-xl font-semibold tracking-tight">{t.signIn.title}</h1>
+            <p className="mt-1.5 text-[13px] leading-relaxed text-muted-foreground">{t.signIn.lead}</p>
           </div>
           {reason !== null ? (
             <Notice tone={reason === 'expired' ? 'warn' : 'info'}>
@@ -124,7 +124,7 @@ export function SignInPage() {
             {t.signIn.submit}
           </Button>
         </form>
-        <details className="border-t px-7 py-4 text-[13px] text-muted-foreground">
+        <details className="mt-10 border-t pt-5 text-[13px] text-muted-foreground">
           <summary className="rounded-sm font-medium text-foreground">{t.signIn.lostTitle}</summary>
           <p className="mt-2">{t.signIn.lostBody}</p>
           <pre className="mt-2 overflow-x-auto rounded-md bg-muted px-3 py-2 font-mono text-xs break-all whitespace-pre-wrap text-foreground">

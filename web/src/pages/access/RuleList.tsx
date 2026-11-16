@@ -49,11 +49,11 @@ export function RuleList({ network, graph, highlighted, focused, onHighlight, on
   return (
     <div>
       {allOpen && othersEnabled ? (
-        <div className="border-b px-4 py-3">
-          <Notice tone="warn">{t.access.allOpenNotice}</Notice>
-        </div>
+        <Notice tone="warn" className="mb-3">
+          {t.access.allOpenNotice}
+        </Notice>
       ) : null}
-      <ul className="divide-y" onMouseLeave={() => onHighlight(null)}>
+      <ul className="-mx-3 divide-y border-t" onMouseLeave={() => onHighlight(null)}>
         {graph.rules.map((rule) => {
           const label = ruleLabel(rule)
           const builtin = isAllToAll(rule)
@@ -68,7 +68,7 @@ export function RuleList({ network, graph, highlighted, focused, onHighlight, on
               data-testid={`rule-row-${rule.id}`}
               data-highlighted={highlighted === rule.id || undefined}
               className={cn(
-                'flex items-center gap-3 px-4 py-2.5 transition-colors',
+                'flex items-center gap-3 rounded-md px-3 py-2.5 transition-colors',
                 highlighted === rule.id && 'bg-accent/60',
               )}
             >

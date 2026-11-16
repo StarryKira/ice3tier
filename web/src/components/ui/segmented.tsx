@@ -27,15 +27,15 @@ function Segmented<V extends string>({
       onValueChange={(next) => onChange(next as V)}
       orientation="horizontal"
       aria-label={props['aria-label']}
-      className={cn('inline-flex rounded-md border border-input bg-muted p-0.5', className)}
+      className={cn('inline-flex rounded-md bg-muted p-0.5', className)}
     >
       {options.map((option) => (
         <RadioGroup.Item
           key={option.value}
           value={option.value}
           className={cn(
-            'inline-flex items-center justify-center gap-1.5 rounded-[5px] px-3 font-medium whitespace-nowrap text-muted-foreground transition-colors hover:text-foreground data-[state=checked]:bg-card data-[state=checked]:text-foreground data-[state=checked]:shadow-card',
-            size === 'sm' ? 'h-6.5 text-[13px]' : 'h-7.5 text-sm',
+            'inline-flex items-center justify-center gap-1.5 rounded-sm px-3 font-medium whitespace-nowrap text-muted-foreground transition-colors hover:text-foreground data-[state=checked]:bg-card data-[state=checked]:text-foreground data-[state=checked]:shadow-card',
+            size === 'sm' ? 'h-6.5 text-[13px]' : 'h-8 text-[13px]',
           )}
         >
           {option.label}

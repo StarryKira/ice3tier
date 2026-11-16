@@ -96,7 +96,7 @@ export function CopyText({ value, children, mono = true, wrap = false, className
         aria-label={t.common.copyValue(value)}
         className={cn(
           'group/copy inline-flex max-w-full items-center gap-1 rounded-sm text-left hover:text-primary',
-          mono && 'font-mono text-[13px] tabular',
+          mono && 'font-mono text-[13px]',
           className,
         )}
       >
@@ -138,7 +138,7 @@ export function CodeBlock({
   testId,
 }: CodeBlockProps) {
   return (
-    <div className={cn('flex items-start gap-2 rounded-md border bg-muted/70 py-2 pr-2 pl-3.5', className)}>
+    <div className={cn('flex items-start gap-2 rounded-md bg-muted py-2 pr-2 pl-3.5', className)}>
       <pre
         aria-label={label}
         data-testid={testId}

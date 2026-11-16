@@ -18,10 +18,14 @@ import {
 
 const g = t.topology
 
+/**
+ * 格子的底色和图上线的颜色是同一套：直连淡绿，经 relay 淡紫，无路可走淡红。底色都很淡，
+ * 格子里的字和数照常是黑的（只有无路可走是红字），一眼扫过去先看到的是不正常的那几格。
+ */
 const CELL: Record<RouteClass, string> = {
-  direct: 'bg-ok-soft text-ok',
-  relay: 'bg-relay-soft text-relay',
-  multi: 'bg-relay-soft text-relay ring-1 ring-inset ring-relay/40',
+  direct: 'bg-ok-soft text-foreground',
+  relay: 'bg-relay-soft text-foreground',
+  multi: 'bg-relay-soft text-foreground ring-1 ring-inset ring-relay-dot/50',
   none: 'bg-danger-soft text-danger',
 }
 
@@ -32,7 +36,7 @@ export function MatrixLegend() {
   const classes: RouteClass[] = ['direct', 'relay', 'multi', 'none']
   return (
     <ul
-      className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground"
+      className="flex flex-wrap items-center gap-x-5 gap-y-1.5 text-xs text-muted-foreground"
       aria-label={t.routes.legendLabel}
     >
       {classes.map((cls) => (
@@ -101,7 +105,7 @@ export function MatrixView({ matrix, pair, onPick }: MatrixViewProps) {
           <tr>
             <th
               scope="col"
-              className="sticky top-0 left-0 z-20 border-b bg-card px-3 py-2 text-left text-xs font-medium whitespace-nowrap text-muted-foreground"
+              className="sticky top-0 left-0 z-20 border-b bg-card py-2 pr-4 text-left text-xs font-medium whitespace-nowrap text-muted-foreground"
             >
               {g.matrixFrom}
             </th>
@@ -110,7 +114,7 @@ export function MatrixView({ matrix, pair, onPick }: MatrixViewProps) {
                 key={node.id}
                 scope="col"
                 className={cn(
-                  'sticky top-0 z-10 max-w-24 border-b bg-card px-1.5 py-2 text-xs font-medium',
+                  'sticky top-0 z-10 max-w-24 border-b bg-card px-1.5 py-2 text-xs font-medium text-muted-foreground',
                   (pair.a === node.id || pair.b === node.id) && 'text-primary',
                 )}
               >
@@ -127,7 +131,7 @@ export function MatrixView({ matrix, pair, onPick }: MatrixViewProps) {
               <th
                 scope="row"
                 className={cn(
-                  'sticky left-0 z-10 border-r bg-card px-3 py-1 text-left text-[13px] font-medium whitespace-nowrap',
+                  'sticky left-0 z-10 bg-card py-0.5 pr-4 text-left text-[13px] font-medium whitespace-nowrap',
                   (pair.a === from.id || pair.b === from.id) && 'text-primary',
                 )}
               >
@@ -140,7 +144,7 @@ export function MatrixView({ matrix, pair, onPick }: MatrixViewProps) {
                 if (from.id === to.id) {
                   return (
                     <td key={to.id} className="p-0.5 text-center">
-                      <span className="block h-8 min-w-12 rounded-sm bg-muted/60" aria-hidden />
+                      <span className="block h-8 min-w-12 rounded-sm bg-muted/50" aria-hidden />
                       <span className="sr-only">{g.cellSelf}</span>
                     </td>
                   )
@@ -148,7 +152,7 @@ export function MatrixView({ matrix, pair, onPick }: MatrixViewProps) {
                 const entry = index.get(cellKey(from.id, to.id))
                 if (entry === undefined) {
                   return (
-                    <td key={to.id} className="p-0.5 text-center text-muted-foreground" title={g.cellEmpty}>
+                    <td key={to.id} className="p-0.5 text-center text-faint" title={g.cellEmpty}>
                       <span aria-hidden>{t.routes.symbolEmpty}</span>
                       <span className="sr-only">{g.cellLabel(from.name, to.name, g.cellEmpty)}</span>
                     </td>
@@ -166,10 +170,10 @@ export function MatrixView({ matrix, pair, onPick }: MatrixViewProps) {
                         aria-pressed={selected(from.id, to.id)}
                         data-testid={`cell-${from.id}-${to.id}`}
                         className={cn(
-                          'flex h-8 w-full min-w-12 items-center justify-center gap-1 rounded-sm px-1 text-[12px] font-medium tabular',
+                          'flex h-8 w-full min-w-12 items-center justify-center gap-1 rounded-sm px-1 text-xs font-medium tabular transition-shadow hover:ring-1 hover:ring-foreground/25',
                           cls === 'none' && !to.online ? NONE_OFFLINE : CELL[cls],
                           entry.stale && 'border border-dashed border-border-strong bg-transparent opacity-60',
-                          selected(from.id, to.id) && 'ring-2 ring-primary',
+                          selected(from.id, to.id) && 'ring-2 ring-primary hover:ring-2 hover:ring-primary',
                         )}
                       >
                         <span aria-hidden>{CLASS_SYMBOL[cls]}</span>

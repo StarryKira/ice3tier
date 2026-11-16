@@ -34,7 +34,7 @@ function Section({ title, manageTo, pending, empty, count, children }: SectionPr
       <CardHeader
         title={title}
         action={
-          <Button asChild size="sm">
+          <Button asChild size="sm" variant="ghost">
             <Link to={manageTo}>{d.relatedManage}</Link>
           </Button>
         }
@@ -42,9 +42,9 @@ function Section({ title, manageTo, pending, empty, count, children }: SectionPr
       {pending ? (
         <SkeletonBlock lines={2} />
       ) : count === 0 ? (
-        <p className="px-5 py-4 text-sm text-muted-foreground">{empty}</p>
+        <p className="border-t pt-3 text-sm text-muted-foreground">{empty}</p>
       ) : (
-        <ul className="divide-y">{children}</ul>
+        <ul className="divide-y border-t">{children}</ul>
       )}
     </Card>
   )
@@ -65,7 +65,7 @@ export function RelatedTab({ network, node }: { network: Network; node: NodeDeta
   const myPairs = (pairs.data ?? []).filter((pair) => pair.a === node.id || pair.b === node.id)
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-12">
       <Section
         title={d.relatedForwards}
         manageTo={networkPath(network.id, 'forwards')}
@@ -76,7 +76,7 @@ export function RelatedTab({ network, node }: { network: Network; node: NodeDeta
         {myForwards.map((forward) => {
           const view = forwardStatusView(forward, all)
           return (
-            <li key={forward.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-5 py-3 text-sm">
+            <li key={forward.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-3 text-sm">
               <StatusText tone={view.tone} className="w-36 shrink-0 text-[13px]">
                 {view.label}
               </StatusText>
@@ -104,7 +104,7 @@ export function RelatedTab({ network, node }: { network: Network; node: NodeDeta
         count={myListeners.length}
       >
         {myListeners.map((listener) => (
-          <li key={listener.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-5 py-3 text-sm">
+          <li key={listener.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-3 text-sm">
             <span className="font-medium">{listener.name}</span>
             <Badge>{PROTOCOL_LABEL[listener.protocol]}</Badge>
             <code className="font-mono text-xs">{listener.bind}</code>
@@ -124,13 +124,13 @@ export function RelatedTab({ network, node }: { network: Network; node: NodeDeta
         {myPairs.map((pair) => {
           const other = pair.a === node.id ? pair.b : pair.a
           return (
-            <li key={`${pair.a}-${pair.b}`} className="flex items-center justify-between gap-3 px-5 py-3 text-sm">
+            <li key={`${pair.a}-${pair.b}`} className="flex items-center justify-between gap-3 py-3 text-sm">
               <NodeLink
                 network={network.id}
                 node={{ id: other, name: nodeName(all, other) }}
                 online={all.find((candidate) => candidate.id === other)?.online}
               />
-              <Badge tone={pair.keep_alive ? 'accent' : 'neutral'}>
+              <Badge tone={pair.keep_alive ? 'outline' : 'neutral'}>
                 {d.keepAlive}：{pair.keep_alive ? t.common.yes : t.common.no}
               </Badge>
             </li>

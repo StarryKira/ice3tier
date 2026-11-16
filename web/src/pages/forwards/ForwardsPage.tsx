@@ -15,10 +15,9 @@ import { Notice } from '@/components/notice'
 import { Page, PageHeader } from '@/components/page'
 import { EmptyState, ErrorState, SkeletonRows } from '@/components/states'
 import { StatusText } from '@/components/status'
-import { Table, Td, Th, Tr } from '@/components/table'
+import { Table, TableNote, Td, Th, Tr } from '@/components/table'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -148,7 +147,7 @@ export function ForwardsPage() {
           {f.focusMissing(focus.focus ?? 0)}
         </Notice>
       ) : null}
-      <Card>
+      <div>
         {forwards.isError ? (
           <ErrorState title={f.loadFailed} error={forwards.error} onRetry={() => void forwards.refetch()} />
         ) : empty && noNodes ? (
@@ -175,7 +174,7 @@ export function ForwardsPage() {
                   key={example.scope}
                   type="button"
                   onClick={() => setEditor({ forward: null, scope: example.scope })}
-                  className="rounded-lg border bg-card p-4 text-left shadow-card transition-colors hover:border-primary/50 hover:bg-accent/40"
+                  className="rounded-lg border border-border-strong bg-card p-4 text-left transition-colors hover:border-foreground/30 hover:bg-muted/40"
                 >
                   <span className="block text-sm font-medium">{example.title}</span>
                   <span className="mt-1 block text-[13px] text-muted-foreground">{example.description}</span>
@@ -190,7 +189,7 @@ export function ForwardsPage() {
               <div className="mt-6 w-full max-w-2xl text-left">
                 <Notice tone="warn" title={f.noTargets}>
                   {f.noTargetsBody}
-                  <CodeBlock copy={declareCommand('forward')} className="mt-2 bg-card">
+                  <CodeBlock copy={declareCommand('forward')} className="mt-2 bg-card/70">
                     {declareCommand('forward')}
                   </CodeBlock>
                 </Notice>
@@ -202,11 +201,11 @@ export function ForwardsPage() {
             <Table>
               <thead>
                 <tr>
-                  <Th>{f.colStatus}</Th>
                   <Th>{f.colName}</Th>
                   <Th>{f.colListen}</Th>
                   <Th className="w-6 px-0" />
                   <Th>{f.colTarget}</Th>
+                  <Th>{f.colStatus}</Th>
                   <Th>{f.colUse}</Th>
                   <Th>{f.colEnabled}</Th>
                   <Th className="w-12">
@@ -232,11 +231,6 @@ export function ForwardsPage() {
                         data-testid={`forward-row-${label}`}
                         data-status={forward.status}
                       >
-                        <Td data-keep>
-                          <StatusText tone={view.tone} className="text-[13px]">
-                            {view.label}
-                          </StatusText>
-                        </Td>
                         <Td className="font-medium">
                           {forward.name === '' ? (
                             <span className="font-normal text-muted-foreground">{f.unnamed}</span>
@@ -251,7 +245,7 @@ export function ForwardsPage() {
                           />
                           <ListenCell forward={forward} view={view} />
                         </Td>
-                        <Td className="px-0 text-muted-foreground">
+                        <Td className="px-0 text-faint">
                           <ArrowRight className="size-4" aria-label={f.dialog.arrow} />
                         </Td>
                         <Td>
@@ -262,6 +256,11 @@ export function ForwardsPage() {
                           <div className="mt-0.5">
                             <CopyText value={forward.target_addr} className="text-xs text-muted-foreground" />
                           </div>
+                        </Td>
+                        <Td data-keep>
+                          <StatusText tone={view.tone} className="text-[13px] whitespace-nowrap">
+                            {view.label}
+                          </StatusText>
                         </Td>
                         <Td className="text-[13px]">
                           {traffic === null ? (
@@ -330,7 +329,7 @@ export function ForwardsPage() {
                       {/* 原因和下一步单独占一行，是一句完整的话，不挤在状态那一格里。 */}
                       {hasDetail ? (
                         <tr className={cn('border-b last:border-b-0', focused && FOCUSED_ROW)}>
-                          <td colSpan={8} className="px-4 pt-0 pb-3 text-[13px] leading-snug text-muted-foreground">
+                          <td colSpan={8} className="px-3 pt-0 pb-3 text-[13px] leading-snug text-muted-foreground">
                             {view.detail}{' '}
                             {view.linkToRules ? (
                               <Link
@@ -348,10 +347,10 @@ export function ForwardsPage() {
                 })}
               </tbody>
             </Table>
-            <p className="border-t px-4 py-2.5 text-[13px] text-muted-foreground">{f.statusCaveat}</p>
+            <TableNote>{f.statusCaveat}</TableNote>
           </>
         )}
-      </Card>
+      </div>
 
       {editor !== null ? (
         <ForwardDialog

@@ -25,8 +25,8 @@ export function AboutTab() {
       ) : status.data === undefined ? (
         <SkeletonBlock lines={5} />
       ) : (
-        <CardBody className="py-2">
-          <dl className="divide-y">
+        <CardBody>
+          <dl className="space-y-2">
             <InfoRow label={v.aboutController}>
               <span className="tabular" data-testid="about-controller-version">
                 {status.data.version}

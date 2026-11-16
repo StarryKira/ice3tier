@@ -134,7 +134,7 @@ test('空的网络：每个页面没有数据时的样子', async () => {
 
   await page.getByRole('button', { name: '添加节点' }).click()
   await expect(page.getByRole('dialog', { name: '添加节点' })).toBeVisible()
-  await shot('add-node-before-token')
+  await shot('add-node-before-token', { fullPage: false })
   await page.getByRole('button', { name: '完成' }).click()
 
   await goTo(page, '访问控制')
@@ -598,7 +598,7 @@ test('有数据时：接入', async () => {
   await page.getByRole('button', { name: '新建监听器' }).click()
   const listener = page.getByRole('dialog', { name: '新建监听器' })
   await listener.getByRole('radio', { name: /给别的机器用/ }).click()
-  await shot('listeners-dialog')
+  await shot('listeners-dialog', { fullPage: false })
   await listener.getByRole('button', { name: '取消', exact: true }).click()
   await page.getByRole('button', { name: '放弃改动' }).click()
 
@@ -631,7 +631,7 @@ test('有数据时：接入', async () => {
   await page.getByRole('option', { name: /nas-home/ }).click()
   await forward.getByRole('radio', { name: /它所在的局域网，或者任何能连到它的人/ }).click()
   await expect(page.getByTestId('forward-check')).toBeVisible()
-  await shot('forwards-dialog')
+  await shot('forwards-dialog', { fullPage: false })
   await forward.getByRole('button', { name: '取消', exact: true }).click()
   await page.getByRole('button', { name: '放弃改动' }).click()
 })
@@ -760,4 +760,13 @@ test('窄一些的笔记本宽度', async () => {
   await goTo(page, '总览')
   await expect(page.getByTestId('overview-status')).toBeVisible()
   await shot('narrow-overview-sidebar-collapsed')
+})
+
+test('拓扑的骨干', async () => {
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await page.getByRole('button', { name: '展开侧栏' }).click()
+  await page.goto(`${controller.baseUrl}/n/1/topology?view=backbone`)
+  // 骨干每次现问 relay（最多 3 秒左右），等表格出来再截。
+  await expect(page.getByTestId('backbone').locator('table')).toBeVisible({ timeout: 15_000 })
+  await shot('topology-backbone')
 })

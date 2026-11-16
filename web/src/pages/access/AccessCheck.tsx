@@ -37,7 +37,7 @@ function Verdict({ network, from, to }: { network: Network; from: Node; to: Node
             <span className="font-medium">
               {from.name} → {to.name}：
             </span>
-            <span className={check.data.allowed ? 'font-medium text-ok' : 'font-medium text-danger'}>
+            <span className={check.data.allowed ? 'font-medium' : 'font-medium text-danger'}>
               {check.data.allowed ? c.allowed : c.denied}
             </span>{' '}
             <span className="text-muted-foreground">
@@ -80,7 +80,7 @@ export function AccessCheck({ network, nodes, from, to, onChange, onClose, onCre
   const tagsOf = (node: Node) => (node.tags.length === 0 ? c.noTags : node.tags.join('、'))
 
   return (
-    <Card className="mb-5" data-testid="access-check">
+    <Card className="mb-10 border-b pb-8" data-testid="access-check">
       <CardHeader
         title={c.title}
         description={c.lead}
@@ -109,7 +109,7 @@ export function AccessCheck({ network, nodes, from, to, onChange, onClose, onCre
           </label>
         </div>
 
-        <div className="mt-3" aria-live="polite">
+        <div className="mt-4" aria-live="polite">
           {same ? (
             <p className="text-sm text-warn">{c.same}</p>
           ) : fromNode === undefined || toNode === undefined ? (
@@ -121,7 +121,7 @@ export function AccessCheck({ network, nodes, from, to, onChange, onClose, onCre
                 <Verdict network={network} from={toNode} to={fromNode} />
               </ul>
               {denied ? (
-                <div className="mt-2 flex flex-wrap items-center justify-between gap-3 rounded-md bg-muted/70 px-3.5 py-2.5 text-[13px]">
+                <div className="mt-2 flex flex-wrap items-center justify-between gap-3 border-t pt-3 text-[13px]">
                   <p className="text-muted-foreground">
                     {c.tagsOf(fromNode.name, tagsOf(fromNode))}；{c.tagsOf(toNode.name, tagsOf(toNode))}
                   </p>

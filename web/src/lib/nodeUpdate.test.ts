@@ -62,7 +62,7 @@ describe('describeUpdate：节点的更新情况怎么说', () => {
     expect(view.detail).toContain(u.blocker.containerHow)
   })
 
-  it('下载中带进度；准备好之后是"等待空闲"或"排空中"，都是蓝色', () => {
+  it('下载中带进度；准备好之后是"等待空闲"或"排空中"，都是进行中的颜色', () => {
     const downloading = describeUpdate(
       withStatus({ state: 'downloading', version: '0.3.0', received: 4_500_000, total: 18_000_000 }),
       AUTO,

@@ -26,7 +26,7 @@ function DetailRow({ view }: { view: ListenView }) {
   if (!view.needsAttention || view.detail === null) return null
   return (
     <tr className="border-b last:border-b-0">
-      <td colSpan={4} className="px-4 pt-0 pb-3 text-[13px] leading-snug text-muted-foreground">
+      <td colSpan={4} className="px-3 pt-0 pb-3 text-[13px] leading-snug text-muted-foreground">
         {view.detail}
       </td>
     </tr>
@@ -72,9 +72,9 @@ export function ListenTab({ network, node }: { network: Network; node: NodeDetai
     listenView(item, { node: node.name, bind: item.bind, online: true })
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-8">
       <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
-        <p className="text-sm text-muted-foreground">{d.listenLead}</p>
+        <p className="text-[13px] text-muted-foreground">{d.listenLead}</p>
         {data?.reported_secs_ago != null ? (
           <p className="text-[13px] text-muted-foreground" data-testid="listen-updated">
             {t.common.reportedAgo(formatAge(data.reported_secs_ago))}
@@ -82,27 +82,19 @@ export function ListenTab({ network, node }: { network: Network; node: NodeDetai
         ) : null}
       </div>
       {report.isError ? (
-        <Card>
-          <ErrorState title={d.listenLoadFailed} error={report.error} onRetry={() => void report.refetch()} />
-        </Card>
+        <ErrorState title={d.listenLoadFailed} error={report.error} onRetry={() => void report.refetch()} />
       ) : data?.online === false ? (
-        <Card>
-          <EmptyState icon={RadioTower} title={d.listenOffline} />
-        </Card>
+        <EmptyState icon={RadioTower} title={d.listenOffline} />
       ) : data?.reported_secs_ago === null ? (
-        <Card>
-          <EmptyState icon={RadioTower} title={d.listenNotReported} />
-        </Card>
+        <EmptyState icon={RadioTower} title={d.listenNotReported} />
       ) : data?.listeners.length === 0 && data.forwards.length === 0 ? (
-        <Card>
-          <EmptyState icon={RadioTower} title={d.listenEmpty} />
-        </Card>
+        <EmptyState icon={RadioTower} title={d.listenEmpty} />
       ) : (
-        <>
+        <div className="space-y-12">
           <Section
             title={d.listenListeners}
             action={
-              <Button asChild size="sm">
+              <Button asChild size="sm" variant="ghost">
                 <Link to={networkPath(network.id, 'listeners')}>{d.listenManage}</Link>
               </Button>
             }
@@ -156,13 +148,13 @@ export function ListenTab({ network, node }: { network: Network; node: NodeDetai
           <Section
             title={d.listenForwards}
             action={
-              <Button asChild size="sm">
+              <Button asChild size="sm" variant="ghost">
                 <Link to={networkPath(network.id, 'forwards')}>{d.listenManage}</Link>
               </Button>
             }
           >
             {data?.forwards.length === 0 ? (
-              <p className="px-5 py-4 text-sm text-muted-foreground">{d.listenForwardsEmpty}</p>
+              <p className="border-t pt-3 text-sm text-muted-foreground">{d.listenForwardsEmpty}</p>
             ) : (
               <Table>
                 <thead>
@@ -186,7 +178,7 @@ export function ListenTab({ network, node }: { network: Network; node: NodeDetai
                           <Td>
                             <Link
                               to={`${networkPath(network.id, 'forwards')}?focus=${item.id}`}
-                              className="rounded-sm font-medium hover:text-primary hover:underline"
+                              className="rounded-sm font-medium hover:underline"
                             >
                               {forwardName(item)}
                             </Link>
@@ -210,7 +202,7 @@ export function ListenTab({ network, node }: { network: Network; node: NodeDetai
               </Table>
             )}
           </Section>
-        </>
+        </div>
       )}
     </div>
   )

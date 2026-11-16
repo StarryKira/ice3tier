@@ -10,7 +10,7 @@ import { useConfirm } from '@/components/confirm'
 import { CodeBlock } from '@/components/copy'
 import { DeclareHowTo } from '@/components/declare'
 import { Notice } from '@/components/notice'
-import { Badge } from '@/components/ui/badge'
+import { StatusText } from '@/components/status'
 import { Button } from '@/components/ui/button'
 import { Field, FormError } from '@/components/ui/field'
 import { Input, Textarea } from '@/components/ui/input'
@@ -46,7 +46,7 @@ interface RowShellProps {
 /** 能力卡片里的一行：名字和一句话解释 · 开关 · 状态行。三行的结构相同。 */
 function RowShell({ title, description, control, status, flash = false, children, testId }: RowShellProps) {
   return (
-    <div data-testid={testId} className={cn('rounded-md px-5 py-4', flash && 'animate-flash')}>
+    <div data-testid={testId} className={cn('py-5', flash && 'animate-flash')}>
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold">{title}</h3>
@@ -54,7 +54,7 @@ function RowShell({ title, description, control, status, flash = false, children
         </div>
         <div className="shrink-0 pt-0.5">{control}</div>
       </div>
-      <div className="mt-2 text-[13px]">{status}</div>
+      <div className="mt-2.5 text-[13px]">{status}</div>
       {children}
     </div>
   )
@@ -71,7 +71,7 @@ interface NotDeclaredProps {
 function NotDeclared({ capability, node, open, onToggle }: NotDeclaredProps) {
   return (
     <>
-      <p className="text-warn" data-testid={`not-declared-${capability}`}>
+      <p data-testid={`not-declared-${capability}`}>
         {capability === 'forward'
           ? t.declare.notDeclaredForward(node.name)
           : t.declare.notDeclared(node.name, t.capability[capability].full)}{' '}
@@ -282,7 +282,7 @@ export function RelayRow({ network, node, onWaiting }: CapabilityRowProps) {
     status = (
       <div className="space-y-1.5">
         <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <Badge tone="relay">{d.relayEnabled}</Badge>
+          <StatusText tone="ok">{d.relayEnabled}</StatusText>
           {relay.udp.length > 0 ? (
             <span>
               {d.relayUdp} <code className="font-mono text-xs">{relay.udp.join('、')}</code>
@@ -354,7 +354,7 @@ export function RelayRow({ network, node, onWaiting }: CapabilityRowProps) {
             event.preventDefault()
             submit()
           }}
-          className="mt-4 space-y-4 rounded-md border bg-muted/40 p-4"
+          className="mt-4 space-y-4 rounded-lg bg-muted/60 p-4"
         >
           {!enabled && node.observed_endpoint !== null ? (
             <Notice>{d.relayPrefilled(node.observed_endpoint)}</Notice>
@@ -476,7 +476,7 @@ export function ExitRow({ network, node, onWaiting }: CapabilityRowProps) {
   if (node.exit !== null) {
     status = (
       <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <Badge tone="accent">{d.relayEnabled}</Badge>
+        <StatusText tone="ok">{d.relayEnabled}</StatusText>
         <span className="text-muted-foreground">{exitSummary(node.exit)}</span>
         {editing ? null : (
           <Button variant="link" size="sm" onClick={openForm}>
@@ -522,7 +522,7 @@ export function ExitRow({ network, node, onWaiting }: CapabilityRowProps) {
               if (ok) setEditing(false)
             })
           }}
-          className="mt-4 space-y-4 rounded-md border bg-muted/40 p-4"
+          className="mt-4 space-y-4 rounded-lg bg-muted/60 p-4"
         >
           <ExitFormFields state={form} onChange={setForm} showProblems={submitted} />
           <FormError message={save.error} />
@@ -562,9 +562,9 @@ export function ForwardTargetRow({ network, node, onWaiting }: CapabilityRowProp
       description={d.forwardDesc}
       flash={watch.flash}
       control={
-        <Badge tone={node.declared.forward ? 'ok' : 'neutral'}>
+        <StatusText tone={node.declared.forward ? 'ok' : 'idle'} className="text-[13px]">
           {node.declared.forward ? d.forwardDeclared : d.forwardNotDeclared}
-        </Badge>
+        </StatusText>
       }
       status={
         node.declared.forward ? (

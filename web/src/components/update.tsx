@@ -29,7 +29,7 @@ export function UpdateStateView({ view, compact = false }: { view: UpdateView; c
           aria-valuemax={100}
           aria-valuenow={Math.floor(view.progress * 100)}
           aria-label={view.label}
-          className="mt-1.5 h-1.5 w-40 max-w-full overflow-hidden rounded-full bg-muted"
+          className="mt-1.5 h-1 w-40 max-w-full overflow-hidden rounded-full bg-border"
         >
           <div className="h-full rounded-full bg-relay-dot" style={{ width: `${view.progress * 100}%` }} />
         </div>
@@ -45,8 +45,8 @@ const MARKS: Record<UpdateMark, { Icon: typeof CircleArrowUp; className: string 
   available: { Icon: CircleArrowUp, className: 'text-warn-dot' },
   updating: { Icon: RefreshCw, className: 'text-relay' },
   failed: { Icon: CircleAlert, className: 'text-danger' },
-  manual: { Icon: Wrench, className: 'text-muted-foreground' },
-  behind: { Icon: CircleArrowUp, className: 'text-muted-foreground' },
+  manual: { Icon: Wrench, className: 'text-faint' },
+  behind: { Icon: CircleArrowUp, className: 'text-faint' },
 }
 
 /** 节点列表"版本"一列：版本号和平台；有新版本、正在更新、更新失败、要手动更新时跟一个图标，悬停说明。 */

@@ -274,7 +274,7 @@ export function ForwardDialog({ network, forward, scope: presetScope, open, onCl
           </div>
         </fieldset>
 
-        <div className="flex items-start justify-center pt-24 text-muted-foreground">
+        <div className="flex items-start justify-center pt-24 text-faint">
           <ArrowRight className="size-5" aria-label={d.arrow} />
         </div>
 

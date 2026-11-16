@@ -10,7 +10,6 @@ import { Page, PageHeader } from '@/components/page'
 import { PairPicker } from '@/components/pair-picker'
 import { EmptyState, ErrorState, SkeletonBlock } from '@/components/states'
 import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
 import { Segmented } from '@/components/ui/segmented'
 import { t } from '@/i18n'
 import { REPORT_INTERVAL_SECS } from '@/lib/product'
@@ -39,7 +38,7 @@ function GraphLegend() {
   )
   return (
     <ul
-      className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-muted-foreground"
+      className="flex flex-wrap items-center gap-x-5 gap-y-1.5 text-xs text-muted-foreground"
       aria-label={t.routes.legendLabel}
     >
       <li className="flex items-center gap-1.5">
@@ -67,7 +66,7 @@ function GraphLegend() {
         {g.legendReverse}
       </li>
       <li className="flex items-center gap-1.5">
-        <span className="h-3 w-5 rounded-sm border border-dashed border-border-strong bg-muted/70" aria-hidden />
+        <span className="h-3 w-5 rounded-sm border border-dashed border-border-strong bg-card" aria-hidden />
         {g.legendOffline}
       </li>
     </ul>
@@ -129,102 +128,112 @@ export function TopologyPage() {
 
   return (
     <Page wide className="@container">
-      <PageHeader title={g.title} description={g.description} />
-      <Card>
-        <div className="flex flex-wrap items-end justify-between gap-3 border-b px-5 py-3.5">
-          {view === 'backbone' ? null : (
+      <PageHeader
+        title={g.title}
+        description={g.description}
+        actions={
+          <Segmented<View>
+            aria-label={g.viewLabel}
+            value={view}
+            onChange={setView}
+            options={[
+              { value: 'graph', label: g.viewGraph },
+              { value: 'matrix', label: g.viewMatrix },
+              { value: 'backbone', label: g.viewBackbone },
+            ]}
+          />
+        }
+      />
+
+      {view === 'backbone' ? (
+        // 骨干是另一份数据（relay 之间测的），和选中的那一对节点无关，也不看路由矩阵。
+        <BackboneView network={network} name={name} />
+      ) : (
+        <>
+          <div className="mb-6 space-y-3">
             <PairPicker
               nodes={nodes.data ?? []}
               pair={pair}
               onChange={setPair}
               labels={{ a: g.pickA, b: g.pickB, swap: g.swap }}
             />
-          )}
-          <div className="ml-auto flex flex-col items-end gap-1.5">
-            <Segmented<View>
-              aria-label={g.viewLabel}
-              value={view}
-              onChange={setView}
-              options={[
-                { value: 'graph', label: g.viewGraph },
-                { value: 'matrix', label: g.viewMatrix },
-                { value: 'backbone', label: g.viewBackbone },
-              ]}
+            <div className="flex min-h-7 flex-wrap items-center justify-between gap-x-6 gap-y-1 text-[13px]">
+              {nodeA !== undefined && nodeB !== undefined ? (
+                <span className="flex items-center gap-2">
+                  <span className="font-medium" data-testid="watching">
+                    {g.watching(nodeA.name, nodeB.name)}
+                  </span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-muted-foreground hover:text-foreground"
+                    onClick={() => setPair({ a: null, b: null })}
+                  >
+                    <X aria-hidden />
+                    {g.clearPair}
+                  </Button>
+                </span>
+              ) : (
+                <span className="text-muted-foreground">{g.pickHint}</span>
+              )}
+              <span className="text-xs text-muted-foreground">{t.common.updatedEvery(REPORT_INTERVAL_SECS)}</span>
+            </div>
+          </div>
+
+          {matrix.isError && matrix.data === undefined ? (
+            <ErrorState title={g.loadFailed} error={matrix.error} onRetry={() => void matrix.refetch()} />
+          ) : shape === null || matrix.data === undefined ? (
+            <SkeletonBlock lines={8} />
+          ) : tooFew ? (
+            <EmptyState
+              icon={Waypoints}
+              title={g.emptyTitle}
+              description={g.emptyBody}
+              action={
+                <Button variant="primary" onClick={() => setAdding(true)}>
+                  <Plus aria-hidden />
+                  {g.addNode}
+                </Button>
+              }
             />
-            {view === 'backbone' ? null : (
-              <p className="text-xs text-muted-foreground">{t.common.updatedEvery(REPORT_INTERVAL_SECS)}</p>
-            )}
-          </div>
-        </div>
-
-        {view === 'backbone' ? null : nodeA !== undefined && nodeB !== undefined ? (
-          <div className="flex items-center justify-between gap-3 border-b bg-accent/40 px-5 py-2 text-sm">
-            <span className="font-medium" data-testid="watching">
-              {g.watching(nodeA.name, nodeB.name)}
-            </span>
-            <Button variant="ghost" size="sm" onClick={() => setPair({ a: null, b: null })}>
-              <X aria-hidden />
-              {g.clearPair}
-            </Button>
-          </div>
-        ) : (
-          <p className="border-b px-5 py-2 text-[13px] text-muted-foreground">{g.pickHint}</p>
-        )}
-
-        {view === 'backbone' ? (
-          // 骨干是另一份数据（relay 之间测的），和选中的那一对节点无关，也不看路由矩阵。
-          <div className="p-5">
-            <BackboneView network={network} name={name} />
-          </div>
-        ) : matrix.isError && matrix.data === undefined ? (
-          <ErrorState title={g.loadFailed} error={matrix.error} onRetry={() => void matrix.refetch()} />
-        ) : shape === null || matrix.data === undefined ? (
-          <SkeletonBlock lines={8} />
-        ) : tooFew ? (
-          <EmptyState
-            icon={Waypoints}
-            title={g.emptyTitle}
-            description={g.emptyBody}
-            action={
-              <Button variant="primary" onClick={() => setAdding(true)}>
-                <Plus aria-hidden />
-                {g.addNode}
-              </Button>
-            }
-          />
-        ) : (
-          <div className="space-y-3 p-5">
-            {noRoutes ? <Notice title={g.noRoutesTitle}>{g.noRoutesBody}</Notice> : null}
-            {view === 'graph' ? (
-              <div className={cn('grid grid-cols-1 gap-5', panel !== null && '@4xl:grid-cols-[minmax(0,1fr)_17rem]')}>
-                <div className="space-y-2">
-                  <div className="h-[600px] rounded-md border" data-testid="topology-graph">
-                    <TopologyGraph
-                      shape={shape}
-                      rtt={{ forward: shape.forward?.rtt_ms ?? null, reverse: shape.reverse?.rtt_ms ?? null }}
-                      onPick={(id) => setPair(nextPick(pair, id))}
-                    />
-                  </div>
-                  <GraphLegend />
-                  <p className="text-xs text-muted-foreground">{g.graphHint}</p>
-                </div>
-                {panel}
-              </div>
-            ) : (
-              <div className="space-y-3">
-                <p className="text-[13px] text-muted-foreground">{g.matrixLead}</p>
-                <MatrixLegend />
-                <div className={cn('grid grid-cols-1 gap-5', panel !== null && '@4xl:grid-cols-[minmax(0,1fr)_17rem]')}>
-                  <div className="min-w-0 rounded-md border">
-                    <MatrixView matrix={matrix.data} pair={pair} onPick={(a, b) => setPair({ a, b })} />
+          ) : (
+            <div className="space-y-4">
+              {noRoutes ? <Notice title={g.noRoutesTitle}>{g.noRoutesBody}</Notice> : null}
+              {view === 'graph' ? (
+                <div
+                  className={cn('grid grid-cols-1 gap-10', panel !== null && '@4xl:grid-cols-[minmax(0,1fr)_16rem]')}
+                >
+                  <div className="space-y-3">
+                    <div className="h-[600px] rounded-lg bg-sidebar" data-testid="topology-graph">
+                      <TopologyGraph
+                        shape={shape}
+                        rtt={{ forward: shape.forward?.rtt_ms ?? null, reverse: shape.reverse?.rtt_ms ?? null }}
+                        onPick={(id) => setPair(nextPick(pair, id))}
+                      />
+                    </div>
+                    <GraphLegend />
+                    <p className="text-xs text-muted-foreground">{g.graphHint}</p>
                   </div>
                   {panel}
                 </div>
-              </div>
-            )}
-          </div>
-        )}
-      </Card>
+              ) : (
+                <div className="space-y-4">
+                  <p className="text-[13px] text-muted-foreground">{g.matrixLead}</p>
+                  <MatrixLegend />
+                  <div
+                    className={cn('grid grid-cols-1 gap-10', panel !== null && '@4xl:grid-cols-[minmax(0,1fr)_16rem]')}
+                  >
+                    <div className="min-w-0">
+                      <MatrixView matrix={matrix.data} pair={pair} onPick={(a, b) => setPair({ a, b })} />
+                    </div>
+                    {panel}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      )}
       <AddNodeDialog network={network} open={adding} onClose={() => setAdding(false)} />
     </Page>
   )

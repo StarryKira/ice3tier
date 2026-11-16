@@ -24,7 +24,7 @@ function NodeBody({ node, emphasized = false }: { node: NodeRef; emphasized?: bo
   return (
     <>
       <span className={cn('truncate text-sm', emphasized ? 'font-semibold' : 'font-medium')}>{node.name}</span>
-      <span className="truncate font-mono text-[11px] text-muted-foreground">{node.virtual_ip}</span>
+      <span className="truncate text-[11px] text-muted-foreground tabular">{node.virtual_ip}</span>
     </>
   )
 }
@@ -33,7 +33,7 @@ function PeerNodeView({ data }: NodeProps<PeerFlowNode>) {
   return (
     <div
       style={BOX}
-      className="flex cursor-pointer flex-col justify-center rounded-lg border bg-card px-3 shadow-card hover:border-primary/60"
+      className="flex cursor-pointer flex-col justify-center rounded-lg border border-border-strong bg-card px-3 transition-colors hover:border-foreground/40"
     >
       <Handle type="target" position={Position.Left} style={HANDLE} isConnectable={false} />
       <Handle type="source" position={Position.Right} style={HANDLE} isConnectable={false} />
@@ -44,7 +44,7 @@ function PeerNodeView({ data }: NodeProps<PeerFlowNode>) {
 
 function FocusNodeView({ data }: NodeProps<FocusFlowNode>) {
   return (
-    <div style={BOX} className="flex flex-col justify-center rounded-lg border-2 border-primary bg-accent px-3">
+    <div style={BOX} className="flex flex-col justify-center rounded-lg border-2 border-primary bg-card px-3">
       <Handle type="target" position={Position.Left} style={HANDLE} isConnectable={false} />
       <Handle type="source" position={Position.Right} style={HANDLE} isConnectable={false} />
       <NodeBody node={data.node} emphasized />
@@ -128,7 +128,8 @@ export function NodeGraphView({ access, rules, expanded, onExpand, onFocus }: No
         labelStyle: { fontSize: 12, fill: EDGE_COLORS.enabled },
         labelBgPadding: [4, 2] as [number, number],
         labelBgBorderRadius: 3,
-        labelBgStyle: { fill: '#f4f6f8' },
+        // 和画布的底色（index.css 的 --sidebar）一样，字下面不留一块看得出的底。
+        labelBgStyle: { fill: '#f7f7f8' },
         markerEnd: { type: MarkerType.ArrowClosed, color: EDGE_COLORS.enabled, width: 16, height: 16 },
         style: { stroke: EDGE_COLORS.enabled, strokeWidth: 1.4 },
         focusable: false,

@@ -30,7 +30,7 @@ type TabId = (typeof TABS)[number]['id']
 function SessionTab() {
   const navigate = useNavigate()
   return (
-    <div className="space-y-5">
+    <div className="space-y-12">
       <Card>
         <CardHeader title={s.session.title} />
         <CardBody className="space-y-3">
@@ -73,7 +73,7 @@ export function SettingsPage() {
   return (
     <Page>
       <PageHeader title={s.title} description={s.description} />
-      <div className="grid grid-cols-[11rem_minmax(0,1fr)] items-start gap-6">
+      <div className="grid grid-cols-[10rem_minmax(0,1fr)] items-start gap-12">
         <nav aria-label={s.tabsLabel}>
           <ul className="space-y-0.5">
             {TABS.map((candidate) => (
@@ -82,8 +82,10 @@ export function SettingsPage() {
                   to={`/settings/${candidate.id}`}
                   className={({ isActive }) =>
                     cn(
-                      'flex h-8.5 items-center justify-between gap-2 rounded-md px-2.5 text-sm',
-                      isActive ? 'bg-accent font-medium text-accent-foreground' : 'text-foreground/85 hover:bg-muted',
+                      'flex h-8 items-center justify-between gap-2 rounded-md px-2.5 text-sm transition-colors',
+                      isActive
+                        ? 'bg-foreground/[0.06] font-medium text-foreground'
+                        : 'text-foreground/80 hover:bg-foreground/[0.04] hover:text-foreground',
                     )
                   }
                 >

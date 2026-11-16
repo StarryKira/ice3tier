@@ -126,7 +126,7 @@ function SettingsForm({ network }: { network: Network }) {
         if (dirty) save.mutate({ routing, max_relay_hops: hops, reach, class: serviceClass })
       }}
     >
-      <CardBody className="space-y-6">
+      <CardBody className="space-y-7">
         <div>
           <p id={routingLabel} className="text-[13px] font-medium">
             {n.routingLabel}
@@ -190,7 +190,7 @@ function SettingsForm({ network }: { network: Network }) {
         </Field>
         <FormError message={save.isError ? formError(formFailure(save.error, {})) : null} />
       </CardBody>
-      <footer className="flex items-center justify-end gap-2 border-t bg-muted/40 px-5 py-3">
+      <footer className="mt-8 flex items-center justify-end gap-2 border-t pt-4">
         <Button onClick={reset} disabled={!dirty || save.isPending}>
           {t.common.cancel}
         </Button>
@@ -229,10 +229,10 @@ function DangerZone({ network }: { network: Network }) {
   }
 
   return (
-    <Card className="border-danger-line">
-      <div className="flex items-center justify-between gap-6 px-5 py-4">
+    <Card className="border-t pt-6">
+      <div className="flex items-center justify-between gap-6">
         <div>
-          <h2 className="text-[15px] font-semibold">{n.dangerTitle}</h2>
+          <h2 className="text-base font-semibold">{n.dangerTitle}</h2>
           <p className="mt-0.5 text-[13px] text-muted-foreground">
             {network.nodes > 0 ? n.dangerNotEmpty(network.nodes) : n.dangerBody}
           </p>
@@ -266,7 +266,7 @@ export function NetworkPage() {
   const [expanding, setExpanding] = useState(false)
 
   return (
-    <Page className="@container">
+    <Page size="narrow" className="@container">
       <PageHeader
         title={n.title}
         description={n.description}
@@ -278,7 +278,7 @@ export function NetworkPage() {
         }
       />
 
-      <section aria-label={n.listTitle} className="mb-6 grid grid-cols-2 gap-3 @3xl:grid-cols-3">
+      <section aria-label={n.listTitle} className="-mx-3 mb-12 divide-y border-y">
         {(networks.data ?? []).map((other) => {
           const current = other.id === network.id
           return (
@@ -288,12 +288,12 @@ export function NetworkPage() {
               aria-current={current ? 'true' : undefined}
               aria-label={current ? `${other.name}（${n.current}）` : n.switchTo(other.name)}
               className={cn(
-                'rounded-lg border bg-card px-4 py-3 shadow-card transition-colors hover:border-primary/50',
-                current && 'border-primary ring-1 ring-primary/30',
+                'grid grid-cols-[minmax(0,1fr)_10rem_6rem] items-center gap-4 px-3 py-3 transition-colors hover:bg-muted/50',
+                current && 'bg-accent/50 hover:bg-accent/70',
               )}
             >
-              <span className="flex items-center justify-between gap-2">
-                <span className="truncate text-[15px] font-semibold">{other.name}</span>
+              <span className="flex min-w-0 items-center gap-2">
+                <span className="truncate text-sm font-semibold">{other.name}</span>
                 {current ? (
                   <Badge tone="accent">
                     <Check aria-hidden />
@@ -301,19 +301,19 @@ export function NetworkPage() {
                   </Badge>
                 ) : null}
               </span>
-              <span className="mt-1 block font-mono text-xs text-muted-foreground">{other.cidr}</span>
-              <span className="mt-0.5 block text-[13px] text-muted-foreground tabular">{n.nodes(other.nodes)}</span>
+              <span className="font-mono text-[13px] text-muted-foreground">{other.cidr}</span>
+              <span className="text-right text-[13px] text-muted-foreground tabular">{n.nodes(other.nodes)}</span>
             </Link>
           )
         })}
       </section>
 
-      <div className="space-y-5">
+      <div className="space-y-12">
         <Card>
           <CardHeader title={n.settingsTitle(network.name)} description={n.settingsDescription} />
-          <CardBody className="border-b py-2">
+          <CardBody>
             <h3 className="sr-only">{n.basics}</h3>
-            <dl className="divide-y">
+            <dl>
               <InfoRow label={n.nameLabel}>
                 <CopyText value={network.name} mono={false} />
               </InfoRow>
@@ -323,7 +323,7 @@ export function NetworkPage() {
               <InfoRow label={n.cidrLabel}>
                 <span className="inline-flex flex-wrap items-center gap-3">
                   <CopyText value={network.cidr} />
-                  <Button size="sm" onClick={() => setExpanding(true)}>
+                  <Button size="sm" variant="link" onClick={() => setExpanding(true)}>
                     {n.expand}
                   </Button>
                 </span>
@@ -334,7 +334,7 @@ export function NetworkPage() {
               </InfoRow>
             </dl>
           </CardBody>
-          <CardHeader title={n.routing} className="border-b-0 pb-0" />
+          <CardHeader title={n.routing} className="mt-10 mb-5" />
           {/* key：切换网络或者保存之后，表单从最新的设置重新开始。 */}
           <SettingsForm
             key={`${network.id}:${network.routing}:${network.max_relay_hops}:${network.reach}:${network.class ?? 'auto'}`}

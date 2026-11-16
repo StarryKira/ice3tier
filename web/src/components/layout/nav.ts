@@ -89,11 +89,3 @@ export function currentPage(pathname: string): string | null {
   const match = /^\/n\/\d+\/([^/]+)/.exec(pathname)
   return match?.[1] ?? null
 }
-
-/** 所有页面的标题，给顶栏的面包屑用。 */
-export function pageLabel(page: string): string | null {
-  for (const item of [...NAV_GROUPS.flatMap((group) => group.items), ...NAV_ADMIN]) {
-    if (item.page === page) return item.label
-  }
-  return null
-}

@@ -13,10 +13,9 @@ import { NodeLink } from '@/components/node'
 import { Notice } from '@/components/notice'
 import { Page, PageHeader } from '@/components/page'
 import { EmptyState, ErrorState, SkeletonRows } from '@/components/states'
-import { Table, Td, Th, Tr } from '@/components/table'
+import { Table, TableNote, Td, Th, Tr } from '@/components/table'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -61,7 +60,7 @@ function DetailRow({ view, focused }: { view: ListenView; focused: boolean }) {
   if (!view.needsAttention || view.detail === null) return null
   return (
     <tr className={cn('border-b last:border-b-0', focused && FOCUSED_ROW)}>
-      <td colSpan={COLUMNS} className="px-4 pt-0 pb-3 pl-8 text-[13px] leading-snug text-muted-foreground">
+      <td colSpan={COLUMNS} className="px-3 pt-0 pb-3 pl-7 text-[13px] leading-snug text-muted-foreground">
         {view.detail}
       </td>
     </tr>
@@ -184,7 +183,7 @@ export function ListenersPage() {
         </Notice>
       ) : null}
       {configuredNone && groups.length > 0 ? <Notice className="mb-4">{l.onlyBuiltin}</Notice> : null}
-      <Card>
+      <div>
         {listeners.isError ? (
           <ErrorState title={l.loadFailed} error={listeners.error} onRetry={() => void listeners.refetch()} />
         ) : empty && noNodes ? (
@@ -219,8 +218,12 @@ export function ListenersPage() {
                 {listeners.isPending ? <SkeletonRows columns={COLUMNS} rows={3} /> : null}
                 {groups.map((group) => (
                   <Fragment key={group.id}>
-                    <tr className="border-b bg-muted/30">
-                      <th scope="rowgroup" colSpan={COLUMNS} className="px-4 py-2 text-left text-[13px] font-medium">
+                    <tr className="border-b">
+                      <th
+                        scope="rowgroup"
+                        colSpan={COLUMNS}
+                        className="px-3 pt-6 pb-2 text-left text-[13px] font-medium"
+                      >
                         <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
                           <NodeLink
                             network={network.id}
@@ -253,7 +256,7 @@ export function ListenersPage() {
                             className={cn(view.needsAttention && 'border-b-0', focused && FOCUSED_ROW)}
                             data-testid={`listener-row-${listener.name}`}
                           >
-                            <Td className="pl-8">
+                            <Td className="pl-7">
                               <span className="block font-medium">{listener.name}</span>
                               <span className="mt-0.5 flex gap-1.5">
                                 <Badge>{PROTOCOL_LABEL[listener.protocol]}</Badge>
@@ -281,7 +284,7 @@ export function ListenersPage() {
                             className={cn(view.needsAttention && 'border-b-0')}
                             data-testid={`builtin-row-${group.name}-${item.name}`}
                           >
-                            <Td className="pl-8">
+                            <Td className="pl-7">
                               <span className="block font-medium">{item.name}</span>
                               <span className="mt-0.5 flex gap-1.5">
                                 <Badge>{PROTOCOL_LABEL[item.protocol]}</Badge>
@@ -327,10 +330,10 @@ export function ListenersPage() {
                 ))}
               </tbody>
             </Table>
-            <p className="border-t px-4 py-2.5 text-[13px] text-muted-foreground">{l.stateEvery}</p>
+            <TableNote>{l.stateEvery}</TableNote>
           </>
         )}
-      </Card>
+      </div>
 
       {editor !== null ? (
         <ListenerDialog

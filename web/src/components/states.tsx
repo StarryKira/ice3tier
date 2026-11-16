@@ -19,21 +19,20 @@ interface EmptyStateProps {
   className?: string
 }
 
-/** "还没有数据"的样子：它本身就是入口。和"筛选之后没有结果"是两回事，后者用 {@link NoMatches}。 */
+/**
+ * "还没有数据"的样子：它本身就是入口。和"筛选之后没有结果"是两回事，后者用 {@link NoMatches}。
+ * 不画框也不画插图：一个淡灰的图标、一句话、一句说明、一个按钮，居中，上下留足空白。
+ */
 export function EmptyState({ icon: Icon, title, description, action, children, className }: EmptyStateProps) {
   return (
-    <div className={cn('flex flex-col items-center px-6 py-12 text-center', className)}>
-      {Icon !== undefined ? (
-        <span className="mb-4 flex size-11 items-center justify-center rounded-full bg-accent text-accent-foreground">
-          <Icon className="size-5" aria-hidden />
-        </span>
-      ) : null}
-      <h2 className="text-[15px] font-semibold">{title}</h2>
+    <div className={cn('flex flex-col items-center px-6 py-16 text-center', className)}>
+      {Icon !== undefined ? <Icon className="mb-4 size-7 text-faint" aria-hidden /> : null}
+      <h2 className="text-base font-semibold">{title}</h2>
       {description !== undefined ? (
-        <p className="mt-1.5 max-w-lg text-sm text-muted-foreground">{description}</p>
+        <p className="mt-1.5 max-w-md text-[13px] leading-relaxed text-muted-foreground">{description}</p>
       ) : null}
       {action !== undefined ? (
-        <div className="mt-5 flex flex-wrap items-center justify-center gap-2">{action}</div>
+        <div className="mt-6 flex flex-wrap items-center justify-center gap-2">{action}</div>
       ) : null}
       {children}
     </div>
@@ -43,10 +42,10 @@ export function EmptyState({ icon: Icon, title, description, action, children, c
 /** 筛选或搜索之后一行也不剩。 */
 export function NoMatches({ message, onClear }: { message: string; onClear: () => void }) {
   return (
-    <div className="flex flex-col items-center px-6 py-10 text-center">
-      <SearchX className="mb-3 size-6 text-muted-foreground" aria-hidden />
+    <div className="flex flex-col items-center px-6 py-12 text-center">
+      <SearchX className="mb-3 size-6 text-faint" aria-hidden />
       <p className="text-sm text-muted-foreground">{message}</p>
-      <Button variant="outline" size="sm" className="mt-3" onClick={onClear}>
+      <Button variant="outline" size="sm" className="mt-4" onClick={onClear}>
         {t.common.clearFilters}
       </Button>
     </div>
@@ -64,12 +63,10 @@ interface ErrorStateProps {
 /** 取数失败。服务器给的说明原样显示。 */
 export function ErrorState({ title, error, onRetry, className }: ErrorStateProps) {
   return (
-    <div role="alert" className={cn('flex flex-col items-center px-6 py-10 text-center', className)}>
-      <span className="mb-3 flex size-10 items-center justify-center rounded-full bg-danger-soft text-danger">
-        <CircleAlert className="size-5" aria-hidden />
-      </span>
-      <h2 className="text-[15px] font-semibold">{title}</h2>
-      <p className="mt-1.5 max-w-lg text-sm text-muted-foreground">{errorMessage(error)}</p>
+    <div role="alert" className={cn('flex flex-col items-center px-6 py-14 text-center', className)}>
+      <CircleAlert className="mb-3 size-6 text-danger" aria-hidden />
+      <h2 className="text-base font-semibold">{title}</h2>
+      <p className="mt-1.5 max-w-md text-[13px] leading-relaxed text-muted-foreground">{errorMessage(error)}</p>
       {onRetry !== undefined ? (
         <Button variant="outline" size="sm" className="mt-4" onClick={onRetry}>
           {t.common.retry}
@@ -86,8 +83,8 @@ export function SkeletonRows({ rows = 4, columns }: { rows?: number; columns: nu
       {Array.from({ length: rows }, (_, row) => (
         <tr key={row} className="border-b last:border-b-0">
           {Array.from({ length: columns }, (_, column) => (
-            <td key={column} className="px-4 py-3.5">
-              <Skeleton className={cn('h-3.5', column === 0 ? 'w-36' : 'w-20')} />
+            <td key={column} className="px-3 py-4">
+              <Skeleton className={cn('h-3', column === 0 ? 'w-32' : 'w-16')} />
             </td>
           ))}
         </tr>
@@ -98,9 +95,9 @@ export function SkeletonRows({ rows = 4, columns }: { rows?: number; columns: nu
 
 export function SkeletonBlock({ lines = 3, className }: { lines?: number; className?: string }) {
   return (
-    <div className={cn('space-y-3 p-5', className)} aria-busy="true" aria-label={t.common.loading}>
+    <div className={cn('space-y-3.5 py-2', className)} aria-busy="true" aria-label={t.common.loading}>
       {Array.from({ length: lines }, (_, line) => (
-        <Skeleton key={line} className={cn('h-3.5', line % 3 === 0 ? 'w-2/5' : line % 3 === 1 ? 'w-3/5' : 'w-1/3')} />
+        <Skeleton key={line} className={cn('h-3', line % 3 === 0 ? 'w-2/5' : line % 3 === 1 ? 'w-3/5' : 'w-1/3')} />
       ))}
     </div>
   )

@@ -37,25 +37,25 @@ export function NetworkSwitcher({ networks, current, collapsed, onCreate }: Netw
     <DropdownMenuTrigger
       aria-label={`${t.switcher.label}（${t.switcher.current}：${current.name}）`}
       className={cn(
-        'flex w-full items-center gap-2.5 rounded-lg border bg-card text-left shadow-card transition-colors hover:bg-muted/60',
-        collapsed ? 'size-9 justify-center' : 'px-2.5 py-2',
+        'flex w-full items-center gap-2.5 rounded-md text-left transition-colors hover:bg-foreground/[0.05] data-[state=open]:bg-foreground/[0.05]',
+        collapsed ? 'size-10 justify-center' : 'px-2 py-1.5',
       )}
     >
       <span
         aria-hidden
-        className="flex size-6 shrink-0 items-center justify-center rounded-md bg-primary text-xs font-semibold text-primary-foreground uppercase"
+        className="flex size-7 shrink-0 items-center justify-center rounded-md bg-foreground text-xs font-semibold text-background uppercase"
       >
         {current.name.slice(0, 1)}
       </span>
       {collapsed ? null : (
         <>
           <span className="min-w-0 flex-1">
-            <span className="block truncate text-sm leading-tight font-semibold">{current.name}</span>
-            <span className="block truncate text-xs leading-tight text-muted-foreground tabular">
+            <span className="block truncate text-sm leading-5 font-semibold">{current.name}</span>
+            <span className="block truncate text-xs leading-4 text-muted-foreground tabular">
               {current.cidr} · {t.switcher.nodes(current.nodes)}
             </span>
           </span>
-          <ChevronsUpDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+          <ChevronsUpDown className="size-3.5 shrink-0 text-faint" aria-hidden />
         </>
       )}
     </DropdownMenuTrigger>

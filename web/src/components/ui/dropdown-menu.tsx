@@ -19,7 +19,7 @@ function DropdownMenuContent({
         sideOffset={sideOffset}
         collisionPadding={8}
         className={cn(
-          'z-50 min-w-44 animate-fade rounded-lg border bg-popover p-1 text-popover-foreground shadow-pop',
+          'z-50 min-w-44 animate-fade rounded-lg bg-popover p-1 text-popover-foreground shadow-pop',
           className,
         )}
         {...props}
@@ -37,8 +37,8 @@ function DropdownMenuItem({ className, danger = false, ...props }: ItemProps) {
   return (
     <MenuPrimitive.Item
       className={cn(
-        'flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-sm outline-none select-none data-disabled:cursor-not-allowed data-disabled:opacity-50 data-highlighted:bg-muted [&_svg]:size-4 [&_svg]:shrink-0',
-        danger ? 'text-danger data-highlighted:bg-danger-soft' : '[&_svg]:text-muted-foreground',
+        'flex cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm outline-none select-none data-disabled:cursor-not-allowed data-disabled:opacity-50 data-highlighted:bg-muted [&_svg]:size-4 [&_svg]:shrink-0',
+        danger ? 'text-danger data-highlighted:bg-danger-soft' : '[&_svg]:text-faint',
         className,
       )}
       {...props}

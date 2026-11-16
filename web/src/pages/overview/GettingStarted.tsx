@@ -28,29 +28,26 @@ function Step({
   children?: ReactNode
 }) {
   return (
-    <li
-      aria-current={state === 'current' ? 'step' : undefined}
-      className={cn('rounded-lg border bg-card shadow-card', state === 'upcoming' && 'bg-transparent shadow-none')}
-    >
-      <div className="flex items-center gap-3 px-5 py-3.5">
+    <li aria-current={state === 'current' ? 'step' : undefined} className="relative pb-8 last:pb-0">
+      <div className="flex items-center gap-3">
         <span
           aria-hidden
           className={cn(
             'flex size-7 shrink-0 items-center justify-center rounded-full text-[13px] font-semibold tabular',
-            state === 'done' && 'bg-ok-soft text-ok',
+            state === 'done' && 'bg-muted text-foreground',
             state === 'current' && 'bg-primary text-primary-foreground',
             state === 'upcoming' && 'border border-border-strong text-muted-foreground',
           )}
         >
           {state === 'done' ? <Check className="size-4" /> : index}
         </span>
-        <h2 className={cn('text-[15px] font-semibold', state === 'upcoming' && 'font-medium text-muted-foreground')}>
+        <h2 className={cn('text-base font-semibold', state === 'upcoming' && 'font-medium text-muted-foreground')}>
           {title}
         </h2>
-        {state === 'done' ? <span className="text-[13px] text-ok">{g.done}</span> : null}
+        {state === 'done' ? <span className="text-[13px] text-muted-foreground">{g.done}</span> : null}
         {state === 'current' ? <span className="sr-only">{g.current}</span> : null}
       </div>
-      {children !== undefined && state !== 'done' ? <div className="border-t px-5 py-5">{children}</div> : null}
+      {children !== undefined && state !== 'done' ? <div className="mt-4 pl-10">{children}</div> : null}
     </li>
   )
 }
@@ -78,7 +75,7 @@ function Slot({
   return (
     <Link
       to={nodePath(network.id, node.id)}
-      className="flex h-24 animate-rise flex-col justify-center rounded-lg border bg-card px-4 shadow-card hover:border-primary/50"
+      className="flex h-24 animate-rise flex-col justify-center rounded-lg border border-border-strong bg-card px-4 transition-colors hover:border-foreground/30"
       data-testid={`guide-node-${node.name}`}
     >
       <span className="flex items-center gap-2 text-sm font-semibold">
@@ -88,7 +85,7 @@ function Slot({
       <span className="mt-0.5 font-mono text-xs text-muted-foreground">
         {node.virtual_ip} · {node.platform}
       </span>
-      <span className={cn('mt-1 text-xs', node.online ? 'font-medium text-ok' : 'text-muted-foreground')}>
+      <span className="mt-1 text-xs text-muted-foreground">
         {node.online ? g.joinedOnline : `${g.joinedOffline}：${g.joinedOfflineHint}`}
       </span>
     </Link>
@@ -106,10 +103,10 @@ export function GettingStarted({ network, nodes }: { network: Network; nodes: re
   const current = first === undefined ? 1 : 2
 
   return (
-    <Page wide>
+    <Page>
       <PageHeader title={g.title} description={g.lead} />
-      <div className="grid grid-cols-[minmax(0,1fr)_17rem] items-start gap-6">
-        <ol className="space-y-3">
+      <div className="grid grid-cols-[minmax(0,1fr)_16rem] items-start gap-12">
+        <ol>
           <Step index={1} title={g.step1} state={current === 1 ? 'current' : 'done'}>
             <AddNodeFlow key="first" network={network} />
           </Step>
@@ -123,7 +120,7 @@ export function GettingStarted({ network, nodes }: { network: Network; nodes: re
           </Step>
         </ol>
 
-        <Card className="sticky top-16 p-4" aria-label={g.live}>
+        <Card className="sticky top-8" aria-label={g.live}>
           <h2 className="mb-3 text-xs font-medium text-muted-foreground">{g.live}</h2>
           <div aria-live="polite">
             <Slot network={network} label={g.slotFirst} node={first} waiting={g.waitingFirst} />

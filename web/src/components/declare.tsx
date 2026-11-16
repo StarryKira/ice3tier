@@ -21,8 +21,8 @@ interface DeclareHowToProps {
  */
 export function DeclareHowTo({ capability, nodeName, waiting = false, className }: DeclareHowToProps) {
   return (
-    <div className={cn('rounded-md border border-warn-line bg-warn-soft/60 px-4 py-3.5 text-[13px]', className)}>
-      <ol className="list-decimal space-y-2.5 pl-4.5 marker:font-medium marker:text-warn">
+    <div className={cn('rounded-md bg-muted/70 px-4 py-3.5 text-[13px]', className)}>
+      <ol className="list-decimal space-y-2.5 pl-4.5 marker:font-medium marker:text-muted-foreground">
         <li>
           <p>{t.declare.step1(nodeName)}</p>
           <CodeBlock

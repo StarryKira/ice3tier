@@ -13,7 +13,7 @@ import { StatusText } from '@/components/status'
 import { Table, Td, Th, Tr } from '@/components/table'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardBody } from '@/components/ui/card'
+import { Card, CardBody, CardHeader } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
@@ -32,19 +32,19 @@ function LegCard({ leg, name, testId }: { leg: PathLeg; name: (id: NodeId) => st
   const view = describeLeg(leg, name)
   return (
     <Card data-testid={testId} data-source={view.state}>
-      <header className="flex flex-wrap items-center justify-between gap-2 border-b px-5 py-3">
-        <h2 className="text-[15px] font-semibold">{p.forward(leg.from.name, leg.to.name)}</h2>
+      <header className="flex flex-wrap items-center justify-between gap-2 border-b pb-3">
+        <h2 className="text-base font-semibold">{p.forward(leg.from.name, leg.to.name)}</h2>
         <Badge tone={BADGE_TONE[view.sourceTone]}>{view.sourceLabel}</Badge>
       </header>
-      <CardBody className="space-y-3">
+      <CardBody className="space-y-4 pt-5">
         {view.route === null ? (
           <p className="text-sm text-muted-foreground">
             {view.state === 'not_peers' ? p.notPeersTitle : t.routes.noData}
           </p>
         ) : (
           <>
-            <div>
-              <StatusText tone={view.route.tone} className="text-base">
+            <div className="flex flex-wrap items-baseline gap-x-1">
+              <StatusText tone={view.route.tone} className="text-xl font-semibold tracking-tight">
                 {view.route.text}
               </StatusText>
               {view.route.detail !== null ? (
@@ -60,7 +60,7 @@ function LegCard({ leg, name, testId }: { leg: PathLeg; name: (id: NodeId) => st
                 </Tooltip>
               ) : null}
               {view.rtt !== null ? (
-                <span className="ml-2 text-sm text-muted-foreground tabular">{view.rtt}</span>
+                <span className="ml-2 text-xl text-muted-foreground tabular">{view.rtt}</span>
               ) : null}
             </div>
             {view.route.hops.length > 1 ? (
@@ -72,7 +72,7 @@ function LegCard({ leg, name, testId }: { leg: PathLeg; name: (id: NodeId) => st
                         →
                       </li>
                     ) : null}
-                    <li className="rounded-md border bg-card px-2 py-0.5 font-medium">{hop}</li>
+                    <li className="rounded-sm bg-muted px-2 py-0.5 font-medium">{hop}</li>
                   </Fragment>
                 ))}
               </ol>
@@ -119,12 +119,9 @@ function Candidates({ leg, name, testId }: { leg: PathLeg; name: (id: NodeId) =>
   if (view.state === 'unknown') return null
   return (
     <Card data-testid={testId}>
-      <header className="border-b px-5 py-3">
-        <h2 className="text-[15px] font-semibold">{p.candidatesTitle(leg.from.name, leg.to.name)}</h2>
-        <p className="mt-0.5 text-[13px] text-muted-foreground">{p.candidatesLead}</p>
-      </header>
+      <CardHeader title={p.candidatesTitle(leg.from.name, leg.to.name)} description={p.candidatesLead} />
       {view.state === 'empty' ? (
-        <p className="px-5 py-4 text-sm text-muted-foreground">{p.candidatesEmpty}</p>
+        <p className="border-t pt-3 text-sm text-muted-foreground">{p.candidatesEmpty}</p>
       ) : (
         <Table aria-label={p.candidatesTitle(leg.from.name, leg.to.name)}>
           <thead>
@@ -139,7 +136,7 @@ function Candidates({ leg, name, testId }: { leg: PathLeg; name: (id: NodeId) =>
             {view.rows.map((row) => (
               <Tr
                 key={row.key}
-                className={row.current ? 'bg-accent/50' : undefined}
+                className={row.current ? 'bg-accent/60' : undefined}
                 aria-current={row.current ? 'true' : undefined}
                 data-current={row.current || undefined}
               >
@@ -177,10 +174,10 @@ function Candidates({ leg, name, testId }: { leg: PathLeg; name: (id: NodeId) =>
 
 function Querying() {
   return (
-    <div className="grid grid-cols-1 gap-5 @3xl:grid-cols-2" aria-busy="true">
+    <div className="grid grid-cols-1 gap-x-14 gap-y-10 @3xl:grid-cols-2" aria-busy="true">
       {[0, 1].map((key) => (
         <Card key={key}>
-          <CardBody className="space-y-3">
+          <CardBody className="space-y-3 border-t pt-5">
             <Skeleton className="h-4 w-2/5" />
             <Skeleton className="h-5 w-3/5" />
             <Skeleton className="h-3.5 w-1/2" />
@@ -226,7 +223,7 @@ export function PathPage() {
         title={p.title}
         description={p.description}
         actions={
-          <Button asChild>
+          <Button asChild variant="ghost">
             <Link to={pairPath(network.id, 'topology', pair.a, pair.b)}>
               <Waypoints aria-hidden />
               {p.toTopology}
@@ -234,64 +231,62 @@ export function PathPage() {
           </Button>
         }
       />
-      <Card className="mb-5">
-        <CardBody className="flex flex-wrap items-end justify-between gap-3">
-          <PairPicker
-            nodes={nodes.data ?? []}
-            pair={pair}
-            onChange={setPair}
-            labels={{ a: p.pickFrom, b: p.pickTo, swap: p.swap }}
-          />
-          {ready ? (
-            <div className="flex items-center gap-3">
-              {path.data !== undefined && !path.isFetching ? (
-                <span className="text-[13px] text-muted-foreground">
-                  {p.queried(formatAge(Math.max(0, now - queriedAt)))}
-                </span>
-              ) : null}
-              <Button pending={path.isFetching} onClick={() => void path.refetch()}>
-                {path.isFetching ? null : <RefreshCw aria-hidden />}
-                {path.isFetching ? p.querying : p.query}
-              </Button>
-            </div>
-          ) : null}
-        </CardBody>
-      </Card>
+      <div className="mb-10 flex flex-wrap items-end justify-between gap-3">
+        <PairPicker
+          nodes={nodes.data ?? []}
+          pair={pair}
+          onChange={setPair}
+          labels={{ a: p.pickFrom, b: p.pickTo, swap: p.swap }}
+        />
+        {ready ? (
+          <div className="flex items-center gap-3">
+            {path.data !== undefined && !path.isFetching ? (
+              <span className="text-[13px] text-muted-foreground">
+                {p.queried(formatAge(Math.max(0, now - queriedAt)))}
+              </span>
+            ) : null}
+            <Button size="sm" pending={path.isFetching} onClick={() => void path.refetch()}>
+              {path.isFetching ? null : <RefreshCw aria-hidden />}
+              {path.isFetching ? p.querying : p.query}
+            </Button>
+          </div>
+        ) : null}
+      </div>
 
-      <div aria-live="polite" className="space-y-5">
+      <div aria-live="polite" className="space-y-12">
         {same ? (
           <p className="text-sm text-warn">{p.same}</p>
         ) : !ready ? (
           <p className="text-sm text-muted-foreground">{p.pickHint}</p>
         ) : path.isError && path.data === undefined ? (
-          <Card>
-            <ErrorState title={p.loadFailed} error={path.error} onRetry={() => void path.refetch()} />
-          </Card>
+          <ErrorState title={p.loadFailed} error={path.error} onRetry={() => void path.refetch()} />
         ) : path.data === undefined ? (
           <Querying />
         ) : (
           <>
-            {notPeers ? (
-              <Notice
-                tone="warn"
-                title={p.notPeersTitle}
-                action={
-                  <Button asChild size="sm">
-                    <Link to={`${networkPath(network.id, 'access')}?check=1&from=${pair.a ?? ''}&to=${pair.b ?? ''}`}>
-                      {p.toAccess}
-                    </Link>
-                  </Button>
-                }
-              >
-                {p.notPeersBody}
-              </Notice>
-            ) : null}
-            {offline.map((node) => (
-              <Notice key={node.id}>{p.offline(node.name)}</Notice>
-            ))}
-            <div className="grid grid-cols-1 gap-5 @3xl:grid-cols-2">
-              <LegCard leg={path.data.forward} name={name} testId="path-forward" />
-              <LegCard leg={path.data.reverse} name={name} testId="path-reverse" />
+            <div className="space-y-6">
+              {notPeers ? (
+                <Notice
+                  tone="warn"
+                  title={p.notPeersTitle}
+                  action={
+                    <Button asChild size="sm">
+                      <Link to={`${networkPath(network.id, 'access')}?check=1&from=${pair.a ?? ''}&to=${pair.b ?? ''}`}>
+                        {p.toAccess}
+                      </Link>
+                    </Button>
+                  }
+                >
+                  {p.notPeersBody}
+                </Notice>
+              ) : null}
+              {offline.map((node) => (
+                <Notice key={node.id}>{p.offline(node.name)}</Notice>
+              ))}
+              <div className="grid grid-cols-1 gap-x-14 gap-y-10 @3xl:grid-cols-2">
+                <LegCard leg={path.data.forward} name={name} testId="path-forward" />
+                <LegCard leg={path.data.reverse} name={name} testId="path-reverse" />
+              </div>
             </div>
             <Candidates leg={path.data.forward} name={name} testId="candidates-forward" />
             <Candidates leg={path.data.reverse} name={name} testId="candidates-reverse" />

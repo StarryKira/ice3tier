@@ -1,5 +1,5 @@
 import { useQueries, useQuery } from '@tanstack/react-query'
-import { CircleArrowUp, RefreshCw, X } from 'lucide-react'
+import { ChevronDown, CircleArrowUp, RefreshCw, X } from 'lucide-react'
 import { useId, useMemo, useState } from 'react'
 
 import { api } from '@/api/endpoints'
@@ -132,7 +132,7 @@ function ReleaseCard({ overview }: { overview: UpdateOverview }) {
       <CardHeader
         title={u.release.title}
         action={
-          <Button pending={check.isPending} onClick={onCheck}>
+          <Button size="sm" pending={check.isPending} onClick={onCheck}>
             {check.isPending ? null : <RefreshCw aria-hidden />}
             {check.isPending ? u.release.checking : u.release.check}
           </Button>
@@ -140,7 +140,7 @@ function ReleaseCard({ overview }: { overview: UpdateOverview }) {
       />
       <CardBody className="space-y-3">
         <div>
-          <p className="text-[15px] font-semibold tabular" data-testid="release-version">
+          <p className="text-base font-semibold tabular" data-testid="release-version">
             {release === null ? u.release.none : u.release.latest(release.version)}
           </p>
           <p className="mt-0.5 text-[13px] text-muted-foreground">
@@ -177,9 +177,7 @@ function ReleaseCard({ overview }: { overview: UpdateOverview }) {
       </CardBody>
       {release !== null && release.packages.length > 0 ? (
         <>
-          <h3 className="border-t px-5 pt-3 pb-1 text-[13px] font-medium text-muted-foreground">
-            {u.release.packages}
-          </h3>
+          <h3 className="mt-6 mb-1 text-[13px] font-medium text-muted-foreground">{u.release.packages}</h3>
           <Table>
             <thead>
               <tr>
@@ -237,7 +235,7 @@ function AutoUpdateCard({ overview }: { overview: UpdateOverview }) {
     <Card>
       <CardBody className="flex items-start justify-between gap-6">
         <div>
-          <label htmlFor={id} className="text-[15px] font-semibold">
+          <label htmlFor={id} className="text-base font-semibold">
             {u.auto.title}
           </label>
           <p className="mt-0.5 text-[13px] text-muted-foreground">{overview.auto_update ? u.auto.on : u.auto.off}</p>
@@ -282,17 +280,21 @@ function SourceCard({ overview }: { overview: UpdateOverview }) {
     <Card>
       {/* 平时不用动，所以折起来；查发布源失败时自己展开，免得要找。 */}
       <details className="group" open={overview.check_error !== null || undefined}>
-        <summary className="flex cursor-pointer list-none items-start justify-between gap-4 rounded-lg px-5 py-3.5 [&::-webkit-details-marker]:hidden">
+        <summary className="flex cursor-pointer list-none items-start justify-between gap-4 rounded-md [&::-webkit-details-marker]:hidden">
           <span className="min-w-0">
-            <span className="block text-[15px] font-semibold">{u.source.title}</span>
+            <span className="block text-base font-semibold">{u.source.title}</span>
             <span className="mt-0.5 block truncate text-[13px] text-muted-foreground" data-testid="source-summary">
               {summary}
             </span>
           </span>
+          <ChevronDown
+            className="mt-1 size-4 shrink-0 text-faint transition-transform group-open:rotate-180"
+            aria-hidden
+          />
         </summary>
         <form
           noValidate
-          className="space-y-4 border-t px-5 py-4"
+          className="mt-4 space-y-4"
           onSubmit={(event) => {
             event.preventDefault()
             setTouched(true)
@@ -442,7 +444,7 @@ function NodesCard({ overview, onForceAll }: { overview: UpdateOverview; onForce
         <EmptyState title={u.nodes.empty} />
       ) : (
         <>
-          <div className="border-b px-4 py-2.5">
+          <div className="mb-3">
             <Segmented<Filter>
               aria-label={u.nodes.filter}
               size="sm"
@@ -455,7 +457,7 @@ function NodesCard({ overview, onForceAll }: { overview: UpdateOverview; onForce
             />
           </div>
           {shown.length === 0 ? (
-            <p className="px-5 py-6 text-center text-sm text-muted-foreground">{u.nodes.noneBehind}</p>
+            <p className="border-t py-6 text-center text-sm text-muted-foreground">{u.nodes.noneBehind}</p>
           ) : (
             <Table>
               <thead>
@@ -539,23 +541,15 @@ export function UpdatesTab() {
   const networks = useQuery(q.networks())
 
   if (overview.isError && overview.data === undefined) {
-    return (
-      <Card>
-        <ErrorState title={u.loadFailed} error={overview.error} onRetry={() => void overview.refetch()} />
-      </Card>
-    )
+    return <ErrorState title={u.loadFailed} error={overview.error} onRetry={() => void overview.refetch()} />
   }
   if (overview.data === undefined) {
-    return (
-      <Card>
-        <SkeletonBlock lines={6} />
-      </Card>
-    )
+    return <SkeletonBlock lines={6} />
   }
   const data = overview.data
 
   return (
-    <div className="space-y-5" data-testid="updates-tab">
+    <div className="space-y-12" data-testid="updates-tab">
       {groupPaused(data.paused).map((group) => (
         <PausedBanner key={group.version} group={group} networks={networks.data ?? []} />
       ))}

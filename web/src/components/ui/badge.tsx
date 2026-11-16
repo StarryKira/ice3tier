@@ -4,7 +4,7 @@ import { type ComponentProps } from 'react'
 import { cn } from '@/lib/utils'
 
 const badgeVariants = cva(
-  'inline-flex items-center gap-1 rounded-sm px-1.5 py-px text-xs font-medium whitespace-nowrap [&_svg]:size-3',
+  'inline-flex h-5 items-center gap-1 rounded-sm px-1.5 text-xs leading-none font-medium whitespace-nowrap [&_svg]:size-3',
   {
     variants: {
       tone: {
@@ -14,7 +14,7 @@ const badgeVariants = cva(
         relay: 'bg-relay-soft text-relay',
         warn: 'bg-warn-soft text-warn',
         danger: 'bg-danger-soft text-danger',
-        outline: 'border border-border-strong text-muted-foreground',
+        outline: 'border border-border-strong font-normal text-muted-foreground',
       },
     },
     defaultVariants: { tone: 'neutral' },

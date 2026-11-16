@@ -12,9 +12,8 @@ import { nodeName } from '@/lib/nodes'
 import { Notice } from '@/components/notice'
 import { Page, PageHeader } from '@/components/page'
 import { EmptyState, ErrorState, SkeletonRows } from '@/components/states'
-import { Table, Td, Th, Tr } from '@/components/table'
+import { Table, TableNote, Td, Th, Tr } from '@/components/table'
 import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
 import { Field } from '@/components/ui/field'
 import { Switch } from '@/components/ui/switch'
 import { Tooltip } from '@/components/ui/tooltip'
@@ -109,7 +108,7 @@ export function PairsPage() {
   return (
     <Page>
       <PageHeader title={p.title} description={p.description} actions={empty ? undefined : addButton} />
-      <Card>
+      <div>
         {pairs.isError ? (
           <ErrorState title={p.loadFailed} error={pairs.error} onRetry={() => void pairs.refetch()} />
         ) : empty ? (
@@ -178,10 +177,10 @@ export function PairsPage() {
                 })}
               </tbody>
             </Table>
-            <p className="border-t px-4 py-2.5 text-[13px] text-muted-foreground">{p.keepAliveHint}</p>
+            <TableNote>{p.keepAliveHint}</TableNote>
           </>
         )}
-      </Card>
+      </div>
       {adding ? (
         <AddPairDialog network={network} existing={pairs.data ?? []} open onClose={() => setAdding(false)} />
       ) : null}

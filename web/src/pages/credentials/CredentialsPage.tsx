@@ -16,9 +16,8 @@ import { Page, PageHeader } from '@/components/page'
 import { SecretDialog } from '@/components/secret-dialog'
 import { EmptyState, ErrorState, SkeletonRows } from '@/components/states'
 import { RelativeTime, StatusText } from '@/components/status'
-import { Table, Td, Th, Tr } from '@/components/table'
+import { Table, TableNote, Td, Th, Tr } from '@/components/table'
 import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -355,7 +354,7 @@ export function CredentialsPage() {
           {c.focusMissing(focus.focus ?? 0)}
         </Notice>
       ) : null}
-      <Card>
+      <div>
         {credentials.isError ? (
           <ErrorState title={c.loadFailed} error={credentials.error} onRetry={() => void credentials.refetch()} />
         ) : empty ? (
@@ -510,7 +509,7 @@ export function CredentialsPage() {
                       {/* 用完了要人处理：原因和下一步单独占一行，是一句完整的话。 */}
                       {attention ? (
                         <tr className={cn('border-b last:border-b-0', focused && FOCUSED_ROW)}>
-                          <td colSpan={6} className="px-4 pt-0 pb-3 text-[13px] leading-snug text-muted-foreground">
+                          <td colSpan={6} className="px-3 pt-0 pb-3 text-[13px] leading-snug text-muted-foreground">
                             {view.detail}
                           </td>
                         </tr>
@@ -520,10 +519,10 @@ export function CredentialsPage() {
                 })}
               </tbody>
             </Table>
-            <p className="border-t px-4 py-2.5 text-[13px] text-muted-foreground">{c.tokenHidden}</p>
+            <TableNote>{c.tokenHidden}</TableNote>
           </>
         )}
-      </Card>
+      </div>
 
       {issuing ? (
         <IssueDialog

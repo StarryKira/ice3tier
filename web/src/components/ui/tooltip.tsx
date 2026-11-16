@@ -20,7 +20,7 @@ function Tooltip({ content, children, side = 'top' }: TooltipProps) {
           side={side}
           sideOffset={6}
           collisionPadding={8}
-          className="z-50 max-w-80 animate-fade rounded-md bg-foreground px-2.5 py-1.5 text-[13px] leading-snug text-background shadow-pop"
+          className="z-50 max-w-80 animate-fade rounded-md bg-foreground px-2.5 py-1.5 text-xs leading-snug text-background"
         >
           {content}
         </TooltipPrimitive.Content>

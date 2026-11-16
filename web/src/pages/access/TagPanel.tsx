@@ -71,8 +71,8 @@ export function TagPanel({ network, graph, open, onOpenChange }: TagPanelProps) 
 
   return (
     <div>
-      <p className="border-b px-4 py-2.5 text-[13px] text-muted-foreground">{p.hint}</p>
-      <ul className="divide-y">
+      <p className="mb-3 text-[13px] text-muted-foreground">{p.hint}</p>
+      <ul className="-mx-3 divide-y border-t">
         {graph.tags.map((entry) => {
           const isOpen = open === entry.tag
           const builtin = entry.tag === ALL_TAG
@@ -91,10 +91,10 @@ export function TagPanel({ network, graph, open, onOpenChange }: TagPanelProps) 
                 onClick={() => onOpenChange(isOpen ? null : entry.tag)}
                 aria-expanded={isOpen}
                 aria-label={p.toggle(entry.tag, isOpen)}
-                className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left hover:bg-muted/50"
+                className="flex w-full items-center gap-2.5 rounded-md px-3 py-2.5 text-left hover:bg-muted/60"
               >
                 <ChevronRight
-                  className={cn('size-3.5 shrink-0 text-muted-foreground transition-transform', isOpen && 'rotate-90')}
+                  className={cn('size-3.5 shrink-0 text-faint transition-transform', isOpen && 'rotate-90')}
                   aria-hidden
                 />
                 <TagChip tag={entry.tag} />
@@ -102,7 +102,7 @@ export function TagPanel({ network, graph, open, onOpenChange }: TagPanelProps) 
                 <span className="ml-auto text-[13px] text-muted-foreground tabular">{p.usedBy(usedBy)}</span>
               </button>
               {isOpen ? (
-                <div className="space-y-2.5 bg-muted/30 py-3 pr-4 pl-10">
+                <div className="space-y-2.5 pt-1 pr-3 pb-4 pl-9">
                   {builtin ? <p className="text-[13px] text-muted-foreground">{p.allMembers}</p> : null}
                   {entry.nodes.length === 0 ? (
                     <p className="text-[13px] text-muted-foreground">{p.noMembers}</p>
@@ -111,7 +111,7 @@ export function TagPanel({ network, graph, open, onOpenChange }: TagPanelProps) 
                       {entry.nodes.map((member) => (
                         <li
                           key={member.id}
-                          className="inline-flex h-7 items-center gap-1 rounded-md border bg-card pr-1 pl-2.5 text-[13px]"
+                          className="inline-flex h-7 items-center gap-1 rounded-md bg-muted pr-1 pl-2.5 text-[13px]"
                         >
                           <NodeLink
                             network={network.id}
@@ -127,7 +127,7 @@ export function TagPanel({ network, graph, open, onOpenChange }: TagPanelProps) 
                               disabled={setTags.isPending}
                               onClick={() => void remove(entry.tag, member.id, entry.nodes.length)}
                               aria-label={p.removeMember(member.name, entry.tag)}
-                              className="flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                              className="flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
                             >
                               <X className="size-3.5" aria-hidden />
                             </button>

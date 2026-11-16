@@ -18,15 +18,20 @@ const DOT: Record<Tone, string> = {
   danger: 'bg-danger-dot',
 }
 
+/**
+ * 状态文字的颜色。正常、不活动、经 relay 的字都是普通的黑字，只靠前面的圆点区分；
+ * 值得注意的（warn）加粗、圆点是琥珀色，字仍是黑的——一屏上常有好几个，整片琥珀字会很吵；
+ * 不能用的（danger）才是红字，一眼能从一列里挑出来。
+ */
 const TEXT: Record<Tone, string> = {
-  ok: 'text-ok',
-  idle: 'text-idle',
-  relay: 'text-relay',
-  warn: 'text-warn',
-  danger: 'text-danger',
+  ok: 'text-foreground',
+  idle: 'text-muted-foreground',
+  relay: 'text-foreground',
+  warn: 'font-medium text-foreground',
+  danger: 'font-medium text-danger',
 }
 
-/** 状态圆点。颜色不单独承担含义：`label` 是给读屏软件的文字，旁边没有可见文字时必须给。 */
+/** 状态圆点（8 像素）。颜色不单独承担含义：`label` 是给读屏软件的文字，旁边没有可见文字时必须给。 */
 export function StatusDot({ tone, label, className }: { tone: Tone; label?: string; className?: string }) {
   return (
     <span className={cn('inline-flex shrink-0 items-center', className)}>
@@ -57,7 +62,7 @@ export function OnlineDot({ online, className }: { online: boolean; className?: 
 /** 圆点加文字的状态。 */
 export function StatusText({ tone, children, className }: { tone: Tone; children: ReactNode; className?: string }) {
   return (
-    <span className={cn('inline-flex items-center gap-1.5 font-medium', TEXT[tone], className)}>
+    <span className={cn('inline-flex items-center gap-2', TEXT[tone], className)}>
       <StatusDot tone={tone} />
       {children}
     </span>

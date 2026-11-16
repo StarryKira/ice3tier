@@ -39,20 +39,14 @@ function TagNodeView({ data }: NodeProps<TagFlowNode>) {
     <div
       style={{ width: TAG_NODE.width, height: TAG_NODE.height }}
       className={cn(
-        'flex flex-col justify-center rounded-lg border bg-card px-3.5 shadow-card transition-colors',
-        untagged
-          ? 'border-dashed border-border-strong bg-transparent shadow-none'
-          : point.tag === 'all'
-            ? 'border-border-strong'
-            : 'border-primary/35',
-        active && 'border-primary ring-2 ring-ring/30',
+        'flex flex-col justify-center rounded-lg border border-border-strong bg-card px-3.5 transition-colors',
+        untagged && 'border-dashed bg-transparent',
+        active && 'border-primary outline-2 outline-offset-0 outline-primary',
       )}
     >
       <Handle type="target" position={Position.Top} style={HIDDEN_HANDLE} isConnectable={false} />
       <Handle type="source" position={Position.Top} style={HIDDEN_HANDLE} isConnectable={false} />
-      <span className={cn('truncate text-sm font-semibold', !untagged && 'font-mono')}>
-        {untagged ? g.untagged(point.members.length) : point.tag}
-      </span>
+      <span className="truncate text-sm font-semibold">{untagged ? g.untagged(point.members.length) : point.tag}</span>
       <span className="flex items-center gap-1.5 text-xs text-muted-foreground tabular">
         {untagged ? g.untaggedSub : g.members(point.members.length)}
         {point.pending > 0 ? (
@@ -99,7 +93,7 @@ function RuleEdgeView({ id, source, target, data, markerStart, markerEnd, style 
           <span
             style={{ transform: `translate(-50%, -50%) translate(${path.label.x}px, ${path.label.y}px)` }}
             className={cn(
-              'pointer-events-none absolute rounded-sm bg-background px-1 text-[11px] leading-4',
+              'pointer-events-none absolute rounded-sm bg-sidebar px-1 text-[11px] leading-4',
               highlighted
                 ? 'font-medium text-primary'
                 : line.enabled

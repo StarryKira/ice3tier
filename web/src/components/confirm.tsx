@@ -64,7 +64,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
       {children}
       <AlertDialog.Root open={pending !== null} onOpenChange={(open) => (open ? undefined : settle(false))}>
         <AlertDialog.Portal>
-          <AlertDialog.Overlay className="fixed inset-0 z-[70] animate-fade bg-foreground/40" />
+          <AlertDialog.Overlay className="fixed inset-0 z-[70] animate-fade bg-foreground/30" />
           <AlertDialog.Content
             onOpenAutoFocus={(event) => {
               // 普通确认把焦点放在确认按钮上，回车即可；危险确认留在"取消"上（库的默认行为），回车不会误删。
@@ -73,11 +73,11 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
                 confirmRef.current.focus()
               }
             }}
-            className="fixed top-1/2 left-1/2 z-[71] w-[min(30rem,calc(100vw-3rem))] -translate-x-1/2 -translate-y-1/2 animate-fade rounded-xl border bg-card p-6 shadow-pop outline-none"
+            className="fixed top-1/2 left-1/2 z-[71] w-[min(30rem,calc(100vw-3rem))] -translate-x-1/2 -translate-y-1/2 animate-fade rounded-xl bg-card p-6 shadow-pop outline-none"
           >
             <AlertDialog.Title className="text-base font-semibold">{options?.title}</AlertDialog.Title>
             <AlertDialog.Description asChild>
-              <div className="mt-2 space-y-2 text-sm leading-relaxed text-muted-foreground">{options?.body}</div>
+              <div className="mt-2 space-y-2 text-[13px] leading-relaxed text-muted-foreground">{options?.body}</div>
             </AlertDialog.Description>
             {mustType !== undefined ? (
               <div className="mt-4 flex flex-col gap-1.5">

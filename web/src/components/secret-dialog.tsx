@@ -41,7 +41,7 @@ export function SecretDialog({
     <Dialog open={open}>
       <DialogContent title={title} dismissible={false} data-testid="secret-dialog">
         <DialogBody className="space-y-5">
-          <p className="rounded-md border border-warn-line bg-warn-soft px-3.5 py-2.5 text-sm">
+          <p className="rounded-md bg-warn-soft px-3.5 py-2.5 text-[13px] leading-relaxed">
             <strong className="font-semibold text-warn">{warning}</strong>
             {warningRest}
           </p>

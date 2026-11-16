@@ -37,8 +37,7 @@ function ToastView({ item }: { item: ToastItem }) {
       onFocus={() => setHeld(true)}
       onBlur={() => setHeld(false)}
       className={cn(
-        'pointer-events-auto flex w-88 animate-rise items-start gap-2.5 rounded-lg border bg-card px-3.5 py-3 shadow-pop',
-        item.kind === 'error' && 'border-danger-line',
+        'pointer-events-auto flex w-88 animate-rise items-start gap-2.5 rounded-lg bg-card px-3.5 py-3 shadow-pop',
       )}
     >
       <Icon

@@ -18,11 +18,11 @@ const d = t.nodes.detail
 
 function EdgeList({ network, edges, rules }: { network: Network; edges: AccessEdge[]; rules: readonly Rule[] }) {
   const nodes = useQuery(q.nodes(network.id))
-  if (edges.length === 0) return <p className="px-5 py-4 text-sm text-muted-foreground">{d.accessNone}</p>
+  if (edges.length === 0) return <p className="border-t pt-3 text-sm text-muted-foreground">{d.accessNone}</p>
   return (
-    <ul className="divide-y">
+    <ul className="divide-y border-t">
       {edges.map((edge) => (
-        <li key={edge.node.id} className="flex items-center justify-between gap-4 px-5 py-2.5">
+        <li key={edge.node.id} className="flex items-center justify-between gap-4 py-2.5">
           <span className="min-w-0">
             <NodeLink
               network={network.id}
@@ -55,30 +55,22 @@ export function AccessTab({ network, node }: { network: Network; node: NodeDetai
   const rules = useQuery(q.rules(network.id))
 
   if (access.isError) {
-    return (
-      <Card>
-        <ErrorState title={d.accessLoadFailed} error={access.error} onRetry={() => void access.refetch()} />
-      </Card>
-    )
+    return <ErrorState title={d.accessLoadFailed} error={access.error} onRetry={() => void access.refetch()} />
   }
   if (access.isPending) {
-    return (
-      <Card>
-        <SkeletonBlock lines={5} />
-      </Card>
-    )
+    return <SkeletonBlock lines={5} />
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-8">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm text-muted-foreground">{d.accessLead}</p>
+        <p className="text-[13px] text-muted-foreground">{d.accessLead}</p>
         <Button asChild size="sm">
           <Link to={`${networkPath(network.id, 'access')}?view=node&node=${node.id}`}>{d.accessOpen}</Link>
         </Button>
       </div>
       {access.data.acknowledged ? null : <Notice tone="warn">{d.accessPending}</Notice>}
-      <div className="grid grid-cols-1 items-start gap-5 @4xl:grid-cols-2">
+      <div className="grid grid-cols-1 items-start gap-x-14 gap-y-10 @4xl:grid-cols-2">
         <Card>
           <CardHeader title={d.accessCanReach(access.data.can_reach.length)} />
           <EdgeList network={network} edges={access.data.can_reach} rules={rules.data ?? []} />

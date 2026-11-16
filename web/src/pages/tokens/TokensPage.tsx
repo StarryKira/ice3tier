@@ -12,10 +12,9 @@ import { Notice } from '@/components/notice'
 import { Page, PageHeader } from '@/components/page'
 import { EmptyState, ErrorState, SkeletonRows } from '@/components/states'
 import { RelativeTime, StatusText } from '@/components/status'
-import { Table, Td, Th, Tr } from '@/components/table'
+import { Table, TableNote, Td, Th, Tr } from '@/components/table'
 import { TagChip } from '@/components/tags'
 import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
 import { Segmented } from '@/components/ui/segmented'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
@@ -112,7 +111,7 @@ export function TokensPage() {
           {k.focusMissing(focus.focus ?? 0)}
         </Notice>
       ) : null}
-      <Card>
+      <div>
         {tokens.isError ? (
           <ErrorState title={k.loadFailed} error={tokens.error} onRetry={() => void tokens.refetch()} />
         ) : empty ? (
@@ -209,7 +208,7 @@ export function TokensPage() {
                         {view.removal === 'revoke' ? (
                           <Button
                             size="sm"
-                            variant="danger-outline"
+                            variant="outline"
                             aria-label={k.revokeFor(label)}
                             onClick={() => void onRemove(token)}
                           >
@@ -233,10 +232,10 @@ export function TokensPage() {
                 })}
               </tbody>
             </Table>
-            <p className="border-t px-4 py-2.5 text-[13px] text-muted-foreground">{k.textHidden}</p>
+            <TableNote>{k.textHidden}</TableNote>
           </>
         )}
-      </Card>
+      </div>
       <AddNodeDialog network={network} open={adding} onClose={() => setAdding(false)} />
     </Page>
   )

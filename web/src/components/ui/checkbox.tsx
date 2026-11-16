@@ -8,14 +8,18 @@ function Checkbox({ className, ...props }: ComponentProps<typeof CheckboxPrimiti
   return (
     <CheckboxPrimitive.Root
       className={cn(
-        'group flex size-4 shrink-0 items-center justify-center rounded-[4px] border border-input bg-card transition-colors data-[state=checked]:border-primary data-[state=checked]:bg-primary data-[state=indeterminate]:border-primary data-[state=indeterminate]:bg-primary data-disabled:opacity-50',
+        'group flex size-4 shrink-0 items-center justify-center rounded-[4px] border border-faint bg-card transition-colors data-[state=checked]:border-primary data-[state=checked]:bg-primary data-[state=indeterminate]:border-primary data-[state=indeterminate]:bg-primary data-disabled:opacity-50',
         className,
       )}
       {...props}
     >
       <CheckboxPrimitive.Indicator className="text-primary-foreground">
-        <Check className="hidden size-3 group-data-[state=checked]:block" strokeWidth={3} aria-hidden />
-        <Minus className="hidden size-3 group-data-[state=indeterminate]:block" strokeWidth={3} aria-hidden />
+        <Check className="hidden size-3 group-data-[state=checked]:block" aria-hidden style={{ strokeWidth: 3 }} />
+        <Minus
+          className="hidden size-3 group-data-[state=indeterminate]:block"
+          aria-hidden
+          style={{ strokeWidth: 3 }}
+        />
       </CheckboxPrimitive.Indicator>
     </CheckboxPrimitive.Root>
   )

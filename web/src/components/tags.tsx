@@ -15,16 +15,14 @@ interface TagChipProps {
   className?: string
 }
 
-/** 标签的样子，全站一致。内置的 `all` 用另一种底色，表示它不是管理员打上去的。 */
+/** 标签的样子，全站一致：浅灰底的小字。内置的 `all` 是空心的细框，表示它不是管理员打上去的。 */
 export function TagChip({ tag, onRemove, muted = false, className }: TagChipProps) {
   const builtin = tag === ALL_TAG
   return (
     <span
       className={cn(
-        'inline-flex h-5.5 max-w-44 items-center gap-0.5 rounded-sm border px-1.5 font-mono text-xs whitespace-nowrap',
-        builtin
-          ? 'border-border-strong bg-card text-foreground'
-          : 'border-transparent bg-accent text-accent-foreground',
+        'inline-flex h-5.5 max-w-44 items-center gap-0.5 rounded-sm border px-1.5 text-xs whitespace-nowrap',
+        builtin ? 'border-border-strong bg-card text-foreground' : 'border-transparent bg-muted text-foreground',
         muted && 'opacity-60',
         className,
       )}
@@ -35,7 +33,7 @@ export function TagChip({ tag, onRemove, muted = false, className }: TagChipProp
           type="button"
           onClick={onRemove}
           aria-label={t.tags.remove(tag)}
-          className="-mr-1 flex size-4 items-center justify-center rounded-sm hover:bg-accent-foreground/15"
+          className="-mr-1 flex size-4 items-center justify-center rounded-sm text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
         >
           <X className="size-3" aria-hidden />
         </button>
@@ -169,7 +167,7 @@ export function TagInput({
             ref={wrapperRef}
             onClick={() => inputRef.current?.focus()}
             className={cn(
-              'flex min-h-9 w-full cursor-text flex-wrap items-center gap-1 rounded-md border border-input bg-card px-2 py-1.5 shadow-card focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ring',
+              'flex min-h-9 w-full cursor-text flex-wrap items-center gap-1 rounded-md border border-input bg-card px-2 py-1.5 transition-colors hover:border-border-strong focus-within:border-primary focus-within:outline-3 focus-within:outline-primary/20',
               disabled && 'cursor-not-allowed bg-muted',
               error !== null && 'border-danger',
             )}
@@ -210,7 +208,7 @@ export function TagInput({
                 if (text.trim() !== '') add(text)
               }}
               onKeyDown={onKeyDown}
-              className="h-5.5 min-w-32 flex-1 bg-transparent px-1 text-sm outline-none placeholder:text-muted-foreground/80"
+              className="h-5.5 min-w-32 flex-1 bg-transparent px-1 text-sm outline-none placeholder:text-muted-foreground"
             />
           </div>
         </PopoverAnchor>

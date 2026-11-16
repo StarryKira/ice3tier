@@ -2,7 +2,7 @@ import { type ReactNode } from 'react'
 
 import { type ServiceClass } from '@/api/types'
 import { type Tone } from '@/components/status'
-import { NativeSelect } from '@/components/ui/input'
+import { fieldBase, NativeSelect } from '@/components/ui/input'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
 import { BYTE_UNITS, type ByteUnit, formatBytes } from '@/lib/format'
@@ -10,8 +10,12 @@ import { SERVICE_CLASSES } from '@/lib/serviceClass'
 import { type UsageView } from '@/lib/usage'
 import { cn } from '@/lib/utils'
 
+/**
+ * 进度条的颜色：正常时是中性的深灰（量本身不是状态），到了八成换琥珀，用完换红。
+ * 底槽是很淡的灰，条只有 4 像素高。
+ */
 const BAR: Record<Tone, string> = {
-  ok: 'bg-ok-dot',
+  ok: 'bg-foreground/70',
   idle: 'bg-idle-dot',
   relay: 'bg-relay-dot',
   warn: 'bg-warn-dot',
@@ -37,7 +41,15 @@ export function UsageBar({ view, label, className, children }: UsageBarProps) {
       <div className="flex items-baseline justify-between gap-3 text-[13px] whitespace-nowrap tabular">
         <span>{view.text}</span>
         {view.percent !== null ? (
-          <span className={cn(view.tone === 'danger' ? 'font-medium text-danger' : 'text-muted-foreground')}>
+          <span
+            className={cn(
+              view.tone === 'danger'
+                ? 'font-medium text-danger'
+                : view.tone === 'warn'
+                  ? 'font-medium text-warn'
+                  : 'text-muted-foreground',
+            )}
+          >
             {t.common.percent(view.percent)}
           </span>
         ) : null}
@@ -50,7 +62,7 @@ export function UsageBar({ view, label, className, children }: UsageBarProps) {
           aria-valuemax={100}
           aria-valuenow={Math.min(100, view.percent)}
           aria-valuetext={view.text}
-          className="mt-1 h-1.5 w-full min-w-24 overflow-hidden rounded-full bg-muted"
+          className="mt-1.5 h-1 w-full min-w-24 overflow-hidden rounded-full bg-border"
         >
           <div
             className={cn('h-full rounded-full', BAR[view.tone])}
@@ -147,7 +159,7 @@ export function BytesInput({ value, unit, onChange, unitLabel, disabled, ...prop
         value={value}
         placeholder={t.common.unlimited}
         onChange={(event) => onChange(event.target.value, unit)}
-        className="h-9 w-28 rounded-md border border-input bg-card px-3 text-sm shadow-card tabular placeholder:text-muted-foreground/80 disabled:bg-muted aria-invalid:border-danger"
+        className={cn(fieldBase, 'h-9 w-28 tabular')}
       />
       <NativeSelect
         aria-label={unitLabel}

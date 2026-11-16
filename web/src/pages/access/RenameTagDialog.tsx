@@ -76,7 +76,6 @@ export function RenameTagDialog({ network, graph, tag, onClose, onRenamed }: Ren
           <Input
             {...props}
             name="tag"
-            className="font-mono"
             value={value}
             autoFocus
             onChange={(event) => {

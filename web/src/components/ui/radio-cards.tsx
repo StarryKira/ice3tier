@@ -25,7 +25,10 @@ interface RadioCardsProps<V extends string> {
 
 const COLUMNS = { 1: 'grid-cols-1', 2: 'grid-cols-2', 3: 'grid-cols-3' } as const
 
-/** 单选卡片：每个选项带一句说明后果的话。 */
+/**
+ * 单选的一组选项，每个选项带一句说明后果的话。不画框：一个圆圈、标题、灰色的说明；
+ * 选中的那个圆圈是实心的强调色，标题加深。悬停时整行有一层很淡的底色，整行都能点。
+ */
 function RadioCards<V extends string>({
   value,
   onChange,
@@ -38,7 +41,7 @@ function RadioCards<V extends string>({
     <RadioGroup.Root
       value={value}
       onValueChange={(next) => onChange(next as V)}
-      className={cn('grid gap-2', COLUMNS[columns], className)}
+      className={cn('-mx-2.5 grid gap-x-4 gap-y-0.5', COLUMNS[columns], className)}
       {...aria}
     >
       {options.map((option) => (
@@ -46,13 +49,13 @@ function RadioCards<V extends string>({
           key={option.value}
           value={option.value}
           disabled={option.disabled}
-          className="group flex items-start gap-2.5 rounded-md border border-input bg-card px-3 py-2.5 text-left transition-colors hover:bg-muted/60 data-disabled:bg-muted data-disabled:opacity-70 data-[state=checked]:border-primary data-[state=checked]:bg-accent/50"
+          className="group flex items-start gap-2.5 rounded-md px-2.5 py-2 text-left transition-colors hover:bg-muted data-disabled:opacity-60 data-disabled:hover:bg-transparent"
         >
           <span
             aria-hidden
-            className="mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border border-input bg-card group-data-[state=checked]:border-primary"
+            className="mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border border-faint bg-card group-data-[state=checked]:border-primary group-data-[state=checked]:bg-primary"
           >
-            <span className="size-2 rounded-full bg-primary opacity-0 group-data-[state=checked]:opacity-100" />
+            <span className="size-1.5 rounded-full bg-white opacity-0 group-data-[state=checked]:opacity-100" />
           </span>
           <span className="min-w-0">
             <span className="block text-sm font-medium">{option.title}</span>

@@ -10,7 +10,6 @@ import { EmptyState, ErrorState, SkeletonRows } from '@/components/states'
 import { StatusText } from '@/components/status'
 import { Table, Td, Th, Tr } from '@/components/table'
 import { Badge } from '@/components/ui/badge'
-import { Card } from '@/components/ui/card'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
 import { REPORT_INTERVAL_SECS } from '@/lib/product'
@@ -21,9 +20,18 @@ import { routeDetail, routeDetailHint } from '@/topology/route'
 const d = t.nodes.detail
 
 /**
- * 一条路径的写法。直连是绿色，经 relay 是蓝色：中转是正常的工作状态，不用警告色。只有无路可走是红色。
+ * 一条路径的写法。直连是绿点，经 relay 是紫点：中转是正常的工作状态，不用警告色，字也照常是黑的。只有无路可走是红色。
  */
-function PathCell({ entry, relayNames }: { entry: NodeRoute; relayNames: (ids: number[]) => string }) {
+function PathCell({
+  entry,
+  relayNames,
+  peerOnline,
+}: {
+  entry: NodeRoute
+  relayNames: (ids: number[]) => string
+  /** 对端离线时"无路可走"是理所当然的：灰色，和路由矩阵里一样，不和真正的不可达抢眼。 */
+  peerOnline: boolean
+}) {
   const route = entry.route
   // 直连的方式、到第一个 relay 的传输：节点说得出来时写在后面，悬停有解释。
   const detail = routeDetail(route, entry)
@@ -60,7 +68,7 @@ function PathCell({ entry, relayNames }: { entry: NodeRoute; relayNames: (ids: n
     case 'none':
       return (
         <div>
-          <StatusText tone="danger">{d.viaNone}</StatusText>
+          <StatusText tone={peerOnline ? 'danger' : 'idle'}>{d.viaNone}</StatusText>
           <div className="mt-0.5 text-xs text-muted-foreground">{d.viaNoneHint}</div>
         </div>
       )
@@ -77,14 +85,14 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
   const freshest = rows.length === 0 ? null : Math.min(...rows.map((entry) => entry.age_secs))
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-6">
       <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
-        <p className="text-sm text-muted-foreground">{d.routesLead}</p>
+        <p className="text-[13px] text-muted-foreground">{d.routesLead}</p>
         <p className="text-[13px] text-muted-foreground" data-testid="routes-updated">
           {freshest === null ? t.common.updatedEvery(REPORT_INTERVAL_SECS) : d.routesUpdated(formatAge(freshest))}
         </p>
       </div>
-      <Card>
+      <div>
         {routes.isError ? (
           <ErrorState title={d.routesLoadFailed} error={routes.error} onRetry={() => void routes.refetch()} />
         ) : routes.isSuccess && !routes.data.online ? (
@@ -126,7 +134,11 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
                     <div className="mt-0.5 font-mono text-xs text-muted-foreground">{entry.peer.virtual_ip}</div>
                   </Td>
                   <Td>
-                    <PathCell entry={entry} relayNames={relayNames} />
+                    <PathCell
+                      entry={entry}
+                      relayNames={relayNames}
+                      peerOnline={nodes.data?.find((other) => other.id === entry.peer.id)?.online ?? true}
+                    />
                   </Td>
                   <Td numeric>
                     {entry.rtt_ms === null ? (
@@ -144,16 +156,16 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
                   <Td className="text-right text-[13px] whitespace-nowrap">
                     <Link
                       to={pairPath(network.id, 'topology', node.id, entry.peer.id)}
-                      className="rounded-sm text-primary hover:underline"
+                      className="rounded-sm text-muted-foreground hover:text-foreground hover:underline"
                     >
                       {d.routesOnTopology}
                     </Link>
-                    <span className="mx-2 text-border-strong" aria-hidden>
-                      |
+                    <span className="mx-2 text-faint" aria-hidden>
+                      ·
                     </span>
                     <Link
                       to={pairPath(network.id, 'diagnosis', node.id, entry.peer.id)}
-                      className="rounded-sm text-primary hover:underline"
+                      className="rounded-sm text-muted-foreground hover:text-foreground hover:underline"
                     >
                       {d.routesDiagnose}
                     </Link>
@@ -163,7 +175,7 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
             </tbody>
           </Table>
         )}
-      </Card>
+      </div>
     </div>
   )
 }

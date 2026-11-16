@@ -17,7 +17,6 @@ import { EmptyState, ErrorState, SkeletonRows } from '@/components/states'
 import { IssueIcon, OnlineDot, StatusText } from '@/components/status'
 import { Table, Td, Th, Tr } from '@/components/table'
 import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -61,7 +60,7 @@ function Users({ network, node }: { network: Network; node: NodeRef }) {
     <Tooltip content={e.usersList(users.map((edge) => edge.node.name).join('、'))}>
       <Link
         to={`${networkPath(network.id, 'access')}?view=node&node=${node.id}`}
-        className="rounded-sm text-primary underline-offset-4 tabular hover:underline"
+        className="rounded-sm underline decoration-border-strong underline-offset-4 tabular hover:decoration-foreground"
       >
         {e.users(users.length)}
       </Link>
@@ -138,7 +137,7 @@ function EnableExitDialog({ network, open, onClose }: EnableExitDialogProps) {
       ) : null}
 
       {chosen !== undefined ? (
-        <div className="rounded-md border bg-muted/40 p-4">
+        <div className="rounded-lg bg-muted/60 p-4">
           <ExitFormFields state={form} onChange={setForm} showProblems={submitted} />
         </div>
       ) : null}
@@ -146,9 +145,9 @@ function EnableExitDialog({ network, open, onClose }: EnableExitDialogProps) {
       {undeclared.length > 0 ? (
         <div>
           <p className="mb-2 text-[13px] font-medium text-muted-foreground">{e.notDeclared}</p>
-          <ul className="divide-y rounded-md border">
+          <ul className="divide-y border-y">
             {undeclared.map((node) => (
-              <li key={node.id} className="px-3 py-2">
+              <li key={node.id} className="py-2">
                 <div className="flex items-center justify-between gap-3">
                   <span className="inline-flex min-w-0 items-center gap-1.5 text-sm text-muted-foreground">
                     <OnlineDot online={node.online} />
@@ -309,10 +308,10 @@ function CrossCheckTable({ view }: { view: ExitView }) {
     <div className="space-y-2" data-testid={`exit-crosscheck-${view.node.name}`}>
       <p className="text-[13px] text-muted-foreground">{e.detailsLead}</p>
       {view.observed.length === 0 ? <p className="text-[13px] text-muted-foreground">{e.observedNone}</p> : null}
-      <div className="overflow-x-auto rounded-md border bg-card">
+      <div className="overflow-x-auto rounded-lg bg-muted/60 px-3 py-1">
         <table className="w-full border-collapse text-[13px]" aria-label={e.detailsFor(view.node.name)}>
           <thead>
-            <tr className="border-b bg-muted/50 text-xs text-muted-foreground">
+            <tr className="border-b border-border-strong/60 text-xs text-muted-foreground">
               <th scope="col" className="px-3 py-2 text-left font-medium">
                 <span className="sr-only">{e.details}</span>
               </th>
@@ -328,7 +327,7 @@ function CrossCheckTable({ view }: { view: ExitView }) {
           </thead>
           <tbody>
             {rows.map((row, rowIndex) => (
-              <tr key={rowIndex} className="border-b last:border-b-0">
+              <tr key={rowIndex} className="border-b border-border-strong/60 last:border-b-0">
                 <th scope="row" className="px-3 py-1.5 text-left font-normal text-muted-foreground">
                   {row.label}
                 </th>
@@ -399,7 +398,7 @@ export function ExitsPage() {
   return (
     <Page>
       <PageHeader title={e.title} description={e.description} actions={empty ? undefined : enableButton} />
-      <Card>
+      <div>
         {exits.isError ? (
           <ErrorState title={e.loadFailed} error={exits.error} onRetry={() => void exits.refetch()} />
         ) : empty && nodes.isSuccess && all.length === 0 ? (
@@ -476,11 +475,12 @@ export function ExitsPage() {
                         </div>
                       </Td>
                       <Td className="max-w-56 text-[13px]">
+                        {/* 分隔符放在不折行的那一段外面：折行只发生在两项之间，而不是把整串挤出格子。 */}
                         {exitSummaryParts(view.settings).map((part, index) => (
-                          <span key={part} className="whitespace-nowrap">
+                          <Fragment key={part}>
                             {index > 0 ? ' · ' : null}
-                            {part}
-                          </span>
+                            <span className="whitespace-nowrap">{part}</span>
+                          </Fragment>
                         ))}
                       </Td>
                       <Td>
@@ -491,7 +491,7 @@ export function ExitsPage() {
                         <Button
                           variant="link"
                           size="sm"
-                          className="mt-0.5 h-auto px-0"
+                          className="mt-1 h-auto px-0 text-muted-foreground hover:text-foreground"
                           aria-expanded={expanded}
                           aria-label={expanded ? e.detailsHide : e.detailsFor(view.node.name)}
                           onClick={() => setOpen(expanded ? null : view.node.id)}
@@ -536,7 +536,7 @@ export function ExitsPage() {
                     </Tr>
                     {expanded ? (
                       <tr className={cn('border-b last:border-b-0', focused && FOCUSED_ROW)}>
-                        <td colSpan={6} className="px-4 pt-0 pb-4">
+                        <td colSpan={6} className="px-3 pt-0 pb-4">
                           <CrossCheckTable view={view} />
                         </td>
                       </tr>
@@ -547,7 +547,7 @@ export function ExitsPage() {
             </tbody>
           </Table>
         )}
-      </Card>
+      </div>
 
       {enabling ? <EnableExitDialog network={network} open onClose={() => setEnabling(false)} /> : null}
     </Page>

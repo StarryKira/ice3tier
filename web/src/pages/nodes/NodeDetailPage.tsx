@@ -21,7 +21,6 @@ import { EmptyState, ErrorState, SkeletonBlock } from '@/components/states'
 import { IssueIcon, OnlineDot, StatusDot } from '@/components/status'
 import { ReasonButton } from '@/components/update'
 import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -93,36 +92,30 @@ export function NodeDetailPage() {
   ) {
     return (
       <Page>
-        <Card>
-          <EmptyState
-            icon={ServerOff}
-            title={d.notFoundTitle}
-            description={d.notFoundBody}
-            action={
-              <Button asChild variant="primary">
-                <Link to={listPath}>{d.backToList}</Link>
-              </Button>
-            }
-          />
-        </Card>
+        <EmptyState
+          icon={ServerOff}
+          title={d.notFoundTitle}
+          description={d.notFoundBody}
+          action={
+            <Button asChild variant="primary">
+              <Link to={listPath}>{d.backToList}</Link>
+            </Button>
+          }
+        />
       </Page>
     )
   }
   if (detail.isError && node === undefined) {
     return (
       <Page>
-        <Card>
-          <ErrorState title={d.loadFailed} error={detail.error} onRetry={() => void detail.refetch()} />
-        </Card>
+        <ErrorState title={d.loadFailed} error={detail.error} onRetry={() => void detail.refetch()} />
       </Page>
     )
   }
   if (node === undefined) {
     return (
       <Page>
-        <Card>
-          <SkeletonBlock lines={8} />
-        </Card>
+        <SkeletonBlock lines={8} />
       </Page>
     )
   }
@@ -134,35 +127,39 @@ export function NodeDetailPage() {
 
   return (
     <Page className="@container">
-      <nav aria-label={t.nav.breadcrumb} className="mb-3 flex items-center gap-1.5 text-[13px] text-muted-foreground">
+      <nav aria-label={t.nav.breadcrumb} className="mb-2 flex items-center gap-1 text-[13px] text-muted-foreground">
         <Link to={listPath} className="rounded-sm hover:text-foreground hover:underline">
           {t.nodes.title}
         </Link>
-        <ChevronRight className="size-3.5" aria-hidden />
+        <ChevronRight className="size-3.5 text-faint" aria-hidden />
         <span className="text-foreground" aria-current="page">
           {node.name}
         </span>
       </nav>
 
-      <header className="mb-5 flex items-start justify-between gap-6">
+      <header className="mb-8 flex items-start justify-between gap-6">
         <div className="min-w-0">
           <h1 className="flex flex-wrap items-center gap-2.5 text-xl font-semibold tracking-tight">
             <OnlineDot online={node.online} className="[&>span:first-child]:size-2.5" />
             <span className="truncate">{node.name}</span>
             <Tooltip content={t.nodes.rename}>
-              <Button variant="ghost" size="icon-sm" onClick={() => setDialog('rename')} aria-label={t.nodes.rename}>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="[&_svg]:text-faint hover:[&_svg]:text-foreground"
+                onClick={() => setDialog('rename')}
+                aria-label={t.nodes.rename}
+              >
                 <Pencil aria-hidden />
               </Button>
             </Tooltip>
             <RoleBadges node={node} attached={attachedCount(nodes.data ?? [], node.id)} />
             {issue !== undefined ? <IssueIcon message={issue.message} tone={issue.tone} /> : null}
           </h1>
-          <p className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
-            <span className={node.online ? 'font-medium text-ok' : undefined}>
-              {node.online ? t.common.online : t.common.offline}
-            </span>
+          <p className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 pl-5 text-[13px] text-muted-foreground">
+            <span>{node.online ? t.common.online : t.common.offline}</span>
             <CopyText value={node.virtual_ip} className="text-foreground" />
-            <CopyText value={node.fqdn} />
+            <CopyText value={node.fqdn} mono={false} />
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -175,7 +172,7 @@ export function NodeDetailPage() {
           ) : null}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button aria-label={d.more}>
+              <Button variant="ghost" aria-label={d.more}>
                 <EllipsisVertical aria-hidden />
                 {d.more}
               </Button>

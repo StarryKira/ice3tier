@@ -26,12 +26,11 @@ import { attachedCount, nodePath } from '@/lib/nodes'
 import { Page, PageHeader } from '@/components/page'
 import { EmptyState, ErrorState, NoMatches, SkeletonRows } from '@/components/states'
 import { IssueIcon, OnlineDot, RelativeTime } from '@/components/status'
-import { SortTh, Table, Td, Th, Tr } from '@/components/table'
+import { SortTh, Table, TableFooter, Td, Th, Toolbar, Tr } from '@/components/table'
 import { TagInput, TagList } from '@/components/tags'
 import { VersionCell } from '@/components/update'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
   DropdownMenu,
@@ -41,6 +40,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Field } from '@/components/ui/field'
+import { fieldBase } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Segmented } from '@/components/ui/segmented'
 import { Switch } from '@/components/ui/switch'
@@ -87,7 +87,7 @@ export function RoleBadges({ node, attached }: { node: Node; attached?: number }
     <>
       {node.relay !== null ? (
         <Tooltip content={attached === undefined ? t.nodes.roleRelayTip : t.nodes.roleRelayAttached(attached)}>
-          <Badge tone="relay" tabIndex={0} data-testid={`relay-badge-${node.name}`}>
+          <Badge tabIndex={0} data-testid={`relay-badge-${node.name}`}>
             {t.nodes.roleRelay}
             {attached !== undefined && attached > 0 ? <span className="tabular opacity-80">· {attached}</span> : null}
           </Badge>
@@ -95,9 +95,7 @@ export function RoleBadges({ node, attached }: { node: Node; attached?: number }
       ) : null}
       {node.exit !== null ? (
         <Tooltip content={t.nodes.roleExitTip}>
-          <Badge tone="accent" tabIndex={0}>
-            {t.nodes.roleExit}
-          </Badge>
+          <Badge tabIndex={0}>{t.nodes.roleExit}</Badge>
         </Tooltip>
       ) : null}
     </>
@@ -411,7 +409,7 @@ export function NodesPage() {
         }
       />
 
-      <Card>
+      <div>
         {nodes.isError ? (
           <ErrorState title={t.nodes.loadFailed} error={nodes.error} onRetry={() => void nodes.refetch()} />
         ) : empty ? (
@@ -428,10 +426,10 @@ export function NodesPage() {
           />
         ) : (
           <>
-            <div className="flex flex-wrap items-center gap-2.5 border-b px-4 py-3">
+            <Toolbar>
               <div className="relative w-72">
                 <Search
-                  className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground"
+                  className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-faint"
                   aria-hidden
                 />
                 <input
@@ -444,11 +442,11 @@ export function NodesPage() {
                   aria-keyshortcuts="Control+K"
                   autoComplete="off"
                   spellCheck={false}
-                  className="h-9 w-full rounded-md border border-input bg-card pr-14 pl-8.5 text-sm placeholder:text-muted-foreground/80 [&::-webkit-search-cancel-button]:hidden"
+                  className={cn(fieldBase, 'h-9 pr-14 pl-8.5 [&::-webkit-search-cancel-button]:hidden')}
                 />
                 <kbd
                   aria-hidden
-                  className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 rounded border bg-muted px-1 font-sans text-[11px] text-muted-foreground"
+                  className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 rounded-sm bg-muted px-1 font-sans text-[11px] text-muted-foreground"
                 >
                   {t.nodes.searchShortcut}
                 </kbd>
@@ -461,7 +459,7 @@ export function NodesPage() {
               />
               <Popover>
                 <PopoverTrigger asChild>
-                  <Button>
+                  <Button variant="ghost">
                     <ListFilter aria-hidden />
                     {t.nodes.filter}
                     {facetCount > 0 ? (
@@ -521,14 +519,14 @@ export function NodesPage() {
                   ) : null}
                 </PopoverContent>
               </Popover>
-            </div>
+            </Toolbar>
 
             {chips.length > 0 ? (
-              <ul aria-label={t.nodes.activeFilters} className="flex flex-wrap items-center gap-1.5 border-b px-4 py-2">
+              <ul aria-label={t.nodes.activeFilters} className="-mt-1 mb-4 flex flex-wrap items-center gap-1.5">
                 {chips.map((chip) => (
                   <li
                     key={chip.label}
-                    className="inline-flex h-6 items-center gap-0.5 rounded-full bg-secondary pr-1 pl-2.5 text-[13px]"
+                    className="inline-flex h-6 items-center gap-0.5 rounded-full bg-muted pr-1 pl-2.5 text-[13px]"
                   >
                     {chip.label}
                     <button
@@ -594,7 +592,10 @@ export function NodesPage() {
                     <Tr
                       key={node.id}
                       onClick={(event) => openRow(event, node)}
-                      className="cursor-pointer hover:bg-muted/40"
+                      className={cn(
+                        'cursor-pointer hover:bg-muted/50',
+                        selected.has(node.id) && 'bg-accent/60 hover:bg-accent',
+                      )}
                       data-testid={`node-row-${node.name}`}
                     >
                       <Td className="pr-0">
@@ -612,11 +613,11 @@ export function NodesPage() {
                         />
                       </Td>
                       <Td>
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2.5">
                           <OnlineDot online={node.online} />
                           <Link
                             to={nodePath(network.id, node.id)}
-                            className="truncate rounded-sm font-medium hover:text-primary hover:underline"
+                            className="truncate rounded-sm font-medium hover:underline"
                           >
                             {node.name}
                           </Link>
@@ -652,7 +653,7 @@ export function NodesPage() {
                       </Td>
                       <Td className="text-[13px] whitespace-nowrap">
                         {node.online ? (
-                          <span className="font-medium text-ok">{t.common.online}</span>
+                          <span>{t.common.online}</span>
                         ) : node.last_seen_at === null ? (
                           <Tooltip content={t.nodes.neverTip}>
                             <span
@@ -710,7 +711,7 @@ export function NodesPage() {
             ) : null}
 
             {visible.length > 0 ? (
-              <footer className="flex items-center justify-between border-t px-4 py-2.5 text-[13px] text-muted-foreground">
+              <TableFooter>
                 <span className="tabular">
                   {t.common.rowsTotal(visible.length)}
                   {hasActiveFilters(filters) && visible.length !== all.length ? ` / ${all.length}` : ''}
@@ -726,11 +727,11 @@ export function NodesPage() {
                     </Button>
                   </div>
                 ) : null}
-              </footer>
+              </TableFooter>
             ) : null}
           </>
         )}
-      </Card>
+      </div>
 
       {selectedNodes.length > 0 ? (
         <div

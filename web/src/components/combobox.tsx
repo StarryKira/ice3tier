@@ -146,14 +146,14 @@ export function Combobox<V extends string | number>({
           disabled={disabled}
           {...aria}
           className={cn(
-            'flex h-9 w-full items-center justify-between gap-2 rounded-md border border-input bg-card px-3 text-left text-sm shadow-card transition-colors hover:bg-muted/50 disabled:bg-muted disabled:text-muted-foreground aria-invalid:border-danger',
+            'flex h-9 w-full items-center justify-between gap-2 rounded-md border border-input bg-card px-3 text-left text-sm transition-colors hover:border-border-strong disabled:bg-muted disabled:text-muted-foreground aria-invalid:border-danger data-[state=open]:border-primary',
             className,
           )}
         >
           <span
             className={cn(
               'flex min-w-0 items-center gap-2 truncate',
-              selectedLabel === null && 'text-muted-foreground/80',
+              selectedLabel === null && 'text-muted-foreground',
             )}
           >
             {selected?.leading}
@@ -162,7 +162,7 @@ export function Combobox<V extends string | number>({
               <span className="truncate text-[13px] text-muted-foreground">{selected.hint}</span>
             ) : null}
           </span>
-          <ChevronsUpDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+          <ChevronsUpDown className="size-3.5 shrink-0 text-faint" aria-hidden />
         </button>
       </PopoverTrigger>
       <PopoverContent className="w-(--radix-popover-trigger-width) min-w-64 p-0">
@@ -180,7 +180,7 @@ export function Combobox<V extends string | number>({
             aria-activedescendant={rows.length > 0 ? `${listId}-${active}` : undefined}
             autoComplete="off"
             spellCheck={false}
-            className="h-8 w-full rounded-md bg-muted px-2.5 text-sm outline-none placeholder:text-muted-foreground/80 focus-visible:outline-2 focus-visible:outline-ring"
+            className="h-8 w-full rounded-md bg-muted px-2.5 text-sm outline-none placeholder:text-muted-foreground focus-visible:outline-2 focus-visible:outline-ring"
           />
         </div>
         <ul id={listId} role="listbox" className="max-h-64 overflow-y-auto p-1">

@@ -56,10 +56,7 @@ function Field({ label, hint, error, optional, className, children }: FieldProps
 function FormError({ message, className }: { message: string | null | undefined; className?: string }) {
   if (message === null || message === undefined || message === '') return null
   return (
-    <p
-      role="alert"
-      className={cn('rounded-md border border-danger-line bg-danger-soft px-3 py-2 text-[13px] text-danger', className)}
-    >
+    <p role="alert" className={cn('rounded-md bg-danger-soft px-3 py-2 text-[13px] text-danger', className)}>
       {message}
     </p>
   )
