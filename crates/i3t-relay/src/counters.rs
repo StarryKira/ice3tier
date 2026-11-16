@@ -25,10 +25,16 @@ pub enum DropReason {
     SendBufferFull,
     /// 目的节点那条 TCP 的待发队列满了。
     QueueFull,
+    /// 多级中转的包：路径上没有本节点，或者目的节点写在了路径中间。
+    NotOnRoute,
+    /// 多级中转的包：路径比网络允许的级数长。
+    HopLimit,
+    /// 多级中转的包：不是路径上的前一个 relay 经骨干发来的，或者到下一个 relay 没有骨干连接。
+    NoBackbone,
 }
 
 impl DropReason {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 13] = [
         Self::Disabled,
         Self::Malformed,
         Self::UnknownClient,
@@ -39,6 +45,9 @@ impl DropReason {
         Self::RateLimited,
         Self::SendBufferFull,
         Self::QueueFull,
+        Self::NotOnRoute,
+        Self::HopLimit,
+        Self::NoBackbone,
     ];
 
     const fn index(self) -> usize {
@@ -53,6 +62,9 @@ impl DropReason {
             Self::RateLimited => 7,
             Self::SendBufferFull => 8,
             Self::QueueFull => 9,
+            Self::NotOnRoute => 10,
+            Self::HopLimit => 11,
+            Self::NoBackbone => 12,
         }
     }
 }
@@ -107,6 +119,10 @@ impl Counters {
         self.sessions_opened.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub(crate) fn sessions_opened(&self) -> u64 {
+        self.sessions_opened.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn snapshot(&self, sessions: usize) -> RelayCounters {
         RelayCounters {
             forwarded_packets: self.forwarded_packets.load(Ordering::Relaxed),
@@ -140,7 +156,7 @@ mod tests {
         for (index, reason) in DropReason::ALL.into_iter().enumerate() {
             assert_eq!(snapshot.dropped(reason), widen(index + 1));
         }
-        assert_eq!(snapshot.dropped_total(), 55);
+        assert_eq!(snapshot.dropped_total(), 91);
         assert_eq!((snapshot.forwarded_packets, snapshot.forwarded_bytes), (3, 4200));
         assert_eq!((snapshot.sessions, snapshot.sessions_opened), (2, 1));
     }

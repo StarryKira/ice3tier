@@ -15,6 +15,7 @@ i3t-proto = { path = "../i3t-proto" }
 i3t-path = { path = "../i3t-path" }
 i3t-underlay = { path = "../i3t-underlay" }
 ring.workspace = true
+socket2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -23,4 +24,6 @@ tracing.workspace = true
 workspace = true
 
 [dev-dependencies]
+quinn.workspace = true
 serde_json.workspace = true
+tracing-subscriber.workspace = true

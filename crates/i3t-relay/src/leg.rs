@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use i3t_proto::NodeId;
 use i3t_underlay::tcp_leg::{self, FrameReader};
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
@@ -19,17 +20,37 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// 同时最多接多少条 TCP。每个走 TCP 的节点只有一条，这个数对个人用的网络绰绰有余；
 /// 它挡的是有人开一大堆连接又不握手。
 const MAX_LEGS: usize = 1024;
+/// 还没来得及接受的连接最多排多少条。
+const LISTEN_BACKLOG: i32 = 1024;
 
 /// 在 UDP 端口的同一个地址和端口号上监听 TCP。
 ///
 /// # Errors
 ///
 /// 绑不上（端口被别的程序占着）。调用方稍后再试。
-pub(crate) async fn listen(inner: &Arc<Inner>) -> io::Result<JoinHandle<()>> {
+pub(crate) fn listen(inner: &Arc<Inner>) -> io::Result<JoinHandle<()>> {
     let addr = inner.port.local_addr();
-    let listener = TcpListener::bind(addr).await?;
+    let listener = bind(addr)?;
     tracing::info!(%addr, "relay 开始监听 TCP 中转");
     Ok(tokio::spawn(accept(Arc::clone(inner), listener)))
+}
+
+/// UDP 端口是双栈的（绑在 `[::]` 上）时，TCP 也要 IPv4 和 IPv6 都接。有的系统上 IPv6 的 TCP 默认不接 IPv4，所以明确设一下。
+fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
+    let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+    if addr.is_ipv6()
+        && let Err(error) = socket.set_only_v6(false)
+    {
+        tracing::debug!(%error, "这个系统上 IPv6 的 TCP 监听不能同时接 IPv4 的连接");
+    }
+    // 和标准库在 Unix 上的做法一样：进程重启之后不用等旧连接的 TIME_WAIT 过去就能重新绑定。Windows 上这个选项的含义是
+    // "允许别的进程抢同一个端口"，不能设。
+    #[cfg(unix)]
+    socket.set_reuse_address(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&addr.into())?;
+    socket.listen(LISTEN_BACKLOG)?;
+    TcpListener::from_std(socket.into())
 }
 
 async fn accept(inner: Arc<Inner>, listener: TcpListener) {

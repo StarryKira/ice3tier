@@ -90,6 +90,11 @@ impl Sessions {
         self.remove_where(|node, _| !is_client(node))
     }
 
+    /// 现在所有会话绑定的地方。给全体会话发通知时用。
+    pub(crate) fn bindings(&self, now: Instant) -> Vec<Binding> {
+        self.by_node.values().filter(|session| session.expires > now).map(|session| session.binding.clone()).collect()
+    }
+
     pub(crate) fn clear(&mut self) {
         self.by_node.clear();
     }
@@ -183,6 +188,16 @@ mod tests {
         assert_eq!(sessions.close_tcp(7), [node(1)]);
         assert_eq!(sessions.close_tcp(9), []);
         assert!(sessions.binding(node(2), now).is_some() && sessions.binding(node(3), now).is_some());
+    }
+
+    #[test]
+    fn every_live_binding_is_listed_for_notifications() {
+        let now = Instant::now();
+        let mut sessions = Sessions::default();
+        sessions.open(node(1), Binding::Udp(udp(4000)), now);
+        sessions.open(node(2), tcp(7), now);
+        assert_eq!(sessions.bindings(now).len(), 2);
+        assert!(sessions.bindings(now + SESSION_TTL).is_empty(), "过期的会话不再通知");
     }
 
     #[test]
