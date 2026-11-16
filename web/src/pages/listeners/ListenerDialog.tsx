@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { useId, useState } from 'react'
 
-import { fieldError, formError, formFailure } from '@/api/formErrors'
+import { fieldError, formError, formErrorDetail, formFailure } from '@/api/formErrors'
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
 import {
@@ -157,7 +157,7 @@ export function ListenerDialog({ network, listener, node: presetNode, open, onCl
     { bind: portProblem === null ? bind : formatSocketAddr(hostValue, 1080), protocol },
     {
       exit: fixedExit !== null ? undefined : (firstExit?.virtual_ip ?? t.credentials.usageExitPlaceholder),
-      credential: mustRequire || requireCredential ? '<凭据>' : undefined,
+      credential: mustRequire || requireCredential ? t.credentials.credentialPlaceholder : undefined,
       hostPlaceholder: host?.name ?? t.credentials.usageHostPlaceholder,
     },
   )
@@ -172,13 +172,14 @@ export function ListenerDialog({ network, listener, node: presetNode, open, onCl
       submitLabel={listener === null ? d.submitCreate : d.submitEdit}
       pending={save.isPending}
       error={formError(failure)}
+      errorDetail={formErrorDetail(failure)}
       onSubmit={submit}
     >
       <div className="grid grid-cols-2 gap-4">
-        <Field label={d.node} hint={d.nodeHint} error={shown(nodeProblem)}>
+        <Field label={d.node} error={shown(nodeProblem)}>
           {(props) => <NodeSelect {...props} nodes={all} value={node} onChange={change(setNode)} />}
         </Field>
-        <Field label={d.name} hint={d.nameHint} error={shown(nameProblem) ?? fieldError(failure, 'name')}>
+        <Field label={d.name} error={shown(nameProblem) ?? fieldError(failure, 'name')}>
           {(props) => (
             <Input {...props} name="name" value={name} onChange={(event) => change(setName)(event.target.value)} />
           )}
@@ -260,12 +261,7 @@ export function ListenerDialog({ network, listener, node: presetNode, open, onCl
       {(mustRequire || requireCredential) && credentials.data?.length === 0 ? <Notice>{d.noCredentials}</Notice> : null}
 
       {external ? (
-        <Field
-          label={d.allowFrom}
-          hint={`${d.allowFromHint}${d.allowFromRecommend}`}
-          optional={t.common.optional}
-          error={shown(allowProblem)}
-        >
+        <Field label={d.allowFrom} hint={d.allowFromHint} optional={t.common.optional} error={shown(allowProblem)}>
           {(props) => (
             <Textarea
               {...props}
@@ -292,12 +288,11 @@ export function ListenerDialog({ network, listener, node: presetNode, open, onCl
             {
               value: 'local',
               title: d.actionLocal,
-              description: d.actionLocalDesc,
               disabled: localNeedsExit,
               disabledReason: host === undefined ? undefined : d.actionLocalNeedsExit(host.name),
             },
             { value: 'reject', title: d.actionReject, description: d.actionRejectDesc },
-            { value: 'exit', title: d.actionExit, description: d.actionExitDesc },
+            { value: 'exit', title: d.actionExit },
           ]}
         />
         {effectiveAction === 'exit' ? (

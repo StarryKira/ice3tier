@@ -12,17 +12,20 @@ export const METRICS_PATH = '/metrics'
  * 一次失败的请求。
  *
  * `code` 给程序看：服务器给的错误码原样放在这里；连不上时是 `network`；应答不是约定的格式时是 `http_<状态码>`。
- * `message` 给人看，可以直接显示：服务器给了就用服务器的，没给就按状态码写一句。
+ * `message` 是服务器给的原话，没给就按状态码写一句；显示给人看时用 {@link errorMessage}，它按码和当前的语言写。
  */
 export class ApiError extends Error {
   readonly status: number
   readonly code: string
+  /** controller 给的原话；它没有给（连不上、不是约定的应答）时是 `null`。 */
+  readonly server: string | null
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, server: string | null = null) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
+    this.server = server
   }
 
   is(...codes: KnownErrorCode[]): boolean {
@@ -96,7 +99,7 @@ async function toApiError(response: Response): Promise<ApiError> {
     parsed = undefined
   }
   if (isErrorBody(parsed)) {
-    return new ApiError(response.status, parsed.error.code, parsed.error.message)
+    return new ApiError(response.status, parsed.error.code, parsed.error.message, parsed.error.message)
   }
   // 不是 controller 写的应答（例如开发时代理报的 502）：按状态码说一句。
   return new ApiError(response.status, `http_${response.status}`, t.errors.http(response.status))
@@ -142,9 +145,38 @@ export async function request<T>(method: Method, path: string, options: RequestO
   }
 }
 
-/** 把任何抛出来的东西写成一句可以显示的话。 */
+/**
+ * 这几个错误码太笼统，光看码说不清是什么问题：界面写自己的一句，controller 的原话作为补充（{@link errorDetail}）。
+ * 别的码本身就说清了问题，原话不再显示。
+ */
+const VAGUE_CODES: readonly string[] = ['invalid_request', 'not_found', 'conflict', 'internal']
+
+function codeText(code: string): string | undefined {
+  const codes: Record<KnownErrorCode, string> = t.errors.codes
+  return Object.hasOwn(codes, code) ? codes[code as KnownErrorCode] : undefined
+}
+
+/**
+ * 把任何抛出来的东西写成一句可以显示的话，用当前的语言。管理 API 的错误按错误码写界面自己的话，
+ * 不用 controller 的原话（它是中文的，见 {@link errorDetail}）。
+ */
 export function errorMessage(error: unknown): string {
-  if (error instanceof ApiError) return error.message
+  if (error instanceof ApiError) {
+    if (error.code === 'network') return t.errors.network
+    if (error.code === 'bad_response') return t.errors.badResponse
+    return codeText(error.code) ?? t.errors.http(error.status)
+  }
   if (error instanceof Error && error.message !== '') return error.message
   return t.errors.unknown
+}
+
+/**
+ * controller 对这次错误的原话，作为 {@link errorMessage} 下面的补充显示；码已经说清楚时是 `null`。
+ * 原话是 controller 写的中文，界面没有办法翻译它。
+ */
+export function errorDetail(error: unknown): string | null {
+  if (!(error instanceof ApiError) || error.server === null) return null
+  const known = codeText(error.code) !== undefined
+  if (known && !VAGUE_CODES.includes(error.code)) return null
+  return error.server === errorMessage(error) ? null : error.server
 }

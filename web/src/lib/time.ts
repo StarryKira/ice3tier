@@ -1,6 +1,22 @@
-import { t } from '@/i18n'
+import { getLocale, t } from '@/i18n'
 
 import { type Timestamp } from '@/api/types'
+
+/**
+ * 时间的写法都按当前语言：日期和时刻交给 `Intl`（语言代码就是它要的标记），
+ * "3 分钟前"这类带数的说法在各语言的目录里（`t.time`），单复数由各语言自己处理。
+ */
+const formatters = new Map<string, Intl.DateTimeFormat>()
+
+function dateFormat(name: string, options: Intl.DateTimeFormatOptions): Intl.DateTimeFormat {
+  const key = `${getLocale()}|${name}`
+  let format = formatters.get(key)
+  if (format === undefined) {
+    format = new Intl.DateTimeFormat(getLocale(), options)
+    formatters.set(key, format)
+  }
+  return format
+}
 
 const MINUTE = 60
 const HOUR = 60 * MINUTE
@@ -9,7 +25,7 @@ const WEEK = 7 * DAY
 
 /** 带时区的完整时间，给悬停提示用。 */
 export function formatFullTime(at: Timestamp): string {
-  return new Intl.DateTimeFormat('zh-CN', {
+  return dateFormat('full', {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -25,9 +41,9 @@ export function formatFullTime(at: Timestamp): string {
 export function formatDate(at: Timestamp, now: Timestamp): string {
   const date = new Date(at * 1000)
   const sameYear = date.getFullYear() === new Date(now * 1000).getFullYear()
-  return new Intl.DateTimeFormat('zh-CN', {
+  return dateFormat(sameYear ? 'date' : 'dateYear', {
     year: sameYear ? undefined : 'numeric',
-    month: '2-digit',
+    month: sameYear ? 'short' : '2-digit',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
@@ -83,12 +99,11 @@ export function formatDuration(secs: number): string {
 }
 
 /**
- * 按 UTC 写的"12 月 1 日"。出口的账期从每个月某一天的 UTC 0 点算起，用 UTC 的日期写，
+ * 按 UTC 写的日期（"12月1日""Dec 1"）。出口的账期从每个月某一天的 UTC 0 点算起，用 UTC 的日期写，
  * 和设置里填的那一天对得上；不然在 UTC 以西的时区会显示成前一天。
  */
 export function formatUtcDay(at: Timestamp): string {
-  const date = new Date(at * 1000)
-  return t.time.monthDay(date.getUTCMonth() + 1, date.getUTCDate())
+  return dateFormat('utcDay', { timeZone: 'UTC', month: 'short', day: 'numeric' }).format(new Date(at * 1000))
 }
 
 export function nowSeconds(): Timestamp {

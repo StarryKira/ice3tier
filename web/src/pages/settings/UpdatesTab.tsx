@@ -4,7 +4,7 @@ import { useId, useMemo, useState } from 'react'
 
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
-import { type ForcedUpdates, type Network, type Node, type UpdateOverview } from '@/api/types'
+import { type ForcedUpdates, type Network, type Node, type PackageState, type UpdateOverview } from '@/api/types'
 import { useConfirm } from '@/components/confirm'
 import { ForceAllDialog, ForceUpdateDialog } from '@/components/force-update'
 import { NodeLink } from '@/components/node'
@@ -23,15 +23,31 @@ import { Segmented } from '@/components/ui/segmented'
 import { Switch } from '@/components/ui/switch'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
-import { formatBytes } from '@/lib/format'
+import { formatBytes, formatList } from '@/lib/format'
 import { forceAbility, groupPaused, isUpdating, type PausedGroup } from '@/lib/nodeUpdate'
 import { LIVE_INTERVAL, WAITING_INTERVAL } from '@/lib/polling'
 import { type SourceKind, sourceKind, validateSource } from '@/lib/releaseSource'
-import { formatRelative } from '@/lib/time'
+import { formatFullTime, formatRelative } from '@/lib/time'
 import { useNow } from '@/lib/useNow'
 import { useUpdateView } from '@/lib/useUpdateView'
 
 const u = t.updates
+
+/** 不认识的状态查不到，徽标用默认的灰。 */
+const PACKAGE_TONES = {
+  cached: 'ok',
+  fetching: 'relay',
+  failed: 'danger',
+  not_needed: 'neutral',
+  unknown: 'neutral',
+} as const satisfies Record<PackageState, string>
+
+/** 包的状态的名字和说明。比界面新的 controller 可能报出这里不认识的状态，原样写出来。 */
+function packageText(state: PackageState): { label: string; hint: string } {
+  const labels: Partial<Record<string, string>> = u.release.packageState
+  const hints: Partial<Record<string, string>> = u.release.packageStateHint
+  return { label: labels[state] ?? state, hint: hints[state] ?? u.release.packageStateHint.unknown }
+}
 
 /** 有更新正在进行：取得勤一些，用户这时正看着进度。 */
 function busy(overview: UpdateOverview | undefined): boolean {
@@ -52,7 +68,7 @@ function PausedBanner({ group, networks }: { group: PausedGroup; networks: reado
   const { version, entries } = group
   const networkName = (id: number | null) =>
     id === null ? '—' : (networks.find((network) => network.id === id)?.name ?? u.paused.networkGone(id))
-  const names = [...new Set(entries.map((entry) => networkName(entry.network)))].join('、')
+  const names = formatList([...new Set(entries.map((entry) => networkName(entry.network)))])
   const [first] = entries
   const resume = useAction('all', {
     mutationFn: () => api.resumeUpdate({ version }),
@@ -99,9 +115,9 @@ function PausedBanner({ group, networks }: { group: PausedGroup; networks: reado
                 ? u.paused.entryNodeGone(networkName(entry.network))
                 : u.paused.entry(networkName(entry.network), entry.node.name)}
               {' · '}
-              {u.paused.reported} · <RelativeTime at={entry.at} />
+              <RelativeTime at={entry.at} />
             </p>
-            <p className="mt-0.5 font-mono text-[13px] break-all text-foreground">{entry.reason}</p>
+            <p className="mt-0.5 font-mono text-xs break-all text-foreground/80">{entry.reason}</p>
           </li>
         ))}
       </ul>
@@ -148,10 +164,15 @@ function ReleaseCard({ overview }: { overview: UpdateOverview }) {
             {overview.checked_at === null ? (
               u.release.neverChecked
             ) : (
-              <>
-                <RelativeTime at={overview.checked_at} className="text-muted-foreground" />
-                {u.release.checked}
-              </>
+              <Tooltip content={formatFullTime(overview.checked_at)}>
+                <time
+                  tabIndex={0}
+                  dateTime={new Date(overview.checked_at * 1000).toISOString()}
+                  className="rounded-sm whitespace-nowrap"
+                >
+                  {u.release.checkedAt(formatRelative(overview.checked_at, now))}
+                </time>
+              </Tooltip>
             )}
           </p>
         </div>
@@ -163,8 +184,11 @@ function ReleaseCard({ overview }: { overview: UpdateOverview }) {
           ) : null}
         </div>
         {overview.check_error !== null ? (
-          <Notice tone="danger" title={u.release.checkFailed(overview.check_error)}>
-            {u.release.checkFailedHint}
+          <Notice tone="danger" title={u.release.checkFailed}>
+            <p className="font-mono text-xs break-words text-foreground/80" data-testid="check-error">
+              {overview.check_error}
+            </p>
+            <p className="mt-0.5">{u.release.checkFailedHint}</p>
           </Notice>
         ) : null}
         {release?.controller_too_old === true ? (
@@ -188,35 +212,28 @@ function ReleaseCard({ overview }: { overview: UpdateOverview }) {
               </tr>
             </thead>
             <tbody>
-              {release.packages.map((pkg) => (
-                <Tr key={pkg.platform} data-testid={`package-${pkg.platform}`}>
-                  <Td className="font-mono text-[13px]">{pkg.platform}</Td>
-                  <Td className="font-mono text-[13px] text-muted-foreground">{pkg.file}</Td>
-                  <Td numeric className="text-[13px]">
-                    {formatBytes(pkg.size)}
-                  </Td>
-                  <Td className="text-[13px]">
-                    <Tooltip content={u.release.packageStateHint[pkg.state]}>
-                      <span tabIndex={0} className="rounded-sm">
-                        <Badge
-                          tone={
-                            pkg.state === 'cached'
-                              ? 'ok'
-                              : pkg.state === 'fetching'
-                                ? 'relay'
-                                : pkg.state === 'failed'
-                                  ? 'danger'
-                                  : 'neutral'
-                          }
-                        >
-                          {u.release.packageState[pkg.state] ?? pkg.state}
-                        </Badge>
-                      </span>
-                    </Tooltip>
-                    {pkg.error !== null ? <p className="mt-1 text-[13px] text-danger">{pkg.error}</p> : null}
-                  </Td>
-                </Tr>
-              ))}
+              {release.packages.map((pkg) => {
+                const state = packageText(pkg.state)
+                return (
+                  <Tr key={pkg.platform} data-testid={`package-${pkg.platform}`}>
+                    <Td className="font-mono text-[13px]">{pkg.platform}</Td>
+                    <Td className="font-mono text-[13px] text-muted-foreground">{pkg.file}</Td>
+                    <Td numeric className="text-[13px]">
+                      {formatBytes(pkg.size)}
+                    </Td>
+                    <Td className="text-[13px]">
+                      <Tooltip content={state.hint}>
+                        <span tabIndex={0} className="rounded-sm">
+                          <Badge tone={PACKAGE_TONES[pkg.state]}>{state.label}</Badge>
+                        </span>
+                      </Tooltip>
+                      {pkg.error !== null ? (
+                        <p className="mt-1 font-mono text-xs break-words text-muted-foreground">{pkg.error}</p>
+                      ) : null}
+                    </Td>
+                  </Tr>
+                )
+              })}
             </tbody>
           </Table>
         </>
@@ -301,7 +318,6 @@ function SourceCard({ overview }: { overview: UpdateOverview }) {
             if (error === null && dirty) save.mutate()
           }}
         >
-          <p className="text-[13px] text-muted-foreground">{u.source.lead}</p>
           <RadioCards<SourceKind>
             aria-label={u.source.kindLabel}
             columns={3}
@@ -374,7 +390,7 @@ function NodeRow({ row, showNetwork, onForce }: { row: Row; showNetwork: boolean
             size="sm"
             reason={ability.ok ? null : ability.reason}
             onClick={() => onForce(node)}
-            aria-label={`${u.force.button} ${node.name}`}
+            aria-label={u.force.buttonFor(node.name)}
           >
             <CircleArrowUp aria-hidden />
             {u.force.button}
@@ -437,7 +453,7 @@ function NodesCard({ overview, onForceAll }: { overview: UpdateOverview; onForce
         }
       />
       {error !== null && rows.length === 0 ? (
-        <ErrorState title={t.nodes.loadFailed} error={error} />
+        <ErrorState title={t.errors.loadFailed} error={error} />
       ) : pending && rows.length === 0 ? (
         <SkeletonBlock lines={4} />
       ) : rows.length === 0 ? (
@@ -486,7 +502,7 @@ function NodesCard({ overview, onForceAll }: { overview: UpdateOverview; onForce
 
 function ForceResult({ result, onDismiss }: { result: ForcedUpdates; onDismiss: () => void }) {
   const a = t.updates.forceAll
-  const names = (list: readonly { name: string }[]) => list.map((node) => node.name).join('、')
+  const names = (list: readonly { name: string }[]) => formatList(list.map((node) => node.name))
   return (
     <Notice
       tone="info"
@@ -497,30 +513,38 @@ function ForceResult({ result, onDismiss }: { result: ForcedUpdates; onDismiss: 
         </Button>
       }
     >
-      <div data-testid="force-all-result" className="space-y-1">
+      <div data-testid="force-all-result">
         {result.version === null ? <p>{a.resultNoVersion}</p> : null}
-        {result.ordered.length > 0 ? (
-          <p>
-            <span className="font-medium text-foreground">{a.resultOrdered}：</span>
-            {names(result.ordered)}
-          </p>
-        ) : null}
-        {result.queued.length > 0 ? (
-          <p>
-            <span className="font-medium text-foreground">{a.resultQueued}：</span>
-            {names(result.queued)}
-          </p>
-        ) : null}
-        {result.skipped.length > 0 ? (
-          <div>
-            <span className="font-medium text-foreground">{a.resultSkipped}：</span>
-            <ul className="mt-0.5 list-disc pl-5">
-              {result.skipped.map((skipped) => (
-                <li key={skipped.node.id}>{skipped.reason}</li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1">
+          {result.ordered.length > 0 ? (
+            <>
+              <dt className="font-medium text-foreground">{a.resultOrdered}</dt>
+              <dd>{names(result.ordered)}</dd>
+            </>
+          ) : null}
+          {result.queued.length > 0 ? (
+            <>
+              <dt className="font-medium text-foreground">{a.resultQueued}</dt>
+              <dd>{names(result.queued)}</dd>
+            </>
+          ) : null}
+          {result.skipped.length > 0 ? (
+            <>
+              <dt className="font-medium text-foreground">{a.resultSkipped}</dt>
+              <dd>
+                <ul className="space-y-0.5">
+                  {result.skipped.map((skipped) => (
+                    <li key={skipped.node.id}>
+                      {skipped.node.name}
+                      {/* controller 给的原因是一句中文原话，作为补充。 */}
+                      <span className="ml-2 text-xs text-muted-foreground">{skipped.reason}</span>
+                    </li>
+                  ))}
+                </ul>
+              </dd>
+            </>
+          ) : null}
+        </dl>
       </div>
     </Notice>
   )

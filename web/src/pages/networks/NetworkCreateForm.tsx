@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { useMemo, useState } from 'react'
 
-import { fieldError, formError, formFailure } from '@/api/formErrors'
+import { fieldError, formError, formErrorDetail, formFailure } from '@/api/formErrors'
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
 import { type Network } from '@/api/types'
@@ -9,7 +9,7 @@ import { Notice } from '@/components/notice'
 import { Field } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { t } from '@/i18n'
-import { cidrContains, cidrOverlaps, formatCidr, parseCidr, SHARED_ADDRESS_SPACE, suggestCidr } from '@/lib/cidr'
+import { cidrContains, cidrOverlaps, parseCidr, SHARED_ADDRESS_SPACE, suggestCidr } from '@/lib/cidr'
 import { validateName, validateNetworkCidr } from '@/lib/validate'
 
 /** 地址段和已有的网络重叠时，说出是和哪一个。 */
@@ -19,7 +19,7 @@ function overlapMessage(raw: string, networks: readonly Network[]): string | nul
   for (const other of networks) {
     const otherCidr = parseCidr(other.cidr)
     if (otherCidr !== null && cidrOverlaps(cidr, otherCidr)) {
-      return t.networks.cidrOverlaps(formatCidr(cidr), other.name, other.cidr)
+      return t.networks.cidrOverlaps(other.name, other.cidr)
     }
   }
   return null
@@ -110,6 +110,7 @@ export function useNetworkCreateForm(onCreated: (network: Network) => void) {
     submit,
     pending: create.isPending,
     error: formError(failure),
+    errorDetail: formErrorDetail(failure),
     dirty: name !== null || cidr !== null,
     reset: () => {
       setName(null)

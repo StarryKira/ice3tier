@@ -13,7 +13,7 @@ const u = t.updates
 
 /**
  * 节点详情的「更新」：现在的版本、可以更新到的版本、能不能自己更新（不能时写出做法）、
- * 更新进行到哪一步、下发的指令、最近一次失败。"立即更新"在页面顶上，这里不再放一个。
+ * 更新进行到哪一步、下发的指令、最近一次失败（节点报的原因是原话，作为补充）。"立即更新"在页面顶上，这里不再放一个。
  */
 export function UpdateTab({ node }: { node: NodeDetail }) {
   const view = useUpdateView(node)
@@ -32,7 +32,7 @@ export function UpdateTab({ node }: { node: NodeDetail }) {
             </InfoRow>
             <InfoRow label={u.detail.available}>
               {update.available === null ? (
-                <span className="text-muted-foreground">{u.detail.availableNone}</span>
+                <span className="text-muted-foreground">{u.detail.none}</span>
               ) : (
                 <span className="font-medium tabular">{update.available}</span>
               )}
@@ -44,25 +44,26 @@ export function UpdateTab({ node }: { node: NodeDetail }) {
             </InfoRow>
             <InfoRow label={u.detail.order}>
               {update.ordered === null ? (
-                <span className="text-muted-foreground">{u.detail.orderNone}</span>
+                <span className="text-muted-foreground">{u.detail.none}</span>
               ) : (
                 u.detail.orderValue(update.ordered.version, update.ordered.timing)
               )}
             </InfoRow>
             <InfoRow label={u.detail.failure}>
               {update.failure === null ? (
-                <span className="text-muted-foreground">{u.detail.failureNone}</span>
+                <span className="text-muted-foreground">{u.detail.none}</span>
               ) : (
                 <span>
                   <StatusText tone="danger">{update.failure.version}</StatusText>{' '}
                   <RelativeTime at={update.failure.at} className="text-[13px] text-muted-foreground" />
-                  <span className="mt-0.5 block text-[13px] text-muted-foreground">{update.failure.reason}</span>
+                  <span className="mt-0.5 block font-mono text-xs break-words text-muted-foreground">
+                    {update.failure.reason}
+                  </span>
                 </span>
               )}
             </InfoRow>
           </dl>
-          <p className="pt-4 text-[13px] text-muted-foreground">
-            {u.detail.history}{' '}
+          <p className="pt-4 text-[13px]">
             <Link to="/settings/updates" className="text-primary hover:underline">
               {u.detail.goSettings}
             </Link>
@@ -74,10 +75,7 @@ export function UpdateTab({ node }: { node: NodeDetail }) {
         <CardHeader title={u.detail.selfUpdate} />
         <CardBody data-testid="node-self-update">
           {block === null ? (
-            <div>
-              <StatusText tone="ok">{u.blocker.able}</StatusText>
-              <p className="mt-0.5 text-[13px] text-muted-foreground">{u.blocker.ableHint}</p>
-            </div>
+            <StatusText tone="ok">{u.blocker.able}</StatusText>
           ) : (
             <ManualUpdate block={block} platform={node.platform} />
           )}

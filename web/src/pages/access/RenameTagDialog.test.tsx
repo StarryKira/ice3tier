@@ -37,24 +37,24 @@ function setup() {
 
 async function openRename(user: ReturnType<typeof userEvent.setup>, tag: string) {
   renderWithApp(<TagPanel network={NETWORK} graph={GRAPH} open={tag} onOpenChange={() => undefined} />)
-  await user.click(await screen.findByRole('button', { name: p.renameFor(tag) }))
+  await user.click(await screen.findByRole('button', { name: p.renameTitle(tag) }))
   return screen.findByRole('dialog', { name: p.renameTitle(tag) })
 }
 
 describe('标签改名', () => {
-  it('整个网络里一起改；新名字没人用时说谁能访问谁不变', async () => {
+  it('整个网络里一起改；新名字没人用时不提醒什么', async () => {
     const user = userEvent.setup()
     const api = setup()
     const dialog = await openRename(user, 'laptops')
-    expect(within(dialog).getByText(p.renameUses(1, 1))).toBeVisible()
+    expect(within(dialog).getByText(p.renameLead)).toBeVisible()
     const input = within(dialog).getByRole('textbox', { name: p.renameLabel })
     await user.clear(input)
     await user.type(input, 'Notebooks')
-    expect(within(dialog).getByText(p.renameNoEffect)).toBeVisible()
+    expect(within(dialog).queryByRole('note')).not.toBeInTheDocument()
     await user.click(within(dialog).getByRole('button', { name: p.renameSubmit }))
     await waitFor(() => expect(api.callsTo('POST /networks/1/tags/rename')).toHaveLength(1))
     expect(api.callsTo('POST /networks/1/tags/rename')[0]?.body).toEqual({ from: 'laptops', to: 'notebooks' })
-    expect(await screen.findByText(p.renamed('laptops', 'notebooks', 1, 1, 0))).toBeVisible()
+    expect(await screen.findByText(p.renamed('laptops', 'notebooks'))).toBeVisible()
   })
 
   it('改成已经有人用的名字：两组合成一组，保存之前说出来', async () => {
@@ -82,7 +82,7 @@ describe('标签改名', () => {
     expect(api.callsTo('POST /networks/1/tags/rename')).toHaveLength(0)
   })
 
-  it('controller 不答应时把它的话写在输入框下面', async () => {
+  it('controller 不答应时按错误码写在输入框下面', async () => {
     const user = userEvent.setup()
     const api = setup()
     api.use({ 'POST /networks/1/tags/rename': () => apiFailure(400, 'invalid_request', '标签的写法不对') })
@@ -91,13 +91,13 @@ describe('标签改名', () => {
     await user.clear(input)
     await user.type(input, 'x')
     await user.click(within(dialog).getByRole('button', { name: p.renameSubmit }))
-    await waitFor(() => expect(input).toHaveAccessibleDescription(/标签的写法不对/))
+    await waitFor(() => expect(input).toHaveAccessibleDescription(t.errors.codes.invalid_request))
   })
 
   it('内置的 all 没有改名的按钮', async () => {
     setup()
     renderWithApp(<TagPanel network={NETWORK} graph={GRAPH} open="all" onOpenChange={() => undefined} />)
     expect(await screen.findByText(p.allMembers)).toBeVisible()
-    expect(screen.queryByRole('button', { name: p.renameFor('all') })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: p.renameTitle('all') })).not.toBeInTheDocument()
   })
 })

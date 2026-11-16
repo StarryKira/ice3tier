@@ -2,7 +2,7 @@ import { screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
-import { t } from '@/i18n'
+import { setLocale, t } from '@/i18n'
 import { makeExitSettings, makeExitView, makeNode } from '@/test/fixtures'
 import { fakeApi, NETWORK, renderWithApp } from '@/test/harness'
 
@@ -90,7 +90,7 @@ describe('出口页', () => {
     const usage = await screen.findByTestId('exit-usage-gw')
     expect(within(usage).getByRole('meter', { name: e.quotaLabel('gw') })).toHaveAttribute('aria-valuenow', '92')
     expect(within(usage).getByText('92.0 GB / 100 GB')).toBeVisible()
-    expect(within(usage).getByText(e.quotaResets('12 月 1 日'))).toBeVisible()
+    expect(within(usage).getByText(e.quotaResets('12月1日'))).toBeVisible()
   })
 
   it('健康：有问题时写出最近 5 分钟里出口自己的失败；排空中直说', async () => {
@@ -124,7 +124,7 @@ describe('出口页', () => {
     await user.click(await screen.findByRole('button', { name: e.detailsFor('gw') }))
     const table = screen.getByRole('table', { name: e.detailsFor('gw') })
     expect(within(table).getByRole('columnheader', { name: e.exitReported })).toBeVisible()
-    expect(within(table).getByRole('columnheader', { name: e.reportedBy('laptop') })).toBeVisible()
+    expect(within(table).getByRole('columnheader', { name: 'laptop' })).toBeVisible()
     const unreachable = within(table).getByRole('row', { name: new RegExp(e.rowUnreachable) })
     expect(
       within(unreachable)
@@ -137,5 +137,17 @@ describe('出口页', () => {
         .getAllByRole('cell')
         .map((cell) => cell.textContent),
     ).toEqual(['6', '6'])
+  })
+})
+
+describe('英文', () => {
+  it('出口列表和对照表里没有中文', async () => {
+    const user = userEvent.setup()
+    setLocale('en', { remember: false })
+    setup()
+    renderWithApp(<ExitsPage />, { network: NETWORK })
+    await user.click(await screen.findByRole('button', { name: e.detailsFor('gw') }))
+    expect(within(screen.getByTestId('exit-usage-gw')).getByText('Resets Dec 1')).toBeVisible()
+    expect(document.body.textContent).not.toMatch(/\p{Script=Han}/u)
   })
 })

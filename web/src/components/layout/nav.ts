@@ -16,7 +16,7 @@ import {
 } from 'lucide-react'
 
 import { t } from '@/i18n'
-import { PLANNED, type PlannedId } from '@/pages/planned/planned'
+import { plannedEntry, type PlannedId } from '@/pages/planned/planned'
 
 export interface NavItem {
   /** 路径里的那一段：`/n/<网络>/<page>`。 */
@@ -34,10 +34,21 @@ export interface NavGroup {
   items: readonly NavItem[]
 }
 
+/** 名字用取值函数（getter）写：每次渲染现读，换了语言就是新的名字。 */
+const item = (page: string, label: () => string, icon: LucideIcon): NavItem => ({
+  page,
+  get label() {
+    return label()
+  },
+  icon,
+})
+
 const planned = (id: PlannedId): NavItem => ({
   page: id,
-  label: PLANNED[id].title,
-  icon: PLANNED[id].icon,
+  get label() {
+    return plannedEntry(id).title
+  },
+  icon: plannedEntry(id).icon,
   planned: true,
 })
 
@@ -49,27 +60,31 @@ export const NAV_GROUPS: readonly NavGroup[] = [
   {
     id: 'main',
     items: [
-      { page: 'overview', label: t.nav.overview, icon: LayoutDashboard },
-      { page: 'nodes', label: t.nav.nodes, icon: Server },
-      { page: 'access', label: t.nav.access, icon: ShieldCheck },
+      item('overview', () => t.nav.overview, LayoutDashboard),
+      item('nodes', () => t.nav.nodes, Server),
+      item('access', () => t.nav.access, ShieldCheck),
     ],
   },
   {
     id: 'access',
-    label: t.nav.groupAccess,
+    get label() {
+      return t.nav.groupAccess
+    },
     items: [
-      { page: 'exits', label: t.nav.exits, icon: DoorOpen },
-      { page: 'listeners', label: t.nav.listeners, icon: RadioTower },
-      { page: 'credentials', label: t.nav.credentials, icon: KeyRound },
-      { page: 'forwards', label: t.nav.forwards, icon: ArrowLeftRight },
+      item('exits', () => t.nav.exits, DoorOpen),
+      item('listeners', () => t.nav.listeners, RadioTower),
+      item('credentials', () => t.nav.credentials, KeyRound),
+      item('forwards', () => t.nav.forwards, ArrowLeftRight),
     ],
   },
   {
     id: 'diagnose',
-    label: t.nav.groupDiagnose,
+    get label() {
+      return t.nav.groupDiagnose
+    },
     items: [
-      { page: 'topology', label: t.nav.topology, icon: Waypoints },
-      { page: 'diagnosis', label: t.nav.diagnosis, icon: Route },
+      item('topology', () => t.nav.topology, Waypoints),
+      item('diagnosis', () => t.nav.diagnosis, Route),
       planned('tests'),
     ],
   },
@@ -77,12 +92,18 @@ export const NAV_GROUPS: readonly NavGroup[] = [
 
 /** 底部的管理区。"设置"是全局的，其余属于当前网络。 */
 export const NAV_ADMIN: readonly NavItem[] = [
-  { page: 'tokens', label: t.nav.tokens, icon: Ticket },
-  { page: 'pairs', label: t.nav.pairs, icon: Link2 },
-  { page: 'network', label: t.nav.network, icon: Network },
+  item('tokens', () => t.nav.tokens, Ticket),
+  item('pairs', () => t.nav.pairs, Link2),
+  item('network', () => t.nav.network, Network),
 ]
 
-export const NAV_SETTINGS = { label: t.nav.settings, icon: Settings, to: '/settings' } as const
+export const NAV_SETTINGS = {
+  get label() {
+    return t.nav.settings
+  },
+  icon: Settings,
+  to: '/settings',
+} as const
 
 /** 从地址里取出当前页面那一段：`/n/3/nodes/7` 是 `nodes`。不在某个网络的页面上时是 `null`。 */
 export function currentPage(pathname: string): string | null {

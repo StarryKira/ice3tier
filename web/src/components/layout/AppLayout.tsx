@@ -40,11 +40,7 @@ export function AppLayout() {
   if (networks.isError) {
     return (
       <div className="mx-auto max-w-3xl pt-24">
-        <ErrorState
-          title={t.errors.loadFailed(t.networks.title)}
-          error={networks.error}
-          onRetry={() => void networks.refetch()}
-        />
+        <ErrorState title={t.errors.loadFailed} error={networks.error} onRetry={() => void networks.refetch()} />
       </div>
     )
   }

@@ -57,11 +57,8 @@ export function useRuleActions(network: Network, graph: AccessGraph) {
     const confirmed = await confirm({
       tone: isolates ? 'danger' : 'normal',
       title: t.access.deleteTitle(ruleLabel(rule)),
-      body: isolates
-        ? t.access.lossAll
-        : diff !== null && diff.lost > 0
-          ? t.access.lossBody(diff.lost)
-          : t.access.noLoss,
+      // 没有谁会因此失去访问时不写正文：标题已经说清了。
+      body: isolates ? t.access.lossAll : diff !== null && diff.lost > 0 ? t.access.lossBody(diff.lost) : undefined,
       confirmLabel: t.access.deleteConfirm,
     })
     if (confirmed) remove.mutate(rule)

@@ -12,6 +12,7 @@ import {
   routeDetail,
   routeDetailHint,
   routeText,
+  textFor,
 } from './route'
 
 const p = t.path
@@ -46,13 +47,15 @@ export interface LegView {
   } | null
   /** "选路模式：默认"和它的说明。只有现问到、发送方的版本会说时才有。 */
   mode: { label: string; hint: string } | null
-  /** "为什么是这条：直连可用"。有没有同 `mode`。 */
+  /** 发送方的路由层说的"为什么是这条"，是节点的原话，原样显示。有没有同 `mode`。 */
   reason: string | null
   rtt: string | null
   /** "6 秒前的数据"。刚问到的不写（是现在）；没有数据时是 `null`。 */
   age: string | null
-  /** 这条路是什么时候、为什么换上的。 */
+  /** 这条路是什么时候换上的："切换于 5 分钟前"。 */
   since: string | null
+  /** 换上它的原因：节点的原话，作为 `since` 下面的补充。 */
+  sinceReason: string | null
 }
 
 const SOURCE_TONE: Record<PathSource, Tone> = {
@@ -84,21 +87,26 @@ export function describeLeg(leg: PathLeg, name: (id: NodeId) => string): LegView
         }
   const age = leg.age_secs === null || state === 'query' ? null : p.age(formatAge(leg.age_secs))
   let since: string | null = null
-  if (leg.since !== null) since = p.since(formatAge(leg.since.secs_ago), leg.since.reason)
+  if (leg.since !== null) since = p.since(formatAge(leg.since.secs_ago))
   else if (state === 'query' && route !== null) since = p.sinceUnknown
+  const sinceReason = leg.since === null || leg.since.reason === '' ? null : leg.since.reason
   const mode = leg.mode ?? null
   const reason = leg.reason ?? null
   return {
     state,
-    mode: mode === null ? null : { label: p.modeLabel(p.mode[mode] ?? mode), hint: p.modeHint[mode] ?? '' },
-    reason: reason === null || reason === '' ? null : p.reason(reason),
-    sourceLabel: p.source[state] ?? state,
+    mode:
+      mode === null
+        ? null
+        : { label: p.modeLabel(textFor(p.mode, mode) ?? mode), hint: textFor(p.modeHint, mode) ?? '' },
+    reason: reason === null || reason === '' ? null : reason,
+    sourceLabel: textFor(p.source, state) ?? p.source.unknown,
     sourceTone: SOURCE_TONE[state],
-    sourceHint: p.sourceHint[state] ?? '',
+    sourceHint: textFor(p.sourceHint, state) ?? p.sourceHint.unknown,
     route,
     rtt: leg.rtt_ms === null ? null : t.routes.rtt(leg.rtt_ms),
     age,
     since,
+    sinceReason,
   }
 }
 
@@ -108,7 +116,7 @@ export interface CandidateRow {
   tone: Tone
   /** 代价，写成毫秒。 */
   cost: string
-  /** 每一段一句："laptop → hk：21.3 ms · ±0.40 ms · 丢 0.2%"。 */
+  /** 每一段一句："laptop → hk：21.3 ms · ±0.40 ms · 丢包 0.2%"。 */
   legs: string[]
   /** 路径上负载最高的 relay 的带宽占用；直连写"—"。 */
   load: string

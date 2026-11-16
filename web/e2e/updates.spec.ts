@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { expect, type Page, test } from '@playwright/test'
 
 import { Controller, type NodeHandle } from './controller'
-import { clearToasts, expectToast, goTo, goToAdmin, signIn } from './helpers'
+import { clearToasts, expectToast, goTo, goToAdmin, literal, signIn, t } from './helpers'
 import { platformName, type ReleaseKit, releaseKit, ReleaseSource } from './release'
 
 /**
@@ -43,8 +43,8 @@ async function apiNode(id: number): Promise<ApiNode> {
 }
 
 async function openUpdates(): Promise<void> {
-  await goToAdmin(page, '设置')
-  await page.getByRole('link', { name: '节点更新' }).click()
+  await goToAdmin(page, t.nav.settings)
+  await page.getByRole('link', { name: t.updates.tab }).click()
   await expect(page.getByTestId('updates-tab')).toBeVisible()
 }
 
@@ -54,7 +54,7 @@ test.beforeAll(async ({ browser }) => {
   test.setTimeout(120_000)
   kit = releaseKit()
   controller = await Controller.start({ bins: kit.oldBins })
-  page = await browser.newPage()
+  page = await browser.newPage({ locale: 'zh-CN' })
 })
 
 test.afterAll(async () => {
@@ -85,64 +85,73 @@ test('关掉自动更新，把发布源换成本机目录，立即检查：查�
   await signIn(page, controller)
   await openUpdates()
 
-  await page.getByRole('switch', { name: '自动更新节点' }).click()
-  await expectToast(page, '自动更新已关闭')
-  await expect(page.getByText('节点不会自己更新。有新版本时在节点列表上标出')).toBeVisible()
+  const u = t.updates
+  await page.getByRole('switch', { name: u.auto.label }).click()
+  await expectToast(page, u.auto.turnedOff)
+  await expect(page.getByText(u.auto.off)).toBeVisible()
   expect((await controller.api<{ auto_update: boolean }>('GET', '/update')).auto_update).toBe(false)
 
   // 默认的发布源查不到时（这里没有发布，或者连不上）这一块自己展开着；否则点开。
-  const dirChoice = page.getByRole('radio', { name: /本机目录/ })
-  if (!(await dirChoice.isVisible())) await page.locator('summary', { hasText: '发布源' }).click()
+  const dirChoice = page.getByRole('radio', { name: new RegExp(literal(u.source.kindDir)) })
+  if (!(await dirChoice.isVisible())) await page.locator('summary', { hasText: u.source.title }).click()
   await dirChoice.click()
-  const input = page.getByLabel('目录的绝对路径')
+  const input = page.getByLabel(u.source.dirLabel)
   await input.fill('releases')
-  await expect(page.getByText('要写绝对路径，例如 /srv/ice3tier/releases。')).toBeVisible()
-  await expect(page.getByRole('button', { name: '保存发布源' })).toBeDisabled()
+  await expect(page.getByText(u.source.dirInvalid)).toBeVisible()
+  await expect(page.getByRole('button', { name: u.source.save, exact: true })).toBeDisabled()
   await input.fill(release.root)
-  await page.getByRole('button', { name: '保存发布源' }).click()
-  await expectToast(page, '发布源已保存')
-  await expect(page.getByTestId('source-summary')).toHaveText(`本机目录 ${release.root}`)
+  await page.getByRole('button', { name: u.source.save, exact: true }).click()
+  await expectToast(page, u.source.saved)
+  await expect(page.getByTestId('source-summary')).toHaveText(u.source.summaryDir(release.root))
   await clearToasts(page)
 
-  await page.getByRole('button', { name: '立即检查' }).click()
-  await expect(page.getByTestId('check-result')).toHaveText(`查过了：最新版本是 ${kit.newVersion}，3 个节点可以更新。`)
-  await expect(page.getByTestId('release-version')).toHaveText(`最新版本 ${kit.newVersion}`)
+  await page.getByRole('button', { name: u.release.check }).click()
+  await expect(page.getByTestId('check-result')).toHaveText(u.release.found(kit.newVersion, 3))
+  await expect(page.getByTestId('release-version')).toHaveText(u.release.latest(kit.newVersion))
   await expect(page.getByTestId(`package-${platformName()}`)).toContainText(`i3t-${platformName()}`)
   // 发布比 controller 新：controller 要手动更新，界面提醒，侧栏底部也有。
-  await expect(page.getByText(`controller 自己是 ${kit.oldVersion}，有新版本 ${kit.newVersion}`)).toBeVisible()
-  await expect(page.getByTestId('newer-version')).toHaveText(`有新版本 ${kit.newVersion}`)
-  await expect(page.getByTestId('update-summary')).toHaveText('3 个节点：1 个有新版本，2 个要手动更新。')
-  await expect(page.getByTestId('update-row-boxed')).toContainText('不能自己更新')
-  await expect(page.getByTestId('update-row-boxed').getByRole('button', { name: '立即更新… boxed' })).toBeDisabled()
-  await expect(page.getByTestId('update-row-able').getByRole('button', { name: '立即更新… able' })).toBeEnabled()
+  await expect(page.getByText(u.release.controllerNewer(kit.oldVersion, kit.newVersion))).toBeVisible()
+  await expect(page.getByTestId('newer-version')).toHaveText(t.version.newer(kit.newVersion))
+  await expect(page.getByTestId('update-summary')).toHaveText(
+    u.nodes.summary({ total: 3, up_to_date: 0, updating: 0, outdated: 1, failed: 0, manual: 2 }),
+  )
+  await expect(page.getByTestId('update-row-boxed')).toContainText(u.state.cannotSelf)
+  await expect(
+    page.getByTestId('update-row-boxed').getByRole('button', { name: u.force.buttonFor('boxed') }),
+  ).toBeDisabled()
+  await expect(
+    page.getByTestId('update-row-able').getByRole('button', { name: u.force.buttonFor('able') }),
+  ).toBeEnabled()
 })
 
 test('节点列表标出有新版本和要手动更新的；详情里写出不能自己更新的原因和做法', async () => {
-  await goTo(page, '节点')
+  await goTo(page, t.nav.nodes)
   await expect(page.getByTestId('node-row-able').getByTestId('update-mark-available')).toBeVisible()
   await expect(page.getByTestId('node-row-boxed').getByTestId('update-mark-manual')).toBeVisible()
   // "不能自己更新而有新版本"上"需要处理"。
-  await expect(page.getByRole('radio', { name: '需要处理 (2)' })).toBeVisible()
+  const u = t.updates
+  await expect(page.getByRole('radio', { name: t.nodes.filterIssues(2) })).toBeVisible()
 
   await page.getByRole('link', { name: 'boxed', exact: true }).click()
-  await page.getByRole('tab', { name: '更新' }).click()
-  await expect(page.getByTestId('node-self-update')).toContainText('在容器里运行')
-  await expect(page.getByTestId('node-self-update')).toContainText('换成新版本的镜像')
-  await expect(page.getByRole('button', { name: '立即更新…' }).first()).toBeDisabled()
+  await page.getByRole('tab', { name: u.detail.tab }).click()
+  await expect(page.getByTestId('node-self-update')).toContainText(u.blocker.container)
+  await expect(page.getByTestId('node-self-update')).toContainText(u.blocker.containerHow)
+  await expect(page.getByRole('button', { name: u.force.button }).first()).toBeDisabled()
 
   await page.goto(`${controller.baseUrl}/n/1/nodes/${nodes.locked.id}?tab=update`)
-  await expect(page.getByTestId('node-self-update')).toContainText('程序所在的目录不可写')
+  await expect(page.getByTestId('node-self-update')).toContainText(u.blocker.read_only_dir)
   await expect(page.getByTestId('node-self-update').locator('pre')).toContainText('curl -fLo i3t')
 })
 
 test('立即更新的确认框写出后果；取消就什么都不发', async () => {
   await page.goto(`${controller.baseUrl}/n/1/nodes/${nodes.able.id}?tab=update`)
-  await expect(page.getByTestId('node-self-update')).toContainText('能自己更新')
-  await expect(page.getByTestId('node-update-state')).toContainText(`有新版本 ${kit.newVersion}`)
-  await page.getByRole('button', { name: '立即更新…' }).first().click()
-  const dialog = page.getByRole('dialog', { name: `立即更新 able 到 ${kit.newVersion}？` })
-  await expect(dialog).toContainText('它现在没有活跃的流')
-  await dialog.getByRole('button', { name: '取消', exact: true }).click()
+  const u = t.updates
+  await expect(page.getByTestId('node-self-update')).toContainText(u.blocker.able)
+  await expect(page.getByTestId('node-update-state')).toContainText(u.state.available(kit.newVersion))
+  await page.getByRole('button', { name: u.force.button }).first().click()
+  const dialog = page.getByRole('dialog', { name: u.force.title('able', kit.newVersion) })
+  await expect(dialog).toContainText(u.force.idleBody)
+  await dialog.getByRole('button', { name: t.common.cancel, exact: true }).click()
   await expect(dialog).toBeHidden()
   expect((await apiNode(nodes.able.id)).version).toBe(kit.oldVersion)
 })
@@ -150,11 +159,12 @@ test('立即更新的确认框写出后果；取消就什么都不发', async ()
 test('全部更新（排空后）：跳过的节点写出原因；能更新的那个真的换成新版本重启', async () => {
   test.setTimeout(150_000)
   await openUpdates()
-  await page.getByRole('button', { name: '全部更新…' }).click()
-  const dialog = page.getByRole('dialog', { name: `全部更新到 ${kit.newVersion}？` })
-  await expect(dialog).toContainText('有新版本、能自己更新的节点有 1 个')
-  await dialog.getByRole('radio', { name: /等手上的流结束再更新/ }).click()
-  await dialog.getByRole('button', { name: '全部排空后更新' }).click()
+  const u = t.updates
+  await page.getByRole('button', { name: u.nodes.updateAll }).click()
+  const dialog = page.getByRole('dialog', { name: u.forceAll.title(kit.newVersion) })
+  await expect(dialog).toContainText(u.forceAll.body(1))
+  await dialog.getByRole('radio', { name: new RegExp(literal(u.force.afterDrain)) }).click()
+  await dialog.getByRole('button', { name: u.forceAll.confirmDrain }).click()
   await expect(dialog).toBeHidden()
   const result = page.getByTestId('force-all-result')
   await expect(result).toContainText('able')
@@ -166,7 +176,7 @@ test('全部更新（排空后）：跳过的节点写出原因；能更新的�
     .poll(async () => (await apiNode(nodes.able.id)).version, { timeout: 120_000, intervals: [1_000] })
     .toBe(kit.newVersion)
   await expect(page.getByTestId('update-row-able')).toContainText(kit.newVersion, { timeout: 20_000 })
-  await expect(page.getByTestId('update-summary')).toContainText('1 个已是最新')
+  await expect(page.getByTestId('update-row-able')).toContainText(u.state.confirmed(kit.newVersion))
 })
 
 test('自检不过的版本：自动更新被暂停，看原因，继续', async () => {
@@ -177,31 +187,32 @@ test('自检不过的版本：自动更新被暂停，看原因，继续', async
   chmodSync(program, 0o755)
   release.publish(broken, program)
 
-  await page.getByRole('button', { name: '立即检查' }).click()
-  await expect(page.getByTestId('release-version')).toHaveText(`最新版本 ${broken}`)
-  await page.getByRole('switch', { name: '自动更新节点' }).click()
-  await expectToast(page, '自动更新已打开')
+  const u = t.updates
+  await page.getByRole('button', { name: u.release.check }).click()
+  await expect(page.getByTestId('release-version')).toHaveText(u.release.latest(broken))
+  await page.getByRole('switch', { name: u.auto.label }).click()
+  await expectToast(page, u.auto.turnedOn)
   await clearToasts(page)
 
-  // able 取包、跑新程序的自检，不过；controller 暂停这个版本。
-  const banner = page.getByText(`${broken} 在 able 上更新失败，已暂停这个版本的自动更新。`)
+  // able 取包、跑新程序的自检，不过；controller 暂停这个版本。节点的原话（"缺一个库"）作为补充显示。
+  const banner = page.getByText(u.paused.title(broken, 'able'))
   await expect(banner).toBeVisible({ timeout: 90_000 })
   const reason = page.getByTestId(`paused-reason-${broken}`)
   await expect(reason).toBeHidden()
-  await page.getByRole('button', { name: '查看原因' }).click()
+  await page.getByRole('button', { name: u.paused.reason }).click()
   await expect(reason).toContainText('缺一个库')
-  await expect(page.getByTestId('update-row-able')).toContainText('更新失败')
+  await expect(page.getByTestId('update-row-able')).toContainText(u.state.failed)
   await expect(page.getByTestId('update-row-able')).toContainText('缺一个库')
   // 设置里「节点更新」旁边有一个红点。
-  await expect(page.getByRole('navigation', { name: '设置的分区' }).getByText('有被暂停的版本')).toBeAttached()
+  await expect(page.getByRole('navigation', { name: t.settings.tabsLabel }).getByText(u.pausedDot)).toBeAttached()
   // 节点没有换程序。
   expect((await apiNode(nodes.able.id)).version).toBe(kit.newVersion)
 
-  await page.getByRole('button', { name: '继续更新其余节点' }).click()
-  const question = page.getByRole('alertdialog', { name: `继续 ${broken} 的自动更新？` })
-  await expect(question).toContainText('able 不会再被自动更新到这个版本')
-  await question.getByRole('button', { name: '继续更新' }).click()
-  await expectToast(page, `已继续 ${broken} 的自动更新`)
+  await page.getByRole('button', { name: u.paused.resume }).click()
+  const question = page.getByRole('alertdialog', { name: u.paused.resumeTitle(broken) })
+  await expect(question).toContainText(u.paused.resumeBody(broken, 'able'))
+  await question.getByRole('button', { name: u.paused.resumeConfirm }).click()
+  await expectToast(page, u.paused.resumed(broken))
   await expect(banner).toHaveCount(0)
   expect((await controller.api<{ paused: unknown[] }>('GET', '/update')).paused).toEqual([])
 })

@@ -1,6 +1,7 @@
 import { type Node } from '@/api/types'
 import { t } from '@/i18n'
 
+import { formatList } from './format'
 import { selfUpdateBlock } from './nodeUpdate'
 
 export interface NodeIssue {
@@ -21,9 +22,9 @@ export function nodeIssues(node: Node, all: readonly Node[]): NodeIssue[] {
   const issues: NodeIssue[] = []
   const { status, failure, available } = node.update
   if (status.state === 'failed' && status.kind === 'version_rejected') {
-    issues.push({ kind: 'update_failed', message: t.updates.issue.failed(status.reason), tone: 'danger' })
+    issues.push({ kind: 'update_failed', message: t.updates.issue.failed, tone: 'danger' })
   } else if (failure !== null && failure.version === available) {
-    issues.push({ kind: 'update_failed', message: t.updates.issue.failed(failure.reason), tone: 'danger' })
+    issues.push({ kind: 'update_failed', message: t.updates.issue.failed, tone: 'danger' })
   }
   if (node.relay !== null && !node.online) {
     issues.push({ kind: 'relay_offline', message: t.nodes.issue.relayOffline, tone: 'warn' })
@@ -33,7 +34,7 @@ export function nodeIssues(node: Node, all: readonly Node[]): NodeIssue[] {
   }
   const gone = node.pinned_relays.filter((id) => all.find((other) => other.id === id)?.relay == null)
   if (gone.length > 0) {
-    const names = gone.map((id) => all.find((other) => other.id === id)?.name ?? `#${id}`).join('、')
+    const names = formatList(gone.map((id) => all.find((other) => other.id === id)?.name ?? `#${id}`))
     issues.push({ kind: 'pinned_gone', message: t.nodes.issue.pinnedGone(names), tone: 'warn' })
   }
   const block = selfUpdateBlock(node.update)

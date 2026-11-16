@@ -22,6 +22,7 @@ import { quotaView } from '@/lib/usage'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { exitHealthView } from '@/pages/exits/exitView'
 import { forwardLabel, forwardStatusView } from '@/pages/forwards/status'
+import { logActionLabel } from '@/pages/settings/logFilter'
 import { networkPath, useNetwork } from '@/pages/networks/context'
 import { AddNodeDialog } from '@/pages/nodes/AddNodeDialog'
 
@@ -52,11 +53,7 @@ interface StatProps {
 /** 总览最上面的一个数：灰色的名字、28 像素的数、下面一行灰色的补充。不画框，整块是去那一页的链接。 */
 function Stat({ label, value, hint, tip, to }: StatProps) {
   const link = (
-    <Link
-      to={to}
-      aria-label={o.stats.open(label)}
-      className="group -mx-3 -my-2 block rounded-md px-3 py-2 transition-colors hover:bg-muted/70"
-    >
+    <Link to={to} className="group -mx-3 -my-2 block rounded-md px-3 py-2 transition-colors hover:bg-muted/70">
       <span className="block text-[13px] text-muted-foreground">{label}</span>
       <span className="mt-1 block truncate text-[28px] leading-9 font-semibold tracking-tight">{value}</span>
       <span className="block h-4 truncate text-xs text-muted-foreground tabular">{hint ?? ''}</span>
@@ -70,7 +67,6 @@ function MinorStat({ label, value, to }: { label: string; value: number; to: str
   return (
     <Link
       to={to}
-      aria-label={o.stats.open(label)}
       className="inline-flex items-baseline gap-1.5 rounded-sm text-[13px] text-muted-foreground hover:text-foreground"
     >
       {label}
@@ -91,18 +87,17 @@ function GoLink({ to, children }: { to: string; children: ReactNode }) {
   )
 }
 
-/** 没有 relay 时两端互不可达：这是唯一需要用户再做事的情况，展开一段补救的步骤。 */
+/** 没有 relay 时两端互不可达：这是唯一需要用户再做事的情况，展开两种做法。 */
 function RelayFix({ network, onAddNode }: { network: Network; onAddNode: () => void }) {
   return (
     <div className="mt-3 space-y-2 border-l-2 pl-4 text-[13px]">
-      <p>{o.fix.why}</p>
       <ul className="list-disc space-y-1 pl-4 text-muted-foreground">
         <li>{o.fix.optionA}</li>
         <li>{o.fix.optionB}</li>
       </ul>
       <div className="flex gap-2 pt-1">
         <Button asChild size="sm">
-          <Link to={networkPath(network.id, 'nodes')}>{t.exits.goNodes}</Link>
+          <Link to={networkPath(network.id, 'nodes')}>{o.fix.goNodes}</Link>
         </Button>
         <Button size="sm" onClick={onAddNode}>
           {o.fix.addNode}
@@ -230,11 +225,11 @@ export function OverviewPage() {
     const health = exitHealthView(exit)
     const text =
       view?.exhausted === true
-        ? o.quotaExhausted(exit.node.name, view.resets)
+        ? o.quotaExhausted(exit.node.name)
         : view?.nearly === true
           ? o.quotaNearly(exit.node.name, view.percent ?? 0)
           : exit.health === 'degraded'
-            ? o.exitDegraded(exit.node.name, health.detail)
+            ? o.exitDegraded(exit.node.name, health.label)
             : null
     if (text === null) continue
     attention.push({
@@ -261,7 +256,7 @@ export function OverviewPage() {
     if (!view.needsAttention) continue
     attention.push({
       key: `listener:${listener.id}`,
-      text: o.listenerBroken(listener.name, view.detail ?? view.label),
+      text: o.listenerBroken(listener.name, view.label),
       action: <GoLink to={`${networkPath(network.id, 'listeners')}?focus=${listener.id}`}>{o.view}</GoLink>,
     })
   }
@@ -270,7 +265,7 @@ export function OverviewPage() {
     if (!view.needsAttention) continue
     attention.push({
       key: `forward:${forward.id}`,
-      text: o.forwardBlocked(forwardLabel(forward), view.detail),
+      text: o.forwardBlocked(forwardLabel(forward), view.label),
       action: (
         <GoLink
           to={
@@ -296,16 +291,9 @@ export function OverviewPage() {
         <h1 className="flex items-center gap-3 text-xl leading-7 font-semibold tracking-tight">
           <StatusDot tone={!healthy ? 'warn' : allOffline ? 'idle' : 'ok'} className="[&>span]:size-2.5" />
           <span data-testid="overview-status">
-            {!healthy
-              ? o.statusIssues(attention.length)
-              : allOffline
-                ? o.statusAllOffline(data.nodes)
-                : o.statusOk(data.online, data.nodes)}
+            {!healthy ? o.statusIssues(attention.length) : allOffline ? o.statusAllOffline : o.statusOk}
           </span>
         </h1>
-        {!healthy ? (
-          <p className="mt-1 pl-5.5 text-[13px] text-muted-foreground">{o.statusSub(data.online, data.nodes)}</p>
-        ) : null}
       </header>
 
       {attention.length > 0 ? (
@@ -343,7 +331,7 @@ export function OverviewPage() {
           <Stat
             label={o.stats.flows}
             value={data.flows}
-            hint={o.stats.flowsHint}
+            tip={o.stats.flowsTip}
             to={networkPath(network.id, 'topology')}
           />
           <Stat
@@ -353,12 +341,7 @@ export function OverviewPage() {
             tip={o.stats.trafficTip}
             to={networkPath(network.id, 'nodes')}
           />
-          <Stat
-            label={o.stats.relays}
-            value={data.relays}
-            hint={o.stats.relaysHint}
-            to={`${networkPath(network.id, 'nodes')}?role=relay`}
-          />
+          <Stat label={o.stats.relays} value={data.relays} to={`${networkPath(network.id, 'nodes')}?role=relay`} />
         </div>
         <div className="mt-6 flex flex-wrap items-center gap-x-8 gap-y-2 border-t pt-4">
           <MinorStat label={o.stats.exits} value={data.exits} to={networkPath(network.id, 'exits')} />
@@ -370,12 +353,9 @@ export function OverviewPage() {
 
       <div className="grid grid-cols-1 items-start gap-x-12 gap-y-10 lg:grid-cols-2">
         <Card>
-          <CardHeader title={o.unreachableTitle} description={o.unreachableLead} />
+          <CardHeader title={o.unreachableTitle} tip={o.unreachableTip} />
           {data.unreachable_pairs.length === 0 ? (
-            <div className="border-t pt-3">
-              <p className="text-sm">{o.unreachableNone}</p>
-              <p className="mt-1 text-[13px] text-muted-foreground">{o.unreachableNoneHint}</p>
-            </div>
+            <p className="border-t pt-3 text-sm text-muted-foreground">{o.unreachableNone}</p>
           ) : (
             <ul className="divide-y border-t">
               {data.unreachable_pairs.slice(0, PAIRS_SHOWN).map((pair) => (
@@ -411,8 +391,8 @@ export function OverviewPage() {
               {recent.map((entry) => (
                 <li key={entry.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-4 py-2.5">
                   <span className="min-w-0">
-                    <span className="block text-sm">{t.settings.log.actions[entry.action] ?? entry.action}</span>
-                    <span className="block truncate text-[13px] text-muted-foreground" title={entry.detail}>
+                    <span className="block text-sm">{logActionLabel(entry.action) ?? entry.action}</span>
+                    <span className="block truncate text-xs text-muted-foreground" title={entry.detail}>
                       {entry.detail}
                     </span>
                   </span>

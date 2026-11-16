@@ -33,7 +33,6 @@ export function NetworkLayout() {
           <EmptyState
             icon={Unplug}
             title={t.networks.notFoundTitle}
-            description={t.networks.notFoundBody}
             action={
               fallback === undefined ? undefined : (
                 <Button asChild variant="primary">

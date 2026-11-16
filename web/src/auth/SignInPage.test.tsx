@@ -1,13 +1,16 @@
-import { useQuery } from '@tanstack/react-query'
-import { screen, waitFor } from '@testing-library/react'
+import { QueryClient, useQuery } from '@tanstack/react-query'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { Route, Routes, useLocation } from 'react-router'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { configureClient } from '@/api/client'
 import { api as endpoints } from '@/api/endpoints'
 import { type Status } from '@/api/types'
-import { t } from '@/i18n'
+import { App as RealApp } from '@/App'
+import { setLocale, t } from '@/i18n'
+import { en } from '@/i18n/en'
+import { zhCN } from '@/i18n/zh-CN'
 import { apiFailure, fakeApi, type FakeApi, renderWithApp, type Routes as ApiRoutes } from '@/test/harness'
 
 import { RequireAuth } from './RequireAuth'
@@ -133,14 +136,14 @@ describe('登录', () => {
     expect(session.token()).toBe(ADMIN_TOKEN)
   })
 
-  it('令牌不对：controller 的话写在输入框下面，留在登录页，什么都不存', async () => {
+  it('令牌不对：写在输入框下面（按错误码，不用 controller 的原话），留在登录页，什么都不存', async () => {
     const user = userEvent.setup()
     controller()
     renderWithApp(<App />, { route: '/login' })
     await submit(user, 'not-the-token')
 
     const input = screen.getByLabelText(t.signIn.tokenLabel)
-    expect(await screen.findByRole('alert')).toHaveTextContent('管理令牌不对')
+    expect(await screen.findByRole('alert')).toHaveTextContent(t.errors.codes.unauthorized)
     expect(input).toHaveAttribute('aria-invalid', 'true')
     expect(screen.getByRole('heading', { name: t.signIn.title })).toBeVisible()
     expect(session.token()).toBeNull()
@@ -244,5 +247,62 @@ describe('登录失效', () => {
     session.signIn(ADMIN_TOKEN, false)
     expect(window.localStorage.getItem(KEY)).toBeNull()
     expect(window.sessionStorage.getItem(KEY)).toBe(ADMIN_TOKEN)
+  })
+})
+
+/** 真的应用（根组件订阅语言），停在登录页。 */
+function renderRealApp() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return render(
+    <MemoryRouter initialEntries={['/login']}>
+      <RealApp client={client} />
+    </MemoryRouter>,
+  )
+}
+
+const HAN = /\p{Script=Han}/u
+
+describe('登录页的语言', () => {
+  it('英文：标题、字段、按钮、语言菜单都是英文，页面上没有中文', async () => {
+    controller()
+    setLocale('en', { remember: false })
+    renderRealApp()
+    expect(await screen.findByRole('heading', { name: en.signIn.title })).toBeVisible()
+    expect(screen.getByLabelText(en.signIn.tokenLabel)).toBeVisible()
+    expect(screen.getByRole('checkbox', { name: en.signIn.remember })).toBeChecked()
+    expect(screen.getByRole('button', { name: en.signIn.submit })).toBeVisible()
+    expect(screen.getByRole('button', { name: `${en.common.language}: English` })).toBeVisible()
+    expect(document.body.textContent).not.toMatch(HAN)
+    expect(document.title).toBe(`${en.signIn.submit} · ice3tier`)
+  })
+
+  it('中文：同一页的中文', async () => {
+    controller()
+    renderRealApp()
+    expect(await screen.findByRole('heading', { name: zhCN.signIn.title })).toBeVisible()
+    expect(screen.getByRole('button', { name: zhCN.signIn.submit })).toBeVisible()
+    expect(screen.getByRole('button', { name: `${zhCN.common.language}: 简体中文` })).toBeVisible()
+  })
+
+  it('右上角换语言：就地重新渲染，填了的令牌还在，<html lang> 和标题跟着变，选择记下来', async () => {
+    const user = userEvent.setup()
+    controller()
+    renderRealApp()
+    const input = await screen.findByLabelText(zhCN.signIn.tokenLabel)
+    await user.type(input, 'half-typed')
+
+    await user.click(screen.getByRole('button', { name: `${zhCN.common.language}: 简体中文` }))
+    const items = screen.getAllByRole('menuitemradio')
+    expect(items.map((item) => item.textContent)).toEqual(['简体中文', 'English'])
+    expect(items[0]).toHaveAttribute('aria-checked', 'true')
+    await user.click(screen.getByRole('menuitemradio', { name: 'English' }))
+
+    expect(await screen.findByRole('heading', { name: en.signIn.title })).toBeVisible()
+    // 同一个输入框，没有重新挂载。
+    expect(screen.getByLabelText(en.signIn.tokenLabel)).toBe(input)
+    expect(input).toHaveValue('half-typed')
+    expect(document.documentElement.lang).toBe('en')
+    expect(document.title).toBe(`${en.signIn.submit} · ice3tier`)
+    expect(window.localStorage.getItem('i3t.locale')).toBe('"en"')
   })
 })

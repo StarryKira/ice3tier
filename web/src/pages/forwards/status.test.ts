@@ -34,7 +34,8 @@ describe('一条转发的状态', () => {
     })
     const view = forwardStatusView(forward, NODES)
     expect(view).toMatchObject({ tone: 'danger', label: t.listen.portInUse, needsAttention: true })
-    expect(view.detail).toBe(t.listen.portInUseDetail('laptop', '8080', 'Address already in use'))
+    expect(view.detail).toBe(t.listen.portInUseDetail('laptop', '8080'))
+    expect(view.listen?.reported).toBe('Address already in use')
   })
 
   it('已经下发、节点还没报：等它上报，不说正常', () => {

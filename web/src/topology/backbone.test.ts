@@ -30,7 +30,7 @@ describe('骨干矩阵一行的表头', () => {
     expect(relayRowView(relay(), name)).toEqual({
       state: { label: b.state.serving, tone: 'ok', hint: b.stateHint.serving },
       load: b.load(12),
-      age: b.rowAge('2 秒前'),
+      age: b.rowAge(t.time.secondsAgo(2)),
       reportedBy: b.reportedBy('laptop'),
     })
   })
@@ -38,6 +38,15 @@ describe('骨干矩阵一行的表头', () => {
   it('满载、即将下线是琥珀色：它还在，只是节点会改走别的', () => {
     expect(relayRowView(relay({ state: 'overloaded' }), name).state.tone).toBe('warn')
     expect(relayRowView(relay({ state: 'draining' }), name).state.label).toBe(b.state.draining)
+  })
+
+  it('比界面新的 controller 报了不认识的状态：按"状态不明"写，灰色', () => {
+    const future = JSON.parse('"resting"') as BackboneRelay['state']
+    expect(relayRowView(relay({ state: future }), name).state).toEqual({
+      label: b.state.unknown,
+      tone: 'idle',
+      hint: b.stateHint.unknown,
+    })
   })
 
   it('问到的节点手上都没有这一行', () => {

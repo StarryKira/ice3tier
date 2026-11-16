@@ -1,9 +1,16 @@
 import '@testing-library/jest-dom/vitest'
 
 import { cleanup } from '@testing-library/react'
-import { afterEach } from 'vitest'
+import { afterEach, beforeEach } from 'vitest'
 
 import { toast } from '@/components/ui/toast'
+import { setLocale } from '@/i18n'
+
+// 测试固定用简体中文，期望的文字从目录里取（`t.…`），不在测试里抄界面上的字。
+// 要测英文的测试自己调 `setLocale('en', { remember: false })`。
+beforeEach(() => {
+  setLocale('zh-CN', { remember: false })
+})
 
 afterEach(() => {
   cleanup()

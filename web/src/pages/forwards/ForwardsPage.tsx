@@ -132,7 +132,6 @@ export function ForwardsPage() {
     <Page>
       <PageHeader
         title={f.title}
-        description={f.description}
         actions={
           empty ? undefined : (
             <Button variant="primary" onClick={() => setEditor({ forward: null })}>
@@ -162,7 +161,7 @@ export function ForwardsPage() {
             }
           />
         ) : empty ? (
-          <EmptyState icon={ArrowLeftRight} title={f.emptyTitle} description={f.emptyBody}>
+          <EmptyState icon={ArrowLeftRight} title={f.emptyTitle}>
             <div className="mt-5 grid w-full max-w-2xl grid-cols-2 gap-3 text-left">
               {(
                 [
@@ -219,7 +218,9 @@ export function ForwardsPage() {
                   const view = forwardStatusView(forward, all)
                   const label = forwardLabel(forward)
                   const blocked = forward.status === 'target_not_declared'
-                  const hasDetail = view.tone !== 'ok'
+                  // 停用的那一行已经变淡、开关关着，不再另起一行说它。
+                  const hasDetail = view.tone !== 'ok' && forward.status !== 'disabled'
+                  const reported = view.needsAttention ? (view.listen?.reported ?? null) : null
                   const focused = focus.focus === forward.id
                   const traffic = view.listen?.traffic ?? null
                   return (
@@ -330,14 +331,17 @@ export function ForwardsPage() {
                       {hasDetail ? (
                         <tr className={cn('border-b last:border-b-0', focused && FOCUSED_ROW)}>
                           <td colSpan={8} className="px-3 pt-0 pb-3 text-[13px] leading-snug text-muted-foreground">
-                            {view.detail}{' '}
+                            {view.detail}
                             {view.linkToRules ? (
                               <Link
                                 to={networkPath(network.id, 'access')}
-                                className="rounded-sm text-primary underline-offset-4 hover:underline"
+                                className="ml-2 rounded-sm text-primary underline-offset-4 hover:underline"
                               >
                                 {f.viewRules}
                               </Link>
+                            ) : null}
+                            {reported !== null ? (
+                              <span className="mt-0.5 block text-xs break-words">{reported}</span>
                             ) : null}
                           </td>
                         </tr>

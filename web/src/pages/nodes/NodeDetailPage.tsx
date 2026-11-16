@@ -95,7 +95,6 @@ export function NodeDetailPage() {
         <EmptyState
           icon={ServerOff}
           title={d.notFoundTitle}
-          description={d.notFoundBody}
           action={
             <Button asChild variant="primary">
               <Link to={listPath}>{d.backToList}</Link>

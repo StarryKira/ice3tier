@@ -19,39 +19,51 @@ import { UpdatesTab } from './UpdatesTab'
 
 const s = t.settings
 
-const TABS = [
-  { id: 'session', label: s.tabSession },
-  { id: 'updates', label: t.updates.tab },
-  { id: 'log', label: s.tabLog },
-  { id: 'about', label: s.tabAbout },
-] as const
-type TabId = (typeof TABS)[number]['id']
+const TAB_IDS = ['session', 'updates', 'log', 'about'] as const
+type TabId = (typeof TAB_IDS)[number]
+
+/** 分区的名字在渲染时现取，换了语言就是新的。 */
+function tabLabel(id: TabId): string {
+  switch (id) {
+    case 'session':
+      return s.tabSession
+    case 'updates':
+      return t.updates.tab
+    case 'log':
+      return s.tabLog
+    case 'about':
+      return s.tabAbout
+  }
+}
 
 function SessionTab() {
   const navigate = useNavigate()
   return (
     <div className="space-y-12">
       <Card>
-        <CardHeader title={s.session.title} />
-        <CardBody className="space-y-3">
-          <p className="text-sm">{s.session.signedIn}</p>
-          <p className="text-[13px] text-muted-foreground">{s.session.oneAdmin}</p>
+        <CardHeader
+          title={s.session.title}
+          action={
+            <Button
+              size="sm"
+              onClick={() => {
+                session.signOut('manual')
+                void navigate('/login', { replace: true })
+              }}
+            >
+              <LogOut aria-hidden />
+              {s.session.signOut}
+            </Button>
+          }
+        />
+        <CardBody>
           <p className="text-[13px] text-muted-foreground">{s.session.stored}</p>
-          <Button
-            onClick={() => {
-              session.signOut('manual')
-              void navigate('/login', { replace: true })
-            }}
-          >
-            <LogOut aria-hidden />
-            {s.session.signOut}
-          </Button>
         </CardBody>
       </Card>
       <Card>
         <CardHeader title={s.session.resetTitle} />
         <CardBody className="space-y-3">
-          <p className="text-[13px] text-muted-foreground">{s.session.resetBody}</p>
+          <p className="text-[13px] text-muted-foreground">{t.signIn.lostBody}</p>
           <CodeBlock copy={t.signIn.lostCommand}>{t.signIn.lostCommand}</CodeBlock>
         </CardBody>
       </Card>
@@ -62,24 +74,24 @@ function SessionTab() {
 /** 全局设置。左侧竖排的分区，每个分区有自己的地址。 */
 export function SettingsPage() {
   const params = useParams()
-  const tab = TABS.find((candidate) => candidate.id === params.tab)
-  useDocumentTitle(tab === undefined ? s.title : `${tab.label} · ${s.title}`)
+  const tab = TAB_IDS.find((candidate) => candidate === params.tab)
+  useDocumentTitle(tab === undefined ? s.title : `${tabLabel(tab)} · ${s.title}`)
   // 有被暂停的版本时，「节点更新」旁边一个红点：从设置的任何一页都看得到。
   const update = useQuery(q.update())
   const paused = (update.data?.paused.length ?? 0) > 0
   if (tab === undefined) return <Navigate to="/settings/session" replace />
-  const active: TabId = tab.id
+  const active: TabId = tab
 
   return (
     <Page>
-      <PageHeader title={s.title} description={s.description} />
+      <PageHeader title={s.title} />
       <div className="grid grid-cols-[10rem_minmax(0,1fr)] items-start gap-12">
         <nav aria-label={s.tabsLabel}>
           <ul className="space-y-0.5">
-            {TABS.map((candidate) => (
-              <li key={candidate.id}>
+            {TAB_IDS.map((candidate) => (
+              <li key={candidate}>
                 <NavLink
-                  to={`/settings/${candidate.id}`}
+                  to={`/settings/${candidate}`}
                   className={({ isActive }) =>
                     cn(
                       'flex h-8 items-center justify-between gap-2 rounded-md px-2.5 text-sm transition-colors',
@@ -89,10 +101,8 @@ export function SettingsPage() {
                     )
                   }
                 >
-                  {candidate.label}
-                  {candidate.id === 'updates' && paused ? (
-                    <StatusDot tone="danger" label={t.updates.pausedDot} />
-                  ) : null}
+                  {tabLabel(candidate)}
+                  {candidate === 'updates' && paused ? <StatusDot tone="danger" label={t.updates.pausedDot} /> : null}
                 </NavLink>
               </li>
             ))}

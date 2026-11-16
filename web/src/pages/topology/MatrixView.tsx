@@ -6,21 +6,13 @@ import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
 import { cn } from '@/lib/utils'
 import { type Pair } from '@/topology/pair'
-import {
-  CLASS_LABEL,
-  CLASS_SYMBOL,
-  cellKey,
-  classify,
-  entryText,
-  indexEntries,
-  type RouteClass,
-} from '@/topology/route'
+import { cellKey, classify, classLabel, classSymbol, entryText, indexEntries, type RouteClass } from '@/topology/route'
 
 const g = t.topology
 
 /**
- * 格子的底色和图上线的颜色是同一套：直连淡绿，经 relay 淡紫，无路可走淡红。底色都很淡，
- * 格子里的字和数照常是黑的（只有无路可走是红字），一眼扫过去先看到的是不正常的那几格。
+ * 格子的底色和图上线的颜色是同一套：直连淡绿，经 relay 淡紫，不可达淡红。底色都很淡，
+ * 格子里的字和数照常是黑的（只有不可达是红字），一眼扫过去先看到的是不正常的那几格。
  */
 const CELL: Record<RouteClass, string> = {
   direct: 'bg-ok-soft text-foreground',
@@ -29,7 +21,7 @@ const CELL: Record<RouteClass, string> = {
   none: 'bg-danger-soft text-danger',
 }
 
-/** 对端离线时"无路可走"是理所当然的：灰色，不和真正的不可达抢眼（悬停的文字照样写"无路可走"）。 */
+/** 对端离线时不可达是理所当然的：灰色，不和真正的不可达抢眼（悬停的文字照样写"不可达"）。 */
 const NONE_OFFLINE = 'bg-muted text-muted-foreground'
 
 export function MatrixLegend() {
@@ -47,9 +39,9 @@ export function MatrixLegend() {
               CELL[cls],
             )}
           >
-            {CLASS_SYMBOL[cls]}
+            {classSymbol(cls)}
           </span>
-          {CLASS_LABEL[cls]}
+          {classLabel(cls)}
         </li>
       ))}
       <li className="flex items-center gap-1.5">
@@ -59,13 +51,13 @@ export function MatrixLegend() {
             NONE_OFFLINE,
           )}
         >
-          {CLASS_SYMBOL.none}
+          {classSymbol('none')}
         </span>
         {t.routes.noneOffline}
       </li>
       <li className="flex items-center gap-1.5">
         <span className="inline-flex size-5 items-center justify-center rounded-sm border border-dashed border-border-strong text-[11px] text-muted-foreground">
-          {CLASS_SYMBOL.direct}
+          {classSymbol('direct')}
         </span>
         {t.routes.stale}
       </li>
@@ -87,7 +79,7 @@ interface MatrixViewProps {
 
 /**
  * 路由矩阵：行是发送方，列是接收方，一格是一个方向现在怎么走。和拓扑图是同一份数据，这里是精确的那一种写法。
- * 格子里有字（直、中、多、✕）和延迟，颜色不单独承担含义；过期的格子是虚框、变淡。
+ * 格子里有符号（直、中、多、✕，按语言）和延迟，颜色不单独承担含义；过期的格子是虚框、变淡。
  * 有数据的格子是按钮：点了选中这一对。没有数据的格子不能聚焦，免得几十个节点时 Tab 要按上千下。
  */
 export function MatrixView({ matrix, pair, onPick }: MatrixViewProps) {
@@ -152,9 +144,9 @@ export function MatrixView({ matrix, pair, onPick }: MatrixViewProps) {
                 const entry = index.get(cellKey(from.id, to.id))
                 if (entry === undefined) {
                   return (
-                    <td key={to.id} className="p-0.5 text-center text-faint" title={g.cellEmpty}>
+                    <td key={to.id} className="p-0.5 text-center text-faint" title={t.routes.classEmpty}>
                       <span aria-hidden>{t.routes.symbolEmpty}</span>
-                      <span className="sr-only">{g.cellLabel(from.name, to.name, g.cellEmpty)}</span>
+                      <span className="sr-only">{g.cellLabel(from.name, to.name, t.routes.classEmpty)}</span>
                     </td>
                   )
                 }
@@ -176,7 +168,7 @@ export function MatrixView({ matrix, pair, onPick }: MatrixViewProps) {
                           selected(from.id, to.id) && 'ring-2 ring-primary hover:ring-2 hover:ring-primary',
                         )}
                       >
-                        <span aria-hidden>{CLASS_SYMBOL[cls]}</span>
+                        <span aria-hidden>{classSymbol(cls)}</span>
                         {entry.rtt_ms !== null ? <span className="font-normal">{entry.rtt_ms}</span> : null}
                         {/* 到 relay 退回 TCP 是值得知道的事：格子里写出来，别的细节在悬停文字里。 */}
                         {entry.route.via === 'relay' && entry.relay_leg === 'tcp' ? (

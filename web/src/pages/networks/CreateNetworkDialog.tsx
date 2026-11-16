@@ -28,10 +28,11 @@ function CreateNetworkForm({ onClose }: { onClose: () => void }) {
       submitLabel={t.networks.createSubmit}
       pending={form.pending}
       error={form.error}
+      errorDetail={form.errorDetail}
       onSubmit={form.submit}
     >
       {form.fields}
-      <ul className="space-y-1.5 text-[13px] text-muted-foreground">
+      <ul className="space-y-1 text-[13px] text-muted-foreground">
         <li>{t.networks.noteDefaultRule}</li>
         <li>{t.networks.noteIsolation}</li>
       </ul>

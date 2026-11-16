@@ -55,7 +55,7 @@ function PathCell({
         <div>
           <StatusText tone="ok">{d.viaDirect}</StatusText>
           {extra}
-          <div className="mt-0.5 font-mono text-xs text-muted-foreground">{d.viaDirectAddr(route.addr)}</div>
+          <div className="mt-0.5 font-mono text-xs text-muted-foreground">{route.addr}</div>
         </div>
       )
     case 'relay':
@@ -66,12 +66,7 @@ function PathCell({
         </div>
       )
     case 'none':
-      return (
-        <div>
-          <StatusText tone={peerOnline ? 'danger' : 'idle'}>{d.viaNone}</StatusText>
-          <div className="mt-0.5 text-xs text-muted-foreground">{d.viaNoneHint}</div>
-        </div>
-      )
+      return <StatusText tone={peerOnline ? 'danger' : 'idle'}>{d.viaNone}</StatusText>
   }
 }
 
@@ -86,19 +81,16 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
-        <p className="text-[13px] text-muted-foreground">{d.routesLead}</p>
-        <p className="text-[13px] text-muted-foreground" data-testid="routes-updated">
-          {freshest === null ? t.common.updatedEvery(REPORT_INTERVAL_SECS) : d.routesUpdated(formatAge(freshest))}
-        </p>
-      </div>
+      <p className="text-right text-[13px] text-muted-foreground" data-testid="routes-updated">
+        {freshest === null ? t.common.updatedEvery(REPORT_INTERVAL_SECS) : t.common.reportedAgo(formatAge(freshest))}
+      </p>
       <div>
         {routes.isError ? (
           <ErrorState title={d.routesLoadFailed} error={routes.error} onRetry={() => void routes.refetch()} />
         ) : routes.isSuccess && !routes.data.online ? (
           <EmptyState icon={RouteIcon} title={d.routesOffline} />
         ) : routes.isSuccess && routes.data.routes.length === 0 ? (
-          <EmptyState icon={RouteIcon} title={d.routesEmpty} description={d.routesEmptyHint} />
+          <EmptyState icon={RouteIcon} title={d.routesEmpty} />
         ) : (
           <Table>
             <thead>

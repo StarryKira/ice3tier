@@ -4,6 +4,7 @@ import { type KeyboardEvent, useId, useMemo, useRef, useState } from 'react'
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
+import { formatList } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { ALL_TAG, normalizeTag, validateTag } from '@/lib/validate'
 
@@ -53,10 +54,10 @@ export function TagList({ tags, max = 2, empty }: { tags: readonly string[]; max
         <TagChip key={tag} tag={tag} />
       ))}
       {rest.length > 0 ? (
-        <Tooltip content={rest.join('、')}>
+        <Tooltip content={formatList(rest)}>
           <span
             tabIndex={0}
-            aria-label={t.tags.more(rest.length, rest.join('、'))}
+            aria-label={t.tags.more(rest.length, formatList(rest))}
             className="rounded-sm px-1 text-xs text-muted-foreground tabular"
           >
             +{rest.length}

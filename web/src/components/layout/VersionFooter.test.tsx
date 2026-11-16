@@ -46,7 +46,7 @@ describe('版本的显示', () => {
   it('关于页：同一次构建时不提醒', async () => {
     fakeApi({ 'GET /status': makeStatus({ version: WEB_VERSION }) })
     renderWithApp(<AboutTab />)
-    expect(await screen.findByText(t.version.aboutSame)).toBeVisible()
+    expect(await screen.findByTestId('about-web-version')).toHaveTextContent(WEB_VERSION)
     expect(screen.queryByTestId('about-version-mismatch')).not.toBeInTheDocument()
   })
 })

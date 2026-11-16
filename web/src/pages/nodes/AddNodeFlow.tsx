@@ -3,7 +3,7 @@ import { CircleCheck, LoaderCircle, RotateCw, TicketPlus } from 'lucide-react'
 import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router'
 
-import { errorMessage } from '@/api/client'
+import { errorDetail, errorMessage } from '@/api/client'
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
 import { type CreatedEnrollToken, type Network, type Node, type NodeId } from '@/api/types'
@@ -26,19 +26,21 @@ import { useNow } from '@/lib/useNow'
 import { cn } from '@/lib/utils'
 import { validateVirtualIp } from '@/lib/validate'
 
+/** 名字用函数写：渲染时现读，换了语言跟着变。 */
 const TTL_CHOICES = [
-  { secs: 60 * 60, label: t.addNode.ttl1h },
-  { secs: DEFAULT_TOKEN_TTL, label: t.addNode.ttl24h },
-  { secs: 7 * 24 * 60 * 60, label: t.addNode.ttl7d },
+  { secs: 60 * 60, label: () => t.addNode.ttl1h },
+  { secs: DEFAULT_TOKEN_TTL, label: () => t.addNode.ttl24h },
+  { secs: 7 * 24 * 60 * 60, label: () => t.addNode.ttl7d },
 ] as const
 
 /** 等了多久之后给出"还没连上？"的排查提示。 */
 const STUCK_AFTER_SECS = 60
 
-const DECLARE_ROWS: readonly { capability: Capability; label: string; hint: string }[] = [
-  { capability: 'relay', label: t.addNode.declareRelay, hint: t.addNode.declareRelayHint },
-  { capability: 'exit', label: t.addNode.declareExit, hint: t.addNode.declareExitHint },
-  { capability: 'forward', label: t.addNode.declareForward, hint: t.addNode.declareForwardHint },
+/** 三个"可以承担"的勾选。只有 relay 带一句提醒：它要公网可达，勾错了也起不了作用。 */
+const DECLARE_ROWS: readonly { capability: Capability; label: () => string; hint?: () => string }[] = [
+  { capability: 'relay', label: () => t.addNode.declareRelay, hint: () => t.addNode.declareRelayHint },
+  { capability: 'exit', label: () => t.addNode.declareExit },
+  { capability: 'forward', label: () => t.addNode.declareForward },
 ]
 
 function Step({ index, title, children }: { index: number; title: string; children: ReactNode }) {
@@ -203,9 +205,11 @@ export function AddNodeFlow({ network, intro, onStateChange, onNavigate }: AddNo
                   }
                   className="mt-0.5"
                 />
-                <span className="min-w-0">
-                  <span className="block text-sm">{row.label}</span>
-                  <span className="block text-[13px] text-muted-foreground">{row.hint}</span>
+                <span className="min-w-0 text-sm">
+                  {row.label()}
+                  {row.hint === undefined ? null : (
+                    <span className="ml-2 text-[13px] text-muted-foreground">{row.hint()}</span>
+                  )}
                 </span>
               </label>
             ))}
@@ -228,7 +232,7 @@ export function AddNodeFlow({ network, intro, onStateChange, onNavigate }: AddNo
                 >
                   {TTL_CHOICES.map((choice) => (
                     <option key={choice.secs} value={choice.secs}>
-                      {choice.label}
+                      {choice.label()}
                     </option>
                   ))}
                 </NativeSelect>
@@ -273,7 +277,7 @@ export function AddNodeFlow({ network, intro, onStateChange, onNavigate }: AddNo
                   </div>
                   {successorOf !== null && !locked ? (
                     <Button size="sm" variant="ghost" onClick={() => setSuccessorOf(null)}>
-                      {t.addNode.successorNone}
+                      {t.addNode.successorClear}
                     </Button>
                   ) : null}
                 </div>
@@ -300,17 +304,14 @@ export function AddNodeFlow({ network, intro, onStateChange, onNavigate }: AddNo
           <CodeBlock copy={install.join(' && ')} copyLabel={t.addNode.copyInstall}>
             {install.join('\n')}
           </CodeBlock>
-          <p className="text-[13px] text-muted-foreground">
-            {t.addNode.step1Manual}
-            <a
-              href={RELEASES_PAGE}
-              target="_blank"
-              rel="noreferrer"
-              className="rounded-sm text-primary underline-offset-4 hover:underline"
-            >
-              {t.addNode.step1Releases}
-            </a>
-          </p>
+          <a
+            href={RELEASES_PAGE}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-block rounded-sm text-[13px] text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+          >
+            {t.addNode.step1Releases}
+          </a>
         </Step>
 
         <Step index={2} title={t.addNode.step2}>
@@ -325,7 +326,10 @@ export function AddNodeFlow({ network, intro, onStateChange, onNavigate }: AddNo
                 <TicketPlus aria-hidden />
                 {t.addNode.generate}
               </Button>
-              <FormError message={generate.isError ? errorMessage(generate.error) : null} />
+              <FormError
+                message={generate.isError ? errorMessage(generate.error) : null}
+                detail={generate.isError ? errorDetail(generate.error) : null}
+              />
             </>
           ) : (
             <>
@@ -346,15 +350,16 @@ export function AddNodeFlow({ network, intro, onStateChange, onNavigate }: AddNo
                   </Button>
                 ) : null}
               </div>
-              <FormError message={generate.isError ? errorMessage(generate.error) : null} />
+              <FormError
+                message={generate.isError ? errorMessage(generate.error) : null}
+                detail={generate.isError ? errorDetail(generate.error) : null}
+              />
             </>
           )}
         </Step>
 
         <Step index={3} title={t.addNode.step3}>
-          <p className="text-[13px] text-muted-foreground">
-            {created === null ? t.addNode.step3Before : t.addNode.step3Join}
-          </p>
+          <p className="text-[13px] text-muted-foreground">{t.addNode.step3Join}</p>
           <CodeBlock
             copy={created === null ? null : joinCommand}
             copyLabel={t.addNode.copyCommand}
@@ -388,12 +393,12 @@ export function AddNodeFlow({ network, intro, onStateChange, onNavigate }: AddNo
                   <CircleCheck className="size-4 text-ok" aria-hidden />
                   {t.addNode.joined(joined.name, joined.virtual_ip)}
                 </p>
-                {joined.hostname !== '' ? (
-                  <p className="mt-0.5 pl-6 text-[13px] text-muted-foreground" data-testid="node-joined-hostname">
-                    {t.addNode.joinedHostname(joined.hostname)}
-                  </p>
-                ) : null}
-                <p className="mt-0.5 pl-6 text-[13px] text-muted-foreground">{t.addNode.joinedHint}</p>
+                <p className="mt-0.5 pl-6 text-[13px] text-muted-foreground">
+                  {joined.hostname !== '' ? (
+                    <span data-testid="node-joined-hostname">{t.addNode.joinedHostname(joined.hostname)} · </span>
+                  ) : null}
+                  {t.addNode.joinedHint}
+                </p>
               </div>
               <div className="flex items-center gap-2">
                 <Button onClick={addAnother}>{t.addNode.addAnother}</Button>
@@ -418,17 +423,16 @@ export function AddNodeFlow({ network, intro, onStateChange, onNavigate }: AddNo
                 <LoaderCircle className="size-4 animate-spin text-muted-foreground" aria-hidden />
                 {t.addNode.waiting}
               </p>
-              <p className="mt-0.5 pl-6 text-[13px] text-muted-foreground">{t.addNode.waitingHint}</p>
               {stuck ? (
                 <details className="mt-2.5 pl-6 text-[13px]">
                   <summary className="rounded-sm font-medium">{t.addNode.stuck}</summary>
                   <ul className="mt-1.5 list-disc space-y-1 pl-4 text-muted-foreground">
-                    <li>{t.addNode.stuckCauses[0]}</li>
+                    <li>{t.addNode.stuckCommand}</li>
                     <li>
-                      {t.addNode.stuckCauses[1]}
+                      {t.addNode.stuckController}
                       <ControllerAddress />
                     </li>
-                    <li>{t.addNode.stuckCauses[2]}</li>
+                    <li>{t.addNode.stuckToken}</li>
                   </ul>
                 </details>
               ) : null}

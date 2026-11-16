@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 
-import { errorMessage } from '@/api/client'
+import { errorDetail, errorMessage } from '@/api/client'
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
 import { type ForcedUpdates, type ForceTiming, type Node } from '@/api/types'
@@ -53,7 +53,7 @@ export function ForceUpdateDialog({ node, onClose }: ForceUpdateDialogProps) {
   const nodes = useQuery({ ...q.nodes(node.network), enabled: node.relay !== null })
   const matrix = useQuery({ ...q.matrix(node.network), enabled: node.relay !== null })
   const [timing, setTiming] = useState<ForceTiming>('now')
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<unknown>(null)
   const version = node.update.available ?? ''
 
   const force = useAction(node.network, {
@@ -74,7 +74,7 @@ export function ForceUpdateDialog({ node, onClose }: ForceUpdateDialogProps) {
 
   const submit = () => {
     setError(null)
-    force.mutate(chosen, { onSuccess: onClose, onError: (cause) => setError(errorMessage(cause)) })
+    force.mutate(chosen, { onSuccess: onClose, onError: setError })
   }
 
   return (
@@ -97,7 +97,7 @@ export function ForceUpdateDialog({ node, onClose }: ForceUpdateDialogProps) {
             </p>
           ) : null}
           <p className="text-[13px] text-muted-foreground">{f.controllerNote}</p>
-          <FormError message={error} />
+          <FormError message={error === null ? null : errorMessage(error)} detail={errorDetail(error)} />
         </DialogBody>
         <DialogFooter>
           <Button onClick={onClose} disabled={force.isPending}>
@@ -123,7 +123,7 @@ interface ForceAllDialogProps {
 /** "全部更新"的确认框。各个节点现在有多少条流这里算不出来，就照实说，不假装。 */
 export function ForceAllDialog({ version, candidates, onClose, onDone }: ForceAllDialogProps) {
   const [timing, setTiming] = useState<ForceTiming>('now')
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<unknown>(null)
   const force = useAction('all', {
     mutationFn: (chosen: ForceTiming) => api.forceUpdateAll({ timing: chosen }),
     toastError: false,
@@ -138,7 +138,7 @@ export function ForceAllDialog({ version, candidates, onClose, onDone }: ForceAl
         onDone(result)
         onClose()
       },
-      onError: (cause) => setError(errorMessage(cause)),
+      onError: setError,
     })
   }
 
@@ -150,7 +150,7 @@ export function ForceAllDialog({ version, candidates, onClose, onDone }: ForceAl
           <TimingChoice value={timing} onChange={setTiming} flows={null} />
           <p className="text-[13px] text-muted-foreground">{a.flowsUnknown}</p>
           <p className="text-[13px] text-muted-foreground">{f.controllerNote}</p>
-          <FormError message={error} />
+          <FormError message={error === null ? null : errorMessage(error)} detail={errorDetail(error)} />
         </DialogBody>
         <DialogFooter>
           <Button onClick={onClose} disabled={force.isPending}>

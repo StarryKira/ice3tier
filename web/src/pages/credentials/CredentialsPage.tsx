@@ -3,7 +3,7 @@ import { Ban, EllipsisVertical, Eraser, KeyRound, Plus, SlidersHorizontal, Trash
 import { Fragment, useState } from 'react'
 import { Link } from 'react-router'
 
-import { fieldError, formError, formFailure } from '@/api/formErrors'
+import { fieldError, formError, formErrorDetail, formFailure } from '@/api/formErrors'
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
 import { type CreatedCredential, type Credential, type Network } from '@/api/types'
@@ -78,17 +78,14 @@ function IssueDialog({ network, open, onClose, onIssued }: IssueDialogProps) {
       submitLabel={c.submit}
       pending={issue.isPending}
       error={formError(failure)}
+      errorDetail={formErrorDetail(failure)}
       onSubmit={() => {
         setTouched(true)
         if (nameProblem !== null || maxParsed.error !== null || bytesParsed.error !== null) return
         issue.mutate(undefined, { onSuccess: onIssued })
       }}
     >
-      <Field
-        label={c.nameLabel}
-        hint={c.nameHint}
-        error={(touched ? nameProblem : null) ?? fieldError(failure, 'name')}
-      >
+      <Field label={c.nameLabel} error={(touched ? nameProblem : null) ?? fieldError(failure, 'name')}>
         {(props) => (
           <Input
             {...props}
@@ -176,13 +173,13 @@ function LimitsDialog({
       open
       onClose={onClose}
       title={c.editTitle(credential.name)}
-      description={c.editLead}
       size="sm"
       dirty={maxChanged || bytesChanged}
       requireDirty
       submitLabel={c.editSubmit}
       pending={save.isPending}
       error={save.isError ? formError(formFailure(save.error, {})) : null}
+      errorDetail={save.isError ? formErrorDetail(formFailure(save.error, {})) : null}
       onSubmit={() => {
         setTouched(true)
         if (maxParsed.error !== null || bytesParsed.error !== null) return
@@ -253,7 +250,7 @@ function Usage({ network, token }: { network: Network; token: string }) {
       <h3 className="text-sm font-semibold">{c.usageTitle}</h3>
       {listener === undefined ? (
         <div className="mt-2 space-y-3">
-          <Notice>{c.usageNoListener}</Notice>
+          <Notice>{c.noListener}</Notice>
           <Button asChild size="sm">
             <Link to={networkPath(network.id, 'listeners')}>{c.newListener}</Link>
           </Button>
@@ -298,12 +295,7 @@ export function CredentialsPage() {
     const confirmed = await confirm({
       tone: 'danger',
       title: c.revokeTitle(credential.name),
-      body: (
-        <>
-          <p>{c.revokeBody}</p>
-          <p>{c.revokeKeeps}</p>
-        </>
-      ),
+      body: c.revokeBody,
       confirmLabel: c.revokeConfirm,
     })
     if (confirmed) remove.mutate(credential)
@@ -339,7 +331,6 @@ export function CredentialsPage() {
     <Page>
       <PageHeader
         title={c.title}
-        description={c.description}
         actions={
           empty ? undefined : (
             <Button variant="primary" onClick={() => setIssuing(true)}>
@@ -361,7 +352,7 @@ export function CredentialsPage() {
           <EmptyState
             icon={KeyRound}
             title={c.emptyTitle}
-            description={requiring > 0 ? c.emptyWithListener(requiring) : c.emptyNoListener}
+            description={requiring > 0 ? c.emptyWithListener(requiring) : c.noListener}
             action={
               // 还没有对外的监听器时凭据用不上：签发只是次要的入口，先指给监听器。
               requiring > 0 ? (
@@ -442,8 +433,7 @@ export function CredentialsPage() {
                           </Tooltip>
                           {credential.revoked_at !== null ? (
                             <span className="mt-0.5 block text-xs text-muted-foreground">
-                              {c.revokedAt}
-                              <RelativeTime at={credential.revoked_at} />
+                              {c.revokedAt} <RelativeTime at={credential.revoked_at} />
                             </span>
                           ) : null}
                         </Td>
@@ -454,7 +444,7 @@ export function CredentialsPage() {
                           ) : null}
                         </Td>
                         <Td data-keep={view.revoked ? true : undefined}>
-                          <UsageBar view={view.traffic} label={`${credential.name} ${c.colTraffic}`} />
+                          <UsageBar view={view.traffic} label={c.trafficOf(credential.name)} />
                           {credential.max_bytes === null ? (
                             <span className="block text-xs text-muted-foreground">{t.common.unlimited}</span>
                           ) : null}
@@ -540,7 +530,6 @@ export function CredentialsPage() {
           open
           title={c.secretTitle(issued.name)}
           warning={c.secretWarning}
-          warningRest={c.secretWarningRest}
           secret={issued.token}
           secretLabel={c.secretLabel}
           copyLabel={c.copySecret}

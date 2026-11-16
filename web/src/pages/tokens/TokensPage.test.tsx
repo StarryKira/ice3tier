@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
-import { t } from '@/i18n'
+import { setLocale, t } from '@/i18n'
 import { nowSeconds } from '@/lib/time'
 import { makeNode, makeToken } from '@/test/fixtures'
 import { fakeApi, NETWORK, renderWithApp } from '@/test/harness'
@@ -80,5 +80,18 @@ describe('注册令牌', () => {
     setup()
     renderWithApp(<TokensPage />, { network: NETWORK, route: '/n/1/tokens?show=all&focus=42' })
     expect(await screen.findByText(k.focusMissing(42))).toBeVisible()
+  })
+})
+
+describe('英文', () => {
+  it('全部令牌的列表里没有中文', async () => {
+    const user = userEvent.setup()
+    setLocale('en', { remember: false })
+    setup()
+    renderWithApp(<TokensPage />, { network: NETWORK })
+    await user.click(await screen.findByRole('radio', { name: 'All' }))
+    await screen.findByTestId('token-row-2')
+    expect(within(screen.getByTestId('token-row-3')).getByText(/^Unused · 1 hour left$/)).toBeVisible()
+    expect(document.body.textContent).not.toMatch(/\p{Script=Han}/u)
   })
 })

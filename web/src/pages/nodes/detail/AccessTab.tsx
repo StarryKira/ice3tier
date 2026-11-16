@@ -35,7 +35,7 @@ function EdgeList({ network, edges, rules }: { network: Network; edges: AccessEd
             {edge.rules.map((id) => {
               const rule = rules.find((candidate) => candidate.id === id)
               return rule === undefined ? null : (
-                <Tooltip key={id} content={`${d.accessByRules}：${ruleLabel(rule)}`}>
+                <Tooltip key={id} content={d.accessByRule(ruleLabel(rule))}>
                   <span tabIndex={0} className="rounded-sm">
                     <RuleSentence rule={rule} />
                   </span>
@@ -63,8 +63,7 @@ export function AccessTab({ network, node }: { network: Network; node: NodeDetai
 
   return (
     <div className="space-y-8">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-[13px] text-muted-foreground">{d.accessLead}</p>
+      <div className="flex justify-end">
         <Button asChild size="sm">
           <Link to={`${networkPath(network.id, 'access')}?view=node&node=${node.id}`}>{d.accessOpen}</Link>
         </Button>

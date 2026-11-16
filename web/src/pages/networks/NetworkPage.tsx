@@ -3,14 +3,13 @@ import { Check, Plus } from 'lucide-react'
 import { useId, useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 
-import { fieldError, formError, formFailure } from '@/api/formErrors'
+import { fieldError, formError, formErrorDetail, formFailure } from '@/api/formErrors'
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
 import { type Network, type Reach, type RoutingMode, type ServiceClass, type UpdateNetwork } from '@/api/types'
 import { useConfirm } from '@/components/confirm'
 import { CopyText } from '@/components/copy'
 import { FormDialog } from '@/components/form-dialog'
-import { Notice } from '@/components/notice'
 import { InfoRow, Page, PageHeader } from '@/components/page'
 import { RelativeTime } from '@/components/status'
 import { Badge } from '@/components/ui/badge'
@@ -62,6 +61,7 @@ function ExpandDialog({ network, open, onClose }: { network: Network; open: bool
       submitLabel={n.expandSubmit}
       pending={expand.isPending}
       error={formError(failure)}
+      errorDetail={formErrorDetail(failure)}
       onSubmit={() => {
         setTouched(true)
         if (problem === null) expand.mutate(undefined, { onSuccess: onClose })
@@ -128,10 +128,12 @@ function SettingsForm({ network }: { network: Network }) {
     >
       <CardBody className="space-y-7">
         <div>
-          <p id={routingLabel} className="text-[13px] font-medium">
+          <p id={routingLabel} className={cn('text-[13px] font-medium', overriding === 0 && 'mb-2')}>
             {n.routingLabel}
           </p>
-          <p className="mb-2 text-[13px] text-muted-foreground">{n.routingOverridable(overriding)}</p>
+          {overriding > 0 ? (
+            <p className="mb-2 text-[13px] text-muted-foreground">{n.routingOverridden(overriding)}</p>
+          ) : null}
           <RadioCards
             aria-labelledby={routingLabel}
             value={routing}
@@ -143,7 +145,7 @@ function SettingsForm({ network }: { network: Network }) {
             ]}
           />
         </div>
-        <Field label={n.hopsLabel} hint={n.hopsHint} className="max-w-xs">
+        <Field label={n.hopsLabel} className="max-w-xs">
           {(props) => (
             <NativeSelect
               {...props}
@@ -188,7 +190,10 @@ function SettingsForm({ network }: { network: Network }) {
             />
           )}
         </Field>
-        <FormError message={save.isError ? formError(formFailure(save.error, {})) : null} />
+        <FormError
+          message={save.isError ? formError(formFailure(save.error, {})) : null}
+          detail={save.isError ? formErrorDetail(formFailure(save.error, {})) : null}
+        />
       </CardBody>
       <footer className="mt-8 flex items-center justify-end gap-2 border-t pt-4">
         <Button onClick={reset} disabled={!dirty || save.isPending}>
@@ -241,7 +246,7 @@ function DangerZone({ network }: { network: Network }) {
               to={networkPath(network.id, 'nodes')}
               className="mt-1 inline-block rounded-sm text-[13px] text-primary underline-offset-4 hover:underline"
             >
-              {t.exits.goNodes}
+              {n.viewNodes}
             </Link>
           ) : null}
         </div>
@@ -269,7 +274,6 @@ export function NetworkPage() {
     <Page size="narrow" className="@container">
       <PageHeader
         title={n.title}
-        description={n.description}
         actions={
           <Button variant="primary" onClick={() => setCreating(true)}>
             <Plus aria-hidden />
@@ -286,7 +290,7 @@ export function NetworkPage() {
               key={other.id}
               to={networkPath(other.id, 'network')}
               aria-current={current ? 'true' : undefined}
-              aria-label={current ? `${other.name}（${n.current}）` : n.switchTo(other.name)}
+              aria-label={current ? n.currentName(other.name) : n.switchTo(other.name)}
               className={cn(
                 'grid grid-cols-[minmax(0,1fr)_10rem_6rem] items-center gap-4 px-3 py-3 transition-colors hover:bg-muted/50',
                 current && 'bg-accent/50 hover:bg-accent/70',
@@ -310,7 +314,7 @@ export function NetworkPage() {
 
       <div className="space-y-12">
         <Card>
-          <CardHeader title={n.settingsTitle(network.name)} description={n.settingsDescription} />
+          <CardHeader title={n.settingsTitle(network.name)} />
           <CardBody>
             <h3 className="sr-only">{n.basics}</h3>
             <dl>
@@ -327,7 +331,6 @@ export function NetworkPage() {
                     {n.expand}
                   </Button>
                 </span>
-                <span className="mt-0.5 block text-[13px] text-muted-foreground">{n.cidrReadonlyHint}</span>
               </InfoRow>
               <InfoRow label={n.createdAt}>
                 <RelativeTime at={network.created_at} />
@@ -342,7 +345,6 @@ export function NetworkPage() {
           />
         </Card>
 
-        <Notice>{n.noteIsolation}</Notice>
         <DangerZone network={network} />
       </div>
 

@@ -6,6 +6,7 @@ import { useSearchParams } from 'react-router'
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
 import { type AccessGraph, type Network, type NodeId, type Rule } from '@/api/types'
+import { InfoTip } from '@/components/info-tip'
 import { NodeLink, NodeSelect } from '@/components/node'
 import { Notice } from '@/components/notice'
 import { Page, PageHeader } from '@/components/page'
@@ -14,6 +15,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardHeader } from '@/components/ui/card'
 import { Segmented } from '@/components/ui/segmented'
 import { t } from '@/i18n'
+import { formatList } from '@/lib/format'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { cn } from '@/lib/utils'
 import { useNetwork } from '@/pages/networks/context'
@@ -74,11 +76,8 @@ function NodeView({ network, graph, focus, onFocus }: NodeViewProps) {
 
   return (
     <>
-      <div className="mb-3 flex flex-wrap items-center gap-3">
-        <div className="w-72">
-          <NodeSelect nodes={nodes.data ?? []} value={focus} onChange={onFocus} aria-label={g.nodePickLabel} />
-        </div>
-        {focus === null ? <p className="text-[13px] text-muted-foreground">{g.nodePick}</p> : null}
+      <div className="mb-3 w-72">
+        <NodeSelect nodes={nodes.data ?? []} value={focus} onChange={onFocus} aria-label={g.nodePickLabel} />
       </div>
       {focus !== null && access.data !== undefined && !access.data.acknowledged ? (
         <Notice tone="warn" className="mb-3">
@@ -109,23 +108,19 @@ function NodeView({ network, graph, focus, onFocus }: NodeViewProps) {
       {focus !== null && access.data !== undefined ? (
         <dl className="grid grid-cols-2 gap-x-6 pt-4 text-[13px]">
           <div>
-            <dt className="font-medium">
-              {g.reachableBy}（{access.data.reachable_by.length}）
-            </dt>
+            <dt className="font-medium">{g.reachableBy(access.data.reachable_by.length)}</dt>
             <dd className="mt-0.5 text-muted-foreground">
               {access.data.reachable_by.length === 0
                 ? g.nobody
-                : access.data.reachable_by.map((edge) => edge.node.name).join('、')}
+                : formatList(access.data.reachable_by.map((edge) => edge.node.name))}
             </dd>
           </div>
           <div>
-            <dt className="font-medium">
-              {g.canReach}（{access.data.can_reach.length}）
-            </dt>
+            <dt className="font-medium">{g.canReach(access.data.can_reach.length)}</dt>
             <dd className="mt-0.5 text-muted-foreground">
               {access.data.can_reach.length === 0
                 ? g.nobody
-                : access.data.can_reach.map((edge) => edge.node.name).join('、')}
+                : formatList(access.data.can_reach.map((edge) => edge.node.name))}
             </dd>
           </div>
         </dl>
@@ -180,7 +175,6 @@ export function AccessPage() {
     <Page wide className="@container">
       <PageHeader
         title={t.access.title}
-        description={t.access.description}
         actions={
           <>
             <Button onClick={() => update({ check: checking ? null : '1' })} aria-pressed={checking}>
@@ -230,13 +224,13 @@ export function AccessPage() {
               <Card>
                 <CardHeader
                   title={t.access.rulesTitle}
+                  tip={t.access.rulesHint}
                   description={data.rules.length > 0 ? t.access.rulesCount(enabledCount, data.rules.length) : undefined}
                 />
                 {data.rules.length === 0 ? (
                   <EmptyState
                     icon={ShieldOff}
                     title={t.access.emptyTitle}
-                    description={t.access.emptyBody}
                     action={
                       <>
                         <Button pending={restore.isPending} onClick={() => restore.mutate()}>
@@ -262,7 +256,7 @@ export function AccessPage() {
               </Card>
 
               <Card>
-                <CardHeader title={t.access.tagsPanel.title} />
+                <CardHeader title={t.access.tagsPanel.title} tip={t.access.tagsPanel.hint} />
                 <TagPanel network={network} graph={data} open={openTag} onOpenChange={setOpenTag} />
               </Card>
             </div>
@@ -285,7 +279,7 @@ export function AccessPage() {
               />
               {data.unacknowledged.length > 0 ? (
                 <Notice tone="warn" className="mb-3">
-                  {g.unacked(data.unacknowledged.map((node) => node.name).join('、'))}
+                  {g.unacked(formatList(data.unacknowledged.map((node) => node.name)))}
                 </Notice>
               ) : null}
 
@@ -308,34 +302,28 @@ export function AccessPage() {
                       }}
                     />
                   </div>
-                  <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-1.5 pt-3">
+                  <div className="flex items-center gap-2 pt-3">
                     <Legend />
-                    <p className="text-xs text-muted-foreground">{g.tagHint}</p>
+                    <InfoTip>{g.tagHint}</InfoTip>
                   </div>
                 </>
               ) : (
                 <NodeView network={network} graph={data} focus={focus} onFocus={(id) => update({ node: String(id) })} />
               )}
 
-              <div className="mt-6 border-t pt-4 text-[13px]" data-testid="unconnected">
-                {nodes.data?.length === 0 ? (
-                  <p className="text-muted-foreground">{g.noNodes}</p>
-                ) : data.unconnected.length === 0 ? (
-                  <p className="text-muted-foreground">{g.unconnectedNone}</p>
-                ) : (
-                  <>
-                    <p className="font-medium text-warn">{g.unconnected(data.unconnected.length)}</p>
-                    <ul className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1">
-                      {data.unconnected.map((node) => (
-                        <li key={node.id}>
-                          <NodeLink network={network.id} node={node} className="font-normal" />
-                        </li>
-                      ))}
-                    </ul>
-                  </>
-                )}
-              </div>
-              <p className="pt-3 text-xs text-muted-foreground">{g.textEquivalent}</p>
+              {/* 只在有节点没被任何规则连通时出现：它们互相到不了，也到不了别人。 */}
+              {data.unconnected.length > 0 ? (
+                <div className="mt-6 border-t pt-4 text-[13px]" data-testid="unconnected">
+                  <p className="font-medium text-warn">{g.unconnected(data.unconnected.length)}</p>
+                  <ul className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1">
+                    {data.unconnected.map((node) => (
+                      <li key={node.id}>
+                        <NodeLink network={network.id} node={node} className="font-normal" />
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
             </Card>
           </div>
         </>

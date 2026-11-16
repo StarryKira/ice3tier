@@ -154,11 +154,12 @@ describe('时间的写法', () => {
     expect(formatRelative(now + 15, now)).toBe(t.time.justNow)
     expect(formatRelative(now + 120, now)).toBe(t.time.justNow)
     // 差得太多就不是钟的问题了，照实写出来。
-    expect(formatRelative(now + 3600, now)).toMatch(/^\d{2}\/\d{2} \d{2}:\d{2}$/)
+    expect(formatRelative(now + 3600, now)).toMatch(/^\d{1,2}月\d{2}日 \d{2}:\d{2}$/)
   })
 
   it('更早的写日期', () => {
-    expect(formatRelative(now - 8 * 86_400, now)).toMatch(/^\d{2}\/\d{2} \d{2}:\d{2}$/)
+    // 今年的写月、日和时刻（这里固定用简体中文）。
+    expect(formatRelative(now - 8 * 86_400, now)).toMatch(/^\d{1,2}月\d{2}日 \d{2}:\d{2}$/)
     // 不是今年的带上年份。
     expect(formatRelative(now - 400 * 86_400, now)).toMatch(/^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}$/)
   })

@@ -9,6 +9,7 @@ import { OnlineDot, StatusText } from '@/components/status'
 import { Button } from '@/components/ui/button'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
+import { formatList } from '@/lib/format'
 import { formatAge } from '@/lib/time'
 import { useNow } from '@/lib/useNow'
 import { cn } from '@/lib/utils'
@@ -37,8 +38,7 @@ export function BackboneView({ network, name }: { network: Network; name: (id: N
 
   return (
     <div className="space-y-6" data-testid="backbone">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <p className="max-w-3xl text-[13px] text-muted-foreground">{b.lead}</p>
+      <div className="flex flex-wrap items-center justify-end gap-3">
         <div className="flex items-center gap-3">
           {data !== undefined && !backbone.isFetching ? (
             <span className="text-[13px] text-muted-foreground">
@@ -62,7 +62,7 @@ export function BackboneView({ network, name }: { network: Network; name: (id: N
             </p>
           </div>
         ) : data.relays.length === 0 ? (
-          <EmptyState icon={RadioTower} title={b.noRelaysTitle} description={b.noRelaysBody} />
+          <EmptyState icon={RadioTower} title={b.noRelaysTitle} />
         ) : (
           <div className="space-y-4">
             {data.answered.length === 0 ? <Notice tone="warn">{b.nobody}</Notice> : null}
@@ -130,7 +130,7 @@ export function BackboneView({ network, name }: { network: Network; name: (id: N
                             )
                           }
                           const link = linkView(row, column.relay.id)
-                          const label = b.cellLabel(row.relay.name, column.relay.name, link?.text ?? b.noLink)
+                          const label = t.topology.cellLabel(row.relay.name, column.relay.name, link?.text ?? b.noLink)
                           return (
                             <td key={column.relay.id} className="p-0.5 text-center">
                               <Tooltip content={label}>
@@ -158,7 +158,7 @@ export function BackboneView({ network, name }: { network: Network; name: (id: N
             </div>
             {data.answered.length > 0 ? (
               <p className="text-xs text-muted-foreground">
-                {b.answered(data.answered.map((node) => node.name).join('、'))}
+                {b.answered(formatList(data.answered.map((node) => node.name)))}
               </p>
             ) : null}
           </div>

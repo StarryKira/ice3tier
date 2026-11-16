@@ -1,4 +1,24 @@
+import { getLocale, t } from '@/i18n'
+
 const UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'] as const
+
+const numberFormats = new Map<string, Intl.NumberFormat>()
+
+/** 数按当前语言写（小数点、千位分隔）。`digits` 是固定的小数位数。 */
+export function formatNumber(value: number, digits = 0): string {
+  const key = `${getLocale()}|${digits}`
+  let format = numberFormats.get(key)
+  if (format === undefined) {
+    format = new Intl.NumberFormat(getLocale(), { minimumFractionDigits: digits, maximumFractionDigits: digits })
+    numberFormats.set(key, format)
+  }
+  return format.format(value)
+}
+
+/** 并列的几个名字：中文用顿号，英文用逗号。 */
+export function formatList(items: readonly string[]): string {
+  return items.join(t.common.listSeparator)
+}
 
 /** 字节数写成人看的大小，按 1024 进位。 */
 export function formatBytes(bytes: number): string {
@@ -10,7 +30,7 @@ export function formatBytes(bytes: number): string {
     unit += 1
   }
   const digits = unit === 0 || value >= 100 ? 0 : 1
-  return `${value.toFixed(digits)} ${UNITS[unit] ?? 'B'}`
+  return `${formatNumber(value, digits)} ${UNITS[unit] ?? 'B'}`
 }
 
 /** 公钥太长，界面上只显示开头的一段用来辨认；复制出去的是完整的。 */

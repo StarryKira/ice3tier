@@ -13,6 +13,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { LanguageSubmenu } from '@/components/language'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
 import { readStored, writeStored } from '@/lib/storage'
@@ -48,7 +49,7 @@ function ItemLink({ to, label, icon: Icon, planned = false, collapsed }: ItemLin
   const link = (
     <NavLink
       to={to}
-      aria-label={collapsed ? (planned ? `${label}（${t.common.planned}）` : label) : undefined}
+      aria-label={collapsed ? (planned ? t.common.withPlanned(label) : label) : undefined}
       className={cn(
         ROW,
         collapsed ? 'w-10 justify-center' : 'px-2.5',
@@ -65,7 +66,7 @@ function ItemLink({ to, label, icon: Icon, planned = false, collapsed }: ItemLin
     </NavLink>
   )
   return collapsed ? (
-    <Tooltip content={planned ? `${label}（${t.common.planned}）` : label} side="right">
+    <Tooltip content={planned ? t.common.withPlanned(label) : label} side="right">
       {link}
     </Tooltip>
   ) : (
@@ -196,6 +197,7 @@ export function Sidebar({ networks, current, collapsed, onToggle, onSignOut, onC
                   <Settings aria-hidden />
                   {t.nav.settings}
                 </DropdownMenuItem>
+                <LanguageSubmenu />
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onSelect={onSignOut}>
                   <LogOut aria-hidden />

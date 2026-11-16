@@ -5,6 +5,7 @@ import { Link, useSearchParams } from 'react-router'
 
 import { q } from '@/api/queries'
 import { type Node, type NodeId, type PathLeg } from '@/api/types'
+import { InfoTip } from '@/components/info-tip'
 import { Notice } from '@/components/notice'
 import { Page, PageHeader } from '@/components/page'
 import { PairPicker } from '@/components/pair-picker'
@@ -34,13 +35,17 @@ function LegCard({ leg, name, testId }: { leg: PathLeg; name: (id: NodeId) => st
     <Card data-testid={testId} data-source={view.state}>
       <header className="flex flex-wrap items-center justify-between gap-2 border-b pb-3">
         <h2 className="text-base font-semibold">{p.forward(leg.from.name, leg.to.name)}</h2>
-        <Badge tone={BADGE_TONE[view.sourceTone]}>{view.sourceLabel}</Badge>
+        {/* 数据从哪里来的说明在悬停里：现问到的、上报的、还是根本不是对端。 */}
+        <Tooltip content={view.sourceHint}>
+          <Badge tone={BADGE_TONE[view.sourceTone]} tabIndex={0} data-testid={`${testId}-source`}>
+            {view.sourceLabel}
+          </Badge>
+        </Tooltip>
       </header>
       <CardBody className="space-y-4 pt-5">
+        {/* 没有路时只说没有数据：为什么（未连通）写在来源的徽标和页面顶上的提醒里。 */}
         {view.route === null ? (
-          <p className="text-sm text-muted-foreground">
-            {view.state === 'not_peers' ? p.notPeersTitle : t.routes.noData}
-          </p>
+          <p className="text-sm text-muted-foreground">{t.routes.noData}</p>
         ) : (
           <>
             <div className="flex flex-wrap items-baseline gap-x-1">
@@ -82,29 +87,32 @@ function LegCard({ leg, name, testId }: { leg: PathLeg; name: (id: NodeId) => st
             ) : null}
           </>
         )}
+        {/* 选路模式、切换的时间和数据的新旧；原因是节点的原话，作为补充写在下面，字淡一些。 */}
         <div className="space-y-1 text-[13px]">
-          {view.reason !== null ? (
-            <p className="font-medium" data-testid={`${testId}-reason`}>
-              {view.reason}
+          {view.age !== null ? <p className="text-warn">{view.age}</p> : null}
+          {view.since !== null ? (
+            <p data-testid={`${testId}-since`}>
+              {view.since}
+              {view.sinceReason !== null ? (
+                <span className="block text-muted-foreground" data-testid={`${testId}-since-reason`}>
+                  {view.sinceReason}
+                </span>
+              ) : null}
             </p>
           ) : null}
           {view.mode !== null ? (
             <Tooltip content={view.mode.hint}>
-              <span tabIndex={0} className="w-fit rounded-sm text-muted-foreground">
+              <span tabIndex={0} className="block w-fit rounded-sm">
                 {view.mode.label}
               </span>
             </Tooltip>
           ) : null}
-          {view.age !== null ? <p className="text-warn">{view.age}</p> : null}
-          {view.since !== null ? (
-            <p data-testid={`${testId}-since`}>{view.since}</p>
-          ) : view.state === 'report' && view.route !== null ? (
-            <p className="text-muted-foreground">{p.sinceOnlyQuery}</p>
+          {view.reason !== null ? (
+            <p className="text-muted-foreground" data-testid={`${testId}-reason`}>
+              <span className="text-foreground">{p.reasonLabel}</span> · {view.reason}
+            </p>
           ) : null}
         </div>
-        <p className="text-[13px] text-muted-foreground">
-          {p.sender(leg.from.name)}：{view.sourceHint}
-        </p>
       </CardBody>
     </Card>
   )
@@ -119,7 +127,10 @@ function Candidates({ leg, name, testId }: { leg: PathLeg; name: (id: NodeId) =>
   if (view.state === 'unknown') return null
   return (
     <Card data-testid={testId}>
-      <CardHeader title={p.candidatesTitle(leg.from.name, leg.to.name)} description={p.candidatesLead} />
+      <CardHeader
+        title={p.candidatesTitle(leg.from.name, leg.to.name)}
+        action={<InfoTip label={p.colCost}>{p.costHint}</InfoTip>}
+      />
       {view.state === 'empty' ? (
         <p className="border-t pt-3 text-sm text-muted-foreground">{p.candidatesEmpty}</p>
       ) : (
@@ -221,7 +232,6 @@ export function PathPage() {
     <Page className="@container">
       <PageHeader
         title={p.title}
-        description={p.description}
         actions={
           <Button asChild variant="ghost">
             <Link to={pairPath(network.id, 'topology', pair.a, pair.b)}>
@@ -276,9 +286,7 @@ export function PathPage() {
                       </Link>
                     </Button>
                   }
-                >
-                  {p.notPeersBody}
-                </Notice>
+                />
               ) : null}
               {offline.map((node) => (
                 <Notice key={node.id}>{p.offline(node.name)}</Notice>
@@ -292,10 +300,6 @@ export function PathPage() {
             <Candidates leg={path.data.reverse} name={name} testId="candidates-reverse" />
           </>
         )}
-        <div className="space-y-1 text-[13px] text-muted-foreground">
-          <p>{p.neverTalked}</p>
-          <p>{p.gaps}</p>
-        </div>
       </div>
     </Page>
   )

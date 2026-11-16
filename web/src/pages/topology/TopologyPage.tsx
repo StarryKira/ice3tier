@@ -130,7 +130,6 @@ export function TopologyPage() {
     <Page wide className="@container">
       <PageHeader
         title={g.title}
-        description={g.description}
         actions={
           <Segmented<View>
             aria-label={g.viewLabel}
@@ -188,7 +187,6 @@ export function TopologyPage() {
             <EmptyState
               icon={Waypoints}
               title={g.emptyTitle}
-              description={g.emptyBody}
               action={
                 <Button variant="primary" onClick={() => setAdding(true)}>
                   <Plus aria-hidden />
@@ -212,13 +210,11 @@ export function TopologyPage() {
                       />
                     </div>
                     <GraphLegend />
-                    <p className="text-xs text-muted-foreground">{g.graphHint}</p>
                   </div>
                   {panel}
                 </div>
               ) : (
                 <div className="space-y-4">
-                  <p className="text-[13px] text-muted-foreground">{g.matrixLead}</p>
                   <MatrixLegend />
                   <div
                     className={cn('grid grid-cols-1 gap-10', panel !== null && '@4xl:grid-cols-[minmax(0,1fr)_16rem]')}

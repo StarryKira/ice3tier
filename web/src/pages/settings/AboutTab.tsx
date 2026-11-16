@@ -14,7 +14,7 @@ import { WEB_VERSION } from '@/lib/version'
 const s = t.settings
 const v = t.version
 
-/** 关于：两边的版本、controller 的身份、指标的地址、数据目录和备份的做法。 */
+/** 关于：两边的版本、controller 的身份、指标的地址、数据目录（备份就是复制它）。 */
 export function AboutTab() {
   const status = useQuery(q.status())
   return (
@@ -45,10 +45,7 @@ export function AboutTab() {
               <span className="tabular" data-testid="about-web-version">
                 {WEB_VERSION}
               </span>
-              <span className="mt-0.5 block text-[13px] text-muted-foreground">{v.aboutWebHint}</span>
-              {status.data.version === WEB_VERSION ? (
-                <span className="block text-[13px] text-muted-foreground">{v.aboutSame}</span>
-              ) : (
+              {status.data.version === WEB_VERSION ? null : (
                 <span className="mt-0.5 block text-[13px] text-warn" data-testid="about-version-mismatch">
                   {v.mismatch(WEB_VERSION, status.data.version)}
                 </span>
@@ -60,7 +57,6 @@ export function AboutTab() {
             </InfoRow>
             <InfoRow label={s.about.key}>
               <CopyText value={status.data.controller_key} wrap />
-              <span className="mt-0.5 block text-[13px] text-muted-foreground">{s.about.keyHint}</span>
             </InfoRow>
             <InfoRow label={s.about.totals}>
               <span className="tabular">
@@ -81,8 +77,9 @@ export function AboutTab() {
                 </>
               )}
             </InfoRow>
-            <InfoRow label={s.about.backup}>{s.about.backupBody}</InfoRow>
-            <InfoRow label={s.about.offline}>{s.about.offlineBody}</InfoRow>
+            <InfoRow label={s.about.offline}>
+              <span className="text-[13px] text-muted-foreground">{s.about.offlineBody}</span>
+            </InfoRow>
           </dl>
         </CardBody>
       )}

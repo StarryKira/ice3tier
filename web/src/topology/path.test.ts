@@ -27,7 +27,7 @@ function leg(extra: Partial<PathLeg>): PathLeg {
 }
 
 describe('describeLeg：路径诊断里一个方向怎么说', () => {
-  it('现问到的：绿色的"刚刚问到"，不写多久之前；有换路记录时写出时间和原因', () => {
+  it('现问到的：绿色的"实时"，不写多久之前；有换路记录时写出时间，原因（节点的原话）另放', () => {
     const view = describeLeg(leg({ since: { secs_ago: 340, reason: '直连打通了' } }), name)
     expect(view).toMatchObject({
       state: 'query',
@@ -35,12 +35,13 @@ describe('describeLeg：路径诊断里一个方向怎么说', () => {
       sourceTone: 'ok',
       rtt: '12 ms',
       age: null,
-      since: p.since('5 分钟前', '直连打通了'),
+      since: p.since(t.time.minutesAgo(5)),
+      sinceReason: '直连打通了',
     })
     expect(view.route).toEqual({
       cls: 'direct',
       tone: 'ok',
-      text: '直连',
+      text: t.routes.direct,
       hops: ['laptop', 'nas'],
       addr: '203.0.113.7:20330',
       detail: null,
@@ -61,10 +62,16 @@ describe('describeLeg：路径诊断里一个方向怎么说', () => {
       state: 'report',
       sourceLabel: p.source.report,
       sourceTone: 'idle',
-      age: p.age('6 秒前'),
+      age: p.age(t.time.secondsAgo(6)),
       since: null,
+      sinceReason: null,
     })
-    expect(view.route).toMatchObject({ cls: 'relay', tone: 'relay', text: '经 hk', hops: ['laptop', 'hk', 'nas'] })
+    expect(view.route).toMatchObject({
+      cls: 'relay',
+      tone: 'relay',
+      text: t.routes.via('hk'),
+      hops: ['laptop', 'hk', 'nas'],
+    })
   })
 
   it('不是对端：琥珀色，没有路', () => {
@@ -78,7 +85,7 @@ describe('describeLeg：路径诊断里一个方向怎么说', () => {
     expect(view).toMatchObject({ state: 'none', sourceLabel: p.source.none, route: null, since: null })
   })
 
-  it('无路可走：红色，只有发送方自己', () => {
+  it('不可达：红色，只有发送方自己', () => {
     const view = describeLeg(leg({ route: { via: 'none' }, rtt_ms: null }), name)
     expect(view.route).toMatchObject({ cls: 'none', tone: 'danger', text: t.routes.none, hops: ['laptop'] })
   })
@@ -88,17 +95,18 @@ describe('describeLeg：路径诊断里一个方向怎么说', () => {
     expect(describeLeg(leg({ source: future }), name)).toMatchObject({
       state: 'unknown',
       sourceLabel: p.source.unknown,
+      sourceHint: p.sourceHint.unknown,
     })
   })
 })
 
 describe('现问到时的细节：直连的方式、选路模式、原因', () => {
-  it('直连写出方式；模式和原因是发送方的路由层说的', () => {
+  it('直连写出方式；模式按自己的话写，原因是发送方的原话、原样给出', () => {
     const view = describeLeg(leg({ direct: 'punched', mode: 'lowest_cost', reason: '直连可用' }), name)
     expect(view.route?.detail).toBe(t.routes.directKind.punched)
     expect(view.route?.detailHint).toBe(t.routes.directKindHint.punched)
-    expect(view.mode).toEqual({ label: p.modeLabel(p.mode.lowest_cost ?? ''), hint: p.modeHint.lowest_cost })
-    expect(view.reason).toBe(p.reason('直连可用'))
+    expect(view.mode).toEqual({ label: p.modeLabel(p.mode.lowest_cost), hint: p.modeHint.lowest_cost })
+    expect(view.reason).toBe('直连可用')
   })
 
   it('经 relay、第一段退回 TCP：写出来，悬停说明为什么', () => {
@@ -149,8 +157,8 @@ describe('describeCandidates：考虑过的路', () => {
     )
     if (view.state !== 'list') throw new Error('应该是一张表')
     expect(view.rows.map((row) => [row.text, row.cost, row.load, row.current])).toEqual([
-      ['直连', '12.9 ms', '—', true],
-      ['经 hk', '49.5 ms', '12%', false],
+      [t.routes.direct, '12.9 ms', '—', true],
+      [t.routes.via('hk'), '49.5 ms', '12%', false],
     ])
     expect(view.rows[1]?.legs).toEqual([
       p.legLine('laptop', 'hk', '21.3 ms', '0.40 ms', '0.2%'),

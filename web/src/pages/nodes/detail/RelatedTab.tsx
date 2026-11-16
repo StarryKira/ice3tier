@@ -130,9 +130,7 @@ export function RelatedTab({ network, node }: { network: Network; node: NodeDeta
                 node={{ id: other, name: nodeName(all, other) }}
                 online={all.find((candidate) => candidate.id === other)?.online}
               />
-              <Badge tone={pair.keep_alive ? 'outline' : 'neutral'}>
-                {d.keepAlive}：{pair.keep_alive ? t.common.yes : t.common.no}
-              </Badge>
+              <Badge tone={pair.keep_alive ? 'outline' : 'neutral'}>{d.keepAlive(pair.keep_alive)}</Badge>
             </li>
           )
         })}

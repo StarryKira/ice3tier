@@ -15,7 +15,7 @@ import { useMemo, useRef } from 'react'
 import { type NodeId } from '@/api/types'
 import { curveBetween, type Rect } from '@/access/geometry'
 import { OnlineDot } from '@/components/status'
-import { t } from '@/i18n'
+import { t, useLocale } from '@/i18n'
 import { cn } from '@/lib/utils'
 import { GraphCanvas } from '@/pages/access/flow'
 import { LINE_COLORS } from '@/topology/colors'
@@ -140,6 +140,8 @@ interface TopologyGraphProps {
  * 选中的那一对 A → B 是粗实线，B → A 是粗虚线，都带箭头，其余的变暗。
  */
 export function TopologyGraph({ shape, rtt, onPick }: TopologyGraphProps) {
+  // 点和线上的文字（读屏的说明、线上的延迟）算好存着，换语言时要重新算。
+  const locale = useLocale()
   const signature = layoutSignature(shape)
   const focused = shape.involved.size > 0
   const name = (id: string) => shape.points.find((point) => point.id === id)?.node.name ?? id
@@ -155,7 +157,8 @@ export function TopologyGraph({ shape, rtt, onPick }: TopologyGraphProps) {
         draggable: false,
         connectable: false,
       })),
-    [shape, focused],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [shape, focused, locale],
   )
 
   const edges = useMemo<LineFlowEdge[]>(() => {
@@ -200,7 +203,7 @@ export function TopologyGraph({ shape, rtt, onPick }: TopologyGraphProps) {
       const total = hop.direction === 'forward' ? rtt.forward : rtt.reverse
       const label =
         hop.step === 0
-          ? `${hop.direction === 'forward' ? 'A → B' : 'B → A'}${total === null ? '' : ` ${t.routes.rtt(total)}`}`
+          ? `${hop.direction === 'forward' ? g.legendForward : g.legendReverse}${total === null ? '' : ` ${t.routes.rtt(total)}`}`
           : null
       return {
         id: hop.id,
@@ -215,9 +218,9 @@ export function TopologyGraph({ shape, rtt, onPick }: TopologyGraphProps) {
       }
     })
     return [...base, ...none, ...highlight]
-    // name 只读 shape.points。
+    // name 只读 shape.points；语言变了线上的说明要换。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shape, focused, rtt.forward, rtt.reverse])
+  }, [shape, focused, rtt.forward, rtt.reverse, locale])
 
   // 用鼠标点一下，画图的库既报"点了"又报"选中了"：同一下只算一次，不然第二个点会被算成重新开始选。
   const last = useRef({ id: '', at: 0 })

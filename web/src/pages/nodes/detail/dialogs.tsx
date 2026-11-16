@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useNavigate } from 'react-router'
 
-import { fieldError, formError, formFailure } from '@/api/formErrors'
+import { fieldError, formError, formErrorDetail, formFailure } from '@/api/formErrors'
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
 import { type Network, type Node, type NodeId } from '@/api/types'
@@ -53,6 +53,7 @@ export function EditIpDialog({ network, node, open, onClose }: NodeDialogProps) 
       submitLabel={d.ipSubmit}
       pending={save.isPending}
       error={formError(failure)}
+      errorDetail={formErrorDetail(failure)}
       onSubmit={() => {
         setTouched(true)
         if (problem === null) save.mutate(undefined, { onSuccess: onClose })
@@ -128,16 +129,15 @@ export function SucceedDialog({ network, node, open, onClose }: NodeDialogProps)
       open={open}
       onClose={onClose}
       title={d.succeedTitle(node.name)}
-      description={d.succeedLead}
       dirty={predecessor !== null}
       submitLabel={d.succeedSubmit}
       pending={succeed.isPending}
       error={formError(failure)}
+      errorDetail={formErrorDetail(failure)}
       onSubmit={() => void submit()}
     >
       <Field
         label={d.succeedLabel}
-        hint={d.succeedOnlyOffline}
         error={(touched && chosen === undefined ? t.validate.pickNode : null) ?? fieldError(failure, 'predecessor')}
       >
         {(props) => (

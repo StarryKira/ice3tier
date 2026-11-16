@@ -23,20 +23,20 @@ export function ExitFormFields({ state, onChange, showProblems }: ExitFormFields
   return (
     <div className="space-y-4">
       <Field
-        label={t.nodes.detail.exitFormPorts}
-        hint={state.limitPorts ? t.nodes.detail.exitFormPortsHint : undefined}
+        label={d.exitFormPorts}
+        hint={state.limitPorts ? d.exitFormPortsHint : undefined}
         error={shown(problems.ports)}
       >
         {(props) => (
           <div className="flex flex-wrap items-center gap-2">
             <Segmented
-              aria-label={t.nodes.detail.exitFormPorts}
+              aria-label={d.exitFormPorts}
               size="sm"
               value={state.limitPorts ? 'limited' : 'any'}
               onChange={(value) => onChange({ ...state, limitPorts: value === 'limited' })}
               options={[
-                { value: 'limited', label: t.nodes.detail.exitFormPortsLimited },
-                { value: 'any', label: t.nodes.detail.exitFormPortsAny },
+                { value: 'limited', label: d.exitFormPortsLimited },
+                { value: 'any', label: d.exitFormPortsAny },
               ]}
             />
             {state.limitPorts ? (
@@ -50,17 +50,13 @@ export function ExitFormFields({ state, onChange, showProblems }: ExitFormFields
           </div>
         )}
       </Field>
-      <Field
-        label={t.nodes.detail.exitFormBandwidth}
-        hint={t.nodes.detail.exitFormBandwidthHint}
-        error={shown(problems.bandwidth)}
-        optional={t.common.optional}
-      >
+      <Field label={d.exitFormBandwidth} error={shown(problems.bandwidth)} optional={t.common.optional}>
         {(props) => (
           <div className="flex items-center gap-2">
             <Input
               {...props}
               inputMode="numeric"
+              placeholder={t.common.unlimited}
               className="w-28 tabular"
               value={state.bandwidth}
               onChange={(event) => onChange({ ...state, bandwidth: event.target.value })}
@@ -72,8 +68,8 @@ export function ExitFormFields({ state, onChange, showProblems }: ExitFormFields
       <label className="flex items-start gap-3">
         <Switch checked={state.lan} onCheckedChange={(lan) => onChange({ ...state, lan })} className="mt-0.5" />
         <span>
-          <span className="block text-[13px] font-medium">{t.nodes.detail.exitFormLan}</span>
-          <span className="block text-[13px] text-muted-foreground">{t.nodes.detail.exitFormLanHint}</span>
+          <span className="block text-[13px] font-medium">{d.exitFormLan}</span>
+          <span className="block text-[13px] text-muted-foreground">{d.exitFormLanHint}</span>
         </span>
       </label>
       <div className="space-y-4 border-t pt-4">
@@ -148,7 +144,7 @@ export function ExitFormFields({ state, onChange, showProblems }: ExitFormFields
             </div>
           )}
         </Field>
-        <Field label={d.exitFormClass} hint={d.exitFormClassHint}>
+        <Field label={d.exitFormClass}>
           {(props) => (
             <ClassSelect
               {...props}
@@ -160,8 +156,8 @@ export function ExitFormFields({ state, onChange, showProblems }: ExitFormFields
         </Field>
       </div>
       <Field
-        label={t.nodes.detail.exitFormUpstream}
-        hint={t.nodes.detail.exitFormUpstreamHint}
+        label={d.exitFormUpstream}
+        hint={d.exitFormUpstreamHint}
         error={shown(problems.upstream)}
         optional={t.common.optional}
       >

@@ -8,7 +8,7 @@ export interface ForwardStatusView {
   tone: Tone
   /** 短的：圆点旁边的那几个字。 */
   label: string
-  /** 原因和下一步。 */
+  /** 原因，先说对象和状态。停用时就是那几个字：列表里不另起一行说它。 */
   detail: string
   /** 这种状态要用户去做点什么。 */
   needsAttention: boolean
@@ -50,7 +50,7 @@ export function forwardStatusView(
       return { ...base, tone: 'ok', label: s.active, detail: s.activeDetail, listen }
     }
     case 'disabled':
-      return { ...base, tone: 'idle', label: s.disabled, detail: s.disabledDetail }
+      return { ...base, tone: 'idle', label: s.disabled, detail: s.disabled }
     case 'target_not_declared':
       return {
         ...base,

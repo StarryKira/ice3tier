@@ -1,22 +1,25 @@
 import { describe, expect, it } from 'vitest'
 
-import { t } from '@/i18n'
+import { setLocale, t } from '@/i18n'
 import { direct, makeEntry, noRoute, viaRelays } from '@/test/fixtures'
 
 import { entryText, formatMicros, formatPermille, routeDetail, routeTextWithDetail } from './route'
 
 const name = (id: number) => ({ 1: 'hk', 2: 'laptop' })[id] ?? `#${id}`
+const r = t.routes
 
 describe('一条路的细节', () => {
   it('直连写方式：局域网、IPv6、端口可达、打洞；不认识的照实说', () => {
     for (const kind of ['lan', 'ipv6', 'reachable', 'punched', 'unknown'] as const) {
       expect(routeDetail(direct(), { direct: kind })).toBe(t.routes.directKind[kind])
     }
-    expect(routeTextWithDetail(direct(), { direct: 'lan' }, name)).toBe('直连（局域网）')
+    expect(routeTextWithDetail(direct(), { direct: 'lan' }, name)).toBe(r.withDetail(r.direct, r.directKind.lan))
   })
 
   it('经 relay 写第一段的传输', () => {
-    expect(routeTextWithDetail(viaRelays(1), { relay_leg: 'tcp' }, name)).toBe('经 hk（第一段走 TCP）')
+    expect(routeTextWithDetail(viaRelays(1), { relay_leg: 'tcp' }, name)).toBe(
+      r.withDetail(r.via('hk'), r.relayLeg('TCP')),
+    )
     expect(routeDetail(viaRelays(1), { relay_leg: 'udp' })).toBe(t.routes.relayLeg('UDP'))
   })
 
@@ -24,12 +27,16 @@ describe('一条路的细节', () => {
     expect(routeDetail(direct(), {})).toBeNull()
     expect(routeDetail(direct(), { direct: null, relay_leg: null })).toBeNull()
     expect(routeDetail(noRoute, { direct: 'lan' })).toBeNull()
-    expect(routeTextWithDetail(viaRelays(1), {}, name)).toBe('经 hk')
+    expect(routeTextWithDetail(viaRelays(1), {}, name)).toBe(r.via('hk'))
   })
 
   it('矩阵格子的悬停文字带着细节', () => {
     const entry = makeEntry(2, 1, direct('203.0.113.7:20330'), { direct: 'punched' })
-    expect(entryText(entry, name)).toMatch(/^直连（打洞），对端地址 203\.0\.113\.7:20330/)
+    expect(
+      entryText(entry, name).startsWith(
+        [r.withDetail(r.direct, r.directKind.punched), r.addr('203.0.113.7:20330')].join(r.factSeparator),
+      ),
+    ).toBe(true)
   })
 })
 
@@ -44,5 +51,12 @@ describe('测量值的单位', () => {
     expect(formatPermille(0)).toBe('0%')
     expect(formatPermille(5)).toBe('0.5%')
     expect(formatPermille(20)).toBe('2%')
+  })
+
+  it('英文界面里也是同样的数和单位', () => {
+    setLocale('en', { remember: false })
+    expect(formatMicros(12_400)).toBe('12.4 ms')
+    expect(formatMicros(1_234_000)).toBe('1,234 ms')
+    expect(formatPermille(5)).toBe('0.5%')
   })
 })

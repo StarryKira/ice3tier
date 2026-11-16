@@ -14,7 +14,7 @@ const context = { node: 'laptop', bind: '127.0.0.1:8080', online: true }
 describe('一个监听的状态', () => {
   it('正在监听：带着连接数和流量，没有要做的事', () => {
     const view = listenView(at({ state: 'listening', local: '127.0.0.1:8080' }), context)
-    expect(view).toMatchObject({ tone: 'ok', label: s.listening, detail: null, needsAttention: false })
+    expect(view).toMatchObject({ tone: 'ok', label: s.listening, detail: null, reported: null, needsAttention: false })
     expect(view.local).toBe('127.0.0.1:8080')
     expect(view.picked).toBeNull()
     expect(view.traffic).toEqual(traffic)
@@ -26,12 +26,13 @@ describe('一个监听的状态', () => {
     expect(view.local).toBe('127.0.0.1:41873')
   })
 
-  it('端口被占用：说是哪台机器上的哪个端口、系统怎么说的、怎么办', () => {
+  it('端口被占用：说是哪台机器上的哪个端口；节点的原话另放，作为补充', () => {
     const view = listenView(at({ state: 'port_in_use', detail: 'Address already in use (os error 98)' }), context)
     expect(view.tone).toBe('danger')
     expect(view.needsAttention).toBe(true)
     expect(view.label).toBe(s.portInUse)
-    expect(view.detail).toBe(s.portInUseDetail('laptop', '8080', 'Address already in use (os error 98)'))
+    expect(view.detail).toBe(s.portInUseDetail('laptop', '8080'))
+    expect(view.reported).toBe('Address already in use (os error 98)')
     expect(view.local).toBeNull()
     // 没有在监听：连接数和流量的 0 没有意思，不写。
     expect(view.traffic).toBeNull()
@@ -42,15 +43,22 @@ describe('一个监听的状态', () => {
     expect(view.detail).toContain('127.0.0.1:0')
   })
 
-  it('没有绑上、不支持：红色，带系统给的原因', () => {
+  it('没有绑上、不支持：红色，节点的原话另放', () => {
     const failed = listenView(at({ state: 'failed', detail: 'Cannot assign requested address' }), {
       ...context,
       bind: '192.168.9.9:1080',
     })
     expect(failed).toMatchObject({ tone: 'danger', label: s.failed, needsAttention: true })
-    expect(failed.detail).toBe(s.failedDetail('laptop', '192.168.9.9:1080', 'Cannot assign requested address'))
+    expect(failed.detail).toBe(s.failedDetail('laptop', '192.168.9.9:1080'))
+    expect(failed.reported).toBe('Cannot assign requested address')
     const unsupported = listenView(at({ state: 'unsupported', detail: '虚拟 IP 上不能写 0' }), context)
-    expect(unsupported).toMatchObject({ tone: 'danger', label: s.unsupported, needsAttention: true })
+    expect(unsupported).toMatchObject({
+      tone: 'danger',
+      label: s.unsupported,
+      needsAttention: true,
+      detail: s.unsupportedDetail('laptop'),
+      reported: '虚拟 IP 上不能写 0',
+    })
   })
 
   it('监听在虚拟 IP 上：正常，不占系统端口', () => {

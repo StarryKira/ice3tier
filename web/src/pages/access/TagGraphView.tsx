@@ -18,7 +18,7 @@ import { type AccessGraph } from '@/api/types'
 import { curveBetween, loopAround, type Rect } from '@/access/geometry'
 import { buildTagGraph, layoutSignature, type RuleLine, TAG_NODE, type TagPoint, UNTAGGED_ID } from '@/access/tagGraph'
 import { ruleLabel } from '@/lib/rules'
-import { t } from '@/i18n'
+import { t, useLocale } from '@/i18n'
 import { cn } from '@/lib/utils'
 
 import { GraphCanvas } from './flow'
@@ -138,6 +138,8 @@ export function TagGraphView({
   onRuleHover,
   onTagClick,
 }: TagGraphViewProps) {
+  // 点和线上的文字（读屏的说明）在下面算好存着，换语言时要重新算。
+  const locale = useLocale()
   const shape = useMemo(() => buildTagGraph(graph), [graph])
   const signature = layoutSignature(shape)
 
@@ -157,9 +159,9 @@ export function TagGraphView({
 
   useEffect(() => {
     setNodes((current) => toNodes(current))
-    // toNodes 用到的都列在下面了。
+    // toNodes 用到的都列在下面了；语言变了，点上的说明也要换。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shape, activeTag, setNodes])
+  }, [shape, activeTag, setNodes, locale])
 
   useEffect(() => {
     setNodes(toNodes([]))
@@ -190,7 +192,9 @@ export function TagGraphView({
           ariaLabel: g.edgeLabel(ruleLabel(line), line.enabled ? g.edgeEnabled : g.edgeDisabled),
         }
       }),
-    [shape.lines, highlightedRule],
+    // 线上的说明来自目录：语言变了要重新算。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [shape.lines, highlightedRule, locale],
   )
 
   return (

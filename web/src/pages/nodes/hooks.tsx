@@ -46,10 +46,11 @@ export function useDeleteNode(network: Network): (node: Node) => Promise<boolean
       title: t.nodes.deleteTitle(node.name),
       body: (
         <>
-          <p>{t.nodes.deleteLead}</p>
-          {refs !== null ? <p>{refs}</p> : null}
+          <p>
+            {t.nodes.deleteLead}
+            {refs !== null ? ` ${refs}` : null}
+          </p>
           <p>{t.nodes.deleteCooldown(node.virtual_ip, node.name, COOLDOWN_DAYS)}</p>
-          <p>{t.nodes.deleteIrreversible}</p>
         </>
       ),
       confirmLabel: t.nodes.deleteConfirm,

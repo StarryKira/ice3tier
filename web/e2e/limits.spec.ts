@@ -6,7 +6,7 @@ import { networkInterfaces } from 'node:os'
 import { expect, type Page, test } from '@playwright/test'
 
 import { Controller, type NodeHandle } from './controller'
-import { clearToasts, expectToast, goTo, goToAdmin, signIn } from './helpers'
+import { clearToasts, expectToast, goTo, goToAdmin, literal, signIn, t } from './helpers'
 
 /**
  * 限额、用量和状态：两个真的跑着的节点（gw 是出口和转发的目标，laptop 是入口），流量真的经它们走。
@@ -112,7 +112,7 @@ test.beforeAll(async ({ browser }) => {
   busyPort = await listen(busy, '127.0.0.1')
 
   controller = await Controller.start()
-  page = await browser.newPage()
+  page = await browser.newPage({ locale: 'zh-CN' })
 })
 
 test.afterAll(async () => {
@@ -141,24 +141,26 @@ test('准备：出口 gw 和入口 laptop 跑起来；还有一个只注册过�
   expect(spare?.last_seen_at).toBeNull()
 
   await signIn(page, controller)
-  await goTo(page, '节点')
-  await expect(page.getByTestId(`node-row-${spare?.name ?? ''}`).getByTestId('never-connected')).toHaveText('从未连接')
+  await goTo(page, t.nav.nodes)
+  await expect(page.getByTestId(`node-row-${spare?.name ?? ''}`).getByTestId('never-connected')).toHaveText(
+    t.nodes.never,
+  )
 })
 
 test('标签改名：整个网络里一起改', async () => {
-  await goTo(page, '访问控制')
-  await page.getByRole('button', { name: '展开标签 laptops 的成员' }).click()
-  await page.getByRole('button', { name: '给标签 laptops 改名' }).click()
-  const dialog = page.getByRole('dialog', { name: '给标签 laptops 改名' })
-  await expect(dialog.getByText('现在有 1 个节点带着它，0 条规则用到它。')).toBeVisible()
-  await dialog.getByRole('textbox', { name: '新名字' }).fill('notebooks')
-  await expect(dialog.getByText('新名字原来没有人用：谁能访问谁不变。')).toBeVisible()
-  await dialog.getByRole('button', { name: '改名', exact: true }).click()
-  await expectToast(page, /标签 laptops 已改名为 notebooks/)
+  await goTo(page, t.nav.access)
+  const p = t.access.tagsPanel
+  await page.getByRole('button', { name: p.toggle('laptops', false) }).click()
+  await page.getByRole('button', { name: p.renameTitle('laptops') }).click()
+  const dialog = page.getByRole('dialog', { name: p.renameTitle('laptops') })
+  await expect(dialog.getByText(p.renameLead)).toBeVisible()
+  await dialog.getByRole('textbox', { name: p.renameLabel }).fill('notebooks')
+  await dialog.getByRole('button', { name: p.renameSubmit, exact: true }).click()
+  await expectToast(page, p.renamed('laptops', 'notebooks'))
   await expect(dialog).toBeHidden()
   const listed = await controller.api<ApiNode[]>('GET', `${NET}/nodes`)
   expect(listed.find((node) => node.id === nodes.laptop.id)?.tags).toEqual(['notebooks'])
-  await expect(page.getByRole('button', { name: '收起标签 notebooks 的成员' })).toBeVisible()
+  await expect(page.getByRole('button', { name: p.toggle('notebooks', true) })).toBeVisible()
   await clearToasts(page)
 })
 
@@ -167,18 +169,19 @@ test('出口配额：在节点详情里配上，下载之后出口页有本账�
   test.setTimeout(90_000)
   await page.goto(`${controller.baseUrl}/n/1/nodes/${nodes.gw.id}`)
   const exitRow = page.getByTestId('capability-exit')
-  await exitRow.getByRole('switch', { name: '把 gw 启用为出口' }).click()
-  await exitRow.getByRole('textbox', { name: /^流量配额/ }).fill('1')
-  await exitRow.getByRole('combobox', { name: '流量配额的单位' }).selectOption('GB')
-  await exitRow.getByRole('spinbutton', { name: '账期从每月几号开始' }).fill('5')
-  await exitRow.getByRole('radio', { name: '只连 IPv4' }).click()
-  await exitRow.getByRole('switch', { name: /^允许访问它所在的局域网/ }).click()
-  await exitRow.getByRole('button', { name: '启用出口' }).click()
+  const d = t.nodes.detail
+  await exitRow.getByRole('switch', { name: d.exitSwitch('gw') }).click()
+  await exitRow.getByRole('textbox', { name: new RegExp(`^${literal(d.exitFormQuota)}`) }).fill('1')
+  await exitRow.getByRole('combobox', { name: d.exitFormQuotaUnit }).selectOption('GB')
+  await exitRow.getByRole('spinbutton', { name: d.exitFormResetDay }).fill('5')
+  await exitRow.getByRole('radio', { name: d.exitFormFamilyIpv4 }).click()
+  await exitRow.getByRole('switch', { name: new RegExp(`^${literal(d.exitFormLan)}`) }).click()
+  await exitRow.getByRole('button', { name: d.exitEnable }).click()
   // 打开"允许访问局域网"要确认一次。
-  await page.getByRole('alertdialog').getByRole('button', { name: '允许访问局域网' }).click()
-  await expectToast(page, 'gw 已启用为出口')
-  await expect(exitRow).toContainText('配额 1.0 GB/月（每月 5 日起）')
-  await expect(exitRow).toContainText('只连 IPv4')
+  await page.getByRole('alertdialog').getByRole('button', { name: d.exitLanConfirm }).click()
+  await expectToast(page, d.exitEnabledToast('gw'))
+  await expect(exitRow).toContainText(d.exitQuota('1.0 GB', 5))
+  await expect(exitRow).toContainText(d.exitFamilyIpv4)
   const exits = await controller.api<{ settings: { quota_bytes: number; quota_reset_day: number; family: string } }[]>(
     'GET',
     `${NET}/exits`,
@@ -190,35 +193,36 @@ test('出口配额：在节点详情里配上，下载之后出口页有本账�
   const done = await download(`socks5h://${nodes.gw.ip}@127.0.0.1:${nodes.laptop.handle.socksPort ?? 0}`)
   expect(done.code, done.stderr).toBe(0)
 
-  await goTo(page, '出口')
+  await goTo(page, t.nav.exits)
   const usage = page.getByTestId('exit-usage-gw')
-  const meter = usage.getByRole('meter', { name: '出口 gw 本账期的配额' })
+  const meter = usage.getByRole('meter', { name: t.exits.quotaLabel('gw') })
   await expect(meter).toBeVisible({ timeout: 40_000 })
   await expect(usage).toContainText(/MB \/ 1\.0 GB/, { timeout: 40_000 })
-  await expect(usage).toContainText(/日重置/)
+  await expect(usage).toContainText(t.exits.quotaResets('').trim())
   // 对照：出口报的和 laptop 看到的并排放着。
-  await page.getByRole('button', { name: '出口 gw 的计数和用它的节点看到的' }).click()
-  const table = page.getByRole('table', { name: '出口 gw 的计数和用它的节点看到的' })
-  await expect(table.getByRole('columnheader', { name: '出口自己报的' })).toBeVisible()
-  await expect(table.getByRole('columnheader', { name: 'laptop 看到的' })).toBeVisible({ timeout: 30_000 })
+  await page.getByRole('button', { name: t.exits.detailsFor('gw') }).click()
+  const table = page.getByRole('table', { name: t.exits.detailsFor('gw') })
+  await expect(table.getByRole('columnheader', { name: t.exits.exitReported, exact: true })).toBeVisible()
+  await expect(table.getByRole('columnheader', { name: 'laptop', exact: true })).toBeVisible({ timeout: 30_000 })
   await expect(page.getByTestId('exit-health-gw')).toBeVisible()
 })
 
 test('凭据：经要求凭据的监听器用过之后有用量；改上限让它用完；吊销；再彻底删掉', async () => {
   test.skip(lanIp === undefined, '这台机器没有私有 IPv4 地址，经出口访问局域网目标的测试做不了')
   test.setTimeout(120_000)
-  await goTo(page, '接入凭据')
-  await page.getByRole('button', { name: '签发凭据' }).first().click()
-  const form = page.getByRole('dialog', { name: '签发凭据' })
-  await form.getByLabel('名字', { exact: true }).fill('phone')
-  await form.getByRole('button', { name: '签发', exact: true }).click()
+  const c = t.credentials
+  await goTo(page, t.nav.credentials)
+  await page.getByRole('button', { name: c.issue }).first().click()
+  const form = page.getByRole('dialog', { name: c.createTitle })
+  await form.getByLabel(c.nameLabel, { exact: true }).fill('phone')
+  await form.getByRole('button', { name: c.submit, exact: true }).click()
   const secretDialog = page.getByTestId('secret-dialog')
   const secret = ((await secretDialog.getByTestId('secret-value').textContent()) ?? '').trim()
-  await secretDialog.getByRole('button', { name: '我已保存，关闭' }).click()
+  await secretDialog.getByRole('button', { name: c.savedClose }).click()
   const row = page.getByTestId('credential-row-phone')
-  await expect(row).toContainText('有效')
+  await expect(row).toContainText(c.state.active)
   await expect(row).toContainText(`${secret.slice(0, 6)}••••`)
-  await expect(row).toContainText('从未使用')
+  await expect(row).toContainText(c.neverUsed)
   credentialId = (await controller.api<{ id: number }[]>('GET', `${NET}/credentials`))[0]?.id ?? 0
 
   // 一个对外的、要求凭据的监听器，开在 laptop 上；只收本机来的连接。
@@ -232,29 +236,29 @@ test('凭据：经要求凭据的监听器用过之后有用量；改上限让�
     require_credential: true,
   })
   // 等它监听上，再用凭据经它下载。
-  await goTo(page, '监听器')
-  await expect(page.getByTestId('listener-state-lan')).toContainText('正在监听', { timeout: 30_000 })
+  await goTo(page, t.nav.listeners)
+  await expect(page.getByTestId('listener-state-lan')).toContainText(t.listen.listening, { timeout: 30_000 })
   // 节点自带的回环入口也列出来。
   await expect(page.locator('[data-testid^="builtin-row-laptop-"]').first()).toBeVisible()
   const done = await download(`socks5h://${nodes.gw.ip}:${secret}@127.0.0.1:${port}`)
   expect(done.code, done.stderr).toBe(0)
 
   // 入口每 10 秒报一次用量。
-  await goTo(page, '接入凭据')
+  await goTo(page, t.nav.credentials)
   await expect(row).toContainText(/\d(\.\d)? MB/, { timeout: 45_000 })
-  await expect(row).not.toContainText('从未使用')
+  await expect(row).not.toContainText(c.neverUsed)
 
-  // 改上限，不用重新签发：比已经用掉的还少，保存之前就说它会马上停用。
-  await page.getByRole('button', { name: 'phone 的操作' }).click()
-  await page.getByRole('menuitem', { name: /修改上限/ }).click()
-  const limits = page.getByRole('dialog', { name: '修改凭据 phone 的上限' })
-  await limits.getByRole('textbox', { name: /^流量上限/ }).fill('1')
-  await limits.getByRole('combobox', { name: '流量上限的单位' }).selectOption('MB')
-  await expect(limits.getByText('新的流量上限比已经用掉的还少')).toBeVisible()
-  await limits.getByRole('button', { name: '保存上限' }).click()
-  await expectToast(page, /凭据 phone 的上限已保存/)
-  await expect(row).toContainText('已用完')
-  await expect(page.getByText(/流量上限用完了：入口拒绝它的新连接/)).toBeVisible()
+  // 改上限，不用重新新建：比已经用掉的还少，保存之前就说它会马上停用。
+  await page.getByRole('button', { name: t.common.actionsFor('phone') }).click()
+  await page.getByRole('menuitem', { name: c.menuEdit }).click()
+  const limits = page.getByRole('dialog', { name: c.editTitle('phone') })
+  await limits.getByRole('textbox', { name: new RegExp(`^${literal(c.maxBytesLabel)}`) }).fill('1')
+  await limits.getByRole('combobox', { name: c.unitLabel }).selectOption('MB')
+  await expect(limits.getByText(c.editWillExhaust)).toBeVisible()
+  await limits.getByRole('button', { name: c.editSubmit }).click()
+  await expectToast(page, c.edited('phone'))
+  await expect(row).toContainText(c.state.exhausted)
+  await expect(page.getByText(c.state.exhaustedDetail)).toBeVisible()
   // 入口收到新的上限之后真的拒绝它。
   await expect
     .poll(async () => (await download(`socks5h://${nodes.gw.ip}:${secret}@127.0.0.1:${port}`)).code, {
@@ -264,27 +268,27 @@ test('凭据：经要求凭据的监听器用过之后有用量；改上限让�
   await clearToasts(page)
 
   // 吊销：危险确认，行留着，看得到用过多少。
-  await page.getByRole('button', { name: 'phone 的操作' }).click()
-  await page.getByRole('menuitem', { name: '吊销…' }).click()
-  const revoke = page.getByRole('alertdialog', { name: '吊销凭据 phone？' })
-  await expect(revoke.getByRole('button', { name: '取消' })).toBeFocused()
-  await revoke.getByRole('button', { name: '吊销凭据' }).click()
-  await expectToast(page, '凭据 phone 已吊销')
-  await expect(row).toContainText('已吊销')
+  await page.getByRole('button', { name: t.common.actionsFor('phone') }).click()
+  await page.getByRole('menuitem', { name: c.menuRevoke }).click()
+  const revoke = page.getByRole('alertdialog', { name: c.revokeTitle('phone') })
+  await expect(revoke.getByRole('button', { name: t.common.cancel })).toBeFocused()
+  await revoke.getByRole('button', { name: c.revokeConfirm }).click()
+  await expectToast(page, c.revoked('phone'))
+  await expect(row).toContainText(c.state.revoked)
   await expect(row).toContainText(/MB/)
   const listed = await controller.api<{ state: string }[]>('GET', `${NET}/credentials`)
   expect(listed[0]?.state).toBe('revoked')
   await clearToasts(page)
 
   // 再删一次才彻底删掉。
-  await page.getByRole('button', { name: 'phone 的操作' }).click()
-  await expect(page.getByRole('menuitem', { name: '吊销…' })).toHaveCount(0)
-  await page.getByRole('menuitem', { name: '删除记录…' }).click()
+  await page.getByRole('button', { name: t.common.actionsFor('phone') }).click()
+  await expect(page.getByRole('menuitem', { name: c.menuRevoke })).toHaveCount(0)
+  await page.getByRole('menuitem', { name: c.menuRemove }).click()
   await page
-    .getByRole('alertdialog', { name: '彻底删掉凭据 phone？' })
-    .getByRole('button', { name: '删除记录' })
+    .getByRole('alertdialog', { name: c.removeTitle('phone') })
+    .getByRole('button', { name: c.removeConfirm })
     .click()
-  await expectToast(page, '凭据 phone 的记录已删除')
+  await expectToast(page, c.removed('phone'))
   await expect(row).toHaveCount(0)
   expect(await controller.api<unknown[]>('GET', `${NET}/credentials`)).toHaveLength(0)
   await clearToasts(page)
@@ -292,32 +296,36 @@ test('凭据：经要求凭据的监听器用过之后有用量；改上限让�
 
 test('端口写 0 的转发：节点挑一个端口，列表里写出来，真的能连', async () => {
   test.setTimeout(90_000)
-  await goTo(page, '端口转发')
-  await page.getByRole('button', { name: '新建转发' }).first().click()
-  const dialog = page.getByRole('dialog', { name: '新建转发' })
-  const listenSide = dialog.getByRole('group', { name: '在哪里监听' })
-  const targetSide = dialog.getByRole('group', { name: '转发到哪里' })
-  await listenSide.getByRole('combobox', { name: '节点' }).click()
+  await goTo(page, t.nav.forwards)
+  const f = t.forwards
+  const d = f.dialog
+  await page.getByRole('button', { name: f.create }).first().click()
+  const dialog = page.getByRole('dialog', { name: d.createTitle })
+  const listenSide = dialog.getByRole('group', { name: d.listenSide })
+  const targetSide = dialog.getByRole('group', { name: d.targetSide })
+  await listenSide.getByRole('combobox', { name: d.node }).click()
   await page.getByRole('option', { name: /10\.66\.0\.2(?!\d)/ }).click()
   await expect(page.getByRole('listbox')).toHaveCount(0)
-  await targetSide.getByRole('combobox', { name: '节点' }).click()
+  await targetSide.getByRole('combobox', { name: d.node }).click()
   await page.getByRole('option', { name: /10\.66\.0\.1(?!\d)/ }).click()
-  await expect(listenSide.getByRole('textbox', { name: '端口' })).toHaveAttribute('placeholder', '留空自动选')
-  await targetSide.getByRole('textbox', { name: '端口' }).fill(String(httpPort))
-  await dialog.getByLabel(/^名字/).fill('picked')
-  await dialog.getByRole('button', { name: '新建转发' }).click()
-  await expectToast(page, /挑定端口之后，地址显示在列表里/)
+  await expect(listenSide.getByRole('textbox', { name: d.port })).toHaveAttribute('placeholder', d.portPlaceholder)
+  await targetSide.getByRole('textbox', { name: d.targetPort }).fill(String(httpPort))
+  await dialog.getByLabel(new RegExp(`^${literal(d.name)}`)).fill('picked')
+  await dialog.getByRole('button', { name: d.submitCreate }).click()
+  await expectToast(page, d.createdPicked('laptop'))
 
   const [forward] = await controller.api<{ id: number; bind: string }[]>('GET', `${NET}/forwards`)
   expect(forward?.bind).toBe('127.0.0.1:0')
   const picked = page.getByTestId(`forward-picked-${forward?.id ?? 0}`)
-  await expect(picked).toContainText(/节点挑的端口 \d+/, { timeout: 40_000 })
-  const port = Number(/节点挑的端口 (\d+)/.exec((await picked.textContent()) ?? '')?.[1])
+  // "节点挑的端口 N"：把端口那一段换成数字的模式，从文字里取出端口。
+  const pickedText = new RegExp(literal(f.picked(65535)).replace('65535', '(\\d+)'))
+  await expect(picked).toContainText(pickedText, { timeout: 40_000 })
+  const port = Number(pickedText.exec((await picked.textContent()) ?? '')?.[1])
   expect(port).toBeGreaterThan(0)
   // 经这个端口真的连到了 gw 上的服务。
   const result = await curl(['-s', '-m', '10', '--noproxy', '*', `http://127.0.0.1:${port}/hello`])
   expect(result.stdout).toBe('hello from the target\n')
-  await expect(page.getByTestId('forward-row-picked')).toContainText('正常')
+  await expect(page.getByTestId('forward-row-picked')).toContainText(f.status.active)
   await clearToasts(page)
 })
 
@@ -332,44 +340,50 @@ test('监听在被占用的端口上的转发：显示端口被占用、是哪�
     target_addr: `127.0.0.1:${httpPort}`,
   })
   const row = page.getByTestId('forward-row-busy')
-  await expect(row).toContainText('端口被占用', { timeout: 40_000 })
-  await expect(page.getByText(new RegExp(`端口被占用：laptop 上 ${busyPort} 已经有别的程序在监听`))).toBeVisible()
+  const detail = t.listen.portInUseDetail('laptop', String(busyPort))
+  await expect(row).toContainText(t.listen.portInUse, { timeout: 40_000 })
+  await expect(page.getByText(detail)).toBeVisible()
   // 节点详情的"监听"里同样看得到，连同自带的回环入口。
   await page.goto(`${controller.baseUrl}/n/1/nodes/${nodes.laptop.id}?tab=listen`)
-  await expect(page.getByTestId('node-listen-local-socks5')).toContainText('正在监听')
-  await expect(page.getByText(new RegExp(`端口被占用：laptop 上 ${busyPort}`))).toBeVisible()
+  await expect(page.getByTestId('node-listen-local-socks5')).toContainText(t.listen.listening)
+  await expect(page.getByText(detail)).toBeVisible()
 })
 
 test('操作记录：按操作筛，记录里的对象是链接；点过去对象已经删掉了会说', async () => {
-  await goToAdmin(page, '设置')
-  await page.getByRole('link', { name: '操作记录' }).click()
-  await page.getByRole('combobox', { name: '按操作筛选' }).selectOption('credential')
+  await goToAdmin(page, t.nav.settings)
+  const l = t.settings.log
+  const credentialRef = (id: number) => l.refLabels.credential(id)
+  await page.getByRole('link', { name: t.settings.tabLog }).click()
+  await page.getByRole('combobox', { name: l.filterAction }).selectOption('credential')
   await expect(page).toHaveURL(/action=credential/)
   test.skip(lanIp === undefined, '前面关于凭据的测试被跳过了，没有可以点的记录')
   const rows = page.locator('[data-testid^="log-row-"]')
   // 签发、改上限、吊销、删除（可能还有一条"用完了"），都是凭据的，新的在前。
-  await expect(rows.first()).toContainText('删除凭据的记录')
-  await expect(rows.last()).toContainText('签发凭据')
-  for (const text of await rows.allTextContents()) expect(text).toMatch(/凭据/)
+  await expect(rows.first()).toContainText(l.actions['credential.delete'])
+  await expect(rows.last()).toContainText(l.actions['credential.create'])
+  for (const text of await rows.allTextContents()) expect(text).toContain(credentialRef(credentialId))
 
   // 只看和这个凭据有关的。
   await rows
     .first()
-    .getByRole('button', { name: `只看和凭据 #${credentialId}有关的记录` })
+    .getByRole('button', { name: l.filterByRef(credentialRef(credentialId)) })
     .click()
   await expect(page).toHaveURL(new RegExp(`ref=credential%3A${credentialId}`))
-  await expect(page.getByTestId('log-ref-filter')).toContainText(`对象：凭据 #${credentialId}`)
+  await expect(page.getByTestId('log-ref-filter')).toContainText(l.refChip(credentialRef(credentialId)))
 
   // 记录里的节点写名字，点了去节点详情。
-  await page.getByRole('combobox', { name: '按操作筛选' }).selectOption('')
-  await page.getByRole('button', { name: `去掉筛选：凭据 #${credentialId}` }).click()
-  await page.getByRole('combobox', { name: '按操作筛选' }).selectOption('node.exit.enable')
-  await page.getByRole('link', { name: '节点 gw' }).first().click()
+  await page.getByRole('combobox', { name: l.filterAction }).selectOption('')
+  await page.getByRole('button', { name: l.refRemove(credentialRef(credentialId)) }).click()
+  await page.getByRole('combobox', { name: l.filterAction }).selectOption('node.exit.enable')
+  await page
+    .getByRole('link', { name: l.refLabels.node(nodes.gw.id, 'gw') })
+    .first()
+    .click()
   await expect(page).toHaveURL(new RegExp(`/n/1/nodes/${nodes.gw.id}$`))
 
   // 点一个已经彻底删掉的凭据：列表页上说一句。
   await page.goto(`${controller.baseUrl}/settings/log?action=credential.create`)
-  await page.getByRole('link', { name: `凭据 #${credentialId}` }).click()
+  await page.getByRole('link', { name: credentialRef(credentialId) }).click()
   await expect(page).toHaveURL(new RegExp(`/n/1/credentials\\?focus=${credentialId}`))
-  await expect(page.getByText(`操作记录里说的凭据 #${credentialId} 已经不在了`)).toBeVisible()
+  await expect(page.getByText(t.credentials.focusMissing(credentialId))).toBeVisible()
 })

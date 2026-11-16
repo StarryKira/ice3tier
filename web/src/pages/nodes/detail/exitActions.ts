@@ -1,4 +1,4 @@
-import { errorMessage } from '@/api/client'
+import { errorDetail, errorMessage } from '@/api/client'
 import { api } from '@/api/endpoints'
 import { useAction } from '@/api/queries'
 import { type Network, type Node } from '@/api/types'
@@ -39,7 +39,13 @@ export function useSaveExit(network: Network, node: Pick<Node, 'id' | 'name' | '
       return false
     }
   }
-  return { submit, pending: save.isPending, error: save.isError ? errorMessage(save.error) : null, reset: save.reset }
+  return {
+    submit,
+    pending: save.isPending,
+    error: save.isError ? errorMessage(save.error) : null,
+    errorDetail: save.isError ? errorDetail(save.error) : null,
+    reset: save.reset,
+  }
 }
 
 /** 出口的限制写成一行摘要。默认值（两种地址都连、不限建连、不设等级）不写。 */

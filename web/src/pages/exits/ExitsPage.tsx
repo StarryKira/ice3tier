@@ -32,7 +32,7 @@ import { TrafficText, UsageBar } from '@/components/usage'
 import { t } from '@/i18n'
 import { copyText } from '@/lib/clipboard'
 import { declareCommand, exitUsage } from '@/lib/commands'
-import { formatBytes } from '@/lib/format'
+import { formatBytes, formatList } from '@/lib/format'
 import { WAITING_INTERVAL } from '@/lib/polling'
 import { formatAge, formatFullTime } from '@/lib/time'
 import { FOCUSED_ROW, useFocusRow } from '@/lib/useFocusRow'
@@ -57,7 +57,7 @@ function Users({ network, node }: { network: Network; node: NodeRef }) {
   const users = access.data.reachable_by
   if (users.length === 0) return <span className="text-warn">{e.usersNone}</span>
   return (
-    <Tooltip content={e.usersList(users.map((edge) => edge.node.name).join('、'))}>
+    <Tooltip content={formatList(users.map((edge) => edge.node.name))}>
       <Link
         to={`${networkPath(network.id, 'access')}?view=node&node=${node.id}`}
         className="rounded-sm underline decoration-border-strong underline-offset-4 tabular hover:decoration-foreground"
@@ -98,7 +98,6 @@ function EnableExitDialog({ network, open, onClose }: EnableExitDialogProps) {
       open={open}
       onClose={onClose}
       title={e.dialogTitle}
-      description={e.dialogLead}
       dirty={picked !== null}
       submitLabel={e.submit}
       pending={save.pending}
@@ -180,7 +179,14 @@ function Health({ view }: { view: ExitView }) {
   const health = exitHealthView(view)
   return (
     <div data-testid={`exit-health-${view.node.name}`}>
-      <Tooltip content={`${health.detail}${view.online ? ` ${e.health.rule}` : ''}`}>
+      <Tooltip
+        content={
+          <>
+            <span className="block">{health.detail}</span>
+            {view.online ? <span className="mt-1 block opacity-75">{e.health.rule}</span> : null}
+          </>
+        }
+      >
         <span tabIndex={0} className="rounded-sm">
           <StatusText tone={health.tone} className="text-[13px] whitespace-nowrap">
             {health.label}
@@ -306,7 +312,6 @@ function CrossCheckTable({ view }: { view: ExitView }) {
   ]
   return (
     <div className="space-y-2" data-testid={`exit-crosscheck-${view.node.name}`}>
-      <p className="text-[13px] text-muted-foreground">{e.detailsLead}</p>
       {view.observed.length === 0 ? <p className="text-[13px] text-muted-foreground">{e.observedNone}</p> : null}
       <div className="overflow-x-auto rounded-lg bg-muted/60 px-3 py-1">
         <table className="w-full border-collapse text-[13px]" aria-label={e.detailsFor(view.node.name)}>
@@ -320,7 +325,7 @@ function CrossCheckTable({ view }: { view: ExitView }) {
               </th>
               {view.observed.map((seen) => (
                 <th key={seen.by.id} scope="col" className="px-3 py-2 text-right font-medium">
-                  {e.reportedBy(seen.by.name)}
+                  {seen.by.name}
                 </th>
               ))}
             </tr>
@@ -397,14 +402,14 @@ export function ExitsPage() {
 
   return (
     <Page>
-      <PageHeader title={e.title} description={e.description} actions={empty ? undefined : enableButton} />
+      <PageHeader title={e.title} actions={empty ? undefined : enableButton} />
       <div>
         {exits.isError ? (
           <ErrorState title={e.loadFailed} error={exits.error} onRetry={() => void exits.refetch()} />
         ) : empty && nodes.isSuccess && all.length === 0 ? (
           <EmptyState
             icon={DoorOpen}
-            title={e.emptyDeclaredTitle}
+            title={e.emptyTitle}
             description={e.emptyNoNodes}
             action={
               <Button asChild variant="primary">
@@ -415,12 +420,12 @@ export function ExitsPage() {
         ) : empty && declared.length > 0 ? (
           <EmptyState
             icon={DoorOpen}
-            title={e.emptyDeclaredTitle}
-            description={e.emptyDeclaredBody(declared.length)}
+            title={e.emptyTitle}
+            description={e.emptyDeclared(declared.length)}
             action={enableButton}
           />
         ) : empty ? (
-          <EmptyState icon={DoorOpen} title={e.emptyNoneTitle} description={e.emptyNoneBody}>
+          <EmptyState icon={DoorOpen} title={e.emptyTitle} description={e.emptyNoneBody}>
             <CodeBlock
               copy={declareCommand('exit')}
               className="mt-4 w-full max-w-md text-left"

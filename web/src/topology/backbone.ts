@@ -1,9 +1,9 @@
-import { type BackboneRelay, type NodeId } from '@/api/types'
+import { type BackboneRelay, type NodeId, type RelayState } from '@/api/types'
 import { type Tone } from '@/components/status'
 import { t } from '@/i18n'
 import { formatAge } from '@/lib/time'
 
-import { formatPermille } from './route'
+import { formatPermille, textFor } from './route'
 
 const b = t.topology.backbone
 
@@ -17,7 +17,7 @@ export interface RelayRowView {
   reportedBy: string | null
 }
 
-const STATE_TONE: Record<string, Tone> = { serving: 'ok', overloaded: 'warn', draining: 'warn', unknown: 'idle' }
+const STATE_TONE: Record<RelayState, Tone> = { serving: 'ok', overloaded: 'warn', draining: 'warn', unknown: 'idle' }
 
 /**
  * 骨干矩阵一行的表头：relay 自己报的状态、负载、这一行多新、从谁那里问来的。
@@ -27,11 +27,13 @@ export function relayRowView(relay: BackboneRelay, name: (id: NodeId) => string)
   if (relay.state === null) {
     return { state: { label: b.noRow, tone: 'idle', hint: b.noRowHint }, load: null, age: null, reportedBy: null }
   }
+  // 比界面新的 controller 可能报这里不认识的状态，按 unknown 写。
+  const known = Object.hasOwn(STATE_TONE, relay.state)
   return {
     state: {
-      label: b.state[relay.state] ?? relay.state,
-      tone: STATE_TONE[relay.state] ?? 'idle',
-      hint: b.stateHint[relay.state] ?? '',
+      label: textFor(b.state, relay.state) ?? b.state.unknown,
+      tone: known ? STATE_TONE[relay.state] : 'idle',
+      hint: textFor(b.stateHint, relay.state) ?? b.stateHint.unknown,
     },
     load: relay.load_percent === null ? null : b.load(relay.load_percent),
     age: relay.age_ms === null ? null : b.rowAge(formatAge(relay.age_ms / 1000)),

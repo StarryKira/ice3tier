@@ -40,6 +40,8 @@ export interface UpdateView {
   label: string
   /** 一句话：现在怎样、为什么、下一步。没有要补充的是 `null`。 */
   detail: string | null
+  /** 节点报的原话（失败的原因），作为补充显示；它是节点写的中文，界面不翻译。没有是 `null`。 */
+  reason: string | null
   /** 下载的进度，0 到 1。不在下载时是 `null`。 */
   progress: number | null
 }
@@ -63,28 +65,36 @@ export interface SelfUpdateBlock {
   commands: boolean
 }
 
-/** 键是字符串而不是 `SelfUpdateBlocker`：更新的 controller 可能报出这里还不认识的原因。 */
-const BLOCKERS: Partial<Record<string, SelfUpdateBlock>> = {
-  container: { reason: u.blocker.container, howTo: u.blocker.containerHow, commands: false },
-  package_manager: { reason: u.blocker.package_manager, howTo: u.blocker.package_managerHow, commands: false },
-  read_only_dir: { reason: u.blocker.read_only_dir, howTo: u.blocker.read_only_dirHow, commands: true },
-} satisfies Record<SelfUpdateBlocker, SelfUpdateBlock>
+/** 要不要给出手动替换程序的命令。文字每次现取（换了语言就是新的），所以这里只记这一点。 */
+const NEEDS_COMMANDS = { container: false, package_manager: false, read_only_dir: true } satisfies Record<
+  SelfUpdateBlocker,
+  boolean
+>
 
-const UNKNOWN_BLOCK: SelfUpdateBlock = { reason: u.blocker.unknown, howTo: u.blocker.unknownHow, commands: true }
+const isBlocker = (value: string): value is SelfUpdateBlocker => Object.hasOwn(NEEDS_COMMANDS, value)
 
 export function selfUpdateBlock(update: NodeUpdate): SelfUpdateBlock | null {
   if (update.self_update === null) return { reason: u.blocker.tooOld, howTo: u.blocker.tooOldHow, commands: true }
   if (update.self_update.able) return null
-  const { blocker } = update.self_update
-  // 不认识的原因按"不知道为什么不能"处理。
-  return (blocker === null ? undefined : BLOCKERS[blocker]) ?? UNKNOWN_BLOCK
+  // 更新的 controller 可能报出这里还不认识的原因：按"不知道为什么不能"处理。
+  const blocker: string | null = update.self_update.blocker
+  if (blocker === null || !isBlocker(blocker))
+    return { reason: u.blocker.unknown, howTo: u.blocker.unknownHow, commands: true }
+  return { reason: u.blocker[blocker], howTo: u.blocker[`${blocker}How`], commands: NEEDS_COMMANDS[blocker] }
 }
 
-const view = (kind: UpdateKind, tone: Tone, label: string, detail: string | null = null): UpdateView => ({
+const view = (
+  kind: UpdateKind,
+  tone: Tone,
+  label: string,
+  detail: string | null = null,
+  reason: string | null = null,
+): UpdateView => ({
   kind,
   tone,
   label,
   detail,
+  reason,
   progress: null,
 })
 
@@ -106,11 +116,11 @@ function fromStatus(update: NodeUpdate): UpdateView | null {
       }
     }
     case 'verifying':
-      return view('in_progress', 'relay', u.state.verifying, u.state.verifyingDetail(status.version))
+      return view('in_progress', 'relay', u.state.verifying, u.state.stepDetail(status.version))
     case 'self_check':
-      return view('in_progress', 'relay', u.state.selfCheck, u.state.selfCheckDetail(status.version))
+      return view('in_progress', 'relay', u.state.selfCheck, u.state.stepDetail(status.version))
     case 'installing':
-      return view('in_progress', 'relay', u.state.installing, u.state.installingDetail(status.version))
+      return view('in_progress', 'relay', u.state.installing, u.state.stepDetail(status.version))
     case 'restarting':
       return view('in_progress', 'relay', u.state.restarting, u.state.restartingDetail(status.version))
     case 'waiting_for_idle':
@@ -124,12 +134,11 @@ function fromStatus(update: NodeUpdate): UpdateView | null {
         'failed',
         'danger',
         u.state.failed,
-        status.kind === 'version_rejected'
-          ? u.state.failedRejected(status.version ?? '', status.reason)
-          : u.state.failedNotInstalled(status.reason),
+        status.kind === 'version_rejected' ? u.state.failedRejected(status.version ?? '') : u.state.failedNotInstalled,
+        status.reason,
       )
     default:
-      return view('unknown', 'idle', u.state.unknownState, u.state.unknownStateDetail)
+      return view('unknown', 'idle', u.state.unknownState)
   }
 }
 
@@ -163,10 +172,11 @@ export function describeUpdate(
         'failed',
         'danger',
         u.state.lastFailed,
-        u.state.lastFailedDetail(failure.version, failure.reason, formatTime(failure.at)),
+        u.state.lastFailedDetail(failure.version, formatTime(failure.at)),
+        failure.reason,
       )
     const block = selfUpdateBlock(update)
-    if (block !== null) return view('manual', 'idle', u.state.cannotSelf, `${block.reason}。${block.howTo}`)
+    if (block !== null) return view('manual', 'idle', u.state.cannotSelf, t.common.sentences(block.reason, block.howTo))
     const detail = !node.online
       ? u.state.availableOffline
       : context.paused.includes(available)
@@ -200,7 +210,7 @@ export function forceAbility(node: Pick<Node, 'online' | 'update'>): ForceAbilit
   const { update } = node
   if (update.available === null) return { ok: false, reason: u.force.cannot.none, short: u.force.cannot.none }
   const block = selfUpdateBlock(update)
-  if (block !== null) return { ok: false, reason: `${block.reason}。${block.howTo}`, short: block.reason }
+  if (block !== null) return { ok: false, reason: t.common.sentences(block.reason, block.howTo), short: block.reason }
   if (!node.online) return { ok: false, reason: u.force.cannot.offline, short: t.common.offline }
   if (update.status.state === 'installing' || update.status.state === 'restarting')
     return { ok: false, reason: u.force.cannot.busy, short: u.force.cannot.busy }

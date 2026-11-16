@@ -27,7 +27,6 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
         className="mx-auto flex min-h-screen max-w-md flex-col items-center justify-center px-6 text-center"
       >
         <h1 className="text-lg font-semibold">{t.errors.crashedTitle}</h1>
-        <p className="mt-2 text-sm text-muted-foreground">{t.errors.crashedBody}</p>
         <Button variant="primary" className="mt-5" onClick={() => window.location.reload()}>
           {t.errors.reload}
         </Button>

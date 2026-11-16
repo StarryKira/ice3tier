@@ -44,7 +44,12 @@ function ToastView({ item }: { item: ToastItem }) {
         className={cn('mt-0.5 size-4 shrink-0', TONES[item.kind], item.kind === 'loading' && 'animate-spin')}
         aria-hidden
       />
-      <p className="min-w-0 flex-1 text-sm leading-snug break-words">{item.message}</p>
+      <div className="min-w-0 flex-1 text-sm leading-snug break-words">
+        <p>{item.message}</p>
+        {item.detail !== undefined && item.detail !== null ? (
+          <p className="mt-0.5 text-xs text-muted-foreground">{item.detail}</p>
+        ) : null}
+      </div>
       {item.kind === 'loading' ? null : (
         <button
           type="button"

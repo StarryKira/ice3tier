@@ -18,8 +18,13 @@ export interface ListenView {
   tone: Tone
   /** 圆点旁边的几个字。 */
   label: string
-  /** 原因和下一步；正常时是 `null`。 */
+  /** 原因（界面自己的话，带节点名和端口）；正常时是 `null`。 */
   detail: string | null
+  /**
+   * 节点报上来的原话（`GET …/listeners` 等的 `status.detail`），只在出错的几种状态里有。
+   * 是节点写的，界面翻译不了，作为 {@link detail} 下面的补充显示。
+   */
+  reported: string | null
   /** 这种状态要用户去做点什么。 */
   needsAttention: boolean
   /** 实际在监听的地址；没有在监听时是 `null`。 */
@@ -35,12 +40,13 @@ function portOf(address: string): number | null {
 }
 
 /**
- * 一个监听（代理监听器、端口转发的监听一侧）现在怎么说，按"状态：原因。下一步。"来写，原因里有节点名和端口。
- * 状态来自监听节点每 10 秒一次的上报；没有上报时分"节点离线"和"等它上报"两种，后者是刚下发、还没轮到上报。
+ * 一个监听（代理监听器、端口转发的监听一侧）现在怎么说：先说对象和状态，原因里有节点名和端口，
+ * 节点的原话另放在 `reported` 里。状态来自监听节点每 10 秒一次的上报；没有上报时分"节点离线"和"等它上报"两种，
+ * 后者是刚下发、还没轮到上报。
  */
 export function listenView(status: ListenStatus | null, context: ListenContext): ListenView {
   const { node, bind } = context
-  const base = { local: null, picked: null, traffic: null, needsAttention: false }
+  const base = { local: null, picked: null, traffic: null, needsAttention: false, reported: null }
   if (status === null) {
     return context.online
       ? { ...base, tone: 'idle', label: s.pending, detail: s.pendingDetail(node) }
@@ -73,7 +79,8 @@ export function listenView(status: ListenStatus | null, context: ListenContext):
         ...base,
         tone: 'danger',
         label: s.portInUse,
-        detail: s.portInUseDetail(node, port, status.detail),
+        detail: s.portInUseDetail(node, port),
+        reported: status.detail,
         needsAttention: true,
       }
     case 'failed':
@@ -81,7 +88,8 @@ export function listenView(status: ListenStatus | null, context: ListenContext):
         ...base,
         tone: 'danger',
         label: s.failed,
-        detail: s.failedDetail(node, bind, status.detail),
+        detail: s.failedDetail(node, bind),
+        reported: status.detail,
         needsAttention: true,
       }
     case 'unsupported':
@@ -89,7 +97,8 @@ export function listenView(status: ListenStatus | null, context: ListenContext):
         ...base,
         tone: 'danger',
         label: s.unsupported,
-        detail: s.unsupportedDetail(node, status.detail),
+        detail: s.unsupportedDetail(node),
+        reported: status.detail,
         needsAttention: true,
       }
     case 'unknown':

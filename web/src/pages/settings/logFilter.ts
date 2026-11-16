@@ -1,4 +1,5 @@
 import { type LogEntry, type LogQuery, type LogRef, type LogRefKind, type NetworkId } from '@/api/types'
+import { t } from '@/i18n'
 import { networkPath } from '@/pages/networks/context'
 
 /**
@@ -75,11 +76,19 @@ export function isFiltered(filter: LogFilter): boolean {
   return hasServerFilter(filter) || filter.search.trim() !== ''
 }
 
-/** 在取回来的记录里按说明文字和操作的名字找，不分大小写。 */
-export function matchesSearch(entry: LogEntry, search: string, actionLabel: string): boolean {
+/**
+ * 一种操作在界面上的名字，按当前的语言。比界面新的 controller 记下的、这里不认识的操作返回 `null`，
+ * 调用的地方原样写操作的代码。
+ */
+export function logActionLabel(action: string): string | null {
+  return t.settings.log.actions[action] ?? null
+}
+
+/** 在取回来的记录里找：界面写的那些字（操作的名字、对象）、操作的代码和 controller 的原话，不分大小写。 */
+export function matchesSearch(entry: LogEntry, search: string, labels: string): boolean {
   const needle = search.trim().toLowerCase()
   if (needle === '') return true
-  return `${entry.detail} ${actionLabel} ${entry.action}`.toLowerCase().includes(needle)
+  return `${labels} ${entry.action} ${entry.detail}`.toLowerCase().includes(needle)
 }
 
 /** 操作的名字可以是 `credential.revoke`；它属于哪一类（`credential`），给筛选的下拉分组用。 */

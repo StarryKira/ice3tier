@@ -19,12 +19,15 @@ export interface PlannedEntry {
   icon: LucideIcon
 }
 
-export const PLANNED = {
-  tests: { ...t.planned.tests, icon: Activity },
-} as const satisfies Record<string, PlannedEntry>
+const ICONS = { tests: Activity } as const satisfies Record<string, LucideIcon>
 
-export type PlannedId = keyof typeof PLANNED
+export type PlannedId = keyof typeof ICONS
+
+/** 一个计划中的页面的文字和图标。每次现取，换了语言就是新的文字。 */
+export function plannedEntry(id: PlannedId): PlannedEntry {
+  return { ...t.planned[id], icon: ICONS[id] }
+}
 
 export function isPlanned(id: string): id is PlannedId {
-  return id in PLANNED
+  return id in ICONS
 }

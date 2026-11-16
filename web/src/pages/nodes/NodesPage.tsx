@@ -49,7 +49,7 @@ import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
 import { nodeIssues } from '@/lib/nodeIssues'
 import { forceAbility } from '@/lib/nodeUpdate'
-import { COOLDOWN_DAYS } from '@/lib/product'
+import { formatList } from '@/lib/format'
 import { readStored, writeStored } from '@/lib/storage'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { cn } from '@/lib/utils'
@@ -78,26 +78,21 @@ const SORT_KEY = 'nodesSort'
 /** 输入停顿这么久之后搜索才生效。 */
 const SEARCH_DEBOUNCE_MS = 300
 
-const ROLE_LABEL: Record<RoleFilter, string> = { relay: t.nodes.roleRelay, exit: t.nodes.roleExit }
+const roleLabel = (role: RoleFilter): string => (role === 'relay' ? t.nodes.roleRelay : t.nodes.roleExit)
 
-/** 角色的小徽标，跟在名字后面。 */
-/** 角色的小徽标。`attached` 给了时，relay 的徽标上写着有几个节点挂靠在它上面。 */
+/** 角色的小徽标，跟在名字后面。`attached` 给了时，relay 的徽标上写着有几个节点挂靠在它上面，悬停有一句话。 */
 export function RoleBadges({ node, attached }: { node: Node; attached?: number }) {
   return (
     <>
       {node.relay !== null ? (
-        <Tooltip content={attached === undefined ? t.nodes.roleRelayTip : t.nodes.roleRelayAttached(attached)}>
-          <Badge tabIndex={0} data-testid={`relay-badge-${node.name}`}>
+        <Tooltip content={attached === undefined ? null : t.nodes.roleRelayAttached(attached)}>
+          <Badge tabIndex={attached === undefined ? undefined : 0} data-testid={`relay-badge-${node.name}`}>
             {t.nodes.roleRelay}
             {attached !== undefined && attached > 0 ? <span className="tabular opacity-80">· {attached}</span> : null}
           </Badge>
         </Tooltip>
       ) : null}
-      {node.exit !== null ? (
-        <Tooltip content={t.nodes.roleExitTip}>
-          <Badge tabIndex={0}>{t.nodes.roleExit}</Badge>
-        </Tooltip>
-      ) : null}
+      {node.exit !== null ? <Badge>{t.nodes.roleExit}</Badge> : null}
     </>
   )
 }
@@ -199,7 +194,7 @@ function BatchTagDialog({ network, nodes, open, onClose }: BatchTagDialogProps) 
       canSubmit={tags.length > 0 || overwrite}
       onSubmit={() => void submit()}
     >
-      <Field label={t.nodes.batchTagLabel} hint={overwrite ? t.nodes.batchOverwriteHint : t.nodes.batchAppendHint}>
+      <Field label={t.nodes.batchTagLabel}>
         {(props) => <TagInput {...props} value={tags} onChange={setTags} suggestions={known} autoFocus />}
       </Field>
       <label className="flex items-center gap-2.5 text-sm">
@@ -328,8 +323,8 @@ export function NodesPage() {
       title: t.nodes.batchDeleteTitle(selectedNodes.length),
       body: (
         <>
-          <p>{selectedNodes.map((node) => node.name).join('、')}</p>
-          <p>{t.nodes.batchDeleteBody(COOLDOWN_DAYS)}</p>
+          <p className="font-medium text-foreground">{formatList(selectedNodes.map((node) => node.name))}</p>
+          <p>{t.nodes.batchDeleteBody}</p>
         </>
       ),
       confirmLabel: t.nodes.batchDeleteConfirm,
@@ -382,7 +377,7 @@ export function NodesPage() {
       remove: () => applyFilters({ tags: toggled(filters.tags, tag, false) }),
     })),
     ...filters.roles.map((role) => ({
-      label: t.nodes.chipRole(ROLE_LABEL[role]),
+      label: t.nodes.chipRole(roleLabel(role)),
       remove: () => applyFilters({ roles: toggled(filters.roles, role, false) }),
     })),
     ...filters.platforms.map((platform) => ({
@@ -397,7 +392,6 @@ export function NodesPage() {
     <Page>
       <PageHeader
         title={t.nodes.title}
-        description={t.nodes.description}
         actions={
           // 没有任何节点时，页面上只留空状态卡片里那一个入口，不放两个一样的按钮。
           empty ? undefined : (
@@ -416,7 +410,6 @@ export function NodesPage() {
           <EmptyState
             icon={Server}
             title={t.nodes.emptyTitle}
-            description={t.nodes.emptyBody}
             action={
               <Button variant="primary" onClick={() => setAdding(true)}>
                 <Plus aria-hidden />
@@ -496,7 +489,7 @@ export function NodesPage() {
                     {(['relay', 'exit'] as const).map((role) => (
                       <FilterToggle
                         key={role}
-                        label={ROLE_LABEL[role]}
+                        label={roleLabel(role)}
                         checked={filters.roles.includes(role)}
                         onChange={(on) => applyFilters({ roles: toggled(filters.roles, role, on) })}
                       />

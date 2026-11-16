@@ -8,8 +8,9 @@ import { fileURLToPath } from 'node:url'
 
 import { expect, type Page, test } from '@playwright/test'
 
+import { en } from '../src/i18n/en'
 import { Controller, type NodeHandle } from './controller'
-import { clearToasts, goTo, goToAdmin, signIn } from './helpers'
+import { clearToasts, goTo, goToAdmin, literal, signIn, t } from './helpers'
 import { type ReleaseKit, releaseKit, ReleaseSource } from './release'
 
 /**
@@ -25,6 +26,12 @@ let page: Page
 let kit: ReleaseKit
 let release: ReleaseSource
 let counter = 0
+/** 带一个数的句子写成正则：数换成 `\d+`（`sample` 是样例里用的那个数，句子里别处不能有它）。 */
+function counted(sentence: (n: number) => string): RegExp {
+  const sample = 987654
+  return new RegExp(literal(sentence(sample)).replace(String(sample), '\\d+'))
+}
+
 /** 用界面或接口加进来的节点，按用途起了名字。 */
 const nodes: Record<string, NodeHandle> = {}
 /** 经出口下载的目标：这台机器局域网地址上的一个 HTTP 服务。没有私有地址的机器上不造用量。 */
@@ -86,7 +93,7 @@ test.beforeAll(async ({ browser }) => {
   mkdirSync(outDir, { recursive: true })
   kit = releaseKit()
   controller = await Controller.start({ bins: kit.oldBins })
-  page = await browser.newPage()
+  page = await browser.newPage({ locale: 'zh-CN', viewport: { width: 1280, height: 800 } })
   const blob = Buffer.alloc(4 * 1024 * 1024, 'i')
   target = createHttpServer((_request, response) => response.end(blob))
   targetPort = await listenOn(target, '0.0.0.0')
@@ -108,52 +115,52 @@ test.afterAll(async () => {
 
 test('登录和第一个网络', async () => {
   await page.goto(`${controller.baseUrl}/`)
-  await expect(page.getByRole('heading', { name: '登录 ice3tier' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: t.signIn.title })).toBeVisible()
   await shot('sign-in')
 
-  await page.getByLabel('管理令牌', { exact: true }).fill('not-the-token')
-  await page.getByRole('button', { name: '登录', exact: true }).click()
-  await expect(page.getByText('管理令牌不对')).toBeVisible()
+  await page.getByLabel(t.signIn.tokenLabel, { exact: true }).fill('not-the-token')
+  await page.getByRole('button', { name: t.signIn.submit, exact: true }).click()
+  await expect(page.getByText(t.errors.codes.unauthorized)).toBeVisible()
   await shot('sign-in-wrong-token')
 
   await signIn(page, controller)
-  await expect(page.getByRole('heading', { name: '建第一个网络' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: t.networks.welcomeTitle })).toBeVisible()
   await shot('welcome-first-network')
 
-  await page.getByRole('button', { name: '创建网络' }).click()
-  await expect(page.getByRole('heading', { name: '把前两个节点连起来' })).toBeVisible()
+  await page.getByRole('button', { name: t.networks.createSubmit }).click()
+  await expect(page.getByRole('heading', { name: t.overview.guide.title })).toBeVisible()
 })
 
 test('空的网络：每个页面没有数据时的样子', async () => {
   await clearToasts(page)
   await shot('overview-guide-empty')
 
-  await goTo(page, '节点')
-  await expect(page.getByText('这个网络里还没有节点')).toBeVisible()
+  await goTo(page, t.nav.nodes)
+  await expect(page.getByText(t.nodes.emptyTitle)).toBeVisible()
   await shot('nodes-empty')
 
-  await page.getByRole('button', { name: '添加节点' }).click()
-  await expect(page.getByRole('dialog', { name: '添加节点' })).toBeVisible()
+  await page.getByRole('button', { name: t.nodes.add }).click()
+  await expect(page.getByRole('dialog', { name: t.addNode.title })).toBeVisible()
   await shot('add-node-before-token', { fullPage: false })
-  await page.getByRole('button', { name: '完成' }).click()
+  await page.getByRole('button', { name: t.addNode.done }).click()
 
-  await goTo(page, '访问控制')
+  await goTo(page, t.nav.access)
   await expect(page.getByTestId('tag-graph')).toBeVisible()
   await shot('access-default-rule-only')
 
   for (const [name, file, marker] of [
-    ['出口', 'exits-empty', '还没有出口'],
-    ['监听器', 'listeners-empty', '还没有通过 controller 配置的监听器'],
-    ['接入凭据', 'credentials-empty', '还没有凭据'],
-    ['端口转发', 'forwards-empty', '还没有端口转发'],
+    [t.nav.exits, 'exits-empty', t.exits.emptyTitle],
+    [t.nav.listeners, 'listeners-empty', t.listeners.emptyTitle],
+    [t.nav.credentials, 'credentials-empty', t.credentials.emptyTitle],
+    [t.nav.forwards, 'forwards-empty', t.forwards.emptyTitle],
   ] as const) {
     await goTo(page, name)
     await expect(page.getByText(marker).first()).toBeVisible()
     await shot(file)
   }
   for (const [name, file, marker] of [
-    ['注册', 'tokens-empty', '没有未使用的令牌'],
-    ['节点对', 'pairs-empty', '所有节点对都在用默认设置'],
+    [t.nav.tokens, 'tokens-empty', t.tokens.emptyTitle],
+    [t.nav.pairs, 'pairs-empty', t.pairs.emptyTitle],
   ] as const) {
     await goToAdmin(page, name)
     await expect(page.getByText(marker).first()).toBeVisible()
@@ -162,9 +169,9 @@ test('空的网络：每个页面没有数据时的样子', async () => {
 })
 
 test('添加节点：令牌、命令、节点加入', async () => {
-  await goTo(page, '总览')
-  await page.getByRole('checkbox', { name: /可以作为 relay/ }).check()
-  await page.getByRole('button', { name: '生成注册令牌' }).click()
+  await goTo(page, t.nav.overview)
+  await page.getByRole('checkbox', { name: new RegExp(literal(t.addNode.declareRelay)) }).check()
+  await page.getByRole('button', { name: t.addNode.generate }).click()
   const command = page.getByTestId('join-command')
   await expect(command).toContainText('echo i3t-')
   await shot('overview-guide-token-generated')
@@ -382,294 +389,303 @@ test('准备数据', async () => {
 
 test('有数据时：总览、节点', async () => {
   await page.reload()
-  await goTo(page, '总览')
+  await goTo(page, t.nav.overview)
   await expect(page.getByTestId('overview-status')).toBeVisible()
   await shot('overview')
 
-  await goTo(page, '节点')
+  await goTo(page, t.nav.nodes)
   await expect(page.getByTestId('node-row-gw-hk')).toBeVisible()
   await shot('nodes')
 
   await page.getByRole('searchbox').fill('lap')
-  await page.getByRole('button', { name: '筛选' }).click()
+  await page.getByRole('button', { name: t.nodes.filter }).click()
   await page.getByRole('checkbox', { name: 'laptops' }).check()
   await page.keyboard.press('Escape')
   await expect(page.getByTestId('node-row-gw-hk')).toBeHidden()
   await shot('nodes-filtered')
-  await page.getByRole('button', { name: '清除全部' }).click()
+  await page.getByRole('button', { name: t.nodes.clearAll }).click()
 
   await page.getByRole('searchbox').fill('no-such-node')
-  await expect(page.getByText('没有符合条件的节点。')).toBeVisible()
+  await expect(page.getByText(t.nodes.noMatches)).toBeVisible()
   await shot('nodes-no-matches')
-  await page.getByRole('button', { name: '清除筛选' }).click()
+  await page.getByRole('button', { name: t.common.clearFilters }).click()
 
-  await page.getByRole('checkbox', { name: '选中 laptop' }).check()
-  await page.getByRole('checkbox', { name: '选中 office-pc' }).check()
+  await page.getByRole('checkbox', { name: t.nodes.selectOne('laptop') }).check()
+  await page.getByRole('checkbox', { name: t.nodes.selectOne('office-pc') }).check()
   await shot('nodes-selection-bar', { fullPage: false })
-  await page.getByRole('button', { name: '打标签…' }).click()
-  await expect(page.getByRole('dialog', { name: '给 2 个节点打标签' })).toBeVisible()
+  await page.getByRole('button', { name: t.nodes.batchTag }).click()
+  await expect(page.getByRole('dialog', { name: t.nodes.batchTagTitle(2) })).toBeVisible()
   await shot('nodes-batch-tag', { fullPage: false })
-  await page.getByRole('button', { name: '取消', exact: true }).click()
-  await page.getByRole('button', { name: '取消选择' }).click()
+  // 标签的候选列表盖在对话框的按钮上：先点一下标题把它收起来。
+  await page.getByRole('heading', { name: t.nodes.batchTagTitle(2) }).click()
+  await page.getByRole('button', { name: t.common.cancel, exact: true }).click()
+  await page.getByRole('button', { name: t.nodes.batchCancel }).click()
 
-  await page.getByRole('button', { name: '添加节点' }).click()
-  await page.getByRole('combobox', { name: '标签' }).fill('servers')
+  await page.getByRole('button', { name: t.nodes.add }).click()
+  await page.getByRole('combobox', { name: t.addNode.tagsLabel }).fill('servers')
   await page.keyboard.press('Enter')
-  await page.getByRole('checkbox', { name: /可以作为出口/ }).check()
-  await page.getByRole('button', { name: '生成注册令牌' }).click()
+  await page.getByRole('checkbox', { name: new RegExp(literal(t.addNode.declareExit)) }).check()
+  await page.getByRole('button', { name: t.addNode.generate }).click()
   await expect(page.getByTestId('join-command')).toContainText('echo i3t-')
   await shot('add-node-waiting', { fullPage: false })
   const extra = controller.join((await page.getByTestId('join-command').textContent()) ?? '')
   nodes.extra = extra
   await expect(page.getByTestId('node-joined')).toBeVisible()
   await shot('add-node-joined', { fullPage: false })
-  await page.getByRole('button', { name: '完成' }).click()
+  await page.getByRole('button', { name: t.addNode.done }).click()
 })
 
 test('有数据时：节点详情', async () => {
+  const d = t.nodes.detail
+  const u = t.updates
   await page.getByRole('link', { name: 'gw-hk', exact: true }).click()
   await expect(page.getByTestId('capability-relay')).toBeVisible()
   await shot('node-detail-relay')
   // 保存 relay 的设置：controller 从自己这边试连填的地址（203.0.113.7 是文档用的地址，连不上），写出建议。
-  await page.getByTestId('capability-relay').getByRole('button', { name: '修改设置' }).click()
-  await page.getByRole('button', { name: '保存 relay 设置' }).click()
+  await page.getByTestId('capability-relay').getByRole('button', { name: d.edit }).click()
+  await page.getByTestId('capability-relay').getByRole('button', { name: d.save }).click()
   await expect(page.getByTestId('relay-reachability')).toBeVisible({ timeout: 15_000 })
   await clearToasts(page)
   await shot('node-detail-relay-reachability')
 
-  await goTo(page, '节点')
+  await goTo(page, t.nav.nodes)
   await page.getByRole('link', { name: 'nas-home', exact: true }).click()
   await expect(page.getByTestId('capability-exit')).toBeVisible()
-  await page.getByText('高级', { exact: true }).click()
+  await page.getByText(d.advanced, { exact: true }).click()
   await shot('node-detail-exit-and-advanced')
 
-  await goTo(page, '节点')
+  await goTo(page, t.nav.nodes)
   await page.getByRole('link', { name: 'laptop', exact: true }).click()
-  await page.getByTestId('capability-exit').getByRole('button', { name: '怎么声明' }).click()
+  await page.getByTestId('capability-exit').getByRole('button', { name: t.declare.howTo }).click()
   await expect(page.getByTestId('declare-command')).toBeVisible()
   await shot('node-detail-not-declared')
 
-  await page.getByRole('tab', { name: '路由' }).click()
-  await expect(page.getByRole('columnheader', { name: '路径' })).toBeVisible()
+  await page.getByRole('tab', { name: d.tabRoutes }).click()
+  await expect(page.getByRole('columnheader', { name: d.colPath })).toBeVisible()
   await shot('node-detail-routes')
 
-  await page.getByRole('tab', { name: '访问' }).click()
-  await expect(page.getByText(/它可以访问的节点/)).toBeVisible()
+  await page.getByRole('tab', { name: d.tabAccess }).click()
+  await expect(page.getByText(counted(d.accessCanReach))).toBeVisible()
   await shot('node-detail-access')
 
-  await page.getByRole('tab', { name: '监听' }).click()
+  await page.getByRole('tab', { name: d.tabListen }).click()
   await expect(page.getByTestId('node-listen-local-socks5')).toBeVisible({ timeout: 20_000 })
   await shot('node-detail-listen')
 
-  await page.getByRole('tab', { name: '关联配置' }).click()
-  await expect(page.getByText('和它有关的端口转发')).toBeVisible()
+  await page.getByRole('tab', { name: d.tabRelated }).click()
+  await expect(page.getByRole('heading', { name: d.relatedForwards })).toBeVisible()
   await shot('node-detail-related')
 
-  await page.getByRole('tab', { name: '概览' }).click()
-  await page.getByRole('button', { name: '改虚拟 IP' }).click()
+  await page.getByRole('tab', { name: d.tabOverview }).click()
+  await page.getByRole('button', { name: d.editIp }).click()
   await expect(page.getByRole('dialog')).toBeVisible()
   await shot('node-edit-ip', { fullPage: false })
-  await page.getByRole('button', { name: '取消', exact: true }).click()
+  await page.getByRole('button', { name: t.common.cancel, exact: true }).click()
 
-  await page.getByRole('button', { name: '更多操作' }).click()
-  await page.getByRole('menuitem', { name: '删除…' }).click()
+  await page.getByRole('button', { name: d.more }).click()
+  await page.getByRole('menuitem', { name: t.nodes.menuDelete }).click()
   await expect(page.getByRole('alertdialog')).toBeVisible()
   await shot('node-delete-confirm', { fullPage: false })
-  await page.getByRole('button', { name: '取消', exact: true }).click()
+  await page.getByRole('button', { name: t.common.cancel, exact: true }).click()
 
-  await goTo(page, '节点')
+  await goTo(page, t.nav.nodes)
   await page.getByRole('link', { name: 'office-pc', exact: true }).click()
-  await page.getByRole('tab', { name: '路由' }).click()
-  await expect(page.getByText('节点离线，没有路由表。')).toBeVisible()
+  await page.getByRole('tab', { name: d.tabRoutes }).click()
+  await expect(page.getByText(d.routesOffline).first()).toBeVisible()
   await shot('node-detail-routes-offline')
 
   // 更新：nas-home 在容器里，不能自己更新；laptop 能，"立即更新"的确认框。
-  await goTo(page, '节点')
+  await goTo(page, t.nav.nodes)
   await page.getByRole('link', { name: 'nas-home', exact: true }).click()
-  await page.getByRole('tab', { name: '更新' }).click()
-  await expect(page.getByTestId('node-self-update')).toContainText('在容器里运行')
+  await page.getByRole('tab', { name: u.detail.tab }).click()
+  await expect(page.getByTestId('node-self-update')).toContainText(u.blocker.container)
   await shot('node-detail-update-manual')
 
-  await goTo(page, '节点')
+  await goTo(page, t.nav.nodes)
   await page.getByRole('link', { name: 'laptop', exact: true }).click()
-  await page.getByRole('tab', { name: '更新' }).click()
-  await expect(page.getByTestId('node-update-state')).toContainText('有新版本')
+  await page.getByRole('tab', { name: u.detail.tab }).click()
+  await expect(page.getByTestId('node-update-state')).toContainText(u.state.available(kit.newVersion))
   await shot('node-detail-update')
-  await page.getByRole('button', { name: '立即更新…' }).first().click()
-  await expect(page.getByRole('dialog')).toContainText('它现在没有活跃的流')
+  await page.getByRole('button', { name: u.force.button }).first().click()
+  await expect(page.getByRole('dialog')).toContainText(u.force.idleBody)
   await shot('node-force-update-dialog', { fullPage: false })
-  await page.getByRole('button', { name: '取消', exact: true }).click()
+  await page.getByRole('button', { name: t.common.cancel, exact: true }).click()
 })
 
 test('有数据时：拓扑和路径诊断', async () => {
-  await goTo(page, '拓扑')
+  await goTo(page, t.nav.topology)
   const graph = page.getByTestId('topology-graph')
   await expect(graph.locator('.react-flow__node')).toHaveCount(6)
   await expect(graph.locator('.react-flow__edge').first()).toBeAttached()
   await shot('topology')
 
-  await page.getByRole('combobox', { name: '节点 A' }).click()
+  await page.getByRole('combobox', { name: t.topology.pickA }).click()
   await page.getByRole('option', { name: /10\.66\.0\.3$/ }).click()
   await expect(page.getByRole('listbox')).toHaveCount(0)
-  await page.getByRole('combobox', { name: '节点 B' }).click()
+  await page.getByRole('combobox', { name: t.topology.pickB }).click()
   await page.getByRole('option', { name: /nas-home/ }).click()
   await expect(page.getByTestId('pair-panel')).toBeVisible()
   await shot('topology-pair')
 
-  await page.getByRole('radio', { name: '路由矩阵' }).click()
+  await page.getByRole('radio', { name: t.topology.viewMatrix }).click()
   await expect(page.getByTestId('route-matrix')).toBeVisible()
   await shot('topology-matrix')
 
-  await page.getByTestId('pair-panel').getByRole('link', { name: '路径诊断' }).click()
+  await page.getByTestId('pair-panel').getByRole('link', { name: t.topology.toPath }).click()
   await expect(page.getByTestId('path-forward')).toHaveAttribute('data-source', /query|report/)
   await shot('diagnosis')
 })
 
 test('有数据时：访问控制', async () => {
-  await goTo(page, '访问控制')
+  await goTo(page, t.nav.access)
   await expect(page.getByTestId('tag-graph')).toBeVisible()
   await expect(page.getByTestId('rule-row-2')).toBeVisible()
   await shot('access-all-open')
 
   // 停用默认规则，按标签收紧。
-  await page.getByRole('switch', { name: '启用规则 default' }).click()
+  await page.getByRole('switch', { name: t.access.ruleSwitch('default') }).click()
   await expect(page.getByRole('alertdialog')).toBeVisible()
   await shot('access-disable-default-confirm', { fullPage: false })
-  await page.getByRole('button', { name: '停用规则' }).click()
-  await expect(page.getByTestId('unconnected')).toContainText('没有被任何规则连通的节点')
+  await page.getByRole('button', { name: t.access.disableConfirm }).click()
+  await expect(page.getByTestId('unconnected')).toContainText(counted(t.access.graph.unconnected))
   await clearToasts(page)
   await shot('access-tightened')
 
-  await page.getByRole('button', { name: '展开标签 servers 的成员' }).click()
+  const p = t.access.tagsPanel
+  await page.getByRole('button', { name: p.toggle('servers', false) }).click()
   await shot('access-tag-panel-open')
-  await page.getByRole('button', { name: '给标签 servers 改名' }).click()
-  const rename = page.getByRole('dialog', { name: '给标签 servers 改名' })
-  await rename.getByRole('textbox', { name: '新名字' }).fill('home')
-  await expect(rename.getByText(/两组节点会合成一组/)).toBeVisible()
+  await page.getByRole('button', { name: p.renameTitle('servers') }).click()
+  const rename = page.getByRole('dialog', { name: p.renameTitle('servers') })
+  await rename.getByRole('textbox', { name: p.renameLabel }).fill('home')
+  await expect(rename.getByText(counted((n) => p.renameMerge('home', n)))).toBeVisible()
   await shot('access-tag-rename', { fullPage: false })
-  await rename.getByRole('button', { name: '取消', exact: true }).click()
-  await page.getByRole('button', { name: '放弃改动' }).click()
+  await rename.getByRole('button', { name: t.common.cancel, exact: true }).click()
+  await page.getByRole('button', { name: t.common.discardConfirm }).click()
 
-  await page.getByRole('button', { name: '新建规则' }).click()
-  const dialog = page.getByRole('dialog', { name: '新建规则' })
-  await dialog.getByRole('combobox', { name: '标签 a' }).click()
+  const rd = t.access.dialog
+  await page.getByRole('button', { name: t.access.newRule }).click()
+  const dialog = page.getByRole('dialog', { name: rd.createTitle })
+  await dialog.getByRole('combobox', { name: rd.srcLabel }).click()
   await page.getByRole('option', { name: /laptops/ }).click()
-  await dialog.getByRole('combobox', { name: '标签 b' }).click()
+  await dialog.getByRole('combobox', { name: rd.dstLabel }).click()
   await page.getByRole('option', { name: /home/ }).click()
-  await dialog.getByRole('radio', { name: '只能 a 访问 b' }).click()
+  await dialog.getByRole('radio', { name: rd.oneWay }).click()
   await expect(page.getByTestId('rule-impact')).toBeVisible()
   await shot('access-rule-dialog', { fullPage: false })
-  await dialog.getByRole('button', { name: '取消', exact: true }).click()
-  await page.getByRole('button', { name: '放弃改动' }).click()
+  await dialog.getByRole('button', { name: t.common.cancel, exact: true }).click()
+  await page.getByRole('button', { name: t.common.discardConfirm }).click()
 
-  await page.getByRole('radio', { name: '按节点' }).click()
-  await page.getByRole('combobox', { name: '焦点节点' }).click()
+  await page.getByRole('radio', { name: t.access.graph.byNode }).click()
+  await page.getByRole('combobox', { name: t.access.graph.nodePickLabel, exact: true }).click()
   await page.getByRole('option', { name: /gw-hk/ }).click()
   await expect(page.getByTestId('node-graph').getByText('gw-hk')).toBeVisible()
   await shot('access-node-view')
 
-  await page.getByRole('button', { name: '访问检查' }).click()
+  const c = t.access.checker
+  await page.getByRole('button', { name: t.access.check }).click()
   const check = page.getByTestId('access-check')
-  await check.getByRole('combobox', { name: '从' }).click()
+  await check.getByRole('combobox', { name: c.from }).click()
   await page.getByRole('option', { name: /laptop/ }).click()
-  await check.getByRole('combobox', { name: '到' }).click()
+  await check.getByRole('combobox', { name: c.to }).click()
   await page.getByRole('option', { name: /nas-home/ }).click()
-  await expect(page.getByTestId('check-laptop-nas-home')).toContainText('可以')
+  await expect(page.getByTestId('check-laptop-nas-home')).toContainText(c.allowed)
   await shot('access-check')
-  await page.getByRole('button', { name: '收起访问检查' }).click()
-  await page.getByRole('radio', { name: '按标签' }).click()
+  await page.getByRole('button', { name: c.close }).click()
+  await page.getByRole('radio', { name: t.access.graph.byTag }).click()
 })
 
 test('有数据时：接入', async () => {
-  await goTo(page, '出口')
+  await goTo(page, t.nav.exits)
   await expect(page.getByTestId('exit-row-nas-home')).toBeVisible()
   await shot('exits')
-  await page.getByRole('button', { name: '出口 nas-home 的计数和用它的节点看到的' }).click()
+  await page.getByRole('button', { name: t.exits.detailsFor('nas-home') }).click()
   await expect(page.getByTestId('exit-crosscheck-nas-home')).toBeVisible()
   await shot('exits-crosscheck')
-  await page.getByRole('button', { name: '启用出口' }).click()
-  await expect(page.getByRole('dialog', { name: '启用出口' })).toBeVisible()
+  await page.getByRole('button', { name: t.exits.enable }).click()
+  await expect(page.getByRole('dialog', { name: t.exits.dialogTitle })).toBeVisible()
   await shot('exits-enable-dialog', { fullPage: false })
-  await page.getByRole('button', { name: '取消', exact: true }).click()
+  await page.getByRole('button', { name: t.common.cancel, exact: true }).click()
 
-  await goTo(page, '监听器')
+  await goTo(page, t.nav.listeners)
   await expect(page.getByTestId('listener-row-lan')).toBeVisible()
   await shot('listeners')
-  await page.getByRole('button', { name: '新建监听器' }).click()
-  const listener = page.getByRole('dialog', { name: '新建监听器' })
-  await listener.getByRole('radio', { name: /给别的机器用/ }).click()
+  await page.getByRole('button', { name: t.listeners.create }).click()
+  const listener = page.getByRole('dialog', { name: t.listeners.dialog.createTitle })
+  await listener.getByRole('radio', { name: new RegExp(literal(t.listeners.dialog.whereOthers)) }).click()
   await shot('listeners-dialog', { fullPage: false })
-  await listener.getByRole('button', { name: '取消', exact: true }).click()
-  await page.getByRole('button', { name: '放弃改动' }).click()
+  await listener.getByRole('button', { name: t.common.cancel, exact: true }).click()
+  await page.getByRole('button', { name: t.common.discardConfirm }).click()
 
-  await goTo(page, '接入凭据')
+  await goTo(page, t.nav.credentials)
   await expect(page.getByTestId('credential-row-phone')).toBeVisible()
   await shot('credentials')
-  await page.getByRole('button', { name: 'phone 的操作' }).click()
-  await page.getByRole('menuitem', { name: /修改上限/ }).click()
-  const limits = page.getByRole('dialog', { name: '修改凭据 phone 的上限' })
-  await limits.getByRole('textbox', { name: /^流量上限/ }).fill('1')
-  await limits.getByRole('combobox', { name: '流量上限的单位' }).selectOption('MB')
+  const cr = t.credentials
+  await page.getByRole('button', { name: t.common.actionsFor('phone') }).click()
+  await page.getByRole('menuitem', { name: cr.menuEdit }).click()
+  const limits = page.getByRole('dialog', { name: cr.editTitle('phone') })
+  await limits.getByRole('textbox', { name: new RegExp(`^${literal(cr.maxBytesLabel)}`) }).fill('1')
+  await limits.getByRole('combobox', { name: cr.unitLabel }).selectOption('MB')
   await shot('credentials-edit-limits', { fullPage: false })
-  await limits.getByRole('button', { name: '取消', exact: true }).click()
-  await page.getByRole('button', { name: '放弃改动' }).click()
-  await page.getByRole('button', { name: '签发凭据' }).click()
-  await page.getByRole('dialog', { name: '签发凭据' }).getByLabel('名字').fill('guest')
-  await page.getByRole('button', { name: '签发', exact: true }).click()
+  await limits.getByRole('button', { name: t.common.cancel, exact: true }).click()
+  await page.getByRole('button', { name: t.common.discardConfirm }).click()
+  await page.getByRole('button', { name: cr.issue }).click()
+  await page.getByRole('dialog', { name: cr.createTitle }).getByLabel(cr.nameLabel, { exact: true }).fill('guest')
+  await page.getByRole('button', { name: cr.submit, exact: true }).click()
   await expect(page.getByTestId('secret-dialog')).toBeVisible()
   await shot('credentials-secret-shown-once', { fullPage: false })
-  await page.getByRole('button', { name: '我已保存，关闭' }).click()
+  await page.getByRole('button', { name: cr.savedClose }).click()
 
-  await goTo(page, '端口转发')
+  await goTo(page, t.nav.forwards)
   await expect(page.getByTestId('forward-row-web')).toBeVisible()
   await shot('forwards')
-  await page.getByRole('button', { name: '新建转发' }).click()
-  const forward = page.getByRole('dialog', { name: '新建转发' })
-  await forward.getByRole('group', { name: '在哪里监听' }).getByRole('combobox', { name: '节点' }).click()
+  const fd = t.forwards.dialog
+  await page.getByRole('button', { name: t.forwards.create }).click()
+  const forward = page.getByRole('dialog', { name: fd.createTitle })
+  await forward.getByRole('group', { name: fd.listenSide }).getByRole('combobox', { name: fd.node }).click()
   await page.getByRole('option', { name: /laptop/ }).click()
-  await forward.getByRole('group', { name: '转发到哪里' }).getByRole('combobox', { name: '节点' }).click()
+  await forward.getByRole('group', { name: fd.targetSide }).getByRole('combobox', { name: fd.node }).click()
   await page.getByRole('option', { name: /nas-home/ }).click()
-  await forward.getByRole('radio', { name: /它所在的局域网，或者任何能连到它的人/ }).click()
+  await forward.getByRole('radio', { name: new RegExp(literal(fd.whoOpen)) }).click()
   await expect(page.getByTestId('forward-check')).toBeVisible()
   await shot('forwards-dialog', { fullPage: false })
-  await forward.getByRole('button', { name: '取消', exact: true }).click()
-  await page.getByRole('button', { name: '放弃改动' }).click()
+  await forward.getByRole('button', { name: t.common.cancel, exact: true }).click()
+  await page.getByRole('button', { name: t.common.discardConfirm }).click()
 })
 
 test('有数据时：管理区和设置', async () => {
-  await goToAdmin(page, '注册')
+  await goToAdmin(page, t.nav.tokens)
   await expect(page.getByTestId('token-row-7')).toBeVisible()
   await shot('tokens')
-  await page.getByRole('radio', { name: '全部' }).click()
+  await page.getByRole('radio', { name: t.tokens.showAll }).click()
   await expect(page.getByTestId('token-row-1')).toBeVisible()
   await shot('tokens-history')
 
-  await goToAdmin(page, '节点对')
+  await goToAdmin(page, t.nav.pairs)
   await expect(page.getByTestId('pair-row-nas-home-laptop')).toBeVisible()
   await shot('pairs')
 
-  await goToAdmin(page, '网络')
-  await expect(page.getByRole('heading', { name: 'home 的设置' })).toBeVisible()
+  await goToAdmin(page, t.nav.network)
+  await expect(page.getByRole('heading', { name: t.networks.settingsTitle('home') })).toBeVisible()
   await shot('network')
-  await page.getByRole('button', { name: '新建网络' }).click()
-  await expect(page.getByRole('dialog', { name: '新建网络' })).toBeVisible()
+  await page.getByRole('button', { name: t.networks.create }).click()
+  await expect(page.getByRole('dialog', { name: t.networks.createTitle })).toBeVisible()
   await shot('network-create-dialog', { fullPage: false })
-  await page.getByRole('button', { name: '取消', exact: true }).click()
+  await page.getByRole('button', { name: t.common.cancel, exact: true }).click()
 
-  await page.getByRole('button', { name: /切换网络/ }).click()
+  await page.getByRole('button', { name: new RegExp(literal(t.switcher.label)) }).click()
   await shot('network-switcher', { fullPage: false })
   await page.keyboard.press('Escape')
 
-  await goToAdmin(page, '设置')
-  await expect(page.getByText('已用管理令牌登录。')).toBeVisible()
+  await goToAdmin(page, t.nav.settings)
+  await expect(page.getByText(t.settings.session.stored)).toBeVisible()
   await shot('settings-session')
-  await page.getByRole('link', { name: /节点更新/ }).click()
-  await expect(page.getByTestId('release-version')).toHaveText(`最新版本 ${kit.newVersion}`)
+  await page.getByRole('link', { name: new RegExp(literal(t.updates.tab)) }).click()
+  await expect(page.getByTestId('release-version')).toHaveText(t.updates.release.latest(kit.newVersion))
   await shot('settings-updates')
-  await page.getByRole('button', { name: '全部更新…' }).click()
+  await page.getByRole('button', { name: t.updates.nodes.updateAll }).click()
   await expect(page.getByRole('dialog')).toBeVisible()
   await shot('settings-updates-force-all', { fullPage: false })
-  await page.getByRole('button', { name: '取消', exact: true }).click()
+  await page.getByRole('button', { name: t.common.cancel, exact: true }).click()
 
   // 一个在这台机器上自检不过的版本：让 laptop 立即更新到它，自检失败，这个版本被暂停。
   const broken = kit.oldVersion.replace(/\d+$/, (patch) => String(Number(patch) + 7))
@@ -685,39 +701,40 @@ test('有数据时：管理区和设置', async () => {
     })
     .toBe(1)
   await page.reload()
-  await page.getByRole('button', { name: '查看原因' }).click()
+  await page.getByRole('button', { name: t.updates.paused.reason }).click()
   await expect(page.getByTestId(`paused-reason-${broken}`)).toContainText('缺一个库')
   await shot('settings-updates-paused')
 
-  await page.getByRole('link', { name: '操作记录' }).click()
-  await expect(page.getByRole('columnheader', { name: '说明' })).toBeVisible()
+  const l = t.settings.log
+  await page.getByRole('link', { name: t.settings.tabLog }).click()
+  await expect(page.getByRole('columnheader', { name: l.colEvent })).toBeVisible()
   await shot('settings-log')
-  await page.getByRole('combobox', { name: '按操作筛选' }).selectOption('credential')
+  await page.getByRole('combobox', { name: l.filterAction }).selectOption('credential')
   await page
     .locator('[data-testid^="log-row-"]')
     .first()
-    .getByRole('button', { name: /^只看和凭据/ })
+    .getByRole('button', { name: counted((n) => l.filterByRef(l.refLabels.credential(n))) })
     .first()
     .click()
   await expect(page.getByTestId('log-ref-filter')).toBeVisible()
   await shot('settings-log-filtered')
-  await page.getByRole('link', { name: '关于' }).click()
-  await expect(page.getByText('controller 公钥')).toBeVisible()
+  await page.getByRole('link', { name: t.settings.tabAbout }).click()
+  await expect(page.getByText(t.settings.about.key)).toBeVisible()
   await shot('settings-about')
 })
 
 test('计划中的页面，和找不到的东西', async () => {
   await page
-    .getByRole('navigation', { name: '主导航' })
-    .getByRole('link', { name: /连通性测试/ })
+    .getByRole('navigation', { name: t.nav.label })
+    .getByRole('link', { name: new RegExp(literal(t.nav.tests)) })
     .click()
-  await expect(page.getByRole('heading', { name: /连通性测试/ })).toBeVisible()
+  await expect(page.getByRole('heading', { name: new RegExp(literal(t.nav.tests)) })).toBeVisible()
   await shot('planned-tests')
   await page.goto(`${controller.baseUrl}/n/1/nodes/999`)
-  await expect(page.getByText('找不到这个节点')).toBeVisible()
+  await expect(page.getByText(t.nodes.detail.notFoundTitle)).toBeVisible()
   await shot('node-not-found')
   await page.goto(`${controller.baseUrl}/n/42/overview`)
-  await expect(page.getByText('找不到这个网络')).toBeVisible()
+  await expect(page.getByText(t.networks.notFoundTitle)).toBeVisible()
   await shot('network-not-found')
 })
 
@@ -729,22 +746,22 @@ test('窄一些的笔记本宽度', async () => {
   await page.getByRole('link', { name: 'gw-hk', exact: true }).click()
   await expect(page.getByTestId('capability-relay')).toBeVisible()
   await shot('narrow-node-detail')
-  await goTo(page, '访问控制')
+  await goTo(page, t.nav.access)
   await expect(page.getByTestId('rule-row-2')).toBeVisible()
   await shot('narrow-access-rules')
-  await page.getByRole('radio', { name: '关系图' }).click()
+  await page.getByRole('radio', { name: t.access.tabGraph }).click()
   await expect(page.getByTestId('tag-graph')).toBeVisible()
   await shot('narrow-access-graph')
-  await goTo(page, '端口转发')
+  await goTo(page, t.nav.forwards)
   await expect(page.getByTestId('forward-row-web')).toBeVisible()
   await shot('narrow-forwards')
-  await goTo(page, '出口')
+  await goTo(page, t.nav.exits)
   await expect(page.getByTestId('exit-row-nas-home')).toBeVisible()
   await shot('narrow-exits')
-  await goTo(page, '接入凭据')
+  await goTo(page, t.nav.credentials)
   await expect(page.getByTestId('credential-row-phone')).toBeVisible()
   await shot('narrow-credentials')
-  await goTo(page, '监听器')
+  await goTo(page, t.nav.listeners)
   await expect(page.getByTestId('listener-row-guests')).toBeVisible()
   await shot('narrow-listeners')
   await page.goto(`${controller.baseUrl}/n/1/topology?a=3&b=2`)
@@ -756,17 +773,112 @@ test('窄一些的笔记本宽度', async () => {
   await page.goto(`${controller.baseUrl}/settings/updates`)
   await expect(page.getByTestId('updates-tab')).toBeVisible()
   await shot('narrow-settings-updates')
-  await page.getByRole('button', { name: '收起侧栏' }).click()
-  await goTo(page, '总览')
+  await page.getByRole('button', { name: t.nav.collapse }).click()
+  await goTo(page, t.nav.overview)
   await expect(page.getByTestId('overview-status')).toBeVisible()
   await shot('narrow-overview-sidebar-collapsed')
 })
 
 test('拓扑的骨干', async () => {
   await page.setViewportSize({ width: 1280, height: 800 })
-  await page.getByRole('button', { name: '展开侧栏' }).click()
+  await page.getByRole('button', { name: t.nav.expand }).click()
   await page.goto(`${controller.baseUrl}/n/1/topology?view=backbone`)
   // 骨干每次现问 relay（最多 3 秒左右），等表格出来再截。
   await expect(page.getByTestId('backbone').locator('table')).toBeVisible({ timeout: 15_000 })
   await shot('topology-backbone')
+})
+
+/**
+ * 英文的一组：英文通常比中文长，挑长度最要紧的几页（登录、总览、节点列表和详情、出口这种列多的表、
+ * 两个对话框、拓扑、1024 宽的页面）。浏览器的语言是 en-US，界面第一次打开时自己选英文。
+ * 放在 screenshots/en/ 下面，编号自己从 1 开始。
+ */
+test('英文：长度最要紧的几页', async ({ browser }) => {
+  test.setTimeout(120_000)
+  const dir = join(outDir, 'en')
+  mkdirSync(dir, { recursive: true })
+  const context = await browser.newContext({ locale: 'en-US', viewport: { width: 1280, height: 800 } })
+  const english = await context.newPage()
+  let count = 0
+  const enShot = async (name: string, options: { fullPage?: boolean } = {}) => {
+    count += 1
+    await english.waitForLoadState('networkidle')
+    if (options.fullPage ?? true) await english.evaluate(() => window.scrollTo(0, 0))
+    await english.waitForTimeout(250)
+    await english.screenshot({
+      path: join(dir, `${String(count).padStart(2, '0')}-${name}.png`),
+      fullPage: options.fullPage ?? true,
+    })
+  }
+
+  await english.goto(`${controller.baseUrl}/`)
+  await expect(english.getByRole('heading', { name: en.signIn.title })).toBeVisible()
+  await expect(english.locator('html')).toHaveAttribute('lang', 'en')
+  await enShot('sign-in')
+  await english.getByLabel(en.signIn.tokenLabel, { exact: true }).fill(controller.adminToken)
+  await english.getByRole('button', { name: en.signIn.submit, exact: true }).click()
+
+  await expect(english.getByTestId('overview-status')).toBeVisible()
+  await enShot('overview')
+
+  await english.goto(`${controller.baseUrl}/n/1/nodes`)
+  await expect(english.getByTestId('node-row-gw-hk')).toBeVisible()
+  await enShot('nodes')
+
+  await english.getByRole('link', { name: 'gw-hk', exact: true }).click()
+  await expect(english.getByTestId('capability-relay')).toBeVisible()
+  await enShot('node-detail-relay')
+
+  await english.goto(`${controller.baseUrl}/n/1/nodes/2`)
+  await expect(english.getByTestId('capability-exit')).toBeVisible()
+  await english.getByText(en.nodes.detail.advanced, { exact: true }).click()
+  await enShot('node-detail-exit-and-advanced')
+
+  await english.goto(`${controller.baseUrl}/n/1/nodes`)
+  await english.getByRole('button', { name: en.nodes.add }).click()
+  await expect(english.getByRole('dialog', { name: en.addNode.title })).toBeVisible()
+  await enShot('add-node-dialog', { fullPage: false })
+  await english.getByRole('button', { name: en.addNode.done }).click()
+
+  await english.goto(`${controller.baseUrl}/n/1/exits`)
+  await expect(english.getByTestId('exit-row-nas-home')).toBeVisible()
+  await enShot('exits')
+
+  await english.goto(`${controller.baseUrl}/n/1/forwards`)
+  await expect(english.getByTestId('forward-row-web')).toBeVisible()
+  const fd = en.forwards.dialog
+  await english.getByRole('button', { name: en.forwards.create }).click()
+  const forward = english.getByRole('dialog', { name: fd.createTitle })
+  await forward.getByRole('group', { name: fd.listenSide }).getByRole('combobox', { name: fd.node }).click()
+  await english.getByRole('option', { name: /laptop/ }).click()
+  await expect(english.getByRole('listbox')).toHaveCount(0)
+  await forward.getByRole('group', { name: fd.targetSide }).getByRole('combobox', { name: fd.node }).click()
+  await english.getByRole('option', { name: /nas-home/ }).click()
+  await forward.getByRole('radio', { name: new RegExp(literal(fd.whoOpen)) }).click()
+  await expect(english.getByTestId('forward-check')).toBeVisible()
+  await enShot('forwards-dialog', { fullPage: false })
+  await forward.getByRole('button', { name: en.common.cancel, exact: true }).click()
+  await english.getByRole('button', { name: en.common.discardConfirm }).click()
+
+  await english.goto(`${controller.baseUrl}/n/1/topology?a=3&b=2`)
+  await expect(english.getByTestId('pair-panel')).toBeVisible()
+  await enShot('topology-pair')
+
+  await english.goto(`${controller.baseUrl}/settings/updates`)
+  await expect(english.getByTestId('updates-tab')).toBeVisible()
+  await enShot('settings-updates')
+
+  await english.setViewportSize({ width: 1024, height: 720 })
+  await english.goto(`${controller.baseUrl}/n/1/nodes`)
+  await english.getByRole('link', { name: 'gw-hk', exact: true }).click()
+  await expect(english.getByTestId('capability-relay')).toBeVisible()
+  await enShot('narrow-node-detail')
+  await english.goto(`${controller.baseUrl}/n/1/credentials`)
+  await expect(english.getByTestId('credential-row-phone')).toBeVisible()
+  await enShot('narrow-credentials')
+
+  // 英文的页面上不该有界面自己写的中文（节点报来的原话除外：这几页上没有）。
+  await english.goto(`${controller.baseUrl}/n/1/nodes`)
+  await expect(english.locator('main')).not.toContainText(/\p{Script=Han}/u)
+  await context.close()
 })

@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { type ReactNode, useEffect, useState } from 'react'
 import { Link } from 'react-router'
 
-import { errorMessage } from '@/api/client'
+import { errorDetail, errorMessage } from '@/api/client'
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
 import { type Network, type Node, type NodeDetail, type Reachability, type RelayInput } from '@/api/types'
@@ -72,9 +72,7 @@ function NotDeclared({ capability, node, open, onToggle }: NotDeclaredProps) {
   return (
     <>
       <p data-testid={`not-declared-${capability}`}>
-        {capability === 'forward'
-          ? t.declare.notDeclaredForward(node.name)
-          : t.declare.notDeclared(node.name, t.capability[capability].full)}{' '}
+        {t.declare.notDeclared(node.name)}{' '}
         <Button variant="link" size="sm" onClick={onToggle} aria-expanded={open}>
           {open ? t.declare.hide : t.declare.howTo}
         </Button>
@@ -170,7 +168,7 @@ function ReachabilityNotice({ results, onDismiss }: { results: Reachability[]; o
           </li>
         ))}
       </ul>
-      <p className="mt-1.5">{failed ? d.reachSomeFail : d.reachAllOk}</p>
+      {failed ? <p className="mt-1.5">{d.reachSomeFail}</p> : null}
     </Notice>
   )
 }
@@ -180,7 +178,7 @@ function addressListProblem(raw: string): string | null {
   if (items.length > MAX_RELAY_ADDRESSES) return d.relayFormTooMany(MAX_RELAY_ADDRESSES)
   for (const item of items) {
     const problem = validateSocketAddr(item)
-    if (problem !== null) return `${item}：${problem}`
+    if (problem !== null) return d.relayFormAddress(item, problem)
   }
   return null
 }
@@ -282,15 +280,15 @@ export function RelayRow({ network, node, onWaiting }: CapabilityRowProps) {
     status = (
       <div className="space-y-1.5">
         <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <StatusText tone="ok">{d.relayEnabled}</StatusText>
+          <StatusText tone="ok">{d.enabled}</StatusText>
           {relay.udp.length > 0 ? (
             <span>
-              {d.relayUdp} <code className="font-mono text-xs">{relay.udp.join('、')}</code>
+              {d.relayUdp} <code className="font-mono text-xs">{relay.udp.join(', ')}</code>
             </span>
           ) : null}
           {relay.tcp.length > 0 ? (
             <span>
-              {d.relayTcp} <code className="font-mono text-xs">{relay.tcp.join('、')}</code>
+              {d.relayTcp} <code className="font-mono text-xs">{relay.tcp.join(', ')}</code>
             </span>
           ) : null}
         </p>
@@ -309,7 +307,7 @@ export function RelayRow({ network, node, onWaiting }: CapabilityRowProps) {
           </span>
           {editing ? null : (
             <Button variant="link" size="sm" onClick={openForm}>
-              {d.relayEdit}
+              {d.edit}
             </Button>
           )}
         </p>
@@ -318,7 +316,7 @@ export function RelayRow({ network, node, onWaiting }: CapabilityRowProps) {
   } else if (!node.declared.relay) {
     status = <NotDeclared capability="relay" node={node} open={watch.open} onToggle={watch.toggle} />
   } else {
-    status = <p className="text-muted-foreground">{node.online ? d.relayReady : d.relayOfflineNote}</p>
+    status = <p className="text-muted-foreground">{node.online ? d.declaredReady : d.offlineNote}</p>
   }
 
   const canToggle = enabled || node.declared.relay
@@ -341,7 +339,7 @@ export function RelayRow({ network, node, onWaiting }: CapabilityRowProps) {
     >
       {watch.flash ? (
         <p role="status" className="mt-2 text-[13px] font-medium text-ok">
-          {t.declare.arrived('relay')}
+          {t.declare.arrived}
         </p>
       ) : null}
       {reachability !== null && !editing ? (
@@ -384,26 +382,23 @@ export function RelayRow({ network, node, onWaiting }: CapabilityRowProps) {
                 />
               )}
             </Field>
-            <Field label={d.relayFormRegion} hint={d.relayFormRegionHint} optional={t.common.optional}>
+            <Field label={d.relayFormRegion} optional={t.common.optional}>
               {(props) => (
                 <Input
                   {...props}
+                  placeholder="hk"
                   value={form.region}
                   onChange={(event) => setForm({ ...form, region: event.target.value })}
                 />
               )}
             </Field>
-            <Field
-              label={d.relayFormBandwidth}
-              hint={d.relayFormBandwidthHint}
-              error={submitted ? bandwidth.error : null}
-              optional={t.common.optional}
-            >
+            <Field label={d.relayFormBandwidth} error={submitted ? bandwidth.error : null} optional={t.common.optional}>
               {(props) => (
                 <div className="flex items-center gap-2">
                   <Input
                     {...props}
                     inputMode="numeric"
+                    placeholder={t.common.unlimited}
                     className="w-28 tabular"
                     value={form.bandwidth}
                     onChange={(event) => setForm({ ...form, bandwidth: event.target.value })}
@@ -419,13 +414,16 @@ export function RelayRow({ network, node, onWaiting }: CapabilityRowProps) {
               {d.relayChecking}
             </p>
           ) : null}
-          <FormError message={save.isError ? errorMessage(save.error) : null} />
+          <FormError
+            message={save.isError ? errorMessage(save.error) : null}
+            detail={save.isError ? errorDetail(save.error) : null}
+          />
           <div className="flex justify-end gap-2">
             <Button onClick={() => setEditing(false)} disabled={save.isPending}>
               {t.common.cancel}
             </Button>
             <Button type="submit" variant="primary" pending={save.isPending}>
-              {enabled ? d.relaySave : d.relayEnable}
+              {enabled ? d.save : d.relayEnable}
             </Button>
           </div>
         </form>
@@ -476,11 +474,11 @@ export function ExitRow({ network, node, onWaiting }: CapabilityRowProps) {
   if (node.exit !== null) {
     status = (
       <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <StatusText tone="ok">{d.relayEnabled}</StatusText>
+        <StatusText tone="ok">{d.enabled}</StatusText>
         <span className="text-muted-foreground">{exitSummary(node.exit)}</span>
         {editing ? null : (
           <Button variant="link" size="sm" onClick={openForm}>
-            {d.relayEdit}
+            {d.edit}
           </Button>
         )}
       </p>
@@ -488,7 +486,7 @@ export function ExitRow({ network, node, onWaiting }: CapabilityRowProps) {
   } else if (!node.declared.exit) {
     status = <NotDeclared capability="exit" node={node} open={watch.open} onToggle={watch.toggle} />
   } else {
-    status = <p className="text-muted-foreground">{node.online ? d.exitReady : d.relayOfflineNote}</p>
+    status = <p className="text-muted-foreground">{node.online ? d.declaredReady : d.offlineNote}</p>
   }
 
   return (
@@ -509,7 +507,7 @@ export function ExitRow({ network, node, onWaiting }: CapabilityRowProps) {
     >
       {watch.flash ? (
         <p role="status" className="mt-2 text-[13px] font-medium text-ok">
-          {t.declare.arrived(t.capability.exit.name)}
+          {t.declare.arrived}
         </p>
       ) : null}
       {editing ? (
@@ -525,21 +523,20 @@ export function ExitRow({ network, node, onWaiting }: CapabilityRowProps) {
           className="mt-4 space-y-4 rounded-lg bg-muted/60 p-4"
         >
           <ExitFormFields state={form} onChange={setForm} showProblems={submitted} />
-          <FormError message={save.error} />
+          <FormError message={save.error} detail={save.errorDetail} />
           <div className="flex justify-end gap-2">
             <Button onClick={() => setEditing(false)} disabled={save.pending}>
               {t.common.cancel}
             </Button>
             <Button type="submit" variant="primary" pending={save.pending}>
-              {enabled ? d.exitSave : d.exitEnable}
+              {enabled ? d.save : d.exitEnable}
             </Button>
           </div>
         </form>
       ) : null}
       {enabled && !editing ? (
         <div className="mt-3">
-          <p className="text-[13px] font-medium">{d.exitUsageTitle}</p>
-          <p className="mt-0.5 text-[13px] text-muted-foreground">{d.exitUsageBody(node.name)}</p>
+          <p className="text-[13px] text-muted-foreground">{d.exitUsageBody}</p>
           <CodeBlock copy={exitUsage(node.virtual_ip)} className="mt-1.5">
             {exitUsage(node.virtual_ip)}
           </CodeBlock>

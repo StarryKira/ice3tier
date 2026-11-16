@@ -55,13 +55,14 @@ interface Group {
   reportedSecsAgo: number | null
 }
 
-/** 状态有问题时，原因和下一步单独占一行，是一句完整的话。 */
+/** 状态有问题时，原因单独占一行；节点的原话在它下面，字小一号。 */
 function DetailRow({ view, focused }: { view: ListenView; focused: boolean }) {
   if (!view.needsAttention || view.detail === null) return null
   return (
     <tr className={cn('border-b last:border-b-0', focused && FOCUSED_ROW)}>
       <td colSpan={COLUMNS} className="px-3 pt-0 pb-3 pl-7 text-[13px] leading-snug text-muted-foreground">
         {view.detail}
+        {view.reported !== null ? <span className="mt-0.5 block text-xs break-words">{view.reported}</span> : null}
       </td>
     </tr>
   )
@@ -112,7 +113,7 @@ export function ListenersPage() {
     const exit = all.find((node) => node.exit !== null)
     const usage = listenerUsage(listener, {
       exit: listener.fixed_exit !== null ? undefined : (exit?.virtual_ip ?? t.credentials.usageExitPlaceholder),
-      credential: listener.require_credential ? '<凭据>' : undefined,
+      credential: listener.require_credential ? t.credentials.credentialPlaceholder : undefined,
       hostPlaceholder: nodeName(all, listener.node),
     })
     void copyText(usage).then((ok) => (ok ? toast.success(l.usageCopied) : toast.error(t.common.copyFailed)))
@@ -175,14 +176,12 @@ export function ListenersPage() {
 
   return (
     <Page>
-      <PageHeader title={l.title} description={l.description} actions={empty || noNodes ? undefined : createButton} />
-      <Notice className="mb-4">{l.builtinNote}</Notice>
+      <PageHeader title={l.title} actions={empty || noNodes ? undefined : createButton} />
       {focus.missing ? (
         <Notice className="mb-4" tone="warn">
           {l.focusMissing(focus.focus ?? 0)}
         </Notice>
       ) : null}
-      {configuredNone && groups.length > 0 ? <Notice className="mb-4">{l.onlyBuiltin}</Notice> : null}
       <div>
         {listeners.isError ? (
           <ErrorState title={l.loadFailed} error={listeners.error} onRetry={() => void listeners.refetch()} />
@@ -198,7 +197,7 @@ export function ListenersPage() {
             }
           />
         ) : empty ? (
-          <EmptyState icon={RadioTower} title={l.emptyTitle} description={l.emptyBody} action={createButton} />
+          <EmptyState icon={RadioTower} title={l.emptyTitle} action={createButton} />
         ) : (
           <>
             <Table>
@@ -307,7 +306,7 @@ export function ListenersPage() {
                               <Button
                                 variant="ghost"
                                 size="icon-sm"
-                                aria-label={`${l.menuCopy}：${item.name}`}
+                                aria-label={l.copyUsageOf(item.name)}
                                 onClick={() =>
                                   copyUsage({
                                     bind: item.bind,
@@ -330,7 +329,7 @@ export function ListenersPage() {
                 ))}
               </tbody>
             </Table>
-            <TableNote>{l.stateEvery}</TableNote>
+            <TableNote>{t.common.updatedEvery(10)}</TableNote>
           </>
         )}
       </div>

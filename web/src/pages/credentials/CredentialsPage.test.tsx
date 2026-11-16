@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
 import { type CreatedCredential, type Credential, type Listener } from '@/api/types'
-import { t } from '@/i18n'
+import { setLocale, t } from '@/i18n'
 import { makeCredential, makeListener } from '@/test/fixtures'
 import { apiFailure, fakeApi, type FakeApi, NETWORK, renderWithApp, type Routes } from '@/test/harness'
 
@@ -102,7 +102,7 @@ describe('签发凭据', () => {
     expect(screen.queryByTestId('secret-dialog')).not.toBeInTheDocument()
   })
 
-  it('名字已经被占用：controller 的话写在名字下面，对话框留着，填的内容还在', async () => {
+  it('名字已经被占用：按错误码写在名字下面，对话框留着，填的内容还在', async () => {
     const user = userEvent.setup()
     controller([PHONE], {
       'POST /networks/1/credentials': () => apiFailure(409, 'name_taken', '名字 phone 已经被占用'),
@@ -113,22 +113,23 @@ describe('签发凭据', () => {
     await user.type(name, 'phone')
     await user.click(within(dialog).getByRole('button', { name: c.submit }))
 
-    await waitFor(() => expect(name).toHaveAccessibleDescription(/名字 phone 已经被占用/))
+    await waitFor(() => expect(name).toHaveAccessibleDescription(t.errors.codes.name_taken))
     expect(name).toHaveValue('phone')
     expect(screen.queryByTestId('secret-dialog')).not.toBeInTheDocument()
     // 右下角不再重复弹同一句话。
     const toasts = screen.getByRole('list', { name: t.common.notifications })
-    expect(within(toasts).queryByText(/已经被占用/)).not.toBeInTheDocument()
+    expect(within(toasts).queryByText(t.errors.codes.name_taken)).not.toBeInTheDocument()
   })
 
-  it('说不清属于哪个字段的错误写在表单底部', async () => {
+  it('说不清属于哪个字段的错误写在表单底部，controller 的原话作补充', async () => {
     const user = userEvent.setup()
     controller([PHONE], { 'POST /networks/1/credentials': () => apiFailure(500, 'internal', 'controller 内部出错') })
     renderWithApp(<CredentialsPage />, { network: NETWORK })
     const dialog = await openIssueDialog(user)
     await user.type(within(dialog).getByLabelText(c.nameLabel), 'guest')
     await user.click(within(dialog).getByRole('button', { name: c.submit }))
-    expect(await within(dialog).findByText('controller 内部出错')).toBeVisible()
+    expect(await within(dialog).findByText(t.errors.codes.internal)).toBeVisible()
+    expect(within(dialog).getByText('controller 内部出错')).toBeVisible()
     expect(within(dialog).getByLabelText(c.nameLabel)).not.toHaveAttribute('aria-invalid')
   })
 })
@@ -142,7 +143,7 @@ describe('签发之后的"下一步"', () => {
     await user.type(within(dialog).getByLabelText(c.nameLabel), 'guest')
     await user.click(within(dialog).getByRole('button', { name: c.submit }))
     const secret = await screen.findByTestId('secret-dialog')
-    expect(within(secret).getByText(c.usageNoListener)).toBeVisible()
+    expect(within(secret).getByText(c.noListener)).toBeVisible()
     expect(within(secret).getByRole('link', { name: c.newListener })).toHaveAttribute('href', '/n/1/listeners')
   })
 
@@ -163,7 +164,7 @@ describe('凭据列表', () => {
     controller([])
     renderWithApp(<CredentialsPage />, { network: NETWORK })
     expect(await screen.findByText(c.emptyTitle)).toBeVisible()
-    expect(screen.getByText(c.emptyNoListener)).toBeVisible()
+    expect(screen.getByText(c.noListener)).toBeVisible()
     expect(screen.getByRole('link', { name: c.goListeners })).toHaveAttribute('href', '/n/1/listeners')
   })
 
@@ -227,7 +228,7 @@ describe('用量、状态和上限', () => {
     expect(within(row).getByText('I7bRtu••••')).toBeVisible()
     expect(within(row).getByText(c.state.active)).toBeVisible()
     expect(within(row).getByText('3 / 8')).toBeVisible()
-    expect(within(row).getByRole('meter', { name: `phone ${c.colTraffic}` })).toHaveAttribute('aria-valuenow', '20')
+    expect(within(row).getByRole('meter', { name: c.trafficOf('phone') })).toHaveAttribute('aria-valuenow', '20')
     expect(within(row).getByText('2.0 GB / 10.0 GB')).toBeVisible()
 
     // 用完了的：原因和怎么恢复写在下面一行。
@@ -328,5 +329,21 @@ describe('用量、状态和上限', () => {
     controller([USED])
     renderWithApp(<CredentialsPage />, { network: NETWORK, route: '/n/1/credentials?focus=9' })
     expect(await screen.findByText(c.focusMissing(9))).toBeVisible()
+  })
+})
+
+describe('英文', () => {
+  it('列表和新建的对话框里没有中文', async () => {
+    const user = userEvent.setup()
+    setLocale('en', { remember: false })
+    controller([PHONE, makeCredential(2, 'old', { state: 'revoked', revoked_at: 1_794_000_000 })], {
+      'GET /networks/1/listeners': [LAN_LISTENER],
+    })
+    renderWithApp(<CredentialsPage />, { network: NETWORK })
+    await screen.findByTestId('credential-row-phone')
+    expect(screen.getByRole('columnheader', { name: c.colLastUsed })).toHaveTextContent('Last used')
+    expect(document.body.textContent).not.toMatch(/\p{Script=Han}/u)
+    const dialog = await openIssueDialog(user)
+    expect(dialog.textContent).not.toMatch(/\p{Script=Han}/u)
   })
 })

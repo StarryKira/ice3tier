@@ -37,6 +37,9 @@ export function UpdateStateView({ view, compact = false }: { view: UpdateView; c
       {view.detail !== null && !compact ? (
         <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">{view.detail}</p>
       ) : null}
+      {view.reason !== null && !compact ? (
+        <p className="mt-0.5 font-mono text-xs leading-snug break-words text-muted-foreground">{view.reason}</p>
+      ) : null}
     </div>
   )
 }
@@ -54,7 +57,7 @@ export function VersionCell({ node }: { node: Node }) {
   const view = useUpdateView(node)
   const mark = updateMark(view.kind)
   const style = mark === null ? null : MARKS[mark]
-  const tip = view.detail === null ? view.label : `${view.label}。${view.detail}`
+  const tip = view.detail === null ? view.label : t.common.sentences(view.label, view.detail)
   return (
     <div>
       <div className="flex items-center gap-1.5 text-[13px] tabular">

@@ -1,6 +1,6 @@
 # ice3tier WebUI
 
-controller 的管理界面。它只和 controller 的管理 API 说话（见 [`docs/admin-api.md`](../docs/admin-api.md)），和 API 同源，每个请求带 `Authorization: Bearer <管理令牌>`。界面语言是简体中文。
+controller 的管理界面。它只和 controller 的管理 API 说话（见 [`docs/admin-api.md`](../docs/admin-api.md)），和 API 同源，每个请求带 `Authorization: Bearer <管理令牌>`。界面有简体中文和英文两种语言（见「界面上的文字」）。
 
 技术栈：React、TypeScript、Vite、TanStack Query、React Router、Tailwind、shadcn/ui 风格的部件（Radix）、React Flow（访问关系图、拓扑）。包管理用 `pnpm`。
 
@@ -57,7 +57,7 @@ target/release/i3t run
 | `src/access/`     | 访问关系图的数据整理和几何，纯函数                                                                                                                                     |
 | `src/topology/`   | 路由视图的数据整理：路由矩阵变成拓扑图的点和线、一条路的几种说法、路径诊断里一个方向怎么说、地址里选中的那一对节点，纯函数                                             |
 | `src/lib/`        | 校验、地址段的计算、给用户执行的命令、时间和字节数的写法、版本号的比较、节点更新情况的说法、用量和监听状态的说法等                                                     |
-| `src/i18n/`       | 界面上的全部文字。组件里不直接写中文                                                                                                                                   |
+| `src/i18n/`       | 界面上的全部文字，每种语言一个目录；语言的选择和切换。组件里不直接写界面文字                                                                                           |
 | `src/test/`       | 单元测试的准备和假的管理 API                                                                                                                                           |
 | `e2e/`            | Playwright 的端到端测试和截图                                                                                                                                          |
 | `screenshots/`    | `pnpm screenshots` 截下来的每个页面，给人看版面                                                                                                                        |
@@ -98,14 +98,15 @@ target/release/i3t run
 
 ### 部件的规矩
 
-- **页面**：`<Page>` 加 `<PageHeader>`。`Page` 的宽度三档：`narrow`（880，以读和填为主：网络、计划中的页面）、默认（1200，列表和总览）、`wide`（1480，画图的页面）。标题下面一句灰色的说明；右端最多一个主按钮，再加一两个次要的。
-- **分区**：`Card` 现在是一个没有框的分区，`CardHeader` 是 16 像素的标题加一句灰色说明、右端一个这个分区自己的动作。分区里的列表以一条细线开头（`border-t`），行与行之间细线（`divide-y`）。不要给分区加边框、底色或阴影。
+- **页面**：`<Page>` 加 `<PageHeader>`。`Page` 的宽度三档：`narrow`（880，以读和填为主：网络、计划中的页面）、默认（1200，列表和总览）、`wide`（1480，画图的页面）。标题下面一般不写说明（见「界面上的文字」）；右端最多一个主按钮，再加一两个次要的。
+- **分区**：`Card` 现在是一个没有框的分区，`CardHeader` 是 16 像素的标题、右端一个这个分区自己的动作；说明只在标题之外还有信息时才写。分区里的列表以一条细线开头（`border-t`），行与行之间细线（`divide-y`）。不要给分区加边框、底色或阴影。
 - **表格**：`Table`、`Th`、`Td`、`Tr`（`src/components/table.tsx`）。不放在框里；第一列是名字，数右对齐，操作在最后一列的「⋮」菜单里。表格向两边各伸出 12 像素，字和页面标题对齐。上面的搜索、筛选用 `Toolbar`，下面的共几项、翻页用 `TableFooter`，常驻的一句说明用 `TableNote`。一行的原因和下一步写在它下面单独的一行里，不挤进状态格。
 - **按钮**：`primary` 每页最多一个；`outline`（默认）是次要动作；`ghost` 给工具栏、行内、菜单触发和"查看 ›"这类去别处的动作；`link` 给句子里的动作。破坏性的动作放进菜单最后，红字；只有"删除网络"这种整页唯一的危险操作才用 `danger-outline`。
 - **状态**：`StatusText`、`StatusDot`、`OnlineDot`（`src/components/status.tsx`）。在线是实心绿点，离线是空心灰圈，紧贴在名字前面。不要用彩色的字写"在线""正常""已启用"。
 - **徽标**：`Badge` 默认是浅灰底的小字（协议、角色、"自带"）；`outline` 是细框（内置、默认）；彩色的只给要注意的（`warn`、`danger`）和"现问到"这类来源。
 - **提醒**：`Notice` 的 `info` 是一句灰色旁注，不铺底；`warn`、`danger` 才铺很淡的底色。不要在页面里堆提醒框，能写成表格下面的一句说明的就写成说明。
-- **空、加载、出错**：`EmptyState`（淡灰的图标、一句话、一句说明、一个按钮）、`NoMatches`、`ErrorState`、`SkeletonRows`、`SkeletonBlock`。不要再给它们套框。
+- **空、加载、出错**：`EmptyState`（淡灰的图标、一句话、一个按钮）、`NoMatches`、`ErrorState`（按错误码写原因，controller 的原话在下面一行作补充）、`SkeletonRows`、`SkeletonBlock`。不要再给它们套框。
+- **较长的解释**：`InfoTip`（名字旁边一个小图标，悬停或聚焦时显示）或者 `<details>`。
 - **表单**：对话框里用 `FormDialog` 和 `Field`；单选用 `RadioCards`（没有框的选项列表）；输入框的外观是 `fieldBase`，自己画的输入框（搜索、标签）也用它。
 - **图**：React Flow 的画布放在一块浅灰（`bg-sidebar`）的圆角区域里，不加边框；图上的点是白底细框，离线的虚线框；选中的用强调色的框。图例写在画布下面，一行灰色小字。
 
@@ -117,6 +118,108 @@ target/release/i3t run
 - 不做：框里套框、给分区加边框或阴影、给标题加彩色图标底圈、整列彩色的字、蓝色的标签、等宽字体的标签名。
 - 不做：新的颜色、字号、圆角或阴影。需要的时候先改 `index.css` 和这一节。
 
+## 界面上的文字
+
+文字的标准是一个克制的专业管理界面：名字短，说明少，不和读者聊天。下面的术语表和规则对两种语言都适用。
+
+### 术语表
+
+一个概念只有一个词，中英文各一个，处处一样。英文和命令行 `i3tctl` 的名词一致。界面和代码里不出现别的产品的名字。括号里是按钮、通知这类地方可以用的简称。
+
+| 中文             | English                  | 命令行          | 说明                                                    |
+| ---------------- | ------------------------ | --------------- | ------------------------------------------------------- |
+| 网络             | network                  | `network`       |                                                         |
+| 节点             | node                     | `node`          | 不叫设备、机器                                          |
+| 虚拟 IP          | virtual IP               |                 |                                                         |
+| 地址段           | address range            | `--cidr`        | 网络的虚拟地址从这里分配                                |
+| 域名             | DNS name                 |                 | 节点的全名，`laptop.home.i3t`                           |
+| 域名后缀         | domain                   |                 | 网络的，`home.i3t`                                      |
+| 标签             | tag                      | `tag`           | 不叫分组                                                |
+| 规则             | rule                     | `rule`          | 需要说清时写"访问规则 / access rule"                    |
+| 访问控制         | access control           | `access`        | 页面                                                    |
+| relay            | relay                    | `relay`         | 中文也写 relay                                          |
+| 出口             | exit                     | `exit`          |                                                         |
+| 监听器           | listener                 | `listener`      |                                                         |
+| 凭据             | credential               | `credential`    |                                                         |
+| 端口转发（转发） | port forward (forward)   | `forward`       |                                                         |
+| 注册令牌（令牌） | enrollment token (token) | `token`         |                                                         |
+| 管理令牌         | admin token              |                 | 登录用的那一个                                          |
+| 节点对           | node pair                | `pair`          |                                                         |
+| 操作记录         | activity log             | `log`           |                                                         |
+| 节点更新         | node updates             | `update`        |                                                         |
+| 发布源           | release source           |                 |                                                         |
+| 拓扑             | topology                 |                 |                                                         |
+| 路由矩阵         | route matrix             | `routes`        |                                                         |
+| 骨干             | backbone                 | `backbone`      | relay 之间的链路                                        |
+| 路径诊断         | path diagnosis           | `path`          |                                                         |
+| 路由             | routes                   |                 | 一个节点到各个对端现在怎么走                            |
+| 直连             | direct                   |                 |                                                         |
+| 经 relay         | via relay                |                 | 写成"经 hk-1""via hk-1"                                 |
+| 不可达           | unreachable              |                 | 不说"无路可走"                                          |
+| 挂靠             | attached                 |                 | 节点和 relay 保持着会话                                 |
+| 固定挂靠的 relay | pinned relays            | `--pin`         |                                                         |
+| 声明             | declare                  | `i3t set can-…` | 节点在本机声明可以承担什么                              |
+| 能力             | capabilities             |                 | 节点详情里 relay、出口、转发目标那一节                  |
+| 角色             | role                     |                 | 已启用的 relay、出口（列表的筛选和标记）                |
+| 选路模式         | routing mode             | `--routing`     | 默认 default，延迟优先 lowest latency                   |
+| 路径限制         | path restriction         | `--reach`       | 不限 any，只直连 direct only，只经 relay relay only     |
+| 服务等级         | service class            | `--class`       | 自动 auto，交互 interactive，可靠 reliable，大流量 bulk |
+| 流               | flow                     |                 |                                                         |
+| 连接             | connection               |                 |                                                         |
+| 流量             | traffic                  |                 | 字节数                                                  |
+| 用量             | usage                    |                 |                                                         |
+| 流量配额         | traffic quota            |                 | 出口的，按账期（period）算                              |
+| 流量上限         | traffic limit            |                 | 凭据的                                                  |
+| 并发上限         | connection limit         |                 | 凭据的                                                  |
+| 健康             | health                   |                 | 出口的                                                  |
+| 继任             | replace                  | `node succeed`  | 新节点接手已下线节点的身份                              |
+| 自带             | built-in                 |                 | 节点自己开的回环入口                                    |
+| 来源白名单       | allowed sources          |                 |                                                         |
+| 监听地址         | listen address           |                 |                                                         |
+| 固定出口         | fixed exit               |                 |                                                         |
+| 连接常驻         | keep alive               |                 |                                                         |
+| 最后在线         | last seen                |                 |                                                         |
+
+动作：
+
+| 中文           | English           | 用在                                         |
+| -------------- | ----------------- | -------------------------------------------- |
+| 添加           | add               | 节点、节点对、标签的成员                     |
+| 新建           | create            | 网络、规则、监听器、端口转发、注册令牌、凭据 |
+| 编辑、改名     | edit, rename      |                                              |
+| 删除           | delete            |                                              |
+| 吊销           | revoke            | 凭据、注册令牌                               |
+| 启用、停用     | enable, disable   | 规则、转发、relay、出口，都用这一对          |
+| 立即更新       | update now        | 节点更新                                     |
+| 登录、退出登录 | sign in, sign out |                                              |
+
+### 怎么写
+
+1. **名字**是短的名词短语。**按钮**是动词，或动词加名词（"新建规则""Create rule"），不写"确定""提交"。**表头**一两个词。
+2. **页面**只有标题。标题之外还有信息时才加一行，大多数页面没有。分区标题同样。
+3. **说明**只在三种情况写，一行：防止填错；后果不明显（破坏性的操作、只显示一次的秘密）；某个设置要另一件事成立才起作用。值得留的长解释放进 `InfoTip` 或 `<details>`。拿不准就删。
+4. **不对读者说话**：不写"请""你可以"，不写理由和安慰，不重复屏幕上已经有的东西。
+5. **空状态**一句"还没有 X"加一个动作。**出错**说是什么情况，给重试；controller 的原话只作补充。
+6. **带数据的句子**先说对象和状态（"hk-1 离线""hk-1 offline"），细节留给它链接的页面。
+7. **确认框**的标题是动作加对象（"删除节点 laptop？"），正文只写不明显的后果，最多两短句，确认按钮写动作。**通知**写对象和结果（"节点 laptop 已删除""Node laptop deleted"）。
+8. **标点**：一句话的（标签、按钮、表头、说明、通知、空状态）不加句号；两句以上每句都加。英文用句首大写（sentence case）。中文里汉字和数字、英文之间空一格。
+9. **带参数的句子**写成函数，量词、单复数、语序在各语言的函数里处理。组件里不拼句子，不写"和""、"这类连接词：并列的名字用 `formatList`，两句接起来用 `t.common.sentences`。
+10. **数、字节、日期、时间**只经 `src/lib/format.ts` 和 `src/lib/time.ts` 写，它们按当前语言（`Intl`）写。
+
+### 语言
+
+- 第一次打开时按浏览器的语言偏好（`navigator.languages`）挑一种有的，都没有时用英文。登录页右上角和账号菜单里都能换，选择记在浏览器里（`localStorage` 的 `i3t.locale`）。
+- 换语言不刷新页面：`t` 就地改写，应用的根组件订阅语言（`useLocale`），整棵树重新渲染，填了一半的表单、展开的行都留着。`<html lang>` 和标签页的标题跟着变。
+- 所以不要在模块加载时就把一句话取出来存着（`const LABEL = t.nodes.title`）：在渲染时读，或者写成取值函数。`src/i18n/live.test.ts` 检查这一点。自己缓存了文字的地方（`useMemo`、画图的库的节点）把 `useLocale()` 放进依赖里。
+- 有些文字来自 controller 或节点，是中文写的（错误的原话、操作记录的说明、换路的原因等）。接口给了错误码、操作、状态这类结构化的字段时，界面按它们用自己的话写，原话只作补充；只给了一句话的，原样显示。
+- 测试固定用简体中文（`src/test/setup.ts`），期望的文字从目录里取（`t.…`），不在测试里抄界面上的字；端到端测试同样从 `src/i18n/zh-CN` 取。
+
+加一种语言：
+
+1. 照着 `src/i18n/en/` 写一个目录，每个分区写成 `export const nodes: Messages['nodes'] = { … }`，在它的 `index.ts` 里合成一个对象。少一个键、多一个键、参数不对都是编译错误。
+2. 在 `src/i18n/index.ts` 的 `LOCALES` 里加一行：代码（BCP 47，也是 `Intl` 和 `<html lang>` 用的）和它用自己的文字写的名字。
+3. `pnpm typecheck` 和 `pnpm test`：`src/i18n/i18n.test.ts` 查空的字符串、函数写不出话、各语言的键不一样。英文和中文都比较短，换一种语言要在 1280 和 1024 宽各看一遍页面。
+
 ## 检查和测试
 
 ```sh
@@ -124,7 +227,7 @@ pnpm typecheck    # TypeScript
 pnpm lint         # ESLint
 pnpm test         # 单元测试和组件测试（Vitest + Testing Library，jsdom）
 pnpm e2e          # 端到端测试（Playwright，无头 Chromium）
-pnpm screenshots  # 重新截一遍每个页面，放到 screenshots/
+pnpm screenshots  # 重新截一遍每个页面：中文的放到 screenshots/，英文的一组放到 screenshots/en/
 ```
 
 **单元测试**和被测的代码放在一起，文件名是 `*.test.ts` / `*.test.tsx`。组件测试不连真的 controller：`src/test/harness.tsx` 里的 `fakeApi` 接住 `fetch`，按"方法 路径"应答。改代码时可以用 `pnpm test:watch`。
@@ -148,6 +251,8 @@ pnpm e2e
 `i3t-controller` 和 `i3t` 从哪里找：环境变量 `I3T_BIN_DIR` 指的目录；没设时依次试 `web/.e2e/release-kit/old`、`target/agent-web/release`、`target/release`、`target/lead/release`，用第一个两样都在的。节点更新的测试和截图总是用 release-kit 里的那一组。
 
 测试里的 controller 一启动就把发布源换成一个空目录：测试不连外网，节点也不会被真的发布更新掉。每个节点跑的是它自己的一份程序文件，自己更新的节点换掉的只是那一份。
+
+端到端测试在简体中文下跑（浏览器语言 zh-CN），界面上的字从 `src/i18n/zh-CN` 取，不在测试里抄；`flows.spec.ts` 里有一段在应用里换成英文再换回来。截图先截一遍中文的全部页面，再用浏览器语言是 en-US 的页面截英文的一组（长度最要紧的那些页）。
 
 `pnpm e2e` 和 `pnpm screenshots` 都会先执行一次 `pnpm build`。截图也要 release-kit：发布源上有一个用测试钥匙签的新版本，节点更新的页面才有东西可看。失败时的截图和过程记录（trace）在 `test-results/` 里，后者用 `pnpm exec playwright show-trace <trace.zip>` 打开。
 

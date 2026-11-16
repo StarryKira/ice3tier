@@ -59,6 +59,7 @@ describe('relay 这一行', () => {
     expect(within(results).getByText(d.reachOk('UDP', '203.0.113.7:20330', t.common.ms(23)))).toBeVisible()
     expect(within(results).getByText(d.reachFail('TCP', '203.0.113.7:20330', 'Connection refused'))).toBeVisible()
     expect(screen.getByText(d.reachSomeFail)).toBeVisible()
+    // 原因是节点那边的原话（"Connection refused"），原样写在括号里。
     // 不是错误：没有红色的报错，启用成功的提示照样有。
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(await screen.findByText(d.relayEnabledToast('hk'))).toBeVisible()

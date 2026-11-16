@@ -65,6 +65,14 @@ function command(): HTMLElement {
   return screen.getByTestId('join-command')
 }
 
+/** 名字里含有这段文字（标签旁边还有"可选"或一句提示）。 */
+function containing(text: string): RegExp {
+  return new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+}
+
+/** 令牌生成之前命令里的占位符。测试开始时语言才固定下来，所以现取。 */
+const placeholder = () => t.addNode.tokenPlaceholder
+
 async function generate(user: ReturnType<typeof userEvent.setup>): Promise<void> {
   await user.click(screen.getByRole('button', { name: t.addNode.generate }))
   await waitFor(() => expect(command()).toHaveTextContent(TOKEN))
@@ -74,7 +82,7 @@ describe('添加节点', () => {
   it('令牌生成之前：命令里是占位符，让人先看懂结构；没有东西可以复制', () => {
     emptyNetwork()
     renderWithApp(<AddNodeFlow network={NETWORK} />)
-    expect(command()).toHaveTextContent('echo <注册令牌> | i3t join')
+    expect(command()).toHaveTextContent(`echo ${placeholder()} | i3t join`)
     expect(screen.getByRole('button', { name: t.addNode.copyCommand })).toBeDisabled()
     expect(screen.queryByRole('button', { name: t.addNode.copyToken })).not.toBeInTheDocument()
     expect(screen.queryByText(t.addNode.waiting)).not.toBeInTheDocument()
@@ -90,13 +98,13 @@ describe('添加节点', () => {
     const user = userEvent.setup()
     emptyNetwork()
     renderWithApp(<AddNodeFlow network={NETWORK} />)
-    await user.click(screen.getByRole('checkbox', { name: /可以作为 relay/ }))
-    expect(command()).toHaveTextContent('echo <注册令牌> | i3t join --can-relay')
-    await user.click(screen.getByRole('checkbox', { name: /可以作为端口转发的目标/ }))
-    await user.click(screen.getByRole('checkbox', { name: /可以作为出口/ }))
-    expect(command()).toHaveTextContent('echo <注册令牌> | i3t join --can-exit --can-relay --can-forward')
-    await user.click(screen.getByRole('checkbox', { name: /可以作为 relay/ }))
-    expect(command()).toHaveTextContent('echo <注册令牌> | i3t join --can-exit --can-forward')
+    await user.click(screen.getByRole('checkbox', { name: containing(t.addNode.declareRelay) }))
+    expect(command()).toHaveTextContent(`echo ${placeholder()} | i3t join --can-relay`)
+    await user.click(screen.getByRole('checkbox', { name: containing(t.addNode.declareForward) }))
+    await user.click(screen.getByRole('checkbox', { name: containing(t.addNode.declareExit) }))
+    expect(command()).toHaveTextContent(`echo ${placeholder()} | i3t join --can-exit --can-relay --can-forward`)
+    await user.click(screen.getByRole('checkbox', { name: containing(t.addNode.declareRelay) }))
+    expect(command()).toHaveTextContent(`echo ${placeholder()} | i3t join --can-exit --can-forward`)
   })
 
   it('换平台，命令跟着变', async () => {
@@ -104,7 +112,7 @@ describe('添加节点', () => {
     emptyNetwork()
     renderWithApp(<AddNodeFlow network={NETWORK} />)
     await user.click(screen.getByRole('radio', { name: 'Windows' }))
-    expect(command()).toHaveTextContent('echo <注册令牌> | .\\i3t.exe join')
+    expect(command()).toHaveTextContent(`echo ${placeholder()} | .\\i3t.exe join`)
     expect(screen.getByText(/curl\.exe -fLo i3t\.exe/)).toBeVisible()
   })
 
@@ -112,7 +120,7 @@ describe('添加节点', () => {
     const user = userEvent.setup()
     const api = emptyNetwork()
     renderWithApp(<AddNodeFlow network={NETWORK} />)
-    await user.click(screen.getByRole('checkbox', { name: /可以作为 relay/ }))
+    await user.click(screen.getByRole('checkbox', { name: containing(t.addNode.declareRelay) }))
     await generate(user)
 
     expect(command()).toHaveTextContent(`echo ${TOKEN} | i3t join --can-relay`)
@@ -131,7 +139,7 @@ describe('添加节点', () => {
     const user = userEvent.setup()
     const api = emptyNetwork()
     renderWithApp(<AddNodeFlow network={NETWORK} />)
-    const tags = screen.getByRole('combobox', { name: /标签/ })
+    const tags = screen.getByRole('combobox', { name: containing(t.addNode.tagsLabel) })
     await user.type(tags, 'Servers{Enter}')
     await user.type(tags, 'home_lab{Enter}')
     await generate(user)
@@ -143,7 +151,7 @@ describe('添加节点', () => {
     const api = emptyNetwork()
     renderWithApp(<AddNodeFlow network={NETWORK} />)
     await generate(user)
-    await user.click(screen.getByRole('checkbox', { name: /可以作为出口/ }))
+    await user.click(screen.getByRole('checkbox', { name: containing(t.addNode.declareExit) }))
     expect(command()).toHaveTextContent(`echo ${TOKEN} | i3t join --can-exit`)
     expect(api.callsTo('POST /networks/1/tokens')).toHaveLength(1)
   })
@@ -154,9 +162,9 @@ describe('添加节点', () => {
     renderWithApp(<AddNodeFlow network={NETWORK} />)
     expect(screen.queryByText(t.addNode.lockedNote)).not.toBeInTheDocument()
     await generate(user)
-    expect(screen.getByRole('combobox', { name: /标签/ })).toBeDisabled()
+    expect(screen.getByRole('combobox', { name: containing(t.addNode.tagsLabel) })).toBeDisabled()
     expect(screen.getByLabelText(t.addNode.ttlLabel)).toBeDisabled()
-    expect(screen.getByLabelText(/预设虚拟 IP/)).toBeDisabled()
+    expect(screen.getByLabelText(containing(t.addNode.ipLabel))).toBeDisabled()
     expect(screen.getByText(t.addNode.lockedNote)).toBeVisible()
   })
 
@@ -164,7 +172,7 @@ describe('添加节点', () => {
     const user = userEvent.setup()
     const api = emptyNetwork()
     renderWithApp(<AddNodeFlow network={NETWORK} />)
-    const ip = screen.getByLabelText(/预设虚拟 IP/)
+    const ip = screen.getByLabelText(containing(t.addNode.ipLabel))
     await user.type(ip, '10.99.0.5')
     expect(screen.getByText(t.validate.ipOutOfRange('10.66.0.0/16'))).toBeInTheDocument()
     expect(screen.getByRole('button', { name: t.addNode.generate })).toBeDisabled()
@@ -175,16 +183,16 @@ describe('添加节点', () => {
     expect(api.callsTo('POST /networks/1/tokens')[0]?.body).toMatchObject({ virtual_ip: '10.66.0.50' })
   })
 
-  it('controller 拒绝生成：按钮恢复，原因写在按钮下面', async () => {
+  it('controller 拒绝生成：按钮恢复，原因按错误码写在按钮下面', async () => {
     const user = userEvent.setup()
     emptyNetwork({
       'POST /networks/1/tokens': () => apiFailure(409, 'address_taken', '虚拟 IP 10.66.0.50 已经分给了节点 nas-01'),
     })
     renderWithApp(<AddNodeFlow network={NETWORK} />)
     await user.click(screen.getByRole('button', { name: t.addNode.generate }))
-    expect(await screen.findByText('虚拟 IP 10.66.0.50 已经分给了节点 nas-01')).toBeVisible()
+    expect(await screen.findByText(t.errors.codes.address_taken)).toBeVisible()
     expect(screen.getByRole('button', { name: t.addNode.generate })).toBeEnabled()
-    expect(command()).toHaveTextContent('echo <注册令牌> | i3t join')
+    expect(command()).toHaveTextContent(`echo ${placeholder()} | i3t join`)
   })
 
   it('节点用令牌加入之后，等待区自己变成结果；令牌不再显示', async () => {
@@ -195,7 +203,7 @@ describe('添加节点', () => {
 
     // 节点执行了加入命令：令牌用掉了，网络里多出一个节点。
     api.use({ 'GET /networks/1/tokens': [], 'GET /networks/1/nodes': [node(5, 'nas-01')] })
-    expect(await screen.findByTestId('node-joined')).toHaveTextContent('nas-01 已加入 · 10.66.0.5')
+    expect(await screen.findByTestId('node-joined')).toHaveTextContent(t.addNode.joined('nas-01', '10.66.0.5'))
     // 名字取自它报的主机名，写出来，用户认得出是哪台机器。
     expect(screen.getByTestId('node-joined-hostname')).toHaveTextContent(t.addNode.joinedHostname('nas-01.lan'))
     expect(screen.queryByText(t.addNode.waiting)).not.toBeInTheDocument()
@@ -225,13 +233,13 @@ describe('添加节点', () => {
     const user = userEvent.setup()
     const api = emptyNetwork()
     renderWithApp(<AddNodeFlow network={NETWORK} />)
-    await user.click(screen.getByRole('checkbox', { name: /可以作为 relay/ }))
+    await user.click(screen.getByRole('checkbox', { name: containing(t.addNode.declareRelay) }))
     await generate(user)
     api.use({ 'GET /networks/1/tokens': [], 'GET /networks/1/nodes': [node(5, 'nas-01')] })
     await screen.findByTestId('node-joined')
 
     await user.click(screen.getByRole('button', { name: t.addNode.addAnother }))
-    expect(command()).toHaveTextContent('echo <注册令牌> | i3t join --can-relay')
+    expect(command()).toHaveTextContent(`echo ${placeholder()} | i3t join --can-relay`)
     expect(document.body).not.toHaveTextContent(TOKEN)
     expect(screen.getByRole('button', { name: t.addNode.generate })).toBeEnabled()
   })

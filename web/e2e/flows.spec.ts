@@ -1,7 +1,8 @@
 import { expect, type Locator, type Page, test } from '@playwright/test'
 
 import { Controller, type NodeHandle } from './controller'
-import { clearToasts, expectToast, goTo, goToAdmin } from './helpers'
+import { en } from '../src/i18n/en'
+import { clearToasts, expectToast, goTo, goToAdmin, t } from './helpers'
 
 /**
  * 从一个空的 controller 开始，把主要的流程照着用户的做法走一遍：
@@ -40,8 +41,9 @@ function joinCommand(): Locator {
 }
 
 /** 关系图上的一条规则线。画图的库把线画成带说明文字的一组 SVG。 */
-function ruleEdge(label: string, state: '启用' | '停用'): Locator {
-  return page.getByTestId('tag-graph').locator(`[aria-label="规则 ${label}（${state}）"]`)
+function ruleEdge(label: string, enabled: boolean): Locator {
+  const state = enabled ? t.access.graph.edgeEnabled : t.access.graph.edgeDisabled
+  return page.getByTestId('tag-graph').locator(`[aria-label="${t.access.graph.edgeLabel(label, state)}"]`)
 }
 
 /**
@@ -53,7 +55,7 @@ function nodeOption(node: { ip: string }): Locator {
 }
 
 function tagPoint(tag: string, members: number): Locator {
-  return page.getByTestId('tag-graph').locator(`[aria-label="标签 ${tag}，${members} 个节点"]`)
+  return page.getByTestId('tag-graph').locator(`[aria-label="${t.access.graph.tagNodeLabel(tag, members)}"]`)
 }
 
 test.describe.configure({ mode: 'serial' })
@@ -62,7 +64,7 @@ test.beforeAll(async ({ browser }) => {
   test.setTimeout(120_000)
   controller = await Controller.start()
   console.log(`用的程序：${controller.bins}`)
-  const context = await browser.newContext()
+  const context = await browser.newContext({ locale: 'zh-CN' })
   await context.grantPermissions(['clipboard-read', 'clipboard-write'])
   page = await context.newPage()
 })
@@ -76,42 +78,42 @@ test('用管理令牌登录', async () => {
   // 没登录时任何地址都落到登录页。
   await page.goto(`${controller.baseUrl}/settings/about`)
   await expect(page).toHaveURL(/\/login\?next=/)
-  await expect(page.getByRole('heading', { name: '登录 ice3tier' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: t.signIn.title })).toBeVisible()
 
-  const token = page.getByLabel('管理令牌', { exact: true })
+  const token = page.getByLabel(t.signIn.tokenLabel, { exact: true })
   await token.fill('not-the-admin-token')
-  await page.getByRole('button', { name: '登录', exact: true }).click()
-  await expect(page.getByRole('alert')).toContainText('管理令牌不对')
+  await page.getByRole('button', { name: t.signIn.submit, exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText(t.errors.codes.unauthorized)
   await expect(page).toHaveURL(/\/login/)
 
   await token.fill(controller.adminToken)
-  await page.getByRole('button', { name: '登录', exact: true }).click()
+  await page.getByRole('button', { name: t.signIn.submit, exact: true }).click()
   // controller 里还没有网络：先去建第一个。
-  await expect(page.getByRole('heading', { name: '建第一个网络' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: t.networks.welcomeTitle })).toBeVisible()
 })
 
 test('建第一个网络', async () => {
-  const name = page.getByLabel('名字', { exact: true })
-  const cidr = page.getByLabel('虚拟地址段', { exact: true })
+  const name = page.getByLabel(t.networks.nameLabel, { exact: true })
+  const cidr = page.getByLabel(t.networks.cidrLabel, { exact: true })
   // 两项都有默认值。
   await expect(name).toHaveValue('home')
   await expect(cidr).toHaveValue('10.66.0.0/16')
-  await expect(page.getByText('有节点加入之后，地址段只能扩大，不能更换。')).toBeVisible()
+  await expect(page.getByText(t.networks.cidrHint)).toBeVisible()
 
   // 写法不对的，在输入框下面就说，不发请求。
   await name.fill('My Network')
-  await expect(page.getByText('名字只能用字母、数字和连字符（-）。')).toBeVisible()
+  await expect(page.getByText(t.validate.nameCharset)).toBeVisible()
   await cidr.fill('10.66.0.0/31')
-  await expect(page.getByText('地址段太小了，前缀最长是 /30。')).toBeVisible()
-  await page.getByRole('button', { name: '创建网络' }).click()
+  await expect(page.getByText(t.validate.cidrTooSmall(30))).toBeVisible()
+  await page.getByRole('button', { name: t.networks.createSubmit }).click()
   expect(await controller.api<unknown[]>('GET', '/networks')).toHaveLength(0)
 
   await name.fill('home')
   await cidr.fill('10.66.0.0/16')
-  await page.getByRole('button', { name: '创建网络' }).click()
+  await page.getByRole('button', { name: t.networks.createSubmit }).click()
 
   // 落在总览页；节点不足两个时它就是引导。
-  await expect(page.getByRole('heading', { name: '把前两个节点连起来' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: t.overview.guide.title })).toBeVisible()
   await expect(page).toHaveURL(/\/n\/1\/overview$/)
   const networks = await controller.api<{ name: string; cidr: string }[]>('GET', '/networks')
   expect(networks).toMatchObject([{ name: 'home', cidr: '10.66.0.0/16' }])
@@ -122,32 +124,32 @@ test('建第一个网络', async () => {
 })
 
 test('生成注册令牌，拿到加入命令，节点加入后出现在界面上', async () => {
-  await goTo(page, '节点')
-  await expect(page.getByText('这个网络里还没有节点')).toBeVisible()
-  await page.getByRole('button', { name: '添加节点' }).click()
-  const dialog = page.getByRole('dialog', { name: '添加节点' })
+  await goTo(page, t.nav.nodes)
+  await expect(page.getByText(t.nodes.emptyTitle)).toBeVisible()
+  await page.getByRole('button', { name: t.nodes.add }).click()
+  const dialog = page.getByRole('dialog', { name: t.addNode.title })
   await expect(dialog).toBeVisible()
 
   // 生成之前：命令里是占位符，没有东西可以复制，controller 上也没有令牌。
-  await expect(joinCommand()).toHaveText('echo <注册令牌> | i3t join')
-  await expect(dialog.getByRole('button', { name: '复制命令' })).toBeDisabled()
+  await expect(joinCommand()).toHaveText(`echo ${t.addNode.tokenPlaceholder} | i3t join`)
+  await expect(dialog.getByRole('button', { name: t.addNode.copyCommand })).toBeDisabled()
   expect(await controller.api<unknown[]>('GET', `${NET}/tokens`)).toHaveLength(0)
 
   // 标签写在令牌上；"可以承担"是命令的参数。
-  await dialog.getByRole('combobox', { name: '标签' }).fill('servers')
+  await dialog.getByRole('combobox', { name: t.addNode.tagsLabel }).fill('servers')
   await page.keyboard.press('Enter')
-  await dialog.getByRole('checkbox', { name: /可以作为端口转发的目标/ }).check()
-  await expect(joinCommand()).toHaveText('echo <注册令牌> | i3t join --can-forward')
+  await dialog.getByRole('checkbox', { name: t.addNode.declareForward }).check()
+  await expect(joinCommand()).toHaveText(`echo ${t.addNode.tokenPlaceholder} | i3t join --can-forward`)
 
-  await dialog.getByRole('button', { name: '生成注册令牌' }).click()
+  await dialog.getByRole('button', { name: t.addNode.generate }).click()
   await expect(joinCommand()).toHaveText(/^echo i3t-[A-Za-z0-9_-]+ \| i3t join --can-forward$/)
-  await expect(dialog.getByText('关闭这个对话框后不再显示。')).toBeVisible()
-  await expect(dialog.getByText('等待节点加入…')).toBeVisible()
+  await expect(dialog.getByText(t.addNode.shownOnce)).toBeVisible()
+  await expect(dialog.getByText(t.addNode.waiting)).toBeVisible()
   const tokens = await controller.api<{ tags: string[] }[]>('GET', `${NET}/tokens`)
   expect(tokens).toMatchObject([{ tags: ['servers'] }])
 
   // 复制出去的就是屏幕上的那一行。
-  await dialog.getByRole('button', { name: '复制命令' }).click()
+  await dialog.getByRole('button', { name: t.addNode.copyCommand }).click()
   const command = (await joinCommand().textContent()) ?? ''
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(command)
 
@@ -155,7 +157,7 @@ test('生成注册令牌，拿到加入命令，节点加入后出现在界面�
   const handle = controller.join(command)
 
   // 不用刷新：等待区自己变成结果。
-  await expect(page.getByTestId('node-joined')).toContainText('已加入 · 10.66.0.1')
+  await expect(page.getByTestId('node-joined')).toContainText('10.66.0.1')
   const [joined] = await apiNodes()
   if (joined === undefined) throw new Error('controller 上没有节点')
   expect(joined).toMatchObject({
@@ -164,11 +166,11 @@ test('生成注册令牌，拿到加入命令，节点加入后出现在界面�
     declared: { exit: false, relay: false, forward: true },
   })
   server = { handle, id: joined.id, name: joined.name, ip: joined.virtual_ip }
-  await expect(page.getByTestId('node-joined')).toContainText(server.name)
+  await expect(page.getByTestId('node-joined')).toContainText(t.addNode.joined(server.name, server.ip))
   // 令牌只能用一次。
   expect(await controller.api<unknown[]>('GET', `${NET}/tokens`)).toHaveLength(0)
 
-  await dialog.getByRole('button', { name: '完成' }).click()
+  await dialog.getByRole('button', { name: t.addNode.done }).click()
   await expect(dialog).toBeHidden()
   const row = page.getByTestId(`node-row-${server.name}`)
   await expect(row).toBeVisible()
@@ -177,11 +179,11 @@ test('生成注册令牌，拿到加入命令，节点加入后出现在界面�
 })
 
 test('在「注册」页新建令牌：关掉对话框后令牌留在列表里，用掉之后消失', async () => {
-  await goToAdmin(page, '注册')
-  await expect(page.getByText('没有未使用的令牌')).toBeVisible()
-  await page.getByRole('button', { name: '添加节点' }).click()
-  const dialog = page.getByRole('dialog', { name: '添加节点' })
-  await dialog.getByRole('button', { name: '生成注册令牌' }).click()
+  await goToAdmin(page, t.nav.tokens)
+  await expect(page.getByText(t.tokens.emptyTitle)).toBeVisible()
+  await page.getByRole('button', { name: t.tokens.addNode }).click()
+  const dialog = page.getByRole('dialog', { name: t.addNode.title })
+  await dialog.getByRole('button', { name: t.addNode.generate }).click()
   await expect(joinCommand()).toHaveText(/^echo i3t-[A-Za-z0-9_-]+ \| i3t join$/)
   const command = (await joinCommand().textContent()) ?? ''
   const secret = command.split(' ')[1] ?? ''
@@ -189,17 +191,17 @@ test('在「注册」页新建令牌：关掉对话框后令牌留在列表里�
   // 令牌还没用掉：按 Esc 关不掉，点"完成"要先问一句。
   await page.keyboard.press('Escape')
   await expect(dialog).toBeVisible()
-  await dialog.getByRole('button', { name: '完成' }).click()
-  const question = page.getByRole('alertdialog', { name: '令牌还没用掉，现在关闭？' })
+  await dialog.getByRole('button', { name: t.addNode.done }).click()
+  const question = page.getByRole('alertdialog', { name: t.addNode.closeWhileWaitingTitle })
   await expect(question).toBeVisible()
-  await question.getByRole('button', { name: '关闭', exact: true }).click()
+  await question.getByRole('button', { name: t.addNode.closeWhileWaitingConfirm, exact: true }).click()
   await expect(dialog).toBeHidden()
 
   // 列表里有这个令牌，但它的文本哪里都查不回来。
   const [pending] = await controller.api<{ id: number }[]>('GET', `${NET}/tokens`)
   if (pending === undefined) throw new Error('controller 上没有令牌')
   const row = page.getByTestId(`token-row-${pending.id}`)
-  await expect(row).toContainText('未使用')
+  await expect(row).toContainText(t.tokens.showPending)
   await expect(page.getByText(secret)).toHaveCount(0)
 
   // 复制走的命令在关掉对话框之后仍然有效。
@@ -209,35 +211,35 @@ test('在「注册」页新建令牌：关掉对话框后令牌留在列表里�
   laptop = { handle, id: joined.id, name: joined.name, ip: joined.virtual_ip }
 
   // 这个节点是在界面之外加入的（对话框已经关了）：节点列表靠轮询发现它，周期是 10 秒。
-  await goTo(page, '节点')
+  await goTo(page, t.nav.nodes)
   await expect(page.getByTestId(`node-row-${laptop.name}`)).toBeVisible({ timeout: 20_000 })
-  await goToAdmin(page, '注册')
-  await expect(page.getByText('没有未使用的令牌')).toBeVisible()
+  await goToAdmin(page, t.nav.tokens)
+  await expect(page.getByText(t.tokens.emptyTitle)).toBeVisible()
 })
 
 test('给节点打标签', async () => {
-  await goTo(page, '节点')
+  await goTo(page, t.nav.nodes)
   const row = page.getByTestId(`node-row-${laptop.name}`)
-  await expect(row.getByText('添加标签')).toBeVisible()
-  await row.getByRole('button', { name: `编辑 ${laptop.name} 的标签` }).click()
+  await expect(row.getByText(t.nodes.addTags)).toBeVisible()
+  await row.getByRole('button', { name: t.nodes.editTagsOf(laptop.name) }).click()
 
-  const dialog = page.getByRole('dialog', { name: `${laptop.name} 的标签` })
+  const dialog = page.getByRole('dialog', { name: t.nodes.tagsTitle(laptop.name) })
   const input = dialog.getByRole('combobox')
   // 内置的 all 不能打在节点上。
   await input.fill('all')
   await page.keyboard.press('Enter')
-  await expect(dialog.getByText('all 是内置标签，每个节点都有，不用打。')).toBeVisible()
+  await expect(dialog.getByText(t.tags.allIsBuiltin)).toBeVisible()
   // 写法不对的标签在这里就拦下。
   await input.fill('my.tag')
   await page.keyboard.press('Enter')
-  await expect(dialog.getByText('标签只能用字母、数字、连字符（-）和下划线（_）。')).toBeVisible()
+  await expect(dialog.getByText(t.validate.tagCharset)).toBeVisible()
 
   // 改了立即生效，不用点保存。大写转成小写。
   await input.fill('Laptops')
   await page.keyboard.press('Enter')
-  await expectToast(page, '标签已更新')
-  await expect(dialog.getByRole('button', { name: '移除标签 laptops' })).toBeVisible()
-  await dialog.getByRole('button', { name: '完成' }).click()
+  await expectToast(page, t.nodes.tagsSaved)
+  await expect(dialog.getByRole('button', { name: t.tags.remove('laptops') })).toBeVisible()
+  await dialog.getByRole('button', { name: t.nodes.tagsDone }).click()
 
   await expect(row).toContainText('laptops')
   const node = (await apiNodes()).find((candidate) => candidate.id === laptop.id)
@@ -245,45 +247,44 @@ test('给节点打标签', async () => {
   await clearToasts(page)
 
   // 按标签筛选：只剩它。筛选写在地址里。
-  await page.getByRole('button', { name: '筛选' }).click()
+  await page.getByRole('button', { name: t.nodes.filter }).click()
   await page.getByRole('checkbox', { name: 'laptops' }).check()
   await page.keyboard.press('Escape')
   await expect(page.getByTestId(`node-row-${server.name}`)).toBeHidden()
   await expect(row).toBeVisible()
   await expect(page).toHaveURL(/[?&]tag=laptops/)
-  await page.getByRole('button', { name: '清除全部' }).click()
+  await page.getByRole('button', { name: t.nodes.clearAll }).click()
   await expect(page.getByTestId(`node-row-${server.name}`)).toBeVisible()
 })
 
 test('加一条规则，关系图跟着变；停用默认规则后按标签收紧', async () => {
-  await goTo(page, '访问控制')
+  await goTo(page, t.nav.access)
   await expect(page.getByTestId('tag-graph')).toBeVisible()
   // 现在：三个标签，一条默认规则画成 all 上的一个环。
   await expect(tagPoint('all', 2)).toBeVisible()
   await expect(tagPoint('servers', 1)).toBeVisible()
   await expect(tagPoint('laptops', 1)).toBeVisible()
-  await expect(ruleEdge('default', '启用')).toHaveCount(1)
+  await expect(ruleEdge('default', true)).toHaveCount(1)
   await expect(page.getByTestId('tag-graph').locator('.react-flow__edge')).toHaveCount(1)
 
-  await page.getByRole('button', { name: '新建规则' }).click()
-  const dialog = page.getByRole('dialog', { name: '新建规则' })
-  await dialog.getByRole('combobox', { name: '标签 a' }).click()
+  const d = t.access.dialog
+  await page.getByRole('button', { name: t.access.newRule }).click()
+  const dialog = page.getByRole('dialog', { name: d.createTitle })
+  await dialog.getByRole('combobox', { name: d.srcLabel }).click()
   await page.getByRole('option', { name: /laptops/ }).click()
-  await dialog.getByRole('combobox', { name: '标签 b' }).click()
+  await dialog.getByRole('combobox', { name: d.dstLabel }).click()
   await page.getByRole('option', { name: /servers/ }).click()
-  // 一句白话，随输入变化。
-  await expect(page.getByTestId('rule-sentence')).toContainText(
-    '带 laptops 标签的 1 个节点，和带 servers 标签的 1 个节点，可以互相访问。',
-  )
-  await dialog.getByRole('radio', { name: '只能 a 访问 b' }).click()
-  await expect(page.getByTestId('rule-sentence')).toContainText(
-    '带 laptops 标签的 1 个节点可以访问带 servers 标签的 1 个节点。反过来不行。',
-  )
+  // 一句话说出规则的意思，随输入变化。
+  const laptops = d.nodesOf('laptops', 1)
+  const servers = d.nodesOf('servers', 1)
+  await expect(page.getByTestId('rule-sentence')).toContainText(d.sentenceBoth(laptops, servers))
+  await dialog.getByRole('radio', { name: d.oneWay }).click()
+  await expect(page.getByTestId('rule-sentence')).toContainText(d.sentenceOneWay(laptops, servers))
   // 默认规则还开着，所以这条规则现在不改变谁能访问谁。
-  await expect(page.getByTestId('rule-impact')).toContainText('保存后谁能访问谁不变。')
-  await dialog.getByLabel(/^名字/).fill('ssh')
-  await dialog.getByRole('button', { name: '保存规则' }).click()
-  await expectToast(page, '规则 ssh 已建好')
+  await expect(page.getByTestId('rule-impact')).toContainText(d.impactNone)
+  await dialog.getByLabel(new RegExp(`^${d.nameLabel}`)).fill('ssh')
+  await dialog.getByRole('button', { name: d.submitCreate }).click()
+  await expectToast(page, d.created('ssh'))
   await expect(dialog).toBeHidden()
 
   // 列表里多了一行，图上多了一条线。
@@ -294,60 +295,60 @@ test('加一条规则，关系图跟着变；停用默认规则后按标签收�
   const ssh = rules.find((rule) => rule.name === 'ssh')
   expect(ssh).toMatchObject({ src: 'laptops', dst: 'servers', direction: 'one_way' })
   await expect(page.getByTestId(`rule-row-${ssh?.id ?? 0}`)).toBeVisible()
-  await expect(ruleEdge('ssh', '启用')).toHaveCount(1)
+  await expect(ruleEdge('ssh', true)).toHaveCount(1)
   await expect(page.getByTestId('tag-graph').locator('.react-flow__edge')).toHaveCount(2)
   // 界面上说出来：默认规则开着时别的规则不起限制作用。
-  await expect(
-    page.getByText('all ⇄ all 开着时所有节点都互通，其他规则不起限制作用。要按标签收紧，先停用它。'),
-  ).toBeVisible()
+  await expect(page.getByText(t.access.allOpenNotice)).toBeVisible()
   await clearToasts(page)
 
   // 停用默认规则。还有 ssh 连着这两个节点，但少了一个方向，所以要确认。
-  await page.getByRole('switch', { name: '启用规则 default' }).click()
-  const question = page.getByRole('alertdialog', { name: '停用规则 default？' })
-  await expect(question).toContainText('之后有 1 对节点不能再访问')
-  await question.getByRole('button', { name: '停用规则' }).click()
-  await expectToast(page, '规则 default 已停用')
-  await expect(ruleEdge('default', '停用')).toHaveCount(1)
-  await expect(ruleEdge('default', '启用')).toHaveCount(0)
-  await expect(page.getByText('all ⇄ all 开着时所有节点都互通')).toHaveCount(0)
+  await page.getByRole('switch', { name: t.access.ruleSwitch('default') }).click()
+  const question = page.getByRole('alertdialog', { name: t.access.disableTitle('default') })
+  await expect(question).toContainText(t.access.lossBody(1))
+  await question.getByRole('button', { name: t.access.disableConfirm }).click()
+  await expectToast(page, t.access.disabledToast('default'))
+  await expect(ruleEdge('default', false)).toHaveCount(1)
+  await expect(ruleEdge('default', true)).toHaveCount(0)
+  await expect(page.getByText(t.access.allOpenNotice)).toHaveCount(0)
   await clearToasts(page)
 
   // 访问检查用文字说出同一件事：单向。
-  await page.getByRole('button', { name: '访问检查' }).click()
+  const c = t.access.checker
+  await page.getByRole('button', { name: t.access.check }).click()
   const check = page.getByTestId('access-check')
-  await check.getByRole('combobox', { name: '从' }).click()
+  await check.getByRole('combobox', { name: c.from }).click()
   await nodeOption(laptop).click()
-  await check.getByRole('combobox', { name: '到' }).click()
+  await check.getByRole('combobox', { name: c.to }).click()
   await nodeOption(server).click()
-  await expect(page.getByTestId(`check-${laptop.name}-${server.name}`)).toContainText('可以。')
-  await expect(page.getByTestId(`check-${laptop.name}-${server.name}`)).toContainText('由规则 ssh 允许。')
-  await expect(page.getByTestId(`check-${server.name}-${laptop.name}`)).toContainText('不可以。')
-  await page.getByRole('button', { name: '收起访问检查' }).click()
+  await expect(page.getByTestId(`check-${laptop.name}-${server.name}`)).toContainText(c.allowed)
+  await expect(page.getByTestId(`check-${laptop.name}-${server.name}`)).toContainText(c.byRules('ssh'))
+  await expect(page.getByTestId(`check-${server.name}-${laptop.name}`)).toContainText(c.denied)
+  await page.getByRole('button', { name: c.close }).click()
 
   // 按节点看：laptop 能访问 server，没有谁能访问 laptop。
-  await page.getByRole('radio', { name: '按节点' }).click()
-  await page.getByRole('combobox', { name: '焦点节点' }).click()
+  await page.getByRole('radio', { name: t.access.graph.byNode }).click()
+  await page.getByRole('combobox', { name: t.access.graph.nodePickLabel, exact: true }).click()
   await nodeOption(laptop).click()
   const nodeGraph = page.getByTestId('node-graph')
   await expect(nodeGraph.getByText(laptop.name, { exact: true })).toBeVisible()
   await expect(nodeGraph.getByText(server.name, { exact: true })).toHaveCount(1)
-  await page.getByRole('radio', { name: '按标签' }).click()
+  await page.getByRole('radio', { name: t.access.graph.byTag }).click()
 })
 
 test('启用出口：节点没有声明时说明原因和要执行的命令，声明一到开关自己变为可用', async () => {
   // 出口页：没有出口，也没有节点声明过。给出要执行的命令。
-  await goTo(page, '出口')
-  await expect(page.getByText('还没有出口，也没有节点声明可以作为出口')).toBeVisible()
+  await goTo(page, t.nav.exits)
+  await expect(page.getByText(t.exits.emptyTitle)).toBeVisible()
+  await expect(page.getByText(t.exits.emptyNoneBody)).toBeVisible()
   await expect(page.getByTestId('declare-command')).toHaveText('i3t set can-exit on')
 
   // "启用出口"里没有声明的节点照样列出来，只是不能选。
-  await page.getByRole('button', { name: '启用出口' }).click()
-  const dialog = page.getByRole('dialog', { name: '启用出口' })
-  await expect(dialog.getByText('还没有声明，现在启用不了')).toBeVisible()
+  await page.getByRole('button', { name: t.exits.enable }).click()
+  const dialog = page.getByRole('dialog', { name: t.exits.dialogTitle })
+  await expect(dialog.getByText(t.exits.notDeclared)).toBeVisible()
   await expect(dialog.getByText(server.name, { exact: true })).toBeVisible()
-  await expect(dialog.getByRole('button', { name: '启用出口' })).toBeDisabled()
-  await dialog.getByRole('button', { name: '取消', exact: true }).click()
+  await expect(dialog.getByRole('button', { name: t.exits.submit })).toBeDisabled()
+  await dialog.getByRole('button', { name: t.common.cancel, exact: true }).click()
 
   // controller 自己也不答应（界面上的置灰不是唯一的一道关）。
   const refused = await fetch(`${controller.baseUrl}/api/v1${NET}/nodes/${server.id}/exit`, {
@@ -359,18 +360,16 @@ test('启用出口：节点没有声明时说明原因和要执行的命令，�
   expect(((await refused.json()) as { error: { code: string } }).error.code).toBe('not_declared')
 
   // 节点详情页：开关是灰的，旁边写着原因；"怎么声明"点开是要在那台机器上执行的命令。
-  await goTo(page, '节点')
+  await goTo(page, t.nav.nodes)
   await page.getByRole('link', { name: server.name, exact: true }).click()
   const exitRow = page.getByTestId('capability-exit')
-  const exitSwitch = exitRow.getByRole('switch', { name: `把 ${server.name} 启用为出口` })
+  const exitSwitch = exitRow.getByRole('switch', { name: t.nodes.detail.exitSwitch(server.name) })
   await expect(exitSwitch).toBeDisabled()
-  await expect(page.getByTestId('not-declared-exit')).toContainText(
-    `${server.name} 没有声明可以作为出口，所以这里启用不了。`,
-  )
-  await exitRow.getByRole('button', { name: '怎么声明' }).click()
-  await expect(exitRow.getByText(`在 ${server.name} 上执行：`)).toBeVisible()
+  await expect(page.getByTestId('not-declared-exit')).toContainText(t.declare.notDeclared(server.name))
+  await exitRow.getByRole('button', { name: t.declare.howTo }).click()
+  await expect(exitRow.getByText(t.declare.step1(server.name))).toBeVisible()
   await expect(exitRow.getByTestId('declare-command')).toHaveText('i3t set can-exit on')
-  await expect(exitRow.getByText('正在等这台机器上报声明…')).toBeVisible()
+  await expect(exitRow.getByText(t.declare.waiting)).toBeVisible()
 
   // 在那台机器上照着做：声明，然后把 i3t 跑起来。
   controller.set(server.handle, 'can-exit', true)
@@ -383,9 +382,9 @@ test('启用出口：节点没有声明时说明原因和要执行的命令，�
 
   // 打开：就地出现几项限制，都有默认值。
   await exitSwitch.click()
-  await expect(exitRow.getByRole('textbox', { name: '允许的目标端口' })).toHaveValue('80, 443')
-  await exitRow.getByRole('button', { name: '启用出口' }).click()
-  await expectToast(page, `${server.name} 已启用为出口`)
+  await expect(exitRow.getByRole('textbox', { name: t.nodes.detail.exitFormPorts })).toHaveValue('80, 443')
+  await exitRow.getByRole('button', { name: t.nodes.detail.exitEnable }).click()
+  await expectToast(page, t.nodes.detail.exitEnabledToast(server.name))
   await expect(exitSwitch).toBeChecked()
   // 启用之后给出一个马上能用的例子，地址是这个节点真实的虚拟 IP。
   await expect(exitRow.getByText(`curl -x socks5h://${server.ip}@127.0.0.1:1080 https://example.com`)).toBeVisible()
@@ -394,41 +393,42 @@ test('启用出口：节点没有声明时说明原因和要执行的命令，�
   await clearToasts(page)
 
   // 出口页现在列出它。
-  await goTo(page, '出口')
+  await goTo(page, t.nav.exits)
   await expect(page.getByTestId(`exit-row-${server.name}`)).toBeVisible()
 })
 
-test('签发凭据：令牌只显示一次', async () => {
-  await goTo(page, '接入凭据')
-  await expect(page.getByText('还没有凭据')).toBeVisible()
-  await page.getByRole('button', { name: '签发凭据' }).click()
-  const form = page.getByRole('dialog', { name: '签发凭据' })
+test('新建凭据：令牌只显示一次', async () => {
+  const c = t.credentials
+  await goTo(page, t.nav.credentials)
+  await expect(page.getByText(c.emptyTitle)).toBeVisible()
+  await page.getByRole('button', { name: c.issue }).click()
+  const form = page.getByRole('dialog', { name: c.createTitle })
 
   // 名字不能是空的。
-  await form.getByRole('button', { name: '签发', exact: true }).click()
-  await expect(form.getByText('请填一个名字。')).toBeVisible()
+  await form.getByRole('button', { name: c.submit, exact: true }).click()
+  await expect(form.getByText(t.validate.titleRequired)).toBeVisible()
   expect(await controller.api<unknown[]>('GET', `${NET}/credentials`)).toHaveLength(0)
 
-  await form.getByLabel('名字', { exact: true }).fill('phone')
-  await form.getByLabel(/^并发上限/).fill('4')
-  await form.getByRole('button', { name: '签发', exact: true }).click()
+  await form.getByLabel(c.nameLabel, { exact: true }).fill('phone')
+  await form.getByLabel(new RegExp(`^${c.maxLabel}`)).fill('4')
+  await form.getByRole('button', { name: c.submit, exact: true }).click()
 
   const secretDialog = page.getByTestId('secret-dialog')
   await expect(secretDialog).toBeVisible()
-  await expect(secretDialog.getByRole('heading', { name: '凭据 phone 已签发' })).toBeVisible()
-  await expect(secretDialog.getByText('它不会再显示。')).toBeVisible()
+  await expect(secretDialog.getByRole('heading', { name: c.secretTitle('phone') })).toBeVisible()
+  await expect(secretDialog.getByText(c.secretWarning)).toBeVisible()
   const secret = ((await secretDialog.getByTestId('secret-value').textContent()) ?? '').trim()
   expect(secret.length).toBeGreaterThan(20)
 
   // 复制出去的是完整的令牌。
-  await secretDialog.getByRole('button', { name: '复制凭据' }).click()
-  await expect(secretDialog.getByRole('button', { name: '已复制' })).toBeVisible()
+  await secretDialog.getByRole('button', { name: c.copySecret }).click()
+  await expect(secretDialog.getByRole('button', { name: t.common.copied })).toBeVisible()
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(secret)
 
   // 按 Esc 关不掉，只能点按钮。
   await page.keyboard.press('Escape')
   await expect(secretDialog).toBeVisible()
-  await secretDialog.getByRole('button', { name: '我已保存，关闭' }).click()
+  await secretDialog.getByRole('button', { name: c.savedClose }).click()
   await expect(secretDialog).toBeHidden()
 
   // 之后哪里都看不到它：列表里只有名字，刷新也一样，接口也不返回。
@@ -445,45 +445,47 @@ test('签发凭据：令牌只显示一次', async () => {
   expect(JSON.stringify(listed)).not.toContain(secret)
 
   // 重名的，controller 的话写在名字下面。
-  await page.getByRole('button', { name: '签发凭据' }).click()
-  await form.getByLabel('名字', { exact: true }).fill('phone')
-  await form.getByRole('button', { name: '签发', exact: true }).click()
-  await expect(form.getByRole('alert')).toBeVisible()
+  await page.getByRole('button', { name: c.issue }).click()
+  await form.getByLabel(c.nameLabel, { exact: true }).fill('phone')
+  await form.getByRole('button', { name: c.submit, exact: true }).click()
+  await expect(form.getByRole('alert')).toContainText(t.errors.codes.name_taken)
   await expect(page.getByTestId('secret-dialog')).toHaveCount(0)
-  await form.getByRole('button', { name: '取消', exact: true }).click()
-  await page.getByRole('button', { name: '放弃改动' }).click()
+  await form.getByRole('button', { name: t.common.cancel, exact: true }).click()
+  await page.getByRole('button', { name: t.common.discardConfirm }).click()
   await expect(form).toBeHidden()
 })
 
 test('新建端口转发，再删除', async () => {
-  await goTo(page, '端口转发')
-  await expect(page.getByText('还没有端口转发')).toBeVisible()
-  await page.getByRole('button', { name: '新建转发' }).first().click()
-  const dialog = page.getByRole('dialog', { name: '新建转发' })
-  const listenSide = dialog.getByRole('group', { name: '在哪里监听' })
-  const targetSide = dialog.getByRole('group', { name: '转发到哪里' })
+  await goTo(page, t.nav.forwards)
+  const f = t.forwards
+  const d = f.dialog
+  await expect(page.getByText(f.emptyTitle)).toBeVisible()
+  await page.getByRole('button', { name: f.create }).first().click()
+  const dialog = page.getByRole('dialog', { name: d.createTitle })
+  const listenSide = dialog.getByRole('group', { name: d.listenSide })
+  const targetSide = dialog.getByRole('group', { name: d.targetSide })
 
-  await listenSide.getByRole('combobox', { name: '节点' }).click()
+  await listenSide.getByRole('combobox', { name: d.node }).click()
   await nodeOption(laptop).click()
   // 等第一个下拉收起来再开第二个：收起的动画期间两个列表同时在页面上，选项会认重。
   await expect(page.getByRole('listbox')).toHaveCount(0)
-  await targetSide.getByRole('combobox', { name: '节点' }).click()
+  await targetSide.getByRole('combobox', { name: d.node }).click()
   await nodeOption(server).click()
   // 即时检查：转发不绕过访问规则。laptop → server 由刚才那条规则允许。
-  await expect(page.getByTestId('forward-check')).toContainText(`${laptop.name} 可以访问 ${server.name}（规则 ssh）。`)
+  await expect(page.getByTestId('forward-check')).toContainText(d.checkAllowed(laptop.name, server.name, 'ssh'))
 
   // 端口写错了，在输入框下面说。
-  await listenSide.getByLabel('端口', { exact: true }).fill('70000')
-  await targetSide.getByLabel('端口', { exact: true }).fill('80')
-  await dialog.getByLabel(/^名字/).fill('web')
-  await dialog.getByRole('button', { name: '新建转发' }).click()
-  await expect(listenSide.getByText('端口是 1 到 65535 之间的数字。')).toBeVisible()
+  await listenSide.getByLabel(d.port, { exact: true }).fill('70000')
+  await targetSide.getByLabel(d.targetPort, { exact: true }).fill('80')
+  await dialog.getByLabel(new RegExp(`^${d.name}`)).fill('web')
+  await dialog.getByRole('button', { name: d.submitCreate }).click()
+  await expect(listenSide.getByText(t.validate.portFormat)).toBeVisible()
   expect(await controller.api<unknown[]>('GET', `${NET}/forwards`)).toHaveLength(0)
 
-  await listenSide.getByLabel('端口', { exact: true }).fill('8080')
-  await dialog.getByRole('button', { name: '新建转发' }).click()
+  await listenSide.getByLabel(d.port, { exact: true }).fill('8080')
+  await dialog.getByRole('button', { name: d.submitCreate }).click()
   await expect(dialog).toBeHidden()
-  await expectToast(page, /转发已建好/)
+  await expectToast(page, d.created(laptop.name, '127.0.0.1:8080'))
 
   const row = page.getByTestId('forward-row-web')
   await expect(row).toBeVisible()
@@ -508,39 +510,70 @@ test('新建端口转发，再删除', async () => {
 
   // 节点详情的"关联配置"里也看得到它。
   await row.getByRole('link', { name: server.name, exact: true }).click()
-  await page.getByRole('tab', { name: '关联配置' }).click()
+  await page.getByRole('tab', { name: t.nodes.detail.tabRelated }).click()
   await expect(page.getByText('127.0.0.1:8080')).toBeVisible()
 
   // 删除要确认，确认框里写明后果。
-  await goTo(page, '端口转发')
-  await page.getByRole('button', { name: 'web 的操作' }).click()
-  await page.getByRole('menuitem', { name: '删除…' }).click()
-  const question = page.getByRole('alertdialog', { name: '删除转发 web？' })
-  await expect(question).toContainText(`${laptop.name} 上的 127.0.0.1:8080 不再监听`)
+  await goTo(page, t.nav.forwards)
+  await page.getByRole('button', { name: t.common.actionsFor('web') }).click()
+  await page.getByRole('menuitem', { name: f.menuDelete }).click()
+  const question = page.getByRole('alertdialog', { name: f.deleteTitle('web') })
+  await expect(question).toContainText(f.deleteBody(laptop.name, '127.0.0.1:8080'))
   // 先取消：什么都没变。
-  await question.getByRole('button', { name: '取消', exact: true }).click()
+  await question.getByRole('button', { name: t.common.cancel, exact: true }).click()
   await expect(page.getByTestId('forward-row-web')).toBeVisible()
   expect(await controller.api<unknown[]>('GET', `${NET}/forwards`)).toHaveLength(1)
 
-  await page.getByRole('button', { name: 'web 的操作' }).click()
-  await page.getByRole('menuitem', { name: '删除…' }).click()
-  await question.getByRole('button', { name: '删除转发' }).click()
-  await expectToast(page, '转发 web 已删除')
+  await page.getByRole('button', { name: t.common.actionsFor('web') }).click()
+  await page.getByRole('menuitem', { name: f.menuDelete }).click()
+  await question.getByRole('button', { name: f.deleteConfirm }).click()
+  await expectToast(page, f.deleted('web'))
   await expect(page.getByTestId('forward-row-web')).toHaveCount(0)
-  await expect(page.getByText('还没有端口转发')).toBeVisible()
+  await expect(page.getByText(f.emptyTitle)).toBeVisible()
   expect(await controller.api<unknown[]>('GET', `${NET}/forwards`)).toHaveLength(0)
   await clearToasts(page)
 })
 
+test('换语言：账号菜单里换成英文，就地重新渲染，刷新后还是英文；再换回中文', async () => {
+  await goTo(page, t.nav.nodes)
+  const search = page.getByRole('searchbox')
+  await search.fill(server.name.slice(0, 3))
+  await expect(page).toHaveURL(/q=/)
+
+  await page.getByRole('button', { name: t.nav.accountMenu }).click()
+  await page.getByRole('menuitem', { name: new RegExp(t.common.language) }).click()
+  await page.getByRole('menuitemradio', { name: 'English' }).click()
+
+  // 不刷新：搜索框里的字还在，标题、侧栏、<html lang>、标签页标题都换了。
+  await expect(page.getByRole('heading', { level: 1, name: en.nodes.title })).toBeVisible()
+  await expect(
+    page.getByRole('navigation', { name: en.nav.label }).getByRole('link', { name: en.nav.access }),
+  ).toBeVisible()
+  await expect(search).toHaveValue(server.name.slice(0, 3))
+  await expect(page.locator('html')).toHaveAttribute('lang', 'en')
+  await expect(page).toHaveTitle(`${en.nodes.title} · ice3tier`)
+  await expect(page.locator('main')).not.toContainText(/\p{Script=Han}/u)
+
+  await page.reload()
+  await expect(page.getByRole('heading', { level: 1, name: en.nodes.title })).toBeVisible()
+
+  await page.getByRole('button', { name: en.nav.accountMenu }).click()
+  await page.getByRole('menuitem', { name: new RegExp(en.common.language) }).click()
+  await page.getByRole('menuitemradio', { name: '简体中文' }).click()
+  await expect(page.getByRole('heading', { level: 1, name: t.nodes.title })).toBeVisible()
+  await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN')
+  await search.clear()
+})
+
 test('做过的事都记在操作记录里；总览反映现在的状态', async () => {
-  await goTo(page, '总览')
+  await goTo(page, t.nav.overview)
   // 两个节点了，总览不再是引导。
   await expect(page.getByTestId('overview-status')).toBeVisible()
-  await expect(page.getByRole('heading', { name: '把前两个节点连起来' })).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: t.overview.guide.title })).toHaveCount(0)
 
-  await goToAdmin(page, '设置')
-  await page.getByRole('link', { name: '操作记录' }).click()
-  await expect(page.getByRole('columnheader', { name: '说明' })).toBeVisible()
+  await goToAdmin(page, t.nav.settings)
+  await page.getByRole('link', { name: t.settings.tabLog }).click()
+  await expect(page.getByRole('columnheader', { name: t.settings.log.colEvent })).toBeVisible()
   const log = await controller.api<{ action: string }[]>('GET', '/log')
   const actions = new Set(log.map((entry) => entry.action))
   // 界面上做的每一类修改，controller 都留了记录。
@@ -553,18 +586,18 @@ test('做过的事都记在操作记录里；总览反映现在的状态', async
 
 test('刷新后还在登录状态；退出后回到登录页，要重新登录', async () => {
   await page.reload()
-  await expect(page.getByRole('columnheader', { name: '说明' })).toBeVisible()
+  await expect(page.getByRole('columnheader', { name: t.settings.log.colEvent })).toBeVisible()
 
-  await page.getByRole('button', { name: '账号菜单' }).click()
-  await page.getByRole('menuitem', { name: '退出登录' }).click()
-  await expect(page.getByRole('heading', { name: '登录 ice3tier' })).toBeVisible()
-  await expect(page.getByText('已退出登录。')).toBeVisible()
+  await page.getByRole('button', { name: t.nav.accountMenu }).click()
+  await page.getByRole('menuitem', { name: t.nav.signOut }).click()
+  await expect(page.getByRole('heading', { name: t.signIn.title })).toBeVisible()
+  await expect(page.getByText(t.signIn.signedOut)).toBeVisible()
 
   // 退出之后直接打开里面的页面，还是落到登录页。
   await page.goto(`${controller.baseUrl}/n/1/nodes`)
   await expect(page).toHaveURL(/\/login\?next=%2Fn%2F1%2Fnodes/)
-  await page.getByLabel('管理令牌', { exact: true }).fill(controller.adminToken)
-  await page.getByRole('button', { name: '登录', exact: true }).click()
+  await page.getByLabel(t.signIn.tokenLabel, { exact: true }).fill(controller.adminToken)
+  await page.getByRole('button', { name: t.signIn.submit, exact: true }).click()
   // 登录后回到原来要去的地址。
   await expect(page).toHaveURL(/\/n\/1\/nodes$/)
   await expect(page.getByTestId(`node-row-${server.name}`)).toBeVisible()

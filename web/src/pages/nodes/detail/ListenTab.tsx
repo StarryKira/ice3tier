@@ -73,14 +73,11 @@ export function ListenTab({ network, node }: { network: Network; node: NodeDetai
 
   return (
     <div className="space-y-8">
-      <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
-        <p className="text-[13px] text-muted-foreground">{d.listenLead}</p>
-        {data?.reported_secs_ago != null ? (
-          <p className="text-[13px] text-muted-foreground" data-testid="listen-updated">
-            {t.common.reportedAgo(formatAge(data.reported_secs_ago))}
-          </p>
-        ) : null}
-      </div>
+      {data?.reported_secs_ago != null ? (
+        <p className="text-right text-[13px] text-muted-foreground" data-testid="listen-updated">
+          {t.common.reportedAgo(formatAge(data.reported_secs_ago))}
+        </p>
+      ) : null}
       {report.isError ? (
         <ErrorState title={d.listenLoadFailed} error={report.error} onRetry={() => void report.refetch()} />
       ) : data?.online === false ? (

@@ -3,7 +3,7 @@ import { ArrowLeftRight, Link2, Plus, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 
 import { api } from '@/api/endpoints'
-import { formError, formFailure } from '@/api/formErrors'
+import { formError, formErrorDetail, formFailure } from '@/api/formErrors'
 import { q, useAction } from '@/api/queries'
 import { type Network, type NodeId, type PairSetting } from '@/api/types'
 import { FormDialog } from '@/components/form-dialog'
@@ -59,6 +59,7 @@ function AddPairDialog({ network, existing, open, onClose }: AddPairDialogProps)
       submitLabel={p.submit}
       pending={add.isPending}
       error={formError(failure)}
+      errorDetail={formErrorDetail(failure)}
       onSubmit={() => {
         setTouched(true)
         if (problem === null) add.mutate(undefined, { onSuccess: onClose })
@@ -107,7 +108,7 @@ export function PairsPage() {
 
   return (
     <Page>
-      <PageHeader title={p.title} description={p.description} actions={empty ? undefined : addButton} />
+      <PageHeader title={p.title} actions={empty ? undefined : addButton} />
       <div>
         {pairs.isError ? (
           <ErrorState title={p.loadFailed} error={pairs.error} onRetry={() => void pairs.refetch()} />
@@ -115,7 +116,7 @@ export function PairsPage() {
           <EmptyState
             icon={Link2}
             title={p.emptyTitle}
-            description={tooFew ? `${p.emptyBody} ${p.emptyNeedTwo}` : p.emptyBody}
+            description={tooFew ? p.emptyNeedTwo : p.keepAliveHint}
             action={addButton}
           />
         ) : (

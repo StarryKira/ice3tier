@@ -8,28 +8,32 @@ import {
   useReactFlow,
   useStore,
 } from '@xyflow/react'
-import { useEffect } from 'react'
+import { useEffect, useMemo } from 'react'
 
-import { t } from '@/i18n'
+import { t, useLocale } from '@/i18n'
 
 const f = t.access.graph.flow
 
-const DIRECTIONS: Record<string, string> = { up: '上', down: '下', left: '左', right: '右' }
-
-/** 画图的库自带的读屏文字是英文的，这里换成中文。 */
-const ARIA: Partial<AriaLabelConfig> = {
-  'node.a11yDescription.default': f.nodeDefault,
-  'node.a11yDescription.keyboardDisabled': f.nodeKeyboardDisabled,
-  'node.a11yDescription.ariaLiveMessage': ({ direction, x, y }) =>
-    f.nodeMoved(DIRECTIONS[direction] ?? direction, Math.round(x), Math.round(y)),
-  'edge.a11yDescription.default': f.edgeDefault,
-  'controls.ariaLabel': f.controls,
-  'controls.zoomIn.ariaLabel': f.zoomIn,
-  'controls.zoomOut.ariaLabel': f.zoomOut,
-  'controls.fitView.ariaLabel': f.fitView,
-  'controls.interactive.ariaLabel': f.interactive,
-  'minimap.ariaLabel': f.minimap,
-  'handle.ariaLabel': f.handle,
+/** 画图的库自带的读屏文字，换成当前语言的。在渲染时现取，换了语言跟着变。 */
+function ariaLabels(): Partial<AriaLabelConfig> {
+  return {
+    'node.a11yDescription.default': f.nodeDefault,
+    'node.a11yDescription.keyboardDisabled': f.nodeKeyboardDisabled,
+    'node.a11yDescription.ariaLiveMessage': ({ direction, x, y }) =>
+      f.nodeMoved(
+        Object.hasOwn(f.directions, direction) ? f.directions[direction as keyof typeof f.directions] : direction,
+        Math.round(x),
+        Math.round(y),
+      ),
+    'edge.a11yDescription.default': f.edgeDefault,
+    'controls.ariaLabel': f.controls,
+    'controls.zoomIn.ariaLabel': f.zoomIn,
+    'controls.zoomOut.ariaLabel': f.zoomOut,
+    'controls.fitView.ariaLabel': f.fitView,
+    'controls.interactive.ariaLabel': f.interactive,
+    'minimap.ariaLabel': f.minimap,
+    'handle.ariaLabel': f.handle,
+  }
 }
 
 const FIT = { padding: 0.08, maxZoom: 1.1 } as const
@@ -66,10 +70,17 @@ function FitOnResize() {
  */
 export function GraphCanvas<N extends Node, E extends Edge>(props: ReactFlowProps<N, E> & { label: string }) {
   const { label, children, ...rest } = props
+  const locale = useLocale()
+  const aria = useMemo(
+    () => ariaLabels(),
+    // 文字在目录里，语言变了才要重新取。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [locale],
+  )
   return (
     <ReactFlow<N, E>
       aria-label={label}
-      ariaLabelConfig={ARIA}
+      ariaLabelConfig={aria}
       fitView
       fitViewOptions={FIT}
       minZoom={0.35}

@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 
 import { api } from '@/api/endpoints'
-import { formError, formFailure } from '@/api/formErrors'
+import { formError, formErrorDetail, formFailure } from '@/api/formErrors'
 import { useAction } from '@/api/queries'
 import { type AccessGraph, type Direction, type Network, type Rule } from '@/api/types'
 import { accessDiff, type RuleLike, sameRule } from '@/access/reach'
@@ -127,6 +127,7 @@ export function RuleDialog({ network, graph, rule, draft, open, onClose }: RuleD
       pending={save.isPending}
       canSubmit={duplicate === undefined}
       error={formError(failure)}
+      errorDetail={formErrorDetail(failure)}
       onSubmit={submit}
     >
       <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-start gap-3">
@@ -174,11 +175,10 @@ export function RuleDialog({ network, graph, rule, draft, open, onClose }: RuleD
         </Field>
       </div>
 
-      <div className="rounded-md bg-muted/70 px-4 py-3 text-sm" aria-live="polite">
-        {sentence === null ? (
-          <p className="text-muted-foreground">{d.pickBoth}</p>
-        ) : (
-          <>
+      {/* 两个标签都选好了才有这一块：用一句话说出规则的意思，再说保存之后的影响。 */}
+      <div aria-live="polite">
+        {sentence === null ? null : (
+          <div className="rounded-md bg-muted/70 px-4 py-3 text-sm">
             <p className="font-medium" data-testid="rule-sentence">
               {sentence}
             </p>
@@ -197,7 +197,7 @@ export function RuleDialog({ network, graph, rule, draft, open, onClose }: RuleD
                 {impactText}
               </p>
             ) : null}
-          </>
+          </div>
         )}
       </div>
 
@@ -206,18 +206,16 @@ export function RuleDialog({ network, graph, rule, draft, open, onClose }: RuleD
         <Notice key={tag} tone="warn">
           <span className="inline-flex flex-wrap items-center gap-1.5">
             <TagChip tag={tag} />
-            {d.emptyTag(tag)}
+            {d.emptyTag}
           </span>
         </Notice>
       ))}
 
-      <Field
-        label={d.nameLabel}
-        hint={d.nameHint(fallbackName)}
-        optional={t.common.optional}
-        error={touched ? nameProblem : null}
-      >
-        {(props) => <Input {...props} value={name} onChange={(event) => setName(event.target.value)} />}
+      {/* 不填名字时规则写成 `a ⇄ b`：占位里就是它会显示成的样子。 */}
+      <Field label={d.nameLabel} optional={t.common.optional} error={touched ? nameProblem : null}>
+        {(props) => (
+          <Input {...props} value={name} placeholder={fallbackName} onChange={(event) => setName(event.target.value)} />
+        )}
       </Field>
 
       {rule !== null ? (

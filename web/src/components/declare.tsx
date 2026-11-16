@@ -43,7 +43,6 @@ export function DeclareHowTo({ capability, nodeName, waiting = false, className 
           {declareConfig(capability)}
         </CodeBlock>
       </details>
-      <p className="mt-3 text-muted-foreground">{t.declare.why}</p>
       {waiting ? (
         <p role="status" className="mt-3 flex items-center gap-1.5 font-medium text-warn">
           <LoaderCircle className="size-3.5 animate-spin" aria-hidden />

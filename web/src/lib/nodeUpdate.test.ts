@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
 import { type ReleaseInfo, type UpdateStatus } from '@/api/types'
-import { t } from '@/i18n'
+import { setLocale, t } from '@/i18n'
+import { en } from '@/i18n/en'
 import { makeNode, makeUpdate } from '@/test/fixtures'
 
 import { nodeIssues } from './nodeIssues'
@@ -29,7 +30,7 @@ const RELEASE: ReleaseInfo = {
 }
 const AUTO: UpdateContext = { release: RELEASE, autoUpdate: true, paused: [] }
 const MANUAL: UpdateContext = { release: RELEASE, autoUpdate: false, paused: [] }
-const when = () => '3 分钟前'
+const when = () => t.time.minutesAgo(3)
 
 const withStatus = (status: UpdateStatus) => makeNode(1, 'nas', { update: makeUpdate({ status }) })
 
@@ -82,7 +83,7 @@ describe('describeUpdate：节点的更新情况怎么说', () => {
     })
   })
 
-  it('失败：红色。版本不能用的说"不会再自动装"，没装成的说"以后会再试"', () => {
+  it('失败：红色。版本不能用的说"不会再自动装"，没装成的说"以后会再试"；节点的原话单独放着', () => {
     const rejected = describeUpdate(
       withStatus({ state: 'failed', version: '0.3.0', kind: 'version_rejected', reason: '自检没有通过' }),
       AUTO,
@@ -91,14 +92,15 @@ describe('describeUpdate：节点的更新情况怎么说', () => {
     expect(rejected).toMatchObject({
       kind: 'failed',
       tone: 'danger',
-      detail: u.state.failedRejected('0.3.0', '自检没有通过'),
+      detail: u.state.failedRejected('0.3.0'),
+      reason: '自检没有通过',
     })
     const notInstalled = describeUpdate(
       withStatus({ state: 'failed', version: null, kind: 'not_installed', reason: '磁盘满了' }),
       AUTO,
       when,
     )
-    expect(notInstalled.detail).toBe(u.state.failedNotInstalled('磁盘满了'))
+    expect(notInstalled).toMatchObject({ detail: u.state.failedNotInstalled, reason: '磁盘满了' })
   })
 
   it('上次装这个版本失败过：比"有新版本"优先，写出时间和原因', () => {
@@ -111,7 +113,8 @@ describe('describeUpdate：节点的更新情况怎么说', () => {
     expect(describeUpdate(node, AUTO, when)).toMatchObject({
       kind: 'failed',
       label: u.state.lastFailed,
-      detail: u.state.lastFailedDetail('0.3.0', '连不上 controller', '3 分钟前'),
+      detail: u.state.lastFailedDetail('0.3.0', t.time.minutesAgo(3)),
+      reason: '连不上 controller',
     })
   })
 
@@ -175,6 +178,14 @@ describe('selfUpdateBlock：不能自己更新的原因和做法', () => {
     // 更新的 controller 报出这里不认识的原因。
     const future = JSON.parse('{"able":false,"blocker":"immutable_os"}') as { able: false; blocker: null }
     expect(selfUpdateBlock(makeUpdate({ self_update: future }))).toMatchObject({ reason: u.blocker.unknown })
+  })
+
+  it('原因和做法跟着语言走', () => {
+    setLocale('en', { remember: false })
+    expect(selfUpdateBlock(makeUpdate({ self_update: { able: false, blocker: 'container' } }))).toMatchObject({
+      reason: en.updates.blocker.container,
+      howTo: en.updates.blocker.containerHow,
+    })
   })
 })
 
@@ -251,7 +262,7 @@ describe('节点列表上的记号和"需要处理"', () => {
     })
     const issues = nodeIssues(node, [node])
     expect(issues.map((issue) => issue.kind)).toEqual(['update_failed', 'relay_offline', 'manual_update'])
-    expect(issues[0]).toMatchObject({ tone: 'danger', message: u.issue.failed('自检没有通过') })
+    expect(issues[0]).toMatchObject({ tone: 'danger', message: u.issue.failed })
   })
 
   it('没装成（和版本无关）的失败不上"需要处理"：它会自己再试', () => {

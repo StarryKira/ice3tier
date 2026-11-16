@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { type MatrixNode, type RouteMatrix } from '@/api/types'
+import { t } from '@/i18n'
 import { direct, makeEntry, noRoute, viaRelays } from '@/test/fixtures'
 
 import { buildTopology, layoutSignature, pointId } from './graph'
@@ -174,14 +175,17 @@ describe('一条路的说法', () => {
     expect(hopsOf(2, 4, viaRelays(1))).toEqual([2, 1, 4])
     expect(hopsOf(2, 3, direct())).toEqual([2, 3])
     expect(hopsOf(2, 3, noRoute)).toBeNull()
-    expect(routeText(viaRelays(1, 4), name)).toBe('经 hk → office')
-    expect(routeText(direct(), name)).toBe('直连')
+    expect(routeText(viaRelays(1, 4), name)).toBe(t.routes.via(['hk', 'office'].join(t.routes.hopSeparator)))
+    expect(routeText(direct(), name)).toBe(t.routes.direct)
   })
 
   it('矩阵一格的完整说法带地址、延迟、新旧', () => {
     const stale = MATRIX.entries.find((entry) => entry.stale)
     if (stale === undefined) throw new Error('没有过期的格子')
-    expect(entryText(stale, name)).toBe('直连，对端地址 203.0.113.7:20330，9 ms，1 小时前的上报，过期')
+    const r = t.routes
+    expect(entryText(stale, name)).toBe(
+      [r.direct, r.addr('203.0.113.7:20330'), r.rtt(9), r.age(t.time.hoursAgo(1)), r.stale].join(r.factSeparator),
+    )
   })
 
   it('数得出经一个 relay 中转的节点对：两个方向算一对，过期的不算', () => {

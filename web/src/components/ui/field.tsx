@@ -52,13 +52,23 @@ function Field({ label, hint, error, optional, className, children }: FieldProps
   )
 }
 
+interface FormErrorProps {
+  message: string | null | undefined
+  /** controller 的原话，写在下面一行，字小一号、颜色淡一些。 */
+  detail?: string | null
+  className?: string
+}
+
 /** 整个表单的错误：服务器的拒绝理由说不清属于哪个字段时显示在按钮上方。 */
-function FormError({ message, className }: { message: string | null | undefined; className?: string }) {
+function FormError({ message, detail, className }: FormErrorProps) {
   if (message === null || message === undefined || message === '') return null
   return (
-    <p role="alert" className={cn('rounded-md bg-danger-soft px-3 py-2 text-[13px] text-danger', className)}>
-      {message}
-    </p>
+    <div role="alert" className={cn('rounded-md bg-danger-soft px-3 py-2 text-[13px] text-danger', className)}>
+      <p>{message}</p>
+      {detail !== undefined && detail !== null && detail !== '' ? (
+        <p className="mt-0.5 text-xs break-words text-foreground/70">{detail}</p>
+      ) : null}
+    </div>
   )
 }
 

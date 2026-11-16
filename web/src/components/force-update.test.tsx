@@ -74,7 +74,7 @@ describe('立即更新的确认框', () => {
     expect(api.callsTo('POST /networks/1/nodes/2/update')[0]?.body).toEqual({ timing: 'now' })
   })
 
-  it('controller 拒绝时原因写在框里，框不关', async () => {
+  it('controller 拒绝时原因写在框里，框不关；错误码说清楚了的不再写原话', async () => {
     const user = userEvent.setup()
     const onClose = vi.fn()
     setup(NAS, 0, {
@@ -85,8 +85,24 @@ describe('立即更新的确认框', () => {
     const dialog = await screen.findByRole('dialog')
     await within(dialog).findByText(f.idleBody)
     await user.click(within(dialog).getByRole('button', { name: f.confirmNow }))
-    expect(await within(dialog).findByRole('alert')).toHaveTextContent('节点 nas 不在线')
+    const alert = await within(dialog).findByRole('alert')
+    expect(alert).toHaveTextContent(t.errors.codes.node_offline)
+    expect(alert).not.toHaveTextContent('让节点立即更新')
     expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('错误码太笼统时，controller 的原话写在下面一行', async () => {
+    const user = userEvent.setup()
+    setup(NAS, 0, {
+      'POST /networks/1/nodes/2/update': () => apiFailure(409, 'conflict', '节点正在换程序'),
+    })
+    renderWithApp(<ForceUpdateDialog node={NAS} onClose={vi.fn()} />)
+    const dialog = await screen.findByRole('dialog')
+    await within(dialog).findByText(f.idleBody)
+    await user.click(within(dialog).getByRole('button', { name: f.confirmNow }))
+    const alert = await within(dialog).findByRole('alert')
+    expect(alert).toHaveTextContent(t.errors.codes.conflict)
+    expect(alert).toHaveTextContent('节点正在换程序')
   })
 
   it('唯一的 relay：写出重启会断开经它中转的几对连接', async () => {

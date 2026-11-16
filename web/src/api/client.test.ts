@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { t } from '@/i18n'
+import { setLocale, t } from '@/i18n'
+import { en } from '@/i18n/en'
 
-import { ApiError, configureClient, errorMessage, request } from './client'
-import { fieldError, formError, formFailure } from './formErrors'
+import { ApiError, configureClient, errorDetail, errorMessage, request } from './client'
+import { fieldError, formError, formErrorDetail, formFailure } from './formErrors'
 
 function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...headers } })
@@ -107,24 +108,38 @@ describe('请求怎么发', () => {
 })
 
 describe('出错时', () => {
-  it('controller 给的 code 和 message 原样放进 ApiError', async () => {
+  it('controller 给的 code 和原话放进 ApiError；显示时按码用当前语言写，码说清了的不再附原话', async () => {
     const message = '节点 laptop 没有声明可以作为出口。在节点上执行 `i3t set can-exit on` 之后才能启用'
     fetchMock.mockResolvedValue(apiError(409, 'not_declared', message))
     const error = await failure(request('PUT', '/networks/1/nodes/3/exit', { body: {} }))
     expect(error.status).toBe(409)
     expect(error.code).toBe('not_declared')
     expect(error.message).toBe(message)
+    expect(error.server).toBe(message)
     expect(error.is('not_declared')).toBe(true)
     expect(error.is('conflict', 'name_taken')).toBe(false)
     expect(error.isNetwork).toBe(false)
-    expect(errorMessage(error)).toBe(message)
+    expect(errorMessage(error)).toBe(t.errors.codes.not_declared)
+    expect(errorDetail(error)).toBeNull()
+
+    setLocale('en', { remember: false })
+    expect(errorMessage(error)).toBe(en.errors.codes.not_declared)
   })
 
-  it('不认识的错误码照样显示 controller 给的话', async () => {
+  it('笼统的码：界面的话之外，附上 controller 的原话', async () => {
+    fetchMock.mockResolvedValue(apiError(409, 'conflict', '这一对节点已经有设置了'))
+    const error = await failure(request('POST', '/networks/1/pairs', { body: {} }))
+    expect(errorMessage(error)).toBe(t.errors.codes.conflict)
+    expect(errorDetail(error)).toBe('这一对节点已经有设置了')
+  })
+
+  it('不认识的错误码：按状态码说一句，附上 controller 的原话', async () => {
     fetchMock.mockResolvedValue(apiError(409, 'some_future_code', '以后才有的一种错误'))
     const error = await failure(request('GET', '/networks'))
     expect(error.code).toBe('some_future_code')
     expect(error.message).toBe('以后才有的一种错误')
+    expect(errorMessage(error)).toBe(t.errors.http(409))
+    expect(errorDetail(error)).toBe('以后才有的一种错误')
   })
 
   it('应答不是约定的格式（例如代理报的 502）时按状态码说一句', async () => {
@@ -133,6 +148,8 @@ describe('出错时', () => {
     expect(error.status).toBe(502)
     expect(error.code).toBe('http_502')
     expect(error.message).toBe(t.errors.http(502))
+    expect(errorMessage(error)).toBe(t.errors.http(502))
+    expect(errorDetail(error)).toBeNull()
   })
 
   it('JSON 里的 error 缺字段时不当成 controller 的错误', async () => {
@@ -148,6 +165,7 @@ describe('出错时', () => {
     expect(error.code).toBe('network')
     expect(error.isNetwork).toBe(true)
     expect(error.message).toBe(t.errors.network)
+    expect(errorMessage(error)).toBe(t.errors.network)
     expect(onReachability).toHaveBeenCalledExactlyOnceWith(false)
   })
 
@@ -210,17 +228,20 @@ describe('把提交失败归到表单的字段上', () => {
   const map = { name_taken: 'name', range_overlaps: 'cidr' } as const
 
   it('错误码在表里：显示在对应的字段下面', () => {
-    const failed = formFailure<FieldName>(new ApiError(409, 'range_overlaps', '地址段和网络 home 的重叠'), map)
-    expect(failed).toEqual({ field: 'cidr', message: '地址段和网络 home 的重叠' })
-    expect(fieldError(failed, 'cidr')).toBe('地址段和网络 home 的重叠')
+    const server = '地址段和网络 home 的重叠'
+    const failed = formFailure<FieldName>(new ApiError(409, 'range_overlaps', server, server), map)
+    expect(failed).toEqual({ field: 'cidr', message: t.errors.codes.range_overlaps, detail: null })
+    expect(fieldError(failed, 'cidr')).toBe(t.errors.codes.range_overlaps)
     expect(fieldError(failed, 'name')).toBeNull()
     expect(formError(failed)).toBeNull()
   })
 
-  it('错误码不在表里，或者根本不是 controller 的错误：显示在表单底部', () => {
-    const unknown = formFailure<FieldName>(new ApiError(500, 'internal', 'controller 内部出错'), map)
-    expect(unknown).toEqual({ field: null, message: 'controller 内部出错' })
-    expect(formError(unknown)).toBe('controller 内部出错')
+  it('错误码不在表里，或者根本不是 controller 的错误：显示在表单底部，原话在下面一行', () => {
+    const server = 'controller 内部出错'
+    const unknown = formFailure<FieldName>(new ApiError(500, 'internal', server, server), map)
+    expect(unknown).toEqual({ field: null, message: t.errors.codes.internal, detail: server })
+    expect(formError(unknown)).toBe(t.errors.codes.internal)
+    expect(formErrorDetail(unknown)).toBe(server)
     expect(fieldError(unknown, 'name')).toBeNull()
 
     expect(formError(formFailure<FieldName>(new ApiError(0, 'network', t.errors.network), map))).toBe(t.errors.network)

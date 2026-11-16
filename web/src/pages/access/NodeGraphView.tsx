@@ -4,7 +4,8 @@ import { useMemo } from 'react'
 import { type NodeAccess, type NodeRef, type Rule } from '@/api/types'
 import { buildNodeGraph, NODE_BOX } from '@/access/nodeGraph'
 import { ruleLabel } from '@/lib/rules'
-import { t } from '@/i18n'
+import { t, useLocale } from '@/i18n'
+import { formatList } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 import { GraphCanvas } from './flow'
@@ -65,10 +66,10 @@ function MoreNodeView({ data }: NodeProps<MoreFlowNode>) {
 
 const nodeTypes = { peer: PeerNodeView, focus: FocusNodeView, more: MoreNodeView }
 
-/** 连线上的名字：最多写两条规则，再多写"等 N 条"。 */
+/** 连线上的名字：最多写两条规则，再多写"+N"。 */
 function edgeText(rules: readonly Rule[]): string {
   const labels = rules.map(ruleLabel)
-  return labels.length <= 2 ? labels.join('、') : `${labels.slice(0, 2).join('、')} +${labels.length - 2}`
+  return labels.length <= 2 ? formatList(labels) : `${formatList(labels.slice(0, 2))} +${labels.length - 2}`
 }
 
 interface NodeGraphViewProps {
@@ -85,6 +86,8 @@ interface NodeGraphViewProps {
  * 图不把所有东西都铺开，只回答"这台机器能到哪、谁能到它"。
  */
 export function NodeGraphView({ access, rules, expanded, onExpand, onFocus }: NodeGraphViewProps) {
+  // 点和线上的文字算好存着，换语言时要重新算。
+  const locale = useLocale()
   const shape = useMemo(() => buildNodeGraph(access, rules, expanded), [access, rules, expanded])
 
   const nodes = useMemo<FlowNode[]>(
@@ -102,7 +105,7 @@ export function NodeGraphView({ access, rules, expanded, onExpand, onFocus }: No
         type: 'peer',
         position: { x: peer.x, y: peer.y - BOX.height / 2 },
         data: { node: peer.node, side: peer.side },
-        ariaLabel: `${peer.node.name}，${g.viaRules(peer.rules.map(ruleLabel).join('、'))}`,
+        ariaLabel: g.peerLabel(peer.node.name, formatList(peer.rules.map(ruleLabel))),
         draggable: false,
       })),
       ...shape.more.map<MoreFlowNode>((more) => ({
@@ -114,7 +117,8 @@ export function NodeGraphView({ access, rules, expanded, onExpand, onFocus }: No
         draggable: false,
       })),
     ],
-    [shape],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [shape, locale],
   )
 
   const edges = useMemo<Edge[]>(
@@ -134,7 +138,8 @@ export function NodeGraphView({ access, rules, expanded, onExpand, onFocus }: No
         style: { stroke: EDGE_COLORS.enabled, strokeWidth: 1.4 },
         focusable: false,
       })),
-    [shape],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [shape, locale],
   )
 
   return (

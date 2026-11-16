@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { t } from '@/i18n'
+import { setLocale, t } from '@/i18n'
 
 import { BYTE_UNITS, bytesToField, formatPercent, unitBytes } from './format'
 import { formatDuration, formatUtcDay } from './time'
@@ -56,7 +56,7 @@ describe('出口的配额', () => {
       period_end: DEC_1,
     })
     expect(view.text).toBe('42.0 GB / 100 GB')
-    expect(view.resets).toBe(t.exits.quotaResets('12 月 1 日'))
+    expect(view.resets).toBe(t.exits.quotaResets('12月1日'))
     expect(view.resetsAt).toBe(DEC_1)
   })
 
@@ -66,9 +66,14 @@ describe('出口的配额', () => {
     expect(view.tone).toBe('danger')
   })
 
-  it('formatUtcDay 不受浏览器时区影响', () => {
-    expect(formatUtcDay(DEC_1 - 1)).toBe('11 月 30 日')
-    expect(formatUtcDay(DEC_1)).toBe('12 月 1 日')
+  it('formatUtcDay 不受浏览器时区影响，按语言写', () => {
+    expect(formatUtcDay(DEC_1 - 1)).toBe('11月30日')
+    expect(formatUtcDay(DEC_1)).toBe('12月1日')
+    setLocale('en', { remember: false })
+    expect(formatUtcDay(DEC_1 - 1)).toBe('Nov 30')
+    expect(quotaView({ limit_bytes: GB, used_bytes: 0, period_start: 0, period_end: DEC_1 }).resets).toBe(
+      'Resets Dec 1',
+    )
   })
 })
 

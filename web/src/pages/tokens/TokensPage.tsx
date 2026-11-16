@@ -58,7 +58,7 @@ export function TokensPage() {
 
   const onRemove = async (token: EnrollTokenInfo) => {
     const label = tokenLabel(token)
-    // 还能用的令牌收回之后拿着它的机器就加入不了了，不能撤回；用掉的和过期的只是删掉一条记录。
+    // 还能用的令牌吊销之后拿着它的机器就加入不了了，不能撤回；用掉的和过期的只是删掉一条记录。
     const confirmed =
       tokenView(token, now).removal === 'revoke'
         ? await confirm({
@@ -86,7 +86,6 @@ export function TokensPage() {
     <Page>
       <PageHeader
         title={k.title}
-        description={k.description}
         actions={
           <Button variant="primary" onClick={() => setAdding(true)}>
             <Plus aria-hidden />
@@ -104,7 +103,7 @@ export function TokensPage() {
             { value: 'all', label: k.showAll },
           ]}
         />
-        <p className="text-[13px] text-muted-foreground">{k.historyNote}</p>
+        {show === 'all' ? <p className="text-[13px] text-muted-foreground">{k.historyNote}</p> : null}
       </div>
       {focus.missing ? (
         <Notice className="mb-4" tone="warn">
@@ -118,7 +117,6 @@ export function TokensPage() {
           <EmptyState
             icon={Ticket}
             title={show === 'all' ? k.emptyAllTitle : k.emptyTitle}
-            description={show === 'all' ? k.emptyAllBody : k.emptyBody}
             action={
               <Button variant="primary" onClick={() => setAdding(true)}>
                 <Plus aria-hidden />

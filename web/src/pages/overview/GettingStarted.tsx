@@ -85,9 +85,7 @@ function Slot({
       <span className="mt-0.5 font-mono text-xs text-muted-foreground">
         {node.virtual_ip} · {node.platform}
       </span>
-      <span className="mt-1 text-xs text-muted-foreground">
-        {node.online ? g.joinedOnline : `${g.joinedOffline}：${g.joinedOfflineHint}`}
-      </span>
+      <span className="mt-1 text-xs text-muted-foreground">{node.online ? g.joinedOnline : g.joinedOffline}</span>
     </Link>
   )
 }
@@ -104,7 +102,7 @@ export function GettingStarted({ network, nodes }: { network: Network; nodes: re
 
   return (
     <Page>
-      <PageHeader title={g.title} description={g.lead} />
+      <PageHeader title={g.title} />
       <div className="grid grid-cols-[minmax(0,1fr)_16rem] items-start gap-12">
         <ol>
           <Step index={1} title={g.step1} state={current === 1 ? 'current' : 'done'}>
@@ -112,7 +110,11 @@ export function GettingStarted({ network, nodes }: { network: Network; nodes: re
           </Step>
           <Step index={2} title={g.step2} state={current === 2 ? 'current' : 'upcoming'}>
             {current === 2 ? (
-              <AddNodeFlow key="second" network={network} intro={<Notice>{g.step2Tip}</Notice>} />
+              <AddNodeFlow
+                key="second"
+                network={network}
+                intro={<Notice>{g.step2Tip(t.capability.relay.full)}</Notice>}
+              />
             ) : undefined}
           </Step>
           <Step index={3} title={g.step3} state="upcoming">
@@ -123,16 +125,15 @@ export function GettingStarted({ network, nodes }: { network: Network; nodes: re
         <Card className="sticky top-8" aria-label={g.live}>
           <h2 className="mb-3 text-xs font-medium text-muted-foreground">{g.live}</h2>
           <div aria-live="polite">
-            <Slot network={network} label={g.slotFirst} node={first} waiting={g.waitingFirst} />
+            <Slot network={network} label={g.slotFirst} node={first} waiting={g.waiting} />
             <div aria-hidden className="mx-auto h-6 w-px border-l border-dashed border-border-strong" />
             <Slot
               network={network}
               label={g.slotSecond}
               node={second}
-              waiting={first === undefined ? g.notYet : g.waitingSecond}
+              waiting={first === undefined ? g.notYet : g.waiting}
             />
           </div>
-          <p className="mt-3 text-xs text-muted-foreground">{g.skip}</p>
         </Card>
       </div>
     </Page>

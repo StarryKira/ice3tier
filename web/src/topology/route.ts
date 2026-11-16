@@ -1,12 +1,21 @@
 import { type MatrixEntry, type NodeId, type Route, type RouteDetail, type RouteMatrix } from '@/api/types'
 import { type Tone } from '@/components/status'
 import { t } from '@/i18n'
+import { formatNumber } from '@/lib/format'
 import { formatAge } from '@/lib/time'
 
 /**
  * 一条路的几种说法。拓扑图、路由矩阵、路径诊断和节点详情的路由表用同一套：
- * 直连是绿色，经 relay 是紫色（中转是正常的工作状态，不用警告色），只有无路可走是红色。
+ * 直连是绿色，经 relay 是紫色（中转是正常的工作状态，不用警告色），只有不可达是红色。
  */
+
+/**
+ * 按接口给的取值从目录里取一句话。接口的取值是封闭的联合类型，但比界面新的 controller 可能给别的值，
+ * 那时返回 `undefined`，由调用的地方决定写什么。
+ */
+export function textFor<K extends string>(map: Readonly<Record<K, string>>, key: string): string | undefined {
+  return Object.hasOwn(map, key) ? map[key as K] : undefined
+}
 
 /** 矩阵着色用的四类（文档 §15）：直连、一级中转、多级中转、不可达。 */
 export type RouteClass = 'direct' | 'relay' | 'multi' | 'none'
@@ -24,21 +33,29 @@ export function classify(route: Route): RouteClass {
 
 export const CLASS_TONE: Record<RouteClass, Tone> = { direct: 'ok', relay: 'relay', multi: 'relay', none: 'danger' }
 
-export const CLASS_LABEL: Record<RouteClass, string> = {
-  direct: t.routes.classDirect,
-  relay: t.routes.classRelay,
-  multi: t.routes.classMulti,
-  none: t.routes.classNone,
+/** 路的种类的名字（矩阵的图例）。每次现取，换了语言就是新的。 */
+export function classLabel(cls: RouteClass): string {
+  const labels = {
+    direct: t.routes.classDirect,
+    relay: t.routes.classRelay,
+    multi: t.routes.classMulti,
+    none: t.routes.classNone,
+  } as const
+  return labels[cls]
 }
 
-export const CLASS_SYMBOL: Record<RouteClass, string> = {
-  direct: t.routes.symbolDirect,
-  relay: t.routes.symbolRelay,
-  multi: t.routes.symbolMulti,
-  none: t.routes.symbolNone,
+/** 矩阵格子里的符号：颜色之外还有字。 */
+export function classSymbol(cls: RouteClass): string {
+  const symbols = {
+    direct: t.routes.symbolDirect,
+    relay: t.routes.symbolRelay,
+    multi: t.routes.symbolMulti,
+    none: t.routes.symbolNone,
+  } as const
+  return symbols[cls]
 }
 
-/** 一条路经过的节点，从发送方到接收方，两头都算。无路可走时是 `null`。 */
+/** 一条路经过的节点，从发送方到接收方，两头都算。不可达时是 `null`。 */
 export function hopsOf(from: NodeId, to: NodeId, route: Route): NodeId[] | null {
   switch (route.via) {
     case 'direct':
@@ -50,7 +67,7 @@ export function hopsOf(from: NodeId, to: NodeId, route: Route): NodeId[] | null 
   }
 }
 
-/** "直连""经 hk-1""经 hk-1 → sg-2""无路可走"。 */
+/** "直连""经 hk-1""经 hk-1 → sg-2""不可达"。 */
 export function routeText(route: Route, name: (id: NodeId) => string): string {
   switch (route.via) {
     case 'direct':
@@ -96,7 +113,7 @@ export function entryText(entry: MatrixEntry, name: (id: NodeId) => string): str
   if (entry.rtt_ms !== null) parts.push(t.routes.rtt(entry.rtt_ms))
   parts.push(t.routes.age(formatAge(entry.age_secs)))
   if (entry.stale) parts.push(t.routes.stale)
-  return parts.join('，')
+  return parts.join(t.routes.factSeparator)
 }
 
 /** 经这个 relay 中转的节点对数：矩阵里现在（不过期的）路经过它的，两个方向算一对。 */
@@ -120,10 +137,10 @@ export function indexEntries(entries: readonly MatrixEntry[]): Map<string, Matri
 export function formatMicros(us: number): string {
   const ms = us / 1000
   const digits = ms < 1 ? 2 : ms < 100 ? 1 : 0
-  return t.routes.ms(ms.toFixed(digits))
+  return t.routes.ms(formatNumber(ms, digits))
 }
 
 /** 千分之几写成百分数：千分之 5 是 0.5%。 */
 export function formatPermille(permille: number): string {
-  return t.routes.percent(permille % 10 === 0 ? String(permille / 10) : (permille / 10).toFixed(1))
+  return t.routes.percent(formatNumber(permille / 10, permille % 10 === 0 ? 0 : 1))
 }

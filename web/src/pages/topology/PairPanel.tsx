@@ -1,6 +1,7 @@
 import { Link } from 'react-router'
 
 import { type MatrixEntry, type MatrixNode, type NodeId } from '@/api/types'
+import { InfoTip } from '@/components/info-tip'
 import { StatusText } from '@/components/status'
 import { Button } from '@/components/ui/button'
 import { t } from '@/i18n'
@@ -28,7 +29,10 @@ function Leg({
     <section className="space-y-1" data-testid={testId}>
       <h3 className="text-[13px] font-semibold">{g.forward(from.name, to.name)}</h3>
       {entry === null ? (
-        <p className="text-[13px] text-muted-foreground">{g.legNoData}</p>
+        <p className="flex items-center gap-1.5 text-[13px] text-muted-foreground">
+          {g.legNoData}
+          <InfoTip>{g.legNoDataHint}</InfoTip>
+        </p>
       ) : (
         <>
           <p className="text-sm">
@@ -46,7 +50,7 @@ function Leg({
             <p className="font-mono text-xs text-muted-foreground">{t.routes.addr(entry.route.addr)}</p>
           ) : null}
           <p className={entry.stale ? 'text-[13px] text-warn' : 'text-[13px] text-muted-foreground'}>
-            {entry.stale ? g.legStale(formatAge(entry.age_secs)) : g.legAge(formatAge(entry.age_secs))}
+            {entry.stale ? g.legStale(formatAge(entry.age_secs)) : t.routes.age(formatAge(entry.age_secs))}
           </p>
         </>
       )}
@@ -69,11 +73,10 @@ export function PairPanel({ network, a, b, forward, reverse, name }: PairPanelPr
     <aside className="space-y-4" aria-label={g.panelTitle} data-testid="pair-panel">
       <Leg from={a} to={b} entry={forward} name={name} testId="pair-forward" />
       <Leg from={b} to={a} entry={reverse} name={name} testId="pair-reverse" />
-      <div className="space-y-1.5 border-t pt-3">
+      <div className="border-t pt-3">
         <Button asChild size="sm">
           <Link to={pairPath(network, 'diagnosis', a.id, b.id)}>{g.toPath}</Link>
         </Button>
-        <p className="text-[13px] text-muted-foreground">{g.toPathHint}</p>
       </div>
     </aside>
   )

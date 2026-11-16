@@ -14,7 +14,6 @@ export function NotFoundPage() {
         <EmptyState
           icon={Compass}
           title={t.errors.notFoundTitle}
-          description={t.errors.notFoundBody}
           action={
             <Button asChild variant="primary">
               <Link to="/">{t.errors.backHome}</Link>

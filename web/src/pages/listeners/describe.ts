@@ -2,6 +2,7 @@ import { type DefaultAction, type Listener, type Node } from '@/api/types'
 import { nodeName } from '@/lib/nodes'
 import { t } from '@/i18n'
 import { isLoopbackBind } from '@/lib/cidr'
+import { formatList } from '@/lib/format'
 
 /** 一个监听器实际生效的默认动作：没有设置时，回环地址是就地出站，其他地址是拒绝。 */
 export function effectiveDefaultAction(listener: Pick<Listener, 'bind' | 'default_action'>): DefaultAction {
@@ -20,7 +21,7 @@ export function describeWho(listener: Listener): string {
       : t.listeners.whoAnyone
   if (loopback) return who
   const sources =
-    listener.allow_from.length === 0 ? t.listeners.anySource : t.listeners.allowFrom(listener.allow_from.join('、'))
+    listener.allow_from.length === 0 ? t.listeners.anySource : t.listeners.allowFrom(formatList(listener.allow_from))
   return `${who} · ${sources}`
 }
 
@@ -38,4 +39,12 @@ export function describeNoUser(listener: Listener, nodes: readonly Pick<Node, 'i
   }
 }
 
-export const PROTOCOL_LABEL = { socks5: t.listeners.socks5, http: t.listeners.http } as const
+/** 协议的名字。取值函数（getter）写：每次现读，换了语言跟着变。 */
+export const PROTOCOL_LABEL = {
+  get socks5() {
+    return t.listeners.socks5
+  },
+  get http() {
+    return t.listeners.http
+  },
+} as const

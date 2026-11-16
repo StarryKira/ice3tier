@@ -52,19 +52,21 @@ describe('路径诊断', () => {
     expect(api.callsTo('GET /networks/1/path')[0]?.query.toString()).toBe('from=2&to=1')
     expect(forward).toHaveAttribute('data-source', 'query')
     expect(forward).toHaveTextContent(p.forward('laptop', 'nas'))
-    expect(forward).toHaveTextContent(p.source.query ?? '')
     expect(forward).toHaveTextContent('12 ms')
-    expect(within(forward).getByTestId('path-forward-since')).toHaveTextContent(p.since('5 分钟前', '直连打通了'))
+    expect(within(forward).getByTestId('path-forward-since')).toHaveTextContent(p.since(t.time.minutesAgo(5)))
+    // 换路的原因是节点的原话，原样写在下面一行。
+    expect(within(forward).getByTestId('path-forward-since-reason')).toHaveTextContent('直连打通了')
+    expect(within(forward).getByTestId('path-forward-source')).toHaveTextContent(p.source.query)
 
     const reverse = screen.getByTestId('path-reverse')
     expect(reverse).toHaveAttribute('data-source', 'report')
-    expect(reverse).toHaveTextContent('经 hk')
-    expect(reverse).toHaveTextContent(p.age('6 秒前'))
+    expect(reverse).toHaveTextContent(t.routes.via('hk'))
+    expect(reverse).toHaveTextContent(p.age(t.time.secondsAgo(6)))
     // nas 不在线：说清楚它那个方向是离线之前的数据。
     expect(screen.getByText(p.offline('nas'))).toBeVisible()
   })
 
-  it('"再问一次"重新问两端', async () => {
+  it('"重新查询"重新问两端', async () => {
     const user = userEvent.setup()
     const api = setup()
     renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=1' })
@@ -81,7 +83,8 @@ describe('路径诊断', () => {
       },
     })
     renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=1' })
-    expect(await screen.findByText(p.notPeersBody)).toBeVisible()
+    expect(await screen.findByText(p.notPeersTitle)).toBeVisible()
+    expect(screen.getByTestId('path-forward-source')).toHaveTextContent(p.source.not_peers)
     expect(screen.getByRole('link', { name: p.toAccess })).toHaveAttribute('href', '/n/1/access?check=1&from=2&to=1')
     expect(screen.getByTestId('path-forward')).toHaveAttribute('data-source', 'not_peers')
     expect(screen.getByTestId('path-reverse')).toHaveTextContent(t.routes.noData)
@@ -144,8 +147,9 @@ describe('现问到时的细节：方式、模式、原因、候选路径', () =
     renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=1' })
     const forward = await screen.findByTestId('path-forward')
     expect(within(forward).getByTestId('path-forward-detail')).toHaveTextContent(t.routes.directKind.punched)
-    expect(within(forward).getByTestId('path-forward-reason')).toHaveTextContent(p.reason('直连可用'))
-    expect(forward).toHaveTextContent(p.modeLabel(p.mode.direct_first ?? ''))
+    // 原因是节点的原话：照原样，前面一个"原因"。
+    expect(within(forward).getByTestId('path-forward-reason')).toHaveTextContent(`${p.reasonLabel} · 直连可用`)
+    expect(forward).toHaveTextContent(p.modeLabel(p.mode.direct_first))
     expect(within(screen.getByTestId('path-reverse')).getByTestId('path-reverse-detail')).toHaveTextContent(
       t.routes.relayLeg('TCP'),
     )

@@ -11,6 +11,7 @@ import { ruleLabel } from '@/lib/rules'
 import { TagChip } from '@/components/tags'
 import { Button } from '@/components/ui/button'
 import { t } from '@/i18n'
+import { formatList } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { ALL_TAG } from '@/lib/validate'
 
@@ -61,7 +62,7 @@ export function TagPanel({ network, graph, open, onOpenChange }: TagPanelProps) 
     if (memberCount === 1 && users.length > 0) {
       const confirmed = await confirm({
         title: p.lastTitle(tag),
-        body: p.lastBody(tag, users.map(ruleLabel).join('、')),
+        body: p.lastBody(formatList(users.map(ruleLabel))),
         confirmLabel: p.lastConfirm,
       })
       if (!confirmed) return
@@ -71,7 +72,6 @@ export function TagPanel({ network, graph, open, onOpenChange }: TagPanelProps) 
 
   return (
     <div>
-      <p className="mb-3 text-[13px] text-muted-foreground">{p.hint}</p>
       <ul className="-mx-3 divide-y border-t">
         {graph.tags.map((entry) => {
           const isOpen = open === entry.tag
@@ -152,7 +152,7 @@ export function TagPanel({ network, graph, open, onOpenChange }: TagPanelProps) 
                         size="sm"
                         variant="ghost"
                         onClick={() => setRenaming(entry.tag)}
-                        aria-label={p.renameFor(entry.tag)}
+                        aria-label={p.renameTitle(entry.tag)}
                       >
                         <Pencil aria-hidden />
                         {p.rename}

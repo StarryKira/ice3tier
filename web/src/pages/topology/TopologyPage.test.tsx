@@ -10,6 +10,9 @@ import { fakeApi, NETWORK, renderWithApp, type Routes } from '@/test/harness'
 import { TopologyPage } from './TopologyPage'
 
 const g = t.topology
+const r = t.routes
+/** 矩阵一格的说法：几样事实按语言接起来。 */
+const facts = (...parts: string[]) => parts.join(r.factSeparator)
 
 const RELAY = { udp: ['203.0.113.7:20330'], tcp: [], region: 'hk', bandwidth_mbps: null }
 
@@ -48,14 +51,20 @@ describe('拓扑的路由矩阵', () => {
     const matrix = await screen.findByTestId('route-matrix')
     const relayed = within(matrix).getByTestId('cell-2-3')
     expect(relayed).toHaveTextContent(`${t.routes.symbolRelay}40`)
-    expect(relayed).toHaveAccessibleName(g.cellLabel('laptop', 'nas', '经 hk，40 ms，4 秒前的上报'))
+    expect(relayed).toHaveAccessibleName(
+      g.cellLabel('laptop', 'nas', facts(r.via('hk'), r.rtt(40), r.age(t.time.secondsAgo(4)))),
+    )
     expect(within(matrix).getByTestId('cell-3-2')).toHaveAccessibleName(
-      g.cellLabel('nas', 'laptop', '直连，对端地址 192.168.1.2:20330，5 ms，10 分钟前的上报，过期'),
+      g.cellLabel(
+        'nas',
+        'laptop',
+        facts(r.direct, r.addr('192.168.1.2:20330'), r.rtt(5), r.age(t.time.minutesAgo(10)), r.stale),
+      ),
     )
     expect(within(matrix).getByTestId('cell-1-2')).toHaveTextContent(t.routes.symbolNone)
     // hk → nas 没有数据：不是按钮，读屏念"没有连接"。
     expect(within(matrix).queryByTestId('cell-1-3')).not.toBeInTheDocument()
-    expect(within(matrix).getByText(g.cellLabel('hk', 'nas', g.cellEmpty))).toBeInTheDocument()
+    expect(within(matrix).getByText(g.cellLabel('hk', 'nas', r.classEmpty))).toBeInTheDocument()
   })
 
   it('点一格选中这一对：两个方向用文字再说一遍，入口去路径诊断', async () => {
@@ -65,9 +74,9 @@ describe('拓扑的路由矩阵', () => {
     await user.click(await screen.findByTestId('cell-2-3'))
     expect(screen.getByTestId('watching')).toHaveTextContent(g.watching('laptop', 'nas'))
     const panel = screen.getByTestId('pair-panel')
-    expect(within(panel).getByTestId('pair-forward')).toHaveTextContent('经 hk')
-    expect(within(panel).getByTestId('pair-forward')).toHaveTextContent('laptop → hk → nas')
-    expect(within(panel).getByTestId('pair-reverse')).toHaveTextContent(g.legStale('10 分钟前'))
+    expect(within(panel).getByTestId('pair-forward')).toHaveTextContent(r.via('hk'))
+    expect(within(panel).getByTestId('pair-forward')).toHaveTextContent(['laptop', 'hk', 'nas'].join(r.hopSeparator))
+    expect(within(panel).getByTestId('pair-reverse')).toHaveTextContent(g.legStale(t.time.minutesAgo(10)))
     expect(within(panel).getByRole('link', { name: g.toPath })).toHaveAttribute('href', '/n/1/diagnosis?a=2&b=3')
     expect(screen.getByTestId('cell-2-3')).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getByTestId('cell-3-2')).toHaveAttribute('aria-pressed', 'true')
@@ -83,7 +92,7 @@ describe('拓扑的路由矩阵', () => {
     expect(within(panel).getByTestId('pair-forward')).toHaveTextContent(g.legNoData)
   })
 
-  it('还没有节点上报路由：说明为什么是空的，节点照样画出来', async () => {
+  it('还没有节点上报路由：说一句，节点照样画出来', async () => {
     setup({ 'GET /networks/1/routes': { ...MATRIX, entries: [] } })
     renderWithApp(<TopologyPage />, { network: NETWORK, route: '/n/1/topology' })
     expect(await screen.findByText(g.noRoutesTitle)).toBeVisible()
@@ -129,24 +138,24 @@ describe('骨干：relay 之间的延迟', () => {
     renderWithApp(<TopologyPage />, { network: NETWORK, route: '/n/1/topology' })
     await user.click(await screen.findByRole('radio', { name: g.viewBackbone }))
     const row = await screen.findByTestId('backbone-row-1')
-    expect(row).toHaveTextContent(g.backbone.state.overloaded ?? '')
+    expect(row).toHaveTextContent(g.backbone.state.overloaded)
     expect(row).toHaveTextContent(g.backbone.load(97))
     expect(row).toHaveTextContent(g.backbone.reportedBy('laptop'))
     expect(screen.getByTestId('backbone-cell-1-4')).toHaveAccessibleName(
-      g.backbone.cellLabel('hk', 'la', g.backbone.cell(150, 2, '0.5%')),
+      g.cellLabel('hk', 'la', g.backbone.cell(150, 2, '0.5%')),
     )
     expect(screen.getByTestId('backbone-row-4')).toHaveTextContent(g.backbone.noRow)
     expect(screen.getByText(g.backbone.answered('laptop'))).toBeVisible()
     // 选节点对的那一栏和骨干无关，不出现。
     expect(screen.queryByRole('combobox', { name: g.pickA })).not.toBeInTheDocument()
 
-    // 每次都要现问：不轮询，有"再问一次"。
+    // 每次都要现问：不轮询，有"重新查询"。
     expect(api.callsTo('GET /networks/1/backbone')).toHaveLength(1)
     await user.click(screen.getByRole('button', { name: g.backbone.query }))
     expect(api.callsTo('GET /networks/1/backbone')).toHaveLength(2)
   })
 
-  it('没有 relay：说怎么启用', async () => {
+  it('没有 relay：照实说', async () => {
     setup({ 'GET /networks/1/backbone': { relays: [], answered: [] } })
     renderWithApp(<TopologyPage />, { network: NETWORK, route: '/n/1/topology?view=backbone' })
     expect(await screen.findByText(g.backbone.noRelaysTitle)).toBeVisible()
@@ -165,7 +174,8 @@ describe('骨干：relay 之间的延迟', () => {
     renderWithApp(<TopologyPage />, { network: NETWORK, route: '/n/1/topology?view=matrix' })
     const relayed = await screen.findByTestId('cell-2-3')
     expect(relayed).toHaveTextContent('TCP')
-    expect(relayed).toHaveAccessibleName(/经 hk（第一段走 TCP）/)
-    expect(screen.getByTestId('cell-3-2')).toHaveAccessibleName(/直连（局域网）/)
+    expect((relayed.getAttribute('aria-label') ?? '').includes(r.withDetail(r.via('hk'), r.relayLeg('TCP')))).toBe(true)
+    const lan = screen.getByTestId('cell-3-2').getAttribute('aria-label') ?? ''
+    expect(lan.includes(r.withDetail(r.direct, r.directKind.lan))).toBe(true)
   })
 })

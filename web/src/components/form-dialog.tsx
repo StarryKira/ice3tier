@@ -21,6 +21,8 @@ interface FormDialogProps {
   canSubmit?: boolean
   /** 整个表单的错误（服务器的拒绝理由说不清属于哪个字段时）。 */
   error?: string | null
+  /** 它的补充：controller 的原话（`formErrorDetail`）。 */
+  errorDetail?: string | null
   onSubmit: () => void
   children: ReactNode
   /** 页脚左侧的一句常驻说明。 */
@@ -43,6 +45,7 @@ export function FormDialog({
   pending,
   canSubmit = true,
   error,
+  errorDetail,
   onSubmit,
   children,
   footerNote,
@@ -54,7 +57,6 @@ export function FormDialog({
     if (dirty) {
       const discard = await confirm({
         title: t.common.discardTitle,
-        body: t.common.discardBody,
         confirmLabel: t.common.discardConfirm,
         cancelLabel: t.common.discardCancel,
       })
@@ -74,7 +76,7 @@ export function FormDialog({
         <form onSubmit={submit} noValidate className="flex min-h-0 flex-1 flex-col">
           <DialogBody className="space-y-5">
             {children}
-            <FormError message={error} />
+            <FormError message={error} detail={errorDetail} />
           </DialogBody>
           <DialogFooter className={footerNote !== undefined ? 'justify-between' : undefined}>
             {footerNote !== undefined ? (

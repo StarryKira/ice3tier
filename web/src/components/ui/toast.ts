@@ -6,6 +6,8 @@ export interface ToastItem {
   id: number
   kind: ToastKind
   message: string
+  /** 第二行的补充，字小一号：出错时 controller 的原话。 */
+  detail?: string | null
 }
 
 /**
@@ -25,19 +27,19 @@ function subscribe(listener: () => void): () => void {
   return () => listeners.delete(listener)
 }
 
-function show(kind: ToastKind, message: string): number {
+function show(kind: ToastKind, message: string, detail: string | null = null): number {
   const id = nextId
   nextId += 1
-  emit([...items, { id, kind, message }])
+  emit([...items, { id, kind, message, detail }])
   return id
 }
 
-function update(id: number, kind: ToastKind, message: string): void {
+function update(id: number, kind: ToastKind, message: string, detail: string | null = null): void {
   if (!items.some((item) => item.id === id)) {
-    show(kind, message)
+    show(kind, message, detail)
     return
   }
-  emit(items.map((item) => (item.id === id ? { id, kind, message } : item)))
+  emit(items.map((item) => (item.id === id ? { id, kind, message, detail } : item)))
 }
 
 function dismiss(id: number): void {
@@ -53,9 +55,9 @@ export const toast = {
     if (id === undefined) show('success', message)
     else update(id, 'success', message)
   },
-  error: (message: string, id?: number): void => {
-    if (id === undefined) show('error', message)
-    else update(id, 'error', message)
+  error: (message: string, id?: number, detail: string | null = null): void => {
+    if (id === undefined) show('error', message, detail)
+    else update(id, 'error', message, detail)
   },
   info: (message: string): void => {
     show('info', message)

@@ -22,6 +22,7 @@ import {
   hasServerFilter,
   isFiltered,
   isRefKind,
+  logActionLabel,
   type LogFilter,
   logFilterToParams,
   logFilterToQuery,
@@ -35,8 +36,9 @@ const s = t.settings.log
 /** 一页取多少条。controller 一次最多给一千条；一百条一页翻起来不慢，也不会一次拉太多。 */
 const PAGE_SIZE = 100
 
-function actionLabel(action: string): string {
-  return s.actions[action] ?? action
+/** 一条记录里要显示的对象：不认识的种类忽略；网络本身就是"网络"那一列，不再重复。 */
+function shownRefs(entry: LogEntry): LogRef[] {
+  return entry.refs.filter((ref) => isRefKind(ref.kind) && !(ref.kind === 'network' && ref.id === entry.network))
 }
 
 /** 记录里提到的一样东西怎么称呼：节点能查到名字的写名字，别的写种类加编号（和说明文字里的写法一致）。 */
@@ -66,11 +68,10 @@ interface RefsProps {
 
 /** 一条记录说的那些东西：每样一个链接，去它所在的页面；旁边一个小按钮，只看和它有关的记录。 */
 function Refs({ entry, names, networks, onFilter }: RefsProps) {
-  // 不认识的种类忽略；网络本身就是"网络"那一列，不再重复。
-  const refs = entry.refs.filter((ref) => isRefKind(ref.kind) && !(ref.kind === 'network' && ref.id === entry.network))
+  const refs = shownRefs(entry)
   if (refs.length === 0) return null
   return (
-    <ul aria-label={s.refsLabel} className="mt-1 flex flex-wrap gap-1.5">
+    <ul aria-label={s.refsLabel} className="flex flex-wrap gap-1.5">
       {refs.map((ref) => {
         const label = refLabel(ref, names, networks)
         const target = refTarget(ref, entry.network)
@@ -106,7 +107,10 @@ function Refs({ entry, names, networks, onFilter }: RefsProps) {
 
 /**
  * 操作记录。网络、操作、对象交给 controller 筛，一页一页往前翻；搜索只在取回来的记录里找。
- * 每条记录说的东西做成链接，点了去它所在的页面。筛选条件写在地址里。
+ * 筛选条件写在地址里。
+ *
+ * 每一行先写界面自己按 `action` 和 `refs` 写的话（操作的名字、对象的链接），按当前的语言；
+ * controller 记下的说明（`detail`，中文原话）放在下面一行，字小一号，作为补充。
  */
 export function LogTab() {
   const [params, setParams] = useSearchParams()
@@ -118,10 +122,6 @@ export function LogTab() {
   const setFilter = (next: LogFilter) => setParams(logFilterToParams(next), { replace: true })
 
   const entries = useMemo(() => log.data?.pages.flat() ?? [], [log.data])
-  const rows = useMemo(
-    () => entries.filter((entry) => matchesSearch(entry, filter.search, actionLabel(entry.action))),
-    [entries, filter.search],
-  )
 
   // 节点的名字：只查记录里出现过的网络，多数时候只有一两个。
   const networkIds = useMemo(
@@ -138,7 +138,17 @@ export function LogTab() {
   }, [nodeLists])
 
   const allNetworks = networks.data ?? []
-  const kinds = Object.entries(s.kinds)
+  // 搜索也找界面写的字（操作的名字、对象），所以每次渲染现算：换了语言就按新的语言找。
+  const rows = entries.filter((entry) =>
+    matchesSearch(
+      entry,
+      filter.search,
+      [logActionLabel(entry.action) ?? '', ...shownRefs(entry).map((ref) => refLabel(ref, names, allNetworks))].join(
+        ' ',
+      ),
+    ),
+  )
+  const kinds = Object.entries(s.kinds).filter((entry): entry is [string, string] => entry[1] !== undefined)
   const actions = Object.keys(s.actions)
 
   const networkLabel = (id: number | null) => {
@@ -157,7 +167,7 @@ export function LogTab() {
 
   return (
     <Card>
-      <CardHeader title={s.title} description={s.description} />
+      <CardHeader title={s.title} />
       {log.isError && log.data === undefined ? (
         <ErrorState title={s.loadFailed} error={log.error} onRetry={() => void log.refetch()} />
       ) : nothingYet ? (
@@ -211,7 +221,7 @@ export function LogTab() {
                     .filter((action) => actionKind(action) === kind)
                     .map((action) => (
                       <option key={action} value={action}>
-                        {actionLabel(action)}
+                        {logActionLabel(action) ?? action}
                       </option>
                     ))}
                 </optgroup>
@@ -249,40 +259,44 @@ export function LogTab() {
             <thead>
               <tr>
                 <Th className="w-32">{s.colTime}</Th>
-                <Th className="w-28">{s.colNetwork}</Th>
-                <Th className="w-48">{s.colAction}</Th>
-                <Th>{s.colDetail}</Th>
+                <Th className="w-32">{s.colNetwork}</Th>
+                <Th>{s.colEvent}</Th>
               </tr>
             </thead>
             <tbody>
-              {log.isPending ? <SkeletonRows columns={4} rows={6} /> : null}
+              {log.isPending ? <SkeletonRows columns={3} rows={6} /> : null}
               {rows.map((entry) => (
                 <Tr key={entry.id} data-testid={`log-row-${entry.id}`}>
                   <Td className="align-top text-[13px] whitespace-nowrap text-muted-foreground">
                     <RelativeTime at={entry.at} />
                   </Td>
                   <Td className="align-top text-[13px]">{networkLabel(entry.network)}</Td>
-                  <Td className="align-top text-[13px] font-medium">
-                    {s.actions[entry.action] ?? <code className="font-mono text-xs font-normal">{entry.action}</code>}
-                  </Td>
-                  <Td className="text-[13px] text-muted-foreground">
-                    {entry.detail}
-                    <Refs
-                      entry={entry}
-                      names={names}
-                      networks={allNetworks}
-                      onFilter={(ref) => setFilter({ ...filter, ref, network: entry.network ?? filter.network })}
-                    />
+                  <Td className="text-[13px]">
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                      <span className="font-medium" data-testid="log-action">
+                        {logActionLabel(entry.action) ?? (
+                          <code className="font-mono text-xs font-normal">{entry.action}</code>
+                        )}
+                      </span>
+                      <Refs
+                        entry={entry}
+                        names={names}
+                        networks={allNetworks}
+                        onFilter={(ref) => setFilter({ ...filter, ref, network: entry.network ?? filter.network })}
+                      />
+                    </div>
+                    {entry.detail !== '' ? (
+                      <p className="mt-1 text-xs break-words text-muted-foreground" data-testid="log-detail">
+                        {entry.detail}
+                      </p>
+                    ) : null}
                   </Td>
                 </Tr>
               ))}
             </tbody>
           </Table>
           {log.isSuccess && rows.length === 0 ? (
-            <NoMatches
-              message={entries.length === 0 ? s.noMatchesServer : s.noMatches}
-              onClear={() => setFilter(EMPTY_LOG_FILTER)}
-            />
+            <NoMatches message={s.noMatches} onClear={() => setFilter(EMPTY_LOG_FILTER)} />
           ) : null}
           <TableFooter className="gap-4">
             <span className="tabular" data-testid="log-count">

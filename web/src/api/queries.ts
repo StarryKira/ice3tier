@@ -3,7 +3,7 @@ import { infiniteQueryOptions, QueryClient, queryOptions, useMutation, useQueryC
 import { toast } from '@/components/ui/toast'
 import { LIVE_INTERVAL } from '@/lib/polling'
 
-import { ApiError, errorMessage } from './client'
+import { ApiError, errorDetail, errorMessage } from './client'
 import { api } from './endpoints'
 import { type LogEntry, type LogQuery, type NetworkId, type NodeId } from './types'
 
@@ -214,7 +214,7 @@ export function useAction<TData, TVars = void>(
       await Promise.all(pending)
     },
     onError: (error) => {
-      if (toastError) toast.error(errorMessage(error))
+      if (toastError) toast.error(errorMessage(error), undefined, errorDetail(error))
     },
   })
 }

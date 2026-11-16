@@ -35,23 +35,16 @@ export function WelcomePage() {
   return (
     <main className="flex min-h-screen flex-col items-center px-6 pt-[14vh] pb-10">
       <Card className="w-full max-w-md">
-        <BrandMark className="mb-12" />
+        <BrandMark className="mb-10" />
         {networks.isPending ? (
           <SkeletonBlock lines={5} />
         ) : networks.isError ? (
-          <ErrorState
-            title={t.errors.loadFailed(t.networks.title)}
-            error={networks.error}
-            onRetry={() => void networks.refetch()}
-          />
+          <ErrorState title={t.errors.loadFailed} error={networks.error} onRetry={() => void networks.refetch()} />
         ) : (
           <form onSubmit={submit} noValidate className="space-y-5">
-            <div>
-              <h1 className="text-xl font-semibold tracking-tight">{t.networks.welcomeTitle}</h1>
-              <p className="mt-1.5 text-[13px] leading-relaxed text-muted-foreground">{t.networks.welcomeLead}</p>
-            </div>
+            <h1 className="text-xl font-semibold tracking-tight">{t.networks.welcomeTitle}</h1>
             {form.fields}
-            <FormError message={form.error} />
+            <FormError message={form.error} detail={form.errorDetail} />
             <Button type="submit" variant="primary" pending={form.pending} className="w-full">
               {t.networks.createSubmit}
             </Button>

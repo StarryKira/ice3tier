@@ -3,7 +3,8 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
 import { type LogEntry } from '@/api/types'
-import { t } from '@/i18n'
+import { en } from '@/i18n/en'
+import { setLocale, t } from '@/i18n'
 import { makeNode } from '@/test/fixtures'
 import { type ApiCall, fakeApi, NETWORK, renderWithApp } from '@/test/harness'
 
@@ -113,7 +114,7 @@ describe('操作记录', () => {
     const user = userEvent.setup()
     const api = setup()
     renderWithApp(<LogTab />, { route: '/settings/log?action=tag&q=x' })
-    expect(await screen.findByText(s.noMatchesServer)).toBeVisible()
+    expect(await screen.findByText(s.noMatches)).toBeVisible()
     expect(api.callsTo('GET /log')[0]?.query.get('action')).toBe('tag')
     expect(screen.getByRole('searchbox', { name: s.searchPlaceholder })).toHaveValue('x')
     const [clear] = screen.getAllByRole('button', { name: t.common.clearFilters })
@@ -122,12 +123,45 @@ describe('操作记录', () => {
     expect(await screen.findByTestId('log-row-150')).toBeVisible()
   })
 
-  it('搜索只在取回的记录里找', async () => {
+  it('搜索只在取回的记录里找：controller 的原话和界面写的字都算', async () => {
     const user = userEvent.setup()
     setup()
     renderWithApp(<LogTab />, { route: '/settings/log' })
     await screen.findByTestId('log-row-150')
-    await user.type(screen.getByRole('searchbox', { name: s.searchPlaceholder }), 'phone')
+    const search = screen.getByRole('searchbox', { name: s.searchPlaceholder })
+    await user.type(search, 'phone')
     expect(screen.getByTestId('log-count')).toHaveTextContent(s.showing(1, 100))
+    await user.clear(search)
+    await user.type(search, s.actions['credential.revoke'])
+    expect(screen.getByTestId('log-count')).toHaveTextContent(s.showing(1, 100))
+  })
+
+  it('每一行先写界面按操作写的话，controller 的原话在下面一行', async () => {
+    setup()
+    renderWithApp(<LogTab />, { route: '/settings/log' })
+    const row = await screen.findByTestId('log-row-150')
+    expect(within(row).getByTestId('log-action')).toHaveTextContent(s.actions['credential.revoke'])
+    expect(within(row).getByTestId('log-detail')).toHaveTextContent('凭据 #5 phone 已吊销')
+  })
+
+  it('英文界面：操作和对象用英文写，原话照旧作补充', async () => {
+    setLocale('en', { remember: false })
+    setup()
+    renderWithApp(<LogTab />, { route: '/settings/log' })
+    const row = await screen.findByTestId('log-row-150')
+    expect(within(row).getByTestId('log-action')).toHaveTextContent(en.settings.log.actions['credential.revoke'])
+    expect(within(row).getByRole('link', { name: en.settings.log.refLabels.credential(5) })).toBeVisible()
+    expect(within(row).getByTestId('log-detail')).toHaveTextContent('凭据 #5 phone 已吊销')
+  })
+
+  it('不认识的操作原样写代码', async () => {
+    fakeApi({
+      'GET /log': [{ id: 1, at: 1_794_000_000, network: null, action: 'gadget.spin', detail: '', refs: [] }],
+      'GET /networks': [NETWORK],
+    })
+    renderWithApp(<LogTab />, { route: '/settings/log' })
+    const row = await screen.findByTestId('log-row-1')
+    expect(within(row).getByTestId('log-action')).toHaveTextContent('gadget.spin')
+    expect(within(row).queryByTestId('log-detail')).not.toBeInTheDocument()
   })
 })

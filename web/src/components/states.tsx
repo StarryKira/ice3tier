@@ -1,7 +1,7 @@
 import { CircleAlert, type LucideIcon, SearchX } from 'lucide-react'
 import { type ReactNode } from 'react'
 
-import { errorMessage } from '@/api/client'
+import { errorDetail, errorMessage } from '@/api/client'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { t } from '@/i18n'
@@ -60,13 +60,15 @@ interface ErrorStateProps {
   className?: string
 }
 
-/** 取数失败。服务器给的说明原样显示。 */
+/** 取数失败：一句标题、原因（按错误码写），码太笼统时下面再加 controller 的原话。 */
 export function ErrorState({ title, error, onRetry, className }: ErrorStateProps) {
+  const detail = errorDetail(error)
   return (
     <div role="alert" className={cn('flex flex-col items-center px-6 py-14 text-center', className)}>
       <CircleAlert className="mb-3 size-6 text-danger" aria-hidden />
       <h2 className="text-base font-semibold">{title}</h2>
       <p className="mt-1.5 max-w-md text-[13px] leading-relaxed text-muted-foreground">{errorMessage(error)}</p>
+      {detail !== null ? <p className="mt-1 max-w-md text-xs break-words text-muted-foreground">{detail}</p> : null}
       {onRetry !== undefined ? (
         <Button variant="outline" size="sm" className="mt-4" onClick={onRetry}>
           {t.common.retry}

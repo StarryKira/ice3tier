@@ -10,6 +10,7 @@ import { Combobox } from '@/components/combobox'
 import { CopyText } from '@/components/copy'
 import { NodeLink } from '@/components/node'
 import { nodeName } from '@/lib/nodes'
+import { InfoTip } from '@/components/info-tip'
 import { Notice } from '@/components/notice'
 import { InfoRow } from '@/components/page'
 import { OnlineDot, RelativeTime } from '@/components/status'
@@ -28,15 +29,10 @@ import { ExitRow, ForwardTargetRow, RelayRow } from './Capabilities'
 
 const d = t.nodes.detail
 
-const ROUTING_LABEL: Record<RoutingMode, string> = {
-  direct_first: d.routingDirectFirst,
-  lowest_cost: d.routingLowestCost,
-}
-const REACH_LABEL: Record<Reach, string> = {
-  any: d.reachAny,
-  direct_only: d.reachDirectOnly,
-  relay_only: d.reachRelayOnly,
-}
+const routingLabel = (mode: RoutingMode): string =>
+  mode === 'direct_first' ? d.routingDirectFirst : d.routingLowestCost
+const reachLabel = (reach: Reach): string =>
+  reach === 'any' ? d.reachAny : reach === 'direct_only' ? d.reachDirectOnly : d.reachRelayOnly
 
 /** "跟随网络"在下拉里的值。 */
 const INHERIT = 'inherit'
@@ -60,14 +56,18 @@ function InfoCard({ network, node, onEditIp }: TabProps & { onEditIp: () => void
           <InfoRow label={d.name}>
             <CopyText value={node.name} mono={false} />
           </InfoRow>
-          <InfoRow label={d.hostname}>
+          <InfoRow
+            label={
+              <span className="inline-flex items-center gap-1">
+                {d.hostname}
+                <InfoTip>{d.hostnameHint}</InfoTip>
+              </span>
+            }
+          >
             {node.hostname === '' ? (
               <span className="text-muted-foreground">{d.hostnameNone}</span>
             ) : (
-              <>
-                <CopyText value={node.hostname} mono={false} />
-                <span className="mt-0.5 block text-[13px] text-muted-foreground">{d.hostnameHint}</span>
-              </>
+              <CopyText value={node.hostname} mono={false} />
             )}
           </InfoRow>
           <InfoRow label={d.fqdn}>
@@ -111,9 +111,9 @@ function InfoCard({ network, node, onEditIp }: TabProps & { onEditIp: () => void
                 {d.onlineNow}
               </span>
             ) : node.last_seen_at === null ? (
-              <span className="text-muted-foreground">
+              <span className="inline-flex items-center gap-1 text-muted-foreground">
                 {t.nodes.never}
-                <span className="mt-0.5 block text-[13px]">{t.nodes.neverTip}</span>
+                <InfoTip>{t.nodes.neverTip}</InfoTip>
               </span>
             ) : (
               <RelativeTime at={node.last_seen_at} />
@@ -134,7 +134,7 @@ function InfoCard({ network, node, onEditIp }: TabProps & { onEditIp: () => void
         </dl>
       </CardBody>
 
-      <CardHeader title={d.live} description={node.online ? undefined : d.liveOffline} className="mt-10" />
+      <CardHeader title={d.live} className="mt-10" />
       <CardBody>
         <dl>
           <InfoRow label={d.endpoints}>
@@ -224,19 +224,16 @@ function AdvancedCard({ network, node }: TabProps) {
     <Card>
       <details className="group">
         <summary className="flex list-none items-center justify-between gap-4 rounded-md [&::-webkit-details-marker]:hidden">
-          <span>
-            <span className="block text-base font-semibold">{d.advanced}</span>
-            <span className="mt-0.5 block text-[13px] text-muted-foreground">{d.advancedHint}</span>
-          </span>
+          <span className="text-base font-semibold">{d.advanced}</span>
           <ChevronDown className="size-4 shrink-0 text-faint transition-transform group-open:rotate-180" aria-hidden />
         </summary>
-        <div className="mt-5 space-y-6">
-          <div className="grid grid-cols-[minmax(0,1fr)_13rem] items-start gap-x-4 gap-y-1">
-            <div>
+        <div className="mt-5 space-y-5">
+          <div className="grid grid-cols-[minmax(0,1fr)_15rem] items-start gap-x-4 gap-y-1">
+            <div className="flex h-9 items-center gap-1.5">
               <label htmlFor={routingId} className="text-sm font-medium">
                 {d.routingLabel}
               </label>
-              <p className="text-[13px] text-muted-foreground">{d.routingHint}</p>
+              <InfoTip>{d.routingHint}</InfoTip>
             </div>
             <NativeSelect
               id={routingId}
@@ -246,18 +243,18 @@ function AdvancedCard({ network, node }: TabProps) {
                 save.mutate({ routing: event.target.value === INHERIT ? null : (event.target.value as RoutingMode) })
               }
             >
-              <option value={INHERIT}>{d.routingInherit(ROUTING_LABEL[network.routing])}</option>
+              <option value={INHERIT}>{d.routingInherit(routingLabel(network.routing))}</option>
               <option value="direct_first">{d.routingDirectFirst}</option>
               <option value="lowest_cost">{d.routingLowestCost}</option>
             </NativeSelect>
           </div>
 
-          <div className="grid grid-cols-[minmax(0,1fr)_13rem] items-start gap-x-4 gap-y-1">
-            <div>
+          <div className="grid grid-cols-[minmax(0,1fr)_15rem] items-start gap-x-4 gap-y-1">
+            <div className="flex h-9 items-center gap-1.5">
               <label htmlFor={reachId} className="text-sm font-medium">
                 {d.reachLabel}
               </label>
-              <p className="text-[13px] text-muted-foreground">{d.reachHint}</p>
+              <InfoTip>{d.reachHint}</InfoTip>
             </div>
             <NativeSelect
               id={reachId}
@@ -267,19 +264,19 @@ function AdvancedCard({ network, node }: TabProps) {
                 save.mutate({ reach: event.target.value === INHERIT ? null : (event.target.value as Reach) })
               }
             >
-              <option value={INHERIT}>{d.reachInherit(REACH_LABEL[network.reach])}</option>
+              <option value={INHERIT}>{d.reachInherit(reachLabel(network.reach))}</option>
               <option value="any">{d.reachAny}</option>
               <option value="direct_only">{d.reachDirectOnly}</option>
               <option value="relay_only">{d.reachRelayOnly}</option>
             </NativeSelect>
           </div>
 
-          <div className="flex items-start justify-between gap-4">
-            <div>
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex items-center gap-1.5">
               <label htmlFor={dialId} className="text-sm font-medium">
                 {d.dialOutOnly}
               </label>
-              <p className="text-[13px] text-muted-foreground">{d.dialOutOnlyHint}</p>
+              <InfoTip>{d.dialOutOnlyHint}</InfoTip>
             </div>
             <Switch
               id={dialId}
@@ -290,10 +287,12 @@ function AdvancedCard({ network, node }: TabProps) {
           </div>
 
           <div>
-            <p id={pinnedId} className="text-sm font-medium">
-              {d.pinnedLabel}
+            <p className="flex items-center gap-1.5">
+              <span id={pinnedId} className="text-sm font-medium">
+                {d.pinnedLabel}
+              </span>
+              <InfoTip>{d.pinnedHint(MAX_PINNED_RELAYS)}</InfoTip>
             </p>
-            <p className="text-[13px] text-muted-foreground">{d.pinnedHint(MAX_PINNED_RELAYS)}</p>
             <ul aria-labelledby={pinnedId} className="mt-2 flex flex-wrap items-center gap-1.5">
               {node.pinned_relays.map((id) => {
                 const relay = (nodes.data ?? []).find((other) => other.id === id)
@@ -349,8 +348,6 @@ interface OverviewTabProps extends TabProps {
 
 /** 概览：左边是只读的"它是什么"，右边是"我可以改什么"。两边不混在一起。 */
 export function OverviewTab({ network, node, onEditIp, onWaiting }: OverviewTabProps) {
-  const tagsLabelId = useId()
-  const tagsHintId = useId()
   // 三行各自报告是不是在等；有任何一行在等，页面就把轮询调勤。
   const waitingRows = useRef(new Set<string>())
   const report = useCallback(
@@ -370,25 +367,19 @@ export function OverviewTab({ network, node, onEditIp, onWaiting }: OverviewTabP
       <InfoCard network={network} node={node} onEditIp={onEditIp} />
       <div className="space-y-12">
         <Card>
-          <CardHeader
-            title={<span id={tagsLabelId}>{d.tags}</span>}
-            description={<span id={tagsHintId}>{t.nodes.tagsHint}</span>}
-          />
+          <CardHeader title={d.tags} />
           <CardBody>
-            <NodeTagsEditor network={network} node={node} aria-label={d.tags} aria-describedby={tagsHintId} />
+            <NodeTagsEditor network={network} node={node} aria-label={d.tags} />
           </CardBody>
         </Card>
 
         <Card>
-          <CardHeader title={d.capabilities} description={d.capabilitiesHint} />
+          <CardHeader title={d.capabilities} tip={d.withdrawnNote} />
           <div className="divide-y border-y">
             <RelayRow network={network} node={node} onWaiting={onRelay} />
             <ExitRow network={network} node={node} onWaiting={onExit} />
             <ForwardTargetRow network={network} node={node} onWaiting={onForward} />
           </div>
-          <p className="pt-3 text-[13px] text-muted-foreground">
-            {d.withdrawnNote(`${t.capability.relay.name} 和${t.capability.exit.name}`)}
-          </p>
         </Card>
 
         <AdvancedCard network={network} node={node} />

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 
-import { fieldError, formError, formFailure } from '@/api/formErrors'
+import { fieldError, formError, formErrorDetail, formFailure } from '@/api/formErrors'
 import { api } from '@/api/endpoints'
 import { useAction } from '@/api/queries'
 import { type Network, type Node } from '@/api/types'
@@ -45,6 +45,7 @@ export function RenameNodeDialog({ network, node, open, onClose }: NodeDialogPro
       submitLabel={t.nodes.renameSubmit}
       pending={rename.isPending}
       error={formError(failure)}
+      errorDetail={formErrorDetail(failure)}
       onSubmit={() => {
         setTouched(true)
         if (problem === null) rename.mutate(undefined, { onSuccess: onClose })
@@ -52,7 +53,7 @@ export function RenameNodeDialog({ network, node, open, onClose }: NodeDialogPro
     >
       <Field
         label={t.nodes.renameLabel}
-        hint={t.nodes.renameHint(network.domain)}
+        hint={t.nodes.renameHint}
         error={(touched ? problem : null) ?? fieldError(failure, 'name')}
       >
         {(props) => (

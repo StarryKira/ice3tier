@@ -11,6 +11,7 @@ import { Card, CardBody, CardHeader } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
+import { formatList } from '@/lib/format'
 
 import { type RuleDraft } from './RuleDialog'
 
@@ -23,8 +24,9 @@ function Verdict({ network, from, to }: { network: Network; from: Node; to: Node
       {check.isPending ? (
         <Skeleton className="mt-1 h-3.5 w-72" />
       ) : check.isError ? (
-        <p role="alert" className="text-sm text-danger">
-          {c.loadFailed}：{errorMessage(check.error)}
+        <p role="alert" className="flex flex-wrap gap-x-2 text-sm">
+          <span className="text-danger">{c.loadFailed}</span>
+          <span className="text-muted-foreground">{errorMessage(check.error)}</span>
         </p>
       ) : (
         <>
@@ -33,15 +35,13 @@ function Verdict({ network, from, to }: { network: Network; from: Node; to: Node
           ) : (
             <CircleX className="mt-0.5 size-4 shrink-0 text-danger" aria-hidden />
           )}
-          <p className="text-sm">
-            <span className="font-medium">
-              {from.name} → {to.name}：
-            </span>
+          <p className="flex flex-wrap items-baseline gap-x-2.5 text-sm">
+            <span className="font-medium">{c.direction(from.name, to.name)}</span>
             <span className={check.data.allowed ? 'font-medium' : 'font-medium text-danger'}>
               {check.data.allowed ? c.allowed : c.denied}
-            </span>{' '}
+            </span>
             <span className="text-muted-foreground">
-              {check.data.allowed ? c.byRules(check.data.rules.map(ruleLabel).join('、')) : c.noRule}
+              {check.data.allowed ? c.byRules(formatList(check.data.rules.map(ruleLabel))) : c.noRule}
             </span>
           </p>
         </>
@@ -77,13 +77,12 @@ export function AccessCheck({ network, nodes, from, to, onChange, onClose, onCre
     enabled: fromNode !== undefined && toNode !== undefined && !same,
   })
   const denied = forward.data?.allowed === false || backward.data?.allowed === false
-  const tagsOf = (node: Node) => (node.tags.length === 0 ? c.noTags : node.tags.join('、'))
+  const tagsOf = (node: Node) => (node.tags.length === 0 ? c.noTags : formatList(node.tags))
 
   return (
     <Card className="mb-10 border-b pb-8" data-testid="access-check">
       <CardHeader
         title={c.title}
-        description={c.lead}
         action={
           <Tooltip content={c.close}>
             <Button variant="ghost" size="icon-sm" onClick={onClose} aria-label={c.close}>
@@ -122,8 +121,9 @@ export function AccessCheck({ network, nodes, from, to, onChange, onClose, onCre
               </ul>
               {denied ? (
                 <div className="mt-2 flex flex-wrap items-center justify-between gap-3 border-t pt-3 text-[13px]">
-                  <p className="text-muted-foreground">
-                    {c.tagsOf(fromNode.name, tagsOf(fromNode))}；{c.tagsOf(toNode.name, tagsOf(toNode))}
+                  <p className="flex flex-wrap gap-x-4 text-muted-foreground">
+                    <span>{c.tagsOf(fromNode.name, tagsOf(fromNode))}</span>
+                    <span>{c.tagsOf(toNode.name, tagsOf(toNode))}</span>
                   </p>
                   <Button
                     size="sm"

@@ -3,7 +3,7 @@ import { ArrowRight, CircleCheck } from 'lucide-react'
 import { useId, useState } from 'react'
 import { Link } from 'react-router'
 
-import { fieldError, formError, formFailure } from '@/api/formErrors'
+import { fieldError, formError, formErrorDetail, formFailure } from '@/api/formErrors'
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
 import {
@@ -28,6 +28,7 @@ import { ClassSelect } from '@/components/usage'
 import { t } from '@/i18n'
 import { formatSocketAddr, isLoopbackHost, parseIpv4, parseSocketAddr } from '@/lib/cidr'
 import { WAITING_INTERVAL } from '@/lib/polling'
+import { formatList } from '@/lib/format'
 import { classLabel } from '@/lib/serviceClass'
 import { normalizeCidrList, splitList, validateCidrList, validatePort, validateTitle } from '@/lib/validate'
 import { networkPath } from '@/pages/networks/context'
@@ -180,6 +181,7 @@ export function ForwardDialog({ network, forward, scope: presetScope, open, onCl
       submitLabel={forward === null ? d.submitCreate : d.submitEdit}
       pending={save.isPending}
       error={formError(failure)}
+      errorDetail={formErrorDetail(failure)}
       onSubmit={submit}
     >
       <div className="grid grid-cols-[minmax(0,1fr)_2rem_minmax(0,1fr)] gap-x-4">
@@ -242,7 +244,7 @@ export function ForwardDialog({ network, forward, scope: presetScope, open, onCl
           <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-4">
             <Field
               label={d.port}
-              hint={scope === 'mesh' ? d.portMeshHint : d.portHint}
+              hint={scope === 'mesh' ? undefined : d.portHint}
               error={shown(problems.port) ?? fieldError(failure, 'port')}
             >
               {(props) => (
@@ -350,13 +352,14 @@ export function ForwardDialog({ network, forward, scope: presetScope, open, onCl
         {listen !== undefined && target !== undefined ? (
           listen.id === target.id ? (
             <Notice>
-              {d.checkSame}
-              {scope === 'mesh' && problems.port === null ? ` ${d.meshNote(bind)}` : ''}
+              {scope === 'mesh' && problems.port === null
+                ? t.common.sentences(d.checkSame, d.meshNote(bind))
+                : d.checkSame}
             </Notice>
           ) : check.data === undefined ? null : check.data.allowed ? (
             <p className="flex items-center gap-1.5 text-[13px] text-ok" data-testid="forward-check">
               <CircleCheck className="size-4" aria-hidden />
-              {d.checkAllowed(listen.name, target.name, check.data.rules.map(ruleLabel).join('、'))}
+              {d.checkAllowed(listen.name, target.name, formatList(check.data.rules.map(ruleLabel)))}
             </p>
           ) : (
             <Notice
@@ -370,26 +373,30 @@ export function ForwardDialog({ network, forward, scope: presetScope, open, onCl
                 </Link>
               }
             >
-              <span data-testid="forward-check">
-                {d.checkDenied(listen.name, target.name)} {d.checkDeniedNote}
-              </span>
+              <span data-testid="forward-check">{d.checkDenied(listen.name, target.name)}</span>
             </Notice>
           )
         ) : null}
       </div>
 
       <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-6">
-        <Field label={d.name} hint={d.nameHint} optional={t.common.optional} error={shown(problems.name)}>
+        <Field label={d.name} optional={t.common.optional} error={shown(problems.name)}>
           {(props) => (
-            <Input {...props} name="name" value={name} onChange={(event) => change(setName)(event.target.value)} />
+            <Input
+              {...props}
+              name="name"
+              placeholder="web"
+              value={name}
+              onChange={(event) => change(setName)(event.target.value)}
+            />
           )}
         </Field>
-        <label className="flex h-9 items-center gap-2.5 pb-6 text-sm">
+        <label className="flex h-9 items-center gap-2.5 text-sm">
           <Switch checked={enabled && targetDeclared} disabled={!targetDeclared} onCheckedChange={change(setEnabled)} />
-          {forward === null ? d.enabled : d.enabledEdit}
+          {d.enabled}
         </label>
       </div>
-      <Field label={d.classLabel} hint={d.classHint}>
+      <Field label={d.classLabel}>
         {(props) => (
           <ClassSelect
             {...props}
