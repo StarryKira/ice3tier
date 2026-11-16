@@ -22,6 +22,25 @@ pub fn local_addresses() -> Vec<IpAddr> {
     addresses
 }
 
+/// 本机一块启用着的网卡上的一个地址。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceAddr {
+    pub ip: IpAddr,
+    /// 网卡的编号。IPv6 的组播要靠它指明从哪块网卡收发；系统没有给时是 `None`。
+    pub index: Option<u32>,
+}
+
+/// 本机启用着的网卡上的全部地址，不做筛选（回环和链路本地的也在）。读不到网卡列表时返回空表。
+#[must_use]
+pub fn interface_addresses() -> Vec<InterfaceAddr> {
+    let Ok(interfaces) = if_addrs::get_if_addrs() else { return Vec::new() };
+    interfaces
+        .iter()
+        .filter(|interface| interface.is_oper_up())
+        .map(|interface| InterfaceAddr { ip: interface.ip(), index: interface.index })
+        .collect()
+}
+
 /// 一个地址能不能当候选端点。
 #[must_use]
 pub fn is_candidate(ip: IpAddr) -> bool {

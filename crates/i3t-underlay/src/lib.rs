@@ -6,12 +6,14 @@
 //! | [`ifaddr`] | 本机网卡地址，用来当局域网里的候选端点 |
 //! | [`addr_query`] | 向别人问"你看到我的地址是什么" |
 //! | [`tcp_leg`] | TCP 中转的一条 TCP：限制积压的写、按帧读。节点和 relay 两头共用 |
-//!
-//! 端口映射（UPnP、NAT-PMP、PCP）和局域网组播发现还没有做。
+//! | [`lan`] | 局域网发现：组播信标 |
+//! | [`portmap`] | 自动端口映射：PCP、NAT-PMP、UPnP-IGD |
 
 pub mod addr_query;
 pub mod ifaddr;
+pub mod lan;
 pub mod port;
+pub mod portmap;
 pub mod tcp_leg;
 
 pub use addr_query::{AddrQuery, Observation};

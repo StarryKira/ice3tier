@@ -7,7 +7,7 @@
 use std::fmt;
 use std::future;
 use std::io::{self, IoSliceMut};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll, ready};
@@ -85,7 +85,7 @@ pub struct RecvMeta {
 
 impl Default for RecvMeta {
     fn default() -> Self {
-        Self { addr: SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), 0), len: 0, stride: 0, ecn: None }
+        Self { addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0), len: 0, stride: 0, ecn: None }
     }
 }
 
@@ -106,6 +106,15 @@ pub enum Direction {
 /// 参数是方向、对方的地址和数据报的内容。一次批量收发里有多个数据报时只拿第一个来问，结果作用于整批。
 pub type PacketFilter = Arc<dyn Fn(Direction, SocketAddr, &[u8]) -> bool + Send + Sync>;
 
+/// IPv6 的 socket 兼收 IPv4 这件事做不到时怎么办。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DualStack {
+    /// 做不到就算绑定失败（调用方会退回只绑 IPv4）。
+    Required,
+    /// 做不到就只用 IPv6。
+    Preferred,
+}
+
 /// 绑定好的 UDP 端口。
 pub struct UdpPort {
     io: UdpSocket,
@@ -117,7 +126,11 @@ pub struct UdpPort {
 }
 
 impl UdpPort {
-    /// 绑定 `addr`。绑定在 IPv6 的未指定地址上时同时收发 IPv4。
+    /// 绑定 `addr`。
+    ///
+    /// 绑定在未指定地址上时尽量做成双栈：IPv6 的未指定地址（`[::]`）同时收发 IPv4；给的是 IPv4 的未指定地址
+    /// （`0.0.0.0`）时，平台允许就改绑 `[::]` 的同一个端口，这样节点的那一个端口上 IPv4 和 IPv6 的候选端点都有。
+    /// 平台不允许（没有 IPv6，或者 IPv6 的 socket 不能兼收 IPv4）时照原样只绑 IPv4。绑定在具体地址上时不变。
     ///
     /// 要在 tokio 运行时里调用。
     ///
@@ -125,11 +138,25 @@ impl UdpPort {
     ///
     /// 端口被占用、地址不属于本机等，原样返回操作系统的错误。
     pub fn bind(addr: SocketAddr) -> io::Result<Self> {
+        if addr.ip() == IpAddr::V4(Ipv4Addr::UNSPECIFIED) {
+            let dual = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), addr.port());
+            match Self::bind_socket(dual, DualStack::Required) {
+                Ok(port) => return Ok(port),
+                Err(error) => tracing::debug!(%error, "绑不成双栈的 UDP 端口，只用 IPv4"),
+            }
+        }
+        Self::bind_socket(addr, DualStack::Preferred)
+    }
+
+    fn bind_socket(addr: SocketAddr, dual_stack: DualStack) -> io::Result<Self> {
         let socket = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
         if addr.is_ipv6() {
-            // 有的系统默认只收 IPv6（Windows），有的不让改（OpenBSD）。改不了就只用 IPv6，不算错。
-            if let Err(error) = socket.set_only_v6(false) {
-                tracing::debug!(%error, "这个系统上 IPv6 的 socket 不能同时收发 IPv4");
+            // 有的系统默认只收 IPv6（Windows），有的不让改（OpenBSD）。
+            match (socket.set_only_v6(false), dual_stack) {
+                (Ok(()), _) => {}
+                (Err(error), DualStack::Required) => return Err(error),
+                // 调用方点名要的就是 IPv6 的地址：改不了就只用 IPv6，不算错。
+                (Err(error), DualStack::Preferred) => tracing::debug!(%error, "这个系统上 IPv6 的 socket 不能同时收发 IPv4"),
             }
         }
         socket.set_nonblocking(true)?;
@@ -409,6 +436,24 @@ mod tests {
         assert_eq!(received, [(v4.local_addr(), b"to dual".to_vec())]);
         dual.send_datagram(b"to v4", v4.local_addr());
         assert_eq!(receive(&v4, 1).await, [(dual_via_v4, b"to v4".to_vec())]);
+    }
+
+    #[tokio::test]
+    async fn binding_the_ipv4_wildcard_gives_a_dual_stack_port_where_the_platform_allows_it() {
+        let port = UdpPort::bind("0.0.0.0:0".parse().unwrap()).unwrap();
+        let v4 = bind();
+        let via_v4 = SocketAddr::new("127.0.0.1".parse().unwrap(), port.local_addr().port());
+        v4.send_datagram(b"over v4", via_v4);
+        assert_eq!(receive(&port, 1).await, [(v4.local_addr(), b"over v4".to_vec())], "不管是不是双栈，IPv4 都要通");
+        if !port.local_addr().is_ipv6() {
+            // 这台机器上绑不成双栈（没有 IPv6）：退回只绑 IPv4，上面那一条已经说明它能用。
+            return;
+        }
+        assert!(port.local_addr().ip().is_unspecified());
+        let Ok(v6) = UdpPort::bind("[::1]:0".parse().unwrap()) else { return };
+        v6.send_datagram(b"over v6", SocketAddr::new("::1".parse().unwrap(), port.local_addr().port()));
+        assert_eq!(receive(&port, 1).await, [(v6.local_addr(), b"over v6".to_vec())], "同一个端口上也收得到 IPv6");
+        assert!(port.local_candidates().iter().all(|candidate| candidate.port() == port.local_addr().port()));
     }
 
     #[tokio::test]

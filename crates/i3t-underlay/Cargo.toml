@@ -11,6 +11,8 @@ description = "ice3tier 的可达层：一个 UDP 端口的批量收发、本机
 bytes.workspace = true
 i3t-proto = { path = "../i3t-proto" }
 if-addrs.workspace = true
+igd-next = { version = "0.18.0", default-features = false, features = ["aio_tokio"] }
+netdev = { version = "0.47.0", default-features = false, features = ["gateway"] }
 quinn-udp = { version = "0.5.16", default-features = false, features = ["tracing"] }
 ring.workspace = true
 socket2.workspace = true
