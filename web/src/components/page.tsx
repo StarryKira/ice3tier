@@ -12,16 +12,19 @@ interface PageHeaderProps {
 }
 
 /**
- * 页面的标题区：20 像素半粗的标题，下面一句灰色的说明，右端最多一个主按钮加一两个次要按钮。
- * 和下面的内容之间留 32 像素。
+ * 页面的标题区：面板顶上的一条，下面一根线横贯整个面板。左边是 22 像素的标题，右端最多一个主按钮加一两个次要按钮。
+ * 和 [`Page`] 的左右留白配套（都是 32 像素），所以线能画到面板的两边。高度由留白撑出来，不写死。
  */
 export function PageHeader({ title, description, actions, className }: PageHeaderProps) {
   return (
-    <header className={cn('mb-8 flex items-start justify-between gap-6', className)}>
+    <header
+      data-page-header
+      className={cn('-mx-8 mb-7 flex shrink-0 items-center justify-between gap-6 border-b px-8 py-[18px]', className)}
+    >
       <div className="min-w-0">
-        <h1 className="flex items-center gap-2.5 text-xl leading-7 font-semibold tracking-tight">{title}</h1>
+        <h1 className="flex items-center gap-2.5 text-[22px] leading-8 font-medium tracking-tight">{title}</h1>
         {description !== undefined ? (
-          <p className="mt-1 max-w-2xl text-[13px] leading-relaxed text-muted-foreground">{description}</p>
+          <p className="mt-0.5 max-w-2xl text-[13px] leading-relaxed text-muted-foreground">{description}</p>
         ) : null}
       </div>
       {actions !== undefined ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
@@ -29,33 +32,43 @@ export function PageHeader({ title, description, actions, className }: PageHeade
   )
 }
 
-const WIDTHS = {
-  /** 以读和填为主的页面：设置、网络、说明页。 */
-  narrow: 'max-w-[880px]',
-  /** 列表和总览。 */
-  default: 'max-w-[1200px]',
-  /** 画图的页面：拓扑、访问关系图。 */
-  wide: 'max-w-[1480px]',
-} as const
-
-/** 页面的内容区：左右留白，限制最大宽度，宽屏上不会把一行字拉得太长。 */
+/**
+ * 页面的内容区：铺满面板，左右留 32 像素，不限制宽度；至少和面板一样高。
+ *
+ * `fill` 的页面是一个竖着排的弹性盒子：里面要占满剩下高度的那一块（画图的画布）写 `flex-1`，
+ * 而不是给它一个写死的高度。
+ */
 export function Page({
   children,
-  wide = false,
-  size,
+  fill = false,
   className,
 }: {
   children: ReactNode
-  /** 旧的写法，等于 `size="wide"`。 */
-  wide?: boolean
-  size?: keyof typeof WIDTHS
+  fill?: boolean
   className?: string
 }) {
   return (
+    // 没有标题区的页面（总览、节点详情）自己从面板顶上留出一段。
     <div
-      className={cn('mx-auto w-full px-8 pt-8 pb-16 xl:px-10', WIDTHS[size ?? (wide ? 'wide' : 'default')], className)}
+      className={cn(
+        'min-h-full w-full px-8 pb-8 [&>:not([data-page-header]):first-child]:mt-7',
+        fill && 'flex flex-col',
+        className,
+      )}
     >
       {children}
+    </div>
+  )
+}
+
+/**
+ * 画布：占满它所在的弹性盒子里剩下的地方，里面的东西铺满它。给关系图这类"自己没有高度、要别人给"的内容用。
+ * 只有一个下限，窗口再矮也画得下；没有写死的高度。
+ */
+export function Canvas({ children, className, ...rest }: React.ComponentProps<'div'>) {
+  return (
+    <div className={cn('relative min-h-96 flex-1 rounded-lg bg-sidebar', className)} {...rest}>
+      <div className="absolute inset-0">{children}</div>
     </div>
   )
 }

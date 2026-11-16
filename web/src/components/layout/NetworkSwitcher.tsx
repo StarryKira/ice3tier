@@ -26,6 +26,7 @@ interface NetworkSwitcherProps {
 
 /**
  * 侧栏顶部的网络切换器。只有一个网络时照样显示名字：让用户知道"网络"这个概念存在。
+ * 按钮上只写名字，地址段和节点数在展开的列表里。
  * 切换时停留在同一类页面上：在节点页切换，到的是另一个网络的节点页。
  */
 export function NetworkSwitcher({ networks, current, collapsed, onCreate }: NetworkSwitcherProps) {
@@ -37,24 +38,19 @@ export function NetworkSwitcher({ networks, current, collapsed, onCreate }: Netw
     <DropdownMenuTrigger
       aria-label={`${t.switcher.label}（${t.switcher.current}：${current.name}）`}
       className={cn(
-        'flex w-full items-center gap-2.5 rounded-md text-left transition-colors hover:bg-foreground/[0.05] data-[state=open]:bg-foreground/[0.05]',
-        collapsed ? 'size-10 justify-center' : 'px-2 py-1.5',
+        'flex w-full items-center gap-3 rounded-[10px] text-left transition-colors hover:bg-card/70 data-[state=open]:bg-card/70',
+        collapsed ? 'justify-center p-1' : 'px-2 py-1.5',
       )}
     >
       <span
         aria-hidden
-        className="flex size-7 shrink-0 items-center justify-center rounded-md bg-foreground text-xs font-semibold text-background uppercase"
+        className="flex size-8 shrink-0 items-center justify-center rounded-[10px] bg-foreground text-[13px] font-semibold text-background uppercase"
       >
         {current.name.slice(0, 1)}
       </span>
       {collapsed ? null : (
         <>
-          <span className="min-w-0 flex-1">
-            <span className="block truncate text-sm leading-5 font-semibold">{current.name}</span>
-            <span className="block truncate text-xs leading-4 text-muted-foreground tabular">
-              {current.cidr} · {t.switcher.nodes(current.nodes)}
-            </span>
-          </span>
+          <span className="min-w-0 flex-1 truncate text-[15px] leading-5 font-semibold">{current.name}</span>
           <ChevronsUpDown className="size-3.5 shrink-0 text-faint" aria-hidden />
         </>
       )}

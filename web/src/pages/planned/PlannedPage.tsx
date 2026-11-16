@@ -27,7 +27,7 @@ export function PlannedPage({ id }: { id: PlannedId }) {
   const entry = plannedEntry(id)
   useDocumentTitle(entry.title)
   return (
-    <Page size="narrow">
+    <Page>
       <PageHeader
         title={
           <>

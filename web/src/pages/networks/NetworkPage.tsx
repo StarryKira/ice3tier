@@ -271,7 +271,7 @@ export function NetworkPage() {
   const [expanding, setExpanding] = useState(false)
 
   return (
-    <Page size="narrow" className="@container">
+    <Page className="@container">
       <PageHeader
         title={n.title}
         actions={

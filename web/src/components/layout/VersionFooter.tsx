@@ -16,7 +16,7 @@ const v = t.version
 export function VersionFooter({ status }: { status: Status | undefined }) {
   const mismatch = status !== undefined && status.version !== WEB_VERSION
   return (
-    <div className="mt-3 space-y-0.5 px-2.5 text-xs text-muted-foreground tabular" data-testid="version-footer">
+    <div className="mt-3 space-y-0.5 px-3 text-xs text-faint tabular" data-testid="version-footer">
       {/* 平时只占一行：侧栏在矮一些的窗口里本来就挤。 */}
       <p>
         {status !== undefined ? <>{v.footerController(status.version)} · </> : null}

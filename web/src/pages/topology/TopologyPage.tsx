@@ -6,7 +6,7 @@ import { useSearchParams } from 'react-router'
 import { q } from '@/api/queries'
 import { type NodeId } from '@/api/types'
 import { Notice } from '@/components/notice'
-import { Page, PageHeader } from '@/components/page'
+import { Canvas, Page, PageHeader } from '@/components/page'
 import { PairPicker } from '@/components/pair-picker'
 import { EmptyState, ErrorState, SkeletonBlock } from '@/components/states'
 import { Button } from '@/components/ui/button'
@@ -127,7 +127,7 @@ export function TopologyPage() {
     ) : null
 
   return (
-    <Page wide className="@container">
+    <Page fill className="@container">
       <PageHeader
         title={g.title}
         actions={
@@ -195,20 +195,23 @@ export function TopologyPage() {
               }
             />
           ) : (
-            <div className="space-y-4">
+            <div className="flex flex-1 flex-col gap-4">
               {noRoutes ? <Notice title={g.noRoutesTitle}>{g.noRoutesBody}</Notice> : null}
               {view === 'graph' ? (
                 <div
-                  className={cn('grid grid-cols-1 gap-10', panel !== null && '@4xl:grid-cols-[minmax(0,1fr)_16rem]')}
+                  className={cn(
+                    'grid flex-1 grid-cols-1 gap-10',
+                    panel !== null && '@4xl:grid-cols-[minmax(0,1fr)_16rem]',
+                  )}
                 >
-                  <div className="space-y-3">
-                    <div className="h-[600px] rounded-lg bg-sidebar" data-testid="topology-graph">
+                  <div className="flex flex-col gap-3">
+                    <Canvas data-testid="topology-graph">
                       <TopologyGraph
                         shape={shape}
                         rtt={{ forward: shape.forward?.rtt_ms ?? null, reverse: shape.reverse?.rtt_ms ?? null }}
                         onPick={(id) => setPair(nextPick(pair, id))}
                       />
-                    </div>
+                    </Canvas>
                     <GraphLegend />
                   </div>
                   {panel}

@@ -29,9 +29,11 @@ const COLLAPSED_GROUPS_KEY = 'navCollapsedGroups'
 const isStringArray = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every((item) => typeof item === 'string')
 
-/** 侧栏里一行的样子：导航项、账号菜单、收起按钮共用，高 32 像素。 */
-const ROW = 'flex h-8 items-center gap-2.5 rounded-md text-sm transition-colors'
-const ROW_IDLE = 'text-foreground/80 hover:bg-foreground/[0.05] hover:text-foreground [&_svg]:text-muted-foreground'
+/** 侧栏里一行的样子：导航项、账号菜单、收起按钮共用。高度由上下留白撑出来（约 36 像素），圆角 10 像素。 */
+const ROW = 'flex items-center gap-3 rounded-[10px] py-2 text-sm leading-5 transition-colors'
+const ROW_IDLE = 'text-foreground/70 hover:bg-card/70 hover:text-foreground [&_svg]:text-muted-foreground'
+/** 当前那一项：一块白，从灰底上浮起来一点。 */
+const ROW_ACTIVE = 'bg-card font-medium text-foreground shadow-nav'
 
 interface ItemLinkProps {
   to: string
@@ -50,13 +52,9 @@ function ItemLink({ to, label, icon: Icon, planned = false, collapsed }: ItemLin
     <NavLink
       to={to}
       aria-label={collapsed ? (planned ? t.common.withPlanned(label) : label) : undefined}
-      className={cn(
-        ROW,
-        collapsed ? 'w-10 justify-center' : 'px-2.5',
-        active ? 'bg-foreground/[0.07] font-medium text-foreground' : ROW_IDLE,
-      )}
+      className={cn(ROW, collapsed ? 'justify-center px-[11px]' : 'px-3', active ? ROW_ACTIVE : ROW_IDLE)}
     >
-      <Icon className="size-4 shrink-0" aria-hidden />
+      <Icon className="size-[18px] shrink-0" aria-hidden />
       {collapsed ? null : (
         <>
           <span className="min-w-0 flex-1 truncate">{label}</span>
@@ -84,8 +82,8 @@ interface SidebarProps {
 }
 
 /**
- * 侧栏：浅灰底，没有边线，和白色的正文靠底色分开。图标和字都是灰的，当前页加深、铺一层更深的灰；
- * 侧栏里不用强调色。最底下是账号菜单、收起按钮和版本。
+ * 侧栏：没有自己的底色和边线，直接坐在整页的浅灰底上。图标和字都是灰的，当前页是一块浮起来的白；
+ * 侧栏里不用强调色。顶上是网络和收起按钮，最底下是账号菜单和版本。
  */
 export function Sidebar({ networks, current, collapsed, onToggle, onSignOut, onCreateNetwork }: SidebarProps) {
   const location = useLocation()
@@ -104,91 +102,101 @@ export function Sidebar({ networks, current, collapsed, onToggle, onSignOut, onC
 
   const toggleLabel = collapsed ? t.nav.expand : t.nav.collapse
 
+  const toggle = (
+    <Tooltip content={toggleLabel} side={collapsed ? 'right' : 'bottom'}>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-label={toggleLabel}
+        aria-pressed={collapsed}
+        className={cn(ROW, ROW_IDLE, 'shrink-0 justify-center', collapsed ? 'px-[11px]' : 'px-[9px]')}
+      >
+        <PanelLeft className="size-[18px]" aria-hidden />
+      </button>
+    </Tooltip>
+  )
+
   return (
-    // 外层撑满整页的高度（底色一直到底），里面那一层跟着视口走。
-    <aside className={cn('shrink-0 bg-sidebar transition-[width]', collapsed ? 'w-16' : 'w-60')}>
-      <div className="sticky top-0 flex h-screen flex-col">
-        <div className="px-3 pt-4 pb-4">
+    <aside className={cn('flex h-full shrink-0 flex-col transition-[width]', collapsed ? 'w-[4.5rem]' : 'w-60')}>
+      <div className={cn('flex gap-1 px-4 pt-5 pb-5', collapsed ? 'flex-col items-center' : 'items-center')}>
+        <div className={cn(collapsed ? undefined : 'min-w-0 flex-1')}>
           <NetworkSwitcher networks={networks} current={current} collapsed={collapsed} onCreate={onCreateNetwork} />
         </div>
+        {toggle}
+      </div>
 
-        <nav aria-label={t.nav.label} className="flex-1 overflow-y-auto px-3 pb-4">
-          {NAV_GROUPS.map((group) => {
-            // 当前页面所在的分区总是展开的，不管记住的折叠状态。
-            const containsCurrent = group.items.some((item) => item.page === page)
-            const open = group.label === undefined || collapsed || containsCurrent || !closedGroups.includes(group.id)
-            return (
-              <div key={group.id} className="mt-5 first:mt-0">
-                {group.label !== undefined && !collapsed ? (
-                  <button
-                    type="button"
-                    onClick={() => toggleGroup(group.id)}
-                    aria-expanded={open}
-                    aria-label={t.nav.toggleGroup(group.label, open)}
-                    disabled={containsCurrent}
-                    className="group/label mb-1 flex h-6 w-full items-center justify-between rounded-md px-2.5 text-xs text-muted-foreground hover:text-foreground disabled:cursor-default disabled:hover:text-muted-foreground"
-                  >
-                    {group.label}
-                    <ChevronDown
-                      className={cn(
-                        'size-3.5 opacity-0 transition group-hover/label:opacity-100 group-focus-visible/label:opacity-100',
-                        !open && '-rotate-90 opacity-100',
-                        containsCurrent && 'hidden',
-                      )}
-                      aria-hidden
-                    />
-                  </button>
-                ) : null}
-                {group.label !== undefined && collapsed ? <div aria-hidden className="mx-2 mb-3 border-t" /> : null}
-                {open ? (
-                  <ul className="space-y-px">
-                    {group.items.map((item) => (
-                      <li key={item.page}>
-                        <ItemLink
-                          to={networkPath(current.id, item.page)}
-                          label={item.label}
-                          icon={item.icon}
-                          planned={item.planned}
-                          collapsed={collapsed}
-                        />
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-              </div>
-            )
-          })}
-        </nav>
+      <nav aria-label={t.nav.label} className="flex-1 overflow-y-auto px-4 pb-4">
+        {NAV_GROUPS.map((group) => {
+          // 当前页面所在的分区总是展开的，不管记住的折叠状态。
+          const containsCurrent = group.items.some((item) => item.page === page)
+          const open = group.label === undefined || collapsed || containsCurrent || !closedGroups.includes(group.id)
+          return (
+            <div key={group.id} className="mt-6 first:mt-0">
+              {group.label !== undefined && !collapsed ? (
+                <button
+                  type="button"
+                  onClick={() => toggleGroup(group.id)}
+                  aria-expanded={open}
+                  aria-label={t.nav.toggleGroup(group.label, open)}
+                  disabled={containsCurrent}
+                  className="group/label mb-1.5 flex w-full items-center justify-between rounded-md px-3 py-1 text-xs text-faint hover:text-foreground disabled:cursor-default disabled:hover:text-faint"
+                >
+                  {group.label}
+                  <ChevronDown
+                    className={cn(
+                      'size-3.5 opacity-0 transition group-hover/label:opacity-100 group-focus-visible/label:opacity-100',
+                      !open && '-rotate-90 opacity-100',
+                      containsCurrent && 'hidden',
+                    )}
+                    aria-hidden
+                  />
+                </button>
+              ) : null}
+              {group.label !== undefined && collapsed ? (
+                <div aria-hidden className="mx-2 mb-3 border-t border-border-strong/60" />
+              ) : null}
+              {open ? (
+                <ul className="space-y-1">
+                  {group.items.map((item) => (
+                    <li key={item.page}>
+                      <ItemLink
+                        to={networkPath(current.id, item.page)}
+                        label={item.label}
+                        icon={item.icon}
+                        planned={item.planned}
+                        collapsed={collapsed}
+                      />
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          )
+        })}
+      </nav>
 
-        <div className="px-3 pt-4 pb-4">
-          <ul className="space-y-px">
-            {NAV_ADMIN.map((item) => (
-              <li key={item.page}>
-                <ItemLink
-                  to={networkPath(current.id, item.page)}
-                  label={item.label}
-                  icon={item.icon}
-                  collapsed={collapsed}
-                />
-              </li>
-            ))}
-            <li>
+      <div className="px-4 pt-3 pb-4">
+        <ul className="space-y-1">
+          {NAV_ADMIN.map((item) => (
+            <li key={item.page}>
               <ItemLink
-                to={NAV_SETTINGS.to}
-                label={NAV_SETTINGS.label}
-                icon={NAV_SETTINGS.icon}
+                to={networkPath(current.id, item.page)}
+                label={item.label}
+                icon={item.icon}
                 collapsed={collapsed}
               />
             </li>
-          </ul>
-
-          <div className={cn('mt-3 flex gap-1 border-t pt-3', collapsed && 'flex-col items-center')}>
+          ))}
+          <li>
+            <ItemLink to={NAV_SETTINGS.to} label={NAV_SETTINGS.label} icon={NAV_SETTINGS.icon} collapsed={collapsed} />
+          </li>
+          <li>
             <DropdownMenu>
               <DropdownMenuTrigger
                 aria-label={t.nav.accountMenu}
-                className={cn(ROW, ROW_IDLE, collapsed ? 'w-10 justify-center' : 'min-w-0 flex-1 px-2.5')}
+                className={cn(ROW, ROW_IDLE, collapsed ? 'justify-center px-[11px]' : 'w-full px-3')}
               >
-                <UserRound className="size-4 shrink-0" aria-hidden />
+                <UserRound className="size-[18px] shrink-0" aria-hidden />
                 {collapsed ? null : <span className="truncate">{t.nav.account}</span>}
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" side="top">
@@ -205,20 +213,9 @@ export function Sidebar({ networks, current, collapsed, onToggle, onSignOut, onC
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
-            <Tooltip content={toggleLabel} side={collapsed ? 'right' : 'top'}>
-              <button
-                type="button"
-                onClick={onToggle}
-                aria-label={toggleLabel}
-                aria-pressed={collapsed}
-                className={cn(ROW, ROW_IDLE, 'w-8 shrink-0 justify-center', collapsed && 'w-10')}
-              >
-                <PanelLeft className="size-4" aria-hidden />
-              </button>
-            </Tooltip>
-          </div>
-          {collapsed ? null : <VersionFooter status={status.data} />}
-        </div>
+          </li>
+        </ul>
+        {collapsed ? null : <VersionFooter status={status.data} />}
       </div>
     </aside>
   )

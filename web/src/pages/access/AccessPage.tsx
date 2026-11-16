@@ -9,7 +9,7 @@ import { type AccessGraph, type Network, type NodeId, type Rule } from '@/api/ty
 import { InfoTip } from '@/components/info-tip'
 import { NodeLink, NodeSelect } from '@/components/node'
 import { Notice } from '@/components/notice'
-import { Page, PageHeader } from '@/components/page'
+import { Canvas, Page, PageHeader } from '@/components/page'
 import { EmptyState, ErrorState, SkeletonBlock } from '@/components/states'
 import { Button } from '@/components/ui/button'
 import { Card, CardHeader } from '@/components/ui/card'
@@ -84,7 +84,7 @@ function NodeView({ network, graph, focus, onFocus }: NodeViewProps) {
           {g.nodePending}
         </Notice>
       ) : null}
-      <div className="h-[460px] rounded-lg bg-sidebar" data-testid="node-graph">
+      <Canvas data-testid="node-graph">
         {focus === null ? (
           <EmptyState icon={ScanSearch} title={g.nodePick} className="h-full justify-center" />
         ) : access.isError ? (
@@ -103,7 +103,7 @@ function NodeView({ network, graph, focus, onFocus }: NodeViewProps) {
             }}
           />
         )}
-      </div>
+      </Canvas>
       {/* 图的文字版：两侧各是谁。 */}
       {focus !== null && access.data !== undefined ? (
         <dl className="grid grid-cols-2 gap-x-6 pt-4 text-[13px]">
@@ -172,7 +172,7 @@ export function AccessPage() {
   const enabledCount = data?.rules.filter((rule) => rule.enabled).length ?? 0
 
   return (
-    <Page wide className="@container">
+    <Page fill className="@container">
       <PageHeader
         title={t.access.title}
         actions={
@@ -217,9 +217,9 @@ export function AccessPage() {
               { value: 'rules', label: t.access.tabRules },
               { value: 'graph', label: t.access.tabGraph },
             ]}
-            className="mb-6 @4xl:hidden"
+            className="mb-6 self-start @4xl:hidden"
           />
-          <div className="grid grid-cols-1 items-start gap-x-12 gap-y-10 @4xl:grid-cols-[minmax(0,26rem)_minmax(0,1fr)]">
+          <div className="grid flex-1 grid-cols-1 gap-x-12 gap-y-10 @4xl:grid-cols-[minmax(0,26rem)_minmax(0,1fr)]">
             <div className={cn('space-y-12', panel === 'graph' && 'hidden @4xl:block')}>
               <Card>
                 <CardHeader
@@ -261,7 +261,7 @@ export function AccessPage() {
               </Card>
             </div>
 
-            <Card className={cn(panel === 'rules' && 'hidden @4xl:block')}>
+            <Card className={cn('flex flex-col', panel === 'rules' && 'hidden @4xl:flex')}>
               <CardHeader
                 title={g.title}
                 action={
@@ -285,7 +285,7 @@ export function AccessPage() {
 
               {view === 'tags' ? (
                 <>
-                  <div className="h-[520px] rounded-lg bg-sidebar" data-testid="tag-graph">
+                  <Canvas data-testid="tag-graph">
                     <TagGraphView
                       graph={data}
                       highlightedRule={hovered ?? selected}
@@ -301,7 +301,7 @@ export function AccessPage() {
                         setPanel('rules')
                       }}
                     />
-                  </div>
+                  </Canvas>
                   <div className="flex items-center gap-2 pt-3">
                     <Legend />
                     <InfoTip>{g.tagHint}</InfoTip>

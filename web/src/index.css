@@ -14,15 +14,18 @@
  *     warn   琥珀 能用，但有一件事值得知道
  *     danger 红  不能用
  * 颜色从不单独承担含义，旁边总有文字或形状。
+ *
+ * 外壳：整页是一层浅灰的底（canvas），侧栏直接坐在它上面；正文是底上面一块白色的大圆角面板。
  */
 :root {
+  --canvas: #f1f2f4;
   --background: #ffffff;
   --foreground: #18181b;
   --card: #ffffff;
   --card-foreground: #18181b;
   --popover: #ffffff;
   --popover-foreground: #18181b;
-  --sidebar: #f7f7f8;
+  --sidebar: var(--canvas);
 
   --primary: #2a5bd7;
   --primary-hover: #2149b8;
@@ -72,6 +75,7 @@
     ui-monospace, 'SF Mono', SFMono-Regular, 'Cascadia Mono', 'JetBrains Mono', Menlo, Consolas, 'Liberation Mono',
     monospace;
 
+  --color-canvas: var(--canvas);
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -120,9 +124,14 @@
   --radius-lg: calc(var(--radius) + 2px);
   --radius-xl: calc(var(--radius) + 6px);
 
-  /* 阴影只给浮在页面上面的东西（菜单、弹出层、对话框、通知）。页面里的东西不投影。 */
+  /*
+   * 阴影：浮在页面上面的东西（菜单、弹出层、对话框、通知）用 pop。
+   * 外壳上有两处极淡的：正文的面板（panel）和侧栏里当前那一项（nav），只是让白色从灰底上浮起来一点。
+   */
   --shadow-pop: 0 12px 32px -8px rgb(24 24 27 / 0.16), 0 0 0 1px rgb(24 24 27 / 0.06);
   --shadow-card: 0 1px 2px rgb(24 24 27 / 0.08);
+  --shadow-panel: 0 1px 2px rgb(24 24 27 / 0.04), 0 12px 32px -16px rgb(24 24 27 / 0.1);
+  --shadow-nav: 0 1px 2px rgb(24 24 27 / 0.06), 0 0 0 1px rgb(24 24 27 / 0.03);
 
   --animate-rise: rise 160ms ease-out;
   --animate-fade: fade 140ms ease-out;
