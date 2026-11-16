@@ -130,7 +130,7 @@ const HELP: Help = Help {
     pair_lane: "独占 TCP",
     pair_unset: "节点对恢复默认",
     access_group: "访问关系",
-    access_graph: "标签和规则",
+    access_graph: "分组和规则",
     access_check: "检查 FROM 能否访问 TO",
     update_group: "节点更新",
     update_show: "更新设置和状态",

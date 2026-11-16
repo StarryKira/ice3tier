@@ -186,7 +186,7 @@ fn virtual_ips_are_the_lowest_free_and_stay_with_the_node() {
     assert_eq!(address(&lab, second), ip("10.66.0.2"));
     assert_eq!(address(&lab, third), ip("10.66.0.3"));
 
-    // 重新连上来、改名、打标签都不换地址。
+    // 重新连上来、改名、改分组都不换地址。
     lab.controller.disconnect(first.session);
     let again = lab.connect(first.key, Declared::default()).unwrap();
     assert_eq!(again.id, first.id);

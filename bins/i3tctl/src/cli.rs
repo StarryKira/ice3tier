@@ -998,13 +998,26 @@ mod tests {
         }
         for (path, help) in all_help(command(Lang::English), Lang::English) {
             assert!(!has_chinese(&help), "{path} 的英文帮助里有中文：\n{help}");
+            assert!(!help.to_lowercase().contains("tag"), "{path}：分组不叫 tag 了\n{help}");
         }
         for (path, help) in all_help(command(Lang::ZhCn), Lang::ZhCn) {
             for english in CLAP_ENGLISH {
                 assert!(!help.contains(english), "{path} 的中文帮助里有 {english}：\n{help}");
             }
             assert!(has_chinese(&help), "{path}：\n{help}");
+            assert!(!help.contains("标签"), "{path}：分组不叫标签了\n{help}");
         }
+    }
+
+    #[test]
+    fn positional_arguments_are_listed_in_the_order_they_are_typed() {
+        // 按字母序的话"目的"（DST）会排在"源"（SRC）前面。
+        let help = all_help(command(Lang::English), Lang::English)
+            .into_iter()
+            .find_map(|(path, help)| (path == "i3tctl rule add").then_some(help))
+            .expect("rule add has help");
+        let (src, dst) = (help.find("  <SRC-GROUP>").expect("source listed"), help.find("  <DST-GROUP>").expect("destination listed"));
+        assert!(src < dst, "{help}");
     }
 
     #[test]

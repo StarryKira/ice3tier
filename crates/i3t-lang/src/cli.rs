@@ -145,11 +145,21 @@ pub fn localize(command: Command, lang: Lang) -> Command {
 
 fn localize_at(command: Command, lang: Lang, path: &str) -> Command {
     let texts = lang.clap();
+    let mut position = 0;
     let mut command = command
         .disable_help_flag(true)
         .disable_help_subcommand(true)
         .arg(Arg::new(HELP).short('h').long("help").action(ArgAction::Help).help(texts.help))
-        .mut_args(|arg| localize_arg(arg, texts))
+        .mut_args(|arg| {
+            let arg = localize_arg(arg, texts);
+            // 位置参数在帮助里按它们在命令行上的顺序列：clap 默认按名字的字母序排它们，`<源> <目的>` 会列成先目的后源。
+            if arg.is_positional() {
+                position += 1;
+                arg.display_order(position)
+            } else {
+                arg
+            }
+        })
         .subcommand_help_heading(texts.commands)
         .subcommand_value_name(texts.command)
         .help_template(format!("{{before-help}}{{about-with-newline}}\n{} {{usage}}\n\n{{all-args}}{{after-help}}", texts.usage));

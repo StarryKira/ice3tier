@@ -130,7 +130,7 @@ const HELP: Help = Help {
     pair_lane: "TCP lanes",
     pair_unset: "Reset a node pair to defaults",
     access_group: "Access",
-    access_graph: "Tags and rules",
+    access_graph: "Groups and rules",
     access_check: "Check whether FROM can reach TO",
     update_group: "Node updates",
     update_show: "Update settings and status",
