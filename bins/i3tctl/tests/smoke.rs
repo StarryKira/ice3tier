@@ -15,7 +15,7 @@ use i3t_model::control::{Declared, EnrollToken, Hello, PROTOCOL_REVISION, Report
 use i3t_model::update::{Artifact, FailureKind, LATEST_DIR, MANIFEST_FILE, Manifest, SIGNATURE_FILE, Sha256, UpdateStatus};
 use i3t_proto::PublicKey;
 use i3t_update::{TrustedKeys, sign_manifest};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
@@ -232,7 +232,18 @@ async fn the_command_line_drives_a_running_controller() {
     assert_eq!(fixture.json(&["forward", "enable", &forward_id]).await["enabled"], true);
     assert!(fixture.ok(&["forward", "list"]).await.contains("#2 192.168.1.10:80"));
     fixture.ok(&["pair", "set", "nas-01", "laptop", "--keep-alive", "on"]).await;
-    assert_eq!(fixture.json(&["pair", "list"]).await, serde_json::json!([{ "a": 1, "b": 2, "keep_alive": true }]));
+    let pairs = fixture.json(&["pair", "list"]).await;
+    assert_eq!(
+        (&pairs[0]["a"], &pairs[0]["b"], &pairs[0]["keep_alive"], &pairs[0]["lane"]),
+        (&json!(1), &json!(2), &json!(true), &json!("off"))
+    );
+    // 只改独占 TCP，常驻不变；设置起不起作用要说出来。
+    let pair = fixture.json(&["pair", "set", "nas-01", "laptop", "--lane", "udp_fallback"]).await;
+    assert_eq!((&pair["keep_alive"], &pair["lane"]), (&json!(true), &json!("udp_fallback")));
+    assert!(pair["lane_effect"]["effective"].is_boolean(), "{pair}");
+    assert!(fixture.ok(&["pair", "list"]).await.contains("udp_fallback"));
+    assert!(fixture.fails(&["pair", "set", "nas-01", "laptop", "--lane", "sometimes"]).await.contains("udp_fallback"));
+    assert!(fixture.fails(&["pair", "set", "nas-01", "laptop"]).await.contains("--lane"), "至少要改一项");
 
     // 地址、令牌和网络也可以从环境变量来。
     let mut from_env = fixture.command();
@@ -242,7 +253,7 @@ async fn the_command_line_drives_a_running_controller() {
     assert!(fixture.fails(&["--network", "nowhere", "node", "list"]).await.contains("nowhere"));
 
     // 删除。--json 时没有应答体的操作什么都不输出。
-    fixture.ok(&["pair", "delete", "laptop", "nas-01"]).await;
+    fixture.ok(&["pair", "unset", "laptop", "nas-01"]).await;
     fixture.ok(&["forward", "delete", &forward_id]).await;
     assert_eq!(fixture.ok(&["--json", "credential", "delete", &credential["id"].to_string()]).await, "");
     assert!(fixture.ok(&["node", "delete", "laptop"]).await.contains("冷却期"));

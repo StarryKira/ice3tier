@@ -3,7 +3,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use i3t_model::netmap::{IpFamily, Reach, RoutingMode};
+use i3t_model::netmap::{IpFamily, LaneMode, Reach, RoutingMode};
 use i3t_proto::flow::Class;
 use ipnet::{IpNet, Ipv4Net};
 
@@ -414,16 +414,21 @@ pub enum ForwardCommand {
 pub enum PairCommand {
     /// 列出节点对设置
     List,
-    /// 设置一对节点
+    /// 设置一对节点（只改写了的项）
+    #[command(group(clap::ArgGroup::new("setting").required(true).multiple(true).args(["keep_alive", "lane"])))]
     Set {
         a: String,
         b: String,
         /// 这一对节点之间的连接常驻，不因为没有流而关闭
         #[arg(long, value_name = "on|off")]
-        keep_alive: OnOff,
+        keep_alive: Option<OnOff>,
+        /// 承载 TCP 连接的流用不用独占 TCP：off、udp_fallback（共用的连接没有 UDP 的路时用）、always
+        #[arg(long, value_name = "off|udp_fallback|always")]
+        lane: Option<LaneMode>,
     },
-    /// 去掉一对节点的设置
-    Delete { a: String, b: String },
+    /// 去掉一对节点的设置，回到默认
+    #[command(alias = "delete")]
+    Unset { a: String, b: String },
 }
 
 #[derive(Subcommand)]

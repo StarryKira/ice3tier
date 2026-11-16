@@ -4,7 +4,16 @@
 
 对应的 Rust 类型在 `crates/i3t-model/src/admin.rs`，实现在 `crates/i3t-controller/src/admin.rs`。文档和代码不一致时以代码为准，并请修正文档。
 
-> **最新一次新增**（路径诊断、骨干矩阵、连接上的防护）。正文里新加的地方也标着「新增」，和前两次的一样；这一次的清单：
+> **最新一次新增**（独占 TCP）。正文里新加的地方也标着「新增」，和前几次的一样；这一次的清单：
+>
+> - 节点对设置多了 `lane`：这一对节点之间承载 TCP 连接的流用不用独占 TCP，`"off"`（默认）、`"udp_fallback"`、`"always"`（第 12 节）。
+> - `GET /networks/{network}/pairs` 和 `PUT …/pairs/{a}/{b}` 的应答从 `PairSetting` 变成 `PairView`：原来的字段还在同一层，多了 `lane`、`lane_effect`（设置起不起作用、为什么、谁拨谁）和 `lanes`（两个节点各自报的状况）。新的结构 `PairView`、`LaneEffect`、`LaneBlock`、`PairLaneSide`、`PeerLanes`、`LaneCounts`、`LaneReport`、`LaneHandshakeFailures`（第 12 节）。
+> - 节点详情 `NodeDetail` 多了 `lanes`（第 5 节）。
+> - 行为上的变化：`PUT …/pairs/{a}/{b}` 的请求体里每一项都可以省略，没写的项保持原样（这一对还没有设置时取默认值）；以前只有 `keep_alive` 一项、必须写。
+>
+> 已有接口的路径和应答里原有的字段都没有变。
+>
+> **上一次新增**（路径诊断、骨干矩阵、连接上的防护）。这一次的清单：
 >
 > - 新接口：`GET /networks/{network}/backbone`（relay 之间的延迟矩阵，第 15 节）。
 > - 新的字段：`NodeRoute.direct`、`relay_leg`（第 5 节）；`MatrixEntry.direct`、`relay_leg`，`PathLeg.direct`、`relay_leg`、`mode`、`reason`、`candidates`（第 15 节）。新的结构 `PathCandidate`、`PathSegment`、`BackboneView`、`BackboneRelay`、`BackboneLink`（第 15 节）。新加的字段在应答里总是有，不知道的时候是 `null`。
@@ -16,7 +25,7 @@
 >
 > 已有接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **上一次新增**（限额、用量和状态）。这一次的清单：
+> **再上一次新增**（限额、用量和状态）。这一次的清单：
 >
 > - 新接口：`PATCH /networks/{network}/credentials/{id}`（改上限、清零用量，第 9 节）；`GET /networks/{network}/exits`、`GET /networks/{network}/exits/{node}`（出口的设置、用量、健康，第 17 节）；`GET /networks/{network}/nodes/{node}/listeners`（节点上全部监听的状态，含节点自己开的回环入口，第 5 节）；`POST /networks/{network}/tags/rename`（标签改名，第 18 节）。
 > - 已有接口新的查询参数：`GET /log` 的 `before`、`network`、`action`、`ref`（翻页和过滤，第 3 节）；`GET /networks/{network}/tokens` 的 `all`（连用掉的和过期的也列出，第 6 节）。
@@ -33,7 +42,7 @@
 >
 > 已有接口的路径、请求体和应答里原有的字段都没有变；凭据的 `DELETE` 改成先吊销，见上。
 >
-> **再上一次新增**（节点更新、路由视图、指标、内嵌的 WebUI）。清单：
+> **更早一次新增**（节点更新、路由视图、指标、内嵌的 WebUI）。清单：
 > - 新接口：`GET /update`、`PATCH /update`、`POST /update/check`、`POST /update/resume`、`POST /update/force`（第 14 节）；`GET`、`POST /networks/{network}/nodes/{node}/update`（第 14 节）；`GET /networks/{network}/routes`、`GET /networks/{network}/path`（第 15 节）；`GET /metrics`（不在 `/api/v1` 下面，第 16 节）。
 > - `Node` 多了两个字段：`hostname`、`update`（第 5 节）。节点详情 `NodeDetail` 随之也有。
 > - `Status` 多了一个字段：`newer_version`（第 3 节）。
@@ -493,8 +502,9 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `mapping_varies` | 映射出来的端口是不是随对端变化。`true` 时这台机器所在的网络基本打不了洞，界面应当提示。不在线或者还不知道时是 `null` |
 | `flows` | 正在进行的流的数量 |
 | `tx_bytes`、`rx_bytes` | 节点启动以来发出和收到的字节数 |
+| `lanes` | 「新增」独占 TCP 的状况，结构是 `LaneReport`（第 12 节）。节点不在线、版本太旧没有报、或者还没有上报过时是 `null` |
 
-`mapping_varies`、`flows`、`tx_bytes`、`rx_bytes` 是节点这次连接期间最近一次上报的值；节点不在线时是 `null` 和 0。
+`mapping_varies`、`flows`、`tx_bytes`、`rx_bytes`、`lanes` 是节点这次连接期间最近一次上报的值；节点不在线时是 `null` 和 0。
 
 ### PATCH /networks/{network}/nodes/{node}
 
@@ -1169,29 +1179,122 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 `PairSetting`：
 
 ```json
-{ "a": 1, "b": 2, "keep_alive": true }
+{ "a": 1, "b": 2, "keep_alive": true, "lane": "always" }
 ```
 
-`a` 和 `b` 是两个节点的编号，`a` 小于 `b`。`keep_alive` 为 `true` 时这一对节点之间的连接常驻，不因为没有流而关闭。
+| 字段 | 含义 |
+|---|---|
+| `a`、`b` | 两个节点的编号，`a` 小于 `b` |
+| `keep_alive` | 为 `true` 时这一对节点之间的连接常驻，不因为没有流而关闭 |
+| `lane` | 「新增」这一对节点之间承载 TCP 连接的流（代理的 CONNECT、TCP 端口转发）用不用独占 TCP：每条用户连接在两个节点之间独占一条 TCP，而不是共用连接里的一条流。`"off"`（默认）：不用。`"udp_fallback"`：开流的一方到对方的共用连接上没有 UDP 的路（UDP 不通、只能经 relay 的 TCP 中转）时，新的 TCP 流走独占 TCP。`"always"`：新的 TCP 流都走独占 TCP。取不到独占 TCP 时（池空了、对方在排空、拨不通）流悄悄改走共用的连接，只在计数里记一笔；已经在跑的流不会换传输，改设置也不影响它们 |
+
+独占 TCP 要两个节点里至少有一个启用了 relay、有已知的 TCP 地址：另一个节点拨它的节点端口（relay 在同一个端口号上听 TCP）。两个都能被拨时，各自用自己拨的连接往对方开流。UDP 应用的数据、数据报和别的流始终走共用的连接，这一对节点之间的共用连接和它的路照常保持（路由视图里显示的是它的路）。
+
+### PairView「新增」
+
+节点对的接口应答的是 `PairView`：`PairSetting` 的字段在同一层，加上：
+
+```json
+{
+  "a": 1, "b": 2, "keep_alive": false, "lane": "always",
+  "lane_effect": {
+    "effective": true,
+    "blocked": [],
+    "dialers": [2],
+    "summary": "由 #2 拨对方的 TCP 端口；新的 TCP 流（代理的 CONNECT、TCP 端口转发）每条独占一条 TCP，……"
+  },
+  "lanes": [
+    {
+      "node": 1,
+      "lanes": {
+        "peer": 2, "dials": false, "control": true, "idle": 6, "ready": 0, "parked_at_peer": 0,
+        "in_use": 212, "dialling": 0, "claims": 18420, "claims_waited": 31, "claim_wait_ms": 412, "claims_failed": 0,
+        "fallbacks": 0, "dial_failures": 0, "refused": 3,
+        "sealed_bytes": 10485760, "passthrough_bytes": 0, "spliced_bytes": 734003200
+      }
+    }
+  ]
+}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `lane_effect` | `lane` 不是 `"off"` 时有：设置起不起作用。`lane` 是 `"off"` 时是 `null` |
+| `lane_effect.effective` | 起作用：至少一边能被拨，两个节点都懂独占 TCP，访问规则连通了它们 |
+| `lane_effect.blocked` | 不起作用的原因，`LaneBlock` 的数组，起作用时是 `[]`。不起作用时这一对的流都走共用的连接 |
+| `lane_effect.dialers` | 拨号的节点：对方启用了 relay、有 TCP 地址的那一个（或者两个） |
+| `lane_effect.summary` | 给人看的一句说明，界面可以直接显示 |
+| `lanes` | 两个节点各自报上来的、和对方之间的独占 TCP，`PairLaneSide` 的数组。不在线、版本太旧、或者没有为对方打开的节点不在里面。设置刚改成 `off` 时，还有流在跑的一边仍然会报 |
+
+`LaneBlock` 用 `reason` 区分：
+
+| `reason` | 其他字段 | 含义 |
+|---|---|---|
+| `no_relay` | | 两个节点都没有启用 relay，没有哪一边的 TCP 端口在听 |
+| `no_tcp_address` | `node` | 这个节点启用了 relay，但没有填 TCP 地址 |
+| `node_too_old` | `node` | 这个节点在线，但版本太旧，不懂独占 TCP（节点协议第 3 版起才懂）。离线的节点不判断 |
+| `not_connected` | | 访问规则没有连通这两个节点 |
+
+`PairLaneSide` 是 `{ "node": 报的节点, "lanes": PeerLanes }`。`PeerLanes` 是一个节点上和一个对端之间的独占 TCP：
+
+| 字段 | 含义 |
+|---|---|
+| `peer` | 对端 |
+| `dials` | 这个节点拨不拨对端 |
+| `control` | 和对端之间的控制连接在不在。不在时新的 TCP 流走共用的连接 |
+| `idle` | 对端拨来、停在这个节点等它开流时取用的空闲连接 |
+| `ready` | 这个节点拨好、留给自己开流的空闲连接 |
+| `parked_at_peer` | 这个节点拨出去、停在对端那里的空闲连接 |
+| 其余 | `LaneCounts` 的字段，平铺在同一层 |
+
+`LaneCounts`（从节点启动算起的累计，`in_use`、`dialling` 是现在的值）：
+
+| 字段 | 含义 |
+|---|---|
+| `in_use` | 正在承载流的连接 |
+| `dialling` | 正在拨号（连接或握手）的连接 |
+| `claims` | 从对端停在这里的连接里取用的次数 |
+| `claims_waited`、`claim_wait_ms` | 其中池是空的、要等对端补拨的次数，和一共等了多少毫秒 |
+| `claims_failed` | 取不到的次数（等满了、控制连接不在、对端在排空） |
+| `fallbacks` | 本来要走独占 TCP、因为取不到改走了共用连接的流 |
+| `dial_failures` | 这个节点拨号失败的次数 |
+| `refused` | 握手成功、但因为用途或数量不对被关掉的连接（旧的、超过上限的、没有为对方打开的） |
+| `sealed_bytes` | 在独占 TCP 的 TLS 里搬运的流数据字节数（两个方向合计） |
+| `passthrough_bytes` | 本来就是 TLS 的用户数据不再加密、在程序里搬运的字节数 |
+| `spliced_bytes` | 本来就是 TLS 的用户数据由内核直接搬运（Linux 上是 splice）的字节数 |
+
+`LaneReport`（节点详情里的 `lanes`）是一个节点上的全部：
+
+```json
+{
+  "total": { "in_use": 212, "dialling": 0, "claims": 18420, "...": "LaneCounts 的其余字段" },
+  "handshake_failures": { "deadline": 0, "unknown_key": 2, "tls": 0, "protocol": 1, "busy": 0 },
+  "peers": [ { "peer": 2, "dials": false, "control": true, "...": "PeerLanes 的其余字段" } ]
+}
+```
+
+`total` 是全节点的 `LaneCounts`（对端去掉之后也不减）；`handshake_failures` 是别人拨进来、没有握手成功的连接，按原因分：`deadline` 没有在时限之内完成，`unknown_key` 公钥不认识或者已经吊销，`tls` 别的 TLS 错误，`protocol` 握手之后的第一个帧不对，`busy` 还没握手完的连接太多被挤掉的；`peers` 是每个打开了独占 TCP 的对端。
 
 ### GET /networks/{network}/pairs
 
-有设置的节点对。应答是 `PairSetting` 的数组。没有列出的节点对用默认值（`keep_alive` 为 `false`）。
+有设置的节点对。应答是 `PairView` 的数组。没有列出的节点对用默认值（`keep_alive` 为 `false`，`lane` 为 `"off"`）。
 
 ### PUT /networks/{network}/pairs/{a}/{b}
 
-写下一对节点的设置，已经有就覆盖。路径里两个节点的先后顺序无所谓。
+写下一对节点的设置。路径里两个节点的先后顺序无所谓。「新增」每一项都可以省略：没写的项保持原样，这一对还没有设置时取默认值。
 
 ```json
-{ "keep_alive": true }
+{ "keep_alive": true, "lane": "udp_fallback" }
 ```
 
-应答：`PairSetting`。
-错误：`invalid_request`（两个编号相同）、`not_found`。
+应答：`PairView`。
+错误：`invalid_request`（两个编号相同，或者 `lane` 不是那三个值之一）、`not_found`。
+
+改了 `lane` 之后，两个节点各自的配置里马上是同一个值；还在跑的流不受影响。
 
 ### DELETE /networks/{network}/pairs/{a}/{b}
 
-去掉一对节点的设置，回到默认。应答：`204`。这一对本来没有设置时是 `404 not_found`。
+去掉一对节点的设置，回到默认。应答：`204`。这一对本来没有设置时是 `404 not_found`。节点被删除时，它所在的节点对设置随之删掉。
 
 ## 13. 接口一览
 

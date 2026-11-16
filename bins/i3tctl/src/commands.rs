@@ -475,12 +475,12 @@ impl Session {
         let pairs = format!("/networks/{network}/pairs");
         match command {
             PairCommand::List => self.show_list(self.get(&pairs).await?, render::pairs),
-            PairCommand::Set { a, b, keep_alive } => {
+            PairCommand::Set { a, b, keep_alive, lane } => {
                 let (a, b) = (self.node(network, &a).await?.id, self.node(network, &b).await?.id);
-                let input = PairInput { keep_alive: keep_alive.0 };
+                let input = PairInput { keep_alive: keep_alive.map(|on| on.0), lane };
                 self.show(self.send(Method::PUT, &format!("{pairs}/{a}/{b}"), &input).await?, render::pair)
             }
-            PairCommand::Delete { a, b } => {
+            PairCommand::Unset { a, b } => {
                 let (a, b) = (self.node(network, &a).await?.id, self.node(network, &b).await?.id);
                 self.delete(&format!("{pairs}/{a}/{b}")).await?;
                 self.done(&format!("已去掉节点 #{a} 和 #{b} 的节点对设置"));

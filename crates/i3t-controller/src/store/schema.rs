@@ -6,7 +6,7 @@
 //! 列的写法：枚举和结构体按它们的 JSON 形式存在 TEXT 列里，地址存文本，公钥和哈希存 BLOB，虚拟 IP 存成整数，
 //! 时间是 Unix 秒。
 
-pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
 
 const V1: &str = "
 CREATE TABLE meta (
@@ -183,4 +183,9 @@ ALTER TABLE enroll_tokens ADD COLUMN used_by INTEGER REFERENCES nodes(id) ON DEL
 
 -- 这条记录说的是哪些东西：[{\"kind\":\"node\",\"id\":3}]。
 ALTER TABLE oplog ADD COLUMN refs TEXT NOT NULL DEFAULT '[]';
+";
+
+/// 节点对的独占 TCP（lane）设置：`off`、`udp_fallback`、`always`。
+const V4: &str = "
+ALTER TABLE pair_settings ADD COLUMN lane TEXT NOT NULL DEFAULT 'off';
 ";

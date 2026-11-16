@@ -7,7 +7,7 @@ use i3t_model::admin::{
     RelaySettings, UpdateNetwork, UpdateNode,
 };
 use i3t_model::control::{Declared, EnrollToken, ToController};
-use i3t_model::netmap::{self, DefaultAction, ExitRole, ForwardProtocol, ListenerProtocol};
+use i3t_model::netmap::{self, DefaultAction, ExitRole, ForwardProtocol, LaneMode, ListenerProtocol};
 use i3t_proto::NodeId;
 
 use super::super::COOLDOWN_SECS;
@@ -143,7 +143,7 @@ fn things_in_another_network_are_not_found_through_this_one() {
     not_found(controller.create_listener(home.id, default_elsewhere).unwrap_err());
     not_found(controller.create_forward(home.id, forward(ours, theirs)).unwrap_err());
     not_found(controller.create_forward(home.id, forward(theirs, ours)).unwrap_err());
-    not_found(controller.set_pair(home.id, ours, theirs, PairInput { keep_alive: true }).unwrap_err());
+    not_found(controller.set_pair(home.id, ours, theirs, PairInput { keep_alive: Some(true), lane: None }).unwrap_err());
     not_found(
         controller.create_token(home.id, &CreateEnrollToken { successor_of: Some(theirs), ..CreateEnrollToken::default() }).unwrap_err(),
     );
@@ -438,7 +438,7 @@ fn a_successor_enrolled_by_token_inherits_identity_and_configuration() {
     let referring_listener = lab.controller.create_listener(network.id, via_exit).unwrap();
     let to_old = lab.controller.create_forward(network.id, forward(other, old.id)).unwrap();
     let from_old = lab.controller.create_forward(network.id, forward(old.id, other)).unwrap();
-    lab.controller.set_pair(network.id, old.id, other, PairInput { keep_alive: true }).unwrap();
+    lab.controller.set_pair(network.id, old.id, other, PairInput { keep_alive: Some(true), lane: None }).unwrap();
     let pin = UpdateNode { pinned_relays: Some(vec![old.id]), ..UpdateNode::default() };
     lab.controller.update_node(network.id, other, &pin).unwrap();
     lab.settle(&mut [&mut old]);
@@ -469,7 +469,8 @@ fn a_successor_enrolled_by_token_inherits_identity_and_configuration() {
     assert_eq!((inherited_target.target_node, inherited_target.enabled), (new.id, true), "新机器声明了，转发照常");
     assert_eq!(forwards.iter().find(|f| f.id == from_old.id).unwrap().listen_node, new.id);
     let pairs = lab.controller.pairs(network.id).unwrap();
-    assert_eq!(pairs, vec![i3t_model::admin::PairSetting { a: other, b: new.id, keep_alive: true }]);
+    let settings: Vec<_> = pairs.into_iter().map(|pair| pair.setting).collect();
+    assert_eq!(settings, vec![i3t_model::admin::PairSetting { a: other, b: new.id, keep_alive: true, lane: LaneMode::Off }]);
     assert!(lab.controller.node(network.id, other).unwrap().node.pinned_relays.is_empty(), "原来的 relay 没了，固定它的节点解除固定");
 
     assert_eq!(new.netmap().me.forward_targets.len(), 1);

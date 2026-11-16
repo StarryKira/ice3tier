@@ -118,7 +118,7 @@ impl Controller {
 }
 
 impl Inner {
-    fn view(&self, network: NetworkId) -> Result<NetworkView, Error> {
+    pub(super) fn view(&self, network: NetworkId) -> Result<NetworkView, Error> {
         NetworkView::load(&self.store, network)?.ok_or(Error::NotFound(Entity::Network))
     }
 

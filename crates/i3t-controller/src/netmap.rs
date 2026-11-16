@@ -224,6 +224,7 @@ impl NetworkView {
             exit: peer.exit.as_ref().filter(|_| relation.outbound).map(|exit| PeerExit { lan: exit.lan, class: exit.class }),
             dial_out_only: peer.dial_out_only,
             keep_alive: self.pairs.iter().any(|pair| pair.a == low && pair.b == high && pair.keep_alive),
+            lane: self.pairs.iter().find(|pair| pair.a == low && pair.b == high).map(|pair| pair.lane).unwrap_or_default(),
         }
     }
 }

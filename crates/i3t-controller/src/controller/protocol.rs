@@ -218,6 +218,7 @@ impl Inner {
             listeners: Vec::new(),
             forwards: Vec::new(),
             credential_connections: BTreeMap::new(),
+            lanes: None,
         };
         self.drop_route_queries(node.id);
         if self.live.insert(node.id, live).is_some() {
@@ -310,6 +311,7 @@ impl Inner {
             live.flows = report.flows;
             live.tx_bytes = report.tx_bytes;
             live.rx_bytes = report.rx_bytes;
+            live.lanes = report.lanes.as_deref().cloned();
         }
         let Report { run, credentials, exit, exits, listeners, forwards, .. } = report;
         self.usage_reported(&node, UsageReport { run, credentials, exit, exits, listeners, forwards })?;

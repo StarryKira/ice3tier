@@ -38,7 +38,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use i3t_crypto::{NodeKey, tls};
 use i3t_model::Netmap;
 use i3t_model::admin::{LogEntry, NetworkId, Node, NodeRef, Status, Timestamp};
-use i3t_model::control::{ForwardReport, ListenerReport, ToNode};
+use i3t_model::control::{ForwardReport, LaneReport, ListenerReport, ToNode};
 use i3t_model::update::{UpdateStatus, Version};
 use i3t_proto::{NodeId, PublicKey};
 use tokio::sync::{Notify, mpsc};
@@ -176,6 +176,8 @@ pub(crate) struct Live {
     pub(crate) forwards: Vec<ForwardReport>,
     /// 最近一次上报里各个凭据（按编号）现在的连接数。
     pub(crate) credential_connections: BTreeMap<u32, u32>,
+    /// 最近一次上报里独占 TCP 的状况。
+    pub(crate) lanes: Option<LaneReport>,
 }
 
 pub(crate) struct Deferred {
@@ -469,6 +471,17 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 
 pub(crate) fn node_ref(record: &NodeRecord) -> NodeRef {
     NodeRef { id: record.id, name: record.name.clone(), virtual_ip: record.virtual_ip }
+}
+
+/// 操作记录里一个开关现在是开还是关。
+pub(crate) const fn switch(on: bool) -> &'static str {
+    if on { "开" } else { "关" }
+}
+
+/// 操作记录里的一串名字：用顿号连起来，一个都没有时写"无"。
+pub(crate) fn listed<T: std::fmt::Display>(items: impl Iterator<Item = T>) -> String {
+    let items: Vec<String> = items.map(|item| item.to_string()).collect();
+    if items.is_empty() { "无".to_owned() } else { items.join("、") }
 }
 
 /// 管理 API 里的计数都是 `u32`。真的数不下时停在最大值，不回绕。

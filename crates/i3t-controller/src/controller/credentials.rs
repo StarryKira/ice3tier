@@ -93,7 +93,13 @@ impl Controller {
                 store.reset_credential_usage(id)?;
             }
             let reset = if request.reset_usage { "，用量清零" } else { "" };
-            let detail = format!("凭据 {}：并发上限 {max_concurrent:?}，流量上限 {max_bytes:?}{reset}", record.credential.name);
+            let limit = |value: Option<u64>, unit: &str| value.map_or_else(|| "不限".to_owned(), |value| format!("{value}{unit}"));
+            let detail = format!(
+                "凭据 {}：并发 {}，流量 {}{reset}",
+                record.credential.name,
+                limit(max_concurrent.map(u64::from), ""),
+                limit(max_bytes, " 字节")
+            );
             store.log_refs(now, Some(network), "credential.update", &detail, &[LogRef::new(RefKind::Credential, id)])?;
             store.credential(network, id)?.ok_or(Error::NotFound(Entity::Credential))
         })?;

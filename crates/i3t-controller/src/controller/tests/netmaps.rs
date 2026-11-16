@@ -1,8 +1,8 @@
 //! 每个节点拿到的 netmap：最小权限，内容变了才动版本号，只发给受影响的节点。
 
-use i3t_model::admin::{CreateCredential, Direction, ForwardInput, ListenerInput, PairInput, RelaySettings, UpdateNode};
+use i3t_model::admin::{CreateCredential, Direction, ForwardInput, LaneBlock, ListenerInput, PairInput, RelaySettings, UpdateNode};
 use i3t_model::control::{Declared, Report, ToController};
-use i3t_model::netmap::{self, Attachment, ExitRole, ForwardProtocol, ListenerProtocol, Reach, TokenHash};
+use i3t_model::netmap::{self, Attachment, ExitRole, ForwardProtocol, LaneMode, ListenerProtocol, Reach, TokenHash};
 
 use super::super::Controller;
 use super::super::testing::{CAN_DO_ALL, Lab, REMOTE};
@@ -240,7 +240,7 @@ fn peer_details_follow_least_privilege() {
     let user = lab.join_offline(network.id, &["users"], Declared::default());
     lab.controller.enable_relay(network.id, relay, relay_at("203.0.113.7:20330")).unwrap();
     lab.controller.enable_exit(network.id, exit.id, ExitRole { lan: true, ports: None, ..ExitRole::default() }).unwrap();
-    lab.controller.set_pair(network.id, user, exit.id, PairInput { keep_alive: true }).unwrap();
+    lab.controller.set_pair(network.id, user, exit.id, PairInput { keep_alive: Some(true), lane: None }).unwrap();
     let report = Report {
         endpoints: vec!["192.168.1.5:20330".parse().unwrap(), "203.0.113.50:20330".parse().unwrap(), "192.168.1.5:20330".parse().unwrap()],
         // 挂靠关系里只有真的是 relay 的才下发，并且按延迟排。
@@ -360,4 +360,57 @@ fn a_restart_keeps_identity_versions_and_the_admin_token() {
 
     let fresh = lab.controller.issue_admin_token().unwrap();
     assert!(lab.controller.is_admin_token(&fresh) && !lab.controller.is_admin_token(&admin_token));
+}
+
+#[test]
+fn a_lane_setting_reaches_both_nodes_and_the_pair_view_says_why_it_does_not_work_yet() {
+    let mut lab = Lab::new();
+    let network = lab.network("home");
+    let entry = lab.join_offline(network.id, &[], CAN_DO_ALL);
+    let exit = lab.join_offline(network.id, &[], CAN_DO_ALL);
+    let lane = |mode| PairInput { keep_alive: None, lane: Some(mode) };
+
+    let view = lab.controller.set_pair(network.id, exit, entry, lane(LaneMode::Always)).unwrap();
+    assert_eq!((view.setting.a, view.setting.b, view.setting.keep_alive, view.setting.lane), (entry, exit, false, LaneMode::Always));
+    let effect = view.lane_effect.unwrap();
+    assert!(!effect.effective);
+    assert_eq!(effect.blocked, vec![LaneBlock::NoRelay], "两边都没有启用 relay，没有 TCP 端口可拨");
+    assert_eq!(lab.netmap(entry).peer(exit).unwrap().lane, LaneMode::Always, "两边的 netmap 里是同一个设置");
+    assert_eq!(lab.netmap(exit).peer(entry).unwrap().lane, LaneMode::Always);
+
+    // entry 启用了 relay：exit 拨它。
+    lab.controller.enable_relay(network.id, entry, relay_at("203.0.113.7:20330")).unwrap();
+    let pairs = lab.controller.pairs(network.id).unwrap();
+    let effect = pairs[0].lane_effect.clone().unwrap();
+    assert!(effect.effective && effect.blocked.is_empty(), "{effect:?}");
+    assert_eq!(effect.dialers, vec![exit]);
+    assert!(effect.summary.contains("共用的连接"), "要说明共用的连接和它的路照常在：{}", effect.summary);
+
+    // 只改常驻，独占 TCP 的设置不变。
+    let view = lab.controller.set_pair(network.id, entry, exit, PairInput { keep_alive: Some(true), lane: None }).unwrap();
+    assert_eq!((view.setting.keep_alive, view.setting.lane), (true, LaneMode::Always));
+    let view = lab.controller.set_pair(network.id, entry, exit, lane(LaneMode::UdpFallback)).unwrap();
+    assert_eq!((view.setting.keep_alive, view.setting.lane), (true, LaneMode::UdpFallback));
+    assert_eq!(lab.netmap(exit).peer(entry).unwrap().lane, LaneMode::UdpFallback);
+
+    // 在线的旧版本节点不懂独占 TCP。
+    let mut old = lab.join(network.id, &[]);
+    lab.settle(&mut [&mut old]);
+    let effect = lab.controller.set_pair(network.id, old.id, entry, lane(LaneMode::Always)).unwrap().lane_effect.unwrap();
+    assert_eq!(effect.blocked, vec![LaneBlock::NodeTooOld { node: old.id }]);
+
+    // 访问规则不再连通它们。
+    drop_default_rule(&lab, network.id);
+    let pairs = lab.controller.pairs(network.id).unwrap();
+    let pair = pairs.iter().find(|pair| (pair.setting.a, pair.setting.b) == (entry, exit)).unwrap();
+    assert_eq!(pair.lane_effect.as_ref().unwrap().blocked, vec![LaneBlock::NotConnected]);
+
+    // 去掉设置回到 off；节点删掉时它的设置一起没了。
+    add_rule(&lab, network.id, "all", "all", Direction::Both);
+    lab.controller.delete_pair(network.id, entry, exit).unwrap();
+    assert_eq!(lab.netmap(exit).peer(entry).unwrap().lane, LaneMode::Off);
+    lab.controller.set_pair(network.id, entry, exit, lane(LaneMode::Always)).unwrap();
+    lab.controller.delete_node(network.id, exit).unwrap();
+    let left: Vec<_> = lab.controller.pairs(network.id).unwrap().into_iter().map(|pair| (pair.setting.a, pair.setting.b)).collect();
+    assert_eq!(left, vec![(entry.min(old.id), entry.max(old.id))]);
 }

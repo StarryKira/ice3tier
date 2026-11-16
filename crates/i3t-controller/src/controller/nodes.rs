@@ -8,7 +8,7 @@ use i3t_model::control::ToNode;
 use i3t_model::netmap::ExitRole;
 use i3t_proto::NodeId;
 
-use super::{COOLDOWN_SECS, Controller, Inner, Seeds, address, naming};
+use super::{COOLDOWN_SECS, Controller, Inner, Seeds, address, listed, naming, switch};
 use crate::error::{Capability, Entity, Error};
 use crate::store::{CooldownKind, NetworkRecord, NodeRecord, Store, is_pending};
 
@@ -45,6 +45,7 @@ impl Controller {
             flows: live.map_or(0, |live| live.flows),
             tx_bytes: live.map_or(0, |live| live.tx_bytes),
             rx_bytes: live.map_or(0, |live| live.rx_bytes),
+            lanes: live.and_then(|live| live.lanes.clone()),
         })
     }
 
@@ -406,16 +407,16 @@ fn describe_update(before: &NodeRecord, after: &NodeRecord) -> String {
         changes.push(format!("虚拟 IP {} → {}", before.virtual_ip, after.virtual_ip));
     }
     if before.tags != after.tags {
-        changes.push(format!("标签 {:?}", after.tags));
+        changes.push(format!("标签 {}", listed(after.tags.iter())));
     }
     if before.dial_out_only != after.dial_out_only {
-        changes.push(format!("只拨出 {}", after.dial_out_only));
+        changes.push(format!("只拨出 {}", switch(after.dial_out_only)));
     }
     if before.routing != after.routing || before.reach != after.reach {
         changes.push("选路设置".to_owned());
     }
     if before.pinned_relays != after.pinned_relays {
-        changes.push(format!("固定的挂靠 relay {:?}", after.pinned_relays));
+        changes.push(format!("固定的挂靠 relay {}", listed(after.pinned_relays.iter().map(|relay| format!("#{relay}")))));
     }
     if changes.is_empty() {
         format!("节点 {}：没有变化", after.name)

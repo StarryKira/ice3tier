@@ -2,11 +2,11 @@
 
 use i3t_model::admin::{
     AccessCheck, AccessGraph, BackboneView, CreatedCredential, CreatedEnrollToken, Credential, Direction, EnrollTokenInfo, ExitView,
-    ForcedUpdates, Forward, ListenStatus, Listener, LogEntry, Network, Node, NodeAccess, NodeDetail, NodeListeners, NodeRef, NodeUpdate,
-    Overview, PairSetting, PathLeg, PathSource, PathView, RenamedTag, RouteMatrix, RouteTable, Rule, Status, Timestamp, UpdateOverview,
-    UpdateWait,
+    ForcedUpdates, Forward, LaneBlock, LaneEffect, ListenStatus, Listener, LogEntry, Network, Node, NodeAccess, NodeDetail, NodeListeners,
+    NodeRef, NodeUpdate, Overview, PairLaneSide, PairView, PathLeg, PathSource, PathView, RenamedTag, RouteMatrix, RouteTable, Rule,
+    Status, Timestamp, UpdateOverview, UpdateWait,
 };
-use i3t_model::control::{DirectKind, LegTransport, ListenState, PathSegment, Route};
+use i3t_model::control::{DirectKind, LaneCounts, LaneReport, LegTransport, ListenState, PathSegment, PeerLanes, Route};
 use i3t_model::netmap::DefaultAction;
 use i3t_model::update::{FailureKind, UpdateStatus, UpdateTiming};
 use i3t_proto::NodeId;
@@ -265,6 +265,9 @@ pub fn node_detail(detail: &NodeDetail) {
         println!("  注意          这台机器所在的网络映射端口随对端变化，基本打不了洞");
     }
     println!("  流与流量      {} 条流，发 {} 字节，收 {} 字节", detail.flows, detail.tx_bytes, detail.rx_bytes);
+    if let Some(lanes) = &detail.lanes {
+        lane_report(lanes);
+    }
 }
 
 pub fn routes(table: &RouteTable) {
@@ -748,16 +751,104 @@ pub fn forward(forward: &Forward) {
     );
 }
 
-pub fn pairs(pairs: &[PairSetting]) {
-    let mut table = Table::new(&["A", "B", "KEEP-ALIVE"]);
+pub fn pairs(pairs: &[PairView]) {
+    let mut table = Table::new(&["A", "B", "KEEP-ALIVE", "LANE", "EFFECTIVE", "LANES-IN-USE", "FALLBACKS"]);
     for pair in pairs {
-        table.row(vec![format!("#{}", pair.a), format!("#{}", pair.b), yes_no(pair.keep_alive)]);
+        let setting = &pair.setting;
+        let effect = pair.lane_effect.as_ref().map_or_else(|| NONE.to_owned(), lane_effect_cell);
+        let in_use: u64 = pair.lanes.iter().map(|side| side.lanes.counts.in_use).sum();
+        let fallbacks: u64 = pair.lanes.iter().map(|side| side.lanes.counts.fallbacks).sum();
+        table.row(vec![
+            format!("#{}", setting.a),
+            format!("#{}", setting.b),
+            yes_no(setting.keep_alive),
+            setting.lane.to_string(),
+            effect,
+            in_use.to_string(),
+            fallbacks.to_string(),
+        ]);
     }
     table.print();
 }
 
-pub fn pair(pair: &PairSetting) {
-    println!("节点 #{} 和 #{}：连接常驻 {}", pair.a, pair.b, yes_no(pair.keep_alive));
+pub fn pair(pair: &PairView) {
+    let setting = &pair.setting;
+    println!("节点 #{} 和 #{}：连接常驻 {}，独占 TCP {}", setting.a, setting.b, yes_no(setting.keep_alive), setting.lane);
+    if let Some(effect) = &pair.lane_effect {
+        println!("  {}", effect.summary);
+        for block in &effect.blocked {
+            println!("  不起作用：{}", lane_block(block));
+        }
+    }
+    for PairLaneSide { node, lanes } in &pair.lanes {
+        println!("  #{node} 这边：{}", peer_lanes(lanes));
+    }
+}
+
+fn lane_effect_cell(effect: &LaneEffect) -> String {
+    if effect.effective {
+        return "yes".to_owned();
+    }
+    let reasons = effect.blocked.iter().map(|block| match block {
+        LaneBlock::NoRelay => "no-relay".to_owned(),
+        LaneBlock::NoTcpAddress { node } => format!("no-tcp-address(#{node})"),
+        LaneBlock::NodeTooOld { node } => format!("too-old(#{node})"),
+        LaneBlock::NotConnected => "not-connected".to_owned(),
+    });
+    format!("no: {}", reasons.collect::<Vec<_>>().join(","))
+}
+
+fn lane_block(block: &LaneBlock) -> String {
+    match block {
+        LaneBlock::NoRelay => "两个节点都没有启用 relay，没有哪一边的 TCP 端口在听".to_owned(),
+        LaneBlock::NoTcpAddress { node } => format!("#{node} 启用了 relay，但还没有已知的 TCP 地址"),
+        LaneBlock::NodeTooOld { node } => format!("#{node} 的版本太旧，不懂独占 TCP"),
+        LaneBlock::NotConnected => "访问规则没有连通这两个节点".to_owned(),
+    }
+}
+
+/// 和一个对端之间的 lane，一行。
+fn peer_lanes(lanes: &PeerLanes) -> String {
+    let control = if lanes.control { "控制 lane 在" } else { "控制 lane 不在" };
+    format!(
+        "{control}，{}拨对方；空闲 {}（对方拨来）/ {}（自己拨好）/ 停在对方 {}；{}",
+        if lanes.dials { "" } else { "不" },
+        lanes.idle,
+        lanes.ready,
+        lanes.parked_at_peer,
+        lane_counts(&lanes.counts)
+    )
+}
+
+fn lane_counts(counts: &LaneCounts) -> String {
+    format!(
+        "在用 {}，拨号中 {}；取用 {}（等过 {}，共 {}ms，没取到 {}），改走共用连接 {}，拨号失败 {}，拒绝 {}；\
+         字节 加密 {} / 不加密 {} / 内核搬运 {}",
+        counts.in_use,
+        counts.dialling,
+        counts.claims,
+        counts.claims_waited,
+        counts.claim_wait_ms,
+        counts.claims_failed,
+        counts.fallbacks,
+        counts.dial_failures,
+        counts.refused,
+        counts.sealed_bytes,
+        counts.passthrough_bytes,
+        counts.spliced_bytes
+    )
+}
+
+fn lane_report(report: &LaneReport) {
+    let failures = &report.handshake_failures;
+    println!("  独占 TCP      {}", lane_counts(&report.total));
+    println!(
+        "                拨进来没握手成功：超时 {}，不认识的公钥 {}，TLS {}，协议 {}，太多 {}",
+        failures.deadline, failures.unknown_key, failures.tls, failures.protocol, failures.busy
+    );
+    for peer in &report.peers {
+        println!("    #{:<10} {}", peer.peer, peer_lanes(peer));
+    }
 }
 
 pub fn access_graph(graph: &AccessGraph) {
