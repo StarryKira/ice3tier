@@ -73,6 +73,45 @@ async fn a_peer_that_keeps_coming_back_cannot_pile_up_connections() {
     timeout(SOON, recv.read_exact(&mut still)).await.expect("现在的连接应该照常工作").unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_that_crashed_and_came_back_ends_its_old_connection_at_once() {
+    let (a, r) = (Node::start(1), Node::start(9));
+    let first = Node::start(2);
+    let key = Arc::clone(&first.key);
+    // A 和 B 只经 relay R 来往：B 重启换了端口之后，A 在旧连接上发的包照样经 R 送到新的 B 手上。
+    let via_relay = |b: &Node| {
+        r.apply(&View { relay_clients: Some(&[&a, b]), ..View::default() });
+        a.apply(&View { peers: &[Peer::via(b, &[&r])], relays: &[&r], reach: Some("relay_only"), ..View::default() });
+        b.apply(&View { peers: &[Peer::via(&a, &[&r])], relays: &[&r], reach: Some("relay_only"), ..View::default() });
+    };
+    via_relay(&first);
+    r.wait_tcp_listening().await;
+    let (mut send, _held) = stream(&a, &first).await;
+
+    // B 崩溃了：一个包也不再发，连关闭帧也没有。然后带着同一把密钥回来。
+    first.block_all();
+    drop(first);
+    let crashed = Instant::now();
+    let back = Node::start_with_key(2, key);
+    via_relay(&back);
+
+    // A 接着在旧连接上发。新的 B 认得出这是自己发出去过的连接编号，却没有这条连接，于是回一个无状态重置；
+    // A 凭它立刻知道连接没了，不用等 30 秒的空闲超时。
+    let ended = timeout(Duration::from_secs(10), async {
+        while send.write_all(&[0; 1024]).await.is_ok() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    });
+    ended.await.expect("旧连接应该在几秒之内结束，而不是等到空闲超时");
+
+    // 新开的流马上可用。
+    let (mut send, mut recv) = stream(&a, &back).await;
+    send.write_all(b"again").await.unwrap();
+    let mut again = [0; 5];
+    timeout(SOON, recv.read_exact(&mut again)).await.expect("新的连接应该照常工作").unwrap();
+    assert!(crashed.elapsed() < Duration::from_secs(20), "整个恢复用了 {:?}", crashed.elapsed());
+}
+
 /// 一条连接的接收窗口：对端发过来、本端还没有读走的数据，所有的流加起来最多这么多。
 const RECEIVE_WINDOW: u64 = 64 * 1024 * 1024;
 

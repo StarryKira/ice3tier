@@ -92,7 +92,7 @@ impl Endpoint {
         let allowed = netmap.clone();
         let server = quic::server(&key, move |key| allowed.borrow().peers.iter().any(|peer| peer.key == *key))?;
         let socket = PathSocket::new(Arc::clone(&paths), me);
-        let quic = quinn::Endpoint::new_with_abstract_socket(quic::endpoint()?, Some(server), socket, Arc::new(quinn::TokioRuntime))
+        let quic = quinn::Endpoint::new_with_abstract_socket(quic::endpoint(&key)?, Some(server), socket, Arc::new(quinn::TokioRuntime))
             .map_err(EndpointError::Quic)?;
 
         let (incoming_tx, incoming_rx) = mpsc::channel(INCOMING_BACKLOG);

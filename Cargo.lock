@@ -886,6 +886,7 @@ dependencies = [
  "i3t-underlay",
  "quinn",
  "quinn-proto",
+ "ring",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",

@@ -5,6 +5,7 @@ use std::fmt;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use i3t_proto::PublicKey;
+use ring::hkdf;
 use ring::rand::SystemRandom;
 use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 
@@ -14,6 +15,20 @@ const PEM_LINE_LEN: usize = 64;
 
 /// 所有签名共用的前缀，后面跟用途标签。同一把密钥在不同场合签出来的东西因此不能互相冒充。
 const SIGNATURE_PREFIX: &[u8] = b"i3t-signature-v1";
+/// 从私钥派生别的密钥时用的盐，和签名的前缀是两回事。
+const DERIVE_SALT: &[u8] = b"i3t-derived-secret-v1";
+
+/// [`NodeKey::derive_secret`] 给出的密钥的长度。
+pub const DERIVED_SECRET_LEN: usize = 32;
+
+/// 让 HKDF 输出 [`DERIVED_SECRET_LEN`] 字节。
+struct DerivedLen;
+
+impl hkdf::KeyType for DerivedLen {
+    fn len(&self) -> usize {
+        DERIVED_SECRET_LEN
+    }
+}
 
 /// 节点的 Ed25519 私钥。私钥不离开节点，除了写进本机的密钥文件之外不导出。
 pub struct NodeKey {
@@ -80,6 +95,21 @@ impl NodeKey {
         let signature = self.pair.sign(&signed_bytes(purpose, message));
         let bytes: [u8; Signature::LEN] = signature.as_ref().try_into().expect("Ed25519 签名固定是 64 字节，这是算法的定义");
         Signature(bytes)
+    }
+
+    /// 从私钥派生一把对称密钥。同一把私钥、同一个 `purpose` 每次得到的都一样，不同的 `purpose` 互不相干，
+    /// 知道其中一把也推不出私钥和别的。
+    ///
+    /// 给那些"重启之后还得是同一把"的密钥用：没有它就得另存一个文件，丢了、和私钥不配套了都是麻烦。
+    #[must_use]
+    pub fn derive_secret(&self, purpose: &str) -> [u8; DERIVED_SECRET_LEN] {
+        let mut secret = [0; DERIVED_SECRET_LEN];
+        hkdf::Salt::new(hkdf::HKDF_SHA256, DERIVE_SALT)
+            .extract(&self.pkcs8)
+            .expand(&[purpose.as_bytes()], DerivedLen)
+            .and_then(|key| key.fill(&mut secret))
+            .expect("HKDF-SHA256 输出 32 字节总是可以的：上限是 255 个哈希长度");
+        secret
     }
 
     pub(crate) fn pkcs8_der(&self) -> &[u8] {
@@ -198,5 +228,14 @@ mod tests {
         let debug = format!("{key:?}");
         assert!(debug.contains("PublicKey("), "{debug}");
         assert!(!debug.contains("pkcs8"), "{debug}");
+    }
+
+    #[test]
+    fn derived_secrets_are_stable_per_purpose_and_differ_between_purposes_and_keys() {
+        let key = NodeKey::generate().unwrap();
+        let reloaded = NodeKey::from_pem(&key.to_pem()).unwrap();
+        assert_eq!(key.derive_secret("a"), reloaded.derive_secret("a"), "同一把私钥重新读进来，派生出的还是同一把");
+        assert_ne!(key.derive_secret("a"), key.derive_secret("b"));
+        assert_ne!(key.derive_secret("a"), NodeKey::generate().unwrap().derive_secret("a"));
     }
 }

@@ -9,6 +9,7 @@ use i3t_path::Paths;
 use i3t_proto::{MAX_CONN_PACKET_LEN, PublicKey};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{ClientConfig, EndpointConfig, IdleTimeout, MtuDiscoveryConfig, ServerConfig, TransportConfig, VarInt};
+use quinn_proto::HashedConnectionIdGenerator;
 
 use crate::congestion::Algorithm;
 
@@ -73,8 +74,23 @@ pub(crate) fn transport() -> Arc<TransportConfig> {
     Arc::new(transport)
 }
 
-pub(crate) fn endpoint() -> Result<EndpointConfig, QuicConfigError> {
-    let mut config = EndpointConfig::default();
+/// 派生"无状态重置"密钥和连接编号密钥时的用途标签。
+const RESET_KEY_PURPOSE: &str = "i3t-conn stateless reset";
+const CID_KEY_PURPOSE: &str = "i3t-conn connection id";
+
+/// 端点的参数。`key` 是本节点的私钥，从它派生两把重启之后不变的密钥：
+///
+/// - 连接编号里带一个校验值，不是本节点发出去的编号一眼就能认出来丢掉；
+/// - 收到"编号是本节点发的、连接却不认识"的包时，回一个无状态重置，对端凭它立刻知道这条连接没了。
+///
+/// QUIC 库默认每次启动随机生成这两把密钥。那样节点崩溃重启之后，对端手上的旧连接发来的包在新进程看来编号不合法，
+/// 直接丢掉、什么都不回，对端要等空闲超时（30 秒）才发现，这期间它开的新流全都没有回音。
+/// 从私钥派生之后，新进程认得旧编号，回的重置对端也认，重启之后一两个往返就恢复。
+pub(crate) fn endpoint(key: &NodeKey) -> Result<EndpointConfig, QuicConfigError> {
+    let reset_key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &key.derive_secret(RESET_KEY_PURPOSE));
+    let mut config = EndpointConfig::new(Arc::new(reset_key));
+    let cid_key = u64::from_le_bytes(*key.derive_secret(CID_KEY_PURPOSE).first_chunk().expect("派生出来的密钥是 32 字节，取得出前 8 个"));
+    config.cid_generator(move || Box::new(HashedConnectionIdGenerator::from_key(cid_key)));
     // 端口上靠"QUIC 包的首字节一定带 0x40 这一位"把连接包和路径层的帧分开，所以这一位不能被随机化。
     config.grease_quic_bit(false);
     // QUIC 库按"这个值 × 一次合并接收的包数 × 批量大小"分配接收缓冲，默认值下是一百多 MB。
