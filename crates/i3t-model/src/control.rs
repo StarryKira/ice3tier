@@ -8,6 +8,9 @@
 //! 1. 节点先发 [`ToController::Enroll`]（第一次加入）或 [`ToController::Hello`]（已经注册过）。
 //! 2. controller 回 [`ToNode::Snapshot`]；不认这个节点时回 [`ToNode::Rejected`] 然后断开。
 //! 3. 之后节点定期发 [`ToController::Report`]，配置有变化时 controller 再发 `Snapshot`，节点应用之后回 [`ToController::Ack`]。
+//!
+//! 保活：节点每 10 秒发一次 `Report`，它同时就是心跳。controller 连续 20 秒没有东西要发时发一个 [`ToNode::Heartbeat`]。
+//! controller 35 秒收不到节点的任何消息就把它记为离线；节点 90 秒收不到 controller 的任何消息就断开重连。
 
 use std::fmt;
 use std::net::SocketAddr;
@@ -74,7 +77,8 @@ impl FromStr for EnrollToken {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToController {
-    /// 用一次性的注册令牌加入网络。节点的公钥不在消息里：它来自这条连接的 TLS 握手。
+    /// 用一次性的注册令牌加入网络。`token` 是令牌里的那个一次性密钥（[`EnrollToken::secret`]），不是整段令牌文本。
+    /// 节点的公钥不在消息里：它来自这条连接的 TLS 握手。
     Enroll { token: String, hello: Hello },
     Hello(Hello),
     Report(Report),
