@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use i3t_conn::{Connector, RecvStream, SendStream, StreamCode};
 use i3t_proto::NodeId;
-use i3t_proto::flow::{Class, Open, Reason, Reply};
+use i3t_proto::flow::{Class, Open, Reason};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
@@ -66,10 +66,11 @@ impl<S: SendStream, R: RecvStream> Pending<S, R> {
     ///
     /// # Errors
     ///
-    /// 对端拒绝时返回 [`FlowError::Refused`]，里面是它给的状态和说明；REPLY 读不到或者不合法时返回对应的错误。
+    /// 对端拒绝时返回 [`FlowError::Refused`]，里面是它给的状态和说明（对端没读 OPEN 就以访问规则为由重置了流时，
+    /// 状态是 [`Status::AccessDenied`](i3t_proto::flow::Status::AccessDenied)）；REPLY 读不到或者不合法时返回对应的错误。
     /// 出错时这条流已经被放弃。
     pub async fn established(mut self) -> Result<Flow<S, R>, FlowError> {
-        let failure = match header::read(&mut self.recv, Reply::decode).await {
+        let failure = match header::read_reply(&mut self.recv).await {
             Ok(reply) if reply.status.is_ok() => return Ok(Flow::new(self.parts(false))),
             Ok(reply) => FlowError::Refused(reply),
             Err(error) => error,

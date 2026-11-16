@@ -1,8 +1,9 @@
 //! 接受方：读 OPEN，交给处理者，回 REPLY。
 
+use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use i3t_conn::contract::{DatagramSender, Datagrams};
@@ -18,6 +19,9 @@ use crate::{FlowError, header};
 
 /// [`serve`] 等一条流的 OPEN 等多久。OPEN 是和流一起到的，正常情况下不用等；这个时限只是不让空流一直占着。
 pub const OPEN_DEADLINE: Duration = Duration::from_secs(10);
+
+/// 拒绝时 REPLY 最多花多久送出去。REPLY 很短，送不出去说明发起方不收（不给流量控制的额度），不为它一直占着这条流。
+const REFUSE_DEADLINE: Duration = Duration::from_secs(5);
 
 /// 一条已经读出 OPEN、还没有应答的流。
 ///
@@ -132,22 +136,89 @@ impl<S: SendStream, R: RecvStream> Request<S, R> {
 }
 
 /// 把拒绝的 `reply` 发回去，然后结束这条流。流和数据报上下文的拒绝是同一个做法。
+///
+/// 先叫停接收方向：发起方别再发数据，已经到了、还没读的数据随之丢掉，不再占本端的内存。
+/// 发送方向是正常结束的，这样 REPLY 一定送得到；[`REFUSE_DEADLINE`] 之内送不出去就重置。
 pub(crate) async fn refuse(peer: NodeId, send: &mut impl SendStream, recv: &mut impl RecvStream, reply: &Reply) {
     debug_assert!(!reply.status.is_ok(), "拒绝时不能回成功的状态");
+    let code = StreamCode(Reason::Cancelled.to_wire());
+    recv.stop(code);
     let mut bytes = Vec::with_capacity(Reply::MAX_LEN);
     reply.encode(&mut bytes);
     let sent = async {
         send.write_all(&bytes).await?;
         send.shutdown().await
     };
-    if let Err(error) = sent.await {
-        tracing::debug!(%peer, %error, "拒绝的 REPLY 没有送出去");
+    match time::timeout(REFUSE_DEADLINE, sent).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::debug!(%peer, %error, "拒绝的 REPLY 没有送出去"),
+        Err(_) => {
+            tracing::debug!(%peer, "拒绝的 REPLY {REFUSE_DEADLINE:?} 之内没有送出去，重置这条流");
+            send.reset(code);
+        }
     }
-    recv.stop(StreamCode(Reason::Cancelled.to_wire()));
+}
+
+/// 对端开过来的一条流在读 OPEN 之前怎么处理，由 [`Handler::screen`] 决定。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Screening {
+    /// 读它的 OPEN，交给处理者。
+    Admit,
+    /// 它发来的东西一个字节也不读，回这个拒绝。
+    Refuse(Reply),
+    /// 不读也不回，两个方向带着这个原因码立刻重置。
+    Reset(Reason),
+}
+
+/// [`serve`] 手上每个对端各有多少条流：还在读 OPEN 的，和处理者还没处理完的。
+#[derive(Debug, Default)]
+struct InProgress {
+    counts: Mutex<HashMap<NodeId, usize>>,
+}
+
+impl InProgress {
+    fn of(&self, peer: NodeId) -> usize {
+        self.counts.lock().expect("in-progress mutex poisoned").get(&peer).copied().unwrap_or(0)
+    }
+
+    /// 给 `peer` 记上一条。返回的守卫被丢弃时减回去。
+    fn enter(self: &Arc<Self>, peer: NodeId) -> InProgressEntry {
+        *self.counts.lock().expect("in-progress mutex poisoned").entry(peer).or_insert(0) += 1;
+        InProgressEntry { tally: Arc::clone(self), peer }
+    }
+}
+
+/// 一条流在 [`InProgress`] 里占着的那一个数。
+struct InProgressEntry {
+    tally: Arc<InProgress>,
+    peer: NodeId,
+}
+
+impl Drop for InProgressEntry {
+    fn drop(&mut self) {
+        let mut counts = self.tally.counts.lock().expect("in-progress mutex poisoned");
+        if let Some(count) = counts.get_mut(&self.peer) {
+            *count -= 1;
+            if *count == 0 {
+                counts.remove(&self.peer);
+            }
+        }
+    }
 }
 
 /// 处理对端开过来的流。出口模块实现它。
 pub trait Handler: Send + Sync + 'static {
+    /// 对端开过来一条流、还没有读它的 OPEN 时问一次：这时就能下结论的拒绝在这里给出，被拒绝的流一个字节也不读。
+    ///
+    /// `in_progress` 是 [`serve`] 手上这个对端已经有多少条流（还在读 OPEN 的、处理者还没处理完的、数据报上下文都算），
+    /// 不含这一条。这里不能等待：每条流都要经过它，它慢了所有对端的流都跟着慢。
+    ///
+    /// 默认一律放行。
+    fn screen(&self, peer: NodeId, in_progress: usize) -> Screening {
+        let _ = (peer, in_progress);
+        Screening::Admit
+    }
+
     /// 处理一条流直到它结束。每条流在自己的任务里调用，互不阻塞。
     fn handle<S: SendStream, R: RecvStream>(&self, request: Request<S, R>) -> impl Future<Output = ()> + Send;
 
@@ -164,12 +235,14 @@ pub trait Handler: Send + Sync + 'static {
 
 /// 接受对端开过来的流，读出 OPEN 之后交给 `handler`，直到 `acceptor` 关闭。
 ///
-/// 流交给 [`Handler::handle`]，数据报上下文交给 [`Handler::handle_datagrams`]，各自一个任务。
+/// 每条流先过 [`Handler::screen`]，被拒绝的不读 OPEN。放行的流交给 [`Handler::handle`]，
+/// 数据报上下文交给 [`Handler::handle_datagrams`]，各自一个任务。
 /// 对端在上下文里发来的数据报也是在这里分给各个上下文的，所以同一个 `acceptor` 上只应该有一个 `serve` 在跑。
 /// 这个函数返回之后，已经在处理的流不受影响，继续跑到自己结束；数据报上下文收不到新的数据报。
 pub async fn serve<A: Acceptor + Datagrams, H: Handler>(acceptor: &A, handler: Arc<H>) {
     let mux = Mux::new(Recipient::Acceptor);
     let transport = acceptor.datagram_sender();
+    let in_progress = Arc::new(InProgress::default());
     let pump = mux.pump(acceptor);
     tokio::pin!(pump);
     let mut pumping = true;
@@ -182,14 +255,33 @@ pub async fn serve<A: Acceptor + Datagrams, H: Handler>(acceptor: &A, handler: A
                 continue;
             }
         };
-        let Some(incoming) = incoming else { return };
+        let Some(mut incoming) = incoming else { return };
+        let peer = incoming.peer;
+        match handler.screen(peer, in_progress.of(peer)) {
+            Screening::Admit => {}
+            Screening::Reset(reason) => {
+                let code = StreamCode(reason.to_wire());
+                incoming.send.reset(code);
+                incoming.recv.stop(code);
+                continue;
+            }
+            Screening::Refuse(reply) => {
+                drop(tokio::spawn(async move {
+                    let Incoming { peer, mut send, mut recv } = incoming;
+                    refuse(peer, &mut send, &mut recv, &reply).await;
+                }));
+                continue;
+            }
+        }
+        let entry = in_progress.enter(peer);
         let (handler, mux, transport) = (Arc::clone(&handler), Arc::clone(&mux), transport.clone());
         tokio::spawn(async move {
-            let peer = incoming.peer;
+            let _entry = entry;
             match Arrival::read(incoming, OPEN_DEADLINE).await {
                 Ok(Arrival::Stream(request)) => handler.handle(request).await,
                 Ok(Arrival::Datagrams(arrival)) => handler.handle_datagrams(datagram::Request::new(arrival, mux, transport)).await,
-                Err(error) => tracing::info!(%peer, ?error, "重置了一条流：没有读到合法的 OPEN"),
+                // 对端每开一条这样的流就是一行，不记成 info：不然它能拿日志刷屏。
+                Err(error) => tracing::debug!(%peer, ?error, "重置了一条流：没有读到合法的 OPEN"),
             }
         });
     }

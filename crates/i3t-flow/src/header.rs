@@ -2,7 +2,8 @@
 
 use std::io;
 
-use i3t_proto::flow::{DecodeError, Decoded};
+use i3t_conn::{StreamAborted, StreamCode};
+use i3t_proto::flow::{DecodeError, Decoded, Reason, Reply, Status};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::FlowError;
@@ -28,6 +29,24 @@ pub(crate) async fn read<T>(
             }
         }
     }
+}
+
+/// 读对端的 REPLY。
+///
+/// 接受方可以不读 OPEN 就带着 [`Reason::AccessRevoked`] 重置整条流：访问规则不允许本节点访问它（见 [`crate::Handler::screen`]）。
+/// 这和它读了 OPEN 再回一个 [`Status::AccessDenied`] 是同一个结论，所以也当作这样一个 REPLY 交出去，
+/// 发起方给客户端的失败和别的拒绝一样，不会因此多透露什么。
+pub(crate) async fn read_reply(recv: &mut (impl AsyncRead + Unpin)) -> Result<Reply, FlowError> {
+    match read(recv, Reply::decode).await {
+        Err(FlowError::Read(error)) if refused_unread(&error) => {
+            Ok(Reply::new(Status::AccessDenied, "对端没有读建流请求就重置了流：访问规则不允许本节点访问它"))
+        }
+        other => other,
+    }
+}
+
+fn refused_unread(error: &io::Error) -> bool {
+    StreamAborted::of(error) == Some(StreamAborted::Reset(StreamCode(Reason::AccessRevoked.to_wire())))
 }
 
 #[cfg(test)]

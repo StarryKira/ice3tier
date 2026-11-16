@@ -91,7 +91,7 @@ impl<C: Connector + Datagrams> Opener<C> {
         request.encode(&mut bytes);
         send.write_all(&bytes).await.map_err(FlowError::Write)?;
 
-        let reply = time::timeout(REPLY_DEADLINE, header::read(&mut recv, Reply::decode)).await;
+        let reply = time::timeout(REPLY_DEADLINE, header::read_reply(&mut recv)).await;
         let failure = match reply.unwrap_or(Err(FlowError::Deadline(REPLY_DEADLINE))) {
             Ok(reply) if reply.status.is_ok() => {
                 let sender = ContextSender::new(self.transport.clone(), peer, &request, Recipient::Acceptor);

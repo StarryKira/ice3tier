@@ -12,7 +12,15 @@
 //! 被截断的数据不能看起来像正常结束。所以搬运一开始就把 TCP 设成"关闭时发 RST"，只有两个方向都正常结束了才改回去：
 //! 中途不管是出错、任务被取消还是进程退出，TCP 那一头看到的都是重置。
 //!
-//! 没有空闲超时。一条静默的流可以一直留着，它的死活由连接层的保活和 TCP 的内核保活判断。
+//! 静默不是断开的理由：经端口转发的 SSH 会话、数据库连接池里的空闲连接，一连几个小时不说话都是正当的。
+//! 所以流没有"多久没有数据就切断"的时限，而是和 TCP 的保活一样，静默久了去探一探两头还在不在，不在了才断：
+//!
+//! - 对端节点还在不在：连接层的保活（15 秒一次，30 秒没有回应就判连接断开，上面的流全部出错）；
+//! - TCP 那一头还在不在：内核保活（[`keep_alive`]），入口一侧的客户端连接和出口一侧到目标的连接都打开。
+//!   探测没有回应时内核报错，搬运把流重置，另一头的节点跟着重置它那一头的 TCP。
+//!
+//! 一头悄无声息地消失（断电、换了网络、NAT 回收了映射）之后，两头的资源在几分钟之内释放；活着的连接照常回应探测，一直留着。
+//! 活着却一直不说话的流占着的资源，由接受方按发起节点限制同时处理的流数来约束（[`crate::Handler::screen`]）。
 //!
 //! 流往对端节点发数据的优先级跟着服务等级（[`priority_of`]）：同一条连接上，interactive 的流先于 bulk 的流发出。
 //! `auto` 的流开始时按 interactive 对待，这一端在它上面发出的数据累计超过 [`AUTO_DEMOTE_AFTER`] 之后降到 bulk 的优先级。
@@ -26,7 +34,7 @@ use std::time::{Duration, Instant};
 use i3t_conn::contract::Priority;
 use i3t_conn::{RecvStream, SendStream, StreamAborted, StreamCode};
 use i3t_proto::flow::{Class, Reason, Reply};
-use socket2::SockRef;
+use socket2::{SockRef, TcpKeepalive};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{ReadHalf, WriteHalf};
@@ -36,6 +44,24 @@ use crate::{FlowError, header};
 
 /// 每个方向一块这么大的缓冲区。流的数量可以上万，所以不取更大的。
 pub(crate) const BUFFER_LEN: usize = 16 * 1024;
+
+/// 和流对接的 TCP 连接静默多久之后内核开始发保活探测，以及探测的间隔。
+///
+/// 探测连续没有回应（Linux 默认 9 次）时内核报错，一头消失之后大约四分钟流被重置。活着的连接回应探测，不受影响。
+/// 系统默认要静默两小时才开始探测；这里取得短得多，因为出口到目标的连接常常要穿过家用路由器，
+/// 静默久了映射会被悄悄回收，而大模型这类请求正好会长时间静默。探测很小，静默的连接每 25 秒一个，代价可以忽略。
+pub const KEEPALIVE: Duration = Duration::from_secs(25);
+
+/// 给一条要和流对接的 TCP 连接打开内核保活，参数见 [`KEEPALIVE`]。入口接受的客户端连接、出口连上的目标都要打开：
+/// 流本身没有空闲时限，TCP 那一头的死活只靠它判断（模块文档）。
+///
+/// # Errors
+///
+/// 系统不让设。连接照样能用，只是那一头悄悄消失时这条流要等到有数据要发才会发现。
+pub fn keep_alive(stream: &TcpStream) -> io::Result<()> {
+    let keepalive = TcpKeepalive::new().with_time(KEEPALIVE).with_interval(KEEPALIVE);
+    SockRef::from(stream).set_tcp_keepalive(&keepalive)
+}
 
 /// `auto` 等级的流，这一端在它上面发出多少字节之后降到 bulk 的优先级。
 pub(crate) const AUTO_DEMOTE_AFTER: u64 = 1024 * 1024;
@@ -341,7 +367,7 @@ async fn flow_to_tcp<R: RecvStream, M: Meter>(
 ) -> Result<(), Abort> {
     let Progress { started, meter, .. } = progress;
     if reply_pending {
-        match header::read(recv, Reply::decode).await {
+        match header::read_reply(recv).await {
             Ok(reply) if reply.status.is_ok() => {}
             Ok(reply) => return Err(Abort::Refused(reply)),
             // 流本身出错（被重置、连接断开）和 REPLY 的内容不对是两回事。

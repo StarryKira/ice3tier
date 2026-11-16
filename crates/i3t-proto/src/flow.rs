@@ -186,7 +186,7 @@ wire_enum! {
     /// 数值按归因分段：`0x1_` 归因于目标，`0x2_` 是被规则或策略拒绝，`0x3_` 是出口自己出了问题。
     /// 只有最后一段计入出口节点的健康度，见 [`Status::attribution`]。
     ///
-    /// `0x24`～`0x26` 是后来加的：出口有意不接（排空、配额、建连预算）。比它们旧的发起方读到这几个值时
+    /// `0x24`～`0x27` 是后来加的：出口有意不接（排空、配额、建连预算、同时开着的流太多）。比它们旧的发起方读到这几个值时
     /// 认不出来，按 REPLY 不合法处理，流照样是失败的，只是说明不够准确。
     pub enum Status: u8 {
         /// 目标已经连上，后面是它发回来的数据。
@@ -213,6 +213,8 @@ wire_enum! {
         QuotaExhausted = 0x25,
         /// 发起节点在短时间里向同一个目标建了太多连接，超过了出口的建连预算。
         RateLimited = 0x26,
+        /// 发起节点在这个节点上同时开着的流到了上限，新的流要等它手上的流结束一些。
+        TooManyStreams = 0x27,
         /// 解析域名时解析器出错或者超时。
         ResolverFailure = 0x30,
         /// 出口内部出错，包括它的上游代理不可用。
@@ -233,7 +235,8 @@ wire_enum! {
         TargetError = 3,
         /// 入口一侧的客户端异常断开。
         ClientReset = 4,
-        /// 访问规则变了，发起节点不再被允许访问这个节点。
+        /// 发起节点不再被允许这样访问这个节点：访问规则变了，或者这条流用到的能力被收回了
+        /// （出口、局域网开关、端口转发）。访问规则本来就不允许的节点开过来的流，也是带着它立刻重置的。
         AccessRevoked = 5,
         /// 出口节点正在关闭。
         ShuttingDown = 6,
@@ -272,7 +275,8 @@ impl Status {
             | Self::UnknownForward
             | Self::Draining
             | Self::QuotaExhausted
-            | Self::RateLimited => Some(Attribution::Refused),
+            | Self::RateLimited
+            | Self::TooManyStreams => Some(Attribution::Refused),
             Self::ResolverFailure | Self::InternalError => Some(Attribution::Exit),
         }
     }
@@ -1063,6 +1067,7 @@ mod tests {
             Status::Draining,
             Status::QuotaExhausted,
             Status::RateLimited,
+            Status::TooManyStreams,
         ] {
             assert_eq!(status.attribution(), Some(Attribution::Refused), "{status:?}");
         }
@@ -1191,6 +1196,7 @@ mod tests {
         assert_eq!(Status::Draining.to_wire(), 0x24);
         assert_eq!(Status::QuotaExhausted.to_wire(), 0x25);
         assert_eq!(Status::RateLimited.to_wire(), 0x26);
+        assert_eq!(Status::TooManyStreams.to_wire(), 0x27);
         assert_eq!(Reason::LimitReached.to_wire(), 7);
     }
 

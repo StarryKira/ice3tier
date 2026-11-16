@@ -6,8 +6,8 @@
 //! | 谁用 | 入口 | 做什么 |
 //! |---|---|---|
 //! | 发起方（入口模块） | [`open`]、[`Pending`] | 开流，把 OPEN 和首批数据一次写出去；等 REPLY，或者不等就开始搬运 |
-//! | 接受方（出口模块） | [`serve`]、[`Handler`]、[`Request`] | 限时读 OPEN，交给处理者，由它接受或者拒绝 |
-//! | 两边 | [`Flow::relay`] | 在流和一条 TCP 连接之间双向搬运，如实传递半关闭和异常结束 |
+//! | 接受方（出口模块） | [`serve`]、[`Handler`]、[`Request`] | 先按发起节点筛一遍，限时读 OPEN，交给处理者，由它接受或者拒绝 |
+//! | 两边 | [`Flow::relay`]、[`keep_alive`] | 在流和一条 TCP 连接之间双向搬运，如实传递半关闭和异常结束；TCP 那一头靠内核保活判断死活 |
 //! | 两边 | [`Meter`] | 搬运时每一段数据要过的关卡：计数、限速、叫停 |
 //! | 中间的节点 | [`Flow::splice`] | 把两条流接起来：监听在虚拟 IP 上、目标是别的节点的端口转发 |
 //!
@@ -30,9 +30,9 @@ mod meter;
 mod relay;
 mod splice;
 
-pub use acceptor::{Handler, OPEN_DEADLINE, Request, serve};
+pub use acceptor::{Handler, OPEN_DEADLINE, Request, Screening, serve};
 pub use error::FlowError;
 pub use initiator::{Pending, open};
 pub use meter::{Direction, Meter, Unmetered};
-pub use relay::{End, Flow, Summary, Traffic};
+pub use relay::{End, Flow, KEEPALIVE, Summary, Traffic, keep_alive};
 pub use splice::Spliced;
