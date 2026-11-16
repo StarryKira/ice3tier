@@ -87,9 +87,17 @@ impl Node {
 
     /// 同 [`Node::start`]，另外给它几个地址查询的服务器。
     pub fn start_with(id: u32, addr_servers: &[SocketAddr]) -> Self {
+        Self::start_inner(id, Arc::new(NodeKey::generate().unwrap()), addr_servers)
+    }
+
+    /// 用一把已有的密钥起一个节点：同一个节点重启之后的样子（端口换了，身份还是它）。
+    pub fn start_with_key(id: u32, key: Arc<NodeKey>) -> Self {
+        Self::start_inner(id, key, &[])
+    }
+
+    fn start_inner(id: u32, key: Arc<NodeKey>, addr_servers: &[SocketAddr]) -> Self {
         init_logging();
         let id = NodeId::new(id).unwrap();
-        let key = Arc::new(NodeKey::generate().unwrap());
         let (netmap, netmap_rx) = watch::channel(build_netmap(id, &View::default()));
         // 节点启用为 relay 时要在同一个端口号上监听 TCP，所以挑一个 TCP 和 UDP 都空着的端口：
         // 先让系统分一个空闲的 TCP 端口，再去绑同号的 UDP，绑不上就换一个。

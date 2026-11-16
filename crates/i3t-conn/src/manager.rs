@@ -41,11 +41,33 @@ const RELIABLE_DATAGRAM_TIMEOUT: Duration = Duration::from_secs(10);
 /// 对端发来、上层还没有取走的数据报，每一侧最多排多少个。
 pub(crate) const DATAGRAM_BACKLOG: usize = 1024;
 
+/// 和同一个对端最多同时留几条连接。
+///
+/// 正常情况下是一条；两边同时拨号会多出一条（它空闲一会儿就关）；对端重启之后，旧的那条要等空闲超时才断，新的已经连进来了。
+/// 再多就不正常了：每条连接能让对端压住一个接收窗口（64MB）的数据和上万条流，条数不设限的话，内存的上限也就没有了。
+/// 超出时关掉最旧的：一个正常的对端只有在它那边已经没有能用的连接时才会再拨，所以最旧的那条在它那边早就不在了。
+const MAX_CONNS_PER_PEER: usize = 2;
+
+/// 对端连进来、还在握手的连接最多多少条。
+///
+/// 握手要做一次密钥交换和一次签名，没握完的还要占着状态等到握手超时。连进来的包算在哪个对端名下，
+/// 可以靠伪造 relay 的来源地址来决定，所以伪造来源的人每秒发多少个，这里就要做多少次握手。
+/// 正常的网络里同一时刻在握手的连接屈指可数，取 64 远远够用。
+const MAX_HANDSHAKES: usize = 64;
+
+/// 其中自称来自同一个对端的最多多少条。正常的对端同一时刻只拨一次（重启、换网络之后再拨一次）。
+const MAX_HANDSHAKES_PER_PEER: usize = 4;
+
+/// 超出上面两个数之后，来源地址验证过（带着本端 Retry 给的令牌回来）的握手还能再接这么多。
+/// 令牌只送到了那个节点真正的路上，伪造来源的人拿不到，所以这些是真的对端：别人占满了名额，它也连得进来。
+const MAX_VALIDATED_HANDSHAKES: usize = 2 * MAX_HANDSHAKES;
+
 /// 关闭连接时带给对端的码。
 const CLOSE_IDLE: u32 = 0;
 const CLOSE_SHUTDOWN: u32 = 1;
 const CLOSE_REVOKED: u32 = 2;
 const CLOSE_IDENTITY: u32 = 3;
+const CLOSE_SURPLUS: u32 = 4;
 
 type Stream = Incoming<SendHalf, RecvHalf>;
 
@@ -91,6 +113,22 @@ impl PeerEntry {
         let alive = self.conns.iter().filter(|conn| conn.quic.close_reason().is_none());
         alive.min_by_key(|conn| (conn.dialer, Reverse(conn.serial))).cloned()
     }
+
+    /// 还活着的连接超过 [`MAX_CONNS_PER_PEER`] 条时，把最旧的几条从表里拿掉，交给调用者关闭。
+    fn take_surplus(&mut self) -> Vec<Arc<Conn>> {
+        let alive: Vec<u64> = self.conns.iter().filter(|conn| conn.quic.close_reason().is_none()).map(|conn| conn.serial).collect();
+        let doomed = oldest_beyond(&alive, MAX_CONNS_PER_PEER);
+        let (surplus, kept) = self.conns.drain(..).partition(|conn| doomed.contains(&conn.serial));
+        self.conns = kept;
+        surplus
+    }
+}
+
+/// `serials` 里除了最新的 `keep` 个之外的那些（编号越新越大）。
+fn oldest_beyond(serials: &[u64], keep: usize) -> Vec<u64> {
+    let mut sorted = serials.to_vec();
+    sorted.sort_unstable_by_key(|&serial| Reverse(serial));
+    sorted.split_off(keep.min(sorted.len()))
 }
 
 pub(crate) struct Manager {
@@ -102,6 +140,8 @@ pub(crate) struct Manager {
     transport: Arc<TransportConfig>,
     peers: Mutex<HashMap<NodeId, PeerEntry>>,
     next_serial: AtomicU64,
+    /// 对端连进来、还在握手的连接。
+    handshakes: Arc<Handshakes>,
     /// 对端开过来的流排在这里等上层来取。
     incoming: mpsc::Sender<Stream>,
     datagrams: DatagramQueues,
@@ -127,6 +167,7 @@ impl Manager {
             transport: quic::transport(),
             peers: Mutex::new(HashMap::new()),
             next_serial: AtomicU64::new(0),
+            handshakes: Arc::default(),
             incoming,
             datagrams,
             closed: watch::Sender::new(false),
@@ -230,13 +271,18 @@ impl Manager {
     fn register(self: &Arc<Self>, peer: NodeId, quic: quinn::Connection, dialer: NodeId, key: PublicKey) -> Arc<Conn> {
         let serial = self.next_serial.fetch_add(1, Ordering::Relaxed);
         let conn = Arc::new(Conn { quic, dialer, key, serial, streams: StreamCount::new() });
-        {
+        let surplus = {
             let mut peers = self.peers();
             let entry = peers.entry(peer).or_default();
             entry.conns.push(Arc::clone(&conn));
             entry.arrived.notify_waiters();
-        }
+            entry.take_surplus()
+        };
         tracing::info!(%peer, %dialer, "和对端的连接建立");
+        for old in surplus {
+            tracing::info!(%peer, dialer = %old.dialer, "和这个对端的连接超过了 {MAX_CONNS_PER_PEER} 条，关闭最旧的一条");
+            old.quic.close(VarInt::from_u32(CLOSE_SURPLUS), b"too many connections");
+        }
         tokio::spawn(Arc::clone(self).serve(peer, Arc::clone(&conn)));
         conn
     }
@@ -372,12 +418,29 @@ impl Manager {
                 incoming.refuse();
                 continue;
             }
-            tokio::spawn(Arc::clone(&self).welcome(incoming, claimed));
+            let crowd = self.handshakes.crowd(claimed);
+            match HandshakeGate::decide(crowd, incoming.remote_address_validated(), incoming.may_retry()) {
+                HandshakeGate::Accept => {
+                    let slot = self.handshakes.enter(claimed);
+                    tokio::spawn(Arc::clone(&self).welcome(incoming, claimed, slot));
+                }
+                HandshakeGate::Retry => {
+                    // 每个这样的包一行，不记成 info：伪造来源的人能让这里每秒来很多次。
+                    tracing::debug!(peer = %claimed, ?crowd, "在握手的连接太多：先要它证明来源地址（QUIC Retry）");
+                    if let Err(error) = incoming.retry() {
+                        tracing::debug!(peer = %claimed, %error, "发不了 Retry");
+                    }
+                }
+                HandshakeGate::Ignore => {
+                    tracing::debug!(peer = %claimed, ?crowd, "在握手的连接太多：不理这个连接请求");
+                    incoming.ignore();
+                }
+            }
         }
     }
 
-    /// 和一个连进来的对端握手，核对它是谁。
-    async fn welcome(self: Arc<Self>, incoming: quinn::Incoming, claimed: NodeId) {
+    /// 和一个连进来的对端握手，核对它是谁。`slot` 在握手结束（成功或者失败）之前占着握手的名额。
+    async fn welcome(self: Arc<Self>, incoming: quinn::Incoming, claimed: NodeId, slot: HandshakeSlot) {
         let connecting = match incoming.accept() {
             Ok(connecting) => connecting,
             Err(error) => {
@@ -385,7 +448,9 @@ impl Manager {
                 return;
             }
         };
-        let connection = match tokio::time::timeout(WELCOME_TIMEOUT, connecting).await {
+        let handshake = tokio::time::timeout(WELCOME_TIMEOUT, connecting).await;
+        drop(slot);
+        let connection = match handshake {
             Ok(Ok(connection)) => connection,
             Ok(Err(error)) => {
                 // 公钥不在 netmap 里的对端在这里被拒绝。
@@ -469,6 +534,90 @@ impl Manager {
     pub(crate) fn abort(&self) {
         self.closed.send_replace(true);
         self.quic.close(VarInt::from_u32(CLOSE_SHUTDOWN), b"shutdown");
+    }
+}
+
+/// 正在握手的、对端连进来的连接：总数和按自称的对端分的数。
+#[derive(Debug, Default)]
+struct Handshakes {
+    counts: Mutex<HandshakeCounts>,
+}
+
+#[derive(Debug, Default)]
+struct HandshakeCounts {
+    total: usize,
+    per_peer: HashMap<NodeId, usize>,
+}
+
+/// 一个连接请求到的时候，握手名额被占了多少。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Crowd {
+    /// 自称来自同一个对端、还在握手的。
+    peer: usize,
+    /// 所有还在握手的。
+    total: usize,
+}
+
+impl Handshakes {
+    fn counts(&self) -> std::sync::MutexGuard<'_, HandshakeCounts> {
+        self.counts.lock().expect("handshake table mutex poisoned")
+    }
+
+    fn crowd(&self, peer: NodeId) -> Crowd {
+        let counts = self.counts();
+        Crowd { peer: counts.per_peer.get(&peer).copied().unwrap_or(0), total: counts.total }
+    }
+
+    fn enter(self: &Arc<Self>, peer: NodeId) -> HandshakeSlot {
+        let mut counts = self.counts();
+        counts.total += 1;
+        *counts.per_peer.entry(peer).or_insert(0) += 1;
+        HandshakeSlot { table: Arc::clone(self), peer }
+    }
+}
+
+/// 一个握手占着的名额，握手结束时丢弃。
+struct HandshakeSlot {
+    table: Arc<Handshakes>,
+    peer: NodeId,
+}
+
+impl Drop for HandshakeSlot {
+    fn drop(&mut self) {
+        let mut counts = self.table.counts();
+        counts.total -= 1;
+        if let Some(count) = counts.per_peer.get_mut(&self.peer) {
+            *count -= 1;
+            if *count == 0 {
+                counts.per_peer.remove(&self.peer);
+            }
+        }
+    }
+}
+
+/// 一个连接请求接下来怎么办。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HandshakeGate {
+    /// 和它握手。
+    Accept,
+    /// 先回一个 Retry，要它带着令牌再来：证明来源地址是真的，本端不用为此花任何算力，也不记任何状态。
+    /// Retry 发往它自称的那个节点的路上，伪造来源的人收不到。
+    Retry,
+    /// 不理。它真是那个节点的话会重发，等名额空出来再接。
+    Ignore,
+}
+
+impl HandshakeGate {
+    /// `validated`：来源地址已经验证过（带着 Retry 的令牌）；`may_retry`：还能要它 Retry（带着令牌的不能再要一次）。
+    fn decide(crowd: Crowd, validated: bool, may_retry: bool) -> Self {
+        let crowded = crowd.peer >= MAX_HANDSHAKES_PER_PEER || crowd.total >= MAX_HANDSHAKES;
+        match (crowded, validated) {
+            (false, _) => Self::Accept,
+            (true, true) if crowd.total < MAX_VALIDATED_HANDSHAKES => Self::Accept,
+            (true, true) => Self::Ignore,
+            (true, false) if may_retry => Self::Retry,
+            (true, false) => Self::Ignore,
+        }
     }
 }
 
@@ -577,6 +726,46 @@ impl DatagramSender for DatagramHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn beyond_two_connections_to_a_peer_the_oldest_ones_go() {
+        assert!(oldest_beyond(&[3, 7], MAX_CONNS_PER_PEER).is_empty());
+        assert_eq!(oldest_beyond(&[3, 9, 7], MAX_CONNS_PER_PEER), [3]);
+        assert_eq!(oldest_beyond(&[12, 3, 9, 7, 10], MAX_CONNS_PER_PEER), [9, 7, 3]);
+        assert!(oldest_beyond(&[], MAX_CONNS_PER_PEER).is_empty());
+    }
+
+    #[test]
+    fn handshakes_are_accepted_until_crowded_then_asked_to_prove_their_address() {
+        let crowd = |peer, total| Crowd { peer, total };
+        assert_eq!(HandshakeGate::decide(crowd(0, 0), false, true), HandshakeGate::Accept);
+        assert_eq!(HandshakeGate::decide(crowd(MAX_HANDSHAKES_PER_PEER - 1, MAX_HANDSHAKES - 1), false, true), HandshakeGate::Accept);
+
+        // 同一个对端名下的握手太多，或者总的太多：没有验证过地址的先要 Retry，Retry 过了还不行的就不理。
+        for crowded in [crowd(MAX_HANDSHAKES_PER_PEER, 0), crowd(0, MAX_HANDSHAKES)] {
+            assert_eq!(HandshakeGate::decide(crowded, false, true), HandshakeGate::Retry, "{crowded:?}");
+            assert_eq!(HandshakeGate::decide(crowded, false, false), HandshakeGate::Ignore, "{crowded:?}");
+            // 带着令牌回来的是真的对端：别人占满了名额它也接，直到更高的上限。
+            assert_eq!(HandshakeGate::decide(crowded, true, false), HandshakeGate::Accept, "{crowded:?}");
+        }
+        assert_eq!(HandshakeGate::decide(crowd(0, MAX_VALIDATED_HANDSHAKES), true, false), HandshakeGate::Ignore);
+    }
+
+    #[test]
+    fn a_handshake_holds_its_slot_until_it_ends() {
+        let table = Arc::new(Handshakes::default());
+        let (a, b) = (NodeId::new(1).unwrap(), NodeId::new(2).unwrap());
+        let first = table.enter(a);
+        let second = table.enter(a);
+        let other = table.enter(b);
+        assert_eq!(table.crowd(a), Crowd { peer: 2, total: 3 });
+        assert_eq!(table.crowd(b), Crowd { peer: 1, total: 3 });
+        drop((first, other));
+        assert_eq!(table.crowd(a), Crowd { peer: 1, total: 1 });
+        drop(second);
+        assert_eq!(table.crowd(a), Crowd { peer: 0, total: 0 });
+        assert!(table.counts().per_peer.is_empty(), "没有在握手的对端不留记录");
+    }
 
     #[test]
     fn idle_connections_are_closed_after_five_minutes_unless_the_peer_is_kept_alive() {
