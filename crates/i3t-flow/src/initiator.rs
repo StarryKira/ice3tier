@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use i3t_conn::{Connector, RecvStream, SendStream, StreamCode};
 use i3t_proto::NodeId;
-use i3t_proto::flow::{Open, Reason, Reply};
+use i3t_proto::flow::{Class, Open, Reason, Reply};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
@@ -16,6 +16,7 @@ use crate::{FlowError, header};
 /// 到 `peer` 开一条流，把 OPEN 和调用者的首批数据一次写出去。
 ///
 /// 和 `peer` 之间已经有连接时不加任何往返：OPEN 和首批数据在同一次写里。
+/// 这一端往对端发数据的优先级按 OPEN 里的服务等级来，首批数据也是。
 ///
 /// 失败之后不会自己重试，调用者也不应该原样重放：OPEN 一旦发出，连接断了就无从知道对端有没有把首批数据交给目标，
 /// 重放可能让一个非幂等的请求被执行两次。
@@ -31,11 +32,12 @@ pub async fn open<C: Connector>(
 ) -> Result<Pending<C::Send, C::Recv>, FlowError> {
     let started = Instant::now();
     let (mut send, recv) = connector.open(peer).await?;
+    send.set_priority(relay::priority_of(request.class));
     let mut bytes = Vec::with_capacity(Open::MAX_LEN + first_data.len());
     request.encode(&mut bytes);
     bytes.extend_from_slice(first_data);
     send.write_all(&bytes).await.map_err(FlowError::Write)?;
-    Ok(Pending { send, recv, started })
+    Ok(Pending { send, recv, class: request.class, started })
 }
 
 /// 已经发出 OPEN、还没有读 REPLY 的流。
@@ -45,6 +47,7 @@ pub async fn open<C: Connector>(
 pub struct Pending<S, R> {
     send: S,
     recv: R,
+    class: Class,
     started: Instant,
 }
 
@@ -88,6 +91,6 @@ impl<S: SendStream, R: RecvStream> Pending<S, R> {
     }
 
     fn parts(self, reply_pending: bool) -> Parts<S, R> {
-        Parts { send: self.send, recv: self.recv, role: TcpRole::Client, started: self.started, reply_pending }
+        Parts { send: self.send, recv: self.recv, role: TcpRole::Client, class: self.class, started: self.started, reply_pending }
     }
 }

@@ -2,8 +2,9 @@
 
 use std::future::Future;
 use std::io;
+use std::net::SocketAddr;
 
-use i3t_proto::flow::{Host, Reply};
+use i3t_proto::flow::{Host, Reply, Status};
 use socket2::SockRef;
 use tokio::net::TcpStream;
 
@@ -24,6 +25,15 @@ pub trait LocalEgress: Send + Sync + 'static {
     ///
     /// 失败时返回的 [`Reply`] 和对端节点拒绝建流时给的是同一套状态，入口按同样的规则把它告诉客户端。
     fn connect(&self, host: &Host, port: u16, policy: EgressPolicy) -> impl Future<Output = Result<TcpStream, Reply>> + Send;
+
+    /// 就地出站的 UDP：发往 `host:port` 的报文该发到哪个地址。解析域名、按策略检查，和 [`connect`](Self::connect) 是同一套规则。
+    ///
+    /// 入口自己拿着发报文的端口，每个报文发之前来问一次；实现应该让重复的询问很便宜（解析结果要缓存）。
+    /// 不支持 UDP 的实现不用写它：默认一律拒绝。
+    fn udp_destination(&self, host: &Host, port: u16, policy: EgressPolicy) -> impl Future<Output = Result<SocketAddr, Reply>> + Send {
+        let _ = (host, port, policy);
+        async { Err(Reply::new(Status::NotEnabled, "就地出站不支持 UDP")) }
+    }
 }
 
 /// 两个方向各搬了多少字节。

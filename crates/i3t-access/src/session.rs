@@ -7,6 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use i3t_conn::Connector;
+use i3t_conn::contract::Datagrams;
+use i3t_flow::datagram::Opener;
 use i3t_flow::{FlowError, Summary};
 use i3t_model::Netmap;
 use i3t_model::netmap::{Credential, Forward, Listener, ListenerProtocol};
@@ -24,7 +26,7 @@ use crate::first_data::{self, FIRST_BYTE_WAIT};
 use crate::message::{Parsed, Parser, ProxyAuth};
 use crate::route::{self, Route};
 use crate::selector::Selector;
-use crate::{http, socks5};
+use crate::{http, socks5, udp};
 
 /// 客户端要在这么长时间之内完成代理握手。握手只有几个小报文，这个时限只是不让不说话的连接一直占着。
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -36,11 +38,15 @@ const READ_CHUNK: usize = 4096;
 const CLOSE_LINGER: Duration = Duration::from_millis(500);
 
 /// 所有连接共用的东西。
-pub(crate) struct Shared<C, E> {
+pub(crate) struct Shared<C: Datagrams, E> {
     pub connector: Arc<C>,
+    /// 本节点开的数据报上下文。对端发回来的数据报由它分发，所以 [`crate::Access::run`] 要让它一直跑着。
+    pub opener: Opener<C>,
     pub egress: E,
     pub netmap: watch::Receiver<Arc<Netmap>>,
     pub slots: Arc<Slots>,
+    /// UDP 端口转发的会话没有报文往来多久之后回收。
+    pub udp_idle_timeout: Duration,
 }
 
 /// 握手阶段的客户端连接：带着一个缓冲区，里面是已经读进来、还没有被解析走的字节。
@@ -132,8 +138,10 @@ impl Front {
     }
 }
 
-/// 握手得到的结果：客户端要去哪里，认证里写了什么。
+/// 握手得到的结果：客户端要做什么、去哪里，认证里写了什么。
 struct Ask {
+    command: socks5::Command,
+    /// CONNECT 的目标；UDP ASSOCIATE 时是客户端自称会用来发报文的地址。
     host: Host,
     port: u16,
     /// 用户名；没有做认证时是空的。
@@ -158,7 +166,7 @@ fn requires_credential(listener: &Listener) -> bool {
     listener.require_credential || !listener.bind.ip().is_loopback()
 }
 
-/// SOCKS5 握手：问候、（可选的）用户名密码认证、CONNECT 请求。失败时已经回了相应的应答，返回 `None`。
+/// SOCKS5 握手：问候、（可选的）用户名密码认证、请求（CONNECT 或者 UDP ASSOCIATE）。失败时已经回了相应的应答，返回 `None`。
 async fn socks5_handshake(client: &mut Client, credentials: &[Credential], required: bool) -> Option<Ask> {
     let greeting = match client.read(socks5::Greeting::parse).await {
         Ok(greeting) => greeting,
@@ -187,9 +195,9 @@ async fn socks5_handshake(client: &mut Client, credentials: &[Credential], requi
         return None;
     };
 
-    match client.read(socks5::Connect::parse).await {
-        Ok(connect) => {
-            Some(Ask { host: connect.host, port: connect.port, username: auth.map(|auth| auth.username).unwrap_or_default(), credential })
+    match client.read(socks5::Request::parse).await {
+        Ok(socks5::Request { command, host, port }) => {
+            Some(Ask { command, host, port, username: auth.map(|auth| auth.username).unwrap_or_default(), credential })
         }
         Err(Broken::Malformed(error)) => {
             tracing::info!(%error, "拒绝了一个 SOCKS5 请求");
@@ -219,7 +227,8 @@ async fn http_handshake(client: &mut Client, credentials: &[Credential], require
         let _ = client.stream.write_all(http::Response::ProxyAuthenticationRequired.as_bytes()).await;
         return None;
     };
-    Some(Ask { host: connect.host, port: connect.port, username: connect.auth.map(|auth| auth.username).unwrap_or_default(), credential })
+    let username = connect.auth.map(|auth| auth.username).unwrap_or_default();
+    Some(Ask { command: socks5::Command::Connect, host: connect.host, port: connect.port, username, credential })
 }
 
 /// 握手读到一半读不下去了：连接出错、客户端走了，或者发来的根本不是这种协议。没有什么可回的，记一行就放弃。
@@ -233,8 +242,8 @@ fn give_up<E: std::fmt::Display>(stage: &str, broken: &Broken<E>) -> Option<Ask>
 }
 
 /// 处理代理监听器上的一条连接。
-pub(crate) async fn proxy<C: Connector, E: LocalEgress>(
-    shared: &Shared<C, E>,
+pub(crate) async fn proxy<C: Connector + Datagrams, E: LocalEgress>(
+    shared: &Arc<Shared<C, E>>,
     netmap: &Netmap,
     listener: &Listener,
     stream: TcpStream,
@@ -277,6 +286,11 @@ pub(crate) async fn proxy<C: Connector, E: LocalEgress>(
         },
         None => None,
     };
+    if ask.command == socks5::Command::UdpAssociate {
+        // 每个报文各有各的目标，往哪里去等报文来了再判断。
+        let origin = Origin { credential: ask.credential.map(|credential| credential.name), client: origin_address(from) };
+        return udp::association::run(shared, listener, client.stream, from, (ask.host, ask.port), selector, origin).await;
+    }
     let route = match route::decide(netmap, listener, &selector, &ask.host, ask.port) {
         Ok(route) => route,
         Err(reason) => {
@@ -304,7 +318,13 @@ pub(crate) async fn proxy<C: Connector, E: LocalEgress>(
 }
 
 /// 乐观回复：先告诉客户端连上了，读到它的首批数据，和 OPEN 一起发出去，不等对端的 REPLY。
-async fn without_waiting<C: Connector, E>(shared: &Shared<C, E>, mut client: Client, front: Front, peer: NodeId, request: &Open) {
+async fn without_waiting<C: Connector + Datagrams, E>(
+    shared: &Shared<C, E>,
+    mut client: Client,
+    front: Front,
+    peer: NodeId,
+    request: &Open,
+) {
     if let Err(error) = client.stream.write_all(&front.established()).await {
         return tracing::debug!(%error, "客户端在应答写出去之前断开了");
     }
@@ -323,7 +343,7 @@ async fn without_waiting<C: Connector, E>(shared: &Shared<C, E>, mut client: Cli
 }
 
 /// 不用乐观回复：等对端说连上了，才告诉客户端；对端拒绝时客户端拿到的是具体的错误码。
-async fn after_reply<C: Connector, E>(shared: &Shared<C, E>, mut client: Client, front: Front, peer: NodeId, request: &Open) {
+async fn after_reply<C: Connector + Datagrams, E>(shared: &Shared<C, E>, mut client: Client, front: Front, peer: NodeId, request: &Open) {
     // 客户端这时还没有收到应答，通常什么都没有发；万一握手时多读进来了一点，就当作首批数据。
     let opened = async { i3t_flow::open(&*shared.connector, peer, request, &client.buffer).await?.established().await };
     let flow = match opened.await {
@@ -346,7 +366,14 @@ async fn after_reply<C: Connector, E>(shared: &Shared<C, E>, mut client: Client,
 }
 
 /// 就地出站：本机直接连目标，连上了才告诉客户端。
-async fn locally<C, E: LocalEgress>(shared: &Shared<C, E>, mut client: Client, front: Front, host: &Host, port: u16, policy: EgressPolicy) {
+async fn locally<C: Datagrams, E: LocalEgress>(
+    shared: &Shared<C, E>,
+    mut client: Client,
+    front: Front,
+    host: &Host,
+    port: u16,
+    policy: EgressPolicy,
+) {
     let mut target = match shared.egress.connect(host, port, policy).await {
         Ok(target) => target,
         Err(reply) => {
@@ -371,7 +398,7 @@ async fn locally<C, E: LocalEgress>(shared: &Shared<C, E>, mut client: Client, f
 /// 处理端口转发监听上的一条连接：它整个变成到目标节点的一条流。
 ///
 /// 端口转发没有地方告诉客户端错误码，所以不等对端的 REPLY：失败一律表现为连接被重置。
-pub(crate) async fn forward<C: Connector, E>(
+pub(crate) async fn forward<C: Connector + Datagrams, E>(
     shared: &Shared<C, E>,
     netmap: &Netmap,
     forward: &Forward,
@@ -398,7 +425,7 @@ pub(crate) async fn forward<C: Connector, E>(
 }
 
 /// 写进 OPEN 的客户端地址。本机的程序连过来时不带：回环地址对另一头没有意义。
-fn origin_address(from: SocketAddr) -> Option<SocketAddr> {
+pub(crate) fn origin_address(from: SocketAddr) -> Option<SocketAddr> {
     let ip = from.ip().to_canonical();
     (!ip.is_loopback()).then(|| SocketAddr::new(ip, from.port()))
 }

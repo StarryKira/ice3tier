@@ -29,7 +29,7 @@ use i3t_proto::{NodeId, PublicKey};
 use ipnet::IpNet;
 use ring::digest;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::watch;
 use tokio::time::{sleep, timeout};
 
@@ -150,6 +150,7 @@ struct FakeState {
     redirects: HashMap<SocketAddr, SocketAddr>,
     resolved: Vec<String>,
     connected: Vec<SocketAddr>,
+    udp_destinations: Vec<SocketAddr>,
 }
 
 impl Default for FakeSystem {
@@ -162,6 +163,7 @@ impl Default for FakeSystem {
             redirects: HashMap::new(),
             resolved: Vec::new(),
             connected: Vec::new(),
+            udp_destinations: Vec::new(),
         };
         Self { state: Arc::new(Mutex::new(state)) }
     }
@@ -187,7 +189,12 @@ impl FakeSystem {
         self.state.lock().unwrap().names.insert(name.into(), Err(error));
     }
 
-    /// 把去 `target` 的连接引到本机的 `real` 上。
+    /// 出口到现在为止决定往哪些地址发 UDP 报文（引到别处之前的），每个目标通过检查时记一次。
+    pub fn udp_destinations(&self) -> Vec<SocketAddr> {
+        self.state.lock().unwrap().udp_destinations.clone()
+    }
+
+    /// 把去 `target` 的连接（和 UDP 报文）引到本机的 `real` 上。
     pub fn redirect(&self, target: &str, real: SocketAddr) {
         self.state.lock().unwrap().redirects.insert(target.parse().unwrap(), real);
     }
@@ -231,6 +238,17 @@ impl System for FakeSystem {
         };
         TcpStream::connect(real).await
     }
+
+    fn udp_route(&self, addr: SocketAddr) -> SocketAddr {
+        let mut state = self.state.lock().unwrap();
+        state.udp_destinations.push(addr);
+        match state.redirects.get(&addr) {
+            Some(real) => *real,
+            None if is_this_machine(addr.ip()) => addr,
+            // 没有安排过的地址绝不真的去发：引到本机一个没有人收的端口上，报文就此消失。
+            None => SocketAddr::from(([127, 0, 0, 1], 9)),
+        }
+    }
 }
 
 fn is_this_machine(ip: IpAddr) -> bool {
@@ -254,13 +272,22 @@ pub struct Node {
 
 impl Node {
     pub fn start(mesh: &MemoryMesh, netmap: Netmap) -> Self {
+        Self::start_with_udp_idle(mesh, netmap, None)
+    }
+
+    /// 同 [`Node::start`]。`udp_idle` 有值时，数据报上下文和 UDP 端口转发的会话空闲这么久就回收，而不是默认的 60 秒。
+    pub fn start_with_udp_idle(mesh: &MemoryMesh, netmap: Netmap, udp_idle: Option<Duration>) -> Self {
         let id = netmap.me.id;
         let (connector, acceptor) = mesh.join(id);
         let (sender, receiver) = watch::channel(Arc::new(netmap));
         let system = FakeSystem::default();
         let outbound = Outbound::new(receiver.clone(), system.clone());
-        let exit = Arc::new(Exit::new(receiver.clone(), outbound.clone()));
-        let access = Arc::new(Access::new(Arc::new(connector), outbound, receiver));
+        let (mut exit, mut access) = (Exit::new(receiver.clone(), outbound.clone()), Access::new(Arc::new(connector), outbound, receiver));
+        if let Some(udp_idle) = udp_idle {
+            exit = exit.with_datagram_idle_timeout(udp_idle);
+            access = access.with_udp_idle_timeout(udp_idle);
+        }
+        let (exit, access) = (Arc::new(exit), Arc::new(access));
         tokio::spawn({
             let access = Arc::clone(&access);
             async move { access.run().await }
@@ -330,12 +357,21 @@ pub struct World {
 
 impl World {
     pub async fn new() -> Self {
+        Self::start(None).await
+    }
+
+    /// 同 [`World::new`]，但数据报上下文和 UDP 端口转发的会话空闲 `udp_idle` 就回收。
+    pub async fn with_udp_idle(udp_idle: Duration) -> Self {
+        Self::start(Some(udp_idle)).await
+    }
+
+    async fn start(udp_idle: Option<Duration>) -> Self {
         let mesh = MemoryMesh::new();
         let mut laptop = netmap(LAPTOP);
         laptop.me.listeners =
             vec![listener("socks", ListenerProtocol::Socks5, "127.0.0.1:0"), listener("http", ListenerProtocol::Http, "127.0.0.1:0")];
-        let world =
-            Self { laptop: Node::start(&mesh, laptop), gw: Node::start(&mesh, netmap(GW)), nas: Node::start(&mesh, netmap(NAS)), mesh };
+        let node = |netmap| Node::start_with_udp_idle(&mesh, netmap, udp_idle);
+        let world = Self { laptop: node(laptop), gw: node(netmap(GW)), nas: node(netmap(NAS)), mesh: mesh.clone() };
         world.laptop.settled().await;
         world
     }
@@ -542,4 +578,161 @@ pub async fn eventually(what: &str, mut condition: impl FnMut() -> bool) {
         }
     });
     waited.await.unwrap_or_else(|_| panic!("等了 {PATIENCE:?} 也没有等到：{what}"));
+}
+
+/// 测试扮演的 UDP 目标：一个绑好的端口，测试从它收出口发过来的报文。
+pub struct UdpTarget {
+    socket: UdpSocket,
+}
+
+impl UdpTarget {
+    pub async fn bind(ip: &str) -> Self {
+        Self { socket: UdpSocket::bind((ip.parse::<IpAddr>().unwrap(), 0)).await.unwrap() }
+    }
+
+    pub fn addr(&self) -> SocketAddr {
+        self.socket.local_addr().unwrap()
+    }
+
+    /// 等下一个报文，返回它的内容和来源。
+    pub async fn recv(&self) -> (Vec<u8>, SocketAddr) {
+        let mut buf = vec![0; 65_535];
+        let (len, from) = timeout(PATIENCE, self.socket.recv_from(&mut buf)).await.expect("应该有报文发到目标").unwrap();
+        buf.truncate(len);
+        (buf, from)
+    }
+
+    pub async fn send(&self, data: &[u8], to: SocketAddr) {
+        self.socket.send_to(data, to).await.unwrap();
+    }
+
+    /// 在 `within` 之内没有任何报文发过来。
+    pub async fn assert_untouched(&self, within: Duration) {
+        let mut buf = [0; 16];
+        assert!(timeout(within, self.socket.recv_from(&mut buf)).await.is_err(), "不应该有报文发到这个目标");
+    }
+
+    /// 之后每个报文都原样发回它的来源。
+    pub fn echo(self) -> SocketAddr {
+        let addr = self.addr();
+        tokio::spawn(async move {
+            let mut buf = vec![0; 65_535];
+            while let Ok((len, from)) = self.socket.recv_from(&mut buf).await {
+                let _ = self.socket.send_to(&buf[..len], from).await;
+            }
+        });
+        addr
+    }
+}
+
+/// 在本机回环上起一个 UDP 回显服务。
+pub async fn udp_echo_server() -> SocketAddr {
+    UdpTarget::bind("127.0.0.1").await.echo()
+}
+
+/// 一个 SOCKS5 的 UDP 关联，测试扮演客户端。
+pub struct UdpAssociation {
+    /// 那条 TCP 连接。它一关，关联就结束。
+    pub control: TcpStream,
+    /// 客户端发报文用的端口。
+    pub socket: UdpSocket,
+    /// 代理给的 UDP 中继端口。
+    pub relay: SocketAddr,
+}
+
+/// 做一次 SOCKS5 握手，请求 UDP ASSOCIATE。`auth` 是用户名和密码；没有时客户端只提供"不认证"。
+/// 请求里客户端的地址写全 0：大多数客户端都这样。
+pub async fn udp_associate(proxy: SocketAddr, auth: Option<(&str, &str)>) -> UdpAssociation {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    udp_associate_from(proxy, auth, socket, [0; 6]).await
+}
+
+/// 同 [`udp_associate`]，用给定的端口发报文，并且在请求里写上 `declared`（IPv4 地址 4 字节加端口 2 字节）。
+pub async fn udp_associate_from(proxy: SocketAddr, auth: Option<(&str, &str)>, socket: UdpSocket, declared: [u8; 6]) -> UdpAssociation {
+    timeout(PATIENCE, async {
+        let mut control = TcpStream::connect(proxy).await.unwrap();
+        control.write_all(if auth.is_some() { &[5, 2, 0, 2] } else { &[5, 1, 0] }).await.unwrap();
+        let mut selection = [0; 2];
+        control.read_exact(&mut selection).await.unwrap();
+        if let Some((username, password)) = auth {
+            assert_eq!(selection, [5, 2]);
+            let mut message = vec![1, u8::try_from(username.len()).unwrap()];
+            message.extend_from_slice(username.as_bytes());
+            message.push(u8::try_from(password.len()).unwrap());
+            message.extend_from_slice(password.as_bytes());
+            control.write_all(&message).await.unwrap();
+            let mut status = [0; 2];
+            control.read_exact(&mut status).await.unwrap();
+            assert_eq!(status, [1, 0], "用户名密码认证应该通过");
+        } else {
+            assert_eq!(selection, [5, 0]);
+        }
+
+        control.write_all(&[&[5, 3, 0, 1][..], &declared].concat()).await.unwrap();
+        let mut reply = [0; 10];
+        control.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply[..4], [5, 0, 0, 1], "代理应该答应 UDP ASSOCIATE，并给出一个 IPv4 的中继地址");
+        let relay = SocketAddr::from(([reply[4], reply[5], reply[6], reply[7]], u16::from_be_bytes([reply[8], reply[9]])));
+        UdpAssociation { control, socket, relay }
+    })
+    .await
+    .expect("SOCKS5 握手应该很快完成")
+}
+
+/// 一个 SOCKS5 UDP 报文：头加数据。`host` 写成地址就按地址发，否则按域名发。
+pub fn socks5_udp_packet(host: &str, port: u16, data: &[u8]) -> Vec<u8> {
+    let mut packet = vec![0, 0, 0];
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => {
+            packet.push(1);
+            packet.extend_from_slice(&ip.octets());
+        }
+        Ok(IpAddr::V6(ip)) => {
+            packet.push(4);
+            packet.extend_from_slice(&ip.octets());
+        }
+        Err(_) => {
+            packet.push(3);
+            packet.push(u8::try_from(host.len()).unwrap());
+            packet.extend_from_slice(host.as_bytes());
+        }
+    }
+    packet.extend_from_slice(&port.to_be_bytes());
+    packet.extend_from_slice(data);
+    packet
+}
+
+impl UdpAssociation {
+    /// 经中继端口发一个报文给 `host:port`。
+    pub async fn send(&self, host: &str, port: u16, data: &[u8]) {
+        self.socket.send_to(&socks5_udp_packet(host, port, data), self.relay).await.unwrap();
+    }
+
+    /// 等中继端口发回来的下一个报文，返回它的来源（写成 `地址:端口`）和数据。
+    pub async fn recv(&self) -> (String, Vec<u8>) {
+        let mut buf = vec![0; 65_535];
+        let (len, from) = timeout(PATIENCE, self.socket.recv_from(&mut buf)).await.expect("中继端口应该发回一个报文").unwrap();
+        assert_eq!(from, self.relay, "报文应该是从中继端口发回来的");
+        assert_eq!(buf[..3], [0, 0, 0], "保留字节和分片号都是 0");
+        let (source, header_len) = match buf[3] {
+            1 => (SocketAddr::from(([buf[4], buf[5], buf[6], buf[7]], u16::from_be_bytes([buf[8], buf[9]]))).to_string(), 10),
+            4 => {
+                let ip: [u8; 16] = buf[4..20].try_into().unwrap();
+                (SocketAddr::from((ip, u16::from_be_bytes([buf[20], buf[21]]))).to_string(), 22)
+            }
+            3 => {
+                let name_end = 5 + usize::from(buf[4]);
+                let name = std::str::from_utf8(&buf[5..name_end]).unwrap();
+                (format!("{name}:{}", u16::from_be_bytes([buf[name_end], buf[name_end + 1]])), name_end + 2)
+            }
+            other => panic!("不认识的地址类型 {other}"),
+        };
+        (source, buf[header_len..len].to_vec())
+    }
+
+    /// 在 `within` 之内中继端口什么都没有发回来。
+    pub async fn assert_silent(&self, within: Duration) {
+        let mut buf = [0; 16];
+        assert!(timeout(within, self.socket.recv_from(&mut buf)).await.is_err(), "中继端口不应该发回报文");
+    }
 }

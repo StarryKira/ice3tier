@@ -1,4 +1,4 @@
-//! 出口要向操作系统要的三样东西：本机网卡上的地址、域名解析、TCP 连接。
+//! 出口要向操作系统要的几样东西：本机网卡上的地址、域名解析、TCP 连接，以及 UDP 报文发到哪里。
 
 use std::future::Future;
 use std::io;
@@ -25,6 +25,14 @@ pub trait System: Send + Sync + 'static {
 
     /// 建一条到 `addr` 的 TCP 连接。连接的选项（NODELAY、保活）由调用者设置。
     fn connect(&self, addr: SocketAddr) -> impl Future<Output = io::Result<TcpStream>> + Send;
+
+    /// 发往 `addr` 的 UDP 报文实际发到哪个地址。
+    ///
+    /// 真的操作系统上就是 `addr` 自己，所以有这个默认实现。测试里的替身用它把"公网地址"引到本机的测试服务上，
+    /// 作用和替身的 [`connect`](Self::connect) 一样；策略检查在这之前已经按 `addr` 做完了。
+    fn udp_route(&self, addr: SocketAddr) -> SocketAddr {
+        addr
+    }
 }
 
 /// 域名解析失败的原因。两种情况的归因不同：域名不存在算目标的，解析器出问题算出口自己的。

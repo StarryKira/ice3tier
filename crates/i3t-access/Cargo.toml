@@ -9,6 +9,7 @@ description = "ice3tier 的入口：SOCKS5、HTTP CONNECT、端口转发的监�
 
 [dependencies]
 base64.workspace = true
+bytes.workspace = true
 i3t-conn = { path = "../i3t-conn" }
 i3t-flow = { path = "../i3t-flow" }
 i3t-model = { path = "../i3t-model" }

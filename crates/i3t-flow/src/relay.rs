@@ -13,14 +13,19 @@
 //! 中途不管是出错、任务被取消还是进程退出，TCP 那一头看到的都是重置。
 //!
 //! 没有空闲超时。一条静默的流可以一直留着，它的死活由连接层的保活和 TCP 的内核保活判断。
+//!
+//! 流往对端节点发数据的优先级跟着服务等级（[`priority_of`]）：同一条连接上，interactive 的流先于 bulk 的流发出。
+//! `auto` 的流开始时按 interactive 对待，这一端在它上面发出的数据累计超过 [`AUTO_DEMOTE_AFTER`] 之后降到 bulk 的优先级。
+//! 优先级只管本端发出去的方向，所以两端各数各的：下载时降级的是出口那一端，上传时是入口这一端。
 
 use std::fmt;
 use std::future::Future;
 use std::io;
 use std::time::{Duration, Instant};
 
+use i3t_conn::contract::Priority;
 use i3t_conn::{RecvStream, SendStream, StreamAborted, StreamCode};
-use i3t_proto::flow::{Reason, Reply};
+use i3t_proto::flow::{Class, Reason, Reply};
 use socket2::SockRef;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -30,6 +35,18 @@ use crate::{FlowError, header};
 
 /// 每个方向一块这么大的缓冲区。流的数量可以上万，所以不取更大的。
 const BUFFER_LEN: usize = 16 * 1024;
+
+/// `auto` 等级的流，这一端在它上面发出多少字节之后降到 bulk 的优先级。
+pub(crate) const AUTO_DEMOTE_AFTER: u64 = 1024 * 1024;
+
+/// 一个服务等级的流刚建立时，往对端发数据用什么优先级。
+pub(crate) const fn priority_of(class: Class) -> Priority {
+    match class {
+        Class::Interactive | Class::Auto => Priority::High,
+        Class::Reliable => Priority::Normal,
+        Class::Bulk => Priority::Low,
+    }
+}
 
 /// TCP 那一头是谁。决定它出错时告诉对端节点的原因码。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +62,8 @@ pub(crate) struct Parts<S, R> {
     pub send: S,
     pub recv: R,
     pub role: TcpRole,
+    /// 服务等级。发送方向的优先级在建流时已经按它设好了，这里用它判断要不要中途降级。
+    pub class: Class,
     /// 首字节时间从这个时刻算起。
     pub started: Instant,
     /// 流上的 REPLY 还没有读（乐观回复）。
@@ -193,7 +212,7 @@ pub(crate) async fn run<S: SendStream, R: RecvStream>(
     mut tcp: TcpStream,
     cancel: impl Future<Output = Reason>,
 ) -> Summary {
-    let Parts { mut send, mut recv, role, started, reply_pending } = parts;
+    let Parts { mut send, mut recv, role, class, started, reply_pending } = parts;
     // 先设成"关闭时发 RST"。这个选项只管 close，中途用 shutdown 发的 FIN 不受影响。
     if let Err(error) = tcp.set_zero_linger() {
         tracing::warn!(%error, "设置不了 SO_LINGER，搬运中断时 TCP 一侧可能看到正常结束");
@@ -203,7 +222,7 @@ pub(crate) async fn run<S: SendStream, R: RecvStream>(
     let mut from_flow = Traffic::default();
     let outcome = {
         let (tcp_read, tcp_write) = tcp.split();
-        let upstream = tcp_to_flow(tcp_read, &mut send, &mut from_tcp, started);
+        let upstream = tcp_to_flow(tcp_read, &mut send, &mut from_tcp, started, class);
         let downstream = flow_to_tcp(&mut recv, tcp_write, &mut from_flow, started, reply_pending);
         drive(upstream, downstream, cancel).await
     };
@@ -271,8 +290,15 @@ async fn drive(
     }
 }
 
-async fn tcp_to_flow<S: SendStream>(mut tcp: ReadHalf<'_>, send: &mut S, traffic: &mut Traffic, started: Instant) -> Result<(), Abort> {
+async fn tcp_to_flow<S: SendStream>(
+    mut tcp: ReadHalf<'_>,
+    send: &mut S,
+    traffic: &mut Traffic,
+    started: Instant,
+    class: Class,
+) -> Result<(), Abort> {
     let mut buf = vec![0; BUFFER_LEN];
+    let mut demotable = class == Class::Auto;
     loop {
         let len = tcp.read(&mut buf).await.map_err(Abort::Tcp)?;
         if len == 0 {
@@ -281,6 +307,11 @@ async fn tcp_to_flow<S: SendStream>(mut tcp: ReadHalf<'_>, send: &mut S, traffic
         traffic.arrived(started);
         send.write_all(&buf[..len]).await.map_err(Abort::Flow)?;
         traffic.delivered(len);
+        if demotable && traffic.bytes > AUTO_DEMOTE_AFTER {
+            // 这条流原来是在传大块的数据：往后让交互的流先走。
+            send.set_priority(priority_of(Class::Bulk));
+            demotable = false;
+        }
     }
 }
 

@@ -365,17 +365,19 @@ async fn a_port_forward_turns_each_connection_into_a_flow_for_its_id() {
 async fn forwards_that_take_no_socket_are_reported_as_such() {
     let mut netmap = netmap();
     netmap.me.forwards = vec![
-        forward(1, ForwardProtocol::Udp, "127.0.0.1:0"),
-        // 监听在本节点自己的虚拟 IP 上：由出口模块在别的节点访问这个端口时接住。
+        // 监听在本节点自己的虚拟 IP 上：由出口模块在别的节点访问这个端口时接住。TCP 和 UDP 都一样。
+        forward(1, ForwardProtocol::Udp, "10.66.0.1:5353"),
         forward(2, ForwardProtocol::Tcp, "10.66.0.1:8080"),
         forward(3, ForwardProtocol::Tcp, "127.0.0.1:0"),
+        forward(4, ForwardProtocol::Udp, "127.0.0.1:0"),
     ];
     let world = World::start(netmap).await;
     let status = world.settled().await;
-    assert_eq!(status.forwards.iter().map(|forward| forward.id).collect::<Vec<u32>>(), [1, 2, 3]);
-    assert_eq!(status.forwards[0].state, ListenState::Unsupported);
+    assert_eq!(status.forwards.iter().map(|forward| forward.id).collect::<Vec<u32>>(), [1, 2, 3, 4]);
+    assert_eq!(status.forwards[0].state, ListenState::Virtual);
     assert_eq!(status.forwards[1].state, ListenState::Virtual);
     assert!(matches!(status.forwards[2].state, ListenState::Listening { .. }));
+    assert!(matches!(status.forwards[3].state, ListenState::Listening { .. }), "UDP 的端口转发和 TCP 的一样监听");
 }
 
 #[tokio::test]
@@ -419,11 +421,9 @@ async fn unsupported_and_malformed_socks5_requests_get_the_right_answer() {
     let mut world = World::start(netmap).await;
     let socks = world.listener("socks").await;
 
-    let after_greeting: [(&[u8], u8); 6] = [
+    let after_greeting: [(&[u8], u8); 5] = [
         // BIND
         (&[5, 2, 0, 1, 1, 2, 3, 4, 0, 80], 7),
-        // UDP ASSOCIATE：数据报还没有实现
-        (&[5, 3, 0, 1, 0, 0, 0, 0, 0, 0], 7),
         // 不认识的地址类型
         (&[5, 1, 0, 2, 1, 2, 3, 4, 0, 80], 8),
         // 保留字节不是 0

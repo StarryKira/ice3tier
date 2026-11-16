@@ -1,0 +1,465 @@
+//! UDP 的入口在真的 socket 上的行为。对端节点是一个记下它收到了什么、然后原样回显的替身，就地出站的拨号器也是替身。
+//!
+//! 入口加真的出口的端到端测试在 `i3t-exit` 的 `tests/datagrams.rs` 里。
+
+// clippy.toml 里的 allow-unwrap-in-tests 只管 #[test] 函数，管不到集成测试里的辅助函数。这里 unwrap 失败就是测试失败。
+#![allow(clippy::unwrap_used)]
+
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use i3t_access::{Access, EgressPolicy, ListenState, LocalEgress};
+use i3t_conn::contract::DatagramSender;
+use i3t_conn::{RecvStream, SendStream};
+use i3t_flow::memory::{MemoryConnector, MemoryMesh};
+use i3t_flow::{Handler, Request, datagram};
+use i3t_model::Netmap;
+use i3t_model::netmap::{
+    Credential, DefaultAction, Forward, ForwardProtocol, Listener, ListenerProtocol, LocalNode, Network, Peer, PeerExit, TokenHash,
+};
+use i3t_proto::flow::{Class, Host, OpenDatagrams, Reply, Status, Target};
+use i3t_proto::{NodeId, PublicKey};
+use ring::digest;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpStream, UdpSocket};
+use tokio::sync::{mpsc, watch};
+use tokio::time::{sleep, timeout};
+
+const ME: u32 = 1;
+const GW: u32 = 2;
+const PATIENCE: Duration = Duration::from_secs(5);
+/// 断言"这件事不会发生"时观察多久。
+const QUIET: Duration = Duration::from_millis(200);
+
+fn node(raw: u32) -> NodeId {
+    NodeId::new(raw).unwrap()
+}
+
+/// 本节点是 1 号，对端只有 2 号 `gw`：可以访问，是出口，开了局域网。
+fn netmap() -> Netmap {
+    Netmap {
+        version: 1,
+        network: Network {
+            name: "home".into(),
+            domain: "home.i3t".into(),
+            cidr: "10.66.0.0/16".parse().unwrap(),
+            routing: Default::default(),
+            max_relay_hops: 2,
+            reach: Default::default(),
+        },
+        me: LocalNode {
+            id: node(ME),
+            name: "laptop".into(),
+            virtual_ip: [10, 66, 0, 1].into(),
+            routing: None,
+            reach: None,
+            dial_out_only: false,
+            relay: None,
+            exit: None,
+            listeners: Vec::new(),
+            forwards: Vec::new(),
+            forward_targets: Vec::new(),
+            pinned_relays: Vec::new(),
+        },
+        peers: vec![Peer {
+            id: node(GW),
+            key: PublicKey::from_bytes([2; 32]),
+            name: "gw".into(),
+            virtual_ip: [10, 66, 0, 2].into(),
+            inbound: true,
+            outbound: true,
+            endpoints: Vec::new(),
+            attached: Vec::new(),
+            exit: Some(PeerExit { lan: true }),
+            dial_out_only: false,
+            keep_alive: false,
+        }],
+        relays: Vec::new(),
+        relay_clients: Vec::new(),
+        credentials: Vec::new(),
+    }
+}
+
+fn socks(name: &str) -> Listener {
+    Listener {
+        name: name.into(),
+        bind: "127.0.0.1:0".parse().unwrap(),
+        protocol: ListenerProtocol::Socks5,
+        allow_from: Vec::new(),
+        require_credential: false,
+        default_action: None,
+        fixed_exit: None,
+    }
+}
+
+/// 对端节点的替身：答应每个数据报上下文，记下 OPEN 和每个数据报的目标，把数据报原样发回去（来源就写它的目标）。
+struct EchoPeer {
+    opens: mpsc::UnboundedSender<OpenDatagrams>,
+    targets: mpsc::UnboundedSender<Target>,
+}
+
+impl Handler for EchoPeer {
+    async fn handle<S: SendStream, R: RecvStream>(&self, request: Request<S, R>) {
+        request.refuse(&Reply::new(Status::InternalError, "这个替身只接受数据报上下文")).await;
+    }
+
+    async fn handle_datagrams<S: SendStream, R: RecvStream, T: DatagramSender>(&self, request: datagram::Request<S, R, T>) {
+        assert_eq!(request.peer(), node(ME));
+        self.opens.send(request.open().clone()).unwrap();
+        let mut context = request.accept().await.unwrap();
+        let sender = context.sender();
+        while let Ok(received) = context.recv().await {
+            self.targets.send(received.target.clone()).unwrap();
+            sender.send(&received.target, &received.payload).await.unwrap();
+        }
+    }
+}
+
+/// 就地出站的替身：写成地址的目标原样放行，记下每次是按什么策略来问的。克隆出来的是同一个。
+#[derive(Clone, Default)]
+struct DirectEgress {
+    asked: Arc<Mutex<Vec<(String, u16, EgressPolicy)>>>,
+}
+
+impl LocalEgress for DirectEgress {
+    async fn connect(&self, _host: &Host, _port: u16, _policy: EgressPolicy) -> Result<TcpStream, Reply> {
+        Err(Reply::new(Status::InternalError, "这些测试不走 TCP"))
+    }
+
+    async fn udp_destination(&self, host: &Host, port: u16, policy: EgressPolicy) -> Result<SocketAddr, Reply> {
+        self.asked.lock().unwrap().push((host.to_string(), port, policy));
+        match host {
+            Host::Ip(ip) => Ok(SocketAddr::new(*ip, port)),
+            Host::Name(_) => Err(Reply::new(Status::NameNotFound, "替身不解析域名")),
+        }
+    }
+}
+
+/// 一个跑着的入口，对面是 [`EchoPeer`]。
+struct World {
+    netmap: watch::Sender<Arc<Netmap>>,
+    access: Arc<Access<MemoryConnector, DirectEgress>>,
+    egress: DirectEgress,
+    /// 对端收到的数据报上下文的 OPEN，按到达的顺序。
+    opens: mpsc::UnboundedReceiver<OpenDatagrams>,
+    /// 对端收到的每个数据报的目标，按到达的顺序。
+    targets: mpsc::UnboundedReceiver<Target>,
+}
+
+impl World {
+    /// UDP 端口转发的会话空闲 0.3 秒就回收，测试不用真的等一分钟。
+    async fn start(netmap: Netmap) -> Self {
+        Self::start_with_udp_idle(netmap, Duration::from_millis(300)).await
+    }
+
+    async fn start_with_udp_idle(netmap: Netmap, udp_idle: Duration) -> Self {
+        let mesh = MemoryMesh::new();
+        let (connector, _) = mesh.join(node(ME));
+        let (_, acceptor) = mesh.join(node(GW));
+        let (opens_sender, opens) = mpsc::unbounded_channel();
+        let (targets_sender, targets) = mpsc::unbounded_channel();
+        let peer = Arc::new(EchoPeer { opens: opens_sender, targets: targets_sender });
+        tokio::spawn(async move { i3t_flow::serve(&acceptor, peer).await });
+
+        let (sender, receiver) = watch::channel(Arc::new(netmap));
+        let egress = DirectEgress::default();
+        let access = Arc::new(Access::new(Arc::new(connector), egress.clone(), receiver).with_udp_idle_timeout(udp_idle));
+        tokio::spawn({
+            let access = Arc::clone(&access);
+            async move { access.run().await }
+        });
+        let world = Self { netmap: sender, access, egress, opens, targets };
+        world.settled().await;
+        world
+    }
+
+    async fn settled(&self) {
+        let version = self.netmap.borrow().version;
+        timeout(PATIENCE, async {
+            while self.access.status().version != version {
+                sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("入口应该很快应用完新的 netmap");
+    }
+
+    fn listener(&self, name: &str) -> SocketAddr {
+        local(&self.access.status().listeners.iter().find(|listener| listener.name == name).unwrap().state)
+    }
+
+    fn forward(&self, id: u32) -> SocketAddr {
+        local(&self.access.status().forwards.iter().find(|forward| forward.id == id).unwrap().state)
+    }
+
+    fn sessions(&self, id: u32) -> usize {
+        self.access.status().forwards.iter().find(|forward| forward.id == id).unwrap().active.get()
+    }
+
+    async fn next_open(&mut self) -> OpenDatagrams {
+        timeout(PATIENCE, self.opens.recv()).await.expect("对端应该收到一个数据报上下文的 OPEN").unwrap()
+    }
+
+    async fn next_target(&mut self) -> Target {
+        timeout(PATIENCE, self.targets.recv()).await.expect("对端应该收到一个数据报").unwrap()
+    }
+}
+
+fn local(state: &ListenState) -> SocketAddr {
+    match state {
+        ListenState::Listening { local } => *local,
+        other => panic!("监听没有起来：{other:?}"),
+    }
+}
+
+/// 一个 SOCKS5 的 UDP 关联，测试扮演客户端。
+struct Association {
+    /// 那条 TCP 连接，留着它关联才在。
+    _control: TcpStream,
+    socket: UdpSocket,
+    relay: SocketAddr,
+}
+
+/// 用户名密码认证的 SOCKS5 握手加 UDP ASSOCIATE。
+async fn associate(proxy: SocketAddr, username: &str, password: &str) -> Association {
+    let mut control = TcpStream::connect(proxy).await.unwrap();
+    let auth = [
+        &[5, 1, 2, 1, u8::try_from(username.len()).unwrap()][..],
+        username.as_bytes(),
+        &[u8::try_from(password.len()).unwrap()],
+        password.as_bytes(),
+        &[5, 3, 0, 1, 0, 0, 0, 0, 0, 0],
+    ]
+    .concat();
+    control.write_all(&auth).await.unwrap();
+    let mut answer = [0; 14];
+    timeout(PATIENCE, control.read_exact(&mut answer)).await.expect("代理应该应答").unwrap();
+    assert_eq!(answer[..8], [5, 2, 1, 0, 5, 0, 0, 1], "选中用户名密码认证，认证通过，答应 UDP ASSOCIATE");
+    let relay = SocketAddr::from(([answer[8], answer[9], answer[10], answer[11]], u16::from_be_bytes([answer[12], answer[13]])));
+    Association { _control: control, socket: UdpSocket::bind("127.0.0.1:0").await.unwrap(), relay }
+}
+
+impl Association {
+    /// 发一个报文。`address` 是 SOCKS5 头里"地址类型、地址、端口"那一段。
+    async fn send(&self, address: &[u8], data: &[u8]) {
+        self.socket.send_to(&[&[0, 0, 0][..], address, data].concat(), self.relay).await.unwrap();
+    }
+
+    /// 等中继端口发回来的下一个报文：头里"地址类型、地址、端口"那一段有 `address_len` 字节，返回它和数据。
+    async fn recv(&self, address_len: usize) -> (Vec<u8>, Vec<u8>) {
+        let mut buf = vec![0; 2048];
+        let (len, from) = timeout(PATIENCE, self.socket.recv_from(&mut buf)).await.expect("中继端口应该发回一个报文").unwrap();
+        assert_eq!((from, &buf[..3]), (self.relay, &[0, 0, 0][..]));
+        (buf[3..3 + address_len].to_vec(), buf[3 + address_len..len].to_vec())
+    }
+
+    async fn assert_silent(&self) {
+        let mut buf = [0; 16];
+        assert!(timeout(QUIET, self.socket.recv_from(&mut buf)).await.is_err(), "中继端口不应该发回报文");
+    }
+}
+
+fn domain(name: &str, port: u16) -> Vec<u8> {
+    [&[3, u8::try_from(name.len()).unwrap()][..], name.as_bytes(), &port.to_be_bytes()].concat()
+}
+
+#[tokio::test]
+async fn an_association_is_one_context_per_peer_carrying_the_class_the_origin_and_each_datagrams_own_target() {
+    let mut netmap = netmap();
+    let mut listener = socks("socks");
+    listener.require_credential = true;
+    netmap.me.listeners = vec![listener];
+    let token = digest::digest(&digest::SHA256, b"s3cret-token");
+    netmap.credentials = vec![Credential {
+        name: "gateway-01".into(),
+        token: TokenHash::from_bytes(token.as_ref().try_into().unwrap()),
+        max_concurrent: None,
+    }];
+    let mut world = World::start(netmap).await;
+    let client = associate(world.listener("socks"), "gw+c-r", "s3cret-token").await;
+
+    // 四种目标：公网地址、域名、出口背后局域网里的地址、节点自己的服务（组网地址）。
+    let public = [1, 93, 184, 216, 34, 0x01, 0xbb];
+    let name = domain("example.com", 53);
+    let lan = [1, 192, 168, 1, 10, 0, 161];
+    let service = [1, 10, 66, 0, 2, 0x14, 0xe9];
+    for address in [&public[..], &name, &lan, &service] {
+        client.send(address, b"payload").await;
+        // 回来的报文带着同样的地址：替身把目标当来源回显，节点自己的服务报成它的虚拟 IP。
+        assert_eq!(client.recv(address.len()).await, (address.to_vec(), b"payload".to_vec()));
+    }
+    let expected = [
+        Target::Internet { host: "93.184.216.34".parse().unwrap(), port: 443 },
+        Target::Internet { host: "example.com".parse().unwrap(), port: 53 },
+        Target::Lan { addr: "192.168.1.10:161".parse().unwrap() },
+        Target::Node { port: 5353 },
+    ];
+    for target in expected {
+        assert_eq!(world.next_target().await, target);
+    }
+
+    // 都在同一个上下文里：等级来自用户名，来源说明里有凭据的名字；客户端在回环上，它的地址不带。
+    let open = world.next_open().await;
+    assert_eq!((open.class, open.origin.credential.as_deref(), open.origin.client), (Class::Reliable, Some("gateway-01"), None));
+    assert!(world.opens.try_recv().is_err(), "到同一个对端只开一个上下文");
+}
+
+#[tokio::test]
+async fn where_a_datagram_goes_is_decided_like_a_connect_request() {
+    let mut netmap = netmap();
+    let mut rejecting = socks("rejecting");
+    rejecting.default_action = Some(DefaultAction::Reject);
+    let mut fixed = socks("fixed");
+    fixed.fixed_exit = Some(node(GW));
+    netmap.me.listeners = vec![rejecting, fixed];
+    let mut world = World::start(netmap).await;
+    let public = [1, 93, 184, 216, 34, 0x01, 0xbb];
+
+    // 没有指定出口、默认动作是拒绝：报文被丢掉，连上下文都不开。
+    let client = associate(world.listener("rejecting"), "", "").await;
+    client.send(&public, b"rejected by default").await;
+    // 用户名指定的节点不存在、指向本节点自己的组网地址：一样。
+    let nobody = associate(world.listener("rejecting"), "nobody", "").await;
+    nobody.send(&public, b"no such exit").await;
+    client.send(&[1, 10, 66, 0, 1, 0, 53], b"myself").await;
+    client.assert_silent().await;
+    assert!(world.opens.try_recv().is_err());
+    // 组网地址不看默认动作。
+    client.send(&[1, 10, 66, 0, 2, 0, 53], b"a mesh service").await;
+    assert_eq!(world.next_target().await, Target::Node { port: 53 });
+    assert_eq!(world.next_open().await.class, Class::Auto);
+
+    // 固定了出口的监听器：不写用户名也从那个节点出去。
+    let client = associate(world.listener("fixed"), "", "").await;
+    client.send(&public, b"via the fixed exit").await;
+    assert_eq!(world.next_target().await, Target::Internet { host: "93.184.216.34".parse().unwrap(), port: 443 });
+    assert_eq!(client.recv(public.len()).await.1, b"via the fixed exit");
+}
+
+#[tokio::test]
+async fn local_egress_is_asked_for_every_datagram_and_only_its_destinations_may_answer() {
+    let mut netmap = netmap();
+    netmap.me.listeners = vec![socks("socks")];
+    let mut world = World::start(netmap).await;
+    let (server, stranger) = (UdpSocket::bind("127.0.0.1:0").await.unwrap(), UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let port = server.local_addr().unwrap().port();
+    let address = [&[1, 127, 0, 0, 1][..], &port.to_be_bytes()].concat();
+
+    // 回环监听器、没有用户名：从本机直接发，不加限制。
+    let client = associate(world.listener("socks"), "", "").await;
+    client.send(&address, b"hello").await;
+    let mut buf = [0; 64];
+    let (len, local_port) = timeout(PATIENCE, server.recv_from(&mut buf)).await.expect("报文应该直接到目标").unwrap();
+    assert_eq!(&buf[..len], b"hello");
+    assert_eq!(*world.egress.asked.lock().unwrap(), [("127.0.0.1".to_owned(), port, EgressPolicy::Unrestricted)]);
+    assert!(world.opens.try_recv().is_err(), "就地出站不经过任何对端节点");
+
+    // 目标回来的报文带着它的地址；没有往它发过报文的地址发来的不转。
+    stranger.send_to(b"unsolicited", local_port).await.unwrap();
+    server.send_to(b"world", local_port).await.unwrap();
+    assert_eq!(client.recv(address.len()).await, (address.clone(), b"world".to_vec()));
+    client.assert_silent().await;
+
+    // 拨号器拒绝的目标（这个替身不解析域名）：报文被丢掉。
+    client.send(&domain("example.com", 53), b"refused").await;
+    client.assert_silent().await;
+    assert_eq!(world.egress.asked.lock().unwrap().len(), 2);
+}
+
+fn udp_forward(id: u32) -> Forward {
+    Forward { id, protocol: ForwardProtocol::Udp, bind: "127.0.0.1:0".parse().unwrap(), target: node(GW), allow_from: Vec::new() }
+}
+
+#[tokio::test]
+async fn a_udp_forward_is_one_context_per_client_address_tagged_with_the_forward_id_and_expires_when_idle() {
+    let mut netmap = netmap();
+    netmap.me.forwards = vec![udp_forward(7)];
+    let mut world = World::start(netmap).await;
+    let listening = world.forward(7);
+    let (first, second) = (UdpSocket::bind("127.0.0.1:0").await.unwrap(), UdpSocket::bind("127.0.0.1:0").await.unwrap());
+
+    let mut buf = [0; 64];
+    for (client, data) in [(&first, &b"one"[..]), (&second, b"two"), (&first, b"three")] {
+        client.send_to(data, listening).await.unwrap();
+        assert_eq!(world.next_target().await, Target::Forward { id: 7 });
+        // 回来的报文是从监听的端口发回这个客户端的。
+        let (len, from) = timeout(PATIENCE, client.recv_from(&mut buf)).await.expect("回显应该回到客户端").unwrap();
+        assert_eq!((&buf[..len], from), (data, listening));
+    }
+    // 两个客户端地址，两个上下文；同一个客户端的第二个报文用的还是它的那一个。
+    for _ in 0..2 {
+        let open = world.next_open().await;
+        assert_eq!((open.class, open.origin.client), (Class::Auto, None));
+    }
+    assert!(world.opens.try_recv().is_err());
+    assert_eq!(world.sessions(7), 2);
+
+    // 没有报文往来超过时限（测试里调成了 0.3 秒）：会话回收。之后再来的报文开一个新的上下文。
+    timeout(PATIENCE, async {
+        while world.sessions(7) != 0 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("空闲的会话应该被回收");
+    first.send_to(b"again", listening).await.unwrap();
+    world.next_open().await;
+    assert_eq!(world.next_target().await, Target::Forward { id: 7 });
+}
+
+#[tokio::test]
+async fn a_udp_forward_refuses_sources_outside_its_allow_list_and_targets_it_may_not_reach() {
+    let mut netmap = netmap();
+    let mut guarded = udp_forward(8);
+    guarded.allow_from = vec!["192.168.0.0/16".parse().unwrap()];
+    let mut unreachable = udp_forward(9);
+    unreachable.target = node(5);
+    netmap.me.forwards = vec![guarded, unreachable];
+    let mut world = World::start(netmap).await;
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+    // 来源（127.0.0.1）不在白名单里；目标节点不在 netmap 里。两种都是丢掉报文，不建会话。
+    for id in [8, 9] {
+        client.send_to(b"dropped", world.forward(id)).await.unwrap();
+    }
+    sleep(QUIET).await;
+    assert!(world.opens.try_recv().is_err());
+    assert_eq!((world.sessions(8), world.sessions(9)), (0, 0));
+
+    // 白名单改了之后马上生效，不用重新绑定：监听的还是原来那个端口。
+    let before = world.forward(8);
+    let mut changed = Netmap::clone(&world.netmap.borrow());
+    changed.me.forwards[0].allow_from = vec!["127.0.0.0/8".parse().unwrap()];
+    changed.version += 1;
+    world.netmap.send(Arc::new(changed)).unwrap();
+    world.settled().await;
+    assert_eq!(world.forward(8), before);
+    client.send_to(b"now allowed", before).await.unwrap();
+    assert_eq!(world.next_target().await, Target::Forward { id: 8 });
+}
+
+#[tokio::test]
+async fn a_udp_forward_holds_a_bounded_number_of_sessions() {
+    let mut netmap = netmap();
+    netmap.me.forwards = vec![udp_forward(7)];
+    // 空闲时限留成默认的 60 秒：这个测试里会话不能自己过期。
+    let mut world = World::start_with_udp_idle(netmap, Duration::from_secs(60)).await;
+    let listening = world.forward(7);
+
+    // 256 个不同的来源地址，各占一个会话。
+    let mut clients = Vec::new();
+    for _ in 0..256 {
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.send_to(b"x", listening).await.unwrap();
+        clients.push(client);
+    }
+    let extra = UdpSocket::bind((IpAddr::from([127, 0, 0, 1]), 0)).await.unwrap();
+    extra.send_to(b"one too many", listening).await.unwrap();
+
+    let mut opened = 0;
+    while timeout(QUIET, world.opens.recv()).await.is_ok() {
+        opened += 1;
+    }
+    assert_eq!((opened, world.sessions(7)), (256, 256), "到了上限之后新的来源不再建会话");
+}

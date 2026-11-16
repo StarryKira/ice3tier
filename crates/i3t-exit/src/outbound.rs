@@ -78,6 +78,12 @@ impl<S: System> Outbound<S> {
 
     /// 互联网目标：本节点必须是出口，端口要在允许的范围里，解析出来的每一个地址都要过出站策略。
     pub(crate) async fn internet(&self, netmap: &Netmap, host: &Host, port: u16) -> Result<TcpStream, Reply> {
+        let (role, targets) = self.internet_targets(netmap, host, port).await?;
+        self.connect_first(targets, CONNECT_TIMEOUT, role.upstream_socks5).await
+    }
+
+    /// 互联网目标的检查。通过的话返回可以去连的地址，流和数据报用的是同一份检查。
+    async fn internet_targets<'n>(&self, netmap: &'n Netmap, host: &Host, port: u16) -> Result<(&'n ExitRole, Vec<SocketAddr>), Reply> {
         let Some(role) = &netmap.me.exit else {
             return Err(Reply::new(Status::NotEnabled, "这个节点没有启用出口"));
         };
@@ -91,12 +97,28 @@ impl<S: System> Outbound<S> {
         if let Some(what) = addresses.iter().find_map(|&ip| forbidden_as_internet(&netmap.network, &interfaces, ip)) {
             return Err(Reply::new(Status::PolicyDenied, format!("目标地址是{what}，出口不替别人连这类地址")));
         }
-        let targets = addresses.into_iter().map(|ip| SocketAddr::new(ip, port));
-        self.connect_first(targets, CONNECT_TIMEOUT, role.upstream_socks5).await
+        Ok((role, addresses.into_iter().map(|ip| SocketAddr::new(ip, port)).collect()))
+    }
+
+    /// 互联网目标的 UDP 报文该发到哪个地址。检查和流的一样；域名取解析出来的第一个地址。
+    ///
+    /// 配了上游代理的出口不替别人发 UDP：上游代理只承载 TCP，绕过它直接发就违背了"都经上游出去"的本意。
+    pub(crate) async fn udp_internet(&self, netmap: &Netmap, host: &Host, port: u16) -> Result<SocketAddr, Reply> {
+        let (role, targets) = self.internet_targets(netmap, host, port).await?;
+        if role.upstream_socks5.is_some() {
+            return Err(Reply::new(Status::NotEnabled, "这个出口经上游代理出站，上游代理不承载 UDP"));
+        }
+        targets.first().copied().ok_or_else(|| Reply::new(Status::Unreachable, "没有可以发的地址"))
     }
 
     /// 局域网目标：本节点必须是出口并且打开了局域网开关，地址必须在本机某块网卡直连的网段里。端口不受限制。
     pub(crate) async fn lan(&self, netmap: &Netmap, addr: SocketAddr) -> Result<TcpStream, Reply> {
+        let target = self.lan_target(netmap, addr)?;
+        self.connect_first([target], CONNECT_TIMEOUT, None).await
+    }
+
+    /// 局域网目标的检查。通过的话返回可以去连的地址，流和数据报用的是同一份检查。
+    pub(crate) fn lan_target(&self, netmap: &Netmap, addr: SocketAddr) -> Result<SocketAddr, Reply> {
         match &netmap.me.exit {
             None => return Err(Reply::new(Status::NotEnabled, "这个节点没有启用出口")),
             Some(ExitRole { lan: false, .. }) => {
@@ -117,7 +139,7 @@ impl<S: System> Outbound<S> {
         };
         match refused {
             Some(why) => Err(Reply::new(Status::PolicyDenied, why)),
-            None => self.connect_first([SocketAddr::new(ip, addr.port())], CONNECT_TIMEOUT, None).await,
+            None => Ok(SocketAddr::new(ip, addr.port())),
         }
     }
 
@@ -126,15 +148,33 @@ impl<S: System> Outbound<S> {
     /// 所以只监听 127.0.0.1 的服务连不上，不会因为装了这个程序就对组网可见；要暴露这样的服务得显式配端口转发。
     /// 本机有几个地址就挨个试：服务可能只监听在其中一个上。
     pub(crate) async fn node_port(&self, port: u16) -> Result<TcpStream, Reply> {
+        let targets = self.node_targets(port)?;
+        self.connect_first(targets, LOCAL_CONNECT_TIMEOUT, None).await
+    }
+
+    /// 本机的非回环地址加上 `port`，IPv4 在前：只监听 0.0.0.0 的服务最常见。
+    fn node_targets(&self, port: u16) -> Result<Vec<SocketAddr>, Reply> {
         let interfaces = self.interfaces()?;
         let own = interfaces.iter().map(IpNet::addr).filter(|ip| !(ip.is_loopback() || ip.is_unspecified() || policy::is_link_local(*ip)));
-        // IPv4 在前：只监听 0.0.0.0 的服务最常见。
         let (v4, v6): (Vec<IpAddr>, Vec<IpAddr>) = own.partition(IpAddr::is_ipv4);
         let targets: Vec<SocketAddr> = v4.into_iter().chain(v6).map(|ip| SocketAddr::new(ip, port)).collect();
         if targets.is_empty() {
             return Err(Reply::new(Status::Unreachable, "这个节点没有非回环的地址，它上面的服务不可达"));
         }
-        self.connect_first(targets, LOCAL_CONNECT_TIMEOUT, None).await
+        Ok(targets)
+    }
+
+    /// 本节点自己的服务的 UDP 报文该发到哪个地址：本机的第一个非回环地址。
+    ///
+    /// TCP 可以挨个地址去试哪个连得上，UDP 没有"连上"这回事，试不了；只监听在别的地址上的服务要配端口转发。
+    pub(crate) fn udp_node(&self, port: u16) -> Result<SocketAddr, Reply> {
+        let targets = self.node_targets(port)?;
+        targets.first().copied().ok_or_else(|| Reply::new(Status::Unreachable, "这个节点没有非回环的地址"))
+    }
+
+    /// 发往 `addr` 的 UDP 报文实际发到哪个地址，见 [`System::udp_route`]。
+    pub(crate) fn udp_route(&self, addr: SocketAddr) -> SocketAddr {
+        self.inner.system.udp_route(addr)
     }
 
     /// 端口转发指向的地址。回环地址和局域网地址都可以：下发给本节点的端口转发就是访问它们的显式途径。
@@ -244,6 +284,21 @@ impl<S: System> LocalEgress for Outbound<S> {
                 self.internet(&netmap, host, port).await
             }
         }
+    }
+
+    async fn udp_destination(&self, host: &Host, port: u16, policy: EgressPolicy) -> Result<SocketAddr, Reply> {
+        let destination = match policy {
+            EgressPolicy::Unrestricted => {
+                let addresses = self.resolve(host).await?;
+                let first = addresses.first().ok_or_else(|| Reply::new(Status::Unreachable, "没有可以发的地址"))?;
+                SocketAddr::new(*first, port)
+            }
+            EgressPolicy::Exit => {
+                let netmap = Arc::clone(&self.inner.netmap.borrow());
+                self.udp_internet(&netmap, host, port).await?
+            }
+        };
+        Ok(self.udp_route(destination))
     }
 }
 

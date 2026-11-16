@@ -4,7 +4,7 @@
 //! 每个报文的长度都由它自己的长度字节决定，最长的也只有五百多字节，所以"还不完整"时缓冲区一定比这个短，
 //! 客户端没办法让读的一方无限地攒数据。
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use i3t_proto::flow::{Host, InvalidDomainName};
 
@@ -18,6 +18,7 @@ const METHOD_PASSWORD: u8 = 0x02;
 const METHOD_UNACCEPTABLE: u8 = 0xff;
 
 const COMMAND_CONNECT: u8 = 0x01;
+const COMMAND_UDP_ASSOCIATE: u8 = 0x03;
 
 const ATYP_V4: u8 = 0x01;
 const ATYP_DOMAIN: u8 = 0x03;
@@ -34,7 +35,7 @@ pub(crate) enum Socks5Error {
     AuthVersion(u8),
     #[error("用户名不是 UTF-8")]
     Username,
-    #[error("不支持的命令 {0:#04x}，只支持 CONNECT")]
+    #[error("不支持的命令 {0:#04x}，只支持 CONNECT 和 UDP ASSOCIATE")]
     Command(u8),
     #[error("请求里的保留字节是 {0:#04x}，应该是 0")]
     Reserved(u8),
@@ -141,30 +142,59 @@ pub(crate) const fn auth_status(granted: bool) -> [u8; 2] {
     [AUTH_VERSION, if granted { 0x00 } else { 0x01 }]
 }
 
-/// 客户端的 CONNECT 请求。
+/// 客户端要代理做什么。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Command {
+    /// 连到请求里的地址，之后这条连接就是到它的通道。
+    Connect,
+    /// 开一个 UDP 中继端口。请求里的地址是客户端打算用来发 UDP 报文的地址，通常全是 0。
+    UdpAssociate,
+}
+
+/// 客户端的请求。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Connect {
+pub(crate) struct Request {
+    pub command: Command,
     pub host: Host,
     pub port: u16,
 }
 
-impl Connect {
+impl Request {
     /// ```text
     /// | 版本 0x05 | 命令 | 保留 0x00 | 地址类型 | 地址 | 端口（大端）|
     ///
+    /// 命令      0x01 CONNECT，0x03 UDP ASSOCIATE
     /// 地址类型  0x01 IPv4，4 字节；0x04 IPv6，16 字节；0x03 域名，1 字节长度加域名
     /// ```
     ///
-    /// 只认 CONNECT。BIND 和 UDP ASSOCIATE 报 [`Socks5Error::Command`]。
+    /// BIND 报 [`Socks5Error::Command`]。
     pub(crate) fn parse(buf: &[u8]) -> Result<Option<Parsed<Self>>, Socks5Error> {
         check_first(buf, VERSION, Socks5Error::Version)?;
-        let Some((&[_, command, reserved, address_type], rest)) = buf.split_first_chunk::<4>() else { return Ok(None) };
-        if command != COMMAND_CONNECT {
-            return Err(Socks5Error::Command(command));
-        }
+        let Some((&[_, command, reserved], rest)) = buf.split_first_chunk::<3>() else { return Ok(None) };
+        let command = match command {
+            COMMAND_CONNECT => Command::Connect,
+            COMMAND_UDP_ASSOCIATE => Command::UdpAssociate,
+            other => return Err(Socks5Error::Command(other)),
+        };
         if reserved != 0 {
             return Err(Socks5Error::Reserved(reserved));
         }
+        let Some(Address { host, port, rest }) = Address::parse(rest)? else { return Ok(None) };
+        Ok(Some(Parsed { value: Self { command, host, port }, len: buf.len() - rest.len() }))
+    }
+}
+
+/// 报文里的"地址类型、地址、端口"，以及它后面剩下的字节。请求和 UDP 报文头里是同一种写法。
+struct Address<'a> {
+    host: Host,
+    port: u16,
+    rest: &'a [u8],
+}
+
+impl<'a> Address<'a> {
+    /// 字节不够时返回 `None`。
+    fn parse(buf: &'a [u8]) -> Result<Option<Self>, Socks5Error> {
+        let Some((&address_type, rest)) = buf.split_first() else { return Ok(None) };
         let (host, rest) = match address_type {
             ATYP_V4 => {
                 let Some((octets, rest)) = rest.split_first_chunk::<4>() else { return Ok(None) };
@@ -184,11 +214,32 @@ impl Connect {
             other => return Err(Socks5Error::AddressType(other)),
         };
         let Some((&port, rest)) = rest.split_first_chunk::<2>() else { return Ok(None) };
-        Ok(Some(Parsed { value: Self { host, port: u16::from_be_bytes(port) }, len: buf.len() - rest.len() }))
+        Ok(Some(Self { host, port: u16::from_be_bytes(port), rest }))
     }
 }
 
-/// 对 CONNECT 请求的应答码（RFC 1928 §6）。
+/// 把"地址类型、地址、端口"追加到 `buf` 末尾。
+fn put_address(buf: &mut Vec<u8>, host: &Host, port: u16) {
+    match host {
+        Host::Ip(IpAddr::V4(ip)) => {
+            buf.push(ATYP_V4);
+            buf.extend_from_slice(&ip.octets());
+        }
+        Host::Ip(IpAddr::V6(ip)) => {
+            buf.push(ATYP_V6);
+            buf.extend_from_slice(&ip.octets());
+        }
+        Host::Name(name) => {
+            buf.push(ATYP_DOMAIN);
+            // 域名最长 253 字节，装得进 1 字节的长度。
+            buf.push(u8::try_from(name.as_str().len()).expect("域名构造时查过长度"));
+            buf.extend_from_slice(name.as_str().as_bytes());
+        }
+    }
+    buf.extend_from_slice(&port.to_be_bytes());
+}
+
+/// 对请求的应答码（RFC 1928 §6）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReplyCode {
     Succeeded = 0x00,
@@ -210,6 +261,74 @@ pub(crate) enum ReplyCode {
 /// 绑定地址一律填 0：连接是在出口节点上建的，它在那边用的本地地址对客户端没有意义。
 pub(crate) const fn reply(code: ReplyCode) -> [u8; 10] {
     [VERSION, code as u8, 0x00, ATYP_V4, 0, 0, 0, 0, 0, 0]
+}
+
+/// 对 UDP ASSOCIATE 请求的成功应答：绑定地址是 UDP 中继端口的地址，客户端之后把 UDP 报文发到那里。
+pub(crate) fn associated(relay: SocketAddr) -> Vec<u8> {
+    let mut reply = vec![VERSION, ReplyCode::Succeeded as u8, 0x00];
+    put_address(&mut reply, &Host::Ip(relay.ip().to_canonical()), relay.port());
+    reply
+}
+
+/// UDP 中继端口上的一个报文（RFC 1928 §7）：前面是头，后面是应用的数据。
+///
+/// ```text
+/// | 保留 0x0000 | 分片号 | 地址类型 | 地址 | 端口（大端）| 数据 |
+/// ```
+///
+/// 客户端发来的报文里地址是它要去的目标，代理发回去的报文里是数据的来源。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UdpPacket<'a> {
+    pub host: Host,
+    pub port: u16,
+    pub data: &'a [u8],
+}
+
+impl<'a> UdpPacket<'a> {
+    /// 头最长多少字节：域名地址。
+    pub(crate) const MAX_HEADER_LEN: usize = 3 + 1 + 1 + 253 + 2;
+
+    /// 解析客户端发来的一个报文。
+    ///
+    /// 分片号不是 0 的报文不接受：分片是可选的功能，RFC 允许不支持它的实现直接丢掉这样的报文。
+    pub(crate) fn parse(datagram: &'a [u8]) -> Result<Self, UdpPacketError> {
+        let Some((&[reserved_hi, reserved_lo, fragment], rest)) = datagram.split_first_chunk::<3>() else {
+            return Err(UdpPacketError::Truncated);
+        };
+        if (reserved_hi, reserved_lo) != (0, 0) {
+            return Err(UdpPacketError::Reserved);
+        }
+        if fragment != 0 {
+            return Err(UdpPacketError::Fragmented(fragment));
+        }
+        match Address::parse(rest) {
+            Ok(Some(Address { host, port, rest: data })) => Ok(Self { host, port, data }),
+            Ok(None) => Err(UdpPacketError::Truncated),
+            Err(error) => Err(UdpPacketError::Address(error)),
+        }
+    }
+
+    /// 编码一个发回客户端的报文。
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        let mut datagram = Vec::with_capacity(Self::MAX_HEADER_LEN + self.data.len());
+        datagram.extend_from_slice(&[0, 0, 0]);
+        put_address(&mut datagram, &self.host, self.port);
+        datagram.extend_from_slice(self.data);
+        datagram
+    }
+}
+
+/// UDP 中继端口上收到的报文不合格式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum UdpPacketError {
+    #[error("报文比头还短")]
+    Truncated,
+    #[error("头里的保留字节不是 0")]
+    Reserved,
+    #[error("这是一个分片（分片号 {0:#04x}），不支持分片")]
+    Fragmented(u8),
+    #[error("头里的地址不合法")]
+    Address(#[source] Socks5Error),
 }
 
 #[cfg(test)]
@@ -299,52 +418,105 @@ mod tests {
 
     #[test]
     fn connect_accepts_ipv4_ipv6_and_domain_targets() {
+        let connect = |target: &str, port| Request { command: Command::Connect, host: host(target), port };
         let v4 = [5, 1, 0, 1, 203, 0, 113, 7, 0x01, 0xbb];
-        assert_eq!(Connect::parse(&v4), Ok(Some(Parsed { value: Connect { host: host("203.0.113.7"), port: 443 }, len: 10 })));
-        assert_prefixes_incomplete(&v4, Connect::parse);
+        assert_eq!(Request::parse(&v4), Ok(Some(Parsed { value: connect("203.0.113.7", 443), len: 10 })));
+        assert_prefixes_incomplete(&v4, Request::parse);
 
         let mut v6 = vec![5, 1, 0, 4];
         v6.extend_from_slice(&"2001:db8::1".parse::<Ipv6Addr>().unwrap().octets());
         v6.extend_from_slice(&[0, 80]);
-        assert_eq!(Connect::parse(&v6), Ok(Some(Parsed { value: Connect { host: host("2001:db8::1"), port: 80 }, len: 22 })));
-        assert_prefixes_incomplete(&v6, Connect::parse);
+        assert_eq!(Request::parse(&v6), Ok(Some(Parsed { value: connect("2001:db8::1", 80), len: 22 })));
+        assert_prefixes_incomplete(&v6, Request::parse);
 
         let domain = [&[5, 1, 0, 3, 11][..], b"example.com", &[0x1f, 0x90], b"early data"].concat();
-        let parsed = Connect::parse(&domain).unwrap().unwrap();
-        assert_eq!(parsed, Parsed { value: Connect { host: host("example.com"), port: 8080 }, len: domain.len() - 10 });
-        assert_prefixes_incomplete(&domain[..domain.len() - 10], Connect::parse);
+        let parsed = Request::parse(&domain).unwrap().unwrap();
+        assert_eq!(parsed, Parsed { value: connect("example.com", 8080), len: domain.len() - 10 });
+        assert_prefixes_incomplete(&domain[..domain.len() - 10], Request::parse);
     }
 
     #[test]
     fn an_address_sent_as_a_domain_is_still_an_address() {
         let bytes = [&[5, 1, 0, 3, 9][..], b"10.66.0.5", &[0, 22]].concat();
-        assert_eq!(Connect::parse(&bytes).unwrap().unwrap().value.host, Host::Ip("10.66.0.5".parse().unwrap()));
+        assert_eq!(Request::parse(&bytes).unwrap().unwrap().value.host, Host::Ip("10.66.0.5".parse().unwrap()));
     }
 
     #[test]
     fn unsupported_commands_and_address_types_get_their_own_reply_codes() {
-        let bind = Connect::parse(&[5, 2, 0, 1]).unwrap_err();
+        let bind = Request::parse(&[5, 2, 0, 1]).unwrap_err();
         assert_eq!(bind, Socks5Error::Command(2));
         assert_eq!(bind.reply(), ReplyCode::CommandNotSupported);
 
-        let udp_associate = Connect::parse(&[5, 3, 0, 1, 0, 0, 0, 0, 0, 0]).unwrap_err();
-        assert_eq!(udp_associate.reply(), ReplyCode::CommandNotSupported);
-
-        let unknown_type = Connect::parse(&[5, 1, 0, 2, 0, 0]).unwrap_err();
+        let unknown_type = Request::parse(&[5, 1, 0, 2, 0, 0]).unwrap_err();
         assert_eq!(unknown_type, Socks5Error::AddressType(2));
         assert_eq!(unknown_type.reply(), ReplyCode::AddressTypeNotSupported);
     }
 
     #[test]
     fn malformed_connect_is_rejected() {
-        assert_eq!(Connect::parse(&[4, 1, 0, 1]), Err(Socks5Error::Version(4)));
-        assert_eq!(Connect::parse(&[5, 1, 9, 1]), Err(Socks5Error::Reserved(9)));
-        assert_eq!(Connect::parse(&[5, 1, 0, 3, 0, 0, 80]), Err(Socks5Error::Domain(InvalidDomainName::Length(0))));
+        assert_eq!(Request::parse(&[4, 1, 0, 1]), Err(Socks5Error::Version(4)));
+        assert_eq!(Request::parse(&[5, 1, 9, 1]), Err(Socks5Error::Reserved(9)));
+        assert_eq!(Request::parse(&[5, 1, 0, 3, 0, 0, 80]), Err(Socks5Error::Domain(InvalidDomainName::Length(0))));
         let spaced = [&[5, 1, 0, 3, 7][..], b"a b.com", &[0, 80]].concat();
-        assert_eq!(Connect::parse(&spaced), Err(Socks5Error::Domain(InvalidDomainName::Byte(b' '))));
+        assert_eq!(Request::parse(&spaced), Err(Socks5Error::Domain(InvalidDomainName::Byte(b' '))));
         let binary = [5, 1, 0, 3, 2, 0xff, 0xfe, 0, 80];
-        assert_eq!(Connect::parse(&binary), Err(Socks5Error::Domain(InvalidDomainName::Byte(0xff))));
-        assert_eq!(Connect::parse(&binary).unwrap_err().reply(), ReplyCode::GeneralFailure);
+        assert_eq!(Request::parse(&binary), Err(Socks5Error::Domain(InvalidDomainName::Byte(0xff))));
+        assert_eq!(Request::parse(&binary).unwrap_err().reply(), ReplyCode::GeneralFailure);
+    }
+
+    #[test]
+    fn udp_associate_is_a_request_like_connect_with_the_address_the_client_will_send_from() {
+        let unspecified = [5, 3, 0, 1, 0, 0, 0, 0, 0, 0];
+        let expected = Request { command: Command::UdpAssociate, host: host("0.0.0.0"), port: 0 };
+        assert_eq!(Request::parse(&unspecified), Ok(Some(Parsed { value: expected, len: 10 })));
+        assert_prefixes_incomplete(&unspecified, Request::parse);
+
+        let declared = Request::parse(&[5, 3, 0, 1, 192, 0, 2, 9, 0xc3, 0x50]).unwrap().unwrap().value;
+        assert_eq!(declared, Request { command: Command::UdpAssociate, host: host("192.0.2.9"), port: 50_000 });
+    }
+
+    #[test]
+    fn the_reply_to_udp_associate_carries_the_address_of_the_relay_port() {
+        assert_eq!(associated("127.0.0.1:4660".parse().unwrap()), [5, 0, 0, 1, 127, 0, 0, 1, 0x12, 0x34]);
+        let v6 = associated("[::1]:4660".parse().unwrap());
+        assert_eq!((v6.len(), &v6[..4], &v6[20..]), (22, &[5, 0, 0, 4][..], &[0x12, 0x34][..]));
+        // 双栈端口上的 IPv4 地址按 IPv4 报，客户端才认得。
+        assert_eq!(associated("[::ffff:192.0.2.1]:80".parse().unwrap()), [5, 0, 0, 1, 192, 0, 2, 1, 0, 80]);
+    }
+
+    #[test]
+    fn a_udp_packet_is_a_header_with_the_other_end_followed_by_the_data() {
+        let v4 = [&[0, 0, 0, 1, 203, 0, 113, 7, 0, 53][..], b"query"].concat();
+        assert_eq!(UdpPacket::parse(&v4), Ok(UdpPacket { host: host("203.0.113.7"), port: 53, data: b"query" }));
+        assert_eq!(UdpPacket { host: host("203.0.113.7"), port: 53, data: b"query" }.encode(), v4);
+
+        let domain = [&[0, 0, 0, 3, 11][..], b"dns.example", &[0, 53], b"query"].concat();
+        let parsed = UdpPacket::parse(&domain).unwrap();
+        assert_eq!(parsed, UdpPacket { host: host("dns.example"), port: 53, data: b"query" });
+        assert_eq!(parsed.encode(), domain);
+
+        let mut v6 = vec![0, 0, 0, 4];
+        v6.extend_from_slice(&"2001:db8::1".parse::<Ipv6Addr>().unwrap().octets());
+        v6.extend_from_slice(&[0x01, 0xbb]);
+        let parsed = UdpPacket::parse(&v6).unwrap();
+        assert_eq!(parsed, UdpPacket { host: host("2001:db8::1"), port: 443, data: b"" }, "没有数据的报文也是报文");
+        assert_eq!(parsed.encode(), v6);
+
+        let longest = UdpPacket { host: host(&"a".repeat(253)), port: 1, data: b"" }.encode();
+        assert_eq!(longest.len(), UdpPacket::MAX_HEADER_LEN);
+    }
+
+    #[test]
+    fn malformed_and_fragmented_udp_packets_are_rejected() {
+        assert_eq!(UdpPacket::parse(&[]), Err(UdpPacketError::Truncated));
+        assert_eq!(UdpPacket::parse(&[0, 0, 0, 1, 203, 0, 113, 7, 0]), Err(UdpPacketError::Truncated));
+        assert_eq!(UdpPacket::parse(&[0, 1, 0, 1, 203, 0, 113, 7, 0, 53]), Err(UdpPacketError::Reserved));
+        // 分片：不支持，丢掉。
+        assert_eq!(UdpPacket::parse(&[0, 0, 1, 1, 203, 0, 113, 7, 0, 53]), Err(UdpPacketError::Fragmented(1)));
+        assert_eq!(UdpPacket::parse(&[0, 0, 0x81, 1, 203, 0, 113, 7, 0, 53]), Err(UdpPacketError::Fragmented(0x81)));
+        assert_eq!(UdpPacket::parse(&[0, 0, 0, 2, 0, 0]), Err(UdpPacketError::Address(Socks5Error::AddressType(2))));
+        let spaced = [&[0, 0, 0, 3, 3][..], b"a b", &[0, 53]].concat();
+        assert!(matches!(UdpPacket::parse(&spaced), Err(UdpPacketError::Address(Socks5Error::Domain(_)))));
     }
 
     #[test]

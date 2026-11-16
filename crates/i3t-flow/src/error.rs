@@ -22,4 +22,8 @@ pub enum FlowError {
     Deadline(Duration),
     #[error("对端拒绝了建流请求：{:?}（{}）", .0.status, .0.detail)]
     Refused(Reply),
+    #[error("对端在一条流上要的是数据报上下文，这里只接受流")]
+    NotAStream,
+    #[error("对端给的上下文号 {0} 已经在用")]
+    ContextInUse(u32),
 }

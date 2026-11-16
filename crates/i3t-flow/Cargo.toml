@@ -5,9 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "ice3tier 的流层：建流请求与应答、两个方向的搬运"
+description = "ice3tier 的流层：建流请求与应答、两个方向的搬运、数据报上下文"
 
 [dependencies]
+bytes.workspace = true
 i3t-conn = { path = "../i3t-conn" }
 i3t-model = { path = "../i3t-model" }
 i3t-proto = { path = "../i3t-proto" }

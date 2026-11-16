@@ -9,10 +9,16 @@
 //! | 接受方（出口模块） | [`serve`]、[`Handler`]、[`Request`] | 限时读 OPEN，交给处理者，由它接受或者拒绝 |
 //! | 两边 | [`Flow::relay`] | 在流和一条 TCP 连接之间双向搬运，如实传递半关闭和异常结束 |
 //!
+//! UDP 应用的数据不走流，走数据报上下文，见 [`datagram`]。接受方那一侧两种都从 [`serve`] 进来。
+//!
+//! 服务等级在这一层落到实处：流的发送优先级跟着等级走（`auto` 的流发得多了会降级），
+//! 数据报按等级选不可靠的通道还是逐个可靠送达。
+//!
 //! 这一层只依赖连接层的契约（[`i3t_conn::contract`]），不知道下面是不是 QUIC。
 //! 打开 `test-util` 特性之后有一个内存里的连接层（`memory` 模块），测试不需要真的连接。
 
 mod acceptor;
+pub mod datagram;
 mod error;
 mod header;
 mod initiator;

@@ -10,6 +10,12 @@
 //! - 连接断开：[`MemoryMesh::partition`] 之后，两个节点之间所有的流读写都出错，而且这个错误里没有原因码。
 //!
 //! 每个方向有一个固定大小的缓冲区，写满了发送方就等，所以反压也是有的。
+//!
+//! 数据报（[`Datagrams`]）也有：加入了这张网、没有被 [`partition`](MemoryMesh::partition) 隔开的两个节点之间算有连接。
+//! 不保证送达的那种有长度上限（[`MemoryMesh::set_max_datagram_len`]），可以让测试挑着丢（[`MemoryMesh::set_datagram_filter`]），
+//! 收的一方排满了也丢；保证送达的那种不经过这些，排满了发送方就等。
+//!
+//! 流的发送优先级没有效果（内存里的流互不争抢），只是记下来，测试用 [`MemoryMesh::send_priorities`] 看设成了什么。
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
@@ -17,13 +23,22 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::task::{Context, Poll, Waker};
 
+use bytes::Bytes;
+use i3t_conn::contract::{Datagram, DatagramSendError, DatagramSender, Datagrams, Priority};
 use i3t_conn::{Acceptor, Connector, Incoming, OpenError, RecvStream, SendStream, StreamAborted, StreamCode};
 use i3t_proto::NodeId;
+use i3t_proto::flow::Recipient;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
 
 /// 一个方向上最多缓冲多少字节。
 const PIPE_CAPACITY: usize = 64 * 1024;
+
+/// 一个节点的每一侧，收到了、还没有被取走的数据报最多排多少个。和 QUIC 的实现取同一个数。
+const DATAGRAM_BACKLOG: usize = 1024;
+
+/// 不保证送达的数据报默认最长多少字节：真的连接在最小的路径 MTU 下差不多是这个数。
+const DEFAULT_MAX_DATAGRAM_LEN: usize = 1200;
 
 /// 发送方向没有正常结束就被丢弃时，对端看到的原因码。契约没有规定这个值，这里和 QUIC 的实现取同一个。
 const DROPPED_SEND: StreamCode = StreamCode(u32::MAX);
@@ -41,14 +56,57 @@ pub struct MemoryMesh {
 
 #[derive(Debug, Default)]
 struct MeshState {
-    nodes: HashMap<NodeId, mpsc::UnboundedSender<IncomingStream>>,
+    nodes: HashMap<NodeId, NodeEntry>,
     partitions: HashSet<Link>,
     pipes: Vec<LivePipe>,
+    /// 没有值时是 [`DEFAULT_MAX_DATAGRAM_LEN`]。
+    max_datagram_len: Option<usize>,
+    datagram_filter: Option<InstalledFilter>,
+}
+
+/// 一个加入了这张网的节点收东西的入口。
+#[derive(Debug)]
+struct NodeEntry {
+    streams: mpsc::UnboundedSender<IncomingStream>,
+    datagrams: Sides<mpsc::Sender<Datagram>>,
+}
+
+/// 上下文的两侧各一份的东西。
+#[derive(Debug)]
+struct Sides<T> {
+    acceptor: T,
+    initiator: T,
+}
+
+impl<T> Sides<T> {
+    fn of(&self, recipient: Recipient) -> &T {
+        match recipient {
+            Recipient::Acceptor => &self.acceptor,
+            Recipient::Initiator => &self.initiator,
+        }
+    }
+}
+
+/// 一个节点的两个接收队列。它的 [`MemoryConnector`] 和 [`MemoryAcceptor`] 共用。
+type Inbox = Arc<Sides<tokio::sync::Mutex<mpsc::Receiver<Datagram>>>>;
+
+/// 测试给的丢包规则：参数是发送方、接收方和数据报，返回 `false` 的被丢掉。
+pub type DatagramFilter = Box<dyn FnMut(NodeId, NodeId, &[u8]) -> bool + Send>;
+
+/// 装着的丢包规则。包这一层只是为了让网的状态还打印得出来。
+struct InstalledFilter(DatagramFilter);
+
+impl std::fmt::Debug for InstalledFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DatagramFilter")
+    }
 }
 
 #[derive(Debug)]
 struct LivePipe {
     link: Link,
+    /// 往这个方向里写的节点。
+    sender: NodeId,
     pipe: Weak<Pipe>,
 }
 
@@ -74,9 +132,31 @@ impl MemoryMesh {
     /// 让一个节点加入这张网。同一个编号再加入一次会顶掉原来的：原来的 [`MemoryAcceptor`] 不再收到新的流。
     #[must_use]
     pub fn join(&self, id: NodeId) -> (MemoryConnector, MemoryAcceptor) {
-        let (sender, receiver) = mpsc::unbounded_channel();
-        self.lock().nodes.insert(id, sender);
-        (MemoryConnector { id, mesh: self.clone() }, MemoryAcceptor { incoming: tokio::sync::Mutex::new(receiver) })
+        let (streams, incoming) = mpsc::unbounded_channel();
+        let (to_acceptor, for_acceptor) = mpsc::channel(DATAGRAM_BACKLOG);
+        let (to_initiator, for_initiator) = mpsc::channel(DATAGRAM_BACKLOG);
+        let inbox: Inbox = Arc::new(Sides { acceptor: for_acceptor.into(), initiator: for_initiator.into() });
+        self.lock().nodes.insert(id, NodeEntry { streams, datagrams: Sides { acceptor: to_acceptor, initiator: to_initiator } });
+        let connector = MemoryConnector { id, mesh: self.clone(), inbox: Arc::clone(&inbox) };
+        (connector, MemoryAcceptor { id, mesh: self.clone(), incoming: tokio::sync::Mutex::new(incoming), inbox })
+    }
+
+    /// 不保证送达的数据报最长多少字节。调小了可以让上层的分片跑起来。
+    pub fn set_max_datagram_len(&self, len: usize) {
+        self.lock().max_datagram_len = Some(len);
+    }
+
+    /// 装上或者卸掉丢包规则：每个不保证送达的数据报都拿去问，返回 `false` 的被丢掉。保证送达的数据报不经过它。
+    pub fn set_datagram_filter(&self, filter: Option<DatagramFilter>) {
+        self.lock().datagram_filter = filter.map(InstalledFilter);
+    }
+
+    /// `sender` 现在开着的每个流的发送方向各是什么优先级，按开流的先后。
+    #[must_use]
+    pub fn send_priorities(&self, sender: NodeId) -> Vec<Priority> {
+        let state = self.lock();
+        let live = state.pipes.iter().filter(|live| live.sender == sender).filter_map(|live| live.pipe.upgrade());
+        live.map(|pipe| pipe.lock().priority).collect()
     }
 
     /// 断开两个节点之间的连接：它们之间已有的流全部出错（不带原因码），之后开流得到 [`OpenError::NoRoute`]。
@@ -109,6 +189,7 @@ impl MemoryMesh {
 pub struct MemoryConnector {
     id: NodeId,
     mesh: MemoryMesh,
+    inbox: Inbox,
 }
 
 impl MemoryConnector {
@@ -135,11 +216,15 @@ impl Connector for MemoryConnector {
         let inbound = Arc::new(Pipe::default());
         let incoming =
             Incoming { peer: self.id, send: MemorySend { pipe: Arc::clone(&inbound) }, recv: MemoryRecv { pipe: Arc::clone(&outbound) } };
-        if node.send(incoming).is_err() {
+        if node.streams.send(incoming).is_err() {
             return Err(OpenError::ConnectionLost { peer, reason: "对端已经不接受新的流".to_owned() });
         }
         state.pipes.retain(|live| live.pipe.strong_count() > 0);
-        state.pipes.extend([&outbound, &inbound].map(|pipe| LivePipe { link, pipe: Arc::downgrade(pipe) }));
+        state.pipes.extend([(self.id, &outbound), (peer, &inbound)].map(|(sender, pipe)| LivePipe {
+            link,
+            sender,
+            pipe: Arc::downgrade(pipe),
+        }));
         Ok((MemorySend { pipe: outbound }, MemoryRecv { pipe: inbound }))
     }
 }
@@ -147,7 +232,10 @@ impl Connector for MemoryConnector {
 /// 一个节点收流的那一半。
 #[derive(Debug)]
 pub struct MemoryAcceptor {
+    id: NodeId,
+    mesh: MemoryMesh,
     incoming: tokio::sync::Mutex<mpsc::UnboundedReceiver<IncomingStream>>,
+    inbox: Inbox,
 }
 
 impl Acceptor for MemoryAcceptor {
@@ -156,6 +244,75 @@ impl Acceptor for MemoryAcceptor {
 
     async fn accept(&self) -> Option<Incoming<Self::Send, Self::Recv>> {
         self.incoming.lock().await.recv().await
+    }
+}
+
+impl Datagrams for MemoryConnector {
+    type Sender = MemoryDatagrams;
+
+    fn datagram_sender(&self) -> MemoryDatagrams {
+        MemoryDatagrams { id: self.id, mesh: self.mesh.clone() }
+    }
+
+    async fn recv_datagram(&self, recipient: Recipient) -> Option<Datagram> {
+        self.inbox.of(recipient).lock().await.recv().await
+    }
+}
+
+impl Datagrams for MemoryAcceptor {
+    type Sender = MemoryDatagrams;
+
+    fn datagram_sender(&self) -> MemoryDatagrams {
+        MemoryDatagrams { id: self.id, mesh: self.mesh.clone() }
+    }
+
+    async fn recv_datagram(&self, recipient: Recipient) -> Option<Datagram> {
+        self.inbox.of(recipient).lock().await.recv().await
+    }
+}
+
+/// 一个节点发数据报的句柄。
+#[derive(Debug, Clone)]
+pub struct MemoryDatagrams {
+    id: NodeId,
+    mesh: MemoryMesh,
+}
+
+impl MemoryDatagrams {
+    /// `datagram` 该进 `peer` 的哪个队列。首字节看不出是给哪一侧的数据报没有队列可进，和真的连接一样直接丢掉。
+    fn queue(&self, state: &MeshState, peer: NodeId, datagram: &[u8]) -> Result<Option<mpsc::Sender<Datagram>>, DatagramSendError> {
+        let node = state.nodes.get(&peer).filter(|_| !state.partitions.contains(&Link::between(self.id, peer)));
+        let node = node.ok_or(DatagramSendError::NotConnected(peer))?;
+        Ok(Recipient::peek(datagram).map(|recipient| node.datagrams.of(recipient).clone()))
+    }
+}
+
+impl DatagramSender for MemoryDatagrams {
+    fn max_datagram_len(&self, peer: NodeId) -> Option<usize> {
+        let state = self.mesh.lock();
+        self.queue(&state, peer, &[]).ok().map(|_| state.max_datagram_len.unwrap_or(DEFAULT_MAX_DATAGRAM_LEN))
+    }
+
+    fn send_datagram(&self, peer: NodeId, datagram: Bytes) -> Result<(), DatagramSendError> {
+        let mut state = self.mesh.lock();
+        let queue = self.queue(&state, peer, &datagram)?;
+        let max = state.max_datagram_len.unwrap_or(DEFAULT_MAX_DATAGRAM_LEN);
+        if datagram.len() > max {
+            return Err(DatagramSendError::TooLarge { len: datagram.len(), max });
+        }
+        let delivered = state.datagram_filter.as_mut().is_none_or(|filter| (filter.0)(self.id, peer, &datagram));
+        if let Some(queue) = queue.filter(|_| delivered) {
+            // 排满了就丢，和真的连接一样。
+            let _full = queue.try_send(Datagram { peer: self.id, payload: datagram });
+        }
+        Ok(())
+    }
+
+    async fn send_reliable(&self, peer: NodeId, datagram: Bytes) -> Result<(), DatagramSendError> {
+        let queue = self.queue(&self.mesh.lock(), peer, &datagram)?;
+        let Some(queue) = queue else { return Ok(()) };
+        let closed = |_| DatagramSendError::ConnectionLost { peer, reason: "对端已经不在这张网上".to_owned() };
+        queue.send(Datagram { peer: self.id, payload: datagram }).await.map_err(closed)
     }
 }
 
@@ -179,6 +336,8 @@ struct PipeState {
     /// 发送方已经正常结束。
     finished: bool,
     aborted: Option<Abort>,
+    /// 发送方给这个方向设的优先级。只是记着，给测试看。
+    priority: Priority,
     reader: Option<Waker>,
     writer: Option<Waker>,
 }
@@ -269,6 +428,10 @@ impl SendStream for MemorySend {
         if !self.pipe.lock().finished {
             self.pipe.abort(Abort::Reset(code));
         }
+    }
+
+    fn set_priority(&mut self, priority: Priority) {
+        self.pipe.lock().priority = priority;
     }
 }
 

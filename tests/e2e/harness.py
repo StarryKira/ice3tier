@@ -195,3 +195,195 @@ class Checks:
 
 def tail(text: str, lines: int = 15) -> str:
     return textwrap.indent("\n".join(text.splitlines()[-lines:]), "    ")
+
+
+# 下面是选路场景（test_routing.py）用的：按"哪两台主机之间"加网络条件，从节点的日志里读它现在走哪条路。
+
+def shape_between(a: Host, b: Host, shape=None) -> None:
+    """只给 `a` 和 `b` 之间的包加网络条件，两台主机的别的流量不受影响。`shape` 是 `lab.Shape`，`None` 表示去掉。
+
+    `Host.shape` 管的是一台主机的整条上联线，做不出"直连差、绕 relay 好"的拓扑；这里按目的地址分流，
+    两个方向各在发出的一侧加一半的延迟和各自的丢包。
+    """
+    for host, peer in ((a, b), (b, a)):
+        shapes = host.__dict__.setdefault("_pair_shapes", {})
+        if shape is None:
+            shapes.pop(peer.ip, None)
+        else:
+            shapes[peer.ip] = shape
+        host.run("tc", "qdisc", "del", "dev", "up0", "root", check=False)
+        if not shapes:
+            continue
+        # 第一条带（1:1）走没有限制的流量，之后每个对端一条带，带下面挂一个 netem。
+        host.run("tc", "qdisc", "add", "dev", "up0", "root", "handle", "1:", "prio", "bands", str(max(2, len(shapes) + 1)),
+                 "priomap", *["0"] * 16)
+        for band, (ip, pair_shape) in enumerate(shapes.items(), start=2):
+            host.run("tc", "qdisc", "add", "dev", "up0", "parent", f"1:{band:x}", "handle", f"{band:x}0:", "netem",
+                     *pair_shape.netem_args())
+            host.run("tc", "filter", "add", "dev", "up0", "parent", "1:", "protocol", "ip", "prio", "1", "u32",
+                     "match", "ip", "dst", f"{ip}/32", "flowid", f"1:{band:x}")
+
+
+def route_changes(node: "Node", peer: "Node") -> list[tuple[str, str]]:
+    """`node` 的日志里到 `peer` 的每一次换路：(换成了哪条路, 原因)，按发生的顺序。
+
+    静态模式下没有 controller 可问，路径层每次换路都记一条带原因的日志，这里读的就是它。
+    路写成"直连 1.2.3.4:20330"、"经 relay 8 → 9"或者"没有路"。
+    """
+    import re
+    pattern = re.compile(rf"到对端的路变了 peer={peer.id} path=(.*?) reason=\"(.*?)\"\s*$")
+    return [match.groups() for line in node.read_log().splitlines() if (match := pattern.search(line))]
+
+
+def current_route(node: "Node", peer: "Node") -> str:
+    """`node` 到 `peer` 现在走的路；还没有过路时是"没有路"。"""
+    changes = route_changes(node, peer)
+    return changes[-1][0] if changes else "没有路"
+
+
+# 下面是 UDP 的场景（test_udp.py）用的。
+
+# 一个 UDP 回显服务：把收到的报文发回去，前面加上"它看到的来源地址"和一个竖线。用它确认 UDP 是从哪个节点的出口出去的。
+UDP_ECHO = r"""
+import socket, sys
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind((sys.argv[1], int(sys.argv[2])))
+while True:
+    data, peer = sock.recvfrom(65535)
+    sock.sendto(peer[0].encode() + b"|" + data, peer)
+"""
+
+# 一个最小的 SOCKS5 UDP 客户端：做 UDP ASSOCIATE，经中继端口发一个报文，打印回来的报文（JSON）；等不到就打印 null。
+# 参数：代理地址、代理端口、用户名（可以为空）、目标、目标端口、载荷（十六进制）、最多发几次。
+# 第一个报文要等两个节点之间建好连接才出得去，所以每隔一秒半重发一次，直到有回音。
+SOCKS5_UDP = r"""
+import json, socket, struct, sys
+proxy_host, proxy_port, user, target, port, payload, tries = sys.argv[1:8]
+control = socket.create_connection((proxy_host, int(proxy_port)), timeout=10)
+if user:
+    control.sendall(b"\x05\x01\x02")
+    assert control.recv(2) == b"\x05\x02", "代理应该选中用户名密码认证"
+    control.sendall(bytes([1, len(user)]) + user.encode() + b"\x00")
+    assert control.recv(2) == b"\x01\x00", "认证应该通过"
+else:
+    control.sendall(b"\x05\x01\x00")
+    assert control.recv(2) == b"\x05\x00", "代理应该选中不认证"
+control.sendall(b"\x05\x03\x00\x01" + bytes(6))
+reply = b""
+while len(reply) < 10:
+    reply += control.recv(10 - len(reply))
+assert reply[:4] == b"\x05\x00\x00\x01", reply
+relay = (socket.inet_ntoa(reply[4:8]), struct.unpack("!H", reply[8:10])[0])
+try:
+    address = b"\x01" + socket.inet_aton(target)
+except OSError:
+    address = b"\x03" + bytes([len(target)]) + target.encode()
+packet = b"\x00\x00\x00" + address + struct.pack("!H", int(port)) + bytes.fromhex(payload)
+udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+udp.settimeout(1.5)
+answer = None
+for _ in range(int(tries)):
+    udp.sendto(packet, relay)
+    try:
+        data, sender = udp.recvfrom(65535)
+    except socket.timeout:
+        continue
+    assert sender == relay and data[:4] == b"\x00\x00\x00\x01", (sender, data[:10])
+    answer = {"source": socket.inet_ntoa(data[4:8]), "port": struct.unpack("!H", data[8:10])[0], "data": data[10:].hex()}
+    break
+print(json.dumps(answer))
+"""
+
+# 一个普通的 UDP 客户端：往一个地址发一个报文，打印回来的报文（十六进制）；等不到就什么都不打印。
+# 参数：地址、端口、载荷（十六进制）、最多发几次。
+UDP_CLIENT = r"""
+import socket, sys
+address, port, payload, tries = sys.argv[1:5]
+udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+udp.settimeout(1.5)
+for _ in range(int(tries)):
+    udp.sendto(bytes.fromhex(payload), (address, int(port)))
+    try:
+        data, _ = udp.recvfrom(65535)
+    except socket.timeout:
+        continue
+    print(data.hex())
+    break
+"""
+
+# 没有 dnsmasq 的机器上顶替它的 DNS 服务：不管问什么名字，都用同一条 A 记录回答。参数：监听地址、端口、要回答的地址。
+DNS_STUB = r"""
+import socket, sys
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind((sys.argv[1], int(sys.argv[2])))
+while True:
+    query, peer = sock.recvfrom(2048)
+    answer = b"\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04" + socket.inet_aton(sys.argv[3])
+    sock.sendto(query[:2] + b"\x81\x80\x00\x01\x00\x01\x00\x00\x00\x00" + query[12:] + answer, peer)
+"""
+
+
+def _wait_udp_listening(host: Host, port: int, what: str) -> None:
+    wait_until(lambda: f":{port} " in host.run("ss", "-lnu").stdout, what=what)
+
+
+def start_udp_echo(host: Host, port: int, bind: str = "0.0.0.0") -> None:
+    host.spawn(sys.executable, "-c", UDP_ECHO, bind, str(port))
+    _wait_udp_listening(host, port, f"{host.name} 上的 UDP 回显服务启动")
+
+
+def start_dns(host: Host, bind: str, port: int, name: str, address: str) -> str:
+    """在 `host` 上起一个 DNS 服务，`name` 解析成 `address`。有 dnsmasq 就用它，没有就用一个替身。返回用的是哪个。"""
+    import shutil
+
+    if shutil.which("dnsmasq"):
+        # -d：留在前台，也不切换用户（测试用的用户命名空间里只有 root 这一个用户，切不了）。
+        host.spawn("dnsmasq", "-d", "--conf-file=/dev/null", "--no-resolv", "--no-hosts", "--bind-interfaces",
+                   f"--listen-address={bind}", f"--port={port}", f"--address=/{name}/{address}")
+        server = "dnsmasq"
+    else:
+        host.spawn(sys.executable, "-c", DNS_STUB, bind, str(port), address)
+        server = "替身"
+    _wait_udp_listening(host, port, f"{host.name} 上的 DNS 服务启动")
+    return server
+
+
+def socks5_udp(host: Host, target: str, port: int, payload: bytes, *, user: str = "", tries: int = 10) -> dict | None:
+    """从 `host` 上经它的本机 SOCKS5 入口发一个 UDP 报文给 `target:port`，返回回来的报文：来源地址、端口和数据。"""
+    done = host.run(sys.executable, "-c", SOCKS5_UDP, "127.0.0.1", "1080", user, target, str(port), payload.hex(), str(tries),
+                    check=False, timeout=tries * 2 + 15)
+    if done.returncode != 0:
+        raise RuntimeError(f"SOCKS5 UDP 客户端出错：{done.stderr.strip()[-500:]}")
+    answer = json.loads(done.stdout)
+    if answer is not None:
+        answer["data"] = bytes.fromhex(answer["data"])
+    return answer
+
+
+def udp_exchange(host: Host, address: str, port: int, payload: bytes, *, tries: int = 10) -> bytes | None:
+    """从 `host` 上往 `address:port` 发一个 UDP 报文，返回回来的报文；等不到返回 `None`。"""
+    done = host.run(sys.executable, "-c", UDP_CLIENT, address, str(port), payload.hex(), str(tries), check=False, timeout=tries * 2 + 15)
+    return bytes.fromhex(done.stdout.strip()) if done.stdout.strip() else None
+
+
+def dns_query(name: str, query_id: int = 0x1d3f) -> bytes:
+    """一个查 `name` 的 A 记录的 DNS 请求。"""
+    labels = b"".join(bytes([len(label)]) + label.encode() for label in name.rstrip(".").split("."))
+    return query_id.to_bytes(2, "big") + b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + labels + b"\x00\x00\x01\x00\x01"
+
+
+def dns_a_records(response: bytes, query: bytes) -> list[str]:
+    """从 DNS 应答里取出 A 记录的地址。应答对不上 `query`（编号、问题）时抛出异常。"""
+    import socket
+
+    if response[:2] != query[:2] or not response[2] & 0x80 or response[12:len(query)] != query[12:]:
+        raise ValueError(f"这不是对那个请求的应答：{response[:len(query)].hex()}")
+    count, at, addresses = int.from_bytes(response[6:8], "big"), len(query), []
+    for _ in range(count):
+        # 名字要么是一个 2 字节的指针，要么是一串标签；这里的应答里都是指针。
+        at += 2 if response[at] & 0xc0 == 0xc0 else response.index(b"\x00", at) - at + 1
+        kind, length = int.from_bytes(response[at:at + 2], "big"), int.from_bytes(response[at + 8:at + 10], "big")
+        if kind == 1 and length == 4:
+            addresses.append(socket.inet_ntoa(response[at + 10:at + 14]))
+        at += 10 + length
+    return addresses
