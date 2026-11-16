@@ -493,7 +493,7 @@ pub enum DirectFailure {
 pub struct RouteDecision {
     /// 本节点现在用的模式。
     pub mode: RoutingMode,
-    /// 现在走的路。
+    /// 选路规则现在选的路。主动测试暂时固定的路不算。
     pub current: Route,
     pub direct_first: ModeChoice,
     pub lowest_cost: ModeChoice,

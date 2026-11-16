@@ -409,14 +409,15 @@ impl Control {
             PathId::Relays(relays) => Some(relays),
             PathId::Direct(_) => None,
         });
+        // "现在走的路"是选路规则选的那一条：测试自己为了量吞吐暂时固定的路不算，不然测完的结果里写的是测试的路。
         Some(RouteDecision {
             mode: self.mode,
-            current: peer.route.to_route(),
+            current: peer.policy_route.to_route(),
             direct_first,
             lowest_cost,
             default_relay,
             cheapest_relay,
-            candidates: candidates.iter().map(|candidate| candidate_report(candidate, peer.route)).collect(),
+            candidates: candidates.iter().map(|candidate| candidate_report(candidate, peer.policy_route)).collect(),
         })
     }
 

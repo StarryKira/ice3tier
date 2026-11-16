@@ -1949,6 +1949,8 @@ mod tests {
         harness.control.update_routes(start, false);
         assert_eq!(route(&harness), pinned);
         assert_eq!(harness.control.peers[&node(2)].policy_route, direct, "选路规则选的还是直连");
+        let decision = harness.control.decide(node(2), start).unwrap();
+        assert_eq!(decision.current, direct.to_route(), "测试的结果里写的是规则选的路，不是测试自己固定的");
         assert!(changes.try_recv().unwrap().reason.contains("主动测试暂时把路固定在"));
 
         // 别的固定的解除不算数；这一次的解除之后回到直连。
