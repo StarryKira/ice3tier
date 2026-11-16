@@ -12,7 +12,7 @@ use std::time::Instant;
 use quinn::{ReadError, VarInt, WriteError};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::contract::{self, StreamAborted, StreamCode};
+use crate::contract::{self, Priority, StreamAborted, StreamCode};
 
 /// 发送方向没有 `shutdown` 就被丢弃时，带给对端的原因码。
 ///
@@ -23,6 +23,15 @@ pub const DROPPED_STREAM_CODE: StreamCode = StreamCode(u32::MAX);
 fn code_of(code: VarInt) -> StreamCode {
     // 本项目的两端只会发 32 位以内的码；别的实现发来更大的就压到最大值。
     StreamCode(u32::try_from(code.into_inner()).unwrap_or(u32::MAX))
+}
+
+/// 契约里的优先级在 QUIC 库里的数值：数值大的先发，新开的流是 0。
+const fn quic_priority(priority: Priority) -> i32 {
+    match priority {
+        Priority::Low => -1,
+        Priority::Normal => 0,
+        Priority::High => 1,
+    }
 }
 
 /// 一条连接上现在开着多少个流方向，以及最近一次变成零是什么时候。连接靠它判断自己是不是空闲。
@@ -118,6 +127,11 @@ impl contract::SendStream for SendHalf {
         // 失败说明这个方向已经关掉了（连接断了也算），没有什么可重置的。
         let _already_closed = self.inner.reset(VarInt::from_u32(code.0));
     }
+
+    fn set_priority(&mut self, priority: Priority) {
+        // 失败说明这个方向已经关掉了，那它排在哪里都无所谓。
+        let _already_closed = self.inner.set_priority(quic_priority(priority));
+    }
 }
 
 impl Drop for SendHalf {
@@ -184,6 +198,13 @@ mod tests {
         let huge = read_error(ReadError::Reset(VarInt::MAX));
         assert_eq!(StreamAborted::of(&huge), Some(StreamAborted::Reset(StreamCode(u32::MAX))));
         assert_eq!(StreamAborted::of(&write_error(WriteError::ClosedStream)), None);
+    }
+
+    #[test]
+    fn a_higher_priority_is_a_larger_number_and_normal_is_what_new_streams_have() {
+        assert!(quic_priority(Priority::High) > quic_priority(Priority::Normal));
+        assert!(quic_priority(Priority::Normal) > quic_priority(Priority::Low));
+        assert_eq!(quic_priority(Priority::default()), 0);
     }
 
     #[test]

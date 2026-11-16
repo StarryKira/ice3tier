@@ -3,20 +3,22 @@
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
+use bytes::{BufMut, Bytes, BytesMut};
 use i3t_crypto::NodeKey;
 use i3t_crypto::tls;
 use i3t_model::Netmap;
 use i3t_model::control::Signal;
 use i3t_path::Paths;
+use i3t_proto::flow::{DatagramHeader, MAX_DATAGRAM_BODY_LEN, Recipient};
 use i3t_proto::{NodeId, PublicKey};
 use quinn::rustls::pki_types::CertificateDer;
-use quinn::{ConnectError, TransportConfig, VarInt};
+use quinn::{ConnectError, SendDatagramError, TransportConfig, VarInt};
 use tokio::sync::{Notify, mpsc, watch};
 
-use crate::contract::{Incoming, OpenError};
+use crate::contract::{Datagram, DatagramSendError, DatagramSender, Incoming, OpenError};
 use crate::quic::{self, SERVER_NAME};
 use crate::socket;
 use crate::stream::{self, RecvHalf, SendHalf, StreamCount};
@@ -34,6 +36,10 @@ const IDLE_CHECK: Duration = Duration::from_secs(1);
 /// 连接里送来的一条信令最长多少字节、最多等多久。
 const SIGNAL_MAX_BYTES: usize = 4096;
 const SIGNAL_TIMEOUT: Duration = Duration::from_secs(5);
+/// 走单向流的数据报最多等多久读完。它是一次写进去的，正常情况下一到就是完整的。
+const RELIABLE_DATAGRAM_TIMEOUT: Duration = Duration::from_secs(10);
+/// 对端发来、上层还没有取走的数据报，每一侧最多排多少个。
+pub(crate) const DATAGRAM_BACKLOG: usize = 1024;
 
 /// 关闭连接时带给对端的码。
 const CLOSE_IDLE: u32 = 0;
@@ -42,6 +48,21 @@ const CLOSE_REVOKED: u32 = 2;
 const CLOSE_IDENTITY: u32 = 3;
 
 type Stream = Incoming<SendHalf, RecvHalf>;
+
+/// 对端发来的数据报排在这里等上层来取，给上下文的接受方和发起方的各一个队列。
+pub(crate) struct DatagramQueues {
+    pub acceptor: mpsc::Sender<Datagram>,
+    pub initiator: mpsc::Sender<Datagram>,
+}
+
+impl DatagramQueues {
+    fn of(&self, recipient: Recipient) -> &mpsc::Sender<Datagram> {
+        match recipient {
+            Recipient::Acceptor => &self.acceptor,
+            Recipient::Initiator => &self.initiator,
+        }
+    }
+}
 
 /// 一条和对端的连接。
 struct Conn {
@@ -83,6 +104,7 @@ pub(crate) struct Manager {
     next_serial: AtomicU64,
     /// 对端开过来的流排在这里等上层来取。
     incoming: mpsc::Sender<Stream>,
+    datagrams: DatagramQueues,
     closed: watch::Sender<bool>,
 }
 
@@ -93,6 +115,7 @@ impl Manager {
         paths: Arc<Paths>,
         netmap: watch::Receiver<Arc<Netmap>>,
         incoming: mpsc::Sender<Stream>,
+        datagrams: DatagramQueues,
     ) -> Arc<Self> {
         let me = netmap.borrow().me.id;
         Arc::new(Self {
@@ -105,6 +128,7 @@ impl Manager {
             peers: Mutex::new(HashMap::new()),
             next_serial: AtomicU64::new(0),
             incoming,
+            datagrams,
             closed: watch::Sender::new(false),
         })
     }
@@ -223,7 +247,7 @@ impl Manager {
         }
     }
 
-    /// 一条连接的一生：接收对端开过来的流和信令，空闲够久就关掉。
+    /// 一条连接的一生：接收对端开过来的流、数据报和信令，空闲够久就关掉。
     async fn serve(self: Arc<Self>, peer: NodeId, conn: Arc<Conn>) {
         let mut idle_check = tokio::time::interval(IDLE_CHECK);
         idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -239,7 +263,11 @@ impl Manager {
                     Err(error) => break error.to_string(),
                 },
                 accepted = conn.quic.accept_uni() => match accepted {
-                    Ok(recv) => drop(tokio::spawn(read_signal(Arc::clone(&self.paths), peer, recv))),
+                    Ok(recv) => drop(tokio::spawn(Arc::clone(&self).read_uni(peer, conn.quic.clone(), recv))),
+                    Err(error) => break error.to_string(),
+                },
+                received = conn.quic.read_datagram() => match received {
+                    Ok(payload) => self.deliver_datagram(peer, payload),
                     Err(error) => break error.to_string(),
                 },
                 _ = idle_check.tick() => {
@@ -252,6 +280,69 @@ impl Manager {
         };
         self.forget(peer, &conn);
         tracing::info!(%peer, reason, "和对端的连接结束");
+    }
+
+    /// 把对端发来的一个不保证送达的数据报排进上层的队列。队列满了就丢：上层来不及取，留着也只会过期。
+    fn deliver_datagram(&self, peer: NodeId, payload: Bytes) {
+        let Some(recipient) = Recipient::peek(&payload) else {
+            return tracing::trace!(%peer, len = payload.len(), "丢掉一个数据报：首字节看不出它是给哪一侧的");
+        };
+        if self.datagrams.of(recipient).try_send(Datagram { peer, payload }).is_err() {
+            tracing::trace!(%peer, ?recipient, "丢掉一个数据报：上层的队列满了，或者本端正在关闭");
+        }
+    }
+
+    /// 读对端开过来的一条单向流。首字节说明它是什么：数据报帧的首字节是标志，高位都是 0；
+    /// 其余的是一条信令（一个 JSON 对象，首字节是 `{`）。
+    async fn read_uni(self: Arc<Self>, peer: NodeId, connection: quinn::Connection, mut stream: quinn::RecvStream) {
+        let mut first = [0; 1];
+        match tokio::time::timeout(SIGNAL_TIMEOUT, stream.read_exact(&mut first)).await {
+            Ok(Ok(())) => {}
+            // 空的流什么都不表示；迟迟不写的流不等它。
+            Ok(Err(_)) | Err(_) => return,
+        }
+        match Recipient::peek(&first) {
+            Some(recipient) => self.read_reliable_datagram(peer, recipient, first, &connection, stream).await,
+            None => read_signal(&self.paths, peer, first, stream).await,
+        }
+    }
+
+    /// 读一个走单向流的数据报，排进上层的队列。
+    ///
+    /// 先在队列里占到位置再读流：队列满着的时候这条流就留在那里不读，对端能同时开的流数有上限，
+    /// 它开不出新的流，发送就慢下来。这样本端不丢这种数据报，占的内存也有上限。
+    async fn read_reliable_datagram(
+        &self,
+        peer: NodeId,
+        recipient: Recipient,
+        first: [u8; 1],
+        connection: &quinn::Connection,
+        mut stream: quinn::RecvStream,
+    ) {
+        let permit = tokio::select! {
+            permit = self.datagrams.of(recipient).reserve() => match permit {
+                Ok(permit) => permit,
+                // 本端正在关闭。
+                Err(_) => return,
+            },
+            // 连接没了就不用等了，不然没有人取的队列会把这些任务永远留着。
+            _ = connection.closed() => return,
+        };
+        let limit = DatagramHeader::LEN + MAX_DATAGRAM_BODY_LEN - first.len();
+        let rest = match tokio::time::timeout(RELIABLE_DATAGRAM_TIMEOUT, stream.read_to_end(limit)).await {
+            Ok(Ok(rest)) => rest,
+            Ok(Err(error)) => return tracing::debug!(%peer, %error, "丢掉一个走单向流的数据报：没有读完整，或者超过了长度上限"),
+            Err(_) => return tracing::debug!(%peer, "丢掉一个走单向流的数据报：迟迟没有发完"),
+        };
+        let mut payload = BytesMut::with_capacity(first.len() + rest.len());
+        payload.put_slice(&first);
+        payload.put_slice(&rest);
+        permit.send(Datagram { peer, payload: payload.freeze() });
+    }
+
+    /// 发数据报用的句柄。它不让连接多活：本端关掉之后，拿着它也发不出去。
+    pub(crate) fn datagram_handle(self: &Arc<Self>) -> DatagramHandle {
+        DatagramHandle { manager: Arc::downgrade(self) }
     }
 
     /// 这条连接该不该因为空闲而关掉；该关的话返回原因。
@@ -393,10 +484,10 @@ fn idle_limit(preferred: bool, keep_alive: bool) -> Option<(Duration, &'static s
     }
 }
 
-/// 读对端在连接里送来的一条信令（一条单向流，内容是一个 JSON 对象），交给路径层。
-async fn read_signal(paths: Arc<Paths>, peer: NodeId, mut stream: quinn::RecvStream) {
-    let body = match tokio::time::timeout(SIGNAL_TIMEOUT, stream.read_to_end(SIGNAL_MAX_BYTES)).await {
-        Ok(Ok(body)) => body,
+/// 读对端在连接里送来的一条信令（一条单向流，内容是一个 JSON 对象），交给路径层。`first` 是已经读走的首字节。
+async fn read_signal(paths: &Paths, peer: NodeId, first: [u8; 1], mut stream: quinn::RecvStream) {
+    let rest = match tokio::time::timeout(SIGNAL_TIMEOUT, stream.read_to_end(SIGNAL_MAX_BYTES - first.len())).await {
+        Ok(Ok(rest)) => rest,
         Ok(Err(error)) => {
             tracing::debug!(%peer, %error, "读连接里的信令失败");
             return;
@@ -406,13 +497,56 @@ async fn read_signal(paths: Arc<Paths>, peer: NodeId, mut stream: quinn::RecvStr
             return;
         }
     };
-    // 空的流什么都不表示。
-    if body.is_empty() {
-        return;
-    }
+    let body = [&first[..], &rest].concat();
     match serde_json::from_slice::<Signal>(&body) {
         Ok(signal) => paths.handle_signal(peer, signal),
         Err(error) => tracing::debug!(%peer, %error, "连接里的信令解析不了"),
+    }
+}
+
+/// 往对端发数据报的句柄，[`crate::Endpoint`] 给出来的。
+///
+/// 数据报走开新的流会用的那条连接。两边同时拨号留下两条连接时，两端可能各用各的那一条发，
+/// 这没有关系：收的一方不分数据报是从哪一条连接上来的，只认对端是谁。
+#[derive(Clone)]
+pub struct DatagramHandle {
+    manager: Weak<Manager>,
+}
+
+impl std::fmt::Debug for DatagramHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DatagramHandle").finish_non_exhaustive()
+    }
+}
+
+impl DatagramHandle {
+    fn connection(&self, peer: NodeId) -> Result<Arc<Conn>, DatagramSendError> {
+        self.manager.upgrade().and_then(|manager| manager.preferred(peer)).ok_or(DatagramSendError::NotConnected(peer))
+    }
+}
+
+impl DatagramSender for DatagramHandle {
+    fn max_datagram_len(&self, peer: NodeId) -> Option<usize> {
+        self.connection(peer).ok()?.quic.max_datagram_size()
+    }
+
+    fn send_datagram(&self, peer: NodeId, datagram: Bytes) -> Result<(), DatagramSendError> {
+        let conn = self.connection(peer)?;
+        let len = datagram.len();
+        conn.quic.send_datagram(datagram).map_err(|error| match error {
+            SendDatagramError::UnsupportedByPeer | SendDatagramError::Disabled => DatagramSendError::Unsupported(peer),
+            SendDatagramError::TooLarge => DatagramSendError::TooLarge { len, max: conn.quic.max_datagram_size().unwrap_or(0) },
+            SendDatagramError::ConnectionLost(reason) => DatagramSendError::ConnectionLost { peer, reason: reason.to_string() },
+        })
+    }
+
+    async fn send_reliable(&self, peer: NodeId, datagram: Bytes) -> Result<(), DatagramSendError> {
+        let conn = self.connection(peer)?;
+        let lost = |reason: String| DatagramSendError::ConnectionLost { peer, reason };
+        // 对端同时接受的单向流有上限，到了上限就在这里等它读完前面的。
+        let mut stream = conn.quic.open_uni().await.map_err(|error| lost(error.to_string()))?;
+        stream.write_all(&datagram).await.map_err(|error| lost(error.to_string()))?;
+        stream.finish().map_err(|error| lost(error.to_string()))
     }
 }
 

@@ -29,6 +29,7 @@
 //! # }
 //! ```
 
+mod congestion;
 pub mod contract;
 mod endpoint;
 mod manager;

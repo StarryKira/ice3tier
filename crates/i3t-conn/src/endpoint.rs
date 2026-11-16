@@ -10,13 +10,14 @@ use i3t_model::control::{RouteEntry, Signal};
 use i3t_model::netmap::Attachment;
 use i3t_path::{PathConfig, Paths, RouteChange};
 use i3t_proto::NodeId;
+use i3t_proto::flow::Recipient;
 use i3t_relay::{Relay, RelayCounters};
 use i3t_underlay::{PacketFilter, UdpPort};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 
-use crate::contract::{Acceptor, Connector, Incoming, OpenError};
-use crate::manager::Manager;
+use crate::contract::{Acceptor, Connector, Datagram, Datagrams, Incoming, OpenError};
+use crate::manager::{DATAGRAM_BACKLOG, DatagramHandle, DatagramQueues, Manager};
 use crate::quic::{self, QuicConfigError};
 use crate::socket::PathSocket;
 use crate::stream::{RecvHalf, SendHalf};
@@ -43,6 +44,7 @@ type SignalHook = Arc<dyn Fn(NodeId, &Signal) + Send + Sync>;
 ///
 /// 它实现 [`Connector`] 和 [`Acceptor`]：到某个节点开一条流，接受某个节点开过来的流。包走直连还是经 relay、
 /// 什么时候换路、和对端之间有没有连接，上层都不用管。本节点在 netmap 里被启用为 relay 时，它同时转发别人的包。
+/// 它也实现 [`Datagrams`]：在已经有的连接上和对端互相发数据报（QUIC 的 DATAGRAM 帧，要保证送达的走单向流）。
 ///
 /// 谁能访问谁（netmap 里的 `inbound`）不在这一层检查：netmap 里有的对端都能连进来、开流，
 /// 上层收到流之后按发起节点自己查。
@@ -54,6 +56,7 @@ pub struct Endpoint {
     relay: Arc<Relay>,
     manager: Arc<Manager>,
     incoming: tokio::sync::Mutex<mpsc::Receiver<Incoming<SendHalf, RecvHalf>>>,
+    datagrams: DatagramInbox,
     /// 装配方提供的信令出口。
     signal_hook: Arc<RwLock<Option<SignalHook>>>,
     tasks: [JoinHandle<()>; 2],
@@ -90,7 +93,11 @@ impl Endpoint {
             .map_err(EndpointError::Quic)?;
 
         let (incoming_tx, incoming_rx) = mpsc::channel(INCOMING_BACKLOG);
-        let manager = Manager::new(key, quic, Arc::clone(&paths), netmap, incoming_tx);
+        let (to_acceptor, for_acceptor) = mpsc::channel(DATAGRAM_BACKLOG);
+        let (to_initiator, for_initiator) = mpsc::channel(DATAGRAM_BACKLOG);
+        let queues = DatagramQueues { acceptor: to_acceptor, initiator: to_initiator };
+        let datagrams = DatagramInbox { acceptor: for_acceptor.into(), initiator: for_initiator.into() };
+        let manager = Manager::new(key, quic, Arc::clone(&paths), netmap, incoming_tx, queues);
 
         // 信令两条路都走：已经有连接的话在连接里送（有 relay 的网络因此不依赖 controller），同时交给装配方的钩子。
         let signal_hook: Arc<RwLock<Option<SignalHook>>> = Arc::default();
@@ -107,7 +114,7 @@ impl Endpoint {
 
         let tasks = [tokio::spawn(Arc::clone(&manager).accept_loop()), tokio::spawn(Arc::clone(&manager).follow_netmap())];
         tracing::info!(node = %me, addr = %port.local_addr(), "数据面启动");
-        Ok(Self { port, paths, relay, manager, incoming: tokio::sync::Mutex::new(incoming_rx), signal_hook, tasks })
+        Ok(Self { port, paths, relay, manager, incoming: tokio::sync::Mutex::new(incoming_rx), datagrams, signal_hook, tasks })
     }
 
     /// UDP 端口实际绑定的地址。
@@ -213,6 +220,39 @@ impl Acceptor for Endpoint {
             biased;
             stream = incoming.recv() => stream,
             _ = closed.wait_for(|closed| *closed) => None,
+        }
+    }
+}
+
+impl Datagrams for Endpoint {
+    type Sender = DatagramHandle;
+
+    fn datagram_sender(&self) -> DatagramHandle {
+        self.manager.datagram_handle()
+    }
+
+    async fn recv_datagram(&self, recipient: Recipient) -> Option<Datagram> {
+        let mut closed = self.manager.subscribe_closed();
+        let mut inbox = self.datagrams.of(recipient).lock().await;
+        tokio::select! {
+            biased;
+            datagram = inbox.recv() => datagram,
+            _ = closed.wait_for(|closed| *closed) => None,
+        }
+    }
+}
+
+/// 对端发来、上层还没有取走的数据报，两侧各一个队列。
+struct DatagramInbox {
+    acceptor: tokio::sync::Mutex<mpsc::Receiver<Datagram>>,
+    initiator: tokio::sync::Mutex<mpsc::Receiver<Datagram>>,
+}
+
+impl DatagramInbox {
+    fn of(&self, recipient: Recipient) -> &tokio::sync::Mutex<mpsc::Receiver<Datagram>> {
+        match recipient {
+            Recipient::Acceptor => &self.acceptor,
+            Recipient::Initiator => &self.initiator,
         }
     }
 }

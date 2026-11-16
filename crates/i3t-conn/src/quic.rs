@@ -7,9 +7,10 @@ use i3t_crypto::NodeKey;
 use i3t_crypto::tls::{self, TlsError};
 use i3t_path::Paths;
 use i3t_proto::{MAX_CONN_PACKET_LEN, PublicKey};
-use quinn::congestion::CubicConfig;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{ClientConfig, EndpointConfig, IdleTimeout, MtuDiscoveryConfig, ServerConfig, TransportConfig, VarInt};
+
+use crate::congestion::Algorithm;
 
 /// 节点之间的连接在 TLS 握手里声明的协议名。
 pub(crate) const ALPN: &[u8] = b"i3t/1";
@@ -25,8 +26,23 @@ const MAX_STREAMS: u32 = 16_384;
 /// 每条流的接收窗口。这是硬上限：QUIC 库给每条流的乱序缓冲设了 1024 个空洞的限制，超过就关掉整条连接，
 /// 窗口 16MB 时在千兆链路上实测触发过，2MB 以内到不了。代价是单条流的吞吐不超过"窗口 ÷ 往返时间"。
 const STREAM_WINDOW: u32 = 2 * 1024 * 1024;
-/// 单向流只用来在连接里送打洞信令，同时有几条就够了。
-const SIGNAL_STREAMS: u32 = 16;
+/// 一条连接上所有的流加起来，写进去了、对端还没有确认的数据最多多少字节。到了这个数，哪条流都写不进去。
+///
+/// 它是这条连接在慢的路上最多压多少数据的上限，也决定了流的优先级管不管用：优先级排的是已经写进连接的数据，
+/// 这个窗口满着的时候，高优先级的流也要先等别的流腾出位置才写得进去，和它们是一样的先后。
+/// 一条不停写的流最多压住一个流窗口（2MB）的数据，QUIC 库默认的 10MB 五条这样的流就满了；
+/// 取 64MB，同时有 32 条流压满才会到。实测（回环上每秒约一千个包的慢路，小消息的往返时间）：
+/// 24 条流压满时高优先级 20～30ms、低优先级 64ms；64 条流压满、超过了这个窗口时，高优先级的也要一百到几百毫秒。
+/// 量的办法在 `tests/priority.rs` 里。
+const SEND_WINDOW: u64 = 64 * 1024 * 1024;
+/// 对端最多能同时开多少条单向流。单向流用来送打洞信令和要求可靠送达的数据报，每个数据报一条，读完就关。
+/// 这个数也是对端一次能压过来多少个这样的数据报：本端来不及收时，对端开不出新的流，就在那里等。
+const UNI_STREAMS: u32 = 256;
+/// 收到了、上层还没有取走的数据报最多攒多少字节，超过了丢最旧的。上层取得很快，这只是给突发留的余量。
+const DATAGRAM_RECV_BUFFER: usize = 256 * 1024;
+/// 等着发出去的数据报最多攒多少字节，超过了丢最旧的：这些是不保证送达的数据，攒久了也就过期了。
+/// 要装得下一个切成片的最大的 UDP 报文（64KB 多一点）。
+const DATAGRAM_SEND_BUFFER: usize = 256 * 1024;
 
 pub(crate) fn transport() -> Arc<TransportConfig> {
     // 两条路（直连、经 relay）对连接报同一个最大包长，探测出来的大包换了路也发得出去。
@@ -36,15 +52,17 @@ pub(crate) fn transport() -> Arc<TransportConfig> {
     let mut transport = TransportConfig::default();
     transport
         .max_concurrent_bidi_streams(VarInt::from_u32(MAX_STREAMS))
-        .max_concurrent_uni_streams(VarInt::from_u32(SIGNAL_STREAMS))
+        .max_concurrent_uni_streams(VarInt::from_u32(UNI_STREAMS))
         .stream_receive_window(VarInt::from_u32(STREAM_WINDOW))
+        .send_window(SEND_WINDOW)
         .keep_alive_interval(Some(KEEP_ALIVE))
         .max_idle_timeout(Some(IdleTimeout::from(VarInt::from_u32(IDLE_TIMEOUT_MS))))
         .mtu_discovery_config(Some(mtu))
-        // 库自带的 BBR 不能用（窄带宽上多发一倍流量，带宽估计只升不降），所以现在只有 Cubic。
-        .congestion_controller_factory(Arc::new(CubicConfig::default()))
-        // 数据报还没有人用，关着。
-        .datagram_receive_buffer_size(None);
+        // 默认用自己写的 BBR；库自带的那份不能用（窄带宽上多发一倍流量，带宽估计只升不降）。
+        // 环境变量 I3T_CONGESTION=cubic 可以换回 Cubic，做对比测试时用。
+        .congestion_controller_factory(Algorithm::from_env().factory())
+        .datagram_receive_buffer_size(Some(DATAGRAM_RECV_BUFFER))
+        .datagram_send_buffer_size(DATAGRAM_SEND_BUFFER);
     Arc::new(transport)
 }
 

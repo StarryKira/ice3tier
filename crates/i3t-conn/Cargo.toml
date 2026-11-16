@@ -16,6 +16,7 @@ i3t-proto = { path = "../i3t-proto" }
 i3t-relay = { path = "../i3t-relay" }
 i3t-underlay = { path = "../i3t-underlay" }
 quinn.workspace = true
+quinn-proto = { version = "0.11", default-features = false }
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
