@@ -52,7 +52,12 @@ pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 ///   [`ToNode::RouteQuery`]；从这一版起，解析不了的一帧只是被跳过。
 /// - 2：认识 [`ToNode::TryLater`]、[`ToNode::BackboneQuery`]；回答路由查询时带 [`RouteAnswer::detail`]，
 ///   上报时带 [`Report::route_kinds`]。
-pub const PROTOCOL_REVISION: u32 = 2;
+/// - 3：认识 netmap 里对端的 [`lane`](crate::netmap::Peer::lane)（独占 TCP），上报时带 [`Report::lanes`]。
+///   比它旧的节点不懂独占 TCP，controller 据此说明节点对的设置为什么不起作用。
+pub const PROTOCOL_REVISION: u32 = 3;
+
+/// 从这一版节点协议起节点懂独占 TCP。
+pub const LANE_REVISION: u32 = 3;
 
 /// 取更新包时一段最多多少字节。同一条连接上还有别的消息要走，所以不能大。
 pub const MAX_PACKAGE_CHUNK: u32 = 256 * 1024;
@@ -345,6 +350,106 @@ pub struct Report {
     /// `routes` 只带变化的条目时这里也一样。节点说不出细节的对端不在里面。旧版本的节点不报。
     #[serde(default)]
     pub route_kinds: Vec<RouteKind>,
+    /// 独占 TCP（lane）的状况。没有为任何对端打开时也报（全是 0）；旧版本的节点不报。
+    #[serde(default)]
+    pub lanes: Option<Box<LaneReport>>,
+}
+
+/// 一个节点上独占 TCP（lane）的状况。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LaneReport {
+    /// 全节点的合计，从节点启动算起，对端去掉之后也不减。
+    #[serde(default)]
+    pub total: LaneCounts,
+    /// 别人拨进来、没有握手成功的连接，按原因分。分不到对端名下，只有全节点的。
+    #[serde(default)]
+    pub handshake_failures: LaneHandshakeFailures,
+    /// 每个打开了独占 TCP 的对端。
+    #[serde(default)]
+    pub peers: Vec<PeerLanes>,
+}
+
+/// 和一个对端之间的 lane。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerLanes {
+    pub peer: NodeId,
+    /// 本节点拨不拨它（它的 TCP 端口本节点连得上，并且按设置现在要用）。
+    #[serde(default)]
+    pub dials: bool,
+    /// 和它之间的控制 lane 在不在。不在时新的 TCP 流走共用的连接。
+    #[serde(default)]
+    pub control: bool,
+    /// 它拨来、停在本节点等本节点开流时取用的空闲 lane。
+    #[serde(default)]
+    pub idle: u64,
+    /// 本节点拨好、留给自己开流的空闲 lane。
+    #[serde(default)]
+    pub ready: u64,
+    /// 本节点拨出去、停在它那里等它取用的 lane。
+    #[serde(default)]
+    pub parked_at_peer: u64,
+    #[serde(default, flatten)]
+    pub counts: LaneCounts,
+}
+
+/// 独占 TCP 的计数和水位。全节点的合计和每个对端的是同一组。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LaneCounts {
+    /// 正在承载流的 lane。
+    #[serde(default)]
+    pub in_use: u64,
+    /// 正在拨号（连接或握手）的 lane。
+    #[serde(default)]
+    pub dialling: u64,
+    /// 从对端停在本节点的 lane 里取用的次数。
+    #[serde(default)]
+    pub claims: u64,
+    /// 其中池是空的、要等补拨的次数，和一共等了多少毫秒。
+    #[serde(default)]
+    pub claims_waited: u64,
+    #[serde(default)]
+    pub claim_wait_ms: u64,
+    /// 取不到 lane 的次数（池空等满了、控制 lane 不在、对方要走了、当场拨也没拨通）。
+    #[serde(default)]
+    pub claims_failed: u64,
+    /// 本来要走 lane、因为取不到改走了共用连接的流。用户看不出来，只在这里记着。
+    #[serde(default)]
+    pub fallbacks: u64,
+    /// 本节点拨号失败的次数。
+    #[serde(default)]
+    pub dial_failures: u64,
+    /// 握手成功、但因为用途或者数量不对被关掉的 lane（旧的 epoch、超过上限、没有为对方打开）。
+    #[serde(default)]
+    pub refused: u64,
+    /// 在 lane 的 TLS 里收发的流数据字节数（两个方向合计）。
+    #[serde(default)]
+    pub sealed_bytes: u64,
+    /// 不再加密的流在程序里搬的字节数。
+    #[serde(default)]
+    pub passthrough_bytes: u64,
+    /// 不再加密的流在两条 TCP 之间直接搬（Linux 上是 splice）的字节数。
+    #[serde(default)]
+    pub spliced_bytes: u64,
+}
+
+/// 拨进来、没有握手成功的连接的原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LaneHandshakeFailures {
+    /// 没有在时限之内完成（包括连上来什么都不发的）。
+    #[serde(default)]
+    pub deadline: u64,
+    /// 公钥不认识或者已经吊销。
+    #[serde(default)]
+    pub unknown_key: u64,
+    /// 别的 TLS 错误。
+    #[serde(default)]
+    pub tls: u64,
+    /// 握手之后的第一个帧不对，或者根本不是 TLS。
+    #[serde(default)]
+    pub protocol: u64,
+    /// 还没握手完的连接太多，被挤掉的。
+    #[serde(default)]
+    pub busy: u64,
 }
 
 /// 一个接入凭据在一个入口上的用量。

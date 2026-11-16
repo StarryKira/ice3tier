@@ -20,10 +20,10 @@ use ipnet::{IpNet, Ipv4Net};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::control::{
-    BackboneLink, Declared, DirectKind, ExitObservation, ExitReport, LegTransport, ListenState, ListenTraffic, PathCandidate, RelayState,
-    Route, RouteSince, SelfUpdate,
+    BackboneLink, Declared, DirectKind, ExitObservation, ExitReport, LaneReport, LegTransport, ListenState, ListenTraffic, PathCandidate,
+    PeerLanes, RelayState, Route, RouteSince, SelfUpdate,
 };
-use crate::netmap::{Attachment, ExitRole, ForwardProtocol, ListenerProtocol, Reach, RoutingMode};
+use crate::netmap::{Attachment, ExitRole, ForwardProtocol, LaneMode, ListenerProtocol, Reach, RoutingMode};
 use crate::update::{FailureKind, UpdateStatus, UpdateTiming, Version};
 
 /// 管理 API 所有路径的前缀。
@@ -476,6 +476,9 @@ pub struct NodeDetail {
     pub flows: u32,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
+    /// 节点本次连接期间最近一次报的独占 TCP（lane）的状况。不在线、旧版本、或者还没报过时是 `null`。
+    #[serde(default)]
+    pub lanes: Option<LaneReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1002,11 +1005,69 @@ pub struct PairSetting {
     pub b: NodeId,
     /// 这一对节点之间的连接常驻，不因为没有流而关闭。
     pub keep_alive: bool,
+    /// 这一对节点之间承载 TCP 连接的流用不用独占 TCP（lane）。
+    #[serde(default)]
+    pub lane: LaneMode,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// 改一对节点的设置。没有写的项不变（这一对还没有设置时取默认值）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PairInput {
-    pub keep_alive: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_alive: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<LaneMode>,
+}
+
+/// 节点对视图里的一项：设置，加上独占 TCP 起不起作用、两边报上来的状况。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairView {
+    #[serde(flatten)]
+    pub setting: PairSetting,
+    /// 独占 TCP 的设置起不起作用。`lane` 是 `off` 时没有。
+    #[serde(default)]
+    pub lane_effect: Option<LaneEffect>,
+    /// 两个节点各自报上来的、和对方之间的 lane（不在线或者没报的节点不在里面）。
+    #[serde(default)]
+    pub lanes: Vec<PairLaneSide>,
+}
+
+/// 独占 TCP 的设置起不起作用，为什么。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneEffect {
+    /// 至少一个节点能拨另一个节点的 TCP 端口，两个节点都懂独占 TCP，访问规则连通了它们。
+    pub effective: bool,
+    /// 不起作用的原因，`effective` 为真时是空的。
+    #[serde(default)]
+    pub blocked: Vec<LaneBlock>,
+    /// 拨号的节点：另一个节点启用了 relay、有已知的 TCP 地址。两个都能拨时各自用自己拨的 lane。
+    #[serde(default)]
+    pub dialers: Vec<NodeId>,
+    /// 给人看的说明。独占 TCP 只承载 TCP 流：这一对节点之间共用的连接和它的路照常存在，UDP 应用的数据和别的流走它，
+    /// 路由视图里显示的是共用连接的路。
+    pub summary: String,
+}
+
+/// 独占 TCP 的设置不起作用的一个原因。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum LaneBlock {
+    /// 两个节点都没有启用 relay：没有哪一边的 TCP 端口在听。
+    NoRelay,
+    /// 启用了 relay 的这个节点还没有已知的公网 TCP 地址。
+    NoTcpAddress { node: NodeId },
+    /// 这个节点的版本太旧，不懂独占 TCP（或者还从来没有连上过 controller）。
+    NodeTooOld { node: NodeId },
+    /// 访问规则没有连通这两个节点：它们互相不在对方的 netmap 里。
+    NotConnected,
+}
+
+/// 一个节点报上来的、和对方之间的 lane。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairLaneSide {
+    /// 报的节点。
+    pub node: NodeId,
+    pub lanes: PeerLanes,
 }
 
 /// 访问关系图的标签视图：每个标签是一个点，每条规则是一条连线。
@@ -1345,6 +1406,34 @@ mod tests {
     }
 
     #[test]
+    fn a_pair_view_keeps_the_setting_flat_and_a_pair_input_may_leave_things_out() {
+        let input: PairInput = serde_json::from_str(r#"{"lane": "always"}"#).unwrap();
+        assert_eq!(input, PairInput { keep_alive: None, lane: Some(LaneMode::Always) });
+        assert_eq!(serde_json::from_str::<PairInput>(r#"{"keep_alive": true}"#).unwrap().lane, None, "旧的请求体照样能用");
+        assert!(serde_json::from_str::<PairInput>(r#"{"lane": "sometimes"}"#).is_err());
+
+        let a = NodeId::new(1).unwrap();
+        let b = NodeId::new(2).unwrap();
+        let view = PairView {
+            setting: PairSetting { a, b, keep_alive: true, lane: LaneMode::UdpFallback },
+            lane_effect: Some(LaneEffect {
+                effective: false,
+                blocked: vec![LaneBlock::NoRelay, LaneBlock::NodeTooOld { node: b }],
+                dialers: Vec::new(),
+                summary: "x".to_owned(),
+            }),
+            lanes: Vec::new(),
+        };
+        let value = serde_json::to_value(&view).unwrap();
+        assert_eq!((&value["a"], &value["keep_alive"], &value["lane"]), (&json!(1), &json!(true), &json!("udp_fallback")));
+        assert_eq!(value["lane_effect"]["blocked"], json!([{ "reason": "no_relay" }, { "reason": "node_too_old", "node": 2 }]));
+        assert_eq!(serde_json::from_value::<PairView>(value).unwrap(), view);
+        // 旧的 controller 给的节点对没有独占 TCP 的设置。
+        let old: PairSetting = serde_json::from_value(json!({ "a": 1, "b": 2, "keep_alive": false })).unwrap();
+        assert_eq!(old.lane, LaneMode::Off);
+    }
+
+    #[test]
     fn node_detail_keeps_attached_in_the_same_place_now_that_it_lives_in_node() {
         let node: Node = serde_json::from_value(json!({
             "id": 1, "network": 1, "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE", "name": "node-1", "fqdn": "node-1.home.i3t",
@@ -1354,8 +1443,16 @@ mod tests {
             "attached": [{ "relay": 9, "rtt_ms": 12 }]
         }))
         .unwrap();
-        let detail =
-            NodeDetail { node, endpoints: Vec::new(), observed_endpoint: None, mapping_varies: None, flows: 0, tx_bytes: 0, rx_bytes: 0 };
+        let detail = NodeDetail {
+            node,
+            endpoints: Vec::new(),
+            observed_endpoint: None,
+            mapping_varies: None,
+            flows: 0,
+            tx_bytes: 0,
+            rx_bytes: 0,
+            lanes: None,
+        };
         let value = serde_json::to_value(&detail).unwrap();
         assert_eq!(value["attached"], json!([{ "relay": 9, "rtt_ms": 12 }]));
         assert_eq!(serde_json::from_value::<NodeDetail>(value).unwrap(), detail);

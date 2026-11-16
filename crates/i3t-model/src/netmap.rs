@@ -261,7 +261,66 @@ pub struct Peer {
     /// 到这个对端的连接常驻，不因为没有流而关闭。
     #[serde(default)]
     pub keep_alive: bool,
+    /// 和这个对端之间承载 TCP 连接的流用不用独占 TCP（lane）。一对节点各自的 netmap 里互相看到同一个值。
+    /// 比本程序新的 controller 下发了这里不认识的值时按 `off` 处理。
+    #[serde(default, deserialize_with = "tolerant_lane_mode")]
+    pub lane: LaneMode,
 }
+
+/// netmap 里的独占 TCP 设置：不认识的值按 `off`，不让整份 netmap 因为一个新的取值而读不了。
+fn tolerant_lane_mode<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<LaneMode, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    Ok(text.parse().unwrap_or_default())
+}
+
+/// 一对节点之间承载 TCP 连接的流用不用独占 TCP（lane，每条流一条只属于它的 TCP）。
+///
+/// 要两个节点里至少有一个启用了 relay、它的 TCP 端口另一个连得上（见 [`Relay::tcp`]），否则不起作用，按 `off` 走。
+/// UDP 应用的数据和别的流始终走共用的连接。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneMode {
+    /// 不用：所有的流都在共用的连接上。
+    #[default]
+    Off,
+    /// 共用的连接到对端的路上没有 UDP（UDP 不通、只能经 relay 的 TCP 中转）时，新的 TCP 流走独占 TCP。
+    UdpFallback,
+    /// 能开出独占 TCP 时新的 TCP 流都走它。
+    Always,
+}
+
+impl LaneMode {
+    /// 在 netmap、管理接口和命令行里的写法。
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::UdpFallback => "udp_fallback",
+            Self::Always => "always",
+        }
+    }
+}
+
+impl fmt::Display for LaneMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for LaneMode {
+    type Err = UnknownLaneMode;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        [Self::Off, Self::UdpFallback, Self::Always]
+            .into_iter()
+            .find(|mode| mode.as_str() == s)
+            .ok_or_else(|| UnknownLaneMode(s.to_owned()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("不认识的独占 TCP 设置 {0:?}：可以是 off、udp_fallback、always")]
+pub struct UnknownLaneMode(pub String);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
@@ -512,6 +571,23 @@ mod tests {
         value["added_in_a_newer_version"] = serde_json::json!({ "x": 1 });
         let netmap: Netmap = serde_json::from_value(value).unwrap();
         assert_eq!(netmap, minimal());
+    }
+
+    #[test]
+    fn a_lane_setting_from_a_newer_controller_reads_as_off_instead_of_breaking_the_netmap() {
+        assert_eq!(minimal().peers[0].lane, LaneMode::Off, "旧的 controller 不发这一项");
+        let mut value = serde_json::to_value(minimal()).unwrap();
+        value["peers"][0]["lane"] = serde_json::json!("udp_fallback");
+        assert_eq!(serde_json::from_value::<Netmap>(value.clone()).unwrap().peers[0].lane, LaneMode::UdpFallback);
+        value["peers"][0]["lane"] = serde_json::json!("only_on_tuesdays");
+        assert_eq!(serde_json::from_value::<Netmap>(value).unwrap().peers[0].lane, LaneMode::Off);
+        // 管理接口和命令行收的设置不宽容：写错了要说出来。
+        assert!(serde_json::from_str::<LaneMode>(r#""only_on_tuesdays""#).is_err());
+        assert!("sometimes".parse::<LaneMode>().unwrap_err().to_string().contains("udp_fallback"));
+        for mode in [LaneMode::Off, LaneMode::UdpFallback, LaneMode::Always] {
+            assert_eq!(serde_json::to_value(mode).unwrap(), mode.as_str());
+            assert_eq!(mode.as_str().parse::<LaneMode>(), Ok(mode));
+        }
     }
 
     #[test]
