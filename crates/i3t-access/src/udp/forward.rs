@@ -22,8 +22,9 @@ use tokio::time;
 use tracing::Instrument;
 
 use super::{MAX_UDP_PAYLOAD, OUTGOING_BACKLOG, open_context, owned};
-use crate::manager::allowed;
+use crate::manager::{Counters, allowed};
 use crate::session::{Shared, origin_address};
+use crate::usage::Tally;
 
 /// 一条转发同时最多多少个会话。
 pub(crate) const MAX_SESSIONS: usize = 256;
@@ -33,13 +34,14 @@ const MAX_LOGGED_REFUSALS: usize = 64;
 
 /// 在 `socket` 上收报文，按客户端地址分给各个会话，直到任务被取消（监听被关掉）。
 ///
-/// `active` 是这条转发现在有多少个会话。转发的设置每个报文都从当前的 netmap 里取，所以改白名单不用重新绑定。
+/// `counters` 记这条转发现在有多少个会话、搬了多少字节。转发的设置每个报文都从当前的 netmap 里取，所以改白名单不用重新绑定。
+/// `bind` 是配置里写的地址（端口可能是 0），用它在 netmap 里认出这条转发。
 pub(crate) async fn serve<C: Connector + Datagrams, E: Send + Sync + 'static>(
     shared: Arc<Shared<C, E>>,
     id: u32,
     bind: SocketAddr,
     socket: UdpSocket,
-    active: Arc<AtomicUsize>,
+    counters: Counters,
 ) {
     let socket = Arc::new(socket);
     let mut sessions: HashMap<SocketAddr, mpsc::Sender<Bytes>> = HashMap::new();
@@ -75,8 +77,18 @@ pub(crate) async fn serve<C: Connector + Datagrams, E: Send + Sync + 'static>(
                 tracing::debug!(target = %forward.target, "丢掉了一个 UDP 报文：目标节点不在 netmap 里，或者访问规则不允许本节点访问它");
                 continue;
             }
+            if shared.refuse_while_draining("UDP 端口转发的新会话") {
+                continue;
+            }
             let (queue, outgoing) = mpsc::channel(OUTGOING_BACKLOG);
-            let session = Session { socket: Arc::clone(&socket), client: from, active: Active::enter(&active) };
+            let class = forward.class.or(netmap.network.class).unwrap_or_default();
+            let session = Session {
+                socket: Arc::clone(&socket),
+                client: from,
+                class,
+                active: Active::enter(&counters.active),
+                traffic: Arc::clone(&counters.traffic),
+            };
             let span = tracing::info_span!("udp-session", client = %from);
             tokio::spawn(session.run(Arc::clone(&shared), forward.clone(), outgoing).instrument(span));
             sessions.insert(from, queue);
@@ -109,7 +121,9 @@ struct Session {
     /// 监听的那个端口：回客户端的报文也从它发，客户端才认得。
     socket: Arc<UdpSocket>,
     client: SocketAddr,
+    class: Class,
     active: Active,
+    traffic: Arc<Tally>,
 }
 
 impl Session {
@@ -117,7 +131,7 @@ impl Session {
     async fn run<C: Connector + Datagrams, E>(self, shared: Arc<Shared<C, E>>, forward: Forward, mut outgoing: mpsc::Receiver<Bytes>) {
         let _active = self.active;
         let origin = Origin { credential: None, client: origin_address(self.client) };
-        let Some(mut context) = open_context(&shared, forward.target, Class::default(), origin, &mut outgoing).await else { return };
+        let Some(mut context) = open_context(&shared, forward.target, self.class, origin, &mut outgoing).await else { return };
         let sender = context.sender();
         let target = Target::Forward { id: forward.id };
         tracing::debug!(target = %forward.target, "UDP 端口转发的会话建立");
@@ -129,7 +143,10 @@ impl Session {
             tokio::select! {
                 queued = outgoing.recv() => match queued {
                     Some(payload) => match sender.send(&target, &payload).await {
-                        Ok(()) => sent += 1,
+                        Ok(()) => {
+                            sent += 1;
+                            self.traffic.add(true, payload.len());
+                        }
                         Err(error) => tracing::debug!(%error, "一个 UDP 报文没有发给目标节点"),
                     },
                     // 监听被关掉了。
@@ -137,7 +154,10 @@ impl Session {
                 },
                 arrived = context.recv() => match arrived {
                     Ok(datagram) => match self.socket.send_to(&datagram.payload, self.client).await {
-                        Ok(_) => received += 1,
+                        Ok(_) => {
+                            received += 1;
+                            self.traffic.add(false, datagram.payload.len());
+                        }
                         Err(error) => tracing::debug!(%error, "一个 UDP 报文没有发回客户端"),
                     },
                     Err(end) => {

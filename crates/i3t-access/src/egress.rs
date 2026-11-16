@@ -4,9 +4,13 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 
-use i3t_proto::flow::{Host, Reply, Status};
+use i3t_proto::flow::{Host, Reason, Reply, Status};
 use socket2::SockRef;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::net::tcp::{ReadHalf, WriteHalf};
+
+use crate::usage::IngressMeter;
 
 /// 就地出站时目标受什么约束。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,25 +47,58 @@ pub(crate) struct Copied {
     pub from_target: u64,
 }
 
-/// 在客户端和目标这两条 TCP 连接之间双向搬运，直到两个方向都结束。
+/// 每个方向一块这么大的缓冲区。
+const BUFFER_LEN: usize = 16 * 1024;
+
+/// 在客户端和目标这两条 TCP 连接之间双向搬运，直到两个方向都结束，或者 `cancel` 完成。
 ///
-/// 半关闭照常传递。和经过流的搬运一样，任何一头异常结束时另一头看到的是重置而不是正常结束：
-/// 两条连接一开始就设成"关闭时发 RST"，两个方向都正常结束了才改回去。
-pub(crate) async fn relay(mut client: TcpStream, mut target: TcpStream) -> io::Result<Copied> {
+/// 半关闭照常传递。和经过流的搬运一样，任何一头异常结束（包括被取消）时另一头看到的是重置而不是正常结束：
+/// 两条连接一开始就设成"关闭时发 RST"，两个方向都正常结束了才改回去。每一段数据都记到 `meter` 上。
+pub(crate) async fn relay(
+    mut client: TcpStream,
+    mut target: TcpStream,
+    meter: &IngressMeter<'_>,
+    cancel: impl Future<Output = Reason>,
+) -> io::Result<Copied> {
     client.set_zero_linger()?;
     target.set_zero_linger()?;
-    let (from_client, from_target) = tokio::io::copy_bidirectional(&mut client, &mut target).await?;
+    let (mut from_client, mut from_target) = (0, 0);
+    {
+        let (client_read, client_write) = client.split();
+        let (target_read, target_write) = target.split();
+        let upward = copy(client_read, target_write, meter, true, &mut from_client);
+        let downward = copy(target_read, client_write, meter, false, &mut from_target);
+        tokio::select! {
+            copied = async { tokio::try_join!(upward, downward) } => { copied?; }
+            reason = cancel => return Err(io::Error::other(format!("搬运被叫停：{reason:?}"))),
+        }
+    }
     SockRef::from(&client).set_linger(None)?;
     SockRef::from(&target).set_linger(None)?;
     Ok(Copied { from_client, from_target })
 }
 
+/// 一个方向：读到 EOF 就把另一头的写关掉。
+async fn copy(mut from: ReadHalf<'_>, mut to: WriteHalf<'_>, meter: &IngressMeter<'_>, upward: bool, count: &mut u64) -> io::Result<()> {
+    let mut buf = vec![0; BUFFER_LEN];
+    loop {
+        let len = from.read(&mut buf).await?;
+        if len == 0 {
+            return to.shutdown().await;
+        }
+        meter.record(upward, len);
+        to.write_all(&buf[..len]).await?;
+        // usize 不会比 u64 宽，这里不会截断。
+        *count += len as u64;
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     use super::*;
+    use crate::usage::Tally;
 
     /// 一对连好的 TCP 连接：`near` 是测试扮演的那一头，`far` 交给被测的搬运。
     async fn pair() -> (TcpStream, TcpStream) {
@@ -75,7 +112,12 @@ mod tests {
     async fn half_close_is_passed_on_and_bytes_are_counted() {
         let (mut client, client_far) = pair().await;
         let (mut target, target_far) = pair().await;
-        let relay = tokio::spawn(relay(client_far, target_far));
+        let listen = std::sync::Arc::new(Tally::default());
+        let counted = std::sync::Arc::clone(&listen);
+        let relay = tokio::spawn(async move {
+            let meter = IngressMeter { listen: &counted, credential: None, exit: None };
+            relay(client_far, target_far, &meter, std::future::pending()).await
+        });
 
         client.write_all(b"request").await.unwrap();
         client.shutdown().await.unwrap();
@@ -90,13 +132,18 @@ mod tests {
         assert_eq!(response, b"a longer response");
 
         assert_eq!(relay.await.unwrap().unwrap(), Copied { from_client: 7, from_target: 17 });
+        assert_eq!((listen.up(), listen.down()), (7, 17), "每一段都记了");
     }
 
     #[tokio::test]
     async fn a_reset_on_one_side_is_a_reset_on_the_other() {
         let (mut client, client_far) = pair().await;
         let (mut target, target_far) = pair().await;
-        let relay = tokio::spawn(relay(client_far, target_far));
+        let relay = tokio::spawn(async move {
+            let listen = Tally::default();
+            let meter = IngressMeter { listen: &listen, credential: None, exit: None };
+            relay(client_far, target_far, &meter, std::future::pending()).await
+        });
 
         client.write_all(b"request").await.unwrap();
         target.read_exact(&mut [0; 7]).await.unwrap();
@@ -107,5 +154,27 @@ mod tests {
         let error = client.read_to_end(&mut Vec::new()).await.unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
         assert!(relay.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelling_resets_both_sides() {
+        let (mut client, client_far) = pair().await;
+        let (mut target, target_far) = pair().await;
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let relay = tokio::spawn(async move {
+            let listen = Tally::default();
+            let meter = IngressMeter { listen: &listen, credential: None, exit: None };
+            relay(client_far, target_far, &meter, async move {
+                let _ = stopped.await;
+                Reason::LimitReached
+            })
+            .await
+        });
+        client.write_all(b"x").await.unwrap();
+        target.read_exact(&mut [0; 1]).await.unwrap();
+        stop.send(()).unwrap();
+        assert!(relay.await.unwrap().is_err());
+        assert_eq!(client.read_to_end(&mut Vec::new()).await.unwrap_err().kind(), io::ErrorKind::ConnectionReset);
+        assert_eq!(target.read_to_end(&mut Vec::new()).await.unwrap_err().kind(), io::ErrorKind::ConnectionReset);
     }
 }

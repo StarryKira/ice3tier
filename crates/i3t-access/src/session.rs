@@ -3,29 +3,32 @@
 use std::future;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use i3t_conn::Connector;
 use i3t_conn::contract::Datagrams;
 use i3t_flow::datagram::Opener;
-use i3t_flow::{FlowError, Summary};
+use i3t_flow::{End, FlowError, Summary};
 use i3t_model::Netmap;
-use i3t_model::netmap::{Credential, Forward, Listener, ListenerProtocol};
+use i3t_model::netmap::{Credential, Forward, Listener, ListenerProtocol, TokenHash};
 use i3t_proto::NodeId;
-use i3t_proto::flow::{Class, Host, Open, Origin, Reason, Target};
+use i3t_proto::flow::{Host, Open, Origin, Reason, Target};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tokio::time;
 
-use crate::credential::{self, Slots};
+use crate::credential;
 use crate::egress::{self, EgressPolicy, LocalEgress};
 use crate::failure::Failure;
 use crate::first_data::{self, FIRST_BYTE_WAIT};
+use crate::manager::{Connection, PortBook};
 use crate::message::{Parsed, Parser, ProxyAuth};
 use crate::route::{self, Route};
 use crate::selector::Selector;
+use crate::usage::{ExitTally, IngressMeter, Usage};
 use crate::{http, socks5, udp};
 
 /// 客户端要在这么长时间之内完成代理握手。握手只有几个小报文，这个时限只是不让不说话的连接一直占着。
@@ -41,12 +44,29 @@ const CLOSE_LINGER: Duration = Duration::from_millis(500);
 pub(crate) struct Shared<C: Datagrams, E> {
     pub connector: Arc<C>,
     /// 本节点开的数据报上下文。对端发回来的数据报由它分发，所以 [`crate::Access::run`] 要让它一直跑着。
-    pub opener: Opener<C>,
+    pub opener: Arc<Opener<C>>,
     pub egress: E,
     pub netmap: watch::Receiver<Arc<Netmap>>,
-    pub slots: Arc<Slots>,
+    /// 按凭据、按出口的用量，和凭据的并发名额。
+    pub usage: Usage,
+    /// 端口写 0 的端口转发挑定的端口记在哪里。
+    pub ports: Arc<dyn PortBook>,
+    /// 节点正在排空时有值：为什么排空，写进拒绝的日志。
+    pub draining: Mutex<Option<String>>,
+    /// 因为排空而拒绝的连接和 UDP 会话。
+    pub drained: AtomicU64,
     /// UDP 端口转发的会话没有报文往来多久之后回收。
     pub udp_idle_timeout: Duration,
+}
+
+impl<C: Datagrams, E> Shared<C, E> {
+    /// 节点正在排空时记一次拒绝，返回 `true`。
+    pub(crate) fn refuse_while_draining(&self, what: &str) -> bool {
+        let Some(why) = self.draining.lock().expect("draining mutex poisoned").clone() else { return false };
+        self.drained.fetch_add(1, Ordering::Relaxed);
+        tracing::info!(what, why, "拒绝了一个新的请求：节点正在排空");
+        true
+    }
 }
 
 /// 握手阶段的客户端连接：带着一个缓冲区，里面是已经读进来、还没有被解析走的字节。
@@ -248,6 +268,7 @@ pub(crate) async fn proxy<C: Connector + Datagrams, E: LocalEgress>(
     listener: &Listener,
     stream: TcpStream,
     from: SocketAddr,
+    connection: &Connection,
 ) {
     let mut client = Client { stream, buffer: Vec::new() };
     let required = requires_credential(listener);
@@ -267,6 +288,11 @@ pub(crate) async fn proxy<C: Connector + Datagrams, E: LocalEgress>(
             return;
         }
     };
+    // 排空时也先把握手做完：客户端要拿到一个看得懂的拒绝，而不是连接莫名其妙地断了。认证在拒绝之前，
+    // 没有凭据的人看不出节点在排空。
+    if shared.refuse_while_draining("代理请求") {
+        return client.fail(front, Failure::Draining).await;
+    }
 
     let selector = match ask.username.parse::<Selector>() {
         Ok(selector) => selector,
@@ -275,9 +301,13 @@ pub(crate) async fn proxy<C: Connector + Datagrams, E: LocalEgress>(
             return client.fail(front, Failure::Denied).await;
         }
     };
+    if let Some(credential) = ask.credential.as_ref().filter(|credential| credential.exhausted) {
+        tracing::info!(credential = %credential.name, "拒绝了一个代理请求：这个凭据的流量上限已经用完");
+        return client.fail(front, Failure::LimitReached).await;
+    }
     // 名额占到这条连接结束。
-    let _slot = match &ask.credential {
-        Some(credential) => match shared.slots.acquire(credential) {
+    let slot = match &ask.credential {
+        Some(credential) => match shared.usage.acquire(credential) {
             Some(slot) => Some(slot),
             None => {
                 tracing::info!(credential = %credential.name, "拒绝了一个代理请求：这个凭据的并发连接数到了上限");
@@ -286,10 +316,17 @@ pub(crate) async fn proxy<C: Connector + Datagrams, E: LocalEgress>(
         },
         None => None,
     };
+    let limit = Limit { netmap: shared.netmap.clone(), credential: ask.credential.as_ref().map(|credential| credential.token) };
     if ask.command == socks5::Command::UdpAssociate {
         // 每个报文各有各的目标，往哪里去等报文来了再判断。
         let origin = Origin { credential: ask.credential.map(|credential| credential.name), client: origin_address(from) };
-        return udp::association::run(shared, listener, client.stream, from, (ask.host, ask.port), selector, origin).await;
+        let meter = IngressMeter { listen: &connection.traffic, credential: slot.as_ref().map(|slot| slot.traffic()), exit: None };
+        let request = udp::association::Ask { declared: (ask.host, ask.port), selector, origin, meter };
+        let association = udp::association::run(shared, listener, client.stream, from, request);
+        return tokio::select! {
+            () = association => {}
+            reason = limit.reached() => tracing::info!(?reason, "凭据的流量上限用完了，结束这个 UDP 关联"),
+        };
     }
     let route = match route::decide(netmap, listener, &selector, &ask.host, ask.port) {
         Ok(route) => route,
@@ -299,32 +336,76 @@ pub(crate) async fn proxy<C: Connector + Datagrams, E: LocalEgress>(
         }
     };
 
+    let class = route::class_for(netmap, selector.class, listener.class, &route);
     match route {
         Route::Flow { peer, target, optimistic } => {
+            let optimistic = listener.optimistic.unwrap_or(optimistic);
+            let exit = target.needs_exit().then(|| shared.usage.exit(peer));
+            if let Some(exit) = &exit {
+                exit.started();
+            }
+            let meter = IngressMeter {
+                listen: &connection.traffic,
+                credential: slot.as_ref().map(|slot| slot.traffic()),
+                exit: exit.as_deref().map(ExitTally::traffic),
+            };
             let origin = Origin { credential: ask.credential.map(|credential| credential.name), client: origin_address(from) };
-            let request = Open { target, class: selector.class.unwrap_or_default(), origin };
-            tracing::debug!(%peer, kind = request.target.kind(), optimistic, "代理请求经对端节点出去");
+            let request = Open { target, class, origin };
+            tracing::debug!(%peer, kind = request.target.kind(), ?class, optimistic, "代理请求经对端节点出去");
+            let flow = Outbound { peer, request: &request, meter, exit: exit.as_deref(), limit };
             if optimistic {
-                without_waiting(shared, client, front, peer, &request).await;
+                without_waiting(shared, client, front, flow).await;
             } else {
-                after_reply(shared, client, front, peer, &request).await;
+                after_reply(shared, client, front, flow).await;
             }
         }
         Route::Local { policy } => {
             tracing::debug!(?policy, "代理请求就地出站");
-            locally(shared, client, front, &ask.host, ask.port, policy).await;
+            let meter = IngressMeter { listen: &connection.traffic, credential: slot.as_ref().map(|slot| slot.traffic()), exit: None };
+            locally(shared, client, front, Destination { host: &ask.host, port: ask.port, policy }, meter, limit).await;
         }
     }
 }
 
-/// 乐观回复：先告诉客户端连上了，读到它的首批数据，和 OPEN 一起发出去，不等对端的 REPLY。
-async fn without_waiting<C: Connector + Datagrams, E>(
-    shared: &Shared<C, E>,
-    mut client: Client,
-    front: Front,
+/// 一个连接受的流量上限：凭据的流量用完时（netmap 里它被标成用完了），正在进行的连接也要断开。
+struct Limit {
+    netmap: watch::Receiver<Arc<Netmap>>,
+    credential: Option<TokenHash>,
+}
+
+impl Limit {
+    /// 等到这个连接的凭据被标成用完。没有凭据，或者节点在关闭时一直等下去。
+    ///
+    /// 凭据被吊销（从 netmap 里消失）不断开已经建立的连接：吊销只管新的连接，和别的配置变更一样不打断手上的流。
+    async fn reached(mut self) -> Reason {
+        let Some(token) = self.credential else { return future::pending().await };
+        loop {
+            let exhausted =
+                self.netmap.borrow_and_update().credentials.iter().any(|credential| credential.token == token && credential.exhausted);
+            if exhausted {
+                tracing::info!("这条连接用的凭据的流量上限用完了，断开它");
+                return Reason::LimitReached;
+            }
+            if self.netmap.changed().await.is_err() {
+                return future::pending().await;
+            }
+        }
+    }
+}
+
+/// 一条到对端节点的流要用到的东西。
+struct Outbound<'a> {
     peer: NodeId,
-    request: &Open,
-) {
+    request: &'a Open,
+    meter: IngressMeter<'a>,
+    /// 对端是出口时，发起这一侧看到的计数记在这里。
+    exit: Option<&'a ExitTally>,
+    limit: Limit,
+}
+
+/// 乐观回复：先告诉客户端连上了，读到它的首批数据，和 OPEN 一起发出去，不等对端的 REPLY。
+async fn without_waiting<C: Connector + Datagrams, E>(shared: &Shared<C, E>, mut client: Client, front: Front, flow: Outbound<'_>) {
+    let Outbound { peer, request, meter, exit, limit } = flow;
     if let Err(error) = client.stream.write_all(&front.established()).await {
         return tracing::debug!(%error, "客户端在应答写出去之前断开了");
     }
@@ -333,9 +414,20 @@ async fn without_waiting<C: Connector + Datagrams, E>(
         Ok(first_data) => first_data,
         Err(error) => return tracing::debug!(%error, "客户端在发出数据之前断开了"),
     };
+    // 首批数据随 OPEN 一起发出，不经过搬运时的关卡，在这里补记。
+    meter.record(true, first_data.len());
     match i3t_flow::open(&*shared.connector, peer, request, &first_data).await {
-        Ok(pending) => log_summary(peer, request, &pending.relay(client.stream).await),
+        Ok(pending) => {
+            let summary = pending.relay_metered(client.stream, limit.reached(), &meter).await;
+            if let (Some(exit), End::Refused(reply)) = (exit, &summary.end) {
+                exit.refused_with(reply.status);
+            }
+            log_summary(peer, request, &summary);
+        }
         Err(error) => {
+            if let Some(exit) = exit {
+                exit.unreachable();
+            }
             tracing::info!(%peer, ?error, "到对端节点建流失败，重置了客户端的连接");
             client.reset();
         }
@@ -343,12 +435,25 @@ async fn without_waiting<C: Connector + Datagrams, E>(
 }
 
 /// 不用乐观回复：等对端说连上了，才告诉客户端；对端拒绝时客户端拿到的是具体的错误码。
-async fn after_reply<C: Connector + Datagrams, E>(shared: &Shared<C, E>, mut client: Client, front: Front, peer: NodeId, request: &Open) {
+async fn after_reply<C: Connector + Datagrams, E>(shared: &Shared<C, E>, mut client: Client, front: Front, flow: Outbound<'_>) {
+    let Outbound { peer, request, meter, exit, limit } = flow;
     // 客户端这时还没有收到应答，通常什么都没有发；万一握手时多读进来了一点，就当作首批数据。
-    let opened = async { i3t_flow::open(&*shared.connector, peer, request, &client.buffer).await?.established().await };
-    let flow = match opened.await {
+    meter.record(true, client.buffer.len());
+    let opened = match i3t_flow::open(&*shared.connector, peer, request, &client.buffer).await {
+        Ok(pending) => pending.established().await,
+        Err(error) => {
+            if let Some(exit) = exit {
+                exit.unreachable();
+            }
+            Err(error)
+        }
+    };
+    let flow = match opened {
         Ok(flow) => flow,
         Err(FlowError::Refused(reply)) => {
+            if let Some(exit) = exit {
+                exit.refused_with(reply.status);
+            }
             // 说明是对端写的，按 Debug 打印，里面的控制字符会被转义。
             tracing::info!(%peer, kind = request.target.kind(), status = ?reply.status, detail = ?reply.detail, "对端节点拒绝了建流请求");
             return client.fail(front, Failure::from(reply.status)).await;
@@ -362,7 +467,14 @@ async fn after_reply<C: Connector + Datagrams, E>(shared: &Shared<C, E>, mut cli
         tracing::debug!(%error, "客户端在应答写出去之前断开了");
         return flow.abort(Reason::ClientReset);
     }
-    log_summary(peer, request, &flow.relay(client.stream, future::pending()).await);
+    log_summary(peer, request, &flow.relay_metered(client.stream, limit.reached(), &meter).await);
+}
+
+/// 就地出站要去的地方。
+struct Destination<'a> {
+    host: &'a Host,
+    port: u16,
+    policy: EgressPolicy,
 }
 
 /// 就地出站：本机直接连目标，连上了才告诉客户端。
@@ -370,10 +482,11 @@ async fn locally<C: Datagrams, E: LocalEgress>(
     shared: &Shared<C, E>,
     mut client: Client,
     front: Front,
-    host: &Host,
-    port: u16,
-    policy: EgressPolicy,
+    destination: Destination<'_>,
+    meter: IngressMeter<'_>,
+    limit: Limit,
 ) {
+    let Destination { host, port, policy } = destination;
     let mut target = match shared.egress.connect(host, port, policy).await {
         Ok(target) => target,
         Err(reply) => {
@@ -389,7 +502,8 @@ async fn locally<C: Datagrams, E: LocalEgress>(
     if let Err(error) = prepared.await {
         return tracing::debug!(%error, "就地出站的连接在开始搬运之前断开了");
     }
-    match egress::relay(client.stream, target).await {
+    meter.record(true, client.buffer.len());
+    match egress::relay(client.stream, target, &meter, limit.reached()).await {
         Ok(copied) => tracing::info!(sent = copied.from_client, received = copied.from_target, "就地出站的连接结束"),
         Err(error) => tracing::info!(%error, "就地出站的连接异常结束，两头都已重置"),
     }
@@ -404,7 +518,11 @@ pub(crate) async fn forward<C: Connector + Datagrams, E>(
     forward: &Forward,
     mut stream: TcpStream,
     from: SocketAddr,
+    connection: &Connection,
 ) {
+    if shared.refuse_while_draining("端口转发的连接") {
+        return reset(stream);
+    }
     if !netmap.peer(forward.target).is_some_and(|peer| peer.outbound) {
         tracing::info!(target = %forward.target, "重置了一条端口转发的连接：目标节点不在 netmap 里，或者访问规则不允许本节点访问它");
         return reset(stream);
@@ -413,10 +531,13 @@ pub(crate) async fn forward<C: Connector + Datagrams, E>(
         Ok(first_data) => first_data,
         Err(error) => return tracing::debug!(%error, "客户端在发出数据之前断开了"),
     };
+    let meter = IngressMeter { listen: &connection.traffic, credential: None, exit: None };
+    meter.record(true, first_data.len());
     let origin = Origin { credential: None, client: origin_address(from) };
-    let request = Open { target: Target::Forward { id: forward.id }, class: Class::default(), origin };
+    let class = forward.class.or(netmap.network.class).unwrap_or_default();
+    let request = Open { target: Target::Forward { id: forward.id }, class, origin };
     match i3t_flow::open(&*shared.connector, forward.target, &request, &first_data).await {
-        Ok(pending) => log_summary(forward.target, &request, &pending.relay(stream).await),
+        Ok(pending) => log_summary(forward.target, &request, &pending.relay_metered(stream, future::pending(), &meter).await),
         Err(error) => {
             tracing::info!(target = %forward.target, ?error, "到目标节点建流失败，重置了端口转发的连接");
             reset(stream);
@@ -446,7 +567,6 @@ fn log_summary(peer: NodeId, request: &Open, summary: &Summary) {
 
 #[cfg(test)]
 mod tests {
-    use i3t_model::netmap::TokenHash;
     use ring::digest;
 
     use super::*;
@@ -454,7 +574,13 @@ mod tests {
 
     fn credential(token: &str) -> Credential {
         let hash = digest::digest(&digest::SHA256, token.as_bytes());
-        Credential { name: "gw".into(), token: TokenHash::from_bytes(hash.as_ref().try_into().unwrap()), max_concurrent: None }
+        Credential {
+            name: "gw".into(),
+            token: TokenHash::from_bytes(hash.as_ref().try_into().unwrap()),
+            max_concurrent: None,
+            id: 1,
+            exhausted: false,
+        }
     }
 
     fn auth(password: &str) -> ProxyAuth {
@@ -488,6 +614,8 @@ mod tests {
             require_credential,
             default_action: None,
             fixed_exit: None,
+            class: None,
+            optimistic: None,
         };
         assert!(!requires_credential(&listener("127.0.0.1:1080", false)));
         assert!(requires_credential(&listener("127.0.0.1:1080", true)));

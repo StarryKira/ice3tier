@@ -11,6 +11,9 @@
 //!
 //! 用法是造一个 [`Access`]，然后让它的 [`run`](Access::run) 一直跑着：监听什么由 netmap 决定，netmap 变了它自己跟着调整。
 //! 就地出站要用的拨号器（[`LocalEgress`]）由出口模块实现，装配时交进来。
+//!
+//! 入口按凭据、按监听、按出口记用量（`usage` 模块），装配层取快照上报；凭据的流量上限由 controller 汇总各入口的用量判断，
+//! 用完时 netmap 里的凭据被标成用完，入口拒绝它的新连接并断开正在进行的。
 
 mod credential;
 mod egress;
@@ -24,6 +27,8 @@ mod selector;
 mod session;
 mod socks5;
 mod udp;
+mod usage;
 
 pub use egress::{EgressPolicy, LocalEgress};
-pub use manager::{Access, AccessStatus, Active, ForwardStatus, ListenState, ListenerStatus};
+pub use manager::{Access, AccessStatus, Active, ForwardStatus, ListenState, ListenerStatus, NoPortBook, PortBook, Traffic};
+pub use usage::{CredentialSnapshot, ExitSnapshot, Tally};

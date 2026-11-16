@@ -16,7 +16,7 @@ use std::net::{IpAddr, SocketAddr};
 use i3t_model::Netmap;
 use i3t_model::netmap::{self, DefaultAction, Listener, Peer};
 use i3t_proto::NodeId;
-use i3t_proto::flow::{Host, Target};
+use i3t_proto::flow::{Class, Host, Target};
 
 use crate::egress::EgressPolicy;
 use crate::selector::{ExitName, Selector};
@@ -89,6 +89,18 @@ pub(crate) fn decide(netmap: &Netmap, listener: &Listener, selector: &Selector, 
         }
         host => Ok(Route::Flow { peer: exit.id, target: Target::Internet { host, port }, optimistic: true }),
     }
+}
+
+/// 一条流的服务等级（白皮书 §8.4），优先级从高到低：用户名里的等级标记、监听器或端口转发的设置、
+/// 出口的默认值（只有经出口出去的流才看它）、网络的默认值。都没有时是 `auto`。
+pub(crate) fn class_for(netmap: &Netmap, username: Option<Class>, configured: Option<Class>, route: &Route) -> Class {
+    let exit = match route {
+        Route::Flow { peer, target, .. } if target.needs_exit() => {
+            netmap.peer(*peer).and_then(|peer| peer.exit).and_then(|exit| exit.class)
+        }
+        Route::Flow { .. } | Route::Local { .. } => None,
+    };
+    username.or(configured).or(exit).or(netmap.network.class).unwrap_or_default()
 }
 
 /// 目标指的是不是组网里的一个节点。不是组网目标时返回 `None`；是的话给出那个对端，或者不能访问它的原因。
@@ -170,7 +182,7 @@ mod tests {
 
     /// 本节点是 1 号 `laptop`；2 号 `gw` 是出口并开了局域网；3 号 `web` 是出口；4 号 `nas` 不是出口；5 号 `hidden` 不允许访问。
     fn netmap() -> Netmap {
-        let mut hidden = peer(5, "hidden", Some(PeerExit { lan: true }));
+        let mut hidden = peer(5, "hidden", Some(PeerExit { lan: true, class: None }));
         hidden.outbound = false;
         Netmap {
             version: 1,
@@ -181,6 +193,7 @@ mod tests {
                 routing: Default::default(),
                 max_relay_hops: 2,
                 reach: Default::default(),
+                class: None,
             },
             me: LocalNode {
                 id: node(1),
@@ -197,8 +210,8 @@ mod tests {
                 pinned_relays: Vec::new(),
             },
             peers: vec![
-                peer(2, "gw", Some(PeerExit { lan: true })),
-                peer(3, "web", Some(PeerExit { lan: false })),
+                peer(2, "gw", Some(PeerExit { lan: true, class: None })),
+                peer(3, "web", Some(PeerExit { lan: false, class: Some(Class::Bulk) })),
                 peer(4, "nas", None),
                 hidden,
             ],
@@ -217,6 +230,8 @@ mod tests {
             require_credential: false,
             default_action: None,
             fixed_exit: None,
+            class: None,
+            optimistic: None,
         }
     }
 
@@ -338,6 +353,22 @@ mod tests {
 
         netmap.me.exit = Some(ExitRole::default());
         assert_eq!(route(&netmap, &lan, "", "example.com", 443), Ok(Route::Local { policy: EgressPolicy::Exit }));
+    }
+
+    #[test]
+    fn class_comes_from_the_username_then_the_listener_then_the_exit_then_the_network() {
+        let mut netmap = netmap();
+        let to_web = route(&netmap, &listener("127.0.0.1:1080"), "web", "example.com", 443).unwrap();
+        let to_nas = route(&netmap, &listener("127.0.0.1:1080"), "", "10.66.0.4", 22).unwrap();
+        let local = route(&netmap, &listener("127.0.0.1:1080"), "", "example.com", 443).unwrap();
+        assert_eq!(class_for(&netmap, Some(Class::Interactive), Some(Class::Reliable), &to_web), Class::Interactive, "用户名最优先");
+        assert_eq!(class_for(&netmap, None, Some(Class::Reliable), &to_web), Class::Reliable, "其次是监听器");
+        assert_eq!(class_for(&netmap, None, None, &to_web), Class::Bulk, "再次是出口的默认值");
+        assert_eq!(class_for(&netmap, None, None, &to_nas), Class::Auto, "不经出口的流不看出口的默认值");
+        netmap.network.class = Some(Class::Reliable);
+        assert_eq!(class_for(&netmap, None, None, &to_nas), Class::Reliable, "最后是网络的默认值");
+        assert_eq!(class_for(&netmap, None, None, &to_web), Class::Bulk, "出口的默认值排在网络的前面");
+        assert_eq!(class_for(&netmap, None, None, &local), Class::Reliable);
     }
 
     #[test]

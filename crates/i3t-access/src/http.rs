@@ -147,6 +147,8 @@ pub(crate) enum Response {
     HeaderTooLarge,
     BadGateway,
     ServiceUnavailable,
+    /// 节点正在排空：503，并且告诉客户端过一会儿再试。
+    Draining,
     GatewayTimeout,
 }
 
@@ -171,6 +173,7 @@ impl Response {
             Self::HeaderTooLarge => failure!("431 Request Header Fields Too Large"),
             Self::BadGateway => failure!("502 Bad Gateway"),
             Self::ServiceUnavailable => failure!("503 Service Unavailable"),
+            Self::Draining => failure!("503 Service Unavailable", "Retry-After: 60\r\n"),
             Self::GatewayTimeout => failure!("504 Gateway Timeout"),
         }
     }

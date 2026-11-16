@@ -47,6 +47,7 @@ fn netmap() -> Netmap {
             routing: Default::default(),
             max_relay_hops: 2,
             reach: Default::default(),
+            class: None,
         },
         me: LocalNode {
             id: node(ME),
@@ -71,7 +72,7 @@ fn netmap() -> Netmap {
             outbound: true,
             endpoints: Vec::new(),
             attached: Vec::new(),
-            exit: Some(PeerExit { lan: true }),
+            exit: Some(PeerExit { lan: true, class: None }),
             dial_out_only: false,
             keep_alive: false,
         }],
@@ -90,6 +91,8 @@ fn socks(name: &str) -> Listener {
         require_credential: false,
         default_action: None,
         fixed_exit: None,
+        class: None,
+        optimistic: None,
     }
 }
 
@@ -275,6 +278,8 @@ async fn an_association_is_one_context_per_peer_carrying_the_class_the_origin_an
         name: "gateway-01".into(),
         token: TokenHash::from_bytes(token.as_ref().try_into().unwrap()),
         max_concurrent: None,
+        id: 1,
+        exhausted: false,
     }];
     let mut world = World::start(netmap).await;
     let client = associate(world.listener("socks"), "gw+c-r", "s3cret-token").await;
@@ -368,7 +373,14 @@ async fn local_egress_is_asked_for_every_datagram_and_only_its_destinations_may_
 }
 
 fn udp_forward(id: u32) -> Forward {
-    Forward { id, protocol: ForwardProtocol::Udp, bind: "127.0.0.1:0".parse().unwrap(), target: node(GW), allow_from: Vec::new() }
+    Forward {
+        id,
+        protocol: ForwardProtocol::Udp,
+        bind: "127.0.0.1:0".parse().unwrap(),
+        target: node(GW),
+        allow_from: Vec::new(),
+        class: None,
+    }
 }
 
 #[tokio::test]

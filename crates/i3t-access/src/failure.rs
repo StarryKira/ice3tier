@@ -23,6 +23,12 @@ pub(crate) enum Failure {
     ExitUnavailable,
     /// 凭据的并发连接数到了上限。
     TooManyConnections,
+    /// 节点正在排空，不接新的连接：入口自己，或者请求要去的出口。客户端应该换一个，或者稍后再试。
+    Draining,
+    /// 流量的限额用完了：出口本账期的配额，或者凭据的流量上限。
+    LimitReached,
+    /// 超过了出口的建连预算：同一个目标短时间里连得太多。
+    RateLimited,
 }
 
 impl Failure {
@@ -33,7 +39,9 @@ impl Failure {
             Self::HostUnreachable | Self::TimedOut => ReplyCode::HostUnreachable,
             Self::NetworkUnreachable => ReplyCode::NetworkUnreachable,
             Self::ConnectionRefused => ReplyCode::ConnectionRefused,
-            Self::ExitUnavailable | Self::TooManyConnections => ReplyCode::GeneralFailure,
+            Self::ExitUnavailable | Self::TooManyConnections | Self::Draining | Self::RateLimited => ReplyCode::GeneralFailure,
+            // 限额是一条规则：0x02 的意思就是"规则不允许这条连接"。
+            Self::LimitReached => ReplyCode::NotAllowed,
         }
     }
 
@@ -43,7 +51,8 @@ impl Failure {
             Self::HostUnreachable | Self::NetworkUnreachable | Self::ConnectionRefused => Response::BadGateway,
             Self::TimedOut => Response::GatewayTimeout,
             Self::ExitUnavailable => Response::ServiceUnavailable,
-            Self::TooManyConnections => Response::TooManyRequests,
+            Self::TooManyConnections | Self::LimitReached | Self::RateLimited => Response::TooManyRequests,
+            Self::Draining => Response::Draining,
         }
     }
 }
@@ -57,6 +66,10 @@ impl From<Status> for Failure {
             Status::Unreachable => Self::NetworkUnreachable,
             Status::TimedOut => Self::TimedOut,
             Status::AccessDenied | Status::NotEnabled | Status::PolicyDenied | Status::UnknownForward => Self::Denied,
+            // 这三种只有能用这个出口的调用者才会看到（出口先查访问规则），说清楚不会帮人枚举节点。
+            Status::Draining => Self::Draining,
+            Status::QuotaExhausted => Self::LimitReached,
+            Status::RateLimited => Self::RateLimited,
             // 拒绝里写着"成功"是对端的错，和它别的内部错误一样对待。
             Status::Ok | Status::ResolverFailure | Status::InternalError => Self::ExitUnavailable,
         }
@@ -84,6 +97,19 @@ mod tests {
         assert_eq!(Failure::from(Status::TimedOut).socks5(), ReplyCode::HostUnreachable);
         assert_eq!(Failure::from(Status::ConnectionRefused).http(), Response::BadGateway);
         assert_eq!(Failure::from(Status::TimedOut).http(), Response::GatewayTimeout);
+    }
+
+    #[test]
+    fn draining_and_limits_get_their_own_proxy_errors() {
+        assert_eq!(Failure::from(Status::Draining).socks5(), ReplyCode::GeneralFailure);
+        assert_eq!(Failure::from(Status::Draining).http(), Response::Draining);
+        assert!(std::str::from_utf8(Response::Draining.as_bytes()).unwrap().starts_with("HTTP/1.1 503 "));
+        assert!(std::str::from_utf8(Response::Draining.as_bytes()).unwrap().contains("Retry-After: "));
+        assert_eq!(Failure::from(Status::QuotaExhausted).socks5(), ReplyCode::NotAllowed);
+        assert_eq!(Failure::from(Status::QuotaExhausted).http(), Response::TooManyRequests);
+        assert_eq!(Failure::from(Status::RateLimited).socks5(), ReplyCode::GeneralFailure);
+        assert_eq!(Failure::from(Status::RateLimited).http(), Response::TooManyRequests);
+        assert_eq!(Failure::LimitReached.http(), Response::TooManyRequests);
     }
 
     #[test]

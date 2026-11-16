@@ -35,6 +35,7 @@ use crate::route::{self, Route};
 use crate::selector::Selector;
 use crate::session::Shared;
 use crate::socks5::{self, UdpPacket};
+use crate::usage::{ExitTally, IngressMeter};
 
 /// 各个上下文收到的、等着发回客户端的报文最多排多少个。排满了上下文的任务就等，再往前是上下文自己的有上限的队列。
 const RETURN_BACKLOG: usize = 64;
@@ -122,6 +123,10 @@ struct Association<'a, C: Datagrams, E> {
     listener: &'a Listener,
     selector: Selector,
     origin: Origin,
+    /// 报文的字节数记到监听器和凭据上。
+    meter: IngressMeter<'a>,
+    /// 经出口出去的报文，发起这一侧看到的计数。
+    exits: HashMap<NodeId, Arc<ExitTally>>,
     relay: UdpSocket,
     client: Client,
     /// 到每个对端节点的上下文的队列。任务结束（上下文没开成、被对端回收）之后队列是关着的，下一个报文会重新开。
@@ -132,18 +137,26 @@ struct Association<'a, C: Datagrams, E> {
     tally: Tally,
 }
 
+/// 一个 UDP ASSOCIATE 请求里说了什么，和它的报文记到哪里。
+pub(crate) struct Ask<'a> {
+    /// 请求里客户端写的"我会从这里发"。
+    pub(crate) declared: (Host, u16),
+    pub(crate) selector: Selector,
+    pub(crate) origin: Origin,
+    pub(crate) meter: IngressMeter<'a>,
+}
+
 /// 处理一个 UDP ASSOCIATE 请求，直到那条 TCP 连接结束。
 ///
-/// `control` 是客户端的 TCP 连接，请求已经读走、还没有应答。`declared` 是请求里的地址。
+/// `control` 是客户端的 TCP 连接，请求已经读走、还没有应答。
 pub(crate) async fn run<C: Connector + Datagrams, E: LocalEgress>(
     shared: &Arc<Shared<C, E>>,
     listener: &Listener,
     mut control: TcpStream,
     tcp_peer: SocketAddr,
-    declared: (Host, u16),
-    selector: Selector,
-    origin: Origin,
+    ask: Ask<'_>,
 ) {
+    let Ask { declared, selector, origin, meter } = ask;
     let bound = async {
         let relay = UdpSocket::bind((control.local_addr()?.ip(), 0)).await?;
         let addr = relay.local_addr()?;
@@ -169,6 +182,8 @@ pub(crate) async fn run<C: Connector + Datagrams, E: LocalEgress>(
         listener,
         selector,
         origin,
+        meter,
+        exits: HashMap::new(),
         relay,
         client: Client::new(tcp_peer, &declared.0, declared.1),
         peers: HashMap::new(),
@@ -193,6 +208,9 @@ pub(crate) async fn run<C: Connector + Datagrams, E: LocalEgress>(
             },
             Some(Return { peer, source, payload }) = returned.recv() => {
                 let netmap = Arc::clone(&shared.netmap.borrow());
+                if source.needs_exit() {
+                    association.exit(peer).traffic().add(false, payload.len());
+                }
                 match source_address(&netmap, peer, source) {
                     Some((host, port)) => association.deliver_to_client(host, port, &payload).await,
                     None => tracing::debug!(%peer, "丢掉对端节点送回来的一个报文：它的来源在 SOCKS5 里写不出来"),
@@ -226,7 +244,11 @@ impl<C: Connector + Datagrams, E: LocalEgress> Association<'_, C, E> {
         // 每个报文都按当时的 netmap 判断，和每条 CONNECT 一样。
         let netmap = Arc::clone(&self.shared.netmap.borrow());
         match route::decide(&netmap, self.listener, &self.selector, &packet.host, packet.port) {
-            Ok(Route::Flow { peer, target, .. }) => self.forward_to_peer(peer, target, packet.data),
+            Ok(route @ Route::Flow { .. }) => {
+                let class = route::class_for(&netmap, self.selector.class, self.listener.class, &route);
+                let Route::Flow { peer, target, .. } = route else { return };
+                self.forward_to_peer(peer, target, class, packet.data);
+            }
             Ok(Route::Local { policy }) => self.locally(&packet, policy).await,
             Err(reason) => {
                 self.tally.dropped += 1;
@@ -237,18 +259,30 @@ impl<C: Connector + Datagrams, E: LocalEgress> Association<'_, C, E> {
         }
     }
 
-    /// 把一个报文交给到 `peer` 的上下文。上下文还没有（或者上一个已经结束了）就新开一个。
-    fn forward_to_peer(&mut self, peer: NodeId, target: Target, data: &[u8]) {
+    /// 发起这一侧经出口 `peer` 出去的报文记在哪里。
+    fn exit(&mut self, peer: NodeId) -> &ExitTally {
+        self.exits.entry(peer).or_insert_with(|| self.shared.usage.exit(peer))
+    }
+
+    /// 把一个报文交给到 `peer` 的上下文。上下文还没有（或者上一个已经结束了）就新开一个，等级按这个报文的算。
+    fn forward_to_peer(&mut self, peer: NodeId, target: Target, class: Class, data: &[u8]) {
+        let via_exit = target.needs_exit();
         if self.peers.get(&peer).is_none_or(mpsc::Sender::is_closed) {
             let (queue, outgoing) = mpsc::channel(OUTGOING_BACKLOG);
-            let class = self.selector.class.unwrap_or_default();
             let session = serve_peer(Arc::clone(self.shared), peer, class, self.origin.clone(), outgoing, self.returns.clone());
             tokio::spawn(session.in_current_span());
             self.peers.insert(peer, queue);
+            if via_exit {
+                self.exit(peer).started();
+            }
         }
         let queued = self.peers.get(&peer).is_some_and(|queue| queue.try_send(Outgoing { target, payload: owned(data) }).is_ok());
         if queued {
             self.tally.from_client += 1;
+            self.meter.record(true, data.len());
+            if via_exit {
+                self.exit(peer).traffic().add(true, data.len());
+            }
         } else {
             self.tally.dropped += 1;
             tracing::trace!(%peer, "丢掉客户端发来的一个 UDP 报文：到对端节点的上下文还没开好，或者来不及发");
@@ -283,7 +317,10 @@ impl<C: Connector + Datagrams, E: LocalEgress> Association<'_, C, E> {
         }
         local.destinations.insert(destination);
         match local.socket.send_to(packet.data, destination).await {
-            Ok(()) => self.tally.from_client += 1,
+            Ok(()) => {
+                self.tally.from_client += 1;
+                self.meter.record(true, packet.data.len());
+            }
             Err(error) => {
                 self.tally.dropped += 1;
                 tracing::debug!(%error, "就地出站的一个 UDP 报文没有发出去");
@@ -304,7 +341,10 @@ impl<C: Connector + Datagrams, E: LocalEgress> Association<'_, C, E> {
         let Some(client) = self.client.reply_to else { return };
         let datagram = UdpPacket { host, port, data }.encode();
         match self.relay.send_to(&datagram, client).await {
-            Ok(_) => self.tally.to_client += 1,
+            Ok(_) => {
+                self.tally.to_client += 1;
+                self.meter.record(false, data.len());
+            }
             Err(error) => tracing::debug!(%error, "一个 UDP 报文没有发回客户端"),
         }
     }
