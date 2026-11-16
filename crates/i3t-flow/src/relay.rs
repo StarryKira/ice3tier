@@ -22,6 +22,10 @@
 //! 一头悄无声息地消失（断电、换了网络、NAT 回收了映射）之后，两头的资源在几分钟之内释放；活着的连接照常回应探测，一直留着。
 //! 活着却一直不说话的流占着的资源，由接受方按发起节点限制同时处理的流数来约束（[`crate::Handler::screen`]）。
 //!
+//! 流在独占 TCP（lane）上、并且负载不再加密（用户自己的 TLS 原样过去）时，那个方向在 lane 交出原始的 socket 之后
+//! （[`SendStream::take_raw`]、[`RecvStream::wait_raw`]）直接在两条 TCP 之间搬（[`crate::engine`]，Linux 上是 splice），
+//! 不再经过流的接口。结局的传法和上表一样：EOF 对 FIN，出错对 RST；计量、配额和带宽照样在每一段上记。
+//!
 //! 流往对端节点发数据的优先级跟着服务等级（[`priority_of`]）：同一条连接上，interactive 的流先于 bulk 的流发出。
 //! `auto` 的流开始时按 interactive 对待，这一端在它上面发出的数据累计超过 [`AUTO_DEMOTE_AFTER`] 之后降到 bulk 的优先级。
 //! 优先级只管本端发出去的方向，所以两端各数各的：下载时降级的是出口那一端，上传时是入口这一端。
@@ -29,16 +33,19 @@
 use std::fmt;
 use std::future::Future;
 use std::io;
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use i3t_conn::contract::Priority;
-use i3t_conn::{RecvStream, SendStream, StreamAborted, StreamCode};
+use i3t_conn::{RawRead, RawWrite, RecvStream, SendStream, StreamAborted, StreamCode};
 use i3t_proto::flow::{Class, Reason, Reply};
 use socket2::{SockRef, TcpKeepalive};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{ReadHalf, WriteHalf};
 
+use crate::engine::{Gate, PumpError, Splicer};
 use crate::meter::{Direction, Meter, Unmetered};
 use crate::{FlowError, header};
 
@@ -254,10 +261,17 @@ pub(crate) async fn run<S: SendStream, R: RecvStream>(
 
     let mut from_tcp = Traffic::default();
     let mut from_flow = Traffic::default();
+    // 流底下的独占 TCP（交出来直接搬的话）。正常结束时它也要恢复正常关闭。
+    let lane = OnceLock::new();
     let outcome = {
         let (tcp_read, tcp_write) = tcp.split();
-        let upstream = tcp_to_flow(tcp_read, &mut send, &mut from_tcp, Progress { started, class, meter });
-        let downstream = flow_to_tcp(&mut recv, tcp_write, &mut from_flow, Progress { started, class, meter }, reply_pending);
+        let upstream = async {
+            match send.take_raw() {
+                Some(raw) => tcp_to_raw(tcp_read, raw, &lane, &mut from_tcp, Progress { started, class, meter }).await,
+                None => tcp_to_flow(tcp_read, &mut send, &mut from_tcp, Progress { started, class, meter }).await,
+            }
+        };
+        let downstream = flow_to_tcp(&mut recv, tcp_write, &mut from_flow, Progress { started, class, meter }, reply_pending, &lane);
         drive(upstream, downstream, cancel).await
     };
 
@@ -265,6 +279,11 @@ pub(crate) async fn run<S: SendStream, R: RecvStream>(
         Ok(()) => {
             if let Err(error) = SockRef::from(&tcp).set_linger(None) {
                 tracing::warn!(%error, "恢复不了 SO_LINGER，正常结束的连接会以 RST 关闭");
+            }
+            if let Some(lane) = lane.get()
+                && let Err(error) = SockRef::from(&**lane).set_linger(None)
+            {
+                tracing::warn!(%error, "恢复不了独占 TCP 的 SO_LINGER，正常结束的流会以 RST 关闭");
             }
             End::Clean
         }
@@ -364,6 +383,7 @@ async fn flow_to_tcp<R: RecvStream, M: Meter>(
     traffic: &mut Traffic,
     progress: Progress<'_, M>,
     reply_pending: bool,
+    lane: &OnceLock<Arc<TcpStream>>,
 ) -> Result<(), Abort> {
     let Progress { started, meter, .. } = progress;
     if reply_pending {
@@ -374,6 +394,9 @@ async fn flow_to_tcp<R: RecvStream, M: Meter>(
             Err(FlowError::Read(error)) => return Err(Abort::Flow(error)),
             Err(error) => return Err(Abort::BadReply(error)),
         }
+    }
+    if let Some(raw) = recv.wait_raw().await {
+        return raw_to_tcp(raw, tcp, lane, traffic, progress).await;
     }
     let mut buf = vec![0; BUFFER_LEN];
     loop {
@@ -386,4 +409,97 @@ async fn flow_to_tcp<R: RecvStream, M: Meter>(
         tcp.write_all(&buf[..len]).await.map_err(Abort::Tcp)?;
         traffic.delivered(len);
     }
+}
+
+/// 一个进程一个搬运引擎，管道池在里面。
+static ENGINE: LazyLock<Splicer> = LazyLock::new(Splicer::new);
+
+/// 不再加密的独占 TCP 上的搬运，每一段之前过 [`Meter`]，顺带记首字节时间、告诉底下的传输搬了多少。
+struct MeterGate<'a, M> {
+    meter: &'a M,
+    direction: Direction,
+    started: Instant,
+    first_byte: &'a mut Option<Duration>,
+    counter: Counter<'a>,
+}
+
+/// 搬了多少要告诉谁：独占 TCP 的哪一个方向。
+enum Counter<'a> {
+    Write(&'a RawWrite),
+    Read(&'a RawRead),
+}
+
+impl<M: Meter> Gate for MeterGate<'_, M> {
+    type Stop = Reason;
+
+    async fn pass(&mut self, len: usize) -> Result<(), Reason> {
+        let started = self.started;
+        self.first_byte.get_or_insert_with(|| started.elapsed());
+        self.meter.pass(self.direction, len).await?;
+        match self.counter {
+            Counter::Write(raw) => raw.moved(len),
+            Counter::Read(raw) => raw.moved(len),
+        }
+        Ok(())
+    }
+}
+
+/// TCP 读到的，直接写进不再加密的独占 TCP。
+async fn tcp_to_raw<M: Meter>(
+    tcp: ReadHalf<'_>,
+    raw: RawWrite,
+    lane: &OnceLock<Arc<TcpStream>>,
+    traffic: &mut Traffic,
+    progress: Progress<'_, M>,
+) -> Result<(), Abort> {
+    let Progress { started, meter, .. } = progress;
+    let _ = lane.set(raw.socket_handle());
+    // 开流时还没交给内核的那一截密文不是用户的字节：先原样写出去，不计数、不过关卡。
+    write_all(raw.socket(), raw.unsent()).await.map_err(Abort::Flow)?;
+    let mut moved = 0;
+    let mut gate =
+        MeterGate { meter, direction: Direction::FromTcp, started, first_byte: &mut traffic.first_byte, counter: Counter::Write(&raw) };
+    let pumped = ENGINE.pump(tcp.as_ref(), raw.socket(), Bytes::new(), &mut gate, &mut moved).await;
+    traffic.bytes += moved;
+    pumped.map_err(|error| match error {
+        PumpError::Read(error) => Abort::Tcp(error),
+        PumpError::Write(error) => Abort::Flow(error),
+        PumpError::Stopped(reason) => Abort::Cancelled(reason),
+    })
+}
+
+/// 不再加密的独占 TCP 上收到的，直接写进 TCP。
+async fn raw_to_tcp<M: Meter>(
+    raw: RawRead,
+    tcp: WriteHalf<'_>,
+    lane: &OnceLock<Arc<TcpStream>>,
+    traffic: &mut Traffic,
+    progress: Progress<'_, M>,
+) -> Result<(), Abort> {
+    let Progress { started, meter, .. } = progress;
+    let _ = lane.set(raw.socket_handle());
+    let received = Bytes::copy_from_slice(raw.received());
+    let mut moved = 0;
+    let mut gate =
+        MeterGate { meter, direction: Direction::FromFlow, started, first_byte: &mut traffic.first_byte, counter: Counter::Read(&raw) };
+    let pumped = ENGINE.pump(raw.socket(), tcp.as_ref(), received, &mut gate, &mut moved).await;
+    traffic.bytes += moved;
+    pumped.map_err(|error| match error {
+        PumpError::Read(error) => Abort::Flow(error),
+        PumpError::Write(error) => Abort::Tcp(error),
+        PumpError::Stopped(reason) => Abort::Cancelled(reason),
+    })
+}
+
+/// 把 `bytes` 全部写给 `to`。
+async fn write_all(to: &TcpStream, mut bytes: &[u8]) -> io::Result<()> {
+    while !bytes.is_empty() {
+        to.writable().await?;
+        match to.try_write(bytes) {
+            Ok(written) => bytes = &bytes[written..],
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }

@@ -10,6 +10,7 @@
 //! | 两边 | [`Flow::relay`]、[`keep_alive`] | 在流和一条 TCP 连接之间双向搬运，如实传递半关闭和异常结束；TCP 那一头靠内核保活判断死活 |
 //! | 两边 | [`Meter`] | 搬运时每一段数据要过的关卡：计数、限速、叫停 |
 //! | 中间的节点 | [`Flow::splice`] | 把两条流接起来：监听在虚拟 IP 上、目标是别的节点的端口转发 |
+//! | 两边 | [`engine`] | 流底下是一条不再加密的独占 TCP 时，在它和另一条 TCP 之间直接搬（Linux 上用 splice） |
 //!
 //! UDP 应用的数据不走流，走数据报上下文，见 [`datagram`]。接受方那一侧两种都从 [`serve`] 进来。
 //!
@@ -21,6 +22,7 @@
 
 mod acceptor;
 pub mod datagram;
+pub mod engine;
 mod error;
 mod header;
 mod initiator;

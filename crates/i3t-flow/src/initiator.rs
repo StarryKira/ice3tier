@@ -4,7 +4,7 @@ use std::fmt;
 use std::future::{self, Future};
 use std::time::Instant;
 
-use i3t_conn::{Connector, RecvStream, SendStream, StreamCode};
+use i3t_conn::{Connector, Payload, RecvStream, SendStream, StreamCode};
 use i3t_proto::NodeId;
 use i3t_proto::flow::{Class, Open, Reason};
 use tokio::io::AsyncWriteExt;
@@ -14,7 +14,7 @@ use crate::meter::{Meter, Unmetered};
 use crate::relay::{self, Flow, Parts, Summary, TcpRole};
 use crate::{FlowError, header};
 
-/// 到 `peer` 开一条流，把 OPEN 和调用者的首批数据一次写出去。
+/// 到 `peer` 开一条承载 TCP 连接的流（[`Connector::open_tcp`]），把 OPEN 和调用者的首批数据一次写出去。
 ///
 /// 和 `peer` 之间已经有连接时不加任何往返：OPEN 和首批数据在同一次写里。
 /// 这一端往对端发数据的优先级按 OPEN 里的服务等级来，首批数据也是。
@@ -32,12 +32,14 @@ pub async fn open<C: Connector>(
     first_data: &[u8],
 ) -> Result<Pending<C::Send, C::Recv>, FlowError> {
     let started = Instant::now();
-    let (mut send, recv) = connector.open(peer).await?;
+    let (mut send, recv) = connector.open_tcp(peer).await?;
     send.set_priority(relay::priority_of(request.class));
     let mut bytes = Vec::with_capacity(Open::MAX_LEN + first_data.len());
     request.encode(&mut bytes);
     bytes.extend_from_slice(first_data);
     send.write_all(&bytes).await.map_err(FlowError::Write)?;
+    // 首批数据本身就是 TLS 时，跑在独占 TCP 上的流之后不再加密第二次。
+    send.end_header(Payload::for_first_data(first_data));
     Ok(Pending { send, recv, class: request.class, started })
 }
 

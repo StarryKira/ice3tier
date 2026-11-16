@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use i3t_conn::contract::{DatagramSender, Datagrams};
-use i3t_conn::{Acceptor, Incoming, RecvStream, SendStream, StreamCode};
+use i3t_conn::{Acceptor, Incoming, Payload, RecvStream, SendStream, StreamCode};
 use i3t_proto::NodeId;
 use i3t_proto::flow::{Open, OpenDatagrams, Opening, Reason, Recipient, Reply, Status};
 use tokio::io::AsyncWriteExt;
@@ -122,6 +122,8 @@ impl<S: SendStream, R: RecvStream> Request<S, R> {
         let mut bytes = Vec::with_capacity(Reply::MAX_LEN);
         Reply::ok().encode(&mut bytes);
         self.send.write_all(&bytes).await.map_err(FlowError::Write)?;
+        // 发起方选了不再加密（它的首批数据是 TLS）时，这个方向也跟着。
+        self.send.end_header(Payload::Passthrough);
         let (send, recv) = (self.send, self.recv);
         Ok(Flow::new(Parts { send, recv, role: TcpRole::Target, class, started: self.received, reply_pending: false }))
     }
