@@ -14,6 +14,7 @@
 
 mod datagrams;
 mod dns_cache;
+mod grant;
 mod handler;
 mod limits;
 mod outbound;

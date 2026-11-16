@@ -274,6 +274,8 @@ pub fn non_loopback_address() -> Option<IpAddr> {
 pub struct Node {
     pub id: NodeId,
     pub system: FakeSystem,
+    /// 数据面报出来的本节点的候选端点（反射地址、端口映射拿到的地址）。测试往里放什么，出口就认为自己对外是什么地址。
+    pub own_endpoints: Arc<Mutex<Vec<SocketAddr>>>,
     pub access: Arc<Access<MemoryConnector, Outbound<FakeSystem>>>,
     pub exit: Arc<Exit<FakeSystem, MemoryConnector>>,
     netmap: watch::Sender<Arc<Netmap>>,
@@ -291,7 +293,11 @@ impl Node {
         let connector = Arc::new(connector);
         let (sender, receiver) = watch::channel(Arc::new(netmap));
         let system = FakeSystem::default();
-        let outbound = Outbound::new(receiver.clone(), system.clone());
+        let own_endpoints: Arc<Mutex<Vec<SocketAddr>>> = Arc::default();
+        let outbound = Outbound::new(receiver.clone(), system.clone()).with_own_endpoints({
+            let own_endpoints = Arc::clone(&own_endpoints);
+            move || own_endpoints.lock().unwrap().clone()
+        });
         let mut access = Access::new(Arc::clone(&connector), outbound.clone(), receiver.clone());
         let mut exit = Exit::new(receiver, outbound, connector).with_opener(access.datagram_opener());
         if let Some(udp_idle) = udp_idle {
@@ -307,7 +313,7 @@ impl Node {
             let exit = Arc::clone(&exit);
             async move { i3t_flow::serve(&acceptor, exit).await }
         });
-        Self { id, system, access, exit, netmap: sender }
+        Self { id, system, own_endpoints, access, exit, netmap: sender }
     }
 
     /// 改这个节点的 netmap 并下发（版本号加一），等入口把监听调整完。

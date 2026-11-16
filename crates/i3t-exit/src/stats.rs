@@ -14,7 +14,7 @@ use crate::limits::QuotaUsage;
 pub struct ExitStats {
     /// 正在处理的流和数据报上下文：从读到 OPEN 到结束。
     pub active: u64,
-    /// 收到过的建流请求，包括建立数据报上下文的。
+    /// 收到过的建流请求，包括建立数据报上下文的，以及没读 OPEN 就被拒绝的（访问规则不允许、同时开着的流太多）。
     pub total: u64,
     /// 从发起方搬到目标的字节，流的数据和数据报的载荷都算。
     pub bytes_to_target: u64,
@@ -78,6 +78,12 @@ impl Counters {
             None => return,
         };
         counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 一个请求还没读 OPEN 就被拒绝了（[`crate::Exit`] 按发起节点筛流）：算进总数和对应的失败计数，不算"正在处理"。
+    pub(crate) fn turned_away(&self, status: Status) {
+        self.total.fetch_add(1, Ordering::Relaxed);
+        self.failed(status);
     }
 
     /// 一条建成的流搬运结束了。

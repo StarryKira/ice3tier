@@ -574,26 +574,26 @@ async fn a_peer_may_hold_only_so_many_contexts_at_once() {
     world.gw.system.redirect(&public(443), udp_echo_server().await);
     let socks = world.socks().await;
 
-    // 每个关联到 gw 是一个上下文。64 个都通。
+    // 每个关联到 gw 是一个上下文。128 个都通。
     let mut clients = Vec::new();
-    for index in 0..64u32 {
+    for index in 0..128u32 {
         let client = udp_associate(socks, gw_user()).await;
         client.send(PUBLIC_IP, 443, &index.to_be_bytes()).await;
         assert_eq!(client.recv().await.1, index.to_be_bytes());
         clients.push(client);
     }
-    assert_eq!(world.gw.exit.stats().active, 64);
+    assert_eq!(world.gw.exit.stats().active, 128);
 
-    // 第 65 个被出口拒绝：它不会多占一个端口。
+    // 第 129 个被出口拒绝：它不会多占一个端口。
     let one_too_many = udp_associate(socks, gw_user()).await;
     one_too_many.send(PUBLIC_IP, 443, b"over the limit").await;
-    let stats = settled(&world, "第 65 个上下文被拒绝", |stats| stats.total == 65 && stats.active == 64).await;
+    let stats = settled(&world, "第 129 个上下文被拒绝", |stats| stats.total == 129 && stats.active == 128).await;
     assert_eq!(stats.refused, 1);
     one_too_many.assert_silent(QUIET).await;
 
     // 结束一个，就空出一个。入口在上一次被拒绝之后会歇几秒才重新去开，所以这里用一个新的关联。
     clients.pop();
-    settled(&world, "结束的上下文让出了名额", |stats| stats.active == 63).await;
+    settled(&world, "结束的上下文让出了名额", |stats| stats.active == 127).await;
     let replacement = udp_associate(socks, gw_user()).await;
     replacement.send(PUBLIC_IP, 443, b"fits again").await;
     assert_eq!(replacement.recv().await.1, b"fits again");

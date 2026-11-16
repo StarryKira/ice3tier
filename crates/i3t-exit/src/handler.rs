@@ -1,14 +1,15 @@
 //! 处理别的节点开过来的流和数据报上下文。
 
+use std::collections::HashMap;
 use std::future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use i3t_conn::contract::{DatagramSender, Datagrams};
 use i3t_conn::{Connector, Endpoint, RecvStream, SendStream};
 use i3t_flow::datagram::{self, Opener, OutboundSocket};
-use i3t_flow::{End, Flow, FlowError, Handler, Request};
+use i3t_flow::{End, Flow, FlowError, Handler, Request, Screening};
 use i3t_model::Netmap;
 use i3t_model::netmap::{Forward, ForwardProtocol, Peer};
 use i3t_proto::NodeId;
@@ -17,14 +18,31 @@ use tokio::net::TcpStream;
 use tokio::sync::watch;
 
 use crate::datagrams::{ContextLimit, IDLE_TIMEOUT, MAX_CONTEXTS_PER_PEER, Session};
+use crate::grant::Grant;
 use crate::limits::{ExitMeter, Limits, QuotaState};
-use crate::outbound::Outbound;
+use crate::outbound::{Asker, Outbound};
 use crate::stats::{Counters, ExitStats};
 use crate::system::{Os, System};
 
+/// 一个发起节点同时能有多少条流在本节点上被处理（还在读 OPEN 的、连着目标在搬运的、数据报上下文都算）。
+///
+/// 每条流在出口上占一个任务、两块搬运的缓冲区，连到目标的还占一个文件描述符。没有这个上限，
+/// 一个被允许访问本节点的节点可以开上万条流、每条都连到一个不说话的目标，把文件描述符耗尽，整个节点跟着用不了。
+/// 个人的网络里一个节点同时开上千条流已经很少见（浏览器整个也就几百条连接），所以取 1024，正常使用碰不到。
+pub(crate) const MAX_STREAMS_PER_PEER: usize = 1024;
+
+/// 同一个发起节点因为流太多被拒绝时，多久最多记一行 info。每条被拒绝的流另有一行 debug。
+const BUSY_LOG_EVERY: Duration = Duration::from_secs(60);
+
 /// 一个节点接受流的那一侧。
 ///
-/// 每个建流请求按这个顺序检查，不通过就用对应的状态拒绝：
+/// 对端开过来的每条流在读 OPEN 之前先筛一遍（[`Handler::screen`]）：
+///
+/// - 访问规则不允许发起节点访问本节点：两个方向立刻重置，原因码是 [`Reason::AccessRevoked`]，它发来的东西一个字节也不读。
+///   发起方把这当作 [`Status::AccessDenied`] 的拒绝。
+/// - 发起节点在本节点上同时开着的流到了 [`MAX_STREAMS_PER_PEER`]：不读 OPEN，回 [`Status::TooManyStreams`]。
+///
+/// 通过的流读出 OPEN，再按这个顺序检查，不通过就用对应的状态拒绝：
 ///
 /// 1. 访问规则：发起节点在当前的 netmap 里必须被允许访问本节点。发起节点是谁来自连接的握手，这里不信任入口的判断。
 /// 2. 节点正在排空（[`Exit::set_draining`]）时一律拒绝，状态是 [`Status::Draining`]：调用方据此换一个出口。
@@ -36,11 +54,12 @@ use crate::system::{Os, System};
 ///    - 本节点的端口：只用本机的非回环地址去连。那个端口上有监听在虚拟 IP 上的端口转发时，按那条转发处理：
 ///      目标是本节点就去连它指向的地址，目标是别的节点就到那个节点开一条流，把两条流接起来；
 ///    - 端口转发：必须是下发给本节点、并且由发起节点监听的那一条。不需要本节点是出口。
-/// 4. 连上目标之后回成功，开始搬运。访问权限被收回时，正在搬运的流被重置。
+/// 4. 连上目标之后回成功，开始搬运。访问权限被收回，或者放行这条流的能力被收回（出口、局域网开关、端口转发，
+///    见 `grant` 模块）时，正在搬运的流被重置，原因码是 [`Reason::AccessRevoked`]。
 ///
 /// 出口流量（互联网和局域网目标）搬运时受带宽上限限速，算进配额，配额用完时正在搬运的流被断开（见 [`crate::limits`]）。
 ///
-/// UDP 应用的数据走数据报上下文。建立上下文时只查访问规则、排空和上下文的个数（每个对端最多 64 个）；
+/// UDP 应用的数据走数据报上下文。建立上下文时只查访问规则、排空和上下文的个数（每个对端最多 128 个）；
 /// 目标写在每个数据报里，所以第 3 步的检查落在每个目标第一次出现的时候，规则和流的完全一样，
 /// 只是端口转发要的是 UDP 的那一条；监听在虚拟 IP 上、目标是别的节点的 UDP 转发，由本节点到目标节点另开一个上下文接力。
 /// 没通过的数据报被丢掉并计数，UDP 没有地方回错误。
@@ -60,6 +79,8 @@ pub struct Exit<S = Os, C: Datagrams = Endpoint> {
     /// 正在排空时有值：给发起方看的说明。
     draining: Mutex<Option<String>>,
     datagram_idle_timeout: Duration,
+    /// 每个发起节点上一次因为流太多被拒绝而记 info 的时刻。
+    busy_logged: Mutex<HashMap<NodeId, Instant>>,
 }
 
 impl<S, C: Datagrams> std::fmt::Debug for Exit<S, C> {
@@ -89,6 +110,7 @@ impl<S: System, C: Connector + Datagrams> Exit<S, C> {
             limits: Limits::new(QuotaState::default()),
             draining: Mutex::new(None),
             datagram_idle_timeout: IDLE_TIMEOUT,
+            busy_logged: Mutex::default(),
         }
     }
 
@@ -145,8 +167,8 @@ impl<S: System, C: Connector + Datagrams> Exit<S, C> {
         Some(Reply::new(Status::Draining, detail))
     }
 
-    /// 检查一个建流请求，通过的话连上它的目标（或者开好到端口转发目标节点的流）。
-    async fn admit(&self, netmap: &Netmap, peer: NodeId, open: &Open) -> Result<Admitted<C::Send, C::Recv>, Reply> {
+    /// 检查一个建流请求，通过的话连上它的目标（或者开好到端口转发目标节点的流），并给出放行凭的是什么。
+    async fn admit(&self, netmap: &Netmap, peer: NodeId, open: &Open) -> Result<(Admitted<C::Send, C::Recv>, Grant), Reply> {
         let Some(initiator) = netmap.peer(peer).filter(|initiator| initiator.inbound) else {
             return Err(Reply::new(Status::AccessDenied, "访问规则不允许发起节点访问这个节点"));
         };
@@ -158,18 +180,26 @@ impl<S: System, C: Connector + Datagrams> Exit<S, C> {
         match &open.target {
             Target::Internet { host, port } => {
                 self.exit_admission(netmap, peer, &format!("{host}:{port}"))?;
-                self.outbound.internet(netmap, host, *port).await.map(exit_traffic)
+                let stream = self.outbound.internet(netmap, host, *port, Asker::Peer(peer)).await?;
+                Ok((exit_traffic(stream), Grant::Internet { port: *port }))
             }
             Target::Lan { addr } => {
                 self.exit_admission(netmap, peer, &addr.to_string())?;
-                self.outbound.lan(netmap, *addr).await.map(exit_traffic)
+                let stream = self.outbound.lan(netmap, *addr).await?;
+                Ok((exit_traffic(stream), Grant::Lan))
             }
             Target::Node { port } => match forward_on_virtual_ip(netmap, *port, ForwardProtocol::Tcp) {
                 Some(forward) if forward.target != netmap.me.id => {
-                    self.onward(netmap, initiator, forward, open).await.map(Admitted::Onward)
+                    let flow = self.onward(netmap, initiator, forward, open).await?;
+                    let grant = Grant::VirtualForward { port: *port, id: forward.id, target: forward.target, addr: None };
+                    Ok((Admitted::Onward(flow), grant))
                 }
-                Some(forward) => self.outbound.forward(virtual_forward_target(netmap, initiator, forward)?).await.map(local),
-                None => self.outbound.node_port(*port).await.map(local),
+                Some(forward) => {
+                    let addr = virtual_forward_target(netmap, initiator, forward)?;
+                    let stream = self.outbound.forward(addr).await?;
+                    Ok((local(stream), Grant::VirtualForward { port: *port, id: forward.id, target: forward.target, addr: Some(addr) }))
+                }
+                None => Ok((local(self.outbound.node_port(*port).await?), Grant::NodeService)),
             },
             Target::Forward { id } => {
                 let listed = netmap
@@ -178,11 +208,36 @@ impl<S: System, C: Connector + Datagrams> Exit<S, C> {
                     .iter()
                     .find(|entry| entry.id == *id && entry.listener == peer && entry.protocol == ForwardProtocol::Tcp);
                 match listed {
-                    Some(entry) => self.outbound.forward(entry.addr).await.map(local),
+                    Some(entry) => Ok((local(self.outbound.forward(entry.addr).await?), Grant::Forward { id: *id, addr: entry.addr })),
                     None => Err(Reply::new(Status::UnknownForward, "没有下发给这个节点、由发起节点监听的这条 TCP 端口转发")),
                 }
             }
         }
+    }
+
+    /// 发起节点同时开着的流太多，拒绝它的又一条。info 日志每个节点每分钟最多一行，被拒绝的流本身只记 debug：
+    /// 不然一个节点不停地开流就能刷屏。
+    fn refuse_busy(&self, peer: NodeId) -> Screening {
+        self.counters.turned_away(Status::TooManyStreams);
+        let now = Instant::now();
+        let first_in_a_while = {
+            let mut logged = self.busy_logged.lock().expect("busy log mutex poisoned");
+            logged.retain(|_, at| now.saturating_duration_since(*at) < BUSY_LOG_EVERY);
+            let first = !logged.contains_key(&peer);
+            if first {
+                logged.insert(peer, now);
+            }
+            first
+        };
+        if first_in_a_while {
+            tracing::info!(%peer, limit = MAX_STREAMS_PER_PEER, "发起节点在本节点上同时开着的流到了上限，新的流被拒绝（{BUSY_LOG_EVERY:?} 之内不再为它记这一行）");
+        } else {
+            tracing::debug!(%peer, "拒绝了一条流：发起节点同时开着的流到了上限");
+        }
+        Screening::Refuse(Reply::new(
+            Status::TooManyStreams,
+            format!("发起节点在这个节点上同时开着的流到了上限（{MAX_STREAMS_PER_PEER} 条），等手上的流结束一些再开"),
+        ))
     }
 
     /// 出口流量在连目标之前的两项检查：配额，和建连预算。本节点不是出口时不查，留给出站那一步去拒绝。
@@ -223,6 +278,19 @@ impl<S: System, C: Connector + Datagrams> Exit<S, C> {
 }
 
 impl<S: System, C: Connector + Datagrams> Handler for Exit<S, C> {
+    fn screen(&self, peer: NodeId, in_progress: usize) -> Screening {
+        if !self.netmap.borrow().peer(peer).is_some_and(|initiator| initiator.inbound) {
+            self.counters.turned_away(Status::AccessDenied);
+            // 每条流一行，不记成 info：不然一个不被允许的节点不停地开流就能刷屏。
+            tracing::debug!(%peer, "重置了一条流：访问规则不允许发起节点访问本节点，没有读它发来的任何东西");
+            return Screening::Reset(Reason::AccessRevoked);
+        }
+        if in_progress >= MAX_STREAMS_PER_PEER {
+            return self.refuse_busy(peer);
+        }
+        Screening::Admit
+    }
+
     async fn handle<Snd: SendStream, Rcv: RecvStream>(&self, request: Request<Snd, Rcv>) {
         let _active = self.counters.begin();
         let peer = request.peer();
@@ -232,7 +300,7 @@ impl<S: System, C: Connector + Datagrams> Handler for Exit<S, C> {
         let netmap = Arc::clone(&netmap_changes.borrow_and_update());
         self.limits.configure(netmap.me.exit.as_ref());
 
-        let admitted = match self.admit(&netmap, peer, request.open()).await {
+        let (admitted, grant) = match self.admit(&netmap, peer, request.open()).await {
             Ok(admitted) => admitted,
             Err(reply) => {
                 self.counters.failed(reply.status);
@@ -240,7 +308,8 @@ impl<S: System, C: Connector + Datagrams> Handler for Exit<S, C> {
                 return request.refuse(&reply).await;
             }
         };
-        let revoked = async move { access_revoked(&mut netmap_changes, peer).await };
+        // 连目标的这段时间里 netmap 可能已经变了：放行时看的那一版之后的每一次变化都要核对。
+        let revoked = async move { withdrawn(&mut netmap_changes, peer, grant).await };
         match admitted {
             Admitted::Target { stream, exit_traffic } => {
                 let flow = match request.accept().await {
@@ -350,17 +419,17 @@ impl<S: System, C: Connector + Datagrams> Handler for Exit<S, C> {
     }
 }
 
-/// 等到 netmap 不再允许 `peer` 访问本节点。那时它已经建立的流和数据报上下文要被重置，不只是拒绝新的。
-///
-/// 可以放在 `select!` 里反复调用：被取消时不会漏掉变化。
-pub(crate) async fn access_revoked(netmap: &mut watch::Receiver<Arc<Netmap>>, peer: NodeId) -> Reason {
+/// 等到 netmap 不再允许 `peer` 凭 `grant` 的这条流：访问规则收回了，或者放行它的能力收回了。那时已经建立的流要被重置，
+/// 不只是拒绝新的。
+async fn withdrawn(netmap: &mut watch::Receiver<Arc<Netmap>>, peer: NodeId, grant: Grant) -> Reason {
     loop {
         if netmap.changed().await.is_err() {
             // 发送端没了说明节点在关闭，不是权限变了。流留给连接的关闭去结束。
             return future::pending().await;
         }
-        if !netmap.borrow_and_update().peer(peer).is_some_and(|peer| peer.inbound) {
-            tracing::info!(%peer, "访问规则不再允许这个节点访问本节点，重置它已经建立的流和数据报上下文");
+        let current = Arc::clone(&netmap.borrow_and_update());
+        if let Some(why) = grant.withdrawn(&current, peer, ForwardProtocol::Tcp) {
+            tracing::info!(%peer, ?grant, why, "重置一条已经建立的流：它不再被允许");
             return Reason::AccessRevoked;
         }
     }
