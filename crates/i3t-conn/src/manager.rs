@@ -329,7 +329,7 @@ impl Manager {
             _ = connection.closed() => return,
         };
         let limit = DatagramHeader::LEN + MAX_DATAGRAM_BODY_LEN - first.len();
-        let rest = match tokio::time::timeout(RELIABLE_DATAGRAM_TIMEOUT, stream.read_to_end(limit)).await {
+        let rest = match tokio::time::timeout(RELIABLE_DATAGRAM_TIMEOUT, read_rest(&mut stream, limit)).await {
             Ok(Ok(rest)) => rest,
             Ok(Err(error)) => return tracing::debug!(%peer, %error, "丢掉一个走单向流的数据报：没有读完整，或者超过了长度上限"),
             Err(_) => return tracing::debug!(%peer, "丢掉一个走单向流的数据报：迟迟没有发完"),
@@ -484,9 +484,33 @@ fn idle_limit(preferred: bool, keep_alive: bool) -> Option<(Duration, &'static s
     }
 }
 
+/// 一条流剩下的内容读不完整的原因。
+#[derive(Debug, thiserror::Error)]
+enum ReadRestError {
+    #[error(transparent)]
+    Read(#[from] quinn::ReadError),
+    #[error("内容超过了 {limit} 字节的上限")]
+    TooLong { limit: usize },
+}
+
+/// 把一条流剩下的内容读完，最多 `limit` 字节。
+///
+/// 不用 quinn 的 `read_to_end`：它不按顺序读，对端重传过的数据会被算两遍。读到一半把流丢掉（超时，或者连接关了）时，
+/// 库里给流量控制记账的减法就会减出负数：debug 构建直接 panic，release 构建悄悄绕回成一个巨大的额度。按顺序读没有这个问题。
+async fn read_rest(stream: &mut quinn::RecvStream, limit: usize) -> Result<Vec<u8>, ReadRestError> {
+    let mut rest = Vec::new();
+    while let Some(chunk) = stream.read_chunk(limit - rest.len() + 1, true).await? {
+        if chunk.bytes.len() > limit - rest.len() {
+            return Err(ReadRestError::TooLong { limit });
+        }
+        rest.extend_from_slice(&chunk.bytes);
+    }
+    Ok(rest)
+}
+
 /// 读对端在连接里送来的一条信令（一条单向流，内容是一个 JSON 对象），交给路径层。`first` 是已经读走的首字节。
 async fn read_signal(paths: &Paths, peer: NodeId, first: [u8; 1], mut stream: quinn::RecvStream) {
-    let rest = match tokio::time::timeout(SIGNAL_TIMEOUT, stream.read_to_end(SIGNAL_MAX_BYTES - first.len())).await {
+    let rest = match tokio::time::timeout(SIGNAL_TIMEOUT, read_rest(&mut stream, SIGNAL_MAX_BYTES - first.len())).await {
         Ok(Ok(rest)) => rest,
         Ok(Err(error)) => {
             tracing::debug!(%peer, %error, "读连接里的信令失败");
