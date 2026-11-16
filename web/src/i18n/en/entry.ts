@@ -1,5 +1,7 @@
 import type { Messages } from '../messages'
 
+import { afterColon } from './text'
+
 const count = (n: number, one: string, many: string) => (n === 1 ? `1 ${one}` : `${n} ${many}`)
 
 export const exits: Messages['exits'] = {
@@ -392,6 +394,7 @@ export const pairs: Messages['pairs'] = {
   toggle: (a, b) => `Keep alive between ${a} and ${b}`,
   on: (a, b) => `${a} ⇄ ${b}: keep alive on`,
   off: (a, b) => `${a} ⇄ ${b}: keep alive off`,
+  added: (a, b) => `Node pair ${a} ⇄ ${b} added`,
   remove: 'Reset to default',
   removeFor: (a, b) => `Reset ${a} ⇄ ${b} to default`,
   removed: (a, b) => `${a} ⇄ ${b} reset to default`,
@@ -402,7 +405,75 @@ export const pairs: Messages['pairs'] = {
   nodeB: 'Node B',
   same: 'Select two different nodes',
   exists: 'This pair already has a setting',
+  nothingSet: 'Turn on at least one setting',
   submit: 'Add',
+
+  lane: {
+    title: 'TCP lanes',
+    tip: "Each stream that carries a TCP connection gets a TCP connection of its own instead of sharing the pair's connection. Needs relay enabled on one of the two nodes.",
+    hint: 'Needs relay enabled on one of the two nodes',
+    modes: { off: 'Off', udp_fallback: 'When UDP fails', always: 'Always' },
+    select: (a, b) => `TCP lanes between ${a} and ${b}`,
+    changed: (a, b, mode) => `${a} ⇄ ${b}: TCP lanes ${afterColon(mode)}`,
+    routeNote: 'With TCP lanes on, the shared connection and its route stay as they are',
+    colState: 'Status',
+    effective: 'In effect',
+    blocked: 'No effect',
+    dials: (name) => `${name} dials`,
+    bothDial: 'Both dial',
+    colInUse: 'In use',
+    colIdle: 'Idle',
+    colFallbacks: 'Fallbacks',
+    fallbacksTip: 'Streams meant for a lane that went over the shared connection instead',
+    colDialFailures: 'Failed dials',
+    countsTip: 'Both nodes, since they started',
+    reason: {
+      noRelay: (a, b) => `Neither ${a} nor ${b} has relay enabled`,
+      noTcpAddress: (node) => `${node}'s relay has no TCP address`,
+      nodeTooOld: (node) => `${node} runs a version without TCP lanes`,
+      notConnected: (a, b) => `No access rule connects ${a} and ${b}`,
+    },
+    fix: {
+      enableRelay: (node) => `Enable relay on ${node}`,
+      tcpAddress: (node) => `Add a TCP address for ${node}`,
+      update: (node) => `Update ${node}`,
+      access: 'Check access',
+    },
+    details: 'Details',
+    detailsHide: 'Hide',
+    detailsFor: (a, b) => `TCP lane details for ${a} ⇄ ${b}`,
+    notReported: '—',
+    row: {
+      control: 'Control connection',
+      controlTip: 'While it is down, new TCP streams use the shared connection',
+      controlUp: 'Connected',
+      controlDown: 'Not connected',
+      dialling: 'Dialling',
+      claims: 'Claims',
+      claimsTip: 'Lanes taken from those the peer dialled and parked here',
+      waited: 'Waited for a dial',
+      waitedValue: (n, wait) => `${n}, ${wait} in total`,
+      claimsFailed: 'Failed claims',
+      refused: 'Refused',
+      refusedTip: 'Closed after the handshake because of their purpose or count',
+      sealed: 'Encrypted',
+      sealedTip: 'Bytes carried inside the lane TLS, both directions',
+      passthrough: 'Passthrough',
+      passthroughTip: 'Data that already was TLS, carried as is by the program',
+      spliced: 'Kernel splice',
+      splicedTip: 'Data that already was TLS, carried as is by the kernel',
+      handshake: 'Failed handshakes',
+      handshakeTip: 'Incoming connections to this node that failed the handshake. Whole node, not per peer',
+    },
+    handshakeCause: {
+      deadline: 'Timed out',
+      unknown_key: 'Unknown key',
+      tls: 'TLS error',
+      protocol: 'Protocol error',
+      busy: 'Busy',
+    },
+    causeCount: (cause, n) => `${cause} ${n}`,
+  },
 }
 
 export const tokens: Messages['tokens'] = {

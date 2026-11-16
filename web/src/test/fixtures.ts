@@ -8,6 +8,8 @@ import {
   type MatrixEntry,
   type Node,
   type NodeUpdate,
+  type PairView,
+  type PeerLanes,
   type Route,
   type Status,
   type UpdateOverview,
@@ -194,4 +196,34 @@ export function makeToken(id: number, extra: Partial<EnrollTokenInfo> = {}): Enr
     used_by: null,
     ...extra,
   }
+}
+
+/** 一个节点上和一个对端之间的独占 TCP：全是 0，测试只写它关心的那几项。 */
+export function makePeerLanes(peer: number, extra: Partial<PeerLanes> = {}): PeerLanes {
+  return {
+    peer,
+    dials: false,
+    control: true,
+    idle: 0,
+    ready: 0,
+    parked_at_peer: 0,
+    in_use: 0,
+    dialling: 0,
+    claims: 0,
+    claims_waited: 0,
+    claim_wait_ms: 0,
+    claims_failed: 0,
+    fallbacks: 0,
+    dial_failures: 0,
+    refused: 0,
+    sealed_bytes: 0,
+    passthrough_bytes: 0,
+    spliced_bytes: 0,
+    ...extra,
+  }
+}
+
+/** 一对节点的设置：默认是连接常驻、不用独占 TCP。 */
+export function makePair(a: number, b: number, extra: Partial<PairView> = {}): PairView {
+  return { a, b, keep_alive: true, lane: 'off', lane_effect: null, lanes: [], ...extra }
 }

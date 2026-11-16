@@ -175,6 +175,15 @@ describe('设置里的「节点更新」', () => {
     expect(screen.getByTestId('update-row-laptop')).toHaveTextContent(u.state.lastFailed)
   })
 
+  it('自动更新关着：开关就在上面，节点的行里不再重复"自动更新已关闭"', async () => {
+    setup({ 'GET /update': { ...OVERVIEW, auto_update: false, paused: [] } })
+    renderWithApp(<UpdatesTab />)
+    const nas = await screen.findByTestId('update-row-nas')
+    expect(nas).toHaveTextContent(u.state.available('0.3.0'))
+    expect(nas).not.toHaveTextContent(u.state.availableManual)
+    expect(screen.getByText(u.auto.off)).toBeVisible()
+  })
+
   it('全部更新：确认框里选时机，结果按已下发、稍后、跳过列出来', async () => {
     const user = userEvent.setup()
     const result: ForcedUpdates = {

@@ -6,6 +6,7 @@ import { Link } from 'react-router'
 import { q } from '@/api/queries'
 import { type Network, type NodeDetail } from '@/api/types'
 import { NodeLink } from '@/components/node'
+import { laneMode, laneModeLabel } from '@/lib/lanes'
 import { nodeName } from '@/lib/nodes'
 import { SkeletonBlock } from '@/components/states'
 import { StatusText } from '@/components/status'
@@ -130,7 +131,12 @@ export function RelatedTab({ network, node }: { network: Network; node: NodeDeta
                 node={{ id: other, name: nodeName(all, other) }}
                 online={all.find((candidate) => candidate.id === other)?.online}
               />
-              <Badge tone={pair.keep_alive ? 'outline' : 'neutral'}>{d.keepAlive(pair.keep_alive)}</Badge>
+              <span className="flex flex-wrap items-center justify-end gap-1.5">
+                {laneMode(pair) !== 'off' ? (
+                  <Badge tone="outline">{d.laneSetting(laneModeLabel(laneMode(pair)))}</Badge>
+                ) : null}
+                <Badge tone={pair.keep_alive ? 'outline' : 'neutral'}>{d.keepAlive(pair.keep_alive)}</Badge>
+              </span>
             </li>
           )
         })}

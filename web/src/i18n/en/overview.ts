@@ -1,5 +1,7 @@
 import type { Messages } from '../messages'
 
+import { afterColon } from './text'
+
 export const overview: Messages['overview'] = {
   title: 'Overview',
   loadFailed: "Couldn't load overview",
@@ -24,11 +26,11 @@ export const overview: Messages['overview'] = {
   },
   relayOffline: (name) => `Relay ${name} offline`,
   exitOffline: (name) => `Exit ${name} offline`,
-  forwardBlocked: (name, state) => `Port forward ${name}: ${state}`,
-  listenerBroken: (name, state) => `Listener ${name}: ${state}`,
+  forwardBlocked: (name, state) => `Port forward ${name}: ${afterColon(state)}`,
+  listenerBroken: (name, state) => `Listener ${name}: ${afterColon(state)}`,
   quotaNearly: (name, percent) => `Exit ${name}: ${percent}% of quota used`,
   quotaExhausted: (name) => `Exit ${name}: quota used up`,
-  exitDegraded: (name, state) => `Exit ${name}: ${state}`,
+  exitDegraded: (name, state) => `Exit ${name}: ${afterColon(state)}`,
   credentialExhausted: (name) => `Credential ${name}: traffic limit reached`,
 
   stats: {

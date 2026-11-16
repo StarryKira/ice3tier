@@ -136,8 +136,11 @@ export function TagInput({
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'ArrowDown' && rows.length > 0) {
       event.preventDefault()
-      setOpen(true)
-      setActive((index) => (index + 1) % rows.length)
+      // 列表收着时第一下只是打开它，停在第一项。
+      if (!open) {
+        setOpen(true)
+        setActive(0)
+      } else setActive((index) => (index + 1) % rows.length)
     } else if (event.key === 'ArrowUp' && rows.length > 0) {
       event.preventDefault()
       setActive((index) => (index - 1 + rows.length) % rows.length)
@@ -203,11 +206,12 @@ export function TagInput({
                 setActive(0)
                 setOpen(true)
               }}
-              onFocus={() => setOpen(true)}
               onBlur={() => {
                 // 输了一半就离开：算作确认，不让它悄悄丢掉。
                 if (text.trim() !== '') add(text)
               }}
+              // 获得焦点时不打开候选列表：对话框一打开就聚焦在这里，列表会盖住下面的按钮。点它、输入或按向下键才打开。
+              onClick={() => setOpen(true)}
               onKeyDown={onKeyDown}
               className="h-5.5 min-w-32 flex-1 bg-transparent px-1 text-sm outline-none placeholder:text-muted-foreground"
             />

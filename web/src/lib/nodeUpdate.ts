@@ -142,11 +142,18 @@ function fromStatus(update: NodeUpdate): UpdateView | null {
   }
 }
 
+/** 写法上的选择，看在哪里显示。 */
+export interface DescribeOptions {
+  /** 自动更新的开关就在上面（设置里的「节点更新」）："自动更新已关闭"不用每行都说一遍。 */
+  autoSwitchShown?: boolean
+}
+
 /** `formatTime` 把失败的时间写成相对时间；放在参数里，这个函数就不必知道"现在"。 */
 export function describeUpdate(
   node: UpdateSubject,
   context: UpdateContext,
   formatTime: (at: number) => string,
+  options: DescribeOptions = {},
 ): UpdateView {
   const { update } = node
   const progress = fromStatus(update)
@@ -183,7 +190,9 @@ export function describeUpdate(
         ? u.state.availablePaused(available)
         : context.autoUpdate
           ? u.state.availableAuto
-          : u.state.availableManual
+          : options.autoSwitchShown === true
+            ? null
+            : u.state.availableManual
     return view('available', 'warn', u.state.available(available), detail)
   }
 

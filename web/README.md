@@ -56,7 +56,7 @@ target/release/i3t run
 | `src/components/` | 页面共用的部件；`ui/` 下是最基础的那一层                                                                                                                               |
 | `src/access/`     | 访问关系图的数据整理和几何，纯函数                                                                                                                                     |
 | `src/topology/`   | 路由视图的数据整理：路由矩阵变成拓扑图的点和线、一条路的几种说法、路径诊断里一个方向怎么说、地址里选中的那一对节点，纯函数                                             |
-| `src/lib/`        | 校验、地址段的计算、给用户执行的命令、时间和字节数的写法、版本号的比较、节点更新情况的说法、用量和监听状态的说法等                                                     |
+| `src/lib/`        | 校验、地址段的计算、给用户执行的命令、时间和字节数的写法、版本号的比较、节点更新情况的说法、用量和监听状态的说法、独占 TCP 的说法等                                    |
 | `src/i18n/`       | 界面上的全部文字，每种语言一个目录；语言的选择和切换。组件里不直接写界面文字                                                                                           |
 | `src/test/`       | 单元测试的准备和假的管理 API                                                                                                                                           |
 | `e2e/`            | Playwright 的端到端测试和截图                                                                                                                                          |
@@ -76,6 +76,7 @@ target/release/i3t run
 - 一条路的细节（直连是局域网、IPv6、端口可达还是打洞；经 relay 时第一段走 UDP 还是 TCP）在节点的路由表、路由矩阵的格子和路径诊断里用同一套说法，出自 `src/topology/route.ts`。比界面旧的 controller 不写这几个字段，界面就不写细节。
 - 拓扑的实时图和路由矩阵是同一份数据（`GET /networks/{network}/routes`）的两种写法；路径诊断每次都去问两端（`GET /networks/{network}/path`，最多等 3 秒），所以不轮询，页面上有"再问一次"。两页之间、和两种写法之间，选中的那一对节点写在地址的 `a`、`b` 里跟着走。现问到的方向还有发送方的选路模式、原因和它考虑过的候选路径（代价、每一段的延迟、抖动、丢包、relay 的负载），在两个方向的卡片下面各一张表。拓扑的第三个标签页"骨干"是 relay 之间的延迟矩阵（`GET /networks/{network}/backbone`），和路径诊断一样每次现问节点、不轮询。
 - 节点更新的暂停按网络算：同一个版本在几个网络里被暂停时，设置里是一条横幅，写明是哪几个网络，"继续"一次继续全部。
+- 独占 TCP（节点对的一项设置）在节点对页和节点详情的「独占 TCP」标签页里用同一套说法，出自 `src/lib/lanes.ts`。起不起作用按 controller 给的原因码（`lane_effect.blocked`）用界面自己的话写，每个原因带修好它的那一步（在哪个节点上启用 relay、填 TCP 地址、更新节点、检查访问）；controller 的 `summary` 只在原因码不认识时原样显示。一对节点的数由两边各自报的合起来：在用的连接两头都算，取大的；空闲的按停在哪一边相加；回退和拨号失败相加。没有节点报上来时不画计数，也没有详情。节点详情的「独占 TCP」标签页只在和哪个对端打开了独占 TCP 时出现。路由视图不因独占 TCP 改变（共用的连接和它的路照常保留），节点对页上说一次。
 
 ## 界面的样子
 
@@ -126,59 +127,68 @@ target/release/i3t run
 
 一个概念只有一个词，中英文各一个，处处一样。英文和命令行 `i3tctl` 的名词一致。界面和代码里不出现别的产品的名字。括号里是按钮、通知这类地方可以用的简称。
 
-| 中文             | English                  | 命令行          | 说明                                                    |
-| ---------------- | ------------------------ | --------------- | ------------------------------------------------------- |
-| 网络             | network                  | `network`       |                                                         |
-| 节点             | node                     | `node`          | 不叫设备、机器                                          |
-| 虚拟 IP          | virtual IP               |                 |                                                         |
-| 地址段           | address range            | `--cidr`        | 网络的虚拟地址从这里分配                                |
-| 域名             | DNS name                 |                 | 节点的全名，`laptop.home.i3t`                           |
-| 域名后缀         | domain                   |                 | 网络的，`home.i3t`                                      |
-| 标签             | tag                      | `tag`           | 不叫分组                                                |
-| 规则             | rule                     | `rule`          | 需要说清时写"访问规则 / access rule"                    |
-| 访问控制         | access control           | `access`        | 页面                                                    |
-| relay            | relay                    | `relay`         | 中文也写 relay                                          |
-| 出口             | exit                     | `exit`          |                                                         |
-| 监听器           | listener                 | `listener`      |                                                         |
-| 凭据             | credential               | `credential`    |                                                         |
-| 端口转发（转发） | port forward (forward)   | `forward`       |                                                         |
-| 注册令牌（令牌） | enrollment token (token) | `token`         |                                                         |
-| 管理令牌         | admin token              |                 | 登录用的那一个                                          |
-| 节点对           | node pair                | `pair`          |                                                         |
-| 操作记录         | activity log             | `log`           |                                                         |
-| 节点更新         | node updates             | `update`        |                                                         |
-| 发布源           | release source           |                 |                                                         |
-| 拓扑             | topology                 |                 |                                                         |
-| 路由矩阵         | route matrix             | `routes`        |                                                         |
-| 骨干             | backbone                 | `backbone`      | relay 之间的链路                                        |
-| 路径诊断         | path diagnosis           | `path`          |                                                         |
-| 路由             | routes                   |                 | 一个节点到各个对端现在怎么走                            |
-| 直连             | direct                   |                 |                                                         |
-| 经 relay         | via relay                |                 | 写成"经 hk-1""via hk-1"                                 |
-| 不可达           | unreachable              |                 | 不说"无路可走"                                          |
-| 挂靠             | attached                 |                 | 节点和 relay 保持着会话                                 |
-| 固定挂靠的 relay | pinned relays            | `--pin`         |                                                         |
-| 声明             | declare                  | `i3t set can-…` | 节点在本机声明可以承担什么                              |
-| 能力             | capabilities             |                 | 节点详情里 relay、出口、转发目标那一节                  |
-| 角色             | role                     |                 | 已启用的 relay、出口（列表的筛选和标记）                |
-| 选路模式         | routing mode             | `--routing`     | 默认 default，延迟优先 lowest latency                   |
-| 路径限制         | path restriction         | `--reach`       | 不限 any，只直连 direct only，只经 relay relay only     |
-| 服务等级         | service class            | `--class`       | 自动 auto，交互 interactive，可靠 reliable，大流量 bulk |
-| 流               | flow                     |                 |                                                         |
-| 连接             | connection               |                 |                                                         |
-| 流量             | traffic                  |                 | 字节数                                                  |
-| 用量             | usage                    |                 |                                                         |
-| 流量配额         | traffic quota            |                 | 出口的，按账期（period）算                              |
-| 流量上限         | traffic limit            |                 | 凭据的                                                  |
-| 并发上限         | connection limit         |                 | 凭据的                                                  |
-| 健康             | health                   |                 | 出口的                                                  |
-| 继任             | replace                  | `node succeed`  | 新节点接手已下线节点的身份                              |
-| 自带             | built-in                 |                 | 节点自己开的回环入口                                    |
-| 来源白名单       | allowed sources          |                 |                                                         |
-| 监听地址         | listen address           |                 |                                                         |
-| 固定出口         | fixed exit               |                 |                                                         |
-| 连接常驻         | keep alive               |                 |                                                         |
-| 最后在线         | last seen                |                 |                                                         |
+| 中文             | English                  | 命令行          | 说明                                                      |
+| ---------------- | ------------------------ | --------------- | --------------------------------------------------------- |
+| 网络             | network                  | `network`       |                                                           |
+| 节点             | node                     | `node`          | 不叫设备、机器                                            |
+| 虚拟 IP          | virtual IP               |                 |                                                           |
+| 地址段           | address range            | `--cidr`        | 网络的虚拟地址从这里分配                                  |
+| 域名             | DNS name                 |                 | 节点的全名，`laptop.home.i3t`                             |
+| 域名后缀         | domain                   |                 | 网络的，`home.i3t`                                        |
+| 标签             | tag                      | `tag`           | 不叫分组                                                  |
+| 规则             | rule                     | `rule`          | 需要说清时写"访问规则 / access rule"                      |
+| 访问控制         | access control           | `access`        | 页面                                                      |
+| relay            | relay                    | `relay`         | 中文也写 relay                                            |
+| 出口             | exit                     | `exit`          |                                                           |
+| 监听器           | listener                 | `listener`      |                                                           |
+| 凭据             | credential               | `credential`    |                                                           |
+| 端口转发（转发） | port forward (forward)   | `forward`       |                                                           |
+| 注册令牌（令牌） | enrollment token (token) | `token`         |                                                           |
+| 管理令牌         | admin token              |                 | 登录用的那一个                                            |
+| 节点对           | node pair                | `pair`          |                                                           |
+| 操作记录         | activity log             | `log`           |                                                           |
+| 节点更新         | node updates             | `update`        |                                                           |
+| 发布源           | release source           |                 |                                                           |
+| 拓扑             | topology                 |                 |                                                           |
+| 路由矩阵         | route matrix             | `routes`        |                                                           |
+| 骨干             | backbone                 | `backbone`      | relay 之间的链路                                          |
+| 路径诊断         | path diagnosis           | `path`          |                                                           |
+| 路由             | routes                   |                 | 一个节点到各个对端现在怎么走                              |
+| 直连             | direct                   |                 |                                                           |
+| 经 relay         | via relay                |                 | 写成"经 hk-1""via hk-1"                                   |
+| 不可达           | unreachable              |                 | 不说"无路可走"                                            |
+| 挂靠             | attached                 |                 | 节点和 relay 保持着会话                                   |
+| 固定挂靠的 relay | pinned relays            | `--pin`         |                                                           |
+| 声明             | declare                  | `i3t set can-…` | 节点在本机声明可以承担什么                                |
+| 能力             | capabilities             |                 | 节点详情里 relay、出口、转发目标那一节                    |
+| 角色             | role                     |                 | 已启用的 relay、出口（列表的筛选和标记）                  |
+| 选路模式         | routing mode             | `--routing`     | 默认 default，延迟优先 lowest latency                     |
+| 路径限制         | path restriction         | `--reach`       | 不限 any，只直连 direct only，只经 relay relay only       |
+| 服务等级         | service class            | `--class`       | 自动 auto，交互 interactive，可靠 reliable，大流量 bulk   |
+| 流               | flow                     |                 |                                                           |
+| 连接             | connection               |                 |                                                           |
+| 流量             | traffic                  |                 | 字节数                                                    |
+| 用量             | usage                    |                 |                                                           |
+| 流量配额         | traffic quota            |                 | 出口的，按账期（period）算                                |
+| 流量上限         | traffic limit            |                 | 凭据的                                                    |
+| 并发上限         | connection limit         |                 | 凭据的                                                    |
+| 健康             | health                   |                 | 出口的                                                    |
+| 继任             | replace                  | `node succeed`  | 新节点接手已下线节点的身份                                |
+| 自带             | built-in                 |                 | 节点自己开的回环入口                                      |
+| 来源白名单       | allowed sources          |                 |                                                           |
+| 监听地址         | listen address           |                 |                                                           |
+| 固定出口         | fixed exit               |                 |                                                           |
+| 连接常驻         | keep alive               |                 |                                                           |
+| 独占 TCP         | TCP lanes                | `--lane`        | 节点对的设置：承载 TCP 连接的流各用一条自己的 TCP（lane） |
+| 不用             | off                      | `off`           | 独占 TCP 的取值                                           |
+| UDP 不通时用     | when UDP fails           | `udp_fallback`  | 独占 TCP 的取值                                           |
+| 总是用           | always                   | `always`        | 独占 TCP 的取值                                           |
+| 共用的连接       | shared connection        |                 | 一对节点之间的那一条连接，独占 TCP 之外的流都走它         |
+| 生效、未生效     | in effect, no effect     |                 | 独占 TCP 的设置起不起作用                                 |
+| 拨号             | dial                     |                 | 独占 TCP 由连得上对方 TCP 端口的一方拨                    |
+| 回退             | fallback                 |                 | 本该走独占 TCP、改走了共用连接的流                        |
+| 控制连接         | control connection       |                 | 独占 TCP 的两端之间管事的那一条                           |
+| 最后在线         | last seen                |                 |                                                           |
 
 动作：
 
@@ -234,7 +244,7 @@ pnpm screenshots  # 重新截一遍每个页面：中文的放到 screenshots/�
 
 **端到端测试**用的是真的程序：每个测试文件自己启动一个全新的 controller（数据在临时目录里），用 `pnpm build` 的产物作界面，把界面上给出的加入命令原样交给 shell 执行，结束时把 controller 和节点都停掉、临时目录删掉。所以运行之前不需要开着什么，但要先构建好 Rust 的程序。
 
-`pnpm e2e` 跑四个文件：`flows.spec.ts`（从空的 controller 开始的主要流程）、`routes.spec.ts`（三个真的跑着、互相连过的节点：拓扑的实时图、路由矩阵、路径诊断）、`updates.spec.ts`（节点更新，发布源是一个本机目录：换发布源、立即检查、节点上的标记和做法、确认框、全部更新之后一个节点真的换成新版本重启、一个自检不过的版本被暂停、继续）、`limits.spec.ts`（限额、用量和监听的状态，流量真的经两个跑着的节点走：凭据经要求凭据的监听器用过之后有用量、改上限让它用完、吊销、彻底删掉；出口配了配额、下载之后有用量；端口写 0 的转发显示节点挑的端口并且连得通；监听在被占用的端口上的转发显示端口被占用；操作记录的筛选和链接；标签改名）。
+`pnpm e2e` 跑五个文件：`flows.spec.ts`（从空的 controller 开始的主要流程）、`routes.spec.ts`（三个真的跑着、互相连过的节点：拓扑的实时图、路由矩阵、路径诊断）、`updates.spec.ts`（节点更新，发布源是一个本机目录：换发布源、立即检查、节点上的标记和做法、确认框、全部更新之后一个节点真的换成新版本重启、一个自检不过的版本被暂停、继续）、`limits.spec.ts`（限额、用量和监听的状态，流量真的经两个跑着的节点走：凭据经要求凭据的监听器用过之后有用量、改上限让它用完、吊销、彻底删掉；出口配了配额、下载之后有用量；端口写 0 的转发显示节点挑的端口并且连得通；监听在被占用的端口上的转发显示端口被占用；操作记录的筛选和链接；标签改名）、`lanes.spec.ts`（独占 TCP，三个节点都在本机回环上：一个是 relay、TCP 地址是它在回环上的节点端口；在界面上把一对设成"总是用"，看它生效、哪一边拨号；经一条端口转发真的走流量之后有在用的连接、详情里有字节数，节点详情的「独占 TCP」里有这一行；改回"不用"；两个都不是 relay 的一对写着为什么不起作用、去哪里启用 relay）。
 
 `limits.spec.ts` 下载的目标是测试进程自己开的一个 HTTP 服务，监听在这台机器的私有 IPv4 地址上，出口打开"允许访问本机局域网"之后把它当局域网目标，不连外网。机器上没有私有 IPv4 地址时，要它的几项测试跳过。
 

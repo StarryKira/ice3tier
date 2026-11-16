@@ -4,7 +4,13 @@ import { useMemo } from 'react'
 import { q } from '@/api/queries'
 import { type Node } from '@/api/types'
 
-import { describeUpdate, NO_UPDATE_CONTEXT, type UpdateContext, type UpdateView } from './nodeUpdate'
+import {
+  type DescribeOptions,
+  describeUpdate,
+  NO_UPDATE_CONTEXT,
+  type UpdateContext,
+  type UpdateView,
+} from './nodeUpdate'
 import { formatRelative } from './time'
 import { useNow } from './useNow'
 
@@ -25,8 +31,11 @@ export function useUpdateContext(): UpdateContext {
 }
 
 /** 一个节点的更新情况，节点列表、详情、设置三处同一套说法。 */
-export function useUpdateView(node: Pick<Node, 'version' | 'platform' | 'online' | 'update'>): UpdateView {
+export function useUpdateView(
+  node: Pick<Node, 'version' | 'platform' | 'online' | 'update'>,
+  options: DescribeOptions = {},
+): UpdateView {
   const context = useUpdateContext()
   const now = useNow()
-  return describeUpdate(node, context, (at) => formatRelative(at, now))
+  return describeUpdate(node, context, (at) => formatRelative(at, now), options)
 }

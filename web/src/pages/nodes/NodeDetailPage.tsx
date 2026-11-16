@@ -43,6 +43,7 @@ import { RenameNodeDialog } from './actions'
 import { useDeleteNode } from './hooks'
 import { AccessTab } from './detail/AccessTab'
 import { EditIpDialog, SucceedDialog } from './detail/dialogs'
+import { LanesTab } from './detail/LanesTab'
 import { ListenTab } from './detail/ListenTab'
 import { OverviewTab } from './detail/OverviewTab'
 import { RelatedTab } from './detail/RelatedTab'
@@ -51,7 +52,7 @@ import { UpdateTab } from './detail/UpdateTab'
 import { RoleBadges } from './NodesPage'
 
 const d = t.nodes.detail
-const TABS = ['overview', 'routes', 'access', 'listen', 'related', 'update'] as const
+const TABS = ['overview', 'routes', 'lanes', 'access', 'listen', 'related', 'update'] as const
 type Tab = (typeof TABS)[number]
 
 /**
@@ -123,6 +124,8 @@ export function NodeDetailPage() {
   const ability = forceAbility(node)
   // 「更新」标签上的小圆点：有新版本，或者上次更新失败了。
   const updateMarked = node.update.available !== null || issue?.kind === 'update_failed'
+  // 独占 TCP 默认不用：只有和哪个对端之间打开了，才有这个标签页。
+  const showLanes = (node.lanes?.peers.length ?? 0) > 0 || tab === 'lanes'
 
   return (
     <Page className="@container">
@@ -215,6 +218,7 @@ export function NodeDetailPage() {
         <TabsList>
           <TabsTrigger value="overview">{d.tabOverview}</TabsTrigger>
           <TabsTrigger value="routes">{d.tabRoutes}</TabsTrigger>
+          {showLanes ? <TabsTrigger value="lanes">{d.tabLanes}</TabsTrigger> : null}
           <TabsTrigger value="access">{d.tabAccess}</TabsTrigger>
           <TabsTrigger value="listen">{d.tabListen}</TabsTrigger>
           <TabsTrigger value="related">{d.tabRelated}</TabsTrigger>
@@ -228,6 +232,9 @@ export function NodeDetailPage() {
         </TabsContent>
         <TabsContent value="routes">
           <RoutesTab network={network} node={node} />
+        </TabsContent>
+        <TabsContent value="lanes">
+          <LanesTab network={network} node={node} />
         </TabsContent>
         <TabsContent value="access">
           <AccessTab network={network} node={node} />

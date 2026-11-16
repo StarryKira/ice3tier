@@ -126,7 +126,9 @@ export const q = {
       queryFn: () => api.forwards(network),
       refetchInterval: LIVE_INTERVAL,
     }),
-  pairs: (network: NetworkId) => queryOptions({ queryKey: keys.pairs(network), queryFn: () => api.pairs(network) }),
+  /** 带着两个节点报的独占 TCP 的计数。 */
+  pairs: (network: NetworkId) =>
+    queryOptions({ queryKey: keys.pairs(network), queryFn: () => api.pairs(network), refetchInterval: LIVE_INTERVAL }),
   /** 出口的设置、用量、健康，和用它的节点看到的。 */
   exits: (network: NetworkId) =>
     queryOptions({ queryKey: keys.exits(network), queryFn: () => api.exits(network), refetchInterval: LIVE_INTERVAL }),

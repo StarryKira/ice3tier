@@ -1,5 +1,7 @@
 import type { Messages } from '../messages'
 
+import { afterColon } from './text'
+
 export const routes: Messages['routes'] = {
   direct: 'Direct',
   via: (hops) => `Via ${hops}`,
@@ -66,7 +68,7 @@ export const topology: Messages['topology'] = {
   canvas: 'Topology graph',
   relayBadge: 'relay',
   nodeLabel: (name, relay, online) => `${relay ? 'Relay' : 'Node'} ${name}, ${online ? 'online' : 'offline'}`,
-  linkLabel: (a, b, what) => `${a} – ${b}: ${what}`,
+  linkLabel: (a, b, what) => `${a} – ${b}: ${afterColon(what)}`,
   linkDirect: (rtt) => `Direct, ${rtt}`,
   linkRelayLeg: 'Relay leg',
   linkStale: 'Stale',
@@ -86,7 +88,7 @@ export const topology: Messages['topology'] = {
   toPath: 'Path diagnosis',
   matrixCaption: 'Route matrix: rows send, columns receive',
   matrixFrom: 'From ↓  To →',
-  cellLabel: (from, to, what) => `${from} → ${to}: ${what}`,
+  cellLabel: (from, to, what) => `${from} → ${to}: ${afterColon(what)}`,
   cellSelf: 'Same node',
 
   backbone: {

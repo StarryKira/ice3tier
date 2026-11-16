@@ -31,7 +31,7 @@ import {
   type NodeUpdate,
   type Overview,
   type PairInput,
-  type PairSetting,
+  type PairView,
   type PathView,
   type RelayEnabled,
   type RelayInput,
@@ -152,9 +152,9 @@ export const api = {
   renameTag: (network: NetworkId, body: RenameTag) =>
     request<RenamedTag>('POST', `${net(network)}/tags/rename`, { body }),
 
-  pairs: (network: NetworkId) => request<PairSetting[]>('GET', `${net(network)}/pairs`),
+  pairs: (network: NetworkId) => request<PairView[]>('GET', `${net(network)}/pairs`),
   setPair: (network: NetworkId, a: NodeId, b: NodeId, body: PairInput) =>
-    request<PairSetting>('PUT', `${net(network)}/pairs/${a}/${b}`, { body }),
+    request<PairView>('PUT', `${net(network)}/pairs/${a}/${b}`, { body }),
   deletePair: (network: NetworkId, a: NodeId, b: NodeId) =>
     request<undefined>('DELETE', `${net(network)}/pairs/${a}/${b}`),
 

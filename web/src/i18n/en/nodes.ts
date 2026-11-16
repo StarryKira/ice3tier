@@ -1,5 +1,7 @@
 import type { Messages } from '../messages'
 
+import { afterColon } from './text'
+
 const count = (n: number, one: string, many: string) => (n === 1 ? `1 ${one}` : `${n} ${many}`)
 
 export const nodes: Messages['nodes'] = {
@@ -111,6 +113,7 @@ export const nodes: Messages['nodes'] = {
     tabAccess: 'Access',
     tabRelated: 'Related',
     tabListen: 'Listening',
+    tabLanes: 'TCP lanes',
     more: 'More',
     succeed: 'Replace offline node…',
     info: 'Details',
@@ -181,7 +184,7 @@ export const nodes: Messages['nodes'] = {
     relayFormTcpHint: 'Usually the same as UDP',
     relayFormNeedOne: 'Enter at least one UDP or TCP address',
     relayFormTooMany: (max) => `Up to ${max} addresses`,
-    relayFormAddress: (item, problem) => `${item}: ${problem}`,
+    relayFormAddress: (item, problem) => `${item}: ${afterColon(problem)}`,
     relayFormRegion: 'Region',
     relayFormBandwidth: 'Bandwidth limit',
     relayPrefilled: (addr) =>
@@ -348,5 +351,17 @@ export const nodes: Messages['nodes'] = {
     relatedListening: 'Listens here',
     relatedTarget: 'Target',
     keepAlive: (on) => (on ? 'Keep alive: on' : 'Keep alive: off'),
+    laneSetting: (mode) => `TCP lanes: ${afterColon(mode)}`,
+
+    lanesEmpty: 'No TCP lanes with other nodes',
+    lanesOffline: 'Node offline',
+    lanesLoadFailed: "Couldn't load node pairs",
+    lanesDials: 'This node dials',
+    lanesPeerDials: 'Peer dials',
+    colLaneTraffic: 'Traffic',
+    laneTrafficTip: (sealed, passthrough, spliced) =>
+      `Encrypted ${sealed} · passthrough ${passthrough} · kernel splice ${spliced}, since start`,
+    lanesPair: 'Node pair',
+    lanesHandshake: (n, causes) => `Failed incoming handshakes: ${n} (${causes})`,
   },
 }

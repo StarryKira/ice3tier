@@ -1,5 +1,5 @@
-import { execFile } from 'node:child_process'
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { type ChildProcess, execFile, spawn } from 'node:child_process'
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer as createHttpServer, type Server as HttpServer } from 'node:http'
 import { createServer as createTcpServer, type Server as TcpServer } from 'node:net'
 import { networkInterfaces } from 'node:os'
@@ -40,6 +40,9 @@ let busy: TcpServer
 let targetPort = 0
 let busyPort = 0
 let lanIp: string | undefined
+/** 经独占 TCP 一直开着的一条连接（curl），和它连着的、一直不结束应答的服务。 */
+let hold: ChildProcess | undefined
+let holder: HttpServer | undefined
 
 function listenOn(server: HttpServer | TcpServer, host: string): Promise<number> {
   return new Promise((done, fail) => {
@@ -107,6 +110,9 @@ test.beforeAll(async ({ browser }) => {
 })
 
 test.afterAll(async () => {
+  hold?.kill('SIGKILL')
+  holder?.closeAllConnections()
+  holder?.close()
   await page.close()
   controller.stop()
   target.close()
@@ -416,8 +422,6 @@ test('有数据时：总览、节点', async () => {
   await page.getByRole('button', { name: t.nodes.batchTag }).click()
   await expect(page.getByRole('dialog', { name: t.nodes.batchTagTitle(2) })).toBeVisible()
   await shot('nodes-batch-tag', { fullPage: false })
-  // 标签的候选列表盖在对话框的按钮上：先点一下标题把它收起来。
-  await page.getByRole('heading', { name: t.nodes.batchTagTitle(2) }).click()
   await page.getByRole('button', { name: t.common.cancel, exact: true }).click()
   await page.getByRole('button', { name: t.nodes.batchCancel }).click()
 
@@ -789,8 +793,84 @@ test('拓扑的骨干', async () => {
 })
 
 /**
+ * 独占 TCP：gw-hk 的 relay 换一个这台机器上真的连得上的 TCP 地址（它在回环上的节点端口），gw-hk 和 laptop 这一对
+ * 设成"总是用"，经 laptop 本机的入口访问 gw-hk 上的服务：一条一直开着的连接，加一次下载。nas-home 和 laptop
+ * 这一对设成"UDP 不通时用"：两个都不是 relay，不起作用。放在中文这一组的最后，前面截图的编号不变。
+ */
+test('独占 TCP', async () => {
+  test.setTimeout(150_000)
+  const net = '/networks/1'
+  const port = Number(/^port = (\d+)$/m.exec(readFileSync(join(nodes.gw?.dir ?? '', 'config.toml'), 'utf8'))?.[1] ?? 0)
+  await controller.api('PUT', `${net}/nodes/1/relay`, {
+    udp: ['203.0.113.7:20330'],
+    tcp: [`127.0.0.1:${port}`],
+    region: 'hk',
+    bandwidth_mbps: 200,
+  })
+  await controller.api('PUT', `${net}/pairs/1/3`, { keep_alive: false, lane: 'always' })
+  await controller.api('PUT', `${net}/pairs/2/3`, { lane: 'udp_fallback' })
+  interface LanePair {
+    a: number
+    b: number
+    lanes: { lanes: { in_use: number; sealed_bytes: number } }[]
+  }
+  const sides = async () =>
+    (await controller.api<LanePair[]>('GET', `${net}/pairs`)).find((item) => item.a === 1 && item.b === 3)?.lanes ?? []
+  await expect.poll(async () => (await sides()).length, { timeout: 40_000 }).toBe(2)
+
+  if (lanIp !== undefined) {
+    // gw-hk 上的服务：节点把访问它虚拟 IP 的连接接到它本机的非回环地址上，所以两个服务都听 0.0.0.0。
+    holder = createHttpServer((_request, response) => {
+      response.writeHead(200, { 'Content-Type': 'text/plain' })
+      response.write('holding\n')
+    })
+    const holdPort = await listenOn(holder, '0.0.0.0')
+    const proxy = `socks5h://127.0.0.1:${nodes.laptop?.socksPort ?? 0}`
+    hold = spawn('curl', ['-s', '-m', '170', '-o', '/dev/null', '-x', proxy, `http://10.66.0.1:${holdPort}/`], {
+      stdio: 'ignore',
+    })
+    await new Promise<void>((done) =>
+      execFile('curl', ['-s', '-m', '20', '-o', '/dev/null', '-x', proxy, `http://10.66.0.1:${targetPort}/`], () =>
+        done(),
+      ),
+    )
+    await expect
+      .poll(async () => (await sides()).some((side) => side.lanes.in_use > 0 && side.lanes.sealed_bytes > 0), {
+        timeout: 40_000,
+      })
+      .toBe(true)
+  }
+
+  const l = t.pairs.lane
+  await goToAdmin(page, t.nav.pairs)
+  await expect(page.getByTestId('lane-effect-gw-hk-laptop')).toContainText(l.effective)
+  await expect(page.getByTestId('lane-blocked-nas-home-laptop')).toBeVisible()
+  await shot('pairs-lanes')
+  await page.getByRole('button', { name: l.detailsFor('gw-hk', 'laptop') }).click()
+  await expect(page.getByTestId('lane-details-gw-hk-laptop')).toBeVisible()
+  await shot('pairs-lanes-details')
+  await page.getByRole('button', { name: l.detailsHide, exact: true }).click()
+
+  await page.getByRole('button', { name: t.pairs.add }).click()
+  const dialog = page.getByRole('dialog', { name: t.pairs.dialogTitle })
+  await dialog.getByRole('combobox', { name: t.pairs.nodeA }).click()
+  await page.getByRole('option', { name: /office-pc/ }).click()
+  await expect(page.getByRole('listbox')).toHaveCount(0)
+  await dialog.getByRole('combobox', { name: t.pairs.nodeB }).click()
+  await page.getByRole('option', { name: /gw-hk/ }).click()
+  await dialog.getByRole('radio', { name: l.modes.udp_fallback }).click()
+  await shot('pairs-add-dialog', { fullPage: false })
+  await dialog.getByRole('button', { name: t.common.cancel, exact: true }).click()
+  await page.getByRole('button', { name: t.common.discardConfirm }).click()
+
+  await page.goto(`${controller.baseUrl}/n/1/nodes/3?tab=lanes`)
+  await expect(page.getByTestId('node-lane-1')).toBeVisible()
+  await shot('node-detail-lanes')
+})
+
+/**
  * 英文的一组：英文通常比中文长，挑长度最要紧的几页（登录、总览、节点列表和详情、出口这种列多的表、
- * 两个对话框、拓扑、1024 宽的页面）。浏览器的语言是 en-US，界面第一次打开时自己选英文。
+ * 两个对话框、拓扑、1024 宽的页面、节点对）。浏览器的语言是 en-US，界面第一次打开时自己选英文。
  * 放在 screenshots/en/ 下面，编号自己从 1 开始。
  */
 test('英文：长度最要紧的几页', async ({ browser }) => {
@@ -876,6 +956,12 @@ test('英文：长度最要紧的几页', async ({ browser }) => {
   await english.goto(`${controller.baseUrl}/n/1/credentials`)
   await expect(english.getByTestId('credential-row-phone')).toBeVisible()
   await enShot('narrow-credentials')
+
+  await english.setViewportSize({ width: 1280, height: 800 })
+  await english.goto(`${controller.baseUrl}/n/1/pairs`)
+  await expect(english.getByTestId('pair-row-gw-hk-laptop')).toBeVisible()
+  await expect(english.locator('main')).not.toContainText(/\p{Script=Han}/u)
+  await enShot('pairs')
 
   // 英文的页面上不该有界面自己写的中文（节点报来的原话除外：这几页上没有）。
   await english.goto(`${controller.baseUrl}/n/1/nodes`)

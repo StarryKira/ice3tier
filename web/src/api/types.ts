@@ -277,6 +277,8 @@ export interface NodeDetail extends Node {
   flows: number
   tx_bytes: number
   rx_bytes: number
+  /** 独占 TCP 的状况。不在线、版本太旧没有报、还没有上报过是 `null`；比界面旧的 controller 不写。 */
+  lanes?: LaneReport | null
 }
 
 export interface UpdateNode {
@@ -575,14 +577,112 @@ export interface ForwardInput {
   class?: ServiceClass | null
 }
 
+/**
+ * 独占 TCP（lane）：一对节点之间承载 TCP 连接的流各用一条只属于它的 TCP，而不是共用那一条连接里的一条流。
+ * `udp_fallback`：开流的一方到对方的共用连接上没有 UDP 的路时才用。
+ */
+export type LaneMode = 'off' | 'udp_fallback' | 'always'
+
 export interface PairSetting {
   a: NodeId
   b: NodeId
   keep_alive: boolean
+  /** 比界面旧的 controller 不写，按 `off` 算。 */
+  lane?: LaneMode
 }
 
+/** 每一项都可以省略：没写的项保持原样（这一对还没有设置时取默认值）。 */
 export interface PairInput {
-  keep_alive: boolean
+  keep_alive?: boolean
+  lane?: LaneMode
+}
+
+/** 独占 TCP 的设置不起作用的一个原因。`node` 是说的那一个节点。比界面新的 controller 可能写别的 `reason`。 */
+export type LaneBlock =
+  | { reason: 'no_relay' }
+  | { reason: 'no_tcp_address'; node: NodeId }
+  | { reason: 'node_too_old'; node: NodeId }
+  | { reason: 'not_connected' }
+
+export interface LaneEffect {
+  /** 至少一边能被拨，两个节点都懂独占 TCP，访问规则连通了它们。 */
+  effective: boolean
+  /** 不起作用的原因；起作用时是 `[]`。 */
+  blocked: LaneBlock[]
+  /** 拨号的节点：对方启用了 relay、有 TCP 地址的那一个（或者两个）。 */
+  dialers: NodeId[]
+  /** controller 写的一句中文。界面按 `blocked` 用自己的话写，只在原因不认识时用它。 */
+  summary: string
+}
+
+/** 独占 TCP 的计数，从节点启动算起的累计；`in_use`、`dialling` 是现在的值。 */
+export interface LaneCounts {
+  in_use: number
+  dialling: number
+  /** 从对端停在这里的连接里取用的次数。 */
+  claims: number
+  /** 其中池是空的、要等对端补拨的次数，和一共等了多少毫秒。 */
+  claims_waited: number
+  claim_wait_ms: number
+  claims_failed: number
+  /** 本来要走独占 TCP、因为取不到改走了共用连接的流。 */
+  fallbacks: number
+  dial_failures: number
+  /** 握手成功、但因为用途或数量不对被关掉的连接。 */
+  refused: number
+  /** 在独占 TCP 的 TLS 里搬运的字节数，两个方向合计。 */
+  sealed_bytes: number
+  /** 本来就是 TLS 的用户数据不再加密、在程序里搬运的字节数。 */
+  passthrough_bytes: number
+  /** 同上，由内核直接搬运（Linux 上是 splice）。 */
+  spliced_bytes: number
+}
+
+/** 一个节点上和一个对端之间的独占 TCP。 */
+export interface PeerLanes extends LaneCounts {
+  peer: NodeId
+  /** 这个节点拨不拨对端。 */
+  dials: boolean
+  /** 和对端之间的控制连接在不在。不在时新的 TCP 流走共用的连接。 */
+  control: boolean
+  /** 对端拨来、停在这个节点等它开流时取用的空闲连接。 */
+  idle: number
+  /** 这个节点拨好、留给自己开流的空闲连接。 */
+  ready: number
+  /** 这个节点拨出去、停在对端那里的空闲连接。 */
+  parked_at_peer: number
+}
+
+export interface PairLaneSide {
+  /** 报的节点。 */
+  node: NodeId
+  lanes: PeerLanes
+}
+
+/** 节点对的接口应答的：设置，加上独占 TCP 起不起作用、两个节点各自报的状况。 */
+export interface PairView extends PairSetting {
+  /** `lane` 是 `off` 时是 `null`。比界面旧的 controller 不写。 */
+  lane_effect?: LaneEffect | null
+  /** 不在线、版本太旧、没有为对方打开的节点不在里面。比界面旧的 controller 不写。 */
+  lanes?: PairLaneSide[]
+}
+
+/** 别人拨进来、没有握手成功的连接，按原因分。分不到对端名下，只有全节点的。 */
+export interface LaneHandshakeFailures {
+  deadline: number
+  unknown_key: number
+  tls: number
+  protocol: number
+  busy: number
+}
+
+/** 一个节点上的全部独占 TCP。 */
+export interface LaneReport {
+  /** 全节点的合计（对端去掉之后也不减）。 */
+  total: LaneCounts
+  handshake_failures: LaneHandshakeFailures
+  /** 每个打开了独占 TCP 的对端。 */
+  peers: PeerLanes[]
 }
 
 /* 节点更新（文档 §14）。设置和发布全局只有一份，不分网络。 */

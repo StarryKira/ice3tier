@@ -369,7 +369,8 @@ interface Row {
 
 function NodeRow({ row, showNetwork, onForce }: { row: Row; showNetwork: boolean; onForce: (node: Node) => void }) {
   const { node, network } = row
-  const view = useUpdateView(node)
+  // 自动更新的开关就在这张表上面，每一行不再重复"自动更新已关闭"。
+  const view = useUpdateView(node, { autoSwitchShown: true })
   const ability = forceAbility(node)
   return (
     <Tr data-testid={`update-row-${node.name}`}>

@@ -49,6 +49,8 @@ describe('describeUpdate：节点的更新情况怎么说', () => {
       detail: u.state.availableAuto,
     })
     expect(describeUpdate(node, MANUAL, when).detail).toBe(u.state.availableManual)
+    // 设置里开关就在表的上面：不再每行都说"自动更新已关闭"。
+    expect(describeUpdate(node, MANUAL, when, { autoSwitchShown: true }).detail).toBeNull()
     expect(describeUpdate({ ...node, online: false }, AUTO, when).detail).toBe(u.state.availableOffline)
     expect(describeUpdate(node, { ...AUTO, paused: ['0.3.0'] }, when).detail).toBe(u.state.availablePaused('0.3.0'))
   })

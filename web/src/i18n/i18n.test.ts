@@ -54,6 +54,13 @@ describe('每种语言的目录都是完整的', () => {
     expect(chinese).toEqual([])
   })
 
+  it('英文：冒号后面的状态短语不大写开头，缩写不动', () => {
+    expect(en.overview.listenerBroken('lan', en.listen.failed)).toBe(`Listener lan: ${en.listen.failed.toLowerCase()}`)
+    expect(en.overview.forwardBlocked('web', en.forwards.status.targetOffline)).toMatch(/^Port forward web: target /)
+    expect(en.nodes.detail.laneSetting(en.pairs.lane.modes.udp_fallback)).toBe('TCP lanes: when UDP fails')
+    expect(en.nodes.detail.laneSetting('UDP only')).toBe('TCP lanes: UDP only')
+  })
+
   it('每种语言用它自己的文字写名字', () => {
     expect(LOCALES.map((locale) => locale.name)).toEqual(['简体中文', 'English'])
   })
