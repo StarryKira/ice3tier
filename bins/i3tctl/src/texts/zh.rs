@@ -228,7 +228,7 @@ const UI: Ui = Ui {
 
     node_offline: |name| format!("{name} 离线"),
     node_listeners_header: ["编号", "名字", "监听地址", "协议", "连接", "流量", "状态"],
-    builtin: "自带",
+    builtin: "内置",
     forward_name: |id| format!("转发 #{id}"),
 
     no_exits: "还没有出口",
@@ -348,7 +348,7 @@ const UI: Ui = Ui {
     no_tokens: "没有注册令牌",
     token_created: |id, expires| format!("注册令牌 #{id}，{expires} 过期。只显示这一次："),
     token_use: "在要加入的机器上：echo <令牌> | i3t join",
-    rules_header: ["编号", "SRC", "", "DST", "启用", "名字"],
+    rules_header: ["编号", "源", "", "目的", "启用", "名字"],
     no_rules: "没有规则",
     rule: "规则",
     credentials_header: ["编号", "开头", "状态", "并发上限", "流量上限", "已用", "连接", "最后使用", "名字"],

@@ -403,7 +403,7 @@ const UI: Ui = Ui {
     groups_header: ["ID", "NAME", "NODES", "RULES"],
     no_groups: "No groups",
     graph_groups_header: ["GROUP", "COUNT", "NODES"],
-    group_deleted: |name, nodes, rules| format!("Group {name} deleted: removed from {nodes} nodes, {rules} rules deleted"),
+    group_deleted: |name, nodes, rules| format!("Group {name} deleted (nodes: {nodes}, rules deleted: {rules})"),
     unconnected: "Nodes no rule connects",
     unacknowledged: "Nodes without the current settings",
     can_access: |from, to| format!("{from} can reach {to}"),
@@ -557,7 +557,7 @@ fn log(entry: &LogEntry) -> Option<String> {
         "rule.delete" => format!("Rule #{} deleted", p.text("rule")),
         "group.create" => format!("Group {} created", group()),
         "group.rename" => format!("Group {} renamed to {}", p.text("from"), p.text("to")),
-        "group.delete" => format!("Group {} deleted: {} nodes, {} rules", group(), p.text("nodes"), p.text("rules")),
+        "group.delete" => format!("Group {} deleted (nodes: {}, rules: {})", group(), p.text("nodes"), p.text("rules")),
         "group.members" => {
             let mut clauses = Vec::new();
             for (key, verb) in [("added", "added"), ("removed", "removed")] {

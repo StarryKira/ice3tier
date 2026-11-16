@@ -170,7 +170,7 @@ async fn the_command_line_drives_a_running_controller() {
     assert_eq!(fixture.json(&["network", "show"]).await["routing"], "lowest_cost");
 
     // 分组。
-    assert!(fixture.ok(&["group", "list"]).await.contains("All（自带）"));
+    assert!(fixture.ok(&["group", "list"]).await.contains("All（内置）"));
     for name in ["servers", "laptops", "home"] {
         assert!(fixture.ok(&["group", "create", name]).await.contains(name));
     }
