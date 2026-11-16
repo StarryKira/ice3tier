@@ -13,6 +13,7 @@ import { networkPath } from '@/pages/networks/context'
 
 import { currentPage, NAV_ADMIN, NAV_GROUPS, NAV_SETTINGS, type NavItem } from './nav'
 import { NetworkSwitcher } from './NetworkSwitcher'
+import { VersionFooter } from './VersionFooter'
 
 const COLLAPSED_GROUPS_KEY = 'navCollapsedGroups'
 
@@ -162,9 +163,7 @@ export function Sidebar({ networks, current, collapsed, onCreateNetwork }: Sideb
               />
             </li>
           </ul>
-          {collapsed || status.data === undefined ? null : (
-            <p className="mt-2 px-2.5 text-xs text-muted-foreground tabular">{t.nav.controller(status.data.version)}</p>
-          )}
+          {collapsed ? null : <VersionFooter status={status.data} />}
         </div>
       </div>
     </aside>

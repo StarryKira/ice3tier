@@ -1,5 +1,16 @@
 import { useQuery } from '@tanstack/react-query'
-import { EllipsisVertical, ListFilter, Pencil, Plus, Search, Server, Tags, Trash2, X } from 'lucide-react'
+import {
+  CircleArrowUp,
+  EllipsisVertical,
+  ListFilter,
+  Pencil,
+  Plus,
+  Search,
+  Server,
+  Tags,
+  Trash2,
+  X,
+} from 'lucide-react'
 import { type MouseEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 
@@ -9,6 +20,7 @@ import { q, useAction } from '@/api/queries'
 import { type Network, type Node } from '@/api/types'
 import { useConfirm } from '@/components/confirm'
 import { CopyText } from '@/components/copy'
+import { ForceUpdateDialog } from '@/components/force-update'
 import { FormDialog } from '@/components/form-dialog'
 import { nodePath } from '@/lib/nodes'
 import { Page, PageHeader } from '@/components/page'
@@ -16,6 +28,7 @@ import { EmptyState, ErrorState, NoMatches, SkeletonRows } from '@/components/st
 import { IssueIcon, OnlineDot, RelativeTime } from '@/components/status'
 import { SortTh, Table, Td, Th, Tr } from '@/components/table'
 import { TagInput, TagList } from '@/components/tags'
+import { VersionCell } from '@/components/update'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -35,6 +48,7 @@ import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
 import { nodeIssues } from '@/lib/nodeIssues'
+import { forceAbility } from '@/lib/nodeUpdate'
 import { COOLDOWN_DAYS } from '@/lib/product'
 import { readStored, writeStored } from '@/lib/storage'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
@@ -88,7 +102,25 @@ export function RoleBadges({ node }: { node: Node }) {
   )
 }
 
-type RowDialog = { kind: 'rename' | 'tags'; node: Node } | null
+type RowDialog = { kind: 'rename' | 'tags' | 'update'; node: Node } | null
+
+/**
+ * 菜单里的"立即更新"。没有新版本时不出现；有新版本但现在不能点时置灰，原因写在下面一行
+ * （菜单项不能悬停出说明，所以直接写出来）。
+ */
+function UpdateMenuItem({ node, onSelect }: { node: Node; onSelect: () => void }) {
+  if (node.update.available === null) return null
+  const ability = forceAbility(node)
+  return (
+    <DropdownMenuItem disabled={!ability.ok} onSelect={onSelect}>
+      <CircleArrowUp aria-hidden />
+      <span>
+        {t.updates.force.menu}
+        {ability.ok ? null : <span className="block text-xs text-muted-foreground">{ability.short}</span>}
+      </span>
+    </DropdownMenuItem>
+  )
+}
 
 interface FilterToggleProps {
   label: string
@@ -587,7 +619,7 @@ export function NodesPage() {
                             {node.name}
                           </Link>
                           <RoleBadges node={node} />
-                          {issue !== undefined ? <IssueIcon message={issue.message} /> : null}
+                          {issue !== undefined ? <IssueIcon message={issue.message} tone={issue.tone} /> : null}
                         </div>
                       </Td>
                       <Td>
@@ -626,8 +658,7 @@ export function NodesPage() {
                         )}
                       </Td>
                       <Td>
-                        <div className="text-[13px] tabular">{node.version === '' ? '—' : node.version}</div>
-                        <div className="text-xs text-muted-foreground">{node.platform}</div>
+                        <VersionCell node={node} />
                       </Td>
                       <Td className="pl-0 text-right" data-keep>
                         <DropdownMenu>
@@ -649,6 +680,7 @@ export function NodesPage() {
                               <Tags aria-hidden />
                               {t.nodes.menuTags}
                             </DropdownMenuItem>
+                            <UpdateMenuItem node={node} onSelect={() => setDialog({ kind: 'update', node })} />
                             <DropdownMenuSeparator />
                             <DropdownMenuItem danger onSelect={() => void deleteNode(node)}>
                               <Trash2 aria-hidden />
@@ -740,6 +772,13 @@ export function NodesPage() {
           // 对话框开着时节点的标签在变：用列表里最新的那一份。
           node={all.find((node) => node.id === dialog.node.id) ?? dialog.node}
           open
+          onClose={() => setDialog(null)}
+        />
+      ) : null}
+      {dialog?.kind === 'update' ? (
+        <ForceUpdateDialog
+          key={dialog.node.id}
+          node={all.find((node) => node.id === dialog.node.id) ?? dialog.node}
           onClose={() => setDialog(null)}
         />
       ) : null}

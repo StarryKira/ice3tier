@@ -386,6 +386,11 @@ export function AddNodeFlow({ network, intro, onStateChange, onNavigate }: AddNo
                   <CircleCheck className="size-4" aria-hidden />
                   {t.addNode.joined(joined.name, joined.virtual_ip)}
                 </p>
+                {joined.hostname !== '' ? (
+                  <p className="mt-0.5 text-[13px] text-muted-foreground" data-testid="node-joined-hostname">
+                    {t.addNode.joinedHostname(joined.hostname)}
+                  </p>
+                ) : null}
                 <p className="mt-0.5 text-[13px] text-muted-foreground">{t.addNode.joinedHint}</p>
               </div>
               <div className="flex items-center gap-2">

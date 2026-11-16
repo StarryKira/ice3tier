@@ -87,7 +87,6 @@ export const settings = {
   about: {
     title: '关于',
     loadFailed: 'controller 的情况没有取到',
-    version: 'controller 版本',
     key: 'controller 公钥',
     keyHint: '写在每个注册令牌里，节点靠它认 controller。',
     publicAddr: '节点连接的地址',

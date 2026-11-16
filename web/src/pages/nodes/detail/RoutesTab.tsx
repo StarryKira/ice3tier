@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { Route as RouteIcon } from 'lucide-react'
+import { Link } from 'react-router'
 
 import { q } from '@/api/queries'
 import { type Network, type NodeDetail, type NodeRoute } from '@/api/types'
@@ -11,6 +12,7 @@ import { Table, Td, Th, Tr } from '@/components/table'
 import { Card } from '@/components/ui/card'
 import { t } from '@/i18n'
 import { REPORT_INTERVAL_SECS } from '@/lib/product'
+import { pairPath } from '@/topology/pair'
 
 const d = t.nodes.detail
 
@@ -64,6 +66,9 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
                 <Th>{d.colPeer}</Th>
                 <Th>{d.colPath}</Th>
                 <Th numeric>{d.colRtt}</Th>
+                <Th>
+                  <span className="sr-only">{t.common.moreActions}</span>
+                </Th>
               </tr>
             </thead>
             <tbody>
@@ -87,6 +92,23 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
                     ) : (
                       t.common.ms(entry.rtt_ms)
                     )}
+                  </Td>
+                  <Td className="text-right text-[13px] whitespace-nowrap">
+                    <Link
+                      to={pairPath(network.id, 'topology', node.id, entry.peer.id)}
+                      className="rounded-sm text-primary hover:underline"
+                    >
+                      {d.routesOnTopology}
+                    </Link>
+                    <span className="mx-2 text-border-strong" aria-hidden>
+                      |
+                    </span>
+                    <Link
+                      to={pairPath(network.id, 'diagnosis', node.id, entry.peer.id)}
+                      className="rounded-sm text-primary hover:underline"
+                    >
+                      {d.routesDiagnose}
+                    </Link>
                   </Td>
                 </Tr>
               ))}

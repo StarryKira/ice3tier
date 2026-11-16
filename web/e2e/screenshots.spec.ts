@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync } from 'node:fs'
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -6,16 +6,20 @@ import { expect, type Page, test } from '@playwright/test'
 
 import { Controller, type NodeHandle } from './controller'
 import { clearToasts, goTo, goToAdmin, signIn } from './helpers'
+import { type ReleaseKit, releaseKit, ReleaseSource } from './release'
 
 /**
  * 把每个页面在"没有数据"和"有数据"时的样子截下来，放到 web/screenshots/，给人看版面有没有问题。
- * 数据都是真的：真的 controller，真的节点用真的令牌加入，其中三个真的跑着。
+ * 数据都是真的：真的 controller，真的节点用真的令牌加入，其中三个真的跑着；
+ * 发布源是一个本机目录，里面有一个用测试钥匙签的新版本（要先 `pnpm e2e:kit`）。
  */
 
 const outDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'screenshots')
 
 let controller: Controller
 let page: Page
+let kit: ReleaseKit
+let release: ReleaseSource
 let counter = 0
 /** 用界面或接口加进来的节点，按用途起了名字。 */
 const nodes: Record<string, NodeHandle> = {}
@@ -40,7 +44,8 @@ test.beforeAll(async ({ browser }) => {
   // 每次都从空目录开始：改过名字或者删掉的截图不会留下旧的一份。
   rmSync(outDir, { recursive: true, force: true })
   mkdirSync(outDir, { recursive: true })
-  controller = await Controller.start()
+  kit = releaseKit()
+  controller = await Controller.start({ bins: kit.oldBins })
   page = await browser.newPage()
 })
 
@@ -131,9 +136,17 @@ test('准备数据', async () => {
   nodes.laptop = await controller.enroll({ tags: ['laptops'] })
   nodes.office = await controller.enroll({ tags: ['laptops'] })
   nodes.spare = await controller.enroll()
-  await controller.run(nodes.nas)
+  // nas 以为自己在容器里：它不能自己更新，界面上要写出做法。
+  await controller.run(nodes.nas, { env: { container: 'podman' } })
   await controller.run(nodes.laptop)
   await controller.waitOnline(3)
+
+  // 发布源上有一个新版本。自动更新关着：截图的时候节点不要自己换程序重启。
+  await controller.api('PATCH', '/update', { auto_update: false })
+  release = new ReleaseSource(join(controller.dir, 'releases'), kit)
+  release.publish(kit.newVersion, kit.newProgram)
+  await controller.api('PATCH', '/update', { source: release.root })
+  await controller.api('POST', '/update/check')
 
   await controller.api('PATCH', `${net}/nodes/1`, { name: 'gw-hk', tags: ['servers'] })
   await controller.api('PATCH', `${net}/nodes/2`, { name: 'nas-home' })
@@ -331,6 +344,47 @@ test('有数据时：节点详情', async () => {
   await page.getByRole('tab', { name: '路由' }).click()
   await expect(page.getByText('节点离线，没有路由表。')).toBeVisible()
   await shot('node-detail-routes-offline')
+
+  // 更新：nas-home 在容器里，不能自己更新；laptop 能，"立即更新"的确认框。
+  await goTo(page, '节点')
+  await page.getByRole('link', { name: 'nas-home', exact: true }).click()
+  await page.getByRole('tab', { name: '更新' }).click()
+  await expect(page.getByTestId('node-self-update')).toContainText('在容器里运行')
+  await shot('node-detail-update-manual')
+
+  await goTo(page, '节点')
+  await page.getByRole('link', { name: 'laptop', exact: true }).click()
+  await page.getByRole('tab', { name: '更新' }).click()
+  await expect(page.getByTestId('node-update-state')).toContainText('有新版本')
+  await shot('node-detail-update')
+  await page.getByRole('button', { name: '立即更新…' }).first().click()
+  await expect(page.getByRole('dialog')).toContainText('它现在没有活跃的流')
+  await shot('node-force-update-dialog', { fullPage: false })
+  await page.getByRole('button', { name: '取消', exact: true }).click()
+})
+
+test('有数据时：拓扑和路径诊断', async () => {
+  await goTo(page, '拓扑')
+  const graph = page.getByTestId('topology-graph')
+  await expect(graph.locator('.react-flow__node')).toHaveCount(6)
+  await expect(graph.locator('.react-flow__edge').first()).toBeAttached()
+  await shot('topology')
+
+  await page.getByRole('combobox', { name: '节点 A' }).click()
+  await page.getByRole('option', { name: /10\.66\.0\.3$/ }).click()
+  await expect(page.getByRole('listbox')).toHaveCount(0)
+  await page.getByRole('combobox', { name: '节点 B' }).click()
+  await page.getByRole('option', { name: /nas-home/ }).click()
+  await expect(page.getByTestId('pair-panel')).toBeVisible()
+  await shot('topology-pair')
+
+  await page.getByRole('radio', { name: '路由矩阵' }).click()
+  await expect(page.getByTestId('route-matrix')).toBeVisible()
+  await shot('topology-matrix')
+
+  await page.getByTestId('pair-panel').getByRole('link', { name: '路径诊断' }).click()
+  await expect(page.getByTestId('path-forward')).toHaveAttribute('data-source', /query|report/)
+  await shot('diagnosis')
 })
 
 test('有数据时：访问控制', async () => {
@@ -451,7 +505,31 @@ test('有数据时：管理区和设置', async () => {
   await expect(page.getByText('已用管理令牌登录。')).toBeVisible()
   await shot('settings-session')
   await page.getByRole('link', { name: /节点更新/ }).click()
-  await shot('settings-updates-planned')
+  await expect(page.getByTestId('release-version')).toHaveText(`最新版本 ${kit.newVersion}`)
+  await shot('settings-updates')
+  await page.getByRole('button', { name: '全部更新…' }).click()
+  await expect(page.getByRole('dialog')).toBeVisible()
+  await shot('settings-updates-force-all', { fullPage: false })
+  await page.getByRole('button', { name: '取消', exact: true }).click()
+
+  // 一个在这台机器上自检不过的版本：让 laptop 立即更新到它，自检失败，这个版本被暂停。
+  const broken = kit.oldVersion.replace(/\d+$/, (patch) => String(Number(patch) + 7))
+  const program = join(controller.dir, 'broken-i3t')
+  writeFileSync(program, "#!/bin/sh\necho '这个程序在这台机器上跑不了：缺一个库' >&2\nexit 127\n")
+  chmodSync(program, 0o755)
+  release.publish(broken, program)
+  await controller.api('POST', '/update/check')
+  await controller.api('POST', '/networks/1/nodes/3/update', { timing: 'now' })
+  await expect
+    .poll(async () => (await controller.api<{ paused: unknown[] }>('GET', '/update')).paused.length, {
+      timeout: 60_000,
+    })
+    .toBe(1)
+  await page.reload()
+  await page.getByRole('button', { name: '查看原因' }).click()
+  await expect(page.getByTestId(`paused-reason-${broken}`)).toContainText('缺一个库')
+  await shot('settings-updates-paused')
+
   await page.getByRole('link', { name: '操作记录' }).click()
   await expect(page.getByRole('columnheader', { name: '说明' })).toBeVisible()
   await shot('settings-log')
@@ -461,18 +539,12 @@ test('有数据时：管理区和设置', async () => {
 })
 
 test('计划中的页面，和找不到的东西', async () => {
-  for (const [name, file] of [
-    ['拓扑', 'planned-topology'],
-    ['路径诊断', 'planned-diagnosis'],
-    ['连通性测试', 'planned-tests'],
-  ] as const) {
-    await page
-      .getByRole('navigation', { name: '主导航' })
-      .getByRole('link', { name: new RegExp(name) })
-      .click()
-    await expect(page.getByRole('heading', { name: new RegExp(name) })).toBeVisible()
-    await shot(file)
-  }
+  await page
+    .getByRole('navigation', { name: '主导航' })
+    .getByRole('link', { name: /连通性测试/ })
+    .click()
+  await expect(page.getByRole('heading', { name: /连通性测试/ })).toBeVisible()
+  await shot('planned-tests')
   await page.goto(`${controller.baseUrl}/n/1/nodes/999`)
   await expect(page.getByText('找不到这个节点')).toBeVisible()
   await shot('node-not-found')
@@ -498,6 +570,15 @@ test('窄一些的笔记本宽度', async () => {
   await goTo(page, '端口转发')
   await expect(page.getByTestId('forward-row-web')).toBeVisible()
   await shot('narrow-forwards')
+  await page.goto(`${controller.baseUrl}/n/1/topology?a=3&b=2`)
+  await expect(page.getByTestId('pair-panel')).toBeVisible()
+  await shot('narrow-topology-pair')
+  await page.goto(`${controller.baseUrl}/n/1/diagnosis?a=3&b=2`)
+  await expect(page.getByTestId('path-forward')).toBeVisible()
+  await shot('narrow-diagnosis')
+  await page.goto(`${controller.baseUrl}/settings/updates`)
+  await expect(page.getByTestId('updates-tab')).toBeVisible()
+  await shot('narrow-settings-updates')
   await page.getByRole('button', { name: '收起侧栏' }).click()
   await goTo(page, '总览')
   await expect(page.getByTestId('overview-status')).toBeVisible()

@@ -40,7 +40,6 @@ export const nav = {
   collapse: '收起侧栏',
   expand: '展开侧栏',
   toggleGroup: (name: string, open: boolean) => `${open ? '收起' : '展开'}「${name}」`,
-  controller: (version: string) => `controller ${version}`,
   account: '管理员',
   accountMenu: '账号菜单',
   signOut: '退出登录',
@@ -62,31 +61,11 @@ export const planned = {
   badge: '计划中',
   note: '这个页面需要的接口 controller 还没有提供，所以这里现在没有数据，也不会用假数据占位。',
   meanwhile: '在那之前',
-  topology: {
-    title: '拓扑',
-    summary:
-      '用一张图看节点、relay 和它们之间当前的路径：选两个节点，高亮两个方向各经过谁、每一段多少毫秒；另有 relay 之间的延迟矩阵和全网的路由矩阵。',
-    needs: '缺的接口：全网当前路径和 relay 之间延迟的汇总。',
-    meanwhile: '每个节点上报的当前路径，可以在节点详情的「路由」页看到。',
-  },
-  diagnosis: {
-    title: '路径诊断',
-    summary:
-      '选两个节点，列出它们之间全部的候选路径、每一段的延迟和代价，并说明两种选路模式各会选哪条、没选的各是因为什么。',
-    needs: '缺的接口：向节点查询"到某个节点现在会怎么走"，以及各候选路径的测量值。',
-    meanwhile: '节点现在实际走的路，可以在节点详情的「路由」页看到。',
-  },
   tests: {
     title: '连通性测试',
     summary:
       '由 controller 对一对节点发起测试，回答能不能直连、直连和经 relay 各有多快；也可以对一批节点两两测，并保留历史。',
     needs: '缺的接口：发起测试、读取测试结果。',
-    meanwhile: '两端都在线却无路可走的节点对，会列在总览页上。',
-  },
-  updates: {
-    title: '节点更新',
-    summary: '查看最新版本和每个节点的更新状态，开关自动更新，更换发布源地址，对单个节点或全部节点立即更新。',
-    needs: '缺的接口：更新的设置、各节点的更新状态、触发更新。',
-    meanwhile: '每个节点现在的版本，可以在节点列表的「版本」一列看到。',
+    meanwhile: '两个节点之间现在怎么走、多快，可以在「路径诊断」里现问；全网的情况在「拓扑」里。',
   },
 }

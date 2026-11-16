@@ -118,6 +118,9 @@ export const nodes = {
     succeed: '继任另一个节点…',
     info: '信息',
     name: '名字',
+    hostname: '主机名',
+    hostnameNone: '没有上报（节点的版本较旧）',
+    hostnameHint: '节点上报的。加入时名字取自它的第一段；之后主机名变了，名字不跟着变。',
     fqdn: '全名',
     virtualIp: '虚拟 IP',
     editIp: '改虚拟 IP',
@@ -293,6 +296,8 @@ export const nodes = {
     viaNone: '无路可走',
     viaNoneHint: '直连不通，也没有 relay 可走。',
     rttUnknown: '—',
+    routesOnTopology: '在拓扑上看',
+    routesDiagnose: '路径诊断',
 
     accessLead: '按 controller 当前启用的规则算出。单向规则只限制谁能发起；连上之后数据是双向的。',
     accessPending: '这个节点还没有确认最新的配置，它现在还在按旧的规则判定。',

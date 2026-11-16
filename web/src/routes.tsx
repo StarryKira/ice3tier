@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { lazy, Suspense } from 'react'
+import { type ComponentType, lazy, Suspense } from 'react'
 import { Navigate, Route, Routes } from 'react-router'
 
 import { q } from '@/api/queries'
@@ -25,11 +25,27 @@ import { NotFoundPage } from '@/pages/NotFoundPage'
 import { OverviewPage } from '@/pages/overview/OverviewPage'
 import { PairsPage } from '@/pages/pairs/PairsPage'
 import { PlannedPage } from '@/pages/planned/PlannedPage'
-import { SettingsPage } from '@/pages/settings/SettingsPage'
 import { TokensPage } from '@/pages/tokens/TokensPage'
 
-// 访问控制页带着画图的库，单独成块：别的页面用不到它。
+// 访问控制页和拓扑页带着画图的库，单独成块：别的页面用不到它。
 const AccessPage = lazy(() => import('@/pages/access/AccessPage').then((module) => ({ default: module.AccessPage })))
+const TopologyPage = lazy(() =>
+  import('@/pages/topology/TopologyPage').then((module) => ({ default: module.TopologyPage })),
+)
+// 不常去的页面也单独成块，第一次打开界面时少下载一些。
+const PathPage = lazy(() => import('@/pages/path/PathPage').then((module) => ({ default: module.PathPage })))
+const SettingsPage = lazy(() =>
+  import('@/pages/settings/SettingsPage').then((module) => ({ default: module.SettingsPage })),
+)
+
+/** 单独成块的页面在取回来之前先显示骨架。 */
+function Lazy({ page: Component }: { page: ComponentType }) {
+  return (
+    <Suspense fallback={<PageFallback />}>
+      <Component />
+    </Suspense>
+  )
+}
 
 function PageFallback() {
   return (
@@ -61,28 +77,21 @@ export function AppRoutes() {
             <Route path="overview" element={<OverviewPage />} />
             <Route path="nodes" element={<NodesPage />} />
             <Route path="nodes/:node" element={<NodeDetailPage />} />
-            <Route
-              path="access"
-              element={
-                <Suspense fallback={<PageFallback />}>
-                  <AccessPage />
-                </Suspense>
-              }
-            />
+            <Route path="access" element={<Lazy page={AccessPage} />} />
             <Route path="exits" element={<ExitsPage />} />
             <Route path="listeners" element={<ListenersPage />} />
             <Route path="credentials" element={<CredentialsPage />} />
             <Route path="forwards" element={<ForwardsPage />} />
-            <Route path="topology" element={<PlannedPage id="topology" />} />
-            <Route path="diagnosis" element={<PlannedPage id="diagnosis" />} />
+            <Route path="topology" element={<Lazy page={TopologyPage} />} />
+            <Route path="diagnosis" element={<Lazy page={PathPage} />} />
             <Route path="tests" element={<PlannedPage id="tests" />} />
             <Route path="tokens" element={<TokensPage />} />
             <Route path="pairs" element={<PairsPage />} />
             <Route path="network" element={<NetworkPage />} />
             <Route path="*" element={<NotFoundPage />} />
           </Route>
-          <Route path="settings" element={<SettingsPage />} />
-          <Route path="settings/:tab" element={<SettingsPage />} />
+          <Route path="settings" element={<Lazy page={SettingsPage} />} />
+          <Route path="settings/:tab" element={<Lazy page={SettingsPage} />} />
           <Route path="*" element={<NotFoundPage />} />
         </Route>
       </Route>

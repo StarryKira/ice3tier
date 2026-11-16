@@ -465,6 +465,8 @@ test('新建端口转发，再删除', async () => {
 
   await listenSide.getByRole('combobox', { name: '节点' }).click()
   await nodeOption(laptop).click()
+  // 等第一个下拉收起来再开第二个：收起的动画期间两个列表同时在页面上，选项会认重。
+  await expect(page.getByRole('listbox')).toHaveCount(0)
   await targetSide.getByRole('combobox', { name: '节点' }).click()
   await nodeOption(server).click()
   // 即时检查：转发不绕过访问规则。laptop → server 由刚才那条规则允许。

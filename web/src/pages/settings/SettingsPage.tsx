@@ -5,12 +5,11 @@ import { Link, Navigate, NavLink, useNavigate, useParams } from 'react-router'
 
 import { q } from '@/api/queries'
 import { session } from '@/auth/session'
-import { CodeBlock, CopyText } from '@/components/copy'
-import { InfoRow, Page, PageHeader } from '@/components/page'
-import { EmptyState, ErrorState, NoMatches, SkeletonBlock, SkeletonRows } from '@/components/states'
-import { RelativeTime } from '@/components/status'
+import { CodeBlock } from '@/components/copy'
+import { Page, PageHeader } from '@/components/page'
+import { EmptyState, ErrorState, NoMatches, SkeletonRows } from '@/components/states'
+import { RelativeTime, StatusDot } from '@/components/status'
 import { Table, Td, Th, Tr } from '@/components/table'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardBody, CardHeader } from '@/components/ui/card'
 import { NativeSelect } from '@/components/ui/input'
@@ -18,16 +17,17 @@ import { t } from '@/i18n'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { cn } from '@/lib/utils'
 import { networkPath } from '@/pages/networks/context'
-import { PlannedContent } from '@/pages/planned/PlannedPage'
-import { PLANNED } from '@/pages/planned/planned'
+
+import { AboutTab } from './AboutTab'
+import { UpdatesTab } from './UpdatesTab'
 
 const s = t.settings
 
 const TABS = [
-  { id: 'session', label: s.tabSession, planned: false },
-  { id: 'updates', label: PLANNED.updates.title, planned: true },
-  { id: 'log', label: s.tabLog, planned: false },
-  { id: 'about', label: s.tabAbout, planned: false },
+  { id: 'session', label: s.tabSession },
+  { id: 'updates', label: t.updates.tab },
+  { id: 'log', label: s.tabLog },
+  { id: 'about', label: s.tabAbout },
 ] as const
 type TabId = (typeof TABS)[number]['id']
 
@@ -209,48 +209,14 @@ function LogTab() {
   )
 }
 
-function AboutTab() {
-  const status = useQuery(q.status())
-  return (
-    <Card>
-      <CardHeader title={s.about.title} />
-      {status.isError ? (
-        <ErrorState title={s.about.loadFailed} error={status.error} onRetry={() => void status.refetch()} />
-      ) : status.data === undefined ? (
-        <SkeletonBlock lines={5} />
-      ) : (
-        <CardBody className="py-2">
-          <dl className="divide-y">
-            <InfoRow label={s.about.version}>
-              <span className="tabular">{status.data.version}</span>
-            </InfoRow>
-            <InfoRow label={s.about.publicAddr}>
-              <CopyText value={status.data.public_addr} />
-              <span className="mt-0.5 block text-[13px] text-muted-foreground">{s.about.publicAddrHint}</span>
-            </InfoRow>
-            <InfoRow label={s.about.key}>
-              <CopyText value={status.data.controller_key} wrap />
-              <span className="mt-0.5 block text-[13px] text-muted-foreground">{s.about.keyHint}</span>
-            </InfoRow>
-            <InfoRow label={s.about.totals}>
-              <span className="tabular">
-                {s.about.totalsValue(status.data.networks, status.data.nodes, status.data.online)}
-              </span>
-            </InfoRow>
-            <InfoRow label={s.about.backup}>{s.about.backupBody}</InfoRow>
-            <InfoRow label={s.about.offline}>{s.about.offlineBody}</InfoRow>
-          </dl>
-        </CardBody>
-      )}
-    </Card>
-  )
-}
-
 /** 全局设置。左侧竖排的分区，每个分区有自己的地址。 */
 export function SettingsPage() {
   const params = useParams()
   const tab = TABS.find((candidate) => candidate.id === params.tab)
   useDocumentTitle(tab === undefined ? s.title : `${tab.label} · ${s.title}`)
+  // 有被暂停的版本时，「节点更新」旁边一个红点：从设置的任何一页都看得到。
+  const update = useQuery(q.update())
+  const paused = (update.data?.paused.length ?? 0) > 0
   if (tab === undefined) return <Navigate to="/settings/session" replace />
   const active: TabId = tab.id
 
@@ -272,7 +238,9 @@ export function SettingsPage() {
                   }
                 >
                   {candidate.label}
-                  {candidate.planned ? <Badge tone="outline">{t.common.planned}</Badge> : null}
+                  {candidate.id === 'updates' && paused ? (
+                    <StatusDot tone="danger" label={t.updates.pausedDot} />
+                  ) : null}
                 </NavLink>
               </li>
             ))}
@@ -280,7 +248,7 @@ export function SettingsPage() {
         </nav>
         <div className="min-w-0">
           {active === 'session' ? <SessionTab /> : null}
-          {active === 'updates' ? <PlannedContent id="updates" /> : null}
+          {active === 'updates' ? <UpdatesTab /> : null}
           {active === 'log' ? <LogTab /> : null}
           {active === 'about' ? <AboutTab /> : null}
         </div>

@@ -7,10 +7,12 @@ import {
   type LucideIcon,
   Network,
   RadioTower,
+  Route,
   Server,
   Settings,
   ShieldCheck,
   Ticket,
+  Waypoints,
 } from 'lucide-react'
 
 import { t } from '@/i18n'
@@ -32,7 +34,7 @@ export interface NavGroup {
   items: readonly NavItem[]
 }
 
-const planned = (id: Exclude<PlannedId, 'updates'>): NavItem => ({
+const planned = (id: PlannedId): NavItem => ({
   page: id,
   label: PLANNED[id].title,
   icon: PLANNED[id].icon,
@@ -65,7 +67,11 @@ export const NAV_GROUPS: readonly NavGroup[] = [
   {
     id: 'diagnose',
     label: t.nav.groupDiagnose,
-    items: [planned('topology'), planned('diagnosis'), planned('tests')],
+    items: [
+      { page: 'topology', label: t.nav.topology, icon: Waypoints },
+      { page: 'diagnosis', label: t.nav.diagnosis, icon: Route },
+      planned('tests'),
+    ],
   },
 ]
 

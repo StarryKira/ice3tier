@@ -101,6 +101,8 @@ export const validate = {
 
 export const time = {
   justNow: '刚刚',
+  now: '刚刚',
+  secondsAgo: (n: number) => `${n} 秒前`,
   minutesAgo: (n: number) => `${n} 分钟前`,
   hoursAgo: (n: number) => `${n} 小时前`,
   daysAgo: (n: number) => `${n} 天前`,

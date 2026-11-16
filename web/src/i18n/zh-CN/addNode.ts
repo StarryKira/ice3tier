@@ -70,6 +70,7 @@ export const addNode = {
     '令牌可能已经过期或者被收回，重新生成一个。',
   ],
   joined: (name: string, ip: string) => `${name} 已加入 · ${ip}`,
+  joinedHostname: (hostname: string) => `主机名 ${hostname}。名字取自它，可以随时改。`,
   joinedHint: '它现在是网络里的一个节点。执行 i3t run 之后它才在线。',
   viewNode: '查看节点',
   addAnother: '再添加一台',

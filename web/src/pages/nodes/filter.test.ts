@@ -5,6 +5,7 @@ import { t } from '@/i18n'
 import { nodeIssues } from '@/lib/nodeIssues'
 import { ruleLabel } from '@/lib/rules'
 import { formatRelative, formatRemaining } from '@/lib/time'
+import { makeNode } from '@/test/fixtures'
 
 import {
   DEFAULT_SORT,
@@ -16,33 +17,7 @@ import {
   writeFilters,
 } from './filter'
 
-function node(id: number, name: string, extra: Partial<Node> = {}): Node {
-  return {
-    id,
-    network: 1,
-    key: 'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE',
-    name,
-    fqdn: `${name}.home.i3t`,
-    virtual_ip: `10.66.0.${id}`,
-    tags: [],
-    declared: { exit: false, relay: false, forward: false },
-    relay: null,
-    exit: null,
-    dial_out_only: false,
-    routing: null,
-    reach: null,
-    pinned_relays: [],
-    platform: 'linux-x86_64',
-    version: '0.1.0',
-    online: true,
-    last_seen_at: 1_794_000_000,
-    created_at: 1_794_000_000,
-    netmap_version: 1,
-    sent_version: 1,
-    acked_version: 1,
-    ...extra,
-  }
-}
+const node = (id: number, name: string, extra: Partial<Node> = {}): Node => makeNode(id, name, extra)
 
 const RELAY = { udp: ['203.0.113.7:20330'], tcp: [], region: 'hk', bandwidth_mbps: null }
 const EXIT = { ports: [80, 443], lan: false, bandwidth_mbps: null, upstream_socks5: null }

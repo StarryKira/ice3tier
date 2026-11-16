@@ -1,14 +1,16 @@
 import { useQuery } from '@tanstack/react-query'
-import { ChevronRight, EllipsisVertical, Pencil, Replace, ServerOff, Trash2 } from 'lucide-react'
+import { ChevronRight, CircleArrowUp, EllipsisVertical, Pencil, Replace, ServerOff, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 
 import { ApiError } from '@/api/client'
 import { q } from '@/api/queries'
 import { CopyText } from '@/components/copy'
+import { ForceUpdateDialog } from '@/components/force-update'
 import { Page } from '@/components/page'
 import { EmptyState, ErrorState, SkeletonBlock } from '@/components/states'
-import { IssueIcon, OnlineDot } from '@/components/status'
+import { IssueIcon, OnlineDot, StatusDot } from '@/components/status'
+import { ReasonButton } from '@/components/update'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import {
@@ -22,7 +24,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
 import { nodeIssues } from '@/lib/nodeIssues'
-import { WAITING_INTERVAL } from '@/lib/polling'
+import { forceAbility, isUpdating } from '@/lib/nodeUpdate'
+import { LIVE_INTERVAL, WAITING_INTERVAL } from '@/lib/polling'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { networkPath, useNetwork } from '@/pages/networks/context'
 
@@ -33,10 +36,11 @@ import { EditIpDialog, SucceedDialog } from './detail/dialogs'
 import { OverviewTab } from './detail/OverviewTab'
 import { RelatedTab } from './detail/RelatedTab'
 import { RoutesTab } from './detail/RoutesTab'
+import { UpdateTab } from './detail/UpdateTab'
 import { RoleBadges } from './NodesPage'
 
 const d = t.nodes.detail
-const TABS = ['overview', 'routes', 'access', 'related'] as const
+const TABS = ['overview', 'routes', 'access', 'related', 'update'] as const
 type Tab = (typeof TABS)[number]
 
 /**
@@ -52,16 +56,19 @@ export function NodeDetailPage() {
   const requested = search.get('tab') as Tab | null
   const tab: Tab = requested !== null && TABS.includes(requested) ? requested : 'overview'
 
-  // 有一行能力正在等节点上报声明时，取得勤一些。
+  // 有一行能力正在等节点上报声明、或者它正在更新时，取得勤一些：用户这时正看着它变。
   const [waiting, setWaiting] = useState(false)
   const detail = useQuery({
     ...q.node(network.id, nodeId),
-    ...(waiting ? { refetchInterval: WAITING_INTERVAL } : {}),
+    refetchInterval: (query) =>
+      waiting || (query.state.data !== undefined && isUpdating(query.state.data.update))
+        ? WAITING_INTERVAL
+        : LIVE_INTERVAL,
     enabled: Number.isInteger(nodeId),
   })
   const nodes = useQuery(q.nodes(network.id))
   const deleteNode = useDeleteNode(network)
-  const [dialog, setDialog] = useState<'rename' | 'ip' | 'succeed' | null>(null)
+  const [dialog, setDialog] = useState<'rename' | 'ip' | 'succeed' | 'update' | null>(null)
 
   const node = detail.data
   useDocumentTitle(node?.name ?? t.nodes.title)
@@ -109,6 +116,9 @@ export function NodeDetailPage() {
   }
 
   const issue = nodeIssues(node, nodes.data ?? [])[0]
+  const ability = forceAbility(node)
+  // 「更新」标签上的小圆点：有新版本，或者上次更新失败了。
+  const updateMarked = node.update.available !== null || issue?.kind === 'update_failed'
 
   return (
     <Page className="@container">
@@ -133,7 +143,7 @@ export function NodeDetailPage() {
               </Button>
             </Tooltip>
             <RoleBadges node={node} />
-            {issue !== undefined ? <IssueIcon message={issue.message} /> : null}
+            {issue !== undefined ? <IssueIcon message={issue.message} tone={issue.tone} /> : null}
           </h1>
           <p className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
             <span className={node.online ? 'font-medium text-ok' : undefined}>
@@ -143,36 +153,45 @@ export function NodeDetailPage() {
             <CopyText value={node.fqdn} />
           </p>
         </div>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button aria-label={d.more}>
-              <EllipsisVertical aria-hidden />
-              {d.more}
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent>
-            <DropdownMenuItem onSelect={() => setDialog('rename')}>
-              <Pencil aria-hidden />
-              {t.nodes.menuRename}
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => setDialog('succeed')}>
-              <Replace aria-hidden />
-              {d.succeed}
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              danger
-              onSelect={() =>
-                void deleteNode(node).then((deleted) => {
-                  if (deleted) void navigate(listPath, { replace: true })
-                })
-              }
-            >
-              <Trash2 aria-hidden />
-              {t.nodes.menuDelete}
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <div className="flex shrink-0 items-center gap-2">
+          {/* 有新版本时才出现；不能点时置灰，悬停写原因和做法。 */}
+          {node.update.available !== null ? (
+            <ReasonButton reason={ability.ok ? null : ability.reason} onClick={() => setDialog('update')}>
+              <CircleArrowUp aria-hidden />
+              {t.updates.force.button}
+            </ReasonButton>
+          ) : null}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button aria-label={d.more}>
+                <EllipsisVertical aria-hidden />
+                {d.more}
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent>
+              <DropdownMenuItem onSelect={() => setDialog('rename')}>
+                <Pencil aria-hidden />
+                {t.nodes.menuRename}
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setDialog('succeed')}>
+                <Replace aria-hidden />
+                {d.succeed}
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                danger
+                onSelect={() =>
+                  void deleteNode(node).then((deleted) => {
+                    if (deleted) void navigate(listPath, { replace: true })
+                  })
+                }
+              >
+                <Trash2 aria-hidden />
+                {t.nodes.menuDelete}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </header>
 
       <Tabs
@@ -186,6 +205,10 @@ export function NodeDetailPage() {
           <TabsTrigger value="routes">{d.tabRoutes}</TabsTrigger>
           <TabsTrigger value="access">{d.tabAccess}</TabsTrigger>
           <TabsTrigger value="related">{d.tabRelated}</TabsTrigger>
+          <TabsTrigger value="update">
+            {t.updates.detail.tab}
+            {updateMarked ? <StatusDot tone={issue?.kind === 'update_failed' ? 'danger' : 'warn'} /> : null}
+          </TabsTrigger>
         </TabsList>
         <TabsContent value="overview">
           <OverviewTab network={network} node={node} onEditIp={() => setDialog('ip')} onWaiting={setWaiting} />
@@ -199,6 +222,9 @@ export function NodeDetailPage() {
         <TabsContent value="related">
           <RelatedTab network={network} node={node} />
         </TabsContent>
+        <TabsContent value="update">
+          <UpdateTab node={node} />
+        </TabsContent>
       </Tabs>
 
       {dialog === 'rename' ? (
@@ -208,6 +234,7 @@ export function NodeDetailPage() {
       {dialog === 'succeed' ? (
         <SucceedDialog network={network} node={node} open onClose={() => setDialog(null)} />
       ) : null}
+      {dialog === 'update' ? <ForceUpdateDialog node={node} onClose={() => setDialog(null)} /> : null}
     </Page>
   )
 }

@@ -1,14 +1,26 @@
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { kitDir } from './release'
+
 /**
  * 测试用的 controller 和节点：真的程序，真的管理 API，不是模拟。
  *
- * 程序从 `I3T_BIN_DIR` 找；没设时依次试仓库里的 `target/agent-web/release`、`target/release` 和 `target/lead/release`，
+ * 程序从 `I3T_BIN_DIR` 找；没设时依次试 `pnpm e2e:kit` 编出来的那一组（`web/.e2e/release-kit/old`，认测试用的发布钥匙，
+ * 节点更新的测试要它），仓库里的 `target/agent-web/release`、`target/release` 和 `target/lead/release`，
  * 用第一个两样程序都在的目录。
  * 界面用的是 `pnpm build` 的产物，由 controller 自己从 `--static-dir` 提供，和正式部署时一样。
  */
@@ -20,6 +32,7 @@ const repoRoot = resolve(webRoot, '..')
 function binDir(): string {
   const candidates = [
     process.env.I3T_BIN_DIR,
+    join(kitDir(), 'old'),
     join(repoRoot, 'target/agent-web/release'),
     join(repoRoot, 'target/release'),
     join(repoRoot, 'target/lead/release'),
@@ -28,8 +41,29 @@ function binDir(): string {
     if (['i3t-controller', 'i3t'].every((name) => existsSync(join(dir, name)))) return dir
   }
   throw new Error(
-    `找不到 i3t-controller 和 i3t。先构建：cargo build --release -p i3t-controller-bin -p i3t，或者用 I3T_BIN_DIR 指出它们在哪。试过的目录：${candidates.join('、')}`,
+    `找不到 i3t-controller 和 i3t。先构建：在 web/ 里执行 pnpm e2e:kit，或者 cargo build --release -p i3t-controller-bin -p i3t，或者用 I3T_BIN_DIR 指出它们在哪。试过的目录：${candidates.join('、')}`,
   )
+}
+
+/**
+ * 代替 systemd 的看护：节点以 75（"请重启我"）退出就马上重新拉起，自己更新的节点换了程序之后靠它重启；
+ * 别的退出码（包括被停掉）就不再拉。
+ */
+const SUPERVISOR = `while :; do "$PROGRAM" --state-dir "$STATE" run; code=$?; [ "$code" -eq 75 ] || exit "$code"; done`
+
+export interface RunOptions {
+  /** 用这个程序文件，而不是共用的那一个。自己更新的节点会替换它，所以不能是共用的。 */
+  program?: string
+  /** 多给的环境变量，例如 `container=podman` 让节点以为自己在容器里。 */
+  env?: Record<string, string>
+  /** 由看护的循环拉起来，见 {@link SUPERVISOR}。 */
+  supervised?: boolean
+}
+
+interface Running {
+  child: ChildProcess
+  /** 看护的循环和节点在一个单独的进程组里，停的时候一起停。 */
+  group: boolean
 }
 
 function freePort(): Promise<number> {
@@ -77,7 +111,8 @@ export class Controller {
   /** 这次用的 `i3t-controller` 和 `i3t` 所在的目录。 */
   readonly bins: string
   private readonly process: ChildProcess
-  private readonly nodes: ChildProcess[] = []
+  private readonly nodes: Running[] = []
+  private readonly readOnly: string[] = []
   private nodeCount = 0
 
   private constructor(options: {
@@ -94,9 +129,12 @@ export class Controller {
     this.process = options.process
   }
 
-  /** 启动一个全新的、空的 controller。管理令牌从它第一次启动时打印的内容里取。 */
-  static async start(): Promise<Controller> {
-    const bins = binDir()
+  /**
+   * 启动一个全新的、空的 controller。管理令牌从它第一次启动时打印的内容里取。
+   * `bins` 指定程序所在的目录；节点更新的测试要用认测试钥匙的那一组。
+   */
+  static async start(options: { bins?: string } = {}): Promise<Controller> {
+    const bins = options.bins ?? binDir()
     const dist = join(webRoot, 'dist')
     if (!existsSync(join(dist, 'index.html'))) throw new Error('web/dist 里没有构建产物，先执行 pnpm build')
 
@@ -143,7 +181,13 @@ export class Controller {
           return undefined
         }
       })
-      return new Controller({ baseUrl, adminToken, dir, bins, process: child })
+      const controller = new Controller({ baseUrl, adminToken, dir, bins, process: child })
+      // 发布源默认是项目的 GitHub Release。测试不该连外网，更不该让节点被真的发布更新掉：换成一个空目录。
+      // 要测更新的地方自己再把它指到准备好的发布上。
+      const empty = join(dir, 'no-releases')
+      mkdirSync(empty)
+      await controller.api('PATCH', '/update', { source: empty })
+      return controller
     } catch (error) {
       child.kill('SIGKILL')
       rmSync(dir, { recursive: true, force: true })
@@ -197,10 +241,27 @@ export class Controller {
   }
 
   /**
+   * 给节点一份它自己的程序文件，放在它的状态目录旁边。自己更新的节点要替换程序文件，不能动共用的那一个。
+   * `readOnly` 时放进一个不可写的目录：节点会报"程序所在的目录不可写"，不能自己更新。
+   */
+  ownProgram(node: NodeHandle, options: { from?: string; readOnly?: boolean } = {}): string {
+    const directory = join(node.dir, options.readOnly === true ? 'ro-bin' : 'bin')
+    mkdirSync(directory, { recursive: true })
+    const program = join(directory, 'i3t')
+    copyFileSync(options.from ?? join(this.bins, 'i3t'), program)
+    chmodSync(program, 0o755)
+    if (options.readOnly === true) {
+      chmodSync(directory, 0o555)
+      this.readOnly.push(directory)
+    }
+    return program
+  }
+
+  /**
    * 把一个已经加入的节点跑起来，让它在界面上显示为在线。
    * 一台机器上跑好几个节点，所以先把它的端口改成不冲突的。
    */
-  async run(node: NodeHandle): Promise<void> {
+  async run(node: NodeHandle, options: RunOptions = {}): Promise<void> {
     const configPath = join(node.dir, 'config.toml')
     const udp = await freePort()
     const socks = await freePort()
@@ -210,8 +271,18 @@ export class Controller {
       .replace(/^socks5 = .*$/m, `socks5 = "127.0.0.1:${socks}"`)
       .replace(/^http = .*$/m, `http = "127.0.0.1:${http}"`)
     writeFileSync(configPath, config)
-    const child = spawn(join(this.bins, 'i3t'), ['--state-dir', node.dir, 'run'], { stdio: 'ignore' })
-    this.nodes.push(child)
+    // 每个节点用自己的一份程序文件：万一它被更新了，换掉的也只是这一份，不是构建出来的那一个。
+    const program = options.program ?? this.ownProgram(node)
+    const env = { ...process.env, ...options.env }
+    const child =
+      options.supervised === true
+        ? spawn('sh', ['-c', SUPERVISOR], {
+            stdio: 'ignore',
+            env: { ...env, PROGRAM: program, STATE: node.dir },
+            detached: true,
+          })
+        : spawn(program, ['--state-dir', node.dir, 'run'], { stdio: 'ignore', env })
+    this.nodes.push({ child, group: options.supervised === true })
     node.socksPort = socks
   }
 
@@ -242,8 +313,18 @@ export class Controller {
   }
 
   stop(): void {
-    for (const node of this.nodes) node.kill('SIGTERM')
+    for (const { child, group } of this.nodes) {
+      if (group && child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, 'SIGTERM')
+        } catch {
+          // 已经退出了。
+        }
+      } else child.kill('SIGTERM')
+    }
     this.process.kill('SIGTERM')
+    // 不可写的目录里的文件删不掉，先改回可写。
+    for (const directory of this.readOnly) chmodSync(directory, 0o755)
     rmSync(this.dir, { recursive: true, force: true })
   }
 }

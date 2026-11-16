@@ -62,6 +62,18 @@ export function formatRemaining(until: Timestamp, now: Timestamp): string | null
   return t.time.days(Math.round(left / DAY))
 }
 
+/**
+ * 一段已经过去的时间（秒），写成"6 秒前""3 分钟前"。给节点上报的数据标新旧用：
+ * 这些数据按秒变，"刚刚"太粗；接口给的本来就是间隔，不是时刻（节点和浏览器的钟不一定对得上）。
+ */
+export function formatAge(secs: number): string {
+  if (secs < 1) return t.time.now
+  if (secs < MINUTE) return t.time.secondsAgo(Math.round(secs))
+  if (secs < HOUR) return t.time.minutesAgo(Math.floor(secs / MINUTE))
+  if (secs < DAY) return t.time.hoursAgo(Math.floor(secs / HOUR))
+  return t.time.daysAgo(Math.floor(secs / DAY))
+}
+
 export function nowSeconds(): Timestamp {
   return Math.floor(Date.now() / 1000)
 }

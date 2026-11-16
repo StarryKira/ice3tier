@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { ChevronDown, Pencil, X } from 'lucide-react'
 import { useCallback, useId, useRef } from 'react'
+import { Link } from 'react-router'
 
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
@@ -59,6 +60,16 @@ function InfoCard({ network, node, onEditIp }: TabProps & { onEditIp: () => void
           <InfoRow label={d.name}>
             <CopyText value={node.name} mono={false} />
           </InfoRow>
+          <InfoRow label={d.hostname}>
+            {node.hostname === '' ? (
+              <span className="text-muted-foreground">{d.hostnameNone}</span>
+            ) : (
+              <>
+                <CopyText value={node.hostname} mono={false} />
+                <span className="mt-0.5 block text-[13px] text-muted-foreground">{d.hostnameHint}</span>
+              </>
+            )}
+          </InfoRow>
           <InfoRow label={d.fqdn}>
             <CopyText value={node.fqdn} />
           </InfoRow>
@@ -84,6 +95,11 @@ function InfoCard({ network, node, onEditIp }: TabProps & { onEditIp: () => void
           <InfoRow label={d.platform}>{node.platform === '' ? '—' : node.platform}</InfoRow>
           <InfoRow label={d.version}>
             <span className="tabular">{node.version === '' ? '—' : node.version}</span>
+            {node.update.available !== null ? (
+              <Link to="?tab=update" className="ml-2 rounded-sm">
+                <Badge tone="warn">{t.updates.icon.available(node.update.available)}</Badge>
+              </Link>
+            ) : null}
           </InfoRow>
           <InfoRow label={d.joined}>
             <RelativeTime at={node.created_at} />

@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { type AccessGraph, type CreatedEnrollToken, type EnrollTokenInfo, type Node } from '@/api/types'
 import { t } from '@/i18n'
+import { makeNode } from '@/test/fixtures'
 import { apiFailure, fakeApi, type FakeApi, NETWORK, renderWithApp, type Routes } from '@/test/harness'
 
 import { AddNodeDialog } from './AddNodeDialog'
@@ -34,31 +35,15 @@ function created(id: number, token: string): CreatedEnrollToken {
   return { ...tokenInfo(id), token }
 }
 
+/** 刚加入、还没跑起来的节点。主机名是 `<名字>.lan`：名字取的是它的第一段。 */
 function node(id: number, name: string): Node {
-  return {
-    id,
-    network: 1,
-    key: 'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE',
-    name,
-    fqdn: `${name}.home.i3t`,
-    virtual_ip: `10.66.0.${id}`,
-    tags: [],
-    declared: { exit: false, relay: false, forward: false },
-    relay: null,
-    exit: null,
-    dial_out_only: false,
-    routing: null,
-    reach: null,
-    pinned_relays: [],
-    platform: 'linux-x86_64',
-    version: '0.1.0',
+  return makeNode(id, name, {
+    hostname: `${name}.lan`,
     online: false,
     last_seen_at: null,
-    created_at: 1_794_000_000,
-    netmap_version: 1,
     sent_version: 0,
     acked_version: 0,
-  }
+  })
 }
 
 /** 一个空网络的 controller：还没有节点，也没有令牌；生成令牌之后令牌出现在"没用掉的"列表里。 */
@@ -211,6 +196,8 @@ describe('添加节点', () => {
     // 节点执行了加入命令：令牌用掉了，网络里多出一个节点。
     api.use({ 'GET /networks/1/tokens': [], 'GET /networks/1/nodes': [node(5, 'nas-01')] })
     expect(await screen.findByTestId('node-joined')).toHaveTextContent('nas-01 已加入 · 10.66.0.5')
+    // 名字取自它报的主机名，写出来，用户认得出是哪台机器。
+    expect(screen.getByTestId('node-joined-hostname')).toHaveTextContent(t.addNode.joinedHostname('nas-01.lan'))
     expect(screen.queryByText(t.addNode.waiting)).not.toBeInTheDocument()
     expect(screen.queryByText(t.addNode.shownOnce)).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: t.addNode.copyToken })).not.toBeInTheDocument()

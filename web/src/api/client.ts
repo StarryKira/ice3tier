@@ -5,6 +5,9 @@ import { type ErrorBody, type KnownErrorCode } from './types'
 /** 管理 API 所有路径的前缀。WebUI 和 API 同源，所以这里没有主机名。 */
 export const API_PREFIX = '/api/v1'
 
+/** Prometheus 的指标（文档 §16）。不在 `API_PREFIX` 下面，也不要管理令牌。 */
+export const METRICS_PATH = '/metrics'
+
 /**
  * 一次失败的请求。
  *

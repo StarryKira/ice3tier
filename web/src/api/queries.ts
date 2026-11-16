@@ -31,6 +31,12 @@ export const keys = {
   listeners: (network: NetworkId) => ['n', network, 'listeners'] as const,
   forwards: (network: NetworkId) => ['n', network, 'forwards'] as const,
   pairs: (network: NetworkId) => ['n', network, 'pairs'] as const,
+  matrix: (network: NetworkId) => ['n', network, 'matrix'] as const,
+  path: (network: NetworkId, from: NodeId, to: NodeId) => ['n', network, 'path', from, to] as const,
+  /** 更新的设置和现状是全局的，不在某个网络下面。 */
+  update: ['update'] as const,
+  /** 所有网络下的查询：全局的修改（全部更新、暂停和继续）会改到每个网络里的节点。 */
+  everyNetwork: ['n'] as const,
 }
 
 /** 带 `refetchInterval` 的是显示实时状态的查询；标签页不在前台时它们不轮询（见 `lib/polling.ts`）。 */
@@ -82,6 +88,26 @@ export const q = {
       refetchInterval: LIVE_INTERVAL,
     }),
   pairs: (network: NetworkId) => queryOptions({ queryKey: keys.pairs(network), queryFn: () => api.pairs(network) }),
+  matrix: (network: NetworkId) =>
+    queryOptions({
+      queryKey: keys.matrix(network),
+      queryFn: () => api.routeMatrix(network),
+      refetchInterval: LIVE_INTERVAL,
+    }),
+  /**
+   * 两个节点之间两个方向的当前路径。每取一次 controller 都要去问两端，所以不轮询，也不在窗口回到前台时自己重取：
+   * 页面上有"再问一次"的按钮。
+   */
+  path: (network: NetworkId, from: NodeId, to: NodeId) =>
+    queryOptions({
+      queryKey: keys.path(network, from, to),
+      queryFn: ({ signal }) => api.path(network, from, to, signal),
+      staleTime: Number.POSITIVE_INFINITY,
+      refetchOnWindowFocus: false,
+    }),
+  /** 有更新正在进行时页面会把轮询调勤（`WAITING_INTERVAL`），见 `pages/settings/updates`。 */
+  update: (interval: number = LIVE_INTERVAL) =>
+    queryOptions({ queryKey: keys.update, queryFn: api.updateOverview, refetchInterval: interval }),
 }
 
 export function createQueryClient(): QueryClient {
@@ -112,8 +138,14 @@ interface ActionOptions<TData, TVars> {
 /**
  * 一次修改。成功之后把这个网络下的查询全部作废并等它们取回来，
  * 所以调用方 `await mutateAsync()` 回来时，页面上的列表已经是改过之后的样子。
+ *
+ * `network` 写 `'all'` 时作废全部网络下的查询：更新的全局操作会改到每个网络里的节点。
+ * 更新的现状（`keys.update`）总是跟着作废：改一个节点也会改变按更新情况数出来的数。
  */
-export function useAction<TData, TVars = void>(network: NetworkId | null, options: ActionOptions<TData, TVars>) {
+export function useAction<TData, TVars = void>(
+  network: NetworkId | 'all' | null,
+  options: ActionOptions<TData, TVars>,
+) {
   const client = useQueryClient()
   const { success, toastError = true } = options
   return useMutation<TData, unknown, TVars>({
@@ -125,8 +157,10 @@ export function useAction<TData, TVars = void>(network: NetworkId | null, option
         client.invalidateQueries({ queryKey: keys.networks }),
         client.invalidateQueries({ queryKey: ['log'] }),
         client.invalidateQueries({ queryKey: keys.status }),
+        client.invalidateQueries({ queryKey: keys.update }),
       ]
-      if (network !== null) pending.push(client.invalidateQueries({ queryKey: keys.scope(network) }))
+      if (network === 'all') pending.push(client.invalidateQueries({ queryKey: keys.everyNetwork }))
+      else if (network !== null) pending.push(client.invalidateQueries({ queryKey: keys.scope(network) }))
       await Promise.all(pending)
     },
     onError: (error) => {

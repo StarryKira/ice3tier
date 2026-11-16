@@ -4,7 +4,7 @@ import { defineConfig, devices } from '@playwright/test'
  * 端到端测试。每个测试文件自己启动一个全新的 controller（见 e2e/controller.ts），用完停掉，
  * 所以这里没有 webServer，也不需要事先开着什么。
  *
- * - flows：从空的 controller 开始把主要流程走一遍。`pnpm e2e`
+ * - flows：从空的 controller 开始把主要流程走一遍；路由视图（拓扑、矩阵、路径诊断）；节点更新。`pnpm e2e`
  * - screenshots：把每个页面在有数据和没数据时的样子截下来，放到 screenshots/。`pnpm screenshots`
  */
 export default defineConfig({
@@ -26,7 +26,7 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   projects: [
-    { name: 'flows', testMatch: 'flows.spec.ts' },
+    { name: 'flows', testMatch: ['flows.spec.ts', 'routes.spec.ts', 'updates.spec.ts'] },
     { name: 'screenshots', testMatch: 'screenshots.spec.ts' },
   ],
 })
