@@ -984,6 +984,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "i3t-lane"
+version = "0.1.2"
+dependencies = [
+ "bytes",
+ "i3t-conn",
+ "i3t-crypto",
+ "i3t-flow",
+ "i3t-proto",
+ "rcgen",
+ "ring",
+ "rustix",
+ "rustls",
+ "socket2",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "i3t-llmgw"
 version = "0.1.0"
 dependencies = [

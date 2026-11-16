@@ -1,0 +1,90 @@
+//! 独占 TCP（lane）：一对节点之间，每条用户连接独占一条 TCP，而不是共用连接里的一条流。
+//!
+//! 默认关着，由管理员按节点对打开。打开之后，两个节点里能连上对方节点端口的那一个（"拨号方"）向对方拨 lane；
+//! 每条 lane 是一条按两边节点公钥双向认证的 TLS 1.3 连接，承载正好一条流，用完就关，不复用。
+//! 流之间互不影响（一个丢包只耽误它自己），本来就是 TLS 的用户数据可以不再加密、由内核直接搬（[`splice`]）。
+//! 代价是每条流一条 TCP 穿过拨号方的路由器、要预先拨好一批，以及流不能换路。
+//!
+//! # 谁拨、谁用
+//!
+//! | lane | 谁拨 | 谁开流 | 什么时候拨 |
+//! |---|---|---|---|
+//! | 控制 lane | 拨号方 | 不承载流 | 一直保持一条 |
+//! | 停车的 lane | 拨号方 | 接受方 | 按接受方的要求预先拨好，停在接受方那里 |
+//! | 自己的 lane | 拨号方 | 拨号方 | 留几条热的，用完了当场拨 |
+//!
+//! 用途在拨号时（HELLO）就定了，两边永远不会争用同一条 lane。两个节点都能连上对方时，各自用自己拨的 lane。
+//! 接受方的监听就是节点端口上 relay 的 TCP 监听：它按开头的字节（[`is_lane`]）把 lane 交给 [`Lanes::accept_tcp`]。
+//!
+//! # 线上格式
+//!
+//! lane 是 TCP 上的 TLS 1.3，ALPN 是 [`ALPN`]。双方用节点密钥自签的证书互相认证，按 netmap 里的公钥比对，
+//! 不认识或者已经吊销的公钥在握手时就被拒绝。没有会话票据，也不做会话恢复。
+//!
+//! TLS 里面是一串帧，多字节整数都是大端：
+//!
+//! ```text
+//! +------+------------+======+
+//! | 类型 | 长度（2）  | 内容 |
+//! +------+------------+======+
+//!
+//! 类型   名字     方向            内容                               长度
+//! 0x01   HELLO    拨号方 → 接受方  用途（1）| epoch（8）              9
+//!                                  用途：0 控制，1 停车，2 自己的
+//! 0x02   POOL     接受方 → 拨号方  空闲目标（2）| 额外补拨（2）       4      只在控制 lane 上
+//! 0x03   PING     双方             随机数（8）                        8      只在控制 lane 上
+//! 0x04   PONG     双方             PING 里的随机数（8）               8      只在控制 lane 上
+//! 0x05   GOAWAY   双方             无                                 0      只在控制 lane 上
+//! 0x10   OPENING  发起方           负载方式（1）| 流的头              1～32769
+//!                                  负载方式：0 sealed，1 passthrough
+//! 0x11   DATA     双方             流的数据                           1～16381
+//! 0x12   SWITCH   接受方           无                                 0
+//! 0x13   ABORT    双方             原因码（4）                        4
+//! 0x14   STOP     双方             原因码（4）                        4
+//! ```
+//!
+//! - 每条 lane 上拨号方的第一个帧是 HELLO，紧跟在它的 TLS Finished 后面，不多一个往返。
+//!   epoch 是一个随机数，拨号方每次启动、地址变了、控制 lane 断了之后换一个。
+//! - 控制 lane 上接受方的第一个帧是 POOL；拨号方收到它才算控制 lane 建立（TLS 1.3 里客户端的握手先于服务端校验它的证书完成，
+//!   这个 POOL 是"认了你"的确认）。之后接受方每当缺 lane（被取走了、死了、请过的没到）或者目标变了就再发：
+//!   空闲目标是它想平时停着几条（拨号方只用来显示），额外补拨是要拨号方现在再拨的条数，拨号方照数去拨。
+//!   双方每隔 [`LaneConfig::ping_interval`] 发一个 PING，三个周期听不到对方就判控制 lane 断了。不认识的帧类型跳过（内容最长 1024 字节）。
+//! - 拨号方只在控制 lane 建立着的时候在 lane 上开流（包括它自己的流）；控制 lane 断了，它换一个新的 epoch 重拨，
+//!   接受方随之关掉旧 epoch 的空闲 lane。
+//! - 一条流：发起方发 OPENING（流层的 OPEN 连同首批数据），接受方回流层的 REPLY 和数据。
+//!   - sealed：之后两个方向都是 DATA 帧。一个方向的正常结束是 TLS 的 close_notify 加 FIN；没有 close_notify 的 FIN 是截断，算异常结束。
+//!   - passthrough：发起方的方向在 OPENING 所在的 TLS 记录之后、接受方的方向在 SWITCH 所在的记录之后，
+//!     离开 TLS，原样传用户的字节（用户的 TLS 记录）；之后 FIN 是正常结束，RST 是异常结束。
+//!     OPENING 和 SWITCH 都必须是它所在记录里的最后一个帧。接受方不发 SWITCH 时它的方向一直是 sealed。
+//!   - ABORT：发的一方异常结束了这条流，之后 RST。STOP：发的一方不再读了，请对方停止发送。两者都只能在还在 TLS 里的方向上发。
+//!   - 流的 lane 上出现别的帧、不认识的帧，都是协议错误，lane 被重置。
+//!
+//! 和 relay 的 TCP 中转共用端口时靠第一个字节区分：lane 以 TLS 握手记录开头（`0x16`），TCP 中转以很短的帧长度开头（高字节是 `0x00`）。
+//!
+//! # 和流层的对接
+//!
+//! [`Lanes`] 实现连接层的 [`i3t_conn::Connector`] 和 [`i3t_conn::Acceptor`]，流的两个方向 [`LaneSend`]、[`LaneRecv`]
+//! 实现 [`i3t_conn::SendStream`]、[`i3t_conn::RecvStream`]，流层不改也能跑在上面（一律 sealed）。要用 passthrough 和 splice，
+//! 流层要多做两件事：头写完时调 [`LaneSend::end_header`]；搬运之前用 [`LaneSend::take_raw`]、[`LaneRecv::take_raw`]
+//! 拿到原始的 socket，交给 [`splice::Splicer::pump`]。
+
+mod admission;
+mod demand;
+mod dialler;
+mod endpoint;
+mod error;
+mod frame;
+mod holder;
+mod lane;
+mod sealed;
+mod socket;
+pub mod splice;
+mod status;
+mod stream;
+
+pub use endpoint::{LaneConfig, LanePeer, Lanes, NoDatagrams, is_lane};
+pub use error::{LaneError, OpenLaneError};
+pub use frame::{FrameError, Payload};
+pub use lane::ALPN;
+pub use status::{HandshakeFailures, LaneStatus};
+pub use stream::{LaneRecv, LaneSend, RawRead, RawWrite};

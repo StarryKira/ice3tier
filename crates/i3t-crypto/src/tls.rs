@@ -31,14 +31,22 @@ const CERT_NAME: &str = "i3t";
 ///
 /// 用节点密钥签证书失败。
 pub fn client_config(key: &NodeKey, expected: PublicKey, alpn: &[u8]) -> Result<ClientConfig, TlsError> {
+    client_config_with(&Identity::new(key)?, expected, alpn)
+}
+
+/// 和 [`client_config`] 一样，只是用已经签好的 [`Identity`]，不再签一次证书。
+///
+/// # Errors
+///
+/// TLS 库不接受这份配置（不会发生在 [`Identity::new`] 签出来的证书上）。
+pub fn client_config_with(identity: &Identity, expected: PublicKey, alpn: &[u8]) -> Result<ClientConfig, TlsError> {
     let provider = provider();
     let verifier = PinnedServer { expected, algorithms: provider.signature_verification_algorithms };
-    let (certificate, private_key) = identity(key)?;
     let mut config = ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(verifier))
-        .with_client_auth_cert(vec![certificate], private_key)?;
+        .with_client_auth_cert(vec![identity.certificate.clone()], identity.private_key.clone_key())?;
     config.alpn_protocols = vec![alpn.to_vec()];
     Ok(config)
 }
@@ -56,15 +64,53 @@ pub fn server_config(
     is_allowed: impl Fn(&PublicKey) -> bool + Send + Sync + 'static,
     alpn: &[u8],
 ) -> Result<ServerConfig, TlsError> {
+    server_config_with(&Identity::new(key)?, is_allowed, alpn)
+}
+
+/// 和 [`server_config`] 一样，只是用已经签好的 [`Identity`]，不再签一次证书。
+///
+/// # Errors
+///
+/// TLS 库不接受这份配置（不会发生在 [`Identity::new`] 签出来的证书上）。
+pub fn server_config_with(
+    identity: &Identity,
+    is_allowed: impl Fn(&PublicKey) -> bool + Send + Sync + 'static,
+    alpn: &[u8],
+) -> Result<ServerConfig, TlsError> {
     let provider = provider();
     let verifier = AllowedClients { is_allowed: Box::new(is_allowed), algorithms: provider.signature_verification_algorithms };
-    let (certificate, private_key) = identity(key)?;
     let mut config = ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_client_cert_verifier(Arc::new(verifier))
-        .with_single_cert(vec![certificate], private_key)?;
+        .with_single_cert(vec![identity.certificate.clone()], identity.private_key.clone_key())?;
     config.alpn_protocols = vec![alpn.to_vec()];
     Ok(config)
+}
+
+/// 用节点密钥自签的证书，连同私钥：本节点在 TLS 里出示的身份。
+///
+/// 签一次可以给任意多份配置用。一个节点要给每个对端各做一份客户端配置（每份钉住一把不同的公钥）时，
+/// 不必每份都重新签一张证书。
+pub struct Identity {
+    certificate: CertificateDer<'static>,
+    private_key: PrivateKeyDer<'static>,
+}
+
+impl Identity {
+    /// # Errors
+    ///
+    /// 用节点密钥签证书失败。
+    pub fn new(key: &NodeKey) -> Result<Self, TlsError> {
+        let (certificate, private_key) = identity(key)?;
+        Ok(Self { certificate, private_key })
+    }
+}
+
+/// 私钥不能出现在日志里。
+impl std::fmt::Debug for Identity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Identity").finish_non_exhaustive()
+    }
 }
 
 /// 取出对端证书里的 Ed25519 公钥。`end_entity` 是握手时对端出示的第一张证书。
@@ -289,6 +335,21 @@ mod tests {
         let server = server_config(&bob, |_| false, ALPN).unwrap();
         let (_client, server) = handshake(client, server);
         assert!(matches!(server, Err(rustls::Error::InvalidCertificate(CertificateError::ApplicationVerificationFailure))));
+    }
+
+    #[test]
+    fn one_identity_serves_configs_pinned_to_different_peers() {
+        let (alice, bob, carol) = (NodeKey::generate().unwrap(), NodeKey::generate().unwrap(), NodeKey::generate().unwrap());
+        let identity = Identity::new(&alice).unwrap();
+        let alice_public = alice.public();
+        for peer in [&bob, &carol] {
+            let client = client_config_with(&identity, peer.public(), ALPN).unwrap();
+            let server = server_config(peer, move |key| *key == alice_public, ALPN).unwrap();
+            let (client, server) = handshake(client, server);
+            assert_eq!(peer_key(&client.unwrap().peer_certificates().unwrap()[0]).unwrap(), peer.public());
+            assert_eq!(peer_key(&server.unwrap().peer_certificates().unwrap()[0]).unwrap(), alice.public());
+        }
+        assert!(!format!("{identity:?}").contains("private"), "Debug 不能带出私钥");
     }
 
     #[test]
