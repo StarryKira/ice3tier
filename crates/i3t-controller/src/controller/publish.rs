@@ -165,6 +165,7 @@ impl Inner {
             netmap.version = version;
             tracing::debug!(node = %id, version, peers = netmap.peers.len(), relays = netmap.relays.len(), "下发 netmap");
             if self.send(id, ToNode::Snapshot(Box::new(netmap))) {
+                self.counters.snapshots_sent += 1;
                 let sync = self.sync.entry(id).or_default();
                 sync.state.sent = version;
                 sync.sent_at = Some(Instant::now());
@@ -196,6 +197,7 @@ impl Inner {
             // 只影响界面上的"最近在线"，不值得让调用方的操作失败。
             tracing::warn!(%node, "记录节点最近在线的时间失败：{err}");
         }
+        self.drop_route_queries(node);
         self.stop_waiting_for(live.network, node);
     }
 

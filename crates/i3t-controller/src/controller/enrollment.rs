@@ -7,7 +7,7 @@ use i3t_model::control::{EnrollToken, Hello, ToNode};
 use i3t_proto::{NodeId, PublicKey};
 use tokio::sync::mpsc;
 
-use super::nodes::{allocate_address, check_address, inherit, require_node};
+use super::nodes::{allocate_address, check_address, check_node_name, inherit, require_node};
 use super::protocol::clip;
 use super::{Admitted, Controller, Inner, naming};
 use crate::error::{Entity, Error, Rejection, error_chain};
@@ -172,6 +172,24 @@ impl Inner {
     }
 }
 
+/// 重名时最多试到几号。再多说明这个主机名本身没有区分度，不如叫 `node-<编号>`。
+const MAX_NAME_SUFFIX: u32 = 99;
+
+/// 按节点上报的主机名给新节点起名字：主机名本身，被占用（或者在冷却期）时加 `-2`、`-3`……
+/// 主机名取不出合法的名字、或者序号用完了，返回 `None`，节点叫 `node-<编号>`。
+fn name_after_hostname(store: &Store, network: NetworkId, hostname: &str, now: Timestamp) -> Result<Option<String>, Error> {
+    let Some(base) = naming::from_hostname(hostname).filter(|base| !naming::is_default_node_name(base)) else { return Ok(None) };
+    let candidates = std::iter::once(base.clone()).chain((2..=MAX_NAME_SUFFIX).map(|index| format!("{base}-{index}")));
+    for candidate in candidates.filter(|candidate| !naming::is_default_node_name(candidate)) {
+        match check_node_name(store, network, &candidate, now) {
+            Ok(()) => return Ok(Some(candidate)),
+            Err(Error::NameTaken(_) | Error::NameCoolingDown { .. }) => {}
+            Err(other) => return Err(other),
+        }
+    }
+    Ok(None)
+}
+
 /// 用掉令牌，建出节点。令牌指名继任时，新节点接手原节点的名字、虚拟 IP、标签和指向它的配置，原节点被删掉。
 fn create_node(
     store: &Store,
@@ -202,15 +220,19 @@ fn create_node(
         new.name = Some(old.name.clone());
         new.virtual_ip = old.virtual_ip;
         new.tags.extend(old.tags.iter().cloned());
-    } else if let Some(preset) = token.virtual_ip {
-        check_address(store, &network, preset, now)
-            .map_err(|err| EnrollFailure::Rejected(Rejection::AddressUnavailable(err.to_string())))?;
-        new.virtual_ip = preset;
     } else {
-        new.virtual_ip = allocate_address(store, &network, now).map_err(|err| match err {
-            Error::RangeExhausted(_) => EnrollFailure::Rejected(Rejection::RangeExhausted),
-            other => EnrollFailure::Internal(other),
-        })?;
+        new.name = name_after_hostname(store, network.id, &hello.hostname, now)?;
+        new.virtual_ip = match token.virtual_ip {
+            Some(preset) => {
+                check_address(store, &network, preset, now)
+                    .map_err(|err| EnrollFailure::Rejected(Rejection::AddressUnavailable(err.to_string())))?;
+                preset
+            }
+            None => allocate_address(store, &network, now).map_err(|err| match err {
+                Error::RangeExhausted(_) => EnrollFailure::Rejected(Rejection::RangeExhausted),
+                other => EnrollFailure::Internal(other),
+            })?,
+        };
     }
     let id = store.insert_node(&new)?;
     let node = store.node(id)?.ok_or(Error::NotFound(Entity::Node))?;

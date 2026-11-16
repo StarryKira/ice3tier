@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use i3t_crypto::NodeKey;
 use i3t_model::Netmap;
 use i3t_model::admin::{CreateEnrollToken, CreateNetwork, Network, NetworkId};
-use i3t_model::control::{Declared, EnrollToken, Hello, Signal, ToController, ToNode};
+use i3t_model::control::{Declared, EnrollToken, Hello, PROTOCOL_REVISION, Report, SelfUpdate, Signal, ToController, ToNode};
+use i3t_model::update::{SignedManifest, UpdateStatus, UpdateTiming};
 use i3t_proto::{NodeId, PublicKey};
 use tokio::sync::mpsc;
 
@@ -32,6 +33,14 @@ pub(crate) struct Member {
     pub(crate) snapshots: Vec<Netmap>,
     pub(crate) signals: Vec<(NodeId, Signal)>,
     pub(crate) revoked: bool,
+    /// 收到的更新指令，按先后。
+    pub(crate) orders: Vec<(SignedManifest, UpdateTiming)>,
+    /// 收到了几次撤回。
+    pub(crate) cancels: usize,
+    /// 对取包请求的回答：编号，和数据或者给不了的原因。
+    pub(crate) chunks: Vec<(u64, Result<Vec<u8>, String>)>,
+    /// 收到的路由查询：编号和问的对端。
+    pub(crate) queries: Vec<(u64, NodeId)>,
     /// 还没确认的版本。测试要自己控制确认的时机时用。
     unacked: Option<u64>,
 }
@@ -89,15 +98,32 @@ impl Lab {
     }
 
     pub(crate) fn enroll(&mut self, key: PublicKey, secret: &str, declared: Declared) -> Result<Member, crate::Rejection> {
+        self.enroll_as(key, secret, &hello(declared))
+    }
+
+    /// 带着指定的自我介绍注册。
+    pub(crate) fn enroll_as(&mut self, key: PublicKey, secret: &str, hello: &Hello) -> Result<Member, crate::Rejection> {
         let (outbox, inbox) = mpsc::channel(64);
-        let session = self.controller.enroll(key, secret, &hello(declared), REMOTE, outbox)?;
+        let session = self.controller.enroll(key, secret, hello, REMOTE, outbox)?;
         Ok(Member::new(key, session, inbox))
+    }
+
+    /// 一个节点带着指定的自我介绍加入网络，并且保持在线。
+    pub(crate) fn join_as(&mut self, network: NetworkId, hello: &Hello) -> Member {
+        let secret = self.secret(network, &CreateEnrollToken::default());
+        let key = self.fresh_key();
+        self.enroll_as(key, &secret, hello).expect("注册应该成功")
     }
 
     /// 已经注册过的节点重新连上来。
     pub(crate) fn connect(&mut self, key: PublicKey, declared: Declared) -> Result<Member, crate::Rejection> {
+        self.connect_as(key, &hello(declared))
+    }
+
+    /// 已经注册过的节点带着指定的自我介绍重新连上来。
+    pub(crate) fn connect_as(&mut self, key: PublicKey, hello: &Hello) -> Result<Member, crate::Rejection> {
         let (outbox, inbox) = mpsc::channel(64);
-        let session = self.controller.hello(key, &hello(declared), REMOTE, outbox)?;
+        let session = self.controller.hello(key, hello, REMOTE, outbox)?;
         Ok(Member::new(key, session, inbox))
     }
 
@@ -125,8 +151,20 @@ impl Lab {
 
 impl Member {
     fn new(key: PublicKey, session: Admitted, inbox: mpsc::Receiver<ToNode>) -> Self {
-        let mut member =
-            Self { id: session.node, key, session, inbox, snapshots: Vec::new(), signals: Vec::new(), revoked: false, unacked: None };
+        let mut member = Self {
+            id: session.node,
+            key,
+            session,
+            inbox,
+            snapshots: Vec::new(),
+            signals: Vec::new(),
+            revoked: false,
+            orders: Vec::new(),
+            cancels: 0,
+            chunks: Vec::new(),
+            queries: Vec::new(),
+            unacked: None,
+        };
         member.receive();
         assert_eq!(member.snapshots.len(), 1, "报到之后 controller 应该先发来一份 netmap");
         member
@@ -146,9 +184,23 @@ impl Member {
                 ToNode::Revoked => self.revoked = true,
                 ToNode::Rejected { reason } => panic!("已经报到的连接上不应该收到 rejected：{reason}"),
                 ToNode::Heartbeat => {}
+                ToNode::Update { manifest, timing } => self.orders.push((manifest, timing)),
+                ToNode::UpdateCancel => self.cancels += 1,
+                ToNode::PackageChunk { request, data } => self.chunks.push((request, Ok(data))),
+                ToNode::PackageUnavailable { request, reason } => self.chunks.push((request, Err(reason))),
+                ToNode::RouteQuery { request, peer } => self.queries.push((request, peer)),
             }
         }
         received
+    }
+
+    pub(crate) fn send(&self, controller: &Controller, message: ToController) {
+        controller.handle(self.session, REMOTE, message).unwrap();
+    }
+
+    /// 上报一次，带着这个更新进度。
+    pub(crate) fn report_update(&self, controller: &Controller, status: UpdateStatus) {
+        self.send(controller, ToController::Report(Report { update: Some(status), ..Report::default() }));
     }
 
     /// 确认收到的最新一份 netmap。
@@ -176,8 +228,14 @@ impl Member {
     }
 }
 
+/// 最初那一版节点的自我介绍：不报主机名，不懂更新。
 pub(crate) fn hello(declared: Declared) -> Hello {
-    Hello { version: "0.1.0".to_owned(), platform: "linux-x86_64".to_owned(), declared, port: 20330 }
+    Hello { version: "0.1.0".to_owned(), platform: "linux-x86_64".to_owned(), declared, port: 20330, ..Hello::default() }
+}
+
+/// 现在这一版节点的自我介绍：懂更新，能自己更新。
+pub(crate) fn modern_hello(version: &str) -> Hello {
+    Hello { version: version.to_owned(), protocol: PROTOCOL_REVISION, self_update: Some(SelfUpdate::ABLE), ..hello(Declared::default()) }
 }
 
 pub(crate) const CAN_DO_ALL: Declared = Declared { exit: true, relay: true, forward: true };

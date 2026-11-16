@@ -8,11 +8,13 @@ mod common;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use common::{Link, Node, PATIENCE, Running, eventually, fast_timing, hello, settle};
+use common::{Link, Node, PATIENCE, Publisher, Running, eventually, fast_timing, hello, settle};
 use i3t_controller::Timing;
+use i3t_controller::webui::WebUi;
 use i3t_crypto::NodeKey;
-use i3t_model::admin::{CreateRule, Direction, RelaySettings};
-use i3t_model::control::{Declared, Report, Signal, ToController, ToNode};
+use i3t_model::admin::{CreateRule, Direction, PackageState, PathSource, RelaySettings};
+use i3t_model::control::{Declared, MAX_PACKAGE_CHUNK, Report, Route, RouteAnswer, Signal, ToController, ToNode};
+use i3t_model::update::{UpdateStatus, UpdateTiming, Version};
 use i3t_proto::addr::{Query, Reply};
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
@@ -342,4 +344,99 @@ async fn shutting_down_closes_node_connections_and_marks_them_offline() {
     running.shutdown().await;
     assert_eq!(node.next().await, None);
     assert!(!controller.node(network.id, id).unwrap().node.online);
+}
+
+/// 等下一条不是 netmap、也不是心跳的消息。
+async fn next_other(node: &mut Node) -> ToNode {
+    loop {
+        match node.next().await.expect("连接不应该断") {
+            ToNode::Snapshot(_) => {}
+            other => return other,
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_node_is_told_to_update_and_fetches_the_package_in_chunks_over_the_link() {
+    let publisher = Publisher::new();
+    let cache = tempfile::tempdir().unwrap();
+    let program: Vec<u8> = (0..=u8::MAX).cycle().take(600_000).collect();
+    publisher.publish("0.2.0", &[("linux-x86_64", &program)]);
+    let running = Running::serve(publisher.controller(fast_timing(), cache.path()), WebUi::NotIncluded).await;
+    let network = running.network("home");
+    running.controller.check_release().unwrap();
+
+    let mut old = running.join(network.id, &[]).await;
+    let mut node = Node::new();
+    node.modern = Some("0.1.0");
+    node.enroll(&running, &running.secret(network.id, &[])).await.unwrap();
+    node.send(ToController::Report(Report { update: Some(UpdateStatus::Idle), routes_full: true, ..Report::default() })).await;
+    old.send(ToController::Report(Report::default())).await;
+    let wanted = || running.controller.update_overview().unwrap().release.unwrap().packages[0].state == PackageState::Fetching;
+    eventually("controller 知道这个平台的包有人要", wanted).await;
+    // 后台任务在测试里是关着的，替它取一次包。
+    let controller = std::sync::Arc::clone(&running.controller);
+    tokio::task::spawn_blocking(move || controller.fetch_packages().unwrap()).await.unwrap();
+
+    let ToNode::Update { manifest, timing } = next_other(&mut node).await else { panic!("应该收到更新指令") };
+    assert_eq!(timing, UpdateTiming::Idle);
+    let verified = publisher.keys().verify(&manifest).expect("清单原样带着签名发下来，节点自己验得过");
+    let version: Version = "0.2.0".parse().unwrap();
+    assert_eq!(verified.version, version);
+    let artifact = verified.artifacts["linux-x86_64"].clone();
+
+    // 一段一段取，取到清单上写的大小为止。
+    let mut received = Vec::new();
+    let mut request = 0;
+    while u64::try_from(received.len()).unwrap() < artifact.size {
+        request += 1;
+        let offset = u64::try_from(received.len()).unwrap();
+        let platform = "linux-x86_64".parse().unwrap();
+        node.send(ToController::PackageRequest { request, version: version.clone(), platform, offset, len: MAX_PACKAGE_CHUNK }).await;
+        let ToNode::PackageChunk { request: answered, data } = next_other(&mut node).await else { panic!("应该收到一段包") };
+        assert_eq!(answered, request);
+        assert!(!data.is_empty() && data.len() <= usize::try_from(MAX_PACKAGE_CHUNK).unwrap());
+        received.extend_from_slice(&data);
+    }
+    assert_eq!(received, program);
+    assert_eq!(request, 3, "600 KB 的包是三段");
+
+    // 没有的包明说给不了。
+    let platform = "macos-aarch64".parse().unwrap();
+    node.send(ToController::PackageRequest { request: 9, version, platform, offset: 0, len: 1 }).await;
+    assert!(matches!(next_other(&mut node).await, ToNode::PackageUnavailable { request: 9, .. }));
+
+    while let Some(message) = old.link().recv_within(Duration::from_millis(300)).await {
+        assert!(matches!(message, ToNode::Snapshot(_) | ToNode::Heartbeat), "最初那一版的节点不懂更新，不该收到 {message:?}");
+    }
+    let listed = running.controller.nodes(network.id).unwrap();
+    let outdated = listed.iter().find(|listed| listed.id == old.id()).unwrap();
+    assert!(outdated.update.available.is_some() && outdated.update.self_update.is_none());
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_route_query_goes_to_the_node_and_its_answer_comes_back_to_the_caller() {
+    let running = Running::start(fast_timing()).await;
+    let network = running.network("home");
+    let mut asked = Node::new();
+    asked.modern = Some("0.2.0");
+    asked.enroll(&running, &running.secret(network.id, &[])).await.unwrap();
+    let mut old = running.join(network.id, &[]).await;
+    let (from, to) = (asked.id(), old.id());
+    settle(&mut [&mut asked, &mut old]).await;
+
+    let controller = std::sync::Arc::clone(&running.controller);
+    let asking = tokio::spawn(async move { controller.path(network.id, from, to).await.unwrap() });
+    let ToNode::RouteQuery { request, peer } = next_other(&mut asked).await else { panic!("应该收到路由查询") };
+    assert_eq!(peer, to);
+    let answer = RouteAnswer { peer, route: Some(Route::Relay { relays: vec![to] }), rtt_ms: Some(31), since: None };
+    asked.send(ToController::RouteAnswer { request, answer }).await;
+
+    let view = timeout(PATIENCE, asking).await.unwrap().unwrap();
+    assert_eq!((view.forward.source, view.forward.rtt_ms), (PathSource::Query, Some(31)));
+    assert_eq!(view.forward.route, Some(Route::Relay { relays: vec![to] }));
+    assert_eq!(view.reverse.source, PathSource::None, "最初那一版的节点不会被问，它也没有上报过");
+    assert!(old.stays_quiet(Duration::from_millis(200)).await, "配置已经收敛，它不该再收到任何东西");
+    running.shutdown().await;
 }

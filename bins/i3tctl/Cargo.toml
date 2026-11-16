@@ -25,3 +25,6 @@ workspace = true
 [dev-dependencies]
 i3t-controller = { path = "../../crates/i3t-controller" }
 i3t-crypto = { path = "../../crates/i3t-crypto" }
+i3t-update = { path = "../../crates/i3t-update" }
+ring.workspace = true
+tempfile.workspace = true

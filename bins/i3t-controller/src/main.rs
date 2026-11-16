@@ -9,8 +9,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use clap::Parser;
+use i3t_controller::webui::{Asset, WebUi};
 use i3t_controller::{Controller, ServeOptions, Server};
 use tracing_subscriber::EnvFilter;
+
+/// 构建时打进来的 WebUI：`web/dist` 里的全部文件。构建的时候没有 `web/dist` 的话是空的（见 `build.rs`）。
+static WEBUI: &[Asset] = include!(concat!(env!("OUT_DIR"), "/webui_assets.rs"));
 
 /// 日志级别用这个环境变量调，写法和 `RUST_LOG` 相同，例如 `I3T_LOG=debug`。
 const LOG_ENV: &str = "I3T_LOG";
@@ -34,7 +38,7 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:20332")]
     admin_listen: SocketAddr,
 
-    /// WebUI 的静态文件目录。给了就挂在管理 API 的"/"上
+    /// 从这个目录取 WebUI 的静态文件，而不用程序自带的那一份
     #[arg(long)]
     static_dir: Option<PathBuf>,
 
@@ -60,7 +64,9 @@ async fn main() -> anyhow::Result<()> {
 
     let opened =
         Controller::open(&args.data_dir, args.public_addr.clone()).with_context(|| format!("打开数据目录 {}", args.data_dir.display()))?;
-    let controller = opened.controller;
+    // 发布清单里的"需要的 controller 最低版本"是和可执行文件的版本比的。
+    let version = env!("CARGO_PKG_VERSION").parse().context("这个程序的版本号不是合法的语义化版本")?;
+    let controller = opened.controller.with_version(version);
     let fresh_token = match opened.admin_token {
         Some(token) => Some(token),
         None if args.reset_admin_token => Some(controller.issue_admin_token().context("重新生成管理令牌")?),
@@ -75,12 +81,23 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let options = ServeOptions { node_listen: args.listen, admin_listen: args.admin_listen, static_dir: args.static_dir };
+    let webui = match args.static_dir {
+        Some(dir) => WebUi::Dir(dir),
+        None if WEBUI.is_empty() => WebUi::NotIncluded,
+        None => WebUi::Embedded(WEBUI),
+    };
+    let webui_from = match &webui {
+        WebUi::Dir(_) => "指定的目录",
+        WebUi::Embedded(_) => "程序自带",
+        WebUi::NotIncluded => "这次构建没有带",
+    };
+    let options = ServeOptions { node_listen: args.listen, admin_listen: args.admin_listen, webui, follow_releases: true };
     let server = Server::bind(Arc::new(controller), options).await.context("绑定端口")?;
     tracing::info!(
         nodes = %server.node_addr().context("查询节点协议的监听地址")?,
         admin = %server.admin_addr().context("查询管理 API 的监听地址")?,
         public = %args.public_addr,
+        webui = webui_from,
         "controller 已启动"
     );
     if !args.admin_listen.ip().is_loopback() {

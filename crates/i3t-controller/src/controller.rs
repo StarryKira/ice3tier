@@ -10,17 +10,21 @@ mod credentials;
 mod enrollment;
 mod forwards;
 mod listeners;
+mod metrics;
 mod naming;
 mod networks;
 mod nodes;
 mod pairs;
 mod protocol;
 mod publish;
+mod rollout;
+mod routes;
 mod rules;
 #[cfg(test)]
 pub(crate) mod testing;
 #[cfg(test)]
 mod tests;
+mod update;
 mod views;
 
 use std::collections::BTreeMap;
@@ -34,6 +38,7 @@ use i3t_crypto::{NodeKey, tls};
 use i3t_model::Netmap;
 use i3t_model::admin::{LogEntry, NetworkId, Node, NodeRef, Status, Timestamp};
 use i3t_model::control::ToNode;
+use i3t_model::update::{UpdateStatus, Version};
 use i3t_proto::{NodeId, PublicKey};
 use tokio::sync::{Notify, mpsc};
 
@@ -45,6 +50,7 @@ use crate::sync::NodeSync;
 
 pub use protocol::Admitted;
 pub(crate) use publish::Seeds;
+pub use routes::RouteAnswers;
 
 /// 节点协议在 TLS 上的 ALPN。
 pub const ALPN: &[u8] = b"i3t-ctl/1";
@@ -72,6 +78,9 @@ pub struct Timing {
     pub liveness_timeout: Duration,
     /// 新连接要在这么久之内完成 TLS 握手并发来第一条消息。
     pub handshake_timeout: Duration,
+    /// 一个 relay 更新完重新连上来之后，过这么久才轮到同一个网络里的下一个 relay 更新：
+    /// 挂靠它的节点要重新建好中转会话，换路的时候才有路可换。
+    pub relay_settle: Duration,
 }
 
 impl Default for Timing {
@@ -83,6 +92,7 @@ impl Default for Timing {
             heartbeat_idle: Duration::from_secs(20),
             liveness_timeout: Duration::from_secs(35),
             handshake_timeout: Duration::from_secs(10),
+            relay_settle: Duration::from_secs(30),
         }
     }
 }
@@ -96,6 +106,10 @@ pub struct Controller {
     inner: Mutex<Inner>,
     /// 有延后的下发时叫醒后台任务。
     wake: Notify,
+    /// 有包要取时叫醒取包的后台任务。
+    release_wake: Notify,
+    /// 设置变了、要尽快重新查发布源时叫醒查发布源的后台任务。
+    check_wake: Notify,
 }
 
 /// [`Controller::open`] 的结果。
@@ -115,7 +129,15 @@ pub(crate) struct Inner {
     pub(crate) live: BTreeMap<NodeId, Live>,
     /// 等着延后重算的节点。
     pub(crate) dirty: BTreeMap<NodeId, Deferred>,
+    /// 各个节点最近上报的路由表。节点离线之后留着，界面上显示成过期的；controller 重启就没有了。
+    pub(crate) routes: BTreeMap<NodeId, routes::Reported>,
+    /// 已经发给节点、还在等回答的路由查询。
+    pub(crate) route_queries: BTreeMap<u64, routes::PendingQuery>,
+    /// 节点更新：已知的发布、包、设置、轮次。
+    pub(crate) updates: update::Updates,
+    pub(crate) counters: metrics::Counters,
     next_conn: u64,
+    next_request: u64,
     last_purge: Option<Instant>,
 }
 
@@ -129,7 +151,12 @@ pub(crate) struct Live {
     pub(crate) flows: u32,
     pub(crate) tx_bytes: u64,
     pub(crate) rx_bytes: u64,
-    pub(crate) routes: BTreeMap<NodeId, i3t_model::control::RouteEntry>,
+    /// 节点说的节点协议是第几版。后来加的消息只发给够新的节点。
+    pub(crate) protocol: u32,
+    /// 节点这次连接上最近一次报的更新进度；还没有上报过（或者它不懂更新）时是 `None`。
+    pub(crate) update: Option<UpdateStatus>,
+    /// 这次连接上发给它的更新指令。
+    pub(crate) order: Option<rollout::Order>,
 }
 
 pub(crate) struct Deferred {
@@ -149,7 +176,7 @@ impl Controller {
         fs::create_dir_all(data_dir).map_err(|source| Error::Io { path: data_dir.to_owned(), source })?;
         let key = load_or_create_key(&data_dir.join(KEY_FILE))?;
         let store = Store::open(&data_dir.join(DATABASE_FILE))?;
-        let controller = Self::new(store, key, public_addr, Timing::default())?;
+        let controller = Self::new(store, key, public_addr, Timing::default())?.with_release_cache(data_dir.join(update::CACHE_DIR));
         let admin_token = if controller.has_admin_token() { None } else { Some(controller.issue_admin_token()?) };
         Ok(Opened { controller, admin_token })
     }
@@ -161,6 +188,8 @@ impl Controller {
     /// 读存储失败。
     pub fn new(store: Store, key: NodeKey, public_addr: String, timing: Timing) -> Result<Self, Error> {
         let admin_token = store.meta(ADMIN_TOKEN_META)?.and_then(|hash| <[u8; DIGEST_LEN]>::try_from(hash).ok());
+        let version: Version = env!("CARGO_PKG_VERSION").parse().expect("Cargo 保证包的版本号是合法的语义化版本");
+        let updates = update::Updates::load(&store, version)?;
         let mut inner = Inner {
             store,
             timing,
@@ -168,11 +197,25 @@ impl Controller {
             sync: BTreeMap::new(),
             live: BTreeMap::new(),
             dirty: BTreeMap::new(),
+            routes: BTreeMap::new(),
+            route_queries: BTreeMap::new(),
+            updates,
+            counters: metrics::Counters::default(),
             next_conn: 0,
+            next_request: 0,
             last_purge: None,
         };
         inner.load_sync()?;
-        Ok(Self { key, public_addr, timing, admin_token: Mutex::new(admin_token), inner: Mutex::new(inner), wake: Notify::new() })
+        Ok(Self {
+            key,
+            public_addr,
+            timing,
+            admin_token: Mutex::new(admin_token),
+            inner: Mutex::new(inner),
+            wake: Notify::new(),
+            release_wake: Notify::new(),
+            check_wake: Notify::new(),
+        })
     }
 
     #[must_use]
@@ -231,13 +274,16 @@ impl Controller {
     /// 读存储失败。
     pub fn status(&self) -> Result<Status, Error> {
         let inner = self.lock();
+        let updates = &inner.updates;
+        let newer = updates.release.as_ref().map(|release| &release.manifest.version).filter(|version| **version > updates.version);
         Ok(Status {
-            version: env!("CARGO_PKG_VERSION").to_owned(),
+            version: updates.version.to_string(),
             controller_key: self.public_key(),
             public_addr: self.public_addr.clone(),
             networks: count(inner.store.networks()?.len()),
             nodes: inner.store.node_count(None)?,
             online: count(inner.live.len()),
+            newer_version: newer.cloned(),
         })
     }
 
@@ -284,10 +330,19 @@ impl Controller {
         self.inner.lock().expect("controller state mutex poisoned")
     }
 
-    /// 操作留下了要后台任务接着做的事时叫醒它：有延后的下发，或者有节点欠着确认（要有人盯着它是不是等得太久）。
+    /// 还没有别人拿着这个 controller 的时候直接改它里面的东西，给 `with_…` 这几个装配用的方法用。
+    fn inner_mut(&mut self) -> &mut Inner {
+        self.inner.get_mut().expect("controller state mutex poisoned")
+    }
+
+    /// 操作留下了要后台任务接着做的事时叫醒它：有延后的下发，有节点欠着确认（要有人盯着它是不是等得太久），
+    /// 或者有 relay 更新完在等站稳。有包要取时另外叫醒管发布的后台任务。
     pub(crate) fn wake_if_needed(&self, inner: &Inner) {
-        if !inner.dirty.is_empty() || inner.sync.values().any(NodeSync::is_waiting) {
+        if !inner.dirty.is_empty() || inner.sync.values().any(NodeSync::is_waiting) || inner.updates.next_rollout.is_some() {
             self.wake.notify_one();
+        }
+        if inner.updates.packages.values().any(|package| *package == update::Package::Wanted) {
+            self.release_wake.notify_one();
         }
     }
 
@@ -314,6 +369,12 @@ impl Inner {
     pub(crate) fn next_conn(&mut self) -> u64 {
         self.next_conn += 1;
         self.next_conn
+    }
+
+    /// 发给节点的查询的编号。
+    pub(crate) fn next_request(&mut self) -> u64 {
+        self.next_request += 1;
+        self.next_request
     }
 
     /// 管理 API 里的节点：存储里的记录，加上它现在在不在线、netmap 发到了第几版。
@@ -343,12 +404,17 @@ impl Inner {
             netmap_version: state.version,
             sent_version: state.sent,
             acked_version: state.acked,
+            hostname: record.hostname.clone(),
+            update: self.node_update(record),
         }
     }
 
     fn tick(&mut self, now: Instant, wall: Timestamp) -> Result<Option<Instant>, Error> {
         self.give_up_on_slow_acks(now);
         let next = self.flush_due(now)?;
+        if self.updates.next_rollout.is_some_and(|at| at <= now) {
+            self.roll_out()?;
+        }
         if self.last_purge.is_none_or(|last| now.duration_since(last) >= PURGE_INTERVAL) {
             self.last_purge = Some(now);
             self.store.purge_expired_tokens(wall)?;
@@ -356,7 +422,7 @@ impl Inner {
         }
         // 还有节点欠着确认时，隔一会儿要回来看它们是不是等得太久了。
         let waiting = self.sync.values().any(NodeSync::is_waiting).then(|| now + self.timing.ack_timeout.min(SWEEP_INTERVAL));
-        Ok([next, waiting].into_iter().flatten().min())
+        Ok([next, waiting, self.updates.next_rollout].into_iter().flatten().min())
     }
 }
 

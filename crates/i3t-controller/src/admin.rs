@@ -3,10 +3,11 @@
 //! 路径、请求体和应答体的说明在 `docs/admin-api.md`，数据结构在 `i3t_model::admin`。
 //! 这里每个处理函数只做三件事：取出路径和请求体，调用 [`Controller`] 上对应的方法，把结果写成 JSON。
 //!
-//! 所有请求都要带管理令牌（`Authorization: Bearer <令牌>`）。只有一个管理员，没有角色。
+//! `/api/v1` 下面的请求都要带管理令牌（`Authorization: Bearer <令牌>`）。只有一个管理员，没有角色。
+//! 不要令牌的只有两样：WebUI 的静态文件（[`WebUi`]），和 `/metrics`。后者只有合计的数，没有节点的名字和地址，
+//! 这样抓指标的程序不用拿着能改一切的管理令牌。
 
 use std::net::SocketAddr;
-use std::path::Path as FsPath;
 use std::sync::Arc;
 
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
@@ -18,19 +19,19 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use i3t_model::admin::{
-    API_PREFIX, ApiError, CreateCredential, CreateEnrollToken, CreateNetwork, CreateRule, ErrorBody, ErrorCode, ForwardInput,
-    ListenerInput, NetworkId, PairInput, RelaySettings, Succeed, UpdateNetwork, UpdateNode, UpdateRule,
+    API_PREFIX, ApiError, CreateCredential, CreateEnrollToken, CreateNetwork, CreateRule, ErrorBody, ErrorCode, ForceUpdate, ForwardInput,
+    ListenerInput, NetworkId, PairInput, RelaySettings, ResumeUpdate, Succeed, UpdateNetwork, UpdateNode, UpdateRule, UpdateSettings,
 };
 use i3t_model::netmap::ExitRole;
 use i3t_proto::NodeId;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tower_http::services::{ServeDir, ServeFile};
 
 use crate::controller::Controller;
 use crate::error::{Error, error_chain};
 use crate::server::blocking;
+use crate::webui::WebUi;
 
 /// 操作记录一次最多取多少条，和不写 `limit` 时取多少条。
 const MAX_LOG_LIMIT: u32 = 1000;
@@ -39,12 +40,16 @@ const DEFAULT_LOG_LIMIT: u32 = 100;
 type App = Arc<Controller>;
 type Reply = Result<Response, Failure>;
 
-/// 管理 API 的全部路由。给了 `static_dir` 时，API 之外的路径从这个目录取文件（WebUI），找不到的路径回 `index.html`。
-pub fn router(controller: Arc<Controller>, static_dir: Option<&FsPath>) -> Router {
+/// 管理 API 的全部路由，加上 `/metrics`。别的路径交给 `webui`。
+pub fn router(controller: Arc<Controller>, webui: &WebUi) -> Router {
     let network = "/networks/{network}";
     let api = Router::new()
         .route("/status", get(status))
         .route("/log", get(log))
+        .route("/update", get(show_update).patch(set_update))
+        .route("/update/check", post(check_update))
+        .route("/update/resume", post(resume_update))
+        .route("/update/force", post(force_update_all))
         .route("/networks", get(list_networks).post(create_network))
         .route(network, get(show_network).patch(update_network).delete(delete_network))
         .route(&format!("{network}/overview"), get(overview))
@@ -55,6 +60,9 @@ pub fn router(controller: Arc<Controller>, static_dir: Option<&FsPath>) -> Route
         .route(&format!("{network}/nodes/{{node}}/succeed"), post(succeed))
         .route(&format!("{network}/nodes/{{node}}/routes"), get(routes))
         .route(&format!("{network}/nodes/{{node}}/access"), get(node_access))
+        .route(&format!("{network}/nodes/{{node}}/update"), get(show_node_update).post(force_node_update))
+        .route(&format!("{network}/routes"), get(route_matrix))
+        .route(&format!("{network}/path"), get(path))
         .route(&format!("{network}/tokens"), get(list_tokens).post(create_token))
         .route(&format!("{network}/tokens/{{id}}"), axum::routing::delete(delete_token))
         .route(&format!("{network}/rules"), get(list_rules).post(create_rule))
@@ -72,14 +80,10 @@ pub fn router(controller: Arc<Controller>, static_dir: Option<&FsPath>) -> Route
         .fallback(no_such_endpoint)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(middleware::from_fn_with_state(Arc::clone(&controller), require_admin))
-        .with_state(controller);
+        .with_state(Arc::clone(&controller));
 
-    let router = Router::new().nest(API_PREFIX, api);
-    match static_dir {
-        // 单页应用的前端路由：不是文件的路径都回 index.html。
-        Some(dir) => router.fallback_service(ServeDir::new(dir).fallback(ServeFile::new(dir.join("index.html")))),
-        None => router.fallback(no_such_endpoint),
-    }
+    let router = Router::new().route("/metrics", get(metrics)).with_state(controller).nest(API_PREFIX, api);
+    webui.attach(router)
 }
 
 /// 出错时的应答：HTTP 状态码加上统一格式的 JSON。
@@ -112,7 +116,10 @@ impl From<Error> for Failure {
             | ErrorCode::NetworkNotEmpty
             | ErrorCode::NotDeclared
             | ErrorCode::PredecessorOnline
-            | ErrorCode::Conflict => StatusCode::CONFLICT,
+            | ErrorCode::Conflict
+            | ErrorCode::NodeOffline
+            | ErrorCode::CannotSelfUpdate
+            | ErrorCode::NoUpdate => StatusCode::CONFLICT,
             // `ErrorCode` 以后可能加新的值；这里没有专门对应的一律按内部错误报。
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -258,6 +265,56 @@ struct ListenerQuery {
 struct CheckQuery {
     from: NodeId,
     to: NodeId,
+}
+
+/// Prometheus 的文本格式。
+const METRICS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
+
+async fn metrics(State(app): State<App>) -> Reply {
+    let text = blocking(&app, Controller::metrics).await?;
+    Ok(([(header::CONTENT_TYPE, METRICS_CONTENT_TYPE)], text).into_response())
+}
+
+async fn show_update(State(app): State<App>) -> Reply {
+    ok(&app, Controller::update_overview).await
+}
+
+async fn set_update(State(app): State<App>, Body(request): Body<UpdateSettings>) -> Reply {
+    ok(&app, move |controller| controller.set_update_settings(&request)).await
+}
+
+/// 查发布源要走网络，可能要等几十秒；它在阻塞线程上跑，不占着运行时。
+async fn check_update(State(app): State<App>) -> Reply {
+    ok(&app, Controller::check_release).await
+}
+
+async fn resume_update(State(app): State<App>, Body(request): Body<ResumeUpdate>) -> Reply {
+    ok(&app, move |controller| controller.resume_update(&request.version)).await
+}
+
+async fn force_update_all(State(app): State<App>, Body(request): Body<ForceUpdate>) -> Reply {
+    ok(&app, move |controller| controller.force_update_all(request.timing)).await
+}
+
+async fn show_node_update(State(app): State<App>, Path((network, node)): Path<(NetworkId, NodeId)>) -> Reply {
+    ok(&app, move |controller| controller.node_update(network, node)).await
+}
+
+async fn force_node_update(
+    State(app): State<App>,
+    Path((network, node)): Path<(NetworkId, NodeId)>,
+    Body(request): Body<ForceUpdate>,
+) -> Reply {
+    ok(&app, move |controller| controller.force_update(network, node, request.timing)).await
+}
+
+async fn route_matrix(State(app): State<App>, Path(network): Path<NetworkId>) -> Reply {
+    ok(&app, move |controller| controller.route_matrix(network)).await
+}
+
+async fn path(State(app): State<App>, Path(network): Path<NetworkId>, Query(query): Query<CheckQuery>) -> Reply {
+    let view = app.path(network, query.from, query.to).await?;
+    Ok(Json(view).into_response())
 }
 
 async fn status(State(app): State<App>) -> Reply {

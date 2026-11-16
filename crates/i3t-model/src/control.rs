@@ -11,6 +11,23 @@
 //!
 //! 保活：节点每 10 秒发一次 `Report`，它同时就是心跳。controller 连续 20 秒没有东西要发时发一个 [`ToNode::Heartbeat`]。
 //! controller 35 秒收不到节点的任何消息就把它记为离线；节点 90 秒收不到 controller 的任何消息就断开重连。
+//!
+//! 新旧版本共存靠三条规矩：
+//!
+//! - 已有的消息只加字段，不改、不删；新加的字段都有默认值，收的一方忽略不认识的字段。
+//! - 收到解析不了的一帧（多半是更新的版本才有的消息）就跳过它，连接接着用。
+//! - 最初那一版的节点做不到上一条，收到不认识的消息会断开重连。所以 controller 只对 [`Hello::protocol`] 够新的节点
+//!   发后来加的消息（见 [`PROTOCOL_REVISION`]）。
+//!
+//! 节点更新（白皮书 §10.5）在这条连接上的样子：
+//!
+//! ```text
+//! controller → 节点   Update { 清单与签名, 时机 }
+//! 节点 → controller   PackageRequest { 编号, 版本, 平台, 位置, 长度 }      一次一段，最多 MAX_PACKAGE_CHUNK 字节
+//! controller → 节点   PackageChunk { 编号, 数据 } 或 PackageUnavailable { 编号, 原因 }
+//! 节点 → controller   Report { …, update: 进行到哪一步 }                  每次变化都马上报一次
+//! controller → 节点   UpdateCancel                                       还没换上去的话就不要换了
+//! ```
 
 use std::fmt;
 use std::net::SocketAddr;
@@ -22,9 +39,20 @@ use i3t_proto::{NodeId, PublicKey};
 use serde::{Deserialize, Serialize};
 
 use crate::netmap::{Attachment, Netmap};
+use crate::update::{Platform, SelfUpdateBlocker, SignedManifest, UpdateStatus, UpdateTiming, Version};
 
 /// 一帧最长多少字节。netmap 随对端数量增长，千级节点时在几百 KB。
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
+
+/// 这个程序说的节点协议是第几版，节点在 [`Hello::protocol`] 里报给 controller。
+///
+/// - 0：最初的一版。收到不认识的消息会断开连接。
+/// - 1：认识 [`ToNode::Update`]、[`ToNode::UpdateCancel`]、[`ToNode::PackageChunk`]、[`ToNode::PackageUnavailable`]、
+///   [`ToNode::RouteQuery`]；从这一版起，解析不了的一帧只是被跳过。
+pub const PROTOCOL_REVISION: u32 = 1;
+
+/// 取更新包时一段最多多少字节。同一条连接上还有别的消息要走，所以不能大。
+pub const MAX_PACKAGE_CHUNK: u32 = 256 * 1024;
 
 /// 注册令牌：管理员在 WebUI 上生成，交给要加入的那台机器（`i3t join` 从标准输入读它）。
 ///
@@ -95,6 +123,21 @@ pub enum ToController {
         signal: Signal,
     },
     Heartbeat,
+    /// 取更新包里从 `offset` 开始的一段，最多 `len` 字节（不超过 [`MAX_PACKAGE_CHUNK`]）。
+    /// controller 用带着同一个 `request` 的 [`ToNode::PackageChunk`] 或 [`ToNode::PackageUnavailable`] 回答。
+    PackageRequest {
+        /// 节点自己编的号，用来把回答对上。
+        request: u64,
+        version: Version,
+        platform: Platform,
+        offset: u64,
+        len: u32,
+    },
+    /// 对 [`ToNode::RouteQuery`] 的回答。
+    RouteAnswer {
+        request: u64,
+        answer: RouteAnswer,
+    },
 }
 
 /// controller 发给节点的消息。
@@ -113,6 +156,48 @@ pub enum ToNode {
         reason: String,
     },
     Heartbeat,
+    /// 更新到这份清单说的版本。节点自己验签，验不过就不装。
+    ///
+    /// 节点还在做上一次要求的更新时又收到一条，就按新的来（换了时机，或者有了更新的版本）；已经取过的包不会重新取。
+    Update {
+        manifest: SignedManifest,
+        timing: UpdateTiming,
+    },
+    /// 上一次 [`ToNode::Update`] 要求的更新不要做了。程序还没有换上去的话节点就此停下；已经换了的不受影响。
+    UpdateCancel,
+    /// [`ToController::PackageRequest`] 要的那一段。可以比要的短，不会是空的。
+    PackageChunk {
+        request: u64,
+        #[serde(with = "base64_bytes")]
+        data: Vec<u8>,
+    },
+    /// controller 给不了 [`ToController::PackageRequest`] 要的包（没有这个版本，或者没有这个平台的包）。再要也没有用。
+    PackageUnavailable {
+        request: u64,
+        reason: String,
+    },
+    /// 问节点"到 `peer` 现在会怎么走"。节点用当前的测量值回答（[`ToController::RouteAnswer`]），不为此建立连接。
+    RouteQuery {
+        /// controller 编的号，回答里原样带回。
+        request: u64,
+        peer: NodeId,
+    },
+}
+
+/// 二进制内容在 JSON 里写成不带填充的 base64url，和公钥、签名的写法一致。
+mod base64_bytes {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&URL_SAFE_NO_PAD.encode(bytes))
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let text = <std::borrow::Cow<'de, str> as Deserialize>::deserialize(deserializer)?;
+        URL_SAFE_NO_PAD.decode(text.as_bytes()).map_err(serde::de::Error::custom)
+    }
 }
 
 /// 节点每次连上 controller 时的自我介绍。
@@ -127,6 +212,41 @@ pub struct Hello {
     /// 节点绑定的 UDP 端口。controller 把它和看到的来源 IP 拼成一个候选端点。
     #[serde(default)]
     pub port: u16,
+    /// 这台机器的主机名。节点第一次加入时 controller 用它起名字；取不到时是空的。
+    #[serde(default)]
+    pub hostname: String,
+    /// 节点说的节点协议是第几版，见 [`PROTOCOL_REVISION`]。最初那一版的节点不报，读成 0。
+    #[serde(default)]
+    pub protocol: u32,
+    /// 节点能不能自己更新（白皮书 §10.5）。不懂更新的旧版本节点不报，读成 `None`。
+    #[serde(default)]
+    pub self_update: Option<SelfUpdate>,
+}
+
+/// 节点能不能自己更新。不能的节点 controller 不会让它更新，界面上标出原因和手动更新的做法。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelfUpdate {
+    pub able: bool,
+    /// 不能的原因。比本程序新的节点报了一个这里不认识的原因时读成 `None`：只知道它不能。
+    #[serde(default, deserialize_with = "known_blocker")]
+    pub blocker: Option<SelfUpdateBlocker>,
+}
+
+impl SelfUpdate {
+    pub const ABLE: Self = Self { able: true, blocker: None };
+}
+
+/// 节点启动时查出来的结果：有原因就是不能，没有就是能。
+impl From<Option<SelfUpdateBlocker>> for SelfUpdate {
+    fn from(blocker: Option<SelfUpdateBlocker>) -> Self {
+        Self { able: blocker.is_none(), blocker }
+    }
+}
+
+/// 不认识的原因读成 `None`，不让整条 `Hello` 因此解析失败。
+fn known_blocker<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<SelfUpdateBlocker>, D::Error> {
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw.and_then(|value| serde_json::from_value(value).ok()))
 }
 
 /// 节点在本地声明的"可以承担"。声明本身不启用任何东西，启用由管理员在 WebUI 上决定；
@@ -162,9 +282,17 @@ pub struct Report {
     pub tx_bytes: u64,
     #[serde(default)]
     pub rx_bytes: u64,
-    /// 到各个对端当前怎么走，只报和上次不同的。
+    /// 到各个对端当前怎么走。`routes_full` 为假时只有和上次上报不同的。
     #[serde(default)]
     pub routes: Vec<RouteEntry>,
+    /// `routes` 是不是完整的路由表。每次连上 controller 之后的第一次上报是完整的，controller 用它整个替换手上的那一份；
+    /// 之后的上报只带变化的条目。
+    #[serde(default)]
+    pub routes_full: bool,
+    /// 节点上的更新进行到哪一步（白皮书 §10.5）。每次上报都带着；一有变化节点就马上报一次，不等定时上报。
+    /// 不懂更新的旧版本节点不报，读成 `None`。
+    #[serde(default)]
+    pub update: Option<UpdateStatus>,
 }
 
 /// 到一个对端当前走的路。
@@ -189,6 +317,29 @@ pub enum Route {
     Relay {
         relays: Vec<NodeId>,
     },
+}
+
+/// 节点对"到某个对端现在会怎么走"的回答，取自它的路由层当前的结论。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteAnswer {
+    pub peer: NodeId,
+    /// 现在走的路。`None` 表示这个对端不在节点的 netmap 里（访问规则没有把它们连通），节点对它没有任何结论。
+    pub route: Option<Route>,
+    /// 这条路上最近测到的往返延迟。
+    #[serde(default)]
+    pub rtt_ms: Option<u32>,
+    /// 这条路是什么时候、因为什么换上的。节点这次启动以来没有换过时是 `None`。
+    #[serde(default)]
+    pub since: Option<RouteSince>,
+}
+
+/// 一条路是多久之前换上的，以及换的原因。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteSince {
+    /// 多少秒之前。用间隔而不是时刻：节点和 controller 的时钟不一定对得上。
+    pub secs_ago: u64,
+    /// 路由层给的原因，给人看的。
+    pub reason: String,
 }
 
 /// 节点之间的信令：建立直连之前要交换的东西。
@@ -236,6 +387,90 @@ mod tests {
         assert_eq!(body.declared, Declared::default());
         let again: ToController = serde_json::from_str(&serde_json::to_string(&hello).unwrap()).unwrap();
         assert_eq!(again, hello);
+    }
+
+    #[test]
+    fn a_hello_from_the_first_version_reads_as_protocol_zero_without_update_support() {
+        let hello: Hello = serde_json::from_str(r#"{"version":"0.1.0","platform":"linux-x86_64","port":20330}"#).unwrap();
+        assert_eq!((hello.protocol, hello.self_update, hello.hostname.as_str()), (0, None, ""));
+    }
+
+    #[test]
+    fn self_update_has_a_stable_shape_and_tolerates_an_unknown_blocker() {
+        let able = serde_json::to_value(SelfUpdate::ABLE).unwrap();
+        assert_eq!(able, serde_json::json!({ "able": true, "blocker": null }));
+        let blocked = SelfUpdate::from(Some(SelfUpdateBlocker::Container));
+        assert_eq!(serde_json::to_value(blocked).unwrap(), serde_json::json!({ "able": false, "blocker": "container" }));
+        assert_eq!(serde_json::from_value::<SelfUpdate>(serde_json::json!({ "able": false, "blocker": "container" })).unwrap(), blocked);
+
+        let hello: Hello = serde_json::from_value(serde_json::json!({
+            "version": "9.0.0", "platform": "linux-x86_64", "protocol": 7,
+            "self_update": { "able": false, "blocker": "a_reason_added_later" }
+        }))
+        .unwrap();
+        assert_eq!(hello.self_update, Some(SelfUpdate { able: false, blocker: None }), "只知道它不能，原因不认识");
+        assert_eq!(hello.protocol, 7);
+    }
+
+    #[test]
+    fn update_messages_have_stable_json_shapes() {
+        let request = ToController::PackageRequest {
+            request: 3,
+            version: Version::new(0, 2, 0),
+            platform: "linux-x86_64".parse().unwrap(),
+            offset: 262_144,
+            len: MAX_PACKAGE_CHUNK,
+        };
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            serde_json::json!({ "type": "package_request", "request": 3, "version": "0.2.0", "platform": "linux-x86_64", "offset": 262_144, "len": 262_144 })
+        );
+        let chunk = ToNode::PackageChunk { request: 3, data: vec![0xfb, 0xff, 0x00] };
+        let wire = serde_json::to_value(&chunk).unwrap();
+        assert_eq!(wire, serde_json::json!({ "type": "package_chunk", "request": 3, "data": "-_8A" }));
+        assert_eq!(serde_json::from_value::<ToNode>(wire).unwrap(), chunk);
+        assert_eq!(serde_json::to_value(ToNode::UpdateCancel).unwrap(), serde_json::json!({ "type": "update_cancel" }));
+
+        let order: ToNode = serde_json::from_value(serde_json::json!({
+            "type": "update", "timing": "after_drain", "manifest": { "manifest": "{}", "signature": "A".repeat(86) }
+        }))
+        .unwrap();
+        assert!(matches!(order, ToNode::Update { timing: UpdateTiming::AfterDrain, .. }));
+    }
+
+    #[test]
+    fn a_report_carries_the_update_status_and_says_whether_the_route_table_is_complete() {
+        let old: Report = serde_json::from_str(r#"{"flows":2}"#).unwrap();
+        assert_eq!((old.update.clone(), old.routes_full), (None, false));
+        let report = Report { routes_full: true, update: Some(UpdateStatus::WaitingForIdle { version: Version::new(0, 2, 0) }), ..old };
+        let wire = serde_json::to_value(&report).unwrap();
+        assert_eq!(wire["update"], serde_json::json!({ "state": "waiting_for_idle", "version": "0.2.0" }));
+        assert_eq!(wire["routes_full"], true);
+        assert_eq!(serde_json::from_value::<Report>(wire).unwrap(), report);
+    }
+
+    #[test]
+    fn route_queries_and_answers_have_stable_json_shapes() {
+        let peer = NodeId::new(4).unwrap();
+        let query = serde_json::to_value(ToNode::RouteQuery { request: 9, peer }).unwrap();
+        assert_eq!(query, serde_json::json!({ "type": "route_query", "request": 9, "peer": 4 }));
+        let answer = RouteAnswer {
+            peer,
+            route: Some(Route::Direct { addr: "1.2.3.4:20330".parse().unwrap() }),
+            rtt_ms: Some(12),
+            since: Some(RouteSince { secs_ago: 30, reason: "直连打通了".to_owned() }),
+        };
+        let wire = serde_json::to_value(ToController::RouteAnswer { request: 9, answer: answer.clone() }).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "type": "route_answer", "request": 9,
+                "answer": { "peer": 4, "route": { "via": "direct", "addr": "1.2.3.4:20330" }, "rtt_ms": 12,
+                            "since": { "secs_ago": 30, "reason": "直连打通了" } }
+            })
+        );
+        let unknown: RouteAnswer = serde_json::from_value(serde_json::json!({ "peer": 4, "route": null })).unwrap();
+        assert_eq!(unknown, RouteAnswer { peer, route: None, rtt_ms: None, since: None });
     }
 
     #[test]

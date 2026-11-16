@@ -3,11 +3,15 @@
 //! 这里不碰 socket：连接由 [`crate::node_server`] 管，它把收到的消息交到这里，从发送队列里取要发的消息。
 //! 节点是谁由连接的 TLS 握手确定，所以这里的入口拿到的公钥和节点编号都是认证过的。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::net::{IpAddr, SocketAddr};
+use std::path::Path;
 
-use i3t_model::control::{Hello, Report, Signal, ToController, ToNode};
+use i3t_model::control::{Hello, MAX_PACKAGE_CHUNK, Report, Signal, ToController, ToNode};
 use i3t_model::netmap::Attachment;
+use i3t_model::update::{Platform, Version};
 use i3t_proto::{NodeId, PublicKey};
 use tokio::sync::mpsc;
 
@@ -20,6 +24,8 @@ use crate::store::NodeRecord;
 const MAX_ATTACHMENTS: usize = 16;
 /// 节点自报的版本号、平台最长留这么多个字符。
 const MAX_HELLO_TEXT: usize = 64;
+/// 节点自报的主机名最长留这么多个字符。域名最长就是这么长。
+const MAX_HOSTNAME: usize = 253;
 /// 到 relay 的延迟变化不超过这个数（毫秒）、也不超过原来的四分之一时，不算变化。
 /// 延迟每次测出来都差几毫秒，不这样就每次上报都要给全部对端重发 netmap。
 const RTT_NOISE_MS: u32 = 10;
@@ -64,10 +70,20 @@ impl Controller {
     /// 读写存储失败。这条消息没有处理完，连接可以继续用。
     pub fn handle(&self, session: Admitted, remote: IpAddr, message: ToController) -> Result<(), Error> {
         let mut inner = self.lock();
-        if !inner.live.get(&session.node).is_some_and(|live| live.conn == session.conn) {
+        if inner.live.get(&session.node).is_none_or(|live| live.conn != session.conn) {
             return Ok(());
         }
         let outcome = match message {
+            // 取包要读文件，不能拿着锁做。
+            ToController::PackageRequest { request, version, platform, offset, len } => {
+                drop(inner);
+                self.package_request(session, request, &version, &platform, PackageRange { offset, len });
+                return Ok(());
+            }
+            ToController::RouteAnswer { request, answer } => {
+                inner.route_answered(session.node, request, answer);
+                Ok(())
+            }
             ToController::Report(report) => inner.report(session.node, report),
             ToController::Ack { version } => inner.ack(session.node, version),
             ToController::Signal { to, signal } => {
@@ -101,6 +117,66 @@ impl Controller {
     pub fn online_nodes(&self) -> Vec<NodeId> {
         self.lock().live.keys().copied().collect()
     }
+
+    /// 节点要更新包里的一段。包是公开的发布文件，所以只要是已经报到的节点就给，不看它有没有收到过更新指令。
+    fn package_request(&self, session: Admitted, request: u64, version: &Version, platform: &Platform, range: PackageRange) {
+        let is_current = |inner: &Inner| inner.live.get(&session.node).is_some_and(|live| live.conn == session.conn);
+        let cached = {
+            let inner = self.lock();
+            if !is_current(&inner) {
+                return;
+            }
+            inner.updates.cached_package(version, platform.as_str()).map(|(path, artifact)| (path.to_owned(), artifact.size))
+        };
+        let chunk = match cached {
+            Some((path, size)) => range.read(&path, size),
+            None => Err(format!("controller 上没有 {version} 的 {platform} 平台的包")),
+        };
+        let mut inner = self.lock();
+        if !is_current(&inner) {
+            return;
+        }
+        let reply = match chunk {
+            Ok(data) => {
+                inner.counters.package_bytes += u64::try_from(data.len()).unwrap_or(u64::MAX);
+                ToNode::PackageChunk { request, data }
+            }
+            Err(reason) => {
+                tracing::warn!(node = %session.node, %version, %platform, offset = range.offset, %reason, "给不了节点要的这一段更新包");
+                ToNode::PackageUnavailable { request, reason }
+            }
+        };
+        inner.send(session.node, reply);
+    }
+}
+
+/// 节点要的那一段：从哪里起，最多多少字节。
+#[derive(Debug, Clone, Copy)]
+struct PackageRange {
+    offset: u64,
+    len: u32,
+}
+
+impl PackageRange {
+    /// 从缓存里的包读出这一段。给出来的不会是空的，也不会超过 [`MAX_PACKAGE_CHUNK`]；读不出来时返回给节点看的原因。
+    fn read(self, path: &Path, size: u64) -> Result<Vec<u8>, String> {
+        let wanted = u64::from(self.len.min(MAX_PACKAGE_CHUNK)).min(size.saturating_sub(self.offset));
+        if wanted == 0 {
+            return Err(format!("要的位置 {} 不在包里（包有 {size} 字节），或者要的长度是 0", self.offset));
+        }
+        let read = || -> std::io::Result<Vec<u8>> {
+            let mut file = File::open(path)?;
+            file.seek(SeekFrom::Start(self.offset))?;
+            let mut data = Vec::with_capacity(usize::try_from(wanted).unwrap_or(0));
+            file.take(wanted).read_to_end(&mut data)?;
+            Ok(data)
+        };
+        match read() {
+            Ok(data) if !data.is_empty() => Ok(data),
+            Ok(_) => Err("缓存里的包比清单上写的短".to_owned()),
+            Err(error) => Err(format!("读不了缓存里的包：{error}")),
+        }
+    }
 }
 
 impl Inner {
@@ -114,8 +190,19 @@ impl Inner {
     ) -> Result<Admitted, Error> {
         let seeds = self.apply_hello(&mut node, hello, remote)?;
         let conn = self.next_conn();
-        let live =
-            Live { conn, network: node.network, outbox, mapping_varies: None, flows: 0, tx_bytes: 0, rx_bytes: 0, routes: BTreeMap::new() };
+        let live = Live {
+            conn,
+            network: node.network,
+            outbox,
+            mapping_varies: None,
+            flows: 0,
+            tx_bytes: 0,
+            rx_bytes: 0,
+            protocol: hello.protocol,
+            update: None,
+            order: None,
+        };
+        self.drop_route_queries(node.id);
         if self.live.insert(node.id, live).is_some() {
             // 旧连接的发送队列随着被替换掉而关闭，那条连接自己会结束。
             tracing::info!(node = %node.id, "同一个节点的新连接顶替了旧连接");
@@ -127,13 +214,19 @@ impl Inner {
             self.live.remove(&node.id);
             return Err(err);
         }
+        // 更新的指令不在这里发：要等它的第一次上报，才知道它是带着什么回来的（见 `rollout`）。
+        self.relay_is_back(&node);
         Ok(Admitted { node: node.id, conn })
     }
 
     fn rehello(&mut self, id: NodeId, hello: &Hello, remote: IpAddr) -> Result<(), Error> {
         let Some(mut node) = self.store.node(id)? else { return Ok(()) };
         let seeds = self.apply_hello(&mut node, hello, remote)?;
-        self.refresh(node.network, seeds, None)
+        if let Some(live) = self.live.get_mut(&id) {
+            live.protocol = hello.protocol;
+        }
+        self.refresh(node.network, seeds, None)?;
+        self.roll_out()
     }
 
     /// 记下节点的自我介绍。节点撤回了某项声明时，已经启用的那项能力随之关闭。返回因此要重算的节点。
@@ -143,6 +236,17 @@ impl Inner {
         node.declared = hello.declared;
         node.platform = clip(&hello.platform);
         node.version = clip(&hello.version);
+        node.hostname = hello.hostname.chars().filter(|ch| !ch.is_control()).take(MAX_HOSTNAME).collect();
+        node.self_update = hello.self_update;
+        // 它已经在跑那个失败过的版本（或者更新的）了：多半是手动换的程序。那条失败不再有意义。
+        let outgrown = node
+            .update_failure
+            .as_ref()
+            .is_some_and(|failure| node.version.parse::<Version>().is_ok_and(|running| running >= failure.version));
+        if outgrown {
+            node.update_failure = None;
+            self.store.set_node_update_failure(node.id, None)?;
+        }
 
         let mut whole_network = false;
         let mut affected = BTreeSet::from([node.id]);
@@ -187,14 +291,15 @@ impl Inner {
 
     fn report(&mut self, id: NodeId, report: Report) -> Result<(), Error> {
         let Some(node) = self.store.node(id)? else { return Ok(()) };
-        if let (Some(live), Some(sync)) = (self.live.get_mut(&id), self.sync.get(&id)) {
+        if let Some(live) = self.live.get_mut(&id) {
             live.mapping_varies = report.mapping_varies;
             live.flows = report.flows;
             live.tx_bytes = report.tx_bytes;
             live.rx_bytes = report.rx_bytes;
-            // 只记到它 netmap 里的对端的路由：别的编号它本来就不该知道，记下来只会让表无限长。
-            live.routes.retain(|peer, _| sync.knows(*peer));
-            live.routes.extend(report.routes.into_iter().filter(|entry| sync.knows(entry.peer)).map(|entry| (entry.peer, entry)));
+        }
+        self.routes_reported(id, report.routes, report.routes_full);
+        if let Some(status) = report.update {
+            self.update_reported(&node, status)?;
         }
 
         let mut endpoints: Vec<SocketAddr> = Vec::with_capacity(report.endpoints.len().min(MAX_ENDPOINTS));
@@ -297,6 +402,24 @@ mod tests {
         assert!(same_endpoints(&[a, b], &[b, a]));
         assert!(!same_endpoints(&[a, b], &[a]));
         assert!(!same_endpoints(&[a], &[b]));
+    }
+
+    #[test]
+    fn a_package_range_is_clamped_to_the_chunk_limit_and_the_end_of_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("i3t-linux-x86_64");
+        let content: Vec<u8> = (0..=u8::MAX).cycle().take(600_000).collect();
+        std::fs::write(&path, &content).unwrap();
+        let size = u64::try_from(content.len()).unwrap();
+        let read = |offset, len| PackageRange { offset, len }.read(&path, size);
+
+        assert_eq!(read(0, 10).unwrap(), content[..10]);
+        assert_eq!(read(1000, u32::MAX).unwrap(), content[1000..1000 + 262_144], "一段不超过上限");
+        assert_eq!(read(599_990, 4096).unwrap(), content[599_990..], "最后一段只给到文件末尾");
+        assert!(read(600_000, 10).is_err() && read(700_000, 10).is_err(), "文件末尾之后没有东西可给");
+        assert!(read(0, 0).is_err(), "不给空的段");
+        assert!(PackageRange { offset: 0, len: 10 }.read(&dir.path().join("missing"), 100).is_err());
+        assert!(read(0, 10).is_ok() && PackageRange { offset: 500_000, len: 10 }.read(&path, 100).is_err());
     }
 
     #[test]

@@ -3,8 +3,8 @@
 use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, SocketAddr};
 
-use i3t_model::admin::{NetworkId, RelaySettings, Timestamp};
-use i3t_model::control::Declared;
+use i3t_model::admin::{NetworkId, RelaySettings, Timestamp, UpdateFailure};
+use i3t_model::control::{Declared, SelfUpdate};
 use i3t_model::netmap::{Attachment, ExitRole, Reach, RoutingMode};
 use i3t_proto::{NodeId, PublicKey};
 use rusqlite::{OptionalExtension, Row, named_params, params};
@@ -38,6 +38,12 @@ pub struct NodeRecord {
     pub attached: Vec<Attachment>,
     pub platform: String,
     pub version: String,
+    /// 节点上报的主机名；旧版本的节点不报，是空的。
+    pub hostname: String,
+    /// 节点自己报的能不能自己更新。`None` 表示它没有报过。
+    pub self_update: Option<SelfUpdate>,
+    /// 最近一次归因于版本的更新失败。
+    pub update_failure: Option<UpdateFailure>,
     pub created_at: Timestamp,
     pub last_seen_at: Option<Timestamp>,
     pub netmap: NetmapState,
@@ -79,6 +85,9 @@ impl NodeRecord {
             attached: row.get::<_, Json<Vec<Attachment>>>("attached")?.0,
             platform: row.get("platform")?,
             version: row.get("version")?,
+            hostname: row.get("hostname")?,
+            self_update: row.get::<_, Option<Json<SelfUpdate>>>("self_update")?.map(|json| json.0),
+            update_failure: row.get::<_, Option<Json<UpdateFailure>>>("update_failure")?.map(|json| json.0),
             created_at: row.get::<_, Unsigned>("created_at")?.0,
             last_seen_at: row.get::<_, Option<Unsigned>>("last_seen_at")?.map(|at| at.0),
             netmap: NetmapState {
@@ -176,8 +185,9 @@ impl Store {
         Ok(self.conn.query_row("SELECT COUNT(*) FROM nodes WHERE ?1 IS NULL OR network_id = ?1", params![network], |row| row.get(0))?)
     }
 
-    /// 写回一个节点的身份和设置：名字、虚拟 IP、标签、声明、启用的能力、各个开关、平台和版本。
-    /// 上报的内容、最近在线时间和 netmap 的进度各有各的方法，不在这里写。
+    /// 写回一个节点的身份和设置：名字、虚拟 IP、标签、声明、启用的能力、各个开关，以及它自我介绍里的
+    /// 平台、版本、主机名和能不能自己更新。
+    /// 上报的内容、最近在线时间、netmap 的进度和更新失败的记录各有各的方法，不在这里写。
     ///
     /// # Errors
     ///
@@ -186,7 +196,7 @@ impl Store {
         self.conn.execute(
             "UPDATE nodes SET name = :name, virtual_ip = :ip, tags = :tags, declared = :declared, relay = :relay, exit = :exit,
                               dial_out_only = :dial_out_only, routing = :routing, reach = :reach, pinned_relays = :pinned,
-                              platform = :platform, version = :version
+                              platform = :platform, version = :version, hostname = :hostname, self_update = :self_update
              WHERE id = :id",
             named_params! {
                 ":id": SqlNode(node.id),
@@ -202,8 +212,20 @@ impl Store {
                 ":pinned": Json(&node.pinned_relays),
                 ":platform": node.platform,
                 ":version": node.version,
+                ":hostname": node.hostname,
+                ":self_update": node.self_update.map(Json),
             },
         )?;
+        Ok(())
+    }
+
+    /// 记下（或者清掉）节点最近一次归因于版本的更新失败。
+    ///
+    /// # Errors
+    ///
+    /// 写数据库失败。
+    pub fn set_node_update_failure(&self, id: NodeId, failure: Option<&UpdateFailure>) -> Result<(), StoreError> {
+        self.conn.execute("UPDATE nodes SET update_failure = ?2 WHERE id = ?1", params![SqlNode(id), failure.map(Json)])?;
         Ok(())
     }
 
@@ -319,6 +341,8 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    use i3t_model::update::{FailureKind, SelfUpdateBlocker};
+
     use super::*;
     use crate::store::NewNetwork;
     use crate::store::fixtures::{home, key, new_node};
@@ -343,6 +367,8 @@ mod tests {
         node.routing = Some(RoutingMode::LowestCost);
         node.reach = Some(Reach::DirectOnly);
         node.pinned_relays = vec![NodeId::new(9).unwrap()];
+        node.hostname = "nas-01.lan".to_owned();
+        node.self_update = Some(SelfUpdate::from(Some(SelfUpdateBlocker::Container)));
         store.update_node(&node).unwrap();
 
         let endpoints: Vec<SocketAddr> = vec!["192.168.1.5:20330".parse().unwrap(), "[2001:db8::1]:20330".parse().unwrap()];
@@ -353,7 +379,15 @@ mod tests {
         store.set_node_netmap(id, 5, &[7; DIGEST_LEN]).unwrap();
         store.set_node_sent(id, 5).unwrap();
         store.set_node_acked(id, 4).unwrap();
+        let failure = UpdateFailure {
+            version: "0.3.0".parse().unwrap(),
+            kind: FailureKind::VersionRejected,
+            reason: "自检没有通过".to_owned(),
+            at: 3_000,
+        };
+        store.set_node_update_failure(id, Some(&failure)).unwrap();
 
+        node.update_failure = Some(failure);
         node.endpoints = endpoints;
         node.attached = attached;
         node.observed = Some("198.51.100.4:20330".parse().unwrap());
@@ -364,6 +398,17 @@ mod tests {
         assert_eq!(store.nodes(network).unwrap(), vec![node]);
         assert_eq!(store.node_count(Some(network)).unwrap(), 1);
         assert_eq!(store.node_count(None).unwrap(), 1);
+
+        store.set_node_update_failure(id, None).unwrap();
+        assert_eq!(store.node(id).unwrap().unwrap().update_failure, None);
+    }
+
+    #[test]
+    fn a_new_node_has_no_hostname_and_has_not_said_whether_it_can_update_itself() {
+        let store = Store::open_in_memory().unwrap();
+        let network = store.insert_network(&home()).unwrap();
+        let node = store.node(store.insert_node(&new_node(network, 1)).unwrap()).unwrap().unwrap();
+        assert_eq!((node.hostname.as_str(), node.self_update, node.update_failure), ("", None, None));
     }
 
     #[test]

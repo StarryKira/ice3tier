@@ -1,11 +1,13 @@
 //! 把管理 API 的应答打印成给人看的样子。`--json` 时不经过这里。
 
 use i3t_model::admin::{
-    AccessCheck, AccessGraph, CreatedCredential, CreatedEnrollToken, Credential, Direction, EnrollTokenInfo, Forward, Listener, LogEntry,
-    Network, Node, NodeAccess, NodeDetail, NodeRef, Overview, PairSetting, RouteTable, Rule, Status, Timestamp,
+    AccessCheck, AccessGraph, CreatedCredential, CreatedEnrollToken, Credential, Direction, EnrollTokenInfo, ForcedUpdates, Forward,
+    Listener, LogEntry, Network, Node, NodeAccess, NodeDetail, NodeRef, NodeUpdate, Overview, PairSetting, PathLeg, PathSource, PathView,
+    RouteMatrix, RouteTable, Rule, Status, Timestamp, UpdateOverview, UpdateWait,
 };
 use i3t_model::control::Route;
 use i3t_model::netmap::DefaultAction;
+use i3t_model::update::{FailureKind, UpdateStatus, UpdateTiming};
 
 use crate::table::{NONE, Table, label, list, optional, yes_no};
 
@@ -15,6 +17,9 @@ pub fn status(status: &Status) {
     println!("  节点连接到  {}", status.public_addr);
     println!("  网络        {}", status.networks);
     println!("  节点        {}（在线 {}）", status.nodes, status.online);
+    if let Some(newer) = &status.newer_version {
+        println!("  有新版本    {newer}。controller 不会自己更新，请手动换上新的程序");
+    }
 }
 
 pub fn overview(overview: &Overview) {
@@ -112,6 +117,8 @@ pub fn node_detail(detail: &NodeDetail) {
     };
     println!("  状态          {seen}");
     println!("  版本与平台    {} / {}", node.version, node.platform);
+    println!("  主机名        {}", if node.hostname.is_empty() { NONE } else { &node.hostname });
+    println!("  更新          {}", update_summary(&node.update));
     let declared =
         [node.declared.relay.then_some("relay"), node.declared.exit.then_some("exit"), node.declared.forward.then_some("forward")];
     println!("  节点声明可作  {}", list(declared.into_iter().flatten()));
@@ -159,14 +166,196 @@ pub fn routes(table: &RouteTable) {
     }
     let mut rows = Table::new(&["PEER", "VIRTUAL-IP", "VIA", "RTT-MS", "DETAIL"]);
     for entry in &table.routes {
-        let (via, detail) = match &entry.route {
-            Route::None => ("none", NONE.to_owned()),
-            Route::Direct { addr } => ("direct", addr.to_string()),
-            Route::Relay { relays } => ("relay", list(relays.iter().map(|relay| format!("#{relay}")))),
-        };
+        let (via, detail) = route_cells(&entry.route);
         rows.row(vec![entry.peer.name.clone(), entry.peer.virtual_ip.to_string(), via.to_owned(), optional(entry.rtt_ms), detail]);
     }
     rows.print();
+}
+
+/// 一条路在表格里的两格：走法，和具体的地址或者经过的 relay。
+fn route_cells(route: &Route) -> (&'static str, String) {
+    match route {
+        Route::None => ("none", NONE.to_owned()),
+        Route::Direct { addr } => ("direct", addr.to_string()),
+        Route::Relay { relays } => ("relay", list(relays.iter().map(|relay| format!("#{relay}")))),
+    }
+}
+
+pub fn route_matrix(matrix: &RouteMatrix) {
+    let name = |id| matrix.nodes.iter().find(|node| node.node.id == id).map_or_else(|| format!("#{id}"), |node| node.node.name.clone());
+    let mut rows = Table::new(&["FROM", "TO", "VIA", "RTT-MS", "AGE-S", "STALE", "DETAIL"]);
+    for entry in &matrix.entries {
+        let (via, detail) = route_cells(&entry.route);
+        rows.row(vec![
+            name(entry.from),
+            name(entry.to),
+            via.to_owned(),
+            optional(entry.rtt_ms),
+            entry.age_secs.to_string(),
+            yes_no(entry.stale),
+            detail,
+        ]);
+    }
+    rows.print();
+    let silent = matrix.nodes.iter().filter(|node| !matrix.entries.iter().any(|entry| entry.from == node.node.id));
+    let silent = list(silent.map(|node| node.node.name.as_str()));
+    if silent != NONE {
+        println!("\n没有上报过路由的节点：{silent}");
+    }
+}
+
+pub fn path(view: &PathView) {
+    let mut rows = Table::new(&["FROM", "TO", "VIA", "RTT-MS", "SOURCE", "AGE-S", "DETAIL"]);
+    for leg in [&view.forward, &view.reverse] {
+        let (via, detail) = leg.route.as_ref().map_or((NONE, NONE.to_owned()), route_cells);
+        rows.row(vec![
+            leg.from.name.clone(),
+            leg.to.name.clone(),
+            via.to_owned(),
+            optional(leg.rtt_ms),
+            label(&leg.source),
+            optional(leg.age_secs),
+            detail,
+        ]);
+    }
+    rows.print();
+    for leg in [&view.forward, &view.reverse] {
+        if let Some(note) = path_note(leg) {
+            println!("{} → {}：{note}", leg.from.name, leg.to.name);
+        }
+    }
+}
+
+/// 一个方向上值得多说一句的事。
+fn path_note(leg: &PathLeg) -> Option<String> {
+    match leg.source {
+        PathSource::Query => leg.since.as_ref().map(|since| format!("{} 秒前换到这条路，原因：{}", since.secs_ago, since.reason)),
+        PathSource::Report => Some(format!("没有问到 {}（不在线、版本太旧或者没有按时回答），这是它最近上报的", leg.from.name)),
+        PathSource::None => Some(format!("没有数据：{} 没有上报过到 {} 的路，现在也问不到它", leg.from.name, leg.to.name)),
+        PathSource::NotPeers => Some(format!("{} 说 {} 不在它的配置里：访问规则没有把这两个节点连通", leg.from.name, leg.to.name)),
+        PathSource::Unknown => None,
+    }
+}
+
+pub fn update_overview(overview: &UpdateOverview) {
+    println!("自动更新    {}", if overview.auto_update { "开" } else { "关" });
+    println!("发布源      {}{}", overview.source, if overview.source_is_default { "（默认）" } else { "" });
+    println!("controller  {}", overview.controller_version);
+    match &overview.release {
+        Some(release) => {
+            println!("最新正式版  {}（发布于 {}）", release.version, time(release.published));
+            if release.controller_too_old {
+                println!(
+                    "  注意      这个版本的节点需要 controller 至少是 {}，现在不会下发。请先手动更新 controller",
+                    release.min_controller
+                );
+            } else if release.newer_than_controller {
+                println!("  提示      controller 自己也有新版本 {}，它不会自己更新，请手动换上新的程序", release.version);
+            }
+            let mut packages = Table::new(&["PLATFORM", "SIZE", "STATE", "ERROR"]);
+            for package in &release.packages {
+                packages.row(vec![
+                    package.platform.clone(),
+                    package.size.to_string(),
+                    label(&package.state),
+                    optional(package.error.as_deref()),
+                ]);
+            }
+            packages.print();
+        }
+        None => println!("最新正式版  还没有查到"),
+    }
+    println!("上次检查    {}", overview.checked_at.map_or_else(|| "还没有查过".to_owned(), time));
+    if let Some(error) = &overview.check_error {
+        println!("检查失败    {error}");
+    }
+    let nodes = overview.nodes;
+    println!(
+        "节点        共 {}：正在更新 {}，可以更新 {}，要手动更新 {}，更新失败 {}，已是最新 {}",
+        nodes.total, nodes.updating, nodes.outdated, nodes.manual, nodes.failed, nodes.up_to_date
+    );
+    for paused in &overview.paused {
+        let node = paused.node.as_ref().map_or("一个已经删除的节点", node_name);
+        println!("\n版本 {} 的自动更新已暂停：{node} 在 {} 更新失败（{}）", paused.version, time(paused.at), paused.reason);
+        println!("看过原因之后，用 i3tctl update resume {} 继续。", paused.version);
+    }
+}
+
+pub fn node_updates(nodes: &[Node]) {
+    let mut table = Table::new(&["ID", "NAME", "STATUS", "VERSION", "AVAILABLE", "SELF-UPDATE", "UPDATE"]);
+    for node in nodes {
+        let ability = match node.update.self_update {
+            None => "unknown".to_owned(),
+            Some(ability) if ability.able => "yes".to_owned(),
+            Some(ability) => ability.blocker.as_ref().map_or_else(|| "no".to_owned(), label),
+        };
+        table.row(vec![
+            node.id.to_string(),
+            node.name.clone(),
+            if node.online { "online".to_owned() } else { "offline".to_owned() },
+            node.version.clone(),
+            optional(node.update.available.as_ref()),
+            ability,
+            update_summary(&node.update),
+        ]);
+    }
+    table.print();
+}
+
+/// 强制更新一个节点之后的回显。
+pub fn node_update(name: &str, update: &NodeUpdate) {
+    println!("节点 {name}：{}", update_summary(update));
+}
+
+pub fn forced_updates(forced: &ForcedUpdates) {
+    match &forced.version {
+        Some(version) => println!("更新到 {version}："),
+        None => println!("没有可以下发的版本："),
+    }
+    println!("  已下发指令  {}", list(forced.ordered.iter().map(node_name)));
+    println!("  排队中      {}", list(forced.queued.iter().map(node_name)));
+    for skipped in &forced.skipped {
+        println!("  跳过        {}：{}", skipped.node.name, skipped.reason);
+    }
+}
+
+/// 一个节点的更新情况，写成一句话。
+fn update_summary(update: &NodeUpdate) -> String {
+    let timing = |timing: UpdateTiming| match timing {
+        UpdateTiming::Idle => "空闲时",
+        UpdateTiming::Now => "立刻",
+        UpdateTiming::AfterDrain => "排空后",
+    };
+    let progress = match &update.status {
+        UpdateStatus::Idle | UpdateStatus::Unknown => None,
+        UpdateStatus::Downloading { version, received, total } => Some(format!("正在取 {version} 的包（{received}/{total} 字节）")),
+        UpdateStatus::Verifying { version } => Some(format!("正在核对 {version} 的包")),
+        UpdateStatus::SelfCheck { version } => Some(format!("正在运行 {version} 的自检")),
+        UpdateStatus::WaitingForIdle { version } => Some(format!("{version} 已经准备好，在等节点空闲")),
+        UpdateStatus::Draining { version } => Some(format!("{version} 已经准备好，节点不再接新的流，在等手上的流结束")),
+        UpdateStatus::Installing { version } => Some(format!("正在换上 {version}")),
+        UpdateStatus::Restarting { version } => Some(format!("已经换上 {version}，正在重启")),
+        UpdateStatus::Confirmed { version } => Some(format!("已经更新到 {version}")),
+        UpdateStatus::Failed { version, kind, reason } => {
+            let blame = match kind {
+                FailureKind::VersionRejected => "这个版本在这台机器上不能用",
+                FailureKind::NotInstalled => "没有装成",
+            };
+            Some(format!("更新到 {} 失败（{blame}）：{reason}", optional(version.as_ref())))
+        }
+    };
+    let order = update.ordered.as_ref().map(|order| format!("已下发指令：{}更新到 {}", timing(order.timing), order.version));
+    let waiting = update.waiting.map(|waiting| match waiting {
+        UpdateWait::Package => "在等 controller 把它的平台的包取回来".to_owned(),
+        UpdateWait::RelayTurn => "在等前一个 relay 更新完重新上线".to_owned(),
+        UpdateWait::Unknown => "在等待".to_owned(),
+    });
+    let parts: Vec<String> = [progress, order, waiting].into_iter().flatten().collect();
+    match (&update.available, parts.is_empty()) {
+        (_, false) => parts.join("；"),
+        (Some(version), true) => format!("有新版本 {version}"),
+        (None, true) => "没有新版本".to_owned(),
+    }
 }
 
 pub fn node_access(access: &NodeAccess) {

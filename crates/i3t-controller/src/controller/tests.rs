@@ -3,6 +3,8 @@
 mod model;
 mod netmaps;
 mod ordering;
+mod routes;
+mod update;
 
 use i3t_model::Netmap;
 use i3t_model::admin::{CreateRule, Direction, NetworkId, UpdateNode};

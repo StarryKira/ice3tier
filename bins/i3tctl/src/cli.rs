@@ -75,6 +75,13 @@ pub enum Command {
     /// 访问关系：谁能访问谁
     #[command(subcommand)]
     Access(AccessCommand),
+    /// 节点程序的更新：设置、查发布源、让节点立即更新
+    #[command(subcommand)]
+    Update(UpdateCommand),
+    /// A 和 B 之间两个方向现在各走哪条路。先问两个节点，问不到的方向用它最近上报的
+    Path { a: String, b: String },
+    /// 整个网络的路由矩阵：每个节点到它的各个对端现在怎么走，取自各节点最近的上报
+    Routes,
 }
 
 #[derive(Subcommand)]
@@ -355,6 +362,43 @@ pub enum AccessCommand {
     Check { from: String, to: String },
 }
 
+#[derive(Subcommand)]
+pub enum UpdateCommand {
+    /// 更新的设置和现状：自动更新的开关、发布源、已知的最新版、被暂停的版本
+    Show,
+    /// 改设置
+    Set {
+        /// 自动更新的开关。开着时，有新版本的节点在空闲的时候自己更新
+        #[arg(long, value_name = "on|off")]
+        auto: Option<OnOff>,
+        /// 发布源：一个 https:// 或 http:// 地址，或者 controller 所在机器上的一个目录；default 表示项目的发布源
+        #[arg(long, value_name = "地址|目录|default")]
+        source: Option<String>,
+    },
+    /// 现在就查一次发布源
+    Check,
+    /// 各个节点的更新情况：有没有新版本、能不能自己更新、进行到哪一步
+    Nodes,
+    /// 让一个节点立即更新，不管自动更新开没开。默认马上重启，正在进行的流会断
+    Node {
+        node: String,
+        /// 排空后更新：节点不再接新的流，等手上的流结束再重启
+        #[arg(long)]
+        drain: bool,
+    },
+    /// 让全部节点立即更新。relay 仍然一个一个来
+    All {
+        /// 排空后更新
+        #[arg(long)]
+        drain: bool,
+    },
+    /// 继续一个因为有节点更新失败而被暂停的版本的自动更新
+    Resume {
+        /// 版本号，例如 0.3.0
+        version: String,
+    },
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 pub enum RoutingArg {
     /// 直连可用就走直连
@@ -506,6 +550,20 @@ mod tests {
         assert_eq!(parse("default"), Ok(None));
         assert_eq!(parse("lowest-cost"), Ok(Some(RoutingMode::LowestCost)));
         assert!(parse("fastest").is_err());
+    }
+
+    #[test]
+    fn update_and_path_commands_parse() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["i3tctl"], args].concat()).unwrap().command;
+        assert!(matches!(parse(&["update", "node", "nas", "--drain"]), Command::Update(UpdateCommand::Node { drain: true, .. })));
+        assert!(matches!(parse(&["update", "all"]), Command::Update(UpdateCommand::All { drain: false })));
+        assert!(matches!(
+            parse(&["update", "set", "--auto", "off"]),
+            Command::Update(UpdateCommand::Set { auto: Some(OnOff(false)), source: None })
+        ));
+        assert!(matches!(parse(&["path", "a", "b"]), Command::Path { .. }));
+        assert!(matches!(parse(&["routes"]), Command::Routes));
+        assert!(Cli::try_parse_from(["i3tctl", "update", "set", "--auto", "maybe"]).is_err());
     }
 
     #[test]

@@ -125,8 +125,9 @@ impl Inner {
     /// 两端都在线、但至少一端上报"没有可用的路"的节点对。
     fn unreachable_pairs(&self, view: &NetworkView) -> Vec<NodePair> {
         let mut pairs = BTreeSet::new();
-        for (&id, live) in &self.live {
-            let no_route = live.routes.values().filter(|entry| entry.route == Route::None).map(|entry| entry.peer);
+        let reporting = self.live.keys().filter_map(|&id| Some((id, self.current_routes(id)?)));
+        for (id, reported) in reporting {
+            let no_route = reported.entries.values().filter(|entry| entry.route == Route::None).map(|entry| entry.peer);
             pairs.extend(no_route.filter(|peer| self.is_online(*peer)).map(|peer| (id.min(peer), id.max(peer))));
         }
         let pair = |(a, b): (NodeId, NodeId)| Some(NodePair { a: node_ref(view.nodes.get(&a)?), b: node_ref(view.nodes.get(&b)?) });

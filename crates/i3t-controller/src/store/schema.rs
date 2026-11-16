@@ -6,7 +6,7 @@
 //! 列的写法：枚举和结构体按它们的 JSON 形式存在 TEXT 列里，地址存文本，公钥和哈希存 BLOB，虚拟 IP 存成整数，
 //! 时间是 Unix 秒。
 
-pub(super) const MIGRATIONS: &[&str] = &[V1];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2];
 
 const V1: &str = "
 CREATE TABLE meta (
@@ -140,4 +140,13 @@ CREATE TABLE oplog (
 
 CREATE INDEX nodes_by_network ON nodes(network_id);
 CREATE INDEX listeners_by_node ON listeners(node_id);
+";
+
+/// 节点更新（白皮书 §10.5）要记在节点上的东西，和节点上报的主机名。
+const V2: &str = "
+ALTER TABLE nodes ADD COLUMN hostname TEXT NOT NULL DEFAULT '';
+-- 节点自己报的能不能自己更新（JSON）。空值表示它没有报过：版本太旧，不懂更新。
+ALTER TABLE nodes ADD COLUMN self_update TEXT;
+-- 最近一次归因于版本的更新失败（JSON）。有它在，自动更新不再让这个节点装同一个版本。
+ALTER TABLE nodes ADD COLUMN update_failure TEXT;
 ";

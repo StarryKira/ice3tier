@@ -3,23 +3,28 @@
 // clippy.toml 里的 allow-unwrap-in-tests 只认 `#[test]` 函数本身，认不出集成测试里的辅助函数。
 #![allow(clippy::unwrap_used, reason = "整个文件都是测试代码，出错就该直接失败")]
 
+mod common;
+
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::Path;
 use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use i3t_controller::store::Store;
+use i3t_controller::webui::{Asset, WebUi};
 use i3t_controller::{Admitted, Controller, Timing, admin};
 use i3t_crypto::NodeKey;
 use i3t_model::admin as model;
-use i3t_model::control::{Declared, EnrollToken, Hello, Report, Route, RouteEntry, ToController, ToNode};
+use i3t_model::control::{Declared, EnrollToken, Hello, Report, Route, RouteEntry, SelfUpdate, ToController, ToNode};
+use i3t_model::update::{FailureKind, UpdateStatus, UpdateTiming};
 use i3t_proto::{NodeId, PublicKey};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tower::ServiceExt;
+
+use crate::common::{Publisher, modern_hello};
 
 const REMOTE: IpAddr = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
 
@@ -40,16 +45,20 @@ struct Member {
 
 impl Api {
     fn new() -> Self {
-        Self::with_static_dir(None)
+        Self::with_webui(&WebUi::NotIncluded)
     }
 
-    fn with_static_dir(static_dir: Option<&Path>) -> Self {
+    fn with_webui(webui: &WebUi) -> Self {
         let store = Store::open_in_memory().unwrap();
         let controller =
             Controller::new(store, NodeKey::generate().unwrap(), "ctl.example.com:20331".to_owned(), Timing::default()).unwrap();
+        Self::around(controller, webui)
+    }
+
+    fn around(controller: Controller, webui: &WebUi) -> Self {
         let token = controller.issue_admin_token().unwrap();
         let controller = Arc::new(controller);
-        Self { router: admin::router(Arc::clone(&controller), static_dir), controller, token, next_key: 0 }
+        Self { router: admin::router(Arc::clone(&controller), webui), controller, token, next_key: 0 }
     }
 
     async fn send(&self, request: Request<Body>) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
@@ -102,18 +111,27 @@ impl Api {
 
     /// 经 API 生成注册令牌，再让一个节点用它加入并保持在线。
     async fn join(&mut self, network: model::NetworkId, declared: Declared) -> Member {
+        self.join_as(network, &hello(declared)).await
+    }
+
+    /// 同上，节点带着指定的自我介绍。懂更新的节点顺带做第一次上报：controller 等它到了才会给节点下发更新指令。
+    async fn join_as(&mut self, network: model::NetworkId, hello: &Hello) -> Member {
         let created: model::CreatedEnrollToken = self.ok(Method::POST, &format!("/networks/{network}/tokens"), Some(json!({}))).await;
         let secret = created.token.parse::<EnrollToken>().unwrap().secret;
         self.next_key += 1;
         let key = PublicKey::from_bytes([self.next_key; PublicKey::LEN]);
         let (outbox, inbox) = mpsc::channel(64);
-        let session = self.controller.enroll(key, &secret, &hello(declared), REMOTE, outbox).unwrap();
+        let session = self.controller.enroll(key, &secret, hello, REMOTE, outbox).unwrap();
+        if hello.protocol > 0 {
+            let report = Report { update: Some(UpdateStatus::Idle), ..Report::default() };
+            self.controller.handle(session, REMOTE, ToController::Report(report)).unwrap();
+        }
         Member { id: session.node, key, session, _inbox: inbox }
     }
 }
 
 fn hello(declared: Declared) -> Hello {
-    Hello { version: "0.1.0".to_owned(), platform: "linux-x86_64".to_owned(), declared, port: 20330 }
+    Hello { version: "0.1.0".to_owned(), platform: "linux-x86_64".to_owned(), declared, port: 20330, ..Hello::default() }
 }
 
 const CAN_DO_ALL: Declared = Declared { exit: true, relay: true, forward: true };
@@ -558,11 +576,232 @@ async fn every_error_has_the_same_shape() {
     assert_eq!(wrong_method.code, model::ErrorCode::InvalidRequest);
     let missing = api.fails(Method::GET, &format!("/networks/{}/nodes/42", network.id), None, StatusCode::NOT_FOUND).await;
     assert_eq!(missing.code, model::ErrorCode::NotFound);
+}
 
-    // 没有配置静态目录时，API 之外的路径也是同样格式的 404。
-    let (status, _, bytes) = api.send(Request::builder().uri("/").body(Body::empty()).unwrap()).await;
-    let body: model::ErrorBody = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!((status, body.error.code), (StatusCode::NOT_FOUND, model::ErrorCode::NotFound));
+#[tokio::test]
+async fn a_build_without_the_web_ui_explains_itself_instead_of_serving_404s() {
+    let api = Api::new();
+    let get = |path: &str| Request::builder().uri(path).body(Body::empty()).unwrap();
+    for path in ["/", "/networks/1/nodes"] {
+        let (status, headers, bytes) = api.send(get(path)).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert!(headers.get(header::CONTENT_TYPE).unwrap().to_str().unwrap().starts_with("text/html"));
+        let page = String::from_utf8(bytes).unwrap();
+        assert!(page.contains("没有带 WebUI") && page.contains("--static-dir"), "{page}");
+    }
+    // API 不受影响：照样要令牌，不存在的接口照样是统一格式的 404。
+    let (status, _, _) = api.send(get("/api/v1/status")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let unknown = api.fails(Method::GET, "/no-such-endpoint", None, StatusCode::NOT_FOUND).await;
+    assert_eq!(unknown.code, model::ErrorCode::NotFound);
+}
+
+#[tokio::test]
+async fn the_embedded_web_ui_is_served_from_memory() {
+    static ASSETS: &[Asset] = &[
+        Asset { path: "index.html", bytes: b"<html>embedded</html>" },
+        Asset { path: "assets/index-3f2a.js", bytes: b"console.log('ui')" },
+        Asset { path: "favicon.svg", bytes: b"<svg/>" },
+    ];
+    let api = Api::with_webui(&WebUi::Embedded(ASSETS));
+    let get = |path: &str| Request::builder().uri(path).body(Body::empty()).unwrap();
+    let header_of = |headers: &axum::http::HeaderMap, name| headers.get(name).unwrap().to_str().unwrap().to_owned();
+
+    let (status, headers, bytes) = api.send(get("/")).await;
+    assert_eq!((status, bytes.as_slice()), (StatusCode::OK, b"<html>embedded</html>".as_slice()));
+    assert!(header_of(&headers, header::CONTENT_TYPE).starts_with("text/html"));
+    assert_eq!(header_of(&headers, header::CACHE_CONTROL), "no-cache", "index.html 每次都要问，这样换了版本马上看得到");
+
+    let (status, headers, bytes) = api.send(get("/assets/index-3f2a.js")).await;
+    assert_eq!((status, bytes.as_slice()), (StatusCode::OK, b"console.log('ui')".as_slice()));
+    assert!(header_of(&headers, header::CONTENT_TYPE).starts_with("text/javascript"));
+    assert!(header_of(&headers, header::CACHE_CONTROL).contains("immutable"), "名字里带哈希的文件可以一直缓存");
+    let (_, headers, _) = api.send(get("/favicon.svg")).await;
+    assert_eq!(header_of(&headers, header::CONTENT_TYPE), "image/svg+xml");
+
+    // 前端自己的路由：不是文件的路径回 index.html。
+    let (status, _, bytes) = api.send(get("/networks/1/nodes")).await;
+    assert_eq!((status, bytes.as_slice()), (StatusCode::OK, b"<html>embedded</html>".as_slice()));
+    let (status, _, _) = api.send(get("/api/v1/status")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "/api/v1 不会落到静态文件上");
+
+    // 打进去的文件里没有 index.html，等于没有带。
+    static BROKEN: &[Asset] = &[Asset { path: "assets/x.js", bytes: b"" }];
+    let (status, _, bytes) = Api::with_webui(&WebUi::Embedded(BROKEN)).send(get("/")).await;
+    assert!(status == StatusCode::OK && String::from_utf8(bytes).unwrap().contains("没有带 WebUI"));
+}
+
+#[tokio::test]
+async fn metrics_need_no_token_and_name_no_node() {
+    let mut api = Api::new();
+    let network = api.network("home").await;
+    let _member = api.join(network.id, Declared::default()).await;
+    let (status, headers, bytes) = api.send(Request::builder().uri("/metrics").body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers.get(header::CONTENT_TYPE).unwrap().to_str().unwrap().starts_with("text/plain; version=0.0.4"));
+    let text = String::from_utf8(bytes).unwrap();
+    for line in [
+        "i3t_controller_nodes 1\n",
+        "i3t_controller_nodes_online 1\n",
+        "i3t_controller_networks 1\n",
+        "# TYPE i3t_controller_snapshots_sent_total counter\n",
+    ] {
+        assert!(text.contains(line), "应该有 {line:?}：\n{text}");
+    }
+    assert!(text.contains("i3t_controller_snapshots_sent_total 1\n"), "{text}");
+    assert!(!text.contains("node-1") && !text.contains("10.66."), "指标里不该有节点的名字和地址：\n{text}");
+}
+
+#[tokio::test]
+async fn update_settings_checks_and_forced_updates_work_over_the_api() {
+    let publisher = Publisher::new();
+    let cache = tempfile::tempdir().unwrap();
+    let mut api = Api::around(publisher.controller(Timing::default(), cache.path()), &WebUi::NotIncluded);
+    let network = api.network("home").await;
+
+    let overview: model::UpdateOverview = api.ok(Method::GET, "/update", None).await;
+    assert!(overview.auto_update && !overview.source_is_default && overview.release.is_none() && overview.checked_at.is_none());
+    assert_eq!(overview.source, publisher.source());
+    let (_, raw) = api.call(Method::GET, "/update", None).await;
+    for field in
+        ["auto_update", "source", "source_is_default", "controller_version", "release", "checked_at", "check_error", "paused", "nodes"]
+    {
+        assert!(raw.get(field).is_some(), "应答里的字段总是全的，缺了 {field}：{raw}");
+    }
+
+    // 还没有发布：查不到是写在应答里的，不是请求失败。
+    let checked: model::UpdateOverview = api.ok(Method::POST, "/update/check", Some(json!({}))).await;
+    assert!(checked.release.is_none() && checked.check_error.is_some() && checked.checked_at.is_some());
+
+    publisher.publish("0.2.0", &[("linux-x86_64", b"the new program")]);
+    let checked: model::UpdateOverview = api.ok(Method::POST, "/update/check", Some(json!({}))).await;
+    let release = checked.release.unwrap();
+    assert_eq!((release.version.to_string().as_str(), release.packages.len(), checked.check_error), ("0.2.0", 1, None));
+    assert_eq!(release.packages[0].state, model::PackageState::NotNeeded);
+    let status: model::Status = api.ok(Method::GET, "/status", None).await;
+    assert_eq!(status.newer_version.map(|version| version.to_string()), Some("0.2.0".to_owned()), "controller 自己也有新版本");
+
+    let off: model::UpdateOverview = api.ok(Method::PATCH, "/update", Some(json!({ "auto_update": false }))).await;
+    assert!(!off.auto_update && off.source == publisher.source(), "没写的字段不动");
+    let bad = api.fails(Method::PATCH, "/update", Some(json!({ "source": "relative/dir" })), StatusCode::BAD_REQUEST).await;
+    assert_eq!(bad.code, model::ErrorCode::InvalidRequest);
+
+    // 节点的更新情况在节点列表、节点详情和单独的接口里都有。
+    let member = api.join_as(network.id, &modern_hello("0.1.0", Declared::default())).await;
+    let ancient = api.join(network.id, Declared::default()).await;
+    let update_path = |node: NodeId| format!("/networks/{}/nodes/{node}/update", network.id);
+    let nodes: Vec<model::Node> = api.ok(Method::GET, &format!("/networks/{}/nodes", network.id), None).await;
+    assert!(nodes.iter().all(|node| node.update.available.as_ref().is_some_and(|version| version.to_string() == "0.2.0")));
+    let update: model::NodeUpdate = api.ok(Method::GET, &update_path(member.id), None).await;
+    assert_eq!((update.self_update, update.ordered, update.status), (Some(SelfUpdate::ABLE), None, UpdateStatus::Idle));
+    let (_, raw) = api.call(Method::GET, &format!("/networks/{}/nodes/{}", network.id, member.id), None).await;
+    assert_eq!(raw["update"]["self_update"], json!({ "able": true, "blocker": null }));
+    assert_eq!(raw["update"]["status"], json!({ "state": "idle" }));
+    assert_eq!(raw["hostname"], json!(""));
+
+    // 强制更新：时机只能是 now 或 after_drain；不能自己更新的、不在线的各有各的错误码。
+    let idle = api.fails(Method::POST, &update_path(member.id), Some(json!({ "timing": "idle" })), StatusCode::BAD_REQUEST).await;
+    assert_eq!(idle.code, model::ErrorCode::InvalidRequest);
+    let unable = api.fails(Method::POST, &update_path(ancient.id), Some(json!({ "timing": "now" })), StatusCode::CONFLICT).await;
+    assert_eq!(unable.code, model::ErrorCode::CannotSelfUpdate);
+    let forced: model::NodeUpdate = api.ok(Method::POST, &update_path(member.id), Some(json!({ "timing": "after_drain" }))).await;
+    assert_eq!(forced.waiting, Some(model::UpdateWait::Package), "包还没有取回来：先排着");
+    let controller = Arc::clone(&api.controller);
+    tokio::task::spawn_blocking(move || controller.fetch_packages().unwrap()).await.unwrap();
+    let update: model::NodeUpdate = api.ok(Method::GET, &update_path(member.id), None).await;
+    assert_eq!(update.ordered.map(|order| order.timing), Some(UpdateTiming::AfterDrain));
+    let all: model::ForcedUpdates = api.ok(Method::POST, "/update/force", Some(json!({ "timing": "now" }))).await;
+    assert_eq!((all.ordered.len(), all.queued.len(), all.skipped.len()), (1, 0, 1));
+    assert!(all.skipped[0].node.id == ancient.id && all.skipped[0].reason.contains("不能自己更新"));
+
+    // 节点说这个版本不能用：暂停出现在总览里，继续之后消失；没有暂停的版本继续不了。
+    let failed =
+        UpdateStatus::Failed {
+            version: Some("0.2.0".parse().unwrap()), kind: FailureKind::VersionRejected, reason: "自检没有通过".into()
+        };
+    api.controller.handle(member.session, REMOTE, ToController::Report(Report { update: Some(failed), ..Report::default() })).unwrap();
+    let paused: model::UpdateOverview = api.ok(Method::GET, "/update", None).await;
+    assert_eq!((paused.paused.len(), paused.nodes.failed, paused.nodes.manual), (1, 1, 1));
+    let (_, raw) = api.call(Method::GET, "/update", None).await;
+    assert_eq!(raw["paused"][0]["version"], json!("0.2.0"));
+    assert_eq!(raw["paused"][0]["node"]["id"], json!(member.id.get()));
+    let resumed: model::UpdateOverview = api.ok(Method::POST, "/update/resume", Some(json!({ "version": "0.2.0" }))).await;
+    assert!(resumed.paused.is_empty());
+    let nothing = api.fails(Method::POST, "/update/resume", Some(json!({ "version": "0.2.0" })), StatusCode::NOT_FOUND).await;
+    assert_eq!(nothing.code, model::ErrorCode::NotFound);
+
+    api.controller.disconnect(member.session);
+    let offline = api.fails(Method::POST, &update_path(member.id), Some(json!({ "timing": "now" })), StatusCode::CONFLICT).await;
+    assert_eq!(offline.code, model::ErrorCode::NodeOffline);
+    let current = api.join_as(network.id, &modern_hello("0.2.0", Declared::default())).await;
+    let none = api.fails(Method::POST, &update_path(current.id), Some(json!({ "timing": "now" })), StatusCode::CONFLICT).await;
+    assert_eq!(none.code, model::ErrorCode::NoUpdate);
+
+    let reset: model::UpdateOverview = api.ok(Method::PATCH, "/update", Some(json!({ "source": null }))).await;
+    assert!(reset.source_is_default && reset.source.starts_with("https://github.com/"));
+    let log: Vec<model::LogEntry> = api.ok(Method::GET, "/log", None).await;
+    for action in ["update.settings", "update.release", "update.force", "update.force_all", "update.pause", "update.resume"] {
+        assert!(log.iter().any(|entry| entry.action == action), "操作记录里应该有 {action}");
+    }
+}
+
+#[tokio::test]
+async fn the_route_matrix_and_the_path_between_two_nodes_are_served() {
+    let mut api = Api::new();
+    let network = api.network("home").await;
+    let a = api.join(network.id, Declared::default()).await;
+    let b = api.join(network.id, Declared::default()).await;
+    let routes = vec![RouteEntry { peer: b.id, route: Route::Relay { relays: vec![b.id] }, rtt_ms: Some(25) }];
+    api.controller.handle(a.session, REMOTE, ToController::Report(Report { routes, routes_full: true, ..Report::default() })).unwrap();
+
+    let (_, raw) = api.call(Method::GET, &format!("/networks/{}/routes", network.id), None).await;
+    assert_eq!(raw["nodes"][0], json!({ "id": a.id.get(), "name": "node-1", "virtual_ip": "10.66.0.1", "online": true }));
+    let entry = &raw["entries"][0];
+    assert_eq!(
+        (&entry["from"], &entry["to"], &entry["rtt_ms"], &entry["stale"]),
+        (&json!(a.id.get()), &json!(b.id.get()), &json!(25), &json!(false))
+    );
+    assert_eq!(entry["route"], json!({ "via": "relay", "relays": [b.id.get()] }));
+    assert!(entry["age_secs"].as_u64().is_some_and(|age| age <= 2));
+    let matrix: model::RouteMatrix = api.ok(Method::GET, &format!("/networks/{}/routes", network.id), None).await;
+    assert_eq!((matrix.nodes.len(), matrix.entries.len()), (2, 1));
+
+    // 这两个节点是最初那一版的，问不了，两个方向都退回到上报的数据。
+    let path = format!("/networks/{}/path?from={}&to={}", network.id, a.id, b.id);
+    let view: model::PathView = api.ok(Method::GET, &path, None).await;
+    assert_eq!((view.forward.from.id, view.forward.to.id, view.forward.source), (a.id, b.id, model::PathSource::Report));
+    assert_eq!((view.forward.rtt_ms, view.forward.route.clone()), (Some(25), Some(Route::Relay { relays: vec![b.id] })));
+    assert_eq!((view.reverse.from.id, view.reverse.source, view.reverse.route.clone()), (b.id, model::PathSource::None, None));
+    let (_, raw) = api.call(Method::GET, &path, None).await;
+    assert_eq!(
+        raw["reverse"],
+        json!({
+            "from": { "id": b.id.get(), "name": "node-2", "virtual_ip": "10.66.0.2" },
+            "to": { "id": a.id.get(), "name": "node-1", "virtual_ip": "10.66.0.1" },
+            "source": "none", "route": null, "rtt_ms": null, "age_secs": null, "since": null
+        })
+    );
+
+    let same =
+        api.fails(Method::GET, &format!("/networks/{}/path?from={}&to={}", network.id, a.id, a.id), None, StatusCode::BAD_REQUEST).await;
+    assert_eq!(same.code, model::ErrorCode::InvalidRequest);
+    let missing = api.fails(Method::GET, &format!("/networks/{}/path?from={}&to=99", network.id, a.id), None, StatusCode::NOT_FOUND).await;
+    assert_eq!(missing.code, model::ErrorCode::NotFound);
+    let no_query = api.fails(Method::GET, &format!("/networks/{}/path", network.id), None, StatusCode::BAD_REQUEST).await;
+    assert_eq!(no_query.code, model::ErrorCode::InvalidRequest);
+    api.fails(Method::GET, "/networks/99/routes", None, StatusCode::NOT_FOUND).await;
+}
+
+#[tokio::test]
+async fn a_new_node_is_named_after_its_hostname_in_the_api() {
+    let mut api = Api::new();
+    let network = api.network("home").await;
+    let member = api.join_as(network.id, &Hello { hostname: "Office-PC.corp.example".to_owned(), ..hello(Declared::default()) }).await;
+    let node: model::NodeDetail = api.ok(Method::GET, &format!("/networks/{}/nodes/{}", network.id, member.id), None).await;
+    assert_eq!(
+        (node.node.name.as_str(), node.node.fqdn.as_str(), node.node.hostname.as_str()),
+        ("office-pc", "office-pc.home.i3t", "Office-PC.corp.example")
+    );
 }
 
 #[tokio::test]
@@ -571,7 +810,7 @@ async fn the_static_directory_is_served_at_the_root_when_configured() {
     std::fs::write(dir.path().join("index.html"), "<html>ice3tier</html>").unwrap();
     std::fs::create_dir(dir.path().join("assets")).unwrap();
     std::fs::write(dir.path().join("assets/app.js"), "console.log('ui')").unwrap();
-    let api = Api::with_static_dir(Some(dir.path()));
+    let api = Api::with_webui(&WebUi::Dir(dir.path().to_owned()));
     let get = |path: &str| Request::builder().uri(path).body(Body::empty()).unwrap();
 
     let (status, headers, bytes) = api.send(get("/")).await;

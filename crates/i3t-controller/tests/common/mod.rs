@@ -11,12 +11,15 @@ use std::time::Duration;
 
 use i3t_controller::frame::{read_frame, write_frame};
 use i3t_controller::store::Store;
+use i3t_controller::webui::WebUi;
 use i3t_controller::{ALPN, Controller, ServeOptions, Server, Timing};
 use i3t_crypto::{NodeKey, tls};
 use i3t_model::Netmap;
-use i3t_model::admin::{CreateEnrollToken, CreateNetwork, Network, NetworkId};
-use i3t_model::control::{Declared, EnrollToken, Hello, MAX_FRAME_LEN, ToController, ToNode};
+use i3t_model::admin::{CreateEnrollToken, CreateNetwork, Network, NetworkId, UpdateSettings};
+use i3t_model::control::{Declared, EnrollToken, Hello, MAX_FRAME_LEN, PROTOCOL_REVISION, SelfUpdate, ToController, ToNode};
+use i3t_model::update::{Artifact, LATEST_DIR, MANIFEST_FILE, Manifest, NODE_PROGRAM, Platform, SIGNATURE_FILE, Sha256, Version};
 use i3t_proto::{NodeId, PublicKey};
+use i3t_update::{TrustedKeys, sign_manifest};
 use rustls::pki_types::ServerName;
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
@@ -46,16 +49,25 @@ pub struct Running {
 
 impl Running {
     pub async fn start(timing: Timing) -> Self {
-        Self::start_with(timing, None).await
+        Self::start_with(timing, WebUi::NotIncluded).await
     }
 
-    pub async fn start_with(timing: Timing, static_dir: Option<std::path::PathBuf>) -> Self {
+    pub async fn start_with(timing: Timing, webui: WebUi) -> Self {
         let store = Store::open_in_memory().unwrap();
         let controller = Controller::new(store, NodeKey::generate().unwrap(), "ctl.example.com:20331".to_owned(), timing).unwrap();
+        Self::serve(controller, webui).await
+    }
+
+    /// 把一个已经建好的 controller 跑起来。后台不查发布源：测试不该去连项目的发布源。
+    pub async fn serve(controller: Controller, webui: WebUi) -> Self {
         let admin_token = controller.issue_admin_token().unwrap();
         let controller = Arc::new(controller);
-        let options =
-            ServeOptions { node_listen: "127.0.0.1:0".parse().unwrap(), admin_listen: "127.0.0.1:0".parse().unwrap(), static_dir };
+        let options = ServeOptions {
+            node_listen: "127.0.0.1:0".parse().unwrap(),
+            admin_listen: "127.0.0.1:0".parse().unwrap(),
+            webui,
+            follow_releases: false,
+        };
         let server = Server::bind(Arc::clone(&controller), options).await.unwrap();
         let (node_addr, admin_addr) = (server.node_addr().unwrap(), server.admin_addr().unwrap());
         let (stop, stopped) = oneshot::channel::<()>();
@@ -106,14 +118,75 @@ impl Drop for Running {
     }
 }
 
+/// 最初那一版节点的自我介绍：不报主机名，不懂更新。
 pub fn hello(declared: Declared) -> Hello {
-    Hello { version: "0.1.0".to_owned(), platform: "linux-x86_64".to_owned(), declared, port: 20330 }
+    Hello { version: "0.1.0".to_owned(), platform: "linux-x86_64".to_owned(), declared, port: 20330, ..Hello::default() }
+}
+
+/// 现在这一版节点的自我介绍：懂更新和路由查询，能自己更新，正在运行 `version`。
+pub fn modern_hello(version: &str, declared: Declared) -> Hello {
+    Hello { version: version.to_owned(), protocol: PROTOCOL_REVISION, self_update: Some(SelfUpdate::ABLE), ..hello(declared) }
+}
+
+/// 一个照 `docs/releasing.md` 第 6 节摆的发布源目录，和签它的那把钥匙。
+pub struct Publisher {
+    pub key: NodeKey,
+    pub root: tempfile::TempDir,
+}
+
+impl Publisher {
+    pub fn new() -> Self {
+        Self { key: NodeKey::generate().unwrap(), root: tempfile::tempdir().unwrap() }
+    }
+
+    pub fn source(&self) -> String {
+        self.root.path().to_str().unwrap().to_owned()
+    }
+
+    pub fn keys(&self) -> TrustedKeys {
+        TrustedKeys::from(self.key.public())
+    }
+
+    /// 发布 `version`：放好各个平台的程序，签清单，再把清单放到"最新"的位置上。
+    pub fn publish(&self, version: &str, programs: &[(&str, &[u8])]) {
+        let version: Version = version.parse().unwrap();
+        let mut artifacts = std::collections::BTreeMap::new();
+        for (platform, content) in programs {
+            let file = platform.parse::<Platform>().unwrap().program_file(NODE_PROGRAM);
+            let path = self.root.path().join(version.release_dir()).join(&file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, content).unwrap();
+            let hash: [u8; 32] = ring::digest::digest(&ring::digest::SHA256, content).as_ref().try_into().unwrap();
+            let artifact = Artifact { file, size: u64::try_from(content.len()).unwrap(), sha256: Sha256::from_bytes(hash) };
+            artifacts.insert((*platform).to_owned(), artifact);
+        }
+        let manifest = Manifest { version, min_controller: "0.0.0".parse().unwrap(), published: 1_763_200_000, artifacts };
+        let signed = sign_manifest(&self.key, serde_json::to_string_pretty(&manifest).unwrap());
+        let latest = self.root.path().join(LATEST_DIR);
+        std::fs::create_dir_all(&latest).unwrap();
+        std::fs::write(latest.join(MANIFEST_FILE), &signed.manifest).unwrap();
+        std::fs::write(latest.join(SIGNATURE_FILE), format!("{}\n", signed.signature)).unwrap();
+    }
+
+    /// 一个认这把钥匙、发布源指向这个目录的 controller。包缓存在 `cache` 里。
+    pub fn controller(&self, timing: Timing, cache: &std::path::Path) -> Controller {
+        let store = Store::open_in_memory().unwrap();
+        let controller = Controller::new(store, NodeKey::generate().unwrap(), "ctl.example.com:20331".to_owned(), timing)
+            .unwrap()
+            .with_release_keys(self.keys())
+            .unwrap()
+            .with_release_cache(cache.to_owned());
+        controller.set_update_settings(&UpdateSettings { source: Some(Some(self.source())), ..UpdateSettings::default() }).unwrap();
+        controller
+    }
 }
 
 /// 一个测试用的节点：真的密钥，真的 TLS，手动收发消息。
 pub struct Node {
     pub key: NodeKey,
     pub declared: Declared,
+    /// 有值时它是现在这一版的节点，正在运行这个版本；没有值时是最初那一版，不懂更新和路由查询。
+    pub modern: Option<&'static str>,
     link: Option<Link>,
     /// 最近收到的 netmap。
     pub netmap: Option<Netmap>,
@@ -162,11 +235,18 @@ impl Node {
     }
 
     pub fn with_key(key: NodeKey) -> Self {
-        Self { key, declared: Declared::default(), link: None, netmap: None }
+        Self { key, declared: Declared::default(), modern: None, link: None, netmap: None }
     }
 
     pub fn id(&self) -> NodeId {
         self.netmap().me.id
+    }
+
+    pub fn hello(&self) -> Hello {
+        match self.modern {
+            Some(version) => modern_hello(version, self.declared),
+            None => hello(self.declared),
+        }
     }
 
     pub fn netmap(&self) -> &Netmap {
@@ -179,13 +259,13 @@ impl Node {
 
     /// 用一次性密钥注册。成功时收下并确认第一份 netmap；被拒绝时返回拒绝的原因。
     pub async fn enroll(&mut self, running: &Running, secret: &str) -> Result<(), String> {
-        let first = ToController::Enroll { token: secret.to_owned(), hello: hello(self.declared) };
+        let first = ToController::Enroll { token: secret.to_owned(), hello: self.hello() };
         self.open(running, first).await
     }
 
     /// 已经注册过的节点重新连上来。
     pub async fn connect(&mut self, running: &Running) -> Result<(), String> {
-        self.open(running, ToController::Hello(hello(self.declared))).await
+        self.open(running, ToController::Hello(self.hello())).await
     }
 
     async fn open(&mut self, running: &Running, first: ToController) -> Result<(), String> {
@@ -221,7 +301,14 @@ impl Node {
                     let version = netmap.version;
                     self.send(ToController::Ack { version }).await;
                 }
-                ToNode::Signal { .. } | ToNode::Revoked | ToNode::Rejected { .. } => {}
+                ToNode::Signal { .. }
+                | ToNode::Revoked
+                | ToNode::Rejected { .. }
+                | ToNode::Update { .. }
+                | ToNode::UpdateCancel
+                | ToNode::PackageChunk { .. }
+                | ToNode::PackageUnavailable { .. }
+                | ToNode::RouteQuery { .. } => {}
             }
             return Some(message);
         }

@@ -18,8 +18,9 @@ use i3t_proto::{NodeId, PublicKey};
 use ipnet::{IpNet, Ipv4Net};
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::control::{Declared, Route};
+use crate::control::{Declared, Route, RouteSince, SelfUpdate};
 use crate::netmap::{Attachment, ExitRole, ForwardProtocol, Reach, RoutingMode};
+use crate::update::{FailureKind, UpdateStatus, UpdateTiming, Version};
 
 /// 管理 API 所有路径的前缀。
 pub const API_PREFIX: &str = "/api/v1";
@@ -93,6 +94,12 @@ pub enum ErrorCode {
     PredecessorOnline,
     /// 和已有的配置冲突（例如同一个监听地址上已经有一条转发）。
     Conflict,
+    /// 要操作的节点不在线（让节点立即更新要它在线）。
+    NodeOffline,
+    /// 节点不能自己更新：在容器里、是包管理器装的、程序所在的目录不可写，或者它的版本太旧不懂更新。
+    CannotSelfUpdate,
+    /// 没有可以让这个节点更新到的版本：还没有查到发布、它已经是最新的、发布里没有它的平台的包，或者 controller 自己太旧。
+    NoUpdate,
     /// controller 内部出错。
     Internal,
     #[serde(other)]
@@ -119,6 +126,9 @@ pub struct Status {
     pub networks: u32,
     pub nodes: u32,
     pub online: u32,
+    /// 已知的最新发布比 controller 自己新时，是那个版本号。controller 不会自己更新，这只是提醒管理员手动更新。
+    #[serde(default)]
+    pub newer_version: Option<Version>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,6 +238,199 @@ pub struct Node {
     pub sent_version: u64,
     /// 它确认已经应用的版本。小于 `netmap_version` 说明它还在用旧的配置。
     pub acked_version: u64,
+    /// 节点上报的主机名；旧版本的节点不报，是空的。
+    #[serde(default)]
+    pub hostname: String,
+    /// 这个节点的程序更新（白皮书 §10.5）。
+    #[serde(default)]
+    pub update: NodeUpdate,
+}
+
+/// 一个节点的程序更新：能不能自己更新、有没有新版本、进行到哪一步。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct NodeUpdate {
+    /// 节点自己报的能不能自己更新。`null` 表示它的版本太旧，不懂更新，只能手动换程序。
+    pub self_update: Option<SelfUpdate>,
+    /// 现在可以让它更新到的版本：已知的发布比它新、里面有它的平台的包、controller 也够新。没有时是 `null`。
+    /// 不管它能不能自己更新都给出，界面据此标"有新版本"。
+    pub available: Option<Version>,
+    /// 节点本次连接期间最近一次报的进度。不在线、或者没有更新在进行时是 `idle`。
+    pub status: UpdateStatus,
+    /// controller 已经在这次连接上发给它的更新指令。
+    pub ordered: Option<UpdateOrder>,
+    /// controller 想让它更新、但还没有下发指令的原因。
+    pub waiting: Option<UpdateWait>,
+    /// 它最近一次"这个版本在这台机器上不能用"的失败。有这条记录时，自动更新不会再让它装同一个版本。
+    pub failure: Option<UpdateFailure>,
+}
+
+/// controller 发给节点的一条更新指令。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateOrder {
+    pub version: Version,
+    /// `idle` 是自动更新，`now` 和 `after_drain` 是管理员强制的。
+    pub timing: UpdateTiming,
+}
+
+/// controller 想让一个节点更新、但还没有下发指令的原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateWait {
+    /// 这个平台的包 controller 还没有从发布源取回来。
+    Package,
+    /// 它是 relay：同一个网络里的 relay 一个一个更新，要等前一个更新完重新上线。
+    RelayTurn,
+    #[serde(other)]
+    Unknown,
+}
+
+/// 一次归因于版本的更新失败。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateFailure {
+    pub version: Version,
+    pub kind: FailureKind,
+    /// 节点报的原因。
+    pub reason: String,
+    /// controller 记下它的时间。
+    pub at: Timestamp,
+}
+
+/// 更新的全局设置和现状。全部网络共用一份。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateOverview {
+    /// 自动更新的开关。开着时，有新版本的节点在空闲的时候自己更新。
+    pub auto_update: bool,
+    /// 发布源：一个 `http(s)://` 地址前缀，或者 controller 所在机器上的一个目录。
+    pub source: String,
+    /// `source` 是不是项目默认的发布源。
+    pub source_is_default: bool,
+    /// controller 自己的版本。
+    pub controller_version: Version,
+    /// 已知的最新正式版；还没有查到过时是 `null`。
+    pub release: Option<ReleaseInfo>,
+    /// 最近一次查发布源的时间；还没有查过时是 `null`。
+    pub checked_at: Option<Timestamp>,
+    /// 最近一次查发布源失败的原因；成功时是 `null`。失败时 `release` 保持上一次查到的。
+    pub check_error: Option<String>,
+    /// 因为有节点更新失败而暂停自动更新的版本。
+    pub paused: Vec<PausedVersion>,
+    pub nodes: UpdateCounts,
+}
+
+/// 已知的最新正式版。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseInfo {
+    pub version: Version,
+    /// 发布时间。
+    pub published: Timestamp,
+    /// 这个版本的节点需要的 controller 最低版本。
+    pub min_controller: Version,
+    /// controller 比 `min_controller` 旧：这个版本不会下发给任何节点，要先手动更新 controller。
+    pub controller_too_old: bool,
+    /// 这个版本比 controller 自己新：提醒管理员手动更新 controller。
+    pub newer_than_controller: bool,
+    /// 发布里各个平台的节点程序，和它们在 controller 上的缓存情况。
+    pub packages: Vec<PackageInfo>,
+}
+
+/// 发布里一个平台的节点程序。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackageInfo {
+    /// 平台名，例如 `linux-x86_64`。
+    pub platform: String,
+    pub file: String,
+    /// 字节数。
+    pub size: u64,
+    pub state: PackageState,
+    /// 最近一次取这个包失败的原因。
+    pub error: Option<String>,
+}
+
+/// 一个平台的包在 controller 上的缓存情况。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageState {
+    /// 没有要更新的节点用这个平台，所以没有取。
+    NotNeeded,
+    /// 要用，正在取，或者排着队等着取。
+    Fetching,
+    /// 已经取回来，核对过大小和 SHA-256。
+    Cached,
+    /// 没有取成，下次查发布源时再试。
+    Failed,
+    #[serde(other)]
+    Unknown,
+}
+
+/// 一个被暂停自动更新的版本，和导致暂停的那次失败。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PausedVersion {
+    pub version: Version,
+    /// 报告失败的节点；它后来被删掉了的话是 `null`。
+    pub node: Option<NodeRef>,
+    /// 那个节点所在的网络。
+    pub network: Option<NetworkId>,
+    pub reason: String,
+    pub at: Timestamp,
+}
+
+/// 全部网络的节点按更新情况数出来的数。一个节点只算在一项里，按下面的顺序取第一个符合的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct UpdateCounts {
+    pub total: u32,
+    /// 正在更新：controller 已经下发了指令，还没有结束。
+    pub updating: u32,
+    /// 有新版本，但上一次装它失败了。
+    pub failed: u32,
+    /// 有新版本，但节点不能自己更新，要手动更新。
+    pub manual: u32,
+    /// 有新版本，可以更新。
+    pub outdated: u32,
+    /// 没有可以更新到的版本。
+    pub up_to_date: u32,
+}
+
+/// 改更新的全局设置。字段都可以省略。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct UpdateSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_update: Option<bool>,
+    /// 写 `null` 表示改回项目默认的发布源。
+    #[serde(default, deserialize_with = "nullable", skip_serializing_if = "Option::is_none")]
+    pub source: Option<Option<String>>,
+}
+
+/// 让节点立即更新。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForceUpdate {
+    /// `now`（马上重启，正在进行的流会断）或者 `after_drain`（不再接新的流，手上的结束之后再重启）。
+    pub timing: UpdateTiming,
+}
+
+/// "全部更新"的结果：每个节点落在哪一类。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ForcedUpdates {
+    /// 要更新到的版本。
+    pub version: Option<Version>,
+    /// 指令已经发出去的节点。
+    pub ordered: Vec<NodeRef>,
+    /// 已经记下、稍后下发的节点：等包取回来，或者是 relay 在等轮到它。
+    pub queued: Vec<NodeRef>,
+    /// 没有动的节点和原因。
+    pub skipped: Vec<SkippedUpdate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkippedUpdate {
+    pub node: NodeRef,
+    /// 给人看的原因：不在线、不能自己更新、已经是最新的、没有它的平台的包。
+    pub reason: String,
+}
+
+/// 继续一个被暂停的版本的自动更新。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeUpdate {
+    pub version: Version,
 }
 
 /// 节点详情：列表里的字段，加上它最近上报的东西。
@@ -314,6 +517,76 @@ pub struct NodeRoute {
     pub peer: NodeRef,
     pub route: Route,
     pub rtt_ms: Option<u32>,
+}
+
+/// 整个网络的路由矩阵：每个节点到它的各个对端现在怎么走，取自各节点最近的上报（白皮书 §7.7）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteMatrix {
+    /// 网络里的全部节点，按编号排。
+    pub nodes: Vec<MatrixNode>,
+    /// 有上报的格子，按 `from`、`to` 排。没有出现的格子是没有数据：两个节点之间没有访问关系，或者 `from` 还没有上报过。
+    pub entries: Vec<MatrixEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatrixNode {
+    #[serde(flatten)]
+    pub node: NodeRef,
+    pub online: bool,
+}
+
+/// 路由矩阵里的一格：`from` 到 `to` 这个方向。两个方向各有一格，路可以不一样。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatrixEntry {
+    pub from: NodeId,
+    pub to: NodeId,
+    pub route: Route,
+    pub rtt_ms: Option<u32>,
+    /// 这一格是多少秒之前的：`from` 最近一次上报到现在过了多久。节点每 10 秒上报一次，在线时一般不超过 10。
+    pub age_secs: u64,
+    /// 这一格不是 `from` 现在这次连接报的，已经过期：它不在线（这是它离线之前最后报的），或者刚重新连上还没有上报。
+    pub stale: bool,
+}
+
+/// 两个节点之间两个方向的当前路径。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathView {
+    /// `from` 到 `to`。
+    pub forward: PathLeg,
+    /// `to` 到 `from`。
+    pub reverse: PathLeg,
+}
+
+/// 一个方向的路径：发送方现在怎么把包送到对端。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathLeg {
+    /// 发送方：这一段是它说的。
+    pub from: NodeRef,
+    pub to: NodeRef,
+    pub source: PathSource,
+    /// 现在走的路；没有数据时是 `null`。
+    pub route: Option<Route>,
+    pub rtt_ms: Option<u32>,
+    /// 这份数据是多少秒之前的。现问的是 0；没有数据时是 `null`。
+    pub age_secs: Option<u64>,
+    /// 这条路是多久之前换上的、为什么换。只有现问到、并且节点这次启动以来换过路时才有。
+    pub since: Option<RouteSince>,
+}
+
+/// 一段路径的数据是从哪里来的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathSource {
+    /// 刚刚问的发送方，它用当前的测量值答的。
+    Query,
+    /// 发送方最近一次上报的路由表。它现在不在线、版本太旧不会回答，或者没有按时回答。
+    Report,
+    /// 没有数据：发送方没有上报过到这个对端的路，现在也问不到。
+    None,
+    /// 发送方说对端不在它的 netmap 里：访问规则没有把这两个节点连通（或者配置还没有下发到）。
+    NotPeers,
+    #[serde(other)]
+    Unknown,
 }
 
 /// 一个还没被用掉的注册令牌。
@@ -585,6 +858,46 @@ mod tests {
 
         assert_eq!(serde_json::to_value(&omitted).unwrap(), json!({}));
         assert_eq!(serde_json::to_value(&cleared).unwrap(), json!({ "routing": null }));
+    }
+
+    #[test]
+    fn a_node_from_an_older_controller_reads_without_the_update_fields() {
+        let node: Node = serde_json::from_value(json!({
+            "id": 1, "network": 1, "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE", "name": "node-1", "fqdn": "node-1.home.i3t",
+            "virtual_ip": "10.66.0.1", "tags": [], "declared": {}, "relay": null, "exit": null, "dial_out_only": false,
+            "routing": null, "reach": null, "pinned_relays": [], "platform": "linux-x86_64", "version": "0.1.0", "online": false,
+            "last_seen_at": null, "created_at": 1, "netmap_version": 1, "sent_version": 1, "acked_version": 1
+        }))
+        .unwrap();
+        assert_eq!((node.hostname.as_str(), node.update.clone()), ("", NodeUpdate::default()));
+        assert_eq!(serde_json::to_value(&node).unwrap()["update"]["status"], json!({ "state": "idle" }));
+    }
+
+    #[test]
+    fn update_settings_tell_an_omitted_source_from_a_reset_to_the_default() {
+        let untouched: UpdateSettings = serde_json::from_value(json!({ "auto_update": false })).unwrap();
+        assert_eq!((untouched.auto_update, untouched.source.clone()), (Some(false), None));
+        let reset: UpdateSettings = serde_json::from_value(json!({ "source": null })).unwrap();
+        assert_eq!(reset.source, Some(None));
+        let mirror: UpdateSettings = serde_json::from_value(json!({ "source": "https://mirror.example/releases" })).unwrap();
+        assert_eq!(mirror.source, Some(Some("https://mirror.example/releases".to_owned())));
+        assert_eq!(serde_json::to_value(&reset).unwrap(), json!({ "source": null }));
+    }
+
+    #[test]
+    fn update_and_route_views_have_stable_json_shapes() {
+        let order = UpdateOrder { version: Version::new(0, 3, 0), timing: UpdateTiming::Idle };
+        assert_eq!(serde_json::to_value(&order).unwrap(), json!({ "version": "0.3.0", "timing": "idle" }));
+        assert_eq!(serde_json::to_value(UpdateWait::RelayTurn).unwrap(), json!("relay_turn"));
+        assert_eq!(serde_json::from_value::<UpdateWait>(json!("added_later")).unwrap(), UpdateWait::Unknown);
+        assert_eq!(serde_json::to_value(PackageState::NotNeeded).unwrap(), json!("not_needed"));
+        assert_eq!(serde_json::to_value(PathSource::NotPeers).unwrap(), json!("not_peers"));
+        assert_eq!(serde_json::to_value(ForceUpdate { timing: UpdateTiming::AfterDrain }).unwrap(), json!({ "timing": "after_drain" }));
+        let node = MatrixNode {
+            node: NodeRef { id: NodeId::new(2).unwrap(), name: "laptop".into(), virtual_ip: "10.66.0.2".parse().unwrap() },
+            online: true,
+        };
+        assert_eq!(serde_json::to_value(&node).unwrap(), json!({ "id": 2, "name": "laptop", "virtual_ip": "10.66.0.2", "online": true }));
     }
 
     #[test]

@@ -3,12 +3,12 @@
 use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, SocketAddr};
 
-use i3t_model::admin::{NetworkId, Node, NodeDetail, NodeRoute, RelaySettings, RouteTable, Timestamp, UpdateNode};
+use i3t_model::admin::{NetworkId, Node, NodeDetail, RelaySettings, Timestamp, UpdateNode};
 use i3t_model::control::ToNode;
 use i3t_model::netmap::ExitRole;
 use i3t_proto::NodeId;
 
-use super::{COOLDOWN_SECS, Controller, Inner, Seeds, address, naming, node_ref};
+use super::{COOLDOWN_SECS, Controller, Inner, Seeds, address, naming};
 use crate::error::{Capability, Entity, Error};
 use crate::store::{CooldownKind, NetworkRecord, NodeRecord, Store};
 
@@ -167,6 +167,8 @@ impl Controller {
             Affects::Holders => inner.holders_and(id),
         };
         inner.refresh(network.id, seeds, None)?;
+        // relay 的更新要排队，是不是 relay 变了，该轮到谁也跟着变。
+        inner.roll_out()?;
         self.wake_if_needed(&inner);
         Ok(inner.node_view(&network, &node, now))
     }
@@ -195,6 +197,7 @@ impl Controller {
         inner.send(id, ToNode::Revoked);
         inner.forget_node(id);
         inner.refresh(network, Seeds::All, None)?;
+        inner.roll_out()?;
         self.wake_if_needed(&inner);
         Ok(())
     }
@@ -236,25 +239,6 @@ impl Controller {
         self.wake_if_needed(&inner);
         Ok(inner.node_view(&network, &node, now))
     }
-
-    /// 一个节点最近上报的路由表：它到各个对端现在怎么走。
-    ///
-    /// # Errors
-    ///
-    /// 这个网络里没有这个节点，或者读存储失败。
-    pub fn routes(&self, network: NetworkId, id: NodeId) -> Result<RouteTable, Error> {
-        let inner = self.lock();
-        let record = inner.require_node(network, id)?;
-        let peers = inner.store.nodes(network)?;
-        let routes = inner.live.get(&id).map(|live| {
-            let known = live.routes.values().filter_map(|entry| {
-                let peer = peers.iter().find(|peer| peer.id == entry.peer)?;
-                Some(NodeRoute { peer: node_ref(peer), route: entry.route.clone(), rtt_ms: entry.rtt_ms })
-            });
-            known.collect()
-        });
-        Ok(RouteTable { node: node_ref(&record), online: routes.is_some(), routes: routes.unwrap_or_default() })
-    }
 }
 
 /// 一项能力的变化要重算哪些节点。
@@ -279,6 +263,9 @@ impl Inner {
         self.live.remove(&id);
         self.sync.remove(&id);
         self.dirty.remove(&id);
+        self.routes.remove(&id);
+        self.drop_route_queries(id);
+        self.updates.forget(id);
         for sync in self.sync.values_mut() {
             sync.forget(id);
         }

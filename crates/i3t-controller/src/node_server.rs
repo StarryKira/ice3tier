@@ -118,7 +118,12 @@ impl Connection {
         let admitted = blocking(&self.controller, move |controller| match first {
             ToController::Enroll { token, hello } => controller.enroll(key, &token, &hello, ip, outbox),
             ToController::Hello(hello) => controller.hello(key, &hello, ip, outbox),
-            ToController::Report(_) | ToController::Ack { .. } | ToController::Signal { .. } | ToController::Heartbeat => {
+            ToController::Report(_)
+            | ToController::Ack { .. }
+            | ToController::Signal { .. }
+            | ToController::Heartbeat
+            | ToController::PackageRequest { .. }
+            | ToController::RouteAnswer { .. } => {
                 tracing::warn!(key = ?key, remote = %ip, "拒绝连接：第一条消息不是 enroll 也不是 hello");
                 Err(Rejection::UnexpectedFirstMessage)
             }

@@ -1,7 +1,6 @@
 //! 把 controller 的几个入口装在一起跑：节点协议（TCP）、地址查询（同一个端口号的 UDP）、管理 API，和后台任务。
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,10 +9,14 @@ use tokio::sync::watch;
 
 use crate::controller::Controller;
 use crate::error::{Error, error_chain};
+use crate::webui::WebUi;
 use crate::{addr_server, admin, node_server};
 
 /// 后台工作出错之后多久再试。
 const RETRY_DELAY: Duration = Duration::from_secs(1);
+
+/// 多久查一次发布源（白皮书 §10.5）。
+const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// [`Server::bind`] 要的东西。
 #[derive(Debug, Clone)]
@@ -22,8 +25,11 @@ pub struct ServeOptions {
     pub node_listen: SocketAddr,
     /// 管理 API 的监听地址。默认应该只绑回环地址。
     pub admin_listen: SocketAddr,
-    /// WebUI 的静态文件目录；有的话挂在 `/` 上。
-    pub static_dir: Option<PathBuf>,
+    /// WebUI 的静态文件从哪里来，挂在管理 API 同一个端口的 `/` 上。
+    pub webui: WebUi,
+    /// 要不要在后台定时查发布源、取节点的更新包。正常运行时是要的；测试里关掉，免得测试去连项目的发布源。
+    /// 关掉之后管理 API 的"立即检查"仍然可以用，只是查到的包没有人去取。
+    pub follow_releases: bool,
 }
 
 /// 已经绑好端口、还没开始服务的 controller。
@@ -33,7 +39,8 @@ pub struct Server {
     node_tcp: TcpListener,
     node_udp: UdpSocket,
     admin: TcpListener,
-    static_dir: Option<PathBuf>,
+    webui: WebUi,
+    follow_releases: bool,
 }
 
 impl Server {
@@ -50,7 +57,7 @@ impl Server {
         let node_addr = node_tcp.local_addr().map_err(bind_error(options.node_listen))?;
         let node_udp = UdpSocket::bind(node_addr).await.map_err(bind_error(node_addr))?;
         let admin = TcpListener::bind(options.admin_listen).await.map_err(bind_error(options.admin_listen))?;
-        Ok(Self { controller, tls, node_tcp, node_udp, admin, static_dir: options.static_dir })
+        Ok(Self { controller, tls, node_tcp, node_udp, admin, webui: options.webui, follow_releases: options.follow_releases })
     }
 
     /// 节点协议实际监听的地址。
@@ -88,7 +95,8 @@ impl Server {
         let nodes = tokio::spawn(node_server::serve(Arc::clone(&self.controller), self.tls, self.node_tcp, stopped.clone()));
         let addresses = tokio::spawn(addr_server::serve(self.node_udp, stopped.clone()));
         let maintenance = tokio::spawn(maintain(Arc::clone(&self.controller), stopped.clone()));
-        let router = admin::router(Arc::clone(&self.controller), self.static_dir.as_deref());
+        let releases = self.follow_releases.then(|| tokio::spawn(follow_releases(Arc::clone(&self.controller), stopped.clone())));
+        let router = admin::router(Arc::clone(&self.controller), &self.webui);
         let mut admin_stopped = stopped.clone();
         let admin = axum::serve(self.admin, router.into_make_service_with_connect_info::<SocketAddr>())
             .with_graceful_shutdown(async move {
@@ -101,6 +109,10 @@ impl Server {
         // 它要是因为出错而停，别的任务还在等一个不会来的信号，直接结束它们。
         addresses.abort();
         maintenance.abort();
+        if let Some(releases) = releases {
+            // 正在取的包取到一半就丢下：没有核对过的文件用的是另外的名字，下次从头取。
+            releases.abort();
+        }
         if *stopped.borrow() {
             if let Err(err) = nodes.await {
                 tracing::error!("节点协议的服务异常结束：{err}");
@@ -133,6 +145,41 @@ async fn maintain(controller: Arc<Controller>, mut shutdown: watch::Receiver<boo
             () = controller.wait_for_work() => {}
             _ = shutdown.changed() => return,
         }
+    }
+}
+
+/// 后台任务：每小时查一次发布源，设置变了就提前查；有节点要用的包就去取。
+///
+/// 查和取都要走网络，在阻塞线程上做，期间不拿 controller 的锁。失败了只记日志：原因在管理 API 里看得到，下一轮再试。
+/// 两件事各走各的：发布源连不上时一次查询要等到超时，不能因此耽误取别的包（管理员可能刚把发布源改到了连得上的地方）。
+async fn follow_releases(controller: Arc<Controller>, mut shutdown: watch::Receiver<bool>) {
+    let checks = async {
+        let mut next_check = tokio::time::Instant::now();
+        loop {
+            if tokio::time::Instant::now() >= next_check || blocking(&controller, Controller::release_check_requested).await {
+                if let Err(err) = blocking(&controller, Controller::check_release).await {
+                    tracing::error!("记录查发布源的结果时出错：{}", error_chain(&err));
+                }
+                next_check = tokio::time::Instant::now() + RELEASE_CHECK_INTERVAL;
+            }
+            tokio::select! {
+                () = tokio::time::sleep_until(next_check) => {}
+                () = controller.wait_for_check_request() => {}
+            }
+        }
+    };
+    let fetches = async {
+        loop {
+            if let Err(err) = blocking(&controller, Controller::fetch_packages).await {
+                tracing::error!("记录取包的结果时出错：{}", error_chain(&err));
+            }
+            controller.wait_for_wanted_packages().await;
+        }
+    };
+    tokio::select! {
+        () = checks => {}
+        () = fetches => {}
+        _ = shutdown.changed() => {}
     }
 }
 

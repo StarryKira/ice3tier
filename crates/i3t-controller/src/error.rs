@@ -41,6 +41,12 @@ pub enum Error {
     PredecessorOnline(String),
     #[error("{0}")]
     Conflict(String),
+    #[error("节点 {0} 不在线。让节点立即更新要它连着 controller")]
+    NodeOffline(String),
+    #[error("节点 {node} 不能自己更新：{reason}")]
+    CannotSelfUpdate { node: String, reason: String },
+    #[error("{0}")]
+    NoUpdate(String),
     #[error("存储出错")]
     Store(#[from] StoreError),
     #[error("netmap 序列化失败")]
@@ -92,6 +98,9 @@ impl Error {
             Self::NotDeclared { .. } => ErrorCode::NotDeclared,
             Self::PredecessorOnline(_) => ErrorCode::PredecessorOnline,
             Self::Conflict(_) => ErrorCode::Conflict,
+            Self::NodeOffline(_) => ErrorCode::NodeOffline,
+            Self::CannotSelfUpdate { .. } => ErrorCode::CannotSelfUpdate,
+            Self::NoUpdate(_) => ErrorCode::NoUpdate,
             Self::Store(_)
             | Self::Encode(_)
             | Self::Random
@@ -120,6 +129,7 @@ pub enum Entity {
     Listener,
     Forward,
     PairSetting,
+    PausedVersion,
 }
 
 impl fmt::Display for Entity {
@@ -133,6 +143,7 @@ impl fmt::Display for Entity {
             Self::Listener => "监听器",
             Self::Forward => "端口转发",
             Self::PairSetting => "节点对设置",
+            Self::PausedVersion => "被暂停的版本",
         })
     }
 }

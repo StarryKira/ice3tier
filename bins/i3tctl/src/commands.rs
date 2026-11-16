@@ -4,10 +4,11 @@ use std::net::Ipv4Addr;
 
 use anyhow::{Context, anyhow, bail};
 use i3t_model::admin::{
-    CreateCredential, CreateEnrollToken, CreateNetwork, CreateRule, Direction, Forward, ForwardInput, ListenerInput, Network, NetworkId,
-    Node, PairInput, RelaySettings, Succeed, UpdateNetwork, UpdateNode, UpdateRule,
+    CreateCredential, CreateEnrollToken, CreateNetwork, CreateRule, Direction, ForceUpdate, Forward, ForwardInput, ListenerInput, Network,
+    NetworkId, Node, PairInput, RelaySettings, ResumeUpdate, Succeed, UpdateNetwork, UpdateNode, UpdateRule, UpdateSettings,
 };
 use i3t_model::netmap::{DefaultAction, ExitRole, ForwardProtocol, Listener, ListenerProtocol};
+use i3t_model::update::UpdateTiming;
 use i3t_proto::NodeId;
 use reqwest::Method;
 use serde::Serialize;
@@ -16,7 +17,7 @@ use serde_json::Value;
 
 use crate::cli::{
     AccessCommand, Cli, Command, CredentialCommand, ExitCommand, ForwardCommand, ListenerCommand, NetworkCommand, NetworkSettings,
-    NodeCommand, PairCommand, RelayCommand, RuleCommand, TokenCommand,
+    NodeCommand, PairCommand, RelayCommand, RuleCommand, TokenCommand, UpdateCommand,
 };
 use crate::client::{Client, decode};
 use crate::render;
@@ -42,6 +43,16 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Forward(command) => session.forward_command(command).await,
         Command::Pair(command) => session.pair_command(command).await,
         Command::Access(command) => session.access_command(command).await,
+        Command::Update(command) => session.update_command(command).await,
+        Command::Path { a, b } => {
+            let network = session.network().await?.id;
+            let (a, b) = (session.node(network, &a).await?.id, session.node(network, &b).await?.id);
+            session.show(session.get(&format!("/networks/{network}/path?from={a}&to={b}")).await?, render::path)
+        }
+        Command::Routes => {
+            let network = session.network().await?.id;
+            session.show(session.get(&format!("/networks/{network}/routes")).await?, render::route_matrix)
+        }
     }
 }
 
@@ -415,6 +426,42 @@ impl Session {
             AccessCommand::Check { from, to } => {
                 let (from, to) = (self.node(network, &from).await?.id, self.node(network, &to).await?.id);
                 self.show(self.get(&format!("/networks/{network}/access/check?from={from}&to={to}")).await?, render::access_check)
+            }
+        }
+    }
+}
+
+impl Session {
+    async fn update_command(&self, command: UpdateCommand) -> anyhow::Result<()> {
+        let timing = |drain: bool| if drain { UpdateTiming::AfterDrain } else { UpdateTiming::Now };
+        match command {
+            UpdateCommand::Show => self.show(self.get("/update").await?, render::update_overview),
+            UpdateCommand::Set { auto, source } => {
+                let source = source.map(|source| (source != "default").then_some(source));
+                let request = UpdateSettings { auto_update: auto.map(|switch| switch.0), source };
+                self.show(self.send(Method::PATCH, "/update", &request).await?, render::update_overview)
+            }
+            UpdateCommand::Check => {
+                self.show(self.send(Method::POST, "/update/check", &serde_json::json!({})).await?, render::update_overview)
+            }
+            UpdateCommand::Nodes => {
+                let network = self.network().await?.id;
+                self.show_list(self.get(&format!("/networks/{network}/nodes")).await?, render::node_updates)
+            }
+            UpdateCommand::Node { node, drain } => {
+                let network = self.network().await?.id;
+                let node = self.node(network, &node).await?;
+                let request = ForceUpdate { timing: timing(drain) };
+                let path = format!("/networks/{network}/nodes/{}/update", node.id);
+                self.show(self.send(Method::POST, &path, &request).await?, |update| render::node_update(&node.name, update))
+            }
+            UpdateCommand::All { drain } => {
+                let request = ForceUpdate { timing: timing(drain) };
+                self.show(self.send(Method::POST, "/update/force", &request).await?, render::forced_updates)
+            }
+            UpdateCommand::Resume { version } => {
+                let version = version.parse().map_err(|error| anyhow!("{error}"))?;
+                self.show(self.send(Method::POST, "/update/resume", &ResumeUpdate { version }).await?, render::update_overview)
             }
         }
     }

@@ -9,11 +9,14 @@
 //! | [`node_server`]、[`frame`] | 节点协议的服务端和分帧 |
 //! | [`addr_server`] | 地址查询的应答 |
 //! | [`admin`] | 管理 API |
+//! | [`release`] | 发布源：从哪里取发布清单和节点的更新包 |
+//! | [`webui`] | WebUI 的静态文件从哪里来 |
 //! | [`Server`] | 把上面这些装在一起跑 |
 //!
 //! ```no_run
 //! # async fn example() -> Result<(), i3t_controller::Error> {
 //! use std::sync::Arc;
+//! use i3t_controller::webui::WebUi;
 //! use i3t_controller::{Controller, ServeOptions, Server};
 //!
 //! let opened = Controller::open("/var/lib/i3t-controller".as_ref(), "ctl.example.com:20331".to_owned())?;
@@ -23,7 +26,8 @@
 //! let options = ServeOptions {
 //!     node_listen: "0.0.0.0:20331".parse().expect("合法的地址"),
 //!     admin_listen: "127.0.0.1:20332".parse().expect("合法的地址"),
-//!     static_dir: None,
+//!     webui: WebUi::NotIncluded,
+//!     follow_releases: true,
 //! };
 //! let server = Server::bind(Arc::new(opened.controller), options).await?;
 //! server.run(async { tokio::signal::ctrl_c().await.ok(); }).await
@@ -38,11 +42,13 @@ mod error;
 pub mod frame;
 pub mod netmap;
 pub mod node_server;
+pub mod release;
 mod secret;
 mod server;
 pub mod store;
 mod sync;
+pub mod webui;
 
-pub use controller::{ALPN, Admitted, Controller, Opened, Timing};
+pub use controller::{ALPN, Admitted, Controller, Opened, RouteAnswers, Timing};
 pub use error::{Capability, Entity, Error, Rejection};
 pub use server::{ServeOptions, Server};
