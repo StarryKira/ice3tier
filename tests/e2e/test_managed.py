@@ -102,7 +102,157 @@ def enable_relay(lab: Lab, work: Path, t: Checks) -> None:
         print(tail(a.read_log(), 25), tail(b.read_log(), 25), tail(r.read_log(), 25), sep="\n  ---\n")
 
 
-SCENARIOS = {"join_and_exit": join_and_exit, "enable_relay": enable_relay}
+def route_of(controller: Controller, node: Node, peer: Node) -> dict:
+    """`node` 最近上报的、到 `peer` 的路。"""
+    routes = controller.ctl("node", "routes", str(node.id))["routes"]
+    return next((route["route"] for route in routes if route["peer"]["id"] == peer.id), {})
+
+
+def wait_route(controller: Controller, node: Node, peer: Node, via: str, timeout: float = 30) -> dict:
+    try:
+        wait_until(lambda: route_of(controller, node, peer).get("via") == via, timeout=timeout, what=f"{node.name} 到 {peer.name} 的路变成 {via}")
+    except TimeoutError:
+        pass
+    return route_of(controller, node, peer)
+
+
+def slow_download(node: Node, url: str, via: Node, megabytes: int, rate: str = "1M"):
+    """在后台开始一次限速下载，返回进程。限速是为了让它持续几十秒，中间好换路。"""
+    import subprocess
+    size = megabytes * 1_000_000
+    cmd = node.host.cmd("curl", "-sS", "--max-time", "120", "--limit-rate", rate, "-o", "/dev/null", "-w", "%{size_download}",
+                        "-x", f"socks5h://{via.virtual_ip}@127.0.0.1:1080", f"{url}bytes/{size}")
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True), size
+
+
+def finished_intact(download, size: int, timeout: float = 120) -> tuple[bool, str]:
+    out, err = download.communicate(timeout=timeout)
+    return out == str(size), f"下载了 {out!r}，应该是 {size}；{err.strip()}"
+
+
+def hole_punch(lab: Lab, work: Path, t: Checks) -> None:
+    """两个节点各在一个普通 NAT 后面，没有 relay：经 controller 交换地址，打洞直连。"""
+    web = lab.host("web")
+    start_whoami(web)
+    controller = Controller(lab.host("ctl"), work)
+    controller.ctl("network", "create", "lab")
+    a = Node(lab.nat("nat-a", NatKind.CONE).host("a"), work)
+    b = Node(lab.nat("nat-b", NatKind.CONE).host("b"), work, declare=("exit",))
+    for node in (a, b):
+        node.join(controller)
+    controller.ctl("exit", "enable", str(b.id))
+    url, expect = f"http://{web.ip}/", lab.hosts["nat-b"].ip
+
+    t.check("没有 relay，靠打洞也能到达", reaches(a, url, b, expect, timeout=40))
+    route = wait_route(controller, a, b, "direct")
+    t.check("a 上报的路由是直连，地址是 b 所在 NAT 的公网地址", route.get("via") == "direct" and route.get("addr", "").startswith(expect + ":"), str(route))
+    download, size = slow_download(a, url, b, 5, rate="5M")
+    ok, detail = finished_intact(download, size)
+    t.check("打洞出来的直连上下载 5MB", ok, detail)
+    if t.failures:
+        print(tail(a.read_log(), 30), tail(b.read_log(), 30), sep="\n  ---\n")
+
+
+def relay_then_direct(lab: Lab, work: Path, t: Checks) -> None:
+    """有 relay 时第一次访问不用等打洞；直连打通之后换过去，正在进行的下载不断。"""
+    web = lab.host("web")
+    start_whoami(web)
+    controller = Controller(lab.host("ctl"), work)
+    controller.ctl("network", "create", "lab")
+    r = Node(lab.host("r"), work, declare=("relay",))
+    a = Node(lab.nat("nat-a", NatKind.CONE).host("a"), work)
+    b = Node(lab.nat("nat-b", NatKind.CONE).host("b"), work, declare=("exit",))
+    for node in (r, a, b):
+        node.join(controller)
+    controller.ctl("exit", "enable", str(b.id))
+    controller.ctl("relay", "enable", str(r.id), "--udp", r.endpoint, "--tcp", r.endpoint)
+    url, expect = f"http://{web.ip}/", lab.hosts["nat-b"].ip
+    wait_until(lambda: all(controller.ctl("node", "show", str(node.id))["attached"] for node in (a, b)), timeout=20, what="两个节点挂靠上 relay")
+
+    started = time.monotonic()
+    download, size = slow_download(a, url, b, 30)
+    wait_until(lambda: "和对端的连接建立" in a.read_log() or download.poll() is not None, timeout=15, what="a 和 b 建立连接")
+    t.check("第一次访问在 3 秒内就连上了（先经 relay，不等打洞）", time.monotonic() - started < 3 and download.poll() is None,
+            f"用了 {time.monotonic() - started:.1f} 秒")
+    route = wait_route(controller, a, b, "direct", timeout=75)
+    switched_during_download = download.poll() is None
+    t.check("之后换到了直连", route.get("via") == "direct", str(route))
+    t.check("换路发生在下载进行当中", switched_during_download)
+    ok, detail = finished_intact(download, size)
+    t.check("换路没有打断下载，字节数对得上", ok, detail)
+    if t.failures:
+        print(tail(a.read_log(), 40), tail(b.read_log(), 25), sep="\n  ---\n")
+
+
+def tcp_relay(lab: Lab, work: Path, t: Checks) -> None:
+    """a 所在的网络用不了 UDP：它用 TCP 连 relay，b 照常用 UDP。"""
+    web = lab.host("web")
+    start_whoami(web)
+    controller = Controller(lab.host("ctl"), work)
+    controller.ctl("network", "create", "lab")
+    r = Node(lab.host("r"), work, declare=("relay",))
+    a = Node(lab.nat("nat-a", NatKind.CONE).host("a"), work)
+    b = Node(lab.nat("nat-b", NatKind.CONE).host("b"), work, declare=("exit",))
+    a.host.block_udp()
+    for node in (r, a, b):
+        node.join(controller)
+    controller.ctl("exit", "enable", str(b.id))
+    controller.ctl("relay", "enable", str(r.id), "--udp", r.endpoint, "--tcp", r.endpoint)
+    url, expect = f"http://{web.ip}/", lab.hosts["nat-b"].ip
+
+    t.check("UDP 用不了的节点经 TCP 中转也能到达", reaches(a, url, b, expect, timeout=40))
+    t.check("a 用的是 TCP 中转", "中转会话建立（TCP）" in a.read_log(), tail(a.read_log(), 8))
+    t.check("b 用的是 UDP 中转", "中转会话建立（UDP）" in b.read_log(), tail(b.read_log(), 8))
+    download, size = slow_download(a, url, b, 10, rate="5M")
+    ok, detail = finished_intact(download, size)
+    t.check("经 TCP 中转下载 10MB", ok, detail)
+
+    a.host.block_udp(False)
+    route = wait_route(controller, a, b, "direct", timeout=90)
+    t.check("UDP 恢复之后改走直连", route.get("via") == "direct", str(route))
+    if t.failures:
+        print(tail(a.read_log(), 40), tail(r.read_log(), 20), sep="\n  ---\n")
+
+
+def relay_failover(lab: Lab, work: Path, t: Checks) -> None:
+    """正在用的 relay 下线：连接换到另一个 relay，正在进行的下载不断。"""
+    web = lab.host("web")
+    start_whoami(web)
+    controller = Controller(lab.host("ctl"), work)
+    controller.ctl("network", "create", "lab")
+    r1, r2 = Node(lab.host("r1"), work, declare=("relay",)), Node(lab.host("r2"), work, declare=("relay",))
+    a = Node(lab.nat("nat-a", NatKind.SYMMETRIC).host("a"), work)
+    b = Node(lab.nat("nat-b", NatKind.SYMMETRIC).host("b"), work, declare=("exit",))
+    for node in (r1, r2, a, b):
+        node.join(controller)
+    controller.ctl("exit", "enable", str(b.id))
+    for relay in (r1, r2):
+        controller.ctl("relay", "enable", str(relay.id), "--udp", relay.endpoint, "--tcp", relay.endpoint)
+    url, expect = f"http://{web.ip}/", lab.hosts["nat-b"].ip
+    t.check("经 relay 到达", reaches(a, url, b, expect, timeout=40))
+
+    download, size = slow_download(a, url, b, 30)
+    time.sleep(5)
+    used = wait_route(controller, a, b, "relay", timeout=15).get("relays", [None])[0]
+    victim = r1 if used == r1.id else r2
+    victim.stop()
+    survivor = r2 if victim is r1 else r1
+    ok, detail = finished_intact(download, size)
+    t.check(f"下载途中停掉正在用的 relay（{victim.name}），下载没有断", ok, detail)
+    route = wait_route(controller, a, b, "relay", timeout=20)
+    t.check(f"之后的路改经 {survivor.name}", route.get("relays") == [survivor.id], f"{route}，原先经 {used}")
+    if t.failures:
+        print(tail(a.read_log(), 40), tail(b.read_log(), 25), sep="\n  ---\n")
+
+
+SCENARIOS = {
+    "join_and_exit": join_and_exit,
+    "enable_relay": enable_relay,
+    "hole_punch": hole_punch,
+    "relay_then_direct": relay_then_direct,
+    "tcp_relay": tcp_relay,
+    "relay_failover": relay_failover,
+}
 
 
 def main() -> int:
