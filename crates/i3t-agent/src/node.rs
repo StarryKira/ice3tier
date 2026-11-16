@@ -150,9 +150,10 @@ pub async fn run(state: StateDir, source: Source, program: Program, shutdown: im
         .with_context(|| format!("绑定端口 {}", config.port))?,
     );
     // 出口不替别人连本节点自己对外的地址（反射地址、路由器映射出来的地址），这些地址数据面最清楚。
+    // 两份都要：候选端点里有本机网卡上的地址，"别人看到的地址"在只经 relay 的节点上也有。
     let outbound = Outbound::new(local_rx.clone(), Os).with_own_endpoints({
         let endpoint = Arc::downgrade(&endpoint);
-        move || endpoint.upgrade().map(|endpoint| endpoint.endpoints()).unwrap_or_default()
+        move || endpoint.upgrade().map(|endpoint| [endpoint.endpoints(), endpoint.public_addresses()].concat()).unwrap_or_default()
     });
     let quota = state.exit_quota().unwrap_or_else(|error| {
         // 读不出来只是这个账期的用量从零记起，不值得让节点起不来。

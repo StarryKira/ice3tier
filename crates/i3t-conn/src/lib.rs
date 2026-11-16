@@ -42,7 +42,7 @@ pub use contract::{
     StreamAborted, StreamCode,
 };
 pub use endpoint::{Endpoint, EndpointConfig, EndpointError};
-pub use i3t_path::{BackboneLink, BackboneRow, CandidateReport, DirectKind, LegReport, PathReport, RouteChange};
+pub use i3t_path::{BackboneLink, BackboneRow, CandidateReport, DirectKind, LegReport, PathReport, RelayLeg, RouteChange};
 pub use i3t_relay::{DropReason, RelayCounters};
 pub use i3t_underlay::{Direction, PacketFilter};
 pub use manager::DatagramHandle;

@@ -138,6 +138,14 @@ impl Endpoint {
         self.paths.endpoints()
     }
 
+    /// 别人看到的本节点地址：relay 和地址查询服务器看到的，以及路由器上映射出来的。
+    /// 和 [`endpoints`](Self::endpoints) 不同，不向对端公布自己地址的节点（只经 relay 的）这里也有。
+    /// 出口靠它知道哪些公网地址其实是自己，不替别人去连。
+    #[must_use]
+    pub fn public_addresses(&self) -> Vec<SocketAddr> {
+        self.paths.public_addresses()
+    }
+
     /// 映射出来的端口是不是随对端变化。要有两个以上的观察点才知道。
     #[must_use]
     pub fn mapping_varies(&self) -> Option<bool> {

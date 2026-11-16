@@ -5,16 +5,22 @@
 
 use std::time::Duration;
 
-use i3t_conn::{BackboneRow, CandidateReport, DirectKind, LegReport, PathReport};
+use i3t_conn::{BackboneRow, CandidateReport, DirectKind, LegReport, PathReport, RelayLeg};
 use i3t_model::control::{self, PathCandidate, PathDetail, PathSegment, Route, RouteKind};
 use i3t_proto::backbone::RelayState;
 
-/// 现在这条路的细节。说不出任何细节的对端返回 `None`，上报里就不带它。
-///
-/// 经 relay 时第一段走 UDP 还是 TCP，路由层现在不给，所以总是 `None`。
+/// 现在这条路的细节：直连是怎么建立的，或者经 relay 时第一段走的是 UDP 还是 TCP。
+/// 说不出任何细节的对端返回 `None`，上报里就不带它。
 pub(crate) fn kind(report: &PathReport) -> Option<RouteKind> {
-    let direct = direct_kind(report);
-    direct.map(|direct| RouteKind { peer: report.peer, direct: Some(direct), relay_leg: None })
+    let (direct, relay_leg) = (direct_kind(report), report.relay_leg.map(leg_transport));
+    (direct.is_some() || relay_leg.is_some()).then_some(RouteKind { peer: report.peer, direct, relay_leg })
+}
+
+const fn leg_transport(leg: RelayLeg) -> control::LegTransport {
+    match leg {
+        RelayLeg::Udp => control::LegTransport::Udp,
+        RelayLeg::Tcp => control::LegTransport::Tcp,
+    }
 }
 
 /// 到这个对端的选路情况：模式、为什么是现在这条、考虑过的候选路径。
@@ -22,7 +28,7 @@ pub(crate) fn detail(report: &PathReport) -> PathDetail {
     PathDetail {
         mode: Some(report.mode),
         direct: direct_kind(report),
-        relay_leg: None,
+        relay_leg: report.relay_leg.map(leg_transport),
         reason: report.reason.clone(),
         candidates: report.candidates.iter().map(candidate).collect(),
     }
@@ -126,6 +132,7 @@ mod tests {
             mode: RoutingMode::LowestCost,
             route,
             direct,
+            relay_leg: None,
             reason: "直连代价最低".to_owned(),
             since_switch_ms: Some(1500),
             candidates: vec![CandidateReport {
@@ -134,6 +141,7 @@ mod tests {
                 legs: vec![LegReport { from: id(1), to: id(9), rtt_ms: 20.4, jitter_ms: 0.5, loss: 0.012 }],
                 load_percent: 30,
                 current: false,
+                relay_leg: Some(RelayLeg::Udp),
             }],
         }
     }
@@ -157,6 +165,11 @@ mod tests {
         let relayed = report(Route::Relay { relays: vec![id(9)] }, Some(DirectKind::Reachable));
         assert_eq!(detail(&relayed).direct, None, "直连的类型只说现在走的直连");
         assert_eq!(kind(&relayed), None);
+
+        // 经 relay 时报的是到第一个 relay 那一段走的传输。
+        let over_tcp = PathReport { relay_leg: Some(RelayLeg::Tcp), ..relayed };
+        assert_eq!(detail(&over_tcp).relay_leg, Some(control::LegTransport::Tcp));
+        assert_eq!(kind(&over_tcp), Some(RouteKind { peer: id(4), direct: None, relay_leg: Some(control::LegTransport::Tcp) }));
     }
 
     #[test]
