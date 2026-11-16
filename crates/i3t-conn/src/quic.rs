@@ -35,6 +35,12 @@ const STREAM_WINDOW: u32 = 2 * 1024 * 1024;
 /// 24 条流压满时高优先级 20～30ms、低优先级 64ms；64 条流压满、超过了这个窗口时，高优先级的也要一百到几百毫秒。
 /// 量的办法在 `tests/priority.rs` 里。
 const SEND_WINDOW: u64 = 64 * 1024 * 1024;
+/// 一条连接上所有的流加起来，对端发过来了、本端的上层还没有读走的数据最多多少字节。
+///
+/// QUIC 库的默认值是不限。不限的话，netmap 里的任何一个对端都能开满流、每条流压满 2MB 却不让本端读得动
+/// （比如在流的开头留一个空洞），把本端的内存吃光：16384 条流 × 2MB 是 32GB。有了这个上限，一条连接最多压住这么多。
+/// 和 [`SEND_WINDOW`] 取一样的数：守规矩的对端本来就不会让没确认的数据超过它。
+const RECEIVE_WINDOW: u32 = 64 * 1024 * 1024;
 /// 对端最多能同时开多少条单向流。单向流用来送打洞信令和要求可靠送达的数据报，每个数据报一条，读完就关。
 /// 这个数也是对端一次能压过来多少个这样的数据报：本端来不及收时，对端开不出新的流，就在那里等。
 const UNI_STREAMS: u32 = 256;
@@ -54,6 +60,7 @@ pub(crate) fn transport() -> Arc<TransportConfig> {
         .max_concurrent_bidi_streams(VarInt::from_u32(MAX_STREAMS))
         .max_concurrent_uni_streams(VarInt::from_u32(UNI_STREAMS))
         .stream_receive_window(VarInt::from_u32(STREAM_WINDOW))
+        .receive_window(VarInt::from_u32(RECEIVE_WINDOW))
         .send_window(SEND_WINDOW)
         .keep_alive_interval(Some(KEEP_ALIVE))
         .max_idle_timeout(Some(IdleTimeout::from(VarInt::from_u32(IDLE_TIMEOUT_MS))))
