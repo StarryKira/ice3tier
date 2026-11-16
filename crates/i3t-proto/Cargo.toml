@@ -8,8 +8,13 @@ publish = false
 description = "ice3tier 的线上格式：节点编号、数据报的分类、中转头、TCP 中转的分帧"
 
 [dependencies]
+base64.workspace = true
 bytes.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

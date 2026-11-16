@@ -85,6 +85,19 @@ impl FromStr for NodeId {
     }
 }
 
+impl serde::Serialize for NodeId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u32(self.get())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for NodeId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = <u32 as serde::Deserialize>::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(serde::de::Error::custom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,5 +125,13 @@ mod tests {
         assert_eq!(format!("{id:?}"), "NodeId(258)");
         assert!(matches!("abc".parse::<NodeId>(), Err(InvalidNodeId::NotANumber(_))));
         assert!(matches!("4294967296".parse::<NodeId>(), Err(InvalidNodeId::NotANumber(_))));
+    }
+
+    #[test]
+    fn json_form_is_a_plain_number() {
+        let id = NodeId::new(7).unwrap();
+        assert_eq!(serde_json::to_string(&id).unwrap(), "7");
+        assert_eq!(serde_json::from_str::<NodeId>("7").unwrap(), id);
+        assert!(serde_json::from_str::<NodeId>("0").is_err());
     }
 }
