@@ -1,0 +1,18 @@
+[package]
+name = "i3t-update"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "ice3tier 的节点更新：验签、取包、自检、替换与回退"
+
+[dependencies]
+i3t-crypto = { path = "../i3t-crypto" }
+i3t-model = { path = "../i3t-model" }
+i3t-proto = { path = "../i3t-proto" }
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
