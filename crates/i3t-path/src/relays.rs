@@ -441,9 +441,10 @@ impl RelayLink {
             Some(Event::Up { .. }) => {
                 self.attempt = None;
                 self.failures = 0;
+                // 这一轮没有同时试 UDP 的话（见 `fell_back`），连上之后马上在后台试一次：UDP 要是恢复了，不用等半分钟。
+                self.udp_retry_at = if self.fell_back { now } else { now + UDP_RETRY };
                 self.fell_back = true;
                 self.session_up(now);
-                self.udp_retry_at = now + UDP_RETRY;
                 tracing::info!(relay = %self.id, "到 relay 的中转会话建立（TCP）");
             }
             Some(Event::Down { reason }) => {
@@ -917,10 +918,13 @@ mod tests {
         assert_eq!(setup.link.leg(), Some(Leg::Tcp));
         assert_eq!(setup.udp_inits(), inits, "重连时没有同时去试 UDP");
 
-        // UDP 并没有被放弃：连上之后照常定期试，通了就换回去。
-        setup.keep_tcp_alive(died + 70 * MS, died + UDP_RETRY + Duration::from_secs(1));
+        // UDP 并没有被放弃：TCP 连上之后马上在后台试一次，之后照常定期试，通了就换回去。
+        setup.keep_tcp_alive(died + 70 * MS, died + 200 * MS);
         assert_eq!(setup.link.leg(), Some(Leg::Tcp));
-        assert!(setup.udp_inits() > inits, "走着 TCP 的时候又试了 UDP");
+        assert_eq!(setup.udp_inits(), inits + 1, "TCP 一连上就试了 UDP");
+        setup.complete_udp(died + 250 * MS);
+        setup.poll(died + 300 * MS);
+        assert!(matches!(setup.link.leg(), Some(Leg::Udp(_))), "UDP 恢复了的话立刻换回去");
     }
 
     #[test]
