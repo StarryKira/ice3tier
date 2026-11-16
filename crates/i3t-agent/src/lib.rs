@@ -23,6 +23,7 @@ pub mod join;
 pub mod local;
 mod metrics;
 pub mod node;
+mod persist;
 pub mod program;
 mod runtime;
 pub mod selfcheck;

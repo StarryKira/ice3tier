@@ -7,10 +7,13 @@
 //! | `config.toml` | 使用者手改的配置，见 [`crate::config`] |
 //! | `netmap.json` | 最后一份成功应用的 netmap。controller 不在线时节点靠它照常工作 |
 //! | `local.json` | 正在运行的节点的本机状态接口在哪里、凭什么问它。节点启动时写，退出时删 |
+//! | `ports.json` | 端口写 0 的端口转发挑定的端口，按转发的编号记。重启之后还用同一个端口 |
+//! | `quota.json` | 本节点作为出口时本账期的流量用量。重启之后接着记 |
 //! | `update/` | 归 `i3t-update` 管：取了一半的更新包、待确认的版本、失败过的版本 |
 //!
 //! 所有文件都是先写临时文件再改名，所以断电不会留下写了一半的文件。
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -27,9 +30,19 @@ const CONTROLLER_FILE: &str = "controller.json";
 const CONFIG_FILE: &str = "config.toml";
 const NETMAP_FILE: &str = "netmap.json";
 const LOCAL_FILE: &str = "local.json";
+const PORTS_FILE: &str = "ports.json";
+const QUOTA_FILE: &str = "quota.json";
 
 /// 节点默认绑定的端口。
 pub const DEFAULT_PORT: u16 = 20330;
+
+/// 出口本账期的流量用量，存下来跨重启用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct QuotaRecord {
+    /// 这份用量属于哪个账期：账期开始的时刻，Unix 秒。
+    pub period_start: u64,
+    pub used_bytes: u64,
+}
 
 /// 到哪里找 controller，以及凭什么确认连上的是它。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,6 +183,38 @@ impl StateDir {
         }
     }
 
+    /// 端口写 0 的端口转发挑定的端口：转发的编号 → 端口。
+    ///
+    /// # Errors
+    ///
+    /// 文件读不了或者解析不了。
+    pub fn forward_ports(&self) -> anyhow::Result<BTreeMap<u32, u16>> {
+        Ok(self.read_json(PORTS_FILE)?.unwrap_or_default())
+    }
+
+    /// # Errors
+    ///
+    /// 写入失败。
+    pub fn save_forward_ports(&self, ports: &BTreeMap<u32, u16>) -> anyhow::Result<()> {
+        self.write_json(PORTS_FILE, ports)
+    }
+
+    /// 上次存下的出口配额用量；从来没有存过时是 `None`。
+    ///
+    /// # Errors
+    ///
+    /// 文件读不了或者解析不了。
+    pub fn exit_quota(&self) -> anyhow::Result<Option<QuotaRecord>> {
+        self.read_json(QUOTA_FILE)
+    }
+
+    /// # Errors
+    ///
+    /// 写入失败。
+    pub fn save_exit_quota(&self, quota: &QuotaRecord) -> anyhow::Result<()> {
+        self.write_json(QUOTA_FILE, quota)
+    }
+
     fn read_json<T: DeserializeOwned>(&self, name: &str) -> anyhow::Result<Option<T>> {
         let path = self.root.join(name);
         match fs::read(&path) {
@@ -287,6 +332,19 @@ mod tests {
         assert!(state.controller().is_err());
         fs::write(state.path().join(KEY_FILE), b"garbage").unwrap();
         assert!(state.key().is_err());
+    }
+
+    #[test]
+    fn forward_ports_and_the_exit_quota_survive_reopening() {
+        let (_dir, state) = state();
+        assert!(state.forward_ports().unwrap().is_empty());
+        assert_eq!(state.exit_quota().unwrap(), None);
+        state.save_forward_ports(&BTreeMap::from([(7, 41_000), (9, 41_001)])).unwrap();
+        let quota = QuotaRecord { period_start: 1_794_787_200, used_bytes: 12_345 };
+        state.save_exit_quota(&quota).unwrap();
+        let reopened = StateDir::open(state.path()).unwrap();
+        assert_eq!(reopened.forward_ports().unwrap(), BTreeMap::from([(7, 41_000), (9, 41_001)]));
+        assert_eq!(reopened.exit_quota().unwrap(), Some(quota));
     }
 
     #[test]

@@ -6,13 +6,13 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
 use i3t_access::ListenState;
-use i3t_model::control::{Route, RouteSince, SelfUpdate};
+use i3t_model::control::{self, CredentialUsage, ExitReport, Route, RouteSince, SelfUpdate};
 use i3t_model::netmap::Attachment;
 use i3t_model::update::UpdateStatus;
 use serde::{Deserialize, Serialize};
 
 use crate::control::LinkState;
-use crate::runtime::Runtime;
+use crate::runtime::{Runtime, exit_report};
 
 /// 一个运行着的节点现在的样子。
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -40,6 +40,10 @@ pub struct LiveStatus {
     pub update: LiveUpdate,
     /// 本节点启用为 relay 时有值。
     pub relay: Option<LiveRelay>,
+    /// 本节点替别人连目标（出口一侧）的计数，配额用到了哪里。
+    pub exit: Option<ExitReport>,
+    /// 入口上各个接入凭据这次运行以来的用量。
+    pub credentials: Vec<CredentialUsage>,
 }
 
 /// 和 controller 的那条长连接。
@@ -89,14 +93,19 @@ pub struct LiveListener {
     pub name: String,
     /// 配置里写的绑定地址。
     pub bind: SocketAddr,
-    /// `listening`、`failed`、`virtual`、`unsupported`。
+    /// `listening`、`port_in_use`、`failed`、`virtual`、`unsupported`。
     pub state: String,
-    /// `failed` 时是系统给的原因。
+    /// `port_in_use`、`failed`、`unsupported` 时是原因；端口写 0 时是实际的端口。
     #[serde(default)]
     pub detail: Option<String>,
     /// 上面正在进行的连接数。
     #[serde(default)]
     pub active: usize,
+    /// 这次运行以来客户端发进来的、发回给客户端的字节数。
+    #[serde(default)]
+    pub bytes_up: u64,
+    #[serde(default)]
+    pub bytes_down: u64,
 }
 
 /// 程序的更新。
@@ -136,14 +145,17 @@ impl LiveStatus {
             }
         });
         let access = runtime.access.status();
-        let listeners = access
-            .listeners
-            .iter()
-            .map(|listener| listener_of(listener.name.clone(), listener.bind, &listener.state, listener.active.get()));
-        let forwards = access
-            .forwards
-            .iter()
-            .map(|forward| listener_of(format!("forward-{}", forward.id), forward.bind, &forward.state, forward.active.get()));
+        let listeners = access.listeners.iter().map(|listener| LiveListener {
+            bytes_up: listener.traffic.up(),
+            bytes_down: listener.traffic.down(),
+            ..listener_of(listener.name.clone(), listener.bind, &listener.state, listener.active.get())
+        });
+        let forwards = access.forwards.iter().map(|forward| LiveListener {
+            bytes_up: forward.traffic.up(),
+            bytes_down: forward.traffic.down(),
+            ..listener_of(format!("forward-{}", forward.id), forward.bind, &forward.state, forward.active.get())
+        });
+        let exit = runtime.exit.stats();
         let counters = runtime.endpoint.relay_counters();
         Self {
             version: runtime.program.version.to_string(),
@@ -160,13 +172,15 @@ impl LiveStatus {
             attached: runtime.endpoint.attached(),
             routes: routes.collect(),
             listeners: listeners.chain(forwards).collect(),
-            update: LiveUpdate { draining: runtime.gate.is_draining(), status: update, self_update: Some(runtime.self_update) },
+            update: LiveUpdate { draining: exit.draining, status: update, self_update: Some(runtime.self_update) },
             relay: netmap.me.relay.is_some().then(|| LiveRelay {
                 sessions: counters.sessions,
                 forwarded_packets: counters.forwarded_packets,
                 forwarded_bytes: counters.forwarded_bytes,
                 dropped: counters.dropped_total(),
             }),
+            exit: netmap.me.exit.is_some().then(|| exit_report(&exit)),
+            credentials: runtime.credential_usage(),
         }
     }
 }
@@ -174,13 +188,27 @@ impl LiveStatus {
 fn listener_of(name: String, bind: SocketAddr, state: &ListenState, active: usize) -> LiveListener {
     let (state, detail) = match state {
         ListenState::Listening { local } => ("listening", (*local != bind).then(|| format!("实际绑定在 {local}"))),
+        ListenState::PortInUse { reason } => ("port_in_use", Some(reason.clone())),
         ListenState::Failed { reason } => ("failed", Some(reason.clone())),
         ListenState::Virtual => ("virtual", None),
-        ListenState::Unsupported => ("unsupported", None),
+        ListenState::Unsupported { reason } => ("unsupported", Some(reason.clone())),
         // 入口模块以后可能有新的状态；这里认不出来的照实说认不出来。
         _ => ("unknown", None),
     };
-    LiveListener { name, bind, state: state.to_owned(), detail, active }
+    LiveListener { name, bind, state: state.to_owned(), detail, active, bytes_up: 0, bytes_down: 0 }
+}
+
+/// 入口模块报的监听状态写成上报给 controller 的样子。
+pub(crate) fn listen_state(state: &ListenState) -> control::ListenState {
+    match state {
+        ListenState::Listening { local } => control::ListenState::Listening { local: *local },
+        ListenState::PortInUse { reason } => control::ListenState::PortInUse { detail: reason.clone() },
+        ListenState::Failed { reason } => control::ListenState::Failed { detail: reason.clone() },
+        ListenState::Virtual => control::ListenState::Virtual,
+        ListenState::Unsupported { reason } => control::ListenState::Unsupported { detail: reason.clone() },
+        // 入口模块以后可能有新的状态；这里认不出来的照实说认不出来。
+        _ => control::ListenState::Unknown,
+    }
 }
 
 #[cfg(test)]
@@ -208,8 +236,25 @@ mod tests {
         assert_eq!((listening.state.as_str(), listening.active), ("listening", 2));
         assert!(listening.detail.unwrap().contains("41000"), "端口写 0 时说出实际的端口");
         assert_eq!(listener_of("socks".into(), local, &ListenState::Listening { local }, 0).detail, None);
-        let failed = listener_of("http".into(), bind, &ListenState::Failed { reason: "地址已经在用".into() }, 0);
-        assert_eq!((failed.state.as_str(), failed.detail.as_deref()), ("failed", Some("地址已经在用")));
+        let in_use = listener_of("http".into(), bind, &ListenState::PortInUse { reason: "地址已经在用".into() }, 0);
+        assert_eq!((in_use.state.as_str(), in_use.detail.as_deref()), ("port_in_use", Some("地址已经在用")));
+        let failed = listener_of("http".into(), bind, &ListenState::Failed { reason: "没有这个地址".into() }, 0);
+        assert_eq!((failed.state.as_str(), failed.detail.as_deref()), ("failed", Some("没有这个地址")));
         assert_eq!(listener_of("forward-3".into(), bind, &ListenState::Virtual, 0).state, "virtual");
+    }
+
+    #[test]
+    fn listen_states_are_reported_to_the_controller_with_their_reason() {
+        let local: SocketAddr = "127.0.0.1:41000".parse().unwrap();
+        assert_eq!(listen_state(&ListenState::Listening { local }), control::ListenState::Listening { local });
+        assert_eq!(
+            listen_state(&ListenState::PortInUse { reason: "in use".into() }),
+            control::ListenState::PortInUse { detail: "in use".into() }
+        );
+        assert_eq!(listen_state(&ListenState::Virtual), control::ListenState::Virtual);
+        assert_eq!(
+            listen_state(&ListenState::Unsupported { reason: "UDP".into() }),
+            control::ListenState::Unsupported { detail: "UDP".into() }
+        );
     }
 }

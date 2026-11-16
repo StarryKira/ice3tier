@@ -12,7 +12,7 @@
 //! 1. 启动时先问更新库上一次更新怎么样了：新程序没被确认过太多次或者太久，这时已经换回旧程序，本进程直接要求重启。
 //! 2. 每次连上 controller 就向更新库确认一次：新程序连上了 controller 才算更新成功。
 //! 3. controller 的指示交给 [`update`](crate::update)，包经长连接取，状态的每次变化马上上报。
-//! 4. 更新进行到"排空中"时不再接新的流（见 [`drain`](crate::drain)）。
+//! 4. 更新进行到"排空中"时不再接新的流（见 [`drain`](crate::drain)）：入口和出口都明确拒绝新的请求，监听照常开着。
 //! 5. 程序文件换好之后把最后的状态报上去，然后返回 [`Outcome::Restart`]。
 
 use std::ffi::OsString;
@@ -25,7 +25,7 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use i3t_access::Access;
 use i3t_conn::{Endpoint, EndpointConfig};
-use i3t_exit::{Exit, Os, Outbound};
+use i3t_exit::{Exit, Os, Outbound, QuotaState};
 use i3t_model::Netmap;
 use i3t_model::control::{Hello, SelfUpdate};
 use i3t_model::netmap::{Listener, ListenerProtocol};
@@ -35,10 +35,11 @@ use tokio::sync::{Notify, watch};
 
 use crate::config::Config;
 use crate::control::{ControlLink, LinkSetup, LinkState, Timing};
-use crate::drain::{Drain, DrainGate};
+use crate::drain::Drain;
 use crate::flows;
 use crate::join::hello;
 use crate::local::LocalServers;
+use crate::persist::{self, StatePorts};
 use crate::program::Program;
 use crate::runtime::{Parts, Runtime};
 use crate::state::StateDir;
@@ -138,7 +139,7 @@ pub async fn run(state: StateDir, source: Source, program: Program, shutdown: im
     let mut drain = Drain::new(update_rx.clone());
 
     // 各层看到的是按本机配置调整过的 netmap。
-    let (local_tx, local_rx) = watch::channel(Arc::new(localize(&initial, &config, false)));
+    let (local_tx, local_rx) = watch::channel(Arc::new(localize(&initial, &config)));
     let endpoint = Arc::new(
         Endpoint::bind(EndpointConfig {
             key: Arc::clone(&key),
@@ -149,14 +150,26 @@ pub async fn run(state: StateDir, source: Source, program: Program, shutdown: im
         .with_context(|| format!("绑定端口 {}", config.port))?,
     );
     let outbound = Outbound::new(local_rx.clone(), Os);
-    let exit = Arc::new(Exit::new(local_rx.clone(), outbound.clone()));
-    let gate = Arc::new(DrainGate::new(Arc::clone(&exit), drain.clone()));
-    let access = Arc::new(Access::new(Arc::clone(&endpoint), outbound, local_rx.clone()));
+    let quota = state.exit_quota().unwrap_or_else(|error| {
+        // 读不出来只是这个账期的用量从零记起，不值得让节点起不来。
+        tracing::warn!("上次存下的出口配额用量读不出来，从零开始记：{error:#}");
+        None
+    });
+    let quota =
+        quota.map_or_else(QuotaState::default, |record| QuotaState { period_start: record.period_start, used_bytes: record.used_bytes });
+    let ports = Arc::new(StatePorts::open(state.clone()));
+    let access = Arc::new(Access::new(Arc::clone(&endpoint), outbound.clone(), local_rx.clone()).with_port_book(ports));
+    // 出口接力 UDP 端口转发时和入口共用一个开数据报上下文的：对端发回来的数据报只由入口的那一个分发。
+    let exit = Arc::new(
+        Exit::new(local_rx.clone(), outbound, Arc::clone(&endpoint)).with_quota_state(quota).with_opener(access.datagram_opener()),
+    );
 
     let serve_exit = tokio::spawn({
-        let (endpoint, gate) = (Arc::clone(&endpoint), Arc::clone(&gate));
-        async move { i3t_flow::serve(&*endpoint, gate).await }
+        let (endpoint, exit) = (Arc::clone(&endpoint), Arc::clone(&exit));
+        async move { i3t_flow::serve(&*endpoint, exit).await }
     });
+    let save_quota = tokio::spawn(persist::save_quota(state.clone(), Arc::clone(&exit)));
+    let state_for_quota = state.clone();
     let serve_access = tokio::spawn({
         let access = Arc::clone(&access);
         async move { access.run().await }
@@ -173,9 +186,8 @@ pub async fn run(state: StateDir, source: Source, program: Program, shutdown: im
         self_update,
         controller: controller.as_ref().map(|controller| controller.address.clone()),
         endpoint: Arc::clone(&endpoint),
-        exit,
-        gate,
-        access,
+        exit: Arc::clone(&exit),
+        access: Arc::clone(&access),
         netmap: local_rx,
         link: controller.is_some().then_some(link_state_rx),
         update: update_rx,
@@ -224,6 +236,8 @@ pub async fn run(state: StateDir, source: Source, program: Program, shutdown: im
                 link: &mut link,
                 link_state: &link_state_tx,
                 endpoint: &endpoint,
+                exit: &exit,
+                access: &access,
                 local: &local_tx,
                 config: &config,
                 drain: &mut drain,
@@ -247,6 +261,8 @@ pub async fn run(state: StateDir, source: Source, program: Program, shutdown: im
 
     tracing::info!("节点停止");
     drop(local_servers);
+    save_quota.abort();
+    persist::save_quota_now(&state_for_quota, &exit);
     count_flows.abort();
     follow_routes.abort();
     serve_access.abort();
@@ -283,6 +299,8 @@ struct Managed<'a> {
     /// 长连接的状态转到这里，给本机状态接口和指标看。
     link_state: &'a watch::Sender<LinkState>,
     endpoint: &'a Arc<Endpoint>,
+    exit: &'a Exit,
+    access: &'a Access<Endpoint, Outbound<Os>>,
     local: &'a watch::Sender<Arc<Netmap>>,
     config: &'a Config,
     drain: &'a mut Drain,
@@ -300,7 +318,7 @@ impl Managed<'_> {
         updates: Option<impl Future<Output = i3t_update::RestartRequired>>,
         shutdown: impl Future<Output = ()>,
     ) -> anyhow::Result<Outcome> {
-        let Self { link, link_state, endpoint, local, config, drain, updater, mut awaiting_confirmation } = self;
+        let Self { link, link_state, endpoint, exit, access, local, config, drain, updater, mut awaiting_confirmation } = self;
         let signals = link.signal_sender();
         endpoint.set_signal_hook(move |to, signal| {
             // 信令是尽力而为的：队列满了就丢，路径层自己会重试。
@@ -310,8 +328,8 @@ impl Managed<'_> {
         });
         let mut netmaps = link.netmap();
         let mut states = link.state();
-        let relocalize = |netmaps: &watch::Receiver<Arc<Netmap>>, draining: bool| {
-            local.send_replace(Arc::new(localize(&netmaps.borrow(), config, draining)));
+        let relocalize = |netmaps: &watch::Receiver<Arc<Netmap>>| {
+            local.send_replace(Arc::new(localize(&netmaps.borrow(), config)));
         };
         let has_updates = updates.is_some();
         let updates = async {
@@ -333,16 +351,18 @@ impl Managed<'_> {
                 () = &mut shutdown => return Ok(Outcome::Stopped),
                 Ok(()) = netmaps.changed() => {
                     netmaps.borrow_and_update();
-                    relocalize(&netmaps, drain.is_draining());
+                    relocalize(&netmaps);
                 }
                 draining = drain.changed() => {
                     if draining {
                         // 两种情况会走到这里：管理员选了"排空后更新"，或者任何一种更新走到了换程序的那一步。
-                        tracing::info!("不再接新的流，直到更新之后重启：关掉本机的代理入口和端口转发的监听，拒绝别的节点新开过来的流；手上的流不受影响");
+                        tracing::info!("不再接新的流，直到更新之后重启：本机入口和别的节点开过来的新请求都明确拒绝，监听照常开着；手上的流不受影响");
                     } else {
-                        tracing::info!("更新没有继续下去：重新打开入口，照常接受新的流");
+                        tracing::info!("更新没有继续下去：照常接受新的流");
                     }
-                    relocalize(&netmaps, draining);
+                    let detail = drain.detail();
+                    exit.set_draining(detail.clone());
+                    access.set_draining(detail);
                 }
                 Some((from, signal)) = link.next_signal() => endpoint.deliver_signal(from, signal),
                 Ok(()) = states.changed() => {
@@ -406,17 +426,20 @@ async fn report_when_reachability_changes(endpoint: Arc<Endpoint>, report_now: A
     }
 }
 
+/// 节点按本机配置文件自己开的回环代理入口的名字。上报时据此标出哪些监听器不是 controller 下发的。
+pub(crate) const BUILTIN_LISTENERS: [&str; 2] = ["local-socks5", "local-http"];
+
 /// 把 controller 下发的 netmap 按本机的配置调整成各层实际使用的样子。
 ///
-/// 做三件事：
+/// 做两件事：
 ///
 /// - 加上配置文件里的本机代理入口；
 /// - 去掉本机没有声明过的能力。controller 被攻破或者管理员密码被盗时，它也不能把一台没有声明的机器
-///   变成出口、relay 或者端口转发的目标；
-/// - `draining` 时去掉全部入口（代理监听器和端口转发的监听）：入口模块随之关掉监听，新的连接连不上，
-///   已经建立的连接照常跑完。出口一侧的新请求由 [`DrainGate`] 拒绝，不在这里管。
+///   变成出口、relay 或者端口转发的目标。
+///
+/// 排空不在这里管：监听照常开着，由入口和出口模块明确拒绝新的请求（见 [`drain`](crate::drain)）。
 #[must_use]
-pub fn localize(netmap: &Netmap, config: &Config, draining: bool) -> Netmap {
+pub fn localize(netmap: &Netmap, config: &Config) -> Netmap {
     let mut netmap = netmap.clone();
     let declared = config.declare;
     if !declared.exit && netmap.me.exit.take().is_some() {
@@ -430,15 +453,9 @@ pub fn localize(netmap: &Netmap, config: &Config, draining: bool) -> Netmap {
         netmap.me.forward_targets.clear();
         tracing::warn!("controller 把本节点配成了端口转发的目标，但本机没有声明，不生效。要声明请执行 i3t set can-forward on");
     }
-    if draining {
-        netmap.me.listeners.clear();
-        netmap.me.forwards.clear();
-        return netmap;
-    }
-
     let local = [
-        ("local-socks5", config.proxy.socks5.addr(), ListenerProtocol::Socks5),
-        ("local-http", config.proxy.http.addr(), ListenerProtocol::Http),
+        (BUILTIN_LISTENERS[0], config.proxy.socks5.addr(), ListenerProtocol::Socks5),
+        (BUILTIN_LISTENERS[1], config.proxy.http.addr(), ListenerProtocol::Http),
     ];
     for (name, bind, protocol) in local {
         let Some(bind) = bind else { continue };
@@ -454,6 +471,8 @@ pub fn localize(netmap: &Netmap, config: &Config, draining: bool) -> Netmap {
             require_credential: false,
             default_action: None,
             fixed_exit: None,
+            class: None,
+            optimistic: None,
         });
     }
     netmap
@@ -480,7 +499,7 @@ mod tests {
 
     #[test]
     fn capabilities_that_were_not_declared_locally_are_stripped() {
-        let local = localize(&enabled_everything(), &Config::default(), false);
+        let local = localize(&enabled_everything(), &Config::default());
         assert!(local.me.exit.is_none() && local.me.relay.is_none());
         assert!(local.relay_clients.is_empty() && local.me.forward_targets.is_empty());
     }
@@ -488,7 +507,7 @@ mod tests {
     #[test]
     fn declared_capabilities_are_kept() {
         let config = Config::parse("[declare]\nexit = true\nrelay = true\nforward = true\n").unwrap();
-        let local = localize(&enabled_everything(), &config, false);
+        let local = localize(&enabled_everything(), &config);
         assert!(local.me.exit.is_some() && local.me.relay.is_some());
         assert_eq!((local.relay_clients.len(), local.me.forward_targets.len()), (1, 1));
     }
@@ -496,10 +515,10 @@ mod tests {
     #[test]
     fn local_proxy_listeners_are_added_unless_switched_off_or_taken() {
         let names = |netmap: &Netmap| netmap.me.listeners.iter().map(|listener| listener.name.clone()).collect::<Vec<_>>();
-        assert_eq!(names(&localize(&netmap(1), &Config::default(), false)), ["local-socks5", "local-http"]);
+        assert_eq!(names(&localize(&netmap(1), &Config::default())), ["local-socks5", "local-http"]);
 
         let only_http = Config::parse("[proxy]\nsocks5 = \"off\"\n").unwrap();
-        assert_eq!(names(&localize(&netmap(1), &only_http, false)), ["local-http"]);
+        assert_eq!(names(&localize(&netmap(1), &only_http)), ["local-http"]);
 
         let mut managed = netmap(1);
         managed.me.listeners.push(Listener {
@@ -510,30 +529,9 @@ mod tests {
             require_credential: false,
             default_action: None,
             fixed_exit: None,
+            class: None,
+            optimistic: None,
         });
-        assert_eq!(names(&localize(&managed, &Config::default(), false)), ["from-controller", "local-http"]);
-    }
-
-    #[test]
-    fn draining_closes_every_ingress_but_keeps_the_roles() {
-        let config = Config::parse("[declare]\nexit = true\nrelay = true\nforward = true\n").unwrap();
-        let mut managed = enabled_everything();
-        managed.me.listeners.push(Listener {
-            name: "from-controller".into(),
-            bind: "192.168.1.5:1080".parse().unwrap(),
-            protocol: ListenerProtocol::Socks5,
-            allow_from: Vec::new(),
-            require_credential: true,
-            default_action: None,
-            fixed_exit: None,
-        });
-        managed.me.forwards =
-            vec![serde_json::from_value(serde_json::json!({ "id": 4, "protocol": "tcp", "bind": "127.0.0.1:8080", "target": 2 })).unwrap()];
-        assert_eq!((localize(&managed, &config, false).me.listeners.len(), localize(&managed, &config, false).me.forwards.len()), (3, 1));
-
-        let drained = localize(&managed, &config, true);
-        assert!(drained.me.listeners.is_empty() && drained.me.forwards.is_empty(), "入口全部关掉，本机的代理入口也不例外");
-        assert!(drained.me.exit.is_some() && drained.me.relay.is_some(), "出口和 relay 的角色不动：手上的流还要跑完，转发照常");
-        assert_eq!(drained.peers, managed.peers, "对端和访问关系不动，否则已经建立的流会被重置");
+        assert_eq!(names(&localize(&managed, &Config::default())), ["from-controller", "local-http"]);
     }
 }

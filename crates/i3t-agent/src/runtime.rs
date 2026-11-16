@@ -6,17 +6,21 @@ use std::time::Instant;
 
 use i3t_access::Access;
 use i3t_conn::{Endpoint, RouteChange};
-use i3t_exit::{Exit, Os, Outbound};
+use i3t_exit::{Exit, ExitStats, Os, Outbound};
 use i3t_model::Netmap;
-use i3t_model::control::{Report, Route, RouteAnswer, RouteSince, SelfUpdate};
+use i3t_model::control::{
+    CredentialUsage, ExitObservation, ExitReport, ForwardReport, ListenTraffic, ListenerReport, QuotaUsage, Report, Route, RouteAnswer,
+    RouteSince, SelfUpdate,
+};
 use i3t_model::update::UpdateStatus;
 use i3t_proto::NodeId;
 use tokio::sync::{broadcast, watch};
 
 use crate::control::LinkState;
-use crate::drain::DrainGate;
 use crate::flows::{self, RelayActivity, Sample};
+use crate::node::BUILTIN_LISTENERS;
 use crate::program::Program;
+use crate::status::listen_state;
 
 /// 一个运行着的节点。
 pub(crate) struct Runtime {
@@ -28,10 +32,11 @@ pub(crate) struct Runtime {
     pub(crate) controller: Option<String>,
     pub(crate) endpoint: Arc<Endpoint>,
     pub(crate) exit: Arc<Exit>,
-    pub(crate) gate: Arc<DrainGate<Exit>>,
     pub(crate) access: Arc<Access<Endpoint, Outbound<Os>>>,
     /// 各层实际在用的 netmap（按本机配置调整过的）。
     pub(crate) netmap: watch::Receiver<Arc<Netmap>>,
+    /// 这次运行的编号，上报里带着，controller 靠它知道累计的计数是不是从头开始了。
+    pub(crate) run: u64,
     /// 长连接的状态；静态模式下没有。
     pub(crate) link: Option<watch::Receiver<LinkState>>,
     /// 报给 controller 的更新状态。
@@ -49,7 +54,6 @@ pub(crate) struct Parts {
     pub(crate) controller: Option<String>,
     pub(crate) endpoint: Arc<Endpoint>,
     pub(crate) exit: Arc<Exit>,
-    pub(crate) gate: Arc<DrainGate<Exit>>,
     pub(crate) access: Arc<Access<Endpoint, Outbound<Os>>>,
     pub(crate) netmap: watch::Receiver<Arc<Netmap>>,
     pub(crate) link: Option<watch::Receiver<LinkState>>,
@@ -59,7 +63,7 @@ pub(crate) struct Parts {
 
 impl Runtime {
     pub(crate) fn new(parts: Parts) -> Self {
-        let Parts { program, self_update, controller, endpoint, exit, gate, access, netmap, link, update, flows } = parts;
+        let Parts { program, self_update, controller, endpoint, exit, access, netmap, link, update, flows } = parts;
         Self {
             program,
             self_update,
@@ -67,9 +71,10 @@ impl Runtime {
             controller,
             endpoint,
             exit,
-            gate,
             access,
             netmap,
+            // 0 留给"旧版本的节点没有报"。
+            run: rand::random::<u64>().max(1),
             link,
             update,
             flows,
@@ -96,17 +101,96 @@ impl Runtime {
     /// 报给 controller 的内容。`routes` 是完整的路由表，长连接自己挑要发的条目。
     pub(crate) fn report(&self) -> Report {
         let stats = self.exit.stats();
+        let access = self.access.status();
+        let configured = &self.netmap.borrow().me.listeners;
+        let listeners: Vec<ListenerReport> = access
+            .listeners
+            .iter()
+            .map(|listener| ListenerReport {
+                name: listener.name.clone(),
+                bind: listener.bind,
+                protocol: listener.protocol,
+                // 名字是本机入口的名字、地址也是它的：本机配置文件开的那一个（controller 在同一个地址上配了监听器时，那一个不会被加进来）。
+                builtin: BUILTIN_LISTENERS.contains(&listener.name.as_str())
+                    && configured.iter().filter(|config| config.bind == listener.bind).count() <= 1,
+                state: listen_state(&listener.state),
+                traffic: ListenTraffic {
+                    connections: count(listener.active.get()),
+                    bytes_up: listener.traffic.up(),
+                    bytes_down: listener.traffic.down(),
+                },
+            })
+            .collect();
+        let forwards: Vec<ForwardReport> = access
+            .forwards
+            .iter()
+            .map(|forward| ForwardReport {
+                id: forward.id,
+                bind: forward.bind,
+                protocol: forward.protocol,
+                state: listen_state(&forward.state),
+                traffic: ListenTraffic {
+                    connections: count(forward.active.get()),
+                    bytes_up: forward.traffic.up(),
+                    bytes_down: forward.traffic.down(),
+                },
+            })
+            .collect();
+        let ingress_up: u64 =
+            listeners.iter().map(|listener| listener.traffic.bytes_up).chain(forwards.iter().map(|forward| forward.traffic.bytes_up)).sum();
+        let ingress_down: u64 = listeners
+            .iter()
+            .map(|listener| listener.traffic.bytes_down)
+            .chain(forwards.iter().map(|forward| forward.traffic.bytes_down))
+            .sum();
         Report {
             endpoints: self.endpoint.endpoints(),
             mapping_varies: self.endpoint.mapping_varies(),
             attached: self.endpoint.attached(),
             flows: u32::try_from(*self.flows.borrow()).unwrap_or(u32::MAX),
-            tx_bytes: stats.bytes_to_target,
-            rx_bytes: stats.bytes_from_target,
+            // 入口一侧客户端发出的、出口一侧发往目标的，都算本节点经流发出的字节；反过来是收到的。
+            tx_bytes: stats.bytes_to_target.saturating_add(ingress_up),
+            rx_bytes: stats.bytes_from_target.saturating_add(ingress_down),
             routes: self.endpoint.routes(),
             routes_full: false,
             update: Some(self.update.borrow().clone()),
+            run: self.run,
+            credentials: self.credential_usage(),
+            exit: Some(Box::new(exit_report(&stats))),
+            exits: self.exit_observations(),
+            listeners,
+            forwards,
         }
+    }
+
+    /// 各个接入凭据的用量。没有编号的（旧版本的 controller 下发的）报不了，跳过。
+    pub(crate) fn credential_usage(&self) -> Vec<CredentialUsage> {
+        let usage = self.access.credential_usage().into_iter().filter(|usage| usage.id != 0);
+        usage
+            .map(|usage| CredentialUsage {
+                id: usage.id,
+                bytes: usage.bytes_up.saturating_add(usage.bytes_down),
+                connections: usage.connections,
+                last_used_secs_ago: usage.last_used.map(|ago| ago.as_secs()),
+            })
+            .collect()
+    }
+
+    /// 本节点作为发起方，经各个出口出去的流。
+    pub(crate) fn exit_observations(&self) -> Vec<ExitObservation> {
+        let observed = self.access.exit_usage().into_iter();
+        observed
+            .map(|seen| ExitObservation {
+                exit: seen.exit,
+                flows: seen.flows,
+                bytes_up: seen.bytes_up,
+                bytes_down: seen.bytes_down,
+                failed_by_target: seen.failed_by_target,
+                refused: seen.refused,
+                failed_by_exit: seen.failed_by_exit,
+                unreachable: seen.unreachable,
+            })
+            .collect()
     }
 
     /// 回答"到 `peer` 现在会怎么走"：路由层手上现成的结论，不为此去探测或者建连接。
@@ -120,6 +204,32 @@ impl Runtime {
             None => RouteAnswer { peer, route: None, rtt_ms: None, since: None },
         }
     }
+}
+
+/// 出口一侧的计数写成上报的样子。
+pub(crate) fn exit_report(stats: &ExitStats) -> ExitReport {
+    ExitReport {
+        active: stats.active,
+        total: stats.total,
+        bytes_to_target: stats.bytes_to_target,
+        bytes_from_target: stats.bytes_from_target,
+        failed_by_target: stats.failed_by_target,
+        refused: stats.refused,
+        failed_by_exit: stats.failed_by_exit,
+        aborted: stats.aborted,
+        draining: stats.draining,
+        quota: stats.quota.map(|quota| QuotaUsage {
+            limit_bytes: quota.limit_bytes,
+            used_bytes: quota.used_bytes,
+            period_start: quota.period.start,
+            period_end: quota.period.end,
+        }),
+    }
+}
+
+/// 上报里的计数都是 `u32`。真的数不下时停在最大值。
+fn count(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 /// 到每个对端的路上一次是什么时候、因为什么换的。路由层只在换路的那一刻说一次原因，这里把它记下来。

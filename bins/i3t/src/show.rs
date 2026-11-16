@@ -32,20 +32,26 @@ pub fn status(live: &LiveStatus) {
         );
     }
     println!("更新      {}", update(live));
+    if live.update.draining {
+        println!("  注意    节点正在排空：新的请求一律被拒绝，手上的流照常跑完");
+    }
+    if let Some(quota) = live.exit.as_ref().and_then(|exit| exit.quota) {
+        println!("出口配额  本账期已用 {} / {} 字节", quota.used_bytes, quota.limit_bytes);
+    }
 
     println!("\n监听：");
     if live.listeners.is_empty() {
-        let why = if live.update.draining { "（节点正在排空，入口都关着）" } else { "（没有）" };
-        println!("  {why}");
+        println!("  （没有）");
     }
     let rows = live.listeners.iter().map(|listener| {
         let state = match &listener.detail {
             Some(detail) => format!("{}（{detail}）", listener.state),
             None => listener.state.clone(),
         };
-        vec![listener.name.clone(), listener.bind.to_string(), listener.active.to_string(), state]
+        let traffic = format!("{}/{}", listener.bytes_up, listener.bytes_down);
+        vec![listener.name.clone(), listener.bind.to_string(), listener.active.to_string(), traffic, state]
     });
-    table(&["NAME", "BIND", "ACTIVE", "STATE"], &rows.collect::<Vec<_>>());
+    table(&["NAME", "BIND", "ACTIVE", "UP/DOWN", "STATE"], &rows.collect::<Vec<_>>());
 
     println!("\n路由：");
     if live.routes.is_empty() {

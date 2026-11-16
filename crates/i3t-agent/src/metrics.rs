@@ -3,8 +3,9 @@
 //! 各层的计数都是它们自己的原子变量，这里只在被抓的时候读一遍、排成文本，没有后台任务。
 //!
 //! 现在有的：流（入口、出口各有多少在进行，出口一共收到过多少）、字节数、没建成的请求按归因分类、
-//! relay 的转发和丢弃、到每个对端走的是哪一种路和延迟、和 controller 的连接、更新的状态。
-//! 白皮书说的"按凭据、按出口分别统计"还没有：入口模块现在不分凭据和出口记数。
+//! 出口的配额，按凭据的用量，经各个出口出去的流（发起这一侧看到的），relay 的转发和丢弃、
+//! 到每个对端走的是哪一种路和延迟、和 controller 的连接、更新的状态。
+//! 白皮书说的"不做交叉组合"：按凭据和按出口是两组各自独立的数，没有"某个凭据经某个出口"这样的组合。
 
 use i3t_conn::DropReason;
 use i3t_metrics::Exposition;
@@ -49,7 +50,45 @@ pub(crate) fn render(runtime: &Runtime) -> String {
     out.counter("i3t_exit_failures_total", help, &[("attribution", "refused")], stats.refused);
     out.counter("i3t_exit_failures_total", help, &[("attribution", "exit")], stats.failed_by_exit);
     out.counter("i3t_exit_flows_aborted_total", "建成之后没有正常结束的流", &[], stats.aborted);
-    out.counter("i3t_drain_refused_total", "因为节点正在排空而拒绝的请求", &[], runtime.gate.refused());
+    out.counter(
+        "i3t_drain_refused_total",
+        "因为节点正在排空而拒绝的请求，入口和出口两边的",
+        &[],
+        stats.drained.saturating_add(runtime.access.drained()),
+    );
+    out.gauge("i3t_draining", "节点正在排空：是 1，不接新的流", &[], f64::from(u8::from(stats.draining)));
+    if let Some(quota) = stats.quota {
+        out.gauge("i3t_exit_quota_bytes", "出口每个账期的流量配额（字节）", &[], bytes_gauge(quota.limit_bytes));
+        out.gauge("i3t_exit_quota_used_bytes", "出口本账期已经用掉的流量（字节）", &[], bytes_gauge(quota.used_bytes));
+    }
+
+    for usage in runtime.access.credential_usage() {
+        let labels = |direction| [("credential", usage.name.as_str()), ("direction", direction)];
+        let help = "经每个接入凭据搬运的字节数，up 是客户端发出的，down 是发回给客户端的";
+        out.counter("i3t_credential_bytes_total", help, &labels("up"), usage.bytes_up);
+        out.counter("i3t_credential_bytes_total", help, &labels("down"), usage.bytes_down);
+        out.gauge(
+            "i3t_credential_connections",
+            "每个接入凭据现在的连接数",
+            &[("credential", usage.name.as_str())],
+            f64::from(usage.connections),
+        );
+    }
+
+    let name_of = |peer| netmap.peer(peer).map_or_else(|| format!("#{peer}"), |peer| peer.name.clone());
+    for seen in runtime.access.exit_usage() {
+        let exit = name_of(seen.exit);
+        out.counter("i3t_exit_observed_flows_total", "本节点经每个出口发起的流", &[("exit", &exit)], seen.flows);
+        let help = "本节点经每个出口搬运的字节数（发起这一侧看到的），up 是发往出口的";
+        out.counter("i3t_exit_observed_bytes_total", help, &[("exit", &exit), ("direction", "up")], seen.bytes_up);
+        out.counter("i3t_exit_observed_bytes_total", help, &[("exit", &exit), ("direction", "down")], seen.bytes_down);
+        let help = "本节点经每个出口发起、没有建成的流，按归因分：unreachable 是到出口开流就失败了";
+        for (attribution, value) in
+            [("target", seen.failed_by_target), ("refused", seen.refused), ("exit", seen.failed_by_exit), ("unreachable", seen.unreachable)]
+        {
+            out.counter("i3t_exit_observed_failures_total", help, &[("exit", &exit), ("attribution", attribution)], value);
+        }
+    }
 
     let relay = runtime.endpoint.relay_counters();
     out.gauge("i3t_relay_enabled", "本节点是不是启用成了 relay", &[], f64::from(u8::from(netmap.me.relay.is_some())));
@@ -63,7 +102,6 @@ pub(crate) fn render(runtime: &Runtime) -> String {
     }
 
     let routes = runtime.endpoint.routes();
-    let name_of = |peer| netmap.peer(peer).map_or_else(|| format!("#{peer}"), |peer| peer.name.clone());
     for entry in &routes {
         let via = match entry.route {
             Route::None => "none",
@@ -90,6 +128,11 @@ pub(crate) fn render(runtime: &Runtime) -> String {
 /// 把一个数当作状态量的值。这里用到的都是小数目（流数、会话数、版本号），放不进 `u32` 时停在最大值。
 fn as_gauge(value: impl TryInto<u32>) -> f64 {
     f64::from(value.try_into().unwrap_or(u32::MAX))
+}
+
+/// 字节数当作状态量的值。这不是收窄：超过 2^53 字节（约 9 PB）时只会损失精度，配额不会有这么大。
+fn bytes_gauge(bytes: u64) -> f64 {
+    bytes as f64
 }
 
 /// `PeerUnattached` → `peer_unattached`。丢弃原因的名字取自它的 Debug 写法：relay 加了新的原因，这里不用跟着改。
