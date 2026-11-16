@@ -18,7 +18,8 @@ rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-tokio_kcp.workspace = true
+# 只有这个测量工具用：当初拿 KCP 和 QUIC 做对比。产品里没有 KCP，所以不放进工作区的依赖表。
+tokio_kcp = "0.9.8"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
