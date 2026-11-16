@@ -1,0 +1,607 @@
+//! relay 本体：握手、保活、转发。
+
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::{Duration, Instant};
+
+use bytes::Bytes;
+use i3t_crypto::{NodeKey, Signature};
+use i3t_model::Netmap;
+use i3t_proto::datagram::{self, RelayHeader};
+use i3t_proto::session::{Accepted, Auth, Challenge, Frame, Pong, RefusalReason, Refused};
+use i3t_proto::{Datagram, MAX_CONN_PACKET_LEN, NodeId, PublicKey};
+use i3t_underlay::tcp_leg::FrameSender;
+use i3t_underlay::{Ecn, Transmit, UdpPort, addr_query};
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+
+use crate::cookie::CookieJar;
+use crate::counters::{Counters, DropReason, RelayCounters};
+use crate::leg;
+use crate::limit::{Bandwidth, RefusalLimiter};
+use crate::session::{Binding, Origin, SESSION_TTL, Sessions};
+
+/// 一个中转帧最长多少字节。再长的不是正常节点发的。
+const MAX_RELAYED_LEN: usize = RelayHeader::LEN + MAX_CONN_PACKET_LEN as usize;
+/// 多久清理一次过期的会话。TCP 监听不起来时也是隔这么久再试。
+const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+
+/// 目的就是本节点的中转帧交给谁。参数是来源节点和去掉中转头之后的包。
+type LocalDelivery = Box<dyn Fn(NodeId, Bytes) + Send + Sync>;
+
+/// 一个节点的 relay 角色。
+///
+/// 只有 netmap 里 `me.relay` 有值时它才工作；没有值时交给它的东西一律丢掉，不回应。netmap 可以随时变：
+/// 启用、停用、允许的节点名单变化都立即生效，被去掉的节点的会话当场删除。
+///
+/// UDP 上的数据报由收包的一方（路径层）交进来（[`handle_udp`](Self::handle_udp)）；同一个端口号上的 TCP 由它自己监听。
+/// 丢弃这个值会停掉后台任务和所有的 TCP 中转。
+#[derive(Debug)]
+pub struct Relay {
+    inner: Arc<Inner>,
+    maintenance: JoinHandle<()>,
+}
+
+pub(crate) struct Inner {
+    key: Arc<NodeKey>,
+    pub(crate) port: Arc<UdpPort>,
+    cookies: CookieJar,
+    state: RwLock<State>,
+    /// 带宽上限单独一把锁：转发时只读会话表，但要改令牌桶。
+    bandwidth: Mutex<Option<Bandwidth>>,
+    refusals: Mutex<RefusalLimiter>,
+    counters: Counters,
+    local: OnceLock<LocalDelivery>,
+    /// TCP 中转腿靠它知道 relay 被停用了。
+    enabled: watch::Sender<bool>,
+    next_conn: AtomicU64,
+}
+
+struct State {
+    me: NodeId,
+    enabled: bool,
+    /// 允许建会话的节点和它们的公钥。
+    clients: HashMap<NodeId, PublicKey>,
+    sessions: Sessions,
+    bandwidth_mbps: Option<u32>,
+}
+
+/// 一个帧是从哪里来的，回话往哪里送。
+pub(crate) struct Source<'a> {
+    /// UDP 的来源地址，或者那条 TCP 的对端地址。cookie 和"relay 看到的地址"都用它。
+    pub(crate) addr: SocketAddr,
+    pub(crate) via: Via<'a>,
+}
+
+pub(crate) enum Via<'a> {
+    Udp,
+    Tcp { conn: u64, sender: &'a FrameSender },
+}
+
+impl Source<'_> {
+    fn origin(&self) -> Origin {
+        match self.via {
+            Via::Udp => Origin::Udp(self.addr),
+            Via::Tcp { conn, .. } => Origin::Tcp(conn),
+        }
+    }
+
+    fn binding(&self) -> Binding {
+        match self.via {
+            Via::Udp => Binding::Udp(self.addr),
+            Via::Tcp { conn, sender } => Binding::Tcp { conn, sender: sender.clone() },
+        }
+    }
+}
+
+enum NextHop {
+    /// 目的就是本节点。
+    Local,
+    Client(Binding),
+}
+
+impl Relay {
+    /// 要在 tokio 运行时里调用：它会启动一个后台任务来跟随 netmap、清理过期会话、监听 TCP。
+    #[must_use]
+    pub fn new(key: Arc<NodeKey>, port: Arc<UdpPort>, netmap: watch::Receiver<Arc<Netmap>>) -> Self {
+        let now = Instant::now();
+        let state = State {
+            me: netmap.borrow().me.id,
+            enabled: false,
+            clients: HashMap::new(),
+            sessions: Sessions::default(),
+            bandwidth_mbps: None,
+        };
+        let inner = Arc::new(Inner {
+            key,
+            port,
+            cookies: CookieJar::new(now),
+            state: RwLock::new(state),
+            bandwidth: Mutex::new(None),
+            refusals: Mutex::new(RefusalLimiter::default()),
+            counters: Counters::default(),
+            local: OnceLock::new(),
+            enabled: watch::Sender::new(false),
+            next_conn: AtomicU64::new(1),
+        });
+        inner.apply(&netmap.borrow());
+        let maintenance = tokio::spawn(maintain(Arc::clone(&inner), netmap));
+        Self { inner, maintenance }
+    }
+
+    /// 本节点现在是不是 relay。
+    #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        *self.inner.enabled.borrow()
+    }
+
+    /// 处理 UDP 上收到的、归 relay 管的数据：节点发来的中转会话帧、要转发的中转帧、地址查询。
+    ///
+    /// `data` 是一个接收缓冲区里连续的若干个数据报，每 `stride` 字节一个（最后一个可以短），都来自 `from`。
+    /// 它们可以发往不同的节点，这里逐个决定去向；发往同一个节点的相邻数据报合成一次发送。
+    pub fn handle_udp(&self, from: SocketAddr, ecn: Option<Ecn>, data: &[u8], stride: usize) {
+        let source = Source { addr: from, via: Via::Udp };
+        let stride = stride.max(1);
+        let mut rest = data;
+        while !rest.is_empty() {
+            let first = &rest[..stride.min(rest.len())];
+            let taken = if datagram::relayed_dst(first).is_some() {
+                let run = same_route_run(rest, stride, self.inner.port.max_gso_segments());
+                self.inner.forward(&source, ecn, &rest[..run], stride);
+                run
+            } else {
+                self.inner.handle_control(&source, first);
+                first.len()
+            };
+            rest = &rest[taken..];
+        }
+    }
+
+    /// `client` 现在在本 relay 上有没有会话。
+    #[must_use]
+    pub fn has_session(&self, client: NodeId) -> bool {
+        self.inner.read().sessions.binding(client, Instant::now()).is_some()
+    }
+
+    /// `client` 的会话是不是绑定在 UDP 地址 `from` 上。
+    /// 收包的一方用它判断"发给本节点的中转帧"是不是真的来自它自称的那个节点。
+    #[must_use]
+    pub fn session_at(&self, client: NodeId, from: SocketAddr) -> bool {
+        let state = self.inner.read();
+        state.enabled && state.sessions.owned_by(client, Origin::Udp(from), Instant::now())
+    }
+
+    /// 本节点自己有包要发给挂在本 relay 上的 `client`。`contents` 是带着中转头的数据报，
+    /// 可以是若干个等长的首尾相接，这时 `segment_size` 是每个的长度。返回有没有送出去。
+    ///
+    /// 这是本节点自己的流量，不算转发，也不受带宽上限限制。
+    pub fn send_to_client(&self, client: NodeId, contents: &[u8], segment_size: Option<usize>, ecn: Option<Ecn>) -> bool {
+        let Some(binding) = self.inner.read().sessions.binding(client, Instant::now()).cloned() else { return false };
+        match binding {
+            Binding::Udp(destination) => self.inner.port.send_or_drop(&Transmit { destination, contents, segment_size, ecn }),
+            Binding::Tcp { sender, .. } => {
+                let stride = segment_size.unwrap_or(contents.len()).max(1);
+                // 队列满了也接着试后面的：中间可能正好腾出了位置。
+                let mut all_sent = true;
+                for datagram in contents.chunks(stride) {
+                    all_sent &= sender.try_send(Bytes::copy_from_slice(datagram));
+                }
+                all_sent
+            }
+        }
+    }
+
+    /// 目的就是本节点的中转帧交给谁（路径层的入口）。只能设一次，再设没有效果。
+    pub fn set_local_delivery(&self, deliver: impl Fn(NodeId, Bytes) + Send + Sync + 'static) {
+        if self.inner.local.set(Box::new(deliver)).is_err() {
+            tracing::warn!("relay 的本地投递入口已经设过了，忽略这一次");
+        }
+    }
+
+    /// 现在的计数。
+    #[must_use]
+    pub fn counters(&self) -> RelayCounters {
+        self.inner.counters.snapshot(self.inner.read().sessions.len())
+    }
+}
+
+impl i3t_path::LocalRelay for Relay {
+    fn handle_udp(&self, from: SocketAddr, ecn: Option<Ecn>, data: &[u8], stride: usize) {
+        Self::handle_udp(self, from, ecn, data, stride);
+    }
+
+    fn has_session(&self, client: NodeId) -> bool {
+        Self::has_session(self, client)
+    }
+
+    fn session_at(&self, client: NodeId, from: SocketAddr) -> bool {
+        Self::session_at(self, client, from)
+    }
+
+    fn send_to_client(&self, client: NodeId, contents: &[u8], segment_size: Option<usize>, ecn: Option<Ecn>) -> bool {
+        Self::send_to_client(self, client, contents, segment_size, ecn)
+    }
+}
+
+impl Drop for Relay {
+    fn drop(&mut self) {
+        self.maintenance.abort();
+        // 让还开着的 TCP 中转腿自己结束。
+        self.inner.enabled.send_replace(false);
+    }
+}
+
+impl std::fmt::Debug for Inner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Relay").field("port", &self.port.local_addr()).finish_non_exhaustive()
+    }
+}
+
+impl Inner {
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, State> {
+        self.state.read().expect("relay state lock poisoned")
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, State> {
+        self.state.write().expect("relay state lock poisoned")
+    }
+
+    pub(crate) fn subscribe_enabled(&self) -> watch::Receiver<bool> {
+        self.enabled.subscribe()
+    }
+
+    pub(crate) fn next_conn(&self) -> u64 {
+        self.next_conn.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// 按新的 netmap 更新：是否启用、允许哪些节点、带宽上限。
+    fn apply(&self, netmap: &Netmap) {
+        let now = Instant::now();
+        let role = netmap.me.relay.as_ref();
+        let mut state = self.write();
+        state.me = netmap.me.id;
+        state.clients = netmap.relay_clients.iter().map(|client| (client.id, client.key)).collect();
+        if state.enabled != role.is_some() {
+            state.enabled = role.is_some();
+            if state.enabled {
+                tracing::info!(clients = state.clients.len(), "本节点启用为 relay");
+            } else {
+                tracing::info!(sessions = state.sessions.len(), "本节点不再是 relay，全部中转会话关闭");
+                state.sessions.clear();
+            }
+        }
+        let State { clients, sessions, .. } = &mut *state;
+        for node in sessions.retain_clients(|node| clients.contains_key(&node)) {
+            tracing::info!(%node, "节点不在允许的名单里了，它的中转会话关闭");
+        }
+        let bandwidth_mbps = role.and_then(|role| role.bandwidth_mbps);
+        if state.bandwidth_mbps != bandwidth_mbps {
+            state.bandwidth_mbps = bandwidth_mbps;
+            *self.bandwidth.lock().expect("relay bandwidth mutex poisoned") = bandwidth_mbps.map(|mbps| Bandwidth::new(mbps, now));
+        }
+        let enabled = state.enabled;
+        drop(state);
+        self.enabled.send_if_modified(|current| std::mem::replace(current, enabled) != enabled);
+    }
+
+    fn sweep(&self, now: Instant) {
+        for node in self.write().sessions.sweep(now) {
+            tracing::info!(%node, "中转会话过期：{} 秒没有收到保活", SESSION_TTL.as_secs());
+        }
+        self.refusals.lock().expect("relay refusal mutex poisoned").sweep(now);
+    }
+
+    /// 一条 TCP 断了，绑定在它上面的会话跟着关闭。
+    pub(crate) fn close_tcp(&self, conn: u64) {
+        for node in self.write().sessions.close_tcp(conn) {
+            tracing::info!(%node, "TCP 中转断开，中转会话关闭");
+        }
+    }
+
+    pub(crate) fn tcp_session_alive(&self, node: NodeId, conn: u64) -> bool {
+        self.read().sessions.owned_by(node, Origin::Tcp(conn), Instant::now())
+    }
+
+    /// TCP 上读出来的一帧。握手成功时返回建了会话的节点。
+    pub(crate) fn handle_tcp_frame(&self, source: &Source<'_>, frame: &[u8]) -> Option<NodeId> {
+        if datagram::relayed_dst(frame).is_some() {
+            self.forward(source, None, frame, frame.len());
+            return None;
+        }
+        self.handle_control(source, frame)
+    }
+
+    /// 不是中转帧的一个数据报：会话帧或者地址查询。握手成功时返回建了会话的节点。
+    fn handle_control(&self, source: &Source<'_>, datagram: &[u8]) -> Option<NodeId> {
+        if !self.read().enabled {
+            self.counters.dropped(DropReason::Disabled, 1);
+            return None;
+        }
+        match Datagram::parse(datagram) {
+            Ok(Datagram::Session(frame)) if frame.is_request() => self.handle_request(source, frame),
+            Ok(Datagram::AddrQuery(query)) => {
+                self.reply(source, &addr_query::answer(&query, source.addr));
+                None
+            }
+            // 别的都不归 relay 管，或者解析不了：丢掉，不回应。
+            Ok(Datagram::Session(_) | Datagram::Conn(_) | Datagram::Relayed { .. } | Datagram::Probe(_) | Datagram::AddrReply(_))
+            | Err(_) => {
+                self.counters.dropped(DropReason::Malformed, 1);
+                None
+            }
+        }
+    }
+
+    fn handle_request(&self, source: &Source<'_>, frame: Frame) -> Option<NodeId> {
+        let now = Instant::now();
+        match frame {
+            Frame::Init(init) => {
+                if !self.read().clients.contains_key(&init.node) {
+                    self.counters.dropped(DropReason::UnknownClient, 1);
+                    tracing::debug!(node = %init.node, from = %source.addr, "握手被忽略：节点不在允许的名单里");
+                    return None;
+                }
+                let cookie = self.cookies.issue(source.addr, init.node, now);
+                self.reply(source, &Challenge { nonce: init.nonce, cookie }.to_bytes());
+                None
+            }
+            Frame::Auth(auth) => self.authenticate(source, &auth, now),
+            Frame::Ping(ping) => {
+                if self.write().sessions.refresh(ping.node, source.origin(), now) {
+                    self.reply(source, &Pong { nonce: ping.nonce, observed: source.addr }.to_bytes());
+                } else {
+                    self.counters.dropped(DropReason::NoSession, 1);
+                    self.refuse(source, Refused { reason: RefusalReason::NoSession, node: ping.node }, now);
+                }
+                None
+            }
+            Frame::Challenge(_) | Frame::Ok(_) | Frame::Pong(_) | Frame::Error(_) => {
+                self.counters.dropped(DropReason::Malformed, 1);
+                None
+            }
+        }
+    }
+
+    /// AUTH：先验 cookie（便宜，证明来源地址是真的），再验签名（贵），都过了才建会话。
+    fn authenticate(&self, source: &Source<'_>, auth: &Auth, now: Instant) -> Option<NodeId> {
+        let node = auth.node;
+        let (me, client_key) = {
+            let state = self.read();
+            (state.me, state.clients.get(&node).copied())
+        };
+        let Some(client_key) = client_key else {
+            self.counters.dropped(DropReason::UnknownClient, 1);
+            tracing::debug!(%node, from = %source.addr, "握手被忽略：节点不在允许的名单里");
+            return None;
+        };
+        if !self.cookies.verify(&auth.cookie, source.addr, node, now) {
+            self.counters.dropped(DropReason::BadCookie, 1);
+            tracing::debug!(%node, from = %source.addr, "握手被忽略：cookie 不是发给这个地址的，或者已经过期");
+            return None;
+        }
+        let message = Auth::signed_message(me, node, &auth.nonce, &auth.cookie);
+        if i3t_crypto::verify(&client_key, Auth::PURPOSE, &message, &Signature::from_bytes(auth.signature)).is_err() {
+            self.counters.dropped(DropReason::BadSignature, 1);
+            tracing::warn!(%node, from = %source.addr, "握手被忽略：签名不对");
+            return None;
+        }
+        {
+            let mut state = self.write();
+            // 验签名的这段时间里 netmap 可能变了。
+            if !state.enabled || !state.clients.contains_key(&node) {
+                return None;
+            }
+            state.sessions.open(node, source.binding(), now);
+        }
+        self.counters.session_opened();
+        let valid_for = u16::try_from(SESSION_TTL.as_secs()).unwrap_or(u16::MAX);
+        let message = Accepted::signed_message(me, node, &auth.nonce, valid_for, source.addr);
+        let signature = *self.key.sign(Accepted::PURPOSE, &message).as_bytes();
+        self.reply(source, &Accepted { nonce: auth.nonce, valid_for, observed: source.addr, signature }.to_bytes());
+        let via = match source.via {
+            Via::Udp => "UDP",
+            Via::Tcp { .. } => "TCP",
+        };
+        tracing::info!(%node, from = %source.addr, via, "中转会话建立");
+        Some(node)
+    }
+
+    /// 转发一段中转头相同（同一个来源节点、同一个目的节点）的数据报。数据报原样转出去，一个字节都不改。
+    fn forward(&self, source: &Source<'_>, ecn: Option<Ecn>, run: &[u8], stride: usize) {
+        let packets = run.len().div_ceil(stride);
+        let first = &run[..stride.min(run.len())];
+        let Ok(Datagram::Relayed { header, .. }) = Datagram::parse(first) else {
+            self.counters.dropped(DropReason::Malformed, packets);
+            return;
+        };
+        if stride > MAX_RELAYED_LEN {
+            self.counters.dropped(DropReason::Malformed, packets);
+            return;
+        }
+        let now = Instant::now();
+        match self.next_hop(source, header, now) {
+            Ok(NextHop::Local) => self.deliver_locally(header.src, run, stride),
+            Ok(NextHop::Client(binding)) => {
+                if self.admit(run.len(), now) {
+                    self.send(&binding, ecn, run, stride);
+                } else {
+                    self.counters.dropped(DropReason::RateLimited, packets);
+                }
+            }
+            Err(reason) => {
+                self.counters.dropped(reason, packets);
+                let refused = match reason {
+                    DropReason::NoSession => Refused { reason: RefusalReason::NoSession, node: header.src },
+                    DropReason::PeerUnattached => Refused { reason: RefusalReason::PeerUnattached, node: header.dst },
+                    // relay 没启用时什么都不回。
+                    _ => return,
+                };
+                self.refuse(source, refused, now);
+            }
+        }
+    }
+
+    /// 架构文档 §5.2 的核对：来源节点有会话，并且数据报就是从会话绑定的地方来的；目的节点也有会话。
+    fn next_hop(&self, source: &Source<'_>, header: RelayHeader, now: Instant) -> Result<NextHop, DropReason> {
+        let state = self.read();
+        if !state.enabled {
+            return Err(DropReason::Disabled);
+        }
+        if !state.sessions.owned_by(header.src, source.origin(), now) {
+            return Err(DropReason::NoSession);
+        }
+        if header.dst == state.me {
+            return Ok(NextHop::Local);
+        }
+        state.sessions.binding(header.dst, now).cloned().map(NextHop::Client).ok_or(DropReason::PeerUnattached)
+    }
+
+    fn admit(&self, bytes: usize, now: Instant) -> bool {
+        self.bandwidth.lock().expect("relay bandwidth mutex poisoned").as_mut().is_none_or(|bandwidth| bandwidth.admit(bytes, now))
+    }
+
+    fn send(&self, binding: &Binding, ecn: Option<Ecn>, run: &[u8], stride: usize) {
+        match binding {
+            Binding::Udp(destination) => {
+                let packets = run.len().div_ceil(stride);
+                let segment_size = (run.len() > stride).then_some(stride);
+                if self.port.send_or_drop(&Transmit { destination: *destination, contents: run, segment_size, ecn }) {
+                    self.counters.forwarded(packets, run.len());
+                } else {
+                    self.counters.dropped(DropReason::SendBufferFull, packets);
+                }
+            }
+            Binding::Tcp { sender, .. } => {
+                for datagram in run.chunks(stride) {
+                    if sender.try_send(Bytes::copy_from_slice(datagram)) {
+                        self.counters.forwarded(1, datagram.len());
+                    } else {
+                        self.counters.dropped(DropReason::QueueFull, 1);
+                    }
+                }
+            }
+        }
+    }
+
+    fn deliver_locally(&self, src: NodeId, run: &[u8], stride: usize) {
+        let Some(deliver) = self.local.get() else {
+            self.counters.dropped(DropReason::PeerUnattached, run.len().div_ceil(stride));
+            return;
+        };
+        let packets = run.chunks(stride).filter_map(|datagram| datagram.get(RelayHeader::LEN..));
+        for packet in packets {
+            deliver(src, Bytes::copy_from_slice(packet));
+        }
+    }
+
+    fn reply(&self, source: &Source<'_>, frame: &[u8]) {
+        match source.via {
+            Via::Udp => self.port.send_datagram(frame, source.addr),
+            // 握手和保活的应答也走那条有上限的队列；满了就丢，节点会重试。
+            Via::Tcp { sender, .. } => drop(sender.try_send(Bytes::copy_from_slice(frame))),
+        }
+    }
+
+    /// 回一个错误帧，按来源地址限速。
+    fn refuse(&self, source: &Source<'_>, refused: Refused, now: Instant) {
+        if !self.refusals.lock().expect("relay refusal mutex poisoned").allow(source.addr, now) {
+            return;
+        }
+        tracing::debug!(from = %source.addr, node = %refused.node, reason = ?refused.reason, "拒绝转发，回一个错误帧");
+        self.reply(source, &refused.to_bytes());
+    }
+}
+
+/// 从 `data` 开头起，连续多少字节的数据报带着同一个中转头（最多 `max_segments` 个数据报）。
+///
+/// 内核一次交上来的一批数据报可能发往不同的节点（实现前测试里见到过），所以要逐个看。
+/// 中转头相同的一段可以用一次带分段卸载的发送转出去，不用逐个调内核。
+fn same_route_run(data: &[u8], stride: usize, max_segments: usize) -> usize {
+    let header = data.get(..RelayHeader::LEN);
+    let segments = data
+        .chunks(stride)
+        .take(max_segments.max(1))
+        .take_while(|datagram| header.is_some() && datagram.get(..RelayHeader::LEN) == header)
+        .count()
+        .max(1);
+    (segments * stride).min(data.len())
+}
+
+/// 后台任务：跟随 netmap，清理过期会话，relay 启用期间监听 TCP。
+async fn maintain(inner: Arc<Inner>, mut netmap: watch::Receiver<Arc<Netmap>>) {
+    let mut sweep = tokio::time::interval(SWEEP_INTERVAL);
+    sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut listener: Option<JoinHandle<()>> = None;
+    // 上一次监听是不是失败了。只在失败和恢复的那一刻各记一条日志，重试期间不刷屏。
+    let mut listen_failed = false;
+    let mut netmap_open = true;
+    loop {
+        tokio::select! {
+            changed = netmap.changed(), if netmap_open => match changed {
+                Ok(()) => inner.apply(&netmap.borrow_and_update()),
+                // 发 netmap 的一方没了（节点在退出）：按最后一份继续。
+                Err(_) => netmap_open = false,
+            },
+            _ = sweep.tick() => inner.sweep(Instant::now()),
+        }
+        // 监听任务自己会在 relay 停用时结束。
+        if !*inner.enabled.borrow() {
+            listener = None;
+            listen_failed = false;
+        } else if listener.as_ref().is_none_or(JoinHandle::is_finished) {
+            // 绑不上（端口被别的程序占着）时，下一轮（一秒之后）再试。
+            match leg::listen(&inner).await {
+                Ok(task) => {
+                    listener = Some(task);
+                    listen_failed = false;
+                }
+                Err(error) if !listen_failed => {
+                    listen_failed = true;
+                    let addr = inner.port.local_addr();
+                    tracing::warn!(%addr, %error, "relay 监听不了 TCP，UDP 用不了的节点暂时连不上来；会一直重试");
+                }
+                Err(_) => {}
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(dst: u32, src: u32, payload_len: usize) -> Vec<u8> {
+        let header = RelayHeader { dst: NodeId::new(dst).unwrap(), src: NodeId::new(src).unwrap() };
+        let mut datagram = header.to_bytes().to_vec();
+        datagram.resize(RelayHeader::LEN + payload_len, 0xab);
+        datagram
+    }
+
+    #[test]
+    fn a_run_stops_where_the_destination_or_the_source_changes() {
+        let stride = frame(2, 1, 100).len();
+        let data = [frame(2, 1, 100), frame(2, 1, 100), frame(3, 1, 100), frame(3, 4, 100), frame(2, 1, 40)].concat();
+        assert_eq!(same_route_run(&data, stride, 64), 2 * stride);
+        assert_eq!(same_route_run(&data[2 * stride..], stride, 64), stride, "目的变了");
+        assert_eq!(same_route_run(&data[3 * stride..], stride, 64), stride, "来源变了");
+        assert_eq!(same_route_run(&data[4 * stride..], stride, 64), data.len() - 4 * stride, "最后一个可以短");
+    }
+
+    #[test]
+    fn a_run_is_capped_by_the_segment_limit() {
+        let stride = frame(2, 1, 100).len();
+        let data = [frame(2, 1, 100), frame(2, 1, 100), frame(2, 1, 100)].concat();
+        assert_eq!(same_route_run(&data, stride, 1), stride);
+        assert_eq!(same_route_run(&data, stride, 2), 2 * stride);
+        assert_eq!(same_route_run(&data, stride, 0), stride, "限制是 0 也至少往前走一个");
+    }
+
+    #[test]
+    fn a_truncated_header_still_advances_by_one_datagram() {
+        assert_eq!(same_route_run(&[1, 0, 0], 1400, 64), 3);
+        let data = [frame(2, 1, 0), vec![1, 0, 0]].concat();
+        assert_eq!(same_route_run(&data, RelayHeader::LEN, 64), RelayHeader::LEN);
+    }
+}

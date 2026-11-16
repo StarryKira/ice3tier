@@ -8,12 +8,19 @@ publish = false
 description = "ice3tier 的 relay：中转会话、包转发、限速"
 
 [dependencies]
+bytes.workspace = true
 i3t-crypto = { path = "../i3t-crypto" }
 i3t-model = { path = "../i3t-model" }
 i3t-proto = { path = "../i3t-proto" }
+i3t-path = { path = "../i3t-path" }
 i3t-underlay = { path = "../i3t-underlay" }
+ring.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
