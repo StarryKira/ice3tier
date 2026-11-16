@@ -37,6 +37,20 @@ pub(crate) struct Destination {
     pub(crate) via: Option<String>,
 }
 
+impl Destination {
+    /// `host` 是用户写的目标。没有 `via` 时目标是网络里的节点，只写了名字（`nas`）的补成全名（`nas.home.i3t`）：
+    /// 节点的入口只认全名和虚拟 IP，而 ssh 传过来的往往就是那个短名字。`domain` 是本节点所在网络的域名，
+    /// 还没有加入网络时是 `None`，这时原样使用。
+    pub(crate) fn new(host: String, port: u16, via: Option<String>, domain: Option<&str>) -> Self {
+        let bare_name = via.is_none() && !host.contains('.') && host.parse::<IpAddr>().is_err();
+        let host = match domain {
+            Some(domain) if bare_name => format!("{host}.{domain}"),
+            Some(_) | None => host,
+        };
+        Self { host, port, via }
+    }
+}
+
 /// 经 `proxy`（本机节点的 SOCKS5 入口）连到 `destination`，然后在它和标准输入输出之间搬数据，直到对面关闭。
 pub(crate) async fn connect(proxy: SocketAddr, destination: &Destination) -> anyhow::Result<()> {
     let mut stream = TcpStream::connect(proxy)
@@ -267,6 +281,20 @@ mod tests {
     async fn something_that_is_not_socks5_is_recognised() {
         let (result, _) = talk(&to("nas", 22, None), &[b"HTTP/1.1 400 Bad Request\r\n"]).await;
         assert!(result.unwrap_err().to_string().contains("不是 SOCKS5"));
+    }
+
+    #[test]
+    fn a_bare_node_name_gets_the_networks_domain_and_nothing_else_is_touched() {
+        let host = |host: &str, via: Option<&str>, domain: Option<&str>| {
+            Destination::new(host.to_owned(), 22, via.map(str::to_owned), domain).host
+        };
+        assert_eq!(host("nas", None, Some("home.i3t")), "nas.home.i3t");
+        assert_eq!(host("nas.home.i3t", None, Some("home.i3t")), "nas.home.i3t");
+        assert_eq!(host("10.77.0.3", None, Some("home.i3t")), "10.77.0.3");
+        assert_eq!(host("fd00::3", None, Some("home.i3t")), "fd00::3");
+        // 经出口时目标是出口那边的名字，不是网络里的节点。
+        assert_eq!(host("printer", Some("gw"), Some("home.i3t")), "printer");
+        assert_eq!(host("nas", None, None), "nas", "还没有加入网络，不知道域名");
     }
 
     #[test]

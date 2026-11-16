@@ -63,6 +63,9 @@ def node_service(lab: Lab, work: Path, t: Checks) -> None:
     piped = connect(a, "b.lab.i3t", 8080)
     t.check("i3t connect 把标准输入输出接到 b 上的服务", piped.returncode == 0 and piped.stdout.endswith(b.host.ip),
             f"{piped.returncode} {piped.stdout!r} {piped.stderr.strip()}")
+    short = connect(a, "b", 8080)
+    t.check("i3t connect 只写节点的名字也行", short.returncode == 0 and short.stdout.endswith(b.host.ip),
+            f"{short.returncode} {short.stdout!r} {short.stderr.strip()}")
     refused = connect(a, b.virtual_ip, 8081)
     t.check("i3t connect 连不上时以失败退出，标准输出上什么都没有", refused.returncode != 0 and refused.stdout == "",
             f"{refused.returncode} {refused.stdout!r} {refused.stderr.strip()}")

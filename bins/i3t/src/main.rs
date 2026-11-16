@@ -75,7 +75,7 @@ enum Command {
     Key,
     /// 把标准输入输出接到网络里的一个地址上，给 ssh 之类的工具用：ssh -o ProxyCommand='i3t connect %h %p' nas
     Connect {
-        /// 目标：节点的名字、全名或虚拟 IP；加了 --via 时是从出口的网络里看到的地址
+        /// 目标：节点的名字（nas）、全名（nas.home.i3t）或虚拟 IP；加了 --via 时是从出口的网络里看到的地址
         host: String,
         port: u16,
         /// 从这个出口节点的网络出去（名字或虚拟 IP），访问它那边的局域网或者互联网
@@ -167,8 +167,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let Some(listen) = config.proxy.socks5.addr() else {
                 bail!("配置文件里把 SOCKS5 入口关掉了（proxy.socks5 = \"off\"），i3t connect 要经它出去");
             };
+            let domain = state.netmap()?.map(|netmap| netmap.network.domain);
+            let destination = Destination::new(host, port, via, domain.as_deref());
             let runtime = current_thread()?;
-            let result = runtime.block_on(connect::connect(reachable_locally(listen), &Destination { host, port, via }));
+            let result = runtime.block_on(connect::connect(reachable_locally(listen), &destination));
             // 读标准输入的那个线程可能还卡在读上，它是取消不了的：不等它，直接退出。
             runtime.shutdown_background();
             result?;
