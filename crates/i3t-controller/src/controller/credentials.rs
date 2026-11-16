@@ -6,9 +6,10 @@ use i3t_model::admin::{
     CreateCredential, CreatedCredential, Credential, CredentialState, CredentialUsage, LogRef, NetworkId, RefKind, UpdateCredential,
 };
 use i3t_model::netmap::TokenHash;
+use serde_json::json;
 
 use super::{Controller, Inner, naming};
-use crate::error::{Entity, Error};
+use crate::error::{Entity, Error, InField};
 use crate::secret;
 use crate::store::CredentialRecord;
 
@@ -33,7 +34,7 @@ impl Controller {
     ///
     /// 名字是空的或者已经有了；并发上限或者流量上限是 0。
     pub fn create_credential(&self, network: NetworkId, request: &CreateCredential) -> Result<CreatedCredential, Error> {
-        let name = naming::title("凭据", &request.name, true)?;
+        let name = naming::title("凭据", &request.name, true).in_field("name")?;
         check_limits(request.max_concurrent, request.max_bytes)?;
         let token = secret::generate()?;
         let mut inner = self.lock();
@@ -63,7 +64,13 @@ impl Controller {
             }
             let id = store.insert_credential(network, &record)?;
             let refs = [LogRef::new(RefKind::Credential, id)];
-            store.log_refs(now, Some(network), "credential.create", &format!("签发凭据 {}", record.credential.name), &refs)?;
+            let params = json!({
+                "credential": id,
+                "credential_name": record.credential.name,
+                "max_concurrent": record.credential.max_concurrent,
+                "max_bytes": record.credential.max_bytes,
+            });
+            store.log_refs(now, Some(network), "credential.create", &format!("签发凭据 {}", record.credential.name), &refs, params)?;
             Ok(id)
         })?;
         let seeds = inner.nodes_requiring_credentials(network)?;
@@ -83,7 +90,7 @@ impl Controller {
         let record = inner.store.atomically(|store| {
             let record = store.credential(network, id)?.ok_or(Error::NotFound(Entity::Credential))?;
             if record.is_revoked() {
-                return Err(Error::invalid(format!("凭据 {} 已经吊销，改不了上限", record.credential.name)));
+                return Err(Error::invalid("revoked", format!("凭据 {} 已经吊销，改不了上限", record.credential.name)));
             }
             let max_concurrent = request.max_concurrent.unwrap_or(record.credential.max_concurrent);
             let max_bytes = request.max_bytes.unwrap_or(record.credential.max_bytes);
@@ -100,7 +107,14 @@ impl Controller {
                 limit(max_concurrent.map(u64::from), ""),
                 limit(max_bytes, " 字节")
             );
-            store.log_refs(now, Some(network), "credential.update", &detail, &[LogRef::new(RefKind::Credential, id)])?;
+            let params = json!({
+                "credential": id,
+                "credential_name": record.credential.name,
+                "max_concurrent": max_concurrent,
+                "max_bytes": max_bytes,
+                "reset_usage": request.reset_usage,
+            });
+            store.log_refs(now, Some(network), "credential.update", &detail, &[LogRef::new(RefKind::Credential, id)], params)?;
             store.credential(network, id)?.ok_or(Error::NotFound(Entity::Credential))
         })?;
         let seeds = inner.nodes_requiring_credentials(network)?;
@@ -120,6 +134,7 @@ impl Controller {
         inner.store.atomically(|store| {
             let record = store.credential(network, id)?.ok_or(Error::NotFound(Entity::Credential))?;
             let refs = [LogRef::new(RefKind::Credential, id)];
+            let params = json!({ "credential": id, "credential_name": record.credential.name });
             if record.is_revoked() {
                 store.delete_credential(id)?;
                 store.log_refs(
@@ -128,10 +143,11 @@ impl Controller {
                     "credential.delete",
                     &format!("删除已经吊销的凭据 {}", record.credential.name),
                     &refs,
+                    params,
                 )?;
             } else {
                 store.revoke_credential(id, now)?;
-                store.log_refs(now, Some(network), "credential.revoke", &format!("吊销凭据 {}", record.credential.name), &refs)?;
+                store.log_refs(now, Some(network), "credential.revoke", &format!("吊销凭据 {}", record.credential.name), &refs, params)?;
             }
             Ok::<_, Error>(())
         })?;
@@ -156,10 +172,10 @@ impl Inner {
 /// 上限要么不写（不限），要么是正数：写 0 多半是把"不限"写错了。
 fn check_limits(max_concurrent: Option<u32>, max_bytes: Option<u64>) -> Result<(), Error> {
     if max_concurrent == Some(0) {
-        return Err(Error::invalid("并发上限不能是 0；不限制就不要填"));
+        return Err(Error::invalid_field("max_concurrent", "zero", "并发上限不能是 0；不限制就不要填"));
     }
     if max_bytes == Some(0) {
-        return Err(Error::invalid("流量上限不能是 0；不限制就不要填"));
+        return Err(Error::invalid_field("max_bytes", "zero", "流量上限不能是 0；不限制就不要填"));
     }
     Ok(())
 }

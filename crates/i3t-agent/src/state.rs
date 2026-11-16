@@ -25,6 +25,8 @@ use i3t_proto::PublicKey;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::texts::texts;
+
 const KEY_FILE: &str = "node.key";
 const CONTROLLER_FILE: &str = "controller.json";
 const CONFIG_FILE: &str = "config.toml";
@@ -82,8 +84,8 @@ impl StateDir {
     /// 目录建不出来。
     pub fn open(root: impl Into<PathBuf>) -> anyhow::Result<Self> {
         let root = root.into();
-        fs::create_dir_all(&root).with_context(|| format!("创建状态目录 {}", root.display()))?;
-        restrict_to_owner(&root, 0o700).with_context(|| format!("收紧状态目录 {} 的权限", root.display()))?;
+        fs::create_dir_all(&root).with_context(|| (texts().create_state_dir)(&root))?;
+        restrict_to_owner(&root, 0o700).with_context(|| (texts().restrict_state_dir)(&root))?;
         Ok(Self { root })
     }
 
@@ -100,9 +102,9 @@ impl StateDir {
     pub fn key(&self) -> anyhow::Result<Option<NodeKey>> {
         let path = self.root.join(KEY_FILE);
         match fs::read_to_string(&path) {
-            Ok(pem) => Ok(Some(NodeKey::from_pem(&pem).with_context(|| format!("解析私钥文件 {}", path.display()))?)),
+            Ok(pem) => Ok(Some(NodeKey::from_pem(&pem).with_context(|| (texts().parse_key)(&path))?)),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err).with_context(|| format!("读私钥文件 {}", path.display())),
+            Err(err) => Err(err).with_context(|| (texts().read_key)(&path)),
         }
     }
 
@@ -115,7 +117,7 @@ impl StateDir {
         if let Some(key) = self.key()? {
             return Ok(key);
         }
-        let key = NodeKey::generate().context("生成节点私钥")?;
+        let key = NodeKey::generate().context(texts().generate_key)?;
         self.write(KEY_FILE, key.to_pem().as_bytes())?;
         Ok(key)
     }

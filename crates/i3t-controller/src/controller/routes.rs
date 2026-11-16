@@ -172,7 +172,7 @@ impl Controller {
     /// 两个节点不都在这个网络里，或者是同一个节点。
     pub fn ask_path(&self, network: NetworkId, from: NodeId, to: NodeId) -> Result<RouteAnswers, Error> {
         if from == to {
-            return Err(Error::invalid("要查的是两个不同的节点之间的路径"));
+            return Err(Error::invalid_field("to", "same_node", "要查的是两个不同的节点之间的路径"));
         }
         let mut inner = self.lock();
         inner.require_node(network, from)?;
@@ -396,6 +396,7 @@ impl Inner {
             relay_leg: None,
             mode: None,
             reason: None,
+            cause: None,
             candidates: None,
         };
         let reported = self.routes.get(&from.id);
@@ -429,7 +430,7 @@ impl Inner {
 
 /// 把节点现答的选路细节填进一个方向。
 fn with_detail(leg: PathLeg, detail: PathDetail) -> PathLeg {
-    let PathDetail { mode, direct, relay_leg, reason, mut candidates } = detail;
+    let PathDetail { mode, direct, relay_leg, reason, cause, mut candidates } = detail;
     candidates.truncate(MAX_CANDIDATES);
-    PathLeg { direct, relay_leg, mode, reason: Some(reason), candidates: Some(candidates), ..leg }
+    PathLeg { direct, relay_leg, mode, reason: Some(reason), cause, candidates: Some(candidates), ..leg }
 }

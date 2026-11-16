@@ -4,7 +4,26 @@
 
 对应的 Rust 类型在 `crates/i3t-model/src/admin.rs`，实现在 `crates/i3t-controller/src/admin.rs`。文档和代码不一致时以代码为准，并请修正文档。
 
-> **最新一次新增**（主动测试）。正文里新加的地方也标着「新增」，和前几次的一样；这一次的清单：
+> **最新一次新增**（代码和参数）。界面要能用自己的语言写出 controller 和节点说的事，所以给人看的那些中文原话旁边
+> 多了代码和写成一句话要用到的值；原话照旧在，给日志和旧的客户端。正文里新加的地方标着「新增」。这一次的清单：
+>
+> - 约定（1.2 节）：原话旁边的**原因**是一个对象 `{ "code": 代码, …这个代码要用到的值 }`，叫 `cause`（或者 `check_cause`）；
+>   没有原因、或者对方的版本太旧不给时是 `null`。不认识的 `code` 按 `unknown` 处理，显示原话。
+> - 错误多了 `what` 和 `field`（第 2 节）：`not_found` 时是找不到的东西，`invalid_request` 时是哪里不对、哪个字段，`conflict` 时是挡着的东西，
+>   `not_declared`、`cannot_self_update`、`no_update` 时是具体的原因。
+> - 操作记录 `LogEntry` 多了 `params`（第 3 节）：每种操作按名字给出的参数，东西的名字挨着编号，是当时的名字。
+> - 监听的状态 `ListenStatus` 多了 `cause`（11.1 节），启用 relay 的试连结果 `Reachability` 多了 `cause`（5.5 节）。
+> - 路径 `PathLeg` 多了 `cause`，`since` 里也多了 `cause`（第 15 节）：为什么是现在这条路、为什么换到它。
+> - 节点更新（第 14 节）：`UpdateOverview.check_cause`、`packages[].cause`、`paused[].cause`、`ForcedUpdates.skipped[].cause`、
+>   节点的 `update.status.cause`（`failed` 时）、`update.failure.cause`。
+> - 独占 TCP（第 12 节）：`PairLaneSide.reported_secs_ago`（两边的计数是多少秒之前报的）、`LaneEffect.opening`（`udp_fallback` 时两个节点
+>   各自开新的 TCP 流现在走不走独占 TCP）、`PeerLanes.udp_path`；节点详情 `NodeDetail.reported_secs_ago`（第 5 节）。
+> - 节点协议没有升版：节点上报里新加的（`PeerLanes.udp_path`、监听状态和更新进度的 `cause`、路由回答里的 `cause`）都可以没有，
+>   旧的 controller 忽略它们，旧的节点不报。
+>
+> 已有接口的路径、请求体和应答里原有的字段都没有变。
+>
+> **上一次新增**（主动测试）。这一次的清单：
 >
 > - 新接口：`POST`、`GET /networks/{network}/tests`（发起一个主动测试、列出最近的测试），`GET /networks/{network}/tests/{id}`、
 >   `POST …/tests/{id}/cancel`（看一个测试的进度和结果、取消它），`POST`、`GET /networks/{network}/tests/matrix`、
@@ -16,7 +35,7 @@
 >
 > 已有接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **上一次新增**（独占 TCP）。这一次的清单：
+> **再上一次新增**（独占 TCP）。这一次的清单：
 >
 > - 节点对设置多了 `lane`：这一对节点之间承载 TCP 连接的流用不用独占 TCP，`"off"`（默认）、`"udp_fallback"`、`"always"`（第 12 节）。
 > - `GET /networks/{network}/pairs` 和 `PUT …/pairs/{a}/{b}` 的应答从 `PairSetting` 变成 `PairView`：原来的字段还在同一层，多了 `lane`、`lane_effect`（设置起不起作用、为什么、谁拨谁）和 `lanes`（两个节点各自报的状况）。新的结构 `PairView`、`LaneEffect`、`LaneBlock`、`PairLaneSide`、`PeerLanes`、`LaneCounts`、`LaneReport`、`LaneHandshakeFailures`（第 12 节）。
@@ -25,7 +44,7 @@
 >
 > 已有接口的路径和应答里原有的字段都没有变。
 >
-> **再上一次新增**（路径诊断、骨干矩阵、连接上的防护）。这一次的清单：
+> **更早的新增**（路径诊断、骨干矩阵、连接上的防护）。这一次的清单：
 >
 > - 新接口：`GET /networks/{network}/backbone`（relay 之间的延迟矩阵，第 15 节）。
 > - 新的字段：`NodeRoute.direct`、`relay_leg`（第 5 节）；`MatrixEntry.direct`、`relay_leg`，`PathLeg.direct`、`relay_leg`、`mode`、`reason`、`candidates`（第 15 节）。新的结构 `PathCandidate`、`PathSegment`、`BackboneView`、`BackboneRelay`、`BackboneLink`（第 15 节）。新加的字段在应答里总是有，不知道的时候是 `null`。
@@ -37,7 +56,7 @@
 >
 > 已有接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **更早一次新增**（限额、用量和状态）。这一次的清单：
+> **更早的新增**（限额、用量和状态）。这一次的清单：
 >
 > - 新接口：`PATCH /networks/{network}/credentials/{id}`（改上限、清零用量，第 9 节）；`GET /networks/{network}/exits`、`GET /networks/{network}/exits/{node}`（出口的设置、用量、健康，第 17 节）；`GET /networks/{network}/nodes/{node}/listeners`（节点上全部监听的状态，含节点自己开的回环入口，第 5 节）；`POST /networks/{network}/tags/rename`（标签改名，第 18 节）。
 > - 已有接口新的查询参数：`GET /log` 的 `before`、`network`、`action`、`ref`（翻页和过滤，第 3 节）；`GET /networks/{network}/tokens` 的 `all`（连用掉的和过期的也列出，第 6 节）。
@@ -91,6 +110,13 @@
 - 成功的状态码：`200`；创建成功是 `201`；删除成功是 `204`，没有应答体。
 - 应答里的字段总是全的：没有值的字段写 `null`，空的列表写 `[]`，不会省略。
 - 请求里标了"可省略"的字段可以不写。controller 忽略不认识的字段。
+- 「新增」**原话和原因**：应答里有些字段是 controller 或者节点写的一句中文（`reason`、`error`、`detail`、`check_error`、操作记录的 `detail`）。
+  它们旁边有给程序看的原因，界面按原因用自己的语言写，原话只作补充：
+  - 原因是一个对象，`code` 是代码，同一层是写成一句话要用到的值：`{ "code": "up_to_date", "running": "0.3.0", "latest": "0.3.0" }`。
+    放在原话旁边的 `cause` 字段里（查发布源的那一个叫 `check_cause`）。每种原因有哪些代码、带哪些值写在用到它的那一节。
+  - 没有原因、或者说这件事的一方（controller、节点）版本太旧不给时是 `null`，这时只能显示原话。
+  - 以后可能增加新的代码：不认识的 `code` 请当作 `unknown`，显示原话。
+  - 操作记录不一样：它的代码就是 `action`，值在 `params` 里（第 3 节）。
 - 改东西的接口有两种：
   - `PATCH`：只改请求里写了的字段。个别字段可以写 `null`，表示清掉这项设置，下面会单独说明；别的字段写 `null` 等于没写。
   - `PUT`：整个替换，请求体的字段和创建时一样。
@@ -144,12 +170,33 @@
 {
   "error": {
     "code": "not_declared",
-    "message": "节点 laptop 没有声明可以作为出口。在节点上执行 `i3t set can-exit on` 之后才能启用"
+    "message": "节点 laptop 没有声明可以作为出口。在节点上执行 `i3t set can-exit on` 之后才能启用",
+    "what": "exit",
+    "field": null
   }
 }
 ```
 
-`code` 给程序看，`message` 给人看，可以直接显示在界面上。
+`code` 给程序看，`message` 是 controller 写的中文原话。「新增」`what` 和 `field` 是比 `code` 更具体的一层，界面据此用自己的语言写：
+
+| 字段 | 含义 |
+|---|---|
+| `what` | 见下表；controller 说不出来时是 `null` |
+| `field` | 请求里出问题的那一项：请求体的字段名（嵌套的写第一层，比如 `pinned_relays`）、查询参数名或者路径参数名（`network`、`node`、`id`……）；不是某一项的问题时是 `null` |
+
+`what` 的取值随 `code` 不同：
+
+| `code` | `what` |
+|---|---|
+| `not_found` | 找不到的东西：`network`、`node`、`token`、`rule`、`credential`、`listener`、`forward`、`pair`（节点对设置）、`paused_version`、`exit`、`test`、`matrix`；路径不是一个接口时是 `endpoint`。请求体里引用的东西找不到时 `field` 是引用它的那一项，比如 `fixed_exit`、`pinned_relays`、`successor_of`、`via` |
+| `invalid_request` | 哪里不对：`too_small`（地址段太小）、`zero`（不能是 0）、`zero_port`（端口不能是 0）、`too_many`、`out_of_range`、`empty`、`too_long`、`malformed`（写法不对）、`all_digits`（名字全是数字）、`same`（新旧标签一样）、`same_node`（两个节点是同一个）、`builtin`（内置标签 `all` 不能改名）、`required`（非回环地址的监听器必须要求凭据）、`missing`（`a`、`b` 只写了一个）、`not_relay`（不是启用了的 relay）、`not_connectable`（不是能连上的地址）、`not_allowed`（立即更新的时机不能是 `idle`）、`duplicate`（路径里 relay 重复）、`with_successor`（继任的令牌不能预设虚拟 IP）、`no_default`（默认的地址段都被占了）、`needs_quality`（测吞吐要同时测质量）、`no_address`（relay 一个地址都没填）、`revoked`（凭据已经吊销）；请求本身读不出来时是 `content_type`、`syntax`、`data`（JSON 里某个字段不对，`field` 是它）、`body`、`query`、`path`；请求方法不对（405）是 `method` |
+| `conflict` | 挡着的东西：`listener`（这个节点上已经有监听器在这个地址上，`field` 是 `bind`）、`forward`（同上，端口转发）、`token`（这个虚拟 IP 已经预设在另一个注册令牌上，`field` 是 `virtual_ip`） |
+| `not_declared` | 没有声明的能力：`relay`、`exit`、`forward`。要在节点上执行的命令是 `i3t set can-<这个值> on` |
+| `cannot_self_update` | `container`、`package_manager`、`read_only_dir`（节点说的原因，见第 14 节的 `self_update.blocker`）、`too_old`（版本太旧，不懂更新）、`unknown`（节点说不能、没有说原因） |
+| `no_update` | `no_release`、`controller_too_old`、`unreadable_version`、`up_to_date`、`no_package`，和第 14 节 `SkipCause` 的代码一样 |
+| `unauthorized` | `missing`（没带令牌）、`wrong`（令牌不对） |
+| `internal` | 出错的环节：`store`、`encode`、`random`、`io`、`key`、`tls`、`socket`。细节只在 controller 的日志里 |
+| 其余 | `null` |
 
 | HTTP 状态 | `code` | 什么时候 |
 |---|---|---|
@@ -176,7 +223,7 @@
 | 409 | `busy` | 「新增」这一对节点正在测试，这个网络正在跑全网矩阵，或者要取消的测试、矩阵已经结束了 |
 | 500 | `internal` | controller 内部出错。细节在 controller 的日志里，不在应答里 |
 
-以后可能增加新的 `code`，客户端遇到不认识的值请按 HTTP 状态处理，并显示 `message`。
+以后可能增加新的 `code` 和 `what`，客户端遇到不认识的值请按 HTTP 状态处理，并显示 `message`。
 
 ## 3. controller
 
@@ -225,12 +272,17 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 ```json
 [
   {
-    "id": 19, "at": 1794798564, "network": 1, "action": "pair.set", "detail": "节点 #2 和 #1：连接常驻 true",
-    "refs": [{ "kind": "node", "id": 2 }, { "kind": "node", "id": 1 }]
+    "id": 19, "at": 1794798564, "network": 1, "action": "pair.set", "detail": "节点 #2 和 #1：连接常驻 开，独占 TCP 不用",
+    "refs": [{ "kind": "node", "id": 2 }, { "kind": "node", "id": 1 }],
+    "params": { "a": 1, "a_name": "nas", "b": 2, "b_name": "laptop", "keep_alive": true, "lane": "off" }
   },
   {
     "id": 18, "at": 1794798564, "network": 1, "action": "forward.create", "detail": "转发 #1：节点 #2 的 127.0.0.1:8080 → 节点 #1 的 192.168.1.10:80（启用）",
-    "refs": [{ "kind": "forward", "id": 1 }, { "kind": "node", "id": 2 }, { "kind": "node", "id": 1 }]
+    "refs": [{ "kind": "forward", "id": 1 }, { "kind": "node", "id": 2 }, { "kind": "node", "id": 1 }],
+    "params": {
+      "forward": 1, "forward_name": "web", "protocol": "tcp", "listen_node": 2, "listen_node_name": "laptop", "bind": "127.0.0.1:8080",
+      "target_node": 1, "target_node_name": "nas", "target_addr": "192.168.1.10:80", "enabled": true
+    }
   }
 ]
 ```
@@ -243,8 +295,46 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `action` | 做了什么，见下 |
 | `detail` | 给人看的说明 |
 | `refs` | 「新增」这条记录说的是哪些东西，界面可以据此做成链接。每一项是 `{ "kind": 种类, "id": 编号 }`，种类是 `"network"`、`"node"`、`"token"`、`"rule"`、`"credential"`、`"listener"`、`"forward"`（以后可能增加，不认识的种类请忽略）。东西后来被删掉了，编号还在。这个字段出现之前的记录是 `[]` |
+| `params` | 「新增」按名字给出的参数，只用 `action` 和它们就能把这条记录写成一句话：东西的编号挨着它当时的名字（`node` 和 `node_name`）。每种操作有哪些参数见下表。这个字段出现之前的记录是 `{}`，那时只能显示 `detail` |
 
 `action` 的取值：`admin.token`、`network.create`、`network.update`、`network.delete`、`node.enroll`、`node.update`、`node.delete`、`node.succeed`、`node.relay.enable`、`node.relay.disable`、`node.relay.withdrawn`、`node.exit.enable`、`node.exit.disable`、`node.exit.withdrawn`、`node.forward.withdrawn`、`token.create`、`token.delete`、`rule.create`、`rule.update`、`rule.delete`、`credential.create`、`credential.delete`、`listener.create`、`listener.update`、`listener.delete`、`forward.create`、`forward.update`、`forward.delete`、`pair.set`、`pair.delete`，以及「新增」`update.settings`、`update.release`（发布源上有了新的正式版）、`update.pause`（节点更新失败，版本被暂停；它记在那个节点所在的网络上）、`update.resume`、`update.force`（记在节点所在的网络上）、`update.force_all`，以及「新增」`credential.update`（改上限、清零用量）、`credential.revoke`（吊销）、`credential.exhausted`（凭据的流量上限用完了，controller 自己记的）、`tag.rename`，以及「新增」`update.failure`（节点说某个版本在它那里不能用，但 controller 没有让它装过这个版本，所以不暂停；记在那个节点所在的网络上），以及「新增」`test.start`（发起了一个主动测试，`refs` 是两个节点）、`test.cancel`、`test.matrix`（开始一次全网矩阵，`refs` 是网络）、`test.matrix.cancel`。`credential.delete` 现在是彻底删掉一个已经吊销的凭据。带 `withdrawn` 的三种是节点撤回了本地声明、controller 随之关闭能力时记的。最多保留最近的一万条。
+
+「新增」各种操作的 `params`。名字的写法：编号是 `<东西>`，名字是 `<东西>_name`，都是记下这一条时的样子；说不出来的值是 `null`。
+
+| `action` | `params` |
+|---|---|
+| `admin.token` | 没有（`{}`） |
+| `network.create` | `network`、`network_name`、`cidr` |
+| `network.update` | `network`、`network_name`，以及改完之后的 `cidr`、`routing`、`max_relay_hops`、`reach`、`class` |
+| `network.delete` | `network`、`network_name` |
+| `node.enroll` | `node`、`node_name`、`virtual_ip`、`token`（用的注册令牌的编号）、`predecessor`、`predecessor_name`（继任的原节点；不是继任时是 `null`） |
+| `node.update` | `node`、`node_name`（改之前的名字）、`changes`：改了的项，没改的不在里面。`name` 和 `virtual_ip` 写成 `{ "from": …, "to": … }`，`tags`、`dial_out_only`、`routing`、`reach`、`pinned_relays` 是改之后的值 |
+| `node.delete` | `node`、`node_name`、`virtual_ip` |
+| `node.succeed` | `node`、`node_name`、`virtual_ip`（继任之前的），`predecessor`、`predecessor_name`、`predecessor_virtual_ip` |
+| `node.relay.enable`、`node.relay.disable`、`node.exit.enable`、`node.exit.disable`、`node.relay.withdrawn`、`node.exit.withdrawn` | `node`、`node_name` |
+| `node.forward.withdrawn` | `node`、`node_name`、`forwards`（停用了几条转发） |
+| `token.create` | `token`、`prefix`、`expires_at`、`tags`、`virtual_ip`、`successor_of` |
+| `token.delete` | `token`、`prefix` |
+| `rule.create`、`rule.update`、`rule.delete` | `rule`、`rule_name`、`src`、`dst`、`direction`、`enabled`（改完之后的，删除时是删之前的） |
+| `tag.rename` | `from`、`to`、`nodes`、`rules`、`tokens`（各改了几处） |
+| `credential.create` | `credential`、`credential_name`、`max_concurrent`、`max_bytes` |
+| `credential.update` | `credential`、`credential_name`、`max_concurrent`、`max_bytes`（新的上限，`null` 是不限）、`reset_usage` |
+| `credential.revoke`、`credential.delete` | `credential`、`credential_name` |
+| `credential.exhausted` | `credential`、`credential_name`、`used_bytes`、`max_bytes` |
+| `listener.create`、`listener.update`、`listener.delete` | `listener`、`listener_name`、`node`、`node_name`、`bind`、`protocol` |
+| `forward.create`、`forward.update`、`forward.delete` | `forward`、`forward_name`、`protocol`、`listen_node`、`listen_node_name`、`bind`、`target_node`、`target_node_name`、`target_addr`、`enabled` |
+| `pair.set` | `a`、`a_name`、`b`、`b_name`（`a` 的编号小），`keep_alive`、`lane` |
+| `pair.delete` | `a`、`a_name`、`b`、`b_name` |
+| `update.settings` | `auto_update`、`source`、`source_is_default` |
+| `update.release` | `version` |
+| `update.pause`、`update.failure` | `node`、`node_name`、`version`、`reason`（节点的原话）、`cause`（节点报的原因，第 14 节的 `UpdateCause`；旧版本的节点不报时是 `null`） |
+| `update.resume` | `version` |
+| `update.force` | `node`、`node_name`、`timing` |
+| `update.force_all` | `timing`、`nodes`（让几个节点更新了）、`skipped`（跳过了几个） |
+| `test.start` | `test`、`a`、`a_name`、`b`、`b_name`、`items`、`throughput`、`matrix`（属于哪一次全网矩阵，单独发起的是 `null`） |
+| `test.cancel` | `test`、`a`、`a_name`、`b`、`b_name` |
+| `test.matrix` | `matrix`、`nodes`、`pairs`、`testing`（其中要测的几对） |
+| `test.matrix.cancel` | `matrix` |
 
 ## 4. 网络
 
@@ -517,6 +607,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `flows` | 正在进行的流的数量 |
 | `tx_bytes`、`rx_bytes` | 节点启动以来发出和收到的字节数 |
 | `lanes` | 「新增」独占 TCP 的状况，结构是 `LaneReport`（第 12 节）。节点不在线、版本太旧没有报、或者还没有上报过时是 `null` |
+| `reported_secs_ago` | 「新增」节点最近一次上报是多少秒之前，上面这几项（`lanes`、`flows`、流量、`mapping_varies`）都是那一次报的。这次连接上还没有上报过、或者不在线时是 `null` |
 
 `mapping_varies`、`flows`、`tx_bytes`、`rx_bytes`、`lanes` 是节点这次连接期间最近一次上报的值；节点不在线时是 `null` 和 0。
 
@@ -573,8 +664,9 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   "id": 1, "name": "node-1", "relay": { "udp": ["203.0.113.7:20330"], "tcp": ["203.0.113.7:20330"], "region": "hk", "bandwidth_mbps": 200 },
   "…": "Node 的其余字段",
   "reachability": [
-    { "protocol": "udp", "addr": "203.0.113.7:20330", "reachable": true, "rtt_ms": 23, "error": null },
-    { "protocol": "tcp", "addr": "203.0.113.7:20330", "reachable": false, "rtt_ms": null, "error": "Connection refused (os error 111)" }
+    { "protocol": "udp", "addr": "203.0.113.7:20330", "reachable": true, "rtt_ms": 23, "error": null, "cause": null },
+    { "protocol": "tcp", "addr": "203.0.113.7:20330", "reachable": false, "rtt_ms": null, "error": "Connection refused (os error 111)",
+      "cause": { "code": "refused" } }
   ]
 }
 ```
@@ -587,7 +679,8 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `addr` | 填的地址 |
 | `reachable` | 从 controller 这边通不通 |
 | `rtt_ms` | UDP 是地址查询的往返时间，TCP 是建连接的时间；不通是 `null` |
-| `error` | 不通的原因；通是 `null` |
+| `error` | 不通的原因（系统或者 controller 的原话）；通是 `null` |
+| `cause` | 「新增」`error` 的原因（`ReachCause`）；通是 `null`。`code` 是 `refused`（对方拒绝了连接：TCP 端口上没有程序在听）、`timeout`（时限之内 UDP 的地址查询没有回答，或者连接超时）、`unreachable`（controller 到那个地址的网络不通）、`local`（controller 这边出的错：绑不出 UDP 端口、发不出去）、`other`（别的，见 `error`） |
 
 这只是参考，不挡着启用：controller 和别的节点不在同一个网络位置上，它连不上不等于别人连不上（比如 controller 和 relay 在同一个局域网里，填的是公网地址），反过来也一样。界面可以据此提示"从 controller 这边连不上这个地址，请确认公网地址和端口放行"。
 
@@ -1141,11 +1234,23 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `state` | 别的字段 | 含义 |
 |---|---|---|
 | `"listening"` | `local` | 正在监听。`local` 是实际绑定的地址：配置里端口写 0 时，这里是节点挑定的端口 |
-| `"port_in_use"` | `detail` | 端口已经被别的程序占着。节点不去抢，每 10 秒再试一次 |
-| `"failed"` | `detail` | 别的原因没有绑上（地址不在这台机器上、没有权限等），`detail` 是系统给的原因。同样会重试 |
+| `"port_in_use"` | `detail`、`cause` | 端口已经被别的程序占着。节点不去抢，每 10 秒再试一次 |
+| `"failed"` | `detail`、`cause` | 别的原因没有绑上（地址不在这台机器上、没有权限等），`detail` 是系统给的原因。同样会重试 |
 | `"virtual"` | — | 监听在节点虚拟 IP 上的端口转发：不占操作系统的端口 |
-| `"unsupported"` | `detail` | 这种配置节点不支持，`detail` 说明为什么（现在只有一种：监听在虚拟 IP 上而端口写 0，controller 本来就不收这样的配置） |
+| `"unsupported"` | `detail`、`cause` | 这种配置节点不支持，`detail` 说明为什么（现在只有一种：监听在虚拟 IP 上而端口写 0，controller 本来就不收这样的配置） |
 | `"unknown"` | — | 比 controller 新的节点报的、这个版本的 controller 不认识的状态 |
+
+「新增」`cause` 是没有绑上的原因（`BindCause`），`detail` 是系统的原话；旧版本的节点不报，是 `null`：
+
+| `code` | 含义 |
+|---|---|
+| `address_in_use` | 端口被别的程序占着（`port_in_use` 总是它） |
+| `permission_denied` | 没有权限，比如普通用户绑 1024 以下的端口 |
+| `address_not_available` | 地址不在这台机器上 |
+| `virtual_port_zero` | 监听在虚拟 IP 上的端口转发没有写端口（`unsupported` 现在总是它） |
+| `other` | 别的原因，看 `detail` |
+
+例子：`{ "state": "failed", "detail": "Permission denied (os error 13)", "cause": { "code": "permission_denied" }, "connections": 0, … }`。
 
 | 字段 | 含义 |
 |---|---|
@@ -1215,17 +1320,19 @@ controller 自己的情况。也用来检查地址和令牌对不对。
     "effective": true,
     "blocked": [],
     "dialers": [2],
-    "summary": "由 #2 拨对方的 TCP 端口；新的 TCP 流（代理的 CONNECT、TCP 端口转发）每条独占一条 TCP，……"
+    "summary": "由 #2 拨对方的 TCP 端口；新的 TCP 流（代理的 CONNECT、TCP 端口转发）每条独占一条 TCP，……",
+    "opening": []
   },
   "lanes": [
     {
       "node": 1,
       "lanes": {
-        "peer": 2, "dials": false, "control": true, "idle": 6, "ready": 0, "parked_at_peer": 0,
+        "peer": 2, "dials": false, "control": true, "idle": 6, "ready": 0, "parked_at_peer": 0, "udp_path": true,
         "in_use": 212, "dialling": 0, "claims": 18420, "claims_waited": 31, "claim_wait_ms": 412, "claims_failed": 0,
         "fallbacks": 0, "dial_failures": 0, "refused": 3,
         "sealed_bytes": 10485760, "passthrough_bytes": 0, "spliced_bytes": 734003200
-      }
+      },
+      "reported_secs_ago": 4
     }
   ]
 }
@@ -1237,7 +1344,8 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `lane_effect.effective` | 起作用：至少一边能被拨，两个节点都懂独占 TCP，访问规则连通了它们 |
 | `lane_effect.blocked` | 不起作用的原因，`LaneBlock` 的数组，起作用时是 `[]`。不起作用时这一对的流都走共用的连接 |
 | `lane_effect.dialers` | 拨号的节点：对方启用了 relay、有 TCP 地址的那一个（或者两个） |
-| `lane_effect.summary` | 给人看的一句说明，界面可以直接显示 |
+| `lane_effect.summary` | 给人看的一句说明（中文原话）。界面用 `effective`、`blocked`、`dialers` 写 |
+| `lane_effect.opening` | 「新增」设置是 `udp_fallback` 时，两个节点各自开新的 TCP 流现在走不走独占 TCP，`LaneOpening` 的数组：`node` 是开流的节点，`udp_path` 是它到对方的共用连接现在有没有 UDP 的路（直连，或者经 UDP 连着的 relay），`lanes` 是它现在开的新 TCP 流走独占 TCP（设置起作用并且 `udp_path` 是 `false`；取不到 lane 时照样悄悄改走共用的连接，见 `lanes` 里的 `control` 和 `fallbacks`）。只有在线、并且报了 `udp_path` 的节点在里面；设置是别的值时是 `[]` |
 | `lanes` | 两个节点各自报上来的、和对方之间的独占 TCP，`PairLaneSide` 的数组。不在线、版本太旧、或者没有为对方打开的节点不在里面。设置刚改成 `off` 时，还有流在跑的一边仍然会报 |
 
 `LaneBlock` 用 `reason` 区分：
@@ -1249,7 +1357,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `node_too_old` | `node` | 这个节点在线，但版本太旧，不懂独占 TCP（节点协议第 3 版起才懂）。离线的节点不判断 |
 | `not_connected` | | 访问规则没有连通这两个节点 |
 
-`PairLaneSide` 是 `{ "node": 报的节点, "lanes": PeerLanes }`。`PeerLanes` 是一个节点上和一个对端之间的独占 TCP：
+`PairLaneSide` 是 `{ "node": 报的节点, "lanes": PeerLanes, "reported_secs_ago": 秒 }`；「新增」`reported_secs_ago` 是这些数是多少秒之前报的。`PeerLanes` 是一个节点上和一个对端之间的独占 TCP：
 
 | 字段 | 含义 |
 |---|---|
@@ -1259,6 +1367,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `idle` | 对端拨来、停在这个节点等它开流时取用的空闲连接 |
 | `ready` | 这个节点拨好、留给自己开流的空闲连接 |
 | `parked_at_peer` | 这个节点拨出去、停在对端那里的空闲连接 |
+| `udp_path` | 「新增」这个节点到对端的共用连接现在有没有 UDP 的路；`udp_fallback` 时没有才在独占 TCP 上开新的 TCP 流。旧版本的节点不报，是 `null` |
 | 其余 | `LaneCounts` 的字段，平铺在同一层 |
 
 `LaneCounts`（从节点启动算起的累计，`in_use`、`dialling` 是现在的值）：
@@ -1414,18 +1523,20 @@ controller 自己的情况。也用来检查地址和令牌对不对。
     "controller_too_old": false,
     "newer_than_controller": true,
     "packages": [
-      { "platform": "linux-aarch64", "file": "i3t-linux-aarch64", "size": 17100288, "state": "not_needed", "error": null },
-      { "platform": "linux-x86_64", "file": "i3t-linux-x86_64", "size": 18234880, "state": "cached", "error": null }
+      { "platform": "linux-aarch64", "file": "i3t-linux-aarch64", "size": 17100288, "state": "not_needed", "error": null, "cause": null },
+      { "platform": "linux-x86_64", "file": "i3t-linux-x86_64", "size": 18234880, "state": "cached", "error": null, "cause": null }
     ]
   },
   "checked_at": 1794798564,
   "check_error": null,
+  "check_cause": null,
   "paused": [
     {
       "version": "0.3.0",
       "node": { "id": 2, "name": "laptop", "virtual_ip": "10.66.0.2" },
       "network": 1,
       "reason": "自检没有通过：退出码 1：读不了 config.toml",
+      "cause": { "code": "self_check", "exit_code": 1, "output": "读不了 config.toml" },
       "at": 1794798600
     }
   ],
@@ -1444,10 +1555,11 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `release.min_controller` | 这个版本的节点需要的 controller 最低版本 |
 | `release.controller_too_old` | `true` 时 controller 比 `min_controller` 旧：这个版本不会下发给任何节点，界面应当提示先手动更新 controller |
 | `release.newer_than_controller` | `true` 时这个版本比 controller 自己新：提醒管理员手动更新 controller（和 `GET /status` 的 `newer_version` 是一回事） |
-| `release.packages` | 发布里各个平台的节点程序，按平台名排。`state` 见下表；`error` 是最近一次取这个包失败的原因，没有失败是 `null` |
+| `release.packages` | 发布里各个平台的节点程序，按平台名排。`state` 见下表；`error` 是最近一次取这个包失败的原因，没有失败是 `null`；「新增」`cause` 是它的代码（`ReleaseCause`，见下表） |
 | `checked_at` | 最近一次查发布源的时间；还没有查过是 `null` |
 | `check_error` | 最近一次查发布源失败的原因（连不上、清单的签名不对、最新版是预发布版）；成功是 `null`。失败时 `release` 保持上一次查到的 |
-| `paused` | 被暂停自动更新的版本，和导致暂停的那次失败。`node` 是报告失败的节点，它后来被删掉了的话是 `null`；`network` 是它所在的网络，「新增」暂停只在这个网络里生效，同一个版本在几个网络里都被暂停时有几条；`reason` 是节点报的原因；`at` 是时间 |
+| `check_cause` | 「新增」`check_error` 的代码（`ReleaseCause`，见下表）；成功是 `null` |
+| `paused` | 被暂停自动更新的版本，和导致暂停的那次失败。`node` 是报告失败的节点，它后来被删掉了的话是 `null`；`network` 是它所在的网络，「新增」暂停只在这个网络里生效，同一个版本在几个网络里都被暂停时有几条；`reason` 是节点报的原因；「新增」`cause` 是节点报的原因的代码（`UpdateCause`，见本节后面），这个字段出现之前的暂停、或者旧版本的节点报的是 `null`；`at` 是时间 |
 | `nodes` | 全部网络的节点按更新情况数出来的数。一个节点只算在一项里，按这个顺序取第一个符合的：`updating`（已经下发了指令，还没有结束）、`up_to_date`（没有可以更新到的版本）、`failed`（有新版本，但它上一次装这个版本失败了）、`manual`（有新版本，但它不能自己更新，要手动更新）、`outdated`（有新版本，可以更新）。`total` 是总数 |
 
 `packages[].state`：
@@ -1458,6 +1570,21 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `"fetching"` | 有节点要用，正在取，或者排着队等着取 |
 | `"cached"` | 已经取回来并且核对过 |
 | `"failed"` | 没有取成（`error` 里有原因），下一次查发布源时再试 |
+
+「新增」`ReleaseCause`：controller 查发布源、取包失败的原因。
+
+| `code` | 别的字段 | 含义 |
+|---|---|---|
+| `invalid_source` | — | 发布源的写法不对 |
+| `fetch_failed` | `url`、`error` | 从这个地址取不到；`error` 是原话（连不上、HTTP 状态码等） |
+| `io` | `path`、`error` | 发布源是本机的目录，读里面的文件失败（或者写缓存失败）；`error` 是系统的原话 |
+| `bad_signature_file` | — | 发布源给的签名文件不是一个签名 |
+| `bad_signature` | — | 清单的签名不是受信任的发布公钥签的 |
+| `bad_manifest` | — | 签名正确，但清单的内容读不懂 |
+| `prerelease` | `version` | 发布源上最新的是预发布版，不取 |
+| `bad_file_name` | `file` | 清单里的文件名不是一个单纯的文件名 |
+| `mismatch` | `file`、`expected_size`、`actual_size` | 取回来的包和清单对不上（大小或者 SHA-256；大小一样时是 SHA-256 不对） |
+| `internal` | — | controller 内部的原因，细节在它的日志里 |
 
 ### PATCH /update
 
@@ -1510,7 +1637,10 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   "ordered": [{ "id": 1, "name": "node-1", "virtual_ip": "10.66.0.1" }],
   "queued": [{ "id": 3, "name": "node-3", "virtual_ip": "10.66.0.3" }],
   "skipped": [
-    { "node": { "id": 2, "name": "laptop", "virtual_ip": "10.66.0.2" }, "reason": "节点 laptop 不在线。让节点立即更新要它连着 controller" }
+    {
+      "node": { "id": 2, "name": "laptop", "virtual_ip": "10.66.0.2" }, "reason": "节点 laptop 不在线。让节点立即更新要它连着 controller",
+      "cause": { "code": "offline" }
+    }
   ]
 }
 ```
@@ -1520,7 +1650,20 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `version` | 要更新到的版本；没有可以下发的版本时是 `null`（这时节点都在 `skipped` 里） |
 | `ordered` | 指令已经发出去的节点 |
 | `queued` | 已经记下、稍后下发的节点：在等 controller 把包取回来，或者是 relay 在等轮到它 |
-| `skipped` | 没有动的节点和原因（给人看的一句话）：不在线、不能自己更新、已经是最新的、没有它的平台的包 |
+| `skipped` | 没有动的节点和原因（给人看的一句话）：不在线、不能自己更新、已经是最新的、没有它的平台的包。「新增」`cause` 是原因的代码（`SkipCause`，见下表） |
+
+「新增」`SkipCause`：controller 没有让一个节点更新的原因。错误 `cannot_self_update`、`no_update` 的 `what` 也取这里的代码（第 2 节）。
+
+| `code` | 别的字段 | 含义 |
+|---|---|---|
+| `offline` | — | 节点不在线 |
+| `too_old` | — | 节点的版本太旧，不懂更新，只能手动换程序 |
+| `cannot_self_update` | `blocker` | 节点说它不能自己更新；`blocker` 见本节的 `self_update.blocker`，说不出来时是 `null` |
+| `no_release` | — | 还没有从发布源查到任何发布 |
+| `controller_too_old` | `version`、`min_controller`、`controller` | 最新的发布要求的 controller 比现在的新 |
+| `unreadable_version` | `version` | 节点报的版本号看不懂 |
+| `up_to_date` | `running`、`latest` | 节点已经是最新的 |
+| `no_package` | `version`、`platform` | 发布里没有它的平台的包 |
 
 错误：`invalid_request`（`timing` 是 `"idle"`）。
 
@@ -1546,7 +1689,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `status` | 节点本次连接期间最近一次报的进度（见下表）。不在线，或者没有更新在进行时是 `{ "state": "idle" }` |
 | `ordered` | controller 在这次连接上发给它、还在做的更新指令：`version` 和 `timing`。没有是 `null` |
 | `waiting` | controller 想让它更新、但指令还没有发的原因：`"package"`（它的平台的包还没有从发布源取回来）、`"relay_turn"`（它是 relay，在等前一个 relay 更新完重新上线）。没有在等是 `null` |
-| `failure` | 它最近一次"这个版本在这台机器上不能用"的失败：`version`、`kind`（总是 `"version_rejected"`）、`reason`（节点报的原因）、`at`（时间）。有这条记录时，自动更新不会再让它装同一个版本。没有是 `null`。节点后来跑上了那个版本（或者更新的），或者管理员对它点了"立即更新"，这条记录就清掉 |
+| `failure` | 它最近一次"这个版本在这台机器上不能用"的失败：`version`、`kind`（总是 `"version_rejected"`）、`reason`（节点报的原因）、「新增」`cause`（原因的代码，`UpdateCause`，见下表；这个字段出现之前的记录、或者旧版本的节点报的是 `null`）、`at`（时间）。有这条记录时，自动更新不会再让它装同一个版本。没有是 `null`。节点后来跑上了那个版本（或者更新的），或者管理员对它点了"立即更新"，这条记录就清掉 |
 
 `self_update.blocker`：
 
@@ -1570,10 +1713,31 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `"installing"` | `version` | 正在替换程序文件 |
 | `"restarting"` | `version` | 程序文件已经换好，节点马上重启 |
 | `"confirmed"` | `version` | 新程序连上了 controller，更新完成 |
-| `"failed"` | `version`、`kind`、`reason` | 更新没有成功。`version` 在连清单都没有验过时是 `null`。`kind` 是 `"not_installed"`（没有装成，和这个版本好不好无关，以后会再试）或者 `"version_rejected"`（这个版本在这台机器上不能用）。`reason` 是给人看的原因 |
+| `"failed"` | `version`、`kind`、`reason`、`cause` | 更新没有成功。`version` 在连清单都没有验过时是 `null`。`kind` 是 `"not_installed"`（没有装成，和这个版本好不好无关，以后会再试）或者 `"version_rejected"`（这个版本在这台机器上不能用）。`reason` 是给人看的原因；「新增」`cause` 是它的代码（`UpdateCause`，见下表），旧版本的节点不报，是 `null` |
 | `"unknown"` | — | 比 controller 新的节点报上来的、这个版本的 controller 不认识的状态 |
 
 节点每 10 秒上报一次，状态一变还会马上报一次，所以这里看到的进度最多滞后一两秒。
+
+「新增」`UpdateCause`：节点更新失败的原因，例子 `{ "code": "self_check", "exit_code": 1, "output": "读不了 config.toml" }`。
+
+| `code` | 别的字段 | 含义 |
+|---|---|---|
+| `bad_signature` | — | 清单的签名不是受信任的发布公钥签的 |
+| `bad_manifest` | — | 签名正确，但清单的内容读不懂 |
+| `cannot_self_update` | `blocker` | 节点不能自己更新（`blocker` 见上面的表） |
+| `not_newer` | `offered`、`running` | 清单里的版本不比正在运行的新 |
+| `prerelease` | `offered`、`running` | 清单里是预发布版，而正在运行的是正式版 |
+| `failed_before` | `version` | 这个版本在这台机器上失败过，不再自动重试 |
+| `no_package` | `version`、`platform` | 这个版本没有这台机器的平台的包 |
+| `restart_pending` | `installed` | 已经换上了另一个版本，在等进程重启 |
+| `unavailable` | `detail` | 从 controller 取不到包；`detail` 是原话 |
+| `corrupt` | `expected_size`、`actual_size` | 取回来的包和清单对不上（大小一样时是 SHA-256 不对） |
+| `self_check` | `exit_code`、`output` | 新程序的自检没有通过。`exit_code` 是退出码，被信号杀掉、没有运行起来或者超时时是 `null`；`output` 是新程序在标准错误上最后说的话，原样（它的语言跟着那台机器） |
+| `cancelled` | — | 节点不再通报流的数量，等不到换程序的时机 |
+| `io` | `path`、`error` | 读写一个文件失败；`error` 是系统的原话 |
+| `state_unreadable` | `path` | 节点上的更新状态文件读不懂 |
+| `not_confirmed` | `minutes` | 新程序换上去这么多分钟还没有连上 controller，已经换回旧程序 |
+| `starts_unconfirmed` | `starts` | 新程序启动了这么多次都没有连上 controller，已经换回旧程序 |
 
 ### POST /networks/{network}/nodes/{node}/update
 
@@ -1639,11 +1803,12 @@ controller 先向两端各问一次"到对端现在会怎么走"，节点用当�
     "route": { "via": "direct", "addr": "203.0.113.7:20330" },
     "rtt_ms": 12,
     "age_secs": 0,
-    "since": { "secs_ago": 340, "reason": "直连打通了" },
+    "since": { "secs_ago": 340, "reason": "直连地址 203.0.113.7:20330 验证通过，改走直连", "cause": { "code": "direct_verified" } },
     "direct": "punched",
     "relay_leg": null,
     "mode": "direct_first",
-    "reason": "直连可用",
+    "reason": "直连地址 203.0.113.7:20330 验证通过，改走直连",
+    "cause": { "code": "direct_verified" },
     "candidates": [
       {
         "route": { "via": "direct", "addr": "203.0.113.7:20330" },
@@ -1676,6 +1841,7 @@ controller 先向两端各问一次"到对端现在会怎么走"，节点用当�
     "relay_leg": null,
     "mode": null,
     "reason": null,
+    "cause": null,
     "candidates": null
   }
 }
@@ -1690,11 +1856,33 @@ controller 先向两端各问一次"到对端现在会怎么走"，节点用当�
 | `route` | 现在走的路；没有数据是 `null` |
 | `rtt_ms` | 这条路上最近测到的往返延迟，没有是 `null` |
 | `age_secs` | 这份数据是多少秒之前的。刚问到的是 0；没有数据是 `null` |
-| `since` | 这条路是多久之前换上的（`secs_ago`，秒）、为什么换（`reason`，节点的路由层给的一句话）。只有 `source` 是 `"query"`、并且节点这次启动以来换过这条路时才有，否则 `null` |
+| `since` | 这条路是多久之前换上的（`secs_ago`，秒）、为什么换（`reason`，节点的路由层给的一句话；「新增」`cause`，它的代码，`RouteCause`，见下表，旧版本的节点不给时是 `null`）。只有 `source` 是 `"query"`、并且节点这次启动以来换过这条路时才有，否则 `null` |
 | `direct`、`relay_leg` | 「新增」直连的类型、到第一个 relay 的那一段的传输，写法见第 5 节的路由表。现问到的取自发送方的回答，否则取自它的上报（只在上报的是同一条路时）；不知道时是 `null` |
 | `mode` | 「新增」发送方用的选路模式：`"direct_first"`（默认：直连可用就走直连，否则经一个 relay）或 `"lowest_cost"`（按代价取最低的，切换有迟滞）。只有 `source` 是 `"query"`、并且发送方的版本会说时才有，否则 `null`；比 controller 新的节点报了不认识的模式时也是 `null` |
 | `reason` | 「新增」发送方的路由层说的"为什么是现在这条路"，给人看的一句话。有没有同 `mode` |
+| `cause` | 「新增」`reason` 的代码（`RouteCause`，见下表）。有 `reason` 而旧版本的节点不给代码时是 `null` |
 | `candidates` | 「新增」发送方考虑过的候选路径（`PathCandidate`），按代价从低到高，最多 16 条。有没有同 `mode`：`null` 是不知道，`[]` 是发送方手上还没有任何测量值（没有测过的路不在里面）。默认模式不按代价选，但代价照样算出来给人看 |
+
+「新增」`RouteCause`：节点的路由层说的"为什么是这条路"。`hint` 是直接的起因（`RouteHint`，见下一张表）；`previous`、`relays` 是节点编号。
+
+| `code` | 别的字段 | 含义 |
+|---|---|---|
+| `no_route_yet` | — | 到这个对端还没有过路 |
+| `test_pinned` | — | 主动测试把路暂时固定在这里 |
+| `test_ended` | — | 主动测试结束，回到选路规则选的路 |
+| `direct_verified` | — | 直连地址验证通过，改走直连 |
+| `direct_lost` | `hint` | 直连不能用了，退回经 relay |
+| `relay_ready` | — | 原来没有路，中转会话可用了 |
+| `leg_changed` | `transport` | 还是经同一串 relay，到第一个 relay 的会话换了传输（`"udp"`、`"tcp"`）；`null` 时第一个 relay 就是发送方自己 |
+| `relay_changed` | `hint`、`previous` | 换了一串 relay；`previous` 是原来经过的 relay |
+| `unreachable` | `hint` | 没有路可走了 |
+| `peer_removed` | — | 对端不在发送方的配置里了：访问规则不再连通它们，或者它被删掉了 |
+| `lan` | — | 延迟优先：对端在同一个局域网里，局域网直连无条件优先 |
+| `lowest_cost` | `candidates`、`cost_us` | 延迟优先：这么多条候选里代价最低；`cost_us` 是它的代价，不知道时是 `null` |
+| `failover` | `hint`、`candidates`、`cost_us` | 延迟优先：原来的路不能用了，不等迟滞，立刻换到剩下的候选里代价最低的 |
+| `cheaper` | `previous`、`previous_cost_us`、`cost_us`、`windows` | 延迟优先：新的路连续 `windows` 个评估窗口都比原来的路便宜得多；这里的 `previous` 是原来的路，写法同 `route` |
+
+`RouteHint`（字符串）：`direct_timeouts`（直连探测连续超时）、`direct_loss`（直连探测丢了超过 20%）、`direct_stale`（对端不活跃，直连地址过期了）、`direct_unavailable`（直连不可用，没有更具体的起因）、`relay_draining`（relay 通知即将下线）、`relay_overloaded`（relay 通知过载）、`relay_path_broken`（relay 说多级路径走不下去）、`peer_not_attached`（relay 说对端没有挂在它上面）、`path_probe_silent`（经多个 relay 的路径上端到端的探测一直没有回音）、`preferred_relay_ready`（对端排在前面的 relay 的会话建好了）、`shortcut`（有了不绕路的中转会话：对端自己是 relay，或者对端挂在发送方的 relay 上）、`relay_unavailable`（原来的 relay 不可用，没有更具体的起因）、`relay_lost`（中转会话断开，没有别的路）、`route_failed`（原来的路不能用了，没有更具体的起因）、`no_path`（没有任何可用的路径）。不认识的值当作 `unknown`。
 
 「新增」`PathCandidate`：
 

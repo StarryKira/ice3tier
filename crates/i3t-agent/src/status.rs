@@ -3,16 +3,16 @@
 //! 这些类型就是本机状态接口应答的 JSON。问的一方和答的一方通常是同一个程序文件，但更新的那一小段时间里
 //! 可能不是同一个版本，所以字段都有默认值，不认识的字段被忽略。
 
+use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 
 use i3t_access::ListenState;
-use i3t_model::control::{self, CredentialUsage, ExitReport, LaneReport, Route, RouteSince, SelfUpdate};
+use i3t_model::control::{self, BindCause, CredentialUsage, ExitReport, LaneReport, Route, RouteSince, SelfUpdate};
 use i3t_model::netmap::Attachment;
 use i3t_model::update::UpdateStatus;
 use serde::{Deserialize, Serialize};
 
 use crate::control::LinkState;
-use crate::lanes;
 use crate::runtime::{Runtime, exit_report};
 
 /// 一个运行着的节点现在的样子。
@@ -101,6 +101,12 @@ pub struct LiveListener {
     /// `port_in_use`、`failed`、`unsupported` 时是原因；端口写 0 时是实际的端口。
     #[serde(default)]
     pub detail: Option<String>,
+    /// `listening` 时实际绑定的地址。
+    #[serde(default)]
+    pub local: Option<SocketAddr>,
+    /// 没有绑上的原因的代码；`detail` 是系统的原话。
+    #[serde(default)]
+    pub cause: Option<BindCause>,
     /// 上面正在进行的连接数。
     #[serde(default)]
     pub active: usize,
@@ -160,7 +166,7 @@ impl LiveStatus {
         });
         let exit = runtime.exit.stats();
         let counters = runtime.endpoint.relay_counters();
-        let lanes = lanes::report(&runtime.lanes.status());
+        let lanes = runtime.lanes.report();
         let lanes_used = !lanes.peers.is_empty() || lanes.total != control::LaneCounts::default();
         Self {
             version: runtime.program.version.to_string(),
@@ -192,28 +198,51 @@ impl LiveStatus {
 }
 
 fn listener_of(name: String, bind: SocketAddr, state: &ListenState, active: usize) -> LiveListener {
-    let (state, detail) = match state {
-        ListenState::Listening { local } => ("listening", (*local != bind).then(|| format!("实际绑定在 {local}"))),
-        ListenState::PortInUse { reason } => ("port_in_use", Some(reason.clone())),
-        ListenState::Failed { reason } => ("failed", Some(reason.clone())),
-        ListenState::Virtual => ("virtual", None),
-        ListenState::Unsupported { reason } => ("unsupported", Some(reason.clone())),
-        // 入口模块以后可能有新的状态；这里认不出来的照实说认不出来。
-        _ => ("unknown", None),
+    let cause = match listen_state(state) {
+        control::ListenState::PortInUse { cause, .. }
+        | control::ListenState::Failed { cause, .. }
+        | control::ListenState::Unsupported { cause, .. } => cause,
+        control::ListenState::Listening { .. } | control::ListenState::Virtual | control::ListenState::Unknown => None,
     };
-    LiveListener { name, bind, state: state.to_owned(), detail, active, bytes_up: 0, bytes_down: 0 }
+    let (state, detail, local) = match state {
+        ListenState::Listening { local } => ("listening", (*local != bind).then(|| format!("实际绑定在 {local}")), Some(*local)),
+        ListenState::PortInUse { reason } => ("port_in_use", Some(reason.clone()), None),
+        ListenState::Failed { reason } => ("failed", Some(reason.clone()), None),
+        ListenState::Virtual => ("virtual", None, None),
+        ListenState::Unsupported { reason } => ("unsupported", Some(reason.clone()), None),
+        // 入口模块以后可能有新的状态；这里认不出来的照实说认不出来。
+        _ => ("unknown", None, None),
+    };
+    LiveListener { name, bind, state: state.to_owned(), detail, local, cause, active, bytes_up: 0, bytes_down: 0 }
 }
 
 /// 入口模块报的监听状态写成上报给 controller 的样子。
 pub(crate) fn listen_state(state: &ListenState) -> control::ListenState {
     match state {
         ListenState::Listening { local } => control::ListenState::Listening { local: *local },
-        ListenState::PortInUse { reason } => control::ListenState::PortInUse { detail: reason.clone() },
-        ListenState::Failed { reason } => control::ListenState::Failed { detail: reason.clone() },
+        ListenState::PortInUse { reason } => {
+            control::ListenState::PortInUse { detail: reason.clone(), cause: Some(BindCause::AddressInUse) }
+        }
+        ListenState::Failed { reason } => control::ListenState::Failed { detail: reason.clone(), cause: Some(bind_cause(reason)) },
         ListenState::Virtual => control::ListenState::Virtual,
-        ListenState::Unsupported { reason } => control::ListenState::Unsupported { detail: reason.clone() },
+        // 入口模块现在只有一种不支持的配置：监听在虚拟 IP 上而端口写 0（controller 本来就不收）。
+        ListenState::Unsupported { reason } => {
+            control::ListenState::Unsupported { detail: reason.clone(), cause: Some(BindCause::VirtualPortZero) }
+        }
         // 入口模块以后可能有新的状态；这里认不出来的照实说认不出来。
         _ => control::ListenState::Unknown,
+    }
+}
+
+/// 绑定失败的原因归到哪一类。入口模块只给了系统的原话，它是 `io::Error` 的写法（`Permission denied (os error 13)`），
+/// 从末尾取出错误号，按这个平台的意思归类；取不出来的算别的原因。
+fn bind_cause(reason: &str) -> BindCause {
+    let code = reason.rsplit_once("(os error ").and_then(|(_, rest)| rest.strip_suffix(')')).and_then(|code| code.parse::<i32>().ok());
+    match code.map(|code| io::Error::from_raw_os_error(code).kind()) {
+        Some(io::ErrorKind::AddrInUse) => BindCause::AddressInUse,
+        Some(io::ErrorKind::PermissionDenied) => BindCause::PermissionDenied,
+        Some(io::ErrorKind::AddrNotAvailable) => BindCause::AddressNotAvailable,
+        _ => BindCause::Other,
     }
 }
 
@@ -240,10 +269,12 @@ mod tests {
         let local: SocketAddr = "127.0.0.1:41000".parse().unwrap();
         let listening = listener_of("socks".into(), bind, &ListenState::Listening { local }, 2);
         assert_eq!((listening.state.as_str(), listening.active), ("listening", 2));
-        assert!(listening.detail.unwrap().contains("41000"), "端口写 0 时说出实际的端口");
+        assert_eq!(listening.local, Some(local), "端口写 0 时说出实际的端口");
+        assert!(listening.detail.unwrap().contains("41000"));
         assert_eq!(listener_of("socks".into(), local, &ListenState::Listening { local }, 0).detail, None);
         let in_use = listener_of("http".into(), bind, &ListenState::PortInUse { reason: "地址已经在用".into() }, 0);
         assert_eq!((in_use.state.as_str(), in_use.detail.as_deref()), ("port_in_use", Some("地址已经在用")));
+        assert_eq!(in_use.cause, Some(BindCause::AddressInUse));
         let failed = listener_of("http".into(), bind, &ListenState::Failed { reason: "没有这个地址".into() }, 0);
         assert_eq!((failed.state.as_str(), failed.detail.as_deref()), ("failed", Some("没有这个地址")));
         assert_eq!(listener_of("forward-3".into(), bind, &ListenState::Virtual, 0).state, "virtual");
@@ -255,12 +286,30 @@ mod tests {
         assert_eq!(listen_state(&ListenState::Listening { local }), control::ListenState::Listening { local });
         assert_eq!(
             listen_state(&ListenState::PortInUse { reason: "in use".into() }),
-            control::ListenState::PortInUse { detail: "in use".into() }
+            control::ListenState::PortInUse { detail: "in use".into(), cause: Some(BindCause::AddressInUse) }
         );
         assert_eq!(listen_state(&ListenState::Virtual), control::ListenState::Virtual);
         assert_eq!(
             listen_state(&ListenState::Unsupported { reason: "UDP".into() }),
-            control::ListenState::Unsupported { detail: "UDP".into() }
+            control::ListenState::Unsupported { detail: "UDP".into(), cause: Some(BindCause::VirtualPortZero) }
         );
+    }
+
+    #[test]
+    fn a_bind_failure_is_classified_from_the_system_error_it_carries() {
+        // 真的去绑一个绑不上的地址，拿系统给的原话：这样错误号是这个平台的。
+        let elsewhere = std::net::TcpListener::bind("192.0.2.1:0").unwrap_err().to_string();
+        assert_eq!(bind_cause(&elsewhere), BindCause::AddressNotAvailable, "{elsewhere}");
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let again = std::net::TcpListener::bind(taken.local_addr().unwrap()).unwrap_err().to_string();
+        assert_eq!(bind_cause(&again), BindCause::AddressInUse, "{again}");
+        if cfg!(unix) {
+            // 13 是 Unix 上的 EACCES：普通用户绑 1024 以下的端口时就是它。
+            let denied = io::Error::from_raw_os_error(13).to_string();
+            assert_eq!(bind_cause(&denied), BindCause::PermissionDenied, "{denied}");
+        }
+        assert_eq!(bind_cause("没有这个地址"), BindCause::Other, "说不出错误号的");
+        let failed = listen_state(&ListenState::Failed { reason: elsewhere.clone() });
+        assert_eq!(failed, control::ListenState::Failed { detail: elsewhere, cause: Some(BindCause::AddressNotAvailable) });
     }
 }

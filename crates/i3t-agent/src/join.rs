@@ -1,6 +1,6 @@
 //! 加入网络：`i3t join` 做的事。
 
-use anyhow::Context;
+use anyhow::anyhow;
 use i3t_model::Netmap;
 use i3t_model::control::{EnrollToken, Hello, PROTOCOL_REVISION};
 
@@ -26,7 +26,8 @@ pub struct JoinOptions {
 ///
 /// 令牌不对、状态目录写不了、连不上 controller 或者 controller 拒绝。
 pub async fn join(state: &StateDir, token: &str, options: JoinOptions, program: &Program) -> anyhow::Result<Netmap> {
-    let token: EnrollToken = token.parse().context("这不是一个注册令牌。令牌以 i3t- 开头，在 WebUI 的“添加节点”里生成")?;
+    // 令牌解析的细节（模型里的原话）对使用者没有用：说清楚它不是令牌、令牌从哪里来就够了。
+    let token: EnrollToken = token.parse().map_err(|_| anyhow!(crate::texts::texts().not_a_token))?;
     let key = state.key_or_generate()?;
 
     let config_path = state.config_path();
@@ -127,7 +128,7 @@ mod tests {
         tokio::spawn(async move {
             let (mut stream, _) = controller.accept().await;
             let _: ToController = expect(&mut stream).await;
-            write_message(&mut stream, &ToNode::Rejected { reason: "令牌过期".into() }).await.unwrap();
+            write_message(&mut stream, &ToNode::Rejected { reason: "令牌过期".into(), cause: None }).await.unwrap();
         });
         let dir = tempfile::tempdir().unwrap();
         let state = StateDir::open(dir.path()).unwrap();

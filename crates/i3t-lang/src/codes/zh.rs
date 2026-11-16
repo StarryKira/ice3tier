@@ -1,0 +1,461 @@
+//! 控制面的代码的中文写法。
+
+use i3t_model::admin::diag::{CellState, ItemState, MatrixState, TestState};
+use i3t_model::admin::{
+    ApiError, CredentialState, ExitHealth, ForwardStatus, LaneBlock, PackageState, PathSource, ReachCause, ReleaseCause, SkipCause,
+    TokenState, UpdateWait,
+};
+use i3t_model::control::diag::{ChoiceCode, HopSource, PathPick, TestCode, TransferEnd};
+use i3t_model::control::{BindCause, DirectKind, LegTransport, ListenState, RejectCause, RelayState, Route, RouteCause, RouteHint};
+use i3t_model::update::{FailureKind, SelfUpdateBlocker, UpdateCause, UpdateStatus};
+
+use super::{Codes, Names, cost_ms, relays};
+
+pub(super) static CODES: Codes = Codes {
+    route,
+    route_cause,
+    route_hint,
+    direct_kind,
+    leg,
+    relay_state,
+    listen_state,
+    bind_cause,
+    update_status,
+    update_cause,
+    blocker,
+    update_wait,
+    release_cause,
+    package_state,
+    skip_cause,
+    reach_cause,
+    reject_cause,
+    api_error,
+    lane_block,
+    forward_status,
+    token_state,
+    credential_state,
+    exit_health,
+    path_source,
+    test_code,
+    test_state,
+    item_state,
+    matrix_state,
+    cell_state,
+    choice,
+    hop_source,
+    path_pick,
+    transfer_end,
+};
+
+fn route(route: &Route, names: Names<'_>) -> String {
+    match route {
+        Route::None => "不可达".to_owned(),
+        Route::Direct { addr } => format!("直连 {addr}"),
+        Route::Relay { relays: path } => format!("经 {}", relays(path, names)),
+    }
+}
+
+fn route_cause(cause: &RouteCause, names: Names<'_>) -> String {
+    let cost = |cost_us: Option<u64>| cost_us.map(|cost| format!("，代价 {} ms", cost_ms(cost))).unwrap_or_default();
+    match cause {
+        RouteCause::NoRouteYet => "还没有路".to_owned(),
+        RouteCause::TestPinned => "主动测试暂时固定了这条路".to_owned(),
+        RouteCause::TestEnded => "主动测试结束，回到选路规则选的路".to_owned(),
+        RouteCause::DirectVerified => "直连验证通过".to_owned(),
+        RouteCause::DirectLost { hint } => format!("{}，退回 relay", route_hint(*hint)),
+        RouteCause::RelayReady => "中转会话可用".to_owned(),
+        RouteCause::LegChanged { transport: Some(transport) } => format!("到 relay 的会话改走 {}", leg(*transport)),
+        RouteCause::LegChanged { transport: None } => "改经本节点自己的 relay".to_owned(),
+        RouteCause::RelayChanged { hint, previous } => format!("{}，原来经 {}", route_hint(*hint), relays(previous, names)),
+        RouteCause::Unreachable { hint } => route_hint(*hint).to_owned(),
+        RouteCause::PeerRemoved => "对端不在本节点的配置里了".to_owned(),
+        RouteCause::Lan => "同一个局域网，直连优先".to_owned(),
+        RouteCause::LowestCost { candidates, cost_us } => format!("{candidates} 条候选里代价最低{}", cost(*cost_us)),
+        RouteCause::Failover { hint, candidates, cost_us } => {
+            format!("{}，立刻换到 {candidates} 条候选里代价最低的{}", route_hint(*hint), cost(*cost_us))
+        }
+        RouteCause::Cheaper { previous, previous_cost_us, cost_us, windows } => format!(
+            "连续 {windows} 个评估窗口比原来的{}便宜：{} ms，原来 {} ms",
+            route(previous, names),
+            cost_ms(*cost_us),
+            cost_ms(*previous_cost_us)
+        ),
+        RouteCause::Unknown => "原因未知".to_owned(),
+    }
+}
+
+const fn route_hint(hint: RouteHint) -> &'static str {
+    match hint {
+        RouteHint::DirectTimeouts => "直连探测连续超时",
+        RouteHint::DirectLoss => "直连丢包超过 20%",
+        RouteHint::DirectStale => "直连地址过期",
+        RouteHint::DirectUnavailable => "直连不可用",
+        RouteHint::RelayDraining => "relay 即将下线",
+        RouteHint::RelayOverloaded => "relay 过载",
+        RouteHint::RelayPathBroken => "多级路径走不通",
+        RouteHint::PeerNotAttached => "对端没有挂靠这个 relay",
+        RouteHint::PathProbeSilent => "多级路径的探测没有回音",
+        RouteHint::PreferredRelayReady => "对端优先的 relay 可用了",
+        RouteHint::Shortcut => "有了不绕路的中转会话",
+        RouteHint::RelayUnavailable => "原来的 relay 不可用",
+        RouteHint::RelayLost => "中转会话断开",
+        RouteHint::RouteFailed => "原来的路不可用",
+        RouteHint::NoPath => "没有可用的路",
+        RouteHint::Unknown => "原因未知",
+    }
+}
+
+const fn direct_kind(kind: DirectKind) -> &'static str {
+    match kind {
+        DirectKind::Lan => "局域网",
+        DirectKind::Ipv6 => "IPv6",
+        DirectKind::Reachable => "地址可达",
+        DirectKind::Punched => "打洞",
+        DirectKind::Unknown => "未知",
+    }
+}
+
+const fn leg(transport: LegTransport) -> &'static str {
+    match transport {
+        LegTransport::Udp => "UDP",
+        LegTransport::Tcp => "TCP",
+        LegTransport::Unknown => "未知",
+    }
+}
+
+const fn relay_state(state: RelayState) -> &'static str {
+    match state {
+        RelayState::Serving => "正常",
+        RelayState::Overloaded => "过载",
+        RelayState::Draining => "即将下线",
+        RelayState::Unknown => "未知",
+    }
+}
+
+fn listen_state(state: &ListenState) -> String {
+    let failed = |detail: &str, cause: Option<BindCause>| match cause {
+        Some(cause) => bind_cause(cause).to_owned(),
+        None => format!("没有绑上：{detail}"),
+    };
+    match state {
+        ListenState::Listening { local } => format!("监听在 {local}"),
+        ListenState::PortInUse { .. } => bind_cause(BindCause::AddressInUse).to_owned(),
+        ListenState::Failed { detail, cause } | ListenState::Unsupported { detail, cause } => failed(detail, *cause),
+        ListenState::Virtual => "在虚拟 IP 上".to_owned(),
+        ListenState::Unknown => "未知".to_owned(),
+    }
+}
+
+const fn bind_cause(cause: BindCause) -> &'static str {
+    match cause {
+        BindCause::AddressInUse => "端口被占用",
+        BindCause::PermissionDenied => "没有权限",
+        BindCause::AddressNotAvailable => "地址不在这台机器上",
+        BindCause::VirtualPortZero => "虚拟 IP 上要写明端口",
+        BindCause::Other => "没有绑上",
+        BindCause::Unknown => "原因未知",
+    }
+}
+
+fn update_status(status: &UpdateStatus) -> String {
+    match status {
+        UpdateStatus::Idle => "没有在更新".to_owned(),
+        UpdateStatus::Downloading { version, received, total } => format!("正在下载 {version}（{received}/{total} 字节）"),
+        UpdateStatus::Verifying { version } => format!("正在核对 {version}"),
+        UpdateStatus::SelfCheck { version } => format!("正在自检 {version}"),
+        UpdateStatus::WaitingForIdle { version } => format!("{version} 已就绪，等待空闲"),
+        UpdateStatus::Draining { version } => format!("{version} 已就绪，正在排空"),
+        UpdateStatus::Installing { version } => format!("正在安装 {version}"),
+        UpdateStatus::Restarting { version } => format!("正在重启到 {version}"),
+        UpdateStatus::Confirmed { version } => format!("已更新到 {version}"),
+        UpdateStatus::Failed { version, kind, reason, cause } => {
+            let version = version.as_ref().map_or_else(|| "新版本".to_owned(), ToString::to_string);
+            let why = cause.as_ref().map_or_else(|| reason.clone(), update_cause);
+            let kind = match kind {
+                FailureKind::VersionRejected => "这个版本不再自动重试",
+                FailureKind::NotInstalled => "以后会再试",
+            };
+            format!("更新到 {version} 失败：{why}（{kind}）")
+        }
+        UpdateStatus::Unknown => "未知".to_owned(),
+    }
+}
+
+fn update_cause(cause: &UpdateCause) -> String {
+    match cause {
+        UpdateCause::BadSignature => "清单的签名不对".to_owned(),
+        UpdateCause::BadManifest => "清单读不懂".to_owned(),
+        UpdateCause::CannotSelfUpdate { blocker: why } => blocker(*why).to_owned(),
+        UpdateCause::NotNewer { offered, running } => format!("{offered} 不比正在运行的 {running} 新"),
+        UpdateCause::Prerelease { offered, .. } => format!("{offered} 是预发布版"),
+        UpdateCause::FailedBefore { version } => format!("{version} 在这台机器上失败过"),
+        UpdateCause::NoPackage { version, platform } => format!("{version} 没有 {platform} 的包"),
+        UpdateCause::RestartPending { installed } => format!("已换上 {installed}，等待重启"),
+        UpdateCause::Unavailable { detail } => format!("取不到包：{detail}"),
+        UpdateCause::Corrupt { expected_size, actual_size } => {
+            format!("包和清单对不上（{actual_size} 字节，应为 {expected_size} 字节）")
+        }
+        UpdateCause::SelfCheck { exit_code: Some(code), output } => format!("自检没有通过（退出码 {code}）：{output}"),
+        UpdateCause::SelfCheck { exit_code: None, output } => format!("自检没有通过：{output}"),
+        UpdateCause::Cancelled => "等不到换程序的时机".to_owned(),
+        UpdateCause::Io { path, error } => format!("读写 {path} 失败：{error}"),
+        UpdateCause::StateUnreadable { path } => format!("更新状态文件 {path} 读不懂"),
+        UpdateCause::NotConfirmed { minutes } => format!("新程序 {minutes} 分钟内没有连上 controller，已换回"),
+        UpdateCause::StartsUnconfirmed { starts } => format!("新程序启动 {starts} 次都没有连上 controller，已换回"),
+        UpdateCause::Unknown => "原因未知".to_owned(),
+    }
+}
+
+const fn blocker(blocker: SelfUpdateBlocker) -> &'static str {
+    match blocker {
+        SelfUpdateBlocker::Container => "在容器里运行，换镜像来更新",
+        SelfUpdateBlocker::PackageManager => "由包管理器安装，用包管理器更新",
+        SelfUpdateBlocker::ReadOnlyDir => "程序目录不可写",
+    }
+}
+
+const fn update_wait(wait: UpdateWait) -> &'static str {
+    match wait {
+        UpdateWait::Package => "等待下载包",
+        UpdateWait::RelayTurn => "等待前一个 relay 更新完",
+        UpdateWait::Unknown => "等待中",
+    }
+}
+
+fn release_cause(cause: &ReleaseCause) -> String {
+    match cause {
+        ReleaseCause::InvalidSource => "发布源的写法不对".to_owned(),
+        ReleaseCause::FetchFailed { url, error } => format!("取不到 {url}：{error}"),
+        ReleaseCause::Io { path, error } => format!("读写 {path} 失败：{error}"),
+        ReleaseCause::BadSignatureFile => "签名文件不是一个签名".to_owned(),
+        ReleaseCause::BadSignature => "清单的签名不对".to_owned(),
+        ReleaseCause::BadManifest => "清单读不懂".to_owned(),
+        ReleaseCause::Prerelease { version } => format!("最新的 {version} 是预发布版，不取"),
+        ReleaseCause::BadFileName { file } => format!("文件名不对：{file}"),
+        ReleaseCause::Mismatch { file, expected_size, actual_size } => {
+            format!("{file} 和清单对不上（{actual_size} 字节，应为 {expected_size} 字节）")
+        }
+        ReleaseCause::Internal => "controller 内部出错".to_owned(),
+        ReleaseCause::Unknown => "原因未知".to_owned(),
+    }
+}
+
+const fn package_state(state: PackageState) -> &'static str {
+    match state {
+        PackageState::NotNeeded => "不需要",
+        PackageState::Fetching => "正在下载",
+        PackageState::Cached => "已下载",
+        PackageState::Failed => "下载失败",
+        PackageState::Unknown => "未知",
+    }
+}
+
+fn skip_cause(cause: &SkipCause) -> String {
+    match cause {
+        SkipCause::Offline => "离线".to_owned(),
+        SkipCause::TooOld => "版本太旧，不能自己更新".to_owned(),
+        SkipCause::CannotSelfUpdate { blocker: Some(why) } => blocker(*why).to_owned(),
+        SkipCause::CannotSelfUpdate { blocker: None } => "不能自己更新".to_owned(),
+        SkipCause::NoRelease => "还没有查到发布".to_owned(),
+        SkipCause::ControllerTooOld { min_controller, .. } => format!("要先把 controller 更新到 {min_controller}"),
+        SkipCause::UnreadableVersion { version } => format!("版本号看不懂：{version}"),
+        SkipCause::UpToDate { running, .. } => format!("已是最新（{running}）"),
+        SkipCause::NoPackage { platform, .. } => format!("没有 {platform} 的包"),
+        SkipCause::Unknown => "原因未知".to_owned(),
+    }
+}
+
+const fn reach_cause(cause: ReachCause) -> &'static str {
+    match cause {
+        ReachCause::Refused => "连接被拒绝",
+        ReachCause::Timeout => "超时",
+        ReachCause::Unreachable => "网络不通",
+        ReachCause::Local => "controller 这边出错",
+        ReachCause::Other => "连不上",
+        ReachCause::Unknown => "原因未知",
+    }
+}
+
+const fn reject_cause(cause: RejectCause) -> &'static str {
+    match cause {
+        RejectCause::BadToken => "注册令牌无效：不存在、已经用过或者已经过期",
+        RejectCause::UnknownKey => "这把公钥没有注册，节点可能已被删除，要重新加入",
+        RejectCause::KeyAlreadyEnrolled => "这把公钥已经注册过",
+        RejectCause::PredecessorOnline => "要继任的节点还在线",
+        RejectCause::AddressUnavailable => "令牌预设的虚拟 IP 现在不能用",
+        RejectCause::RangeExhausted => "地址段里没有空闲的地址了",
+        RejectCause::UnexpectedFirstMessage => "连接上的第一条消息不对",
+        RejectCause::Unknown => "原因未知",
+    }
+}
+
+/// controller 的原话本来就是中文，并且比按代码拼出来的说得细。
+fn api_error(error: &ApiError) -> String {
+    error.message.clone()
+}
+
+fn lane_block(block: &LaneBlock, names: Names<'_>) -> String {
+    match block {
+        LaneBlock::NoRelay => "两个节点都没有启用 relay".to_owned(),
+        LaneBlock::NoTcpAddress { node } => format!("{} 没有 TCP 地址", names(*node)),
+        LaneBlock::NodeTooOld { node } => format!("{} 的版本太旧", names(*node)),
+        LaneBlock::NotConnected => "访问规则没有连通这两个节点".to_owned(),
+    }
+}
+
+const fn forward_status(status: ForwardStatus) -> &'static str {
+    match status {
+        ForwardStatus::TargetNotDeclared => "目标没有声明",
+        ForwardStatus::Disabled => "已停用",
+        ForwardStatus::AccessDenied => "访问规则不允许",
+        ForwardStatus::ListenerOffline => "监听节点离线",
+        ForwardStatus::TargetOffline => "目标节点离线",
+        ForwardStatus::Active => "生效",
+    }
+}
+
+const fn token_state(state: TokenState) -> &'static str {
+    match state {
+        TokenState::Pending => "未使用",
+        TokenState::Used => "已使用",
+        TokenState::Expired => "已过期",
+        TokenState::Unknown => "未知",
+    }
+}
+
+const fn credential_state(state: CredentialState) -> &'static str {
+    match state {
+        CredentialState::Active => "可用",
+        CredentialState::Exhausted => "流量用完",
+        CredentialState::Revoked => "已吊销",
+        CredentialState::Unknown => "未知",
+    }
+}
+
+const fn exit_health(health: ExitHealth) -> &'static str {
+    match health {
+        ExitHealth::Ok => "正常",
+        ExitHealth::Degraded => "异常",
+        ExitHealth::Unknown => "未知",
+    }
+}
+
+const fn path_source(source: PathSource) -> &'static str {
+    match source {
+        PathSource::Query => "现问",
+        PathSource::Report => "上报",
+        PathSource::None => "没有数据",
+        PathSource::NotPeers => "不连通",
+        PathSource::Unknown => "未知",
+    }
+}
+
+const fn test_code(code: TestCode) -> &'static str {
+    match code {
+        TestCode::NotSupported => "版本太旧，不支持主动测试",
+        TestCode::NodeOffline => "离线",
+        TestCode::NotConnected => "访问规则没有连通",
+        TestCode::RelayOnly => "只经 relay，不测直连",
+        TestCode::DirectOnly => "只直连，不测 relay",
+        TestCode::ThroughputOff => "关掉了吞吐测试",
+        TestCode::NoRelay => "没有可用的 relay 路径",
+        TestCode::NoDirect => "没有可用的直连",
+        TestCode::NoCandidates => "没有对端的候选地址",
+        TestCode::UdpBlocked => "UDP 不通",
+        TestCode::MappingVaries => "端口映射随对端变化，打不了洞",
+        TestCode::DialOutOnly => "两个节点都只拨出",
+        TestCode::Timeout => "超时",
+        TestCode::Unreachable => "路径走不通",
+        TestCode::Refused => "对端拒绝了测量",
+        TestCode::Busy => "节点正忙",
+        TestCode::TooSoon => "刚测过",
+        TestCode::Cancelled => "已取消",
+        TestCode::NoReport => "没有按时报告结果",
+        TestCode::StreamFailed => "测量中途断开",
+        TestCode::InvalidPath => "路径不能用",
+        TestCode::Internal => "内部出错",
+        TestCode::Unknown => "原因未知",
+    }
+}
+
+const fn test_state(state: TestState) -> &'static str {
+    match state {
+        TestState::Running => "进行中",
+        TestState::Done => "完成",
+        TestState::Failed => "失败",
+        TestState::Cancelled => "已取消",
+        TestState::Unknown => "未知",
+    }
+}
+
+const fn item_state(state: ItemState) -> &'static str {
+    match state {
+        ItemState::Pending => "等待",
+        ItemState::Done => "完成",
+        ItemState::Skipped => "跳过",
+        ItemState::Failed => "失败",
+        ItemState::Unknown => "未知",
+    }
+}
+
+const fn matrix_state(state: MatrixState) -> &'static str {
+    match state {
+        MatrixState::Running => "进行中",
+        MatrixState::Done => "完成",
+        MatrixState::Cancelled => "已取消",
+        MatrixState::Unknown => "未知",
+    }
+}
+
+const fn cell_state(state: CellState) -> &'static str {
+    match state {
+        CellState::Pending => "等待",
+        CellState::Running => "进行中",
+        CellState::Done => "完成",
+        CellState::Skipped => "跳过",
+        CellState::Failed => "失败",
+        CellState::Cancelled => "已取消",
+        CellState::Unknown => "未知",
+    }
+}
+
+const fn choice(code: ChoiceCode) -> &'static str {
+    match code {
+        ChoiceCode::Lan => "局域网直连优先",
+        ChoiceCode::Direct => "直连可用",
+        ChoiceCode::PeerIsRelay => "对端是 relay",
+        ChoiceCode::OwnRelay => "对端挂靠本节点",
+        ChoiceCode::PeerRelay => "对端挂靠的 relay",
+        ChoiceCode::LowestCost => "代价最低",
+        ChoiceCode::NoPath => "没有路",
+        ChoiceCode::Unknown => "未知",
+    }
+}
+
+const fn hop_source(source: HopSource) -> &'static str {
+    match source {
+        HopSource::Measured => "实测",
+        HopSource::Backbone => "骨干",
+        HopSource::Reported => "对端上报",
+        HopSource::Unknown => "未知",
+    }
+}
+
+const fn path_pick(pick: PathPick) -> &'static str {
+    match pick {
+        PathPick::Direct => "直连",
+        PathPick::DirectFirst => "默认",
+        PathPick::LowestCost => "延迟优先",
+        PathPick::Admin => "指定",
+        PathPick::Unknown => "未知",
+    }
+}
+
+const fn transfer_end(end: TransferEnd) -> &'static str {
+    match end {
+        TransferEnd::Finished => "传完",
+        TransferEnd::Bytes => "到字节上限",
+        TransferEnd::Time => "到时长上限",
+        TransferEnd::Unknown => "未知",
+    }
+}

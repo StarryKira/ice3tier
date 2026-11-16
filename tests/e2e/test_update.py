@@ -303,9 +303,9 @@ def forced_update(lab: Lab, work: Path, t: Checks) -> None:
     t.check("新版本的 a 和旧版本的 b 照样互通", reaches(a, url, b, b.host.ip))
 
     live = a.i3t("status").stdout
-    t.check("i3t status 显示运行中的状态", f"正在运行  i3t {new}" in live and "controller 已连上" in live and "local-socks5" in live, live[-600:])
+    t.check("i3t status 显示运行中的状态", f"正在运行 i3t {new}" in live and "已连接" in live and "local-socks5" in live, live[-600:])
     routes = a.i3t("routes")
-    t.check("i3t routes 列出到对端的路", routes.returncode == 0 and "PEER" in routes.stdout and " b " in routes.stdout, routes.stdout + routes.stderr)
+    t.check("i3t routes 列出到对端的路", routes.returncode == 0 and "对端" in routes.stdout and " b " in routes.stdout, routes.stdout + routes.stderr)
     metrics = a.host.run("curl", "-sS", "--max-time", "5", "http://127.0.0.1:20333/metrics", check=False).stdout
     t.check("节点的 /metrics 有版本、连接状态和路由",
             f'i3t_info{{version="{new}"}} 1' in metrics and "i3t_controller_link_up 1" in metrics and 'i3t_peer_route{peer="b"' in metrics,

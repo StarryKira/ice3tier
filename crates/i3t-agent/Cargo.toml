@@ -15,6 +15,7 @@ i3t-conn = { path = "../i3t-conn" }
 i3t-crypto = { path = "../i3t-crypto" }
 i3t-exit = { path = "../i3t-exit" }
 i3t-flow = { path = "../i3t-flow" }
+i3t-lang = { path = "../i3t-lang" }
 i3t-lane = { path = "../i3t-lane" }
 i3t-metrics = { path = "../i3t-metrics" }
 i3t-model = { path = "../i3t-model" }

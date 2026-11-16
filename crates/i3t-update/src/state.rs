@@ -8,7 +8,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use i3t_model::update::Version;
+use i3t_model::update::{UpdateCause, Version};
 use serde::{Deserialize, Serialize};
 
 use crate::error::UpdateError;
@@ -53,6 +53,9 @@ pub struct FailedVersion {
     pub reason: String,
     /// 什么时候失败的，Unix 秒。
     pub at: u64,
+    /// `reason` 的代码。这个字段出现之前记下的失败没有。
+    #[serde(default)]
+    pub cause: Option<UpdateCause>,
 }
 
 impl State {
@@ -61,9 +64,9 @@ impl State {
     }
 
     /// 记下一次失败。同一个版本只留最近的一次。
-    pub fn record_failure(&mut self, version: Version, reason: String) {
+    pub fn record_failure(&mut self, version: Version, reason: String, cause: UpdateCause) {
         self.failed.retain(|failure| failure.version != version);
-        self.failed.push(FailedVersion { version, reason, at: now() });
+        self.failed.push(FailedVersion { version, reason, at: now(), cause: Some(cause) });
         let excess = self.failed.len().saturating_sub(MAX_FAILURES);
         self.failed.drain(..excess);
     }
@@ -137,7 +140,7 @@ mod tests {
             pending: Some(Pending { version: version("0.2.0"), previous: version("0.1.0"), starts: 2, since: 1_763_200_000 }),
             failed: Vec::new(),
         };
-        state.record_failure(version("0.1.5"), "自检没有通过".to_owned());
+        state.record_failure(version("0.1.5"), "自检没有通过".to_owned(), UpdateCause::Cancelled);
         file.save(&state).unwrap();
         assert_eq!(file.load().unwrap(), state);
         let names: Vec<_> = fs::read_dir(dir.path()).unwrap().map(|entry| entry.unwrap().file_name()).collect();
@@ -166,9 +169,9 @@ mod tests {
     #[test]
     fn each_version_has_one_failure_record_and_old_ones_are_dropped_on_success() {
         let mut state = State::default();
-        state.record_failure(version("0.2.0"), "第一次".to_owned());
-        state.record_failure(version("0.3.0"), "另一个版本".to_owned());
-        state.record_failure(version("0.2.0"), "第二次".to_owned());
+        state.record_failure(version("0.2.0"), "第一次".to_owned(), UpdateCause::Cancelled);
+        state.record_failure(version("0.3.0"), "另一个版本".to_owned(), UpdateCause::Cancelled);
+        state.record_failure(version("0.2.0"), "第二次".to_owned(), UpdateCause::Cancelled);
         assert_eq!(state.failed.len(), 2);
         assert_eq!(state.failure_of(&version("0.2.0")).unwrap().reason, "第二次");
         assert_eq!(state.failure_of(&version("0.2.1")), None);
@@ -182,7 +185,7 @@ mod tests {
     fn failure_records_are_bounded() {
         let mut state = State::default();
         for patch in 0..40 {
-            state.record_failure(Version::new(0, 1, patch), String::new());
+            state.record_failure(Version::new(0, 1, patch), String::new(), UpdateCause::Cancelled);
         }
         assert_eq!(state.failed.len(), MAX_FAILURES);
         assert_eq!(state.failed.last().unwrap().version, Version::new(0, 1, 39));

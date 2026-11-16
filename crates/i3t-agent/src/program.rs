@@ -27,7 +27,7 @@ impl Program {
     ///
     /// 系统给不出当前程序的路径。
     pub fn detect(version: Version) -> anyhow::Result<Self> {
-        let path = i3t_update::current_program().context("查不出正在运行的程序文件在哪里")?;
+        let path = i3t_update::current_program().context(crate::texts::texts().find_program)?;
         let blocker = i3t_update::self_update_blocker(&path);
         Ok(Self { version, path, blocker })
     }

@@ -17,6 +17,8 @@ use anyhow::{Context, bail, ensure};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use crate::texts::texts;
+
 const SOCKS_VERSION: u8 = 5;
 /// 用户名密码认证这个子协议自己的版本号（RFC 1929）。
 const AUTH_VERSION: u8 = 1;
@@ -53,62 +55,60 @@ impl Destination {
 
 /// 经 `proxy`（本机节点的 SOCKS5 入口）连到 `destination`，然后在它和标准输入输出之间搬数据，直到对面关闭。
 pub(crate) async fn connect(proxy: SocketAddr, destination: &Destination) -> anyhow::Result<()> {
-    let mut stream = TcpStream::connect(proxy)
-        .await
-        .with_context(|| format!("连不上本机节点的 SOCKS5 入口 {proxy}。节点在运行吗？用 i3t status 看一下"))?;
-    stream.set_nodelay(true).context("设置连接参数")?;
+    let t = &texts().ui;
+    let mut stream = TcpStream::connect(proxy).await.with_context(|| (t.socks5_unreachable)(&proxy.to_string()))?;
+    stream.set_nodelay(true).context(t.socket_options)?;
     negotiate(&mut stream, destination).await?;
     pipe(stream).await
 }
 
 /// 走完 SOCKS5 的握手：协商认证方式，（有出口时）报上用户名，发 CONNECT，读回复。
 async fn negotiate(stream: &mut (impl AsyncRead + AsyncWrite + Unpin), destination: &Destination) -> anyhow::Result<()> {
+    let t = &texts().ui;
     // 出口节点写在用户名里，所以有出口时只提用户名密码这一种方式。
     let method = if destination.via.is_some() { METHOD_PASSWORD } else { METHOD_NONE };
-    stream.write_all(&[SOCKS_VERSION, 1, method]).await.context("向本机节点发握手")?;
+    stream.write_all(&[SOCKS_VERSION, 1, method]).await.context(t.socks5_talk)?;
     let mut chosen = [0u8; 2];
-    stream.read_exact(&mut chosen).await.context("读本机节点的握手应答")?;
-    ensure!(chosen[0] == SOCKS_VERSION, "配置里的 SOCKS5 入口上答话的不是 SOCKS5 服务");
+    stream.read_exact(&mut chosen).await.context(t.socks5_talk)?;
+    ensure!(chosen[0] == SOCKS_VERSION, t.not_socks5);
     match (chosen[1], &destination.via) {
         (METHOD_NONE, None) => {}
         (METHOD_PASSWORD, Some(exit)) => authenticate(stream, exit).await?,
-        (METHOD_REFUSED, None) => {
-            bail!("这个入口要求凭据（它没有绑在回环地址上）。i3t connect 只用本机回环上的入口，请把 proxy.socks5 设成 127.0.0.1 上的地址")
-        }
-        (METHOD_REFUSED, Some(_)) => bail!("本机节点的入口不接受用用户名指定出口"),
-        (other, _) => bail!("本机节点选了一种没有提过的认证方式（{other:#04x}）"),
+        (METHOD_REFUSED, None) => bail!(t.needs_credential),
+        (METHOD_REFUSED, Some(_)) => bail!(t.no_exit_by_name),
+        (other, _) => bail!((t.unknown_method)(other)),
     }
 
-    stream.write_all(&request(destination)?).await.context("向本机节点发连接请求")?;
+    stream.write_all(&request(destination)?).await.context(t.socks5_talk)?;
     let mut head = [0u8; 4];
-    stream.read_exact(&mut head).await.context("读本机节点对连接请求的回复")?;
-    ensure!(head[0] == SOCKS_VERSION, "本机节点的回复不是 SOCKS5 的格式");
+    stream.read_exact(&mut head).await.context(t.socks5_talk)?;
+    ensure!(head[0] == SOCKS_VERSION, t.not_socks5);
     // 回复后面跟着一个绑定地址，用不上，但要读走，不然它会混进数据里。
     let bound_len = match head[3] {
         ADDR_V4 => 4,
         ADDR_V6 => 16,
-        ADDR_NAME => usize::from(stream.read_u8().await.context("读回复里的地址")?),
-        other => bail!("本机节点的回复里有不认识的地址类型（{other:#04x}）"),
+        ADDR_NAME => usize::from(stream.read_u8().await.context(t.socks5_talk)?),
+        other => bail!((t.unknown_address_type)(other)),
     };
     let mut bound = vec![0u8; bound_len + 2];
-    stream.read_exact(&mut bound).await.context("读回复里的地址")?;
+    stream.read_exact(&mut bound).await.context(t.socks5_talk)?;
     match head[1] {
         0 => Ok(()),
-        code => bail!("连不上 {}：{}", destination.describe(), refusal(code)),
+        code => bail!(i3t_lang::current().labelled(&(t.cannot_reach)(&destination.describe()), (t.refusal)(code))),
     }
 }
 
 /// 用户名密码认证：用户名是出口节点，密码留空（回环上的入口不查密码）。
 async fn authenticate(stream: &mut (impl AsyncRead + AsyncWrite + Unpin), exit: &str) -> anyhow::Result<()> {
-    let name_len =
-        u8::try_from(exit.len()).ok().filter(|len| *len > 0).with_context(|| format!("出口的名字要在 1 到 255 字节之间：{exit:?}"))?;
+    let t = &texts().ui;
+    let name_len = u8::try_from(exit.len()).ok().filter(|len| *len > 0).with_context(|| (t.name_length)(exit))?;
     let mut message = vec![AUTH_VERSION, name_len];
     message.extend_from_slice(exit.as_bytes());
     message.push(0);
-    stream.write_all(&message).await.context("向本机节点报出口")?;
+    stream.write_all(&message).await.context(t.socks5_talk)?;
     let mut answer = [0u8; 2];
-    stream.read_exact(&mut answer).await.context("读本机节点对出口的应答")?;
-    ensure!(answer[1] == 0, "本机节点不接受这个出口：{exit:?}");
+    stream.read_exact(&mut answer).await.context(t.socks5_talk)?;
+    ensure!(answer[1] == 0, (t.exit_refused)(exit));
     Ok(())
 }
 
@@ -126,10 +126,7 @@ fn request(destination: &Destination) -> anyhow::Result<Vec<u8>> {
         }
         Err(_) => {
             let name = destination.host.as_bytes();
-            let len = u8::try_from(name.len())
-                .ok()
-                .filter(|len| *len > 0)
-                .with_context(|| format!("目标的名字要在 1 到 255 字节之间：{:?}", destination.host))?;
+            let len = u8::try_from(name.len()).ok().filter(|len| *len > 0).with_context(|| (texts().ui.name_length)(&destination.host))?;
             request.push(ADDR_NAME);
             request.push(len);
             request.extend_from_slice(name);
@@ -139,26 +136,12 @@ fn request(destination: &Destination) -> anyhow::Result<Vec<u8>> {
     Ok(request)
 }
 
-/// SOCKS5 回复里的失败码是什么意思（RFC 1928 第 6 节）。节点把建流失败的原因映射到这几个码上。
-const fn refusal(code: u8) -> &'static str {
-    match code {
-        1 => "出口或者目标节点现在接不了这条连接（不可用、正在排空、连接太多或者被限速），细节见节点的日志",
-        2 => "访问规则不允许，或者达到了限额",
-        3 => "到目标的网络不通",
-        4 => "目标到不了，或者连接超时",
-        5 => "目标拒绝了连接（端口上没有服务在听）",
-        6 => "连接超时",
-        7 => "节点不支持这种请求",
-        8 => "节点不支持这种地址",
-        _ => "节点回了一个不认识的失败码",
-    }
-}
-
 impl Destination {
     fn describe(&self) -> String {
+        let target = format!("{}:{}", self.host, self.port);
         match &self.via {
-            Some(exit) => format!("{}:{}（经出口 {exit}）", self.host, self.port),
-            None => format!("{}:{}", self.host, self.port),
+            Some(exit) => (texts().ui.via_exit)(&target, exit),
+            None => target,
         }
     }
 }
@@ -179,9 +162,9 @@ async fn pipe(stream: TcpStream) -> anyhow::Result<()> {
     let mut uploading = true;
     loop {
         tokio::select! {
-            finished = &mut download => return finished.context("从对端收数据"),
+            finished = &mut download => return finished.context(texts().ui.receiving),
             finished = &mut upload, if uploading => {
-                finished.context("把标准输入发给对端")?;
+                finished.context(texts().ui.sending)?;
                 uploading = false;
             }
         }
@@ -261,26 +244,26 @@ mod tests {
         let refused = [5, 2, 0, 1, 0, 0, 0, 0, 0, 0];
         let (result, _) = talk(&to("nas", 22, None), &[&[5, 0], &refused]).await;
         let message = result.unwrap_err().to_string();
-        assert!(message.contains("nas:22") && message.contains("访问规则不允许"), "{message}");
+        assert!(message.contains("nas:22") && message.contains((texts().ui.refusal)(2)), "{message}");
 
         let unreachable = [5, 3, 0, 1, 0, 0, 0, 0, 0, 0];
         let (result, _) = talk(&to("10.0.0.9", 22, Some("home")), &[&[5, 2], &[1, 0], &unreachable]).await;
         let message = result.unwrap_err().to_string();
-        assert!(message.contains("经出口 home") && message.contains("网络不通"), "{message}");
+        assert!(message.contains(&(texts().ui.via_exit)("10.0.0.9:22", "home")) && message.contains((texts().ui.refusal)(3)), "{message}");
     }
 
     #[tokio::test]
     async fn an_entry_that_demands_credentials_is_explained() {
         let (result, _) = talk(&to("nas", 22, None), &[&[5, 0xff]]).await;
-        assert!(result.unwrap_err().to_string().contains("要求凭据"));
+        assert_eq!(result.unwrap_err().to_string(), texts().ui.needs_credential);
         let (result, _) = talk(&to("nas", 22, Some("home")), &[&[5, 2], &[1, 1]]).await;
-        assert!(result.unwrap_err().to_string().contains("不接受这个出口"));
+        assert_eq!(result.unwrap_err().to_string(), (texts().ui.exit_refused)("home"));
     }
 
     #[tokio::test]
     async fn something_that_is_not_socks5_is_recognised() {
         let (result, _) = talk(&to("nas", 22, None), &[b"HTTP/1.1 400 Bad Request\r\n"]).await;
-        assert!(result.unwrap_err().to_string().contains("不是 SOCKS5"));
+        assert_eq!(result.unwrap_err().to_string(), texts().ui.not_socks5);
     }
 
     #[test]

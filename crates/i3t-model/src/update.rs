@@ -429,7 +429,14 @@ pub enum UpdateStatus {
     /// 新程序连上了 controller，更新完成。
     Confirmed { version: Version },
     /// 更新没有成功。`version` 在连清单都没有验过时是 `null`。
-    Failed { version: Option<Version>, kind: FailureKind, reason: String },
+    Failed {
+        version: Option<Version>,
+        kind: FailureKind,
+        reason: String,
+        /// `reason` 的代码和它要用到的值。旧版本的节点不报。
+        #[serde(default)]
+        cause: Option<UpdateCause>,
+    },
     /// 比本程序新的节点报上来的、本程序不认识的状态。节点可以比 controller 新。
     #[serde(other)]
     Unknown,
@@ -445,6 +452,48 @@ pub enum FailureKind {
     /// 这个版本在这台机器上不能用：自检不通过，或者装上之后没能连上 controller、已经换回旧程序。
     /// 节点记下了这次失败，不再自动重试这个版本。
     VersionRejected,
+}
+
+/// 节点上一次更新为什么没有成功：一个代码，加上把它写成一句话要用到的值。和它在一起的 `reason` 是中文原话。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum UpdateCause {
+    /// 清单的签名不是任何一把受信任的发布公钥签的。
+    BadSignature,
+    /// 签名正确，但清单的内容读不懂。
+    BadManifest,
+    /// 节点不能自己更新。
+    CannotSelfUpdate { blocker: SelfUpdateBlocker },
+    /// 清单里的版本不比正在运行的新。
+    NotNewer { offered: Version, running: Version },
+    /// 清单里是预发布版，而正在运行的是正式版。
+    Prerelease { offered: Version, running: Version },
+    /// 这个版本在这台机器上失败过，不再自动重试。
+    FailedBefore { version: Version },
+    /// 这个版本没有这台机器的平台的包。
+    NoPackage { version: Version, platform: Platform },
+    /// 已经换上了另一个版本，在等进程重启。
+    RestartPending { installed: Version },
+    /// 从 controller 取不到包。`detail` 是 controller 或者节点给的原话。
+    Unavailable { detail: String },
+    /// 取回来的包和清单对不上。
+    Corrupt { expected_size: u64, actual_size: u64 },
+    /// 新程序的自检没有通过。`exit_code` 是它的退出码（被信号杀掉、没有运行起来或者超时时是 `null`），
+    /// `output` 是它在标准错误上最后说的话，原样。
+    SelfCheck { exit_code: Option<i32>, output: String },
+    /// 节点不再通报流的数量，等不到换程序的时机。
+    Cancelled,
+    /// 对一个文件的读写失败。`error` 是系统的原话。
+    Io { path: String, error: String },
+    /// 节点上的更新状态文件读不懂。
+    StateUnreadable { path: String },
+    /// 新程序换上去 `minutes` 分钟还没有连上 controller，已经换回旧程序。
+    NotConfirmed { minutes: u64 },
+    /// 新程序启动了 `starts` 次都没有连上 controller，已经换回旧程序。
+    StartsUnconfirmed { starts: u32 },
+    /// 比这个程序新的节点报的、这里不认识的原因。
+    #[serde(other)]
+    Unknown,
 }
 
 /// 节点不能自己更新的原因。节点在连上 controller 时上报，WebUI 标出原因和手动更新的做法。
@@ -677,10 +726,20 @@ mod tests {
             serde_json::to_value(&downloading).unwrap(),
             json!({ "state": "downloading", "version": "0.3.0", "received": 10, "total": 30 })
         );
-        let failed = UpdateStatus::Failed { version: None, kind: FailureKind::NotInstalled, reason: "签名不对".to_owned() };
+        let failed = UpdateStatus::Failed {
+            version: None,
+            kind: FailureKind::NotInstalled,
+            reason: "签名不对".to_owned(),
+            cause: Some(UpdateCause::BadSignature),
+        };
         let value = serde_json::to_value(&failed).unwrap();
-        assert_eq!(value, json!({ "state": "failed", "version": null, "kind": "not_installed", "reason": "签名不对" }));
+        assert_eq!(
+            value,
+            json!({ "state": "failed", "version": null, "kind": "not_installed", "reason": "签名不对", "cause": { "code": "bad_signature" } })
+        );
         assert_eq!(serde_json::from_value::<UpdateStatus>(value).unwrap(), failed);
+        let old = json!({ "state": "failed", "version": null, "kind": "not_installed", "reason": "签名不对" });
+        assert!(matches!(serde_json::from_value(old).unwrap(), UpdateStatus::Failed { cause: None, .. }), "旧版本的节点不报原因的代码");
         assert_eq!(serde_json::to_value(UpdateStatus::Idle).unwrap(), json!({ "state": "idle" }));
         assert_eq!(serde_json::to_value(UpdateStatus::WaitingForIdle { version: version("0.3.0") }).unwrap()["state"], "waiting_for_idle");
         assert_eq!(serde_json::to_value(UpdateStatus::SelfCheck { version: version("0.3.0") }).unwrap()["state"], "self_check");

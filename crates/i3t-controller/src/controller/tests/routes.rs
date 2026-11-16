@@ -6,7 +6,7 @@ use std::time::Duration;
 use i3t_model::admin::{NetworkId, PathSource, RelaySettings, UpdateNode};
 use i3t_model::control::{
     BackboneLink, BackboneRow, Declared, DirectKind, Hello, LegTransport, PathCandidate, PathDetail, PathSegment, RelayState, Report,
-    Route, RouteAnswer, RouteEntry, RouteKind, RouteSince, ToController,
+    Route, RouteAnswer, RouteCause, RouteEntry, RouteKind, RouteSince, ToController,
 };
 use i3t_model::netmap::RoutingMode;
 use i3t_model::update::UpdateStatus;
@@ -110,7 +110,7 @@ async fn a_path_is_asked_from_both_ends_and_falls_back_to_the_last_report() {
     b.receive();
     let (&(to_a, a_peer), &(to_b, b_peer)) = (a.queries.last().unwrap(), b.queries.last().unwrap());
     assert_eq!((a_peer, b_peer), (b.id, a.id), "每一端被问的是到对端怎么走");
-    let since = RouteSince { secs_ago: 42, reason: "直连打通了".to_owned() };
+    let since = RouteSince { secs_ago: 42, reason: "直连打通了".to_owned(), cause: Some(RouteCause::DirectVerified) };
     let answer = RouteAnswer {
         peer: b.id,
         route: Some(Route::Direct { addr: "198.51.100.9:20330".parse().unwrap() }),
@@ -229,6 +229,7 @@ async fn a_path_shows_the_candidates_the_sender_weighed_and_why_it_chose_one() {
         direct: None,
         relay_leg: Some(LegTransport::Udp),
         reason: "经 relay 代价最低".to_owned(),
+        cause: Some(RouteCause::LowestCost { candidates: 2, cost_us: Some(30_000) }),
         candidates: vec![
             candidate(chosen.clone(), 30_000, true),
             candidate(Route::Direct { addr: "198.51.100.9:20330".parse().unwrap() }, 45_000, false),
@@ -243,6 +244,7 @@ async fn a_path_shows_the_candidates_the_sender_weighed_and_why_it_chose_one() {
     let forward = &view.forward;
     assert_eq!((forward.mode, forward.relay_leg, forward.direct), (Some(RoutingMode::LowestCost), Some(LegTransport::Udp), None));
     assert_eq!(forward.reason.as_deref(), Some("经 relay 代价最低"));
+    assert_eq!(forward.cause, Some(RouteCause::LowestCost { candidates: 2, cost_us: Some(30_000) }), "原因的代码原样转给管理 API");
     let candidates = forward.candidates.as_ref().unwrap();
     assert_eq!(
         candidates.iter().map(|candidate| (candidate.cost_us, candidate.current)).collect::<Vec<_>>(),

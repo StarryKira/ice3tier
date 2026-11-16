@@ -14,6 +14,8 @@ from lab import Host, wait_until
 
 REPO = Path(__file__).resolve().parents[2]
 BIN_DIR = Path(os.environ.get("I3T_BIN_DIR", REPO / "target" / "release"))
+# 程序在终端上说的话跟着系统的语言。测试读其中的一些（多数用 --json），按中文写的，所以这里定下来：测试启动的程序都继承它。
+os.environ["I3T_LANG"] = "zh-CN"
 NETWORK = {"name": "lab", "domain": "lab.i3t", "cidr": "10.66.0.0/16"}
 
 # 一个只回答"你是从哪个地址连过来的"的 HTTP 服务。用它确认流量是从哪个节点的出口出去的。

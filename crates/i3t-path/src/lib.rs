@@ -48,7 +48,7 @@ mod timing;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use i3t_model::control::{Route, RouteEntry};
+use i3t_model::control::{Route, RouteCause, RouteEntry};
 use i3t_model::netmap::Attachment;
 use i3t_proto::NodeId;
 use i3t_proto::backbone::{Link, RelayState};
@@ -120,6 +120,8 @@ pub struct RouteChange {
     pub route: Route,
     /// 为什么换，给人看的。
     pub reason: String,
+    /// `reason` 的代码和它要用到的值。
+    pub cause: RouteCause,
 }
 
 /// 对外公布的状态，由控制任务定期刷新。

@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use i3t_model::admin::diag::{CellState, ItemState, MatrixCell, MatrixRun, MatrixState, TestItem, TestRequest, TestState, TestView};
 use i3t_model::admin::{LogRef, NetworkId, RefKind};
 use i3t_proto::NodeId;
+use serde_json::json;
 
 use super::{MIN_INTERVAL, pair};
 use crate::controller::{Controller, Inner, count, node_ref};
@@ -102,7 +103,8 @@ impl Controller {
             cells,
         };
         let detail = format!("开始全网矩阵：{} 个节点，{} 对，其中 {} 对要测", nodes.len(), run.total, pending.len());
-        inner.store.log_refs(run.started_at, Some(network), "test.matrix", &detail, &[LogRef::new(RefKind::Network, network.0)])?;
+        let params = json!({ "matrix": id, "nodes": nodes.len(), "pairs": run.total, "testing": pending.len() });
+        inner.store.log_refs(run.started_at, Some(network), "test.matrix", &detail, &[LogRef::new(RefKind::Network, network.0)], params)?;
         tracing::info!(network = %network, matrix = id, pairs = run.total, testing = pending.len(), "开始全网矩阵");
         let mut matrix = Matrix { run, started: Instant::now(), pending, running: BTreeMap::new() };
         matrix.count_finished();
@@ -148,11 +150,14 @@ impl Controller {
             inner.finish_test(test, true)?;
         }
         let now = inner.clock.now();
+        let mut id = None;
         if let Some(matrix) = inner.diag.matrices.get_mut(&network) {
             matrix.run.finished_at = Some(now);
             matrix.count_finished();
+            id = Some(matrix.run.id);
         }
-        inner.store.log_refs(now, Some(network), "test.matrix.cancel", "取消了全网矩阵", &[LogRef::new(RefKind::Network, network.0)])?;
+        let refs = [LogRef::new(RefKind::Network, network.0)];
+        inner.store.log_refs(now, Some(network), "test.matrix.cancel", "取消了全网矩阵", &refs, json!({ "matrix": id }))?;
         tracing::info!(network = %network, "取消全网矩阵");
         inner.matrix_run(network)
     }

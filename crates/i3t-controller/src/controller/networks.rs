@@ -3,10 +3,11 @@
 use i3t_model::admin::{CreateNetwork, Direction, LogRef, Network, NetworkId, RefKind, Rule, UpdateNetwork};
 use i3t_model::netmap::{Reach, RoutingMode};
 use ipnet::Ipv4Net;
+use serde_json::json;
 
 use super::{Controller, Inner, Seeds, address, naming};
 use crate::access::ALL;
-use crate::error::{Entity, Error};
+use crate::error::{Entity, Error, InField};
 use crate::store::{NetworkRecord, NewNetwork};
 
 /// 一条路径最多经过几个 relay：默认值，和协议允许的范围。
@@ -36,7 +37,7 @@ impl Controller {
     ///
     /// 名字不合法或者已经有了；地址段和别的网络重叠；没指定地址段而默认的都被占了。
     pub fn create_network(&self, request: &CreateNetwork) -> Result<Network, Error> {
-        let name = naming::label("网络", &request.name)?;
+        let name = naming::label("网络", &request.name).in_field("name")?;
         let max_relay_hops = check_max_relay_hops(request.max_relay_hops.unwrap_or(DEFAULT_MAX_RELAY_HOPS))?;
         let mut inner = self.lock();
         let now = inner.clock.now();
@@ -46,13 +47,14 @@ impl Controller {
                 return Err(Error::NameTaken(name.clone()));
             }
             let cidr = match request.cidr {
-                Some(cidr) => address::normalize(cidr)?,
+                Some(cidr) => address::normalize(cidr).in_field("cidr")?,
                 None => {
                     let taken: Vec<Ipv4Net> = existing.iter().map(|network| network.cidr).collect();
-                    address::default_range(&taken).ok_or_else(|| Error::invalid("默认的地址段都被占用了，请用 cidr 指定一个"))?
+                    address::default_range(&taken)
+                        .ok_or_else(|| Error::invalid_field("cidr", "no_default", "默认的地址段都被占用了，请用 cidr 指定一个"))?
                 }
             };
-            check_no_overlap(&existing, None, cidr)?;
+            check_no_overlap(&existing, None, cidr).in_field("cidr")?;
             let id = store.insert_network(&NewNetwork {
                 name: name.clone(),
                 cidr,
@@ -72,7 +74,8 @@ impl Controller {
             };
             store.insert_rule(id, &default_rule)?;
             let refs = [LogRef::new(RefKind::Network, id.0)];
-            store.log_refs(now, Some(id), "network.create", &format!("新建网络 {name}，地址段 {cidr}"), &refs)?;
+            let params = json!({ "network": id, "network_name": name, "cidr": cidr });
+            store.log_refs(now, Some(id), "network.create", &format!("新建网络 {name}，地址段 {cidr}"), &refs, params)?;
             Ok(id)
         })?;
         tracing::info!(network = %id, %name, "新建网络");
@@ -90,10 +93,10 @@ impl Controller {
         let updated = inner.store.atomically(|store| {
             let mut network = store.network(id)?.ok_or(Error::NotFound(Entity::Network))?;
             if let Some(cidr) = request.cidr {
-                let cidr = address::normalize(cidr)?;
-                check_no_overlap(&store.networks()?, Some(id), cidr)?;
+                let cidr = address::normalize(cidr).in_field("cidr")?;
+                check_no_overlap(&store.networks()?, Some(id), cidr).in_field("cidr")?;
                 if store.node_count(Some(id))? > 0 && !cidr.contains(&network.cidr) {
-                    return Err(Error::RangeNotSuperset(network.cidr));
+                    return Err(Error::RangeNotSuperset(network.cidr).in_field("cidr"));
                 }
                 network.cidr = cidr;
             }
@@ -105,7 +108,16 @@ impl Controller {
             network.class = request.class.unwrap_or(network.class);
             store.update_network(&network)?;
             let refs = [LogRef::new(RefKind::Network, id.0)];
-            store.log_refs(now, Some(id), "network.update", &format!("修改网络 {} 的设置", network.name), &refs)?;
+            let params = json!({
+                "network": id,
+                "network_name": network.name,
+                "cidr": network.cidr,
+                "routing": network.routing,
+                "max_relay_hops": network.max_relay_hops,
+                "reach": network.reach,
+                "class": network.class,
+            });
+            store.log_refs(now, Some(id), "network.update", &format!("修改网络 {} 的设置", network.name), &refs, params)?;
             Ok::<_, Error>(network)
         })?;
         inner.refresh(id, Seeds::All, None)?;
@@ -127,7 +139,9 @@ impl Controller {
                 return Err(Error::NetworkNotEmpty(network.name));
             }
             store.delete_network(id)?;
-            store.log_refs(now, None, "network.delete", &format!("删除网络 {}", network.name), &[LogRef::new(RefKind::Network, id.0)])?;
+            let params = json!({ "network": id, "network_name": network.name });
+            let refs = [LogRef::new(RefKind::Network, id.0)];
+            store.log_refs(now, None, "network.delete", &format!("删除网络 {}", network.name), &refs, params)?;
             tracing::info!(network = %id, name = %network.name, "删除网络");
             Ok(())
         })
@@ -155,7 +169,11 @@ fn check_max_relay_hops(hops: u8) -> Result<u8, Error> {
     if MAX_RELAY_HOPS.contains(&hops) {
         Ok(hops)
     } else {
-        Err(Error::invalid(format!("最大中转级数要在 {} 到 {} 之间", MAX_RELAY_HOPS.start(), MAX_RELAY_HOPS.end())))
+        Err(Error::invalid_field(
+            "max_relay_hops",
+            "out_of_range",
+            format!("最大中转级数要在 {} 到 {} 之间", MAX_RELAY_HOPS.start(), MAX_RELAY_HOPS.end()),
+        ))
     }
 }
 

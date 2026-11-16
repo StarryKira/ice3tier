@@ -20,7 +20,7 @@ use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use i3t_model::control::Signal;
+use i3t_model::control::{RouteHint, Signal};
 use i3t_proto::session::Nonce;
 use i3t_underlay::ifaddr;
 
@@ -105,11 +105,12 @@ pub(crate) enum DownReason {
 }
 
 impl DownReason {
-    pub(crate) const fn describe(self) -> &'static str {
+    /// 直连因此断了时，换路的起因。
+    pub(crate) const fn hint(self) -> RouteHint {
         match self {
-            Self::Timeouts => "直连探测连续超时",
-            Self::Loss => "直连探测丢失超过 20%",
-            Self::Stale => "对端不活跃，直连地址过期",
+            Self::Timeouts => RouteHint::DirectTimeouts,
+            Self::Loss => RouteHint::DirectLoss,
+            Self::Stale => RouteHint::DirectStale,
         }
     }
 }

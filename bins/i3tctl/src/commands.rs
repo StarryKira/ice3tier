@@ -5,9 +5,9 @@ use std::net::Ipv4Addr;
 use anyhow::{Context, anyhow, bail};
 use i3t_model::admin::diag::{CreateTest, MatrixRun, MatrixState, TestState, TestView};
 use i3t_model::admin::{
-    CreateCredential, CreateEnrollToken, CreateNetwork, CreateRule, Direction, ForceUpdate, Forward, ForwardInput, ListenerInput, Network,
-    NetworkId, Node, PairInput, RelaySettings, RenameTag, ResumeUpdate, Succeed, UpdateCredential, UpdateNetwork, UpdateNode, UpdateRule,
-    UpdateSettings,
+    CreateCredential, CreateEnrollToken, CreateNetwork, CreateRule, Credential, CredentialState, Direction, ForceUpdate, Forward,
+    ForwardInput, ListenerInput, Network, NetworkId, Node, PairInput, RelaySettings, RenameTag, ResumeUpdate, Succeed, UpdateCredential,
+    UpdateNetwork, UpdateNode, UpdateRule, UpdateSettings,
 };
 use i3t_model::netmap::{DefaultAction, ExitRole, ForwardProtocol, Listener, ListenerProtocol};
 use i3t_model::update::UpdateTiming;
@@ -23,9 +23,10 @@ use crate::cli::{
 };
 use crate::client::{Client, decode};
 use crate::render;
+use crate::texts::texts;
 
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
-    let token = cli.token.context("没有管理令牌。用 --token 或环境变量 I3T_ADMIN_TOKEN 给出 controller 第一次启动时打印的那个")?;
+    let token = cli.token.context(texts().ui.no_token)?;
     let session = Session { client: Client::new(&cli.url, token)?, network: cli.network, json: cli.json };
     match cli.command {
         Command::Status => session.show(session.get("/status").await?, render::status),
@@ -115,7 +116,7 @@ impl Session {
     fn show<T: DeserializeOwned>(&self, value: Value, human: impl FnOnce(&T)) -> anyhow::Result<()> {
         if self.json {
             if !value.is_null() {
-                println!("{}", serde_json::to_string_pretty(&value).context("输出 JSON")?);
+                println!("{}", serde_json::to_string_pretty(&value).expect("JSON 的值写回 JSON 不会失败"));
             }
         } else {
             human(&decode(value)?);
@@ -135,6 +136,13 @@ impl Session {
         }
     }
 
+    /// 等待时在标准错误上说一声；`--json` 时不说。
+    fn waiting(&self, message: &str) {
+        if !self.json {
+            eprintln!("{message}");
+        }
+    }
+
     /// 当前操作的网络：`--network` 指的那个；没写的话，只有一个网络时就是它。
     async fn network(&self) -> anyhow::Result<Network> {
         let networks: Vec<Network> = self.client.get("/networks").await?;
@@ -142,10 +150,10 @@ impl Session {
             Some(reference) => pick_network(networks, reference),
             None => match <[Network; 1]>::try_from(networks) {
                 Ok([only]) => Ok(only),
-                Err(networks) if networks.is_empty() => bail!("还没有网络。先用 i3tctl network create <名字> 建一个"),
+                Err(networks) if networks.is_empty() => bail!(texts().ui.no_networks_yet),
                 Err(networks) => {
-                    let names = networks.iter().map(|network| network.name.as_str()).collect::<Vec<_>>().join("、");
-                    bail!("有多个网络（{names}），用 --network 或环境变量 I3T_NETWORK 指定一个")
+                    let names = i3t_lang::current().list(networks.iter().map(|network| network.name.as_str()));
+                    bail!((texts().ui.several_networks)(&names))
                 }
             },
         }
@@ -169,9 +177,7 @@ impl Session {
         if args.no_wait {
             return self.show(self.get(&path).await?, render::test);
         }
-        if !self.json {
-            eprintln!("测试 #{} 开始了，等它做完……", started.id);
-        }
+        self.waiting(&(texts().ui.test_started)(started.id));
         let finished = self.wait(&path, |view: &TestView| view.state != TestState::Running).await?;
         self.show(finished, render::test)
     }
@@ -186,7 +192,7 @@ impl Session {
                     let (a, b) = (self.node(network, a).await?.id, self.node(network, b).await?.id);
                     query.push_str(&format!("&a={a}&b={b}"));
                 } else if a.is_some() {
-                    bail!("要看一对节点的测试时两个节点都要写");
+                    bail!(texts().ui.both_nodes);
                 }
                 self.show_list(self.get(&query).await?, render::tests)
             }
@@ -204,9 +210,7 @@ impl Session {
                 if no_wait {
                     return self.show(started, render::matrix);
                 }
-                if !self.json {
-                    eprintln!("全网矩阵开始了，等它做完……");
-                }
+                self.waiting(texts().ui.matrix_started);
                 let finished = self.wait(&path, |run: &MatrixRun| run.state != MatrixState::Running).await?;
                 self.show(finished, render::matrix)
             }
@@ -223,7 +227,7 @@ impl Session {
                 return Ok(value);
             }
             if tokio::time::Instant::now() >= deadline {
-                bail!("等了 {} 秒还没有做完，之后可以用 i3tctl tests show 再看", WAIT_LIMIT.as_secs());
+                bail!((texts().ui.wait_timeout)(WAIT_LIMIT.as_secs()));
             }
             tokio::time::sleep(POLL).await;
         }
@@ -237,7 +241,7 @@ impl Session {
         let found = nodes
             .into_iter()
             .find(|node| Some(node.id) == by_id || Some(node.virtual_ip) == by_ip || node.name.eq_ignore_ascii_case(reference));
-        found.ok_or_else(|| anyhow!("这个网络里没有节点 {reference:?}（可以写编号、名字或虚拟 IP）"))
+        found.ok_or_else(|| anyhow!((texts().ui.no_such_node)(reference)))
     }
 
     async fn network_command(&self, command: NetworkCommand) -> anyhow::Result<()> {
@@ -264,7 +268,7 @@ impl Session {
             NetworkCommand::Delete { network } => {
                 let network = pick_network(self.client.get("/networks").await?, &network)?;
                 self.delete(&format!("/networks/{}", network.id)).await?;
-                self.done(&format!("已删除网络 {}", network.name));
+                self.done(&(texts().ui.network_deleted)(&network.name));
                 Ok(())
             }
         }
@@ -312,7 +316,7 @@ impl Session {
             NodeCommand::Delete { node } => {
                 let node = self.node(network, &node).await?;
                 self.delete(&format!("{nodes}/{}", node.id)).await?;
-                self.done(&format!("已删除节点 {}（{}）。它的公钥已吊销，名字和虚拟 IP 进入冷却期", node.name, node.virtual_ip));
+                self.done(&(texts().ui.node_deleted)(&node.name));
                 Ok(())
             }
             NodeCommand::Succeed { node, predecessor } => {
@@ -344,7 +348,7 @@ impl Session {
                 let settings = RelaySettings { udp, tcp, region, bandwidth_mbps: bandwidth };
                 self.show(
                     self.send(Method::PUT, &format!("/networks/{network}/nodes/{}/relay", node.id), &settings).await?,
-                    render::node_changed,
+                    render::relay_enabled,
                 )
             }
             RelayCommand::Disable { node } => {
@@ -401,7 +405,7 @@ impl Session {
             }
             TokenCommand::Delete { id } => {
                 self.delete(&format!("{tokens}/{id}")).await?;
-                self.done(&format!("已收回注册令牌 #{id}"));
+                self.done(&(texts().ui.token_deleted)(id));
                 Ok(())
             }
         }
@@ -426,7 +430,7 @@ impl Session {
             }
             RuleCommand::Delete { id } => {
                 self.delete(&format!("{rules}/{id}")).await?;
-                self.done(&format!("已删除规则 #{id}"));
+                self.done(&(texts().ui.rule_deleted)(id));
                 Ok(())
             }
         }
@@ -450,8 +454,12 @@ impl Session {
                 self.show(self.send(Method::PATCH, &format!("{credentials}/{id}"), &request).await?, render::credential)
             }
             CredentialCommand::Delete { id } => {
+                // 第一次删是吊销，对吊销了的再删一次才是删掉：先看一眼它现在的样子，好说清楚做的是哪一种。
+                let existing: Vec<Credential> = self.client.get(&credentials).await?;
+                let revoked = existing.iter().any(|credential| credential.id == id && credential.state == CredentialState::Revoked);
                 self.delete(&format!("{credentials}/{id}")).await?;
-                self.done(&format!("已吊销凭据 #{id}（记录留着；对吊销了的再删一次就彻底删掉）"));
+                let ui = &texts().ui;
+                self.done(&if revoked { (ui.credential_deleted)(id) } else { (ui.credential_revoked)(id) });
                 Ok(())
             }
         }
@@ -486,9 +494,7 @@ impl Session {
                     Some("local") => Some(DefaultAction::Local),
                     Some("reject") => Some(DefaultAction::Reject),
                     Some(other) => {
-                        let exit = other
-                            .strip_prefix("exit:")
-                            .with_context(|| format!("--default 要写 local、reject 或 exit:<NODE>，现在是 {other:?}"))?;
+                        let exit = other.strip_prefix("exit:").with_context(|| (texts().ui.bad_default_action)(other))?;
                         Some(DefaultAction::Exit { node: self.node(network, exit).await?.id })
                     }
                 };
@@ -512,7 +518,7 @@ impl Session {
             }
             ListenerCommand::Delete { id } => {
                 self.delete(&format!("{listeners}/{id}")).await?;
-                self.done(&format!("已删除监听器 #{id}"));
+                self.done(&(texts().ui.listener_deleted)(id));
                 Ok(())
             }
         }
@@ -541,7 +547,7 @@ impl Session {
             ForwardCommand::Disable { id } => self.switch_forward(&forwards, id, false).await,
             ForwardCommand::Delete { id } => {
                 self.delete(&format!("{forwards}/{id}")).await?;
-                self.done(&format!("已删除转发 #{id}"));
+                self.done(&(texts().ui.forward_deleted)(id));
                 Ok(())
             }
         }
@@ -550,7 +556,7 @@ impl Session {
     /// 启用或停用一条转发。管理 API 只能整条替换，所以先取出来，改掉开关再放回去。
     async fn switch_forward(&self, forwards: &str, id: u32, enabled: bool) -> anyhow::Result<()> {
         let existing: Vec<Forward> = self.client.get(forwards).await?;
-        let forward = existing.into_iter().find(|forward| forward.id == id).ok_or_else(|| anyhow!("这个网络里没有转发 #{id}"))?;
+        let forward = existing.into_iter().find(|forward| forward.id == id).ok_or_else(|| anyhow!((texts().ui.no_such_forward)(id)))?;
         let input = ForwardInput {
             name: forward.name,
             protocol: forward.protocol,
@@ -578,7 +584,7 @@ impl Session {
             PairCommand::Unset { a, b } => {
                 let (a, b) = (self.node(network, &a).await?.id, self.node(network, &b).await?.id);
                 self.delete(&format!("{pairs}/{a}/{b}")).await?;
-                self.done(&format!("已去掉节点 #{a} 和 #{b} 的节点对设置"));
+                self.done(&(texts().ui.pair_unset)(a.get(), b.get()));
                 Ok(())
             }
         }
@@ -625,7 +631,7 @@ impl Session {
                 self.show(self.send(Method::POST, "/update/force", &request).await?, render::forced_updates)
             }
             UpdateCommand::Resume { version } => {
-                let version = version.parse().map_err(|error| anyhow!("{error}"))?;
+                let version = version.parse().map_err(|_| anyhow!((texts().ui.bad_version)(&version)))?;
                 self.show(self.send(Method::POST, "/update/resume", &ResumeUpdate { version }).await?, render::update_overview)
             }
         }
@@ -636,5 +642,5 @@ impl Session {
 fn pick_network(networks: Vec<Network>, reference: &str) -> anyhow::Result<Network> {
     let by_id = reference.parse::<NetworkId>().ok();
     let found = networks.into_iter().find(|network| network.name.eq_ignore_ascii_case(reference) || Some(network.id) == by_id);
-    found.ok_or_else(|| anyhow!("没有网络 {reference:?}（可以写名字或编号）"))
+    found.ok_or_else(|| anyhow!((texts().ui.no_such_network)(reference)))
 }

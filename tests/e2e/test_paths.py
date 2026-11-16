@@ -84,7 +84,7 @@ def path_candidates_and_backbone(lab: Lab, work: Path, t: Checks) -> None:
     relayed = [candidate for candidate in path["forward"]["candidates"] if candidate["route"] == {"via": "relay", "relays": [r.id]}]
     t.check("候选里有经 relay 的那条，它有两段", bool(relayed) and len(relayed[0]["legs"]) == 2, str(path["forward"]["candidates"]))
     shown = human(controller, "path", "a", "b")
-    t.check("i3tctl path 打印出候选路径", "a → b 的候选路径" in shown and "COST-MS" in shown, shown)
+    t.check("i3tctl path 打印出候选路径", "a → b 的候选路径" in shown and "代价 ms" in shown, shown)
 
     backbone = eventually(lambda: controller.ctl("backbone"), lambda view: all(relay["state"] for relay in view["relays"]))
     rows = {relay["relay"]["id"]: relay for relay in backbone["relays"]}
@@ -94,7 +94,7 @@ def path_candidates_and_backbone(lab: Lab, work: Path, t: Checks) -> None:
             and row.get("age_ms") is not None and row["age_ms"] < 120_000, str(row))
     t.check("relay 自己手上没有自己的行，这一行是挂靠它的节点给的", row.get("reported_by") in (a.id, b.id), str(row))
     t.check("回答了的节点列在 answered 里", bool(backbone["answered"]), str(backbone["answered"]))
-    t.check("i3tctl backbone 打印出这一行", "serving" in human(controller, "backbone"), human(controller, "backbone"))
+    t.check("i3tctl backbone 打印出这一行", "正常" in human(controller, "backbone"), human(controller, "backbone"))
 
     # 打洞成功之后走直连：直连的类型出现在路径和路由表里，经 relay 的那条仍然在候选里。
     direct = eventually(lambda: controller.ctl("path", str(a.id), str(b.id))["forward"],

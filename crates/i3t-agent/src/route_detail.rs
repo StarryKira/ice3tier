@@ -30,6 +30,7 @@ pub(crate) fn detail(report: &PathReport) -> PathDetail {
         direct: direct_kind(report),
         relay_leg: report.relay_leg.map(leg_transport),
         reason: report.reason.clone(),
+        cause: report.cause.clone(),
         candidates: report.candidates.iter().map(candidate).collect(),
     }
 }
@@ -139,6 +140,7 @@ mod tests {
             direct,
             relay_leg: None,
             reason: "直连代价最低".to_owned(),
+            cause: Some(control::RouteCause::Lan),
             since_switch_ms: Some(1500),
             candidates: vec![CandidateReport {
                 route: Route::Relay { relays: vec![id(9)] },
@@ -159,6 +161,7 @@ mod tests {
             (detail.mode, detail.direct, detail.reason.as_str()),
             (Some(RoutingMode::LowestCost), Some(control::DirectKind::Lan), "直连代价最低")
         );
+        assert_eq!(detail.cause, Some(control::RouteCause::Lan), "原因的代码原样上报");
         let candidate = &detail.candidates[0];
         assert_eq!((candidate.cost_us, candidate.load_percent, candidate.current), (41_250, 30, false));
         assert_eq!(candidate.legs[0], PathSegment { from: id(1), to: id(9), rtt_us: 20_400, jitter_us: 500, loss_permille: 12 });

@@ -384,6 +384,7 @@ mod tests {
             kind: FailureKind::VersionRejected,
             reason: "自检没有通过".to_owned(),
             at: 3_000,
+            cause: Some(i3t_model::update::UpdateCause::SelfCheck { exit_code: Some(1), output: "坏了".to_owned() }),
         };
         store.set_node_update_failure(id, Some(&failure)).unwrap();
 

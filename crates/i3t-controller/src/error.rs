@@ -4,20 +4,22 @@ use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
-use i3t_model::admin::{ErrorCode, Timestamp};
-use i3t_model::control::ToNode;
+use i3t_model::admin::{ErrorCode, SkipCause, Timestamp};
+use i3t_model::control::{RejectCause, ToNode};
 use ipnet::Ipv4Net;
 
 use crate::store::StoreError;
 
-/// 管理操作失败的原因。[`Error::code`] 是给程序看的分类，`Display` 是给人看的说明。
+/// 管理操作失败的原因。[`Error::code`] 是给程序看的分类，[`Error::what`]、[`Error::field`] 是更具体的一层，
+/// `Display` 是给人看的说明。
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
     #[error("没有这个{0}")]
     NotFound(Entity),
-    #[error("{0}")]
-    Invalid(String),
+    /// 请求不合法。`what` 是哪里不对的代码，取值见 `docs/admin-api.md` 第 2 节。
+    #[error("{message}")]
+    Invalid { what: &'static str, message: String },
     #[error("名字 {0} 已经被占用")]
     NameTaken(String),
     #[error("名字 {name} 属于一个刚删除的节点，还在冷却期（到 Unix 时间 {until} 为止），现在不能分给别的节点")]
@@ -40,14 +42,17 @@ pub enum Error {
     NotDeclared { node: String, capability: Capability },
     #[error("节点 {0} 还在线。只有已经下线的节点才能被继任")]
     PredecessorOnline(String),
-    #[error("{0}")]
-    Conflict(String),
+    /// 和已有的配置冲突。`with` 是挡着的东西。
+    #[error("{message}")]
+    Conflict { with: Entity, message: String },
     #[error("节点 {0} 不在线。让节点立即更新要它连着 controller")]
     NodeOffline(String),
+    /// 节点不能自己更新（[`SkipCause::TooOld`] 或 [`SkipCause::CannotSelfUpdate`]）。
     #[error("节点 {node} 不能自己更新：{reason}")]
-    CannotSelfUpdate { node: String, reason: String },
-    #[error("{0}")]
-    NoUpdate(String),
+    CannotSelfUpdate { node: String, reason: String, cause: Box<SkipCause> },
+    /// 没有可以让这个节点更新到的版本。
+    #[error("{message}")]
+    NoUpdate { message: String, cause: Box<SkipCause> },
     /// 同一对节点刚测过，或者全网矩阵刚开始过。
     #[error("{0}")]
     TooSoon(String),
@@ -84,6 +89,10 @@ pub enum Error {
     },
     #[error("网络端口出错")]
     Socket(#[source] std::io::Error),
+    /// 请求里的 `field` 这一项引起的错误。只是给 [`Error::field`] 带上字段名，别的都和 `error` 一样。
+    /// 内部错误不会被这样包起来（见 [`Error::in_field`]），所以不用往下转来由。
+    #[error("{error}")]
+    InField { field: &'static str, error: Box<Error> },
 }
 
 impl Error {
@@ -92,7 +101,7 @@ impl Error {
     pub const fn code(&self) -> ErrorCode {
         match self {
             Self::NotFound(_) => ErrorCode::NotFound,
-            Self::Invalid(_) => ErrorCode::InvalidRequest,
+            Self::Invalid { .. } => ErrorCode::InvalidRequest,
             Self::NameTaken(_) => ErrorCode::NameTaken,
             Self::NameCoolingDown { .. } => ErrorCode::NameCoolingDown,
             Self::AddressTaken(_) => ErrorCode::AddressTaken,
@@ -104,10 +113,10 @@ impl Error {
             Self::NetworkNotEmpty(_) => ErrorCode::NetworkNotEmpty,
             Self::NotDeclared { .. } => ErrorCode::NotDeclared,
             Self::PredecessorOnline(_) => ErrorCode::PredecessorOnline,
-            Self::Conflict(_) => ErrorCode::Conflict,
+            Self::Conflict { .. } => ErrorCode::Conflict,
             Self::NodeOffline(_) => ErrorCode::NodeOffline,
             Self::CannotSelfUpdate { .. } => ErrorCode::CannotSelfUpdate,
-            Self::NoUpdate(_) => ErrorCode::NoUpdate,
+            Self::NoUpdate { .. } => ErrorCode::NoUpdate,
             Self::TooSoon(_) => ErrorCode::TooSoon,
             Self::Busy(_) => ErrorCode::Busy,
             Self::Store(_)
@@ -119,11 +128,106 @@ impl Error {
             | Self::Tls(_)
             | Self::Bind { .. }
             | Self::Socket(_) => ErrorCode::Internal,
+            Self::InField { error, .. } => error.code(),
         }
     }
 
-    pub(crate) fn invalid(message: impl Into<String>) -> Self {
-        Self::Invalid(message.into())
+    /// 比 [`code`](Self::code) 更具体的一层，管理 API 的错误里的 `what`。说不出来时是 `None`。
+    ///
+    /// - `not_found`：找不到的东西（[`Entity::code`]）；
+    /// - `invalid_request`：哪里不对；
+    /// - `conflict`：挡着的东西；
+    /// - `cannot_self_update`：节点说的原因（`container` 之类），或者 `too_old`、`unknown`；
+    /// - `no_update`：[`SkipCause`] 的代码；
+    /// - `not_declared`：没有声明的能力（`relay`、`exit`、`forward`）；
+    /// - `internal`：出错的环节（`store`、`io` 之类）。日志里有细节，应答里只有这一个词。
+    #[must_use]
+    pub fn what(&self) -> Option<String> {
+        let what = match self {
+            Self::NotFound(entity) | Self::Conflict { with: entity, .. } => entity.code(),
+            Self::Invalid { what, .. } => what,
+            Self::CannotSelfUpdate { cause, .. } => match cause.as_ref() {
+                SkipCause::CannotSelfUpdate { blocker: Some(blocker) } => return cause_code(blocker),
+                SkipCause::CannotSelfUpdate { blocker: None } => "unknown",
+                cause => return cause_code(cause),
+            },
+            Self::NoUpdate { cause, .. } => return cause_code(cause.as_ref()),
+            Self::Store(_) => "store",
+            Self::Encode(_) => "encode",
+            Self::Random => "random",
+            Self::Io { .. } => "io",
+            Self::Key { .. } | Self::KeyGeneration(_) => "key",
+            Self::Tls(_) => "tls",
+            Self::Bind { .. } | Self::Socket(_) => "socket",
+            Self::InField { error, .. } => return error.what(),
+            Self::NotDeclared { capability, .. } => capability.code(),
+            Self::NameTaken(_)
+            | Self::NameCoolingDown { .. }
+            | Self::AddressTaken(_)
+            | Self::AddressCoolingDown { .. }
+            | Self::AddressOutOfRange { .. }
+            | Self::RangeOverlaps { .. }
+            | Self::RangeExhausted(_)
+            | Self::RangeNotSuperset(_)
+            | Self::NetworkNotEmpty(_)
+            | Self::PredecessorOnline(_)
+            | Self::NodeOffline(_)
+            | Self::TooSoon(_)
+            | Self::Busy(_) => return None,
+        };
+        Some(what.to_owned())
+    }
+
+    /// 请求里引起这个错误的字段，管理 API 的错误里的 `field`。
+    #[must_use]
+    pub fn field(&self) -> Option<&'static str> {
+        match self {
+            Self::InField { field, .. } => Some(field),
+            _ => None,
+        }
+    }
+
+    /// 标上这个错误是请求里的哪一项引起的。已经标过的不再改：最里面的那一层最清楚。
+    /// 内部错误不标：那不是请求的问题，而且它的来由要原样留给日志。
+    #[must_use]
+    pub fn in_field(self, field: &'static str) -> Self {
+        match self {
+            Self::InField { .. } => self,
+            error if error.code() == ErrorCode::Internal => error,
+            error => Self::InField { field, error: Box::new(error) },
+        }
+    }
+
+    pub(crate) fn invalid(what: &'static str, message: impl Into<String>) -> Self {
+        Self::Invalid { what, message: message.into() }
+    }
+
+    /// 字段 `field` 不合法。
+    pub(crate) fn invalid_field(field: &'static str, what: &'static str, message: impl Into<String>) -> Self {
+        Self::invalid(what, message).in_field(field)
+    }
+}
+
+/// 给 `Result` 用的 [`Error::in_field`]。
+pub(crate) trait InField<T> {
+    fn in_field(self, field: &'static str) -> Result<T, Error>;
+}
+
+impl<T> InField<T> for Result<T, Error> {
+    fn in_field(self, field: &'static str) -> Self {
+        self.map_err(|error| error.in_field(field))
+    }
+}
+
+/// 一个带 `code` 的原因在 JSON 里的代码，或者一个单纯的枚举值在 JSON 里的写法。代码只在模型里写一次，这里照着取。
+fn cause_code(cause: &impl serde::Serialize) -> Option<String> {
+    match serde_json::to_value(cause).ok()? {
+        serde_json::Value::String(code) => Some(code),
+        serde_json::Value::Object(mut fields) => match fields.remove("code")? {
+            serde_json::Value::String(code) => Some(code),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -145,6 +249,27 @@ pub enum Entity {
     Test,
     /// 全网矩阵。
     Matrix,
+}
+
+impl Entity {
+    /// 管理 API 的错误里 `what` 的写法。
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Network => "network",
+            Self::Node => "node",
+            Self::Token => "token",
+            Self::Rule => "rule",
+            Self::Credential => "credential",
+            Self::Listener => "listener",
+            Self::Forward => "forward",
+            Self::PairSetting => "pair",
+            Self::PausedVersion => "paused_version",
+            Self::Exit => "exit",
+            Self::Test => "test",
+            Self::Matrix => "matrix",
+        }
+    }
 }
 
 impl fmt::Display for Entity {
@@ -175,6 +300,16 @@ pub enum Capability {
 }
 
 impl Capability {
+    /// 管理 API 的错误里 `what` 的写法。
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Relay => "relay",
+            Self::Exit => "exit",
+            Self::Forward => "forward",
+        }
+    }
+
     /// 在节点上声明这项能力要执行的命令。
     #[must_use]
     pub const fn command(self) -> &'static str {
@@ -225,16 +360,17 @@ impl Rejection {
     #[must_use]
     pub fn reply(&self) -> ToNode {
         let reason = self.to_string();
-        match self {
-            Self::Internal => ToNode::TryLater { reason },
-            Self::BadToken
-            | Self::UnknownKey
-            | Self::KeyAlreadyEnrolled
-            | Self::PredecessorOnline
-            | Self::AddressUnavailable(_)
-            | Self::RangeExhausted
-            | Self::UnexpectedFirstMessage => ToNode::Rejected { reason },
-        }
+        let cause = match self {
+            Self::Internal => return ToNode::TryLater { reason },
+            Self::BadToken => RejectCause::BadToken,
+            Self::UnknownKey => RejectCause::UnknownKey,
+            Self::KeyAlreadyEnrolled => RejectCause::KeyAlreadyEnrolled,
+            Self::PredecessorOnline => RejectCause::PredecessorOnline,
+            Self::AddressUnavailable(_) => RejectCause::AddressUnavailable,
+            Self::RangeExhausted => RejectCause::RangeExhausted,
+            Self::UnexpectedFirstMessage => RejectCause::UnexpectedFirstMessage,
+        };
+        ToNode::Rejected { reason, cause: Some(cause) }
     }
 }
 
@@ -266,14 +402,42 @@ mod tests {
             let message = error.to_string();
             assert!(message.contains("nas-01") && message.contains(command), "{message}");
             assert_eq!(error.code(), ErrorCode::NotDeclared);
+            assert_eq!(error.what().as_deref(), Some(capability.code()));
         }
+    }
+
+    #[test]
+    fn an_error_names_what_was_wrong_and_which_field_caused_it() {
+        let missing = Error::NotFound(Entity::Node).in_field("pinned_relays");
+        assert_eq!(
+            (missing.code(), missing.what().as_deref(), missing.field()),
+            (ErrorCode::NotFound, Some("node"), Some("pinned_relays"))
+        );
+        assert_eq!(missing.to_string(), "没有这个节点", "字段不改原话");
+        let zero = Error::invalid_field("bandwidth_mbps", "zero", "带宽上限不能是 0").in_field("exit");
+        assert_eq!((zero.what().as_deref(), zero.field()), (Some("zero"), Some("bandwidth_mbps")), "最里面的字段算数");
+        let conflict = Error::Conflict { with: Entity::Listener, message: "x".into() };
+        assert_eq!((conflict.code(), conflict.what().as_deref()), (ErrorCode::Conflict, Some("listener")));
+        let blocked = Error::CannotSelfUpdate {
+            node: "nas".into(),
+            reason: "x".into(),
+            cause: Box::new(SkipCause::CannotSelfUpdate { blocker: Some(i3t_model::update::SelfUpdateBlocker::Container) }),
+        };
+        assert_eq!(blocked.what().as_deref(), Some("container"));
+        let too_old = Error::CannotSelfUpdate { node: "nas".into(), reason: "x".into(), cause: Box::new(SkipCause::TooOld) };
+        assert_eq!(too_old.what().as_deref(), Some("too_old"));
+        let none = Error::NoUpdate { message: "x".into(), cause: Box::new(SkipCause::NoRelease) };
+        assert_eq!(none.what().as_deref(), Some("no_release"));
+        assert_eq!(Error::Random.what().as_deref(), Some("random"));
+        assert_eq!(Error::NodeOffline("nas".into()).what(), None);
     }
 
     #[test]
     fn only_an_internal_error_tells_the_node_to_try_again_later() {
         assert!(matches!(Rejection::Internal.reply(), ToNode::TryLater { reason } if reason.contains("稍后再试")));
         for definite in [Rejection::UnknownKey, Rejection::BadToken, Rejection::KeyAlreadyEnrolled, Rejection::RangeExhausted] {
-            assert!(matches!(definite.reply(), ToNode::Rejected { .. }), "{definite:?}");
+            assert!(matches!(definite.reply(), ToNode::Rejected { cause: Some(_), .. }), "{definite:?}");
         }
+        assert!(matches!(Rejection::BadToken.reply(), ToNode::Rejected { cause: Some(RejectCause::BadToken), .. }));
     }
 }

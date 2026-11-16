@@ -8,7 +8,7 @@ use std::sync::{Mutex as StdMutex, MutexGuard};
 use std::time::Duration;
 
 use i3t_model::update::{
-    Artifact, FailureKind, Manifest, Platform, SelfUpdateBlocker, SignedManifest, UpdateStatus, UpdateTiming, Version,
+    Artifact, FailureKind, Manifest, Platform, SelfUpdateBlocker, SignedManifest, UpdateCause, UpdateStatus, UpdateTiming, Version,
 };
 use tokio::sync::{Mutex, watch};
 
@@ -209,14 +209,17 @@ impl Updater {
         }
 
         let give_up = if pending.starts >= MAX_UNCONFIRMED_STARTS {
-            Some(format!("新程序启动了 {MAX_UNCONFIRMED_STARTS} 次都没有连上 controller"))
+            Some((
+                format!("新程序启动了 {MAX_UNCONFIRMED_STARTS} 次都没有连上 controller"),
+                UpdateCause::StartsUnconfirmed { starts: MAX_UNCONFIRMED_STARTS },
+            ))
         } else if pending.age(state::now()) >= CONFIRMATION_WINDOW {
-            Some(overdue_reason())
+            Some(overdue())
         } else {
             None
         };
-        if let Some(reason) = give_up {
-            return Ok(self.roll_back(state, &pending, reason)?.map_or(Startup::Clean, Startup::RolledBack));
+        if let Some((reason, cause)) = give_up {
+            return Ok(self.roll_back(state, &pending, reason, cause)?.map_or(Startup::Clean, Startup::RolledBack));
         }
 
         let starts = pending.starts + 1;
@@ -266,7 +269,10 @@ impl Updater {
         let _transition = self.transition();
         let state = self.state.load()?;
         match self.unconfirmed(&state) {
-            Some(pending) => self.roll_back(state, &pending, overdue_reason()),
+            Some(pending) => {
+                let (reason, cause) = overdue();
+                self.roll_back(state, &pending, reason, cause)
+            }
             None => Ok(None),
         }
     }
@@ -356,14 +362,21 @@ impl Updater {
             .await
             .expect("拷贝文件的线程不会 panic：里面只有文件操作")
             .map_err(UpdateError::io("把新程序放到", &candidate))?;
-        if let Err(reason) = self_check::run_candidate(&candidate, &self.self_check_args, version, self_check::TIMEOUT).await {
+        if let Err(rejected) = self_check::run_candidate(&candidate, &self.self_check_args, version, self_check::TIMEOUT).await {
             discard(&candidate);
             discard(&package);
             let _transition = self.transition();
             let mut state = self.state.load()?;
-            state.record_failure(version.clone(), format!("自检没有通过：{reason}"));
+            let recorded = format!("自检没有通过：{}", rejected.reason);
+            let error = UpdateError::SelfCheck {
+                version: version.clone(),
+                reason: rejected.reason,
+                exit_code: rejected.exit_code,
+                output: rejected.output,
+            };
+            state.record_failure(version.clone(), recorded, error.cause());
             self.state.save(&state)?;
-            return Err(UpdateError::SelfCheck { version: version.clone(), reason });
+            return Err(error);
         }
         tracing::info!(%version, "新程序的自检通过了");
         Ok(())
@@ -475,7 +488,13 @@ impl Updater {
     }
 
     /// 换回旧程序并把新版本记为失败。备份不见了就没有东西可换，返回 `None`，继续跑现在的程序。
-    fn roll_back(&self, mut state: State, pending: &Pending, reason: String) -> Result<Option<RolledBack>, UpdateError> {
+    fn roll_back(
+        &self,
+        mut state: State,
+        pending: &Pending,
+        reason: String,
+        cause: UpdateCause,
+    ) -> Result<Option<RolledBack>, UpdateError> {
         state.pending = None;
         if !self.files.has_backup() {
             tracing::error!(version = %pending.version, %reason, "新版本没有被确认，但备份的旧程序不见了，只能继续运行新版本");
@@ -483,13 +502,14 @@ impl Updater {
             return Ok(None);
         }
         self.files.restore_backup().map_err(UpdateError::io("换回旧程序", self.files.program()))?;
-        state.record_failure(pending.version.clone(), reason.clone());
+        state.record_failure(pending.version.clone(), reason.clone(), cause.clone());
         self.state.save(&state)?;
         tracing::warn!(version = %pending.version, previous = %pending.previous, %reason, "新版本没有被确认，已经换回旧程序，需要重启");
         self.status.send_replace(UpdateStatus::Failed {
             version: Some(pending.version.clone()),
             kind: FailureKind::VersionRejected,
             reason: reason.clone(),
+            cause: Some(cause),
         });
         Ok(Some(RolledBack { failed: pending.version.clone(), reason, restart: RestartRequired { version: pending.previous.clone() } }))
     }
@@ -502,6 +522,7 @@ impl Updater {
                 version: Some(failure.version.clone()),
                 kind: FailureKind::VersionRejected,
                 reason: failure.reason.clone(),
+                cause: failure.cause.clone(),
             });
         }
     }
@@ -521,7 +542,12 @@ impl Updater {
     fn fail(&self, version: Option<&Version>, error: &UpdateError) {
         let reason = describe(error);
         tracing::warn!(version = version.map(tracing::field::display), %reason, "更新没有成功");
-        self.status.send_replace(UpdateStatus::Failed { version: version.cloned(), kind: error.kind(), reason });
+        self.status.send_replace(UpdateStatus::Failed {
+            version: version.cloned(),
+            kind: error.kind(),
+            reason,
+            cause: Some(error.cause()),
+        });
     }
 
     /// 没有待确认的更新时，把程序旁边不该再留着的文件清掉：备份，和没换上去的新程序。
@@ -553,8 +579,10 @@ fn discard(path: &Path) {
     }
 }
 
-fn overdue_reason() -> String {
-    format!("新程序换上去 {} 分钟还没有连上 controller", CONFIRMATION_WINDOW.as_secs() / 60)
+/// 新程序过了确认的期限还没有连上 controller：原因的原话和代码。
+fn overdue() -> (String, UpdateCause) {
+    let minutes = CONFIRMATION_WINDOW.as_secs() / 60;
+    (format!("新程序换上去 {minutes} 分钟还没有连上 controller"), UpdateCause::NotConfirmed { minutes })
 }
 
 #[cfg(test)]

@@ -1,188 +1,188 @@
-//! 把正在运行的节点的状态打印成给人看的样子：`i3t status` 的下半段，和 `i3t routes`。
+//! 节点的状态打印成给人看的样子：`i3t status`（本机的配置，和正在运行的节点现在的情况）与 `i3t routes`。
 
-use i3t_agent::status::{Link, LiveStatus};
-use i3t_model::control::{LaneReport, Route};
-use i3t_model::update::{FailureKind, UpdateStatus};
+use i3t_agent::config::Config;
+use i3t_agent::state::StateDir;
+use i3t_agent::status::{Link, LiveListener, LiveStatus};
+use i3t_lang::table::{Fields, Table};
+use i3t_lang::{Lang, NONE, optional};
+use i3t_model::control::{BindCause, LaneReport};
+use i3t_model::update::UpdateStatus;
+use i3t_proto::NodeId;
 
-/// 没有值的地方显示的短横。
-const NONE: &str = "-";
+use crate::texts::Ui;
+
+fn context() -> (&'static Ui, Lang) {
+    let lang = i3t_lang::current();
+    (&crate::texts::texts_in(lang).ui, lang)
+}
+
+/// 本机的配置和加入的网络：节点没有在运行时也有。
+pub fn local(state: &StateDir) -> anyhow::Result<()> {
+    let (t, lang) = context();
+    let config = Config::load(&state.config_path())?;
+    let mut fields = Fields::new(0);
+    fields.add(t.state_dir, state.path().display().to_string());
+    fields.add(t.port, config.port.to_string());
+    let declared = [(config.declare.exit, t.exit), (config.declare.relay, "relay"), (config.declare.forward, t.forward_target)];
+    fields.add(t.declared, lang.list(declared.into_iter().filter_map(|(on, name)| on.then_some(name))));
+    let (Some(controller), Some(netmap)) = (state.controller()?, state.netmap()?) else {
+        fields.print();
+        println!("{}", t.not_joined);
+        return Ok(());
+    };
+    fields.add("controller", controller.address);
+    fields.add(t.network, lang.paren(&netmap.network.name, &netmap.network.cidr.to_string()));
+    fields.add(t.node, netmap.me.name.clone());
+    fields.add(t.virtual_ip, netmap.me.virtual_ip.to_string());
+    fields.add("netmap", (t.netmap)(netmap.version, netmap.peers.len(), netmap.relays.len()));
+    fields.print();
+    Ok(())
+}
 
 pub fn status(live: &LiveStatus) {
-    println!("\n正在运行  i3t {}，已经运行 {}", live.version, duration(live.uptime_secs));
+    let (t, lang) = context();
+    println!("\n{}", (t.running)(&live.version, &lang.duration(live.uptime_secs)));
     let link = match live.link {
-        Link::Static => "静态模式，不连 controller".to_owned(),
-        Link::Online => "已连上".to_owned(),
-        Link::Offline => "没有连上，按手上的配置运行，正在重连".to_owned(),
-        Link::Revoked => "controller 吊销了这个节点".to_owned(),
-        Link::Rejected => "controller 不认这个节点，要重新加入网络".to_owned(),
-        Link::Unknown => "未知".to_owned(),
+        Link::Static => t.link_static,
+        Link::Online => t.link_online,
+        Link::Offline => t.link_offline,
+        Link::Revoked => t.link_revoked,
+        Link::Rejected => t.link_rejected,
+        Link::Unknown => t.unknown,
     };
-    println!("controller {link}");
-    println!("netmap    第 {} 版", live.netmap_version);
-    println!("活跃的流  {}", live.flows);
-    println!("候选端点  {}", list(live.endpoints.iter()));
+    let mut fields = Fields::new(0);
+    fields.add("controller", link.to_owned());
+    fields.add("netmap", (t.netmap_version)(live.netmap_version));
+    fields.add(t.flows, live.flows.to_string());
+    fields.add(t.endpoints, lang.list(&live.endpoints));
     if live.mapping_varies == Some(true) {
-        println!("  注意    这台机器所在的网络映射端口随对端变化，基本打不了洞");
+        fields.add(t.nat, t.mapping_varies.to_owned());
     }
-    println!("挂靠 relay {}", list(live.attached.iter().map(|attachment| format!("#{}({}ms)", attachment.relay, attachment.rtt_ms))));
+    fields.add(t.attached, lang.list(live.attached.iter().map(|attachment| format!("#{} {} ms", attachment.relay, attachment.rtt_ms))));
     if let Some(relay) = &live.relay {
-        println!(
-            "本机 relay {} 个会话，转发了 {} 个包（{} 字节），丢掉 {} 个",
-            relay.sessions, relay.forwarded_packets, relay.forwarded_bytes, relay.dropped
-        );
+        fields.add("relay", (t.relay_counts)(relay.sessions, relay.forwarded_packets, &lang.bytes(relay.forwarded_bytes), relay.dropped));
     }
-    println!("更新      {}", update(live));
+    fields.add(t.update, update(live));
     if live.update.draining {
-        println!("  注意    节点正在排空：新的请求一律被拒绝，手上的流照常跑完");
+        fields.add(t.state, t.draining.to_owned());
     }
     if let Some(quota) = live.exit.as_ref().and_then(|exit| exit.quota) {
-        println!("出口配额  本账期已用 {} / {} 字节", quota.used_bytes, quota.limit_bytes);
+        fields.add(t.quota, format!("{} / {}", lang.bytes(quota.used_bytes), lang.bytes(quota.limit_bytes)));
     }
+    fields.print();
 
-    println!("\n监听：");
-    if live.listeners.is_empty() {
-        println!("  （没有）");
+    println!("\n{}", t.listeners);
+    let mut table = Table::new(&t.listeners_header).indented(2);
+    for listener in &live.listeners {
+        let traffic = format!("↑ {}  ↓ {}", lang.bytes(listener.bytes_up), lang.bytes(listener.bytes_down));
+        table.row(vec![listener.name.clone(), listener.bind.to_string(), listener.active.to_string(), traffic, listen_state(listener)]);
     }
-    let rows = live.listeners.iter().map(|listener| {
-        let state = match &listener.detail {
-            Some(detail) => format!("{}（{detail}）", listener.state),
-            None => listener.state.clone(),
-        };
-        let traffic = format!("{}/{}", listener.bytes_up, listener.bytes_down);
-        vec![listener.name.clone(), listener.bind.to_string(), listener.active.to_string(), traffic, state]
-    });
-    table(&["NAME", "BIND", "ACTIVE", "UP/DOWN", "STATE"], &rows.collect::<Vec<_>>());
+    print_table(&table);
 
     if let Some(lanes) = &live.lanes {
         print_lanes(live, lanes);
     }
 
-    println!("\n路由：");
-    if live.routes.is_empty() {
-        println!("  （没有对端）");
-    }
+    println!("\n{}", t.routes);
     route_table(live);
+}
+
+fn print_table(table: &Table) {
+    let (t, _) = context();
+    if table.is_empty() { println!("  {}", t.none) } else { table.print() }
+}
+
+/// 一个监听的状态，一短句。节点报了原因的代码时按代码写，否则用系统的原话。
+fn listen_state(listener: &LiveListener) -> String {
+    let (t, lang) = context();
+    let codes = lang.codes();
+    let detail = || listener.detail.clone().unwrap_or_default();
+    match listener.state.as_str() {
+        "listening" => listener.local.map_or_else(|| t.listening.to_owned(), |local| (t.listening_on)(&local.to_string())),
+        "virtual" => t.on_virtual_ip.to_owned(),
+        "port_in_use" => (codes.bind_cause)(BindCause::AddressInUse).to_owned(),
+        "failed" | "unsupported" => {
+            listener.cause.map_or_else(|| lang.labelled(t.not_bound, &detail()), |cause| (codes.bind_cause)(cause).to_owned())
+        }
+        _ => t.unknown.to_owned(),
+    }
 }
 
 /// 独占 TCP：每个打开了它的对端一行。
 fn print_lanes(live: &LiveStatus, lanes: &LaneReport) {
-    println!("\n独占 TCP（只承载 TCP 流；和对端之间共用的连接照常在，它的路见下面的路由表）：");
+    let (t, lang) = context();
+    println!("\n{}", t.lanes);
     let name =
         |peer: u32| live.routes.iter().find(|route| route.peer == peer).map_or_else(|| format!("#{peer}"), |route| route.name.clone());
-    let rows = lanes.peers.iter().map(|peer| {
+    let mut table = Table::new(&t.lanes_header).indented(2);
+    for peer in &lanes.peers {
         let counts = &peer.counts;
-        vec![
+        table.row(vec![
             name(peer.peer.get()),
-            if peer.dials { "dial" } else { "accept" }.to_owned(),
-            if peer.control { "up" } else { "down" }.to_owned(),
+            if peer.dials { t.dial } else { t.accept }.to_owned(),
+            if peer.control { t.up } else { t.down }.to_owned(),
             format!("{}/{}/{}", peer.idle, peer.ready, peer.parked_at_peer),
             counts.in_use.to_string(),
-            format!("{}({})", counts.claims, counts.claims_waited),
+            format!("{} ({})", counts.claims, counts.claims_waited),
             counts.fallbacks.to_string(),
             counts.dial_failures.to_string(),
-            format!("{}/{}/{}", counts.sealed_bytes, counts.passthrough_bytes, counts.spliced_bytes),
-        ]
-    });
-    let header =
-        ["PEER", "ROLE", "CONTROL", "IDLE/READY/PARKED", "IN-USE", "CLAIMS(WAITED)", "FALLBACKS", "DIAL-FAIL", "SEALED/PASS/SPLICED"];
-    table(&header, &rows.collect::<Vec<_>>());
+            lang.bytes(counts.sealed_bytes + counts.passthrough_bytes + counts.spliced_bytes),
+        ]);
+    }
+    print_table(&table);
     let failures = &lanes.handshake_failures;
     let failed = failures.deadline + failures.unknown_key + failures.tls + failures.protocol + failures.busy;
     if failed > 0 {
         println!(
-            "  拨进来没握手成功 {failed} 次：超时 {}，不认识的公钥 {}，TLS {}，协议 {}，太多 {}",
-            failures.deadline, failures.unknown_key, failures.tls, failures.protocol, failures.busy
+            "  {}",
+            (t.handshake_failures)(failed, failures.deadline, failures.unknown_key, failures.tls, failures.protocol, failures.busy)
         );
     }
 }
 
 pub fn routes(live: &LiveStatus) {
+    let (t, _) = context();
     if live.routes.is_empty() {
-        println!("没有对端：这个节点的配置里没有和它有访问关系的节点。");
+        println!("{}", t.no_peers);
+        return;
     }
     route_table(live);
 }
 
 fn route_table(live: &LiveStatus) {
-    let rows = live.routes.iter().map(|entry| {
-        let (via, detail) = match &entry.route {
-            Route::None => ("none", "没有可用的路".to_owned()),
-            Route::Direct { addr } => ("direct", addr.to_string()),
-            Route::Relay { relays } => ("relay", list(relays.iter().map(|relay| format!("#{relay}")))),
-        };
-        let since =
-            entry.since.as_ref().map_or_else(|| NONE.to_owned(), |since| format!("{} 前：{}", duration(since.secs_ago), since.reason));
-        vec![
-            entry.name.clone(),
-            entry.virtual_ip.map_or_else(|| NONE.to_owned(), |ip| ip.to_string()),
-            via.to_owned(),
-            entry.rtt_ms.map_or_else(|| NONE.to_owned(), |rtt| rtt.to_string()),
-            detail,
-            since,
-        ]
-    });
-    table(&["PEER", "VIRTUAL-IP", "VIA", "RTT-MS", "DETAIL", "CHANGED"], &rows.collect::<Vec<_>>());
+    let (t, lang) = context();
+    let codes = lang.codes();
+    let name =
+        |id: NodeId| live.routes.iter().find(|route| route.peer == id.get()).map_or_else(|| format!("#{id}"), |route| route.name.clone());
+    let mut table = Table::new(&t.routes_header).indented(2);
+    for entry in &live.routes {
+        let since = entry.since.as_ref().map_or_else(
+            || NONE.to_owned(),
+            |since| {
+                let why = since.cause.as_ref().map_or_else(|| since.reason.clone(), |cause| (codes.route_cause)(cause, &name));
+                lang.labelled(&lang.ago(since.secs_ago), &why)
+            },
+        );
+        table.row(vec![entry.name.clone(), optional(entry.virtual_ip), (codes.route)(&entry.route, &name), optional(entry.rtt_ms), since]);
+    }
+    print_table(&table);
 }
 
-/// 更新的情况，一句话。
+/// 更新的情况，一短句；节点不能自己更新时说为什么。
 fn update(live: &LiveStatus) -> String {
+    let (t, lang) = context();
+    let codes = lang.codes();
     let progress = match &live.update.status {
-        UpdateStatus::Idle => "没有更新在进行".to_owned(),
-        UpdateStatus::Downloading { version, received, total } => format!("正在从 controller 取 {version} 的包（{received}/{total} 字节）"),
-        UpdateStatus::Verifying { version } => format!("正在核对 {version} 的包"),
-        UpdateStatus::SelfCheck { version } => format!("正在运行 {version} 的自检"),
-        UpdateStatus::WaitingForIdle { version } => format!("{version} 已经准备好，等没有活跃的流时换上去"),
-        UpdateStatus::Draining { version } => format!("{version} 已经准备好，正在排空：不接新的流，手上的结束之后换上去"),
-        UpdateStatus::Installing { version } => format!("正在换上 {version}"),
-        UpdateStatus::Restarting { version } => format!("已经换上 {version}，马上重启"),
-        UpdateStatus::Confirmed { version } => format!("已经更新到 {version}"),
-        UpdateStatus::Failed { version, kind, reason } => {
-            let version = version.as_ref().map_or_else(|| "新版本".to_owned(), ToString::to_string);
-            let blame = match kind {
-                FailureKind::VersionRejected => "这个版本在这台机器上不能用，不会再自动重试",
-                FailureKind::NotInstalled => "没有装成，以后会再试",
-            };
-            format!("更新到 {version} 失败（{blame}）：{reason}")
-        }
-        UpdateStatus::Unknown => "未知".to_owned(),
+        UpdateStatus::Unknown => t.unknown.to_owned(),
+        status => (codes.update_status)(status),
     };
     match live.update.self_update {
         Some(ability) if !ability.able => {
-            let why = ability.blocker.map_or_else(|| "更新的记录读不了".to_owned(), |blocker| blocker.to_string());
-            format!("{progress}。这个节点不能自己更新：{why}")
+            let why = ability.blocker.map_or(t.update_record_unreadable, codes.blocker);
+            lang.sentences(&format!("{progress}{}", t.period), &lang.labelled(t.cannot_self_update, why))
         }
         _ => progress,
     }
-}
-
-/// 一段时间写成"3 小时 12 分"这样。
-fn duration(secs: u64) -> String {
-    match (secs / 86400, secs % 86400 / 3600, secs % 3600 / 60) {
-        (0, 0, 0) => format!("{secs} 秒"),
-        (0, 0, minutes) => format!("{minutes} 分 {} 秒", secs % 60),
-        (0, hours, minutes) => format!("{hours} 小时 {minutes} 分"),
-        (days, hours, _) => format!("{days} 天 {hours} 小时"),
-    }
-}
-
-fn list<T: ToString>(values: impl IntoIterator<Item = T>) -> String {
-    let joined = values.into_iter().map(|value| value.to_string()).collect::<Vec<_>>().join("，");
-    if joined.is_empty() { NONE.to_owned() } else { joined }
-}
-
-/// 打印一张对齐的表，每行缩进两格。表头是英文：中文字符的宽度会让列对不齐，会有中文的内容放在最后几列。
-fn table(header: &[&str], rows: &[Vec<String>]) {
-    if rows.is_empty() {
-        return;
-    }
-    let width = |column: usize| rows.iter().map(|row| row[column].chars().count()).chain([header[column].len()]).max().unwrap_or(0);
-    let widths: Vec<usize> = (0..header.len()).map(width).collect();
-    let line = |cells: &mut dyn Iterator<Item = &str>| {
-        let padded = cells.zip(&widths).map(|(cell, width)| format!("{cell}{}", " ".repeat(width + 2 - cell.chars().count())));
-        println!("  {}", padded.collect::<String>().trim_end());
-    };
-    line(&mut header.iter().copied());
-    rows.iter().for_each(|row| line(&mut row.iter().map(String::as_str)));
 }
 
 #[cfg(test)]
@@ -194,21 +194,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn durations_use_the_two_largest_units() {
-        assert_eq!(duration(42), "42 秒");
-        assert_eq!(duration(192), "3 分 12 秒");
-        assert_eq!(duration(3 * 3600 + 12 * 60 + 5), "3 小时 12 分");
-        assert_eq!(duration(2 * 86400 + 5 * 3600 + 60), "2 天 5 小时");
+    fn the_update_line_says_what_is_going_on_and_why_a_node_cannot_update_itself() {
+        let (t, lang) = context();
+        let codes = lang.codes();
+        let with =
+            |status, self_update| LiveStatus { update: LiveUpdate { status, self_update, draining: false }, ..LiveStatus::default() };
+        assert_eq!(update(&with(UpdateStatus::Idle, Some(SelfUpdate::ABLE))), (codes.update_status)(&UpdateStatus::Idle));
+        let blocked = update(&with(UpdateStatus::Idle, Some(SelfUpdate::from(Some(SelfUpdateBlocker::Container)))));
+        assert!(blocked.contains(t.cannot_self_update) && blocked.contains((codes.blocker)(SelfUpdateBlocker::Container)), "{blocked}");
+        let waiting = update(&with(UpdateStatus::WaitingForIdle { version: "0.2.0".parse().unwrap() }, None));
+        assert!(waiting.contains("0.2.0"), "{waiting}");
     }
 
     #[test]
-    fn the_update_line_says_what_is_going_on_and_why_a_node_cannot_update_itself() {
-        let with =
-            |status, self_update| LiveStatus { update: LiveUpdate { status, self_update, draining: false }, ..LiveStatus::default() };
-        assert_eq!(update(&with(UpdateStatus::Idle, Some(SelfUpdate::ABLE))), "没有更新在进行");
-        let blocked = update(&with(UpdateStatus::Idle, Some(SelfUpdate::from(Some(SelfUpdateBlocker::Container)))));
-        assert!(blocked.contains("不能自己更新") && blocked.contains("容器"), "{blocked}");
-        let waiting = update(&with(UpdateStatus::WaitingForIdle { version: "0.2.0".parse().unwrap() }, None));
-        assert!(waiting.contains("0.2.0") && waiting.contains("等没有活跃的流"), "{waiting}");
+    fn listen_states_read_from_their_cause_when_the_node_gave_one() {
+        let (t, lang) = context();
+        let listener = |state: &str, cause, detail: &str| LiveListener {
+            name: "socks".into(),
+            bind: "127.0.0.1:1080".parse().unwrap(),
+            state: state.into(),
+            detail: Some(detail.into()),
+            local: None,
+            cause,
+            active: 0,
+            bytes_up: 0,
+            bytes_down: 0,
+        };
+        let denied = listen_state(&listener("failed", Some(BindCause::PermissionDenied), "Permission denied (os error 13)"));
+        assert_eq!(denied, (lang.codes().bind_cause)(BindCause::PermissionDenied));
+        let older = listen_state(&listener("failed", None, "boom"));
+        assert!(older.contains("boom") && older.contains(t.not_bound), "旧版本的节点只给原话：{older}");
     }
 }

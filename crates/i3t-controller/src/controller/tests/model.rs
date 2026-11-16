@@ -600,9 +600,114 @@ fn changes_are_written_to_the_operation_log_without_secrets() {
     assert_eq!(actions, ["network.create", "token.create", "node.enroll", "credential.create", "node.update", "node.delete"]);
     assert!(log.iter().all(|entry| entry.network == Some(network.id)));
     for entry in &log {
-        assert!(
-            !entry.detail.contains(&secret) && !entry.detail.contains(&credential.token) && !entry.detail.contains(&created.token),
-            "{entry:?}"
-        );
+        let params = serde_json::Value::Object(entry.params.clone()).to_string();
+        for text in [&entry.detail, &params] {
+            assert!(!text.contains(&secret) && !text.contains(&credential.token) && !text.contains(&created.token), "{entry:?}");
+        }
+    }
+}
+
+/// 每种操作的记录都带着按名字给出的参数，名字是当时的名字。
+#[test]
+fn every_log_entry_carries_the_named_values_its_sentence_needs() {
+    use i3t_model::admin::{CreateRule, PairInput, RenameTag, UpdateCredential, UpdateRule};
+    use serde_json::{Value, json};
+
+    let mut lab = Lab::new();
+    let network = lab.network("home");
+    let token = lab.controller.create_token(network.id, &CreateEnrollToken::default()).unwrap();
+    lab.controller.delete_token(network.id, token.info.id).unwrap();
+    let nas = lab.join_with(network.id, &["servers"], CAN_DO_ALL).id;
+    let laptop = lab.join(network.id, &[]).id;
+    rename(&lab, network.id, laptop, "laptop");
+    let rule = lab
+        .controller
+        .create_rule(
+            network.id,
+            &CreateRule { name: "ssh".into(), src: "all".into(), dst: "servers".into(), direction: Direction::Both, enabled: true },
+        )
+        .unwrap();
+    lab.controller.update_rule(network.id, rule.id, &UpdateRule { enabled: Some(false), ..UpdateRule::default() }).unwrap();
+    lab.controller.delete_rule(network.id, rule.id).unwrap();
+    lab.controller.rename_tag(network.id, &RenameTag { from: "servers".into(), to: "boxes".into() }).unwrap();
+    let credential = lab
+        .controller
+        .create_credential(network.id, &CreateCredential { name: "phone".into(), max_concurrent: Some(4), max_bytes: None })
+        .unwrap()
+        .credential;
+    let limits = UpdateCredential { max_concurrent: Some(None), reset_usage: true, ..UpdateCredential::default() };
+    lab.controller.update_credential(network.id, credential.id, &limits).unwrap();
+    lab.controller.delete_credential(network.id, credential.id).unwrap();
+    lab.controller.delete_credential(network.id, credential.id).unwrap();
+    let entry = lab.controller.create_listener(network.id, listener(laptop, "local", "127.0.0.1:1080", false)).unwrap();
+    lab.controller.replace_listener(network.id, entry.id, listener(laptop, "local", "127.0.0.1:1081", false)).unwrap();
+    lab.controller.delete_listener(network.id, entry.id).unwrap();
+    let web = lab.controller.create_forward(network.id, forward(laptop, nas)).unwrap();
+    lab.controller.replace_forward(network.id, web.id, ForwardInput { enabled: false, ..forward(laptop, nas) }).unwrap();
+    lab.controller.delete_forward(network.id, web.id).unwrap();
+    lab.controller.set_pair(network.id, nas, laptop, PairInput { keep_alive: Some(true), lane: Some(LaneMode::Always) }).unwrap();
+    lab.controller.delete_pair(network.id, laptop, nas).unwrap();
+    lab.controller.enable_relay(network.id, nas, relay_at("203.0.113.7:20330")).unwrap();
+    lab.controller.disable_relay(network.id, nas).unwrap();
+    lab.controller.enable_exit(network.id, nas, ExitRole::default()).unwrap();
+    lab.controller.disable_exit(network.id, nas).unwrap();
+    lab.controller.update_network(network.id, &UpdateNetwork { max_relay_hops: Some(3), ..UpdateNetwork::default() }).unwrap();
+    let other = lab.network("lab");
+    lab.controller.delete_network(other.id).unwrap();
+    lab.controller.delete_node(network.id, laptop).unwrap();
+
+    let log = lab.controller.oplog(200).unwrap();
+    // 最早的那一条：同一种操作有几条时（两个节点加入、两次建网）说的是先做的那个。
+    let params = |action: &str| {
+        let entry = log.iter().rev().find(|entry| entry.action == action).unwrap_or_else(|| panic!("没有 {action} 的记录"));
+        Value::Object(entry.params.clone())
+    };
+    let (nas_id, laptop_id) = (json!(nas), json!(laptop));
+    assert_eq!(params("network.create")["network_name"], "home");
+    assert_eq!(
+        (params("network.update")["network_name"].clone(), params("network.update")["max_relay_hops"].clone()),
+        (json!("home"), json!(3))
+    );
+    assert_eq!(params("network.delete"), json!({ "network": other.id, "network_name": "lab" }));
+    assert_eq!(params("token.create")["token"], json!(token.info.id));
+    assert_eq!(params("token.delete")["prefix"], json!(token.info.prefix));
+    assert_eq!(params("node.enroll")["node"], nas_id);
+    assert!(params("node.enroll")["predecessor"].is_null());
+    let update = params("node.update");
+    assert_eq!((&update["node"], &update["changes"]["name"]["to"]), (&laptop_id, &json!("laptop")));
+    assert_eq!(params("node.delete")["node_name"], "laptop");
+    let rule_created = params("rule.create");
+    assert_eq!(
+        (&rule_created["rule"], &rule_created["rule_name"], &rule_created["dst"]),
+        (&json!(rule.id), &json!("ssh"), &json!("servers"))
+    );
+    assert_eq!(params("rule.update")["enabled"], false);
+    assert_eq!(params("rule.delete")["rule"], json!(rule.id));
+    assert_eq!(params("tag.rename"), json!({ "from": "servers", "to": "boxes", "nodes": 1, "rules": 0, "tokens": 0 }));
+    assert_eq!(params("credential.create")["credential_name"], "phone");
+    let limits = params("credential.update");
+    assert_eq!((&limits["max_concurrent"], &limits["reset_usage"]), (&Value::Null, &json!(true)));
+    assert_eq!(params("credential.revoke")["credential"], json!(credential.id));
+    assert_eq!(params("credential.delete")["credential_name"], "phone");
+    let listened = params("listener.create");
+    assert_eq!(
+        (&listened["node_name"], &listened["bind"], &listened["listener_name"]),
+        (&json!("laptop"), &json!("127.0.0.1:1080"), &json!("local"))
+    );
+    assert_eq!(params("listener.update")["bind"], "127.0.0.1:1081");
+    assert_eq!(params("listener.delete")["listener"], json!(entry.id));
+    let forwarded = params("forward.create");
+    assert_eq!(
+        (&forwarded["listen_node_name"], &forwarded["target_node"], &forwarded["enabled"]),
+        (&json!("laptop"), &nas_id, &json!(true))
+    );
+    assert_eq!(params("forward.update")["enabled"], false);
+    assert_eq!(params("forward.delete")["forward"], json!(web.id));
+    let pair = params("pair.set");
+    let (a, b) = (nas.min(laptop), nas.max(laptop));
+    assert_eq!((&pair["a"], &pair["b"], &pair["lane"], &pair["keep_alive"]), (&json!(a), &json!(b), &json!("always"), &json!(true)));
+    assert_eq!(params("pair.delete")["a_name"], if a == laptop { json!("laptop") } else { params("node.enroll")["node_name"].clone() });
+    for action in ["node.relay.enable", "node.relay.disable", "node.exit.enable", "node.exit.disable"] {
+        assert_eq!(params(action)["node"], nas_id, "{action}");
     }
 }

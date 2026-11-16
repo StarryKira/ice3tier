@@ -7,9 +7,10 @@ use i3t_model::admin::{LogRef, NetworkId, Node, NodeDetail, RelaySettings, Times
 use i3t_model::control::ToNode;
 use i3t_model::netmap::ExitRole;
 use i3t_proto::NodeId;
+use serde_json::{Map, Value, json};
 
 use super::{COOLDOWN_SECS, Controller, Inner, Seeds, address, listed, naming, switch};
-use crate::error::{Capability, Entity, Error};
+use crate::error::{Capability, Entity, Error, InField};
 use crate::store::{CooldownKind, NetworkRecord, NodeRecord, Store, is_pending};
 
 /// 一个 relay 每种协议最多填几个公网地址，一个节点最多固定几个挂靠 relay。都只是防止填错。
@@ -46,6 +47,7 @@ impl Controller {
             tx_bytes: live.map_or(0, |live| live.tx_bytes),
             rx_bytes: live.map_or(0, |live| live.rx_bytes),
             lanes: live.and_then(|live| live.lanes.clone()),
+            reported_secs_ago: live.and_then(|live| live.reported_at).map(|at| at.elapsed().as_secs()),
         })
     }
 
@@ -62,16 +64,16 @@ impl Controller {
             let before = require_node(store, network.id, id)?;
             let mut node = before.clone();
             if let Some(name) = &request.name {
-                node.name = naming::label("节点", name)?;
+                node.name = naming::label("节点", name).in_field("name")?;
                 if node.name != before.name {
-                    check_node_name(store, network.id, &node.name, now)?;
+                    check_node_name(store, network.id, &node.name, now).in_field("name")?;
                 }
             }
             if let Some(tags) = &request.tags {
-                node.tags = naming::node_tags(tags)?;
+                node.tags = naming::node_tags(tags).in_field("tags")?;
             }
             if let Some(virtual_ip) = request.virtual_ip.filter(|ip| *ip != before.virtual_ip) {
-                check_address(store, &network, virtual_ip, now)?;
+                check_address(store, &network, virtual_ip, now).in_field("virtual_ip")?;
                 node.virtual_ip = virtual_ip;
             }
             if let Some(pinned) = &request.pinned_relays {
@@ -81,7 +83,8 @@ impl Controller {
             node.routing = request.routing.unwrap_or(node.routing);
             node.reach = request.reach.unwrap_or(node.reach);
             store.update_node(&node)?;
-            store.log_refs(now, Some(network.id), "node.update", &describe_update(&before, &node), &[LogRef::node(id)])?;
+            let params = update_params(&before, &node);
+            store.log_refs(now, Some(network.id), "node.update", &describe_update(&before, &node), &[LogRef::node(id)], params)?;
             Ok::<_, Error>((before, node))
         })?;
         // relay 的名字写在全网每个节点的 netmap 里；别的改动只影响 netmap 里有它的节点。
@@ -158,7 +161,8 @@ impl Controller {
             let mut node = require_node(store, network.id, id)?;
             change(&mut node)?;
             store.update_node(&node)?;
-            store.log_refs(now, Some(network.id), action, &format!("节点 {}", node.name), &[LogRef::node(id)])?;
+            let params = json!({ "node": id, "node_name": node.name });
+            store.log_refs(now, Some(network.id), action, &format!("节点 {}", node.name), &[LogRef::node(id)], params)?;
             Ok::<_, Error>(node)
         })?;
         tracing::info!(node = %id, name = %node.name, action, "修改节点的能力");
@@ -195,6 +199,7 @@ impl Controller {
                 "node.delete",
                 &format!("删除节点 {}（{}）", node.name, node.virtual_ip),
                 &[LogRef::node(id)],
+                json!({ "node": id, "node_name": node.name, "virtual_ip": node.virtual_ip }),
             )?;
             Ok::<_, Error>(node)
         })?;
@@ -218,7 +223,7 @@ impl Controller {
     /// 两个节点不都在这个网络里，或者 `predecessor` 还在线。
     pub fn succeed(&self, network: NetworkId, id: NodeId, predecessor: NodeId) -> Result<Node, Error> {
         if id == predecessor {
-            return Err(Error::invalid("节点不能继任它自己"));
+            return Err(Error::invalid_field("predecessor", "same_node", "节点不能继任它自己"));
         }
         let mut inner = self.lock();
         let network = inner.require_network(network)?;
@@ -227,9 +232,17 @@ impl Controller {
             return Err(Error::PredecessorOnline(inner.require_node(network.id, predecessor)?.name));
         }
         let node = inner.store.atomically(|store| {
-            let old = require_node(store, network.id, predecessor)?;
+            let old = require_node(store, network.id, predecessor).in_field("predecessor")?;
             let mut node = require_node(store, network.id, id)?;
             let former = format!("{}（{}）", node.name, node.virtual_ip);
+            let params = json!({
+                "node": id,
+                "node_name": node.name,
+                "virtual_ip": node.virtual_ip,
+                "predecessor": predecessor,
+                "predecessor_name": old.name,
+                "predecessor_virtual_ip": old.virtual_ip,
+            });
             store.park_node(predecessor)?;
             node.name.clone_from(&old.name);
             node.virtual_ip = old.virtual_ip;
@@ -237,7 +250,7 @@ impl Controller {
             store.update_node(&node)?;
             inherit(store, network.id, &old, &node)?;
             let detail = format!("节点 {former} 继任 {}（{}）", old.name, old.virtual_ip);
-            store.log_refs(now, Some(network.id), "node.succeed", &detail, &[LogRef::node(id), LogRef::node(predecessor)])?;
+            store.log_refs(now, Some(network.id), "node.succeed", &detail, &[LogRef::node(id), LogRef::node(predecessor)], params)?;
             Ok::<_, Error>(node)
         })?;
         tracing::info!(node = %id, %predecessor, name = %node.name, "节点继任");
@@ -343,13 +356,13 @@ fn unpin_everywhere(store: &Store, network: NetworkId, relay: NodeId) -> Result<
 
 fn check_pinned_relays(store: &Store, node: &NodeRecord, pinned: &[NodeId]) -> Result<Vec<NodeId>, Error> {
     if pinned.len() > MAX_PINNED_RELAYS {
-        return Err(Error::invalid(format!("最多固定 {MAX_PINNED_RELAYS} 个挂靠 relay")));
+        return Err(Error::invalid_field("pinned_relays", "too_many", format!("最多固定 {MAX_PINNED_RELAYS} 个挂靠 relay")));
     }
     let mut checked = Vec::with_capacity(pinned.len());
     for &relay in pinned {
-        let record = require_node(store, node.network, relay)?;
+        let record = require_node(store, node.network, relay).in_field("pinned_relays")?;
         if relay == node.id || record.relay.is_none() {
-            return Err(Error::invalid(format!("节点 {} 不是可以挂靠的 relay", record.name)));
+            return Err(Error::invalid_field("pinned_relays", "not_relay", format!("节点 {} 不是可以挂靠的 relay", record.name)));
         }
         if !checked.contains(&relay) {
             checked.push(relay);
@@ -360,34 +373,36 @@ fn check_pinned_relays(store: &Store, node: &NodeRecord, pinned: &[NodeId]) -> R
 
 fn check_relay_settings(mut settings: RelaySettings) -> Result<RelaySettings, Error> {
     if settings.udp.is_empty() && settings.tcp.is_empty() {
-        return Err(Error::invalid("relay 必须公网可达：至少填一个从公网能连上的 UDP 或 TCP 地址"));
+        return Err(Error::invalid("no_address", "relay 必须公网可达：至少填一个从公网能连上的 UDP 或 TCP 地址"));
     }
-    if settings.udp.len() > MAX_RELAY_ADDRESSES || settings.tcp.len() > MAX_RELAY_ADDRESSES {
-        return Err(Error::invalid(format!("每种协议最多填 {MAX_RELAY_ADDRESSES} 个地址")));
-    }
-    if let Some(bad) = settings.udp.iter().chain(&settings.tcp).find(|address| !is_connectable(address)) {
-        return Err(Error::invalid(format!("{bad} 不是一个能连上的地址")));
+    for (field, addresses) in [("udp", &settings.udp), ("tcp", &settings.tcp)] {
+        if addresses.len() > MAX_RELAY_ADDRESSES {
+            return Err(Error::invalid_field(field, "too_many", format!("每种协议最多填 {MAX_RELAY_ADDRESSES} 个地址")));
+        }
+        if let Some(bad) = addresses.iter().find(|address| !is_connectable(address)) {
+            return Err(Error::invalid_field(field, "not_connectable", format!("{bad} 不是一个能连上的地址")));
+        }
     }
     if settings.bandwidth_mbps == Some(0) {
-        return Err(Error::invalid("带宽上限不能是 0；不限制就不要填"));
+        return Err(Error::invalid_field("bandwidth_mbps", "zero", "带宽上限不能是 0；不限制就不要填"));
     }
-    settings.region = naming::title("区域", &settings.region, false)?;
+    settings.region = naming::title("区域", &settings.region, false).in_field("region")?;
     Ok(settings)
 }
 
 fn check_exit_settings(mut settings: ExitRole) -> Result<ExitRole, Error> {
     if let Some(ports) = &mut settings.ports {
         if ports.contains(&0) {
-            return Err(Error::invalid("端口不能是 0"));
+            return Err(Error::invalid_field("ports", "zero", "端口不能是 0"));
         }
         ports.sort_unstable();
         ports.dedup();
     }
     if settings.bandwidth_mbps == Some(0) {
-        return Err(Error::invalid("带宽上限不能是 0；不限制就不要填"));
+        return Err(Error::invalid_field("bandwidth_mbps", "zero", "带宽上限不能是 0；不限制就不要填"));
     }
     if settings.upstream_socks5.is_some_and(|address| !is_connectable(&address)) {
-        return Err(Error::invalid("上游代理的地址不是一个能连上的地址"));
+        return Err(Error::invalid_field("upstream_socks5", "not_connectable", "上游代理的地址不是一个能连上的地址"));
     }
     Ok(settings)
 }
@@ -395,6 +410,33 @@ fn check_exit_settings(mut settings: ExitRole) -> Result<ExitRole, Error> {
 /// 一个地址能不能当连接的目的地：不是全零地址，端口不是 0。
 pub(super) fn is_connectable(address: &SocketAddr) -> bool {
     !address.ip().is_unspecified() && address.port() != 0
+}
+
+/// 操作记录里的参数：节点（改之前的名字），和改了的项。没有改的项不在 `changes` 里；改名和改地址写出前后两个值。
+fn update_params(before: &NodeRecord, after: &NodeRecord) -> Value {
+    let mut changes = Map::new();
+    if before.name != after.name {
+        changes.insert("name".to_owned(), json!({ "from": before.name, "to": after.name }));
+    }
+    if before.virtual_ip != after.virtual_ip {
+        changes.insert("virtual_ip".to_owned(), json!({ "from": before.virtual_ip, "to": after.virtual_ip }));
+    }
+    if before.tags != after.tags {
+        changes.insert("tags".to_owned(), json!(after.tags));
+    }
+    if before.dial_out_only != after.dial_out_only {
+        changes.insert("dial_out_only".to_owned(), json!(after.dial_out_only));
+    }
+    if before.routing != after.routing {
+        changes.insert("routing".to_owned(), json!(after.routing));
+    }
+    if before.reach != after.reach {
+        changes.insert("reach".to_owned(), json!(after.reach));
+    }
+    if before.pinned_relays != after.pinned_relays {
+        changes.insert("pinned_relays".to_owned(), json!(after.pinned_relays));
+    }
+    json!({ "node": after.id, "node_name": before.name, "changes": changes })
 }
 
 /// 操作记录里的一句话：这次改了什么。

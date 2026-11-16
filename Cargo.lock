@@ -296,6 +296,8 @@ dependencies = [
  "anstyle",
  "clap_lex",
  "strsim",
+ "unicase",
+ "unicode-width",
 ]
 
 [[package]]
@@ -820,7 +822,10 @@ dependencies = [
  "anyhow",
  "clap",
  "i3t-agent",
+ "i3t-lang",
  "i3t-model",
+ "i3t-proto",
+ "i3t-update",
  "rlimit",
  "tokio",
  "tracing",
@@ -859,6 +864,7 @@ dependencies = [
  "i3t-exit",
  "i3t-flow",
  "i3t-lane",
+ "i3t-lang",
  "i3t-metrics",
  "i3t-model",
  "i3t-proto",
@@ -932,6 +938,7 @@ dependencies = [
  "anyhow",
  "clap",
  "i3t-controller",
+ "i3t-lang",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1006,6 +1013,16 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "i3t-lang"
+version = "0.1.4"
+dependencies = [
+ "clap",
+ "i3t-model",
+ "i3t-proto",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1168,6 +1185,7 @@ dependencies = [
  "clap",
  "i3t-controller",
  "i3t-crypto",
+ "i3t-lang",
  "i3t-model",
  "i3t-proto",
  "i3t-update",
@@ -2738,6 +2756,12 @@ name = "unicode-ident"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
+
+[[package]]
+name = "unicode-width"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 
 [[package]]
 name = "untrusted"

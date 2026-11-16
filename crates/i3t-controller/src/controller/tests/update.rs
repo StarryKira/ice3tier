@@ -11,7 +11,7 @@ use i3t_model::admin::{ErrorCode, NetworkId, PackageState, RelaySettings, Update
 use i3t_model::control::{Declared, Hello, MAX_PACKAGE_CHUNK, SelfUpdate, ToController};
 use i3t_model::update::{
     Artifact, FailureKind, LATEST_DIR, MANIFEST_FILE, Manifest, NODE_PROGRAM, Platform, SIGNATURE_FILE, SelfUpdateBlocker, Sha256,
-    UpdateStatus, UpdateTiming, Version,
+    UpdateCause, UpdateStatus, UpdateTiming, Version,
 };
 use i3t_update::{TrustedKeys, sign_manifest};
 use ring::digest;
@@ -171,7 +171,12 @@ impl Fleet {
 }
 
 fn failed(release: &str, kind: FailureKind) -> UpdateStatus {
-    UpdateStatus::Failed { version: Some(version(release)), kind, reason: "自检没有通过：读不了 config.toml".to_owned() }
+    UpdateStatus::Failed {
+        version: Some(version(release)),
+        kind,
+        reason: "自检没有通过：读不了 config.toml".to_owned(),
+        cause: Some(UpdateCause::SelfCheck { exit_code: Some(1), output: "读不了 config.toml".to_owned() }),
+    }
 }
 
 #[test]
@@ -443,6 +448,7 @@ fn a_node_that_rolled_back_reports_it_on_reconnect_and_that_pauses_the_rollout()
         version: Some(version(NEW)),
         kind: FailureKind::VersionRejected,
         reason: "新程序启动了 3 次都没有连上 controller".to_owned(),
+        cause: Some(UpdateCause::StartsUnconfirmed { starts: 3 }),
     };
     fleet.first_report(&mut back, rolled_back);
 

@@ -1,14 +1,15 @@
 //! 节点对设置：连接常驻，和独占 TCP（lane）。
 
-use i3t_model::admin::{LaneBlock, LaneEffect, LogRef, NetworkId, PairInput, PairLaneSide, PairSetting, PairView};
+use i3t_model::admin::{LaneBlock, LaneEffect, LaneOpening, LogRef, NetworkId, PairInput, PairLaneSide, PairSetting, PairView};
 use i3t_model::control::LANE_REVISION;
 use i3t_model::netmap::LaneMode;
 use i3t_proto::NodeId;
+use serde_json::{Value, json};
 
 use super::nodes::require_node;
 use super::{Controller, Inner, Seeds, switch};
-use crate::error::{Entity, Error};
-use crate::store::NodeRecord;
+use crate::error::{Entity, Error, InField};
+use crate::store::{NodeRecord, Store};
 
 impl Controller {
     /// 一个网络里全部的节点对设置，带着独占 TCP 起不起作用、两边报上来的状况。
@@ -30,13 +31,13 @@ impl Controller {
     /// 两个节点不都在这个网络里，或者是同一个节点。
     pub fn set_pair(&self, network: NetworkId, a: NodeId, b: NodeId, input: PairInput) -> Result<PairView, Error> {
         if a == b {
-            return Err(Error::invalid("一对节点得是两个不同的节点"));
+            return Err(Error::invalid_field("b", "same_node", "一对节点得是两个不同的节点"));
         }
         let mut inner = self.lock();
         let now = inner.clock.now();
         let setting = inner.store.atomically(|store| {
-            require_node(store, network, a)?;
-            require_node(store, network, b)?;
+            require_node(store, network, a).in_field("a")?;
+            require_node(store, network, b).in_field("b")?;
             let before = store.pair(a, b)?;
             let keep_alive = input.keep_alive.unwrap_or(before.as_ref().is_some_and(|pair| pair.keep_alive));
             let lane = input.lane.unwrap_or(before.as_ref().map_or(LaneMode::Off, |pair| pair.lane));
@@ -47,7 +48,15 @@ impl Controller {
                 LaneMode::Always => "总是用",
             };
             let detail = format!("节点 #{a} 和 #{b}：连接常驻 {}，独占 TCP {lane_text}", switch(keep_alive));
-            store.log_refs(now, Some(network), "pair.set", &detail, &[LogRef::node(a), LogRef::node(b)])?;
+            let params = json!({ "keep_alive": keep_alive, "lane": lane });
+            store.log_refs(
+                now,
+                Some(network),
+                "pair.set",
+                &detail,
+                &[LogRef::node(a), LogRef::node(b)],
+                pair_params(store, a, b, params)?,
+            )?;
             Ok::<_, Error>(PairSetting { a: a.min(b), b: a.max(b), keep_alive, lane })
         })?;
         inner.refresh(network, Seeds::of([a, b]), None)?;
@@ -75,6 +84,7 @@ impl Controller {
                 "pair.delete",
                 &format!("节点 #{a} 和 #{b}：去掉节点对设置"),
                 &[LogRef::node(a), LogRef::node(b)],
+                pair_params(store, a, b, json!({}))?,
             )?;
             Ok(())
         })?;
@@ -82,6 +92,17 @@ impl Controller {
         self.wake_if_needed(&inner);
         Ok(())
     }
+}
+
+/// 操作记录里一对节点的参数：`a` 是编号小的那个，两个都带着当时的名字；`extra` 里的项加在后面。
+fn pair_params(store: &Store, a: NodeId, b: NodeId, extra: Value) -> Result<Value, Error> {
+    let (a, b) = (a.min(b), a.max(b));
+    let name = |node| Ok::<_, Error>(store.node(node)?.map(|node| node.name));
+    let mut params = json!({ "a": a, "a_name": name(a)?, "b": b, "b_name": name(b)? });
+    if let (Value::Object(params), Value::Object(extra)) = (&mut params, extra) {
+        params.extend(extra);
+    }
+    Ok(params)
 }
 
 impl Inner {
@@ -92,9 +113,9 @@ impl Inner {
         };
         // 两边各自报的、和对方之间的 lane。设置是 off 的一对也报（刚关掉时还有在跑的流）。
         let side = |node: NodeId, other: NodeId| {
-            let report = self.live.get(&node)?.lanes.as_ref()?;
-            let lanes = report.peers.iter().find(|peer| peer.peer == other)?.clone();
-            Some(PairLaneSide { node, lanes })
+            let live = self.live.get(&node)?;
+            let lanes = live.lanes.as_ref()?.peers.iter().find(|peer| peer.peer == other)?.clone();
+            Some(PairLaneSide { node, lanes, reported_secs_ago: live.reported_at.map(|at| at.elapsed().as_secs()) })
         };
         let lanes = [side(setting.a, setting.b), side(setting.b, setting.a)].into_iter().flatten().collect();
         Ok(PairView { setting, lane_effect, lanes })
@@ -144,6 +165,17 @@ impl Inner {
         } else {
             "设置不起作用，这一对节点的流都走共用的连接（见 blocked）。".to_owned()
         };
-        Ok(LaneEffect { effective, blocked, dialers, summary })
+        let opening = if setting.lane == LaneMode::UdpFallback { self.lane_opening(setting, effective) } else { Vec::new() };
+        Ok(LaneEffect { effective, blocked, dialers, summary, opening })
+    }
+
+    /// `udp_fallback` 时两个节点各自开新的 TCP 流现在走不走 lane：按它自己报的"到对方的共用连接上有没有 UDP 的路"。
+    fn lane_opening(&self, setting: &PairSetting, effective: bool) -> Vec<LaneOpening> {
+        let side = |node: NodeId, other: NodeId| {
+            let report = self.live.get(&node)?.lanes.as_ref()?;
+            let udp_path = report.peers.iter().find(|peer| peer.peer == other)?.udp_path?;
+            Some(LaneOpening { node, udp_path, lanes: effective && !udp_path })
+        };
+        [side(setting.a, setting.b), side(setting.b, setting.a)].into_iter().flatten().collect()
     }
 }

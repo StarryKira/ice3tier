@@ -21,10 +21,10 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::control::{
     BackboneLink, Declared, DirectKind, ExitObservation, ExitReport, LaneReport, LegTransport, ListenState, ListenTraffic, PathCandidate,
-    PeerLanes, RelayState, Route, RouteSince, SelfUpdate,
+    PeerLanes, RelayState, Route, RouteCause, RouteSince, SelfUpdate,
 };
 use crate::netmap::{Attachment, ExitRole, ForwardProtocol, LaneMode, ListenerProtocol, Reach, RoutingMode};
-use crate::update::{FailureKind, UpdateStatus, UpdateTiming, Version};
+use crate::update::{FailureKind, SelfUpdateBlocker, UpdateCause, UpdateStatus, UpdateTiming, Version};
 
 pub mod diag;
 
@@ -63,6 +63,14 @@ pub struct ErrorBody {
 pub struct ApiError {
     pub code: ErrorCode,
     pub message: String,
+    /// 比 `code` 更具体的一层：`not_found` 时是找不到的东西（`node`、`network` 等），`conflict` 时是挡着的东西，
+    /// `invalid_request` 时是哪里不对（`zero`、`too_long` 等），`cannot_self_update`、`no_update` 时是原因。
+    /// 取值见 `docs/admin-api.md` 第 2 节；controller 说不出来时是 `null`。
+    #[serde(default)]
+    pub what: Option<String>,
+    /// 请求里出问题的字段（请求体的字段名、查询参数名或路径参数名）；不是某一个字段的问题时是 `null`。
+    #[serde(default)]
+    pub field: Option<String>,
 }
 
 /// 给程序看的错误码。以后可能增加，不认识的值读成 [`ErrorCode::Unknown`]。
@@ -326,6 +334,9 @@ pub struct UpdateFailure {
     pub reason: String,
     /// controller 记下它的时间。
     pub at: Timestamp,
+    /// `reason` 的代码和它要用到的值。旧版本的节点不报，这个字段出现之前的记录也没有。
+    #[serde(default)]
+    pub cause: Option<UpdateCause>,
 }
 
 /// 更新的全局设置和现状。全部网络共用一份。
@@ -345,9 +356,41 @@ pub struct UpdateOverview {
     pub checked_at: Option<Timestamp>,
     /// 最近一次查发布源失败的原因；成功时是 `null`。失败时 `release` 保持上一次查到的。
     pub check_error: Option<String>,
+    /// `check_error` 的代码和它要用到的值；成功时是 `null`。
+    #[serde(default)]
+    pub check_cause: Option<ReleaseCause>,
     /// 因为有节点更新失败而暂停自动更新的版本。
     pub paused: Vec<PausedVersion>,
     pub nodes: UpdateCounts,
+}
+
+/// 查发布源、取更新包为什么没有成功：一个代码，加上把它写成一句话要用到的值。和它在一起的是中文原话。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum ReleaseCause {
+    /// 发布源的写法不对。
+    InvalidSource,
+    /// 从这个地址取不到。`error` 是 HTTP 库的原话（连不上、HTTP 状态码等）。
+    FetchFailed { url: String, error: String },
+    /// 发布源是本机的目录，读写里面的文件失败。`error` 是系统的原话。
+    Io { path: String, error: String },
+    /// 发布源给的签名文件不是一个签名。
+    BadSignatureFile,
+    /// 清单的签名不是任何一把受信任的发布公钥签的。
+    BadSignature,
+    /// 签名正确，但清单的内容读不懂。
+    BadManifest,
+    /// 发布源上最新的是预发布版，不取。
+    Prerelease { version: Version },
+    /// 清单里的文件名不是一个单纯的文件名。
+    BadFileName { file: String },
+    /// 取回来的包和清单对不上。
+    Mismatch { file: String, expected_size: u64, actual_size: u64 },
+    /// controller 内部的原因（比如没有放包的缓存目录），细节在它的日志里。
+    Internal,
+    /// 比这个程序新的 controller 给的、这里不认识的原因。
+    #[serde(other)]
+    Unknown,
 }
 
 /// 已知的最新正式版。
@@ -377,6 +420,9 @@ pub struct PackageInfo {
     pub state: PackageState,
     /// 最近一次取这个包失败的原因。
     pub error: Option<String>,
+    /// `error` 的代码和它要用到的值。
+    #[serde(default)]
+    pub cause: Option<ReleaseCause>,
 }
 
 /// 一个平台的包在 controller 上的缓存情况。
@@ -405,6 +451,9 @@ pub struct PausedVersion {
     pub network: Option<NetworkId>,
     pub reason: String,
     pub at: Timestamp,
+    /// `reason` 的代码和它要用到的值。旧版本的节点不报。
+    #[serde(default)]
+    pub cause: Option<UpdateCause>,
 }
 
 /// 全部网络的节点按更新情况数出来的数。一个节点只算在一项里，按下面的顺序取第一个符合的。
@@ -458,6 +507,34 @@ pub struct SkippedUpdate {
     pub node: NodeRef,
     /// 给人看的原因：不在线、不能自己更新、已经是最新的、没有它的平台的包。
     pub reason: String,
+    /// `reason` 的代码和它要用到的值。
+    #[serde(default)]
+    pub cause: Option<SkipCause>,
+}
+
+/// 一个节点为什么不能立即更新。`POST /update/force` 跳过它的原因；单独让它更新时，同一个代码在错误的 `what` 里。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum SkipCause {
+    /// 节点不在线。
+    Offline,
+    /// 节点的版本太旧，不懂更新。
+    TooOld,
+    /// 节点说它不能自己更新；`blocker` 是它说的原因，说不出来时是 `null`。
+    CannotSelfUpdate { blocker: Option<SelfUpdateBlocker> },
+    /// 还没有从发布源查到任何发布。
+    NoRelease,
+    /// 最新的发布 `version` 要求 controller 至少是 `min_controller`，现在的 controller 是 `controller`。
+    ControllerTooOld { version: Version, min_controller: Version, controller: Version },
+    /// 节点报的版本号看不懂。
+    UnreadableVersion { version: String },
+    /// 节点已经是最新的。
+    UpToDate { running: Version, latest: Version },
+    /// 发布里没有它的平台的包。
+    NoPackage { version: Version, platform: String },
+    /// 比这个程序新的 controller 给的、这里不认识的原因。
+    #[serde(other)]
+    Unknown,
 }
 
 /// 继续一个被暂停的版本的自动更新。
@@ -485,6 +562,9 @@ pub struct NodeDetail {
     /// 节点本次连接期间最近一次报的独占 TCP（lane）的状况。不在线、旧版本、或者还没报过时是 `null`。
     #[serde(default)]
     pub lanes: Option<LaneReport>,
+    /// 上面这些上报的值（`lanes`、`flows`、流量、`mapping_varies`）是多少秒之前报的；这次连接上还没有上报过是 `null`。
+    #[serde(default)]
+    pub reported_secs_ago: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -636,6 +716,9 @@ pub struct PathLeg {
     /// 发送方的路由层说的"为什么是现在这条路"。有没有同 `mode`。
     #[serde(default)]
     pub reason: Option<String>,
+    /// `reason` 的代码和它要用到的值。发送方的版本太旧不报时是 `null`。
+    #[serde(default)]
+    pub cause: Option<RouteCause>,
     /// 发送方考虑过的候选路径，按代价从低到高，现在走的那条标着 `current`。有没有同 `mode`：`null` 是不知道，
     /// 空数组是发送方手上还没有任何测量值。
     #[serde(default)]
@@ -1052,6 +1135,22 @@ pub struct LaneEffect {
     /// 给人看的说明。独占 TCP 只承载 TCP 流：这一对节点之间共用的连接和它的路照常存在，UDP 应用的数据和别的流走它，
     /// 路由视图里显示的是共用连接的路。
     pub summary: String,
+    /// 设置是 `udp_fallback` 时，两个节点各自开新的 TCP 流现在走不走独占 TCP。只有在线、并且报了这一项的节点在里面；
+    /// 设置是别的值时是空的。
+    #[serde(default)]
+    pub opening: Vec<LaneOpening>,
+}
+
+/// 一个节点开新的 TCP 流现在走不走独占 TCP（`udp_fallback` 时），按它自己看到的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneOpening {
+    /// 开流的节点。
+    pub node: NodeId,
+    /// 它到对方的共用连接现在有没有 UDP 的路。
+    pub udp_path: bool,
+    /// 它现在开的新 TCP 流走独占 TCP：设置起作用，并且共用连接上没有 UDP 的路。取不到 lane 时（控制连接不在、池空了）
+    /// 照样悄悄改走共用的连接，见 `lanes` 里的 `control` 和 `fallbacks`。
+    pub lanes: bool,
 }
 
 /// 独占 TCP 的设置不起作用的一个原因。
@@ -1074,6 +1173,9 @@ pub struct PairLaneSide {
     /// 报的节点。
     pub node: NodeId,
     pub lanes: PeerLanes,
+    /// 这些数是多少秒之前报的。
+    #[serde(default)]
+    pub reported_secs_ago: Option<u64>,
 }
 
 /// 访问关系图的标签视图：每个标签是一个点，每条规则是一条连线。
@@ -1135,6 +1237,10 @@ pub struct LogEntry {
     /// 这条记录说的是哪些东西，界面可以据此做成链接。这个字段出现之前的记录是空的。
     #[serde(default)]
     pub refs: Vec<LogRef>,
+    /// 按名字给出的参数：只用 `action` 和它们就能把这条记录写成一句话。东西的名字是当时的名字，挨着它的编号。
+    /// 每种 `action` 有哪些参数见 `docs/admin-api.md` 第 3 节；这个字段出现之前的记录是空的。
+    #[serde(default)]
+    pub params: serde_json::Map<String, serde_json::Value>,
 }
 
 /// 操作记录里提到的一样东西。东西后来被删掉了，编号还在。
@@ -1235,6 +1341,28 @@ pub struct Reachability {
     pub rtt_ms: Option<u32>,
     /// 没连上的原因；连上了是 `null`。
     pub error: Option<String>,
+    /// `error` 的代码；连上了是 `null`。
+    #[serde(default)]
+    pub cause: Option<ReachCause>,
+}
+
+/// controller 为什么没有连上一个 relay 填的地址。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum ReachCause {
+    /// 对方拒绝了连接（TCP 端口上没有程序在听）。
+    Refused,
+    /// 时限之内没有回答（UDP 的地址查询），或者连接超时。
+    Timeout,
+    /// controller 到那个地址的网络不通。
+    Unreachable,
+    /// controller 这边出的错（绑不出 UDP 端口、发不出去）。
+    Local,
+    /// 别的原因，见 `error`。
+    Other,
+    /// 比这个程序新的 controller 给的、这里不认识的原因。
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1427,12 +1555,14 @@ mod tests {
                 blocked: vec![LaneBlock::NoRelay, LaneBlock::NodeTooOld { node: b }],
                 dialers: Vec::new(),
                 summary: "x".to_owned(),
+                opening: vec![LaneOpening { node: a, udp_path: false, lanes: false }],
             }),
             lanes: Vec::new(),
         };
         let value = serde_json::to_value(&view).unwrap();
         assert_eq!((&value["a"], &value["keep_alive"], &value["lane"]), (&json!(1), &json!(true), &json!("udp_fallback")));
         assert_eq!(value["lane_effect"]["blocked"], json!([{ "reason": "no_relay" }, { "reason": "node_too_old", "node": 2 }]));
+        assert_eq!(value["lane_effect"]["opening"], json!([{ "node": 1, "udp_path": false, "lanes": false }]));
         assert_eq!(serde_json::from_value::<PairView>(value).unwrap(), view);
         // 旧的 controller 给的节点对没有独占 TCP 的设置。
         let old: PairSetting = serde_json::from_value(json!({ "a": 1, "b": 2, "keep_alive": false })).unwrap();
@@ -1458,9 +1588,11 @@ mod tests {
             tx_bytes: 0,
             rx_bytes: 0,
             lanes: None,
+            reported_secs_ago: Some(4),
         };
         let value = serde_json::to_value(&detail).unwrap();
         assert_eq!(value["attached"], json!([{ "relay": 9, "rtt_ms": 12 }]));
+        assert_eq!(value["reported_secs_ago"], json!(4));
         assert_eq!(serde_json::from_value::<NodeDetail>(value).unwrap(), detail);
     }
 
@@ -1473,7 +1605,7 @@ mod tests {
             bind: "127.0.0.1:1080".parse().unwrap(),
             protocol: ListenerProtocol::Socks5,
             status: ListenStatus {
-                state: ListenState::PortInUse { detail: "地址已经在用".into() },
+                state: ListenState::PortInUse { detail: "地址已经在用".into(), cause: Some(crate::control::BindCause::AddressInUse) },
                 traffic: ListenTraffic { connections: 0, bytes_up: 1, bytes_down: 2 },
             },
         };
@@ -1482,10 +1614,45 @@ mod tests {
             value,
             json!({
                 "id": null, "builtin": true, "name": "local-socks5", "bind": "127.0.0.1:1080", "protocol": "socks5",
-                "state": "port_in_use", "detail": "地址已经在用", "connections": 0, "bytes_up": 1, "bytes_down": 2
+                "state": "port_in_use", "detail": "地址已经在用", "cause": { "code": "address_in_use" },
+                "connections": 0, "bytes_up": 1, "bytes_down": 2
             })
         );
         assert_eq!(serde_json::from_value::<NodeListener>(value).unwrap(), listener);
+    }
+
+    #[test]
+    fn causes_are_written_as_a_code_with_their_values_beside_it() {
+        let version = |text: &str| text.parse::<Version>().unwrap();
+        let skipped = SkipCause::UpToDate { running: version("0.3.0"), latest: version("0.3.0") };
+        assert_eq!(serde_json::to_value(&skipped).unwrap(), json!({ "code": "up_to_date", "running": "0.3.0", "latest": "0.3.0" }));
+        let blocked = SkipCause::CannotSelfUpdate { blocker: Some(SelfUpdateBlocker::Container) };
+        assert_eq!(serde_json::to_value(&blocked).unwrap(), json!({ "code": "cannot_self_update", "blocker": "container" }));
+        let check = ReleaseCause::Prerelease { version: version("0.4.0-rc.1") };
+        assert_eq!(serde_json::to_value(&check).unwrap(), json!({ "code": "prerelease", "version": "0.4.0-rc.1" }));
+        assert_eq!(serde_json::to_value(ReachCause::Refused).unwrap(), json!({ "code": "refused" }));
+        assert_eq!(serde_json::from_value::<ReachCause>(json!({ "code": "later" })).unwrap(), ReachCause::Unknown);
+        assert_eq!(serde_json::from_value::<ReleaseCause>(json!({ "code": "later", "x": 1 })).unwrap(), ReleaseCause::Unknown);
+
+        let error: ErrorBody = serde_json::from_value(json!({ "error": { "code": "not_found", "message": "没有这个节点" } })).unwrap();
+        assert_eq!((error.error.what, error.error.field), (None, None), "旧的 controller 不给 what 和 field");
+        let error = ErrorBody {
+            error: ApiError {
+                code: ErrorCode::InvalidRequest,
+                message: "x".into(),
+                what: Some("zero".into()),
+                field: Some("bandwidth_mbps".into()),
+            },
+        };
+        let value = serde_json::to_value(&error).unwrap();
+        assert_eq!(value["error"]["what"], "zero");
+        assert_eq!(value["error"]["field"], "bandwidth_mbps");
+
+        let entry: LogEntry = serde_json::from_value(json!({
+            "id": 1, "at": 2, "network": null, "action": "admin.token", "detail": "生成了新的管理令牌", "refs": []
+        }))
+        .unwrap();
+        assert!(entry.params.is_empty(), "这个字段出现之前的记录没有参数");
     }
 
     #[test]

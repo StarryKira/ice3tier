@@ -12,7 +12,7 @@ use i3t_controller::webui::WebUi;
 use i3t_controller::{Admitted, Controller, ServeOptions, Server, Timing};
 use i3t_crypto::NodeKey;
 use i3t_model::control::{Declared, EnrollToken, Hello, PROTOCOL_REVISION, Report, Route, RouteEntry, SelfUpdate, ToController, ToNode};
-use i3t_model::update::{Artifact, FailureKind, LATEST_DIR, MANIFEST_FILE, Manifest, SIGNATURE_FILE, Sha256, UpdateStatus};
+use i3t_model::update::{Artifact, FailureKind, LATEST_DIR, MANIFEST_FILE, Manifest, SIGNATURE_FILE, Sha256, UpdateCause, UpdateStatus};
 use i3t_proto::PublicKey;
 use i3t_update::{TrustedKeys, sign_manifest};
 use serde_json::{Value, json};
@@ -61,16 +61,38 @@ impl Fixture {
         Self { controller, admin, token, _stop: stop }
     }
 
+    /// 说中文的 `i3tctl`：这里的断言照着中文的输出写。
     fn command(&self) -> Command {
+        self.command_in("zh-CN")
+    }
+
+    fn command_in(&self, lang: &str) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_i3tctl"));
         // 测试所在的环境里可能设着这些变量，不能让它们混进来。
-        command.env_remove("I3T_ADMIN_URL").env_remove("I3T_ADMIN_TOKEN").env_remove("I3T_NETWORK");
+        command.env_remove("I3T_ADMIN_URL").env_remove("I3T_ADMIN_TOKEN").env_remove("I3T_NETWORK").env("I3T_LANG", lang);
         command
     }
 
     async fn run(&self, args: &[&str]) -> Output {
         let url = format!("http://{}", self.admin);
         self.command().args(["--url", &url, "--token", &self.token]).args(args).output().await.unwrap()
+    }
+
+    /// 同一条命令用英文跑一遍：成功，输出里（标准输出和标准错误）一个汉字都没有。返回标准输出。
+    async fn english(&self, args: &[&str]) -> String {
+        let url = format!("http://{}", self.admin);
+        let output = self.command_in("en").args(["--url", &url, "--token", &self.token]).args(args).output().await.unwrap();
+        let (stdout, stderr) = (text(&output.stdout), text(&output.stderr));
+        assert!(output.status.success(), "i3tctl {args:?} 应该成功\nstdout: {stdout}\nstderr: {stderr}");
+        for said in [&stdout, &stderr] {
+            assert!(!i3t_lang::cli::has_chinese(said), "i3tctl {args:?} 的英文输出里有中文：\n{said}");
+        }
+        stdout
+    }
+
+    /// 一行里同时有这几段文字。表格和"名字 值"的列宽随语言变，所以不比空格。
+    fn has_line(output: &str, parts: &[&str]) -> bool {
+        output.lines().any(|line| parts.iter().all(|part| line.contains(part)))
     }
 
     /// 期望成功，返回标准输出。
@@ -140,7 +162,7 @@ async fn the_command_line_drives_a_running_controller() {
     let created = fixture.ok(&["network", "create", "home"]).await;
     assert!(created.contains("home.i3t") && created.contains("10.66.0.0/16"), "{created}");
     let listed = fixture.ok(&["network", "list"]).await;
-    assert!(listed.lines().next().unwrap().starts_with("ID  NAME") && listed.contains("home"), "{listed}");
+    assert!(listed.lines().next().unwrap().starts_with("编号  名字") && listed.contains("home"), "{listed}");
     let networks = fixture.json(&["network", "list"]).await;
     assert_eq!(networks.as_array().unwrap().len(), 1);
     assert_eq!(networks[0]["name"], "home");
@@ -157,14 +179,14 @@ async fn the_command_line_drives_a_running_controller() {
     let _plain = fixture.join(1, Declared::default()).await;
     let _capable = fixture.join(2, Declared { exit: true, relay: true, forward: true }).await;
     let nodes = fixture.ok(&["node", "list"]).await;
-    assert!(nodes.contains("10.66.0.1") && nodes.contains("10.66.0.2") && nodes.contains("online"), "{nodes}");
+    assert!(nodes.contains("10.66.0.1") && nodes.contains("10.66.0.2") && nodes.contains("在线"), "{nodes}");
     // 节点可以用编号、虚拟 IP 或名字指代。
     fixture.ok(&["node", "rename", "1", "laptop"]).await;
     fixture.ok(&["node", "rename", "10.66.0.2", "nas-01"]).await;
     fixture.ok(&["node", "tag", "laptop", "laptops"]).await;
     fixture.ok(&["node", "tag", "nas-01", "servers", "home"]).await;
     let detail = fixture.ok(&["node", "show", "nas-01"]).await;
-    assert!(detail.contains("nas-01.home.i3t") && detail.contains("home,servers"), "{detail}");
+    assert!(detail.contains("nas-01.home.i3t") && detail.contains("home、servers"), "{detail}");
     assert_eq!(fixture.json(&["node", "show", "laptop"]).await["virtual_ip"], "10.66.0.1");
     assert!(fixture.fails(&["node", "show", "nobody"]).await.contains("nobody"));
     fixture.ok(&["node", "set", "laptop", "--dial-out-only", "on", "--reach", "direct-only"]).await;
@@ -183,9 +205,14 @@ async fn the_command_line_drives_a_running_controller() {
     assert_eq!(nas["relay"]["udp"], serde_json::json!(["203.0.113.7:20330"]));
     assert!(nas["exit"]["ports"].is_null() && nas["exit"]["lan"] == true);
     fixture.ok(&["node", "set", "laptop", "--pin", "nas-01"]).await;
-    assert!(fixture.ok(&["node", "list"]).await.contains("relay,exit"));
+    assert!(fixture.ok(&["node", "list"]).await.contains("relay、出口"));
     let overview = fixture.ok(&["overview"]).await;
-    assert!(overview.contains("relay 1") && overview.contains("laptop"), "{overview}");
+    assert!(Fixture::has_line(&overview, &["relay", "1"]) && overview.contains("laptop"), "{overview}");
+    let reachability = fixture.ok(&["relay", "enable", "nas-01", "--udp", "203.0.113.7:20330", "--region", "hk"]).await;
+    assert!(
+        reachability.contains("从 controller 试连") && Fixture::has_line(&reachability, &["udp", "203.0.113.7:20330"]),
+        "{reachability}"
+    );
     fixture.ok(&["exit", "disable", "nas-01"]).await;
 
     // 规则和访问关系。
@@ -194,12 +221,12 @@ async fn the_command_line_drives_a_running_controller() {
     let added = fixture.json(&["rule", "add", "laptops", "servers", "--one-way", "--name", "ssh"]).await;
     assert_eq!(added["direction"], "one_way");
     let listed = fixture.ok(&["rule", "list"]).await;
-    assert!(listed.contains("laptops  ->   servers  yes      ssh") && listed.contains("all      <->  all      no"), "{listed}");
+    assert!(listed.contains("laptops  ->   servers  是    ssh") && listed.contains("all      <->  all      否"), "{listed}");
     assert!(fixture.ok(&["access", "check", "laptop", "nas-01"]).await.contains("可以访问"));
     assert!(fixture.ok(&["access", "check", "nas-01", "laptop"]).await.contains("不能访问"));
     assert_eq!(fixture.json(&["access", "check", "laptop", "nas-01"]).await["allowed"], true);
     assert!(fixture.ok(&["access", "graph"]).await.contains("laptops"));
-    assert!(fixture.ok(&["node", "access", "nas-01"]).await.contains("reachable-by"));
+    assert!(fixture.ok(&["node", "access", "nas-01"]).await.contains("可被访问"));
 
     // 凭据、监听器、端口转发、节点对。
     let credential = fixture.json(&["credential", "create", "phone", "--max-concurrent", "4"]).await;
@@ -256,11 +283,38 @@ async fn the_command_line_drives_a_running_controller() {
     fixture.ok(&["pair", "unset", "laptop", "nas-01"]).await;
     fixture.ok(&["forward", "delete", &forward_id]).await;
     assert_eq!(fixture.ok(&["--json", "credential", "delete", &credential["id"].to_string()]).await, "");
-    assert!(fixture.ok(&["node", "delete", "laptop"]).await.contains("冷却期"));
+    assert!(fixture.ok(&["node", "delete", "laptop"]).await.contains("节点 laptop 已删除"));
     assert_eq!(fixture.json(&["node", "list"]).await.as_array().unwrap().len(), 1);
     assert!(fixture.fails(&["network", "delete", "home"]).await.contains("network_not_empty"));
     let log = fixture.ok(&["log", "--limit", "5"]).await;
-    assert!(log.contains("node.delete") && log.lines().count() == 6, "{log}");
+    assert!(log.contains("node.delete") && log.contains("删除节点 laptop") && log.lines().count() == 6, "{log}");
+
+    // 同样的东西用英文看：按代码和参数写，没有一个汉字（controller 的原话是中文的，不能漏出来）。
+    for args in [
+        &["status"][..],
+        &["overview"],
+        &["network", "list"],
+        &["network", "show"],
+        &["node", "list"],
+        &["node", "show", "nas-01"],
+        &["rule", "list"],
+        &["access", "graph"],
+        &["credential", "list"],
+        &["listener", "list"],
+        &["forward", "list"],
+        &["log", "--limit", "100"],
+        &["--help"],
+        &["node", "set", "--help"],
+    ] {
+        fixture.english(args).await;
+    }
+    let english_log = fixture.english(&["log", "--limit", "100"]).await;
+    assert!(english_log.contains("Node laptop deleted") && english_log.contains("Network home created"), "{english_log}");
+    let url = format!("http://{}", fixture.admin);
+    let refused =
+        fixture.command_in("en").args(["--url", &url, "--token", &fixture.token, "network", "delete", "home"]).output().await.unwrap();
+    let said = text(&refused.stderr);
+    assert!(!refused.status.success() && !i3t_lang::cli::has_chinese(&said) && said.contains("network_not_empty"), "{said}");
 }
 
 /// 在 `root` 里摆一个发布源（布局见 `docs/releasing.md` 第 6 节）：`version` 的 Linux 节点程序，清单用 `key` 签。
@@ -323,9 +377,10 @@ async fn updates_routes_and_paths_can_be_driven_from_the_command_line() {
     assert!(empty.contains("检查失败") && empty.contains("还没有查到"), "{empty}");
     publish(source.path(), &release_key, "0.2.0", b"the new program");
     let checked = fixture.ok(&["update", "check"]).await;
-    assert!(checked.contains("最新正式版  0.2.0") && checked.contains("linux-x86_64") && checked.contains("not_needed"), "{checked}");
-    assert!(checked.contains("controller 自己也有新版本 0.2.0"), "{checked}");
-    assert!(fixture.ok(&["status"]).await.contains("有新版本    0.2.0"));
+    assert!(Fixture::has_line(&checked, &["最新版本", "0.2.0"]) && Fixture::has_line(&checked, &["linux-x86_64", "不需要"]), "{checked}");
+    assert!(checked.contains("controller 也有新版本 0.2.0"), "{checked}");
+    assert!(Fixture::has_line(&fixture.ok(&["status"]).await, &["新版本", "0.2.0"]));
+    fixture.english(&["update", "show"]).await;
 
     // 一个懂更新的节点（主机名变成了它的名字），一个最初那一版的。
     let modern = Hello {
@@ -342,33 +397,40 @@ async fn updates_routes_and_paths_can_be_driven_from_the_command_line() {
     fixture.report(&laptop, Report { update: Some(UpdateStatus::Idle), ..Report::default() });
     let nodes = fixture.ok(&["update", "nodes"]).await;
     let row = |name: &str| nodes.lines().find(|line| line.contains(name)).unwrap_or_else(|| panic!("{nodes}")).to_owned();
-    assert!(row("laptop").contains("0.2.0") && row("laptop").contains("yes") && row("laptop").contains("有新版本 0.2.0"), "{nodes}");
-    assert!(row("node-2").contains("unknown"), "{nodes}");
+    assert!(row("laptop").contains("0.2.0") && row("laptop").contains("是") && row("laptop").contains("有新版本 0.2.0"), "{nodes}");
+    assert!(row("node-2").contains("版本太旧"), "{nodes}");
     let detail = fixture.ok(&["node", "show", "laptop"]).await;
-    assert!(detail.contains("主机名        Laptop.lan") && detail.contains("更新          有新版本 0.2.0"), "{detail}");
+    assert!(Fixture::has_line(&detail, &["主机名", "Laptop.lan"]) && Fixture::has_line(&detail, &["更新", "有新版本 0.2.0"]), "{detail}");
 
     // 强制更新：包还没有取回来时先排着；取回来之后指令发出去。
     assert!(fixture.fails(&["update", "node", "node-2"]).await.contains("cannot_self_update"));
     let queued = fixture.ok(&["update", "node", "laptop", "--drain"]).await;
-    assert!(queued.contains("在等 controller 把它的平台的包取回来"), "{queued}");
+    assert!(queued.contains("等待下载包"), "{queued}");
     let controller = Arc::clone(&fixture.controller);
     tokio::task::spawn_blocking(move || controller.fetch_packages().unwrap()).await.unwrap();
     let update = fixture.json(&["update", "node", "laptop", "--drain"]).await;
     assert_eq!(update["ordered"], serde_json::json!({ "version": "0.2.0", "timing": "after_drain" }));
     let all = fixture.ok(&["update", "all"]).await;
-    assert!(all.contains("已下发指令  laptop") && all.contains("跳过        node-2"), "{all}");
+    assert!(Fixture::has_line(&all, &["已下发", "laptop"]) && Fixture::has_line(&all, &["跳过 node-2", "版本太旧"]), "{all}");
     fixture.report(&laptop, Report { update: Some(UpdateStatus::Draining { version: "0.2.0".parse().unwrap() }), ..Report::default() });
-    assert!(fixture.ok(&["update", "nodes"]).await.contains("不再接新的流"));
+    assert!(fixture.ok(&["update", "nodes"]).await.contains("正在排空"));
 
     // 节点说这个版本不能用：自动更新暂停，看过之后继续。
-    let failed =
-        UpdateStatus::Failed {
-            version: Some("0.2.0".parse().unwrap()), kind: FailureKind::VersionRejected, reason: "自检没有通过".into()
-        };
+    let failed = UpdateStatus::Failed {
+        version: Some("0.2.0".parse().unwrap()),
+        kind: FailureKind::VersionRejected,
+        reason: "自检没有通过".into(),
+        cause: Some(UpdateCause::SelfCheck { exit_code: Some(1), output: "config.toml unreadable".into() }),
+    };
     fixture.report(&laptop, Report { update: Some(failed), ..Report::default() });
     let paused = fixture.ok(&["update", "show"]).await;
-    assert!(paused.contains("版本 0.2.0 的自动更新已暂停：laptop") && paused.contains("i3tctl update resume 0.2.0"), "{paused}");
-    assert!(fixture.ok(&["update", "nodes"]).await.contains("这个版本在这台机器上不能用"));
+    assert!(paused.contains("0.2.0 已暂停：laptop") && paused.contains("i3tctl update resume 0.2.0"), "{paused}");
+    assert!(paused.contains("自检没有通过（退出码 1）：config.toml unreadable"), "按原因的代码写：{paused}");
+    assert!(fixture.ok(&["update", "nodes"]).await.contains("不再自动重试"));
+    let english = fixture.english(&["update", "show"]).await;
+    assert!(english.contains("Self-check failed (exit code 1): config.toml unreadable"), "{english}");
+    fixture.english(&["update", "nodes"]).await;
+    fixture.english(&["log"]).await;
     assert!(fixture.json(&["update", "resume", "0.2.0"]).await["paused"].as_array().unwrap().is_empty());
     assert!(fixture.fails(&["update", "resume", "0.2.0"]).await.contains("not_found"));
     assert!(fixture.fails(&["update", "resume", "latest"]).await.contains("版本号"));
@@ -381,16 +443,22 @@ async fn updates_routes_and_paths_can_be_driven_from_the_command_line() {
         Report { routes: vec![RouteEntry { peer: laptop.session.node, ..route.clone() }], routes_full: true, ..Report::default() },
     );
     let matrix = fixture.ok(&["routes"]).await;
-    assert!(matrix.lines().next().unwrap().starts_with("FROM") && matrix.contains("node-2  laptop  direct  7"), "{matrix}");
-    assert!(matrix.contains("没有上报过路由的节点：laptop"), "{matrix}");
+    assert!(matrix.lines().next().unwrap().starts_with("从") && matrix.contains("node-2  laptop  直连 203.0.113.9:20330  7"), "{matrix}");
+    assert!(matrix.contains("没有上报过的节点：laptop"), "{matrix}");
+    fixture.english(&["routes"]).await;
     assert_eq!(fixture.json(&["routes"]).await["entries"][0]["stale"], false);
     // laptop 懂路由查询但不会回答（它只是个收件箱），等几秒之后退回到上报的数据；它没有上报过。
     let path = fixture.ok(&["path", "laptop", "node-2"]).await;
-    assert!(path.contains("laptop  node-2  -       -       none") && path.contains("node-2  laptop  direct  7       report"), "{path}");
-    assert!(path.contains("没有数据") && path.contains("这是它最近上报的"), "{path}");
+    assert!(Fixture::has_line(&path, &["laptop → node-2", "没有数据"]), "{path}");
+    assert!(
+        path.contains("node-2 → laptop  直连 203.0.113.9:20330  7") && Fixture::has_line(&path, &["node-2 → laptop", "上报"]),
+        "{path}"
+    );
+    assert!(path.contains("用的是它的上报"), "{path}");
+    fixture.english(&["path", "laptop", "node-2"]).await;
     assert_eq!(fixture.json(&["path", "node-2", "laptop"]).await["forward"]["source"], "report");
     assert!(fixture.fails(&["path", "laptop", "laptop"]).await.contains("invalid_request"));
-    assert!(fixture.ok(&["backbone"]).await.contains("这个网络里还没有 relay"));
+    assert!(fixture.ok(&["backbone"]).await.contains("还没有 relay"));
     assert_eq!(fixture.json(&["backbone"]).await["relays"], serde_json::json!([]));
 }
 
@@ -425,22 +493,25 @@ async fn active_tests_and_the_matrix_are_run_and_shown_from_the_command_line() {
         fixture.controller.handle(member.session, REMOTE, ToController::TestReport(Box::new(report))).unwrap();
     }
     let shown = fixture.ok(&["tests", "show", &id.to_string()]).await;
-    assert!(shown.contains(&format!("测试 #{id}  laptop → nas  done")) && shown.contains("直连能力：可以：punched，用了 640ms"), "{shown}");
+    assert!(shown.contains(&format!("测试 #{id}  laptop → nas  完成")) && shown.contains("直连：是（打洞、640 ms）"), "{shown}");
     assert!(shown.contains("laptop：连上了") && shown.contains("nas：连上了"), "{shown}");
+    let english = fixture.english(&["tests", "show", &id.to_string()]).await;
+    assert!(english.contains("Direct: yes (hole punched, 640 ms)"), "{english}");
     let listed = fixture.ok(&["tests", "list", "nas", "laptop"]).await;
-    assert!(listed.starts_with("ID  A") && listed.contains(&format!("{id}   laptop  nas")), "{listed}");
+    assert!(listed.starts_with("编号  A") && Fixture::has_line(&listed, &[&id.to_string(), "laptop  nas"]), "{listed}");
     assert!(fixture.fails(&["test", "laptop", "nas"]).await.contains("too_soon"), "同一对刚测过");
     assert!(fixture.fails(&["tests", "cancel", &id.to_string()]).await.contains("busy"));
 
     // 版本太旧的节点：测试立刻失败，说是哪个节点。等结果的这一种也马上返回。
     let refused = fixture.ok(&["test", "laptop", "old"]).await;
-    assert!(refused.contains("没有做成：not_supported（old）"), "{refused}");
+    assert!(refused.contains("没有做成：old：版本太旧，不支持主动测试"), "{refused}");
 
     // 全网矩阵：开始（不等）、看、取消。
     let run = fixture.json(&["tests", "matrix", "--no-wait"]).await;
     assert_eq!((run["total"].as_u64(), run["state"].as_str()), (Some(3), Some("running")));
     let matrix = fixture.ok(&["tests", "matrix", "--show"]).await;
-    assert!(matrix.starts_with("全网矩阵 #1  running") && matrix.contains("not_supported（old）"), "{matrix}");
+    assert!(matrix.starts_with("全网矩阵 #1  进行中") && matrix.contains("old：版本太旧"), "{matrix}");
+    fixture.english(&["tests", "matrix", "--show"]).await;
     let cancelled = fixture.ok(&["tests", "matrix", "--cancel"]).await;
-    assert!(cancelled.starts_with("全网矩阵 #1  cancelled"), "{cancelled}");
+    assert!(cancelled.starts_with("全网矩阵 #1  已取消"), "{cancelled}");
 }

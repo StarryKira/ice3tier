@@ -17,7 +17,7 @@ const DEFAULT_SECOND_OCTETS: std::ops::RangeInclusive<u8> = 66..=255;
 /// 把管理员写的地址段规整成网络地址的形式（`10.66.3.4/16` 读成 `10.66.0.0/16`）。
 pub(super) fn normalize(cidr: Ipv4Net) -> Result<Ipv4Net, Error> {
     if cidr.prefix_len() > MAX_PREFIX_LEN {
-        return Err(Error::invalid(format!("地址段 {cidr} 太小：前缀最长是 /{MAX_PREFIX_LEN}")));
+        return Err(Error::invalid_field("cidr", "too_small", format!("地址段 {cidr} 太小：前缀最长是 /{MAX_PREFIX_LEN}")));
     }
     Ok(cidr.trunc())
 }

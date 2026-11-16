@@ -172,7 +172,7 @@ impl Runtime {
             listeners,
             forwards,
             route_kinds: self.endpoint.path_reports().iter().filter_map(route_detail::kind).collect(),
-            lanes: Some(Box::new(lanes::report(&self.lanes.status()))),
+            lanes: Some(Box::new(self.lanes.report())),
         }
     }
 
@@ -259,18 +259,22 @@ fn count(value: usize) -> u32 {
 /// 到每个对端的路上一次是什么时候、因为什么换的。路由层只在换路的那一刻说一次原因，这里把它记下来。
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RouteHistory {
-    changes: Arc<Mutex<BTreeMap<NodeId, (Instant, String)>>>,
+    changes: Arc<Mutex<BTreeMap<NodeId, (Instant, RouteChange)>>>,
 }
 
 impl RouteHistory {
     /// 到 `peer` 的路是多久之前换上的、为什么。这次启动以来没有换过时是 `None`。
     pub(crate) fn since(&self, peer: NodeId) -> Option<RouteSince> {
         let changes = self.changes.lock().expect("route history mutex poisoned");
-        changes.get(&peer).map(|(at, reason)| RouteSince { secs_ago: at.elapsed().as_secs(), reason: reason.clone() })
+        changes.get(&peer).map(|(at, change)| RouteSince {
+            secs_ago: at.elapsed().as_secs(),
+            reason: change.reason.clone(),
+            cause: Some(change.cause.clone()),
+        })
     }
 
     fn record(&self, change: RouteChange) {
-        self.changes.lock().expect("route history mutex poisoned").insert(change.peer, (Instant::now(), change.reason));
+        self.changes.lock().expect("route history mutex poisoned").insert(change.peer, (Instant::now(), change));
     }
 
     /// 一直记录换路事件，直到路由层关闭。
@@ -290,6 +294,8 @@ impl RouteHistory {
 mod tests {
     use std::time::Duration;
 
+    use i3t_model::control::{RouteCause, RouteHint};
+
     use super::*;
 
     #[tokio::test]
@@ -300,9 +306,10 @@ mod tests {
         let peer = NodeId::new(2).unwrap();
         assert_eq!(history.since(peer), None);
 
-        tx.send(RouteChange { peer, route: Route::None, reason: "直连超时".to_owned() }).unwrap();
-        tx.send(RouteChange { peer, route: Route::Relay { relays: vec![NodeId::new(9).unwrap()] }, reason: "改走 relay".to_owned() })
-            .unwrap();
+        let lost = RouteCause::Unreachable { hint: RouteHint::DirectTimeouts };
+        tx.send(RouteChange { peer, route: Route::None, reason: "直连超时".to_owned(), cause: lost }).unwrap();
+        let relayed = Route::Relay { relays: vec![NodeId::new(9).unwrap()] };
+        tx.send(RouteChange { peer, route: relayed, reason: "改走 relay".to_owned(), cause: RouteCause::RelayReady }).unwrap();
         for _ in 0..100 {
             if history.since(peer).is_some_and(|since| since.reason == "改走 relay") {
                 break;
@@ -311,6 +318,7 @@ mod tests {
         }
         let since = history.since(peer).unwrap();
         assert_eq!(since.reason, "改走 relay");
+        assert_eq!(since.cause, Some(RouteCause::RelayReady), "原因的代码跟着原话一起记下");
         assert!(since.secs_ago <= 1);
         assert_eq!(history.since(NodeId::new(3).unwrap()), None);
 

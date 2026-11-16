@@ -34,6 +34,7 @@ mod runtime;
 pub mod selfcheck;
 pub mod state;
 pub mod status;
+mod texts;
 mod update;
 
 pub use i3t_model::update::Version;

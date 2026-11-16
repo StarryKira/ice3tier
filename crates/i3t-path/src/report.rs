@@ -3,7 +3,7 @@
 //!
 //! 这些都是某一时刻的快照，由控制任务定期刷新；[`crate::Paths::path_reports`] 等方法读的就是最近的一份。
 
-use i3t_model::control::Route;
+use i3t_model::control::{Route, RouteCause};
 use i3t_model::netmap::RoutingMode;
 use i3t_proto::NodeId;
 use i3t_proto::backbone::RelayState;
@@ -81,6 +81,9 @@ pub struct PathReport {
     pub relay_leg: Option<RelayLeg>,
     /// 为什么是现在这条路，给人看的。
     pub reason: String,
+    /// `reason` 的代码和它要用到的值。
+    #[serde(default)]
+    pub cause: Option<RouteCause>,
     /// 上一次换路是多少毫秒之前；从来没有过路时是 `None`。
     pub since_switch_ms: Option<u64>,
     /// 考虑过的候选路径，按代价从低到高。没有任何测量值的路径不在里面。

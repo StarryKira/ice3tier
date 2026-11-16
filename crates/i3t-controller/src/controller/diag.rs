@@ -28,8 +28,10 @@ use i3t_proto::NodeId;
 
 pub(crate) use self::matrix::Matrix;
 use self::merge::{Inputs, Skips, final_state, merge};
+use serde_json::json;
+
 use super::{Controller, Inner, node_ref};
-use crate::error::{Entity, Error};
+use crate::error::{Entity, Error, InField};
 use crate::store::{NetworkRecord, NodeRecord};
 
 /// 同一对节点两次测试至少隔多久，带吞吐的至少隔多久。
@@ -134,7 +136,8 @@ impl Controller {
         let pair = match (query.a, query.b) {
             (Some(a), Some(b)) => Some((a, b)),
             (None, None) => None,
-            (Some(_), None) | (None, Some(_)) => return Err(Error::invalid("要看一对节点的测试时 a 和 b 都要写")),
+            (Some(_), None) => return Err(Error::invalid_field("b", "missing", "要看一对节点的测试时 a 和 b 都要写")),
+            (None, Some(_)) => return Err(Error::invalid_field("a", "missing", "要看一对节点的测试时 a 和 b 都要写")),
         };
         let limit = query.limit.unwrap_or(DEFAULT_LIST).clamp(1, MAX_LIST);
         let stored = inner.store.tests(network, pair, limit)?;
@@ -169,6 +172,7 @@ impl Controller {
             "test.cancel",
             &detail,
             &[LogRef::node(view.a.id), LogRef::node(view.b.id)],
+            json!({ "test": id, "a": view.a.id, "a_name": view.a.name, "b": view.b.id, "b_name": view.b.name }),
         )?;
         self.wake_if_needed(&inner);
         Ok(view)
@@ -179,7 +183,7 @@ impl Inner {
     /// 把请求规整一遍：测试项去重排好，指定的路径要是这个网络里启用了的 relay、不超过最大中转级数。
     fn test_request(&self, network: &NetworkRecord, input: &CreateTest) -> Result<TestRequest, Error> {
         if input.a == input.b {
-            return Err(Error::invalid("要测的是两个不同的节点"));
+            return Err(Error::invalid_field("b", "same_node", "要测的是两个不同的节点"));
         }
         let mut items: Vec<TestItem> = input.items.clone().unwrap_or_else(|| TestItem::ALL.to_vec());
         if !input.via.is_empty() && !items.contains(&TestItem::RelayQuality) {
@@ -188,25 +192,29 @@ impl Inner {
         items.sort_unstable();
         items.dedup();
         if items.is_empty() {
-            return Err(Error::invalid("至少要做一项测试"));
+            return Err(Error::invalid_field("items", "empty", "至少要做一项测试"));
         }
         if input.throughput && !items.iter().any(|item| matches!(item, TestItem::DirectQuality | TestItem::RelayQuality)) {
-            return Err(Error::invalid("吞吐是在测质量的路径上量的：要同时测直连质量或者 relay 质量"));
+            return Err(Error::invalid_field("throughput", "needs_quality", "吞吐是在测质量的路径上量的：要同时测直连质量或者 relay 质量"));
         }
         if input.via.len() > MAX_VIA {
-            return Err(Error::invalid(format!("最多指定 {MAX_VIA} 条路径")));
+            return Err(Error::invalid_field("via", "too_many", format!("最多指定 {MAX_VIA} 条路径")));
         }
         for path in &input.via {
             if path.is_empty() || path.len() > usize::from(network.max_relay_hops) {
-                return Err(Error::invalid(format!("一条路径经过 1 到 {} 个 relay（网络的最大中转级数）", network.max_relay_hops)));
+                return Err(Error::invalid_field(
+                    "via",
+                    "out_of_range",
+                    format!("一条路径经过 1 到 {} 个 relay（网络的最大中转级数）", network.max_relay_hops),
+                ));
             }
             if path.iter().enumerate().any(|(index, relay)| path[..index].contains(relay)) {
-                return Err(Error::invalid("一条路径里同一个 relay 不能出现两次"));
+                return Err(Error::invalid_field("via", "duplicate", "一条路径里同一个 relay 不能出现两次"));
             }
             for relay in path {
-                let node = self.require_node(network.id, *relay)?;
+                let node = self.require_node(network.id, *relay).in_field("via")?;
                 if node.relay.is_none() {
-                    return Err(Error::invalid(format!("节点 {} 没有启用为 relay，不能出现在路径里", node.name)));
+                    return Err(Error::invalid_field("via", "not_relay", format!("节点 {} 没有启用为 relay，不能出现在路径里", node.name)));
                 }
             }
         }
@@ -361,7 +369,17 @@ impl Inner {
         let throughput = if view.request.throughput { "，含吞吐" } else { "" };
         let detail = format!("节点 {} 和 {} 之间的主动测试 #{}：{}{throughput}", view.a.name, view.b.name, view.id, items.join("、"));
         let refs = [LogRef::node(view.a.id), LogRef::node(view.b.id)];
-        self.store.log_refs(view.started_at, Some(view.network), "test.start", &detail, &refs)?;
+        let params = json!({
+            "test": view.id,
+            "a": view.a.id,
+            "a_name": view.a.name,
+            "b": view.b.id,
+            "b_name": view.b.name,
+            "items": view.request.items,
+            "throughput": view.request.throughput,
+            "matrix": view.matrix,
+        });
+        self.store.log_refs(view.started_at, Some(view.network), "test.start", &detail, &refs, params)?;
         Ok(())
     }
 
@@ -689,7 +707,10 @@ mod tests {
         assert!(matches!(lab.controller.start_test(network, &CreateTest { throughput: true, ..request(&a, &b) }), Err(Error::TooSoon(_))));
         let view = lab.controller.start_test(network, &request(&a, &b)).unwrap();
         assert_eq!(view.state, TestState::Running);
-        assert!(matches!(lab.controller.start_test(network, &CreateTest { a: a.id, b: a.id, ..request(&a, &b) }), Err(Error::Invalid(_))));
+        assert!(matches!(
+            lab.controller.start_test(network, &CreateTest { a: a.id, b: a.id, ..request(&a, &b) }),
+            Err(Error::InField { .. })
+        ));
     }
 
     #[test]

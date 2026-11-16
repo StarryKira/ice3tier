@@ -32,11 +32,11 @@ pub async fn self_check(state: &StateDir, running: &Version) -> Result<(), SelfC
 
 /// 把节点运行要读的东西都读一遍：配置文件、私钥、controller 的地址、最后一份 netmap。
 fn load(state: &StateDir) -> anyhow::Result<Loaded> {
-    const NOT_JOINED: &str = "这台机器还没有加入网络";
+    let not_joined = crate::texts::texts().not_joined;
     Config::load(&state.config_path())?;
-    let key = state.key()?.context(NOT_JOINED)?;
-    let controller = state.controller()?.context(NOT_JOINED)?;
-    state.netmap()?.context(NOT_JOINED)?;
+    let key = state.key()?.context(not_joined)?;
+    let controller = state.controller()?.context(not_joined)?;
+    state.netmap()?.context(not_joined)?;
     Ok(Loaded { key, controller })
 }
 
@@ -83,7 +83,8 @@ mod tests {
 
         let empty = tempfile::tempdir().unwrap();
         let failure = self_check(&StateDir::open(empty.path()).unwrap(), &Version::new(0, 2, 0)).await.unwrap_err();
-        assert!(matches!(&failure, SelfCheckFailure::State(reason) if reason.contains("还没有加入网络")), "{failure}");
+        let not_joined = crate::texts::texts().not_joined;
+        assert!(matches!(&failure, SelfCheckFailure::State(reason) if reason.contains(not_joined)), "{failure}");
     }
 
     #[tokio::test]

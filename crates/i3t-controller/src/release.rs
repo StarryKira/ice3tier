@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
+use i3t_model::admin::ReleaseCause;
 use i3t_model::update::{Artifact, LATEST_DIR, MANIFEST_FILE, SIGNATURE_FILE, SignedManifest, Version};
 use i3t_update::FileDigest;
 
@@ -99,6 +100,22 @@ pub enum FetchError {
     BadFileName(String),
     #[error("取回来的 {file} 和清单对不上：{actual_size} 字节、SHA-256 {actual}，清单上是 {expected_size} 字节、{expected}")]
     Mismatch { file: String, expected_size: u64, expected: String, actual_size: u64, actual: String },
+}
+
+impl FetchError {
+    /// 管理 API 里的原因代码，和 `Display` 写的那句话说的是同一件事。
+    #[must_use]
+    pub fn cause(&self) -> ReleaseCause {
+        match self {
+            Self::Http { url, source } => ReleaseCause::FetchFailed { url: url.clone(), error: source.to_string() },
+            Self::Io { path, source } => ReleaseCause::Io { path: path.display().to_string(), error: source.to_string() },
+            Self::BadSignatureFile => ReleaseCause::BadSignatureFile,
+            Self::BadFileName(file) => ReleaseCause::BadFileName { file: file.clone() },
+            Self::Mismatch { file, expected_size, actual_size, .. } => {
+                ReleaseCause::Mismatch { file: file.clone(), expected_size: *expected_size, actual_size: *actual_size }
+            }
+        }
+    }
 }
 
 impl Source {

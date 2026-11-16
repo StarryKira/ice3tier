@@ -1,28 +1,30 @@
 //! 命令行的参数。
+//!
+//! 结构在这里用 clap 的 derive 写；帮助的文字（命令和参数的说明、值的名字）在文字目录里，由 [`command`] 按语言装上去。
+//! 所以这里的类型不写文档注释：clap 会把它们当成说明。
 
 use std::net::{Ipv4Addr, SocketAddr};
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use i3t_lang::Lang;
 use i3t_model::netmap::{IpFamily, LaneMode, Reach, RoutingMode};
 use i3t_proto::flow::Class;
 use ipnet::{IpNet, Ipv4Net};
 
+use crate::texts::{Help, Values, texts};
+
 #[derive(Parser)]
-#[command(name = "i3tctl", version, about = "ice3tier 的管理命令行：通过管理 API 操作 controller")]
+#[command(name = "i3tctl", version)]
 pub struct Cli {
-    /// 管理 API 的地址
     #[arg(long, env = "I3T_ADMIN_URL", default_value = "http://127.0.0.1:20332", global = true)]
     pub url: String,
 
-    /// 管理令牌，controller 第一次启动时打印的那个
     #[arg(long, env = "I3T_ADMIN_TOKEN", hide_env_values = true, global = true, allow_hyphen_values = true)]
     pub token: Option<String>,
 
-    /// 操作哪个网络，写名字或编号。controller 里只有一个网络时可以不写
     #[arg(long, env = "I3T_NETWORK", global = true)]
     pub network: Option<String>,
 
-    /// 原样输出管理 API 的 JSON，给脚本用
     #[arg(long, global = true)]
     pub json: bool,
 
@@ -30,134 +32,97 @@ pub struct Cli {
     pub command: Command,
 }
 
-/// 下面凡是写 NODE 的地方，都可以用节点的编号、名字或者虚拟 IP。
 #[derive(Subcommand)]
 pub enum Command {
-    /// controller 自己的情况；也用来检查地址和令牌对不对
     Status,
-    /// 当前网络的总览：在线的节点、各样东西的数量、互相到不了的节点对
     Overview,
-    /// 操作记录
     Log {
-        /// 最多看多少条
         #[arg(long, default_value_t = 30)]
         limit: u32,
-        /// 只看这种操作，或者以它开头的，例如 node、credential.create
         #[arg(long)]
         action: Option<String>,
-        /// 只看提到这样东西的，写成 <种类>:<编号>，例如 node:3、credential:1
-        #[arg(long = "ref", value_name = "KIND:ID")]
+        #[arg(long = "ref")]
         reference: Option<String>,
-        /// 只看编号比它小的（翻页）
         #[arg(long)]
         before: Option<u64>,
     },
-    /// 在当前网络里把一个标签改名：节点上的、规则里的、还没用掉的注册令牌里的
     #[command(subcommand)]
     Tag(TagCommand),
-    /// 网络
     #[command(subcommand)]
     Network(NetworkCommand),
-    /// 节点
     #[command(subcommand)]
     Node(NodeCommand),
-    /// 把节点启用为 relay，或者停用
     #[command(subcommand)]
     Relay(RelayCommand),
-    /// 把节点启用为出口，或者停用
     #[command(subcommand)]
     Exit(ExitCommand),
-    /// 注册令牌
     #[command(subcommand)]
     Token(TokenCommand),
-    /// 访问规则
     #[command(subcommand)]
     Rule(RuleCommand),
-    /// 接入凭据
     #[command(subcommand)]
     Credential(CredentialCommand),
-    /// 代理监听器
     #[command(subcommand)]
     Listener(ListenerCommand),
-    /// 端口转发
     #[command(subcommand)]
     Forward(ForwardCommand),
-    /// 节点对设置
     #[command(subcommand)]
     Pair(PairCommand),
-    /// 访问关系：谁能访问谁
     #[command(subcommand)]
     Access(AccessCommand),
-    /// 节点程序的更新：设置、查发布源、让节点立即更新
     #[command(subcommand)]
     Update(UpdateCommand),
-    /// A 和 B 之间两个方向现在各走哪条路，以及发送方考虑过的候选路径和代价。先问两个节点，问不到的方向用它最近上报的
-    Path { a: String, b: String },
-    /// 整个网络的路由矩阵：每个节点到它的各个对端现在怎么走，取自各节点最近的上报
-    Routes,
-    /// relay 之间的延迟矩阵：每个 relay 的状态、负载，和它到别的 relay 的延迟、抖动、丢包。现问几个在线的节点
-    Backbone,
-    /// 主动测试 A 和 B 之间：能不能直连，直连和经 relay 的延迟、丢包（和吞吐），两种选路模式各会选哪条路。等它做完再打印
-    Test {
-        /// 发起方：探测和测量从它发出
+    Path {
         a: String,
         b: String,
-        /// 另外量吞吐：每个方向最多 5 秒或 20MB，先到为止。消耗带宽和流量
+    },
+    Routes,
+    Backbone,
+    Test {
+        a: String,
+        b: String,
         #[arg(long)]
         throughput: bool,
-        /// relay 质量测这条路径：按 A 到 B 的顺序经过的 relay，逗号隔开。可以写几次，测几条
-        #[arg(long, value_name = "RELAY[,RELAY]")]
+        #[arg(long)]
         via: Vec<String>,
-        /// 只做这几项，逗号隔开。不写时全做
         #[arg(long, value_delimiter = ',')]
         only: Vec<TestItemArg>,
-        /// 发起之后不等结果，打印测试的编号就返回
         #[arg(long)]
         no_wait: bool,
     },
-    /// 主动测试的历史、单个结果、取消，和全网矩阵
     #[command(subcommand)]
     Tests(TestsCommand),
 }
 
 #[derive(Subcommand)]
 pub enum TestsCommand {
-    /// 最近的测试，新的在前。写了两个节点时只看这一对的
     List {
         a: Option<String>,
         b: Option<String>,
-        /// 最多看多少个
         #[arg(long, default_value_t = 20)]
         limit: u32,
     },
-    /// 一个测试的结果
-    Show { id: u64 },
-    /// 取消一个进行中的测试。已经有的结果照样留着
-    Cancel { id: u64 },
-    /// 全网矩阵：对所有节点对测直连能力和延迟（不测吞吐），分批进行。不加参数时开始一次并等它做完
+    Show {
+        id: u64,
+    },
+    Cancel {
+        id: u64,
+    },
     Matrix {
-        /// 只看最近一次的结果，不开始新的
         #[arg(long, conflicts_with_all = ["cancel", "no_wait"])]
         show: bool,
-        /// 取消正在跑的那一次
         #[arg(long, conflicts_with = "no_wait")]
         cancel: bool,
-        /// 开始之后不等它做完
         #[arg(long)]
         no_wait: bool,
     },
 }
 
-/// 测试项。
 #[derive(Clone, Copy, ValueEnum)]
 pub enum TestItemArg {
-    /// 能不能直连
     Direct,
-    /// 直连的延迟、丢包（和吞吐）
     DirectQuality,
-    /// 经 relay 的延迟、丢包（和吞吐），每一段的分解
     RelayQuality,
-    /// 两种选路模式各会选哪条路
     Route,
 }
 
@@ -174,386 +139,318 @@ impl From<TestItemArg> for i3t_model::admin::diag::TestItem {
 
 #[derive(Subcommand)]
 pub enum NetworkCommand {
-    /// 列出全部网络
     List,
-    /// 新建一个网络。它自带一条 all <-> all 规则
     Create {
-        /// 小写字母、数字和连字符。节点的全名是 <节点>.<网络>.i3t
         name: String,
         #[command(flatten)]
         settings: NetworkSettings,
     },
-    /// 当前网络的设置
     Show,
-    /// 改当前网络的设置
     Set {
         #[command(flatten)]
         settings: NetworkSettings,
     },
-    /// 删掉一个空的网络
     Delete {
-        /// 网络的名字或编号
         network: String,
     },
 }
 
 #[derive(Args)]
 pub struct NetworkSettings {
-    /// 虚拟地址段。网络里有了节点之后只能扩大
     #[arg(long)]
     pub cidr: Option<Ipv4Net>,
-    /// 默认的选路模式
     #[arg(long)]
     pub routing: Option<RoutingArg>,
-    /// 一条路径最多经过几个 relay，1 到 4
     #[arg(long)]
     pub max_relay_hops: Option<u8>,
-    /// 对可用路径的限制
     #[arg(long)]
     pub reach: Option<ReachArg>,
-    /// 默认的服务等级；default 表示 auto
     #[arg(long)]
     pub class: Option<Inherit<ClassArg>>,
 }
 
 #[derive(Subcommand)]
 pub enum TagCommand {
-    /// 把 FROM 改名为 TO
     Rename { from: String, to: String },
 }
 
 #[derive(Subcommand)]
 pub enum NodeCommand {
-    /// 列出当前网络的节点
     List,
-    /// 一个节点的详情
-    Show { node: String },
-    /// 改名
-    Rename { node: String, name: String },
-    /// 整个替换节点的标签；不写标签就是清空
-    Tag { node: String, tags: Vec<String> },
-    /// 改节点的虚拟 IP 和各个开关
+    Show {
+        node: String,
+    },
+    Rename {
+        node: String,
+        name: String,
+    },
+    Tag {
+        node: String,
+        tags: Vec<String>,
+    },
     Set {
         node: String,
-        /// 换一个虚拟 IP。引用旧地址的配置会失效
         #[arg(long)]
         ip: Option<Ipv4Addr>,
-        /// 只拨出：不接受别人主动发来的连接
-        #[arg(long, value_name = "on|off")]
+        #[arg(long)]
         dial_out_only: Option<OnOff>,
-        /// 选路模式；default 表示用网络的
         #[arg(long)]
         routing: Option<Inherit<RoutingArg>>,
-        /// 对可用路径的限制；default 表示用网络的
         #[arg(long)]
         reach: Option<Inherit<ReachArg>>,
-        /// 固定挂靠到这个 relay，可以写多次
-        #[arg(long = "pin", value_name = "NODE")]
+        #[arg(long = "pin")]
         pins: Vec<String>,
-        /// 不再固定挂靠的 relay
         #[arg(long, conflicts_with = "pins")]
         unpin: bool,
     },
-    /// 删掉节点：吊销它的公钥，它的虚拟 IP 和名字进入冷却期
-    Delete { node: String },
-    /// 把 NODE 指定为已下线节点 PREDECESSOR 的继任：继承它的虚拟 IP、名字、标签和指向它的配置
-    Succeed { node: String, predecessor: String },
-    /// 节点最近上报的路由表：它到各个对端现在怎么走
-    Routes { node: String },
-    /// 这个节点能访问谁、谁能访问它、各是哪条规则允许的
-    Access { node: String },
-    /// 节点上的全部监听：下发的监听器、它自己开的回环入口、端口转发；状态、连接数、流量
-    Listeners { node: String },
+    Delete {
+        node: String,
+    },
+    Succeed {
+        node: String,
+        predecessor: String,
+    },
+    Routes {
+        node: String,
+    },
+    Access {
+        node: String,
+    },
+    Listeners {
+        node: String,
+    },
 }
 
 #[derive(Subcommand)]
 pub enum RelayCommand {
-    /// 启用 relay，或者改它的设置。节点要先在本地声明（i3t set can-relay on）
     Enable {
         node: String,
-        /// 从公网能连上的 UDP 地址，可以写多次。--udp 和 --tcp 至少要有一个
         #[arg(long)]
         udp: Vec<SocketAddr>,
-        /// 从公网能连上的 TCP 地址，给 UDP 用不了的节点用，可以写多次
         #[arg(long)]
         tcp: Vec<SocketAddr>,
-        /// 所属区域，随便起名
         #[arg(long, default_value = "")]
         region: String,
-        /// 转发的带宽上限（Mbps）；不写表示不限
         #[arg(long)]
         bandwidth: Option<u32>,
     },
-    /// 停用 relay
-    Disable { node: String },
+    Disable {
+        node: String,
+    },
 }
 
 #[derive(Subcommand)]
 pub enum ExitCommand {
-    /// 启用出口，或者改它的设置。节点要先在本地声明（i3t set can-exit on）
     Enable {
         node: String,
-        /// 互联网目标允许的端口，逗号分隔；any 表示不限制
         #[arg(long, default_value = "80,443")]
         ports: PortList,
-        /// 允许经它访问它所在的局域网
         #[arg(long)]
         lan: bool,
-        /// 带宽上限（Mbps）；不写表示不限
         #[arg(long)]
         bandwidth: Option<u32>,
-        /// 把流交给节点本机的这个 SOCKS5 代理去连目标
         #[arg(long)]
         upstream_socks5: Option<SocketAddr>,
-        /// 每个账期的流量配额，例如 500G、2T；不写表示不限
         #[arg(long)]
         quota: Option<ByteSize>,
-        /// 账期从每月的哪一天开始（UTC），1 到 28
         #[arg(long, default_value_t = 1)]
         reset_day: u8,
-        /// 只连这种地址
         #[arg(long, default_value = "any")]
         family: FamilyArg,
-        /// 同一个发起节点每分钟最多让它向同一个目标新建多少条连接；不写表示不限
         #[arg(long)]
         connects_per_minute: Option<u32>,
-        /// 经它出去的流的默认服务等级
         #[arg(long)]
         class: Option<ClassArg>,
     },
-    /// 停用出口
-    Disable { node: String },
-    /// 启用了的出口：设置、它自己报的计数和配额、健康、用它的节点看到的
+    Disable {
+        node: String,
+    },
     List,
 }
 
 #[derive(Subcommand)]
 pub enum TokenCommand {
-    /// 列出还没用掉的注册令牌
     List {
-        /// 连用掉的和过期的也列出来
         #[arg(long)]
         all: bool,
     },
-    /// 生成一个注册令牌。令牌文本只显示这一次，在要加入的机器上交给 i3t join
     Create {
-        /// 多久之后过期，例如 30m、24h、7d
         #[arg(long, default_value = "24h")]
         expires: Lifetime,
-        /// 用它加入的节点自动带上的标签，可以写多次
         #[arg(long = "tag")]
         tags: Vec<String>,
-        /// 预设的虚拟 IP
         #[arg(long)]
         ip: Option<Ipv4Addr>,
-        /// 用它加入的节点继任这个已下线的节点
-        #[arg(long, value_name = "NODE")]
+        #[arg(long)]
         successor_of: Option<String>,
     },
-    /// 收回一个还没用掉的令牌
-    Delete { id: u32 },
+    Delete {
+        id: u32,
+    },
 }
 
 #[derive(Subcommand)]
 pub enum RuleCommand {
-    /// 列出访问规则
     List,
-    /// 加一条规则：带标签 SRC 的节点和带标签 DST 的节点可以互相访问
     Add {
         src: String,
         dst: String,
-        /// 只有 SRC 一侧能发起（SRC -> DST）
         #[arg(long)]
         one_way: bool,
         #[arg(long, default_value = "")]
         name: String,
-        /// 先建成停用的
         #[arg(long)]
         disabled: bool,
     },
-    /// 启用一条规则
-    Enable { id: u32 },
-    /// 停用一条规则
-    Disable { id: u32 },
-    /// 删掉一条规则
-    Delete { id: u32 },
+    Enable {
+        id: u32,
+    },
+    Disable {
+        id: u32,
+    },
+    Delete {
+        id: u32,
+    },
 }
 
 #[derive(Subcommand)]
 pub enum CredentialCommand {
-    /// 列出接入凭据
     List,
-    /// 签发一个凭据。令牌只显示这一次，调用者把它填在代理的密码字段里
     Create {
         name: String,
-        /// 同时进行的连接数上限；不写表示不限
         #[arg(long)]
         max_concurrent: Option<u32>,
-        /// 流量上限，例如 10G；不写表示不限
         #[arg(long)]
         max_bytes: Option<ByteSize>,
     },
-    /// 改一个凭据的上限，不用重新签发令牌
     Set {
         id: u32,
-        /// 同时进行的连接数上限；none 表示不限
         #[arg(long)]
         max_concurrent: Option<Limit<u32>>,
-        /// 流量上限，例如 10G；none 表示不限
         #[arg(long)]
         max_bytes: Option<Limit<ByteSize>>,
-        /// 用量清零
         #[arg(long)]
         reset_usage: bool,
     },
-    /// 吊销一个凭据；对已经吊销的再执行一次就彻底删掉
-    Delete { id: u32 },
+    Delete {
+        id: u32,
+    },
 }
 
 #[derive(Subcommand)]
 pub enum ListenerCommand {
-    /// 列出监听器
     List {
-        /// 只看这个节点上的
         #[arg(long)]
         node: Option<String>,
     },
-    /// 在 NODE 上加一个代理入口，监听在 BIND
     Add {
         node: String,
         name: String,
         bind: SocketAddr,
-        /// HTTP 代理；不写是 SOCKS5
         #[arg(long)]
         http: bool,
-        /// 来源白名单，可以写多次；不写表示不限制
         #[arg(long)]
         allow_from: Vec<IpNet>,
-        /// 要求调用者在密码字段里带凭据。绑定在非回环地址上时必须要求
         #[arg(long)]
         require_credential: bool,
-        /// 没写用户名、目标又不是组网地址时怎么办：local、reject 或 exit:<NODE>
-        #[arg(long = "default", value_name = "ACTION")]
+        #[arg(long = "default")]
         default_action: Option<String>,
-        /// 这个监听器上的流量都从这个节点出去
-        #[arg(long, value_name = "NODE")]
+        #[arg(long)]
         fixed_exit: Option<String>,
-        /// 这个监听器上的流的默认服务等级
         #[arg(long)]
         class: Option<ClassArg>,
-        /// 乐观回复：on 时不等对端的应答就告诉客户端连上了，off 时一律等；不写按目标的种类
-        #[arg(long, value_name = "on|off")]
+        #[arg(long)]
         optimistic: Option<OnOff>,
     },
-    /// 删掉一个监听器
-    Delete { id: u32 },
+    Delete {
+        id: u32,
+    },
 }
 
 #[derive(Subcommand)]
 pub enum ForwardCommand {
-    /// 列出端口转发和它们的状态
     List,
-    /// 在 LISTEN_NODE 的 BIND 上监听，转发到 TARGET_NODE 去连的 TARGET_ADDR。BIND 的端口写 0 由监听节点挑一个空闲的。
-    /// 目标节点要先在本地声明（i3t set can-forward on）
     Add {
         listen_node: String,
         bind: SocketAddr,
         target_node: String,
         target_addr: SocketAddr,
-        /// 转发 UDP；不写是 TCP
         #[arg(long)]
         udp: bool,
         #[arg(long, default_value = "")]
         name: String,
-        /// 来源白名单，可以写多次；不写表示不限制
         #[arg(long)]
         allow_from: Vec<IpNet>,
-        /// 先建成停用的
         #[arg(long)]
         disabled: bool,
-        /// 这条转发上的流的服务等级
         #[arg(long)]
         class: Option<ClassArg>,
     },
-    /// 启用一条转发
-    Enable { id: u32 },
-    /// 停用一条转发
-    Disable { id: u32 },
-    /// 删掉一条转发
-    Delete { id: u32 },
+    Enable {
+        id: u32,
+    },
+    Disable {
+        id: u32,
+    },
+    Delete {
+        id: u32,
+    },
 }
 
 #[derive(Subcommand)]
 pub enum PairCommand {
-    /// 列出节点对设置
     List,
-    /// 设置一对节点（只改写了的项）
+    // 至少要改一项。
     #[command(group(clap::ArgGroup::new("setting").required(true).multiple(true).args(["keep_alive", "lane"])))]
     Set {
         a: String,
         b: String,
-        /// 这一对节点之间的连接常驻，不因为没有流而关闭
-        #[arg(long, value_name = "on|off")]
+        #[arg(long)]
         keep_alive: Option<OnOff>,
-        /// 承载 TCP 连接的流用不用独占 TCP：off、udp_fallback（共用的连接没有 UDP 的路时用）、always
-        #[arg(long, value_name = "off|udp_fallback|always")]
+        #[arg(long, value_parser = parse_lane)]
         lane: Option<LaneMode>,
     },
-    /// 去掉一对节点的设置，回到默认
     #[command(alias = "delete")]
-    Unset { a: String, b: String },
+    Unset {
+        a: String,
+        b: String,
+    },
 }
 
 #[derive(Subcommand)]
 pub enum AccessCommand {
-    /// 标签、规则，以及没有被任何规则连通的节点
     Graph,
-    /// FROM 能不能访问 TO，是哪条规则允许的
     Check { from: String, to: String },
 }
 
 #[derive(Subcommand)]
 pub enum UpdateCommand {
-    /// 更新的设置和现状：自动更新的开关、发布源、已知的最新版、被暂停的版本
     Show,
-    /// 改设置
     Set {
-        /// 自动更新的开关。开着时，有新版本的节点在空闲的时候自己更新
-        #[arg(long, value_name = "on|off")]
+        #[arg(long)]
         auto: Option<OnOff>,
-        /// 发布源：一个 https:// 或 http:// 地址，或者 controller 所在机器上的一个目录；default 表示项目的发布源
-        #[arg(long, value_name = "地址|目录|default")]
+        #[arg(long)]
         source: Option<String>,
     },
-    /// 现在就查一次发布源
     Check,
-    /// 各个节点的更新情况：有没有新版本、能不能自己更新、进行到哪一步
     Nodes,
-    /// 让一个节点立即更新，不管自动更新开没开。默认马上重启，正在进行的流会断
     Node {
         node: String,
-        /// 排空后更新：节点不再接新的流，等手上的流结束再重启
         #[arg(long)]
         drain: bool,
     },
-    /// 让全部节点立即更新。relay 仍然一个一个来
     All {
-        /// 排空后更新
         #[arg(long)]
         drain: bool,
     },
-    /// 继续一个因为有节点更新失败而被暂停的版本的自动更新
     Resume {
-        /// 版本号，例如 0.3.0
         version: String,
     },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
 pub enum RoutingArg {
-    /// 直连可用就走直连
     DirectFirst,
-    /// 直连和各条 relay 路径比较，取代价最低的
     LowestCost,
 }
 
@@ -569,11 +466,8 @@ impl From<RoutingArg> for RoutingMode {
 #[derive(Clone, Copy, ValueEnum)]
 pub enum ClassArg {
     Auto,
-    /// 尾延迟最重要
     Interactive,
-    /// 一个报文都不丢
     Reliable,
-    /// 吞吐优先
     Bulk,
 }
 
@@ -605,6 +499,11 @@ impl From<FamilyArg> for IpFamily {
     }
 }
 
+/// 独占 TCP 的设置。模型里的解析报的是中文，这里按语言说。
+fn parse_lane(text: &str) -> Result<LaneMode, String> {
+    text.parse().map_err(|_| (texts().ui.must_be)("off, udp_fallback, always"))
+}
+
 /// 字节数：数字加可选的单位 K、M、G、T（按 1000 进位，和网络流量的计法一样）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ByteSize(pub u64);
@@ -613,6 +512,7 @@ impl std::str::FromStr for ByteSize {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let wrong = || (texts().ui.must_be)("500M, 10G");
         let text = s.trim().trim_end_matches(['B', 'b']);
         let (digits, scale) = match text.char_indices().last() {
             Some((index, unit)) if unit.is_ascii_alphabetic() => {
@@ -621,14 +521,14 @@ impl std::str::FromStr for ByteSize {
                     'M' => 1_000_000,
                     'G' => 1_000_000_000,
                     'T' => 1_000_000_000_000,
-                    _ => return Err("单位要是 K、M、G 或 T，例如 500M、10G".to_owned()),
+                    _ => return Err(wrong()),
                 };
                 (&text[..index], scale)
             }
             _ => (text, 1),
         };
-        let count: u64 = digits.trim().parse().map_err(|_| "要写成数字加单位，例如 500M、10G".to_owned())?;
-        count.checked_mul(scale).map(Self).ok_or_else(|| "太大了".to_owned())
+        let count: u64 = digits.trim().parse().map_err(|_| wrong())?;
+        count.checked_mul(scale).map(Self).ok_or_else(|| texts().ui.too_large.to_owned())
     }
 }
 
@@ -643,7 +543,7 @@ impl<T: std::str::FromStr<Err: std::fmt::Display>> std::str::FromStr for Limit<T
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == "none" { Ok(Self::None) } else { s.parse().map(Self::Value).map_err(|err| format!("{err}；或者写 none")) }
+        if s == "none" { Ok(Self::None) } else { s.parse().map(Self::Value).map_err(|err| (texts().ui.or_write)(&err.to_string(), "none")) }
     }
 }
 
@@ -666,9 +566,7 @@ impl From<ByteSize> for u64 {
 #[derive(Clone, Copy, ValueEnum)]
 pub enum ReachArg {
     Any,
-    /// 不使用 relay
     DirectOnly,
-    /// 不建立直连，不向对端暴露公网地址
     RelayOnly,
 }
 
@@ -694,10 +592,13 @@ impl<T: ValueEnum> std::str::FromStr for Inherit<T> {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s == "default" {
-            Ok(Self::Default)
-        } else {
-            T::from_str(s, true).map(Self::Value).map_err(|err| format!("{err}；或者写 default"))
+            return Ok(Self::Default);
         }
+        T::from_str(s, true).map(Self::Value).map_err(|_| {
+            let values: Vec<String> =
+                T::value_variants().iter().filter_map(ValueEnum::to_possible_value).map(|value| value.get_name().to_owned()).collect();
+            (texts().ui.must_be)(&format!("{}, default", values.join(", ")))
+        })
     }
 }
 
@@ -721,7 +622,7 @@ impl std::str::FromStr for OnOff {
         match s {
             "on" => Ok(Self(true)),
             "off" => Ok(Self(false)),
-            _ => Err("要写 on 或 off".to_owned()),
+            _ => Err((texts().ui.must_be)("on, off")),
         }
     }
 }
@@ -736,6 +637,7 @@ impl std::str::FromStr for Lifetime {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let wrong = || (texts().ui.must_be)("30m, 24h, 7d");
         let (digits, unit) = match s.char_indices().last() {
             Some((index, unit)) if unit.is_ascii_alphabetic() => (&s[..index], unit),
             _ => (s, 's'),
@@ -745,10 +647,10 @@ impl std::str::FromStr for Lifetime {
             'm' => 60,
             'h' => 3600,
             'd' => 86400,
-            _ => return Err("单位要是 s、m、h 或 d，例如 30m、24h、7d".to_owned()),
+            _ => return Err(wrong()),
         };
-        let count: u64 = digits.parse().map_err(|_| "要写成数字加单位，例如 30m、24h、7d".to_owned())?;
-        count.checked_mul(scale).map(|secs| Self { secs }).ok_or_else(|| "时间太长了".to_owned())
+        let count: u64 = digits.parse().map_err(|_| wrong())?;
+        count.checked_mul(scale).map(|secs| Self { secs }).ok_or_else(|| texts().ui.too_large.to_owned())
     }
 }
 
@@ -763,21 +665,315 @@ impl std::str::FromStr for PortList {
         if s == "any" {
             return Ok(Self(None));
         }
-        let ports =
-            s.split(',').map(|port| port.trim().parse::<u16>().map_err(|_| format!("{port:?} 不是端口号；写成 80,443 这样，或者 any")));
+        let ports = s.split(',').map(|port| port.trim().parse::<u16>().map_err(|_| (texts().ui.must_be)("80,443, any")));
         ports.collect::<Result<Vec<_>, _>>().map(|ports| Self(Some(ports)))
     }
 }
 
+/// 命令行的定义，帮助按 `lang` 写。
+pub fn command(lang: Lang) -> clap::Command {
+    let texts = crate::texts::texts_in(lang);
+    describe(Cli::command(), &texts.help, &texts.values)
+}
+
+/// 把文字目录里的说明装到命令行上。命令和参数的名字写错了 clap 会 panic，测试按两种语言都装一遍，所以写错过不了测试。
+fn describe(command: clap::Command, h: &Help, v: &Values) -> clap::Command {
+    let node = |arg: clap::Arg| arg.value_name(v.node);
+    let id = |arg: clap::Arg| arg.value_name(v.id);
+    let on_off = |arg: clap::Arg| arg.value_name("on|off");
+    let routing = |arg: clap::Arg| arg.value_name("direct-first|lowest-cost");
+    let reach = |arg: clap::Arg| arg.value_name("any|direct-only|relay-only");
+    let class = |arg: clap::Arg| arg.value_name("auto|interactive|reliable|bulk");
+    let settings = |sub: clap::Command| {
+        sub.mut_arg("cidr", |arg| arg.help(h.network_cidr).value_name(v.cidr))
+            .mut_arg("routing", |arg| routing(arg.help(h.routing)))
+            .mut_arg("max_relay_hops", |arg| arg.help(h.network_max_relay_hops).value_name(v.count))
+            .mut_arg("reach", |arg| reach(arg.help(h.reach)))
+            .mut_arg("class", |arg| arg.help(h.class).value_name("auto|interactive|reliable|bulk|default"))
+    };
+    command
+        .about(h.about)
+        .mut_arg("url", |arg| arg.help(h.url).value_name(v.url))
+        .mut_arg("token", |arg| arg.help(h.token).value_name(v.token))
+        .mut_arg("network", |arg| arg.help(h.network).value_name(v.network))
+        .mut_arg("json", |arg| arg.help(h.json))
+        .mut_subcommand("status", |sub| sub.about(h.status))
+        .mut_subcommand("overview", |sub| sub.about(h.overview))
+        .mut_subcommand("log", |sub| {
+            sub.about(h.log)
+                .mut_arg("limit", |arg| arg.help(h.log_limit).value_name(v.count))
+                .mut_arg("action", |arg| arg.help(h.log_action).value_name(v.action))
+                .mut_arg("reference", |arg| arg.help(h.log_ref).value_name(v.reference))
+                .mut_arg("before", |arg| arg.help(h.log_before).value_name(v.id))
+        })
+        .mut_subcommand("tag", |sub| {
+            sub.about(h.tag).mut_subcommand("rename", |sub| {
+                sub.about(h.tag_rename).mut_arg("from", |arg| arg.value_name(v.tag)).mut_arg("to", |arg| arg.value_name(v.new_tag))
+            })
+        })
+        .mut_subcommand("network", |sub| {
+            sub.about(h.network_group)
+                .mut_subcommand("list", |sub| sub.about(h.network_list))
+                .mut_subcommand("create", |sub| {
+                    settings(sub.about(h.network_create).mut_arg("name", |arg| arg.help(h.network_name).value_name(v.name)))
+                })
+                .mut_subcommand("show", |sub| sub.about(h.network_show))
+                .mut_subcommand("set", |sub| settings(sub.about(h.network_set)))
+                .mut_subcommand("delete", |sub| sub.about(h.network_delete).mut_arg("network", |arg| arg.value_name(v.network)))
+        })
+        .mut_subcommand("node", |sub| {
+            sub.about(h.node_group)
+                .mut_subcommand("list", |sub| sub.about(h.node_list))
+                .mut_subcommand("show", |sub| sub.about(h.node_show).mut_arg("node", node))
+                .mut_subcommand("rename", |sub| {
+                    sub.about(h.node_rename).mut_arg("node", node).mut_arg("name", |arg| arg.value_name(v.name))
+                })
+                .mut_subcommand("tag", |sub| sub.about(h.node_tag).mut_arg("node", node).mut_arg("tags", |arg| arg.value_name(v.tag)))
+                .mut_subcommand("set", |sub| {
+                    sub.about(h.node_set)
+                        .mut_arg("node", node)
+                        .mut_arg("ip", |arg| arg.help(h.node_ip).value_name(v.ip))
+                        .mut_arg("dial_out_only", |arg| on_off(arg.help(h.node_dial_out_only)))
+                        .mut_arg("routing", |arg| arg.help(h.node_routing).value_name("direct-first|lowest-cost|default"))
+                        .mut_arg("reach", |arg| arg.help(h.node_reach).value_name("any|direct-only|relay-only|default"))
+                        .mut_arg("pins", |arg| node(arg.help(h.node_pin)))
+                        .mut_arg("unpin", |arg| arg.help(h.node_unpin))
+                })
+                .mut_subcommand("delete", |sub| sub.about(h.node_delete).mut_arg("node", node))
+                .mut_subcommand("succeed", |sub| {
+                    sub.about(h.node_succeed).mut_arg("node", node).mut_arg("predecessor", |arg| arg.value_name(v.predecessor))
+                })
+                .mut_subcommand("routes", |sub| sub.about(h.node_routes).mut_arg("node", node))
+                .mut_subcommand("access", |sub| sub.about(h.node_access).mut_arg("node", node))
+                .mut_subcommand("listeners", |sub| sub.about(h.node_listeners).mut_arg("node", node))
+        })
+        .mut_subcommand("relay", |sub| {
+            sub.about(h.relay_group)
+                .mut_subcommand("enable", |sub| {
+                    sub.about(h.relay_enable)
+                        .mut_arg("node", node)
+                        .mut_arg("udp", |arg| arg.help(h.relay_udp).value_name(v.address))
+                        .mut_arg("tcp", |arg| arg.help(h.relay_tcp).value_name(v.address))
+                        .mut_arg("region", |arg| arg.help(h.relay_region).value_name(v.name))
+                        .mut_arg("bandwidth", |arg| arg.help(h.bandwidth).value_name("MBIT/S"))
+                })
+                .mut_subcommand("disable", |sub| sub.about(h.relay_disable).mut_arg("node", node))
+        })
+        .mut_subcommand("exit", |sub| {
+            sub.about(h.exit_group)
+                .mut_subcommand("enable", |sub| {
+                    sub.about(h.exit_enable)
+                        .mut_arg("node", node)
+                        .mut_arg("ports", |arg| arg.help(h.exit_ports).value_name(v.ports))
+                        .mut_arg("lan", |arg| arg.help(h.exit_lan))
+                        .mut_arg("bandwidth", |arg| arg.help(h.bandwidth).value_name("MBIT/S"))
+                        .mut_arg("upstream_socks5", |arg| arg.help(h.exit_upstream).value_name(v.address))
+                        .mut_arg("quota", |arg| arg.help(h.exit_quota).value_name(v.size))
+                        .mut_arg("reset_day", |arg| arg.help(h.exit_reset_day).value_name(v.day))
+                        .mut_arg("family", |arg| arg.help(h.exit_family).value_name("any|ipv4|ipv6"))
+                        .mut_arg("connects_per_minute", |arg| arg.help(h.exit_connects).value_name(v.count))
+                        .mut_arg("class", |arg| class(arg.help(h.class)))
+                })
+                .mut_subcommand("disable", |sub| sub.about(h.exit_disable).mut_arg("node", node))
+                .mut_subcommand("list", |sub| sub.about(h.exit_list))
+        })
+        .mut_subcommand("token", |sub| {
+            sub.about(h.token_group)
+                .mut_subcommand("list", |sub| sub.about(h.token_list).mut_arg("all", |arg| arg.help(h.token_all)))
+                .mut_subcommand("create", |sub| {
+                    sub.about(h.token_create)
+                        .mut_arg("expires", |arg| arg.help(h.token_expires).value_name(v.duration))
+                        .mut_arg("tags", |arg| arg.help(h.token_tag).value_name(v.tag))
+                        .mut_arg("ip", |arg| arg.help(h.token_ip).value_name(v.ip))
+                        .mut_arg("successor_of", |arg| node(arg.help(h.token_successor_of)))
+                })
+                .mut_subcommand("delete", |sub| sub.about(h.token_delete).mut_arg("id", id))
+        })
+        .mut_subcommand("rule", |sub| {
+            sub.about(h.rule_group)
+                .mut_subcommand("list", |sub| sub.about(h.rule_list))
+                .mut_subcommand("add", |sub| {
+                    sub.about(h.rule_add)
+                        .mut_arg("src", |arg| arg.value_name("SRC"))
+                        .mut_arg("dst", |arg| arg.value_name("DST"))
+                        .mut_arg("one_way", |arg| arg.help(h.rule_one_way))
+                        .mut_arg("name", |arg| arg.help(h.name).value_name(v.name))
+                        .mut_arg("disabled", |arg| arg.help(h.create_disabled))
+                })
+                .mut_subcommand("enable", |sub| sub.about(h.rule_enable).mut_arg("id", id))
+                .mut_subcommand("disable", |sub| sub.about(h.rule_disable).mut_arg("id", id))
+                .mut_subcommand("delete", |sub| sub.about(h.rule_delete).mut_arg("id", id))
+        })
+        .mut_subcommand("credential", |sub| {
+            sub.about(h.credential_group)
+                .mut_subcommand("list", |sub| sub.about(h.credential_list))
+                .mut_subcommand("create", |sub| {
+                    sub.about(h.credential_create)
+                        .mut_arg("name", |arg| arg.value_name(v.name))
+                        .mut_arg("max_concurrent", |arg| arg.help(h.credential_max_concurrent).value_name(v.count))
+                        .mut_arg("max_bytes", |arg| arg.help(h.credential_max_bytes).value_name(v.size))
+                })
+                .mut_subcommand("set", |sub| {
+                    sub.about(h.credential_set)
+                        .mut_arg("id", id)
+                        .mut_arg("max_concurrent", |arg| arg.help(h.credential_set_max_concurrent).value_name(v.count))
+                        .mut_arg("max_bytes", |arg| arg.help(h.credential_set_max_bytes).value_name(v.size))
+                        .mut_arg("reset_usage", |arg| arg.help(h.credential_reset_usage))
+                })
+                .mut_subcommand("delete", |sub| sub.about(h.credential_delete).mut_arg("id", id))
+        })
+        .mut_subcommand("listener", |sub| {
+            sub.about(h.listener_group)
+                .mut_subcommand("list", |sub| sub.about(h.listener_list).mut_arg("node", |arg| node(arg.help(h.listener_list_node))))
+                .mut_subcommand("add", |sub| {
+                    sub.about(h.listener_add)
+                        .mut_arg("node", node)
+                        .mut_arg("name", |arg| arg.value_name(v.name))
+                        .mut_arg("bind", |arg| arg.value_name(v.address))
+                        .mut_arg("http", |arg| arg.help(h.listener_http))
+                        .mut_arg("allow_from", |arg| arg.help(h.allow_from).value_name(v.cidr))
+                        .mut_arg("require_credential", |arg| arg.help(h.listener_require_credential))
+                        .mut_arg("default_action", |arg| arg.help(h.listener_default).value_name(v.action))
+                        .mut_arg("fixed_exit", |arg| node(arg.help(h.listener_fixed_exit)))
+                        .mut_arg("class", |arg| class(arg.help(h.class)))
+                        .mut_arg("optimistic", |arg| on_off(arg.help(h.listener_optimistic)))
+                })
+                .mut_subcommand("delete", |sub| sub.about(h.listener_delete).mut_arg("id", id))
+        })
+        .mut_subcommand("forward", |sub| {
+            sub.about(h.forward_group)
+                .mut_subcommand("list", |sub| sub.about(h.forward_list))
+                .mut_subcommand("add", |sub| {
+                    sub.about(h.forward_add)
+                        .mut_arg("listen_node", |arg| arg.value_name(v.listen_node))
+                        .mut_arg("bind", |arg| arg.value_name(v.bind))
+                        .mut_arg("target_node", |arg| arg.value_name(v.target_node))
+                        .mut_arg("target_addr", |arg| arg.value_name(v.target_addr))
+                        .mut_arg("udp", |arg| arg.help(h.forward_udp))
+                        .mut_arg("name", |arg| arg.help(h.name).value_name(v.name))
+                        .mut_arg("allow_from", |arg| arg.help(h.allow_from).value_name(v.cidr))
+                        .mut_arg("disabled", |arg| arg.help(h.create_disabled))
+                        .mut_arg("class", |arg| class(arg.help(h.class)))
+                })
+                .mut_subcommand("enable", |sub| sub.about(h.forward_enable).mut_arg("id", id))
+                .mut_subcommand("disable", |sub| sub.about(h.forward_disable).mut_arg("id", id))
+                .mut_subcommand("delete", |sub| sub.about(h.forward_delete).mut_arg("id", id))
+        })
+        .mut_subcommand("pair", |sub| {
+            sub.about(h.pair_group)
+                .mut_subcommand("list", |sub| sub.about(h.pair_list))
+                .mut_subcommand("set", |sub| {
+                    sub.about(h.pair_set)
+                        .mut_arg("a", node)
+                        .mut_arg("b", node)
+                        .mut_arg("keep_alive", |arg| on_off(arg.help(h.pair_keep_alive)))
+                        .mut_arg("lane", |arg| arg.help(h.pair_lane).value_name("off|udp_fallback|always"))
+                })
+                .mut_subcommand("unset", |sub| sub.about(h.pair_unset).mut_arg("a", node).mut_arg("b", node))
+        })
+        .mut_subcommand("access", |sub| {
+            sub.about(h.access_group)
+                .mut_subcommand("graph", |sub| sub.about(h.access_graph))
+                .mut_subcommand("check", |sub| sub.about(h.access_check).mut_arg("from", node).mut_arg("to", node))
+        })
+        .mut_subcommand("update", |sub| {
+            sub.about(h.update_group)
+                .mut_subcommand("show", |sub| sub.about(h.update_show))
+                .mut_subcommand("set", |sub| {
+                    sub.about(h.update_set)
+                        .mut_arg("auto", |arg| on_off(arg.help(h.update_auto)))
+                        .mut_arg("source", |arg| arg.help(h.update_source).value_name(v.source))
+                })
+                .mut_subcommand("check", |sub| sub.about(h.update_check))
+                .mut_subcommand("nodes", |sub| sub.about(h.update_nodes))
+                .mut_subcommand("node", |sub| {
+                    sub.about(h.update_node).mut_arg("node", node).mut_arg("drain", |arg| arg.help(h.update_drain))
+                })
+                .mut_subcommand("all", |sub| sub.about(h.update_all).mut_arg("drain", |arg| arg.help(h.update_drain)))
+                .mut_subcommand("resume", |sub| sub.about(h.update_resume).mut_arg("version", |arg| arg.value_name(v.version)))
+        })
+        .mut_subcommand("path", |sub| sub.about(h.path).mut_arg("a", node).mut_arg("b", node))
+        .mut_subcommand("routes", |sub| sub.about(h.routes))
+        .mut_subcommand("backbone", |sub| sub.about(h.backbone))
+        .mut_subcommand("test", |sub| {
+            sub.about(h.test)
+                .mut_arg("a", |arg| node(arg.help(h.test_a)))
+                .mut_arg("b", node)
+                .mut_arg("throughput", |arg| arg.help(h.test_throughput))
+                .mut_arg("via", |arg| arg.help(h.test_via).value_name(v.relays))
+                .mut_arg("only", |arg| arg.help(h.test_only).value_name("direct,direct-quality,relay-quality,route"))
+                .mut_arg("no_wait", |arg| arg.help(h.no_wait))
+        })
+        .mut_subcommand("tests", |sub| {
+            sub.about(h.tests_group)
+                .mut_subcommand("list", |sub| {
+                    sub.about(h.tests_list)
+                        .mut_arg("a", node)
+                        .mut_arg("b", node)
+                        .mut_arg("limit", |arg| arg.help(h.tests_limit).value_name(v.count))
+                })
+                .mut_subcommand("show", |sub| sub.about(h.tests_show).mut_arg("id", id))
+                .mut_subcommand("cancel", |sub| sub.about(h.tests_cancel).mut_arg("id", id))
+                .mut_subcommand("matrix", |sub| {
+                    sub.about(h.tests_matrix)
+                        .mut_arg("show", |arg| arg.help(h.tests_matrix_show))
+                        .mut_arg("cancel", |arg| arg.help(h.tests_matrix_cancel))
+                        .mut_arg("no_wait", |arg| arg.help(h.no_wait))
+                })
+        })
+}
+
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
+    use std::ffi::OsString;
+
+    use i3t_lang::cli::{CLAP_ENGLISH, all_help, has_chinese, try_parse_from};
 
     use super::*;
 
+    fn parse(args: &[&str]) -> Cli {
+        try_parse_from(command(Lang::English), Lang::English, ["i3tctl"].iter().chain(args).map(OsString::from)).unwrap()
+    }
+
+    fn fails(args: &[&str]) -> bool {
+        try_parse_from::<Cli>(command(Lang::English), Lang::English, ["i3tctl"].iter().chain(args).map(OsString::from)).is_err()
+    }
+
     #[test]
-    fn the_command_line_definition_is_consistent() {
-        Cli::command().debug_assert();
+    fn the_command_line_definition_is_consistent_in_both_languages() {
+        for lang in Lang::ALL {
+            i3t_lang::cli::localize(command(lang), lang).debug_assert();
+        }
+    }
+
+    #[test]
+    fn every_command_and_option_is_described_in_both_languages_without_the_other_language() {
+        for lang in Lang::ALL {
+            let mut built = i3t_lang::cli::localize(command(lang), lang);
+            built.build();
+            let mut stack = vec![built];
+            while let Some(command) = stack.pop() {
+                assert!(command.get_about().is_some(), "{lang:?}：{} 没有说明", command.get_name());
+                for arg in command.get_arguments().filter(|arg| !arg.is_positional()) {
+                    assert!(
+                        arg.get_help().is_some_and(|help| !help.to_string().is_empty()),
+                        "{lang:?}：{} --{} 没有说明",
+                        command.get_name(),
+                        arg.get_id()
+                    );
+                }
+                stack.extend(command.get_subcommands().cloned());
+            }
+        }
+        for (path, help) in all_help(command(Lang::English), Lang::English) {
+            assert!(!has_chinese(&help), "{path} 的英文帮助里有中文：\n{help}");
+        }
+        for (path, help) in all_help(command(Lang::ZhCn), Lang::ZhCn) {
+            for english in CLAP_ENGLISH {
+                assert!(!help.contains(english), "{path} 的中文帮助里有 {english}：\n{help}");
+            }
+            assert!(has_chinese(&help), "{path}：\n{help}");
+        }
     }
 
     #[test]
@@ -801,17 +997,16 @@ mod tests {
 
     #[test]
     fn update_and_path_commands_parse() {
-        let parse = |args: &[&str]| Cli::try_parse_from([&["i3tctl"], args].concat()).unwrap().command;
-        assert!(matches!(parse(&["update", "node", "nas", "--drain"]), Command::Update(UpdateCommand::Node { drain: true, .. })));
-        assert!(matches!(parse(&["update", "all"]), Command::Update(UpdateCommand::All { drain: false })));
+        assert!(matches!(parse(&["update", "node", "nas", "--drain"]).command, Command::Update(UpdateCommand::Node { drain: true, .. })));
+        assert!(matches!(parse(&["update", "all"]).command, Command::Update(UpdateCommand::All { drain: false })));
         assert!(matches!(
-            parse(&["update", "set", "--auto", "off"]),
+            parse(&["update", "set", "--auto", "off"]).command,
             Command::Update(UpdateCommand::Set { auto: Some(OnOff(false)), source: None })
         ));
-        assert!(matches!(parse(&["path", "a", "b"]), Command::Path { .. }));
-        assert!(matches!(parse(&["routes"]), Command::Routes));
-        assert!(matches!(parse(&["backbone"]), Command::Backbone));
-        assert!(Cli::try_parse_from(["i3tctl", "update", "set", "--auto", "maybe"]).is_err());
+        assert!(matches!(parse(&["path", "a", "b"]).command, Command::Path { .. }));
+        assert!(matches!(parse(&["routes"]).command, Command::Routes));
+        assert!(matches!(parse(&["backbone"]).command, Command::Backbone));
+        assert!(fails(&["update", "set", "--auto", "maybe"]));
     }
 
     #[test]
@@ -823,24 +1018,25 @@ mod tests {
         assert!("10X".parse::<ByteSize>().is_err() && "lots".parse::<ByteSize>().is_err());
         assert!(matches!("none".parse::<Limit<ByteSize>>(), Ok(Limit::None)));
         assert!(matches!("1K".parse::<Limit<ByteSize>>(), Ok(Limit::Value(ByteSize(1000)))));
-        let parse = |args: &[&str]| Cli::try_parse_from([&["i3tctl"], args].concat()).unwrap().command;
         assert!(matches!(
-            parse(&["credential", "set", "3", "--max-bytes", "none", "--reset-usage"]),
+            parse(&["credential", "set", "3", "--max-bytes", "none", "--reset-usage"]).command,
             Command::Credential(CredentialCommand::Set { id: 3, reset_usage: true, .. })
         ));
         assert!(matches!(
-            parse(&["exit", "enable", "gw", "--quota", "1G", "--family", "ipv4"]),
+            parse(&["exit", "enable", "gw", "--quota", "1G", "--family", "ipv4"]).command,
             Command::Exit(ExitCommand::Enable { quota: Some(ByteSize(1_000_000_000)), .. })
         ));
-        assert!(matches!(parse(&["tag", "rename", "a", "b"]), Command::Tag(TagCommand::Rename { .. })));
-        assert!(matches!(parse(&["token", "list", "--all"]), Command::Token(TokenCommand::List { all: true })));
-        assert!(matches!(parse(&["log", "--ref", "node:3", "--action", "node"]), Command::Log { .. }));
-        assert!(matches!(parse(&["node", "listeners", "gw"]), Command::Node(NodeCommand::Listeners { .. })));
+        assert!(matches!(parse(&["tag", "rename", "a", "b"]).command, Command::Tag(TagCommand::Rename { .. })));
+        assert!(matches!(parse(&["token", "list", "--all"]).command, Command::Token(TokenCommand::List { all: true })));
+        assert!(matches!(parse(&["log", "--ref", "node:3", "--action", "node"]).command, Command::Log { .. }));
+        assert!(matches!(parse(&["node", "listeners", "gw"]).command, Command::Node(NodeCommand::Listeners { .. })));
+        assert!(matches!(parse(&["pair", "set", "a", "b", "--lane", "always"]).command, Command::Pair(PairCommand::Set { .. })));
+        assert!(fails(&["pair", "set", "a", "b", "--lane", "sometimes"]));
     }
 
     #[test]
     fn global_flags_can_follow_the_subcommand() {
-        let cli = Cli::try_parse_from(["i3tctl", "node", "list", "--json", "--network", "home", "--url", "http://127.0.0.1:1"]).unwrap();
+        let cli = parse(&["node", "list", "--json", "--network", "home", "--url", "http://127.0.0.1:1"]);
         assert!(cli.json);
         assert_eq!((cli.network.as_deref(), cli.url.as_str()), (Some("home"), "http://127.0.0.1:1"));
         assert!(matches!(cli.command, Command::Node(NodeCommand::List)));

@@ -138,6 +138,11 @@ impl NodeLanes {
     pub(crate) fn status(&self) -> LaneStatus {
         self.lanes.status()
     }
+
+    /// lane 的状况写成上报的样子，带上每个对端的共用连接现在有没有 UDP 的路（`udp_fallback` 按它决定开流走不走 lane）。
+    pub(crate) fn report(&self) -> LaneReport {
+        report(&self.lanes.status(), |peer| Some(self.endpoint.path_has_udp(peer)))
+    }
 }
 
 /// 要开 lane 的对端和它们的设置。两边都不能被拨的对端不在里面。
@@ -170,8 +175,8 @@ impl PublicAddresses {
     }
 }
 
-/// lane 的状况写成上报的样子。
-pub(crate) fn report(status: &LaneStatus) -> LaneReport {
+/// lane 的状况写成上报的样子。`udp_path` 说到一个对端的共用连接现在有没有 UDP 的路，不知道时是 `None`。
+pub(crate) fn report(status: &LaneStatus, udp_path: impl Fn(NodeId) -> Option<bool>) -> LaneReport {
     let failures = &status.handshake_failures;
     LaneReport {
         total: counts(&status.total),
@@ -192,6 +197,7 @@ pub(crate) fn report(status: &LaneStatus) -> LaneReport {
                 idle: peer.idle,
                 ready: peer.ready,
                 parked_at_peer: peer.parked_at_peer,
+                udp_path: udp_path(peer.peer),
                 counts: counts(&peer.counts),
             })
             .collect(),

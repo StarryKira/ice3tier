@@ -73,7 +73,7 @@ def punch_and_udp_blocked(lab: Lab, work: Path, t: Checks) -> None:
     c_side = next((side for side in direct.get("sides", []) if side["node"] == c.id), {})
     t.check("c 自己报 UDP 不通", c_side.get("udp") is False and c_side.get("failure") == "udp_blocked", str(c_side))
     shown = human(controller, "tests", "show", str(view["id"]))
-    t.check("i3tctl 打印出原因", "udp_blocked（c）" in shown, shown)
+    t.check("i3tctl 打印出原因", "c：UDP 不通" in shown, shown)
     if t.failures:
         print(tail(a.read_log(), 30), tail(c.read_log(), 30), tail(controller.log.read_text(errors="replace"), 20), sep="\n  ---\n")
 
@@ -199,7 +199,7 @@ def two_relays_and_route_decision(lab: Lab, work: Path, t: Checks) -> None:
             str(forward_route(controller, a, b)))
     t.check("默认模式的选择仍然是直连", (decision.get("direct_first") or {}).get("route", {}).get("via") == "direct", str(decision))
     shown = human(controller, "tests", "show", str(view["id"]))
-    t.check("i3tctl 打印出两种模式的选择", "DIRECT-FIRST" in shown and "lowest_cost" in shown, shown)
+    t.check("i3tctl 打印出两种模式的选择", "延迟优先" in shown and "代价最低" in shown, shown)
     if t.failures:
         print(tail(a.read_log(), 40), tail(b.read_log(), 20), sep="\n  ---\n")
 
@@ -235,7 +235,7 @@ def matrix_five_nodes(lab: Lab, work: Path, t: Checks) -> None:
     t.check("每一对是一个测试，历史里看得到", len([view for view in tests if view.get("matrix") == run["id"]]) == 10, str(len(tests)))
     t.check("矩阵不量吞吐", all(not view["request"]["throughput"] for view in tests))
     shown = human(controller, "tests", "matrix", "--show")
-    t.check("i3tctl 打印出矩阵", shown.startswith(f"全网矩阵 #{run['id']}  done"), shown)
+    t.check("i3tctl 打印出矩阵", shown.startswith(f"全网矩阵 #{run['id']}  完成"), shown)
     if t.failures:
         print(tail(d.read_log(), 30), tail(controller.log.read_text(errors="replace"), 30), sep="\n  ---\n")
 

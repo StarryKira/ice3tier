@@ -190,7 +190,7 @@ impl Member {
                 }
                 ToNode::Signal { from, signal } => self.signals.push((from, signal)),
                 ToNode::Revoked => self.revoked = true,
-                ToNode::Rejected { reason } => panic!("已经报到的连接上不应该收到 rejected：{reason}"),
+                ToNode::Rejected { reason, .. } => panic!("已经报到的连接上不应该收到 rejected：{reason}"),
                 ToNode::Heartbeat => {}
                 ToNode::Update { manifest, timing } => self.orders.push((manifest, timing)),
                 ToNode::UpdateCancel => self.cancels += 1,

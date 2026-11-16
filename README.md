@@ -98,6 +98,8 @@ Linux 上可以用 `i3t tune` 检查会影响节点表现的内核参数（UDP �
 
 节点的本机设置在状态目录的 `config.toml` 里，每一项都有注释。`i3t status` 查看节点的状态，`i3t routes` 查看到各个对端现在怎么走。
 
+三个程序在终端上的文字跟着系统的语言：简体中文或英文。要指定的话设环境变量 `I3T_LANG=zh-CN` 或 `I3T_LANG=en`。`config.toml` 的注释用第一次写它时的语言；日志不翻译。
+
 ## 构建
 
 需要 Rust 1.88 或更新的稳定版；Web 界面要 Node.js 22 和 pnpm。

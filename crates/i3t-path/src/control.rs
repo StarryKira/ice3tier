@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use i3t_crypto::{NodeKey, Signature};
 use i3t_model::Netmap;
-use i3t_model::control::{Route, RouteEntry, Signal};
+use i3t_model::control::{Route, RouteCause, RouteEntry, RouteHint, Signal};
 use i3t_model::netmap::{Attachment, Reach, RoutingMode};
 use i3t_proto::backbone::{Link, LinkQuality, RelayState, Row};
 use i3t_proto::datagram::{MAX_RELAY_HOPS, RelayPath};
@@ -44,7 +44,7 @@ use i3t_underlay::portmap::{GatewaySource, PortMapConfig, PortMapper};
 use i3t_underlay::{AddrQuery, ifaddr};
 use tokio::sync::{mpsc, oneshot, watch};
 
-use self::route::{RouteKey, Via, View, describe, explain, relay_candidates, relay_in_use, route_text};
+use self::route::{Reason, RouteKey, Via, View, describe, explain, relay_candidates, relay_in_use, route_text};
 use crate::budget::Budget;
 use crate::diag::{
     DirectAttempt, HopReport, Pin, RouteDecision, Side, TestPath, TestSpec, TrainError, TrainReport, TrainRun, TrainSpec, Window,
@@ -191,8 +191,8 @@ struct PeerState {
     active_source: Option<SocketAddr>,
     /// 陌生地址来的、自称是这个对端的 PING 的验签额度。
     stranger_budget: Budget,
-    /// 下一次换路时写进日志的原因。
-    hint: Option<&'static str>,
+    /// 下一次换路的直接起因。
+    hint: Option<RouteHint>,
     /// 哪些 relay 说过这个对端没挂在它上面，到什么时候为止不把它们当作最后一个 relay。
     unattached: Vec<(NodeId, Instant)>,
     /// 端到端的探测没有回音的多级路径，到什么时候为止不用。
@@ -203,7 +203,7 @@ struct PeerState {
     /// 最近一次算出来的候选路径，按代价从低到高。
     candidates: Vec<Candidate>,
     /// 现在这条路是为什么选的，以及是什么时候换上的。
-    reason: String,
+    reason: Reason,
     switched: Option<Instant>,
     /// 上一次从没有路变成有路的时刻。见 [`route::relay_in_use`]。
     first_route: Option<Instant>,
@@ -547,7 +547,7 @@ impl Control {
             table.peers.remove(&id);
             peer.slot.set_hop(Hop::None);
             if peer.route != RouteKey::None {
-                self.announce(id, RouteKey::None, "对端不在 netmap 里了".to_owned());
+                self.announce(id, RouteKey::None, Reason::new("对端不在 netmap 里了", RouteCause::PeerRemoved));
             }
         }
         if !gone.is_empty() {
@@ -585,7 +585,7 @@ impl Control {
                     probe: PathProbe::default(),
                     selector: Selector::default(),
                     candidates: Vec::new(),
-                    reason: "还没有可用的路径".to_owned(),
+                    reason: Reason::no_route_yet(),
                     switched: None,
                     first_route: None,
                     pin: None,
@@ -733,7 +733,7 @@ impl Control {
                 tracing::info!(%relay, %next, "relay 说多级路径走不下去，这一段先不用");
                 self.broken.push((relay, next, until));
                 for peer in self.peers.values_mut().filter(|peer| on_route(peer)) {
-                    peer.hint = Some("relay 说多级路径走不下去");
+                    peer.hint = Some(RouteHint::RelayPathBroken);
                 }
             }
         }
@@ -744,7 +744,7 @@ impl Control {
         let Some(state) = self.peers.get_mut(&peer) else { return };
         state.unattached.retain(|(id, _)| *id != relay);
         state.unattached.push((relay, now + UNATTACHED_HOLD));
-        state.hint = Some("relay 说对端没有挂在它上面");
+        state.hint = Some(RouteHint::PeerNotAttached);
     }
 
     /// 骨干矩阵的一行，是从 `via` 这个 relay 的会话上收到的（它自己的，或者它转来的别的 relay 的）。
@@ -1042,11 +1042,11 @@ impl Control {
             let notice = match state {
                 RelayState::Draining => {
                     tracing::info!(relay = %id, "relay 通知即将下线：有别的路可走的话，经它的路径和到它的挂靠马上换到别处");
-                    Some("relay 通知即将下线")
+                    Some(RouteHint::RelayDraining)
                 }
                 RelayState::Overloaded => {
                     tracing::info!(relay = %id, "relay 通知过载：有别的 relay 可走的话先改走别的，等它恢复");
-                    Some("relay 通知过载")
+                    Some(RouteHint::RelayOverloaded)
                 }
                 RelayState::Serving => {
                     tracing::info!(relay = %id, "relay 可以正常使用了");
@@ -1151,7 +1151,7 @@ impl Control {
             let policy = direct_policy(&self.shared, self.allow_direct, self.dial_out_only, self.mode, &self.endpoints, peer);
             let step = peer.direct.poll(now, &policy);
             if let Some(Change::Down { reason }) = step.change {
-                peer.hint = Some(reason.describe());
+                peer.hint = Some(reason.hint());
             }
             if !step.actions.is_empty() {
                 todo.push((id, step.actions));
@@ -1253,7 +1253,7 @@ impl Control {
                         peer.probe = PathProbe { answered: peer.probe.answered, ..PathProbe::default() };
                         peer.suspect.retain(|(suspect, _)| *suspect != path);
                         peer.suspect.push((path, now + SUSPECT_HOLD));
-                        peer.hint = Some("经多个 relay 的路径上端到端的探测一直没有回音");
+                        peer.hint = Some(RouteHint::PathProbeSilent);
                     } else if peer.probe.pending.is_none() {
                         // 有流量、或者已经丢过探测时探测得勤一些：断了要在几秒之内发现。
                         let busy = peer.probe.missed > 0 || peer.slot.last_tx.within(&shared.clock, PATH_PROBE_BUSY);
@@ -1329,13 +1329,13 @@ impl Control {
                     && relay_in_use(peer, now).is_none()
                     && peer.hint.is_none()
                 {
-                    peer.hint = Some("刚有路时先连上的不是对端排在前面的 relay，那个 relay 的会话随后也建好了");
+                    peer.hint = Some(RouteHint::PreferredRelayReady);
                 }
                 let hint = peer.hint.take();
                 let reason = if peer.pinned {
-                    format!("主动测试暂时把路固定在{}", route_text(key))
+                    Reason::new(format!("主动测试暂时把路固定在{}", route_text(key)), RouteCause::TestPinned)
                 } else if was_pinned {
-                    format!("主动测试结束，回到选路规则选的{}", route_text(key))
+                    Reason::new(format!("主动测试结束，回到选路规则选的{}", route_text(key)), RouteCause::TestEnded)
                 } else {
                     match why {
                         Some(why) => explain(why, key, peer.route, &peer.candidates, hint),
@@ -1383,11 +1383,11 @@ impl Control {
     }
 
     /// 每一次换路都记一条带原因的日志，并且通知订阅的人。
-    fn announce(&self, peer: NodeId, key: RouteKey, reason: String) {
+    fn announce(&self, peer: NodeId, key: RouteKey, reason: Reason) {
         let route = key.to_route();
-        tracing::info!(%peer, path = %route_text(key), reason, "到对端的路变了");
+        tracing::info!(%peer, path = %route_text(key), reason = reason.text.as_str(), "到对端的路变了");
         // 没有人订阅时发送会失败，那就是没有人要听。
-        let _subscribers = self.shared.changes.send(RouteChange { peer, route, reason });
+        let _subscribers = self.shared.changes.send(RouteChange { peer, route, reason: reason.text, cause: reason.cause });
         self.shared.route_changed.notify_waiters();
     }
 
@@ -1517,7 +1517,8 @@ impl Control {
                 RouteKey::Relay { via: Via::Tcp(_), .. } => Some(RelayLeg::Tcp),
                 RouteKey::Relay { via: Via::Local, .. } | RouteKey::Direct(_) | RouteKey::None => None,
             },
-            reason: peer.reason.clone(),
+            reason: peer.reason.text.clone(),
+            cause: Some(peer.reason.cause.clone()),
             since_switch_ms: peer.switched.map(|at| u64::try_from(now.saturating_duration_since(at).as_millis()).unwrap_or(u64::MAX)),
             candidates,
         }
@@ -1951,7 +1952,11 @@ mod tests {
         assert_eq!(harness.control.peers[&node(2)].policy_route, direct, "选路规则选的还是直连");
         let decision = harness.control.decide(node(2), start).unwrap();
         assert_eq!(decision.current, direct.to_route(), "测试的结果里写的是规则选的路，不是测试自己固定的");
-        assert!(changes.try_recv().unwrap().reason.contains("主动测试暂时把路固定在"));
+        let change = changes.try_recv().unwrap();
+        assert!(change.reason.contains("主动测试暂时把路固定在"));
+        assert_eq!(change.cause, RouteCause::TestPinned);
+        let peer = &harness.control.peers[&node(2)];
+        assert_eq!(harness.control.report(node(2), peer, start).cause, Some(RouteCause::TestPinned), "现问时说的也是同一个原因");
 
         // 别的固定的解除不算数；这一次的解除之后回到直连。
         harness.control.unpin(node(2), 7);
@@ -1960,7 +1965,9 @@ mod tests {
         harness.control.unpin(node(2), 1);
         harness.control.update_routes(start, false);
         assert_eq!(route(&harness), direct);
-        assert!(changes.try_recv().unwrap().reason.contains("主动测试结束"));
+        let change = changes.try_recv().unwrap();
+        assert!(change.reason.contains("主动测试结束"));
+        assert_eq!(change.cause, RouteCause::TestEnded);
 
         // 到期的固定由控制任务自己解除，拿着它的一方什么都不用做。
         harness.control.pin(node(2), Pin { id: 2, path: TestPath::Relays(own), until: start + Duration::from_secs(1) }, start);

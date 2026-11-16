@@ -101,8 +101,9 @@ fn a_manifest_signed_with_another_key_is_refused() {
     assert!(matches!(refusal(updater.check(&manifest, UpdateTiming::Now)), Refusal::Manifest(ManifestError::BadSignature)));
     // 连清单都没有验过，所以状态里说不出是哪个版本。
     let status = updater.status().borrow().clone();
-    let UpdateStatus::Failed { version: None, kind: FailureKind::NotInstalled, reason } = status else { panic!("{status:?}") };
+    let UpdateStatus::Failed { version: None, kind: FailureKind::NotInstalled, reason, cause } = status else { panic!("{status:?}") };
     assert_eq!(reason, "不装这份清单：清单的签名不是任何一把受信任的发布公钥签的");
+    assert_eq!(cause, Some(UpdateCause::BadSignature));
 }
 
 #[test]
@@ -424,7 +425,7 @@ exit 0"#;
 
         let error = old.update(&release.signed, UpdateTiming::Now, &release.source, &mut flows).await.unwrap_err();
         assert!(
-            matches!(&error, UpdateError::SelfCheck { version: failed, reason } if *failed == version(NEW) && reason == "退出码 3：读不了 config.toml"),
+            matches!(&error, UpdateError::SelfCheck { version: failed, reason, .. } if *failed == version(NEW) && reason == "退出码 3：读不了 config.toml"),
             "{error:?}"
         );
         assert_eq!(node.running_program(), fake_program(OLD, "exit 0"));
@@ -436,6 +437,7 @@ exit 0"#;
                 version: Some(version(NEW)),
                 kind: FailureKind::VersionRejected,
                 reason: "版本 0.2.0 的自检没有通过：退出码 3：读不了 config.toml".to_owned(),
+                cause: Some(UpdateCause::SelfCheck { exit_code: Some(3), output: "读不了 config.toml".to_owned() }),
             }
         );
         // 没有换程序，所以启动时没有东西要确认，也没有东西要换回。
@@ -496,7 +498,12 @@ exit 0"#;
         assert_eq!(old.startup().unwrap(), Startup::Clean);
         assert_eq!(
             *old.status().borrow(),
-            UpdateStatus::Failed { version: Some(version(NEW)), kind: FailureKind::VersionRejected, reason: rolled_back.reason }
+            UpdateStatus::Failed {
+                version: Some(version(NEW)),
+                kind: FailureKind::VersionRejected,
+                reason: rolled_back.reason,
+                cause: Some(UpdateCause::StartsUnconfirmed { starts: MAX_UNCONFIRMED_STARTS }),
+            }
         );
         let error = old.check(&release.signed, UpdateTiming::Idle).unwrap_err();
         assert!(matches!(error, UpdateError::Refused(Refusal::FailedBefore { .. })), "{error:?}");

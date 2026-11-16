@@ -280,7 +280,7 @@ impl Node {
                 self.link = Some(link);
                 Ok(())
             }
-            Some(ToNode::Rejected { reason }) => {
+            Some(ToNode::Rejected { reason, .. }) => {
                 assert!(link.recv().await.is_none(), "拒绝之后 controller 应该关闭连接");
                 Err(reason)
             }

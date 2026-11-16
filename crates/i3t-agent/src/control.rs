@@ -38,6 +38,7 @@ use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
 use crate::state::{ControllerInfo, StateDir};
+use crate::texts::{CONNECT_ZH, Connect, texts};
 
 /// 节点协议在 TLS 上的 ALPN。
 pub const ALPN: &[u8] = b"i3t-ctl/1";
@@ -62,18 +63,23 @@ const RTT_NOISE_MS: u32 = 10;
 ///
 /// 连不上 controller、controller 的公钥不对、令牌被拒绝，或者回答不符合协议。
 pub async fn enroll(controller: &ControllerInfo, key: &NodeKey, secret: &str, hello: Hello) -> anyhow::Result<Netmap> {
-    let mut stream = connect(controller, key).await?;
+    let said = texts();
+    let mut stream = connect(controller, key, &said.connect).await?;
     write_message(&mut stream, &ToController::Enroll { token: secret.to_owned(), hello }).await?;
-    let first = timeout(CONNECT_TIMEOUT, read_message::<_, ToNode>(&mut stream)).await.context("等 controller 回答注册请求超时")??;
+    let first = timeout(CONNECT_TIMEOUT, read_message::<_, ToNode>(&mut stream)).await.context(said.enroll_timeout)??;
     match first {
         Some(ToNode::Snapshot(netmap)) => {
             write_message(&mut stream, &ToController::Ack { version: netmap.version }).await?;
             Ok(*netmap)
         }
-        Some(ToNode::Rejected { reason }) => bail!("controller 拒绝了注册：{reason}"),
-        Some(ToNode::TryLater { reason }) => bail!("controller 暂时处理不了注册请求，令牌没有用掉，请稍后再试：{reason}"),
-        Some(other) => bail!("controller 对注册请求的回答不对：{}", kind_of(&other)),
-        None => bail!("controller 没有回答就关闭了连接"),
+        Some(ToNode::Rejected { reason, cause }) => {
+            // controller 的原话是中文的；带了原因的代码时按这个程序的语言说。
+            let reason = cause.map_or(reason, |cause| (i3t_lang::current().codes().reject_cause)(cause).to_owned());
+            bail!((said.enroll_rejected)(&reason))
+        }
+        Some(ToNode::TryLater { reason }) => bail!((said.enroll_try_later)(&reason)),
+        Some(other) => bail!((said.enroll_unexpected)(kind_of(&other))),
+        None => bail!(said.enroll_closed),
     }
 }
 
@@ -86,15 +92,16 @@ pub async fn enroll(controller: &ControllerInfo, key: &NodeKey, secret: &str, he
 ///
 /// 连不上 controller、controller 的公钥不对，或者 controller 拒绝了这次握手。
 pub async fn probe(controller: &ControllerInfo, key: &NodeKey) -> anyhow::Result<()> {
-    let mut stream = connect(controller, key).await?;
-    stream.shutdown().await.context("关闭探测用的连接")?;
+    let said = texts();
+    let mut stream = connect(controller, key, &said.connect).await?;
+    stream.shutdown().await.context(said.probe_close)?;
     // TLS 1.3 里客户端先完成握手：controller 要是不收本节点的证书，要到这里读的时候才看得到它的拒绝。
     let mut rest = [0; 64];
     match timeout(PROBE_CLOSE_TIMEOUT, stream.read(&mut rest)).await {
         // controller 关了连接（没有发关闭通知就断开也算）：握手是成了的。
         Ok(Ok(_)) => Ok(()),
         Ok(Err(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => Ok(()),
-        Ok(Err(err)) => Err(err).context("controller 拒绝了握手"),
+        Ok(Err(err)) => Err(err).context(said.probe_refused),
         // 握手已经完成，只是 controller 迟迟不关连接。它没有拒绝，算通过。
         Err(_) => Ok(()),
     }
@@ -391,7 +398,8 @@ impl Worker {
 
     /// 连 controller。连上之前来的请求同样马上告诉对方做不了：连接可能要等到超时才知道连不上。
     async fn connect(&mut self) -> anyhow::Result<TlsStream<TcpStream>> {
-        let connecting = connect(&self.setup.controller, &self.setup.key);
+        // 长连接出的错只进日志，日志是中文的。
+        let connecting = connect(&self.setup.controller, &self.setup.key, &CONNECT_ZH);
         tokio::pin!(connecting);
         loop {
             tokio::select! {
@@ -434,7 +442,7 @@ impl Worker {
                             }
                         }
                         ToNode::Revoked => return Ok(Ended::Revoked),
-                        ToNode::Rejected { reason } => return Ok(Ended::Rejected(reason)),
+                        ToNode::Rejected { reason, .. } => return Ok(Ended::Rejected(reason)),
                         // controller 自己出了错，不是不认这个节点：当作连接断了，带退避地重连。
                         ToNode::TryLater { reason } => bail!("controller 这一次接待不了本节点，稍后重连：{reason}"),
                         ToNode::Heartbeat => {}
@@ -622,16 +630,17 @@ fn spawn_reader<R: AsyncRead + Unpin + Send + 'static>(mut reader: R) -> Reader 
     Reader { messages, task }
 }
 
-async fn connect(controller: &ControllerInfo, key: &NodeKey) -> anyhow::Result<TlsStream<TcpStream>> {
-    let config = tls::client_config(key, controller.key, ALPN).context("准备 TLS 配置")?;
+/// 连上 controller 并完成 TLS 握手。`said` 是出错时的说明：交互的命令用当前语言的，长连接用中文的（它只进日志）。
+async fn connect(controller: &ControllerInfo, key: &NodeKey, said: &Connect) -> anyhow::Result<TlsStream<TcpStream>> {
+    let config = tls::client_config(key, controller.key, ALPN).context(said.tls_config)?;
     // 校验器只比对公钥，不看名字；这里的名字只是 TLS 接口要求有一个。
-    let name = ServerName::try_from("i3t").context("构造 TLS 服务器名")?;
+    let name = ServerName::try_from("i3t").context(said.server_name)?;
     let handshake = async {
-        let tcp = TcpStream::connect(&controller.address).await.with_context(|| format!("连接 controller {}", controller.address))?;
-        tcp.set_nodelay(true).context("设置 TCP_NODELAY")?;
-        TlsConnector::from(Arc::new(config)).connect(name, tcp).await.context("和 controller 的 TLS 握手")
+        let tcp = TcpStream::connect(&controller.address).await.with_context(|| (said.tcp)(&controller.address))?;
+        tcp.set_nodelay(true).context(said.nodelay)?;
+        TlsConnector::from(Arc::new(config)).connect(name, tcp).await.context(said.handshake)
     };
-    timeout(CONNECT_TIMEOUT, handshake).await.with_context(|| format!("连接 controller {} 超时", controller.address))?
+    timeout(CONNECT_TIMEOUT, handshake).await.with_context(|| (said.timeout)(&controller.address))?
 }
 
 /// 发一条消息：4 字节大端长度，后面是 JSON。
@@ -848,7 +857,7 @@ mod tests {
         tokio::spawn(async move {
             let (mut stream, _) = controller.accept().await;
             let _: ToController = expect(&mut stream).await;
-            write_message(&mut stream, &ToNode::Rejected { reason: "令牌已经用过".into() }).await.unwrap();
+            write_message(&mut stream, &ToNode::Rejected { reason: "令牌已经用过".into(), cause: None }).await.unwrap();
         });
         let err = enroll(&info, &NodeKey::generate().unwrap(), "x", Hello::default()).await.unwrap_err();
         assert!(format!("{err:#}").contains("令牌已经用过"), "{err:#}");
@@ -1111,7 +1120,7 @@ mod tests {
         });
         let err = enroll(&info, &NodeKey::generate().unwrap(), "x", Hello::default()).await.unwrap_err();
         let message = format!("{err:#}");
-        assert!(message.contains("稍后再试") && message.contains("存储暂时不可用"), "{message}");
+        assert!(message.contains(&(texts().enroll_try_later)("存储暂时不可用")), "{message}");
     }
 
     /// 取一段包：`version` 的 linux 包里从 `offset` 起的 `len` 字节。
@@ -1248,9 +1257,10 @@ mod tests {
 
     #[tokio::test]
     async fn revocation_and_rejection_stop_the_link_for_good() {
-        for (message, expected) in
-            [(ToNode::Revoked, LinkState::Revoked), (ToNode::Rejected { reason: "不认识这个公钥".into() }, LinkState::Rejected)]
-        {
+        for (message, expected) in [
+            (ToNode::Revoked, LinkState::Revoked),
+            (ToNode::Rejected { reason: "不认识这个公钥".into(), cause: None }, LinkState::Rejected),
+        ] {
             let controller = FakeController::start().await;
             let (_dir, state) = temp_state();
             let (link, _hello) = link(&controller, state);

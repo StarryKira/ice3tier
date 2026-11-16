@@ -18,10 +18,10 @@ use i3t_crypto::NodeKey;
 use i3t_model::admin as model;
 use i3t_model::control::{
     BackboneLink, BackboneRow, Declared, DirectKind, EnrollToken, Hello, PathCandidate, PathDetail, PathSegment, RelayState, Report, Route,
-    RouteAnswer, RouteEntry, RouteKind, SelfUpdate, ToController, ToNode,
+    RouteAnswer, RouteCause, RouteEntry, RouteKind, SelfUpdate, ToController, ToNode,
 };
 use i3t_model::netmap::RoutingMode;
-use i3t_model::update::{FailureKind, UpdateStatus, UpdateTiming};
+use i3t_model::update::{FailureKind, UpdateCause, UpdateStatus, UpdateTiming};
 use i3t_proto::{NodeId, PublicKey};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -746,18 +746,23 @@ async fn update_settings_checks_and_forced_updates_work_over_the_api() {
     let all: model::ForcedUpdates = api.ok(Method::POST, "/update/force", Some(json!({ "timing": "now" }))).await;
     assert_eq!((all.ordered.len(), all.queued.len(), all.skipped.len()), (1, 0, 1));
     assert!(all.skipped[0].node.id == ancient.id && all.skipped[0].reason.contains("不能自己更新"));
+    assert_eq!(all.skipped[0].cause, Some(model::SkipCause::TooOld), "原话旁边有原因的代码");
 
     // 节点说这个版本不能用：暂停出现在总览里，继续之后消失；没有暂停的版本继续不了。
-    let failed =
-        UpdateStatus::Failed {
-            version: Some("0.2.0".parse().unwrap()), kind: FailureKind::VersionRejected, reason: "自检没有通过".into()
-        };
+    let failed = UpdateStatus::Failed {
+        version: Some("0.2.0".parse().unwrap()),
+        kind: FailureKind::VersionRejected,
+        reason: "自检没有通过".into(),
+        cause: Some(UpdateCause::SelfCheck { exit_code: Some(2), output: "读不了 config.toml".into() }),
+    };
     api.controller.handle(member.session, REMOTE, ToController::Report(Report { update: Some(failed), ..Report::default() })).unwrap();
     let paused: model::UpdateOverview = api.ok(Method::GET, "/update", None).await;
     assert_eq!((paused.paused.len(), paused.nodes.failed, paused.nodes.manual), (1, 1, 1));
     let (_, raw) = api.call(Method::GET, "/update", None).await;
     assert_eq!(raw["paused"][0]["version"], json!("0.2.0"));
     assert_eq!(raw["paused"][0]["node"]["id"], json!(member.id.get()));
+    assert_eq!(raw["paused"][0]["reason"], json!("自检没有通过"));
+    assert_eq!(raw["paused"][0]["cause"], json!({ "code": "self_check", "exit_code": 2, "output": "读不了 config.toml" }));
     let resumed: model::UpdateOverview = api.ok(Method::POST, "/update/resume", Some(json!({ "version": "0.2.0" }))).await;
     assert!(resumed.paused.is_empty());
     let nothing = api.fails(Method::POST, "/update/resume", Some(json!({ "version": "0.2.0" })), StatusCode::NOT_FOUND).await;
@@ -768,7 +773,7 @@ async fn update_settings_checks_and_forced_updates_work_over_the_api() {
     assert_eq!(offline.code, model::ErrorCode::NodeOffline);
     let current = api.join_as(network.id, &modern_hello("0.2.0", Declared::default())).await;
     let none = api.fails(Method::POST, &update_path(current.id), Some(json!({ "timing": "now" })), StatusCode::CONFLICT).await;
-    assert_eq!(none.code, model::ErrorCode::NoUpdate);
+    assert_eq!((none.code, none.what.as_deref()), (model::ErrorCode::NoUpdate, Some("up_to_date")));
 
     let reset: model::UpdateOverview = api.ok(Method::PATCH, "/update", Some(json!({ "source": null }))).await;
     assert!(reset.source_is_default && reset.source.starts_with("https://github.com/"));
@@ -776,6 +781,11 @@ async fn update_settings_checks_and_forced_updates_work_over_the_api() {
     for action in ["update.settings", "update.release", "update.force", "update.force_all", "update.pause", "update.resume"] {
         assert!(log.iter().any(|entry| entry.action == action), "操作记录里应该有 {action}");
     }
+    let pause = log.iter().find(|entry| entry.action == "update.pause").unwrap();
+    assert_eq!((&pause.params["node"], &pause.params["version"]), (&json!(member.id.get()), &json!("0.2.0")));
+    assert_eq!(pause.params["cause"]["code"], json!("self_check"));
+    let force = log.iter().find(|entry| entry.action == "update.force").unwrap();
+    assert_eq!(force.params["timing"], json!("after_drain"));
 }
 
 #[tokio::test]
@@ -812,18 +822,52 @@ async fn the_route_matrix_and_the_path_between_two_nodes_are_served() {
             "from": { "id": b.id.get(), "name": "node-2", "virtual_ip": "10.66.0.2" },
             "to": { "id": a.id.get(), "name": "node-1", "virtual_ip": "10.66.0.1" },
             "source": "none", "route": null, "rtt_ms": null, "age_secs": null, "since": null,
-            "direct": null, "relay_leg": null, "mode": null, "reason": null, "candidates": null
+            "direct": null, "relay_leg": null, "mode": null, "reason": null, "cause": null, "candidates": null
         })
     );
 
     let same =
         api.fails(Method::GET, &format!("/networks/{}/path?from={}&to={}", network.id, a.id, a.id), None, StatusCode::BAD_REQUEST).await;
     assert_eq!(same.code, model::ErrorCode::InvalidRequest);
+    assert_eq!((same.what.as_deref(), same.field.as_deref()), (Some("same_node"), Some("to")));
     let missing = api.fails(Method::GET, &format!("/networks/{}/path?from={}&to=99", network.id, a.id), None, StatusCode::NOT_FOUND).await;
-    assert_eq!(missing.code, model::ErrorCode::NotFound);
+    assert_eq!((missing.code, missing.what.as_deref()), (model::ErrorCode::NotFound, Some("node")));
     let no_query = api.fails(Method::GET, &format!("/networks/{}/path", network.id), None, StatusCode::BAD_REQUEST).await;
     assert_eq!(no_query.code, model::ErrorCode::InvalidRequest);
+    assert_eq!((no_query.what.as_deref(), no_query.field.as_deref()), (Some("query"), Some("from")));
     api.fails(Method::GET, "/networks/99/routes", None, StatusCode::NOT_FOUND).await;
+}
+
+#[tokio::test]
+async fn vague_errors_say_what_was_wrong_and_which_field() {
+    let mut api = Api::new();
+    let network = api.network("home").await;
+    let bad_json =
+        api.fails(Method::POST, "/networks", Some(json!({ "name": "lab", "routing": "fastest" })), StatusCode::BAD_REQUEST).await;
+    assert_eq!((bad_json.what.as_deref(), bad_json.field.as_deref()), (Some("data"), Some("routing")));
+    let no_name = api.fails(Method::POST, "/networks", Some(json!({})), StatusCode::BAD_REQUEST).await;
+    assert_eq!((no_name.what.as_deref(), no_name.field.as_deref()), (Some("data"), Some("name")));
+    let bad_name = api.fails(Method::POST, "/networks", Some(json!({ "name": "123" })), StatusCode::BAD_REQUEST).await;
+    assert_eq!((bad_name.what.as_deref(), bad_name.field.as_deref()), (Some("all_digits"), Some("name")));
+    let hops = json!({ "max_relay_hops": 9 });
+    let hops = api.fails(Method::PATCH, &format!("/networks/{}", network.id), Some(hops), StatusCode::BAD_REQUEST).await;
+    assert_eq!((hops.what.as_deref(), hops.field.as_deref()), (Some("out_of_range"), Some("max_relay_hops")));
+    let path = api.fails(Method::GET, "/networks/x/nodes", None, StatusCode::BAD_REQUEST).await;
+    assert_eq!((path.what.as_deref(), path.field.as_deref()), (Some("path"), Some("network")));
+    let endpoint = api.fails(Method::GET, "/nowhere", None, StatusCode::NOT_FOUND).await;
+    assert_eq!(endpoint.what.as_deref(), Some("endpoint"));
+    let rule = api.fails(Method::DELETE, &format!("/networks/{}/rules/99", network.id), None, StatusCode::NOT_FOUND).await;
+    assert_eq!((rule.what.as_deref(), rule.field), (Some("rule"), None));
+
+    let node = api.join(network.id, Declared::default()).await;
+    let listener = json!({ "node": node.id.get(), "name": "a", "bind": "127.0.0.1:1080", "protocol": "socks5" });
+    let _: model::Listener = api.ok(Method::POST, &format!("/networks/{}/listeners", network.id), Some(listener.clone())).await;
+    let twin = json!({ "node": node.id.get(), "name": "b", "bind": "127.0.0.1:1080", "protocol": "socks5" });
+    let clash = api.fails(Method::POST, &format!("/networks/{}/listeners", network.id), Some(twin), StatusCode::CONFLICT).await;
+    assert_eq!((clash.code, clash.what.as_deref(), clash.field.as_deref()), (model::ErrorCode::Conflict, Some("listener"), Some("bind")));
+    let exit = json!({ "node": node.id.get(), "name": "c", "bind": "127.0.0.1:1081", "protocol": "socks5", "fixed_exit": 99 });
+    let exit = api.fails(Method::POST, &format!("/networks/{}/listeners", network.id), Some(exit), StatusCode::NOT_FOUND).await;
+    assert_eq!((exit.what.as_deref(), exit.field.as_deref()), (Some("node"), Some("fixed_exit")));
 }
 
 #[tokio::test]
@@ -862,6 +906,7 @@ async fn path_candidates_route_details_and_the_backbone_are_served() {
         direct: Some(DirectKind::Lan),
         relay_leg: None,
         reason: "直连可用".to_owned(),
+        cause: Some(RouteCause::DirectVerified),
         candidates: vec![PathCandidate { route: direct.clone(), cost_us: 13_600, legs: vec![segment], load_percent: 0, current: true }],
     };
     let answer = RouteAnswer { peer: b.id, route: Some(direct.clone()), rtt_ms: Some(12), since: None, detail: Some(detail) };
@@ -873,6 +918,7 @@ async fn path_candidates_route_details_and_the_backbone_are_served() {
     let view: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
     let forward = &view["forward"];
     assert_eq!((&forward["mode"], &forward["direct"], &forward["reason"]), (&json!("direct_first"), &json!("lan"), &json!("直连可用")));
+    assert_eq!(forward["cause"], json!({ "code": "direct_verified" }));
     assert_eq!(
         forward["candidates"],
         json!([{
@@ -994,6 +1040,9 @@ async fn enabling_a_relay_answers_with_a_reachability_check_that_only_advises() 
         ]
     );
     assert!(enabled.reachability[0].rtt_ms.is_some() && enabled.reachability[1].error.is_some());
+    assert_eq!(enabled.reachability[0].cause, None);
+    assert_eq!(enabled.reachability[1].cause, Some(model::ReachCause::Timeout), "UDP 的地址查询没有回答");
+    assert_eq!(enabled.reachability[3].cause, Some(model::ReachCause::Refused), "TCP 端口上没有程序在听");
 }
 
 #[tokio::test]

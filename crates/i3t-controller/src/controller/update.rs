@@ -20,13 +20,14 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use i3t_model::admin::{
-    ForcedUpdates, NetworkId, NodeUpdate, PackageInfo, PackageState, PausedVersion, ReleaseInfo, SkippedUpdate, Timestamp, UpdateCounts,
-    UpdateFailure, UpdateOrder, UpdateOverview, UpdateSettings,
+    ForcedUpdates, LogRef, NetworkId, NodeUpdate, PackageInfo, PackageState, PausedVersion, ReleaseCause, ReleaseInfo, SkipCause,
+    SkippedUpdate, Timestamp, UpdateCounts, UpdateFailure, UpdateOrder, UpdateOverview, UpdateSettings,
 };
-use i3t_model::update::{Artifact, FailureKind, Manifest, Platform, SignedManifest, UpdateStatus, UpdateTiming, Version};
+use i3t_model::update::{Artifact, FailureKind, Manifest, Platform, SignedManifest, UpdateCause, UpdateStatus, UpdateTiming, Version};
 use i3t_proto::NodeId;
 use i3t_update::TrustedKeys;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use super::rollout::{Forced, Turn};
 use super::{Controller, Inner, node_ref};
@@ -77,6 +78,32 @@ pub(crate) struct Paused {
     pub(crate) network: NetworkId,
     pub(crate) reason: String,
     pub(crate) at: Timestamp,
+    /// `reason` 的代码。这个字段出现之前存下的暂停没有。
+    #[serde(default)]
+    pub(crate) cause: Option<UpdateCause>,
+}
+
+/// 查发布源或者取包没有成功：给管理员看的一句话，和它的代码。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReleaseFailure {
+    pub(crate) reason: String,
+    pub(crate) cause: ReleaseCause,
+}
+
+impl ReleaseFailure {
+    fn fetch(error: &FetchError) -> Self {
+        Self { reason: error_chain(error), cause: error.cause() }
+    }
+
+    fn invalid_source(error: &release::InvalidSource) -> Self {
+        Self { reason: error.to_string(), cause: ReleaseCause::InvalidSource }
+    }
+}
+
+/// 不能让一个节点立即更新：原因的代码，和单独让它更新时管理 API 回的错误。
+struct Blocked {
+    cause: SkipCause,
+    error: Error,
 }
 
 /// 一个平台的包在缓存里的情况。没有记录的平台是还没有节点要用。
@@ -88,7 +115,7 @@ pub(crate) enum Package {
     /// 已经在缓存里，核对过。
     Cached(PathBuf),
     /// 没有取成。下次查发布源时清掉这条记录，于是会再试。
-    Failed(String),
+    Failed(ReleaseFailure),
 }
 
 /// 节点更新在 controller 上的全部状态。
@@ -100,7 +127,7 @@ pub(crate) struct Updates {
     settings: Settings,
     pub(crate) release: Option<Release>,
     checked_at: Option<Timestamp>,
-    check_error: Option<String>,
+    check_error: Option<ReleaseFailure>,
     pub(crate) paused: Vec<Paused>,
     /// 当前这个发布的各个平台的包，键是平台名。
     pub(crate) packages: BTreeMap<String, Package>,
@@ -198,7 +225,7 @@ impl Updates {
 
 /// 一次要做的取包。
 struct FetchJob {
-    source: Result<Source, String>,
+    source: Result<Source, ReleaseFailure>,
     cache_dir: Option<PathBuf>,
     version: Version,
     platform: String,
@@ -254,7 +281,8 @@ impl Controller {
             None => None,
             Some(None) => Some(None),
             Some(Some(text)) => {
-                let source: Source = text.parse().map_err(|error: release::InvalidSource| Error::invalid(error.to_string()))?;
+                let source: Source =
+                    text.parse().map_err(|error: release::InvalidSource| Error::invalid_field("source", "malformed", error.to_string()))?;
                 let text = source.to_string();
                 Some((text != DEFAULT_SOURCE).then_some(text))
             }
@@ -267,12 +295,10 @@ impl Controller {
         if after != before {
             let now = inner.clock.now();
             write_meta(&inner.store, SETTINGS_META, &after)?;
-            let detail = format!(
-                "自动更新 {}，发布源 {}",
-                if after.auto_update { "开" } else { "关" },
-                after.source.as_deref().unwrap_or(DEFAULT_SOURCE)
-            );
-            inner.store.log(now, None, "update.settings", &detail)?;
+            let source = after.source.as_deref().unwrap_or(DEFAULT_SOURCE);
+            let detail = format!("自动更新 {}，发布源 {source}", if after.auto_update { "开" } else { "关" });
+            let params = json!({ "auto_update": after.auto_update, "source": source, "source_is_default": after.source.is_none() });
+            inner.store.log(now, None, "update.settings", &detail, params)?;
             tracing::info!(auto_update = after.auto_update, source = after.source.as_deref().unwrap_or(DEFAULT_SOURCE), "更新的设置变了");
             let source_changed = after.source != before.source;
             inner.updates.settings = after;
@@ -356,7 +382,7 @@ impl Controller {
         inner.updates.paused.retain(|paused| paused.version != *version);
         let now = inner.clock.now();
         write_meta(&inner.store, PAUSED_META, &inner.updates.paused)?;
-        inner.store.log(now, None, "update.resume", &format!("继续版本 {version} 的自动更新"))?;
+        inner.store.log(now, None, "update.resume", &format!("继续版本 {version} 的自动更新"), json!({ "version": version }))?;
         tracing::info!(%version, "管理员继续了这个版本的自动更新");
         inner.roll_out()?;
         self.wake_if_needed(&inner);
@@ -382,8 +408,8 @@ impl Controller {
         require_forced(timing)?;
         let mut inner = self.lock();
         let node = inner.require_node(network, id)?;
-        if let Some(reason) = inner.cannot_force(&node) {
-            return Err(reason);
+        if let Some(blocked) = inner.cannot_force(&node) {
+            return Err(blocked.error);
         }
         // 管理员明说了要再试一次，上一次的失败就不再算数。这样它要是又失败了，会被当成新的失败重新告警。
         let node = inner.forget_update_failure(node)?;
@@ -394,7 +420,8 @@ impl Controller {
             Some(network),
             "update.force",
             &format!("让节点 {} 立即更新（{}）", node.name, describe_timing(timing)),
-            &[i3t_model::admin::LogRef::node(node.id)],
+            &[LogRef::node(node.id)],
+            json!({ "node": node.id, "node_name": node.name, "timing": timing }),
         )?;
         tracing::info!(node = %id, name = %node.name, ?timing, "管理员让这个节点立即更新");
         inner.roll_out()?;
@@ -418,7 +445,9 @@ impl Controller {
         for network in inner.store.networks()? {
             for node in inner.store.nodes(network.id)? {
                 match inner.cannot_force(&node) {
-                    Some(reason) => outcome.skipped.push(SkippedUpdate { node: node_ref(&node), reason: reason.to_string() }),
+                    Some(Blocked { cause, error }) => {
+                        outcome.skipped.push(SkippedUpdate { node: node_ref(&node), reason: error.to_string(), cause: Some(cause) });
+                    }
                     None => {
                         let node = inner.forget_update_failure(node)?;
                         // 已经单独点过"立即更新"的节点保持它不排队的待遇。
@@ -431,7 +460,8 @@ impl Controller {
         }
         let now = inner.clock.now();
         let detail = format!("让全部节点立即更新（{}）：{} 个节点", describe_timing(timing), accepted.len());
-        inner.store.log(now, None, "update.force_all", &detail)?;
+        let params = json!({ "timing": timing, "nodes": accepted.len(), "skipped": outcome.skipped.len() });
+        inner.store.log(now, None, "update.force_all", &detail, params)?;
         tracing::info!(?timing, nodes = accepted.len(), skipped = outcome.skipped.len(), "管理员让全部节点立即更新");
         inner.roll_out()?;
         for node in &accepted {
@@ -447,7 +477,7 @@ fn require_forced(timing: UpdateTiming) -> Result<(), Error> {
     if timing.is_forced() {
         Ok(())
     } else {
-        Err(Error::invalid("立即更新的时机要写 now 或者 after_drain；idle 是自动更新用的"))
+        Err(Error::invalid_field("timing", "not_allowed", "立即更新的时机要写 now 或者 after_drain；idle 是自动更新用的"))
     }
 }
 
@@ -459,29 +489,42 @@ fn describe_timing(timing: UpdateTiming) -> &'static str {
     }
 }
 
-/// 取清单并验签。失败的原因是给管理员看的一句话。
-fn check(source_text: &str, keys: &TrustedKeys) -> Result<Release, String> {
-    let source: Source = source_text.parse().map_err(|error: release::InvalidSource| error.to_string())?;
-    let signed = source.latest().map_err(|error| error_chain(&error))?;
+/// 取清单并验签。
+fn check(source_text: &str, keys: &TrustedKeys) -> Result<Release, ReleaseFailure> {
+    let source: Source = source_text.parse().map_err(|error| ReleaseFailure::invalid_source(&error))?;
+    let signed = source.latest().map_err(|error| ReleaseFailure::fetch(&error))?;
     // 验过签才看里面的内容：发布源和镜像都不需要可信。
-    let manifest = keys.verify(&signed).map_err(|error| format!("发布源给的清单不能用：{}", error_chain(&error)))?;
+    let manifest = keys.verify(&signed).map_err(|error| {
+        let cause = match &error {
+            i3t_update::ManifestError::BadSignature => ReleaseCause::BadSignature,
+            i3t_update::ManifestError::Malformed(_) => ReleaseCause::BadManifest,
+        };
+        ReleaseFailure { reason: format!("发布源给的清单不能用：{}", error_chain(&error)), cause }
+    })?;
     if manifest.is_prerelease() {
-        return Err(format!("发布源的最新版是预发布版 {}，不取", manifest.version));
+        return Err(ReleaseFailure {
+            reason: format!("发布源的最新版是预发布版 {}，不取", manifest.version),
+            cause: ReleaseCause::Prerelease { version: manifest.version },
+        });
     }
     Ok(Release { signed, manifest })
 }
 
 impl FetchJob {
-    fn run(&self) -> Result<PathBuf, String> {
+    fn run(&self) -> Result<PathBuf, ReleaseFailure> {
         let source = self.source.as_ref().map_err(Clone::clone)?;
-        let cache_dir = self.cache_dir.as_deref().ok_or("这个 controller 没有配置放包的缓存目录")?;
-        source.fetch(&self.version, &self.artifact, cache_dir).map_err(|error: FetchError| error_chain(&error))
+        let cache_dir =
+            self.cache_dir.as_deref().ok_or_else(|| ReleaseFailure {
+                reason: "这个 controller 没有配置放包的缓存目录".to_owned(),
+                cause: ReleaseCause::Internal,
+            })?;
+        source.fetch(&self.version, &self.artifact, cache_dir).map_err(|error| ReleaseFailure::fetch(&error))
     }
 }
 
 impl Inner {
     /// 记下一次查发布源的结果。
-    fn check_finished(&mut self, source: &str, checked: Result<Release, String>) -> Result<(), Error> {
+    fn check_finished(&mut self, source: &str, checked: Result<Release, ReleaseFailure>) -> Result<(), Error> {
         let now = self.clock.now();
         self.updates.checked_at = Some(now);
         self.counters.release_checks += 1;
@@ -493,7 +536,13 @@ impl Inner {
                     tracing::debug!(%version, source, "查了发布源，最新的正式版没有变");
                 } else {
                     tracing::info!(%version, min_controller = %release.manifest.min_controller, source, "发布源上有新的正式版");
-                    self.store.log(now, None, "update.release", &format!("发布源上最新的正式版是 {version}"))?;
+                    self.store.log(
+                        now,
+                        None,
+                        "update.release",
+                        &format!("发布源上最新的正式版是 {version}"),
+                        json!({ "version": version }),
+                    )?;
                     self.updates.release = Some(release.clone());
                     self.updates.packages.clear();
                     // 只有当前的发布会被暂停，别的版本的下发记录用不上了。
@@ -519,10 +568,10 @@ impl Inner {
                     }
                 }
             }
-            Err(reason) => {
+            Err(failure) => {
                 self.counters.release_check_failures += 1;
-                tracing::warn!(source, %reason, "查发布源没有成功，已知的发布保持不变");
-                self.updates.check_error = Some(reason);
+                tracing::warn!(source, reason = %failure.reason, "查发布源没有成功，已知的发布保持不变");
+                self.updates.check_error = Some(failure);
             }
         }
         self.roll_out()
@@ -541,12 +590,12 @@ impl Inner {
             return self.next_fetch();
         };
         self.updates.packages.insert(platform.clone(), Package::Fetching);
-        let source = self.updates.source_text().parse::<Source>().map_err(|error| error.to_string());
+        let source = self.updates.source_text().parse::<Source>().map_err(|error| ReleaseFailure::invalid_source(&error));
         tracing::info!(%version, %platform, file = %artifact.file, size = artifact.size, "从发布源取这个平台的包");
         Some(FetchJob { source, cache_dir: self.updates.cache_dir.clone(), version, platform, artifact })
     }
 
-    fn fetch_finished(&mut self, job: &FetchJob, outcome: Result<PathBuf, String>) -> Result<(), Error> {
+    fn fetch_finished(&mut self, job: &FetchJob, outcome: Result<PathBuf, ReleaseFailure>) -> Result<(), Error> {
         // 取的时候发布换了：这个包已经没有人要了。
         if self.updates.release.as_ref().is_none_or(|release| release.manifest.version != job.version) {
             return Ok(());
@@ -556,9 +605,9 @@ impl Inner {
                 tracing::info!(version = %job.version, platform = %job.platform, path = %path.display(), "包已经取回来并且核对过");
                 Package::Cached(path)
             }
-            Err(reason) => {
-                tracing::warn!(version = %job.version, platform = %job.platform, %reason, "包没有取成，下次查发布源时再试");
-                Package::Failed(reason)
+            Err(failure) => {
+                tracing::warn!(version = %job.version, platform = %job.platform, reason = %failure.reason, "包没有取成，下次查发布源时再试");
+                Package::Failed(failure)
             }
         };
         self.updates.packages.insert(job.platform.clone(), package);
@@ -581,12 +630,12 @@ impl Inner {
             _ => tracing::info!(node = %node.id, name = %node.name, status = %described, "节点的更新进度变了"),
         }
         live.update = Some(status.clone());
-        let UpdateStatus::Failed { version, kind, reason } = status else {
+        let UpdateStatus::Failed { version, kind, reason, cause } = status else {
             // 这次连接上的第一次上报：现在知道它是带着什么回来的，可以轮到它了。之后的进度变化不改变该让谁更新。
             return if first_report { self.roll_out() } else { Ok(()) };
         };
         match (kind, version) {
-            (FailureKind::VersionRejected, Some(version)) => self.version_rejected(node, &version, &reason)?,
+            (FailureKind::VersionRejected, Some(version)) => self.version_rejected(node, &version, &reason, cause)?,
             // 连是哪个版本都没有说的失败，没法记到某个版本头上，和没装成一样对待。
             (FailureKind::VersionRejected, None) | (FailureKind::NotInstalled, _) => {
                 self.order_failed(node.id, None);
@@ -605,7 +654,7 @@ impl Inner {
     /// - 暂停只在它所在的网络生效，别的网络照常更新；
     /// - 同一个节点在同一个版本上只失败一次：记录在 controller 上，节点自报的版本号清不掉，管理员点"立即更新"才清。
     ///   所以管理员继续之后，同一个节点不能把这个版本再暂停一次。
-    fn version_rejected(&mut self, node: &NodeRecord, version: &Version, reason: &str) -> Result<(), Error> {
+    fn version_rejected(&mut self, node: &NodeRecord, version: &Version, reason: &str, cause: Option<UpdateCause>) -> Result<(), Error> {
         self.order_failed(node.id, Some(version));
         // 节点每次上报都带着同一条失败，重启之后也还带着。记过的就不是新闻，不能因此把管理员已经继续的版本再暂停一次。
         let already_recorded =
@@ -614,17 +663,24 @@ impl Inner {
             return Ok(());
         }
         let now = self.clock.now();
-        let failure = UpdateFailure { version: version.clone(), kind: FailureKind::VersionRejected, reason: reason.to_owned(), at: now };
+        let failure = UpdateFailure {
+            version: version.clone(),
+            kind: FailureKind::VersionRejected,
+            reason: reason.to_owned(),
+            at: now,
+            cause: cause.clone(),
+        };
         self.store.set_node_update_failure(node.id, Some(&failure))?;
         self.counters.version_failures += 1;
         tracing::warn!(node = %node.id, name = %node.name, %version, %reason, "节点说这个版本在它那里不能用，以后不再自动让它装这个版本");
 
+        let params = json!({ "node": node.id, "node_name": node.name, "version": version, "reason": reason, "cause": cause });
         let offered = self.updates.offered.get(&node.id) == Some(version);
         if !offered {
             tracing::warn!(node = %node.id, name = %node.name, %version, "controller 没有让这个节点装过这个版本，它的失败不暂停自动更新");
             let detail =
                 format!("节点 {} 说版本 {version} 在它那里不能用（{reason}）；controller 没有让它装过这个版本，不因此暂停", node.name);
-            self.store.log_refs(now, Some(node.network), "update.failure", &detail, &[i3t_model::admin::LogRef::node(node.id)])?;
+            self.store.log_refs(now, Some(node.network), "update.failure", &detail, &[LogRef::node(node.id)], params)?;
             return Ok(());
         }
         self.updates.offered.remove(&node.id);
@@ -636,10 +692,11 @@ impl Inner {
                 network: node.network,
                 reason: reason.to_owned(),
                 at: now,
+                cause,
             });
             write_meta(&self.store, PAUSED_META, &self.updates.paused)?;
             let detail = format!("节点 {} 更新到 {version} 失败（{reason}），暂停这个版本在这个网络里的自动更新", node.name);
-            self.store.log_refs(now, Some(node.network), "update.pause", &detail, &[i3t_model::admin::LogRef::node(node.id)])?;
+            self.store.log_refs(now, Some(node.network), "update.pause", &detail, &[LogRef::node(node.id)], params)?;
             tracing::warn!(%version, node = %node.id, network = %node.network, "暂停这个版本在这个网络里的自动更新，等管理员看过之后继续");
         }
         Ok(())
@@ -664,37 +721,57 @@ impl Inner {
     }
 
     /// 为什么不能让这个节点立即更新；可以的话是 `None`。
-    fn cannot_force(&self, node: &NodeRecord) -> Option<Error> {
+    fn cannot_force(&self, node: &NodeRecord) -> Option<Blocked> {
         let name = || node.name.clone();
-        let Some(live) = self.live.get(&node.id) else { return Some(Error::NodeOffline(name())) };
-        let too_old =
-            || Error::CannotSelfUpdate { node: name(), reason: "它的版本太旧，不懂更新，要手动换程序".to_owned() };
-        let Some(ability) = node.self_update.filter(|_| live.understands_updates()) else { return Some(too_old()) };
+        let Some(live) = self.live.get(&node.id) else {
+            return Some(Blocked { cause: SkipCause::Offline, error: Error::NodeOffline(name()) });
+        };
+        let cannot = |cause: SkipCause, reason: String| Blocked {
+            error: Error::CannotSelfUpdate { node: name(), reason, cause: Box::new(cause.clone()) },
+            cause,
+        };
+        let Some(ability) = node.self_update.filter(|_| live.understands_updates()) else {
+            return Some(cannot(SkipCause::TooOld, "它的版本太旧，不懂更新，要手动换程序".to_owned()));
+        };
         if !ability.able {
             let reason = ability.blocker.map_or_else(|| "节点说它不能自己更新".to_owned(), |blocker| blocker.to_string());
-            return Some(Error::CannotSelfUpdate { node: name(), reason });
+            return Some(cannot(SkipCause::CannotSelfUpdate { blocker: ability.blocker }, reason));
         }
-        self.unavailable_reason(node).map(Error::NoUpdate)
+        let (cause, message) = self.unavailable_reason(node)?;
+        Some(Blocked { error: Error::NoUpdate { message, cause: Box::new(cause.clone()) }, cause })
     }
 
-    /// 为什么没有可以让这个节点更新到的版本；有的话是 `None`。
-    fn unavailable_reason(&self, node: &NodeRecord) -> Option<String> {
-        let Some(release) = &self.updates.release else { return Some("还没有从发布源查到任何发布".to_owned()) };
+    /// 为什么没有可以让这个节点更新到的版本：原因的代码和给人看的一句话；有的话是 `None`。
+    fn unavailable_reason(&self, node: &NodeRecord) -> Option<(SkipCause, String)> {
+        let Some(release) = &self.updates.release else {
+            return Some((SkipCause::NoRelease, "还没有从发布源查到任何发布".to_owned()));
+        };
         let manifest = &release.manifest;
         if manifest.min_controller > self.updates.version {
-            return Some(format!(
+            let message = format!(
                 "最新的发布 {} 需要 controller 至少是 {}，现在是 {}。先更新 controller",
                 manifest.version, manifest.min_controller, self.updates.version
-            ));
+            );
+            let cause = SkipCause::ControllerTooOld {
+                version: manifest.version.clone(),
+                min_controller: manifest.min_controller.clone(),
+                controller: self.updates.version.clone(),
+            };
+            return Some((cause, message));
         }
         let Ok(running) = node.version.parse::<Version>() else {
-            return Some(format!("节点 {} 报的版本号 {:?} 看不懂", node.name, node.version));
+            let message = format!("节点 {} 报的版本号 {:?} 看不懂", node.name, node.version);
+            return Some((SkipCause::UnreadableVersion { version: node.version.clone() }, message));
         };
         if running >= manifest.version {
-            return Some(format!("节点 {} 已经是 {running}，不比最新的发布 {} 旧", node.name, manifest.version));
+            let message = format!("节点 {} 已经是 {running}，不比最新的发布 {} 旧", node.name, manifest.version);
+            return Some((SkipCause::UpToDate { running, latest: manifest.version.clone() }, message));
         }
         let has_package = node.platform.parse::<Platform>().is_ok_and(|platform| manifest.artifact(&platform).is_some());
-        (!has_package).then(|| format!("发布 {} 里没有 {} 平台的包", manifest.version, node.platform))
+        (!has_package).then(|| {
+            let message = format!("发布 {} 里没有 {} 平台的包", manifest.version, node.platform);
+            (SkipCause::NoPackage { version: manifest.version.clone(), platform: node.platform.clone() }, message)
+        })
     }
 
     /// 管理 API 里一个节点的更新情况。
@@ -721,13 +798,14 @@ impl Inner {
         let release = updates.release.as_ref().map(|release| {
             let manifest = &release.manifest;
             let packages = manifest.artifacts.iter().map(|(platform, artifact)| {
-                let (state, error) = match updates.packages.get(platform) {
+                let (state, failure) = match updates.packages.get(platform) {
                     None => (PackageState::NotNeeded, None),
                     Some(Package::Wanted | Package::Fetching) => (PackageState::Fetching, None),
                     Some(Package::Cached(_)) => (PackageState::Cached, None),
-                    Some(Package::Failed(reason)) => (PackageState::Failed, Some(reason.clone())),
+                    Some(Package::Failed(failure)) => (PackageState::Failed, Some(failure.clone())),
                 };
-                PackageInfo { platform: platform.clone(), file: artifact.file.clone(), size: artifact.size, state, error }
+                let (error, cause) = failure.map(|failure| (failure.reason, failure.cause)).unzip();
+                PackageInfo { platform: platform.clone(), file: artifact.file.clone(), size: artifact.size, state, error, cause }
             });
             ReleaseInfo {
                 version: manifest.version.clone(),
@@ -761,6 +839,7 @@ impl Inner {
                 network: Some(paused.network),
                 reason: paused.reason.clone(),
                 at: paused.at,
+                cause: paused.cause.clone(),
             })
         });
         Ok(UpdateOverview {
@@ -770,7 +849,8 @@ impl Inner {
             controller_version: updates.version.clone(),
             release,
             checked_at: updates.checked_at,
-            check_error: updates.check_error.clone(),
+            check_error: updates.check_error.as_ref().map(|failure| failure.reason.clone()),
+            check_cause: updates.check_error.as_ref().map(|failure| failure.cause.clone()),
             paused: paused.collect::<Result<_, Error>>()?,
             nodes: counts,
         })

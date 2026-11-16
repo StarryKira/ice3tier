@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use i3t_model::admin::{ExitHealth, ExitObserved, ExitView, ListenStatus, NetworkId, NodeForwardListen, NodeListener, NodeListeners};
 use i3t_model::control::{CredentialUsage, ExitObservation, ExitReport};
 use i3t_proto::NodeId;
+use serde_json::json;
 
 use super::{Controller, Inner, Seeds, node_ref};
 use crate::error::{Entity, Error};
@@ -261,7 +262,13 @@ impl Inner {
             tracing::info!(credential = %after.credential.name, used = after.credential.usage.bytes, max = ?after.credential.max_bytes, "凭据的流量上限用完了，通知各个入口");
             let refs = [i3t_model::admin::LogRef::new(i3t_model::admin::RefKind::Credential, usage.id)];
             let detail = format!("凭据 {} 的流量上限用完了（已用 {} 字节）", after.credential.name, after.credential.usage.bytes);
-            self.store.log_refs(now, Some(node.network), "credential.exhausted", &detail, &refs)?;
+            let params = json!({
+                "credential": usage.id,
+                "credential_name": after.credential.name,
+                "used_bytes": after.credential.usage.bytes,
+                "max_bytes": after.credential.max_bytes,
+            });
+            self.store.log_refs(now, Some(node.network), "credential.exhausted", &detail, &refs, params)?;
         }
         Ok(flipped)
     }

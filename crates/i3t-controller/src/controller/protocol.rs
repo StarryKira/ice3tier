@@ -14,6 +14,7 @@ use i3t_model::control::{Hello, MAX_PACKAGE_CHUNK, Report, Signal, ToController,
 use i3t_model::netmap::Attachment;
 use i3t_model::update::{Platform, Version};
 use i3t_proto::{NodeId, PublicKey};
+use serde_json::json;
 use tokio::sync::mpsc;
 
 use super::usage::UsageReport;
@@ -271,14 +272,16 @@ impl Inner {
             whole_network = true;
             tracing::warn!(node = %node.id, name = %node.name, "节点撤回了可以作为 relay 的声明，关闭它的 relay");
             let detail = format!("节点 {} 撤回了声明，relay 已关闭", node.name);
-            self.store.log_refs(now, Some(node.network), "node.relay.withdrawn", &detail, &[LogRef::node(node.id)])?;
+            let params = json!({ "node": node.id, "node_name": node.name });
+            self.store.log_refs(now, Some(node.network), "node.relay.withdrawn", &detail, &[LogRef::node(node.id)], params)?;
         }
         if node.exit.is_some() && !node.declared.exit {
             node.exit = None;
             affected.extend(self.holders_of(node.id));
             tracing::warn!(node = %node.id, name = %node.name, "节点撤回了可以作为出口的声明，关闭它的出口");
             let detail = format!("节点 {} 撤回了声明，出口已关闭", node.name);
-            self.store.log_refs(now, Some(node.network), "node.exit.withdrawn", &detail, &[LogRef::node(node.id)])?;
+            let params = json!({ "node": node.id, "node_name": node.name });
+            self.store.log_refs(now, Some(node.network), "node.exit.withdrawn", &detail, &[LogRef::node(node.id)], params)?;
         }
         if !node.declared.forward {
             let pointing_here = self.store.forwards(node.network)?.into_iter().filter(|forward| forward.config.target_node == node.id);
@@ -289,7 +292,8 @@ impl Inner {
                 affected.extend(listeners);
                 tracing::warn!(node = %node.id, name = %node.name, disabled, "节点没有声明可以作为端口转发的目标，停用指向它的转发");
                 let detail = format!("节点 {} 没有声明可以作为端口转发的目标，指向它的 {disabled} 条转发已停用", node.name);
-                self.store.log_refs(now, Some(node.network), "node.forward.withdrawn", &detail, &[LogRef::node(node.id)])?;
+                let params = json!({ "node": node.id, "node_name": node.name, "forwards": disabled });
+                self.store.log_refs(now, Some(node.network), "node.forward.withdrawn", &detail, &[LogRef::node(node.id)], params)?;
             }
         }
         if *node != before {

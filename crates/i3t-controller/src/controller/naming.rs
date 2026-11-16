@@ -20,12 +20,13 @@ pub(super) fn label(what: &str, raw: &str) -> Result<String, Error> {
         && !name.starts_with('-')
         && !name.ends_with('-');
     if !well_formed {
-        return Err(Error::invalid(format!(
-            "{what}的名字 {raw:?} 不合法：只能用字母、数字和连字符，不能以连字符开头或结尾，最长 {MAX_LABEL_LEN} 个字符"
-        )));
+        return Err(Error::invalid(
+            "malformed",
+            format!("{what}的名字 {raw:?} 不合法：只能用字母、数字和连字符，不能以连字符开头或结尾，最长 {MAX_LABEL_LEN} 个字符"),
+        ));
     }
     if name.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(Error::invalid(format!("{what}的名字 {raw:?} 不合法：不能全是数字")));
+        return Err(Error::invalid("all_digits", format!("{what}的名字 {raw:?} 不合法：不能全是数字")));
     }
     Ok(name)
 }
@@ -63,7 +64,7 @@ pub(super) fn tag(raw: &str) -> Result<String, Error> {
     if well_formed {
         Ok(tag)
     } else {
-        Err(Error::invalid(format!("标签 {raw:?} 不合法：只能用字母、数字、连字符和下划线，最长 {MAX_TAG_LEN} 个字符")))
+        Err(Error::invalid("malformed", format!("标签 {raw:?} 不合法：只能用字母、数字、连字符和下划线，最长 {MAX_TAG_LEN} 个字符")))
     }
 }
 
@@ -77,10 +78,10 @@ pub(super) fn node_tags(raw: &[String]) -> Result<BTreeSet<String>, Error> {
 pub(super) fn title(what: &str, raw: &str, required: bool) -> Result<String, Error> {
     let title = raw.trim();
     if required && title.is_empty() {
-        return Err(Error::invalid(format!("{what}的名字不能是空的")));
+        return Err(Error::invalid("empty", format!("{what}的名字不能是空的")));
     }
     if title.chars().count() > MAX_TITLE_LEN || title.chars().any(char::is_control) {
-        return Err(Error::invalid(format!("{what}的名字不合法：最长 {MAX_TITLE_LEN} 个字符，不能有控制字符")));
+        return Err(Error::invalid("malformed", format!("{what}的名字不合法：最长 {MAX_TITLE_LEN} 个字符，不能有控制字符")));
     }
     Ok(title.to_owned())
 }

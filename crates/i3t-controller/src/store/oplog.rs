@@ -3,6 +3,7 @@
 use i3t_model::admin::{LogEntry, LogRef, NetworkId, Timestamp};
 use rusqlite::types::Value;
 use rusqlite::{Row, params, params_from_iter};
+use serde_json::{Map, Value as JsonValue};
 
 use super::codec::{Json, SqlNetwork, Unsigned};
 use super::{Store, StoreError};
@@ -32,20 +33,23 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<LogEntry> {
         action: row.get("action")?,
         detail: row.get("detail")?,
         refs: row.get::<_, Json<Vec<LogRef>>>("refs")?.0,
+        params: row.get::<_, Json<Map<String, JsonValue>>>("params")?.0,
     })
 }
 
 impl Store {
-    /// 记一条操作。`detail` 里不能有令牌之类的秘密。
+    /// 记一条操作。`detail` 和 `params` 里不能有令牌之类的秘密。
     ///
     /// # Errors
     ///
     /// 写数据库失败。
-    pub fn log(&self, at: Timestamp, network: Option<NetworkId>, action: &str, detail: &str) -> Result<(), StoreError> {
-        self.log_refs(at, network, action, detail, &[])
+    pub fn log(&self, at: Timestamp, network: Option<NetworkId>, action: &str, detail: &str, params: JsonValue) -> Result<(), StoreError> {
+        self.log_refs(at, network, action, detail, &[], params)
     }
 
-    /// 记一条操作，带上它说的是哪些东西。`detail` 里不能有令牌之类的秘密。
+    /// 记一条操作，带上它说的是哪些东西。`detail` 和 `params` 里不能有令牌之类的秘密。
+    ///
+    /// `params` 是一个 JSON 对象（`serde_json::json!({ … })`）：按名字给出的参数，见 `docs/admin-api.md` 第 3 节。
     ///
     /// # Errors
     ///
@@ -57,10 +61,20 @@ impl Store {
         action: &str,
         detail: &str,
         refs: &[LogRef],
+        params: JsonValue,
     ) -> Result<(), StoreError> {
+        let params = match params {
+            JsonValue::Object(params) => params,
+            other => {
+                // 调用方写错了。不为一条记录的参数让整个操作失败：记下原话，参数留空。
+                debug_assert!(false, "操作记录的参数要是一个 JSON 对象，{action} 给的是 {other}");
+                tracing::error!(action, params = %other, "操作记录的参数不是一个 JSON 对象，不记参数");
+                Map::new()
+            }
+        };
         self.conn.execute(
-            "INSERT INTO oplog (at, network_id, action, detail, refs) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![Unsigned(at), network.map(SqlNetwork), action, detail, Json(refs)],
+            "INSERT INTO oplog (at, network_id, action, detail, refs, params) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![Unsigned(at), network.map(SqlNetwork), action, detail, Json(refs), Json(&params)],
         )?;
         self.conn.execute("DELETE FROM oplog WHERE id <= ?1 - ?2", params![self.conn.last_insert_rowid(), KEEP])?;
         Ok(())
@@ -112,6 +126,8 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
     use crate::store::fixtures::home;
 
@@ -119,12 +135,14 @@ mod tests {
     fn operations_are_listed_newest_first() {
         let store = Store::open_in_memory().unwrap();
         let network = store.insert_network(&home()).unwrap();
-        store.log(10, None, "controller.start", "first start").unwrap();
-        store.log(20, Some(network), "node.rename", "node-1 -> nas-01").unwrap();
+        store.log(10, None, "controller.start", "first start", json!({})).unwrap();
+        store.log(20, Some(network), "node.rename", "node-1 -> nas-01", json!({ "node": 1, "node_name": "nas-01" })).unwrap();
         let entries = store.oplog(10).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!((entries[0].at, entries[0].network, entries[0].action.as_str()), (20, Some(network), "node.rename"));
         assert_eq!((entries[1].at, entries[1].network, entries[1].detail.as_str()), (10, None, "first start"));
+        assert_eq!(serde_json::Value::Object(entries[0].params.clone()), json!({ "node": 1, "node_name": "nas-01" }));
+        assert!(entries[1].params.is_empty());
         assert_eq!(store.oplog(1).unwrap().len(), 1);
     }
 
@@ -134,11 +152,11 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let network = store.insert_network(&home()).unwrap();
         let node = |id| LogRef::new(RefKind::Node, id);
-        store.log_refs(1, Some(network), "node.update", "a", &[node(3)]).unwrap();
-        store.log_refs(2, Some(network), "node.relay.enable", "b", &[node(30)]).unwrap();
-        store.log_refs(3, None, "update.force_all", "c", &[]).unwrap();
-        store.log_refs(4, Some(network), "credential.create", "d", &[LogRef::new(RefKind::Credential, 3)]).unwrap();
-        store.log(5, Some(network), "nodes.weird", "e").unwrap();
+        store.log_refs(1, Some(network), "node.update", "a", &[node(3)], json!({})).unwrap();
+        store.log_refs(2, Some(network), "node.relay.enable", "b", &[node(30)], json!({})).unwrap();
+        store.log_refs(3, None, "update.force_all", "c", &[], json!({})).unwrap();
+        store.log_refs(4, Some(network), "credential.create", "d", &[LogRef::new(RefKind::Credential, 3)], json!({})).unwrap();
+        store.log(5, Some(network), "nodes.weird", "e", json!({})).unwrap();
         let ids = |filter: LogFilter| {
             store.oplog_filtered(&LogFilter { limit: 100, ..filter }).unwrap().iter().map(|entry| entry.at).collect::<Vec<_>>()
         };

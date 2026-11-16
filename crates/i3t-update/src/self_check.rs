@@ -96,8 +96,24 @@ where
     }
 }
 
+/// 新程序的自检没有通过：给人看的一句话，和写成别的语言要用到的值。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Rejected {
+    pub(crate) reason: String,
+    /// 新程序的退出码；被信号杀掉、没有运行起来或者超时时没有。
+    pub(crate) exit_code: Option<i32>,
+    /// 新程序在标准错误上最后说的话；没有运行到那一步时是出错的原话。
+    pub(crate) output: String,
+}
+
+impl Rejected {
+    fn without_output(reason: String) -> Self {
+        Self { output: reason.clone(), reason, exit_code: None }
+    }
+}
+
 /// 旧程序这一头：运行放在程序旁边的新程序，看它的自检过不过。不过的话返回原因。
-pub(crate) async fn run_candidate(candidate: &Path, args: &[OsString], version: &Version, limit: Duration) -> Result<(), String> {
+pub(crate) async fn run_candidate(candidate: &Path, args: &[OsString], version: &Version, limit: Duration) -> Result<(), Rejected> {
     let mut command = Command::new(candidate);
     command
         .args(args)
@@ -107,12 +123,15 @@ pub(crate) async fn run_candidate(candidate: &Path, args: &[OsString], version: 
         .stderr(Stdio::piped())
         // 超时或者调用方不等了，这个 future 被丢弃，子进程跟着被杀掉。
         .kill_on_drop(true);
-    let child = spawn(&mut command).await.map_err(|error| format!("新程序运行不起来：{error}"))?;
+    let child = spawn(&mut command).await.map_err(|error| Rejected::without_output(format!("新程序运行不起来：{error}")))?;
     match tokio::time::timeout(limit, child.wait_with_output()).await {
         Ok(Ok(output)) if output.status.success() => Ok(()),
-        Ok(Ok(output)) => Err(format!("{}：{}", describe_exit(output.status), tail(&output.stderr))),
-        Ok(Err(error)) => Err(format!("等新程序结束的时候出错：{error}")),
-        Err(_) => Err(format!("{} 秒之内没有结束", limit.as_secs())),
+        Ok(Ok(output)) => {
+            let said = tail(&output.stderr);
+            Err(Rejected { reason: format!("{}：{said}", describe_exit(output.status)), exit_code: output.status.code(), output: said })
+        }
+        Ok(Err(error)) => Err(Rejected::without_output(format!("等新程序结束的时候出错：{error}"))),
+        Err(_) => Err(Rejected::without_output(format!("{} 秒之内没有结束", limit.as_secs()))),
     }
 }
 
@@ -252,7 +271,7 @@ mod tests {
         async fn run(body: &str, limit: Duration) -> Result<(), String> {
             let dir = tempfile::tempdir().unwrap();
             let args = [OsString::from("--state-dir"), OsString::from("/var/lib/i3t"), OsString::from("self-check")];
-            run_candidate(&script(dir.path(), body), &args, &version(), limit).await
+            run_candidate(&script(dir.path(), body), &args, &version(), limit).await.map_err(|rejected| rejected.reason)
         }
 
         #[tokio::test]
@@ -274,6 +293,14 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn a_failure_keeps_the_exit_code_and_what_the_program_said() {
+            let dir = tempfile::tempdir().unwrap();
+            let rejected = run_candidate(&script(dir.path(), "echo 读不了 config.toml >&2; exit 3"), &[], &version(), TIMEOUT).await;
+            let rejected = rejected.unwrap_err();
+            assert_eq!((rejected.exit_code, rejected.output.as_str()), (Some(3), "读不了 config.toml"));
+        }
+
+        #[tokio::test]
         async fn a_candidate_killed_by_a_signal_fails() {
             assert_eq!(run("kill -9 $$", TIMEOUT).await, Err("被信号终止：没有输出原因".to_owned()));
         }
@@ -292,7 +319,7 @@ mod tests {
             let path = dir.path().join("i3t.new");
             std::fs::write(&path, "不是程序").unwrap();
             let result = run_candidate(&path, &[], &version(), TIMEOUT).await;
-            assert!(result.unwrap_err().starts_with("新程序运行不起来："));
+            assert!(result.unwrap_err().reason.starts_with("新程序运行不起来："));
         }
     }
 }

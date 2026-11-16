@@ -288,7 +288,7 @@ impl Controller {
         let hash = secret::sha256(token.as_bytes());
         let inner = self.lock();
         inner.store.set_meta(ADMIN_TOKEN_META, &hash)?;
-        inner.store.log(inner.clock.now(), None, "admin.token", "生成了新的管理令牌")?;
+        inner.store.log(inner.clock.now(), None, "admin.token", "生成了新的管理令牌", serde_json::json!({}))?;
         *self.admin_token.lock().expect("admin token mutex poisoned") = Some(hash);
         Ok(token)
     }

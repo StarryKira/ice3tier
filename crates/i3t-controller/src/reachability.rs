@@ -7,10 +7,11 @@
 //!   不用等它把 relay 开起来。
 //! - TCP：连一次就关。relay 的 TCP 监听是节点收到新的 netmap 之后才开的，所以在时限之内隔一会儿重试。
 
+use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use i3t_model::admin::{Reachability, Transport};
+use i3t_model::admin::{ReachCause, Reachability, Transport};
 use i3t_proto::addr::{Query, Reply};
 use ring::rand::{SecureRandom, SystemRandom};
 use tokio::net::{TcpStream, UdpSocket};
@@ -31,7 +32,8 @@ pub(crate) async fn check(udp: &[SocketAddr], tcp: &[SocketAddr]) -> Vec<Reachab
     let mut results = Vec::with_capacity(checks.len());
     // 它们是同时在跑的，挨个等的总时间也就是最慢的那一个。
     for (protocol, addr, check) in checks {
-        results.push(check.await.unwrap_or_else(|error| failed(protocol, addr, format!("检查没有做完：{error}"))));
+        let unfinished = |error| failed(protocol, addr, format!("检查没有做完：{error}"), ReachCause::Local);
+        results.push(check.await.unwrap_or_else(unfinished));
     }
     results
 }
@@ -42,21 +44,21 @@ async fn check_udp(addr: SocketAddr) -> Reachability {
     let rtt = started.elapsed();
     match outcome {
         Ok(Ok(())) => reached(Transport::Udp, addr, rtt),
-        Ok(Err(error)) => failed(Transport::Udp, addr, error),
-        Err(_) => failed(Transport::Udp, addr, format!("{} 秒之内没有回答地址查询", CHECK_TIMEOUT.as_secs())),
+        Ok(Err((error, cause))) => failed(Transport::Udp, addr, error, cause),
+        Err(_) => failed(Transport::Udp, addr, format!("{} 秒之内没有回答地址查询", CHECK_TIMEOUT.as_secs()), ReachCause::Timeout),
     }
 }
 
 /// 向 `addr` 发地址查询，直到收到对得上的应答。
-async fn ask_address(addr: SocketAddr) -> Result<(), String> {
+async fn ask_address(addr: SocketAddr) -> Result<(), (String, ReachCause)> {
     let bind: SocketAddr = if addr.is_ipv4() { ([0, 0, 0, 0], 0).into() } else { ([0u16; 8], 0).into() };
-    let socket = UdpSocket::bind(bind).await.map_err(|error| format!("绑不出 UDP 端口：{error}"))?;
+    let socket = UdpSocket::bind(bind).await.map_err(|error| (format!("绑不出 UDP 端口：{error}"), ReachCause::Local))?;
     let mut nonce = [0; 8];
-    SystemRandom::new().fill(&mut nonce).map_err(|_| "系统的随机数源不可用".to_owned())?;
+    SystemRandom::new().fill(&mut nonce).map_err(|_| ("系统的随机数源不可用".to_owned(), ReachCause::Local))?;
     let query = Query { nonce }.to_bytes();
     let mut buf = [0; 64];
     loop {
-        socket.send_to(&query, addr).await.map_err(|error| format!("发不出去：{error}"))?;
+        socket.send_to(&query, addr).await.map_err(|error| (format!("发不出去：{error}"), cause_of(&error)))?;
         let deadline = time::sleep(UDP_RESEND);
         tokio::pin!(deadline);
         loop {
@@ -89,22 +91,32 @@ async fn check_tcp(addr: SocketAddr) -> Reachability {
         Ok(rtt) => reached(Transport::Tcp, addr, rtt),
         Err(_) => {
             // 时限到了，再试一次拿到具体的原因。
-            let reason = match time::timeout(Duration::from_millis(500), TcpStream::connect(addr)).await {
-                Ok(Err(error)) => error.to_string(),
+            let (reason, cause) = match time::timeout(Duration::from_millis(500), TcpStream::connect(addr)).await {
+                Ok(Err(error)) => (error.to_string(), cause_of(&error)),
                 Ok(Ok(_)) => return reached(Transport::Tcp, addr, started.elapsed()),
-                Err(_) => "连接超时".to_owned(),
+                Err(_) => ("连接超时".to_owned(), ReachCause::Timeout),
             };
-            failed(Transport::Tcp, addr, reason)
+            failed(Transport::Tcp, addr, reason, cause)
         }
     }
 }
 
 fn reached(protocol: Transport, addr: SocketAddr, rtt: Duration) -> Reachability {
     let rtt_ms = u32::try_from(rtt.as_millis()).unwrap_or(u32::MAX);
-    Reachability { protocol, addr, reachable: true, rtt_ms: Some(rtt_ms), error: None }
+    Reachability { protocol, addr, reachable: true, rtt_ms: Some(rtt_ms), error: None, cause: None }
 }
 
-fn failed(protocol: Transport, addr: SocketAddr, error: String) -> Reachability {
+fn failed(protocol: Transport, addr: SocketAddr, error: String, cause: ReachCause) -> Reachability {
     tracing::info!(?protocol, %addr, %error, "从 controller 这边连不上 relay 填的地址（只是参考，不挡着启用）");
-    Reachability { protocol, addr, reachable: false, rtt_ms: None, error: Some(error) }
+    Reachability { protocol, addr, reachable: false, rtt_ms: None, error: Some(error), cause: Some(cause) }
+}
+
+/// 系统给的连接错误归到哪一类。
+fn cause_of(error: &io::Error) -> ReachCause {
+    match error.kind() {
+        io::ErrorKind::ConnectionRefused => ReachCause::Refused,
+        io::ErrorKind::TimedOut => ReachCause::Timeout,
+        io::ErrorKind::NetworkUnreachable | io::ErrorKind::HostUnreachable => ReachCause::Unreachable,
+        _ => ReachCause::Other,
+    }
 }

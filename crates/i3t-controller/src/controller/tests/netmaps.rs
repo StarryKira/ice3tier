@@ -1,7 +1,9 @@
 //! 每个节点拿到的 netmap：最小权限，内容变了才动版本号，只发给受影响的节点。
 
-use i3t_model::admin::{CreateCredential, Direction, ForwardInput, LaneBlock, ListenerInput, PairInput, RelaySettings, UpdateNode};
-use i3t_model::control::{Declared, Report, ToController};
+use i3t_model::admin::{
+    CreateCredential, Direction, ForwardInput, LaneBlock, LaneOpening, ListenerInput, PairInput, RelaySettings, UpdateNode,
+};
+use i3t_model::control::{Declared, Hello, Report, ToController};
 use i3t_model::netmap::{self, Attachment, ExitRole, ForwardProtocol, LaneMode, ListenerProtocol, Reach, TokenHash};
 
 use super::super::Controller;
@@ -360,6 +362,53 @@ fn a_restart_keeps_identity_versions_and_the_admin_token() {
 
     let fresh = lab.controller.issue_admin_token().unwrap();
     assert!(lab.controller.is_admin_token(&fresh) && !lab.controller.is_admin_token(&admin_token));
+}
+
+#[test]
+fn the_pair_view_says_how_old_each_lane_report_is_and_whether_new_tcp_streams_use_lanes_now() {
+    use i3t_model::control::{LANE_REVISION, LaneReport, PROTOCOL_REVISION, PeerLanes};
+
+    let mut lab = Lab::new();
+    let network = lab.network("home");
+    let hello = Hello { protocol: PROTOCOL_REVISION.max(LANE_REVISION), ..super::super::testing::hello(CAN_DO_ALL) };
+    let mut relay = lab.join_as(network.id, &hello);
+    let mut member = lab.join_as(network.id, &hello);
+    lab.settle(&mut [&mut relay, &mut member]);
+    lab.controller.enable_relay(network.id, relay.id, relay_at("203.0.113.7:20330")).unwrap();
+    let lane = PairInput { keep_alive: None, lane: Some(LaneMode::UdpFallback) };
+    lab.controller.set_pair(network.id, relay.id, member.id, lane).unwrap();
+    let report = |peer, udp_path| {
+        let lanes = PeerLanes {
+            peer,
+            dials: false,
+            control: true,
+            idle: 0,
+            ready: 0,
+            parked_at_peer: 0,
+            udp_path,
+            counts: i3t_model::control::LaneCounts::default(),
+        };
+        ToController::Report(Report {
+            lanes: Some(Box::new(LaneReport { peers: vec![lanes], ..LaneReport::default() })),
+            ..Report::default()
+        })
+    };
+    member.send(&lab.controller, report(relay.id, Some(false)));
+    relay.send(&lab.controller, report(member.id, Some(true)));
+
+    let pair = lab.controller.pairs(network.id).unwrap().remove(0);
+    assert!(pair.lanes.iter().all(|side| side.reported_secs_ago == Some(0)), "刚报的：{:?}", pair.lanes);
+    let mut opening = pair.lane_effect.unwrap().opening;
+    opening.sort_by_key(|side| side.node);
+    let expected =
+        [LaneOpening { node: relay.id, udp_path: true, lanes: false }, LaneOpening { node: member.id, udp_path: false, lanes: true }];
+    let mut expected = expected.to_vec();
+    expected.sort_by_key(|side| side.node);
+    assert_eq!(opening, expected, "共用连接上没有 UDP 的那一边在 lane 上开新的 TCP 流");
+    assert_eq!(lab.controller.node(network.id, member.id).unwrap().reported_secs_ago, Some(0));
+
+    lab.controller.set_pair(network.id, relay.id, member.id, PairInput { keep_alive: None, lane: Some(LaneMode::Always) }).unwrap();
+    assert!(lab.controller.pairs(network.id).unwrap()[0].lane_effect.as_ref().unwrap().opening.is_empty(), "只在 udp_fallback 时说");
 }
 
 #[test]

@@ -5,12 +5,13 @@ use std::net::{IpAddr, Ipv4Addr};
 use i3t_model::admin::{CreateEnrollToken, CreatedEnrollToken, EnrollTokenInfo, LogRef, NetworkId, RefKind, Timestamp, TokenState};
 use i3t_model::control::{EnrollToken, Hello, ToNode};
 use i3t_proto::{NodeId, PublicKey};
+use serde_json::json;
 use tokio::sync::mpsc;
 
 use super::nodes::{allocate_address, check_address, check_node_name, inherit, require_node};
 use super::protocol::{Joined, clip};
 use super::{Admitted, Controller, Inner, naming};
-use crate::error::{Entity, Error, Rejection, error_chain};
+use crate::error::{Entity, Error, InField, Rejection, error_chain};
 use crate::secret;
 use crate::store::{DIGEST_LEN, NewNode, NewToken, NodeRecord, Store, TokenRecord, is_pending, token_at};
 
@@ -49,9 +50,9 @@ impl Controller {
     ///
     /// 标签不合法；预设的虚拟 IP 现在不能用；要继任的节点不在这个网络里。
     pub fn create_token(&self, network: NetworkId, request: &CreateEnrollToken) -> Result<CreatedEnrollToken, Error> {
-        let tags = naming::node_tags(&request.tags)?;
+        let tags = naming::node_tags(&request.tags).in_field("tags")?;
         if request.successor_of.is_some() && request.virtual_ip.is_some() {
-            return Err(Error::invalid("继任的节点继承原节点的虚拟 IP，不能同时预设另一个"));
+            return Err(Error::invalid_field("virtual_ip", "with_successor", "继任的节点继承原节点的虚拟 IP，不能同时预设另一个"));
         }
         let secret = secret::generate()?;
         let token = EnrollToken { secret: secret.clone(), controller: self.public_addr.clone(), key: self.public_key() }.to_string();
@@ -61,13 +62,17 @@ impl Controller {
         let now = inner.clock.now();
         let info = inner.store.atomically(|store| {
             if let Some(virtual_ip) = request.virtual_ip {
-                check_address(store, &network, virtual_ip, now)?;
+                check_address(store, &network, virtual_ip, now).in_field("virtual_ip")?;
                 if store.tokens(network.id)?.iter().any(|token| is_pending(token, now) && token.virtual_ip == Some(virtual_ip)) {
-                    return Err(Error::Conflict(format!("虚拟 IP {virtual_ip} 已经预设在另一个还没用掉的注册令牌上")));
+                    return Err(Error::Conflict {
+                        with: Entity::Token,
+                        message: format!("虚拟 IP {virtual_ip} 已经预设在另一个还没用掉的注册令牌上"),
+                    }
+                    .in_field("virtual_ip"));
                 }
             }
             if let Some(predecessor) = request.successor_of {
-                require_node(store, network.id, predecessor)?;
+                require_node(store, network.id, predecessor).in_field("successor_of")?;
             }
             let new = NewToken {
                 network: network.id,
@@ -86,6 +91,14 @@ impl Controller {
                 "token.create",
                 &format!("生成注册令牌 #{id}（{prefix}…）"),
                 &[LogRef::new(RefKind::Token, id)],
+                json!({
+                    "token": id,
+                    "prefix": prefix,
+                    "expires_at": new.expires_at,
+                    "tags": new.tags,
+                    "virtual_ip": new.virtual_ip,
+                    "successor_of": new.successor_of,
+                }),
             )?;
             Ok(EnrollTokenInfo {
                 id,
@@ -113,9 +126,17 @@ impl Controller {
         let mut inner = self.lock();
         let now = inner.clock.now();
         inner.store.atomically(|store| {
-            store.token(id)?.filter(|token| token.network == network).ok_or(Error::NotFound(Entity::Token))?;
+            let token = store.token(id)?.filter(|token| token.network == network).ok_or(Error::NotFound(Entity::Token))?;
             store.delete_token(id)?;
-            store.log_refs(now, Some(network), "token.delete", &format!("收回注册令牌 #{id}"), &[LogRef::new(RefKind::Token, id)])?;
+            let params = json!({ "token": id, "prefix": token.prefix });
+            store.log_refs(
+                now,
+                Some(network),
+                "token.delete",
+                &format!("收回注册令牌 #{id}"),
+                &[LogRef::new(RefKind::Token, id)],
+                params,
+            )?;
             Ok(())
         })
     }
@@ -259,6 +280,14 @@ fn create_node(
         }
         None => format!("节点 {}（{}）用令牌 #{} 加入", node.name, node.virtual_ip, token.id),
     };
-    store.log_refs(now, Some(network.id), "node.enroll", &detail, &[LogRef::node(id), LogRef::new(RefKind::Token, token.id)])?;
+    let params = json!({
+        "node": node.id,
+        "node_name": node.name,
+        "virtual_ip": node.virtual_ip,
+        "token": token.id,
+        "predecessor": predecessor.as_ref().map(|old| old.id),
+        "predecessor_name": predecessor.as_ref().map(|old| &old.name),
+    });
+    store.log_refs(now, Some(network.id), "node.enroll", &detail, &[LogRef::node(id), LogRef::new(RefKind::Token, token.id)], params)?;
     Ok((node, predecessor.map(|old| old.id)))
 }

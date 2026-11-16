@@ -188,6 +188,9 @@ pub enum ToNode {
     /// controller 不接受这个节点（令牌无效、公钥没有注册等）。
     Rejected {
         reason: String,
+        /// `reason` 的代码，节点按自己的语言说。旧版本的 controller 不给。
+        #[serde(default)]
+        cause: Option<RejectCause>,
     },
     Heartbeat,
     /// 更新到这份清单说的版本。节点自己验签，验不过就不装。
@@ -410,6 +413,10 @@ pub struct PeerLanes {
     /// 本节点拨出去、停在它那里等它取用的 lane。
     #[serde(default)]
     pub parked_at_peer: u64,
+    /// 本节点到它的共用连接现在有没有 UDP 的路（直连，或者经 UDP 连着的 relay）。设置是 `udp_fallback` 时，
+    /// 没有才在 lane 上开新的 TCP 流。旧版本的节点不报。
+    #[serde(default)]
+    pub udp_path: Option<bool>,
     #[serde(default, flatten)]
     pub counts: LaneCounts,
 }
@@ -593,14 +600,69 @@ pub enum ListenState {
     /// 正在监听。`local` 是实际绑定的地址：配置里端口写 0 时，这里是节点挑定的端口。
     Listening { local: SocketAddr },
     /// 端口已经被别的程序占着。节点不去抢，每隔一段时间再试。
-    PortInUse { detail: String },
+    PortInUse {
+        detail: String,
+        /// 原因的代码。旧版本的节点不报。
+        #[serde(default)]
+        cause: Option<BindCause>,
+    },
     /// 别的原因没有绑上（地址不在本机、没有权限等），`detail` 是系统给的原因。
-    Failed { detail: String },
+    Failed {
+        detail: String,
+        #[serde(default)]
+        cause: Option<BindCause>,
+    },
     /// 监听在本节点虚拟 IP 上的端口转发：不占操作系统的端口。
     Virtual,
     /// 这种用法节点不支持，`detail` 说明为什么。
-    Unsupported { detail: String },
+    Unsupported {
+        detail: String,
+        #[serde(default)]
+        cause: Option<BindCause>,
+    },
     /// 比这个程序新的节点报的、这里不认识的状态。
+    #[serde(other)]
+    Unknown,
+}
+
+/// controller 不接受一个节点的原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RejectCause {
+    /// 注册令牌不存在、已经用过或者已经过期。
+    BadToken,
+    /// 这把公钥没有在 controller 上注册（节点可能已经被删除）。
+    UnknownKey,
+    /// 这把公钥已经注册过了。
+    KeyAlreadyEnrolled,
+    /// 要继任的节点还在线。
+    PredecessorOnline,
+    /// 令牌预设的虚拟 IP 现在不能用。
+    AddressUnavailable,
+    /// 网络的地址段里没有空闲的地址了。
+    RangeExhausted,
+    /// 连接上的第一条消息不是注册或者报到。
+    UnexpectedFirstMessage,
+    /// 比这个程序新的 controller 给的、这里不认识的原因。
+    #[serde(other)]
+    Unknown,
+}
+
+/// 一个监听没有绑上的原因，给界面按自己的语言写。`detail` 里是系统的原话。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum BindCause {
+    /// 端口被别的程序占着。
+    AddressInUse,
+    /// 没有权限（比如普通用户绑 1024 以下的端口）。
+    PermissionDenied,
+    /// 地址不在这台机器上。
+    AddressNotAvailable,
+    /// 监听在虚拟 IP 上的端口转发没有写端口。
+    VirtualPortZero,
+    /// 别的原因，见 `detail`。
+    Other,
+    /// 比这个程序新的节点报的、这里不认识的原因。
     #[serde(other)]
     Unknown,
 }
@@ -702,6 +764,9 @@ pub struct PathDetail {
     /// 路由层说的"为什么是现在这条路"，给人看的。
     #[serde(default)]
     pub reason: String,
+    /// `reason` 的代码和它要用到的值。旧版本的节点不报。
+    #[serde(default)]
+    pub cause: Option<RouteCause>,
     /// 考虑过的候选路径，按代价从低到高。没有任何测量值的路不在里面。
     #[serde(default)]
     pub candidates: Vec<PathCandidate>,
@@ -797,6 +862,88 @@ pub struct RouteSince {
     pub secs_ago: u64,
     /// 路由层给的原因，给人看的。
     pub reason: String,
+    /// `reason` 的代码和它要用到的值。旧版本的节点不报。
+    #[serde(default)]
+    pub cause: Option<RouteCause>,
+}
+
+/// 路由层为什么走现在这条路、为什么换到它：一个代码，加上把它写成一句话要用到的值。
+///
+/// 和它在一起的 `reason` 是同一件事的中文原话，留给日志和旧的客户端。"现在这条路"（经哪些 relay、第一段走什么）
+/// 在同一个应答的 `route`、`relay_leg` 里，这里不重复。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum RouteCause {
+    /// 到这个对端还没有过路。
+    NoRouteYet,
+    /// 主动测试把路暂时固定在这里。
+    TestPinned,
+    /// 主动测试结束，回到选路规则选的路。
+    TestEnded,
+    /// 直连地址验证通过，改走直连。
+    DirectVerified,
+    /// 直连不能用了，退回经 relay。
+    DirectLost { hint: RouteHint },
+    /// 原来没有路，中转会话可用了。
+    RelayReady,
+    /// 还是经同一串 relay，到第一个 relay 的会话换了传输。`transport` 是 `null` 时第一个 relay 就是本节点自己。
+    LegChanged { transport: Option<LegTransport> },
+    /// 换了一串 relay。`previous` 是原来经过的 relay。
+    RelayChanged { hint: RouteHint, previous: Vec<NodeId> },
+    /// 没有路可走了。
+    Unreachable { hint: RouteHint },
+    /// 对端不在本节点的配置里了：访问规则不再连通它们，或者它被删掉了。
+    PeerRemoved,
+    /// 延迟优先：对端在同一个局域网里，局域网直连无条件优先。
+    Lan,
+    /// 延迟优先：`candidates` 条候选里代价最低。`cost_us` 是它的代价，不知道时是 `null`。
+    LowestCost { candidates: u32, cost_us: Option<u64> },
+    /// 延迟优先：原来的路不能用了，不等迟滞，立刻换到剩下的候选里代价最低的。
+    Failover { hint: RouteHint, candidates: u32, cost_us: Option<u64> },
+    /// 延迟优先：新的路连续 `windows` 个评估窗口都比原来的 `previous` 便宜得多。
+    Cheaper { previous: Route, previous_cost_us: u64, cost_us: u64, windows: u32 },
+    /// 比这个程序新的节点报的、这里不认识的原因。
+    #[serde(other)]
+    Unknown,
+}
+
+/// 换路的直接起因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RouteHint {
+    /// 直连探测连续超时。
+    DirectTimeouts,
+    /// 直连探测丢了超过 20%。
+    DirectLoss,
+    /// 对端不活跃，直连地址过期了。
+    DirectStale,
+    /// 直连不可用（没有更具体的起因）。
+    DirectUnavailable,
+    /// relay 通知即将下线。
+    RelayDraining,
+    /// relay 通知过载。
+    RelayOverloaded,
+    /// relay 说多级路径走不下去。
+    RelayPathBroken,
+    /// relay 说对端没有挂在它上面。
+    PeerNotAttached,
+    /// 经多个 relay 的路径上端到端的探测一直没有回音。
+    PathProbeSilent,
+    /// 刚有路时先连上的不是对端排在前面的 relay，那个 relay 的会话随后也建好了。
+    PreferredRelayReady,
+    /// 有了不绕路的中转会话（对端自己是 relay，或者对端挂在本节点的 relay 上）。
+    Shortcut,
+    /// 原来的 relay 不可用（没有更具体的起因）。
+    RelayUnavailable,
+    /// 中转会话断开，没有别的路。
+    RelayLost,
+    /// 原来的路不能用了（没有更具体的起因）。
+    RouteFailed,
+    /// 没有任何可用的路径。
+    NoPath,
+    /// 比这个程序新的节点报的、这里不认识的起因。
+    #[serde(other)]
+    Unknown,
 }
 
 /// 节点之间的信令：建立直连之前要交换的东西。
@@ -937,8 +1084,17 @@ mod tests {
                 "connections": 2, "bytes_up": 10, "bytes_down": 20
             })
         );
-        let in_use = serde_json::to_value(ListenState::PortInUse { detail: "Address in use".into() }).unwrap();
-        assert_eq!(in_use, serde_json::json!({ "state": "port_in_use", "detail": "Address in use" }));
+        let in_use =
+            serde_json::to_value(ListenState::PortInUse { detail: "Address in use".into(), cause: Some(BindCause::AddressInUse) }).unwrap();
+        assert_eq!(
+            in_use,
+            serde_json::json!({ "state": "port_in_use", "detail": "Address in use", "cause": { "code": "address_in_use" } })
+        );
+        let old: ListenState = serde_json::from_value(serde_json::json!({ "state": "failed", "detail": "x" })).unwrap();
+        assert_eq!(old, ListenState::Failed { detail: "x".into(), cause: None }, "旧版本的节点不报原因的代码");
+        let newer: ListenState =
+            serde_json::from_value(serde_json::json!({ "state": "failed", "detail": "x", "cause": { "code": "later" } })).unwrap();
+        assert_eq!(newer, ListenState::Failed { detail: "x".into(), cause: Some(BindCause::Unknown) });
         assert_eq!(serde_json::from_value::<ListenState>(serde_json::json!({ "state": "later" })).unwrap(), ListenState::Unknown);
 
         let usage = CredentialUsage { id: 3, bytes: 4096, connections: 1, last_used_secs_ago: Some(5) };
@@ -964,7 +1120,7 @@ mod tests {
             peer,
             route: Some(Route::Direct { addr: "1.2.3.4:20330".parse().unwrap() }),
             rtt_ms: Some(12),
-            since: Some(RouteSince { secs_ago: 30, reason: "直连打通了".to_owned() }),
+            since: Some(RouteSince { secs_ago: 30, reason: "直连打通了".to_owned(), cause: Some(RouteCause::DirectVerified) }),
             detail: None,
         };
         let wire = serde_json::to_value(ToController::RouteAnswer { request: 9, answer: answer.clone() }).unwrap();
@@ -973,7 +1129,7 @@ mod tests {
             serde_json::json!({
                 "type": "route_answer", "request": 9,
                 "answer": { "peer": 4, "route": { "via": "direct", "addr": "1.2.3.4:20330" }, "rtt_ms": 12,
-                            "since": { "secs_ago": 30, "reason": "直连打通了" }, "detail": null }
+                            "since": { "secs_ago": 30, "reason": "直连打通了", "cause": { "code": "direct_verified" } }, "detail": null }
             })
         );
         let unknown: RouteAnswer = serde_json::from_value(serde_json::json!({ "peer": 4, "route": null })).unwrap();
@@ -988,6 +1144,7 @@ mod tests {
             direct: None,
             relay_leg: Some(LegTransport::Tcp),
             reason: "经 relay 代价最低".to_owned(),
+            cause: Some(RouteCause::LowestCost { candidates: 2, cost_us: Some(41_500) }),
             candidates: vec![PathCandidate {
                 route: Route::Relay { relays: vec![relay] },
                 cost_us: 41_500,

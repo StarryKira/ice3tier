@@ -126,10 +126,10 @@ pub async fn query(state: &StateDir) -> anyhow::Result<Option<LiveStatus>> {
             let refused = error
                 .chain()
                 .any(|cause| cause.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::ConnectionRefused));
-            return if refused { Ok(None) } else { Err(anyhow!("问不到正在运行的节点：{error:#}")) };
+            return if refused { Ok(None) } else { Err(anyhow!((crate::texts::texts().query_running)(&format!("{error:#}")))) };
         }
     };
-    serde_json::from_str(&body).map(Some).context("正在运行的节点给的状态看不懂")
+    serde_json::from_str(&body).map(Some).context(crate::texts::texts().status_unreadable)
 }
 
 #[cfg(test)]

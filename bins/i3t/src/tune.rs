@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 
+use crate::texts::texts;
+
 /// `--apply` 把改过的参数记在这里。
 const PERSIST_FILE: &str = "/etc/sysctl.d/90-i3t.conf";
 /// 节点给自己的 UDP 端口申请的缓冲区大小（`i3t-underlay` 里的 `SOCKET_BUFFER_BYTES`）。
@@ -99,51 +101,30 @@ pub(crate) struct Finding {
 
 /// 检查一遍。`port` 是节点的端口（配置文件里的 `port`）。
 pub(crate) fn survey(sysctl: &impl Sysctl, port: u16) -> Vec<Finding> {
+    let t = &texts().ui;
     let check = |key: &'static str, want: Want, why: &'static str| {
         let current = sysctl.read(key);
         let verdict = match &current {
-            None => Verdict::Skipped("这个内核没有这个参数"),
+            None => Verdict::Skipped(t.tune_missing),
             Some(current) => want.change(current).map_or(Verdict::Fine, Verdict::Change),
         };
         Finding { key, current, verdict, why }
     };
     let mut findings = vec![
-        check(
-            "net.core.rmem_max",
-            Want::AtLeast(UDP_BUFFER_BYTES),
-            "节点给自己的 UDP 端口申请 4MB 的接收缓冲，内核按这个上限截断。很多系统的默认值只有 200KB 左右，流量一突发，包在内核里就被丢掉了",
-        ),
-        check("net.core.wmem_max", Want::AtLeast(UDP_BUFFER_BYTES), "同上，发送的方向"),
-        check(
-            "net.ipv4.tcp_slow_start_after_idle",
-            Want::Exactly("0"),
-            "经过节点的 TCP 连接（出口到目标的、UDP 用不了时到 relay 的、独占 TCP）安静一会儿之后不把发送窗口收回去。流式的应答停一下再来时，不用从头慢启动",
-        ),
-        check(
-            "net.ipv4.tcp_tw_reuse",
-            Want::Exactly("1"),
-            "打开了独占 TCP 的节点每条用户连接用一条新的 TCP，用完就关。拨号的一方每秒关掉几百条时，留在 TIME_WAIT 里的连接占着本地端口\
-             （到同一个对端地址只有两万多个），新的拨号会因为端口用完而失败。1 让拨出去的连接复用 TIME_WAIT 里的端口（靠 TCP 时间戳判断安全）；\
-             默认的 2 只对回环地址这样做",
-        ),
+        check("net.core.rmem_max", Want::AtLeast(UDP_BUFFER_BYTES), t.tune_rmem),
+        check("net.core.wmem_max", Want::AtLeast(UDP_BUFFER_BYTES), t.tune_wmem),
+        check("net.ipv4.tcp_slow_start_after_idle", Want::Exactly("0"), t.tune_slow_start),
+        check("net.ipv4.tcp_tw_reuse", Want::Exactly("1"), t.tune_tw_reuse),
     ];
 
-    let mut congestion = check(
-        "net.ipv4.tcp_congestion_control",
-        Want::Exactly("bbr"),
-        "上面那些 TCP 连接在有丢包的链路上用 BBR 快得多。节点之间的 QUIC 连接用的是程序自带的 BBR，不受这一项影响",
-    );
+    let mut congestion = check("net.ipv4.tcp_congestion_control", Want::Exactly("bbr"), t.tune_bbr);
     let available = sysctl.read("net.ipv4.tcp_available_congestion_control").unwrap_or_default();
     if matches!(congestion.verdict, Verdict::Change(_)) && !available.split_whitespace().any(|name| name == "bbr") {
-        congestion.verdict = Verdict::Skipped("内核现在没有加载 bbr，先执行 modprobe tcp_bbr，再运行一次 i3t tune");
+        congestion.verdict = Verdict::Skipped(t.tune_no_bbr);
     }
     findings.push(congestion);
 
-    let mut reserved = check(
-        "net.ipv4.ip_local_reserved_ports",
-        Want::IncludesPort(port),
-        "节点的端口落在系统给出站连接随机分配的端口范围里。节点重启的间隙，别的程序可能正好占到它，节点就起不来了",
-    );
+    let mut reserved = check("net.ipv4.ip_local_reserved_ports", Want::IncludesPort(port), t.tune_reserved);
     let in_ephemeral_range = sysctl.read("net.ipv4.ip_local_port_range").and_then(|range| {
         let mut bounds = range.split_whitespace().map(str::parse::<u16>);
         Some((bounds.next()?.ok()?..=bounds.next()?.ok()?).contains(&port))
@@ -163,9 +144,7 @@ pub(crate) fn apply(sysctl: &mut impl Sysctl, findings: &[Finding]) -> anyhow::R
     let mut changed = Vec::new();
     for finding in findings {
         if let Verdict::Change(value) = &finding.verdict {
-            sysctl
-                .write(finding.key, value)
-                .with_context(|| format!("写内核参数 {} 失败。修改内核参数要 root 权限：sudo i3t tune --apply", finding.key))?;
+            sysctl.write(finding.key, value).with_context(|| (texts().ui.tune_write_failed)(finding.key))?;
             changed.push((finding.key, value.clone()));
         }
     }
@@ -183,7 +162,7 @@ fn persisted(existing: &str, changed: &[(&'static str, String)]) -> String {
     for (key, value) in changed {
         settings.insert((*key).to_owned(), value.clone());
     }
-    let mut text = String::from("# 由 i3t tune --apply 写入。每一项的原因见 i3t tune 的输出。\n");
+    let mut text = format!("# {}\n", texts().ui.tune_file_header);
     for (key, value) in settings {
         text.push_str(&format!("{key} = {value}\n"));
     }
@@ -192,50 +171,51 @@ fn persisted(existing: &str, changed: &[(&'static str, String)]) -> String {
 
 /// `i3t tune` 的全部：检查，打印，按要求修改。
 pub(crate) fn run(port: u16, apply_changes: bool) -> anyhow::Result<()> {
+    let t = &texts().ui;
     let mut sysctl = ProcSys;
-    let kernel = sysctl.read("kernel.osrelease").unwrap_or_else(|| "版本未知".to_owned());
-    println!("内核参数（Linux {kernel}）");
+    let kernel = sysctl.read("kernel.osrelease").unwrap_or_else(|| i3t_lang::NONE.to_owned());
+    println!("{}", (t.tune_title)(&kernel));
     let findings = survey(&sysctl, port);
+    let mut table = i3t_lang::table::Table::new(&t.tune_header).indented(2);
     for finding in &findings {
-        let current = finding.current.as_deref().unwrap_or("没有");
-        match &finding.verdict {
-            Verdict::Fine => println!("  正常      {} = {current}", finding.key),
-            Verdict::Change(value) => {
-                println!("  建议修改  {} = {current}，建议 {value}", finding.key);
-                println!("            {}", finding.why);
-            }
-            Verdict::Skipped(reason) => println!("  没有检查  {}（现在是 {current}）：{reason}", finding.key),
-        }
+        let current = finding.current.clone().unwrap_or_else(|| i3t_lang::NONE.to_owned());
+        let (verdict, suggested, note) = match &finding.verdict {
+            Verdict::Fine => (t.tune_fine, i3t_lang::NONE.to_owned(), String::new()),
+            Verdict::Change(value) => (t.tune_change, value.clone(), finding.why.to_owned()),
+            Verdict::Skipped(reason) => (t.tune_skipped, i3t_lang::NONE.to_owned(), (*reason).to_owned()),
+        };
+        table.row(vec![verdict.to_owned(), finding.key.to_owned(), current, suggested, note]);
     }
+    table.print();
     print_open_file_limit();
 
     let wanted = findings.iter().filter(|finding| matches!(finding.verdict, Verdict::Change(_))).count();
     if wanted == 0 {
-        println!("\n没有要改的。");
+        println!("\n{}", t.tune_nothing);
         return Ok(());
     }
     if !apply_changes {
-        println!("\n有 {wanted} 项建议修改。执行 sudo i3t tune --apply：立刻生效，并写进 {PERSIST_FILE}，重启之后还在。");
+        println!("\n{}", (t.tune_wanted)(wanted, PERSIST_FILE));
         return Ok(());
     }
     let changed = apply(&mut sysctl, &findings)?;
     let existing = std::fs::read_to_string(PERSIST_FILE).unwrap_or_default();
-    std::fs::write(PERSIST_FILE, persisted(&existing, &changed))
-        .with_context(|| format!("参数已经生效，但写 {PERSIST_FILE} 失败，重启之后会变回去"))?;
-    println!("\n改了 {} 项，已经生效，并写进了 {PERSIST_FILE}。", changed.len());
+    std::fs::write(PERSIST_FILE, persisted(&existing, &changed)).with_context(|| (t.tune_persist_failed)(PERSIST_FILE))?;
+    println!("\n{}", (t.tune_changed)(changed.len(), PERSIST_FILE));
     Ok(())
 }
 
 /// 能同时打开的文件数。它不是内核参数，这里只报告：`i3t run` 启动时自己会把软上限抬到硬上限。
 fn print_open_file_limit() {
+    let t = &texts().ui;
     match rlimit::Resource::NOFILE.get() {
         Ok((soft, hard)) => {
-            println!("能同时打开的文件数：软上限 {soft}，硬上限 {hard}。i3t run 启动时会把软上限抬到硬上限；经过节点的每条连接占一个。");
+            println!("\n{}", (t.tune_files)(soft, hard));
             if hard < 65_536 {
-                println!("            硬上限偏低，流多的出口或者 relay 可能不够用。装成系统服务时单元文件里的 LimitNOFILE 管这一项。");
+                println!("{}", t.tune_files_low);
             }
         }
-        Err(error) => println!("能同时打开的文件数：读不到（{error}）"),
+        Err(error) => println!("\n{}", (t.tune_files_unknown)(&error.to_string())),
     }
 }
 

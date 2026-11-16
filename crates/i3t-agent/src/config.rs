@@ -16,42 +16,7 @@ use anyhow::{Context, bail};
 use i3t_model::control::Declared;
 use serde::Deserialize;
 
-/// 第一次运行时写出来的配置文件。里面的值就是默认值。
-pub const TEMPLATE: &str = r#"# ice3tier 节点的配置。
-# 改完之后重启 i3t 才生效。`i3t set …` 改的也是这个文件。
-
-# 节点绑定的端口（UDP）。启用为 relay 的节点还会在同一个端口号上监听 TCP。
-port = 20330
-
-# 这台机器声明自己可以承担什么。
-# 声明本身不启用任何东西：启用要管理员在 WebUI 上打开；没有声明的，WebUI 上启用不了。
-[declare]
-# 可以作为出口：别的节点的流量从这台机器的网络出去。
-exit = false
-# 可以作为 relay：为别的节点转发数据包。这台机器要有从公网连得上的端口。
-relay = false
-# 可以作为端口转发的目标：别的节点可以经它访问它的回环地址和局域网里指定的服务。
-forward = false
-
-# 本机的代理入口，只给这台机器上的程序用。不需要的那一种写 "off"。
-[proxy]
-socks5 = "127.0.0.1:1080"
-http = "127.0.0.1:1081"
-
-# 本机的指标接口，Prometheus 的文本格式：http://<这里的地址>/metrics。只能绑回环地址。不需要就写 "off"。
-[metrics]
-listen = "127.0.0.1:20333"
-
-# 管理员发起的主动测试（连通性测试）。
-[tests]
-# 接受吞吐测试：测试时对端会向本机发、或者要本机发回最多 20MB 的数据（每个方向最多 5 秒）。
-# 按流量计费的机器可以关掉（写 false），延迟和直连的测试照常可以做。也可以用 i3t set throughput-tests off。
-throughput = true
-
-[log]
-# 日志级别：error、warn、info、debug、trace。
-level = "info"
-"#;
+use crate::texts::texts;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -80,9 +45,9 @@ impl Config {
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(err) => return Err(err).with_context(|| format!("读配置文件 {}", path.display())),
+            Err(err) => return Err(err).with_context(|| (texts().read_config)(path)),
         };
-        Self::parse(&text).with_context(|| format!("配置文件 {} 有错", path.display()))
+        Self::parse(&text).with_context(|| (texts().config_error)(path))
     }
 
     /// # Errors
@@ -95,16 +60,16 @@ impl Config {
         Ok(config)
     }
 
-    /// 配置文件不存在时写出模板；已经存在时不动它。
+    /// 配置文件不存在时写出模板，注释用这时的语言（`i3t_lang::current`）；已经存在时不动它，也不因为换了语言重写。
     ///
     /// # Errors
     ///
     /// 写文件失败。
     pub fn write_template_if_missing(path: &Path) -> anyhow::Result<()> {
         match fs::OpenOptions::new().write(true).create_new(true).open(path) {
-            Ok(mut file) => io::Write::write_all(&mut file, TEMPLATE.as_bytes()).with_context(|| format!("写配置文件 {}", path.display())),
+            Ok(mut file) => io::Write::write_all(&mut file, texts().template.as_bytes()).with_context(|| (texts().write_config)(path)),
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-            Err(err) => Err(err).with_context(|| format!("创建配置文件 {}", path.display())),
+            Err(err) => Err(err).with_context(|| (texts().create_config)(path)),
         }
     }
 
@@ -124,43 +89,37 @@ impl Config {
     /// 文件读写失败，或者现有的内容解析不了。
     pub fn set(path: &Path, setting: Setting, on: bool) -> anyhow::Result<()> {
         Self::write_template_if_missing(path)?;
-        let text = fs::read_to_string(path).with_context(|| format!("读配置文件 {}", path.display()))?;
+        let text = fs::read_to_string(path).with_context(|| (texts().read_config)(path))?;
         let mut document: toml_edit::DocumentMut =
-            text.parse().map_err(|err| anyhow::anyhow!("{err}")).with_context(|| format!("配置文件 {} 有错", path.display()))?;
+            text.parse().map_err(|err| anyhow::anyhow!("{err}")).with_context(|| (texts().config_error)(path))?;
         let (section, key) = setting.key();
         document[section][key] = toml_edit::value(on);
         let updated = document.to_string();
         // 改完先整个验一遍，不把一个读不回来的文件写下去。
-        Self::parse(&updated).with_context(|| format!("配置文件 {} 有错", path.display()))?;
-        fs::write(path, updated).with_context(|| format!("写配置文件 {}", path.display()))
+        Self::parse(&updated).with_context(|| (texts().config_error)(path))?;
+        fs::write(path, updated).with_context(|| (texts().write_config)(path))
     }
 
     fn validate(&self) -> anyhow::Result<()> {
         if self.port == 0 {
-            bail!("port 不能是 0：节点要绑定一个固定的端口，别的节点才找得到它");
+            bail!(texts().port_zero);
         }
         for (name, entry) in [("proxy.socks5", self.proxy.socks5), ("proxy.http", self.proxy.http)] {
             if let ProxyBind::At(addr) = entry
                 && !addr.ip().is_loopback()
             {
-                bail!(
-                    "{name} = \"{addr}\" 不是回环地址。这里的代理入口只给本机的程序用，只能写 127.0.0.1 或 [::1]。\n\
-                     要对别的机器开放代理入口，请在 WebUI 的“监听器”里配置，那里可以设凭据和来源白名单。"
-                );
+                bail!((texts().proxy_not_loopback)(name, &addr.to_string()));
             }
         }
         if let ProxyBind::At(addr) = self.metrics.listen
             && !addr.ip().is_loopback()
         {
-            bail!(
-                "metrics.listen = \"{addr}\" 不是回环地址。指标接口不带认证，只能写 127.0.0.1 或 [::1]。\n\
-                 要从别的机器抓指标，请在这台机器上用反向代理或者 SSH 端口转发把它转出去。"
-            );
+            bail!((texts().metrics_not_loopback)(&addr.to_string()));
         }
         if let (ProxyBind::At(socks5), ProxyBind::At(http)) = (self.proxy.socks5, self.proxy.http)
             && socks5 == http
         {
-            bail!("proxy.socks5 和 proxy.http 不能用同一个地址 {socks5}");
+            bail!((texts().same_proxy_address)(&socks5.to_string()));
         }
         Ok(())
     }
@@ -244,10 +203,7 @@ impl FromStr for Setting {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "throughput-tests" => Ok(Self::ThroughputTests),
-            other => other
-                .parse()
-                .map(Self::Declare)
-                .map_err(|_| anyhow::anyhow!("不认识的设置项 {other}，可以写的有 can-exit、can-relay、can-forward、throughput-tests")),
+            other => other.parse().map(Self::Declare).map_err(|_| anyhow::anyhow!((texts().unknown_setting)(other))),
         }
     }
 }
@@ -270,7 +226,7 @@ impl FromStr for Capability {
             "can-exit" => Ok(Self::Exit),
             "can-relay" => Ok(Self::Relay),
             "can-forward" => Ok(Self::Forward),
-            other => bail!("不认识的设置项 {other}，可以写的有 can-exit、can-relay、can-forward"),
+            other => bail!((texts().unknown_setting)(other)),
         }
     }
 }
@@ -328,9 +284,7 @@ impl<'de> Deserialize<'de> for ProxyBind {
         if text.eq_ignore_ascii_case("off") {
             return Ok(Self::Off);
         }
-        text.parse().map(Self::At).map_err(|_| {
-            serde::de::Error::custom(format!("\"{text}\" 不是一个地址。写成 \"127.0.0.1:1080\" 这样的“地址:端口”，或者写 \"off\" 表示不开"))
-        })
+        text.parse().map(Self::At).map_err(|_| serde::de::Error::custom((texts().not_an_address)(&text)))
     }
 }
 
@@ -420,7 +374,7 @@ mod tests {
 
     #[test]
     fn the_template_parses_to_the_defaults() {
-        assert_eq!(Config::parse(TEMPLATE).unwrap(), Config::default());
+        assert_eq!(Config::parse(texts().template).unwrap(), Config::default());
     }
 
     #[test]
@@ -449,13 +403,13 @@ mod tests {
         assert_eq!(config.proxy.socks5, ProxyBind::Off);
         assert_eq!(config.proxy.http.addr(), Some("[::1]:8080".parse().unwrap()));
         let error = error_of("[proxy]\nsocks5 = \"1080\"\n");
-        assert!(error.contains("地址:端口") && error.contains("off"), "{error}");
+        assert!(error.contains(&(texts().not_an_address)("1080")), "{error}");
     }
 
     #[test]
     fn a_non_loopback_proxy_is_refused_with_a_pointer_to_the_right_place() {
         let error = error_of("[proxy]\nsocks5 = \"0.0.0.0:1080\"\n");
-        assert!(error.contains("回环地址") && error.contains("监听器"), "{error}");
+        assert!(error.contains(&(texts().proxy_not_loopback)("proxy.socks5", "0.0.0.0:1080")), "{error}");
     }
 
     #[test]
@@ -465,13 +419,14 @@ mod tests {
         assert_eq!(moved.metrics.listen.addr(), Some("[::1]:9100".parse().unwrap()));
         assert_eq!(Config::parse("[metrics]\nlisten = \"off\"\n").unwrap().metrics.listen, ProxyBind::Off);
         let error = error_of("[metrics]\nlisten = \"0.0.0.0:20333\"\n");
-        assert!(error.contains("回环地址") && error.contains("metrics.listen"), "{error}");
+        assert!(error.contains(&(texts().metrics_not_loopback)("0.0.0.0:20333")), "{error}");
     }
 
     #[test]
     fn nonsense_values_are_refused() {
         assert!(error_of("port = 0\n").contains("port"));
-        assert!(error_of("[proxy]\nsocks5 = \"127.0.0.1:1080\"\nhttp = \"127.0.0.1:1080\"\n").contains("同一个地址"));
+        let error = error_of("[proxy]\nsocks5 = \"127.0.0.1:1080\"\nhttp = \"127.0.0.1:1080\"\n");
+        assert!(error.contains(&(texts().same_proxy_address)("127.0.0.1:1080")), "{error}");
         assert!(error_of("[log]\nlevel = \"loud\"\n").contains("line 2"));
     }
 
@@ -481,11 +436,11 @@ mod tests {
         let path = dir.path().join("config.toml");
         Config::set_declared(&path, Capability::Exit, true).unwrap();
         let text = fs::read_to_string(&path).unwrap();
-        assert_eq!(text, TEMPLATE.replace("exit = false", "exit = true"));
+        assert_eq!(text, texts().template.replace("exit = false", "exit = true"));
         assert_eq!(Config::load(&path).unwrap().declare, Declare { exit: true, relay: false, forward: false });
 
         Config::set_declared(&path, Capability::Exit, false).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), TEMPLATE);
+        assert_eq!(fs::read_to_string(&path).unwrap(), texts().template);
     }
 
     #[test]
@@ -516,7 +471,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         let setting: Setting = "throughput-tests".parse().unwrap();
         Config::set(&path, setting, false).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), TEMPLATE.replace("throughput = true", "throughput = false"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), texts().template.replace("throughput = true", "throughput = false"));
         assert!(!Config::load(&path).unwrap().tests.throughput);
         assert_eq!(setting.to_string(), "throughput-tests");
         assert_eq!("can-relay".parse::<Setting>().unwrap(), Setting::Declare(Capability::Relay));

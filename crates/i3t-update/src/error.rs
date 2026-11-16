@@ -5,7 +5,7 @@ use std::fmt::Write;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use i3t_model::update::{FailureKind, Platform, SelfUpdateBlocker, Sha256, Version};
+use i3t_model::update::{FailureKind, Platform, SelfUpdateBlocker, Sha256, UpdateCause, Version};
 
 /// 一份带签名的清单没有通过检查。
 #[derive(Debug, thiserror::Error)]
@@ -38,6 +38,21 @@ pub enum Refusal {
     RestartPending { installed: Version },
 }
 
+impl Refusal {
+    fn cause(&self) -> UpdateCause {
+        match self {
+            Self::Manifest(ManifestError::BadSignature) => UpdateCause::BadSignature,
+            Self::Manifest(ManifestError::Malformed(_)) => UpdateCause::BadManifest,
+            Self::CannotSelfUpdate(blocker) => UpdateCause::CannotSelfUpdate { blocker: *blocker },
+            Self::NotNewer { offered, running } => UpdateCause::NotNewer { offered: offered.clone(), running: running.clone() },
+            Self::Prerelease { offered, running } => UpdateCause::Prerelease { offered: offered.clone(), running: running.clone() },
+            Self::FailedBefore { version, .. } => UpdateCause::FailedBefore { version: version.clone() },
+            Self::NoArtifact { version, platform } => UpdateCause::NoPackage { version: version.clone(), platform: platform.clone() },
+            Self::RestartPending { installed } => UpdateCause::RestartPending { installed: installed.clone() },
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum UpdateError {
@@ -49,7 +64,14 @@ pub enum UpdateError {
     #[error("包的内容和清单对不上：大小 {actual_size} 字节、SHA-256 {actual}，清单上是 {expected_size} 字节、{expected}")]
     Corrupt { expected_size: u64, expected: Sha256, actual_size: u64, actual: Sha256 },
     #[error("版本 {version} 的自检没有通过：{reason}")]
-    SelfCheck { version: Version, reason: String },
+    SelfCheck {
+        version: Version,
+        reason: String,
+        /// 新程序的退出码；被信号杀掉、没有运行起来或者超时时没有。
+        exit_code: Option<i32>,
+        /// 新程序在标准错误上最后说的话。
+        output: String,
+    },
     #[error("调用方不再通报流的数量，等不到换程序的时机")]
     Cancelled,
     #[error("{action} {} 失败", path.display())]
@@ -77,6 +99,22 @@ impl UpdateError {
             Self::Refused(_) | Self::Unavailable(_) | Self::Corrupt { .. } | Self::Cancelled | Self::Io { .. } | Self::State { .. } => {
                 FailureKind::NotInstalled
             }
+        }
+    }
+
+    /// 上报给 controller 的原因代码，和 [`describe`] 写的那句话说的是同一件事。
+    #[must_use]
+    pub fn cause(&self) -> UpdateCause {
+        match self {
+            Self::Refused(refusal) => refusal.cause(),
+            Self::Unavailable(detail) => UpdateCause::Unavailable { detail: detail.clone() },
+            Self::Corrupt { expected_size, actual_size, .. } => {
+                UpdateCause::Corrupt { expected_size: *expected_size, actual_size: *actual_size }
+            }
+            Self::SelfCheck { exit_code, output, .. } => UpdateCause::SelfCheck { exit_code: *exit_code, output: output.clone() },
+            Self::Cancelled => UpdateCause::Cancelled,
+            Self::Io { path, source, .. } => UpdateCause::Io { path: path.display().to_string(), error: source.to_string() },
+            Self::State { path, .. } => UpdateCause::StateUnreadable { path: path.display().to_string() },
         }
     }
 
@@ -112,9 +150,30 @@ mod tests {
     }
 
     #[test]
+    fn every_failure_has_a_code_with_the_values_its_sentence_uses() {
+        let refused = UpdateError::Refused(Refusal::Manifest(ManifestError::BadSignature));
+        assert_eq!(refused.cause(), UpdateCause::BadSignature);
+        let (offered, running) = (Version::new(0, 2, 0), Version::new(0, 3, 0));
+        let not_newer = UpdateError::Refused(Refusal::NotNewer { offered: offered.clone(), running: running.clone() });
+        assert_eq!(not_newer.cause(), UpdateCause::NotNewer { offered, running });
+        let io = UpdateError::Io { action: "写", path: PathBuf::from("/x/y"), source: io::Error::other("磁盘满了") };
+        assert_eq!(io.cause(), UpdateCause::Io { path: "/x/y".into(), error: "磁盘满了".into() });
+        let check = UpdateError::SelfCheck {
+            version: Version::new(1, 0, 0),
+            reason: "退出码 3：坏了".into(),
+            exit_code: Some(3),
+            output: "坏了".into(),
+        };
+        assert_eq!(check.cause(), UpdateCause::SelfCheck { exit_code: Some(3), output: "坏了".into() });
+        let blocked = UpdateError::Refused(Refusal::CannotSelfUpdate(SelfUpdateBlocker::Container));
+        assert_eq!(blocked.cause(), UpdateCause::CannotSelfUpdate { blocker: SelfUpdateBlocker::Container });
+    }
+
+    #[test]
     fn only_a_failed_self_check_blames_the_version() {
         let version = Version::new(1, 0, 0);
-        assert_eq!(UpdateError::SelfCheck { version, reason: String::new() }.kind(), FailureKind::VersionRejected);
+        let failed = UpdateError::SelfCheck { version, reason: String::new(), exit_code: Some(1), output: String::new() };
+        assert_eq!(failed.kind(), FailureKind::VersionRejected);
         assert_eq!(UpdateError::Unavailable(String::new()).kind(), FailureKind::NotInstalled);
         assert_eq!(UpdateError::Refused(Refusal::Manifest(ManifestError::BadSignature)).kind(), FailureKind::NotInstalled);
     }

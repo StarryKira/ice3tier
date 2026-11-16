@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use i3t_model::control::Route;
+use i3t_model::control::{LegTransport, Route, RouteCause, RouteHint};
 use i3t_proto::NodeId;
 use i3t_proto::backbone::RelayState;
 use i3t_proto::datagram::{RelayHeader, RelayPath, RouteHeader};
@@ -306,6 +306,52 @@ pub(super) fn rank_relays(mut order: Vec<NodeId>, current: Option<NodeId>, stand
     order
 }
 
+/// 为什么走现在这条路：给人看的一句话（日志、旧的客户端），和它的代码（界面按自己的语言写）。两样说的是同一件事。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Reason {
+    pub(crate) text: String,
+    pub(crate) cause: RouteCause,
+}
+
+impl Reason {
+    pub(crate) fn new(text: impl Into<String>, cause: RouteCause) -> Self {
+        Self { text: text.into(), cause }
+    }
+
+    /// 到这个对端还没有过路。
+    pub(crate) fn no_route_yet() -> Self {
+        Self::new("还没有可用的路径", RouteCause::NoRouteYet)
+    }
+}
+
+/// 换路的直接起因写给人看。
+pub(crate) const fn hint_text(hint: RouteHint) -> &'static str {
+    match hint {
+        RouteHint::DirectTimeouts => "直连探测连续超时",
+        RouteHint::DirectLoss => "直连探测丢失超过 20%",
+        RouteHint::DirectStale => "对端不活跃，直连地址过期",
+        RouteHint::DirectUnavailable => "直连不可用",
+        RouteHint::RelayDraining => "relay 通知即将下线",
+        RouteHint::RelayOverloaded => "relay 通知过载",
+        RouteHint::RelayPathBroken => "relay 说多级路径走不下去",
+        RouteHint::PeerNotAttached => "relay 说对端没有挂在它上面",
+        RouteHint::PathProbeSilent => "经多个 relay 的路径上端到端的探测一直没有回音",
+        RouteHint::PreferredRelayReady => "刚有路时先连上的不是对端排在前面的 relay，那个 relay 的会话随后也建好了",
+        RouteHint::Shortcut => "有了不绕路的中转会话",
+        RouteHint::RelayUnavailable => "原来的 relay 不可用",
+        RouteHint::RelayLost => "中转会话断开，没有别的路",
+        RouteHint::RouteFailed => "原来的路不能用了",
+        RouteHint::NoPath => "没有任何可用的路径",
+        RouteHint::Unknown => "原因不明",
+    }
+}
+
+/// 代价的毫秒数换成微秒，原因的代码里用。不是数（没找到这条候选）或者是负数时没有。借 `Duration` 来换，不用 `as`。
+fn micros(ms: f64) -> Option<u64> {
+    let duration = std::time::Duration::try_from_secs_f64(ms / 1000.0).ok()?;
+    Some(u64::try_from(duration.as_micros()).unwrap_or(u64::MAX))
+}
+
 /// 一条路径写给人看：`relay 8 → 9`。
 fn relays_text(path: RelayPath) -> String {
     let hops: Vec<String> = path.as_slice().iter().map(NodeId::to_string).collect();
@@ -321,34 +367,49 @@ pub(super) fn route_text(key: RouteKey) -> String {
     }
 }
 
-/// 延迟优先模式换路的原因，给人看的。`candidates` 是做决定时的候选，用来写出代价。
-pub(super) fn explain(why: Why, to: RouteKey, from: RouteKey, candidates: &[Candidate], hint: Option<&'static str>) -> String {
+/// 延迟优先模式换路的原因。`candidates` 是做决定时的候选，用来写出代价。
+pub(super) fn explain(why: Why, to: RouteKey, from: RouteKey, candidates: &[Candidate], hint: Option<RouteHint>) -> Reason {
     let chosen = match to {
         RouteKey::None => None,
         RouteKey::Direct(addr) => Some(PathId::Direct(addr)),
         RouteKey::Relay { path, .. } => Some(PathId::Relays(path)),
     };
     let cost = candidates.iter().find(|candidate| Some(candidate.path) == chosen).map_or(f64::NAN, |candidate| candidate.cost_ms);
-    let (to, from) = (route_text(to), route_text(from));
+    let count = u32::try_from(candidates.len()).unwrap_or(u32::MAX);
+    let (to_text, from_text) = (route_text(to), route_text(from));
     match why {
-        Why::Lan => format!("对端在同一个局域网里，局域网直连无条件优先，改走{to}"),
-        Why::First => format!("延迟优先：{} 条候选里{to}的代价最低（{cost:.0}ms）", candidates.len()),
+        Why::Lan => Reason::new(format!("对端在同一个局域网里，局域网直连无条件优先，改走{to_text}"), RouteCause::Lan),
+        Why::First => Reason::new(
+            format!("延迟优先：{} 条候选里{to_text}的代价最低（{cost:.0}ms）", candidates.len()),
+            RouteCause::LowestCost { candidates: count, cost_us: micros(cost) },
+        ),
         Why::Failover => {
-            format!(
-                "{}，不等迟滞，立刻换到剩下的 {} 条候选里代价最低的{to}（{cost:.0}ms）",
-                hint.unwrap_or("原来的路不能用了"),
-                candidates.len()
+            let hint = hint.unwrap_or(RouteHint::RouteFailed);
+            Reason::new(
+                format!("{}，不等迟滞，立刻换到剩下的 {} 条候选里代价最低的{to_text}（{cost:.0}ms）", hint_text(hint), candidates.len()),
+                RouteCause::Failover { hint, candidates: count, cost_us: micros(cost) },
             )
         }
-        Why::Cheaper { from_ms, to_ms } => format!(
-            "延迟优先：{to}的代价（{to_ms:.0}ms）连续 {SWITCH_WINDOWS} 个评估窗口都比原来的{from}（{from_ms:.0}ms）低至少 max(5ms, 10%)，切换"
+        Why::Cheaper { from_ms, to_ms } => Reason::new(
+            format!(
+                "延迟优先：{to_text}的代价（{to_ms:.0}ms）连续 {SWITCH_WINDOWS} 个评估窗口都比原来的{from_text}（{from_ms:.0}ms）低至少 max(5ms, 10%)，切换"
+            ),
+            RouteCause::Cheaper {
+                previous: from.to_route(),
+                previous_cost_us: micros(from_ms).unwrap_or_default(),
+                cost_us: micros(to_ms).unwrap_or_default(),
+                windows: u32::from(SWITCH_WINDOWS),
+            },
         ),
-        Why::NoPath => hint.unwrap_or("没有任何可用的路径").to_owned(),
+        Why::NoPath => {
+            let hint = hint.unwrap_or(RouteHint::NoPath);
+            Reason::new(hint_text(hint), RouteCause::Unreachable { hint })
+        }
     }
 }
 
-/// 默认模式换路的原因，给人看的。`peer` 是这条路通向的对端。延迟优先模式下路径没变、只是到 relay 的会话换了传输时也用它。
-pub(super) fn describe(peer: NodeId, from: RouteKey, to: RouteKey, hint: Option<&'static str>) -> String {
+/// 默认模式换路的原因。`peer` 是这条路通向的对端。延迟优先模式下路径没变、只是到 relay 的会话换了传输时也用它。
+pub(super) fn describe(peer: NodeId, from: RouteKey, to: RouteKey, hint: Option<RouteHint>) -> Reason {
     let transport = |via: Via| match via {
         Via::Udp(_) => "UDP",
         Via::Tcp(_) => "TCP",
@@ -366,20 +427,37 @@ pub(super) fn describe(peer: NodeId, from: RouteKey, to: RouteKey, hint: Option<
     // 新的路是不是两个节点之间直接的中转会话。
     let is_shortcut = |path: RelayPath, via: Via| via == Via::Local || *path.as_slice() == [peer];
     match (from, to) {
-        (_, RouteKey::Direct(addr)) => format!("直连地址 {addr} 验证通过，改走直连"),
+        (_, RouteKey::Direct(addr)) => Reason::new(format!("直连地址 {addr} 验证通过，改走直连"), RouteCause::DirectVerified),
         (RouteKey::Direct(_), RouteKey::Relay { path, via }) => {
-            format!("{}，退回{}", hint.unwrap_or("直连不可用"), relay_choice(path, via))
+            let hint = hint.unwrap_or(RouteHint::DirectUnavailable);
+            Reason::new(format!("{}，退回{}", hint_text(hint), relay_choice(path, via)), RouteCause::DirectLost { hint })
         }
-        (RouteKey::None, RouteKey::Relay { path, via }) => format!("中转会话可用，经{}", relay_choice(path, via)),
+        (RouteKey::None, RouteKey::Relay { path, via }) => {
+            Reason::new(format!("中转会话可用，经{}", relay_choice(path, via)), RouteCause::RelayReady)
+        }
         (RouteKey::Relay { path: old, .. }, RouteKey::Relay { path, via }) if old == path => {
-            format!("到 relay {} 的会话改走 {}", path.first(), transport(via))
+            let leg = match via {
+                Via::Udp(_) => Some(LegTransport::Udp),
+                Via::Tcp(_) => Some(LegTransport::Tcp),
+                Via::Local => None,
+            };
+            Reason::new(format!("到 relay {} 的会话改走 {}", path.first(), transport(via)), RouteCause::LegChanged { transport: leg })
         }
         (RouteKey::Relay { path: old, .. }, RouteKey::Relay { path, via }) => {
-            let cause = hint.unwrap_or(if is_shortcut(path, via) { "有了不绕路的中转会话" } else { "原来的 relay 不可用" });
-            format!("{cause}，从 {} 换到{}", relays_text(old), relay_choice(path, via))
+            let hint = hint.unwrap_or(if is_shortcut(path, via) { RouteHint::Shortcut } else { RouteHint::RelayUnavailable });
+            Reason::new(
+                format!("{}，从 {} 换到{}", hint_text(hint), relays_text(old), relay_choice(path, via)),
+                RouteCause::RelayChanged { hint, previous: old.as_slice().to_vec() },
+            )
         }
-        (RouteKey::Direct(_), RouteKey::None) => format!("{}，也没有 relay 可走", hint.unwrap_or("直连不可用")),
-        (_, RouteKey::None) => hint.unwrap_or("中转会话断开，没有别的路").to_owned(),
+        (RouteKey::Direct(_), RouteKey::None) => {
+            let hint = hint.unwrap_or(RouteHint::DirectUnavailable);
+            Reason::new(format!("{}，也没有 relay 可走", hint_text(hint)), RouteCause::Unreachable { hint })
+        }
+        (_, RouteKey::None) => {
+            let hint = hint.unwrap_or(RouteHint::RelayLost);
+            Reason::new(hint_text(hint), RouteCause::Unreachable { hint })
+        }
     }
 }
 
@@ -415,37 +493,43 @@ mod tests {
         let itself = RouteKey::Relay { path: path(&[2]), via: Via::Tcp(2) };
         let local = RouteKey::Relay { path: path(&[1]), via: Via::Local };
 
-        assert_eq!(describe(peer, via_udp, direct, None), "直连地址 203.0.113.7:4000 验证通过，改走直连");
-        assert_eq!(describe(peer, direct, via_udp, Some("直连探测连续超时")), "直连探测连续超时，退回对端挂靠的 relay 9（会话走 UDP）");
-        assert_eq!(describe(peer, RouteKey::None, via_tcp, None), "中转会话可用，经对端挂靠的 relay 9（会话走 TCP）");
-        assert_eq!(describe(peer, via_tcp, via_udp, None), "到 relay 9 的会话改走 UDP");
+        assert_eq!(describe(peer, via_udp, direct, None).text, "直连地址 203.0.113.7:4000 验证通过，改走直连");
         assert_eq!(
-            describe(peer, via_udp, other, Some("relay 说对端没有挂在它上面")),
+            describe(peer, direct, via_udp, Some(RouteHint::DirectTimeouts)).text,
+            "直连探测连续超时，退回对端挂靠的 relay 9（会话走 UDP）"
+        );
+        assert_eq!(describe(peer, RouteKey::None, via_tcp, None).text, "中转会话可用，经对端挂靠的 relay 9（会话走 TCP）");
+        assert_eq!(describe(peer, via_tcp, via_udp, None).text, "到 relay 9 的会话改走 UDP");
+        assert_eq!(
+            describe(peer, via_udp, other, Some(RouteHint::PeerNotAttached)).text,
             "relay 说对端没有挂在它上面，从 relay 9 换到对端挂靠的 relay 8（会话走 UDP）"
         );
-        assert_eq!(describe(peer, via_udp, other, None), "原来的 relay 不可用，从 relay 9 换到对端挂靠的 relay 8（会话走 UDP）");
-        assert_eq!(describe(peer, direct, RouteKey::None, None), "直连不可用，也没有 relay 可走");
-        assert_eq!(describe(peer, via_udp, RouteKey::None, None), "中转会话断开，没有别的路");
+        assert_eq!(describe(peer, via_udp, other, None).text, "原来的 relay 不可用，从 relay 9 换到对端挂靠的 relay 8（会话走 UDP）");
+        assert_eq!(describe(peer, direct, RouteKey::None, None).text, "直连不可用，也没有 relay 可走");
+        assert_eq!(describe(peer, via_udp, RouteKey::None, None).text, "中转会话断开，没有别的路");
 
         // 两个节点之间直接的中转会话：说明为什么不走对端挂靠表里排在前面的 relay。
         assert_eq!(
-            describe(peer, RouteKey::None, itself, None),
+            describe(peer, RouteKey::None, itself, None).text,
             "中转会话可用，经对端自己的 relay（它本身就是 relay，会话走 TCP，不用绕别的 relay）"
         );
         assert_eq!(
-            describe(peer, via_udp, itself, None),
+            describe(peer, via_udp, itself, None).text,
             "有了不绕路的中转会话，从 relay 9 换到对端自己的 relay（它本身就是 relay，会话走 TCP，不用绕别的 relay）"
         );
         assert_eq!(
-            describe(peer, via_udp, local, None),
+            describe(peer, via_udp, local, None).text,
             "有了不绕路的中转会话，从 relay 9 换到本节点自己的 relay（对端在它上面有会话，不用绕别的 relay）"
         );
 
         // 从延迟优先换回默认模式时，原来的路可能是多级的。
         let two_hops = RouteKey::Relay { path: path(&[8, 9]), via: Via::Udp(addr("198.51.100.8:20330")) };
-        assert_eq!(describe(peer, two_hops, via_udp, None), "原来的 relay 不可用，从 relay 8 → 9 换到对端挂靠的 relay 9（会话走 UDP）");
+        assert_eq!(
+            describe(peer, two_hops, via_udp, None).text,
+            "原来的 relay 不可用，从 relay 8 → 9 换到对端挂靠的 relay 9（会话走 UDP）"
+        );
         let two_hops_tcp = RouteKey::Relay { path: path(&[8, 9]), via: Via::Tcp(4) };
-        assert_eq!(describe(peer, two_hops, two_hops_tcp, None), "到 relay 8 的会话改走 TCP");
+        assert_eq!(describe(peer, two_hops, two_hops_tcp, None).text, "到 relay 8 的会话改走 TCP");
 
         assert_eq!(direct.to_route(), Route::Direct { addr: addr("203.0.113.7:4000") });
         assert_eq!(via_udp.to_route(), Route::Relay { relays: vec![node(9)] });
@@ -458,6 +542,49 @@ mod tests {
     }
 
     #[test]
+    fn every_reason_carries_a_code_with_the_values_it_names() {
+        let peer = node(2);
+        let direct = RouteKey::Direct(addr("203.0.113.7:4000"));
+        let via_udp = RouteKey::Relay { path: path(&[9]), via: Via::Udp(addr("198.51.100.9:20330")) };
+        let via_tcp = RouteKey::Relay { path: path(&[9]), via: Via::Tcp(1) };
+        let other = RouteKey::Relay { path: path(&[8]), via: Via::Udp(addr("198.51.100.8:20330")) };
+        let itself = RouteKey::Relay { path: path(&[2]), via: Via::Tcp(2) };
+        let cause = |from, to, hint| describe(peer, from, to, hint).cause;
+
+        assert_eq!(cause(via_udp, direct, None), RouteCause::DirectVerified);
+        assert_eq!(cause(direct, via_udp, Some(RouteHint::DirectLoss)), RouteCause::DirectLost { hint: RouteHint::DirectLoss });
+        assert_eq!(cause(direct, via_udp, None), RouteCause::DirectLost { hint: RouteHint::DirectUnavailable }, "说不出起因时是默认的");
+        assert_eq!(cause(RouteKey::None, via_tcp, None), RouteCause::RelayReady);
+        assert_eq!(cause(via_udp, via_tcp, None), RouteCause::LegChanged { transport: Some(LegTransport::Tcp) });
+        assert_eq!(
+            cause(other, via_udp, Some(RouteHint::RelayDraining)),
+            RouteCause::RelayChanged { hint: RouteHint::RelayDraining, previous: vec![node(8)] }
+        );
+        assert_eq!(cause(via_udp, itself, None), RouteCause::RelayChanged { hint: RouteHint::Shortcut, previous: vec![node(9)] });
+        assert_eq!(cause(direct, RouteKey::None, None), RouteCause::Unreachable { hint: RouteHint::DirectUnavailable });
+        assert_eq!(cause(via_udp, RouteKey::None, None), RouteCause::Unreachable { hint: RouteHint::RelayLost });
+
+        let candidate =
+            |path: PathId, cost_ms: f64| Candidate { path, legs: Vec::new(), cost_ms, load_percent: 0, lan: false, settled: true };
+        let candidates = [candidate(PathId::Direct(addr("203.0.113.7:4000")), 12.5)];
+        assert_eq!(
+            explain(Why::First, direct, RouteKey::None, &candidates, None).cause,
+            RouteCause::LowestCost { candidates: 1, cost_us: Some(12_500) }
+        );
+        assert_eq!(
+            explain(Why::Cheaper { from_ms: 20.0, to_ms: 12.5 }, direct, via_udp, &candidates, None).cause,
+            RouteCause::Cheaper { previous: via_udp.to_route(), previous_cost_us: 20_000, cost_us: 12_500, windows: 3 }
+        );
+        assert_eq!(
+            explain(Why::Failover, via_udp, direct, &[], Some(RouteHint::DirectStale)).cause,
+            RouteCause::Failover { hint: RouteHint::DirectStale, candidates: 0, cost_us: None },
+            "候选里没有它时说不出代价"
+        );
+        assert_eq!(explain(Why::Lan, direct, via_udp, &candidates, None).cause, RouteCause::Lan);
+        assert_eq!(explain(Why::NoPath, RouteKey::None, direct, &[], None).cause, RouteCause::Unreachable { hint: RouteHint::NoPath });
+    }
+
+    #[test]
     fn every_cost_based_decision_is_explained_with_the_numbers_behind_it() {
         let direct = RouteKey::Direct(addr("203.0.113.7:4000"));
         let two_hops = RouteKey::Relay { path: path(&[8, 9]), via: Via::Udp(addr("198.51.100.8:20330")) };
@@ -466,27 +593,27 @@ mod tests {
         let candidates = [candidate(PathId::Relays(path(&[8, 9])), 185.8), candidate(PathId::Direct(addr("203.0.113.7:4000")), 201.4)];
 
         assert_eq!(
-            explain(Why::First, two_hops, RouteKey::None, &candidates, None),
+            explain(Why::First, two_hops, RouteKey::None, &candidates, None).text,
             "延迟优先：2 条候选里经 relay 8 → 9的代价最低（186ms）"
         );
         assert_eq!(
-            explain(Why::Cheaper { from_ms: 201.4, to_ms: 185.8 }, two_hops, direct, &candidates, None),
+            explain(Why::Cheaper { from_ms: 201.4, to_ms: 185.8 }, two_hops, direct, &candidates, None).text,
             "延迟优先：经 relay 8 → 9的代价（186ms）连续 3 个评估窗口都比原来的直连 203.0.113.7:4000（201ms）低至少 max(5ms, 10%)，切换"
         );
         assert_eq!(
-            explain(Why::Failover, direct, two_hops, &candidates[1..], Some("relay 说多级路径走不下去")),
+            explain(Why::Failover, direct, two_hops, &candidates[1..], Some(RouteHint::RelayPathBroken)).text,
             "relay 说多级路径走不下去，不等迟滞，立刻换到剩下的 1 条候选里代价最低的直连 203.0.113.7:4000（201ms）"
         );
         assert_eq!(
-            explain(Why::Failover, direct, two_hops, &candidates[1..], None),
+            explain(Why::Failover, direct, two_hops, &candidates[1..], None).text,
             "原来的路不能用了，不等迟滞，立刻换到剩下的 1 条候选里代价最低的直连 203.0.113.7:4000（201ms）"
         );
         assert_eq!(
-            explain(Why::Lan, direct, two_hops, &candidates, None),
+            explain(Why::Lan, direct, two_hops, &candidates, None).text,
             "对端在同一个局域网里，局域网直连无条件优先，改走直连 203.0.113.7:4000"
         );
-        assert_eq!(explain(Why::NoPath, RouteKey::None, direct, &[], None), "没有任何可用的路径");
-        assert_eq!(explain(Why::NoPath, RouteKey::None, direct, &[], Some("直连探测连续超时")), "直连探测连续超时");
+        assert_eq!(explain(Why::NoPath, RouteKey::None, direct, &[], None).text, "没有任何可用的路径");
+        assert_eq!(explain(Why::NoPath, RouteKey::None, direct, &[], Some(RouteHint::DirectTimeouts)).text, "直连探测连续超时");
     }
 
     fn peer_attached_to(relays: &[u32]) -> PeerState {
@@ -509,7 +636,7 @@ mod tests {
             probe: crate::control::PathProbe::default(),
             selector: Selector::default(),
             candidates: Vec::new(),
-            reason: String::new(),
+            reason: Reason::no_route_yet(),
             switched: None,
             first_route: None,
             pin: None,

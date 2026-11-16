@@ -6,8 +6,8 @@ use i3t_model::admin::{
     RenameTag, TokenState, UpdateCredential, UpdateNetwork,
 };
 use i3t_model::control::{
-    CredentialUsage, Declared, ExitObservation, ExitReport, ForwardReport, ListenState, ListenTraffic, ListenerReport, QuotaUsage, Report,
-    ToController,
+    BindCause, CredentialUsage, Declared, ExitObservation, ExitReport, ForwardReport, ListenState, ListenTraffic, ListenerReport,
+    QuotaUsage, Report, ToController,
 };
 use i3t_model::netmap::{self, ExitRole, ForwardProtocol, ListenerProtocol};
 use i3t_proto::flow::Class;
@@ -197,7 +197,7 @@ fn listener_and_forward_status_reported_by_the_node_shows_up_including_its_built
                 bind: "127.0.0.1:1080".parse().unwrap(),
                 protocol: ListenerProtocol::Socks5,
                 builtin: true,
-                state: ListenState::PortInUse { detail: "Address already in use".to_owned() },
+                state: ListenState::PortInUse { detail: "Address already in use".to_owned(), cause: Some(BindCause::AddressInUse) },
                 traffic: ListenTraffic::default(),
             },
         ],
@@ -213,7 +213,7 @@ fn listener_and_forward_status_reported_by_the_node_shows_up_including_its_built
                 id: busy.id,
                 bind: "127.0.0.1:8080".parse().unwrap(),
                 protocol: ForwardProtocol::Tcp,
-                state: ListenState::PortInUse { detail: "Address already in use".to_owned() },
+                state: ListenState::PortInUse { detail: "Address already in use".to_owned(), cause: Some(BindCause::AddressInUse) },
                 traffic: ListenTraffic::default(),
             },
         ],

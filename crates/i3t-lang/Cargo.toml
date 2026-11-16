@@ -1,0 +1,19 @@
+[package]
+name = "i3t-lang"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "ice3tier 命令行程序的语言：挑语言、按语言写数和时间、把命令行的帮助和报错写成这种语言"
+
+[dependencies]
+clap = { workspace = true, features = ["env", "unicode"] }
+i3t-model = { path = "../i3t-model" }
+i3t-proto = { path = "../i3t-proto" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Globalization"] }
+
+[lints]
+workspace = true

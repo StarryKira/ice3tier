@@ -10,6 +10,8 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::extract::RawPathParams;
+use axum::extract::path::ErrorKind;
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{ConnectInfo, FromRequest, FromRequestParts, Request, State};
 use axum::http::request::Parts;
@@ -105,11 +107,18 @@ struct Failure {
     status: StatusCode,
     code: ErrorCode,
     message: String,
+    what: Option<String>,
+    field: Option<String>,
 }
 
 impl Failure {
-    fn bad_request(message: String) -> Self {
-        Self { status: StatusCode::BAD_REQUEST, code: ErrorCode::InvalidRequest, message }
+    fn new(status: StatusCode, code: ErrorCode, what: Option<&str>, message: String) -> Self {
+        Self { status, code, message, what: what.map(str::to_owned), field: None }
+    }
+
+    /// 请求本身不合法。`what` 是哪里不对：`body`、`query`、`path`。
+    fn bad_request(what: &str, field: Option<String>, message: String) -> Self {
+        Self { field, ..Self::new(StatusCode::BAD_REQUEST, ErrorCode::InvalidRequest, Some(what), message) }
     }
 }
 
@@ -141,17 +150,18 @@ impl From<Error> for Failure {
         };
         if status == StatusCode::INTERNAL_SERVER_ERROR {
             tracing::error!("管理请求失败：{}", error_chain(&error));
-            // 内部错误的细节只进日志，不发给调用方。
-            return Self { status, code: ErrorCode::Internal, message: "controller 内部出错，详情见它的日志".to_owned() };
+            // 内部错误的细节只进日志，不发给调用方；只说是哪个环节。
+            let message = "controller 内部出错，详情见它的日志".to_owned();
+            return Self::new(status, ErrorCode::Internal, error.what().as_deref(), message);
         }
         tracing::info!(?code, reason = %error, "拒绝管理请求");
-        Self { status, code, message: error.to_string() }
+        Self { status, code, message: error.to_string(), what: error.what(), field: error.field().map(str::to_owned) }
     }
 }
 
 impl IntoResponse for Failure {
     fn into_response(self) -> Response {
-        let body = ErrorBody { error: ApiError { code: self.code, message: self.message } };
+        let body = ErrorBody { error: ApiError { code: self.code, message: self.message, what: self.what, field: self.field } };
         let mut response = (self.status, Json(body)).into_response();
         if self.status == StatusCode::UNAUTHORIZED {
             response.headers_mut().insert(header::WWW_AUTHENTICATE, header::HeaderValue::from_static("Bearer"));
@@ -164,24 +174,22 @@ impl IntoResponse for Failure {
 async fn require_admin(State(controller): State<App>, request: Request, next: Next) -> Response {
     let presented =
         request.headers().get(header::AUTHORIZATION).and_then(|value| value.to_str().ok()).and_then(|value| value.strip_prefix("Bearer "));
-    let reason = match presented {
+    let (what, reason) = match presented {
         Some(token) if controller.is_admin_token(token.trim()) => return next.run(request).await,
-        Some(_) => "管理令牌不对",
-        None => "请求没有带管理令牌（Authorization: Bearer <令牌>）",
+        Some(_) => ("wrong", "管理令牌不对"),
+        None => ("missing", "请求没有带管理令牌（Authorization: Bearer <令牌>）"),
     };
     let remote = request.extensions().get::<ConnectInfo<SocketAddr>>().map(|info| info.0);
     tracing::warn!(?remote, path = %request.uri().path(), reason, "拒绝管理请求");
-    Failure { status: StatusCode::UNAUTHORIZED, code: ErrorCode::Unauthorized, message: reason.to_owned() }.into_response()
+    Failure::new(StatusCode::UNAUTHORIZED, ErrorCode::Unauthorized, Some(what), reason.to_owned()).into_response()
 }
 
 async fn no_such_endpoint() -> Failure {
-    Failure { status: StatusCode::NOT_FOUND, code: ErrorCode::NotFound, message: "没有这个接口".to_owned() }
+    Failure::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, Some("endpoint"), "没有这个接口".to_owned())
 }
 
 async fn method_not_allowed() -> Failure {
-    Failure {
-        status: StatusCode::METHOD_NOT_ALLOWED, code: ErrorCode::InvalidRequest, message: "这个接口不支持这种请求方法".to_owned()
-    }
+    Failure::new(StatusCode::METHOD_NOT_ALLOWED, ErrorCode::InvalidRequest, Some("method"), "这个接口不支持这种请求方法".to_owned())
 }
 
 /// 路径里的参数。解析不了时按统一的格式报错。
@@ -193,10 +201,19 @@ impl<S: Send + Sync, T: DeserializeOwned + Send> FromRequestParts<S> for Path<T>
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         match axum::extract::Path::<T>::from_request_parts(parts, state).await {
             Ok(axum::extract::Path(value)) => Ok(Self(value)),
-            Err(rejection @ PathRejection::FailedToDeserializePathParams(_)) => {
-                Err(Failure::bad_request(format!("路径里的编号不对：{}", rejection.body_text())))
+            Err(PathRejection::FailedToDeserializePathParams(error)) => {
+                // 路径参数的名字：axum 在按名字解析时直接给出；按位置（元组）或者只有一个参数时，从原始的参数表里按位置取。
+                let names = RawPathParams::from_request_parts(parts, state).await.ok();
+                let nth = |index: usize| names.as_ref().and_then(|names| names.iter().nth(index)).map(|(key, _)| key.to_owned());
+                let field = match error.kind() {
+                    ErrorKind::ParseErrorAtKey { key, .. } | ErrorKind::InvalidUtf8InPathParam { key } => Some(key.clone()),
+                    ErrorKind::ParseErrorAtIndex { index, .. } => nth(*index),
+                    ErrorKind::ParseError { .. } if names.as_ref().is_some_and(|names| names.iter().count() == 1) => nth(0),
+                    _ => None,
+                };
+                Err(Failure::bad_request("path", field, format!("路径里的编号不对：{}", error.body_text())))
             }
-            Err(rejection) => Err(Failure::bad_request(rejection.body_text())),
+            Err(rejection) => Err(Failure::bad_request("path", None, rejection.body_text())),
         }
     }
 }
@@ -211,9 +228,10 @@ impl<S: Send + Sync, T: DeserializeOwned> FromRequestParts<S> for Query<T> {
         match axum::extract::Query::<T>::from_request_parts(parts, state).await {
             Ok(axum::extract::Query(value)) => Ok(Self(value)),
             Err(rejection @ QueryRejection::FailedToDeserializeQueryString(_)) => {
-                Err(Failure::bad_request(format!("查询参数不对：{}", rejection.body_text())))
+                let text = rejection.body_text();
+                Err(Failure::bad_request("query", named_field(&text), format!("查询参数不对：{text}")))
             }
-            Err(rejection) => Err(Failure::bad_request(rejection.body_text())),
+            Err(rejection) => Err(Failure::bad_request("query", None, rejection.body_text())),
         }
     }
 }
@@ -228,16 +246,34 @@ impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for Body<T> {
         match Json::<T>::from_request(request, state).await {
             Ok(Json(value)) => Ok(Self(value)),
             Err(rejection) => {
-                let what = match &rejection {
-                    JsonRejection::MissingJsonContentType(_) => "请求体要是 JSON（Content-Type: application/json）",
-                    JsonRejection::JsonSyntaxError(_) => "请求体不是合法的 JSON",
-                    JsonRejection::JsonDataError(_) => "请求体里的字段不对",
-                    _ => "请求体读不出来",
+                let text = rejection.body_text();
+                let (what, field, said) = match &rejection {
+                    JsonRejection::MissingJsonContentType(_) => ("content_type", None, "请求体要是 JSON（Content-Type: application/json）"),
+                    JsonRejection::JsonSyntaxError(_) => ("syntax", None, "请求体不是合法的 JSON"),
+                    JsonRejection::JsonDataError(_) => ("data", data_field(&text), "请求体里的字段不对"),
+                    _ => ("body", None, "请求体读不出来"),
                 };
-                Err(Failure::bad_request(format!("{what}：{}", rejection.body_text())))
+                Err(Failure::bad_request(what, field, format!("{said}：{text}")))
             }
         }
     }
+}
+
+/// JSON 请求体里出问题的字段。axum 的说法是"Failed to deserialize the JSON body into the target type: <路径>: <原因>"，
+/// 路径是 serde 走到出错处的字段（`exit.ports[2]` 这样），取它的第一段；缺字段时路径是空的，字段名在原因里（`` missing field `name` ``）。
+fn data_field(text: &str) -> Option<String> {
+    let detail = text.split_once("target type: ").map_or(text, |(_, rest)| rest);
+    let path = detail.split_once(": ").map(|(path, _)| path).filter(|path| !path.contains(' '));
+    match path {
+        Some(path) => path.split(['.', '[']).next().filter(|first| !first.is_empty()).map(str::to_owned),
+        None => named_field(detail),
+    }
+}
+
+/// serde 的说法里用反引号括起来的字段名：`` missing field `from` ``。
+fn named_field(text: &str) -> Option<String> {
+    let (_, rest) = text.split_once("field `")?;
+    rest.split_once('`').map(|(name, _)| name.to_owned())
 }
 
 /// 调用 controller，把结果写成 JSON 应答。
@@ -385,7 +421,7 @@ async fn status(State(app): State<App>) -> Reply {
 async fn log(State(app): State<App>, Query(query): Query<LogQuery>) -> Reply {
     let reference = match query.reference.as_deref().map(str::parse::<LogRef>).transpose() {
         Ok(reference) => reference,
-        Err(error) => return Err(Failure::bad_request(format!("查询参数 ref 不对：{error}"))),
+        Err(error) => return Err(Failure::bad_request("query", Some("ref".to_owned()), format!("查询参数 ref 不对：{error}"))),
     };
     let filter = LogFilter {
         limit: query.limit.unwrap_or(DEFAULT_LOG_LIMIT).min(MAX_LOG_LIMIT),

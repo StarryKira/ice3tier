@@ -3,10 +3,11 @@
 use std::collections::BTreeSet;
 
 use i3t_model::admin::{CreateRule, Direction, LogRef, NetworkId, RefKind, RenameTag, RenamedTag, Rule, UpdateRule};
+use serde_json::json;
 
 use super::{Controller, Inner, Seeds, count, naming};
 use crate::access::ALL;
-use crate::error::{Entity, Error};
+use crate::error::{Entity, Error, InField};
 
 impl Controller {
     /// 一个网络的全部规则，包括停用的。
@@ -26,9 +27,9 @@ impl Controller {
     pub fn create_rule(&self, network: NetworkId, request: &CreateRule) -> Result<Rule, Error> {
         let mut rule = Rule {
             id: 0,
-            name: naming::title("规则", &request.name, false)?,
-            src: naming::tag(&request.src)?,
-            dst: naming::tag(&request.dst)?,
+            name: naming::title("规则", &request.name, false).in_field("name")?,
+            src: naming::tag(&request.src).in_field("src")?,
+            dst: naming::tag(&request.dst).in_field("dst")?,
             direction: request.direction,
             enabled: request.enabled,
         };
@@ -37,7 +38,8 @@ impl Controller {
         let now = inner.clock.now();
         rule.id = inner.store.atomically(|store| {
             let id = store.insert_rule(network, &rule)?;
-            store.log_refs(now, Some(network), "rule.create", &describe(&rule), &[LogRef::new(RefKind::Rule, id)])?;
+            let created = Rule { id, ..rule.clone() };
+            store.log_refs(now, Some(network), "rule.create", &describe(&created), &[LogRef::new(RefKind::Rule, id)], params(&created))?;
             Ok::<_, Error>(id)
         })?;
         let seeds = inner.nodes_tagged(network, &[&rule.src, &rule.dst])?;
@@ -58,18 +60,18 @@ impl Controller {
             let before = store.rule(network, id)?.ok_or(Error::NotFound(Entity::Rule))?;
             let mut rule = before.clone();
             if let Some(name) = &request.name {
-                rule.name = naming::title("规则", name, false)?;
+                rule.name = naming::title("规则", name, false).in_field("name")?;
             }
             if let Some(src) = &request.src {
-                rule.src = naming::tag(src)?;
+                rule.src = naming::tag(src).in_field("src")?;
             }
             if let Some(dst) = &request.dst {
-                rule.dst = naming::tag(dst)?;
+                rule.dst = naming::tag(dst).in_field("dst")?;
             }
             rule.direction = request.direction.unwrap_or(rule.direction);
             rule.enabled = request.enabled.unwrap_or(rule.enabled);
             store.update_rule(&rule)?;
-            store.log_refs(now, Some(network), "rule.update", &describe(&rule), &[LogRef::new(RefKind::Rule, id)])?;
+            store.log_refs(now, Some(network), "rule.update", &describe(&rule), &[LogRef::new(RefKind::Rule, id)], params(&rule))?;
             Ok::<_, Error>((before, rule))
         })?;
         let seeds = inner.nodes_tagged(network, &[&before.src, &before.dst, &after.src, &after.dst])?;
@@ -87,7 +89,7 @@ impl Controller {
         let rule = inner.store.atomically(|store| {
             let rule = store.rule(network, id)?.ok_or(Error::NotFound(Entity::Rule))?;
             store.delete_rule(id)?;
-            store.log_refs(now, Some(network), "rule.delete", &describe(&rule), &[LogRef::new(RefKind::Rule, id)])?;
+            store.log_refs(now, Some(network), "rule.delete", &describe(&rule), &[LogRef::new(RefKind::Rule, id)], params(&rule))?;
             Ok::<_, Error>(rule)
         })?;
         let seeds = inner.nodes_tagged(network, &[&rule.src, &rule.dst])?;
@@ -107,12 +109,13 @@ impl Controller {
     ///
     /// 没有这个网络；标签的写法不对；`from` 或 `to` 是内置的 `all`；两个是同一个。
     pub fn rename_tag(&self, network: NetworkId, request: &RenameTag) -> Result<RenamedTag, Error> {
-        let (from, to) = (naming::tag(&request.from)?, naming::tag(&request.to)?);
+        let (from, to) = (naming::tag(&request.from).in_field("from")?, naming::tag(&request.to).in_field("to")?);
         if from == ALL || to == ALL {
-            return Err(Error::invalid(format!("内置标签 {ALL} 不能改名，也不能把别的标签改成它")));
+            let field = if from == ALL { "from" } else { "to" };
+            return Err(Error::invalid_field(field, "builtin", format!("内置标签 {ALL} 不能改名，也不能把别的标签改成它")));
         }
         if from == to {
-            return Err(Error::invalid("新旧两个标签是同一个"));
+            return Err(Error::invalid_field("to", "same", "新旧两个标签是同一个"));
         }
         let mut inner = self.lock();
         inner.require_network(network)?;
@@ -144,7 +147,8 @@ impl Controller {
             let renamed = RenamedTag { from: from.clone(), to: to.clone(), nodes: count(nodes.len()), rules, tokens };
             let detail = format!("标签 {from} 改名为 {to}：{} 个节点，{rules} 条规则，{tokens} 个注册令牌", renamed.nodes);
             let refs: Vec<LogRef> = nodes.into_iter().map(LogRef::node).collect();
-            store.log_refs(now, Some(network), "tag.rename", &detail, &refs)?;
+            let params = json!({ "from": from, "to": to, "nodes": renamed.nodes, "rules": rules, "tokens": tokens });
+            store.log_refs(now, Some(network), "tag.rename", &detail, &refs, params)?;
             Ok::<_, Error>(renamed)
         })?;
         tracing::info!(%network, from = %renamed.from, to = %renamed.to, nodes = renamed.nodes, rules = renamed.rules, "标签改名");
@@ -163,6 +167,18 @@ impl Inner {
         let tagged = self.store.nodes(network)?.into_iter().filter(|node| tags.iter().any(|tag| node.tags.contains(*tag)));
         Ok(Seeds::Nodes(tagged.map(|node| node.id).collect::<BTreeSet<_>>()))
     }
+}
+
+/// 操作记录里一条规则的参数：它改完（或者删掉之前）的样子。
+fn params(rule: &Rule) -> serde_json::Value {
+    json!({
+        "rule": rule.id,
+        "rule_name": rule.name,
+        "src": rule.src,
+        "dst": rule.dst,
+        "direction": rule.direction,
+        "enabled": rule.enabled,
+    })
 }
 
 fn describe(rule: &Rule) -> String {

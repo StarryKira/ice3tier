@@ -8,6 +8,7 @@ publish = false
 description = "ice3tier 的管理命令行"
 
 [dependencies]
+i3t-lang = { path = "../../crates/i3t-lang" }
 i3t-model = { path = "../../crates/i3t-model" }
 i3t-proto = { path = "../../crates/i3t-proto" }
 anyhow.workspace = true
