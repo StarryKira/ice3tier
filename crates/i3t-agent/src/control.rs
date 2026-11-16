@@ -17,7 +17,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 use tokio_rustls::TlsConnector;
@@ -97,6 +97,9 @@ pub struct LinkSetup {
     pub hello: watch::Receiver<Hello>,
     /// 每次上报时调用，取当前要报的内容。
     pub report: Box<dyn Fn() -> Report + Send + Sync>,
+    /// 通知它一下，就不等下一次定时上报，马上报一次。
+    /// 候选端点或者挂靠的 relay 变了的时候用：对端要靠这些才找得到本节点，晚报十秒就晚通十秒。
+    pub report_now: Arc<Notify>,
     /// 收到的 netmap 存到这里，下次启动时用。
     pub state: StateDir,
     pub timing: Timing,
@@ -215,7 +218,7 @@ impl Worker {
                             self.apply(*netmap);
                             write_message(&mut writer, &ToController::Ack { version }).await?;
                             *was_online = true;
-                            self.state.send_replace(LinkState::Online);
+                            self.state.send_if_modified(|state| std::mem::replace(state, LinkState::Online) != LinkState::Online);
                         }
                         ToNode::Signal { from, signal } => {
                             if self.signals.try_send((from, signal)).is_err() {
@@ -232,6 +235,10 @@ impl Worker {
                 }
                 _ = report_at.tick() => {
                     write_message(&mut writer, &ToController::Report((self.setup.report)())).await?;
+                }
+                () = self.setup.report_now.notified() => {
+                    write_message(&mut writer, &ToController::Report((self.setup.report)())).await?;
+                    report_at.reset();
                 }
                 Ok(()) = self.setup.hello.changed() => {
                     let hello = self.setup.hello.borrow_and_update().clone();
@@ -412,6 +419,7 @@ mod tests {
             initial: Arc::new(netmap(1)),
             hello: hello_rx,
             report: Box::new(|| Report { flows: 3, ..Report::default() }),
+            report_now: Arc::new(Notify::new()),
             state,
             timing: Timing {
                 report_interval: Duration::from_millis(50),
@@ -525,6 +533,32 @@ mod tests {
         let _: ToController = expect(&mut stream).await;
         let ToController::Report(report) = expect(&mut stream).await else { panic!("应该收到上报") };
         assert_eq!(report.flows, 3);
+    }
+
+    #[tokio::test]
+    async fn a_report_can_be_requested_ahead_of_schedule() {
+        let controller = FakeController::start().await;
+        let (_dir, state) = temp_state();
+        let hello = Hello::default();
+        let (_hello_tx, hello_rx) = watch::channel(hello);
+        let report_now = Arc::new(Notify::new());
+        let setup = LinkSetup {
+            controller: controller.info.clone(),
+            key: Arc::new(NodeKey::generate().unwrap()),
+            initial: Arc::new(netmap(1)),
+            hello: hello_rx,
+            report: Box::new(|| Report { flows: 9, ..Report::default() }),
+            report_now: Arc::clone(&report_now),
+            state,
+            // 定时上报要很久以后才到，收到的只能是提前要的那一次。
+            timing: Timing { report_interval: Duration::from_secs(3600), ..Timing::default() },
+        };
+        let _link = ControlLink::spawn(setup);
+        let (mut stream, _) = controller.accept().await;
+        let _: ToController = expect(&mut stream).await;
+        report_now.notify_one();
+        let ToController::Report(report) = expect(&mut stream).await else { panic!("应该收到上报") };
+        assert_eq!(report.flows, 9);
     }
 
     #[tokio::test]

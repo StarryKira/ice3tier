@@ -1,6 +1,6 @@
 //! `i3t`：ice3tier 的节点程序。
 
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
@@ -105,7 +105,8 @@ fn init_logging(level: &str) {
         eprintln!("环境变量 I3T_LOG 的值 {filter:?} 看不懂（{err}），改用配置文件里的级别 {level}");
         tracing_subscriber::EnvFilter::new(level)
     });
-    tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).init();
+    // 输出到文件或者日志服务时不带颜色的控制符。
+    tracing_subscriber::fmt().with_env_filter(filter).with_ansi(std::io::stderr().is_terminal()).with_writer(std::io::stderr).init();
 }
 
 /// 收到 Ctrl-C，或者（Unix 上）收到 SIGTERM 时完成。

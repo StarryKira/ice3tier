@@ -49,10 +49,50 @@ def start_whoami(host: Host, port: int = 80, bind: str = "0.0.0.0") -> None:
     wait_until(lambda: f":{port} " in host.run("ss", "-lnt").stdout, what=f"{host.name} 上的 HTTP 服务启动")
 
 
+class Controller:
+    """实验环境里的 controller，以及操作它的命令行。"""
+
+    def __init__(self, host: Host, work: Path) -> None:
+        self.host = host
+        self.log = work / "controller.log"
+        self.out = work / "controller.out"
+        self.address = f"{host.ip}:20331"
+        data = work / "controller"
+        # 管理令牌打在标准输出上，日志在标准错误上，分开收。
+        self.proc = subprocess.Popen(
+            host.cmd(binary("i3t-controller"), "--data-dir", str(data), "--public-addr", self.address),
+            stdout=self.out.open("w"), stderr=self.log.open("w"))
+        host._procs.append(self.proc)
+        wait_until(lambda: "已启动" in self.log.read_text(errors="replace") or self.proc.poll() is not None, what="controller 启动")
+        if self.proc.poll() is not None:
+            raise RuntimeError(f"controller 启动失败：\n{self.log.read_text(errors='replace')[-2000:]}")
+        tokens = [line.strip() for line in self.out.read_text().splitlines() if line.startswith("    ")]
+        if len(tokens) != 1:
+            raise RuntimeError(f"没有在 controller 的输出里找到管理令牌：{self.out.read_text()!r}")
+        self.token = tokens[0]
+
+    def ctl(self, *args: str, check: bool = True) -> object:
+        """执行一条 i3tctl 命令，返回管理 API 的 JSON。`check=False` 时出错不抛异常，返回完成的进程。"""
+        done = self.host.run(binary("i3tctl"), "--token", self.token, "--json", *args, check=False)
+        if not check:
+            return done
+        if done.returncode != 0:
+            raise RuntimeError(f"i3tctl {' '.join(args)} 失败：{done.stderr.strip() or done.stdout.strip()}")
+        return json.loads(done.stdout) if done.stdout.strip() else None
+
+    def enroll_token(self, *tags: str) -> str:
+        created = self.ctl("token", "create", *[arg for tag in tags for arg in ("--tag", tag)])
+        return created["token"]
+
+    def node(self, node: "Node") -> dict:
+        """controller 眼里这个节点现在的样子。"""
+        return next(entry for entry in self.ctl("node", "list") if entry["key"] == node.key)
+
+
 class Node:
     """实验环境里的一个 ice3tier 节点。"""
 
-    def __init__(self, host: Host, work: Path, node_id: int, *, declare: tuple[str, ...] = ()) -> None:
+    def __init__(self, host: Host, work: Path, node_id: int = 0, *, declare: tuple[str, ...] = ()) -> None:
         self.host = host
         self.id = node_id
         self.name = host.name
@@ -94,6 +134,24 @@ class Node:
         path = self.state / "static-netmap.json"
         path.write_text(json.dumps(netmap, indent=1))
         self.proc = self.host.spawn(binary("i3t"), "--state-dir", str(self.state), "run", "--static", str(path), log=self.log)
+        wait_until(lambda: "节点启动" in self.read_log() or self.proc.poll() is not None, what=f"{self.name} 启动")
+        if self.proc.poll() is not None:
+            raise RuntimeError(f"{self.name} 启动失败：\n{self.read_log()[-2000:]}")
+
+    def join(self, controller: Controller, *tags: str, name: bool = True) -> None:
+        """用一个新的注册令牌加入网络，然后启动。加入之后把节点名改成主机名，方便看日志和写用户名。"""
+        token = controller.enroll_token(*tags)
+        done = self.host.run(binary("i3t"), "--state-dir", str(self.state), "join", input=token, check=False)
+        if done.returncode != 0:
+            raise RuntimeError(f"{self.name} 加入失败：{done.stderr.strip()}")
+        seen = controller.node(self)
+        self.id, self.virtual_ip = seen["id"], seen["virtual_ip"]
+        if name:
+            controller.ctl("node", "rename", str(self.id), self.name)
+        self.start()
+
+    def start(self) -> None:
+        self.proc = self.host.spawn(binary("i3t"), "--state-dir", str(self.state), "run", log=self.log)
         wait_until(lambda: "节点启动" in self.read_log() or self.proc.poll() is not None, what=f"{self.name} 启动")
         if self.proc.poll() is not None:
             raise RuntimeError(f"{self.name} 启动失败：\n{self.read_log()[-2000:]}")

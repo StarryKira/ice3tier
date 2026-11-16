@@ -2,6 +2,7 @@
 //!
 //! 这里只做装配：读参数，打开数据目录，绑端口，等退出信号。逻辑都在 `i3t-controller` 这个库里。
 
+use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,7 +47,8 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let filter = EnvFilter::try_from_env(LOG_ENV).unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).init();
+    // 输出到文件或者日志服务时不带颜色的控制符。
+    tracing_subscriber::fmt().with_env_filter(filter).with_ansi(std::io::stderr().is_terminal()).with_writer(std::io::stderr).init();
     abort_on_panic();
     check_public_addr(&args.public_addr)?;
     if let Some(dir) = &args.static_dir {

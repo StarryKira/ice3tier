@@ -18,7 +18,7 @@ use i3t_exit::{Exit, Os, Outbound};
 use i3t_model::Netmap;
 use i3t_model::control::Report;
 use i3t_model::netmap::{Listener, ListenerProtocol};
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 
 use crate::config::Config;
 use crate::control::{ControlLink, LinkSetup, LinkState, Timing};
@@ -97,16 +97,21 @@ pub async fn run(state: StateDir, source: Source, shutdown: impl Future<Output =
                 let (endpoint, exit, access) = (Arc::clone(&endpoint), Arc::clone(&exit), Arc::clone(&access));
                 Box::new(move || report(&endpoint, &exit, &access))
             };
+            let report_now = Arc::new(Notify::new());
             let link = ControlLink::spawn(LinkSetup {
                 controller,
                 key,
                 initial: Arc::clone(&initial),
                 hello: hello_rx,
                 report,
+                report_now: Arc::clone(&report_now),
                 state,
                 timing: Timing::default(),
             });
-            managed(link, &endpoint, &local_tx, &config, shutdown).await
+            let watch_reachability = tokio::spawn(report_when_reachability_changes(Arc::clone(&endpoint), report_now));
+            let outcome = managed(link, &endpoint, &local_tx, &config, shutdown).await;
+            watch_reachability.abort();
+            outcome
         }
         None => {
             shutdown.await;
@@ -155,6 +160,26 @@ async fn managed(
                 LinkState::Online => tracing::info!("已连上 controller"),
                 LinkState::Offline => tracing::warn!("和 controller 的连接断了，按手上的配置继续运行"),
             },
+        }
+    }
+}
+
+/// 别的节点怎么找到本节点（候选端点、挂靠的 relay）一有变化就马上上报，不等定时上报。
+///
+/// 延迟的小幅波动不算变化，否则每秒都在报。
+async fn report_when_reachability_changes(endpoint: Arc<Endpoint>, report_now: Arc<Notify>) {
+    let snapshot = |endpoint: &Endpoint| {
+        let relays: Vec<_> = endpoint.attached().into_iter().map(|attachment| attachment.relay).collect();
+        (endpoint.endpoints(), relays)
+    };
+    let mut last = snapshot(&endpoint);
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    loop {
+        tick.tick().await;
+        let now = snapshot(&endpoint);
+        if now != last {
+            last = now;
+            report_now.notify_one();
         }
     }
 }
