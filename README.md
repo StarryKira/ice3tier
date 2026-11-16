@@ -39,6 +39,54 @@
 
 更细的说明见 [docs/architecture.md](docs/architecture.md)。
 
+## 快速上手
+
+下面用三台机器举例：一台有公网地址的服务器（跑 controller，同时当 relay），家里的一台机器，和随身的笔记本。
+
+**1. 启动 controller。** 在服务器上：
+
+```sh
+i3t-controller --data-dir /var/lib/i3t-controller --public-addr <服务器的公网地址>:20331
+```
+
+第一次启动会打印一次管理令牌，`i3tctl` 和 Web 界面用它登录。管理接口和 Web 界面默认只监听 `127.0.0.1:20332`，远程访问用 SSH 端口转发：`ssh -L 20332:127.0.0.1:20332 <服务器>`，然后打开 <http://127.0.0.1:20332>。
+
+**2. 建一个网络，生成注册令牌。** 在 Web 界面里按引导做，或者用命令行：
+
+```sh
+export I3T_ADMIN_TOKEN=<管理令牌>
+i3tctl network create home
+i3tctl token create          # 每台机器用一个
+```
+
+**3. 让机器加入。** 在每台要组网的机器上：
+
+```sh
+echo <注册令牌> | i3t join     # 服务器上加 --can-relay，要当出口的机器加 --can-exit
+i3t run
+```
+
+`--can-relay`、`--can-exit` 只是这台机器声明"可以承担"，本身不启用任何东西；之后也可以用 `i3t set can-exit on` 改。
+
+**4. 启用 relay 和出口。** 在 Web 界面的节点页打开开关，或者：
+
+```sh
+i3tctl relay enable <服务器的节点名> --udp <公网地址>:20330 --tcp <公网地址>:20330
+i3tctl exit enable <家里那台的节点名>
+```
+
+**5. 使用。** 每个节点在本机开了两个代理入口，SOCKS5 在 `127.0.0.1:1080`，HTTP 在 `127.0.0.1:1081`：
+
+```sh
+# 从家里那台机器的网络出去（用户名写出口节点的名字或虚拟 IP）
+curl -x socks5h://<家里那台的节点名>@127.0.0.1:1080 https://example.com
+
+# 访问另一个节点上的服务（目标写它的虚拟 IP 或全名，不需要它是出口）
+curl -x socks5h://127.0.0.1:1080 http://nas.home.i3t:8080/
+```
+
+节点的本机设置在状态目录的 `config.toml` 里，每一项都有注释。`i3t status` 查看节点的状态，`i3t routes` 查看到各个对端现在怎么走。
+
 ## 构建
 
 需要 Rust 1.88 或更新的稳定版。
