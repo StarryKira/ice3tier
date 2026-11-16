@@ -623,3 +623,29 @@ table inet notcp {{
 }}
 """
         host.run("nft", "-f", "-", input=rules)
+
+
+# 下面是主动测试（test_probe.py）用的。
+
+def ctl_wait(controller: Controller, *args: str, timeout: float = 300) -> object:
+    """执行一条要等一阵的 i3tctl 命令（主动测试会等到结果出来），返回管理 API 的 JSON。"""
+    done = controller.host.run(binary("i3tctl"), "--token", controller.token, "--json", *args, check=False, timeout=timeout)
+    if done.returncode != 0:
+        raise RuntimeError(f"i3tctl {' '.join(args)} 失败：{done.stderr.strip() or done.stdout.strip()}")
+    return json.loads(done.stdout)
+
+
+def active_test(controller: Controller, a: Node, b: Node, *options: str, timeout: float = 300) -> dict:
+    """在 `a` 和 `b` 之间做一次主动测试（`i3tctl test`），等它做完，返回结果。"""
+    return ctl_wait(controller, "test", a.name, b.name, *options, timeout=timeout)
+
+
+def forward_route(controller: Controller, a: Node, b: Node) -> dict:
+    """controller 现问 `a`：到 `b` 现在走哪条路。"""
+    return controller.ctl("path", str(a.id), str(b.id))["forward"].get("route") or {}
+
+
+def add_node_config(node: Node, text: str) -> None:
+    """在节点的配置文件末尾加几行。要在节点启动之前。"""
+    with (node.state / "config.toml").open("a") as config:
+        config.write(text)
