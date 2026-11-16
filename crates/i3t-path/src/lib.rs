@@ -16,6 +16,7 @@
 //! | `relays` | 到一个 relay 的联系（UDP 和 TCP 同时试，优先 UDP），挂靠哪几个 relay |
 //! | `tcp` | 到 relay 的那条 TCP |
 //! | `table` | 收发每个包时查的表 |
+//! | `budget` | 验签名的额度 |
 //! | [`report`] | 给界面看的选路情况和骨干矩阵 |
 //!
 //! 选路模式按 netmap 里本节点的设置（没有就用网络的默认值），每个节点只为自己发出的包选路，所以一条连接的两个方向可以走不同的路：
@@ -28,6 +29,7 @@
 //! 交给 [`LocalRelay`] 发给挂靠的节点。
 
 mod attach;
+mod budget;
 mod control;
 mod cost;
 mod direct;
@@ -52,7 +54,7 @@ use i3t_underlay::Ecn;
 
 pub use cost::Segment;
 pub use paths::{PacketMeta, PathConfig, Paths};
-pub use report::{BackboneLink, BackboneRow, CandidateReport, DirectKind, LegReport, PathReport};
+pub use report::{BackboneLink, BackboneRow, CandidateReport, DirectKind, LegReport, PathReport, RelayLeg};
 pub use table::Packets;
 
 /// 本节点的 relay 角色，路径层要它做的几件事。实现在 `i3t-relay`。
@@ -119,6 +121,7 @@ pub struct RouteChange {
 pub(crate) struct Status {
     pub(crate) routes: Vec<RouteEntry>,
     pub(crate) endpoints: Vec<SocketAddr>,
+    pub(crate) public_addresses: Vec<SocketAddr>,
     pub(crate) mapping_varies: Option<bool>,
     pub(crate) attached: Vec<Attachment>,
     pub(crate) reports: Vec<PathReport>,

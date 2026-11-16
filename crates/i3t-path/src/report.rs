@@ -26,6 +26,15 @@ pub enum DirectKind {
     Punched,
 }
 
+/// 经 relay 时，本节点到路径上第一个 relay 的那一段用的传输。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayLeg {
+    Udp,
+    /// UDP 用不了时，经 relay 的 TCP 监听。
+    Tcp,
+}
+
 /// 路径上一段的测量值。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct LegReport {
@@ -51,6 +60,10 @@ pub struct CandidateReport {
     pub load_percent: u8,
     /// 现在走的就是这一条。
     pub current: bool,
+    /// 经 relay 的路径：本节点现在到它的第一个 relay 走 UDP 还是 TCP。直连、第一个 relay 就是本节点自己、
+    /// 或者此刻到它没有会话时是 `None`。
+    #[serde(default)]
+    pub relay_leg: Option<RelayLeg>,
 }
 
 /// 到一个对端的选路情况。
@@ -63,6 +76,9 @@ pub struct PathReport {
     pub route: Route,
     /// 现在走直连时，它是怎么建立起来的。
     pub direct: Option<DirectKind>,
+    /// 现在经 relay 时，本节点到第一个 relay 的那一段走 UDP 还是 TCP。不经 relay、或者第一个 relay 就是本节点自己时是 `None`。
+    #[serde(default)]
+    pub relay_leg: Option<RelayLeg>,
     /// 为什么是现在这条路，给人看的。
     pub reason: String,
     /// 上一次换路是多少毫秒之前；从来没有过路时是 `None`。

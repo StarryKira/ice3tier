@@ -19,7 +19,7 @@ use i3t_underlay::tcp_leg::FrameSender;
 use i3t_underlay::{Ecn, Transmit, UdpPort};
 use tokio::sync::{Notify, broadcast, mpsc};
 
-use crate::control::Ctrl;
+use crate::control::{Ctrl, Inbound};
 use crate::timing::{PEER_ACTIVE, SILENCE, STASH_MAX_AGE, UNANSWERED_WINDOW};
 use crate::{LocalRelay, RouteChange, Status};
 
@@ -280,13 +280,17 @@ impl PeerSlot {
     /// 连接在路断着的时候重传定时器会退避到几秒一次（实现前测试：断 3 秒，数据到第 6 秒才恢复）。连接库没有
     /// "现在就发一个包"的接口，而且拥塞窗口被断路之前发出去的包占着，新的包也发不出去。补发断路期间最后的几个包
     /// 就够了：对面收到之后回确认，这边的丢包检测和重传立刻恢复。补发的包对面要是已经收到过，会被当作重复的丢掉，没有害处。
+    ///
+    /// 补发之后包还留着，直到放满 [`STASH_MAX_AGE`]：恢复的过程中路常常要换好几次（经 TCP 的中转刚连上又断了，
+    /// 或者先换到 relay、再换到直连），中间那条路要是没送到，下一次恢复时还得再补发一遍。在实际链路上见过：
+    /// 补发的包都交给了一条马上又断掉的路，等真正能用的路回来时手上已经没有可补的，连接又干等了 4 秒，等它自己的重传。
+    /// 多补发几次的代价只是对面多收到几个重复的包。
     pub(crate) fn flush(&self, shared: &Shared, now: Instant) {
         let mut inner = self.lock();
         let SlotInner { hop, scratch, stash } = &mut *inner;
-        for (stashed, packet) in stash.drain(..) {
-            if now.saturating_duration_since(stashed) <= STASH_MAX_AGE {
-                self.emit(shared, hop, scratch, &packet);
-            }
+        stash.retain(|(stashed, _)| now.saturating_duration_since(*stashed) <= STASH_MAX_AGE);
+        for (_, packet) in stash.iter() {
+            self.emit(shared, hop, scratch, packet);
         }
     }
 
@@ -363,8 +367,13 @@ pub(crate) struct Shared {
     pub(crate) port: Arc<UdpPort>,
     pub(crate) clock: Clock,
     pub(crate) table: RwLock<Table>,
-    /// 收包路径认出来的、要控制任务处理的帧。
+    /// 交给控制任务的事：TCP 中转腿的事件、信令、端口映射、关机、唤醒。
     pub(crate) ctrl: mpsc::Sender<Ctrl>,
+    /// 收包路径认出来的、从 relay 的地址来的帧（会话的应答和错误帧、矩阵的行）。和下面的分开排队：
+    /// 不认识的人往本节点灌探测，挤不掉 relay 的应答。
+    pub(crate) from_relays: mpsc::Sender<Ctrl>,
+    /// 收包路径认出来的别的帧（探测、地址查询的应答），以及局域网里看到的信标。
+    pub(crate) from_peers: mpsc::Sender<Ctrl>,
     /// 不是直接从 UDP 端口读进连接层缓冲区的包：TCP 中转来的、本节点的 relay 交过来的、一批里放不下的。
     pub(crate) inbound: mpsc::Sender<(NodeId, Bytes)>,
     pub(crate) inbound_rx: Mutex<mpsc::Receiver<(NodeId, Bytes)>>,
@@ -387,11 +396,49 @@ impl Shared {
         self.table.write().expect("path table lock poisoned")
     }
 
+    /// 把收到的一帧放进控制任务对应的队列。队列满了就丢掉，返回 `false`：它们都是有重试的握手和探测。
+    pub(crate) fn queue_frame(&self, from: SocketAddr, frame: Inbound) -> bool {
+        let queue = match frame {
+            Inbound::Session(_) | Inbound::Refusal(..) | Inbound::Row(_) => &self.from_relays,
+            Inbound::Probe(_) | Inbound::AddrReply(_) | Inbound::PathProbe { .. } => &self.from_peers,
+        };
+        queue.try_send(Ctrl::Frame { from, frame }).is_ok()
+    }
+
     pub(crate) fn send_signal(&self, to: NodeId, signal: &Signal) {
         let hook = self.signal_hook.read().expect("signal hook lock poisoned").clone();
         if let Some(hook) = hook {
             hook(to, signal);
         }
+    }
+}
+
+#[cfg(test)]
+impl Shared {
+    /// 测试用：一份绑在 `port` 上的共用状态，和控制任务那三个队列的接收端（没有人在读它们）。帧的两个队列各只装得下 `frames` 个。
+    pub(crate) fn for_tests(me: NodeId, port: Arc<UdpPort>, frames: usize) -> (Arc<Self>, [mpsc::Receiver<Ctrl>; 3]) {
+        let (ctrl, ctrl_rx) = mpsc::channel(16);
+        let (from_relays, from_relays_rx) = mpsc::channel(frames);
+        let (from_peers, from_peers_rx) = mpsc::channel(frames);
+        let (inbound, inbound_rx) = mpsc::channel(16);
+        let shared = Arc::new(Self {
+            me,
+            port,
+            clock: Clock::new(),
+            table: RwLock::new(Table::default()),
+            ctrl,
+            from_relays,
+            from_peers,
+            inbound,
+            inbound_rx: Mutex::new(inbound_rx),
+            local_relay: OnceLock::new(),
+            signal_hook: RwLock::new(None),
+            changes: broadcast::Sender::new(16),
+            route_changed: Notify::new(),
+            status: Mutex::new(Status::default()),
+            lan: Mutex::new(None),
+        });
+        (shared, [ctrl_rx, from_relays_rx, from_peers_rx])
     }
 }
 
@@ -406,23 +453,64 @@ mod tests {
     use super::*;
 
     fn shared() -> Arc<Shared> {
-        let (ctrl, _ctrl_rx) = mpsc::channel(1);
-        let (inbound, inbound_rx) = mpsc::channel(1);
-        Arc::new(Shared {
-            me: NodeId::new(1).unwrap(),
-            port: Arc::new(UdpPort::bind("127.0.0.1:0".parse().unwrap()).unwrap()),
-            clock: Clock::new(),
-            table: RwLock::new(Table::default()),
-            ctrl,
-            inbound,
-            inbound_rx: Mutex::new(inbound_rx),
-            local_relay: OnceLock::new(),
-            signal_hook: RwLock::new(None),
-            changes: broadcast::Sender::new(1),
-            route_changed: Notify::new(),
-            status: Mutex::new(Status::default()),
-            lan: Mutex::new(None),
-        })
+        shared_with_queues().0
+    }
+
+    /// 帧的两个队列各只装得下一个。
+    fn shared_with_queues() -> (Arc<Shared>, [mpsc::Receiver<Ctrl>; 3]) {
+        Shared::for_tests(NodeId::new(1).unwrap(), Arc::new(UdpPort::bind("127.0.0.1:0".parse().unwrap()).unwrap()), 1)
+    }
+
+    /// 从 `receiver` 收一个数据报，等不到就是 `None`。
+    async fn receive(receiver: &UdpPort) -> Option<Vec<u8>> {
+        let mut storage = vec![0u8; 2048 * receiver.gro_segments()];
+        let mut metas = [i3t_underlay::RecvMeta::default(); 1];
+        let mut bufs = [std::io::IoSliceMut::new(&mut storage)];
+        let received = tokio::time::timeout(Duration::from_millis(300), receiver.recv(&mut bufs, &mut metas)).await.ok()?.ok()?;
+        (received == 1).then(|| bufs[0][..metas[0].len].to_vec())
+    }
+
+    #[tokio::test]
+    async fn packets_kept_while_the_route_was_down_are_resent_again_when_the_first_route_back_fails_too() {
+        let shared = shared();
+        let slot = PeerSlot::new(NodeId::new(2).unwrap());
+        // 没有路：连接层发的包被丢掉，最后几个留着。
+        for byte in 1..=2u8 {
+            slot.send(&shared, &Packets { contents: &[byte; 100], segment_size: None, ecn: None }).unwrap();
+        }
+        // 路回来了，补发。但这条路马上又断了（比如经 TCP 的中转刚连上就断开），补发的包没有送到。
+        let lost = UdpPort::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        slot.set_hop(Hop::Direct(lost.local_addr()));
+        let now = Instant::now();
+        slot.flush(&shared, now);
+        assert_eq!(receive(&lost).await, Some(vec![1; 100]));
+        assert_eq!(receive(&lost).await, Some(vec![2; 100]));
+        slot.set_hop(Hop::None);
+
+        // 能用的路回来了：手上还有可以补发的包。
+        let working = UdpPort::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        slot.set_hop(Hop::Direct(working.local_addr()));
+        slot.flush(&shared, now + Duration::from_secs(4));
+        assert_eq!(receive(&working).await, Some(vec![1; 100]));
+        assert_eq!(receive(&working).await, Some(vec![2; 100]));
+
+        // 留得太久的不再补发：对面拿它算出来的延迟没有意义。
+        slot.flush(&shared, now + STASH_MAX_AGE + Duration::from_secs(1));
+        assert_eq!(receive(&working).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_flood_of_probes_cannot_crowd_relay_replies_out_of_the_control_queues() {
+        let (shared, _receivers) = shared_with_queues();
+        let from: SocketAddr = "203.0.113.9:4000".parse().unwrap();
+        let probe = || {
+            let ping = i3t_proto::probe::Ping { src: NodeId::new(2).unwrap(), dst: shared.me, nonce: [1; 8], signature: [0; 64] };
+            Inbound::Probe(i3t_proto::probe::Frame::Ping(ping))
+        };
+        assert!(shared.queue_frame(from, probe()));
+        assert!(!shared.queue_frame(from, probe()), "探测的队列满了");
+        let challenge = i3t_proto::session::Challenge { nonce: [2; 8], cookie: [3; 16] };
+        assert!(shared.queue_frame(from, Inbound::Session(i3t_proto::session::Frame::Challenge(challenge))), "relay 的应答有自己的队列");
     }
 
     #[tokio::test]

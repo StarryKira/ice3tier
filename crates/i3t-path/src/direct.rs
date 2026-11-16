@@ -6,15 +6,25 @@
 //! 一个地址要先验证才能用：向它发 PING，收到带着同一个随机数的 PONG。验证过的地址每 5 秒再探测一次，
 //! 连续超时或者丢得太多就判为不可用。没有可用地址时按固定的节奏重试：每次尝试向所有候选地址发几轮 PING，
 //! 并且发信令请对端同时向本端发，这就是打洞。
+//!
+//! # 别人能让它做什么
+//!
+//! - PING 可以被人截下来、从别的地址重放，签名照样是对的。所以只凭收到过 PING 的地址只认很短的一阵
+//!   （[`PINGED_TTL`]），本端自己的 PING 在那里得到回答才算真正验证过。
+//! - 对端的候选地址来自它自己（netmap 里上报的、信令里带来的），它可以写任何地址。没法发、不该发的地址不记
+//!   （回环、组播、广播、链路本地；本节点自己绑在回环上的测试除外），信令引出的探测最多每 [`PUNCH_ATTEMPT`] 一轮，
+//!   重试的退避照常推进，所以对端不能让本节点不停地向随便什么地址发探测。
+//! - 每个候选地址来的 PING 有自己的验签额度，伪造的 PING 花不掉别的地址的额度。
 
 use std::collections::VecDeque;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use i3t_model::control::Signal;
 use i3t_proto::session::Nonce;
 use i3t_underlay::ifaddr;
 
+use crate::budget::Budget;
 use crate::estimate::{Estimate, Quality, Train};
 use crate::report::DirectKind;
 use crate::timing::{MAX_TIMEOUTS, PROBE_INTERVAL, PUNCH_ATTEMPT, PUNCH_BACKOFF, PUNCH_IDLE_RETRY, PUNCH_VOLLEYS, Rtt, SILENCE};
@@ -25,6 +35,13 @@ const MAX_CANDIDATES: usize = 16;
 const MAX_SIGNALLED: usize = 8;
 /// 不是对端上报的候选地址多久没有再出现就忘掉；验证过的地址多久没有新的证明就不再认它发来的包。
 const CANDIDATE_TTL: Duration = Duration::from_secs(120);
+/// 只是收到过对端 PING 的地址，多久之内认它发来的连接包。对端在用这个地址时每 5 秒就有一个保活 PING，
+/// 三个间隔够了；别人重放一个旧的 PING，也只能让这个地址被认这么久。
+const PINGED_TTL: Duration = Duration::from_secs(15);
+/// 一个候选地址来的 PING 每秒最多验多少个签名，最多攒多少个。对端打洞时一轮向本端的每个候选地址各发一个，
+/// 三轮在 600ms 里发完，这些都从它的同一个地址来。
+const CANDIDATE_VERIFIES_PER_SEC: f64 = 25.0;
+const CANDIDATE_VERIFY_BURST: f64 = 50.0;
 /// 发出去的 PING 等多久还没有回答就不再等。比一次打洞尝试长，晚到的 PONG 照样算数。
 const PENDING_TTL: Duration = Duration::from_secs(5);
 const MAX_PENDING: usize = 64;
@@ -111,10 +128,14 @@ struct Candidate {
     reported: bool,
     /// 最近一次从任何来源得知这个地址。
     refreshed: Instant,
-    /// 最近一次从这个地址收到对端签过名的探测帧。
+    /// 最近一次本端发往这个地址的 PING 得到了对端签了名的回答。
     proven: Option<Instant>,
+    /// 最近一次从这个地址收到对端签了名的 PING。
+    pinged: Option<Instant>,
     /// 是从对端在本地网段上发的信标里得知的。
     lan: bool,
+    /// 这个地址来的 PING 的验签额度。
+    budget: Budget,
 }
 
 #[derive(Debug)]
@@ -200,6 +221,10 @@ pub(crate) struct DirectPath {
     heard: Option<Instant>,
     /// 两边的公网地址相同：对端的私有地址多半和本节点在同一个局域网里。
     same_nat: bool,
+    /// 上一次因为信令立刻发一轮探测的时刻。
+    signal_volley: Option<Instant>,
+    /// 回环地址可以当候选：本节点自己就绑在回环上（测试里几个节点在同一台机器上）。
+    loopback: bool,
 }
 
 impl DirectPath {
@@ -212,7 +237,14 @@ impl DirectPath {
             last_request: None,
             heard: None,
             same_nat: false,
+            signal_volley: None,
+            loopback: false,
         }
+    }
+
+    /// 本节点的端口绑在 `local` 上时用的。绑在回环上时，对端的回环地址也可以当候选；否则那是本节点自己的回环，不该往那里发。
+    pub(crate) fn for_port(local: SocketAddr) -> Self {
+        Self { loopback: local.ip().is_loopback(), ..Self::new() }
     }
 
     /// 在用的地址上测到的延迟、抖动和丢包。没有在用的地址，或者估计过期了，是 `None`。
@@ -242,7 +274,22 @@ impl DirectPath {
     /// `addr` 是不是对端在本节点所在局域网里的地址：它是私有地址，并且要么对端的信标就是在本地网段上从它发来的，
     /// 要么两边的公网地址相同（白皮书 §5.3 的推断）。只凭"是私有地址"不算：两个不相干的网络可以用同一个私有网段。
     fn is_lan(&self, addr: SocketAddr) -> bool {
-        ifaddr::is_private(addr.ip()) && (self.same_nat || self.candidates.iter().any(|candidate| candidate.addr == addr && candidate.lan))
+        ifaddr::is_private(addr.ip()) && (self.same_nat || self.came_from_beacon(addr))
+    }
+
+    fn came_from_beacon(&self, addr: SocketAddr) -> bool {
+        self.candidates.iter().any(|candidate| candidate.addr == addr && candidate.lan)
+    }
+
+    /// 到 `addr` 的包是不是不经过地址转换：它是私有地址，或者是从局域网信标里得知的。
+    /// 这样的地址上的对端看到的本节点地址，应该就是本节点网卡上的地址。
+    pub(crate) fn is_local_network(&self, addr: SocketAddr) -> bool {
+        ifaddr::is_private(addr.ip()) || self.came_from_beacon(addr)
+    }
+
+    /// `from` 是这个对端的候选地址时，从它的验签额度里扣一次，返回扣没扣到；不是候选地址返回 `None`。
+    pub(crate) fn charge(&mut self, from: SocketAddr, now: Instant) -> Option<bool> {
+        self.candidate_mut(from).map(|candidate| candidate.budget.take(now))
     }
 
     /// 本节点和对端是不是在同一个 NAT 后面（两边上报的公网地址里有相同的 IP）。
@@ -272,12 +319,13 @@ impl DirectPath {
         self.active.as_ref().is_some_and(|active| active.timeouts > 0)
     }
 
-    /// 可以认作"这个对端发来的连接包"的来源地址：最近从它们收到过对端签了名的探测帧。
+    /// 可以认作"这个对端发来的连接包"的来源地址：本端验证过的，加上刚收到过对端签了名的 PING 的。
     ///
-    /// 比"本端验证过的地址"宽一点：对端先验证完、先改走直连时，它的包会比本端的反向验证早到一步。
-    /// 放进来的即使是别人重放的旧探测，也只是让一些垃圾包多走到连接层，在那里解密不了被丢掉。
+    /// 后一种是为了对端先验证完、先改走直连的时候：它的包会比本端的反向验证早到一步。PING 可以被人重放，
+    /// 所以这种地址只认 [`PINGED_TTL`] 那么久；同一个地址还被别的对端认领时谁优先，由收包表那边决定。
     pub(crate) fn sources(&self, now: Instant) -> impl Iterator<Item = SocketAddr> + '_ {
-        let fresh = move |candidate: &&Candidate| candidate.proven.is_some_and(|at| now.saturating_duration_since(at) < CANDIDATE_TTL);
+        let within = move |at: Option<Instant>, ttl: Duration| at.is_some_and(|at| now.saturating_duration_since(at) < ttl);
+        let fresh = move |candidate: &&Candidate| within(candidate.proven, CANDIDATE_TTL) || within(candidate.pinged, PINGED_TTL);
         self.candidates.iter().filter(fresh).map(|candidate| candidate.addr)
     }
 
@@ -326,13 +374,19 @@ impl DirectPath {
         if is_request {
             actions.push(Action::Signal(Signal::PunchReply { endpoints: policy.local.to_vec() }));
         }
-        if self.active.is_none() {
+        // 信令引出的探测最多每 `PUNCH_ATTEMPT` 一轮：对端发多少信令，本节点也只按一次尝试的节奏发。
+        let volley_due = self.signal_volley.is_none_or(|at| now.saturating_duration_since(at) >= PUNCH_ATTEMPT);
+        if self.active.is_none() && volley_due {
             // 对端此刻正在向本端发探测。本端也立刻发，并把这一次尝试的节奏对齐到现在，后面两轮跟着来。
             let round = match self.punch {
                 Punch::Idle => 0,
-                Punch::Attempt { round, .. } | Punch::Backoff { round, .. } => round,
+                Punch::Attempt { round, started, .. } if now.saturating_duration_since(started) < PUNCH_ATTEMPT => round,
+                // 上一次已经失败了（或者正好到了判为失败的时候），这是下一次：退避照常推进，
+                // 信令不会让本节点一直停在同一档上。
+                Punch::Attempt { round, .. } | Punch::Backoff { round, .. } => round + 1,
                 Punch::Exhausted { .. } => PUNCH_BACKOFF.len(),
             };
+            self.signal_volley = Some(now);
             self.punch = Punch::Attempt { round, started: now, volleys: 1 };
             actions.extend(self.volley(now));
         }
@@ -342,7 +396,9 @@ impl DirectPath {
     /// 从 `from` 收到了对端的 PING（签名已经验过，PONG 由外面去回）。返回要不要向 `from` 发一个反方向的 PING。
     pub(crate) fn on_ping(&mut self, from: SocketAddr, now: Instant) -> Option<Action> {
         self.learn(from, now);
-        self.prove(from, now);
+        if let Some(candidate) = self.candidate_mut(from) {
+            candidate.pinged = Some(now);
+        }
         self.heard = Some(now);
         if self.active.as_ref().is_some_and(|active| active.addr == from) {
             return None;
@@ -501,9 +557,21 @@ impl DirectPath {
         Action::Ping { to, nonce }
     }
 
+    /// 能不能往 `addr` 发探测。对端可以在上报的端点和信令里写任何地址，没法发、不该发的不记。
+    ///
+    /// 私有地址照样收：两个节点可能在同一个局域网里，也可能经站点之间的隧道用私有地址互通，这里分不出来。
+    fn can_probe(&self, addr: SocketAddr) -> bool {
+        let ip = addr.ip().to_canonical();
+        let unusable = match ip {
+            IpAddr::V4(ip) => ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast() || ip.is_link_local(),
+            IpAddr::V6(ip) => ip.is_unspecified() || ip.is_multicast() || ip.is_unicast_link_local(),
+        };
+        addr.port() != 0 && !unusable && (self.loopback || !ip.is_loopback())
+    }
+
     /// 记下一个候选地址。返回它是不是新的。
     fn learn(&mut self, addr: SocketAddr, now: Instant) -> bool {
-        if addr.port() == 0 || addr.ip().is_unspecified() {
+        if !self.can_probe(addr) {
             return false;
         }
         if let Some(candidate) = self.candidate_mut(addr) {
@@ -518,7 +586,8 @@ impl DirectPath {
             let Some((oldest, _)) = evictable.min_by_key(|(_, candidate)| candidate.refreshed) else { return false };
             self.candidates.swap_remove(oldest);
         }
-        self.candidates.push(Candidate { addr, reported: false, refreshed: now, proven: None, lan: false });
+        let budget = Budget::new(CANDIDATE_VERIFIES_PER_SEC, CANDIDATE_VERIFY_BURST, now);
+        self.candidates.push(Candidate { addr, reported: false, refreshed: now, proven: None, pinged: None, lan: false, budget });
         true
     }
 
@@ -785,6 +854,93 @@ mod tests {
 
         assert_eq!(path.on_pong(from, &nonce, start + 30 * MS), Some(Change::Up { addr: from }));
         assert_eq!(path.on_ping(from, start + 5 * REVERSE_PROBE_INTERVAL), None, "已经在用的地址有自己的保活");
+    }
+
+    #[test]
+    fn a_ping_alone_vouches_for_its_source_only_briefly_unless_the_reverse_probe_is_answered() {
+        let start = Instant::now();
+        // 别人截下对端的一个 PING，从 `spoofed` 重放过来：签名是对的，但对端并不在那里。
+        let spoofed = addr("203.0.113.7:4000");
+        let mut path = DirectPath::new();
+        let Some(Action::Ping { nonce, .. }) = path.on_ping(spoofed, start) else { panic!("应该反过来验证这个地址") };
+        assert_eq!(path.sources(start).collect::<Vec<_>>(), [spoofed], "对端可能已经先改走直连了，它的包先认着");
+        assert_eq!(path.sources(start + PINGED_TTL).count(), 0, "反向的验证一直没有回答：过一阵就不认了");
+
+        // 对端确实在那里：反向的验证有了回答，这个地址就按验证过的地址认。
+        let mut path = DirectPath::new();
+        let Some(Action::Ping { nonce: reverse, .. }) = path.on_ping(spoofed, start) else { panic!("应该反过来验证这个地址") };
+        path.on_pong(spoofed, &reverse, start + 20 * MS);
+        assert_eq!(path.sources(start + PINGED_TTL).collect::<Vec<_>>(), [spoofed]);
+        assert_ne!(nonce, reverse);
+    }
+
+    #[test]
+    fn each_candidate_address_has_its_own_budget_for_signature_checks() {
+        let start = Instant::now();
+        let (reported, other) = (addr("203.0.113.7:20330"), addr("198.51.100.4:20330"));
+        let mut path = DirectPath::new();
+        path.set_reported(&[reported, other], start);
+        assert_eq!(path.charge(addr("192.0.2.1:9"), start), None, "不是候选地址：交给陌生地址的额度");
+        let spent = (0..1000).take_while(|_| path.charge(reported, start) == Some(true)).count();
+        assert_eq!(spent, 50);
+        assert_eq!(path.charge(reported, start), Some(false));
+        assert_eq!(path.charge(other, start), Some(true), "一个地址的额度用完了，不影响别的地址");
+        assert_eq!(path.charge(reported, start + Duration::from_millis(40)), Some(true), "之后每秒 25 个");
+    }
+
+    #[test]
+    fn a_peer_flooding_punch_signals_gets_one_volley_per_attempt_and_the_backoff_still_advances() {
+        let start = Instant::now();
+        let mut path = DirectPath::new();
+        let local = [addr("198.51.100.1:20330")];
+        let theirs: Vec<SocketAddr> = (1..=8u16).map(|port| SocketAddr::from(([203, 0, 113, 7], port))).collect();
+        let reply = Signal::PunchReply { endpoints: theirs.clone() };
+        // 对端每 100ms 发一条回应信令，一共 15 秒。
+        let mut volleys = 0;
+        let mut pinged = 0;
+        for tick in 0..150u32 {
+            let now = start + 100 * MS * tick;
+            let actions = path.on_signal(&reply, now, &policy(&local));
+            volleys += usize::from(!pings(&actions).is_empty());
+            pinged += pings(&actions).len() + pings(&path.poll(now, &policy(&local)).actions).len();
+        }
+        assert!(volleys <= 10, "15 秒里信令引出的探测最多每 1.5 秒一轮：{volleys}");
+        // 每一次尝试三轮，每轮向 8 个候选各发一个；不比按退避表自己重试多多少。
+        assert!(pinged <= 10 * 3 * theirs.len(), "{pinged}");
+        let advanced = match path.punch {
+            Punch::Attempt { round, .. } | Punch::Backoff { round, .. } => round >= 2,
+            Punch::Exhausted { .. } => true,
+            Punch::Idle => false,
+        };
+        assert!(advanced, "退避在往前走：{:?}", path.punch);
+    }
+
+    #[test]
+    fn addresses_that_cannot_or_should_not_be_probed_never_become_candidates() {
+        let start = Instant::now();
+        let refused = [
+            "127.0.0.1:20330",
+            "[::1]:20330",
+            "224.0.0.251:5353",
+            "[ff02::1]:20330",
+            "255.255.255.255:20330",
+            "169.254.1.2:20330",
+            "[fe80::1]:20330",
+            "0.0.0.0:20330",
+            "203.0.113.7:0",
+        ];
+        let mut path = DirectPath::new();
+        path.set_reported(&refused.map(addr), start);
+        let signal = Signal::PunchRequest { endpoints: refused[..8].iter().map(|text| addr(text)).collect() };
+        path.on_signal(&signal, start, &policy(&[]));
+        assert!(path.candidates.is_empty(), "{:?}", path.candidates);
+        // 私有地址照样收：可能就在同一个局域网里。
+        path.set_reported(&[addr("192.168.1.5:20330"), addr("[fd00::5]:20330")], start);
+        assert_eq!(path.candidates.len(), 2);
+        // 本节点自己绑在回环上（测试）时，对端的回环地址就是它真的地址。
+        let mut on_loopback = DirectPath::for_port(addr("127.0.0.1:4000"));
+        on_loopback.set_reported(&[addr("127.0.0.1:20330")], start);
+        assert_eq!(on_loopback.candidates.len(), 1);
     }
 
     #[test]

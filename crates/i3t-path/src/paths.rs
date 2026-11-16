@@ -13,6 +13,7 @@ use i3t_model::Netmap;
 use i3t_model::control::{RouteEntry, Signal};
 use i3t_model::netmap::Attachment;
 use i3t_proto::datagram::{RelayHeader, RouteHeader};
+use i3t_proto::session::{self, Refused};
 use i3t_proto::{Datagram, NodeId, PublicKey, probe};
 use i3t_underlay::lan::{LanConfig, LanDiscovery};
 use i3t_underlay::portmap::PortMapConfig;
@@ -20,13 +21,16 @@ use i3t_underlay::{BATCH_SIZE, Ecn, RecvMeta, UdpPort};
 use tokio::sync::{Notify, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
-use crate::control::{Control, Ctrl, Inbound};
+use crate::control::{Control, Ctrl, Inbound, Queues};
 use crate::report::{BackboneRow, PathReport};
 use crate::table::{Clock, Packets, PeerSlot, Shared, Table};
 use crate::{LocalRelay, RouteChange, Status};
 
-/// 收包路径交给控制任务的帧最多攒多少。满了就丢：它们都是有重试的握手和探测，而且这样陌生人灌不爆内存。
+/// 交给控制任务的内部事件最多攒多少。
 const CTRL_QUEUE: usize = 1024;
+/// 收包路径交给控制任务的帧最多攒多少，relay 来的和别的各一个队列。满了就丢：它们都是有重试的握手和探测，
+/// 而且这样陌生人灌不爆内存。
+const FRAME_QUEUE: usize = 512;
 /// 不走 UDP 缓冲区直达的包（TCP 中转来的等）最多攒多少。满了之后 TCP 那边停下来等。
 const INBOUND_QUEUE: usize = 1024;
 /// 换路事件的订阅者最多落后多少条。
@@ -75,6 +79,8 @@ impl Paths {
     pub fn new(config: PathConfig) -> Self {
         let PathConfig { key, port, mut netmap, addr_servers } = config;
         let (ctrl, ctrl_rx) = mpsc::channel(CTRL_QUEUE);
+        let (from_relays, from_relays_rx) = mpsc::channel(FRAME_QUEUE);
+        let (from_peers, from_peers_rx) = mpsc::channel(FRAME_QUEUE);
         let (inbound, inbound_rx) = mpsc::channel(INBOUND_QUEUE);
         let current = Arc::clone(&netmap.borrow_and_update());
         let shared = Arc::new(Shared {
@@ -83,6 +89,8 @@ impl Paths {
             clock: Clock::new(),
             table: RwLock::new(Table::default()),
             ctrl,
+            from_relays,
+            from_peers,
             inbound,
             inbound_rx: Mutex::new(inbound_rx),
             local_relay: OnceLock::new(),
@@ -94,7 +102,8 @@ impl Paths {
         });
         let public = key.public();
         let control = Control::new(Arc::clone(&shared), key, current, addr_servers);
-        let control = tokio::spawn(control.run(ctrl_rx, netmap));
+        let queues = Queues { ctrl: ctrl_rx, from_relays: from_relays_rx, from_peers: from_peers_rx };
+        let control = tokio::spawn(control.run(queues, netmap));
         let paths = Self { shared, control, public };
         // 端口绑在未指定地址上的才是真的节点：只有它们自动在本地网段上找对端。绑在具体地址上的（测试）要自己明确打开。
         if paths.shared.port.local_addr().ip().is_unspecified()
@@ -117,11 +126,11 @@ impl Paths {
     ///
     /// 之前的调用 panic 过（锁中毒）。
     pub fn start_lan_discovery(&self, config: LanConfig) -> io::Result<()> {
-        let ctrl = self.shared.ctrl.clone();
+        let queue = self.shared.from_peers.clone();
         let port = self.shared.port.local_addr().port();
         let discovery = LanDiscovery::start(config, self.public, port, move |sighting| {
             // 信标每隔几秒就来一个，控制任务忙的时候丢掉这一个没有关系。
-            let _queued = ctrl.try_send(Ctrl::Lan(sighting));
+            let _queued = queue.try_send(Ctrl::Lan(sighting));
         })?;
         *self.shared.lan.lock().expect("lan discovery mutex poisoned") = Some(discovery);
         let _queued = self.shared.ctrl.try_send(Ctrl::LanStarted);
@@ -318,6 +327,16 @@ impl Paths {
         self.status().endpoints.clone()
     }
 
+    /// 别人看到的本节点地址：relay（以及地址查询服务器）看到的来源地址，和路由器上映射出来的外部地址（UDP 和 TCP）。
+    ///
+    /// 和 [`endpoints`](Self::endpoints) 不同，不管本节点用不用直连都照样给出：不建立直连的节点不向对端公布自己的地址，
+    /// 但本节点自己还是要知道它们（比如出口不替人去连本节点自己的公网地址）。地址查询服务器只在可以直连时才去问，
+    /// 所以只经 relay 的节点这里只有 relay 看到的和映射出来的。端口照实给出，只关心 IP 的调用方自己去掉。
+    #[must_use]
+    pub fn public_addresses(&self) -> Vec<SocketAddr> {
+        self.status().public_addresses.clone()
+    }
+
     /// 映射出来的端口是不是随对端变化。要有两个以上的观察点才知道；是的话这台机器所在的网络基本打不了洞。
     #[must_use]
     pub fn mapping_varies(&self) -> Option<bool> {
@@ -367,8 +386,7 @@ impl Paths {
             let Poll::Ready(Some((peer, packet))) = queue.poll_recv(cx) else { break };
             // TCP 中转来的、本节点的 relay 交过来的包里也可能夹着对端的路径探测。
             if let Some(frame) = path_probe(&packet) {
-                let from = self.shared.port.local_addr();
-                if self.shared.ctrl.try_send(Ctrl::Frame { from, frame: Inbound::PathProbe { peer, frame } }).is_err() {
+                if !self.shared.queue_frame(self.shared.port.local_addr(), Inbound::PathProbe { peer, frame }) {
                     tracing::trace!(%peer, "控制任务忙不过来，丢掉一个路径探测");
                 }
                 continue;
@@ -425,7 +443,7 @@ impl Paths {
                 }
                 Verdict::Relay => for_relay = Some(for_relay.map_or(offset..end, |span| span.start..end)),
                 Verdict::Control(frame) => {
-                    if self.shared.ctrl.try_send(Ctrl::Frame { from: raw.addr, frame }).is_err() {
+                    if !self.shared.queue_frame(raw.addr, frame) {
                         tracing::trace!(from = %raw.addr, "控制任务忙不过来，丢掉一帧");
                     }
                 }
@@ -470,7 +488,8 @@ impl Paths {
                 };
                 match (table.peers.get(&header.src), path_probe(packet)) {
                     (Some(_), Some(frame)) if vouched => Verdict::Control(Inbound::PathProbe { peer: header.src, frame }),
-                    (Some(slot), None) if vouched => {
+                    // 空的连接包不交上去：它会成为一个长度为 0 的包，连接层没有理由收到这种东西。
+                    (Some(slot), None) if vouched && !packet.is_empty() => {
                         slot.received(clock);
                         Verdict::Packet { slot, skip: RelayHeader::LEN }
                     }
@@ -484,6 +503,7 @@ impl Paths {
                         relay.last_rx.touch(clock);
                         match path_probe(packet) {
                             Some(frame) => Verdict::Control(Inbound::PathProbe { peer: header.src, frame }),
+                            None if packet.is_empty() => Verdict::Drop,
                             None => {
                                 slot.received(clock);
                                 Verdict::Packet { slot, skip: header.encoded_len() }
@@ -496,12 +516,17 @@ impl Paths {
             // 发给别人的中转帧、路径上有本节点的多级中转帧、节点发来的会话帧、地址查询：本节点是 relay 时由它处理，不是就没有人理。
             Ok(Datagram::Relayed { .. } | Datagram::Routed { .. } | Datagram::AddrQuery(_)) => Verdict::Relay,
             Ok(Datagram::Session(frame)) if frame.is_request() => Verdict::Relay,
-            Ok(Datagram::Session(frame)) => {
-                if let Some(relay) = table.relays.get(&from) {
+            // relay 的应答只认从 netmap 里 relay 的地址来的：别的地址来的没有人在等，不值得进控制任务的队列。
+            Ok(Datagram::Session(frame)) => match table.relays.get(&from) {
+                Some(relay) => {
                     relay.last_rx.touch(clock);
+                    match (frame, Refused::echo(datagram)) {
+                        (session::Frame::Error(refused), Some(echo)) => Verdict::Control(Inbound::Refusal(refused, echo)),
+                        (frame, _) => Verdict::Control(Inbound::Session(frame)),
+                    }
                 }
-                Verdict::Control(Inbound::Session(frame))
-            }
+                None => Verdict::Drop,
+            },
             // 矩阵行只认从 netmap 里的 relay 地址来的；是不是有会话、签名对不对由控制任务去查。
             Ok(Datagram::Row(frame)) => match table.relays.get(&from) {
                 Some(relay) => {
@@ -510,7 +535,18 @@ impl Paths {
                 }
                 None => Verdict::Drop,
             },
-            Ok(Datagram::Probe(frame)) => Verdict::Control(Inbound::Probe(frame)),
+            // 探测只收发给本节点的、自称来自 netmap 里的对端的：别的不可能验得过签名，不值得进控制任务的队列。
+            Ok(Datagram::Probe(frame)) => {
+                let (src, dst) = match frame {
+                    probe::Frame::Ping(ping) => (ping.src, ping.dst),
+                    probe::Frame::Pong(pong) => (pong.src, pong.dst),
+                };
+                if dst == self.shared.me && table.peers.contains_key(&src) {
+                    Verdict::Control(Inbound::Probe(frame))
+                } else {
+                    Verdict::Drop
+                }
+            }
             Ok(Datagram::AddrReply(reply)) => Verdict::Control(Inbound::AddrReply(reply)),
             Err(_) => Verdict::Drop,
         }
@@ -752,6 +788,35 @@ mod tests {
 
         // 别的地址冒充那个节点发给本节点的帧：本地 relay 不认，丢掉。
         assert!(demux(&paths, "203.0.113.61:5000", &[relayed(ME, 2, &[0xc3; 500])]).is_none());
+    }
+
+    #[tokio::test]
+    async fn frames_nobody_is_waiting_for_never_reach_the_control_task() {
+        let (paths, _netmap) = paths();
+        let table = paths.shared.table();
+        let stranger = addr("203.0.113.50:1");
+        let control = |from: SocketAddr, datagram: &[u8]| matches!(paths.classify(&table, from, datagram), Verdict::Control(_));
+        let ping = |src: u32, dst: u32| probe::Ping { src: node(src), dst: node(dst), nonce: [1; 8], signature: [0; 64] }.to_bytes();
+
+        // 探测：只有发给本节点、自称来自 netmap 里的对端的才交给控制任务去验签名。
+        assert!(control(stranger, &ping(2, ME)));
+        assert!(!control(stranger, &ping(2, 77)), "不是发给本节点的");
+        assert!(!control(stranger, &ping(77, ME)), "自称的来源不是对端");
+        let pong = probe::Pong { src: node(77), dst: node(ME), nonce: [1; 8], observed: stranger, signature: [0; 64] };
+        assert!(!control(stranger, &pong.to_bytes()));
+
+        // relay 的应答只认 netmap 里 relay 的地址。错误帧连同它回显的字节一起交过去。
+        let error = Refused { reason: i3t_proto::session::RefusalReason::NoSession, node: node(ME) }.to_bytes_echoing(&[7; 8]);
+        assert!(!control(stranger, &Pong { nonce: [1; 8], observed: stranger }.to_bytes()));
+        assert!(!control(stranger, &error));
+        assert!(matches!(
+            paths.classify(&table, addr(RELAY_ADDR), &error),
+            Verdict::Control(Inbound::Refusal(_, [7, 7, 7, 7, 7, 7, 7, 7]))
+        ));
+        assert!(control(addr(RELAY_ADDR), &Pong { nonce: [1; 8], observed: stranger }.to_bytes()));
+
+        // 空的连接包不交给连接层。
+        assert!(matches!(paths.classify(&table, addr(RELAY_ADDR), &relayed(ME, 2, &[])), Verdict::Drop));
     }
 
     #[tokio::test]

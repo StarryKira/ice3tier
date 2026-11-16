@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use i3t_model::control::Route;
 use i3t_proto::NodeId;
@@ -20,6 +20,9 @@ use crate::routing::{self, Candidate, Destination, DirectLink, Entry, Graph, Pat
 use crate::table::{FrameHeader, Hop, Shared};
 use crate::tcp::TcpLegHandle;
 use crate::timing::{SETTLE, SWITCH_WINDOWS};
+
+/// 从没有路变成有路之后多久之内，选中的 relay 还不算"在用"，见 [`relay_in_use`]。
+const FIRST_ROUTE_GRACE: Duration = Duration::from_secs(1);
 
 /// 到路径上第一个 relay 的那一段走的是什么。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,11 +121,7 @@ impl View<'_> {
         if !self.allow_relay {
             return direct.map(PathId::Direct);
         }
-        // 现在走着的 relay（默认模式只经一个）。
-        let current = match peer.route {
-            RouteKey::Relay { path, .. } => Some(path.first()),
-            RouteKey::Direct(_) | RouteKey::None => None,
-        };
+        let current = relay_in_use(peer, self.now);
         // 通知过下线或者过载的 relay、刚说过"对端没挂在我这里"的 relay 排到后面，但不是完全不用：
         // 只有它一个可走时，对端可能只是还没来得及挂上去。
         let refused = |relay: NodeId| peer.unattached.iter().any(|(held, _)| *held == relay);
@@ -244,6 +243,18 @@ impl View<'_> {
             && !relays.windows(2).any(|pair| self.is_broken(pair[0], pair[1]))
             && !peer.suspect.iter().any(|(suspect, _)| *suspect == path)
             && !peer.unattached.iter().any(|(relay, _)| *relay == path.last())
+    }
+}
+
+/// 默认模式下现在走着的 relay（默认模式只经一个）。它在对端的挂靠表里排在前面，不因为刚连上往后排，免得来回换。
+///
+/// 刚从没有路变成有路的头 [`FIRST_ROUTE_GRACE`] 里不算：启动时到几个 relay 的会话往往前后脚建立，相差不到一毫秒，
+/// 先建好的那个只是碰巧先到，不该因此一直占着、把对端排在前面的 relay 挡在后面。
+pub(super) fn relay_in_use(peer: &PeerState, now: Instant) -> Option<NodeId> {
+    let just_picked = peer.first_route.is_some_and(|at| now.saturating_duration_since(at) < FIRST_ROUTE_GRACE);
+    match peer.route {
+        RouteKey::Relay { path, .. } if !just_picked => Some(path.first()),
+        RouteKey::Relay { .. } | RouteKey::Direct(_) | RouteKey::None => None,
     }
 }
 
@@ -488,6 +499,8 @@ mod tests {
             route: RouteKey::None,
             doubt: true,
             sources: Vec::new(),
+            active_source: None,
+            stranger_budget: crate::budget::Budget::new(1.0, 1.0, Instant::now()),
             hint: None,
             unattached: Vec::new(),
             suspect: Vec::new(),
@@ -496,7 +509,22 @@ mod tests {
             candidates: Vec::new(),
             reason: String::new(),
             switched: None,
+            first_route: None,
         }
+    }
+
+    #[test]
+    fn a_relay_picked_the_moment_a_route_first_appeared_does_not_count_as_in_use_yet() {
+        let now = Instant::now();
+        let mut peer = peer_attached_to(&[8, 9]);
+        peer.route = RouteKey::Relay { path: path(&[9]), via: Via::Udp(addr("198.51.100.9:20330")) };
+        peer.first_route = Some(now);
+        assert_eq!(relay_in_use(&peer, now + Duration::from_millis(1)), None, "到 8 的会话晚到一点点，照样按对端的顺序排");
+        assert_eq!(relay_in_use(&peer, now + FIRST_ROUTE_GRACE), Some(node(9)), "之后就是在用的 relay");
+        peer.first_route = None;
+        assert_eq!(relay_in_use(&peer, now), Some(node(9)));
+        peer.route = RouteKey::Direct(addr("203.0.113.7:4000"));
+        assert_eq!(relay_in_use(&peer, now), None);
     }
 
     #[test]

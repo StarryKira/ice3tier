@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use i3t_crypto::{NodeKey, Signature};
 use i3t_model::netmap::Relay;
-use i3t_proto::session::{Accepted, Auth, Frame, Init, Nonce, Ping, RefusalReason};
+use i3t_proto::session::{Accepted, Auth, Echo, Frame, Init, Nonce, Ping, RefusalReason, Refused};
 use i3t_proto::{NodeId, PublicKey};
 
 use crate::attach::{Event, Send, Session, Step};
@@ -460,8 +460,8 @@ impl RelayLink {
         }
     }
 
-    /// relay 的 UDP 地址发来的会话帧。返回 relay 对某条路的抱怨（如果它说了的话）。
-    pub(crate) fn on_udp_frame(&mut self, frame: &Frame, now: Instant, who: Identity<'_>, wire: &mut dyn Wire) -> Option<Complaint> {
+    /// relay 的 UDP 地址发来的会话帧。错误帧走 [`on_udp_refusal`](Self::on_udp_refusal)。
+    pub(crate) fn on_udp_frame(&mut self, frame: &Frame, now: Instant, who: Identity<'_>, wire: &mut dyn Wire) {
         match frame {
             Frame::Challenge(challenge) => {
                 if let Some((_, sent)) = self.survey.take_if(|(nonce, _)| *nonce == challenge.nonce) {
@@ -483,19 +483,46 @@ impl RelayLink {
                     self.observed = Some((observed, now));
                 }
             }
-            Frame::Error(refused) => match refused.reason {
-                RefusalReason::NoSession if refused.node == who.me => {
-                    let step = self.udp.on_no_session();
-                    self.apply_udp(step, now, who, wire);
-                }
-                RefusalReason::PeerUnattached => return Some(Complaint::PeerUnattached(refused.node)),
-                RefusalReason::RouteUnavailable => return Some(Complaint::RouteUnavailable(refused.node)),
-                RefusalReason::NoSession => {}
-            },
+            // 错误帧要和它回显的字节一起看，见 [`on_udp_refusal`](Self::on_udp_refusal)。
             // 别的会话帧是节点发给 relay 的，不该从 relay 来。
-            Frame::Ok(_) | Frame::Init(_) | Frame::Auth(_) | Frame::Ping(_) => {}
+            Frame::Error(_) | Frame::Ok(_) | Frame::Init(_) | Frame::Auth(_) | Frame::Ping(_) => {}
         }
-        None
+    }
+
+    /// relay 的 UDP 地址发来的错误帧，回显的是 `echo`。返回 relay 对某条路的抱怨（只有回显对得上会话时才算数）。
+    pub(crate) fn on_udp_refusal(
+        &mut self,
+        refused: &Refused,
+        echo: &Echo,
+        now: Instant,
+        who: Identity<'_>,
+        wire: &mut dyn Wire,
+    ) -> Option<Complaint> {
+        let (step, complaint) = Self::refusal(&mut self.udp, self.id, refused, echo, now, who);
+        self.apply_udp(step, now, who, wire);
+        complaint
+    }
+
+    /// 一个会话收到的错误帧：说本节点没有会话的交给会话自己核对；说路走不通的，回显是这个会话握手的随机数才算数。
+    fn refusal(
+        session: &mut Session,
+        relay: NodeId,
+        refused: &Refused,
+        echo: &Echo,
+        now: Instant,
+        who: Identity<'_>,
+    ) -> (Step, Option<Complaint>) {
+        let complaint = match refused.reason {
+            RefusalReason::NoSession if refused.node == who.me => return (session.on_no_session(echo, now), None),
+            RefusalReason::NoSession => return (Step::default(), None),
+            RefusalReason::PeerUnattached => Complaint::PeerUnattached(refused.node),
+            RefusalReason::RouteUnavailable => Complaint::RouteUnavailable(refused.node),
+        };
+        if !session.is_session_echo(echo) {
+            tracing::debug!(%relay, reason = ?refused.reason, "relay 的错误帧回显的不是本节点的会话，不理");
+            return (Step::default(), None);
+        }
+        (Step::default(), Some(complaint))
     }
 
     /// 到这个 relay 的 TCP 连上了：在里面开始握手，先停在 cookie 那一步。
@@ -506,10 +533,10 @@ impl RelayLink {
         self.send_tcp(send, who, wire);
     }
 
-    /// 到这个 relay 的 TCP 里收到的会话帧。返回值同 [`on_udp_frame`](Self::on_udp_frame)。
-    pub(crate) fn on_tcp_frame(&mut self, frame: &Frame, now: Instant, who: Identity<'_>, wire: &mut dyn Wire) -> Option<Complaint> {
+    /// 到这个 relay 的 TCP 里收到的会话帧。错误帧走 [`on_tcp_refusal`](Self::on_tcp_refusal)。
+    pub(crate) fn on_tcp_frame(&mut self, frame: &Frame, now: Instant, who: Identity<'_>, wire: &mut dyn Wire) {
         let genuine = matches!(frame, Frame::Ok(ok) if self.ok_is_genuine(ok, who));
-        let tcp = self.tcp.as_mut()?;
+        let Some(tcp) = self.tcp.as_mut() else { return };
         let step = match frame {
             Frame::Challenge(challenge) => tcp.session.on_challenge(challenge, now),
             Frame::Ok(ok) if genuine => tcp.session.on_ok(ok, now),
@@ -518,16 +545,25 @@ impl RelayLink {
                 tcp.session.on_pong(pong, now);
                 Step::default()
             }
-            Frame::Error(refused) => match refused.reason {
-                RefusalReason::NoSession if refused.node == who.me => tcp.session.on_no_session(),
-                RefusalReason::PeerUnattached => return Some(Complaint::PeerUnattached(refused.node)),
-                RefusalReason::RouteUnavailable => return Some(Complaint::RouteUnavailable(refused.node)),
-                RefusalReason::NoSession => Step::default(),
-            },
-            Frame::Ok(_) | Frame::Init(_) | Frame::Auth(_) | Frame::Ping(_) => Step::default(),
+            Frame::Error(_) | Frame::Ok(_) | Frame::Init(_) | Frame::Auth(_) | Frame::Ping(_) => Step::default(),
         };
         self.apply_tcp(step, now, who, wire);
-        None
+    }
+
+    /// 到这个 relay 的 TCP 里收到的错误帧。规则和 UDP 上的一样（[`on_udp_refusal`](Self::on_udp_refusal)）：
+    /// TCP 上的帧路径外的人伪造不了，但一样的规则让两边的行为一致，代价只是"没有会话"时多一个往返。
+    pub(crate) fn on_tcp_refusal(
+        &mut self,
+        refused: &Refused,
+        echo: &Echo,
+        now: Instant,
+        who: Identity<'_>,
+        wire: &mut dyn Wire,
+    ) -> Option<Complaint> {
+        let tcp = self.tcp.as_mut()?;
+        let (step, complaint) = Self::refusal(&mut tcp.session, self.id, refused, echo, now, who);
+        self.apply_tcp(step, now, who, wire);
+        complaint
     }
 
     /// 到这个 relay 的 TCP 断了，或者没连上。
@@ -721,14 +757,24 @@ mod tests {
             self.link.poll(self.start + at, who, false, false, &mut self.wire);
         }
 
-        fn udp_frame(&mut self, frame: Frame, at: Duration) -> Option<Complaint> {
+        fn udp_frame(&mut self, frame: Frame, at: Duration) {
             let who = Identity { me: node(ME), key: &self.node_key };
-            self.link.on_udp_frame(&frame, self.start + at, who, &mut self.wire)
+            self.link.on_udp_frame(&frame, self.start + at, who, &mut self.wire);
         }
 
-        fn tcp_frame(&mut self, frame: Frame, at: Duration) -> Option<Complaint> {
+        fn tcp_frame(&mut self, frame: Frame, at: Duration) {
             let who = Identity { me: node(ME), key: &self.node_key };
-            self.link.on_tcp_frame(&frame, self.start + at, who, &mut self.wire)
+            self.link.on_tcp_frame(&frame, self.start + at, who, &mut self.wire);
+        }
+
+        fn udp_refusal(&mut self, reason: RefusalReason, node: NodeId, echo: Echo, at: Duration) -> Option<Complaint> {
+            let who = Identity { me: self::node(ME), key: &self.node_key };
+            self.link.on_udp_refusal(&Refused { reason, node }, &echo, self.start + at, who, &mut self.wire)
+        }
+
+        fn tcp_refusal(&mut self, reason: RefusalReason, node: NodeId, echo: Echo, at: Duration) -> Option<Complaint> {
+            let who = Identity { me: self::node(ME), key: &self.node_key };
+            self.link.on_tcp_refusal(&Refused { reason, node }, &echo, self.start + at, who, &mut self.wire)
         }
 
         fn tcp_connected(&mut self, at: Duration) {
@@ -752,13 +798,14 @@ mod tests {
             *self.wire.tcp.last().expect("应该发过 TCP 帧")
         }
 
-        /// 把 UDP 握手走完。
-        fn complete_udp(&mut self, at: Duration) {
+        /// 把 UDP 握手走完。返回会话握手时的随机数。
+        fn complete_udp(&mut self, at: Duration) -> Nonce {
             let Frame::Init(init) = self.last_udp() else { panic!("UDP 上最后发的应该是 INIT：{:?}", self.wire.udp) };
             self.udp_frame(Frame::Challenge(Challenge { nonce: init.nonce, cookie: [3; 16] }), at);
             let Frame::Auth(auth) = self.last_udp() else { panic!("收到 CHALLENGE 之后应该发 AUTH") };
             let ok = self.ok_for(&auth, "203.0.113.7:4000");
             self.udp_frame(ok, at);
+            auth.nonce
         }
 
         /// 把 TCP 握手从 INIT 走到拿到 cookie。
@@ -767,10 +814,12 @@ mod tests {
             self.tcp_frame(Frame::Challenge(Challenge { nonce: init.nonce, cookie: [4; 16] }), at);
         }
 
-        fn complete_tcp(&mut self, at: Duration) {
+        /// 返回会话握手时的随机数。
+        fn complete_tcp(&mut self, at: Duration) -> Nonce {
             let Frame::Auth(auth) = self.last_tcp() else { panic!("TCP 上最后发的应该是 AUTH：{:?}", self.wire.tcp) };
             let ok = self.ok_for(&auth, "203.0.113.7:5555");
             self.tcp_frame(ok, at);
+            auth.nonce
         }
 
         /// UDP 一直没有回音，靠 TCP 把会话建起来。返回建好的时刻。
@@ -1075,9 +1124,13 @@ mod tests {
         setup.complete_udp(10 * MS);
         assert!(setup.link.leg().is_some());
 
-        // relay 说没有会话（它重启了）：马上重新握手。
+        // relay 重启了，它说本节点没有会话。这个错误帧回答的是一个中转帧，回显的东西本节点核对不了：先发一个 PING 去问。
+        setup.udp_refusal(RefusalReason::NoSession, node(ME), [0x41; 8], Duration::from_secs(1));
+        assert!(setup.link.leg().is_some(), "一个核对不了的错误帧不拆会话");
+        let Frame::Ping(ping) = setup.last_udp() else { panic!("应该马上发 PING 去问：{:?}", setup.wire.udp) };
+        // relay 对这个 PING 的回答回显了它的随机数：会话确实没了，马上重新握手。
         let sent_before = setup.wire.udp.len();
-        setup.udp_frame(Frame::Error(Refused { reason: RefusalReason::NoSession, node: node(ME) }), Duration::from_secs(1));
+        setup.udp_refusal(RefusalReason::NoSession, node(ME), ping.nonce, Duration::from_secs(1) + 20 * MS);
         assert_eq!(setup.link.leg(), None);
         setup.poll(Duration::from_secs(1) + 400 * MS);
         assert!(matches!(setup.wire.udp[sent_before..], [(_, Frame::Init(_))]), "{:?}", &setup.wire.udp[sent_before..]);
@@ -1109,14 +1162,37 @@ mod tests {
     fn a_refusal_meant_for_another_node_or_about_a_peer_does_not_touch_the_session() {
         let mut setup = Setup::new(&["198.51.100.9:20330"], &[]);
         setup.poll(Duration::ZERO);
-        setup.complete_udp(10 * MS);
-        assert_eq!(setup.udp_frame(Frame::Error(Refused { reason: RefusalReason::NoSession, node: node(77) }), 20 * MS), None);
-        assert!(setup.link.leg().is_some(), "说的是别的节点");
-        let unattached = setup.udp_frame(Frame::Error(Refused { reason: RefusalReason::PeerUnattached, node: node(5) }), 20 * MS);
+        let session = setup.complete_udp(10 * MS);
+        let sent = setup.wire.udp.len();
+        assert_eq!(setup.udp_refusal(RefusalReason::NoSession, node(77), session, 20 * MS), None);
+        assert!(setup.link.leg().is_some() && setup.wire.udp.len() == sent, "说的是别的节点");
+        let unattached = setup.udp_refusal(RefusalReason::PeerUnattached, node(5), session, 20 * MS);
         assert_eq!(unattached, Some(Complaint::PeerUnattached(node(5))), "对端没挂在这个 relay 上：交给选路去换");
-        let unroutable = setup.udp_frame(Frame::Error(Refused { reason: RefusalReason::RouteUnavailable, node: node(8) }), 20 * MS);
+        let unroutable = setup.udp_refusal(RefusalReason::RouteUnavailable, node(8), session, 20 * MS);
         assert_eq!(unroutable, Some(Complaint::RouteUnavailable(node(8))), "多级路径走不下去：也交给选路去换");
         assert!(setup.link.leg().is_some());
+    }
+
+    #[test]
+    fn a_complaint_that_does_not_echo_the_session_is_ignored() {
+        let mut setup = Setup::new(&["198.51.100.9:20330"], &["198.51.100.9:20330"]);
+        let tcp_session = setup.fall_back_to_tcp();
+        let tcp_nonce = {
+            let Some(Frame::Auth(auth)) = setup.wire.tcp.iter().rev().find(|frame| matches!(frame, Frame::Auth(_))).copied() else {
+                panic!("TCP 上发过 AUTH")
+            };
+            auth.nonce
+        };
+        // 伪造来源地址的人冒充 relay：它不知道会话握手的随机数。
+        for reason in [RefusalReason::PeerUnattached, RefusalReason::RouteUnavailable] {
+            assert_eq!(setup.tcp_refusal(reason, node(5), [0; 8], tcp_session), None);
+            assert_eq!(setup.udp_refusal(reason, node(5), tcp_nonce, tcp_session), None, "UDP 上没有会话，回显什么都不算");
+        }
+        assert_eq!(
+            setup.tcp_refusal(RefusalReason::PeerUnattached, node(5), tcp_nonce, tcp_session),
+            Some(Complaint::PeerUnattached(node(5)))
+        );
+        assert_eq!(setup.link.leg(), Some(Leg::Tcp));
     }
 
     #[test]

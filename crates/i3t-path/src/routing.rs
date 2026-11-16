@@ -466,12 +466,13 @@ mod tests {
     #[test]
     fn only_edges_that_really_connect_are_walked() {
         let mut example = Example::new();
-        // B 的行里没有 C 了（连不上）：两级路径 A→B→C→D 不存在，反方向 A→C→B→D 还在。
+        // B 的行里没有 C 了（连不上）：只有 C 一头说连得上不算，两个方向的两级路径都不存在。
         example.matrix = Matrix::default();
+        row(&mut example.matrix, B, 0, &[], example.now);
         row(&mut example.matrix, C, 0, &[(B, 140, 0)], example.now);
         let found = example.candidates(2, false);
         let paths: Vec<PathId> = found.iter().map(|candidate| candidate.path).collect();
-        assert_eq!(paths, [relays(&[B]), relays(&[C]), relays(&[C, B])]);
+        assert_eq!(paths, [relays(&[B]), relays(&[C])]);
 
         // 没有直连、没有能进去的 relay：没有候选。
         example.entries.clear();
@@ -523,8 +524,8 @@ mod tests {
     fn a_destination_that_is_itself_a_relay_ends_the_path_and_this_nodes_own_relay_is_not_a_transit() {
         let now = Instant::now();
         let mut matrix = Matrix::default();
-        row(&mut matrix, B, 0, &[(D, 30, 0), (C, 10, 0)], now);
-        row(&mut matrix, D, 0, &[(C, 10, 0)], now);
+        row(&mut matrix, B, 0, &[(D, 30, 0), (C, 10, 0), (A, 5, 0)], now);
+        row(&mut matrix, D, 0, &[(C, 10, 0), (B, 30, 0)], now);
         row(&mut matrix, A, 0, &[(B, 5, 0)], now);
         // 对端 D 自己是 relay；本节点 A 也是 relay，D 在 A 上有会话。
         let entries = [entry(B, segment(20.0, 0.0)), entry(D, segment(60.0, 0.0)), entry(A, segment(0.0, 0.0))];

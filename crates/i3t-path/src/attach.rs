@@ -2,14 +2,22 @@
 //!
 //! 一台不做 I/O 的状态机，UDP 和 TCP 上各用一份：外面告诉它时间和 relay 发来了什么，它回答该发什么、会话还在不在。
 //! 签名在外面做：它只说"该发 AUTH 了"，OK 的签名由外面验过才交进来。
+//!
+//! relay 的 ERROR 没有签名，伪造来源地址的人也能冒充 relay 发。所以它只在回显对得上时才算数（格式见
+//! [`i3t_proto::session`]）：说本节点没有会话的，要回显一个还在等回答的保活 PING 的随机数；说别的路走不通的，
+//! 要回显这个会话握手时的随机数。说没有会话、回显又对不上的（relay 回答中转帧时只能这样）只是个提示：马上发一个 PING 去问。
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use i3t_proto::session::{Accepted, Challenge, Cookie, Nonce, Pong};
+use i3t_proto::session::{Accepted, Challenge, Cookie, Echo, Nonce, Pong};
 
 use crate::estimate::{Estimate, Quality, Train};
 use crate::timing::{HANDSHAKE_RETRY, HANDSHAKE_TRIES, MAX_TIMEOUTS, PROBE_INTERVAL, Rtt, SILENCE};
+
+/// 回显对不上的"没有会话"最多这么频繁地引出一个核实用的 PING。真的 relay 给中转帧回错误帧本来就是一秒一个；
+/// 伪造的再多，本节点也只是每秒多发一个 PING。
+const NO_SESSION_CHECK_GAP: Duration = Duration::from_secs(1);
 
 /// 要外面去发的帧。节点编号和签名由外面填。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +65,8 @@ enum State {
         tries: u8,
     },
     Up {
+        /// 握手时的随机数。relay 回给会话主人的错误帧回显它。
+        nonce: Nonce,
         last_ping: Instant,
         awaiting: Option<(Nonce, Instant)>,
         missed: u8,
@@ -74,6 +84,8 @@ pub(crate) struct Session {
     training: bool,
     /// 保活的间隔。挂靠的 relay 是 5 秒，relay 和 relay 之间是 2 秒（白皮书 §7.3）。
     interval: Duration,
+    /// 上一次因为一个核对不了的"没有会话"提前发 PING 的时刻。
+    checked: Option<Instant>,
 }
 
 impl Session {
@@ -83,7 +95,7 @@ impl Session {
 
     /// 同一段链路上重新建的会话：接着用上一个会话留下的测量值（见 [`measured`](Self::measured)）。
     pub(crate) const fn resuming(estimate: Estimate) -> Self {
-        Self { state: State::Idle, estimate, train: Train::new(), training: false, interval: PROBE_INTERVAL }
+        Self { state: State::Idle, estimate, train: Train::new(), training: false, interval: PROBE_INTERVAL, checked: None }
     }
 
     /// 这段链路上测到的全部结果。会话没了之后链路还是那一段，留给下一个会话接着用。
@@ -179,17 +191,17 @@ impl Session {
         }
         // 两步都重发过的话还不知道延迟：不等保活间隔，马上量一次。
         let last_ping = if self.rtt().is_some() { now } else { now.checked_sub(self.interval).unwrap_or(now) };
-        self.state = State::Up { last_ping, awaiting: None, missed: 0 };
+        self.state = State::Up { nonce, last_ping, awaiting: None, missed: 0 };
         Step { send: None, event: Some(Event::Up { observed: ok.observed }) }
     }
 
     /// PONG。返回 relay 看到的本节点地址；随机数对不上时返回 `None`。
     pub(crate) fn on_pong(&mut self, pong: &Pong, now: Instant) -> Option<SocketAddr> {
-        let State::Up { last_ping, awaiting, .. } = self.state else { return None };
+        let State::Up { nonce: session, last_ping, awaiting, .. } = self.state else { return None };
         match awaiting {
             Some((nonce, sent)) if pong.nonce == nonce => {
                 self.estimate.sample(now.saturating_duration_since(sent), now);
-                self.state = State::Up { last_ping, awaiting: None, missed: 0 };
+                self.state = State::Up { nonce: session, last_ping, awaiting: None, missed: 0 };
                 Some(pong.observed)
             }
             // 不是在回答保活，那就看是不是探测包列里的一个。
@@ -197,12 +209,27 @@ impl Session {
         }
     }
 
-    /// relay 说本节点在它那里没有会话。
-    pub(crate) fn on_no_session(&mut self) -> Step {
-        if !self.is_up() {
+    /// 这是不是会话握手时的随机数：relay 回给会话主人的错误帧回显它，回显对得上才是这个 relay 说的。
+    pub(crate) fn is_session_echo(&self, echo: &Echo) -> bool {
+        matches!(self.state, State::Up { nonce, .. } if nonce == *echo)
+    }
+
+    /// relay 说本节点在它那里没有会话，错误帧回显的是 `echo`。
+    ///
+    /// 回显的是一个还在等回答（或者刚超时）的保活 PING 的随机数：这是 relay 对那个 PING 的回答，会话确实没了。
+    /// 别的回显核对不了，只当作提示：马上发一个 PING 去问，relay 怎么回答它才算数。
+    pub(crate) fn on_no_session(&mut self, echo: &Echo, now: Instant) -> Step {
+        let State::Up { nonce, last_ping, awaiting, missed } = self.state else { return Step::default() };
+        if awaiting.is_some_and(|(pinged, _)| pinged == *echo) || self.train.expects(echo) {
+            return self.fail("relay 说本节点没有会话");
+        }
+        if awaiting.is_some() || self.checked.is_some_and(|at| now.saturating_duration_since(at) < NO_SESSION_CHECK_GAP) {
             return Step::default();
         }
-        self.fail("relay 说本节点没有会话")
+        self.checked = Some(now);
+        let ping: Nonce = i3t_underlay::random_bytes();
+        self.state = State::Up { nonce, last_ping: last_ping.max(now), awaiting: Some((ping, now)), missed };
+        Step { send: Some(Send::Ping { nonce: ping }), event: None }
     }
 
     /// 推进定时器。`urgent`：有包正经这个 relay 发出去，却有一阵没有从它收到任何东西了。
@@ -225,11 +252,19 @@ impl Session {
                 }
                 Retry::GiveUp => self.fail("握手的最后一步没有回应"),
             },
-            State::Up { last_ping, awaiting, missed } => self.keep_alive(now, urgent, last_ping, awaiting, missed),
+            State::Up { nonce, last_ping, awaiting, missed } => self.keep_alive(now, urgent, nonce, last_ping, awaiting, missed),
         }
     }
 
-    fn keep_alive(&mut self, now: Instant, urgent: bool, last_ping: Instant, awaiting: Option<(Nonce, Instant)>, missed: u8) -> Step {
+    fn keep_alive(
+        &mut self,
+        now: Instant,
+        urgent: bool,
+        session: Nonce,
+        last_ping: Instant,
+        awaiting: Option<(Nonce, Instant)>,
+        missed: u8,
+    ) -> Step {
         let since_ping = now.saturating_duration_since(last_ping);
         let timeout = self.rtt().map_or(crate::timing::PROBE_TIMEOUT_MAX, Rtt::probe_timeout);
         let (due, missed) = match awaiting {
@@ -251,7 +286,7 @@ impl Session {
             return Step { send: probe.map(|nonce| Send::Ping { nonce }), event: None };
         }
         let nonce: Nonce = i3t_underlay::random_bytes();
-        self.state = State::Up { last_ping: now, awaiting: Some((nonce, now)), missed };
+        self.state = State::Up { nonce: session, last_ping: now, awaiting: Some((nonce, now)), missed };
         Step { send: Some(Send::Ping { nonce }), event: None }
     }
 
@@ -442,11 +477,38 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_from_the_relay_ends_the_session_so_that_it_can_be_rebuilt() {
-        let (mut session, _up) = established();
-        assert_eq!(session.on_no_session().event, Some(Event::Down { reason: "relay 说本节点没有会话" }));
+    fn a_refusal_that_answers_a_keepalive_ends_the_session_so_that_it_can_be_rebuilt() {
+        let (mut session, up) = established();
+        let Some(Send::Ping { nonce }) = session.poll(up + PROBE_INTERVAL, false).send else { panic!("该发保活了") };
+        assert_eq!(
+            session.on_no_session(&nonce, up + PROBE_INTERVAL + 10 * MS).event,
+            Some(Event::Down { reason: "relay 说本节点没有会话" })
+        );
         assert!(session.is_idle());
-        assert_eq!(session.on_no_session(), Step::default(), "没有会话时这种帧没有意义，伪造的也触发不了什么");
+        assert_eq!(session.on_no_session(&nonce, up + PROBE_INTERVAL + 20 * MS), Step::default(), "没有会话时这种帧没有意义");
+    }
+
+    #[test]
+    fn a_refusal_that_echoes_nothing_this_node_sent_only_makes_it_ask_the_relay() {
+        let (mut session, up) = established();
+        // 伪造来源地址的人冒充 relay 说本节点没有会话：会话不拆，只是马上发一个 PING 去问。
+        let at = up + Duration::from_secs(1);
+        let step = session.on_no_session(&[0xee; 8], at);
+        let Some(Send::Ping { nonce }) = step.send else { panic!("应该马上发一个 PING 去问：{step:?}") };
+        assert!(session.is_up() && step.event.is_none());
+        // 再多伪造的也不会让它多发：问的那个还在等回答，或者一秒之内问过。
+        assert_eq!(session.on_no_session(&[0xef; 8], at + 10 * MS), Step::default());
+        session.on_pong(&Pong { nonce, observed: observed() }, at + 20 * MS);
+        assert!(session.is_up(), "relay 照常回答了：是伪造的");
+        assert_eq!(session.on_no_session(&[0xef; 8], at + 30 * MS), Step::default(), "一秒之内问过了");
+        assert!(session.on_no_session(&[0xef; 8], at + NO_SESSION_CHECK_GAP).send.is_some());
+
+        // 会话握手的随机数是另一回事：它不是在回答保活，不能用来拆会话。
+        let (mut session, up) = established();
+        let State::Up { nonce: session_nonce, .. } = session.state else { panic!("会话已经建好了") };
+        assert!(session.is_session_echo(&session_nonce) && !session.is_session_echo(&[0; 8]));
+        assert!(session.on_no_session(&session_nonce, up + MS).send.is_some());
+        assert!(session.is_up());
     }
 
     #[test]

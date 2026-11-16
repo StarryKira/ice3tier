@@ -7,7 +7,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use i3t_proto::Datagram;
 use i3t_proto::datagram::RelayHeader;
-use i3t_proto::session::Frame;
+use i3t_proto::session::{Echo, Frame, Refused};
 use i3t_underlay::tcp_leg::{self, FrameQueue, FrameReader, FrameSender};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
@@ -22,8 +22,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 #[derive(Debug)]
 pub(crate) enum TcpEvent {
     Connected,
-    /// relay 发来的会话帧。
+    /// relay 发来的会话帧，错误帧除外。
     Frame(Frame),
+    /// relay 发来的错误帧和它回显的字节。
+    Refusal(Refused, Echo),
     /// relay 发来的骨干矩阵的一行，整帧。
     Row(Bytes),
     /// 没连上，或者断了。
@@ -106,7 +108,11 @@ async fn read(shared: &Shared, relay: &RelaySlot, conn: u64, mut reader: FrameRe
                 }
             }
             Ok(Datagram::Session(session)) if !session.is_request() => {
-                if shared.ctrl.send(Ctrl::Tcp { relay: relay.id, conn, event: TcpEvent::Frame(session) }).await.is_err() {
+                let event = match (session, Refused::echo(&frame)) {
+                    (Frame::Error(refused), Some(echo)) => TcpEvent::Refusal(refused, echo),
+                    (session, _) => TcpEvent::Frame(session),
+                };
+                if shared.ctrl.send(Ctrl::Tcp { relay: relay.id, conn, event }).await.is_err() {
                     return "路径层已经停了";
                 }
             }
