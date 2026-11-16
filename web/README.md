@@ -60,7 +60,7 @@ target/release/i3t run
 | `src/i18n/`       | 界面上的全部文字，每种语言一个目录；语言的选择和切换。组件里不直接写界面文字                                                                                           |
 | `src/test/`       | 单元测试的准备和假的管理 API                                                                                                                                           |
 | `e2e/`            | Playwright 的端到端测试和截图                                                                                                                                          |
-| `screenshots/`    | `pnpm screenshots` 截下来的每个页面，给人看版面                                                                                                                        |
+| `screenshots/`    | `pnpm screenshots` 截下来的每个页面，只在本机看，不提交                                                                                                                |
 
 几条约定：
 
@@ -237,7 +237,7 @@ pnpm typecheck    # TypeScript
 pnpm lint         # ESLint
 pnpm test         # 单元测试和组件测试（Vitest + Testing Library，jsdom）
 pnpm e2e          # 端到端测试（Playwright，无头 Chromium）
-pnpm screenshots  # 重新截一遍每个页面：中文的放到 screenshots/，英文的一组放到 screenshots/en/
+pnpm screenshots  # 截一遍每个页面：中文的放到 screenshots/，英文的一组放到 screenshots/en/（不提交）
 ```
 
 **单元测试**和被测的代码放在一起，文件名是 `*.test.ts` / `*.test.tsx`。组件测试不连真的 controller：`src/test/harness.tsx` 里的 `fakeApi` 接住 `fetch`，按"方法 路径"应答。改代码时可以用 `pnpm test:watch`。

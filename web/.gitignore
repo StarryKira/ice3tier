@@ -4,6 +4,8 @@ dist/
 # 测试和工具生成的东西
 playwright-report/
 test-results/
+# pnpm screenshots 截下来的页面：只在本机看，不提交
+screenshots/
 blob-report/
 coverage/
 *.tsbuildinfo
