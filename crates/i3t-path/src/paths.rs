@@ -632,8 +632,8 @@ mod tests {
             self.clients.iter().any(|(id, _)| *id == client)
         }
 
-        fn session_age(&self, client: NodeId) -> Option<Duration> {
-            self.has_session(client).then_some(Duration::MAX)
+        fn session_reopened(&self, _client: NodeId) -> Option<Duration> {
+            None
         }
 
         fn session_at(&self, client: NodeId, from: SocketAddr) -> bool {

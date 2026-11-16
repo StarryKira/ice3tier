@@ -81,16 +81,15 @@ impl View<'_> {
 
     /// 经 `relay` 到 `peer` 的那个会话信得过，可以把流量换过去。
     ///
-    /// - `relay` 是别的节点：看本节点到它的会话，没有断过，或者断了重连之后已经保持了 [`SETTLE`] 那么久。
-    /// - `relay` 是本节点自己：看对端在本节点的 relay 上的会话。relay 这一头不记得它以前断没断过，
-    ///   所以一律要它已经保持了 [`SETTLE`] 那么久。
+    /// 会话没有断过，或者断了重连之后已经保持了 [`SETTLE`] 那么久，才信得过。`relay` 是别的节点时看的是
+    /// 本节点到它的会话；是本节点自己时看的是对端在本节点的 relay 上的会话。
     ///
     /// 一条时好时坏的链路，会话断了重连之后头几秒看起来总是好的；等它保持够久再把流量换过去，
     /// 免得流量跟着它一断一连地来回换。原来的路断了、只剩它能走的时候不管这一条。
     fn settled(&self, peer: NodeId, relay: NodeId) -> bool {
         if relay == self.shared.me {
-            let age = self.shared.local_relay.get().and_then(|local| local.session_age(peer));
-            return age.is_some_and(|age| age >= SETTLE);
+            let Some(local) = self.shared.local_relay.get() else { return false };
+            return local.has_session(peer) && local.session_reopened(peer).is_none_or(|held| held >= SETTLE);
         }
         self.relays.get(&relay).is_some_and(|entry| entry.link.is_settled(self.now))
     }

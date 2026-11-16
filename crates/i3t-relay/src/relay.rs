@@ -204,11 +204,12 @@ impl Relay {
         self.inner.read().sessions.binding(client, Instant::now()).is_some()
     }
 
-    /// `client` 现在的会话已经保持了多久；没有会话是 `None`。断了重连之后从头算。
+    /// `client` 现在的会话如果是它上一个会话断掉之后重新建的，返回重新建立以来过了多久。
+    /// 没有会话，或者这是它头一次建立的会话，返回 `None`。
     #[must_use]
-    pub fn session_age(&self, client: NodeId) -> Option<Duration> {
+    pub fn session_reopened(&self, client: NodeId) -> Option<Duration> {
         let now = Instant::now();
-        self.inner.read().sessions.opened(client, now).map(|opened| now.saturating_duration_since(opened))
+        self.inner.read().sessions.reopened(client, now).map(|at| now.saturating_duration_since(at))
     }
 
     /// `client` 的会话是不是绑定在 UDP 地址 `from` 上。
@@ -296,8 +297,8 @@ impl i3t_path::LocalRelay for Relay {
         Self::has_session(self, client)
     }
 
-    fn session_age(&self, client: NodeId) -> Option<Duration> {
-        Self::session_age(self, client)
+    fn session_reopened(&self, client: NodeId) -> Option<Duration> {
+        Self::session_reopened(self, client)
     }
 
     fn session_at(&self, client: NodeId, from: SocketAddr) -> bool {

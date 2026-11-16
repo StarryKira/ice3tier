@@ -1,6 +1,6 @@
 //! relay 上的会话表：哪个节点现在挂在哪个地址（或者哪条 TCP）上。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -38,8 +38,8 @@ impl Binding {
 #[derive(Debug)]
 struct Session {
     binding: Binding,
-    /// 这个会话是什么时候握手成功的。
-    opened: Instant,
+    /// 这个节点的上一个会话是断掉的，这个会话是之后重新建的：它建立的时刻。头一次建立的会话是 `None`。
+    reopened: Option<Instant>,
     expires: Instant,
 }
 
@@ -47,17 +47,28 @@ struct Session {
 #[derive(Debug, Default)]
 pub(crate) struct Sessions {
     by_node: HashMap<NodeId, Session>,
+    /// 会话断过（TCP 断开，或者过期）的节点。它们下一次建立的会话算"重新建的"。
+    broke: HashSet<NodeId>,
 }
 
 impl Sessions {
     /// 握手成功：给 `node` 建会话，或者把它已有的会话改绑到新的来源上。
     pub(crate) fn open(&mut self, node: NodeId, binding: Binding, now: Instant) {
-        self.by_node.insert(node, Session { binding, opened: now, expires: now + SESSION_TTL });
+        let previous = self.by_node.get(&node);
+        let reopened = match (previous.filter(|session| session.expires > now), &binding) {
+            // 走着 TCP 的节点发现 UDP 通了，在 UDP 上再握一次手：会话没有断，只是换了个地方。
+            (Some(Session { binding: Binding::Tcp { .. }, reopened, .. }), Binding::Udp(_)) => *reopened,
+            // 别的情况下，节点重新握手是因为它认为原来的会话没了（保活没有回应，或者它重启了）。
+            _ if previous.is_some() || self.broke.remove(&node) => Some(now),
+            _ => None,
+        };
+        self.by_node.insert(node, Session { binding, reopened, expires: now + SESSION_TTL });
     }
 
-    /// `node` 现在的会话是什么时候握手成功的。重新握手（换了来源，或者断了重连）之后是新的时刻。
-    pub(crate) fn opened(&self, node: NodeId, now: Instant) -> Option<Instant> {
-        self.live(node, now).map(|session| session.opened)
+    /// `node` 现在的会话如果是上一个会话断掉之后重新建的，返回它建立的时刻。
+    /// 没有会话，或者这是它头一次建立的会话，返回 `None`。
+    pub(crate) fn reopened(&self, node: NodeId, now: Instant) -> Option<Instant> {
+        self.live(node, now).and_then(|session| session.reopened)
     }
 
     /// `node` 有没有会话，并且就是绑定在 `origin` 上的。转发之前靠它核对来源：
@@ -84,16 +95,21 @@ impl Sessions {
 
     /// 一条 TCP 断了：绑定在它上面的会话跟着没有。节点这期间已经换到别处的会话不受影响。
     pub(crate) fn close_tcp(&mut self, conn: u64) -> Vec<NodeId> {
-        self.remove_where(|_, session| session.binding.is(Origin::Tcp(conn)))
+        let removed = self.remove_where(|_, session| session.binding.is(Origin::Tcp(conn)));
+        self.broke.extend(&removed);
+        removed
     }
 
     /// 删掉过期的会话，返回是哪些节点的。
     pub(crate) fn sweep(&mut self, now: Instant) -> Vec<NodeId> {
-        self.remove_where(|_, session| session.expires <= now)
+        let removed = self.remove_where(|_, session| session.expires <= now);
+        self.broke.extend(&removed);
+        removed
     }
 
     /// 删掉不再被允许的节点的会话（节点被吊销、从网络里删除），返回是哪些节点的。
     pub(crate) fn retain_clients(&mut self, is_client: impl Fn(NodeId) -> bool) -> Vec<NodeId> {
+        self.broke.retain(|node| is_client(*node));
         self.remove_where(|node, _| !is_client(node))
     }
 
@@ -104,6 +120,7 @@ impl Sessions {
 
     pub(crate) fn clear(&mut self) {
         self.by_node.clear();
+        self.broke.clear();
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -184,19 +201,44 @@ mod tests {
     }
 
     #[test]
-    fn keepalive_does_not_change_when_a_session_was_opened_but_a_new_handshake_does() {
+    fn only_a_session_rebuilt_after_a_break_counts_as_reopened() {
         let start = Instant::now();
         let mut sessions = Sessions::default();
-        assert_eq!(sessions.opened(node(1), start), None);
         sessions.open(node(1), tcp(7), start);
+        assert_eq!(sessions.reopened(node(1), start), None, "头一次建立");
 
+        // 节点认为原来的会话没了，在一条新的 TCP 上重新握手：这是断过。
         let later = start + Duration::from_secs(20);
-        assert!(sessions.refresh(node(1), Origin::Tcp(7), later));
-        assert_eq!(sessions.opened(node(1), later), Some(start));
-        // 断了重连：是一个新的会话。
         sessions.open(node(1), tcp(8), later);
-        assert_eq!(sessions.opened(node(1), later), Some(later));
-        assert_eq!(sessions.opened(node(1), later + SESSION_TTL), None, "过期的会话不算");
+        assert_eq!(sessions.reopened(node(1), later), Some(later));
+        // 保活不改变这个时刻。
+        assert!(sessions.refresh(node(1), Origin::Tcp(8), later + Duration::from_secs(5)));
+        assert_eq!(sessions.reopened(node(1), later + Duration::from_secs(5)), Some(later));
+        // 从 TCP 换到 UDP 不是断：还是原来那个时刻。
+        sessions.open(node(1), Binding::Udp(udp(4000)), later + Duration::from_secs(10));
+        assert_eq!(sessions.reopened(node(1), later + Duration::from_secs(10)), Some(later));
+        assert_eq!(sessions.reopened(node(2), later), None, "没有会话");
+    }
+
+    #[test]
+    fn a_session_opened_after_the_last_one_was_closed_or_expired_counts_as_reopened() {
+        let start = Instant::now();
+        let mut sessions = Sessions::default();
+        sessions.open(node(1), tcp(7), start);
+        sessions.open(node(2), Binding::Udp(udp(4000)), start);
+        sessions.open(node(3), Binding::Udp(udp(4001)), start);
+        assert_eq!(sessions.close_tcp(7), [node(1)]);
+        let expired = start + SESSION_TTL;
+        assert_eq!(sessions.sweep(expired).len(), 2);
+
+        sessions.open(node(1), tcp(9), expired);
+        sessions.open(node(2), Binding::Udp(udp(4000)), expired);
+        assert_eq!(sessions.reopened(node(1), expired), Some(expired));
+        assert_eq!(sessions.reopened(node(2), expired), Some(expired));
+        // 被从网络里拿掉的节点不留记录：以后再加回来是全新的。
+        sessions.retain_clients(|node| node != self::node(3));
+        sessions.open(node(3), Binding::Udp(udp(4001)), expired);
+        assert_eq!(sessions.reopened(node(3), expired), None);
     }
 
     #[test]
