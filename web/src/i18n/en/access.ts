@@ -11,6 +11,7 @@ export const rules: Messages['rules'] = {
 
 export const access: Messages['access'] = {
   title: 'Access control',
+  subtitle: 'Decide which nodes can reach each other with tags and rules',
   check: 'Check access',
   newRule: 'Create rule',
   loadFailed: "Couldn't load rules",

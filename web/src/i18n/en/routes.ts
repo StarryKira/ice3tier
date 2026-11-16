@@ -50,6 +50,7 @@ export const routes: Messages['routes'] = {
 
 export const topology: Messages['topology'] = {
   title: 'Topology',
+  subtitle: 'How traffic flows between nodes: direct or via a relay',
   viewLabel: 'View',
   viewGraph: 'Live graph',
   viewMatrix: 'Route matrix',
@@ -128,6 +129,7 @@ export const topology: Messages['topology'] = {
 
 export const path: Messages['path'] = {
   title: 'Path diagnosis',
+  subtitle: 'Inspect the path and latency between two nodes',
   pickFrom: 'Node A',
   pickTo: 'Node B',
   swap: 'Swap A and B',

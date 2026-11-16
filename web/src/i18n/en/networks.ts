@@ -4,6 +4,7 @@ const count = (n: number, one: string, many: string) => (n === 1 ? `1 ${one}` : 
 
 export const networks: Messages['networks'] = {
   title: 'Networks',
+  subtitle: 'Name, address range and routing of this network',
   listTitle: 'All networks',
   current: 'Current',
   currentName: (name) => `${name} (current)`,

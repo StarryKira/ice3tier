@@ -54,6 +54,7 @@ export const routes = {
 
 export const topology = {
   title: '拓扑',
+  subtitle: '节点之间实际走的路：直连还是经 relay',
   viewLabel: '视图',
   viewGraph: '实时图',
   viewMatrix: '路由矩阵',
@@ -135,6 +136,7 @@ export const topology = {
 
 export const path = {
   title: '路径诊断',
+  subtitle: '查看两个节点之间的路径和延迟',
   pickFrom: '节点 A',
   pickTo: '节点 B',
   swap: '交换 A 和 B',

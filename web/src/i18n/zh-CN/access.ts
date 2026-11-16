@@ -7,6 +7,7 @@ export const rules = {
 
 export const access = {
   title: '访问控制',
+  subtitle: '用标签和规则决定节点之间谁能访问谁',
   check: '访问检查',
   newRule: '新建规则',
   loadFailed: '无法加载规则',

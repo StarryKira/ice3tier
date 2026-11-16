@@ -3,9 +3,19 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="light" />
+    <meta name="color-scheme" content="light dark" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>ice3tier</title>
+    <script>
+      // 页面画出来之前定下亮色还是暗色，和 src/lib/theme.ts 的规则一样：打开时不先闪一下白。
+      try {
+        var theme = JSON.parse(localStorage.getItem('i3t.theme') || '"system"')
+        if (theme === 'dark' || (theme !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches)) {
+          document.documentElement.classList.add('dark')
+          document.documentElement.style.colorScheme = 'dark'
+        }
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

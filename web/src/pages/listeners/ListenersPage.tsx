@@ -176,7 +176,7 @@ export function ListenersPage() {
 
   return (
     <Page>
-      <PageHeader title={l.title} actions={empty || noNodes ? undefined : createButton} />
+      <PageHeader title={l.title} description={l.subtitle} actions={empty || noNodes ? undefined : createButton} />
       {focus.missing ? (
         <Notice className="mb-4" tone="warn">
           {l.focusMissing(focus.focus ?? 0)}

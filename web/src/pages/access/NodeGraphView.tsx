@@ -9,7 +9,7 @@ import { formatList } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 import { GraphCanvas } from './flow'
-import { EDGE_COLORS } from '@/access/colors'
+import { useEdgeColors } from '@/access/colors'
 
 const g = t.access.graph
 
@@ -88,6 +88,7 @@ interface NodeGraphViewProps {
 export function NodeGraphView({ access, rules, expanded, onExpand, onFocus }: NodeGraphViewProps) {
   // 点和线上的文字算好存着，换语言时要重新算。
   const locale = useLocale()
+  const colors = useEdgeColors()
   const shape = useMemo(() => buildNodeGraph(access, rules, expanded), [access, rules, expanded])
 
   const nodes = useMemo<FlowNode[]>(
@@ -129,17 +130,17 @@ export function NodeGraphView({ access, rules, expanded, onExpand, onFocus }: No
         source: peer.side === 'left' ? peer.id : shape.focus.id,
         target: peer.side === 'left' ? shape.focus.id : peer.id,
         label: edgeText(peer.rules),
-        labelStyle: { fontSize: 12, fill: EDGE_COLORS.enabled },
+        labelStyle: { fontSize: 12, fill: colors.enabled },
         labelBgPadding: [4, 2] as [number, number],
         labelBgBorderRadius: 3,
-        // 和画布的底色（index.css 的 --sidebar）一样，字下面不留一块看得出的底。
-        labelBgStyle: { fill: '#f7f7f8' },
-        markerEnd: { type: MarkerType.ArrowClosed, color: EDGE_COLORS.enabled, width: 16, height: 16 },
-        style: { stroke: EDGE_COLORS.enabled, strokeWidth: 1.4 },
+        // 和面板的底色一样，字下面不留一块看得出的底；亮色、暗色都跟着变量走。
+        labelBgStyle: { fill: 'var(--card)' },
+        markerEnd: { type: MarkerType.ArrowClosed, color: colors.enabled, width: 16, height: 16 },
+        style: { stroke: colors.enabled, strokeWidth: 1.4 },
         focusable: false,
       })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [shape, locale],
+    [shape, locale, colors],
   )
 
   return (

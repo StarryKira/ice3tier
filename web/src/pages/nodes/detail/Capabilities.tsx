@@ -46,7 +46,7 @@ interface RowShellProps {
 /** 能力卡片里的一行：名字和一句话解释 · 开关 · 状态行。三行的结构相同。 */
 function RowShell({ title, description, control, status, flash = false, children, testId }: RowShellProps) {
   return (
-    <div data-testid={testId} className={cn('py-5', flash && 'animate-flash')}>
+    <div data-testid={testId} className={cn('-mx-5 px-5 py-4', flash && 'animate-flash')}>
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold">{title}</h3>

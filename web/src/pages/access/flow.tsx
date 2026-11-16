@@ -11,6 +11,7 @@ import {
 import { useEffect, useMemo } from 'react'
 
 import { t, useLocale } from '@/i18n'
+import { useResolvedTheme } from '@/lib/theme'
 
 const f = t.access.graph.flow
 
@@ -71,6 +72,7 @@ function FitOnResize() {
 export function GraphCanvas<N extends Node, E extends Edge>(props: ReactFlowProps<N, E> & { label: string }) {
   const { label, children, ...rest } = props
   const locale = useLocale()
+  const theme = useResolvedTheme()
   const aria = useMemo(
     () => ariaLabels(),
     // 文字在目录里，语言变了才要重新取。
@@ -80,6 +82,7 @@ export function GraphCanvas<N extends Node, E extends Edge>(props: ReactFlowProp
   return (
     <ReactFlow<N, E>
       aria-label={label}
+      colorMode={theme}
       ariaLabelConfig={aria}
       fitView
       fitViewOptions={FIT}

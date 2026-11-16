@@ -84,7 +84,7 @@ export function SettingsPage() {
 
   return (
     <Page>
-      <PageHeader title={s.title} />
+      <PageHeader title={s.title} description={s.subtitle} />
       <div className="grid grid-cols-[10rem_minmax(0,1fr)] items-start gap-12">
         <nav aria-label={s.tabsLabel}>
           <ul className="space-y-0.5">

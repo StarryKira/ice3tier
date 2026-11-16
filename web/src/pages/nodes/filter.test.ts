@@ -58,27 +58,25 @@ describe('筛选节点', () => {
 
   it('搜索匹配名字、全名、虚拟 IP 和标签，不分大小写', () => {
     for (const search of ['NAS', 'home.i3t', '10.66.0.2', 'serv']) {
-      expect(matchesFilters(nas, { ...NONE, search }, false), search).toBe(true)
+      expect(matchesFilters(nas, { ...NONE, search }), search).toBe(true)
     }
-    expect(matchesFilters(nas, { ...NONE, search: 'laptop' }, false)).toBe(false)
+    expect(matchesFilters(nas, { ...NONE, search: 'laptop' })).toBe(false)
   })
 
   it('条件之间是"并且"', () => {
-    expect(matchesFilters(nas, { ...NONE, tags: ['servers', 'home'], roles: ['exit'] }, false)).toBe(true)
-    expect(matchesFilters(nas, { ...NONE, tags: ['servers', 'laptops'] }, false)).toBe(false)
-    expect(matchesFilters(nas, { ...NONE, roles: ['exit', 'relay'] }, false)).toBe(false)
+    expect(matchesFilters(nas, { ...NONE, tags: ['servers', 'home'], roles: ['exit'] })).toBe(true)
+    expect(matchesFilters(nas, { ...NONE, tags: ['servers', 'laptops'] })).toBe(false)
+    expect(matchesFilters(nas, { ...NONE, roles: ['exit', 'relay'] })).toBe(false)
   })
 
-  it('在线、离线、需要处理', () => {
-    expect(matchesFilters(nas, { ...NONE, status: 'online' }, false)).toBe(true)
-    expect(matchesFilters(nas, { ...NONE, status: 'offline' }, false)).toBe(false)
-    expect(matchesFilters(nas, { ...NONE, status: 'issues' }, false)).toBe(false)
-    expect(matchesFilters(nas, { ...NONE, status: 'issues' }, true)).toBe(true)
+  it('在线、离线', () => {
+    expect(matchesFilters(nas, { ...NONE, status: 'online' })).toBe(true)
+    expect(matchesFilters(nas, { ...NONE, status: 'offline' })).toBe(false)
   })
 
   it('选了几个平台是"其中之一"', () => {
-    expect(matchesFilters(nas, { ...NONE, platforms: ['windows-x86_64', 'linux-x86_64'] }, false)).toBe(true)
-    expect(matchesFilters(nas, { ...NONE, platforms: ['windows-x86_64'] }, false)).toBe(false)
+    expect(matchesFilters(nas, { ...NONE, platforms: ['windows-x86_64', 'linux-x86_64'] })).toBe(true)
+    expect(matchesFilters(nas, { ...NONE, platforms: ['windows-x86_64'] })).toBe(false)
   })
 })
 

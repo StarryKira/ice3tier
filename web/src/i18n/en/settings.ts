@@ -4,6 +4,7 @@ const count = (n: number, one: string, many: string) => (n === 1 ? `1 ${one}` : 
 
 export const settings: Messages['settings'] = {
   title: 'Settings',
+  subtitle: 'Sign-in, node updates and activity log',
   tabsLabel: 'Settings sections',
   tabSession: 'Sign-in',
   tabLog: 'Activity log',
@@ -121,5 +122,7 @@ export const settings: Messages['settings'] = {
       `${count(networks, 'network', 'networks')} · ${count(nodes, 'node', 'nodes')} · ${online} online`,
     offline: 'If the controller is offline',
     offlineBody: 'Connected nodes keep working; nodes cannot join and settings cannot change',
+    geoip: 'IP database',
+    geoipSource: 'IP Geolocation by DB-IP',
   },
 }

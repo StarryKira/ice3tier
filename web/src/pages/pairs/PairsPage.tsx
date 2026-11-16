@@ -314,7 +314,7 @@ export function PairsPage() {
 
   return (
     <Page>
-      <PageHeader title={p.title} actions={empty ? undefined : addButton} />
+      <PageHeader title={p.title} description={p.subtitle} actions={empty ? undefined : addButton} />
       <div>
         {pairs.isError ? (
           <ErrorState title={p.loadFailed} error={pairs.error} onRetry={() => void pairs.refetch()} />

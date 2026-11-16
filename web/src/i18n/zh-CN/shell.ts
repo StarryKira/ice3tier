@@ -16,6 +16,7 @@ export const signIn = {
 
 export const nav = {
   label: '主导航',
+  console: '控制台',
   overview: '总览',
   nodes: '节点',
   access: '访问控制',
@@ -28,6 +29,7 @@ export const nav = {
   topology: '拓扑',
   diagnosis: '路径诊断',
   tests: '连通性测试',
+  groupManage: '管理',
   tokens: '注册令牌',
   pairs: '节点对',
   network: '网络',
@@ -35,8 +37,6 @@ export const nav = {
   collapse: '收起侧栏',
   expand: '展开侧栏',
   toggleGroup: (name: string, open: boolean) => `${open ? '收起' : '展开'}${name}`,
-  account: '管理员',
-  accountMenu: '账号菜单',
   signOut: '退出登录',
   skipToContent: '跳到正文',
   breadcrumb: '当前位置',
@@ -46,7 +46,6 @@ export const switcher = {
   label: '切换网络',
   current: '当前网络',
   nodes: (n: number) => `${n} 个节点`,
-  create: '新建网络',
   manage: '网络设置',
   heading: '网络',
   switched: (name: string) => `已切换到 ${name}`,

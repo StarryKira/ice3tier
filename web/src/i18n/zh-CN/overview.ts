@@ -31,27 +31,26 @@ export const overview = {
   exitDegraded: (name: string, state: string) => `出口 ${name}：${state}`,
   credentialExhausted: (name: string) => `凭据 ${name}：流量已用完`,
 
-  stats: {
-    online: '在线节点',
-    flows: '活跃流',
-    flowsTip: '两端各计一次',
-    traffic: '流量',
-    trafficHint: (tx: string, rx: string) => `↑ ${tx} · ↓ ${rx}`,
-    trafficTip: '在线节点自启动以来发送（↑）和接收（↓）的合计。经过两个节点的流量计两次。',
-    relays: 'relay',
-    exits: '出口',
-    rules: '规则',
-    forwards: '端口转发',
-    tokens: '未使用的令牌',
+  /** 访问地图：总览的主体。 */
+  map: {
+    canvas: '访问地图',
+    view: '视角',
+    byNode: '节点',
+    byTag: '标签',
+    pickNode: '切换节点',
+    pickTag: '切换标签',
+    members: (n: number) => `${n} 个节点`,
+    both: '双向',
+    oneWay: '单向',
+    disabled: '已停用',
+    noRules: '没有适用的规则',
+    ruleLabel: (rule: string, how: string) => `规则 ${rule}：${how}`,
+    flowBoth: (a: string, b: string) => `${a} 与 ${b} 互相可访问`,
+    flowOut: (a: string, b: string) => `${a} 可访问 ${b}`,
+    flowIn: (a: string, b: string) => `${b} 可访问 ${a}`,
+    tagLabel: (tag: string, n: number) => `标签 ${tag}，${n} 个节点，查看这个标签`,
+    loadFailed: '无法加载访问地图',
   },
-
-  unreachableTitle: '不可达的节点对',
-  unreachableTip: '两端在线、规则允许，但节点报告没有可用的路',
-  unreachableNone: '无',
-
-  recentTitle: '最近操作',
-  recentAll: '全部',
-  recentEmpty: '还没有操作记录',
 
   guide: {
     title: '连接前两个节点',

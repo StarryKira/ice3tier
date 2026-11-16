@@ -1,4 +1,4 @@
-import { Check, ChevronsUpDown, Plus, Settings2 } from 'lucide-react'
+import { ChevronsUpDown, LogOut, Network as NetworkIcon, Settings, Settings2 } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router'
 
 import { type Network } from '@/api/types'
@@ -10,88 +10,95 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
-import { networkPath } from '@/pages/networks/context'
 import { cn } from '@/lib/utils'
+import { networkPath } from '@/pages/networks/context'
 
 import { currentPage } from './nav'
+
+/** 网络的头像：名字的第一个字，圆角方块。当前网络是黑底白字，别的网络浅灰底。 */
+function NetworkAvatar({ name, muted = false }: { name: string; muted?: boolean }) {
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        'flex size-[18px] shrink-0 items-center justify-center rounded-[5px] text-[10px] font-semibold uppercase',
+        muted ? 'bg-muted text-muted-foreground' : 'bg-foreground text-background',
+      )}
+    >
+      {name.slice(0, 1)}
+    </span>
+  )
+}
+
+const SEPARATOR = 'mx-1 my-1'
 
 interface NetworkSwitcherProps {
   networks: readonly Network[]
   current: Network
-  collapsed: boolean
-  onCreate: () => void
+  onSignOut: () => void
 }
 
 /**
- * 侧栏顶部的网络切换器。只有一个网络时照样显示名字：让用户知道"网络"这个概念存在。
- * 按钮上只写名字，地址段和节点数在展开的列表里。
- * 切换时停留在同一类页面上：在节点页切换，到的是另一个网络的节点页。
+ * 顶栏右上角的网络：和旁边的图标按钮一样没有底和边，一个网络的图标、当前网络的名字和上下箭头。点开的菜单顶上写着当前网络（地址段、节点数），
+ * 有别的网络时列出来，点了切过去——停留在同一类页面上：在节点页切换，到的是另一个网络的节点页；然后是网络设置。
+ * 最后隔一条线是设置和退出登录：管理界面只有一个管理员，没有名字和头像，不另放一个账号按钮。新建网络只在网络页上。
  */
-export function NetworkSwitcher({ networks, current, collapsed, onCreate }: NetworkSwitcherProps) {
+export function NetworkSwitcher({ networks, current, onSignOut }: NetworkSwitcherProps) {
   const navigate = useNavigate()
   const location = useLocation()
   const page = currentPage(location.pathname) ?? 'overview'
-
-  const trigger = (
-    <DropdownMenuTrigger
-      aria-label={`${t.switcher.label}（${t.switcher.current}：${current.name}）`}
-      className={cn(
-        'flex w-full items-center gap-3 rounded-[10px] text-left transition-colors hover:bg-card/70 data-[state=open]:bg-card/70',
-        collapsed ? 'justify-center p-1' : 'px-2 py-1.5',
-      )}
-    >
-      <span
-        aria-hidden
-        className="flex size-8 shrink-0 items-center justify-center rounded-[10px] bg-foreground text-[13px] font-semibold text-background uppercase"
-      >
-        {current.name.slice(0, 1)}
-      </span>
-      {collapsed ? null : (
-        <>
-          <span className="min-w-0 flex-1 truncate text-[15px] leading-5 font-semibold">{current.name}</span>
-          <ChevronsUpDown className="size-3.5 shrink-0 text-faint" aria-hidden />
-        </>
-      )}
-    </DropdownMenuTrigger>
-  )
+  const others = networks.filter((network) => network.id !== current.id)
 
   return (
     <DropdownMenu>
-      {collapsed ? (
-        <Tooltip content={`${t.switcher.current}：${current.name}`} side="right">
-          {trigger}
-        </Tooltip>
-      ) : (
-        trigger
-      )}
-      <DropdownMenuContent align="start" className="w-64">
-        <DropdownMenuLabel>{t.switcher.heading}</DropdownMenuLabel>
-        {networks.map((network) => (
-          <DropdownMenuItem
-            key={network.id}
-            onSelect={() => {
-              if (network.id !== current.id) void navigate(networkPath(network.id, page))
-            }}
-          >
-            <span className="min-w-0 flex-1">
-              <span className="block truncate font-medium">{network.name}</span>
-              <span className="block truncate text-xs text-muted-foreground tabular">
-                {network.cidr} · {t.switcher.nodes(network.nodes)}
-              </span>
-            </span>
-            {network.id === current.id ? <Check className="text-primary!" aria-label={t.switcher.current} /> : null}
-          </DropdownMenuItem>
-        ))}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={onCreate}>
-          <Plus aria-hidden />
-          {t.switcher.create}
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => void navigate(networkPath(current.id, 'network'))}>
+      <DropdownMenuTrigger
+        aria-label={`${t.switcher.label}（${t.switcher.current}：${current.name}）`}
+        className="flex h-8 max-w-48 items-center gap-1.5 rounded-lg px-2 text-sm font-medium text-foreground/85 transition-colors outline-none hover:bg-foreground/[0.05] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-[state=open]:bg-foreground/[0.06] data-[state=open]:text-foreground"
+      >
+        <NetworkIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} aria-hidden />
+        <span className="min-w-0 truncate">{current.name}</span>
+        <ChevronsUpDown className="size-3.5 shrink-0 text-faint" aria-hidden />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" sideOffset={6} className="w-60">
+        <div className="px-2 pt-1.5 pb-2">
+          <p className="truncate text-sm leading-5 font-semibold">{current.name}</p>
+          <p className="truncate text-xs leading-4 text-muted-foreground tabular">
+            {current.cidr} · {t.switcher.nodes(current.nodes)}
+          </p>
+        </div>
+
+        {others.length > 0 ? (
+          <>
+            <DropdownMenuSeparator className={SEPARATOR} />
+            <DropdownMenuLabel>{t.switcher.label}</DropdownMenuLabel>
+            {others.map((network) => (
+              <DropdownMenuItem key={network.id} onSelect={() => void navigate(networkPath(network.id, page))}>
+                <NetworkAvatar name={network.name} muted />
+                <span className="min-w-0 flex-1 truncate">{network.name}</span>
+                <span className="text-xs text-muted-foreground tabular">{network.cidr}</span>
+              </DropdownMenuItem>
+            ))}
+          </>
+        ) : null}
+
+        <DropdownMenuSeparator className={SEPARATOR} />
+        <DropdownMenuItem
+          className="[&_svg]:text-foreground/70"
+          onSelect={() => void navigate(networkPath(current.id, 'network'))}
+        >
           <Settings2 aria-hidden />
           {t.switcher.manage}
+        </DropdownMenuItem>
+
+        <DropdownMenuSeparator className={SEPARATOR} />
+        <DropdownMenuItem className="[&_svg]:text-foreground/70" onSelect={() => void navigate('/settings')}>
+          <Settings aria-hidden />
+          {t.nav.settings}
+        </DropdownMenuItem>
+        <DropdownMenuItem className="[&_svg]:text-foreground/70" onSelect={onSignOut}>
+          <LogOut aria-hidden />
+          {t.nav.signOut}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

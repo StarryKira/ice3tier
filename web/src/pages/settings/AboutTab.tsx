@@ -80,6 +80,17 @@ export function AboutTab() {
             <InfoRow label={s.about.offline}>
               <span className="text-[13px] text-muted-foreground">{s.about.offlineBody}</span>
             </InfoRow>
+            {/* 地址库的许可（CC BY 4.0）要求注明来源。 */}
+            <InfoRow label={s.about.geoip}>
+              <a
+                href="https://db-ip.com"
+                target="_blank"
+                rel="noreferrer"
+                className="rounded-sm text-primary underline-offset-4 hover:underline"
+              >
+                {s.about.geoipSource}
+              </a>
+            </InfoRow>
           </dl>
         </CardBody>
       )}

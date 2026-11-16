@@ -2,6 +2,8 @@
 export const common = {
   appName: 'ice3tier',
   language: '语言',
+  appearance: '外观',
+  themes: { system: '跟随系统', light: '亮色', dark: '暗色' },
   close: '关闭',
   cancel: '取消',
   save: '保存',
@@ -29,7 +31,6 @@ export const common = {
   actionsFor: (name: string) => `${name} 的操作`,
   viewDetails: '查看详情',
   details: '详情',
-  planned: '计划中',
   default: '默认',
   enabled: '已启用',
   disabled: '未启用',

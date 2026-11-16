@@ -232,6 +232,7 @@ export function PathPage() {
     <Page className="@container">
       <PageHeader
         title={p.title}
+        description={p.subtitle}
         actions={
           <Button asChild variant="ghost">
             <Link to={pairPath(network.id, 'topology', pair.a, pair.b)}>

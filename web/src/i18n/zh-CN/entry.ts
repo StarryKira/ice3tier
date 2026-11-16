@@ -1,6 +1,7 @@
 /** 接入：出口、凭据、监听器、端口转发、节点对、注册令牌。 */
 export const exits = {
   title: '出口',
+  subtitle: '让流量从指定的节点出去访问外网',
   enable: '启用出口',
   loadFailed: '无法加载出口',
   colNode: '节点',
@@ -71,6 +72,7 @@ export const exits = {
 
 export const credentials = {
   title: '凭据',
+  subtitle: '代理入口的账号、密码和流量上限',
   issue: '新建凭据',
   loadFailed: '无法加载凭据',
   colName: '名字',
@@ -153,6 +155,7 @@ export const credentials = {
 
 export const listeners = {
   title: '监听器',
+  subtitle: '节点上的 SOCKS5 和 HTTP 代理入口',
   create: '新建监听器',
   loadFailed: '无法加载监听器',
   colName: '名字',
@@ -243,6 +246,7 @@ export const listeners = {
 
 export const forwards = {
   title: '端口转发',
+  subtitle: '把一个节点上的端口转发到另一个节点',
   create: '新建转发',
   loadFailed: '无法加载端口转发',
   colStatus: '状态',
@@ -382,6 +386,7 @@ export const serviceClass = {
 
 export const pairs = {
   title: '节点对',
+  subtitle: '单独设置某两个节点之间的连接，例如独占 TCP',
   add: '添加节点对',
   loadFailed: '无法加载节点对',
   colPair: '节点对',
@@ -475,6 +480,7 @@ export const pairs = {
 
 export const tokens = {
   title: '注册令牌',
+  subtitle: '用来让新节点加入网络的一次性令牌',
   create: '新建令牌',
   loadFailed: '无法加载注册令牌',
   showLabel: '显示',

@@ -402,7 +402,7 @@ export function ExitsPage() {
 
   return (
     <Page>
-      <PageHeader title={e.title} actions={empty ? undefined : enableButton} />
+      <PageHeader title={e.title} description={e.subtitle} actions={empty ? undefined : enableButton} />
       <div>
         {exits.isError ? (
           <ErrorState title={e.loadFailed} error={exits.error} onRetry={() => void exits.refetch()} />

@@ -37,6 +37,18 @@ export function formatFullTime(at: Timestamp): string {
   }).format(new Date(at * 1000))
 }
 
+/** 完整的日期加时分（不带秒和时区），给详情里"加入时间""最后在线"这样的行用。 */
+export function formatDateTime(at: Timestamp): string {
+  return dateFormat('dateTime', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(new Date(at * 1000))
+}
+
 /** 日期加时分，给表格里一周以前的时间用。 */
 export function formatDate(at: Timestamp, now: Timestamp): string {
   const date = new Date(at * 1000)

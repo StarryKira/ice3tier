@@ -5,9 +5,6 @@ import {
   DropdownMenuContent,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { type Locale, LOCALES, setLocale, t, useLocale } from '@/i18n'
@@ -16,7 +13,7 @@ import { cn } from '@/lib/utils'
 const nameOf = (code: Locale) => LOCALES.find((locale) => locale.code === code)?.name ?? code
 
 /** 每种语言一项，用它自己的文字写名字（`lang` 标上，读屏软件按那种语言读）。 */
-function LanguageItems() {
+export function LanguageItems() {
   const locale = useLocale()
   return (
     <DropdownMenuRadioGroup
@@ -55,22 +52,5 @@ export function LanguageMenu({ className }: { className?: string }) {
         <LanguageItems />
       </DropdownMenuContent>
     </DropdownMenu>
-  )
-}
-
-/** 账号菜单里的一项"语言 ›"，展开是同样的语言列表。 */
-export function LanguageSubmenu() {
-  const locale = useLocale()
-  return (
-    <DropdownMenuSub>
-      <DropdownMenuSubTrigger>
-        <Languages aria-hidden />
-        <span>{t.common.language}</span>
-        <span className="ml-auto pl-4 text-[13px] text-muted-foreground">{nameOf(locale)}</span>
-      </DropdownMenuSubTrigger>
-      <DropdownMenuSubContent>
-        <LanguageItems />
-      </DropdownMenuSubContent>
-    </DropdownMenuSub>
   )
 }

@@ -5,7 +5,7 @@ import { parseIpv4 } from '@/lib/cidr'
  * 节点列表的筛选和排序。筛选条件和搜索词写在 URL 的查询参数里：刷新、前进后退、分享链接都保留，
  * 下次打开不会留着一个被筛过的表格让人以为节点丢了。只有排序方式记在浏览器本地。
  */
-export type StatusFilter = 'all' | 'online' | 'offline' | 'issues'
+export type StatusFilter = 'all' | 'online' | 'offline'
 export type RoleFilter = 'relay' | 'exit'
 
 export interface NodeFilters {
@@ -16,7 +16,7 @@ export interface NodeFilters {
   platforms: string[]
 }
 
-const STATUSES: readonly StatusFilter[] = ['all', 'online', 'offline', 'issues']
+const STATUSES: readonly StatusFilter[] = ['all', 'online', 'offline']
 const ROLES: readonly RoleFilter[] = ['relay', 'exit']
 
 export function parseFilters(params: URLSearchParams): NodeFilters {
@@ -58,11 +58,10 @@ function matchesSearch(node: Node, search: string): boolean {
 }
 
 /** 条件之间是"并且"：每加一个条件，结果只会更少。同一类里选了几个平台则是"其中之一"，因为一个节点只有一个平台。 */
-export function matchesFilters(node: Node, filters: NodeFilters, hasIssue: boolean): boolean {
+export function matchesFilters(node: Node, filters: NodeFilters): boolean {
   if (!matchesSearch(node, filters.search)) return false
   if (filters.status === 'online' && !node.online) return false
   if (filters.status === 'offline' && node.online) return false
-  if (filters.status === 'issues' && !hasIssue) return false
   if (!filters.tags.every((tag) => node.tags.includes(tag))) return false
   if (filters.roles.includes('relay') && node.relay === null) return false
   if (filters.roles.includes('exit') && node.exit === null) return false

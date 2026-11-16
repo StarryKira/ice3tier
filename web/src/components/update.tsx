@@ -3,6 +3,8 @@ import { type ReactNode } from 'react'
 
 import { type Node } from '@/api/types'
 import { CodeBlock } from '@/components/copy'
+import { IceStack } from '@/components/layout/BrandMark'
+import { OsIcon } from '@/components/os-icon'
 import { StatusText } from '@/components/status'
 import { Button, type ButtonProps } from '@/components/ui/button'
 import { Tooltip } from '@/components/ui/tooltip'
@@ -11,6 +13,7 @@ import { installCommands } from '@/lib/commands'
 import { type SelfUpdateBlock, type UpdateMark, updateMark, type UpdateView } from '@/lib/nodeUpdate'
 import { PLATFORMS, type PlatformId } from '@/lib/product'
 import { useUpdateView } from '@/lib/useUpdateView'
+import { platformLabel } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 
 const u = t.updates
@@ -53,14 +56,19 @@ const MARKS: Record<UpdateMark, { Icon: typeof CircleArrowUp; className: string 
 }
 
 /** 节点列表"版本"一列：版本号和平台；有新版本、正在更新、更新失败、要手动更新时跟一个图标，悬停说明。 */
+/**
+ * 节点列表里"版本"那一格，两行：上面是 i3t 的标志和版本号（有新版本、要手动更新时后面一个标记），
+ * 下面是系统的图标和平台。
+ */
 export function VersionCell({ node }: { node: Node }) {
   const view = useUpdateView(node)
   const mark = updateMark(view.kind)
   const style = mark === null ? null : MARKS[mark]
   const tip = view.detail === null ? view.label : t.common.sentences(view.label, view.detail)
   return (
-    <div>
-      <div className="flex items-center gap-1.5 text-[13px] tabular">
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-2 text-[13px] tabular">
+        <IceStack className="size-4 shrink-0" />
         {node.version === '' ? '—' : node.version}
         {style !== null ? (
           <Tooltip content={tip}>
@@ -76,7 +84,12 @@ export function VersionCell({ node }: { node: Node }) {
           </Tooltip>
         ) : null}
       </div>
-      <div className="text-xs text-muted-foreground">{node.platform}</div>
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <span className="flex size-4 shrink-0 items-center justify-center">
+          <OsIcon platform={node.platform} />
+        </span>
+        {platformLabel(node.platform)}
+      </div>
     </div>
   )
 }

@@ -274,6 +274,7 @@ export function NetworkPage() {
     <Page className="@container">
       <PageHeader
         title={n.title}
+        description={n.subtitle}
         actions={
           <Button variant="primary" onClick={() => setCreating(true)}>
             <Plus aria-hidden />

@@ -4,7 +4,7 @@ import { cn } from '@/lib/utils'
 
 interface PageHeaderProps {
   title: ReactNode
-  /** 标题下面的一句话：这个页面是做什么的。 */
+  /** 标题下面的一句话（副标题）：这个页面是做什么的。 */
   description?: ReactNode
   /** 右端：这个页面的主按钮。 */
   actions?: ReactNode
@@ -12,19 +12,18 @@ interface PageHeaderProps {
 }
 
 /**
- * 页面的标题区：面板顶上的一条，下面一根线横贯整个面板。左边是 22 像素的标题，右端最多一个主按钮加一两个次要按钮。
- * 和 [`Page`] 的左右留白配套（都是 32 像素），所以线能画到面板的两边。高度由留白撑出来，不写死。
+ * 页面的标题区，在正文面板的最上面：左边是 22 像素的粗体标题，下面一行 14 像素的灰色副标题；
+ * 右端是这个页面的按钮——最多一个主按钮加一两个次要按钮，和标题那一块上下居中。总览没有标题区。
  */
 export function PageHeader({ title, description, actions, className }: PageHeaderProps) {
   return (
-    <header
-      data-page-header
-      className={cn('-mx-8 mb-7 flex shrink-0 items-center justify-between gap-6 border-b px-8 py-[18px]', className)}
-    >
+    <header data-page-header className={cn('flex shrink-0 items-center justify-between gap-6 pt-7 pb-6', className)}>
       <div className="min-w-0">
-        <h1 className="flex items-center gap-2.5 text-[22px] leading-8 font-medium tracking-tight">{title}</h1>
+        <h1 className="flex items-center gap-2.5 text-[22px] leading-[30px] font-bold tracking-tight text-balance">
+          {title}
+        </h1>
         {description !== undefined ? (
-          <p className="mt-0.5 max-w-2xl text-[13px] leading-relaxed text-muted-foreground">{description}</p>
+          <p className="mt-1 max-w-3xl text-sm text-pretty text-muted-foreground">{description}</p>
         ) : null}
       </div>
       {actions !== undefined ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
@@ -48,7 +47,7 @@ export function Page({
   className?: string
 }) {
   return (
-    // 没有标题区的页面（总览、节点详情）自己从面板顶上留出一段。
+    // 没有标题区的页面（节点详情）自己从面板顶上留出一段。
     <div
       className={cn(
         'min-h-full w-full px-8 pb-8 [&>:not([data-page-header]):first-child]:mt-7',

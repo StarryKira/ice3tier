@@ -331,6 +331,7 @@ export function CredentialsPage() {
     <Page>
       <PageHeader
         title={c.title}
+        description={c.subtitle}
         actions={
           empty ? undefined : (
             <Button variant="primary" onClick={() => setIssuing(true)}>

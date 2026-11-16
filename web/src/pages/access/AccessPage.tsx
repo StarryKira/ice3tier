@@ -175,6 +175,7 @@ export function AccessPage() {
     <Page fill className="@container">
       <PageHeader
         title={t.access.title}
+        description={t.access.subtitle}
         actions={
           <>
             <Button onClick={() => update({ check: checking ? null : '1' })} aria-pressed={checking}>

@@ -5,6 +5,8 @@ const plural = (n: number, one: string, many: string) => (n === 1 ? `1 ${one}` :
 export const common: Messages['common'] = {
   appName: 'ice3tier',
   language: 'Language',
+  appearance: 'Theme',
+  themes: { system: 'System', light: 'Light', dark: 'Dark' },
   close: 'Close',
   cancel: 'Cancel',
   save: 'Save',
@@ -32,7 +34,6 @@ export const common: Messages['common'] = {
   actionsFor: (name) => `Actions for ${name}`,
   viewDetails: 'View details',
   details: 'Details',
-  planned: 'Planned',
   default: 'Default',
   enabled: 'Enabled',
   disabled: 'Off',

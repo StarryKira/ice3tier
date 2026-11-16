@@ -132,6 +132,7 @@ export function ForwardsPage() {
     <Page>
       <PageHeader
         title={f.title}
+        description={f.subtitle}
         actions={
           empty ? undefined : (
             <Button variant="primary" onClick={() => setEditor({ forward: null })}>

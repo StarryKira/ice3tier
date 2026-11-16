@@ -86,6 +86,7 @@ export function TokensPage() {
     <Page>
       <PageHeader
         title={k.title}
+        description={k.subtitle}
         actions={
           <Button variant="primary" onClick={() => setAdding(true)}>
             <Plus aria-hidden />

@@ -8,6 +8,8 @@ import { configureClient } from '@/api/client'
 import { reportReachability } from '@/api/connection'
 import { createQueryClient } from '@/api/queries'
 import { session } from '@/auth/session'
+// 亮色还是暗色：模块一载入就定下来，登录页也跟着。
+import '@/lib/theme'
 
 import { App } from './App'
 

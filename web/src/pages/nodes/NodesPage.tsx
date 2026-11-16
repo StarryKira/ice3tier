@@ -25,7 +25,8 @@ import { FormDialog } from '@/components/form-dialog'
 import { attachedCount, nodePath } from '@/lib/nodes'
 import { Page, PageHeader } from '@/components/page'
 import { EmptyState, ErrorState, NoMatches, SkeletonRows } from '@/components/states'
-import { IssueIcon, OnlineDot, RelativeTime } from '@/components/status'
+import { Flag } from '@/components/flag'
+import { IssueIcon, RelativeTime, StatusDot } from '@/components/status'
 import { SortTh, Table, TableFooter, Td, Th, Toolbar, Tr } from '@/components/table'
 import { TagInput, TagList } from '@/components/tags'
 import { VersionCell } from '@/components/update'
@@ -263,7 +264,6 @@ export function NodesPage() {
 
   const all = useMemo(() => nodes.data ?? [], [nodes.data])
   const issues = useMemo(() => new Map(all.map((node) => [node.id, nodeIssues(node, all)])), [all])
-  const issueCount = useMemo(() => [...issues.values()].filter((list) => list.length > 0).length, [issues])
   const platforms = useMemo(
     () => [...new Set(all.map((node) => node.platform))].filter((platform) => platform !== '').sort(),
     [all],
@@ -273,10 +273,10 @@ export function NodesPage() {
   const visible = useMemo(
     () =>
       sortNodes(
-        all.filter((node) => matchesFilters(node, filters, (issues.get(node.id)?.length ?? 0) > 0)),
+        all.filter((node) => matchesFilters(node, filters)),
         sort,
       ),
-    [all, filters, issues, sort],
+    [all, filters, sort],
   )
   const pages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE))
   const currentPage = Math.min(page, pages)
@@ -355,9 +355,6 @@ export function NodesPage() {
     { value: 'online', label: t.nodes.filterOnline },
     { value: 'offline', label: t.nodes.filterOffline },
   ]
-  // "需要处理"只在有事时出现；正选着它的时候即使事情处理完了也留着，让用户能切走。
-  if (issueCount > 0 || filters.status === 'issues')
-    statusOptions.push({ value: 'issues', label: t.nodes.filterIssues(issueCount) })
 
   const facetCount = filters.tags.length + filters.roles.length + filters.platforms.length
   const chips: { label: string; remove: () => void }[] = [
@@ -392,6 +389,7 @@ export function NodesPage() {
     <Page>
       <PageHeader
         title={t.nodes.title}
+        description={t.nodes.subtitle}
         actions={
           // 没有任何节点时，页面上只留空状态卡片里那一个入口，不放两个一样的按钮。
           empty ? undefined : (
@@ -586,7 +584,8 @@ export function NodesPage() {
                       key={node.id}
                       onClick={(event) => openRow(event, node)}
                       className={cn(
-                        'cursor-pointer hover:bg-muted/50',
+                        // 每行 88 像素高，行与行之间一根 1 像素的线。
+                        'h-[88px] cursor-pointer hover:bg-muted/50',
                         selected.has(node.id) && 'bg-accent/60 hover:bg-accent',
                       )}
                       data-testid={`node-row-${node.name}`}
@@ -607,7 +606,6 @@ export function NodesPage() {
                       </Td>
                       <Td>
                         <div className="flex items-center gap-2.5">
-                          <OnlineDot online={node.online} />
                           <Link
                             to={nodePath(network.id, node.id)}
                             className="truncate rounded-sm font-medium hover:underline"
@@ -619,7 +617,10 @@ export function NodesPage() {
                         </div>
                       </Td>
                       <Td>
-                        <CopyText value={node.virtual_ip} />
+                        <span className="inline-flex items-center gap-1.5">
+                          <Flag code={node.country} />
+                          <CopyText value={node.virtual_ip} />
+                        </span>
                         <div className="text-xs text-muted-foreground">
                           <CopyText value={node.fqdn} mono={false} className="text-xs" />
                         </div>
@@ -645,21 +646,25 @@ export function NodesPage() {
                         </button>
                       </Td>
                       <Td className="text-[13px] whitespace-nowrap">
-                        {node.online ? (
-                          <span>{t.common.online}</span>
-                        ) : node.last_seen_at === null ? (
-                          <Tooltip content={t.nodes.neverTip}>
-                            <span
-                              tabIndex={0}
-                              className="rounded-sm text-muted-foreground"
-                              data-testid="never-connected"
-                            >
-                              {t.nodes.never}
-                            </span>
-                          </Tooltip>
-                        ) : (
-                          <RelativeTime at={node.last_seen_at} className="text-muted-foreground" />
-                        )}
+                        {/* 在线与否的圆点在这一格的最前面，和"在线""3 分钟前"这句话放在一起。 */}
+                        <span className="inline-flex items-center gap-2">
+                          <StatusDot tone={node.online ? 'ok' : 'idle'} />
+                          {node.online ? (
+                            <span>{t.common.online}</span>
+                          ) : node.last_seen_at === null ? (
+                            <Tooltip content={t.nodes.neverTip}>
+                              <span
+                                tabIndex={0}
+                                className="rounded-sm text-muted-foreground"
+                                data-testid="never-connected"
+                              >
+                                {t.nodes.never}
+                              </span>
+                            </Tooltip>
+                          ) : (
+                            <RelativeTime at={node.last_seen_at} className="text-muted-foreground" />
+                          )}
+                        </span>
                       </Td>
                       <Td>
                         <VersionCell node={node} />

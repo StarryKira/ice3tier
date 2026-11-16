@@ -7,6 +7,7 @@ const known = <T extends Record<string, string>>(map: T) => map as T & Partial<R
 /** 设置：登录、操作记录、关于。 */
 export const settings = {
   title: '设置',
+  subtitle: '登录、节点更新和操作记录',
   tabsLabel: '设置分区',
   tabSession: '登录',
   tabLog: '操作记录',
@@ -124,5 +125,7 @@ export const settings = {
       `${networks} 个网络 · ${nodes} 个节点 · ${online} 个在线`,
     offline: 'controller 离线时',
     offlineBody: '已连接的节点照常工作；无法添加节点或修改配置',
+    geoip: 'IP 地址库',
+    geoipSource: 'IP Geolocation by DB-IP',
   },
 }

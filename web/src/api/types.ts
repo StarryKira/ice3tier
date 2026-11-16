@@ -258,6 +258,11 @@ export interface Node {
   update: NodeUpdate
   /** 节点挂靠的 relay 和到它们的往返延迟，取自它最近的上报；离线时是它离线前报的。 */
   attached: Attachment[]
+  /**
+   * 节点公网地址所在的国家或地区，ISO 3166-1 的两个大写字母（`"JP"`）。controller 用离线的地址库查；
+   * 不知道（内网地址、从没连上过、库里没有）是 `null`。比这个界面旧的 controller 没有这个字段。
+   */
+  country?: string | null
 }
 
 export interface Attachment {

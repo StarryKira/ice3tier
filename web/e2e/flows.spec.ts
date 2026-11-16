@@ -2,7 +2,7 @@ import { expect, type Locator, type Page, test } from '@playwright/test'
 
 import { Controller, type NodeHandle } from './controller'
 import { en } from '../src/i18n/en'
-import { clearToasts, expectToast, goTo, goToAdmin, t } from './helpers'
+import { clearToasts, expectToast, goTo, goToAdmin, literal, t } from './helpers'
 
 /**
  * 从一个空的 controller 开始，把主要的流程照着用户的做法走一遍：
@@ -272,6 +272,7 @@ test('加一条规则，关系图跟着变；停用默认规则后按标签收�
   const dialog = page.getByRole('dialog', { name: d.createTitle })
   await dialog.getByRole('combobox', { name: d.srcLabel }).click()
   await page.getByRole('option', { name: /laptops/ }).click()
+  await expect(page.getByRole('listbox')).toHaveCount(0)
   await dialog.getByRole('combobox', { name: d.dstLabel }).click()
   await page.getByRole('option', { name: /servers/ }).click()
   // 一句话说出规则的意思，随输入变化。
@@ -318,6 +319,7 @@ test('加一条规则，关系图跟着变；停用默认规则后按标签收�
   const check = page.getByTestId('access-check')
   await check.getByRole('combobox', { name: c.from }).click()
   await nodeOption(laptop).click()
+  await expect(page.getByRole('listbox')).toHaveCount(0)
   await check.getByRole('combobox', { name: c.to }).click()
   await nodeOption(server).click()
   await expect(page.getByTestId(`check-${laptop.name}-${server.name}`)).toContainText(c.allowed)
@@ -534,14 +536,13 @@ test('新建端口转发，再删除', async () => {
   await clearToasts(page)
 })
 
-test('换语言：账号菜单里换成英文，就地重新渲染，刷新后还是英文；再换回中文', async () => {
+test('换语言：顶栏的语言菜单里换成英文，就地重新渲染，刷新后还是英文；再换回中文', async () => {
   await goTo(page, t.nav.nodes)
   const search = page.getByRole('searchbox')
   await search.fill(server.name.slice(0, 3))
   await expect(page).toHaveURL(/q=/)
 
-  await page.getByRole('button', { name: t.nav.accountMenu }).click()
-  await page.getByRole('menuitem', { name: new RegExp(t.common.language) }).click()
+  await page.getByRole('button', { name: new RegExp(`^${literal(t.common.language)}`) }).click()
   await page.getByRole('menuitemradio', { name: 'English' }).click()
 
   // 不刷新：搜索框里的字还在，标题、侧栏、<html lang>、标签页标题都换了。
@@ -557,8 +558,7 @@ test('换语言：账号菜单里换成英文，就地重新渲染，刷新后�
   await page.reload()
   await expect(page.getByRole('heading', { level: 1, name: en.nodes.title })).toBeVisible()
 
-  await page.getByRole('button', { name: en.nav.accountMenu }).click()
-  await page.getByRole('menuitem', { name: new RegExp(en.common.language) }).click()
+  await page.getByRole('button', { name: new RegExp(`^${literal(en.common.language)}`) }).click()
   await page.getByRole('menuitemradio', { name: '简体中文' }).click()
   await expect(page.getByRole('heading', { level: 1, name: t.nodes.title })).toBeVisible()
   await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN')
@@ -588,7 +588,7 @@ test('刷新后还在登录状态；退出后回到登录页，要重新登录',
   await page.reload()
   await expect(page.getByRole('columnheader', { name: t.settings.log.colEvent })).toBeVisible()
 
-  await page.getByRole('button', { name: t.nav.accountMenu }).click()
+  await page.getByRole('button', { name: new RegExp(literal(t.switcher.label)) }).click()
   await page.getByRole('menuitem', { name: t.nav.signOut }).click()
   await expect(page.getByRole('heading', { name: t.signIn.title })).toBeVisible()
   await expect(page.getByText(t.signIn.signedOut)).toBeVisible()

@@ -1,6 +1,9 @@
 @import 'tailwindcss';
 @import '@xyflow/react/dist/style.css' layer(base);
 
+/* 暗色是 <html> 上的 dark 类（src/lib/theme.ts），不直接看系统：用户可以选和系统不一样的。 */
+@custom-variant dark (&:where(.dark, .dark *));
+
 /*
  * 界面的视觉系统：全部的颜色、字、圆角、阴影都在这一处。规则写在 web/README.md 的「界面的样子」里。
  *
@@ -63,14 +66,84 @@
   --danger-line: #f5c2be;
   --danger-dot: #e5484d;
 
+  --tooltip: #18181b;
+  --tooltip-foreground: #ffffff;
+
+  --shadow-pop-value: 0 12px 32px -8px rgb(24 24 27 / 0.16), 0 0 0 1px rgb(24 24 27 / 0.06);
+  --shadow-card-value: 0 1px 2px rgb(24 24 27 / 0.08);
+  --shadow-panel-value: 0 1px 2px rgb(24 24 27 / 0.04), 0 12px 32px -16px rgb(24 24 27 / 0.1);
+  --shadow-nav-value: 0 1px 2px rgb(24 24 27 / 0.06), 0 0 0 1px rgb(24 24 27 / 0.03);
+
   --radius: 0.375rem;
 }
 
+/*
+ * 暗色：中性的灰，不带蓝。层次和亮色一样——整页的底是黑的，面板 #1a1a1a，菜单和弹出层 #262626，悬停 #333；
+ * 字是白色的 90%、60%、40% 三档。阴影在暗底上看不出来，靠一圈很淡的亮边把一层和下一层分开。状态色提亮，在深底上读得清。
+ */
+.dark {
+  --canvas: #000000;
+  --background: #1a1a1a;
+  --foreground: #ffffffe6;
+  --card: #1a1a1a;
+  --card-foreground: #ffffffe6;
+  --popover: #262626;
+  --popover-foreground: #ffffffe6;
+
+  --primary: #3d72ea;
+  --primary-hover: #5585f0;
+  --primary-foreground: #ffffff;
+  --secondary: #262626;
+  --secondary-foreground: #ffffffe6;
+  --muted: #333333;
+  --muted-foreground: #ffffff99;
+  --faint: #ffffff66;
+  --accent: #1b2643;
+  --accent-foreground: #9db8ff;
+  --destructive: #e5484d;
+  --destructive-hover: #f0595e;
+  --destructive-foreground: #ffffff;
+  --border: #333333;
+  --border-strong: #404040;
+  --input: #404040;
+  --ring: #5585f0;
+
+  --ok: #4cc38a;
+  --ok-soft: #0a1f0b;
+  --ok-dot: #30a46c;
+  --idle: #ffffff99;
+  --idle-soft: #262626;
+  --idle-dot: #666666;
+  --relay: #b5a6ff;
+  --relay-soft: #1e142a;
+  --relay-dot: #8e7cf0;
+  --warn: #f1c35b;
+  --warn-soft: #261e14;
+  --warn-line: #574313;
+  --warn-dot: #e0a100;
+  --danger: #ff8f88;
+  --danger-soft: #2e1517;
+  --danger-line: #5c2427;
+  --danger-dot: #e5484d;
+
+  --tooltip: #333333;
+  --tooltip-foreground: #ffffffe6;
+
+  --shadow-pop-value: 0 16px 40px -8px rgb(0 0 0 / 0.7), 0 0 0 1px rgb(255 255 255 / 0.08);
+  --shadow-card-value: 0 0 0 1px rgb(255 255 255 / 0.04);
+  --shadow-panel-value: 0 0 0 1px rgb(255 255 255 / 0.06);
+  --shadow-nav-value: 0 0 0 1px rgb(255 255 255 / 0.08);
+}
+
 @theme inline {
-  /* 系统字体：界面常常离线使用，不从网上取字体，也不打包字体文件。中文落在系统自带的黑体上。 */
+  /*
+   * 系统字体：界面常常离线使用，不从网上取字体，也不打包字体文件。
+   * 不写 system-ui：Linux 上它跟着桌面的界面字体走，那可能是一种等宽字体，整个界面就成了等宽的。
+   * macOS 和 Windows 点名它们的界面字体；别处落到 sans-serif，也就是系统里设好的无衬线字体。
+   */
   --font-sans:
-    system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei UI', 'Microsoft YaHei',
-    'Noto Sans CJK SC', 'Noto Sans SC', 'Source Han Sans SC', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei UI',
+    'Microsoft YaHei', 'Helvetica Neue', sans-serif;
   --font-mono:
     ui-monospace, 'SF Mono', SFMono-Regular, 'Cascadia Mono', 'JetBrains Mono', Menlo, Consolas, 'Liberation Mono',
     monospace;
@@ -118,6 +191,8 @@
   --color-danger-soft: var(--danger-soft);
   --color-danger-line: var(--danger-line);
   --color-danger-dot: var(--danger-dot);
+  --color-tooltip: var(--tooltip);
+  --color-tooltip-foreground: var(--tooltip-foreground);
 
   --radius-sm: calc(var(--radius) - 2px);
   --radius-md: var(--radius);
@@ -128,14 +203,20 @@
    * 阴影：浮在页面上面的东西（菜单、弹出层、对话框、通知）用 pop。
    * 外壳上有两处极淡的：正文的面板（panel）和侧栏里当前那一项（nav），只是让白色从灰底上浮起来一点。
    */
-  --shadow-pop: 0 12px 32px -8px rgb(24 24 27 / 0.16), 0 0 0 1px rgb(24 24 27 / 0.06);
-  --shadow-card: 0 1px 2px rgb(24 24 27 / 0.08);
-  --shadow-panel: 0 1px 2px rgb(24 24 27 / 0.04), 0 12px 32px -16px rgb(24 24 27 / 0.1);
-  --shadow-nav: 0 1px 2px rgb(24 24 27 / 0.06), 0 0 0 1px rgb(24 24 27 / 0.03);
+  --shadow-pop: var(--shadow-pop-value);
+  --shadow-card: var(--shadow-card-value);
+  --shadow-panel: var(--shadow-panel-value);
+  --shadow-nav: var(--shadow-nav-value);
 
   --animate-rise: rise 160ms ease-out;
   --animate-fade: fade 140ms ease-out;
   --animate-flash: flash 1400ms ease-out;
+  /*
+   * 从一个按钮弹出来的东西（菜单、弹出层）：打开时从按钮那一侧长出来——淡入、放大、朝外挪几个像素，
+   * 收尾很软；关上时快一点，缩回去淡出，不是一下子没了。挪的方向由 --pop-x、--pop-y 给（见 ui/ 里的部件）。
+   */
+  --animate-pop-in: pop-in 200ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-pop-out: pop-out 120ms cubic-bezier(0.4, 0, 1, 1) forwards;
 
   @keyframes rise {
     from {
@@ -145,6 +226,26 @@
     to {
       opacity: 1;
       transform: translateY(0);
+    }
+  }
+  @keyframes pop-in {
+    from {
+      opacity: 0;
+      transform: translate(var(--pop-x, 0px), var(--pop-y, 0px)) scale(0.96);
+    }
+    to {
+      opacity: 1;
+      transform: translate(0, 0) scale(1);
+    }
+  }
+  @keyframes pop-out {
+    from {
+      opacity: 1;
+      transform: translate(0, 0) scale(1);
+    }
+    to {
+      opacity: 0;
+      transform: translate(calc(var(--pop-x, 0px) / 2), calc(var(--pop-y, 0px) / 2)) scale(0.97);
     }
   }
   @keyframes fade {
@@ -282,4 +383,19 @@
 
 .react-flow__controls-button:hover {
   background: var(--muted);
+}
+
+/* 访问地图的连线：虚线顺着访问的方向流动；双向的两条一来一回（见 pages/overview/AccessMap.tsx）。 */
+.access-map-dash {
+  animation: access-map-dash 1.1s linear infinite;
+}
+
+.access-map-dash-reverse {
+  animation-direction: reverse;
+}
+
+@keyframes access-map-dash {
+  to {
+    stroke-dashoffset: -22;
+  }
 }

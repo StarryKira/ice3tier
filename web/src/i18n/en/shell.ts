@@ -17,6 +17,7 @@ export const signIn: Messages['signIn'] = {
 
 export const nav: Messages['nav'] = {
   label: 'Main navigation',
+  console: 'Console',
   overview: 'Overview',
   nodes: 'Nodes',
   access: 'Access control',
@@ -29,6 +30,7 @@ export const nav: Messages['nav'] = {
   topology: 'Topology',
   diagnosis: 'Path diagnosis',
   tests: 'Connectivity tests',
+  groupManage: 'Manage',
   tokens: 'Enrollment tokens',
   pairs: 'Node pairs',
   network: 'Network',
@@ -36,8 +38,6 @@ export const nav: Messages['nav'] = {
   collapse: 'Collapse sidebar',
   expand: 'Expand sidebar',
   toggleGroup: (name, open) => `${open ? 'Collapse' : 'Expand'} ${name}`,
-  account: 'Admin',
-  accountMenu: 'Account menu',
   signOut: 'Sign out',
   skipToContent: 'Skip to content',
   breadcrumb: 'Breadcrumb',
@@ -47,7 +47,6 @@ export const switcher: Messages['switcher'] = {
   label: 'Switch network',
   current: 'Current network',
   nodes: (n) => (n === 1 ? '1 node' : `${n} nodes`),
-  create: 'Create network',
   manage: 'Network settings',
   heading: 'Networks',
   switched: (name) => `Switched to ${name}`,

@@ -109,9 +109,11 @@ test('关掉自动更新，把发布源换成本机目录，立即检查：查�
   await expect(page.getByTestId('check-result')).toHaveText(u.release.found(kit.newVersion, 3))
   await expect(page.getByTestId('release-version')).toHaveText(u.release.latest(kit.newVersion))
   await expect(page.getByTestId(`package-${platformName()}`)).toContainText(`i3t-${platformName()}`)
-  // 发布比 controller 新：controller 要手动更新，界面提醒，侧栏底部也有。
+  // 发布比 controller 新：controller 要手动更新，界面提醒；顶栏的版本号上也有一个去节点更新的小点。
   await expect(page.getByText(u.release.controllerNewer(kit.oldVersion, kit.newVersion))).toBeVisible()
-  await expect(page.getByTestId('newer-version')).toHaveText(t.version.newer(kit.newVersion))
+  const badge = page.getByTestId('version-badge')
+  await expect(badge).toHaveAttribute('href', '/settings/updates')
+  await expect(badge).toHaveAccessibleName(new RegExp(literal(t.version.newer(kit.newVersion))))
   await expect(page.getByTestId('update-summary')).toHaveText(
     u.nodes.summary({ total: 3, up_to_date: 0, updating: 0, outdated: 1, failed: 0, manual: 2 }),
   )
@@ -128,9 +130,7 @@ test('节点列表标出有新版本和要手动更新的；详情里写出不�
   await goTo(page, t.nav.nodes)
   await expect(page.getByTestId('node-row-able').getByTestId('update-mark-available')).toBeVisible()
   await expect(page.getByTestId('node-row-boxed').getByTestId('update-mark-manual')).toBeVisible()
-  // "不能自己更新而有新版本"上"需要处理"。
   const u = t.updates
-  await expect(page.getByRole('radio', { name: t.nodes.filterIssues(2) })).toBeVisible()
 
   await page.getByRole('link', { name: 'boxed', exact: true }).click()
   await page.getByRole('tab', { name: u.detail.tab }).click()

@@ -18,7 +18,7 @@ import { OnlineDot } from '@/components/status'
 import { t, useLocale } from '@/i18n'
 import { cn } from '@/lib/utils'
 import { GraphCanvas } from '@/pages/access/flow'
-import { LINE_COLORS } from '@/topology/colors'
+import { type LineColors, useLineColors } from '@/topology/colors'
 import { type HighlightHop, layoutSignature, type TopoLink, type TopologyShape, type TopoPoint } from '@/topology/graph'
 
 const g = t.topology
@@ -117,9 +117,9 @@ const edgeTypes = { line: LineEdgeView }
 /** 线不多时把直连的延迟写在线上；多了就不写，免得糊成一片（精确的数看矩阵）。 */
 const LABELS_UP_TO = 24
 
-function linkColor(link: TopoLink): string {
-  if (link.stale) return LINE_COLORS.stale
-  return link.direct ? LINE_COLORS.direct : LINE_COLORS.relay
+function linkColor(link: TopoLink, colors: LineColors): string {
+  if (link.stale) return colors.stale
+  return link.direct ? colors.direct : colors.relay
 }
 
 function linkDescription(link: TopoLink): string {
@@ -142,6 +142,7 @@ interface TopologyGraphProps {
 export function TopologyGraph({ shape, rtt, onPick }: TopologyGraphProps) {
   // 点和线上的文字（读屏的说明、线上的延迟）算好存着，换语言时要重新算。
   const locale = useLocale()
+  const colors = useLineColors()
   const signature = layoutSignature(shape)
   const focused = shape.involved.size > 0
   const name = (id: string) => shape.points.find((point) => point.id === id)?.node.name ?? id
@@ -175,7 +176,7 @@ export function TopologyGraph({ shape, rtt, onPick }: TopologyGraphProps) {
         strong: false,
       },
       style: {
-        stroke: linkColor(link),
+        stroke: linkColor(link, colors),
         strokeWidth: 1.6,
         strokeDasharray: link.stale ? '5 4' : undefined,
         opacity: focused ? 0.15 : 0.9,
@@ -190,7 +191,7 @@ export function TopologyGraph({ shape, rtt, onPick }: TopologyGraphProps) {
       target: pair.target,
       data: { index: 0, siblings: 1, label: null, strong: false },
       style: {
-        stroke: pair.stale ? LINE_COLORS.stale : LINE_COLORS.none,
+        stroke: pair.stale ? colors.stale : colors.none,
         strokeWidth: 1.4,
         strokeDasharray: '2 4',
         opacity: focused ? 0.15 : 0.85,
@@ -199,7 +200,7 @@ export function TopologyGraph({ shape, rtt, onPick }: TopologyGraphProps) {
       ariaLabel: g.linkLabel(name(pair.source), name(pair.target), g.linkUnreachable),
     }))
     const highlight: LineFlowEdge[] = shape.highlight.map((hop: HighlightHop) => {
-      const color = hop.stale ? LINE_COLORS.stale : hop.kind === 'direct' ? LINE_COLORS.direct : LINE_COLORS.relay
+      const color = hop.stale ? colors.stale : hop.kind === 'direct' ? colors.direct : colors.relay
       const total = hop.direction === 'forward' ? rtt.forward : rtt.reverse
       const label =
         hop.step === 0
@@ -220,7 +221,7 @@ export function TopologyGraph({ shape, rtt, onPick }: TopologyGraphProps) {
     return [...base, ...none, ...highlight]
     // name 只读 shape.points；语言变了线上的说明要换。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shape, focused, rtt.forward, rtt.reverse, locale])
+  }, [shape, focused, rtt.forward, rtt.reverse, locale, colors])
 
   // 用鼠标点一下，画图的库既报"点了"又报"选中了"：同一下只算一次，不然第二个点会被算成重新开始选。
   const last = useRef({ id: '', at: 0 })

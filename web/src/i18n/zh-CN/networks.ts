@@ -1,6 +1,7 @@
 /** 网络：新建、设置、删除。 */
 export const networks = {
   title: '网络',
+  subtitle: '这个网络的名字、地址段和选路',
   listTitle: '全部网络',
   current: '当前',
   currentName: (name: string) => `${name}（当前）`,

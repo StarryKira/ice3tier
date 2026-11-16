@@ -40,4 +40,50 @@ function CardBody({ className, ...props }: ComponentProps<'div'>) {
   return <div className={cn(className)} {...props} />
 }
 
-export { Card, CardBody, CardHeader }
+interface BoxCardHeaderProps {
+  title: ReactNode
+  tip?: ReactNode
+  action?: ReactNode
+  className?: string
+}
+
+/**
+ * 有边框的卡片：一块圆角的白，和旁边的卡片一样大小的标题条、一样的留白。
+ * 一页里几块信息并排放的时候用它（节点详情的概览），左右两栏看起来是同一种东西。
+ */
+function BoxCard({ className, ...props }: ComponentProps<'section'>) {
+  return <section className={cn('min-w-0 rounded-xl border bg-card text-card-foreground', className)} {...props} />
+}
+
+/** 卡片顶上的标题条：15 像素半粗的标题，右端放这块卡片自己的动作，下面一根线。 */
+function BoxCardHeader({ title, tip, action, className }: BoxCardHeaderProps) {
+  return (
+    <header className={cn('flex min-h-12 items-center justify-between gap-4 border-b px-5 py-2.5', className)}>
+      <div className="flex min-w-0 items-center gap-1.5">
+        <h2 className="truncate text-[15px] leading-6 font-semibold">{title}</h2>
+        {tip !== undefined ? <InfoTip>{tip}</InfoTip> : null}
+      </div>
+      {action !== undefined ? <div className="flex shrink-0 items-center gap-2">{action}</div> : null}
+    </header>
+  )
+}
+
+/** 卡片的内容：左右和标题条一样留 20 像素。 */
+function BoxCardBody({ className, ...props }: ComponentProps<'div'>) {
+  return <div className={cn('px-5', className)} {...props} />
+}
+
+/**
+ * 卡片里一列"名字：值"：行与行之间一根细线，横贯整张卡片（和能力那几行一样），每行一样高；名字一栏一样宽（10rem），值从同一条线开始。
+ * 里面放 `InfoRow`。
+ */
+function BoxCardList({ className, ...props }: ComponentProps<'dl'>) {
+  return (
+    <dl
+      className={cn('-mx-5 divide-y [&>div]:grid-cols-[10rem_minmax(0,1fr)] [&>div]:px-5 [&>div]:py-2.5', className)}
+      {...props}
+    />
+  )
+}
+
+export { BoxCard, BoxCardBody, BoxCardHeader, BoxCardList, Card, CardBody, CardHeader }

@@ -6,6 +6,7 @@ const count = (n: number, one: string, many: string) => (n === 1 ? `1 ${one}` : 
 
 export const exits: Messages['exits'] = {
   title: 'Exits',
+  subtitle: 'Send traffic to the internet through a chosen node',
   enable: 'Enable exit',
   loadFailed: "Couldn't load exits",
   colNode: 'Node',
@@ -77,6 +78,7 @@ export const exits: Messages['exits'] = {
 
 export const credentials: Messages['credentials'] = {
   title: 'Credentials',
+  subtitle: 'Usernames, passwords and traffic limits for proxy entry points',
   issue: 'Create credential',
   loadFailed: "Couldn't load credentials",
   colName: 'Name',
@@ -159,6 +161,7 @@ export const credentials: Messages['credentials'] = {
 
 export const listeners: Messages['listeners'] = {
   title: 'Listeners',
+  subtitle: 'SOCKS5 and HTTP proxy entry points on nodes',
   create: 'Create listener',
   loadFailed: "Couldn't load listeners",
   colName: 'Name',
@@ -249,6 +252,7 @@ export const listeners: Messages['listeners'] = {
 
 export const forwards: Messages['forwards'] = {
   title: 'Port forwards',
+  subtitle: 'Forward a port on one node to another node',
   create: 'Create forward',
   loadFailed: "Couldn't load port forwards",
   colStatus: 'Status',
@@ -386,6 +390,7 @@ export const serviceClass: Messages['serviceClass'] = {
 
 export const pairs: Messages['pairs'] = {
   title: 'Node pairs',
+  subtitle: 'Connection settings for a pair of nodes, such as dedicated TCP',
   add: 'Add node pair',
   loadFailed: "Couldn't load node pairs",
   colPair: 'Pair',
@@ -478,6 +483,7 @@ export const pairs: Messages['pairs'] = {
 
 export const tokens: Messages['tokens'] = {
   title: 'Enrollment tokens',
+  subtitle: 'One-time tokens for adding new nodes',
   create: 'Create token',
   loadFailed: "Couldn't load enrollment tokens",
   showLabel: 'Show',

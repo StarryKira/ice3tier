@@ -22,7 +22,7 @@ import { t, useLocale } from '@/i18n'
 import { cn } from '@/lib/utils'
 
 import { GraphCanvas } from './flow'
-import { EDGE_COLORS } from '@/access/colors'
+import { useEdgeColors } from '@/access/colors'
 
 const g = t.access.graph
 
@@ -140,6 +140,7 @@ export function TagGraphView({
 }: TagGraphViewProps) {
   // 点和线上的文字（读屏的说明）在下面算好存着，换语言时要重新算。
   const locale = useLocale()
+  const colors = useEdgeColors()
   const shape = useMemo(() => buildTagGraph(graph), [graph])
   const signature = layoutSignature(shape)
 
@@ -173,7 +174,7 @@ export function TagGraphView({
     () =>
       shape.lines.map((line) => {
         const highlighted = line.ruleId === highlightedRule
-        const color = highlighted ? EDGE_COLORS.highlighted : line.enabled ? EDGE_COLORS.enabled : EDGE_COLORS.disabled
+        const color = highlighted ? colors.highlighted : line.enabled ? colors.enabled : colors.disabled
         const marker = { type: MarkerType.ArrowClosed, color, width: 16, height: 16 }
         return {
           id: line.id,
@@ -194,7 +195,7 @@ export function TagGraphView({
       }),
     // 线上的说明来自目录：语言变了要重新算。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [shape.lines, highlightedRule, locale],
+    [shape.lines, highlightedRule, locale, colors],
   )
 
   return (

@@ -17,7 +17,7 @@ import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { cn } from '@/lib/utils'
 import { useNetwork } from '@/pages/networks/context'
 import { AddNodeDialog } from '@/pages/nodes/AddNodeDialog'
-import { LINE_COLORS } from '@/topology/colors'
+import { useLineColors } from '@/topology/colors'
 import { buildTopology, type Selection } from '@/topology/graph'
 import { nextPick, type Pair, readPair, writePair } from '@/topology/pair'
 
@@ -31,6 +31,7 @@ const g = t.topology
 type View = 'graph' | 'matrix' | 'backbone'
 
 function GraphLegend() {
+  const colors = useLineColors()
   const line = (color: string, dash?: string, width = 1.6) => (
     <svg width="28" height="8" aria-hidden className="shrink-0">
       <line x1="1" y1="4" x2="27" y2="4" stroke={color} strokeWidth={width} strokeDasharray={dash} />
@@ -42,27 +43,27 @@ function GraphLegend() {
       aria-label={t.routes.legendLabel}
     >
       <li className="flex items-center gap-1.5">
-        {line(LINE_COLORS.direct)}
+        {line(colors.direct)}
         {g.legendDirect}
       </li>
       <li className="flex items-center gap-1.5">
-        {line(LINE_COLORS.relay)}
+        {line(colors.relay)}
         {g.legendRelay}
       </li>
       <li className="flex items-center gap-1.5">
-        {line(LINE_COLORS.stale, '5 4')}
+        {line(colors.stale, '5 4')}
         {g.legendStale}
       </li>
       <li className="flex items-center gap-1.5">
-        {line(LINE_COLORS.none, '2 4')}
+        {line(colors.none, '2 4')}
         {g.legendNone}
       </li>
       <li className="flex items-center gap-1.5">
-        {line(LINE_COLORS.neutral, undefined, 2.6)}
+        {line(colors.neutral, undefined, 2.6)}
         {g.legendForward}
       </li>
       <li className="flex items-center gap-1.5">
-        {line(LINE_COLORS.neutral, '7 5', 2.6)}
+        {line(colors.neutral, '7 5', 2.6)}
         {g.legendReverse}
       </li>
       <li className="flex items-center gap-1.5">
@@ -130,6 +131,7 @@ export function TopologyPage() {
     <Page fill className="@container">
       <PageHeader
         title={g.title}
+        description={g.subtitle}
         actions={
           <Segmented<View>
             aria-label={g.viewLabel}

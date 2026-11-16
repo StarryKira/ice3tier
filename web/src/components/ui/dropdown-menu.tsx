@@ -4,6 +4,13 @@ import { type ComponentProps } from 'react'
 
 import { cn } from '@/lib/utils'
 
+/**
+ * 弹出和收起的动画（`index.css` 的 pop-in、pop-out）：从触发它的那个按钮的方向长出来、缩回去。
+ * 原点用 Radix 算好的那个点；朝外挪的方向跟着实际弹出的那一侧。
+ */
+const POP =
+  'origin-(--radix-dropdown-menu-content-transform-origin) data-[state=open]:animate-pop-in data-[state=closed]:animate-pop-out data-[side=bottom]:[--pop-y:-6px] data-[side=left]:[--pop-x:6px] data-[side=right]:[--pop-x:-6px] data-[side=top]:[--pop-y:6px]'
+
 const DropdownMenu = MenuPrimitive.Root
 const DropdownMenuTrigger = MenuPrimitive.Trigger
 
@@ -19,10 +26,7 @@ function DropdownMenuContent({
         align={align}
         sideOffset={sideOffset}
         collisionPadding={8}
-        className={cn(
-          'z-50 min-w-44 animate-fade rounded-lg bg-popover p-1 text-popover-foreground shadow-pop',
-          className,
-        )}
+        className={cn('z-50 min-w-40 rounded-xl bg-popover p-1 text-popover-foreground shadow-pop', POP, className)}
         {...props}
       />
     </MenuPrimitive.Portal>
@@ -38,7 +42,7 @@ function DropdownMenuItem({ className, danger = false, ...props }: ItemProps) {
   return (
     <MenuPrimitive.Item
       className={cn(
-        'flex cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm outline-none select-none data-disabled:cursor-not-allowed data-disabled:opacity-50 data-highlighted:bg-muted [&_svg]:size-4 [&_svg]:shrink-0',
+        'flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-sm leading-5 outline-none select-none data-disabled:cursor-not-allowed data-disabled:opacity-50 data-highlighted:bg-muted [&_svg]:size-4 [&_svg]:shrink-0',
         danger ? 'text-danger data-highlighted:bg-danger-soft' : '[&_svg]:text-faint',
         className,
       )}
@@ -52,7 +56,7 @@ function DropdownMenuSeparator({ className, ...props }: ComponentProps<typeof Me
 }
 
 function DropdownMenuLabel({ className, ...props }: ComponentProps<typeof MenuPrimitive.Label>) {
-  return <MenuPrimitive.Label className={cn('px-2.5 py-1.5 text-xs text-muted-foreground', className)} {...props} />
+  return <MenuPrimitive.Label className={cn('px-2 pt-1.5 pb-1 text-xs font-medium text-faint', className)} {...props} />
 }
 
 const DropdownMenuRadioGroup = MenuPrimitive.RadioGroup
@@ -62,7 +66,7 @@ function DropdownMenuRadioItem({ className, children, ...props }: ComponentProps
   return (
     <MenuPrimitive.RadioItem
       className={cn(
-        'flex cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm outline-none select-none data-highlighted:bg-muted',
+        'flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-sm leading-5 outline-none select-none data-highlighted:bg-muted',
         className,
       )}
       {...props}
@@ -82,7 +86,7 @@ function DropdownMenuSubTrigger({ className, children, ...props }: ComponentProp
   return (
     <MenuPrimitive.SubTrigger
       className={cn(
-        'flex cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm outline-none select-none data-highlighted:bg-muted data-[state=open]:bg-muted [&_svg]:size-4 [&_svg]:shrink-0 [&_svg]:text-faint',
+        'flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-sm leading-5 outline-none select-none data-highlighted:bg-muted data-[state=open]:bg-muted [&_svg]:size-4 [&_svg]:shrink-0 [&_svg]:text-faint',
         className,
       )}
       {...props}
@@ -99,10 +103,7 @@ function DropdownMenuSubContent({ className, ...props }: ComponentProps<typeof M
       <MenuPrimitive.SubContent
         sideOffset={6}
         collisionPadding={8}
-        className={cn(
-          'z-50 min-w-40 animate-fade rounded-lg bg-popover p-1 text-popover-foreground shadow-pop',
-          className,
-        )}
+        className={cn('z-50 min-w-36 rounded-xl bg-popover p-1 text-popover-foreground shadow-pop', POP, className)}
         {...props}
       />
     </MenuPrimitive.Portal>

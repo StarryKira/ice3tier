@@ -7,29 +7,36 @@ import { AboutTab } from '@/pages/settings/AboutTab'
 import { makeStatus } from '@/test/fixtures'
 import { fakeApi, renderWithApp } from '@/test/harness'
 
-import { VersionFooter } from './VersionFooter'
+import { VersionBadge } from './VersionFooter'
 
 describe('版本的显示', () => {
-  it('侧栏底部写出界面的版本，就是构建时写进来的那一个', () => {
-    renderWithApp(<VersionFooter status={makeStatus({ version: WEB_VERSION })} />)
-    expect(screen.getByTestId('web-version')).toHaveTextContent(t.version.footerWeb(__APP_VERSION__))
-    expect(screen.getByTestId('version-footer')).toHaveTextContent(t.version.footerController(WEB_VERSION))
-    // 同一次构建：不提。
-    expect(screen.queryByText(t.version.mismatchShort)).not.toBeInTheDocument()
-    expect(screen.queryByTestId('newer-version')).not.toBeInTheDocument()
+  it('顶栏的版本号就是构建时写进来的那一个；同一次构建时说出两边的版本，不提醒', () => {
+    renderWithApp(<VersionBadge status={makeStatus({ version: WEB_VERSION })} />)
+    expect(screen.getByTestId('web-version')).toHaveTextContent(`v${__APP_VERSION__}`)
+    const badge = screen.getByTestId('version-badge')
+    expect(badge).toHaveAccessibleName(
+      `${t.version.footerController(WEB_VERSION)} · ${t.version.footerWeb(WEB_VERSION)}`,
+    )
+    expect(badge).not.toHaveAttribute('data-mismatch')
+    expect(badge).not.toHaveAttribute('href')
   })
 
   it('controller 的状态还没取到时，也写界面的版本', () => {
-    renderWithApp(<VersionFooter status={undefined} />)
+    renderWithApp(<VersionBadge status={undefined} />)
     expect(screen.getByTestId('web-version')).toHaveTextContent(WEB_VERSION)
   })
 
-  it('两边版本不一样时直接写出来；有更新的正式版时有一个去节点更新的提示', () => {
-    renderWithApp(<VersionFooter status={makeStatus({ version: '9.9.9', newer_version: '10.0.0' })} />)
-    expect(screen.getByText(t.version.mismatchShort)).toBeVisible()
-    const newer = screen.getByTestId('newer-version')
-    expect(newer).toHaveTextContent(t.version.newer('10.0.0'))
-    expect(newer).toHaveAttribute('href', '/settings/updates')
+  it('两边版本不一样时直接说出来；有更新的正式版时点了去节点更新', () => {
+    renderWithApp(<VersionBadge status={makeStatus({ version: '9.9.9', newer_version: '10.0.0' })} />)
+    const badge = screen.getByTestId('version-badge')
+    expect(badge).toHaveAttribute('data-mismatch', 'true')
+    expect(badge).toHaveAttribute('href', '/settings/updates')
+    expect(badge).toHaveAccessibleName(expect.stringContaining(t.version.newer('10.0.0')) as string)
+  })
+
+  it('只是版本不一样：说的是不一致的那句话', () => {
+    renderWithApp(<VersionBadge status={makeStatus({ version: '9.9.9' })} />)
+    expect(screen.getByTestId('version-badge')).toHaveAccessibleName(t.version.mismatch(WEB_VERSION, '9.9.9'))
   })
 
   it('关于页：两边的版本，不一样时说清楚是两次构建', async () => {

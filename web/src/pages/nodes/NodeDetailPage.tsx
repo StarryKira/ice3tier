@@ -129,19 +129,19 @@ export function NodeDetailPage() {
 
   return (
     <Page className="@container">
-      <nav aria-label={t.nav.breadcrumb} className="mb-2 flex items-center gap-1 text-[13px] text-muted-foreground">
+      <nav aria-label={t.nav.breadcrumb} className="mb-3 flex items-center gap-1.5 text-base text-muted-foreground">
         <Link to={listPath} className="rounded-sm hover:text-foreground hover:underline">
           {t.nodes.title}
         </Link>
-        <ChevronRight className="size-3.5 text-faint" aria-hidden />
-        <span className="text-foreground" aria-current="page">
+        <ChevronRight className="size-4 text-faint" aria-hidden />
+        <span className="font-medium text-foreground" aria-current="page">
           {node.name}
         </span>
       </nav>
 
       <header className="mb-8 flex items-start justify-between gap-6">
         <div className="min-w-0">
-          <h1 className="flex flex-wrap items-center gap-2.5 text-xl font-semibold tracking-tight">
+          <h1 className="flex flex-wrap items-center gap-2.5 text-[22px] leading-[30px] font-bold tracking-tight">
             <OnlineDot online={node.online} className="[&>span:first-child]:size-2.5" />
             <span className="truncate">{node.name}</span>
             <Tooltip content={t.nodes.rename}>
@@ -155,13 +155,23 @@ export function NodeDetailPage() {
                 <Pencil aria-hidden />
               </Button>
             </Tooltip>
-            <RoleBadges node={node} attached={attachedCount(nodes.data ?? [], node.id)} />
+            {/* 徽标跟着 22 像素的名字放大一档，在列表里是小的那一档。 */}
+            <span className="inline-flex items-center gap-1.5 [&>span]:h-6 [&>span]:px-2 [&>span]:text-[13px]">
+              <RoleBadges node={node} attached={attachedCount(nodes.data ?? [], node.id)} />
+            </span>
             {issue !== undefined ? <IssueIcon message={issue.message} tone={issue.tone} /> : null}
           </h1>
-          <p className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 pl-5 text-[13px] text-muted-foreground">
+          {/* 名字下面一行：在线与否、虚拟 IP、域名，中间一个圆点隔开，和名字左对齐。点值就复制（悬停有说明），不另画复制图标，间距才匀。 */}
+          <p className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 pl-5 text-sm text-muted-foreground">
             <span>{node.online ? t.common.online : t.common.offline}</span>
-            <CopyText value={node.virtual_ip} className="text-foreground" />
-            <CopyText value={node.fqdn} mono={false} />
+            <span aria-hidden className="text-faint">
+              ·
+            </span>
+            <CopyText value={node.virtual_ip} className="text-foreground [&>svg]:hidden" />
+            <span aria-hidden className="text-faint">
+              ·
+            </span>
+            <CopyText value={node.fqdn} mono={false} className="[&>svg]:hidden" />
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
