@@ -48,158 +48,164 @@ async fn careful_socks(world: &World) -> SocketAddr {
     world.laptop.listener("careful").await
 }
 
-#[tokio::test]
-async fn the_bandwidth_cap_holds_a_download_to_its_rate() {
-    let world = World::new().await;
-    world.gw.system.redirect(&format!("{PUBLIC_IP}:443"), sender(600_000).await);
-    world.gw.update(|netmap| netmap.me.exit = Some(ExitRole { bandwidth_mbps: Some(8), ..ExitRole::default() })).await;
+i3t_lane::on_both_transports! {
+    async fn the_bandwidth_cap_holds_a_download_to_its_rate() {
+        let world = World::new().await;
+        world.gw.system.redirect(&format!("{PUBLIC_IP}:443"), sender(600_000).await);
+        world.gw.update(|netmap| netmap.me.exit = Some(ExitRole { bandwidth_mbps: Some(8), ..ExitRole::default() })).await;
 
-    let started = Instant::now();
-    let mut stream = socks5(world.socks().await, Some(("gw", "")), PUBLIC_IP, 443).await.connected();
-    let mut received = Vec::new();
-    timeout(Duration::from_secs(10), stream.read_to_end(&mut received)).await.unwrap().unwrap();
-    let took = started.elapsed();
-    assert_eq!(received.len(), 600_000, "限速不丢数据");
-    // 每秒 100 万字节，开头能突发 10 万字节：60 万字节至少要半秒。
-    assert!(took >= Duration::from_millis(450), "8 Mbit/s 的上限下载 600KB 只用了 {took:?}");
-    assert!(took < Duration::from_secs(3), "也不该慢得离谱：{took:?}");
+        let started = Instant::now();
+        let mut stream = socks5(world.socks().await, Some(("gw", "")), PUBLIC_IP, 443).await.connected();
+        let mut received = Vec::new();
+        timeout(Duration::from_secs(10), stream.read_to_end(&mut received)).await.unwrap().unwrap();
+        let took = started.elapsed();
+        assert_eq!(received.len(), 600_000, "限速不丢数据");
+        // 每秒 100 万字节，开头能突发 10 万字节：60 万字节至少要半秒。
+        assert!(took >= Duration::from_millis(450), "8 Mbit/s 的上限下载 600KB 只用了 {took:?}");
+        assert!(took < Duration::from_secs(3), "也不该慢得离谱：{took:?}");
+    }
 }
 
-#[tokio::test]
-async fn a_spent_quota_cuts_the_running_flow_refuses_new_ones_and_survives_a_restart() {
-    let world = World::new().await;
-    world.gw.system.redirect(&format!("{PUBLIC_IP}:443"), sender(300_000).await);
-    world.gw.update(|netmap| netmap.me.exit = Some(ExitRole { quota_bytes: Some(100_000), ..ExitRole::default() })).await;
-    let careful = careful_socks(&world).await;
+i3t_lane::on_both_transports! {
+    async fn a_spent_quota_cuts_the_running_flow_refuses_new_ones_and_survives_a_restart() {
+        let world = World::new().await;
+        world.gw.system.redirect(&format!("{PUBLIC_IP}:443"), sender(300_000).await);
+        world.gw.update(|netmap| netmap.me.exit = Some(ExitRole { quota_bytes: Some(100_000), ..ExitRole::default() })).await;
+        let careful = careful_socks(&world).await;
 
-    // 下载到一半配额用完：流在那一刻被断开，客户端看到的是重置，不是正常结束。
-    let mut stream = socks5(world.socks().await, Some(("gw", "")), PUBLIC_IP, 443).await.connected();
-    let (data, end) = drain(&mut stream).await;
-    assert_reset(&end);
-    assert!(data.len() <= 100_000, "配额之外的数据不再送出：收到 {}", data.len());
-    let quota = world.gw.exit.stats().quota.unwrap();
-    assert_eq!(quota.limit_bytes, 100_000);
-    assert!(quota.used_bytes >= 100_000, "{quota:?}");
-    assert!(quota.period.start <= quota.period.end);
+        // 下载到一半配额用完：流在那一刻被断开，客户端看到的是重置，不是正常结束。
+        let mut stream = socks5(world.socks().await, Some(("gw", "")), PUBLIC_IP, 443).await.connected();
+        let (data, end) = drain(&mut stream).await;
+        assert_reset(&end);
+        assert!(data.len() <= 100_000, "配额之外的数据不再送出：收到 {}", data.len());
+        let quota = world.gw.exit.stats().quota.unwrap();
+        assert_eq!(quota.limit_bytes, 100_000);
+        assert!(quota.used_bytes >= 100_000, "{quota:?}");
+        assert!(quota.period.start <= quota.period.end);
 
-    // 新的请求直接拒绝，状态说明是配额用完了：SOCKS5 回 0x02。
-    assert_eq!(socks5(careful, Some(("gw", "")), PUBLIC_IP, 443).await.failed(), 2);
-    assert_eq!(world.gw.exit.stats().refused, 1);
+        // 新的请求直接拒绝，状态说明是配额用完了：SOCKS5 回 0x02。
+        assert_eq!(socks5(careful, Some(("gw", "")), PUBLIC_IP, 443).await.failed(), 2);
+        assert_eq!(world.gw.exit.stats().refused, 1);
 
-    // 节点重启：用量从存下来的那一份接着记，配额还是用完的。
-    let saved = world.gw.exit.quota_state();
-    assert_eq!(saved.used_bytes, quota.used_bytes);
-    let mut netmap = common::netmap(GW);
-    netmap.me.exit = Some(ExitRole { quota_bytes: Some(100_000), ..ExitRole::default() });
-    let (_sender, receiver) = watch::channel(Arc::new(netmap));
-    let outbound = Outbound::new(receiver.clone(), world.gw.system.clone());
-    let (connector, _) = world.mesh.join(node(9));
-    let restarted = Exit::new(receiver, outbound, Arc::new(connector)).with_quota_state(saved);
-    assert_eq!(restarted.stats().quota.map(|quota| quota.used_bytes), Some(saved.used_bytes));
+        // 节点重启：用量从存下来的那一份接着记，配额还是用完的。
+        let saved = world.gw.exit.quota_state();
+        assert_eq!(saved.used_bytes, quota.used_bytes);
+        let mut netmap = common::netmap(GW);
+        netmap.me.exit = Some(ExitRole { quota_bytes: Some(100_000), ..ExitRole::default() });
+        let (_sender, receiver) = watch::channel(Arc::new(netmap));
+        let outbound = Outbound::new(receiver.clone(), world.gw.system.clone());
+        let (connector, _) = world.mesh.join(node(9));
+        let restarted = Exit::new(receiver, outbound, Arc::new(connector)).with_quota_state(saved);
+        assert_eq!(restarted.stats().quota.map(|quota| quota.used_bytes), Some(saved.used_bytes));
+    }
 }
 
-#[tokio::test]
-async fn the_connect_budget_stops_one_initiator_from_hammering_one_target() {
-    let world = World::new().await;
-    world.gw.system.redirect(&format!("{PUBLIC_IP}:443"), echo_server().await);
-    world.gw.system.redirect(&format!("{PUBLIC_IP}:80"), echo_server().await);
-    world.gw.update(|netmap| netmap.me.exit = Some(ExitRole { connects_per_minute: Some(2), ..ExitRole::default() })).await;
-    let careful = careful_socks(&world).await;
+i3t_lane::on_both_transports! {
+    async fn the_connect_budget_stops_one_initiator_from_hammering_one_target() {
+        let world = World::new().await;
+        world.gw.system.redirect(&format!("{PUBLIC_IP}:443"), echo_server().await);
+        world.gw.system.redirect(&format!("{PUBLIC_IP}:80"), echo_server().await);
+        world.gw.update(|netmap| netmap.me.exit = Some(ExitRole { connects_per_minute: Some(2), ..ExitRole::default() })).await;
+        let careful = careful_socks(&world).await;
 
-    for _ in 0..2 {
+        for _ in 0..2 {
+            let mut stream = socks5(careful, Some(("gw", "")), PUBLIC_IP, 443).await.connected();
+            assert_echo(&mut stream).await;
+        }
+        assert_eq!(socks5(careful, Some(("gw", "")), PUBLIC_IP, 443).await.failed(), 1, "第三次超过了预算");
+        let mut other = socks5(careful, Some(("gw", "")), PUBLIC_IP, 80).await.connected();
+        assert_echo(&mut other).await;
+        assert_eq!(world.gw.exit.stats().refused, 1);
+        assert_eq!(world.gw.system.connected().len(), 3, "被拒绝的那一次没有去连目标");
+    }
+}
+
+i3t_lane::on_both_transports! {
+    async fn an_ipv4_only_exit_connects_only_to_ipv4_addresses() {
+        let world = World::new().await;
+        let echo = echo_server().await;
+        world.gw.system.redirect(&format!("{PUBLIC_IP}:443"), echo);
+        world.gw.system.name("dual.example", &["2606:4700::1", PUBLIC_IP]);
+        world.gw.system.name("v6.example", &["2606:4700::1"]);
+        world.gw.update(|netmap| netmap.me.exit = Some(ExitRole { family: IpFamily::Ipv4, ..ExitRole::default() })).await;
+        let careful = careful_socks(&world).await;
+
+        let mut stream = socks5(careful, Some(("gw", "")), "dual.example", 443).await.connected();
+        assert_echo(&mut stream).await;
+        assert_eq!(world.gw.system.connected(), [format!("{PUBLIC_IP}:443").parse().unwrap()], "IPv6 的地址没有去试");
+        assert_eq!(socks5(careful, Some(("gw", "")), "v6.example", 443).await.failed(), 2);
+        assert_eq!(socks5(careful, Some(("gw", "")), "2606:4700::1", 443).await.failed(), 2);
+        assert_eq!(world.gw.system.connected().len(), 1);
+    }
+}
+
+i3t_lane::on_both_transports! {
+    async fn a_draining_exit_refuses_new_flows_with_its_own_status_after_the_access_check() {
+        let world = World::new().await;
+        world.gw.system.redirect(&format!("{PUBLIC_IP}:443"), echo_server().await);
+        let careful = careful_socks(&world).await;
+        let mut established = socks5(careful, Some(("gw", "")), PUBLIC_IP, 443).await.connected();
+        assert_echo(&mut established).await;
+
+        world.gw.exit.set_draining(Some("节点正在排空，准备更新到 0.2.0 后重启".to_owned()));
+        assert_eq!(socks5(careful, Some(("gw", "")), PUBLIC_IP, 443).await.failed(), 1, "SOCKS5 回 0x01：换一个出口或者稍后再试");
+        assert_eq!(socks5(careful, None, "10.66.0.2", 22).await.failed(), 1, "节点自己的服务也不接");
+        let stats = world.gw.exit.stats();
+        assert_eq!((stats.drained, stats.refused, stats.failed_by_exit, stats.draining), (2, 2, 0, true), "排空不算出口坏了");
+        assert_echo(&mut established).await;
+
+        // 不能访问这个节点的发起方看不出它在排空。
+        world.gw.update(|netmap| peer_mut(netmap, LAPTOP).inbound = false).await;
+        assert_eq!(socks5(careful, Some(("gw", "")), PUBLIC_IP, 443).await.failed(), 2);
+        assert_eq!(world.gw.exit.stats().drained, 2);
+
+        world.gw.update(|netmap| peer_mut(netmap, LAPTOP).inbound = true).await;
+        world.gw.exit.set_draining(None);
         let mut stream = socks5(careful, Some(("gw", "")), PUBLIC_IP, 443).await.connected();
         assert_echo(&mut stream).await;
     }
-    assert_eq!(socks5(careful, Some(("gw", "")), PUBLIC_IP, 443).await.failed(), 1, "第三次超过了预算");
-    let mut other = socks5(careful, Some(("gw", "")), PUBLIC_IP, 80).await.connected();
-    assert_echo(&mut other).await;
-    assert_eq!(world.gw.exit.stats().refused, 1);
-    assert_eq!(world.gw.system.connected().len(), 3, "被拒绝的那一次没有去连目标");
-}
-
-#[tokio::test]
-async fn an_ipv4_only_exit_connects_only_to_ipv4_addresses() {
-    let world = World::new().await;
-    let echo = echo_server().await;
-    world.gw.system.redirect(&format!("{PUBLIC_IP}:443"), echo);
-    world.gw.system.name("dual.example", &["2606:4700::1", PUBLIC_IP]);
-    world.gw.system.name("v6.example", &["2606:4700::1"]);
-    world.gw.update(|netmap| netmap.me.exit = Some(ExitRole { family: IpFamily::Ipv4, ..ExitRole::default() })).await;
-    let careful = careful_socks(&world).await;
-
-    let mut stream = socks5(careful, Some(("gw", "")), "dual.example", 443).await.connected();
-    assert_echo(&mut stream).await;
-    assert_eq!(world.gw.system.connected(), [format!("{PUBLIC_IP}:443").parse().unwrap()], "IPv6 的地址没有去试");
-    assert_eq!(socks5(careful, Some(("gw", "")), "v6.example", 443).await.failed(), 2);
-    assert_eq!(socks5(careful, Some(("gw", "")), "2606:4700::1", 443).await.failed(), 2);
-    assert_eq!(world.gw.system.connected().len(), 1);
-}
-
-#[tokio::test]
-async fn a_draining_exit_refuses_new_flows_with_its_own_status_after_the_access_check() {
-    let world = World::new().await;
-    world.gw.system.redirect(&format!("{PUBLIC_IP}:443"), echo_server().await);
-    let careful = careful_socks(&world).await;
-    let mut established = socks5(careful, Some(("gw", "")), PUBLIC_IP, 443).await.connected();
-    assert_echo(&mut established).await;
-
-    world.gw.exit.set_draining(Some("节点正在排空，准备更新到 0.2.0 后重启".to_owned()));
-    assert_eq!(socks5(careful, Some(("gw", "")), PUBLIC_IP, 443).await.failed(), 1, "SOCKS5 回 0x01：换一个出口或者稍后再试");
-    assert_eq!(socks5(careful, None, "10.66.0.2", 22).await.failed(), 1, "节点自己的服务也不接");
-    let stats = world.gw.exit.stats();
-    assert_eq!((stats.drained, stats.refused, stats.failed_by_exit, stats.draining), (2, 2, 0, true), "排空不算出口坏了");
-    assert_echo(&mut established).await;
-
-    // 不能访问这个节点的发起方看不出它在排空。
-    world.gw.update(|netmap| peer_mut(netmap, LAPTOP).inbound = false).await;
-    assert_eq!(socks5(careful, Some(("gw", "")), PUBLIC_IP, 443).await.failed(), 2);
-    assert_eq!(world.gw.exit.stats().drained, 2);
-
-    world.gw.update(|netmap| peer_mut(netmap, LAPTOP).inbound = true).await;
-    world.gw.exit.set_draining(None);
-    let mut stream = socks5(careful, Some(("gw", "")), PUBLIC_IP, 443).await.connected();
-    assert_echo(&mut stream).await;
 }
 
 fn tcp_forward(id: u32, bind: &str, target: u32) -> Forward {
     Forward { id, protocol: ForwardProtocol::Tcp, bind: bind.parse().unwrap(), target: node(target), allow_from: Vec::new(), class: None }
 }
 
-#[tokio::test]
-async fn a_forward_on_a_virtual_ip_reaches_a_service_on_another_node_when_the_access_rules_allow_it() {
-    let world = World::new().await;
-    let echo = echo_server().await;
-    // gw 把 nas 回环上的服务发布在 gw 自己的虚拟 IP 的 9100 端口上。
-    world.gw.update(|netmap| netmap.me.forwards.push(tcp_forward(9, "10.66.0.2:9100", NAS))).await;
-    world
-        .nas
-        .update(|netmap| {
-            netmap.me.forward_targets.push(ForwardTarget { id: 9, protocol: ForwardProtocol::Tcp, addr: echo, listener: node(GW) });
-        })
-        .await;
+i3t_lane::on_both_transports! {
+    async fn a_forward_on_a_virtual_ip_reaches_a_service_on_another_node_when_the_access_rules_allow_it() {
+        let world = World::new().await;
+        let echo = echo_server().await;
+        // gw 把 nas 回环上的服务发布在 gw 自己的虚拟 IP 的 9100 端口上。
+        world.gw.update(|netmap| netmap.me.forwards.push(tcp_forward(9, "10.66.0.2:9100", NAS))).await;
+        world
+            .nas
+            .update(|netmap| {
+                netmap.me.forward_targets.push(ForwardTarget { id: 9, protocol: ForwardProtocol::Tcp, addr: echo, listener: node(GW) });
+            })
+            .await;
 
-    let mut stream = socks5(world.socks().await, None, "10.66.0.2", 9100).await.connected();
-    assert_echo(&mut stream).await;
-    stream.shutdown().await.unwrap();
-    assert!(drain(&mut stream).await.1.is_ok(), "正常结束一路传过去，也一路传回来");
-    assert_eq!(world.nas.system.connected(), [echo], "是 nas 去连的目标");
-    common::eventually("gw 记下接力的流", || world.gw.exit.stats().bytes_to_target >= common::ECHO_LEN).await;
+        let mut stream = socks5(world.socks().await, None, "10.66.0.2", 9100).await.connected();
+        assert_echo(&mut stream).await;
+        stream.shutdown().await.unwrap();
+        assert!(drain(&mut stream).await.1.is_ok(), "正常结束一路传过去，也一路传回来");
+        assert_eq!(world.nas.system.connected(), [echo], "是 nas 去连的目标");
+        common::eventually("gw 记下接力的流", || world.gw.exit.stats().bytes_to_target >= common::ECHO_LEN).await;
 
-    // 访问规则不允许 gw 访问 nas：gw 不替它接力，客户端拿到"不允许"。
-    world.gw.update(|netmap| peer_mut(netmap, NAS).outbound = false).await;
-    assert_eq!(socks5(world.socks().await, None, "10.66.0.2", 9100).await.failed(), 2);
-    assert_eq!(world.nas.exit.stats().total, 1, "nas 根本没有收到第二个请求");
+        // 访问规则不允许 gw 访问 nas：gw 不替它接力，客户端拿到"不允许"。
+        world.gw.update(|netmap| peer_mut(netmap, NAS).outbound = false).await;
+        assert_eq!(socks5(world.socks().await, None, "10.66.0.2", 9100).await.failed(), 2);
+        assert_eq!(world.nas.exit.stats().total, 1, "nas 根本没有收到第二个请求");
 
-    // 允许了，但 nas 上没有下发这一条（或者下发给了别的监听节点）：nas 的拒绝原样转给客户端。
-    world.gw.update(|netmap| peer_mut(netmap, NAS).outbound = true).await;
-    world.nas.update(|netmap| netmap.me.forward_targets[0].listener = node(LAPTOP)).await;
-    assert_eq!(socks5(world.socks().await, None, "10.66.0.2", 9100).await.failed(), 2);
-    assert_eq!(world.nas.exit.stats().refused, 1);
+        // 允许了，但 nas 上没有下发这一条（或者下发给了别的监听节点）：nas 的拒绝原样转给客户端。
+        world.gw.update(|netmap| peer_mut(netmap, NAS).outbound = true).await;
+        world.nas.update(|netmap| netmap.me.forward_targets[0].listener = node(LAPTOP)).await;
+        assert_eq!(socks5(world.socks().await, None, "10.66.0.2", 9100).await.failed(), 2);
+        assert_eq!(world.nas.exit.stats().refused, 1);
 
-    // 来源白名单照样按发起节点的虚拟 IP 查。
-    world.nas.update(|netmap| netmap.me.forward_targets[0].listener = node(GW)).await;
-    world.gw.update(|netmap| netmap.me.forwards[0].allow_from = vec!["10.66.0.3/32".parse().unwrap()]).await;
-    assert_eq!(socks5(world.socks().await, None, "10.66.0.2", 9100).await.failed(), 2);
+        // 来源白名单照样按发起节点的虚拟 IP 查。
+        world.nas.update(|netmap| netmap.me.forward_targets[0].listener = node(GW)).await;
+        world.gw.update(|netmap| netmap.me.forwards[0].allow_from = vec!["10.66.0.3/32".parse().unwrap()]).await;
+        assert_eq!(socks5(world.socks().await, None, "10.66.0.2", 9100).await.failed(), 2);
+    }
 }
 
 #[tokio::test]

@@ -155,7 +155,7 @@ fn is_lan_literal(ip: IpAddr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use i3t_model::netmap::{ExitRole, ListenerProtocol, LocalNode, Network, PeerExit};
+    use i3t_model::netmap::{ExitRole, LaneMode, ListenerProtocol, LocalNode, Network, PeerExit};
     use i3t_proto::PublicKey;
 
     use super::*;
@@ -177,6 +177,7 @@ mod tests {
             exit,
             dial_out_only: false,
             keep_alive: false,
+            lane: LaneMode::Off,
         }
     }
 

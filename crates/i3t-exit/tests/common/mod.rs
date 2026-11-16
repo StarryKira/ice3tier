@@ -6,6 +6,9 @@
 //!
 //! 出口和操作系统之间换成了 [`FakeSystem`]：网卡、域名解析由测试给出，"公网地址"被引到本机的测试服务上。
 //! 出站策略的检查在它之上，照常进行。
+//!
+//! 用 `i3t_lane::on_both_transports!` 写的测试各跑两遍：一遍所有的流都在内存里的连接上，一遍承载 TCP 连接的流
+//! 走回环上真的 lane（独占 TCP），数据报和别的流仍然在内存里的连接上。两遍的期望完全一样。
 
 // 每个测试文件各用到这里的一部分，没用到的在那个文件里会被报成死代码。
 #![allow(dead_code)]
@@ -22,9 +25,11 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use i3t_access::{Access, AccessStatus, ListenState};
 use i3t_exit::{Exit, Os, Outbound, ResolveError, System};
-use i3t_flow::memory::{MemoryConnector, MemoryMesh};
+use i3t_flow::memory::{MemoryAcceptor, MemoryConnector, MemoryMesh};
+use i3t_lane::testing::LaneMesh;
+use i3t_lane::{LaneAcceptor, LaneConnector};
 use i3t_model::Netmap;
-use i3t_model::netmap::{Credential, ExitRole, Listener, ListenerProtocol, LocalNode, Network, Peer, PeerExit, TokenHash};
+use i3t_model::netmap::{Credential, ExitRole, LaneMode, Listener, ListenerProtocol, LocalNode, Network, Peer, PeerExit, TokenHash};
 use i3t_proto::{NodeId, PublicKey};
 use ipnet::IpNet;
 use ring::digest;
@@ -78,6 +83,7 @@ pub fn peer(raw: u32, exit: Option<PeerExit>) -> Peer {
         exit,
         dial_out_only: false,
         keep_alive: false,
+        lane: LaneMode::Off,
     }
 }
 
@@ -276,21 +282,23 @@ pub struct Node {
     pub system: FakeSystem,
     /// 数据面报出来的本节点的候选端点（反射地址、端口映射拿到的地址）。测试往里放什么，出口就认为自己对外是什么地址。
     pub own_endpoints: Arc<Mutex<Vec<SocketAddr>>>,
-    pub access: Arc<Access<MemoryConnector, Outbound<FakeSystem>>>,
-    pub exit: Arc<Exit<FakeSystem, MemoryConnector>>,
+    pub access: Arc<Access<LaneConnector<MemoryConnector>, Outbound<FakeSystem>>>,
+    pub exit: Arc<Exit<FakeSystem, LaneConnector<MemoryConnector>>>,
     netmap: watch::Sender<Arc<Netmap>>,
 }
 
 impl Node {
-    pub fn start(mesh: &MemoryMesh, netmap: Netmap) -> Self {
-        Self::start_with_udp_idle(mesh, netmap, None)
+    pub async fn start(mesh: &MemoryMesh, lanes: &LaneMesh, netmap: Netmap) -> Self {
+        Self::start_with_udp_idle(mesh, lanes, netmap, None).await
     }
 
     /// 同 [`Node::start`]。`udp_idle` 有值时，数据报上下文和 UDP 端口转发的会话空闲这么久就回收，而不是默认的 60 秒。
-    pub fn start_with_udp_idle(mesh: &MemoryMesh, netmap: Netmap, udp_idle: Option<Duration>) -> Self {
+    pub async fn start_with_udp_idle(mesh: &MemoryMesh, lane_mesh: &LaneMesh, netmap: Netmap, udp_idle: Option<Duration>) -> Self {
         let id = netmap.me.id;
         let (connector, acceptor) = mesh.join(id);
-        let connector = Arc::new(connector);
+        let lanes = lane_mesh.join(id).await;
+        let connector = Arc::new(LaneConnector::new(Arc::new(connector), Arc::clone(&lanes), lane_mesh.choose()));
+        let acceptor: LaneAcceptor<MemoryAcceptor> = LaneAcceptor::new(Arc::new(acceptor), lanes);
         let (sender, receiver) = watch::channel(Arc::new(netmap));
         let system = FakeSystem::default();
         let own_endpoints: Arc<Mutex<Vec<SocketAddr>>> = Arc::default();
@@ -367,6 +375,7 @@ fn local_addr(state: &ListenState) -> SocketAddr {
 /// 三个节点。laptop 上有一个 SOCKS5 监听器 `socks` 和一个 HTTP 监听器 `http`，都在回环上。
 pub struct World {
     pub mesh: MemoryMesh,
+    pub lanes: LaneMesh,
     pub laptop: Node,
     pub gw: Node,
     pub nas: Node,
@@ -384,11 +393,14 @@ impl World {
 
     async fn start(udp_idle: Option<Duration>) -> Self {
         let mesh = MemoryMesh::new();
+        let lanes = LaneMesh::for_current_test();
         let mut laptop = netmap(LAPTOP);
         laptop.me.listeners =
             vec![listener("socks", ListenerProtocol::Socks5, "127.0.0.1:0"), listener("http", ListenerProtocol::Http, "127.0.0.1:0")];
-        let node = |netmap| Node::start_with_udp_idle(&mesh, netmap, udp_idle);
-        let world = Self { laptop: node(laptop), gw: node(netmap(GW)), nas: node(netmap(NAS)), mesh: mesh.clone() };
+        let laptop = Node::start_with_udp_idle(&mesh, &lanes, laptop, udp_idle).await;
+        let gw = Node::start_with_udp_idle(&mesh, &lanes, netmap(GW), udp_idle).await;
+        let nas = Node::start_with_udp_idle(&mesh, &lanes, netmap(NAS), udp_idle).await;
+        let world = Self { laptop, gw, nas, mesh: mesh.clone(), lanes };
         world.laptop.settled().await;
         world
     }

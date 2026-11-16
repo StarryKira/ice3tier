@@ -16,7 +16,8 @@ use i3t_flow::memory::{MemoryConnector, MemoryMesh};
 use i3t_flow::{Handler, Request, datagram};
 use i3t_model::Netmap;
 use i3t_model::netmap::{
-    Credential, DefaultAction, Forward, ForwardProtocol, Listener, ListenerProtocol, LocalNode, Network, Peer, PeerExit, TokenHash,
+    Credential, DefaultAction, Forward, ForwardProtocol, LaneMode, Listener, ListenerProtocol, LocalNode, Network, Peer, PeerExit,
+    TokenHash,
 };
 use i3t_proto::flow::{Class, Host, OpenDatagrams, Reply, Status, Target};
 use i3t_proto::{NodeId, PublicKey};
@@ -75,6 +76,7 @@ fn netmap() -> Netmap {
             exit: Some(PeerExit { lan: true, class: None }),
             dial_out_only: false,
             keep_alive: false,
+            lane: LaneMode::Off,
         }],
         relays: Vec::new(),
         relay_clients: Vec::new(),

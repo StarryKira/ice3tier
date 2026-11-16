@@ -15,10 +15,14 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use i3t_access::{Access, AccessStatus, EgressPolicy, ListenState, LocalEgress, PortBook};
 use i3t_conn::{RecvStream, SendStream};
-use i3t_flow::memory::{MemoryConnector, MemoryMesh};
+use i3t_flow::memory::{MemoryAcceptor, MemoryConnector, MemoryMesh};
 use i3t_flow::{Handler, Request};
+use i3t_lane::testing::LaneMesh;
+use i3t_lane::{LaneAcceptor, LaneConnector};
 use i3t_model::Netmap;
-use i3t_model::netmap::{Credential, Forward, ForwardProtocol, Listener, ListenerProtocol, LocalNode, Network, Peer, PeerExit, TokenHash};
+use i3t_model::netmap::{
+    Credential, Forward, ForwardProtocol, LaneMode, Listener, ListenerProtocol, LocalNode, Network, Peer, PeerExit, TokenHash,
+};
 use i3t_proto::flow::{Class, Host, Open, Origin, Reply, Status, Target};
 use i3t_proto::{NodeId, PublicKey};
 use ring::digest;
@@ -75,6 +79,7 @@ fn netmap() -> Netmap {
             exit: Some(PeerExit { lan: true, class: None }),
             dial_out_only: false,
             keep_alive: false,
+            lane: LaneMode::Off,
         }],
         relays: Vec::new(),
         relay_clients: Vec::new(),
@@ -153,7 +158,7 @@ impl LocalEgress for DirectEgress {
 /// 一个跑着的入口，对面是 [`EchoPeer`]。
 struct World {
     netmap: watch::Sender<Arc<Netmap>>,
-    access: Arc<Access<MemoryConnector, DirectEgress>>,
+    access: Arc<Access<LaneConnector<MemoryConnector>, DirectEgress>>,
     egress: DirectEgress,
     /// 对端收到的建流请求，按到达的顺序。
     opens: mpsc::UnboundedReceiver<Open>,
@@ -168,11 +173,16 @@ impl World {
     /// 同 [`World::start`]，入口在开始之前先交给 `prepare` 加上别的设置。
     async fn start_with(
         netmap: Netmap,
-        prepare: impl FnOnce(Access<MemoryConnector, DirectEgress>) -> Access<MemoryConnector, DirectEgress>,
+        prepare: impl FnOnce(Access<LaneConnector<MemoryConnector>, DirectEgress>) -> Access<LaneConnector<MemoryConnector>, DirectEgress>,
     ) -> Self {
         let mesh = MemoryMesh::new();
+        let lane_mesh = LaneMesh::for_current_test();
         let (connector, _) = mesh.join(node(ME));
         let (_, acceptor) = mesh.join(node(GW));
+        let my_lanes = lane_mesh.join(node(ME)).await;
+        let peer_lanes = lane_mesh.join(node(GW)).await;
+        let connector = LaneConnector::new(Arc::new(connector), my_lanes, lane_mesh.choose());
+        let acceptor = LaneAcceptor::<MemoryAcceptor>::new(Arc::new(acceptor), peer_lanes);
         let (opens_sender, opens) = mpsc::unbounded_channel();
         let peer = Arc::new(EchoPeer { opens: opens_sender, echo: echo_server().await });
         tokio::spawn(async move { i3t_flow::serve(&acceptor, peer).await });
@@ -285,72 +295,74 @@ fn internet(host: &str, port: u16) -> Target {
     Target::Internet { host: host.parse().unwrap(), port }
 }
 
-#[tokio::test]
-async fn proxy_requests_become_flows_carrying_target_class_and_origin() {
-    let mut netmap = netmap();
-    netmap.me.listeners =
-        vec![listener("socks", ListenerProtocol::Socks5, "127.0.0.1:0"), listener("http", ListenerProtocol::Http, "127.0.0.1:0")];
-    let mut world = World::start(netmap).await;
-    let socks = world.listener("socks").await;
+i3t_lane::on_both_transports! {
+    async fn proxy_requests_become_flows_carrying_target_class_and_origin() {
+        let mut netmap = netmap();
+        netmap.me.listeners =
+            vec![listener("socks", ListenerProtocol::Socks5, "127.0.0.1:0"), listener("http", ListenerProtocol::Http, "127.0.0.1:0")];
+        let mut world = World::start(netmap).await;
+        let socks = world.listener("socks").await;
 
-    // 用户名写出口和等级，域名原样交给出口去解析。
-    let (code, mut stream) = socks5_connect(socks, "gw+c-i", "", "example.com", 443).await;
-    assert_eq!(code, 0);
-    assert_echo(&mut stream).await;
-    let open = world.next_open().await;
-    assert_eq!(open, Open { target: internet("example.com", 443), class: Class::Interactive, origin: Origin::default() });
+        // 用户名写出口和等级，域名原样交给出口去解析。
+        let (code, mut stream) = socks5_connect(socks, "gw+c-i", "", "example.com", 443).await;
+        assert_eq!(code, 0);
+        assert_echo(&mut stream).await;
+        let open = world.next_open().await;
+        assert_eq!(open, Open { target: internet("example.com", 443), class: Class::Interactive, origin: Origin::default() });
 
-    // 私有地址按"出口的局域网"发。
-    let (code, mut stream) = socks5_connect(socks, "10.66.0.2", "", "192.168.1.10", 8080).await;
-    assert_eq!(code, 0);
-    assert_echo(&mut stream).await;
-    assert_eq!(world.next_open().await.target, Target::Lan { addr: "192.168.1.10:8080".parse().unwrap() });
+        // 私有地址按"出口的局域网"发。
+        let (code, mut stream) = socks5_connect(socks, "10.66.0.2", "", "192.168.1.10", 8080).await;
+        assert_eq!(code, 0);
+        assert_echo(&mut stream).await;
+        assert_eq!(world.next_open().await.target, Target::Lan { addr: "192.168.1.10:8080".parse().unwrap() });
 
-    // 组网地址是那个节点自己的端口，不需要用户名。
-    let mut stream = TcpStream::connect(socks).await.unwrap();
-    exchange(&mut stream, &[5, 1, 0], &[5, 0]).await;
-    exchange(&mut stream, &[5, 1, 0, 1, 10, 66, 0, 2, 0, 22], &[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await;
-    assert_echo(&mut stream).await;
-    assert_eq!(world.next_open().await, Open { target: Target::Node { port: 22 }, class: Class::Auto, origin: Origin::default() });
+        // 组网地址是那个节点自己的端口，不需要用户名。
+        let mut stream = TcpStream::connect(socks).await.unwrap();
+        exchange(&mut stream, &[5, 1, 0], &[5, 0]).await;
+        exchange(&mut stream, &[5, 1, 0, 1, 10, 66, 0, 2, 0, 22], &[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await;
+        assert_echo(&mut stream).await;
+        assert_eq!(world.next_open().await, Open { target: Target::Node { port: 22 }, class: Class::Auto, origin: Origin::default() });
 
-    // HTTP 代理的用户名是同一个意思。
-    let mut stream = TcpStream::connect(world.listener("http").await).await.unwrap();
-    let request = format!("CONNECT example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic {}\r\n\r\n", STANDARD.encode("gw+c-b:"));
-    exchange(&mut stream, request.as_bytes(), b"HTTP/1.1 200 Connection established\r\n\r\n").await;
-    assert_echo(&mut stream).await;
-    assert_eq!(world.next_open().await, Open { target: internet("example.com", 443), class: Class::Bulk, origin: Origin::default() });
+        // HTTP 代理的用户名是同一个意思。
+        let mut stream = TcpStream::connect(world.listener("http").await).await.unwrap();
+        let request = format!("CONNECT example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic {}\r\n\r\n", STANDARD.encode("gw+c-b:"));
+        exchange(&mut stream, request.as_bytes(), b"HTTP/1.1 200 Connection established\r\n\r\n").await;
+        assert_echo(&mut stream).await;
+        assert_eq!(world.next_open().await, Open { target: internet("example.com", 443), class: Class::Bulk, origin: Origin::default() });
+    }
 }
 
-#[tokio::test]
-async fn the_credential_name_and_the_client_address_travel_in_the_origin() {
-    let token = "s3cret-token";
-    let hash = digest::digest(&digest::SHA256, token.as_bytes());
-    let mut netmap = netmap();
-    netmap.me.listeners = vec![listener("lan", ListenerProtocol::Socks5, "0.0.0.0:0")];
-    netmap.credentials = vec![Credential {
-        name: "gateway".into(),
-        token: TokenHash::from_bytes(hash.as_ref().try_into().unwrap()),
-        max_concurrent: None,
-        id: 1,
-        exhausted: false,
-    }];
-    let mut world = World::start(netmap).await;
-    let port = world.listener("lan").await.port();
+i3t_lane::on_both_transports! {
+    async fn the_credential_name_and_the_client_address_travel_in_the_origin() {
+        let token = "s3cret-token";
+        let hash = digest::digest(&digest::SHA256, token.as_bytes());
+        let mut netmap = netmap();
+        netmap.me.listeners = vec![listener("lan", ListenerProtocol::Socks5, "0.0.0.0:0")];
+        netmap.credentials = vec![Credential {
+            name: "gateway".into(),
+            token: TokenHash::from_bytes(hash.as_ref().try_into().unwrap()),
+            max_concurrent: None,
+            id: 1,
+            exhausted: false,
+        }];
+        let mut world = World::start(netmap).await;
+        let port = world.listener("lan").await.port();
 
-    // 从回环连过去：凭据的名字带上，回环地址不带。
-    let (code, _stream) = socks5_connect(SocketAddr::new([127, 0, 0, 1].into(), port), "gw", token, "example.com", 443).await;
-    assert_eq!(code, 0);
-    assert_eq!(world.next_open().await.origin, Origin { credential: Some("gateway".into()), client: None });
+        // 从回环连过去：凭据的名字带上，回环地址不带。
+        let (code, _stream) = socks5_connect(SocketAddr::new([127, 0, 0, 1].into(), port), "gw", token, "example.com", 443).await;
+        assert_eq!(code, 0);
+        assert_eq!(world.next_open().await.origin, Origin { credential: Some("gateway".into()), client: None });
 
-    // 从这台机器的局域网地址连过去（有的话）：入口看到的客户端地址也带上。
-    let Some(lan_ip) = non_loopback_address() else {
-        eprintln!("跳过后半段：这台机器只有回环网卡");
-        return;
-    };
-    let (code, stream) = socks5_connect(SocketAddr::new(lan_ip, port), "gw", token, "example.com", 443).await;
-    assert_eq!(code, 0);
-    let origin = world.next_open().await.origin;
-    assert_eq!(origin, Origin { credential: Some("gateway".into()), client: Some(stream.local_addr().unwrap()) });
+        // 从这台机器的局域网地址连过去（有的话）：入口看到的客户端地址也带上。
+        let Some(lan_ip) = non_loopback_address() else {
+            eprintln!("跳过后半段：这台机器只有回环网卡");
+            return;
+        };
+        let (code, stream) = socks5_connect(SocketAddr::new(lan_ip, port), "gw", token, "example.com", 443).await;
+        assert_eq!(code, 0);
+        let origin = world.next_open().await.origin;
+        assert_eq!(origin, Origin { credential: Some("gateway".into()), client: Some(stream.local_addr().unwrap()) });
+    }
 }
 
 /// 这台机器的一个非回环 IPv4 地址：往外"连"一个 UDP socket（不发任何包），看系统给它挑的本地地址。
@@ -360,25 +372,26 @@ fn non_loopback_address() -> Option<IpAddr> {
     socket.local_addr().ok().map(|addr| addr.ip()).filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
 }
 
-#[tokio::test]
-async fn a_port_forward_turns_each_connection_into_a_flow_for_its_id() {
-    let mut netmap = netmap();
-    netmap.me.forwards = vec![forward(7, ForwardProtocol::Tcp, "127.0.0.1:0")];
-    let mut world = World::start(netmap).await;
+i3t_lane::on_both_transports! {
+    async fn a_port_forward_turns_each_connection_into_a_flow_for_its_id() {
+        let mut netmap = netmap();
+        netmap.me.forwards = vec![forward(7, ForwardProtocol::Tcp, "127.0.0.1:0")];
+        let mut world = World::start(netmap).await;
 
-    let mut stream = TcpStream::connect(world.forward(7).await).await.unwrap();
-    assert_echo(&mut stream).await;
-    assert_eq!(world.next_open().await, Open { target: Target::Forward { id: 7 }, class: Class::Auto, origin: Origin::default() });
-    assert_eq!(world.settled().await.forwards[0].active.get(), 1);
-    drop(stream);
-    let active = world.settled().await.forwards[0].active.clone();
-    timeout(PATIENCE, async {
-        while active.get() != 0 {
-            sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await
-    .expect("连接结束之后计数应该归零");
+        let mut stream = TcpStream::connect(world.forward(7).await).await.unwrap();
+        assert_echo(&mut stream).await;
+        assert_eq!(world.next_open().await, Open { target: Target::Forward { id: 7 }, class: Class::Auto, origin: Origin::default() });
+        assert_eq!(world.settled().await.forwards[0].active.get(), 1);
+        drop(stream);
+        let active = world.settled().await.forwards[0].active.clone();
+        timeout(PATIENCE, async {
+            while active.get() != 0 {
+                sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("连接结束之后计数应该归零");
+    }
 }
 
 /// 本进程里一条 TCP 连接（按本端和对端的端口找）的保活计时器还有多久到；没有在走的保活计时器时是 `None`。
@@ -454,38 +467,39 @@ async fn forwards_that_take_no_socket_are_reported_as_such() {
     );
 }
 
-#[tokio::test]
-async fn the_source_allow_list_is_checked_before_anything_else() {
-    let mut netmap = netmap();
-    let mut guarded = listener("socks", ListenerProtocol::Socks5, "127.0.0.1:0");
-    guarded.allow_from = vec!["10.0.0.0/8".parse().unwrap()];
-    netmap.me.listeners = vec![guarded];
-    let mut guarded_forward = forward(7, ForwardProtocol::Tcp, "127.0.0.1:0");
-    guarded_forward.allow_from = vec!["192.168.0.0/16".parse().unwrap()];
-    netmap.me.forwards = vec![guarded_forward];
-    let mut world = World::start(netmap).await;
-    let (socks, forwarded) = (world.listener("socks").await, world.forward(7).await);
+i3t_lane::on_both_transports! {
+    async fn the_source_allow_list_is_checked_before_anything_else() {
+        let mut netmap = netmap();
+        let mut guarded = listener("socks", ListenerProtocol::Socks5, "127.0.0.1:0");
+        guarded.allow_from = vec!["10.0.0.0/8".parse().unwrap()];
+        netmap.me.listeners = vec![guarded];
+        let mut guarded_forward = forward(7, ForwardProtocol::Tcp, "127.0.0.1:0");
+        guarded_forward.allow_from = vec!["192.168.0.0/16".parse().unwrap()];
+        netmap.me.forwards = vec![guarded_forward];
+        let mut world = World::start(netmap).await;
+        let (socks, forwarded) = (world.listener("socks").await, world.forward(7).await);
 
-    // 来源（127.0.0.1）不在白名单里：连接直接被关掉，连握手都不做。
-    let mut stream = TcpStream::connect(socks).await.unwrap();
-    let _ = stream.write_all(&[5, 1, 0]).await;
-    assert_closed(&mut stream).await;
-    let mut stream = TcpStream::connect(forwarded).await.unwrap();
-    assert_closed(&mut stream).await;
-    world.assert_no_open();
+        // 来源（127.0.0.1）不在白名单里：连接直接被关掉，连握手都不做。
+        let mut stream = TcpStream::connect(socks).await.unwrap();
+        let _ = stream.write_all(&[5, 1, 0]).await;
+        assert_closed(&mut stream).await;
+        let mut stream = TcpStream::connect(forwarded).await.unwrap();
+        assert_closed(&mut stream).await;
+        world.assert_no_open();
 
-    // 白名单改了之后新的连接就按新的来，不需要重新绑定。
-    world
-        .update(|netmap| {
-            netmap.me.listeners[0].allow_from.push("127.0.0.0/8".parse().unwrap());
-            netmap.me.forwards[0].allow_from.push("127.0.0.1/32".parse().unwrap());
-        })
-        .await;
-    assert_eq!((world.listener("socks").await, world.forward(7).await), (socks, forwarded));
-    let (code, _stream) = socks5_connect(socks, "gw", "", "example.com", 443).await;
-    assert_eq!(code, 0);
-    let mut stream = TcpStream::connect(forwarded).await.unwrap();
-    assert_echo(&mut stream).await;
+        // 白名单改了之后新的连接就按新的来，不需要重新绑定。
+        world
+            .update(|netmap| {
+                netmap.me.listeners[0].allow_from.push("127.0.0.0/8".parse().unwrap());
+                netmap.me.forwards[0].allow_from.push("127.0.0.1/32".parse().unwrap());
+            })
+            .await;
+        assert_eq!((world.listener("socks").await, world.forward(7).await), (socks, forwarded));
+        let (code, _stream) = socks5_connect(socks, "gw", "", "example.com", 443).await;
+        assert_eq!(code, 0);
+        let mut stream = TcpStream::connect(forwarded).await.unwrap();
+        assert_echo(&mut stream).await;
+    }
 }
 
 #[tokio::test]
@@ -588,34 +602,35 @@ async fn local_egress_is_asked_with_the_policy_that_fits_the_listener() {
     world.assert_no_open();
 }
 
-#[tokio::test]
-async fn stopping_the_manager_closes_the_listeners_and_leaves_connections_alone() {
-    let mut netmap = netmap();
-    netmap.me.listeners = vec![listener("socks", ListenerProtocol::Socks5, "127.0.0.1:0")];
-    let world = World::start(netmap).await;
-    let socks = world.listener("socks").await;
-    let (code, mut established) = socks5_connect(socks, "gw", "", "example.com", 443).await;
-    assert_eq!(code, 0);
-    assert_echo(&mut established).await;
+i3t_lane::on_both_transports! {
+    async fn stopping_the_manager_closes_the_listeners_and_leaves_connections_alone() {
+        let mut netmap = netmap();
+        netmap.me.listeners = vec![listener("socks", ListenerProtocol::Socks5, "127.0.0.1:0")];
+        let world = World::start(netmap).await;
+        let socks = world.listener("socks").await;
+        let (code, mut established) = socks5_connect(socks, "gw", "", "example.com", 443).await;
+        assert_eq!(code, 0);
+        assert_echo(&mut established).await;
 
-    let manager = world.manager;
-    manager.abort();
-    // 任务是被取消的，它的结果只会是"已取消"。
-    let _ = manager.await;
+        let manager = world.manager;
+        manager.abort();
+        // 任务是被取消的，它的结果只会是"已取消"。
+        let _ = manager.await;
 
-    // 接受连接的任务随后被取消，监听的 socket 跟着关掉。
-    let refused = timeout(PATIENCE, async {
-        loop {
-            match TcpStream::connect(socks).await {
-                Ok(_) => sleep(Duration::from_millis(2)).await,
-                Err(error) => break error,
+        // 接受连接的任务随后被取消，监听的 socket 跟着关掉。
+        let refused = timeout(PATIENCE, async {
+            loop {
+                match TcpStream::connect(socks).await {
+                    Ok(_) => sleep(Duration::from_millis(2)).await,
+                    Err(error) => break error,
+                }
             }
-        }
-    })
-    .await
-    .expect("监听应该很快关掉");
-    assert_eq!(refused.kind(), io::ErrorKind::ConnectionRefused);
-    assert_echo(&mut established).await;
+        })
+        .await
+        .expect("监听应该很快关掉");
+        assert_eq!(refused.kind(), io::ErrorKind::ConnectionRefused);
+        assert_echo(&mut established).await;
+    }
 }
 
 /// 一个记在内存里的端口簿，代替装配层存在状态目录里的那一份。克隆出来的是同一本。
@@ -634,36 +649,37 @@ impl PortBook for MemoryPortBook {
     }
 }
 
-#[tokio::test]
-async fn a_forward_on_port_zero_gets_a_port_that_survives_a_restart() {
-    let book = MemoryPortBook::default();
-    let mut map = netmap();
-    map.me.forwards = vec![forward(7, ForwardProtocol::Tcp, "127.0.0.1:0"), forward(8, ForwardProtocol::Udp, "127.0.0.1:0")];
-    let first = World::start_with(map.clone(), |access| access.with_port_book(Arc::new(book.clone()))).await;
-    let (tcp, udp) = (first.forward(7).await, first.forward(8).await);
-    assert_ne!(tcp.port(), 0);
-    assert_eq!(book.port(7), Some(tcp.port()), "挑定的端口记下来了");
-    assert_eq!(book.port(8), Some(udp.port()));
-    let mut stream = TcpStream::connect(tcp).await.unwrap();
-    assert_echo(&mut stream).await;
-    drop(stream);
-    first.manager.abort();
-    // 等监听真的关掉，再像重启那样从头开一个入口。
-    let _ = first.manager.await;
-    sleep(Duration::from_millis(20)).await;
+i3t_lane::on_both_transports! {
+    async fn a_forward_on_port_zero_gets_a_port_that_survives_a_restart() {
+        let book = MemoryPortBook::default();
+        let mut map = netmap();
+        map.me.forwards = vec![forward(7, ForwardProtocol::Tcp, "127.0.0.1:0"), forward(8, ForwardProtocol::Udp, "127.0.0.1:0")];
+        let first = World::start_with(map.clone(), |access| access.with_port_book(Arc::new(book.clone()))).await;
+        let (tcp, udp) = (first.forward(7).await, first.forward(8).await);
+        assert_ne!(tcp.port(), 0);
+        assert_eq!(book.port(7), Some(tcp.port()), "挑定的端口记下来了");
+        assert_eq!(book.port(8), Some(udp.port()));
+        let mut stream = TcpStream::connect(tcp).await.unwrap();
+        assert_echo(&mut stream).await;
+        drop(stream);
+        first.manager.abort();
+        // 等监听真的关掉，再像重启那样从头开一个入口。
+        let _ = first.manager.await;
+        sleep(Duration::from_millis(20)).await;
 
-    let second = World::start_with(map.clone(), |access| access.with_port_book(Arc::new(book.clone()))).await;
-    assert_eq!((second.forward(7).await, second.forward(8).await), (tcp, udp), "重启之后还是同一个端口");
-    second.manager.abort();
-    let _ = second.manager.await;
-    sleep(Duration::from_millis(20)).await;
+        let second = World::start_with(map.clone(), |access| access.with_port_book(Arc::new(book.clone()))).await;
+        assert_eq!((second.forward(7).await, second.forward(8).await), (tcp, udp), "重启之后还是同一个端口");
+        second.manager.abort();
+        let _ = second.manager.await;
+        sleep(Duration::from_millis(20)).await;
 
-    // 记着的端口被别的程序占了：不换端口，照实报"端口被占用"。
-    let squatter = TcpListener::bind(tcp).await.unwrap();
-    let third = World::start_with(map, |access| access.with_port_book(Arc::new(book.clone()))).await;
-    let status = third.settled().await;
-    assert!(matches!(&status.forwards[0].state, ListenState::PortInUse { .. }), "{:?}", status.forwards[0].state);
-    drop(squatter);
+        // 记着的端口被别的程序占了：不换端口，照实报"端口被占用"。
+        let squatter = TcpListener::bind(tcp).await.unwrap();
+        let third = World::start_with(map, |access| access.with_port_book(Arc::new(book.clone()))).await;
+        let status = third.settled().await;
+        assert!(matches!(&status.forwards[0].state, ListenState::PortInUse { .. }), "{:?}", status.forwards[0].state);
+        drop(squatter);
+    }
 }
 
 #[tokio::test]
@@ -680,152 +696,156 @@ async fn a_port_already_taken_by_another_program_is_reported_as_in_use() {
     drop(squatter);
 }
 
-#[tokio::test]
-async fn while_draining_proxies_answer_with_a_proxy_error_forwards_are_reset_and_listeners_stay_open() {
-    let mut map = netmap();
-    map.me.listeners =
-        vec![listener("socks", ListenerProtocol::Socks5, "127.0.0.1:0"), listener("http", ListenerProtocol::Http, "127.0.0.1:0")];
-    map.me.forwards = vec![forward(7, ForwardProtocol::Tcp, "127.0.0.1:0")];
-    let mut world = World::start(map).await;
-    let (socks, http, forwarded) = (world.listener("socks").await, world.listener("http").await, world.forward(7).await);
-    let (code, mut established) = socks5_connect(socks, "gw", "", "example.com", 443).await;
-    assert_eq!(code, 0);
-    world.next_open().await;
+i3t_lane::on_both_transports! {
+    async fn while_draining_proxies_answer_with_a_proxy_error_forwards_are_reset_and_listeners_stay_open() {
+        let mut map = netmap();
+        map.me.listeners =
+            vec![listener("socks", ListenerProtocol::Socks5, "127.0.0.1:0"), listener("http", ListenerProtocol::Http, "127.0.0.1:0")];
+        map.me.forwards = vec![forward(7, ForwardProtocol::Tcp, "127.0.0.1:0")];
+        let mut world = World::start(map).await;
+        let (socks, http, forwarded) = (world.listener("socks").await, world.listener("http").await, world.forward(7).await);
+        let (code, mut established) = socks5_connect(socks, "gw", "", "example.com", 443).await;
+        assert_eq!(code, 0);
+        world.next_open().await;
 
-    world.access.set_draining(Some("准备更新到 0.2.0".to_owned()));
-    assert!(world.access.is_draining());
-    assert_eq!(socks5_connect(socks, "gw", "", "example.com", 443).await.0, 1, "SOCKS5 回 0x01：一般性失败，换一个或者稍后再试");
-    let mut stream = TcpStream::connect(http).await.unwrap();
-    stream.write_all(b"CONNECT example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic Z3c6\r\n\r\n").await.unwrap();
-    let mut answer = Vec::new();
-    let _ = timeout(PATIENCE, stream.read_to_end(&mut answer)).await.unwrap();
-    let answer = String::from_utf8(answer).unwrap();
-    assert!(answer.starts_with("HTTP/1.1 503 Service Unavailable\r\n") && answer.contains("Retry-After: "), "{answer:?}");
-    let mut forwarded_stream = TcpStream::connect(forwarded).await.unwrap();
-    let end = timeout(PATIENCE, forwarded_stream.read_to_end(&mut Vec::new())).await.unwrap();
-    assert_eq!(end.unwrap_err().kind(), io::ErrorKind::ConnectionReset, "端口转发没有地方回错误，连接被重置");
-    world.assert_no_open();
-    assert_eq!(world.access.drained(), 3);
-    let status = world.settled().await;
-    assert!(matches!(status.listeners[0].state, ListenState::Listening { .. }), "排空不关监听");
-    assert_echo(&mut established).await;
+        world.access.set_draining(Some("准备更新到 0.2.0".to_owned()));
+        assert!(world.access.is_draining());
+        assert_eq!(socks5_connect(socks, "gw", "", "example.com", 443).await.0, 1, "SOCKS5 回 0x01：一般性失败，换一个或者稍后再试");
+        let mut stream = TcpStream::connect(http).await.unwrap();
+        stream.write_all(b"CONNECT example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic Z3c6\r\n\r\n").await.unwrap();
+        let mut answer = Vec::new();
+        let _ = timeout(PATIENCE, stream.read_to_end(&mut answer)).await.unwrap();
+        let answer = String::from_utf8(answer).unwrap();
+        assert!(answer.starts_with("HTTP/1.1 503 Service Unavailable\r\n") && answer.contains("Retry-After: "), "{answer:?}");
+        let mut forwarded_stream = TcpStream::connect(forwarded).await.unwrap();
+        let end = timeout(PATIENCE, forwarded_stream.read_to_end(&mut Vec::new())).await.unwrap();
+        assert_eq!(end.unwrap_err().kind(), io::ErrorKind::ConnectionReset, "端口转发没有地方回错误，连接被重置");
+        world.assert_no_open();
+        assert_eq!(world.access.drained(), 3);
+        let status = world.settled().await;
+        assert!(matches!(status.listeners[0].state, ListenState::Listening { .. }), "排空不关监听");
+        assert_echo(&mut established).await;
 
-    world.access.set_draining(None);
-    assert_eq!(socks5_connect(socks, "gw", "", "example.com", 443).await.0, 0, "撤回之后照常接");
-}
-
-#[tokio::test]
-async fn credential_usage_is_counted_and_an_exhausted_credential_is_refused_and_cut_off() {
-    let token = "s3cret-token";
-    let hash = digest::digest(&digest::SHA256, token.as_bytes());
-    let mut map = netmap();
-    let mut socks = listener("socks", ListenerProtocol::Socks5, "127.0.0.1:0");
-    socks.require_credential = true;
-    let mut http = listener("http", ListenerProtocol::Http, "127.0.0.1:0");
-    http.require_credential = true;
-    map.me.listeners = vec![socks, http];
-    map.credentials = vec![Credential {
-        name: "phone".into(),
-        token: TokenHash::from_bytes(hash.as_ref().try_into().unwrap()),
-        max_concurrent: None,
-        id: 42,
-        exhausted: false,
-    }];
-    let mut world = World::start(map).await;
-    let socks = world.listener("socks").await;
-    assert!(world.access.credential_usage().is_empty());
-
-    let (code, mut stream) = socks5_connect(socks, "gw", token, "example.com", 443).await;
-    assert_eq!(code, 0);
-    world.next_open().await;
-    assert_echo(&mut stream).await;
-    let usage = timeout(PATIENCE, async {
-        loop {
-            let usage = world.access.credential_usage();
-            if usage.first().is_some_and(|usage| usage.bytes_down >= 21) {
-                return usage;
-            }
-            sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!((usage[0].id, usage[0].name.as_str(), usage[0].bytes_up, usage[0].connections), (42, "phone", 21, 1));
-    assert!(usage[0].last_used.is_some());
-    let listened = &world.settled().await.listeners[0].traffic;
-    assert_eq!((listened.up(), listened.down()), (21, 21), "监听器上也记了");
-
-    // controller 汇总之后把凭据标成用完：正在进行的连接被断开，新的连接被拒绝。
-    world.update(|netmap| netmap.credentials[0].exhausted = true).await;
-    let end = timeout(PATIENCE, stream.read_to_end(&mut Vec::new())).await.unwrap();
-    assert_eq!(end.unwrap_err().kind(), io::ErrorKind::ConnectionReset);
-    assert_eq!(socks5_connect(socks, "gw", token, "example.com", 443).await.0, 2, "SOCKS5 回 0x02：规则不允许");
-    let mut stream = TcpStream::connect(world.listener("http").await).await.unwrap();
-    let request =
-        format!("CONNECT example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic {}\r\n\r\n", STANDARD.encode(format!("gw:{token}")));
-    stream.write_all(request.as_bytes()).await.unwrap();
-    let mut answer = Vec::new();
-    let _ = timeout(PATIENCE, stream.read_to_end(&mut answer)).await.unwrap();
-    assert!(String::from_utf8(answer).unwrap().starts_with("HTTP/1.1 429 "), "HTTP 回 429");
-    world.assert_no_open();
-
-    // 上限调高（或者用量清零）之后又能用。
-    world.update(|netmap| netmap.credentials[0].exhausted = false).await;
-    assert_eq!(socks5_connect(socks, "gw", token, "example.com", 443).await.0, 0);
-}
-
-#[tokio::test]
-async fn classes_come_from_the_username_the_listener_the_exit_and_the_network_in_that_order() {
-    let mut map = netmap();
-    let mut socks = listener("socks", ListenerProtocol::Socks5, "127.0.0.1:0");
-    socks.class = Some(Class::Reliable);
-    map.me.listeners = vec![socks, listener("plain", ListenerProtocol::Socks5, "127.0.0.1:0")];
-    let mut tagged = forward(7, ForwardProtocol::Tcp, "127.0.0.1:0");
-    tagged.class = Some(Class::Interactive);
-    map.me.forwards = vec![tagged, forward(8, ForwardProtocol::Tcp, "127.0.0.1:0")];
-    map.peers[0].exit = Some(PeerExit { lan: true, class: Some(Class::Bulk) });
-    map.network.class = Some(Class::Interactive);
-    let mut world = World::start(map).await;
-    let (socks, plain) = (world.listener("socks").await, world.listener("plain").await);
-
-    async fn class_of(world: &mut World, proxy: SocketAddr, username: &str, host: &str) -> Class {
-        let (_code, _stream) = socks5_connect(proxy, username, "", host, 443).await;
-        world.next_open().await.class
+        world.access.set_draining(None);
+        assert_eq!(socks5_connect(socks, "gw", "", "example.com", 443).await.0, 0, "撤回之后照常接");
     }
-    assert_eq!(class_of(&mut world, socks, "gw+c-b", "example.com").await, Class::Bulk, "用户名优先");
-    assert_eq!(class_of(&mut world, socks, "gw", "example.com").await, Class::Reliable, "其次是监听器");
-    assert_eq!(class_of(&mut world, plain, "gw", "example.com").await, Class::Bulk, "再次是出口的默认值");
-    assert_eq!(class_of(&mut world, plain, "", "10.66.0.2").await, Class::Interactive, "不经出口时是网络的默认值");
-
-    let mut stream = TcpStream::connect(world.forward(7).await).await.unwrap();
-    assert_echo(&mut stream).await;
-    assert_eq!(world.next_open().await.class, Class::Interactive, "端口转发自己的设置");
-    world.update(|netmap| netmap.network.class = Some(Class::Reliable)).await;
-    let mut stream = TcpStream::connect(world.forward(8).await).await.unwrap();
-    assert_echo(&mut stream).await;
-    assert_eq!(world.next_open().await.class, Class::Reliable, "端口转发没有设置时用网络的默认值");
 }
 
-#[tokio::test]
-async fn a_listener_can_turn_the_optimistic_reply_off_so_clients_see_precise_errors() {
-    let mut map = netmap();
-    let mut careful = listener("careful", ListenerProtocol::Socks5, "127.0.0.1:0");
-    careful.optimistic = Some(false);
-    map.me.listeners = vec![listener("socks", ListenerProtocol::Socks5, "127.0.0.1:0"), careful];
-    let mut world = World::start(map).await;
-    let (socks, careful) = (world.listener("socks").await, world.listener("careful").await);
+i3t_lane::on_both_transports! {
+    async fn credential_usage_is_counted_and_an_exhausted_credential_is_refused_and_cut_off() {
+        let token = "s3cret-token";
+        let hash = digest::digest(&digest::SHA256, token.as_bytes());
+        let mut map = netmap();
+        let mut socks = listener("socks", ListenerProtocol::Socks5, "127.0.0.1:0");
+        socks.require_credential = true;
+        let mut http = listener("http", ListenerProtocol::Http, "127.0.0.1:0");
+        http.require_credential = true;
+        map.me.listeners = vec![socks, http];
+        map.credentials = vec![Credential {
+            name: "phone".into(),
+            token: TokenHash::from_bytes(hash.as_ref().try_into().unwrap()),
+            max_concurrent: None,
+            id: 42,
+            exhausted: false,
+        }];
+        let mut world = World::start(map).await;
+        let socks = world.listener("socks").await;
+        assert!(world.access.credential_usage().is_empty());
 
-    let (code, mut stream) = socks5_connect(socks, "gw", "", "example.com", 9).await;
-    assert_eq!(code, 0, "互联网目标默认不等应答：先说连上了");
-    world.next_open().await;
-    let end = timeout(PATIENCE, stream.read_to_end(&mut Vec::new())).await.unwrap();
-    assert_eq!(end.unwrap_err().kind(), io::ErrorKind::ConnectionReset, "之后的失败只能表现为被重置");
+        let (code, mut stream) = socks5_connect(socks, "gw", token, "example.com", 443).await;
+        assert_eq!(code, 0);
+        world.next_open().await;
+        assert_echo(&mut stream).await;
+        let usage = timeout(PATIENCE, async {
+            loop {
+                let usage = world.access.credential_usage();
+                if usage.first().is_some_and(|usage| usage.bytes_down >= 21) {
+                    return usage;
+                }
+                sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!((usage[0].id, usage[0].name.as_str(), usage[0].bytes_up, usage[0].connections), (42, "phone", 21, 1));
+        assert!(usage[0].last_used.is_some());
+        let listened = &world.settled().await.listeners[0].traffic;
+        assert_eq!((listened.up(), listened.down()), (21, 21), "监听器上也记了");
 
-    let (code, _stream) = socks5_connect(careful, "gw", "", "example.com", 9).await;
-    assert_eq!(code, 5, "关掉乐观回复之后客户端拿到准确的 0x05（连接被拒绝）");
-    world.next_open().await;
+        // controller 汇总之后把凭据标成用完：正在进行的连接被断开，新的连接被拒绝。
+        world.update(|netmap| netmap.credentials[0].exhausted = true).await;
+        let end = timeout(PATIENCE, stream.read_to_end(&mut Vec::new())).await.unwrap();
+        assert_eq!(end.unwrap_err().kind(), io::ErrorKind::ConnectionReset);
+        assert_eq!(socks5_connect(socks, "gw", token, "example.com", 443).await.0, 2, "SOCKS5 回 0x02：规则不允许");
+        let mut stream = TcpStream::connect(world.listener("http").await).await.unwrap();
+        let request =
+            format!("CONNECT example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic {}\r\n\r\n", STANDARD.encode(format!("gw:{token}")));
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut answer = Vec::new();
+        let _ = timeout(PATIENCE, stream.read_to_end(&mut answer)).await.unwrap();
+        assert!(String::from_utf8(answer).unwrap().starts_with("HTTP/1.1 429 "), "HTTP 回 429");
+        world.assert_no_open();
 
-    let usage = world.access.exit_usage();
-    assert_eq!(usage.len(), 1);
-    assert_eq!((usage[0].exit, usage[0].flows, usage[0].failed_by_target), (node(GW), 2, 2), "两次都是目标的问题");
+        // 上限调高（或者用量清零）之后又能用。
+        world.update(|netmap| netmap.credentials[0].exhausted = false).await;
+        assert_eq!(socks5_connect(socks, "gw", token, "example.com", 443).await.0, 0);
+    }
+}
+
+i3t_lane::on_both_transports! {
+    async fn classes_come_from_the_username_the_listener_the_exit_and_the_network_in_that_order() {
+        let mut map = netmap();
+        let mut socks = listener("socks", ListenerProtocol::Socks5, "127.0.0.1:0");
+        socks.class = Some(Class::Reliable);
+        map.me.listeners = vec![socks, listener("plain", ListenerProtocol::Socks5, "127.0.0.1:0")];
+        let mut tagged = forward(7, ForwardProtocol::Tcp, "127.0.0.1:0");
+        tagged.class = Some(Class::Interactive);
+        map.me.forwards = vec![tagged, forward(8, ForwardProtocol::Tcp, "127.0.0.1:0")];
+        map.peers[0].exit = Some(PeerExit { lan: true, class: Some(Class::Bulk) });
+        map.network.class = Some(Class::Interactive);
+        let mut world = World::start(map).await;
+        let (socks, plain) = (world.listener("socks").await, world.listener("plain").await);
+
+        async fn class_of(world: &mut World, proxy: SocketAddr, username: &str, host: &str) -> Class {
+            let (_code, _stream) = socks5_connect(proxy, username, "", host, 443).await;
+            world.next_open().await.class
+        }
+        assert_eq!(class_of(&mut world, socks, "gw+c-b", "example.com").await, Class::Bulk, "用户名优先");
+        assert_eq!(class_of(&mut world, socks, "gw", "example.com").await, Class::Reliable, "其次是监听器");
+        assert_eq!(class_of(&mut world, plain, "gw", "example.com").await, Class::Bulk, "再次是出口的默认值");
+        assert_eq!(class_of(&mut world, plain, "", "10.66.0.2").await, Class::Interactive, "不经出口时是网络的默认值");
+
+        let mut stream = TcpStream::connect(world.forward(7).await).await.unwrap();
+        assert_echo(&mut stream).await;
+        assert_eq!(world.next_open().await.class, Class::Interactive, "端口转发自己的设置");
+        world.update(|netmap| netmap.network.class = Some(Class::Reliable)).await;
+        let mut stream = TcpStream::connect(world.forward(8).await).await.unwrap();
+        assert_echo(&mut stream).await;
+        assert_eq!(world.next_open().await.class, Class::Reliable, "端口转发没有设置时用网络的默认值");
+    }
+}
+
+i3t_lane::on_both_transports! {
+    async fn a_listener_can_turn_the_optimistic_reply_off_so_clients_see_precise_errors() {
+        let mut map = netmap();
+        let mut careful = listener("careful", ListenerProtocol::Socks5, "127.0.0.1:0");
+        careful.optimistic = Some(false);
+        map.me.listeners = vec![listener("socks", ListenerProtocol::Socks5, "127.0.0.1:0"), careful];
+        let mut world = World::start(map).await;
+        let (socks, careful) = (world.listener("socks").await, world.listener("careful").await);
+
+        let (code, mut stream) = socks5_connect(socks, "gw", "", "example.com", 9).await;
+        assert_eq!(code, 0, "互联网目标默认不等应答：先说连上了");
+        world.next_open().await;
+        let end = timeout(PATIENCE, stream.read_to_end(&mut Vec::new())).await.unwrap();
+        assert_eq!(end.unwrap_err().kind(), io::ErrorKind::ConnectionReset, "之后的失败只能表现为被重置");
+
+        let (code, _stream) = socks5_connect(careful, "gw", "", "example.com", 9).await;
+        assert_eq!(code, 5, "关掉乐观回复之后客户端拿到准确的 0x05（连接被拒绝）");
+        world.next_open().await;
+
+        let usage = world.access.exit_usage();
+        assert_eq!(usage.len(), 1);
+        assert_eq!((usage[0].exit, usage[0].flows, usage[0].failed_by_target), (node(GW), 2, 2), "两次都是目标的问题");
+    }
 }

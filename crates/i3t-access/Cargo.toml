@@ -24,6 +24,8 @@ tracing.workspace = true
 
 [dev-dependencies]
 i3t-flow = { path = "../i3t-flow", features = ["test-util"] }
+# 同一批测试再跑一遍在 lane 上（`i3t_lane::testing`）。
+i3t-lane = { path = "../i3t-lane", features = ["test-util"] }
 # 暂停时钟，测首批数据的等待时限。
 tokio = { workspace = true, features = ["test-util"] }
 

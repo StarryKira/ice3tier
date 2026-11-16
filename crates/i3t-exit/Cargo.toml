@@ -25,6 +25,8 @@ tracing.workspace = true
 [dev-dependencies]
 base64.workspace = true
 i3t-flow = { path = "../i3t-flow", features = ["test-util"] }
+# 同一批测试再跑一遍在 lane 上（`i3t_lane::testing`）。
+i3t-lane = { path = "../i3t-lane", features = ["test-util"] }
 ring.workspace = true
 # 测试里要读回保活的参数，读的接口在这个特性后面。
 socket2.workspace = true

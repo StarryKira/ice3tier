@@ -83,7 +83,7 @@ impl Grant {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use i3t_model::netmap::{Forward, ForwardTarget, LocalNode, Network, Peer};
+    use i3t_model::netmap::{Forward, ForwardTarget, LaneMode, LocalNode, Network, Peer};
     use i3t_proto::PublicKey;
 
     use super::*;
@@ -109,6 +109,7 @@ pub(crate) mod tests {
             exit: None,
             dial_out_only: false,
             keep_alive: false,
+            lane: LaneMode::Off,
         }
     }
 
