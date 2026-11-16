@@ -80,7 +80,12 @@ pub(crate) struct Inner {
     draining: AtomicBool,
     /// 上一次发出去的矩阵行的序号。
     row_seq: AtomicU64,
+    /// 同一个 TCP 端口上别的协议（独占 TCP）：开头字节认出来是它的连接交给这里。没有设时 TCP 端口上只有中转。
+    pub(crate) tcp_handoff: RwLock<Option<TcpHandoff>>,
 }
+
+/// 接过一条 TCP 连接：开头字节已经用 `peek` 看过，没有读走。
+pub type TcpHandoff = Arc<dyn Fn(tokio::net::TcpStream, SocketAddr) + Send + Sync>;
 
 struct State {
     me: NodeId,
@@ -171,10 +176,25 @@ impl Relay {
             next_conn: AtomicU64::new(1),
             draining: AtomicBool::new(false),
             row_seq: AtomicU64::new(0),
+            tcp_handoff: RwLock::new(None),
         });
         inner.apply(&netmap.borrow());
         let maintenance = tokio::spawn(maintain(Arc::clone(&inner), netmap));
         Self { inner, maintenance }
+    }
+
+    /// 同一个 TCP 端口上还接独占 TCP（lane）：开头是 TLS 握手记录（`0x16`）的连接交给 `handoff`，
+    /// 别的照常当作中转。`handoff` 不能阻塞。
+    ///
+    /// 没有设的时候（没有为任何对端打开独占 TCP）连接一接受就按中转处理，和原来完全一样；设了之后每条连接先等它的第一个字节
+    /// （最多 [`leg::CLASSIFY_TIMEOUT`]），这段时间里同一来源、以及全部来源还没认出来的连接数另有上限。
+    /// 认出来是中转的连接之后照常受中转的全部限制。
+    ///
+    /// # Panics
+    ///
+    /// 锁中毒（之前持锁的地方 panic 过）。
+    pub fn set_tcp_handoff(&self, handoff: Option<TcpHandoff>) {
+        *self.inner.tcp_handoff.write().expect("relay tcp handoff lock poisoned") = handoff;
     }
 
     /// 本节点现在是不是 relay。

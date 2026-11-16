@@ -112,7 +112,7 @@ impl TestRelay {
 
     pub fn start_in(net: &Net<'_>) -> Self {
         let key = Arc::new(NodeKey::generate().unwrap());
-        let port = Arc::new(UdpPort::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+        let port = Arc::new(port_free_for_tcp_too());
         let addr = port.local_addr();
         let (netmap, netmap_rx) = watch::channel(netmap(net));
         let relay = Arc::new(Relay::new(Arc::clone(&key), Arc::clone(&port), netmap_rx));
@@ -307,5 +307,20 @@ impl TcpClient {
         let Some(Frame::Ok(ok)) = Frame::parse(&reply) else { panic!("不是 OK：{reply:?}") };
         verify_ok(&ok, relay, self.id, nonce);
         ok
+    }
+}
+
+/// 一个 UDP 端口，同一个端口号在 TCP 上也空着：relay 在同一个端口号上听 TCP。
+///
+/// 随便挑的 UDP 端口号可能正被一条 TIME_WAIT 的 TCP 连接占着（同一次 `cargo test` 里前面的测试留下的，
+/// 例如独占 TCP 的测试一下子开关几千条连接），那样 relay 的 TCP 监听一直绑不上。先让内核挑一个空着的 TCP 端口号。
+fn port_free_for_tcp_too() -> UdpPort {
+    loop {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        if let Ok(port) = UdpPort::bind(addr) {
+            return port;
+        }
     }
 }

@@ -73,9 +73,12 @@ fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
 }
 
 async fn accept(inner: Arc<Inner>, listener: TcpListener) {
-    let slots = Arc::new(Semaphore::new(MAX_LEGS));
-    let pending = Arc::new(Pending::default());
-    let mut refusals = RefusalLog::default();
+    let gate = Arc::new(Gate {
+        slots: Arc::new(Semaphore::new(MAX_LEGS)),
+        pending: Arc::new(Pending::default()),
+        unclassified: Arc::new(Unclassified::default()),
+        refusals: Mutex::new(RefusalLog::default()),
+    });
     let mut enabled = inner.subscribe_enabled();
     loop {
         let accepted = tokio::select! {
@@ -92,24 +95,113 @@ async fn accept(inner: Arc<Inner>, listener: TcpListener) {
                 continue;
             }
         };
-        let Ok(slot) = Arc::clone(&slots).try_acquire_owned() else {
-            if let Some(more) = refusals.due(Instant::now()) {
-                tracing::warn!(from = %addr, more, "TCP 中转的连接数到了上限 {MAX_LEGS}，拒绝新的连接");
+        let handoff = inner.tcp_handoff.read().expect("relay tcp handoff lock poisoned").clone();
+        match handoff {
+            // 端口上只有中转：和以前一样，接受了就按中转的规矩来。
+            None => gate.serve_leg(&inner, stream, addr),
+            Some(handoff) => {
+                let Some(ticket) = gate.unclassified.admit(addr.ip()) else {
+                    gate.refused(addr, "这个来源还没认出协议的 TCP 太多，拒绝新的连接");
+                    continue;
+                };
+                let (gate, inner) = (Arc::clone(&gate), Arc::clone(&inner));
+                tokio::spawn(async move {
+                    let mut first = [0; 1];
+                    let peeked = tokio::time::timeout(CLASSIFY_TIMEOUT, stream.peek(&mut first)).await;
+                    drop(ticket);
+                    match peeked {
+                        Ok(Ok(1..)) if first[0] == LANE_FIRST_BYTE => handoff(stream, addr),
+                        Ok(Ok(1..)) => gate.serve_leg(&inner, stream, addr),
+                        // 什么都没发就断了、出错了，或者迟迟不说话：不值得留着。外人能造成的，只记 debug。
+                        Ok(Ok(_) | Err(_)) => tracing::debug!(from = %addr, "TCP 连接没有发来任何字节就结束了"),
+                        Err(_) => tracing::debug!(from = %addr, "TCP 连接 {CLASSIFY_TIMEOUT:?} 之内没有发来第一个字节，断开"),
+                    }
+                });
             }
-            continue;
+        }
+    }
+}
+
+/// 同一个端口上还接独占 TCP 时，连接多久之内要发来第一个字节，才知道它是哪一种。
+pub(crate) const CLASSIFY_TIMEOUT: Duration = Duration::from_secs(3);
+/// 独占 TCP 以 TLS 的握手记录开头。中转以 2 字节的帧长度开头，第一帧是很短的会话握手，高字节远小于它。
+const LANE_FIRST_BYTE: u8 = 0x16;
+/// 还没认出协议的 TCP，同一个来源同时最多几条。比中转的握手名额（8）大：一个拨独占 TCP 的节点池被抽干时
+/// 一下子会拨上百条（它自己限制在 128 条以内），全都从同一个地址来，第一个字节一个往返之内就到。
+const MAX_UNCLASSIFIED_PER_SOURCE: usize = 256;
+/// 还没认出协议的 TCP，全部来源合计最多几条。
+const MAX_UNCLASSIFIED: usize = 1024;
+
+/// 接受下来的 TCP 要过的几道名额，和拒绝时的日志。
+struct Gate {
+    slots: Arc<Semaphore>,
+    pending: Arc<Pending>,
+    unclassified: Arc<Unclassified>,
+    refusals: Mutex<RefusalLog>,
+}
+
+impl Gate {
+    /// 按中转的规矩接下一条 TCP：总数上限、同一来源还没握手成功的上限，然后服务它。
+    fn serve_leg(&self, inner: &Arc<Inner>, stream: TcpStream, addr: SocketAddr) {
+        let Ok(slot) = Arc::clone(&self.slots).try_acquire_owned() else {
+            return self.refused(addr, "TCP 中转的连接数到了上限，拒绝新的连接");
         };
-        let Some(handshake) = pending.admit(addr.ip()) else {
-            if let Some(more) = refusals.due(Instant::now()) {
-                tracing::warn!(from = %addr, more, "这个来源已经有 {MAX_PENDING_PER_SOURCE} 条 TCP 还没握手成功，拒绝新的连接");
-            }
-            continue;
+        let Some(handshake) = self.pending.admit(addr.ip()) else {
+            return self.refused(addr, "这个来源已经有太多条 TCP 还没握手成功，拒绝新的连接");
         };
-        let inner = Arc::clone(&inner);
+        let inner = Arc::clone(inner);
         tokio::spawn(async move {
             let reason = serve(&inner, stream, addr, handshake).await;
             tracing::debug!(from = %addr, reason, "一条 TCP 中转结束");
             drop(slot);
         });
+    }
+
+    /// 拒绝一条连接。日志限速：有人一直往上连的时候不刷屏。
+    fn refused(&self, addr: SocketAddr, what: &str) {
+        if let Some(more) = self.refusals.lock().expect("refusal log mutex poisoned").due(Instant::now()) {
+            tracing::warn!(from = %addr, more, max_legs = MAX_LEGS, max_pending = MAX_PENDING_PER_SOURCE, "{what}");
+        }
+    }
+}
+
+/// 还没认出协议的 TCP 有几条，按来源算，另有总数。
+#[derive(Debug, Default)]
+struct Unclassified(Mutex<(HashMap<IpAddr, usize>, usize)>);
+
+/// 一条还没认出协议的 TCP 占着的名额。
+#[derive(Debug)]
+struct Unknown {
+    counts: Arc<Unclassified>,
+    source: IpAddr,
+}
+
+impl Unclassified {
+    fn admit(self: &Arc<Self>, from: IpAddr) -> Option<Unknown> {
+        let source = source_key(from);
+        let mut counts = self.0.lock().expect("unclassified TCP mutex poisoned");
+        let (by_source, total) = &mut *counts;
+        let count = by_source.entry(source).or_default();
+        if *count >= MAX_UNCLASSIFIED_PER_SOURCE || *total >= MAX_UNCLASSIFIED {
+            return None;
+        }
+        *count += 1;
+        *total += 1;
+        Some(Unknown { counts: Arc::clone(self), source })
+    }
+}
+
+impl Drop for Unknown {
+    fn drop(&mut self) {
+        let mut counts = self.counts.0.lock().expect("unclassified TCP mutex poisoned");
+        let (by_source, total) = &mut *counts;
+        *total = total.saturating_sub(1);
+        if let Some(count) = by_source.get_mut(&self.source) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                by_source.remove(&self.source);
+            }
+        }
     }
 }
 
