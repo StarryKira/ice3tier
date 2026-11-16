@@ -11,8 +11,18 @@ description = "ice3tier 的流层：建流请求与应答、两个方向的搬�
 i3t-conn = { path = "../i3t-conn" }
 i3t-model = { path = "../i3t-model" }
 i3t-proto = { path = "../i3t-proto" }
+socket2 = "0.6.5"
 thiserror.workspace = true
 tokio.workspace = true
+tracing = "0.1.44"
+
+[features]
+# 内存里的连接层（`i3t_flow::memory`），给本 crate 和上层 crate 的测试用。
+test-util = []
+
+[dev-dependencies]
+# 让本 crate 的集成测试也能用到 `test-util` 里的东西。
+i3t-flow = { path = ".", features = ["test-util"] }
 
 [lints]
 workspace = true
