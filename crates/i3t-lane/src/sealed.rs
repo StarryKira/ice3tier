@@ -190,8 +190,9 @@ mod tests {
     use rustls::{ClientConnection, ServerConnection};
 
     use super::*;
-    use crate::frame::{Payload, Purpose};
+    use crate::frame::Purpose;
     use crate::lane::{client_config, server_config};
+    use i3t_conn::Payload;
 
     /// 在内存里握完手的一对：拨号方（客户端）和接受方（服务端）。
     fn pair() -> (Sealed, Sealed) {

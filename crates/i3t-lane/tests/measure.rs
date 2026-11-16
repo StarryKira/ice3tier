@@ -18,8 +18,9 @@ use std::time::{Duration, Instant};
 
 use common::{id, quick};
 use i3t_conn::Acceptor;
+use i3t_conn::{RecvStream as _, SendStream as _};
 use i3t_crypto::NodeKey;
-use i3t_lane::splice::Splicer;
+use i3t_flow::engine::Splicer;
 use i3t_lane::{LanePeer, LaneRecv, LaneSend, Lanes, Payload};
 use rustix::time::{ClockId, clock_gettime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -378,8 +379,8 @@ async fn time_from_claim_to_first_byte_with_a_warm_pool() {
             at(50),
             at(90),
             at(99),
-            status.claims,
-            status.claims_waited
+            status.total.claims,
+            status.total.claims_waited
         );
     }
 }

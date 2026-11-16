@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use i3t_conn::SendStream as _;
 use i3t_crypto::NodeKey;
 use i3t_lane::{LaneConfig, LanePeer, LaneRecv, LaneSend, Lanes, Payload};
 use i3t_proto::NodeId;
@@ -115,7 +116,7 @@ impl Pair {
     /// 等到入口能在出口停过来的 lane 上开流，并且至少停了 `idle` 条。
     pub async fn ready(&self, idle: u64) {
         wait_for("入口那里停好 lane", Duration::from_secs(10), || {
-            self.entry.lanes.can_open(self.exit.id) && self.entry.lanes.status().idle >= idle
+            self.entry.lanes.can_open(self.exit.id) && self.entry.lanes.status().idle() >= idle
         })
         .await;
     }

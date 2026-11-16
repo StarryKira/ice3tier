@@ -4,6 +4,7 @@
 //! 所以对端乱写也不能让读的一方多缓冲内存。
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use i3t_conn::Payload;
 
 /// 帧头：类型 1 字节，长度 2 字节（大端，不含帧头）。
 pub(crate) const HEADER_LEN: usize = 3;
@@ -61,43 +62,19 @@ impl Purpose {
     }
 }
 
-/// 流的头之后，这个方向上的数据怎么走。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum Payload {
-    /// 一直在 lane 的 TLS 里面。
-    #[default]
-    Sealed,
-    /// 头之后离开 TLS，原样传用户的字节。只在用户的数据本身就是 TLS 时用：不再加密第二次，可以用 splice 搬。
-    Passthrough,
+/// 负载方式在 OPENING 里的编码。
+const fn payload_to_wire(payload: Payload) -> u8 {
+    match payload {
+        Payload::Sealed => MODE_SEALED,
+        Payload::Passthrough => MODE_PASSTHROUGH,
+    }
 }
 
-impl Payload {
-    /// 首批数据是一条完整的 TLS 握手记录、内容是 ClientHello 时选 [`Payload::Passthrough`]，其余选 [`Payload::Sealed`]。
-    ///
-    /// 只看开头：记录头是握手类型、版本是 3.x、长度在 TLS 允许的范围里并且整条都在，记录里第一条握手消息是 ClientHello。
-    /// 不完整的不算，宁可多加密一次，也不能把不是 TLS 的数据明文送出去。
-    #[must_use]
-    pub fn for_first_data(first: &[u8]) -> Self {
-        const HANDSHAKE: u8 = 0x16;
-        const CLIENT_HELLO: u8 = 0x01;
-        let Some(&[HANDSHAKE, 0x03, _minor, hi, lo, CLIENT_HELLO]) = first.first_chunk::<6>() else { return Self::Sealed };
-        let len = usize::from(u16::from_be_bytes([hi, lo]));
-        if (4..=1 << 14).contains(&len) && first.len() >= 5 + len { Self::Passthrough } else { Self::Sealed }
-    }
-
-    const fn to_wire(self) -> u8 {
-        match self {
-            Self::Sealed => MODE_SEALED,
-            Self::Passthrough => MODE_PASSTHROUGH,
-        }
-    }
-
-    const fn from_wire(raw: u8) -> Option<Self> {
-        match raw {
-            MODE_SEALED => Some(Self::Sealed),
-            MODE_PASSTHROUGH => Some(Self::Passthrough),
-            _ => None,
-        }
+const fn payload_from_wire(raw: u8) -> Option<Payload> {
+    match raw {
+        MODE_SEALED => Some(Payload::Sealed),
+        MODE_PASSTHROUGH => Some(Payload::Passthrough),
+        _ => None,
     }
 }
 
@@ -162,7 +139,7 @@ impl Frame {
             Self::Opening { payload, header } => {
                 assert!(header.len() <= MAX_HEADER_LEN, "流的头 {} 字节，调用方应该已经限制在 {MAX_HEADER_LEN} 以内", header.len());
                 put_header(buf, TYPE_OPENING, 1 + header.len());
-                buf.push(payload.to_wire());
+                buf.push(payload_to_wire(*payload));
                 buf.extend_from_slice(header);
             }
             Self::Data(data) => {
@@ -221,7 +198,7 @@ impl Frame {
             TYPE_PONG => Self::Pong(body.get_u64()),
             TYPE_GOAWAY => Self::GoAway,
             TYPE_OPENING => {
-                let payload = Payload::from_wire(body.get_u8()).ok_or(FrameError::Invalid("OPENING 里的负载方式"))?;
+                let payload = payload_from_wire(body.get_u8()).ok_or(FrameError::Invalid("OPENING 里的负载方式"))?;
                 Self::Opening { payload, header: body.freeze() }
             }
             TYPE_DATA => Self::Data(body.freeze()),
@@ -330,18 +307,5 @@ mod tests {
         assert!(matches!(Frame::decode(&mut bytes, false), Err(FrameError::Invalid(_))));
         let mut bytes = BytesMut::from(&[TYPE_OPENING, 0, 1, 2][..]);
         assert!(matches!(Frame::decode(&mut bytes, false), Err(FrameError::Invalid(_))));
-    }
-
-    #[test]
-    fn only_a_complete_client_hello_is_passed_through() {
-        let mut hello = vec![0x16, 0x03, 0x01, 0x00, 0x08, 0x01, 0, 0, 4, 3, 3, 0, 0];
-        assert_eq!(Payload::for_first_data(&hello), Payload::Passthrough);
-        hello.extend_from_slice(b"more records");
-        assert_eq!(Payload::for_first_data(&hello), Payload::Passthrough);
-        assert_eq!(Payload::for_first_data(&hello[..12]), Payload::Sealed, "记录不完整");
-        assert_eq!(Payload::for_first_data(b"GET / HTTP/1.1\r\n\r\n"), Payload::Sealed);
-        assert_eq!(Payload::for_first_data(&[]), Payload::Sealed);
-        assert_eq!(Payload::for_first_data(&[0x16, 0x03, 0x01, 0x00, 0x04, 0x02, 0, 0, 0]), Payload::Sealed, "ServerHello 不算");
-        assert_eq!(Payload::for_first_data(&[0x17, 0x03, 0x03, 0x00, 0x04, 0x01, 0, 0, 0]), Payload::Sealed, "应用数据记录不算");
     }
 }

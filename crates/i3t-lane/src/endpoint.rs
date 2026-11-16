@@ -20,13 +20,14 @@ use tokio::sync::{Notify, mpsc, watch};
 use tokio::time::Instant;
 
 use crate::admission::Admission;
+use crate::demand::Demand;
 use crate::dialler::{self, DialSide, Opening};
 use crate::error::{LaneError, OpenLaneError};
 use crate::frame::Purpose;
 use crate::holder::{self, Holder};
 use crate::lane::{self, Dial, Lane};
-use crate::status::{Counters, LaneStatus, Level};
-use crate::stream::{self, Gauges, LaneRecv, LaneSend};
+use crate::status::{Book, Counters, LaneStatus, PeerLaneStatus, Tally};
+use crate::stream::{self, LaneRecv, LaneSend};
 
 /// 一个对端同时在用的 lane 最多这么多条（和共用连接上的并发流上限一样）。再开过来的流直接重置。
 const MAX_IN_USE_PER_PEER: usize = 16384;
@@ -43,10 +44,9 @@ const REFUSAL_LOG_INTERVAL: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct LaneConfig {
-    /// 接受方：每个拨号方平时至少为本节点停着多少条空闲的 lane（本节点自己也拨它时是 0）。
+    /// 平时至少备着多少条空闲的 lane：接受方是每个拨号方为本节点停着的（本节点自己也拨它时是 0），
+    /// 拨号方是留给自己开流的（往对方开过流之后才备）。实际备多少跟着新流的速率往上走（见 `demand`）。
     pub min_idle: usize,
-    /// 拨号方：留给自己开流的空闲 lane 有几条。用完了当场拨。
-    pub warm: usize,
     /// 控制 lane 上多久发一次 PING。三个周期听不到对方就判控制 lane 断了。
     pub ping_interval: Duration,
     /// 池空时取 lane 最多等多久。
@@ -59,7 +59,6 @@ impl Default for LaneConfig {
     fn default() -> Self {
         Self {
             min_idle: 4,
-            warm: 2,
             ping_interval: Duration::from_secs(10),
             claim_wait: Duration::from_secs(2),
             handshake_deadline: Duration::from_secs(10),
@@ -109,8 +108,8 @@ pub(crate) struct Peer {
     dial: Option<DialSide>,
     /// 它拨来、等它自己开流的 lane 有几条。
     own_waiting: usize,
-    /// 和它之间在用的 lane。
-    in_use: Level,
+    /// 这个对端的计数。
+    tally: Arc<Tally>,
 }
 
 impl Peer {
@@ -187,7 +186,7 @@ impl Lanes {
                 holder: Holder::default(),
                 dial: None,
                 own_waiting: 0,
-                in_use: Level::default(),
+                tally: Arc::default(),
             });
             let same_dial = entry.dial.as_ref().is_some_and(|dial| dial.addrs == peer.dial);
             if same_dial || (peer.dial.is_empty() && entry.dial.is_none()) {
@@ -204,6 +203,9 @@ impl Lanes {
                     peer_going_away: false,
                     control_up: false,
                     parked: 0,
+                    own: None,
+                    dial_time: None,
+                    trimmed: None,
                     wake,
                     task,
                     last_good: None,
@@ -281,13 +283,13 @@ impl Lanes {
         if inner.is_going_away() {
             return Err(OpenLaneError::GoingAway(peer));
         }
-        let gauges = inner.gauges(peer).ok_or(OpenLaneError::TooMany(peer))?;
+        let book = inner.stream_book(peer)?;
         let lane = match inner.take_warm(peer)? {
             Some(Ok(lane)) => lane,
-            Some(Err(plan)) => inner.dial_now(peer, plan).await?,
-            None => holder::claim(inner, peer).await?,
+            Some(Err(plan)) => inner.dial_now(peer, plan, &book).await?,
+            None => holder::claim(inner, peer, &book).await?,
         };
-        Ok(stream::initiate(lane, &inner.counters, gauges))
+        Ok(stream::initiate(lane, book))
     }
 
     /// 现在能不能在 lane 上到 `peer` 开流（不保证池里马上有）。不能的话调用方直接走共用的连接，不用试。
@@ -320,16 +322,33 @@ impl Lanes {
         tracing::info!("独占 TCP 进入排空：通知对端，不再拨新的 lane");
     }
 
+    /// 排空撤销了（更新没有继续下去）：重新在 lane 上接新的流。
+    ///
+    /// "要走"已经说出去了，线上没有收回的帧：拨出去的 lane 换一个新的 epoch 重拨，对端拨来的控制 lane 断开让它重拨。
+    /// 两边都按新的控制 lane 忘掉"要走"。没有在排空时什么都不做。
+    pub fn come_back(&self) {
+        let inner = &self.inner;
+        if !inner.going_away.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        let mut peers = inner.lock_peers();
+        for (id, entry) in peers.iter_mut() {
+            entry.holder.close();
+            if let Some(dial) = &mut entry.dial {
+                dial.redial(inner, *id);
+            }
+        }
+        drop(peers);
+        tracing::info!("独占 TCP 撤销排空：控制 lane 重新建立之后照常开流");
+    }
+
     /// 本节点的地址变了（家宽重拨等）：拨出去的 lane 多半已经死了而且不会收到重置。全部换一个新的 epoch 重拨。
     pub fn address_changed(&self) {
         let inner = &self.inner;
         let mut peers = inner.lock_peers();
         for (id, entry) in peers.iter_mut() {
             if let Some(dial) = &mut entry.dial {
-                dial.task.abort();
-                dial.warm.clear();
-                dial.last_good = None;
-                dial.task = tokio::spawn(dialler::run(Arc::clone(inner), *id, Arc::clone(&dial.wake))).abort_handle();
+                dial.redial(inner, *id);
             }
         }
         drop(peers);
@@ -339,16 +358,35 @@ impl Lanes {
     #[must_use]
     pub fn status(&self) -> LaneStatus {
         let inner = &self.inner;
-        let mut status = inner.counters.snapshot();
+        let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
         let peers = inner.lock_peers();
-        for entry in peers.values() {
-            status.idle += u64::try_from(entry.holder.idle()).unwrap_or(u64::MAX);
-            if let Some(dial) = &entry.dial {
-                status.warm += u64::try_from(dial.warm.len()).unwrap_or(u64::MAX);
-                status.parked_at_peers += u64::try_from(dial.parked).unwrap_or(u64::MAX);
-            }
+        let mut list: Vec<PeerLaneStatus> = peers
+            .iter()
+            .map(|(id, entry)| {
+                let mut status = PeerLaneStatus::new(*id, entry.tally.counts());
+                status.idle = count(entry.holder.idle());
+                match &entry.dial {
+                    Some(dial) => {
+                        status.dials = true;
+                        status.control = dial.control_up;
+                        status.ready = count(dial.warm.len());
+                        status.parked_at_peer = count(dial.parked);
+                    }
+                    None => status.control = entry.holder.available(inner.config.ping_interval),
+                }
+                status
+            })
+            .collect();
+        drop(peers);
+        list.sort_by_key(|status| status.peer);
+        LaneStatus { total: inner.counters.all.counts(), handshake_failures: inner.counters.handshake_failures(), peers: list }
+    }
+
+    /// 记下一条本来要走 lane、改走了共用连接的流。
+    pub fn note_fallback(&self, peer: NodeId) {
+        if let Some(book) = self.inner.book(peer) {
+            book.bump(|tally| &tally.fallbacks);
         }
-        status
     }
 }
 
@@ -412,23 +450,34 @@ impl Inner {
     /// 对方在一条 lane 上开了流：交给接受队列。
     pub(crate) fn deliver(&self, lane: Lane, opening: &Opening) {
         let peer = lane.peer;
-        let Some(gauges) = self.gauges(peer) else { return self.refuse(peer, "和它之间在用的 lane 到了上限") };
-        let incoming = dialler::incoming(lane, opening, &self.counters, gauges);
+        let Ok(book) = self.stream_book(peer) else { return self.refuse(peer, "和它之间在用的 lane 到了上限") };
+        let incoming = dialler::incoming(lane, opening, book);
         // 接受队列没有人在收（本节点在关闭）：流被丢弃，对方看到重置。
         let _ = self.incoming.send(incoming);
     }
 
-    /// 一条 lane 开始承载流时占的数。和这个对端之间在用的到了上限时返回 `None`。
-    fn gauges(&self, peer: NodeId) -> Option<Gauges> {
+    /// 记 `peer` 的数用的：它的一份和全节点的一份。它不在时是 `None`。
+    pub(crate) fn book(&self, peer: NodeId) -> Option<Book> {
         let peers = self.lock_peers();
-        let entry = peers.get(&peer)?;
-        let in_use = usize::try_from(entry.in_use.get()).unwrap_or(usize::MAX);
-        (in_use < MAX_IN_USE_PER_PEER).then(|| [self.counters.in_use.enter(), entry.in_use.enter()])
+        Some(Book { node: Arc::clone(&self.counters), peer: Arc::clone(&peers.get(&peer)?.tally) })
+    }
+
+    /// 一条 lane 开始承载流时用的计数。和这个对端之间在用的到了上限时失败。
+    fn stream_book(&self, peer: NodeId) -> Result<Book, OpenLaneError> {
+        let book = self.book(peer).ok_or(OpenLaneError::NotEnabled(peer))?;
+        let in_use = usize::try_from(book.peer.in_use.get()).unwrap_or(usize::MAX);
+        if in_use >= MAX_IN_USE_PER_PEER {
+            return Err(OpenLaneError::TooMany(peer));
+        }
+        Ok(book)
     }
 
     /// 握手完成之后因为用途或者数量不对关掉一条 lane。对方是认证过的节点，但它可以一直这样做，所以只记 debug。
     pub(crate) fn refuse(&self, peer: NodeId, reason: &str) {
-        self.counters.refused.bump();
+        match self.book(peer) {
+            Some(book) => book.bump(|tally| &tally.refused),
+            None => self.counters.all.refused.bump(),
+        }
         tracing::debug!(%peer, reason, "关掉了对方拨来的一条 lane");
     }
 
@@ -470,6 +519,7 @@ impl Inner {
         if !dial.control_up {
             return Err(OpenLaneError::NoControl(peer));
         }
+        dial.own.get_or_insert_with(|| Demand::new(std::time::Instant::now())).record();
         dial.wake.notify_one();
         while let Some(lane) = dial.warm.pop_back() {
             if lane.is_usable() {
@@ -480,7 +530,7 @@ impl Inner {
     }
 
     /// 当场拨一条 lane 给自己开流。HELLO 留在待发的密文里，和开流的帧一起走。
-    async fn dial_now(&self, peer: NodeId, plan: DialPlan) -> Result<Lane, OpenLaneError> {
+    async fn dial_now(&self, peer: NodeId, plan: DialPlan, book: &Book) -> Result<Lane, OpenLaneError> {
         let dial = Dial {
             addrs: &plan.addrs,
             config: plan.config,
@@ -489,17 +539,20 @@ impl Inner {
             epoch: 0,
             deadline: Instant::now() + OWN_DIAL_DEADLINE,
         };
+        let started = Instant::now();
         let dialled = {
-            let _dialling = self.counters.dialling.enter();
+            let _dialling = book.enter(|tally| &tally.dialling);
             lane::dial(dial).await
         };
         match dialled {
             Ok((lane, addr)) => {
                 self.remember_good(peer, addr);
+                self.note_dial_time(peer, started.elapsed());
                 Ok(lane)
             }
             Err(source) => {
-                self.counters.dial_failures.bump();
+                book.bump(|tally| &tally.dial_failures);
+                book.bump(|tally| &tally.claims_failed);
                 Err(OpenLaneError::Dial { peer, source })
             }
         }
@@ -530,6 +583,34 @@ impl Inner {
         }
     }
 
+    /// 一次拨号（连上加握手）用了多久：拨号方据此估计补一条热 lane 要多久。
+    pub(crate) fn note_dial_time(&self, peer: NodeId, took: Duration) {
+        if let Some(dial) = self.lock_peers().get_mut(&peer).and_then(|entry| entry.dial.as_mut()) {
+            dial.dial_time = Some(dial.dial_time.map_or(took, |average| (average * 7 + took) / 8));
+        }
+    }
+
+    /// 拨号方留给自己开流的热 lane 该有几条：和接受方的池同一个估计（见 `demand`），补一条的时间是测到的拨号时间。
+    /// 多出来的（速率落下来之后）从最老的关起，每次最多关十分之一。
+    ///
+    /// 本节点还没有往这个对端开过流时是 0：网关里出口拨入口，只为入口停 lane，自己从不往入口开流，备着的热 lane 白占连接。
+    /// 第一条流当场拨，之后才按速率备。
+    pub(crate) fn size_ready(&self, peer: NodeId) -> Option<usize> {
+        let mut peers = self.lock_peers();
+        let dial = peers.get_mut(&peer)?.dial.as_mut()?;
+        let now = std::time::Instant::now();
+        let Some(demand) = dial.own.as_mut() else { return Some(0) };
+        demand.update(now);
+        let refill = dial.dial_time.unwrap_or(Duration::from_millis(200)) + Duration::from_millis(5);
+        let target = demand.target(refill, self.config.min_idle);
+        let excess = dial.warm.len().saturating_sub(target);
+        if excess > 0 && dial.trimmed.is_none_or(|at| now.saturating_duration_since(at) >= Duration::from_secs(1)) {
+            dial.warm.drain(..(excess / 10).max(1));
+            dial.trimmed = Some(now);
+        }
+        Some(target)
+    }
+
     pub(crate) fn set_parked(&self, peer: NodeId, parked: usize) {
         if let Some(dial) = self.lock_peers().get_mut(&peer).and_then(|entry| entry.dial.as_mut()) {
             dial.parked = parked;
@@ -539,7 +620,11 @@ impl Inner {
     pub(crate) fn set_control_up(&self, peer: NodeId, up: bool) {
         if let Some(dial) = self.lock_peers().get_mut(&peer).and_then(|entry| entry.dial.as_mut()) {
             dial.control_up = up;
-            if !up {
+            if up {
+                // "要走"只对说它的那条控制 lane 算数：新的控制 lane 被接受了，说明对方（重启过的，或者撤销了排空的）又在接新的流。
+                // 它还在排空的话会在新的控制 lane 上再说一次。
+                dial.peer_going_away = false;
+            } else {
                 dial.warm.clear();
             }
         }

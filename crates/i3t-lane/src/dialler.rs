@@ -3,6 +3,8 @@
 //! - 先拨控制 lane，等对方在上面回第一个 POOL：这才说明对方认了本节点（TLS 1.3 里客户端的握手先于服务端校验它的证书完成，
 //!   被拒绝的拨号方在握手那一刻还不知道）。控制 lane 不在时，本节点不在任何 lane 上往这个对端开流，调用方改走共用的连接。
 //! - 停多少条由对方说了算：它在 POOL 里说再拨几条就拨几条（它确切知道手上还有几条）。
+//! - 自己开流用的热 lane 由本节点自己定：和接受方的池同一个估计（新流的速率 × 补一条要多久），补一条的时间是测到的拨号时间。
+//!   热的用完了才当场拨。本节点往这个对端开第一条流之前一条不备（第一条当场拨）：只为对方停 lane 的拨号方用不着它们。
 //! - 停过去的 lane 每条有一个任务守着：对方在上面开流（OPENING）就把它交给本节点的接受队列；
 //!   对方关掉它（多余的、旧 epoch 的）或者它死了，这个任务就结束。
 //! - 每次拨号各自完成、立刻投入使用，不按批等：一次慢的拨号（SYN 重传）不拖住别的。
@@ -23,7 +25,7 @@ use rustls::ClientConfig;
 use tokio::sync::{Notify, mpsc};
 use tokio::time::{self, Instant, MissedTickBehavior};
 
-use crate::demand::MAX_IDLE_TARGET;
+use crate::demand::{Demand, MAX_IDLE_TARGET};
 use crate::endpoint::Inner;
 use crate::error::LaneError;
 use crate::frame::{Frame, Purpose};
@@ -51,6 +53,12 @@ pub(crate) struct DialSide {
     pub(crate) control_up: bool,
     /// 停在对方那里、按本节点所知还空闲的条数（给状况用）。
     pub(crate) parked: usize,
+    /// 本节点自己往对方开流的速率，热 lane 的条数跟着它走。第一次开流时才有。
+    pub(crate) own: Option<Demand>,
+    /// 拨一条 lane（连上加握手）平均要多久。
+    pub(crate) dial_time: Option<Duration>,
+    /// 上一次关多余的热 lane 的时刻。
+    pub(crate) trimmed: Option<std::time::Instant>,
     /// 叫醒维护任务：热 lane 被取走了，或者配置变了。
     pub(crate) wake: Arc<Notify>,
     pub(crate) task: tokio::task::AbortHandle,
@@ -59,6 +67,16 @@ pub(crate) struct DialSide {
 }
 
 impl DialSide {
+    /// 停掉维护任务（连同控制 lane 和在拨的），换一个新的 epoch 从控制 lane 重新拨。手上的热 lane 不要了。
+    pub(crate) fn redial(&mut self, inner: &Arc<Inner>, peer: NodeId) {
+        self.task.abort();
+        self.warm.clear();
+        self.last_good = None;
+        self.control_up = false;
+        self.parked = 0;
+        self.task = tokio::spawn(run(Arc::clone(inner), peer, Arc::clone(&self.wake))).abort_handle();
+    }
+
     pub(crate) fn addrs_in_order(&self) -> Vec<SocketAddr> {
         let mut addrs = self.addrs.clone();
         if let Some(good) = self.last_good
@@ -194,10 +212,15 @@ impl Dialler {
             epoch: self.epoch,
             deadline: Instant::now() + DIAL_DEADLINE,
         };
+        let Some(book) = inner.book(self.peer) else { return false };
+        let started = Instant::now();
         let dialled = {
-            let _dialling = inner.counters.dialling.enter();
+            let _dialling = book.enter(|tally| &tally.dialling);
             lane::dial(dial).await
         };
+        if dialled.is_ok() {
+            inner.note_dial_time(self.peer, started.elapsed());
+        }
         let confirmed = match dialled {
             Ok((mut lane, addr)) => {
                 lane.sealed.allow_unknown_frames();
@@ -228,7 +251,7 @@ impl Dialler {
                 true
             }
             Err(error) => {
-                inner.counters.dial_failures.bump();
+                book.bump(|tally| &tally.dial_failures);
                 tracing::debug!(peer = %self.peer, %error, "拨控制 lane 失败（对方不认本节点时也是这样）");
                 self.failed();
                 false
@@ -325,7 +348,8 @@ impl Dialler {
             tokio::spawn(park(Arc::clone(inner), self.peer, self.epoch, self.events.clone()));
         }
         let slots = MAX_CONCURRENT_DIALS.saturating_sub(self.dialling_parked + self.dialling_own);
-        let own = inner.config.warm.saturating_sub(warm + self.dialling_own).min(slots);
+        let ready = inner.size_ready(self.peer).unwrap_or(0);
+        let own = ready.saturating_sub(warm + self.dialling_own).min(slots);
         for _ in 0..own {
             self.dialling_own += 1;
             tokio::spawn(warm_up(Arc::clone(inner), self.peer, self.epoch, self.events.clone()));
@@ -379,18 +403,21 @@ async fn warm_up(inner: Arc<Inner>, peer: NodeId, epoch: u64, events: mpsc::Unbo
 
 async fn dial_one(inner: &Arc<Inner>, peer: NodeId, purpose: Purpose, epoch: u64) -> Option<Lane> {
     let plan = inner.dial_plan(peer)?;
+    let book = inner.book(peer)?;
     let dial = Dial { addrs: &plan.addrs, config: plan.config, peer, purpose, epoch, deadline: Instant::now() + DIAL_DEADLINE };
+    let started = Instant::now();
     let dialled = {
-        let _dialling = inner.counters.dialling.enter();
+        let _dialling = book.enter(|tally| &tally.dialling);
         lane::dial(dial).await
     };
     match dialled {
         Ok((lane, addr)) => {
             inner.remember_good(peer, addr);
+            inner.note_dial_time(peer, started.elapsed());
             Some(lane)
         }
         Err(error) => {
-            inner.counters.dial_failures.bump();
+            book.bump(|tally| &tally.dial_failures);
             tracing::debug!(%peer, ?purpose, %error, "拨 lane 失败");
             None
         }
@@ -399,7 +426,7 @@ async fn dial_one(inner: &Arc<Inner>, peer: NodeId, purpose: Purpose, epoch: u64
 
 /// 开流请求：对方在一条 lane 上发来的 OPENING。
 pub(crate) struct Opening {
-    pub(crate) payload: crate::frame::Payload,
+    pub(crate) payload: i3t_conn::Payload,
     pub(crate) header: bytes::Bytes,
 }
 
@@ -411,7 +438,7 @@ pub(crate) struct Opening {
 pub(crate) async fn await_opening(lane: &mut Lane) -> Result<Option<Opening>, LaneError> {
     match lane.read_frame().await {
         Ok(Some(Frame::Opening { payload, header })) => {
-            if payload == crate::frame::Payload::Passthrough && !lane.sealed.at_record_boundary() {
+            if payload == i3t_conn::Payload::Passthrough && !lane.sealed.at_record_boundary() {
                 return Err(LaneError::Protocol("passthrough 的 OPENING 后面同一条记录里还有东西"));
             }
             Ok(Some(Opening { payload, header }))
@@ -426,10 +453,9 @@ pub(crate) async fn await_opening(lane: &mut Lane) -> Result<Option<Opening>, La
 pub(crate) fn incoming(
     lane: Lane,
     opening: &Opening,
-    counters: &Arc<crate::status::Counters>,
-    gauges: crate::stream::Gauges,
+    book: crate::status::Book,
 ) -> Incoming<crate::stream::LaneSend, crate::stream::LaneRecv> {
     let peer = lane.peer;
-    let (send, recv) = crate::stream::respond(lane, opening.payload, &opening.header, counters, gauges);
+    let (send, recv) = crate::stream::respond(lane, opening.payload, &opening.header, book);
     Incoming { peer, send, recv }
 }

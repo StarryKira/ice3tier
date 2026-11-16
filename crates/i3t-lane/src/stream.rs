@@ -38,17 +38,17 @@ use std::task::{Context, Poll, Waker, ready};
 use std::time::Duration;
 
 use bytes::{Buf, Bytes, BytesMut};
-use i3t_conn::{RecvStream, SendStream, StreamAborted, StreamCode};
+use i3t_conn::{Payload, RawRead, RawWrite, RecvStream, SendStream, StreamAborted, StreamCode};
 use i3t_proto::NodeId;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::Notify;
 
-use crate::frame::{Frame, MAX_DATA_LEN, MAX_HEADER_LEN, Payload, data_header};
+use crate::frame::{Frame, MAX_DATA_LEN, MAX_HEADER_LEN, data_header};
 use crate::lane::Lane;
 use crate::sealed::{Next, Sealed};
 use crate::socket;
-use crate::status::{Counters, Gauge};
+use crate::status::{Book, Gauge};
 
 /// 发送方向没有正常结束就被丢弃时，对端看到的原因码。和 QUIC 的实现取同一个数。
 const DROPPED_SEND: StreamCode = StreamCode(u32::MAX);
@@ -91,74 +91,15 @@ impl fmt::Debug for LaneRecv {
     }
 }
 
-/// 一个已经离开 TLS 的发送方向，交给调用方直接往 socket 里写（例如用 [`crate::splice`] 在两条 TCP 之间搬）。
-///
-/// 先写 [`unsent`](Self::unsent)，再写自己的数据。lane 交出它之后不再管这个方向怎么结束：
-/// 正常结束时调用方发 FIN（`shutdown(Write)`）；异常结束时绝不能发 FIN，而是重置连接。
-/// socket 处在"关闭时发 RST"的状态，调用方在整条流两个方向都正常结束时才恢复（`SO_LINGER` 关掉）。
-#[derive(Debug)]
-pub struct RawWrite {
-    socket: Arc<TcpStream>,
-    unsent: Bytes,
-}
-
-impl RawWrite {
-    #[must_use]
-    pub fn socket(&self) -> &TcpStream {
-        &self.socket
-    }
-
-    /// 开流时的密文还没交给内核的那一截，必须先于任何原始字节写出去。
-    #[must_use]
-    pub fn unsent(&self) -> &[u8] {
-        &self.unsent
-    }
-
-    #[must_use]
-    pub fn into_parts(self) -> (Arc<TcpStream>, Bytes) {
-        (self.socket, self.unsent)
-    }
-}
-
-/// 一个已经离开 TLS 的接收方向，交给调用方直接从 socket 里读。
-///
-/// 先交出 [`received`](Self::received)（lane 已经从 socket 读进来、还没交出去的原始字节），再读 socket。
-/// 结束的规矩和 [`RawWrite`] 一样：FIN 是正常结束，RST 或出错是异常结束。
-#[derive(Debug)]
-pub struct RawRead {
-    socket: Arc<TcpStream>,
-    received: Bytes,
-}
-
-impl RawRead {
-    #[must_use]
-    pub fn socket(&self) -> &TcpStream {
-        &self.socket
-    }
-
-    #[must_use]
-    pub fn received(&self) -> &[u8] {
-        &self.received
-    }
-
-    #[must_use]
-    pub fn into_parts(self) -> (Arc<TcpStream>, Bytes) {
-        (self.socket, self.received)
-    }
-}
-
 struct Shared {
     socket: Arc<TcpStream>,
     peer: NodeId,
     state: Mutex<State>,
     /// 两个方向都被丢弃了：后台的发送任务不用再等。
     closed: Notify,
-    counters: Arc<Counters>,
-    _in_use: Gauges,
+    book: Book,
+    _in_use: [Gauge; 2],
 }
-
-/// 一条在用的 lane 占着的两个数：全节点的，和这个对端的。
-pub(crate) type Gauges = [Gauge; 2];
 
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -238,38 +179,6 @@ struct State {
 }
 
 impl LaneSend {
-    /// 头写完了：发起方是 OPEN 连同首批数据，接受方是 REPLY。
-    ///
-    /// - 发起方：`payload` 选定这条流的负载方式，攒下的头作为一个 OPENING 帧送出；
-    ///   选了 [`Payload::Passthrough`] 时，之后这个方向是原始字节。
-    /// - 接受方：发起方选了 passthrough、并且这里也传 [`Payload::Passthrough`] 时，发一个 SWITCH，之后这个方向是原始字节；
-    ///   别的情况什么都不做，这个方向留在 TLS 里。
-    ///
-    /// 不用等：密文立刻交给内核，交不完的由后台送出。头已经结束之后再调用没有效果。
-    ///
-    /// 发起方不调它也能用，只是一直是 sealed：开始读（等回复）、`flush`、`shutdown`，或者头超过上限时，
-    /// 攒下的头按 sealed 送出。
-    pub fn end_header(&mut self, payload: Payload) {
-        let mut state = self.shared.lock();
-        state.end_header(payload);
-        push(&self.shared, &mut state);
-    }
-
-    /// 这个方向已经离开 TLS 时，把它交出去，让调用方直接写 socket（见 [`RawWrite`]）。还在 TLS 里、已经结束或者已经交出去时返回 `None`。
-    ///
-    /// 交出去之后这个 [`LaneSend`] 不再能写，丢弃它也不会重置流。
-    pub fn take_raw(&mut self) -> Option<RawWrite> {
-        let mut state = self.shared.lock();
-        if !matches!(state.send, SendState::Raw) || state.aborted {
-            return None;
-        }
-        state.send = SendState::Handed;
-        state.raw_taken = true;
-        let unsent = std::mem::take(&mut state.out).freeze();
-        state.drop_tls_if_unused();
-        Some(RawWrite { socket: Arc::clone(&self.shared.socket), unsent })
-    }
-
     /// 对端节点。
     #[must_use]
     pub fn peer(&self) -> NodeId {
@@ -279,6 +188,7 @@ impl LaneSend {
 
 impl LaneRecv {
     /// 这个方向已经离开 TLS 时，把它交出去，让调用方直接读 socket（见 [`RawRead`]）。还在 TLS 里、已经结束或者已经交出去时返回 `None`。
+    /// 不等待；要等对端的切换用 [`RecvStream::wait_raw`]。
     ///
     /// 交出去之后这个 [`LaneRecv`] 不再能读，丢弃它也不会叫停流。
     ///
@@ -299,38 +209,7 @@ impl LaneRecv {
         state.recv = RecvState::Handed;
         state.raw_taken = true;
         state.drop_tls_if_unused();
-        Some(RawRead { socket: Arc::clone(&self.shared.socket), received })
-    }
-
-    /// 等到知道这个方向接下来是什么：离开了 TLS（对端发了 SWITCH，或者发起方选了 passthrough）就交出来，和
-    /// [`take_raw`](Self::take_raw) 一样；接下来是 TLS 里的数据、或者这个方向结束了、出错了，返回 `None`，调用方照常读。
-    ///
-    /// 发起方读完 REPLY 之后用它：接受方紧接着发 SWITCH，但它可能还在路上。
-    pub async fn wait_raw(&mut self) -> Option<RawRead> {
-        std::future::poll_fn(|cx| {
-            let shared = &self.shared;
-            let mut state = shared.lock();
-            loop {
-                match &state.recv {
-                    RecvState::Raw(_) => break,
-                    RecvState::Sealed(data) if data.is_empty() => {
-                        let step = state.poll_sealed_step(&shared.socket, Read::Wait(cx));
-                        if !state.out.is_empty() {
-                            push(shared, &mut state);
-                        }
-                        match step {
-                            Poll::Ready(Ok(())) => {}
-                            Poll::Ready(Err(_)) => return Poll::Ready(()),
-                            Poll::Pending => return Poll::Pending,
-                        }
-                    }
-                    _ => return Poll::Ready(()),
-                }
-            }
-            Poll::Ready(())
-        })
-        .await;
-        self.take_raw()
+        Some(RawRead::new(Arc::clone(&shared.socket), received, shared.book.spliced()))
     }
 
     /// 这条流的负载方式。发起方在头写完之前是 `None`。
@@ -341,7 +220,7 @@ impl LaneRecv {
 }
 
 /// 把一条刚取到的 lane 变成本端发起的一条流。
-pub(crate) fn initiate(lane: Lane, counters: &Arc<Counters>, gauges: Gauges) -> (LaneSend, LaneRecv) {
+pub(crate) fn initiate(lane: Lane, book: Book) -> (LaneSend, LaneRecv) {
     let Lane { socket, mut sealed, out, peer, .. } = lane;
     sealed.shrink();
     socket::rst_on_close(&socket);
@@ -361,13 +240,13 @@ pub(crate) fn initiate(lane: Lane, counters: &Arc<Counters>, gauges: Gauges) -> 
         aborted: false,
         heard_from_peer: false,
     };
-    split(socket, peer, state, counters, gauges)
+    split(socket, peer, state, book)
 }
 
 /// 对端在一条 lane 上开过来的流：它的 OPENING 已经读到了，`header` 是里面流的头。
 ///
 /// passthrough 时 OPENING 所在的记录之后就是原始字节，调用方已经确认这条记录在这个帧的末尾结束。
-pub(crate) fn respond(lane: Lane, payload: Payload, header: &[u8], counters: &Arc<Counters>, gauges: Gauges) -> (LaneSend, LaneRecv) {
+pub(crate) fn respond(lane: Lane, payload: Payload, header: &[u8], book: Book) -> (LaneSend, LaneRecv) {
     let Lane { socket, mut sealed, out, peer, .. } = lane;
     socket::rst_on_close(&socket);
     socket::set_user_timeout(&socket, socket::STREAM_USER_TIMEOUT);
@@ -390,17 +269,17 @@ pub(crate) fn respond(lane: Lane, payload: Payload, header: &[u8], counters: &Ar
         aborted: false,
         heard_from_peer: true,
     };
-    split(socket, peer, state, counters, gauges)
+    split(socket, peer, state, book)
 }
 
-fn split(socket: TcpStream, peer: NodeId, state: State, counters: &Arc<Counters>, gauges: Gauges) -> (LaneSend, LaneRecv) {
+fn split(socket: TcpStream, peer: NodeId, state: State, book: Book) -> (LaneSend, LaneRecv) {
     let shared = Arc::new(Shared {
         socket: Arc::new(socket),
         peer,
         state: Mutex::new(state),
         closed: Notify::new(),
-        counters: Arc::clone(counters),
-        _in_use: gauges,
+        _in_use: book.enter(|tally| &tally.in_use),
+        book,
     });
     (LaneSend { shared: Arc::clone(&shared) }, LaneRecv { shared })
 }
@@ -639,12 +518,12 @@ impl AsyncRead for LaneRecv {
                 RecvState::Handed => return Poll::Ready(Err(io::Error::other("这个方向已经交给调用方直接读"))),
                 RecvState::Sealed(data) if !data.is_empty() => {
                     let len = take_into(data, buf);
-                    shared.counters.sealed_bytes.add(len);
+                    shared.book.add(|tally| &tally.sealed_bytes, len);
                     return Poll::Ready(Ok(()));
                 }
                 RecvState::Raw(pending) if !pending.is_empty() => {
                     let len = take_into(pending, buf);
-                    shared.counters.raw_bytes.add(len);
+                    shared.book.add(|tally| &tally.raw_bytes, len);
                     return Poll::Ready(Ok(()));
                 }
                 RecvState::Raw(_) => match shared.socket.try_read(buf.initialize_unfilled()) {
@@ -655,7 +534,7 @@ impl AsyncRead for LaneRecv {
                     Ok(len) => {
                         buf.advance(len);
                         state.heard(&shared.socket);
-                        shared.counters.raw_bytes.add(len);
+                        shared.book.add(|tally| &tally.raw_bytes, len);
                         return Poll::Ready(Ok(()));
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -701,7 +580,7 @@ impl AsyncWrite for LaneSend {
                     let sealed = sealed.as_mut().expect("sealed 的方向一定还有 TLS 状态");
                     sealed.seal(&[&data_header(len), &data[..len]]);
                     sealed.take_output(out);
-                    shared.counters.sealed_bytes.add(len);
+                    shared.book.add(|tally| &tally.sealed_bytes, len);
                     push(shared, &mut state);
                     return Poll::Ready(Ok(len));
                 }
@@ -709,7 +588,7 @@ impl AsyncWrite for LaneSend {
                     ready!(state.poll_drain(&shared.socket, cx))?;
                     match shared.socket.try_write(data) {
                         Ok(len) => {
-                            shared.counters.raw_bytes.add(len);
+                            shared.book.add(|tally| &tally.raw_bytes, len);
                             return Poll::Ready(Ok(len));
                         }
                         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -772,6 +651,39 @@ impl SendStream for LaneSend {
         let mut state = shared.lock();
         reset(shared, &mut state, code);
     }
+
+    /// 头写完了：发起方是 OPEN 连同首批数据，接受方是 REPLY。
+    ///
+    /// - 发起方：`payload` 选定这条流的负载方式，攒下的头作为一个 OPENING 帧送出；
+    ///   选了 [`Payload::Passthrough`] 时，之后这个方向是原始字节。
+    /// - 接受方：发起方选了 passthrough、并且这里也传 [`Payload::Passthrough`] 时，发一个 SWITCH，之后这个方向是原始字节；
+    ///   别的情况什么都不做，这个方向留在 TLS 里。
+    ///
+    /// 不用等：密文立刻交给内核，交不完的由后台送出。头已经结束之后再调用没有效果。
+    ///
+    /// 发起方不调它也能用，只是一直是 sealed：开始读（等回复）、`flush`、`shutdown`，或者头超过上限时，
+    /// 攒下的头按 sealed 送出。
+    fn end_header(&mut self, payload: Payload) {
+        let mut state = self.shared.lock();
+        state.end_header(payload);
+        push(&self.shared, &mut state);
+    }
+
+    /// 这个方向已经离开 TLS 时，把它交出去，让调用方直接写 socket（见 [`RawWrite`]）。还在 TLS 里、已经结束或者已经交出去时返回 `None`。
+    ///
+    /// 交出去之后这个 [`LaneSend`] 不再能写，丢弃它也不会重置流。
+    fn take_raw(&mut self) -> Option<RawWrite> {
+        let shared = &self.shared;
+        let mut state = shared.lock();
+        if !matches!(state.send, SendState::Raw) || state.aborted {
+            return None;
+        }
+        state.send = SendState::Handed;
+        state.raw_taken = true;
+        let unsent = std::mem::take(&mut state.out).freeze();
+        state.drop_tls_if_unused();
+        Some(RawWrite::new(Arc::clone(&shared.socket), unsent, shared.book.spliced()))
+    }
 }
 
 fn reset(shared: &Shared, state: &mut State, code: StreamCode) {
@@ -802,6 +714,37 @@ impl RecvStream for LaneRecv {
         let shared = &self.shared;
         let mut state = shared.lock();
         stop(shared, &mut state, code);
+    }
+
+    /// 等到知道这个方向接下来是什么：离开了 TLS（对端发了 SWITCH，或者发起方选了 passthrough）就交出来，和
+    /// [`take_raw`](Self::take_raw) 一样；接下来是 TLS 里的数据、或者这个方向结束了、出错了，返回 `None`，调用方照常读。
+    ///
+    /// 发起方读完 REPLY 之后用它：接受方紧接着发 SWITCH，但它可能还在路上。
+    async fn wait_raw(&mut self) -> Option<RawRead> {
+        std::future::poll_fn(|cx| {
+            let shared = &self.shared;
+            let mut state = shared.lock();
+            loop {
+                match &state.recv {
+                    RecvState::Raw(_) => break,
+                    RecvState::Sealed(data) if data.is_empty() => {
+                        let step = state.poll_sealed_step(&shared.socket, Read::Wait(cx));
+                        if !state.out.is_empty() {
+                            push(shared, &mut state);
+                        }
+                        match step {
+                            Poll::Ready(Ok(())) => {}
+                            Poll::Ready(Err(_)) => return Poll::Ready(()),
+                            Poll::Pending => return Poll::Pending,
+                        }
+                    }
+                    _ => return Poll::Ready(()),
+                }
+            }
+            Poll::Ready(())
+        })
+        .await;
+        self.take_raw()
     }
 }
 

@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{Pair, accept_next, quick, wait_for};
+use i3t_conn::SendStream as _;
 use i3t_lane::{LaneRecv, LaneSend, Lanes, Payload};
 use i3t_proto::NodeId;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -144,7 +145,7 @@ async fn silent_then_active(pair: &Pair, payload: Payload, report: bool) {
     sleep(Duration::from_secs(2)).await;
     let (fds_after, heap_after) = resources();
     let status = pair.entry.lanes.status();
-    assert_eq!(status.in_use, u64::try_from(STREAMS).unwrap());
+    assert_eq!(status.total.in_use, u64::try_from(STREAMS).unwrap());
     let per_stream_fds = (fds_after.saturating_sub(fds_before)) as f64 / STREAMS as f64;
     let per_stream_kb = (heap_after.saturating_sub(heap_before)) as f64 / 1024.0 / STREAMS as f64;
     if report {
@@ -152,10 +153,10 @@ async fn silent_then_active(pair: &Pair, payload: Payload, report: bool) {
             "{payload:?}: {STREAMS} 条流用了 {opening:?} 开好；两头合计每条静默的流 {per_stream_fds:.2} 个文件描述符、{per_stream_kb:.1} KB 堆内存（{} → {} KB，含两头守着它的任务；量的时候池里另有 {} 条空闲的）；取用 {} 次，其中等待 {} 次，共等 {:?}",
             heap_before / 1024,
             heap_after / 1024,
-            status.idle,
-            status.claims - before.claims,
-            status.claims_waited - before.claims_waited,
-            status.claim_wait - before.claim_wait
+            status.idle(),
+            status.total.claims - before.total.claims,
+            status.total.claims_waited - before.total.claims_waited,
+            status.total.claim_wait - before.total.claim_wait
         );
         assert!(per_stream_fds < 2.5, "每条流两头各一个 socket，多出来的是池里的空闲 lane：{per_stream_fds}");
     }
@@ -168,7 +169,7 @@ async fn silent_then_active(pair: &Pair, payload: Payload, report: bool) {
     if report {
         eprintln!("{payload:?}: {STREAMS} 条流一起各收 {MESSAGE} 字节、两头正常结束，用了 {:?}", started.elapsed());
     }
-    wait_for("流都结束了", Duration::from_secs(10), || pair.entry.lanes.status().in_use == 0).await;
+    wait_for("流都结束了", Duration::from_secs(10), || pair.entry.lanes.status().total.in_use == 0).await;
 }
 
 /// 两种负载方式依次跑：同一个进程里的数字才能比，所以放在一个测试里，不和别的测试并行。

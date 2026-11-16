@@ -1,10 +1,7 @@
 //! 流层跑在 lane 上：客户端 TCP ↔ 入口 ↔ lane ↔ 出口 ↔ 目标 TCP。
 //!
-//! sealed 用的是现在的流层，一行不改（`i3t_flow::open`、`serve`、`Flow::relay`）：流层不知道头在哪里结束，
-//! lane 按"发起方开始读回复时头一定写完了"把它当作 sealed 送出。
-//!
-//! passthrough 要流层多做两件事（头写完时 `end_header`，搬运前取原始 socket 交给 splice），那是下一阶段的改动。
-//! 这里用一个替身：照流层的样子写 OPEN、读 REPLY，加上那两件事，见 `stand_in`。
+//! 流层自己（`i3t_flow::open`、`serve`、`Flow::relay`）在头写完时结束头，首批数据是 TLS 时走 passthrough，
+//! 搬运时把不再加密的方向交给 splice。`stand_in` 是同样几步的手写版本，给要在中间看着线上字节的测试用。
 
 // clippy.toml 里的 allow-unwrap-in-tests 只管 #[test] 函数，管不到集成测试里的辅助函数。这里 unwrap 失败就是测试失败。
 #![allow(clippy::unwrap_used)]
@@ -19,8 +16,8 @@ use std::time::Duration;
 
 use common::{Hop, Pair, quick};
 use i3t_conn::{RecvStream, SendStream};
+use i3t_flow::engine::Splicer;
 use i3t_flow::{End, Handler, Request};
-use i3t_lane::splice::Splicer;
 use i3t_lane::{Lanes, Payload};
 use i3t_proto::NodeId;
 use i3t_proto::flow::{Class, Open, Origin, Reply, Target};
@@ -102,15 +99,15 @@ async fn drain(stream: &mut (impl AsyncRead + Unpin)) -> (Vec<u8>, io::Result<()
     }
 }
 
-/// 现在的流层：入口用 `open` + `established` + `relay`，出口用 `serve`。
-async fn through_unmodified_flow(lanes: &Lanes, peer: NodeId, client_side: TcpStream, first_data: &[u8]) -> End {
+/// 流层：入口用 `open` + `established` + `relay`，出口用 `serve`。
+async fn through_flow(lanes: &Lanes, peer: NodeId, client_side: TcpStream, first_data: &[u8]) -> End {
     let pending = i3t_flow::open(lanes, peer, &open_request(), first_data).await.unwrap();
     let flow = pending.established().await.unwrap();
     flow.relay(client_side, future::pending()).await.end
 }
 
 #[tokio::test]
-async fn the_unmodified_flow_layer_runs_sealed_on_lanes_in_both_directions_of_initiative() {
+async fn the_flow_layer_runs_sealed_on_lanes_in_both_directions_of_initiative() {
     let pair = Pair::new(quick()).await;
     pair.ready(2).await;
     let target = echo_target().await;
@@ -122,7 +119,7 @@ async fn the_unmodified_flow_layer_runs_sealed_on_lanes_in_both_directions_of_in
         let (mut client, client_side) = tcp_pair().await;
         let lanes = Arc::clone(&from.lanes);
         let peer = to.id;
-        let relay = tokio::spawn(async move { through_unmodified_flow(&lanes, peer, client_side, b"first ").await });
+        let relay = tokio::spawn(async move { through_flow(&lanes, peer, client_side, b"first ").await });
         let body: Vec<u8> = (0..200_000u32).map(|i| u8::try_from(i % 249).unwrap()).collect();
         client.write_all(&body).await.unwrap();
         client.shutdown().await.unwrap();
@@ -135,8 +132,44 @@ async fn the_unmodified_flow_layer_runs_sealed_on_lanes_in_both_directions_of_in
         assert!(relay.await.unwrap().is_clean());
     }
     let status = pair.entry.lanes.status();
-    assert!(status.sealed_bytes >= 400_000, "{status:?}");
-    assert_eq!(status.passthrough_bytes, 0, "流层不改时一律是 sealed");
+    assert!(status.total.sealed_bytes >= 400_000, "{status:?}");
+    assert_eq!(status.total.passthrough_bytes + status.total.spliced_bytes, 0, "首批数据不是 TLS，一律是 sealed");
+}
+
+#[tokio::test]
+async fn the_flow_layer_passes_tls_through_and_splices_it() {
+    let pair = Pair::new(quick()).await;
+    pair.ready(1).await;
+    let target = echo_target().await;
+    let lanes = Arc::clone(&pair.exit.lanes);
+    tokio::spawn(async move { i3t_flow::serve(&*lanes, Arc::new(ToTarget { target })).await });
+    let (mut client, client_side) = tcp_pair().await;
+    let lanes = Arc::clone(&pair.entry.lanes);
+    let peer = pair.exit.id;
+    let hello = [0x16, 0x03, 0x01, 0x00, 0x04, 0x01, 0, 0, 0];
+    let relay = tokio::spawn(async move { through_flow(&lanes, peer, client_side, &hello).await });
+    let body: Vec<u8> = (0..3_000_000u32).map(|i| u8::try_from(i % 239).unwrap()).collect();
+    let (mut from_target, mut to_target) = client.split();
+    let ((), (echoed, end)) = tokio::join!(
+        async {
+            to_target.write_all(&body).await.unwrap();
+            to_target.shutdown().await.unwrap();
+        },
+        async {
+            let mut echoed = Vec::new();
+            let end = from_target.read_to_end(&mut echoed).await;
+            (echoed, end)
+        }
+    );
+    end.unwrap();
+    assert!(echoed == [&hello[..], &body].concat(), "回显的字节不一样");
+    assert!(relay.await.unwrap().is_clean());
+    let entry = pair.entry.lanes.status();
+    let exit = pair.exit.lanes.status();
+    // 两头都把不再加密的方向交给了搬运引擎：每个方向的数据都过了 splice（非 Linux 上是用户态拷贝，同样经引擎）。
+    assert!(entry.total.spliced_bytes >= 2 * 3_000_000, "{entry:?}");
+    assert!(exit.total.spliced_bytes >= 2 * 3_000_000, "{exit:?}");
+    assert!(entry.total.sealed_bytes < 1024, "加密的只有开流时的头：{entry:?}");
 }
 
 #[tokio::test]
@@ -149,7 +182,7 @@ async fn an_upstream_reset_in_the_middle_of_an_answer_reaches_the_client_as_a_re
     let (mut client, client_side) = tcp_pair().await;
     let lanes = Arc::clone(&pair.entry.lanes);
     let peer = pair.exit.id;
-    let relay = tokio::spawn(async move { through_unmodified_flow(&lanes, peer, client_side, b"").await });
+    let relay = tokio::spawn(async move { through_flow(&lanes, peer, client_side, b"").await });
     client.write_all(b"request!!").await.unwrap();
     let (got, end) = drain(&mut client).await;
     assert_eq!(got, b"half of the ans");
@@ -162,7 +195,8 @@ async fn an_upstream_reset_in_the_middle_of_an_answer_reaches_the_client_as_a_re
 mod stand_in {
     use std::sync::Arc;
 
-    use i3t_lane::splice::Splicer;
+    use i3t_conn::{RecvStream as _, SendStream as _};
+    use i3t_flow::engine::Splicer;
     use i3t_lane::{LaneRecv, LaneSend, Lanes, Payload};
     use i3t_proto::NodeId;
     use i3t_proto::flow::{DecodeError, Decoded, Opening, Reply};
@@ -436,12 +470,23 @@ async fn an_upstream_reset_in_the_middle_of_an_answer_reaches_the_client_as_a_re
 
 #[tokio::test]
 async fn sealed_mode_still_runs_when_the_responder_never_switches() {
-    // 发起方选了 passthrough，接受方（现在的流层）不调 end_header：接受方的方向一直在 TLS 里，照样读得懂。
+    // 发起方选了 passthrough，接受方不调 end_header：接受方的方向一直在 TLS 里，照样读得懂。
     let pair = Pair::new(quick()).await;
     pair.ready(1).await;
-    let target = echo_target().await;
-    let lanes = Arc::clone(&pair.exit.lanes);
-    tokio::spawn(async move { i3t_flow::serve(&*lanes, Arc::new(ToTarget { target })).await });
+    let exit = Arc::clone(&pair.exit.lanes);
+    let responder = tokio::spawn(async move {
+        use i3t_conn::Acceptor;
+        let incoming = exit.accept().await.unwrap();
+        let (mut send, mut recv) = (incoming.send, incoming.recv);
+        let _open = stand_in::read_header(&mut recv, i3t_proto::flow::Opening::decode).await;
+        let mut reply = Vec::new();
+        Reply::ok().encode(&mut reply);
+        send.write_all(&reply).await.unwrap();
+        let mut rest = Vec::new();
+        recv.read_to_end(&mut rest).await.unwrap();
+        send.write_all(&rest).await.unwrap();
+        send.shutdown().await.unwrap();
+    });
     let (mut send, mut recv) = pair.entry.lanes.open_stream(pair.exit.id).await.unwrap();
     let mut header = Vec::new();
     open_request().encode(&mut header);
@@ -456,4 +501,5 @@ async fn sealed_mode_still_runs_when_the_responder_never_switches() {
     let (echoed, end) = drain(&mut recv).await;
     end.unwrap();
     assert_eq!(echoed, [&[0x16, 0x03, 0x01, 0x00, 0x04, 0x01, 0, 0, 0][..], b"raw up"].concat());
+    responder.await.unwrap();
 }

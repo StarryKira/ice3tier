@@ -19,9 +19,13 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
+[features]
+# 给上层 crate 的测试用：同一批测试分别跑在共用的连接上和 lane 上（`i3t_lane::testing`）。
+test-util = []
+
 [dev-dependencies]
 bytes.workspace = true
-i3t-flow = { path = "../i3t-flow" }
+i3t-flow = { path = "../i3t-flow", features = ["test-util"] }
 rcgen.workspace = true
 tokio-rustls.workspace = true
 tracing-subscriber.workspace = true
@@ -30,7 +34,7 @@ tracing-subscriber.workspace = true
 workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix = { version = "1.1.6", features = ["pipe", "net"] }
+rustix = { version = "1.1.6", features = ["net"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 rustix = { version = "1.1.6", features = ["time"] }

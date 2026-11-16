@@ -27,6 +27,7 @@ use crate::endpoint::{Inner, LaneConfig};
 use crate::error::{LaneError, OpenLaneError};
 use crate::frame::Frame;
 use crate::lane::Lane;
+use crate::status::Book;
 
 /// 突发时一次最多请对方额外补拨多少条。
 pub(crate) const MAX_BURST: usize = 512;
@@ -130,20 +131,20 @@ impl Holder {
 }
 
 /// 从 `peer` 停在本节点的 lane 里取一条。
-pub(crate) async fn claim(inner: &Arc<Inner>, peer: NodeId) -> Result<Lane, OpenLaneError> {
+pub(crate) async fn claim(inner: &Arc<Inner>, peer: NodeId, book: &Book) -> Result<Lane, OpenLaneError> {
     let waiter = {
         let mut peers = inner.lock_peers();
         let holder = &mut peers.get_mut(&peer).ok_or(OpenLaneError::NotEnabled(peer))?.holder;
         let silent = holder.silent(inner.config.ping_interval);
         let Some(control) = holder.control.as_ref().filter(|_| !silent) else {
-            inner.counters.claims_failed.bump();
+            book.bump(|tally| &tally.claims_failed);
             return Err(OpenLaneError::NoControl(peer));
         };
         if holder.going_away {
-            inner.counters.claims_failed.bump();
+            book.bump(|tally| &tally.claims_failed);
             return Err(OpenLaneError::GoingAway(peer));
         }
-        inner.counters.claims.bump();
+        book.bump(|tally| &tally.claims);
         holder.demand.get_or_insert_with(|| Demand::new(Instant::now().into_std())).record();
         // 每取走一条都让控制 lane 算一下要不要补：不等下一个维护周期，取得快的时候池才不会在两个周期之间被抽干。
         // 控制 lane 按"还在路上的"去重，连着来的几次只会请一次。
@@ -159,19 +160,19 @@ pub(crate) async fn claim(inner: &Arc<Inner>, peer: NodeId) -> Result<Lane, Open
         holder.waiters.push_back(sender);
         receiver
     };
-    inner.counters.claims_waited.bump();
+    book.bump(|tally| &tally.claims_waited);
     let started = Instant::now();
     let outcome = time::timeout(inner.config.claim_wait, waiter).await;
     let waited = started.elapsed();
-    inner.counters.claim_wait_micros.add(usize::try_from(waited.as_micros()).unwrap_or(usize::MAX));
+    book.add(|tally| &tally.claim_wait_micros, usize::try_from(waited.as_micros()).unwrap_or(usize::MAX));
     match outcome {
         Ok(Ok(lane)) => Ok(lane),
         Ok(Err(_)) => {
-            inner.counters.claims_failed.bump();
+            book.bump(|tally| &tally.claims_failed);
             Err(OpenLaneError::NoControl(peer))
         }
         Err(_) => {
-            inner.counters.claims_failed.bump();
+            book.bump(|tally| &tally.claims_failed);
             inner.log_dry_pool(peer, waited);
             Err(OpenLaneError::PoolDry { peer, waited })
         }
@@ -301,6 +302,10 @@ impl Pool {
         ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
         // 第一个 POOL 也告诉对方：它的控制 lane 被接受了，可以开始停 lane 过来。
         self.request(inner, lane, true).await?;
+        // 本节点在排空时对方（重启过的、换了地址的）新拨来控制 lane：马上告诉它，它才不会在这里开流。
+        if inner.is_going_away() {
+            lane.send(&Frame::GoAway).await?;
+        }
         loop {
             let event = tokio::select! {
                 _ = shutdown.changed() => Event::Shutdown,

@@ -2,7 +2,7 @@
 //!
 //! 默认关着，由管理员按节点对打开。打开之后，两个节点里能连上对方节点端口的那一个（"拨号方"）向对方拨 lane；
 //! 每条 lane 是一条按两边节点公钥双向认证的 TLS 1.3 连接，承载正好一条流，用完就关，不复用。
-//! 流之间互不影响（一个丢包只耽误它自己），本来就是 TLS 的用户数据可以不再加密、由内核直接搬（[`splice`]）。
+//! 流之间互不影响（一个丢包只耽误它自己），本来就是 TLS 的用户数据可以不再加密、由内核直接搬（Linux 上是 splice）。
 //! 代价是每条流一条 TCP 穿过拨号方的路由器、要预先拨好一批，以及流不能换路。
 //!
 //! # 谁拨、谁用
@@ -64,9 +64,12 @@
 //! # 和流层的对接
 //!
 //! [`Lanes`] 实现连接层的 [`i3t_conn::Connector`] 和 [`i3t_conn::Acceptor`]，流的两个方向 [`LaneSend`]、[`LaneRecv`]
-//! 实现 [`i3t_conn::SendStream`]、[`i3t_conn::RecvStream`]，流层不改也能跑在上面（一律 sealed）。要用 passthrough 和 splice，
-//! 流层要多做两件事：头写完时调 [`LaneSend::end_header`]；搬运之前用 [`LaneSend::take_raw`]、[`LaneRecv::take_raw`]
-//! 拿到原始的 socket，交给 [`splice::Splicer::pump`]。
+//! 实现 [`i3t_conn::SendStream`]、[`i3t_conn::RecvStream`]。流层头写完时调 [`i3t_conn::SendStream::end_header`]
+//! 说这条流的负载要不要再加密；搬运之前用 [`i3t_conn::SendStream::take_raw`]、[`i3t_conn::RecvStream::wait_raw`]
+//! 拿到原始的 socket，交给流层的搬运引擎（`i3t_flow::engine`）。
+//!
+//! 节点里用的是 [`LaneConnector`] 和 [`LaneAcceptor`]：把共用的连接和 lane 装成一个连接层，承载 TCP 连接的流按节点对的设置走 lane，
+//! 取不到 lane 时悄悄改走共用的连接；别的流和数据报一律走共用的连接。
 
 mod admission;
 mod demand;
@@ -76,15 +79,19 @@ mod error;
 mod frame;
 mod holder;
 mod lane;
+mod mixed;
 mod sealed;
 mod socket;
-pub mod splice;
 mod status;
 mod stream;
+#[cfg(feature = "test-util")]
+pub mod testing;
 
 pub use endpoint::{LaneConfig, LanePeer, Lanes, NoDatagrams, is_lane};
 pub use error::{LaneError, OpenLaneError};
-pub use frame::{FrameError, Payload};
+pub use frame::FrameError;
+pub use i3t_conn::{Payload, RawRead, RawWrite};
 pub use lane::ALPN;
-pub use status::{HandshakeFailures, LaneStatus};
-pub use stream::{LaneRecv, LaneSend, RawRead, RawWrite};
+pub use mixed::{Choose, EitherRecv, EitherSend, LaneAcceptor, LaneConnector};
+pub use status::{HandshakeFailures, LaneCounts, LaneStatus, PeerLaneStatus};
+pub use stream::{LaneRecv, LaneSend};

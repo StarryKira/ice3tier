@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{Node, Pair, accept_next, id, quick, read_to_end, wait_for};
+use i3t_conn::SendStream as _;
 use i3t_lane::{OpenLaneError, Payload};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -46,12 +47,12 @@ async fn a_drained_pool_asks_for_a_burst_and_waiting_claims_are_served() {
         held.push(claim.unwrap().unwrap());
     }
     let status = pair.entry.lanes.status();
-    assert_eq!(status.claims - before.claims, 60);
-    assert!(status.claims_waited > before.claims_waited, "池被抽干时有人要等：{status:?}");
-    assert_eq!(status.claims_failed, 0);
-    assert_eq!(status.in_use, 60, "取走的 lane 都在用：{status:?}");
+    assert_eq!(status.total.claims - before.total.claims, 60);
+    assert!(status.total.claims_waited > before.total.claims_waited, "池被抽干时有人要等：{status:?}");
+    assert_eq!(status.total.claims_failed, 0);
+    assert_eq!(status.total.in_use, 60, "取走的 lane 都在用：{status:?}");
     // 补拨之后池又满了，而且刚才那一阵让目标比最小值大。
-    wait_for("池补回来", Duration::from_secs(5), || pair.entry.lanes.status().idle > 4).await;
+    wait_for("池补回来", Duration::from_secs(5), || pair.entry.lanes.status().idle() > 4).await;
     for _ in 0..60 {
         drop(accept_next(&pair.exit.lanes).await);
     }
@@ -65,7 +66,7 @@ async fn a_claim_waits_two_seconds_on_an_empty_pool_and_then_fails_distinctly() 
     // 出口从此拨不进来：池用完了就补不上。
     pair.hop.refuse_new(true);
     let mut held = Vec::new();
-    while pair.entry.lanes.status().idle > 0 {
+    while pair.entry.lanes.status().idle() > 0 {
         held.push(pair.entry.lanes.open_stream(pair.exit.id).await.unwrap());
     }
     let started = Instant::now();
@@ -74,7 +75,7 @@ async fn a_claim_waits_two_seconds_on_an_empty_pool_and_then_fails_distinctly() 
     assert!(matches!(error, OpenLaneError::PoolDry { .. }), "{error}");
     assert!((Duration::from_millis(1900)..Duration::from_millis(3000)).contains(&waited), "等了 {waited:?}");
     assert!(matches!(error.to_open_error(), i3t_conn::OpenError::Timeout(_)), "通过连接层契约看到的是超时");
-    assert_eq!(pair.entry.lanes.status().claims_failed, 1);
+    assert_eq!(pair.entry.lanes.status().total.claims_failed, 1);
     // 出口又能拨进来之后，池补上，取用照常。
     pair.hop.refuse_new(false);
     pair.ready(1).await;
@@ -154,7 +155,7 @@ async fn a_node_whose_key_is_not_known_is_refused_in_the_handshake() {
     stranger.lanes.set_peers([pair.entry.peer(vec![pair.hop.addr])]).unwrap();
     wait_for("陌生人的握手被拒绝", Duration::from_secs(5), || pair.entry.lanes.status().handshake_failures.unknown_key >= 1).await;
     assert!(!pair.entry.lanes.can_open(stranger.id));
-    wait_for("陌生人知道自己被拒绝", Duration::from_secs(5), || stranger.lanes.status().dial_failures >= 1).await;
+    wait_for("陌生人知道自己被拒绝", Duration::from_secs(5), || stranger.lanes.status().total.dial_failures >= 1).await;
     // 它的控制 lane 没有被认可：不在 lane 上开流，开流请求一个字节都没发出去，调用方改走共用的连接。
     assert!(!stranger.lanes.can_open(pair.entry.id));
     assert!(matches!(stranger.lanes.open_stream(pair.entry.id).await, Err(OpenLaneError::NoControl(_))));
@@ -166,7 +167,7 @@ async fn a_node_whose_key_is_not_known_is_refused_in_the_handshake() {
         pair.entry.lanes.status().handshake_failures.unknown_key > unknown
     })
     .await;
-    assert_eq!(pair.entry.lanes.status().idle, 0);
+    assert_eq!(pair.entry.lanes.status().idle(), 0);
 }
 
 #[tokio::test]
@@ -212,21 +213,26 @@ async fn a_crowd_of_idle_connections_from_one_source_cannot_lock_the_dialler_out
     }
     wait_for("最老的被挤掉", Duration::from_secs(5), || pair.entry.lanes.status().handshake_failures.busy >= 50).await;
     // 出口这时拨的新 lane 照样握手成功：挤掉的是赖着的老连接，不是新来的。连开十条，池里原来的不够用，一定有新拨的。
-    let dial_failures = pair.exit.lanes.status().dial_failures;
+    let dial_failures = pair.exit.lanes.status().total.dial_failures;
     for _ in 0..10 {
         timeout(Duration::from_secs(3), round_trip(&pair)).await.unwrap();
     }
-    assert_eq!(pair.exit.lanes.status().dial_failures, dial_failures);
+    assert_eq!(pair.exit.lanes.status().total.dial_failures, dial_failures);
     drop(crowd);
 }
 
 #[tokio::test]
 async fn the_dialler_streams_go_over_its_warm_lanes_or_a_lane_dialled_on_the_spot() {
     let mut config = quick();
-    config.warm = 1;
+    config.min_idle = 1;
     let pair = Pair::new(config).await;
     pair.ready(1).await;
-    wait_for("出口的热 lane", Duration::from_secs(5), || pair.exit.lanes.status().warm >= 1).await;
+    sleep(Duration::from_millis(300)).await;
+    assert_eq!(pair.exit.lanes.status().ready(), 0, "还没有往入口开过流时不备自己的热 lane");
+    // 第一条当场拨，之后开始备热的。
+    let first = pair.exit_opens(b"first", Payload::Sealed).await;
+    drop(first);
+    wait_for("出口的热 lane", Duration::from_secs(5), || pair.exit.lanes.status().ready() >= 1).await;
     // 第一条用热的，后面几条热的来不及补，当场拨。
     let mut streams = Vec::new();
     for _ in 0..5 {
@@ -247,7 +253,61 @@ async fn going_away_stops_new_streams_on_lanes_of_that_pair() {
     pair.ready(2).await;
     pair.exit.lanes.go_away();
     wait_for("入口知道出口要走", Duration::from_secs(3), || !pair.entry.lanes.can_open(pair.exit.id)).await;
-    assert_eq!(pair.entry.lanes.status().idle, 0);
+    assert_eq!(pair.entry.lanes.status().idle(), 0);
     assert!(matches!(pair.entry.lanes.open_stream(pair.exit.id).await, Err(OpenLaneError::GoingAway(_))));
     assert!(matches!(pair.exit.lanes.open_stream(pair.entry.id).await, Err(OpenLaneError::GoingAway(_))));
+}
+
+/// 出口自己开一条流到入口，入口回一句话。
+async fn round_trip_from_exit(pair: &Pair) {
+    let ((mut send, mut recv), (mut far_send, mut far_recv)) = pair.exit_opens(b"hello", Payload::Sealed).await;
+    far_send.write_all(b"world").await.unwrap();
+    far_send.shutdown().await.unwrap();
+    send.shutdown().await.unwrap();
+    assert_eq!(read_to_end(&mut recv).await.unwrap(), b"world");
+    assert_eq!(read_to_end(&mut far_recv).await.unwrap(), b"");
+}
+
+#[tokio::test]
+async fn lanes_come_back_after_a_drain_is_called_off_or_the_draining_node_restarts() {
+    let mut pair = Pair::new(quick()).await;
+    pair.ready(2).await;
+
+    // 入口（接受方）排空：出口不再在 lane 上往它开流。撤销之后两边重新建立控制 lane，照常开流。
+    pair.entry.lanes.go_away();
+    wait_for("出口知道入口要走", Duration::from_secs(3), || !pair.exit.lanes.can_open(pair.entry.id)).await;
+    pair.entry.lanes.come_back();
+    timeout(Duration::from_secs(10), pair.ready(2)).await.expect("撤销排空之后入口这边的 lane 要回来");
+    wait_for("出口重新能开流", Duration::from_secs(10), || pair.exit.lanes.can_open(pair.entry.id)).await;
+    round_trip(&pair).await;
+    round_trip_from_exit(&pair).await;
+
+    // 出口（拨号方）排空再撤销。
+    pair.exit.lanes.go_away();
+    wait_for("入口知道出口要走", Duration::from_secs(3), || !pair.entry.lanes.can_open(pair.exit.id)).await;
+    pair.exit.lanes.come_back();
+    timeout(Duration::from_secs(10), pair.ready(2)).await.expect("撤销排空之后出口要重新停 lane 过来");
+    round_trip(&pair).await;
+
+    // 入口排空着的时候出口重启：新拨来的控制 lane 上马上听到"要走"。
+    pair.entry.lanes.go_away();
+    pair.exit.restart(quick());
+    pair.introduce();
+    wait_for("出口的控制 lane 建立", Duration::from_secs(10), || {
+        pair.exit.lanes.status().peer(pair.entry.id).is_some_and(|peer| peer.control)
+    })
+    .await;
+    sleep(Duration::from_millis(200)).await;
+    assert!(!pair.exit.lanes.can_open(pair.entry.id), "排空中的入口要在新的控制 lane 上也说要走");
+
+    // 入口更新完重启：出口对新的入口照常开流。
+    let addr = pair.entry.addr.unwrap();
+    pair.entry.restart(quick());
+    // 旧的监听任务被取消之后才放开端口。
+    sleep(Duration::from_millis(300)).await;
+    pair.entry.listen(addr).await;
+    pair.introduce();
+    timeout(Duration::from_secs(15), pair.ready(2)).await.expect("入口重启之后出口要重新停 lane 过来");
+    wait_for("出口对重启之后的入口照常开流", Duration::from_secs(10), || pair.exit.lanes.can_open(pair.entry.id)).await;
+    round_trip_from_exit(&pair).await;
 }
