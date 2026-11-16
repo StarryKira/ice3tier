@@ -11,17 +11,30 @@
 //!
 //! 接收方也可以主动叫停（[`RecvStream::stop`]）：发送方之后的写会出错，[`StreamAborted::of`] 同样能取出原因码。
 //!
+//! # 独占 TCP（lane）要上层多做的事
+//!
+//! 一条流也可能跑在一条只属于它的 TCP 上（`i3t-lane`）。那时上层多做三件事，跑在共用连接上的流全部是空操作：
+//!
+//! - 写完流的头（发起方的 OPEN 连同首批数据、接受方的 REPLY）时调 [`SendStream::end_header`]，发起方顺便选定
+//!   [`Payload`]：首批数据本身就是 TLS 时，头之后的字节可以不再加密；
+//! - 搬运之前用 [`SendStream::take_raw`]、[`RecvStream::wait_raw`] 问一下这个方向是不是已经是一条原始的 TCP，
+//!   是的话直接在两条 TCP 之间搬（Linux 上用 splice）；
+//! - 开一条承载 TCP 连接的流用 [`Connector::open_tcp`]：实现可以为它挑独占的 TCP，别的流（数据报上下文等）照常用 [`Connector::open`]。
+//!
 //! 流之外，一对节点之间还可以互相发数据报（[`Datagrams`]）：一份一份的，每份有长度上限。
 //! 走 [`DatagramSender::send_datagram`] 的可能丢、可能乱序、不重传；走 [`DatagramSender::send_reliable`] 的不丢，
 //! 但同样不保证先后。数据报只在已经有的连接上发，不会为它去建连接：上层总是先开一条流，再发和这条流有关的数据报。
 
 use std::future::Future;
 use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
 use i3t_proto::NodeId;
 use i3t_proto::flow::Recipient;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpStream;
 
 /// 流异常结束时带给对端的原因码。各个值的含义由上层定义，这一层只负责送达。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -52,12 +65,157 @@ pub trait SendStream: AsyncWrite + Unpin + Send + 'static {
     fn set_priority(&mut self, priority: Priority) {
         let _ = priority;
     }
+
+    /// 流的头写完了：发起方是 OPEN 连同首批数据，接受方是 REPLY。
+    ///
+    /// 发起方用 `payload` 选这条流头之后的负载方式；接受方传 [`Payload::Passthrough`] 表示"发起方选了不加密的话，我这个方向也跟着"。
+    /// 跑在共用连接上的流不需要知道头在哪里结束，默认什么都不做。不用等，也不用再 `flush`。
+    fn end_header(&mut self, payload: Payload) {
+        let _ = payload;
+    }
+
+    /// 这个方向底下是不是已经是一条只属于这条流、不再加密的 TCP。是的话交出来（见 [`RawWrite`]），之后这个 [`SendStream`] 不再能写。
+    ///
+    /// 默认 `None`：照常用 `AsyncWrite` 写。
+    fn take_raw(&mut self) -> Option<RawWrite> {
+        None
+    }
 }
 
 /// 一条流的接收方向。
 pub trait RecvStream: AsyncRead + Unpin + Send + 'static {
     /// 不再读了，请对端停止发送。对端之后的写会出错并拿到 `code`。
     fn stop(&mut self, code: StreamCode);
+
+    /// 等到知道这个方向接下来是什么：底下已经是一条不再加密的 TCP（见 [`RawRead`]）就交出来，之后这个 [`RecvStream`] 不再能读；
+    /// 不是（接下来还是加密的数据、或者已经结束），返回 `None`，照常读。
+    ///
+    /// 发起方读完 REPLY 之后调：对端在 REPLY 后面紧跟着切换，切换的标记可能还在路上。默认立刻返回 `None`。
+    fn wait_raw(&mut self) -> impl Future<Output = Option<RawRead>> + Send {
+        std::future::ready(None)
+    }
+}
+
+/// 流的头之后，这个方向上的数据怎么走。只对跑在独占 TCP 上的流有意义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Payload {
+    /// 一直加密。
+    #[default]
+    Sealed,
+    /// 头之后原样传用户的字节，不再加密第二次。只在用户的数据本身就是 TLS 时用。
+    Passthrough,
+}
+
+impl Payload {
+    /// 首批数据是一条完整的 TLS 握手记录、内容是 ClientHello 时选 [`Payload::Passthrough`]，其余选 [`Payload::Sealed`]。
+    ///
+    /// 只看开头：记录头是握手类型、版本是 3.x、长度在 TLS 允许的范围里并且整条都在，记录里第一条握手消息是 ClientHello。
+    /// 不完整的不算，宁可多加密一次，也不能把不是 TLS 的数据明文送出去。
+    #[must_use]
+    pub fn for_first_data(first: &[u8]) -> Self {
+        const HANDSHAKE: u8 = 0x16;
+        const CLIENT_HELLO: u8 = 0x01;
+        let Some(&[HANDSHAKE, 0x03, _minor, hi, lo, CLIENT_HELLO]) = first.first_chunk::<6>() else { return Self::Sealed };
+        let len = usize::from(u16::from_be_bytes([hi, lo]));
+        if (4..=1 << 14).contains(&len) && first.len() >= 5 + len { Self::Passthrough } else { Self::Sealed }
+    }
+}
+
+/// 一个已经不再加密的发送方向：一条只属于这条流的 TCP，交给调用方直接写（例如在两条 TCP 之间 splice）。
+///
+/// - 先写 [`unsent`](Self::unsent)，再写自己的数据。
+/// - 正常结束时发 FIN（`shutdown(Write)`）；异常结束时绝不能发 FIN，而是重置连接。
+/// - socket 处在"关闭时发 RST"的状态。交出去之后底下的传输不再管它怎么关：调用方在整条流两个方向都正常结束时
+///   才恢复正常关闭（`SO_LINGER` 关掉），否则保持原样，丢弃时对端看到重置。
+#[derive(Debug)]
+pub struct RawWrite {
+    socket: Arc<TcpStream>,
+    unsent: Bytes,
+    counters: Vec<Arc<AtomicU64>>,
+}
+
+impl RawWrite {
+    /// 调用方每搬一段就往 `counters` 上各加一次，底下的传输用它们计数。
+    #[must_use]
+    pub fn new(socket: Arc<TcpStream>, unsent: Bytes, counters: Vec<Arc<AtomicU64>>) -> Self {
+        Self { socket, unsent, counters }
+    }
+
+    #[must_use]
+    pub fn socket(&self) -> &TcpStream {
+        &self.socket
+    }
+
+    /// 同一条 socket 的又一个句柄：调用方要在搬运结束之后决定怎么关它时留着。
+    #[must_use]
+    pub fn socket_handle(&self) -> Arc<TcpStream> {
+        Arc::clone(&self.socket)
+    }
+
+    /// 还没交给内核的那一截（开流时的密文），必须先于任何原始字节写出去。
+    #[must_use]
+    pub fn unsent(&self) -> &[u8] {
+        &self.unsent
+    }
+
+    /// 告诉底下的传输又搬了 `bytes` 字节。
+    pub fn moved(&self, bytes: usize) {
+        for counter in &self.counters {
+            // usize 不会比 u64 宽，这里不会截断。
+            counter.fetch_add(bytes as u64, Ordering::Relaxed);
+        }
+    }
+
+    #[must_use]
+    pub fn into_parts(self) -> (Arc<TcpStream>, Bytes) {
+        (self.socket, self.unsent)
+    }
+}
+
+/// 一个已经不再加密的接收方向：先交出 [`received`](Self::received)（已经从 socket 读进来、还没交出去的原始字节），再读 socket。
+/// FIN 是正常结束，RST 或者出错是异常结束。关闭的规矩和 [`RawWrite`] 一样。
+#[derive(Debug)]
+pub struct RawRead {
+    socket: Arc<TcpStream>,
+    received: Bytes,
+    counters: Vec<Arc<AtomicU64>>,
+}
+
+impl RawRead {
+    /// 调用方每搬一段就往 `counters` 上各加一次，底下的传输用它们计数。
+    #[must_use]
+    pub fn new(socket: Arc<TcpStream>, received: Bytes, counters: Vec<Arc<AtomicU64>>) -> Self {
+        Self { socket, received, counters }
+    }
+
+    #[must_use]
+    pub fn socket(&self) -> &TcpStream {
+        &self.socket
+    }
+
+    /// 同一条 socket 的又一个句柄：调用方要在搬运结束之后决定怎么关它时留着。
+    #[must_use]
+    pub fn socket_handle(&self) -> Arc<TcpStream> {
+        Arc::clone(&self.socket)
+    }
+
+    #[must_use]
+    pub fn received(&self) -> &[u8] {
+        &self.received
+    }
+
+    /// 告诉底下的传输又搬了 `bytes` 字节。
+    pub fn moved(&self, bytes: usize) {
+        for counter in &self.counters {
+            // usize 不会比 u64 宽，这里不会截断。
+            counter.fetch_add(bytes as u64, Ordering::Relaxed);
+        }
+    }
+
+    #[must_use]
+    pub fn into_parts(self) -> (Arc<TcpStream>, Bytes) {
+        (self.socket, self.received)
+    }
 }
 
 /// 流的某个方向被对端异常结束了。它被包在读写返回的 [`io::Error`] 里。
@@ -103,6 +261,13 @@ pub trait Connector: Send + Sync + 'static {
 
     /// 到 `peer` 开一条新的流。和它之间还没有连接时先建连接（多一次握手往返）；已经有连接时不需要任何往返。
     fn open(&self, peer: NodeId) -> impl Future<Output = Result<(Self::Send, Self::Recv), OpenError>> + Send;
+
+    /// 到 `peer` 开一条承载一条 TCP 连接的流（代理的 CONNECT、TCP 端口转发）。
+    ///
+    /// 实现可以为这种流挑另一种传输（一对节点之间打开了独占 TCP 时，每条这样的流独占一条 TCP）。默认同 [`open`](Self::open)。
+    fn open_tcp(&self, peer: NodeId) -> impl Future<Output = Result<(Self::Send, Self::Recv), OpenError>> + Send {
+        self.open(peer)
+    }
 }
 
 /// 接受对端开过来的流。
@@ -206,6 +371,19 @@ pub enum OpenError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_complete_client_hello_goes_unencrypted() {
+        let mut hello = vec![0x16, 0x03, 0x01, 0x00, 0x08, 0x01, 0, 0, 4, 3, 3, 0, 0];
+        assert_eq!(Payload::for_first_data(&hello), Payload::Passthrough);
+        hello.extend_from_slice(b"more records");
+        assert_eq!(Payload::for_first_data(&hello), Payload::Passthrough);
+        assert_eq!(Payload::for_first_data(&hello[..12]), Payload::Sealed, "记录不完整");
+        assert_eq!(Payload::for_first_data(b"GET / HTTP/1.1\r\n\r\n"), Payload::Sealed);
+        assert_eq!(Payload::for_first_data(&[]), Payload::Sealed);
+        assert_eq!(Payload::for_first_data(&[0x16, 0x03, 0x01, 0x00, 0x04, 0x02, 0, 0, 0]), Payload::Sealed, "ServerHello 不算");
+        assert_eq!(Payload::for_first_data(&[0x17, 0x03, 0x03, 0x00, 0x04, 0x01, 0, 0, 0]), Payload::Sealed, "应用数据记录不算");
+    }
 
     #[test]
     fn abort_survives_the_trip_through_io_error() {

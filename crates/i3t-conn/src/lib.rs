@@ -38,12 +38,12 @@ mod socket;
 mod stream;
 
 pub use contract::{
-    Acceptor, Connector, Datagram, DatagramSendError, DatagramSender, Datagrams, Incoming, OpenError, Priority, RecvStream, SendStream,
-    StreamAborted, StreamCode,
+    Acceptor, Connector, Datagram, DatagramSendError, DatagramSender, Datagrams, Incoming, OpenError, Payload, Priority, RawRead, RawWrite,
+    RecvStream, SendStream, StreamAborted, StreamCode,
 };
 pub use endpoint::{Endpoint, EndpointConfig, EndpointError};
 pub use i3t_path::{BackboneLink, BackboneRow, CandidateReport, DirectKind, LegReport, PathReport, RelayLeg, RouteChange};
-pub use i3t_relay::{DropReason, RelayCounters};
+pub use i3t_relay::{DropReason, RelayCounters, TcpHandoff};
 pub use i3t_underlay::{Direction, PacketFilter};
 pub use manager::DatagramHandle;
 pub use quic::QuicConfigError;
