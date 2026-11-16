@@ -55,6 +55,8 @@ pub struct NewNetwork {
 }
 
 impl Store {
+    /// 加一个网络，连同它的内置分组 `All`：每个网络从建好起就有它。
+    ///
     /// # Errors
     ///
     /// 写数据库失败，包括名字和已有的网络重复。
@@ -71,7 +73,9 @@ impl Store {
                 new.class.map(Json)
             ],
         )?;
-        Ok(NetworkId(row_id(self.conn.last_insert_rowid())?))
+        let id = NetworkId(row_id(self.conn.last_insert_rowid())?);
+        self.insert_builtin_group(id)?;
+        Ok(id)
     }
 
     /// # Errors
@@ -119,7 +123,7 @@ impl Store {
         Ok(())
     }
 
-    /// 删掉一个网络，连同它的规则、凭据、注册令牌和冷却记录。网络里还有节点时会因为外键失败。
+    /// 删掉一个网络，连同它的分组、规则、凭据、注册令牌和冷却记录。网络里还有节点时会因为外键失败。
     ///
     /// # Errors
     ///

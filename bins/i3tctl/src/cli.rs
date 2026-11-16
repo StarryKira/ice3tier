@@ -47,8 +47,6 @@ pub enum Command {
         before: Option<u64>,
     },
     #[command(subcommand)]
-    Tag(TagCommand),
-    #[command(subcommand)]
     Network(NetworkCommand),
     #[command(subcommand)]
     Node(NodeCommand),
@@ -56,6 +54,8 @@ pub enum Command {
     Relay(RelayCommand),
     #[command(subcommand)]
     Exit(ExitCommand),
+    #[command(subcommand)]
+    Group(GroupCommand),
     #[command(subcommand)]
     Token(TokenCommand),
     #[command(subcommand)]
@@ -170,8 +170,31 @@ pub struct NetworkSettings {
 }
 
 #[derive(Subcommand)]
-pub enum TagCommand {
-    Rename { from: String, to: String },
+pub enum GroupCommand {
+    List,
+    Show {
+        group: String,
+    },
+    Create {
+        name: String,
+    },
+    Rename {
+        group: String,
+        name: String,
+    },
+    Delete {
+        group: String,
+    },
+    Add {
+        group: String,
+        #[arg(required = true)]
+        nodes: Vec<String>,
+    },
+    Remove {
+        group: String,
+        #[arg(required = true)]
+        nodes: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -184,9 +207,9 @@ pub enum NodeCommand {
         node: String,
         name: String,
     },
-    Tag {
+    Groups {
         node: String,
-        tags: Vec<String>,
+        groups: Vec<String>,
     },
     Set {
         node: String,
@@ -277,8 +300,8 @@ pub enum TokenCommand {
     Create {
         #[arg(long, default_value = "24h")]
         expires: Lifetime,
-        #[arg(long = "tag")]
-        tags: Vec<String>,
+        #[arg(long = "group")]
+        groups: Vec<String>,
         #[arg(long)]
         ip: Option<Ipv4Addr>,
         #[arg(long)]
@@ -679,6 +702,7 @@ pub fn command(lang: Lang) -> clap::Command {
 /// 把文字目录里的说明装到命令行上。命令和参数的名字写错了 clap 会 panic，测试按两种语言都装一遍，所以写错过不了测试。
 fn describe(command: clap::Command, h: &Help, v: &Values) -> clap::Command {
     let node = |arg: clap::Arg| arg.value_name(v.node);
+    let group = |arg: clap::Arg| arg.value_name(v.group);
     let id = |arg: clap::Arg| arg.value_name(v.id);
     let on_off = |arg: clap::Arg| arg.value_name("on|off");
     let routing = |arg: clap::Arg| arg.value_name("direct-first|lowest-cost");
@@ -706,11 +730,6 @@ fn describe(command: clap::Command, h: &Help, v: &Values) -> clap::Command {
                 .mut_arg("reference", |arg| arg.help(h.log_ref).value_name(v.reference))
                 .mut_arg("before", |arg| arg.help(h.log_before).value_name(v.id))
         })
-        .mut_subcommand("tag", |sub| {
-            sub.about(h.tag).mut_subcommand("rename", |sub| {
-                sub.about(h.tag_rename).mut_arg("from", |arg| arg.value_name(v.tag)).mut_arg("to", |arg| arg.value_name(v.new_tag))
-            })
-        })
         .mut_subcommand("network", |sub| {
             sub.about(h.network_group)
                 .mut_subcommand("list", |sub| sub.about(h.network_list))
@@ -728,7 +747,7 @@ fn describe(command: clap::Command, h: &Help, v: &Values) -> clap::Command {
                 .mut_subcommand("rename", |sub| {
                     sub.about(h.node_rename).mut_arg("node", node).mut_arg("name", |arg| arg.value_name(v.name))
                 })
-                .mut_subcommand("tag", |sub| sub.about(h.node_tag).mut_arg("node", node).mut_arg("tags", |arg| arg.value_name(v.tag)))
+                .mut_subcommand("groups", |sub| sub.about(h.node_groups).mut_arg("node", node).mut_arg("groups", group))
                 .mut_subcommand("set", |sub| {
                     sub.about(h.node_set)
                         .mut_arg("node", node)
@@ -777,13 +796,25 @@ fn describe(command: clap::Command, h: &Help, v: &Values) -> clap::Command {
                 .mut_subcommand("disable", |sub| sub.about(h.exit_disable).mut_arg("node", node))
                 .mut_subcommand("list", |sub| sub.about(h.exit_list))
         })
+        .mut_subcommand("group", |sub| {
+            sub.about(h.group_group)
+                .mut_subcommand("list", |sub| sub.about(h.group_list))
+                .mut_subcommand("show", |sub| sub.about(h.group_show).mut_arg("group", group))
+                .mut_subcommand("create", |sub| sub.about(h.group_create).mut_arg("name", |arg| arg.value_name(v.name)))
+                .mut_subcommand("rename", |sub| {
+                    sub.about(h.group_rename).mut_arg("group", group).mut_arg("name", |arg| arg.value_name(v.name))
+                })
+                .mut_subcommand("delete", |sub| sub.about(h.group_delete).mut_arg("group", group))
+                .mut_subcommand("add", |sub| sub.about(h.group_add).mut_arg("group", group).mut_arg("nodes", node))
+                .mut_subcommand("remove", |sub| sub.about(h.group_remove).mut_arg("group", group).mut_arg("nodes", node))
+        })
         .mut_subcommand("token", |sub| {
             sub.about(h.token_group)
                 .mut_subcommand("list", |sub| sub.about(h.token_list).mut_arg("all", |arg| arg.help(h.token_all)))
                 .mut_subcommand("create", |sub| {
                     sub.about(h.token_create)
                         .mut_arg("expires", |arg| arg.help(h.token_expires).value_name(v.duration))
-                        .mut_arg("tags", |arg| arg.help(h.token_tag).value_name(v.tag))
+                        .mut_arg("groups", |arg| group(arg.help(h.token_groups)))
                         .mut_arg("ip", |arg| arg.help(h.token_ip).value_name(v.ip))
                         .mut_arg("successor_of", |arg| node(arg.help(h.token_successor_of)))
                 })
@@ -794,8 +825,8 @@ fn describe(command: clap::Command, h: &Help, v: &Values) -> clap::Command {
                 .mut_subcommand("list", |sub| sub.about(h.rule_list))
                 .mut_subcommand("add", |sub| {
                     sub.about(h.rule_add)
-                        .mut_arg("src", |arg| arg.value_name("SRC"))
-                        .mut_arg("dst", |arg| arg.value_name("DST"))
+                        .mut_arg("src", |arg| arg.value_name(v.src))
+                        .mut_arg("dst", |arg| arg.value_name(v.dst))
                         .mut_arg("one_way", |arg| arg.help(h.rule_one_way))
                         .mut_arg("name", |arg| arg.help(h.name).value_name(v.name))
                         .mut_arg("disabled", |arg| arg.help(h.create_disabled))
@@ -1026,7 +1057,19 @@ mod tests {
             parse(&["exit", "enable", "gw", "--quota", "1G", "--family", "ipv4"]).command,
             Command::Exit(ExitCommand::Enable { quota: Some(ByteSize(1_000_000_000)), .. })
         ));
-        assert!(matches!(parse(&["tag", "rename", "a", "b"]).command, Command::Tag(TagCommand::Rename { .. })));
+        assert!(
+            matches!(parse(&["group", "add", "servers", "nas", "box"]).command, Command::Group(GroupCommand::Add { nodes, .. }) if nodes.len() == 2)
+        );
+        assert!(fails(&["group", "add", "servers"]), "要写至少一个节点");
+        assert!(fails(&["tag", "rename", "a", "b"]), "标签的命令没有了");
+        assert!(
+            matches!(parse(&["node", "groups", "nas"]).command, Command::Node(NodeCommand::Groups { groups, .. }) if groups.is_empty())
+        );
+        assert!(matches!(
+            parse(&["token", "create", "--group", "a", "--group", "b"]).command,
+            Command::Token(TokenCommand::Create { groups, .. }) if groups == ["a", "b"]
+        ));
+        assert!(fails(&["token", "create", "--tag", "a"]));
         assert!(matches!(parse(&["token", "list", "--all"]).command, Command::Token(TokenCommand::List { all: true })));
         assert!(matches!(parse(&["log", "--ref", "node:3", "--action", "node"]).command, Command::Log { .. }));
         assert!(matches!(parse(&["node", "listeners", "gw"]).command, Command::Node(NodeCommand::Listeners { .. })));

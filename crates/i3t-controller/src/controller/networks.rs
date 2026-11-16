@@ -1,14 +1,13 @@
 //! 网络的增删改查。
 
-use i3t_model::admin::{CreateNetwork, Direction, LogRef, Network, NetworkId, RefKind, Rule, UpdateNetwork};
+use i3t_model::admin::{CreateNetwork, Direction, GroupRef, LogRef, Network, NetworkId, RefKind, Rule, UpdateNetwork};
 use i3t_model::netmap::{Reach, RoutingMode};
 use ipnet::Ipv4Net;
 use serde_json::json;
 
 use super::{Controller, Inner, Seeds, address, naming};
-use crate::access::ALL;
 use crate::error::{Entity, Error, InField};
-use crate::store::{NetworkRecord, NewNetwork};
+use crate::store::{BUILTIN_GROUP, NetworkRecord, NewNetwork};
 
 /// 一条路径最多经过几个 relay：默认值，和协议允许的范围。
 const DEFAULT_MAX_RELAY_HOPS: u8 = 2;
@@ -31,7 +30,7 @@ impl Controller {
         inner.network_view(&inner.require_network(id)?)
     }
 
-    /// 新建一个网络。它自带一条 `all <-> all` 规则，所以装好就能互通。
+    /// 新建一个网络。它自带内置分组 `All` 和一条 `All <-> All` 规则，所以装好就能互通。
     ///
     /// # Errors
     ///
@@ -64,14 +63,10 @@ impl Controller {
                 created_at: now,
                 class: request.class,
             })?;
-            let default_rule = Rule {
-                id: 0,
-                name: "default".to_owned(),
-                src: ALL.to_owned(),
-                dst: ALL.to_owned(),
-                direction: Direction::Both,
-                enabled: true,
-            };
+            let all = store.builtin_group(id)?.ok_or(Error::NotFound(Entity::Group))?;
+            let all = GroupRef { id: all, name: BUILTIN_GROUP.to_owned() };
+            let default_rule =
+                Rule { id: 0, name: "default".to_owned(), src: all.clone(), dst: all, direction: Direction::Both, enabled: true };
             store.insert_rule(id, &default_rule)?;
             let refs = [LogRef::new(RefKind::Network, id.0)];
             let params = json!({ "network": id, "network_name": name, "cidr": cidr });
@@ -125,7 +120,7 @@ impl Controller {
         inner.network_view(&updated)
     }
 
-    /// 删掉一个空的网络，连同它的规则、凭据和注册令牌。
+    /// 删掉一个空的网络，连同它的分组、规则、凭据和注册令牌。
     ///
     /// # Errors
     ///

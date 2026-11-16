@@ -1,5 +1,6 @@
 //! 规则、netmap 和下发顺序的测试。都跑在 [`super::testing::Lab`] 上，不经过网络。
 
+mod groups;
 mod limits;
 mod model;
 mod netmaps;
@@ -22,15 +23,17 @@ fn peer_ids(netmap: &Netmap) -> Vec<NodeId> {
     netmap.peers.iter().map(|peer| peer.id).collect()
 }
 
-/// 去掉网络自带的 `all <-> all`，之后谁能访问谁全看测试自己加的规则。
+/// 去掉网络自带的 `All <-> All`，之后谁能访问谁全看测试自己加的规则。
 fn drop_default_rule(lab: &Lab, network: NetworkId) {
     for rule in lab.controller.rules(network).unwrap() {
         lab.controller.delete_rule(network, rule.id).unwrap();
     }
 }
 
+/// 加一条规则，两头按分组的名字写（没有的先建出来，`all` 是 `All`）。
 fn add_rule(lab: &Lab, network: NetworkId, src: &str, dst: &str, direction: Direction) -> u32 {
-    let request = CreateRule { name: String::new(), src: src.to_owned(), dst: dst.to_owned(), direction, enabled: true };
+    let (src, dst) = (lab.group(network, src), lab.group(network, dst));
+    let request = CreateRule { name: String::new(), src, dst, direction, enabled: true };
     lab.controller.create_rule(network, &request).unwrap().id
 }
 

@@ -9,12 +9,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 
 use i3t_model::Netmap;
-use i3t_model::admin::{Listener, NetworkId, PairSetting, Rule};
+use i3t_model::admin::{GroupId, Listener, NetworkId, PairSetting, Rule};
 use i3t_model::netmap::{Credential, Forward, ForwardTarget, LocalNode, Network, Peer, PeerExit, Reach, Relay, RelayClient, RelayRole};
 use i3t_proto::NodeId;
 
 use crate::access::AccessMap;
-use crate::store::{CredentialRecord, ForwardRecord, NetworkRecord, NodeRecord, Store, StoreError};
+use crate::store::{CredentialRecord, ForwardRecord, GroupRecord, NetworkRecord, NodeRecord, Store, StoreError};
 
 /// 下发给对端的候选端点最多这么多个。正常的节点只有几个；多出来的没有用，只会让每个对端都去探测。
 pub(crate) const MAX_ENDPOINTS: usize = 16;
@@ -40,6 +40,8 @@ impl Relation {
 pub struct NetworkView {
     pub network: NetworkRecord,
     pub nodes: BTreeMap<NodeId, NodeRecord>,
+    /// 全部分组，内置的在最前面，其余按名字排。
+    pub groups: Vec<GroupRecord>,
     pub rules: Vec<Rule>,
     pub listeners: Vec<Listener>,
     pub forwards: Vec<ForwardRecord>,
@@ -58,6 +60,7 @@ impl NetworkView {
         Ok(Some(Self {
             network,
             nodes: store.nodes(id)?.into_iter().map(|node| (node.id, node)).collect(),
+            groups: store.groups(id)?,
             rules: store.rules(id)?,
             listeners: store.listeners(id)?,
             forwards: store.forwards(id)?,
@@ -66,10 +69,19 @@ impl NetworkView {
         }))
     }
 
+    /// 这个网络的内置分组 `All`。
+    ///
+    /// 每个网络建好时就有它，迁移也给旧的网络建了。真的没有时用一个不存在的编号（编号从 1 起）：
+    /// 规则的两头有外键，没有规则能指向一个不存在的分组，所以它不会让任何节点多出访问关系。
+    #[must_use]
+    pub fn all_group(&self) -> GroupId {
+        self.groups.iter().find(|group| group.builtin).map_or(GroupId(0), |group| group.id)
+    }
+
     /// 这个网络里谁能访问谁。
     #[must_use]
     pub fn access(&self) -> AccessMap<'_> {
-        AccessMap::new(self.nodes.values().map(|node| (node.id, &node.tags)), &self.rules)
+        AccessMap::new(self.nodes.values().map(|node| (node.id, &node.groups)), self.all_group(), &self.rules)
     }
 
     /// 规则算出来的访问关系：`node` 和网络里每个别的节点之间。没有关系的不在结果里。

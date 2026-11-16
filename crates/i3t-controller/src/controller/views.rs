@@ -1,13 +1,14 @@
 //! 给界面看的几个现算的视图：总览、访问关系图、访问检查。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
-use i3t_model::admin::{AccessCheck, AccessEdge, AccessGraph, NetworkId, NodeAccess, NodePair, NodeRef, Overview, TagMembers};
+use i3t_model::admin::{AccessCheck, AccessEdge, AccessGraph, NetworkId, NodeAccess, NodePair, NodeRef, Overview};
 use i3t_model::control::Route;
 use i3t_proto::NodeId;
 
+use super::groups::group_view;
 use super::{Controller, Inner, count, node_ref};
-use crate::access::{ALL, AccessMap};
+use crate::access::AccessMap;
 use crate::error::{Entity, Error};
 use crate::netmap::NetworkView;
 use crate::store::is_pending;
@@ -43,7 +44,7 @@ impl Controller {
         })
     }
 
-    /// 访问关系图的标签视图。
+    /// 访问关系图的分组视图：全部分组（和分组列表一样）、全部规则。
     ///
     /// # Errors
     ///
@@ -52,22 +53,9 @@ impl Controller {
         let inner = self.lock();
         let view = inner.view(network)?;
         let access = view.access();
-
-        let mut tags: BTreeMap<&str, Vec<NodeRef>> = BTreeMap::new();
-        tags.insert(ALL, view.nodes.values().map(node_ref).collect());
-        for rule in &view.rules {
-            tags.entry(&rule.src).or_default();
-            tags.entry(&rule.dst).or_default();
-        }
-        for node in view.nodes.values() {
-            for tag in &node.tags {
-                tags.entry(tag).or_default().push(node_ref(node));
-            }
-        }
-
         let is_connected = |id: NodeId| view.nodes.keys().any(|&other| access.allows(id, other) || access.allows(other, id));
         Ok(AccessGraph {
-            tags: tags.into_iter().map(|(tag, nodes)| TagMembers { tag: tag.to_owned(), nodes }).collect(),
+            groups: view.groups.iter().map(|group| group_view(&view, group)).collect(),
             unconnected: view.nodes.values().filter(|node| !is_connected(node.id)).map(node_ref).collect(),
             unacknowledged: view.nodes.values().filter(|node| !inner.has_acknowledged(node.id)).map(node_ref).collect(),
             rules: view.rules,

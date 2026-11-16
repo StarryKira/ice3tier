@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lab as lablib  # noqa: E402
-from harness import Checks, Controller, Node, start_whoami, tail  # noqa: E402
+from harness import Checks, Controller, Node, create_groups, start_whoami, tail  # noqa: E402
 from lab import Lab, NatKind, wait_until  # noqa: E402
 
 
@@ -44,6 +44,7 @@ def join_and_exit(lab: Lab, work: Path, t: Checks) -> None:
     controller = Controller(lab.host("ctl"), work)
     controller.ctl("network", "create", "lab", "--cidr", "10.66.0.0/16")
     a, b = Node(lab.host("a"), work), Node(lab.host("b"), work, declare=("exit",))
+    create_groups(controller, "laptop", "server")
     a.join(controller, "laptop")
     b.join(controller, "server")
     t.check("加入之后得到虚拟 IP 和名字", (a.virtual_ip, b.virtual_ip) == ("10.66.0.1", "10.66.0.2"), f"{a.virtual_ip} {b.virtual_ip}")
@@ -61,7 +62,7 @@ def join_and_exit(lab: Lab, work: Path, t: Checks) -> None:
 
     rules = controller.ctl("rule", "list")
     controller.ctl("rule", "delete", str(rules[0]["id"]))
-    t.check("删掉 all <-> all 之后互相不可达", blocked(a, url, b))
+    t.check("删掉 All <-> All 之后互相不可达", blocked(a, url, b))
     controller.ctl("rule", "add", "laptop", "server", "--one-way")
     t.check("加上 laptop -> server 之后 a 又能用 b", reaches(a, url, b, b.host.ip))
 

@@ -5,9 +5,9 @@ use std::net::Ipv4Addr;
 use anyhow::{Context, anyhow, bail};
 use i3t_model::admin::diag::{CreateTest, MatrixRun, MatrixState, TestState, TestView};
 use i3t_model::admin::{
-    CreateCredential, CreateEnrollToken, CreateNetwork, CreateRule, Credential, CredentialState, Direction, ForceUpdate, Forward,
-    ForwardInput, ListenerInput, Network, NetworkId, Node, PairInput, RelaySettings, RenameTag, ResumeUpdate, Succeed, UpdateCredential,
-    UpdateNetwork, UpdateNode, UpdateRule, UpdateSettings,
+    CreateCredential, CreateEnrollToken, CreateGroup, CreateNetwork, CreateRule, Credential, CredentialState, Direction, ForceUpdate,
+    Forward, ForwardInput, Group, GroupId, GroupMembers, ListenerInput, Network, NetworkId, Node, PairInput, RelaySettings, ResumeUpdate,
+    Succeed, UpdateCredential, UpdateGroup, UpdateNetwork, UpdateNode, UpdateRule, UpdateSettings,
 };
 use i3t_model::netmap::{DefaultAction, ExitRole, ForwardProtocol, Listener, ListenerProtocol};
 use i3t_model::update::UpdateTiming;
@@ -18,8 +18,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::cli::{
-    AccessCommand, Cli, Command, CredentialCommand, ExitCommand, ForwardCommand, ListenerCommand, NetworkCommand, NetworkSettings,
-    NodeCommand, PairCommand, RelayCommand, RuleCommand, TagCommand, TestItemArg, TestsCommand, TokenCommand, UpdateCommand,
+    AccessCommand, Cli, Command, CredentialCommand, ExitCommand, ForwardCommand, GroupCommand, ListenerCommand, NetworkCommand,
+    NetworkSettings, NodeCommand, PairCommand, RelayCommand, RuleCommand, TestItemArg, TestsCommand, TokenCommand, UpdateCommand,
 };
 use crate::client::{Client, decode};
 use crate::render;
@@ -43,15 +43,11 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             }
             session.show_list(session.get(&query).await?, render::log)
         }
-        Command::Tag(TagCommand::Rename { from, to }) => {
-            let network = session.network().await?.id;
-            let request = RenameTag { from, to };
-            session.show(session.send(Method::POST, &format!("/networks/{network}/tags/rename"), &request).await?, render::renamed_tag)
-        }
         Command::Network(command) => session.network_command(command).await,
         Command::Node(command) => session.node_command(command).await,
         Command::Relay(command) => session.relay_command(command).await,
         Command::Exit(command) => session.exit_command(command).await,
+        Command::Group(command) => session.group_command(command).await,
         Command::Token(command) => session.token_command(command).await,
         Command::Rule(command) => session.rule_command(command).await,
         Command::Credential(command) => session.credential_command(command).await,
@@ -244,6 +240,61 @@ impl Session {
         found.ok_or_else(|| anyhow!((texts().ui.no_such_node)(reference)))
     }
 
+    /// 把命令行上写的分组找出来：先按名字（不分大小写），没有叫这个名字的再当编号。分组的名字可以全是数字，所以名字优先。
+    async fn group(&self, network: NetworkId, reference: &str) -> anyhow::Result<Group> {
+        let groups: Vec<Group> = self.client.get(&format!("/networks/{network}/groups")).await?;
+        pick_group(&groups, reference).cloned()
+    }
+
+    /// 一串分组名换成编号，一个不存在就报出它的名字。
+    async fn group_ids(&self, network: NetworkId, references: &[String]) -> anyhow::Result<Vec<GroupId>> {
+        if references.is_empty() {
+            return Ok(Vec::new());
+        }
+        let groups: Vec<Group> = self.client.get(&format!("/networks/{network}/groups")).await?;
+        references.iter().map(|reference| pick_group(&groups, reference).map(|group| group.id)).collect()
+    }
+
+    async fn group_command(&self, command: GroupCommand) -> anyhow::Result<()> {
+        let network = self.network().await?.id;
+        let groups = format!("/networks/{network}/groups");
+        match command {
+            GroupCommand::List => self.show_list(self.get(&groups).await?, render::groups),
+            GroupCommand::Show { group } => {
+                let group = self.group(network, &group).await?;
+                self.show(self.get(&format!("{groups}/{}", group.id)).await?, render::group)
+            }
+            GroupCommand::Create { name } => self.show(self.send(Method::POST, &groups, &CreateGroup { name }).await?, render::group),
+            GroupCommand::Rename { group, name } => {
+                let group = self.group(network, &group).await?;
+                let request = UpdateGroup { name: Some(name) };
+                self.show(self.send(Method::PATCH, &format!("{groups}/{}", group.id), &request).await?, render::group)
+            }
+            GroupCommand::Delete { group } => {
+                let group = self.group(network, &group).await?;
+                self.show(self.delete(&format!("{groups}/{}", group.id)).await?, render::deleted_group)
+            }
+            GroupCommand::Add { group, nodes } => {
+                let group = self.group(network, &group).await?;
+                let request = GroupMembers { add: self.node_ids(network, &nodes).await?, remove: Vec::new() };
+                self.show(self.send(Method::PATCH, &format!("{groups}/{}/nodes", group.id), &request).await?, render::group)
+            }
+            GroupCommand::Remove { group, nodes } => {
+                let group = self.group(network, &group).await?;
+                let request = GroupMembers { add: Vec::new(), remove: self.node_ids(network, &nodes).await? };
+                self.show(self.send(Method::PATCH, &format!("{groups}/{}/nodes", group.id), &request).await?, render::group)
+            }
+        }
+    }
+
+    async fn node_ids(&self, network: NetworkId, references: &[String]) -> anyhow::Result<Vec<NodeId>> {
+        let mut ids = Vec::with_capacity(references.len());
+        for reference in references {
+            ids.push(self.node(network, reference).await?.id);
+        }
+        Ok(ids)
+    }
+
     async fn network_command(&self, command: NetworkCommand) -> anyhow::Result<()> {
         match command {
             NetworkCommand::List => self.show_list(self.get("/networks").await?, render::networks),
@@ -288,9 +339,9 @@ impl Session {
                 let request = UpdateNode { name: Some(name), ..UpdateNode::default() };
                 self.show(self.send(Method::PATCH, &format!("{nodes}/{}", node.id), &request).await?, render::node_changed)
             }
-            NodeCommand::Tag { node, tags } => {
+            NodeCommand::Groups { node, groups } => {
                 let node = self.node(network, &node).await?;
-                let request = UpdateNode { tags: Some(tags), ..UpdateNode::default() };
+                let request = UpdateNode { groups: Some(self.group_ids(network, &groups).await?), ..UpdateNode::default() };
                 self.show(self.send(Method::PATCH, &format!("{nodes}/{}", node.id), &request).await?, render::node_changed)
             }
             NodeCommand::Set { node, ip, dial_out_only, routing, reach, pins, unpin } => {
@@ -395,12 +446,13 @@ impl Session {
                 let path = if all { format!("{tokens}?all=true") } else { tokens };
                 self.show_list(self.get(&path).await?, render::tokens)
             }
-            TokenCommand::Create { expires, tags, ip, successor_of } => {
+            TokenCommand::Create { expires, groups, ip, successor_of } => {
                 let successor_of = match successor_of {
                     Some(reference) => Some(self.node(network, &reference).await?.id),
                     None => None,
                 };
-                let request = CreateEnrollToken { expires_in_secs: Some(expires.secs), tags, virtual_ip: ip, successor_of };
+                let groups = self.group_ids(network, &groups).await?;
+                let request = CreateEnrollToken { expires_in_secs: Some(expires.secs), groups, virtual_ip: ip, successor_of };
                 self.show(self.send(Method::POST, &tokens, &request).await?, render::created_token)
             }
             TokenCommand::Delete { id } => {
@@ -419,6 +471,7 @@ impl Session {
             RuleCommand::List => self.show_list(self.get(&rules).await?, render::rules),
             RuleCommand::Add { src, dst, one_way, name, disabled } => {
                 let direction = if one_way { Direction::OneWay } else { Direction::Both };
+                let (src, dst) = (self.group(network, &src).await?.id, self.group(network, &dst).await?.id);
                 let request = CreateRule { name, src, dst, direction, enabled: !disabled };
                 self.show(self.send(Method::POST, &rules, &request).await?, render::rule)
             }
@@ -639,6 +692,14 @@ impl Session {
 }
 
 /// 按名字或编号在网络列表里找一个。
+/// 名字不分大小写（按 Unicode 的小写比）；没有叫这个名字的分组时，写的是数字就当编号。
+fn pick_group<'a>(groups: &'a [Group], reference: &str) -> anyhow::Result<&'a Group> {
+    let folded = reference.to_lowercase();
+    let by_id = reference.parse::<GroupId>().ok();
+    let by_name = groups.iter().find(|group| group.name.to_lowercase() == folded);
+    by_name.or_else(|| groups.iter().find(|group| Some(group.id) == by_id)).ok_or_else(|| anyhow!((texts().ui.no_such_group)(reference)))
+}
+
 fn pick_network(networks: Vec<Network>, reference: &str) -> anyhow::Result<Network> {
     let by_id = reference.parse::<NetworkId>().ok();
     let found = networks.into_iter().find(|network| network.name.eq_ignore_ascii_case(reference) || Some(network.id) == by_id);

@@ -39,7 +39,7 @@ async fn a_node_enrols_and_gets_its_snapshot() {
     let listed = running.controller.nodes(network.id).unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!((listed[0].id, listed[0].key), (node.id(), node.key.public()));
-    assert_eq!(listed[0].tags, vec!["servers".to_owned()]);
+    assert_eq!(listed[0].groups.iter().map(|group| group.name.as_str()).collect::<Vec<_>>(), ["servers"]);
     assert!(listed[0].online);
     assert_eq!((listed[0].platform.as_str(), listed[0].version.as_str()), ("linux-x86_64", "0.1.0"));
     let detail = running.controller.node(network.id, node.id()).unwrap();
@@ -103,7 +103,8 @@ async fn signals_are_forwarded_only_between_peers() {
     for rule in running.controller.rules(network.id).unwrap() {
         running.controller.delete_rule(network.id, rule.id).unwrap();
     }
-    let rule = CreateRule { name: String::new(), src: "a".to_owned(), dst: "b".to_owned(), direction: Direction::Both, enabled: true };
+    let (src, dst) = (running.group(network.id, "a"), running.group(network.id, "b"));
+    let rule = CreateRule { name: String::new(), src, dst, direction: Direction::Both, enabled: true };
     running.controller.create_rule(network.id, &rule).unwrap();
     let mut a = running.join(network.id, &["a"]).await;
     let mut b = running.join(network.id, &["b"]).await;
@@ -279,8 +280,8 @@ async fn a_grant_waits_for_the_destination_but_not_forever() {
     let mut destination = running.join(network.id, &["dst"]).await;
     let (source_id, destination_id) = (source.id(), destination.id());
 
-    let rule =
-        CreateRule { name: String::new(), src: "src".to_owned(), dst: "dst".to_owned(), direction: Direction::OneWay, enabled: true };
+    let (src, dst) = (running.group(network.id, "src"), running.group(network.id, "dst"));
+    let rule = CreateRule { name: String::new(), src, dst, direction: Direction::OneWay, enabled: true };
     running.controller.create_rule(network.id, &rule).unwrap();
     // 目的端收到了新的 netmap 但还没确认：发起端这时还不知道可以访问它。
     let granted = destination.link().recv().await;

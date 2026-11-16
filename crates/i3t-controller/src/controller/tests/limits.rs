@@ -1,9 +1,9 @@
 //! 限额、用量和状态：凭据的上限和用量、出口的用量和健康、监听的状态、自动挑端口的端口转发、服务等级、
-//! 注册令牌的记录、标签改名、操作记录里提到的东西、"最近在线"。
+//! 注册令牌的记录、操作记录里提到的东西、"最近在线"。
 
 use i3t_model::admin::{
     CreateCredential, CreateEnrollToken, CredentialState, ExitHealth, ForwardInput, ListenStatus, ListenerInput, LogRef, RefKind,
-    RenameTag, TokenState, UpdateCredential, UpdateNetwork,
+    TokenState, UpdateCredential, UpdateNetwork,
 };
 use i3t_model::control::{
     BindCause, CredentialUsage, Declared, ExitObservation, ExitReport, ForwardReport, ListenState, ListenTraffic, ListenerReport,
@@ -315,36 +315,6 @@ fn used_and_expired_tokens_stay_listed_with_the_node_that_used_them() {
     let all = lab.controller.tokens(network.id, true).unwrap();
     assert_eq!(all.iter().find(|token| token.id == other.info.id).unwrap().state, TokenState::Expired);
     assert!(lab.controller.tokens(network.id, false).unwrap().is_empty());
-}
-
-#[test]
-fn a_tag_is_renamed_on_nodes_rules_and_pending_tokens_without_changing_who_reaches_whom() {
-    let mut lab = Lab::new();
-    let network = lab.network("home");
-    super::drop_default_rule(&lab, network.id);
-    let mut laptop = lab.join(network.id, &["laptops"]);
-    let mut server = lab.join(network.id, &["servers"]);
-    super::add_rule(&lab, network.id, "laptops", "servers", i3t_model::admin::Direction::OneWay);
-    let token = lab
-        .controller
-        .create_token(network.id, &CreateEnrollToken { tags: vec!["laptops".to_owned()], ..CreateEnrollToken::default() })
-        .unwrap();
-    lab.settle(&mut [&mut laptop, &mut server]);
-    let before = super::relations(laptop.netmap());
-
-    let renamed = lab.controller.rename_tag(network.id, &RenameTag { from: "Laptops".to_owned(), to: "phones".to_owned() }).unwrap();
-    assert_eq!((renamed.nodes, renamed.rules, renamed.tokens), (1, 1, 1));
-    lab.settle(&mut [&mut laptop, &mut server]);
-    assert_eq!(lab.controller.node(network.id, laptop.id).unwrap().node.tags, ["phones"]);
-    assert_eq!(lab.controller.rules(network.id).unwrap()[0].src, "phones");
-    assert_eq!(lab.controller.tokens(network.id, false).unwrap().iter().find(|t| t.id == token.info.id).unwrap().tags, ["phones"]);
-    assert_eq!(super::relations(laptop.netmap()), before, "谁能访问谁没有变");
-    assert!(lab.controller.rename_tag(network.id, &RenameTag { from: "all".to_owned(), to: "x".to_owned() }).is_err());
-    assert!(lab.controller.rename_tag(network.id, &RenameTag { from: "x".to_owned(), to: "x".to_owned() }).is_err());
-
-    let logged = lab.controller.oplog_filtered(&LogFilter { limit: 10, action: Some("tag".to_owned()), ..LogFilter::default() }).unwrap();
-    assert_eq!(logged.len(), 1);
-    assert_eq!(logged[0].refs, [LogRef::node(laptop.id)]);
 }
 
 #[test]

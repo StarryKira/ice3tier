@@ -1,12 +1,9 @@
-//! 名字和标签的写法。
+//! 名字的写法。
 
-use std::collections::BTreeSet;
-
-use crate::access::ALL;
 use crate::error::Error;
 
 const MAX_LABEL_LEN: usize = 63;
-const MAX_TAG_LEN: usize = 32;
+const MAX_GROUP_NAME_LEN: usize = 32;
 const MAX_TITLE_LEN: usize = 64;
 
 /// 网络和节点的名字：会出现在 `<节点>.<网络>.i3t` 里，所以按域名的一段来要求。返回小写的形式。
@@ -55,23 +52,22 @@ pub(super) fn is_default_node_name(name: &str) -> bool {
 /// 给重名的节点加序号（`-2` 起）最多占几个字符。
 const UNIQUE_SUFFIX_ROOM: usize = 5;
 
-/// 一个标签的写法，包括内置的 `all`。返回小写的形式。
-pub(super) fn tag(raw: &str) -> Result<String, Error> {
-    let tag = raw.trim().to_ascii_lowercase();
-    let well_formed = !tag.is_empty()
-        && tag.len() <= MAX_TAG_LEN
-        && tag.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_');
-    if well_formed {
-        Ok(tag)
-    } else {
-        Err(Error::invalid("malformed", format!("标签 {raw:?} 不合法：只能用字母、数字、连字符和下划线，最长 {MAX_TAG_LEN} 个字符")))
+/// 分组的名字：1 到 32 个字符，字母（任何文字的）、数字、连字符、下划线。首尾的空白去掉，大小写保留。
+///
+/// 字符按 Unicode 的标量值数，字母和数字按 Unicode 的属性认（`char::is_alphanumeric`），所以中文、带变音的字母都可以。
+/// 全是数字也可以：分组在请求里按编号引用，命令行按名字找不到时才把它当编号。
+pub(super) fn group_name(raw: &str) -> Result<String, Error> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err(Error::invalid("empty", "分组的名字不能是空的"));
     }
-}
-
-/// 打在节点上的一组标签。`all` 每个节点本来就有，写了也不存。
-pub(super) fn node_tags(raw: &[String]) -> Result<BTreeSet<String>, Error> {
-    let tags = raw.iter().map(|raw| tag(raw)).collect::<Result<BTreeSet<_>, _>>()?;
-    Ok(tags.into_iter().filter(|tag| tag != ALL).collect())
+    if name.chars().count() > MAX_GROUP_NAME_LEN {
+        return Err(Error::invalid("too_long", format!("分组的名字 {raw:?} 太长：最长 {MAX_GROUP_NAME_LEN} 个字符")));
+    }
+    if !name.chars().all(|ch| ch.is_alphanumeric() || ch == '-' || ch == '_') {
+        return Err(Error::invalid("malformed", format!("分组的名字 {raw:?} 不合法：只能用字母、数字、连字符和下划线")));
+    }
+    Ok(name.to_owned())
 }
 
 /// 规则、凭据、监听器、端口转发的名字：给人看的一小段文字。`required` 为真时不能是空的。
@@ -136,12 +132,16 @@ mod tests {
     }
 
     #[test]
-    fn node_tags_are_normalised_and_the_builtin_tag_is_not_stored() {
-        let tags = node_tags(&["Servers".to_owned(), "all".to_owned(), "home_lab".to_owned(), "servers".to_owned()]).unwrap();
-        assert_eq!(tags.into_iter().collect::<Vec<_>>(), vec!["home_lab".to_owned(), "servers".to_owned()]);
-        assert!(node_tags(&["a b".to_owned()]).is_err());
-        assert!(node_tags(&[String::new()]).is_err());
-        assert_eq!(tag("ALL").unwrap(), ALL);
+    fn group_names_keep_their_case_and_allow_letters_of_any_script() {
+        for good in ["Servers", "home_lab", "家里", "Café-2", "2025", "a", &"字".repeat(32)] {
+            assert_eq!(group_name(&format!(" {good} ")).unwrap(), good, "{good}");
+        }
+        let what = |raw: &str| group_name(raw).unwrap_err().what();
+        assert_eq!(what("  ").as_deref(), Some("empty"));
+        assert_eq!(what(&"a".repeat(33)).as_deref(), Some("too_long"));
+        for bad in ["a b", "a.b", "a/b", "a\nb", "😀"] {
+            assert_eq!(what(bad).as_deref(), Some("malformed"), "{bad}");
+        }
     }
 
     #[test]

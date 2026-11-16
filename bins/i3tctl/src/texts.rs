@@ -49,8 +49,6 @@ pub struct Help {
     pub log_action: &'static str,
     pub log_ref: &'static str,
     pub log_before: &'static str,
-    pub tag: &'static str,
-    pub tag_rename: &'static str,
     pub network_group: &'static str,
     pub network_list: &'static str,
     pub network_create: &'static str,
@@ -67,7 +65,7 @@ pub struct Help {
     pub node_list: &'static str,
     pub node_show: &'static str,
     pub node_rename: &'static str,
-    pub node_tag: &'static str,
+    pub node_groups: &'static str,
     pub node_set: &'static str,
     pub node_ip: &'static str,
     pub node_dial_out_only: &'static str,
@@ -98,12 +96,20 @@ pub struct Help {
     pub exit_connects: &'static str,
     pub exit_disable: &'static str,
     pub exit_list: &'static str,
+    pub group_group: &'static str,
+    pub group_list: &'static str,
+    pub group_show: &'static str,
+    pub group_create: &'static str,
+    pub group_rename: &'static str,
+    pub group_delete: &'static str,
+    pub group_add: &'static str,
+    pub group_remove: &'static str,
     pub token_group: &'static str,
     pub token_list: &'static str,
     pub token_all: &'static str,
     pub token_create: &'static str,
     pub token_expires: &'static str,
-    pub token_tag: &'static str,
+    pub token_groups: &'static str,
     pub token_ip: &'static str,
     pub token_successor_of: &'static str,
     pub token_delete: &'static str,
@@ -189,8 +195,10 @@ pub struct Values {
     pub node: &'static str,
     pub name: &'static str,
     pub id: &'static str,
-    pub tag: &'static str,
-    pub new_tag: &'static str,
+    pub group: &'static str,
+    /// 规则的两头。
+    pub src: &'static str,
+    pub dst: &'static str,
     pub address: &'static str,
     pub bind: &'static str,
     pub cidr: &'static str,
@@ -250,7 +258,6 @@ pub struct Ui {
     pub unreachable_pairs: &'static str,
     pub no_relay_hint: &'static str,
     pub log_header: [&'static str; 5],
-    pub tag_renamed: fn(&str, &str, u32, u32, u32) -> String,
 
     pub node_offline: fn(&str) -> String,
     pub node_listeners_header: [&'static str; 7],
@@ -288,7 +295,7 @@ pub struct Ui {
     pub no_nodes: &'static str,
     pub exit: &'static str,
     pub forward: &'static str,
-    pub tags: &'static str,
+    pub groups: &'static str,
     pub roles: &'static str,
     pub reachability: &'static str,
     pub reachability_header: [&'static str; 4],
@@ -403,7 +410,12 @@ pub struct Ui {
     pub total: &'static str,
     pub handshake_failures: &'static str,
     pub handshake_failure_counts: fn(u64, u64, u64, u64, u64) -> String,
-    pub tags_header: [&'static str; 3],
+    pub groups_header: [&'static str; 4],
+    pub no_groups: &'static str,
+    /// 访问关系图里的分组：名字、节点数、节点。
+    pub graph_groups_header: [&'static str; 3],
+    /// 删掉的分组：名字、从几个节点上去掉、删掉几条规则。
+    pub group_deleted: fn(&str, usize, usize) -> String,
     pub unconnected: &'static str,
     pub unacknowledged: &'static str,
     pub can_access: fn(&str, &str) -> String,
@@ -441,6 +453,7 @@ pub struct Ui {
     pub both_nodes: &'static str,
     pub wait_timeout: fn(u64) -> String,
     pub no_such_node: fn(&str) -> String,
+    pub no_such_group: fn(&str) -> String,
     pub no_such_network: fn(&str) -> String,
     pub no_such_forward: fn(u32) -> String,
     pub network_deleted: fn(&str) -> String,
@@ -510,6 +523,12 @@ impl<'a> Params<'a> {
         self.0.get(key).and_then(|value| serde_json::from_value(value.clone()).ok())
     }
 
+    /// 一列东西（`added`、`removed` 这样的 `[{ "node": 2, "node_name": "laptop" }]`）的名字，没有名字的写 `#编号`。
+    pub(crate) fn names(&self, key: &str, name: &str, id: &str) -> Vec<String> {
+        let items = self.0.get(key).and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
+        items.iter().filter_map(Value::as_object).map(|item| Params(item).thing(name, id)).collect()
+    }
+
     /// `node.update` 里改了的项。
     pub(crate) fn changes(&self) -> Option<&'a Map<String, Value>> {
         self.0.get("changes").and_then(Value::as_object)
@@ -536,7 +555,9 @@ mod tests {
     fn every_action() -> Vec<LogEntry> {
         let node = json!({ "node": 2, "node_name": "laptop" });
         let pair = json!({ "a": 1, "a_name": "nas", "b": 2, "b_name": "laptop", "keep_alive": true, "lane": "always" });
-        let rule = json!({ "rule": 3, "rule_name": "ssh", "src": "all", "dst": "servers", "direction": "one_way", "enabled": true });
+        let rule = json!({
+            "rule": 3, "rule_name": "ssh", "src": 1, "src_name": "All", "dst": 4, "dst_name": "servers", "direction": "one_way", "enabled": true
+        });
         let credential = json!({ "credential": 4, "credential_name": "phone", "max_concurrent": 8, "max_bytes": null, "reset_usage": true, "used_bytes": 10 });
         let listener = json!({ "listener": 5, "listener_name": "lan", "node": 2, "node_name": "laptop", "bind": "127.0.0.1:1080", "protocol": "socks5" });
         let forward = json!({
@@ -551,7 +572,8 @@ mod tests {
             ("network.delete", json!({ "network": 1, "network_name": "home" })),
             ("node.enroll", json!({ "node": 2, "node_name": "laptop", "virtual_ip": "10.66.0.2", "token": 1, "predecessor": 9, "predecessor_name": "old" })),
             ("node.update", json!({ "node": 2, "node_name": "laptop", "changes": {
-                "name": { "from": "laptop", "to": "lap" }, "virtual_ip": { "from": "10.66.0.2", "to": "10.66.0.9" }, "tags": ["a"],
+                "name": { "from": "laptop", "to": "lap" }, "virtual_ip": { "from": "10.66.0.2", "to": "10.66.0.9" },
+                "groups": [{ "group": 4, "group_name": "servers" }],
                 "dial_out_only": true, "routing": "lowest_cost", "reach": null, "pinned_relays": [1]
             } })),
             ("node.delete", json!({ "node": 2, "node_name": "laptop", "virtual_ip": "10.66.0.2" })),
@@ -568,7 +590,12 @@ mod tests {
             ("rule.create", rule.clone()),
             ("rule.update", rule.clone()),
             ("rule.delete", rule),
-            ("tag.rename", json!({ "from": "a", "to": "b", "nodes": 1, "rules": 0, "tokens": 0 })),
+            ("group.create", json!({ "group": 4, "group_name": "servers" })),
+            ("group.rename", json!({ "group": 4, "from": "servers", "to": "boxes" })),
+            ("group.delete", json!({ "group": 4, "group_name": "boxes", "nodes": 2, "rules": 1, "tokens": 0 })),
+            ("group.members", json!({
+                "group": 4, "group_name": "boxes", "added": [{ "node": 2, "node_name": "laptop" }], "removed": [{ "node": 7, "node_name": null }]
+            })),
             ("credential.create", credential.clone()),
             ("credential.update", credential.clone()),
             ("credential.revoke", credential.clone()),
@@ -609,6 +636,12 @@ mod tests {
         }
         let named = (en::TEXTS.log)(&every_action()[4]).unwrap();
         assert!(named.contains("laptop") && named.contains("old"), "{named}");
+        let actions = every_action();
+        let find = |action: &str| actions.iter().find(|entry| entry.action == action).unwrap();
+        let members = (en::TEXTS.log)(find("group.members")).unwrap();
+        assert!(members.contains("boxes") && members.contains("laptop") && members.contains("#7"), "{members}");
+        let rule = (zh::TEXTS.log)(find("rule.create")).unwrap();
+        assert!(rule.contains("All") && rule.contains("servers"), "规则写分组的名字：{rule}");
     }
 
     #[test]

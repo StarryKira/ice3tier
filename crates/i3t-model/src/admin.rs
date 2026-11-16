@@ -53,6 +53,25 @@ impl FromStr for NetworkId {
     }
 }
 
+/// 分组的编号。controller 在建分组时分配，在整个 controller 里唯一，删掉之后不复用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GroupId(pub u32);
+
+impl fmt::Display for GroupId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl FromStr for GroupId {
+    type Err = ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse().map(Self)
+    }
+}
+
 /// 出错时的应答体。HTTP 状态码说明大类，[`ApiError::code`] 给程序看，[`ApiError::message`] 给人看。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorBody {
@@ -82,7 +101,7 @@ pub enum ErrorCode {
     Unauthorized,
     /// 路径里指的东西不存在，或者不属于路径里的那个网络。
     NotFound,
-    /// 请求本身不合法：JSON 解析不了、名字或标签的写法不对、地址不合法等。
+    /// 请求本身不合法：JSON 解析不了、名字的写法不对、地址不合法、要改内置分组等。
     InvalidRequest,
     /// 名字已经被同一个网络里的另一个东西占用。
     NameTaken,
@@ -130,6 +149,13 @@ pub struct NodeRef {
     pub id: NodeId,
     pub name: String,
     pub virtual_ip: Ipv4Addr,
+}
+
+/// 指代一个分组时附带的名字（现在的名字）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupRef {
+    pub id: GroupId,
+    pub name: String,
 }
 
 /// controller 自己的情况。也用来检查地址和令牌对不对。
@@ -249,8 +275,8 @@ pub struct Node {
     /// 全名：`<名字>.<网络的域名后缀>`。
     pub fqdn: String,
     pub virtual_ip: Ipv4Addr,
-    /// 管理员打的标签，按字典序。内置标签 `all` 每个节点都有，不在这里列出。
-    pub tags: Vec<String>,
+    /// 它所在的分组，按名字排（不分大小写）。内置分组 `All` 每个节点都在，不在这里列出。
+    pub groups: Vec<GroupRef>,
     /// 节点在本地声明的"可以承担"。没有声明的能力启用不了。
     pub declared: Declared,
     /// 启用为 relay 时有值。
@@ -575,9 +601,9 @@ pub struct NodeDetail {
 pub struct UpdateNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// 整个替换节点的标签。
+    /// 整个替换节点所在的分组。`All` 的编号会被忽略：每个节点本来就在里面。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tags: Option<Vec<String>>,
+    pub groups: Option<Vec<GroupId>>,
     /// 改虚拟 IP 会让引用旧地址的配置失效。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub virtual_ip: Option<Ipv4Addr>,
@@ -781,8 +807,8 @@ pub struct EnrollTokenInfo {
     pub network: NetworkId,
     pub created_at: Timestamp,
     pub expires_at: Timestamp,
-    /// 用它加入的节点自动带上的标签。
-    pub tags: Vec<String>,
+    /// 用它加入的节点自动加入的分组，按名字排。不含 `All`。
+    pub groups: Vec<GroupRef>,
     /// 预设的虚拟 IP。
     pub virtual_ip: Option<Ipv4Addr>,
     /// 用它加入的节点继任这个节点。
@@ -820,8 +846,9 @@ pub struct CreateEnrollToken {
     /// 多少秒之后过期，省略时是一天。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_in_secs: Option<u64>,
+    /// 用它加入的节点自动加入的分组。`All` 的编号会被忽略。
     #[serde(default)]
-    pub tags: Vec<String>,
+    pub groups: Vec<GroupId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub virtual_ip: Option<Ipv4Addr>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -836,13 +863,15 @@ pub struct CreatedEnrollToken {
     pub token: String,
 }
 
-/// 一条访问规则：带标签 `src` 的节点可以访问带标签 `dst` 的节点。
+/// 一条访问规则：分组 `src` 里的节点可以访问分组 `dst` 里的节点。
+///
+/// 规则记的是分组的编号，名字只是给人看的：分组改名之后规则照常生效。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rule {
     pub id: u32,
     pub name: String,
-    pub src: String,
-    pub dst: String,
+    pub src: GroupRef,
+    pub dst: GroupRef,
     pub direction: Direction,
     pub enabled: bool,
 }
@@ -857,12 +886,13 @@ pub enum Direction {
     OneWay,
 }
 
+/// 新建一条规则。`src`、`dst` 是这个网络里已有的分组。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateRule {
     #[serde(default)]
     pub name: String,
-    pub src: String,
-    pub dst: String,
+    pub src: GroupId,
+    pub dst: GroupId,
     #[serde(default)]
     pub direction: Direction,
     #[serde(default = "enabled_by_default")]
@@ -874,9 +904,9 @@ pub struct UpdateRule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub src: Option<String>,
+    pub src: Option<GroupId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dst: Option<String>,
+    pub dst: Option<GroupId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direction: Option<Direction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1182,22 +1212,16 @@ pub struct PairLaneSide {
     pub reported_secs_ago: Option<u64>,
 }
 
-/// 访问关系图的标签视图：每个标签是一个点，每条规则是一条连线。
+/// 访问关系图的分组视图：每个分组是一个点，每条规则是一条连线。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccessGraph {
-    /// 内置的 `all`、节点上的标签、规则里提到的标签，按字典序。
-    pub tags: Vec<TagMembers>,
+    /// 全部分组，和分组列表一样：`All` 在最前面，其余按名字排。
+    pub groups: Vec<Group>,
     pub rules: Vec<Rule>,
     /// 没有被任何启用的规则连通的节点。
     pub unconnected: Vec<NodeRef>,
     /// 还没有确认当前版本配置的节点（例如不在线）。它们还在按旧的规则判定。
     pub unacknowledged: Vec<NodeRef>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TagMembers {
-    pub tag: String,
-    pub nodes: Vec<NodeRef>,
 }
 
 /// 访问关系图的节点视图：选中一个节点，它能访问谁、谁能访问它、各是哪些规则允许的。
@@ -1288,7 +1312,7 @@ impl FromStr for LogRef {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("应该写成 <种类>:<编号>，例如 node:3；种类是 network、node、token、rule、credential、listener、forward 之一")]
+#[error("应该写成 <种类>:<编号>，例如 node:3；种类是 network、node、group、token、rule、credential、listener、forward 之一")]
 pub struct InvalidLogRef;
 
 /// 操作记录里提到的东西是哪一种。
@@ -1297,6 +1321,7 @@ pub struct InvalidLogRef;
 pub enum RefKind {
     Network,
     Node,
+    Group,
     Token,
     Rule,
     Credential,
@@ -1306,24 +1331,53 @@ pub enum RefKind {
     Unknown,
 }
 
-/// 在整个网络里把一个标签改名。
+/// 一个分组：它的成员和用到它的规则。分组列表、单个分组、改名和增减成员的应答都是它。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RenameTag {
-    pub from: String,
-    pub to: String,
+pub struct Group {
+    pub id: GroupId,
+    /// 写的时候的大小写。在一个网络里不分大小写唯一。
+    pub name: String,
+    /// 内置分组 `All`：每个节点都在里面，不能改名、删除，也不能增减成员。
+    pub builtin: bool,
+    /// 成员，按编号排。`All` 的成员是网络里的全部节点。
+    pub nodes: Vec<NodeRef>,
+    /// `src` 或 `dst` 是它的规则（包括停用的），按编号排。删除这个分组时它们被一起删掉。
+    pub rules: Vec<Rule>,
 }
 
-/// 改名的结果：各改了几处。
+/// 新建一个分组。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RenamedTag {
-    pub from: String,
-    pub to: String,
-    /// 带着这个标签的节点。
-    pub nodes: u32,
-    /// 提到这个标签的规则（`src` 或 `dst`）。
-    pub rules: u32,
-    /// 还没用掉的注册令牌里预设了这个标签的。
-    pub tokens: u32,
+pub struct CreateGroup {
+    pub name: String,
+}
+
+/// 改一个分组。只有名字可改。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct UpdateGroup {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// 批量增减一个分组的成员。已经在里面的再加入、本来就不在的移出都什么也不做。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct GroupMembers {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub add: Vec<NodeId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove: Vec<NodeId>,
+}
+
+/// 删掉一个分组的应答：删掉了什么。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeletedGroup {
+    pub id: GroupId,
+    pub name: String,
+    /// 原来的成员。
+    pub nodes: Vec<NodeRef>,
+    /// 一起删掉的规则，删之前的样子。
+    pub rules: Vec<Rule>,
+    /// 预设了它、还没用掉的注册令牌：它们不再预设它。用掉了的令牌上它也被去掉，不列在这里。
+    pub tokens: Vec<u32>,
 }
 
 /// 启用（或修改）relay 的应答：节点，加上 controller 从自己这边试连这些地址的结果。
@@ -1439,7 +1493,7 @@ mod tests {
     fn a_node_from_an_older_controller_reads_without_the_update_fields() {
         let node: Node = serde_json::from_value(json!({
             "id": 1, "network": 1, "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE", "name": "node-1", "fqdn": "node-1.home.i3t",
-            "virtual_ip": "10.66.0.1", "tags": [], "declared": {}, "relay": null, "exit": null, "dial_out_only": false,
+            "virtual_ip": "10.66.0.1", "groups": [], "declared": {}, "relay": null, "exit": null, "dial_out_only": false,
             "routing": null, "reach": null, "pinned_relays": [], "platform": "linux-x86_64", "version": "0.1.0", "online": false,
             "last_seen_at": null, "created_at": 1, "netmap_version": 1, "sent_version": 1, "acked_version": 1
         }))
@@ -1526,7 +1580,7 @@ mod tests {
             (CredentialState::Active, None, CredentialUsage::default(), "")
         );
         let token: EnrollTokenInfo = serde_json::from_value(json!({
-            "id": 1, "network": 1, "created_at": 1, "expires_at": 2, "tags": [], "virtual_ip": null, "successor_of": null
+            "id": 1, "network": 1, "created_at": 1, "expires_at": 2, "groups": [], "virtual_ip": null, "successor_of": null
         }))
         .unwrap();
         assert_eq!((token.state, token.used_at, token.used_by), (TokenState::Pending, None, None));
@@ -1577,7 +1631,7 @@ mod tests {
     fn node_detail_keeps_attached_in_the_same_place_now_that_it_lives_in_node() {
         let node: Node = serde_json::from_value(json!({
             "id": 1, "network": 1, "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE", "name": "node-1", "fqdn": "node-1.home.i3t",
-            "virtual_ip": "10.66.0.1", "tags": [], "declared": {}, "relay": null, "exit": null, "dial_out_only": false,
+            "virtual_ip": "10.66.0.1", "groups": [], "declared": {}, "relay": null, "exit": null, "dial_out_only": false,
             "routing": null, "reach": null, "pinned_relays": [], "platform": "linux-x86_64", "version": "0.1.0", "online": true,
             "last_seen_at": null, "created_at": 1, "netmap_version": 1, "sent_version": 1, "acked_version": 1,
             "attached": [{ "relay": 9, "rtt_ms": 12 }]
@@ -1681,9 +1735,40 @@ mod tests {
 
     #[test]
     fn rules_default_to_both_directions_and_enabled() {
-        let rule: CreateRule = serde_json::from_value(json!({ "src": "laptops", "dst": "servers" })).unwrap();
+        let rule: CreateRule = serde_json::from_value(json!({ "src": 2, "dst": 3 })).unwrap();
+        assert_eq!((rule.src, rule.dst), (GroupId(2), GroupId(3)));
         assert_eq!(rule.direction, Direction::Both);
         assert!(rule.enabled);
         assert_eq!(serde_json::to_value(Direction::OneWay).unwrap(), json!("one_way"));
+        assert!(serde_json::from_value::<CreateRule>(json!({ "src": "laptops", "dst": 3 })).is_err(), "分组按编号引用，不收名字");
+    }
+
+    #[test]
+    fn groups_are_referenced_by_id_and_shown_with_their_name() {
+        let laptops = GroupRef { id: GroupId(2), name: "Laptops".to_owned() };
+        let rule = Rule {
+            id: 5,
+            name: "ssh".to_owned(),
+            src: laptops.clone(),
+            dst: GroupRef { id: GroupId(1), name: "All".to_owned() },
+            direction: Direction::OneWay,
+            enabled: true,
+        };
+        let value = serde_json::to_value(&rule).unwrap();
+        assert_eq!(value["src"], json!({ "id": 2, "name": "Laptops" }));
+        assert_eq!(serde_json::from_value::<Rule>(value).unwrap(), rule);
+
+        let group = Group { id: GroupId(2), name: "Laptops".to_owned(), builtin: false, nodes: Vec::new(), rules: vec![rule] };
+        let value = serde_json::to_value(&group).unwrap();
+        assert_eq!((&value["builtin"], &value["nodes"]), (&json!(false), &json!([])));
+        assert_eq!(value["rules"][0]["id"], json!(5));
+
+        let members: GroupMembers = serde_json::from_value(json!({ "add": [1, 4] })).unwrap();
+        assert_eq!((members.add.len(), members.remove.len()), (2, 0), "两项都可以省略");
+        assert_eq!(serde_json::to_value(GroupMembers::default()).unwrap(), json!({}));
+        let update: UpdateNode = serde_json::from_value(json!({ "groups": [3, 1] })).unwrap();
+        assert_eq!(update.groups, Some(vec![GroupId(3), GroupId(1)]));
+        assert_eq!("7".parse::<GroupId>(), Ok(GroupId(7)));
+        assert_eq!("group:7".parse::<LogRef>(), Ok(LogRef::new(RefKind::Group, 7)));
     }
 }

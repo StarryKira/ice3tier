@@ -22,8 +22,6 @@ const HELP: Help = Help {
     log_action: "操作，或它的前缀（如 node）",
     log_ref: "提到的东西，如 node:3",
     log_before: "只看编号更小的（翻页）",
-    tag: "标签",
-    tag_rename: "标签改名",
     network_group: "网络",
     network_list: "网络列表",
     network_create: "新建网络",
@@ -40,7 +38,7 @@ const HELP: Help = Help {
     node_list: "节点列表",
     node_show: "节点详情",
     node_rename: "节点改名",
-    node_tag: "设置标签。不写标签就是清空",
+    node_groups: "设置节点所在的分组。不写就是只在 All 里",
     node_set: "修改节点设置",
     node_ip: "虚拟 IP。引用旧地址的配置会失效",
     node_dial_out_only: "只拨出",
@@ -71,19 +69,27 @@ const HELP: Help = Help {
     exit_connects: "每分钟新建连接上限（每个发起节点、每个目标）",
     exit_disable: "停用出口",
     exit_list: "出口列表",
+    group_group: "分组",
+    group_list: "分组列表",
+    group_show: "分组详情：成员和用到它的规则",
+    group_create: "新建分组",
+    group_rename: "分组改名",
+    group_delete: "删除分组，连同用到它的规则",
+    group_add: "把节点加入分组",
+    group_remove: "把节点移出分组",
     token_group: "注册令牌",
     token_list: "注册令牌列表",
     token_all: "包括用掉的和过期的",
     token_create: "新建注册令牌。令牌只显示这一次",
     token_expires: "有效期，如 30m、24h、7d",
-    token_tag: "加入的节点带上的标签，可写多次",
+    token_groups: "加入的节点所在的分组，可写多次",
     token_ip: "预设的虚拟 IP",
     token_successor_of: "要继任的已下线节点",
     token_delete: "删除注册令牌",
     rule_group: "访问规则",
     rule_list: "规则列表",
-    rule_add: "新建规则：SRC 和 DST 互相可以访问",
-    rule_one_way: "只有 SRC 能发起",
+    rule_add: "新建规则：两个分组的节点互相可以访问",
+    rule_one_way: "只有源分组能发起",
     rule_enable: "启用规则",
     rule_disable: "停用规则",
     rule_delete: "删除规则",
@@ -160,8 +166,9 @@ const VALUES: Values = Values {
     node: "节点",
     name: "名字",
     id: "编号",
-    tag: "标签",
-    new_tag: "新标签",
+    group: "分组",
+    src: "源分组",
+    dst: "目的分组",
     address: "地址",
     bind: "监听地址",
     cidr: "地址段",
@@ -218,7 +225,6 @@ const UI: Ui = Ui {
     unreachable_pairs: "不可达的节点对：",
     no_relay_hint: "还没有 relay。在有公网地址的节点上执行 i3t set can-relay on，再用 i3tctl relay enable 启用。",
     log_header: ["编号", "时间", "网络", "操作", "说明"],
-    tag_renamed: |from, to, nodes, rules, tokens| format!("标签 {from} 改名为 {to}：{nodes} 个节点，{rules} 条规则，{tokens} 个注册令牌"),
 
     node_offline: |name| format!("{name} 离线"),
     node_listeners_header: ["编号", "名字", "监听地址", "协议", "连接", "流量", "状态"],
@@ -254,11 +260,11 @@ const UI: Ui = Ui {
     max_relay_hops: "最大中转级数",
     class: "服务等级",
 
-    nodes_header: ["编号", "名字", "虚拟 IP", "状态", "角色", "版本", "平台", "标签"],
+    nodes_header: ["编号", "名字", "虚拟 IP", "状态", "角色", "版本", "平台", "分组"],
     no_nodes: "还没有节点",
     exit: "出口",
     forward: "端口转发",
-    tags: "标签",
+    groups: "分组",
     roles: "角色",
     reachability: "从 controller 试连：",
     reachability_header: ["协议", "地址", "延迟 ms", "结果"],
@@ -338,7 +344,7 @@ const UI: Ui = Ui {
     can_reach: "可以访问",
     reachable_by: "可被访问",
     not_acknowledged: |name| format!("{name} 还没有确认当前配置，仍按旧规则判定"),
-    tokens_header: ["编号", "开头", "状态", "过期", "使用者", "虚拟 IP", "继任", "标签"],
+    tokens_header: ["编号", "开头", "状态", "过期", "使用者", "虚拟 IP", "继任", "分组"],
     no_tokens: "没有注册令牌",
     token_created: |id, expires| format!("注册令牌 #{id}，{expires} 过期。只显示这一次："),
     token_use: "在要加入的机器上：echo <令牌> | i3t join",
@@ -394,7 +400,10 @@ const UI: Ui = Ui {
     handshake_failure_counts: |deadline, unknown_key, tls, protocol, busy| {
         format!("超时 {deadline}，不认识的公钥 {unknown_key}，TLS {tls}，协议 {protocol}，太多 {busy}")
     },
-    tags_header: ["标签", "节点数", "节点"],
+    groups_header: ["编号", "名字", "节点数", "规则数"],
+    no_groups: "没有分组",
+    graph_groups_header: ["分组", "节点数", "节点"],
+    group_deleted: |name, nodes, rules| format!("分组 {name} 已删除：移出 {nodes} 个节点，删掉 {rules} 条规则"),
     unconnected: "没有被规则连通的节点",
     unacknowledged: "还没确认当前配置的节点",
     can_access: |from, to| format!("{from} 可以访问 {to}"),
@@ -434,6 +443,7 @@ const UI: Ui = Ui {
     both_nodes: "要写两个节点",
     wait_timeout: |secs| format!("{secs} 秒还没有做完，稍后用 i3tctl tests show 查看"),
     no_such_node: |reference| format!("没有节点 {reference}"),
+    no_such_group: |reference| format!("没有分组 {reference}"),
     no_such_network: |reference| format!("没有网络 {reference}"),
     no_such_forward: |id| format!("没有端口转发 #{id}"),
     network_deleted: |name| format!("网络 {name} 已删除"),
@@ -473,6 +483,7 @@ fn log(entry: &LogEntry) -> Option<String> {
     let switch = |key: &str| if p.flag(key) { "开" } else { "关" };
     let arrow = || if p.text("direction") == "one_way" { "->" } else { "<->" };
     let pair = || format!("{} ↔ {}", p.thing("a_name", "a"), p.thing("b_name", "b"));
+    let (src, dst, group) = (|| p.thing("src_name", "src"), || p.thing("dst_name", "dst"), || p.thing("group_name", "group"));
     let cause = || p.decode::<UpdateCause>("cause").map_or_else(|| p.text("reason"), |cause| (lang.codes().update_cause)(&cause));
     let timing = || match p.text("timing").as_str() {
         "now" => "立即",
@@ -497,8 +508,8 @@ fn log(entry: &LogEntry) -> Option<String> {
                 if let Some(address) = get("virtual_ip") {
                     out.push(format!("虚拟 IP {}", address["to"].as_str().unwrap_or_default()));
                 }
-                if get("tags").is_some() {
-                    out.push("标签".to_owned());
+                if get("groups").is_some() {
+                    out.push("分组".to_owned());
                 }
                 if get("dial_out_only").is_some() {
                     out.push("只拨出".to_owned());
@@ -524,13 +535,25 @@ fn log(entry: &LogEntry) -> Option<String> {
         "node.forward.withdrawn" => format!("{} 撤回声明，{} 条端口转发已停用", node(), p.text("forwards")),
         "token.create" => format!("新建注册令牌 #{}（{}…）", p.text("token"), p.text("prefix")),
         "token.delete" => format!("删除注册令牌 #{}", p.text("token")),
-        "rule.create" => format!("新建规则 #{} {} {} {}", p.text("rule"), p.text("src"), arrow(), p.text("dst")),
+        "rule.create" => format!("新建规则 #{} {} {} {}", p.text("rule"), src(), arrow(), dst()),
         "rule.update" => {
             let state = if p.flag("enabled") { "启用" } else { "停用" };
-            format!("修改规则 #{} {} {} {}（{state}）", p.text("rule"), p.text("src"), arrow(), p.text("dst"))
+            format!("修改规则 #{} {} {} {}（{state}）", p.text("rule"), src(), arrow(), dst())
         }
         "rule.delete" => format!("删除规则 #{}", p.text("rule")),
-        "tag.rename" => format!("标签 {} 改名为 {}", p.text("from"), p.text("to")),
+        "group.create" => format!("新建分组 {}", group()),
+        "group.rename" => format!("分组 {} 改名为 {}", p.text("from"), p.text("to")),
+        "group.delete" => format!("删除分组 {}：{} 个节点，{} 条规则", group(), p.text("nodes"), p.text("rules")),
+        "group.members" => {
+            let mut clauses = Vec::new();
+            for (key, verb) in [("added", "加入"), ("removed", "移出")] {
+                let names = p.names(key, "node_name", "node");
+                if !names.is_empty() {
+                    clauses.push(format!("{verb} {}", lang.list(names)));
+                }
+            }
+            format!("分组 {}：{}", group(), clauses.join("；"))
+        }
         "credential.create" => format!("新建凭据 {}", p.thing("credential_name", "credential")),
         "credential.update" => format!("修改凭据 {}", p.thing("credential_name", "credential")),
         "credential.revoke" => format!("吊销凭据 {}", p.thing("credential_name", "credential")),

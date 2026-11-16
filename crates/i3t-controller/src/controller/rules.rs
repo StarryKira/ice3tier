@@ -1,13 +1,12 @@
-//! 访问规则的增删改。
+//! 访问规则的增删改。规则的两头是分组，按编号引用。
 
-use std::collections::BTreeSet;
-
-use i3t_model::admin::{CreateRule, Direction, LogRef, NetworkId, RefKind, RenameTag, RenamedTag, Rule, UpdateRule};
+use i3t_model::admin::{CreateRule, Direction, GroupId, GroupRef, LogRef, NetworkId, RefKind, Rule, UpdateRule};
 use serde_json::json;
 
-use super::{Controller, Inner, Seeds, count, naming};
-use crate::access::ALL;
+use super::groups::require_group;
+use super::{Controller, naming};
 use crate::error::{Entity, Error, InField};
+use crate::store::Store;
 
 impl Controller {
     /// 一个网络的全部规则，包括停用的。
@@ -23,26 +22,26 @@ impl Controller {
 
     /// # Errors
     ///
-    /// 没有这个网络，或者标签、名字的写法不对。
+    /// 没有这个网络；名字的写法不对；`src` 或 `dst` 不是这个网络里已有的分组。
     pub fn create_rule(&self, network: NetworkId, request: &CreateRule) -> Result<Rule, Error> {
-        let mut rule = Rule {
-            id: 0,
-            name: naming::title("规则", &request.name, false).in_field("name")?,
-            src: naming::tag(&request.src).in_field("src")?,
-            dst: naming::tag(&request.dst).in_field("dst")?,
-            direction: request.direction,
-            enabled: request.enabled,
-        };
+        let name = naming::title("规则", &request.name, false).in_field("name")?;
         let mut inner = self.lock();
         inner.require_network(network)?;
         let now = inner.clock.now();
-        rule.id = inner.store.atomically(|store| {
-            let id = store.insert_rule(network, &rule)?;
-            let created = Rule { id, ..rule.clone() };
-            store.log_refs(now, Some(network), "rule.create", &describe(&created), &[LogRef::new(RefKind::Rule, id)], params(&created))?;
-            Ok::<_, Error>(id)
+        let rule = inner.store.atomically(|store| {
+            let mut rule = Rule {
+                id: 0,
+                name,
+                src: group_ref(store, network, request.src).in_field("src")?,
+                dst: group_ref(store, network, request.dst).in_field("dst")?,
+                direction: request.direction,
+                enabled: request.enabled,
+            };
+            rule.id = store.insert_rule(network, &rule)?;
+            store.log_refs(now, Some(network), "rule.create", &describe(&rule), &[LogRef::new(RefKind::Rule, rule.id)], params(&rule))?;
+            Ok::<_, Error>(rule)
         })?;
-        let seeds = inner.nodes_tagged(network, &[&rule.src, &rule.dst])?;
+        let seeds = inner.members_of(network, &[rule.src.id, rule.dst.id])?;
         inner.refresh(network, seeds, None)?;
         self.wake_if_needed(&inner);
         Ok(rule)
@@ -52,7 +51,7 @@ impl Controller {
     ///
     /// # Errors
     ///
-    /// 这个网络里没有这条规则，或者标签、名字的写法不对。
+    /// 这个网络里没有这条规则；名字的写法不对；`src` 或 `dst` 不是这个网络里已有的分组。
     pub fn update_rule(&self, network: NetworkId, id: u32, request: &UpdateRule) -> Result<Rule, Error> {
         let mut inner = self.lock();
         let now = inner.clock.now();
@@ -62,11 +61,11 @@ impl Controller {
             if let Some(name) = &request.name {
                 rule.name = naming::title("规则", name, false).in_field("name")?;
             }
-            if let Some(src) = &request.src {
-                rule.src = naming::tag(src).in_field("src")?;
+            if let Some(src) = request.src {
+                rule.src = group_ref(store, network, src).in_field("src")?;
             }
-            if let Some(dst) = &request.dst {
-                rule.dst = naming::tag(dst).in_field("dst")?;
+            if let Some(dst) = request.dst {
+                rule.dst = group_ref(store, network, dst).in_field("dst")?;
             }
             rule.direction = request.direction.unwrap_or(rule.direction);
             rule.enabled = request.enabled.unwrap_or(rule.enabled);
@@ -74,7 +73,7 @@ impl Controller {
             store.log_refs(now, Some(network), "rule.update", &describe(&rule), &[LogRef::new(RefKind::Rule, id)], params(&rule))?;
             Ok::<_, Error>((before, rule))
         })?;
-        let seeds = inner.nodes_tagged(network, &[&before.src, &before.dst, &after.src, &after.dst])?;
+        let seeds = inner.members_of(network, &[before.src.id, before.dst.id, after.src.id, after.dst.id])?;
         inner.refresh(network, seeds, None)?;
         self.wake_if_needed(&inner);
         Ok(after)
@@ -92,80 +91,10 @@ impl Controller {
             store.log_refs(now, Some(network), "rule.delete", &describe(&rule), &[LogRef::new(RefKind::Rule, id)], params(&rule))?;
             Ok::<_, Error>(rule)
         })?;
-        let seeds = inner.nodes_tagged(network, &[&rule.src, &rule.dst])?;
+        let seeds = inner.members_of(network, &[rule.src.id, rule.dst.id])?;
         inner.refresh(network, seeds, None)?;
         self.wake_if_needed(&inner);
         Ok(())
-    }
-}
-
-impl Controller {
-    /// 在整个网络里把标签 `from` 改名为 `to`：节点上的、规则里的、还没用掉的注册令牌预设的。
-    ///
-    /// 节点上已经有 `to` 的，两个合成一个。改名不改变谁能访问谁（除非 `to` 原来就是一个在用的标签，那时两组合并），
-    /// 所以只有带这两个标签的节点要重算。
-    ///
-    /// # Errors
-    ///
-    /// 没有这个网络；标签的写法不对；`from` 或 `to` 是内置的 `all`；两个是同一个。
-    pub fn rename_tag(&self, network: NetworkId, request: &RenameTag) -> Result<RenamedTag, Error> {
-        let (from, to) = (naming::tag(&request.from).in_field("from")?, naming::tag(&request.to).in_field("to")?);
-        if from == ALL || to == ALL {
-            let field = if from == ALL { "from" } else { "to" };
-            return Err(Error::invalid_field(field, "builtin", format!("内置标签 {ALL} 不能改名，也不能把别的标签改成它")));
-        }
-        if from == to {
-            return Err(Error::invalid_field("to", "same", "新旧两个标签是同一个"));
-        }
-        let mut inner = self.lock();
-        inner.require_network(network)?;
-        let now = inner.clock.now();
-        let seeds = inner.nodes_tagged(network, &[&from, &to])?;
-        let renamed = inner.store.atomically(|store| {
-            let mut nodes = Vec::new();
-            for mut node in store.nodes(network)? {
-                if node.tags.remove(&from) {
-                    node.tags.insert(to.clone());
-                    store.update_node(&node)?;
-                    nodes.push(node.id);
-                }
-            }
-            let mut rules = 0;
-            for mut rule in store.rules(network)? {
-                if rule.src != from && rule.dst != from {
-                    continue;
-                }
-                for tag in [&mut rule.src, &mut rule.dst] {
-                    if *tag == from {
-                        tag.clone_from(&to);
-                    }
-                }
-                store.update_rule(&rule)?;
-                rules += 1;
-            }
-            let tokens = store.rename_token_tag(network, &from, &to)?;
-            let renamed = RenamedTag { from: from.clone(), to: to.clone(), nodes: count(nodes.len()), rules, tokens };
-            let detail = format!("标签 {from} 改名为 {to}：{} 个节点，{rules} 条规则，{tokens} 个注册令牌", renamed.nodes);
-            let refs: Vec<LogRef> = nodes.into_iter().map(LogRef::node).collect();
-            let params = json!({ "from": from, "to": to, "nodes": renamed.nodes, "rules": rules, "tokens": tokens });
-            store.log_refs(now, Some(network), "tag.rename", &detail, &refs, params)?;
-            Ok::<_, Error>(renamed)
-        })?;
-        tracing::info!(%network, from = %renamed.from, to = %renamed.to, nodes = renamed.nodes, rules = renamed.rules, "标签改名");
-        inner.refresh(network, seeds, None)?;
-        self.wake_if_needed(&inner);
-        Ok(renamed)
-    }
-}
-
-impl Inner {
-    /// 带着这些标签里任何一个的节点：一条规则变了，要重算的就是它两头的节点。
-    fn nodes_tagged(&self, network: NetworkId, tags: &[&String]) -> Result<Seeds, Error> {
-        if tags.iter().any(|tag| *tag == ALL) {
-            return Ok(Seeds::All);
-        }
-        let tagged = self.store.nodes(network)?.into_iter().filter(|node| tags.iter().any(|tag| node.tags.contains(*tag)));
-        Ok(Seeds::Nodes(tagged.map(|node| node.id).collect::<BTreeSet<_>>()))
     }
 }
 
@@ -174,8 +103,10 @@ fn params(rule: &Rule) -> serde_json::Value {
     json!({
         "rule": rule.id,
         "rule_name": rule.name,
-        "src": rule.src,
-        "dst": rule.dst,
+        "src": rule.src.id,
+        "src_name": rule.src.name,
+        "dst": rule.dst.id,
+        "dst_name": rule.dst.name,
         "direction": rule.direction,
         "enabled": rule.enabled,
     })
@@ -187,5 +118,10 @@ fn describe(rule: &Rule) -> String {
         Direction::OneWay => "->",
     };
     let state = if rule.enabled { "启用" } else { "停用" };
-    format!("规则 #{} {} {arrow} {}（{state}）", rule.id, rule.src, rule.dst)
+    format!("规则 #{} {} {arrow} {}（{state}）", rule.id, rule.src.name, rule.dst.name)
+}
+
+/// 规则的一头：这个网络里已有的分组，带着它现在的名字。
+fn group_ref(store: &Store, network: NetworkId, id: GroupId) -> Result<GroupRef, Error> {
+    Ok(require_group(store, network, id)?.to_ref())
 }

@@ -15,7 +15,7 @@ use i3t_controller::webui::WebUi;
 use i3t_controller::{ALPN, Controller, ServeOptions, Server, Timing};
 use i3t_crypto::{NodeKey, tls};
 use i3t_model::Netmap;
-use i3t_model::admin::{CreateEnrollToken, CreateNetwork, Network, NetworkId, UpdateSettings};
+use i3t_model::admin::{CreateEnrollToken, CreateGroup, CreateNetwork, GroupId, Network, NetworkId, UpdateSettings};
 use i3t_model::control::{Declared, EnrollToken, Hello, MAX_FRAME_LEN, PROTOCOL_REVISION, SelfUpdate, ToController, ToNode};
 use i3t_model::update::{Artifact, LATEST_DIR, MANIFEST_FILE, Manifest, NODE_PROGRAM, Platform, SIGNATURE_FILE, Sha256, Version};
 use i3t_proto::{NodeId, PublicKey};
@@ -86,9 +86,16 @@ impl Running {
         self.controller.create_network(&CreateNetwork { name: name.to_owned(), ..CreateNetwork::default() }).unwrap()
     }
 
-    /// 生成一个注册令牌，返回里面的一次性密钥。
-    pub fn secret(&self, network: NetworkId, tags: &[&str]) -> String {
-        let request = CreateEnrollToken { tags: tags.iter().map(|&tag| tag.to_owned()).collect(), ..CreateEnrollToken::default() };
+    /// 叫 `name` 的分组（不分大小写），没有就建一个。`all` 是内置的 `All`。
+    pub fn group(&self, network: NetworkId, name: &str) -> GroupId {
+        let existing = self.controller.groups(network).unwrap().into_iter().find(|group| group.name.eq_ignore_ascii_case(name));
+        existing.map_or_else(|| self.controller.create_group(network, &CreateGroup { name: name.to_owned() }).unwrap().id, |group| group.id)
+    }
+
+    /// 生成一个注册令牌（用它加入的节点在这些分组里，没有的先建出来），返回里面的一次性密钥。
+    pub fn secret(&self, network: NetworkId, groups: &[&str]) -> String {
+        let groups = groups.iter().map(|name| self.group(network, name)).collect();
+        let request = CreateEnrollToken { groups, ..CreateEnrollToken::default() };
         let created = self.controller.create_token(network, &request).unwrap();
         let token: EnrollToken = created.token.parse().unwrap();
         assert_eq!(token.key, self.controller.public_key());
@@ -96,8 +103,8 @@ impl Running {
     }
 
     /// 一个新节点加入网络并保持连接。它的第一份 netmap 已经收下并确认。
-    pub async fn join(&self, network: NetworkId, tags: &[&str]) -> Node {
-        let secret = self.secret(network, tags);
+    pub async fn join(&self, network: NetworkId, groups: &[&str]) -> Node {
+        let secret = self.secret(network, groups);
         let mut node = Node::new();
         node.enroll(self, &secret).await.expect("注册应该成功");
         node

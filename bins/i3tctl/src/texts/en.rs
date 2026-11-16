@@ -22,8 +22,6 @@ const HELP: Help = Help {
     log_action: "Action, or its prefix (e.g. node)",
     log_ref: "Item mentioned, e.g. node:3",
     log_before: "Only entries before this ID (paging)",
-    tag: "Tags",
-    tag_rename: "Rename a tag",
     network_group: "Networks",
     network_list: "List networks",
     network_create: "Create a network",
@@ -40,7 +38,7 @@ const HELP: Help = Help {
     node_list: "List nodes",
     node_show: "Node details",
     node_rename: "Rename a node",
-    node_tag: "Set tags. No tags clears them",
+    node_groups: "Set the node's groups. None leaves it only in All",
     node_set: "Change node settings",
     node_ip: "Virtual IP. Settings using the old address stop working",
     node_dial_out_only: "Dial out only",
@@ -71,19 +69,27 @@ const HELP: Help = Help {
     exit_connects: "New connections per minute (per source node and target)",
     exit_disable: "Disable an exit",
     exit_list: "List exits",
+    group_group: "Groups",
+    group_list: "List groups",
+    group_show: "Show a group's members and rules",
+    group_create: "Create a group",
+    group_rename: "Rename a group",
+    group_delete: "Delete a group and the rules using it",
+    group_add: "Add nodes to a group",
+    group_remove: "Remove nodes from a group",
     token_group: "Enrollment tokens",
     token_list: "List enrollment tokens",
     token_all: "Include used and expired",
     token_create: "Create an enrollment token. Shown only once",
     token_expires: "Lifetime, e.g. 30m, 24h, 7d",
-    token_tag: "Tag for the joining node; repeatable",
+    token_groups: "Group for the joining node; repeatable",
     token_ip: "Preset virtual IP",
     token_successor_of: "Offline node to replace",
     token_delete: "Delete an enrollment token",
     rule_group: "Access rules",
     rule_list: "List rules",
-    rule_add: "Create a rule: SRC and DST can reach each other",
-    rule_one_way: "Only SRC can initiate",
+    rule_add: "Create a rule: nodes in the two groups can reach each other",
+    rule_one_way: "Only the source group can initiate",
     rule_enable: "Enable a rule",
     rule_disable: "Disable a rule",
     rule_delete: "Delete a rule",
@@ -160,8 +166,9 @@ const VALUES: Values = Values {
     node: "NODE",
     name: "NAME",
     id: "ID",
-    tag: "TAG",
-    new_tag: "NEW-TAG",
+    group: "GROUP",
+    src: "SRC-GROUP",
+    dst: "DST-GROUP",
     address: "ADDR",
     bind: "LISTEN-ADDR",
     cidr: "CIDR",
@@ -218,7 +225,6 @@ const UI: Ui = Ui {
     unreachable_pairs: "Unreachable node pairs:",
     no_relay_hint: "No relay yet. On a node with a public address run 'i3t set can-relay on', then 'i3tctl relay enable'.",
     log_header: ["ID", "TIME", "NETWORK", "ACTION", "DETAIL"],
-    tag_renamed: |from, to, nodes, rules, tokens| format!("Tag {from} renamed to {to}: {nodes} nodes, {rules} rules, {tokens} tokens"),
 
     node_offline: |name| format!("{name} offline"),
     node_listeners_header: ["ID", "NAME", "LISTEN", "PROTOCOL", "CONNECTIONS", "TRAFFIC", "STATE"],
@@ -254,11 +260,11 @@ const UI: Ui = Ui {
     max_relay_hops: "Max relay hops",
     class: "Service class",
 
-    nodes_header: ["ID", "NAME", "VIRTUAL-IP", "STATE", "ROLES", "VERSION", "PLATFORM", "TAGS"],
+    nodes_header: ["ID", "NAME", "VIRTUAL-IP", "STATE", "ROLES", "VERSION", "PLATFORM", "GROUPS"],
     no_nodes: "No nodes yet",
     exit: "exit",
     forward: "forward",
-    tags: "Tags",
+    groups: "Groups",
     roles: "Roles",
     reachability: "Reachability from the controller:",
     reachability_header: ["PROTOCOL", "ADDRESS", "RTT-MS", "RESULT"],
@@ -338,7 +344,7 @@ const UI: Ui = Ui {
     can_reach: "can reach",
     reachable_by: "reachable by",
     not_acknowledged: |name| format!("{name} hasn't acknowledged the current settings; old rules still apply there"),
-    tokens_header: ["ID", "PREFIX", "STATE", "EXPIRES", "USED-BY", "VIRTUAL-IP", "REPLACES", "TAGS"],
+    tokens_header: ["ID", "PREFIX", "STATE", "EXPIRES", "USED-BY", "VIRTUAL-IP", "REPLACES", "GROUPS"],
     no_tokens: "No enrollment tokens",
     token_created: |id, expires| format!("Enrollment token #{id}, expires {expires}. Shown only once:"),
     token_use: "On the joining machine: echo <TOKEN> | i3t join",
@@ -394,7 +400,10 @@ const UI: Ui = Ui {
     handshake_failure_counts: |deadline, unknown_key, tls, protocol, busy| {
         format!("timeout {deadline}, unknown key {unknown_key}, TLS {tls}, protocol {protocol}, too many {busy}")
     },
-    tags_header: ["TAG", "COUNT", "NODES"],
+    groups_header: ["ID", "NAME", "NODES", "RULES"],
+    no_groups: "No groups",
+    graph_groups_header: ["GROUP", "COUNT", "NODES"],
+    group_deleted: |name, nodes, rules| format!("Group {name} deleted: removed from {nodes} nodes, {rules} rules deleted"),
     unconnected: "Nodes no rule connects",
     unacknowledged: "Nodes without the current settings",
     can_access: |from, to| format!("{from} can reach {to}"),
@@ -447,6 +456,7 @@ const UI: Ui = Ui {
     both_nodes: "Give both nodes",
     wait_timeout: |secs| format!("Not done after {secs} s; check later with 'i3tctl tests show'"),
     no_such_node: |reference| format!("No node {reference}"),
+    no_such_group: |reference| format!("No group {reference}"),
     no_such_network: |reference| format!("No network {reference}"),
     no_such_forward: |id| format!("No port forward #{id}"),
     network_deleted: |name| format!("Network {name} deleted"),
@@ -486,6 +496,7 @@ fn log(entry: &LogEntry) -> Option<String> {
     let switch = |key: &str| if p.flag(key) { "on" } else { "off" };
     let arrow = || if p.text("direction") == "one_way" { "->" } else { "<->" };
     let pair = || format!("{} ↔ {}", p.thing("a_name", "a"), p.thing("b_name", "b"));
+    let (src, dst, group) = (|| p.thing("src_name", "src"), || p.thing("dst_name", "dst"), || p.thing("group_name", "group"));
     let cause =
         || p.decode::<UpdateCause>("cause").map_or_else(|| "reason not reported".to_owned(), |cause| (lang.codes().update_cause)(&cause));
     let timing = || match p.text("timing").as_str() {
@@ -511,8 +522,8 @@ fn log(entry: &LogEntry) -> Option<String> {
                 if let Some(address) = get("virtual_ip") {
                     out.push(format!("virtual IP {}", address["to"].as_str().unwrap_or_default()));
                 }
-                if get("tags").is_some() {
-                    out.push("tags".to_owned());
+                if get("groups").is_some() {
+                    out.push("groups".to_owned());
                 }
                 if get("dial_out_only").is_some() {
                     out.push("dial out only".to_owned());
@@ -538,13 +549,25 @@ fn log(entry: &LogEntry) -> Option<String> {
         "node.forward.withdrawn" => format!("{} withdrew its declaration; {} port forwards disabled", node(), p.text("forwards")),
         "token.create" => format!("Enrollment token #{} created ({}…)", p.text("token"), p.text("prefix")),
         "token.delete" => format!("Enrollment token #{} deleted", p.text("token")),
-        "rule.create" => format!("Rule #{} created: {} {} {}", p.text("rule"), p.text("src"), arrow(), p.text("dst")),
+        "rule.create" => format!("Rule #{} created: {} {} {}", p.text("rule"), src(), arrow(), dst()),
         "rule.update" => {
             let state = if p.flag("enabled") { "enabled" } else { "disabled" };
-            format!("Rule #{} changed: {} {} {} ({state})", p.text("rule"), p.text("src"), arrow(), p.text("dst"))
+            format!("Rule #{} changed: {} {} {} ({state})", p.text("rule"), src(), arrow(), dst())
         }
         "rule.delete" => format!("Rule #{} deleted", p.text("rule")),
-        "tag.rename" => format!("Tag {} renamed to {}", p.text("from"), p.text("to")),
+        "group.create" => format!("Group {} created", group()),
+        "group.rename" => format!("Group {} renamed to {}", p.text("from"), p.text("to")),
+        "group.delete" => format!("Group {} deleted: {} nodes, {} rules", group(), p.text("nodes"), p.text("rules")),
+        "group.members" => {
+            let mut clauses = Vec::new();
+            for (key, verb) in [("added", "added"), ("removed", "removed")] {
+                let names = p.names(key, "node_name", "node");
+                if !names.is_empty() {
+                    clauses.push(format!("{verb} {}", lang.list(names)));
+                }
+            }
+            format!("Group {}: {}", group(), clauses.join("; "))
+        }
         "credential.create" => format!("Credential {} created", p.thing("credential_name", "credential")),
         "credential.update" => format!("Credential {} changed", p.thing("credential_name", "credential")),
         "credential.revoke" => format!("Credential {} revoked", p.thing("credential_name", "credential")),

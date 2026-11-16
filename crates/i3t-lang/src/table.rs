@@ -112,10 +112,10 @@ mod tests {
 
     #[test]
     fn columns_are_padded_to_the_widest_cell() {
-        let mut table = Table::new(&["ID", "NAME", "TAGS"]);
+        let mut table = Table::new(&["ID", "NAME", "GROUPS"]);
         table.row(vec!["1".to_owned(), "nas-01".to_owned(), "servers".to_owned()]);
         table.row(vec!["12".to_owned(), "a".to_owned(), "-".to_owned()]);
-        assert_eq!(table.to_string(), "ID  NAME    TAGS\n1   nas-01  servers\n12  a       -\n");
+        assert_eq!(table.to_string(), "ID  NAME    GROUPS\n1   nas-01  servers\n12  a       -\n");
     }
 
     #[test]

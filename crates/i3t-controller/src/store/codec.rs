@@ -6,7 +6,7 @@ use std::fmt::Display;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 
-use i3t_model::admin::NetworkId;
+use i3t_model::admin::{GroupId, NetworkId};
 use i3t_proto::{NodeId, PublicKey};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use serde::Serialize;
@@ -89,6 +89,20 @@ impl ToSql for SqlNetwork {
 impl FromSql for SqlNetwork {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
         u32::column_result(value).map(|raw| Self(NetworkId(raw)))
+    }
+}
+
+pub(super) struct SqlGroup(pub GroupId);
+
+impl ToSql for SqlGroup {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(self.0.0))
+    }
+}
+
+impl FromSql for SqlGroup {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        u32::column_result(value).map(|raw| Self(GroupId(raw)))
     }
 }
 

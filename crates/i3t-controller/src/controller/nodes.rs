@@ -1,4 +1,4 @@
-//! 节点：查看、改名、打标签、启用能力、删除、继任。
+//! 节点：查看、改名、改所在的分组、启用能力、删除、继任。
 
 use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -9,9 +9,10 @@ use i3t_model::netmap::ExitRole;
 use i3t_proto::NodeId;
 use serde_json::{Map, Value, json};
 
+use super::groups::resolve_groups;
 use super::{COOLDOWN_SECS, Controller, Inner, Seeds, address, listed, naming, switch};
 use crate::error::{Capability, Entity, Error, InField};
-use crate::store::{CooldownKind, NetworkRecord, NodeRecord, Store, is_pending};
+use crate::store::{CooldownKind, GroupRecord, NetworkRecord, NodeRecord, Store, is_pending};
 
 /// 一个 relay 每种协议最多填几个公网地址，一个节点最多固定几个挂靠 relay。都只是防止填错。
 const MAX_RELAY_ADDRESSES: usize = 8;
@@ -27,7 +28,8 @@ impl Controller {
         let inner = self.lock();
         let network = inner.require_network(network)?;
         let now = inner.clock.now();
-        Ok(inner.store.nodes(network.id)?.iter().map(|record| inner.node_view(&network, record, now)).collect())
+        let groups = inner.store.groups(network.id)?;
+        Ok(inner.store.nodes(network.id)?.iter().map(|record| inner.node_view(&network, &groups, record, now)).collect())
     }
 
     /// # Errors
@@ -39,7 +41,7 @@ impl Controller {
         let record = inner.require_node(network.id, id)?;
         let live = inner.live.get(&id);
         Ok(NodeDetail {
-            node: inner.node_view(&network, &record, inner.clock.now()),
+            node: inner.node_view(&network, &inner.store.groups(network.id)?, &record, inner.clock.now()),
             endpoints: record.endpoints,
             observed_endpoint: record.observed,
             mapping_varies: live.and_then(|live| live.mapping_varies),
@@ -51,16 +53,17 @@ impl Controller {
         })
     }
 
-    /// 改节点的名字、标签、虚拟 IP 和各个开关。只改请求里写了的字段。
+    /// 改节点的名字、所在的分组、虚拟 IP 和各个开关。只改请求里写了的字段。
     ///
     /// # Errors
     ///
-    /// 名字或虚拟 IP 不合法、被占用、在冷却期；固定的挂靠 relay 不是这个网络里启用了的 relay。
+    /// 名字或虚拟 IP 不合法、被占用、在冷却期；固定的挂靠 relay 不是这个网络里启用了的 relay；
+    /// 分组不是这个网络里已有的分组（`field` 是 `groups[序号]`）。
     pub fn update_node(&self, network: NetworkId, id: NodeId, request: &UpdateNode) -> Result<Node, Error> {
         let mut inner = self.lock();
         let network = inner.require_network(network)?;
         let now = inner.clock.now();
-        let (before, after) = inner.store.atomically(|store| {
+        let (before, after, groups) = inner.store.atomically(|store| {
             let before = require_node(store, network.id, id)?;
             let mut node = before.clone();
             if let Some(name) = &request.name {
@@ -69,8 +72,8 @@ impl Controller {
                     check_node_name(store, network.id, &node.name, now).in_field("name")?;
                 }
             }
-            if let Some(tags) = &request.tags {
-                node.tags = naming::node_tags(tags).in_field("tags")?;
+            if let Some(groups) = &request.groups {
+                node.groups = resolve_groups(store, network.id, groups, "groups")?;
             }
             if let Some(virtual_ip) = request.virtual_ip.filter(|ip| *ip != before.virtual_ip) {
                 check_address(store, &network, virtual_ip, now).in_field("virtual_ip")?;
@@ -83,15 +86,20 @@ impl Controller {
             node.routing = request.routing.unwrap_or(node.routing);
             node.reach = request.reach.unwrap_or(node.reach);
             store.update_node(&node)?;
-            let params = update_params(&before, &node);
-            store.log_refs(now, Some(network.id), "node.update", &describe_update(&before, &node), &[LogRef::node(id)], params)?;
-            Ok::<_, Error>((before, node))
+            if node.groups != before.groups {
+                store.set_node_groups(id, &node.groups)?;
+            }
+            let groups = store.groups(network.id)?;
+            let params = update_params(&before, &node, &groups);
+            let detail = describe_update(&before, &node, &groups);
+            store.log_refs(now, Some(network.id), "node.update", &detail, &[LogRef::node(id)], params)?;
+            Ok::<_, Error>((before, node, groups))
         })?;
         // relay 的名字写在全网每个节点的 netmap 里；别的改动只影响 netmap 里有它的节点。
         let seeds = if after.relay.is_some() && before.name != after.name { Seeds::All } else { inner.holders_and(id) };
         inner.refresh(network.id, seeds, None)?;
         self.wake_if_needed(&inner);
-        Ok(inner.node_view(&network, &after, now))
+        Ok(inner.node_view(&network, &groups, &after, now))
     }
 
     /// 把节点启用为 relay，或者改它的 relay 设置。
@@ -174,7 +182,7 @@ impl Controller {
         // relay 的更新要排队，是不是 relay 变了，该轮到谁也跟着变。
         inner.roll_out()?;
         self.wake_if_needed(&inner);
-        Ok(inner.node_view(&network, &node, now))
+        Ok(inner.node_view(&network, &inner.store.groups(network.id)?, &node, now))
     }
 
     /// 删掉一个节点：吊销它的公钥，立即把它从所有节点的 netmap 里去掉。
@@ -213,7 +221,7 @@ impl Controller {
         Ok(())
     }
 
-    /// 把 `id` 指定为已下线节点 `predecessor` 的继任：继承它的虚拟 IP、名字、标签，
+    /// 把 `id` 指定为已下线节点 `predecessor` 的继任：继承它的虚拟 IP、名字、所在的分组（和自己的合并），
     /// 以及指向它的端口转发、监听器和节点对设置；然后删掉 `predecessor`。
     ///
     /// relay、出口和端口转发目标不继承：要在新机器上重新声明，再重新启用。
@@ -246,9 +254,9 @@ impl Controller {
             store.park_node(predecessor)?;
             node.name.clone_from(&old.name);
             node.virtual_ip = old.virtual_ip;
-            node.tags.extend(old.tags.iter().cloned());
             store.update_node(&node)?;
             inherit(store, network.id, &old, &node)?;
+            let node = require_node(store, network.id, id)?;
             let detail = format!("节点 {former} 继任 {}（{}）", old.name, old.virtual_ip);
             store.log_refs(now, Some(network.id), "node.succeed", &detail, &[LogRef::node(id), LogRef::node(predecessor)], params)?;
             Ok::<_, Error>(node)
@@ -257,7 +265,7 @@ impl Controller {
         inner.forget_node(predecessor);
         inner.refresh(network.id, Seeds::All, None)?;
         self.wake_if_needed(&inner);
-        Ok(inner.node_view(&network, &node, now))
+        Ok(inner.node_view(&network, &inner.store.groups(network.id)?, &node, now))
     }
 }
 
@@ -330,7 +338,8 @@ pub(super) fn allocate_address(store: &Store, network: &NetworkRecord, now: Time
     address::lowest_free(network.cidr, &unavailable).ok_or(Error::RangeExhausted(network.cidr))
 }
 
-/// 继任的后半段：`successor` 已经拿到了 `old` 的名字、虚拟 IP 和标签，这里把指向 `old` 的配置转给它，再删掉 `old`。
+/// 继任的后半段：`successor` 已经拿到了 `old` 的名字和虚拟 IP，这里把指向 `old` 的配置和 `old` 所在的分组转给它，
+/// 再删掉 `old`。
 pub(super) fn inherit(store: &Store, network: NetworkId, old: &NodeRecord, successor: &NodeRecord) -> Result<(), Error> {
     store.repoint_node(old.id, successor.id)?;
     // 让出了名字和地址的那一行已经读不出来，先删掉它，后面才能再遍历这个网络的节点。
@@ -413,7 +422,7 @@ pub(super) fn is_connectable(address: &SocketAddr) -> bool {
 }
 
 /// 操作记录里的参数：节点（改之前的名字），和改了的项。没有改的项不在 `changes` 里；改名和改地址写出前后两个值。
-fn update_params(before: &NodeRecord, after: &NodeRecord) -> Value {
+fn update_params(before: &NodeRecord, after: &NodeRecord, groups: &[GroupRecord]) -> Value {
     let mut changes = Map::new();
     if before.name != after.name {
         changes.insert("name".to_owned(), json!({ "from": before.name, "to": after.name }));
@@ -421,8 +430,9 @@ fn update_params(before: &NodeRecord, after: &NodeRecord) -> Value {
     if before.virtual_ip != after.virtual_ip {
         changes.insert("virtual_ip".to_owned(), json!({ "from": before.virtual_ip, "to": after.virtual_ip }));
     }
-    if before.tags != after.tags {
-        changes.insert("tags".to_owned(), json!(after.tags));
+    if before.groups != after.groups {
+        let entries = member_groups(after, groups).map(|group| json!({ "group": group.id, "group_name": group.name })).collect();
+        changes.insert("groups".to_owned(), Value::Array(entries));
     }
     if before.dial_out_only != after.dial_out_only {
         changes.insert("dial_out_only".to_owned(), json!(after.dial_out_only));
@@ -440,7 +450,7 @@ fn update_params(before: &NodeRecord, after: &NodeRecord) -> Value {
 }
 
 /// 操作记录里的一句话：这次改了什么。
-fn describe_update(before: &NodeRecord, after: &NodeRecord) -> String {
+fn describe_update(before: &NodeRecord, after: &NodeRecord, groups: &[GroupRecord]) -> String {
     let mut changes = Vec::new();
     if before.name != after.name {
         changes.push(format!("名字 {} → {}", before.name, after.name));
@@ -448,8 +458,8 @@ fn describe_update(before: &NodeRecord, after: &NodeRecord) -> String {
     if before.virtual_ip != after.virtual_ip {
         changes.push(format!("虚拟 IP {} → {}", before.virtual_ip, after.virtual_ip));
     }
-    if before.tags != after.tags {
-        changes.push(format!("标签 {}", listed(after.tags.iter())));
+    if before.groups != after.groups {
+        changes.push(format!("分组 {}", listed(member_groups(after, groups).map(|group| &group.name))));
     }
     if before.dial_out_only != after.dial_out_only {
         changes.push(format!("只拨出 {}", switch(after.dial_out_only)));
@@ -465,4 +475,9 @@ fn describe_update(before: &NodeRecord, after: &NodeRecord) -> String {
     } else {
         format!("节点 {}：{}", before.name, changes.join("，"))
     }
+}
+
+/// `node` 所在的分组，按 `groups` 的顺序（名字）。
+fn member_groups<'a>(node: &'a NodeRecord, groups: &'a [GroupRecord]) -> impl Iterator<Item = &'a GroupRecord> {
+    groups.iter().filter(|group| node.groups.contains(&group.id))
 }

@@ -125,6 +125,16 @@ impl Api {
         self.ok(Method::POST, "/networks", Some(json!({ "name": name }))).await
     }
 
+    /// 经 API 找叫 `name` 的分组（不分大小写），没有就建一个。`all` 是内置的 `All`。
+    async fn group(&self, network: model::NetworkId, name: &str) -> model::GroupId {
+        let path = format!("/networks/{network}/groups");
+        let groups: Vec<model::Group> = self.ok(Method::GET, &path, None).await;
+        match groups.into_iter().find(|group| group.name.eq_ignore_ascii_case(name)) {
+            Some(group) => group.id,
+            None => self.ok::<model::Group>(Method::POST, &path, Some(json!({ "name": name }))).await.id,
+        }
+    }
+
     /// 经 API 生成注册令牌，再让一个节点用它加入并保持在线。
     async fn join(&mut self, network: model::NetworkId, declared: Declared) -> Member {
         self.join_as(network, &hello(declared)).await
@@ -237,13 +247,14 @@ async fn enrolment_tokens_show_their_text_only_once() {
     let api = Api::new();
     let network = api.network("home").await;
     let path = format!("/networks/{}/tokens", network.id);
-    let request = json!({ "expires_in_secs": 600, "tags": ["Servers"], "virtual_ip": "10.66.0.9" });
+    let servers = api.group(network.id, "Servers").await;
+    let request = json!({ "expires_in_secs": 600, "groups": [servers], "virtual_ip": "10.66.0.9" });
     let (status, created) = api.call(Method::POST, &path, Some(request)).await;
     assert_eq!(status, StatusCode::CREATED);
     let text = created["token"].as_str().unwrap();
     let token: EnrollToken = text.parse().unwrap();
     assert_eq!((token.controller.as_str(), token.key), ("ctl.example.com:20331", api.controller.public_key()));
-    assert_eq!(created["tags"], json!(["servers"]));
+    assert_eq!(created["groups"], json!([{ "id": servers, "name": "Servers" }]));
     assert_eq!(created["virtual_ip"], json!("10.66.0.9"));
     assert_eq!(created["expires_at"].as_u64().unwrap() - created["created_at"].as_u64().unwrap(), 600);
 
@@ -255,6 +266,8 @@ async fn enrolment_tokens_show_their_text_only_once() {
 
     let unknown_node = api.fails(Method::POST, &path, Some(json!({ "successor_of": 99 })), StatusCode::NOT_FOUND).await;
     assert_eq!(unknown_node.code, model::ErrorCode::NotFound);
+    let unknown_group = api.fails(Method::POST, &path, Some(json!({ "groups": [servers, 99] })), StatusCode::NOT_FOUND).await;
+    assert_eq!((unknown_group.what.as_deref(), unknown_group.field.as_deref()), (Some("group"), Some("groups[1]")));
     let (status, _) = api.call(Method::DELETE, &format!("{path}/{}", created["id"]), None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     let listed: Vec<model::EnrollTokenInfo> = api.ok(Method::GET, &path, None).await;
@@ -299,12 +312,13 @@ async fn a_node_can_be_inspected_changed_and_deleted() {
     assert_eq!((table.routes[0].peer.id, table.routes[0].rtt_ms), (relay.id, Some(30)));
     assert_eq!(serde_json::to_value(&table.routes[0].route).unwrap(), json!({ "via": "relay", "relays": [relay.id] }));
 
-    // 改名、打标签、开关；null 表示清掉覆盖值。
+    // 改名、改分组、开关；null 表示清掉覆盖值。
+    let (laptops, all) = (api.group(network.id, "laptops").await, api.group(network.id, "all").await);
     let patch =
-        json!({ "name": "Laptop", "tags": ["laptops", "all"], "dial_out_only": true, "routing": "lowest_cost", "reach": "relay_only" });
+        json!({ "name": "Laptop", "groups": [laptops, all], "dial_out_only": true, "routing": "lowest_cost", "reach": "relay_only" });
     let changed: model::Node = api.ok(Method::PATCH, &path, Some(patch)).await;
     assert_eq!((changed.name.as_str(), changed.fqdn.as_str()), ("laptop", "laptop.home.i3t"));
-    assert_eq!(changed.tags, vec!["laptops".to_owned()]);
+    assert_eq!(serde_json::to_value(&changed.groups).unwrap(), json!([{ "id": laptops, "name": "laptops" }]), "All 不列出");
     assert!(changed.dial_out_only && changed.routing.is_some() && changed.reach.is_some());
     let cleared: model::Node = api.ok(Method::PATCH, &path, Some(json!({ "routing": null }))).await;
     assert!(cleared.routing.is_none() && cleared.reach.is_some() && cleared.name == "laptop");
@@ -374,36 +388,42 @@ async fn rules_and_the_access_views_follow_each_other() {
     let laptop = api.join(network.id, Declared::default()).await;
     let server = api.join(network.id, Declared::default()).await;
     let loner = api.join(network.id, Declared::default()).await;
-    for (member, tag) in [(&laptop, "laptops"), (&server, "servers")] {
-        api.ok::<model::Node>(Method::PATCH, &format!("{base}/nodes/{}", member.id), Some(json!({ "tags": [tag] }))).await;
+    let (laptops, servers, all) =
+        (api.group(network.id, "Laptops").await, api.group(network.id, "servers").await, api.group(network.id, "all").await);
+    for (member, group) in [(&laptop, laptops), (&server, servers)] {
+        api.ok::<model::Node>(Method::PATCH, &format!("{base}/nodes/{}", member.id), Some(json!({ "groups": [group] }))).await;
     }
 
     let rules: Vec<model::Rule> = api.ok(Method::GET, &format!("{base}/rules"), None).await;
     assert_eq!(rules.len(), 1);
+    let builtin = json!({ "id": all, "name": "All" });
     assert_eq!(
         serde_json::to_value(&rules[0]).unwrap(),
-        json!({ "id": rules[0].id, "name": "default", "src": "all", "dst": "all", "direction": "both", "enabled": true })
+        json!({ "id": rules[0].id, "name": "default", "src": builtin, "dst": builtin, "direction": "both", "enabled": true })
     );
     let default_rule = format!("{base}/rules/{}", rules[0].id);
     let disabled: model::Rule = api.ok(Method::PATCH, &default_rule, Some(json!({ "enabled": false }))).await;
-    assert!(!disabled.enabled && disabled.src == "all");
+    assert!(!disabled.enabled && disabled.src.id == all);
 
     let (status, created) = api
         .call(
             Method::POST,
             &format!("{base}/rules"),
-            Some(json!({ "src": "Laptops", "dst": "servers", "direction": "one_way", "name": "ssh" })),
+            Some(json!({ "src": laptops, "dst": servers, "direction": "one_way", "name": "ssh" })),
         )
         .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(
         (created["src"].clone(), created["direction"].clone(), created["enabled"].clone()),
-        (json!("laptops"), json!("one_way"), json!(true))
+        (json!({ "id": laptops, "name": "Laptops" }), json!("one_way"), json!(true))
     );
     let rule_id = created["id"].as_u64().unwrap();
-    let bad_tag =
-        api.fails(Method::POST, &format!("{base}/rules"), Some(json!({ "src": "a b", "dst": "x" })), StatusCode::BAD_REQUEST).await;
-    assert_eq!(bad_tag.code, model::ErrorCode::InvalidRequest);
+    let by_name =
+        api.fails(Method::POST, &format!("{base}/rules"), Some(json!({ "src": "laptops", "dst": servers })), StatusCode::BAD_REQUEST).await;
+    assert_eq!((by_name.code, by_name.what.as_deref()), (model::ErrorCode::InvalidRequest, Some("data")), "分组按编号引用");
+    let missing =
+        api.fails(Method::POST, &format!("{base}/rules"), Some(json!({ "src": laptops, "dst": 99 })), StatusCode::NOT_FOUND).await;
+    assert_eq!((missing.what.as_deref(), missing.field.as_deref()), (Some("group"), Some("dst")));
 
     let check = |from: NodeId, to: NodeId| format!("{base}/access/check?from={from}&to={to}");
     let allowed: model::AccessCheck = api.ok(Method::GET, &check(laptop.id, server.id), None).await;
@@ -416,12 +436,12 @@ async fn rules_and_the_access_views_follow_each_other() {
     api.fails(Method::GET, &format!("{base}/access/check?from={}", laptop.id), None, StatusCode::BAD_REQUEST).await;
 
     let graph: model::AccessGraph = api.ok(Method::GET, &format!("{base}/access/graph"), None).await;
-    let members = |tag: &str| {
-        graph.tags.iter().find(|entry| entry.tag == tag).map(|entry| entry.nodes.iter().map(|node| node.id).collect::<Vec<_>>())
+    let members = |name: &str| {
+        graph.groups.iter().find(|group| group.name == name).map(|group| group.nodes.iter().map(|node| node.id).collect::<Vec<_>>())
     };
-    assert_eq!(graph.tags.iter().map(|entry| entry.tag.as_str()).collect::<Vec<_>>(), vec!["all", "laptops", "servers"]);
-    assert_eq!(members("all"), Some(vec![laptop.id, server.id, loner.id]));
-    assert_eq!(members("laptops"), Some(vec![laptop.id]));
+    assert_eq!(graph.groups.iter().map(|group| group.name.as_str()).collect::<Vec<_>>(), vec!["All", "Laptops", "servers"]);
+    assert_eq!(members("All"), Some(vec![laptop.id, server.id, loner.id]));
+    assert_eq!(members("Laptops"), Some(vec![laptop.id]));
     assert_eq!(graph.rules.len(), 2, "停用的规则也在图里（画成虚线）");
     assert_eq!(graph.unconnected.iter().map(|node| node.id).collect::<Vec<_>>(), vec![loner.id]);
     assert!(!graph.unacknowledged.is_empty(), "这些节点从来没有确认过 netmap");
@@ -1130,7 +1150,7 @@ async fn the_log_pages_filters_and_names_what_each_entry_is_about() {
 }
 
 #[tokio::test]
-async fn status_overview_node_list_routes_and_tags_carry_what_the_web_ui_asked_for() {
+async fn status_overview_node_list_routes_and_groups_carry_what_the_web_ui_asked_for() {
     let mut api = Api::new();
     let network = api.network("home").await;
     let base = format!("/networks/{}", network.id);
@@ -1153,13 +1173,16 @@ async fn status_overview_node_list_routes_and_tags_carry_what_the_web_ui_asked_f
     let table: model::RouteTable = api.ok(Method::GET, &format!("{base}/nodes/{}/routes", member.id), None).await;
     assert!(table.routes[0].age_secs <= 1 && table.routes[0].since_secs <= 1);
 
-    api.ok::<model::Node>(Method::PATCH, &format!("{base}/nodes/{}", member.id), Some(json!({ "tags": ["laptops"] }))).await;
-    let renamed: model::RenamedTag =
-        api.ok(Method::POST, &format!("{base}/tags/rename"), Some(json!({ "from": "laptops", "to": "phones" }))).await;
-    assert_eq!((renamed.nodes, renamed.rules, renamed.tokens), (1, 0, 0));
+    let laptops = api.group(network.id, "laptops").await;
+    api.ok::<model::Node>(Method::PATCH, &format!("{base}/nodes/{}", member.id), Some(json!({ "groups": [laptops] }))).await;
+    api.ok::<model::Group>(Method::PATCH, &format!("{base}/groups/{laptops}"), Some(json!({ "name": "phones" }))).await;
     let node: model::NodeDetail = api.ok(Method::GET, &format!("{base}/nodes/{}", member.id), None).await;
-    assert_eq!(node.node.tags, ["phones"]);
-    api.fails(Method::POST, &format!("{base}/tags/rename"), Some(json!({ "from": "all", "to": "x" })), StatusCode::BAD_REQUEST).await;
+    assert_eq!(serde_json::to_value(&node.node.groups).unwrap(), json!([{ "id": laptops, "name": "phones" }]));
+    let (_, raw) = api.call(Method::GET, &format!("{base}/nodes/{}", member.id), None).await;
+    assert!(raw.get("tags").is_none(), "标签没有了，也没有别名：{raw}");
+    let gone =
+        api.fails(Method::POST, &format!("{base}/tags/rename"), Some(json!({ "from": "a", "to": "b" })), StatusCode::NOT_FOUND).await;
+    assert_eq!(gone.what.as_deref(), Some("endpoint"));
 
     let class: model::Network = api.ok(Method::PATCH, &base, Some(json!({ "class": "interactive" }))).await;
     assert_eq!(class.class, Some(i3t_proto::flow::Class::Interactive));
@@ -1283,4 +1306,86 @@ async fn an_active_test_is_started_followed_listed_and_cancelled_over_the_api() 
     let log: Vec<model::LogEntry> = api.ok(Method::GET, &format!("/log?network={network}&action=test"), None).await;
     let actions: Vec<&str> = log.iter().map(|entry| entry.action.as_str()).collect();
     assert!(actions.contains(&"test.start") && actions.contains(&"test.matrix") && actions.contains(&"test.matrix.cancel"), "{actions:?}");
+}
+
+#[tokio::test]
+async fn groups_are_listed_created_read_renamed_changed_and_deleted_through_the_router() {
+    let mut api = Api::new();
+    let network = api.network("home").await;
+    let base = format!("/networks/{}/groups", network.id);
+    let a = api.join(network.id, Declared::default()).await;
+    let b = api.join(network.id, Declared::default()).await;
+
+    let listed: Vec<model::Group> = api.ok(Method::GET, &base, None).await;
+    assert_eq!(listed.len(), 1);
+    let all = listed[0].id;
+    let (_, raw) = api.call(Method::GET, &base, None).await;
+    assert_eq!(raw[0]["name"], "All");
+    assert_eq!((raw[0]["builtin"].clone(), raw[0]["nodes"].as_array().unwrap().len()), (json!(true), 2));
+    assert_eq!(raw[0]["rules"][0]["name"], "default");
+
+    let (status, created) = api.call(Method::POST, &base, Some(json!({ "name": "Servers" }))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(created, json!({ "id": created["id"], "name": "Servers", "builtin": false, "nodes": [], "rules": [] }));
+    let servers: model::GroupId = serde_json::from_value(created["id"].clone()).unwrap();
+    let path = format!("{base}/{servers}");
+
+    let taken = api.fails(Method::POST, &base, Some(json!({ "name": "servers" })), StatusCode::CONFLICT).await;
+    assert_eq!((taken.code, taken.what.as_deref(), taken.field.as_deref()), (model::ErrorCode::NameTaken, Some("group"), Some("name")));
+    let bad = api.fails(Method::POST, &base, Some(json!({ "name": "a/b" })), StatusCode::BAD_REQUEST).await;
+    assert_eq!((bad.what.as_deref(), bad.field.as_deref()), (Some("malformed"), Some("name")));
+    let long = api.fails(Method::POST, &base, Some(json!({ "name": "x".repeat(33) })), StatusCode::BAD_REQUEST).await;
+    assert_eq!(long.what.as_deref(), Some("too_long"));
+
+    // 一个一个地加入、移出，和批量的。
+    let one: model::Group = api.ok(Method::PUT, &format!("{path}/nodes/{}", a.id), Some(json!({}))).await;
+    assert_eq!(one.nodes.iter().map(|node| node.id).collect::<Vec<_>>(), vec![a.id]);
+    let batch: model::Group = api.ok(Method::PATCH, &format!("{path}/nodes"), Some(json!({ "add": [b.id], "remove": [a.id] }))).await;
+    assert_eq!(batch.nodes.iter().map(|node| node.id).collect::<Vec<_>>(), vec![b.id]);
+    let unknown = api.fails(Method::PATCH, &format!("{path}/nodes"), Some(json!({ "add": [a.id, 99] })), StatusCode::NOT_FOUND).await;
+    assert_eq!((unknown.what.as_deref(), unknown.field.as_deref()), (Some("node"), Some("add[1]")));
+    let removed: model::Group = api.ok(Method::DELETE, &format!("{path}/nodes/{}", b.id), None).await;
+    assert!(removed.nodes.is_empty());
+    let again: model::Group = api.ok(Method::PUT, &format!("{path}/nodes/{}", b.id), Some(json!({}))).await;
+    assert_eq!(again.nodes.len(), 1);
+    api.fails(Method::PUT, &format!("{path}/nodes/99"), Some(json!({})), StatusCode::NOT_FOUND).await;
+
+    let builtin = api.fails(Method::PUT, &format!("{base}/{all}/nodes/{}", a.id), Some(json!({})), StatusCode::BAD_REQUEST).await;
+    assert_eq!((builtin.what.as_deref(), builtin.field.as_deref()), (Some("builtin"), Some("group")));
+    api.fails(Method::PATCH, &format!("{base}/{all}"), Some(json!({ "name": "Everyone" })), StatusCode::BAD_REQUEST).await;
+    api.fails(Method::DELETE, &format!("{base}/{all}"), None, StatusCode::BAD_REQUEST).await;
+
+    let rule: model::Rule =
+        api.ok(Method::POST, &format!("/networks/{}/rules", network.id), Some(json!({ "src": all, "dst": servers, "name": "ssh" }))).await;
+    let renamed: model::Group = api.ok(Method::PATCH, &path, Some(json!({ "name": "boxes" }))).await;
+    assert_eq!((renamed.name.as_str(), renamed.rules.len()), ("boxes", 1));
+    assert_eq!(renamed.rules[0].dst.name, "boxes", "规则里看到的是新名字");
+    let read: model::Group = api.ok(Method::GET, &path, None).await;
+    assert_eq!(read, renamed);
+
+    let (status, deleted) = api.call(Method::DELETE, &path, None).await;
+    assert_eq!(status, StatusCode::OK, "删除的应答说删掉了什么");
+    assert_eq!(deleted["id"], json!(servers));
+    assert_eq!(deleted["name"], "boxes");
+    assert_eq!(deleted["nodes"][0]["id"], json!(b.id));
+    assert_eq!(deleted["rules"][0]["id"], json!(rule.id));
+    assert_eq!(deleted["tokens"], json!([]));
+    let missing = api.fails(Method::GET, &path, None, StatusCode::NOT_FOUND).await;
+    assert_eq!((missing.what.as_deref(), missing.field), (Some("group"), None));
+    assert!(missing.message.contains(&format!("#{servers}")), "{}", missing.message);
+    let rules: Vec<model::Rule> = api.ok(Method::GET, &format!("/networks/{}/rules", network.id), None).await;
+    assert_eq!(rules.len(), 1, "用到它的规则一起删掉了");
+
+    let other = api.network("lab").await;
+    api.fails(Method::GET, &format!("/networks/{}/groups/{all}", other.id), None, StatusCode::NOT_FOUND).await;
+    let path_error = api.fails(Method::GET, &format!("{base}/x"), None, StatusCode::BAD_REQUEST).await;
+    assert_eq!(path_error.field.as_deref(), Some("group"));
+    let actions: Vec<model::LogEntry> = api.ok(Method::GET, "/log?action=group", None).await;
+    let actions: Vec<&str> = actions.iter().rev().map(|entry| entry.action.as_str()).collect();
+    assert_eq!(
+        actions,
+        ["group.create", "group.members", "group.members", "group.members", "group.members", "group.rename", "group.delete"]
+    );
+    let by_ref: Vec<model::LogEntry> = api.ok(Method::GET, &format!("/log?ref=group:{servers}"), None).await;
+    assert_eq!(by_ref.len(), 7);
 }

@@ -122,6 +122,12 @@ mod tests {
             (codes.skip_cause)(&SkipCause::UpToDate { running: version("0.2.0"), latest: version("0.2.0") }),
             (codes.lane_block)(&LaneBlock::NodeTooOld { node: node(2) }, names),
             (codes.api_error)(&ApiError { code: ErrorCode::NotFound, message: "没有".into(), what: Some("node".into()), field: None }),
+            (codes.api_error)(&ApiError {
+                code: ErrorCode::NotFound,
+                message: "没有分组 #9".into(),
+                what: Some("group".into()),
+                field: Some("groups[1]".into()),
+            }),
         ];
         let causes = [
             RouteCause::NoRouteYet,
@@ -158,6 +164,18 @@ mod tests {
         }
         let chinese = samples(Lang::ZhCn.codes());
         assert!(chinese.iter().filter(|text| has_chinese(text)).count() >= chinese.len() - 1, "{chinese:?}");
+    }
+
+    #[test]
+    fn group_errors_say_it_is_a_group_in_english() {
+        let error =
+            |code, what: &str, field: &str| ApiError { code, message: "原话".into(), what: Some(what.into()), field: Some(field.into()) };
+        let english = Lang::English.codes();
+        let missing = (english.api_error)(&error(ErrorCode::NotFound, "group", "groups[1]"));
+        assert!(missing.contains("group") && missing.contains("groups[1]"), "{missing}");
+        assert!((english.api_error)(&error(ErrorCode::NameTaken, "group", "name")).starts_with("Group name"));
+        assert!((english.api_error)(&error(ErrorCode::InvalidRequest, "builtin", "group")).contains("All"));
+        assert_eq!((Lang::ZhCn.codes().api_error)(&error(ErrorCode::NotFound, "group", "groups[1]")), "原话", "中文用 controller 的原话");
     }
 
     #[test]

@@ -22,9 +22,9 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use i3t_model::admin::diag::{CreateTest, TestQuery};
 use i3t_model::admin::{
-    API_PREFIX, ApiError, CreateCredential, CreateEnrollToken, CreateNetwork, CreateRule, ErrorBody, ErrorCode, ForceUpdate, ForwardInput,
-    ListenerInput, LogRef, NetworkId, PairInput, RelayEnabled, RelaySettings, RenameTag, ResumeUpdate, Succeed, UpdateCredential,
-    UpdateNetwork, UpdateNode, UpdateRule, UpdateSettings,
+    API_PREFIX, ApiError, CreateCredential, CreateEnrollToken, CreateGroup, CreateNetwork, CreateRule, ErrorBody, ErrorCode, ForceUpdate,
+    ForwardInput, GroupId, GroupMembers, ListenerInput, LogRef, NetworkId, PairInput, RelayEnabled, RelaySettings, ResumeUpdate, Succeed,
+    UpdateCredential, UpdateGroup, UpdateNetwork, UpdateNode, UpdateRule, UpdateSettings,
 };
 use i3t_model::netmap::ExitRole;
 use i3t_proto::NodeId;
@@ -70,7 +70,6 @@ pub fn router(controller: Arc<Controller>, webui: &WebUi) -> Router {
         .route(&format!("{network}/nodes/{{node}}/listeners"), get(node_listeners))
         .route(&format!("{network}/exits"), get(list_exits))
         .route(&format!("{network}/exits/{{node}}"), get(show_exit))
-        .route(&format!("{network}/tags/rename"), post(rename_tag))
         .route(&format!("{network}/routes"), get(route_matrix))
         .route(&format!("{network}/path"), get(path))
         .route(&format!("{network}/backbone"), get(backbone))
@@ -79,6 +78,10 @@ pub fn router(controller: Arc<Controller>, webui: &WebUi) -> Router {
         .route(&format!("{network}/tests/matrix/cancel"), post(cancel_matrix))
         .route(&format!("{network}/tests/{{id}}"), get(show_test))
         .route(&format!("{network}/tests/{{id}}/cancel"), post(cancel_test))
+        .route(&format!("{network}/groups"), get(list_groups).post(create_group))
+        .route(&format!("{network}/groups/{{group}}"), get(show_group).patch(update_group).delete(delete_group))
+        .route(&format!("{network}/groups/{{group}}/nodes"), axum::routing::patch(change_members))
+        .route(&format!("{network}/groups/{{group}}/nodes/{{node}}"), put(add_member).delete(remove_member))
         .route(&format!("{network}/tokens"), get(list_tokens).post(create_token))
         .route(&format!("{network}/tokens/{{id}}"), axum::routing::delete(delete_token))
         .route(&format!("{network}/rules"), get(list_rules).post(create_rule))
@@ -445,8 +448,45 @@ async fn show_exit(State(app): State<App>, Path((network, node)): Path<(NetworkI
     ok(&app, move |controller| controller.exit(network, node)).await
 }
 
-async fn rename_tag(State(app): State<App>, Path(network): Path<NetworkId>, Body(request): Body<RenameTag>) -> Reply {
-    ok(&app, move |controller| controller.rename_tag(network, &request)).await
+async fn list_groups(State(app): State<App>, Path(network): Path<NetworkId>) -> Reply {
+    ok(&app, move |controller| controller.groups(network)).await
+}
+
+async fn create_group(State(app): State<App>, Path(network): Path<NetworkId>, Body(request): Body<CreateGroup>) -> Reply {
+    created(&app, move |controller| controller.create_group(network, &request)).await
+}
+
+async fn show_group(State(app): State<App>, Path((network, group)): Path<(NetworkId, GroupId)>) -> Reply {
+    ok(&app, move |controller| controller.group(network, group)).await
+}
+
+async fn update_group(
+    State(app): State<App>,
+    Path((network, group)): Path<(NetworkId, GroupId)>,
+    Body(request): Body<UpdateGroup>,
+) -> Reply {
+    ok(&app, move |controller| controller.update_group(network, group, &request)).await
+}
+
+/// 删除分组的应答说删掉了什么，所以是 200 和一个应答体，不是别的删除那样的 204。
+async fn delete_group(State(app): State<App>, Path((network, group)): Path<(NetworkId, GroupId)>) -> Reply {
+    ok(&app, move |controller| controller.delete_group(network, group)).await
+}
+
+async fn change_members(
+    State(app): State<App>,
+    Path((network, group)): Path<(NetworkId, GroupId)>,
+    Body(request): Body<GroupMembers>,
+) -> Reply {
+    ok(&app, move |controller| controller.change_members(network, group, &request)).await
+}
+
+async fn add_member(State(app): State<App>, Path((network, group, node)): Path<(NetworkId, GroupId, NodeId)>) -> Reply {
+    ok(&app, move |controller| controller.add_member(network, group, node)).await
+}
+
+async fn remove_member(State(app): State<App>, Path((network, group, node)): Path<(NetworkId, GroupId, NodeId)>) -> Reply {
+    ok(&app, move |controller| controller.remove_member(network, group, node)).await
 }
 
 async fn update_credential(

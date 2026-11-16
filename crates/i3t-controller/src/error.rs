@@ -1,10 +1,11 @@
 //! controller 的错误类型。
 
+use std::borrow::Cow;
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
-use i3t_model::admin::{ErrorCode, SkipCause, Timestamp};
+use i3t_model::admin::{ErrorCode, GroupId, SkipCause, Timestamp};
 use i3t_model::control::{RejectCause, ToNode};
 use ipnet::Ipv4Net;
 
@@ -17,11 +18,17 @@ use crate::store::StoreError;
 pub enum Error {
     #[error("没有这个{0}")]
     NotFound(Entity),
+    /// 分组不存在。原话写出编号：请求里常常一次引用好几个分组。
+    #[error("没有分组 #{0}")]
+    NoSuchGroup(GroupId),
     /// 请求不合法。`what` 是哪里不对的代码，取值见 `docs/admin-api.md` 第 2 节。
     #[error("{message}")]
     Invalid { what: &'static str, message: String },
     #[error("名字 {0} 已经被占用")]
     NameTaken(String),
+    /// 分组的名字被占用（不分大小写）。和 [`Error::NameTaken`] 同一个代码，`what` 是 `group`。
+    #[error("分组名 {0} 已经被占用（名字不分大小写）")]
+    GroupNameTaken(String),
     #[error("名字 {name} 属于一个刚删除的节点，还在冷却期（到 Unix 时间 {until} 为止），现在不能分给别的节点")]
     NameCoolingDown { name: String, until: Timestamp },
     #[error("虚拟 IP {0} 已经分给了另一个节点")]
@@ -92,7 +99,7 @@ pub enum Error {
     /// 请求里的 `field` 这一项引起的错误。只是给 [`Error::field`] 带上字段名，别的都和 `error` 一样。
     /// 内部错误不会被这样包起来（见 [`Error::in_field`]），所以不用往下转来由。
     #[error("{error}")]
-    InField { field: &'static str, error: Box<Error> },
+    InField { field: Cow<'static, str>, error: Box<Error> },
 }
 
 impl Error {
@@ -100,9 +107,9 @@ impl Error {
     #[must_use]
     pub const fn code(&self) -> ErrorCode {
         match self {
-            Self::NotFound(_) => ErrorCode::NotFound,
+            Self::NotFound(_) | Self::NoSuchGroup(_) => ErrorCode::NotFound,
             Self::Invalid { .. } => ErrorCode::InvalidRequest,
-            Self::NameTaken(_) => ErrorCode::NameTaken,
+            Self::NameTaken(_) | Self::GroupNameTaken(_) => ErrorCode::NameTaken,
             Self::NameCoolingDown { .. } => ErrorCode::NameCoolingDown,
             Self::AddressTaken(_) => ErrorCode::AddressTaken,
             Self::AddressCoolingDown { .. } => ErrorCode::AddressCoolingDown,
@@ -145,6 +152,7 @@ impl Error {
     pub fn what(&self) -> Option<String> {
         let what = match self {
             Self::NotFound(entity) | Self::Conflict { with: entity, .. } => entity.code(),
+            Self::NoSuchGroup(_) | Self::GroupNameTaken(_) => Entity::Group.code(),
             Self::Invalid { what, .. } => what,
             Self::CannotSelfUpdate { cause, .. } => match cause.as_ref() {
                 SkipCause::CannotSelfUpdate { blocker: Some(blocker) } => return cause_code(blocker),
@@ -180,7 +188,7 @@ impl Error {
 
     /// 请求里引起这个错误的字段，管理 API 的错误里的 `field`。
     #[must_use]
-    pub fn field(&self) -> Option<&'static str> {
+    pub fn field(&self) -> Option<&str> {
         match self {
             Self::InField { field, .. } => Some(field),
             _ => None,
@@ -191,6 +199,16 @@ impl Error {
     /// 内部错误不标：那不是请求的问题，而且它的来由要原样留给日志。
     #[must_use]
     pub fn in_field(self, field: &'static str) -> Self {
+        self.marked(Cow::Borrowed(field))
+    }
+
+    /// 标上这个错误是请求里的编号列表 `field` 的第 `index` 项（从 0 数）引起的：`field` 写成 `groups[1]`。
+    #[must_use]
+    pub fn in_item(self, field: &'static str, index: usize) -> Self {
+        self.marked(Cow::Owned(format!("{field}[{index}]")))
+    }
+
+    fn marked(self, field: Cow<'static, str>) -> Self {
         match self {
             Self::InField { .. } => self,
             error if error.code() == ErrorCode::Internal => error,
@@ -249,6 +267,7 @@ pub enum Entity {
     Test,
     /// 全网矩阵。
     Matrix,
+    Group,
 }
 
 impl Entity {
@@ -268,6 +287,7 @@ impl Entity {
             Self::Exit => "exit",
             Self::Test => "test",
             Self::Matrix => "matrix",
+            Self::Group => "group",
         }
     }
 }
@@ -287,6 +307,7 @@ impl fmt::Display for Entity {
             Self::Exit => "出口",
             Self::Test => "测试",
             Self::Matrix => "全网矩阵",
+            Self::Group => "分组",
         })
     }
 }

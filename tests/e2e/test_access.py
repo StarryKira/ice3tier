@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""接入方式的端到端测试：节点上的服务、端口转发、出口背后的局域网、对外开放的代理入口。
+"""接入方式的端到端测试：节点上的服务、端口转发、出口背后的局域网、对外开放的代理入口，以及分组决定谁能访问谁。
 
     python3 tests/e2e/test_access.py [场景名...]
 """
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import tempfile
 import time
@@ -13,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lab as lablib  # noqa: E402
-from harness import Checks, Controller, Node, binary, start_whoami, tail  # noqa: E402
+from harness import Checks, Controller, Node, binary, create_groups, group_names, start_whoami, tail  # noqa: E402
 from lab import Lab, NatKind, wait_until  # noqa: E402
 
 
@@ -166,11 +167,78 @@ def public_listener(lab: Lab, work: Path, t: Checks) -> None:
         print(tail(gw.read_log()), tail(ex.read_log()), sep="\n  ---\n")
 
 
+def groups(lab: Lab, work: Path, t: Checks) -> None:
+    """分组决定访问：加入分组就得到规则给它的访问，移出时正在进行的连接断开；删掉分组连同它的规则和访问；
+    令牌预设分组；命令行上写了不存在的分组被拒绝，并且说出是哪一个。"""
+    controller = Controller(lab.host("ctl"), work)
+    controller.ctl("network", "create", "lab")
+    create_groups(controller, "admins", "servers")
+    for rule in controller.ctl("rule", "list"):
+        controller.ctl("rule", "delete", str(rule["id"]))
+    controller.ctl("rule", "add", "admins", "servers", "--one-way", "--name", "admin")
+    a, b, c = Node(lab.host("a"), work), Node(lab.host("b"), work), Node(lab.host("c"), work)
+    a.join(controller)
+    b.join(controller, "servers")
+    c.join(controller)
+    t.check("令牌预设的分组：b 一加入就在 servers 里", group_names(controller, b) == ["servers"], str(group_names(controller, b)))
+    for node in (a, b, c):
+        start_whoami(node.host, 8080)
+    to_b = f"http://{b.virtual_ip}:8080/"
+    t.check("a 不在 admins 里时到不了 b", socks(a, to_b).returncode != 0)
+
+    unknown = controller.ctl("group", "add", "nope", str(a.id), check=False)
+    t.check("命令行上写了不存在的分组被拒绝，说出是哪一个", unknown.returncode != 0 and "nope" in unknown.stderr, unknown.stderr.strip())
+    unknown = controller.ctl("node", "groups", str(a.id), "admins", "ghosts", check=False)
+    t.check("一串分组里有一个不存在也被拒绝，说出是哪一个", unknown.returncode != 0 and "ghosts" in unknown.stderr, unknown.stderr.strip())
+    t.check("被拒绝的请求什么也没改", group_names(controller, a) == [], str(group_names(controller, a)))
+
+    controller.ctl("group", "add", "admins", str(a.id))
+    seen = eventually(lambda: socks(a, to_b), lambda r: r.returncode == 0)
+    t.check("a 加入 admins 之后可以访问 b", seen.stdout == b.host.ip, f"{seen.stdout!r} {seen.stderr.strip()}")
+    t.check("规则是单向的：b 还是访问不了 a", socks(b, f"http://{a.virtual_ip}:8080/").returncode != 0)
+    t.check("c 不在 admins 里，照旧到不了 b", socks(c, to_b).returncode != 0)
+    t.check("a 也没有因此能访问 c", socks(a, f"http://{c.virtual_ip}:8080/").returncode != 0)
+
+    # 一次限速的下载，持续三十秒左右；下载途中把 a 移出 admins。
+    size = 30_000_000
+    download = subprocess.Popen(
+        a.host.cmd("curl", "-sS", "--max-time", "90", "--limit-rate", "1M", "-o", "/dev/null", "-w", "%{size_download}",
+                   "-x", "socks5h://127.0.0.1:1080", f"{to_b}bytes/{size}"),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    time.sleep(3)
+    t.check("下载开始了", download.poll() is None)
+    controller.ctl("group", "remove", "admins", str(a.id))
+    try:
+        out, err = download.communicate(timeout=20)
+        ended = out != str(size)
+        detail = f"下载了 {out!r}；{err.strip()}"
+    except subprocess.TimeoutExpired:
+        download.kill()
+        ended, detail = False, "移出之后 20 秒连接还在"
+    t.check("a 移出 admins 之后，正在进行的连接断开", ended, detail)
+    gone = eventually(lambda: socks(a, to_b), lambda r: r.returncode != 0)
+    t.check("之后也连不上了", gone.returncode != 0)
+
+    controller.ctl("group", "add", "admins", str(a.id))
+    back = eventually(lambda: socks(a, to_b), lambda r: r.returncode == 0)
+    t.check("重新加入之后又能访问", back.returncode == 0, back.stderr.strip())
+    deleted = controller.ctl("group", "delete", "admins")
+    t.check("删掉分组的应答说出删掉了哪条规则和哪些成员",
+            [rule["name"] for rule in deleted["rules"]] == ["admin"] and [node["id"] for node in deleted["nodes"]] == [a.id], str(deleted))
+    t.check("用到它的规则没了", controller.ctl("rule", "list") == [])
+    t.check("a 不再在任何分组里", group_names(controller, a) == [], str(group_names(controller, a)))
+    after = eventually(lambda: socks(a, to_b), lambda r: r.returncode != 0)
+    t.check("删掉分组之后 a 到不了 b", after.returncode != 0)
+    if t.failures:
+        print(tail(a.read_log()), tail(b.read_log()), tail(controller.log.read_text(errors="replace")), sep="\n  ---\n")
+
+
 SCENARIOS = {
     "node_service": node_service,
     "port_forward": port_forward,
     "lan_behind_exit": lan_behind_exit,
     "public_listener": public_listener,
+    "groups": groups,
 }
 
 

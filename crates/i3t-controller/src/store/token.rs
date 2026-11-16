@@ -2,13 +2,15 @@
 //!
 //! 用掉的令牌不删：留着谁用的、什么时候用的，界面上看得到。用掉的和过期的令牌留 [`RETENTION_SECS`] 再清掉。
 
+use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 
-use i3t_model::admin::{EnrollTokenInfo, NetworkId, NodeRef, Timestamp, TokenState};
+use i3t_model::admin::{EnrollTokenInfo, GroupId, GroupRef, NetworkId, NodeRef, Timestamp, TokenState};
 use i3t_proto::NodeId;
 use rusqlite::{OptionalExtension, Row, named_params, params};
 
-use super::codec::{Json, SqlIp, SqlNetwork, SqlNode, Unsigned, row_id};
+use super::codec::{Json, SqlGroup, SqlIp, SqlNetwork, SqlNode, Unsigned, row_id};
+use super::group::folded;
 use super::{DIGEST_LEN, Store, StoreError};
 
 /// 用掉的、过期的令牌留多久。
@@ -34,8 +36,11 @@ pub fn is_pending(token: &TokenRecord, now: Timestamp) -> bool {
     token.used_at.is_none() && token.expires_at > now
 }
 
-/// 读令牌时顺带取出用它加入的节点，没有用过或者那个节点后来被删掉时没有。
-const SELECT: &str = "SELECT enroll_tokens.*, nodes.name AS used_by_name, nodes.virtual_ip AS used_by_ip
+/// 读令牌时顺带取出用它加入的节点（没有用过或者那个节点后来被删掉时没有），和它预设的分组（JSON 数组）。
+const SELECT: &str = "SELECT enroll_tokens.*, nodes.name AS used_by_name, nodes.virtual_ip AS used_by_ip,
+                             (SELECT json_group_array(json_object('id', groups.id, 'name', groups.name))
+                              FROM token_groups JOIN groups ON groups.id = token_groups.group_id
+                              WHERE token_groups.token_id = enroll_tokens.id) AS groups
                       FROM enroll_tokens LEFT JOIN nodes ON nodes.id = enroll_tokens.used_by";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,7 +51,8 @@ pub struct NewToken {
     pub prefix: String,
     pub created_at: Timestamp,
     pub expires_at: Timestamp,
-    pub tags: Vec<String>,
+    /// 用它加入的节点自动加入的分组。不含内置分组。
+    pub groups: BTreeSet<GroupId>,
     pub virtual_ip: Option<Ipv4Addr>,
     pub successor_of: Option<NodeId>,
 }
@@ -57,12 +63,14 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<TokenRecord> {
         (Some(id), Some(name)) => Some(NodeRef { id: id.0, name, virtual_ip: row.get::<_, SqlIp>("used_by_ip")?.0 }),
         _ => None,
     };
+    let mut groups = row.get::<_, Json<Vec<GroupRef>>>("groups")?.0;
+    groups.sort_by_cached_key(|group| (folded(&group.name), group.id));
     Ok(TokenRecord {
         id: row.get("id")?,
         network: row.get::<_, SqlNetwork>("network_id")?.0,
         created_at: row.get::<_, Unsigned>("created_at")?.0,
         expires_at: row.get::<_, Unsigned>("expires_at")?.0,
-        tags: row.get::<_, Json<Vec<String>>>("tags")?.0,
+        groups,
         virtual_ip: row.get::<_, Option<SqlIp>>("virtual_ip")?.map(|ip| ip.0),
         successor_of: row.get::<_, Option<SqlNode>>("successor_of")?.map(|node| node.0),
         prefix: row.get("prefix")?,
@@ -78,20 +86,23 @@ impl Store {
     /// 写数据库失败。
     pub fn insert_token(&self, new: &NewToken) -> Result<u32, StoreError> {
         self.conn.execute(
-            "INSERT INTO enroll_tokens (network_id, secret_hash, created_at, expires_at, tags, virtual_ip, successor_of, prefix)
-             VALUES (:network, :hash, :created_at, :expires_at, :tags, :ip, :successor_of, :prefix)",
+            "INSERT INTO enroll_tokens (network_id, secret_hash, created_at, expires_at, virtual_ip, successor_of, prefix)
+             VALUES (:network, :hash, :created_at, :expires_at, :ip, :successor_of, :prefix)",
             named_params! {
                 ":network": SqlNetwork(new.network),
                 ":hash": new.secret_hash,
                 ":prefix": new.prefix,
                 ":created_at": Unsigned(new.created_at),
                 ":expires_at": Unsigned(new.expires_at),
-                ":tags": Json(&new.tags),
                 ":ip": new.virtual_ip.map(SqlIp),
                 ":successor_of": new.successor_of.map(SqlNode),
             },
         )?;
-        Ok(row_id(self.conn.last_insert_rowid())?)
+        let id = row_id(self.conn.last_insert_rowid())?;
+        for &group in &new.groups {
+            self.conn.execute("INSERT INTO token_groups (token_id, group_id) VALUES (?1, ?2)", params![id, SqlGroup(group)])?;
+        }
+        Ok(id)
     }
 
     /// 一个网络里的全部令牌：还没用的、用掉的、过期的（还没清掉的那些）。
@@ -142,26 +153,6 @@ impl Store {
         Ok(())
     }
 
-    /// 把令牌里预设的标签 `from` 改成 `to`，只改还没用掉的。返回改了几个令牌。
-    ///
-    /// # Errors
-    ///
-    /// 写数据库失败。
-    pub fn rename_token_tag(&self, network: NetworkId, from: &str, to: &str) -> Result<u32, StoreError> {
-        let mut renamed = 0;
-        for mut token in self.tokens(network)?.into_iter().filter(|token| token.used_at.is_none()) {
-            if !token.tags.iter().any(|tag| tag == from) {
-                continue;
-            }
-            token.tags.retain(|tag| tag != from && tag != to);
-            token.tags.push(to.to_owned());
-            token.tags.sort();
-            self.conn.execute("UPDATE enroll_tokens SET tags = ?2 WHERE id = ?1", params![token.id, Json(&token.tags)])?;
-            renamed += 1;
-        }
-        Ok(renamed)
-    }
-
     /// 删掉一个令牌（用掉了，或者管理员收回）。返回它之前在不在。
     ///
     /// # Errors
@@ -193,20 +184,24 @@ mod tests {
     #[test]
     fn a_token_is_found_by_its_hash_until_it_is_consumed() {
         let (store, network, nodes) = store_with_nodes(1);
+        let servers = store.insert_group(network, "servers").unwrap();
         let new = NewToken {
             network,
             secret_hash: [9; DIGEST_LEN],
             prefix: "i3t-eyJzIjoiAb".to_owned(),
             created_at: 100,
             expires_at: 200,
-            tags: vec!["servers".to_owned()],
+            groups: [servers].into(),
             virtual_ip: Some("10.66.0.50".parse().unwrap()),
             successor_of: Some(nodes[0]),
         };
         let id = store.insert_token(&new).unwrap();
         let record = store.token_by_hash(&[9; DIGEST_LEN]).unwrap().unwrap();
         assert_eq!(record.id, id);
-        assert_eq!(record.tags, vec!["servers".to_owned()]);
+        assert_eq!(record.groups, vec![GroupRef { id: servers, name: "servers".to_owned() }]);
+        store.delete_group(servers).unwrap();
+        assert!(store.token(id).unwrap().unwrap().groups.is_empty(), "删掉的分组也从令牌上去掉");
+        let record = store.token(id).unwrap().unwrap();
         assert_eq!(record.virtual_ip, new.virtual_ip);
         assert_eq!(record.successor_of, Some(nodes[0]));
         assert_eq!(store.tokens(network).unwrap(), vec![record.clone()]);
@@ -227,7 +222,7 @@ mod tests {
             prefix: "i3t-eyJzIjoiQx".to_owned(),
             created_at: 100,
             expires_at: 10_000,
-            tags: vec!["servers".to_owned()],
+            groups: BTreeSet::new(),
             virtual_ip: None,
             successor_of: Some(nodes[1]),
         };
@@ -259,7 +254,7 @@ mod tests {
                 prefix: String::new(),
                 created_at: 100,
                 expires_at: 300,
-                tags: Vec::new(),
+                groups: BTreeSet::new(),
                 virtual_ip: None,
                 successor_of: None,
             })
@@ -278,7 +273,7 @@ mod tests {
             prefix: String::new(),
             created_at: 100,
             expires_at,
-            tags: Vec::new(),
+            groups: BTreeSet::new(),
             virtual_ip: None,
             successor_of,
         };

@@ -13,7 +13,6 @@ use i3t_proto::NodeId;
 use super::super::COOLDOWN_SECS;
 use super::super::testing::{CAN_DO_ALL, Lab, REMOTE, hello};
 use super::{add_rule, drop_default_rule, rename};
-use crate::access::ALL;
 use crate::error::{Error, Rejection};
 
 fn ip(text: &str) -> Ipv4Addr {
@@ -56,13 +55,18 @@ fn forward(listen_node: NodeId, target_node: NodeId) -> ForwardInput {
 }
 
 #[test]
-fn a_new_network_comes_with_the_all_to_all_rule() {
+fn a_new_network_comes_with_the_builtin_group_and_the_all_to_all_rule() {
     let lab = Lab::new();
     let network = lab.network("home");
     assert_eq!(network.domain, "home.i3t");
+    let groups = lab.controller.groups(network.id).unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!((groups[0].name.as_str(), groups[0].builtin), ("All", true));
     let rules = lab.controller.rules(network.id).unwrap();
     assert_eq!(rules.len(), 1);
-    assert_eq!((rules[0].src.as_str(), rules[0].dst.as_str(), rules[0].direction, rules[0].enabled), (ALL, ALL, Direction::Both, true));
+    let all = &groups[0].id;
+    assert_eq!((&rules[0].src.id, &rules[0].dst.id, rules[0].direction, rules[0].enabled), (all, all, Direction::Both, true));
+    assert_eq!(rules[0].src.name, "All");
 }
 
 #[test]
@@ -444,7 +448,8 @@ fn a_successor_enrolled_by_token_inherits_identity_and_configuration() {
     lab.settle(&mut [&mut old]);
     let old_view = lab.controller.node(network.id, old.id).unwrap().node;
 
-    let request = CreateEnrollToken { successor_of: Some(old.id), tags: vec!["rebuilt".to_owned()], ..CreateEnrollToken::default() };
+    let rebuilt = lab.group(network.id, "rebuilt");
+    let request = CreateEnrollToken { successor_of: Some(old.id), groups: vec![rebuilt], ..CreateEnrollToken::default() };
     let secret = lab.secret(network.id, &request);
     let new_key = lab.fresh_key();
     assert_eq!(lab.enroll(new_key, &secret, Declared::default()).err(), Some(Rejection::PredecessorOnline));
@@ -456,7 +461,7 @@ fn a_successor_enrolled_by_token_inherits_identity_and_configuration() {
     assert!(new.id > old.id, "继任者是一个新节点，编号不沿用");
     let view = lab.controller.node(network.id, new.id).unwrap().node;
     assert_eq!((view.name.as_str(), view.virtual_ip), ("nas-01", old_view.virtual_ip));
-    assert_eq!(view.tags, vec!["rebuilt".to_owned(), "servers".to_owned()]);
+    assert_eq!(group_names(&view.groups), ["rebuilt", "servers"], "令牌预设的分组和原节点所在的分组合在一起");
     assert!(view.relay.is_none() && view.exit.is_none(), "relay 和出口要重新声明、重新启用");
     assert_eq!(lab.controller.node(network.id, old.id).unwrap_err().code(), ErrorCode::NotFound);
     assert_eq!(lab.connect(old.key, CAN_DO_ALL).err(), Some(Rejection::UnknownKey), "原来的公钥被吊销了");
@@ -505,7 +510,7 @@ fn an_existing_node_can_be_made_the_successor_of_an_offline_one() {
 
     let node = lab.controller.succeed(network.id, replacement, old.id).unwrap();
     assert_eq!((node.id, node.name.as_str(), node.virtual_ip), (replacement, "nas-01", old_address));
-    assert_eq!(node.tags, vec!["new".to_owned(), "servers".to_owned()]);
+    assert_eq!(group_names(&node.groups), ["new", "servers"]);
     assert_eq!(lab.controller.nodes(network.id).unwrap().len(), 2);
     let inherited = &lab.controller.forwards(network.id).unwrap()[0];
     assert_eq!((inherited.target_node, inherited.enabled, inherited.status), (replacement, false, ForwardStatus::TargetNotDeclared));
@@ -544,20 +549,20 @@ fn tokens_are_one_time_expire_and_can_be_withdrawn() {
 }
 
 #[test]
-fn a_token_presets_tags_and_tags_decide_access() {
+fn a_token_presets_groups_and_groups_decide_access() {
     let mut lab = Lab::new();
     let network = lab.network("home");
     drop_default_rule(&lab, network.id);
     add_rule(&lab, network.id, "laptops", "servers", Direction::OneWay);
     let laptop = lab.join_offline(network.id, &["Laptops", "all"], Declared::default());
     let server = lab.join_offline(network.id, &["servers"], Declared::default());
-    assert_eq!(lab.controller.node(network.id, laptop).unwrap().node.tags, vec!["laptops".to_owned()], "all 是内置的，不存");
+    assert_eq!(group_names(&lab.controller.node(network.id, laptop).unwrap().node.groups), ["laptops"], "All 不列出");
     let check = lab.controller.access_check(network.id, laptop, server).unwrap();
     assert!(check.allowed && check.rules.len() == 1);
     assert!(!lab.controller.access_check(network.id, server, laptop).unwrap().allowed);
 
-    let retag = UpdateNode { tags: Some(vec!["servers".to_owned()]), ..UpdateNode::default() };
-    lab.controller.update_node(network.id, laptop, &retag).unwrap();
+    let regroup = UpdateNode { groups: Some(vec![lab.group(network.id, "servers")]), ..UpdateNode::default() };
+    lab.controller.update_node(network.id, laptop, &regroup).unwrap();
     assert!(!lab.controller.access_check(network.id, laptop, server).unwrap().allowed);
     assert!(lab.netmap(laptop).peers.is_empty() && lab.netmap(server).peers.is_empty());
 }
@@ -610,7 +615,7 @@ fn changes_are_written_to_the_operation_log_without_secrets() {
 /// 每种操作的记录都带着按名字给出的参数，名字是当时的名字。
 #[test]
 fn every_log_entry_carries_the_named_values_its_sentence_needs() {
-    use i3t_model::admin::{CreateRule, PairInput, RenameTag, UpdateCredential, UpdateRule};
+    use i3t_model::admin::{CreateGroup, CreateRule, GroupMembers, PairInput, UpdateCredential, UpdateGroup, UpdateRule};
     use serde_json::{Value, json};
 
     let mut lab = Lab::new();
@@ -624,12 +629,25 @@ fn every_log_entry_carries_the_named_values_its_sentence_needs() {
         .controller
         .create_rule(
             network.id,
-            &CreateRule { name: "ssh".into(), src: "all".into(), dst: "servers".into(), direction: Direction::Both, enabled: true },
+            &CreateRule {
+                name: "ssh".into(),
+                src: lab.group(network.id, "all"),
+                dst: lab.group(network.id, "servers"),
+                direction: Direction::Both,
+                enabled: true,
+            },
         )
         .unwrap();
     lab.controller.update_rule(network.id, rule.id, &UpdateRule { enabled: Some(false), ..UpdateRule::default() }).unwrap();
     lab.controller.delete_rule(network.id, rule.id).unwrap();
-    lab.controller.rename_tag(network.id, &RenameTag { from: "servers".into(), to: "boxes".into() }).unwrap();
+    let servers = lab.group(network.id, "servers");
+    lab.controller.update_group(network.id, servers, &UpdateGroup { name: Some("boxes".into()) }).unwrap();
+    let spare = lab.controller.create_group(network.id, &CreateGroup { name: "spare".into() }).unwrap().id;
+    lab.controller.change_members(network.id, spare, &GroupMembers { add: vec![nas, laptop], remove: Vec::new() }).unwrap();
+    lab.controller.remove_member(network.id, spare, laptop).unwrap();
+    lab.controller.delete_group(network.id, spare).unwrap();
+    let regroup = UpdateNode { groups: Some(vec![servers]), ..UpdateNode::default() };
+    lab.controller.update_node(network.id, laptop, &regroup).unwrap();
     let credential = lab
         .controller
         .create_credential(network.id, &CreateCredential { name: "phone".into(), max_concurrent: Some(4), max_bytes: None })
@@ -678,12 +696,22 @@ fn every_log_entry_carries_the_named_values_its_sentence_needs() {
     assert_eq!(params("node.delete")["node_name"], "laptop");
     let rule_created = params("rule.create");
     assert_eq!(
-        (&rule_created["rule"], &rule_created["rule_name"], &rule_created["dst"]),
-        (&json!(rule.id), &json!("ssh"), &json!("servers"))
+        (&rule_created["rule"], &rule_created["rule_name"], &rule_created["dst"], &rule_created["dst_name"], &rule_created["src_name"]),
+        (&json!(rule.id), &json!("ssh"), &json!(servers), &json!("servers"), &json!("All"))
     );
     assert_eq!(params("rule.update")["enabled"], false);
     assert_eq!(params("rule.delete")["rule"], json!(rule.id));
-    assert_eq!(params("tag.rename"), json!({ "from": "servers", "to": "boxes", "nodes": 1, "rules": 0, "tokens": 0 }));
+    assert_eq!(params("group.rename"), json!({ "group": servers, "from": "servers", "to": "boxes" }));
+    assert_eq!(params("group.create"), json!({ "group": servers, "group_name": "servers" }), "最早建的是 servers");
+    assert_eq!(
+        params("group.members"),
+        json!({ "group": spare, "group_name": "spare", "added": [{ "node": nas, "node_name": params("node.enroll")["node_name"] }, { "node": laptop, "node_name": "laptop" }], "removed": [] })
+    );
+    let removed = log.iter().find(|entry| entry.action == "group.members").unwrap();
+    assert_eq!(Value::Object(removed.params.clone())["removed"], json!([{ "node": laptop, "node_name": "laptop" }]));
+    assert_eq!(params("group.delete"), json!({ "group": spare, "group_name": "spare", "nodes": 1, "rules": 0, "tokens": 0 }));
+    let regrouped = &log.iter().find(|entry| entry.action == "node.update").unwrap().params;
+    assert_eq!(regrouped["changes"], json!({ "groups": [{ "group": servers, "group_name": "boxes" }] }));
     assert_eq!(params("credential.create")["credential_name"], "phone");
     let limits = params("credential.update");
     assert_eq!((&limits["max_concurrent"], &limits["reset_usage"]), (&Value::Null, &json!(true)));
@@ -710,4 +738,8 @@ fn every_log_entry_carries_the_named_values_its_sentence_needs() {
     for action in ["node.relay.enable", "node.relay.disable", "node.exit.enable", "node.exit.disable"] {
         assert_eq!(params(action)["node"], nas_id, "{action}");
     }
+}
+
+fn group_names(groups: &[i3t_model::admin::GroupRef]) -> Vec<&str> {
+    groups.iter().map(|group| group.name.as_str()).collect()
 }

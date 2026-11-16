@@ -4,7 +4,27 @@
 
 对应的 Rust 类型在 `crates/i3t-model/src/admin.rs`，实现在 `crates/i3t-controller/src/admin.rs`。文档和代码不一致时以代码为准，并请修正文档。
 
-> **最新一次新增**（代码和参数）。界面要能用自己的语言写出 controller 和节点说的事，所以给人看的那些中文原话旁边
+> **最新一次改动**（分组取代标签）。原来的"标签"只是节点、注册令牌和规则上的一串文字；现在它是**分组**：一样单独的东西，
+> 有编号和名字，有自己的接口（第 18 节）。这是改名，旧的写法不再收，也没有别名。这一次的清单：
+>
+> - 去掉的：`POST /networks/{network}/tags/rename` 和它的 `RenameTag`、`RenamedTag`；`Node.tags`、`UpdateNode.tags`；
+>   `EnrollTokenInfo.tags`、`CreateEnrollToken.tags`；访问关系图的 `tags`（和它的 `TagMembers`）；操作记录的 `tag.rename`。
+> - 新的接口：`GET`、`POST /networks/{network}/groups`，`GET`、`PATCH`、`DELETE /networks/{network}/groups/{group}`，
+>   `PATCH /networks/{network}/groups/{group}/nodes`（批量增减成员），`PUT`、`DELETE /networks/{network}/groups/{group}/nodes/{node}`
+>   （一个一个地加入、移出），见第 18 节。新的结构 `Group`、`GroupRef`、`DeletedGroup`。
+> - 改了写法的字段：节点的 `groups`（`GroupRef` 的数组，第 5 节），改节点时的 `groups`（分组编号的数组）；注册令牌的 `groups`
+>   （第 6 节）；规则的 `src`、`dst`：应答里是 `GroupRef`，请求里是分组编号（第 7 节）；访问关系图的 `groups`（`Group` 的数组，8.1 节）。
+> - 内置分组 `All`：每个网络都有，每个节点都在里面，不能改名、删除、增减成员。新网络的默认规则是 `All <-> All`（第 4 节）。
+> - 错误：分组不存在是 `404 not_found`（`what` 是 `group`，`field` 说是哪一个：`src`、`dst`，或者列表里的 `groups[序号]`；
+>   批量增减成员时不存在的节点同样是 `add[序号]`、`remove[序号]`），名字被占用是 `409 name_taken`（`what` 是 `group`），名字的写法不对是
+>   `400 invalid_request`（`what` 是 `empty`、`too_long`、`malformed`），动内置分组是 `400 invalid_request`（`what` 是 `builtin`），
+>   见 18.1 节。
+> - 操作记录：新的 `action` `group.create`、`group.rename`、`group.delete`、`group.members`，`refs` 的种类多了 `group`；
+>   `node.update` 的 `changes.groups`、`token.create` 的 `groups`、`rule.*` 的 `src`、`src_name`、`dst`、`dst_name` 换了写法（第 3 节）。
+> - 升级时数据库原地迁移：节点、注册令牌、规则里出现过的每个标签成为同名的分组，`all` 成为 `All`，成员和规则跟着走。
+>   旧的操作记录的参数也改成了新的写法。
+>
+> **上一次新增**（代码和参数）。界面要能用自己的语言写出 controller 和节点说的事，所以给人看的那些中文原话旁边
 > 多了代码和写成一句话要用到的值；原话照旧在，给日志和旧的客户端。正文里新加的地方标着「新增」。这一次的清单：
 >
 > - 约定（1.2 节）：原话旁边的**原因**是一个对象 `{ "code": 代码, …这个代码要用到的值 }`，叫 `cause`（或者 `check_cause`）；
@@ -24,7 +44,7 @@
 >
 > 已有接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **上一次新增**（主动测试）。这一次的清单：
+> **再上一次新增**（主动测试）。这一次的清单：
 >
 > - 新接口：`POST`、`GET /networks/{network}/tests`（发起一个主动测试、列出最近的测试），`GET /networks/{network}/tests/{id}`、
 >   `POST …/tests/{id}/cancel`（看一个测试的进度和结果、取消它），`POST`、`GET /networks/{network}/tests/matrix`、
@@ -36,7 +56,7 @@
 >
 > 已有接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **再上一次新增**（独占 TCP）。这一次的清单：
+> **更早的新增**（独占 TCP）。这一次的清单：
 >
 > - 节点对设置多了 `lane`：这一对节点之间承载 TCP 连接的流用不用独占 TCP，`"off"`（默认）、`"udp_fallback"`、`"always"`（第 12 节）。
 > - `GET /networks/{network}/pairs` 和 `PUT …/pairs/{a}/{b}` 的应答从 `PairSetting` 变成 `PairView`：原来的字段还在同一层，多了 `lane`、`lane_effect`（设置起不起作用、为什么、谁拨谁）和 `lanes`（两个节点各自报的状况）。新的结构 `PairView`、`LaneEffect`、`LaneBlock`、`PairLaneSide`、`PeerLanes`、`LaneCounts`、`LaneReport`、`LaneHandshakeFailures`（第 12 节）。
@@ -59,11 +79,11 @@
 >
 > **更早的新增**（限额、用量和状态）。这一次的清单：
 >
-> - 新接口：`PATCH /networks/{network}/credentials/{id}`（改上限、清零用量，第 9 节）；`GET /networks/{network}/exits`、`GET /networks/{network}/exits/{node}`（出口的设置、用量、健康，第 17 节）；`GET /networks/{network}/nodes/{node}/listeners`（节点上全部监听的状态，含节点自己开的回环入口，第 5 节）；`POST /networks/{network}/tags/rename`（标签改名，第 18 节）。
+> - 新接口：`PATCH /networks/{network}/credentials/{id}`（改上限、清零用量，第 9 节）；`GET /networks/{network}/exits`、`GET /networks/{network}/exits/{node}`（出口的设置、用量、健康，第 17 节）；`GET /networks/{network}/nodes/{node}/listeners`（节点上全部监听的状态，含节点自己开的回环入口，第 5 节）；`POST /networks/{network}/tags/rename`（标签改名；后来标签被分组取代，这个接口已经去掉，见最新一次改动）。
 > - 已有接口新的查询参数：`GET /log` 的 `before`、`network`、`action`、`ref`（翻页和过滤，第 3 节）；`GET /networks/{network}/tokens` 的 `all`（连用掉的和过期的也列出，第 6 节）。
 > - 新的字段：`Status.data_dir`；`Network.class`（`POST`、`PATCH /networks` 也收）；`Overview.flows`、`tx_bytes`、`rx_bytes`；`Node.attached`（以前只在节点详情里，现在列表里也有，详情的 JSON 没有变）；`NodeRoute.age_secs`、`since_secs`；出口设置（`Node.exit`、`PUT …/exit`）的 `quota_bytes`、`quota_reset_day`、`family`、`connects_per_minute`、`class`；`EnrollTokenInfo.prefix`、`state`、`used_at`、`used_by`；`Credential.prefix`、`max_bytes`、`state`、`revoked_at`、`usage`（`POST …/credentials` 也收 `max_bytes`）；`Listener.class`、`optimistic`、`status`；`Forward.class`、`listen`（`ForwardInput` 也收 `class`）；`LogEntry.refs`；`PUT …/relay` 的应答多了 `reachability`。
-> - 新的取值：`ExitRole.family` 是 `"any"`、`"ipv4"`、`"ipv6"`；服务等级（`class`）是 `"auto"`、`"interactive"`、`"reliable"`、`"bulk"`；新的结构 `ListenStatus`（第 11.1 节）、`ExitView`（第 17 节）、`NodeListeners`（第 5 节）、`RelayEnabled`（第 5.5 节）、`RenamedTag`（第 18 节）。
-> - 操作记录多了四种 `action`：`credential.update`、`credential.revoke`、`credential.exhausted`（凭据的流量上限用完了，controller 自己记的）、`tag.rename`。`credential.delete` 现在是"彻底删掉一个已经吊销的凭据"。
+> - 新的取值：`ExitRole.family` 是 `"any"`、`"ipv4"`、`"ipv6"`；服务等级（`class`）是 `"auto"`、`"interactive"`、`"reliable"`、`"bulk"`；新的结构 `ListenStatus`（第 11.1 节）、`ExitView`（第 17 节）、`NodeListeners`（第 5 节）、`RelayEnabled`（第 5.5 节）、`RenamedTag`（已经去掉）。
+> - 操作记录多了四种 `action`：`credential.update`、`credential.revoke`、`credential.exhausted`（凭据的流量上限用完了，controller 自己记的）、`tag.rename`（已经去掉）。`credential.delete` 现在是"彻底删掉一个已经吊销的凭据"。
 > - 行为上的变化：
 >   - `DELETE /networks/{network}/credentials/{id}` 第一次是吊销：凭据留在列表里，`state` 是 `"revoked"`；对已经吊销的再删一次才彻底删掉（第 9 节）。
 >   - 端口转发的监听端口可以写 0，由监听节点挑一个空闲的、重启不变（监听在虚拟 IP 上的除外），挑定的端口在 `listen.local` 里（第 11 节）。端口写 0 的转发之间不算冲突。
@@ -133,10 +153,10 @@
 | 地址加端口 | 字符串；IPv6 地址加方括号 | `"203.0.113.7:20330"`、`"[2001:db8::1]:20330"` |
 | 地址段 | CIDR 字符串 | `"10.66.0.0/16"`、`"192.168.1.0/24"` |
 
-名字和标签的规则：
+名字的规则：
 
 - **网络和节点的名字**：字母、数字、连字符，不能以连字符开头或结尾，最长 63 个字符，不能全是数字。大写会被转成小写。节点名在一个网络里唯一，网络名在整个 controller 里唯一。
-- **标签**：字母、数字、连字符、下划线，最长 32 个字符，转成小写。`all` 是内置标签，每个节点都有；给节点打标签时写了 `all` 会被去掉，规则里可以用它。
+- 「新增」**分组的名字**：1 到 32 个字符，字母（任何文字的都行）、数字、连字符、下划线，首尾的空白会被去掉。保留写的大小写；在一个网络里不分大小写唯一，内置分组占着 `All`。见第 18 节。
 - **规则、凭据、监听器、端口转发的名字**：给人看的一小段文字，最长 64 个字符，不能有控制字符，首尾的空白会被去掉。凭据和监听器的名字不能是空的。
 
 几个到处用到的枚举：
@@ -161,7 +181,7 @@
 
 ### 1.4 网络是硬隔离
 
-除了 `/status`、`/log` 和 `/networks`，所有接口都在某一个网络下面（`/networks/{network}/…`，`{network}` 是网络编号）。路径里指的节点、规则、凭据、监听器、端口转发、令牌必须属于这个网络，否则是 `404 not_found`，和不存在一样。请求体里引用的节点（固定出口、端口转发的两端、继任的对象等）也必须在同一个网络里。
+除了 `/status`、`/log` 和 `/networks`，所有接口都在某一个网络下面（`/networks/{network}/…`，`{network}` 是网络编号）。路径里指的节点、分组、规则、凭据、监听器、端口转发、令牌必须属于这个网络，否则是 `404 not_found`，和不存在一样。请求体里引用的节点（固定出口、端口转发的两端、继任的对象等）和分组也必须在同一个网络里。
 
 ## 2. 错误
 
@@ -183,14 +203,15 @@
 | 字段 | 含义 |
 |---|---|
 | `what` | 见下表；controller 说不出来时是 `null` |
-| `field` | 请求里出问题的那一项：请求体的字段名（嵌套的写第一层，比如 `pinned_relays`）、查询参数名或者路径参数名（`network`、`node`、`id`……）；不是某一项的问题时是 `null` |
+| `field` | 请求里出问题的那一项：请求体的字段名（嵌套的写第一层，比如 `pinned_relays`）、查询参数名或者路径参数名（`network`、`node`、`id`……）；不是某一项的问题时是 `null`。「新增」编号的列表 `groups`、`add`、`remove`（第 5、6、18 节）里有不存在的东西时，写成 `列表名[序号]`：序号是请求发来的列表里第一个不存在的编号的位置，从 0 数起，比如 `groups[1]`、`add[2]` |
 
 `what` 的取值随 `code` 不同：
 
 | `code` | `what` |
 |---|---|
-| `not_found` | 找不到的东西：`network`、`node`、`token`、`rule`、`credential`、`listener`、`forward`、`pair`（节点对设置）、`paused_version`、`exit`、`test`、`matrix`；路径不是一个接口时是 `endpoint`。请求体里引用的东西找不到时 `field` 是引用它的那一项，比如 `fixed_exit`、`pinned_relays`、`successor_of`、`via` |
-| `invalid_request` | 哪里不对：`too_small`（地址段太小）、`zero`（不能是 0）、`zero_port`（端口不能是 0）、`too_many`、`out_of_range`、`empty`、`too_long`、`malformed`（写法不对）、`all_digits`（名字全是数字）、`same`（新旧标签一样）、`same_node`（两个节点是同一个）、`builtin`（内置标签 `all` 不能改名）、`required`（非回环地址的监听器必须要求凭据）、`missing`（`a`、`b` 只写了一个）、`not_relay`（不是启用了的 relay）、`not_connectable`（不是能连上的地址）、`not_allowed`（立即更新的时机不能是 `idle`）、`duplicate`（路径里 relay 重复）、`with_successor`（继任的令牌不能预设虚拟 IP）、`no_default`（默认的地址段都被占了）、`needs_quality`（测吞吐要同时测质量）、`no_address`（relay 一个地址都没填）、`revoked`（凭据已经吊销）；请求本身读不出来时是 `content_type`、`syntax`、`data`（JSON 里某个字段不对，`field` 是它）、`body`、`query`、`path`；请求方法不对（405）是 `method` |
+| `not_found` | 找不到的东西：`network`、`node`、`group`、`token`、`rule`、`credential`、`listener`、`forward`、`pair`（节点对设置）、`paused_version`、`exit`、`test`、`matrix`；路径不是一个接口时是 `endpoint`。请求体里引用的东西找不到时 `field` 是引用它的那一项，比如 `fixed_exit`、`pinned_relays`、`successor_of`、`via`、`src`、`dst`、`groups[1]`、`add[0]`、`remove[2]` |
+| `invalid_request` | 哪里不对：`too_small`（地址段太小）、`zero`（不能是 0）、`zero_port`（端口不能是 0）、`too_many`、`out_of_range`、`empty`、`too_long`、`malformed`（写法不对）、`all_digits`（名字全是数字）、`same_node`（两个节点是同一个）、`builtin`（内置分组 `All` 不能改名、删除、增减成员）、`required`（非回环地址的监听器必须要求凭据）、`missing`（`a`、`b` 只写了一个）、`not_relay`（不是启用了的 relay）、`not_connectable`（不是能连上的地址）、`not_allowed`（立即更新的时机不能是 `idle`）、`duplicate`（路径里 relay 重复；同一个节点既要加入分组又要移出）、`with_successor`（继任的令牌不能预设虚拟 IP）、`no_default`（默认的地址段都被占了）、`needs_quality`（测吞吐要同时测质量）、`no_address`（relay 一个地址都没填）、`revoked`（凭据已经吊销）；请求本身读不出来时是 `content_type`、`syntax`、`data`（JSON 里某个字段不对，`field` 是它）、`body`、`query`、`path`；请求方法不对（405）是 `method` |
+| `name_taken` | 「新增」分组的名字被占用时是 `group`；别的名字是 `null` |
 | `conflict` | 挡着的东西：`listener`（这个节点上已经有监听器在这个地址上，`field` 是 `bind`）、`forward`（同上，端口转发）、`token`（这个虚拟 IP 已经预设在另一个注册令牌上，`field` 是 `virtual_ip`） |
 | `not_declared` | 没有声明的能力：`relay`、`exit`、`forward`。要在节点上执行的命令是 `i3t set can-<这个值> on` |
 | `cannot_self_update` | `container`、`package_manager`、`read_only_dir`（节点说的原因，见第 14 节的 `self_update.blocker`）、`too_old`（版本太旧，不懂更新）、`unknown`（节点说不能、没有说原因） |
@@ -203,10 +224,10 @@
 |---|---|---|
 | 401 | `unauthorized` | 没带管理令牌，或者令牌不对 |
 | 404 | `not_found` | 路径或请求体里指的东西不存在，或者不属于路径里的那个网络；路径不是一个接口 |
-| 400 | `invalid_request` | 请求本身不合法：JSON 解析不了、缺字段、路径里的编号不是数字、名字或标签的写法不对、地址不合法、数值超出范围 |
+| 400 | `invalid_request` | 请求本身不合法：JSON 解析不了、缺字段、路径里的编号不是数字、名字的写法不对、地址不合法、数值超出范围、要改内置分组 `All` |
 | 405 | `invalid_request` | 这个路径不支持这种请求方法 |
 | 400 | `address_out_of_range` | 虚拟 IP 不在网络的地址段里，或者是网络地址、广播地址 |
-| 409 | `name_taken` | 名字已经被占用（网络名；同一网络里的节点名、凭据名；同一节点上的监听器名） |
+| 409 | `name_taken` | 名字已经被占用（网络名；同一网络里的节点名、凭据名、分组名；同一节点上的监听器名） |
 | 409 | `name_cooling_down` | 名字属于一个刚删除的节点，还在冷却期（90 天） |
 | 409 | `address_taken` | 虚拟 IP 已经分给了另一个节点 |
 | 409 | `address_cooling_down` | 虚拟 IP 属于一个刚删除的节点，还在冷却期（90 天） |
@@ -295,10 +316,14 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `network` | 属于哪个网络；和网络无关的操作是 `null` |
 | `action` | 做了什么，见下 |
 | `detail` | 给人看的说明 |
-| `refs` | 「新增」这条记录说的是哪些东西，界面可以据此做成链接。每一项是 `{ "kind": 种类, "id": 编号 }`，种类是 `"network"`、`"node"`、`"token"`、`"rule"`、`"credential"`、`"listener"`、`"forward"`（以后可能增加，不认识的种类请忽略）。东西后来被删掉了，编号还在。这个字段出现之前的记录是 `[]` |
+| `refs` | 「新增」这条记录说的是哪些东西，界面可以据此做成链接。每一项是 `{ "kind": 种类, "id": 编号 }`，种类是 `"network"`、`"node"`、`"group"`、`"token"`、`"rule"`、`"credential"`、`"listener"`、`"forward"`（以后可能增加，不认识的种类请忽略）。东西后来被删掉了，编号还在。这个字段出现之前的记录是 `[]` |
 | `params` | 「新增」按名字给出的参数，只用 `action` 和它们就能把这条记录写成一句话：东西的编号挨着它当时的名字（`node` 和 `node_name`）。每种操作有哪些参数见下表。这个字段出现之前的记录是 `{}`，那时只能显示 `detail` |
 
-`action` 的取值：`admin.token`、`network.create`、`network.update`、`network.delete`、`node.enroll`、`node.update`、`node.delete`、`node.succeed`、`node.relay.enable`、`node.relay.disable`、`node.relay.withdrawn`、`node.exit.enable`、`node.exit.disable`、`node.exit.withdrawn`、`node.forward.withdrawn`、`token.create`、`token.delete`、`rule.create`、`rule.update`、`rule.delete`、`credential.create`、`credential.delete`、`listener.create`、`listener.update`、`listener.delete`、`forward.create`、`forward.update`、`forward.delete`、`pair.set`、`pair.delete`，以及「新增」`update.settings`、`update.release`（发布源上有了新的正式版）、`update.pause`（节点更新失败，版本被暂停；它记在那个节点所在的网络上）、`update.resume`、`update.force`（记在节点所在的网络上）、`update.force_all`，以及「新增」`credential.update`（改上限、清零用量）、`credential.revoke`（吊销）、`credential.exhausted`（凭据的流量上限用完了，controller 自己记的）、`tag.rename`，以及「新增」`update.failure`（节点说某个版本在它那里不能用，但 controller 没有让它装过这个版本，所以不暂停；记在那个节点所在的网络上），以及「新增」`test.start`（发起了一个主动测试，`refs` 是两个节点）、`test.cancel`、`test.matrix`（开始一次全网矩阵，`refs` 是网络）、`test.matrix.cancel`。`credential.delete` 现在是彻底删掉一个已经吊销的凭据。带 `withdrawn` 的三种是节点撤回了本地声明、controller 随之关闭能力时记的。最多保留最近的一万条。
+`action` 的取值：`admin.token`、`network.create`、`network.update`、`network.delete`、`node.enroll`、`node.update`、`node.delete`、`node.succeed`、`node.relay.enable`、`node.relay.disable`、`node.relay.withdrawn`、`node.exit.enable`、`node.exit.disable`、`node.exit.withdrawn`、`node.forward.withdrawn`、`token.create`、`token.delete`、`rule.create`、`rule.update`、`rule.delete`、`credential.create`、`credential.delete`、`listener.create`、`listener.update`、`listener.delete`、`forward.create`、`forward.update`、`forward.delete`、`pair.set`、`pair.delete`，以及「新增」`update.settings`、`update.release`（发布源上有了新的正式版）、`update.pause`（节点更新失败，版本被暂停；它记在那个节点所在的网络上）、`update.resume`、`update.force`（记在节点所在的网络上）、`update.force_all`，以及「新增」`credential.update`（改上限、清零用量）、`credential.revoke`（吊销）、`credential.exhausted`（凭据的流量上限用完了，controller 自己记的），以及「新增」`update.failure`（节点说某个版本在它那里不能用，但 controller 没有让它装过这个版本，所以不暂停；记在那个节点所在的网络上），以及「新增」`test.start`（发起了一个主动测试，`refs` 是两个节点）、`test.cancel`、`test.matrix`（开始一次全网矩阵，`refs` 是网络）、`test.matrix.cancel`，以及「新增」`group.create`、`group.rename`、`group.delete`、`group.members`（分组的成员变了，第 18 节）。`credential.delete` 现在是彻底删掉一个已经吊销的凭据。带 `withdrawn` 的三种是节点撤回了本地声明、controller 随之关闭能力时记的。最多保留最近的一万条。
+
+不认识的 `action` 请显示 `detail`。分组出现之前的记录里可能还有 `tag.rename`，它没有新的写法，只能显示 `detail`。
+
+「新增」分组出现之前记下的 `node.update`、`token.create`、`rule.*` 的参数，在升级数据库时已经改成了下表的写法：原来的标签名成了 `…_name`，编号是同名的那个分组（这个标签后来不在任何地方出现、因而没有成为分组时是 `null`）。
 
 「新增」各种操作的 `params`。名字的写法：编号是 `<东西>`，名字是 `<东西>_name`，都是记下这一条时的样子；说不出来的值是 `null`。
 
@@ -309,15 +334,18 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `network.update` | `network`、`network_name`，以及改完之后的 `cidr`、`routing`、`max_relay_hops`、`reach`、`class` |
 | `network.delete` | `network`、`network_name` |
 | `node.enroll` | `node`、`node_name`、`virtual_ip`、`token`（用的注册令牌的编号）、`predecessor`、`predecessor_name`（继任的原节点；不是继任时是 `null`） |
-| `node.update` | `node`、`node_name`（改之前的名字）、`changes`：改了的项，没改的不在里面。`name` 和 `virtual_ip` 写成 `{ "from": …, "to": … }`，`tags`、`dial_out_only`、`routing`、`reach`、`pinned_relays` 是改之后的值 |
+| `node.update` | `node`、`node_name`（改之前的名字）、`changes`：改了的项，没改的不在里面。`name` 和 `virtual_ip` 写成 `{ "from": …, "to": … }`，`groups`、`dial_out_only`、`routing`、`reach`、`pinned_relays` 是改之后的值；`groups` 的每一项是 `{ "group": 编号, "group_name": 名字 }`，不含 `All` |
 | `node.delete` | `node`、`node_name`、`virtual_ip` |
 | `node.succeed` | `node`、`node_name`、`virtual_ip`（继任之前的），`predecessor`、`predecessor_name`、`predecessor_virtual_ip` |
 | `node.relay.enable`、`node.relay.disable`、`node.exit.enable`、`node.exit.disable`、`node.relay.withdrawn`、`node.exit.withdrawn` | `node`、`node_name` |
 | `node.forward.withdrawn` | `node`、`node_name`、`forwards`（停用了几条转发） |
-| `token.create` | `token`、`prefix`、`expires_at`、`tags`、`virtual_ip`、`successor_of` |
+| `token.create` | `token`、`prefix`、`expires_at`、`groups`（每一项是 `{ "group": 编号, "group_name": 名字 }`）、`virtual_ip`、`successor_of` |
 | `token.delete` | `token`、`prefix` |
-| `rule.create`、`rule.update`、`rule.delete` | `rule`、`rule_name`、`src`、`dst`、`direction`、`enabled`（改完之后的，删除时是删之前的） |
-| `tag.rename` | `from`、`to`、`nodes`、`rules`、`tokens`（各改了几处） |
+| `rule.create`、`rule.update`、`rule.delete` | `rule`、`rule_name`、`src`、`src_name`、`dst`、`dst_name`（两头的分组的编号和名字）、`direction`、`enabled`（改完之后的，删除时是删之前的） |
+| `group.create` | `group`、`group_name` |
+| `group.rename` | `group`、`from`、`to`（改之前和改之后的名字） |
+| `group.delete` | `group`、`group_name`、`nodes`（从几个节点上去掉了它）、`rules`（一起删掉了几条规则）、`tokens`（从几个还没用掉的注册令牌上去掉了它）。`refs` 是这个分组和这些节点、规则、令牌 |
+| `group.members` | `group`、`group_name`、`added`、`removed`：加入、移出的节点，每一项是 `{ "node": 编号, "node_name": 名字 }`，本来就在（或者本来就不在）的不算。`refs` 是这个分组和这些节点 |
 | `credential.create` | `credential`、`credential_name`、`max_concurrent`、`max_bytes` |
 | `credential.update` | `credential`、`credential_name`、`max_concurrent`、`max_bytes`（新的上限，`null` 是不限）、`reset_usage` |
 | `credential.revoke`、`credential.delete` | `credential`、`credential_name` |
@@ -375,7 +403,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 
 ### POST /networks
 
-新建一个网络。它自带一条名叫 `default` 的 `all <-> all` 规则，所以装好就能互通。
+新建一个网络。它自带内置分组 `All`（第 18 节）和一条名叫 `default` 的 `All <-> All` 规则，所以装好就能互通。
 
 ```json
 { "name": "home", "cidr": "10.66.0.0/16", "routing": "direct_first", "max_relay_hops": 2, "reach": "any" }
@@ -412,7 +440,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 
 ### DELETE /networks/{network}
 
-删掉一个空的网络，连同它的规则、凭据和注册令牌。
+删掉一个空的网络，连同它的分组、规则、凭据和注册令牌。
 
 应答：`204`。
 错误：`network_not_empty`。
@@ -475,7 +503,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   "name": "node-1",
   "fqdn": "node-1.home.i3t",
   "virtual_ip": "10.66.0.1",
-  "tags": ["servers"],
+  "groups": [{ "id": 3, "name": "servers" }],
   "declared": { "exit": true, "relay": true, "forward": true },
   "relay": {
     "udp": ["203.0.113.7:20330"],
@@ -528,7 +556,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `name` | 名字，之后可以改。「新增」节点加入时取它上报的主机名：只取第一段（`nas.lan` 取 `nas`），转成小写，名字里不能有的字符换成连字符；同一个网络里重名（或者那个名字还在冷却期）就加 `-2`、`-3`……。主机名取不出合法的名字（空的、全是数字、不是 ASCII、`localhost`、`node-<数字>`）或者节点的版本太旧没有报主机名时，叫 `node-<编号>` |
 | `fqdn` | 全名：`<name>.<网络的 domain>` |
 | `virtual_ip` | 虚拟 IP。加入时分配（地址段里最小的空闲地址），之后不变，除非管理员改 |
-| `tags` | 管理员打的标签，按字典序。内置的 `all` 不列出 |
+| `groups` | 「新增」它所在的分组（`GroupRef`：`{ "id": 分组编号, "name": 名字 }`），按名字排（不分大小写）。内置的 `All` 不列出：每个节点都在里面 |
 | `declared` | 节点在本地声明的"可以承担"：`exit` 出口、`relay`、`forward` 端口转发的目标。由节点上报，这里只读 |
 | `relay` | 启用为 relay 时是它的设置（见 5.5），否则 `null` |
 | `exit` | 启用为出口时是它的设置（见 5.6），否则 `null` |
@@ -566,7 +594,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   "name": "laptop",
   "fqdn": "laptop.home.i3t",
   "virtual_ip": "10.66.0.2",
-  "tags": ["laptops"],
+  "groups": [{ "id": 2, "name": "laptops" }],
   "declared": { "exit": false, "relay": false, "forward": false },
   "relay": null,
   "exit": null,
@@ -616,16 +644,16 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 
 ### PATCH /networks/{network}/nodes/{node}
 
-改节点的名字、标签、虚拟 IP 和各个开关。
+改节点的名字、分组、虚拟 IP 和各个开关。
 
 ```json
-{ "name": "laptop", "tags": ["laptops"], "pinned_relays": [1], "routing": null }
+{ "name": "laptop", "groups": [2, 5], "pinned_relays": [1], "routing": null }
 ```
 
 | 字段 | 含义 |
 |---|---|
 | `name` | 新名字 |
-| `tags` | 整个替换节点的标签 |
+| `groups` | 「新增」整个替换节点所在的分组：分组编号的数组，每个都必须是这个网络里已有的分组。`[]` 表示只在 `All` 里；写了 `All` 的编号会被忽略，重复的算一个 |
 | `virtual_ip` | 新的虚拟 IP。必须在网络的地址段里，不是网络地址和广播地址，没被占用，不在冷却期。改了之后引用旧地址的配置会失效，界面上要提示 |
 | `dial_out_only` | `true` 或 `false` |
 | `routing` | 一种选路模式；写 `null` 表示改回用网络的默认值 |
@@ -635,7 +663,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 全部可省略。`routing` 和 `reach` 是仅有的两个"写 `null` 有含义"的字段。
 
 应答：`Node`。
-错误：`name_taken`、`name_cooling_down`、`address_taken`、`address_cooling_down`、`address_out_of_range`、`invalid_request`、`not_found`（固定的 relay 不在这个网络里）。
+错误：`name_taken`、`name_cooling_down`、`address_taken`、`address_cooling_down`、`address_out_of_range`、`invalid_request`、`not_found`（固定的 relay 不在这个网络里；「新增」`groups` 里有不存在的分组，`what` 是 `group`，`field` 是 `groups[序号]`，见 18.1 节）。
 
 ### DELETE /networks/{network}/nodes/{node}
 
@@ -737,7 +765,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 { "predecessor": 2 }
 ```
 
-`{node}` 继承 `predecessor` 的虚拟 IP、名字、标签（和它自己已有的标签合并），以及指向 `predecessor` 的端口转发、监听器和节点对设置；然后 `predecessor` 被删掉，它的公钥被吊销。节点编号不继承，`{node}` 还是它自己的编号。relay、出口不继承：要在新机器上重新声明，再重新启用。继承来的、以它为目标的端口转发，在它没有声明"可以作为端口转发的目标"时是停用的。
+`{node}` 继承 `predecessor` 的虚拟 IP、名字、分组（和它自己已经在的分组合并），以及指向 `predecessor` 的端口转发、监听器和节点对设置；然后 `predecessor` 被删掉，它的公钥被吊销。节点编号不继承，`{node}` 还是它自己的编号。relay、出口不继承：要在新机器上重新声明，再重新启用。继承来的、以它为目标的端口转发，在它没有声明"可以作为端口转发的目标"时是停用的。
 
 也可以在生成注册令牌时用 `successor_of` 指名继任（见第 6 节），效果相同。
 
@@ -862,7 +890,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   "network": 1,
   "created_at": 1794798564,
   "expires_at": 1794802164,
-  "tags": ["servers"],
+  "groups": [{ "id": 3, "name": "servers" }],
   "virtual_ip": null,
   "successor_of": null,
   "prefix": "i3t-eyJzIjoiSmFY",
@@ -877,7 +905,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `id` | 令牌编号 |
 | `network` | 所属网络 |
 | `created_at`、`expires_at` | 生成和过期的时间 |
-| `tags` | 用它加入的节点自动带上的标签 |
+| `groups` | 「新增」用它加入的节点自动加入的分组（`GroupRef`），按名字排。不含 `All`。分组被删掉时也从令牌上去掉 |
 | `virtual_ip` | 预设的虚拟 IP；`null` 表示自动分配 |
 | `successor_of` | 用它加入的节点继任这个节点（节点编号）；`null` 表示是一个普通的新节点。继任的令牌用掉之后是 `null`（被继任的节点随即被删掉了） |
 | `prefix` | 「新增」令牌文本的开头 18 个字符，不是秘密（露出的不到 30 位），用来认出是哪一个令牌：界面显示成 `i3t-eyJzIjoiSmFY…`，和管理员手里的令牌文本的开头对得上。这个字段出现之前生成的令牌是 `""` |
@@ -894,13 +922,13 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 ### POST /networks/{network}/tokens
 
 ```json
-{ "expires_in_secs": 3600, "tags": ["servers"], "virtual_ip": "10.66.0.9", "successor_of": null }
+{ "expires_in_secs": 3600, "groups": [3], "virtual_ip": "10.66.0.9", "successor_of": null }
 ```
 
 | 字段 | 必填 | 含义 |
 |---|---|---|
 | `expires_in_secs` | 否 | 多少秒之后过期，默认 86400（一天） |
-| `tags` | 否 | 默认 `[]` |
+| `groups` | 否 | 「新增」分组编号的数组，每个都必须是这个网络里已有的分组；写了 `All` 的编号会被忽略。默认 `[]` |
 | `virtual_ip` | 否 | 预设的虚拟 IP，要求同"改节点的虚拟 IP"。预设着的地址不会被自动分给别的节点 |
 | `successor_of` | 否 | 要继任的节点编号。那个节点在新节点加入的那一刻必须不在线。不能和 `virtual_ip` 同时写 |
 
@@ -912,16 +940,20 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   "network": 1,
   "created_at": 1794798564,
   "expires_at": 1794802164,
-  "tags": ["servers"],
+  "groups": [{ "id": 3, "name": "servers" }],
   "virtual_ip": null,
   "successor_of": null,
+  "prefix": "i3t-eyJzIjoiSmFY",
+  "state": "pending",
+  "used_at": null,
+  "used_by": null,
   "token": "i3t-eyJjIjoiY3RsLmV4YW1wbGUuY29tOjIwMzMxIiwiayI6Ikxs…"
 }
 ```
 
 `token` 是整段令牌文本（以 `i3t-` 开头），**只在这个应答里出现一次**，界面要让管理员当场复制。
 
-错误：`address_taken`、`address_cooling_down`、`address_out_of_range`、`conflict`（这个虚拟 IP 已经预设在另一个令牌上）、`not_found`（要继任的节点不在这个网络里）、`invalid_request`。
+错误：`address_taken`、`address_cooling_down`、`address_out_of_range`、`conflict`（这个虚拟 IP 已经预设在另一个令牌上）、`not_found`（要继任的节点不在这个网络里；「新增」`groups` 里有不存在的分组，`what` 是 `group`，`field` 是 `groups[序号]`，见 18.1 节）、`invalid_request`。
 
 ### DELETE /networks/{network}/tokens/{id}
 
@@ -929,13 +961,21 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 
 ## 7. 访问规则
 
-只有"允许"：一条规则说带标签 `src` 的节点可以访问带标签 `dst` 的节点。没有被任何启用的规则连通的两个节点互相不可达，也拿不到对方的地址和公钥。规则之间没有顺序和优先级。
+只有"允许"：一条规则说分组 `src` 里的节点可以访问分组 `dst` 里的节点（分组见第 18 节）。没有被任何启用的规则连通的两个节点互相不可达，也拿不到对方的地址和公钥。规则之间没有顺序和优先级。
+
+规则记的是分组的编号，所以分组改名之后规则照常生效；分组被删掉时，用到它的规则一起被删掉。
 
 `Rule`：
 
 ```json
-{ "id": 2, "name": "ssh", "src": "laptops", "dst": "servers", "direction": "one_way", "enabled": true }
+{
+  "id": 2, "name": "ssh",
+  "src": { "id": 2, "name": "laptops" }, "dst": { "id": 3, "name": "servers" },
+  "direction": "one_way", "enabled": true
+}
 ```
+
+「新增」`src` 和 `dst` 是 `GroupRef`：分组的编号和它现在的名字。
 
 ### GET /networks/{network}/rules
 
@@ -944,24 +984,25 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 ### POST /networks/{network}/rules
 
 ```json
-{ "name": "ssh", "src": "laptops", "dst": "servers", "direction": "one_way", "enabled": true }
+{ "name": "ssh", "src": 2, "dst": 3, "direction": "one_way", "enabled": true }
 ```
 
 | 字段 | 必填 | 含义 |
 |---|---|---|
-| `src`、`dst` | 是 | 两个标签。可以是还没有节点带着的标签，也可以是 `all` |
+| `src`、`dst` | 是 | 「新增」两个分组的编号，都必须是这个网络里已有的分组。可以是 `All`，可以是还没有成员的分组，可以是同一个 |
 | `direction` | 否 | 默认 `"both"` |
 | `enabled` | 否 | 默认 `true` |
 | `name` | 否 | 默认 `""` |
 
 应答：`201`，`Rule`。
-错误：`invalid_request`。
+错误：`invalid_request`、`not_found`（分组不存在，`what` 是 `group`，`field` 是 `src` 或 `dst`）。
 
 ### PATCH /networks/{network}/rules/{id}
 
-可以写的字段：`name`、`src`、`dst`、`direction`、`enabled`，都可省略。启用和停用一条规则就是 `{ "enabled": true }` 和 `{ "enabled": false }`。
+可以写的字段：`name`、`src`、`dst`（分组编号）、`direction`、`enabled`，都可省略。启用和停用一条规则就是 `{ "enabled": true }` 和 `{ "enabled": false }`。
 
 应答：`Rule`。
+错误：`invalid_request`、`not_found`（规则不存在；分组不存在，`what` 是 `group`，`field` 是 `src` 或 `dst`）。
 
 ### DELETE /networks/{network}/rules/{id}
 
@@ -973,25 +1014,32 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 
 ### 8.1 GET /networks/{network}/access/graph
 
-访问关系图的标签视图：每个标签是一个点，每条规则是一条连线。
+访问关系图的分组视图：每个分组是一个点，每条规则是一条连线。
 
 ```json
 {
-  "tags": [
+  "groups": [
     {
-      "tag": "all",
+      "id": 1, "name": "All", "builtin": true,
       "nodes": [
         { "id": 1, "name": "node-1", "virtual_ip": "10.66.0.1" },
         { "id": 2, "name": "laptop", "virtual_ip": "10.66.0.2" },
         { "id": 3, "name": "node-3", "virtual_ip": "10.66.0.3" }
-      ]
+      ],
+      "rules": [{ "id": 1, "name": "default", "src": { "id": 1, "name": "All" }, "dst": { "id": 1, "name": "All" }, "direction": "both", "enabled": false }]
     },
-    { "tag": "laptops", "nodes": [{ "id": 2, "name": "laptop", "virtual_ip": "10.66.0.2" }] },
-    { "tag": "servers", "nodes": [{ "id": 1, "name": "node-1", "virtual_ip": "10.66.0.1" }] }
+    {
+      "id": 2, "name": "laptops", "builtin": false, "nodes": [{ "id": 2, "name": "laptop", "virtual_ip": "10.66.0.2" }],
+      "rules": [{ "id": 2, "name": "ssh", "src": { "id": 2, "name": "laptops" }, "dst": { "id": 3, "name": "servers" }, "direction": "one_way", "enabled": true }]
+    },
+    {
+      "id": 3, "name": "servers", "builtin": false, "nodes": [{ "id": 1, "name": "node-1", "virtual_ip": "10.66.0.1" }],
+      "rules": [{ "id": 2, "name": "ssh", "src": { "id": 2, "name": "laptops" }, "dst": { "id": 3, "name": "servers" }, "direction": "one_way", "enabled": true }]
+    }
   ],
   "rules": [
-    { "id": 1, "name": "default", "src": "all", "dst": "all", "direction": "both", "enabled": false },
-    { "id": 2, "name": "ssh", "src": "laptops", "dst": "servers", "direction": "one_way", "enabled": true }
+    { "id": 1, "name": "default", "src": { "id": 1, "name": "All" }, "dst": { "id": 1, "name": "All" }, "direction": "both", "enabled": false },
+    { "id": 2, "name": "ssh", "src": { "id": 2, "name": "laptops" }, "dst": { "id": 3, "name": "servers" }, "direction": "one_way", "enabled": true }
   ],
   "unconnected": [{ "id": 3, "name": "node-3", "virtual_ip": "10.66.0.3" }],
   "unacknowledged": []
@@ -1000,7 +1048,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 
 | 字段 | 含义 |
 |---|---|
-| `tags` | 内置的 `all`、节点上的标签、规则里提到的标签，按字典序；每个标签带着它的成员。规则里提到而没有节点带着的标签，`nodes` 是空的 |
+| `groups` | 「新增」全部分组（`Group`，第 18 节），和 `GET …/groups` 一样：`All` 在最前面，其余按名字排，每个带着它的成员和用到它的规则。没有成员的分组 `nodes` 是空的 |
 | `rules` | 全部规则。`direction` 是 `"both"` 的画双箭头，`"one_way"` 的画从 `src` 到 `dst` 的单箭头，`enabled` 是 `false` 的画虚线 |
 | `unconnected` | 没有被任何启用的规则连通的节点 |
 | `unacknowledged` | 还没有确认当前版本配置的节点（例如不在线）。它们还在按旧的规则判定，图上要标出来 |
@@ -1017,7 +1065,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   "to": { "id": 1, "name": "node-1", "virtual_ip": "10.66.0.1" },
   "allowed": true,
   "rules": [
-    { "id": 2, "name": "ssh", "src": "laptops", "dst": "servers", "direction": "one_way", "enabled": true }
+    { "id": 2, "name": "ssh", "src": { "id": 2, "name": "laptops" }, "dst": { "id": 3, "name": "servers" }, "direction": "one_way", "enabled": true }
   ]
 }
 ```
@@ -1438,6 +1486,10 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | POST | `/networks/{network}/nodes/{node}/succeed` | 继任 |
 | GET | `/networks/{network}/nodes/{node}/routes` | 节点上报的路由表 |
 | GET | `/networks/{network}/nodes/{node}/access` | 访问关系的节点视图 |
+| GET、POST | `/networks/{network}/groups` | 「新增」列出、新建分组 |
+| GET、PATCH、DELETE | `/networks/{network}/groups/{group}` | 「新增」一个分组（成员和用到它的规则）、改名、删除 |
+| PATCH | `/networks/{network}/groups/{group}/nodes` | 「新增」批量增减分组的成员 |
+| PUT、DELETE | `/networks/{network}/groups/{group}/nodes/{node}` | 「新增」把一个节点加入、移出分组 |
 | GET、POST | `/networks/{network}/tokens` | 列出、生成注册令牌 |
 | DELETE | `/networks/{network}/tokens/{id}` | 收回注册令牌 |
 | GET、POST | `/networks/{network}/rules` | 列出、新建规则 |
@@ -1451,7 +1503,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | PUT、DELETE | `/networks/{network}/forwards/{id}` | 替换、删除端口转发 |
 | GET | `/networks/{network}/pairs` | 列出节点对设置 |
 | PUT、DELETE | `/networks/{network}/pairs/{a}/{b}` | 设置、去掉一对节点的设置 |
-| GET | `/networks/{network}/access/graph` | 访问关系的标签视图 |
+| GET | `/networks/{network}/access/graph` | 访问关系的分组视图 |
 | GET | `/networks/{network}/access/check` | 访问检查 |
 | GET、PATCH | `/update` | 「新增」更新的设置和现状；改设置 |
 | POST | `/update/check` | 「新增」现在查一次发布源 |
@@ -1463,7 +1515,6 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | GET | `/networks/{network}/nodes/{node}/listeners` | 「新增」节点上全部监听的状态（含节点自己开的回环入口） |
 | GET | `/networks/{network}/exits` | 「新增」启用了的出口：设置、用量、健康、用它的节点看到的 |
 | GET | `/networks/{network}/exits/{node}` | 「新增」一个出口 |
-| POST | `/networks/{network}/tags/rename` | 「新增」在整个网络里把一个标签改名 |
 | GET | `/networks/{network}/backbone` | 「新增」relay 之间的延迟矩阵 |
 | GET、POST | `/networks/{network}/tests` | 「新增」列出最近的主动测试、发起一个 |
 | GET | `/networks/{network}/tests/{id}` | 「新增」一个测试的进度和结果 |
@@ -2027,25 +2078,157 @@ Prometheus 的文本格式（`Content-Type: text/plain; version=0.0.4`）。**�
 
 一个出口，应答是 `ExitView`。错误：`not_found`（节点不在这个网络里，或者没有启用出口）。
 
-## 18. 标签「新增」
+## 18. 分组「新增」
 
-### POST /networks/{network}/tags/rename
+分组是一组节点，访问规则按分组写（第 7 节）。一个节点可以在任意多个分组里。分组只有名字和成员，没有别的设置，也不能嵌套。
+它取代了原来的"标签"。
 
-在整个网络里把一个标签改名：节点上的、规则里的（`src` 和 `dst`）、还没用掉的注册令牌预设的。节点上已经有新名字的，两个合成一个。
+- **内置分组 `All`**：每个网络从建好起就有，网络里的每个节点都是它的成员，不用加入，也移不出去；它不能改名，不能删除。
+  新网络的默认规则是 `All <-> All`。节点和注册令牌的 `groups` 里不列出它。
+- **名字**：1 到 32 个字符，字母（任何文字的都行）、数字、连字符 `-`、下划线 `_`，首尾的空白会被去掉。保留写的大小写；在一个网络里
+  不分大小写唯一：`Servers` 和 `servers` 是同一个名字，`all` 被内置分组占着。全是数字的名字也可以。
+- **编号**：分组的编号在整个 controller 里唯一，删掉之后不复用。
+- **引用**：请求里一律写分组的编号（节点的 `groups`、注册令牌的 `groups`、规则的 `src` 和 `dst`），必须是这个网络里已有的分组，
+  不会因为被引用而新建分组。规则记的是编号，所以分组改名之后规则照常生效。
+- **节点看不到分组**：下发给节点的是按规则算好的"它能访问谁、谁能访问它"，分组的名字和成员不出节点协议。改名不下发任何东西。
+
+`GroupRef` 是指代一个分组时附带的名字（现在的名字），节点的 `groups`、注册令牌的 `groups`、规则的 `src` 和 `dst` 用它：
 
 ```json
-{ "from": "laptops", "to": "phones" }
+{ "id": 3, "name": "servers" }
 ```
 
-应答：
+`Group`：
 
 ```json
-{ "from": "laptops", "to": "phones", "nodes": 3, "rules": 1, "tokens": 0 }
+{
+  "id": 3,
+  "name": "servers",
+  "builtin": false,
+  "nodes": [{ "id": 1, "name": "nas", "virtual_ip": "10.66.0.1" }],
+  "rules": [
+    { "id": 2, "name": "ssh", "src": { "id": 2, "name": "laptops" }, "dst": { "id": 3, "name": "servers" }, "direction": "one_way", "enabled": true }
+  ]
+}
 ```
 
-`nodes`、`rules`、`tokens` 是各改了几处。新名字原来没有人用时，谁能访问谁不变；原来就有人用时，两组节点合成了一组，访问关系按合并之后的算，随即下发。
+| 字段 | 含义 |
+|---|---|
+| `id` | 分组编号 |
+| `name` | 名字，写的时候的大小写 |
+| `builtin` | 是不是内置的 `All` |
+| `nodes` | 成员（`NodeRef`），按编号排。`All` 的成员是网络里的全部节点 |
+| `rules` | `src` 或 `dst` 是它的规则（`Rule`，包括停用的），按编号排。删除这个分组时它们被一起删掉 |
 
-错误：`invalid_request`（标签的写法不对；`from` 或 `to` 是内置的 `all`；两个一样）。
+### GET /networks/{network}/groups
+
+全部分组：`All` 在最前面，其余按名字排（不分大小写）。应答是 `Group` 的数组。
+
+### POST /networks/{network}/groups
+
+新建一个分组。
+
+```json
+{ "name": "servers" }
+```
+
+应答：`201`，`Group`（新分组没有成员，也没有规则）。
+错误：`invalid_request`（名字的写法不对）、`name_taken`，见 18.1 节。
+
+### GET /networks/{network}/groups/{group}
+
+一个分组，带着它的成员和用到它的规则。界面在删除之前用它告诉管理员会影响什么。
+
+应答：`Group`。
+错误：`not_found`。
+
+### PATCH /networks/{network}/groups/{group}
+
+改名。
+
+```json
+{ "name": "boxes" }
+```
+
+`name` 可省略（省略就什么也不改）。只改大小写也算改名；和现在的名字一模一样时什么也不做。改名不改变谁能访问谁。
+
+应答：`Group`。
+错误：`not_found`、`invalid_request`（名字的写法不对；要改的是 `All`）、`name_taken`。
+
+### DELETE /networks/{network}/groups/{group}
+
+删掉一个分组：把它从成员节点上去掉，从预设了它的注册令牌上去掉，删掉 `src` 或 `dst` 是它的规则。这些在同一个事务里，要么都做，要么都不做。
+只经由这些规则才被允许的访问随即撤销，和删掉一条规则一样（第 7 节末尾说的顺序）：不再被允许的连接被断开。
+
+应答：`200`（不是 `204`），`DeletedGroup`，说删掉了什么：
+
+```json
+{
+  "id": 3,
+  "name": "servers",
+  "nodes": [{ "id": 1, "name": "nas", "virtual_ip": "10.66.0.1" }],
+  "rules": [
+    { "id": 2, "name": "ssh", "src": { "id": 2, "name": "laptops" }, "dst": { "id": 3, "name": "servers" }, "direction": "one_way", "enabled": true }
+  ],
+  "tokens": [4]
+}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `id`、`name` | 删掉的分组 |
+| `nodes` | 原来的成员，现在不在这个分组里了（`NodeRef`） |
+| `rules` | 一起删掉的规则，删之前的样子（`Rule`） |
+| `tokens` | 预设了它、还没用掉的注册令牌的编号：它们不再预设它。用掉了的令牌上它也被去掉，但不列在这里 |
+
+错误：`not_found`、`invalid_request`（要删的是 `All`）。
+
+### PATCH /networks/{network}/groups/{group}/nodes
+
+批量增减成员：一次把几个节点加入、移出这个分组。
+
+```json
+{ "add": [1, 4], "remove": [2] }
+```
+
+| 字段 | 必填 | 含义 |
+|---|---|---|
+| `add` | 否 | 要加入的节点编号，默认 `[]` |
+| `remove` | 否 | 要移出的节点编号，默认 `[]` |
+
+已经在里面的再加入、本来就不在的移出，都不算错，什么也不做。要么全部做到，要么一个都不改。成员变了的节点，访问关系随即按规则重算、下发；
+被移出之后不再被允许的连接被断开。
+
+应答：`Group`（改完之后的）。
+错误：`not_found`（分组不存在；节点不在这个网络里，`what` 是 `node`，`field` 是 `add[序号]` 或 `remove[序号]`，序号见第 2 节的 `field`）、`invalid_request`（要改的是 `All`；
+同一个节点既在 `add` 里又在 `remove` 里，`what` 是 `duplicate`，`field` 是 `remove`）。
+
+### PUT /networks/{network}/groups/{group}/nodes/{node}
+
+把一个节点加入分组。请求体写 `{}`。已经在里面时什么也不做。
+
+应答：`Group`。
+错误：`not_found`（分组或者节点不存在）、`invalid_request`（要改的是 `All`）。
+
+### DELETE /networks/{network}/groups/{group}/nodes/{node}
+
+把一个节点移出分组。本来就不在里面时什么也不做。
+
+应答：`Group`（不是 `204`）。
+错误：同上。
+
+### 18.1 分组的错误
+
+| 情况 | HTTP | `code` | `what` | `field` |
+|---|---|---|---|---|
+| 分组不存在，或者不在这个网络里 | 404 | `not_found` | `group` | 路径里的是 `null`；规则里的是 `src` 或 `dst`；列表 `groups` 里的是 `groups[序号]` |
+| 名字被占用（不分大小写；`All` 也算） | 409 | `name_taken` | `group` | `name` |
+| 名字的写法不对 | 400 | `invalid_request` | `empty`（空的）、`too_long`（超过 32 个字符）、`malformed`（有不能用的字符） | `name` |
+| 内置分组 `All` 不能改名、删除、增减成员 | 400 | `invalid_request` | `builtin` | `group` |
+
+哪一个分组不存在看 `field`：规则里是 `src` 或 `dst`；节点、注册令牌的 `groups` 列表里是 `groups[序号]`，序号是请求发来的那个列表里
+第一个不存在的编号的位置，从 0 数起（`{ "groups": [3, 99] }` 得到 `"field": "groups[1]"`）。成员列表 `add`、`remove` 里不存在的节点也这样写（`add[2]`），见第 2 节的 `field`。
+`message` 是给人看的原话，写着那个编号（`没有分组 #99`）或者名字；请不要从里面取值。
 
 ## 19. 主动测试「新增」
 

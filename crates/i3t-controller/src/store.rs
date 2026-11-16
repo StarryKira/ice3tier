@@ -12,6 +12,7 @@ mod credential;
 #[cfg(test)]
 pub(crate) mod fixtures;
 mod forward;
+mod group;
 mod listener;
 mod network;
 mod node;
@@ -29,6 +30,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 pub use cooldown::CooldownKind;
 pub use credential::CredentialRecord;
 pub use forward::ForwardRecord;
+pub use group::{BUILTIN_GROUP, GroupRecord, folded};
 pub use network::{NetworkRecord, NewNetwork};
 pub use node::{NetmapState, NewNode, NodeRecord};
 pub use oplog::LogFilter;

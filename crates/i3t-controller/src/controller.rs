@@ -10,6 +10,7 @@ mod credentials;
 mod diag;
 mod enrollment;
 mod forwards;
+mod groups;
 mod listeners;
 mod metrics;
 mod naming;
@@ -48,7 +49,7 @@ use crate::error::{Entity, Error};
 use crate::gate::Throttle;
 use crate::netmap::NetworkView;
 use crate::secret;
-use crate::store::{DIGEST_LEN, LogFilter, NetworkRecord, NodeRecord, Store};
+use crate::store::{DIGEST_LEN, GroupRecord, LogFilter, NetworkRecord, NodeRecord, Store};
 use crate::sync::NodeSync;
 
 pub use protocol::Admitted;
@@ -423,7 +424,8 @@ impl Inner {
     }
 
     /// 管理 API 里的节点：存储里的记录，加上它现在在不在线、netmap 发到了第几版。
-    pub(crate) fn node_view(&self, network: &NetworkRecord, record: &NodeRecord, now: Timestamp) -> Node {
+    /// `groups` 是这个网络的全部分组（[`Store::groups`] 的顺序），用来写出它所在分组的名字。
+    pub(crate) fn node_view(&self, network: &NetworkRecord, groups: &[GroupRecord], record: &NodeRecord, now: Timestamp) -> Node {
         let online = self.is_online(record.id);
         // 只是注册时连上过（`i3t join`）不算在线过：节点真的跑起来连上了才有"最近在线"。
         let running = self.live.get(&record.id).is_some_and(|live| !live.enrolling);
@@ -435,7 +437,7 @@ impl Inner {
             name: record.name.clone(),
             fqdn: format!("{}.{}", record.name, network.domain()),
             virtual_ip: record.virtual_ip,
-            tags: record.tags.iter().cloned().collect(),
+            groups: groups.iter().filter(|group| record.groups.contains(&group.id)).map(GroupRecord::to_ref).collect(),
             declared: record.declared,
             relay: record.relay.clone(),
             exit: record.exit.clone(),

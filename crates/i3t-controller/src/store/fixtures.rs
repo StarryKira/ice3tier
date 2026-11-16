@@ -30,7 +30,7 @@ pub(crate) fn new_node(network: NetworkId, seed: u8) -> NewNode {
         key: key(seed),
         name: None,
         virtual_ip: [10, 66, 0, seed].into(),
-        tags: Default::default(),
+        groups: Default::default(),
         declared: Declared::default(),
         platform: "linux-x86_64".to_owned(),
         version: "0.1.0".to_owned(),

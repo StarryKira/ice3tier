@@ -169,11 +169,21 @@ async fn the_command_line_drives_a_running_controller() {
     fixture.ok(&["network", "set", "--routing", "lowest-cost", "--max-relay-hops", "3"]).await;
     assert_eq!(fixture.json(&["network", "show"]).await["routing"], "lowest_cost");
 
+    // 分组。
+    assert!(fixture.ok(&["group", "list"]).await.contains("All（自带）"));
+    for name in ["servers", "laptops", "home"] {
+        assert!(fixture.ok(&["group", "create", name]).await.contains(name));
+    }
+    assert!(fixture.fails(&["group", "create", "SERVERS"]).await.contains("name_taken"));
+    let missing = fixture.fails(&["token", "create", "--group", "servers", "--group", "printers"]).await;
+    assert!(missing.contains("没有分组 printers"), "说出不存在的那一个：{missing}");
+
     // 注册令牌和节点。
-    let token = fixture.ok(&["token", "create", "--tag", "servers", "--ip", "10.66.0.50"]).await;
+    let token = fixture.ok(&["token", "create", "--group", "servers", "--ip", "10.66.0.50"]).await;
     assert!(token.lines().any(|line| line.trim().starts_with("i3t-")), "{token}");
     let tokens = fixture.json(&["token", "list"]).await;
-    assert_eq!(tokens[0]["tags"], serde_json::json!(["servers"]));
+    assert_eq!(tokens[0]["groups"][0]["name"], "servers");
+    assert!(fixture.ok(&["token", "list"]).await.contains("servers"));
     fixture.ok(&["token", "delete", &tokens[0]["id"].to_string()]).await;
 
     let _plain = fixture.join(1, Declared::default()).await;
@@ -183,10 +193,16 @@ async fn the_command_line_drives_a_running_controller() {
     // 节点可以用编号、虚拟 IP 或名字指代。
     fixture.ok(&["node", "rename", "1", "laptop"]).await;
     fixture.ok(&["node", "rename", "10.66.0.2", "nas-01"]).await;
-    fixture.ok(&["node", "tag", "laptop", "laptops"]).await;
-    fixture.ok(&["node", "tag", "nas-01", "servers", "home"]).await;
+    fixture.ok(&["node", "groups", "laptop", "laptops"]).await;
+    fixture.ok(&["node", "groups", "nas-01", "Servers", "home"]).await;
     let detail = fixture.ok(&["node", "show", "nas-01"]).await;
     assert!(detail.contains("nas-01.home.i3t") && detail.contains("home、servers"), "{detail}");
+    assert!(fixture.fails(&["node", "groups", "laptop", "nope"]).await.contains("nope"));
+    let group = fixture.ok(&["group", "add", "home", "laptop", "nas-01"]).await;
+    assert!(Fixture::has_line(&group, &["节点", "laptop、nas-01"]), "{group}");
+    fixture.ok(&["group", "remove", "home", "laptop"]).await;
+    assert_eq!(fixture.json(&["group", "show", "home"]).await["nodes"].as_array().unwrap().len(), 1);
+    assert!(fixture.fails(&["group", "add", "all", "laptop"]).await.contains("All"), "All 的成员改不了");
     assert_eq!(fixture.json(&["node", "show", "laptop"]).await["virtual_ip"], "10.66.0.1");
     assert!(fixture.fails(&["node", "show", "nobody"]).await.contains("nobody"));
     fixture.ok(&["node", "set", "laptop", "--dial-out-only", "on", "--reach", "direct-only"]).await;
@@ -221,7 +237,15 @@ async fn the_command_line_drives_a_running_controller() {
     let added = fixture.json(&["rule", "add", "laptops", "servers", "--one-way", "--name", "ssh"]).await;
     assert_eq!(added["direction"], "one_way");
     let listed = fixture.ok(&["rule", "list"]).await;
-    assert!(listed.contains("laptops  ->   servers  是    ssh") && listed.contains("all      <->  all      否"), "{listed}");
+    assert!(listed.contains("laptops  ->   servers  是    ssh") && listed.contains("All      <->  All      否"), "{listed}");
+    assert!(fixture.fails(&["rule", "add", "laptops", "ghosts"]).await.contains("没有分组 ghosts"));
+    let renamed = fixture.ok(&["group", "rename", "servers", "boxes"]).await;
+    assert!(Fixture::has_line(&renamed, &["规则", "#", "laptops -> boxes"]), "改名之后规则跟着走：{renamed}");
+    fixture.ok(&["group", "rename", "boxes", "servers"]).await;
+    let spare = fixture.json(&["group", "create", "spare"]).await;
+    fixture.ok(&["rule", "add", "spare", "all"]).await;
+    let deleted = fixture.ok(&["group", "delete", &spare["id"].to_string()]).await;
+    assert!(deleted.contains("分组 spare 已删除") && deleted.contains("1 条规则"), "按编号也能指代分组：{deleted}");
     assert!(fixture.ok(&["access", "check", "laptop", "nas-01"]).await.contains("可以访问"));
     assert!(fixture.ok(&["access", "check", "nas-01", "laptop"]).await.contains("不能访问"));
     assert_eq!(fixture.json(&["access", "check", "laptop", "nas-01"]).await["allowed"], true);
@@ -298,6 +322,9 @@ async fn the_command_line_drives_a_running_controller() {
         &["node", "list"],
         &["node", "show", "nas-01"],
         &["rule", "list"],
+        &["group", "list"],
+        &["group", "show", "servers"],
+        &["token", "list", "--all"],
         &["access", "graph"],
         &["credential", "list"],
         &["listener", "list"],
@@ -310,6 +337,18 @@ async fn the_command_line_drives_a_running_controller() {
     }
     let english_log = fixture.english(&["log", "--limit", "100"]).await;
     assert!(english_log.contains("Node laptop deleted") && english_log.contains("Network home created"), "{english_log}");
+    assert!(english_log.contains("Group servers renamed to boxes") && english_log.contains("Group spare deleted"), "{english_log}");
+    let english_group = fixture.english(&["group", "create", "lab"]).await;
+    assert!(english_group.starts_with("lab #"), "{english_group}");
+    let url = format!("http://{}", fixture.admin);
+    let unknown = fixture
+        .command_in("en")
+        .args(["--url", &url, "--token", &fixture.token, "node", "groups", "nas-01", "nope"])
+        .output()
+        .await
+        .unwrap();
+    let said = text(&unknown.stderr);
+    assert!(!unknown.status.success() && said.contains("No group nope") && !i3t_lang::cli::has_chinese(&said), "{said}");
     let url = format!("http://{}", fixture.admin);
     let refused =
         fixture.command_in("en").args(["--url", &url, "--token", &fixture.token, "network", "delete", "home"]).output().await.unwrap();

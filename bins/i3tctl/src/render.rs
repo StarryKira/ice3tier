@@ -6,10 +6,10 @@ use i3t_lang::codes::Codes;
 use i3t_lang::table::{Fields, Table};
 use i3t_lang::{Lang, NONE, optional};
 use i3t_model::admin::{
-    AccessCheck, AccessGraph, BackboneView, CreatedCredential, CreatedEnrollToken, Credential, Direction, EnrollTokenInfo, ExitView,
-    ForcedUpdates, Forward, LaneEffect, ListenStatus, Listener, LogEntry, Network, Node, NodeAccess, NodeDetail, NodeListeners, NodeRef,
-    NodeUpdate, Overview, PairLaneSide, PairView, PathLeg, PathSource, PathView, RelayEnabled, RenamedTag, RouteMatrix, RouteTable, Rule,
-    Status, UpdateOverview,
+    AccessCheck, AccessGraph, BackboneView, CreatedCredential, CreatedEnrollToken, Credential, DeletedGroup, Direction, EnrollTokenInfo,
+    ExitView, ForcedUpdates, Forward, Group, GroupRef, LaneEffect, ListenStatus, Listener, LogEntry, Network, Node, NodeAccess, NodeDetail,
+    NodeListeners, NodeRef, NodeUpdate, Overview, PairLaneSide, PairView, PathLeg, PathSource, PathView, RelayEnabled, RouteMatrix,
+    RouteTable, Rule, Status, UpdateOverview,
 };
 use i3t_model::control::{DirectKind, LaneCounts, LaneReport, LegTransport, PathSegment, PeerLanes, Route};
 use i3t_model::netmap::DefaultAction;
@@ -103,9 +103,34 @@ fn print_table(table: &Table, empty: &str) {
     if table.is_empty() { println!("{empty}") } else { table.print() }
 }
 
-pub fn renamed_tag(renamed: &RenamedTag) {
+pub fn groups(groups: &[Group]) {
+    let (t, lang, _) = context();
+    let mut table = Table::new(&t.groups_header);
+    for group in groups {
+        let name = if group.builtin { lang.paren(&group.name, t.builtin) } else { group.name.clone() };
+        table.row(vec![group.id.to_string(), name, group.nodes.len().to_string(), group.rules.len().to_string()]);
+    }
+    print_table(&table, t.no_groups);
+}
+
+/// 一个分组：成员和用到它的规则。
+pub fn group(group: &Group) {
+    let (t, lang, _) = context();
+    let title = format!("{} #{}", group.name, group.id);
+    println!("{}", if group.builtin { lang.paren(&title, t.builtin) } else { title });
+    let mut fields = Fields::new(2);
+    fields.add(t.nodes, lang.list(group.nodes.iter().map(node_name)));
+    fields.add(t.rules, lang.list(group.rules.iter().map(rule_text)));
+    fields.print();
+}
+
+pub fn deleted_group(deleted: &DeletedGroup) {
     let (t, _, _) = context();
-    println!("{}", (t.tag_renamed)(&renamed.from, &renamed.to, renamed.nodes, renamed.rules, renamed.tokens));
+    println!("{}", (t.group_deleted)(&deleted.name, deleted.nodes.len(), deleted.rules.len()));
+}
+
+fn group_names(lang: Lang, groups: &[GroupRef]) -> String {
+    lang.list(groups.iter().map(|group| group.name.as_str()))
 }
 
 fn listen_cells(status: Option<&ListenStatus>) -> [String; 3] {
@@ -219,7 +244,7 @@ pub fn nodes(nodes: &[Node]) {
             roles(node),
             node.version.clone(),
             node.platform.clone(),
-            lang.list(&node.tags),
+            group_names(lang, &node.groups),
         ]);
     }
     print_table(&table, t.no_nodes);
@@ -235,7 +260,7 @@ pub fn node_changed(node: &Node) {
     let (t, lang, _) = context();
     println!("{} #{}  {}  {}", node.name, node.id, node.virtual_ip, node.fqdn);
     let mut fields = Fields::new(2);
-    fields.add(t.tags, lang.list(&node.tags));
+    fields.add(t.groups, group_names(lang, &node.groups));
     fields.add(t.roles, roles(node));
     fields.print();
 }
@@ -271,7 +296,7 @@ pub fn node_detail(detail: &NodeDetail) {
     fields.add(t.fqdn, node.fqdn.clone());
     fields.add(t.virtual_ip, node.virtual_ip.to_string());
     fields.add(t.key, node.key.to_string());
-    fields.add(t.tags, lang.list(&node.tags));
+    fields.add(t.groups, group_names(lang, &node.groups));
     let state = if node.online {
         t.online.to_owned()
     } else {
@@ -647,7 +672,7 @@ pub fn tokens(tokens: &[EnrollTokenInfo]) {
             optional(token.used_by.as_ref().map(|node| node.name.clone())),
             optional(token.virtual_ip),
             optional(token.successor_of.map(|node| format!("#{node}"))),
-            lang.list(&token.tags),
+            group_names(lang, &token.groups),
         ]);
     }
     print_table(&table, t.no_tokens);
@@ -666,9 +691,9 @@ pub fn rules(rules: &[Rule]) {
     for rule in rules {
         table.row(vec![
             rule.id.to_string(),
-            rule.src.clone(),
+            rule.src.name.clone(),
             arrow(rule.direction).to_owned(),
-            rule.dst.clone(),
+            rule.dst.name.clone(),
             yes_no(rule.enabled),
             rule.name.clone(),
         ]);
@@ -679,7 +704,12 @@ pub fn rules(rules: &[Rule]) {
 pub fn rule(rule: &Rule) {
     let (t, lang, _) = context();
     let state = if rule.enabled { t.enabled } else { t.disabled };
-    println!("{}", lang.paren(&format!("{} #{}  {} {} {}", t.rule, rule.id, rule.src, arrow(rule.direction), rule.dst), state));
+    println!("{}", lang.paren(&format!("{} {}", t.rule, rule_text(rule)), state));
+}
+
+/// `#2 laptops -> servers`。
+fn rule_text(rule: &Rule) -> String {
+    format!("#{} {} {} {}", rule.id, rule.src.name, arrow(rule.direction), rule.dst.name)
 }
 
 const fn arrow(direction: Direction) -> &'static str {
@@ -896,11 +926,11 @@ fn lane_report(report: &LaneReport) {
 
 pub fn access_graph(graph: &AccessGraph) {
     let (t, lang, _) = context();
-    let mut tags = Table::new(&t.tags_header);
-    for entry in &graph.tags {
-        tags.row(vec![entry.tag.clone(), entry.nodes.len().to_string(), lang.list(entry.nodes.iter().map(node_name))]);
+    let mut groups = Table::new(&t.graph_groups_header);
+    for group in &graph.groups {
+        groups.row(vec![group.name.clone(), group.nodes.len().to_string(), lang.list(group.nodes.iter().map(node_name))]);
     }
-    tags.print();
+    groups.print();
     println!();
     rules(&graph.rules);
     if !graph.unconnected.is_empty() {
@@ -914,7 +944,7 @@ pub fn access_graph(graph: &AccessGraph) {
 pub fn access_check(check: &AccessCheck) {
     let (t, lang, _) = context();
     if check.allowed {
-        let rules = lang.list(check.rules.iter().map(|rule| format!("#{} {} {} {}", rule.id, rule.src, arrow(rule.direction), rule.dst)));
+        let rules = lang.list(check.rules.iter().map(rule_text));
         println!("{}", lang.labelled(&(t.can_access)(&check.from.name, &check.to.name), &rules));
     } else {
         println!("{}", (t.cannot_access)(&check.from.name, &check.to.name));

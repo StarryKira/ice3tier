@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use i3t_crypto::NodeKey;
 use i3t_model::Netmap;
-use i3t_model::admin::{CreateEnrollToken, CreateNetwork, Network, NetworkId};
+use i3t_model::admin::{CreateEnrollToken, CreateGroup, CreateNetwork, GroupId, Network, NetworkId};
 use i3t_model::control::{Declared, EnrollToken, Hello, PROTOCOL_REVISION, Report, SelfUpdate, Signal, TestOrder, ToController, ToNode};
 use i3t_model::update::{SignedManifest, UpdateStatus, UpdateTiming};
 use i3t_proto::{NodeId, PublicKey};
@@ -82,21 +82,28 @@ impl Lab {
         created.token.parse::<EnrollToken>().unwrap().secret
     }
 
-    /// 一个节点带着这些标签和声明加入网络，并且保持在线。它的第一份 netmap 已经收下但还没确认。
-    pub(crate) fn join_with(&mut self, network: NetworkId, tags: &[&str], declared: Declared) -> Member {
-        let request = CreateEnrollToken { tags: tags.iter().map(|&tag| tag.to_owned()).collect(), ..CreateEnrollToken::default() };
+    /// 叫 `name` 的分组（不分大小写），没有就建一个。`all` 是内置的 `All`。
+    pub(crate) fn group(&self, network: NetworkId, name: &str) -> GroupId {
+        let existing = self.controller.groups(network).unwrap().into_iter().find(|group| group.name.eq_ignore_ascii_case(name));
+        existing.map_or_else(|| self.controller.create_group(network, &CreateGroup { name: name.to_owned() }).unwrap().id, |group| group.id)
+    }
+
+    /// 一个节点带着这些分组（按名字，没有的先建出来）和声明加入网络，并且保持在线。它的第一份 netmap 已经收下但还没确认。
+    pub(crate) fn join_with(&mut self, network: NetworkId, groups: &[&str], declared: Declared) -> Member {
+        let groups = groups.iter().map(|name| self.group(network, name)).collect();
+        let request = CreateEnrollToken { groups, ..CreateEnrollToken::default() };
         let secret = self.secret(network, &request);
         let key = self.fresh_key();
         self.enroll(key, &secret, declared).expect("注册应该成功")
     }
 
-    pub(crate) fn join(&mut self, network: NetworkId, tags: &[&str]) -> Member {
-        self.join_with(network, tags, Declared::default())
+    pub(crate) fn join(&mut self, network: NetworkId, groups: &[&str]) -> Member {
+        self.join_with(network, groups, Declared::default())
     }
 
     /// 加入网络之后马上下线。不在线的节点不用等它确认，所以它的 netmap 立刻就是最终的样子。
-    pub(crate) fn join_offline(&mut self, network: NetworkId, tags: &[&str], declared: Declared) -> NodeId {
-        let member = self.join_with(network, tags, declared);
+    pub(crate) fn join_offline(&mut self, network: NetworkId, groups: &[&str], declared: Declared) -> NodeId {
+        let member = self.join_with(network, groups, declared);
         self.controller.disconnect(member.session);
         self.settle(&mut []);
         member.id

@@ -54,7 +54,7 @@ fn a_one_way_rule_gives_inbound_to_one_side_and_outbound_to_the_other() {
 }
 
 #[test]
-fn nodes_with_tags_no_rule_connects_do_not_see_each_other_at_all() {
+fn nodes_in_groups_no_rule_connects_do_not_see_each_other_at_all() {
     let mut lab = Lab::new();
     let network = lab.network("home");
     drop_default_rule(&lab, network.id);
@@ -293,11 +293,14 @@ fn the_version_moves_only_when_the_content_changes() {
     lab.controller.update_node(network.id, b.id, &UpdateNode::default()).unwrap();
     let disabled = i3t_model::admin::CreateRule {
         name: String::new(),
-        src: "x".to_owned(),
-        dst: "y".to_owned(),
+        src: lab.group(network.id, "x"),
+        dst: lab.group(network.id, "y"),
         direction: Direction::Both,
         enabled: false,
     };
+    // 分组改名也不出节点协议。
+    let x = lab.controller.update_group(network.id, disabled.src, &i3t_model::admin::UpdateGroup { name: Some("X2".to_owned()) });
+    assert_eq!(x.unwrap().name, "X2");
     lab.controller.create_rule(network.id, &disabled).unwrap();
     lab.controller.update_network(network.id, &i3t_model::admin::UpdateNetwork::default()).unwrap();
     lab.settle(&mut [&mut a, &mut b]);

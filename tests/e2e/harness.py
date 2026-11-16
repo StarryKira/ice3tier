@@ -82,8 +82,9 @@ class Controller:
             raise RuntimeError(f"i3tctl {' '.join(args)} 失败：{done.stderr.strip() or done.stdout.strip()}")
         return json.loads(done.stdout) if done.stdout.strip() else None
 
-    def enroll_token(self, *tags: str) -> str:
-        created = self.ctl("token", "create", *[arg for tag in tags for arg in ("--tag", tag)])
+    def enroll_token(self, *groups: str) -> str:
+        """一个注册令牌，用它加入的节点在这些分组里。分组要已经有了，见 `create_groups`。"""
+        created = self.ctl("token", "create", *[arg for group in groups for arg in ("--group", group)])
         return created["token"]
 
     def node(self, node: "Node") -> dict:
@@ -140,9 +141,9 @@ class Node:
         if self.proc.poll() is not None:
             raise RuntimeError(f"{self.name} 启动失败：\n{self.read_log()[-2000:]}")
 
-    def join(self, controller: Controller, *tags: str, name: bool = True) -> None:
-        """用一个新的注册令牌加入网络，然后启动。加入之后把节点名改成主机名，方便看日志和写用户名。"""
-        token = controller.enroll_token(*tags)
+    def join(self, controller: Controller, *groups: str, name: bool = True) -> None:
+        """用一个新的注册令牌加入网络（一加入就在 `groups` 里），然后启动。加入之后把节点名改成主机名，方便看日志和写用户名。"""
+        token = controller.enroll_token(*groups)
         done = self.host.run(binary("i3t"), "--state-dir", str(self.state), "join", input=token, check=False)
         if done.returncode != 0:
             raise RuntimeError(f"{self.name} 加入失败：{done.stderr.strip()}")
@@ -651,3 +652,16 @@ def add_node_config(node: Node, text: str) -> None:
     """在节点的配置文件末尾加几行。要在节点启动之前。"""
     with (node.state / "config.toml").open("a") as config:
         config.write(text)
+
+
+def create_groups(controller: Controller, *names: str) -> None:
+    """在当前的网络里建这些分组，已经有的跳过。节点、注册令牌和规则只能引用已有的分组。"""
+    existing = {group["name"].lower() for group in controller.ctl("group", "list")}
+    for name in names:
+        if name.lower() not in existing:
+            controller.ctl("group", "create", name)
+
+
+def group_names(controller: Controller, node: Node) -> list[str]:
+    """controller 眼里这个节点所在的分组（不含 All）。"""
+    return [group["name"] for group in controller.node(node)["groups"]]

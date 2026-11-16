@@ -2,12 +2,13 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 
-use i3t_model::admin::{CreateEnrollToken, CreatedEnrollToken, EnrollTokenInfo, LogRef, NetworkId, RefKind, Timestamp, TokenState};
+use i3t_model::admin::{CreateEnrollToken, CreatedEnrollToken, EnrollTokenInfo, LogRef, NetworkId, RefKind, Timestamp};
 use i3t_model::control::{EnrollToken, Hello, ToNode};
 use i3t_proto::{NodeId, PublicKey};
 use serde_json::json;
 use tokio::sync::mpsc;
 
+use super::groups::resolve_groups;
 use super::nodes::{allocate_address, check_address, check_node_name, inherit, require_node};
 use super::protocol::{Joined, clip};
 use super::{Admitted, Controller, Inner, naming};
@@ -48,9 +49,8 @@ impl Controller {
     ///
     /// # Errors
     ///
-    /// 标签不合法；预设的虚拟 IP 现在不能用；要继任的节点不在这个网络里。
+    /// 分组不是这个网络里已有的分组（`field` 是 `groups[序号]`）；预设的虚拟 IP 现在不能用；要继任的节点不在这个网络里。
     pub fn create_token(&self, network: NetworkId, request: &CreateEnrollToken) -> Result<CreatedEnrollToken, Error> {
-        let tags = naming::node_tags(&request.tags).in_field("tags")?;
         if request.successor_of.is_some() && request.virtual_ip.is_some() {
             return Err(Error::invalid_field("virtual_ip", "with_successor", "继任的节点继承原节点的虚拟 IP，不能同时预设另一个"));
         }
@@ -61,6 +61,7 @@ impl Controller {
         let network = inner.require_network(network)?;
         let now = inner.clock.now();
         let info = inner.store.atomically(|store| {
+            let groups = resolve_groups(store, network.id, &request.groups, "groups")?;
             if let Some(virtual_ip) = request.virtual_ip {
                 check_address(store, &network, virtual_ip, now).in_field("virtual_ip")?;
                 if store.tokens(network.id)?.iter().any(|token| is_pending(token, now) && token.virtual_ip == Some(virtual_ip)) {
@@ -80,11 +81,13 @@ impl Controller {
                 prefix: prefix.clone(),
                 created_at: now,
                 expires_at: now.saturating_add(request.expires_in_secs.unwrap_or(DEFAULT_TOKEN_LIFETIME_SECS)),
-                tags: tags.into_iter().collect(),
+                groups,
                 virtual_ip: request.virtual_ip,
                 successor_of: request.successor_of,
             };
             let id = store.insert_token(&new)?;
+            let info = store.token(id)?.ok_or(Error::NotFound(Entity::Token))?;
+            let groups: Vec<_> = info.groups.iter().map(|group| json!({ "group": group.id, "group_name": group.name })).collect();
             store.log_refs(
                 now,
                 Some(network.id),
@@ -95,24 +98,12 @@ impl Controller {
                     "token": id,
                     "prefix": prefix,
                     "expires_at": new.expires_at,
-                    "tags": new.tags,
+                    "groups": groups,
                     "virtual_ip": new.virtual_ip,
                     "successor_of": new.successor_of,
                 }),
             )?;
-            Ok(EnrollTokenInfo {
-                id,
-                network: new.network,
-                created_at: new.created_at,
-                expires_at: new.expires_at,
-                tags: new.tags,
-                virtual_ip: new.virtual_ip,
-                successor_of: new.successor_of,
-                prefix: new.prefix,
-                state: TokenState::Pending,
-                used_at: None,
-                used_by: None,
-            })
+            Ok::<_, Error>(info)
         })?;
         Ok(CreatedEnrollToken { info, token })
     }
@@ -226,7 +217,8 @@ fn name_after_hostname(store: &Store, network: NetworkId, hostname: &str, now: T
     Ok(None)
 }
 
-/// 用掉令牌，建出节点。令牌指名继任时，新节点接手原节点的名字、虚拟 IP、标签和指向它的配置，原节点被删掉。
+/// 用掉令牌，建出节点。它加入令牌预设的分组。令牌指名继任时，新节点接手原节点的名字、虚拟 IP、所在的分组和指向它的配置，
+/// 原节点被删掉。
 fn create_node(
     store: &Store,
     token: &TokenRecord,
@@ -242,7 +234,7 @@ fn create_node(
         key,
         name: None,
         virtual_ip: Ipv4Addr::UNSPECIFIED,
-        tags: naming::node_tags(&token.tags)?,
+        groups: token.groups.iter().map(|group| group.id).collect(),
         declared: hello.declared,
         platform: clip(&hello.platform),
         version: clip(&hello.version),
@@ -255,7 +247,6 @@ fn create_node(
         store.park_node(old.id)?;
         new.name = Some(old.name.clone());
         new.virtual_ip = old.virtual_ip;
-        new.tags.extend(old.tags.iter().cloned());
     } else {
         new.name = name_after_hostname(store, network.id, &hello.hostname, now)?;
         new.virtual_ip = match token.virtual_ip {
@@ -280,6 +271,8 @@ fn create_node(
         }
         None => format!("节点 {}（{}）用令牌 #{} 加入", node.name, node.virtual_ip, token.id),
     };
+    // 继任时接手了原节点所在的分组，重新读一遍。
+    let node = store.node(id)?.ok_or(Error::NotFound(Entity::Node))?;
     let params = json!({
         "node": node.id,
         "node_name": node.name,

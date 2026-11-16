@@ -296,6 +296,7 @@ fn api_error(error: &ApiError) -> String {
     let thing = |what: Option<&str>| match what {
         Some("network") => "network",
         Some("node") => "node",
+        Some("group") => "group",
         Some("token") => "enrollment token",
         Some("rule") => "rule",
         Some("credential") => "credential",
@@ -322,8 +323,8 @@ fn api_error(error: &ApiError) -> String {
                 Some("empty") => "empty",
                 Some("malformed") => "malformed",
                 Some("all_digits") => "can't be all digits",
-                Some("same" | "same_node") => "must differ",
-                Some("builtin") => "built-in tag can't change",
+                Some("same_node") => "must differ",
+                Some("builtin") => "the built-in group All can't change",
                 Some("required") => "required here",
                 Some("missing") => "missing",
                 Some("not_relay") => "not an enabled relay",
@@ -341,6 +342,7 @@ fn api_error(error: &ApiError) -> String {
             format!("Invalid request{field}: {problem}")
         }
         ErrorCode::AddressOutOfRange => format!("Virtual IP outside the address range{field}"),
+        ErrorCode::NameTaken if what == Some("group") => format!("Group name already taken{field}"),
         ErrorCode::NameTaken => format!("Name already taken{field}"),
         ErrorCode::NameCoolingDown => format!("Name belongs to a recently deleted node{field}"),
         ErrorCode::AddressTaken => format!("Virtual IP already taken{field}"),

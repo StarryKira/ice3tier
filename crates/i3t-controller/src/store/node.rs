@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, SocketAddr};
 
-use i3t_model::admin::{NetworkId, RelaySettings, Timestamp, UpdateFailure};
+use i3t_model::admin::{GroupId, NetworkId, RelaySettings, Timestamp, UpdateFailure};
 use i3t_model::control::{Declared, SelfUpdate};
 use i3t_model::netmap::{Attachment, ExitRole, Reach, RoutingMode};
 use i3t_proto::{NodeId, PublicKey};
@@ -12,6 +12,9 @@ use rusqlite::{OptionalExtension, Row, named_params, params};
 use super::codec::{Json, SqlIp, SqlKey, SqlNetwork, SqlNode, Text, Unsigned};
 use super::{DIGEST_LEN, Store, StoreError};
 
+/// 读节点时顺带取出它所在的分组（成员表里的分组编号，JSON 数组）。
+const SELECT: &str = "SELECT nodes.*, (SELECT json_group_array(group_id) FROM group_members WHERE node_id = nodes.id) AS groups FROM nodes";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeRecord {
     pub id: NodeId,
@@ -19,8 +22,9 @@ pub struct NodeRecord {
     pub key: PublicKey,
     pub name: String,
     pub virtual_ip: Ipv4Addr,
-    /// 管理员打的标签。内置的 `all` 不存。
-    pub tags: BTreeSet<String>,
+    /// 它所在的分组。内置分组 `All` 不在里面：每个节点本来就在。
+    /// 读的时候从成员表里取；写的时候用 [`Store::set_node_groups`]，[`Store::update_node`] 不写它。
+    pub groups: BTreeSet<GroupId>,
     /// 节点自己声明的"可以承担"。
     pub declared: Declared,
     /// 管理员启用了 relay 时有值。
@@ -72,7 +76,7 @@ impl NodeRecord {
             key: row.get::<_, SqlKey>("public_key")?.0,
             name: row.get("name")?,
             virtual_ip: row.get::<_, SqlIp>("virtual_ip")?.0,
-            tags: row.get::<_, Json<BTreeSet<String>>>("tags")?.0,
+            groups: row.get::<_, Json<BTreeSet<GroupId>>>("groups")?.0,
             declared: row.get::<_, Json<Declared>>("declared")?.0,
             relay: row.get::<_, Option<Json<RelaySettings>>>("relay")?.map(|json| json.0),
             exit: row.get::<_, Option<Json<ExitRole>>>("exit")?.map(|json| json.0),
@@ -109,7 +113,8 @@ pub struct NewNode {
     /// 留空时用 `node-<编号>`：编号要插入之后才知道。
     pub name: Option<String>,
     pub virtual_ip: Ipv4Addr,
-    pub tags: BTreeSet<String>,
+    /// 它一加入就在的分组（注册令牌预设的）。
+    pub groups: BTreeSet<GroupId>,
     pub declared: Declared,
     pub platform: String,
     pub version: String,
@@ -126,15 +131,14 @@ impl Store {
         // 占位的名字带冒号，合法的名字里没有冒号，所以不会和任何节点撞。
         let placeholder = format!("new:{}", new.key);
         self.conn.execute(
-            "INSERT INTO nodes (network_id, public_key, name, virtual_ip, tags, declared, dial_out_only, pinned_relays, endpoints,
+            "INSERT INTO nodes (network_id, public_key, name, virtual_ip, declared, dial_out_only, pinned_relays, endpoints,
                                 attached, platform, version, created_at, netmap_version, sent_version, acked_version, enrolled_with)
-             VALUES (:network, :key, :name, :ip, :tags, :declared, 0, '[]', '[]', '[]', :platform, :version, :created_at, 0, 0, 0, :enrolled_with)",
+             VALUES (:network, :key, :name, :ip, :declared, 0, '[]', '[]', '[]', :platform, :version, :created_at, 0, 0, 0, :enrolled_with)",
             named_params! {
                 ":network": SqlNetwork(new.network),
                 ":key": SqlKey(new.key),
                 ":name": new.name.as_deref().unwrap_or(&placeholder),
                 ":ip": SqlIp(new.virtual_ip),
-                ":tags": Json(&new.tags),
                 ":declared": Json(new.declared),
                 ":platform": new.platform,
                 ":version": new.version,
@@ -147,6 +151,7 @@ impl Store {
         if new.name.is_none() {
             self.conn.execute("UPDATE nodes SET name = ?2 WHERE id = ?1", params![SqlNode(id), format!("node-{id}")])?;
         }
+        self.set_node_groups(id, &new.groups)?;
         Ok(id)
     }
 
@@ -154,7 +159,7 @@ impl Store {
     ///
     /// 读数据库失败。
     pub fn node(&self, id: NodeId) -> Result<Option<NodeRecord>, StoreError> {
-        Ok(self.conn.query_row("SELECT * FROM nodes WHERE id = ?1", params![SqlNode(id)], NodeRecord::from_row).optional()?)
+        Ok(self.conn.query_row(&format!("{SELECT} WHERE id = ?1"), params![SqlNode(id)], NodeRecord::from_row).optional()?)
     }
 
     /// 按公钥找节点，不分网络：一把公钥在整个 controller 里只对应一个节点。
@@ -163,7 +168,8 @@ impl Store {
     ///
     /// 读数据库失败。
     pub fn node_by_key(&self, key: &PublicKey) -> Result<Option<NodeRecord>, StoreError> {
-        Ok(self.conn.query_row("SELECT * FROM nodes WHERE public_key = ?1", params![SqlKey(*key)], NodeRecord::from_row).optional()?)
+        let sql = format!("{SELECT} WHERE public_key = ?1");
+        Ok(self.conn.query_row(&sql, params![SqlKey(*key)], NodeRecord::from_row).optional()?)
     }
 
     /// 一个网络里的全部节点，按编号排。
@@ -172,7 +178,7 @@ impl Store {
     ///
     /// 读数据库失败。
     pub fn nodes(&self, network: NetworkId) -> Result<Vec<NodeRecord>, StoreError> {
-        let mut statement = self.conn.prepare("SELECT * FROM nodes WHERE network_id = ?1 ORDER BY id")?;
+        let mut statement = self.conn.prepare(&format!("{SELECT} WHERE network_id = ?1 ORDER BY id"))?;
         let rows = statement.query_map(params![SqlNetwork(network)], NodeRecord::from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -185,16 +191,16 @@ impl Store {
         Ok(self.conn.query_row("SELECT COUNT(*) FROM nodes WHERE ?1 IS NULL OR network_id = ?1", params![network], |row| row.get(0))?)
     }
 
-    /// 写回一个节点的身份和设置：名字、虚拟 IP、标签、声明、启用的能力、各个开关，以及它自我介绍里的
+    /// 写回一个节点的身份和设置：名字、虚拟 IP、声明、启用的能力、各个开关，以及它自我介绍里的
     /// 平台、版本、主机名和能不能自己更新。
-    /// 上报的内容、最近在线时间、netmap 的进度和更新失败的记录各有各的方法，不在这里写。
+    /// 所在的分组、上报的内容、最近在线时间、netmap 的进度和更新失败的记录各有各的方法，不在这里写。
     ///
     /// # Errors
     ///
     /// 写数据库失败，包括名字或虚拟 IP 和别的节点重复。
     pub fn update_node(&self, node: &NodeRecord) -> Result<(), StoreError> {
         self.conn.execute(
-            "UPDATE nodes SET name = :name, virtual_ip = :ip, tags = :tags, declared = :declared, relay = :relay, exit = :exit,
+            "UPDATE nodes SET name = :name, virtual_ip = :ip, declared = :declared, relay = :relay, exit = :exit,
                               dial_out_only = :dial_out_only, routing = :routing, reach = :reach, pinned_relays = :pinned,
                               platform = :platform, version = :version, hostname = :hostname, self_update = :self_update
              WHERE id = :id",
@@ -202,7 +208,6 @@ impl Store {
                 ":id": SqlNode(node.id),
                 ":name": node.name,
                 ":ip": SqlIp(node.virtual_ip),
-                ":tags": Json(&node.tags),
                 ":declared": Json(node.declared),
                 ":relay": node.relay.as_ref().map(Json),
                 ":exit": node.exit.as_ref().map(Json),
@@ -312,8 +317,8 @@ impl Store {
         Ok(())
     }
 
-    /// 把指向 `old` 的东西改成指向 `new`：`old` 上的监听器、把它当出口的监听器、它参与的端口转发和节点对设置。
-    /// 继任时用，之后 `old` 可以删掉而这些配置还在。
+    /// 把指向 `old` 的东西改成指向 `new`：`old` 上的监听器、把它当出口的监听器、它参与的端口转发和节点对设置，
+    /// 它所在的分组（和 `new` 已经在的合并）。继任时用，之后 `old` 可以删掉而这些配置还在。
     ///
     /// # Errors
     ///
@@ -335,6 +340,10 @@ impl Store {
             ids,
         )?;
         self.conn.execute("DELETE FROM pair_settings WHERE node_a = ?1 OR node_b = ?1", params![SqlNode(old)])?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO group_members (group_id, node_id) SELECT group_id, ?2 FROM group_members WHERE node_id = ?1",
+            ids,
+        )?;
         Ok(())
     }
 }
@@ -358,7 +367,8 @@ mod tests {
         assert_eq!(node.last_seen_at, None);
 
         node.name = "nas-01".to_owned();
-        node.tags = ["servers".to_owned(), "home".to_owned()].into();
+        node.groups = [store.insert_group(network, "servers").unwrap(), store.insert_group(network, "home").unwrap()].into();
+        store.set_node_groups(id, &node.groups).unwrap();
         node.declared = Declared { exit: true, relay: true, forward: false };
         node.relay =
             Some(RelaySettings { udp: vec!["203.0.113.7:20330".parse().unwrap()], region: "hk".to_owned(), ..RelaySettings::default() });
@@ -440,13 +450,16 @@ mod tests {
         let old = store.insert_node(&NewNode { name: Some("nas-01".to_owned()), ..new_node(network, 1) }).unwrap();
         let taken = NewNode { name: Some("nas-01".to_owned()), virtual_ip: "10.66.0.1".parse().unwrap(), ..new_node(network, 2) };
         assert!(store.insert_node(&taken).is_err());
+        let (servers, home) = (store.insert_group(network, "servers").unwrap(), store.insert_group(network, "home").unwrap());
+        store.set_node_groups(old, &[servers].into()).unwrap();
         store.park_node(old).unwrap();
-        let new = store.insert_node(&taken).unwrap();
+        let new = store.insert_node(&NewNode { groups: [home].into(), ..taken }).unwrap();
         store.repoint_node(old, new).unwrap();
         store.delete_node(old).unwrap();
         let nodes = store.nodes(network).unwrap();
         assert_eq!(nodes.len(), 1);
         assert_eq!((nodes[0].id, nodes[0].name.as_str(), nodes[0].virtual_ip), (new, "nas-01", "10.66.0.1".parse().unwrap()));
+        assert_eq!(nodes[0].groups, [servers, home].into(), "继任者在两边的分组里");
     }
 
     #[test]
