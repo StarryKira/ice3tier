@@ -8,6 +8,8 @@
 //! | 发起方（入口模块） | [`open`]、[`Pending`] | 开流，把 OPEN 和首批数据一次写出去；等 REPLY，或者不等就开始搬运 |
 //! | 接受方（出口模块） | [`serve`]、[`Handler`]、[`Request`] | 限时读 OPEN，交给处理者，由它接受或者拒绝 |
 //! | 两边 | [`Flow::relay`] | 在流和一条 TCP 连接之间双向搬运，如实传递半关闭和异常结束 |
+//! | 两边 | [`Meter`] | 搬运时每一段数据要过的关卡：计数、限速、叫停 |
+//! | 中间的节点 | [`Flow::splice`] | 把两条流接起来：监听在虚拟 IP 上、目标是别的节点的端口转发 |
 //!
 //! UDP 应用的数据不走流，走数据报上下文，见 [`datagram`]。接受方那一侧两种都从 [`serve`] 进来。
 //!
@@ -24,9 +26,13 @@ mod header;
 mod initiator;
 #[cfg(feature = "test-util")]
 pub mod memory;
+mod meter;
 mod relay;
+mod splice;
 
 pub use acceptor::{Handler, OPEN_DEADLINE, Request, serve};
 pub use error::FlowError;
 pub use initiator::{Pending, open};
+pub use meter::{Direction, Meter, Unmetered};
 pub use relay::{End, Flow, Summary, Traffic};
+pub use splice::Spliced;

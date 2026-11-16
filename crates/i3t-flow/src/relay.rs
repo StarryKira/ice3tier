@@ -31,10 +31,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{ReadHalf, WriteHalf};
 
+use crate::meter::{Direction, Meter, Unmetered};
 use crate::{FlowError, header};
 
 /// 每个方向一块这么大的缓冲区。流的数量可以上万，所以不取更大的。
-const BUFFER_LEN: usize = 16 * 1024;
+pub(crate) const BUFFER_LEN: usize = 16 * 1024;
 
 /// `auto` 等级的流，这一端在它上面发出多少字节之后降到 bulk 的优先级。
 pub(crate) const AUTO_DEMOTE_AFTER: u64 = 1024 * 1024;
@@ -72,7 +73,7 @@ pub(crate) struct Parts<S, R> {
 
 /// 一条两边都同意了的流：REPLY 已经发出（接受方）或者已经读到并且是成功（发起方），接下来只剩搬运。
 pub struct Flow<S, R> {
-    parts: Parts<S, R>,
+    pub(crate) parts: Parts<S, R>,
 }
 
 /// 契约没有要求流实现 `Debug`，所以这里不打印它们。
@@ -94,7 +95,13 @@ impl<S: SendStream, R: RecvStream> Flow<S, R> {
     ///
     /// 返回之后流和 `tcp` 都已经关闭。
     pub async fn relay(self, tcp: TcpStream, cancel: impl Future<Output = Reason>) -> Summary {
-        run(self.parts, tcp, cancel).await
+        run(self.parts, tcp, cancel, &Unmetered).await
+    }
+
+    /// 和 [`relay`](Self::relay) 一样，只是每一段数据写出去之前先过 `meter`：它可以计数、让搬运慢下来，或者叫停。
+    /// 被叫停时结局是 [`End::Cancelled`]，带着 `meter` 给的原因码。
+    pub async fn relay_metered(self, tcp: TcpStream, cancel: impl Future<Output = Reason>, meter: &impl Meter) -> Summary {
+        run(self.parts, tcp, cancel, meter).await
     }
 
     /// 不搬运了：两个方向都异常结束，带上 `reason`。
@@ -211,6 +218,7 @@ pub(crate) async fn run<S: SendStream, R: RecvStream>(
     parts: Parts<S, R>,
     mut tcp: TcpStream,
     cancel: impl Future<Output = Reason>,
+    meter: &impl Meter,
 ) -> Summary {
     let Parts { mut send, mut recv, role, class, started, reply_pending } = parts;
     // 先设成"关闭时发 RST"。这个选项只管 close，中途用 shutdown 发的 FIN 不受影响。
@@ -222,8 +230,8 @@ pub(crate) async fn run<S: SendStream, R: RecvStream>(
     let mut from_flow = Traffic::default();
     let outcome = {
         let (tcp_read, tcp_write) = tcp.split();
-        let upstream = tcp_to_flow(tcp_read, &mut send, &mut from_tcp, started, class);
-        let downstream = flow_to_tcp(&mut recv, tcp_write, &mut from_flow, started, reply_pending);
+        let upstream = tcp_to_flow(tcp_read, &mut send, &mut from_tcp, Progress { started, class, meter });
+        let downstream = flow_to_tcp(&mut recv, tcp_write, &mut from_flow, Progress { started, class, meter }, reply_pending);
         drive(upstream, downstream, cancel).await
     };
 
@@ -290,13 +298,21 @@ async fn drive(
     }
 }
 
-async fn tcp_to_flow<S: SendStream>(
+/// 一个方向搬运时要知道的事。
+struct Progress<'m, M> {
+    /// 首字节时间从这个时刻算起。
+    started: Instant,
+    class: Class,
+    meter: &'m M,
+}
+
+async fn tcp_to_flow<S: SendStream, M: Meter>(
     mut tcp: ReadHalf<'_>,
     send: &mut S,
     traffic: &mut Traffic,
-    started: Instant,
-    class: Class,
+    progress: Progress<'_, M>,
 ) -> Result<(), Abort> {
+    let Progress { started, class, meter } = progress;
     let mut buf = vec![0; BUFFER_LEN];
     let mut demotable = class == Class::Auto;
     loop {
@@ -305,6 +321,7 @@ async fn tcp_to_flow<S: SendStream>(
             return send.shutdown().await.map_err(Abort::Flow);
         }
         traffic.arrived(started);
+        meter.pass(Direction::FromTcp, len).await.map_err(Abort::Cancelled)?;
         send.write_all(&buf[..len]).await.map_err(Abort::Flow)?;
         traffic.delivered(len);
         if demotable && traffic.bytes > AUTO_DEMOTE_AFTER {
@@ -315,13 +332,14 @@ async fn tcp_to_flow<S: SendStream>(
     }
 }
 
-async fn flow_to_tcp<R: RecvStream>(
+async fn flow_to_tcp<R: RecvStream, M: Meter>(
     recv: &mut R,
     mut tcp: WriteHalf<'_>,
     traffic: &mut Traffic,
-    started: Instant,
+    progress: Progress<'_, M>,
     reply_pending: bool,
 ) -> Result<(), Abort> {
+    let Progress { started, meter, .. } = progress;
     if reply_pending {
         match header::read(recv, Reply::decode).await {
             Ok(reply) if reply.status.is_ok() => {}
@@ -338,6 +356,7 @@ async fn flow_to_tcp<R: RecvStream>(
             return tcp.shutdown().await.map_err(Abort::Tcp);
         }
         traffic.arrived(started);
+        meter.pass(Direction::FromFlow, len).await.map_err(Abort::Cancelled)?;
         tcp.write_all(&buf[..len]).await.map_err(Abort::Tcp)?;
         traffic.delivered(len);
     }

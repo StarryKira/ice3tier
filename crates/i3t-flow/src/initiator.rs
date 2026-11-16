@@ -1,7 +1,7 @@
 //! 发起方：开流、发 OPEN、等 REPLY。
 
 use std::fmt;
-use std::future;
+use std::future::{self, Future};
 use std::time::Instant;
 
 use i3t_conn::{Connector, RecvStream, SendStream, StreamCode};
@@ -10,6 +10,7 @@ use i3t_proto::flow::{Class, Open, Reason, Reply};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
+use crate::meter::{Meter, Unmetered};
 use crate::relay::{self, Flow, Parts, Summary, TcpRole};
 use crate::{FlowError, header};
 
@@ -87,7 +88,12 @@ impl<S: SendStream, R: RecvStream> Pending<S, R> {
     /// REPLY 在往客户端搬运的那个方向上读：对端拒绝了，或者流出了别的问题，客户端的连接被重置（RST），
     /// 结果在 [`Summary::end`] 里。
     pub async fn relay(self, client: TcpStream) -> Summary {
-        relay::run(self.parts(true), client, future::pending()).await
+        relay::run(self.parts(true), client, future::pending(), &Unmetered).await
+    }
+
+    /// 和 [`relay`](Self::relay) 一样，只是可以取消（`cancel` 完成时用它给的原因码结束），每一段数据写出去之前先过 `meter`。
+    pub async fn relay_metered(self, client: TcpStream, cancel: impl Future<Output = Reason>, meter: &impl Meter) -> Summary {
+        relay::run(self.parts(true), client, cancel, meter).await
     }
 
     fn parts(self, reply_pending: bool) -> Parts<S, R> {
