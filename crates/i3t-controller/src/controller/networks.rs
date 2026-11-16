@@ -1,0 +1,163 @@
+//! 网络的增删改查。
+
+use i3t_model::admin::{CreateNetwork, Direction, Network, NetworkId, Rule, UpdateNetwork};
+use i3t_model::netmap::{Reach, RoutingMode};
+use ipnet::Ipv4Net;
+
+use super::{Controller, Inner, Seeds, address, naming};
+use crate::access::ALL;
+use crate::error::{Entity, Error};
+use crate::store::{NetworkRecord, NewNetwork};
+
+/// 一条路径最多经过几个 relay：默认值，和协议允许的范围。
+const DEFAULT_MAX_RELAY_HOPS: u8 = 2;
+const MAX_RELAY_HOPS: std::ops::RangeInclusive<u8> = 1..=4;
+
+impl Controller {
+    /// # Errors
+    ///
+    /// 读存储失败。
+    pub fn networks(&self) -> Result<Vec<Network>, Error> {
+        let inner = self.lock();
+        inner.store.networks()?.iter().map(|record| inner.network_view(record)).collect()
+    }
+
+    /// # Errors
+    ///
+    /// 没有这个网络，或者读存储失败。
+    pub fn network(&self, id: NetworkId) -> Result<Network, Error> {
+        let inner = self.lock();
+        inner.network_view(&inner.require_network(id)?)
+    }
+
+    /// 新建一个网络。它自带一条 `all <-> all` 规则，所以装好就能互通。
+    ///
+    /// # Errors
+    ///
+    /// 名字不合法或者已经有了；地址段和别的网络重叠；没指定地址段而默认的都被占了。
+    pub fn create_network(&self, request: &CreateNetwork) -> Result<Network, Error> {
+        let name = naming::label("网络", &request.name)?;
+        let max_relay_hops = check_max_relay_hops(request.max_relay_hops.unwrap_or(DEFAULT_MAX_RELAY_HOPS))?;
+        let mut inner = self.lock();
+        let now = inner.clock.now();
+        let id = inner.store.atomically(|store| {
+            let existing = store.networks()?;
+            if existing.iter().any(|network| network.name == name) {
+                return Err(Error::NameTaken(name.clone()));
+            }
+            let cidr = match request.cidr {
+                Some(cidr) => address::normalize(cidr)?,
+                None => {
+                    let taken: Vec<Ipv4Net> = existing.iter().map(|network| network.cidr).collect();
+                    address::default_range(&taken).ok_or_else(|| Error::invalid("默认的地址段都被占用了，请用 cidr 指定一个"))?
+                }
+            };
+            check_no_overlap(&existing, None, cidr)?;
+            let id = store.insert_network(&NewNetwork {
+                name: name.clone(),
+                cidr,
+                routing: request.routing.unwrap_or(RoutingMode::DirectFirst),
+                max_relay_hops,
+                reach: request.reach.unwrap_or(Reach::Any),
+                created_at: now,
+            })?;
+            let default_rule = Rule {
+                id: 0,
+                name: "default".to_owned(),
+                src: ALL.to_owned(),
+                dst: ALL.to_owned(),
+                direction: Direction::Both,
+                enabled: true,
+            };
+            store.insert_rule(id, &default_rule)?;
+            store.log(now, Some(id), "network.create", &format!("新建网络 {name}，地址段 {cidr}"))?;
+            Ok(id)
+        })?;
+        tracing::info!(network = %id, %name, "新建网络");
+        inner.network_view(&inner.require_network(id)?)
+    }
+
+    /// 改网络的设置，并把新的设置发给网络里的节点。
+    ///
+    /// # Errors
+    ///
+    /// 没有这个网络；地址段和别的网络重叠；网络里已经有节点而新的地址段不包含原来的。
+    pub fn update_network(&self, id: NetworkId, request: &UpdateNetwork) -> Result<Network, Error> {
+        let mut inner = self.lock();
+        let now = inner.clock.now();
+        let updated = inner.store.atomically(|store| {
+            let mut network = store.network(id)?.ok_or(Error::NotFound(Entity::Network))?;
+            if let Some(cidr) = request.cidr {
+                let cidr = address::normalize(cidr)?;
+                check_no_overlap(&store.networks()?, Some(id), cidr)?;
+                if store.node_count(Some(id))? > 0 && !cidr.contains(&network.cidr) {
+                    return Err(Error::RangeNotSuperset(network.cidr));
+                }
+                network.cidr = cidr;
+            }
+            if let Some(max_relay_hops) = request.max_relay_hops {
+                network.max_relay_hops = check_max_relay_hops(max_relay_hops)?;
+            }
+            network.routing = request.routing.unwrap_or(network.routing);
+            network.reach = request.reach.unwrap_or(network.reach);
+            store.update_network(&network)?;
+            store.log(now, Some(id), "network.update", &format!("修改网络 {} 的设置", network.name))?;
+            Ok::<_, Error>(network)
+        })?;
+        inner.refresh(id, Seeds::All, None)?;
+        self.wake_if_needed(&inner);
+        inner.network_view(&updated)
+    }
+
+    /// 删掉一个空的网络，连同它的规则、凭据和注册令牌。
+    ///
+    /// # Errors
+    ///
+    /// 没有这个网络，或者里面还有节点。
+    pub fn delete_network(&self, id: NetworkId) -> Result<(), Error> {
+        let mut inner = self.lock();
+        let now = inner.clock.now();
+        inner.store.atomically(|store| {
+            let network = store.network(id)?.ok_or(Error::NotFound(Entity::Network))?;
+            if store.node_count(Some(id))? > 0 {
+                return Err(Error::NetworkNotEmpty(network.name));
+            }
+            store.delete_network(id)?;
+            store.log(now, None, "network.delete", &format!("删除网络 {}", network.name))?;
+            tracing::info!(network = %id, name = %network.name, "删除网络");
+            Ok(())
+        })
+    }
+}
+
+impl Inner {
+    fn network_view(&self, record: &NetworkRecord) -> Result<Network, Error> {
+        Ok(Network {
+            id: record.id,
+            name: record.name.clone(),
+            domain: record.domain(),
+            cidr: record.cidr,
+            routing: record.routing,
+            max_relay_hops: record.max_relay_hops,
+            reach: record.reach,
+            created_at: record.created_at,
+            nodes: self.store.node_count(Some(record.id))?,
+        })
+    }
+}
+
+fn check_max_relay_hops(hops: u8) -> Result<u8, Error> {
+    if MAX_RELAY_HOPS.contains(&hops) {
+        Ok(hops)
+    } else {
+        Err(Error::invalid(format!("最大中转级数要在 {} 到 {} 之间", MAX_RELAY_HOPS.start(), MAX_RELAY_HOPS.end())))
+    }
+}
+
+/// 各个网络的地址段不能重叠：一个虚拟 IP 在整个 controller 里只对应一个节点。
+fn check_no_overlap(existing: &[NetworkRecord], except: Option<NetworkId>, cidr: Ipv4Net) -> Result<(), Error> {
+    match existing.iter().find(|network| Some(network.id) != except && address::overlaps(network.cidr, cidr)) {
+        Some(other) => Err(Error::RangeOverlaps { cidr, other: other.name.clone(), other_cidr: other.cidr }),
+        None => Ok(()),
+    }
+}

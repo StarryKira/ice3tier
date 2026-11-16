@@ -1,0 +1,183 @@
+//! 测试用的小实验室：一个只在内存里的 controller，加上几个假装成节点的收件箱。
+//!
+//! 这里的"节点"不走 TLS，直接调用节点协议在 controller 一侧的入口，所以测的是规则和下发，不是连接本身。
+
+use std::net::{IpAddr, Ipv4Addr};
+use std::time::{Duration, Instant};
+
+use i3t_crypto::NodeKey;
+use i3t_model::Netmap;
+use i3t_model::admin::{CreateEnrollToken, CreateNetwork, Network, NetworkId};
+use i3t_model::control::{Declared, EnrollToken, Hello, Signal, ToController, ToNode};
+use i3t_proto::{NodeId, PublicKey};
+use tokio::sync::mpsc;
+
+use super::{Admitted, Controller, Timing};
+use crate::store::Store;
+
+pub(crate) const REMOTE: IpAddr = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+
+pub(crate) struct Lab {
+    pub(crate) controller: Controller,
+    next_key: u8,
+}
+
+/// 一个假装在线的节点：它的连接，和从 controller 收到的东西。
+pub(crate) struct Member {
+    pub(crate) id: NodeId,
+    pub(crate) key: PublicKey,
+    pub(crate) session: Admitted,
+    inbox: mpsc::Receiver<ToNode>,
+    /// 收到的每一份 netmap，按先后。
+    pub(crate) snapshots: Vec<Netmap>,
+    pub(crate) signals: Vec<(NodeId, Signal)>,
+    pub(crate) revoked: bool,
+    /// 还没确认的版本。测试要自己控制确认的时机时用。
+    unacked: Option<u64>,
+}
+
+impl Lab {
+    /// 延后的下发不等待：`settle` 一调就做完。
+    pub(crate) fn new() -> Self {
+        Self::with_timing(Timing { ack_coalesce: Duration::ZERO, report_coalesce: Duration::ZERO, ..Timing::default() })
+    }
+
+    pub(crate) fn with_timing(timing: Timing) -> Self {
+        let store = Store::open_in_memory().unwrap();
+        let controller = Controller::new(store, NodeKey::generate().unwrap(), "ctl.example.com:20331".to_owned(), timing).unwrap();
+        Self { controller, next_key: 0 }
+    }
+
+    /// 用一个已经建好的 controller（比如开在磁盘上的）。
+    pub(crate) fn around(controller: Controller) -> Self {
+        Self { controller, next_key: 100 }
+    }
+
+    pub(crate) fn network(&self, name: &str) -> Network {
+        self.controller.create_network(&CreateNetwork { name: name.to_owned(), ..CreateNetwork::default() }).unwrap()
+    }
+
+    pub(crate) fn fresh_key(&mut self) -> PublicKey {
+        self.next_key += 1;
+        PublicKey::from_bytes([self.next_key; PublicKey::LEN])
+    }
+
+    /// 生成一个注册令牌，返回里面的一次性密钥。
+    pub(crate) fn secret(&self, network: NetworkId, request: &CreateEnrollToken) -> String {
+        let created = self.controller.create_token(network, request).unwrap();
+        created.token.parse::<EnrollToken>().unwrap().secret
+    }
+
+    /// 一个节点带着这些标签和声明加入网络，并且保持在线。它的第一份 netmap 已经收下但还没确认。
+    pub(crate) fn join_with(&mut self, network: NetworkId, tags: &[&str], declared: Declared) -> Member {
+        let request = CreateEnrollToken { tags: tags.iter().map(|&tag| tag.to_owned()).collect(), ..CreateEnrollToken::default() };
+        let secret = self.secret(network, &request);
+        let key = self.fresh_key();
+        self.enroll(key, &secret, declared).expect("注册应该成功")
+    }
+
+    pub(crate) fn join(&mut self, network: NetworkId, tags: &[&str]) -> Member {
+        self.join_with(network, tags, Declared::default())
+    }
+
+    /// 加入网络之后马上下线。不在线的节点不用等它确认，所以它的 netmap 立刻就是最终的样子。
+    pub(crate) fn join_offline(&mut self, network: NetworkId, tags: &[&str], declared: Declared) -> NodeId {
+        let member = self.join_with(network, tags, declared);
+        self.controller.disconnect(member.session);
+        self.settle(&mut []);
+        member.id
+    }
+
+    pub(crate) fn enroll(&mut self, key: PublicKey, secret: &str, declared: Declared) -> Result<Member, crate::Rejection> {
+        let (outbox, inbox) = mpsc::channel(64);
+        let session = self.controller.enroll(key, secret, &hello(declared), REMOTE, outbox)?;
+        Ok(Member::new(key, session, inbox))
+    }
+
+    /// 已经注册过的节点重新连上来。
+    pub(crate) fn connect(&mut self, key: PublicKey, declared: Declared) -> Result<Member, crate::Rejection> {
+        let (outbox, inbox) = mpsc::channel(64);
+        let session = self.controller.hello(key, &hello(declared), REMOTE, outbox)?;
+        Ok(Member::new(key, session, inbox))
+    }
+
+    /// 让一切走到头：每个节点收下并确认发给它的东西，controller 做完延后的下发，直到谁也没有新动作。
+    pub(crate) fn settle(&self, members: &mut [&mut Member]) {
+        for _ in 0..50 {
+            let received: usize = members.iter_mut().map(|member| member.receive_and_ack(&self.controller)).sum();
+            self.controller.tick().unwrap();
+            let pending: usize = members.iter_mut().map(|member| member.receive()).sum();
+            let next_due = self.controller.lock().dirty.values().map(|deferred| deferred.due).min();
+            match next_due {
+                // 还有排着的下发没到时间：等到那时再看。
+                Some(due) => std::thread::sleep(due.saturating_duration_since(Instant::now())),
+                None if received == 0 && pending == 0 => return,
+                None => {}
+            }
+        }
+        panic!("50 轮之后还在变化：下发没有收敛");
+    }
+
+    pub(crate) fn netmap(&self, node: NodeId) -> Netmap {
+        self.controller.netmap_of(node).unwrap().expect("节点应该存在")
+    }
+}
+
+impl Member {
+    fn new(key: PublicKey, session: Admitted, inbox: mpsc::Receiver<ToNode>) -> Self {
+        let mut member =
+            Self { id: session.node, key, session, inbox, snapshots: Vec::new(), signals: Vec::new(), revoked: false, unacked: None };
+        member.receive();
+        assert_eq!(member.snapshots.len(), 1, "报到之后 controller 应该先发来一份 netmap");
+        member
+    }
+
+    /// 收下队列里的东西但不确认。返回收到了几条。
+    pub(crate) fn receive(&mut self) -> usize {
+        let mut received = 0;
+        while let Ok(message) = self.inbox.try_recv() {
+            received += 1;
+            match message {
+                ToNode::Snapshot(netmap) => {
+                    self.unacked = Some(netmap.version);
+                    self.snapshots.push(*netmap);
+                }
+                ToNode::Signal { from, signal } => self.signals.push((from, signal)),
+                ToNode::Revoked => self.revoked = true,
+                ToNode::Rejected { reason } => panic!("已经报到的连接上不应该收到 rejected：{reason}"),
+                ToNode::Heartbeat => {}
+            }
+        }
+        received
+    }
+
+    /// 确认收到的最新一份 netmap。
+    pub(crate) fn ack(&mut self, controller: &Controller) {
+        if let Some(version) = self.unacked.take() {
+            controller.handle(self.session, REMOTE, ToController::Ack { version }).unwrap();
+        }
+    }
+
+    pub(crate) fn receive_and_ack(&mut self, controller: &Controller) -> usize {
+        let received = self.receive();
+        let acked = usize::from(self.unacked.is_some());
+        self.ack(controller);
+        received + acked
+    }
+
+    /// 手上最新的 netmap。
+    pub(crate) fn netmap(&self) -> &Netmap {
+        self.snapshots.last().expect("节点应该已经收到过 netmap")
+    }
+
+    /// 连接是不是被 controller 关掉了（发送队列的另一头没了）。
+    pub(crate) fn is_closed(&mut self) -> bool {
+        matches!(self.inbox.try_recv(), Err(mpsc::error::TryRecvError::Disconnected))
+    }
+}
+
+pub(crate) fn hello(declared: Declared) -> Hello {
+    Hello { version: "0.1.0".to_owned(), platform: "linux-x86_64".to_owned(), declared, port: 20330 }
+}
+
+pub(crate) const CAN_DO_ALL: Declared = Declared { exit: true, relay: true, forward: true };

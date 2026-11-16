@@ -1,0 +1,220 @@
+//! 存储：一个 SQLite 文件。
+//!
+//! 别的模块只通过 [`Store`] 上的方法读写，看不到 SQL，所以以后要换存储只需要重写这个模块。
+//! 这里不检查业务规则（名字合不合法、能力有没有声明），那是 [`crate::Controller`] 的事；
+//! 表上的唯一约束和外键只是最后一道保险。
+//!
+//! 备份就是拷贝这个文件。
+
+mod codec;
+mod cooldown;
+mod credential;
+#[cfg(test)]
+pub(crate) mod fixtures;
+mod forward;
+mod listener;
+mod network;
+mod node;
+mod oplog;
+mod pair;
+mod rule;
+mod schema;
+mod token;
+
+use std::path::Path;
+
+use rusqlite::{Connection, OptionalExtension, params};
+
+pub use cooldown::CooldownKind;
+pub use credential::CredentialRecord;
+pub use forward::ForwardRecord;
+pub use network::{NetworkRecord, NewNetwork};
+pub use node::{NetmapState, NewNode, NodeRecord};
+pub use token::{NewToken, TokenRecord};
+
+/// SHA-256 的长度。令牌和 netmap 的摘要都是它。
+pub const DIGEST_LEN: usize = 32;
+
+pub struct Store {
+    conn: Connection,
+}
+
+impl Store {
+    /// 打开数据库文件，不存在就新建，并把表结构升到当前版本。
+    ///
+    /// # Errors
+    ///
+    /// 文件打不开、不是 SQLite 数据库，或者它是更新版本的程序写的。
+    pub fn open(path: &Path) -> Result<Self, StoreError> {
+        Self::prepare(Connection::open(path)?, schema::MIGRATIONS)
+    }
+
+    /// 只在内存里的数据库，进程结束就没了。测试用。
+    ///
+    /// # Errors
+    ///
+    /// SQLite 初始化失败。
+    pub fn open_in_memory() -> Result<Self, StoreError> {
+        Self::prepare(Connection::open_in_memory()?, schema::MIGRATIONS)
+    }
+
+    fn prepare(mut conn: Connection, migrations: &[&str]) -> Result<Self, StoreError> {
+        // WAL 加 NORMAL：每次提交不必等刷盘，断电最多丢最后几次提交，文件不会坏。
+        // controller 的数据丢了最后一两次修改可以重做，换来的是上报密集时不卡在磁盘上。
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.pragma_update(None, "foreign_keys", true)?;
+        migrate(&mut conn, migrations)?;
+        Ok(Self { conn })
+    }
+
+    /// 表结构现在是第几版，也就是已经执行过几条迁移。
+    ///
+    /// # Errors
+    ///
+    /// 读数据库失败。
+    pub fn schema_version(&self) -> Result<u32, StoreError> {
+        Ok(self.conn.pragma_query_value(None, "user_version", |row| row.get(0))?)
+    }
+
+    /// 把 `f` 里的读写放进一个事务：`f` 返回错误时全部撤销。
+    ///
+    /// 要 `&mut self` 是为了让编译器保证事务不会嵌套。
+    ///
+    /// # Errors
+    ///
+    /// `f` 返回的错误，或者开始、提交事务时数据库出的错。
+    pub fn atomically<T, E: From<StoreError>>(&mut self, f: impl FnOnce(&Self) -> Result<T, E>) -> Result<T, E> {
+        let transaction = self.conn.unchecked_transaction().map_err(StoreError::from)?;
+        // `f` 出错时 `transaction` 在这里被丢弃，丢弃即回滚。
+        let value = f(self)?;
+        transaction.commit().map_err(StoreError::from)?;
+        Ok(value)
+    }
+
+    /// 读一项全局设置（管理令牌的哈希之类）。
+    ///
+    /// # Errors
+    ///
+    /// 读数据库失败。
+    pub fn meta(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        Ok(self.conn.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |row| row.get(0)).optional()?)
+    }
+
+    /// # Errors
+    ///
+    /// 写数据库失败。
+    pub fn set_meta(&self, key: &str, value: &[u8]) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+}
+
+fn migrate(conn: &mut Connection, migrations: &[&str]) -> Result<(), StoreError> {
+    let found: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let supported = u32::try_from(migrations.len()).expect("迁移是代码里写死的一个短列表，条数远小于 u32 的上限");
+    if found > supported {
+        return Err(StoreError::NewerSchema { found, supported });
+    }
+    for version in found..supported {
+        let index = usize::try_from(version).expect("version 小于迁移的条数，条数本来就是 usize");
+        let transaction = conn.transaction()?;
+        transaction.execute_batch(migrations[index])?;
+        transaction.pragma_update(None, "user_version", version + 1)?;
+        transaction.commit()?;
+        tracing::info!(version = version + 1, "数据库的表结构已升级");
+    }
+    Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum StoreError {
+    #[error("数据库操作失败")]
+    Sqlite(#[from] rusqlite::Error),
+    #[error("数据库是更新版本的程序写的（表结构第 {found} 版，这个程序只认识到第 {supported} 版）")]
+    NewerSchema { found: u32, supported: u32 },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FIRST: &str = "CREATE TABLE a (x INTEGER NOT NULL);";
+    const SECOND: &str = "CREATE TABLE b (y TEXT NOT NULL); ALTER TABLE a ADD COLUMN z INTEGER NOT NULL DEFAULT 7;";
+
+    #[test]
+    fn an_empty_file_is_migrated_to_the_current_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("controller.db")).unwrap();
+        assert_eq!(store.schema_version().unwrap(), u32::try_from(schema::MIGRATIONS.len()).unwrap());
+        assert!(store.networks().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reopening_keeps_the_data_and_does_not_migrate_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("controller.db");
+        {
+            let store = Store::open(&path).unwrap();
+            store.set_meta("k", b"v").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.meta("k").unwrap().as_deref(), Some(b"v".as_slice()));
+        assert_eq!(store.meta("missing").unwrap(), None);
+    }
+
+    #[test]
+    fn a_later_migration_is_applied_on_top_of_existing_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.db");
+        {
+            let store = Store::prepare(Connection::open(&path).unwrap(), &[FIRST]).unwrap();
+            assert_eq!(store.schema_version().unwrap(), 1);
+            store.conn.execute("INSERT INTO a (x) VALUES (1)", []).unwrap();
+        }
+        let store = Store::prepare(Connection::open(&path).unwrap(), &[FIRST, SECOND]).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 2);
+        let row: (i64, i64) = store.conn.query_row("SELECT x, z FROM a", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(row, (1, 7));
+        store.conn.execute("INSERT INTO b (y) VALUES ('new table')", []).unwrap();
+    }
+
+    #[test]
+    fn a_database_from_a_newer_program_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.db");
+        drop(Store::prepare(Connection::open(&path).unwrap(), &[FIRST, SECOND]).unwrap());
+        let result = Store::prepare(Connection::open(&path).unwrap(), &[FIRST]);
+        assert!(matches!(result, Err(StoreError::NewerSchema { found: 2, supported: 1 })));
+    }
+
+    #[test]
+    fn a_failed_migration_leaves_the_previous_version_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.db");
+        drop(Store::prepare(Connection::open(&path).unwrap(), &[FIRST]).unwrap());
+        let broken = "CREATE TABLE c (q INTEGER); CREATE TABLE a (dup INTEGER);";
+        assert!(matches!(Store::prepare(Connection::open(&path).unwrap(), &[FIRST, broken]), Err(StoreError::Sqlite(_))));
+        let store = Store::prepare(Connection::open(&path).unwrap(), &[FIRST]).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 1);
+        assert!(store.conn.execute("INSERT INTO c (q) VALUES (1)", []).is_err(), "失败的迁移不应该留下半张表");
+    }
+
+    #[test]
+    fn a_failed_transaction_is_rolled_back_as_a_whole() {
+        let mut store = Store::open_in_memory().unwrap();
+        let result: Result<(), StoreError> = store.atomically(|store| {
+            store.set_meta("a", b"1")?;
+            Err(StoreError::NewerSchema { found: 0, supported: 0 })
+        });
+        assert!(result.is_err());
+        assert_eq!(store.meta("a").unwrap(), None);
+
+        store.atomically(|store| store.set_meta("a", b"2")).unwrap();
+        assert_eq!(store.meta("a").unwrap().as_deref(), Some(b"2".as_slice()));
+    }
+}

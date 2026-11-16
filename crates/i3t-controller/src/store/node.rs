@@ -1,0 +1,416 @@
+//! 节点。
+
+use std::collections::BTreeSet;
+use std::net::{Ipv4Addr, SocketAddr};
+
+use i3t_model::admin::{NetworkId, RelaySettings, Timestamp};
+use i3t_model::control::Declared;
+use i3t_model::netmap::{Attachment, ExitRole, Reach, RoutingMode};
+use i3t_proto::{NodeId, PublicKey};
+use rusqlite::{OptionalExtension, Row, named_params, params};
+
+use super::codec::{Json, SqlIp, SqlKey, SqlNetwork, SqlNode, Text, Unsigned};
+use super::{DIGEST_LEN, Store, StoreError};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeRecord {
+    pub id: NodeId,
+    pub network: NetworkId,
+    pub key: PublicKey,
+    pub name: String,
+    pub virtual_ip: Ipv4Addr,
+    /// 管理员打的标签。内置的 `all` 不存。
+    pub tags: BTreeSet<String>,
+    /// 节点自己声明的"可以承担"。
+    pub declared: Declared,
+    /// 管理员启用了 relay 时有值。
+    pub relay: Option<RelaySettings>,
+    /// 管理员启用了出口时有值。
+    pub exit: Option<ExitRole>,
+    pub dial_out_only: bool,
+    pub routing: Option<RoutingMode>,
+    pub reach: Option<Reach>,
+    pub pinned_relays: Vec<NodeId>,
+    /// 节点最近上报的候选端点。
+    pub endpoints: Vec<SocketAddr>,
+    /// controller 看到的来源 IP 加上节点自报的 UDP 端口。
+    pub observed: Option<SocketAddr>,
+    pub attached: Vec<Attachment>,
+    pub platform: String,
+    pub version: String,
+    pub created_at: Timestamp,
+    pub last_seen_at: Option<Timestamp>,
+    pub netmap: NetmapState,
+    /// 注册时所用令牌的哈希。回答丢了的节点拿同一个令牌重试时靠它认出来。
+    pub enrolled_with: Option<[u8; DIGEST_LEN]>,
+}
+
+/// 一个节点的 netmap 下发到了哪一步。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NetmapState {
+    /// 当前内容的版本号。内容变了才加一。
+    pub version: u64,
+    /// 当前内容（不含版本号）的摘要，用来判断内容变没变。
+    pub digest: Option<[u8; DIGEST_LEN]>,
+    /// 最近一次发给节点的版本。
+    pub sent: u64,
+    /// 节点确认已经应用的版本。
+    pub acked: u64,
+}
+
+impl NodeRecord {
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get::<_, SqlNode>("id")?.0,
+            network: row.get::<_, SqlNetwork>("network_id")?.0,
+            key: row.get::<_, SqlKey>("public_key")?.0,
+            name: row.get("name")?,
+            virtual_ip: row.get::<_, SqlIp>("virtual_ip")?.0,
+            tags: row.get::<_, Json<BTreeSet<String>>>("tags")?.0,
+            declared: row.get::<_, Json<Declared>>("declared")?.0,
+            relay: row.get::<_, Option<Json<RelaySettings>>>("relay")?.map(|json| json.0),
+            exit: row.get::<_, Option<Json<ExitRole>>>("exit")?.map(|json| json.0),
+            dial_out_only: row.get("dial_out_only")?,
+            routing: row.get::<_, Option<Json<RoutingMode>>>("routing")?.map(|json| json.0),
+            reach: row.get::<_, Option<Json<Reach>>>("reach")?.map(|json| json.0),
+            pinned_relays: row.get::<_, Json<Vec<NodeId>>>("pinned_relays")?.0,
+            endpoints: row.get::<_, Json<Vec<SocketAddr>>>("endpoints")?.0,
+            observed: row.get::<_, Option<Text<SocketAddr>>>("observed")?.map(|text| text.0),
+            attached: row.get::<_, Json<Vec<Attachment>>>("attached")?.0,
+            platform: row.get("platform")?,
+            version: row.get("version")?,
+            created_at: row.get::<_, Unsigned>("created_at")?.0,
+            last_seen_at: row.get::<_, Option<Unsigned>>("last_seen_at")?.map(|at| at.0),
+            netmap: NetmapState {
+                version: row.get::<_, Unsigned>("netmap_version")?.0,
+                digest: row.get("netmap_digest")?,
+                sent: row.get::<_, Unsigned>("sent_version")?.0,
+                acked: row.get::<_, Unsigned>("acked_version")?.0,
+            },
+            enrolled_with: row.get("enrolled_with")?,
+        })
+    }
+}
+
+/// 注册一个新节点时要写下的东西。其余的列从空值开始。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewNode {
+    pub network: NetworkId,
+    pub key: PublicKey,
+    /// 留空时用 `node-<编号>`：编号要插入之后才知道。
+    pub name: Option<String>,
+    pub virtual_ip: Ipv4Addr,
+    pub tags: BTreeSet<String>,
+    pub declared: Declared,
+    pub platform: String,
+    pub version: String,
+    pub created_at: Timestamp,
+    pub enrolled_with: Option<[u8; DIGEST_LEN]>,
+}
+
+impl Store {
+    /// # Errors
+    ///
+    /// 写数据库失败，包括公钥、虚拟 IP 或名字和已有的节点重复。
+    pub fn insert_node(&self, new: &NewNode) -> Result<NodeId, StoreError> {
+        // 名字有唯一约束，编号又要插入之后才知道，所以先占个位，再改成默认名字。
+        // 占位的名字带冒号，合法的名字里没有冒号，所以不会和任何节点撞。
+        let placeholder = format!("new:{}", new.key);
+        self.conn.execute(
+            "INSERT INTO nodes (network_id, public_key, name, virtual_ip, tags, declared, dial_out_only, pinned_relays, endpoints,
+                                attached, platform, version, created_at, netmap_version, sent_version, acked_version, enrolled_with)
+             VALUES (:network, :key, :name, :ip, :tags, :declared, 0, '[]', '[]', '[]', :platform, :version, :created_at, 0, 0, 0, :enrolled_with)",
+            named_params! {
+                ":network": SqlNetwork(new.network),
+                ":key": SqlKey(new.key),
+                ":name": new.name.as_deref().unwrap_or(&placeholder),
+                ":ip": SqlIp(new.virtual_ip),
+                ":tags": Json(&new.tags),
+                ":declared": Json(new.declared),
+                ":platform": new.platform,
+                ":version": new.version,
+                ":created_at": Unsigned(new.created_at),
+                ":enrolled_with": new.enrolled_with,
+            },
+        )?;
+        let raw = self.conn.last_insert_rowid();
+        let id = u32::try_from(raw).ok().and_then(NodeId::new).ok_or(rusqlite::Error::IntegralValueOutOfRange(0, raw))?;
+        if new.name.is_none() {
+            self.conn.execute("UPDATE nodes SET name = ?2 WHERE id = ?1", params![SqlNode(id), format!("node-{id}")])?;
+        }
+        Ok(id)
+    }
+
+    /// # Errors
+    ///
+    /// 读数据库失败。
+    pub fn node(&self, id: NodeId) -> Result<Option<NodeRecord>, StoreError> {
+        Ok(self.conn.query_row("SELECT * FROM nodes WHERE id = ?1", params![SqlNode(id)], NodeRecord::from_row).optional()?)
+    }
+
+    /// 按公钥找节点，不分网络：一把公钥在整个 controller 里只对应一个节点。
+    ///
+    /// # Errors
+    ///
+    /// 读数据库失败。
+    pub fn node_by_key(&self, key: &PublicKey) -> Result<Option<NodeRecord>, StoreError> {
+        Ok(self.conn.query_row("SELECT * FROM nodes WHERE public_key = ?1", params![SqlKey(*key)], NodeRecord::from_row).optional()?)
+    }
+
+    /// 一个网络里的全部节点，按编号排。
+    ///
+    /// # Errors
+    ///
+    /// 读数据库失败。
+    pub fn nodes(&self, network: NetworkId) -> Result<Vec<NodeRecord>, StoreError> {
+        let mut statement = self.conn.prepare("SELECT * FROM nodes WHERE network_id = ?1 ORDER BY id")?;
+        let rows = statement.query_map(params![SqlNetwork(network)], NodeRecord::from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// # Errors
+    ///
+    /// 读数据库失败。
+    pub fn node_count(&self, network: Option<NetworkId>) -> Result<u32, StoreError> {
+        let network = network.map(SqlNetwork);
+        Ok(self.conn.query_row("SELECT COUNT(*) FROM nodes WHERE ?1 IS NULL OR network_id = ?1", params![network], |row| row.get(0))?)
+    }
+
+    /// 写回一个节点的身份和设置：名字、虚拟 IP、标签、声明、启用的能力、各个开关、平台和版本。
+    /// 上报的内容、最近在线时间和 netmap 的进度各有各的方法，不在这里写。
+    ///
+    /// # Errors
+    ///
+    /// 写数据库失败，包括名字或虚拟 IP 和别的节点重复。
+    pub fn update_node(&self, node: &NodeRecord) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE nodes SET name = :name, virtual_ip = :ip, tags = :tags, declared = :declared, relay = :relay, exit = :exit,
+                              dial_out_only = :dial_out_only, routing = :routing, reach = :reach, pinned_relays = :pinned,
+                              platform = :platform, version = :version
+             WHERE id = :id",
+            named_params! {
+                ":id": SqlNode(node.id),
+                ":name": node.name,
+                ":ip": SqlIp(node.virtual_ip),
+                ":tags": Json(&node.tags),
+                ":declared": Json(node.declared),
+                ":relay": node.relay.as_ref().map(Json),
+                ":exit": node.exit.as_ref().map(Json),
+                ":dial_out_only": node.dial_out_only,
+                ":routing": node.routing.map(Json),
+                ":reach": node.reach.map(Json),
+                ":pinned": Json(&node.pinned_relays),
+                ":platform": node.platform,
+                ":version": node.version,
+            },
+        )?;
+        Ok(())
+    }
+
+    /// 记下节点上报的候选端点和挂靠关系。
+    ///
+    /// # Errors
+    ///
+    /// 写数据库失败。
+    pub fn set_node_report(&self, id: NodeId, endpoints: &[SocketAddr], attached: &[Attachment]) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE nodes SET endpoints = ?2, attached = ?3 WHERE id = ?1",
+            params![SqlNode(id), Json(endpoints), Json(attached)],
+        )?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// 写数据库失败。
+    pub fn set_node_observed(&self, id: NodeId, observed: Option<SocketAddr>) -> Result<(), StoreError> {
+        self.conn.execute("UPDATE nodes SET observed = ?2 WHERE id = ?1", params![SqlNode(id), observed.map(Text)])?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// 写数据库失败。
+    pub fn set_node_last_seen(&self, id: NodeId, at: Timestamp) -> Result<(), StoreError> {
+        self.conn.execute("UPDATE nodes SET last_seen_at = ?2 WHERE id = ?1", params![SqlNode(id), Unsigned(at)])?;
+        Ok(())
+    }
+
+    /// 节点的 netmap 内容变了：记下新的版本号和摘要。
+    ///
+    /// # Errors
+    ///
+    /// 写数据库失败。
+    pub fn set_node_netmap(&self, id: NodeId, version: u64, digest: &[u8; DIGEST_LEN]) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE nodes SET netmap_version = ?2, netmap_digest = ?3 WHERE id = ?1",
+            params![SqlNode(id), Unsigned(version), digest],
+        )?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// 写数据库失败。
+    pub fn set_node_sent(&self, id: NodeId, version: u64) -> Result<(), StoreError> {
+        self.conn.execute("UPDATE nodes SET sent_version = ?2 WHERE id = ?1", params![SqlNode(id), Unsigned(version)])?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// 写数据库失败。
+    pub fn set_node_acked(&self, id: NodeId, version: u64) -> Result<(), StoreError> {
+        self.conn.execute("UPDATE nodes SET acked_version = ?2 WHERE id = ?1", params![SqlNode(id), Unsigned(version)])?;
+        Ok(())
+    }
+
+    /// 删掉一个节点，连同它上面的监听器、和它有关的端口转发、节点对设置、指名继任它的注册令牌。
+    /// 别的节点的监听器里把它当出口的地方改回没有设置。
+    ///
+    /// # Errors
+    ///
+    /// 写数据库失败。
+    pub fn delete_node(&self, id: NodeId) -> Result<(), StoreError> {
+        self.conn
+            .execute("UPDATE listeners SET default_action = NULL, default_exit = NULL WHERE default_exit = ?1", params![SqlNode(id)])?;
+        self.conn.execute("UPDATE listeners SET fixed_exit = NULL WHERE fixed_exit = ?1", params![SqlNode(id)])?;
+        self.conn.execute("DELETE FROM nodes WHERE id = ?1", params![SqlNode(id)])?;
+        Ok(())
+    }
+
+    /// 让出一个节点的名字和虚拟 IP，好让继任者在同一个事务里接手。之后这一行读不出来，只能删掉。
+    ///
+    /// # Errors
+    ///
+    /// 写数据库失败。
+    pub fn park_node(&self, id: NodeId) -> Result<(), StoreError> {
+        // 两列都有唯一约束，所以换成不会和任何正常值相撞的东西：带冒号的名字，负数的地址。
+        self.conn.execute("UPDATE nodes SET name = 'parked:' || id, virtual_ip = -id WHERE id = ?1", params![SqlNode(id)])?;
+        Ok(())
+    }
+
+    /// 把指向 `old` 的东西改成指向 `new`：`old` 上的监听器、把它当出口的监听器、它参与的端口转发和节点对设置。
+    /// 继任时用，之后 `old` 可以删掉而这些配置还在。
+    ///
+    /// # Errors
+    ///
+    /// 写数据库失败。
+    pub fn repoint_node(&self, old: NodeId, new: NodeId) -> Result<(), StoreError> {
+        let ids = params![SqlNode(old), SqlNode(new)];
+        // 新节点自己已经有同名的监听器、或者和同一个对端已经有设置时，保留新节点的，旧的随旧节点一起删掉。
+        self.conn.execute("UPDATE OR IGNORE listeners SET node_id = ?2 WHERE node_id = ?1", ids)?;
+        self.conn.execute("UPDATE listeners SET default_exit = ?2 WHERE default_exit = ?1", ids)?;
+        self.conn.execute("UPDATE listeners SET fixed_exit = ?2 WHERE fixed_exit = ?1", ids)?;
+        self.conn.execute("UPDATE forwards SET listen_node = ?2 WHERE listen_node = ?1", ids)?;
+        self.conn.execute("UPDATE forwards SET target_node = ?2 WHERE target_node = ?1", ids)?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO pair_settings (node_a, node_b, keep_alive)
+             SELECT MIN(peer, ?2), MAX(peer, ?2), keep_alive
+             FROM (SELECT CASE WHEN node_a = ?1 THEN node_b ELSE node_a END AS peer, keep_alive
+                   FROM pair_settings WHERE node_a = ?1 OR node_b = ?1)
+             WHERE peer <> ?2",
+            ids,
+        )?;
+        self.conn.execute("DELETE FROM pair_settings WHERE node_a = ?1 OR node_b = ?1", params![SqlNode(old)])?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::NewNetwork;
+    use crate::store::fixtures::{home, key, new_node};
+
+    #[test]
+    fn a_node_round_trips_with_everything_set() {
+        let store = Store::open_in_memory().unwrap();
+        let network = store.insert_network(&home()).unwrap();
+        let id = store.insert_node(&new_node(network, 1)).unwrap();
+        let mut node = store.node(id).unwrap().unwrap();
+        assert_eq!(node.name, format!("node-{id}"));
+        assert_eq!(node.netmap, NetmapState::default());
+        assert_eq!(node.last_seen_at, None);
+
+        node.name = "nas-01".to_owned();
+        node.tags = ["servers".to_owned(), "home".to_owned()].into();
+        node.declared = Declared { exit: true, relay: true, forward: false };
+        node.relay =
+            Some(RelaySettings { udp: vec!["203.0.113.7:20330".parse().unwrap()], region: "hk".to_owned(), ..RelaySettings::default() });
+        node.exit = Some(ExitRole { ports: None, lan: true, ..ExitRole::default() });
+        node.dial_out_only = true;
+        node.routing = Some(RoutingMode::LowestCost);
+        node.reach = Some(Reach::DirectOnly);
+        node.pinned_relays = vec![NodeId::new(9).unwrap()];
+        store.update_node(&node).unwrap();
+
+        let endpoints: Vec<SocketAddr> = vec!["192.168.1.5:20330".parse().unwrap(), "[2001:db8::1]:20330".parse().unwrap()];
+        let attached = vec![Attachment { relay: NodeId::new(9).unwrap(), rtt_ms: 12 }];
+        store.set_node_report(id, &endpoints, &attached).unwrap();
+        store.set_node_observed(id, Some("198.51.100.4:20330".parse().unwrap())).unwrap();
+        store.set_node_last_seen(id, 2_000).unwrap();
+        store.set_node_netmap(id, 5, &[7; DIGEST_LEN]).unwrap();
+        store.set_node_sent(id, 5).unwrap();
+        store.set_node_acked(id, 4).unwrap();
+
+        node.endpoints = endpoints;
+        node.attached = attached;
+        node.observed = Some("198.51.100.4:20330".parse().unwrap());
+        node.last_seen_at = Some(2_000);
+        node.netmap = NetmapState { version: 5, digest: Some([7; DIGEST_LEN]), sent: 5, acked: 4 };
+        assert_eq!(store.node(id).unwrap(), Some(node.clone()));
+        assert_eq!(store.node_by_key(&key(1)).unwrap(), Some(node.clone()));
+        assert_eq!(store.nodes(network).unwrap(), vec![node]);
+        assert_eq!(store.node_count(Some(network)).unwrap(), 1);
+        assert_eq!(store.node_count(None).unwrap(), 1);
+    }
+
+    #[test]
+    fn node_ids_are_never_reused() {
+        let store = Store::open_in_memory().unwrap();
+        let network = store.insert_network(&home()).unwrap();
+        let first = store.insert_node(&new_node(network, 1)).unwrap();
+        let second = store.insert_node(&new_node(network, 2)).unwrap();
+        store.delete_node(second).unwrap();
+        let third = store.insert_node(&new_node(network, 3)).unwrap();
+        assert!(first < second && second < third, "{first} {second} {third}");
+    }
+
+    #[test]
+    fn key_address_and_name_are_unique() {
+        let store = Store::open_in_memory().unwrap();
+        let network = store.insert_network(&home()).unwrap();
+        store.insert_node(&NewNode { name: Some("a".to_owned()), ..new_node(network, 1) }).unwrap();
+        assert!(store.insert_node(&NewNode { virtual_ip: "10.66.0.99".parse().unwrap(), ..new_node(network, 1) }).is_err(), "同一把公钥");
+        assert!(store.insert_node(&NewNode { key: key(2), ..new_node(network, 1) }).is_err(), "同一个虚拟 IP");
+        assert!(store.insert_node(&NewNode { name: Some("a".to_owned()), ..new_node(network, 3) }).is_err(), "同一个名字");
+    }
+
+    #[test]
+    fn a_parked_node_gives_up_its_name_and_address_to_a_successor() {
+        let store = Store::open_in_memory().unwrap();
+        let network = store.insert_network(&home()).unwrap();
+        let old = store.insert_node(&NewNode { name: Some("nas-01".to_owned()), ..new_node(network, 1) }).unwrap();
+        let taken = NewNode { name: Some("nas-01".to_owned()), virtual_ip: "10.66.0.1".parse().unwrap(), ..new_node(network, 2) };
+        assert!(store.insert_node(&taken).is_err());
+        store.park_node(old).unwrap();
+        let new = store.insert_node(&taken).unwrap();
+        store.repoint_node(old, new).unwrap();
+        store.delete_node(old).unwrap();
+        let nodes = store.nodes(network).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!((nodes[0].id, nodes[0].name.as_str(), nodes[0].virtual_ip), (new, "nas-01", "10.66.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn nodes_are_listed_per_network_only() {
+        let store = Store::open_in_memory().unwrap();
+        let home_id = store.insert_network(&home()).unwrap();
+        let lab_id = store.insert_network(&NewNetwork { name: "lab".to_owned(), cidr: "10.67.0.0/16".parse().unwrap(), ..home() }).unwrap();
+        let in_home = store.insert_node(&new_node(home_id, 1)).unwrap();
+        let in_lab = store.insert_node(&NewNode { virtual_ip: "10.67.0.1".parse().unwrap(), ..new_node(lab_id, 2) }).unwrap();
+        assert_eq!(store.nodes(home_id).unwrap().iter().map(|node| node.id).collect::<Vec<_>>(), vec![in_home]);
+        assert_eq!(store.nodes(lab_id).unwrap().iter().map(|node| node.id).collect::<Vec<_>>(), vec![in_lab]);
+    }
+}

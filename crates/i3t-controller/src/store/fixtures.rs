@@ -1,0 +1,47 @@
+//! 测试里反复用到的数据。
+
+use i3t_model::admin::NetworkId;
+use i3t_model::control::Declared;
+use i3t_model::netmap::{Reach, RoutingMode};
+use i3t_proto::{NodeId, PublicKey};
+
+use super::{NewNetwork, NewNode, Store};
+
+pub(crate) fn home() -> NewNetwork {
+    NewNetwork {
+        name: "home".to_owned(),
+        cidr: "10.66.0.0/16".parse().unwrap(),
+        routing: RoutingMode::DirectFirst,
+        max_relay_hops: 2,
+        reach: Reach::Any,
+        created_at: 1_000,
+    }
+}
+
+pub(crate) fn key(seed: u8) -> PublicKey {
+    PublicKey::from_bytes([seed; PublicKey::LEN])
+}
+
+/// 第 `seed` 个节点：公钥和虚拟 IP 都由 `seed` 决定，所以不同的 `seed` 不会撞。
+pub(crate) fn new_node(network: NetworkId, seed: u8) -> NewNode {
+    NewNode {
+        network,
+        key: key(seed),
+        name: None,
+        virtual_ip: [10, 66, 0, seed].into(),
+        tags: Default::default(),
+        declared: Declared::default(),
+        platform: "linux-x86_64".to_owned(),
+        version: "0.1.0".to_owned(),
+        created_at: 1_000,
+        enrolled_with: None,
+    }
+}
+
+/// 一个网络加 `count` 个节点。
+pub(crate) fn store_with_nodes(count: u8) -> (Store, NetworkId, Vec<NodeId>) {
+    let store = Store::open_in_memory().unwrap();
+    let network = store.insert_network(&home()).unwrap();
+    let nodes = (1..=count).map(|seed| store.insert_node(&new_node(network, seed)).unwrap()).collect();
+    (store, network, nodes)
+}

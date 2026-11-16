@@ -8,11 +8,26 @@ publish = false
 description = "ice3tier 的 controller：存储、注册、访问规则编译、netmap、节点协议、管理 API"
 
 [dependencies]
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "query"] }
+base64.workspace = true
 i3t-crypto = { path = "../i3t-crypto" }
 i3t-model = { path = "../i3t-model" }
 i3t-proto = { path = "../i3t-proto" }
+ipnet.workspace = true
+ring.workspace = true
+rusqlite = { version = "0.43.0", features = ["bundled"] }
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-rustls = { version = "0.26.6", default-features = false }
+tower-http = { version = "0.7.1", default-features = false, features = ["fs"] }
+tracing = "0.1.44"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tower = { version = "0.5.3", features = ["util"] }
