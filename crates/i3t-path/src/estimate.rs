@@ -1,0 +1,384 @@
+//! 一段链路的质量估计：延迟、抖动、丢包（白皮书 §7.3）。
+//!
+//! 本节点自己测的每一段都用它：到 relay 的中转会话、到对端的直连。样本来自两处：平时的保活探测，
+//! 以及给正在评估的候选路径发的探测包列（[`Train`]）。只靠低频的保活看不出百分之几的丢包。
+//!
+//! 估计带时间戳，太久没有得到新的回答就作废，不会一直沿用旧值。
+//!
+//! # 迟到的回答
+//!
+//! 等不到回答的探测记成丢失；它的回答后来又到了的话，再记一个延迟样本（不再算一次"没丢"）。走 TCP 的那一段
+//! 丢的包由 TCP 自己重传，探测不会真的丢，只会在停顿之后迟到：节点能测到的只有这条 TCP 的延迟和停顿。
+//! 这样一次停顿既算一次丢失（端到端的连接在这么久的停顿里也会判定丢包、重传），又让延迟和抖动跟着涨，
+//! 一条经常停顿的 TCP 在代价里就明显比一条顺畅的贵。
+
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
+
+use i3t_proto::session::Nonce;
+
+use crate::cost::Segment;
+use crate::timing::{ESTIMATE_TTL, Rtt, TRAIN_INTERVAL, TRAIN_PROBES};
+
+/// 丢包率按最近这么多个探测算。一组探测包列是 10 个，所以大约是最近四组。
+const LOSS_WINDOW: usize = 40;
+/// 探测不到这么多个时不报丢包率：样本太少，丢一个就是百分之十几。
+const MIN_LOSS_SAMPLES: usize = 10;
+/// 超时的探测最多记多少个、记多久，等它们迟到的回答。再晚的回答就不当样本了：那样的停顿早就让会话判为断开。
+const OVERDUE_KEPT: usize = 8;
+const OVERDUE_LIMIT: Duration = Duration::from_secs(10);
+
+/// 一段链路的估计。
+#[derive(Debug, Clone)]
+pub(crate) struct Estimate {
+    rtt: Option<Rtt>,
+    /// 延迟样本和平滑值之差的平滑值，和 TCP 的 RTTVAR 是同一种算法。
+    jitter: Duration,
+    /// 最近的探测是不是丢了。
+    outcomes: VecDeque<bool>,
+    /// 最近一次得到回答的时刻。
+    answered: Option<Instant>,
+}
+
+/// 某一时刻读出来的估计值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Quality {
+    pub(crate) rtt: Duration,
+    pub(crate) jitter: Duration,
+    /// 最近 `probes` 个探测里丢了 `lost` 个。样本不够时两个都是 0。
+    pub(crate) lost: usize,
+    pub(crate) probes: usize,
+}
+
+impl Quality {
+    /// 换成算代价用的形式。
+    pub(crate) fn segment(&self) -> Segment {
+        let millis = |value: Duration| value.as_secs_f64() * 1000.0;
+        // 两个计数都不超过窗口的长度（40），换成浮点数没有精度问题。
+        let ratio = |count: usize| u8::try_from(count).map_or(f64::from(u8::MAX), f64::from);
+        let loss = if self.probes == 0 { 0.0 } else { ratio(self.lost) / ratio(self.probes) };
+        Segment { rtt_ms: millis(self.rtt), jitter_ms: millis(self.jitter), loss }
+    }
+}
+
+impl Estimate {
+    pub(crate) const fn new() -> Self {
+        Self { rtt: None, jitter: Duration::ZERO, outcomes: VecDeque::new(), answered: None }
+    }
+
+    /// 一个探测得到了回答，往返用了 `rtt`。
+    pub(crate) fn sample(&mut self, rtt: Duration, now: Instant) {
+        self.measure(rtt, now);
+        self.record(false);
+    }
+
+    /// 一个探测没有等到回答。
+    pub(crate) fn lost(&mut self) {
+        self.record(true);
+    }
+
+    /// 一个已经记成丢失的探测，回答在 `rtt` 之后迟到了：只更新延迟和抖动，不改丢包的记录（见模块文档）。
+    pub(crate) fn late_answer(&mut self, rtt: Duration, now: Instant) {
+        self.measure(rtt, now);
+    }
+
+    fn measure(&mut self, rtt: Duration, now: Instant) {
+        match &mut self.rtt {
+            Some(smoothed) => {
+                let deviation = smoothed.get().abs_diff(rtt);
+                self.jitter = (self.jitter * 3 + deviation) / 4;
+                smoothed.update(rtt);
+            }
+            None => self.rtt = Some(Rtt::new(rtt)),
+        }
+        self.answered = Some(now);
+    }
+
+    fn record(&mut self, lost: bool) {
+        if self.outcomes.len() == LOSS_WINDOW {
+            self.outcomes.pop_front();
+        }
+        self.outcomes.push_back(lost);
+    }
+
+    /// 平滑之后的往返延迟，不管新旧。用来定探测的超时。
+    pub(crate) const fn rtt(&self) -> Option<Rtt> {
+        self.rtt
+    }
+
+    /// 现在的估计。从来没有得到过回答，或者最近一次回答已经过期了，返回 `None`。
+    pub(crate) fn quality(&self, now: Instant) -> Option<Quality> {
+        let fresh = self.answered.is_some_and(|at| now.saturating_duration_since(at) < ESTIMATE_TTL);
+        let rtt = self.rtt.filter(|_| fresh)?.get();
+        let probes = self.outcomes.len();
+        let (lost, probes) = if probes < MIN_LOSS_SAMPLES { (0, 0) } else { (self.outcomes.iter().filter(|&&lost| lost).count(), probes) };
+        Some(Quality { rtt, jitter: self.jitter, lost, probes })
+    }
+}
+
+/// 探测包列：每隔一段时间连着发一组探测，专门用来估丢包率（白皮书 §7.3：默认每 30 秒一组 10 个）。
+///
+/// 它只管节奏和对账：外面每隔一小段时间问一次"现在要不要发一个"，把回答交回来；没有等到回答的记成丢失，
+/// 回答迟到的再记一个延迟样本（见模块文档）。同一段链路上保活用的探测超时了也交给它等迟到的回答（[`overdue`](Self::overdue)）。
+#[derive(Debug)]
+pub(crate) struct Train {
+    pending: Vec<(Nonce, Instant)>,
+    /// 已经记成丢失、还在等迟到的回答的探测，最老的在前面。
+    overdue: VecDeque<(Nonce, Instant)>,
+    /// 这一组还要发几个。
+    remaining: u8,
+    /// 下一组什么时候开始。
+    next_round: Option<Instant>,
+}
+
+impl Train {
+    pub(crate) const fn new() -> Self {
+        Self { pending: Vec::new(), overdue: VecDeque::new(), remaining: 0, next_round: None }
+    }
+
+    /// 推进一步。`wanted`：这段链路是不是在正在评估的候选路径上；不是就不发新的。
+    /// 等了超过 `timeout` 的探测记成丢失。返回值是现在要发的一个探测的随机数；每次调用最多发一个，
+    /// 所以一组探测自然地按调用的间隔散开，不会挤成一个突发。
+    pub(crate) fn poll(&mut self, now: Instant, wanted: bool, timeout: Duration, estimate: &mut Estimate) -> Option<Nonce> {
+        let (waiting, expired): (Vec<_>, Vec<_>) =
+            self.pending.drain(..).partition(|(_, sent)| now.saturating_duration_since(*sent) < timeout);
+        self.pending = waiting;
+        for (nonce, sent) in expired {
+            estimate.lost();
+            self.overdue(nonce, sent);
+        }
+        self.overdue.retain(|(_, sent)| now.saturating_duration_since(*sent) < OVERDUE_LIMIT);
+        if !wanted {
+            self.remaining = 0;
+            return None;
+        }
+        if self.remaining == 0 && self.next_round.is_none_or(|at| now >= at) {
+            self.remaining = TRAIN_PROBES;
+            self.next_round = Some(now + TRAIN_INTERVAL);
+        }
+        self.remaining = self.remaining.checked_sub(1)?;
+        let nonce: Nonce = i3t_underlay::random_bytes();
+        self.pending.push((nonce, now));
+        Some(nonce)
+    }
+
+    /// 一个已经记成丢失的探测（`sent` 时发的），它的回答要是迟到了，仍然记一个延迟样本。
+    pub(crate) fn overdue(&mut self, nonce: Nonce, sent: Instant) {
+        if self.overdue.len() == OVERDUE_KEPT {
+            self.overdue.pop_front();
+        }
+        self.overdue.push_back((nonce, sent));
+    }
+
+    /// 一个回答到了。它回答的是这一列里的探测（或者一个超时了的探测）时记一个样本，返回 `true`。
+    pub(crate) fn on_reply(&mut self, nonce: &Nonce, now: Instant, estimate: &mut Estimate) -> bool {
+        if let Some(index) = self.pending.iter().position(|(pending, _)| pending == nonce) {
+            let (_, sent) = self.pending.swap_remove(index);
+            estimate.sample(now.saturating_duration_since(sent), now);
+            return true;
+        }
+        let Some(index) = self.overdue.iter().position(|(overdue, _)| overdue == nonce) else { return false };
+        let Some((_, sent)) = self.overdue.remove(index) else { return false };
+        let delay = now.saturating_duration_since(sent);
+        if delay < OVERDUE_LIMIT {
+            estimate.late_answer(delay, now);
+        }
+        true
+    }
+
+    /// 是不是发过带这个随机数的探测、还在等回答（包括迟到的）。
+    pub(crate) fn expects(&self, nonce: &Nonce) -> bool {
+        self.pending.iter().chain(&self.overdue).any(|(pending, _)| pending == nonce)
+    }
+
+    /// 链路断了：在等的探测都不算数了。
+    pub(crate) fn clear(&mut self) {
+        self.pending.clear();
+        self.overdue.clear();
+        self.remaining = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MS: Duration = Duration::from_millis(1);
+
+    #[test]
+    fn nothing_is_known_before_the_first_answer() {
+        let now = Instant::now();
+        let mut estimate = Estimate::new();
+        assert_eq!(estimate.quality(now), None);
+        estimate.lost();
+        assert_eq!(estimate.quality(now), None, "只有丢失、从来没有回答：还是不知道");
+        assert_eq!(estimate.rtt(), None);
+    }
+
+    #[test]
+    fn rtt_is_smoothed_and_jitter_follows_the_deviation() {
+        let now = Instant::now();
+        let mut estimate = Estimate::new();
+        estimate.sample(80 * MS, now);
+        let first = estimate.quality(now).unwrap();
+        assert_eq!((first.rtt, first.jitter), (80 * MS, Duration::ZERO));
+
+        // 样本偏了 40ms：延迟向它走八分之一，抖动记下四分之一的偏差。
+        estimate.sample(120 * MS, now);
+        let second = estimate.quality(now).unwrap();
+        assert_eq!((second.rtt, second.jitter), (85 * MS, 10 * MS));
+
+        // 之后的样本都落在平滑值上：抖动慢慢退回去。
+        for _ in 0..40 {
+            estimate.sample(estimate.rtt().unwrap().get(), now);
+        }
+        assert!(estimate.quality(now).unwrap().jitter < MS);
+    }
+
+    #[test]
+    fn loss_is_not_reported_until_there_are_enough_probes() {
+        let now = Instant::now();
+        let mut estimate = Estimate::new();
+        estimate.sample(50 * MS, now);
+        estimate.lost();
+        let few = estimate.quality(now).unwrap();
+        assert_eq!((few.lost, few.probes), (0, 0), "两个探测丢一个不能说丢包率是一半");
+        assert_eq!(few.segment().loss, 0.0);
+
+        for _ in 0..8 {
+            estimate.sample(50 * MS, now);
+        }
+        let enough = estimate.quality(now).unwrap();
+        assert_eq!((enough.lost, enough.probes), (1, 10));
+        assert!((enough.segment().loss - 0.1).abs() < 1e-9);
+        assert!((enough.segment().rtt_ms - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn loss_is_measured_over_the_most_recent_window_only() {
+        let now = Instant::now();
+        let mut estimate = Estimate::new();
+        for _ in 0..LOSS_WINDOW {
+            estimate.lost();
+        }
+        for _ in 0..LOSS_WINDOW {
+            estimate.sample(50 * MS, now);
+        }
+        let quality = estimate.quality(now).unwrap();
+        assert_eq!((quality.lost, quality.probes), (0, LOSS_WINDOW), "早先丢的那些已经滑出窗口了");
+    }
+
+    #[test]
+    fn an_estimate_expires_when_no_answer_arrives_for_two_minutes() {
+        let start = Instant::now();
+        let mut estimate = Estimate::new();
+        estimate.sample(50 * MS, start);
+        assert!(estimate.quality(start + ESTIMATE_TTL - MS).is_some());
+        assert_eq!(estimate.quality(start + ESTIMATE_TTL), None, "过期作废");
+        // 期间只有丢失、没有回答，不能让它续命。
+        estimate.lost();
+        assert_eq!(estimate.quality(start + ESTIMATE_TTL), None);
+        assert!(estimate.rtt().is_some(), "定超时用的延迟不受过期影响");
+        estimate.sample(60 * MS, start + ESTIMATE_TTL);
+        assert!(estimate.quality(start + ESTIMATE_TTL).is_some());
+    }
+
+    #[test]
+    fn a_train_sends_ten_probes_one_per_step_every_thirty_seconds() {
+        let start = Instant::now();
+        let mut estimate = Estimate::new();
+        let mut train = Train::new();
+        let timeout = 300 * MS;
+        let mut sent = Vec::new();
+        // 每 50ms 推进一步，所有探测都在 20ms 之后得到回答。
+        for step in 0..1400u32 {
+            let now = start + 50 * MS * step;
+            for (nonce, at) in std::mem::take(&mut sent) {
+                assert!(train.on_reply(&nonce, at + 20 * MS, &mut estimate));
+            }
+            if let Some(nonce) = train.poll(now, true, timeout, &mut estimate) {
+                sent.push((nonce, now));
+            }
+        }
+        // 70 秒里是三组：0 秒、30 秒、60 秒各开始一组。
+        let quality = estimate.quality(start + Duration::from_secs(70)).unwrap();
+        assert_eq!((quality.lost, quality.probes), (0, 30));
+        assert_eq!(quality.rtt, 20 * MS);
+        assert!(!train.on_reply(&[0; 8], start, &mut estimate), "不是这一列里的探测");
+    }
+
+    #[test]
+    fn unanswered_train_probes_count_as_lost_and_an_unwanted_train_stops() {
+        let start = Instant::now();
+        let mut estimate = Estimate::new();
+        estimate.sample(20 * MS, start);
+        let mut train = Train::new();
+        let timeout = 300 * MS;
+        let mut answered = 0;
+        for step in 0..20u32 {
+            let now = start + 50 * MS * step;
+            // 每三个探测回答两个。
+            if let Some(nonce) = train.poll(now, true, timeout, &mut estimate)
+                && step % 3 != 0
+            {
+                assert!(train.on_reply(&nonce, now + 20 * MS, &mut estimate));
+                answered += 1;
+            }
+        }
+        // 等所有没回答的都超时。
+        train.poll(start + Duration::from_secs(2), false, timeout, &mut estimate);
+        let quality = estimate.quality(start + Duration::from_secs(2)).unwrap();
+        assert_eq!((answered, quality.probes, quality.lost), (6, 11, 4), "十个探测丢了四个，加上最开始的一个样本");
+
+        // 不再需要之后不发新的；重新需要时要等到下一组的时刻。
+        assert_eq!(train.poll(start + Duration::from_secs(3), false, timeout, &mut estimate), None);
+        assert_eq!(train.poll(start + Duration::from_secs(4), true, timeout, &mut estimate), None);
+        assert!(train.poll(start + TRAIN_INTERVAL, true, timeout, &mut estimate).is_some());
+        train.clear();
+        assert_eq!(train.poll(start + TRAIN_INTERVAL + MS, true, timeout, &mut estimate), None);
+    }
+
+    #[test]
+    fn a_late_answer_stays_a_loss_but_raises_the_delay_and_the_jitter() {
+        let start = Instant::now();
+        let mut estimate = Estimate::new();
+        for _ in 0..10 {
+            estimate.sample(20 * MS, start);
+        }
+        let mut train = Train::new();
+        let timeout = 300 * MS;
+        let nonce = train.poll(start, true, timeout, &mut estimate).unwrap();
+        // 300ms 没有回答：记成丢失。
+        train.poll(start + timeout, true, timeout, &mut estimate);
+        assert_eq!(estimate.quality(start + timeout).unwrap().lost, 1);
+        // 回答在 900ms 之后才到（TCP 重传完了）：认得出来，丢失不撤销，延迟和抖动跟着涨。
+        assert!(train.expects(&nonce));
+        assert!(train.on_reply(&nonce, start + 900 * MS, &mut estimate));
+        let quality = estimate.quality(start + 900 * MS).unwrap();
+        assert_eq!((quality.lost, quality.probes), (1, 11), "一次停顿只算一次");
+        assert_eq!(quality.rtt, 20 * MS + (900 * MS - 20 * MS) / 8);
+        assert_eq!(quality.jitter, (900 * MS - 20 * MS) / 4);
+        assert!(!train.on_reply(&nonce, start + 950 * MS, &mut estimate), "同一个回答只算一次");
+
+        // 再晚的回答不当样本，也不再等。
+        let late = train.poll(start + TRAIN_INTERVAL, true, timeout, &mut estimate).unwrap();
+        train.poll(start + TRAIN_INTERVAL + timeout, true, timeout, &mut estimate);
+        train.poll(start + TRAIN_INTERVAL + OVERDUE_LIMIT, true, timeout, &mut estimate);
+        assert!(!train.expects(&late));
+    }
+
+    #[test]
+    fn a_timed_out_keepalive_handed_to_the_train_is_matched_when_its_answer_arrives() {
+        let start = Instant::now();
+        let mut estimate = Estimate::new();
+        estimate.sample(20 * MS, start);
+        let mut train = Train::new();
+        let nonces: Vec<Nonce> = (0..=OVERDUE_KEPT).map(|index| [u8::try_from(index).unwrap(); 8]).collect();
+        for nonce in &nonces {
+            train.overdue(*nonce, start);
+        }
+        assert!(!train.expects(&nonces[0]), "最多等 {OVERDUE_KEPT} 个，最老的先放弃");
+        assert!(train.on_reply(&nonces[OVERDUE_KEPT], start + 500 * MS, &mut estimate));
+        assert!(estimate.rtt().unwrap().get() > 20 * MS);
+    }
+}

@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use i3t_proto::Datagram;
 use i3t_proto::datagram::RelayHeader;
 use i3t_proto::session::Frame;
@@ -23,6 +24,8 @@ pub(crate) enum TcpEvent {
     Connected,
     /// relay 发来的会话帧。
     Frame(Frame),
+    /// relay 发来的骨干矩阵的一行，整帧。
+    Row(Bytes),
     /// 没连上，或者断了。
     Closed,
 }
@@ -96,8 +99,19 @@ async fn read(shared: &Shared, relay: &RelaySlot, conn: u64, mut reader: FrameRe
                     return "路径层已经停了";
                 }
             }
+            // 多级中转的包：这条 TCP 通向的 relay 必须就是路径上的最后一个。
+            Ok(Datagram::Routed { header, .. }) if header.dst == shared.me && header.relays.last() == relay.id => {
+                if shared.inbound.send((header.src, frame.slice(header.encoded_len()..))).await.is_err() {
+                    return "路径层已经停了";
+                }
+            }
             Ok(Datagram::Session(session)) if !session.is_request() => {
                 if shared.ctrl.send(Ctrl::Tcp { relay: relay.id, conn, event: TcpEvent::Frame(session) }).await.is_err() {
+                    return "路径层已经停了";
+                }
+            }
+            Ok(Datagram::Row(_)) => {
+                if shared.ctrl.send(Ctrl::Tcp { relay: relay.id, conn, event: TcpEvent::Row(frame) }).await.is_err() {
                     return "路径层已经停了";
                 }
             }

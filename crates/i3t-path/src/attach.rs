@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use i3t_proto::session::{Accepted, Challenge, Cookie, Nonce, Pong};
 
+use crate::estimate::{Estimate, Quality, Train};
 use crate::timing::{HANDSHAKE_RETRY, HANDSHAKE_TRIES, MAX_TIMEOUTS, PROBE_INTERVAL, Rtt, SILENCE};
 
 /// 要外面去发的帧。节点编号和签名由外面填。
@@ -66,12 +67,26 @@ enum State {
 #[derive(Debug)]
 pub(crate) struct Session {
     state: State,
-    rtt: Option<Rtt>,
+    /// 这一段链路的延迟、抖动和丢包。保活和探测包列的结果都记在这里。
+    estimate: Estimate,
+    train: Train,
+    /// 这段链路是不是在正在评估的候选路径上：是的话定期发探测包列。
+    training: bool,
+    /// 保活的间隔。挂靠的 relay 是 5 秒，relay 和 relay 之间是 2 秒（白皮书 §7.3）。
+    interval: Duration,
 }
 
 impl Session {
     pub(crate) const fn new() -> Self {
-        Self { state: State::Idle, rtt: None }
+        Self { state: State::Idle, estimate: Estimate::new(), train: Train::new(), training: false, interval: PROBE_INTERVAL }
+    }
+
+    pub(crate) const fn set_interval(&mut self, interval: Duration) {
+        self.interval = interval;
+    }
+
+    pub(crate) const fn set_training(&mut self, training: bool) {
+        self.training = training;
     }
 
     pub(crate) const fn is_up(&self) -> bool {
@@ -89,7 +104,12 @@ impl Session {
     }
 
     pub(crate) const fn rtt(&self) -> Option<Rtt> {
-        self.rtt
+        self.estimate.rtt()
+    }
+
+    /// 这段链路现在的估计；没有测到过或者过期了是 `None`。
+    pub(crate) fn quality(&self, now: Instant) -> Option<Quality> {
+        self.estimate.quality(now)
     }
 
     /// 开始握手，返回要发的 INIT。
@@ -112,6 +132,7 @@ impl Session {
     /// 放弃：不再握手，也不再保活。relay 那边的会话会自己过期。
     pub(crate) fn stop(&mut self) {
         self.state = State::Idle;
+        self.train.clear();
     }
 
     pub(crate) fn on_challenge(&mut self, challenge: &Challenge, now: Instant) -> Step {
@@ -121,7 +142,7 @@ impl Session {
         }
         // 握手的第一个往返顺便当一个延迟样本。重发过的话分不清这是在回答哪一个 INIT，就不取样。
         if tries == 1 {
-            self.sample(now.saturating_duration_since(sent));
+            self.estimate.sample(now.saturating_duration_since(sent), now);
         }
         if hold {
             self.state = State::Held { nonce, cookie: challenge.cookie };
@@ -144,23 +165,26 @@ impl Session {
         }
         // 握手的第二个往返同样可以当延迟样本，重发过就不取。
         if tries == 1 {
-            self.sample(now.saturating_duration_since(sent));
+            self.estimate.sample(now.saturating_duration_since(sent), now);
         }
         // 两步都重发过的话还不知道延迟：不等保活间隔，马上量一次。
-        let last_ping = if self.rtt.is_some() { now } else { now.checked_sub(PROBE_INTERVAL).unwrap_or(now) };
+        let last_ping = if self.rtt().is_some() { now } else { now.checked_sub(self.interval).unwrap_or(now) };
         self.state = State::Up { last_ping, awaiting: None, missed: 0 };
         Step { send: None, event: Some(Event::Up { observed: ok.observed }) }
     }
 
     /// PONG。返回 relay 看到的本节点地址；随机数对不上时返回 `None`。
     pub(crate) fn on_pong(&mut self, pong: &Pong, now: Instant) -> Option<SocketAddr> {
-        let State::Up { last_ping, awaiting: Some((nonce, sent)), .. } = self.state else { return None };
-        if pong.nonce != nonce {
-            return None;
+        let State::Up { last_ping, awaiting, .. } = self.state else { return None };
+        match awaiting {
+            Some((nonce, sent)) if pong.nonce == nonce => {
+                self.estimate.sample(now.saturating_duration_since(sent), now);
+                self.state = State::Up { last_ping, awaiting: None, missed: 0 };
+                Some(pong.observed)
+            }
+            // 不是在回答保活，那就看是不是探测包列里的一个。
+            Some(_) | None => self.train.on_reply(&pong.nonce, now, &mut self.estimate).then_some(pong.observed),
         }
-        self.sample(now.saturating_duration_since(sent));
-        self.state = State::Up { last_ping, awaiting: None, missed: 0 };
-        Some(pong.observed)
     }
 
     /// relay 说本节点在它那里没有会话。
@@ -168,8 +192,7 @@ impl Session {
         if !self.is_up() {
             return Step::default();
         }
-        self.state = State::Idle;
-        Step { send: None, event: Some(Event::Down { reason: "relay 说本节点没有会话" }) }
+        self.fail("relay 说本节点没有会话")
     }
 
     /// 推进定时器。`urgent`：有包正经这个 relay 发出去，却有一阵没有从它收到任何东西了。
@@ -198,18 +221,24 @@ impl Session {
 
     fn keep_alive(&mut self, now: Instant, urgent: bool, last_ping: Instant, awaiting: Option<(Nonce, Instant)>, missed: u8) -> Step {
         let since_ping = now.saturating_duration_since(last_ping);
-        let timeout = self.rtt.map_or(crate::timing::PROBE_TIMEOUT_MAX, Rtt::probe_timeout);
+        let timeout = self.rtt().map_or(crate::timing::PROBE_TIMEOUT_MAX, Rtt::probe_timeout);
         let (due, missed) = match awaiting {
             Some((_, sent)) if now.saturating_duration_since(sent) < timeout => (false, missed),
-            // 超时之后不等下一个保活间隔，立刻再问。
-            Some(_) => (true, missed + 1),
-            None => (since_ping >= PROBE_INTERVAL || (urgent && since_ping >= SILENCE), missed),
+            // 超时之后不等下一个保活间隔，立刻再问。它的回答要是迟到了（走 TCP 时常见：TCP 在重传），照样记下延迟。
+            Some((nonce, sent)) => {
+                self.estimate.lost();
+                self.train.overdue(nonce, sent);
+                (true, missed + 1)
+            }
+            None => (since_ping >= self.interval || (urgent && since_ping >= SILENCE), missed),
         };
         if missed >= MAX_TIMEOUTS {
             return self.fail("保活连续没有回应");
         }
         if !due {
-            return Step::default();
+            // 不到发保活的时候：探测包列该发的话发一个。它的回答只用来估丢包，不影响会话还在不在的判断。
+            let probe = self.train.poll(now, self.training, timeout, &mut self.estimate);
+            return Step { send: probe.map(|nonce| Send::Ping { nonce }), event: None };
         }
         let nonce: Nonce = i3t_underlay::random_bytes();
         self.state = State::Up { last_ping: now, awaiting: Some((nonce, now)), missed };
@@ -218,14 +247,8 @@ impl Session {
 
     fn fail(&mut self, reason: &'static str) -> Step {
         self.state = State::Idle;
+        self.train.clear();
         Step { send: None, event: Some(Event::Down { reason }) }
-    }
-
-    fn sample(&mut self, sample: Duration) {
-        match &mut self.rtt {
-            Some(rtt) => rtt.update(sample),
-            None => self.rtt = Some(Rtt::new(sample)),
-        }
     }
 }
 
@@ -414,6 +437,85 @@ mod tests {
         assert_eq!(session.on_no_session().event, Some(Event::Down { reason: "relay 说本节点没有会话" }));
         assert!(session.is_idle());
         assert_eq!(session.on_no_session(), Step::default(), "没有会话时这种帧没有意义，伪造的也触发不了什么");
+    }
+
+    #[test]
+    fn a_backbone_session_is_pinged_every_two_seconds() {
+        let (mut session, up) = established();
+        session.set_interval(crate::timing::BACKBONE_PROBE_INTERVAL);
+        assert_eq!(session.poll(up + Duration::from_secs(2) - MS, false), Step::default());
+        assert!(matches!(session.poll(up + Duration::from_secs(2), false).send, Some(Send::Ping { .. })));
+    }
+
+    #[test]
+    fn a_probe_train_measures_loss_without_disturbing_the_keepalive() {
+        let (mut session, up) = established();
+        session.set_training(true);
+        let mut pings = Vec::new();
+        // 两秒里每 50ms 推进一步：探测包列发出 10 个，每三个回答两个。
+        for step in 1..40u32 {
+            let now = up + 50 * MS * step;
+            if let Some(Send::Ping { nonce }) = session.poll(now, false).send {
+                pings.push(nonce);
+                if pings.len() % 3 != 0 {
+                    assert_eq!(session.on_pong(&Pong { nonce, observed: observed() }, now + 20 * MS), Some(observed()));
+                }
+            }
+        }
+        assert_eq!(pings.len(), 10, "一组 10 个，发完就停到下一组");
+        assert!(session.is_up() && !session.in_doubt(), "探测包列丢了回答不算保活超时");
+        let quality = session.quality(up + Duration::from_secs(3)).unwrap();
+        assert_eq!((quality.lost, quality.probes), (3, 12), "握手的两个样本，加上 10 个探测里丢的 3 个");
+
+        // 不在候选路径上的会话不发探测包列。
+        let (mut idle, up) = established();
+        assert!((1..40u32).all(|step| idle.poll(up + 50 * MS * step, false).send.is_none()));
+    }
+
+    #[test]
+    fn keepalive_timeouts_count_as_loss_and_the_estimate_expires() {
+        let (mut session, up) = established();
+        let timeout = session.rtt().unwrap().probe_timeout();
+        session.poll(up + PROBE_INTERVAL, false);
+        let Some(Send::Ping { nonce }) = session.poll(up + PROBE_INTERVAL + timeout, false).send else { panic!("该重发保活了") };
+        session.on_pong(&Pong { nonce, observed: observed() }, up + PROBE_INTERVAL + timeout + 5 * MS);
+        for _ in 0..7 {
+            session.estimate.sample(20 * MS, up + PROBE_INTERVAL + timeout + 5 * MS);
+        }
+        let quality = session.quality(up + PROBE_INTERVAL + timeout + 6 * MS).unwrap();
+        assert_eq!((quality.lost, quality.probes), (1, 11));
+        assert_eq!(session.quality(up + PROBE_INTERVAL + timeout + crate::timing::ESTIMATE_TTL + 6 * MS), None, "过期作废");
+    }
+
+    /// 一条 TCP 的中转腿：每个探测都会被回答（TCP 不丢包），但 `stalls` 为真时每三个里有一个要等一次重传，迟到 900ms。
+    /// 跑一分钟，返回这段链路按白皮书 §7.4 算出来的代价。
+    fn leg_cost(stalls: bool) -> f64 {
+        let (mut session, up) = established();
+        session.set_training(true);
+        let mut answers: Vec<(Instant, Nonce)> = Vec::new();
+        let mut sent = 0u32;
+        for step in 1..1200u32 {
+            let now = up + 50 * MS * step;
+            for (at, nonce) in answers.extract_if(.., |(at, _)| *at <= now) {
+                session.on_pong(&Pong { nonce, observed: observed() }, at);
+            }
+            if let Some(Send::Ping { nonce }) = session.poll(now, false).send {
+                sent += 1;
+                let delay = if stalls && sent.is_multiple_of(3) { 900 * MS } else { 20 * MS };
+                answers.push((now + delay, nonce));
+            }
+            assert!(session.is_up(), "停顿不到连续三次保活超时，会话一直在");
+        }
+        let quality = session.quality(up + Duration::from_secs(60)).unwrap();
+        crate::cost::path_cost(&[quality.segment()], 0, 0.0)
+    }
+
+    #[test]
+    fn a_tcp_leg_that_keeps_stalling_costs_far_more_than_a_smooth_one() {
+        let (smooth, stalling) = (leg_cost(false), leg_cost(true));
+        assert!((19.0..25.0).contains(&smooth), "顺畅的那条差不多就是它的延迟：{smooth}");
+        // 一个只看平滑延迟的比较会觉得两条差不多；停顿让抖动、延迟和丢包一起涨，代价差出好几倍。
+        assert!(stalling > 5.0 * smooth, "顺畅 {smooth:.1}ms，停顿 {stalling:.1}ms");
     }
 
     #[test]

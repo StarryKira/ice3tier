@@ -13,6 +13,7 @@ i3t-crypto = { path = "../i3t-crypto" }
 i3t-model = { path = "../i3t-model" }
 i3t-proto = { path = "../i3t-proto" }
 i3t-underlay = { path = "../i3t-underlay" }
+serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

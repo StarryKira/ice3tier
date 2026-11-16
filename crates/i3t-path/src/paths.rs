@@ -12,13 +12,16 @@ use i3t_crypto::NodeKey;
 use i3t_model::Netmap;
 use i3t_model::control::{RouteEntry, Signal};
 use i3t_model::netmap::Attachment;
-use i3t_proto::datagram::RelayHeader;
-use i3t_proto::{Datagram, NodeId};
+use i3t_proto::datagram::{RelayHeader, RouteHeader};
+use i3t_proto::{Datagram, NodeId, PublicKey, probe};
+use i3t_underlay::lan::{LanConfig, LanDiscovery};
+use i3t_underlay::portmap::PortMapConfig;
 use i3t_underlay::{BATCH_SIZE, Ecn, RecvMeta, UdpPort};
-use tokio::sync::{Notify, broadcast, mpsc, watch};
+use tokio::sync::{Notify, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::control::{Control, Ctrl, Inbound};
+use crate::report::{BackboneRow, PathReport};
 use crate::table::{Clock, Packets, PeerSlot, Shared, Table};
 use crate::{LocalRelay, RouteChange, Status};
 
@@ -62,6 +65,8 @@ pub struct PacketMeta {
 pub struct Paths {
     shared: Arc<Shared>,
     control: JoinHandle<()>,
+    /// 本节点的公钥：局域网信标里的标签是拿它算的。
+    public: PublicKey,
 }
 
 impl Paths {
@@ -85,10 +90,63 @@ impl Paths {
             changes: broadcast::Sender::new(CHANGE_BACKLOG),
             route_changed: Notify::new(),
             status: Mutex::new(Status::default()),
+            lan: Mutex::new(None),
         });
+        let public = key.public();
         let control = Control::new(Arc::clone(&shared), key, current, addr_servers);
         let control = tokio::spawn(control.run(ctrl_rx, netmap));
-        Self { shared, control }
+        let paths = Self { shared, control, public };
+        // 端口绑在未指定地址上的才是真的节点：只有它们自动在本地网段上找对端。绑在具体地址上的（测试）要自己明确打开。
+        if paths.shared.port.local_addr().ip().is_unspecified()
+            && let Err(error) = paths.start_lan_discovery(LanConfig::default())
+        {
+            tracing::debug!(%error, "局域网发现启动不了，同一个局域网里的对端只能靠上报的地址去找");
+        }
+        paths
+    }
+
+    /// 开始在本地网段上发信标、听对端的信标。看到的对端成为直连的候选地址，照样要验证过才用。
+    ///
+    /// 端口绑在未指定地址上时 [`new`](Self::new) 已经用默认参数调用过它；再调用会换成新的参数。要在 tokio 运行时里调用。
+    ///
+    /// # Errors
+    ///
+    /// 组播的 socket 建不起来（端口被不肯共用的程序占着，或者系统不让用组播）。
+    ///
+    /// # Panics
+    ///
+    /// 之前的调用 panic 过（锁中毒）。
+    pub fn start_lan_discovery(&self, config: LanConfig) -> io::Result<()> {
+        let ctrl = self.shared.ctrl.clone();
+        let port = self.shared.port.local_addr().port();
+        let discovery = LanDiscovery::start(config, self.public, port, move |sighting| {
+            // 信标每隔几秒就来一个，控制任务忙的时候丢掉这一个没有关系。
+            let _queued = ctrl.try_send(Ctrl::Lan(sighting));
+        })?;
+        *self.shared.lan.lock().expect("lan discovery mutex poisoned") = Some(discovery);
+        let _queued = self.shared.ctrl.try_send(Ctrl::LanStarted);
+        Ok(())
+    }
+
+    /// 向网关申请端口映射（PCP、NAT-PMP、UPnP），映射出来的地址会出现在 [`endpoints`](Self::endpoints) 里。
+    ///
+    /// 端口绑在未指定地址上时 [`new`](Self::new) 已经按默认网关启动过；这个方法用给定的参数重新来，
+    /// 测试靠它把请求指向假的网关。
+    pub fn start_port_mapping(&self, config: PortMapConfig) {
+        if self.shared.ctrl.try_send(Ctrl::PortMap(config)).is_err() {
+            tracing::warn!("控制任务忙不过来，端口映射没有启动");
+        }
+    }
+
+    /// 节点要停了：把在路由器上申请的端口映射删掉，然后停止维护路径。最多等一两秒。
+    ///
+    /// 本节点同时是 relay 时，先调用 relay 的 `announce_shutdown`，再调用这个。之后这个值不再换路，只能丢弃。
+    pub async fn shutdown(&self) {
+        let (done, finished) = oneshot::channel();
+        if self.shared.ctrl.send(Ctrl::Shutdown(done)).await.is_ok() {
+            // 控制任务已经没了的话也就没有映射要删了。
+            let _stopped = finished.await;
+        }
     }
 
     /// 本节点的 relay 角色。归 relay 处理的数据报从此交给它；对端挂在本节点自己的 relay 上时，包也经它送。
@@ -213,10 +271,10 @@ impl Paths {
         }
     }
 
-    /// 这个端口上一个数据报最长多少字节：连接包的上限加上中转头。
+    /// 这个端口上一个数据报最长多少字节：连接包的上限加上最长的中转头（经 4 个 relay 时的）。
     #[must_use]
     pub const fn max_datagram_len() -> usize {
-        i3t_proto::MAX_CONN_PACKET_LEN as usize + RelayHeader::LEN
+        i3t_proto::MAX_CONN_PACKET_LEN as usize + RouteHeader::MAX_LEN
     }
 
     /// 一次发送最多能带几个包。
@@ -278,6 +336,25 @@ impl Paths {
         self.shared.changes.subscribe()
     }
 
+    /// 到每个对端的选路情况：考虑过的候选路径和各自测出来的代价、现在走的是哪一条、为什么（白皮书 §7.7）。
+    /// 没有连接的对端也在里面，候选是按手上现有的测量值算的。
+    #[must_use]
+    pub fn path_reports(&self) -> Vec<PathReport> {
+        self.status().reports.clone()
+    }
+
+    /// 到 `peer` 的选路情况；它不在 netmap 里时返回 `None`。
+    #[must_use]
+    pub fn path_report(&self, peer: NodeId) -> Option<PathReport> {
+        self.status().reports.iter().find(|report| report.peer == peer).cloned()
+    }
+
+    /// 本节点手上的骨干矩阵：每个 relay 最新的一行（它的状态、负载、到别的 relay 的延迟），过期的不在里面。
+    #[must_use]
+    pub fn backbone(&self) -> Vec<BackboneRow> {
+        self.status().backbone.clone()
+    }
+
     fn status(&self) -> std::sync::MutexGuard<'_, Status> {
         self.shared.status.lock().expect("path status mutex poisoned")
     }
@@ -288,9 +365,17 @@ impl Paths {
         let mut filled = 0;
         while filled < bufs.len() {
             let Poll::Ready(Some((peer, packet))) = queue.poll_recv(cx) else { break };
+            // TCP 中转来的、本节点的 relay 交过来的包里也可能夹着对端的路径探测。
+            if let Some(frame) = path_probe(&packet) {
+                let from = self.shared.port.local_addr();
+                if self.shared.ctrl.try_send(Ctrl::Frame { from, frame: Inbound::PathProbe { peer, frame } }).is_err() {
+                    tracing::trace!(%peer, "控制任务忙不过来，丢掉一个路径探测");
+                }
+                continue;
+            }
             let buf = &mut bufs[filled];
             match self.shared.table().peers.get(&peer) {
-                Some(slot) if packet.len() <= buf.len() => slot.last_rx.touch(&self.shared.clock),
+                Some(slot) if packet.len() <= buf.len() => slot.received(&self.shared.clock),
                 Some(_) | None => continue,
             }
             buf[..packet.len()].copy_from_slice(&packet);
@@ -368,12 +453,12 @@ impl Paths {
             Ok(Datagram::Conn(_)) => match table.direct.get(&from) {
                 Some(slot) => {
                     slot.last_rx_direct.touch(clock);
-                    slot.last_rx.touch(clock);
+                    slot.received(clock);
                     Verdict::Packet { slot, skip: 0 }
                 }
                 None => Verdict::Drop,
             },
-            Ok(Datagram::Relayed { header, .. }) if header.dst == self.shared.me => {
+            Ok(Datagram::Relayed { header, packet }) if header.dst == self.shared.me => {
                 // 发给本节点的中转帧只认两种来源：netmap 里的 relay；或者挂在本节点自己的 relay 上的节点，
                 // 并且帧里的来源节点就是那个会话的主人。
                 let vouched = match table.relays.get(&from) {
@@ -383,16 +468,33 @@ impl Paths {
                     }
                     None => self.shared.local_relay.get().is_some_and(|relay| relay.session_at(header.src, from)),
                 };
-                match table.peers.get(&header.src) {
-                    Some(slot) if vouched => {
-                        slot.last_rx.touch(clock);
+                match (table.peers.get(&header.src), path_probe(packet)) {
+                    (Some(_), Some(frame)) if vouched => Verdict::Control(Inbound::PathProbe { peer: header.src, frame }),
+                    (Some(slot), None) if vouched => {
+                        slot.received(clock);
                         Verdict::Packet { slot, skip: RelayHeader::LEN }
                     }
-                    Some(_) | None => Verdict::Drop,
+                    (Some(_) | None, _) => Verdict::Drop,
                 }
             }
-            // 发给别人的中转帧、节点发来的会话帧、地址查询：本节点是 relay 时由它处理，不是就没有人理。
-            Ok(Datagram::Relayed { .. } | Datagram::AddrQuery(_)) => Verdict::Relay,
+            // 多级中转的包，本节点是目的节点、又不在它的路径上：只认路径上最后一个 relay 发来的，而且它得是 netmap 里的 relay。
+            Ok(Datagram::Routed { header, packet }) if header.dst == self.shared.me && header.relays.around(self.shared.me).is_none() => {
+                match (table.relays.get(&from), table.peers.get(&header.src)) {
+                    (Some(relay), Some(slot)) if relay.id == header.relays.last() => {
+                        relay.last_rx.touch(clock);
+                        match path_probe(packet) {
+                            Some(frame) => Verdict::Control(Inbound::PathProbe { peer: header.src, frame }),
+                            None => {
+                                slot.received(clock);
+                                Verdict::Packet { slot, skip: header.encoded_len() }
+                            }
+                        }
+                    }
+                    _ => Verdict::Drop,
+                }
+            }
+            // 发给别人的中转帧、路径上有本节点的多级中转帧、节点发来的会话帧、地址查询：本节点是 relay 时由它处理，不是就没有人理。
+            Ok(Datagram::Relayed { .. } | Datagram::Routed { .. } | Datagram::AddrQuery(_)) => Verdict::Relay,
             Ok(Datagram::Session(frame)) if frame.is_request() => Verdict::Relay,
             Ok(Datagram::Session(frame)) => {
                 if let Some(relay) = table.relays.get(&from) {
@@ -400,6 +502,14 @@ impl Paths {
                 }
                 Verdict::Control(Inbound::Session(frame))
             }
+            // 矩阵行只认从 netmap 里的 relay 地址来的；是不是有会话、签名对不对由控制任务去查。
+            Ok(Datagram::Row(frame)) => match table.relays.get(&from) {
+                Some(relay) => {
+                    relay.last_rx.touch(clock);
+                    Verdict::Control(Inbound::Row(Bytes::copy_from_slice(frame)))
+                }
+                None => Verdict::Drop,
+            },
             Ok(Datagram::Probe(frame)) => Verdict::Control(Inbound::Probe(frame)),
             Ok(Datagram::AddrReply(reply)) => Verdict::Control(Inbound::AddrReply(reply)),
             Err(_) => Verdict::Drop,
@@ -410,6 +520,15 @@ impl Paths {
 impl Drop for Paths {
     fn drop(&mut self) {
         self.control.abort();
+    }
+}
+
+/// 经 relay 送到的包如果不是连接包而是一个探测帧，那是对端发来的端到端路径探测（或者对它的回答）。
+/// 连接包的首字节一定带着 QUIC 的那一位，所以两者不会混淆。
+fn path_probe(packet: &[u8]) -> Option<probe::Frame> {
+    match Datagram::parse(packet) {
+        Ok(Datagram::Probe(frame)) => Some(frame),
+        _ => None,
     }
 }
 
@@ -520,6 +639,18 @@ mod tests {
         fn send_to_client(&self, _client: NodeId, _contents: &[u8], _segment_size: Option<usize>, _ecn: Option<Ecn>) -> bool {
             false
         }
+
+        fn has_udp_session(&self, client: NodeId) -> bool {
+            self.has_session(client)
+        }
+
+        fn status(&self) -> Option<crate::RelayStatus> {
+            None
+        }
+
+        fn publish_row(&self, _links: &[i3t_proto::backbone::Link]) {}
+
+        fn broadcast(&self, _frame: &[u8]) {}
     }
 
     #[tokio::test]

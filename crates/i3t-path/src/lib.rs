@@ -1,28 +1,42 @@
 //! 路由层：包怎么送到对端。见 docs/architecture.md §5.2～§5.4。
 //!
-//! 为每个对端维护"现在走哪条路"：直连某个验证过的地址，经某个 relay（UDP 或 TCP），或者没有路。
+//! 为每个对端维护"现在走哪条路"：直连某个验证过的地址，经一个或几个 relay（到第一个 relay 走 UDP 或 TCP），或者没有路。
 //! 连接层只和节点编号打交道，所以路可以随时换，连接和上面的流不受影响。
 //!
 //! | 模块 | 内容 |
 //! |---|---|
-//! | [`paths`] | 对外的入口 [`Paths`]：收发包（按首字节分类）、状态查询、信令 |
-//! | `control` | 控制任务：处理 relay 的应答和探测、应用 netmap、选路 |
+//! | [`paths`] | 对外的入口 [`Paths`]：收发包（按首字节分类）、状态查询、信令、局域网发现和端口映射的开关 |
+//! | `control` | 控制任务：处理 relay 的应答和探测、应用 netmap、选路；`control::route` 是把选路结果落实成收发做法的那一部分 |
+//! | `routing` | 候选路径的穷举、代价的比较、延迟优先模式的迟滞 |
+//! | `cost` | 一条路径的代价怎么算 |
+//! | `estimate` | 一段链路的延迟、抖动和丢包估计，探测包列 |
+//! | `matrix` | 骨干延迟矩阵在节点一侧的存放 |
 //! | `direct` | 到一个对端的直连：候选地址、验证、打洞的重试、保活 |
 //! | `attach` | 节点一侧的中转会话：握手、保活 |
 //! | `relays` | 到一个 relay 的联系（UDP 和 TCP 同时试，优先 UDP），挂靠哪几个 relay |
 //! | `tcp` | 到 relay 的那条 TCP |
 //! | `table` | 收发每个包时查的表 |
+//! | [`report`] | 给界面看的选路情况和骨干矩阵 |
 //!
-//! 现在只有默认的选路模式：直连可用就走直连，否则经一个 relay。两个节点之间有直接的中转会话时用它
-//! （对端自己是 relay，或者对端挂在本节点的 relay 上），不然用对端挂靠的 relay 里第一个能用的。
-//! 延迟优先、多级中转和 relay 之间的骨干还没有做；对外的路由类型（`i3t_model::control::Route`）里 relay 是一个列表，
-//! 以后加上它们不用改接口。
+//! 选路模式按 netmap 里本节点的设置（没有就用网络的默认值），每个节点只为自己发出的包选路，所以一条连接的两个方向可以走不同的路：
+//!
+//! - 默认模式：直连可用就走直连，否则经一个 relay。两个节点之间有直接的中转会话时用它
+//!   （对端自己是 relay，或者对端挂在本节点的 relay 上），不然用对端挂靠的 relay 里第一个能用的。
+//! - 延迟优先：直连和经 1 到最大中转级数个 relay 的路径按代价比较，切换有迟滞；局域网直连无条件优先。
+//!
+//! 本节点同时是 relay 时，路径层还负责骨干：和别的 relay 保持会话并互测，把测到的这一行和手上别的 relay 的行
+//! 交给 [`LocalRelay`] 发给挂靠的节点。
 
 mod attach;
 mod control;
+mod cost;
 mod direct;
+mod estimate;
+mod matrix;
 pub mod paths;
 mod relays;
+pub mod report;
+mod routing;
 mod table;
 mod tcp;
 mod timing;
@@ -32,9 +46,12 @@ use std::net::SocketAddr;
 use i3t_model::control::{Route, RouteEntry};
 use i3t_model::netmap::Attachment;
 use i3t_proto::NodeId;
+use i3t_proto::backbone::{Link, RelayState};
 use i3t_underlay::Ecn;
 
+pub use cost::Segment;
 pub use paths::{PacketMeta, PathConfig, Paths};
+pub use report::{BackboneLink, BackboneRow, CandidateReport, DirectKind, LegReport, PathReport};
 pub use table::Packets;
 
 /// 本节点的 relay 角色，路径层要它做的几件事。实现在 `i3t-relay`。
@@ -56,6 +73,29 @@ pub trait LocalRelay: Send + Sync + 'static {
     /// 把带着中转头的数据报送到 `client` 的会话上。`contents` 可以是若干个等长的首尾相接，
     /// 这时 `segment_size` 是每个的长度。返回有没有送出去。
     fn send_to_client(&self, client: NodeId, contents: &[u8], segment_size: Option<usize>, ecn: Option<Ecn>) -> bool;
+
+    /// `client`（另一个 relay）在本节点的 relay 上是不是有走 UDP 的会话。
+    /// 骨干上的一条连接要两边互相都有会话才转发得过去，本节点报矩阵时靠它判断这条连接算不算通。
+    fn has_udp_session(&self, client: NodeId) -> bool;
+
+    /// 本节点的 relay 现在的状态和负载。没有启用 relay 时返回 `None`。
+    fn status(&self) -> Option<RelayStatus>;
+
+    /// 把本节点测到的骨干链路签成矩阵的一行，发给所有会话。
+    fn publish_row(&self, links: &[Link]);
+
+    /// 把一帧原样发给所有会话：别的 relay 的矩阵行要这样传下去。
+    fn broadcast(&self, frame: &[u8]);
+}
+
+/// 本节点的 relay 的状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelayStatus {
+    pub state: RelayState,
+    /// 转发带宽占用了上限的百分之几；没有设上限时是 0。
+    pub load_percent: u8,
+    /// 启动以来握手成功过多少次。它变了说明有新的会话：新挂上来的节点要尽快拿到骨干矩阵，不该等下一轮。
+    pub sessions_opened: u64,
 }
 
 /// 到一个对端的路换了。
@@ -75,4 +115,6 @@ pub(crate) struct Status {
     pub(crate) endpoints: Vec<SocketAddr>,
     pub(crate) mapping_varies: Option<bool>,
     pub(crate) attached: Vec<Attachment>,
+    pub(crate) reports: Vec<PathReport>,
+    pub(crate) backbone: Vec<BackboneRow>,
 }

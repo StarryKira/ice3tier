@@ -85,6 +85,22 @@ pub(crate) const RELAY_SURVEY: Duration = Duration::from_secs(60);
 /// 测量结果的有效期，过期作废（白皮书 §7.3）。
 pub(crate) const ESTIMATE_TTL: Duration = Duration::from_secs(120);
 
+/// relay 和 relay 之间多久探测一次（白皮书 §7.3）。
+pub(crate) const BACKBONE_PROBE_INTERVAL: Duration = Duration::from_secs(2);
+/// 给正在评估的候选路径发探测包列：多久一组，一组几个（白皮书 §7.3）。
+pub(crate) const TRAIN_INTERVAL: Duration = Duration::from_secs(30);
+pub(crate) const TRAIN_PROBES: u8 = 10;
+/// 延迟优先模式多久比较一次候选路径的代价（白皮书 §7.5 的评估窗口）。
+pub(crate) const EVAL_WINDOW: Duration = Duration::from_secs(5);
+/// 新的路要连续几个评估窗口都更优才换过去。
+pub(crate) const SWITCH_WINDOWS: u8 = 3;
+/// 因为代价换过一次路之后至少停留多久。
+pub(crate) const MIN_DWELL: Duration = Duration::from_secs(30);
+/// relay 多久把骨干矩阵发给它的会话一次。状态变了的时候不等这个间隔。
+pub(crate) const ROW_INTERVAL: Duration = Duration::from_secs(5);
+/// 延迟优先模式下，入口 relay 只在离本节点最近的这么多个里选（白皮书 §7.1），为的是限制探测量。
+pub(crate) const ENTRY_RELAYS: usize = 3;
+
 #[cfg(test)]
 mod tests {
     use super::*;

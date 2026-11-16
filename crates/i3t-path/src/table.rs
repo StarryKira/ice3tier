@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 use bytes::{BufMut, Bytes, BytesMut};
 use i3t_model::control::Signal;
 use i3t_proto::NodeId;
-use i3t_proto::datagram::RelayHeader;
+use i3t_proto::datagram::{RelayHeader, RouteHeader};
+use i3t_underlay::lan::LanDiscovery;
 use i3t_underlay::tcp_leg::FrameSender;
 use i3t_underlay::{Ecn, Transmit, UdpPort};
 use tokio::sync::{Notify, broadcast, mpsc};
@@ -109,19 +110,51 @@ impl RelaySlot {
     }
 }
 
+/// 经 relay 的包前面要加的头，已经编码好。只经一个 relay 时是 9 字节的那一种，经多个时带着整条路径。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FrameHeader {
+    len: usize,
+    bytes: [u8; RouteHeader::MAX_LEN],
+}
+
+impl FrameHeader {
+    /// 经一个 relay：老的格式，relay 不用升级也认识。
+    pub(crate) fn single(header: RelayHeader) -> Self {
+        let mut bytes = [0; RouteHeader::MAX_LEN];
+        bytes[..RelayHeader::LEN].copy_from_slice(&header.to_bytes());
+        Self { len: RelayHeader::LEN, bytes }
+    }
+
+    /// 经多个 relay。
+    pub(crate) fn routed(header: &RouteHeader) -> Self {
+        let encoded = header.to_bytes();
+        let mut bytes = [0; RouteHeader::MAX_LEN];
+        bytes[..encoded.len()].copy_from_slice(&encoded);
+        Self { len: encoded.len(), bytes }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
 /// 发给一个对端的包此刻怎么送。
 #[derive(Debug)]
 pub(crate) enum Hop {
     /// 没有路，包被丢掉。
     None,
     Direct(SocketAddr),
+    /// 加上 `header` 发给路径上第一个 relay 的 UDP 地址。
     RelayUdp {
         relay: Arc<RelaySlot>,
         addr: SocketAddr,
+        header: FrameHeader,
     },
+    /// 加上 `header` 写进到第一个 relay 的那条 TCP。
     RelayTcp {
         relay: Arc<RelaySlot>,
         sender: FrameSender,
+        header: FrameHeader,
     },
     /// 对端挂在本节点自己的 relay 上，直接交给它的会话。
     Local,
@@ -179,6 +212,11 @@ impl PeerSlot {
         self.last_tx.within(clock, PEER_ACTIVE) || self.last_demand.within(clock, PEER_ACTIVE)
     }
 
+    /// 收到了它的一个连接包（不管从哪条路来的）。
+    pub(crate) fn received(&self, clock: &Clock) {
+        self.last_rx.touch(clock);
+    }
+
     /// 现在有没有路。
     pub(crate) fn has_hop(&self) -> bool {
         !matches!(self.lock().hop, Hop::None)
@@ -214,22 +252,21 @@ impl PeerSlot {
                 segment_size: packets.segment_size,
                 ecn: packets.ecn,
             }),
-            Hop::RelayUdp { relay, addr } => {
+            Hop::RelayUdp { relay, addr, header } => {
                 relay.last_tx.touch(&shared.clock);
-                let transmit = self.framed(shared, scratch, packets, *addr);
+                let transmit = framed(header.as_slice(), scratch, packets, *addr);
                 shared.port.try_send(&transmit)
             }
-            Hop::RelayTcp { relay, sender } => {
+            Hop::RelayTcp { relay, sender, header } => {
                 relay.last_tx.touch(&shared.clock);
-                let header = self.header(shared);
                 for packet in packets.segments() {
                     // 队列满了就丢：让连接看到丢包，而不是越积越多的延迟。
-                    sender.try_send(frame(&header, packet));
+                    sender.try_send(frame(header.as_slice(), packet));
                 }
                 Ok(())
             }
             Hop::Local => {
-                let transmit = self.framed(shared, scratch, packets, shared.port.local_addr());
+                let transmit = framed(&self.header(shared), scratch, packets, shared.port.local_addr());
                 if let Some(relay) = shared.local_relay.get() {
                     relay.send_to_client(self.id, transmit.contents, transmit.segment_size, transmit.ecn);
                 }
@@ -247,28 +284,39 @@ impl PeerSlot {
         let mut inner = self.lock();
         let SlotInner { hop, scratch, stash } = &mut *inner;
         for (stashed, packet) in stash.drain(..) {
-            if now.saturating_duration_since(stashed) > STASH_MAX_AGE {
-                continue;
+            if now.saturating_duration_since(stashed) <= STASH_MAX_AGE {
+                self.emit(shared, hop, scratch, &packet);
             }
-            let packets = Packets { contents: &packet, segment_size: None, ecn: None };
-            match hop {
-                Hop::None => {}
-                // 补发是尽力而为的：这几个分支里发不出去就算了，返回值不看。
-                Hop::Direct(addr) => {
-                    let _sent =
-                        shared.port.send_or_drop(&Transmit { destination: *addr, contents: &packet, segment_size: None, ecn: None });
-                }
-                Hop::RelayUdp { addr, .. } => {
-                    let _sent = shared.port.send_or_drop(&self.framed(shared, scratch, &packets, *addr));
-                }
-                Hop::RelayTcp { sender, .. } => {
-                    let _queued = sender.try_send(frame(&self.header(shared), &packet));
-                }
-                Hop::Local => {
-                    let transmit = self.framed(shared, scratch, &packets, shared.port.local_addr());
-                    if let Some(relay) = shared.local_relay.get() {
-                        relay.send_to_client(self.id, transmit.contents, transmit.segment_size, transmit.ecn);
-                    }
+        }
+    }
+
+    /// 把路径层自己的一个帧从现在这条路送给对端：经 relay 时和连接包一样套上中转头，直连时原样发。
+    /// 端到端的路径探测靠它走和连接包完全相同的路。它不算连接层的流量：不动"最近发过包"的记录，也不留底。
+    /// 没有路时什么都不做。
+    pub(crate) fn send_frame(&self, shared: &Shared, frame: &[u8]) {
+        let mut inner = self.lock();
+        let SlotInner { hop, scratch, .. } = &mut *inner;
+        self.emit(shared, hop, scratch, frame);
+    }
+
+    /// 从 `hop` 这条路发一个包。尽力而为：发不出去就算了。
+    fn emit(&self, shared: &Shared, hop: &Hop, scratch: &mut Vec<u8>, packet: &[u8]) {
+        let packets = Packets { contents: packet, segment_size: None, ecn: None };
+        match hop {
+            Hop::None => {}
+            Hop::Direct(addr) => {
+                let _sent = shared.port.send_or_drop(&Transmit { destination: *addr, contents: packet, segment_size: None, ecn: None });
+            }
+            Hop::RelayUdp { addr, header, .. } => {
+                let _sent = shared.port.send_or_drop(&framed(header.as_slice(), scratch, &packets, *addr));
+            }
+            Hop::RelayTcp { sender, header, .. } => {
+                let _queued = sender.try_send(frame(header.as_slice(), packet));
+            }
+            Hop::Local => {
+                let transmit = framed(&self.header(shared), scratch, &packets, shared.port.local_addr());
+                if let Some(relay) = shared.local_relay.get() {
+                    relay.send_to_client(self.id, transmit.contents, transmit.segment_size, transmit.ecn);
                 }
             }
         }
@@ -277,26 +325,20 @@ impl PeerSlot {
     fn header(&self, shared: &Shared) -> [u8; RelayHeader::LEN] {
         RelayHeader { dst: self.id, src: shared.me }.to_bytes()
     }
-
-    /// 给每个包加上中转头，放进 `scratch`。每个包都多了同样长的头，所以仍然是等长的，分段卸载照样能用。
-    fn framed<'a>(&self, shared: &Shared, scratch: &'a mut Vec<u8>, packets: &Packets<'_>, destination: SocketAddr) -> Transmit<'a> {
-        let header = self.header(shared);
-        scratch.clear();
-        for packet in packets.segments() {
-            scratch.extend_from_slice(&header);
-            scratch.extend_from_slice(packet);
-        }
-        Transmit {
-            destination,
-            contents: scratch,
-            segment_size: packets.segment_size.map(|size| size + RelayHeader::LEN),
-            ecn: packets.ecn,
-        }
-    }
 }
 
-fn frame(header: &[u8; RelayHeader::LEN], packet: &[u8]) -> Bytes {
-    let mut datagram = BytesMut::with_capacity(RelayHeader::LEN + packet.len());
+/// 给每个包加上中转头，放进 `scratch`。每个包都多了同样长的头，所以仍然是等长的，分段卸载照样能用。
+fn framed<'a>(header: &[u8], scratch: &'a mut Vec<u8>, packets: &Packets<'_>, destination: SocketAddr) -> Transmit<'a> {
+    scratch.clear();
+    for packet in packets.segments() {
+        scratch.extend_from_slice(header);
+        scratch.extend_from_slice(packet);
+    }
+    Transmit { destination, contents: scratch, segment_size: packets.segment_size.map(|size| size + header.len()), ecn: packets.ecn }
+}
+
+fn frame(header: &[u8], packet: &[u8]) -> Bytes {
+    let mut datagram = BytesMut::with_capacity(header.len() + packet.len());
     datagram.put_slice(header);
     datagram.put_slice(packet);
     datagram.freeze()
@@ -332,6 +374,8 @@ pub(crate) struct Shared {
     /// 任何一个对端的路变了就通知一次，等路的人靠它醒来。
     pub(crate) route_changed: Notify,
     pub(crate) status: Mutex<Status>,
+    /// 局域网发现。绑在具体地址上的端口（测试）不自动开，要调用方明确要求。
+    pub(crate) lan: Mutex<Option<LanDiscovery>>,
 }
 
 impl Shared {
@@ -354,5 +398,63 @@ impl Shared {
 impl std::fmt::Debug for Shared {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Shared").field("me", &self.me).field("port", &self.port.local_addr()).finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shared() -> Arc<Shared> {
+        let (ctrl, _ctrl_rx) = mpsc::channel(1);
+        let (inbound, inbound_rx) = mpsc::channel(1);
+        Arc::new(Shared {
+            me: NodeId::new(1).unwrap(),
+            port: Arc::new(UdpPort::bind("127.0.0.1:0".parse().unwrap()).unwrap()),
+            clock: Clock::new(),
+            table: RwLock::new(Table::default()),
+            ctrl,
+            inbound,
+            inbound_rx: Mutex::new(inbound_rx),
+            local_relay: OnceLock::new(),
+            signal_hook: RwLock::new(None),
+            changes: broadcast::Sender::new(1),
+            route_changed: Notify::new(),
+            status: Mutex::new(Status::default()),
+            lan: Mutex::new(None),
+        })
+    }
+
+    #[tokio::test]
+    async fn a_path_layer_frame_takes_the_same_route_as_connection_packets_without_counting_as_traffic() {
+        let shared = shared();
+        let receiver = UdpPort::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let slot = PeerSlot::new(NodeId::new(2).unwrap());
+        // 没有路：什么都不发。
+        slot.send_frame(&shared, b"probe");
+
+        // 经 relay：套上和连接包一样的中转头。
+        let header = FrameHeader::single(RelayHeader { dst: slot.id, src: shared.me });
+        slot.set_hop(Hop::RelayUdp { relay: RelaySlot::new(NodeId::new(9).unwrap()), addr: receiver.local_addr(), header });
+        slot.send_frame(&shared, b"probe");
+        let mut storage = vec![0u8; 2048 * receiver.gro_segments()];
+        let mut metas = [i3t_underlay::RecvMeta::default(); 1];
+        let mut bufs = [std::io::IoSliceMut::new(&mut storage)];
+        let received = tokio::time::timeout(Duration::from_secs(5), receiver.recv(&mut bufs, &mut metas)).await.unwrap().unwrap();
+        assert_eq!(received, 1);
+        let expected = [&RelayHeader { dst: slot.id, src: shared.me }.to_bytes()[..], b"probe"].concat();
+        assert_eq!(&bufs[0][..metas[0].len], expected);
+        assert_eq!(slot.last_tx.elapsed(&shared.clock), None, "探测不算连接层发过包：不活跃的对端不会因为它一直被当成活跃的");
+    }
+
+    #[test]
+    fn a_frame_header_is_the_single_relay_header_or_the_whole_route() {
+        let (me, peer) = (NodeId::new(1).unwrap(), NodeId::new(2).unwrap());
+        let single = FrameHeader::single(RelayHeader { dst: peer, src: me });
+        assert_eq!(single.as_slice(), RelayHeader { dst: peer, src: me }.to_bytes());
+        let relays = i3t_proto::datagram::RelayPath::new(&[NodeId::new(8).unwrap(), NodeId::new(9).unwrap()]).unwrap();
+        let header = RouteHeader { dst: peer, src: me, relays };
+        assert_eq!(FrameHeader::routed(&header).as_slice(), header.to_bytes());
+        assert_eq!(frame(single.as_slice(), b"quic").len(), RelayHeader::LEN + 4);
     }
 }

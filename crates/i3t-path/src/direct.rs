@@ -15,6 +15,8 @@ use i3t_model::control::Signal;
 use i3t_proto::session::Nonce;
 use i3t_underlay::ifaddr;
 
+use crate::estimate::{Estimate, Quality, Train};
+use crate::report::DirectKind;
 use crate::timing::{MAX_TIMEOUTS, PROBE_INTERVAL, PUNCH_ATTEMPT, PUNCH_BACKOFF, PUNCH_IDLE_RETRY, PUNCH_VOLLEYS, Rtt, SILENCE};
 
 /// 一个对端最多记多少个候选地址。对端上报的、信令里带来的、探测里看到的都算。
@@ -50,6 +52,8 @@ pub(crate) struct Policy<'a> {
     pub(crate) silent: bool,
     /// 本节点自己的候选端点，放进信令里告诉对端。
     pub(crate) local: &'a [SocketAddr],
+    /// 直连是正在评估的候选路径（延迟优先模式）：给在用的地址定期发探测包列来估丢包。
+    pub(crate) train: bool,
 }
 
 /// 要外面去做的事。
@@ -109,6 +113,8 @@ struct Candidate {
     refreshed: Instant,
     /// 最近一次从这个地址收到对端签过名的探测帧。
     proven: Option<Instant>,
+    /// 是从对端在本地网段上发的信标里得知的。
+    lan: bool,
 }
 
 #[derive(Debug)]
@@ -116,6 +122,9 @@ struct Pending {
     nonce: Nonce,
     addr: SocketAddr,
     sent: Instant,
+    /// 发这个探测的时候，对端已经在这一轮里和本端通过气了（发来过打洞信令或者探测）。
+    /// 它得到回答的话，这条直连算是打洞打通的；不然就是对端的地址本来就连得上。
+    coordinated: bool,
 }
 
 #[derive(Debug)]
@@ -130,9 +139,31 @@ struct Active {
     timeouts: u8,
     /// 最近几次保活探测是不是丢了。
     history: VecDeque<bool>,
+    /// 给选路用的延迟、抖动和丢包估计。保活和探测包列的结果都记在这里。
+    estimate: Estimate,
+    train: Train,
+    /// 这个地址是和对端协调之后才打通的。
+    punched: bool,
 }
 
 impl Active {
+    fn new(addr: SocketAddr, sample: Duration, punched: bool, now: Instant) -> Self {
+        let mut estimate = Estimate::new();
+        estimate.sample(sample, now);
+        Self {
+            addr,
+            rtt: Rtt::new(sample),
+            confirmed: now,
+            last_probe: now,
+            awaiting: None,
+            timeouts: 0,
+            history: VecDeque::new(),
+            estimate,
+            train: Train::new(),
+            punched,
+        }
+    }
+
     fn record(&mut self, lost: bool) {
         if self.history.len() == LOSS_WINDOW {
             self.history.pop_front();
@@ -165,11 +196,70 @@ pub(crate) struct DirectPath {
     active: Option<Active>,
     punch: Punch,
     last_request: Option<Instant>,
+    /// 最近一次从对端收到打洞信令或者探测。
+    heard: Option<Instant>,
+    /// 两边的公网地址相同：对端的私有地址多半和本节点在同一个局域网里。
+    same_nat: bool,
 }
 
 impl DirectPath {
     pub(crate) const fn new() -> Self {
-        Self { candidates: Vec::new(), pending: VecDeque::new(), active: None, punch: Punch::Idle, last_request: None }
+        Self {
+            candidates: Vec::new(),
+            pending: VecDeque::new(),
+            active: None,
+            punch: Punch::Idle,
+            last_request: None,
+            heard: None,
+            same_nat: false,
+        }
+    }
+
+    /// 在用的地址上测到的延迟、抖动和丢包。没有在用的地址，或者估计过期了，是 `None`。
+    pub(crate) fn quality(&self, now: Instant) -> Option<Quality> {
+        self.active.as_ref().and_then(|active| active.estimate.quality(now))
+    }
+
+    /// 在用的直连是怎么建立起来的。
+    pub(crate) fn kind(&self) -> Option<DirectKind> {
+        let active = self.active.as_ref()?;
+        Some(if self.is_lan(active.addr) {
+            DirectKind::Lan
+        } else if active.addr.ip().to_canonical().is_ipv6() {
+            DirectKind::Ipv6
+        } else if active.punched {
+            DirectKind::Punched
+        } else {
+            DirectKind::Reachable
+        })
+    }
+
+    /// 在用的直连是不是局域网直连。两种模式下它都无条件优先（白皮书 §7.1）。
+    pub(crate) fn is_lan_active(&self) -> bool {
+        self.active.as_ref().is_some_and(|active| self.is_lan(active.addr))
+    }
+
+    /// `addr` 是不是对端在本节点所在局域网里的地址：它是私有地址，并且要么对端的信标就是在本地网段上从它发来的，
+    /// 要么两边的公网地址相同（白皮书 §5.3 的推断）。只凭"是私有地址"不算：两个不相干的网络可以用同一个私有网段。
+    fn is_lan(&self, addr: SocketAddr) -> bool {
+        ifaddr::is_private(addr.ip()) && (self.same_nat || self.candidates.iter().any(|candidate| candidate.addr == addr && candidate.lan))
+    }
+
+    /// 本节点和对端是不是在同一个 NAT 后面（两边上报的公网地址里有相同的 IP）。
+    pub(crate) const fn set_same_nat(&mut self, same_nat: bool) {
+        self.same_nat = same_nat;
+    }
+
+    /// 在本地网段上看到了对端的信标，来源是 `addr`。它成为一个候选地址，照样要验证过才用。
+    pub(crate) fn on_lan_sighting(&mut self, addr: SocketAddr, now: Instant) {
+        let appeared = self.learn(addr, now);
+        if let Some(candidate) = self.candidate_mut(addr) {
+            candidate.lan = true;
+        }
+        // 信标每隔几秒就来一个，只有头一次才算"候选变了"，不然重试的节奏会被它一直打断。
+        if appeared {
+            self.candidates_changed();
+        }
     }
 
     /// 在用的直连地址和到它的延迟。
@@ -231,6 +321,7 @@ impl DirectPath {
         for &addr in endpoints.iter().take(MAX_SIGNALLED) {
             self.learn(addr, now);
         }
+        self.heard = Some(now);
         let mut actions = Vec::new();
         if is_request {
             actions.push(Action::Signal(Signal::PunchReply { endpoints: policy.local.to_vec() }));
@@ -252,6 +343,7 @@ impl DirectPath {
     pub(crate) fn on_ping(&mut self, from: SocketAddr, now: Instant) -> Option<Action> {
         self.learn(from, now);
         self.prove(from, now);
+        self.heard = Some(now);
         if self.active.as_ref().is_some_and(|active| active.addr == from) {
             return None;
         }
@@ -265,16 +357,28 @@ impl DirectPath {
     /// 是不是向 `from` 发过带这个随机数的 PING、还在等回答。验 PONG 的签名之前先问这个，不花冤枉的计算。
     pub(crate) fn expects_pong(&self, from: SocketAddr, nonce: &Nonce) -> bool {
         self.pending.iter().any(|pending| pending.nonce == *nonce && pending.addr == from)
+            || self.active.as_ref().is_some_and(|active| active.addr == from && active.train.expects(nonce))
     }
 
     /// 从 `from` 收到了对端的 PONG（签名已经验过）。随机数对不上发往 `from` 的任何一个 PING 时不算数。
     pub(crate) fn on_pong(&mut self, from: SocketAddr, nonce: &Nonce, now: Instant) -> Option<Change> {
+        // 探测包列里的回答只用来估丢包和延迟，也算这个地址还活着的证明。
+        if let Some(active) = &mut self.active
+            && active.addr == from
+            && active.train.on_reply(nonce, now, &mut active.estimate)
+        {
+            active.confirmed = now;
+            self.prove(from, now);
+            return None;
+        }
         let index = self.pending.iter().position(|pending| pending.nonce == *nonce && pending.addr == from)?;
-        let sample = now.saturating_duration_since(self.pending.remove(index)?.sent);
+        let answered = self.pending.remove(index)?;
+        let sample = now.saturating_duration_since(answered.sent);
         self.prove(from, now);
         match &mut self.active {
             Some(active) if active.addr == from => {
                 active.rtt.update(sample);
+                active.estimate.sample(sample, now);
                 active.confirmed = now;
                 active.timeouts = 0;
                 if active.awaiting.take().is_some() {
@@ -283,17 +387,9 @@ impl DirectPath {
                 None
             }
             // 局域网直连无条件优先（白皮书 §7.1）：已经在用公网地址时，局域网地址验证通过就换过去。别的情况先到先得。
-            Some(active) if !(ifaddr::is_private(from.ip()) && !ifaddr::is_private(active.addr.ip())) => None,
+            Some(active) if !ifaddr::is_private(from.ip()) || ifaddr::is_private(active.addr.ip()) => None,
             Some(_) | None => {
-                self.active = Some(Active {
-                    addr: from,
-                    rtt: Rtt::new(sample),
-                    confirmed: now,
-                    last_probe: now,
-                    awaiting: None,
-                    timeouts: 0,
-                    history: VecDeque::new(),
-                });
+                self.active = Some(Active::new(from, sample, answered.coordinated, now));
                 self.punch = Punch::Idle;
                 Some(Change::Up { addr: from })
             }
@@ -331,6 +427,7 @@ impl DirectPath {
                 active.awaiting = None;
                 active.timeouts += 1;
                 active.record(true);
+                active.estimate.lost();
                 let verdict = if active.timeouts >= MAX_TIMEOUTS {
                     Some(DownReason::Timeouts)
                 } else if active.too_lossy() {
@@ -358,6 +455,8 @@ impl DirectPath {
             active.awaiting = Some(now);
             active.last_probe = now;
             step.actions.push(self.probe(addr, now));
+        } else if let Some(nonce) = active.train.poll(now, policy.train, active.rtt.probe_timeout(), &mut active.estimate) {
+            step.actions.push(Action::Ping { to: active.addr, nonce });
         }
     }
 
@@ -397,7 +496,8 @@ impl DirectPath {
         if self.pending.len() == MAX_PENDING {
             self.pending.pop_front();
         }
-        self.pending.push_back(Pending { nonce, addr: to, sent: now });
+        let coordinated = self.heard.is_some_and(|heard| now.saturating_duration_since(heard) < PENDING_TTL);
+        self.pending.push_back(Pending { nonce, addr: to, sent: now, coordinated });
         Action::Ping { to, nonce }
     }
 
@@ -418,7 +518,7 @@ impl DirectPath {
             let Some((oldest, _)) = evictable.min_by_key(|(_, candidate)| candidate.refreshed) else { return false };
             self.candidates.swap_remove(oldest);
         }
-        self.candidates.push(Candidate { addr, reported: false, refreshed: now, proven: None });
+        self.candidates.push(Candidate { addr, reported: false, refreshed: now, proven: None, lan: false });
         true
     }
 
@@ -461,7 +561,7 @@ mod tests {
     }
 
     fn policy(local: &[SocketAddr]) -> Policy<'_> {
-        Policy { wanted: true, initiate: true, signal: true, silent: false, local }
+        Policy { wanted: true, initiate: true, signal: true, silent: false, local, train: false }
     }
 
     fn pings(actions: &[Action]) -> Vec<(SocketAddr, Nonce)> {
@@ -787,6 +887,124 @@ mod tests {
         assert_eq!(path.on_pong(lan, &nonce_of(lan), start + 30 * MS), Some(Change::Up { addr: lan }));
         assert_eq!(path.on_pong(public, &nonce_of(public), start + 40 * MS), None, "已经在用局域网地址就不换");
         assert_eq!(path.sources(start + 40 * MS).count(), 2, "两个地址来的包都认");
+    }
+
+    #[test]
+    fn a_peer_seen_through_a_lan_beacon_becomes_a_candidate_that_still_has_to_be_validated() {
+        let start = Instant::now();
+        let lan = addr("192.168.1.7:20330");
+        let mut path = DirectPath::new();
+        // 对端没有上报任何端点；信标是唯一的线索。
+        assert!(path.poll(start, &policy(&[])).actions.iter().all(|action| !matches!(action, Action::Ping { .. })));
+        path.on_lan_sighting(lan, start + 10 * MS);
+        assert_eq!(path.active(), None, "看到信标不等于验证过");
+        let step = path.poll(start + 10 * MS, &policy(&[]));
+        let [(to, nonce)] = pings(&step.actions)[..] else { panic!("应该立刻去探测信标里的地址：{step:?}") };
+        assert_eq!(to, lan);
+        assert_eq!(path.on_pong(lan, &nonce, start + 12 * MS), Some(Change::Up { addr: lan }));
+        assert_eq!(path.kind(), Some(DirectKind::Lan));
+        assert!(path.is_lan_active());
+    }
+
+    #[test]
+    fn repeated_beacons_refresh_the_candidate_without_restarting_the_retry_schedule() {
+        let start = Instant::now();
+        let lan = addr("192.168.1.7:20330");
+        let mut path = DirectPath::new();
+        path.on_lan_sighting(lan, start);
+        path.poll(start, &policy(&[]));
+        // 这一次尝试失败之后进入退避。信标每隔几秒再来一个，不该每次都把退避清掉重来。
+        path.poll(start + PUNCH_ATTEMPT, &policy(&[]));
+        assert!(matches!(path.punch, Punch::Backoff { round: 0, .. }));
+        path.on_lan_sighting(lan, start + PUNCH_ATTEMPT + 10 * MS);
+        assert!(matches!(path.punch, Punch::Backoff { round: 0, .. }));
+        // 信标一直在来，这个候选就一直留着（不是对端上报的候选本来两分钟不出现就忘掉）。
+        let later = start + CANDIDATE_TTL + Duration::from_secs(1);
+        path.on_lan_sighting(lan, later - Duration::from_secs(5));
+        path.poll(later, &Policy { wanted: false, ..policy(&[]) });
+        assert_eq!(path.candidates.len(), 1);
+    }
+
+    #[test]
+    fn a_private_address_counts_as_lan_only_with_a_beacon_or_a_shared_public_address() {
+        let start = Instant::now();
+        let private = addr("192.168.1.7:20330");
+        let (mut path, _up) = established(private);
+        // 两个不相干的网络可以用同一个私有网段（比如经站点之间的隧道连得上）：只凭地址是私有的不算局域网。
+        assert_eq!(path.kind(), Some(DirectKind::Reachable));
+        assert!(!path.is_lan_active());
+        // 两边的公网地址相同，说明在同一个 NAT 后面。
+        path.set_same_nat(true);
+        assert_eq!(path.kind(), Some(DirectKind::Lan));
+        path.set_same_nat(false);
+        // 或者对端的信标就是从这个地址发来的。
+        path.on_lan_sighting(private, start + Duration::from_secs(1));
+        assert_eq!(path.kind(), Some(DirectKind::Lan));
+
+        // 公网地址不管怎样都不是局域网。
+        let (mut public, _up) = established(addr("203.0.113.7:20330"));
+        public.set_same_nat(true);
+        assert_eq!(public.kind(), Some(DirectKind::Reachable));
+        assert_eq!(DirectPath::new().kind(), None);
+    }
+
+    #[test]
+    fn the_kind_of_a_direct_path_tells_reachable_punched_and_ipv6_apart() {
+        let start = Instant::now();
+        let local = [addr("198.51.100.1:20330")];
+        // 对端的地址本来就连得上：头一个探测就得到了回答，那时还没有从对端收到过任何东西。
+        let (reachable, _up) = established(addr("203.0.113.7:20330"));
+        assert_eq!(reachable.kind(), Some(DirectKind::Reachable));
+
+        // 打洞：头一轮探测被对面的 NAT 挡掉，收到对端的回应信令之后发的那一轮才通。
+        let peer = addr("203.0.113.7:4000");
+        let mut punched = DirectPath::new();
+        punched.set_reported(&[peer], start);
+        punched.poll(start, &policy(&local));
+        let actions = punched.on_signal(&Signal::PunchReply { endpoints: vec![peer] }, start + 100 * MS, &policy(&local));
+        let (to, nonce) = pings(&actions)[0];
+        assert_eq!(punched.on_pong(to, &nonce, start + 130 * MS), Some(Change::Up { addr: peer }));
+        assert_eq!(punched.kind(), Some(DirectKind::Punched));
+
+        // 对端先来探测本端（它那边的 NAT 因此开了口子），本端反过来验证通过：同样是协调出来的。
+        let mut dialled = DirectPath::new();
+        let Some(Action::Ping { to, nonce }) = dialled.on_ping(peer, start) else { panic!("应该反向验证") };
+        dialled.on_pong(to, &nonce, start + 20 * MS);
+        assert_eq!(dialled.kind(), Some(DirectKind::Punched));
+
+        let (v6, _up) = established(addr("[2001:db8::7]:20330"));
+        assert_eq!(v6.kind(), Some(DirectKind::Ipv6));
+    }
+
+    #[test]
+    fn a_probe_train_on_the_active_address_measures_loss_for_the_cost_comparison() {
+        let peer = addr("203.0.113.7:20330");
+        let (mut path, up) = established(peer);
+        let training = Policy { train: true, ..policy(&[]) };
+        let mut sent = 0;
+        // 一秒里每 50ms 推进一步：探测包列发出 10 个，每五个丢一个。
+        for step in 1..20u32 {
+            let now = up + 50 * MS * step;
+            for (to, nonce) in pings(&path.poll(now, &training).actions) {
+                assert_eq!(to, peer);
+                sent += 1;
+                assert!(path.expects_pong(peer, &nonce));
+                if sent % 5 != 0 {
+                    assert_eq!(path.on_pong(peer, &nonce, now + 20 * MS), None);
+                }
+            }
+        }
+        assert_eq!(sent, 10);
+        // 等没有回答的那两个超时。
+        path.poll(up + Duration::from_secs(3), &training);
+        let quality = path.quality(up + Duration::from_secs(3)).unwrap();
+        assert_eq!((quality.lost, quality.probes), (2, 11), "验证时的一个样本，加上 10 个探测里丢的 2 个");
+        assert!(!path.in_doubt(), "探测包列丢了回答不算保活超时");
+
+        // 默认模式不比代价，不发探测包列。
+        let (mut quiet, up) = established(peer);
+        assert!((1..20u32).all(|step| quiet.poll(up + 50 * MS * step, &policy(&[])).actions.is_empty()));
+        assert_eq!(quiet.quality(up).map(|quality| quality.probes), Some(0), "样本不够时不报丢包率");
     }
 
     #[test]

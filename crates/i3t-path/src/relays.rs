@@ -12,7 +12,8 @@ use i3t_proto::session::{Accepted, Auth, Frame, Init, Nonce, Ping, RefusalReason
 use i3t_proto::{NodeId, PublicKey};
 
 use crate::attach::{Event, Send, Session, Step};
-use crate::timing::{ESTIMATE_TTL, RELAY_RETRY_MAX, RELAY_SURVEY, Rtt, UDP_HEAD_START, UDP_RETRY};
+use crate::estimate::Quality;
+use crate::timing::{ESTIMATE_TTL, PROBE_INTERVAL, RELAY_RETRY_MAX, RELAY_SURVEY, Rtt, UDP_HEAD_START, UDP_RETRY};
 
 /// 挂靠几个 relay（白皮书 §7.2 的 K）。
 pub(crate) const ATTACH_COUNT: usize = 2;
@@ -38,6 +39,15 @@ pub(crate) trait Wire {
     fn tcp_connect(&mut self, addrs: &[SocketAddr]);
     /// 关掉到这个 relay 的 TCP。
     fn tcp_close(&mut self);
+}
+
+/// relay 没有照办，原因出在某条路上而不是会话本身。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Complaint {
+    /// 这个对端没有挂在它上面。
+    PeerUnattached(NodeId),
+    /// 多级中转的路径走不下去：它和这个 relay 之间没有骨干连接；是它自己的编号时，表示路径比网络允许的长。
+    RouteUnavailable(NodeId),
 }
 
 /// 现在经这个 relay 收发包走的是哪一种传输。
@@ -80,6 +90,10 @@ pub(crate) struct RelayLink {
     survey: Option<(Nonce, Instant)>,
     surveyed: Option<(Duration, Instant)>,
     next_survey: Instant,
+    /// 会话保活的间隔，见 [`set_probe_interval`](Self::set_probe_interval)。
+    probe_interval: Duration,
+    /// 要不要给这段链路发探测包列。
+    training: bool,
 }
 
 impl RelayLink {
@@ -102,6 +116,26 @@ impl RelayLink {
             survey: None,
             surveyed: None,
             next_survey: now,
+            probe_interval: PROBE_INTERVAL,
+            training: false,
+        }
+    }
+
+    /// 会话多久保活一次。本节点是 relay 时，到别的 relay 的会话就是骨干上的连接，探测得更勤（白皮书 §7.3）。
+    pub(crate) fn set_probe_interval(&mut self, interval: Duration) {
+        self.probe_interval = interval;
+        self.udp.set_interval(interval);
+        if let Some(tcp) = &mut self.tcp {
+            tcp.session.set_interval(interval);
+        }
+    }
+
+    /// 这段链路是不是在正在评估的候选路径上：是的话定期发探测包列来估丢包。
+    pub(crate) fn set_training(&mut self, training: bool) {
+        self.training = training;
+        self.udp.set_training(training);
+        if let Some(tcp) = &mut self.tcp {
+            tcp.session.set_training(training);
         }
     }
 
@@ -155,6 +189,14 @@ impl RelayLink {
         match self.leg()? {
             Leg::Udp(_) => self.udp.rtt(),
             Leg::Tcp => self.tcp.as_ref().and_then(|tcp| tcp.session.rtt()),
+        }
+    }
+
+    /// 现在在用的那个会话上测到的延迟、抖动和丢包。没有会话，或者估计过期了，是 `None`。
+    pub(crate) fn quality(&self, now: Instant) -> Option<Quality> {
+        match self.leg()? {
+            Leg::Udp(_) => self.udp.quality(now),
+            Leg::Tcp => self.tcp.as_ref().and_then(|tcp| tcp.session.quality(now)),
         }
     }
 
@@ -257,7 +299,10 @@ impl RelayLink {
             self.start_udp(now, who, wire);
         }
         if !self.tcp_addrs.is_empty() {
-            self.tcp = Some(TcpLeg { session: Session::new(), connected: false, started: now });
+            let mut session = Session::new();
+            session.set_interval(self.probe_interval);
+            session.set_training(self.training);
+            self.tcp = Some(TcpLeg { session, connected: false, started: now });
             wire.tcp_connect(&self.tcp_addrs);
         }
         if self.udp_addr().is_none() && self.tcp_addrs.is_empty() {
@@ -353,8 +398,8 @@ impl RelayLink {
         }
     }
 
-    /// relay 的 UDP 地址发来的会话帧。返回 relay 说哪个对端没有挂在它上面（如果它说了的话）。
-    pub(crate) fn on_udp_frame(&mut self, frame: &Frame, now: Instant, who: Identity<'_>, wire: &mut dyn Wire) -> Option<NodeId> {
+    /// relay 的 UDP 地址发来的会话帧。返回 relay 对某条路的抱怨（如果它说了的话）。
+    pub(crate) fn on_udp_frame(&mut self, frame: &Frame, now: Instant, who: Identity<'_>, wire: &mut dyn Wire) -> Option<Complaint> {
         match frame {
             Frame::Challenge(challenge) => {
                 if let Some((_, sent)) = self.survey.take_if(|(nonce, _)| *nonce == challenge.nonce) {
@@ -381,7 +426,8 @@ impl RelayLink {
                     let step = self.udp.on_no_session();
                     self.apply_udp(step, now, who, wire);
                 }
-                RefusalReason::PeerUnattached => return Some(refused.node),
+                RefusalReason::PeerUnattached => return Some(Complaint::PeerUnattached(refused.node)),
+                RefusalReason::RouteUnavailable => return Some(Complaint::RouteUnavailable(refused.node)),
                 RefusalReason::NoSession => {}
             },
             // 别的会话帧是节点发给 relay 的，不该从 relay 来。
@@ -399,7 +445,7 @@ impl RelayLink {
     }
 
     /// 到这个 relay 的 TCP 里收到的会话帧。返回值同 [`on_udp_frame`](Self::on_udp_frame)。
-    pub(crate) fn on_tcp_frame(&mut self, frame: &Frame, now: Instant, who: Identity<'_>, wire: &mut dyn Wire) -> Option<NodeId> {
+    pub(crate) fn on_tcp_frame(&mut self, frame: &Frame, now: Instant, who: Identity<'_>, wire: &mut dyn Wire) -> Option<Complaint> {
         let genuine = matches!(frame, Frame::Ok(ok) if self.ok_is_genuine(ok, who));
         let tcp = self.tcp.as_mut()?;
         let step = match frame {
@@ -412,7 +458,8 @@ impl RelayLink {
             }
             Frame::Error(refused) => match refused.reason {
                 RefusalReason::NoSession if refused.node == who.me => tcp.session.on_no_session(),
-                RefusalReason::PeerUnattached => return Some(refused.node),
+                RefusalReason::PeerUnattached => return Some(Complaint::PeerUnattached(refused.node)),
+                RefusalReason::RouteUnavailable => return Some(Complaint::RouteUnavailable(refused.node)),
                 RefusalReason::NoSession => Step::default(),
             },
             Frame::Ok(_) | Frame::Init(_) | Frame::Auth(_) | Frame::Ping(_) => Step::default(),
@@ -463,7 +510,7 @@ fn retry_delay(failures: u32) -> Duration {
 }
 
 /// 0 到 `max` 之间的一个随机时长。
-fn jitter(max: Duration) -> Duration {
+pub(crate) fn jitter(max: Duration) -> Duration {
     let [byte]: [u8; 1] = i3t_underlay::random_bytes();
     max * u32::from(byte) / 255
 }
@@ -601,12 +648,12 @@ mod tests {
             self.link.poll(self.start + at, who, false, false, &mut self.wire);
         }
 
-        fn udp_frame(&mut self, frame: Frame, at: Duration) -> Option<NodeId> {
+        fn udp_frame(&mut self, frame: Frame, at: Duration) -> Option<Complaint> {
             let who = Identity { me: node(ME), key: &self.node_key };
             self.link.on_udp_frame(&frame, self.start + at, who, &mut self.wire)
         }
 
-        fn tcp_frame(&mut self, frame: Frame, at: Duration) -> Option<NodeId> {
+        fn tcp_frame(&mut self, frame: Frame, at: Duration) -> Option<Complaint> {
             let who = Identity { me: node(ME), key: &self.node_key };
             self.link.on_tcp_frame(&frame, self.start + at, who, &mut self.wire)
         }
@@ -805,7 +852,9 @@ mod tests {
         assert_eq!(setup.udp_frame(Frame::Error(Refused { reason: RefusalReason::NoSession, node: node(77) }), 20 * MS), None);
         assert!(setup.link.leg().is_some(), "说的是别的节点");
         let unattached = setup.udp_frame(Frame::Error(Refused { reason: RefusalReason::PeerUnattached, node: node(5) }), 20 * MS);
-        assert_eq!(unattached, Some(node(5)), "对端没挂在这个 relay 上：交给选路去换");
+        assert_eq!(unattached, Some(Complaint::PeerUnattached(node(5))), "对端没挂在这个 relay 上：交给选路去换");
+        let unroutable = setup.udp_frame(Frame::Error(Refused { reason: RefusalReason::RouteUnavailable, node: node(8) }), 20 * MS);
+        assert_eq!(unroutable, Some(Complaint::RouteUnavailable(node(8))), "多级路径走不下去：也交给选路去换");
         assert!(setup.link.leg().is_some());
     }
 
