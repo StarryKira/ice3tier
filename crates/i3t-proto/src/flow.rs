@@ -164,7 +164,9 @@ wire_enum! {
     /// 服务等级：同一条连接上流与流之间谁先发，以及 UDP 应用的数据怎么送。
     ///
     /// 流在任何等级下都是可靠的，等级只决定调度上的先后。真正可以选择"丢"的只有数据报。
-    #[derive(Default)]
+    /// 配置里（netmap、管理 API）写成小写的名字：`"auto"`、`"interactive"`、`"reliable"`、`"bulk"`。
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
+    #[serde(rename_all = "snake_case")]
     pub enum Class: u8 {
         /// 开始按 interactive 对待，流量大了之后让位。数据报走不可靠的通道。
         #[default]
@@ -183,6 +185,9 @@ wire_enum! {
     ///
     /// 数值按归因分段：`0x1_` 归因于目标，`0x2_` 是被规则或策略拒绝，`0x3_` 是出口自己出了问题。
     /// 只有最后一段计入出口节点的健康度，见 [`Status::attribution`]。
+    ///
+    /// `0x24`～`0x26` 是后来加的：出口有意不接（排空、配额、建连预算）。比它们旧的发起方读到这几个值时
+    /// 认不出来，按 REPLY 不合法处理，流照样是失败的，只是说明不够准确。
     pub enum Status: u8 {
         /// 目标已经连上，后面是它发回来的数据。
         Ok = 0x00,
@@ -202,6 +207,12 @@ wire_enum! {
         PolicyDenied = 0x22,
         /// 没有下发给发起节点的这一条端口转发。
         UnknownForward = 0x23,
+        /// 节点正在排空（准备更新后重启），不接新的流。调用方应该换一个出口，或者稍后再试。
+        Draining = 0x24,
+        /// 出口本账期的流量配额已经用完。
+        QuotaExhausted = 0x25,
+        /// 发起节点在短时间里向同一个目标建了太多连接，超过了出口的建连预算。
+        RateLimited = 0x26,
         /// 解析域名时解析器出错或者超时。
         ResolverFailure = 0x30,
         /// 出口内部出错，包括它的上游代理不可用。
@@ -226,6 +237,8 @@ wire_enum! {
         AccessRevoked = 5,
         /// 出口节点正在关闭。
         ShuttingDown = 6,
+        /// 流量的限额用完了：出口本账期的配额，或者入口上接入凭据的流量上限。
+        LimitReached = 7,
     }
 }
 
@@ -234,7 +247,7 @@ wire_enum! {
 pub enum Attribution {
     /// 目标的问题：域名不存在、拒绝连接、不可达、超时。
     Target,
-    /// 被访问规则或出站策略拒绝。
+    /// 被访问规则或出站策略拒绝，或者出口有意不接（排空、配额用完、超过建连预算）。
     Refused,
     /// 出口节点自己的问题。只有这一类计入它的健康度。
     Exit,
@@ -252,7 +265,14 @@ impl Status {
         match self {
             Self::Ok => None,
             Self::NameNotFound | Self::ConnectionRefused | Self::Unreachable | Self::TimedOut => Some(Attribution::Target),
-            Self::AccessDenied | Self::NotEnabled | Self::PolicyDenied | Self::UnknownForward => Some(Attribution::Refused),
+            // 排空、配额和建连预算是出口按自己的设置有意不接，不是它坏了，所以不算进健康度。
+            Self::AccessDenied
+            | Self::NotEnabled
+            | Self::PolicyDenied
+            | Self::UnknownForward
+            | Self::Draining
+            | Self::QuotaExhausted
+            | Self::RateLimited => Some(Attribution::Refused),
             Self::ResolverFailure | Self::InternalError => Some(Attribution::Exit),
         }
     }
@@ -359,6 +379,12 @@ impl Target {
             Self::Lan { .. } => "lan",
             Self::Forward { .. } => "forward",
         }
+    }
+
+    /// 要对端启用了出口才能去的目标：互联网，和对端所在的局域网。
+    #[must_use]
+    pub const fn needs_exit(&self) -> bool {
+        matches!(self, Self::Internet { .. } | Self::Lan { .. })
     }
 
     /// 把目标追加到 `buf` 末尾。OPEN 里和每个数据报里用的是同一种编码。
@@ -1014,6 +1040,7 @@ mod tests {
             Reason::ClientReset,
             Reason::AccessRevoked,
             Reason::ShuttingDown,
+            Reason::LimitReached,
         ] {
             assert_eq!(Reason::from_wire(reason.to_wire()), Some(reason));
         }
@@ -1028,7 +1055,15 @@ mod tests {
         for status in [Status::NameNotFound, Status::ConnectionRefused, Status::Unreachable, Status::TimedOut] {
             assert_eq!(status.attribution(), Some(Attribution::Target), "{status:?}");
         }
-        for status in [Status::AccessDenied, Status::NotEnabled, Status::PolicyDenied, Status::UnknownForward] {
+        for status in [
+            Status::AccessDenied,
+            Status::NotEnabled,
+            Status::PolicyDenied,
+            Status::UnknownForward,
+            Status::Draining,
+            Status::QuotaExhausted,
+            Status::RateLimited,
+        ] {
             assert_eq!(status.attribution(), Some(Attribution::Refused), "{status:?}");
         }
         for status in [Status::ResolverFailure, Status::InternalError] {
@@ -1152,8 +1187,25 @@ mod tests {
     }
 
     #[test]
+    fn statuses_added_later_have_fixed_wire_values() {
+        assert_eq!(Status::Draining.to_wire(), 0x24);
+        assert_eq!(Status::QuotaExhausted.to_wire(), 0x25);
+        assert_eq!(Status::RateLimited.to_wire(), 0x26);
+        assert_eq!(Reason::LimitReached.to_wire(), 7);
+    }
+
+    #[test]
+    fn classes_are_written_by_name_in_configuration() {
+        assert_eq!(serde_json::to_value(Class::Interactive).unwrap(), serde_json::json!("interactive"));
+        assert_eq!(serde_json::from_value::<Class>(serde_json::json!("bulk")).unwrap(), Class::Bulk);
+        assert!(serde_json::from_value::<Class>(serde_json::json!("fast")).is_err());
+    }
+
+    #[test]
     fn target_kind_names_what_the_flow_log_may_show() {
         let kinds: Vec<&str> = samples().iter().map(|request| request.target.kind()).collect();
         assert_eq!(kinds[..7], ["internet", "internet", "internet", "node", "lan", "lan", "forward"]);
+        let via_exit: Vec<bool> = samples().iter().map(|request| request.target.needs_exit()).collect();
+        assert_eq!(via_exit[..7], [true, true, true, false, true, true, false]);
     }
 }

@@ -14,12 +14,13 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::num::ParseIntError;
 use std::str::FromStr;
 
+use i3t_proto::flow::Class;
 use i3t_proto::{NodeId, PublicKey};
 use ipnet::{IpNet, Ipv4Net};
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::control::{Declared, Route, RouteSince, SelfUpdate};
-use crate::netmap::{Attachment, ExitRole, ForwardProtocol, Reach, RoutingMode};
+use crate::control::{Declared, ExitObservation, ExitReport, ListenState, ListenTraffic, Route, RouteSince, SelfUpdate};
+use crate::netmap::{Attachment, ExitRole, ForwardProtocol, ListenerProtocol, Reach, RoutingMode};
 use crate::update::{FailureKind, UpdateStatus, UpdateTiming, Version};
 
 /// 管理 API 所有路径的前缀。
@@ -129,6 +130,9 @@ pub struct Status {
     /// 已知的最新发布比 controller 自己新时，是那个版本号。controller 不会自己更新，这只是提醒管理员手动更新。
     #[serde(default)]
     pub newer_version: Option<Version>,
+    /// controller 的数据目录（数据库、密钥、更新包的缓存都在里面），备份时拷贝它。不是从数据目录打开的（测试）时是 `null`。
+    #[serde(default)]
+    pub data_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +148,9 @@ pub struct Network {
     pub created_at: Timestamp,
     /// 网络里有多少个节点。
     pub nodes: u32,
+    /// 网络的默认服务等级；`null` 表示 `auto`。
+    #[serde(default)]
+    pub class: Option<Class>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -160,6 +167,8 @@ pub struct CreateNetwork {
     pub max_relay_hops: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reach: Option<Reach>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<Class>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -173,6 +182,9 @@ pub struct UpdateNetwork {
     pub max_relay_hops: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reach: Option<Reach>,
+    /// 写 `null` 表示改回 `auto`。
+    #[serde(default, deserialize_with = "nullable", skip_serializing_if = "Option::is_none")]
+    pub class: Option<Option<Class>>,
 }
 
 /// 一个网络的总览。
@@ -193,6 +205,14 @@ pub struct Overview {
     pub online_nodes: Vec<NodeRef>,
     /// 两端都在线、访问规则允许、但节点上报"没有可用的路"的节点对：直连不通，也没有 relay 可走。
     pub unreachable_pairs: Vec<NodePair>,
+    /// 在线节点最近一次上报的活跃流之和。一条流两端的节点各报一次，所以这里算两次。
+    #[serde(default)]
+    pub flows: u64,
+    /// 在线节点最近一次上报的流量之和（各自启动以来经它的流发出和收到的字节数）。经过两个节点的流量两边都算。
+    #[serde(default)]
+    pub tx_bytes: u64,
+    #[serde(default)]
+    pub rx_bytes: u64,
 }
 
 /// 一对节点，`a` 的编号小于 `b`。
@@ -244,6 +264,10 @@ pub struct Node {
     /// 这个节点的程序更新（白皮书 §10.5）。
     #[serde(default)]
     pub update: NodeUpdate,
+    /// 节点挂靠的 relay 和到它们的延迟，取自它最近的上报（离线时是它离线前报的）。
+    /// 以前只在节点详情里有；放进列表里，界面数"有几个节点挂靠在这个 relay 上"只要一次请求。
+    #[serde(default)]
+    pub attached: Vec<Attachment>,
 }
 
 /// 一个节点的程序更新：能不能自己更新、有没有新版本、进行到哪一步。
@@ -442,8 +466,7 @@ pub struct NodeDetail {
     pub endpoints: Vec<SocketAddr>,
     /// controller 看到的来源 IP 加上节点自报的 UDP 端口。
     pub observed_endpoint: Option<SocketAddr>,
-    /// 节点挂靠的 relay 和到它们的延迟。
-    pub attached: Vec<Attachment>,
+    // 挂靠的 relay（`attached`）原来在这里，现在在 `Node` 里，JSON 里还是同一层的同一个字段。
     /// 映射出来的端口是不是随对端变化。是的话这台机器所在的网络基本打不了洞。节点不在线或者还不知道时是 `null`。
     pub mapping_varies: Option<bool>,
     /// 下面三项是节点本次连接期间最近一次上报的值，不在线时是 0。
@@ -517,6 +540,12 @@ pub struct NodeRoute {
     pub peer: NodeRef,
     pub route: Route,
     pub rtt_ms: Option<u32>,
+    /// 这一条是多少秒之前的：节点最近一次上报到现在过了多久。节点不在线时是它离线前最后报的。
+    #[serde(default)]
+    pub age_secs: u64,
+    /// controller 看到这条路换上来已经多少秒了：从它第一次报这条路算起。controller 重启之后从头算。
+    #[serde(default)]
+    pub since_secs: u64,
 }
 
 /// 整个网络的路由矩阵：每个节点到它的各个对端现在怎么走，取自各节点最近的上报（白皮书 §7.7）。
@@ -589,7 +618,7 @@ pub enum PathSource {
     Unknown,
 }
 
-/// 一个还没被用掉的注册令牌。
+/// 一个注册令牌。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnrollTokenInfo {
     pub id: u32,
@@ -602,6 +631,32 @@ pub struct EnrollTokenInfo {
     pub virtual_ip: Option<Ipv4Addr>,
     /// 用它加入的节点继任这个节点。
     pub successor_of: Option<NodeId>,
+    /// 令牌文本的开头一小段，不是秘密，用来认出是哪一个令牌。这个字段出现之前生成的令牌是空的。
+    #[serde(default)]
+    pub prefix: String,
+    #[serde(default)]
+    pub state: TokenState,
+    /// 被用掉的时间。
+    #[serde(default)]
+    pub used_at: Option<Timestamp>,
+    /// 用它加入的节点；还没用、或者那个节点后来被删掉了时是 `null`。
+    #[serde(default)]
+    pub used_by: Option<NodeRef>,
+}
+
+/// 一个注册令牌现在的情况。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenState {
+    /// 还能用。
+    #[default]
+    Pending,
+    /// 已经有节点用它加入了。
+    Used,
+    /// 没有被用过，已经过期。
+    Expired,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -684,6 +739,46 @@ pub struct Credential {
     /// 同时进行的连接数上限；`null` 表示不限。
     pub max_concurrent: Option<u32>,
     pub created_at: Timestamp,
+    /// 令牌的开头一小段，不是秘密，用来认出是哪一个凭据。这个字段出现之前签发的凭据是空的。
+    #[serde(default)]
+    pub prefix: String,
+    /// 流量上限，字节：经各个入口用它搬运的字节数（两个方向相加）到了这个数，它就停用，直到上限调高或者用量清零。
+    /// `null` 表示不限。
+    #[serde(default)]
+    pub max_bytes: Option<u64>,
+    #[serde(default)]
+    pub state: CredentialState,
+    /// 吊销的时间；没有吊销是 `null`。
+    #[serde(default)]
+    pub revoked_at: Option<Timestamp>,
+    #[serde(default)]
+    pub usage: CredentialUsage,
+}
+
+/// 一个凭据现在能不能用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialState {
+    #[default]
+    Active,
+    /// 流量上限用完了。入口拒绝它的新连接，断开正在进行的连接。
+    Exhausted,
+    /// 被吊销了。入口不再认它；记录留着，看得到它用过多少。
+    Revoked,
+    #[serde(other)]
+    Unknown,
+}
+
+/// 一个凭据的用量，各个入口上报的汇总。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CredentialUsage {
+    /// 签发（或者上次清零）以来经它搬运的字节数，两个方向相加。流量上限比的就是它。
+    pub bytes: u64,
+    /// 现在在线的入口上正在进行的连接数。
+    pub connections: u32,
+    /// 最近一次有连接用它的时间；从来没有用过是 `null`。
+    pub last_used_at: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -691,6 +786,22 @@ pub struct CreateCredential {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
+}
+
+/// 改一个凭据的上限，不用重新签发令牌。字段都可以省略。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct UpdateCredential {
+    /// 写 `null` 表示不限。
+    #[serde(default, deserialize_with = "nullable", skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<Option<u32>>,
+    /// 写 `null` 表示不限。
+    #[serde(default, deserialize_with = "nullable", skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<Option<u64>>,
+    /// `true` 时把用量清零（比如开始一个新的计费周期）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reset_usage: bool,
 }
 
 /// 创建凭据的应答。`token` 是调用者填在代理密码字段里的东西，只在这里出现一次。
@@ -709,6 +820,52 @@ pub struct Listener {
     pub node: NodeId,
     #[serde(flatten)]
     pub config: crate::netmap::Listener,
+    /// 节点最近一次报的这个监听器的状态。节点不在线、还没有报过，或者版本太旧不报时是 `null`。
+    #[serde(default)]
+    pub status: Option<ListenStatus>,
+}
+
+/// 节点报的一个监听（代理监听器或者端口转发的监听一侧）现在的状态、连接数和流量。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListenStatus {
+    #[serde(flatten)]
+    pub state: ListenState,
+    #[serde(flatten)]
+    pub traffic: ListenTraffic,
+}
+
+/// 一个节点上的全部监听：controller 下发的监听器、节点按本机配置自己开的回环入口、端口转发的监听一侧。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeListeners {
+    pub node: NodeRef,
+    pub online: bool,
+    /// 节点最近一次上报是多少秒之前；没有上报过是 `null`。
+    pub reported_secs_ago: Option<u64>,
+    pub listeners: Vec<NodeListener>,
+    pub forwards: Vec<NodeForwardListen>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeListener {
+    /// controller 上的监听器编号；节点自己开的回环入口没有，是 `null`。
+    pub id: Option<u32>,
+    /// 节点按本机的配置文件自己开的回环入口（`local-socks5`、`local-http`）。
+    pub builtin: bool,
+    pub name: String,
+    pub bind: SocketAddr,
+    pub protocol: ListenerProtocol,
+    #[serde(flatten)]
+    pub status: ListenStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeForwardListen {
+    /// 端口转发的编号。
+    pub id: u32,
+    pub bind: SocketAddr,
+    pub protocol: ForwardProtocol,
+    #[serde(flatten)]
+    pub status: ListenStatus,
 }
 
 /// 创建或者整个替换一个监听器。
@@ -735,6 +892,13 @@ pub struct Forward {
     pub allow_from: Vec<IpNet>,
     pub enabled: bool,
     pub status: ForwardStatus,
+    /// 这条转发上的流的服务等级；`null` 表示用网络的默认值。
+    #[serde(default)]
+    pub class: Option<Class>,
+    /// 监听节点最近一次报的这条转发的监听状态：在监听（端口写 0 时 `local` 是节点挑定的端口）、端口被占用、绑定失败等，
+    /// 以及连接数和流量。节点不在线或者还没有报过时是 `null`。
+    #[serde(default)]
+    pub listen: Option<ListenStatus>,
 }
 
 /// 创建或者整个替换一条端口转发。
@@ -751,6 +915,8 @@ pub struct ForwardInput {
     pub allow_from: Vec<IpNet>,
     #[serde(default = "enabled_by_default")]
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<Class>,
 }
 
 /// 一条转发现在的情况，按 controller 知道的算。排在前面的优先。
@@ -839,6 +1005,156 @@ pub struct LogEntry {
     pub action: String,
     /// 给人看的说明。
     pub detail: String,
+    /// 这条记录说的是哪些东西，界面可以据此做成链接。这个字段出现之前的记录是空的。
+    #[serde(default)]
+    pub refs: Vec<LogRef>,
+}
+
+/// 操作记录里提到的一样东西。东西后来被删掉了，编号还在。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LogRef {
+    pub kind: RefKind,
+    pub id: u32,
+}
+
+impl LogRef {
+    #[must_use]
+    pub const fn new(kind: RefKind, id: u32) -> Self {
+        Self { kind, id }
+    }
+
+    #[must_use]
+    pub const fn node(id: NodeId) -> Self {
+        Self { kind: RefKind::Node, id: id.get() }
+    }
+}
+
+/// `node:3` 这样的写法，用在 `GET /log` 的 `ref` 查询参数里。
+impl fmt::Display for LogRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = serde_json::to_value(self.kind).ok().and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_default();
+        write!(f, "{kind}:{}", self.id)
+    }
+}
+
+impl FromStr for LogRef {
+    type Err = InvalidLogRef;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (kind, id) = s.split_once(':').ok_or(InvalidLogRef)?;
+        let kind: RefKind = serde_json::from_value(serde_json::Value::String(kind.to_owned())).map_err(|_| InvalidLogRef)?;
+        if kind == RefKind::Unknown {
+            return Err(InvalidLogRef);
+        }
+        Ok(Self { kind, id: id.parse().map_err(|_| InvalidLogRef)? })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("应该写成 <种类>:<编号>，例如 node:3；种类是 network、node、token、rule、credential、listener、forward 之一")]
+pub struct InvalidLogRef;
+
+/// 操作记录里提到的东西是哪一种。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefKind {
+    Network,
+    Node,
+    Token,
+    Rule,
+    Credential,
+    Listener,
+    Forward,
+    #[serde(other)]
+    Unknown,
+}
+
+/// 在整个网络里把一个标签改名。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenameTag {
+    pub from: String,
+    pub to: String,
+}
+
+/// 改名的结果：各改了几处。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenamedTag {
+    pub from: String,
+    pub to: String,
+    /// 带着这个标签的节点。
+    pub nodes: u32,
+    /// 提到这个标签的规则（`src` 或 `dst`）。
+    pub rules: u32,
+    /// 还没用掉的注册令牌里预设了这个标签的。
+    pub tokens: u32,
+}
+
+/// 启用（或修改）relay 的应答：节点，加上 controller 从自己这边试连这些地址的结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayEnabled {
+    #[serde(flatten)]
+    pub node: Node,
+    /// 每个填写的地址一项。只是参考：controller 和别的节点不在同一个网络位置上，它连不上不等于别人连不上。
+    pub reachability: Vec<Reachability>,
+}
+
+/// controller 试连一个 relay 地址的结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reachability {
+    pub protocol: Transport,
+    pub addr: SocketAddr,
+    pub reachable: bool,
+    /// UDP 是地址查询的往返时间，TCP 是建连接的时间；没连上是 `null`。
+    pub rtt_ms: Option<u32>,
+    /// 没连上的原因；连上了是 `null`。
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Transport {
+    Udp,
+    Tcp,
+}
+
+/// 一个出口：它的设置、它自己报的计数和限制、健康，以及用它的节点各自看到的情况。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExitView {
+    pub node: NodeRef,
+    pub online: bool,
+    pub settings: ExitRole,
+    pub health: ExitHealth,
+    /// 最近 5 分钟里出口报的建流请求数，和其中归因于出口自己的失败数。健康只看这两个数。
+    pub recent_requests: u64,
+    pub recent_failures: u64,
+    /// 出口最近一次报的计数（它这次运行以来的累计）、配额用到了哪里、是不是在排空。没有报过时是 `null`。
+    pub usage: Option<ExitReport>,
+    /// `usage` 是多少秒之前报的。
+    pub reported_secs_ago: Option<u64>,
+    /// 用过这个出口的节点各自看到的计数（各自这次运行以来的累计），和出口自己报的交叉核对。
+    pub observed: Vec<ExitObserved>,
+}
+
+/// 出口的健康：只看归因于出口自己的失败（解析器出错、内部错误），目标的问题和被拒绝都不算。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExitHealth {
+    /// 最近 5 分钟里有请求，出口自己的失败不到一成。
+    Ok,
+    /// 最近 5 分钟里出口自己的失败至少 3 次，并且占请求的一成以上。
+    Degraded,
+    /// 不在线，或者最近 5 分钟里没有请求，说不上来。
+    Unknown,
+}
+
+/// 一个节点经某个出口出去的流，它自己看到的计数。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExitObserved {
+    pub by: NodeRef,
+    #[serde(flatten)]
+    pub counts: ExitObservation,
+    /// 是多少秒之前报的。
+    pub reported_secs_ago: u64,
 }
 
 #[cfg(test)]
@@ -919,6 +1235,93 @@ mod tests {
         let value = serde_json::to_value(&listener).unwrap();
         assert_eq!(value["bind"], json!("192.168.1.5:1080"));
         assert_eq!(value["default_action"], json!({ "action": "exit", "node": 9 }));
+    }
+
+    #[test]
+    fn responses_from_an_older_controller_read_with_the_new_fields_defaulted() {
+        let credential: Credential =
+            serde_json::from_value(json!({ "id": 1, "name": "phone", "max_concurrent": 8, "created_at": 5 })).unwrap();
+        assert_eq!(
+            (credential.state, credential.max_bytes, credential.usage, credential.prefix.as_str()),
+            (CredentialState::Active, None, CredentialUsage::default(), "")
+        );
+        let token: EnrollTokenInfo = serde_json::from_value(json!({
+            "id": 1, "network": 1, "created_at": 1, "expires_at": 2, "tags": [], "virtual_ip": null, "successor_of": null
+        }))
+        .unwrap();
+        assert_eq!((token.state, token.used_at, token.used_by), (TokenState::Pending, None, None));
+        let entry: LogEntry =
+            serde_json::from_value(json!({ "id": 1, "at": 2, "network": null, "action": "admin.token", "detail": "x" })).unwrap();
+        assert!(entry.refs.is_empty());
+        let forward: ForwardInput = serde_json::from_value(json!({
+            "protocol": "tcp", "listen_node": 1, "bind": "127.0.0.1:0", "target_node": 2, "target_addr": "127.0.0.1:22"
+        }))
+        .unwrap();
+        assert_eq!((forward.class, forward.enabled), (None, true));
+        let network: UpdateNetwork = serde_json::from_value(json!({ "class": null })).unwrap();
+        assert_eq!(network.class, Some(None));
+        assert_eq!(serde_json::to_value(UpdateNetwork::default()).unwrap(), json!({}));
+    }
+
+    #[test]
+    fn node_detail_keeps_attached_in_the_same_place_now_that_it_lives_in_node() {
+        let node: Node = serde_json::from_value(json!({
+            "id": 1, "network": 1, "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE", "name": "node-1", "fqdn": "node-1.home.i3t",
+            "virtual_ip": "10.66.0.1", "tags": [], "declared": {}, "relay": null, "exit": null, "dial_out_only": false,
+            "routing": null, "reach": null, "pinned_relays": [], "platform": "linux-x86_64", "version": "0.1.0", "online": true,
+            "last_seen_at": null, "created_at": 1, "netmap_version": 1, "sent_version": 1, "acked_version": 1,
+            "attached": [{ "relay": 9, "rtt_ms": 12 }]
+        }))
+        .unwrap();
+        let detail =
+            NodeDetail { node, endpoints: Vec::new(), observed_endpoint: None, mapping_varies: None, flows: 0, tx_bytes: 0, rx_bytes: 0 };
+        let value = serde_json::to_value(&detail).unwrap();
+        assert_eq!(value["attached"], json!([{ "relay": 9, "rtt_ms": 12 }]));
+        assert_eq!(serde_json::from_value::<NodeDetail>(value).unwrap(), detail);
+    }
+
+    #[test]
+    fn listen_status_sits_flat_next_to_the_listener_it_describes() {
+        let listener = NodeListener {
+            id: None,
+            builtin: true,
+            name: "local-socks5".into(),
+            bind: "127.0.0.1:1080".parse().unwrap(),
+            protocol: ListenerProtocol::Socks5,
+            status: ListenStatus {
+                state: ListenState::PortInUse { detail: "地址已经在用".into() },
+                traffic: ListenTraffic { connections: 0, bytes_up: 1, bytes_down: 2 },
+            },
+        };
+        let value = serde_json::to_value(&listener).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "id": null, "builtin": true, "name": "local-socks5", "bind": "127.0.0.1:1080", "protocol": "socks5",
+                "state": "port_in_use", "detail": "地址已经在用", "connections": 0, "bytes_up": 1, "bytes_down": 2
+            })
+        );
+        assert_eq!(serde_json::from_value::<NodeListener>(value).unwrap(), listener);
+    }
+
+    #[test]
+    fn log_refs_are_written_as_kind_and_id() {
+        let reference = LogRef::new(RefKind::Credential, 4);
+        assert_eq!(serde_json::to_value(reference).unwrap(), json!({ "kind": "credential", "id": 4 }));
+        assert_eq!(reference.to_string(), "credential:4");
+        assert_eq!("node:3".parse::<LogRef>(), Ok(LogRef::new(RefKind::Node, 3)));
+        for bad in ["node", "node:x", "planet:3", ":3", "unknown:1"] {
+            assert_eq!(bad.parse::<LogRef>(), Err(InvalidLogRef), "{bad}");
+        }
+    }
+
+    #[test]
+    fn update_credential_tells_an_omitted_limit_from_a_cleared_one() {
+        let cleared: UpdateCredential = serde_json::from_value(json!({ "max_bytes": null })).unwrap();
+        assert_eq!((cleared.max_bytes, cleared.max_concurrent, cleared.reset_usage), (Some(None), None, false));
+        let set: UpdateCredential = serde_json::from_value(json!({ "max_bytes": 1000, "reset_usage": true })).unwrap();
+        assert_eq!((set.max_bytes, set.reset_usage), (Some(Some(1000)), true));
+        assert_eq!(serde_json::to_value(UpdateCredential::default()).unwrap(), json!({}));
     }
 
     #[test]

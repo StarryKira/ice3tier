@@ -38,7 +38,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use i3t_proto::{NodeId, PublicKey};
 use serde::{Deserialize, Serialize};
 
-use crate::netmap::{Attachment, Netmap};
+use crate::netmap::{Attachment, ForwardProtocol, ListenerProtocol, Netmap};
 use crate::update::{Platform, SelfUpdateBlocker, SignedManifest, UpdateStatus, UpdateTiming, Version};
 
 /// 一帧最长多少字节。netmap 随对端数量增长，千级节点时在几百 KB。
@@ -58,19 +58,26 @@ pub const MAX_PACKAGE_CHUNK: u32 = 256 * 1024;
 ///
 /// 里面有三样东西：到哪里找 controller、controller 的公钥（节点靠它确认连上的是真的 controller）、
 /// 一次性的密钥（controller 靠它确认这台机器是管理员放进来的）。文本形式是 `i3t-` 加上这三样的 base64url。
+///
+/// 一次性密钥排在 JSON 的最前面：这样令牌文本的开头一小段（[`EnrollToken::VISIBLE_PREFIX_LEN`] 个字符）随令牌而不同，
+/// 界面上可以拿它认出是哪一个令牌。字段按名字解析，先后不影响以前的版本读它。
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnrollToken {
+    #[serde(rename = "s")]
+    pub secret: String,
     /// controller 的节点协议地址，`主机:端口`。主机可以是域名。
     #[serde(rename = "c")]
     pub controller: String,
     #[serde(rename = "k")]
     pub key: PublicKey,
-    #[serde(rename = "s")]
-    pub secret: String,
 }
 
 impl EnrollToken {
     const PREFIX: &str = "i3t-";
+
+    /// 令牌文本开头可以给人看的字符数：`i3t-`、`{"s":"` 的编码，加上露出密钥开头约 4 个字符的 6 个字符。
+    /// 密钥有 256 位，露出的不到 30 位。
+    pub const VISIBLE_PREFIX_LEN: usize = 18;
 }
 
 impl fmt::Display for EnrollToken {
@@ -293,6 +300,157 @@ pub struct Report {
     /// 不懂更新的旧版本节点不报，读成 `None`。
     #[serde(default)]
     pub update: Option<UpdateStatus>,
+    /// 这次运行的编号：节点进程每次启动时随机取一个，不是 0。下面几项里累计的数都从进程启动时算起，
+    /// controller 靠它分辨"节点重启了，计数从头开始"和"计数还在往上涨"。旧版本的节点不报，读成 0。
+    #[serde(default)]
+    pub run: u64,
+    /// 入口上各个接入凭据的用量。这次运行里没有用过的凭据不在里面。
+    #[serde(default)]
+    pub credentials: Vec<CredentialUsage>,
+    /// 本节点替别人连目标（出口一侧）的计数，以及它自己的限制用到了哪里。旧版本的节点不报。
+    /// 装在 `Box` 里只是为了让消息的枚举不至于太大，JSON 里没有区别。
+    #[serde(default)]
+    pub exit: Option<Box<ExitReport>>,
+    /// 本节点作为发起方经各个出口出去的流：发起一方自己看到的字节数和失败，用来和出口的上报交叉核对。
+    #[serde(default)]
+    pub exits: Vec<ExitObservation>,
+    /// 代理监听器的状态，包括节点按本机配置文件自己开的那几个。
+    #[serde(default)]
+    pub listeners: Vec<ListenerReport>,
+    /// 本节点负责监听的端口转发的状态。
+    #[serde(default)]
+    pub forwards: Vec<ForwardReport>,
+}
+
+/// 一个接入凭据在一个入口上的用量。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialUsage {
+    /// 凭据在 controller 上的编号（netmap 里的 [`Credential::id`](crate::netmap::Credential::id)）。
+    pub id: u32,
+    /// 这次运行以来经这个凭据搬运的字节数：客户端发出的和收到的相加。
+    pub bytes: u64,
+    /// 现在正在进行的连接（UDP ASSOCIATE 也算一条）。
+    #[serde(default)]
+    pub connections: u32,
+    /// 最近一次有连接用它是多少秒之前。用间隔而不是时刻：节点和 controller 的时钟不一定对得上。
+    #[serde(default)]
+    pub last_used_secs_ago: Option<u64>,
+}
+
+/// 出口一侧的计数。都是这次运行以来的累计，`active` 除外。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExitReport {
+    /// 正在处理的流和数据报上下文。
+    pub active: u64,
+    /// 收到过的建流请求，包括数据报上下文的。
+    pub total: u64,
+    pub bytes_to_target: u64,
+    pub bytes_from_target: u64,
+    /// 没有建成的请求，按归因分：目标的问题、被规则或策略拒绝（含排空、配额、建连预算）、出口自己的问题。
+    /// 只有最后一项说明出口不健康。
+    pub failed_by_target: u64,
+    pub refused: u64,
+    pub failed_by_exit: u64,
+    /// 建成之后没有正常结束的流和数据报上下文。
+    pub aborted: u64,
+    /// 节点正在排空，不接新的流。
+    pub draining: bool,
+    /// 配了流量配额时，本账期用到了哪里。
+    pub quota: Option<QuotaUsage>,
+}
+
+/// 出口本账期的流量配额。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuotaUsage {
+    /// 每个账期的配额，字节。
+    pub limit_bytes: u64,
+    /// 本账期已经用掉的，字节。可能略超过配额：超出的那一段流是在用完的那一刻被断开的。
+    pub used_bytes: u64,
+    /// 本账期的开始和结束，Unix 秒，按出口节点自己的时钟。
+    pub period_start: u64,
+    pub period_end: u64,
+}
+
+/// 发起方看到的、经一个出口出去的流。都是这次运行以来的累计。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExitObservation {
+    pub exit: NodeId,
+    /// 发往这个出口的建流请求，成功和失败的都算。
+    #[serde(default)]
+    pub flows: u64,
+    /// 客户端经它发出的、收到的字节数。
+    #[serde(default)]
+    pub bytes_up: u64,
+    #[serde(default)]
+    pub bytes_down: u64,
+    /// 出口回的拒绝，按归因分，和 [`ExitReport`] 里的分法相同。
+    #[serde(default)]
+    pub failed_by_target: u64,
+    #[serde(default)]
+    pub refused: u64,
+    #[serde(default)]
+    pub failed_by_exit: u64,
+    /// 到出口开流就失败了（没有路、连接断了），出口根本没有看到这个请求。
+    #[serde(default)]
+    pub unreachable: u64,
+}
+
+/// 一个代理监听器现在的状态。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListenerReport {
+    pub name: String,
+    /// 配置里写的绑定地址。
+    pub bind: SocketAddr,
+    pub protocol: ListenerProtocol,
+    /// 节点按本机的配置文件自己开的回环入口（`local-socks5`、`local-http`），不是 controller 下发的。
+    #[serde(default)]
+    pub builtin: bool,
+    pub state: ListenState,
+    #[serde(flatten)]
+    pub traffic: ListenTraffic,
+}
+
+/// 一条端口转发（监听一侧）现在的状态。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardReport {
+    pub id: u32,
+    /// 配置里写的监听地址；端口写 0 时实际的端口在 [`ListenState::Listening`] 里。
+    pub bind: SocketAddr,
+    pub protocol: ForwardProtocol,
+    pub state: ListenState,
+    #[serde(flatten)]
+    pub traffic: ListenTraffic,
+}
+
+/// 一个监听上的连接和流量。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ListenTraffic {
+    /// 现在的连接数；UDP 的端口转发是会话数。
+    pub connections: u32,
+    /// 这次运行以来客户端发进来的字节数，和发回给客户端的字节数。
+    pub bytes_up: u64,
+    pub bytes_down: u64,
+}
+
+/// 一个监听现在的状态。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ListenState {
+    /// 正在监听。`local` 是实际绑定的地址：配置里端口写 0 时，这里是节点挑定的端口。
+    Listening { local: SocketAddr },
+    /// 端口已经被别的程序占着。节点不去抢，每隔一段时间再试。
+    PortInUse { detail: String },
+    /// 别的原因没有绑上（地址不在本机、没有权限等），`detail` 是系统给的原因。
+    Failed { detail: String },
+    /// 监听在本节点虚拟 IP 上的端口转发：不占操作系统的端口。
+    Virtual,
+    /// 这种用法节点不支持，`detail` 说明为什么。
+    Unsupported { detail: String },
+    /// 比这个程序新的节点报的、这里不认识的状态。
+    #[serde(other)]
+    Unknown,
 }
 
 /// 到一个对端当前走的路。
@@ -364,7 +522,15 @@ mod tests {
             secret: "one-time-secret".to_owned(),
         };
         let text = token.to_string();
-        assert!(text.starts_with("i3t-"));
+        assert!(text.starts_with("i3t-eyJzIjoi"), "密钥排在最前面：{text}");
+        let other = EnrollToken { secret: "another-secret".to_owned(), ..token.clone() };
+        assert_ne!(text[..EnrollToken::VISIBLE_PREFIX_LEN], other.to_string()[..EnrollToken::VISIBLE_PREFIX_LEN], "开头一小段就分得出来");
+        let older = format!(
+            "i3t-{}",
+            URL_SAFE_NO_PAD
+                .encode(r#"{"c":"ctl.example.com:20331","k":"AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM","s":"one-time-secret"}"#)
+        );
+        assert_eq!(older.parse::<EnrollToken>(), Ok(token.clone()), "以前的写法照样读得出来");
         assert_eq!(format!("  {text}\n").parse::<EnrollToken>(), Ok(token.clone()));
         assert!(!format!("{token:?}").contains("one-time-secret"));
         for bad in ["", "i3t-", "i3t-!!!", "abc", "i3t-e30"] {
@@ -447,6 +613,47 @@ mod tests {
         assert_eq!(wire["update"], serde_json::json!({ "state": "waiting_for_idle", "version": "0.2.0" }));
         assert_eq!(wire["routes_full"], true);
         assert_eq!(serde_json::from_value::<Report>(wire).unwrap(), report);
+    }
+
+    #[test]
+    fn a_report_from_an_older_node_reads_without_usage_and_status() {
+        let old: Report = serde_json::from_value(serde_json::json!({ "flows": 3, "tx_bytes": 10, "rx_bytes": 20 })).unwrap();
+        assert_eq!((old.run, old.exit.clone(), old.credentials.len(), old.exits.len()), (0, None, 0, 0));
+        assert!(old.listeners.is_empty() && old.forwards.is_empty());
+    }
+
+    #[test]
+    fn usage_and_listen_status_have_stable_json_shapes() {
+        let forward = ForwardReport {
+            id: 7,
+            bind: "127.0.0.1:0".parse().unwrap(),
+            protocol: ForwardProtocol::Tcp,
+            state: ListenState::Listening { local: "127.0.0.1:41000".parse().unwrap() },
+            traffic: ListenTraffic { connections: 2, bytes_up: 10, bytes_down: 20 },
+        };
+        assert_eq!(
+            serde_json::to_value(&forward).unwrap(),
+            serde_json::json!({
+                "id": 7, "bind": "127.0.0.1:0", "protocol": "tcp", "state": { "state": "listening", "local": "127.0.0.1:41000" },
+                "connections": 2, "bytes_up": 10, "bytes_down": 20
+            })
+        );
+        let in_use = serde_json::to_value(ListenState::PortInUse { detail: "Address in use".into() }).unwrap();
+        assert_eq!(in_use, serde_json::json!({ "state": "port_in_use", "detail": "Address in use" }));
+        assert_eq!(serde_json::from_value::<ListenState>(serde_json::json!({ "state": "later" })).unwrap(), ListenState::Unknown);
+
+        let usage = CredentialUsage { id: 3, bytes: 4096, connections: 1, last_used_secs_ago: Some(5) };
+        let wire = serde_json::to_value(&usage).unwrap();
+        assert_eq!(wire, serde_json::json!({ "id": 3, "bytes": 4096, "connections": 1, "last_used_secs_ago": 5 }));
+        assert_eq!(serde_json::from_value::<CredentialUsage>(wire).unwrap(), usage);
+
+        let exit = ExitReport {
+            quota: Some(QuotaUsage { limit_bytes: 100, used_bytes: 40, period_start: 1, period_end: 2 }),
+            ..ExitReport::default()
+        };
+        let wire = serde_json::to_value(&exit).unwrap();
+        assert_eq!(wire["quota"], serde_json::json!({ "limit_bytes": 100, "used_bytes": 40, "period_start": 1, "period_end": 2 }));
+        assert_eq!(serde_json::from_value::<ExitReport>(serde_json::json!({ "total": 5 })).unwrap().total, 5);
     }
 
     #[test]

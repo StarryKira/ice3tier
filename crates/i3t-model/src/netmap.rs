@@ -7,6 +7,7 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 
+use i3t_proto::flow::Class;
 use i3t_proto::{NodeId, PublicKey};
 use ipnet::{IpNet, Ipv4Net};
 use serde::{Deserialize, Serialize};
@@ -71,6 +72,9 @@ pub struct Network {
     pub max_relay_hops: u8,
     #[serde(default)]
     pub reach: Reach,
+    /// 网络的默认服务等级：用户名、监听器、端口转发、出口都没有指定等级时用它；没有值时是 `auto`。
+    #[serde(default)]
+    pub class: Option<Class>,
 }
 
 impl Network {
@@ -166,17 +170,70 @@ pub struct ExitRole {
     /// 把流交给本机配置的一个 SOCKS5 代理去连目标，而不是自己直接连。
     #[serde(default)]
     pub upstream_socks5: Option<SocketAddr>,
+    /// 每个账期的流量配额，单位字节；没有值表示不限。算的是出口替别人搬运的互联网和局域网目标的流量，
+    /// 两个方向相加，流和数据报都算。用完之后新的请求被拒绝，正在搬运的流被断开，直到下一个账期。
+    #[serde(default)]
+    pub quota_bytes: Option<u64>,
+    /// 账期从每个月的哪一天开始（UTC 的 0 点），1 到 28。
+    #[serde(default = "default_quota_reset_day")]
+    pub quota_reset_day: u8,
+    /// 互联网目标只连哪一种地址。域名解析出来的地址里只取这一种；目标是另一种地址时拒绝。
+    #[serde(default)]
+    pub family: IpFamily,
+    /// 建连预算：同一个发起节点每分钟最多让出口向同一个互联网或局域网目标（主机加端口）新建多少条连接；
+    /// 没有值表示不限。可以短时间用完一分钟的额度，之后按每分钟这么多的速度恢复。
+    #[serde(default)]
+    pub connects_per_minute: Option<u32>,
+    /// 经这个出口的流的默认服务等级，排在用户名和监听器的设置之后、网络的默认值之前。
+    #[serde(default)]
+    pub class: Option<Class>,
 }
 
 impl Default for ExitRole {
     fn default() -> Self {
-        Self { ports: default_exit_ports(), lan: false, bandwidth_mbps: None, upstream_socks5: None }
+        Self {
+            ports: default_exit_ports(),
+            lan: false,
+            bandwidth_mbps: None,
+            upstream_socks5: None,
+            quota_bytes: None,
+            quota_reset_day: default_quota_reset_day(),
+            family: IpFamily::default(),
+            connects_per_minute: None,
+            class: None,
+        }
     }
 }
 
 // serde 的 `default = "..."` 要的是一个返回字段类型的函数，所以这里返回 Option。
 fn default_exit_ports() -> Option<Vec<u16>> {
     Some(vec![80, 443])
+}
+
+const fn default_quota_reset_day() -> u8 {
+    1
+}
+
+/// 出口连互联网目标时用的地址族。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IpFamily {
+    /// IPv4 和 IPv6 都可以。
+    #[default]
+    Any,
+    Ipv4,
+    Ipv6,
+}
+
+impl IpFamily {
+    /// 这个地址族允许不允许 `ip`。IPv4 映射的 IPv6 地址按 IPv4 算。
+    #[must_use]
+    pub fn admits(self, ip: IpAddr) -> bool {
+        match (self, ip.to_canonical()) {
+            (Self::Any, _) | (Self::Ipv4, IpAddr::V4(_)) | (Self::Ipv6, IpAddr::V6(_)) => true,
+            (Self::Ipv4, IpAddr::V6(_)) | (Self::Ipv6, IpAddr::V4(_)) => false,
+        }
+    }
 }
 
 /// 一个和本节点有访问关系的对端。
@@ -216,6 +273,9 @@ pub struct Attachment {
 pub struct PeerExit {
     #[serde(default)]
     pub lan: bool,
+    /// 这个出口的默认服务等级（[`ExitRole::class`]）。入口给经它出去的流挑等级时要用。
+    #[serde(default)]
+    pub class: Option<Class>,
 }
 
 /// 一个启用了的 relay。
@@ -258,6 +318,13 @@ pub struct Listener {
     /// 固定出口：这个监听器上的流量都从这个节点出去，给不能设置代理用户名的应用用。
     #[serde(default)]
     pub fixed_exit: Option<NodeId>,
+    /// 这个监听器上的流的默认服务等级。用户名里写了等级时以用户名为准；没有值时看出口和网络的默认值。
+    #[serde(default)]
+    pub class: Option<Class>,
+    /// 乐观回复（白皮书 §8.1）：`true` 时不等对端的应答就告诉客户端连上了，`false` 时一律等。
+    /// 没有值时按目标的种类取默认：互联网目标不等，组网目标（节点的服务、局域网）等。
+    #[serde(default)]
+    pub optimistic: Option<bool>,
 }
 
 impl Listener {
@@ -305,6 +372,9 @@ pub struct Forward {
     pub target: NodeId,
     #[serde(default)]
     pub allow_from: Vec<IpNet>,
+    /// 这条转发上的流的服务等级；没有值时用网络的默认值。
+    #[serde(default)]
+    pub class: Option<Class>,
 }
 
 /// 一条端口转发的目标一侧。
@@ -325,6 +395,13 @@ pub struct Credential {
     pub token: TokenHash,
     #[serde(default)]
     pub max_concurrent: Option<u32>,
+    /// controller 上的编号。入口按它上报每个凭据的用量；旧版本的 controller 不给，读成 0。
+    #[serde(default)]
+    pub id: u32,
+    /// 这个凭据的流量上限已经用完：入口拒绝它的新连接，并断开它正在进行的连接。
+    /// 用量是 controller 汇总各个入口的上报算出来的，所以从用完到这里变成 `true` 有一个上报周期左右的滞后。
+    #[serde(default)]
+    pub exhausted: bool,
 }
 
 /// 凭据令牌的 SHA-256。文本形式是 64 个小写十六进制字符。
@@ -468,6 +545,8 @@ mod tests {
             require_credential: false,
             default_action: None,
             fixed_exit: None,
+            class: None,
+            optimistic: None,
         };
         assert_eq!(listener("127.0.0.1:1080").effective_default_action(), DefaultAction::Local);
         assert_eq!(listener("192.168.1.5:1080").effective_default_action(), DefaultAction::Reject);
@@ -482,6 +561,36 @@ mod tests {
         assert_eq!(text.parse::<TokenHash>(), Ok(hash));
         assert_eq!("0f".parse::<TokenHash>(), Err(InvalidTokenHash));
         assert_eq!("zz".repeat(32).parse::<TokenHash>(), Err(InvalidTokenHash));
+    }
+
+    #[test]
+    fn limits_classes_and_credential_state_default_when_an_older_controller_omits_them() {
+        let exit: ExitRole = serde_json::from_value(serde_json::json!({ "ports": [443], "lan": true })).unwrap();
+        assert_eq!(
+            (exit.quota_bytes, exit.quota_reset_day, exit.family, exit.connects_per_minute, exit.class),
+            (None, 1, IpFamily::Any, None, None)
+        );
+        assert_eq!(exit, ExitRole { ports: Some(vec![443]), lan: true, ..ExitRole::default() });
+        let credential: Credential =
+            serde_json::from_value(serde_json::json!({ "name": "phone", "token": "0f".repeat(32), "max_concurrent": 2 })).unwrap();
+        assert_eq!((credential.id, credential.exhausted), (0, false));
+        let forward: Forward =
+            serde_json::from_value(serde_json::json!({ "id": 4, "protocol": "tcp", "bind": "127.0.0.1:0", "target": 2 })).unwrap();
+        assert_eq!((forward.class, forward.bind.port()), (None, 0));
+        assert_eq!(minimal().network.class, None);
+        let peer_exit: PeerExit = serde_json::from_value(serde_json::json!({ "lan": true, "class": "bulk" })).unwrap();
+        assert_eq!(peer_exit, PeerExit { lan: true, class: Some(Class::Bulk) });
+        let quota: ExitRole = serde_json::from_value(serde_json::json!({ "family": "ipv4", "quota_bytes": 1_000_000 })).unwrap();
+        assert_eq!((quota.family, quota.quota_bytes), (IpFamily::Ipv4, Some(1_000_000)));
+    }
+
+    #[test]
+    fn an_address_family_admits_only_its_own_addresses() {
+        let (v4, v6, mapped): (IpAddr, IpAddr, IpAddr) =
+            ("1.1.1.1".parse().unwrap(), "2606:4700::1".parse().unwrap(), "::ffff:1.1.1.1".parse().unwrap());
+        assert!(IpFamily::Any.admits(v4) && IpFamily::Any.admits(v6));
+        assert!(IpFamily::Ipv4.admits(v4) && IpFamily::Ipv4.admits(mapped) && !IpFamily::Ipv4.admits(v6));
+        assert!(IpFamily::Ipv6.admits(v6) && !IpFamily::Ipv6.admits(v4) && !IpFamily::Ipv6.admits(mapped));
     }
 
     #[test]
