@@ -9,15 +9,66 @@
 //! 2. controller 回 [`ToNode::Snapshot`]；不认这个节点时回 [`ToNode::Rejected`] 然后断开。
 //! 3. 之后节点定期发 [`ToController::Report`]，配置有变化时 controller 再发 `Snapshot`，节点应用之后回 [`ToController::Ack`]。
 
+use std::fmt;
 use std::net::SocketAddr;
+use std::str::FromStr;
 
-use i3t_proto::NodeId;
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use i3t_proto::{NodeId, PublicKey};
 use serde::{Deserialize, Serialize};
 
 use crate::netmap::{Attachment, Netmap};
 
 /// 一帧最长多少字节。netmap 随对端数量增长，千级节点时在几百 KB。
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
+
+/// 注册令牌：管理员在 WebUI 上生成，交给要加入的那台机器（`i3t join` 从标准输入读它）。
+///
+/// 里面有三样东西：到哪里找 controller、controller 的公钥（节点靠它确认连上的是真的 controller）、
+/// 一次性的密钥（controller 靠它确认这台机器是管理员放进来的）。文本形式是 `i3t-` 加上这三样的 base64url。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollToken {
+    /// controller 的节点协议地址，`主机:端口`。主机可以是域名。
+    #[serde(rename = "c")]
+    pub controller: String,
+    #[serde(rename = "k")]
+    pub key: PublicKey,
+    #[serde(rename = "s")]
+    pub secret: String,
+}
+
+impl EnrollToken {
+    const PREFIX: &str = "i3t-";
+}
+
+impl fmt::Display for EnrollToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let json = serde_json::to_vec(self).map_err(|_| fmt::Error)?;
+        write!(f, "{}{}", Self::PREFIX, URL_SAFE_NO_PAD.encode(json))
+    }
+}
+
+/// 令牌里有一次性的密钥，不能进日志。
+impl fmt::Debug for EnrollToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EnrollToken").field("controller", &self.controller).field("key", &self.key).finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("不是一个注册令牌")]
+pub struct InvalidEnrollToken;
+
+impl FromStr for EnrollToken {
+    type Err = InvalidEnrollToken;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let body = s.trim().strip_prefix(Self::PREFIX).ok_or(InvalidEnrollToken)?;
+        let json = URL_SAFE_NO_PAD.decode(body).map_err(|_| InvalidEnrollToken)?;
+        serde_json::from_slice(&json).map_err(|_| InvalidEnrollToken)
+    }
+}
 
 /// 节点发给 controller 的消息。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,6 +183,22 @@ pub enum Signal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enroll_token_round_trips_and_hides_its_secret() {
+        let token = EnrollToken {
+            controller: "ctl.example.com:20331".to_owned(),
+            key: PublicKey::from_bytes([3; 32]),
+            secret: "one-time-secret".to_owned(),
+        };
+        let text = token.to_string();
+        assert!(text.starts_with("i3t-"));
+        assert_eq!(format!("  {text}\n").parse::<EnrollToken>(), Ok(token.clone()));
+        assert!(!format!("{token:?}").contains("one-time-secret"));
+        for bad in ["", "i3t-", "i3t-!!!", "abc", "i3t-e30"] {
+            assert_eq!(bad.parse::<EnrollToken>(), Err(InvalidEnrollToken), "{bad}");
+        }
+    }
 
     #[test]
     fn messages_carry_a_type_tag() {
