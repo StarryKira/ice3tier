@@ -29,6 +29,8 @@
 //! 节点 → controller   Report { …, update: 进行到哪一步 }                  每次变化都马上报一次
 //! controller → 节点   UpdateCancel                                       还没换上去的话就不要换了
 //! ```
+//!
+//! 主动测试（白皮书 §7.6）在这条连接上的样子见 [`diag`]。
 
 use std::fmt;
 use std::net::SocketAddr;
@@ -42,6 +44,10 @@ use serde::{Deserialize, Serialize};
 use crate::netmap::{Attachment, ForwardProtocol, ListenerProtocol, Netmap, RoutingMode};
 use crate::update::{Platform, SelfUpdateBlocker, SignedManifest, UpdateStatus, UpdateTiming, Version};
 
+pub mod diag;
+
+pub use diag::{TestOrder, TestReport};
+
 /// 一帧最长多少字节。netmap 随对端数量增长，千级节点时在几百 KB。
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 
@@ -54,10 +60,15 @@ pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 ///   上报时带 [`Report::route_kinds`]。
 /// - 3：认识 netmap 里对端的 [`lane`](crate::netmap::Peer::lane)（独占 TCP），上报时带 [`Report::lanes`]。
 ///   比它旧的节点不懂独占 TCP，controller 据此说明节点对的设置为什么不起作用。
-pub const PROTOCOL_REVISION: u32 = 3;
+/// - 4：认识 [`ToNode::Test`]、[`ToNode::TestEnd`]，会回 [`ToController::TestReport`]（主动测试），
+///   在 [`Hello::throughput_tests`] 里说本机接不接受吞吐测试。
+pub const PROTOCOL_REVISION: u32 = 4;
 
 /// 从这一版节点协议起节点懂独占 TCP。
 pub const LANE_REVISION: u32 = 3;
+
+/// 从这一版节点协议起节点懂主动测试。
+pub const TEST_REVISION: u32 = 4;
 
 /// 取更新包时一段最多多少字节。同一条连接上还有别的消息要走，所以不能大。
 pub const MAX_PACKAGE_CHUNK: u32 = 256 * 1024;
@@ -159,6 +170,8 @@ pub enum ToController {
         #[serde(default)]
         rows: Vec<BackboneRow>,
     },
+    /// 主动测试里这一端看到的结果（[`diag`]）。
+    TestReport(Box<TestReport>),
 }
 
 /// controller 发给节点的消息。
@@ -215,6 +228,12 @@ pub enum ToNode {
     BackboneQuery {
         request: u64,
     },
+    /// 一个主动测试的指令（[`diag`]）。只发给 [`Hello::protocol`] 至少是 [`TEST_REVISION`] 的节点。
+    Test(Box<TestOrder>),
+    /// 这个测试结束了（做完了，或者被取消了）：关掉它的时间窗，停下手上的事，还没报的马上报。
+    TestEnd {
+        test: u64,
+    },
 }
 
 /// 二进制内容在 JSON 里写成不带填充的 base64url，和公钥、签名的写法一致。
@@ -254,6 +273,9 @@ pub struct Hello {
     /// 节点能不能自己更新（白皮书 §10.5）。不懂更新的旧版本节点不报，读成 `None`。
     #[serde(default)]
     pub self_update: Option<SelfUpdate>,
+    /// 节点接不接受吞吐测试（本机配置文件里的开关，默认接受）。只有节点协议至少是 [`TEST_REVISION`] 时才有意义。
+    #[serde(default)]
+    pub throughput_tests: bool,
 }
 
 /// 节点能不能自己更新。不能的节点 controller 不会让它更新，界面上标出原因和手动更新的做法。

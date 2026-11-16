@@ -8,7 +8,10 @@ use i3t_crypto::NodeKey;
 use i3t_model::Netmap;
 use i3t_model::control::{RouteEntry, Signal};
 use i3t_model::netmap::Attachment;
-use i3t_path::{BackboneRow, PathConfig, PathReport, Paths, RouteChange};
+use i3t_path::{
+    BackboneRow, DirectAttempt, HopReport, PathConfig, PathReport, Paths, RouteChange, RouteDecision, RoutePin, Side, TestGuard, TestPath,
+    TestSpec, TrainError, TrainReport, TrainSpec,
+};
 use i3t_proto::NodeId;
 use i3t_proto::flow::Recipient;
 use i3t_relay::{Relay, RelayCounters};
@@ -16,6 +19,7 @@ use i3t_underlay::{PacketFilter, UdpPort};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 
+use crate::congestion::Algorithm;
 use crate::contract::{Acceptor, Connector, Datagram, Datagrams, Incoming, OpenError};
 use crate::manager::{DATAGRAM_BACKLOG, DatagramHandle, DatagramQueues, Manager};
 use crate::quic::{self, QuicConfigError};
@@ -197,6 +201,48 @@ impl Endpoint {
             (i3t_model::control::Route::Relay { .. }, None) => self.relay.has_udp_session(peer),
             (i3t_model::control::Route::None, _) => false,
         }
+    }
+
+    /// 主动测试（白皮书 §7.6）：打开一个测试的时间窗，见 [`Paths::open_test`]。丢弃返回的值就关掉。
+    #[must_use]
+    pub fn open_test(&self, spec: TestSpec) -> TestGuard {
+        self.paths.open_test(spec)
+    }
+
+    /// 主动测试：在一条路径上发一列探测，见 [`Paths::train`]。
+    ///
+    /// # Errors
+    ///
+    /// 同 [`Paths::train`]。
+    pub async fn test_train(&self, spec: TrainSpec) -> Result<TrainReport, TrainError> {
+        self.paths.train(spec).await
+    }
+
+    /// 主动测试：把到 `peer` 的共用连接暂时固定在 `path` 上，见 [`Paths::pin`]。丢弃返回的值就解除。
+    #[must_use]
+    pub fn pin_route(&self, peer: NodeId, path: TestPath, limit: std::time::Duration) -> RoutePin {
+        self.paths.pin(peer, path, limit)
+    }
+
+    /// 主动测试：试一次直连（带头或者跟随），见 [`Paths::attempt_direct`]。
+    pub async fn attempt_direct(&self, peer: NodeId, side: Side, limit: std::time::Duration) -> DirectAttempt {
+        self.paths.attempt_direct(peer, side, limit).await
+    }
+
+    /// 主动测试：两种选路模式此刻各会选哪条路，见 [`Paths::decide`]。
+    pub async fn route_decision(&self, peer: NodeId) -> Option<RouteDecision> {
+        self.paths.decide(peer).await
+    }
+
+    /// 主动测试：一条路径上各段此刻的测量值，见 [`Paths::hops`]。
+    pub async fn path_hops(&self, peer: NodeId, path: TestPath) -> Vec<HopReport> {
+        self.paths.hops(peer, path).await
+    }
+
+    /// 连接用的拥塞控制：`"bbr"` 或者 `"cubic"`。吞吐测试的结果要说明它是在哪一种下面量的。
+    #[must_use]
+    pub fn congestion(&self) -> String {
+        Algorithm::from_env().to_string()
     }
 
     /// 本节点启用为 relay 时，它在 UDP 端口的同一个端口号上听 TCP。开头是 TLS 握手记录的连接（独占 TCP）交给 `handoff`，

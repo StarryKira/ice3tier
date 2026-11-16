@@ -48,6 +48,12 @@ pub enum Error {
     CannotSelfUpdate { node: String, reason: String },
     #[error("{0}")]
     NoUpdate(String),
+    /// 同一对节点刚测过，或者全网矩阵刚开始过。
+    #[error("{0}")]
+    TooSoon(String),
+    /// 正在测，或者要取消的已经结束了。
+    #[error("{0}")]
+    Busy(String),
     #[error("存储出错")]
     Store(#[from] StoreError),
     #[error("netmap 序列化失败")]
@@ -102,6 +108,8 @@ impl Error {
             Self::NodeOffline(_) => ErrorCode::NodeOffline,
             Self::CannotSelfUpdate { .. } => ErrorCode::CannotSelfUpdate,
             Self::NoUpdate(_) => ErrorCode::NoUpdate,
+            Self::TooSoon(_) => ErrorCode::TooSoon,
+            Self::Busy(_) => ErrorCode::Busy,
             Self::Store(_)
             | Self::Encode(_)
             | Self::Random
@@ -133,6 +141,10 @@ pub enum Entity {
     PausedVersion,
     /// 启用了出口的节点。
     Exit,
+    /// 主动测试。
+    Test,
+    /// 全网矩阵。
+    Matrix,
 }
 
 impl fmt::Display for Entity {
@@ -148,6 +160,8 @@ impl fmt::Display for Entity {
             Self::PairSetting => "节点对设置",
             Self::PausedVersion => "被暂停的版本",
             Self::Exit => "出口",
+            Self::Test => "测试",
+            Self::Matrix => "全网矩阵",
         })
     }
 }

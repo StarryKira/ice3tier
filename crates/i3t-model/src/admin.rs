@@ -26,6 +26,8 @@ use crate::control::{
 use crate::netmap::{Attachment, ExitRole, ForwardProtocol, LaneMode, ListenerProtocol, Reach, RoutingMode};
 use crate::update::{FailureKind, UpdateStatus, UpdateTiming, Version};
 
+pub mod diag;
+
 /// 管理 API 所有路径的前缀。
 pub const API_PREFIX: &str = "/api/v1";
 
@@ -104,6 +106,10 @@ pub enum ErrorCode {
     CannotSelfUpdate,
     /// 没有可以让这个节点更新到的版本：还没有查到发布、它已经是最新的、发布里没有它的平台的包，或者 controller 自己太旧。
     NoUpdate,
+    /// 同一对节点的上一次主动测试刚做过（或者一次全网矩阵刚开始过），要隔一会儿再测。
+    TooSoon,
+    /// 这个网络正在跑一次全网矩阵，或者要取消的测试已经结束了。
+    Busy,
     /// controller 内部出错。
     Internal,
     #[serde(other)]

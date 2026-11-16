@@ -18,6 +18,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use i3t_model::admin::diag::{CreateTest, TestQuery};
 use i3t_model::admin::{
     API_PREFIX, ApiError, CreateCredential, CreateEnrollToken, CreateNetwork, CreateRule, ErrorBody, ErrorCode, ForceUpdate, ForwardInput,
     ListenerInput, LogRef, NetworkId, PairInput, RelayEnabled, RelaySettings, RenameTag, ResumeUpdate, Succeed, UpdateCredential,
@@ -71,6 +72,11 @@ pub fn router(controller: Arc<Controller>, webui: &WebUi) -> Router {
         .route(&format!("{network}/routes"), get(route_matrix))
         .route(&format!("{network}/path"), get(path))
         .route(&format!("{network}/backbone"), get(backbone))
+        .route(&format!("{network}/tests"), get(list_tests).post(start_test))
+        .route(&format!("{network}/tests/matrix"), get(show_matrix).post(start_matrix))
+        .route(&format!("{network}/tests/matrix/cancel"), post(cancel_matrix))
+        .route(&format!("{network}/tests/{{id}}"), get(show_test))
+        .route(&format!("{network}/tests/{{id}}/cancel"), post(cancel_test))
         .route(&format!("{network}/tokens"), get(list_tokens).post(create_token))
         .route(&format!("{network}/tokens/{{id}}"), axum::routing::delete(delete_token))
         .route(&format!("{network}/rules"), get(list_rules).post(create_rule))
@@ -127,7 +133,9 @@ impl From<Error> for Failure {
             | ErrorCode::Conflict
             | ErrorCode::NodeOffline
             | ErrorCode::CannotSelfUpdate
-            | ErrorCode::NoUpdate => StatusCode::CONFLICT,
+            | ErrorCode::NoUpdate
+            | ErrorCode::TooSoon
+            | ErrorCode::Busy => StatusCode::CONFLICT,
             // `ErrorCode` 以后可能加新的值；这里没有专门对应的一律按内部错误报。
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -340,6 +348,34 @@ async fn path(State(app): State<App>, Path(network): Path<NetworkId>, Query(quer
 async fn backbone(State(app): State<App>, Path(network): Path<NetworkId>) -> Reply {
     let view = app.backbone(network).await?;
     Ok(Json(view).into_response())
+}
+
+async fn start_test(State(app): State<App>, Path(network): Path<NetworkId>, Body(request): Body<CreateTest>) -> Reply {
+    created(&app, move |controller| controller.start_test(network, &request)).await
+}
+
+async fn list_tests(State(app): State<App>, Path(network): Path<NetworkId>, Query(query): Query<TestQuery>) -> Reply {
+    ok(&app, move |controller| controller.tests(network, &query)).await
+}
+
+async fn show_test(State(app): State<App>, Path((network, id)): Path<(NetworkId, u64)>) -> Reply {
+    ok(&app, move |controller| controller.test(network, id)).await
+}
+
+async fn cancel_test(State(app): State<App>, Path((network, id)): Path<(NetworkId, u64)>) -> Reply {
+    ok(&app, move |controller| controller.cancel_test(network, id)).await
+}
+
+async fn start_matrix(State(app): State<App>, Path(network): Path<NetworkId>) -> Reply {
+    created(&app, move |controller| controller.start_matrix(network)).await
+}
+
+async fn show_matrix(State(app): State<App>, Path(network): Path<NetworkId>) -> Reply {
+    ok(&app, move |controller| controller.matrix(network)).await
+}
+
+async fn cancel_matrix(State(app): State<App>, Path(network): Path<NetworkId>) -> Reply {
+    ok(&app, move |controller| controller.cancel_matrix(network)).await
 }
 
 async fn status(State(app): State<App>) -> Reply {

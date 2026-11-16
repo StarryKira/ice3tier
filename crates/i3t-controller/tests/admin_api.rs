@@ -1156,3 +1156,82 @@ async fn exits_and_listen_status_are_served_from_what_the_nodes_report() {
     assert_eq!(on_node.forwards.len(), 1);
     assert_eq!(on_node.forwards[0].id, created.id);
 }
+
+/// 等 controller 发来的下一个测试指令，跳过别的消息。
+async fn next_order(member: &mut Member) -> i3t_model::control::TestOrder {
+    loop {
+        let message = tokio::time::timeout(common::PATIENCE, member.inbox.recv()).await.unwrap().unwrap();
+        if let ToNode::Test(order) = message {
+            return *order;
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_active_test_is_started_followed_listed_and_cancelled_over_the_api() {
+    use i3t_model::admin::diag::{MatrixRun, TestView};
+    use i3t_model::control::TestReport;
+    use i3t_model::control::diag::{DirectSide, TestRole};
+
+    let mut api = Api::new();
+    let network = api.network("home").await.id;
+    let modern = Hello { throughput_tests: true, ..modern_hello("0.2.0", Declared::default()) };
+    let mut a = api.join_as(network, &modern).await;
+    let mut b = api.join_as(network, &modern).await;
+    let mut old = api.join(network, Declared::default()).await;
+    let tests = format!("/networks/{network}/tests");
+
+    let (status, started) = api.call(Method::POST, &tests, Some(json!({ "a": a.id, "b": b.id, "items": ["direct"] }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{started}");
+    assert_eq!((started["state"].as_str(), started["direct"]["state"].as_str()), (Some("running"), Some("pending")));
+    assert_eq!(started["direct_quality"], Value::Null, "没有要的项是 null");
+    let id = started["id"].as_u64().unwrap();
+    let (order_a, order_b) = (next_order(&mut a).await, next_order(&mut b).await);
+    assert_eq!((order_a.test, order_a.role, order_b.role), (id, TestRole::Initiator, TestRole::Responder));
+
+    let busy = api.fails(Method::POST, &tests, Some(json!({ "a": b.id, "b": a.id })), StatusCode::CONFLICT).await;
+    assert_eq!(busy.code, model::ErrorCode::Busy);
+    let side = DirectSide { ok: true, kind: Some(DirectKind::Reachable), elapsed_ms: Some(30), ..DirectSide::default() };
+    let report = |role, last| TestReport { test: id, role: Some(role), last, direct: Some(side.clone()), ..TestReport::default() };
+    api.controller.handle(a.session, REMOTE, ToController::TestReport(Box::new(report(TestRole::Initiator, true)))).unwrap();
+    api.controller.handle(b.session, REMOTE, ToController::TestReport(Box::new(report(TestRole::Responder, true)))).unwrap();
+    let done: TestView = api.ok(Method::GET, &format!("{tests}/{id}"), None).await;
+    let direct = done.direct.unwrap();
+    assert_eq!((serde_json::to_value(done.state).unwrap(), direct.ok, direct.elapsed_ms), (json!("done"), true, Some(30)));
+    let (_, raw) = api.call(Method::GET, &format!("{tests}/{id}"), None).await;
+    assert_eq!(raw["direct"]["kind"], "reachable");
+    assert_eq!(raw["direct"]["sides"][1]["node"], json!(b.id), "两端各自看到的，节点编号和那一端的字段在同一层");
+
+    let soon = api.fails(Method::POST, &tests, Some(json!({ "a": a.id, "b": b.id })), StatusCode::CONFLICT).await;
+    assert_eq!(soon.code, model::ErrorCode::TooSoon);
+    let finished = api.fails(Method::POST, &format!("{tests}/{id}/cancel"), None, StatusCode::CONFLICT).await;
+    assert_eq!(finished.code, model::ErrorCode::Busy);
+    let listed: Vec<TestView> = api.ok(Method::GET, &format!("{tests}?a={}&b={}", b.id, a.id), None).await;
+    assert_eq!(listed.iter().map(|view| view.id).collect::<Vec<_>>(), [id]);
+    api.fails(Method::GET, &format!("{tests}?a={}", a.id), None, StatusCode::BAD_REQUEST).await;
+    api.fails(Method::GET, &format!("{tests}/999"), None, StatusCode::NOT_FOUND).await;
+    let invalid = api.fails(Method::POST, &tests, Some(json!({ "a": a.id, "b": a.id })), StatusCode::BAD_REQUEST).await;
+    assert_eq!(invalid.code, model::ErrorCode::InvalidRequest);
+
+    // 版本太旧的节点：测试建起来、立刻失败，并且说是哪个节点。
+    let (status, refused) = api.call(Method::POST, &tests, Some(json!({ "a": a.id, "b": old.id }))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!((refused["state"].as_str(), refused["error"]["code"].as_str()), (Some("failed"), Some("not_supported")));
+    assert_eq!(refused["error"]["node"], json!(old.id));
+    assert!(old.inbox.try_recv().is_err() || !matches!(old.inbox.try_recv(), Ok(ToNode::Test(_))));
+
+    // 全网矩阵：开始、看、取消。`tests/matrix` 不会被当成编号。
+    let matrix_path = format!("{tests}/matrix");
+    api.fails(Method::GET, &matrix_path, None, StatusCode::NOT_FOUND).await;
+    let (status, run) = api.call(Method::POST, &matrix_path, None).await;
+    assert_eq!(status, StatusCode::CREATED, "{run}");
+    let run: MatrixRun = serde_json::from_value(run).unwrap();
+    assert_eq!((run.total, run.nodes.len()), (3, 3));
+    let shown: MatrixRun = api.ok(Method::GET, &matrix_path, None).await;
+    assert_eq!(shown.id, run.id);
+    let cancelled: MatrixRun = api.ok(Method::POST, &format!("{matrix_path}/cancel"), None).await;
+    assert_eq!(serde_json::to_value(cancelled.state).unwrap(), json!("cancelled"));
+    let log: Vec<model::LogEntry> = api.ok(Method::GET, &format!("/log?network={network}&action=test"), None).await;
+    let actions: Vec<&str> = log.iter().map(|entry| entry.action.as_str()).collect();
+    assert!(actions.contains(&"test.start") && actions.contains(&"test.matrix") && actions.contains(&"test.matrix.cancel"), "{actions:?}");
+}

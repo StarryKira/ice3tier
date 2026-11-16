@@ -3,9 +3,10 @@
 use std::io::{self, IoSliceMut};
 use std::net::SocketAddr;
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::task::{Context, Poll, ready};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use i3t_crypto::NodeKey;
@@ -13,6 +14,7 @@ use i3t_model::Netmap;
 use i3t_model::control::{RouteEntry, Signal};
 use i3t_model::netmap::Attachment;
 use i3t_proto::datagram::{RelayHeader, RouteHeader};
+use i3t_proto::probe::{TestId, TestPing, TestPong};
 use i3t_proto::session::{self, Refused};
 use i3t_proto::{Datagram, NodeId, PublicKey, probe};
 use i3t_underlay::lan::{LanConfig, LanDiscovery};
@@ -22,6 +24,9 @@ use tokio::sync::{Notify, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::control::{Control, Ctrl, Inbound, Queues};
+use crate::diag::{
+    DirectAttempt, DirectFailure, HopReport, Pin, RouteDecision, Side, TestPath, TestSpec, TrainError, TrainReport, TrainSpec,
+};
 use crate::report::{BackboneRow, PathReport};
 use crate::table::{Clock, Packets, PeerSlot, Shared, Table};
 use crate::{LocalRelay, RouteChange, Status};
@@ -71,6 +76,8 @@ pub struct Paths {
     control: JoinHandle<()>,
     /// 本节点的公钥：局域网信标里的标签是拿它算的。
     public: PublicKey,
+    /// 给固定路编号用：解除时靠它认出是哪一次，免得解除了别人后来的固定。
+    next_pin: AtomicU64,
 }
 
 impl Paths {
@@ -99,12 +106,13 @@ impl Paths {
             route_changed: Notify::new(),
             status: Mutex::new(Status::default()),
             lan: Mutex::new(None),
+            open_tests: RwLock::default(),
         });
         let public = key.public();
         let control = Control::new(Arc::clone(&shared), key, current, addr_servers);
         let queues = Queues { ctrl: ctrl_rx, from_relays: from_relays_rx, from_peers: from_peers_rx };
         let control = tokio::spawn(control.run(queues, netmap));
-        let paths = Self { shared, control, public };
+        let paths = Self { shared, control, public, next_pin: AtomicU64::new(1) };
         // 端口绑在未指定地址上的才是真的节点：只有它们自动在本地网段上找对端。绑在具体地址上的（测试）要自己明确打开。
         if paths.shared.port.local_addr().ip().is_unspecified()
             && let Err(error) = paths.start_lan_discovery(LanConfig::default())
@@ -374,6 +382,78 @@ impl Paths {
         self.status().backbone.clone()
     }
 
+    /// 打开一个主动测试的时间窗（白皮书 §7.6）：在窗内回答对端带着这个编号的测试探测，和指定的 relay 保持会话，
+    /// 对端算作活跃的。丢弃返回的值就关掉它；不丢也会在时间窗到了时自己关掉。
+    #[must_use]
+    pub fn open_test(&self, spec: TestSpec) -> TestGuard {
+        let test = spec.test;
+        if self.shared.ctrl.try_send(Ctrl::OpenTest(spec)).is_err() {
+            tracing::warn!(test, "控制任务忙不过来，主动测试的时间窗没有打开");
+        }
+        TestGuard { ctrl: self.shared.ctrl.clone(), test }
+    }
+
+    /// 在一条路径上发一列测试探测，等它们的回答。要先打开这个测试（[`open_test`](Self::open_test)）。
+    ///
+    /// # Errors
+    ///
+    /// 测试没有打开、对端不在 netmap 里、此刻走不了这条路径，或者本节点的路径限制不允许。
+    pub async fn train(&self, spec: TrainSpec) -> Result<TrainReport, TrainError> {
+        let (reply, answer) = oneshot::channel();
+        self.shared.ctrl.send(Ctrl::Train { spec, reply }).await.map_err(|_| TrainError::Stopped)?;
+        answer.await.map_err(|_| TrainError::Stopped)?
+    }
+
+    /// 把到 `peer` 的路暂时固定在 `path` 上，最多 `limit`（不超过 [`crate::diag::MAX_PIN`]）。
+    /// 丢弃返回的值就解除；到期也会自己解除。这条路此刻走不了时照常按选路规则走，路通了再换过去。
+    #[must_use]
+    pub fn pin(&self, peer: NodeId, path: TestPath, limit: Duration) -> RoutePin {
+        let id = self.next_pin.fetch_add(1, Ordering::Relaxed);
+        let pin = Pin { id, path, until: Instant::now() + limit };
+        if self.shared.ctrl.try_send(Ctrl::Pin { peer, pin }).is_err() {
+            tracing::warn!(%peer, "控制任务忙不过来，没有固定到对端的路");
+        }
+        // 固定之后马上重新选路，不等下一个定时器。
+        let _queued = self.shared.ctrl.try_send(Ctrl::Wake);
+        RoutePin { ctrl: self.shared.ctrl.clone(), peer, id }
+    }
+
+    /// 试一次到 `peer` 的直连，最多等 `limit`。已经有可用的直连时马上回答。`side` 是带头（现在就试，不等退避）
+    /// 还是跟随（等对端来试，见 [`Side`]）。
+    pub async fn attempt_direct(&self, peer: NodeId, side: Side, limit: Duration) -> DirectAttempt {
+        let stopped = DirectAttempt {
+            ok: false,
+            already: false,
+            kind: None,
+            elapsed: None,
+            failure: Some(DirectFailure::NotPeer),
+            udp: None,
+            mapping_varies: None,
+            candidates: 0,
+        };
+        let (reply, answer) = oneshot::channel();
+        if self.shared.ctrl.send(Ctrl::AttemptDirect { peer, side, limit, reply }).await.is_err() {
+            return stopped;
+        }
+        answer.await.unwrap_or(stopped)
+    }
+
+    /// 两种选路模式此刻各会选哪条路；对端不在 netmap 里时是 `None`。
+    pub async fn decide(&self, peer: NodeId) -> Option<RouteDecision> {
+        let (reply, answer) = oneshot::channel();
+        self.shared.ctrl.send(Ctrl::Decide { peer, reply }).await.ok()?;
+        answer.await.ok().flatten()
+    }
+
+    /// 一条到 `peer` 的路径上各段此刻的测量值。
+    pub async fn hops(&self, peer: NodeId, path: TestPath) -> Vec<HopReport> {
+        let (reply, answer) = oneshot::channel();
+        if self.shared.ctrl.send(Ctrl::Hops { peer, path, reply }).await.is_err() {
+            return Vec::new();
+        }
+        answer.await.unwrap_or_default()
+    }
+
     fn status(&self) -> std::sync::MutexGuard<'_, Status> {
         self.shared.status.lock().expect("path status mutex poisoned")
     }
@@ -384,10 +464,12 @@ impl Paths {
         let mut filled = 0;
         while filled < bufs.len() {
             let Poll::Ready(Some((peer, packet))) = queue.poll_recv(cx) else { break };
-            // TCP 中转来的、本节点的 relay 交过来的包里也可能夹着对端的路径探测。
+            // TCP 中转来的、本节点的 relay 交过来的包里也可能夹着对端的路径探测和测试探测。
             if let Some(frame) = path_probe(&packet) {
-                if !self.shared.queue_frame(self.shared.port.local_addr(), Inbound::PathProbe { peer, frame }) {
-                    tracing::trace!(%peer, "控制任务忙不过来，丢掉一个路径探测");
+                let queued =
+                    self.relayed_probe(peer, frame).is_some_and(|inbound| self.shared.queue_frame(self.shared.port.local_addr(), inbound));
+                if !queued {
+                    tracing::trace!(%peer, "丢掉一个经 relay 来的探测：控制任务忙不过来，或者它不属于任何打开着的测试");
                 }
                 continue;
             }
@@ -487,7 +569,7 @@ impl Paths {
                     None => self.shared.local_relay.get().is_some_and(|relay| relay.session_at(header.src, from)),
                 };
                 match (table.peers.get(&header.src), path_probe(packet)) {
-                    (Some(_), Some(frame)) if vouched => Verdict::Control(Inbound::PathProbe { peer: header.src, frame }),
+                    (Some(_), Some(frame)) if vouched => self.relayed_probe(header.src, frame).map_or(Verdict::Drop, Verdict::Control),
                     // 空的连接包不交上去：它会成为一个长度为 0 的包，连接层没有理由收到这种东西。
                     (Some(slot), None) if vouched && !packet.is_empty() => {
                         slot.received(clock);
@@ -502,7 +584,7 @@ impl Paths {
                     (Some(relay), Some(slot)) if relay.id == header.relays.last() => {
                         relay.last_rx.touch(clock);
                         match path_probe(packet) {
-                            Some(frame) => Verdict::Control(Inbound::PathProbe { peer: header.src, frame }),
+                            Some(frame) => self.relayed_probe(header.src, frame).map_or(Verdict::Drop, Verdict::Control),
                             None if packet.is_empty() => Verdict::Drop,
                             None => {
                                 slot.received(clock);
@@ -537,14 +619,18 @@ impl Paths {
             },
             // 探测只收发给本节点的、自称来自 netmap 里的对端的：别的不可能验得过签名，不值得进控制任务的队列。
             Ok(Datagram::Probe(frame)) => {
-                let (src, dst) = match frame {
-                    probe::Frame::Ping(ping) => (ping.src, ping.dst),
-                    probe::Frame::Pong(pong) => (pong.src, pong.dst),
-                };
-                if dst == self.shared.me && table.peers.contains_key(&src) {
-                    Verdict::Control(Inbound::Probe(frame))
-                } else {
-                    Verdict::Drop
+                let (src, dst) = frame.ends();
+                if dst != self.shared.me || !table.peers.contains_key(&src) {
+                    return Verdict::Drop;
+                }
+                match frame {
+                    probe::Frame::Ping(_) | probe::Frame::Pong(_) => Verdict::Control(Inbound::Probe(frame)),
+                    probe::Frame::TestPing(TestPing { test, .. }) | probe::Frame::TestPong(TestPong { test, .. })
+                        if self.shared.expects_test(test, src) =>
+                    {
+                        Verdict::Control(Inbound::Test { frame, at: Instant::now(), relayed: false })
+                    }
+                    probe::Frame::TestPing(_) | probe::Frame::TestPong(_) => Verdict::Drop,
                 }
             }
             Ok(Datagram::AddrReply(reply)) => Verdict::Control(Inbound::AddrReply(reply)),
@@ -556,6 +642,51 @@ impl Paths {
 impl Drop for Paths {
     fn drop(&mut self) {
         self.control.abort();
+    }
+}
+
+impl Paths {
+    /// 经 relay 送到的包里夹着的探测帧（`peer` 是中转头里的来源）该交给控制任务的哪一处。
+    /// 测试探测只有属于一个打开着的、和 `peer` 之间的测试时才交，帧里写的来源也要就是 `peer`。
+    fn relayed_probe(&self, peer: NodeId, frame: probe::Frame) -> Option<Inbound> {
+        match frame {
+            probe::Frame::Ping(_) | probe::Frame::Pong(_) => Some(Inbound::PathProbe { peer, frame }),
+            probe::Frame::TestPing(TestPing { test, src, .. }) | probe::Frame::TestPong(TestPong { test, src, .. }) => {
+                (src == peer && self.shared.expects_test(test, peer)).then(|| Inbound::Test { frame, at: Instant::now(), relayed: true })
+            }
+        }
+    }
+}
+
+/// 一个打开着的主动测试。丢弃它就关掉这个测试的时间窗。
+#[derive(Debug)]
+pub struct TestGuard {
+    ctrl: mpsc::Sender<Ctrl>,
+    test: TestId,
+}
+
+impl Drop for TestGuard {
+    fn drop(&mut self) {
+        // 队列满了也没有关系：时间窗到了控制任务自己会关。
+        let _queued = self.ctrl.try_send(Ctrl::CloseTest(self.test));
+    }
+}
+
+/// 一次暂时固定的路。丢弃它就解除固定。
+#[derive(Debug)]
+pub struct RoutePin {
+    ctrl: mpsc::Sender<Ctrl>,
+    peer: NodeId,
+    id: u64,
+}
+
+impl Drop for RoutePin {
+    fn drop(&mut self) {
+        // 队列满了也没有关系：固定有期限，到了控制任务自己会解除。
+        if self.ctrl.try_send(Ctrl::Unpin { peer: self.peer, id: self.id }).is_err() {
+            tracing::debug!(peer = %self.peer, "控制任务忙不过来，固定的路等到期自己解除");
+        }
+        let _queued = self.ctrl.try_send(Ctrl::Wake);
     }
 }
 
@@ -817,6 +948,43 @@ mod tests {
 
         // 空的连接包不交给连接层。
         assert!(matches!(paths.classify(&table, addr(RELAY_ADDR), &relayed(ME, 2, &[])), Verdict::Drop));
+    }
+
+    #[tokio::test]
+    async fn a_pin_is_released_when_its_holder_drops_it_even_if_the_holding_task_is_aborted() {
+        let (ctrl, mut queue) = mpsc::channel(8);
+        let holder = tokio::spawn(async move {
+            let _pin = RoutePin { ctrl, peer: node(2), id: 5 };
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        holder.abort();
+        assert!(holder.await.unwrap_err().is_cancelled());
+        assert!(matches!(queue.recv().await, Some(Ctrl::Unpin { peer, id: 5 }) if peer == node(2)), "任务被取消，固定照样解除");
+
+        let (ctrl, mut queue) = mpsc::channel(8);
+        drop(TestGuard { ctrl, test: 7 });
+        assert!(matches!(queue.recv().await, Some(Ctrl::CloseTest(7))));
+    }
+
+    #[tokio::test]
+    async fn test_probes_reach_the_control_task_only_for_an_open_test_with_the_peer_that_sent_them() {
+        let (paths, _netmap) = paths();
+        let ping = |src: u32, test: u64| {
+            probe::TestPing { src: node(src), dst: node(ME), test, seq: 0, path: None, signature: [0; 64] }.to_bytes().to_vec()
+        };
+        let table = paths.shared.table();
+        let control =
+            |datagram: &[u8]| matches!(paths.classify(&table, addr("203.0.113.50:1"), datagram), Verdict::Control(Inbound::Test { .. }));
+        assert!(!control(&ping(2, 7)), "没有打开的测试");
+        paths.shared.open_tests.write().unwrap().insert((7, node(2)));
+        assert!(control(&ping(2, 7)));
+        assert!(!control(&ping(3, 7)), "别的对端");
+        assert!(!control(&ping(2, 8)), "别的测试");
+        // 经 relay 来的：帧里写的来源要就是中转头里的来源。
+        drop(table);
+        assert!(paths.relayed_probe(node(2), probe::Frame::parse(&ping(2, 7)).unwrap()).is_some());
+        assert!(paths.relayed_probe(node(3), probe::Frame::parse(&ping(2, 7)).unwrap()).is_none());
     }
 
     #[tokio::test]

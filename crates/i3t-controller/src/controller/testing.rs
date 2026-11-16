@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use i3t_crypto::NodeKey;
 use i3t_model::Netmap;
 use i3t_model::admin::{CreateEnrollToken, CreateNetwork, Network, NetworkId};
-use i3t_model::control::{Declared, EnrollToken, Hello, PROTOCOL_REVISION, Report, SelfUpdate, Signal, ToController, ToNode};
+use i3t_model::control::{Declared, EnrollToken, Hello, PROTOCOL_REVISION, Report, SelfUpdate, Signal, TestOrder, ToController, ToNode};
 use i3t_model::update::{SignedManifest, UpdateStatus, UpdateTiming};
 use i3t_proto::{NodeId, PublicKey};
 use tokio::sync::mpsc;
@@ -43,6 +43,9 @@ pub(crate) struct Member {
     pub(crate) queries: Vec<(u64, NodeId)>,
     /// 收到的骨干矩阵查询的编号。
     pub(crate) backbone_queries: Vec<u64>,
+    /// 收到的主动测试的指令，和"测试结束"的编号。
+    pub(crate) tests: Vec<TestOrder>,
+    pub(crate) test_ends: Vec<u64>,
     /// 还没确认的版本。测试要自己控制确认的时机时用。
     unacked: Option<u64>,
 }
@@ -166,6 +169,8 @@ impl Member {
             chunks: Vec::new(),
             queries: Vec::new(),
             backbone_queries: Vec::new(),
+            tests: Vec::new(),
+            test_ends: Vec::new(),
             unacked: None,
         };
         member.receive();
@@ -193,6 +198,8 @@ impl Member {
                 ToNode::PackageUnavailable { request, reason } => self.chunks.push((request, Err(reason))),
                 ToNode::RouteQuery { request, peer } => self.queries.push((request, peer)),
                 ToNode::BackboneQuery { request } => self.backbone_queries.push(request),
+                ToNode::Test(order) => self.tests.push(*order),
+                ToNode::TestEnd { test } => self.test_ends.push(test),
                 ToNode::TryLater { reason } => panic!("已经报到的连接上不应该收到 try_later：{reason}"),
             }
         }
@@ -240,7 +247,13 @@ pub(crate) fn hello(declared: Declared) -> Hello {
 
 /// 现在这一版节点的自我介绍：懂更新，能自己更新。
 pub(crate) fn modern_hello(version: &str) -> Hello {
-    Hello { version: version.to_owned(), protocol: PROTOCOL_REVISION, self_update: Some(SelfUpdate::ABLE), ..hello(Declared::default()) }
+    Hello {
+        version: version.to_owned(),
+        protocol: PROTOCOL_REVISION,
+        self_update: Some(SelfUpdate::ABLE),
+        throughput_tests: true,
+        ..hello(Declared::default())
+    }
 }
 
 pub(crate) const CAN_DO_ALL: Declared = Declared { exit: true, relay: true, forward: true };

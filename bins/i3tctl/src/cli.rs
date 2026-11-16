@@ -97,6 +97,79 @@ pub enum Command {
     Routes,
     /// relay 之间的延迟矩阵：每个 relay 的状态、负载，和它到别的 relay 的延迟、抖动、丢包。现问几个在线的节点
     Backbone,
+    /// 主动测试 A 和 B 之间：能不能直连，直连和经 relay 的延迟、丢包（和吞吐），两种选路模式各会选哪条路。等它做完再打印
+    Test {
+        /// 发起方：探测和测量从它发出
+        a: String,
+        b: String,
+        /// 另外量吞吐：每个方向最多 5 秒或 20MB，先到为止。消耗带宽和流量
+        #[arg(long)]
+        throughput: bool,
+        /// relay 质量测这条路径：按 A 到 B 的顺序经过的 relay，逗号隔开。可以写几次，测几条
+        #[arg(long, value_name = "RELAY[,RELAY]")]
+        via: Vec<String>,
+        /// 只做这几项，逗号隔开。不写时全做
+        #[arg(long, value_delimiter = ',')]
+        only: Vec<TestItemArg>,
+        /// 发起之后不等结果，打印测试的编号就返回
+        #[arg(long)]
+        no_wait: bool,
+    },
+    /// 主动测试的历史、单个结果、取消，和全网矩阵
+    #[command(subcommand)]
+    Tests(TestsCommand),
+}
+
+#[derive(Subcommand)]
+pub enum TestsCommand {
+    /// 最近的测试，新的在前。写了两个节点时只看这一对的
+    List {
+        a: Option<String>,
+        b: Option<String>,
+        /// 最多看多少个
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
+    /// 一个测试的结果
+    Show { id: u64 },
+    /// 取消一个进行中的测试。已经有的结果照样留着
+    Cancel { id: u64 },
+    /// 全网矩阵：对所有节点对测直连能力和延迟（不测吞吐），分批进行。不加参数时开始一次并等它做完
+    Matrix {
+        /// 只看最近一次的结果，不开始新的
+        #[arg(long, conflicts_with_all = ["cancel", "no_wait"])]
+        show: bool,
+        /// 取消正在跑的那一次
+        #[arg(long, conflicts_with = "no_wait")]
+        cancel: bool,
+        /// 开始之后不等它做完
+        #[arg(long)]
+        no_wait: bool,
+    },
+}
+
+/// 测试项。
+#[derive(Clone, Copy, ValueEnum)]
+pub enum TestItemArg {
+    /// 能不能直连
+    Direct,
+    /// 直连的延迟、丢包（和吞吐）
+    DirectQuality,
+    /// 经 relay 的延迟、丢包（和吞吐），每一段的分解
+    RelayQuality,
+    /// 两种选路模式各会选哪条路
+    Route,
+}
+
+impl From<TestItemArg> for i3t_model::admin::diag::TestItem {
+    fn from(arg: TestItemArg) -> Self {
+        match arg {
+            TestItemArg::Direct => Self::Direct,
+            TestItemArg::DirectQuality => Self::DirectQuality,
+            TestItemArg::RelayQuality => Self::RelayQuality,
+            TestItemArg::Route => Self::Route,
+        }
+    }
 }
 
 #[derive(Subcommand)]

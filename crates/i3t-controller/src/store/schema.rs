@@ -6,7 +6,7 @@
 //! 列的写法：枚举和结构体按它们的 JSON 形式存在 TEXT 列里，地址存文本，公钥和哈希存 BLOB，虚拟 IP 存成整数，
 //! 时间是 Unix 秒。
 
-pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
 
 const V1: &str = "
 CREATE TABLE meta (
@@ -188,4 +188,17 @@ ALTER TABLE oplog ADD COLUMN refs TEXT NOT NULL DEFAULT '[]';
 /// 节点对的独占 TCP（lane）设置：`off`、`udp_fallback`、`always`。
 const V4: &str = "
 ALTER TABLE pair_settings ADD COLUMN lane TEXT NOT NULL DEFAULT 'off';
+";
+
+/// 主动测试的结果（白皮书 §7.6）：每个测试一行，整个结果按 JSON 存，节点删掉时它的测试跟着删。
+const V5: &str = "
+CREATE TABLE tests (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    network_id INTEGER NOT NULL REFERENCES networks(id) ON DELETE CASCADE,
+    node_a     INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    node_b     INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    started_at INTEGER NOT NULL,
+    view       TEXT NOT NULL
+);
+CREATE INDEX tests_by_pair ON tests(network_id, node_a, node_b);
 ";

@@ -3,6 +3,7 @@
 use std::net::Ipv4Addr;
 
 use anyhow::{Context, anyhow, bail};
+use i3t_model::admin::diag::{CreateTest, MatrixRun, MatrixState, TestState, TestView};
 use i3t_model::admin::{
     CreateCredential, CreateEnrollToken, CreateNetwork, CreateRule, Direction, ForceUpdate, Forward, ForwardInput, ListenerInput, Network,
     NetworkId, Node, PairInput, RelaySettings, RenameTag, ResumeUpdate, Succeed, UpdateCredential, UpdateNetwork, UpdateNode, UpdateRule,
@@ -18,7 +19,7 @@ use serde_json::Value;
 
 use crate::cli::{
     AccessCommand, Cli, Command, CredentialCommand, ExitCommand, ForwardCommand, ListenerCommand, NetworkCommand, NetworkSettings,
-    NodeCommand, PairCommand, RelayCommand, RuleCommand, TagCommand, TokenCommand, UpdateCommand,
+    NodeCommand, PairCommand, RelayCommand, RuleCommand, TagCommand, TestItemArg, TestsCommand, TokenCommand, UpdateCommand,
 };
 use crate::client::{Client, decode};
 use crate::render;
@@ -71,8 +72,24 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             let network = session.network().await?.id;
             session.show(session.get(&format!("/networks/{network}/backbone")).await?, render::backbone)
         }
+        Command::Test { a, b, throughput, via, only, no_wait } => session.test(TestArgs { a, b, throughput, via, only, no_wait }).await,
+        Command::Tests(command) => session.tests_command(command).await,
     }
 }
+
+/// `i3tctl test` 的参数。
+struct TestArgs {
+    a: String,
+    b: String,
+    throughput: bool,
+    via: Vec<String>,
+    only: Vec<TestItemArg>,
+    no_wait: bool,
+}
+
+/// 等测试和矩阵做完时多久问一次，最多等多久。一个带吞吐的测试最长两分多钟。
+const POLL: std::time::Duration = std::time::Duration::from_secs(1);
+const WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(600);
 
 struct Session {
     client: Client,
@@ -131,6 +148,84 @@ impl Session {
                     bail!("有多个网络（{names}），用 --network 或环境变量 I3T_NETWORK 指定一个")
                 }
             },
+        }
+    }
+
+    async fn test(&self, args: TestArgs) -> anyhow::Result<()> {
+        let network = self.network().await?.id;
+        let (a, b) = (self.node(network, &args.a).await?.id, self.node(network, &args.b).await?.id);
+        let mut via = Vec::with_capacity(args.via.len());
+        for path in &args.via {
+            let mut relays = Vec::new();
+            for relay in path.split(',').map(str::trim).filter(|relay| !relay.is_empty()) {
+                relays.push(self.node(network, relay).await?.id);
+            }
+            via.push(relays);
+        }
+        let items = (!args.only.is_empty()).then(|| args.only.iter().map(|&item| item.into()).collect());
+        let request = CreateTest { a, b, items, throughput: args.throughput, via };
+        let started: TestView = decode(self.send(Method::POST, &format!("/networks/{network}/tests"), &request).await?)?;
+        let path = format!("/networks/{network}/tests/{}", started.id);
+        if args.no_wait {
+            return self.show(self.get(&path).await?, render::test);
+        }
+        if !self.json {
+            eprintln!("测试 #{} 开始了，等它做完……", started.id);
+        }
+        let finished = self.wait(&path, |view: &TestView| view.state != TestState::Running).await?;
+        self.show(finished, render::test)
+    }
+
+    async fn tests_command(&self, command: TestsCommand) -> anyhow::Result<()> {
+        let network = self.network().await?.id;
+        let tests = format!("/networks/{network}/tests");
+        match command {
+            TestsCommand::List { a, b, limit } => {
+                let mut query = format!("{tests}?limit={limit}");
+                if let (Some(a), Some(b)) = (&a, &b) {
+                    let (a, b) = (self.node(network, a).await?.id, self.node(network, b).await?.id);
+                    query.push_str(&format!("&a={a}&b={b}"));
+                } else if a.is_some() {
+                    bail!("要看一对节点的测试时两个节点都要写");
+                }
+                self.show_list(self.get(&query).await?, render::tests)
+            }
+            TestsCommand::Show { id } => self.show(self.get(&format!("{tests}/{id}")).await?, render::test),
+            TestsCommand::Cancel { id } => self.show(self.send(Method::POST, &format!("{tests}/{id}/cancel"), &()).await?, render::test),
+            TestsCommand::Matrix { show, cancel, no_wait } => {
+                let path = format!("{tests}/matrix");
+                if show {
+                    return self.show(self.get(&path).await?, render::matrix);
+                }
+                if cancel {
+                    return self.show(self.send(Method::POST, &format!("{path}/cancel"), &()).await?, render::matrix);
+                }
+                let started = self.send(Method::POST, &path, &()).await?;
+                if no_wait {
+                    return self.show(started, render::matrix);
+                }
+                if !self.json {
+                    eprintln!("全网矩阵开始了，等它做完……");
+                }
+                let finished = self.wait(&path, |run: &MatrixRun| run.state != MatrixState::Running).await?;
+                self.show(finished, render::matrix)
+            }
+        }
+    }
+
+    /// 隔一会儿问一次 `path`，直到 `done` 说做完了，返回最后那一次的应答。
+    async fn wait<T: DeserializeOwned>(&self, path: &str, done: impl Fn(&T) -> bool) -> anyhow::Result<Value> {
+        let deadline = tokio::time::Instant::now() + WAIT_LIMIT;
+        loop {
+            let value = self.get(path).await?;
+            let current: T = decode(value.clone())?;
+            if done(&current) {
+                return Ok(value);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                bail!("等了 {} 秒还没有做完，之后可以用 i3tctl tests show 再看", WAIT_LIMIT.as_secs());
+            }
+            tokio::time::sleep(POLL).await;
         }
     }
 

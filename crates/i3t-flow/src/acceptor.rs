@@ -14,6 +14,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::time;
 
 use crate::datagram::{self, Mux};
+use crate::measure::MeasureRequest;
 use crate::relay::{self, Flow, Parts, TcpRole};
 use crate::{FlowError, header};
 
@@ -41,10 +42,11 @@ impl<S, R> fmt::Debug for Request<S, R> {
     }
 }
 
-/// 对端开过来的一条流上读出来的 OPEN：它要一条流，还是要一个数据报上下文。
+/// 对端开过来的一条流上读出来的 OPEN：它要一条流、一个数据报上下文，还是一条测量流。
 pub(crate) enum Arrival<S, R> {
     Stream(Request<S, R>),
     Datagrams(DatagramArrival<S, R>),
+    Measure(MeasureRequest<S, R>),
 }
 
 /// 一条读出了数据报上下文的 OPEN 的流。
@@ -63,6 +65,7 @@ impl<S: SendStream, R: RecvStream> Arrival<S, R> {
         match outcome.unwrap_or(Err(FlowError::Deadline(deadline))) {
             Ok(Opening::Stream(open)) => Ok(Self::Stream(Request { peer, open, send, recv, received: Instant::now() })),
             Ok(Opening::Datagrams(open)) => Ok(Self::Datagrams(DatagramArrival { peer, open, send, recv })),
+            Ok(Opening::Measure(open)) => Ok(Self::Measure(MeasureRequest { peer, open, send, recv })),
             Err(error) => {
                 let code = StreamCode(Reason::ProtocolError.to_wire());
                 send.reset(code);
@@ -83,10 +86,11 @@ impl<S: SendStream, R: RecvStream> Request<S, R> {
     pub async fn read(incoming: Incoming<S, R>, deadline: Duration) -> Result<Self, FlowError> {
         match Arrival::read(incoming, deadline).await? {
             Arrival::Stream(request) => Ok(request),
-            Arrival::Datagrams(mut arrival) => {
+            Arrival::Datagrams(DatagramArrival { mut send, mut recv, .. })
+            | Arrival::Measure(MeasureRequest { mut send, mut recv, .. }) => {
                 let code = StreamCode(Reason::ProtocolError.to_wire());
-                arrival.send.reset(code);
-                arrival.recv.stop(code);
+                send.reset(code);
+                recv.stop(code);
                 Err(FlowError::NotAStream)
             }
         }
@@ -233,6 +237,13 @@ pub trait Handler: Send + Sync + 'static {
     ) -> impl Future<Output = ()> + Send {
         async move { request.refuse(&Reply::new(Status::NotEnabled, "这个节点不接受数据报上下文")).await }
     }
+
+    /// 处理对端开过来的一条测量流（主动测试量吞吐用，见 [`crate::measure`]），直到它结束。每条在自己的任务里调用。
+    ///
+    /// 不提供测量服务的实现不用写它：默认拒绝。
+    fn handle_measure<S: SendStream, R: RecvStream>(&self, request: MeasureRequest<S, R>) -> impl Future<Output = ()> + Send {
+        async move { request.refuse(&Reply::new(Status::NotEnabled, "这个节点不提供测量服务")).await }
+    }
 }
 
 /// 接受对端开过来的流，读出 OPEN 之后交给 `handler`，直到 `acceptor` 关闭。
@@ -282,6 +293,7 @@ pub async fn serve<A: Acceptor + Datagrams, H: Handler>(acceptor: &A, handler: A
             match Arrival::read(incoming, OPEN_DEADLINE).await {
                 Ok(Arrival::Stream(request)) => handler.handle(request).await,
                 Ok(Arrival::Datagrams(arrival)) => handler.handle_datagrams(datagram::Request::new(arrival, mux, transport)).await,
+                Ok(Arrival::Measure(request)) => handler.handle_measure(request).await,
                 // 对端每开一条这样的流就是一行，不记成 info：不然它能拿日志刷屏。
                 Err(error) => tracing::debug!(%peer, ?error, "重置了一条流：没有读到合法的 OPEN"),
             }

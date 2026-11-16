@@ -7,6 +7,7 @@
 
 mod address;
 mod credentials;
+mod diag;
 mod enrollment;
 mod forwards;
 mod listeners;
@@ -143,6 +144,8 @@ pub(crate) struct Inner {
     pub(crate) usage: usage::Usage,
     /// 已经发给节点、还在等回答的路由查询。
     pub(crate) route_queries: BTreeMap<u64, routes::PendingQuery>,
+    /// 进行中的主动测试和全网矩阵。
+    pub(crate) diag: diag::Diag,
     /// 节点更新：已知的发布、包、设置、轮次。
     pub(crate) updates: update::Updates,
     pub(crate) counters: metrics::Counters,
@@ -178,6 +181,8 @@ pub(crate) struct Live {
     pub(crate) credential_connections: BTreeMap<u32, u32>,
     /// 最近一次上报里独占 TCP 的状况。
     pub(crate) lanes: Option<LaneReport>,
+    /// 节点说它接不接受吞吐测试（本机配置文件里的开关）。
+    pub(crate) throughput_tests: bool,
 }
 
 pub(crate) struct Deferred {
@@ -222,6 +227,7 @@ impl Controller {
             routes: BTreeMap::new(),
             usage: usage::Usage::default(),
             route_queries: BTreeMap::new(),
+            diag: diag::Diag::default(),
             updates,
             counters: metrics::Counters::default(),
             next_conn: 0,
@@ -373,7 +379,11 @@ impl Controller {
     /// 操作留下了要后台任务接着做的事时叫醒它：有延后的下发，有节点欠着确认（要有人盯着它是不是等得太久），
     /// 或者有 relay 更新完在等站稳。有包要取时另外叫醒管发布的后台任务。
     pub(crate) fn wake_if_needed(&self, inner: &Inner) {
-        if !inner.dirty.is_empty() || inner.sync.values().any(NodeSync::is_waiting) || inner.updates.next_rollout.is_some() {
+        if !inner.dirty.is_empty()
+            || inner.sync.values().any(NodeSync::is_waiting)
+            || inner.updates.next_rollout.is_some()
+            || !inner.diag.is_idle()
+        {
             self.wake.notify_one();
         }
         if inner.updates.packages.values().any(|package| *package == update::Package::Wanted) {
@@ -460,7 +470,8 @@ impl Inner {
         }
         // 还有节点欠着确认时，隔一会儿要回来看它们是不是等得太久了。
         let waiting = self.sync.values().any(NodeSync::is_waiting).then(|| now + self.timing.ack_timeout.min(SWEEP_INTERVAL));
-        Ok([next, waiting, self.updates.next_rollout].into_iter().flatten().min())
+        let tests = self.tests_tick(now)?;
+        Ok([next, waiting, self.updates.next_rollout, tests].into_iter().flatten().min())
     }
 }
 

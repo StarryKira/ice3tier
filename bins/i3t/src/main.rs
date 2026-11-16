@@ -12,7 +12,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use i3t_agent::config::{Capability, Config};
+use i3t_agent::config::{Config, Setting};
 use i3t_agent::join::{JoinOptions, join};
 use i3t_agent::node::{self, Outcome, Source};
 use i3t_agent::program::Program;
@@ -61,10 +61,10 @@ enum Command {
         #[arg(long, value_name = "文件")]
         r#static: Option<PathBuf>,
     },
-    /// 修改本机的声明，例如：i3t set can-exit on
+    /// 修改本机的声明或开关，例如：i3t set can-exit on、i3t set throughput-tests off
     Set {
-        /// can-exit、can-relay 或 can-forward
-        capability: Capability,
+        /// can-exit、can-relay、can-forward，或者 throughput-tests（接不接受管理员发起的吞吐测试）
+        setting: Setting,
         state: Switch,
     },
     /// 查看本机的状态。节点正在运行时还会显示它现在的情况：和 controller 的连接、监听、路由、更新
@@ -142,11 +142,11 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 Outcome::Restart => ExitCode::from(RESTART_EXIT_CODE),
             });
         }
-        Command::Set { capability, state: switch } => {
+        Command::Set { setting, state: switch } => {
             let on = matches!(switch, Switch::On);
-            Config::set_declared(&state.config_path(), capability, on)?;
-            println!("{capability} 已设为 {}，重启 i3t 之后生效。", if on { "on" } else { "off" });
-            if on {
+            Config::set(&state.config_path(), setting, on)?;
+            println!("{setting} 已设为 {}，重启 i3t 之后生效。", if on { "on" } else { "off" });
+            if on && matches!(setting, Setting::Declare(_)) {
                 println!("声明本身不启用任何东西，还要管理员在 WebUI 上打开。");
             }
         }

@@ -250,9 +250,11 @@ impl View<'_> {
 ///
 /// 刚从没有路变成有路的头 [`FIRST_ROUTE_GRACE`] 里不算：启动时到几个 relay 的会话往往前后脚建立，相差不到一毫秒，
 /// 先建好的那个只是碰巧先到，不该因此一直占着、把对端排在前面的 relay 挡在后面。
+///
+/// 看的是选路规则选的路（[`PeerState::policy_route`]），不是主动测试暂时固定出来的路：测试结束之后要回到原来那条。
 pub(super) fn relay_in_use(peer: &PeerState, now: Instant) -> Option<NodeId> {
     let just_picked = peer.first_route.is_some_and(|at| now.saturating_duration_since(at) < FIRST_ROUTE_GRACE);
-    match peer.route {
+    match peer.policy_route {
         RouteKey::Relay { path, .. } if !just_picked => Some(path.first()),
         RouteKey::Relay { .. } | RouteKey::Direct(_) | RouteKey::None => None,
     }
@@ -510,6 +512,9 @@ mod tests {
             reason: String::new(),
             switched: None,
             first_route: None,
+            pin: None,
+            pinned: false,
+            policy_route: RouteKey::None,
         }
     }
 
@@ -518,12 +523,16 @@ mod tests {
         let now = Instant::now();
         let mut peer = peer_attached_to(&[8, 9]);
         peer.route = RouteKey::Relay { path: path(&[9]), via: Via::Udp(addr("198.51.100.9:20330")) };
+        peer.policy_route = peer.route;
         peer.first_route = Some(now);
         assert_eq!(relay_in_use(&peer, now + Duration::from_millis(1)), None, "到 8 的会话晚到一点点，照样按对端的顺序排");
         assert_eq!(relay_in_use(&peer, now + FIRST_ROUTE_GRACE), Some(node(9)), "之后就是在用的 relay");
         peer.first_route = None;
         assert_eq!(relay_in_use(&peer, now), Some(node(9)));
-        peer.route = RouteKey::Direct(addr("203.0.113.7:4000"));
+        peer.policy_route = RouteKey::Direct(addr("203.0.113.7:4000"));
+        assert_eq!(relay_in_use(&peer, now), None);
+        // 主动测试把路固定在 relay 9 上时，"现在走着的 relay"仍然按选路规则选的那条算。
+        peer.route = RouteKey::Relay { path: path(&[9]), via: Via::Udp(addr("198.51.100.9:20330")) };
         assert_eq!(relay_in_use(&peer, now), None);
     }
 

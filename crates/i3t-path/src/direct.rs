@@ -165,6 +165,8 @@ struct Active {
     train: Train,
     /// 这个地址是和对端协调之后才打通的。
     punched: bool,
+    /// 这个地址验证通过的时刻。
+    since: Instant,
 }
 
 impl Active {
@@ -182,6 +184,7 @@ impl Active {
             estimate,
             train: Train::new(),
             punched,
+            since: now,
         }
     }
 
@@ -312,6 +315,22 @@ impl DirectPath {
     /// 在用的直连地址和到它的延迟。
     pub(crate) fn active(&self) -> Option<(SocketAddr, Rtt)> {
         self.active.as_ref().map(|active| (active.addr, active.rtt))
+    }
+
+    /// 在用的直连是什么时候验证通过的。
+    pub(crate) fn established_at(&self) -> Option<Instant> {
+        self.active.as_ref().map(|active| active.since)
+    }
+
+    /// 手上有几个对端的候选地址。
+    pub(crate) fn candidate_count(&self) -> usize {
+        self.candidates.len()
+    }
+
+    /// 主动测试要试一次直连：没有可用的直连时不等退避，下一次推进就从头尝试（白皮书 §7.6 的"直连能力"）。
+    /// 和候选地址变了时的做法一样，之前的失败记录不再算数。
+    pub(crate) fn retry_now(&mut self) {
+        self.candidates_changed();
     }
 
     /// 在用的地址是不是可疑：有保活探测没有得到回答。

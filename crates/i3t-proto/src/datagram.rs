@@ -15,6 +15,7 @@
 //! | `0x01` | 经一个 relay 转发的包 | 本模块 |
 //! | `0x02`～`0x07`、`0x0c` | 中转会话帧 | [`crate::session`] |
 //! | `0x08`、`0x09` | 探测帧 | [`crate::probe`] |
+//! | `0x0f`、`0x10` | 主动测试的探测帧 | [`crate::probe`] |
 //! | `0x0a`、`0x0b` | 地址查询与应答 | [`crate::addr`] |
 //! | `0x0d` | 经多个 relay 转发的包 | 本模块 |
 //! | `0x0e` | 骨干矩阵的一行，也是 relay 的过载和下线通知 | [`crate::backbone`] |
@@ -297,7 +298,9 @@ impl<'a> Datagram<'a> {
             backbone::KIND_ROW if backbone::Row::is_complete(datagram) => Ok(Self::Row(datagram)),
             backbone::KIND_ROW => Err(malformed),
             kind if session::Frame::is_session_kind(kind) => session::Frame::parse(datagram).map(Self::Session).ok_or(malformed),
-            probe::KIND_PING | probe::KIND_PONG => probe::Frame::parse(datagram).map(Self::Probe).ok_or(malformed),
+            probe::KIND_PING | probe::KIND_PONG | probe::KIND_TEST_PING | probe::KIND_TEST_PONG => {
+                probe::Frame::parse(datagram).map(Self::Probe).ok_or(malformed)
+            }
             addr::KIND_QUERY => addr::Query::parse(datagram).map(Self::AddrQuery).ok_or(malformed),
             addr::KIND_REPLY => addr::Reply::parse(datagram).map(Self::AddrReply).ok_or(malformed),
             kind => Err(DatagramError::UnknownKind(kind)),
@@ -412,7 +415,7 @@ mod tests {
     #[test]
     fn empty_and_unknown_datagrams_are_rejected() {
         assert_eq!(Datagram::parse(&[]), Err(DatagramError::Empty));
-        for kind in [0x00, 0x0f, 0x3f, 0x80, 0xbf] {
+        for kind in [0x00, 0x11, 0x3f, 0x80, 0xbf] {
             assert_eq!(Datagram::parse(&[kind, 0, 0, 0, 1, 0, 0, 0, 2]), Err(DatagramError::UnknownKind(kind)));
             assert_eq!(relayed_dst(&[kind, 0, 0, 0, 1, 0, 0, 0, 2]), None);
             assert_eq!(forwarding_header_len(&[kind, 0, 0, 0, 1, 0, 0, 0, 2]), None);

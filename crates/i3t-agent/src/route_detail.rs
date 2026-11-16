@@ -16,7 +16,7 @@ pub(crate) fn kind(report: &PathReport) -> Option<RouteKind> {
     (direct.is_some() || relay_leg.is_some()).then_some(RouteKind { peer: report.peer, direct, relay_leg })
 }
 
-const fn leg_transport(leg: RelayLeg) -> control::LegTransport {
+pub(crate) const fn leg_transport(leg: RelayLeg) -> control::LegTransport {
     match leg {
         RelayLeg::Udp => control::LegTransport::Udp,
         RelayLeg::Tcp => control::LegTransport::Tcp,
@@ -65,15 +65,20 @@ fn direct_kind(report: &PathReport) -> Option<control::DirectKind> {
     if !matches!(report.route, Route::Direct { .. }) {
         return None;
     }
-    report.direct.map(|kind| match kind {
+    report.direct.map(direct_kind_of)
+}
+
+/// 路由层说的直连类型写成协议里的样子。
+pub(crate) const fn direct_kind_of(kind: DirectKind) -> control::DirectKind {
+    match kind {
         DirectKind::Lan => control::DirectKind::Lan,
         DirectKind::Ipv6 => control::DirectKind::Ipv6,
         DirectKind::Reachable => control::DirectKind::Reachable,
         DirectKind::Punched => control::DirectKind::Punched,
-    })
+    }
 }
 
-fn candidate(candidate: &CandidateReport) -> PathCandidate {
+pub(crate) fn candidate(candidate: &CandidateReport) -> PathCandidate {
     PathCandidate {
         route: candidate.route.clone(),
         cost_us: u64::from(micros(candidate.cost_ms)),
@@ -94,7 +99,7 @@ fn segment(leg: &LegReport) -> PathSegment {
 }
 
 /// 毫秒换成微秒，四舍五入。借 `Duration` 来换，不用 `as`：负数和不是数的值得 0，大得放不下的封顶。
-fn micros(ms: f64) -> u32 {
+pub(crate) fn micros(ms: f64) -> u32 {
     match Duration::try_from_secs_f64(ms / 1000.0) {
         Ok(duration) => u32::try_from(rounded_thousandths(duration)).unwrap_or(u32::MAX),
         Err(_) if ms > 0.0 => u32::MAX,
@@ -104,7 +109,7 @@ fn micros(ms: f64) -> u32 {
 
 /// 0 到 1 的比例换成千分之几，四舍五入，超出范围的取边界。和 [`micros`] 一样借 `Duration` 来换：比例当成秒数，
 /// 毫秒数就是千分之几。
-fn permille(fraction: f64) -> u16 {
+pub(crate) fn permille(fraction: f64) -> u16 {
     let clamped = if fraction.is_nan() { 0.0 } else { fraction.clamp(0.0, 1.0) };
     Duration::try_from_secs_f64(clamped).map_or(0, |duration| u16::try_from((rounded_thousandths(duration) + 500) / 1000).unwrap_or(1000))
 }

@@ -92,6 +92,7 @@ impl Controller {
                 inner.backbone_answered(session.node, request, rows);
                 Ok(())
             }
+            ToController::TestReport(report) => inner.test_reported(session.node, *report),
             ToController::Report(report) => inner.report(session.node, report),
             ToController::Ack { version } => inner.ack(session.node, version),
             ToController::Signal { to, signal } => {
@@ -219,6 +220,7 @@ impl Inner {
             forwards: Vec::new(),
             credential_connections: BTreeMap::new(),
             lanes: None,
+            throughput_tests: hello.throughput_tests,
         };
         self.drop_route_queries(node.id);
         if self.live.insert(node.id, live).is_some() {
@@ -243,6 +245,7 @@ impl Inner {
         let seeds = self.apply_hello(&mut node, hello, remote)?;
         if let Some(live) = self.live.get_mut(&id) {
             live.protocol = hello.protocol;
+            live.throughput_tests = hello.throughput_tests;
         }
         self.refresh(node.network, seeds, None)?;
         self.roll_out()

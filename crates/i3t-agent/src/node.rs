@@ -32,10 +32,11 @@ use i3t_model::control::{Hello, SelfUpdate};
 use i3t_model::netmap::{Listener, ListenerProtocol};
 use i3t_model::update::UpdateStatus;
 use i3t_update::{RolledBack, Startup, Updater, UpdaterConfig};
-use tokio::sync::{Notify, watch};
+use tokio::sync::{Notify, mpsc, watch};
 
 use crate::config::Config;
-use crate::control::{ControlLink, LinkSetup, LinkState, Timing};
+use crate::control::{ControlLink, LinkSetup, LinkState, TestMessage, Timing};
+use crate::diag::{Diag, NodeHandler};
 use crate::drain::Drain;
 use crate::flows;
 use crate::join::hello;
@@ -172,10 +173,14 @@ pub async fn run(state: StateDir, source: Source, program: Program, shutdown: im
     // 出口接力 UDP 端口转发时和入口共用一个开数据报上下文的：对端发回来的数据报只由入口的那一个分发。
     let exit = Arc::new(Exit::new(local_rx.clone(), outbound, connector).with_quota_state(quota).with_opener(access.datagram_opener()));
     let follow_lanes = tokio::spawn(Arc::clone(&lanes).follow(local_rx.clone()));
+    // 主动测试：测量服务和出口一起接别的节点开过来的流；结果经长连接送给 controller。
+    let (test_reports_tx, test_reports) = mpsc::channel(32);
+    let diag = Arc::new(Diag::new(Arc::clone(&endpoint), local_rx.clone(), config.tests.throughput, test_reports_tx));
 
     let serve_exit = tokio::spawn({
-        let (acceptor, exit) = (lanes.acceptor(), Arc::clone(&exit));
-        async move { i3t_flow::serve(&*acceptor, exit).await }
+        let acceptor = lanes.acceptor();
+        let handler = Arc::new(NodeHandler { exit: Arc::clone(&exit), diag: Arc::clone(&diag) });
+        async move { i3t_flow::serve(&*acceptor, handler).await }
     });
     let save_quota = tokio::spawn(persist::save_quota(state.clone(), Arc::clone(&exit)));
     let state_for_quota = state.clone();
@@ -230,6 +235,14 @@ pub async fn run(state: StateDir, source: Source, program: Program, shutdown: im
                     move || runtime.backbone()
                 }),
                 report_now: Arc::clone(&report_now),
+                tests: Box::new({
+                    let diag = Arc::clone(&diag);
+                    move |message| match message {
+                        TestMessage::Order(order) => diag.order(order),
+                        TestMessage::End(test) => diag.end(test),
+                    }
+                }),
+                test_reports,
                 state,
                 timing: Timing::default(),
             });

@@ -393,3 +393,54 @@ async fn updates_routes_and_paths_can_be_driven_from_the_command_line() {
     assert!(fixture.ok(&["backbone"]).await.contains("这个网络里还没有 relay"));
     assert_eq!(fixture.json(&["backbone"]).await["relays"], serde_json::json!([]));
 }
+
+#[tokio::test]
+async fn active_tests_and_the_matrix_are_run_and_shown_from_the_command_line() {
+    use i3t_model::control::DirectKind;
+    use i3t_model::control::TestReport;
+    use i3t_model::control::diag::{DirectSide, TestRole};
+
+    let fixture = Fixture::start().await;
+    fixture.ok(&["network", "create", "home"]).await;
+    let modern = Hello {
+        version: "0.2.0".to_owned(),
+        protocol: PROTOCOL_REVISION,
+        throughput_tests: true,
+        self_update: Some(SelfUpdate::ABLE),
+        ..Hello::default()
+    };
+    let laptop = fixture.join_as(11, &modern).await;
+    let nas = fixture.join_as(12, &modern).await;
+    let _old = fixture.join(13, Declared::default()).await;
+    fixture.ok(&["node", "rename", "1", "laptop"]).await;
+    fixture.ok(&["node", "rename", "2", "nas"]).await;
+    fixture.ok(&["node", "rename", "3", "old"]).await;
+
+    let started = fixture.json(&["test", "laptop", "nas", "--only", "direct,route", "--no-wait"]).await;
+    assert_eq!((started["state"].as_str(), started["request"]["items"].clone()), (Some("running"), serde_json::json!(["direct", "route"])));
+    let id = started["id"].as_u64().unwrap();
+    let side = DirectSide { ok: true, kind: Some(DirectKind::Punched), elapsed_ms: Some(640), ..DirectSide::default() };
+    for (member, role) in [(&laptop, TestRole::Initiator), (&nas, TestRole::Responder)] {
+        let report = TestReport { test: id, role: Some(role), last: true, direct: Some(side.clone()), ..TestReport::default() };
+        fixture.controller.handle(member.session, REMOTE, ToController::TestReport(Box::new(report))).unwrap();
+    }
+    let shown = fixture.ok(&["tests", "show", &id.to_string()]).await;
+    assert!(shown.contains(&format!("测试 #{id}  laptop → nas  done")) && shown.contains("直连能力：可以：punched，用了 640ms"), "{shown}");
+    assert!(shown.contains("laptop：连上了") && shown.contains("nas：连上了"), "{shown}");
+    let listed = fixture.ok(&["tests", "list", "nas", "laptop"]).await;
+    assert!(listed.starts_with("ID  A") && listed.contains(&format!("{id}   laptop  nas")), "{listed}");
+    assert!(fixture.fails(&["test", "laptop", "nas"]).await.contains("too_soon"), "同一对刚测过");
+    assert!(fixture.fails(&["tests", "cancel", &id.to_string()]).await.contains("busy"));
+
+    // 版本太旧的节点：测试立刻失败，说是哪个节点。等结果的这一种也马上返回。
+    let refused = fixture.ok(&["test", "laptop", "old"]).await;
+    assert!(refused.contains("没有做成：not_supported（old）"), "{refused}");
+
+    // 全网矩阵：开始（不等）、看、取消。
+    let run = fixture.json(&["tests", "matrix", "--no-wait"]).await;
+    assert_eq!((run["total"].as_u64(), run["state"].as_str()), (Some(3), Some("running")));
+    let matrix = fixture.ok(&["tests", "matrix", "--show"]).await;
+    assert!(matrix.starts_with("全网矩阵 #1  running") && matrix.contains("not_supported（old）"), "{matrix}");
+    let cancelled = fixture.ok(&["tests", "matrix", "--cancel"]).await;
+    assert!(cancelled.starts_with("全网矩阵 #1  cancelled"), "{cancelled}");
+}

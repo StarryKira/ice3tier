@@ -36,14 +36,41 @@
 //! 只凭一个 PING 就长期相信它的来源地址：只能短暂地认那个地址来的连接包，要等自己向那个地址发的 PING 得到回答才算验证过；
 //! 一个地址同时被几个对端认领时，归正在把它当直连用的那个。PONG 里"看到的地址"也要核对：中间有人来回转发探测时，
 //! 它是转发者的地址，不是本节点的。这些规则在路径层（`i3t-path` 的 `direct` 和 `control`）。
+//!
+//! # 主动测试的探测
+//!
+//! 管理员发起的主动测试（白皮书 §7.6）在一条指定的路径上发一列探测量延迟和丢包，用另外两种帧：
+//!
+//! ```text
+//! A → B  TPING 0x0f | 来源 A 4 | 目的 B 4 | 测试编号 8 | 序号 4 | relay 数 n 1 | n 个 relay 4n | 签名 64 | 填充到 102 字节
+//! B → A  TPONG 0x10 | 来源 B 4 | 目的 A 4 | 测试编号 8 | 序号 4 | 停留 4 | 已收到 4 | 标志 1 | 签名 64                 94 字节
+//! ```
+//!
+//! - `n` 是 0 时 TPING 直接发到 B 的直连地址；不是 0 时它和连接包一样套上中转头，按顺序经过这 n 个 relay。
+//!   B 把 TPONG 从同一条路径倒着发回来（直连的回到 TPING 的来源地址），这样量到的是这条路径两个方向的往返。
+//!   B 到不了倒过来的那条路径时（例如它和最后一个 relay 之间没有会话），从它自己现在的路发回，标志的第 0 位是 0。
+//! - 停留是 B 从收到 TPING 到发出 TPONG 用了多少微秒，A 从往返时间里减掉它，量到的就只是路上的时间。
+//! - 已收到是 B 在这个测试的这条路径上一共收到了几个不同的 TPING（含这一个），A 用它把丢包分成去和回两个方向。
+//! - 测试编号来自 controller 给两端的同一个指令。B 只回答它知道的、还在时间窗里的测试，并且只回答指令里那个对端的；
+//!   每个序号只回答一次，所以重放一个 TPING 引不出第二个 TPONG。TPING 带填充，比 TPONG 长。
+//! - 签名的用途标签和普通的探测不同，两种帧互相拿去冒充没有用。
 
 use std::net::SocketAddr;
 
+use crate::datagram::{MAX_RELAY_HOPS, RelayPath};
 use crate::node::NodeId;
 use crate::session::{self, MAX_ADDR_LEN, NONCE_LEN, Nonce, SIGNATURE_LEN};
 
 pub const KIND_PING: u8 = 0x08;
 pub const KIND_PONG: u8 = 0x09;
+pub const KIND_TEST_PING: u8 = 0x0f;
+pub const KIND_TEST_PONG: u8 = 0x10;
+
+/// 主动测试的编号。controller 给的，同一个测试在两端是同一个数。
+pub type TestId = u64;
+
+/// TPONG 标志：从 TPING 来的那条路径倒着发回来的。
+const FLAG_SAME_PATH: u8 = 0b0000_0001;
 
 /// 类型、来源、目的、随机数。
 const HEAD_LEN: usize = 1 + 2 * NodeId::WIRE_LEN + NONCE_LEN;
@@ -174,11 +201,173 @@ impl Pong {
     }
 }
 
+/// TPING 和 TPONG 开头相同的部分：类型、来源、目的、测试编号、序号。
+const TEST_HEAD_LEN: usize = 1 + 2 * NodeId::WIRE_LEN + 8 + 4;
+
+/// 主动测试里的探测：`src` 经 `path` 问 `dst`（见模块文档）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TestPing {
+    pub src: NodeId,
+    pub dst: NodeId,
+    pub test: TestId,
+    /// 发的一方在这个测试里给探测编的号，每个都不一样。
+    pub seq: u32,
+    /// 经过的 relay；`None` 是直连。
+    pub path: Option<RelayPath>,
+    /// `src` 对 [`TestPing::signed_message`] 的签名。
+    pub signature: [u8; SIGNATURE_LEN],
+}
+
+impl TestPing {
+    /// 帧的长度，含填充：经 4 个 relay 时的长度。比 TPONG 长。
+    pub const LEN: usize = TEST_HEAD_LEN + 1 + MAX_RELAY_HOPS * NodeId::WIRE_LEN + SIGNATURE_LEN;
+    pub const PURPOSE: &str = "test-ping";
+
+    #[must_use]
+    pub fn signed_message(src: NodeId, dst: NodeId, test: TestId, seq: u32, path: Option<RelayPath>) -> Vec<u8> {
+        let mut message = Vec::with_capacity(Self::LEN);
+        put_test_head(&mut message, None, src, dst, test, seq);
+        put_path(&mut message, path);
+        message
+    }
+
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; Self::LEN] {
+        let mut encoded = Vec::with_capacity(Self::LEN);
+        put_test_head(&mut encoded, Some(KIND_TEST_PING), self.src, self.dst, self.test, self.seq);
+        put_path(&mut encoded, self.path);
+        encoded.extend_from_slice(&self.signature);
+        let mut bytes = [0; Self::LEN];
+        bytes[..encoded.len()].copy_from_slice(&encoded);
+        bytes
+    }
+
+    /// 不是一个完整的 TPING 时返回 `None`。比 [`TestPing::LEN`] 短的不认：应答不能比请求大。
+    #[must_use]
+    pub fn parse(datagram: &[u8]) -> Option<Self> {
+        if datagram.len() < Self::LEN {
+            return None;
+        }
+        let (src, dst, test, seq, rest) = take_test_head(datagram, KIND_TEST_PING)?;
+        let (&count, rest) = rest.split_first()?;
+        let count = usize::from(count);
+        if count > MAX_RELAY_HOPS {
+            return None;
+        }
+        let (list, rest) = rest.split_at_checked(count * NodeId::WIRE_LEN)?;
+        let relays: Option<Vec<NodeId>> = list.chunks_exact(NodeId::WIRE_LEN).map(|id| NodeId::from_be_bytes(*id.first_chunk()?)).collect();
+        let path = match relays?.as_slice() {
+            [] => None,
+            relays => Some(RelayPath::new(relays).ok()?),
+        };
+        Some(Self { src, dst, test, seq, path, signature: *rest.first_chunk::<SIGNATURE_LEN>()? })
+    }
+}
+
+/// 对 TPING 的回答。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TestPong {
+    /// 回答的一方，也就是 TPING 的目的节点。
+    pub src: NodeId,
+    pub dst: NodeId,
+    pub test: TestId,
+    /// 抄回 TPING 的序号。
+    pub seq: u32,
+    /// 从收到 TPING 到发出这个回答用了多少微秒，到头了停在最大值。
+    pub held_us: u32,
+    /// 回答的一方在这个测试的这条路径上一共收到了几个不同的 TPING，含这一个。
+    pub received: u32,
+    /// 是从 TPING 来的那条路径倒着发回来的；`false` 时走的是回答的一方自己现在的路。
+    pub same_path: bool,
+    pub signature: [u8; SIGNATURE_LEN],
+}
+
+impl TestPong {
+    pub const LEN: usize = TEST_HEAD_LEN + 4 + 4 + 1 + SIGNATURE_LEN;
+    pub const PURPOSE: &str = "test-pong";
+
+    #[must_use]
+    pub fn signed_message(&self) -> Vec<u8> {
+        let mut message = Vec::with_capacity(Self::LEN);
+        put_test_head(&mut message, None, self.src, self.dst, self.test, self.seq);
+        self.put_tail(&mut message);
+        message
+    }
+
+    fn put_tail(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&self.held_us.to_be_bytes());
+        buf.extend_from_slice(&self.received.to_be_bytes());
+        buf.push(if self.same_path { FLAG_SAME_PATH } else { 0 });
+    }
+
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(Self::LEN);
+        put_test_head(&mut bytes, Some(KIND_TEST_PONG), self.src, self.dst, self.test, self.seq);
+        self.put_tail(&mut bytes);
+        bytes.extend_from_slice(&self.signature);
+        bytes
+    }
+
+    /// 不是一个完整的 TPONG 时返回 `None`。只看格式，签名由收的一方去验。
+    #[must_use]
+    pub fn parse(datagram: &[u8]) -> Option<Self> {
+        if datagram.len() != Self::LEN {
+            return None;
+        }
+        let (src, dst, test, seq, rest) = take_test_head(datagram, KIND_TEST_PONG)?;
+        let (&held, rest) = rest.split_first_chunk::<4>()?;
+        let (&received, rest) = rest.split_first_chunk::<4>()?;
+        let (&flags, rest) = rest.split_first()?;
+        Some(Self {
+            src,
+            dst,
+            test,
+            seq,
+            held_us: u32::from_be_bytes(held),
+            received: u32::from_be_bytes(received),
+            same_path: flags & FLAG_SAME_PATH != 0,
+            signature: *rest.first_chunk::<SIGNATURE_LEN>()?,
+        })
+    }
+}
+
+/// 写 TPING、TPONG 开头的部分。`kind` 是 `None` 时不写类型：签名的消息里没有它，用途标签已经分开了两种帧。
+fn put_test_head(buf: &mut Vec<u8>, kind: Option<u8>, src: NodeId, dst: NodeId, test: TestId, seq: u32) {
+    buf.extend(kind);
+    buf.extend_from_slice(&src.to_be_bytes());
+    buf.extend_from_slice(&dst.to_be_bytes());
+    buf.extend_from_slice(&test.to_be_bytes());
+    buf.extend_from_slice(&seq.to_be_bytes());
+}
+
+fn put_path(buf: &mut Vec<u8>, path: Option<RelayPath>) {
+    let relays = path.as_ref().map_or(&[][..], RelayPath::as_slice);
+    buf.push(u8::try_from(relays.len()).expect("一条路径最多 4 个 relay"));
+    for relay in relays {
+        buf.extend_from_slice(&relay.to_be_bytes());
+    }
+}
+
+fn take_test_head(datagram: &[u8], kind: u8) -> Option<(NodeId, NodeId, TestId, u32, &[u8])> {
+    let (&first, rest) = datagram.split_first()?;
+    if first != kind {
+        return None;
+    }
+    let (&src, rest) = rest.split_first_chunk::<{ NodeId::WIRE_LEN }>()?;
+    let (&dst, rest) = rest.split_first_chunk::<{ NodeId::WIRE_LEN }>()?;
+    let (&test, rest) = rest.split_first_chunk::<8>()?;
+    let (&seq, rest) = rest.split_first_chunk::<4>()?;
+    Some((NodeId::from_be_bytes(src)?, NodeId::from_be_bytes(dst)?, u64::from_be_bytes(test), u32::from_be_bytes(seq), rest))
+}
+
 /// 任意一种探测帧。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Frame {
     Ping(Ping),
     Pong(Pong),
+    TestPing(TestPing),
+    TestPong(TestPong),
 }
 
 impl Frame {
@@ -188,7 +377,20 @@ impl Frame {
         match *datagram.first()? {
             KIND_PING => Ping::parse(datagram).map(Self::Ping),
             KIND_PONG => Pong::parse(datagram).map(Self::Pong),
+            KIND_TEST_PING => TestPing::parse(datagram).map(Self::TestPing),
+            KIND_TEST_PONG => TestPong::parse(datagram).map(Self::TestPong),
             _ => None,
+        }
+    }
+
+    /// 帧里写的来源和目的节点。
+    #[must_use]
+    pub const fn ends(&self) -> (NodeId, NodeId) {
+        match self {
+            Self::Ping(ping) => (ping.src, ping.dst),
+            Self::Pong(pong) => (pong.src, pong.dst),
+            Self::TestPing(ping) => (ping.src, ping.dst),
+            Self::TestPong(pong) => (pong.src, pong.dst),
         }
     }
 }
@@ -196,6 +398,8 @@ impl Frame {
 const _: () = {
     assert!(Pong::MAX_LEN <= Ping::LEN);
     assert!(HEAD_LEN + SIGNATURE_LEN <= Ping::LEN);
+    assert!(TestPong::LEN <= TestPing::LEN);
+    assert!(KIND_TEST_PONG < 0x40);
 };
 
 #[cfg(test)]
@@ -283,6 +487,58 @@ mod tests {
         assert_eq!(Ping::parse(&[0x09; 100]), None);
         assert_eq!(Frame::parse(&[]), None);
         assert_eq!(Frame::parse(&[0x07; 100]), None);
+    }
+
+    fn test_ping(path: Option<RelayPath>) -> TestPing {
+        TestPing { src: node(1), dst: node(2), test: 0x0102_0304_0506_0708, seq: 9, path, signature: SIGNATURE }
+    }
+
+    #[test]
+    fn a_test_ping_has_the_documented_layout_for_direct_and_relayed_paths_and_round_trips() {
+        let direct = test_ping(None).to_bytes();
+        assert_eq!(direct.len(), 102);
+        assert_eq!(&direct[..26], [0x0f, 0, 0, 0, 1, 0, 0, 0, 2, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 9, 0, 0x5a, 0x5a, 0x5a, 0x5a]);
+        assert!(direct[22 + SIGNATURE_LEN..].iter().all(|&byte| byte == 0), "签名之后是填充");
+        assert_eq!(TestPing::parse(&direct), Some(test_ping(None)));
+
+        let path = RelayPath::new(&[node(8), node(9)]).unwrap();
+        let relayed = test_ping(Some(path)).to_bytes();
+        assert_eq!(&relayed[21..30], [2, 0, 0, 0, 8, 0, 0, 0, 9]);
+        assert_eq!(Frame::parse(&relayed), Some(Frame::TestPing(test_ping(Some(path)))));
+        for len in 0..TestPing::LEN {
+            assert_eq!(TestPing::parse(&relayed[..len]), None, "短于 {} 字节的不认：{len}", TestPing::LEN);
+        }
+        let mut repeated = relayed;
+        repeated[26..30].copy_from_slice(&8u32.to_be_bytes());
+        assert_eq!(TestPing::parse(&repeated), None, "同一个 relay 出现两次");
+        let mut too_long = relayed;
+        too_long[21] = 5;
+        assert_eq!(TestPing::parse(&too_long), None);
+    }
+
+    #[test]
+    fn a_test_pong_round_trips_and_is_never_larger_than_a_test_ping() {
+        let pong =
+            TestPong { src: node(2), dst: node(1), test: 7, seq: 9, held_us: 1500, received: 42, same_path: true, signature: SIGNATURE };
+        let bytes = pong.to_bytes();
+        assert_eq!(bytes.len(), TestPong::LEN);
+        assert_eq!(&bytes[21..30], [0, 0, 0x05, 0xdc, 0, 0, 0, 42, 1]);
+        assert_eq!(Frame::parse(&bytes), Some(Frame::TestPong(pong)));
+        assert_eq!(Frame::parse(&bytes).map(|frame| frame.ends()), Some((node(2), node(1))));
+        let other_path = TestPong { same_path: false, ..pong };
+        assert_eq!(TestPong::parse(&other_path.to_bytes()), Some(other_path));
+        assert_eq!(TestPong::parse(&bytes[..bytes.len() - 1]), None);
+        assert_ne!(pong.signed_message(), TestPong { held_us: 1, ..pong }.signed_message(), "停留时间在签名里，路上改不了");
+        assert_ne!(pong.signed_message(), other_path.signed_message());
+    }
+
+    #[test]
+    fn a_test_ping_signs_the_test_the_sequence_number_and_the_path() {
+        let path = RelayPath::new(&[node(8)]).ok();
+        let message = TestPing::signed_message(node(1), node(2), 7, 9, path);
+        assert_eq!(message, [0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 9, 1, 0, 0, 0, 8]);
+        assert_ne!(message, TestPing::signed_message(node(1), node(2), 7, 9, None), "换一条路径签名就不同");
+        assert_ne!(message, TestPing::signed_message(node(1), node(2), 8, 9, path));
     }
 
     #[test]

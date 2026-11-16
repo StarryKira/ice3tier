@@ -18,6 +18,7 @@
 //! | `table` | 收发每个包时查的表 |
 //! | `budget` | 验签名的额度 |
 //! | [`report`] | 给界面看的选路情况和骨干矩阵 |
+//! | [`diag`] | 主动测试：时间窗、探测包列、暂时固定路，和它们的结果 |
 //!
 //! 选路模式按 netmap 里本节点的设置（没有就用网络的默认值），每个节点只为自己发出的包选路，所以一条连接的两个方向可以走不同的路：
 //!
@@ -32,6 +33,7 @@ mod attach;
 mod budget;
 mod control;
 mod cost;
+pub mod diag;
 mod direct;
 mod estimate;
 mod matrix;
@@ -53,7 +55,11 @@ use i3t_proto::backbone::{Link, RelayState};
 use i3t_underlay::Ecn;
 
 pub use cost::Segment;
-pub use paths::{PacketMeta, PathConfig, Paths};
+pub use diag::{
+    ChoiceReason, DirectAttempt, DirectFailure, HopReport, HopSource, LatencySummary, ModeChoice, RouteDecision, Side, TestPath, TestSpec,
+    TrainError, TrainReport, TrainSpec,
+};
+pub use paths::{PacketMeta, PathConfig, Paths, RoutePin, TestGuard};
 pub use report::{BackboneLink, BackboneRow, CandidateReport, DirectKind, LegReport, PathReport, RelayLeg};
 pub use table::Packets;
 

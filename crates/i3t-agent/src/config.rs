@@ -42,6 +42,12 @@ http = "127.0.0.1:1081"
 [metrics]
 listen = "127.0.0.1:20333"
 
+# 管理员发起的主动测试（连通性测试）。
+[tests]
+# 接受吞吐测试：测试时对端会向本机发、或者要本机发回最多 20MB 的数据（每个方向最多 5 秒）。
+# 按流量计费的机器可以关掉（写 false），延迟和直连的测试照常可以做。也可以用 i3t set throughput-tests off。
+throughput = true
+
 [log]
 # 日志级别：error、warn、info、debug、trace。
 level = "info"
@@ -58,6 +64,8 @@ pub struct Config {
     pub proxy: Proxy,
     #[serde(default)]
     pub metrics: Metrics,
+    #[serde(default)]
+    pub tests: Tests,
     #[serde(default)]
     pub log: Log,
 }
@@ -106,11 +114,21 @@ impl Config {
     ///
     /// 文件读写失败，或者现有的内容解析不了。
     pub fn set_declared(path: &Path, capability: Capability, on: bool) -> anyhow::Result<()> {
+        Self::set(path, Setting::Declare(capability), on)
+    }
+
+    /// 把配置文件里的一个开关改成 `on`，注释和排版原样保留。文件不存在时先写出模板。
+    ///
+    /// # Errors
+    ///
+    /// 文件读写失败，或者现有的内容解析不了。
+    pub fn set(path: &Path, setting: Setting, on: bool) -> anyhow::Result<()> {
         Self::write_template_if_missing(path)?;
         let text = fs::read_to_string(path).with_context(|| format!("读配置文件 {}", path.display()))?;
         let mut document: toml_edit::DocumentMut =
             text.parse().map_err(|err| anyhow::anyhow!("{err}")).with_context(|| format!("配置文件 {} 有错", path.display()))?;
-        document["declare"][capability.key()] = toml_edit::value(on);
+        let (section, key) = setting.key();
+        document[section][key] = toml_edit::value(on);
         let updated = document.to_string();
         // 改完先整个验一遍，不把一个读不回来的文件写下去。
         Self::parse(&updated).with_context(|| format!("配置文件 {} 有错", path.display()))?;
@@ -155,6 +173,7 @@ impl Default for Config {
             declare: Declare::default(),
             proxy: Proxy::default(),
             metrics: Metrics::default(),
+            tests: Tests::default(),
             log: Log::default(),
         }
     }
@@ -196,6 +215,48 @@ impl Capability {
             Self::Exit => "exit",
             Self::Relay => "relay",
             Self::Forward => "forward",
+        }
+    }
+}
+
+/// `i3t set` 能改的开关：三项声明，和接不接受吞吐测试。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Setting {
+    Declare(Capability),
+    /// 接不接受管理员发起的吞吐测试（`[tests] throughput`）。
+    ThroughputTests,
+}
+
+impl Setting {
+    /// 在配置文件里的位置：节和键。
+    const fn key(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Declare(capability) => ("declare", capability.key()),
+            Self::ThroughputTests => ("tests", "throughput"),
+        }
+    }
+}
+
+/// 命令行上的写法：`can-exit`、`can-relay`、`can-forward`、`throughput-tests`。
+impl FromStr for Setting {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "throughput-tests" => Ok(Self::ThroughputTests),
+            other => other
+                .parse()
+                .map(Self::Declare)
+                .map_err(|_| anyhow::anyhow!("不认识的设置项 {other}，可以写的有 can-exit、can-relay、can-forward、throughput-tests")),
+        }
+    }
+}
+
+impl fmt::Display for Setting {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Declare(capability) => capability.fmt(f),
+            Self::ThroughputTests => f.write_str("throughput-tests"),
         }
     }
 }
@@ -290,6 +351,25 @@ impl Default for Metrics {
 
 fn default_metrics() -> ProxyBind {
     ProxyBind::At(SocketAddr::from(([127, 0, 0, 1], 20333)))
+}
+
+/// 主动测试的本机开关。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Tests {
+    /// 接受吞吐测试。关掉之后对端开来的测量流一律拒绝，controller 也知道（节点报给它），不会再发吞吐的测试项。
+    #[serde(default = "default_true")]
+    pub throughput: bool,
+}
+
+impl Default for Tests {
+    fn default() -> Self {
+        Self { throughput: true }
+    }
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -426,6 +506,21 @@ mod tests {
         fs::write(&path, "port = = 1\n").unwrap();
         assert!(Config::set_declared(&path, Capability::Exit, true).is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), "port = = 1\n");
+    }
+
+    #[test]
+    fn throughput_tests_are_accepted_unless_switched_off_and_the_switch_keeps_the_comments() {
+        assert!(Config::default().tests.throughput);
+        assert!(Config::parse("[tests]\n").unwrap().tests.throughput, "没写就是接受");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let setting: Setting = "throughput-tests".parse().unwrap();
+        Config::set(&path, setting, false).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), TEMPLATE.replace("throughput = true", "throughput = false"));
+        assert!(!Config::load(&path).unwrap().tests.throughput);
+        assert_eq!(setting.to_string(), "throughput-tests");
+        assert_eq!("can-relay".parse::<Setting>().unwrap(), Setting::Declare(Capability::Relay));
+        assert!("throughput".parse::<Setting>().unwrap_err().to_string().contains("throughput-tests"));
     }
 
     #[test]

@@ -1,0 +1,89 @@
+//! 主动测试的结果：每个测试一行，整个结果按 JSON 存。一对节点只留最近的 [`KEEP_PER_PAIR`] 个，够对比时段的差异。
+
+use i3t_model::admin::NetworkId;
+use i3t_model::admin::diag::TestView;
+use i3t_proto::NodeId;
+use rusqlite::{OptionalExtension, params};
+
+use super::codec::{Json, SqlNetwork, SqlNode, Unsigned};
+use super::{Store, StoreError};
+
+/// 一对节点最多留多少个测试的结果，再多就删最老的。
+pub const KEEP_PER_PAIR: u32 = 20;
+
+impl Store {
+    /// 记下一个刚开始的测试，返回它的编号。`view` 里的编号不算数，以返回的为准。
+    ///
+    /// # Errors
+    ///
+    /// 写数据库失败，包括两个节点有一个不存在。
+    pub fn insert_test(&self, view: &TestView) -> Result<u64, StoreError> {
+        self.conn.execute(
+            "INSERT INTO tests (network_id, node_a, node_b, started_at, view) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![SqlNetwork(view.network), SqlNode(view.a.id), SqlNode(view.b.id), Unsigned(view.started_at), Json(view)],
+        )?;
+        let id = u64::try_from(self.conn.last_insert_rowid()).unwrap_or(0);
+        self.prune_tests(view.network, view.a.id, view.b.id)?;
+        Ok(id)
+    }
+
+    /// 换上一个测试的最新结果。
+    ///
+    /// # Errors
+    ///
+    /// 写数据库失败。
+    pub fn update_test(&self, view: &TestView) -> Result<(), StoreError> {
+        self.conn.execute("UPDATE tests SET view = ?2 WHERE id = ?1", params![Unsigned(view.id), Json(view)])?;
+        Ok(())
+    }
+
+    /// 一个网络里的一个测试。
+    ///
+    /// # Errors
+    ///
+    /// 读数据库失败。
+    pub fn test(&self, network: NetworkId, id: u64) -> Result<Option<TestView>, StoreError> {
+        let view = self
+            .conn
+            .query_row("SELECT view FROM tests WHERE id = ?1 AND network_id = ?2", params![Unsigned(id), SqlNetwork(network)], |row| {
+                row.get::<_, Json<TestView>>(0)
+            })
+            .optional()?;
+        Ok(view.map(|view| view.0))
+    }
+
+    /// 最近的测试，新的在前。`pair` 有值时只要这一对节点的（先后无所谓）。
+    ///
+    /// # Errors
+    ///
+    /// 读数据库失败。
+    pub fn tests(&self, network: NetworkId, pair: Option<(NodeId, NodeId)>, limit: u32) -> Result<Vec<TestView>, StoreError> {
+        let read = |row: &rusqlite::Row<'_>| row.get::<_, Json<TestView>>(0).map(|view| view.0);
+        let views = match pair {
+            Some((a, b)) => {
+                let mut statement = self.conn.prepare(
+                    "SELECT view FROM tests WHERE network_id = ?1 AND ((node_a = ?2 AND node_b = ?3) OR (node_a = ?3 AND node_b = ?2))
+                     ORDER BY id DESC LIMIT ?4",
+                )?;
+                let rows = statement.query_map(params![SqlNetwork(network), SqlNode(a), SqlNode(b), limit], read)?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            }
+            None => {
+                let mut statement = self.conn.prepare("SELECT view FROM tests WHERE network_id = ?1 ORDER BY id DESC LIMIT ?2")?;
+                let rows = statement.query_map(params![SqlNetwork(network), limit], read)?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            }
+        };
+        Ok(views)
+    }
+
+    fn prune_tests(&self, network: NetworkId, a: NodeId, b: NodeId) -> Result<(), StoreError> {
+        self.conn.execute(
+            "DELETE FROM tests WHERE network_id = ?1 AND ((node_a = ?2 AND node_b = ?3) OR (node_a = ?3 AND node_b = ?2)) AND id NOT IN (
+                 SELECT id FROM tests WHERE network_id = ?1 AND ((node_a = ?2 AND node_b = ?3) OR (node_a = ?3 AND node_b = ?2))
+                 ORDER BY id DESC LIMIT ?4)",
+            params![SqlNetwork(network), SqlNode(a), SqlNode(b), KEEP_PER_PAIR],
+        )?;
+        Ok(())
+    }
+}

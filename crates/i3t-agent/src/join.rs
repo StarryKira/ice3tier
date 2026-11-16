@@ -56,6 +56,7 @@ pub fn hello(config: &Config, program: &Program) -> Hello {
         hostname: hostname(),
         protocol: PROTOCOL_REVISION,
         self_update: Some(program.self_update()),
+        throughput_tests: config.tests.throughput,
     }
 }
 

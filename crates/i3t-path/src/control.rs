@@ -22,6 +22,7 @@
 //! - 一个直连地址被几个对端认领时，收包表归正在把它当直连用的那个（[`rebuild_direct`]）；
 //! - 对端回答直连探测时报的"看到的本节点地址"必须像是本节点的（[`observed_is_mine`]），
 //!   不然可能是有人在中间来回转发，把自己插进了"直连"里。
+//! - 主动测试的探测只在测试打开着的时候、只对测试指定的对端回答，个数有上限，签名在这些检查之后才验（[`crate::diag`]）。
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
@@ -35,6 +36,7 @@ use i3t_model::control::{Route, RouteEntry, Signal};
 use i3t_model::netmap::{Attachment, Reach, RoutingMode};
 use i3t_proto::backbone::{Link, LinkQuality, RelayState, Row};
 use i3t_proto::datagram::{MAX_RELAY_HOPS, RelayPath};
+use i3t_proto::probe::TestId;
 use i3t_proto::session::{Echo, Nonce, Refused};
 use i3t_proto::{NodeId, PublicKey, addr, probe, session};
 use i3t_underlay::lan::Sighting;
@@ -44,6 +46,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use self::route::{RouteKey, Via, View, describe, explain, relay_candidates, relay_in_use, route_text};
 use crate::budget::Budget;
+use crate::diag::{
+    DirectAttempt, HopReport, Pin, RouteDecision, Side, TestPath, TestSpec, TrainError, TrainReport, TrainRun, TrainSpec, Window,
+};
 use crate::direct::{Action, Change, DirectPath, Policy};
 use crate::matrix::Matrix;
 use crate::relays::{self, Complaint, Identity, Leg, RelayLink, Standing, Wire};
@@ -54,6 +59,7 @@ use crate::tcp::{self, TcpEvent, TcpLegHandle};
 use crate::timing::{BACKBONE_PROBE_INTERVAL, ENTRY_RELAYS, EVAL_WINDOW, MAX_TIMEOUTS, PROBE_INTERVAL, ROW_INTERVAL, Rtt, TICK};
 use crate::{RouteChange, Status};
 
+mod active;
 mod route;
 
 /// 多久重新看一次本机的网卡地址。
@@ -117,6 +123,22 @@ pub(crate) enum Ctrl {
     Shutdown(oneshot::Sender<()>),
     /// 有人在等路：别等下一个定时器，现在就把状态机推进一步。
     Wake,
+    /// 打开一个主动测试的时间窗。
+    OpenTest(TestSpec),
+    /// 关掉一个主动测试的时间窗（测试做完了、被取消了，或者等它的一方不在了）。
+    CloseTest(TestId),
+    /// 在一条路径上发一列探测。
+    Train { spec: TrainSpec, reply: oneshot::Sender<Result<TrainReport, TrainError>> },
+    /// 把到对端的路暂时固定在一条路径上。
+    Pin { peer: NodeId, pin: Pin },
+    /// 解除固定。`id` 对不上（已经被新的固定替换了）时不做什么。
+    Unpin { peer: NodeId, id: u64 },
+    /// 现在就试一次直连（带头），或者等对端来试（跟随），最多等 `limit`。
+    AttemptDirect { peer: NodeId, side: Side, limit: Duration, reply: oneshot::Sender<DirectAttempt> },
+    /// 两种选路模式此刻各会选哪条路。
+    Decide { peer: NodeId, reply: oneshot::Sender<Option<RouteDecision>> },
+    /// 一条路径上各段的测量值。
+    Hops { peer: NodeId, path: TestPath, reply: oneshot::Sender<Vec<HopReport>> },
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +155,13 @@ pub(crate) enum Inbound {
     PathProbe {
         peer: NodeId,
         frame: probe::Frame,
+    },
+    /// 主动测试的探测或者回答（`frame` 是 [`probe::Frame::TestPing`] 或 [`probe::Frame::TestPong`]）。
+    /// `at` 是收包路径看到它的时刻，往返时间从这里算，不含它在队列里等的时间；`relayed` 说它是经 relay 来的还是直连来的。
+    Test {
+        frame: probe::Frame,
+        at: Instant,
+        relayed: bool,
     },
 }
 
@@ -178,6 +207,23 @@ struct PeerState {
     switched: Option<Instant>,
     /// 上一次从没有路变成有路的时刻。见 [`route::relay_in_use`]。
     first_route: Option<Instant>,
+    /// 主动测试把路暂时固定在哪里（见 [`crate::diag`]）。
+    pin: Option<Pin>,
+    /// 现在的路是不是固定出来的。
+    pinned: bool,
+    /// 选路规则此刻选的路。没有固定时就是 `route`；固定期间选路规则照样每一轮都选，"现在走着的 relay"这类判断看的是它，
+    /// 所以测试结束之后回到的是没有这次测试时会走的那条路。
+    policy_route: RouteKey,
+}
+
+/// 一次正在进行的直连尝试（主动测试）。
+#[derive(Debug)]
+struct Attempt {
+    peer: NodeId,
+    side: Side,
+    started: Instant,
+    deadline: Instant,
+    reply: oneshot::Sender<DirectAttempt>,
 }
 
 /// 经现在这条多级路径做的端到端探测。
@@ -263,6 +309,12 @@ pub(crate) struct Control {
     own_state: Option<RelayState>,
     sessions_seen: u64,
     portmap: Option<PortMapper>,
+    /// 打开着的主动测试。
+    windows: HashMap<TestId, Window>,
+    /// 正在发的探测包列。
+    trains: Vec<TrainRun>,
+    /// 正在进行的直连尝试。
+    attempts: Vec<Attempt>,
 }
 
 /// 把 [`RelayLink`] 要发的东西真的发出去。
@@ -336,6 +388,9 @@ impl Control {
             own_state: None,
             sessions_seen: 0,
             portmap,
+            windows: HashMap::new(),
+            trains: Vec::new(),
+            attempts: Vec::new(),
         };
         control.apply_netmap(netmap, now);
         control.poll(now);
@@ -348,7 +403,14 @@ impl Control {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut netmap_open = true;
         loop {
+            // 探测包列的间隔比定时器细：有列在发的时候按它们自己的时刻醒，只推进它们。
+            let train_wake = self.trains.iter().map(TrainRun::wake_at).min();
+            let train_sleep = tokio::time::sleep_until(tokio::time::Instant::from_std(train_wake.unwrap_or_else(|| Instant::now() + TICK)));
             let first = tokio::select! {
+                () = train_sleep, if train_wake.is_some() => {
+                    self.poll_trains(Instant::now());
+                    continue;
+                }
                 message = ctrl.recv() => {
                     let Some(message) = message else { return };
                     Some(message)
@@ -407,6 +469,31 @@ impl Control {
             }
             Ctrl::Frame { frame: Inbound::PathProbe { peer, frame: probe::Frame::Ping(ping) }, .. } => self.on_path_ping(peer, &ping, now),
             Ctrl::Frame { frame: Inbound::PathProbe { peer, frame: probe::Frame::Pong(pong) }, .. } => self.on_path_pong(peer, &pong),
+            Ctrl::Frame { from, frame: Inbound::Test { frame: probe::Frame::TestPing(ping), at, relayed } } => {
+                self.on_test_ping(from, &ping, at, relayed, now);
+            }
+            Ctrl::Frame { frame: Inbound::Test { frame: probe::Frame::TestPong(pong), at, .. }, .. } => self.on_test_pong(&pong, at),
+            // 收包路径只把测试的帧放进 `Test`，也不会把测试的帧当作普通的探测：这几种组合不会出现。
+            Ctrl::Frame {
+                frame:
+                    Inbound::Test { frame: probe::Frame::Ping(_) | probe::Frame::Pong(_), .. }
+                    | Inbound::Probe(probe::Frame::TestPing(_) | probe::Frame::TestPong(_))
+                    | Inbound::PathProbe { frame: probe::Frame::TestPing(_) | probe::Frame::TestPong(_), .. },
+                ..
+            } => {}
+            Ctrl::OpenTest(spec) => self.open_test(&spec, now),
+            Ctrl::CloseTest(test) => self.close_test(test, "测试结束"),
+            Ctrl::Train { spec, reply } => self.start_train(spec, reply, now),
+            Ctrl::Pin { peer, pin } => self.pin(peer, pin, now),
+            Ctrl::Unpin { peer, id } => self.unpin(peer, id),
+            Ctrl::AttemptDirect { peer, side, limit, reply } => self.attempt_direct(peer, side, limit, reply, now),
+            Ctrl::Decide { peer, reply } => {
+                // 问的人不等了也没有关系。
+                let _waiting = reply.send(self.decide(peer, now));
+            }
+            Ctrl::Hops { peer, path, reply } => {
+                let _waiting = reply.send(self.hops(peer, path, now));
+            }
             Ctrl::Tcp { relay, conn, event } => self.on_tcp(relay, conn, &event, now),
             Ctrl::Signal { from, signal } => self.on_signal(from, &signal, now),
             Ctrl::Lan(sighting) => self.on_lan(sighting, now),
@@ -466,6 +553,11 @@ impl Control {
         if !gone.is_empty() {
             rebuild_direct(&mut table, &self.peers);
         }
+        drop(table);
+        for test in self.windows.iter().filter(|(_, window)| gone.contains(&window.peer)).map(|(test, _)| *test).collect::<Vec<_>>() {
+            self.close_test(test, "对端不在 netmap 里了");
+        }
+        let mut table = self.shared.table_mut();
         let local = self.shared.port.local_addr();
         for info in &netmap.peers {
             if info.id == me {
@@ -496,6 +588,9 @@ impl Control {
                     reason: "还没有可用的路径".to_owned(),
                     switched: None,
                     first_route: None,
+                    pin: None,
+                    pinned: false,
+                    policy_route: RouteKey::None,
                 }
             });
             if peer.key != info.key {
@@ -859,6 +954,7 @@ impl Control {
         self.review_attachments(now);
         self.poll_relays(now, &active);
         self.poll_directs(now);
+        self.poll_tests(now);
         self.publish_rows(now);
         let window = self.evaluated.is_none_or(|at| now.saturating_duration_since(at) >= EVAL_WINDOW);
         if window {
@@ -1027,6 +1123,10 @@ impl Control {
             // 本节点是 relay：和别的 relay 连得上的都保持会话，这就是骨干。
             wanted.extend(self.relays.keys().copied());
         }
+        if self.allow_relay {
+            // 主动测试指定的路径上，本节点这一头的第一个 relay：测试期间保持会话，平时可能不连它。
+            wanted.extend(self.windows.values().filter(|window| window.is_open(now)).flat_map(|window| window.relays.iter().copied()));
+        }
         let survey = self.allow_relay && self.netmap.me.pinned_relays.is_empty();
         let Self { shared, key, relays, legs, next_conn, .. } = self;
         let who = Identity { me: shared.me, key };
@@ -1109,15 +1209,7 @@ impl Control {
     /// 返回有没有变化。
     fn update_routes(&mut self, now: Instant, window: bool) -> bool {
         self.broken.retain(|(_, _, until)| now < *until);
-        let mut entries: Vec<Entry> = self
-            .relays
-            .iter()
-            .filter(|(_, entry)| entry.link.leg().is_some())
-            .filter_map(|(&relay, entry)| {
-                Some(Entry { relay, segment: entry.link.quality(now)?.segment(), settled: entry.link.is_settled(now) })
-            })
-            .collect();
-        entries.sort_unstable_by_key(|entry| entry.relay);
+        let entries = self.entries(now);
         let Self { shared, key, relays, legs, peers, matrix, broken, allow_direct, allow_relay, mode, max_hops, .. } = self;
         let view = View {
             shared,
@@ -1203,7 +1295,23 @@ impl Control {
                     peer.selector.current()
                 }
             };
-            let (key, hop) = path.and_then(|path| view.resolve(id, peer, path)).unwrap_or((RouteKey::None, Hop::None));
+            let (policy_key, policy_hop) = path.and_then(|path| view.resolve(id, peer, path)).unwrap_or((RouteKey::None, Hop::None));
+            peer.policy_route = policy_key;
+            if peer.pin.is_some_and(|pin| now >= pin.until) {
+                tracing::info!(peer = %id, "主动测试固定的路到期了，解除");
+                peer.pin = None;
+            }
+            // 固定的路此刻走不了（直连没了、到第一个 relay 的会话断了）时照常按选路规则走：有路总比没有强。
+            let pinned = peer.pin.and_then(|pin| {
+                let path = match pin.path {
+                    TestPath::Direct => PathId::Direct(peer.direct.active()?.0),
+                    TestPath::Relays(relays) => PathId::Relays(relays),
+                };
+                view.resolve(id, peer, path)
+            });
+            let was_pinned = peer.pinned;
+            peer.pinned = pinned.is_some();
+            let (key, hop) = pinned.unwrap_or((policy_key, policy_hop));
             let doubt = match key {
                 RouteKey::None => true,
                 RouteKey::Direct(_) => peer.direct.in_doubt(),
@@ -1224,9 +1332,15 @@ impl Control {
                     peer.hint = Some("刚有路时先连上的不是对端排在前面的 relay，那个 relay 的会话随后也建好了");
                 }
                 let hint = peer.hint.take();
-                let reason = match why {
-                    Some(why) => explain(why, key, peer.route, &peer.candidates, hint),
-                    None => describe(id, peer.route, key, hint),
+                let reason = if peer.pinned {
+                    format!("主动测试暂时把路固定在{}", route_text(key))
+                } else if was_pinned {
+                    format!("主动测试结束，回到选路规则选的{}", route_text(key))
+                } else {
+                    match why {
+                        Some(why) => explain(why, key, peer.route, &peer.candidates, hint),
+                        None => describe(id, peer.route, key, hint),
+                    }
                 };
                 peer.slot.set_hop(hop);
                 // 新的路要从头探测。
@@ -1252,6 +1366,20 @@ impl Control {
             self.announce(id, key, reason);
         }
         changed
+    }
+
+    /// 本节点现在能把包交给它的 relay：会话是通的、延迟测出来了。
+    fn entries(&self, now: Instant) -> Vec<Entry> {
+        let mut entries: Vec<Entry> = self
+            .relays
+            .iter()
+            .filter(|(_, entry)| entry.link.leg().is_some())
+            .filter_map(|(&relay, entry)| {
+                Some(Entry { relay, segment: entry.link.quality(now)?.segment(), settled: entry.link.is_settled(now) })
+            })
+            .collect();
+        entries.sort_unstable_by_key(|entry| entry.relay);
+        entries
     }
 
     /// 每一次换路都记一条带原因的日志，并且通知订阅的人。
@@ -1497,6 +1625,8 @@ fn random_below(bound: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use i3t_proto::probe::{TestPing, TestPong};
+
     use super::*;
 
     fn addr(text: &str) -> SocketAddr {
@@ -1532,6 +1662,11 @@ mod tests {
     impl Harness {
         /// 本节点是 1。`peers` 是对端的编号和它在 netmap 里上报的端点。
         fn new(peers: &[(u32, &[SocketAddr])]) -> Self {
+            Self::with_me(peers, &serde_json::json!({}))
+        }
+
+        /// 同 [`new`](Self::new)，`me` 里的字段加进 netmap 里本节点的那一项（例如路径限制）。
+        fn with_me(peers: &[(u32, &[SocketAddr])], me: &serde_json::Value) -> Self {
             let keys: HashMap<NodeId, NodeKey> = peers.iter().map(|&(id, _)| (node(id), NodeKey::generate().unwrap())).collect();
             let entries: Vec<serde_json::Value> = peers
                 .iter()
@@ -1542,10 +1677,12 @@ mod tests {
                     })
                 })
                 .collect();
+            let mut local = serde_json::json!({ "id": ME, "name": "me", "virtual_ip": "10.66.0.1" });
+            local.as_object_mut().unwrap().extend(me.as_object().cloned().unwrap_or_default());
             let netmap = serde_json::json!({
                 "version": 1,
                 "network": { "name": "test", "domain": "test.i3t", "cidr": "10.66.0.0/16" },
-                "me": { "id": ME, "name": "me", "virtual_ip": "10.66.0.1" },
+                "me": local,
                 "peers": entries,
             });
             let port = Arc::new(i3t_underlay::UdpPort::bind(addr("127.0.0.1:0")).unwrap());
@@ -1595,6 +1732,17 @@ mod tests {
             probe::Frame::parse(&buf[..len])
         }
 
+        /// 收完眼下到了的测试探测的回答。
+        async fn test_pongs(&self) -> Vec<TestPong> {
+            let mut pongs = Vec::new();
+            while let Some(frame) = self.probe().await {
+                if let probe::Frame::TestPong(pong) = frame {
+                    pongs.push(pong);
+                }
+            }
+            pongs
+        }
+
         /// 收完眼下到了的探测帧，返回其中的 PONG 和 PING。
         async fn drain(&self) -> (Vec<probe::Pong>, Vec<probe::Ping>) {
             let (mut pongs, mut pings) = (Vec::new(), Vec::new());
@@ -1602,6 +1750,7 @@ mod tests {
                 match frame {
                     probe::Frame::Pong(pong) => pongs.push(pong),
                     probe::Frame::Ping(ping) => pings.push(ping),
+                    probe::Frame::TestPing(_) | probe::Frame::TestPong(_) => {}
                 }
             }
             (pongs, pings)
@@ -1743,5 +1892,176 @@ mod tests {
         assert!((0..1000).all(|_| random_below(3) < 3));
         assert_eq!(random_below(1), 0);
         assert_eq!(random_below(0), 0);
+    }
+
+    /// 本节点自己的 relay，只说哪些对端在它上面有会话。
+    struct LocalSessions(Vec<NodeId>);
+
+    impl crate::LocalRelay for LocalSessions {
+        fn handle_udp(&self, _from: SocketAddr, _ecn: Option<i3t_underlay::Ecn>, _data: &[u8], _stride: usize) {}
+
+        fn has_session(&self, client: NodeId) -> bool {
+            self.0.contains(&client)
+        }
+
+        fn session_reopened(&self, _client: NodeId) -> Option<Duration> {
+            None
+        }
+
+        fn session_at(&self, _client: NodeId, _from: SocketAddr) -> bool {
+            false
+        }
+
+        fn send_to_client(&self, _client: NodeId, _contents: &[u8], _segment_size: Option<usize>, _ecn: Option<i3t_underlay::Ecn>) -> bool {
+            true
+        }
+
+        fn has_udp_session(&self, client: NodeId) -> bool {
+            self.has_session(client)
+        }
+
+        fn status(&self) -> Option<crate::RelayStatus> {
+            None
+        }
+
+        fn publish_row(&self, _links: &[Link]) {}
+
+        fn broadcast(&self, _frame: &[u8]) {}
+    }
+
+    #[tokio::test]
+    async fn a_pinned_route_overrides_the_policy_until_it_is_released_or_runs_out() {
+        let socket = Socket::new().await;
+        let mut harness = Harness::new(&[(2, &[])]);
+        let start = Instant::now();
+        assert!(harness.control.shared.local_relay.set(Arc::new(LocalSessions(vec![node(2)]))).is_ok());
+        validate(&mut harness, 2, &socket, start).await;
+        harness.control.update_routes(start, true);
+        let direct = RouteKey::Direct(socket.addr());
+        let route = |harness: &Harness| harness.control.peers[&node(2)].route;
+        assert_eq!(route(&harness), direct, "默认模式：直连可用就走直连");
+
+        // 固定在本节点自己的 relay 上（对端在它上面有会话）：选路规则照样选直连，走的却是被固定的路。
+        let own = RelayPath::new(&[node(ME)]).unwrap();
+        let pinned = RouteKey::Relay { path: own, via: Via::Local };
+        let mut changes = harness.control.shared.changes.subscribe();
+        harness.control.pin(node(2), Pin { id: 1, path: TestPath::Relays(own), until: start + Duration::from_secs(10) }, start);
+        harness.control.update_routes(start, false);
+        assert_eq!(route(&harness), pinned);
+        assert_eq!(harness.control.peers[&node(2)].policy_route, direct, "选路规则选的还是直连");
+        assert!(changes.try_recv().unwrap().reason.contains("主动测试暂时把路固定在"));
+
+        // 别的固定的解除不算数；这一次的解除之后回到直连。
+        harness.control.unpin(node(2), 7);
+        harness.control.update_routes(start, false);
+        assert_eq!(route(&harness), pinned);
+        harness.control.unpin(node(2), 1);
+        harness.control.update_routes(start, false);
+        assert_eq!(route(&harness), direct);
+        assert!(changes.try_recv().unwrap().reason.contains("主动测试结束"));
+
+        // 到期的固定由控制任务自己解除，拿着它的一方什么都不用做。
+        harness.control.pin(node(2), Pin { id: 2, path: TestPath::Relays(own), until: start + Duration::from_secs(1) }, start);
+        harness.control.update_routes(start, false);
+        assert_eq!(route(&harness), pinned);
+        harness.control.update_routes(start + Duration::from_secs(2), false);
+        assert_eq!((route(&harness), harness.control.peers[&node(2)].pin), (direct, None));
+
+        // 不管要多久，最多固定 MAX_PIN。
+        harness.control.pin(node(2), Pin { id: 3, path: TestPath::Direct, until: start + Duration::from_secs(3600) }, start);
+        assert_eq!(harness.control.peers[&node(2)].pin.map(|pin| pin.until), Some(start + crate::diag::MAX_PIN));
+    }
+
+    fn test_ping(harness: &Harness, from: u32, test: TestId, seq: u32, path: Option<RelayPath>) -> TestPing {
+        let (src, dst) = (node(from), node(ME));
+        let message = TestPing::signed_message(src, dst, test, seq, path);
+        TestPing { src, dst, test, seq, path, signature: *harness.keys[&src].sign(TestPing::PURPOSE, &message).as_bytes() }
+    }
+
+    fn window(peer: u32, test: TestId, max_probes: u32) -> TestSpec {
+        TestSpec { test, peer: node(peer), side: Side::Lead, window: Duration::from_secs(10), max_probes, relays: Vec::new() }
+    }
+
+    #[tokio::test]
+    async fn test_probes_are_answered_only_inside_an_open_test_from_its_peer_once_each_up_to_the_limit() {
+        let a = Socket::new().await;
+        let mut harness = Harness::new(&[(2, &[]), (3, &[])]);
+        let now = Instant::now();
+        let me = harness.control.key.public();
+
+        harness.control.on_test_ping(a.addr(), &test_ping(&harness, 2, 7, 0, None), now, false, now);
+        assert!(a.test_pongs().await.is_empty(), "没有打开的测试不回答：对端自己开不了测试");
+        assert!(!harness.control.shared.expects_test(7, node(2)), "收包路径也不会把它交上来");
+
+        harness.control.open_test(&window(2, 7, 3), now);
+        assert!(harness.control.shared.expects_test(7, node(2)));
+        harness.control.on_test_ping(a.addr(), &test_ping(&harness, 2, 7, 0, None), now, false, now);
+        let pongs = a.test_pongs().await;
+        assert_eq!(pongs.len(), 1, "直连的探测回到它的来源地址");
+        let pong = pongs[0];
+        assert_eq!((pong.seq, pong.received, pong.same_path, pong.dst), (0, 1, true, node(2)));
+        assert!(i3t_crypto::verify(&me, TestPong::PURPOSE, &pong.signed_message(), &Signature::from_bytes(pong.signature)).is_ok());
+
+        harness.control.on_test_ping(a.addr(), &test_ping(&harness, 2, 7, 0, None), now, false, now);
+        assert!(a.test_pongs().await.is_empty(), "重放的探测不回答第二次");
+        harness.control.on_test_ping(a.addr(), &test_ping(&harness, 3, 7, 1, None), now, false, now);
+        assert!(a.test_pongs().await.is_empty(), "别的对端拿着这个编号也不行");
+        let forged = TestPing { signature: [0; 64], ..test_ping(&harness, 2, 7, 1, None) };
+        harness.control.on_test_ping(a.addr(), &forged, now, false, now);
+        assert!(a.test_pongs().await.is_empty(), "签名不对");
+        harness.control.on_test_ping(a.addr(), &test_ping(&harness, 2, 7, 1, None), now, true, now);
+        assert!(a.test_pongs().await.is_empty(), "说是直连、却是经 relay 来的");
+
+        for seq in 1..5 {
+            harness.control.on_test_ping(a.addr(), &test_ping(&harness, 2, 7, seq, None), now, false, now);
+        }
+        let answered: Vec<u32> = a.test_pongs().await.iter().map(|pong| pong.seq).collect();
+        assert_eq!(answered, [1, 2], "这个测试最多回答 3 个");
+
+        harness.control.open_test(&window(2, 8, 10), now);
+        let later = now + Duration::from_secs(11);
+        harness.control.on_test_ping(a.addr(), &test_ping(&harness, 2, 8, 0, None), later, false, later);
+        assert!(a.test_pongs().await.is_empty(), "时间窗过了");
+        harness.control.poll_tests(later);
+        assert!(!harness.control.shared.expects_test(8, node(2)), "过了时间窗的测试自己关掉");
+        harness.control.close_test(7, "测试结束");
+        assert!(!harness.control.shared.expects_test(7, node(2)));
+    }
+
+    #[tokio::test]
+    async fn a_relay_only_node_answers_no_direct_test_probe_and_refuses_to_try_a_direct_path() {
+        let a = Socket::new().await;
+        let mut harness = Harness::with_me(&[(2, &[])], &serde_json::json!({ "reach": "relay_only" }));
+        let now = Instant::now();
+        harness.control.open_test(&window(2, 7, 10), now);
+        harness.control.on_test_ping(a.addr(), &test_ping(&harness, 2, 7, 0, None), now, false, now);
+        assert!(a.test_pongs().await.is_empty(), "回答直连的探测就把地址告诉了对端");
+
+        let (reply, answer) = oneshot::channel();
+        harness.control.attempt_direct(node(2), Side::Lead, Duration::from_secs(1), reply, now);
+        let attempt = answer.await.unwrap();
+        assert_eq!((attempt.ok, attempt.failure), (false, Some(crate::diag::DirectFailure::RelayOnly)));
+        assert!(harness.control.attempts.is_empty(), "不建立直连的节点连试都不试");
+    }
+
+    #[tokio::test]
+    async fn a_direct_attempt_reports_an_existing_direct_path_at_once_and_otherwise_gives_up_with_a_reason() {
+        let socket = Socket::new().await;
+        let mut harness = Harness::new(&[(2, &[]), (3, &[])]);
+        let now = Instant::now();
+        validate(&mut harness, 2, &socket, now).await;
+        let (reply, answer) = oneshot::channel();
+        harness.control.attempt_direct(node(2), Side::Lead, Duration::from_secs(1), reply, now);
+        let attempt = answer.await.unwrap();
+        assert!(attempt.ok && attempt.already && attempt.elapsed.is_none());
+
+        // 对端 3 没有任何候选地址：到时间也没有结果，说得出原因。
+        let (reply, answer) = oneshot::channel();
+        harness.control.attempt_direct(node(3), Side::Lead, Duration::from_secs(1), reply, now);
+        harness.control.poll_tests(now);
+        assert_eq!(harness.control.attempts.len(), 1, "还在等");
+        harness.control.poll_tests(now + Duration::from_secs(1));
+        let attempt = answer.await.unwrap();
+        assert_eq!((attempt.ok, attempt.failure, attempt.candidates), (false, Some(crate::diag::DirectFailure::NoCandidates), 0));
     }
 }

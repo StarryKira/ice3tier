@@ -19,6 +19,7 @@ mod oplog;
 mod pair;
 mod rule;
 mod schema;
+mod test;
 mod token;
 
 use std::path::Path;
@@ -31,6 +32,7 @@ pub use forward::ForwardRecord;
 pub use network::{NetworkRecord, NewNetwork};
 pub use node::{NetmapState, NewNode, NodeRecord};
 pub use oplog::LogFilter;
+pub use test::KEEP_PER_PAIR;
 pub use token::{NewToken, RETENTION_SECS, TokenRecord, is_pending, token_at};
 
 /// SHA-256 的长度。令牌和 netmap 的摘要都是它。

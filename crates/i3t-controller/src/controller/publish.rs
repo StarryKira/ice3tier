@@ -202,6 +202,7 @@ impl Inner {
         }
         self.drop_route_queries(node);
         self.stop_waiting_for(live.network, node);
+        self.tests_node_gone(node);
     }
 
     /// 不再等 `node` 确认：等它确认才能继续的对端现在就可以继续。

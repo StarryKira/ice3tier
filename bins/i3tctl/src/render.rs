@@ -13,6 +13,10 @@ use i3t_proto::NodeId;
 
 use crate::table::{NONE, Table, label, list, optional, yes_no};
 
+mod diag;
+
+pub use diag::{matrix, test, tests};
+
 pub fn status(status: &Status) {
     println!("controller {}", status.version);
     println!("  公钥        {}", status.controller_key);

@@ -147,7 +147,8 @@ impl Connection {
             | ToController::Heartbeat
             | ToController::PackageRequest { .. }
             | ToController::RouteAnswer { .. }
-            | ToController::BackboneAnswer { .. } => {
+            | ToController::BackboneAnswer { .. }
+            | ToController::TestReport(_) => {
                 if let Some(suppressed) = controller.refusal_log.allow() {
                     tracing::warn!(key = ?key, remote = %ip, suppressed, "拒绝连接：第一条消息不是 enroll 也不是 hello");
                 }

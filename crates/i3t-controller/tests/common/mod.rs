@@ -312,7 +312,9 @@ impl Node {
                 | ToNode::PackageUnavailable { .. }
                 | ToNode::RouteQuery { .. }
                 | ToNode::TryLater { .. }
-                | ToNode::BackboneQuery { .. } => {}
+                | ToNode::BackboneQuery { .. }
+                | ToNode::Test(_)
+                | ToNode::TestEnd { .. } => {}
             }
             return Some(message);
         }

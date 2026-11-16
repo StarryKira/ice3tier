@@ -1,7 +1,8 @@
 //! 连 controller 的那条长连接。
 //!
 //! 节点用它做这些事：第一次加入时注册（[`enroll`]）；收 netmap 并确认；定期上报；转发信令；
-//! 收更新的指令、取更新包（[`Packages`]）；回答"到某个对端现在怎么走"和"手上的骨干矩阵"的查询。
+//! 收更新的指令、取更新包（[`Packages`]）；回答"到某个对端现在怎么走"和"手上的骨干矩阵"的查询；
+//! 收主动测试的指令、送回测试的结果。
 //! 连接断了就带退避地重连，这期间节点按手上最后一份 netmap 照常工作。
 //! 被吊销，或者 controller 明说不认这个节点（`Rejected`）时，不再重连。controller 说它自己出了错（`TryLater`）时
 //! 照常带退避地重连：那不是不认这个节点。
@@ -19,7 +20,9 @@ use std::time::Duration;
 use anyhow::{Context, anyhow, bail, ensure};
 use i3t_crypto::{NodeKey, tls};
 use i3t_model::Netmap;
-use i3t_model::control::{BackboneRow, Hello, MAX_FRAME_LEN, Report, RouteAnswer, RouteEntry, RouteKind, Signal, ToController, ToNode};
+use i3t_model::control::{
+    BackboneRow, Hello, MAX_FRAME_LEN, Report, RouteAnswer, RouteEntry, RouteKind, Signal, TestOrder, TestReport, ToController, ToNode,
+};
 use i3t_model::update::{Platform, SignedManifest, UpdateTiming, Version};
 use i3t_proto::NodeId;
 use i3t_update::{ChunkRequest, PackageSource, SourceError};
@@ -178,6 +181,14 @@ pub enum LinkState {
     Rejected,
 }
 
+/// controller 关于主动测试说的话。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TestMessage {
+    Order(TestOrder),
+    /// 这个测试结束了。
+    End(u64),
+}
+
 /// 长连接上的几个时间。默认值是协议约定的，测试里会改短。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timing {
@@ -218,6 +229,10 @@ pub struct LinkSetup {
     /// 通知它一下，就不等下一次定时上报，马上报一次。
     /// 候选端点或者挂靠的 relay 变了的时候用：对端要靠这些才找得到本节点，晚报十秒就晚通十秒。
     pub report_now: Arc<Notify>,
+    /// controller 的主动测试指令交给它。在长连接的任务里调用，不能阻塞。
+    pub tests: Box<dyn Fn(TestMessage) + Send + Sync>,
+    /// 主动测试的结果从这里取出来送给 controller。没有连着的时候留在队列里，连上之后再送（controller 不认的会丢掉）。
+    pub test_reports: mpsc::Receiver<TestReport>,
     /// 收到的 netmap 存到这里，下次启动时用。
     pub state: StateDir,
     pub timing: Timing,
@@ -437,7 +452,12 @@ impl Worker {
                             tracing::debug!(rows = rows.len(), "回答 controller 的骨干矩阵查询");
                             write_message(&mut writer, &ToController::BackboneAnswer { request, rows }).await?;
                         }
+                        ToNode::Test(order) => (self.setup.tests)(TestMessage::Order(*order)),
+                        ToNode::TestEnd { test } => (self.setup.tests)(TestMessage::End(test)),
                     }
+                }
+                Some(report) = self.setup.test_reports.recv() => {
+                    write_message(&mut writer, &ToController::TestReport(Box::new(report))).await?;
                 }
                 Some((to, signal)) = self.outgoing.recv() => {
                     write_message(&mut writer, &ToController::Signal { to, signal }).await?;
@@ -674,6 +694,8 @@ fn kind_of(message: &ToNode) -> &'static str {
         ToNode::RouteQuery { .. } => "route_query",
         ToNode::TryLater { .. } => "try_later",
         ToNode::BackboneQuery { .. } => "backbone_query",
+        ToNode::Test(_) => "test",
+        ToNode::TestEnd { .. } => "test_end",
     }
 }
 
@@ -776,6 +798,8 @@ mod tests {
             route: Box::new(|peer| RouteAnswer { peer, route: None, rtt_ms: None, since: None, detail: None }),
             backbone: Box::new(Vec::new),
             report_now: Arc::new(Notify::new()),
+            tests: Box::new(|_| {}),
+            test_reports: mpsc::channel(1).1,
             state,
             timing,
         };

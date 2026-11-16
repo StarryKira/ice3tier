@@ -17,6 +17,12 @@
 //! | 0x02 | 标志 | 上下文号 | 凭据名 | 客户端地址 |
 //! +------+------+----------+========+============+
 //!
+//! OPEN（测量流，主动测试量吞吐用，见 [`OpenMeasure`]）
+//! +------+------+----------+----------+===========+----------+----------+
+//! | 0x03 | 方式 | 测试编号 | relay 数 | relay 编号 | 字节上限 | 时长上限 |
+//! +------+------+----------+----------+===========+----------+----------+
+//!            1        8          1         4n          8         4（毫秒）
+//!
 //! 标志        bit 0～1  服务等级：0 auto，1 interactive，2 reliable，3 bulk
 //!             bit 2     后面有凭据名
 //!             bit 3     后面有客户端地址
@@ -93,8 +99,10 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 
 mod dgram;
+mod measure;
 
 pub use dgram::{DatagramHeader, Fragment, FrameError, Frames, MAX_DATAGRAM_BODY_LEN, Recipient, SplitError};
+pub use measure::{MeasureEnd, MeasureMode, MeasureSummary, OpenMeasure};
 
 /// 域名最长多少字节。DNS 的名字写成文本最长就是这么多。
 pub const MAX_DOMAIN_LEN: usize = 253;
@@ -105,6 +113,7 @@ pub const MAX_DETAIL_LEN: usize = u8::MAX as usize;
 
 const KIND_OPEN_STREAM: u8 = 0x01;
 const KIND_OPEN_DATAGRAMS: u8 = 0x02;
+const KIND_OPEN_MEASURE: u8 = 0x03;
 
 const FLAG_CLASS: u8 = 0b0000_0011;
 const FLAG_CREDENTIAL: u8 = 0b0000_0100;
@@ -531,11 +540,12 @@ impl OpenDatagrams {
     }
 }
 
-/// 对端开过来的一条流上的第一样东西：它要一条流，还是要建立一个数据报上下文。
+/// 对端开过来的一条流上的第一样东西：它要一条流，要建立一个数据报上下文，还是要一条测量流。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Opening {
     Stream(Open),
     Datagrams(OpenDatagrams),
+    Measure(OpenMeasure),
 }
 
 impl Opening {
@@ -551,6 +561,7 @@ impl Opening {
         Reader::run(buf, |reader| match reader.kind_and_flags()? {
             (KIND_OPEN_STREAM, flags) => Open::after_kind(reader, flags).map(Self::Stream),
             (KIND_OPEN_DATAGRAMS, flags) => OpenDatagrams::after_kind(reader, flags).map(Self::Datagrams),
+            (KIND_OPEN_MEASURE, mode) => OpenMeasure::after_kind(reader, mode).map(Self::Measure),
             (kind, _) => Err(DecodeError::UnknownKind(kind).into()),
         })
     }
@@ -640,6 +651,10 @@ pub enum DecodeError {
     UnknownAddressFamily(u8),
     #[error("不认识的状态 {0:#04x}")]
     UnknownStatus(u8),
+    #[error("不认识的测量方式 {0}")]
+    UnknownMeasureMode(u8),
+    #[error("测量流里的路径不合法：超过 4 个 relay、编号是 0，或者同一个 relay 出现了两次")]
+    BadPath,
 }
 
 /// 解析停下来的原因：字节不够，或者内容不对。
@@ -1163,7 +1178,8 @@ mod tests {
             assert_eq!(read_incrementally(&bytes, Opening::decode), Ok((Opening::Datagrams(request), bytes.len())));
         }
         assert_eq!(Opening::decode(&[0x00, 0]), Err(DecodeError::UnknownKind(0x00)));
-        assert_eq!(Opening::decode(&[0x03, 0]), Err(DecodeError::UnknownKind(0x03)));
+        assert_eq!(Opening::decode(&[0x04, 0]), Err(DecodeError::UnknownKind(0x04)));
+        assert_eq!(Opening::decode(&[0x03, 0]), Err(DecodeError::UnknownMeasureMode(0)), "0x03 是测量流");
         assert_eq!(Opening::decode(&[0x01, 0x10]), Err(DecodeError::ReservedFlags(0x10)));
         assert_eq!(Opening::decode(&[0x02]), Ok(Decoded::Incomplete { more: 1 }));
     }

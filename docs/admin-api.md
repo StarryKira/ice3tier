@@ -4,7 +4,19 @@
 
 对应的 Rust 类型在 `crates/i3t-model/src/admin.rs`，实现在 `crates/i3t-controller/src/admin.rs`。文档和代码不一致时以代码为准，并请修正文档。
 
-> **最新一次新增**（独占 TCP）。正文里新加的地方也标着「新增」，和前几次的一样；这一次的清单：
+> **最新一次新增**（主动测试）。正文里新加的地方也标着「新增」，和前几次的一样；这一次的清单：
+>
+> - 新接口：`POST`、`GET /networks/{network}/tests`（发起一个主动测试、列出最近的测试），`GET /networks/{network}/tests/{id}`、
+>   `POST …/tests/{id}/cancel`（看一个测试的进度和结果、取消它），`POST`、`GET /networks/{network}/tests/matrix`、
+>   `POST …/tests/matrix/cancel`（全网矩阵），见第 19 节。新的结构 `CreateTest`、`TestView`、`TestRequest`、`TestProblem`、
+>   `DirectResult`、`DirectSideView`、`PathResult`、`Latency`、`Hop`、`ThroughputResult`、`Transfer`、`RouteResult`、`DecisionView`、
+>   `Choice`、`MatrixRun`、`MatrixCell`，和原因码 `TestCode`（第 19 节）。
+> - 新的错误码：`too_soon`、`busy`（第 2 节）。
+> - 操作记录多了四种 `action`：`test.start`、`test.cancel`、`test.matrix`、`test.matrix.cancel`（第 3 节）。
+>
+> 已有接口的路径、请求体和应答里原有的字段都没有变。
+>
+> **上一次新增**（独占 TCP）。这一次的清单：
 >
 > - 节点对设置多了 `lane`：这一对节点之间承载 TCP 连接的流用不用独占 TCP，`"off"`（默认）、`"udp_fallback"`、`"always"`（第 12 节）。
 > - `GET /networks/{network}/pairs` 和 `PUT …/pairs/{a}/{b}` 的应答从 `PairSetting` 变成 `PairView`：原来的字段还在同一层，多了 `lane`、`lane_effect`（设置起不起作用、为什么、谁拨谁）和 `lanes`（两个节点各自报的状况）。新的结构 `PairView`、`LaneEffect`、`LaneBlock`、`PairLaneSide`、`PeerLanes`、`LaneCounts`、`LaneReport`、`LaneHandshakeFailures`（第 12 节）。
@@ -13,7 +25,7 @@
 >
 > 已有接口的路径和应答里原有的字段都没有变。
 >
-> **上一次新增**（路径诊断、骨干矩阵、连接上的防护）。这一次的清单：
+> **再上一次新增**（路径诊断、骨干矩阵、连接上的防护）。这一次的清单：
 >
 > - 新接口：`GET /networks/{network}/backbone`（relay 之间的延迟矩阵，第 15 节）。
 > - 新的字段：`NodeRoute.direct`、`relay_leg`（第 5 节）；`MatrixEntry.direct`、`relay_leg`，`PathLeg.direct`、`relay_leg`、`mode`、`reason`、`candidates`（第 15 节）。新的结构 `PathCandidate`、`PathSegment`、`BackboneView`、`BackboneRelay`、`BackboneLink`（第 15 节）。新加的字段在应答里总是有，不知道的时候是 `null`。
@@ -25,7 +37,7 @@
 >
 > 已有接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **再上一次新增**（限额、用量和状态）。这一次的清单：
+> **更早一次新增**（限额、用量和状态）。这一次的清单：
 >
 > - 新接口：`PATCH /networks/{network}/credentials/{id}`（改上限、清零用量，第 9 节）；`GET /networks/{network}/exits`、`GET /networks/{network}/exits/{node}`（出口的设置、用量、健康，第 17 节）；`GET /networks/{network}/nodes/{node}/listeners`（节点上全部监听的状态，含节点自己开的回环入口，第 5 节）；`POST /networks/{network}/tags/rename`（标签改名，第 18 节）。
 > - 已有接口新的查询参数：`GET /log` 的 `before`、`network`、`action`、`ref`（翻页和过滤，第 3 节）；`GET /networks/{network}/tokens` 的 `all`（连用掉的和过期的也列出，第 6 节）。
@@ -42,7 +54,7 @@
 >
 > 已有接口的路径、请求体和应答里原有的字段都没有变；凭据的 `DELETE` 改成先吊销，见上。
 >
-> **更早一次新增**（节点更新、路由视图、指标、内嵌的 WebUI）。清单：
+> **最早一次新增**（节点更新、路由视图、指标、内嵌的 WebUI）。清单：
 > - 新接口：`GET /update`、`PATCH /update`、`POST /update/check`、`POST /update/resume`、`POST /update/force`（第 14 节）；`GET`、`POST /networks/{network}/nodes/{node}/update`（第 14 节）；`GET /networks/{network}/routes`、`GET /networks/{network}/path`（第 15 节）；`GET /metrics`（不在 `/api/v1` 下面，第 16 节）。
 > - `Node` 多了两个字段：`hostname`、`update`（第 5 节）。节点详情 `NodeDetail` 随之也有。
 > - `Status` 多了一个字段：`newer_version`（第 3 节）。
@@ -160,6 +172,8 @@
 | 409 | `node_offline` | 「新增」要让它立即更新的节点不在线 |
 | 409 | `cannot_self_update` | 「新增」节点不能自己更新：在容器里、是包管理器装的、程序所在的目录不可写，或者它的版本太旧不懂更新。`message` 里写着原因 |
 | 409 | `no_update` | 「新增」没有可以让这个节点更新到的版本：还没有查到发布、它已经是最新的、发布里没有它的平台的包，或者 controller 自己太旧。`message` 里写着是哪一种 |
+| 409 | `too_soon` | 「新增」同一对节点刚做过主动测试（或者全网矩阵刚开始过），要隔一会儿。`message` 里写着还要等几秒 |
+| 409 | `busy` | 「新增」这一对节点正在测试，这个网络正在跑全网矩阵，或者要取消的测试、矩阵已经结束了 |
 | 500 | `internal` | controller 内部出错。细节在 controller 的日志里，不在应答里 |
 
 以后可能增加新的 `code`，客户端遇到不认识的值请按 HTTP 状态处理，并显示 `message`。
@@ -230,7 +244,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `detail` | 给人看的说明 |
 | `refs` | 「新增」这条记录说的是哪些东西，界面可以据此做成链接。每一项是 `{ "kind": 种类, "id": 编号 }`，种类是 `"network"`、`"node"`、`"token"`、`"rule"`、`"credential"`、`"listener"`、`"forward"`（以后可能增加，不认识的种类请忽略）。东西后来被删掉了，编号还在。这个字段出现之前的记录是 `[]` |
 
-`action` 的取值：`admin.token`、`network.create`、`network.update`、`network.delete`、`node.enroll`、`node.update`、`node.delete`、`node.succeed`、`node.relay.enable`、`node.relay.disable`、`node.relay.withdrawn`、`node.exit.enable`、`node.exit.disable`、`node.exit.withdrawn`、`node.forward.withdrawn`、`token.create`、`token.delete`、`rule.create`、`rule.update`、`rule.delete`、`credential.create`、`credential.delete`、`listener.create`、`listener.update`、`listener.delete`、`forward.create`、`forward.update`、`forward.delete`、`pair.set`、`pair.delete`，以及「新增」`update.settings`、`update.release`（发布源上有了新的正式版）、`update.pause`（节点更新失败，版本被暂停；它记在那个节点所在的网络上）、`update.resume`、`update.force`（记在节点所在的网络上）、`update.force_all`，以及「新增」`credential.update`（改上限、清零用量）、`credential.revoke`（吊销）、`credential.exhausted`（凭据的流量上限用完了，controller 自己记的）、`tag.rename`，以及「新增」`update.failure`（节点说某个版本在它那里不能用，但 controller 没有让它装过这个版本，所以不暂停；记在那个节点所在的网络上）。`credential.delete` 现在是彻底删掉一个已经吊销的凭据。带 `withdrawn` 的三种是节点撤回了本地声明、controller 随之关闭能力时记的。最多保留最近的一万条。
+`action` 的取值：`admin.token`、`network.create`、`network.update`、`network.delete`、`node.enroll`、`node.update`、`node.delete`、`node.succeed`、`node.relay.enable`、`node.relay.disable`、`node.relay.withdrawn`、`node.exit.enable`、`node.exit.disable`、`node.exit.withdrawn`、`node.forward.withdrawn`、`token.create`、`token.delete`、`rule.create`、`rule.update`、`rule.delete`、`credential.create`、`credential.delete`、`listener.create`、`listener.update`、`listener.delete`、`forward.create`、`forward.update`、`forward.delete`、`pair.set`、`pair.delete`，以及「新增」`update.settings`、`update.release`（发布源上有了新的正式版）、`update.pause`（节点更新失败，版本被暂停；它记在那个节点所在的网络上）、`update.resume`、`update.force`（记在节点所在的网络上）、`update.force_all`，以及「新增」`credential.update`（改上限、清零用量）、`credential.revoke`（吊销）、`credential.exhausted`（凭据的流量上限用完了，controller 自己记的）、`tag.rename`，以及「新增」`update.failure`（节点说某个版本在它那里不能用，但 controller 没有让它装过这个版本，所以不暂停；记在那个节点所在的网络上），以及「新增」`test.start`（发起了一个主动测试，`refs` 是两个节点）、`test.cancel`、`test.matrix`（开始一次全网矩阵，`refs` 是网络）、`test.matrix.cancel`。`credential.delete` 现在是彻底删掉一个已经吊销的凭据。带 `withdrawn` 的三种是节点撤回了本地声明、controller 随之关闭能力时记的。最多保留最近的一万条。
 
 ## 4. 网络
 
@@ -1339,10 +1353,15 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | GET | `/networks/{network}/exits/{node}` | 「新增」一个出口 |
 | POST | `/networks/{network}/tags/rename` | 「新增」在整个网络里把一个标签改名 |
 | GET | `/networks/{network}/backbone` | 「新增」relay 之间的延迟矩阵 |
+| GET、POST | `/networks/{network}/tests` | 「新增」列出最近的主动测试、发起一个 |
+| GET | `/networks/{network}/tests/{id}` | 「新增」一个测试的进度和结果 |
+| POST | `/networks/{network}/tests/{id}/cancel` | 「新增」取消一个进行中的测试 |
+| GET、POST | `/networks/{network}/tests/matrix` | 「新增」最近一次全网矩阵、开始一次 |
+| POST | `/networks/{network}/tests/matrix/cancel` | 「新增」取消正在跑的全网矩阵 |
 
 不在 `/api/v1` 下面的：`GET /metrics`（「新增」，第 16 节）。
 
-目前没有的：主动测试（连通性测试）、按时间的流量曲线。
+目前没有的：按时间的流量曲线；主动测试的定时重复（见第 19 节）。
 
 ## 14. 节点更新「新增」
 
@@ -1836,3 +1855,248 @@ Prometheus 的文本格式（`Content-Type: text/plain; version=0.0.4`）。**�
 `nodes`、`rules`、`tokens` 是各改了几处。新名字原来没有人用时，谁能访问谁不变；原来就有人用时，两组节点合成了一组，访问关系按合并之后的算，随即下发。
 
 错误：`invalid_request`（标签的写法不对；`from` 或 `to` 是内置的 `all`；两个一样）。
+
+## 19. 主动测试「新增」
+
+管理员对一对节点发起的测试，回答三个问题：这两个节点能不能直连；直连的延迟（和吞吐）是多少；经 relay 的延迟（和吞吐）是多少。另外给出两种选路模式各会选哪条路。controller 给两端下发同一个测试编号和参数，两端各自量、各自上报，controller 合成结果并存下来：每一对节点留最近的 20 个结果，可以对比不同时段。
+
+测试项（`items`）：
+
+| 值 | 做什么 | 结果在哪里 |
+|---|---|---|
+| `direct` | 让两个节点现在就按打洞的做法试一次直连，不管选路会不会用它 | `direct` |
+| `direct_quality` | 在直连上发 100 个探测（每 20ms 一个），要了吞吐时再量上下行 | `direct_quality` |
+| `relay_quality` | 在经 relay 的路径上做同样的事；默认测两种模式会选的那两条（相同就一条），也可以用 `via` 指定 | `relay_quality` |
+| `route` | 两端各自算一遍：默认模式和延迟优先模式各会选哪条路、为什么 | `route` |
+
+几条规矩：
+
+- **吞吐要明确要。** 吞吐测试每个方向最多 5 秒或 20MB，先到为止，消耗带宽和流量，所以只有请求里写了 `"throughput": true` 才量，并且只在测质量的路径上量。节点可以在本机关掉吞吐测试（配置文件 `[tests] throughput = false`，或者 `i3t set throughput-tests off`），那时吞吐这一项是 `skipped`，原因是 `throughput_off`。吞吐测的是这一对节点之间共用的那条连接：测量期间连接被暂时固定在被测的路径上，这一对节点之间别的流量也走这条路（结果里的 `shared_connection`），测完（或者测试被取消、出错）马上回到选路规则选的路。测量流不走独占 TCP，出口的流量配额不算它（它不是出口替别人搬运的流量）。
+- **路径限制照旧。** 只经 relay（`relay_only`）的节点不参加直连的两项：不试直连、不回答直连的探测，不向对端暴露地址；只用直连（`direct_only`）的节点不参加 relay 质量。这些项是 `skipped`，原因里写着是哪个节点。
+- **间隔。** 同一对节点两次测试至少隔 10 秒，带吞吐的至少隔 30 秒，同一对节点同时只有一个测试；否则 `409 too_soon` 或 `busy`。节点自己也守着差不多的间隔和"同时最多 8 个测试"。
+- **版本。** 节点协议第 4 版起节点才懂主动测试。有一端太旧、不在线，或者访问规则没有把两个节点连通时，测试照样建起来、立刻失败（`state` 是 `failed`），`error` 里写着原因和是哪个节点，历史里看得到。
+- **记录。** 发起、取消、全网矩阵都记进操作记录（第 3 节）。
+- **不做的。** 定时重复测试：这是个人用的工具，要对比时段就过一会儿再点一次，历史结果都留着。
+
+### POST /networks/{network}/tests
+
+发起一个测试，马上应答（不等测试做完）。请求体是 `CreateTest`：
+
+```json
+{ "a": 2, "b": 5, "items": ["direct", "direct_quality", "relay_quality", "route"], "throughput": true, "via": [[3, 4]] }
+```
+
+| 字段 | 必填 | 含义 |
+|---|---|---|
+| `a` | 是 | 发起方：探测和测量流从它发出 |
+| `b` | 是 | 接受方 |
+| `items` | 否 | 做哪几项；省略时四项全做。写了 `via` 时自动带上 `relay_quality` |
+| `throughput` | 否 | 量吞吐，默认 `false`。要同时做 `direct_quality` 或 `relay_quality` |
+| `via` | 否 | relay 质量测哪几条路径（最多 2 条），每条按 `a` 到 `b` 的顺序列出经过的 relay：网络里启用了的 relay，1 到网络的最大中转级数个，不重复。省略时测默认的 |
+
+应答：`201`，`TestView`（`state` 是 `running`，各项是 `pending`）。
+错误：`invalid_request`（两个节点相同、没有测试项、`via` 不对、要吞吐却没有测质量的项）、`not_found`（节点不在这个网络里）、`too_soon`、`busy`。
+
+### GET /networks/{network}/tests/{id}
+
+一个测试现在的样子：进行中的是到这一刻的结果（已经有结果的项先有），结束了的是存下来的。界面每秒问一次就够了；一个带吞吐的测试最长两分钟左右。
+
+```json
+{
+  "id": 12, "network": 1,
+  "a": { "id": 2, "name": "laptop", "virtual_ip": "10.66.0.2" },
+  "b": { "id": 5, "name": "nas", "virtual_ip": "10.66.0.5" },
+  "state": "done",
+  "request": { "items": ["direct", "direct_quality", "relay_quality", "route"], "throughput": true, "via": [] },
+  "started_at": 1794798564, "finished_at": 1794798611, "matrix": null, "error": null,
+  "direct": {
+    "state": "done", "ok": true, "kind": "punched", "elapsed_ms": 640, "already": false, "problem": null,
+    "sides": [
+      { "node": 2, "ok": true, "already": false, "kind": "punched", "elapsed_ms": 640, "failure": null, "udp": true, "mapping_varies": false, "candidates": 3 },
+      { "node": 5, "ok": true, "already": false, "kind": "punched", "elapsed_ms": 610, "failure": null, "udp": true, "mapping_varies": false, "candidates": 2 }
+    ]
+  },
+  "direct_quality": {
+    "state": "done", "route": { "via": "direct", "addr": "203.0.113.7:20330" }, "picked_by": ["direct"], "problem": null,
+    "latency": { "probes": 100, "answered": 97, "min_us": 58100, "avg_us": 61240, "p95_us": 66800, "jitter_us": 1900,
+                 "loss_permille": 30, "loss_up_permille": 10, "loss_down_permille": 20, "same_path": 97, "interval_ms": 20, "duration_ms": 4010 },
+    "cost_us": 74300,
+    "hops": [ { "from": 2, "to": 5, "rtt_us": 60900, "jitter_us": 1200, "loss_permille": 20, "source": "measured" } ],
+    "relay_leg": null,
+    "throughput": {
+      "state": "done", "problem": null,
+      "up": { "bytes": 11904000, "ms": 4998, "bits_per_second": 19054000, "stopped_by": "time" },
+      "down": { "bytes": 12058000, "ms": 4950, "bits_per_second": 19487000, "stopped_by": "time" },
+      "failure": null, "transport": "quic", "congestion": "bbr", "limit_bytes": 20000000, "limit_ms": 5000, "pinned": true,
+      "shared_connection": true
+    }
+  },
+  "relay_quality": [
+    {
+      "state": "done", "route": { "via": "relay", "relays": [3] }, "picked_by": ["direct_first", "lowest_cost"], "problem": null,
+      "latency": { "probes": 100, "answered": 100, "min_us": 50200, "avg_us": 51800, "p95_us": 54000, "jitter_us": 600,
+                   "loss_permille": 0, "loss_up_permille": 0, "loss_down_permille": 0, "same_path": 100, "interval_ms": 20, "duration_ms": 3900 },
+      "cost_us": 55200,
+      "hops": [
+        { "from": 2, "to": 3, "rtt_us": 30400, "jitter_us": 300, "loss_permille": 0, "source": "measured" },
+        { "from": 3, "to": 5, "rtt_us": 20000, "jitter_us": null, "loss_permille": null, "source": "reported" }
+      ],
+      "relay_leg": "udp",
+      "throughput": { "state": "done", "problem": null, "up": { "…": "同上" }, "down": { "…": "同上" }, "…": "同上" }
+    }
+  ],
+  "route": {
+    "state": "done", "problem": null,
+    "forward": {
+      "from": 2, "to": 5, "mode": "direct_first", "current": { "via": "direct", "addr": "203.0.113.7:20330" },
+      "direct_first": { "route": { "via": "direct", "addr": "203.0.113.7:20330" }, "reason": "direct", "cost_us": 74300 },
+      "lowest_cost": { "route": { "via": "relay", "relays": [3] }, "reason": "lowest_cost", "cost_us": 55200 },
+      "candidates": [ { "route": { "via": "relay", "relays": [3] }, "cost_us": 55200, "legs": [], "load_percent": 0, "current": false } ]
+    },
+    "reverse": { "from": 5, "to": 2, "…": "同上，是 nas 那一端算的" }
+  },
+  "notes": []
+}
+```
+
+`TestView`：
+
+| 字段 | 含义 |
+|---|---|
+| `a`、`b` | 发起方和接受方（`NodeRef`） |
+| `state` | `running`、`done`（做完了；各项成没成看各项自己的 `state`）、`failed`（整个测试做不了，原因在 `error`）、`cancelled`（被取消了，已经有的结果照样在） |
+| `request` | 规整过的请求：`items` 按固定顺序、去了重 |
+| `started_at`、`finished_at` | 开始和结束的时间；还在进行时 `finished_at` 是 `null` |
+| `matrix` | 属于哪一次全网矩阵；单独发起的是 `null` |
+| `error` | `TestProblem`：整个测试做不了的原因 |
+| `direct` | `DirectResult`；没有要这一项时是 `null` |
+| `direct_quality` | `PathResult`；没有要这一项时是 `null` |
+| `relay_quality` | `PathResult` 的数组，每条测过（或者要测）的路径一项；没有要这一项时是 `[]` |
+| `route` | `RouteResult`；没有要这一项时是 `null` |
+| `notes` | `TestProblem` 的数组：不影响结果、但值得说的事，比如一端没有按时报最后的结果（`no_report`） |
+
+各项的 `state`：`pending`（还没有结果）、`done`（有结果。直连能力"没成"也是结果：`ok` 是 `false`）、`skipped`（没有做，原因在 `problem`）、`failed`（做了但没量出来，原因在 `problem`）。
+
+`TestProblem` 是 `{ "code": 原因码, "node": 节点编号或者 null, "message": 一小段话 }`。界面按 `code` 显示，`node` 说是哪个节点的原因；`message` 只是兜底。原因码：
+
+| `code` | 含义 |
+|---|---|
+| `not_supported` | 节点版本太旧，不懂主动测试 |
+| `node_offline` | 节点不在线 |
+| `not_connected` | 访问规则没有连通这两个节点 |
+| `relay_only` | 节点只经 relay，不参加直连的测试 |
+| `direct_only` | 节点只用直连，不参加 relay 的测试 |
+| `throughput_off` | 节点在本机关掉了吞吐测试 |
+| `no_relay` | 没有可用的 relay 路径 |
+| `no_direct` | 两个节点之间没有可用的直连，直连质量测不了 |
+| `no_candidates` | 手上没有对端的候选地址 |
+| `udp_blocked` | 节点的 UDP 不通（它到 relay 只能走 TCP） |
+| `mapping_varies` | 节点映射出来的端口随对端变化（对称型 NAT），打不了洞 |
+| `dial_out_only` | 两个节点都是只拨出的 |
+| `timeout` | 试过了，没有在时限之内成功 |
+| `unreachable` | 这条路径此刻走不了：到它的第一个 relay 没有会话，或者路径上有 relay 不转发 |
+| `refused` | 对端拒绝了测量流 |
+| `busy` | 节点上同时进行的测试太多 |
+| `too_soon` | 节点说和这个对端刚测过 |
+| `cancelled` | 测试被取消了 |
+| `no_report` | 节点没有在时限之内报告结果 |
+| `stream_failed` | 测量流中途断了 |
+| `invalid_path` | 指定的路径不能用 |
+| `internal` | 节点或 controller 内部出错（比如 controller 重启时还在进行的测试） |
+| `unknown` | 比 controller 新的节点报的、这里不认识的原因 |
+
+`DirectResult`：
+
+| 字段 | 含义 |
+|---|---|
+| `ok` | 两端都有了验证过的直连 |
+| `kind` | 直连是怎么建立的（发起方看到的）：`lan`、`ipv6`、`reachable`（对端的地址本来就连得上：公网地址、端口转发、端口映射）、`punched`（打洞）。由发起方带头去试、接受方只回应（接受方是只拨出的节点时它也去试），所以本来就连得上的地址报成 `reachable` |
+| `elapsed_ms` | 从开始尝试到验证通过，毫秒；开始时就已经有直连（`already` 是 `true`）或者没成时是 `null` |
+| `already` | 开始时就已经有直连：没有新建，所以没有耗时 |
+| `problem` | 没成（或者没做）时最能说明问题的原因，说得出是哪个节点的（`udp_blocked`、`mapping_varies` 之类）排在 `timeout` 前面 |
+| `sides` | 两端各自看到的，`a` 在前：`node`，加上 `ok`、`already`、`kind`、`elapsed_ms`、`failure`（原因码）、`udp`（这一端的 UDP 通不通，不知道是 `null`）、`mapping_varies`、`candidates`（尝试时手上有几个对端的候选地址） |
+
+`PathResult`：
+
+| 字段 | 含义 |
+|---|---|
+| `route` | 测的路径，写法同第 5 节的 `route`；还不知道测哪条时是 `null` |
+| `picked_by` | 为什么测这一条：`direct`、`direct_first`（不算直连时默认模式会经的 relay）、`lowest_cost`（延迟优先模式会选的经 relay 的路径）、`admin`（`via` 指定的） |
+| `latency` | `Latency`，见下 |
+| `cost_us` | 用这次量到的延迟、抖动和丢包按代价公式（第 15 节的 `PathCandidate.cost_us`）算的代价，微秒 |
+| `hops` | 各段（`Hop`）：`from`、`to`、`rtt_us`、`jitter_us`、`loss_permille`（不知道的是 `null`）和 `source`：`measured`（这一段起点的节点自己测的）、`backbone`（relay 之间的骨干矩阵）、`reported`（`b` 上报的它到 relay 的延迟，只有延迟）、`unknown` |
+| `relay_leg` | `a` 到第一个 relay 的那一段在测试开始时走的是 `udp` 还是 `tcp`；直连是 `null` |
+| `throughput` | `ThroughputResult`；没有要吞吐时是 `null` |
+
+`Latency`：`probes`、`answered` 发了几个探测、有几个回答；`min_us`、`avg_us`、`p95_us` 往返延迟（微秒，减掉了对端处理的时间）；`jitter_us` 相邻两个往返延迟之差的绝对值的平均；`loss_permille` 往返的丢包（千分之几）；`loss_up_permille`、`loss_down_permille` 去程（`a` 到 `b`）和回程各自的丢包，按 `b` 说它收到了几个分出来，分不出来时是 `null`；`same_path` 有几个回答是沿同一条路径倒着回来的（不是全部时，其余的走的是 `b` 自己的路）；`interval_ms`、`duration_ms` 探测的间隔和整列用了多久。
+
+`ThroughputResult`：`state`、`problem`，加上：
+
+| 字段 | 含义 |
+|---|---|
+| `up`、`down` | `Transfer`：`a` 到 `b`、`b` 到 `a`。`bytes` 搬了多少，`ms` 从第一个字节到最后一个字节用了多久，`bits_per_second` 平均速率，`stopped_by` 为什么停：`bytes`（到了字节上限）、`time`（到了时长上限）、`finished`。没有量（或者量不了）的方向是 `null` |
+| `failure` | 发起方报的量不了的原因码 |
+| `transport` | 用的传输，现在总是 `"quic"` |
+| `congestion` | 连接的拥塞控制：`"bbr"` 或 `"cubic"` |
+| `limit_bytes`、`limit_ms` | 每个方向的上限 |
+| `pinned` | 量的整个期间，`a` 到 `b` 的连接都固定在这条路径上 |
+| `shared_connection` | 总是 `true`：测量流走的是这一对节点之间共用的连接，测量期间别的流量也在上面 |
+
+短时间的吞吐测试受拥塞控制启动阶段的影响，结果偏低；界面应当把 `congestion` 和 `ms` 一起显示。
+
+`RouteResult`：`state`、`problem`、`forward`（`a` 到 `b`，`a` 算的）、`reverse`（`b` 到 `a`，`b` 算的；它没有报时是 `null`）。每个方向是 `DecisionView`：`from`、`to`、`mode`（发送方现在用的模式）、`current`（现在走的路）、`direct_first` 和 `lowest_cost`（`Choice`：`route`，没有能走的路时是 `null`；`reason`；`cost_us`）、`candidates`（`PathCandidate` 的数组，第 15 节）。`Choice.reason`：`lan`（局域网直连无条件优先）、`direct`（默认模式：直连可用就走直连）、`peer_is_relay`（对端自己就是 relay）、`own_relay`（对端挂在发送方自己的 relay 上）、`peer_relay`（对端挂靠的 relay）、`lowest_cost`（候选里代价最低的）、`no_path`。这是按当前的测量值现算的结论，不含延迟优先模式的迟滞：节点真的换过去还要满足迟滞的条件。
+
+### GET /networks/{network}/tests
+
+最近的测试，新的在前，应答是 `TestView` 的数组。查询参数都可省略：`a` 和 `b`（只要这一对节点的，先后无所谓；要写就两个都写）、`limit`（默认 20，最多 200）。
+
+错误：`invalid_request`（只写了 `a`、`b` 中的一个）。
+
+### POST /networks/{network}/tests/{id}/cancel
+
+取消一个进行中的测试：两端随即停下，固定的路随即解除，已经有的结果留着。请求体可以不写。应答：`TestView`（`state` 是 `cancelled`）。
+
+错误：`not_found`、`busy`（测试已经结束了）。
+
+### POST /networks/{network}/tests/matrix
+
+开始一次全网矩阵：对网络里所有的节点对做直连能力和延迟测试（有直连时延迟测在直连上，没有时测在默认会经的 relay 上），分批进行，同时最多 4 个测试，不量吞吐、不算选路。每一对是一个普通的测试（`matrix` 是这次矩阵的编号），历史里看得到。节点不在线、版本太旧、访问规则没有连通的节点对不测，格子里写明原因。同一对节点刚单独测过的，等它过了间隔再测。请求体可以不写。
+
+应答：`201`，`MatrixRun`：
+
+```json
+{
+  "id": 3, "network": 1, "state": "running", "started_at": 1794798564, "finished_at": null,
+  "concurrency": 4, "total": 10, "finished": 2,
+  "nodes": [ { "id": 1, "name": "r", "virtual_ip": "10.66.0.1" }, "…" ],
+  "cells": [
+    { "a": 2, "b": 3, "state": "done", "test": 40, "direct_ok": true, "direct_kind": "punched", "direct_elapsed_ms": 640,
+      "route": { "via": "direct", "addr": "203.0.113.7:20330" }, "latency": { "probes": 100, "answered": 100, "…": "同 Latency" }, "problem": null },
+    { "a": 3, "b": 5, "state": "done", "test": 41, "direct_ok": false, "direct_kind": null, "direct_elapsed_ms": null,
+      "route": { "via": "relay", "relays": [1] }, "latency": { "…": "…" },
+      "problem": { "code": "mapping_varies", "node": 5, "message": "端口映射随对端变化，打不了洞" } },
+    { "a": 4, "b": 6, "state": "skipped", "test": null, "direct_ok": null, "direct_kind": null, "direct_elapsed_ms": null,
+      "route": null, "latency": null, "problem": { "code": "node_offline", "node": 6, "message": "节点不在线" } }
+  ]
+}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `state` | `running`、`done`、`cancelled` |
+| `concurrency` | 同时最多跑几个测试 |
+| `total`、`finished` | 一共几对，已经有结果（包括没有测的）的几对 |
+| `nodes` | 开始时网络里的节点 |
+| `cells[]` | 每一对一格，`a` 的编号小于 `b`。`state`：`pending`、`running`、`done`、`failed`、`skipped`、`cancelled`；`test` 是这一对的测试（细节用 `GET …/tests/{id}` 看）；`direct_ok`、`direct_kind`、`direct_elapsed_ms` 是直连能力；`route` 和 `latency` 是延迟测在哪条路径上、量到多少；`problem` 是原因 |
+
+错误：`busy`（这个网络正在跑一次矩阵）、`too_soon`（上一次开始不到 60 秒）。
+
+### GET /networks/{network}/tests/matrix
+
+这个网络最近一次全网矩阵，`MatrixRun`。矩阵只在 controller 的内存里：controller 重启之后没有了（每一对的结果还在各自的测试里）。
+
+错误：`not_found`（这次启动以来还没有跑过矩阵）。
+
+### POST /networks/{network}/tests/matrix/cancel
+
+取消正在跑的全网矩阵：正在跑的测试被取消，还没开始的不再开始。应答：`MatrixRun`。错误：`not_found`、`busy`（已经结束了）。

@@ -3,7 +3,7 @@
 //! 这些由控制任务（[`crate::control`]）写，由收发包的路径读。发包时只查"现在走哪条路"这一个结果，不做别的判断
 //! （docs/architecture.md §5.4）。
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -14,6 +14,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use i3t_model::control::Signal;
 use i3t_proto::NodeId;
 use i3t_proto::datagram::{RelayHeader, RouteHeader};
+use i3t_proto::probe::TestId;
 use i3t_underlay::lan::LanDiscovery;
 use i3t_underlay::tcp_leg::FrameSender;
 use i3t_underlay::{Ecn, Transmit, UdpPort};
@@ -305,29 +306,40 @@ impl PeerSlot {
 
     /// 从 `hop` 这条路发一个包。尽力而为：发不出去就算了。
     fn emit(&self, shared: &Shared, hop: &Hop, scratch: &mut Vec<u8>, packet: &[u8]) {
-        let packets = Packets { contents: packet, segment_size: None, ecn: None };
-        match hop {
-            Hop::None => {}
-            Hop::Direct(addr) => {
-                let _sent = shared.port.send_or_drop(&Transmit { destination: *addr, contents: packet, segment_size: None, ecn: None });
-            }
-            Hop::RelayUdp { addr, header, .. } => {
-                let _sent = shared.port.send_or_drop(&framed(header.as_slice(), scratch, &packets, *addr));
-            }
-            Hop::RelayTcp { sender, header, .. } => {
-                let _queued = sender.try_send(frame(header.as_slice(), packet));
-            }
-            Hop::Local => {
-                let transmit = framed(&self.header(shared), scratch, &packets, shared.port.local_addr());
-                if let Some(relay) = shared.local_relay.get() {
-                    relay.send_to_client(self.id, transmit.contents, transmit.segment_size, transmit.ecn);
-                }
-            }
-        }
+        emit(shared, self.id, hop, scratch, packet);
     }
 
     fn header(&self, shared: &Shared) -> [u8; RelayHeader::LEN] {
         RelayHeader { dst: self.id, src: shared.me }.to_bytes()
+    }
+}
+
+/// 从 `hop` 这条路给对端 `peer` 发路径层自己的一个帧，不管这条路是不是它现在走的。主动测试从指定的路径回答探测时用它。
+/// 尽力而为：发不出去就算了。
+pub(crate) fn send_frame_via(shared: &Shared, peer: NodeId, hop: &Hop, frame: &[u8]) {
+    emit(shared, peer, hop, &mut Vec::new(), frame);
+}
+
+fn emit(shared: &Shared, peer: NodeId, hop: &Hop, scratch: &mut Vec<u8>, packet: &[u8]) {
+    let packets = Packets { contents: packet, segment_size: None, ecn: None };
+    match hop {
+        Hop::None => {}
+        Hop::Direct(addr) => {
+            let _sent = shared.port.send_or_drop(&Transmit { destination: *addr, contents: packet, segment_size: None, ecn: None });
+        }
+        Hop::RelayUdp { addr, header, .. } => {
+            let _sent = shared.port.send_or_drop(&framed(header.as_slice(), scratch, &packets, *addr));
+        }
+        Hop::RelayTcp { sender, header, .. } => {
+            let _queued = sender.try_send(frame(header.as_slice(), packet));
+        }
+        Hop::Local => {
+            let header = RelayHeader { dst: peer, src: shared.me }.to_bytes();
+            let transmit = framed(&header, scratch, &packets, shared.port.local_addr());
+            if let Some(relay) = shared.local_relay.get() {
+                relay.send_to_client(peer, transmit.contents, transmit.segment_size, transmit.ecn);
+            }
+        }
     }
 }
 
@@ -385,6 +397,8 @@ pub(crate) struct Shared {
     pub(crate) status: Mutex<Status>,
     /// 局域网发现。绑在具体地址上的端口（测试）不自动开，要调用方明确要求。
     pub(crate) lan: Mutex<Option<LanDiscovery>>,
+    /// 打开着的主动测试和它们的对端。收包路径凭它把不属于任何测试的测试探测当场丢掉，不进控制任务的队列。
+    pub(crate) open_tests: RwLock<HashSet<(TestId, NodeId)>>,
 }
 
 impl Shared {
@@ -400,9 +414,14 @@ impl Shared {
     pub(crate) fn queue_frame(&self, from: SocketAddr, frame: Inbound) -> bool {
         let queue = match frame {
             Inbound::Session(_) | Inbound::Refusal(..) | Inbound::Row(_) => &self.from_relays,
-            Inbound::Probe(_) | Inbound::AddrReply(_) | Inbound::PathProbe { .. } => &self.from_peers,
+            Inbound::Probe(_) | Inbound::AddrReply(_) | Inbound::PathProbe { .. } | Inbound::Test { .. } => &self.from_peers,
         };
         queue.try_send(Ctrl::Frame { from, frame }).is_ok()
+    }
+
+    /// 有没有和 `peer` 之间编号是 `test` 的测试打开着。
+    pub(crate) fn expects_test(&self, test: TestId, peer: NodeId) -> bool {
+        self.open_tests.read().expect("open tests lock poisoned").contains(&(test, peer))
     }
 
     pub(crate) fn send_signal(&self, to: NodeId, signal: &Signal) {
@@ -437,6 +456,7 @@ impl Shared {
             route_changed: Notify::new(),
             status: Mutex::new(Status::default()),
             lan: Mutex::new(None),
+            open_tests: RwLock::default(),
         });
         (shared, [ctrl_rx, from_relays_rx, from_peers_rx])
     }
