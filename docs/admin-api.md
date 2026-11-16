@@ -18,6 +18,7 @@
 >   节点的 `update.status.cause`（`failed` 时）、`update.failure.cause`。
 > - 独占 TCP（第 12 节）：`PairLaneSide.reported_secs_ago`（两边的计数是多少秒之前报的）、`LaneEffect.opening`（`udp_fallback` 时两个节点
 >   各自开新的 TCP 流现在走不走独占 TCP）、`PeerLanes.udp_path`；节点详情 `NodeDetail.reported_secs_ago`（第 5 节）。
+> - 节点多了 `country`（第 5 节）：公网地址所在的国家或地区，ISO 3166-1 的两个大写字母，controller 查程序自带的离线地址库（DB-IP 的 IP to Country Lite，CC BY 4.0）得出；不知道时是 `null`。
 > - 节点协议没有升版：节点上报里新加的（`PeerLanes.udp_path`、监听状态和更新进度的 `cause`、路由回答里的 `cause`）都可以没有，
 >   旧的 controller 忽略它们，旧的节点不报。
 >
@@ -514,7 +515,8 @@ controller 自己的情况。也用来检查地址和令牌对不对。
     "waiting": null,
     "failure": null
   },
-  "attached": []
+  "attached": [],
+  "country": "JP"
 }
 ```
 
@@ -544,6 +546,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `hostname` | 「新增」节点上报的主机名，原样；旧版本的节点不报，是 `""`。主机名后来变了，`name` 不跟着变 |
 | `update` | 「新增」这个节点的程序更新：能不能自己更新、有没有新版本、进行到哪一步。结构是 `NodeUpdate`，见第 14 节 |
 | `attached` | 「新增」节点挂靠的 relay（节点编号）和到它们的往返延迟（毫秒），取自它最近的上报；离线时是它离线前报的。以前只在节点详情里有，现在列表里也有：数"有几个节点挂靠在这个 relay 上"只要一次 `GET …/nodes` |
+| `country` | 「新增」公网地址（controller 看到的来源地址，详情里的 `observed_endpoint`）所在的国家或地区，ISO 3166-1 的两个大写字母（`"JP"`）。controller 查程序自带的离线地址库（DB-IP 的 IP to Country Lite，<https://db-ip.com>，CC BY 4.0），不联网。内网地址、从没连上过、库里没有时是 `null`；比这个文档旧的 controller 没有这个字段 |
 
 **能力的启用。** relay、出口和端口转发的目标都要节点先在本地声明（`declared` 里对应的字段是 `true`），管理员才能启用。没有声明时，启用的请求得到 `409 not_declared`，`message` 里写着要在节点上执行的命令（`i3t set can-relay on`、`i3t set can-exit on`、`i3t set can-forward on`）。界面上应当在 `declared` 里对应字段是 `false` 时把开关置灰并显示这个做法。节点撤回声明时，已经启用的能力随之关闭（`relay` 或 `exit` 变回 `null`，指向它的端口转发被停用），并在操作记录里留下 `node.*.withdrawn`；节点再声明回来，能力不会自己打开。
 

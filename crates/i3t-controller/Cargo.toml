@@ -10,6 +10,7 @@ description = "ice3tier 的 controller：存储、注册、访问规则编译、
 [dependencies]
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "query"] }
 base64.workspace = true
+flate2 = "1.1.11"
 hyper = { version = "1.12.0", features = ["http1", "server"] }
 hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
 i3t-crypto = { path = "../i3t-crypto" }
@@ -18,6 +19,7 @@ i3t-model = { path = "../i3t-model" }
 i3t-proto = { path = "../i3t-proto" }
 i3t-update = { path = "../i3t-update" }
 ipnet.workspace = true
+maxminddb = "0.33.0"
 ring.workspace = true
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 rustls.workspace = true

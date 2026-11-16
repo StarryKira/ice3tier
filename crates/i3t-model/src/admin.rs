@@ -285,6 +285,10 @@ pub struct Node {
     /// 以前只在节点详情里有；放进列表里，界面数"有几个节点挂靠在这个 relay 上"只要一次请求。
     #[serde(default)]
     pub attached: Vec<Attachment>,
+    /// 公网地址（controller 看到的来源地址）所在的国家或地区，ISO 3166-1 的两个大写字母（`"JP"`），
+    /// controller 查自带的离线地址库得出。内网地址、从没连上过、库里没有时是 `null`。
+    #[serde(default)]
+    pub country: Option<String>,
 }
 
 /// 一个节点的程序更新：能不能自己更新、有没有新版本、进行到哪一步。

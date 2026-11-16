@@ -42,6 +42,7 @@ mod controller;
 mod error;
 pub mod frame;
 mod gate;
+mod geo;
 pub mod netmap;
 pub mod node_server;
 mod reachability;

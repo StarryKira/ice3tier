@@ -454,6 +454,7 @@ impl Inner {
             hostname: record.hostname.clone(),
             update: self.node_update(record),
             attached: record.attached.clone(),
+            country: record.observed.and_then(|address| crate::geo::country(address.ip())),
         }
     }
 
