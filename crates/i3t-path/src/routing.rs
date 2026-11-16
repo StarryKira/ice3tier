@@ -12,9 +12,18 @@
 //!    头一次有路不算换路，所以连接刚建立时不用白等。
 //! 4. 挑"最低的"时，代价相差在 5% 以内的候选之间随机取两个，用路径上 relay 负载低的那个。
 //!    这样大家不会同时挤到同一个"最优"的 relay 上，又比纯随机更偏向空闲的。
+//!
+//! 下面两条白皮书里没有，是在真实链路上补的。一个只能走 TCP 的节点，到两个 relay 的链路都时好时坏：
+//! 坏的那一阵会话十来秒断一次，每次重连之后的头几个测量值都很漂亮。只按上面的规则，流量会每半分钟被换到
+//! 刚重连的那条路上，几秒之后它又断，再换回来。
+//!
+//! 5. 因为代价换路时，只换到入口 relay 的会话已经连续保持了一段时间的路上（[`SETTLE`]）。
+//!    原来的路断了要立刻换的时候不管这一条：有路总比没有强。
+//! 6. 换路之后没停留多久（不到停留期的两倍）又换，说明这两条路比不出高下：停留期加倍，最长 8 分钟。
+//!    在一条路上留满了停留期的两倍，下一次换路之后停留期回到 30 秒。
 
 use std::net::SocketAddr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use i3t_proto::NodeId;
 use i3t_proto::backbone::LinkQuality;
@@ -22,7 +31,7 @@ use i3t_proto::datagram::RelayPath;
 
 use crate::cost::{self, Segment};
 use crate::matrix::Matrix;
-use crate::timing::{MIN_DWELL, SWITCH_WINDOWS};
+use crate::timing::{MAX_DWELL, MIN_DWELL, SWITCH_WINDOWS};
 
 /// 新的路至少要便宜这么多毫秒……
 const SWITCH_MARGIN_MS: f64 = 5.0;
@@ -58,6 +67,18 @@ pub(crate) struct Candidate {
     pub(crate) load_percent: u8,
     /// 是局域网直连。
     pub(crate) lan: bool,
+    /// 可以因为代价换到这条路上：它的入口 relay 不是刚连上的（见模块文档第 5 条）。直连总是 `true`。
+    pub(crate) settled: bool,
+}
+
+/// 本节点现在能把包交给它的一个 relay：到它的会话是通的。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Entry {
+    pub(crate) relay: NodeId,
+    /// 到它的链路质量。
+    pub(crate) segment: Segment,
+    /// 到它的会话已经连续保持了 [`SETTLE`](crate::timing::SETTLE) 那么久。
+    pub(crate) settled: bool,
 }
 
 /// 到一个对端的直连，已经验证过、现在能用的。
@@ -73,8 +94,8 @@ pub(crate) struct Graph<'a> {
     pub(crate) me: NodeId,
     /// 一条路径最多经过几个 relay。
     pub(crate) max_hops: usize,
-    /// 本节点现在能把包交给它的 relay（会话是通的），和到它的链路质量。
-    pub(crate) entries: &'a [(NodeId, Segment)],
+    /// 本节点现在能把包交给它的 relay。
+    pub(crate) entries: &'a [Entry],
     pub(crate) matrix: &'a Matrix,
     pub(crate) now: Instant,
     /// 不能用的 relay：即将下线的、过载的。
@@ -103,13 +124,15 @@ pub(crate) fn candidates(graph: &Graph<'_>, dest: &Destination<'_>) -> Vec<Candi
             cost_ms: cost::path_cost(&[direct.segment], 0, 0.0),
             load_percent: 0,
             lan: direct.lan,
+            settled: true,
         });
     }
-    for &(entry, segment) in graph.entries {
-        if (graph.avoid)(entry) {
+    for entry in graph.entries {
+        if (graph.avoid)(entry.relay) {
             continue;
         }
-        let mut walk = Walk { relays: vec![entry], legs: vec![Leg { from: graph.me, to: entry, segment }] };
+        let first = Leg { from: graph.me, to: entry.relay, segment: entry.segment };
+        let mut walk = Walk { relays: vec![entry.relay], legs: vec![first], settled: entry.settled };
         walk.extend(graph, dest, &mut found);
     }
     found
@@ -119,6 +142,8 @@ pub(crate) fn candidates(graph: &Graph<'_>, dest: &Destination<'_>) -> Vec<Candi
 struct Walk {
     relays: Vec<NodeId>,
     legs: Vec<Leg>,
+    /// 入口 relay 的会话是不是已经稳定了。
+    settled: bool,
 }
 
 impl Walk {
@@ -138,6 +163,7 @@ impl Walk {
                 legs,
                 load_percent: loads.max().unwrap_or(0),
                 lan: false,
+                settled: self.settled,
             });
         }
         // 到了对端自己（它是 relay）就不再往前；本节点自己的 relay 只用来把包交给挂在它上面的对端，不从它再绕骨干。
@@ -196,6 +222,8 @@ pub(crate) struct Selector {
     current: Option<PathId>,
     /// 上一次从一条路换到另一条路的时刻。
     switched: Option<Instant>,
+    /// 那一次换路之后要停留多久；来回换的时候会加倍（见模块文档第 6 条）。
+    dwell: Duration,
     /// 正在考察的更便宜的路，和它已经连续赢了几个窗口。
     challenger: Option<(PathId, u8)>,
 }
@@ -236,8 +264,10 @@ impl Selector {
             return None;
         }
         let margin = (current.cost_ms * SWITCH_MARGIN_RATIO).max(SWITCH_MARGIN_MS);
-        let cheaper: Vec<&Candidate> =
-            candidates.iter().filter(|candidate| candidate.path != current.path && current.cost_ms - candidate.cost_ms >= margin).collect();
+        let cheaper: Vec<&Candidate> = candidates
+            .iter()
+            .filter(|candidate| candidate.settled && candidate.path != current.path && current.cost_ms - candidate.cost_ms >= margin)
+            .collect();
         let near = near_best(&cheaper);
         // 上一个窗口考察的那条路还在"明显更便宜"的一组里就接着数；不在了就从头数另一条。
         let (path, wins) = match self.challenger {
@@ -251,7 +281,7 @@ impl Selector {
             },
         };
         self.challenger = Some((path, wins));
-        let dwelled = self.switched.is_none_or(|at| now.saturating_duration_since(at) >= MIN_DWELL);
+        let dwelled = self.switched.is_none_or(|at| now.saturating_duration_since(at) >= self.dwell);
         let to_ms = near.iter().find(|candidate| candidate.path == path)?.cost_ms;
         if wins < SWITCH_WINDOWS || !dwelled {
             return None;
@@ -266,6 +296,8 @@ impl Selector {
             return None;
         }
         if self.current.is_some() && path.is_some() {
+            let again_soon = self.switched.is_some_and(|at| now.saturating_duration_since(at) < self.dwell * 2);
+            self.dwell = if again_soon { (self.dwell * 2).min(MAX_DWELL) } else { MIN_DWELL };
             self.switched = Some(now);
         }
         self.current = path;
@@ -296,8 +328,6 @@ fn two_choice<'a>(near: &[&'a Candidate], pick: &mut dyn FnMut(usize) -> usize) 
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use bytes::Bytes;
     use i3t_proto::backbone::{Link, RelayState, Row};
 
@@ -343,8 +373,12 @@ mod tests {
     struct Example {
         matrix: Matrix,
         now: Instant,
-        entries: Vec<(NodeId, Segment)>,
+        entries: Vec<Entry>,
         exits: Vec<(NodeId, Option<Segment>)>,
+    }
+
+    fn entry(relay: u32, segment: Segment) -> Entry {
+        Entry { relay: node(relay), segment, settled: true }
     }
 
     impl Example {
@@ -356,7 +390,7 @@ mod tests {
             Self {
                 matrix,
                 now,
-                entries: vec![(node(B), segment(35.0, 0.2)), (node(C), segment(200.0, 3.0))],
+                entries: vec![entry(B, segment(35.0, 0.2)), entry(C, segment(200.0, 3.0))],
                 exits: vec![(node(C), Some(segment(8.0, 0.0))), (node(B), Some(segment(170.0, 0.5)))],
             }
         }
@@ -469,7 +503,7 @@ mod tests {
             let links: Vec<(u32, u16, u8)> = ids.iter().filter(|&&other| other != origin).map(|&other| (other, 10, 0)).collect();
             row(&mut matrix, origin, 0, &links, now);
         }
-        let entries = [(node(11), segment(5.0, 0.0))];
+        let entries = [entry(11, segment(5.0, 0.0))];
         let exits = [(node(15), Some(segment(5.0, 0.0)))];
         let count = |max_hops| {
             let graph = Graph { me: node(A), max_hops, entries: &entries, matrix: &matrix, now, avoid: &|_| false, broken: &|_, _| false };
@@ -493,7 +527,7 @@ mod tests {
         row(&mut matrix, D, 0, &[(C, 10, 0)], now);
         row(&mut matrix, A, 0, &[(B, 5, 0)], now);
         // 对端 D 自己是 relay；本节点 A 也是 relay，D 在 A 上有会话。
-        let entries = [(node(B), segment(20.0, 0.0)), (node(D), segment(60.0, 0.0)), (node(A), segment(0.0, 0.0))];
+        let entries = [entry(B, segment(20.0, 0.0)), entry(D, segment(60.0, 0.0)), entry(A, segment(0.0, 0.0))];
         let exits = [(node(D), None), (node(A), Some(segment(60.0, 0.0)))];
         let graph = Graph { me: node(A), max_hops: 3, entries: &entries, matrix: &matrix, now, avoid: &|_| false, broken: &|_, _| false };
         let found = candidates(&graph, &Destination { id: node(D), exits: &exits, direct: None });
@@ -504,7 +538,7 @@ mod tests {
     }
 
     fn candidate(path: PathId, cost_ms: f64) -> Candidate {
-        Candidate { path, legs: Vec::new(), cost_ms, load_percent: 0, lan: false }
+        Candidate { path, legs: Vec::new(), cost_ms, load_percent: 0, lan: false, settled: true }
     }
 
     /// 从 `start` 起每个评估窗口调用一次，返回第几个窗口（从 1 数）换了路。
@@ -588,6 +622,104 @@ mod tests {
         let back = windows_until_switch(&mut selector, switched, &towards_first, 20).unwrap();
         assert_eq!(EVAL_WINDOW * back, MIN_DWELL, "换回去发生在停留满 30 秒的时候，而不是 15 秒");
         assert_eq!(selector.current(), Some(first_path));
+    }
+
+    /// 两条路轮流显得更便宜：在哪条上，另一条就便宜一半。从 `start` 起每个评估窗口调用一次，
+    /// 返回头 `count` 次换路各自离上一次换路（头一次是离 `start`）多久。
+    fn gaps_between_switches(selector: &mut Selector, start: Instant, count: usize) -> Vec<Duration> {
+        let (one, two) = (relays(&[B]), relays(&[C]));
+        let mut last = start;
+        let mut gaps = Vec::new();
+        for window in 1u32.. {
+            let now = start + EVAL_WINDOW * window;
+            let cost = |path| if selector.current() == Some(path) { 200.0 } else { 100.0 };
+            let options = [candidate(one, cost(one)), candidate(two, cost(two))];
+            if selector.choose(now, &options, true, &mut first).is_some() {
+                gaps.push(now.saturating_duration_since(last));
+                last = now;
+            }
+            if gaps.len() == count {
+                break;
+            }
+        }
+        gaps
+    }
+
+    #[test]
+    fn two_paths_that_keep_trading_places_are_switched_between_less_and_less_often() {
+        let start = Instant::now();
+        let mut selector = Selector::default();
+        selector.choose(start, &[candidate(relays(&[B]), 100.0)], true, &mut first);
+
+        let seconds: Vec<u64> = gaps_between_switches(&mut selector, start, 7).iter().map(Duration::as_secs).collect();
+        // 头一次换路只等三个评估窗口；之后每一次都紧跟着停留期满，所以停留期一路加倍到上限。
+        assert_eq!(seconds, [15, 30, 60, 120, 240, 480, 480]);
+    }
+
+    #[test]
+    fn keeping_a_route_for_twice_its_dwell_brings_the_dwell_back_to_thirty_seconds() {
+        let start = Instant::now();
+        let (one, two) = (relays(&[B]), relays(&[C]));
+        let mut selector = Selector::default();
+        selector.choose(start, &[candidate(one, 100.0)], true, &mut first);
+        let gaps = gaps_between_switches(&mut selector, start, 3);
+        assert_eq!(gaps[2], MIN_DWELL * 2, "来回换了几次，停留期已经是 60 秒");
+        let switched = start + gaps.iter().sum::<Duration>();
+        let on = selector.current().unwrap();
+        let off = if on == one { two } else { one };
+
+        // 这一次两条路一样好，安安稳稳留了很久（超过停留期的两倍）……
+        let quiet = switched + MIN_DWELL * 8;
+        let level = [candidate(on, 100.0), candidate(off, 100.0)];
+        assert_eq!(windows_until_switch(&mut selector, switched, &level, 48), None);
+        // ……之后另一条路真的变好了：换过去，并且这一次换路之后的停留期是从头算的 30 秒。
+        let better = [candidate(on, 200.0), candidate(off, 100.0)];
+        assert_eq!(windows_until_switch(&mut selector, quiet, &better, 10), Some(3));
+        let there = quiet + EVAL_WINDOW * 3;
+        let back = [candidate(on, 100.0), candidate(off, 200.0)];
+        assert_eq!(windows_until_switch(&mut selector, there, &back, 40).map(|windows| EVAL_WINDOW * windows), Some(MIN_DWELL));
+    }
+
+    #[test]
+    fn a_path_through_a_relay_that_just_connected_is_not_switched_to_on_cost() {
+        let start = Instant::now();
+        let (steady, fresh) = (relays(&[B]), relays(&[C]));
+        let mut selector = Selector::default();
+        selector.choose(start, &[candidate(steady, 500.0)], true, &mut first);
+
+        // 刚重连的 relay 头几个测量值很漂亮，但它还没有证明自己稳得住：便宜再多也不换。
+        let unsettled = [candidate(steady, 500.0), Candidate { settled: false, ..candidate(fresh, 50.0) }];
+        assert_eq!(windows_until_switch(&mut selector, start, &unsettled, 20), None);
+        // 会话保持够久之后和别的候选一样比，而且要从这时起连续赢三个窗口。
+        let later = start + EVAL_WINDOW * 20;
+        assert_eq!(windows_until_switch(&mut selector, later, &[candidate(steady, 500.0), candidate(fresh, 50.0)], 10), Some(3));
+    }
+
+    #[test]
+    fn a_path_through_a_relay_that_just_connected_is_still_taken_when_the_current_one_dies() {
+        let start = Instant::now();
+        let (steady, fresh) = (relays(&[B]), relays(&[C]));
+        let mut selector = Selector::default();
+        selector.choose(start, &[candidate(steady, 500.0)], true, &mut first);
+        let only_fresh = [Candidate { settled: false, ..candidate(fresh, 50.0) }];
+        assert_eq!(selector.choose(start + Duration::from_millis(50), &only_fresh, false, &mut first), Some(Why::Failover));
+        assert_eq!(selector.current(), Some(fresh));
+    }
+
+    #[test]
+    fn a_route_that_dies_right_after_being_chosen_is_not_returned_to_for_twice_as_long() {
+        let start = Instant::now();
+        let (steady, flaky) = (relays(&[B]), relays(&[C]));
+        let mut selector = Selector::default();
+        selector.choose(start, &[candidate(steady, 200.0)], true, &mut first);
+        let both = [candidate(steady, 200.0), candidate(flaky, 100.0)];
+        assert_eq!(windows_until_switch(&mut selector, start, &both, 10), Some(3));
+        // 换过去 3 秒它就断了：立刻换回来。
+        let died = start + EVAL_WINDOW * 3 + Duration::from_secs(3);
+        assert_eq!(selector.choose(died, &[candidate(steady, 200.0)], false, &mut first), Some(Why::Failover));
+        // 它重连之后又显得更便宜。这一回要等 60 秒而不是 30 秒才会再换过去。
+        let back = windows_until_switch(&mut selector, died, &both, 40).unwrap();
+        assert_eq!(EVAL_WINDOW * back, MIN_DWELL * 2);
     }
 
     #[test]

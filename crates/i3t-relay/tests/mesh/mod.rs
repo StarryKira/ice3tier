@@ -274,7 +274,12 @@ impl Node {
 
     /// 等到 `peer` 的路满足 `wanted` 为止。
     pub async fn wait_route(&self, peer: &Node, what: &str, wanted: impl Fn(&Route) -> bool) -> Route {
-        let deadline = Instant::now() + 3 * SOON;
+        self.wait_route_within(3 * SOON, peer, what, wanted).await
+    }
+
+    /// 同 [`wait_route`](Self::wait_route)，最多等 `limit`。
+    pub async fn wait_route_within(&self, limit: Duration, peer: &Node, what: &str, wanted: impl Fn(&Route) -> bool) -> Route {
+        let deadline = Instant::now() + limit;
         loop {
             let route = self.route_to(peer);
             if wanted(&route) {

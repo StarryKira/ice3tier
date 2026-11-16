@@ -16,7 +16,7 @@ use super::{PeerState, RelayEntry};
 use crate::cost::Segment;
 use crate::matrix::Matrix;
 use crate::relays::Leg;
-use crate::routing::{self, Candidate, Destination, DirectLink, Graph, PathId, Why};
+use crate::routing::{self, Candidate, Destination, DirectLink, Entry, Graph, PathId, Why};
 use crate::table::{FrameHeader, Hop, Shared};
 use crate::tcp::TcpLegHandle;
 use crate::timing::SWITCH_WINDOWS;
@@ -56,8 +56,8 @@ pub(super) struct View<'a> {
     pub(super) legs: &'a HashMap<NodeId, TcpLegHandle>,
     pub(super) matrix: &'a Matrix,
     pub(super) broken: &'a [(NodeId, NodeId, Instant)],
-    /// 本节点现在能把包交给它的 relay（会话是通的、延迟测出来了），和到它的链路质量。
-    pub(super) entries: &'a [(NodeId, Segment)],
+    /// 本节点现在能把包交给它的 relay（会话是通的、延迟测出来了）。
+    pub(super) entries: &'a [Entry],
     pub(super) allow_direct: bool,
     pub(super) allow_relay: bool,
     pub(super) max_hops: usize,
@@ -122,14 +122,14 @@ impl View<'_> {
                 .map_or_else(|| Segment::from_rtt_ms(rtt.get().as_secs_f64() * 1000.0), |quality| quality.segment()),
             lan: peer.direct.is_lan_active(),
         });
-        let mut entries: Vec<(NodeId, Segment)> = Vec::new();
+        let mut entries: Vec<Entry> = Vec::new();
         let mut exits: Vec<(NodeId, Option<Segment>)> = Vec::new();
         if self.allow_relay {
             entries.extend_from_slice(self.entries);
             let local = self.local_session(id);
             if local {
-                // 对端挂在本节点自己的 relay 上：包直接交给它的会话，本节点这一头没有延迟。
-                entries.push((me, Segment::from_rtt_ms(0.0)));
+                // 对端挂在本节点自己的 relay 上：包直接交给它的会话，本节点这一头没有延迟，也没有会断的会话。
+                entries.push(Entry { relay: me, segment: Segment::from_rtt_ms(0.0), settled: true });
             }
             for attachment in peer.attached.iter().filter(|attachment| attachment.relay != id && (attachment.relay != me || local)) {
                 exits.push((attachment.relay, Some(Segment::from_rtt_ms(f64::from(attachment.rtt_ms)))));
@@ -391,7 +391,8 @@ mod tests {
     fn every_cost_based_decision_is_explained_with_the_numbers_behind_it() {
         let direct = RouteKey::Direct(addr("203.0.113.7:4000"));
         let two_hops = RouteKey::Relay { path: path(&[8, 9]), via: Via::Udp(addr("198.51.100.8:20330")) };
-        let candidate = |path: PathId, cost_ms: f64| Candidate { path, legs: Vec::new(), cost_ms, load_percent: 0, lan: false };
+        let candidate =
+            |path: PathId, cost_ms: f64| Candidate { path, legs: Vec::new(), cost_ms, load_percent: 0, lan: false, settled: true };
         let candidates = [candidate(PathId::Relays(path(&[8, 9])), 185.8), candidate(PathId::Direct(addr("203.0.113.7:4000")), 201.4)];
 
         assert_eq!(

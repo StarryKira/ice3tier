@@ -78,7 +78,17 @@ pub(crate) struct Session {
 
 impl Session {
     pub(crate) const fn new() -> Self {
-        Self { state: State::Idle, estimate: Estimate::new(), train: Train::new(), training: false, interval: PROBE_INTERVAL }
+        Self::resuming(Estimate::new())
+    }
+
+    /// 同一段链路上重新建的会话：接着用上一个会话留下的测量值（见 [`measured`](Self::measured)）。
+    pub(crate) const fn resuming(estimate: Estimate) -> Self {
+        Self { state: State::Idle, estimate, train: Train::new(), training: false, interval: PROBE_INTERVAL }
+    }
+
+    /// 这段链路上测到的全部结果。会话没了之后链路还是那一段，留给下一个会话接着用。
+    pub(crate) const fn measured(&self) -> &Estimate {
+        &self.estimate
     }
 
     pub(crate) const fn set_interval(&mut self, interval: Duration) {

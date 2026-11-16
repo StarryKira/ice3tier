@@ -96,6 +96,10 @@ pub(crate) const EVAL_WINDOW: Duration = Duration::from_secs(5);
 pub(crate) const SWITCH_WINDOWS: u8 = 3;
 /// 因为代价换过一次路之后至少停留多久。
 pub(crate) const MIN_DWELL: Duration = Duration::from_secs(30);
+/// 两条路来回换的时候停留期每次加倍，最长到这么久。
+pub(crate) const MAX_DWELL: Duration = Duration::from_secs(480);
+/// 到一个 relay 的会话要连续保持这么久，才会因为代价换到经它的路上。
+pub(crate) const SETTLE: Duration = MIN_DWELL;
 /// relay 多久把骨干矩阵发给它的会话一次。状态变了的时候不等这个间隔。
 pub(crate) const ROW_INTERVAL: Duration = Duration::from_secs(5);
 /// 延迟优先模式下，入口 relay 只在离本节点最近的这么多个里选（白皮书 §7.1），为的是限制探测量。

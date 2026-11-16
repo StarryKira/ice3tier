@@ -33,12 +33,11 @@ use i3t_underlay::{AddrQuery, ifaddr};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use self::route::{RouteKey, Via, View, describe, explain, relay_candidates, route_text};
-use crate::cost::Segment;
 use crate::direct::{Action, Change, DirectPath, Policy};
 use crate::matrix::Matrix;
 use crate::relays::{self, Complaint, Identity, Leg, RelayLink, Standing, Wire};
 use crate::report::{BackboneLink, BackboneRow, CandidateReport, LegReport, PathReport};
-use crate::routing::{Candidate, PathId, Selector};
+use crate::routing::{Candidate, Entry, PathId, Selector};
 use crate::table::{self, Hop, PeerSlot, RelaySlot, Shared};
 use crate::tcp::{self, TcpEvent, TcpLegHandle};
 use crate::timing::{BACKBONE_PROBE_INTERVAL, ENTRY_RELAYS, EVAL_WINDOW, MAX_TIMEOUTS, PROBE_INTERVAL, ROW_INTERVAL, Rtt, TICK};
@@ -996,13 +995,15 @@ impl Control {
     /// 返回有没有变化。
     fn update_routes(&mut self, now: Instant, window: bool) -> bool {
         self.broken.retain(|(_, _, until)| now < *until);
-        let mut entries: Vec<(NodeId, Segment)> = self
+        let mut entries: Vec<Entry> = self
             .relays
             .iter()
             .filter(|(_, entry)| entry.link.leg().is_some())
-            .filter_map(|(&id, entry)| Some((id, entry.link.quality(now)?.segment())))
+            .filter_map(|(&relay, entry)| {
+                Some(Entry { relay, segment: entry.link.quality(now)?.segment(), settled: entry.link.is_settled(now) })
+            })
             .collect();
-        entries.sort_unstable_by_key(|(id, _)| *id);
+        entries.sort_unstable_by_key(|entry| entry.relay);
         let Self { shared, key, relays, legs, peers, matrix, broken, allow_direct, allow_relay, mode, max_hops, .. } = self;
         let view = View {
             shared,
