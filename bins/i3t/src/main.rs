@@ -7,6 +7,7 @@ use anyhow::{Context, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use i3t_agent::config::{Capability, Config};
 use i3t_agent::join::{JoinOptions, join};
+use i3t_agent::node::{self, Source};
 use i3t_agent::state::StateDir;
 
 #[derive(Parser)]
@@ -32,6 +33,12 @@ enum Command {
         /// 声明这台机器可以作为端口转发的目标
         #[arg(long)]
         can_forward: bool,
+    },
+    /// 运行节点。通常由系统服务启动
+    Run {
+        /// 测试用：不连 controller，从这个 JSON 文件读 netmap
+        #[arg(long, value_name = "文件")]
+        r#static: Option<PathBuf>,
     },
     /// 修改本机的声明，例如：i3t set can-exit on
     Set {
@@ -68,6 +75,13 @@ fn main() -> anyhow::Result<()> {
             println!("  配置文件  {}", state.config_path().display());
             println!("执行 i3t run 启动节点。");
         }
+        Command::Run { r#static } => {
+            let config = Config::load(&state.config_path())?;
+            init_logging(config.log.level.as_str());
+            let source = r#static.map_or(Source::Controller, Source::Static);
+            let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().context("启动运行时")?;
+            runtime.block_on(node::run(state, source, shutdown_signal()))?;
+        }
         Command::Set { capability, state: switch } => {
             let on = matches!(switch, Switch::On);
             Config::set_declared(&state.config_path(), capability, on)?;
@@ -79,6 +93,41 @@ fn main() -> anyhow::Result<()> {
         Command::Status => print_status(&state)?,
     }
     Ok(())
+}
+
+/// 日志写到标准错误。级别来自配置文件，可以用环境变量 `I3T_LOG` 临时覆盖（写法同 `RUST_LOG`，可以按模块设）。
+fn init_logging(level: &str) {
+    let filter = std::env::var("I3T_LOG").unwrap_or_else(|_| level.to_owned());
+    let filter = tracing_subscriber::EnvFilter::try_new(&filter).unwrap_or_else(|err| {
+        eprintln!("环境变量 I3T_LOG 的值 {filter:?} 看不懂（{err}），改用配置文件里的级别 {level}");
+        tracing_subscriber::EnvFilter::new(level)
+    });
+    tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).init();
+}
+
+/// 收到 Ctrl-C，或者（Unix 上）收到 SIGTERM 时完成。
+async fn shutdown_signal() {
+    let interrupt = tokio::signal::ctrl_c();
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = interrupt => {}
+                    _ = terminate.recv() => {}
+                }
+            }
+            Err(err) => {
+                tracing::warn!("装不上 SIGTERM 的处理（{err}），只响应 Ctrl-C");
+                let _ = interrupt.await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = interrupt.await;
+    }
 }
 
 fn print_status(state: &StateDir) -> anyhow::Result<()> {

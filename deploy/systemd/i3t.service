@@ -1,5 +1,7 @@
 [Unit]
 Description=ice3tier node
+# 更新失败回退时会连续重启几次，不能被 systemd 默认的启动次数限制（10 秒内 5 次）拦住。
+StartLimitIntervalSec=0
 Documentation=https://github.com/fuqiuluo/ice3tier
 After=network-online.target
 Wants=network-online.target
