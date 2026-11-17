@@ -388,7 +388,7 @@ test('启用出口：节点没有声明时说明原因和要执行的命令，�
   // 节点详情页：开关是灰的，旁边写着原因；"怎么声明"点开是要在那台机器上执行的命令。
   await goTo(page, t.nav.nodes)
   await page.getByRole('link', { name: server.name, exact: true }).click()
-  await page.getByRole('tab', { name: t.nodes.detail.tabSettings }).click()
+  await page.getByRole('tab', { name: t.nodes.detail.tabExit }).click()
   const exitRow = page.getByTestId('capability-exit')
   const exitSwitch = exitRow.getByRole('switch', { name: t.nodes.detail.exitSwitch(server.name) })
   await expect(exitSwitch).toBeDisabled()

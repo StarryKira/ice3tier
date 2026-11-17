@@ -58,7 +58,7 @@ export const planned = {
   meanwhile: '目前',
   tests: {
     title: '连通性测试',
-    summary: '由 controller 对节点对发起测试：能否直连，直连与经 relay 的延迟，并保留历史。',
+    summary: '由 controller 对节点对发起测试：能否直连，直连与经中继的延迟，并保留历史。',
     needs: '缺少接口：发起测试、读取结果',
     meanwhile: '单对节点见「路径诊断」，全网见「拓扑」',
   },

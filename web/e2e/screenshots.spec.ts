@@ -467,7 +467,7 @@ test('有数据时：节点详情', async () => {
   await page.getByRole('link', { name: 'gw-hk', exact: true }).click()
   await expect(page.getByRole('combobox', { name: d.groups })).toBeVisible()
   await shot('node-detail-overview')
-  await page.getByRole('tab', { name: d.tabSettings }).click()
+  await page.getByRole('tab', { name: d.tabRelay }).click()
   await expect(page.getByTestId('capability-relay')).toBeVisible()
   await shot('node-detail-relay')
   // 保存 relay 的设置：controller 从自己这边试连填的地址（203.0.113.7 是文档用的地址，连不上），写出建议。
@@ -479,14 +479,16 @@ test('有数据时：节点详情', async () => {
 
   await goTo(page, t.nav.nodes)
   await page.getByRole('link', { name: 'nas-home', exact: true }).click()
-  await page.getByRole('tab', { name: d.tabSettings }).click()
+  await page.getByRole('tab', { name: d.tabExit }).click()
   await expect(page.getByTestId('capability-exit')).toBeVisible()
-  await page.getByText(d.advanced, { exact: true }).click()
-  await shot('node-detail-exit-and-advanced')
+  await shot('node-detail-exit')
+  await page.getByRole('tab', { name: d.tabForward }).click()
+  await expect(page.getByTestId('capability-forward')).toBeVisible()
+  await shot('node-detail-forward')
 
   await goTo(page, t.nav.nodes)
   await page.getByRole('link', { name: 'laptop', exact: true }).click()
-  await page.getByRole('tab', { name: d.tabSettings }).click()
+  await page.getByRole('tab', { name: d.tabExit }).click()
   await page.getByTestId('capability-exit').getByRole('button', { name: t.declare.howTo }).click()
   await expect(page.getByTestId('declare-command')).toBeVisible()
   await shot('node-detail-not-declared')
@@ -958,14 +960,13 @@ test('英文：长度最要紧的几页', async ({ browser }) => {
   await enShot('nodes')
 
   await english.getByRole('link', { name: 'gw-hk', exact: true }).click()
-  await english.getByRole('tab', { name: en.nodes.detail.tabSettings }).click()
+  await english.getByRole('tab', { name: en.nodes.detail.tabRelay }).click()
   await expect(english.getByTestId('capability-relay')).toBeVisible()
   await enShot('node-detail-relay')
 
-  await english.goto(`${controller.baseUrl}/n/1/nodes/2?tab=settings`)
+  await english.goto(`${controller.baseUrl}/n/1/nodes/2?tab=exit`)
   await expect(english.getByTestId('capability-exit')).toBeVisible()
-  await english.getByText(en.nodes.detail.advanced, { exact: true }).click()
-  await enShot('node-detail-exit-and-advanced')
+  await enShot('node-detail-exit')
 
   await english.goto(`${controller.baseUrl}/n/1/nodes`)
   await english.getByRole('button', { name: en.nodes.add }).click()

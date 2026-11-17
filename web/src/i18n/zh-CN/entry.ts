@@ -412,8 +412,8 @@ export const pairs = {
   /** 独占 TCP（lane）：设置、起不起作用、两个节点报的计数。 */
   lane: {
     title: '独占 TCP',
-    tip: '承载 TCP 连接的流各用一条自己的 TCP，不共用这对节点之间的连接。需要其中一个节点启用 relay。',
-    hint: '需要其中一个节点启用 relay',
+    tip: '承载 TCP 连接的流各用一条自己的 TCP，不共用这对节点之间的连接。需要其中一个节点启用中继。',
+    hint: '需要其中一个节点启用中继',
     modes: { off: '不用', udp_fallback: 'UDP 不通时用', always: '总是用' },
     select: (a: string, b: string) => `${a} 和 ${b} 之间的独占 TCP`,
     changed: (a: string, b: string, mode: string) => `${a} ⇄ ${b} 的独占 TCP 已改为${mode}`,
@@ -430,13 +430,13 @@ export const pairs = {
     colDialFailures: '拨号失败',
     countsTip: '两个节点自启动以来的累计',
     reason: {
-      noRelay: (a: string, b: string) => `${a} 和 ${b} 都没有启用 relay`,
-      noTcpAddress: (node: string) => `${node} 的 relay 没有 TCP 地址`,
+      noRelay: (a: string, b: string) => `${a} 和 ${b} 都没有启用中继`,
+      noTcpAddress: (node: string) => `${node} 的中继没有 TCP 地址`,
       nodeTooOld: (node: string) => `${node} 的版本不支持独占 TCP`,
       notConnected: (a: string, b: string) => `访问规则没有连通 ${a} 和 ${b}`,
     },
     fix: {
-      enableRelay: (node: string) => `在 ${node} 上启用 relay`,
+      enableRelay: (node: string) => `在 ${node} 上启用中继`,
       tcpAddress: (node: string) => `为 ${node} 填写 TCP 地址`,
       update: (node: string) => `更新 ${node}`,
       access: '检查访问',

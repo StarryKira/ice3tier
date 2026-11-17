@@ -33,6 +33,7 @@ import { platformLabel } from '@/lib/platform'
 import { countryName } from '@/lib/region'
 
 import { NodeGroupsEditor } from '../actions'
+import { AdvancedCard } from './AdvancedCard'
 
 const d = t.nodes.detail
 
@@ -191,12 +192,15 @@ interface OverviewTabProps extends TabProps {
   onEditIp: () => void
 }
 
-/** 概览：左边是只读的"它是什么"，右边是它在哪些分组里。能力和其他设置在"设置"那一页。 */
+/** 概览：左边是只读的"它是什么"；右边是它在哪些分组里，和怎么选路、连谁。relay、出口、端口转发各有一页。 */
 export function OverviewTab({ network, node, onEditIp }: OverviewTabProps) {
   return (
     <div className="grid grid-cols-1 items-start gap-x-8 gap-y-6 @4xl:grid-cols-2">
       <InfoCard network={network} node={node} onEditIp={onEditIp} />
-      <GroupsSection network={network} node={node} />
+      <div className="space-y-8">
+        <GroupsSection network={network} node={node} />
+        <AdvancedCard network={network} node={node} />
+      </div>
     </div>
   )
 }

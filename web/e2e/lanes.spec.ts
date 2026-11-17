@@ -232,7 +232,7 @@ test('两个节点都不是 relay：设置不起作用，说为什么，给出�
   const blocked = page.getByTestId('lane-blocked-laptop-nas')
   await expect(blocked).toContainText(l.reason.noRelay('laptop', 'nas'))
   const fix = blocked.getByRole('link', { name: l.fix.enableRelay('laptop') })
-  await expect(fix).toHaveAttribute('href', `/n/1/nodes/${nodes.laptop.id}?tab=settings`)
+  await expect(fix).toHaveAttribute('href', `/n/1/nodes/${nodes.laptop.id}?tab=relay`)
   await fix.click()
   await expect(page.getByTestId('capability-relay')).toBeVisible()
 })

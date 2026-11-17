@@ -7,7 +7,7 @@ import { t } from '@/i18n'
 import { makeNode } from '@/test/fixtures'
 import { fakeApi, NETWORK, renderWithApp } from '@/test/harness'
 
-import { RelayRow } from './Capabilities'
+import { RelayTab } from './Capabilities'
 
 const d = t.nodes.detail
 
@@ -26,7 +26,7 @@ function detail(extra: Partial<NodeDetail> = {}): NodeDetail {
 
 const RELAY = { udp: ['203.0.113.7:20330'], tcp: ['203.0.113.7:20330'], region: '', bandwidth_mbps: null }
 
-describe('relay 这一行', () => {
+describe('relay 这一页', () => {
   it('写出有几个节点挂靠在它上面', async () => {
     fakeApi({
       'GET /networks/1/nodes': [
@@ -36,8 +36,8 @@ describe('relay 这一行', () => {
         makeNode(4, 'pc', { attached: [{ relay: 9, rtt_ms: 12 }] }),
       ],
     })
-    renderWithApp(<RelayRow network={NETWORK} node={detail({ relay: RELAY })} onWaiting={() => undefined} />)
-    await waitFor(() => expect(screen.getByTestId('relay-attached')).toHaveTextContent(d.relayAttached(2)))
+    renderWithApp(<RelayTab network={NETWORK} node={detail({ relay: RELAY })} onWaiting={() => undefined} />)
+    await waitFor(() => expect(screen.getByTestId('relay-attached')).toHaveTextContent(d.rowNodes(2)))
   })
 
   it('启用之后写出 controller 试连的结果：连不上是一条建议，不是错误', async () => {
@@ -50,7 +50,7 @@ describe('relay 这一行', () => {
       ],
     }
     const api = fakeApi({ 'GET /networks/1/nodes': [makeNode(1, 'hk')], 'PUT /networks/1/nodes/1/relay': reply })
-    renderWithApp(<RelayRow network={NETWORK} node={detail()} onWaiting={() => undefined} />)
+    renderWithApp(<RelayTab network={NETWORK} node={detail()} onWaiting={() => undefined} />)
     await user.click(await screen.findByRole('switch', { name: d.relaySwitch('hk') }))
     await user.click(screen.getByRole('button', { name: d.relayEnable }))
     await waitFor(() => expect(api.callsTo('PUT /networks/1/nodes/1/relay')).toHaveLength(1))

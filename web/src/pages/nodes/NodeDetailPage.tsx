@@ -44,13 +44,13 @@ import { logPathFor } from '@/pages/settings/logFilter'
 import { RenameNodeDialog } from './actions'
 import { useDeleteNode } from './hooks'
 import { AccessTab } from './detail/AccessTab'
+import { ExitTab, ForwardTab, RelayTab } from './detail/Capabilities'
 import { EditIpDialog, SucceedDialog } from './detail/dialogs'
 import { LanesTab } from './detail/LanesTab'
 import { ListenTab } from './detail/ListenTab'
 import { OverviewTab } from './detail/OverviewTab'
 import { RelatedTab } from './detail/RelatedTab'
 import { RoutesTab } from './detail/RoutesTab'
-import { SettingsTab } from './detail/SettingsTab'
 import { UpdateTab } from './detail/UpdateTab'
 import { RoleBadges } from './NodesPage'
 
@@ -61,7 +61,18 @@ function MetaDivider() {
   return <span aria-hidden className="h-3 w-px bg-border-strong" />
 }
 
-const TABS = ['overview', 'settings', 'routes', 'lanes', 'access', 'listen', 'related', 'update'] as const
+const TABS = [
+  'overview',
+  'relay',
+  'exit',
+  'forward',
+  'routes',
+  'lanes',
+  'access',
+  'listen',
+  'related',
+  'update',
+] as const
 type Tab = (typeof TABS)[number]
 
 /**
@@ -241,7 +252,9 @@ export function NodeDetailPage() {
       >
         <TabsList>
           <TabsTrigger value="overview">{d.tabOverview}</TabsTrigger>
-          <TabsTrigger value="settings">{d.tabSettings}</TabsTrigger>
+          <TabsTrigger value="relay">{d.tabRelay}</TabsTrigger>
+          <TabsTrigger value="exit">{d.tabExit}</TabsTrigger>
+          <TabsTrigger value="forward">{d.tabForward}</TabsTrigger>
           <TabsTrigger value="routes">{d.tabRoutes}</TabsTrigger>
           {showLanes ? <TabsTrigger value="lanes">{d.tabLanes}</TabsTrigger> : null}
           <TabsTrigger value="access">{d.tabAccess}</TabsTrigger>
@@ -255,8 +268,15 @@ export function NodeDetailPage() {
         <TabsContent value="overview">
           <OverviewTab network={network} node={node} onEditIp={() => setDialog('ip')} />
         </TabsContent>
-        <TabsContent value="settings">
-          <SettingsTab network={network} node={node} onWaiting={setWaiting} />
+        {/* 表单不铺满整个宽度：开关和"修改"离名字太远就对不上了。 */}
+        <TabsContent value="relay" className="max-w-5xl">
+          <RelayTab network={network} node={node} onWaiting={setWaiting} />
+        </TabsContent>
+        <TabsContent value="exit" className="max-w-5xl">
+          <ExitTab network={network} node={node} onWaiting={setWaiting} />
+        </TabsContent>
+        <TabsContent value="forward" className="max-w-5xl">
+          <ForwardTab network={network} node={node} onWaiting={setWaiting} />
         </TabsContent>
         <TabsContent value="routes">
           <RoutesTab network={network} node={node} />

@@ -89,7 +89,7 @@ export const updates = {
   auto: {
     title: '自动更新',
     label: '自动更新节点',
-    on: '节点空闲时更新，不中断连接；relay 逐个更新',
+    on: '节点空闲时更新，不中断连接；中继逐个更新',
     off: '新版本只标出，不自动安装',
     turnedOn: '自动更新已开启',
     turnedOff: '自动更新已关闭',
@@ -187,7 +187,7 @@ export const updates = {
     waitingPackage: '等待安装包',
     waitingPackageDetail: (platform: string) => `controller 正在下载 ${platform} 的包`,
     waitingRelayTurn: '排队中',
-    waitingRelayTurnDetail: 'relay 逐个更新',
+    waitingRelayTurnDetail: '中继逐个更新',
     waitingUnknown: '等待中',
     lastFailed: '上次失败',
     lastFailedDetail: (version: string, age: string) => `${age}安装 ${version} 失败，不会自动重试`,
@@ -224,9 +224,9 @@ export const updates = {
     afterDrain: '流结束后',
     afterDrainHint: '期间拒绝新的流',
     idleBody: '没有活跃的流。i3t 将重启，几秒后上线。',
-    relayOthers: (relays: number) => `经它中转的连接将切换到其余 ${relays} 个 relay`,
+    relayOthers: (relays: number) => `经它中转的连接将切换到其余 ${relays} 个中继`,
     relayOnly: (pairs: number) =>
-      pairs > 0 ? `它是唯一的 relay，${pairs} 对节点的连接将中断` : '它是唯一的 relay，重启期间不能直连的节点互不可达',
+      pairs > 0 ? `它是唯一的中继，${pairs} 对节点的连接将中断` : '它是唯一的中继，重启期间不能直连的节点互不可达',
     controllerNote: '不受自动更新设置、暂停和以往失败的限制',
     loadingDetail: '正在读取流数',
     confirmNow: '立即更新',
@@ -237,7 +237,7 @@ export const updates = {
 
   forceAll: {
     title: (version: string) => `将全部节点更新到 ${version}？`,
-    body: (n: number) => `${n} 个节点可更新。离线的节点跳过，relay 逐个更新。`,
+    body: (n: number) => `${n} 个节点可更新。离线的节点跳过，中继逐个更新。`,
     flowsUnknown: '选择"立即"将中断所有正在进行的流',
     confirmNow: '全部立即更新',
     confirmDrain: '全部排空后更新',

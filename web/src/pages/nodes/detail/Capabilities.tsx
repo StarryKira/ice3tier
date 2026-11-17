@@ -1,4 +1,24 @@
 import { useQuery } from '@tanstack/react-query'
+import {
+  ArrowLeftRight,
+  ArrowRight,
+  Cable,
+  ChartPie,
+  DoorOpen,
+  Earth,
+  Forward,
+  Gauge,
+  Globe,
+  Hash,
+  House,
+  Layers,
+  Pencil,
+  Pin,
+  Radio,
+  RadioTower,
+  Users,
+  Zap,
+} from 'lucide-react'
 import { type ReactNode, useEffect, useState } from 'react'
 import { Link } from 'react-router'
 
@@ -9,54 +29,115 @@ import { type Network, type Node, type NodeDetail, type Reachability, type Relay
 import { useConfirm } from '@/components/confirm'
 import { CodeBlock } from '@/components/copy'
 import { DeclareHowTo } from '@/components/declare'
+import { DetailList, DetailRow } from '@/components/detail-list'
+import { InfoTip } from '@/components/info-tip'
 import { Notice } from '@/components/notice'
+import { SkeletonBlock } from '@/components/states'
 import { StatusText } from '@/components/status'
 import { Button } from '@/components/ui/button'
+import { BoxCard } from '@/components/ui/card'
 import { Field, FormError } from '@/components/ui/field'
 import { Input, Textarea } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
-import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
 import { exitUsage } from '@/lib/commands'
-import { attachedCount } from '@/lib/nodes'
+import { formatBytes } from '@/lib/format'
+import { attachedCount, nodeName } from '@/lib/nodes'
 import { type Capability, DEFAULT_NODE_PORT, MAX_RELAY_ADDRESSES } from '@/lib/product'
+import { classLabel } from '@/lib/serviceClass'
 import { cn } from '@/lib/utils'
 import { parseOptionalPositiveInt, splitList, validateSocketAddr } from '@/lib/validate'
+import { forwardLabel, forwardStatusView } from '@/pages/forwards/status'
 import { networkPath } from '@/pages/networks/context'
 
-import { exitSummary, useSaveExit } from './exitActions'
+import { useSaveExit } from './exitActions'
 import { ExitFormFields } from './exitForm'
 import { exitFormFrom, type ExitFormState } from './exitFormState'
 
 const d = t.nodes.detail
 
-interface RowShellProps {
+interface CapabilityCardProps {
+  icon: ReactNode
   title: string
+  /** 标题旁边悬停看的补充说明。 */
+  tip?: string
   description: string
   /** 右端的开关，或者只读的状态。 */
   control: ReactNode
-  /** 状态行：现在是什么情况、下一步做什么。 */
-  status: ReactNode
+  /** 开关左边的按钮（修改）。 */
+  action?: ReactNode
   /** 声明刚到：轻微地亮一下，让刚从终端回来的人看到界面已经准备好了。 */
   flash?: boolean
   children?: ReactNode
   testId: string
 }
 
-/** 能力卡片里的一行：名字和一句话解释 · 开关 · 状态行。三行的结构相同。 */
-function RowShell({ title, description, control, status, flash = false, children, testId }: RowShellProps) {
+/**
+ * 一种能力一张卡片：顶上是图标、名字、一句话解释和开关；下面一根线，是现在的设置（"名字：值"一行一项）、
+ * 修改的表单，或者怎么声明。三张卡片的结构相同。
+ */
+function CapabilityCard({
+  icon,
+  title,
+  tip,
+  description,
+  control,
+  action,
+  flash = false,
+  children,
+  testId,
+}: CapabilityCardProps) {
   return (
-    <div data-testid={testId} className={cn('-mx-5 px-5 py-4', flash && 'animate-flash')}>
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <h3 className="text-sm font-semibold">{title}</h3>
-          <p className="mt-0.5 text-[13px] text-muted-foreground">{description}</p>
+    <BoxCard data-testid={testId} className={cn('overflow-hidden', flash && 'animate-flash')}>
+      <header className="flex items-center justify-between gap-4 px-5 py-4">
+        <div className="flex min-w-0 items-center gap-3.5">
+          <span
+            aria-hidden
+            className="flex size-10 shrink-0 items-center justify-center rounded-lg border bg-muted/60 text-foreground/80 [&_svg]:size-5"
+          >
+            {icon}
+          </span>
+          <div className="min-w-0">
+            <h2 className="flex items-center gap-1.5 text-[15px] leading-6 font-semibold">
+              {title}
+              {tip !== undefined ? <InfoTip>{tip}</InfoTip> : null}
+            </h2>
+            <p className="text-[13px] text-muted-foreground">{description}</p>
+          </div>
         </div>
-        <div className="shrink-0 pt-0.5">{control}</div>
-      </div>
-      <div className="mt-2.5 text-[13px]">{status}</div>
-      {children}
-    </div>
+        <div className="flex shrink-0 items-center gap-3">
+          {action}
+          {control}
+        </div>
+      </header>
+      {children !== undefined && children !== null && children !== false ? (
+        <div className="border-t">{children}</div>
+      ) : null}
+    </BoxCard>
+  )
+}
+
+/** 卡片里一段说明文字（还没声明、已声明未启用）。 */
+function CardNote({ children }: { children: ReactNode }) {
+  return <div className="px-5 py-4 text-[13px]">{children}</div>
+}
+
+/** 开关左边的"修改"：一个安静的小按钮。 */
+function EditButton({ onClick }: { onClick: () => void }) {
+  return (
+    <Button variant="ghost" size="sm" onClick={onClick} className="text-muted-foreground hover:text-foreground">
+      <Pencil aria-hidden />
+      {d.edit}
+    </Button>
+  )
+}
+
+/** 声明刚到时卡片里的一句话。 */
+function Arrived() {
+  return (
+    <p role="status" className="px-5 pt-3 text-[13px] font-medium text-ok">
+      {t.declare.arrived}
+    </p>
   )
 }
 
@@ -110,10 +191,10 @@ function useDeclareWatch(declared: boolean, onWaiting: (waiting: boolean) => voi
   return { open, flash, toggle: () => setOpen((value) => !value) }
 }
 
-interface CapabilityRowProps {
+interface CapabilityTabProps {
   network: Network
   node: NodeDetail
-  /** 这一行正在等节点上报声明：页面据此把轮询调得勤一些。 */
+  /** 正在等节点上报声明：页面据此把轮询调得勤一些。 */
   onWaiting: (waiting: boolean) => void
 }
 
@@ -148,7 +229,7 @@ function ReachabilityNotice({ results, onDismiss }: { results: Reachability[]; o
     <Notice
       tone={failed ? 'warn' : 'info'}
       title={d.reachTitle}
-      className="mt-3"
+      className="mx-5 my-4"
       action={
         <Button size="sm" variant="ghost" onClick={onDismiss}>
           {d.reachDismiss}
@@ -183,7 +264,7 @@ function addressListProblem(raw: string): string | null {
   return null
 }
 
-export function RelayRow({ network, node, onWaiting }: CapabilityRowProps) {
+export function RelayTab({ network, node, onWaiting }: CapabilityTabProps) {
   const confirm = useConfirm()
   const nodes = useQuery(q.nodes(network.id))
   const watch = useDeclareWatch(node.declared.relay, onWaiting)
@@ -267,66 +348,154 @@ export function RelayRow({ network, node, onWaiting }: CapabilityRowProps) {
   }
 
   const pinnedBy = (nodes.data ?? []).filter((other) => other.pinned_relays.includes(node.id)).length
+  const canToggle = enabled || node.declared.relay
+  const relay = node.relay
 
-  let status: ReactNode
-  if (node.relay !== null) {
-    const relay = node.relay
-    // 第二行的几项用同一种分隔，和出口那一行的写法一致。
-    const facts = [
-      relay.region !== '' ? d.relayRegion(relay.region) : null,
-      relay.bandwidth_mbps === null ? d.relayUnlimited : d.relayBandwidth(relay.bandwidth_mbps),
-      pinnedBy > 0 ? d.relayPinnedBy(pinnedBy) : null,
-    ].filter((fact): fact is string => fact !== null)
-    status = (
-      <div className="space-y-1.5">
-        <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <StatusText tone="ok">{d.enabled}</StatusText>
-          {relay.udp.length > 0 ? (
-            <span>
-              {d.relayUdp} <code className="font-mono text-xs">{relay.udp.join(', ')}</code>
-            </span>
-          ) : null}
-          {relay.tcp.length > 0 ? (
-            <span>
-              {d.relayTcp} <code className="font-mono text-xs">{relay.tcp.join(', ')}</code>
-            </span>
-          ) : null}
-        </p>
-        <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-muted-foreground">
-          <span>
-            {facts.map((fact) => `${fact} · `).join('')}
-            <Tooltip content={d.relayAttachedTip}>
-              <span
-                tabIndex={0}
-                className="cursor-help rounded-sm underline decoration-dotted underline-offset-4"
-                data-testid="relay-attached"
-              >
-                {d.relayAttached(attached)}
+  let body: ReactNode
+  if (editing) {
+    body = (
+      <form
+        noValidate
+        onSubmit={(event) => {
+          event.preventDefault()
+          submit()
+        }}
+        className="space-y-4 px-5 py-5"
+      >
+        {!enabled && node.observed_endpoint !== null ? (
+          <Notice>{d.relayPrefilled(node.observed_endpoint)}</Notice>
+        ) : null}
+        <div className="grid grid-cols-2 gap-4">
+          <Field label={d.relayFormUdp} hint={d.relayFormUdpHint} error={submitted ? (udpProblem ?? needOne) : null}>
+            {(props) => (
+              <Textarea
+                {...props}
+                rows={2}
+                className="font-mono"
+                placeholder={`203.0.113.7:${DEFAULT_NODE_PORT}`}
+                value={form.udp}
+                onChange={(event) => setForm({ ...form, udp: event.target.value })}
+              />
+            )}
+          </Field>
+          <Field label={d.relayFormTcp} hint={d.relayFormTcpHint} error={submitted ? tcpProblem : null}>
+            {(props) => (
+              <Textarea
+                {...props}
+                rows={2}
+                className="font-mono"
+                placeholder={`203.0.113.7:${DEFAULT_NODE_PORT}`}
+                value={form.tcp}
+                onChange={(event) => setForm({ ...form, tcp: event.target.value })}
+              />
+            )}
+          </Field>
+          <Field label={d.relayFormRegion} optional={t.common.optional}>
+            {(props) => (
+              <Input
+                {...props}
+                placeholder="hk"
+                value={form.region}
+                onChange={(event) => setForm({ ...form, region: event.target.value })}
+              />
+            )}
+          </Field>
+          <Field label={d.relayFormBandwidth} error={submitted ? bandwidth.error : null} optional={t.common.optional}>
+            {(props) => (
+              <div className="flex items-center gap-2">
+                <Input
+                  {...props}
+                  inputMode="numeric"
+                  placeholder={t.common.unlimited}
+                  className="w-28 tabular"
+                  value={form.bandwidth}
+                  onChange={(event) => setForm({ ...form, bandwidth: event.target.value })}
+                />
+                <span className="text-[13px] text-muted-foreground">{t.common.mbps}</span>
+              </div>
+            )}
+          </Field>
+        </div>
+        <p className="text-[13px] text-muted-foreground">{d.relayPortReminder(DEFAULT_NODE_PORT)}</p>
+        {save.isPending ? (
+          <p role="status" className="text-[13px] text-relay">
+            {d.relayChecking}
+          </p>
+        ) : null}
+        <FormError
+          message={save.isError ? errorMessage(save.error) : null}
+          detail={save.isError ? errorDetail(save.error) : null}
+        />
+        <div className="flex justify-end gap-2">
+          <Button onClick={() => setEditing(false)} disabled={save.isPending}>
+            {t.common.cancel}
+          </Button>
+          <Button type="submit" variant="primary" pending={save.isPending}>
+            {enabled ? d.save : d.relayEnable}
+          </Button>
+        </div>
+      </form>
+    )
+  } else if (relay !== null) {
+    body = (
+      <>
+        <DetailList>
+          <DetailRow icon={<Radio />} label={d.relayFormUdp} multiline={relay.udp.length > 1}>
+            <AddressList addresses={relay.udp} />
+          </DetailRow>
+          <DetailRow icon={<Cable />} label={d.relayFormTcp} multiline={relay.tcp.length > 1}>
+            <AddressList addresses={relay.tcp} />
+          </DetailRow>
+          <DetailRow icon={<Earth />} label={d.rowRegion}>
+            {relay.region === '' ? '—' : relay.region}
+          </DetailRow>
+          <DetailRow icon={<Gauge />} label={d.rowBandwidth}>
+            {bandwidthValue(relay.bandwidth_mbps)}
+          </DetailRow>
+          <DetailRow
+            icon={<Users />}
+            label={
+              <span className="inline-flex items-center gap-1">
+                {d.rowAttached}
+                <InfoTip>{d.relayAttachedTip}</InfoTip>
               </span>
-            </Tooltip>
-          </span>
-          {editing ? null : (
-            <Button variant="link" size="sm" onClick={openForm}>
-              {d.edit}
-            </Button>
-          )}
-        </p>
-      </div>
+            }
+          >
+            <span data-testid="relay-attached" className="tabular">
+              {d.rowNodes(attached)}
+            </span>
+          </DetailRow>
+          {pinnedBy > 0 ? (
+            <DetailRow icon={<Pin />} label={d.rowPinnedBy}>
+              <span className="tabular">{d.rowNodes(pinnedBy)}</span>
+            </DetailRow>
+          ) : null}
+        </DetailList>
+      </>
     )
   } else if (!node.declared.relay) {
-    status = <NotDeclared capability="relay" node={node} open={watch.open} onToggle={watch.toggle} />
+    body = (
+      <CardNote>
+        <NotDeclared capability="relay" node={node} open={watch.open} onToggle={watch.toggle} />
+      </CardNote>
+    )
   } else {
-    status = <p className="text-muted-foreground">{node.online ? d.declaredReady : d.offlineNote}</p>
+    body = (
+      <CardNote>
+        <p className="text-muted-foreground">{node.online ? d.declaredReady : d.offlineNote}</p>
+      </CardNote>
+    )
   }
 
-  const canToggle = enabled || node.declared.relay
-
   return (
-    <RowShell
+    <CapabilityCard
       testId="capability-relay"
+      icon={<RadioTower />}
       title={d.relayTitle}
+      tip={d.withdrawnNote}
       description={d.relayDesc}
       flash={watch.flash}
+      action={enabled && !editing ? <EditButton onClick={openForm} /> : null}
       control={
         <Switch
           aria-label={d.relaySwitch(node.name)}
@@ -335,104 +504,18 @@ export function RelayRow({ network, node, onWaiting }: CapabilityRowProps) {
           onCheckedChange={onSwitch}
         />
       }
-      status={status}
     >
-      {watch.flash ? (
-        <p role="status" className="mt-2 text-[13px] font-medium text-ok">
-          {t.declare.arrived}
-        </p>
-      ) : null}
+      {watch.flash ? <Arrived /> : null}
+      {body}
+      {/* 保存之后马上就有：不等页面重新取到节点。 */}
       {reachability !== null && !editing ? (
         <ReachabilityNotice results={reachability} onDismiss={() => setReachability(null)} />
       ) : null}
-      {editing ? (
-        <form
-          noValidate
-          onSubmit={(event) => {
-            event.preventDefault()
-            submit()
-          }}
-          className="mt-4 space-y-4 rounded-lg bg-muted/60 p-4"
-        >
-          {!enabled && node.observed_endpoint !== null ? (
-            <Notice>{d.relayPrefilled(node.observed_endpoint)}</Notice>
-          ) : null}
-          <div className="grid grid-cols-2 gap-4">
-            <Field label={d.relayFormUdp} hint={d.relayFormUdpHint} error={submitted ? (udpProblem ?? needOne) : null}>
-              {(props) => (
-                <Textarea
-                  {...props}
-                  rows={2}
-                  className="font-mono"
-                  placeholder={`203.0.113.7:${DEFAULT_NODE_PORT}`}
-                  value={form.udp}
-                  onChange={(event) => setForm({ ...form, udp: event.target.value })}
-                />
-              )}
-            </Field>
-            <Field label={d.relayFormTcp} hint={d.relayFormTcpHint} error={submitted ? tcpProblem : null}>
-              {(props) => (
-                <Textarea
-                  {...props}
-                  rows={2}
-                  className="font-mono"
-                  placeholder={`203.0.113.7:${DEFAULT_NODE_PORT}`}
-                  value={form.tcp}
-                  onChange={(event) => setForm({ ...form, tcp: event.target.value })}
-                />
-              )}
-            </Field>
-            <Field label={d.relayFormRegion} optional={t.common.optional}>
-              {(props) => (
-                <Input
-                  {...props}
-                  placeholder="hk"
-                  value={form.region}
-                  onChange={(event) => setForm({ ...form, region: event.target.value })}
-                />
-              )}
-            </Field>
-            <Field label={d.relayFormBandwidth} error={submitted ? bandwidth.error : null} optional={t.common.optional}>
-              {(props) => (
-                <div className="flex items-center gap-2">
-                  <Input
-                    {...props}
-                    inputMode="numeric"
-                    placeholder={t.common.unlimited}
-                    className="w-28 tabular"
-                    value={form.bandwidth}
-                    onChange={(event) => setForm({ ...form, bandwidth: event.target.value })}
-                  />
-                  <span className="text-[13px] text-muted-foreground">{t.common.mbps}</span>
-                </div>
-              )}
-            </Field>
-          </div>
-          <p className="text-[13px] text-muted-foreground">{d.relayPortReminder(DEFAULT_NODE_PORT)}</p>
-          {save.isPending ? (
-            <p role="status" className="text-[13px] text-relay">
-              {d.relayChecking}
-            </p>
-          ) : null}
-          <FormError
-            message={save.isError ? errorMessage(save.error) : null}
-            detail={save.isError ? errorDetail(save.error) : null}
-          />
-          <div className="flex justify-end gap-2">
-            <Button onClick={() => setEditing(false)} disabled={save.isPending}>
-              {t.common.cancel}
-            </Button>
-            <Button type="submit" variant="primary" pending={save.isPending}>
-              {enabled ? d.save : d.relayEnable}
-            </Button>
-          </div>
-        </form>
-      ) : null}
-    </RowShell>
+    </CapabilityCard>
   )
 }
 
-export function ExitRow({ network, node, onWaiting }: CapabilityRowProps) {
+export function ExitTab({ network, node, onWaiting }: CapabilityTabProps) {
   const confirm = useConfirm()
   const watch = useDeclareWatch(node.declared.exit, onWaiting)
   const [editing, setEditing] = useState(false)
@@ -470,31 +553,104 @@ export function ExitRow({ network, node, onWaiting }: CapabilityRowProps) {
     else setEditing(false)
   }
 
-  let status: ReactNode
-  if (node.exit !== null) {
-    status = (
-      <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <StatusText tone="ok">{d.enabled}</StatusText>
-        <span className="text-muted-foreground">{exitSummary(node.exit)}</span>
-        {editing ? null : (
-          <Button variant="link" size="sm" onClick={openForm}>
-            {d.edit}
+  const exit = node.exit
+
+  let body: ReactNode
+  if (editing) {
+    body = (
+      <form
+        noValidate
+        onSubmit={(event) => {
+          event.preventDefault()
+          setSubmitted(true)
+          void save.submit(form).then((ok) => {
+            if (ok) setEditing(false)
+          })
+        }}
+        className="space-y-4 px-5 py-5"
+      >
+        <ExitFormFields state={form} onChange={setForm} showProblems={submitted} />
+        <FormError message={save.error} detail={save.errorDetail} />
+        <div className="flex justify-end gap-2">
+          <Button onClick={() => setEditing(false)} disabled={save.pending}>
+            {t.common.cancel}
           </Button>
-        )}
-      </p>
+          <Button type="submit" variant="primary" pending={save.pending}>
+            {enabled ? d.save : d.exitEnable}
+          </Button>
+        </div>
+      </form>
+    )
+  } else if (exit !== null) {
+    body = (
+      <>
+        <DetailList>
+          <DetailRow icon={<Hash />} label={d.rowPorts}>
+            <span className="tabular">{exit.ports === null ? t.common.unlimited : exit.ports.join(', ')}</span>
+          </DetailRow>
+          <DetailRow icon={<House />} label={d.rowLan}>
+            {exit.lan ? d.rowLanOn : d.rowLanOff}
+          </DetailRow>
+          <DetailRow icon={<Gauge />} label={d.rowBandwidth}>
+            {bandwidthValue(exit.bandwidth_mbps)}
+          </DetailRow>
+          {exit.quota_bytes !== null ? (
+            <DetailRow icon={<ChartPie />} label={d.rowQuota}>
+              <span className="tabular">{d.rowQuotaValue(formatBytes(exit.quota_bytes), exit.quota_reset_day)}</span>
+            </DetailRow>
+          ) : null}
+          {exit.family !== 'any' ? (
+            <DetailRow icon={<Globe />} label={d.rowFamily}>
+              {exit.family === 'ipv4' ? d.exitFamilyIpv4 : d.exitFamilyIpv6}
+            </DetailRow>
+          ) : null}
+          {exit.connects_per_minute !== null ? (
+            <DetailRow icon={<Zap />} label={d.rowConnects}>
+              <span className="tabular">{d.rowConnectsValue(exit.connects_per_minute)}</span>
+            </DetailRow>
+          ) : null}
+          {exit.class !== null ? (
+            <DetailRow icon={<Layers />} label={d.rowClass}>
+              {classLabel(exit.class)}
+            </DetailRow>
+          ) : null}
+          {exit.upstream_socks5 !== null ? (
+            <DetailRow icon={<Forward />} label={d.rowUpstream} copy={exit.upstream_socks5}>
+              <span className="tabular">{exit.upstream_socks5}</span>
+            </DetailRow>
+          ) : null}
+        </DetailList>
+        <div className="border-t px-5 py-4">
+          <p className="text-[13px] text-muted-foreground">{d.exitUsageBody}</p>
+          <CodeBlock copy={exitUsage(node.virtual_ip)} className="mt-2">
+            {exitUsage(node.virtual_ip)}
+          </CodeBlock>
+        </div>
+      </>
     )
   } else if (!node.declared.exit) {
-    status = <NotDeclared capability="exit" node={node} open={watch.open} onToggle={watch.toggle} />
+    body = (
+      <CardNote>
+        <NotDeclared capability="exit" node={node} open={watch.open} onToggle={watch.toggle} />
+      </CardNote>
+    )
   } else {
-    status = <p className="text-muted-foreground">{node.online ? d.declaredReady : d.offlineNote}</p>
+    body = (
+      <CardNote>
+        <p className="text-muted-foreground">{node.online ? d.declaredReady : d.offlineNote}</p>
+      </CardNote>
+    )
   }
 
   return (
-    <RowShell
+    <CapabilityCard
       testId="capability-exit"
+      icon={<DoorOpen />}
       title={d.exitTitle}
+      tip={d.withdrawnNote}
       description={d.exitDesc}
       flash={watch.flash}
+      action={enabled && !editing ? <EditButton onClick={openForm} /> : null}
       control={
         <Switch
           aria-label={d.exitSwitch(node.name)}
@@ -503,58 +659,78 @@ export function ExitRow({ network, node, onWaiting }: CapabilityRowProps) {
           onCheckedChange={onSwitch}
         />
       }
-      status={status}
     >
-      {watch.flash ? (
-        <p role="status" className="mt-2 text-[13px] font-medium text-ok">
-          {t.declare.arrived}
-        </p>
-      ) : null}
-      {editing ? (
-        <form
-          noValidate
-          onSubmit={(event) => {
-            event.preventDefault()
-            setSubmitted(true)
-            void save.submit(form).then((ok) => {
-              if (ok) setEditing(false)
-            })
-          }}
-          className="mt-4 space-y-4 rounded-lg bg-muted/60 p-4"
-        >
-          <ExitFormFields state={form} onChange={setForm} showProblems={submitted} />
-          <FormError message={save.error} detail={save.errorDetail} />
-          <div className="flex justify-end gap-2">
-            <Button onClick={() => setEditing(false)} disabled={save.pending}>
-              {t.common.cancel}
-            </Button>
-            <Button type="submit" variant="primary" pending={save.pending}>
-              {enabled ? d.save : d.exitEnable}
-            </Button>
-          </div>
-        </form>
-      ) : null}
-      {enabled && !editing ? (
-        <div className="mt-3">
-          <p className="text-[13px] text-muted-foreground">{d.exitUsageBody}</p>
-          <CodeBlock copy={exitUsage(node.virtual_ip)} className="mt-1.5">
-            {exitUsage(node.virtual_ip)}
-          </CodeBlock>
-        </div>
-      ) : null}
-    </RowShell>
+      {watch.flash ? <Arrived /> : null}
+      {body}
+    </CapabilityCard>
   )
 }
 
-/** 端口转发的目标没有开关：声明过的节点可以被选作转发的目标。这里只读地显示声明的情况。 */
-export function ForwardTargetRow({ network, node, onWaiting }: CapabilityRowProps) {
+/**
+ * 端口转发的目标没有开关：声明过的节点可以被选作转发的目标。卡片顶上是声明的情况，下面是指向它的端口转发。
+ */
+export function ForwardTab({ network, node, onWaiting }: CapabilityTabProps) {
   const watch = useDeclareWatch(node.declared.forward, onWaiting)
+  const nodes = useQuery(q.nodes(network.id))
   const forwards = useQuery(q.forwards(network.id))
-  const count = (forwards.data ?? []).filter((forward) => forward.target_node === node.id).length
+  const all = nodes.data ?? []
+  const mine = (forwards.data ?? []).filter((forward) => forward.target_node === node.id)
+  const manage = networkPath(network.id, 'forwards')
+
+  let body: ReactNode
+  if (!node.declared.forward) {
+    body = (
+      <CardNote>
+        <NotDeclared capability="forward" node={node} open={watch.open} onToggle={watch.toggle} />
+      </CardNote>
+    )
+  } else if (forwards.isPending) {
+    body = (
+      <CardNote>
+        <SkeletonBlock lines={2} />
+      </CardNote>
+    )
+  } else {
+    body = (
+      <>
+        <div className="flex min-h-11 items-center justify-between gap-4 px-5 py-2 text-[13px] text-muted-foreground">
+          <span>{d.forwardCount(mine.length)}</span>
+          <Link to={manage} className="rounded-sm text-primary underline-offset-4 hover:underline">
+            {d.relatedManage}
+          </Link>
+        </div>
+        {mine.length > 0 ? (
+          <ul className="divide-y border-t">
+            {mine.map((forward) => {
+              const view = forwardStatusView(forward, all)
+              return (
+                <li
+                  key={forward.id}
+                  className="flex min-h-11 flex-wrap items-center gap-x-4 gap-y-1 px-5 py-2.5 text-sm"
+                >
+                  <span className="min-w-0 font-medium">{forwardLabel(forward)}</span>
+                  <span className="flex min-w-0 flex-wrap items-center gap-1.5 text-[13px] text-muted-foreground">
+                    <span>{nodeName(all, forward.listen_node)}</span>
+                    <span className="tabular">{forward.bind}</span>
+                    <ArrowRight className="size-3.5" aria-label={t.forwards.dialog.arrow} />
+                    <span className="tabular">{forward.target_addr}</span>
+                  </span>
+                  <StatusText tone={view.tone} className="ml-auto text-[13px]">
+                    {view.label}
+                  </StatusText>
+                </li>
+              )
+            })}
+          </ul>
+        ) : null}
+      </>
+    )
+  }
 
   return (
-    <RowShell
+    <CapabilityCard
       testId="capability-forward"
+      icon={<ArrowLeftRight />}
       title={d.forwardTitle}
       description={d.forwardDesc}
       flash={watch.flash}
@@ -563,20 +739,26 @@ export function ForwardTargetRow({ network, node, onWaiting }: CapabilityRowProp
           {node.declared.forward ? d.forwardDeclared : d.forwardNotDeclared}
         </StatusText>
       }
-      status={
-        node.declared.forward ? (
-          <p className="text-muted-foreground">
-            <Link
-              to={networkPath(network.id, 'forwards')}
-              className="rounded-sm text-primary underline-offset-4 hover:underline"
-            >
-              {d.forwardCount(count)}
-            </Link>
-          </p>
-        ) : (
-          <NotDeclared capability="forward" node={node} open={watch.open} onToggle={watch.toggle} />
-        )
-      }
-    />
+    >
+      {watch.flash ? <Arrived /> : null}
+      {body}
+    </CapabilityCard>
   )
 }
+
+/** 一个或几个地址，一行一个。 */
+function AddressList({ addresses }: { addresses: readonly string[] }) {
+  if (addresses.length === 0) return <>—</>
+  return (
+    <ul className="space-y-1">
+      {addresses.map((address) => (
+        <li key={address} className="tabular">
+          {address}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+const bandwidthValue = (mbps: number | null): string =>
+  mbps === null ? t.common.unlimited : `${mbps} ${t.common.mbps}`

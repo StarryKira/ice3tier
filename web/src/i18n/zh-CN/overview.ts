@@ -14,15 +14,15 @@ export const overview = {
   viewRoutes: '查看路由',
 
   /** 一条问题：先说对象和状态，细节在它链接的页面上。 */
-  unreachableNoRelay: (a: string, b: string) => `${a} ⇄ ${b} 不可达，网络中没有 relay`,
+  unreachableNoRelay: (a: string, b: string) => `${a} ⇄ ${b} 不可达，网络中没有中继`,
   unreachableWithRelay: (a: string, b: string) => `${a} ⇄ ${b} 不可达`,
   fix: {
-    optionA: '将一台有公网地址的节点启用为 relay',
-    optionB: '或添加一台有公网地址的节点，加入时声明可作为 relay',
+    optionA: '将一台有公网地址的节点启用为中继',
+    optionB: '或添加一台有公网地址的节点，加入时声明可作为中继',
     goNodes: '前往节点',
     addNode: '添加节点',
   },
-  relayOffline: (name: string) => `relay ${name} 离线`,
+  relayOffline: (name: string) => `中继 ${name} 离线`,
   exitOffline: (name: string) => `出口 ${name} 离线`,
   forwardBlocked: (name: string, state: string) => `端口转发 ${name}：${state}`,
   listenerBroken: (name: string, state: string) => `监听器 ${name}：${state}`,

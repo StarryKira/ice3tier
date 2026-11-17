@@ -1,6 +1,6 @@
 /** 节点本地声明：三种能力的名字，和"如何声明"的步骤。 */
 export const capability = {
-  relay: { name: 'relay', full: '可作为 relay', short: 'relay' },
+  relay: { name: '中继', full: '可作为中继', short: '中继' },
   exit: { name: '出口', full: '可作为出口', short: '出口' },
   forward: { name: '端口转发目标', full: '可作为端口转发目标', short: '转发目标' },
 }

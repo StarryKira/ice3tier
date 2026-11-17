@@ -527,7 +527,7 @@ export function ExitsPage() {
                               {e.menuCopy}
                             </DropdownMenuItem>
                             <DropdownMenuItem
-                              onSelect={() => void navigate(`${nodePath(network.id, view.node.id)}?tab=settings`)}
+                              onSelect={() => void navigate(`${nodePath(network.id, view.node.id)}?tab=exit`)}
                             >
                               <SlidersHorizontal aria-hidden />
                               {e.menuEdit}

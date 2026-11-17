@@ -149,7 +149,7 @@ function fixPath(network: number, fix: LaneFix): string {
   switch (fix.kind) {
     case 'enable_relay':
     case 'tcp_address':
-      return `${nodePath(network, fix.node)}?tab=settings`
+      return `${nodePath(network, fix.node)}?tab=relay`
     case 'update':
       return `${nodePath(network, fix.node)}?tab=update`
     case 'access':
