@@ -6,6 +6,7 @@ import { Link } from 'react-router'
 import { q } from '@/api/queries'
 import {
   type Network,
+  type Node,
   type NodeDetail,
   type NodeId,
   type NodeRoute,
@@ -125,13 +126,38 @@ function ModeBadge({ route, peerOnline, hint }: { route: Route; peerOnline: bool
 }
 
 /**
- * 经过：经中继时按顺序写经过的中继。P2P、或者中继就是对端自己（对端是中继、直接连它的中继会话，没有经过别人）
- * 都是一道横线。
+ * 下一跳：经中继时是第一个中继。P2P、或者中继就是对端自己（对端是中继、直接连它的中继会话，没有经过别人）
+ * 是 `null`，写一道横线。
  */
-function Via({ route, peer, names }: { route: Route; peer: NodeId; names: (ids: readonly NodeId[]) => string }) {
-  const own = route.via === 'relay' && route.relays.length === 1 && route.relays[0] === peer
-  if (route.via !== 'relay' || own) return <span className="text-muted-foreground">—</span>
-  return <span className="whitespace-nowrap">{names(route.relays)}</span>
+function nextHopOf(route: Route, peer: NodeId): NodeId | null {
+  if (route.via !== 'relay') return null
+  const own = route.relays.length === 1 && route.relays[0] === peer
+  return own ? null : (route.relays[0] ?? null)
+}
+
+const dash = <span className="text-muted-foreground">—</span>
+
+/** 下一跳的名字。经好几个中继时，悬停写出整条（后面几个看路径长度就知道有）。 */
+function NextHop({ route, peer, nodes }: { route: Route; peer: NodeId; nodes: readonly Node[] }) {
+  const hop = nextHopOf(route, peer)
+  if (hop === null) return dash
+  const name = <span className="whitespace-nowrap">{nodeName(nodes, hop)}</span>
+  if (route.via !== 'relay' || route.relays.length < 2) return name
+  const chain = route.relays.map((id) => nodeName(nodes, id)).join(' → ')
+  return (
+    <Tooltip content={d.routesViaChain(chain)}>
+      <span tabIndex={0} className="cursor-help rounded-sm">
+        {name}
+      </span>
+    </Tooltip>
+  )
+}
+
+/** 下一跳的虚拟 IP。 */
+function NextHopIp({ route, peer, nodes }: { route: Route; peer: NodeId; nodes: readonly Node[] }) {
+  const hop = nextHopOf(route, peer)
+  const ip = hop === null ? undefined : nodes.find((candidate) => candidate.id === hop)?.virtual_ip
+  return ip === undefined ? dash : <span className="whitespace-nowrap tabular">{ip}</span>
 }
 
 const p = t.routes.protocol
@@ -155,10 +181,13 @@ function Protocol({ route, leg, lane }: { route: Route; leg: Leg; lane: boolean 
     )
   if (!lane) return quic
   return (
-    <span className="flex flex-col leading-5">
+    <span className="flex flex-col leading-[18px]">
       {quic}
       <Tooltip content={p.laneHint}>
-        <span tabIndex={0} className="cursor-help self-start rounded-sm whitespace-nowrap">
+        <span
+          tabIndex={0}
+          className="cursor-help self-start rounded-sm text-xs whitespace-nowrap text-muted-foreground"
+        >
           {p.over(p.lane, t.routes.legTransport.tcp)}
         </span>
       </Tooltip>
@@ -195,7 +224,6 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
   const routes = useQuery(q.routes(network.id, node.id))
   const nodes = useQuery(q.nodes(network.id))
   const all = nodes.data ?? []
-  const names = (ids: readonly NodeId[]) => ids.map((id) => nodeName(all, id)).join(' → ')
   // 一份上报里的各行一样新；取最新的那个写在表的右上角，比它旧得多的行单独标出来。
   const reported = routes.data?.routes ?? []
   const freshest = reported.length === 0 ? null : Math.min(...reported.map((entry) => entry.age_secs))
@@ -264,11 +292,11 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
             {/* 两组列的名字：现在走的、换成另一种模式。后一组的底色一直铺到表格底。 */}
             <tr>
               <th aria-hidden />
-              <th colSpan={5} scope="colgroup" className="px-3 pt-2 text-left text-xs font-medium text-foreground">
+              <th colSpan={6} scope="colgroup" className="px-3 pt-2 text-left text-xs font-medium text-foreground">
                 {d.routesGroupNow(modeLabel(mode))}
               </th>
               <th
-                colSpan={5}
+                colSpan={6}
                 scope="colgroup"
                 className={cn('px-3 pt-2 text-left text-xs font-medium text-foreground', BAND)}
               >
@@ -283,11 +311,13 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
               <Th>{d.colPeer}</Th>
               <Th>{d.routesColMode}</Th>
               <Th>{d.routesColVia}</Th>
+              <Th>{d.routesColNextHopIp}</Th>
               <Th>{d.routesColProtocol}</Th>
               <Th>{d.routesColLength}</Th>
               <Th>{d.colRtt}</Th>
               <Th className={BAND}>{d.routesColMode}</Th>
               <Th className={BAND}>{d.routesColVia}</Th>
+              <Th className={BAND}>{d.routesColNextHopIp}</Th>
               <Th className={BAND}>{d.routesColProtocol}</Th>
               <Th className={BAND}>{d.routesColLength}</Th>
               <Th className={BAND}>{d.colRtt}</Th>
@@ -304,7 +334,7 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
             </tr>
           </thead>
           <tbody>
-            {routes.isPending ? <SkeletonRows columns={14} rows={3} /> : null}
+            {routes.isPending ? <SkeletonRows columns={16} rows={3} /> : null}
             {rows.map((entry, index) => {
               const peer = all.find((candidate) => candidate.id === entry.peer.id)
               const peerOnline = peer?.online ?? true
@@ -331,7 +361,7 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
               const directHint = modeHint(entry)
 
               // 没有内容的格子每列一道横线，和左边一组一样，不合并成一格。
-              const dashes = [0, 1, 2, 3, 4].map((column) => (
+              const dashes = [0, 1, 2, 3, 4, 5].map((column) => (
                 <Td key={column} className={cn(BAND, 'text-muted-foreground', fade)}>
                   —
                 </Td>
@@ -339,7 +369,7 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
               let otherCells: ReactNode
               if (pending) {
                 otherCells = (
-                  <Td colSpan={5} className={BAND}>
+                  <Td colSpan={6} className={BAND}>
                     <Skeleton className="h-3.5 w-40" />
                   </Td>
                 )
@@ -364,9 +394,12 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
                       <ModeBadge route={altRoute} peerOnline={peerOnline} />
                     </Td>
                     <Td className={cn(BAND, 'text-sm')}>
-                      <Via route={altRoute} peer={entry.peer.id} names={names} />
+                      <NextHop route={altRoute} peer={entry.peer.id} nodes={all} />
                     </Td>
-                    <Td className={cn(BAND, 'text-sm')}>
+                    <Td className={cn(BAND, 'text-[13px]')}>
+                      <NextHopIp route={altRoute} peer={entry.peer.id} nodes={all} />
+                    </Td>
+                    <Td className={cn(BAND, 'text-[13px]')}>
                       <Protocol route={altRoute} leg={altLeg} lane={lanes.has(entry.peer.id)} />
                     </Td>
                     <Td className={BAND}>
@@ -401,9 +434,12 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
                     <ModeBadge route={entry.route} peerOnline={peerOnline} hint={directHint} />
                   </Td>
                   <Td className={cn('text-sm', fade)}>
-                    <Via route={entry.route} peer={entry.peer.id} names={names} />
+                    <NextHop route={entry.route} peer={entry.peer.id} nodes={all} />
                   </Td>
-                  <Td className={cn('text-sm', fade)}>
+                  <Td className={cn('text-[13px]', fade)}>
+                    <NextHopIp route={entry.route} peer={entry.peer.id} nodes={all} />
+                  </Td>
+                  <Td className={cn('text-[13px]', fade)}>
                     <Protocol route={entry.route} leg={nowLeg} lane={lanes.has(entry.peer.id)} />
                   </Td>
                   <Td className={fade}>

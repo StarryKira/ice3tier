@@ -139,13 +139,15 @@ describe('路由', () => {
       within(row)
         .getAllByRole('cell')
         .map((cell) => cell.textContent)
-    // 现在：中继、经过 hk、QUIC/UDP、路径长度 2、150 ms。
-    expect(texts(nas).slice(1, 6)).toEqual([d.routesRelay, 'hk', 'QUIC/UDP', '2', t.common.ms(150)])
+    // 现在：中继、下一跳 hk 和它的虚拟 IP、QUIC/UDP、路径长度 2、150 ms。
+    expect(texts(nas).slice(1, 7)).toEqual([d.routesRelay, 'hk', '10.66.0.3', 'QUIC/UDP', '2', t.common.ms(150)])
     // 换成延迟优先：中继、经过 tokyo → hk、底下的传输不知道（第一个中继换了）、长度 3、90 ms，比现在少 60 ms。
-    await waitFor(() => expect(nas).toHaveTextContent('tokyo → hk'))
-    expect(texts(nas).slice(6, 11)).toEqual([
+    // 下一跳是 tokyo（经 tokyo → hk，长度 3）。
+    await waitFor(() => expect(nas).toHaveTextContent('10.66.0.5'))
+    expect(texts(nas).slice(7, 13)).toEqual([
       d.routesRelay,
-      'tokyo → hk',
+      'tokyo',
+      '10.66.0.5',
       'QUIC',
       '3',
       `${t.common.ms(90)}${d.routesDelta(-60)}`,
@@ -154,8 +156,10 @@ describe('路由', () => {
     // 直连的那一行：P2P、经过一道横线、UDP、长度 1；延迟优先也是这条，照常写出来。
     const pc = screen.getByText('10.66.0.4').closest('tr')
     if (pc === null) throw new Error('没有 pc 那一行')
-    expect(texts(pc).slice(1, 6)).toEqual([d.routesP2P, '—', 'QUIC/UDP', '1', t.common.ms(2)])
-    await waitFor(() => expect(texts(pc).slice(6, 11)).toEqual([d.routesP2P, '—', 'QUIC/UDP', '1', t.common.ms(2)]))
+    expect(texts(pc).slice(1, 7)).toEqual([d.routesP2P, '—', '—', 'QUIC/UDP', '1', t.common.ms(2)])
+    await waitFor(() =>
+      expect(texts(pc).slice(7, 13)).toEqual([d.routesP2P, '—', '—', 'QUIC/UDP', '1', t.common.ms(2)]),
+    )
   })
 
   it('0.1.11 起节点自己报另一种模式和直连的情况：不再去问路径，中继上悬停说直连为什么没通', async () => {
@@ -195,13 +199,15 @@ describe('路由', () => {
         .getAllByRole('cell')
         .map((cell) => cell.textContent)
     // 到中继 UDP 不通，现在走的是 QUIC/TCP；延迟优先会直连，40 ms，少 110 ms。
-    expect(texts(nas).slice(1, 11)).toEqual([
+    expect(texts(nas).slice(1, 13)).toEqual([
       d.routesRelay,
       'hk',
+      '10.66.0.3',
       'QUIC/TCP',
       '2',
       t.common.ms(150),
       d.routesP2P,
+      '—',
       '—',
       'QUIC/UDP',
       '1',
@@ -216,13 +222,15 @@ describe('路由', () => {
     const pc = screen.getByText('10.66.0.4').closest('tr')
     if (pc === null) throw new Error('没有 pc 那一行')
     const lane = `QUIC/UDP${t.routes.protocol.over(t.routes.protocol.lane, 'TCP')}`
-    expect(texts(pc).slice(1, 11)).toEqual([
+    expect(texts(pc).slice(1, 13)).toEqual([
       d.routesP2P,
+      '—',
       '—',
       lane,
       '1',
       t.common.ms(2),
       d.routesP2P,
+      '—',
       '—',
       lane,
       '1',
