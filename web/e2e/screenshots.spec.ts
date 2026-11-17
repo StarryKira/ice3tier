@@ -514,14 +514,6 @@ test('有数据时：节点详情', async () => {
   await shot('node-detail-routes-wide', { fullPage: false })
   await page.setViewportSize({ width: 1280, height: 800 })
 
-  await page.getByRole('tab', { name: d.tabListen }).click()
-  await expect(page.getByTestId('node-listen-local-socks5')).toBeVisible({ timeout: 20_000 })
-  await shot('node-detail-listen')
-
-  await page.getByRole('tab', { name: d.tabRelated }).click()
-  await expect(page.getByRole('heading', { name: d.relatedForwards })).toBeVisible()
-  await shot('node-detail-related')
-
   await page.getByRole('tab', { name: d.tabOverview }).click()
   await page.getByRole('button', { name: d.editIp }).click()
   await expect(page.getByRole('dialog')).toBeVisible()

@@ -326,10 +326,6 @@ test('监听在被占用的端口上的转发：显示端口被占用、是哪�
   const detail = t.listen.portInUseDetail('laptop', String(busyPort))
   await expect(row).toContainText(t.listen.portInUse, { timeout: 40_000 })
   await expect(page.getByText(detail)).toBeVisible()
-  // 节点详情的"监听"里同样看得到，连同自带的回环入口。
-  await page.goto(`${controller.baseUrl}/n/1/nodes/${nodes.laptop.id}?tab=listen`)
-  await expect(page.getByTestId('node-listen-local-socks5')).toContainText(t.listen.listening)
-  await expect(page.getByText(detail)).toBeVisible()
 })
 
 test('操作记录：按操作筛，记录里的对象是链接；点过去对象已经删掉了会说', async () => {

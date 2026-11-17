@@ -47,9 +47,7 @@ import { useDeleteNode } from './hooks'
 import { ExitTab, ForwardTab, RelayTab } from './detail/Capabilities'
 import { EditIpDialog, SucceedDialog } from './detail/dialogs'
 import { LanesTab } from './detail/LanesTab'
-import { ListenTab } from './detail/ListenTab'
 import { OverviewTab } from './detail/OverviewTab'
-import { RelatedTab } from './detail/RelatedTab'
 import { RoutesTab } from './detail/RoutesTab'
 import { UpdateTab } from './detail/UpdateTab'
 import { RoleBadges } from './NodesPage'
@@ -61,7 +59,7 @@ function MetaDivider() {
   return <span aria-hidden className="h-3 w-px bg-border-strong" />
 }
 
-const TABS = ['overview', 'relay', 'exit', 'forward', 'routes', 'lanes', 'listen', 'related', 'update'] as const
+const TABS = ['overview', 'relay', 'exit', 'forward', 'routes', 'lanes', 'update'] as const
 type Tab = (typeof TABS)[number]
 
 /**
@@ -255,8 +253,6 @@ export function NodeDetailPage() {
           <TabsTrigger value="forward">{d.tabForward}</TabsTrigger>
           <TabsTrigger value="routes">{d.tabRoutes}</TabsTrigger>
           {showLanes ? <TabsTrigger value="lanes">{d.tabLanes}</TabsTrigger> : null}
-          <TabsTrigger value="listen">{d.tabListen}</TabsTrigger>
-          <TabsTrigger value="related">{d.tabRelated}</TabsTrigger>
           <TabsTrigger value="update">
             {t.updates.detail.tab}
             {updateMarked ? <StatusDot tone={issue?.kind === 'update_failed' ? 'danger' : 'warn'} /> : null}
@@ -280,12 +276,6 @@ export function NodeDetailPage() {
         </TabsContent>
         <TabsContent value="lanes">
           <LanesTab network={network} node={node} />
-        </TabsContent>
-        <TabsContent value="listen">
-          <ListenTab network={network} node={node} />
-        </TabsContent>
-        <TabsContent value="related">
-          <RelatedTab network={network} node={node} />
         </TabsContent>
         <TabsContent value="update">
           <UpdateTab node={node} />

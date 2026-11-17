@@ -1,7 +1,5 @@
 import type { Messages } from '../messages'
 
-import { afterColon } from './text'
-
 const count = (n: number, one: string, many: string) => (n === 1 ? `1 ${one}` : `${n} ${many}`)
 
 export const nodes: Messages['nodes'] = {
@@ -120,8 +118,6 @@ export const nodes: Messages['nodes'] = {
     tabExit: 'Exit',
     tabForward: 'Port forwarding',
     tabRoutes: 'Routes',
-    tabRelated: 'Related',
-    tabListen: 'Listening',
     tabLanes: 'TCP lanes',
     more: 'More',
     succeed: 'Replace offline node…',
@@ -393,29 +389,8 @@ export const nodes: Messages['nodes'] = {
     routesOnTopology: 'Topology',
     routesDiagnose: 'Diagnose',
 
-    listenLoadFailed: "Couldn't load listening ports",
-    listenOffline: 'Node offline',
-    listenNotReported: 'Not reported yet',
-    listenEmpty: 'No listening ports',
-    listenListeners: 'Listeners',
-    listenForwards: 'Port forwards',
-    listenForwardsEmpty: 'No port forwards',
-    colListenName: 'Name',
-    colListenBind: 'Address',
-    colListenState: 'Status',
-    listenManage: 'Manage',
     nodeLog: 'Activity log',
-    relatedListeners: 'Listeners',
-    relatedListenersEmpty: 'No listeners',
-    relatedForwards: 'Port forwards',
-    relatedForwardsEmpty: 'No port forwards',
-    relatedPairs: 'Node pairs',
-    relatedPairsEmpty: 'No node pair settings',
     relatedManage: 'Manage',
-    relatedListening: 'Listens here',
-    relatedTarget: 'Target',
-    keepAlive: (on) => (on ? 'Keep alive: on' : 'Keep alive: off'),
-    laneSetting: (mode) => `TCP lanes: ${afterColon(mode)}`,
 
     lanesEmpty: 'No TCP lanes with other nodes',
     lanesOffline: 'Node offline',
