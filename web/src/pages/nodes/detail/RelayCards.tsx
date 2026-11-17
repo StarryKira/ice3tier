@@ -293,10 +293,9 @@ export function RelayPairsCard({ network, relay, relayName }: { network: Network
     <BoxCard data-testid="relay-pairs">
       <BoxCardHeader
         title={
-          <CountTitle
-            title={<NamedText text={d.relayPairsTitle} name={relayName} />}
-            count={matrix.isSuccess ? rows.length : undefined}
-          />
+          <span>
+            <NamedText text={d.relayPairsTitle} name={relayName} />
+          </span>
         }
         tip={d.relayPairsTip}
         action={
