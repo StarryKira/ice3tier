@@ -9,6 +9,7 @@ import { type Network, type Node, type NodeDetail, type NodeId, type Reachabilit
 import { useConfirm } from '@/components/confirm'
 import { CodeBlock } from '@/components/copy'
 import { DeclareHowTo } from '@/components/declare'
+import { Flag } from '@/components/flag'
 import { FormDialog } from '@/components/form-dialog'
 import { InfoTip } from '@/components/info-tip'
 import { NodeLink } from '@/components/node'
@@ -19,9 +20,10 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { BoxCard } from '@/components/ui/card'
 import { Switch } from '@/components/ui/switch'
-import { t } from '@/i18n'
+import { t, useLocale } from '@/i18n'
 import { exitUsage } from '@/lib/commands'
 import { formatBytes } from '@/lib/format'
+import { countryName } from '@/lib/region'
 import { attachedCount, nodeName } from '@/lib/nodes'
 import { type Capability } from '@/lib/product'
 import { classLabel } from '@/lib/serviceClass'
@@ -240,25 +242,36 @@ function StatGrid({ children }: { children: ReactNode }) {
   return <dl className="grid grid-cols-2 gap-x-8 gap-y-5 px-5 py-5 @3xl:grid-cols-4">{children}</dl>
 }
 
-/** 中继的地址：UDP 和 TCP 一样时每个地址写一次，后面注明两种都用；不一样时分开写。 */
-function RelayAddresses({ udp, tcp }: { udp: readonly string[]; tcp: readonly string[] }) {
-  const same = udp.length === tcp.length && udp.every((address, index) => address === tcp[index])
-  const lines = same
-    ? udp.map((address) => ({ address, protocols: 'UDP · TCP' }))
-    : [
-        ...udp.map((address) => ({ address, protocols: 'UDP' })),
-        ...tcp.map((address) => ({ address, protocols: 'TCP' })),
-      ]
-  if (lines.length === 0) return <>—</>
+/** 公网 IP 查到的国家或地区：国旗和名字。查不到时是一道横线。 */
+function CountryValue({ code }: { code: string | null }) {
+  const locale = useLocale()
+  if (code === null) return <>—</>
   return (
-    <ul className="space-y-1">
-      {lines.map((line) => (
-        <li key={`${line.protocols}-${line.address}`} className="flex flex-wrap items-baseline gap-x-2">
-          <span className="tabular">{line.address}</span>
-          <span className="text-xs font-normal text-muted-foreground">{line.protocols}</span>
-        </li>
-      ))}
-    </ul>
+    <span className="inline-flex items-center gap-2">
+      <Flag code={code} />
+      {countryName(code, locale)}
+    </span>
+  )
+}
+
+/** 中继的地址：自动取它的公网 IP 加端口（不能改），下面一行说明会跟着公网 IP 变。 */
+function RelayAddresses({ udp, tcp }: { udp: readonly string[]; tcp: readonly string[] }) {
+  const addresses = [...new Set([...udp, ...tcp])]
+  return (
+    <>
+      {addresses.length === 0 ? (
+        '—'
+      ) : (
+        <ul className="space-y-1">
+          {addresses.map((address) => (
+            <li key={address} className="tabular">
+              {address}
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="mt-1 text-xs font-normal text-muted-foreground">{d.relayAddressAuto}</p>
+    </>
   )
 }
 
@@ -309,7 +322,7 @@ export function RelayTab({ network, node, onWaiting }: CapabilityTabProps) {
   const confirm = useConfirm()
   const nodes = useQuery(q.nodes(network.id))
   const watch = useDeclareWatch(node.declared.relay, onWaiting)
-  const [editing, setEditing] = useState(false)
+  const [enabling, setEnabling] = useState(false)
   const [reachability, setReachability] = useState<Reachability[] | null>(null)
   const enabled = node.relay !== null
   const attached = attachedCount(nodes.data ?? [], node.id)
@@ -320,7 +333,7 @@ export function RelayTab({ network, node, onWaiting }: CapabilityTabProps) {
 
   const openForm = () => {
     setReachability(null)
-    setEditing(true)
+    setEnabling(true)
   }
 
   const turnOff = async () => {
@@ -360,7 +373,9 @@ export function RelayTab({ network, node, onWaiting }: CapabilityTabProps) {
           <Stat label={d.statAddress} wide>
             <RelayAddresses udp={relay.udp} tcp={relay.tcp} />
           </Stat>
-          <Stat label={d.rowRegion}>{relay.region === '' ? '—' : relay.region}</Stat>
+          <Stat label={d.region}>
+            <CountryValue code={node.country ?? null} />
+          </Stat>
           <Stat label={d.rowBandwidth}>{bandwidthValue(relay.bandwidth_mbps)}</Stat>
         </StatGrid>
         <ConnectedNodes network={network} relay={node.id} nodes={nodes.data ?? []} />
@@ -388,11 +403,10 @@ export function RelayTab({ network, node, onWaiting }: CapabilityTabProps) {
       tip={d.withdrawnNote}
       description={d.relayDesc}
       flash={watch.flash}
-      action={enabled ? <EditButton onClick={openForm} /> : null}
       control={
         <Switch
           aria-label={d.relaySwitch(node.name)}
-          checked={enabled || editing}
+          checked={enabled || enabling}
           disabled={!(enabled || node.declared.relay) || disable.isPending}
           onCheckedChange={onSwitch}
         />
@@ -404,11 +418,11 @@ export function RelayTab({ network, node, onWaiting }: CapabilityTabProps) {
         <ReachabilityNotice results={reachability} onDismiss={() => setReachability(null)} />
       ) : null}
       {body}
-      {editing ? (
+      {enabling ? (
         <RelayDialog
           network={network}
           node={node}
-          onClose={() => setEditing(false)}
+          onClose={() => setEnabling(false)}
           onSaved={(saved) => setReachability(saved.reachability.length > 0 ? saved.reachability : null)}
         />
       ) : null}

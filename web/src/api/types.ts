@@ -191,16 +191,18 @@ export interface Declared {
 }
 
 export interface RelaySettings {
+  /** 其他节点连它用的地址：它的公网 IP 加端口，由 controller 定，不能改（白皮书 §7.2）。 */
   udp: string[]
   tcp: string[]
-  region: string
+  /** 界面不再用：区域去掉了，后端会删掉这个字段。 */
+  region?: string
   bandwidth_mbps: number | null
 }
 
 export interface RelayInput {
+  /** 现在的接口还要地址；界面交的是它的公网 IP 加端口。后端改成只收带宽之后去掉。 */
   udp?: string[]
   tcp?: string[]
-  region?: string
   bandwidth_mbps?: number | null
 }
 

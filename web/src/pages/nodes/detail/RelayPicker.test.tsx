@@ -12,10 +12,9 @@ import { renderWithApp } from '@/test/harness'
 import { RelayPicker } from './RelayPicker'
 
 const d = t.nodes.detail
-const relay = (id: number, name: string, region = '') =>
-  makeNode(id, name, { relay: { udp: [], tcp: [], region, bandwidth_mbps: null } })
+const relay = (id: number, name: string) => makeNode(id, name, { relay: { udp: [], tcp: [], bandwidth_mbps: null } })
 
-const NODES = [makeNode(1, 'self'), relay(2, 'hk', 'hk'), relay(3, 'tokyo'), makeNode(4, 'laptop')]
+const NODES = [makeNode(1, 'self'), relay(2, 'hk'), relay(3, 'tokyo'), makeNode(4, 'laptop')]
 
 function Harness({ initial = [], nodes = NODES }: { initial?: NodeId[]; nodes?: typeof NODES }) {
   const [value, setValue] = useState<NodeId[]>(initial)
@@ -40,7 +39,7 @@ describe('指定的中继', () => {
 
     await user.click(box)
     expect(screen.getAllByRole('option').map((row) => row.textContent)).toEqual([
-      `${t.common.online}hkhk`,
+      `${t.common.online}hk10.66.0.2`,
       `${t.common.online}tokyo10.66.0.3`,
     ])
     await user.click(option('tokyo'))

@@ -2,6 +2,7 @@ import { ChevronDown, Search, TriangleAlert } from 'lucide-react'
 import { type KeyboardEvent, useId, useState } from 'react'
 
 import { type Node, type NodeId } from '@/api/types'
+import { Flag } from '@/components/flag'
 import { OnlineDot } from '@/components/status'
 import { Badge } from '@/components/ui/badge'
 import { CheckMark } from '@/components/ui/check-mark'
@@ -18,8 +19,10 @@ const d = t.nodes.detail
 interface Row {
   id: NodeId
   name: string
-  /** 名字右边的灰字：区域，没有区域时是虚拟 IP。 */
+  /** 名字右边的灰字：虚拟 IP。 */
   hint: string
+  /** 公网 IP 所在的国家或地区，名字前面画国旗。 */
+  country: string | null
   online: boolean
   /** 指定过、但现在已经不是中继了（或者节点已经删掉）。 */
   stale: boolean
@@ -40,7 +43,7 @@ interface RelayPickerProps {
 
 /**
  * 指定的中继：和上面几项一样是一个下拉框，框里写着现在指定了哪几个（没有指定时是"自动"）。
- * 点开是能搜索的列表，每行一个中继、在不在线、区域、一个勾选框；勾上、取消立即保存，列表不收起。
+ * 点开是能搜索的列表，每行一个中继、在不在线、国旗、虚拟 IP、一个勾选框；勾上、取消立即保存，列表不收起。
  * 选满了没勾的行变灰；指定过但已经不是中继的排在最后，带一个提醒，取消勾选就去掉了。
  */
 export function RelayPicker({ id, nodes, self, value, onChange, busy = false, ...aria }: RelayPickerProps) {
@@ -55,7 +58,8 @@ export function RelayPicker({ id, nodes, self, value, onChange, busy = false, ..
     .map((node) => ({
       id: node.id,
       name: node.name,
-      hint: node.relay?.region === '' || node.relay === null ? node.virtual_ip : node.relay.region,
+      hint: node.virtual_ip,
+      country: node.country ?? null,
       online: node.online,
       stale: false,
     }))
@@ -65,6 +69,7 @@ export function RelayPicker({ id, nodes, self, value, onChange, busy = false, ..
       id: pinned,
       name: nodeName(nodes, pinned),
       hint: '',
+      country: null,
       online: nodes.find((node) => node.id === pinned)?.online ?? false,
       stale: true,
     }))
@@ -172,6 +177,7 @@ export function RelayPicker({ id, nodes, self, value, onChange, busy = false, ..
                 )}
               >
                 <OnlineDot online={row.online} />
+                <Flag code={row.country} />
                 <span className={cn('min-w-0 flex-1 truncate', locked(row) && !busy && 'text-muted-foreground')}>
                   {row.name}
                 </span>
