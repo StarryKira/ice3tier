@@ -407,12 +407,26 @@ test('启用出口：节点没有声明时说明原因和要执行的命令，�
   await expect(page.getByTestId('not-declared-exit')).toHaveCount(0)
   await expect(exitRow.getByTestId('declare-command')).toHaveCount(0)
 
-  // 打开就按默认值启用，没有对话框；设置平铺在卡片里，端口默认不限，要限制时才填。
+  // 打开就按默认值启用，没有对话框；设置平铺在卡片里。端口限制是单独的一张卡片，默认关着。
   await exitSwitch.click()
   await expectToast(page, t.nodes.detail.exitEnabledToast(server.name))
   await expect(exitSwitch).toBeChecked()
-  await expect(exitRow.getByRole('radio', { name: t.nodes.detail.exitFormPortsAny })).toBeChecked()
-  await expect(exitRow.getByRole('textbox', { name: t.nodes.detail.exitFormPorts })).toHaveCount(0)
+  const portsCard = page.getByTestId('exit-ports')
+  const portsSwitch = portsCard.getByRole('switch', { name: t.nodes.detail.exitPortsSwitch(server.name) })
+  await expect(portsSwitch).not.toBeChecked()
+  await expect(portsCard.getByRole('textbox', { name: t.nodes.detail.exitFormPorts })).toHaveCount(0)
+  await clearToasts(page)
+  // 打开端口限制、填上端口、回车：保存；关上：又不限了。
+  await portsSwitch.click()
+  await portsCard.getByRole('textbox', { name: t.nodes.detail.exitFormPorts }).fill('443')
+  await page.keyboard.press('Enter')
+  await expectToast(page, t.nodes.detail.exitSavedToast)
+  await expect
+    .poll(async () => (await apiNodes()).find((candidate) => candidate.id === server.id)?.exit?.ports)
+    .toEqual([443])
+  await clearToasts(page)
+  await portsSwitch.click()
+  await expectToast(page, t.nodes.detail.exitSavedToast)
   // 启用之后给出一个马上能用的例子，地址是这个节点真实的虚拟 IP。
   await expect(exitRow.getByText(`curl -x socks5h://${server.ip}@127.0.0.1:1080 https://example.com`)).toBeVisible()
   const node = (await apiNodes()).find((candidate) => candidate.id === server.id)

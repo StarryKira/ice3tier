@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { Hash } from 'lucide-react'
 import { type KeyboardEvent, type ReactNode, useId, useState } from 'react'
 import { Link } from 'react-router'
 
@@ -54,10 +55,10 @@ const onEnter = (save: () => void) => (event: KeyboardEvent<HTMLInputElement>) =
 }
 
 /**
- * 出口的设置，一行一项，改了就保存：开关、分段选择、下拉是一改就存；输入框在离开或回车时存。
- * `PUT …/exit` 是整个替换，所以每次交的都是全部的设置。值不对时不交，错误写在那一行下面。
+ * 出口设置的表单：设置列表和端口限制卡片共用一份。改了就保存：开关、分段选择、下拉是一改就存；
+ * 输入框在离开或回车时存。`PUT …/exit` 是整个替换，所以每次交的都是全部的设置。值不对时不交。
  */
-export function ExitSettingsList({ network, node, exit }: { network: Network; node: NodeDetail; exit: ExitSettings }) {
+function useExitForm(network: Network, node: NodeDetail, exit: ExitSettings) {
   const save = useSaveExit(network, node)
   const savedKey = JSON.stringify(exit)
   const [synced, setSynced] = useState(savedKey)
@@ -70,9 +71,6 @@ export function ExitSettingsList({ network, node, exit }: { network: Network; no
     setTouched(new Set())
   }
   const problems = exitFormProblems(form)
-  const shown = (field: Field) => (touched.has(field) ? problems[field] : null)
-  const ids = { ports: useId(), lan: useId(), quota: useId(), family: useId(), connects: useId(), upstream: useId() }
-  const classId = useId()
 
   const commit = (next: ExitFormState, field?: Field) => {
     setForm(next)
@@ -86,38 +84,27 @@ export function ExitSettingsList({ network, node, exit }: { network: Network; no
     })
   }
 
+  return {
+    form,
+    setForm,
+    commit,
+    problems,
+    shown: (field: Field) => (touched.has(field) ? problems[field] : null),
+    save,
+  }
+}
+
+type ExitForm = ReturnType<typeof useExitForm>
+
+/** 出口的设置，一行一项（端口限制在单独的卡片里）。 */
+function ExitSettingsList({ ctl }: { ctl: ExitForm }) {
+  const { form, setForm, commit, problems, shown, save } = ctl
+  const ids = { lan: useId(), quota: useId(), family: useId(), connects: useId(), upstream: useId() }
+  const classId = useId()
+
   return (
     <div>
       <div className="divide-y">
-        <SettingRow label={d.exitFormPorts} hint={d.exitFormPortsHint} labelId={ids.ports} error={shown('ports')}>
-          <div className="flex items-center gap-2">
-            <Segmented
-              aria-label={d.exitFormPorts}
-              size="sm"
-              value={form.limitPorts ? 'limited' : 'any'}
-              onChange={(value) =>
-                value === 'any' ? commit({ ...form, limitPorts: false }) : setForm({ ...form, limitPorts: true })
-              }
-              options={[
-                { value: 'any', label: d.exitFormPortsAny },
-                { value: 'limited', label: d.exitFormPortsLimited },
-              ]}
-            />
-            {form.limitPorts ? (
-              <Input
-                aria-labelledby={ids.ports}
-                className="w-40 font-mono"
-                placeholder="80, 443"
-                autoFocus={form.ports === ''}
-                value={form.ports}
-                onChange={(event) => setForm({ ...form, ports: event.target.value })}
-                onBlur={() => commit(form, 'ports')}
-                onKeyDown={onEnter(() => commit(form, 'ports'))}
-              />
-            ) : null}
-          </div>
-        </SettingRow>
-
         <SettingRow label={d.exitFormLan} hint={d.exitFormLanHint} htmlFor={ids.lan}>
           <Switch id={ids.lan} checked={form.lan} onCheckedChange={(lan) => commit({ ...form, lan })} />
         </SettingRow>
@@ -229,6 +216,57 @@ export function ExitSettingsList({ network, node, exit }: { network: Network; no
   )
 }
 
+/**
+ * 端口限制，单独一张卡片：默认关着（任何端口都放行）。打开之后填允许的端口，离开输入框或回车时保存；
+ * 端口没填好之前不保存，开关看起来开着，出口照旧不限。只限制互联网目标，局域网目标不受它管。
+ */
+function ExitPortsCard({ node, ctl }: { node: NodeDetail; ctl: ExitForm }) {
+  const { form, setForm, commit, shown } = ctl
+  const portsId = useId()
+  return (
+    <BoxCard data-testid="exit-ports">
+      <header className="flex items-center justify-between gap-4 px-5 py-4">
+        {/* 和出口卡片的标题栏一样：左边一个图标块。 */}
+        <div className="flex min-w-0 items-center gap-3.5">
+          <span
+            aria-hidden
+            className="flex size-10 shrink-0 items-center justify-center rounded-lg border bg-muted/60 text-foreground/80"
+          >
+            <Hash className="size-5" />
+          </span>
+          <div className="min-w-0">
+            <h2 className="text-[15px] leading-6 font-semibold">{d.exitPortsTitle}</h2>
+            <p className="text-[13px] text-muted-foreground">{d.exitPortsDesc}</p>
+          </div>
+        </div>
+        <Switch
+          aria-label={d.exitPortsSwitch(node.name)}
+          checked={form.limitPorts}
+          onCheckedChange={(on) =>
+            on ? setForm({ ...form, limitPorts: true }) : commit({ ...form, limitPorts: false })
+          }
+        />
+      </header>
+      {form.limitPorts ? (
+        <div className="border-t">
+          <SettingRow label={d.exitFormPorts} hint={d.exitFormPortsHint} htmlFor={portsId} error={shown('ports')}>
+            <Input
+              id={portsId}
+              className="w-56 font-mono"
+              placeholder="80, 443"
+              autoFocus={form.ports === ''}
+              value={form.ports}
+              onChange={(event) => setForm({ ...form, ports: event.target.value })}
+              onBlur={() => commit(form, 'ports')}
+              onKeyDown={onEnter(() => commit(form, 'ports'))}
+            />
+          </SettingRow>
+        </div>
+      ) : null}
+    </BoxCard>
+  )
+}
+
 /** 一项数：上面一行灰色的小字是名字，下面是值。 */
 function Stat({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
@@ -252,7 +290,7 @@ function Stat({ label, hint, children }: { label: string; hint?: string; childre
 /**
  * 出口的用量：它自己报的、这次启动以来的累计。标题右边是健康（只算出口自己的失败）；设了配额时最上面是本账期的进度条。
  */
-export function ExitUsageCard({ network, node }: { network: Network; node: NodeDetail }) {
+function ExitUsageCard({ network, node }: { network: Network; node: NodeDetail }) {
   const exits = useQuery(q.exits(network.id))
   const view = exits.data?.find((candidate) => candidate.node.id === node.id)
   const health = view === undefined ? null : exitHealthView(view)
@@ -328,7 +366,7 @@ interface UserRow {
  * 能用它的节点：访问规则允许访问它的节点都能把它当出口。每行一样高：名字，右边是它经这个出口发出和收到的字节
  * （那个节点自己看到的，没用过就是 0）。用过、但规则现在已经不允许的也列出来，标明。按流量排。
  */
-export function ExitUsersCard({ network, node }: { network: Network; node: NodeDetail }) {
+function ExitUsersCard({ network, node }: { network: Network; node: NodeDetail }) {
   const access = useQuery(q.nodeAccess(network.id, node.id))
   const exits = useQuery(q.exits(network.id))
   const nodes = useQuery(q.nodes(network.id))
@@ -391,5 +429,33 @@ export function ExitUsersCard({ network, node }: { network: Network; node: NodeD
         </ul>
       )}
     </BoxCard>
+  )
+}
+
+interface ExitEnabledLayoutProps {
+  network: Network
+  node: NodeDetail
+  exit: ExitSettings
+  /** 出口卡片本身（顶上的开关等）由出口页给，这里只给它里面的设置列表。 */
+  renderCard: (settings: ReactNode) => ReactNode
+}
+
+/**
+ * 启用了的出口：宽屏分两栏。左边是出口卡片（设置一行一项）和端口限制；右边是用量、能用它的节点。
+ * 设置列表和端口限制共用一份表单。
+ */
+export function ExitEnabledLayout({ network, node, exit, renderCard }: ExitEnabledLayoutProps) {
+  const ctl = useExitForm(network, node, exit)
+  return (
+    <div className="grid items-start gap-5 @6xl:grid-cols-2">
+      <div className="space-y-5">
+        {renderCard(<ExitSettingsList ctl={ctl} />)}
+        <ExitPortsCard node={node} ctl={ctl} />
+      </div>
+      <div className="space-y-5">
+        <ExitUsageCard network={network} node={node} />
+        <ExitUsersCard network={network} node={node} />
+      </div>
+    </div>
   )
 }

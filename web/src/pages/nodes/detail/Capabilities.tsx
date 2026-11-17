@@ -29,7 +29,7 @@ import { networkPath } from '@/pages/networks/context'
 import { useSaveExit } from './exitActions'
 import { exitFormFrom } from './exitFormState'
 import { ConnectedNodesCard, RelayLinksCard, RelayPairsCard, RelayStateValue } from './RelayCards'
-import { ExitSettingsList, ExitUsageCard, ExitUsersCard } from './ExitCards'
+import { ExitEnabledLayout } from './ExitCards'
 import { RelayDialog } from './RelayDialog'
 
 const d = t.nodes.detail
@@ -415,35 +415,7 @@ export function ExitTab({ network, node, onWaiting }: CapabilityTabProps) {
     else if (enabled) void turnOff()
   }
 
-  const exit = node.exit
-  let body: ReactNode
-  if (exit !== null) {
-    body = (
-      <>
-        <ExitSettingsList network={network} node={node} exit={exit} />
-        <div className="border-t px-5 py-4">
-          <p className="text-[13px] text-muted-foreground">{d.exitUsageBody}</p>
-          <CodeBlock copy={exitUsage(node.virtual_ip)} className="mt-2">
-            {exitUsage(node.virtual_ip)}
-          </CodeBlock>
-        </div>
-      </>
-    )
-  } else if (!node.declared.exit) {
-    body = (
-      <CardNote>
-        <NotDeclared capability="exit" node={node} open={watch.open} onToggle={watch.toggle} />
-      </CardNote>
-    )
-  } else {
-    body = (
-      <CardNote>
-        <p className="text-muted-foreground">{node.online ? d.declaredReady : d.offlineNote}</p>
-      </CardNote>
-    )
-  }
-
-  const card = (
+  const card = (content: ReactNode) => (
     <CapabilityCard
       testId="capability-exit"
       icon={<DoorOpen />}
@@ -461,19 +433,46 @@ export function ExitTab({ network, node, onWaiting }: CapabilityTabProps) {
       }
     >
       {watch.flash ? <Arrived /> : null}
-      {body}
+      {content}
     </CapabilityCard>
   )
-  // 和中继页一样：没启用时只有这一张卡片；启用之后宽屏分两栏，左边是出口和它的设置，右边是用量、能用它的节点。
-  if (!enabled) return <div className="max-w-5xl">{card}</div>
-  return (
-    <div className="grid items-start gap-5 @6xl:grid-cols-2">
-      {card}
-      <div className="space-y-5">
-        <ExitUsageCard network={network} node={node} />
-        <ExitUsersCard network={network} node={node} />
+
+  const exit = node.exit
+  if (exit === null) {
+    // 和中继页一样：没启用时只有这一张卡片。
+    return (
+      <div className="max-w-5xl">
+        {card(
+          <CardNote>
+            {node.declared.exit ? (
+              <p className="text-muted-foreground">{node.online ? d.declaredReady : d.offlineNote}</p>
+            ) : (
+              <NotDeclared capability="exit" node={node} open={watch.open} onToggle={watch.toggle} />
+            )}
+          </CardNote>,
+        )}
       </div>
-    </div>
+    )
+  }
+  return (
+    <ExitEnabledLayout
+      network={network}
+      node={node}
+      exit={exit}
+      renderCard={(settings) =>
+        card(
+          <>
+            {settings}
+            <div className="border-t px-5 py-4">
+              <p className="text-[13px] text-muted-foreground">{d.exitUsageBody}</p>
+              <CodeBlock copy={exitUsage(node.virtual_ip)} className="mt-2">
+                {exitUsage(node.virtual_ip)}
+              </CodeBlock>
+            </div>
+          </>,
+        )
+      }
+    />
   )
 }
 

@@ -252,6 +252,9 @@ export const nodes = {
     exitUsersRules: '访问规则',
     exitUsersNone: '没有节点能访问它：在访问控制里加一条规则',
     exitNotAllowed: '规则已不允许',
+    exitPortsTitle: '端口限制',
+    exitPortsDesc: '打开后只放行下面这些端口的互联网目标；局域网目标不受限制',
+    exitPortsSwitch: (name: string) => `限制 ${name} 的出口端口`,
     exitUsageBody: '代理用户名填它的虚拟 IP：',
 
     forwardTitle: '端口转发目标',

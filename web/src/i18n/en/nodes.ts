@@ -261,6 +261,9 @@ export const nodes: Messages['nodes'] = {
     exitUsersRules: 'Access rules',
     exitUsersNone: 'No node can reach it: add an access rule',
     exitNotAllowed: 'No longer allowed',
+    exitPortsTitle: 'Port restriction',
+    exitPortsDesc: 'When on, only these ports are allowed for internet targets; LAN targets are not affected',
+    exitPortsSwitch: (name) => `Restrict the exit ports of ${name}`,
     exitUsageBody: 'Use its virtual IP as the proxy username:',
 
     forwardTitle: 'Port forward target',
