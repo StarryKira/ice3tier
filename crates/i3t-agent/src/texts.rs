@@ -169,14 +169,14 @@ static EN: Texts = Texts {
 
 const TEMPLATE_ZH: &str = r#"# ice3tier 节点的配置。改完重启 i3t 生效。`i3t set …` 改的也是这个文件。
 
-# 节点的 UDP 端口。启用为 relay 的节点在同一个端口号上还监听 TCP。
+# 节点的 UDP 端口。启用为中继的节点在同一个端口号上还监听 TCP。
 port = 20330
 
 # 这台机器声明可以承担什么。声明本身不启用任何东西：要管理员在 WebUI 上启用；没有声明的启用不了。
 [declare]
 # 出口：别的节点的流量从这台机器的网络出去。
 exit = false
-# relay：为别的节点转发。要有从公网连得上的端口。
+# 中继：为别的节点转发。要有从公网连得上的端口。
 relay = false
 # 端口转发的目标：别的节点经它访问它的回环地址和局域网里指定的服务。
 forward = false
@@ -200,7 +200,7 @@ throughput = true
 [performance]
 profile = "balanced"
 # 下面各项不写就用档位的值；写了就盖过档位，不管档位是谁选的。
-# threads = 2               # 工作线程。只有一个对端在忙的机器、纯粹的 relay 写 1 最快。改了要重启
+# threads = 2               # 工作线程。只有一个对端在忙的机器、纯粹的中继写 1 最快。改了要重启
 # stream_buffer_kb = 16     # 每条流每个方向的搬运缓冲
 # stream_window_kb = 2048   # 每条流的接收窗口，最大 2048
 # connection_window_mb = 64 # 一条连接上收、发各自最多压住多少数据
