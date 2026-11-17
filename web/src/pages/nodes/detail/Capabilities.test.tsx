@@ -27,7 +27,7 @@ function detail(extra: Partial<NodeDetail> = {}): NodeDetail {
 const RELAY = { udp: ['203.0.113.7:20330'], tcp: ['203.0.113.7:20330'], region: '', bandwidth_mbps: null }
 
 describe('relay 这一页', () => {
-  it('写出有几个节点挂靠在它上面', async () => {
+  it('列出连着它的节点，连着别的中继的不在里面', async () => {
     fakeApi({
       'GET /networks/1/nodes': [
         makeNode(1, 'hk', { relay: RELAY }),
@@ -37,7 +37,9 @@ describe('relay 这一页', () => {
       ],
     })
     renderWithApp(<RelayTab network={NETWORK} node={detail({ relay: RELAY })} onWaiting={() => undefined} />)
-    await waitFor(() => expect(screen.getByTestId('relay-attached')).toHaveTextContent('2'))
+    const list = await screen.findByRole('list', { name: d.relayConnectedTitle })
+    await waitFor(() => expect(within(list).getAllByRole('listitem')).toHaveLength(2))
+    expect(list).not.toHaveTextContent('pc')
   })
 
   it('已连接的节点单独一张卡片：延迟、首选还是备用、指定的、它还连着哪些中继', async () => {

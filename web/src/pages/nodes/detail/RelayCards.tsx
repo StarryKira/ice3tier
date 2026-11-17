@@ -59,20 +59,6 @@ function Pending() {
   )
 }
 
-/** 卡片标题：名字，后面一个灰色的数。 */
-function CountTitle({ title, count, testId }: { title: ReactNode; count?: number; testId?: string }) {
-  return (
-    <span className="inline-flex items-center gap-2">
-      {title}
-      {count !== undefined ? (
-        <span data-testid={testId} className="text-sm font-normal text-muted-foreground tabular">
-          {count}
-        </span>
-      ) : null}
-    </span>
-  )
-}
-
 /** 去拓扑页某个视图的一个安静的链接。 */
 function TopologyLink({
   network,
@@ -168,13 +154,7 @@ export function ConnectedNodesCard({
   return (
     <BoxCard>
       <BoxCardHeader
-        title={
-          <CountTitle
-            title={d.relayConnectedTitle}
-            count={rows.filter((row) => row.rtt !== null).length}
-            testId="relay-attached"
-          />
-        }
+        title={d.relayConnectedTitle}
         tip={
           <>
             <p>{d.relayAttachedTip}</p>
@@ -400,7 +380,7 @@ export function RelayLinksCard({ network, relay }: { network: Network; relay: No
   return (
     <BoxCard data-testid="relay-links">
       <BoxCardHeader
-        title={<CountTitle title={d.relayLinksTitle} count={others.length > 0 ? row?.links.length : undefined} />}
+        title={d.relayLinksTitle}
         tip={d.relayLinksTip}
         action={
           <>
