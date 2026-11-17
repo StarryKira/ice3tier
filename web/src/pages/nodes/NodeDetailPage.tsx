@@ -15,6 +15,7 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 
 import { ApiError } from '@/api/client'
 import { q } from '@/api/queries'
+import { type Network, type NodeDetail } from '@/api/types'
 import { CopyText } from '@/components/copy'
 import { ForceUpdateDialog } from '@/components/force-update'
 import { Page } from '@/components/page'
@@ -74,6 +75,15 @@ const TABS = [
   'update',
 ] as const
 type Tab = (typeof TABS)[number]
+
+/**
+ * 名字旁边的角色标记，大一档、带图标。悬停写出有多少节点可以经它中继、经它访问互联网
+ * （能当出口用的节点数由访问规则算，只在它是出口时才去取）。
+ */
+function HeaderBadges({ network, node, attached }: { network: Network; node: NodeDetail; attached: number }) {
+  const access = useQuery({ ...q.nodeAccess(network.id, node.id), enabled: node.exit !== null })
+  return <RoleBadges node={node} attached={attached} exitUsers={access.data?.reachable_by.length} size="md" />
+}
 
 /**
  * 节点详情：独立的页面，有自己的地址。字段多、关联多的对象不用抽屉。
@@ -183,7 +193,7 @@ export function NodeDetailPage() {
                 </Button>
               </Tooltip>
               <span className="ml-1 flex shrink-0 items-center gap-1.5">
-                <RoleBadges node={node} attached={attachedCount(nodes.data ?? [], node.id)} size="md" />
+                <HeaderBadges network={network} node={node} attached={attachedCount(nodes.data ?? [], node.id)} />
                 {issue !== undefined ? <IssueIcon message={issue.message} tone={issue.tone} /> : null}
               </span>
             </div>

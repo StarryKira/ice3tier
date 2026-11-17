@@ -42,7 +42,7 @@ describe('relay 这一页', () => {
     expect(list).not.toHaveTextContent('pc')
   })
 
-  it('已连接的节点单独一张卡片：延迟、首选还是备用、指定的、它还连着哪些中继', async () => {
+  it('已连接的节点单独一张卡片：延迟、首选还是备用、指定的；不写它还连着哪些中继', async () => {
     fakeApi({
       'GET /networks/1/nodes': [
         makeNode(1, 'hk', { relay: RELAY }),
@@ -69,7 +69,7 @@ describe('relay 这一页', () => {
     expect(rows[0]).toHaveTextContent(d.relayRankFirst)
     expect(rows[0]).toHaveTextContent(d.relayPinnedTag)
     expect(rows[1]).toHaveTextContent(d.relayRankBackup)
-    expect(rows[1]).toHaveTextContent(d.relayAlsoConnected(`tokyo ${t.common.ms(12)}`))
+    expect(rows[1]).not.toHaveTextContent('tokyo')
     expect(rows[2]).toHaveTextContent(d.relayNotConnected)
   })
 

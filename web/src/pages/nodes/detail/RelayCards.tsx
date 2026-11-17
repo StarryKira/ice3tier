@@ -1,10 +1,20 @@
 import { useQuery } from '@tanstack/react-query'
-import { RotateCw } from 'lucide-react'
-import { type ReactNode } from 'react'
+import { Pencil, RotateCw } from 'lucide-react'
+import { type ReactNode, useState } from 'react'
 import { Link } from 'react-router'
 
-import { q } from '@/api/queries'
-import { type MatrixEntry, type Network, type Node, type NodeId, type RelayState } from '@/api/types'
+import { api } from '@/api/endpoints'
+import { q, useAction } from '@/api/queries'
+import {
+  type MatrixEntry,
+  type Network,
+  type Node,
+  type NodeDetail,
+  type NodeId,
+  type RelayInput,
+  type RelaySettings,
+  type RelayState,
+} from '@/api/types'
 import { Flag } from '@/components/flag'
 import { NodeLink } from '@/components/node'
 import { SkeletonBlock } from '@/components/states'
@@ -12,10 +22,12 @@ import { StatusText, type Tone } from '@/components/status'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { BoxCard, BoxCardHeader } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
 import { t } from '@/i18n'
-import { formatList } from '@/lib/format'
 import { nodeName } from '@/lib/nodes'
+import { relayAddresses } from '@/lib/relay'
 import { cn } from '@/lib/utils'
+import { parseOptionalPositiveInt } from '@/lib/validate'
 import { networkPath } from '@/pages/networks/context'
 import { formatPermille } from '@/topology/route'
 
@@ -115,8 +127,6 @@ interface ConnectedRow {
   /** 这个中继是它延迟最低的那个：别的节点经中继找它时走这一个。 */
   preferred: boolean
   pinned: boolean
-  /** 它连着的其他中继，按延迟排。 */
-  others: { id: NodeId; rtt: number }[]
 }
 
 function connectedRows(relay: NodeId, nodes: readonly Node[]): ConnectedRow[] {
@@ -138,8 +148,8 @@ function connectedRows(relay: NodeId, nodes: readonly Node[]): ConnectedRow[] {
 }
 
 /**
- * 连着这个中继的节点：在线、名字、国旗、虚拟 IP；右边是这个中继对它是首选还是备用、是不是它指定的、延迟；
- * 第二行写它还连着哪些中继。按延迟排；指定了它、但现在没连着的排在最后。
+ * 连着这个中继的节点：在线、名字、国旗、虚拟 IP；右边是这个中继对它是首选还是备用、是不是它指定的、延迟。
+ * 每行一样高。按延迟排；指定了它、但现在没连着的排在最后。
  */
 export function ConnectedNodesCard({
   network,
@@ -186,13 +196,6 @@ export function ConnectedNodesCard({
                   {row.pinned ? <Badge tone="outline">{d.relayPinnedTag}</Badge> : null}
                   <Rtt ms={row.rtt} none={d.relayNotConnected} />
                 </>
-              }
-              sub={
-                row.others.length === 0
-                  ? null
-                  : d.relayAlsoConnected(
-                      formatList(row.others.map((other) => `${nodeName(nodes, other.id)} ${t.common.ms(other.rtt)}`)),
-                    )
               }
             />
           ))}
@@ -402,5 +405,96 @@ export function RelayLinksCard({ network, relay }: { network: Network; relay: No
       />
       {body}
     </BoxCard>
+  )
+}
+
+/**
+ * 中继卡片上"带宽"那一格：平时是值和一支铅笔，点了变成输入框（单位 Mbit/s，留空是不限），
+ * 回车或离开时保存，Esc 放弃。没有对话框。
+ */
+export function RelayBandwidthValue({
+  network,
+  node,
+  relay,
+}: {
+  network: Network
+  node: NodeDetail
+  relay: RelaySettings
+}) {
+  const [editing, setEditing] = useState(false)
+  const [text, setText] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const save = useAction(network.id, {
+    mutationFn: (input: RelayInput) => api.enableRelay(network.id, node.id, input),
+    success: d.relayBandwidthSaved,
+  })
+  const current = relay.bandwidth_mbps
+
+  const start = () => {
+    setText(current?.toString() ?? '')
+    setError(null)
+    setEditing(true)
+  }
+  const commit = () => {
+    const parsed = parseOptionalPositiveInt(text)
+    if (parsed.error !== null) {
+      setError(parsed.error)
+      return
+    }
+    if (parsed.value === current) {
+      setEditing(false)
+      return
+    }
+    // 比 0.1.10 旧的 controller 是整个替换、要地址：把现在的地址原样带上；新的只看带宽。
+    const addresses = relayAddresses(relay).map((entry) => entry.address)
+    save.mutate(
+      { bandwidth_mbps: parsed.value, udp: addresses, tcp: addresses },
+      { onSuccess: () => setEditing(false) },
+    )
+  }
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        onClick={start}
+        aria-label={d.relayBandwidthEdit}
+        className="group -mx-1 inline-flex items-center gap-1.5 rounded-sm px-1 hover:text-primary"
+      >
+        {current === null ? t.common.unlimited : `${current} ${t.common.mbps}`}
+        <Pencil className="size-3.5 text-faint group-hover:text-primary" aria-hidden />
+      </button>
+    )
+  }
+  return (
+    <span className="block">
+      <span className="flex items-center gap-2">
+        <Input
+          autoFocus
+          inputMode="numeric"
+          aria-label={d.relayFormBandwidth}
+          aria-invalid={error !== null ? true : undefined}
+          placeholder={t.common.unlimited}
+          className="h-8 w-24 font-normal tabular"
+          disabled={save.isPending}
+          value={text}
+          onChange={(event) => {
+            setText(event.target.value)
+            setError(null)
+          }}
+          onBlur={commit}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              commit()
+            } else if (event.key === 'Escape') {
+              setEditing(false)
+            }
+          }}
+        />
+        <span className="text-[13px] font-normal text-muted-foreground">{t.common.mbps}</span>
+      </span>
+      {error !== null ? <span className="mt-1 block text-xs font-normal text-danger">{error}</span> : null}
+    </span>
   )
 }

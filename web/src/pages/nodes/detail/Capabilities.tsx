@@ -29,7 +29,7 @@ import { networkPath } from '@/pages/networks/context'
 
 import { useSaveExit } from './exitActions'
 import { exitFormFrom } from './exitFormState'
-import { ConnectedNodesCard, RelayLinksCard, RelayPairsCard, RelayStateValue } from './RelayCards'
+import { ConnectedNodesCard, RelayBandwidthValue, RelayLinksCard, RelayPairsCard, RelayStateValue } from './RelayCards'
 import { ExitEnabledLayout } from './ExitCards'
 import { RelayDialog } from './RelayDialog'
 
@@ -242,21 +242,15 @@ function CountryValue({ code }: { code: string | null }) {
   )
 }
 
-/**
- * 中继的地址：controller 找出来的，只读，按节点去试的顺序。每个后面一行小字写它从哪里来
- * （节点上声明的、controller 看到的、网卡上的）；比 0.1.10 旧的 controller 不给来源，就不写。
- */
+/** 中继的地址：controller 找出来的，只读，按节点去试的顺序，一行一个。 */
 function RelayAddresses({ relay }: { relay: RelaySettings }) {
   const addresses = relayAddresses(relay)
   if (addresses.length === 0) return <span className="font-normal text-muted-foreground">{d.relayNoAddressYet}</span>
   return (
-    <ul className="space-y-1.5">
+    <ul className="space-y-1">
       {addresses.map((entry) => (
-        <li key={entry.address}>
-          <span className="tabular">{entry.address}</span>
-          {entry.source !== 'unknown' ? (
-            <span className="block text-xs font-normal text-muted-foreground">{d.relaySource[entry.source]}</span>
-          ) : null}
+        <li key={entry.address} className="tabular">
+          {entry.address}
         </li>
       ))}
     </ul>
@@ -321,7 +315,9 @@ export function RelayTab({ network, node, onWaiting }: CapabilityTabProps) {
           <Stat label={d.region}>
             <CountryValue code={node.country ?? null} />
           </Stat>
-          <Stat label={d.rowBandwidth}>{bandwidthValue(relay.bandwidth_mbps)}</Stat>
+          <Stat label={d.rowBandwidth}>
+            <RelayBandwidthValue network={network} node={node} relay={relay} />
+          </Stat>
           <Stat label={d.statState}>
             <RelayStateValue network={network} relay={node.id} />
           </Stat>
@@ -564,6 +560,3 @@ export function ForwardTab({ network, node, onWaiting }: CapabilityTabProps) {
     </CapabilityCard>
   )
 }
-
-const bandwidthValue = (mbps: number | null): string =>
-  mbps === null ? t.common.unlimited : `${mbps} ${t.common.mbps}`

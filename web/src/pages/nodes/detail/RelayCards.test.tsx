@@ -1,4 +1,5 @@
-import { screen, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
 import { type BackboneView, type RouteMatrix } from '@/api/types'
@@ -6,7 +7,7 @@ import { t } from '@/i18n'
 import { makeNode } from '@/test/fixtures'
 import { fakeApi, NETWORK, renderWithApp } from '@/test/harness'
 
-import { RelayLinksCard, RelayPairsCard, RelayStateValue } from './RelayCards'
+import { RelayBandwidthValue, RelayLinksCard, RelayPairsCard, RelayStateValue } from './RelayCards'
 
 const d = t.nodes.detail
 const b = t.topology.backbone
@@ -107,5 +108,33 @@ describe('中继页的卡片', () => {
     renderWithApp(<RelayStateValue network={NETWORK} relay={1} />)
     expect(await screen.findByText(b.state.overloaded)).toBeVisible()
     expect(screen.getByText(b.load(97))).toBeVisible()
+  })
+
+  it('带宽点着改：回车保存，只交带宽和现在的地址；写错了不交', async () => {
+    const user = userEvent.setup()
+    const relay = { addresses: [{ address: '198.51.100.45:20330', source: 'observed' as const }], bandwidth_mbps: null }
+    const node = {
+      ...makeNode(1, 'atl', { relay }),
+      endpoints: [],
+      observed_endpoint: null,
+      mapping_varies: false,
+      flows: 0,
+      tx_bytes: 0,
+      rx_bytes: 0,
+    }
+    const api = fakeApi({ 'PUT /networks/1/nodes/1/relay': { ...node, reachability: [] } })
+    renderWithApp(<RelayBandwidthValue network={NETWORK} node={node} relay={relay} />)
+    await user.click(screen.getByRole('button', { name: d.relayBandwidthEdit }))
+    const input = screen.getByRole('textbox', { name: d.relayFormBandwidth })
+    await user.type(input, '0{Enter}')
+    expect(screen.getByText(t.validate.positiveInt)).toBeVisible()
+    await user.clear(input)
+    await user.type(input, '200{Enter}')
+    await waitFor(() => expect(api.callsTo('PUT /networks/1/nodes/1/relay')).toHaveLength(1))
+    expect(api.callsTo('PUT /networks/1/nodes/1/relay')[0]?.body).toEqual({
+      bandwidth_mbps: 200,
+      udp: ['198.51.100.45:20330'],
+      tcp: ['198.51.100.45:20330'],
+    })
   })
 })

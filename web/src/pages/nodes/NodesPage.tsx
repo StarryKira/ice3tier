@@ -92,9 +92,11 @@ interface RoleBadgesProps {
   attached?: number
   /** `sm` 用在列表里，挂着几个节点写在 relay 后面；`md` 用在详情页的名字旁边，带图标，挂着几个节点只在悬停里写。 */
   size?: 'sm' | 'md'
+  /** 能把它当出口的节点数：悬停出口的标记时写出来。不给就没有悬停的说明。 */
+  exitUsers?: number
 }
 
-export function RoleBadges({ node, attached, size = 'sm' }: RoleBadgesProps) {
+export function RoleBadges({ node, attached, exitUsers, size = 'sm' }: RoleBadgesProps) {
   const md = size === 'md'
   const className = md ? 'h-6 gap-1.5 rounded-md px-2 [&_svg]:size-3.5' : undefined
   return (
@@ -115,10 +117,12 @@ export function RoleBadges({ node, attached, size = 'sm' }: RoleBadgesProps) {
         </Tooltip>
       ) : null}
       {node.exit !== null ? (
-        <Badge className={className}>
-          {md ? <DoorOpen aria-hidden /> : null}
-          {t.nodes.roleExit}
-        </Badge>
+        <Tooltip content={exitUsers === undefined ? null : t.nodes.roleExitUsers(exitUsers)}>
+          <Badge tabIndex={exitUsers === undefined ? undefined : 0} className={className}>
+            {md ? <DoorOpen aria-hidden /> : null}
+            {t.nodes.roleExit}
+          </Badge>
+        </Tooltip>
       ) : null}
     </>
   )

@@ -40,8 +40,14 @@ export const nodes: Messages['nodes'] = {
   neverTip: 'Joined, but i3t run has not started yet',
   roleRelay: 'Relay',
   roleRelayAttached: (n) =>
-    n === 0 ? 'Relay · no connected nodes' : `Relay · ${count(n, 'connected node', 'connected nodes')}`,
+    n === 0
+      ? 'No node relays through this node yet'
+      : `${count(n, 'node', 'nodes')} can relay through this node to reach others`,
   roleExit: 'Exit',
+  roleExitUsers: (n) =>
+    n === 0
+      ? 'No node can reach the internet through this node yet'
+      : `${count(n, 'node', 'nodes')} can reach the internet through this node`,
 
   emptyTitle: 'No nodes yet',
   noMatches: 'No matching nodes',
@@ -186,22 +192,18 @@ export const nodes: Messages['nodes'] = {
       'Latency, jitter and loss it measures to the other relays; paths over several relays are chosen by these. Asked fresh each time, not refreshed automatically',
     relayLinksBackbone: 'Backbone matrix',
     relayLinkDown: 'Unreachable',
-    relayAlsoConnected: (list) => `Also connected to ${list}`,
     relayVia: (path) => `Via ${path}`,
     relayLinkStats: (jitter, loss) => `Jitter ${jitter} · loss ${loss}`,
     relayConnectedNone: 'No nodes connected yet',
     relayPinnedTag: 'Pinned',
     relayNotConnected: 'Not connected',
     relayNoAddressYet: 'No address found yet',
-    relaySource: {
-      declared: 'declared on the node',
-      observed: 'seen by the controller',
-      local: 'on its interface',
-    },
     relayDeclareBefore: (name) =>
       `If none of the found addresses can be reached (a port mapping at the provider or router), run on ${name}`,
     relayDeclareArg: 'address:port',
     relayDeclareAfter: 'and restart i3t; the declared address is tried first.',
+    relayBandwidthEdit: 'Change the bandwidth limit',
+    relayBandwidthSaved: 'Bandwidth limit saved',
     relayAddressLabel: 'Other nodes reach it at',
     relayAddressAuto: 'Found automatically; nothing to fill in',
     relayNoAddress: 'No address found yet: enable it once the node is online',
