@@ -368,6 +368,11 @@ export interface NodeRoute extends RouteDetail {
   age_secs: number
   /** controller 看到这条路换上来已经多少秒了。只是延迟变了不算换路；controller 重启之后从头算。 */
   since_secs: number
+  /** 和对端的共用连接上现在开着几条流。没有连接、或者节点太旧不报时是 `null`。 */
+  flows?: number | null
+  /** 节点启动以来在和这个对端的连接上发出、收到的字节数（线上的字节）。有没有同 `flows`。 */
+  tx_bytes?: number | null
+  rx_bytes?: number | null
 }
 
 export interface RouteTable {

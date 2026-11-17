@@ -508,7 +508,7 @@ test('有数据时：节点详情', async () => {
   await page.keyboard.press('Escape')
 
   await page.getByRole('tab', { name: d.tabRoutes }).click()
-  await expect(page.getByRole('columnheader', { name: d.colPath })).toBeVisible()
+  await expect(page.getByRole('columnheader', { name: d.routesColMode })).toBeVisible()
   await shot('node-detail-routes')
 
   await page.getByRole('tab', { name: d.tabAccess }).click()
