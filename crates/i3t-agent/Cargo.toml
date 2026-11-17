@@ -20,6 +20,7 @@ i3t-lane = { path = "../i3t-lane" }
 i3t-metrics = { path = "../i3t-metrics" }
 i3t-model = { path = "../i3t-model" }
 i3t-proto = { path = "../i3t-proto" }
+i3t-underlay = { path = "../i3t-underlay" }
 i3t-update = { path = "../i3t-update" }
 rand = "0.10.4"
 rustls.workspace = true

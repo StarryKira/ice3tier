@@ -137,7 +137,7 @@ impl Fleet {
     /// 一个启用了 relay 的节点。
     fn relay(&mut self, running: &str) -> Member {
         let member = self.node_as(&Hello { declared: CAN_DO_ALL, ..modern_hello(running) });
-        let settings = RelaySettings { udp: vec!["203.0.113.7:20330".parse().unwrap()], ..RelaySettings::default() };
+        let settings = RelaySettings::default();
         self.controller().enable_relay(self.network, member.id, settings).unwrap();
         member
     }

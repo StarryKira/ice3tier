@@ -21,6 +21,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use i3t_model::admin::diag::{CreateTest, TestQuery};
+use i3t_model::admin::stats::SeriesQuery;
 use i3t_model::admin::{
     API_PREFIX, ApiError, CreateCredential, CreateEnrollToken, CreateGroup, CreateNetwork, CreateRule, ErrorBody, ErrorCode, ExitTestInput,
     ForceUpdate, ForwardInput, GroupId, GroupMembers, ListenerInput, LogRef, NetworkId, PairInput, RelayEnabled, RelaySettings,
@@ -74,6 +75,7 @@ pub fn router(controller: Arc<Controller>, webui: &WebUi) -> Router {
         .route(&format!("{network}/routes"), get(route_matrix))
         .route(&format!("{network}/path"), get(path))
         .route(&format!("{network}/backbone"), get(backbone))
+        .route(&format!("{network}/stats"), get(series))
         .route(&format!("{network}/tests"), get(list_tests).post(start_test))
         .route(&format!("{network}/tests/matrix"), get(show_matrix).post(start_matrix))
         .route(&format!("{network}/tests/matrix/cancel"), post(cancel_matrix))
@@ -543,16 +545,20 @@ async fn delete_node(State(app): State<App>, Path((network, node)): Path<(Networ
     deleted(&app, move |controller| controller.delete_node(network, node)).await
 }
 
-/// 启用之后从 controller 这边试连填的地址，结果和节点一起回给调用方。试连只是参考，连不上也照样启用。
+/// 启用之后从 controller 这边试连 relay 的地址，结果和节点一起回给调用方。试连只是参考：谁连得上它，它就是谁的 relay。
 async fn enable_relay(
     State(app): State<App>,
     Path((network, node)): Path<(NetworkId, NodeId)>,
     Body(settings): Body<RelaySettings>,
 ) -> Reply {
     let node = blocking(&app, move |controller| controller.enable_relay(network, node, settings)).await?;
-    let (udp, tcp) = node.relay.as_ref().map(|relay| (relay.udp.clone(), relay.tcp.clone())).unwrap_or_default();
-    let reachability = reachability::check(&udp, &tcp).await;
+    let addresses: Vec<SocketAddr> = node.relay.iter().flat_map(|relay| &relay.addresses).map(|entry| entry.address).collect();
+    let reachability = reachability::check(&addresses, &addresses).await;
     Ok(Json(RelayEnabled { node, reachability }).into_response())
+}
+
+async fn series(State(app): State<App>, Path(network): Path<NetworkId>, Query(query): Query<SeriesQuery>) -> Reply {
+    ok(&app, move |controller| controller.series(network, &query)).await
 }
 
 async fn disable_relay(State(app): State<App>, Path((network, node)): Path<(NetworkId, NodeId)>) -> Reply {

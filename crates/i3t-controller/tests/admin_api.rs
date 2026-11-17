@@ -160,7 +160,7 @@ fn hello(declared: Declared) -> Hello {
     Hello { version: "0.1.0".to_owned(), platform: "linux-x86_64".to_owned(), declared, port: 20330, ..Hello::default() }
 }
 
-const CAN_DO_ALL: Declared = Declared { exit: true, relay: true, forward: true };
+const CAN_DO_ALL: Declared = Declared { exit: true, relay: true, forward: true, relay_address: None };
 
 #[tokio::test]
 async fn requests_without_the_admin_token_are_refused() {
@@ -343,11 +343,20 @@ async fn a_node_can_be_inspected_changed_and_deleted() {
     assert!(refused.message.contains("i3t set can-relay on"), "{}", refused.message);
 
     let relay_path = format!("{base}/{}", relay.id);
-    let no_address = api.fails(Method::PUT, &format!("{relay_path}/relay"), Some(json!({})), StatusCode::BAD_REQUEST).await;
-    assert_eq!(no_address.code, model::ErrorCode::InvalidRequest);
+    let zero = api.fails(Method::PUT, &format!("{relay_path}/relay"), Some(json!({ "bandwidth_mbps": 0 })), StatusCode::BAD_REQUEST).await;
+    assert_eq!(
+        (zero.code, zero.what.as_deref(), zero.field.as_deref()),
+        (model::ErrorCode::InvalidRequest, Some("zero"), Some("bandwidth_mbps"))
+    );
+    // 早先的请求体照收，填的地址和区域没有作用：地址是 controller 找出来的。
     let settings = json!({ "udp": ["203.0.113.7:20330"], "tcp": ["203.0.113.7:20330"], "region": "hk", "bandwidth_mbps": 200 });
-    let enabled: model::Node = api.ok(Method::PUT, &format!("{relay_path}/relay"), Some(settings.clone())).await;
-    assert_eq!(serde_json::to_value(enabled.relay.unwrap()).unwrap(), settings);
+    let enabled: model::Node = api.ok(Method::PUT, &format!("{relay_path}/relay"), Some(settings)).await;
+    assert_eq!(
+        serde_json::to_value(enabled.relay.unwrap()).unwrap(),
+        json!({ "addresses": [{ "address": "198.51.100.7:20330", "source": "observed" }], "bandwidth_mbps": 200 })
+    );
+    let plain: model::Node = api.ok(Method::PUT, &format!("{relay_path}/relay"), Some(json!({}))).await;
+    assert_eq!(plain.relay.unwrap().bandwidth_mbps, None, "{{}} 就是不限带宽地启用");
     let exit: model::Node = api.ok(Method::PUT, &format!("{relay_path}/exit"), Some(json!({ "lan": true }))).await;
     assert_eq!(
         serde_json::to_value(exit.exit.unwrap()).unwrap(),
@@ -908,7 +917,7 @@ async fn path_candidates_route_details_and_the_backbone_are_served() {
     let mut relay = api.join_as(network.id, &Hello { declared: CAN_DO_ALL, ..modern.clone() }).await;
     let mut a = api.join_as(network.id, &modern).await;
     let mut b = api.join_as(network.id, &modern).await;
-    let settings = model::RelaySettings { udp: vec!["203.0.113.7:20330".parse().unwrap()], ..model::RelaySettings::default() };
+    let settings = model::RelaySettings::default();
     api.controller.enable_relay(network.id, relay.id, settings).unwrap();
     let direct = Route::Direct { addr: "198.51.100.9:20330".parse().unwrap() };
     let report = Report {
@@ -1050,13 +1059,22 @@ async fn answering_relay() -> std::net::SocketAddr {
 
 #[tokio::test]
 async fn enabling_a_relay_answers_with_a_reachability_check_that_only_advises() {
-    let mut api = Api::new();
+    let api = Api::new();
     let network = api.network("home").await;
-    let relay = api.join(network.id, CAN_DO_ALL).await;
     let good = answering_relay().await;
-    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap();
-    let body = json!({ "udp": [good, closed], "tcp": [good, closed] });
-    let enabled: model::RelayEnabled = api.ok(Method::PUT, &format!("/networks/{}/nodes/{}/relay", network.id, relay.id), Some(body)).await;
+    // relay 和 controller 在同一台机器上：controller 看到的是回环地址加上它自报的端口，那里有程序在回答；
+    // 它报的网卡地址 127.0.0.2 上同一个端口没有程序在听。
+    let created: model::CreatedEnrollToken = api.ok(Method::POST, &format!("/networks/{}/tokens", network.id), Some(json!({}))).await;
+    let secret = created.token.parse::<EnrollToken>().unwrap().secret;
+    let (outbox, _inbox) = mpsc::channel(64);
+    let hello = Hello { port: good.port(), ..hello(CAN_DO_ALL) };
+    let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let relay = api.controller.enroll(PublicKey::from_bytes([77; PublicKey::LEN]), &secret, &hello, loopback, outbox).unwrap();
+    let local = Report { local_addresses: Some(vec!["127.0.0.2".parse().unwrap()].into()), ..Report::default() };
+    api.controller.handle(relay, loopback, ToController::Report(local)).unwrap();
+    let closed = std::net::SocketAddr::new("127.0.0.2".parse().unwrap(), good.port());
+    let path = format!("/networks/{}/nodes/{}/relay", network.id, relay.node);
+    let enabled: model::RelayEnabled = api.ok(Method::PUT, &path, Some(json!({}))).await;
     assert!(enabled.node.relay.is_some(), "连不上的地址不挡着启用");
     let summary: Vec<(model::Transport, std::net::SocketAddr, bool)> =
         enabled.reachability.iter().map(|check| (check.protocol, check.addr, check.reachable)).collect();
@@ -1446,4 +1464,48 @@ async fn an_exit_is_asked_to_test_a_target_and_its_answer_is_passed_on() {
     assert_eq!((&view["target"], &view["answered"]), (&json!("example.com:8443"), &json!(true)));
     assert_eq!(view["node"]["id"], json!(exit.id.get()));
     assert_eq!(view["result"]["connect"], json!({ "ms": 30, "address": null, "cause": { "code": "refused" } }));
+}
+
+#[tokio::test]
+async fn a_series_is_read_with_a_query_string_and_gaps_come_back_as_null() {
+    let mut api = Api::new();
+    let network = api.network("home").await;
+    let a = api.join(network.id, Declared::default()).await;
+    let path = format!("/networks/{}/stats", network.id);
+    let (status, view) = api.call(Method::GET, &format!("{path}?series=online"), None).await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(
+        (view["series"].clone(), view["node"].clone(), view["unit"].clone(), view["step"].clone()),
+        (json!("online"), Value::Null, json!("count"), json!(300))
+    );
+    let points = view["points"].as_array().unwrap();
+    assert_eq!(points.len(), 288);
+    assert!(points.iter().all(|point| point[1].is_null() && point[0].is_u64()), "还没有数据：每一段都在，值是 null");
+
+    let node: Value = api.ok(Method::GET, &format!("{path}?series=node_tx&node={}&step=3600", a.id), None).await;
+    assert_eq!(
+        (node["node"]["id"].clone(), node["unit"].clone(), node["step"].clone()),
+        (json!(a.id), json!("bytes_per_second"), json!(3600))
+    );
+
+    let missing = api.fails(Method::GET, &format!("{path}?series=node_tx"), None, StatusCode::BAD_REQUEST).await;
+    assert_eq!((missing.what.as_deref(), missing.field.as_deref()), (Some("required"), Some("node")));
+    let unknown = api.fails(Method::GET, &format!("{path}?series=everything"), None, StatusCode::BAD_REQUEST).await;
+    assert_eq!(unknown.what.as_deref(), Some("query"));
+    api.fails(Method::GET, &format!("{path}?series=node_tx&node=999"), None, StatusCode::NOT_FOUND).await;
+}
+
+#[tokio::test]
+async fn a_node_whose_interface_is_inside_the_range_carries_a_warning() {
+    let mut api = Api::new();
+    let network = api.network("home").await;
+    let a = api.join(network.id, Declared::default()).await;
+    let local =
+        Report { local_addresses: Some(vec!["10.66.5.5".parse().unwrap(), "192.168.1.9".parse().unwrap()].into()), ..Report::default() };
+    api.controller.handle(a.session, REMOTE, ToController::Report(local)).unwrap();
+    let node: Value = api.ok(Method::GET, &format!("/networks/{}/nodes/{}", network.id, a.id), None).await;
+    assert_eq!(node["warnings"], json!([{ "code": "range_overlap", "address": "10.66.5.5" }]));
+    let overview: Value = api.ok(Method::GET, &format!("/networks/{}/overview", network.id), None).await;
+    assert_eq!(overview["warnings"][0]["code"], json!("range_overlap"));
+    assert_eq!(overview["warnings"][0]["node"]["id"], json!(a.id));
 }

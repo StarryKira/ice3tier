@@ -8,8 +8,8 @@ mod zh;
 
 use i3t_model::admin::diag::{CellState, ItemState, MatrixState, TestState};
 use i3t_model::admin::{
-    ApiError, CredentialState, ExitHealth, ForwardStatus, LaneBlock, PackageState, PathSource, ReachCause, ReleaseCause, SkipCause,
-    TokenState, UpdateWait,
+    AddressSource, ApiError, CredentialState, ExitHealth, ForwardStatus, LaneBlock, NodeWarning, PackageState, PathSource, ReachCause,
+    ReleaseCause, SkipCause, TokenState, UpdateWait,
 };
 use i3t_model::control::diag::{ChoiceCode, HopSource, PathPick, TestCode, TransferEnd};
 use i3t_model::control::exit_test::{ExitTestCause, ExitVia};
@@ -48,6 +48,10 @@ pub struct Codes {
     pub package_state: fn(PackageState) -> &'static str,
     pub skip_cause: fn(&SkipCause) -> String,
     pub reach_cause: fn(ReachCause) -> &'static str,
+    /// relay 的一个地址是从哪里来的：`声明的`、`controller 看到的`、`网卡上的`。
+    pub address_source: fn(AddressSource) -> &'static str,
+    /// controller 对一个节点的提醒，一短句。
+    pub node_warning: fn(&NodeWarning) -> String,
     /// controller 为什么不接受这个节点（`i3t join` 被拒绝时）。
     pub reject_cause: fn(RejectCause) -> &'static str,
     /// 管理 API 的错误。中文直接用 controller 的原话；别的语言按错误码和 `what`、`field` 写。

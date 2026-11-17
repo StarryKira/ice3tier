@@ -7,6 +7,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use i3t_lang::Lang;
+use i3t_model::admin::stats::Series;
 use i3t_model::netmap::{IpFamily, LaneMode, Profile, ProxyProtocol, Reach, RoutingMode};
 use i3t_proto::flow::Class;
 use ipnet::{IpNet, Ipv4Net};
@@ -78,6 +79,14 @@ pub enum Command {
     },
     Routes,
     Backbone,
+    Stats {
+        #[arg(value_parser = parse_series)]
+        series: Series,
+        #[arg(long)]
+        node: Option<String>,
+        #[arg(long, default_value = "24h")]
+        since: Lifetime,
+    },
     Test {
         a: String,
         b: String,
@@ -250,12 +259,6 @@ pub enum NodeCommand {
 pub enum RelayCommand {
     Enable {
         node: String,
-        #[arg(long)]
-        udp: Vec<SocketAddr>,
-        #[arg(long)]
-        tcp: Vec<SocketAddr>,
-        #[arg(long, default_value = "")]
-        region: String,
         #[arg(long)]
         bandwidth: Option<u32>,
     },
@@ -712,6 +715,13 @@ impl std::str::FromStr for Lifetime {
     }
 }
 
+/// `i3tctl stats` 能读的序列。
+const SERIES: &str = "online|flows|tx|rx|node_tx|node_rx|node_flows|relay_attached|exit_tx|exit_rx";
+
+fn parse_series(text: &str) -> Result<Series, String> {
+    text.parse().map_err(|_| (texts().ui.must_be)(&SERIES.replace('|', ", ")))
+}
+
 /// 出口允许的端口：一组端口，或者 `any`。
 #[derive(Clone)]
 pub struct PortList(pub Option<Vec<u16>>);
@@ -805,12 +815,7 @@ fn describe(command: clap::Command, h: &Help, v: &Values) -> clap::Command {
         .mut_subcommand("relay", |sub| {
             sub.about(h.relay_group)
                 .mut_subcommand("enable", |sub| {
-                    sub.about(h.relay_enable)
-                        .mut_arg("node", node)
-                        .mut_arg("udp", |arg| arg.help(h.relay_udp).value_name(v.address))
-                        .mut_arg("tcp", |arg| arg.help(h.relay_tcp).value_name(v.address))
-                        .mut_arg("region", |arg| arg.help(h.relay_region).value_name(v.name))
-                        .mut_arg("bandwidth", |arg| arg.help(h.bandwidth).value_name("MBIT/S"))
+                    sub.about(h.relay_enable).mut_arg("node", node).mut_arg("bandwidth", |arg| arg.help(h.bandwidth).value_name("MBIT/S"))
                 })
                 .mut_subcommand("disable", |sub| sub.about(h.relay_disable).mut_arg("node", node))
         })
@@ -967,6 +972,12 @@ fn describe(command: clap::Command, h: &Help, v: &Values) -> clap::Command {
         .mut_subcommand("path", |sub| sub.about(h.path).mut_arg("a", node).mut_arg("b", node))
         .mut_subcommand("routes", |sub| sub.about(h.routes))
         .mut_subcommand("backbone", |sub| sub.about(h.backbone))
+        .mut_subcommand("stats", |sub| {
+            sub.about(h.stats)
+                .mut_arg("series", |arg| arg.help(h.stats_series).value_name(SERIES))
+                .mut_arg("node", |arg| node(arg.help(h.stats_node)))
+                .mut_arg("since", |arg| arg.help(h.stats_since).value_name(v.duration))
+        })
         .mut_subcommand("test", |sub| {
             sub.about(h.test)
                 .mut_arg("a", |arg| node(arg.help(h.test_a)))

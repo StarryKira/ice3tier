@@ -2,6 +2,11 @@
 //!
 //! 一个 [`RelayLink`] 管到一个 relay 的全部事情。它不直接碰 socket：要发的东西交给 [`Wire`]，
 //! 所以整套"先试谁、什么时候换"的规则可以脱离网络来测。
+//!
+//! 一个 relay 可以有好几个地址（controller 找出来的，白皮书 §7.2），不一定每个都连得上。UDP 的握手把 INIT 同时发给每个地址，
+//! 谁先回答 CHALLENGE 就用谁，之后的握手和保活都只走它；会话断了，下一次又是每个地址一起试。所以连不上的地址不多花时间。
+//! 回答了 CHALLENGE、握手却走不完的地址（地址和别的 relay 撞了，回答的是另一台机器）这一轮里不再试，剩下的地址马上接着试。
+//! TCP 一个接一个地错开一点时间去连（见 [`crate::tcp`]），上一次握手成功的地址排在最前，失败的排在最后。
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -62,6 +67,10 @@ struct TcpLeg {
     session: Session,
     connected: bool,
     started: Instant,
+    /// 连上的是哪个地址。
+    addr: Option<SocketAddr>,
+    /// 这条 TCP 上的会话建起来过。
+    established: bool,
 }
 
 /// 到一个 relay 的联系。
@@ -71,13 +80,24 @@ pub(crate) struct RelayLink {
     key: PublicKey,
     udp_addrs: Vec<SocketAddr>,
     tcp_addrs: Vec<SocketAddr>,
+    /// 本节点自己的地址。relay 的地址里有它们的话不去试：发出去的包会回到本节点自己这里。
+    own: Vec<SocketAddr>,
     /// 要不要和它保持会话：它是挂靠的 relay，或者有活跃的对端要经它到达。
     wanted: bool,
     wanted_since: Option<Instant>,
     udp: Session,
-    /// 这一次用 `udp_addrs` 里的第几个。握手失败就换下一个。
-    udp_choice: usize,
+    /// UDP 的握手和会话用的地址：回答了这一次握手的 CHALLENGE 的那个。还没有谁回答时是 `None`，INIT 发给每个地址。
+    udp_target: Option<SocketAddr>,
+    /// UDP 的会话建起来过（之后再断就是"会话没了"，不是"握手失败"）。
+    udp_established: bool,
+    /// 这一轮里回答了 CHALLENGE、握手却没有走完的地址。这一轮剩下的时间里不再试。
+    udp_shunned: Vec<SocketAddr>,
+    /// `udp_target` 变过，收包时按地址认 relay 的表要重建（见 [`take_target_changed`](Self::take_target_changed)）。
+    target_changed: bool,
     tcp: Option<TcpLeg>,
+    /// 最近一次 TCP 上握手成功的地址，下一次先连它；握手失败的地址下一次排最后。
+    tcp_good: Option<SocketAddr>,
+    tcp_bad: Option<SocketAddr>,
     /// TCP 那条腿上一个会话留下的测量值。断了重连还是同一段链路，新的会话接着用：不这样的话，
     /// 一条隔一会儿就断的链路每次重连之后都像新的一样好，延迟优先的选路会一次次被它骗回去。
     tcp_measured: Estimate,
@@ -111,11 +131,17 @@ impl RelayLink {
             key: relay.key,
             udp_addrs: relay.udp.clone(),
             tcp_addrs: relay.tcp.clone(),
+            own: Vec::new(),
             wanted: false,
             wanted_since: None,
             udp: Session::new(),
-            udp_choice: 0,
+            udp_target: None,
+            udp_established: false,
+            udp_shunned: Vec::new(),
+            target_changed: false,
             tcp: None,
+            tcp_good: None,
+            tcp_bad: None,
             tcp_measured: Estimate::new(),
             fell_back: false,
             steadiness: Steadiness::Unbroken,
@@ -150,18 +176,61 @@ impl RelayLink {
         }
     }
 
-    /// netmap 更新了这个 relay 的信息。
+    /// netmap 更新了这个 relay 的信息。正在用的地址不在新的列表里也接着用：它还通着；会话断了之后才只试新的。
     pub(crate) fn update(&mut self, relay: &Relay) {
         self.key = relay.key;
         if self.udp_addrs != relay.udp || self.tcp_addrs != relay.tcp {
             self.udp_addrs.clone_from(&relay.udp);
             self.tcp_addrs.clone_from(&relay.tcp);
-            self.udp_choice = 0;
+            self.udp_shunned.retain(|addr| relay.udp.contains(addr));
         }
     }
 
-    pub(crate) fn udp_addrs(&self) -> &[SocketAddr] {
-        &self.udp_addrs
+    /// 本节点自己的地址变了。
+    pub(crate) fn set_own(&mut self, own: &[SocketAddr]) {
+        own.clone_into(&mut self.own);
+    }
+
+    /// 要按来源地址认出这个 relay 的那些地址：netmap 里的，加上正在用的那个（它可能已经不在 netmap 里了）。
+    pub(crate) fn dispatch_addrs(&self) -> impl Iterator<Item = SocketAddr> + '_ {
+        self.udp_addrs.iter().copied().chain(self.udp_target.filter(|target| !self.udp_addrs.contains(target)))
+    }
+
+    /// UDP 的握手和会话现在用的地址；还没有哪个地址回答时是 `None`。
+    pub(crate) const fn udp_target(&self) -> Option<SocketAddr> {
+        self.udp_target
+    }
+
+    /// `udp_target` 自上次问过之后变过没有。
+    pub(crate) fn take_target_changed(&mut self) -> bool {
+        std::mem::take(&mut self.target_changed)
+    }
+
+    fn set_target(&mut self, target: Option<SocketAddr>) {
+        if self.udp_target != target {
+            self.udp_target = target;
+            self.target_changed = true;
+        }
+    }
+
+    /// 这一轮还可以试的 UDP 地址。
+    fn udp_candidates(&self) -> Vec<SocketAddr> {
+        self.udp_addrs.iter().copied().filter(|addr| !self.own.contains(addr) && !self.udp_shunned.contains(addr)).collect()
+    }
+
+    fn has_udp(&self) -> bool {
+        self.udp_addrs.iter().any(|addr| !self.own.contains(addr) && !self.udp_shunned.contains(addr))
+    }
+
+    /// 去连 TCP 的顺序：上一次握手成功的在最前，失败的在最后，别的照 netmap 里的顺序。
+    fn tcp_candidates(&self) -> Vec<SocketAddr> {
+        let mut addrs: Vec<SocketAddr> = self.tcp_addrs.iter().copied().filter(|addr| !self.own.contains(addr)).collect();
+        addrs.sort_by_key(|addr| match Some(*addr) {
+            good if good == self.tcp_good => 0,
+            bad if bad == self.tcp_bad => 2,
+            _ => 1,
+        });
+        addrs
     }
 
     pub(crate) const fn is_wanted(&self) -> bool {
@@ -180,6 +249,8 @@ impl RelayLink {
             self.failures = 0;
         } else {
             self.udp.stop();
+            self.udp_established = false;
+            self.set_target(None);
             if self.retire_tcp().is_some() {
                 wire.tcp_close();
             }
@@ -223,7 +294,7 @@ impl RelayLink {
     /// 现在能经它收发包的传输。UDP 和 TCP 都通时用 UDP。
     pub(crate) fn leg(&self) -> Option<Leg> {
         if self.udp.is_up() {
-            return self.udp_addr().map(Leg::Udp);
+            return self.udp_target.map(Leg::Udp);
         }
         self.tcp.as_ref().filter(|tcp| tcp.session.is_up()).map(|_| Leg::Tcp)
     }
@@ -269,10 +340,6 @@ impl RelayLink {
         self.observed.filter(|(_, at)| now.saturating_duration_since(*at) < ESTIMATE_TTL).map(|(addr, _)| addr)
     }
 
-    fn udp_addr(&self) -> Option<SocketAddr> {
-        self.udp_addrs.get(self.udp_choice % self.udp_addrs.len().max(1)).copied()
-    }
-
     /// 推进定时器。`urgent`：有包正经它发出去，却有一阵没有从它收到任何东西了。
     /// `survey`：不保持会话时要不要定期测一下延迟。
     pub(crate) fn poll(&mut self, now: Instant, who: Identity<'_>, urgent: bool, survey: bool, wire: &mut dyn Wire) {
@@ -295,7 +362,7 @@ impl RelayLink {
         }
         if self.tcp.as_ref().is_some_and(|tcp| tcp.session.is_up()) {
             // 走着 TCP：定期再试 UDP，通了就换回去。
-            if self.udp.is_idle() && now >= self.udp_retry_at && self.udp_addr().is_some() {
+            if self.udp.is_idle() && now >= self.udp_retry_at && self.has_udp() {
                 self.udp_retry_at = now + UDP_RETRY;
                 self.start_udp(now, who, wire);
             }
@@ -343,20 +410,22 @@ impl RelayLink {
 
     fn begin_attempt(&mut self, now: Instant, who: Identity<'_>, wire: &mut dyn Wire) {
         self.attempt = Some(now);
-        let tcp_only = self.fell_back && !self.tcp_addrs.is_empty();
+        let tcp_addrs = self.tcp_candidates();
+        let tcp_only = self.fell_back && !tcp_addrs.is_empty();
         if tcp_only {
             // 定期试 UDP 的握手要是正好进行到一半，放下它：relay 上一个节点只有一个会话，两边一起握手会互相顶掉。
             self.udp.stop();
-        } else if self.udp_addr().is_some() {
+            self.set_target(None);
+        } else if self.has_udp() {
             self.start_udp(now, who, wire);
         }
-        if !self.tcp_addrs.is_empty() {
+        if !tcp_addrs.is_empty() {
             let mut session = Session::over_tcp(self.tcp_measured.clone());
             session.set_training(self.training);
-            self.tcp = Some(TcpLeg { session, connected: false, started: now });
-            wire.tcp_connect(&self.tcp_addrs);
+            self.tcp = Some(TcpLeg { session, connected: false, started: now, addr: None, established: false });
+            wire.tcp_connect(&tcp_addrs);
         }
-        if self.udp_addr().is_none() && self.tcp_addrs.is_empty() {
+        if !self.has_udp() && tcp_addrs.is_empty() {
             tracing::warn!(relay = %self.id, "netmap 里这个 relay 没有任何地址，连不了");
             self.attempt_failed(now);
         }
@@ -366,7 +435,7 @@ impl RelayLink {
         self.attempt = None;
         self.fell_back = false;
         self.failures = self.failures.saturating_add(1);
-        self.udp_choice = self.udp_choice.wrapping_add(1);
+        self.udp_shunned.clear();
         let wait = retry_delay(self.failures);
         self.retry_at = now + wait;
         tracing::info!(relay = %self.id, failures = self.failures, "连不上 relay，{} 秒后再试", wait.as_secs());
@@ -377,17 +446,30 @@ impl RelayLink {
         self.session_lost();
         self.attempt = None;
         self.failures = 0;
+        self.udp_shunned.clear();
         self.retry_at = now + jitter(Duration::from_millis(300));
     }
 
+    /// 开始一次 UDP 握手：INIT 发给每个还可以试的地址。
     fn start_udp(&mut self, now: Instant, who: Identity<'_>, wire: &mut dyn Wire) {
+        self.set_target(None);
+        self.udp_established = false;
         let send = self.udp.start(now, false);
         self.send_udp(send, who, wire);
     }
 
+    /// 握手还没有地址回答时 INIT（和它的重发）发给每个地址；之后只发给回答了的那个。
     fn send_udp(&mut self, send: Send, who: Identity<'_>, wire: &mut dyn Wire) {
-        if let Some(to) = self.udp_addr() {
-            wire.udp(to, &self.encode(send, who));
+        let frame = self.encode(send, who);
+        match (send, self.udp_target) {
+            (_, Some(to)) => wire.udp(to, &frame),
+            (Send::Init { .. }, None) => {
+                for to in self.udp_candidates() {
+                    wire.udp(to, &frame);
+                }
+            }
+            // AUTH 和 PING 只在有地址回答过之后才会发。
+            (Send::Auth { .. } | Send::Ping { .. }, None) => {}
         }
     }
 
@@ -417,10 +499,28 @@ impl RelayLink {
                 self.attempt = None;
                 self.failures = 0;
                 self.fell_back = false;
+                self.udp_established = true;
+                self.udp_shunned.clear();
                 self.session_up(now);
-                tracing::info!(relay = %self.id, %observed, "到 relay 的中转会话建立（UDP）");
+                let via = self.udp_target.map(|addr| addr.to_string()).unwrap_or_default();
+                tracing::info!(relay = %self.id, %observed, %via, "到 relay 的中转会话建立（UDP）");
             }
             Some(Event::Down { reason }) => {
+                let target = self.udp_target;
+                let established = std::mem::take(&mut self.udp_established);
+                self.set_target(None);
+                if !established
+                    && self.wanted
+                    && let Some(addr) = target
+                {
+                    // 回答了 CHALLENGE，握手却没有走完：这一轮不再试它，剩下的地址马上接着试，不等这一轮结束。
+                    self.udp_shunned.push(addr);
+                    if self.has_udp() {
+                        tracing::info!(relay = %self.id, %addr, reason, "relay 的这个地址握手没有走完，换别的地址试");
+                        self.start_udp(now, who, wire);
+                        return;
+                    }
+                }
                 // 握手失败留给这一轮尝试去收尾；已经建好的会话掉了才需要马上重连。
                 if self.attempt.is_none() && !self.tcp.as_ref().is_some_and(|tcp| tcp.session.is_up()) {
                     tracing::info!(relay = %self.id, reason, "到 relay 的中转会话断开（UDP）");
@@ -445,10 +545,23 @@ impl RelayLink {
                 self.udp_retry_at = if self.fell_back { now } else { now + UDP_RETRY };
                 self.fell_back = true;
                 self.session_up(now);
-                tracing::info!(relay = %self.id, "到 relay 的中转会话建立（TCP）");
+                let via = self.tcp.as_mut().and_then(|tcp| {
+                    tcp.established = true;
+                    tcp.addr
+                });
+                self.tcp_good = via;
+                if self.tcp_bad == via {
+                    self.tcp_bad = None;
+                }
+                let via = via.map(|addr| addr.to_string()).unwrap_or_default();
+                tracing::info!(relay = %self.id, %via, "到 relay 的中转会话建立（TCP）");
             }
             Some(Event::Down { reason }) => {
                 tracing::info!(relay = %self.id, reason, "到 relay 的 TCP 中转不可用");
+                // 连上了、握手却没有走完的地址，下一次排在最后：它多半是另一台机器。
+                if let Some(TcpLeg { addr: Some(addr), established: false, .. }) = self.tcp {
+                    self.tcp_bad = Some(addr);
+                }
                 self.retire_tcp();
                 wire.tcp_close();
                 // 握手失败时这一轮尝试还没结束（`attempt` 还在）；建好的会话掉了才算"断过"。
@@ -460,24 +573,31 @@ impl RelayLink {
         }
     }
 
-    /// relay 的 UDP 地址发来的会话帧。错误帧走 [`on_udp_refusal`](Self::on_udp_refusal)。
-    pub(crate) fn on_udp_frame(&mut self, frame: &Frame, now: Instant, who: Identity<'_>, wire: &mut dyn Wire) {
+    /// relay 的地址 `from` 发来的会话帧。错误帧走 [`on_udp_refusal`](Self::on_udp_refusal)。
+    ///
+    /// 同一个地址可能是好几个 relay 的（不同局域网里的内网地址会撞），所以收包的一方会把帧交给每一个：
+    /// 这里只认在回答本节点发出去的随机数的帧，OK 还要验过签名。
+    pub(crate) fn on_udp_frame(&mut self, from: SocketAddr, frame: &Frame, now: Instant, who: Identity<'_>, wire: &mut dyn Wire) {
         match frame {
             Frame::Challenge(challenge) => {
                 if let Some((_, sent)) = self.survey.take_if(|(nonce, _)| *nonce == challenge.nonce) {
                     self.surveyed = Some((now.saturating_duration_since(sent), now));
                     self.next_survey = now + RELAY_SURVEY;
-                } else {
+                } else if self.udp_target.is_none_or(|target| target == from) && self.udp_candidates().contains(&from) {
                     let step = self.udp.on_challenge(challenge, now);
+                    if matches!(step.send, Some(Send::Auth { .. })) {
+                        self.set_target(Some(from));
+                    }
                     self.apply_udp(step, now, who, wire);
                 }
             }
-            Frame::Ok(ok) if self.udp.expects_ok(ok) => {
+            Frame::Ok(ok) if self.udp_target == Some(from) && self.udp.expects_ok(ok) => {
                 if self.ok_is_genuine(ok, who) {
                     let step = self.udp.on_ok(ok, now);
                     self.apply_udp(step, now, who, wire);
                 }
             }
+            Frame::Pong(_) if self.udp_target != Some(from) => {}
             Frame::Pong(pong) => {
                 if let Some(observed) = self.udp.on_pong(pong, now) {
                     self.observed = Some((observed, now));
@@ -525,10 +645,11 @@ impl RelayLink {
         (Step::default(), Some(complaint))
     }
 
-    /// 到这个 relay 的 TCP 连上了：在里面开始握手，先停在 cookie 那一步。
-    pub(crate) fn on_tcp_connected(&mut self, now: Instant, who: Identity<'_>, wire: &mut dyn Wire) {
+    /// 到这个 relay 的 TCP 连上了（`addr` 是连上的那个地址）：在里面开始握手，先停在 cookie 那一步。
+    pub(crate) fn on_tcp_connected(&mut self, addr: SocketAddr, now: Instant, who: Identity<'_>, wire: &mut dyn Wire) {
         let Some(tcp) = &mut self.tcp else { return };
         tcp.connected = true;
+        tcp.addr = Some(addr);
         let send = tcp.session.start(now, true);
         self.send_tcp(send, who, wire);
     }
@@ -592,12 +713,19 @@ impl RelayLink {
         if now < self.next_survey {
             return;
         }
-        let Some(to) = self.udp_addr() else { return };
+        let candidates = self.udp_candidates();
+        if candidates.is_empty() {
+            return;
+        }
         // 没有回答的话过一会儿就再问，早点知道它能不能用；有回答的话下一次在一个完整的间隔之后。
         self.next_survey = now + RELAY_SURVEY / 6;
         let nonce: Nonce = i3t_underlay::random_bytes();
         self.survey = Some((nonce, now));
-        wire.udp(to, &Init { node: who.me, nonce }.to_bytes());
+        // 每个地址都问，先回答的那个就是量到的延迟。
+        let init = Init { node: who.me, nonce }.to_bytes();
+        for to in candidates {
+            wire.udp(to, &init);
+        }
     }
 }
 
@@ -697,6 +825,8 @@ mod tests {
         udp: Vec<(SocketAddr, Frame)>,
         tcp: Vec<Frame>,
         tcp_connects: usize,
+        /// 每次去连 TCP 时给的地址，按顺序。
+        tcp_targets: Vec<Vec<SocketAddr>>,
         tcp_closes: usize,
     }
 
@@ -709,8 +839,9 @@ mod tests {
             self.tcp.push(Frame::parse(frame).expect("发出去的应该是合法的会话帧"));
         }
 
-        fn tcp_connect(&mut self, _addrs: &[SocketAddr]) {
+        fn tcp_connect(&mut self, addrs: &[SocketAddr]) {
             self.tcp_connects += 1;
+            self.tcp_targets.push(addrs.to_vec());
         }
 
         fn tcp_close(&mut self) {
@@ -738,7 +869,6 @@ mod tests {
                 name: "relay".to_owned(),
                 udp: udp.iter().map(|text| addr(text)).collect(),
                 tcp: tcp.iter().map(|text| addr(text)).collect(),
-                region: String::new(),
             };
             let start = Instant::now();
             let mut setup = Self {
@@ -757,9 +887,15 @@ mod tests {
             self.link.poll(self.start + at, who, false, false, &mut self.wire);
         }
 
+        /// relay 从本节点最近一次发往的那个地址回答。
         fn udp_frame(&mut self, frame: Frame, at: Duration) {
+            let from = self.wire.udp.last().expect("relay 只回答发给它的东西").0;
+            self.udp_frame_from(from, frame, at);
+        }
+
+        fn udp_frame_from(&mut self, from: SocketAddr, frame: Frame, at: Duration) {
             let who = Identity { me: node(ME), key: &self.node_key };
-            self.link.on_udp_frame(&frame, self.start + at, who, &mut self.wire);
+            self.link.on_udp_frame(from, &frame, self.start + at, who, &mut self.wire);
         }
 
         fn tcp_frame(&mut self, frame: Frame, at: Duration) {
@@ -777,9 +913,15 @@ mod tests {
             self.link.on_tcp_refusal(&Refused { reason, node }, &echo, self.start + at, who, &mut self.wire)
         }
 
+        /// TCP 连上了，连上的是最近一次去连的地址里的第一个。
         fn tcp_connected(&mut self, at: Duration) {
+            let to = self.wire.tcp_targets.last().and_then(|addrs| addrs.first()).copied().expect("应该去连过 TCP");
+            self.tcp_connected_to(to, at);
+        }
+
+        fn tcp_connected_to(&mut self, to: SocketAddr, at: Duration) {
             let who = Identity { me: node(ME), key: &self.node_key };
-            self.link.on_tcp_connected(self.start + at, who, &mut self.wire);
+            self.link.on_tcp_connected(to, self.start + at, who, &mut self.wire);
         }
 
         /// relay 对一个 AUTH 的回答，签名是真的。
@@ -853,6 +995,17 @@ mod tests {
 
         /// 从 `from` 起 relay 在 TCP 上什么也不回答了（链路卡住了）。每 50ms 推进一次，返回会话被判为断开的时刻。
         fn stall_tcp(&mut self, from: Duration) -> Duration {
+            let mut at = from;
+            while self.link.leg().is_some() {
+                at += 50 * MS;
+                assert!(at < from + Duration::from_secs(30), "保活没有回答，会话早该断了");
+                self.poll(at);
+            }
+            at
+        }
+
+        /// 从 `from` 起 relay 在 UDP 上什么也不回答了。每 50ms 推进一次，返回会话被判为断开的时刻。
+        fn stall_udp(&mut self, from: Duration) -> Duration {
             let mut at = from;
             while self.link.leg().is_some() {
                 at += 50 * MS;
@@ -1273,6 +1426,139 @@ mod tests {
         // 没有回答的话十秒之后就再问。
         setup.link.poll(setup.start + 35 * MS + RELAY_SURVEY + RELAY_SURVEY / 6, who, false, true, &mut setup.wire);
         assert_eq!(setup.wire.udp.len(), 3);
+    }
+
+    const DEAD: &str = "198.51.100.9:20330";
+    const LAN: &str = "192.168.1.5:20330";
+    const MAPPED: &str = "203.0.113.9:40330";
+
+    /// 发出去的 INIT 都发给了哪些地址（按发出的顺序）。
+    fn init_targets(wire: &Recorder, from: usize) -> Vec<SocketAddr> {
+        wire.udp[from..].iter().filter(|(_, frame)| matches!(frame, Frame::Init(_))).map(|(to, _)| *to).collect()
+    }
+
+    #[test]
+    fn every_address_gets_the_init_and_the_first_to_answer_carries_the_session() {
+        let mut setup = Setup::new(&[DEAD, LAN, MAPPED], &[DEAD, LAN, MAPPED]);
+        setup.poll(Duration::ZERO);
+        assert_eq!(init_targets(&setup.wire, 0), [addr(DEAD), addr(LAN), addr(MAPPED)], "同时问每个地址，第一个连不上不耽误别的");
+        let nonces: Vec<Nonce> =
+            setup.wire.udp.iter().filter_map(|(_, frame)| if let Frame::Init(init) = frame { Some(init.nonce) } else { None }).collect();
+        assert!(nonces.windows(2).all(|pair| pair[0] == pair[1]), "是同一次握手");
+
+        // 局域网里的地址先回答：和只有这一个地址时一样快。
+        setup.udp_frame_from(addr(LAN), Frame::Challenge(Challenge { nonce: nonces[0], cookie: [3; 16] }), 2 * MS);
+        assert!(matches!(setup.wire.udp.last(), Some((to, Frame::Auth(_))) if *to == addr(LAN)), "AUTH 只发给回答了的地址");
+        // 另一个地址后来也回答了（经路由器绕了一圈）：不理，不能让 relay 那边的会话换来换去。
+        let sent = setup.wire.udp.len();
+        setup.udp_frame_from(addr(MAPPED), Frame::Challenge(Challenge { nonce: nonces[0], cookie: [5; 16] }), 4 * MS);
+        assert_eq!(setup.wire.udp.len(), sent);
+        let Frame::Auth(auth) = setup.last_udp() else { panic!("应该发了 AUTH") };
+        let ok = setup.ok_for(&auth, "192.168.1.20:20330");
+        setup.udp_frame_from(addr(MAPPED), ok, 5 * MS);
+        assert_eq!(setup.link.leg(), None, "OK 要从握手的那个地址来");
+        setup.udp_frame_from(addr(LAN), ok, 5 * MS);
+        assert_eq!(setup.link.leg(), Some(Leg::Udp(addr(LAN))));
+        assert!(setup.link.take_target_changed());
+
+        setup.poll(PROBE_INTERVAL + 10 * MS);
+        assert!(matches!(setup.wire.udp.last(), Some((to, Frame::Ping(_))) if *to == addr(LAN)), "保活只走在用的地址");
+        setup.poll(UDP_HEAD_START + 50 * MS);
+        assert!(setup.wire.tcp.iter().all(|frame| !matches!(frame, Frame::Auth(_))), "UDP 通了，TCP 从来没有走到 AUTH");
+    }
+
+    #[test]
+    fn when_the_address_in_use_stops_answering_every_address_is_tried_again() {
+        let mut setup = Setup::new(&[DEAD, LAN, MAPPED], &[]);
+        setup.poll(Duration::ZERO);
+        let Frame::Init(init) = setup.last_udp() else { panic!() };
+        setup.udp_frame_from(addr(LAN), Frame::Challenge(Challenge { nonce: init.nonce, cookie: [3; 16] }), 2 * MS);
+        let Frame::Auth(auth) = setup.last_udp() else { panic!() };
+        let ok = setup.ok_for(&auth, "192.168.1.20:20330");
+        setup.udp_frame_from(addr(LAN), ok, 3 * MS);
+        assert_eq!(setup.link.leg(), Some(Leg::Udp(addr(LAN))));
+
+        // 换了个局域网：原来的地址不再回答，保活连续没有回音，会话断开，马上重新问每个地址。
+        let sent = setup.wire.udp.len();
+        let died = setup.stall_udp(10 * MS);
+        setup.poll(died + 400 * MS);
+        assert_eq!(
+            init_targets(&setup.wire, sent).iter().rev().take(3).rev().copied().collect::<Vec<_>>(),
+            [addr(DEAD), addr(LAN), addr(MAPPED)]
+        );
+        let Frame::Init(init) = setup.last_udp() else { panic!() };
+        setup.udp_frame_from(addr(MAPPED), Frame::Challenge(Challenge { nonce: init.nonce, cookie: [3; 16] }), died + 420 * MS);
+        let Frame::Auth(auth) = setup.last_udp() else { panic!() };
+        let ok = setup.ok_for(&auth, "198.51.100.30:20330");
+        setup.udp_frame_from(addr(MAPPED), ok, died + 440 * MS);
+        assert_eq!(setup.link.leg(), Some(Leg::Udp(addr(MAPPED))), "这回用的是现在连得上的那个");
+    }
+
+    #[test]
+    fn an_address_that_answers_but_cannot_finish_the_handshake_is_left_out_for_the_rest_of_the_round() {
+        // 第一个地址上回答的是另一台机器（和别的 relay 撞了地址）：它给 cookie，却不认本节点的 AUTH。
+        let mut setup = Setup::new(&[LAN, MAPPED], &[]);
+        setup.poll(Duration::ZERO);
+        let Frame::Init(init) = setup.last_udp() else { panic!() };
+        setup.udp_frame_from(addr(LAN), Frame::Challenge(Challenge { nonce: init.nonce, cookie: [3; 16] }), MS);
+        let sent = setup.wire.udp.len();
+        let mut at = MS;
+        while setup.link.udp_target() == Some(addr(LAN)) {
+            at += 50 * MS;
+            assert!(at < Duration::from_secs(5), "握手走不完总该放弃");
+            setup.poll(at);
+        }
+        assert_eq!(init_targets(&setup.wire, sent), [addr(MAPPED)], "马上接着试剩下的地址，不等这一轮结束");
+        assert!(at < Duration::from_secs(3), "{at:?}");
+        let Frame::Init(init) = setup.last_udp() else { panic!() };
+        setup.udp_frame_from(addr(LAN), Frame::Challenge(Challenge { nonce: init.nonce, cookie: [3; 16] }), at + MS);
+        assert!(!matches!(setup.last_udp(), Frame::Auth(_)), "这一轮里不再理它");
+        setup.udp_frame_from(addr(MAPPED), Frame::Challenge(Challenge { nonce: init.nonce, cookie: [4; 16] }), at + 2 * MS);
+        let Frame::Auth(auth) = setup.last_udp() else { panic!() };
+        let ok = setup.ok_for(&auth, "198.51.100.30:20330");
+        setup.udp_frame_from(addr(MAPPED), ok, at + 3 * MS);
+        assert_eq!(setup.link.leg(), Some(Leg::Udp(addr(MAPPED))));
+    }
+
+    #[test]
+    fn the_nodes_own_addresses_are_never_tried() {
+        let mut setup = Setup::new(&[LAN, MAPPED], &[LAN, MAPPED]);
+        setup.link.set_own(&[addr(LAN)]);
+        setup.poll(Duration::ZERO);
+        assert_eq!(init_targets(&setup.wire, 0), [addr(MAPPED)]);
+        assert_eq!(setup.wire.tcp_targets, [vec![addr(MAPPED)]]);
+    }
+
+    #[test]
+    fn a_relay_whose_udp_never_gets_through_works_over_tcp_on_the_same_addresses() {
+        let mut setup = Setup::new(&[DEAD, MAPPED], &[DEAD, MAPPED]);
+        setup.poll(Duration::ZERO);
+        assert_eq!(setup.wire.tcp_targets, [vec![addr(DEAD), addr(MAPPED)]]);
+        setup.tcp_connected_to(addr(MAPPED), 300 * MS);
+        setup.challenge_tcp(310 * MS);
+        setup.poll(UDP_HEAD_START);
+        setup.complete_tcp(UDP_HEAD_START + 20 * MS);
+        assert_eq!(setup.link.leg(), Some(Leg::Tcp), "没有人说过这个 relay 只能用 TCP");
+
+        // 下一次连 TCP 时，上一次握手成功的地址排在最前。
+        let died = setup.stall_tcp(UDP_HEAD_START + 20 * MS);
+        assert_eq!(setup.wire.tcp_targets.last(), Some(&vec![addr(MAPPED), addr(DEAD)]), "断开于 {died:?}");
+    }
+
+    #[test]
+    fn a_tcp_address_that_connects_but_cannot_finish_the_handshake_goes_last_next_time() {
+        let mut setup = Setup::new(&[], &[LAN, MAPPED]);
+        setup.poll(Duration::ZERO);
+        setup.tcp_connected_to(addr(LAN), 10 * MS);
+        // 连上的是另一台机器：它回了 cookie，AUTH 却等不到回答。
+        setup.challenge_tcp(20 * MS);
+        let mut at = 20 * MS;
+        while setup.wire.tcp_targets.len() < 2 {
+            at += 100 * MS;
+            assert!(at < Duration::from_secs(30), "握手走不完总该重连");
+            setup.poll(at);
+        }
+        assert_eq!(setup.wire.tcp_targets[1], [addr(MAPPED), addr(LAN)]);
     }
 
     fn standing(id: u32, rtt_ms: Option<u64>) -> Standing {

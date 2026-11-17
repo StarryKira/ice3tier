@@ -386,7 +386,7 @@ def managed_drain(lab: Lab, work: Path, t: Checks) -> None:
     exit_node = upd.SupervisedNode(home.host("exit"), work, declare=("exit",))
     for node in (entry, exit_node):
         node.join(controller)
-    controller.ctl("relay", "enable", str(entry.id), "--udp", entry.endpoint, "--tcp", entry.endpoint)
+    controller.ctl("relay", "enable", str(entry.id))
     controller.ctl("exit", "enable", str(exit_node.id))
     view = controller.ctl("pair", "set", entry.name, exit_node.name, "--lane", "always")
     effect = view.get("lane_effect") or {}

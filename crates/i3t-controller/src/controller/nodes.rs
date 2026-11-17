@@ -14,8 +14,7 @@ use super::{COOLDOWN_SECS, Controller, Inner, Seeds, address, listed, naming, sw
 use crate::error::{Capability, Entity, Error, InField};
 use crate::store::{CooldownKind, GroupRecord, NetworkRecord, NodeRecord, Store, is_pending};
 
-/// 一个 relay 每种协议最多填几个公网地址，一个节点最多固定几个挂靠 relay。都只是防止填错。
-const MAX_RELAY_ADDRESSES: usize = 8;
+/// 一个节点最多固定几个挂靠 relay。只是防止填错。
 const MAX_PINNED_RELAYS: usize = 8;
 
 impl Controller {
@@ -107,9 +106,12 @@ impl Controller {
 
     /// 把节点启用为 relay，或者改它的 relay 设置。
     ///
+    /// 不要地址：relay 的地址由 controller 自己找出来（白皮书 §7.2）。也不查谁连得上它：谁连得上它，它就是谁的 relay，
+    /// 一个现在还没有任何已知地址的节点照样可以启用，地址等它连上来就有了。
+    ///
     /// # Errors
     ///
-    /// 节点没有声明可以作为 relay；没有填公网可达的地址，或者地址不合法。
+    /// 节点没有声明可以作为 relay；带宽上限写了 0。
     pub fn enable_relay(&self, network: NetworkId, id: NodeId, settings: RelaySettings) -> Result<Node, Error> {
         let settings = check_relay_settings(settings)?;
         self.set_capability(network, id, Affects::WholeNetwork, "node.relay.enable", move |node| {
@@ -296,6 +298,7 @@ impl Inner {
         self.dirty.remove(&id);
         self.routes.remove(&id);
         self.usage.forget(id);
+        self.stats_forget(id);
         self.drop_route_queries(id);
         self.updates.forget(id);
         for sync in self.sync.values_mut() {
@@ -383,22 +386,10 @@ fn check_pinned_relays(store: &Store, node: &NodeRecord, pinned: &[NodeId]) -> R
     Ok(checked)
 }
 
-fn check_relay_settings(mut settings: RelaySettings) -> Result<RelaySettings, Error> {
-    if settings.udp.is_empty() && settings.tcp.is_empty() {
-        return Err(Error::invalid("no_address", "relay 必须公网可达：至少填一个从公网能连上的 UDP 或 TCP 地址"));
-    }
-    for (field, addresses) in [("udp", &settings.udp), ("tcp", &settings.tcp)] {
-        if addresses.len() > MAX_RELAY_ADDRESSES {
-            return Err(Error::invalid_field(field, "too_many", format!("每种协议最多填 {MAX_RELAY_ADDRESSES} 个地址")));
-        }
-        if let Some(bad) = addresses.iter().find(|address| !is_connectable(address)) {
-            return Err(Error::invalid_field(field, "not_connectable", format!("{bad} 不是一个能连上的地址")));
-        }
-    }
+fn check_relay_settings(settings: RelaySettings) -> Result<RelaySettings, Error> {
     if settings.bandwidth_mbps == Some(0) {
         return Err(Error::invalid_field("bandwidth_mbps", "zero", "带宽上限不能是 0；不限制就不要填"));
     }
-    settings.region = naming::title("区域", &settings.region, false).in_field("region")?;
     Ok(settings)
 }
 

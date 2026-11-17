@@ -10,7 +10,7 @@ use i3t_exit::{Exit, ExitStats, Os, Outbound};
 use i3t_model::Netmap;
 use i3t_model::control::{
     BackboneRow, CredentialUsage, ExitObservation, ExitReport, ForwardReport, InterceptReport, InterceptState, ListenTraffic,
-    ListenerReport, PerformanceReport, QuotaUsage, Report, Route, RouteAnswer, RouteSince, SelfUpdate,
+    ListenerReport, MAX_LOCAL_ADDRESSES, PerformanceReport, QuotaUsage, Report, Route, RouteAnswer, RouteSince, SelfUpdate,
 };
 use i3t_model::update::UpdateStatus;
 use i3t_proto::NodeId;
@@ -171,8 +171,17 @@ impl Runtime {
             .chain(forwards.iter().map(|forward| forward.traffic.bytes_down))
             .sum::<u64>()
             .saturating_add(intercept.down_bytes);
+        // 本机网卡上的地址，不管在不在网络的地址段里（controller 拿它找 relay 的地址、提醒地址段重叠）。
+        // 透明访问在 i3t0 上放的是本节点自己的虚拟 IP，不算这台机器所在的网络。
+        let own = self.netmap.borrow().me.virtual_ip;
+        let local_addresses = i3t_underlay::ifaddr::local_addresses()
+            .into_iter()
+            .filter(|ip| ip.to_canonical() != std::net::IpAddr::V4(own))
+            .take(MAX_LOCAL_ADDRESSES)
+            .collect();
         Report {
             endpoints: self.endpoint.endpoints(),
+            local_addresses: Some(local_addresses),
             mapping_varies: self.endpoint.mapping_varies(),
             attached: self.endpoint.attached(),
             flows: u32::try_from(*self.flows.borrow()).unwrap_or(u32::MAX),

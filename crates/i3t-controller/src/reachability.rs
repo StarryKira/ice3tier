@@ -1,7 +1,7 @@
-//! 启用 relay 时从 controller 这边试连它填的地址（白皮书 §10.4）。
+//! 启用 relay 时从 controller 这边试连它的地址（白皮书 §10.4；地址是 controller 找出来的，见 `crate::node_addresses`）。
 //!
-//! 只是参考，不挡着启用：controller 和别的节点不在同一个网络位置上，它连得上不等于别人连得上，它连不上也不等于别人连不上
-//! （比如 controller 和 relay 在同一个局域网里，填的却是公网地址）。
+//! 只是参考，不挡着启用，也不说明 relay 坏了：谁连得上它，它就是谁的 relay。controller 和别的节点不在同一个网络位置上，
+//! 它连得上不等于别人连得上，它连不上也不等于别人连不上（比如 relay 只在某个局域网里连得上，controller 不在那里）。
 //!
 //! - UDP：向那个地址发一次地址查询（`i3t_proto::addr`），收到带着同一个随机数的应答就算通。节点的 UDP 端口总在回答地址查询，
 //!   不用等它把 relay 开起来。
@@ -24,7 +24,7 @@ const UDP_RESEND: Duration = Duration::from_millis(500);
 /// TCP 连不上时隔这么久再试：节点可能还没开始监听。
 const TCP_RETRY: Duration = Duration::from_millis(200);
 
-/// 同时试 `udp` 和 `tcp` 里的每个地址，每个地址一项结果，顺序和填的一样（先 UDP 后 TCP）。最多等 [`CHECK_TIMEOUT`] 多一点。
+/// 同时试 `udp` 和 `tcp` 里的每个地址，每个地址一项结果，顺序和给的一样（先 UDP 后 TCP）。最多等 [`CHECK_TIMEOUT`] 多一点。
 pub(crate) async fn check(udp: &[SocketAddr], tcp: &[SocketAddr]) -> Vec<Reachability> {
     let udp = udp.iter().map(|&addr| (Transport::Udp, addr, tokio::spawn(check_udp(addr))));
     let tcp = tcp.iter().map(|&addr| (Transport::Tcp, addr, tokio::spawn(check_tcp(addr))));
@@ -107,7 +107,7 @@ fn reached(protocol: Transport, addr: SocketAddr, rtt: Duration) -> Reachability
 }
 
 fn failed(protocol: Transport, addr: SocketAddr, error: String, cause: ReachCause) -> Reachability {
-    tracing::info!(?protocol, %addr, %error, "从 controller 这边连不上 relay 填的地址（只是参考，不挡着启用）");
+    tracing::info!(?protocol, %addr, %error, "从 controller 这边连不上 relay 的这个地址（只是参考：谁连得上它，它就是谁的 relay）");
     Reachability { protocol, addr, reachable: false, rtt_ms: None, error: Some(error), cause: Some(cause) }
 }
 

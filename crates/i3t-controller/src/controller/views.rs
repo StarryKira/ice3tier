@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use i3t_model::admin::{AccessCheck, AccessEdge, AccessGraph, NetworkId, NodeAccess, NodePair, NodeRef, Overview};
+use i3t_model::admin::{AccessCheck, AccessEdge, AccessGraph, NetworkId, NetworkWarning, NodeAccess, NodePair, NodeRef, Overview};
 use i3t_model::control::Route;
 use i3t_proto::NodeId;
 
@@ -11,6 +11,7 @@ use super::{Controller, Inner, count, node_ref};
 use crate::access::AccessMap;
 use crate::error::{Entity, Error};
 use crate::netmap::NetworkView;
+use crate::node_addresses;
 use crate::store::is_pending;
 
 impl Controller {
@@ -41,6 +42,14 @@ impl Controller {
             flows: live.clone().map(|live| u64::from(live.flows)).sum(),
             tx_bytes: live.clone().map(|live| live.tx_bytes).fold(0, u64::saturating_add),
             rx_bytes: live.map(|live| live.rx_bytes).fold(0, u64::saturating_add),
+            warnings: view
+                .nodes
+                .values()
+                .flat_map(|node| {
+                    let warnings = node_addresses::warnings(node, view.network.cidr);
+                    warnings.into_iter().map(|warning| NetworkWarning { node: node_ref(node), warning })
+                })
+                .collect(),
         })
     }
 

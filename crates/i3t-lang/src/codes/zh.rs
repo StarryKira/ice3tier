@@ -2,8 +2,8 @@
 
 use i3t_model::admin::diag::{CellState, ItemState, MatrixState, TestState};
 use i3t_model::admin::{
-    ApiError, CredentialState, ExitHealth, ForwardStatus, LaneBlock, PackageState, PathSource, ReachCause, ReleaseCause, SkipCause,
-    TokenState, UpdateWait,
+    AddressSource, ApiError, CredentialState, ExitHealth, ForwardStatus, LaneBlock, NodeWarning, PackageState, PathSource, ReachCause,
+    ReleaseCause, SkipCause, TokenState, UpdateWait,
 };
 use i3t_model::control::diag::{ChoiceCode, HopSource, PathPick, TestCode, TransferEnd};
 use i3t_model::control::exit_test::{ExitTestCause, ExitVia};
@@ -33,6 +33,8 @@ pub(super) static CODES: Codes = Codes {
     package_state,
     skip_cause,
     reach_cause,
+    address_source,
+    node_warning,
     reject_cause,
     api_error,
     lane_block,
@@ -287,6 +289,22 @@ const fn reach_cause(cause: ReachCause) -> &'static str {
     }
 }
 
+const fn address_source(source: AddressSource) -> &'static str {
+    match source {
+        AddressSource::Declared => "节点上声明的",
+        AddressSource::Observed => "controller 看到的",
+        AddressSource::Local => "网卡上的",
+        AddressSource::Unknown => "来源未知",
+    }
+}
+
+fn node_warning(warning: &NodeWarning) -> String {
+    match warning {
+        NodeWarning::RangeOverlap { address } => format!("网卡地址 {address} 在网络的地址段里"),
+        NodeWarning::Unknown => "未知的提醒".to_owned(),
+    }
+}
+
 const fn reject_cause(cause: RejectCause) -> &'static str {
     match cause {
         RejectCause::BadToken => "注册令牌无效：不存在、已经用过或者已经过期",
@@ -308,7 +326,7 @@ fn api_error(error: &ApiError) -> String {
 fn lane_block(block: &LaneBlock, names: Names<'_>) -> String {
     match block {
         LaneBlock::NoRelay => "两个节点都没有启用中继".to_owned(),
-        LaneBlock::NoTcpAddress { node } => format!("{} 没有 TCP 地址", names(*node)),
+        LaneBlock::NoTcpAddress { node } => format!("{} 还没有已知的地址", names(*node)),
         LaneBlock::NodeTooOld { node } => format!("{} 的版本太旧", names(*node)),
         LaneBlock::NotConnected => "访问规则没有连通这两个节点".to_owned(),
     }

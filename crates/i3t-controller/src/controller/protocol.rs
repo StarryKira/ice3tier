@@ -10,7 +10,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 
 use i3t_model::admin::LogRef;
-use i3t_model::control::{Hello, MAX_PACKAGE_CHUNK, Report, Signal, ToController, ToNode};
+use i3t_model::control::{Hello, MAX_LOCAL_ADDRESSES, MAX_PACKAGE_CHUNK, Report, Signal, ToController, ToNode};
 use i3t_model::netmap::Attachment;
 use i3t_model::update::{Platform, Version};
 use i3t_proto::{NodeId, PublicKey};
@@ -21,6 +21,7 @@ use super::usage::UsageReport;
 use super::{Controller, Inner, Live, Seeds};
 use crate::error::{Error, Rejection, error_chain};
 use crate::netmap::MAX_ENDPOINTS;
+use crate::node_addresses;
 use crate::store::NodeRecord;
 
 /// 一个节点最多报这么多个挂靠的 relay。默认只挂靠 2 个。
@@ -126,6 +127,18 @@ impl Controller {
         }
     }
 
+    /// controller 对外地址里的主机解析出来的 IP（主机是域名时由后台任务定期解析）。见 [`Inner::observed_endpoint`]。
+    ///
+    /// # Errors
+    ///
+    /// 读写存储失败。
+    pub fn set_public_host(&self, host: Option<IpAddr>) -> Result<(), Error> {
+        let mut inner = self.lock();
+        let outcome = inner.set_public_host(host);
+        self.wake_if_needed(&inner);
+        outcome
+    }
+
     /// 现在在线的节点。
     #[must_use]
     pub fn online_nodes(&self) -> Vec<NodeId> {
@@ -228,6 +241,8 @@ impl Inner {
             performance: None,
             intercept: None,
             throughput_tests: hello.throughput_tests,
+            remote,
+            port: hello.port,
         };
         self.drop_route_queries(node.id);
         if self.live.insert(node.id, live).is_some() {
@@ -253,6 +268,8 @@ impl Inner {
         if let Some(live) = self.live.get_mut(&id) {
             live.protocol = hello.protocol;
             live.throughput_tests = hello.throughput_tests;
+            live.remote = remote;
+            live.port = hello.port;
         }
         self.refresh(node.network, seeds, None)?;
         self.roll_out()
@@ -262,7 +279,14 @@ impl Inner {
     fn apply_hello(&mut self, node: &mut NodeRecord, hello: &Hello, remote: IpAddr) -> Result<Seeds, Error> {
         let before = node.clone();
         let now = self.clock.now();
+        let cidr = self.require_network(node.network)?.cidr;
+        let addresses_before = node_addresses::relay_addresses(node, cidr);
         node.declared = hello.declared;
+        // 别的节点会去连声明的地址，所以只收一个能连的单播地址。节点自己也查过，这里防的是乱报的节点。
+        if let Some(address) = node.declared.relay_address.filter(|address| !node_addresses::declarable(*address, cidr)) {
+            tracing::warn!(node = %node.id, %address, "节点声明的 relay 地址别的节点连不了，不用它");
+            node.declared.relay_address = None;
+        }
         node.platform = clip(&hello.platform);
         node.version = clip(&hello.version);
         node.hostname = hello.hostname.chars().filter(|ch| !ch.is_control()).take(MAX_HOSTNAME).collect();
@@ -306,19 +330,62 @@ impl Inner {
             self.store.update_node(node)?;
         }
 
-        // 节点自报的 UDP 端口加上这条连接的来源 IP，是它的一个候选端点。
-        let observed = (hello.port != 0).then(|| SocketAddr::new(remote.to_canonical(), hello.port));
+        let observed = self.observed_endpoint(remote, hello.port);
         if observed != node.observed {
             node.observed = observed;
             self.store.set_node_observed(node.id, observed)?;
             let holders = self.holders_of(node.id);
             self.defer(node.network, holders, self.timing.report_coalesce);
         }
+        // relay 的地址写在全网每个节点的 netmap 里（白皮书 §7.2）：声明的或者 controller 看到的地址变了，大家都要知道。
+        if node.relay.is_some() && node_addresses::relay_addresses(node, cidr) != addresses_before {
+            tracing::info!(node = %node.id, name = %node.name, "relay 的地址变了");
+            whole_network = true;
+        }
         Ok(if whole_network { Seeds::All } else { Seeds::Nodes(affected) })
     }
 
+    /// controller 看到的节点地址：这条连接的来源 IP 加上节点自报的 UDP 端口，节点没报端口时是 `None`。
+    ///
+    /// 节点和 controller 在同一台机器上、走回环连过来时，回环地址对别的机器没有用，换成 controller 对外地址里的主机
+    /// （白皮书 §7.2）；那个主机是域名、还没解析出来时照旧用回环地址：同一台机器上的节点还用得上它。
+    fn observed_endpoint(&self, remote: IpAddr, port: u16) -> Option<SocketAddr> {
+        let remote = remote.to_canonical();
+        let ip = if remote.is_loopback() { self.public_host.unwrap_or(remote) } else { remote };
+        (port != 0).then(|| SocketAddr::new(ip, port))
+    }
+
+    /// controller 对外地址里的主机解析出来了（或者变了）：走回环连着的节点，controller 看到的地址跟着变。
+    pub(super) fn set_public_host(&mut self, host: Option<IpAddr>) -> Result<(), Error> {
+        if self.public_host == host {
+            return Ok(());
+        }
+        tracing::info!(?host, "controller 对外地址里的主机是这个 IP");
+        self.public_host = host;
+        let looped: Vec<(NodeId, IpAddr, u16)> = self
+            .live
+            .iter()
+            .filter(|(_, live)| live.remote.to_canonical().is_loopback())
+            .map(|(id, live)| (*id, live.remote, live.port))
+            .collect();
+        for (id, remote, port) in looped {
+            let Some(mut node) = self.store.node(id)? else { continue };
+            let cidr = self.require_network(node.network)?.cidr;
+            let before = node_addresses::relay_addresses(&node, cidr);
+            node.observed = self.observed_endpoint(remote, port);
+            self.store.set_node_observed(id, node.observed)?;
+            let mut affected = self.holders_of(id);
+            if node.relay.is_some() && node_addresses::relay_addresses(&node, cidr) != before {
+                affected.extend(self.store.nodes(node.network)?.into_iter().map(|record| record.id));
+            }
+            self.defer(node.network, affected, self.timing.report_coalesce);
+        }
+        Ok(())
+    }
+
     fn report(&mut self, id: NodeId, report: Report) -> Result<(), Error> {
-        let Some(node) = self.store.node(id)? else { return Ok(()) };
+        let Some(mut node) = self.store.node(id)? else { return Ok(()) };
+        self.stats_reported(&node, &report);
         if let Some(live) = self.live.get_mut(&id) {
             live.mapping_varies = report.mapping_varies;
             live.flows = report.flows;
@@ -337,6 +404,14 @@ impl Inner {
             self.update_reported(&node, status)?;
         }
 
+        if let Some(local) = report.local_addresses {
+            let mut local = local.into_vec();
+            local.truncate(MAX_LOCAL_ADDRESSES);
+            if node.local_addresses.as_ref() != Some(&local) {
+                self.local_addresses_reported(&mut node, local)?;
+            }
+        }
+
         let mut endpoints: Vec<SocketAddr> = Vec::with_capacity(report.endpoints.len().min(MAX_ENDPOINTS));
         for endpoint in report.endpoints {
             if endpoints.len() < MAX_ENDPOINTS && !endpoints.contains(&endpoint) {
@@ -353,6 +428,23 @@ impl Inner {
         self.store.set_node_report(id, &endpoints, &attached)?;
         let holders = self.holders_of(id);
         self.defer(node.network, holders, self.timing.report_coalesce);
+        Ok(())
+    }
+
+    /// 节点报的网卡地址变了。它是 relay 的话，它的地址跟着变，全网的节点都要知道（白皮书 §7.2）。
+    fn local_addresses_reported(&mut self, node: &mut NodeRecord, local: Vec<IpAddr>) -> Result<(), Error> {
+        let cidr = self.require_network(node.network)?.cidr;
+        let before = node_addresses::relay_addresses(node, cidr);
+        self.store.set_node_local_addresses(node.id, &local)?;
+        node.local_addresses = Some(local);
+        for warning in node_addresses::warnings(node, cidr) {
+            tracing::warn!(node = %node.id, name = %node.name, ?warning, %cidr, "节点的网卡地址落在网络的地址段里");
+        }
+        if node.relay.is_some() && node_addresses::relay_addresses(node, cidr) != before {
+            tracing::info!(node = %node.id, name = %node.name, "relay 网卡上的地址变了");
+            let everyone: Vec<NodeId> = self.store.nodes(node.network)?.into_iter().map(|record| record.id).collect();
+            self.defer(node.network, everyone, self.timing.report_coalesce);
+        }
         Ok(())
     }
 

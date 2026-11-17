@@ -5,6 +5,7 @@
 use i3t_lang::codes::Codes;
 use i3t_lang::table::{Fields, Table};
 use i3t_lang::{Lang, NONE, optional};
+use i3t_model::admin::stats::{SeriesView, Unit};
 use i3t_model::admin::{
     AccessCheck, AccessGraph, BackboneView, CreatedCredential, CreatedEnrollToken, Credential, DeletedGroup, Direction, EnrollTokenInfo,
     ExitTestView, ExitView, ForcedUpdates, Forward, Group, GroupRef, LaneEffect, ListenStatus, Listener, LogEntry, Network, Node,
@@ -65,7 +66,7 @@ pub fn status(status: &Status) {
 }
 
 pub fn overview(overview: &Overview) {
-    let (t, lang, _) = context();
+    let (t, lang, codes) = context();
     let mut fields = Fields::new(0);
     fields.add(t.nodes, (t.of_online)(u64::from(overview.nodes), u64::from(overview.online)));
     fields.add(t.relays, overview.relays.to_string());
@@ -79,6 +80,12 @@ pub fn overview(overview: &Overview) {
     fields.add(t.traffic, format!("↑ {}  ↓ {}", lang.bytes(overview.tx_bytes), lang.bytes(overview.rx_bytes)));
     fields.add(t.online, lang.list(overview.online_nodes.iter().map(node_name)));
     fields.print();
+    if !overview.warnings.is_empty() {
+        println!("\n{}", lang.labelled(t.warnings, "").trim_end());
+        for warning in &overview.warnings {
+            println!("  {}", lang.labelled(node_name(&warning.node), &(codes.node_warning)(&warning.warning)));
+        }
+    }
     if overview.unreachable_pairs.is_empty() {
         return;
     }
@@ -88,6 +95,24 @@ pub fn overview(overview: &Overview) {
     }
     if overview.relays == 0 {
         println!("{}", t.no_relay_hint);
+    }
+}
+
+/// 一条时间序列：每一段一行，没有数据的段写"—"。
+pub fn series(view: &SeriesView) {
+    let (t, lang, _) = context();
+    let mut table = Table::new(&t.stats_header);
+    for (at, value) in &view.points {
+        let value = value.map_or_else(|| NONE.to_owned(), |value| series_value(view.unit, value));
+        table.row(vec![lang.time(*at), value]);
+    }
+    print_table(&table, t.none_found);
+}
+
+fn series_value(unit: Unit, value: f64) -> String {
+    match unit {
+        Unit::Count => format!("{value:.1}"),
+        Unit::BytesPerSecond => format!("{:.1} Mbit/s", value * 8.0 / 1_000_000.0),
     }
 }
 
@@ -285,7 +310,7 @@ pub fn nodes(nodes: &[Node]) {
 
 fn roles(node: &Node) -> String {
     let (t, lang, _) = context();
-    lang.list([node.relay.is_some().then_some("relay"), node.exit.is_some().then_some(t.exit)].into_iter().flatten())
+    lang.list([node.relay.is_some().then_some(t.relay), node.exit.is_some().then_some(t.exit)].into_iter().flatten())
 }
 
 /// 改动节点之后的回显：现在是什么样。
@@ -322,7 +347,7 @@ pub fn relay_enabled(enabled: &RelayEnabled) {
 }
 
 pub fn node_detail(detail: &NodeDetail) {
-    let (t, lang, _) = context();
+    let (t, lang, codes) = context();
     let node = &detail.node;
     println!("{} #{}", node.name, node.id);
     let mut fields = Fields::new(2);
@@ -340,16 +365,22 @@ pub fn node_detail(detail: &NodeDetail) {
     fields.add(t.hostname, if node.hostname.is_empty() { NONE.to_owned() } else { node.hostname.clone() });
     fields.add(t.update, update_summary(&node.update));
     let declared =
-        [node.declared.relay.then_some("relay"), node.declared.exit.then_some(t.exit), node.declared.forward.then_some(t.forward)];
+        [node.declared.relay.then_some(t.relay), node.declared.exit.then_some(t.exit), node.declared.forward.then_some(t.forward)];
     fields.add(t.declared, lang.list(declared.into_iter().flatten()));
+    if let Some(address) = node.declared.relay_address {
+        fields.add(t.declared_address, address.to_string());
+    }
     let relay = node.relay.as_ref().map_or_else(
         || t.disabled.to_owned(),
         |relay| {
-            let region = if relay.region.is_empty() { NONE } else { &relay.region };
-            (t.relay_settings)(&lang.list(&relay.udp), &lang.list(&relay.tcp), region, &bandwidth(relay.bandwidth_mbps))
+            let addresses =
+                relay.addresses.iter().map(|entry| (t.relay_address)(&entry.address.to_string(), (codes.address_source)(entry.source)));
+            let addresses: Vec<String> = addresses.collect();
+            let addresses = if addresses.is_empty() { t.no_address_yet.to_owned() } else { lang.list(addresses) };
+            (t.relay_settings)(&addresses, &bandwidth(relay.bandwidth_mbps))
         },
     );
-    fields.add("relay", relay);
+    fields.add(t.relay, relay);
     let exit = node.exit.as_ref().map_or_else(
         || t.disabled.to_owned(),
         |exit| {
@@ -377,6 +408,9 @@ pub fn node_detail(detail: &NodeDetail) {
     fields.add(t.traffic, format!("↑ {}  ↓ {}", lang.bytes(detail.tx_bytes), lang.bytes(detail.rx_bytes)));
     if let Some(ago) = detail.reported_secs_ago {
         fields.add(t.reported, lang.ago(ago));
+    }
+    if !node.warnings.is_empty() {
+        fields.add(t.warnings, lang.list(node.warnings.iter().map(|warning| (codes.node_warning)(warning))));
     }
     fields.print();
     if let Some(lanes) = &detail.lanes {

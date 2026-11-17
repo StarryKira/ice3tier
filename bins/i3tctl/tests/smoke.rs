@@ -187,7 +187,7 @@ async fn the_command_line_drives_a_running_controller() {
     fixture.ok(&["token", "delete", &tokens[0]["id"].to_string()]).await;
 
     let _plain = fixture.join(1, Declared::default()).await;
-    let _capable = fixture.join(2, Declared { exit: true, relay: true, forward: true }).await;
+    let _capable = fixture.join(2, Declared { exit: true, relay: true, forward: true, relay_address: None }).await;
     let nodes = fixture.ok(&["node", "list"]).await;
     assert!(nodes.contains("10.66.0.1") && nodes.contains("10.66.0.2") && nodes.contains("在线"), "{nodes}");
     // 节点可以用编号、虚拟 IP 或名字指代。
@@ -212,24 +212,34 @@ async fn the_command_line_drives_a_running_controller() {
     assert!(fixture.json(&["node", "show", "laptop"]).await["reach"].is_null());
 
     // 没声明的能力启用不了，错误里有要在节点上执行的命令。
-    let refused = fixture.fails(&["relay", "enable", "laptop", "--udp", "203.0.113.7:20330"]).await;
+    let refused = fixture.fails(&["relay", "enable", "laptop"]).await;
     assert!(refused.contains("i3t set can-relay on") && refused.contains("not_declared"), "{refused}");
     assert!(fixture.fails(&["exit", "enable", "laptop"]).await.contains("i3t set can-exit on"));
-    fixture.ok(&["relay", "enable", "nas-01", "--udp", "203.0.113.7:20330", "--region", "hk"]).await;
+    assert!(fixture.fails(&["relay", "enable", "nas-01", "--udp", "203.0.113.7:20330"]).await.contains("--udp"), "地址不再由人填");
+    fixture.ok(&["relay", "enable", "nas-01"]).await;
     fixture.ok(&["exit", "enable", "nas-01", "--ports", "any", "--lan"]).await;
     let nas = fixture.json(&["node", "show", "nas-01"]).await;
-    assert_eq!(nas["relay"]["udp"], serde_json::json!(["203.0.113.7:20330"]));
+    let found = &nas["relay"]["addresses"][0];
+    assert_eq!(found["source"], "observed", "{nas}");
+    let shown = fixture.ok(&["node", "show", "nas-01"]).await;
+    assert!(shown.contains(&format!("{}（controller 看到的）", found["address"].as_str().unwrap())), "{shown}");
     assert!(nas["exit"]["ports"].is_null() && nas["exit"]["lan"] == true);
     fixture.ok(&["node", "set", "laptop", "--pin", "nas-01"]).await;
-    assert!(fixture.ok(&["node", "list"]).await.contains("relay、出口"));
+    assert!(fixture.ok(&["node", "list"]).await.contains("中继、出口"));
     let overview = fixture.ok(&["overview"]).await;
-    assert!(Fixture::has_line(&overview, &["relay", "1"]) && overview.contains("laptop"), "{overview}");
-    let reachability = fixture.ok(&["relay", "enable", "nas-01", "--udp", "203.0.113.7:20330", "--region", "hk"]).await;
-    assert!(
-        reachability.contains("从 controller 试连") && Fixture::has_line(&reachability, &["udp", "203.0.113.7:20330"]),
-        "{reachability}"
-    );
+    assert!(Fixture::has_line(&overview, &["中继", "1"]) && overview.contains("laptop"), "{overview}");
+    let reachability = fixture.ok(&["relay", "enable", "nas-01", "--bandwidth", "100"]).await;
+    let address = found["address"].as_str().unwrap();
+    assert!(reachability.contains("从 controller 试连") && Fixture::has_line(&reachability, &["udp", address]), "{reachability}");
     fixture.ok(&["exit", "disable", "nas-01"]).await;
+
+    // 时间序列：还没有数据的段是空的。
+    let online = fixture.ok(&["stats", "online", "--since", "1h"]).await;
+    assert!(online.lines().count() > 10 && online.lines().nth(1).is_some_and(|line| line.trim_end().ends_with(i3t_lang::NONE)), "{online}");
+    let flows = fixture.json(&["stats", "node_flows", "--node", "laptop"]).await;
+    assert_eq!((flows["step"].clone(), flows["node"]["name"].clone()), (Value::from(300), Value::from("laptop")));
+    assert!(fixture.fails(&["stats", "node_flows"]).await.contains("node"), "节点的序列要写节点");
+    assert!(fixture.fails(&["stats", "nodes"]).await.contains("online"), "写错了序列的名字，说可以写哪些");
 
     // 规则和访问关系。
     let rules = fixture.json(&["rule", "list"]).await;

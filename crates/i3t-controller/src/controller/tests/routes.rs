@@ -266,7 +266,7 @@ async fn the_backbone_is_asked_from_online_nodes_and_each_relay_keeps_its_freshe
     let mut node = lab.join_as(network, &modern_hello("0.2.0"));
     let mut ancient = lab.join_as(network, &hello(Declared::default()));
     for relay in [&r1, &r2, &silent] {
-        let settings = RelaySettings { udp: vec!["203.0.113.7:20330".parse().unwrap()], ..RelaySettings::default() };
+        let settings = RelaySettings::default();
         lab.controller.enable_relay(network, relay.id, settings).unwrap();
     }
     lab.settle(&mut [&mut r1, &mut r2, &mut silent, &mut node, &mut ancient]);

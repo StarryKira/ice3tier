@@ -44,6 +44,7 @@ pub mod frame;
 mod gate;
 mod geo;
 pub mod netmap;
+mod node_addresses;
 pub mod node_server;
 mod reachability;
 pub mod release;

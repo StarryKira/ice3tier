@@ -26,8 +26,11 @@ pub fn local(state: &StateDir) -> anyhow::Result<()> {
     let mut fields = Fields::new(0);
     fields.add(t.state_dir, state.path().display().to_string());
     fields.add(t.port, config.port.to_string());
-    let declared = [(config.declare.exit, t.exit), (config.declare.relay, "relay"), (config.declare.forward, t.forward_target)];
+    let declared = [(config.declare.exit, t.exit), (config.declare.relay, t.relay), (config.declare.forward, t.forward_target)];
     fields.add(t.declared, lang.list(declared.into_iter().filter_map(|(on, name)| on.then_some(name))));
+    if let Some(address) = config.declare.relay_address {
+        fields.add(t.relay_address, address.to_string());
+    }
     let (Some(controller), Some(netmap)) = (state.controller()?, state.netmap()?) else {
         fields.print();
         println!("{}", t.not_joined);
@@ -63,7 +66,7 @@ pub fn status(live: &LiveStatus) {
     }
     fields.add(t.attached, lang.list(live.attached.iter().map(|attachment| format!("#{} {} ms", attachment.relay, attachment.rtt_ms))));
     if let Some(relay) = &live.relay {
-        fields.add("relay", (t.relay_counts)(relay.sessions, relay.forwarded_packets, &lang.bytes(relay.forwarded_bytes), relay.dropped));
+        fields.add(t.relay, (t.relay_counts)(relay.sessions, relay.forwarded_packets, &lang.bytes(relay.forwarded_bytes), relay.dropped));
     }
     fields.add(t.update, update(live));
     if live.update.draining {

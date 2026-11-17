@@ -282,7 +282,8 @@ pub(crate) struct Control {
     peers: HashMap<NodeId, PeerState>,
     relays: HashMap<NodeId, RelayEntry>,
     legs: HashMap<NodeId, TcpLegHandle>,
-    relay_by_addr: HashMap<SocketAddr, NodeId>,
+    /// 按来源地址认 relay：一个地址可能是好几个 relay 的（不同局域网里的内网地址会撞），所以是一个列表。
+    relay_by_addr: HashMap<SocketAddr, Vec<NodeId>>,
     attached: Vec<NodeId>,
     attach_reviewed: Option<Instant>,
     addr_query: AddrQuery,
@@ -463,7 +464,7 @@ impl Control {
                 }
             }
             Ctrl::Frame { from, frame: Inbound::Row(frame) } => {
-                if let Some(&relay) = self.relay_by_addr.get(&from) {
+                if let Some(&relay) = self.relays_at(from).first() {
                     self.on_row(relay, &frame, now);
                 }
             }
@@ -612,6 +613,7 @@ impl Control {
             self.legs.remove(&id);
             tracing::info!(relay = %id, "relay 不在 netmap 里了，到它的中转会话关闭");
         }
+        let own = self.own_addresses();
         for info in netmap.relays.iter().filter(|relay| relay.id != me) {
             let entry = self.relays.entry(info.id).or_insert_with(|| RelayEntry {
                 link: RelayLink::new(info, now),
@@ -620,12 +622,11 @@ impl Control {
                 cooling_until: None,
             });
             entry.link.update(info);
+            entry.link.set_own(&own);
         }
-        self.relay_by_addr =
-            self.relays.iter().flat_map(|(&id, entry)| entry.link.udp_addrs().iter().map(move |&addr| (addr, id))).collect();
-        table.relays =
-            self.relays.values().flat_map(|entry| entry.link.udp_addrs().iter().map(|&addr| (addr, Arc::clone(&entry.slot)))).collect();
         drop(table);
+        let slots = self.relay_addresses();
+        self.shared.table_mut().relays = slots;
         self.matrix.retain(now, |relay| netmap.relay(relay).is_some());
         self.row_gates.retain(|relay, _| netmap.relay(*relay).is_some());
         if let Some(mapper) = &self.portmap {
@@ -649,27 +650,92 @@ impl Control {
         lan.set_announcing(self.allow_direct && !self.dial_out_only);
     }
 
+    /// 本节点自己的地址：网卡上的候选端点，端口绑在全零地址上时还有回环地址。relay 的地址里有它们的话不去试。
+    fn own_addresses(&self) -> Vec<SocketAddr> {
+        let local = self.shared.port.local_addr();
+        let mut own = self.local_candidates.clone();
+        own.push(local);
+        if local.ip().is_unspecified() {
+            own.extend([SocketAddr::from(([127, 0, 0, 1], local.port())), SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, local.port()))]);
+        }
+        own
+    }
+
+    /// 重建按来源地址认 relay 的两张表。同一个地址是几个 relay 的时，收包路径那张表里给正在用它的那个。
+    fn relay_addresses(&mut self) -> HashMap<SocketAddr, Arc<RelaySlot>> {
+        let mut by_addr: HashMap<SocketAddr, Vec<NodeId>> = HashMap::new();
+        for (&id, entry) in &self.relays {
+            for addr in entry.link.dispatch_addrs() {
+                by_addr.entry(addr).or_default().push(id);
+            }
+        }
+        let mut slots = HashMap::with_capacity(by_addr.len());
+        for (addr, ids) in &mut by_addr {
+            ids.sort_unstable();
+            let using = ids.iter().copied().find(|id| self.relays.get(id).is_some_and(|entry| entry.link.udp_target() == Some(*addr)));
+            if let Some(entry) = using.or_else(|| ids.first().copied()).and_then(|id| self.relays.get(&id)) {
+                slots.insert(*addr, Arc::clone(&entry.slot));
+            }
+        }
+        self.relay_by_addr = by_addr;
+        slots
+    }
+
+    /// 有 relay 换了在用的地址：重建按地址认 relay 的表。
+    fn sync_relay_targets(&mut self) {
+        let changed = self.relays.values_mut().fold(false, |changed, entry| entry.link.take_target_changed() | changed);
+        if changed {
+            let slots = self.relay_addresses();
+            self.shared.table_mut().relays = slots;
+        }
+    }
+
+    /// 从 `from` 来的帧是哪些 relay 的。几个 relay 都有这个地址时，正在用它的那个排在前面。
+    fn relays_at(&self, from: SocketAddr) -> Vec<NodeId> {
+        let mut ids = self.relay_by_addr.get(&from).cloned().unwrap_or_default();
+        ids.sort_by_key(|id| self.relays.get(id).is_none_or(|entry| entry.link.udp_target() != Some(from)));
+        ids
+    }
+
     fn on_relay_frame(&mut self, from: SocketAddr, frame: &session::Frame, now: Instant) {
-        let Some(&relay) = self.relay_by_addr.get(&from) else {
+        let relays_at = self.relays_at(from);
+        if relays_at.is_empty() {
             tracing::trace!(%from, "中转会话帧不是从 netmap 里的 relay 地址来的，丢弃");
             return;
-        };
+        }
+        // 交给有这个地址的每一个 relay：只有在等这个随机数的那个会认它（OK 还要验签名）。
         let Self { shared, key, relays, legs, next_conn, .. } = self;
-        let Some(entry) = relays.get_mut(&relay) else { return };
         let who = Identity { me: shared.me, key };
-        let mut wire = LinkWire { shared, slot: &entry.slot, legs, next_conn };
-        entry.link.on_udp_frame(frame, now, who, &mut wire);
+        for relay in relays_at {
+            let Some(entry) = relays.get_mut(&relay) else { continue };
+            let mut wire = LinkWire { shared, slot: &entry.slot, legs, next_conn };
+            entry.link.on_udp_frame(from, frame, now, who, &mut wire);
+        }
+        self.sync_relay_targets();
     }
 
     fn on_relay_refusal(&mut self, from: SocketAddr, refused: &Refused, echo: &Echo, now: Instant) {
-        let Some(&relay) = self.relay_by_addr.get(&from) else { return };
+        // 正在用这个地址的 relay 有的话只给它；没有的话给每一个（回显对不上的不算数，见 `RelayLink::on_udp_refusal`）。
+        let mut relays_at = self.relays_at(from);
+        if let Some(&first) = relays_at.first()
+            && self.relays.get(&first).is_some_and(|entry| entry.link.udp_target() == Some(from))
+        {
+            relays_at.truncate(1);
+        }
+        let mut complaints = Vec::new();
         let Self { shared, key, relays, legs, next_conn, .. } = self;
-        let Some(entry) = relays.get_mut(&relay) else { return };
         let who = Identity { me: shared.me, key };
-        let mut wire = LinkWire { shared, slot: &entry.slot, legs, next_conn };
-        if let Some(complaint) = entry.link.on_udp_refusal(refused, echo, now, who, &mut wire) {
+        for relay in relays_at {
+            let Some(entry) = relays.get_mut(&relay) else { continue };
+            let mut wire = LinkWire { shared, slot: &entry.slot, legs, next_conn };
+            if let Some(complaint) = entry.link.on_udp_refusal(refused, echo, now, who, &mut wire) {
+                complaints.push((relay, complaint));
+            }
+        }
+        for (relay, complaint) in complaints {
             self.on_complaint(relay, complaint, now);
         }
+        self.sync_relay_targets();
     }
 
     fn on_tcp(&mut self, relay: NodeId, conn: u64, event: &TcpEvent, now: Instant) {
@@ -685,9 +751,9 @@ impl Control {
         let Some(entry) = relays.get_mut(&relay) else { return };
         let who = Identity { me: shared.me, key };
         let complaint = match event {
-            TcpEvent::Connected => {
+            TcpEvent::Connected(addr) => {
                 let mut wire = LinkWire { shared, slot: &entry.slot, legs, next_conn };
-                entry.link.on_tcp_connected(now, who, &mut wire);
+                entry.link.on_tcp_connected(*addr, now, who, &mut wire);
                 None
             }
             TcpEvent::Frame(frame) => {
@@ -976,6 +1042,10 @@ impl Control {
                     mapper.network_changed();
                 }
                 self.local_candidates = local;
+                let own = self.own_addresses();
+                for entry in self.relays.values_mut() {
+                    entry.link.set_own(&own);
+                }
             }
             self.local_refreshed = Some(now);
         }
@@ -1143,6 +1213,7 @@ impl Control {
             let urgent = table::unanswered(&shared.clock, &entry.slot.last_tx, &entry.slot.last_rx);
             entry.link.poll(now, who, urgent, survey, &mut wire);
         }
+        self.sync_relay_targets();
     }
 
     fn poll_directs(&mut self, now: Instant) {

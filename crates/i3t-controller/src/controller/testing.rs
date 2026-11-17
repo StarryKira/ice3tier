@@ -267,4 +267,4 @@ pub(crate) fn modern_hello(version: &str) -> Hello {
     }
 }
 
-pub(crate) const CAN_DO_ALL: Declared = Declared { exit: true, relay: true, forward: true };
+pub(crate) const CAN_DO_ALL: Declared = Declared { exit: true, relay: true, forward: true, relay_address: None };

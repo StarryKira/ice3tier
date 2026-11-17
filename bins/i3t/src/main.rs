@@ -133,8 +133,8 @@ fn command(lang: Lang) -> clap::Command {
         .mut_subcommand("run", |sub| sub.about(h.run).mut_arg("static", |arg| arg.help(h.run_static).value_name(v.file)))
         .mut_subcommand("set", |sub| {
             sub.about(h.set)
-                .mut_arg("setting", |arg| arg.value_name("can-exit|can-relay|can-forward|throughput-tests|profile|intercept"))
-                .mut_arg("value", |arg| arg.value_name("on|off|low-footprint|balanced|high-throughput"))
+                .mut_arg("setting", |arg| arg.value_name("can-exit|can-relay|can-forward|relay-address|throughput-tests|profile|intercept"))
+                .mut_arg("value", |arg| arg.value_name("on|off|low-footprint|balanced|high-throughput|IP:PORT"))
         })
         .mut_subcommand("status", |sub| sub.about(h.status))
         .mut_subcommand("routes", |sub| sub.about(h.routes))
@@ -229,7 +229,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     let running = current_thread()?.block_on(local::query(&state)).map_or(true, |live| live.is_some());
                     after_intercept_set(on, running);
                 }
-                Change::Declare(_, false) | Change::ThroughputTests(_) => {}
+                Change::Declare(_, false) | Change::RelayAddress(_) | Change::ThroughputTests(_) => {}
             }
         }
         Command::Status => {

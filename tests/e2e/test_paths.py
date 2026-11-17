@@ -66,7 +66,7 @@ def path_candidates_and_backbone(lab: Lab, work: Path, t: Checks) -> None:
     for node in (r, a, b):
         node.join(controller)
     controller.ctl("exit", "enable", str(b.id))
-    controller.ctl("relay", "enable", str(r.id), "--udp", r.endpoint, "--tcp", r.endpoint)
+    controller.ctl("relay", "enable", str(r.id))
     wait_until(lambda: all(controller.ctl("node", "show", str(node.id))["attached"] for node in (a, b)), timeout=20,
                what="两个节点挂靠上 relay")
     url, expect = f"http://{web.ip}/", lab.hosts["nat-b"].ip

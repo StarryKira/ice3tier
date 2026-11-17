@@ -2,8 +2,8 @@
 
 use i3t_model::admin::diag::{CellState, ItemState, MatrixState, TestState};
 use i3t_model::admin::{
-    ApiError, CredentialState, ErrorCode, ExitHealth, ForwardStatus, LaneBlock, PackageState, PathSource, ReachCause, ReleaseCause,
-    SkipCause, TokenState, UpdateWait,
+    AddressSource, ApiError, CredentialState, ErrorCode, ExitHealth, ForwardStatus, LaneBlock, NodeWarning, PackageState, PathSource,
+    ReachCause, ReleaseCause, SkipCause, TokenState, UpdateWait,
 };
 use i3t_model::control::diag::{ChoiceCode, HopSource, PathPick, TestCode, TransferEnd};
 use i3t_model::control::exit_test::{ExitTestCause, ExitVia};
@@ -33,6 +33,8 @@ pub(super) static CODES: Codes = Codes {
     package_state,
     skip_cause,
     reach_cause,
+    address_source,
+    node_warning,
     reject_cause,
     api_error,
     lane_block,
@@ -287,6 +289,22 @@ const fn reach_cause(cause: ReachCause) -> &'static str {
     }
 }
 
+const fn address_source(source: AddressSource) -> &'static str {
+    match source {
+        AddressSource::Declared => "declared on the node",
+        AddressSource::Observed => "seen by the controller",
+        AddressSource::Local => "interface",
+        AddressSource::Unknown => "unknown source",
+    }
+}
+
+fn node_warning(warning: &NodeWarning) -> String {
+    match warning {
+        NodeWarning::RangeOverlap { address } => format!("interface address {address} is inside the network's range"),
+        NodeWarning::Unknown => "unknown warning".to_owned(),
+    }
+}
+
 const fn reject_cause(cause: RejectCause) -> &'static str {
     match cause {
         RejectCause::BadToken => "Invalid enrollment token: unknown, used or expired",
@@ -345,7 +363,6 @@ fn api_error(error: &ApiError) -> String {
                 Some("with_successor") => "can't be set together with a successor",
                 Some("no_default") => "no free default range",
                 Some("needs_quality") => "needs a quality test",
-                Some("no_address") => "at least one UDP or TCP address required",
                 Some("revoked") => "credential revoked",
                 Some("method") => "method not allowed",
                 Some(_) | None => "invalid",
@@ -406,7 +423,7 @@ fn api_error(error: &ApiError) -> String {
 fn lane_block(block: &LaneBlock, names: Names<'_>) -> String {
     match block {
         LaneBlock::NoRelay => "Neither node is a relay".to_owned(),
-        LaneBlock::NoTcpAddress { node } => format!("{} has no TCP address", names(*node)),
+        LaneBlock::NoTcpAddress { node } => format!("{} has no known address yet", names(*node)),
         LaneBlock::NodeTooOld { node } => format!("{} is too old", names(*node)),
         LaneBlock::NotConnected => "No rule connects these nodes".to_owned(),
     }

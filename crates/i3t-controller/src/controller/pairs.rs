@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use super::nodes::require_node;
 use super::{Controller, Inner, Seeds, switch};
 use crate::error::{Entity, Error, InField};
+use crate::node_addresses;
 use crate::store::{NodeRecord, Store};
 
 impl Controller {
@@ -124,9 +125,11 @@ impl Inner {
     /// 独占 TCP 的设置在这一对节点上起不起作用。
     fn lane_effect(&self, network: NetworkId, setting: &PairSetting) -> Result<LaneEffect, Error> {
         let (a, b) = (self.require_node(network, setting.a)?, self.require_node(network, setting.b)?);
+        let cidr = self.require_network(network)?.cidr;
         let mut blocked = Vec::new();
-        // 能拨对方的一边：对方启用了 relay（在它的端口上听 TCP），并且有已知的 TCP 地址。
-        let dialable = |node: &NodeRecord| node.relay.as_ref().is_some_and(|relay| !relay.tcp.is_empty());
+        // 能拨对方的一边：对方启用了 relay（在它的端口上听 TCP），并且有已知的地址（controller 找出来的，见 `node_addresses`）。
+        let has_address = |node: &NodeRecord| !node_addresses::relay_addresses(node, cidr).is_empty();
+        let dialable = |node: &NodeRecord| node.relay.is_some() && has_address(node);
         let mut dialers = Vec::new();
         if dialable(&b) {
             dialers.push(a.id);
@@ -138,7 +141,7 @@ impl Inner {
             blocked.push(LaneBlock::NoRelay);
         }
         for node in [&a, &b] {
-            if node.relay.as_ref().is_some_and(|relay| relay.tcp.is_empty()) && dialers.is_empty() {
+            if node.relay.is_some() && !has_address(node) && dialers.is_empty() {
                 blocked.push(LaneBlock::NoTcpAddress { node: node.id });
             }
         }

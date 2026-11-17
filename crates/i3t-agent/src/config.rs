@@ -98,10 +98,16 @@ impl Config {
         let mut document: toml_edit::DocumentMut =
             text.parse().map_err(|err| anyhow::anyhow!("{err}")).with_context(|| (texts().config_error)(path))?;
         let (section, key) = change.setting().key();
-        document[section][key] = match change {
-            Change::Declare(_, on) | Change::ThroughputTests(on) | Change::Intercept(on) => toml_edit::value(on),
-            Change::Profile(profile) => toml_edit::value(profile.spelling()),
-        };
+        match change {
+            Change::Declare(_, on) | Change::ThroughputTests(on) | Change::Intercept(on) => document[section][key] = toml_edit::value(on),
+            Change::Profile(profile) => document[section][key] = toml_edit::value(profile.spelling()),
+            Change::RelayAddress(Some(address)) => document[section][key] = toml_edit::value(address.to_string()),
+            Change::RelayAddress(None) => {
+                if let Some(table) = document.get_mut(section).and_then(toml_edit::Item::as_table_like_mut) {
+                    table.remove(key);
+                }
+            }
+        }
         let updated = document.to_string();
         // 改完先整个验一遍，不把一个读不回来的文件写下去。
         Self::parse(&updated).with_context(|| (texts().config_error)(path))?;
@@ -111,6 +117,11 @@ impl Config {
     fn validate(&self) -> anyhow::Result<()> {
         if self.port == 0 {
             bail!(texts().port_zero);
+        }
+        if let Some(address) = self.declare.relay_address
+            && !is_relay_address(address)
+        {
+            bail!((texts().bad_relay_address)(&address.to_string()));
         }
         for (name, entry) in [("proxy.socks5", self.proxy.socks5), ("proxy.http", self.proxy.http)] {
             if let ProxyBind::At(addr) = entry
@@ -162,12 +173,24 @@ pub struct Declare {
     pub relay: bool,
     #[serde(default)]
     pub forward: bool,
+    /// 作为 relay 时，别的节点还可以经这个地址连它（白皮书 §7.2）：只有人知道的那一种，机房或者路由器把另一个地址上的端口
+    /// 映射到这台机器。只一个：一台机器的端口映射到外面通常就是一个地址；controller 从网卡和连接上找出来的地址照样都用。
+    #[serde(default)]
+    pub relay_address: Option<SocketAddr>,
 }
 
 impl From<Declare> for Declared {
     fn from(declare: Declare) -> Self {
-        Self { exit: declare.exit, relay: declare.relay, forward: declare.forward }
+        Self { exit: declare.exit, relay: declare.relay, forward: declare.forward, relay_address: declare.relay_address }
     }
+}
+
+/// 声明的 relay 地址别的节点连得了：一个具体的单播地址（不是全零、回环、组播、广播），端口不是 0。
+fn is_relay_address(address: SocketAddr) -> bool {
+    let ip = address.ip().to_canonical();
+    let unusable =
+        ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() || ip == std::net::IpAddr::V4(std::net::Ipv4Addr::BROADCAST);
+    address.port() != 0 && !unusable
 }
 
 /// 可以在本机声明的三种能力。
@@ -188,10 +211,12 @@ impl Capability {
     }
 }
 
-/// `i3t set` 能改的项：三项声明、接不接受吞吐测试、性能档位、透明访问。
+/// `i3t set` 能改的项：三项声明、声明的 relay 地址、接不接受吞吐测试、性能档位、透明访问。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setting {
     Declare(Capability),
+    /// 声明的 relay 地址（`[declare] relay_address`）。
+    RelayAddress,
     /// 接不接受管理员发起的吞吐测试（`[tests] throughput`）。
     ThroughputTests,
     /// controller 没有选档位时用的性能档位（`[performance] profile`）。
@@ -205,13 +230,14 @@ impl Setting {
     const fn key(self) -> (&'static str, &'static str) {
         match self {
             Self::Declare(capability) => ("declare", capability.key()),
+            Self::RelayAddress => ("declare", "relay_address"),
             Self::ThroughputTests => ("tests", "throughput"),
             Self::Profile => ("performance", "profile"),
             Self::Intercept => ("intercept", "enabled"),
         }
     }
 
-    /// 这一项改成命令行上写的 `value`：开关写 `on` 或 `off`，档位写它的名字。
+    /// 这一项改成命令行上写的 `value`：开关写 `on` 或 `off`，档位写它的名字，relay 地址写 `地址:端口` 或者 `off`（不再声明）。
     ///
     /// # Errors
     ///
@@ -227,16 +253,27 @@ impl Setting {
             Self::ThroughputTests => Change::ThroughputTests(switch()?),
             Self::Intercept => Change::Intercept(switch()?),
             Self::Profile => Change::Profile(value.parse().map_err(|_| anyhow::anyhow!((texts().unknown_profile)(value)))?),
+            Self::RelayAddress => match value {
+                "off" => Change::RelayAddress(None),
+                text => {
+                    let address: SocketAddr = text.parse().map_err(|_| anyhow::anyhow!((texts().bad_relay_address)(text)))?;
+                    if !is_relay_address(address) {
+                        bail!((texts().bad_relay_address)(text));
+                    }
+                    Change::RelayAddress(Some(address))
+                }
+            },
         })
     }
 }
 
-/// 命令行上的写法：`can-exit`、`can-relay`、`can-forward`、`throughput-tests`、`profile`、`intercept`。
+/// 命令行上的写法：`can-exit`、`can-relay`、`can-forward`、`relay-address`、`throughput-tests`、`profile`、`intercept`。
 impl FromStr for Setting {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            "relay-address" => Ok(Self::RelayAddress),
             "throughput-tests" => Ok(Self::ThroughputTests),
             "profile" => Ok(Self::Profile),
             "intercept" => Ok(Self::Intercept),
@@ -249,6 +286,7 @@ impl fmt::Display for Setting {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Declare(capability) => capability.fmt(f),
+            Self::RelayAddress => f.write_str("relay-address"),
             Self::ThroughputTests => f.write_str("throughput-tests"),
             Self::Profile => f.write_str("profile"),
             Self::Intercept => f.write_str("intercept"),
@@ -260,6 +298,8 @@ impl fmt::Display for Setting {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Change {
     Declare(Capability, bool),
+    /// 声明的 relay 地址；`None` 是不再声明。
+    RelayAddress(Option<SocketAddr>),
     ThroughputTests(bool),
     Profile(Profile),
     Intercept(bool),
@@ -270,6 +310,7 @@ impl Change {
     pub const fn setting(self) -> Setting {
         match self {
             Self::Declare(capability, _) => Setting::Declare(capability),
+            Self::RelayAddress(_) => Setting::RelayAddress,
             Self::ThroughputTests(_) => Setting::ThroughputTests,
             Self::Profile(_) => Setting::Profile,
             Self::Intercept(_) => Setting::Intercept,
@@ -277,12 +318,14 @@ impl Change {
     }
 }
 
-/// 命令行上的写法：`on`、`off`，或者档位的名字。
+/// 命令行上的写法：`on`、`off`，档位的名字，或者地址。
 impl fmt::Display for Change {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Declare(_, on) | Self::ThroughputTests(on) | Self::Intercept(on) => f.write_str(if *on { "on" } else { "off" }),
             Self::Profile(profile) => f.write_str(profile.spelling()),
+            Self::RelayAddress(Some(address)) => address.fmt(f),
+            Self::RelayAddress(None) => f.write_str("off"),
         }
     }
 }
@@ -570,7 +613,7 @@ mod tests {
         Config::set_declared(&path, Capability::Exit, true).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert_eq!(text, texts().template.replace("exit = false", "exit = true"));
-        assert_eq!(Config::load(&path).unwrap().declare, Declare { exit: true, relay: false, forward: false });
+        assert_eq!(Config::load(&path).unwrap().declare, Declare { exit: true, ..Declare::default() });
 
         Config::set_declared(&path, Capability::Exit, false).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), texts().template);
@@ -649,6 +692,30 @@ mod tests {
         Config::set(&path, setting.change("off").unwrap()).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), texts().template);
         assert!(error_of("[intercept]\nenable = true\n").contains("enable"));
+    }
+
+    #[test]
+    fn a_relay_address_is_declared_once_kept_with_the_comments_and_taken_back_with_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let setting: Setting = "relay-address".parse().unwrap();
+        assert_eq!((setting, setting.to_string()), (Setting::RelayAddress, "relay-address".to_owned()));
+        let change = setting.change("203.0.113.9:40330").unwrap();
+        assert_eq!(change.to_string(), "203.0.113.9:40330");
+        Config::set(&path, change).unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.declare.relay_address, Some("203.0.113.9:40330".parse().unwrap()));
+        assert_eq!(Declared::from(config.declare).relay_address, config.declare.relay_address, "和 can-* 一起报给 controller");
+        assert!(fs::read_to_string(&path).unwrap().contains("relay_address = \"203.0.113.9:40330\""));
+
+        Config::set(&path, setting.change("off").unwrap()).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), texts().template, "off 去掉这一项，别的原样");
+        assert_eq!(Config::load(&path).unwrap().declare.relay_address, None);
+
+        for bad in ["203.0.113.9", "0.0.0.0:40330", "127.0.0.1:20330", "203.0.113.9:0", "224.0.0.1:1", "nas:20330"] {
+            assert!(setting.change(bad).is_err(), "{bad}");
+        }
+        assert!(error_of("[declare]\nrelay_address = \"127.0.0.1:20330\"\n").contains("127.0.0.1:20330"), "手写进文件的也查");
     }
 
     #[test]

@@ -872,6 +872,7 @@ dependencies = [
  "i3t-metrics",
  "i3t-model",
  "i3t-proto",
+ "i3t-underlay",
  "i3t-update",
  "libc",
  "rand 0.10.4",

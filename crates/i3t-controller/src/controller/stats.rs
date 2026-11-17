@@ -1,0 +1,349 @@
+//! 给界面画图的低分辨率时间序列（白皮书 §13）。
+//!
+//! 数都来自 controller 本来就收到的东西：节点每 10 秒的上报（流量、活跃流、挂靠的 relay、出口的计数）和谁在线。
+//! 攒在内存里，每 5 分钟写一个点；整点时把上一个小时的 5 分钟的点平均成一个 1 小时的点。
+//!
+//! | 分辨率 | 保留 | 每条序列的点 |
+//! |---|---|---|
+//! | 5 分钟 | 24 小时 | 288 |
+//! | 1 小时 | 7 天 | 168 |
+//!
+//! 序列是固定的一小组（[`Series`]）：每个网络 4 条，每个节点 3 条，每个 relay 1 条，每个出口 2 条。1000 个节点
+//! （其中 100 个 relay、100 个出口）大约 3300 条序列，最多 150 万行，数据库里约 46 MB（按这个表结构量过）。点都存在同一个数据库里，
+//! controller 重启之后还在，`--backup-to` 也带着它们；过了保留期的整点时删掉。
+//!
+//! 速率从累计的计数算：两次上报之间涨了多少除以隔了多久。节点重启（[`Report::run`] 变了）或者计数变小了，
+//! 这一段不算：算出来不是负数就是一个从零开始的大数。两次上报隔得太久（节点断开过）也不算，增量不知道落在哪一段里。
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant};
+
+use i3t_model::admin::stats::{Series, SeriesQuery, SeriesView};
+use i3t_model::admin::{NetworkId, Timestamp};
+use i3t_model::control::Report;
+use i3t_proto::NodeId;
+
+use super::{Controller, Inner, node_ref};
+use crate::error::{Error, InField};
+use crate::store::{NodeRecord, StatPoint};
+
+/// 细的一档：多少秒一个点，留多久。
+pub(crate) const FINE_STEP: u32 = 300;
+const FINE_KEEP: u64 = 24 * 60 * 60;
+/// 粗的一档。
+pub(crate) const COARSE_STEP: u32 = 3600;
+const COARSE_KEEP: u64 = 7 * 24 * 60 * 60;
+/// 一次最多读多少个点：7 天的 5 分钟的点。
+const MAX_POINTS: u64 = 2016;
+/// 在线的节点数、挂靠在 relay 上的节点数多久数一次。一段 5 分钟里数 5 次，平均下来就是这一段的值。
+const SAMPLE_EVERY: Duration = Duration::from_secs(60);
+/// 同一个计数两次上报隔了超过这么久，中间的增量不算（节点每 10 秒报一次）。
+const MAX_GAP: Duration = Duration::from_secs(60);
+
+/// 一段里攒着的数。
+#[derive(Debug, Clone, Copy)]
+enum Acc {
+    /// 个数：每次看到的值相加，最后除以次数。
+    Gauge { sum: f64, count: u32 },
+    /// 速率：增量相加，时间相加，最后相除。
+    Rate { bytes: u64, secs: f64 },
+}
+
+impl Acc {
+    fn value(self) -> Option<f64> {
+        match self {
+            Self::Gauge { sum, count } => (count > 0).then(|| sum / f64::from(count)),
+            Self::Rate { bytes, secs } => (secs > 0.0).then(|| precise(bytes) / secs),
+        }
+    }
+}
+
+/// 字节数换成浮点数。一段里的增量超过 2^53（8 PB）才会差一点，画图用不着那么准；标准库没有不丢精度的转换。
+fn precise(bytes: u64) -> f64 {
+    bytes as f64
+}
+
+/// 一个累计的计数上一次报的值。
+#[derive(Debug, Clone, Copy)]
+struct Counter {
+    run: u64,
+    value: u64,
+    at: Instant,
+}
+
+type Key = (NetworkId, Series, Option<NodeId>);
+
+/// 攒着还没写进存储的数。
+#[derive(Debug, Default)]
+pub(crate) struct Collector {
+    /// 正在攒的那一段的开始；还没开始攒时是 `None`。
+    bucket: Option<Timestamp>,
+    acc: BTreeMap<Key, Acc>,
+    counters: BTreeMap<(NodeId, Series), Counter>,
+    /// 每个节点最近一次报的挂靠的 relay。数 relay 上挂着几个在线节点要用。
+    attached: BTreeMap<NodeId, (NetworkId, Vec<NodeId>)>,
+    next_sample: Option<Instant>,
+}
+
+impl Collector {
+    fn gauge(&mut self, key: Key, value: f64) {
+        let entry = self.acc.entry(key).or_insert(Acc::Gauge { sum: 0.0, count: 0 });
+        if let Acc::Gauge { sum, count } = entry {
+            *sum += value;
+            *count += 1;
+        }
+    }
+
+    /// 一个累计的计数报上来了：和上一次比，涨了多少记进这一段的速率。
+    fn counter(&mut self, key: Key, run: u64, value: u64, now: Instant) {
+        let (_, series, Some(node)) = key else { return };
+        let previous = self.counters.insert((node, series), Counter { run, value, at: now });
+        let Some(previous) = previous else { return };
+        if previous.run != run || value < previous.value {
+            tracing::debug!(%node, series = %series, "计数从头开始了（节点重启过），这一段不算速率");
+            return;
+        }
+        let gap = now.saturating_duration_since(previous.at);
+        if gap.is_zero() || gap > MAX_GAP {
+            return;
+        }
+        let entry = self.acc.entry(key).or_insert(Acc::Rate { bytes: 0, secs: 0.0 });
+        if let Acc::Rate { bytes, secs } = entry {
+            *bytes = bytes.saturating_add(value - previous.value);
+            *secs += gap.as_secs_f64();
+        }
+    }
+
+    /// 这一段攒下的点，加上从节点的点算出来的网络的合计。之后从空的开始攒下一段。
+    fn take_points(&mut self, at: Timestamp) -> Vec<StatPoint> {
+        let acc = std::mem::take(&mut self.acc);
+        let mut totals: BTreeMap<(NetworkId, Series), f64> = BTreeMap::new();
+        let mut points = Vec::with_capacity(acc.len());
+        for ((network, series, node), entry) in acc {
+            let Some(value) = entry.value() else { continue };
+            let total = match series {
+                Series::NodeTx => Some(Series::Tx),
+                Series::NodeRx => Some(Series::Rx),
+                Series::NodeFlows => Some(Series::Flows),
+                Series::Online | Series::Flows | Series::Tx | Series::Rx | Series::RelayAttached | Series::ExitTx | Series::ExitRx => None,
+            };
+            if let Some(total) = total {
+                *totals.entry((network, total)).or_default() += value;
+            }
+            points.push(StatPoint { network, series, node, at, value });
+        }
+        points.extend(totals.into_iter().map(|((network, series), value)| StatPoint { network, series, node: None, at, value }));
+        points
+    }
+
+    fn forget(&mut self, node: NodeId) {
+        self.counters.retain(|(counted, _), _| *counted != node);
+        self.attached.remove(&node);
+    }
+}
+
+impl Controller {
+    /// 一条序列在一段时间里的点（`GET …/stats`）。
+    ///
+    /// # Errors
+    ///
+    /// 没有这个网络或者节点；节点的序列没有写节点，网络的序列写了节点；时间范围或者步长不对；读存储失败。
+    pub fn series(&self, network: NetworkId, query: &SeriesQuery) -> Result<SeriesView, Error> {
+        let inner = self.lock();
+        let network = inner.require_network(network)?;
+        let node = match (query.series.per_node(), query.node) {
+            (true, Some(id)) => Some(node_ref(&inner.require_node(network.id, id).in_field("node")?)),
+            (true, None) => return Err(Error::invalid_field("node", "required", format!("序列 {} 要写是哪个节点", query.series))),
+            (false, Some(_)) => return Err(Error::invalid_field("node", "not_allowed", format!("序列 {} 是整个网络的", query.series))),
+            (false, None) => None,
+        };
+        let now = inner.clock.now();
+        let to = query.to.unwrap_or(now);
+        let from = query.from.unwrap_or_else(|| to.saturating_sub(FINE_KEEP));
+        if from > to {
+            return Err(Error::invalid_field("from", "out_of_range", "开始的时间不能晚于结束的时间"));
+        }
+        let step = match query.step {
+            Some(step @ (FINE_STEP | COARSE_STEP)) => step,
+            Some(_) => return Err(Error::invalid_field("step", "out_of_range", format!("步长只能是 {FINE_STEP} 或 {COARSE_STEP} 秒"))),
+            None if from >= now.saturating_sub(FINE_KEEP) => FINE_STEP,
+            None => COARSE_STEP,
+        };
+        let span = u64::from(step);
+        let first = from - from % span;
+        // 只到最后一段过完了的：正在攒的那一段还没有点，画出来会是一个假的断口。
+        let last_complete = (now - now % span).saturating_sub(span);
+        let last = (to - to % span).min(last_complete);
+        if last >= first && (last - first) / span >= MAX_POINTS {
+            return Err(Error::invalid_field(
+                "from",
+                "too_many",
+                format!("一次最多读 {MAX_POINTS} 个点，把时间范围缩短或者用大一些的步长"),
+            ));
+        }
+        let stored: BTreeMap<Timestamp, f64> =
+            inner.store.stats(network.id, query.series, query.node, step, (first, last))?.into_iter().collect();
+        let points = if last >= first {
+            (0..=(last - first) / span).map(|index| first + index * span).map(|at| (at, stored.get(&at).copied())).collect()
+        } else {
+            Vec::new()
+        };
+        Ok(SeriesView { series: query.series, node, unit: query.series.unit(), step, from: first, to: last.max(first), points })
+    }
+}
+
+impl Inner {
+    /// 一个节点的上报里给时间序列用的数。
+    pub(super) fn stats_reported(&mut self, node: &NodeRecord, report: &Report) {
+        let now = Instant::now();
+        let (network, id) = (node.network, Some(node.id));
+        let stats = &mut self.stats;
+        stats.counter((network, Series::NodeTx, id), report.run, report.tx_bytes, now);
+        stats.counter((network, Series::NodeRx, id), report.run, report.rx_bytes, now);
+        stats.gauge((network, Series::NodeFlows, id), f64::from(report.flows));
+        if let Some(exit) = report.exit.as_deref().filter(|_| node.exit.is_some()) {
+            stats.counter((network, Series::ExitTx, id), report.run, exit.bytes_to_target, now);
+            stats.counter((network, Series::ExitRx, id), report.run, exit.bytes_from_target, now);
+        }
+        stats.attached.insert(node.id, (network, report.attached.iter().map(|attachment| attachment.relay).collect()));
+    }
+
+    /// 节点删掉了：它的计数不用再记着。已经写下的点留到过了保留期。
+    pub(super) fn stats_forget(&mut self, node: NodeId) {
+        self.stats.forget(node);
+    }
+
+    /// 到点了就数一次、写一个点、整点时汇总和清理。返回下一次要叫它的时刻。
+    pub(super) fn stats_tick(&mut self, now: Instant, wall: Timestamp) -> Result<Instant, Error> {
+        if self.stats.next_sample.is_none_or(|at| at <= now) {
+            self.stats.next_sample = Some(now + SAMPLE_EVERY);
+            self.sample()?;
+        }
+        let span = u64::from(FINE_STEP);
+        let bucket = wall - wall % span;
+        match self.stats.bucket {
+            Some(current) if current < bucket => {
+                self.stats.bucket = Some(bucket);
+                self.flush(current, bucket)?;
+            }
+            Some(_) => {}
+            None => self.stats.bucket = Some(bucket),
+        }
+        let boundary = now + Duration::from_secs(bucket + span - wall);
+        Ok(self.stats.next_sample.map_or(boundary, |sample| sample.min(boundary)))
+    }
+
+    /// 数一次在线的节点和每个 relay 上挂着的在线节点。
+    fn sample(&mut self) -> Result<(), Error> {
+        let mut online: BTreeMap<NetworkId, u32> = self.store.networks()?.into_iter().map(|network| (network.id, 0)).collect();
+        for live in self.live.values() {
+            *online.entry(live.network).or_default() += 1;
+        }
+        let mut attached: BTreeMap<(NetworkId, NodeId), u32> =
+            self.store.relay_nodes()?.into_iter().map(|(network, relay)| ((network, relay), 0)).collect();
+        for (node, (network, relays)) in &self.stats.attached {
+            if !self.live.contains_key(node) {
+                continue;
+            }
+            for relay in relays {
+                if let Some(count) = attached.get_mut(&(*network, *relay)) {
+                    *count += 1;
+                }
+            }
+        }
+        for (network, count) in online {
+            self.stats.gauge((network, Series::Online, None), f64::from(count));
+        }
+        for ((network, relay), count) in attached {
+            self.stats.gauge((network, Series::RelayAttached, Some(relay)), f64::from(count));
+        }
+        Ok(())
+    }
+
+    /// `ended` 开始的那一段过完了，现在是 `now_bucket` 开始的这一段。
+    fn flush(&mut self, ended: Timestamp, now_bucket: Timestamp) -> Result<(), Error> {
+        // 这一段里删掉了的网络，它的点不写：存储里没有它了（外键也不让写）。
+        let networks: BTreeSet<NetworkId> = self.store.networks()?.into_iter().map(|network| network.id).collect();
+        let mut points = self.stats.take_points(ended);
+        points.retain(|point| networks.contains(&point.network));
+        let hour = u64::from(COARSE_STEP);
+        let new_hour = now_bucket / hour != ended / hour;
+        self.store.atomically(|store| {
+            store.insert_stats(FINE_STEP, &points)?;
+            if new_hour {
+                // 上一个小时，和再上一个（controller 正好在整点前后重启过的话那一个还没有汇总）。重复汇总只是换成同样的值。
+                let last_hour = ended - ended % hour;
+                store.roll_up_stats(FINE_STEP, COARSE_STEP, last_hour)?;
+                store.roll_up_stats(FINE_STEP, COARSE_STEP, last_hour.saturating_sub(hour))?;
+                store.prune_stats(FINE_STEP, now_bucket.saturating_sub(FINE_KEEP))?;
+                store.prune_stats(COARSE_STEP, now_bucket.saturating_sub(COARSE_KEEP))?;
+            }
+            Ok::<_, Error>(())
+        })?;
+        tracing::debug!(at = ended, points = points.len(), new_hour, "写下了时间序列的一段");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NET: NetworkId = NetworkId(1);
+
+    fn node(raw: u32) -> Option<NodeId> {
+        NodeId::new(raw)
+    }
+
+    #[test]
+    fn a_rate_is_the_increase_over_the_time_it_took_and_a_restart_or_a_drop_is_skipped() {
+        let mut collector = Collector::default();
+        let start = Instant::now();
+        let key = (NET, Series::NodeTx, node(3));
+        collector.counter(key, 7, 1_000, start);
+        collector.counter(key, 7, 11_000, start + Duration::from_secs(10));
+        collector.counter(key, 8, 50, start + Duration::from_secs(20));
+        collector.counter(key, 8, 10, start + Duration::from_secs(30));
+        collector.counter(key, 8, 1_010, start + Duration::from_secs(40));
+        collector.counter(key, 8, 99_999_999, start + Duration::from_secs(400));
+        let points = collector.take_points(600);
+        let rate = points.iter().find(|point| point.series == Series::NodeTx).unwrap().value;
+        assert!((rate - 550.0).abs() < 1e-9, "两段：10000 字节 10 秒、1000 字节 10 秒；重启、变小和隔太久的都不算：{rate}");
+        assert!(points.iter().all(|point| point.value >= 0.0));
+    }
+
+    #[test]
+    fn points_of_a_network_deleted_during_the_bucket_are_dropped_and_the_rest_written() {
+        let lab = crate::controller::testing::Lab::new();
+        let kept = lab.network("home");
+        let gone = lab.network("lab");
+        let now = Instant::now();
+        let wall = lab.controller.lock().clock.now();
+        // 一个小时的第一段：下一段还在同一个小时里，不汇总。
+        let bucket = wall - wall % u64::from(COARSE_STEP);
+        lab.controller.lock().stats_tick(now, bucket).unwrap();
+        lab.controller.delete_network(gone.id).unwrap();
+        lab.controller.lock().stats_tick(now, bucket + u64::from(FINE_STEP)).unwrap();
+        let inner = lab.controller.lock();
+        assert_eq!(inner.store.stats(kept.id, Series::Online, None, FINE_STEP, (bucket, bucket)).unwrap(), [(bucket, 0.0)]);
+        assert_eq!(inner.store.stats_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn gauges_are_averaged_and_node_series_add_up_to_the_network() {
+        let mut collector = Collector::default();
+        let now = Instant::now();
+        collector.gauge((NET, Series::NodeFlows, node(3)), 2.0);
+        collector.gauge((NET, Series::NodeFlows, node(3)), 4.0);
+        collector.gauge((NET, Series::NodeFlows, node(4)), 1.0);
+        collector.counter((NET, Series::NodeRx, node(4)), 1, 0, now);
+        collector.counter((NET, Series::NodeRx, node(4)), 1, 600, now + Duration::from_secs(6));
+        let points = collector.take_points(900);
+        let value = |series, node| points.iter().find(|point| point.series == series && point.node == node).map(|point| point.value);
+        assert_eq!(value(Series::NodeFlows, self::node(3)), Some(3.0));
+        assert_eq!(value(Series::Flows, None), Some(4.0));
+        assert_eq!(value(Series::Rx, None), Some(100.0));
+        assert_eq!(value(Series::Tx, None), None, "没有数的序列没有点，图上是断开的");
+        assert!(collector.take_points(1200).is_empty(), "写过之后从空的开始");
+    }
+}

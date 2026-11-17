@@ -1,10 +1,10 @@
 //! 模型的规则：网络隔离、编号和地址的分配、能力的声明与启用、继任。
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 
 use i3t_model::admin::{
-    CreateCredential, CreateEnrollToken, CreateNetwork, Direction, ErrorCode, ForwardInput, ForwardStatus, ListenerInput, PairInput,
-    RelaySettings, UpdateNetwork, UpdateNode,
+    AddressSource, CreateCredential, CreateEnrollToken, CreateNetwork, Direction, ErrorCode, ForwardInput, ForwardStatus, ListenerInput,
+    PairInput, RelayAddress, RelaySettings, UpdateNetwork, UpdateNode,
 };
 use i3t_model::control::{Declared, EnrollToken, ToController};
 use i3t_model::netmap::{self, DefaultAction, ExitRole, ForwardProtocol, LaneMode, ListenerProtocol};
@@ -17,10 +17,6 @@ use crate::error::{Error, Rejection};
 
 fn ip(text: &str) -> Ipv4Addr {
     text.parse().unwrap()
-}
-
-fn relay_at(address: &str) -> RelaySettings {
-    RelaySettings { udp: vec![address.parse().unwrap()], ..RelaySettings::default() }
 }
 
 fn listener(node: NodeId, name: &str, bind: &str, require_credential: bool) -> ListenerInput {
@@ -325,7 +321,7 @@ fn enabling_an_undeclared_capability_is_refused_and_names_the_command_to_run() {
     rename(&lab, network.id, plain, "nas-01");
 
     let cases = [
-        (lab.controller.enable_relay(network.id, plain, relay_at("203.0.113.7:20330")).map(drop), "i3t set can-relay on"),
+        (lab.controller.enable_relay(network.id, plain, RelaySettings::default()).map(drop), "i3t set can-relay on"),
         (lab.controller.enable_exit(network.id, plain, ExitRole::default()).map(drop), "i3t set can-exit on"),
         (lab.controller.create_forward(network.id, forward(other, plain)).map(drop), "i3t set can-forward on"),
     ];
@@ -340,18 +336,38 @@ fn enabling_an_undeclared_capability_is_refused_and_names_the_command_to_run() {
 }
 
 #[test]
-fn a_relay_needs_a_publicly_reachable_address() {
+fn a_relay_is_enabled_without_typing_an_address_and_shows_the_ones_found() {
     let mut lab = Lab::new();
     let network = lab.network("home");
     let node = lab.join_offline(network.id, &[], CAN_DO_ALL);
     let enable = |settings| lab.controller.enable_relay(network.id, node, settings);
 
-    assert_eq!(enable(RelaySettings::default()).unwrap_err().code(), ErrorCode::InvalidRequest);
-    assert_eq!(enable(relay_at("0.0.0.0:20330")).unwrap_err().code(), ErrorCode::InvalidRequest);
-    assert_eq!(enable(relay_at("203.0.113.7:0")).unwrap_err().code(), ErrorCode::InvalidRequest);
-    let tcp_only = RelaySettings { tcp: vec!["203.0.113.7:20330".parse().unwrap()], region: "hk".to_owned(), ..RelaySettings::default() };
-    assert_eq!(enable(tcp_only.clone()).unwrap().relay, Some(tcp_only));
+    assert_eq!(enable(RelaySettings { bandwidth_mbps: Some(0) }).unwrap_err().code(), ErrorCode::InvalidRequest);
+    // 早先的请求体（WebUI 换过来之前还在发）照收，填的地址和区域没有作用。
+    let old_body: RelaySettings =
+        serde_json::from_value(serde_json::json!({ "udp": ["192.0.2.1:9"], "tcp": ["192.0.2.1:9"], "region": "hk", "bandwidth_mbps": 50 }))
+            .unwrap();
+    let relay = enable(old_body).unwrap().relay.unwrap();
+    assert_eq!(relay.bandwidth_mbps, Some(50));
+    assert_eq!(
+        relay.addresses,
+        [RelayAddress { address: SocketAddr::new(REMOTE, 20330), source: AddressSource::Observed }],
+        "controller 看到的地址，不是请求里填的"
+    );
     assert_eq!(lab.controller.disable_relay(network.id, node).unwrap().relay, None);
+}
+
+#[test]
+fn a_node_that_never_connected_can_be_a_relay_with_no_address_yet() {
+    let mut lab = Lab::new();
+    let network = lab.network("home");
+    let token = lab.secret(network.id, &CreateEnrollToken::default());
+    let key = lab.fresh_key();
+    let hello = i3t_model::control::Hello { port: 0, ..hello(CAN_DO_ALL) };
+    let member = lab.enroll_as(key, &token, &hello).unwrap();
+    lab.controller.disconnect(member.session);
+    let relay = lab.controller.enable_relay(network.id, member.id, RelaySettings::default()).unwrap().relay.unwrap();
+    assert!(relay.addresses.is_empty(), "不知道它的端口，就还没有地址；照样启用，不拦");
 }
 
 #[test]
@@ -363,7 +379,7 @@ fn withdrawing_a_declaration_turns_the_capability_off() {
     // 第一次连接时什么都没声明；这里带着声明重新连上来。
     node = lab.connect(node.key, CAN_DO_ALL).unwrap();
     let listener_node = lab.join_offline(network.id, &[], Declared::default());
-    lab.controller.enable_relay(network.id, node.id, relay_at("203.0.113.7:20330")).unwrap();
+    lab.controller.enable_relay(network.id, node.id, RelaySettings::default()).unwrap();
     lab.controller.enable_exit(network.id, node.id, ExitRole::default()).unwrap();
     let forward_id = lab.controller.create_forward(network.id, forward(listener_node, node.id)).unwrap().id;
     lab.settle(&mut [&mut node]);
@@ -435,7 +451,7 @@ fn a_successor_enrolled_by_token_inherits_identity_and_configuration() {
     let mut old = lab.join_with(network.id, &["servers"], CAN_DO_ALL);
     let other = lab.join_offline(network.id, &[], CAN_DO_ALL);
     rename(&lab, network.id, old.id, "nas-01");
-    lab.controller.enable_relay(network.id, old.id, relay_at("203.0.113.7:20330")).unwrap();
+    lab.controller.enable_relay(network.id, old.id, RelaySettings::default()).unwrap();
     lab.controller.enable_exit(network.id, old.id, ExitRole::default()).unwrap();
     let own_listener = lab.controller.create_listener(network.id, listener(old.id, "local", "127.0.0.1:1080", false)).unwrap();
     let mut via_exit = listener(other, "via", "127.0.0.1:1081", false);
@@ -666,7 +682,7 @@ fn every_log_entry_carries_the_named_values_its_sentence_needs() {
     lab.controller.delete_forward(network.id, web.id).unwrap();
     lab.controller.set_pair(network.id, nas, laptop, PairInput { keep_alive: Some(true), lane: Some(LaneMode::Always) }).unwrap();
     lab.controller.delete_pair(network.id, laptop, nas).unwrap();
-    lab.controller.enable_relay(network.id, nas, relay_at("203.0.113.7:20330")).unwrap();
+    lab.controller.enable_relay(network.id, nas, RelaySettings::default()).unwrap();
     lab.controller.disable_relay(network.id, nas).unwrap();
     lab.controller.enable_exit(network.id, nas, ExitRole::default()).unwrap();
     lab.controller.disable_exit(network.id, nas).unwrap();

@@ -10,7 +10,7 @@
 //! - 令牌的明文只在创建它的那一次应答里出现（[`CreatedEnrollToken`]、[`CreatedCredential`]），controller 只存哈希。
 
 use std::fmt;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::ParseIntError;
 use std::str::FromStr;
 
@@ -27,6 +27,7 @@ use crate::netmap::{Attachment, ExitRole, ForwardProtocol, LaneMode, ListenerPro
 use crate::update::{FailureKind, SelfUpdateBlocker, UpdateCause, UpdateStatus, UpdateTiming, Version};
 
 pub mod diag;
+pub mod stats;
 
 /// 管理 API 所有路径的前缀。
 pub const API_PREFIX: &str = "/api/v1";
@@ -259,6 +260,9 @@ pub struct Overview {
     pub tx_bytes: u64,
     #[serde(default)]
     pub rx_bytes: u64,
+    /// 网络里各个节点的提醒（[`Node::warnings`]），按节点编号排。
+    #[serde(default)]
+    pub warnings: Vec<NetworkWarning>,
 }
 
 /// 一对节点，`a` 的编号小于 `b`。
@@ -282,8 +286,8 @@ pub struct Node {
     pub groups: Vec<GroupRef>,
     /// 节点在本地声明的"可以承担"。没有声明的能力启用不了。
     pub declared: Declared,
-    /// 启用为 relay 时有值。
-    pub relay: Option<RelaySettings>,
+    /// 启用为 relay 时有值：它的地址（controller 找出来的）和设置。
+    pub relay: Option<RelayView>,
     /// 启用为出口时有值。
     pub exit: Option<ExitRole>,
     pub dial_out_only: bool,
@@ -321,6 +325,9 @@ pub struct Node {
     /// 管理员给它选的性能档位；`null` 表示没有选，节点用本机配置文件里的（默认 `balanced`）。节点实际在用的见节点详情的 `performance`。
     #[serde(default)]
     pub profile: Option<Profile>,
+    /// controller 发现的、值得提醒的情况，按节点最近一次报的东西算（离线时是它离线前报的）。没有时是空的。
+    #[serde(default)]
+    pub warnings: Vec<NodeWarning>,
 }
 
 /// 一个节点的程序更新：能不能自己更新、有没有新版本、进行到哪一步。
@@ -640,20 +647,69 @@ fn nullable<'de, T: Deserialize<'de>, D: Deserializer<'de>>(deserializer: D) -> 
     Option::<T>::deserialize(deserializer).map(Some)
 }
 
-/// relay 的设置。启用 relay 时由管理员填写。
+/// relay 的设置：启用 relay 时的请求体（`PUT …/relay`），也是 controller 存着的那一份。
+///
+/// 地址不在这里：controller 自己找出来（白皮书 §7.2），见 [`RelayView::addresses`]。
+/// 早先的请求体里的 `udp`、`tcp`、`region` 照收，没有作用（不认识的字段一律忽略）。
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RelaySettings {
-    /// 公网可达的 UDP 地址。`udp` 和 `tcp` 至少要有一个地址。
-    #[serde(default)]
-    pub udp: Vec<SocketAddr>,
-    /// 公网可达的 TCP 地址，给 UDP 用不了的节点用。
-    #[serde(default)]
-    pub tcp: Vec<SocketAddr>,
-    #[serde(default)]
-    pub region: String,
     /// 转发的带宽上限；`null` 表示不限。
     #[serde(default)]
     pub bandwidth_mbps: Option<u32>,
+}
+
+/// 一个启用了的 relay（`Node.relay`）：别的节点经哪些地址连它，和它的设置。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayView {
+    /// controller 找出来的地址，只读，按节点去试的顺序排，最多 [`MAX_RELAY_ADDRESSES`] 个。
+    /// 每个地址 UDP 和 TCP 都用。还不知道任何地址（节点从没连上过）时是空的，relay 照样是启用的。
+    pub addresses: Vec<RelayAddress>,
+    /// 转发的带宽上限；`null` 表示不限。
+    pub bandwidth_mbps: Option<u32>,
+}
+
+/// 一个 relay 最多有几个地址。多出来的（多半是网卡上的）不下发：节点每个都要试，试的都是同一台机器。
+pub const MAX_RELAY_ADDRESSES: usize = 8;
+
+/// relay 的一个地址和它是从哪里来的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayAddress {
+    pub address: SocketAddr,
+    pub source: AddressSource,
+}
+
+/// relay 的地址是从哪里来的（白皮书 §7.2）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddressSource {
+    /// 在节点上声明的（`i3t set relay-address`）：机房或者路由器上映射进来的地址。
+    Declared,
+    /// controller 看到的：节点连 controller 时的来源 IP，加上节点自报的端口。
+    Observed,
+    /// 节点网卡上的地址，加上节点自报的端口。同一个局域网里的节点靠它连上。
+    Local,
+    /// 比这个程序新的 controller 给的、这里不认识的来源。
+    #[serde(other)]
+    Unknown,
+}
+
+/// controller 发现的、值得提醒的情况。只是提醒，不挡着任何事。不认识的 `code` 读成 [`NodeWarning::Unknown`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum NodeWarning {
+    /// 节点的一个网卡地址落在网络的虚拟地址段里（白皮书 §4.6）：在这台机器上，连这个地址段里的虚拟 IP 可能连到真实网络上去，
+    /// 透明访问也装不上。`address` 是那个网卡地址。
+    RangeOverlap { address: IpAddr },
+    #[serde(other)]
+    Unknown,
+}
+
+/// 网络的总览里的一条提醒：哪个节点，什么情况。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkWarning {
+    pub node: NodeRef,
+    #[serde(flatten)]
+    pub warning: NodeWarning,
 }
 
 /// 把一个节点指定为另一个已下线节点的继任。
@@ -1225,7 +1281,7 @@ pub struct LaneOpening {
 pub enum LaneBlock {
     /// 两个节点都没有启用 relay：没有哪一边的 TCP 端口在听。
     NoRelay,
-    /// 启用了 relay 的这个节点还没有已知的公网 TCP 地址。
+    /// 启用了 relay 的这个节点还没有已知的地址（它还没有连上过 controller）。
     NoTcpAddress { node: NodeId },
     /// 这个节点的版本太旧，不懂独占 TCP（或者还从来没有连上过 controller）。
     NodeTooOld { node: NodeId },
@@ -1412,12 +1468,12 @@ pub struct DeletedGroup {
     pub tokens: Vec<u32>,
 }
 
-/// 启用（或修改）relay 的应答：节点，加上 controller 从自己这边试连这些地址的结果。
+/// 启用（或修改）relay 的应答：节点，加上 controller 从自己这边试连它的地址的结果。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelayEnabled {
     #[serde(flatten)]
     pub node: Node,
-    /// 每个填写的地址一项。只是参考：controller 和别的节点不在同一个网络位置上，它连不上不等于别人连不上。
+    /// relay 的每个地址两项，先 UDP 后 TCP。只是参考：谁连得上它，它就是谁的 relay，controller 连不上不等于别人连不上。
     pub reachability: Vec<Reachability>,
 }
 
@@ -1436,7 +1492,7 @@ pub struct Reachability {
     pub cause: Option<ReachCause>,
 }
 
-/// controller 为什么没有连上一个 relay 填的地址。
+/// controller 为什么没有连上 relay 的一个地址。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum ReachCause {

@@ -21,6 +21,7 @@ mod oplog;
 mod pair;
 mod rule;
 mod schema;
+mod stats;
 mod test;
 mod token;
 
@@ -36,6 +37,7 @@ pub use group::{BUILTIN_GROUP, GroupRecord, folded};
 pub use network::{NetworkRecord, NewNetwork};
 pub use node::{NetmapState, NewNode, NodeRecord};
 pub use oplog::LogFilter;
+pub use stats::StatPoint;
 pub use test::KEEP_PER_PAIR;
 pub use token::{NewToken, RETENTION_SECS, TokenRecord, is_pending, token_at};
 

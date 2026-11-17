@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::Path;
 
+use i3t_model::admin::stats::{Series, SeriesQuery};
 use i3t_model::admin::{CreateEnrollToken, CreateGroup, CreateNetwork, Direction};
 use i3t_model::control::Declared;
 use rusqlite::types::Value;
@@ -12,10 +13,11 @@ use super::super::testing::Lab;
 use super::add_rule;
 use crate::controller::{Controller, DATABASE_FILE, KEY_FILE};
 use crate::error::{Error, Rejection};
+use crate::store::StatPoint;
 
 const ADDR: &str = "ctl.example.com:20331";
 
-/// 一个数据库文件里的全部内容：表结构的版本号，每个表和索引的定义，每个表的每一行（按 rowid）。
+/// 一个数据库文件里的全部内容：表结构的版本号，每个表和索引的定义，每个表的每一行（按 rowid；没有 rowid 的表按主键）。
 /// 另开一个只读的连接来读，所以看得到别的连接已经提交、还在 `-wal` 里的东西。
 fn content(database: &Path) -> Vec<String> {
     let conn = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
@@ -29,7 +31,8 @@ fn content(database: &Path) -> Vec<String> {
         if kind != "table" {
             continue;
         }
-        let mut rows = conn.prepare(&format!("SELECT * FROM \"{name}\" ORDER BY rowid")).unwrap();
+        let order = if sql.as_deref().is_some_and(|sql| sql.contains("WITHOUT ROWID")) { "1, 2, 3, 4, 5" } else { "rowid" };
+        let mut rows = conn.prepare(&format!("SELECT * FROM \"{name}\" ORDER BY {order}")).unwrap();
         let columns = rows.column_count();
         let rows = rows.query_map([], |row| (0..columns).map(|index| row.get::<_, Value>(index)).collect::<Result<Vec<_>, _>>()).unwrap();
         out.extend(rows.map(|row| format!("  {:?}", row.unwrap())));
@@ -58,6 +61,11 @@ fn a_backup_of_a_running_controller_has_every_commit_and_starts_as_the_same_cont
     lab.join_offline(office, &["printers"], Declared::default());
     add_rule(&lab, home, "laptops", "servers", Direction::OneWay);
     let unused = lab.controller.create_token(home, &CreateEnrollToken::default()).unwrap();
+    // 时间序列也在数据库里：备份带着它，恢复之后图上照样有。
+    let now = lab.controller.lock().clock.now();
+    let point_at = now - now % 300 - 600;
+    let point = StatPoint { network: home, series: Series::Online, node: None, at: point_at, value: 2.0 };
+    lab.controller.lock().store.insert_stats(300, &[point]).unwrap();
     lab.settle(&mut [&mut a, &mut b]);
     let netmap_at_backup = a.netmap().clone();
 
@@ -96,6 +104,8 @@ fn a_backup_of_a_running_controller_has_every_commit_and_starts_as_the_same_cont
     assert_eq!(groups, ["All", "laptops", "servers"]);
     let tokens = lab.controller.tokens(home, true).unwrap();
     assert!(tokens.iter().any(|token| token.id == unused.info.id), "没用过的注册令牌还在");
+    let query = SeriesQuery { series: Series::Online, node: None, from: Some(point_at), to: Some(point_at), step: Some(300) };
+    assert_eq!(lab.controller.series(home, &query).unwrap().points, [(point_at, Some(2.0))], "时间序列跟着备份回来了");
 }
 
 #[test]

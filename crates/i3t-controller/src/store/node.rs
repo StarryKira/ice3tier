@@ -1,7 +1,7 @@
 //! 节点。
 
 use std::collections::BTreeSet;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use i3t_model::admin::{GroupId, NetworkId, RelaySettings, Timestamp, UpdateFailure};
 use i3t_model::control::{Declared, SelfUpdate};
@@ -39,6 +39,8 @@ pub struct NodeRecord {
     pub profile: Option<Profile>,
     /// 节点最近上报的候选端点。
     pub endpoints: Vec<SocketAddr>,
+    /// 节点最近上报的网卡地址；旧版本的节点不报，是 `None`。
+    pub local_addresses: Option<Vec<IpAddr>>,
     /// controller 看到的来源 IP 加上节点自报的 UDP 端口。
     pub observed: Option<SocketAddr>,
     pub attached: Vec<Attachment>,
@@ -88,6 +90,7 @@ impl NodeRecord {
             pinned_relays: row.get::<_, Json<Vec<NodeId>>>("pinned_relays")?.0,
             profile: row.get::<_, Option<Json<Profile>>>("profile")?.map(|json| json.0),
             endpoints: row.get::<_, Json<Vec<SocketAddr>>>("endpoints")?.0,
+            local_addresses: row.get::<_, Option<Json<Vec<IpAddr>>>>("local_addresses")?.map(|json| json.0),
             observed: row.get::<_, Option<Text<SocketAddr>>>("observed")?.map(|text| text.0),
             attached: row.get::<_, Json<Vec<Attachment>>>("attached")?.0,
             platform: row.get("platform")?,
@@ -186,6 +189,17 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// 全部启用了 relay 的节点：所在的网络和节点编号。
+    ///
+    /// # Errors
+    ///
+    /// 读数据库失败。
+    pub fn relay_nodes(&self) -> Result<Vec<(NetworkId, NodeId)>, StoreError> {
+        let mut statement = self.conn.prepare("SELECT network_id, id FROM nodes WHERE relay IS NOT NULL ORDER BY id")?;
+        let rows = statement.query_map([], |row| Ok((row.get::<_, SqlNetwork>(0)?.0, row.get::<_, SqlNode>(1)?.0)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// # Errors
     ///
     /// 读数据库失败。
@@ -248,6 +262,16 @@ impl Store {
             "UPDATE nodes SET endpoints = ?2, attached = ?3 WHERE id = ?1",
             params![SqlNode(id), Json(endpoints), Json(attached)],
         )?;
+        Ok(())
+    }
+
+    /// 记下节点上报的网卡地址。
+    ///
+    /// # Errors
+    ///
+    /// 写数据库失败。
+    pub fn set_node_local_addresses(&self, id: NodeId, addresses: &[IpAddr]) -> Result<(), StoreError> {
+        self.conn.execute("UPDATE nodes SET local_addresses = ?2 WHERE id = ?1", params![SqlNode(id), Json(addresses)])?;
         Ok(())
     }
 
@@ -373,9 +397,8 @@ mod tests {
         node.name = "nas-01".to_owned();
         node.groups = [store.insert_group(network, "servers").unwrap(), store.insert_group(network, "home").unwrap()].into();
         store.set_node_groups(id, &node.groups).unwrap();
-        node.declared = Declared { exit: true, relay: true, forward: false };
-        node.relay =
-            Some(RelaySettings { udp: vec!["203.0.113.7:20330".parse().unwrap()], region: "hk".to_owned(), ..RelaySettings::default() });
+        node.declared = Declared { exit: true, relay: true, forward: false, relay_address: Some("203.0.113.9:40330".parse().unwrap()) };
+        node.relay = Some(RelaySettings { bandwidth_mbps: Some(200) });
         node.exit = Some(ExitRole { ports: None, lan: true, ..ExitRole::default() });
         node.dial_out_only = true;
         node.routing = Some(RoutingMode::LowestCost);
@@ -390,6 +413,8 @@ mod tests {
         let attached = vec![Attachment { relay: NodeId::new(9).unwrap(), rtt_ms: 12 }];
         store.set_node_report(id, &endpoints, &attached).unwrap();
         store.set_node_observed(id, Some("198.51.100.4:20330".parse().unwrap())).unwrap();
+        let local: Vec<IpAddr> = vec!["192.168.1.5".parse().unwrap(), "10.66.3.7".parse().unwrap()];
+        store.set_node_local_addresses(id, &local).unwrap();
         store.set_node_last_seen(id, 2_000).unwrap();
         store.set_node_netmap(id, 5, &[7; DIGEST_LEN]).unwrap();
         store.set_node_sent(id, 5).unwrap();
@@ -407,6 +432,7 @@ mod tests {
         node.endpoints = endpoints;
         node.attached = attached;
         node.observed = Some("198.51.100.4:20330".parse().unwrap());
+        node.local_addresses = Some(local);
         node.last_seen_at = Some(2_000);
         node.netmap = NetmapState { version: 5, digest: Some([7; DIGEST_LEN]), sent: 5, acked: 4 };
         assert_eq!(store.node(id).unwrap(), Some(node.clone()));
@@ -425,6 +451,7 @@ mod tests {
         let network = store.insert_network(&home()).unwrap();
         let node = store.node(store.insert_node(&new_node(network, 1)).unwrap()).unwrap().unwrap();
         assert_eq!((node.hostname.as_str(), node.self_update, node.update_failure), ("", None, None));
+        assert_eq!(node.local_addresses, None, "没报过网卡地址和报了一个空表不一样");
     }
 
     #[test]

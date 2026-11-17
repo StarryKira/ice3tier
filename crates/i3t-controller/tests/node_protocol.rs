@@ -74,7 +74,7 @@ async fn report_changes_propagate_to_peers() {
     let mut relay = Node::new();
     relay.declared = Declared { relay: true, ..Declared::default() };
     relay.enroll(&running, &running.secret(network.id, &[])).await.unwrap();
-    let settings = RelaySettings { udp: vec!["203.0.113.7:20330".parse().unwrap()], ..RelaySettings::default() };
+    let settings = RelaySettings::default();
     running.controller.enable_relay(network.id, relay.id(), settings).unwrap();
     let reporter_id = reporter.id();
     settle(&mut [&mut reporter, &mut peer, &mut relay]).await;

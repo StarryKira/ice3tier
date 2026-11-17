@@ -195,7 +195,6 @@ i3t_lane::on_both_transports! {
             name: "r".into(),
             udp: Vec::new(),
             tcp: vec![node_address],
-            region: String::new(),
         };
         world.gw.update(|netmap| netmap.relays = vec![relay]).await;
         refused().await;

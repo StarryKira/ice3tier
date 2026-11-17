@@ -310,3 +310,23 @@ def private_link(lab: Lab, host: Host, name: str, network: str) -> Host:
     other = Host(lab, name, str(theirs))
     lab.hosts[name] = other
     return other
+
+
+def forward_port_as(nat: Nat, public_port: int, to: Host, port: int) -> None:
+    """在路由器上把公网一侧的 `public_port`（UDP 和 TCP）转给内网主机 `to` 的 `port`。和 `Nat.forward_port` 不同，
+    两个端口号可以不一样：像机房在另一个端口上映射进来的那种。"""
+    for proto in ("udp", "tcp"):
+        nat.run("nft", "add", "rule", "ip", "nat", "pre", "iifname", "up0", proto, "dport", str(public_port), "dnat", "to", f"{to.ip}:{port}")
+
+
+def drop_inbound_udp(host: Host) -> None:
+    """这台主机收不到外面来的 UDP（回环除外），发得出去。像一个只放行 TCP 进来的机房。"""
+    rules = """
+table inet noudpin {
+    chain in {
+        type filter hook input priority filter;
+        iifname != "lo" meta l4proto udp drop
+    }
+}
+"""
+    host.run("nft", "-f", "-", input=rules)

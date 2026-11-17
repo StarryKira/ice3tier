@@ -4,7 +4,30 @@
 
 对应的 Rust 类型在 `crates/i3t-model/src/admin.rs`，实现在 `crates/i3t-controller/src/admin.rs`。文档和代码不一致时以代码为准，并请修正文档。
 
-> **最新一次新增**（入口、出口、端口转发和两个运维命令）。这一次的清单：
+> **最新一次改动**（relay 的地址由 controller 找出来，地址段重叠的提醒，时间序列）。relay 的地址不再由人填：
+> controller 从三处找出来（节点上声明的、controller 看到的、节点网卡上的），谁连得上它，它就是谁的 relay（第 5.5 节）。这一次的清单：
+>
+> - 改了写法的字段：节点的 `relay`（第 5 节）从填的设置变成 `RelayView`：
+>   `{ "addresses": [{ "address": "203.0.113.7:20330", "source": "observed" }], "bandwidth_mbps": 200 }`。
+>   `addresses` 只读，按节点去试的顺序，最多 8 个，每个地址 UDP 和 TCP 都用；`source` 是 `"declared"`、`"observed"`、`"local"`。
+>   去掉的：`relay.udp`、`relay.tcp`、`relay.region`。
+> - `PUT …/nodes/{node}/relay` 的请求体只有 `{ "bandwidth_mbps": 数或 null }`，`{}` 就是不限带宽地启用。早先的 `udp`、`tcp`、`region`
+>   照收，没有作用。不再因为没有地址而拒绝（`what` 的 `no_address` 不再出现）。应答的 `reachability` 是 controller 试连每个找出来的地址
+>   （先 UDP 后 TCP）的结果，照旧只是参考。
+> - 新的字段：`Node.declared.relay_address`（节点上声明的 relay 地址，`i3t set relay-address`，没有是 `null`）；
+>   `Node.warnings`（`NodeWarning`，现在只有 `range_overlap`：节点的一个网卡地址落在网络的地址段里）；`Overview.warnings`
+>   （`NetworkWarning`：节点加上它的提醒）。见第 4、5 节。
+> - 新接口：`GET /networks/{network}/stats`，给界面画图的低分辨率时间序列（第 20 节）。新的结构 `SeriesQuery`、`SeriesView`，
+>   序列的名字 `Series`，单位 `Unit`。
+> - 节点协议没有升版：节点上报里新加的 `local_addresses`（网卡上的地址）和声明里的 `relay_address`，旧的 controller 忽略，旧的节点不报
+>   （controller 拿旧节点报的候选端点代替网卡地址）。下发给节点的 relay 照旧是两个地址列表（`udp`、`tcp`，现在是同一组），不再带 `region`，
+>   旧的节点照常用。
+> - 升级时数据库原地迁移：去掉存着的、人填的 relay 地址和区域，只留带宽上限。原来靠填的地址才连得上的 relay，要在它上面
+>   `i3t set relay-address <地址:端口>` 并重启 i3t。
+>
+> 别的接口的路径、请求体和应答里原有的字段都没有变。
+>
+> **上一次新增**（入口、出口、端口转发和两个运维命令）。这一次的清单：
 >
 > - 新接口：`POST /networks/{network}/exits/{node}/test`，出口测试（第 17 节）。新的结构 `ExitTestInput`、`ExitTestView`、`ExitTestResult`、
 >   `ResolveStep`、`ConnectStep`、`TlsStep`，原因的代码 `ExitTestCause`。
@@ -19,7 +42,7 @@
 >
 > 已有接口的路径、请求体和应答里原有的字段都没有变；出口端口的默认值和明文 HTTP 见上。
 >
-> **上一次新增**（几处小的补充）。这一次的清单：
+> **再上一次新增**（几处小的补充）。这一次的清单：
 >
 > - 分组的引用 `GroupRef` 多了 `builtin`：是不是内置的 `All`，界面不用按名字认它。用到它的地方都有：节点的 `groups`（第 5 节）、
 >   注册令牌的 `groups`（第 6 节）、规则的 `src`、`dst`（第 7 节，也包括分组和访问关系图里列出的规则）。操作记录的参数不是 `GroupRef`，没有变（第 3 节）。
@@ -32,7 +55,7 @@
 >
 > 已有接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **再上一次新增**（透明访问）。Linux 节点可以在本机打开透明访问：本机的程序不配代理，直接连别的节点的虚拟 IP 或者名字。
+> **更早的新增**（透明访问）。Linux 节点可以在本机打开透明访问：本机的程序不配代理，直接连别的节点的虚拟 IP 或者名字。
 > 它改的是那台机器的网络配置，只能在节点上打开（`i3t set intercept on`），管理接口只看状态。这一次的清单：
 >
 > - 节点详情 `NodeDetail` 多了 `intercept`（结构 `InterceptReport`）：开着、关着、开不起来（原因是代码 `InterceptCause`）、这个平台上没有；
@@ -138,7 +161,7 @@
 >   - 用掉的注册令牌不再从数据库里删掉；用掉的和过期的令牌留 30 天（第 6 节）。`GET …/tokens` 不带参数时和以前一样只列还能用的。
 >   - `Node.last_seen_at` 只在节点真的跑起来（带着 Hello）连上过之后才有；只用 `i3t join` 注册过的节点是 `null`（第 5 节）。
 >   - 新签发的注册令牌文本的开头变了（`i3t-eyJzIjoi…`，一次性密钥排在最前面），格式和以前兼容。
->   - 启用 relay（`PUT …/relay`）多等最多 3 秒：controller 要从自己这边试连填的地址（第 5.5 节）。
+>   - 启用 relay（`PUT …/relay`）多等最多 3 秒：controller 要从自己这边试连 relay 的地址（第 5.5 节）。
 >
 > 已有接口的路径、请求体和应答里原有的字段都没有变；凭据的 `DELETE` 改成先吊销，见上。
 >
@@ -258,7 +281,7 @@
 | `code` | `what` |
 |---|---|
 | `not_found` | 找不到的东西：`network`、`node`、`group`、`token`、`rule`、`credential`、`listener`、`forward`、`pair`（节点对设置）、`paused_version`、`exit`、`test`、`matrix`；路径不是一个接口时是 `endpoint`。请求体里引用的东西找不到时 `field` 是引用它的那一项，比如 `fixed_exit`、`pinned_relays`、`successor_of`、`via`、`src`、`dst`、`groups[1]`、`add[0]`、`remove[2]` |
-| `invalid_request` | 哪里不对：`too_small`（地址段太小）、`zero`（不能是 0）、`zero_port`（端口不能是 0）、`too_many`、`out_of_range`、`empty`、`too_long`、`malformed`（写法不对）、`all_digits`（名字全是数字）、`same_node`（两个节点是同一个）、`builtin`（内置分组 `All` 不能改名、删除、增减成员）、`required`（非回环地址的监听器必须要求凭据）、`missing`（`a`、`b` 只写了一个）、`not_relay`（不是启用了的 relay）、`not_connectable`（不是能连上的地址）、`not_allowed`（立即更新的时机不能是 `idle`）、`duplicate`（路径里 relay 重复；同一个节点既要加入分组又要移出）、`with_successor`（继任的令牌不能预设虚拟 IP）、`no_default`（默认的地址段都被占了）、`needs_quality`（测吞吐要同时测质量）、`no_address`（relay 一个地址都没填）、`revoked`（凭据已经吊销）、「新增」`tcp_only`（只有 TCP 的端口转发能设 PROXY protocol）；请求本身读不出来时是 `content_type`、`syntax`、`data`（JSON 里某个字段不对，`field` 是它）、`body`、`query`、`path`；请求方法不对（405）是 `method` |
+| `invalid_request` | 哪里不对：`too_small`（地址段太小）、`zero`（不能是 0）、`zero_port`（端口不能是 0）、`too_many`、`out_of_range`、`empty`、`too_long`、`malformed`（写法不对）、`all_digits`（名字全是数字）、`same_node`（两个节点是同一个）、`builtin`（内置分组 `All` 不能改名、删除、增减成员）、`required`（非回环地址的监听器必须要求凭据；「新增」节点、relay、出口的时间序列要写 `node`）、`missing`（`a`、`b` 只写了一个）、`not_relay`（不是启用了的 relay）、`not_connectable`（不是能连上的地址）、`not_allowed`（立即更新的时机不能是 `idle`；「新增」网络的时间序列不能写 `node`）、`duplicate`（路径里 relay 重复；同一个节点既要加入分组又要移出）、`with_successor`（继任的令牌不能预设虚拟 IP）、`no_default`（默认的地址段都被占了）、`needs_quality`（测吞吐要同时测质量）、`revoked`（凭据已经吊销）、「新增」`tcp_only`（只有 TCP 的端口转发能设 PROXY protocol）；请求本身读不出来时是 `content_type`、`syntax`、`data`（JSON 里某个字段不对，`field` 是它）、`body`、`query`、`path`；请求方法不对（405）是 `method` |
 | `name_taken` | 「新增」分组的名字被占用时是 `group`；别的名字是 `null` |
 | `conflict` | 挡着的东西：`listener`（这个节点上已经有监听器在这个地址上，`field` 是 `bind`）、`forward`（同上，端口转发）、`token`（这个虚拟 IP 已经预设在另一个注册令牌上，`field` 是 `virtual_ip`） |
 | `not_declared` | 没有声明的能力：`relay`、`exit`、`forward`。要在节点上执行的命令是 `i3t set can-<这个值> on` |
@@ -522,7 +545,10 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   ],
   "flows": 12,
   "tx_bytes": 1048576,
-  "rx_bytes": 20971520
+  "rx_bytes": 20971520,
+  "warnings": [
+    { "node": { "id": 3, "name": "node-3", "virtual_ip": "10.66.0.3" }, "code": "range_overlap", "address": "10.66.200.7" }
+  ]
 }
 ```
 
@@ -536,6 +562,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `unreachable_pairs` | 两端都在线、但至少一端上报"没有可用的路"的节点对：直连不通，也没有 relay 可走。`a` 的编号小于 `b` |
 | `flows` | 「新增」在线节点最近一次上报的活跃流之和。一条流两端的节点各报一次，所以算了两次 |
 | `tx_bytes`、`rx_bytes` | 「新增」在线节点最近一次上报的流量之和（各自启动以来经它的流发出和收到的字节数，入口和出口两侧都算）。经过两个节点的流量两边各算一次 |
+| `warnings` | 「新增」网络里各个节点的提醒（`NetworkWarning`）：`node` 是哪个节点，同一层是它的 `NodeWarning`（见第 5 节的 `warnings`），按节点编号排。没有时是 `[]` |
 
 `unreachable_pairs` 不为空而 `relays` 是 0 时，界面应当提示启用一个 relay。
 
@@ -552,11 +579,12 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   "fqdn": "node-1.home.i3t",
   "virtual_ip": "10.66.0.1",
   "groups": [{ "id": 3, "name": "servers", "builtin": false }],
-  "declared": { "exit": true, "relay": true, "forward": true },
+  "declared": { "exit": true, "relay": true, "forward": true, "relay_address": null },
   "relay": {
-    "udp": ["203.0.113.7:20330"],
-    "tcp": ["203.0.113.7:20330"],
-    "region": "hk",
+    "addresses": [
+      { "address": "203.0.113.7:20330", "source": "observed" },
+      { "address": "192.168.1.20:20330", "source": "local" }
+    ],
     "bandwidth_mbps": 200
   },
   "exit": {
@@ -594,7 +622,8 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   },
   "attached": [],
   "country": "JP",
-  "profile": null
+  "profile": null,
+  "warnings": []
 }
 ```
 
@@ -607,8 +636,8 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `fqdn` | 全名：`<name>.<网络的 domain>` |
 | `virtual_ip` | 虚拟 IP。加入时分配（地址段里最小的空闲地址），之后不变，除非管理员改 |
 | `groups` | 「新增」它所在的分组（`GroupRef`：`{ "id": 分组编号, "name": 名字, "builtin": 是不是 All }`），按名字排（不分大小写）。内置的 `All` 不列出：每个节点都在里面 |
-| `declared` | 节点在本地声明的"可以承担"：`exit` 出口、`relay`、`forward` 端口转发的目标。由节点上报，这里只读 |
-| `relay` | 启用为 relay 时是它的设置（见 5.5），否则 `null` |
+| `declared` | 节点在本地声明的"可以承担"：`exit` 出口、`relay`、`forward` 端口转发的目标。由节点上报，这里只读。「新增」`relay_address`：节点上声明的 relay 地址（`i3t set relay-address <地址:端口>`，机房或路由器映射进来的那个），没有声明是 `null`；比这个文档旧的节点不报，也是 `null` |
+| `relay` | 启用为 relay 时是它的地址和设置（`RelayView`，见 5.5），否则 `null` |
 | `exit` | 启用为出口时是它的设置（见 5.6），否则 `null` |
 | `dial_out_only` | 只主动连接：不接受别人主动发来的连接，不参与打洞 |
 | `routing` | 覆盖网络默认值的选路模式；`null` 表示用网络的 |
@@ -625,6 +654,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `update` | 「新增」这个节点的程序更新：能不能自己更新、有没有新版本、进行到哪一步。结构是 `NodeUpdate`，见第 14 节 |
 | `attached` | 「新增」节点挂靠的 relay（节点编号）和到它们的往返延迟（毫秒），取自它最近的上报；离线时是它离线前报的。以前只在节点详情里有，现在列表里也有：数"有几个节点挂靠在这个 relay 上"只要一次 `GET …/nodes` |
 | `country` | 「新增」公网地址（controller 看到的来源地址，详情里的 `observed_endpoint`）所在的国家或地区，ISO 3166-1 的两个大写字母（`"JP"`）。controller 查程序自带的离线地址库（DB-IP 的 IP to Country Lite，<https://db-ip.com>，CC BY 4.0），不联网。内网地址、从没连上过、库里没有时是 `null`；比这个文档旧的 controller 没有这个字段 |
+| `warnings` | 「新增」controller 发现的、值得提醒的情况（`NodeWarning`），按节点最近一次报的东西算，离线时是它离线前报的；没有时是 `[]`。只是提醒，不挡着任何事。现在只有一种：`{ "code": "range_overlap", "address": "10.66.200.7" }`，节点的一个网卡地址落在网络的虚拟地址段里（`address` 是那个网卡地址）：在这台机器上连这个地址段里的虚拟 IP 可能连到真实的网络上去，透明访问也装不上。界面可以提示换一个地址段，或者换掉那个网络。不认识的 `code` 当作 `unknown` |
 | `profile` | 「新增」管理员给它选的性能档位：`"low_footprint"`（低占用）、`"balanced"`（默认）、`"high_throughput"`（高速度）；`null` 表示没有选，节点用它本机配置文件里的（没写就是 `balanced`）。节点实际在用的见详情里的 `performance`。比这个文档旧的 controller 没有这个字段。各档位的内容见 [architecture.md](architecture.md) 的性能一节 |
 
 **能力的启用。** relay、出口和端口转发的目标都要节点先在本地声明（`declared` 里对应的字段是 `true`），管理员才能启用。没有声明时，启用的请求得到 `409 not_declared`，`message` 里写着要在节点上执行的命令（`i3t set can-relay on`、`i3t set can-exit on`、`i3t set can-forward on`）。界面上应当在 `declared` 里对应字段是 `false` 时把开关置灰并显示这个做法。节点撤回声明时，已经启用的能力随之关闭（`relay` 或 `exit` 变回 `null`，指向它的端口转发被停用），并在操作记录里留下 `node.*.withdrawn`；节点再声明回来，能力不会自己打开。
@@ -646,7 +676,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   "fqdn": "laptop.home.i3t",
   "virtual_ip": "10.66.0.2",
   "groups": [{ "id": 2, "name": "laptops", "builtin": false }],
-  "declared": { "exit": false, "relay": false, "forward": false },
+  "declared": { "exit": false, "relay": false, "forward": false, "relay_address": null },
   "relay": null,
   "exit": null,
   "dial_out_only": false,
@@ -782,26 +812,58 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 
 ### 5.5 PUT /networks/{network}/nodes/{node}/relay
 
-把节点启用为 relay，或者改它的 relay 设置。relay 必须公网可达，地址由管理员填。
+把节点启用为 relay，或者改它的 relay 设置。不填地址：relay 的地址是 controller 找出来的（见下面的 `RelayView`）。
 
 ```json
-{ "udp": ["203.0.113.7:20330"], "tcp": ["203.0.113.7:20330"], "region": "hk", "bandwidth_mbps": 200 }
+{ "bandwidth_mbps": 200 }
 ```
 
 | 字段 | 必填 | 含义 |
 |---|---|---|
-| `udp` | 否 | 从公网能连上的 UDP 地址，最多 8 个。默认 `[]` |
-| `tcp` | 否 | 从公网能连上的 TCP 地址，给 UDP 用不了的节点用，最多 8 个。默认 `[]` |
-| `region` | 否 | 所属区域，随便起名。默认 `""` |
-| `bandwidth_mbps` | 否 | 转发的带宽上限；`null` 或省略表示不限 |
+| `bandwidth_mbps` | 否 | 转发的带宽上限（Mbit/s）；`null` 或省略表示不限。不能是 0 |
 
-`udp` 和 `tcp` 至少要有一个地址；地址不能是 `0.0.0.0`，端口不能是 0。
+「新增」请求体写 `{}` 就是不限带宽地启用。早先的请求体里的 `udp`、`tcp`、`region` 照收，没有任何作用。
 
-应答：`Node`（`relay` 字段是刚写入的设置），「新增」加上同一层的 `reachability`（这个结构叫 `RelayEnabled`）：
+**谁连得上它，它就是谁的 relay。** relay 不要求人人连得上，不要求 controller 连得上，也不要求有公网地址：一台只有某个局域网里的机器连得上的
+服务器，是那个局域网里的节点的 relay；连不上它的节点只是不用它。所以启用不会因为"连不上"被拒绝，也不会因此告警；一个还不知道任何地址的节点
+（比如注册之后还没有跑起来）也照样启用，地址等它连上来就有了。
+
+`RelayView`（`Node.relay`）：
 
 ```json
 {
-  "id": 1, "name": "node-1", "relay": { "udp": ["203.0.113.7:20330"], "tcp": ["203.0.113.7:20330"], "region": "hk", "bandwidth_mbps": 200 },
+  "addresses": [
+    { "address": "203.0.113.9:40330", "source": "declared" },
+    { "address": "198.51.100.4:20330", "source": "observed" },
+    { "address": "192.168.1.20:20330", "source": "local" }
+  ],
+  "bandwidth_mbps": null
+}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `addresses` | 别的节点经哪些地址连它，只读。按节点去试的顺序，去掉重复的，最多 8 个。每个地址 UDP 和 TCP 都用。还不知道任何地址时是 `[]` |
+| `addresses[].address` | `地址:端口` |
+| `addresses[].source` | 从哪里来：`"declared"`、`"observed"`、`"local"`，见下表。不认识的值当作 `unknown` |
+| `bandwidth_mbps` | 转发的带宽上限；`null` 表示不限 |
+
+| `source` | 是什么 |
+|---|---|
+| `declared` | 节点上声明的（`i3t set relay-address <地址:端口>`，写在节点的配置文件里，重启 i3t 之后报上来）：只有人知道的那一种，机房或路由器把另一个地址上的端口映射到这台机器。排在最前 |
+| `observed` | controller 看到的：节点连 controller 时的来源 IP，加上节点自报的端口。节点和 controller 在同一台机器上、走回环连过来时，换成 controller 对外地址（`--public-addr`）里的主机；那个主机是域名时，controller 定期解析它（回环地址不算），解析出来之前照旧是回环地址 |
+| `local` | 节点网卡上的地址，加上节点自报的端口：同一个局域网里的节点靠它连上这个 relay，哪怕 controller 看到的是局域网的出口。IPv4 排在 IPv6 前面。网络地址段里的、链路本地的、组播的不算 |
+
+这些地址都来自存储里的东西：节点离线时还是它最后的那一组，controller 重启之后也一样。哪一处变了（节点换了网络、改了声明），
+地址跟着变，全网的节点随即收到新的配置。节点拿到一个 relay 的几个地址之后同时去试，用回答的那个；UDP 过不去的自动走 TCP，不用谁说明。
+
+显示 relay 在哪里时，用节点的 `country`（controller 看到的地址所在的国家或地区）。
+
+应答：`Node`（`relay` 字段是刚写入的设置和找出来的地址），「新增」加上同一层的 `reachability`（这个结构叫 `RelayEnabled`）：
+
+```json
+{
+  "id": 1, "name": "node-1", "relay": { "addresses": [{ "address": "203.0.113.7:20330", "source": "observed" }], "bandwidth_mbps": 200 },
   "…": "Node 的其余字段",
   "reachability": [
     { "protocol": "udp", "addr": "203.0.113.7:20330", "reachable": true, "rtt_ms": 23, "error": null, "cause": null },
@@ -811,20 +873,20 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 }
 ```
 
-「新增」启用之后 controller 从自己这边把填的每个地址试一遍，最多等 3 秒左右才应答：UDP 是向那个地址发地址查询（节点的端口总在回答），收到对得上的应答就算通；TCP 是建一次连接就关（relay 的 TCP 监听要等节点收到新配置才开，所以在 3 秒之内会重试）。
+「新增」启用之后 controller 从自己这边把 relay 的每个地址试一遍（先全部的 UDP，后全部的 TCP），最多等 3 秒左右才应答：UDP 是向那个地址发地址查询（节点的端口总在回答），收到对得上的应答就算通；TCP 是建一次连接就关（relay 的 TCP 监听要等节点收到新配置才开，所以在 3 秒之内会重试）。
 
 | 字段 | 含义 |
 |---|---|
 | `protocol` | `"udp"` 或 `"tcp"` |
-| `addr` | 填的地址 |
+| `addr` | relay 的一个地址 |
 | `reachable` | 从 controller 这边通不通 |
 | `rtt_ms` | UDP 是地址查询的往返时间，TCP 是建连接的时间；不通是 `null` |
 | `error` | 不通的原因（系统或者 controller 的原话）；通是 `null` |
 | `cause` | 「新增」`error` 的原因（`ReachCause`）；通是 `null`。`code` 是 `refused`（对方拒绝了连接：TCP 端口上没有程序在听）、`timeout`（时限之内 UDP 的地址查询没有回答，或者连接超时）、`unreachable`（controller 到那个地址的网络不通）、`local`（controller 这边出的错：绑不出 UDP 端口、发不出去）、`other`（别的，见 `error`） |
 
-这只是参考，不挡着启用：controller 和别的节点不在同一个网络位置上，它连不上不等于别人连不上（比如 controller 和 relay 在同一个局域网里，填的是公网地址），反过来也一样。界面可以据此提示"从 controller 这边连不上这个地址，请确认公网地址和端口放行"。
+这只是参考，不挡着启用，也不说明 relay 坏了：谁连得上它，它就是谁的 relay，controller 连不上不等于别人连不上（比如 controller 不在那个局域网里），反过来也一样。界面不要把连不上的地址标成错误；要提示的话，写成"从 controller 这边连不上这个地址"。
 
-错误：`not_declared`、`invalid_request`。
+错误：`not_declared`、`invalid_request`（`bandwidth_mbps` 是 0）。
 
 ### DELETE /networks/{network}/nodes/{node}/relay
 
@@ -1538,7 +1600,7 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
 | `reason` | 其他字段 | 含义 |
 |---|---|---|
 | `no_relay` | | 两个节点都没有启用 relay，没有哪一边的 TCP 端口在听 |
-| `no_tcp_address` | `node` | 这个节点启用了 relay，但没有填 TCP 地址 |
+| `no_tcp_address` | `node` | 这个节点启用了 relay，但 controller 还不知道它的任何地址（它还没有连上来过） |
 | `node_too_old` | `node` | 这个节点在线，但版本太旧，不懂独占 TCP（节点协议第 3 版起才懂）。离线的节点不判断 |
 | `not_connected` | | 访问规则没有连通这两个节点 |
 
@@ -1651,6 +1713,7 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
 | GET | `/networks/{network}/exits/{node}` | 「新增」一个出口 |
 | POST | `/networks/{network}/exits/{node}/test` | 「新增」出口测试：让出口按它的策略试着连一个目标 |
 | GET | `/networks/{network}/backbone` | 「新增」relay 之间的延迟矩阵 |
+| GET | `/networks/{network}/stats` | 「新增」给界面画图的时间序列（第 20 节） |
 | GET、POST | `/networks/{network}/tests` | 「新增」列出最近的主动测试、发起一个 |
 | GET | `/networks/{network}/tests/{id}` | 「新增」一个测试的进度和结果 |
 | POST | `/networks/{network}/tests/{id}/cancel` | 「新增」取消一个进行中的测试 |
@@ -1659,7 +1722,7 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
 
 不在 `/api/v1` 下面的：`GET /metrics`（「新增」，第 16 节）。
 
-目前没有的：按时间的流量曲线；主动测试的定时重复（见第 19 节）。
+目前没有的：主动测试的定时重复（见第 19 节）。
 
 ## 14. 节点更新「新增」
 
@@ -2696,3 +2759,74 @@ Prometheus 的文本格式（`Content-Type: text/plain; version=0.0.4`）。**�
 ### POST /networks/{network}/tests/matrix/cancel
 
 取消正在跑的全网矩阵：正在跑的测试被取消，还没开始的不再开始。应答：`MatrixRun`。错误：`not_found`、`busy`（已经结束了）。
+
+## 20. 时间序列「新增」
+
+controller 给界面的图表留一份低分辨率的时间序列（白皮书 §13）。长期的、细的数据请用节点自己暴露的指标和外部的 Prometheus；
+这里只有一小组固定的序列，数都来自 controller 本来就收到的东西（节点每 10 秒的上报、谁在线）。
+
+| 分辨率（`step`） | 保留 | 每条序列的点 |
+|---|---|---|
+| 300 秒 | 24 小时 | 288 |
+| 3600 秒 | 7 天 | 168 |
+
+每 5 分钟写一个点（这 5 分钟里的平均），整点时把上一个小时的 5 分钟的点平均成一个 1 小时的点；过了保留期的整点时删掉。
+点存在 controller 的数据库里：controller 重启之后还在，`--backup-to` 也带着它们。1000 个节点（其中 100 个 relay、100 个出口）
+大约 3300 条序列，最多 150 万个点，数据库里约 46 MB（量过）。
+
+| `series` | 要 `node` | `unit` | 是什么 |
+|---|---|---|---|
+| `online` | 否 | `count` | 网络里在线的节点数（每分钟数一次） |
+| `flows` | 否 | `count` | 网络里各个节点上报的活跃流之和（一条流两端各算一次） |
+| `tx`、`rx` | 否 | `bytes_per_second` | 网络里各个节点经流发出、收到的速率之和 |
+| `node_tx`、`node_rx` | 是 | `bytes_per_second` | 一个节点经它的流发出、收到的速率（入口一侧客户端发出的、出口一侧发往目标的算发出） |
+| `node_flows` | 是 | `count` | 一个节点上正在进行的流 |
+| `relay_attached` | 是 | `count` | 挂靠在这个 relay 上的在线节点数 |
+| `exit_tx`、`exit_rx` | 是 | `bytes_per_second` | 一个出口替别人发往目标、从目标收到的速率 |
+
+速率是两次上报之间累计的字节数涨了多少除以隔了多久，一段里的值是节点在线的那些时间里的平均速率。节点重启之后计数从头开始，
+那一次的增量不算（不会出现负数，也不会出现一个从零开始的大数）；两次上报隔了一分钟以上（节点断开过）的那一段也不算。
+个数（`count`）是这一段里看到的平均数，所以可以有小数。relay 转发了多少流量节点没有报给 controller，所以没有这条序列。
+
+### GET /networks/{network}/stats
+
+查询参数：
+
+| 参数 | 必填 | 含义 |
+|---|---|---|
+| `series` | 是 | 序列的名字，见上表 |
+| `node` | 节点的序列要写 | 节点编号。网络的序列不能写 |
+| `from` | 否 | 时间范围的开始，Unix 秒；省略时是 `to` 之前 24 小时 |
+| `to` | 否 | 时间范围的结束，Unix 秒；省略时是现在 |
+| `step` | 否 | `300` 或 `3600`。省略时：`from` 还在 24 小时之内用 300，更早用 3600 |
+
+```
+GET /api/v1/networks/1/stats?series=node_tx&node=3&from=1794790000
+```
+
+应答 `SeriesView`：
+
+```json
+{
+  "series": "node_tx",
+  "node": { "id": 3, "name": "nas", "virtual_ip": "10.66.0.3" },
+  "unit": "bytes_per_second",
+  "step": 300,
+  "from": 1794789900,
+  "to": 1794798300,
+  "points": [[1794789900, 81234.5], [1794790200, null], [1794790500, 1200.0]]
+}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `series`、`unit` | 序列的名字和它的单位：`count`（个数）、`bytes_per_second`（字节每秒） |
+| `node` | 节点的序列是这个节点（`NodeRef`）；网络的序列是 `null` |
+| `step` | 两个点之间隔几秒 |
+| `from`、`to` | 第一个点和最后一个点的时间，都按 `step` 对齐。`to` 只到最后一段过完了的：正在攒的那一段还没有点 |
+| `points` | `[时间, 值]` 的数组，从 `from` 到 `to` 每一段一个，时间是这一段的开始（Unix 秒）。没有数据的段（节点不在线、controller 没在运行、过了保留期）值是 `null`：图上画成断开，不要连起来，也不要当成 0 |
+
+可以直接交给图表：ECharts 的 `series.data` 就是这个形状（时间乘 1000 换成毫秒，`connectNulls` 保持默认的 `false`）。
+一次最多 2016 个点（7 天的 5 分钟的点）。
+
+错误：`not_found`（网络或者 `node` 不存在，`field` 是 `node`）、`invalid_request`（`series` 不认识时 `what` 是 `query`；节点的序列没写 `node`，`what` 是 `required`；网络的序列写了 `node`，`what` 是 `not_allowed`；`step` 不是 300 或 3600、`from` 晚于 `to`，`what` 是 `out_of_range`；点太多，`what` 是 `too_many`，`field` 是 `from`）。

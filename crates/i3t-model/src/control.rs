@@ -33,7 +33,7 @@
 //! 主动测试（白皮书 §7.6）在这条连接上的样子见 [`diag`]。
 
 use std::fmt;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 
 use base64::Engine;
@@ -71,6 +71,9 @@ pub const LANE_REVISION: u32 = 3;
 
 /// 从这一版节点协议起节点懂主动测试。
 pub const TEST_REVISION: u32 = 4;
+
+/// [`Report::local_addresses`] 最多报几个。一台机器上的网卡地址一般只有几个；多的（容器、虚拟网桥）对谁都没有用。
+pub const MAX_LOCAL_ADDRESSES: usize = 32;
 
 /// 取更新包时一段最多多少字节。同一条连接上还有别的消息要走，所以不能大。
 pub const MAX_PACKAGE_CHUNK: u32 = 256 * 1024;
@@ -334,6 +337,10 @@ pub struct Declared {
     /// 可以被配成端口转发的目标。
     #[serde(default)]
     pub forward: bool,
+    /// 节点上声明的 relay 地址（`i3t set relay-address`）：只有人知道的那一种，机房或者路由器上映射进来的地址。
+    /// 节点启用为 relay 时，它排在 controller 找出来的地址前面（白皮书 §7.2）。旧版本的节点不报。
+    #[serde(default)]
+    pub relay_address: Option<SocketAddr>,
 }
 
 /// 节点的定期上报，默认每 10 秒一次。
@@ -342,6 +349,11 @@ pub struct Report {
     /// 本节点当前的 UDP 候选端点：网卡地址、反射地址、端口映射。
     #[serde(default)]
     pub endpoints: Vec<SocketAddr>,
+    /// 本机网卡上的地址（回环和链路本地的除外），不管它们在不在网络的地址段里，最多 [`MAX_LOCAL_ADDRESSES`] 个。
+    /// `endpoints` 里分不出哪些是网卡上的，也去掉了地址段里的那些，所以另报：controller 拿它当 relay 的地址（白皮书 §7.2），
+    /// 并且在它落进网络的地址段时提醒（§4.6）。旧版本的节点不报，读成 `None`。是切片不是 `Vec`，同上，为了消息的枚举不至于太大。
+    #[serde(default)]
+    pub local_addresses: Option<Box<[IpAddr]>>,
     /// 映射出来的端口是不是随对端变化。只有问过两个以上的观察点才知道；是的话这台机器所在的网络基本打不了洞。
     #[serde(default)]
     pub mapping_varies: Option<bool>,

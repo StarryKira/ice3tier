@@ -188,7 +188,7 @@ def trial(pair: str, variant: str, rep: int, rtt_ms: float, work: Path) -> Row:
         if relay_host is not None:
             relay = Node(relay_host, work, declare=("relay",))
             relay.join(controller)
-            controller.ctl("relay", "enable", str(relay.id), "--udp", relay.endpoint, "--tcp", relay.endpoint)
+            controller.ctl("relay", "enable", str(relay.id))
         a, b = Node(host_a, work), Node(host_b, work)
         a.join(controller)
         b.join(controller)

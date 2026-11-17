@@ -11,13 +11,9 @@ use super::super::testing::{CAN_DO_ALL, Lab, REMOTE};
 use super::{add_rule, drop_default_rule, peer_ids, relations, rename};
 use crate::secret;
 
-fn relay_at(address: &str) -> RelaySettings {
-    RelaySettings {
-        udp: vec![address.parse().unwrap()],
-        tcp: vec![address.parse().unwrap()],
-        region: "hk".to_owned(),
-        bandwidth_mbps: Some(100),
-    }
+/// 启用 relay 的设置：只有带宽上限，地址由 controller 自己找出来。
+fn relay_settings() -> RelaySettings {
+    RelaySettings { bandwidth_mbps: Some(100) }
 }
 
 #[test]
@@ -84,7 +80,7 @@ fn two_networks_never_see_each_other() {
     let ours = lab.join_offline(home.id, &["shared"], CAN_DO_ALL);
     let theirs = lab.join_offline(office.id, &["shared"], CAN_DO_ALL);
     let their_relay = lab.join_offline(office.id, &["shared"], CAN_DO_ALL);
-    lab.controller.enable_relay(office.id, their_relay, relay_at("203.0.113.9:20330")).unwrap();
+    lab.controller.enable_relay(office.id, their_relay, relay_settings()).unwrap();
     lab.controller.create_credential(office.id, &CreateCredential { name: "c".to_owned(), max_concurrent: None, max_bytes: None }).unwrap();
     add_rule(&lab, home.id, "shared", "shared", Direction::Both);
 
@@ -104,7 +100,7 @@ fn relays_are_listed_for_everyone_but_relay_clients_only_for_relays() {
     let relay = lab.join_offline(network.id, &[], CAN_DO_ALL);
     let a = lab.join_offline(network.id, &["a"], Declared::default());
     let b = lab.join_offline(network.id, &["b"], Declared::default());
-    lab.controller.enable_relay(network.id, relay, relay_at("203.0.113.7:20330")).unwrap();
+    lab.controller.enable_relay(network.id, relay, relay_settings()).unwrap();
     let relay_view = lab.controller.node(network.id, relay).unwrap().node;
 
     for node in [a, b] {
@@ -112,12 +108,10 @@ fn relays_are_listed_for_everyone_but_relay_clients_only_for_relays() {
         assert!(netmap.peers.is_empty(), "没有任何规则：relay 不是对端");
         assert_eq!(netmap.relays.len(), 1);
         let listed = &netmap.relays[0];
-        assert_eq!(
-            (listed.id, listed.key, listed.name.as_str(), listed.region.as_str()),
-            (relay, relay_view.key, relay_view.name.as_str(), "hk")
-        );
-        assert_eq!(listed.udp, vec!["203.0.113.7:20330".parse().unwrap()]);
-        assert_eq!(listed.tcp, vec!["203.0.113.7:20330".parse().unwrap()]);
+        assert_eq!((listed.id, listed.key, listed.name.as_str()), (relay, relay_view.key, relay_view.name.as_str()));
+        let observed = std::net::SocketAddr::new(REMOTE, 20330);
+        assert_eq!(listed.udp, vec![observed], "controller 看到的地址，UDP 和 TCP 是同一组");
+        assert_eq!(listed.tcp, vec![observed]);
         assert!(netmap.relay_clients.is_empty(), "全网的公钥只给 relay");
         assert!(netmap.me.relay.is_none());
     }
@@ -247,7 +241,7 @@ fn peer_details_follow_least_privilege() {
     let mut exit = lab.join_with(network.id, &["exits"], CAN_DO_ALL);
     let relay = lab.join_offline(network.id, &[], CAN_DO_ALL);
     let user = lab.join_offline(network.id, &["users"], Declared::default());
-    lab.controller.enable_relay(network.id, relay, relay_at("203.0.113.7:20330")).unwrap();
+    lab.controller.enable_relay(network.id, relay, relay_settings()).unwrap();
     lab.controller.enable_exit(network.id, exit.id, ExitRole { lan: true, ports: None, ..ExitRole::default() }).unwrap();
     lab.controller.set_pair(network.id, user, exit.id, PairInput { keep_alive: Some(true), lane: None }).unwrap();
     let report = Report {
@@ -384,7 +378,7 @@ fn the_pair_view_says_how_old_each_lane_report_is_and_whether_new_tcp_streams_us
     let mut relay = lab.join_as(network.id, &hello);
     let mut member = lab.join_as(network.id, &hello);
     lab.settle(&mut [&mut relay, &mut member]);
-    lab.controller.enable_relay(network.id, relay.id, relay_at("203.0.113.7:20330")).unwrap();
+    lab.controller.enable_relay(network.id, relay.id, relay_settings()).unwrap();
     let lane = PairInput { keep_alive: None, lane: Some(LaneMode::UdpFallback) };
     lab.controller.set_pair(network.id, relay.id, member.id, lane).unwrap();
     let report = |peer, udp_path| {
@@ -438,7 +432,7 @@ fn a_lane_setting_reaches_both_nodes_and_the_pair_view_says_why_it_does_not_work
     assert_eq!(lab.netmap(exit).peer(entry).unwrap().lane, LaneMode::Always);
 
     // entry 启用了 relay：exit 拨它。
-    lab.controller.enable_relay(network.id, entry, relay_at("203.0.113.7:20330")).unwrap();
+    lab.controller.enable_relay(network.id, entry, relay_settings()).unwrap();
     let pairs = lab.controller.pairs(network.id).unwrap();
     let effect = pairs[0].lane_effect.clone().unwrap();
     assert!(effect.effective && effect.blocked.is_empty(), "{effect:?}");

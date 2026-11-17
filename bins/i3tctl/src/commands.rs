@@ -69,6 +69,15 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             let network = session.network().await?.id;
             session.show(session.get(&format!("/networks/{network}/backbone")).await?, render::backbone)
         }
+        Command::Stats { series, node, since } => {
+            let network = session.network().await?.id;
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs());
+            let mut query = format!("/networks/{network}/stats?series={series}&from={}", now.saturating_sub(since.secs));
+            if let Some(node) = node {
+                query.push_str(&format!("&node={}", session.node(network, &node).await?.id));
+            }
+            session.show(session.get(&query).await?, render::series)
+        }
         Command::Test { a, b, throughput, via, only, no_wait } => session.test(TestArgs { a, b, throughput, via, only, no_wait }).await,
         Command::Tests(command) => session.tests_command(command).await,
     }
@@ -395,9 +404,9 @@ impl Session {
     async fn relay_command(&self, command: RelayCommand) -> anyhow::Result<()> {
         let network = self.network().await?.id;
         match command {
-            RelayCommand::Enable { node, udp, tcp, region, bandwidth } => {
+            RelayCommand::Enable { node, bandwidth } => {
                 let node = self.node(network, &node).await?;
-                let settings = RelaySettings { udp, tcp, region, bandwidth_mbps: bandwidth };
+                let settings = RelaySettings { bandwidth_mbps: bandwidth };
                 self.show(
                     self.send(Method::PUT, &format!("/networks/{network}/nodes/{}/relay", node.id), &settings).await?,
                     render::relay_enabled,

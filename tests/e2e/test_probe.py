@@ -54,7 +54,7 @@ def punch_and_udp_blocked(lab: Lab, work: Path, t: Checks) -> None:
     c = Node(c_host, work)
     for node in (r, a, b, c):
         node.join(controller)
-    controller.ctl("relay", "enable", str(r.id), "--udp", r.endpoint, "--tcp", r.endpoint)
+    controller.ctl("relay", "enable", str(r.id))
     attached(controller, a, b, c, timeout=40)
 
     view = active_test(controller, a, b, "--only", "direct")
@@ -101,7 +101,7 @@ def quality_and_throughput(lab: Lab, work: Path, t: Checks) -> None:
     shape_between(r.host, b.host, Shape(rtt_ms=20))
     for node in (r, a, b):
         node.join(controller)
-    controller.ctl("relay", "enable", str(r.id), "--udp", r.endpoint, "--tcp", r.endpoint)
+    controller.ctl("relay", "enable", str(r.id))
     attached(controller, a, b)
 
     view = active_test(controller, a, b, "--only", "direct,direct-quality,relay-quality")
@@ -160,7 +160,7 @@ def two_relays_and_route_decision(lab: Lab, work: Path, t: Checks) -> None:
     for node in (r1, r2, a, b):
         node.join(controller)
     for relay in (r1, r2):
-        controller.ctl("relay", "enable", str(relay.id), "--udp", relay.endpoint, "--tcp", relay.endpoint)
+        controller.ctl("relay", "enable", str(relay.id))
     controller.ctl("node", "set", a.name, "--pin", r1.name)
     controller.ctl("node", "set", b.name, "--pin", r2.name)
     attached(controller, a, b)
@@ -216,7 +216,7 @@ def matrix_five_nodes(lab: Lab, work: Path, t: Checks) -> None:
     nodes = (r, a, b, c, d)
     for node in nodes:
         node.join(controller)
-    controller.ctl("relay", "enable", str(r.id), "--udp", r.endpoint, "--tcp", r.endpoint)
+    controller.ctl("relay", "enable", str(r.id))
     attached(controller, a, b, c, d, timeout=40)
 
     run = ctl_wait(controller, "tests", "matrix", timeout=400)
@@ -250,7 +250,7 @@ def switched_off_and_cancel(lab: Lab, work: Path, t: Checks) -> None:
     t.check("i3t set throughput-tests off", switched.returncode == 0 and "throughput-tests" in switched.stdout, switched.stdout + switched.stderr)
     for node in (r, a, b, c):
         node.join(controller)
-    controller.ctl("relay", "enable", str(r.id), "--udp", r.endpoint, "--tcp", r.endpoint)
+    controller.ctl("relay", "enable", str(r.id))
     attached(controller, a, b, c)
 
     view = active_test(controller, a, b, "--only", "direct-quality", "--throughput")

@@ -255,7 +255,6 @@ mod tests {
             name: format!("relay-{id}"),
             udp: Vec::new(),
             tcp: tcp.iter().map(|addr| addr.parse().unwrap()).collect(),
-            region: String::new(),
         });
     }
 

@@ -27,7 +27,8 @@ pub struct ServeOptions {
     pub admin_listen: SocketAddr,
     /// WebUI 的静态文件从哪里来，挂在管理 API 同一个端口的 `/` 上。
     pub webui: WebUi,
-    /// 要不要在后台定时查发布源、取节点的更新包。正常运行时是要的；测试里关掉，免得测试去连项目的发布源。
+    /// 要不要做和外面打交道的后台工作：定时查发布源、取节点的更新包、解析对外地址里的域名（见 `resolve_public_host`）。
+    /// 正常运行时是要的；测试里关掉，免得测试去连项目的发布源、结果随测试机器的域名解析而变。
     /// 关掉之后管理 API 的"立即检查"仍然可以用，只是查到的包没有人去取。
     pub follow_releases: bool,
 }
@@ -96,6 +97,8 @@ impl Server {
         let addresses = tokio::spawn(addr_server::serve(self.node_udp, stopped.clone()));
         let maintenance = tokio::spawn(maintain(Arc::clone(&self.controller), stopped.clone()));
         let releases = self.follow_releases.then(|| tokio::spawn(follow_releases(Arc::clone(&self.controller), stopped.clone())));
+        let host = (self.follow_releases && self.controller.public_host_name().is_some())
+            .then(|| tokio::spawn(resolve_public_host(Arc::clone(&self.controller))));
         let router = admin::router(Arc::clone(&self.controller), &self.webui);
         admin_server::serve(self.admin, router, stopped.clone()).await;
 
@@ -103,6 +106,9 @@ impl Server {
         // 关闭的信号要是没来（发送端没了），别的任务还在等一个不会来的信号，直接结束它们。
         addresses.abort();
         maintenance.abort();
+        if let Some(host) = host {
+            host.abort();
+        }
         if let Some(releases) = releases {
             // 正在取的包取到一半就丢下：没有核对过的文件用的是另外的名字，下次从头取。
             releases.abort();
@@ -141,6 +147,31 @@ async fn maintain(controller: Arc<Controller>, mut shutdown: watch::Receiver<boo
         }
     }
 }
+
+/// 后台任务：controller 对外地址里的主机是域名时，定期解析它，告诉 controller 它是哪个 IP（白皮书 §7.2：
+/// 走回环连过来的节点，别的机器要靠这个 IP 找到它）。回环地址不算：controller 自己的机器上的 `/etc/hosts` 常把本机的名字指向回环。
+async fn resolve_public_host(controller: Arc<Controller>) {
+    let Some(host) = controller.public_host_name() else { return };
+    let address = controller.public_addr().to_owned();
+    loop {
+        let found = match tokio::net::lookup_host(address.as_str()).await {
+            Ok(found) => found.map(|resolved| resolved.ip().to_canonical()).find(|ip| !ip.is_loopback() && !ip.is_unspecified()),
+            Err(error) => {
+                tracing::debug!(%host, %error, "解析不了 controller 对外地址里的主机");
+                None
+            }
+        };
+        if let Some(ip) = found
+            && let Err(err) = blocking(&controller, move |controller| controller.set_public_host(Some(ip))).await
+        {
+            tracing::error!("记下 controller 对外地址的 IP 时出错：{}", error_chain(&err));
+        }
+        tokio::time::sleep(PUBLIC_HOST_REFRESH).await;
+    }
+}
+
+/// 多久重新解析一次 controller 对外地址里的主机。
+const PUBLIC_HOST_REFRESH: Duration = Duration::from_secs(10 * 60);
 
 /// 后台任务：每小时查一次发布源，设置变了就提前查；有节点要用的包就去取。
 ///

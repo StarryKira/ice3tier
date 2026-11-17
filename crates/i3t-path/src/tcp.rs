@@ -11,7 +11,7 @@ use i3t_proto::session::{Echo, Frame, Refused};
 use i3t_underlay::tcp_leg::{self, FrameQueue, FrameReader, FrameSender};
 use i3t_underlay::tcp_recovery::Recovery;
 use tokio::net::TcpStream;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::control::Ctrl;
 use crate::table::{RelaySlot, Shared};
@@ -19,11 +19,15 @@ use crate::timing::TCP_LEG_GIVE_UP;
 
 /// 每个地址连多久算连不上。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
+/// 一个 relay 有几个地址时，前一个还没连上，隔这么久就同时去连下一个（前一个失败了就马上连下一个）。
+/// 连不上的地址多半是根本不回答，挨个等满 [`CONNECT_TIMEOUT`] 的话，排在后面的好地址要等好几秒。
+const CONNECT_STAGGER: Duration = Duration::from_millis(250);
 
 /// 这条 TCP 上发生的事，报给控制任务。
 #[derive(Debug)]
 pub(crate) enum TcpEvent {
-    Connected,
+    /// 连上了这个地址。
+    Connected(SocketAddr),
     /// relay 发来的会话帧，错误帧除外。
     Frame(Frame),
     /// relay 发来的错误帧和它回显的字节。
@@ -49,7 +53,7 @@ impl Drop for TcpLegHandle {
     }
 }
 
-/// 去连 `addrs` 里的地址（按顺序，连上一个为止），之后在这条 TCP 上收发帧。
+/// 去连 `addrs` 里的地址（按顺序错开一点时间一个个开始，先连上的那个为准），之后在这条 TCP 上收发帧。
 pub(crate) fn spawn(shared: Arc<Shared>, relay: Arc<RelaySlot>, conn: u64, addrs: Vec<SocketAddr>) -> TcpLegHandle {
     let (sender, queue) = tcp_leg::frame_queue();
     let task = tokio::spawn(async move {
@@ -62,14 +66,14 @@ pub(crate) fn spawn(shared: Arc<Shared>, relay: Arc<RelaySlot>, conn: u64, addrs
 }
 
 async fn run(shared: &Shared, relay: &RelaySlot, conn: u64, addrs: &[SocketAddr], queue: FrameQueue) -> &'static str {
-    let Some(stream) = connect(addrs).await else { return "连不上" };
+    let Some((stream, addr)) = connect(addrs).await else { return "连不上" };
     if tcp_leg::configure(&stream).is_err() {
         return "设置不了 socket 选项";
     }
     if !Recovery::giving_up_after(TCP_LEG_GIVE_UP).apply(&stream) {
         tracing::debug!(relay = %relay.id, "到 relay 的 TCP 没有设重传上限（内核不支持），断网之后恢复得慢一些");
     }
-    if shared.ctrl.send(Ctrl::Tcp { relay: relay.id, conn, event: TcpEvent::Connected }).await.is_err() {
+    if shared.ctrl.send(Ctrl::Tcp { relay: relay.id, conn, event: TcpEvent::Connected(addr) }).await.is_err() {
         return "路径层已经停了";
     }
     let (read_half, write_half) = stream.into_split();
@@ -79,15 +83,34 @@ async fn run(shared: &Shared, relay: &RelaySlot, conn: u64, addrs: &[SocketAddr]
     }
 }
 
-async fn connect(addrs: &[SocketAddr]) -> Option<TcpStream> {
-    for &addr in addrs {
-        match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
-            Ok(Ok(stream)) => return Some(stream),
-            Ok(Err(error)) => tracing::debug!(%addr, %error, "连 relay 的 TCP 失败"),
-            Err(_) => tracing::debug!(%addr, "连 relay 的 TCP 超时"),
+/// 按顺序去连 `addrs`：每隔 [`CONNECT_STAGGER`]（或者前一个失败时马上）开始连下一个，几个同时在连，先连上的那个为准，
+/// 别的放下。全都连不上时返回 `None`。
+async fn connect(addrs: &[SocketAddr]) -> Option<(TcpStream, SocketAddr)> {
+    let mut pending = addrs.iter().copied();
+    let mut attempts = JoinSet::new();
+    let mut next_start = tokio::time::Instant::now();
+    loop {
+        let more = pending.len() > 0;
+        tokio::select! {
+            () = tokio::time::sleep_until(next_start), if more => {
+                if let Some(addr) = pending.next() {
+                    attempts.spawn(async move { (addr, tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await) });
+                }
+                next_start = tokio::time::Instant::now() + CONNECT_STAGGER;
+            }
+            Some(done) = attempts.join_next() => match done {
+                Ok((addr, Ok(Ok(stream)))) => return Some((stream, addr)),
+                Ok((addr, Ok(Err(error)))) => {
+                    tracing::debug!(%addr, %error, "连 relay 的 TCP 失败");
+                    next_start = tokio::time::Instant::now();
+                }
+                Ok((addr, Err(_))) => tracing::debug!(%addr, "连 relay 的 TCP 超时"),
+                // 连接的任务不会 panic，也只在这里被放下。
+                Err(_) => {}
+            },
+            else => return None,
         }
     }
-    None
 }
 
 /// 读这条 TCP：发给本节点的中转帧去掉头交给连接层，会话帧交给控制任务，别的丢掉。

@@ -413,14 +413,13 @@ pub struct Relay {
     pub id: NodeId,
     pub key: PublicKey,
     pub name: String,
-    /// 公网可达的 UDP 地址。
+    /// 它的 UDP 地址，按要试的顺序。由 controller 下发时和 `tcp` 是同一组：controller 找出来的地址（白皮书 §7.2），
+    /// 节点并行地试，用回答的那个。不一定每个都连得上：谁连得上它，它就是谁的 relay。
     #[serde(default)]
     pub udp: Vec<SocketAddr>,
-    /// 公网可达的 TCP 地址，给 UDP 用不了的节点用。
+    /// 它的 TCP 地址，给 UDP 用不了的节点用。
     #[serde(default)]
     pub tcp: Vec<SocketAddr>,
-    #[serde(default)]
-    pub region: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

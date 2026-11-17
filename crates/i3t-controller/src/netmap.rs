@@ -14,6 +14,7 @@ use i3t_model::netmap::{Credential, Forward, ForwardTarget, LocalNode, Network, 
 use i3t_proto::NodeId;
 
 use crate::access::AccessMap;
+use crate::node_addresses;
 use crate::store::{CredentialRecord, ForwardRecord, GroupRecord, NetworkRecord, NodeRecord, Store, StoreError};
 
 /// 下发给对端的候选端点最多这么多个。正常的节点只有几个；多出来的没有用，只会让每个对端都去探测。
@@ -170,17 +171,13 @@ impl NetworkView {
         };
 
         let other_nodes = || self.nodes.values().filter(|node| node.id != id);
+        // relay 的地址是 controller 找出来的（白皮书 §7.2），UDP 和 TCP 是同一组：节点自己挑连得上的那个。
         let relay_list = other_nodes()
-            .filter_map(|node| {
-                let settings = node.relay.as_ref()?;
-                Some(Relay {
-                    id: node.id,
-                    key: node.key,
-                    name: node.name.clone(),
-                    udp: settings.udp.clone(),
-                    tcp: settings.tcp.clone(),
-                    region: settings.region.clone(),
-                })
+            .filter(|node| node.relay.is_some())
+            .map(|node| {
+                let addresses: Vec<SocketAddr> =
+                    node_addresses::relay_addresses(node, self.network.cidr).into_iter().map(|entry| entry.address).collect();
+                Relay { id: node.id, key: node.key, name: node.name.clone(), udp: addresses.clone(), tcp: addresses }
             })
             .collect();
         let relay_clients =

@@ -24,6 +24,7 @@ mod publish;
 mod rollout;
 mod routes;
 mod rules;
+mod stats;
 #[cfg(test)]
 pub(crate) mod testing;
 #[cfg(test)]
@@ -35,13 +36,14 @@ mod views;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use i3t_crypto::{NodeKey, tls};
 use i3t_model::Netmap;
-use i3t_model::admin::{LogEntry, NetworkId, Node, NodeRef, Status, Timestamp};
+use i3t_model::admin::{LogEntry, NetworkId, Node, NodeRef, RelayView, Status, Timestamp};
 use i3t_model::control::{ForwardReport, InterceptReport, LaneReport, ListenerReport, PerformanceReport, ToNode};
 use i3t_model::update::{UpdateStatus, Version};
 use i3t_proto::{NodeId, PublicKey};
@@ -50,9 +52,9 @@ use tokio::sync::{Notify, mpsc};
 use crate::error::{Entity, Error};
 use crate::gate::Throttle;
 use crate::netmap::NetworkView;
-use crate::secret;
 use crate::store::{DIGEST_LEN, GroupRecord, LogFilter, NetworkRecord, NodeRecord, Store};
 use crate::sync::NodeSync;
+use crate::{node_addresses, secret};
 
 pub use backup::{Backup, BackupFile};
 pub use protocol::Admitted;
@@ -153,6 +155,11 @@ pub(crate) struct Inner {
     /// 节点更新：已知的发布、包、设置、轮次。
     pub(crate) updates: update::Updates,
     pub(crate) counters: metrics::Counters,
+    /// 给界面画图的时间序列：这一段里攒着、还没写进存储的数。
+    pub(crate) stats: stats::Collector,
+    /// controller 对外地址（`--public-addr`）里的主机是哪个 IP：节点走回环连过来时，别的机器要用它找到这个节点（白皮书 §7.2）。
+    /// 主机是域名、还没有解析出来时是 `None`。
+    pub(crate) public_host: Option<IpAddr>,
     next_conn: u64,
     next_request: u64,
     last_purge: Option<Instant>,
@@ -191,6 +198,9 @@ pub(crate) struct Live {
     pub(crate) intercept: Option<InterceptReport>,
     /// 节点说它接不接受吞吐测试（本机配置文件里的开关）。
     pub(crate) throughput_tests: bool,
+    /// 这条连接的来源 IP 和节点自报的端口。controller 对外地址的主机后来才知道时，靠它们重算 controller 看到的地址。
+    pub(crate) remote: IpAddr,
+    pub(crate) port: u16,
 }
 
 pub(crate) struct Deferred {
@@ -240,6 +250,8 @@ impl Controller {
             diag: diag::Diag::default(),
             updates,
             counters: metrics::Counters::default(),
+            stats: stats::Collector::default(),
+            public_host: host_ip(&public_addr),
             next_conn: 0,
             next_request: 0,
             last_purge: None,
@@ -267,6 +279,14 @@ impl Controller {
     #[must_use]
     pub fn public_addr(&self) -> &str {
         &self.public_addr
+    }
+
+    /// controller 对外地址里的主机，它是域名（不是 IP 地址）的话。
+    #[must_use]
+    pub fn public_host_name(&self) -> Option<&str> {
+        let (host, _port) = self.public_addr.rsplit_once(':')?;
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        host.parse::<IpAddr>().is_err().then_some(host)
     }
 
     #[must_use]
@@ -448,7 +468,10 @@ impl Inner {
             virtual_ip: record.virtual_ip,
             groups: groups.iter().filter(|group| record.groups.contains(&group.id)).map(GroupRecord::to_ref).collect(),
             declared: record.declared,
-            relay: record.relay.clone(),
+            relay: record.relay.as_ref().map(|settings| RelayView {
+                addresses: node_addresses::relay_addresses(record, network.cidr),
+                bandwidth_mbps: settings.bandwidth_mbps,
+            }),
             exit: record.exit.clone(),
             dial_out_only: record.dial_out_only,
             routing: record.routing,
@@ -467,6 +490,7 @@ impl Inner {
             update: self.node_update(record),
             attached: record.attached.clone(),
             country: record.observed.and_then(|address| crate::geo::country(address.ip())),
+            warnings: node_addresses::warnings(record, network.cidr),
         }
     }
 
@@ -484,7 +508,8 @@ impl Inner {
         // 还有节点欠着确认时，隔一会儿要回来看它们是不是等得太久了。
         let waiting = self.sync.values().any(NodeSync::is_waiting).then(|| now + self.timing.ack_timeout.min(SWEEP_INTERVAL));
         let tests = self.tests_tick(now)?;
-        Ok([next, waiting, self.updates.next_rollout, tests].into_iter().flatten().min())
+        let stats = self.stats_tick(now, wall)?;
+        Ok([next, waiting, self.updates.next_rollout, tests, Some(stats)].into_iter().flatten().min())
     }
 }
 
@@ -492,6 +517,14 @@ impl Inner {
 const PURGE_INTERVAL: Duration = Duration::from_secs(60);
 /// 有节点欠着确认时多久查一次超时。
 const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+
+/// `主机:端口` 里的主机，是 IP 地址的话。回环和全零的地址对别的机器没有用，不算。
+fn host_ip(public_addr: &str) -> Option<IpAddr> {
+    let (host, _port) = public_addr.rsplit_once(':')?;
+    let ip: IpAddr = host.trim_start_matches('[').trim_end_matches(']').parse().ok()?;
+    let ip = ip.to_canonical();
+    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+}
 
 pub(crate) fn node_ref(record: &NodeRecord) -> NodeRef {
     NodeRef { id: record.id, name: record.name.clone(), virtual_ip: record.virtual_ip }

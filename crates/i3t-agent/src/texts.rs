@@ -24,6 +24,7 @@ pub(crate) struct Texts {
     pub(crate) unknown_setting: fn(&str) -> String,
     pub(crate) not_a_switch: fn(&str) -> String,
     pub(crate) unknown_profile: fn(&str) -> String,
+    pub(crate) bad_relay_address: fn(&str) -> String,
     pub(crate) performance_range: fn(&str, u64, u64) -> String,
     pub(crate) not_an_address: fn(&str) -> String,
     pub(crate) create_state_dir: fn(&Path) -> String,
@@ -83,9 +84,14 @@ static ZH: Texts = Texts {
     },
     metrics_not_loopback: |addr| format!("metrics.listen = \"{addr}\" 不是回环地址：指标接口没有认证，只能写 127.0.0.1 或 [::1]。"),
     same_proxy_address: |addr| format!("proxy.socks5 和 proxy.http 不能用同一个地址 {addr}"),
-    unknown_setting: |other| format!("没有设置项 {other}：可以写 can-exit、can-relay、can-forward、throughput-tests、profile、intercept"),
+    unknown_setting: |other| {
+        format!("没有设置项 {other}：可以写 can-exit、can-relay、can-forward、relay-address、throughput-tests、profile、intercept")
+    },
     not_a_switch: |other| format!("\"{other}\" 不是开关的值：写 on 或 off"),
     unknown_profile: |other| format!("没有档位 \"{other}\"：可以写 low-footprint、balanced、high-throughput"),
+    bad_relay_address: |text| {
+        format!("\"{text}\" 不能作为中继地址：写别的节点连得上的“地址:端口”，比如 \"203.0.113.9:40330\"，或者 \"off\"")
+    },
     performance_range: |key, low, high| format!("performance.{key} 要在 {low} 到 {high} 之间"),
     not_an_address: |text| format!("\"{text}\" 不是地址：写成 \"127.0.0.1:1080\" 这样的“地址:端口”，或者 \"off\""),
     create_state_dir: |path| format!("创建状态目录 {}", path.display()),
@@ -137,10 +143,15 @@ static EN: Texts = Texts {
     },
     same_proxy_address: |addr| format!("proxy.socks5 and proxy.http can't share the address {addr}"),
     unknown_setting: |other| {
-        format!("No setting {other}: possible values: can-exit, can-relay, can-forward, throughput-tests, profile, intercept")
+        format!(
+            "No setting {other}: possible values: can-exit, can-relay, can-forward, relay-address, throughput-tests, profile, intercept"
+        )
     },
     not_a_switch: |other| format!("\"{other}\" isn't a switch value: write on or off"),
     unknown_profile: |other| format!("No profile \"{other}\": possible values: low-footprint, balanced, high-throughput"),
+    bad_relay_address: |text| {
+        format!("\"{text}\" can't be a relay address: write an address:port other nodes can reach, e.g. \"203.0.113.9:40330\", or \"off\"")
+    },
     performance_range: |key, low, high| format!("performance.{key} must be between {low} and {high}"),
     not_an_address: |text| format!("\"{text}\" isn't an address: write \"127.0.0.1:1080\" (address:port) or \"off\""),
     create_state_dir: |path| format!("Creating the state directory {}", path.display()),
@@ -180,8 +191,11 @@ port = 20330
 [declare]
 # 出口：别的节点的流量从这台机器的网络出去。
 exit = false
-# 中继：为别的节点转发。要有从公网连得上的端口。
+# 中继：为别的节点转发。别的节点连得上它的端口就行，谁连得上它，它就是谁的中继。
 relay = false
+# 中继的另一个地址，只有机房或路由器把另一个 IP 上的端口映射到这台机器时才要写，比如：
+# relay_address = "203.0.113.9:40330"
+# 也可以执行 i3t set relay-address 203.0.113.9:40330。别的地址由 controller 自己找出来。
 # 端口转发的目标：别的节点经它访问它的回环地址和局域网里指定的服务。
 forward = false
 
@@ -232,8 +246,11 @@ port = 20330
 [declare]
 # Exit: other nodes' traffic leaves through this machine's network.
 exit = false
-# Relay: forward for other nodes. Needs a port reachable from the internet.
+# Relay: forward for other nodes. A relay serves whoever can reach its port.
 relay = false
+# Another address of the relay. Only needed when a provider or router maps a port on another IP to this machine, e.g.:
+# relay_address = "203.0.113.9:40330"
+# Or run: i3t set relay-address 203.0.113.9:40330. The controller finds the other addresses itself.
 # Port forward target: other nodes reach chosen services on its loopback and LAN through it.
 forward = false
 
