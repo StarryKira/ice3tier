@@ -59,13 +59,50 @@ function chooseFor(mode: RoutingMode, candidates: readonly PathCandidate[] | nul
 const candidateRtt = (candidate: PathCandidate): number =>
   Math.round(candidate.legs.reduce((sum, leg) => sum + leg.rtt_us, 0) / 1000)
 
+/**
+ * 0.1.11 起的节点自己报"另一种模式会怎么走"（`alternative`）和直连在哪一步（`direct_status`），两个一起报。
+ * 报了的行不用再去问 `…/path`；`alternative` 是 `null` 时就是和现在一样（或者刚上线、还没算过）。
+ */
+const reportsAlternative = (entry: NodeRoute): boolean =>
+  entry.direct_status !== undefined && entry.direct_status !== null
+
+/** 另一种模式的那条路和它的延迟（不知道是 `null`）。 */
+interface Alternative {
+  route: Route
+  rtt: number | null
+}
+
+/** 经中继的那一行，悬停在"中继"上说直连怎么样了；P2P 的那一行说直连是怎么通的。旧的节点不报，就没有说明。 */
+function modeHint(entry: NodeRoute): string | undefined {
+  if (entry.route.via === 'direct') {
+    const kind = entry.direct ?? null
+    return kind === null ? undefined : `${t.routes.directKind[kind]}：${t.routes.directKindHint[kind]}`
+  }
+  if (entry.route.via !== 'relay') return undefined
+  const status = entry.direct_status ?? null
+  if (status === null) return undefined
+  const states = t.routes.directState
+  switch (status.state) {
+    case 'not_tried':
+      return states.not_tried
+    case 'trying':
+      return states.trying
+    case 'verified':
+      return states.verified
+    case 'failed':
+      return states.failed(t.routes.directCause[status.cause?.code ?? 'unknown'])
+    default:
+      return states.unknown
+  }
+}
+
 /** 路径长度：直连一段；经中继是中继数加一。 */
 const lengthOf = (route: Route): number | null =>
   route.via === 'direct' ? 1 : route.via === 'relay' ? route.relays.length + 1 : null
 
 type Leg = 'udp' | 'tcp' | 'unknown' | null
 
-/** 方式：就写 P2P 或者中继，标签一样宽，上下对齐。`hint` 是 P2P 悬停的说明（直连是怎么建立的）。 */
+/** 方式：就写 P2P 或者中继，标签一样宽，上下对齐。`hint` 是悬停的说明：P2P 是怎么通的，中继时直连怎么样了。 */
 function ModeBadge({ route, peerOnline, hint }: { route: Route; peerOnline: boolean; hint?: string }) {
   const width = 'w-12 justify-center'
   if (route.via === 'none') {
@@ -75,16 +112,13 @@ function ModeBadge({ route, peerOnline, hint }: { route: Route; peerOnline: bool
       </Badge>
     )
   }
-  if (route.via === 'relay') {
-    return (
-      <Badge tone="relay" className={width}>
-        {d.routesRelay}
-      </Badge>
-    )
-  }
   const badge = (
-    <Badge tone="ok" className={width} tabIndex={hint === undefined ? undefined : 0}>
-      {d.routesP2P}
+    <Badge
+      tone={route.via === 'relay' ? 'relay' : 'ok'}
+      className={cn(width, hint !== undefined && 'cursor-help')}
+      tabIndex={hint === undefined ? undefined : 0}
+    >
+      {route.via === 'relay' ? d.routesRelay : d.routesP2P}
     </Badge>
   )
   return hint === undefined ? badge : <Tooltip content={hint}>{badge}</Tooltip>
@@ -100,20 +134,39 @@ function Via({ route, peer, names }: { route: Route; peer: NodeId; names: (ids: 
   return <span className="whitespace-nowrap">{names(route.relays)}</span>
 }
 
-/** 协议：UDP 或 TCP。TCP 是黄字，悬停有一句解释。不知道时是一道横线。 */
-function Protocol({ leg }: { leg: Leg }) {
-  if (leg === null || leg === 'unknown') return <span className="text-muted-foreground">—</span>
-  if (leg === 'udp') return <span>{t.routes.legTransport.udp}</span>
+const p = t.routes.protocol
+
+/**
+ * 协议：前面是业务协议，后面是底层的传输。共用的连接是 QUIC，底下 UDP 或 TCP（UDP 不通时到中继改走 TCP，
+ * 黄字，悬停有一句解释；不知道底下是什么时只写 QUIC）。这一对在节点对里打开了 ice3proxy 时，下面再写一行。
+ * 走不通时是一道横线。
+ */
+function Protocol({ route, leg, lane }: { route: Route; leg: Leg; lane: boolean }) {
+  if (route.via === 'none') return <span className="text-muted-foreground">—</span>
+  const quic =
+    leg === 'tcp' ? (
+      <Tooltip content={t.routes.relayLegHint.tcp}>
+        <span tabIndex={0} className="cursor-help rounded-sm whitespace-nowrap text-warn">
+          {p.over(p.quic, t.routes.legTransport.tcp)}
+        </span>
+      </Tooltip>
+    ) : (
+      <span className="whitespace-nowrap">{leg === 'udp' ? p.over(p.quic, t.routes.legTransport.udp) : p.quic}</span>
+    )
+  if (!lane) return quic
   return (
-    <Tooltip content={t.routes.relayLegHint.tcp}>
-      <span tabIndex={0} className="cursor-help rounded-sm text-warn">
-        {t.routes.legTransport.tcp}
-      </span>
-    </Tooltip>
+    <span className="flex flex-col leading-5">
+      {quic}
+      <Tooltip content={p.laneHint}>
+        <span tabIndex={0} className="cursor-help self-start rounded-sm whitespace-nowrap">
+          {p.over(p.lane, t.routes.legTransport.tcp)}
+        </span>
+      </Tooltip>
+    </span>
   )
 }
 
-/** 一条路的协议：P2P 直连只用 UDP；经中继时是到第一个中继那一段的传输。 */
+/** 一条路底下的传输：P2P 直连只用 UDP；经中继时是到第一个中继那一段的传输。 */
 const legOf = (route: Route, reported: Leg): Leg =>
   route.via === 'direct' ? 'udp' : route.via === 'relay' ? reported : null
 
@@ -156,12 +209,19 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
   const other: RoutingMode = mode === 'direct_first' ? 'lowest_cost' : 'direct_first'
   const auto = rows.length <= AUTO_ALTERNATIVE_LIMIT
   const paths = useQueries({
-    queries: rows.map((entry) => ({ ...q.path(network.id, node.id, entry.peer.id), enabled: auto })),
+    queries: rows.map((entry) => ({
+      ...q.path(network.id, node.id, entry.peer.id),
+      enabled: auto && !reportsAlternative(entry) && entry.route.via !== 'none',
+    })),
   })
   const recompute = () => {
     for (const path of paths) void path.refetch()
   }
   const computing = paths.some((path) => path.isFetching)
+  // 打开了 ice3proxy、控制连接在的对端：它们之间的 TCP 连接走 ice3proxy。
+  const lanes = new Set((node.lanes?.peers ?? []).filter((lane) => lane.control).map((lane) => lane.peer))
+  // 都是自己报的新节点时不用重新算：每次上报都是新的。
+  const asksPaths = rows.some((entry) => !reportsAlternative(entry))
 
   return (
     <div className="space-y-4">
@@ -176,7 +236,7 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
               ? t.common.updatedEvery(REPORT_INTERVAL_SECS)
               : t.common.reportedAgo(formatAge(freshest))}
           </p>
-          {rows.length > 0 ? (
+          {asksPaths ? (
             <Tooltip content={d.routesRecompute(modeLabel(other))}>
               <Button
                 variant="ghost"
@@ -249,15 +309,26 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
               const peer = all.find((candidate) => candidate.id === entry.peer.id)
               const peerOnline = peer?.online ?? true
               const path = paths[index]
-              const alternative = entry.route.via === 'none' ? null : chooseFor(other, path?.data?.forward.candidates)
-              const pending = path?.isPending === true && auto && entry.route.via !== 'none'
+              let alternative: Alternative | null
+              let pending = false
+              if (reportsAlternative(entry)) {
+                const reportedAlt = entry.alternative ?? null
+                alternative =
+                  reportedAlt !== null
+                    ? { route: reportedAlt.route, rtt: reportedAlt.rtt_ms }
+                    : entry.route.via === 'none'
+                      ? null
+                      : { route: entry.route, rtt: entry.rtt_ms }
+              } else {
+                const chosen = entry.route.via === 'none' ? null : chooseFor(other, path?.data?.forward.candidates)
+                alternative = chosen === null ? null : { route: chosen.route, rtt: candidateRtt(chosen) }
+                pending = path?.isPending === true && auto && entry.route.via !== 'none'
+              }
               // 走不通、对端离线的行淡下去：名字和"不可达"照常能看清。
               const dim = entry.route.via === 'none' || peer?.online === false
               const fade = cn(dim && 'opacity-50')
               const nowLeg = legOf(entry.route, entry.relay_leg ?? null)
-              const kind = entry.direct ?? null
-              const directHint =
-                kind === null ? undefined : `${t.routes.directKind[kind]}：${t.routes.directKindHint[kind]}`
+              const directHint = modeHint(entry)
 
               // 没有内容的格子每列一道横线，和左边一组一样，不合并成一格。
               const dashes = [0, 1, 2, 3, 4].map((column) => (
@@ -266,9 +337,7 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
                 </Td>
               ))
               let otherCells: ReactNode
-              if (entry.route.via === 'none') {
-                otherCells = dashes
-              } else if (pending) {
+              if (pending) {
                 otherCells = (
                   <Td colSpan={5} className={BAND}>
                     <Skeleton className="h-3.5 w-40" />
@@ -287,8 +356,8 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
                         altRoute.relays[0] === entry.route.relays[0]
                       ? (entry.relay_leg ?? null)
                       : null
-                const rtt = candidateRtt(alternative)
-                const delta = entry.rtt_ms === null ? null : rtt - entry.rtt_ms
+                const rtt = alternative.rtt
+                const delta = rtt === null || entry.rtt_ms === null ? null : rtt - entry.rtt_ms
                 otherCells = (
                   <>
                     <Td className={BAND}>
@@ -298,13 +367,17 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
                       <Via route={altRoute} peer={entry.peer.id} names={names} />
                     </Td>
                     <Td className={cn(BAND, 'text-sm')}>
-                      <Protocol leg={altLeg} />
+                      <Protocol route={altRoute} leg={altLeg} lane={lanes.has(entry.peer.id)} />
                     </Td>
                     <Td className={BAND}>
                       <span className="text-sm tabular">{lengthOf(altRoute) ?? '—'}</span>
                     </Td>
                     <Td className={cn(BAND, 'whitespace-nowrap')}>
-                      <span className="text-sm font-medium tabular">{t.common.ms(rtt)}</span>
+                      {rtt === null ? (
+                        <span className="text-muted-foreground">—</span>
+                      ) : (
+                        <span className="text-sm font-medium tabular">{t.common.ms(rtt)}</span>
+                      )}
                       {delta !== null && delta !== 0 ? (
                         <span className={cn('ml-1.5 text-xs tabular', delta < 0 ? 'text-ok' : 'text-warn')}>
                           {d.routesDelta(delta)}
@@ -331,7 +404,7 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
                     <Via route={entry.route} peer={entry.peer.id} names={names} />
                   </Td>
                   <Td className={cn('text-sm', fade)}>
-                    <Protocol leg={nowLeg} />
+                    <Protocol route={entry.route} leg={nowLeg} lane={lanes.has(entry.peer.id)} />
                   </Td>
                   <Td className={fade}>
                     <span className="text-sm tabular">{lengthOf(entry.route) ?? '—'}</span>

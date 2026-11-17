@@ -110,7 +110,6 @@ export const nodes = {
     tabExit: '出口',
     tabForward: '端口转发',
     tabRoutes: '路由',
-    tabLanes: '独占 TCP',
     more: '更多',
     succeed: '继任已下线节点…',
     info: '信息',
@@ -375,16 +374,5 @@ export const nodes = {
 
     nodeLog: '操作记录',
     relatedManage: '管理',
-
-    lanesEmpty: '没有和其他节点之间的独占 TCP',
-    lanesOffline: '节点离线',
-    lanesLoadFailed: '无法加载节点对',
-    lanesDials: '本节点拨号',
-    lanesPeerDials: '对端拨号',
-    colLaneTraffic: '流量',
-    laneTrafficTip: (sealed: string, passthrough: string, spliced: string) =>
-      `加密搬运 ${sealed} · 透传 ${passthrough} · 内核搬运 ${spliced}，自启动以来累计`,
-    lanesPair: '节点对',
-    lanesHandshake: (n: number, causes: string) => `拨进来的握手失败 ${n} 次：${causes}`,
   },
 }

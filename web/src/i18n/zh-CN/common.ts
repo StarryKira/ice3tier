@@ -89,6 +89,7 @@ export const errors = {
     range_not_superset: '新地址段必须包含原地址段',
     network_not_empty: '网络中还有节点',
     not_declared: '节点未声明此能力',
+    forward_target_off: '目标节点没有打开端口转发',
     predecessor_online: '被继任的节点在线',
     conflict: '与现有配置冲突',
     node_offline: '节点离线',

@@ -42,7 +42,7 @@ let busy: TcpServer
 let targetPort = 0
 let busyPort = 0
 let lanIp: string | undefined
-/** 经独占 TCP 一直开着的一条连接（curl），和它连着的、一直不结束应答的服务。 */
+/** 经 ice3proxy 一直开着的一条连接（curl），和它连着的、一直不结束应答的服务。 */
 let hold: ChildProcess | undefined
 let holder: HttpServer | undefined
 
@@ -852,11 +852,11 @@ test('拓扑的骨干', async () => {
 })
 
 /**
- * 独占 TCP：gw-hk 的 relay 换一个这台机器上真的连得上的 TCP 地址（它在回环上的节点端口），gw-hk 和 laptop 这一对
+ * ice3proxy：gw-hk 的 relay 换一个这台机器上真的连得上的 TCP 地址（它在回环上的节点端口），gw-hk 和 laptop 这一对
  * 设成"总是用"，经 laptop 本机的入口访问 gw-hk 上的服务：一条一直开着的连接，加一次下载。nas-home 和 laptop
  * 这一对设成"UDP 不通时用"：两个都不是 relay，不起作用。放在中文这一组的最后，前面截图的编号不变。
  */
-test('独占 TCP', async () => {
+test('ice3proxy', async () => {
   test.setTimeout(150_000)
   const net = '/networks/1'
   const port = Number(/^port = (\d+)$/m.exec(readFileSync(join(nodes.gw?.dir ?? '', 'config.toml'), 'utf8'))?.[1] ?? 0)
@@ -921,10 +921,6 @@ test('独占 TCP', async () => {
   await shot('pairs-add-dialog', { fullPage: false })
   await dialog.getByRole('button', { name: t.common.cancel, exact: true }).click()
   await page.getByRole('button', { name: t.common.discardConfirm }).click()
-
-  await page.goto(`${controller.baseUrl}/n/1/nodes/3?tab=lanes`)
-  await expect(page.getByTestId('node-lane-1')).toBeVisible()
-  await shot('node-detail-lanes')
 })
 
 /**

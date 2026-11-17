@@ -33,7 +33,7 @@ const effect = (extra: Partial<LaneEffect>): LaneEffect => ({
   ...extra,
 })
 
-describe('独占 TCP 起不起作用', () => {
+describe('ice3proxy 起不起作用', () => {
   it('不用时什么也不说；controller 太旧不写 lane 时按不用算', () => {
     expect(laneEffectView(makePair(1, 2), NODES)).toEqual({ kind: 'off' })
     const old: PairView = { a: 1, b: 2, keep_alive: true }
@@ -125,7 +125,7 @@ describe('独占 TCP 起不起作用', () => {
   })
 })
 
-describe('独占 TCP 的计数', () => {
+describe('ice3proxy 的计数', () => {
   it('一个节点和一个对端之间：空闲的是停在两头、它看得到的那些', () => {
     const peer = makePeerLanes(2, { in_use: 3, idle: 2, ready: 4, parked_at_peer: 5, fallbacks: 1, dial_failures: 2 })
     expect(peerGlance(peer)).toEqual({ inUse: 3, idle: 11, fallbacks: 1, dialFailures: 2 })

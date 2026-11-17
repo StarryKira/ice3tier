@@ -161,7 +161,7 @@ function fixPath(network: number, fix: LaneFix): string {
 }
 
 /**
- * 两个节点各自报的、和对方之间的独占 TCP，并排放着：一眼看的那几个数之外的其余部分。
+ * 两个节点各自报的、和对方之间的 ice3proxy，并排放着：一眼看的那几个数之外的其余部分。
  * 握手失败分不到对端名下，是两个节点各自全节点的数，所以要取节点详情。
  */
 function LaneDetails({ network, pair, names }: { network: Network; pair: PairView; names: readonly [string, string] }) {
@@ -261,7 +261,7 @@ function LaneDetails({ network, pair, names }: { network: Network; pair: PairVie
 }
 
 /**
- * 节点对设置：连接常驻和独占 TCP（lane）。设置的控件改了立即生效；独占 TCP 不是"不用"时，
+ * 节点对设置：连接常驻和 ice3proxy（lane）。设置的控件改了立即生效；ice3proxy 不是"不用"时，
  * 写着它起不起作用、谁拨号，不起作用时下面一行是原因和修好它的那一步；两个节点报的计数一眼看几个，其余的点开看。
  * 从节点详情过来时地址里带着 `a`、`b`：那一对亮出来，详情展开。
  */
@@ -304,7 +304,7 @@ export function PairsPage() {
   const list = pairs.data ?? []
   const empty = pairs.isSuccess && list.length === 0
   const tooFew = nodes.isSuccess && all.length < 2
-  // 状态那一列只在有哪一对开着独占 TCP 时画；计数的几列只在有数可看（或者马上就会有）时画。不然它们整列都是空的。
+  // 状态那一列只在有哪一对开着 ice3proxy 时画；计数的几列只在有数可看（或者马上就会有）时画。不然它们整列都是空的。
   const effectShown = list.some((pair) => laneMode(pair) !== 'off')
   const lanesShown = list.some((pair) => lanesReported(pair) || pair.lane_effect?.effective === true)
   const columns = 4 + (effectShown ? 1 : 0) + (lanesShown ? 4 : 0)

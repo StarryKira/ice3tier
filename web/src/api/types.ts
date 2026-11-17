@@ -49,6 +49,8 @@ export type KnownErrorCode =
   | 'range_not_superset'
   | 'network_not_empty'
   | 'not_declared'
+  /** 0.1.11 起：要启用的转发指向的目标节点没有打开"可作为端口转发的目标"。 */
+  | 'forward_target_off'
   | 'predecessor_online'
   | 'conflict'
   | 'node_offline'
@@ -317,7 +319,7 @@ export interface NodeDetail extends Node {
   flows: number
   tx_bytes: number
   rx_bytes: number
-  /** 独占 TCP 的状况。不在线、版本太旧没有报、还没有上报过是 `null`；比界面旧的 controller 不写。 */
+  /** ice3proxy 的状况。不在线、版本太旧没有报、还没有上报过是 `null`；比界面旧的 controller 不写。 */
   lanes?: LaneReport | null
 }
 
@@ -377,6 +379,25 @@ export interface NodeRoute extends RouteDetail {
   /** 节点启动以来在和这个对端的连接上发出、收到的字节数（线上的字节）。有没有同 `flows`。 */
   tx_bytes?: number | null
   rx_bytes?: number | null
+  /** 0.1.11 起：到这个对端的直连在哪一步，不管现在走不走它。旧的节点不报，是 `null`。 */
+  direct_status?: DirectStatusView | null
+  /**
+   * 0.1.11 起：节点没在用的那种选路模式此刻会选的路；那种模式没有路时 `route` 是 `{ via: 'none' }`。
+   * 和现在的路一样、还没算过、或者旧的节点不报时是 `null`。
+   */
+  alternative?: { route: Route; rtt_ms: number | null } | null
+}
+
+export type DirectState = 'not_tried' | 'trying' | 'verified' | 'failed' | 'unknown'
+export type DirectCauseCode = 'no_answer' | 'no_candidates' | 'timeouts' | 'loss' | 'stale' | 'unknown'
+
+export interface DirectStatusView {
+  state: DirectState
+  /** `verified` 时：怎么通的。 */
+  kind: DirectKind | null
+  /** 最近一次失败的原因：`failed` 时是这一次的，`trying` 时是上一次的。 */
+  cause: { code: DirectCauseCode } | null
+  attempted_at: Timestamp | null
 }
 
 export interface RouteTable {
@@ -594,8 +615,18 @@ export interface NodeListeners {
   forwards: NodeForwardListen[]
 }
 
+/**
+ * 按这个顺序取第一个符合的。`forward_target_off` 是 0.1.11 起的（目标关了"可作为端口转发的目标"），
+ * `target_not_declared` 是更早的 controller 的。比界面新的 controller 可能报这里没有的值，当作未知。
+ */
 export type ForwardStatus =
-  'target_not_declared' | 'disabled' | 'access_denied' | 'listener_offline' | 'target_offline' | 'active'
+  | 'disabled'
+  | 'forward_target_off'
+  | 'target_not_declared'
+  | 'access_denied'
+  | 'listener_offline'
+  | 'target_offline'
+  | 'active'
 
 export interface Forward {
   id: number
@@ -628,7 +659,7 @@ export interface ForwardInput {
 }
 
 /**
- * 独占 TCP（lane）：一对节点之间承载 TCP 连接的流各用一条只属于它的 TCP，而不是共用那一条连接里的一条流。
+ * ice3proxy（lane）：一对节点之间承载 TCP 连接的流各用一条只属于它的 TCP，而不是共用那一条连接里的一条流。
  * `udp_fallback`：开流的一方到对方的共用连接上没有 UDP 的路时才用。
  */
 export type LaneMode = 'off' | 'udp_fallback' | 'always'
@@ -647,7 +678,7 @@ export interface PairInput {
   lane?: LaneMode
 }
 
-/** 独占 TCP 的设置不起作用的一个原因。`node` 是说的那一个节点。比界面新的 controller 可能写别的 `reason`。 */
+/** ice3proxy 的设置不起作用的一个原因。`node` 是说的那一个节点。比界面新的 controller 可能写别的 `reason`。 */
 export type LaneBlock =
   | { reason: 'no_relay' }
   | { reason: 'no_tcp_address'; node: NodeId }
@@ -655,7 +686,7 @@ export type LaneBlock =
   | { reason: 'not_connected' }
 
 export interface LaneEffect {
-  /** 至少一边能被拨，两个节点都懂独占 TCP，访问规则连通了它们。 */
+  /** 至少一边能被拨，两个节点都懂 ice3proxy，访问规则连通了它们。 */
   effective: boolean
   /** 不起作用的原因；起作用时是 `[]`。 */
   blocked: LaneBlock[]
@@ -665,7 +696,7 @@ export interface LaneEffect {
   summary: string
 }
 
-/** 独占 TCP 的计数，从节点启动算起的累计；`in_use`、`dialling` 是现在的值。 */
+/** ice3proxy 的计数，从节点启动算起的累计；`in_use`、`dialling` 是现在的值。 */
 export interface LaneCounts {
   in_use: number
   dialling: number
@@ -675,12 +706,12 @@ export interface LaneCounts {
   claims_waited: number
   claim_wait_ms: number
   claims_failed: number
-  /** 本来要走独占 TCP、因为取不到改走了共用连接的流。 */
+  /** 本来要走 ice3proxy、因为取不到改走了共用连接的流。 */
   fallbacks: number
   dial_failures: number
   /** 握手成功、但因为用途或数量不对被关掉的连接。 */
   refused: number
-  /** 在独占 TCP 的 TLS 里搬运的字节数，两个方向合计。 */
+  /** 在 ice3proxy 的 TLS 里搬运的字节数，两个方向合计。 */
   sealed_bytes: number
   /** 本来就是 TLS 的用户数据不再加密、在程序里搬运的字节数。 */
   passthrough_bytes: number
@@ -688,7 +719,7 @@ export interface LaneCounts {
   spliced_bytes: number
 }
 
-/** 一个节点上和一个对端之间的独占 TCP。 */
+/** 一个节点上和一个对端之间的 ice3proxy。 */
 export interface PeerLanes extends LaneCounts {
   peer: NodeId
   /** 这个节点拨不拨对端。 */
@@ -709,7 +740,7 @@ export interface PairLaneSide {
   lanes: PeerLanes
 }
 
-/** 节点对的接口应答的：设置，加上独占 TCP 起不起作用、两个节点各自报的状况。 */
+/** 节点对的接口应答的：设置，加上 ice3proxy 起不起作用、两个节点各自报的状况。 */
 export interface PairView extends PairSetting {
   /** `lane` 是 `off` 时是 `null`。比界面旧的 controller 不写。 */
   lane_effect?: LaneEffect | null
@@ -726,12 +757,12 @@ export interface LaneHandshakeFailures {
   busy: number
 }
 
-/** 一个节点上的全部独占 TCP。 */
+/** 一个节点上的全部 ice3proxy。 */
 export interface LaneReport {
   /** 全节点的合计（对端去掉之后也不减）。 */
   total: LaneCounts
   handshake_failures: LaneHandshakeFailures
-  /** 每个打开了独占 TCP 的对端。 */
+  /** 每个打开了 ice3proxy 的对端。 */
   peers: PeerLanes[]
 }
 

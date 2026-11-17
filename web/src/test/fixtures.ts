@@ -197,7 +197,7 @@ export function makeToken(id: number, extra: Partial<EnrollTokenInfo> = {}): Enr
   }
 }
 
-/** 一个节点上和一个对端之间的独占 TCP：全是 0，测试只写它关心的那几项。 */
+/** 一个节点上和一个对端之间的 ice3proxy：全是 0，测试只写它关心的那几项。 */
 export function makePeerLanes(peer: number, extra: Partial<PeerLanes> = {}): PeerLanes {
   return {
     peer,
@@ -222,7 +222,7 @@ export function makePeerLanes(peer: number, extra: Partial<PeerLanes> = {}): Pee
   }
 }
 
-/** 一对节点的设置：默认是连接常驻、不用独占 TCP。 */
+/** 一对节点的设置：默认是连接常驻、不用 ice3proxy。 */
 export function makePair(a: number, b: number, extra: Partial<PairView> = {}): PairView {
   return { a, b, keep_alive: true, lane: 'off', lane_effect: null, lanes: [], ...extra }
 }

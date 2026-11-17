@@ -148,7 +148,11 @@ export function ForwardDialog({ network, forward, scope: presetScope, open, onCl
     },
     toastError: false,
   })
-  const failure = formFailure(save.error, { conflict: 'port', not_declared: 'targetNode' } as const)
+  const failure = formFailure(save.error, {
+    conflict: 'port',
+    not_declared: 'targetNode',
+    forward_target_off: 'targetNode',
+  } as const)
 
   const change =
     <T,>(setter: (value: T) => void) =>

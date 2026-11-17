@@ -14,7 +14,7 @@ import { t } from '@/i18n'
 import { nodeName } from './nodes'
 
 /**
- * 独占 TCP（lane）在界面上怎么说。纯函数：节点对页和节点详情用同一套。
+ * ice3proxy（lane）在界面上怎么说。纯函数：节点对页和节点详情用同一套。
  *
  * 起不起作用、为什么，按 controller 给的原因码（`lane_effect.blocked`）用界面自己的话写，带着修好它的那一步；
  * controller 的 `summary` 只在原因码不认识时（比界面新的 controller）原样显示。
@@ -34,7 +34,7 @@ export function laneModeLabel(mode: LaneMode): string {
   return l.modes[mode]
 }
 
-/** 有节点报了这一对之间的独占 TCP：设置起作用之后，或者刚关掉、还有流在跑的时候。没有报的就没有数可看。 */
+/** 有节点报了这一对之间的 ice3proxy：设置起作用之后，或者刚关掉、还有流在跑的时候。没有报的就没有数可看。 */
 export function lanesReported(pair: PairView): boolean {
   return (pair.lanes?.length ?? 0) > 0
 }

@@ -51,6 +51,14 @@ export function forwardStatusView(
     }
     case 'disabled':
       return { ...base, tone: 'idle', label: s.disabled, detail: s.disabled }
+    case 'forward_target_off':
+      return {
+        ...base,
+        tone: 'warn',
+        label: s.targetOff,
+        detail: s.targetOffDetail(target),
+        needsAttention: true,
+      }
     case 'target_not_declared':
       return {
         ...base,
@@ -79,6 +87,8 @@ export function forwardStatusView(
         listen: listenView(forward.listen, { node: listenName, bind: forward.bind, online: true }),
       }
   }
+  // 比界面新的 controller 报的、这里还不认识的状态。
+  return { ...base, tone: 'idle', label: s.unknown, detail: s.unknown }
 }
 
 /** 转发在文字里的叫法：有名字用名字，没有就写监听地址。 */

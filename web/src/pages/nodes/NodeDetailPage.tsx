@@ -34,7 +34,6 @@ import { RenameNodeDialog } from './actions'
 import { useDeleteNode } from './hooks'
 import { ExitTab, ForwardTab, RelayTab } from './detail/Capabilities'
 import { EditIpDialog, SucceedDialog } from './detail/dialogs'
-import { LanesTab } from './detail/LanesTab'
 import { OverviewTab } from './detail/OverviewTab'
 import { RoutesTab } from './detail/RoutesTab'
 import { RoleBadges } from './NodesPage'
@@ -46,7 +45,7 @@ function MetaDivider() {
   return <span aria-hidden className="h-3 w-px bg-border-strong" />
 }
 
-const TABS = ['overview', 'relay', 'exit', 'forward', 'routes', 'lanes'] as const
+const TABS = ['overview', 'relay', 'exit', 'forward', 'routes'] as const
 type Tab = (typeof TABS)[number]
 
 /**
@@ -124,8 +123,6 @@ export function NodeDetailPage() {
   }
 
   const issue = nodeIssues(node, nodes.data ?? [])[0]
-  // 独占 TCP 默认不用：只有和哪个对端之间打开了，才有这个标签页。
-  const showLanes = (node.lanes?.peers.length ?? 0) > 0 || tab === 'lanes'
 
   return (
     <Page className="@container">
@@ -229,7 +226,6 @@ export function NodeDetailPage() {
           <TabsTrigger value="exit">{d.tabExit}</TabsTrigger>
           <TabsTrigger value="forward">{d.tabForward}</TabsTrigger>
           <TabsTrigger value="routes">{d.tabRoutes}</TabsTrigger>
-          {showLanes ? <TabsTrigger value="lanes">{d.tabLanes}</TabsTrigger> : null}
         </TabsList>
         <TabsContent value="overview">
           <OverviewTab network={network} node={node} onEditIp={() => setDialog('ip')} />
@@ -246,9 +242,6 @@ export function NodeDetailPage() {
         </TabsContent>
         <TabsContent value="routes">
           <RoutesTab network={network} node={node} />
-        </TabsContent>
-        <TabsContent value="lanes">
-          <LanesTab network={network} node={node} />
         </TabsContent>
       </Tabs>
 

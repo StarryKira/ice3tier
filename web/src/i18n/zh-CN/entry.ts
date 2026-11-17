@@ -268,6 +268,9 @@ export const forwards = {
     disabled: '已停用',
     targetNotDeclared: '目标未声明',
     targetNotDeclaredDetail: (target: string) => `${target} 未声明可作为转发目标`,
+    targetOff: '目标没打开',
+    targetOffDetail: (target: string) => `${target} 没有打开端口转发，打开后恢复`,
+    unknown: '未知',
     accessDenied: '规则不允许',
     accessDeniedDetail: (listen: string, target: string) => `${listen} 无权访问 ${target}`,
     listenerOffline: '监听节点离线',
@@ -389,7 +392,7 @@ export const serviceClass = {
 
 export const pairs = {
   title: '节点对',
-  subtitle: '单独设置某两个节点之间的连接，例如独占 TCP',
+  subtitle: '单独设置某两个节点之间的连接，例如 ice3proxy',
   add: '添加节点对',
   loadFailed: '无法加载节点对',
   colPair: '节点对',
@@ -412,15 +415,15 @@ export const pairs = {
   nothingSet: '至少开启一项设置',
   submit: '添加',
 
-  /** 独占 TCP（lane）：设置、起不起作用、两个节点报的计数。 */
+  /** ice3proxy（lane）：设置、起不起作用、两个节点报的计数。 */
   lane: {
-    title: '独占 TCP',
+    title: 'ice3proxy',
     tip: '承载 TCP 连接的流各用一条自己的 TCP，不共用这对节点之间的连接。需要其中一个节点启用中继。',
     hint: '需要其中一个节点启用中继',
     modes: { off: '不用', udp_fallback: 'UDP 不通时用', always: '总是用' },
-    select: (a: string, b: string) => `${a} 和 ${b} 之间的独占 TCP`,
-    changed: (a: string, b: string, mode: string) => `${a} ⇄ ${b} 的独占 TCP 已改为${mode}`,
-    routeNote: '开着独占 TCP 时，共用的连接和它的路由照常保留',
+    select: (a: string, b: string) => `${a} 和 ${b} 之间的 ice3proxy`,
+    changed: (a: string, b: string, mode: string) => `${a} ⇄ ${b} 的 ice3proxy 已改为${mode}`,
+    routeNote: '开着 ice3proxy 时，共用的连接和它的路由照常保留',
     colState: '状态',
     effective: '生效',
     blocked: '未生效',
@@ -429,13 +432,13 @@ export const pairs = {
     colInUse: '在用',
     colIdle: '空闲',
     colFallbacks: '回退',
-    fallbacksTip: '本该走独占 TCP、改走了共用连接的流',
+    fallbacksTip: '本该走 ice3proxy、改走了共用连接的流',
     colDialFailures: '拨号失败',
     countsTip: '两个节点自启动以来的累计',
     reason: {
       noRelay: (a: string, b: string) => `${a} 和 ${b} 都没有启用中继`,
       noTcpAddress: (node: string) => `${node} 的中继没有 TCP 地址`,
-      nodeTooOld: (node: string) => `${node} 的版本不支持独占 TCP`,
+      nodeTooOld: (node: string) => `${node} 的版本不支持 ice3proxy`,
       notConnected: (a: string, b: string) => `访问规则没有连通 ${a} 和 ${b}`,
     },
     fix: {
@@ -446,7 +449,7 @@ export const pairs = {
     },
     details: '详情',
     detailsHide: '收起',
-    detailsFor: (a: string, b: string) => `${a} ⇄ ${b} 的独占 TCP 详情`,
+    detailsFor: (a: string, b: string) => `${a} ⇄ ${b} 的 ice3proxy 详情`,
     notReported: '—',
     row: {
       control: '控制连接',
@@ -462,7 +465,7 @@ export const pairs = {
       refused: '被拒绝',
       refusedTip: '握手成功、但因为用途或数量不对被关掉的连接',
       sealed: '加密搬运',
-      sealedTip: '在独占 TCP 的 TLS 里搬运的字节，两个方向合计',
+      sealedTip: '在 ice3proxy 的 TLS 里搬运的字节，两个方向合计',
       passthrough: '透传',
       passthroughTip: '本来就是 TLS 的数据不再加密，由程序搬运',
       spliced: '内核搬运',

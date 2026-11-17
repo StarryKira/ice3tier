@@ -60,7 +60,7 @@ function setup(pairs: PairView[], extra: Routes = {}) {
 }
 
 describe('节点对页', () => {
-  it('独占 TCP 生效：写出谁拨号和一眼要看的几个数，两边报的合起来', async () => {
+  it('ice3proxy 生效：写出谁拨号和一眼要看的几个数，两边报的合起来', async () => {
     setup([ON_LANES])
     renderWithApp(<PairsPage />, { network: NETWORK })
     const row = await screen.findByTestId('pair-row-hk-laptop')
@@ -72,7 +72,7 @@ describe('节点对页', () => {
       .getAllByRole('cell')
       .map((cell) => cell.textContent)
     expect(cells.slice(4, 8)).toEqual(['12', '8', '1', '2'])
-    // 开着独占 TCP 时说一次：共用的连接和路由照常保留。
+    // 开着 ice3proxy 时说一次：共用的连接和路由照常保留。
     expect(screen.getByText(l.routeNote)).toBeVisible()
   })
 
@@ -110,12 +110,12 @@ describe('节点对页', () => {
     expect(screen.queryByRole('button', { name: l.detailsFor('laptop', 'nas') })).toBeNull()
   })
 
-  it('改独占 TCP 只发这一项；拨连接常驻的开关也只发那一项', async () => {
+  it('改 ice3proxy 只发这一项；拨连接常驻的开关也只发那一项', async () => {
     const api = setup([makePair(1, 2)], {
       'PUT /networks/1/pairs/1/2': (call) => ({ ...makePair(1, 2), ...(call.body as object) }),
     })
     renderWithApp(<PairsPage />, { network: NETWORK })
-    // 没有哪一对开着独占 TCP 时，不画计数的几列。
+    // 没有哪一对开着 ice3proxy 时，不画计数的几列。
     await screen.findByTestId('pair-row-hk-laptop')
     expect(screen.queryByRole('columnheader', { name: l.colInUse })).toBeNull()
 

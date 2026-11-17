@@ -118,7 +118,6 @@ export const nodes: Messages['nodes'] = {
     tabExit: 'Exit',
     tabForward: 'Port forwarding',
     tabRoutes: 'Routes',
-    tabLanes: 'TCP lanes',
     more: 'More',
     succeed: 'Replace offline node…',
     info: 'Details',
@@ -395,16 +394,5 @@ export const nodes: Messages['nodes'] = {
 
     nodeLog: 'Activity log',
     relatedManage: 'Manage',
-
-    lanesEmpty: 'No TCP lanes with other nodes',
-    lanesOffline: 'Node offline',
-    lanesLoadFailed: "Couldn't load node pairs",
-    lanesDials: 'This node dials',
-    lanesPeerDials: 'Peer dials',
-    colLaneTraffic: 'Traffic',
-    laneTrafficTip: (sealed, passthrough, spliced) =>
-      `Encrypted ${sealed} · passthrough ${passthrough} · kernel splice ${spliced}, since start`,
-    lanesPair: 'Node pair',
-    lanesHandshake: (n, causes) => `Failed incoming handshakes: ${n} (${causes})`,
   },
 }

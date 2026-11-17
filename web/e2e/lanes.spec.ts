@@ -10,7 +10,7 @@ import { Controller, type NodeHandle } from './controller'
 import { clearToasts, expectToast, goToAdmin, literal, signIn, t } from './helpers'
 
 /**
- * 独占 TCP（lane）：三个真的跑着的节点，都在这台机器的回环地址上。
+ * ice3proxy（lane）：三个真的跑着的节点，都在这台机器的回环地址上。
  *
  * - gw 启用了 relay，TCP 地址是它在回环上的节点端口；laptop 和 gw 这一对在界面上设成"总是用"：生效，laptop 拨号。
  * - 经 laptop 上的一条端口转发真的走流量（目标是 gw 上的一个 HTTP 服务）：一条一直开着的连接让"在用"不是 0，
@@ -89,7 +89,7 @@ test.beforeAll(async ({ browser }) => {
   const blob = Buffer.alloc(4 * MB, 'l')
   http = createHttpServer((request, response) => {
     if (request.url === '/hold') {
-      // 一条一直开着的连接：它在的时候，经它的那条独占 TCP 一直在用。
+      // 一条一直开着的连接：它在的时候，经它的那条 ice3proxy 一直在用。
       response.writeHead(200, { 'Content-Type': 'text/plain' })
       response.write('holding\n')
       holding.push(response)
@@ -140,7 +140,7 @@ test('准备：gw 是 relay（TCP 地址在回环上），laptop 上一条到 gw
     target_node: nodes.gw.id,
     target_addr: `127.0.0.1:${httpPort}`,
   })
-  // 等转发真的通了（先走共用的连接）：之后再看独占 TCP。
+  // 等转发真的通了（先走共用的连接）：之后再看 ice3proxy。
   await expect.poll(download, { timeout: 40_000 }).toBe(0)
 })
 
@@ -155,7 +155,7 @@ test('添加节点对，设成"总是用"：生效，laptop 拨号', async () =>
   await dialog.getByRole('combobox', { name: t.pairs.nodeB }).click()
   await page.getByRole('option', { name: /10\.66\.0\.1(?!\d)/ }).click()
   await expect(page.getByRole('listbox')).toHaveCount(0)
-  // 只要独占 TCP：连接常驻关掉。
+  // 只要 ice3proxy：连接常驻关掉。
   await dialog.getByRole('switch', { name: t.pairs.colKeepAlive }).click()
   await dialog.getByRole('radio', { name: l.modes.always }).click()
   await dialog.getByRole('button', { name: t.pairs.submit, exact: true }).click()
@@ -172,7 +172,7 @@ test('添加节点对，设成"总是用"：生效，laptop 拨号', async () =>
   await clearToasts(page)
 })
 
-test('流量真的走独占 TCP：在用的连接、详情里的字节数；节点详情里有这一行', async () => {
+test('流量真的走 ice3proxy：在用的连接、详情里的字节数', async () => {
   test.setTimeout(120_000)
   // 两个节点各自开好控制连接、报上来之后再开流：之前开的流按规矩改走共用的连接。
   await expect
@@ -199,17 +199,6 @@ test('流量真的走独占 TCP：在用的连接、详情里的字节数；节�
   await expect(details.getByRole('row', { name: new RegExp(`^${literal(l.row.control)}`) })).toContainText(
     l.row.controlUp,
   )
-
-  // 节点详情：和 gw 之间的那一行，本节点拨号，有流量；连回节点对页，那一对的详情已经展开。
-  await page.goto(`${controller.baseUrl}/n/1/nodes/${nodes.laptop.id}?tab=lanes`)
-  await expect(page.getByRole('tab', { name: t.nodes.detail.tabLanes })).toHaveAttribute('aria-selected', 'true')
-  const lane = page.getByTestId(`node-lane-${nodes.gw.id}`)
-  await expect(lane).toContainText(t.nodes.detail.lanesDials)
-  await expect(lane).toContainText(l.row.controlUp)
-  await expect(page.getByTestId(`node-lane-traffic-${nodes.gw.id}`)).toContainText(/MB/)
-  await lane.getByRole('link', { name: t.nodes.detail.lanesPair }).click()
-  await expect(page).toHaveURL(new RegExp(`/n/1/pairs\\?a=${nodes.laptop.id}&b=${nodes.gw.id}$`))
-  await expect(page.getByRole('table', { name: l.detailsFor('gw', 'laptop') })).toBeVisible()
 })
 
 test('改回"不用"：只发这一项，状态不再显示', async () => {

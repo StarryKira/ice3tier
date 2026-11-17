@@ -38,8 +38,8 @@ export const routes = {
   directKindHint: {
     lan: '两个节点在同一局域网',
     ipv6: '使用对端的 IPv6 地址',
-    reachable: '对端地址可直接连通（公网地址或端口映射），未打洞',
-    punched: '通过打洞建立',
+    reachable: '没打洞就连通了（公网地址、端口映射等）',
+    punched: '打洞后连通',
     unknown: '节点报告了未知的方式',
   },
   /** 经 relay 时到第一个 relay 的那一段。 */
@@ -50,6 +50,29 @@ export const routes = {
     udp: '连中继走 UDP，正常',
     tcp: 'UDP 不通，改走 TCP，能用但会慢一些',
     unknown: '不知道走的什么',
+  },
+  /** 路由表的协议一列：业务协议/底层传输。 */
+  protocol: {
+    quic: 'QUIC',
+    lane: 'ice3proxy',
+    over: (app: string, transport: string) => `${app}/${transport}`,
+    laneHint: '这一对节点之间的 TCP 连接各走一条单独的 TCP（在节点对里打开）',
+  },
+  /** 经中继的那一行，悬停在"中继"上说直连怎么样了。 */
+  directState: {
+    not_tried: '还没试过直连：这一对还没通信过，或者有一方限制了直连',
+    trying: '正在试直连',
+    verified: '直连是通的，按选路模式走了中继',
+    failed: (cause: string) => `直连没通：${cause}`,
+    unknown: '直连情况未知',
+  },
+  directCause: {
+    no_answer: '对端的地址都没有回答',
+    no_candidates: '不知道对端的任何地址',
+    timeouts: '探测连续超时',
+    loss: '丢包超过 20%',
+    stale: '闲置太久，下次用到时再试',
+    unknown: '原因未知',
   },
   withDetail: (route: string, detail: string) => `${route}（${detail}）`,
   /** 微秒写成毫秒；数已经按语言写好。 */

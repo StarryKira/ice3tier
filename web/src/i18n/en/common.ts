@@ -89,6 +89,7 @@ export const errors: Messages['errors'] = {
     range_not_superset: 'New range must contain the current one',
     network_not_empty: 'Network still has nodes',
     not_declared: 'Node has not declared this capability',
+    forward_target_off: 'Port forwarding is off on the target node',
     predecessor_online: 'Node to replace is online',
     conflict: 'Conflicts with existing configuration',
     node_offline: 'Node is offline',

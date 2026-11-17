@@ -138,7 +138,7 @@ export const q = {
       queryFn: () => api.forwards(network),
       refetchInterval: LIVE_INTERVAL,
     }),
-  /** 带着两个节点报的独占 TCP 的计数。 */
+  /** 带着两个节点报的 ice3proxy 的计数。 */
   pairs: (network: NetworkId) =>
     queryOptions({ queryKey: keys.pairs(network), queryFn: () => api.pairs(network), refetchInterval: LIVE_INTERVAL }),
   /** 出口的设置、用量、健康，和用它的节点看到的。 */
