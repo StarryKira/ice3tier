@@ -472,7 +472,10 @@ test('有数据时：节点详情', async () => {
   await shot('node-detail-relay')
   // 保存 relay 的设置：controller 从自己这边试连填的地址（203.0.113.7 是文档用的地址，连不上），写出建议。
   await page.getByTestId('capability-relay').getByRole('button', { name: d.edit }).click()
-  await page.getByTestId('capability-relay').getByRole('button', { name: d.save }).click()
+  const relayDialog = page.getByRole('dialog', { name: d.relayEditTitle('gw-hk') })
+  await expect(relayDialog).toBeVisible()
+  await shot('node-detail-relay-edit', { fullPage: false })
+  await relayDialog.getByRole('button', { name: d.save }).click()
   await expect(page.getByTestId('relay-reachability')).toBeVisible({ timeout: 15_000 })
   await clearToasts(page)
   await shot('node-detail-relay-reachability')

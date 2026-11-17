@@ -37,7 +37,7 @@ describe('relay 这一页', () => {
       ],
     })
     renderWithApp(<RelayTab network={NETWORK} node={detail({ relay: RELAY })} onWaiting={() => undefined} />)
-    await waitFor(() => expect(screen.getByTestId('relay-attached')).toHaveTextContent(d.rowNodes(2)))
+    await waitFor(() => expect(screen.getByTestId('relay-attached')).toHaveTextContent('2'))
   })
 
   it('启用之后写出 controller 试连的结果：连不上是一条建议，不是错误', async () => {

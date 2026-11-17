@@ -407,10 +407,11 @@ test('启用出口：节点没有声明时说明原因和要执行的命令，�
   await expect(page.getByTestId('not-declared-exit')).toHaveCount(0)
   await expect(exitRow.getByTestId('declare-command')).toHaveCount(0)
 
-  // 打开：就地出现几项限制，都有默认值。
+  // 打开：对话框里是几项限制，都有默认值。
   await exitSwitch.click()
-  await expect(exitRow.getByRole('textbox', { name: t.nodes.detail.exitFormPorts })).toHaveValue('80, 443')
-  await exitRow.getByRole('button', { name: t.nodes.detail.exitEnable }).click()
+  const exitDialog = page.getByRole('dialog', { name: t.nodes.detail.exitSwitch(server.name) })
+  await expect(exitDialog.getByRole('textbox', { name: t.nodes.detail.exitFormPorts })).toHaveValue('80, 443')
+  await exitDialog.getByRole('button', { name: t.nodes.detail.exitEnable }).click()
   await expectToast(page, t.nodes.detail.exitEnabledToast(server.name))
   await expect(exitSwitch).toBeChecked()
   // 启用之后给出一个马上能用的例子，地址是这个节点真实的虚拟 IP。

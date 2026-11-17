@@ -1,58 +1,38 @@
 import { useQuery } from '@tanstack/react-query'
-import {
-  ArrowLeftRight,
-  ArrowRight,
-  Cable,
-  ChartPie,
-  DoorOpen,
-  Earth,
-  Forward,
-  Gauge,
-  Globe,
-  Hash,
-  House,
-  Layers,
-  Pencil,
-  Pin,
-  Radio,
-  RadioTower,
-  Users,
-  Zap,
-} from 'lucide-react'
+import { ArrowLeftRight, ArrowRight, DoorOpen, Pencil, RadioTower } from 'lucide-react'
 import { type ReactNode, useEffect, useState } from 'react'
 import { Link } from 'react-router'
 
-import { errorDetail, errorMessage } from '@/api/client'
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
-import { type Network, type Node, type NodeDetail, type Reachability, type RelayInput } from '@/api/types'
+import { type Network, type Node, type NodeDetail, type NodeId, type Reachability } from '@/api/types'
 import { useConfirm } from '@/components/confirm'
 import { CodeBlock } from '@/components/copy'
 import { DeclareHowTo } from '@/components/declare'
-import { DetailList, DetailRow } from '@/components/detail-list'
+import { FormDialog } from '@/components/form-dialog'
 import { InfoTip } from '@/components/info-tip'
+import { NodeLink } from '@/components/node'
 import { Notice } from '@/components/notice'
 import { SkeletonBlock } from '@/components/states'
 import { StatusText } from '@/components/status'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { BoxCard } from '@/components/ui/card'
-import { Field, FormError } from '@/components/ui/field'
-import { Input, Textarea } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { t } from '@/i18n'
 import { exitUsage } from '@/lib/commands'
 import { formatBytes } from '@/lib/format'
 import { attachedCount, nodeName } from '@/lib/nodes'
-import { type Capability, DEFAULT_NODE_PORT, MAX_RELAY_ADDRESSES } from '@/lib/product'
+import { type Capability } from '@/lib/product'
 import { classLabel } from '@/lib/serviceClass'
 import { cn } from '@/lib/utils'
-import { parseOptionalPositiveInt, splitList, validateSocketAddr } from '@/lib/validate'
 import { forwardLabel, forwardStatusView } from '@/pages/forwards/status'
 import { networkPath } from '@/pages/networks/context'
 
 import { useSaveExit } from './exitActions'
 import { ExitFormFields } from './exitForm'
 import { exitFormFrom, type ExitFormState } from './exitFormState'
+import { RelayDialog } from './RelayDialog'
 
 const d = t.nodes.detail
 
@@ -198,27 +178,6 @@ interface CapabilityTabProps {
   onWaiting: (waiting: boolean) => void
 }
 
-interface RelayFormState {
-  udp: string
-  tcp: string
-  region: string
-  bandwidth: string
-}
-
-function relayFormFrom(node: NodeDetail): RelayFormState {
-  if (node.relay !== null) {
-    return {
-      udp: node.relay.udp.join('\n'),
-      tcp: node.relay.tcp.join('\n'),
-      region: node.relay.region,
-      bandwidth: node.relay.bandwidth_mbps?.toString() ?? '',
-    }
-  }
-  // 第一次启用：用 controller 看到的地址预填，多数有公网 IP 的机器不用再改。
-  const observed = node.observed_endpoint ?? ''
-  return { udp: observed, tcp: observed, region: '', bandwidth: '' }
-}
-
 /**
  * 启用 relay 之后 controller 从自己这边试连的结果。这是一条建议，不是错误：relay 已经启用了，
  * controller 和节点不在同一个网络位置上，它连不上不等于节点连不上。
@@ -254,14 +213,96 @@ function ReachabilityNotice({ results, onDismiss }: { results: Reachability[]; o
   )
 }
 
-function addressListProblem(raw: string): string | null {
-  const items = splitList(raw)
-  if (items.length > MAX_RELAY_ADDRESSES) return d.relayFormTooMany(MAX_RELAY_ADDRESSES)
-  for (const item of items) {
-    const problem = validateSocketAddr(item)
-    if (problem !== null) return d.relayFormAddress(item, problem)
-  }
-  return null
+/** 一项设置：上面一行灰色的小字是名字，下面是值。几项排成一行，宽的时候四列。 */
+function Stat({
+  label,
+  tip,
+  wide = false,
+  children,
+}: {
+  label: string
+  tip?: string
+  wide?: boolean
+  children: ReactNode
+}) {
+  return (
+    <div className={cn('min-w-0', wide && 'col-span-2')}>
+      <dt className="flex items-center gap-1 text-[13px] text-muted-foreground">
+        {label}
+        {tip !== undefined ? <InfoTip>{tip}</InfoTip> : null}
+      </dt>
+      <dd className="mt-1.5 text-sm font-medium">{children}</dd>
+    </div>
+  )
+}
+
+function StatGrid({ children }: { children: ReactNode }) {
+  return <dl className="grid grid-cols-2 gap-x-8 gap-y-5 px-5 py-5 @3xl:grid-cols-4">{children}</dl>
+}
+
+/** 中继的地址：UDP 和 TCP 一样时每个地址写一次，后面注明两种都用；不一样时分开写。 */
+function RelayAddresses({ udp, tcp }: { udp: readonly string[]; tcp: readonly string[] }) {
+  const same = udp.length === tcp.length && udp.every((address, index) => address === tcp[index])
+  const lines = same
+    ? udp.map((address) => ({ address, protocols: 'UDP · TCP' }))
+    : [
+        ...udp.map((address) => ({ address, protocols: 'UDP' })),
+        ...tcp.map((address) => ({ address, protocols: 'TCP' })),
+      ]
+  if (lines.length === 0) return <>—</>
+  return (
+    <ul className="space-y-1">
+      {lines.map((line) => (
+        <li key={`${line.protocols}-${line.address}`} className="flex flex-wrap items-baseline gap-x-2">
+          <span className="tabular">{line.address}</span>
+          <span className="text-xs font-normal text-muted-foreground">{line.protocols}</span>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+/**
+ * 连着这个中继的节点：名字、虚拟 IP、延迟，按延迟排。指定用它、但现在没连着的也列出来，排在后面。
+ */
+function ConnectedNodes({ network, relay, nodes }: { network: Network; relay: NodeId; nodes: readonly Node[] }) {
+  const rows = nodes
+    .filter((node) => node.attached.some((entry) => entry.relay === relay) || node.pinned_relays.includes(relay))
+    .map((node) => ({
+      node,
+      rtt: node.attached.find((entry) => entry.relay === relay)?.rtt_ms ?? null,
+      pinned: node.pinned_relays.includes(relay),
+    }))
+    .sort((a, b) => (a.rtt ?? Infinity) - (b.rtt ?? Infinity))
+  const connected = rows.filter((row) => row.rtt !== null).length
+
+  return (
+    <section className="border-t">
+      <h3 className="flex min-h-11 items-center gap-1.5 px-5 py-2.5 text-sm font-medium">
+        {d.relayConnectedTitle}
+        <span data-testid="relay-attached" className="font-normal text-muted-foreground tabular">
+          {connected}
+        </span>
+        <InfoTip>{d.relayAttachedTip}</InfoTip>
+      </h3>
+      {rows.length === 0 ? (
+        <p className="border-t px-5 py-4 text-[13px] text-muted-foreground">{d.relayConnectedNone}</p>
+      ) : (
+        <ul className="divide-y border-t">
+          {rows.map(({ node, rtt, pinned }) => (
+            <li key={node.id} className="flex min-h-11 items-center gap-3 px-5 py-2 text-sm">
+              <NodeLink network={network.id} node={node} online={node.online} />
+              <span className="text-[13px] text-muted-foreground tabular">{node.virtual_ip}</span>
+              {pinned ? <Badge tone="outline">{d.relayPinnedTag}</Badge> : null}
+              <span className="ml-auto text-[13px] text-muted-foreground tabular">
+                {rtt === null ? d.relayNotConnected : t.common.ms(rtt)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
 }
 
 export function RelayTab({ network, node, onWaiting }: CapabilityTabProps) {
@@ -269,59 +310,24 @@ export function RelayTab({ network, node, onWaiting }: CapabilityTabProps) {
   const nodes = useQuery(q.nodes(network.id))
   const watch = useDeclareWatch(node.declared.relay, onWaiting)
   const [editing, setEditing] = useState(false)
-  const [form, setForm] = useState<RelayFormState>(() => relayFormFrom(node))
-  const [submitted, setSubmitted] = useState(false)
   const [reachability, setReachability] = useState<Reachability[] | null>(null)
   const enabled = node.relay !== null
-
-  const save = useAction(network.id, {
-    mutationFn: (input: RelayInput) => api.enableRelay(network.id, node.id, input),
-    success: enabled ? d.relaySavedToast : d.relayEnabledToast(node.name),
-    toastError: false,
-  })
   const attached = attachedCount(nodes.data ?? [], node.id)
   const disable = useAction(network.id, {
     mutationFn: () => api.disableRelay(network.id, node.id),
     success: d.relayDisabledToast(node.name),
   })
 
-  const udpProblem = addressListProblem(form.udp)
-  const tcpProblem = addressListProblem(form.tcp)
-  const needOne = splitList(form.udp).length + splitList(form.tcp).length === 0 ? d.relayFormNeedOne : null
-  const bandwidth = parseOptionalPositiveInt(form.bandwidth)
-
   const openForm = () => {
-    setForm(relayFormFrom(node))
-    setSubmitted(false)
     setReachability(null)
-    save.reset()
     setEditing(true)
-  }
-
-  const submit = () => {
-    setSubmitted(true)
-    if (udpProblem !== null || tcpProblem !== null || needOne !== null || bandwidth.error !== null) return
-    save.mutate(
-      {
-        udp: splitList(form.udp),
-        tcp: splitList(form.tcp),
-        region: form.region.trim(),
-        bandwidth_mbps: bandwidth.value,
-      },
-      {
-        onSuccess: (saved) => {
-          setEditing(false)
-          setReachability(saved.reachability.length > 0 ? saved.reachability : null)
-        },
-      },
-    )
   }
 
   const turnOff = async () => {
     const relays = (nodes.data ?? []).filter((other) => other.relay !== null)
     const pinnedBy = (nodes.data ?? []).filter((other) => other.pinned_relays.includes(node.id)).length
     const only = relays.length === 1
-    // 唯一的 relay 关掉之后，打不通直连的节点对就互不可达了：这是危险级别。
+    // 唯一的中继关掉之后，打不通直连的节点对就互不可达了：这是危险级别。
     const confirmed = await confirm({
       tone: only ? 'danger' : 'normal',
       title: d.relayOffTitle(node.name),
@@ -335,7 +341,6 @@ export function RelayTab({ network, node, onWaiting }: CapabilityTabProps) {
       confirmLabel: d.relayOffConfirm,
     })
     if (confirmed) {
-      setEditing(false)
       setReachability(null)
       disable.mutate()
     }
@@ -344,133 +349,21 @@ export function RelayTab({ network, node, onWaiting }: CapabilityTabProps) {
   const onSwitch = (checked: boolean) => {
     if (checked) openForm()
     else if (enabled) void turnOff()
-    else setEditing(false)
   }
 
-  const pinnedBy = (nodes.data ?? []).filter((other) => other.pinned_relays.includes(node.id)).length
-  const canToggle = enabled || node.declared.relay
   const relay = node.relay
-
   let body: ReactNode
-  if (editing) {
-    body = (
-      <form
-        noValidate
-        onSubmit={(event) => {
-          event.preventDefault()
-          submit()
-        }}
-        className="space-y-4 px-5 py-5"
-      >
-        {!enabled && node.observed_endpoint !== null ? (
-          <Notice>{d.relayPrefilled(node.observed_endpoint)}</Notice>
-        ) : null}
-        <div className="grid grid-cols-2 gap-4">
-          <Field label={d.relayFormUdp} hint={d.relayFormUdpHint} error={submitted ? (udpProblem ?? needOne) : null}>
-            {(props) => (
-              <Textarea
-                {...props}
-                rows={2}
-                className="font-mono"
-                placeholder={`203.0.113.7:${DEFAULT_NODE_PORT}`}
-                value={form.udp}
-                onChange={(event) => setForm({ ...form, udp: event.target.value })}
-              />
-            )}
-          </Field>
-          <Field label={d.relayFormTcp} hint={d.relayFormTcpHint} error={submitted ? tcpProblem : null}>
-            {(props) => (
-              <Textarea
-                {...props}
-                rows={2}
-                className="font-mono"
-                placeholder={`203.0.113.7:${DEFAULT_NODE_PORT}`}
-                value={form.tcp}
-                onChange={(event) => setForm({ ...form, tcp: event.target.value })}
-              />
-            )}
-          </Field>
-          <Field label={d.relayFormRegion} optional={t.common.optional}>
-            {(props) => (
-              <Input
-                {...props}
-                placeholder="hk"
-                value={form.region}
-                onChange={(event) => setForm({ ...form, region: event.target.value })}
-              />
-            )}
-          </Field>
-          <Field label={d.relayFormBandwidth} error={submitted ? bandwidth.error : null} optional={t.common.optional}>
-            {(props) => (
-              <div className="flex items-center gap-2">
-                <Input
-                  {...props}
-                  inputMode="numeric"
-                  placeholder={t.common.unlimited}
-                  className="w-28 tabular"
-                  value={form.bandwidth}
-                  onChange={(event) => setForm({ ...form, bandwidth: event.target.value })}
-                />
-                <span className="text-[13px] text-muted-foreground">{t.common.mbps}</span>
-              </div>
-            )}
-          </Field>
-        </div>
-        <p className="text-[13px] text-muted-foreground">{d.relayPortReminder(DEFAULT_NODE_PORT)}</p>
-        {save.isPending ? (
-          <p role="status" className="text-[13px] text-relay">
-            {d.relayChecking}
-          </p>
-        ) : null}
-        <FormError
-          message={save.isError ? errorMessage(save.error) : null}
-          detail={save.isError ? errorDetail(save.error) : null}
-        />
-        <div className="flex justify-end gap-2">
-          <Button onClick={() => setEditing(false)} disabled={save.isPending}>
-            {t.common.cancel}
-          </Button>
-          <Button type="submit" variant="primary" pending={save.isPending}>
-            {enabled ? d.save : d.relayEnable}
-          </Button>
-        </div>
-      </form>
-    )
-  } else if (relay !== null) {
+  if (relay !== null) {
     body = (
       <>
-        <DetailList>
-          <DetailRow icon={<Radio />} label={d.relayFormUdp} multiline={relay.udp.length > 1}>
-            <AddressList addresses={relay.udp} />
-          </DetailRow>
-          <DetailRow icon={<Cable />} label={d.relayFormTcp} multiline={relay.tcp.length > 1}>
-            <AddressList addresses={relay.tcp} />
-          </DetailRow>
-          <DetailRow icon={<Earth />} label={d.rowRegion}>
-            {relay.region === '' ? '—' : relay.region}
-          </DetailRow>
-          <DetailRow icon={<Gauge />} label={d.rowBandwidth}>
-            {bandwidthValue(relay.bandwidth_mbps)}
-          </DetailRow>
-          <DetailRow
-            icon={<Users />}
-            label={
-              <span className="inline-flex items-center gap-1">
-                {d.rowAttached}
-                <InfoTip>{d.relayAttachedTip}</InfoTip>
-              </span>
-            }
-          >
-            <span data-testid="relay-attached" className="tabular">
-              {d.rowNodes(attached)}
-            </span>
-          </DetailRow>
-          {pinnedBy > 0 ? (
-            <DetailRow icon={<Pin />} label={d.rowPinnedBy}>
-              <span className="tabular">{d.rowNodes(pinnedBy)}</span>
-            </DetailRow>
-          ) : null}
-        </DetailList>
+        <StatGrid>
+          <Stat label={d.statAddress} wide>
+            <RelayAddresses udp={relay.udp} tcp={relay.tcp} />
+          </Stat>
+          <Stat label={d.rowRegion}>{relay.region === '' ? '—' : relay.region}</Stat>
+          <Stat label={d.rowBandwidth}>{bandwidthValue(relay.bandwidth_mbps)}</Stat>
+        </StatGrid>
+        <ConnectedNodes network={network} relay={node.id} nodes={nodes.data ?? []} />
       </>
     )
   } else if (!node.declared.relay) {
@@ -495,23 +388,66 @@ export function RelayTab({ network, node, onWaiting }: CapabilityTabProps) {
       tip={d.withdrawnNote}
       description={d.relayDesc}
       flash={watch.flash}
-      action={enabled && !editing ? <EditButton onClick={openForm} /> : null}
+      action={enabled ? <EditButton onClick={openForm} /> : null}
       control={
         <Switch
           aria-label={d.relaySwitch(node.name)}
           checked={enabled || editing}
-          disabled={!canToggle || disable.isPending || save.isPending}
+          disabled={!(enabled || node.declared.relay) || disable.isPending}
           onCheckedChange={onSwitch}
         />
       }
     >
       {watch.flash ? <Arrived /> : null}
-      {body}
       {/* 保存之后马上就有：不等页面重新取到节点。 */}
-      {reachability !== null && !editing ? (
+      {reachability !== null ? (
         <ReachabilityNotice results={reachability} onDismiss={() => setReachability(null)} />
       ) : null}
+      {body}
+      {editing ? (
+        <RelayDialog
+          network={network}
+          node={node}
+          onClose={() => setEditing(false)}
+          onSaved={(saved) => setReachability(saved.reachability.length > 0 ? saved.reachability : null)}
+        />
+      ) : null}
     </CapabilityCard>
+  )
+}
+
+interface ExitDialogProps {
+  network: Network
+  node: NodeDetail
+  onClose: () => void
+}
+
+/** 启用出口，或者改出口的设置。和出口页上启用出口用的是同一组字段。 */
+function ExitDialog({ network, node, onClose }: ExitDialogProps) {
+  const enabled = node.exit !== null
+  const [initial] = useState<ExitFormState>(() => exitFormFrom(node.exit))
+  const [form, setForm] = useState(initial)
+  const [submitted, setSubmitted] = useState(false)
+  const save = useSaveExit(network, node)
+  return (
+    <FormDialog
+      open
+      onClose={onClose}
+      title={enabled ? d.exitEditTitle(node.name) : d.exitSwitch(node.name)}
+      dirty={JSON.stringify(form) !== JSON.stringify(initial)}
+      submitLabel={enabled ? d.save : d.exitEnable}
+      pending={save.pending}
+      error={save.error}
+      errorDetail={save.errorDetail}
+      onSubmit={() => {
+        setSubmitted(true)
+        void save.submit(form).then((ok) => {
+          if (ok) onClose()
+        })
+      }}
+    >
+      <ExitFormFields state={form} onChange={setForm} showProblems={submitted} />
+    </FormDialog>
   )
 }
 
@@ -519,21 +455,11 @@ export function ExitTab({ network, node, onWaiting }: CapabilityTabProps) {
   const confirm = useConfirm()
   const watch = useDeclareWatch(node.declared.exit, onWaiting)
   const [editing, setEditing] = useState(false)
-  const [form, setForm] = useState<ExitFormState>(() => exitFormFrom(node.exit))
-  const [submitted, setSubmitted] = useState(false)
   const enabled = node.exit !== null
-  const save = useSaveExit(network, node)
   const disable = useAction(network.id, {
     mutationFn: () => api.disableExit(network.id, node.id),
     success: d.exitDisabledToast(node.name),
   })
-
-  const openForm = () => {
-    setForm(exitFormFrom(node.exit))
-    setSubmitted(false)
-    save.reset()
-    setEditing(true)
-  }
 
   const turnOff = async () => {
     const confirmed = await confirm({
@@ -541,85 +467,45 @@ export function ExitTab({ network, node, onWaiting }: CapabilityTabProps) {
       body: d.exitOffBody,
       confirmLabel: d.exitOffConfirm,
     })
-    if (confirmed) {
-      setEditing(false)
-      disable.mutate()
-    }
+    if (confirmed) disable.mutate()
   }
 
   const onSwitch = (checked: boolean) => {
-    if (checked) openForm()
+    if (checked) setEditing(true)
     else if (enabled) void turnOff()
-    else setEditing(false)
   }
 
   const exit = node.exit
-
   let body: ReactNode
-  if (editing) {
-    body = (
-      <form
-        noValidate
-        onSubmit={(event) => {
-          event.preventDefault()
-          setSubmitted(true)
-          void save.submit(form).then((ok) => {
-            if (ok) setEditing(false)
-          })
-        }}
-        className="space-y-4 px-5 py-5"
-      >
-        <ExitFormFields state={form} onChange={setForm} showProblems={submitted} />
-        <FormError message={save.error} detail={save.errorDetail} />
-        <div className="flex justify-end gap-2">
-          <Button onClick={() => setEditing(false)} disabled={save.pending}>
-            {t.common.cancel}
-          </Button>
-          <Button type="submit" variant="primary" pending={save.pending}>
-            {enabled ? d.save : d.exitEnable}
-          </Button>
-        </div>
-      </form>
-    )
-  } else if (exit !== null) {
+  if (exit !== null) {
     body = (
       <>
-        <DetailList>
-          <DetailRow icon={<Hash />} label={d.rowPorts}>
+        <StatGrid>
+          <Stat label={d.rowPorts}>
             <span className="tabular">{exit.ports === null ? t.common.unlimited : exit.ports.join(', ')}</span>
-          </DetailRow>
-          <DetailRow icon={<House />} label={d.rowLan}>
-            {exit.lan ? d.rowLanOn : d.rowLanOff}
-          </DetailRow>
-          <DetailRow icon={<Gauge />} label={d.rowBandwidth}>
-            {bandwidthValue(exit.bandwidth_mbps)}
-          </DetailRow>
+          </Stat>
+          <Stat label={d.rowLan}>{exit.lan ? d.rowLanOn : d.rowLanOff}</Stat>
+          <Stat label={d.rowBandwidth}>{bandwidthValue(exit.bandwidth_mbps)}</Stat>
           {exit.quota_bytes !== null ? (
-            <DetailRow icon={<ChartPie />} label={d.rowQuota}>
+            <Stat label={d.rowQuota}>
               <span className="tabular">{d.rowQuotaValue(formatBytes(exit.quota_bytes), exit.quota_reset_day)}</span>
-            </DetailRow>
+            </Stat>
           ) : null}
           {exit.family !== 'any' ? (
-            <DetailRow icon={<Globe />} label={d.rowFamily}>
-              {exit.family === 'ipv4' ? d.exitFamilyIpv4 : d.exitFamilyIpv6}
-            </DetailRow>
+            <Stat label={d.rowFamily}>{exit.family === 'ipv4' ? d.exitFamilyIpv4 : d.exitFamilyIpv6}</Stat>
           ) : null}
           {exit.connects_per_minute !== null ? (
-            <DetailRow icon={<Zap />} label={d.rowConnects}>
+            <Stat label={d.rowConnects}>
               <span className="tabular">{d.rowConnectsValue(exit.connects_per_minute)}</span>
-            </DetailRow>
+            </Stat>
           ) : null}
-          {exit.class !== null ? (
-            <DetailRow icon={<Layers />} label={d.rowClass}>
-              {classLabel(exit.class)}
-            </DetailRow>
-          ) : null}
+          {exit.class !== null ? <Stat label={d.rowClass}>{classLabel(exit.class)}</Stat> : null}
           {exit.upstream_socks5 !== null ? (
-            <DetailRow icon={<Forward />} label={d.rowUpstream} copy={exit.upstream_socks5}>
+            <Stat label={d.rowUpstream}>
               <span className="tabular">{exit.upstream_socks5}</span>
-            </DetailRow>
+            </Stat>
           ) : null}
-        </DetailList>
+        </StatGrid>
         <div className="border-t px-5 py-4">
           <p className="text-[13px] text-muted-foreground">{d.exitUsageBody}</p>
           <CodeBlock copy={exitUsage(node.virtual_ip)} className="mt-2">
@@ -650,18 +536,19 @@ export function ExitTab({ network, node, onWaiting }: CapabilityTabProps) {
       tip={d.withdrawnNote}
       description={d.exitDesc}
       flash={watch.flash}
-      action={enabled && !editing ? <EditButton onClick={openForm} /> : null}
+      action={enabled ? <EditButton onClick={() => setEditing(true)} /> : null}
       control={
         <Switch
           aria-label={d.exitSwitch(node.name)}
           checked={enabled || editing}
-          disabled={!(enabled || node.declared.exit) || disable.isPending || save.pending}
+          disabled={!(enabled || node.declared.exit) || disable.isPending}
           onCheckedChange={onSwitch}
         />
       }
     >
       {watch.flash ? <Arrived /> : null}
       {body}
+      {editing ? <ExitDialog network={network} node={node} onClose={() => setEditing(false)} /> : null}
     </CapabilityCard>
   )
 }
@@ -743,20 +630,6 @@ export function ForwardTab({ network, node, onWaiting }: CapabilityTabProps) {
       {watch.flash ? <Arrived /> : null}
       {body}
     </CapabilityCard>
-  )
-}
-
-/** 一个或几个地址，一行一个。 */
-function AddressList({ addresses }: { addresses: readonly string[] }) {
-  if (addresses.length === 0) return <>—</>
-  return (
-    <ul className="space-y-1">
-      {addresses.map((address) => (
-        <li key={address} className="tabular">
-          {address}
-        </li>
-      ))}
-    </ul>
   )
 }
 
