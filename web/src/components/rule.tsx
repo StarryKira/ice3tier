@@ -28,9 +28,9 @@ export function RuleSentence({
 }) {
   return (
     <span className={cn('inline-flex items-center gap-1.5', className)}>
-      <GroupChip name={rule.src.name} muted={muted} />
+      <GroupChip name={rule.src.name} builtin={rule.src.builtin} muted={muted} />
       <DirectionMark direction={rule.direction} />
-      <GroupChip name={rule.dst.name} muted={muted} />
+      <GroupChip name={rule.dst.name} builtin={rule.dst.builtin} muted={muted} />
     </span>
   )
 }

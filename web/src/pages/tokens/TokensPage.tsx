@@ -166,7 +166,7 @@ export function TokensPage() {
                         {hasPreset ? (
                           <span className="inline-flex flex-wrap items-center gap-1.5 text-[13px]">
                             {token.groups.map((group) => (
-                              <GroupChip key={group.id} name={group.name} />
+                              <GroupChip key={group.id} name={group.name} builtin={group.builtin} />
                             ))}
                             {token.virtual_ip !== null ? <span>{k.presetIp(token.virtual_ip)}</span> : null}
                             {token.successor_of !== null ? (

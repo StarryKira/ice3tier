@@ -58,7 +58,7 @@ export function RuleDialog({ network, graph, rule, draft, open, onClose }: RuleD
   const groupOf = (id: GroupId) => graph.groups.find((group) => group.id === id)
   const memberCount = (id: GroupId) => groupOf(id)?.nodes.length ?? 0
   // 规则写成 `a ⇄ b` 时用的名字；列表里没有（刚删掉）时写编号。
-  const refOf = (id: GroupId): GroupRef => ({ id, name: groupOf(id)?.name ?? `#${id}` })
+  const refOf = (id: GroupId): GroupRef => ({ id, name: groupOf(id)?.name ?? `#${id}`, builtin: groupOf(id)?.builtin })
   const options = useMemo<ComboOption<GroupId>[]>(
     () =>
       graph.groups.map((group) => ({
@@ -212,7 +212,7 @@ export function RuleDialog({ network, graph, rule, draft, open, onClose }: RuleD
       {emptyGroups.map((id) => (
         <Notice key={id} tone="warn">
           <span className="inline-flex flex-wrap items-center gap-1.5">
-            <GroupChip name={refOf(id).name} />
+            <GroupChip name={refOf(id).name} builtin={refOf(id).builtin} />
             {d.emptyGroup}
           </span>
         </Notice>

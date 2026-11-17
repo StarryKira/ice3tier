@@ -13,6 +13,8 @@ import { networkPath } from '@/pages/networks/context'
 
 interface GroupChipProps {
   name: string
+  /** 是不是内置的 `All`（`GroupRef.builtin`）。没给时按名字认。 */
+  builtin?: boolean
   /** 给了就在名字右边出现一个移除的叉。 */
   onRemove?: () => void
   muted?: boolean
@@ -29,8 +31,8 @@ const CHIP_SIZE = {
 /**
  * 分组的样子，全站一致：分组的图标加名字，浅灰底。内置的 `All` 是空心的细框，表示它不是管理员加上去的。
  */
-export function GroupChip({ name, onRemove, muted = false, size = 'sm', className }: GroupChipProps) {
-  const builtin = isAllGroup({ name })
+export function GroupChip({ name, builtin: flag, onRemove, muted = false, size = 'sm', className }: GroupChipProps) {
+  const builtin = isAllGroup({ name, builtin: flag })
   return (
     <span
       className={cn(
@@ -69,7 +71,7 @@ export function GroupList({ groups, max = 2, empty }: { groups: readonly GroupRe
   return (
     <span className="inline-flex flex-wrap items-center gap-1">
       {shown.map((group) => (
-        <GroupChip key={group.id} name={group.name} />
+        <GroupChip key={group.id} name={group.name} builtin={group.builtin} />
       ))}
       {rest.length > 0 ? (
         <Tooltip content={formatList(rest)}>
@@ -217,11 +219,12 @@ export function GroupPicker({
           )}
         >
           <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
-            <GroupChip name={allName} size="md" />
+            <GroupChip name={allName} builtin size="md" />
             {value.map((group) => (
               <GroupChip
                 key={group.id}
                 name={group.name}
+                builtin={group.builtin}
                 size="md"
                 onRemove={disabled || busy ? undefined : () => onChange(value.filter((other) => other.id !== group.id))}
               />
@@ -311,6 +314,7 @@ export function GroupPicker({
               >
                 <GroupChip
                   name={group.name}
+                  builtin={group.builtin}
                   size="md"
                   // 这一行亮着时底色是灰的，分组换成白底才分得出来。
                   className={cn('min-w-0 shrink', index === active && !group.builtin && 'bg-card')}

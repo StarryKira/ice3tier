@@ -77,6 +77,8 @@ export interface NodeRef {
 export interface GroupRef {
   id: GroupId
   name: string
+  /** 是不是内置的 `All`。比 0.1.8 旧的 controller 不给，这时按名字认（`isAllGroup`）。 */
+  builtin?: boolean
 }
 
 export interface Status {

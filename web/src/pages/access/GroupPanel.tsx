@@ -46,7 +46,7 @@ export function GroupPanel({ network, graph, active }: GroupPanelProps) {
               active === group.id && 'bg-accent/60 hover:bg-accent',
             )}
           >
-            <GroupChip name={group.name} />
+            <GroupChip name={group.name} builtin={group.builtin} />
             <span className="text-[13px] text-muted-foreground tabular">{p.members(group.nodes.length)}</span>
             <span className="ml-auto text-[13px] text-muted-foreground tabular">{p.usedBy(group.rules.length)}</span>
             <ChevronRight className="size-3.5 shrink-0 text-faint" aria-hidden />
