@@ -120,7 +120,6 @@ export const nodes: Messages['nodes'] = {
     tabExit: 'Exit',
     tabForward: 'Port forwarding',
     tabRoutes: 'Routes',
-    tabAccess: 'Access',
     tabRelated: 'Related',
     tabListen: 'Listening',
     tabLanes: 'TCP lanes',
@@ -393,15 +392,6 @@ export const nodes: Messages['nodes'] = {
     rttUnknown: '—',
     routesOnTopology: 'Topology',
     routesDiagnose: 'Diagnose',
-
-    accessPending: 'Node still on old rules; latest config not confirmed',
-    accessCanReach: (n) => `Can reach (${n})`,
-    accessReachableBy: (n) => `Reachable by (${n})`,
-    accessNone: 'None',
-    accessByRules: 'Allowed by',
-    accessByRule: (rule) => `Allowed by rule ${rule}`,
-    accessOpen: 'View in graph',
-    accessLoadFailed: "Couldn't load access",
 
     listenLoadFailed: "Couldn't load listening ports",
     listenOffline: 'Node offline',

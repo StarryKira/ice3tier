@@ -110,7 +110,6 @@ export const nodes = {
     tabExit: '出口',
     tabForward: '端口转发',
     tabRoutes: '路由',
-    tabAccess: '访问',
     tabRelated: '关联配置',
     tabListen: '监听',
     tabLanes: '独占 TCP',
@@ -371,15 +370,6 @@ export const nodes = {
     rttUnknown: '—',
     routesOnTopology: '拓扑',
     routesDiagnose: '诊断',
-
-    accessPending: '节点未确认最新配置，仍在使用旧规则',
-    accessCanReach: (n: number) => `可访问（${n}）`,
-    accessReachableBy: (n: number) => `可被访问（${n}）`,
-    accessNone: '无',
-    accessByRules: '允许的规则',
-    accessByRule: (rule: string) => `由规则 ${rule} 允许`,
-    accessOpen: '在关系图中查看',
-    accessLoadFailed: '无法加载访问关系',
 
     listenLoadFailed: '无法加载监听',
     listenOffline: '节点离线',
