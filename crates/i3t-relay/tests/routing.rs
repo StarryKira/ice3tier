@@ -232,6 +232,9 @@ async fn an_overloaded_relay_is_left_at_once_and_not_rejoined_the_moment_it_reco
     a.paths.activate(d.id);
     let via = |relay: &Node| Route::Relay { relays: vec![relay.id] };
     a.wait_route(&d, "经 R1", |route| *route == via(&r1)).await;
+    // A 的路是照 netmap 里写的挂靠定的，D 自己到 R1 的会话这时可能还没有建好。那时就灌包，R1 回的是"对端没有挂在我这里"，
+    // A 因为那个原因换走，考不到过载。等两边在 R1 上都有会话了再开始。
+    eventually("A 和 D 在 R1 上都有会话", SOON, || [&a, &d].iter().all(|node| r1.relay().has_session(node.id))).await;
     let mut changes = a.paths.subscribe();
 
     // 往 D 灌远超过 R1 上限的包（不经过连接层，所以没有拥塞控制替它收着）。R1 丢掉超出的部分，同时发现自己过载了，
