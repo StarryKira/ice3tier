@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeftRight, ArrowRight, DoorOpen, Pencil, RadioTower } from 'lucide-react'
+import { ArrowLeftRight, ArrowRight, DoorOpen, RadioTower } from 'lucide-react'
 import { type ReactNode, useEffect, useState } from 'react'
 import { Link } from 'react-router'
 
@@ -10,7 +10,6 @@ import { useConfirm } from '@/components/confirm'
 import { CodeBlock } from '@/components/copy'
 import { DeclareHowTo } from '@/components/declare'
 import { Flag } from '@/components/flag'
-import { FormDialog } from '@/components/form-dialog'
 import { InfoTip } from '@/components/info-tip'
 import { Notice } from '@/components/notice'
 import { SkeletonBlock } from '@/components/states'
@@ -20,19 +19,17 @@ import { BoxCard } from '@/components/ui/card'
 import { Switch } from '@/components/ui/switch'
 import { t, useLocale } from '@/i18n'
 import { exitUsage } from '@/lib/commands'
-import { formatBytes } from '@/lib/format'
 import { countryName } from '@/lib/region'
 import { attachedCount, nodeName } from '@/lib/nodes'
 import { type Capability } from '@/lib/product'
-import { classLabel } from '@/lib/serviceClass'
 import { cn } from '@/lib/utils'
 import { forwardLabel, forwardStatusView } from '@/pages/forwards/status'
 import { networkPath } from '@/pages/networks/context'
 
 import { useSaveExit } from './exitActions'
-import { ExitFormFields } from './exitForm'
-import { exitFormFrom, type ExitFormState } from './exitFormState'
+import { exitFormFrom } from './exitFormState'
 import { ConnectedNodesCard, RelayLinksCard, RelayPairsCard, RelayStateValue } from './RelayCards'
+import { ExitSettingsList, ExitUsageCard, ExitUsersCard } from './ExitCards'
 import { RelayDialog } from './RelayDialog'
 
 const d = t.nodes.detail
@@ -101,16 +98,6 @@ function CapabilityCard({
 /** 卡片里一段说明文字（还没声明、已声明未启用）。 */
 function CardNote({ children }: { children: ReactNode }) {
   return <div className="px-5 py-4 text-[13px]">{children}</div>
-}
-
-/** 开关左边的"修改"：一个安静的小按钮。 */
-function EditButton({ onClick }: { onClick: () => void }) {
-  return (
-    <Button variant="ghost" size="sm" onClick={onClick} className="text-muted-foreground hover:text-foreground">
-      <Pencil aria-hidden />
-      {d.edit}
-    </Button>
-  )
 }
 
 /** 声明刚到时卡片里的一句话。 */
@@ -403,46 +390,12 @@ export function RelayTab({ network, node, onWaiting }: CapabilityTabProps) {
   )
 }
 
-interface ExitDialogProps {
-  network: Network
-  node: NodeDetail
-  onClose: () => void
-}
-
-/** 启用出口，或者改出口的设置。和出口页上启用出口用的是同一组字段。 */
-function ExitDialog({ network, node, onClose }: ExitDialogProps) {
-  const enabled = node.exit !== null
-  const [initial] = useState<ExitFormState>(() => exitFormFrom(node.exit))
-  const [form, setForm] = useState(initial)
-  const [submitted, setSubmitted] = useState(false)
-  const save = useSaveExit(network, node)
-  return (
-    <FormDialog
-      open
-      onClose={onClose}
-      title={enabled ? d.exitEditTitle(node.name) : d.exitSwitch(node.name)}
-      dirty={JSON.stringify(form) !== JSON.stringify(initial)}
-      submitLabel={enabled ? d.save : d.exitEnable}
-      pending={save.pending}
-      error={save.error}
-      errorDetail={save.errorDetail}
-      onSubmit={() => {
-        setSubmitted(true)
-        void save.submit(form).then((ok) => {
-          if (ok) onClose()
-        })
-      }}
-    >
-      <ExitFormFields state={form} onChange={setForm} showProblems={submitted} />
-    </FormDialog>
-  )
-}
-
 export function ExitTab({ network, node, onWaiting }: CapabilityTabProps) {
   const confirm = useConfirm()
   const watch = useDeclareWatch(node.declared.exit, onWaiting)
-  const [editing, setEditing] = useState(false)
   const enabled = node.exit !== null
+  // 打开开关就按默认值启用（端口不限、不含局域网）；之后在下面一项一项改，没有对话框。
+  const enable = useSaveExit(network, node)
   const disable = useAction(network.id, {
     mutationFn: () => api.disableExit(network.id, node.id),
     success: d.exitDisabledToast(node.name),
@@ -458,7 +411,7 @@ export function ExitTab({ network, node, onWaiting }: CapabilityTabProps) {
   }
 
   const onSwitch = (checked: boolean) => {
-    if (checked) setEditing(true)
+    if (checked) void enable.submit(exitFormFrom(null))
     else if (enabled) void turnOff()
   }
 
@@ -467,31 +420,7 @@ export function ExitTab({ network, node, onWaiting }: CapabilityTabProps) {
   if (exit !== null) {
     body = (
       <>
-        <StatGrid>
-          <Stat label={d.rowPorts}>
-            <span className="tabular">{exit.ports === null ? t.common.unlimited : exit.ports.join(', ')}</span>
-          </Stat>
-          <Stat label={d.rowLan}>{exit.lan ? d.rowLanOn : d.rowLanOff}</Stat>
-          {exit.quota_bytes !== null ? (
-            <Stat label={d.rowQuota}>
-              <span className="tabular">{d.rowQuotaValue(formatBytes(exit.quota_bytes), exit.quota_reset_day)}</span>
-            </Stat>
-          ) : null}
-          {exit.family !== 'any' ? (
-            <Stat label={d.rowFamily}>{exit.family === 'ipv4' ? d.exitFamilyIpv4 : d.exitFamilyIpv6}</Stat>
-          ) : null}
-          {exit.connects_per_minute !== null ? (
-            <Stat label={d.rowConnects}>
-              <span className="tabular">{d.rowConnectsValue(exit.connects_per_minute)}</span>
-            </Stat>
-          ) : null}
-          {exit.class !== null ? <Stat label={d.rowClass}>{classLabel(exit.class)}</Stat> : null}
-          {exit.upstream_socks5 !== null ? (
-            <Stat label={d.rowUpstream}>
-              <span className="tabular">{exit.upstream_socks5}</span>
-            </Stat>
-          ) : null}
-        </StatGrid>
+        <ExitSettingsList network={network} node={node} exit={exit} />
         <div className="border-t px-5 py-4">
           <p className="text-[13px] text-muted-foreground">{d.exitUsageBody}</p>
           <CodeBlock copy={exitUsage(node.virtual_ip)} className="mt-2">
@@ -514,7 +443,7 @@ export function ExitTab({ network, node, onWaiting }: CapabilityTabProps) {
     )
   }
 
-  return (
+  const card = (
     <CapabilityCard
       testId="capability-exit"
       icon={<DoorOpen />}
@@ -522,20 +451,29 @@ export function ExitTab({ network, node, onWaiting }: CapabilityTabProps) {
       tip={d.withdrawnNote}
       description={d.exitDesc}
       flash={watch.flash}
-      action={enabled ? <EditButton onClick={() => setEditing(true)} /> : null}
       control={
         <Switch
           aria-label={d.exitSwitch(node.name)}
-          checked={enabled || editing}
-          disabled={!(enabled || node.declared.exit) || disable.isPending}
+          checked={enabled || enable.pending}
+          disabled={!(enabled || node.declared.exit) || disable.isPending || enable.pending}
           onCheckedChange={onSwitch}
         />
       }
     >
       {watch.flash ? <Arrived /> : null}
       {body}
-      {editing ? <ExitDialog network={network} node={node} onClose={() => setEditing(false)} /> : null}
     </CapabilityCard>
+  )
+  // 和中继页一样：没启用时只有这一张卡片；启用之后宽屏分两栏，左边是出口和它的设置，右边是用量、能用它的节点。
+  if (!enabled) return <div className="max-w-5xl">{card}</div>
+  return (
+    <div className="grid items-start gap-5 @6xl:grid-cols-2">
+      {card}
+      <div className="space-y-5">
+        <ExitUsageCard network={network} node={node} />
+        <ExitUsersCard network={network} node={node} />
+      </div>
+    </div>
   )
 }
 

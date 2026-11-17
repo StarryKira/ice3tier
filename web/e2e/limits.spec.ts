@@ -152,24 +152,24 @@ test('出口配额：在节点详情里配上，下载之后出口页有本账�
   await page.goto(`${controller.baseUrl}/n/1/nodes/${nodes.gw.id}?tab=exit`)
   const exitRow = page.getByTestId('capability-exit')
   const d = t.nodes.detail
+  // 打开开关就启用；设置在卡片里一项一项改，改了就保存。
   await exitRow.getByRole('switch', { name: d.exitSwitch('gw') }).click()
-  const form = page.getByRole('dialog', { name: d.exitSwitch('gw') })
-  await form.getByRole('textbox', { name: new RegExp(`^${literal(d.exitFormQuota)}`) }).fill('1')
-  await form.getByRole('combobox', { name: d.exitFormQuotaUnit }).selectOption('GB')
-  await form.getByRole('spinbutton', { name: d.exitFormResetDay }).fill('5')
-  await form.getByRole('radio', { name: d.exitFormFamilyIpv4 }).click()
-  await form.getByRole('switch', { name: new RegExp(`^${literal(d.exitFormLan)}`) }).click()
-  await form.getByRole('button', { name: d.exitEnable }).click()
+  await expectToast(page, d.exitEnabledToast('gw'))
+  await clearToasts(page)
+  const quota = exitRow.getByRole('textbox', { name: new RegExp(`^${literal(d.exitFormQuota)}`) })
+  await quota.fill('1')
+  await exitRow.getByRole('combobox', { name: d.exitFormQuotaUnit }).selectOption('GB')
+  await exitRow.getByRole('spinbutton', { name: d.exitFormResetDay }).fill('5')
+  await exitRow.getByRole('spinbutton', { name: d.exitFormResetDay }).press('Tab')
+  await expectToast(page, d.exitSavedToast)
+  await exitRow.getByRole('radio', { name: d.exitFormFamilyIpv4 }).click()
+  await exitRow.getByRole('switch', { name: new RegExp(`^${literal(d.exitFormLan)}`) }).click()
   // 打开"允许访问局域网"要确认一次。
   await page.getByRole('alertdialog').getByRole('button', { name: d.exitLanConfirm }).click()
-  await expectToast(page, d.exitEnabledToast('gw'))
-  await expect(exitRow).toContainText(d.rowQuotaValue('1.0 GB', 5))
-  await expect(exitRow).toContainText(d.exitFamilyIpv4)
-  const exits = await controller.api<{ settings: { quota_bytes: number; quota_reset_day: number; family: string } }[]>(
-    'GET',
-    `${NET}/exits`,
-  )
-  expect(exits[0]?.settings).toMatchObject({ quota_bytes: 1024 * MB, quota_reset_day: 5, family: 'ipv4' })
+  type ExitApi = { settings: { quota_bytes: number; quota_reset_day: number; family: string; lan: boolean } }
+  await expect
+    .poll(async () => (await controller.api<ExitApi[]>('GET', `${NET}/exits`))[0]?.settings)
+    .toMatchObject({ quota_bytes: 1024 * MB, quota_reset_day: 5, family: 'ipv4', lan: true })
   await clearToasts(page)
 
   // laptop 上的程序经它本机的入口、用户名写 gw，下载一个文件：从 gw 出去。

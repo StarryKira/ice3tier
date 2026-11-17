@@ -272,7 +272,7 @@ export function NodeDetailPage() {
         <TabsContent value="relay">
           <RelayTab network={network} node={node} onWaiting={setWaiting} />
         </TabsContent>
-        <TabsContent value="exit" className="max-w-5xl">
+        <TabsContent value="exit">
           <ExitTab network={network} node={node} onWaiting={setWaiting} />
         </TabsContent>
         <TabsContent value="forward" className="max-w-5xl">
