@@ -610,7 +610,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `declared` | 节点在本地声明的"可以承担"：`exit` 出口、`relay`、`forward` 端口转发的目标。由节点上报，这里只读 |
 | `relay` | 启用为 relay 时是它的设置（见 5.5），否则 `null` |
 | `exit` | 启用为出口时是它的设置（见 5.6），否则 `null` |
-| `dial_out_only` | 只拨出：不接受别人主动发来的连接，不参与打洞 |
+| `dial_out_only` | 只主动连接：不接受别人主动发来的连接，不参与打洞 |
 | `routing` | 覆盖网络默认值的选路模式；`null` 表示用网络的 |
 | `reach` | 覆盖网络默认值的路径限制；`null` 表示用网络的 |
 | `pinned_relays` | 管理员固定的挂靠 relay（节点编号）；空表示节点自己挑 |
@@ -2579,7 +2579,7 @@ Prometheus 的文本格式（`Content-Type: text/plain; version=0.0.4`）。**�
 | `no_candidates` | 手上没有对端的候选地址 |
 | `udp_blocked` | 节点的 UDP 不通（它到 relay 只能走 TCP） |
 | `mapping_varies` | 节点映射出来的端口随对端变化（对称型 NAT），打不了洞 |
-| `dial_out_only` | 两个节点都是只拨出的 |
+| `dial_out_only` | 两个节点都是只主动连接的 |
 | `timeout` | 试过了，没有在时限之内成功 |
 | `unreachable` | 这条路径此刻走不了：到它的第一个 relay 没有会话，或者路径上有 relay 不转发 |
 | `refused` | 对端拒绝了测量流 |
@@ -2597,7 +2597,7 @@ Prometheus 的文本格式（`Content-Type: text/plain; version=0.0.4`）。**�
 | 字段 | 含义 |
 |---|---|
 | `ok` | 两端都有了验证过的直连 |
-| `kind` | 直连是怎么建立的（发起方看到的）：`lan`、`ipv6`、`reachable`（对端的地址本来就连得上：公网地址、端口转发、端口映射）、`punched`（打洞）。由发起方带头去试、接受方只回应（接受方是只拨出的节点时它也去试），所以本来就连得上的地址报成 `reachable` |
+| `kind` | 直连是怎么建立的（发起方看到的）：`lan`、`ipv6`、`reachable`（对端的地址本来就连得上：公网地址、端口转发、端口映射）、`punched`（打洞）。由发起方带头去试、接受方只回应（接受方是只主动连接的节点时它也去试），所以本来就连得上的地址报成 `reachable` |
 | `elapsed_ms` | 从开始尝试到验证通过，毫秒；开始时就已经有直连（`already` 是 `true`）或者没成时是 `null` |
 | `already` | 开始时就已经有直连：没有新建，所以没有耗时 |
 | `problem` | 没成（或者没做）时最能说明问题的原因，说得出是哪个节点的（`udp_blocked`、`mapping_varies` 之类）排在 `timeout` 前面 |

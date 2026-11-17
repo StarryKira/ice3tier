@@ -272,7 +272,7 @@ pub(crate) struct Control {
     shared: Arc<Shared>,
     key: Arc<NodeKey>,
     netmap: Arc<Netmap>,
-    /// 这三项来自 netmap：能不能用直连、能不能用 relay、本节点是不是只拨出。
+    /// 这三项来自 netmap：能不能用直连、能不能用 relay、本节点是不是只主动连接。
     allow_direct: bool,
     allow_relay: bool,
     dial_out_only: bool,
@@ -643,7 +643,7 @@ impl Control {
     fn sync_lan(&self) {
         let lan = self.shared.lan.lock().expect("lan discovery mutex poisoned");
         let Some(lan) = lan.as_ref() else { return };
-        // 不建立直连的节点既不找人也不让人找；只拨出的节点照样听，但自己不出声。
+        // 不建立直连的节点既不找人也不让人找；只主动连接的节点照样听，但自己不出声。
         let keys: Vec<PublicKey> = if self.allow_direct { self.peers.values().map(|peer| peer.key).collect() } else { Vec::new() };
         lan.set_peers(&keys);
         lan.set_announcing(self.allow_direct && !self.dial_out_only);
@@ -794,7 +794,7 @@ impl Control {
         };
         let policy = direct_policy(&self.shared, self.allow_direct, self.dial_out_only, self.mode, &self.endpoints, peer);
         if !policy.signal {
-            tracing::debug!(peer = %from, "本节点或者对端是只拨出的，不参与打洞，忽略信令");
+            tracing::debug!(peer = %from, "本节点或者对端是只主动连接的，不参与打洞，忽略信令");
             return;
         }
         // 信令是经 controller 或者已经认证的连接送来的，对端确实想和本端建立直连：把它当作活跃的，后面几轮探测才会跟上。
@@ -814,7 +814,7 @@ impl Control {
             return;
         };
         if self.dial_out_only && !peer.slot.is_active(&self.shared.clock) {
-            // 只拨出的节点不理别人主动找上来的探测，只有它自己正在连的对端除外。
+            // 只主动连接的节点不理别人主动找上来的探测，只有它自己正在连的对端除外。
             return;
         }
         // 对端的候选地址来的用那个地址自己的额度；陌生地址来的先用这个对端的、再用全体的。不管签名对不对都要扣：

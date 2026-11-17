@@ -273,7 +273,7 @@ fn peer_details_follow_least_privilege() {
     let seen_by_exit = exit.netmap().peer(user).cloned().unwrap();
     assert!(seen_by_exit.inbound && !seen_by_exit.outbound && seen_by_exit.exit.is_none() && seen_by_exit.keep_alive);
 
-    // 只走 relay 的节点不向对端暴露地址；只拨出的节点带着标记。
+    // 只走 relay 的节点不向对端暴露地址；只主动连接的节点带着标记。
     let hide = UpdateNode { reach: Some(Some(Reach::RelayOnly)), dial_out_only: Some(true), ..UpdateNode::default() };
     lab.controller.update_node(network.id, exit.id, &hide).unwrap();
     lab.settle(&mut [&mut exit]);

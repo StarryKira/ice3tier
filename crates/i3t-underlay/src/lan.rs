@@ -136,7 +136,7 @@ impl LanDiscovery {
         *self.inner.peers.write().expect("lan peers lock poisoned") = peers;
     }
 
-    /// 本节点发不发信标。不建立直连的节点、只拨出的节点不发，但照样听。
+    /// 本节点发不发信标。不建立直连的节点、只主动连接的节点不发，但照样听。
     pub fn set_announcing(&self, announcing: bool) {
         self.inner.announcing.store(announcing, Ordering::Relaxed);
     }

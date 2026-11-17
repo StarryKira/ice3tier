@@ -255,7 +255,7 @@ impl Manager {
             None => return Err(OpenError::UnknownPeer(peer)),
         };
         if dial_out_only {
-            tracing::info!(%peer, "对端只拨出，不接受连进去的连接；只能等它连过来");
+            tracing::info!(%peer, "对端只主动连接，不接受连进去的连接；只能等它连过来");
             return Err(OpenError::NoRoute(peer));
         }
         let deadline = tokio::time::Instant::now() + DIAL_TIMEOUT;
@@ -432,7 +432,7 @@ impl Manager {
                 continue;
             };
             if dial_out_only {
-                tracing::info!(peer = %claimed, "本节点只拨出，拒绝对端连进来的连接");
+                tracing::info!(peer = %claimed, "本节点只主动连接，拒绝对端连进来的连接");
                 incoming.refuse();
                 continue;
             }

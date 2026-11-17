@@ -468,7 +468,7 @@ fn describe_update(before: &NodeRecord, after: &NodeRecord, groups: &[GroupRecor
         changes.push(format!("分组 {}", listed(member_groups(after, groups).map(|group| &group.name))));
     }
     if before.dial_out_only != after.dial_out_only {
-        changes.push(format!("只拨出 {}", switch(after.dial_out_only)));
+        changes.push(format!("只主动连接 {}", switch(after.dial_out_only)));
     }
     if before.routing != after.routing || before.reach != after.reach {
         changes.push("选路设置".to_owned());

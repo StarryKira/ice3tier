@@ -476,7 +476,7 @@ pub enum DirectFailure {
     RelayOnly,
     /// 对端不在 netmap 里。
     NotPeer,
-    /// 两边都是只拨出的：谁也不接受对方主动发来的探测。
+    /// 两边都是只主动连接的：谁也不接受对方主动发来的探测。
     DialOutOnly,
     /// 手上没有对端的任何候选地址。
     NoCandidates,

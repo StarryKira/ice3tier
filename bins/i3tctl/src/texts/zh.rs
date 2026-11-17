@@ -41,7 +41,7 @@ const HELP: Help = Help {
     node_groups: "设置节点所在的分组。不写就是只在 All 里",
     node_set: "修改节点设置",
     node_ip: "虚拟 IP。引用旧地址的配置会失效",
-    node_dial_out_only: "只拨出",
+    node_dial_out_only: "只主动连接",
     node_routing: "选路模式；default 用网络的",
     node_reach: "路径限制；default 用网络的",
     node_profile: "性能档位；default 用节点本机配置文件里的",
@@ -292,7 +292,7 @@ const UI: Ui = Ui {
     declared: "声明",
     relay_settings: |udp, tcp, region, bandwidth| format!("UDP {udp}，TCP {tcp}，区域 {region}，带宽上限 {bandwidth}"),
     exit_settings: |ports, lan, bandwidth, upstream| format!("端口 {ports}，局域网 {lan}，带宽上限 {bandwidth}，上游代理 {upstream}"),
-    dial_out_only: "只拨出",
+    dial_out_only: "只主动连接",
     from_network: "用网络的",
     pinned: "固定挂靠的中继",
     profile: "性能档位",
@@ -533,7 +533,7 @@ fn log(entry: &LogEntry) -> Option<String> {
                     out.push("分组".to_owned());
                 }
                 if get("dial_out_only").is_some() {
-                    out.push("只拨出".to_owned());
+                    out.push("只主动连接".to_owned());
                 }
                 if get("routing").is_some() || get("reach").is_some() {
                     out.push("选路".to_owned());

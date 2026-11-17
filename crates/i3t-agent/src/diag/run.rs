@@ -88,7 +88,7 @@ pub(super) async fn respond(diag: &Diag, order: &TestOrder, until: Instant, ende
         report.throughput_refused = Some(i3t_model::control::diag::TestProblem::new(TestCode::ThroughputOff, Some(me)));
     }
     if order.items.direct || order.items.direct_quality {
-        // 接受方跟随，等发起方来试；只拨出的节点不理对端主动找上来的探测，只能自己也去试。
+        // 接受方跟随，等发起方来试；只主动连接的节点不理对端主动找上来的探测，只能自己也去试。
         let side = if diag.netmap.borrow().me.dial_out_only { Side::Lead } else { Side::Follow };
         let attempt = if diag.reach() == Reach::RelayOnly { None } else { Some(endpoint.attempt_direct(peer, side, DIRECT_LIMIT).await) };
         report.direct = Some(direct_side(attempt.as_ref()));

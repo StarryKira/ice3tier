@@ -128,7 +128,7 @@ pub enum TestCode {
     UdpBlocked,
     /// 节点映射出来的端口随对端变化（对称型 NAT），打不了洞。
     MappingVaries,
-    /// 两个节点都是只拨出的。
+    /// 两个节点都是只主动连接的。
     DialOutOnly,
     /// 试过了，没有在时限之内成功。
     Timeout,
@@ -170,7 +170,7 @@ impl TestCode {
             Self::NoCandidates => "没有对端的候选地址",
             Self::UdpBlocked => "UDP 不通",
             Self::MappingVaries => "端口映射随对端变化，打不了洞",
-            Self::DialOutOnly => "两个节点都只拨出",
+            Self::DialOutOnly => "两个节点都只主动连接",
             Self::Timeout => "超时",
             Self::Unreachable => "这条路径现在走不通",
             Self::Refused => "对端拒绝了测量",

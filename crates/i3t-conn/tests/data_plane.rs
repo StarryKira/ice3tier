@@ -341,7 +341,7 @@ async fn a_dial_out_only_node_cannot_be_dialled_but_its_own_connection_is_reused
 
     let started = Instant::now();
     assert_eq!(a.endpoint.open(b.id).await.unwrap_err(), OpenError::NoRoute(b.id));
-    assert!(started.elapsed() < Duration::from_secs(1), "只拨出的对端连不进去，不用等满时限");
+    assert!(started.elapsed() < Duration::from_secs(1), "只主动连接的对端连不进去，不用等满时限");
 
     // 它连过来之后，反方向的流走它建的那条连接。
     echo_once(&b, &a, b"dialled out").await;

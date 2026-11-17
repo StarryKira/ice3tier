@@ -61,9 +61,9 @@ const STALE: Duration = Duration::from_secs(30);
 pub(crate) struct Policy<'a> {
     /// 现在需要到这个对端的直连：它是活跃的，并且没有禁用直连。
     pub(crate) wanted: bool,
-    /// 可以由本端主动去探测它的候选地址。对端是只拨出的节点时不行：它不理陌生的探测，只能等它来找本端。
+    /// 可以由本端主动去探测它的候选地址。对端是只主动连接的节点时不行：它不理陌生的探测，只能等它来找本端。
     pub(crate) initiate: bool,
-    /// 可以和它互发打洞信令。任何一方只拨出时不行。
+    /// 可以和它互发打洞信令。任何一方只主动连接时不行。
     pub(crate) signal: bool,
     /// 有包发给它，却有一阵没有从直连上收到它的包了。
     pub(crate) silent: bool,

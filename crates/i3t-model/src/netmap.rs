@@ -128,7 +128,7 @@ pub struct LocalNode {
     pub routing: Option<RoutingMode>,
     #[serde(default)]
     pub reach: Option<Reach>,
-    /// 只拨出：不接受别人主动发来的连接，不参与打洞。
+    /// 只主动连接：不接受别人主动发来的连接，不参与打洞。
     #[serde(default)]
     pub dial_out_only: bool,
     /// 启用为 relay 时有值。没有值时本节点不转发任何包。

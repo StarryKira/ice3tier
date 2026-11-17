@@ -422,7 +422,7 @@ const fn test_code(code: TestCode) -> &'static str {
         TestCode::NoCandidates => "没有对端的候选地址",
         TestCode::UdpBlocked => "UDP 不通",
         TestCode::MappingVaries => "端口映射随对端变化，打不了洞",
-        TestCode::DialOutOnly => "两个节点都只拨出",
+        TestCode::DialOutOnly => "两个节点都只主动连接",
         TestCode::Timeout => "超时",
         TestCode::Unreachable => "路径走不通",
         TestCode::Refused => "对端拒绝了测量",
