@@ -149,7 +149,7 @@ test('准备：出口 gw 和入口 laptop 跑起来；还有一个只注册过�
 test('出口配额：在节点详情里配上，下载之后出口页有本账期的用量', async () => {
   test.skip(lanIp === undefined, '这台机器没有私有 IPv4 地址，经出口访问局域网目标的测试做不了')
   test.setTimeout(90_000)
-  await page.goto(`${controller.baseUrl}/n/1/nodes/${nodes.gw.id}`)
+  await page.goto(`${controller.baseUrl}/n/1/nodes/${nodes.gw.id}?tab=settings`)
   const exitRow = page.getByTestId('capability-exit')
   const d = t.nodes.detail
   await exitRow.getByRole('switch', { name: d.exitSwitch('gw') }).click()

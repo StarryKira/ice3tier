@@ -47,7 +47,6 @@ export const groups: Messages['groups'] = {
   focusMissing: (id) => `Group #${id} has been deleted`,
 
   picker: {
-    placeholder: 'Select groups',
     pickOne: 'Select a group',
     search: 'Search groups',
     options: 'Groups',
@@ -55,6 +54,7 @@ export const groups: Messages['groups'] = {
     allTip: "Every node is in All; it can't be removed",
     noneFound: 'No matching groups',
     noGroups: 'No other groups yet',
+    nodes: (n) => count(n, 'node', 'nodes'),
     more: (n, list) => `${n} more: ${list}`,
     manage: 'Manage groups',
   },

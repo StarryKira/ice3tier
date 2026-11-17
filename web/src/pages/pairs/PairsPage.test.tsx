@@ -103,7 +103,7 @@ describe('节点对页', () => {
     expect(blocked).not.toHaveTextContent(BLOCKED.summary)
     expect(within(blocked).getByRole('link', { name: l.fix.enableRelay('laptop') })).toHaveAttribute(
       'href',
-      '/n/1/nodes/2',
+      '/n/1/nodes/2?tab=settings',
     )
     // 没有节点报上来，就没有数可看：不画计数的几列，也没有详情。
     expect(screen.queryByRole('columnheader', { name: l.colInUse })).toBeNull()

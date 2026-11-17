@@ -186,12 +186,13 @@ test('在节点页上把节点放进分组：只能选已有的', async () => {
     [nodes.laptop, 'laptops'],
   ] as const) {
     await page.goto(`${controller.baseUrl}/n/1/nodes/${node.id}`)
-    const picker = page.getByRole('combobox', { name: d.groups })
-    // 输入只是筛选：没有这个分组时什么也不会新建。
-    await picker.fill('nope')
+    await page.getByRole('combobox', { name: d.groups }).click()
+    const search = page.getByRole('textbox', { name: t.groups.picker.search })
+    // 搜索只是筛选：没有这个分组时什么也不会新建。
+    await search.fill('nope')
     await expect(page.getByText(t.groups.picker.noneFound)).toBeVisible()
     await page.keyboard.press('Enter')
-    await picker.fill(group.slice(0, 3))
+    await search.fill(group.slice(0, 3))
     await page.keyboard.press('Enter')
     await expectToast(page, t.nodes.groupsSaved)
     expect((await apiNode(node.id))?.groups.map((entry) => entry.name)).toEqual([group])
@@ -280,8 +281,11 @@ test('注册令牌带着分组：用它加入的节点就在那个分组里', as
   await goTo(page, t.nav.nodes)
   await page.getByRole('button', { name: t.nodes.add }).click()
   const dialog = page.getByRole('dialog', { name: t.addNode.title })
-  await dialog.getByRole('combobox', { name: t.addNode.groupsLabel }).fill('serv')
+  await dialog.getByRole('combobox', { name: t.addNode.groupsLabel }).click()
+  await page.getByRole('textbox', { name: t.groups.picker.search }).fill('serv')
   await page.keyboard.press('Enter')
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('listbox')).toHaveCount(0)
   await dialog.getByRole('button', { name: t.addNode.generate }).click()
   const command = page.getByTestId('join-command')
   await expect(command).toHaveText(/^echo i3t-[A-Za-z0-9_-]+ \| i3t join$/)

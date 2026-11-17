@@ -48,11 +48,12 @@ import { ListenTab } from './detail/ListenTab'
 import { OverviewTab } from './detail/OverviewTab'
 import { RelatedTab } from './detail/RelatedTab'
 import { RoutesTab } from './detail/RoutesTab'
+import { SettingsTab } from './detail/SettingsTab'
 import { UpdateTab } from './detail/UpdateTab'
 import { RoleBadges } from './NodesPage'
 
 const d = t.nodes.detail
-const TABS = ['overview', 'routes', 'lanes', 'access', 'listen', 'related', 'update'] as const
+const TABS = ['overview', 'settings', 'routes', 'lanes', 'access', 'listen', 'related', 'update'] as const
 type Tab = (typeof TABS)[number]
 
 /**
@@ -227,6 +228,7 @@ export function NodeDetailPage() {
       >
         <TabsList>
           <TabsTrigger value="overview">{d.tabOverview}</TabsTrigger>
+          <TabsTrigger value="settings">{d.tabSettings}</TabsTrigger>
           <TabsTrigger value="routes">{d.tabRoutes}</TabsTrigger>
           {showLanes ? <TabsTrigger value="lanes">{d.tabLanes}</TabsTrigger> : null}
           <TabsTrigger value="access">{d.tabAccess}</TabsTrigger>
@@ -238,7 +240,10 @@ export function NodeDetailPage() {
           </TabsTrigger>
         </TabsList>
         <TabsContent value="overview">
-          <OverviewTab network={network} node={node} onEditIp={() => setDialog('ip')} onWaiting={setWaiting} />
+          <OverviewTab network={network} node={node} onEditIp={() => setDialog('ip')} />
+        </TabsContent>
+        <TabsContent value="settings">
+          <SettingsTab network={network} node={node} onWaiting={setWaiting} />
         </TabsContent>
         <TabsContent value="routes">
           <RoutesTab network={network} node={node} />

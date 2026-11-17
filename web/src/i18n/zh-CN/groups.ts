@@ -43,7 +43,6 @@ export const groups = {
 
   /** 节点、注册令牌上的分组：只能从已有的分组里选，输入只是筛选。 */
   picker: {
-    placeholder: '选择分组',
     pickOne: '选择一个分组',
     search: '搜索分组',
     options: '分组',
@@ -51,6 +50,7 @@ export const groups = {
     allTip: '所有节点都在 All 里，不能移除',
     noneFound: '没有匹配的分组',
     noGroups: '还没有别的分组',
+    nodes: (n: number) => `${n} 个节点`,
     more: (n: number, list: string) => `另有 ${n} 个：${list}`,
     manage: '管理分组',
   },

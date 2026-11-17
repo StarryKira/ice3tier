@@ -1,7 +1,7 @@
 import { screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { type Group, type GroupRef } from '@/api/types'
 import { setLocale, t } from '@/i18n'
@@ -9,15 +9,24 @@ import { renderWithApp } from '@/test/harness'
 
 import { GroupList, GroupPicker } from './groups'
 
-const group = (id: number, name: string, builtin = false): Pick<Group, 'id' | 'name' | 'builtin'> => ({
+type PickerGroup = Pick<Group, 'id' | 'name' | 'builtin' | 'nodes'>
+
+const node = (id: number) => ({ id, name: `n${id}`, virtual_ip: `10.77.0.${id}` })
+const group = (id: number, name: string, members: number[] = [], builtin = false): PickerGroup => ({
   id,
   name,
   builtin,
+  nodes: members.map(node),
 })
 
-const GROUPS = [group(1, 'All', true), group(2, 'laptops'), group(3, 'Servers'), group(4, 'home')]
+const GROUPS = [
+  group(1, 'All', [1, 2, 3], true),
+  group(2, 'laptops', [1, 2]),
+  group(3, 'Servers', [3]),
+  group(4, 'home'),
+]
 
-function Harness({ initial = [], groups = GROUPS }: { initial?: GroupRef[]; groups?: typeof GROUPS }) {
+function Harness({ initial = [], groups = GROUPS }: { initial?: GroupRef[]; groups?: PickerGroup[] }) {
   const [value, setValue] = useState<GroupRef[]>(initial)
   return (
     <>
@@ -28,61 +37,98 @@ function Harness({ initial = [], groups = GROUPS }: { initial?: GroupRef[]; grou
 }
 
 const value = () => screen.getByTestId('value').textContent
+const search = () => screen.getByRole('textbox', { name: t.groups.picker.search })
+const option = (name: string) => screen.getByRole('option', { name: new RegExp(`^${name}`) })
 
 describe('选分组', () => {
   for (const locale of ['zh-CN', 'en'] as const) {
-    it(`All 总在最前面、移不掉；输入只是筛选，回车选中，不会新建（${locale}）`, async () => {
+    it(`框里总有 All、移不掉；列表里每行写着几个节点，All 勾着、勾不掉（${locale}）`, async () => {
       setLocale(locale, { remember: false })
       const user = userEvent.setup()
       renderWithApp(<Harness />)
-      const input = screen.getByRole('combobox', { name: 'groups' })
-      expect(input).toHaveAttribute('placeholder', t.groups.picker.placeholder)
       expect(screen.getByText('All')).toBeVisible()
       expect(screen.queryByRole('button', { name: t.groups.picker.remove('All') })).not.toBeInTheDocument()
 
-      // 没有这个名字的分组：什么也选不上，列表里说没有匹配的。
-      await user.type(input, 'nope')
-      expect(screen.getByText(t.groups.picker.noneFound)).toBeVisible()
-      await user.keyboard('{Enter}')
+      await user.click(screen.getByRole('combobox', { name: 'groups' }))
+      const list = screen.getByRole('listbox', { name: t.groups.picker.options })
+      expect(
+        within(list)
+          .getAllByRole('option')
+          .map((row) => row.textContent),
+      ).toEqual([
+        `All${t.groups.picker.nodes(3)}`,
+        `laptops${t.groups.picker.nodes(2)}`,
+        `Servers${t.groups.picker.nodes(1)}`,
+        `home${t.groups.picker.nodes(0)}`,
+      ])
+      expect(option('All')).toHaveAttribute('aria-selected', 'true')
+      expect(option('All')).toHaveAttribute('aria-disabled', 'true')
+      await user.click(option('All'))
       expect(value()).toBe('')
-
-      // 筛选不分大小写；All 不在候选里。
-      await user.clear(input)
-      await user.type(input, 'serv{Enter}')
-      expect(value()).toBe('3')
-      await user.type(input, 'a')
-      const options = within(screen.getByRole('listbox', { name: t.groups.picker.options })).getAllByRole('option')
-      expect(options.map((option) => option.textContent)).toEqual(['laptops'])
     })
   }
 
-  it('获得焦点时不打开候选列表；向下键打开，停在第一个', async () => {
+  it('搜索只是筛选，回车勾选，不会新建；勾着的再回车取消', async () => {
+    const user = userEvent.setup()
+    renderWithApp(<Harness />)
+    await user.keyboard('{ArrowDown}')
+    expect(search()).toHaveFocus()
+
+    await user.type(search(), 'nope')
+    expect(screen.getByText(t.groups.picker.noneFound)).toBeVisible()
+    await user.keyboard('{Enter}')
+    expect(value()).toBe('')
+
+    // 筛选不分大小写；回车勾的是第一个能勾的，列表不收起，接着能勾别的。
+    await user.clear(search())
+    await user.type(search(), 'serv{Enter}')
+    expect(value()).toBe('3')
+    expect(option('Servers')).toHaveAttribute('aria-selected', 'true')
+    await user.clear(search())
+    await user.type(search(), 'home{Enter}')
+    expect(value()).toBe('4,3')
+    await user.keyboard('{Enter}')
+    expect(value()).toBe('3')
+
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'groups' })).toHaveFocus()
+  })
+
+  it('获得焦点时不打开列表；打开时停在第一个能勾的', async () => {
     const user = userEvent.setup()
     renderWithApp(<Harness />)
     expect(screen.getByRole('combobox', { name: 'groups' })).toHaveFocus()
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
     await user.keyboard('{ArrowDown}')
-    expect(screen.getByRole('option', { name: 'laptops' })).toHaveAttribute('aria-selected', 'true')
+    expect(search()).toHaveAttribute('aria-activedescendant', option('laptops').id)
+  })
+
+  it('点行勾选或取消，选中的按名字排；框里的叉移除', async () => {
+    const user = userEvent.setup()
+    renderWithApp(<Harness initial={[{ id: 3, name: 'Servers' }]} />)
+    await user.click(screen.getByRole('combobox', { name: 'groups' }))
+    await user.click(option('home'))
+    expect(value()).toBe('4,3')
+    await user.click(option('Servers'))
+    expect(value()).toBe('4')
     await user.keyboard('{Escape}')
+    await user.click(screen.getByRole('button', { name: t.groups.picker.remove('home') }))
+    expect(value()).toBe('')
+    // 点叉不会打开列表。
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
   })
 
-  it('选中的按名字排；叉号和退格移除', async () => {
+  it('还在保存时列表开着，但勾不了', async () => {
     const user = userEvent.setup()
-    renderWithApp(<Harness initial={[{ id: 3, name: 'Servers' }]} />)
-    const input = screen.getByRole('combobox', { name: 'groups' })
-    await user.type(input, 'home{Enter}')
-    expect(value()).toBe('4,3')
-    await user.click(screen.getByRole('button', { name: t.groups.picker.remove('Servers') }))
-    expect(value()).toBe('4')
-    await user.type(input, '{Backspace}')
-    expect(value()).toBe('')
+    renderWithApp(<GroupPicker aria-label="groups" value={[]} onChange={vi.fn()} groups={GROUPS} busy />)
+    await user.click(screen.getByRole('combobox', { name: 'groups' }))
+    expect(option('home')).toHaveAttribute('aria-disabled', 'true')
   })
 
   it('网络里只有 All 时说还没有别的分组', async () => {
     const user = userEvent.setup()
-    renderWithApp(<Harness groups={[group(1, 'All', true)]} />)
-    await user.keyboard('{ArrowDown}')
+    renderWithApp(<Harness groups={[group(1, 'All', [1], true)]} />)
     await user.click(screen.getByRole('combobox', { name: 'groups' }))
     expect(screen.getByText(t.groups.picker.noGroups)).toBeVisible()
   })

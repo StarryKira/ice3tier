@@ -156,8 +156,11 @@ test('生成注册令牌，拿到加入命令，节点加入后出现在界面�
   expect(await controller.api<unknown[]>('GET', `${NET}/tokens`)).toHaveLength(0)
 
   // 分组写在令牌上，只能从已有的里面选；"可以承担"是命令的参数。
-  await dialog.getByRole('combobox', { name: t.addNode.groupsLabel }).fill('serv')
+  await dialog.getByRole('combobox', { name: t.addNode.groupsLabel }).click()
+  await page.getByRole('textbox', { name: t.groups.picker.search }).fill('serv')
   await page.keyboard.press('Enter')
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('listbox')).toHaveCount(0)
   await dialog.getByRole('checkbox', { name: t.addNode.declareForward }).check()
   await expect(joinCommand()).toHaveText(`echo ${t.addNode.tokenPlaceholder} | i3t join --can-forward`)
 
@@ -244,17 +247,19 @@ test('在节点列表上编辑节点的分组：只能选已有的', async () =>
   await row.getByRole('button', { name: t.nodes.editGroupsOf(laptop.name) }).click()
 
   const dialog = page.getByRole('dialog', { name: t.nodes.groupsTitle(laptop.name) })
-  const input = dialog.getByRole('combobox')
-  // 输入只是筛选：没有这个分组时什么也不会新建。
-  await input.fill('nope')
+  await dialog.getByRole('combobox').click()
+  const search = page.getByRole('textbox', { name: t.groups.picker.search })
+  // 搜索只是筛选：没有这个分组时什么也不会新建。
+  await search.fill('nope')
   await expect(page.getByText(t.groups.picker.noneFound)).toBeVisible()
   await page.keyboard.press('Enter')
-  await input.fill('')
 
-  // 改了立即生效，不用点保存。
-  await input.fill('lap')
+  // 勾上立即生效，不用点保存。
+  await search.fill('lap')
   await page.keyboard.press('Enter')
   await expectToast(page, t.nodes.groupsSaved)
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('listbox')).toHaveCount(0)
   await expect(dialog.getByRole('button', { name: t.groups.picker.remove('laptops') })).toBeVisible()
   await dialog.getByRole('button', { name: t.nodes.groupsDone }).click()
 
@@ -383,6 +388,7 @@ test('启用出口：节点没有声明时说明原因和要执行的命令，�
   // 节点详情页：开关是灰的，旁边写着原因；"怎么声明"点开是要在那台机器上执行的命令。
   await goTo(page, t.nav.nodes)
   await page.getByRole('link', { name: server.name, exact: true }).click()
+  await page.getByRole('tab', { name: t.nodes.detail.tabSettings }).click()
   const exitRow = page.getByTestId('capability-exit')
   const exitSwitch = exitRow.getByRole('switch', { name: t.nodes.detail.exitSwitch(server.name) })
   await expect(exitSwitch).toBeDisabled()

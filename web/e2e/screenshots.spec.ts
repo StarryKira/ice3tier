@@ -445,8 +445,11 @@ test('有数据时：总览、节点', async () => {
   await page.getByRole('button', { name: t.nodes.batchCancel }).click()
 
   await page.getByRole('button', { name: t.nodes.add }).click()
-  await page.getByRole('combobox', { name: t.addNode.groupsLabel }).fill('serv')
+  await page.getByRole('combobox', { name: t.addNode.groupsLabel }).click()
+  await page.getByRole('textbox', { name: t.groups.picker.search }).fill('serv')
   await page.keyboard.press('Enter')
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('listbox')).toHaveCount(0)
   await page.getByRole('checkbox', { name: new RegExp(literal(t.addNode.declareExit)) }).check()
   await page.getByRole('button', { name: t.addNode.generate }).click()
   await expect(page.getByTestId('join-command')).toContainText('echo i3t-')
@@ -462,6 +465,9 @@ test('有数据时：节点详情', async () => {
   const d = t.nodes.detail
   const u = t.updates
   await page.getByRole('link', { name: 'gw-hk', exact: true }).click()
+  await expect(page.getByRole('combobox', { name: d.groups })).toBeVisible()
+  await shot('node-detail-overview')
+  await page.getByRole('tab', { name: d.tabSettings }).click()
   await expect(page.getByTestId('capability-relay')).toBeVisible()
   await shot('node-detail-relay')
   // 保存 relay 的设置：controller 从自己这边试连填的地址（203.0.113.7 是文档用的地址，连不上），写出建议。
@@ -473,12 +479,14 @@ test('有数据时：节点详情', async () => {
 
   await goTo(page, t.nav.nodes)
   await page.getByRole('link', { name: 'nas-home', exact: true }).click()
+  await page.getByRole('tab', { name: d.tabSettings }).click()
   await expect(page.getByTestId('capability-exit')).toBeVisible()
   await page.getByText(d.advanced, { exact: true }).click()
   await shot('node-detail-exit-and-advanced')
 
   await goTo(page, t.nav.nodes)
   await page.getByRole('link', { name: 'laptop', exact: true }).click()
+  await page.getByRole('tab', { name: d.tabSettings }).click()
   await page.getByTestId('capability-exit').getByRole('button', { name: t.declare.howTo }).click()
   await expect(page.getByTestId('declare-command')).toBeVisible()
   await shot('node-detail-not-declared')
@@ -792,7 +800,7 @@ test('窄一些的笔记本宽度', async () => {
   await expect(page.getByTestId('node-row-gw-hk')).toBeVisible()
   await shot('narrow-nodes')
   await page.getByRole('link', { name: 'gw-hk', exact: true }).click()
-  await expect(page.getByTestId('capability-relay')).toBeVisible()
+  await expect(page.getByRole('combobox', { name: t.nodes.detail.groups })).toBeVisible()
   await shot('narrow-node-detail')
   await goTo(page, t.nav.access)
   await expect(page.getByTestId('rule-row-2')).toBeVisible()
@@ -950,10 +958,11 @@ test('英文：长度最要紧的几页', async ({ browser }) => {
   await enShot('nodes')
 
   await english.getByRole('link', { name: 'gw-hk', exact: true }).click()
+  await english.getByRole('tab', { name: en.nodes.detail.tabSettings }).click()
   await expect(english.getByTestId('capability-relay')).toBeVisible()
   await enShot('node-detail-relay')
 
-  await english.goto(`${controller.baseUrl}/n/1/nodes/2`)
+  await english.goto(`${controller.baseUrl}/n/1/nodes/2?tab=settings`)
   await expect(english.getByTestId('capability-exit')).toBeVisible()
   await english.getByText(en.nodes.detail.advanced, { exact: true }).click()
   await enShot('node-detail-exit-and-advanced')
@@ -1017,7 +1026,7 @@ test('英文：长度最要紧的几页', async ({ browser }) => {
   await english.setViewportSize({ width: 1024, height: 720 })
   await english.goto(`${controller.baseUrl}/n/1/nodes`)
   await english.getByRole('link', { name: 'gw-hk', exact: true }).click()
-  await expect(english.getByTestId('capability-relay')).toBeVisible()
+  await expect(english.getByRole('combobox', { name: en.nodes.detail.groups })).toBeVisible()
   await enShot('narrow-node-detail')
   await english.goto(`${controller.baseUrl}/n/1/credentials`)
   await expect(english.getByTestId('credential-row-phone')).toBeVisible()

@@ -80,7 +80,7 @@ interface NodeGroupsEditorProps {
   autoFocus?: boolean
 }
 
-/** 节点所在的分组：只能从已有的分组里选。页面上的单个控件：改了立即生效，弹一条提示。 */
+/** 节点所在的分组：只能从已有的分组里选。页面上的单个控件：勾一下就保存，弹一条提示；保存完之前列表开着，先不能再勾。 */
 export function NodeGroupsEditor({ network, node, ...props }: NodeGroupsEditorProps) {
   const groups = useQuery(q.groups(network.id))
   const save = useAction(network.id, {
@@ -95,7 +95,7 @@ export function NodeGroupsEditor({ network, node, ...props }: NodeGroupsEditorPr
       value={value}
       onChange={(next) => save.mutate(next)}
       groups={groups.data ?? []}
-      disabled={save.isPending}
+      busy={save.isPending}
     />
   )
 }
