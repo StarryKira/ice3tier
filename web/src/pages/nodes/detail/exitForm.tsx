@@ -35,14 +35,15 @@ export function ExitFormFields({ state, onChange, showProblems }: ExitFormFields
               value={state.limitPorts ? 'limited' : 'any'}
               onChange={(value) => onChange({ ...state, limitPorts: value === 'limited' })}
               options={[
-                { value: 'limited', label: d.exitFormPortsLimited },
                 { value: 'any', label: d.exitFormPortsAny },
+                { value: 'limited', label: d.exitFormPortsLimited },
               ]}
             />
             {state.limitPorts ? (
               <Input
                 {...props}
                 className="w-52 font-mono"
+                placeholder="80, 443"
                 value={state.ports}
                 onChange={(event) => onChange({ ...state, ports: event.target.value })}
               />

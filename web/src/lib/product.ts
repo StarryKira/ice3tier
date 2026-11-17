@@ -13,9 +13,6 @@ export const DEFAULT_NODE_PORT = 20330
 export const LOCAL_SOCKS5 = '127.0.0.1:1080'
 export const LOCAL_HTTP = '127.0.0.1:1081'
 
-/** 出口默认允许的目标端口。 */
-export const DEFAULT_EXIT_PORTS = [80, 443] as const
-
 /** 注册令牌默认的有效期，秒。 */
 export const DEFAULT_TOKEN_TTL = 24 * 60 * 60
 

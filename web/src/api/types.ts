@@ -234,7 +234,7 @@ export interface ExitSettings {
 }
 
 export interface ExitInput {
-  /** 省略时是 `[80, 443]`；写 `null` 表示不限制。 */
+  /** `null` 表示不限制（省略时也是，0.1.9 起；更早的 controller 省略时是 `[80, 443]`，所以界面总是写上）。 */
   ports?: number[] | null
   lan?: boolean
   bandwidth_mbps?: number | null

@@ -8,9 +8,9 @@ import { exitFormFrom, exitFormProblems, exitFormToInput, exitFormValid } from '
 const GB = 1024 ** 3
 
 describe('出口设置的表单', () => {
-  it('第一次启用：默认值，提交的是 PUT 要的全部字段', () => {
+  it('第一次启用：默认值（端口不限），提交的是 PUT 要的全部字段', () => {
     expect(exitFormToInput(exitFormFrom(null))).toEqual({
-      ports: [80, 443],
+      ports: null,
       lan: false,
       bandwidth_mbps: null,
       upstream_socks5: null,

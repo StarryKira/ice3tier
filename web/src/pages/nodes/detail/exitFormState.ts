@@ -1,6 +1,5 @@
 import { type ExitInput, type ExitSettings, type IpFamily, type ServiceClass } from '@/api/types'
 import { type ByteUnit, bytesToField } from '@/lib/format'
-import { DEFAULT_EXIT_PORTS } from '@/lib/product'
 import {
   parseOptionalBytes,
   parseOptionalPositiveInt,
@@ -29,8 +28,9 @@ export interface ExitFormState {
 export function exitFormFrom(settings: ExitSettings | null): ExitFormState {
   const quota = bytesToField(settings?.quota_bytes ?? null)
   return {
-    limitPorts: settings?.ports !== null,
-    ports: (settings?.ports ?? DEFAULT_EXIT_PORTS).join(', '),
+    // 第一次启用时端口不限；要限制再选"仅限"，自己填。
+    limitPorts: settings !== null && settings.ports !== null,
+    ports: settings?.ports?.join(', ') ?? '',
     bandwidth: settings?.bandwidth_mbps?.toString() ?? '',
     lan: settings?.lan ?? false,
     upstream: settings?.upstream_socks5 ?? '',

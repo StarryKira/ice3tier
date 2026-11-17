@@ -407,17 +407,18 @@ test('启用出口：节点没有声明时说明原因和要执行的命令，�
   await expect(page.getByTestId('not-declared-exit')).toHaveCount(0)
   await expect(exitRow.getByTestId('declare-command')).toHaveCount(0)
 
-  // 打开：对话框里是几项限制，都有默认值。
+  // 打开：对话框里是几项限制，都有默认值；端口默认不限，要限制时才填。
   await exitSwitch.click()
   const exitDialog = page.getByRole('dialog', { name: t.nodes.detail.exitSwitch(server.name) })
-  await expect(exitDialog.getByRole('textbox', { name: t.nodes.detail.exitFormPorts })).toHaveValue('80, 443')
+  await expect(exitDialog.getByRole('radio', { name: t.nodes.detail.exitFormPortsAny })).toBeChecked()
+  await expect(exitDialog.getByRole('textbox', { name: t.nodes.detail.exitFormPorts })).toHaveCount(0)
   await exitDialog.getByRole('button', { name: t.nodes.detail.exitEnable }).click()
   await expectToast(page, t.nodes.detail.exitEnabledToast(server.name))
   await expect(exitSwitch).toBeChecked()
   // 启用之后给出一个马上能用的例子，地址是这个节点真实的虚拟 IP。
   await expect(exitRow.getByText(`curl -x socks5h://${server.ip}@127.0.0.1:1080 https://example.com`)).toBeVisible()
   const node = (await apiNodes()).find((candidate) => candidate.id === server.id)
-  expect(node?.exit).toMatchObject({ ports: [80, 443] })
+  expect(node?.exit).toMatchObject({ ports: null })
   await clearToasts(page)
 
   // 出口页现在列出它。
