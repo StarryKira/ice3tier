@@ -472,7 +472,6 @@ export function ExitTab({ network, node, onWaiting }: CapabilityTabProps) {
             <span className="tabular">{exit.ports === null ? t.common.unlimited : exit.ports.join(', ')}</span>
           </Stat>
           <Stat label={d.rowLan}>{exit.lan ? d.rowLanOn : d.rowLanOff}</Stat>
-          <Stat label={d.rowBandwidth}>{bandwidthValue(exit.bandwidth_mbps)}</Stat>
           {exit.quota_bytes !== null ? (
             <Stat label={d.rowQuota}>
               <span className="tabular">{d.rowQuotaValue(formatBytes(exit.quota_bytes), exit.quota_reset_day)}</span>

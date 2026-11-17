@@ -12,7 +12,6 @@ describe('出口设置的表单', () => {
     expect(exitFormToInput(exitFormFrom(null))).toEqual({
       ports: null,
       lan: false,
-      bandwidth_mbps: null,
       upstream_socks5: null,
       quota_bytes: null,
       quota_reset_day: 1,
@@ -26,7 +25,6 @@ describe('出口设置的表单', () => {
     const settings = makeExitSettings({
       ports: null,
       lan: true,
-      bandwidth_mbps: 50,
       quota_bytes: 500 * GB,
       quota_reset_day: 15,
       family: 'ipv4',
@@ -36,7 +34,6 @@ describe('出口设置的表单', () => {
     expect(exitFormToInput(exitFormFrom(settings))).toEqual({
       ports: null,
       lan: true,
-      bandwidth_mbps: 50,
       upstream_socks5: null,
       quota_bytes: 500 * GB,
       quota_reset_day: 15,

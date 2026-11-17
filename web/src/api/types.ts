@@ -221,8 +221,6 @@ export interface ExitSettings {
   /** `null` 表示不限制端口。 */
   ports: number[] | null
   lan: boolean
-  /** 出口替别人搬运的流量，两个方向各受这个上限。 */
-  bandwidth_mbps: number | null
   upstream_socks5: string | null
   /** 每个账期的流量配额（字节），两个方向相加；`null` 表示不限。 */
   quota_bytes: number | null
@@ -239,9 +237,8 @@ export interface ExitInput {
   /** `null` 表示不限制（省略时也是，0.1.9 起；更早的 controller 省略时是 `[80, 443]`，所以界面总是写上）。 */
   ports?: number[] | null
   lan?: boolean
-  bandwidth_mbps?: number | null
   upstream_socks5?: string | null
-  /** 带宽上限、配额、建连预算都不能写 0：不限制就写 `null` 或者不写。 */
+  /** 配额、建连预算都不能写 0：不限制就写 `null` 或者不写。出口没有带宽上限（用户决定去掉了）。 */
   quota_bytes?: number | null
   quota_reset_day?: number
   family?: IpFamily

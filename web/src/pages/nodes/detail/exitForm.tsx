@@ -51,21 +51,6 @@ export function ExitFormFields({ state, onChange, showProblems }: ExitFormFields
           </div>
         )}
       </Field>
-      <Field label={d.exitFormBandwidth} error={shown(problems.bandwidth)} optional={t.common.optional}>
-        {(props) => (
-          <div className="flex items-center gap-2">
-            <Input
-              {...props}
-              inputMode="numeric"
-              placeholder={t.common.unlimited}
-              className="w-28 tabular"
-              value={state.bandwidth}
-              onChange={(event) => onChange({ ...state, bandwidth: event.target.value })}
-            />
-            <span className="text-[13px] text-muted-foreground">{t.common.mbps}</span>
-          </div>
-        )}
-      </Field>
       <label className="flex items-start gap-3">
         <Switch checked={state.lan} onCheckedChange={(lan) => onChange({ ...state, lan })} className="mt-0.5" />
         <span>

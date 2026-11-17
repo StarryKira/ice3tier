@@ -102,9 +102,8 @@ export function makeEntry(from: number, to: number, route: Route, extra: Partial
 /** 出口的默认设置，和 `PUT …/exit` 写 `{}` 时一样。 */
 export function makeExitSettings(extra: Partial<ExitSettings> = {}): ExitSettings {
   return {
-    ports: [80, 443],
+    ports: null,
     lan: false,
-    bandwidth_mbps: null,
     upstream_socks5: null,
     quota_bytes: null,
     quota_reset_day: 1,

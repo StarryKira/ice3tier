@@ -58,7 +58,6 @@ export function exitSummaryParts(exit: NonNullable<Node['exit']>): string[] {
   return [
     exit.ports === null ? d.exitPortsAny : d.exitPorts(exit.ports.join(', ')),
     exit.lan ? d.exitLanOn : d.exitLanOff,
-    exit.bandwidth_mbps === null ? d.relayUnlimited : d.relayBandwidth(exit.bandwidth_mbps),
     exit.quota_bytes === null ? null : d.exitQuota(formatBytes(exit.quota_bytes), exit.quota_reset_day),
     exit.family === 'ipv4' ? d.exitFamilyIpv4 : exit.family === 'ipv6' ? d.exitFamilyIpv6 : null,
     exit.connects_per_minute === null ? null : d.exitConnects(exit.connects_per_minute),

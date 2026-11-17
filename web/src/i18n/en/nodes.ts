@@ -225,7 +225,6 @@ export const nodes: Messages['nodes'] = {
     exitFormPortsLimited: 'Only these',
     exitFormPortsAny: 'Any',
     exitFormPortsHint: 'Internet destinations only; separate with commas or spaces',
-    exitFormBandwidth: 'Bandwidth limit',
     exitFormLan: 'Allow access to its LAN',
     exitFormLanHint: 'Nodes that can reach this node can reach its directly connected subnets, on any port',
     exitFormQuota: 'Traffic quota',

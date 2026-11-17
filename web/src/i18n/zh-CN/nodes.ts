@@ -216,7 +216,6 @@ export const nodes = {
     exitFormPortsLimited: '仅限',
     exitFormPortsAny: '不限',
     exitFormPortsHint: '只限制互联网目标；用逗号或空格分隔',
-    exitFormBandwidth: '带宽上限',
     exitFormLan: '允许访问其局域网',
     exitFormLanHint: '能访问此节点的节点可访问它直连的网段，不受端口限制',
     exitFormQuota: '流量配额',

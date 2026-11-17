@@ -12,7 +12,6 @@ import {
 export interface ExitFormState {
   limitPorts: boolean
   ports: string
-  bandwidth: string
   lan: boolean
   upstream: string
   quota: string
@@ -31,7 +30,6 @@ export function exitFormFrom(settings: ExitSettings | null): ExitFormState {
     // 第一次启用时端口不限；要限制再选"仅限"，自己填。
     limitPorts: settings !== null && settings.ports !== null,
     ports: settings?.ports?.join(', ') ?? '',
-    bandwidth: settings?.bandwidth_mbps?.toString() ?? '',
     lan: settings?.lan ?? false,
     upstream: settings?.upstream_socks5 ?? '',
     quota: quota.value,
@@ -46,7 +44,6 @@ export function exitFormFrom(settings: ExitSettings | null): ExitFormState {
 
 export interface ExitFormProblems {
   ports: string | null
-  bandwidth: string | null
   upstream: string | null
   quota: string | null
   resetDay: string | null
@@ -56,7 +53,6 @@ export interface ExitFormProblems {
 export function exitFormProblems(state: ExitFormState): ExitFormProblems {
   return {
     ports: state.limitPorts ? parsePortList(state.ports).error : null,
-    bandwidth: parseOptionalPositiveInt(state.bandwidth).error,
     upstream: state.upstream.trim() === '' ? null : validateSocketAddr(state.upstream),
     quota: parseOptionalBytes(state.quota, state.quotaUnit).error,
     // 没有配额时账期无所谓，不拦着保存。
@@ -82,7 +78,6 @@ export function exitFormToInput(state: ExitFormState): ExitInput {
   return {
     ports: state.limitPorts ? parsePortList(state.ports).ports : null,
     lan: state.lan,
-    bandwidth_mbps: parseOptionalPositiveInt(state.bandwidth).value,
     upstream_socks5: state.upstream.trim() === '' ? null : state.upstream.trim(),
     quota_bytes: quota,
     quota_reset_day: quota === null ? 1 : parseResetDay(state.resetDay).value,
