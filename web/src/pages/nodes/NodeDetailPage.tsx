@@ -269,7 +269,7 @@ export function NodeDetailPage() {
           <OverviewTab network={network} node={node} onEditIp={() => setDialog('ip')} />
         </TabsContent>
         {/* 表单不铺满整个宽度：开关和"修改"离名字太远就对不上了。 */}
-        <TabsContent value="relay" className="max-w-5xl">
+        <TabsContent value="relay">
           <RelayTab network={network} node={node} onWaiting={setWaiting} />
         </TabsContent>
         <TabsContent value="exit" className="max-w-5xl">

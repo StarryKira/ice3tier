@@ -470,6 +470,11 @@ test('有数据时：节点详情', async () => {
   await page.getByRole('tab', { name: d.tabRelay }).click()
   await expect(page.getByTestId('capability-relay')).toBeVisible()
   await shot('node-detail-relay')
+  // 宽屏：中继页分成两栏。
+  await page.setViewportSize({ width: 1680, height: 960 })
+  await expect(page.getByTestId('relay-links')).toBeVisible()
+  await shot('node-detail-relay-wide', { fullPage: false })
+  await page.setViewportSize({ width: 1280, height: 800 })
 
   await goTo(page, t.nav.nodes)
   await page.getByRole('link', { name: 'nas-home', exact: true }).click()

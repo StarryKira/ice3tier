@@ -56,19 +56,19 @@ describe('relay 这一页', () => {
       ],
     })
     renderWithApp(<RelayTab network={NETWORK} node={detail({ relay: RELAY })} onWaiting={() => undefined} />)
-    const rows = await screen.findAllByRole('row')
-    // 表头一行，然后按延迟排：nas、laptop；只指定了、没连着的 pc 在最后。
-    expect(rows.map((row) => row.querySelector('td a')?.textContent ?? null)).toEqual([
-      null,
+    const list = await screen.findByRole('list', { name: d.relayConnectedTitle })
+    const rows = within(list).getAllByRole('listitem')
+    // 按延迟排：nas、laptop；只指定了、没连着的 pc 在最后。
+    expect(rows.map((row) => row.querySelector('a')?.textContent)).toEqual([
       `${t.common.online}nas`,
       `${t.common.online}laptop`,
       `${t.common.online}pc`,
     ])
-    expect(rows[1]).toHaveTextContent(d.relayRankFirst)
-    expect(rows[1]).toHaveTextContent(d.relayPinnedTag)
-    expect(rows[2]).toHaveTextContent(d.relayRankBackup)
-    expect(rows[2]).toHaveTextContent(`tokyo ${t.common.ms(12)}`)
-    expect(rows[3]).toHaveTextContent(d.relayNotConnected)
+    expect(rows[0]).toHaveTextContent(d.relayRankFirst)
+    expect(rows[0]).toHaveTextContent(d.relayPinnedTag)
+    expect(rows[1]).toHaveTextContent(d.relayRankBackup)
+    expect(rows[1]).toHaveTextContent(d.relayAlsoConnected(`tokyo ${t.common.ms(12)}`))
+    expect(rows[2]).toHaveTextContent(d.relayNotConnected)
   })
 
   it('启用之后写出 controller 试连的结果：连不上是一条建议，不是错误', async () => {
