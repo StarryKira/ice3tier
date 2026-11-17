@@ -508,8 +508,11 @@ test('有数据时：节点详情', async () => {
   await page.keyboard.press('Escape')
 
   await page.getByRole('tab', { name: d.tabRoutes }).click()
-  await expect(page.getByRole('columnheader', { name: d.routesColPath })).toBeVisible()
+  await expect(page.getByRole('columnheader', { name: d.routesColMode }).first()).toBeVisible()
   await shot('node-detail-routes')
+  await page.setViewportSize({ width: 1680, height: 960 })
+  await shot('node-detail-routes-wide', { fullPage: false })
+  await page.setViewportSize({ width: 1280, height: 800 })
 
   await page.getByRole('tab', { name: d.tabAccess }).click()
   await expect(page.getByText(counted(d.accessCanReach))).toBeVisible()

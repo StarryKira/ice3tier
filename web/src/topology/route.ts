@@ -87,7 +87,7 @@ export function routeDetail(route: Route, detail: RouteDetail): string | null {
   const direct = detail.direct ?? null
   const leg = detail.relay_leg ?? null
   if (route.via === 'direct' && direct !== null) return t.routes.directKind[direct]
-  if (route.via === 'relay' && leg !== null) return t.routes.relayLeg(t.routes.legTransport[leg])
+  if (route.via === 'relay' && leg !== null) return t.routes.legTransport[leg]
   return null
 }
 

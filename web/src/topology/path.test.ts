@@ -111,7 +111,7 @@ describe('现问到时的细节：直连的方式、选路模式、原因', () =
 
   it('经 relay、第一段退回 TCP：写出来，悬停说明为什么', () => {
     const view = describeLeg(leg({ route: viaRelays(3), relay_leg: 'tcp' }), name)
-    expect(view.route?.detail).toBe(t.routes.relayLeg('TCP'))
+    expect(view.route?.detail).toBe(t.routes.legTransport.tcp)
     expect(view.route?.detailHint).toBe(t.routes.relayLegTcpHint)
   })
 

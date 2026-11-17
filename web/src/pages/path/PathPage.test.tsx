@@ -151,7 +151,7 @@ describe('现问到时的细节：方式、模式、原因、候选路径', () =
     expect(within(forward).getByTestId('path-forward-reason')).toHaveTextContent(`${p.reasonLabel} · 直连可用`)
     expect(forward).toHaveTextContent(p.modeLabel(p.mode.direct_first))
     expect(within(screen.getByTestId('path-reverse')).getByTestId('path-reverse-detail')).toHaveTextContent(
-      t.routes.relayLeg('TCP'),
+      t.routes.legTransport.tcp,
     )
 
     const table = within(screen.getByTestId('candidates-forward')).getByRole('table', {

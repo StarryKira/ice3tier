@@ -44,8 +44,13 @@ export const routes = {
   },
   /** 经 relay 时到第一个 relay 的那一段。 */
   legTransport: { udp: 'UDP', tcp: 'TCP', unknown: '传输不明' },
-  relayLeg: (transport: string) => `首段 ${transport}`,
-  relayLegTcpHint: 'UDP 不可用，到中继的一段改用 TCP',
+  relayLegTcpHint: 'UDP 不通，改走 TCP',
+  /** 路由表里那个小图标的悬停说明：标题一句，下面一句解释。 */
+  relayLegHint: {
+    udp: '连中继走 UDP，正常',
+    tcp: 'UDP 不通，改走 TCP，能用但会慢一些',
+    unknown: '不知道走的什么',
+  },
   withDetail: (route: string, detail: string) => `${route}（${detail}）`,
   /** 微秒写成毫秒；数已经按语言写好。 */
   ms: (value: string) => `${value} ms`,

@@ -174,7 +174,9 @@ describe('骨干：relay 之间的延迟', () => {
     renderWithApp(<TopologyPage />, { network: NETWORK, route: '/n/1/topology?view=matrix' })
     const relayed = await screen.findByTestId('cell-2-3')
     expect(relayed).toHaveTextContent('TCP')
-    expect((relayed.getAttribute('aria-label') ?? '').includes(r.withDetail(r.via('hk'), r.relayLeg('TCP')))).toBe(true)
+    expect((relayed.getAttribute('aria-label') ?? '').includes(r.withDetail(r.via('hk'), r.legTransport.tcp))).toBe(
+      true,
+    )
     const lan = screen.getByTestId('cell-3-2').getAttribute('aria-label') ?? ''
     expect(lan.includes(r.withDetail(r.direct, r.directKind.lan))).toBe(true)
   })

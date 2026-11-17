@@ -18,9 +18,9 @@ describe('一条路的细节', () => {
 
   it('经 relay 写第一段的传输', () => {
     expect(routeTextWithDetail(viaRelays(1), { relay_leg: 'tcp' }, name)).toBe(
-      r.withDetail(r.via('hk'), r.relayLeg('TCP')),
+      r.withDetail(r.via('hk'), r.legTransport.tcp),
     )
-    expect(routeDetail(viaRelays(1), { relay_leg: 'udp' })).toBe(t.routes.relayLeg('UDP'))
+    expect(routeDetail(viaRelays(1), { relay_leg: 'udp' })).toBe(t.routes.legTransport.udp)
   })
 
   it('不知道、或者旧的 controller 没写这两个字段：什么都不加', () => {

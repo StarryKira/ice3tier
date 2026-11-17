@@ -100,7 +100,7 @@ const TO_PC = pathTo(4, [
 ])
 
 describe('路由', () => {
-  it('路径写清楚 P2P 还是中继、经过谁；延迟优先不同时写它怎么走、快多少，相同时只写相同', async () => {
+  it('现在和延迟优先各一组：方式、经过、协议、路径长度、延迟；延迟优先写差多少，一样时也照常写出来', async () => {
     fakeApi({
       'GET /networks/1/nodes/1/routes': ROUTES,
       'GET /networks/1/nodes': [
@@ -118,21 +118,26 @@ describe('路由', () => {
 
     const nas = (await screen.findByText('10.66.0.2')).closest('tr')
     if (nas === null) throw new Error('没有 nas 那一行')
-    // 路径一格：中继、经 hk、首段 UDP；延迟 150 ms。
-    expect(within(nas).getByText(d.routesRelay)).toBeVisible()
-    expect(nas).toHaveTextContent(d.viaRelay('hk'))
-    expect(nas).toHaveTextContent(t.routes.relayLeg('UDP'))
-    expect(nas).toHaveTextContent(t.common.ms(150))
-    // 换成延迟优先：经 tokyo → hk，90 ms，快 60 ms。
-    await waitFor(() => expect(nas).toHaveTextContent(d.viaRelay('tokyo → hk')))
-    expect(nas).toHaveTextContent(t.common.ms(90))
-    expect(nas).toHaveTextContent(d.routesFaster(60))
+    const texts = (row: HTMLElement) =>
+      within(row)
+        .getAllByRole('cell')
+        .map((cell) => cell.textContent)
+    // 现在：中继、经过 hk、UDP、路径长度 2、150 ms。
+    expect(texts(nas).slice(1, 6)).toEqual([d.routesRelay, 'hk', 'UDP', '2', t.common.ms(150)])
+    // 换成延迟优先：中继、经过 tokyo → hk、协议不知道（第一个中继换了）、长度 3、90 ms，比现在少 60 ms。
+    await waitFor(() => expect(nas).toHaveTextContent('tokyo → hk'))
+    expect(texts(nas).slice(6, 11)).toEqual([
+      d.routesRelay,
+      'tokyo → hk',
+      '—',
+      '3',
+      `${t.common.ms(90)}${d.routesDelta(-60)}`,
+    ])
 
-    // 直连的那一行：P2P 直连、局域网；延迟优先也一样，只写"相同"。
+    // 直连的那一行：P2P、经过一道横线、UDP、长度 1；延迟优先也是这条，照常写出来。
     const pc = screen.getByText('10.66.0.4').closest('tr')
     if (pc === null) throw new Error('没有 pc 那一行')
-    expect(within(pc).getByText(d.routesP2P)).toBeVisible()
-    expect(pc).toHaveTextContent(t.routes.directKind.lan)
-    await waitFor(() => expect(within(pc).getByText(d.routesSame)).toBeVisible())
+    expect(texts(pc).slice(1, 6)).toEqual([d.routesP2P, '—', 'UDP', '1', t.common.ms(2)])
+    await waitFor(() => expect(texts(pc).slice(6, 11)).toEqual([d.routesP2P, '—', 'UDP', '1', t.common.ms(2)]))
   })
 })
