@@ -1,13 +1,15 @@
 //! ice3tier 的 controller：节点协议、管理 API 和内嵌的 WebUI，一个进程。
 //!
 //! 这里只做装配：读参数，打开数据目录，绑端口，等退出信号。逻辑都在 `i3t-controller` 这个库里。
-//! 终端上的文字（帮助、管理令牌、启动时的错误）跟着系统的语言，日志不翻译。
+//! 终端上的文字（帮助、管理令牌、备份的结果、启动时的错误）跟着系统的语言，日志不翻译。
+//!
+//! 除了运行，还有两种做完就退出的用法：`--reset-admin-token` 和 `--backup-to`。
 
 mod texts;
 
 use std::io::IsTerminal;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -31,8 +33,8 @@ struct Args {
     #[arg(long, env = "I3T_DATA_DIR")]
     data_dir: PathBuf,
 
-    #[arg(long, env = "I3T_PUBLIC_ADDR")]
-    public_addr: String,
+    #[arg(long, env = "I3T_PUBLIC_ADDR", required_unless_present = "backup_to")]
+    public_addr: Option<String>,
 
     #[arg(long, default_value = "0.0.0.0:20331")]
     listen: SocketAddr,
@@ -45,6 +47,9 @@ struct Args {
 
     #[arg(long)]
     reset_admin_token: bool,
+
+    #[arg(long, conflicts_with = "reset_admin_token")]
+    backup_to: Option<PathBuf>,
 }
 
 /// 命令行的定义，帮助按 `lang` 写。
@@ -58,19 +63,23 @@ fn command(lang: Lang) -> clap::Command {
         .mut_arg("admin_listen", |arg| arg.help(t.admin_listen).value_name(t.address))
         .mut_arg("static_dir", |arg| arg.help(t.static_dir).value_name(t.dir))
         .mut_arg("reset_admin_token", |arg| arg.help(t.reset_admin_token))
+        .mut_arg("backup_to", |arg| arg.help(t.backup_to).value_name(t.dir))
 }
 
 fn main() -> ExitCode {
     let lang = i3t_lang::set(Lang::detect());
     let args: Args = i3t_lang::cli::parse(command(lang), lang);
-    let runtime = match tokio::runtime::Runtime::new() {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            eprintln!("i3t-controller: {}", lang.labelled(texts::texts().start_runtime, &error.to_string()));
-            return ExitCode::FAILURE;
-        }
+    let outcome = match &args.backup_to {
+        Some(to) => back_up(&args.data_dir, to),
+        None => match tokio::runtime::Runtime::new() {
+            Ok(runtime) => runtime.block_on(serve(args)),
+            Err(error) => {
+                eprintln!("i3t-controller: {}", lang.labelled(texts::texts().start_runtime, &error.to_string()));
+                return ExitCode::FAILURE;
+            }
+        },
     };
-    match runtime.block_on(serve(args)) {
+    match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("i3t-controller: {}", texts::describe(&error));
@@ -79,13 +88,33 @@ fn main() -> ExitCode {
     }
 }
 
-async fn serve(args: Args) -> anyhow::Result<()> {
-    let t = texts::texts();
-    let filter = EnvFilter::try_from_env(LOG_ENV).unwrap_or_else(|_| EnvFilter::new("info"));
+/// 日志写到标准错误。`default` 是没有设 [`LOG_ENV`] 时的级别。
+fn init_logging(default: &str) {
+    let filter = EnvFilter::try_from_env(LOG_ENV).unwrap_or_else(|_| EnvFilter::new(default));
     // 输出到文件或者日志服务时不带颜色的控制符。
     tracing_subscriber::fmt().with_env_filter(filter).with_ansi(std::io::stderr().is_terminal()).with_writer(std::io::stderr).init();
+}
+
+/// 备份数据目录，把写了什么打在标准输出上。不需要 controller 停着，也不需要运行时才要的参数。
+fn back_up(data_dir: &Path, to: &Path) -> anyhow::Result<()> {
+    // 写了什么由这里打出来，库里那条"备份写好了"的日志在终端上是重复的，所以默认只看警告。
+    init_logging("warn");
+    let t = texts::texts();
+    let backup = Controller::back_up(data_dir, to).with_context(|| (t.back_up)(&data_dir.display().to_string()))?;
+    println!("{}", (t.backup_written)(&backup.dir.display().to_string()));
+    let width = backup.files.iter().map(|file| file.name.len()).max().unwrap_or(0);
+    for file in &backup.files {
+        println!("    {:width$}  {}", file.name, i3t_lang::current().bytes(file.bytes));
+    }
+    Ok(())
+}
+
+async fn serve(args: Args) -> anyhow::Result<()> {
+    let t = texts::texts();
+    init_logging("info");
     abort_on_panic();
-    check_public_addr(&args.public_addr)?;
+    let public_addr = args.public_addr.expect("clap 保证：没有 --backup-to 时 --public-addr 是必须写的");
+    check_public_addr(&public_addr)?;
     if let Some(dir) = &args.static_dir {
         // 目录写错了的话 WebUI 只会全是 404，不如启动时就说。
         if !dir.join("index.html").is_file() {
@@ -93,8 +122,8 @@ async fn serve(args: Args) -> anyhow::Result<()> {
         }
     }
 
-    let opened = Controller::open(&args.data_dir, args.public_addr.clone())
-        .with_context(|| (t.open_data_dir)(&args.data_dir.display().to_string()))?;
+    let opened =
+        Controller::open(&args.data_dir, public_addr.clone()).with_context(|| (t.open_data_dir)(&args.data_dir.display().to_string()))?;
     // 发布清单里的"需要的 controller 最低版本"是和可执行文件的版本比的。
     let version = env!("CARGO_PKG_VERSION").parse().context(t.bad_version)?;
     let controller = opened.controller.with_version(version);
@@ -127,7 +156,7 @@ async fn serve(args: Args) -> anyhow::Result<()> {
     tracing::info!(
         nodes = %server.node_addr().context(t.bind)?,
         admin = %server.admin_addr().context(t.bind)?,
-        public = %args.public_addr,
+        public = %public_addr,
         webui = webui_from,
         "controller 已启动"
     );

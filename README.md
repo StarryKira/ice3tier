@@ -123,6 +123,24 @@ Linux 上可以用 `i3t tune` 检查会影响节点表现的内核参数（UDP �
 
 三个程序（和发布工具 `i3t-release`）在终端上的文字跟着系统的语言：简体中文或英文。要指定的话设环境变量 `I3T_LANG=zh-CN` 或 `I3T_LANG=en`。`config.toml` 的注释用第一次写它时的语言；日志不翻译。
 
+## 备份和恢复
+
+备份不用停 controller：
+
+```sh
+i3t-controller --data-dir /var/lib/i3t-controller --backup-to /srv/backup/i3t-controller-2026-11-17
+```
+
+它把数据库的一份一致的快照和 controller 的密钥（权限 0600）写进一个新的或者空的目录，已经有东西的目录不写。不要直接拷贝 `controller.db`：controller 开着时最近的改动还在旁边的 `controller.db-wal` 里，只拷主文件会丢掉它们。
+
+备份里有全部的设置和记录：网络、节点、分组、规则、出口、端口转发、注册令牌、凭据、操作记录、备份那一刻的管理令牌，以及 controller 的密钥。没有更新包的缓存（`releases/`，要用时重新取），也没有节点在不在线、上报的路由这类只在内存里的状态。
+
+恢复：停掉 controller，把备份目录放到数据目录的位置（或者让 `--data-dir` 指向它），照常启动。节点连的地址（`--public-addr`）不变；换了机器的话让这个地址指到新机器上。用 systemd 跑的话先 `chown -R i3t-controller: /var/lib/i3t-controller`。
+
+- 已经加入的节点自己连回来：controller 的密钥没有变，节点认得它。
+- 备份之后的改动都没有了。备份之后加入的节点会被当成不认识的节点拒绝，`i3t run` 停下并提示重新加入：生成一个新的注册令牌，`echo <令牌> | i3t join`，再 `i3t run`。备份之后删掉的节点又出现在列表里。
+- 旧版本做的备份照常能用：启动时数据库按新版本升级。
+
 ## 构建
 
 需要 Rust 1.88 或更新的稳定版；Web 界面要 Node.js 22 和 pnpm。

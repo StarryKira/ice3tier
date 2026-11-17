@@ -454,6 +454,29 @@ mod tests {
     }
 
     #[test]
+    fn a_backup_of_an_older_data_directory_is_migrated_when_a_controller_starts_on_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        old_database(&data.join("controller.db"));
+        std::fs::write(data.join("controller.key"), i3t_crypto::NodeKey::generate().unwrap().to_pem()).unwrap();
+
+        let backup = crate::Controller::back_up(&data, &dir.path().join("backup")).unwrap();
+        let version = |path: &std::path::Path| -> u32 {
+            Connection::open(path).unwrap().pragma_query_value(None, "user_version", |row| row.get(0)).unwrap()
+        };
+        assert_eq!(version(&backup.dir.join("controller.db")), u32::try_from(BEFORE_GROUPS).unwrap(), "备份原样照抄，不迁移");
+
+        let controller = crate::Controller::open(&backup.dir, "ctl.example.com:20331".to_owned()).unwrap().controller;
+        assert_eq!(version(&backup.dir.join("controller.db")), u32::try_from(MIGRATIONS.len()).unwrap());
+        let home = i3t_model::admin::NetworkId(1);
+        let groups: Vec<String> = controller.groups(home).unwrap().into_iter().map(|group| group.name).collect();
+        assert_eq!(groups, ["All", "ghost", "home", "laptops", "printers", "servers"], "标签照常迁成了分组");
+        assert_eq!(controller.nodes(home).unwrap().len(), 3);
+        assert_eq!(version(&data.join("controller.db")), u32::try_from(BEFORE_GROUPS).unwrap(), "原来的数据目录没有动");
+    }
+
+    #[test]
     fn a_migration_that_fails_on_broken_data_leaves_the_tags_in_place() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("controller.db");

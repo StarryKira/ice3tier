@@ -6,6 +6,7 @@
 //! 方法里有数据库读写，重算一个大网络也要花时间，所以异步代码要经 `spawn_blocking` 调用它们。
 
 mod address;
+mod backup;
 mod credentials;
 mod diag;
 mod enrollment;
@@ -52,6 +53,7 @@ use crate::secret;
 use crate::store::{DIGEST_LEN, GroupRecord, LogFilter, NetworkRecord, NodeRecord, Store};
 use crate::sync::NodeSync;
 
+pub use backup::{Backup, BackupFile};
 pub use protocol::Admitted;
 pub(crate) use publish::Seeds;
 pub use routes::RouteAnswers;
@@ -531,22 +533,32 @@ impl Clock {
 }
 
 fn load_or_create_key(path: &Path) -> Result<NodeKey, Error> {
-    let io_error = |source| Error::Io { path: path.to_owned(), source };
     match fs::read_to_string(path) {
         Ok(pem) => NodeKey::from_pem(&pem).map_err(|source| Error::Key { path: path.to_owned(), source }),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             let key = NodeKey::generate().map_err(Error::KeyGeneration)?;
-            let mut options = fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            // 私钥文件只有属主可读。别的平台靠数据目录本身的权限。
-            #[cfg(unix)]
-            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-            let mut file = options.open(path).map_err(io_error)?;
-            file.write_all(key.to_pem().as_bytes()).map_err(io_error)?;
-            file.sync_all().map_err(io_error)?;
+            create_key_file(path)
+                .and_then(|file| write_synced(file, key.to_pem().as_bytes()))
+                .map_err(|source| Error::Io { path: path.to_owned(), source })?;
             tracing::info!(path = %path.display(), public = %key.public(), "生成了 controller 的密钥");
             Ok(key)
         }
-        Err(err) => Err(io_error(err)),
+        Err(source) => Err(Error::Io { path: path.to_owned(), source }),
     }
+}
+
+/// 新建一个密钥文件，已经有了就失败，不覆盖。生成密钥和备份都用它，所以两边的权限一样。
+fn create_key_file(path: &Path) -> std::io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    // 私钥文件只有属主可读。别的平台靠数据目录本身的权限。
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)
+}
+
+/// 写完并且落盘之后才算写好。
+fn write_synced(mut file: fs::File, content: &[u8]) -> std::io::Result<()> {
+    file.write_all(content)?;
+    file.sync_all()
 }

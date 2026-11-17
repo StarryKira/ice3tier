@@ -4,7 +4,8 @@
 //! 这里不检查业务规则（名字合不合法、能力有没有声明），那是 [`crate::Controller`] 的事；
 //! 表上的唯一约束和外键只是最后一道保险。
 //!
-//! 备份就是拷贝这个文件。
+//! 数据库是 WAL 模式：提交先写进旁边的 `-wal` 文件，过一阵才写回主文件。所以 controller 开着的时候拷贝主文件
+//! 得不到完整的数据，备份要用 [`Store::snapshot`]。
 
 mod codec;
 mod cooldown;
@@ -24,8 +25,9 @@ mod test;
 mod token;
 
 use std::path::Path;
+use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 pub use cooldown::CooldownKind;
 pub use credential::CredentialRecord;
@@ -40,6 +42,9 @@ pub use token::{NewToken, RETENTION_SECS, TokenRecord, is_pending, token_at};
 /// SHA-256 的长度。令牌和 netmap 的摘要都是它。
 pub const DIGEST_LEN: usize = 32;
 
+/// 做快照时最多等别的连接多久。WAL 模式下读不挡写，只有对方正在重建 WAL 的索引这类很短的时刻要等。
+const SNAPSHOT_BUSY_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub struct Store {
     conn: Connection,
 }
@@ -52,6 +57,28 @@ impl Store {
     /// 文件打不开、不是 SQLite 数据库，或者它是更新版本的程序写的。
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         Self::prepare(Connection::open(path)?, schema::MIGRATIONS)
+    }
+
+    /// 把数据库文件 `database` 的一份一致的快照写到 `to`。`to` 要么还不存在，要么是一个空文件。
+    ///
+    /// 用的是 SQLite 的 `VACUUM INTO`：在一个读事务里把整个数据库写成一个新文件。读事务看到的是它开始那一刻已经提交的
+    /// 全部内容，包括还在 `-wal` 里、没有写回主文件的提交；之后的提交一条也不混进来。WAL 模式下读不挡写，
+    /// 同时开着这个数据库的 controller（同一个进程或者别的进程）照常读写。
+    ///
+    /// 只读打开，不迁移：快照不改原来的数据库，哪个版本的程序写的都原样照抄，表结构的版本号也在里面。
+    /// 在快照上 [`Store::open`] 时照常迁移。controller 停着时，SQLite 会在原来的数据库旁边建出空的 `-wal` 和 `-shm`
+    /// （只读也要用它们）；留着不碍事，controller 启动时照常用。
+    ///
+    /// # Errors
+    ///
+    /// `database` 打不开或者不是 SQLite 数据库，`to` 写不了或者已经有内容。
+    pub fn snapshot(database: &Path, to: &Path) -> Result<(), StoreError> {
+        let conn = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        conn.busy_timeout(SNAPSHOT_BUSY_TIMEOUT)?;
+        // SQLite 的文件名是 UTF-8。rusqlite 在 Windows 上对不是 UTF-8 的路径也是这样拒绝的。
+        let target = to.to_str().ok_or_else(|| rusqlite::Error::InvalidPath(to.to_owned()))?;
+        conn.execute("VACUUM INTO ?1", [target])?;
+        Ok(())
     }
 
     /// 只在内存里的数据库，进程结束就没了。测试用。

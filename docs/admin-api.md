@@ -306,7 +306,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `public_addr` | 节点连 controller 用的 `主机:端口`，写在每个注册令牌里 |
 | `networks`、`nodes`、`online` | 全部网络的数量、全部节点的数量、在线节点的数量 |
 | `newer_version` | 「新增」已知的最新正式版比 controller 自己新时，是那个版本号；否则 `null`。controller 不会自己更新，界面据此提醒管理员手动更新 |
-| `data_dir` | 「新增」controller 的数据目录（数据库、密钥、更新包的缓存都在里面），备份时拷贝它。controller 不是从数据目录打开的（只在测试里）时是 `null` |
+| `data_dir` | 「新增」controller 的数据目录（数据库、密钥、更新包的缓存都在里面）。备份用 `i3t-controller --data-dir <数据目录> --backup-to <新目录>`，controller 开着也可以；不要直接拷贝它，controller 开着时最近的改动还在 `controller.db-wal` 里。controller 不是从数据目录打开的（只在测试里）时是 `null` |
 
 ### GET /log
 

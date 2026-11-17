@@ -951,3 +951,36 @@ def leaked(host: Host) -> int:
     text = host.run("nft", "list", "table", "ip", "leakwatch").stdout
     found = re.search(r"counter packets (\d+)", text)
     return int(found.group(1)) if found else -1
+
+
+# 下面是备份与恢复的场景（test_backup.py）用的。
+
+def controller_data(controller: Controller) -> Path:
+    """`Controller` 启动时用的数据目录。"""
+    return controller.out.parent / "controller"
+
+
+def back_up(host: Host, data: Path, to: Path) -> subprocess.CompletedProcess:
+    """在 `host` 上把数据目录 `data` 备份到 `to`（`i3t-controller --backup-to`）。controller 开着也可以。"""
+    return host.run(binary("i3t-controller"), "--data-dir", str(data), "--backup-to", str(to), check=False)
+
+
+class RestoredController(Controller):
+    """在一个备份上启动的 controller，地址和原来的一样。
+
+    管理令牌是备份时的那个（备份里有它的哈希），启动时不再打出来，所以由调用方给。
+    """
+
+    def __init__(self, host: Host, work: Path, data: Path, token: str) -> None:
+        self.host = host
+        self.log = work / "restored.log"
+        self.out = work / "restored.out"
+        self.address = f"{host.ip}:20331"
+        self.proc = subprocess.Popen(
+            host.cmd(binary("i3t-controller"), "--data-dir", str(data), "--public-addr", self.address),
+            stdout=self.out.open("w"), stderr=self.log.open("w"))
+        host._procs.append(self.proc)
+        wait_until(lambda: "已启动" in self.log.read_text(errors="replace") or self.proc.poll() is not None, what="恢复的 controller 启动")
+        if self.proc.poll() is not None:
+            raise RuntimeError(f"恢复的 controller 启动失败：\n{self.log.read_text(errors='replace')[-2000:]}")
+        self.token = token
