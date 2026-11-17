@@ -5,7 +5,7 @@ import { Link } from 'react-router'
 
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
-import { type Network, type Node, type NodeDetail, type Reachability } from '@/api/types'
+import { type Network, type Node, type NodeDetail, type Reachability, type RelaySettings } from '@/api/types'
 import { useConfirm } from '@/components/confirm'
 import { CodeBlock } from '@/components/copy'
 import { DeclareHowTo } from '@/components/declare'
@@ -21,6 +21,7 @@ import { t, useLocale } from '@/i18n'
 import { exitUsage } from '@/lib/commands'
 import { countryName } from '@/lib/region'
 import { attachedCount, nodeName } from '@/lib/nodes'
+import { relayAddresses } from '@/lib/relay'
 import { type Capability } from '@/lib/product'
 import { cn } from '@/lib/utils'
 import { forwardLabel, forwardStatusView } from '@/pages/forwards/status'
@@ -241,24 +242,24 @@ function CountryValue({ code }: { code: string | null }) {
   )
 }
 
-/** 中继的地址：自动发现（不能改），下面一行说明不用填。 */
-function RelayAddresses({ udp, tcp }: { udp: readonly string[]; tcp: readonly string[] }) {
-  const addresses = [...new Set([...udp, ...tcp])]
+/**
+ * 中继的地址：controller 找出来的，只读，按节点去试的顺序。每个后面一行小字写它从哪里来
+ * （节点上声明的、controller 看到的、网卡上的）；比 0.1.10 旧的 controller 不给来源，就不写。
+ */
+function RelayAddresses({ relay }: { relay: RelaySettings }) {
+  const addresses = relayAddresses(relay)
+  if (addresses.length === 0) return <span className="font-normal text-muted-foreground">{d.relayNoAddressYet}</span>
   return (
-    <>
-      {addresses.length === 0 ? (
-        '—'
-      ) : (
-        <ul className="space-y-1">
-          {addresses.map((address) => (
-            <li key={address} className="tabular">
-              {address}
-            </li>
-          ))}
-        </ul>
-      )}
-      <p className="mt-1 text-xs font-normal text-muted-foreground">{d.relayAddressAuto}</p>
-    </>
+    <ul className="space-y-1.5">
+      {addresses.map((entry) => (
+        <li key={entry.address}>
+          <span className="tabular">{entry.address}</span>
+          {entry.source !== 'unknown' ? (
+            <span className="block text-xs font-normal text-muted-foreground">{d.relaySource[entry.source]}</span>
+          ) : null}
+        </li>
+      ))}
+    </ul>
   )
 }
 
@@ -315,7 +316,7 @@ export function RelayTab({ network, node, onWaiting }: CapabilityTabProps) {
       <>
         <StatGrid>
           <Stat label={d.statAddress}>
-            <RelayAddresses udp={relay.udp} tcp={relay.tcp} />
+            <RelayAddresses relay={relay} />
           </Stat>
           <Stat label={d.region}>
             <CountryValue code={node.country ?? null} />
@@ -325,6 +326,14 @@ export function RelayTab({ network, node, onWaiting }: CapabilityTabProps) {
             <RelayStateValue network={network} relay={node.id} />
           </Stat>
         </StatGrid>
+        {/* 自动找出来的地址连不上时（机房或路由器做了端口映射），在中继那台机器上声明一个。 */}
+        <p className="border-t px-5 py-3 text-xs text-muted-foreground">
+          {d.relayDeclareBefore(node.name)}
+          <code className="mx-1 rounded bg-muted px-1.5 py-0.5 font-mono text-foreground">
+            i3t set relay-address &lt;{d.relayDeclareArg}&gt;
+          </code>
+          {d.relayDeclareAfter}
+        </p>
       </>
     )
   } else if (!node.declared.relay) {

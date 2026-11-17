@@ -33,6 +33,7 @@ import {
   lanesReported,
   pairGlance,
 } from '@/lib/lanes'
+import { relayHasTcp } from '@/lib/relay'
 import { nodeName, nodePath } from '@/lib/nodes'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { FOCUSED_ROW } from '@/lib/useFocusRow'
@@ -72,7 +73,9 @@ function AddPairDialog({ network, existing, open, onClose }: AddPairDialogProps)
   const failure = formFailure(add.error, {})
 
   // 选中的节点里已经有能被拨的 relay 时，"要一个节点启用 relay"就不用说了。
-  const relayChosen = all.some((node) => (node.id === a || node.id === b) && (node.relay?.tcp.length ?? 0) > 0)
+  const relayChosen = all.some(
+    (node) => (node.id === a || node.id === b) && node.relay !== null && relayHasTcp(node.relay),
+  )
   const same = a !== null && a === b
   const exists = a !== null && b !== null && existing.some((pair) => pairKey(pair.a, pair.b) === pairKey(a, b))
   const problem =

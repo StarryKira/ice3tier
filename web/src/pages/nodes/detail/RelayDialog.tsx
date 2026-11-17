@@ -10,6 +10,7 @@ import { Field } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { t } from '@/i18n'
 import { DEFAULT_NODE_PORT } from '@/lib/product'
+import { relayAddresses } from '@/lib/relay'
 import { parseOptionalPositiveInt } from '@/lib/validate'
 
 const d = t.nodes.detail
@@ -19,7 +20,7 @@ const d = t.nodes.detail
  * 节点从没连上过、还没发现任何地址时是 `null`：这时不能启用。
  */
 function relayAddress(node: Pick<NodeDetail, 'observed_endpoint' | 'relay'>): string | null {
-  return node.observed_endpoint ?? node.relay?.udp[0] ?? node.relay?.tcp[0] ?? null
+  return node.observed_endpoint ?? (node.relay === null ? null : (relayAddresses(node.relay)[0]?.address ?? null))
 }
 
 interface RelayDialogProps {

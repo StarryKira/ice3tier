@@ -14,7 +14,7 @@ const l = t.pairs.lane
 
 const HK = makeNode(1, 'hk', {
   declared: { relay: true, exit: false, forward: false },
-  relay: { udp: ['203.0.113.7:20330'], tcp: ['203.0.113.7:20330'], region: 'hk', bandwidth_mbps: null },
+  relay: { udp: ['203.0.113.7:20330'], tcp: ['203.0.113.7:20330'], bandwidth_mbps: null },
 })
 const LAPTOP = makeNode(2, 'laptop')
 const NAS = makeNode(3, 'nas')

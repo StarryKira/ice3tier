@@ -254,7 +254,7 @@ describe('节点列表上的记号和"需要处理"', () => {
 
   it('更新失败排在最前，红色；不能自己更新而有新版本排在最后', () => {
     const node = makeNode(1, 'hk', {
-      relay: { udp: ['203.0.113.7:20330'], tcp: [], region: 'hk', bandwidth_mbps: null },
+      relay: { udp: ['203.0.113.7:20330'], tcp: [], bandwidth_mbps: null },
       online: false,
       update: makeUpdate({
         available: '0.3.0',

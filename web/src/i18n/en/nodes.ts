@@ -192,6 +192,16 @@ export const nodes: Messages['nodes'] = {
     relayConnectedNone: 'No nodes connected yet',
     relayPinnedTag: 'Pinned',
     relayNotConnected: 'Not connected',
+    relayNoAddressYet: 'No address found yet',
+    relaySource: {
+      declared: 'declared on the node',
+      observed: 'seen by the controller',
+      local: 'on its interface',
+    },
+    relayDeclareBefore: (name) =>
+      `If none of the found addresses can be reached (a port mapping at the provider or router), run on ${name}`,
+    relayDeclareArg: 'address:port',
+    relayDeclareAfter: 'and restart i3t; the declared address is tried first.',
     relayAddressLabel: 'Other nodes reach it at',
     relayAddressAuto: 'Found automatically; nothing to fill in',
     relayNoAddress: 'No address found yet: enable it once the node is online',

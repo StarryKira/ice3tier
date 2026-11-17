@@ -190,17 +190,30 @@ export interface Declared {
   forward: boolean
 }
 
+/** 中继的一个地址从哪里来：节点上声明的、controller 看到的、节点网卡上的。`unknown` 是更新的 controller 才有的取值。 */
+export type RelayAddressSource = 'declared' | 'observed' | 'local' | 'unknown'
+
+export interface RelayAddress {
+  /** `地址:端口`，UDP 和 TCP 都用。 */
+  address: string
+  source: RelayAddressSource
+}
+
+/**
+ * 中继（0.1.10 起是 `RelayView`）：地址由 controller 找出来，只读，按节点去试的顺序；还不知道任何地址时是 `[]`。
+ * 比 0.1.10 旧的 controller 给的是人填的 `udp`、`tcp` 两组，用 `relayAddresses` 读，两种都认。
+ */
 export interface RelaySettings {
-  /** 其他节点连它用的地址：controller 自动发现，界面上不能改。之后会换成带来源的地址列表。 */
-  udp: string[]
-  tcp: string[]
-  /** 界面不再用：区域去掉了，后端会删掉这个字段。 */
-  region?: string
+  addresses?: RelayAddress[]
+  /** 0.1.10 之前。 */
+  udp?: string[]
+  /** 0.1.10 之前。 */
+  tcp?: string[]
   bandwidth_mbps: number | null
 }
 
 export interface RelayInput {
-  /** 现在的接口还要地址；界面交的是 controller 看到的那个。后端改成只收带宽之后去掉。 */
+  /** 0.1.10 之前的 controller 要地址才能启用；新的照收、不用。界面交的是 controller 看到的那个。 */
   udp?: string[]
   tcp?: string[]
   bandwidth_mbps?: number | null
