@@ -89,15 +89,15 @@ jobs:
           "$RUNNER_TEMP/zig/bin/pip" install ziglang cargo-zigbuild
           export PATH="$RUNNER_TEMP/zig/bin:$PATH"
           scripts/build-linux.sh "$LINUX_ARCH"
-          echo "OUT_DIR=target/dist/$TARGET/release" >> "$GITHUB_ENV"
+          echo "OUT_DIR=target/dist/$TARGET/dist" >> "$GITHUB_ENV"
       - name: Build (Windows, macOS)
         if: runner.os != 'Linux'
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          cargo build --release --locked --target "$TARGET" -p i3t -p i3t-controller-bin -p i3tctl
-          echo "OUT_DIR=target/$TARGET/release" >> "$GITHUB_ENV"
+          cargo build --profile dist --locked --target "$TARGET" -p i3t -p i3t-controller-bin -p i3tctl
+          echo "OUT_DIR=target/$TARGET/dist" >> "$GITHUB_ENV"
       - name: Name the programs after the platform
         shell: bash
         env:

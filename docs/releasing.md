@@ -98,7 +98,7 @@ kWB8NBoJtLGX7mZwXgMSZ1C8RkUDpkdOphusy_JhEk0
 
   ```sh
   i3t-release keygen --out release.key           # 打印出公钥
-  I3T_RELEASE_EXTRA_KEY=<公钥> cargo build --release -p i3t -p i3t-controller-bin -p i3tctl
+  I3T_RELEASE_EXTRA_KEY=<公钥> cargo build --profile dist -p i3t -p i3t-controller-bin -p i3tctl
   i3t-release manifest --version <版本号> --dir <发布目录> --key release.key
   ```
 

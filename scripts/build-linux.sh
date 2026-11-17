@@ -5,7 +5,7 @@
 #
 #   scripts/build-linux.sh [x86_64|aarch64]
 #
-# 产物在 target/dist/<目标>/release/ 下：i3t、i3t-controller、i3tctl。
+# 产物在 target/dist/<目标>/dist/ 下：i3t、i3t-controller、i3tctl。用的是发布档位 `dist`（见根目录的 Cargo.toml）。
 set -euo pipefail
 
 arch=${1:-x86_64}
@@ -19,5 +19,5 @@ command -v cargo-zigbuild >/dev/null || { echo "找不到 cargo-zigbuild。安�
 cd "$(dirname "$0")/.."
 target="$arch-unknown-linux-gnu"
 rustup target add "$target" >/dev/null
-CARGO_TARGET_DIR=target/dist cargo zigbuild --release --target "$target.2.28" -p i3t -p i3t-controller-bin -p i3tctl
-ls -l "target/dist/$target/release/"{i3t,i3t-controller,i3tctl}
+CARGO_TARGET_DIR=target/dist cargo zigbuild --profile dist --target "$target.2.28" -p i3t -p i3t-controller-bin -p i3tctl
+ls -l "target/dist/$target/dist/"{i3t,i3t-controller,i3tctl}

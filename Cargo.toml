@@ -40,3 +40,13 @@ fn_params_excessive_bools = "warn"
 undocumented_unsafe_blocks = "warn"
 wildcard_imports = "warn"
 return_self_not_must_use = "warn"
+
+# 发给用户的程序用这个档位（`cargo build --profile dist`，产物在 target/…/dist/ 下）：整个程序一起做链接期优化，
+# 一个代码生成单元。节点空闲时常驻内存的大头是程序自己的映像，这样小 2 MB 多（实验环境里空闲节点 14.3 MB → 11.9 MB），
+# 吞吐和每 GB 的 CPU 不变或略好。代价是构建慢两三倍，所以不放进 `release`：测试和日常用的 `--release` 照旧。
+# 偏体积的优化（opt-level = "s"）量过：再小 1.4 MB，每 GB 的 CPU 多一成左右，没有用。
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+strip = "debuginfo"
