@@ -19,6 +19,8 @@ use tokio::time;
 use tracing::Instrument;
 
 use crate::egress::LocalEgress;
+use crate::forward_health::{ForwardHealth, TargetFailure};
+use crate::routes::{NoRoutes, SharedRoutes};
 use crate::session::{self, Shared};
 use crate::udp;
 use crate::usage::{CredentialSnapshot, ExitSnapshot, Tally, Usage};
@@ -87,6 +89,8 @@ impl<C: Connector + Datagrams, E: LocalEgress> Access<C, E> {
             drained: AtomicU64::new(0),
             udp_idle_timeout: UDP_IDLE_TIMEOUT,
             intercept: Counters::default(),
+            forward_health: ForwardHealth::default(),
+            routes: Arc::new(NoRoutes),
         };
         Self { shared: Arc::new(shared), published: Mutex::default() }
     }
@@ -110,6 +114,17 @@ impl<C: Connector + Datagrams, E: LocalEgress> Access<C, E> {
     #[must_use]
     pub fn with_port_book(mut self, ports: Arc<dyn PortBook>) -> Self {
         self.shared_mut("with_port_book").ports = ports;
+        self
+    }
+
+    /// 到各个对端现在走哪条路从哪里问：每条流结束时的摘要里写它。不设时摘要里的路是"不知道"。
+    ///
+    /// # Panics
+    ///
+    /// 在 [`run`](Self::run) 已经开始之后调用。
+    #[must_use]
+    pub fn with_routes(mut self, routes: SharedRoutes) -> Self {
+        self.shared_mut("with_routes").routes = routes;
         self
     }
 
@@ -158,7 +173,17 @@ impl<C: Connector + Datagrams, E: LocalEgress> Access<C, E> {
     /// 每个监听器和每条端口转发现在的状态。
     #[must_use]
     pub fn status(&self) -> AccessStatus {
-        self.published.lock().expect("access status mutex poisoned").clone()
+        let mut status = self.published.lock().expect("access status mutex poisoned").clone();
+        for forward in &mut status.forwards {
+            forward.target_failure = self.shared.forward_health.last_failure(forward.id);
+        }
+        status
+    }
+
+    /// 端口转发的目标最近连不上的记录。出口模块接住监听在虚拟 IP 上的转发时记到同一份里。
+    #[must_use]
+    pub fn forward_health(&self) -> ForwardHealth {
+        self.shared.forward_health.clone()
     }
 
     /// 开始或者结束排空。`Some(说明)` 时新的连接得到拒绝（见类型的文档），说明写进日志。
@@ -239,10 +264,12 @@ impl<C: Connector + Datagrams, E: LocalEgress> Access<C, E> {
                     status.listeners.push(ListenerStatus { name: name.clone(), bind: *bind, protocol: *protocol, state, active, traffic });
                 }
                 Key::Forward { id, bind, protocol } => {
-                    status.forwards.push(ForwardStatus { id: *id, bind: *bind, protocol: *protocol, state, active, traffic });
+                    let forward = ForwardStatus { id: *id, bind: *bind, protocol: *protocol, state, active, traffic, target_failure: None };
+                    status.forwards.push(forward);
                 }
             }
         }
+        self.shared.forward_health.retain(|id| netmap.me.forwards.iter().any(|forward| forward.id == id));
         *self.published.lock().expect("access status mutex poisoned") = status;
     }
 
@@ -326,6 +353,8 @@ pub struct ForwardStatus {
     pub state: ListenState,
     pub active: Active,
     pub traffic: Traffic,
+    /// 最近一次这条转发的流在目标那里失败；之后成功过就是 `None`（[`crate::ForwardHealth`]）。
+    pub target_failure: Option<TargetFailure>,
 }
 
 /// 一个监听现在的状态。

@@ -166,6 +166,74 @@ async fn request_and_response_cross_with_half_close_from_the_client_first() {
     assert!(exit.from_tcp.first_byte.is_some(), "出口应该记下目标的首字节时间");
 }
 
+/// 划分：只有前 `left` 个字节属于这条流，内容随便。
+struct FirstBytes {
+    left: usize,
+}
+
+impl i3t_flow::Framing for FirstBytes {
+    fn take(&mut self, bytes: &[u8]) -> Result<usize, Reason> {
+        let taken = bytes.len().min(self.left);
+        self.left -= taken;
+        Ok(taken)
+    }
+
+    fn is_complete(&self) -> bool {
+        self.left == 0
+    }
+}
+
+#[tokio::test]
+async fn a_framed_relay_sends_only_its_part_and_keeps_the_flow_open_until_the_answer_is_done() {
+    let mut world = World::new().await;
+    let TcpPair { near: mut client, far } = TcpPair::new().await;
+    let flow = i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"HEAD ").await.unwrap().established().await.unwrap();
+    let ingress =
+        tokio::spawn(async move { flow.relay_framed(far, future::pending(), &i3t_flow::Unmetered, &mut FirstBytes { left: 4 }).await });
+
+    // 四个字节之后的是下一个请求，不属于这条流。
+    client.write_all(b"bodyNEXT REQUEST").await.unwrap();
+    let mut target = world.accept_target().await;
+    let mut request = [0; 9];
+    timeout(PATIENCE, target.read_exact(&mut request)).await.unwrap().unwrap();
+    assert_eq!(&request, b"HEAD body");
+    let mut more = [0; 1];
+    let early = timeout(Duration::from_millis(300), target.read(&mut more)).await;
+    assert!(early.is_err(), "这一段完整之后目标既不该再收到字节，也不该看到结束：{early:?}");
+
+    target.write_all(b"answer").await.unwrap();
+    target.shutdown().await.unwrap();
+    let mut response = [0; 6];
+    timeout(PATIENCE, client.read_exact(&mut response)).await.unwrap().unwrap();
+    assert_eq!(&response, b"answer");
+    let (rest, end) = drain(&mut target).await;
+    assert!(rest.is_empty(), "{rest:?}");
+    end.expect("应答发完之后流正常结束，目标读到正常结束");
+
+    let ingress = ingress.await.unwrap();
+    assert!(ingress.end.is_clean(), "{:?}", ingress.end);
+    assert_eq!((ingress.from_tcp.bytes, ingress.from_flow.bytes), (4, 6));
+    assert!(world.exit_summary().await.end.is_clean());
+}
+
+#[tokio::test]
+async fn a_framed_part_cut_short_by_the_client_reaches_the_target_as_a_reset() {
+    let mut world = World::new().await;
+    let TcpPair { near: mut client, far } = TcpPair::new().await;
+    let flow = i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"").await.unwrap().established().await.unwrap();
+    let ingress =
+        tokio::spawn(async move { flow.relay_framed(far, future::pending(), &i3t_flow::Unmetered, &mut FirstBytes { left: 100 }).await });
+
+    client.write_all(b"only part").await.unwrap();
+    client.shutdown().await.unwrap();
+    let mut target = world.accept_target().await;
+    let (received, end) = drain(&mut target).await;
+    assert_eq!(received, b"only part");
+    assert_reset(&end);
+    assert!(matches!(ingress.await.unwrap().end, End::Tcp(ref error) if error.kind() == io::ErrorKind::UnexpectedEof));
+    assert!(!world.exit_summary().await.end.is_clean());
+}
+
 #[tokio::test]
 async fn half_close_from_the_target_first_leaves_the_other_direction_open() {
     let mut world = World::new().await;

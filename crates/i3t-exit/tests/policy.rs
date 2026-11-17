@@ -155,7 +155,8 @@ i3t_lane::on_both_transports! {
             world.gw.system.redirect(&public(port), echo);
         }
 
-        // 默认只放行 80 和 443。
+        // 默认不限端口；写了白名单（这里是 80 和 443）就只放行这些。
+        world.gw.update(|netmap| netmap.me.exit = Some(ExitRole { ports: Some(vec![80, 443]), ..ExitRole::default() })).await;
         for port in [80, 443] {
             let mut stream = socks5(world.socks().await, Some(("gw", "")), PUBLIC_IP, port).await.connected();
             assert_echo(&mut stream).await;
@@ -174,7 +175,7 @@ i3t_lane::on_both_transports! {
         let mut stream = socks5(world.socks().await, Some(("gw", "")), PUBLIC_IP, 443).await.connected();
         assert_reset(&drain(&mut stream).await.1);
 
-        world.gw.update(|netmap| netmap.me.exit = Some(ExitRole { ports: None, ..ExitRole::default() })).await;
+        world.gw.update(|netmap| netmap.me.exit = Some(ExitRole::default())).await;
         let mut stream = socks5(world.socks().await, Some(("gw", "")), PUBLIC_IP, 22).await.connected();
         assert_echo(&mut stream).await;
     }
@@ -259,7 +260,8 @@ i3t_lane::on_both_transports! {
         let world = World::new().await;
         let upstream = common::Target::bind("127.0.0.1").await;
         world.gw.system.name("api.example.com", &[PUBLIC_IP]);
-        world.gw.update(|netmap| netmap.me.exit = Some(ExitRole { upstream_socks5: Some(upstream.addr()), ..ExitRole::default() })).await;
+        let role = ExitRole { upstream_socks5: Some(upstream.addr()), ports: Some(vec![443]), ..ExitRole::default() };
+        world.gw.update(|netmap| netmap.me.exit = Some(role)).await;
 
         let client = tokio::spawn({
             let socks = world.socks().await;

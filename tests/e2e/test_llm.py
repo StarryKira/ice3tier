@@ -237,7 +237,7 @@ def set_nat_timeouts(nat: Nat, udp_s: int, tcp_s: int) -> str:
 
 
 def start_upstream(api: Host, work: Path) -> Path:
-    """在 `api` 上起模拟的上游，HTTPS 在 443、明文在 80（出口默认只放行这两个端口）。返回 CA 证书的路径。"""
+    """在 `api` 上起模拟的上游，HTTPS 在 443、明文在 80。返回 CA 证书的路径。"""
     log = work / "upstream.log"
     api.spawn(binary("i3t-llmgw"), "upstream", "--https", "0.0.0.0:443", "--http", "0.0.0.0:80", "--cert-dir", str(work / "ca"),
               "--name", api.ip, log=log)

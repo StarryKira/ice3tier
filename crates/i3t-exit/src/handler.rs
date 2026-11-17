@@ -6,14 +6,16 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use i3t_access::{ForwardHealth, NoRoutes, RouteAtStart, SharedRoutes, TargetCause};
 use i3t_conn::contract::{DatagramSender, Datagrams};
 use i3t_conn::{Connector, Endpoint, RecvStream, SendStream};
 use i3t_flow::datagram::{self, Opener, OutboundSocket};
 use i3t_flow::{End, Flow, FlowError, Handler, Request, Screening};
 use i3t_model::Netmap;
-use i3t_model::netmap::{Forward, ForwardProtocol, Peer};
+use i3t_model::netmap::{Forward, ForwardProtocol, ForwardTarget, Peer};
 use i3t_proto::NodeId;
 use i3t_proto::flow::{Open, Reason, Reply, Status, Target};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 
@@ -21,6 +23,7 @@ use crate::datagrams::{ContextLimit, IDLE_TIMEOUT, MAX_CONTEXTS_PER_PEER, Sessio
 use crate::grant::Grant;
 use crate::limits::{ExitMeter, Limits, QuotaState};
 use crate::outbound::{Asker, Outbound};
+use crate::proxy_header;
 use crate::stats::{Counters, ExitStats};
 use crate::system::{Os, System};
 
@@ -86,6 +89,10 @@ pub struct Exit<S = Os, C: Datagrams = Endpoint> {
     datagram_idle_timeout: Duration,
     /// 每个发起节点上一次因为流太多被拒绝而记 info 的时刻。
     busy_logged: Mutex<HashMap<NodeId, Instant>>,
+    /// 监听在本节点虚拟 IP 上的端口转发连不连得上目标，和入口记的是同一份（[`with_forward_health`](Self::with_forward_health)）。
+    forward_health: ForwardHealth,
+    /// 到各个对端现在走哪条路，写进每条流结束时的摘要（[`with_routes`](Self::with_routes)）。
+    routes: SharedRoutes,
 }
 
 impl<S, C: Datagrams> std::fmt::Debug for Exit<S, C> {
@@ -116,7 +123,24 @@ impl<S: System, C: Connector + Datagrams> Exit<S, C> {
             draining: Mutex::new(None),
             datagram_idle_timeout: IDLE_TIMEOUT,
             busy_logged: Mutex::default(),
+            forward_health: ForwardHealth::default(),
+            routes: Arc::new(NoRoutes),
         }
+    }
+
+    /// 到各个对端现在走哪条路从哪里问：每条流结束时的摘要里写它（和入口用同一个）。不设时摘要里的路是"不知道"。
+    #[must_use]
+    pub fn with_routes(mut self, routes: SharedRoutes) -> Self {
+        self.routes = routes;
+        self
+    }
+
+    /// 监听在本节点虚拟 IP 上的端口转发的流在目标那里成没成，记到哪里。装配时交进入口的那一份
+    /// （`i3t_access::Access::forward_health`），上报里就有这些转发的"目标连不上"。不设时记在一份没有人看的里面。
+    #[must_use]
+    pub fn with_forward_health(mut self, health: ForwardHealth) -> Self {
+        self.forward_health = health;
+        self
     }
 
     /// 数据报上下文没有报文往来多久之后回收。默认 60 秒；测试里调短，不用真的等一分钟。
@@ -200,9 +224,12 @@ impl<S: System, C: Connector + Datagrams> Exit<S, C> {
                     Ok((Admitted::Onward(flow), grant))
                 }
                 Some(forward) => {
-                    let addr = virtual_forward_target(netmap, initiator, forward)?;
-                    let stream = self.outbound.forward(addr, initiator.virtual_ip).await?;
-                    Ok((local(stream), Grant::VirtualForward { port: *port, id: forward.id, target: forward.target, addr: Some(addr) }))
+                    let entry = virtual_forward_target(netmap, initiator, forward)?;
+                    let connected = self.outbound.forward(entry.addr, initiator.virtual_ip).await;
+                    self.forward_health.record(forward.id, connected.as_ref().map(drop).map_err(|reply| forward_cause(reply.status)));
+                    let stream = present(connected?, &entry, initiator).await?;
+                    let grant = Grant::VirtualForward { port: *port, id: forward.id, target: forward.target, addr: Some(entry.addr) };
+                    Ok((local(stream), grant))
                 }
                 None => Ok((local(self.outbound.node_port(*port, initiator.virtual_ip).await?), Grant::NodeService)),
             },
@@ -215,6 +242,7 @@ impl<S: System, C: Connector + Datagrams> Exit<S, C> {
                 match listed {
                     Some(entry) => {
                         let stream = self.outbound.forward(entry.addr, initiator.virtual_ip).await?;
+                        let stream = present(stream, entry, initiator).await?;
                         Ok((local(stream), Grant::Forward { id: *id, addr: entry.addr }))
                     }
                     None => Err(Reply::new(Status::UnknownForward, "没有下发给这个节点、由发起节点监听的这条 TCP 端口转发")),
@@ -276,12 +304,17 @@ impl<S: System, C: Connector + Datagrams> Exit<S, C> {
         }
         let request = Open { target: Target::Forward { id: forward.id }, class: open.class, origin: open.origin.clone() };
         let opened = async { i3t_flow::open(&*self.connector, forward.target, &request, b"").await?.established().await };
-        match opened.await {
-            Ok(flow) => Ok(flow),
+        let (outcome, result) = match opened.await {
+            Ok(flow) => (Ok(()), Ok(flow)),
             // 目标节点的拒绝原样转给发起节点：连接被拒绝、转发没有下发等，对方都该知道得和直接访问一样准确。
-            Err(FlowError::Refused(reply)) => Err(reply),
-            Err(error) => Err(Reply::new(Status::Unreachable, format!("到端口转发的目标节点 {} 建流失败：{error}", forward.target))),
-        }
+            Err(FlowError::Refused(reply)) => (Err(forward_cause(reply.status)), Err(reply)),
+            Err(error) => (
+                Err(TargetCause::NodeUnreachable),
+                Err(Reply::new(Status::Unreachable, format!("到端口转发的目标节点 {} 建流失败：{error}", forward.target))),
+            ),
+        };
+        self.forward_health.record(forward.id, outcome);
+        result
     }
 }
 
@@ -302,6 +335,7 @@ impl<S: System, C: Connector + Datagrams> Handler for Exit<S, C> {
     async fn handle<Snd: SendStream, Rcv: RecvStream>(&self, request: Request<Snd, Rcv>) {
         let _active = self.counters.begin();
         let peer = request.peer();
+        let route = RouteAtStart::now(&*self.routes, peer);
         let (class, kind) = (request.open().class, request.open().target.kind());
         // 先记下"已经看过"的版本再判断，之后的变化才不会漏掉。
         let mut netmap_changes = self.netmap.clone();
@@ -330,6 +364,7 @@ impl<S: System, C: Connector + Datagrams> Handler for Exit<S, C> {
                     flow.relay(stream, revoked).await
                 };
                 self.counters.finished(&summary);
+                let route = route.ended(&*self.routes);
                 tracing::info!(
                     %peer,
                     ?class,
@@ -338,6 +373,9 @@ impl<S: System, C: Connector + Datagrams> Handler for Exit<S, C> {
                     from_target = summary.from_tcp.bytes,
                     first_byte_ms = summary.from_tcp.first_byte.map(|elapsed| elapsed.as_millis()),
                     end = ?summary.end,
+                    route_start = %route.start_label(),
+                    route_end = %route.end_label(),
+                    route_changed = route.changed,
                     "流结束"
                 );
             }
@@ -351,12 +389,16 @@ impl<S: System, C: Connector + Datagrams> Handler for Exit<S, C> {
                 };
                 let spliced = flow.splice(onward, revoked).await;
                 self.counters.spliced(spliced.near_to_far, spliced.far_to_near, matches!(spliced.end, End::Clean));
+                let route = route.ended(&*self.routes);
                 tracing::info!(
                     %peer,
                     ?class,
                     to_target = spliced.near_to_far,
                     from_target = spliced.far_to_near,
                     end = ?spliced.end,
+                    route_start = %route.start_label(),
+                    route_end = %route.end_label(),
+                    route_changed = route.changed,
                     "接力到端口转发目标节点的流结束"
                 );
             }
@@ -443,6 +485,11 @@ async fn withdrawn(netmap: &mut watch::Receiver<Arc<Netmap>>, peer: NodeId, gran
     }
 }
 
+/// 端口转发的目标给的失败状态是哪一种原因。
+fn forward_cause(status: Status) -> TargetCause {
+    TargetCause::of(status).unwrap_or(TargetCause::Other)
+}
+
 /// 本节点上监听在自己的虚拟 IP 的 `port` 端口上的端口转发。这种转发不占操作系统的端口，别的节点访问这个端口时在这里接住。
 pub(crate) fn forward_on_virtual_ip(netmap: &Netmap, port: u16, protocol: ForwardProtocol) -> Option<&Forward> {
     let bind = SocketAddr::new(IpAddr::V4(netmap.me.virtual_ip), port);
@@ -459,10 +506,10 @@ pub(crate) fn check_allow_list(initiator: &Peer, forward: &Forward) -> Result<()
     }
 }
 
-/// 监听在虚拟 IP 上、目标是本节点自己的端口转发最后要连的地址。
+/// 监听在虚拟 IP 上、目标是本节点自己的端口转发的目标一侧：最后要连的地址，和要不要发 PROXY protocol 的头。
 ///
 /// 目标是别的节点的不走这里，由出口接力（[`Exit`] 的文档）。
-pub(crate) fn virtual_forward_target(netmap: &Netmap, initiator: &Peer, forward: &Forward) -> Result<SocketAddr, Reply> {
+pub(crate) fn virtual_forward_target(netmap: &Netmap, initiator: &Peer, forward: &Forward) -> Result<ForwardTarget, Reply> {
     check_allow_list(initiator, forward)?;
     if forward.target != netmap.me.id {
         return Err(Reply::new(Status::UnknownForward, "这条端口转发的目标是别的节点"));
@@ -472,6 +519,25 @@ pub(crate) fn virtual_forward_target(netmap: &Netmap, initiator: &Peer, forward:
         .forward_targets
         .iter()
         .find(|entry| entry.id == forward.id && entry.listener == netmap.me.id && entry.protocol == forward.protocol)
-        .map(|entry| entry.addr)
+        .copied()
         .ok_or_else(|| Reply::new(Status::UnknownForward, "这条端口转发的目标地址没有下发给这个节点"))
+}
+
+/// 端口转发要求的话，先给刚连上的目标发 PROXY protocol 的头（[`crate::proxy_header`]）。
+///
+/// 头里的来源是 `initiator` 的虚拟 IP：它来自连接的握手认出的发起节点在 netmap 里的条目，建流请求里写的什么都不算。
+async fn present(mut stream: TcpStream, entry: &ForwardTarget, initiator: &Peer) -> Result<TcpStream, Reply> {
+    let Some(version) = entry.proxy_protocol else { return Ok(stream) };
+    let written = async {
+        let (local, peer) = (stream.local_addr()?, stream.peer_addr()?);
+        let header = proxy_header::encode(version, initiator.virtual_ip, local.port(), peer);
+        stream.write_all(&header).await
+    };
+    match written.await {
+        Ok(()) => {
+            tracing::debug!(forward = entry.id, ?version, initiator = %initiator.virtual_ip, "给端口转发的目标发了 PROXY protocol 的头");
+            Ok(stream)
+        }
+        Err(error) => Err(Reply::new(Status::ConnectionRefused, format!("目标在收到 PROXY protocol 的头之前断开了：{error}"))),
+    }
 }

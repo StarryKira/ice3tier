@@ -3,10 +3,14 @@
 //!
 //! 路由层用的是浮点数的毫秒和 0 到 1 的丢包率；协议里换成整数（微秒、千分之几），消息因此可以直接比较相等。
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use i3t_conn::{BackboneRow, CandidateReport, DirectKind, LegReport, PathReport, RelayLeg};
+use i3t_access::{CurrentRoute, Routes};
+
+use i3t_conn::{BackboneRow, CandidateReport, DirectKind, Endpoint, LegReport, PathReport, RelayLeg};
 use i3t_model::control::{self, PathCandidate, PathDetail, PathSegment, Route, RouteKind};
+use i3t_proto::NodeId;
 use i3t_proto::backbone::RelayState;
 
 /// 现在这条路的细节：直连是怎么建立的，或者经 relay 时第一段走的是 UDP 还是 TCP。
@@ -32,6 +36,16 @@ pub(crate) fn detail(report: &PathReport) -> PathDetail {
         reason: report.reason.clone(),
         cause: report.cause.clone(),
         candidates: report.candidates.iter().map(candidate).collect(),
+    }
+}
+
+/// 入口和出口写每条流的摘要时问"到这个对端现在走哪条路"，答的是路由层手上现成的结论。
+pub(crate) struct EndpointRoutes(pub(crate) Arc<Endpoint>);
+
+impl Routes for EndpointRoutes {
+    fn current(&self, peer: NodeId) -> Option<CurrentRoute> {
+        let report = self.0.path_report(peer)?;
+        Some(CurrentRoute { route: report.route, since_switch: report.since_switch_ms.map(Duration::from_millis) })
     }
 }
 

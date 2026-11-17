@@ -375,7 +375,7 @@ async fn serve_peer<C: Connector + Datagrams, E>(
     mut outgoing: mpsc::Receiver<Outgoing>,
     returns: mpsc::Sender<Return>,
 ) {
-    let Some(mut context) = open_context(&shared, peer, class, origin, &mut outgoing).await else { return };
+    let Ok(mut context) = open_context(&shared, peer, class, origin, &mut outgoing).await else { return };
     let sender = context.sender();
     tracing::debug!(%peer, ?class, "到对端节点的数据报上下文建立");
     loop {

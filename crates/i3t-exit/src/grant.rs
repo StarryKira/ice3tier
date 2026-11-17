@@ -124,8 +124,13 @@ pub(crate) mod tests {
             allow_from: Vec::new(),
             class: None,
         };
-        let target =
-            |id, protocol, addr: &str, listener| ForwardTarget { id, protocol, addr: addr.parse().unwrap(), listener: node(listener) };
+        let target = |id, protocol, addr: &str, listener| ForwardTarget {
+            id,
+            protocol,
+            addr: addr.parse().unwrap(),
+            listener: node(listener),
+            proxy_protocol: None,
+        };
         Netmap {
             version: 1,
             network: Network {

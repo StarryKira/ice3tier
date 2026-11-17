@@ -61,7 +61,7 @@ const HELP: Help = Help {
     bandwidth: "带宽上限",
     exit_group: "出口",
     exit_enable: "启用出口或修改设置。节点要先声明：i3t set can-exit on",
-    exit_ports: "允许的互联网端口，逗号分隔；any 不限",
+    exit_ports: "允许的互联网端口：默认 any 不限；写 80,443 这样的列表就只允许这些",
     exit_lan: "允许访问它的局域网",
     exit_upstream: "上游 SOCKS5 代理",
     exit_quota: "每个账期的流量配额，如 500G",
@@ -70,6 +70,8 @@ const HELP: Help = Help {
     exit_connects: "每分钟新建连接上限（每个发起节点、每个目标）",
     exit_disable: "停用出口",
     exit_list: "出口列表",
+    exit_test: "让出口按它的策略试着连一个目标：解析、连接、443 端口的 TLS 握手",
+    exit_test_target: "主机[:端口]，端口默认 443",
     group_group: "分组",
     group_list: "分组列表",
     group_show: "分组详情：成员和用到它的规则",
@@ -116,11 +118,13 @@ const HELP: Help = Help {
     listener_default: "默认动作：local、reject 或 exit:<节点>",
     listener_fixed_exit: "固定出口",
     listener_optimistic: "乐观回复：on 时不等对端应答",
+    exit_optimistic: "乐观回复：on 时不等出口应答（监听器自己设了的以监听器为准）",
     listener_delete: "删除监听器",
     forward_group: "端口转发",
     forward_list: "端口转发列表",
     forward_add: "新建端口转发。监听端口写 0 由监听节点挑；目标节点要先声明：i3t set can-forward on",
     forward_udp: "UDP（默认 TCP）",
+    forward_proxy_protocol: "连上目标后先发 PROXY protocol 头，服务看到发起节点的虚拟 IP（只有 TCP）",
     forward_enable: "启用端口转发",
     forward_disable: "停用端口转发",
     forward_delete: "删除端口转发",
@@ -191,6 +195,7 @@ const VALUES: Values = Values {
     relays: "relay,…",
     version: "版本",
     source: "发布源",
+    target: "目标",
 };
 
 const UI: Ui = Ui {
@@ -248,6 +253,13 @@ const UI: Ui = Ui {
     draining: "正在排空",
     quota: "流量配额",
     seen_by: |name| format!("{name} 看到的"),
+    resolve_step: "解析",
+    connect_step: "连接",
+    tls_step: "TLS",
+    exit_refused: "出口不连",
+    tls_done: "握手完成（不检查证书）",
+    family_only: |family| format!("只连 {family}"),
+    exit_unanswered: |name| format!("{name} 没有回答：版本太旧，或者 20 秒之内没有做完"),
     exit_seen: |flows, target, refused, exit, unreachable| {
         format!("{flows} 条流，目标失败 {target}，拒绝 {refused}，出口失败 {exit}，连不上出口 {unreachable}")
     },

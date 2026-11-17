@@ -12,9 +12,10 @@ use i3t_model::admin::{
     TokenState, UpdateWait,
 };
 use i3t_model::control::diag::{ChoiceCode, HopSource, PathPick, TestCode, TransferEnd};
+use i3t_model::control::exit_test::{ExitTestCause, ExitVia};
 use i3t_model::control::{
     BindCause, DirectKind, InterceptCause, InterceptState, LegTransport, ListenState, NameService, RejectCause, RelayState, Route,
-    RouteCause, RouteHint,
+    RouteCause, RouteHint, TargetCause,
 };
 use i3t_model::update::{SelfUpdateBlocker, UpdateCause, UpdateStatus};
 use i3t_proto::NodeId;
@@ -53,6 +54,12 @@ pub struct Codes {
     pub api_error: fn(&ApiError) -> String,
     pub lane_block: fn(&LaneBlock, Names<'_>) -> String,
     pub forward_status: fn(ForwardStatus) -> &'static str,
+    /// 端口转发的目标为什么连不上，一短句：`目标拒绝连接`。
+    pub target_cause: fn(TargetCause) -> &'static str,
+    /// 出口测试里一步为什么没有成功，一短句：`端口 8080 不在允许的范围里`。
+    pub exit_test_cause: fn(&ExitTestCause) -> String,
+    /// 出口经什么连目标：`直接连`、`经上游代理`。
+    pub exit_via: fn(ExitVia) -> &'static str,
     pub token_state: fn(TokenState) -> &'static str,
     pub credential_state: fn(CredentialState) -> &'static str,
     pub exit_health: fn(ExitHealth) -> &'static str,
@@ -155,6 +162,40 @@ mod tests {
             InterceptState::Unknown,
         ];
         out.extend(intercept.iter().map(codes.intercept_state));
+        let targets = [
+            TargetCause::Refused,
+            TargetCause::Timeout,
+            TargetCause::Unreachable,
+            TargetCause::NotDeclared,
+            TargetCause::AccessDenied,
+            TargetCause::NodeUnreachable,
+            TargetCause::Other,
+            TargetCause::Unknown,
+        ];
+        out.extend(targets.iter().map(|cause| (codes.target_cause)(*cause).to_owned()));
+        let ip = "10.1.2.3".parse().expect("地址");
+        let exit_tests = [
+            ExitTestCause::Busy,
+            ExitTestCause::BadTarget,
+            ExitTestCause::NotEnabled,
+            ExitTestCause::LanNotEnabled,
+            ExitTestCause::PortNotAllowed { port: 8080 },
+            ExitTestCause::FamilyUnavailable { family: i3t_model::netmap::IpFamily::Ipv6 },
+            ExitTestCause::AddressNotAllowed { address: ip },
+            ExitTestCause::NotOnLan { address: ip },
+            ExitTestCause::NameNotFound,
+            ExitTestCause::ResolverFailed,
+            ExitTestCause::Timeout,
+            ExitTestCause::Refused,
+            ExitTestCause::Unreachable,
+            ExitTestCause::UpstreamFailed,
+            ExitTestCause::Closed,
+            ExitTestCause::Alert,
+            ExitTestCause::Other,
+            ExitTestCause::Unknown,
+        ];
+        out.extend(exit_tests.iter().map(codes.exit_test_cause));
+        out.extend([ExitVia::Direct, ExitVia::Upstream, ExitVia::Unknown].map(|via| (codes.exit_via)(via).to_owned()));
         out.push((codes.name_service)(&NameService::Failed {
             cause: InterceptCause::PortInUse { address: "10.66.0.1:53".parse().expect("地址") },
         }));

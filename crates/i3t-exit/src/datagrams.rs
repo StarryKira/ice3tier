@@ -492,7 +492,7 @@ impl<S: System, C: Connector + Datagrams> Session<'_, S, C> {
                     return Ok(Checked::Onward { forward: forward.id, node: forward.target, grant });
                 }
                 Some(forward) => {
-                    let addr = virtual_forward_target(netmap, initiator, forward)?;
+                    let addr = virtual_forward_target(netmap, initiator, forward)?.addr;
                     self.outbound.not_overlay(addr)?;
                     (addr, Grant::VirtualForward { port: *port, id: forward.id, target: forward.target, addr: Some(addr) })
                 }

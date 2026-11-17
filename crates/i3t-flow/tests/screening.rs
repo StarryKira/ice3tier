@@ -201,3 +201,14 @@ async fn open_silently(connector: &MemoryConnector, count: usize) -> Vec<(Memory
     }
     streams
 }
+
+#[tokio::test]
+async fn a_ping_is_answered_after_the_same_screening_without_reaching_the_handler() {
+    let world = World::new();
+    let rtt = i3t_flow::ping(&world.connector(ALLOWED), node(EXIT)).await.unwrap();
+    assert!(rtt < PATIENCE, "{rtt:?}");
+    let refused = i3t_flow::ping(&world.connector(STRANGER), node(EXIT)).await.unwrap_err();
+    assert!(matches!(refused, FlowError::Refused(ref reply) if reply.status == Status::AccessDenied), "{refused:?}");
+    assert_eq!(world.gate.screened.load(Ordering::Relaxed), 2, "往返测量照样先筛");
+    assert_eq!(world.gate.handled.load(Ordering::Relaxed), 0, "处理者看不到往返测量");
+}

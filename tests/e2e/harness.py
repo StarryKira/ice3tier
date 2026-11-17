@@ -174,7 +174,7 @@ class Node:
         if proxy == "socks5":
             proxy_args = ["-x", f"socks5h://{user}127.0.0.1:1080"]
         else:
-            # HTTP 入口只支持 CONNECT，-p 让 curl 对明文 HTTP 也走隧道。
+            # -p 让 curl 对明文 HTTP 也走 CONNECT 的隧道（不用 -p 的明文转发见 plain_http）。
             proxy_args = ["-p", "-x", f"http://{user.rstrip('@') + ':x@' if via else ''}127.0.0.1:1081"]
         return self.host.run("curl", "-sS", "--max-time", str(timeout), *proxy_args, *extra, url, check=False, timeout=timeout + 5)
 
@@ -506,7 +506,7 @@ def blob_digest(size: int) -> str:
 
 
 def start_blob_server(host: Host, work: Path) -> Path:
-    """在 `host` 上起 `BLOB_SERVER`，明文在 80、TLS 在 443（出口默认只放行这两个端口）。返回给客户端用的证书。"""
+    """在 `host` 上起 `BLOB_SERVER`，明文在 80、TLS 在 443。返回给客户端用的证书。"""
     cert, key = work / f"{host.name}-cert.pem", work / f"{host.name}-key.pem"
     subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-days", "2",
                     "-subj", f"/CN={host.ip}", "-addext", f"subjectAltName=IP:{host.ip}", "-keyout", str(key), "-out", str(cert)],
@@ -984,3 +984,98 @@ class RestoredController(Controller):
         if self.proc.poll() is not None:
             raise RuntimeError(f"恢复的 controller 启动失败：\n{self.log.read_text(errors='replace')[-2000:]}")
         self.token = token
+
+
+# 一个把请求头原样作为正文回给客户端的 HTTP 服务：看代理往目标传了哪些头。
+HEADER_ECHO = r"""
+import http.server, socketserver, sys
+class Handler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def do_GET(self):
+        body = (self.requestline + "\n" + str(self.headers)).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        pass
+class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+Server((sys.argv[1], int(sys.argv[2])), Handler).serve_forever()
+"""
+
+
+def start_header_echo(host: Host, port: int = 80) -> None:
+    host.spawn(sys.executable, "-c", HEADER_ECHO, "0.0.0.0", str(port))
+    wait_until(lambda: f":{port} " in host.run("ss", "-lnt").stdout, what=f"{host.name} 上的请求头回显服务启动")
+
+
+def plain_http(node: Node, url: str, *, user: str = "", extra: tuple[str, ...] = (), timeout: float = 60) -> tuple[str, str, str]:
+    """从 `node` 所在的机器经它本机的 HTTP 入口（127.0.0.1:1081）以明文 HTTP 代理的方式取 `url`（不用 CONNECT），
+    `user` 是代理的用户名。返回 (状态码, 应答体或者它的 SHA-256, curl 的错误输出)：应答体比 4KB 长时换成摘要。"""
+    auth = f"{user}:x@" if user else ""
+    answer = node.state / "plain-answer"
+    done = node.host.run("curl", "-sS", "--max-time", str(timeout), "-x", f"http://{auth}127.0.0.1:1081", *extra, "-o", str(answer),
+                         "-w", "%{http_code}", url, check=False, timeout=timeout + 5)
+    body = ""
+    if answer.exists():
+        data = answer.read_bytes()
+        import hashlib
+
+        body = hashlib.sha256(data).hexdigest() if len(data) > 4096 else data.decode(errors="replace")
+        answer.unlink()
+    return done.stdout.strip(), body, done.stderr.strip()
+
+
+# 一个认 PROXY protocol（v1 和 v2）的小服务：读出头里的来源地址，读掉一个 HTTP 请求头，把那个地址作为应答的正文回过去。
+# 头不对时回 "no proxy header"。参数：监听地址、端口。
+PROXY_PROTOCOL_ECHO = r"""
+import ipaddress, socket, socketserver, struct, sys
+class Handler(socketserver.BaseRequestHandler):
+    def read(self, n):
+        data = b""
+        while len(data) < n:
+            chunk = self.request.recv(n - len(data))
+            if not chunk:
+                break
+            data += chunk
+        return data
+    def handle(self):
+        first = self.read(12)
+        source = "no proxy header"
+        if first.startswith(b"PROXY "):
+            line = first
+            while not line.endswith(b"\r\n"):
+                line += self.read(1)
+            source = line.decode().split()[2]
+        elif first == b"\r\n\r\n\x00\r\nQUIT\n":
+            ver_cmd, family, length = struct.unpack("!BBH", self.read(4))
+            body = self.read(length)
+            source = str(ipaddress.ip_address(body[:4] if family == 0x11 else body[:16]))
+        rest = b""
+        while b"\r\n\r\n" not in rest:
+            chunk = self.request.recv(4096)
+            if not chunk:
+                break
+            rest += chunk
+        answer = source.encode()
+        self.request.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" % (len(answer), answer))
+class Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+Server((sys.argv[1], int(sys.argv[2])), Handler).serve_forever()
+"""
+
+
+def start_proxy_protocol_echo(host: Host, port: int, bind: str = "127.0.0.1") -> None:
+    host.spawn(sys.executable, "-c", PROXY_PROTOCOL_ECHO, bind, str(port))
+    wait_until(lambda: f":{port} " in host.run("ss", "-lnt").stdout, what=f"{host.name} 上认 PROXY protocol 的服务启动")
+
+
+def flow_routes(node: Node) -> list[tuple[str, str, str]]:
+    """`node` 的日志里每条流结束时的摘要写的路：(开始时, 结束时, 中间换没换过)，按出现的顺序。"""
+    import re
+
+    pattern = re.compile(r"route_start=(.+?) route_end=(.+?) route_changed=(true|false)")
+    return [match.groups() for line in node.read_log().splitlines() if "流结束" in line for match in [pattern.search(line)] if match]

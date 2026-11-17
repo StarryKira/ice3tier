@@ -2,8 +2,8 @@
 //!
 //! - **指标**：`http://<配置里的地址>/metrics`，Prometheus 的文本格式，不带认证。里面只有计数和对端的名字，
 //!   没有密钥、令牌和目标地址。地址在 `config.toml` 的 `[metrics]` 里，写 `"off"` 就不开。
-//! - **本机状态**：`i3t status` 和 `i3t routes` 向正在运行的节点问现在的状态。它在一个系统挑的回环端口上，
-//!   每个请求都要带令牌。
+//! - **本机状态**：`i3t status` 和 `i3t routes` 向正在运行的节点问现在的状态，`i3t ping` 让它量到另一个节点的往返
+//!   （`/ping?peer=…&count=…`）。它在一个系统挑的回环端口上，每个请求都要带令牌。
 //!
 //! 本机状态接口为什么是"回环端口加令牌"：回环地址本机的任何用户都连得上，只靠它挡不住别的用户。
 //! 所以节点每次启动生成一个随机令牌，和端口一起写进状态目录里的 `local.json`。状态目录只有属主进得去
@@ -19,11 +19,13 @@ use tokio::task::JoinHandle;
 
 use crate::http::{self, Request, Response};
 use crate::metrics;
+use crate::ping::{self, PingReport};
 use crate::runtime::Runtime;
 use crate::state::{LocalEndpoint, StateDir};
 use crate::status::LiveStatus;
 
 const STATUS_PATH: &str = "/status";
+const PING_PATH: &str = "/ping";
 const METRICS_PATH: &str = "/metrics";
 /// Prometheus 的文本格式。
 const METRICS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
@@ -80,24 +82,48 @@ async fn start_status(runtime: &Arc<Runtime>, state: &StateDir) -> anyhow::Resul
     let token: String = rand::random::<[u8; 24]>().iter().map(|byte| format!("{byte:02x}")).collect();
     state.save_local(&LocalEndpoint { addr, token: token.clone() })?;
     let runtime = Arc::clone(runtime);
+    let token: Arc<str> = token.into();
     Ok(tokio::spawn(http::serve(listener, move |request| {
-        let response = respond_status(&runtime, &token, &request);
-        async move { response }
+        let (runtime, token) = (Arc::clone(&runtime), Arc::clone(&token));
+        async move { respond_status(&runtime, &token, &request).await }
     })))
 }
 
-fn respond_status(runtime: &Runtime, token: &str, request: &Request) -> Response {
+async fn respond_status(runtime: &Runtime, token: &str, request: &Request) -> Response {
     if !request.bearer.as_deref().is_some_and(|presented| same(presented, token)) {
         tracing::warn!(path = %request.path, "拒绝了本机状态接口上的一个请求：没有带令牌，或者令牌不对");
         return Response::error(401, "要带状态目录里 local.json 记的令牌");
     }
-    match request.path.as_str() {
-        STATUS_PATH => match serde_json::to_string(&LiveStatus::of(runtime)) {
-            Ok(body) => Response::ok("application/json", body),
-            Err(error) => Response::error(500, &format!("状态写不成 JSON：{error}")),
-        },
-        _ => Response::error(404, "没有这个路径"),
+    let body = match request.path.as_str() {
+        STATUS_PATH => serde_json::to_string(&LiveStatus::of(runtime)),
+        PING_PATH => {
+            let Some((peer, count)) = ping_query(&request.query) else {
+                return Response::error(400, "要写 peer=节点，可以加 count=次数");
+            };
+            serde_json::to_string(&ping::ping(runtime, &peer, count).await)
+        }
+        _ => return Response::error(404, "没有这个路径"),
+    };
+    match body {
+        Ok(body) => Response::ok("application/json", body),
+        Err(error) => Response::error(500, &format!("回答写不成 JSON：{error}")),
     }
+}
+
+/// `/ping` 的查询串：`peer=<节点>&count=<次数>`。节点只能是名字、全名或者虚拟 IP 用到的字符，不用解码。
+fn ping_query(query: &str) -> Option<(String, u32)> {
+    let mut peer = None;
+    let mut count = ping::DEFAULT_COUNT;
+    for pair in query.split('&') {
+        match pair.split_once('=')? {
+            ("peer", value) if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)) => {
+                peer = Some(value.to_owned());
+            }
+            ("count", value) => count = value.parse().ok()?,
+            _ => return None,
+        }
+    }
+    Some((peer?, count))
 }
 
 fn respond_metrics(runtime: &Runtime, request: &Request) -> Response {
@@ -112,6 +138,30 @@ fn same(presented: &str, expected: &str) -> bool {
     presented.len() == expected.len() && presented.bytes().zip(expected.bytes()).fold(0, |diff, (a, b)| diff | (a ^ b)) == 0
 }
 
+/// 让正在运行的节点在到 `peer` 的连接上量 `count` 个往返（`i3t ping`）。没有节点在运行时返回 `None`。
+///
+/// # Errors
+///
+/// `local.json` 读不了，节点给不出看得懂的回答，或者 `peer` 里有节点名和地址里不会有的字符。
+pub async fn ping(state: &StateDir, peer: &str, count: u32) -> anyhow::Result<Option<PingReport>> {
+    let Some(local) = state.local()? else { return Ok(None) };
+    if peer.is_empty() || !peer.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)) {
+        return Err(anyhow!((crate::texts::texts().bad_peer)(peer)));
+    }
+    let path = format!("{PING_PATH}?peer={peer}&count={count}");
+    let body = match http::get(local.addr, &path, Some(&local.token)).await {
+        Ok(body) => body,
+        Err(error) if refused(&error) => return Ok(None),
+        Err(error) => return Err(anyhow!((crate::texts::texts().query_running)(&format!("{error:#}")))),
+    };
+    serde_json::from_str(&body).map(Some).context(crate::texts::texts().status_unreadable)
+}
+
+/// 记录还在、端口却连不上：节点是被杀掉的，没来得及删记录。
+fn refused(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::ConnectionRefused))
+}
+
 /// 向正在运行的节点问它现在的状态。没有节点在运行时返回 `None`。
 ///
 /// # Errors
@@ -122,11 +172,7 @@ pub async fn query(state: &StateDir) -> anyhow::Result<Option<LiveStatus>> {
     let body = match http::get(local.addr, STATUS_PATH, Some(&local.token)).await {
         Ok(body) => body,
         Err(error) => {
-            // 记录还在、端口却连不上：节点是被杀掉的，没来得及删记录。
-            let refused = error
-                .chain()
-                .any(|cause| cause.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::ConnectionRefused));
-            return if refused { Ok(None) } else { Err(anyhow!((crate::texts::texts().query_running)(&format!("{error:#}")))) };
+            return if refused(&error) { Ok(None) } else { Err(anyhow!((crate::texts::texts().query_running)(&format!("{error:#}")))) };
         }
     };
     serde_json::from_str(&body).map(Some).context(crate::texts::texts().status_unreadable)

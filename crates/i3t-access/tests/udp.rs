@@ -74,7 +74,7 @@ fn netmap() -> Netmap {
             outbound: true,
             endpoints: Vec::new(),
             attached: Vec::new(),
-            exit: Some(PeerExit { lan: true, class: None }),
+            exit: Some(PeerExit { lan: true, class: None, optimistic: None }),
             dial_out_only: false,
             keep_alive: false,
             lane: LaneMode::Off,

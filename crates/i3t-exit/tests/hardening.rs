@@ -101,7 +101,7 @@ i3t_lane::on_both_transports! {
         let world = World::new().await;
         world.gw.system.redirect("192.168.77.10:8080", echo_server().await);
         world.gw.system.redirect(&public(443), echo_server().await);
-        world.laptop.update(|netmap| peer_mut(netmap, GW).exit = Some(PeerExit { lan: true, class: None })).await;
+        world.laptop.update(|netmap| peer_mut(netmap, GW).exit = Some(PeerExit { lan: true, class: None, optimistic: None })).await;
         world.gw.update(|netmap| netmap.me.exit = Some(ExitRole { lan: true, ..ExitRole::default() })).await;
         let mut lan = established(&world, "192.168.77.10", 8080).await;
         let mut internet = established(&world, PUBLIC_IP, 443).await;
@@ -123,8 +123,8 @@ i3t_lane::on_both_transports! {
             .update(|netmap| {
                 netmap.me.forwards.push(forward(9, ForwardProtocol::Tcp, "10.66.0.3:8080", NAS));
                 netmap.me.forward_targets = vec![
-                    ForwardTarget { id: 7, protocol: ForwardProtocol::Tcp, addr: echo, listener: node(LAPTOP) },
-                    ForwardTarget { id: 9, protocol: ForwardProtocol::Tcp, addr: echo, listener: node(NAS) },
+                    ForwardTarget { id: 7, protocol: ForwardProtocol::Tcp, addr: echo, listener: node(LAPTOP), proxy_protocol: None },
+                    ForwardTarget { id: 9, protocol: ForwardProtocol::Tcp, addr: echo, listener: node(NAS), proxy_protocol: None },
                 ];
             })
             .await;
@@ -147,7 +147,7 @@ async fn turning_the_lan_switch_off_stops_udp_in_both_directions_but_other_chang
     let world = World::new().await;
     let printer = UdpTarget::bind("127.0.0.1").await;
     world.gw.system.redirect("192.168.77.10:161", printer.addr());
-    world.laptop.update(|netmap| peer_mut(netmap, GW).exit = Some(PeerExit { lan: true, class: None })).await;
+    world.laptop.update(|netmap| peer_mut(netmap, GW).exit = Some(PeerExit { lan: true, class: None, optimistic: None })).await;
     world.gw.update(|netmap| netmap.me.exit = Some(ExitRole { lan: true, ..ExitRole::default() })).await;
     let client = udp_associate(world.socks().await, gw()).await;
     client.send("192.168.77.10", 161, b"snmp").await;
@@ -233,7 +233,13 @@ async fn a_full_udp_forward_leaves_room_for_other_udp_to_the_same_node() {
     world
         .gw
         .update(|netmap| {
-            netmap.me.forward_targets.push(ForwardTarget { id: 7, protocol: ForwardProtocol::Udp, addr: service, listener: node(LAPTOP) });
+            netmap.me.forward_targets.push(ForwardTarget {
+                id: 7,
+                protocol: ForwardProtocol::Udp,
+                addr: service,
+                listener: node(LAPTOP),
+                proxy_protocol: None,
+            });
         })
         .await;
     let listening = world.laptop.forward(7).await;

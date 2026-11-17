@@ -22,7 +22,7 @@ use crate::lanes::{self, NodeLanes};
 use crate::node::BUILTIN_LISTENERS;
 use crate::program::Program;
 use crate::route_detail;
-use crate::status::listen_state;
+use crate::status::{listen_state, target_failure};
 
 /// 节点里的出口：流经共用的连接或者 lane 进来。
 pub(crate) type NodeExit = Exit<Os, lanes::Connector>;
@@ -155,6 +155,7 @@ impl Runtime {
                     bytes_up: forward.traffic.up(),
                     bytes_down: forward.traffic.down(),
                 },
+                target_failure: forward.target_failure.as_ref().map(target_failure),
             })
             .collect();
         let intercept = self.intercept_report();

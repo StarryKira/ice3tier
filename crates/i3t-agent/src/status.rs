@@ -5,9 +5,10 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 
-use i3t_access::{ListenCause, ListenState};
+use i3t_access::{ListenCause, ListenState, TargetCause, TargetFailure};
 use i3t_model::control::{
     self, BindCause, CredentialUsage, ExitReport, InterceptReport, LaneReport, PerformanceReport, Route, RouteSince, SelfUpdate,
+    TargetFailureReport,
 };
 use i3t_model::netmap::Attachment;
 use i3t_model::update::UpdateStatus;
@@ -251,6 +252,22 @@ fn bind_cause(cause: ListenCause) -> BindCause {
         // 入口模块以后可能多出新的种类：这里认不出来的算别的原因，原话照样在 `detail` 里。
         _ => BindCause::Other,
     }
+}
+
+/// 一条端口转发最近一次在目标那里失败，写成上报的样子。
+pub(crate) fn target_failure(failure: &TargetFailure) -> TargetFailureReport {
+    let cause = match failure.cause {
+        TargetCause::Refused => control::TargetCause::Refused,
+        TargetCause::Timeout => control::TargetCause::Timeout,
+        TargetCause::Unreachable => control::TargetCause::Unreachable,
+        TargetCause::NotDeclared => control::TargetCause::NotDeclared,
+        TargetCause::AccessDenied => control::TargetCause::AccessDenied,
+        TargetCause::NodeUnreachable => control::TargetCause::NodeUnreachable,
+        TargetCause::Other => control::TargetCause::Other,
+        // 入口模块以后可能多出新的原因：这里认不出来的算别的原因。
+        _ => control::TargetCause::Other,
+    };
+    TargetFailureReport { cause, secs_ago: failure.at.elapsed().as_secs() }
 }
 
 #[cfg(test)]

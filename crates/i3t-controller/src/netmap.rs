@@ -146,6 +146,7 @@ impl NetworkView {
                 protocol: forward.config.protocol,
                 addr: forward.config.target_addr,
                 listener: forward.config.listen_node,
+                proxy_protocol: forward.config.proxy_protocol,
             })
             .collect();
 
@@ -234,7 +235,11 @@ impl NetworkView {
             endpoints: if self.reach_of(peer) == Reach::RelayOnly { Vec::new() } else { candidate_endpoints(peer) },
             attached,
             // 出口的提示只给能用它的节点。
-            exit: peer.exit.as_ref().filter(|_| relation.outbound).map(|exit| PeerExit { lan: exit.lan, class: exit.class }),
+            exit: peer.exit.as_ref().filter(|_| relation.outbound).map(|exit| PeerExit {
+                lan: exit.lan,
+                class: exit.class,
+                optimistic: exit.optimistic,
+            }),
             dial_out_only: peer.dial_out_only,
             keep_alive: self.pairs.iter().any(|pair| pair.a == low && pair.b == high && pair.keep_alive),
             lane: self.pairs.iter().find(|pair| pair.a == low && pair.b == high).map(|pair| pair.lane).unwrap_or_default(),

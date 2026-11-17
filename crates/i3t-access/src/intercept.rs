@@ -24,6 +24,7 @@ use crate::egress::LocalEgress;
 use crate::first_data::{self, FIRST_BYTE_WAIT};
 use crate::manager::{ACCEPT_BACKOFF, Access, Active, Connection, Traffic};
 use crate::route;
+use crate::routes::RouteAtStart;
 use crate::session::{self, Shared};
 use crate::usage::IngressMeter;
 
@@ -115,8 +116,12 @@ async fn carry<C: Connector + Datagrams, E>(
     let origin = Origin { credential: None, client: None };
     let request = Open { target: Target::Node { port: original.port() }, class: netmap.network.class.unwrap_or_default(), origin };
     tracing::debug!(%peer, port = original.port(), "被拦截的连接经对端节点出去");
+    let route = RouteAtStart::now(&*shared.routes, peer);
     match i3t_flow::open(&*shared.connector, peer, &request, &first_data).await {
-        Ok(pending) => session::log_summary(peer, &request, &pending.relay_metered(stream, future::pending(), &meter).await),
+        Ok(pending) => {
+            let summary = pending.relay_metered(stream, future::pending(), &meter).await;
+            session::log_summary(peer, &request, &summary, &route.ended(&*shared.routes));
+        }
         Err(error) => {
             tracing::info!(%peer, ?error, "到对端节点建流失败，重置了被拦截的连接");
             session::reset(stream);

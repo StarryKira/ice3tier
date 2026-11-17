@@ -21,9 +21,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::control::{
     BackboneLink, Declared, DirectKind, ExitObservation, ExitReport, InterceptReport, LaneReport, LegTransport, ListenState, ListenTraffic,
-    PathCandidate, PeerLanes, PerformanceReport, RelayState, Route, RouteCause, RouteSince, SelfUpdate,
+    PathCandidate, PeerLanes, PerformanceReport, RelayState, Route, RouteCause, RouteSince, SelfUpdate, TargetCause,
 };
-use crate::netmap::{Attachment, ExitRole, ForwardProtocol, LaneMode, ListenerProtocol, Profile, Reach, RoutingMode};
+use crate::netmap::{Attachment, ExitRole, ForwardProtocol, LaneMode, ListenerProtocol, Profile, ProxyProtocol, Reach, RoutingMode};
 use crate::update::{FailureKind, SelfUpdateBlocker, UpdateCause, UpdateStatus, UpdateTiming, Version};
 
 pub mod diag;
@@ -1100,6 +1100,21 @@ pub struct Forward {
     /// 以及连接数和流量。节点不在线或者还没有报过时是 `null`。
     #[serde(default)]
     pub listen: Option<ListenStatus>,
+    /// 这条转发的流最近一次在目标那里失败（目标连不上）：原因和时间。之后有流成功了、从来没有失败过、
+    /// 或者监听节点不在线（或者版本太旧不报）时是 `null`。
+    #[serde(default)]
+    pub target_failure: Option<ForwardFailure>,
+    /// 目标节点连上目标之后先发一个 PROXY protocol 的头（`"v1"`、`"v2"`），服务据此看到发起节点的虚拟 IP；`null` 是不发。只有 TCP 的转发有。
+    #[serde(default)]
+    pub proxy_protocol: Option<ProxyProtocol>,
+}
+
+/// 端口转发的流最近一次在目标那里失败。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardFailure {
+    pub cause: TargetCause,
+    /// 什么时候，按 controller 的时钟。
+    pub at: Timestamp,
 }
 
 /// 创建或者整个替换一条端口转发。
@@ -1118,6 +1133,8 @@ pub struct ForwardInput {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub class: Option<Class>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_protocol: Option<ProxyProtocol>,
 }
 
 /// 一条转发现在的情况，按 controller 知道的算。排在前面的优先。
@@ -1443,6 +1460,25 @@ pub enum ReachCause {
 pub enum Transport {
     Udp,
     Tcp,
+}
+
+/// 让一个出口试着连一个目标（`POST …/exits/{node}/test`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExitTestInput {
+    /// `主机[:端口]`：域名、IPv4 地址，或者方括号里的 IPv6 地址；不写端口是 443。
+    pub target: String,
+}
+
+/// 一次出口测试的结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExitTestView {
+    pub node: NodeRef,
+    /// 测的目标，`主机:端口`。
+    pub target: String,
+    /// 出口节点回答了没有。没有回答（版本太旧不懂这条消息，或者时限之内没有回答）时 `result` 是 `null`。
+    pub answered: bool,
+    #[serde(default)]
+    pub result: Option<crate::control::ExitTestResult>,
 }
 
 /// 一个出口：它的设置、它自己报的计数和限制、健康，以及用它的节点各自看到的情况。

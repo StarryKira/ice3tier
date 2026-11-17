@@ -19,12 +19,13 @@ mod handler;
 mod limits;
 mod outbound;
 mod policy;
+mod proxy_header;
 mod stats;
 mod system;
 mod upstream;
 
 pub use handler::Exit;
 pub use limits::{Period, QuotaState, QuotaUsage};
-pub use outbound::Outbound;
+pub use outbound::{Outbound, PROBE_STEP, Probe};
 pub use stats::ExitStats;
 pub use system::{Os, ResolveError, System};

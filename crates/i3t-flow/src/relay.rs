@@ -147,13 +147,31 @@ impl<S: SendStream, R: RecvStream> Flow<S, R> {
     ///
     /// 返回之后流和 `tcp` 都已经关闭。
     pub async fn relay(self, tcp: TcpStream, cancel: impl Future<Output = Reason>) -> Summary {
-        run(self.parts, tcp, cancel, &Unmetered).await
+        run(self.parts, tcp, cancel, &Unmetered, None).await
     }
 
     /// 和 [`relay`](Self::relay) 一样，只是每一段数据写出去之前先过 `meter`：它可以计数、让搬运慢下来，或者叫停。
     /// 被叫停时结局是 [`End::Cancelled`]，带着 `meter` 给的原因码。
     pub async fn relay_metered(self, tcp: TcpStream, cancel: impl Future<Output = Reason>, meter: &impl Meter) -> Summary {
-        run(self.parts, tcp, cancel, meter).await
+        run(self.parts, tcp, cancel, meter, None).await
+    }
+
+    /// 和 [`relay_metered`](Self::relay_metered) 一样，只是从 `tcp` 读到的字节里只有 `framing` 划出来的那一段写进流。
+    ///
+    /// 给一条 TCP 连接上只有一段属于这条流的协议用：明文 HTTP 代理的一个请求（请求头已经随 OPEN 发出，这里搬的是请求体）。
+    /// 这一段完整之后不再读 `tcp`，读到的多余字节丢掉；流的发送方向这时**不**正常结束，等另一个方向结束（目标的应答发完）
+    /// 才结束：有的服务器把客户端的半关闭当作客户端走了，会丢下还没回完的应答。这一段还没完整 `tcp` 就读到了 EOF，
+    /// 是被截断，按 TCP 出错处理（流被重置），不会让目标以为请求是完整的。
+    ///
+    /// 流的头之后的字节一直经过这一层（不交给独占 TCP 直接搬）：要划分就得看得到它们。首批数据是 TLS 握手的流不该用它。
+    pub async fn relay_framed(
+        self,
+        tcp: TcpStream,
+        cancel: impl Future<Output = Reason>,
+        meter: &impl Meter,
+        framing: &mut (dyn Framing + Send),
+    ) -> Summary {
+        run(self.parts, tcp, cancel, meter, Some(framing)).await
     }
 
     /// 不搬运了：两个方向都异常结束，带上 `reason`。
@@ -162,6 +180,19 @@ impl<S: SendStream, R: RecvStream> Flow<S, R> {
         self.parts.send.reset(code);
         self.parts.recv.stop(code);
     }
+}
+
+/// 从 TCP 读到的字节里哪些属于这条流（见 [`Flow::relay_framed`]）。
+pub trait Framing {
+    /// `bytes` 是刚从 TCP 读到的，返回开头有多少字节属于这条流。比 `bytes.len()` 少，说明这一段在中间结束了。
+    ///
+    /// # Errors
+    ///
+    /// 字节不合这一段的格式。流用这个原因码重置，TCP 那一头也被重置。
+    fn take(&mut self, bytes: &[u8]) -> Result<usize, Reason>;
+
+    /// 这一段已经完整了。
+    fn is_complete(&self) -> bool;
 }
 
 /// 一个方向上搬了多少。
@@ -271,6 +302,7 @@ pub(crate) async fn run<S: SendStream, R: RecvStream>(
     mut tcp: TcpStream,
     cancel: impl Future<Output = Reason>,
     meter: &impl Meter,
+    framing: Option<&mut (dyn Framing + Send)>,
 ) -> Summary {
     let Parts { mut send, mut recv, role, class, started, reply_pending } = parts;
     // 先设成"关闭时发 RST"。这个选项只管 close，中途用 shutdown 发的 FIN 不受影响。
@@ -282,16 +314,26 @@ pub(crate) async fn run<S: SendStream, R: RecvStream>(
     let mut from_flow = Traffic::default();
     // 流底下的独占 TCP（交出来直接搬的话）。正常结束时它也要恢复正常关闭。
     let lane = OnceLock::new();
+    let framed = framing.is_some();
     let outcome = {
         let (tcp_read, tcp_write) = tcp.split();
         let upstream = async {
-            match send.take_raw() {
-                Some(raw) => tcp_to_raw(tcp_read, raw, &lane, &mut from_tcp, Progress { started, class, meter }).await,
-                None => tcp_to_flow(tcp_read, &mut send, &mut from_tcp, Progress { started, class, meter }).await,
+            let progress = Progress { started, class, meter };
+            match framing {
+                Some(framing) => tcp_to_flow_framed(tcp_read, &mut send, &mut from_tcp, progress, framing).await,
+                None => match send.take_raw() {
+                    Some(raw) => tcp_to_raw(tcp_read, raw, &lane, &mut from_tcp, progress).await,
+                    None => tcp_to_flow(tcp_read, &mut send, &mut from_tcp, progress).await,
+                },
             }
         };
         let downstream = flow_to_tcp(&mut recv, tcp_write, &mut from_flow, Progress { started, class, meter }, reply_pending, &lane);
         drive(upstream, downstream, cancel).await
+    };
+    // 划分过的那一段发完之后发送方向一直开着（见 [`Flow::relay_framed`]），两个方向都结束了才正常结束它。
+    let outcome = match outcome {
+        Ok(()) if framed => send.shutdown().await.map_err(Abort::Flow),
+        outcome => outcome,
     };
 
     let end = match outcome {
@@ -394,6 +436,38 @@ async fn tcp_to_flow<S: SendStream, M: Meter>(
             demotable = false;
         }
     }
+}
+
+/// 只把 `framing` 划出来的那一段从 TCP 搬进流。这一段完整了就返回，不读 TCP 剩下的、也不结束流的发送方向（[`run`] 在最后结束它）。
+async fn tcp_to_flow_framed<S: SendStream, M: Meter>(
+    mut tcp: ReadHalf<'_>,
+    send: &mut S,
+    traffic: &mut Traffic,
+    progress: Progress<'_, M>,
+    framing: &mut (dyn Framing + Send),
+) -> Result<(), Abort> {
+    let Progress { started, class, meter } = progress;
+    let mut buf = vec![0; buffer_len()];
+    let mut demotable = class == Class::Auto;
+    while !framing.is_complete() {
+        let read = tcp.read(&mut buf).await.map_err(Abort::Tcp)?;
+        if read == 0 {
+            return Err(Abort::Tcp(io::Error::new(io::ErrorKind::UnexpectedEof, "这一段还没有完整，TCP 那一头就结束了")));
+        }
+        traffic.arrived(started);
+        let len = framing.take(&buf[..read]).map_err(Abort::Cancelled)?;
+        if len == 0 {
+            continue;
+        }
+        meter.pass(Direction::FromTcp, len).await.map_err(Abort::Cancelled)?;
+        send.write_all(&buf[..len]).await.map_err(Abort::Flow)?;
+        traffic.delivered(len);
+        if demotable && traffic.bytes > AUTO_DEMOTE_AFTER {
+            send.set_priority(priority_of(Class::Bulk));
+            demotable = false;
+        }
+    }
+    Ok(())
 }
 
 async fn flow_to_tcp<R: RecvStream, M: Meter>(

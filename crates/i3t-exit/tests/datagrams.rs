@@ -152,9 +152,10 @@ async fn an_internet_target_needs_the_exit_to_be_enabled_and_the_port_to_be_allo
     for port in [53, 443] {
         world.gw.system.redirect(&public(port), target.addr());
     }
+    world.gw.update(|netmap| netmap.me.exit = Some(ExitRole { ports: Some(vec![80, 443]), ..ExitRole::default() })).await;
     let client = udp_associate(world.socks().await, gw_user()).await;
 
-    // 端口不在出口允许的范围里（默认只有 80 和 443）：报文被丢掉。
+    // 端口不在出口允许的范围里（这里写了只有 80 和 443）：报文被丢掉。
     client.send(PUBLIC_IP, 53, b"dns").await;
     let stats = settled(&world, "出口拒绝了发往 53 端口的报文", |stats| stats.datagrams_refused == 1).await;
     assert_eq!((stats.refused, stats.datagrams_to_target), (1, 0));
@@ -216,7 +217,7 @@ async fn a_lan_target_needs_the_lan_switch_and_an_address_on_an_attached_subnet(
     world.gw.system.redirect("192.168.77.10:161", printer.addr());
     world.gw.system.redirect("192.168.1.10:161", printer.addr());
     // laptop 以为 gw 开了局域网开关，所以入口放行；gw 自己其实没开。
-    world.laptop.update(|netmap| peer_mut(netmap, GW).exit = Some(PeerExit { lan: true, class: None })).await;
+    world.laptop.update(|netmap| peer_mut(netmap, GW).exit = Some(PeerExit { lan: true, class: None, optimistic: None })).await;
     let client = udp_associate(world.socks().await, gw_user()).await;
 
     client.send("192.168.77.10", 161, b"snmp").await;
@@ -460,7 +461,8 @@ async fn a_udp_port_forward_carries_each_client_in_its_own_session_to_the_listed
     };
     world.laptop.update(|netmap| netmap.me.forwards = vec![forward(7), forward(8), forward(9)]).await;
     // gw 不需要是出口；它只认下发给它、由 laptop 监听的那一条 UDP 转发。8 号在它那里是 TCP 的，9 号是别的节点监听的。
-    let target = |id, protocol, listener| ForwardTarget { id, protocol, addr: service.addr(), listener: node(listener) };
+    let target =
+        |id, protocol, listener| ForwardTarget { id, protocol, addr: service.addr(), listener: node(listener), proxy_protocol: None };
     world
         .gw
         .update(|netmap| {
@@ -515,7 +517,13 @@ async fn a_udp_forward_session_is_collected_after_the_idle_timeout_and_only_admi
         .gw
         .update(|netmap| {
             netmap.me.forward_targets = [7, 8]
-                .map(|id| ForwardTarget { id, protocol: ForwardProtocol::Udp, addr: service.addr(), listener: node(LAPTOP) })
+                .map(|id| ForwardTarget {
+                    id,
+                    protocol: ForwardProtocol::Udp,
+                    addr: service.addr(),
+                    listener: node(LAPTOP),
+                    proxy_protocol: None,
+                })
                 .to_vec();
         })
         .await;
@@ -558,7 +566,8 @@ async fn a_udp_forward_on_the_virtual_ip_is_reached_through_the_node_port_withou
         .nas
         .update(|netmap| {
             netmap.me.forwards = vec![forward];
-            netmap.me.forward_targets = vec![ForwardTarget { id: 9, protocol: ForwardProtocol::Udp, addr: service, listener: node(NAS) }];
+            netmap.me.forward_targets =
+                vec![ForwardTarget { id: 9, protocol: ForwardProtocol::Udp, addr: service, listener: node(NAS), proxy_protocol: None }];
         })
         .await;
 

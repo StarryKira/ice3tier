@@ -43,6 +43,8 @@ pub(crate) struct Member {
     pub(crate) queries: Vec<(u64, NodeId)>,
     /// 收到的骨干矩阵查询的编号。
     pub(crate) backbone_queries: Vec<u64>,
+    /// 收到的出口测试：编号、主机、端口。
+    pub(crate) exit_tests: Vec<(u64, String, u16)>,
     /// 收到的主动测试的指令，和"测试结束"的编号。
     pub(crate) tests: Vec<TestOrder>,
     pub(crate) test_ends: Vec<u64>,
@@ -176,6 +178,7 @@ impl Member {
             chunks: Vec::new(),
             queries: Vec::new(),
             backbone_queries: Vec::new(),
+            exit_tests: Vec::new(),
             tests: Vec::new(),
             test_ends: Vec::new(),
             unacked: None,
@@ -207,6 +210,7 @@ impl Member {
                 ToNode::BackboneQuery { request } => self.backbone_queries.push(request),
                 ToNode::Test(order) => self.tests.push(*order),
                 ToNode::TestEnd { test } => self.test_ends.push(test),
+                ToNode::ExitTest { request, host, port } => self.exit_tests.push((request, host, port)),
                 ToNode::TryLater { reason } => panic!("已经报到的连接上不应该收到 try_later：{reason}"),
             }
         }

@@ -321,7 +321,8 @@ impl Node {
                 | ToNode::TryLater { .. }
                 | ToNode::BackboneQuery { .. }
                 | ToNode::Test(_)
-                | ToNode::TestEnd { .. } => {}
+                | ToNode::TestEnd { .. }
+                | ToNode::ExitTest { .. } => {}
             }
             return Some(message);
         }

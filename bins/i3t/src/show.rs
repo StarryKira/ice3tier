@@ -1,11 +1,14 @@
-//! 节点的状态打印成给人看的样子：`i3t status`（本机的配置，和正在运行的节点现在的情况）与 `i3t routes`。
+//! 节点的状态打印成给人看的样子：`i3t status`（本机的配置，和正在运行的节点现在的情况）、`i3t routes` 与 `i3t ping`。
+
+use std::time::Duration;
 
 use i3t_agent::config::Config;
+use i3t_agent::ping::{PingOutcome, PingReport};
 use i3t_agent::state::StateDir;
 use i3t_agent::status::{Link, LiveListener, LiveStatus};
 use i3t_lang::table::{Fields, Table};
 use i3t_lang::{Lang, NONE, optional};
-use i3t_model::control::{BindCause, InterceptReport, InterceptState, LaneReport};
+use i3t_model::control::{BindCause, InterceptReport, InterceptState, LaneReport, Route};
 use i3t_model::update::UpdateStatus;
 use i3t_proto::NodeId;
 
@@ -170,6 +173,42 @@ pub fn routes(live: &LiveStatus) {
         return;
     }
     route_table(live);
+}
+
+/// `i3t ping` 的结果。量到了至少一个往返时返回 `true`。
+pub fn ping(asked: &str, report: &PingReport) -> bool {
+    let (t, lang) = context();
+    let name = report.peer.as_ref().map_or_else(|| asked.to_owned(), |peer| peer.name.clone());
+    let failure = match report.outcome {
+        PingOutcome::Done => None,
+        PingOutcome::UnknownNode => Some((t.ping_unknown_node)(asked)),
+        PingOutcome::Myself => Some(t.ping_myself.to_owned()),
+        PingOutcome::NotAllowed => Some((t.ping_not_allowed)(&name)),
+        PingOutcome::Refused => Some((t.ping_refused)(&name)),
+        PingOutcome::Unreachable => Some((t.ping_unreachable)(&name)),
+        PingOutcome::Unsupported => Some((t.ping_unsupported)(&name)),
+        PingOutcome::Busy => Some(t.ping_busy.to_owned()),
+        PingOutcome::Unknown => Some((t.ping_unknown)(&name)),
+    };
+    if let Some(failure) = failure {
+        eprintln!("{failure}");
+        return false;
+    }
+    let codes = lang.codes();
+    let names = |id: NodeId| format!("#{id}");
+    let route = |route: Option<&Route>| route.map_or_else(|| t.unknown.to_owned(), |route| (codes.route)(route, &names));
+    let start = route(report.route_start.as_ref());
+    let path = if report.route_changed { (t.ping_route_changed)(&start, &route(report.route_end.as_ref())) } else { start };
+    let peer = report.peer.as_ref().map_or_else(|| name.clone(), |peer| lang.paren(&peer.name, &peer.virtual_ip.to_string()));
+    println!("{peer}  {path}");
+    let (Some(min), Some(max)) = (report.rtts_us.iter().min(), report.rtts_us.iter().max()) else {
+        println!("{}", (t.ping_all_lost)(report.sent));
+        return false;
+    };
+    let avg = report.rtts_us.iter().sum::<u64>() / u64::try_from(report.rtts_us.len()).unwrap_or(1).max(1);
+    let ms = |micros: u64| format!("{:.1} ms", Duration::from_micros(micros).as_secs_f64() * 1000.0);
+    println!("{}", (t.ping_summary)(report.sent, report.received, &ms(*min), &ms(avg), &ms(*max)));
+    true
 }
 
 fn route_table(live: &LiveStatus) {

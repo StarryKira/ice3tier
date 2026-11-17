@@ -14,6 +14,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use i3t_conn::Connector;
 use i3t_conn::contract::Datagrams;
+use i3t_flow::FlowError;
 use i3t_flow::datagram::Context;
 use i3t_proto::NodeId;
 use i3t_proto::flow::{Class, Origin};
@@ -35,22 +36,22 @@ const MAX_UDP_PAYLOAD: usize = 65_535;
 /// 到对端节点的一个数据报上下文，流的类型跟着连接层走。
 type MeshContext<C> = Context<<C as Connector>::Send, <C as Connector>::Recv, <C as Datagrams>::Sender>;
 
-/// 到 `peer` 开一个上下文。失败时记一行日志，把这段时间里排进 `queue` 的报文都丢掉，然后返回 `None`。
+/// 到 `peer` 开一个上下文。失败时记一行日志，把这段时间里排进 `queue` 的报文都丢掉，然后返回错误。
 async fn open_context<C: Connector + Datagrams, E, T>(
     shared: &Arc<Shared<C, E>>,
     peer: NodeId,
     class: Class,
     origin: Origin,
     queue: &mut mpsc::Receiver<T>,
-) -> Option<MeshContext<C>> {
+) -> Result<MeshContext<C>, FlowError> {
     match shared.opener.open(peer, class, origin).await {
-        Ok(context) => Some(context),
+        Ok(context) => Ok(context),
         Err(error) => {
             tracing::info!(%peer, ?error, "到对端节点开数据报上下文失败，{RETRY_PAUSE:?} 之内发往它的 UDP 报文都被丢掉");
             let discard = async { while queue.recv().await.is_some() {} };
             // 到时间了，或者发报文的一方已经不在了，都是不用再等。
             let _ = time::timeout(RETRY_PAUSE, discard).await;
-            None
+            Err(error)
         }
     }
 }

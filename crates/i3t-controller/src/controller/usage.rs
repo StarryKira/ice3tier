@@ -11,7 +11,9 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
-use i3t_model::admin::{ExitHealth, ExitObserved, ExitView, ListenStatus, NetworkId, NodeForwardListen, NodeListener, NodeListeners};
+use i3t_model::admin::{
+    ExitHealth, ExitObserved, ExitView, ForwardFailure, ListenStatus, NetworkId, NodeForwardListen, NodeListener, NodeListeners,
+};
 use i3t_model::control::{CredentialUsage, ExitObservation, ExitReport};
 use i3t_proto::NodeId;
 use serde_json::json;
@@ -209,6 +211,14 @@ impl Inner {
     pub(crate) fn forward_listen_status(&self, node: NodeId, id: u32) -> Option<ListenStatus> {
         let report = self.live.get(&node)?.forwards.iter().find(|report| report.id == id)?;
         Some(ListenStatus { state: report.state.clone(), traffic: report.traffic })
+    }
+
+    /// 一条端口转发的流最近一次在目标那里失败，监听节点报的。时间换算成 controller 的时钟。
+    pub(crate) fn forward_target_failure(&self, node: NodeId, id: u32) -> Option<ForwardFailure> {
+        let live = self.live.get(&node)?;
+        let failure = live.forwards.iter().find(|report| report.id == id)?.target_failure?;
+        let since_report = live.reported_at.map_or(0, |at| at.elapsed().as_secs());
+        Some(ForwardFailure { cause: failure.cause, at: self.clock.now().saturating_sub(failure.secs_ago.saturating_add(since_report)) })
     }
 
     /// 一个凭据现在在各个在线的入口上一共有多少条连接。

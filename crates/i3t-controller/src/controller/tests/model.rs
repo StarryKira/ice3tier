@@ -51,6 +51,7 @@ fn forward(listen_node: NodeId, target_node: NodeId) -> ForwardInput {
         allow_from: Vec::new(),
         enabled: true,
         class: None,
+        proxy_protocol: None,
     }
 }
 

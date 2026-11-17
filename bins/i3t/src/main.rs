@@ -71,6 +71,11 @@ enum Command {
     },
     Status,
     Routes,
+    Ping {
+        node: String,
+        #[arg(long, default_value_t = i3t_agent::ping::DEFAULT_COUNT, value_parser = clap::value_parser!(u32).range(1..=i64::from(i3t_agent::ping::MAX_COUNT)))]
+        count: u32,
+    },
     Key,
     Connect {
         host: String,
@@ -133,6 +138,11 @@ fn command(lang: Lang) -> clap::Command {
         })
         .mut_subcommand("status", |sub| sub.about(h.status))
         .mut_subcommand("routes", |sub| sub.about(h.routes))
+        .mut_subcommand("ping", |sub| {
+            sub.about(h.ping)
+                .mut_arg("node", |arg| arg.help(h.ping_node).value_name(v.node))
+                .mut_arg("count", |arg| arg.help(h.ping_count).value_name(v.count))
+        })
         .mut_subcommand("key", |sub| sub.about(h.key))
         .mut_subcommand("connect", |sub| {
             sub.about(h.connect)
@@ -231,6 +241,14 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
         Command::Routes => match current_thread()?.block_on(local::query(&state))? {
             Some(live) => show::routes(&live),
+            None => bail!(t.routes_not_running),
+        },
+        Command::Ping { node, count } => match current_thread()?.block_on(local::ping(&state, &node, count))? {
+            Some(report) => {
+                if !show::ping(&node, &report) {
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
             None => bail!(t.routes_not_running),
         },
         Command::Key => println!("{}", state.key_or_generate()?.public()),

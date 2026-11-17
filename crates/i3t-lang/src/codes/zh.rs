@@ -6,10 +6,12 @@ use i3t_model::admin::{
     TokenState, UpdateWait,
 };
 use i3t_model::control::diag::{ChoiceCode, HopSource, PathPick, TestCode, TransferEnd};
+use i3t_model::control::exit_test::{ExitTestCause, ExitVia};
 use i3t_model::control::{
     BindCause, DirectKind, InterceptCause, InterceptState, LegTransport, ListenState, NameService, RejectCause, RelayState, Route,
-    RouteCause, RouteHint,
+    RouteCause, RouteHint, TargetCause,
 };
+use i3t_model::netmap::IpFamily;
 use i3t_model::update::{FailureKind, SelfUpdateBlocker, UpdateCause, UpdateStatus};
 
 use super::{Codes, Names, cost_ms, relays};
@@ -35,6 +37,9 @@ pub(super) static CODES: Codes = Codes {
     api_error,
     lane_block,
     forward_status,
+    target_cause,
+    exit_test_cause,
+    exit_via,
     token_state,
     credential_state,
     exit_health,
@@ -317,6 +322,54 @@ const fn forward_status(status: ForwardStatus) -> &'static str {
         ForwardStatus::ListenerOffline => "监听节点离线",
         ForwardStatus::TargetOffline => "目标节点离线",
         ForwardStatus::Active => "生效",
+    }
+}
+
+const fn target_cause(cause: TargetCause) -> &'static str {
+    match cause {
+        TargetCause::Refused => "目标拒绝连接",
+        TargetCause::Timeout => "连目标超时",
+        TargetCause::Unreachable => "目标不可达",
+        TargetCause::NotDeclared => "目标节点没有这条转发",
+        TargetCause::AccessDenied => "目标节点不允许访问",
+        TargetCause::NodeUnreachable => "到目标节点不通",
+        TargetCause::Other => "目标连不上",
+        TargetCause::Unknown => "目标连不上",
+    }
+}
+
+fn exit_test_cause(cause: &ExitTestCause) -> String {
+    let family = |family: IpFamily| match family {
+        IpFamily::Ipv4 => "IPv4",
+        IpFamily::Ipv6 => "IPv6",
+        IpFamily::Any => "任何",
+    };
+    match cause {
+        ExitTestCause::Busy => "出口上另一个测试正在做或者刚做过，稍后再试".to_owned(),
+        ExitTestCause::BadTarget => "出口读不懂这个目标".to_owned(),
+        ExitTestCause::NotEnabled => "这个节点没有启用出口".to_owned(),
+        ExitTestCause::LanNotEnabled => "局域网的地址：出口没有打开局域网访问".to_owned(),
+        ExitTestCause::PortNotAllowed { port } => format!("端口 {port} 不在出口允许的范围里"),
+        ExitTestCause::FamilyUnavailable { family: wanted } => format!("出口只连 {} 地址，目标没有", family(*wanted)),
+        ExitTestCause::AddressNotAllowed { address } => format!("出口不替别人连 {address} 这类地址"),
+        ExitTestCause::NotOnLan { address } => format!("{address} 不在出口直连的网段里"),
+        ExitTestCause::NameNotFound => "域名不存在".to_owned(),
+        ExitTestCause::ResolverFailed => "解析器出错".to_owned(),
+        ExitTestCause::Timeout => "超时".to_owned(),
+        ExitTestCause::Refused => "连接被拒绝".to_owned(),
+        ExitTestCause::Unreachable => "不可达".to_owned(),
+        ExitTestCause::UpstreamFailed => "连不上出口的上游代理".to_owned(),
+        ExitTestCause::Closed => "握手完成之前对方关了连接".to_owned(),
+        ExitTestCause::Alert => "对方回了 TLS 告警".to_owned(),
+        ExitTestCause::Other | ExitTestCause::Unknown => "别的原因，见出口节点的日志".to_owned(),
+    }
+}
+
+const fn exit_via(via: ExitVia) -> &'static str {
+    match via {
+        ExitVia::Direct => "直接连",
+        ExitVia::Upstream => "经上游代理",
+        ExitVia::Unknown => "不知道经什么",
     }
 }
 

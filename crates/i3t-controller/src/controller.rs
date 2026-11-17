@@ -10,6 +10,7 @@ mod backup;
 mod credentials;
 mod diag;
 mod enrollment;
+mod exit_test;
 mod forwards;
 mod groups;
 mod listeners;

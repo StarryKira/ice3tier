@@ -22,9 +22,9 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use i3t_model::admin::diag::{CreateTest, TestQuery};
 use i3t_model::admin::{
-    API_PREFIX, ApiError, CreateCredential, CreateEnrollToken, CreateGroup, CreateNetwork, CreateRule, ErrorBody, ErrorCode, ForceUpdate,
-    ForwardInput, GroupId, GroupMembers, ListenerInput, LogRef, NetworkId, PairInput, RelayEnabled, RelaySettings, ResumeUpdate, Succeed,
-    UpdateCredential, UpdateGroup, UpdateNetwork, UpdateNode, UpdateRule, UpdateSettings,
+    API_PREFIX, ApiError, CreateCredential, CreateEnrollToken, CreateGroup, CreateNetwork, CreateRule, ErrorBody, ErrorCode, ExitTestInput,
+    ForceUpdate, ForwardInput, GroupId, GroupMembers, ListenerInput, LogRef, NetworkId, PairInput, RelayEnabled, RelaySettings,
+    ResumeUpdate, Succeed, UpdateCredential, UpdateGroup, UpdateNetwork, UpdateNode, UpdateRule, UpdateSettings,
 };
 use i3t_model::netmap::ExitRole;
 use i3t_proto::NodeId;
@@ -70,6 +70,7 @@ pub fn router(controller: Arc<Controller>, webui: &WebUi) -> Router {
         .route(&format!("{network}/nodes/{{node}}/listeners"), get(node_listeners))
         .route(&format!("{network}/exits"), get(list_exits))
         .route(&format!("{network}/exits/{{node}}"), get(show_exit))
+        .route(&format!("{network}/exits/{{node}}/test"), post(test_exit))
         .route(&format!("{network}/routes"), get(route_matrix))
         .route(&format!("{network}/path"), get(path))
         .route(&format!("{network}/backbone"), get(backbone))
@@ -446,6 +447,11 @@ async fn list_exits(State(app): State<App>, Path(network): Path<NetworkId>) -> R
 
 async fn show_exit(State(app): State<App>, Path((network, node)): Path<(NetworkId, NodeId)>) -> Reply {
     ok(&app, move |controller| controller.exit(network, node)).await
+}
+
+async fn test_exit(State(app): State<App>, Path((network, node)): Path<(NetworkId, NodeId)>, Body(input): Body<ExitTestInput>) -> Reply {
+    let view = app.exit_test(network, node, input).await?;
+    Ok(Json(view).into_response())
 }
 
 async fn list_groups(State(app): State<App>, Path(network): Path<NetworkId>) -> Reply {

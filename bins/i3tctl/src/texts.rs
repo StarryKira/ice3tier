@@ -97,6 +97,8 @@ pub struct Help {
     pub exit_connects: &'static str,
     pub exit_disable: &'static str,
     pub exit_list: &'static str,
+    pub exit_test: &'static str,
+    pub exit_test_target: &'static str,
     pub group_group: &'static str,
     pub group_list: &'static str,
     pub group_show: &'static str,
@@ -143,11 +145,13 @@ pub struct Help {
     pub listener_default: &'static str,
     pub listener_fixed_exit: &'static str,
     pub listener_optimistic: &'static str,
+    pub exit_optimistic: &'static str,
     pub listener_delete: &'static str,
     pub forward_group: &'static str,
     pub forward_list: &'static str,
     pub forward_add: &'static str,
     pub forward_udp: &'static str,
+    pub forward_proxy_protocol: &'static str,
     pub forward_enable: &'static str,
     pub forward_disable: &'static str,
     pub forward_delete: &'static str,
@@ -221,6 +225,8 @@ pub struct Values {
     pub relays: &'static str,
     pub version: &'static str,
     pub source: &'static str,
+    /// 出口测试的目标。
+    pub target: &'static str,
 }
 
 /// 打印出来的东西：表头、名字、提示、报错。
@@ -281,6 +287,18 @@ pub struct Ui {
     pub draining: &'static str,
     pub quota: &'static str,
     pub seen_by: fn(&str) -> String,
+    /// 出口测试：哪一步。
+    pub resolve_step: &'static str,
+    pub connect_step: &'static str,
+    pub tls_step: &'static str,
+    /// 出口按它的策略不连。
+    pub exit_refused: &'static str,
+    /// TLS 握手完成，证书没有检查。
+    pub tls_done: &'static str,
+    /// 出口只连某一种地址：`只连 IPv4`。
+    pub family_only: fn(&str) -> String,
+    /// 出口节点没有回答出口测试。
+    pub exit_unanswered: fn(&str) -> String,
     pub exit_seen: fn(u64, u64, u64, u64, u64) -> String,
 
     pub networks_header: [&'static str; 7],

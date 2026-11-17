@@ -42,11 +42,12 @@ impl<S, R> fmt::Debug for Request<S, R> {
     }
 }
 
-/// 对端开过来的一条流上读出来的 OPEN：它要一条流、一个数据报上下文，还是一条测量流。
+/// 对端开过来的一条流上读出来的 OPEN：它要一条流、一个数据报上下文、一条测量流，还是只量一个往返。
 pub(crate) enum Arrival<S, R> {
     Stream(Request<S, R>),
     Datagrams(DatagramArrival<S, R>),
     Measure(MeasureRequest<S, R>),
+    Ping { peer: NodeId, send: S, recv: R },
 }
 
 /// 一条读出了数据报上下文的 OPEN 的流。
@@ -66,6 +67,7 @@ impl<S: SendStream, R: RecvStream> Arrival<S, R> {
             Ok(Opening::Stream(open)) => Ok(Self::Stream(Request { peer, open, send, recv, received: Instant::now() })),
             Ok(Opening::Datagrams(open)) => Ok(Self::Datagrams(DatagramArrival { peer, open, send, recv })),
             Ok(Opening::Measure(open)) => Ok(Self::Measure(MeasureRequest { peer, open, send, recv })),
+            Ok(Opening::Ping(_)) => Ok(Self::Ping { peer, send, recv }),
             Err(error) => {
                 let code = StreamCode(Reason::ProtocolError.to_wire());
                 send.reset(code);
@@ -87,7 +89,8 @@ impl<S: SendStream, R: RecvStream> Request<S, R> {
         match Arrival::read(incoming, deadline).await? {
             Arrival::Stream(request) => Ok(request),
             Arrival::Datagrams(DatagramArrival { mut send, mut recv, .. })
-            | Arrival::Measure(MeasureRequest { mut send, mut recv, .. }) => {
+            | Arrival::Measure(MeasureRequest { mut send, mut recv, .. })
+            | Arrival::Ping { mut send, mut recv, .. } => {
                 let code = StreamCode(Reason::ProtocolError.to_wire());
                 send.reset(code);
                 recv.stop(code);
@@ -162,6 +165,25 @@ pub(crate) async fn refuse(peer: NodeId, send: &mut impl SendStream, recv: &mut 
             tracing::debug!(%peer, "拒绝的 REPLY {REFUSE_DEADLINE:?} 之内没有送出去，重置这条流");
             send.reset(code);
         }
+    }
+}
+
+/// 回答一个往返测量（`i3t ping`）：一个成功的 REPLY，然后正常结束这条流。
+///
+/// 能走到这里的对端已经过了 [`Handler::screen`]（访问规则、每个对端的流数上限），所以不再查别的。
+/// REPLY 只有两个字节，不比对端发来的 OPEN 长，没有放大。
+async fn answer_ping(peer: NodeId, mut send: impl SendStream, mut recv: impl RecvStream) {
+    recv.stop(StreamCode(Reason::Cancelled.to_wire()));
+    let mut bytes = Vec::with_capacity(Reply::MAX_LEN);
+    Reply::ok().encode(&mut bytes);
+    let answered = async {
+        send.write_all(&bytes).await?;
+        send.shutdown().await
+    };
+    match time::timeout(REFUSE_DEADLINE, answered).await {
+        Ok(Ok(())) => tracing::trace!(%peer, "回答了一个往返测量"),
+        Ok(Err(error)) => tracing::debug!(%peer, %error, "往返测量的回答没有送出去"),
+        Err(_) => send.reset(StreamCode(Reason::Cancelled.to_wire())),
     }
 }
 
@@ -294,6 +316,7 @@ pub async fn serve<A: Acceptor + Datagrams, H: Handler>(acceptor: &A, handler: A
                 Ok(Arrival::Stream(request)) => handler.handle(request).await,
                 Ok(Arrival::Datagrams(arrival)) => handler.handle_datagrams(datagram::Request::new(arrival, mux, transport)).await,
                 Ok(Arrival::Measure(request)) => handler.handle_measure(request).await,
+                Ok(Arrival::Ping { peer, send, recv }) => answer_ping(peer, send, recv).await,
                 // 对端每开一条这样的流就是一行，不记成 info：不然它能拿日志刷屏。
                 Err(error) => tracing::debug!(%peer, ?error, "重置了一条流：没有读到合法的 OPEN"),
             }

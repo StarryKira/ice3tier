@@ -103,6 +103,13 @@ pub(crate) fn class_for(netmap: &Netmap, username: Option<Class>, configured: Op
     username.or(configured).or(exit).or(netmap.network.class).unwrap_or_default()
 }
 
+/// 一条流用不用乐观回复（白皮书 §8.1），先看到哪一个设置用哪一个：监听器的、出口的（只有经出口出去的流才看它）、
+/// 按目标种类的默认值 `by_kind`。监听器排在出口前面：它是这个入口的主人为这个入口定的，出口的设置管的是经它出去的所有入口。
+pub(crate) fn optimistic_for(netmap: &Netmap, listener: Option<bool>, peer: NodeId, target: &Target, by_kind: bool) -> bool {
+    let exit = target.needs_exit().then(|| netmap.peer(peer).and_then(|peer| peer.exit).and_then(|exit| exit.optimistic)).flatten();
+    listener.or(exit).unwrap_or(by_kind)
+}
+
 /// 目标指的是不是组网里的一个节点。不是组网目标时返回 `None`；是的话给出那个对端，或者不能访问它的原因。
 pub(crate) fn mesh_node<'a>(netmap: &'a Netmap, host: &Host) -> Option<Result<&'a Peer, Denied>> {
     let peer = match host {
@@ -145,8 +152,9 @@ fn local(netmap: &Netmap, listener: &Listener) -> Result<Route, Denied> {
 /// 写成字面量的地址是不是只在局域网里有意义：私有地址和链路本地地址。
 ///
 /// 入口不知道出口节点的网卡上有哪些网段，只能按地址本身来分：这些地址按"对端的局域网"发过去，其余的按互联网目标发。
-/// 出口节点会再核对它是不是真的在自己直连的网段里。
-fn is_lan_literal(ip: IpAddr) -> bool {
+/// 出口节点会再核对它是不是真的在自己直连的网段里。出口测试（`i3t_exit::Outbound::probe`）按同一条分。
+#[must_use]
+pub fn is_lan_literal(ip: IpAddr) -> bool {
     match ip.to_canonical() {
         IpAddr::V4(ip) => ip.is_private() || ip.is_link_local(),
         IpAddr::V6(ip) => ip.is_unique_local() || ip.is_unicast_link_local(),
@@ -183,7 +191,7 @@ mod tests {
 
     /// 本节点是 1 号 `laptop`；2 号 `gw` 是出口并开了局域网；3 号 `web` 是出口；4 号 `nas` 不是出口；5 号 `hidden` 不允许访问。
     fn netmap() -> Netmap {
-        let mut hidden = peer(5, "hidden", Some(PeerExit { lan: true, class: None }));
+        let mut hidden = peer(5, "hidden", Some(PeerExit { lan: true, class: None, optimistic: None }));
         hidden.outbound = false;
         Netmap {
             version: 1,
@@ -212,8 +220,8 @@ mod tests {
                 profile: None,
             },
             peers: vec![
-                peer(2, "gw", Some(PeerExit { lan: true, class: None })),
-                peer(3, "web", Some(PeerExit { lan: false, class: Some(Class::Bulk) })),
+                peer(2, "gw", Some(PeerExit { lan: true, class: None, optimistic: None })),
+                peer(3, "web", Some(PeerExit { lan: false, class: Some(Class::Bulk), optimistic: None })),
                 peer(4, "nas", None),
                 hidden,
             ],
@@ -371,6 +379,18 @@ mod tests {
         assert_eq!(class_for(&netmap, None, None, &to_nas), Class::Reliable, "最后是网络的默认值");
         assert_eq!(class_for(&netmap, None, None, &to_web), Class::Bulk, "出口的默认值排在网络的前面");
         assert_eq!(class_for(&netmap, None, None, &local), Class::Reliable);
+    }
+
+    #[test]
+    fn the_optimistic_reply_follows_the_listener_then_the_exit_then_the_kind_of_target() {
+        let mut netmap = netmap();
+        let web = netmap.peers.iter().find(|peer| peer.name == "web").unwrap().id;
+        let (internet, nas_service) = (Target::Internet { host: "example.com".parse().unwrap(), port: 443 }, Target::Node { port: 22 });
+        assert!(optimistic_for(&netmap, None, web, &internet, true), "没有设时按目标的种类");
+        netmap.peers.iter_mut().find(|peer| peer.id == web).unwrap().exit.as_mut().unwrap().optimistic = Some(false);
+        assert!(!optimistic_for(&netmap, None, web, &internet, true), "出口的设置盖过按种类的默认值");
+        assert!(optimistic_for(&netmap, Some(true), web, &internet, true), "监听器的设置排在出口的前面");
+        assert!(optimistic_for(&netmap, None, web, &nas_service, true), "不经出口的流不看出口的设置");
     }
 
     #[test]

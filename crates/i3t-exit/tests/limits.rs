@@ -179,7 +179,7 @@ i3t_lane::on_both_transports! {
         world
             .nas
             .update(|netmap| {
-                netmap.me.forward_targets.push(ForwardTarget { id: 9, protocol: ForwardProtocol::Tcp, addr: echo, listener: node(GW) });
+                netmap.me.forward_targets.push(ForwardTarget { id: 9, protocol: ForwardProtocol::Tcp, addr: echo, listener: node(GW), proxy_protocol: None });
             })
             .await;
 
@@ -218,7 +218,8 @@ async fn a_udp_forward_on_a_virtual_ip_is_relayed_to_another_node_through_a_seco
     world
         .nas
         .update(|netmap| {
-            let target = ForwardTarget { id: 10, protocol: ForwardProtocol::Udp, addr: service.addr(), listener: node(GW) };
+            let target =
+                ForwardTarget { id: 10, protocol: ForwardProtocol::Udp, addr: service.addr(), listener: node(GW), proxy_protocol: None };
             netmap.me.forward_targets.push(target);
         })
         .await;

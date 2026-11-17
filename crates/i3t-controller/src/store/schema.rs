@@ -6,7 +6,7 @@
 //! 列的写法：枚举和结构体按它们的 JSON 形式存在 TEXT 列里，地址存文本，公钥和哈希存 BLOB，虚拟 IP 存成整数，
 //! 时间是 Unix 秒。
 
-pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9];
 
 const V1: &str = "
 CREATE TABLE meta (
@@ -308,6 +308,11 @@ ALTER TABLE enroll_tokens DROP COLUMN tags;
 /// 管理员给节点选的性能档位（JSON 写法的字符串）；没有选时是 NULL。
 const V8: &str = "
 ALTER TABLE nodes ADD COLUMN profile TEXT;
+";
+
+// 端口转发的目标节点连上目标之后先发的 PROXY protocol 头（`"v1"`、`"v2"`）；NULL 是不发。
+const V9: &str = "
+ALTER TABLE forwards ADD COLUMN proxy_protocol TEXT;
 ";
 
 #[cfg(test)]

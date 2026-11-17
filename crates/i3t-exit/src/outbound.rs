@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use i3t_access::{EgressPolicy, LocalEgress};
 use i3t_model::Netmap;
+use i3t_model::control::exit_test::{ConnectStep, ExitTestCause, ExitTestResult, ExitVia, ResolveStep};
 use i3t_model::netmap::{self, ExitRole, IpFamily, Network};
 use i3t_proto::NodeId;
 use i3t_proto::flow::{Host, Reply, Status};
@@ -189,31 +190,29 @@ impl<S: System> Outbound<S> {
         port: u16,
         asker: Asker,
     ) -> Result<(&'n ExitRole, Vec<SocketAddr>), Reply> {
-        let Some(role) = &netmap.me.exit else {
-            return Err(Reply::new(Status::NotEnabled, "这个节点没有启用出口"));
-        };
-        if role.ports.as_ref().is_some_and(|ports| !ports.contains(&port)) {
-            return Err(Reply::new(Status::PolicyDenied, format!("出口不允许目标端口 {port}")));
-        }
+        let role = internet_role(netmap, port)?;
         let resolved = self.resolve(host, asker).await?;
+        let addresses = self.admissible(netmap, role, &resolved)?;
+        Ok((role, addresses.into_iter().map(|ip| SocketAddr::new(ip, port)).collect()))
+    }
+
+    /// 解析出来的地址里出口会去连的那些：先按地址族挑，再一个个过出站策略。
+    fn admissible(&self, netmap: &Netmap, role: &ExitRole, resolved: &[IpAddr]) -> Result<Vec<IpAddr>, Stop> {
         // 出口只连某一种地址时，先按地址族挑：另一种地址根本不会去连，也就不用为它拒绝整个请求。
         let addresses: Vec<IpAddr> = resolved.iter().copied().filter(|&ip| role.family.admits(ip)).collect();
         if addresses.is_empty() {
-            let wanted = match role.family {
-                IpFamily::Ipv4 => "IPv4",
-                IpFamily::Ipv6 => "IPv6",
-                IpFamily::Any => "可以连",
-            };
-            return Err(Reply::new(Status::PolicyDenied, format!("出口只连 {wanted} 地址，这个目标没有这种地址")));
+            return Err(Stop::FamilyUnavailable(role.family));
         }
         // 域名可以解析到任何地方，所以要看解析之后的地址；只要有一个不该连，整个请求都拒绝，
         // 不然对方可以把一个内网地址夹在几个公网地址中间碰运气。
         let interfaces = self.interfaces()?;
         let nodes = self.node_addresses(netmap);
-        if let Some(what) = addresses.iter().find_map(|&ip| forbidden_as_internet(&netmap.network, &interfaces, &nodes, ip)) {
-            return Err(Reply::new(Status::PolicyDenied, format!("目标地址是{what}，出口不替别人连这类地址")));
+        if let Some((ip, what)) =
+            addresses.iter().find_map(|&ip| forbidden_as_internet(&netmap.network, &interfaces, &nodes, ip).map(|what| (ip, what)))
+        {
+            return Err(Stop::Forbidden { ip, what });
         }
-        Ok((role, addresses.into_iter().map(|ip| SocketAddr::new(ip, port)).collect()))
+        Ok(addresses)
     }
 
     /// 网络里节点自己的地址：本节点的候选端点（含反射地址、端口映射拿到的地址），netmap 里各个对端报上来的端点，
@@ -244,11 +243,13 @@ impl<S: System> Outbound<S> {
 
     /// 局域网目标的检查。通过的话返回可以去连的地址，流和数据报用的是同一份检查。
     pub(crate) fn lan_target(&self, netmap: &Netmap, addr: SocketAddr) -> Result<SocketAddr, Reply> {
+        Ok(self.lan_check(netmap, addr)?)
+    }
+
+    fn lan_check(&self, netmap: &Netmap, addr: SocketAddr) -> Result<SocketAddr, Stop> {
         match &netmap.me.exit {
-            None => return Err(Reply::new(Status::NotEnabled, "这个节点没有启用出口")),
-            Some(ExitRole { lan: false, .. }) => {
-                return Err(Reply::new(Status::NotEnabled, "这个出口没有打开「允许访问本机局域网」"));
-            }
+            None => return Err(Stop::NotEnabled),
+            Some(ExitRole { lan: false, .. }) => return Err(Stop::LanNotEnabled),
             Some(ExitRole { lan: true, .. }) => {}
         }
         let ip = addr.ip().to_canonical();
@@ -263,9 +264,88 @@ impl<S: System> Outbound<S> {
             None
         };
         match refused {
-            Some(why) => Err(Reply::new(Status::PolicyDenied, why)),
+            Some(why) => Err(Stop::NotOnLan { ip, why }),
             None => Ok(SocketAddr::new(ip, addr.port())),
         }
+    }
+
+    /// 出口测试（白皮书 §13 的 `i3tctl exit test`）：按替别人连这个目标时的同一套规矩试着连 `host:port`，记下每一步花了多久、
+    /// 停在了哪里。写成字面量的私有地址按局域网目标查（和入口分的一样），别的按互联网目标查：不是出口、端口不允许、
+    /// 解析出来的地址不能连，拒绝的原因和别人经这个出口访问时一样。
+    ///
+    /// 和替别人连时不同的只有两处：解析不用缓存里的结果（要量它花了多久），每一步最多 [`PROBE_STEP`]。
+    /// 连上了的话连接交给调用方（TLS 握手在装配层做）。一次一个、隔多久做一次由调用方管。
+    pub async fn probe(&self, host: &Host, port: u16) -> Probe {
+        let netmap = Arc::clone(&self.inner.netmap.borrow());
+        let upstream = netmap.me.exit.as_ref().and_then(|role| role.upstream_socks5);
+        let mut result = ExitTestResult {
+            via: if upstream.is_some() { ExitVia::Upstream } else { ExitVia::Direct },
+            refused: None,
+            resolve: None,
+            connect: None,
+            tls: None,
+        };
+        let lan = match host {
+            Host::Ip(ip) if i3t_access::is_lan_literal(*ip) => Some(SocketAddr::new(*ip, port)),
+            Host::Ip(_) | Host::Name(_) => None,
+        };
+        let (targets, via) = match lan {
+            // 局域网目标不经上游代理（[`Outbound::lan`]）。
+            Some(addr) => match self.lan_check(&netmap, addr) {
+                Ok(target) => {
+                    result.via = ExitVia::Direct;
+                    (vec![target], Via::Direct)
+                }
+                Err(stop) => return Probe::refused(result, &stop),
+            },
+            None => {
+                let role = match internet_role(&netmap, port) {
+                    Ok(role) => role,
+                    Err(stop) => return Probe::refused(result, &stop),
+                };
+                let started = Instant::now();
+                let resolved = self.resolve_with(host, Asker::Local, Cache::Bypass, PROBE_STEP).await;
+                if matches!(host, Host::Name(_)) {
+                    result.resolve = Some(ResolveStep {
+                        ms: millis(started.elapsed()),
+                        addresses: resolved.clone().unwrap_or_default(),
+                        family: role.family,
+                        cause: resolved.as_ref().err().filter(|stop| stop.is_resolution()).map(Stop::cause),
+                    });
+                }
+                let admitted = resolved.and_then(|resolved| self.admissible(&netmap, role, &resolved));
+                match admitted {
+                    Ok(addresses) => {
+                        (addresses.into_iter().map(|ip| SocketAddr::new(ip, port)).collect(), upstream.map_or(Via::Direct, Via::Upstream))
+                    }
+                    Err(stop) if stop.is_resolution() => return Probe { result, stream: None },
+                    Err(stop) => return Probe::refused(result, &stop),
+                }
+            }
+        };
+
+        let started = Instant::now();
+        let deadline = started + PROBE_STEP;
+        let mut last = None;
+        for target in targets {
+            let Some(left) = deadline.checked_duration_since(Instant::now()).filter(|left| !left.is_zero()) else { break };
+            let cause = match time::timeout(left, self.connect_one(target, via)).await {
+                Ok(Ok(stream)) => {
+                    tune(&stream);
+                    result.connect = Some(ConnectStep { ms: millis(started.elapsed()), address: Some(target), cause: None });
+                    return Probe { result, stream: Some(stream) };
+                }
+                Ok(Err(reply)) => connect_cause(reply.status, via),
+                Err(_) => ExitTestCause::Timeout,
+            };
+            // 几个地址都连不上时报最说明问题的那个，和替别人连时一样。
+            if last.is_none_or(|kept| cause_rank(cause) > cause_rank(kept)) {
+                last = Some(cause);
+            }
+        }
+        result.connect =
+            Some(ConnectStep { ms: millis(started.elapsed()), address: None, cause: Some(last.unwrap_or(ExitTestCause::Timeout)) });
+        Probe { result, stream: None }
     }
 
     /// 本节点自己的服务：只用本机的非回环地址去连。`initiator` 是发起节点的虚拟 IP。
@@ -332,18 +412,25 @@ impl<S: System> Outbound<S> {
     ///
     /// 等解析的名额（[`MAX_LOOKUPS`]、[`MAX_LOOKUPS_PER_ASKER`]）也算在 [`RESOLVE_TIMEOUT`] 里。
     async fn resolve(&self, host: &Host, asker: Asker) -> Result<Vec<IpAddr>, Reply> {
+        Ok(self.resolve_with(host, asker, Cache::Use, RESOLVE_TIMEOUT).await?)
+    }
+
+    /// 同 [`resolve`](Self::resolve)。`cache` 是 [`Cache::Bypass`] 时不用缓存里的结果（量解析要多久的时候），解析出来的照样放进去。
+    async fn resolve_with(&self, host: &Host, asker: Asker, cache: Cache, timeout: Duration) -> Result<Vec<IpAddr>, Stop> {
         let name = match host {
             Host::Ip(ip) => return Ok(vec![ip.to_canonical()]),
             Host::Name(name) => dns_cache::normalize(name.as_str()),
         };
-        if let Some(cached) = self.inner.dns.lock().expect("dns cache mutex poisoned").get(&name, Instant::now()) {
+        if cache == Cache::Use
+            && let Some(cached) = self.inner.dns.lock().expect("dns cache mutex poisoned").get(&name, Instant::now())
+        {
             return Ok(cached);
         }
-        let resolved = match time::timeout(RESOLVE_TIMEOUT, self.lookup(name.clone(), asker)).await {
+        let resolved = match time::timeout(timeout, self.lookup(name.clone(), asker)).await {
             Ok(Ok(resolved)) => resolved,
-            Ok(Err(ResolveError::NotFound)) => return Err(Reply::new(Status::NameNotFound, "域名不存在")),
-            Ok(Err(ResolveError::Failed(reason))) => return Err(Reply::new(Status::ResolverFailure, reason)),
-            Err(_) => return Err(Reply::new(Status::ResolverFailure, format!("{RESOLVE_TIMEOUT:?} 之内没有解析出来"))),
+            Ok(Err(ResolveError::NotFound)) => return Err(Stop::NameNotFound("域名不存在")),
+            Ok(Err(ResolveError::Failed(reason))) => return Err(Stop::ResolverFailed(reason)),
+            Err(_) => return Err(Stop::ResolveTimeout(timeout)),
         };
         let mut addresses: Vec<IpAddr> = Vec::with_capacity(resolved.len().min(MAX_ADDRESSES));
         for ip in resolved.into_iter().map(|ip| ip.to_canonical()) {
@@ -352,7 +439,7 @@ impl<S: System> Outbound<S> {
             }
         }
         if addresses.is_empty() {
-            return Err(Reply::new(Status::NameNotFound, "域名没有地址记录"));
+            return Err(Stop::NameNotFound("域名没有地址记录"));
         }
         self.inner.dns.lock().expect("dns cache mutex poisoned").put(name, addresses.clone(), Instant::now());
         Ok(addresses)
@@ -373,17 +460,12 @@ impl<S: System> Outbound<S> {
     }
 
     /// 本机网卡上的地址和网段。读不到时拒绝请求：没有它就判断不了目标是不是在本机的内网里。
-    fn interfaces(&self) -> Result<Arc<[IpNet]>, Reply> {
+    fn interfaces(&self) -> Result<Arc<[IpNet]>, Stop> {
         let mut cached = self.inner.interfaces.lock().expect("interfaces mutex poisoned");
         if let Some(interfaces) = cached.as_ref().filter(|interfaces| interfaces.read_at.elapsed() < INTERFACES_TTL) {
             return Ok(Arc::clone(&interfaces.nets));
         }
-        let nets: Arc<[IpNet]> = self
-            .inner
-            .system
-            .interfaces()
-            .map_err(|error| Reply::new(Status::InternalError, format!("读不到本机网卡的地址：{error}")))?
-            .into();
+        let nets: Arc<[IpNet]> = self.inner.system.interfaces().map_err(|error| Stop::Interfaces(error.to_string()))?.into();
         *cached = Some(Interfaces { read_at: Instant::now(), nets: Arc::clone(&nets) });
         Ok(nets)
     }
@@ -494,6 +576,141 @@ impl<S: System> LocalEgress for Outbound<S> {
         };
         Ok(self.udp_route(destination))
     }
+}
+
+/// 出站停在了哪一步、为什么。
+///
+/// 替别人连时写成 REPLY（`From<Stop> for Reply`），出口测试时写成代码（[`Stop::cause`]）：同一个值，
+/// 所以出口测试说的拒绝原因和别人经这个出口访问时被拒绝的原因一样。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Stop {
+    NotEnabled,
+    LanNotEnabled,
+    PortNotAllowed(u16),
+    FamilyUnavailable(IpFamily),
+    Forbidden {
+        ip: IpAddr,
+        what: &'static str,
+    },
+    NotOnLan {
+        ip: IpAddr,
+        why: &'static str,
+    },
+    NameNotFound(&'static str),
+    ResolverFailed(String),
+    ResolveTimeout(Duration),
+    /// 读不到本机网卡的地址。
+    Interfaces(String),
+}
+
+impl Stop {
+    /// 出口测试里的代码。
+    pub(crate) const fn cause(&self) -> ExitTestCause {
+        match self {
+            Self::NotEnabled => ExitTestCause::NotEnabled,
+            Self::LanNotEnabled => ExitTestCause::LanNotEnabled,
+            Self::PortNotAllowed(port) => ExitTestCause::PortNotAllowed { port: *port },
+            Self::FamilyUnavailable(family) => ExitTestCause::FamilyUnavailable { family: *family },
+            Self::Forbidden { ip, .. } => ExitTestCause::AddressNotAllowed { address: *ip },
+            Self::NotOnLan { ip, .. } => ExitTestCause::NotOnLan { address: *ip },
+            Self::NameNotFound(_) => ExitTestCause::NameNotFound,
+            Self::ResolverFailed(_) => ExitTestCause::ResolverFailed,
+            Self::ResolveTimeout(_) => ExitTestCause::Timeout,
+            Self::Interfaces(_) => ExitTestCause::Other,
+        }
+    }
+
+    /// 是解析域名这一步的失败（而不是出站策略的拒绝）。
+    const fn is_resolution(&self) -> bool {
+        matches!(self, Self::NameNotFound(_) | Self::ResolverFailed(_) | Self::ResolveTimeout(_))
+    }
+}
+
+impl From<Stop> for Reply {
+    fn from(stop: Stop) -> Self {
+        match stop {
+            Stop::NotEnabled => Self::new(Status::NotEnabled, "这个节点没有启用出口"),
+            Stop::LanNotEnabled => Self::new(Status::NotEnabled, "这个出口没有打开「允许访问本机局域网」"),
+            Stop::PortNotAllowed(port) => Self::new(Status::PolicyDenied, format!("出口不允许目标端口 {port}")),
+            Stop::FamilyUnavailable(family) => {
+                let wanted = match family {
+                    IpFamily::Ipv4 => "IPv4",
+                    IpFamily::Ipv6 => "IPv6",
+                    IpFamily::Any => "可以连",
+                };
+                Self::new(Status::PolicyDenied, format!("出口只连 {wanted} 地址，这个目标没有这种地址"))
+            }
+            Stop::Forbidden { what, .. } => Self::new(Status::PolicyDenied, format!("目标地址是{what}，出口不替别人连这类地址")),
+            Stop::NotOnLan { why, .. } => Self::new(Status::PolicyDenied, why),
+            Stop::NameNotFound(detail) => Self::new(Status::NameNotFound, detail),
+            Stop::ResolverFailed(reason) => Self::new(Status::ResolverFailure, reason),
+            Stop::ResolveTimeout(timeout) => Self::new(Status::ResolverFailure, format!("{timeout:?} 之内没有解析出来")),
+            Stop::Interfaces(error) => Self::new(Status::InternalError, format!("读不到本机网卡的地址：{error}")),
+        }
+    }
+}
+
+/// 出口测试每一步（解析、连接）最多等多久。
+pub const PROBE_STEP: Duration = Duration::from_secs(5);
+
+/// 一次出口测试做到的地方，连上了的话还有那条连接。
+#[derive(Debug)]
+pub struct Probe {
+    pub result: ExitTestResult,
+    pub stream: Option<TcpStream>,
+}
+
+impl Probe {
+    fn refused(mut result: ExitTestResult, stop: &Stop) -> Self {
+        tracing::info!(?stop, "出口测试：按出口的策略不替别人连这个目标");
+        result.refused = Some(stop.cause());
+        Self { result, stream: None }
+    }
+}
+
+/// 一段时间写成整毫秒，超出的按上限算。
+fn millis(elapsed: Duration) -> u32 {
+    u32::try_from(elapsed.as_millis()).unwrap_or(u32::MAX)
+}
+
+/// 连接失败的状态在出口测试里是哪一种原因。经上游代理时，代理自己不对劲（[`Status::InternalError`]）就是上游的问题。
+fn connect_cause(status: Status, via: Via) -> ExitTestCause {
+    match status {
+        Status::ConnectionRefused => ExitTestCause::Refused,
+        Status::TimedOut => ExitTestCause::Timeout,
+        Status::Unreachable => ExitTestCause::Unreachable,
+        Status::InternalError if matches!(via, Via::Upstream(_)) => ExitTestCause::UpstreamFailed,
+        // 别的状态连接这一步给不出来（策略的拒绝在连之前就查过了），有的话照实说是别的原因。
+        _ => ExitTestCause::Other,
+    }
+}
+
+/// 同 [`rank`]：越具体的失败越优先。
+const fn cause_rank(cause: ExitTestCause) -> u8 {
+    match cause {
+        ExitTestCause::Refused => 4,
+        ExitTestCause::Timeout => 3,
+        ExitTestCause::Unreachable => 2,
+        ExitTestCause::UpstreamFailed => 1,
+        // 连接这一步只会给出上面这几种，别的排在最后。
+        _ => 0,
+    }
+}
+
+/// 解析域名时用不用缓存里的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cache {
+    Use,
+    Bypass,
+}
+
+/// 本节点能不能替别人连这个端口上的互联网目标：必须是出口，端口要在允许的范围里。
+fn internet_role(netmap: &Netmap, port: u16) -> Result<&ExitRole, Stop> {
+    let role = netmap.me.exit.as_ref().ok_or(Stop::NotEnabled)?;
+    if role.ports.as_ref().is_some_and(|ports| !ports.contains(&port)) {
+        return Err(Stop::PortNotAllowed(port));
+    }
+    Ok(role)
 }
 
 /// `ip` 不能当互联网目标去连时，返回它是什么地址。`nodes` 是网络里节点自己的地址（[`Outbound::node_addresses`]）。

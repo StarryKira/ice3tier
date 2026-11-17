@@ -4,7 +4,22 @@
 
 对应的 Rust 类型在 `crates/i3t-model/src/admin.rs`，实现在 `crates/i3t-controller/src/admin.rs`。文档和代码不一致时以代码为准，并请修正文档。
 
-> **最新一次新增**（几处小的补充）。这一次的清单：
+> **最新一次新增**（入口、出口、端口转发和两个运维命令）。这一次的清单：
+>
+> - 新接口：`POST /networks/{network}/exits/{node}/test`，出口测试（第 17 节）。新的结构 `ExitTestInput`、`ExitTestView`、`ExitTestResult`、
+>   `ResolveStep`、`ConnectStep`、`TlsStep`，原因的代码 `ExitTestCause`。
+> - 端口转发 `Forward` 多了 `target_failure`（目标连不上：原因 `TargetCause` 和时间，第 11 节）和 `proxy_protocol`（目标节点先给服务发
+>   PROXY protocol 的头，`"v1"`、`"v2"` 或 `null`，创建和替换时也收，只有 TCP 的转发能设）。新的 `what`：`tcp_only`（第 2 节）。
+> - 出口的设置（`Node.exit`、`PUT …/exit`、`ExitView.settings`）多了 `optimistic`：经这个出口的流用不用乐观回复，监听器的设置排在它前面（第 5.6、10 节）。
+> - 行为上的变化：出口的 `ports` 省略时不再是 `[80, 443]`，而是不限（`null`），写了列表的照旧只允许那些端口（第 5.6 节）。
+>   以前用默认值启用的出口存着的是 `[80, 443]`，照旧；要放开就用 `ports: null` 再启用一次。
+> - 行为上的变化：HTTP 代理监听器除了 `CONNECT` 也转发明文 HTTP 的请求（`GET http://…`），以前回 405（第 10 节）。
+> - 节点协议没有升版：上报的端口转发里的 `target_failure`、netmap 里的 `proxy_protocol` 和出口的 `optimistic`，旧的一方都忽略；
+>   出口测试的消息（`exit_test`、`exit_test_answer`）旧的节点跳过，出口测试的 `answered` 是 `false`。
+>
+> 已有接口的路径、请求体和应答里原有的字段都没有变；出口端口的默认值和明文 HTTP 见上。
+>
+> **上一次新增**（几处小的补充）。这一次的清单：
 >
 > - 分组的引用 `GroupRef` 多了 `builtin`：是不是内置的 `All`，界面不用按名字认它。用到它的地方都有：节点的 `groups`（第 5 节）、
 >   注册令牌的 `groups`（第 6 节）、规则的 `src`、`dst`（第 7 节，也包括分组和访问关系图里列出的规则）。操作记录的参数不是 `GroupRef`，没有变（第 3 节）。
@@ -17,7 +32,7 @@
 >
 > 已有接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **上一次新增**（透明访问）。Linux 节点可以在本机打开透明访问：本机的程序不配代理，直接连别的节点的虚拟 IP 或者名字。
+> **再上一次新增**（透明访问）。Linux 节点可以在本机打开透明访问：本机的程序不配代理，直接连别的节点的虚拟 IP 或者名字。
 > 它改的是那台机器的网络配置，只能在节点上打开（`i3t set intercept on`），管理接口只看状态。这一次的清单：
 >
 > - 节点详情 `NodeDetail` 多了 `intercept`（结构 `InterceptReport`）：开着、关着、开不起来（原因是代码 `InterceptCause`）、这个平台上没有；
@@ -26,7 +41,7 @@
 >
 > 已有接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **再上一次新增**（性能档位）。管理员可以给每个节点选一个性能档位，节点报它实际在用的。这一次的清单：
+> **更早的新增**（性能档位）。管理员可以给每个节点选一个性能档位，节点报它实际在用的。这一次的清单：
 >
 > - 节点 `Node` 多了 `profile`：管理员给它选的档位，`"low_footprint"`、`"balanced"`、`"high_throughput"`，没有选时是 `null`（第 5 节）。
 > - 改节点（`PATCH …/nodes/{node}`）可以写 `profile`；写 `null` 是不再指定，节点改用它本机配置文件里的（第 5 节）。
@@ -243,7 +258,7 @@
 | `code` | `what` |
 |---|---|
 | `not_found` | 找不到的东西：`network`、`node`、`group`、`token`、`rule`、`credential`、`listener`、`forward`、`pair`（节点对设置）、`paused_version`、`exit`、`test`、`matrix`；路径不是一个接口时是 `endpoint`。请求体里引用的东西找不到时 `field` 是引用它的那一项，比如 `fixed_exit`、`pinned_relays`、`successor_of`、`via`、`src`、`dst`、`groups[1]`、`add[0]`、`remove[2]` |
-| `invalid_request` | 哪里不对：`too_small`（地址段太小）、`zero`（不能是 0）、`zero_port`（端口不能是 0）、`too_many`、`out_of_range`、`empty`、`too_long`、`malformed`（写法不对）、`all_digits`（名字全是数字）、`same_node`（两个节点是同一个）、`builtin`（内置分组 `All` 不能改名、删除、增减成员）、`required`（非回环地址的监听器必须要求凭据）、`missing`（`a`、`b` 只写了一个）、`not_relay`（不是启用了的 relay）、`not_connectable`（不是能连上的地址）、`not_allowed`（立即更新的时机不能是 `idle`）、`duplicate`（路径里 relay 重复；同一个节点既要加入分组又要移出）、`with_successor`（继任的令牌不能预设虚拟 IP）、`no_default`（默认的地址段都被占了）、`needs_quality`（测吞吐要同时测质量）、`no_address`（relay 一个地址都没填）、`revoked`（凭据已经吊销）；请求本身读不出来时是 `content_type`、`syntax`、`data`（JSON 里某个字段不对，`field` 是它）、`body`、`query`、`path`；请求方法不对（405）是 `method` |
+| `invalid_request` | 哪里不对：`too_small`（地址段太小）、`zero`（不能是 0）、`zero_port`（端口不能是 0）、`too_many`、`out_of_range`、`empty`、`too_long`、`malformed`（写法不对）、`all_digits`（名字全是数字）、`same_node`（两个节点是同一个）、`builtin`（内置分组 `All` 不能改名、删除、增减成员）、`required`（非回环地址的监听器必须要求凭据）、`missing`（`a`、`b` 只写了一个）、`not_relay`（不是启用了的 relay）、`not_connectable`（不是能连上的地址）、`not_allowed`（立即更新的时机不能是 `idle`）、`duplicate`（路径里 relay 重复；同一个节点既要加入分组又要移出）、`with_successor`（继任的令牌不能预设虚拟 IP）、`no_default`（默认的地址段都被占了）、`needs_quality`（测吞吐要同时测质量）、`no_address`（relay 一个地址都没填）、`revoked`（凭据已经吊销）、「新增」`tcp_only`（只有 TCP 的端口转发能设 PROXY protocol）；请求本身读不出来时是 `content_type`、`syntax`、`data`（JSON 里某个字段不对，`field` 是它）、`body`、`query`、`path`；请求方法不对（405）是 `method` |
 | `name_taken` | 「新增」分组的名字被占用时是 `group`；别的名字是 `null` |
 | `conflict` | 挡着的东西：`listener`（这个节点上已经有监听器在这个地址上，`field` 是 `bind`）、`forward`（同上，端口转发）、`token`（这个虚拟 IP 已经预设在另一个注册令牌上，`field` 是 `virtual_ip`） |
 | `not_declared` | 没有声明的能力：`relay`、`exit`、`forward`。要在节点上执行的命令是 `i3t set can-<这个值> on` |
@@ -545,7 +560,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
     "bandwidth_mbps": 200
   },
   "exit": {
-    "ports": [80, 443],
+    "ports": null,
     "lan": true,
     "bandwidth_mbps": null,
     "upstream_socks5": null,
@@ -553,7 +568,8 @@ controller 自己的情况。也用来检查地址和令牌对不对。
     "quota_reset_day": 1,
     "family": "any",
     "connects_per_minute": null,
-    "class": null
+    "class": null,
+    "optimistic": null
   },
   "dial_out_only": false,
   "routing": null,
@@ -823,13 +839,13 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 ```json
 {
   "ports": [80, 443], "lan": true, "bandwidth_mbps": 50, "upstream_socks5": null,
-  "quota_bytes": 500000000000, "quota_reset_day": 1, "family": "ipv4", "connects_per_minute": 120, "class": null
+  "quota_bytes": 500000000000, "quota_reset_day": 1, "family": "ipv4", "connects_per_minute": 120, "class": null, "optimistic": null
 }
 ```
 
 | 字段 | 必填 | 含义 |
 |---|---|---|
-| `ports` | 否 | 互联网目标允许的端口。**省略**时是 `[80, 443]`；写 `null` 表示不限制。局域网目标不受它限制 |
+| `ports` | 否 | 互联网目标允许的端口。「新增」省略或者写 `null` 表示不限制（以前省略时是 `[80, 443]`）；写一个列表（比如 `[80, 443]`）就只允许这些端口。局域网目标不受它限制。不管端口一律不连的地址照样不连：私有、回环、链路本地、运营商级 NAT、云平台的元数据地址，覆盖网和节点自己的地址（[architecture.md](architecture.md) 的 5.6）。以前用默认值启用的出口存着的是 `[80, 443]` 这个列表，照旧只允许这两个端口，要放开就写 `null` 再启用一次 |
 | `lan` | 否 | 允许经它访问它所在的局域网（本机网卡直连的网段）。默认 `false` |
 | `bandwidth_mbps` | 否 | 带宽上限（Mbit/s）；`null` 或省略表示不限。「新增」现在由出口执行：出口替别人搬运的互联网和局域网目标的流量，两个方向各受这个上限，所有的流和 UDP 报文共用；流超出时被放慢，UDP 报文超出时被丢掉。访问出口节点自己的服务、下发给它的端口转发不受限 |
 | `upstream_socks5` | 否 | 把流交给节点本机的这个 SOCKS5 代理（`地址:端口`）去连目标；`null` 或省略表示自己直接连 |
@@ -838,6 +854,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `family` | 否 | 「新增」互联网目标只连哪一种地址：`"any"`（默认）、`"ipv4"`、`"ipv6"`。域名解析出来的地址里只取这一种；目标是另一种地址、或者域名没有这种地址时拒绝 |
 | `connects_per_minute` | 否 | 「新增」建连预算：同一个发起节点每分钟最多让出口向同一个互联网或局域网目标（主机加端口）新建多少条连接；`null` 或省略表示不限。可以一下子用完一分钟的额度，之后按每分钟这么多恢复。超出时请求被拒绝（SOCKS5 的 `0x01`、HTTP 的 `429`） |
 | `class` | 否 | 「新增」经这个出口的流的默认服务等级，见第 4 节 `Network.class` 的先后顺序；`null` 表示没有 |
+| `optimistic` | 否 | 「新增」经这个出口的流（互联网和局域网目标）用不用乐观回复：`true` 时入口不等出口的应答就告诉客户端连上了，`false` 时一律等（客户端拿到准确的错误码）；`null` 或省略时按目标的种类（互联网目标不等，局域网目标等）。监听器自己设了 `optimistic` 的以监听器为准（第 10 节）：先看监听器，再看出口，最后按目标的种类。明文 HTTP 的转发不管哪一项都等应答 |
 
 请求体写 `{}` 就是用默认设置启用。「新增」带宽上限、配额、建连预算都不能写 0（不限制就不写）。
 
@@ -911,7 +928,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | 字段 | 含义 |
 |---|---|
 | `direct` | 走直连时，这条直连是怎么建立起来的：`"lan"`（同一个局域网）、`"ipv6"`（对端的 IPv6 地址）、`"reachable"`（对端的这个地址本来就连得上：公网地址、端口转发、端口映射，没有用到打洞）、`"punched"`（交换打洞信令之后打通的）。比 controller 新的节点报了这里不认识的类型时是 `"unknown"`。不是直连时是 `null` |
-| `relay_leg` | 经 relay 时，节点到第一个 relay 的那一段走的是 `"udp"` 还是 `"tcp"`（UDP 用不了时的 TCP 中转）。现在的节点还报不出来，总是 `null`；以后的节点会报 |
+| `relay_leg` | 经 relay 时，节点到第一个 relay 的那一段走的是 `"udp"` 还是 `"tcp"`（UDP 用不了时的 TCP 中转）。不是经 relay、或者节点的版本太旧不报时是 `null` |
 
 ### GET /networks/{network}/nodes/{node}/listeners「新增」
 
@@ -1243,7 +1260,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 
 ## 10. 监听器
 
-监听器是某个节点上的一个代理入口（SOCKS5 或 HTTP CONNECT）。
+监听器是某个节点上的一个代理入口（SOCKS5，或者 HTTP 代理：「新增」除了 CONNECT 也转发明文 HTTP 的请求，见 [architecture.md](architecture.md) 的 5.6）。
 
 `Listener`：
 
@@ -1276,7 +1293,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `default_action` | 调用者没有写用户名、目标又不是组网地址时怎么办，见下。`null` 时按 `bind` 取默认：回环地址是就地出站，其他地址是拒绝 |
 | `fixed_exit` | 固定出口（节点编号）：这个监听器上的流量都从这个节点出去；`null` 表示不固定 |
 | `class` | 「新增」这个监听器上的流的默认服务等级（`"auto"`、`"interactive"`、`"reliable"`、`"bulk"`）。用户名里写了 `+c-` 时以用户名为准；`null` 时看出口和网络的默认值 |
-| `optimistic` | 「新增」乐观回复：`true` 时不等对端的应答就告诉客户端连上了（省一个全程往返，失败只能表现为随后被断开），`false` 时一律等（客户端拿到准确的错误码）。`null` 时按目标的种类：互联网目标不等，组网目标（节点的服务、局域网）等 |
+| `optimistic` | 「新增」乐观回复：`true` 时不等对端的应答就告诉客户端连上了（省一个全程往返，失败只能表现为随后被断开），`false` 时一律等（客户端拿到准确的错误码）。`null` 时看出口的设置（「新增」`Node.exit.optimistic`，只管经出口出去的流），出口也没有设时按目标的种类：互联网目标不等，组网目标（节点的服务、局域网）等。「新增」明文 HTTP 的转发（`GET http://…`）不管这一项都等：目标的应答本来就在对端的应答之后才到，等它不多花时间 |
 | `status` | 「新增」节点最近一次报的这个监听器的状态、连接数和流量，写法见 11.1 节的 `ListenStatus`。节点不在线、还没有报过，或者版本太旧不报时是 `null`。只读，创建和替换时不用写 |
 
 `default_action` 有三种：
@@ -1335,7 +1352,9 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   "enabled": true,
   "status": "active",
   "class": null,
-  "listen": { "state": "listening", "local": "127.0.0.1:8080", "connections": 1, "bytes_up": 512, "bytes_down": 8192 }
+  "listen": { "state": "listening", "local": "127.0.0.1:8080", "connections": 1, "bytes_up": 512, "bytes_down": 8192 },
+  "target_failure": { "cause": { "code": "refused" }, "at": 1794798564 },
+  "proxy_protocol": null
 }
 ```
 
@@ -1353,6 +1372,8 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `status` | 现在的状态，只读，见下 |
 | `class` | 「新增」这条转发上的流的服务等级；`null` 时用网络的默认值 |
 | `listen` | 「新增」监听节点最近一次报的这条转发的监听状态、连接数和流量，写法见 11.1 节的 `ListenStatus`。节点不在线或者还没有报过时是 `null`。只读 |
+| `proxy_protocol` | 「新增」目标节点连上目标之后先发一个 PROXY protocol 的头（HAProxy 的规范）：`"v1"`（一行文字）、`"v2"`（二进制）；`null`（默认）是不发。认它的服务（nginx 的 `proxy_protocol`、HAProxy、Postfix 等）据此看到发起节点（监听节点）的虚拟 IP，不是目标节点自己的地址：在 Linux 上透明访问打开着时服务本来就看得到，别的平台上和只听回环的服务靠它。头里的来源只取自连接的握手认出的发起节点，端口是目标节点这一侧这条 TCP 的端口，目的是它连到的地址；目标是 IPv6 时来源写成 IPv4 映射的地址。只有 TCP 的转发能设（UDP 的转发写了是 `400 invalid_request`，`what` 是 `tcp_only`）：v1 没有 UDP 的写法，v2 要加在每个报文前面，认它的 UDP 服务几乎没有。比这个文档旧的目标节点不认这一项，照旧不发 |
+| `target_failure` | 「新增」目标连不上：这条转发的流最近一次在目标那里失败的原因（`cause`，`TargetCause`，见下表）和时间（`at`，按 controller 的时钟）。之后有一条流成功了就变回 `null`；从来没有失败过、监听节点不在线、或者它的版本太旧不报时也是 `null`。只读 |
 
 `status` 按 controller 知道的算，排在前面的优先：
 
@@ -1365,7 +1386,27 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `"target_offline"` | 目标节点不在线 |
 | `"active"` | 已经下发，两端都在线 |
 
-「新增」"端口被占用"这类监听上的状态在 `listen` 里，不在 `status` 里（`status` 的取值没有变）：界面可以在 `status` 是 `"active"` 时再看 `listen.state`。"目标连不上"现在还没有。
+「新增」"端口被占用"这类监听上的状态在 `listen` 里，"目标连不上"在 `target_failure` 里，都不在 `status` 里（`status` 的取值没有变）：
+界面可以在 `status` 是 `"active"` 时再看 `listen.state` 和 `target_failure`。
+
+「新增」`target_failure` 是监听节点看到的：它开到目标节点的流被目标节点拒绝时，拒绝里的状态就是原因（目标节点知道为什么），
+开不出流时是到目标节点不通。监听在虚拟 IP 上的转发由监听节点自己接住，它连目标时的失败同样记下。TCP 的转发每条连接都算；
+UDP 的转发只看得到会话开不开得起来（报文发出去之后目标收没收到，UDP 不说），所以 UDP 目标不回答和它安静着分不出来。
+节点在上报的端口转发里带着这一项（`target_failure: { cause, secs_ago }`），节点协议没有升版：旧的 controller 忽略它，旧的节点不报。
+
+`TargetCause`（`{ "code": … }`）：
+
+| `code` | 含义 |
+|---|---|
+| `refused` | 目标地址拒绝了连接：那个端口上没有程序在听 |
+| `timeout` | 连目标地址超时 |
+| `unreachable` | 目标地址所在的网络或主机不可达 |
+| `not_declared` | 目标节点没有这条转发：它没有声明可以作为端口转发的目标（`i3t set can-forward on`），或者它的配置还没有更新 |
+| `access_denied` | 目标节点的访问规则不允许监听节点访问它 |
+| `node_unreachable` | 监听节点到目标节点开不出流：目标节点不在线，或者两者之间没有路 |
+| `other` | 别的原因（目标节点在排空、内部出错等），见监听节点的日志 |
+
+不认识的 `code` 当作 `unknown`。
 
 ### 11.1 ListenStatus「新增」
 
@@ -1422,10 +1463,10 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 }
 ```
 
-`protocol`、`listen_node`、`bind`、`target_node`、`target_addr` 必填；`name` 默认 `""`，`allow_from` 默认 `[]`，`enabled` 默认 `true`，「新增」`class` 默认 `null`。
+`protocol`、`listen_node`、`bind`、`target_node`、`target_addr` 必填；`name` 默认 `""`，`allow_from` 默认 `[]`，`enabled` 默认 `true`，「新增」`class`、`proxy_protocol` 默认 `null`。
 
 应答：`201`，`Forward`。
-错误：`not_declared`（`enabled` 是 `true` 而目标节点没有声明）、`conflict`（监听节点上同一个地址已经有一条同协议的转发；端口写 0 的不算）、`invalid_request`（「新增」监听在虚拟 IP 上而端口写 0）、`not_found`（节点不在这个网络里）。
+错误：`not_declared`（`enabled` 是 `true` 而目标节点没有声明）、`conflict`（监听节点上同一个地址已经有一条同协议的转发；端口写 0 的不算）、`invalid_request`（「新增」监听在虚拟 IP 上而端口写 0；「新增」UDP 的转发写了 `proxy_protocol`，`what` 是 `tcp_only`）、`not_found`（节点不在这个网络里）。
 
 ### PUT /networks/{network}/forwards/{id}
 
@@ -1608,6 +1649,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | GET | `/networks/{network}/nodes/{node}/listeners` | 「新增」节点上全部监听的状态（含节点自己开的回环入口） |
 | GET | `/networks/{network}/exits` | 「新增」启用了的出口：设置、用量、健康、用它的节点看到的 |
 | GET | `/networks/{network}/exits/{node}` | 「新增」一个出口 |
+| POST | `/networks/{network}/exits/{node}/test` | 「新增」出口测试：让出口按它的策略试着连一个目标 |
 | GET | `/networks/{network}/backbone` | 「新增」relay 之间的延迟矩阵 |
 | GET、POST | `/networks/{network}/tests` | 「新增」列出最近的主动测试、发起一个 |
 | GET | `/networks/{network}/tests/{id}` | 「新增」一个测试的进度和结果 |
@@ -2136,7 +2178,8 @@ Prometheus 的文本格式（`Content-Type: text/plain; version=0.0.4`）。**�
     "node": { "id": 1, "name": "gw", "virtual_ip": "10.66.0.1" },
     "online": true,
     "settings": { "ports": [80, 443], "lan": false, "bandwidth_mbps": 50, "upstream_socks5": null,
-                  "quota_bytes": 500000000000, "quota_reset_day": 1, "family": "any", "connects_per_minute": null, "class": null },
+                  "quota_bytes": 500000000000, "quota_reset_day": 1, "family": "any", "connects_per_minute": null, "class": null,
+                  "optimistic": null },
     "health": "ok",
     "recent_requests": 120,
     "recent_failures": 0,
@@ -2170,6 +2213,80 @@ Prometheus 的文本格式（`Content-Type: text/plain; version=0.0.4`）。**�
 ### GET /networks/{network}/exits/{node}
 
 一个出口，应答是 `ExitView`。错误：`not_found`（节点不在这个网络里，或者没有启用出口）。
+
+### POST /networks/{network}/exits/{node}/test「新增」
+
+出口测试（`i3tctl exit test <节点> <目标>`）：让这个出口按它自己的出站策略试着连一个目标，看解析、连接和（端口是 443 时）TLS 握手
+各花多久、停在哪一步、经什么出去。controller 只转达，测试在出口节点上做，最多等 20 秒左右。
+
+```json
+{ "target": "example.com:443" }
+```
+
+`target` 是 `主机[:端口]`：域名、IPv4 地址，或者 IPv6 地址（要写端口时放在方括号里）；不写端口是 443。没有默认的目标：测谁由管理员定，
+不依赖哪一家的服务器。
+
+应答是 `ExitTestView`：
+
+```json
+{
+  "node": { "id": 1, "name": "gw", "virtual_ip": "10.66.0.1" },
+  "target": "example.com:443",
+  "answered": true,
+  "result": {
+    "via": "direct",
+    "refused": null,
+    "resolve": { "ms": 12, "addresses": ["93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"], "family": "any", "cause": null },
+    "connect": { "ms": 35, "address": "93.184.216.34:443", "cause": null },
+    "tls": { "ms": 80, "cause": null }
+  }
+}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `target` | 测的目标，`主机:端口` |
+| `answered` | 出口节点回答了没有。`false` 时 `result` 是 `null`：它的版本太旧不懂这条消息，或者 20 秒之内没有做完 |
+| `result.via` | 经什么连目标：`"direct"`（自己直接连），`"upstream"`（出口配的上游 SOCKS5 代理）。局域网目标总是直接连 |
+| `result.refused` | 出口节点不做这次测试、或者按出口的策略不替别人连这个目标的原因（`ExitTestCause`，见下表）；可以做下去时是 `null`。有值时后面只做到被拒绝的那一步 |
+| `result.resolve` | 解析域名：`ms` 用了多久（失败时是到失败为止），`addresses` 解析出来的地址（最多 8 个），`family` 出口只连哪一种地址（出口的设置，`"any"`、`"ipv4"`、`"ipv6"`），`cause` 失败的原因。目标写成地址时是 `null`。为了量时间，这一次不用出口的解析缓存 |
+| `result.connect` | 连目标：`ms`，`address` 连上的那个地址（都没连上是 `null`），`cause`。几个地址按顺序试，一共最多 5 秒 |
+| `result.tls` | 端口是 443 并且连上了时做一次 TLS 握手：`ms`、`cause`。只看握手能不能完成、要多久，**不检查证书**（不说网站是不是真的），不发别的数据 |
+
+规矩和别人经这个出口访问时一样：写成地址的私有、链路本地地址按局域网目标查（要打开局域网开关，并且在出口直连的网段里），
+别的按互联网目标查（不是出口、端口不在白名单里、解析出来的地址里有不该连的，都拒绝，原因同下表）。配额和建连预算不算：测试不是用户。
+
+出口节点自己限制测试，不依赖 controller：同一时间只做一个，两次之间至少隔 2 秒（多出来的回答 `busy`），每一步最多 5 秒。
+加上只能测出口本来就替别人连的地址和端口，它不能被用来扫描。
+
+`ExitTestCause`（`{ "code": … }`）：
+
+| `code` | 同一层的值 | 含义 |
+|---|---|---|
+| `busy` | | 出口节点上另一个测试正在做，或者刚做过 |
+| `bad_target` | | 出口节点读不懂这个目标 |
+| `not_enabled` | | 节点没有启用出口 |
+| `lan_not_enabled` | | 目标是局域网的地址，出口没有打开局域网开关 |
+| `port_not_allowed` | `port` | 端口不在出口的白名单里 |
+| `family_unavailable` | `family` | 出口只连一种地址，目标没有这种地址 |
+| `address_not_allowed` | `address` | 出口不替别人连这个地址：私有、回环、链路本地、运营商级 NAT、云平台元数据，覆盖网和节点自己的地址，本机网卡所在网段的 |
+| `not_on_lan` | `address` | 局域网目标不在出口直连的网段里（或者是不算局域网的地址） |
+| `name_not_found` | | 域名不存在，或者没有地址记录 |
+| `resolver_failed` | | 解析器出错 |
+| `timeout` | | 超时（看是哪一步） |
+| `refused` | | 目标拒绝了连接 |
+| `unreachable` | | 目标所在的网络或主机不可达 |
+| `upstream_failed` | | 连不上出口的上游代理 |
+| `closed` | | TLS 握手完成之前对方关了连接 |
+| `alert` | | TLS 握手时对方回了告警 |
+| `other` | | 别的原因，见出口节点的日志 |
+
+不认识的 `code` 当作 `unknown`。
+
+错误：`not_found`（节点不在这个网络里，或者没有启用出口，`what` 是 `exit`）、`invalid_request`（`target` 写得不对，`what` 是 `malformed`，`field` 是 `target`）、
+`node_offline`（出口节点不在线）。
+
+节点协议没有升版：controller 给出口节点发 `exit_test`，节点回 `exit_test_answer`；比它旧的节点跳过这条消息，`answered` 是 `false`。
 
 ## 18. 分组「新增」
 

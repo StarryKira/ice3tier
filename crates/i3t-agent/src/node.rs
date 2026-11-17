@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
-use i3t_access::Access;
+use i3t_access::{Access, SharedRoutes};
 use i3t_conn::{Endpoint, EndpointConfig};
 use i3t_exit::{Exit, Os, Outbound, QuotaState};
 use i3t_model::Netmap;
@@ -38,6 +38,7 @@ use crate::config::Config;
 use crate::control::{ControlLink, LinkSetup, LinkState, TestMessage, Timing};
 use crate::diag::{Diag, NodeHandler};
 use crate::drain::Drain;
+use crate::exit_test::ExitTests;
 use crate::flows;
 use crate::intercept::Intercept;
 use crate::join::hello;
@@ -47,6 +48,7 @@ use crate::memory;
 use crate::performance::Performance;
 use crate::persist::{self, StatePorts};
 use crate::program::Program;
+use crate::route_detail::EndpointRoutes;
 use crate::runtime::{NodeAccess, NodeExit, Parts, Runtime};
 use crate::state::StateDir;
 use crate::update::Driver;
@@ -201,11 +203,23 @@ pub async fn run(
     // 入口和出口用的连接层：共用的连接，加上按节点对的设置给 TCP 流用的独占 TCP。
     let lanes = Arc::new(NodeLanes::new(&key, Arc::clone(&endpoint))?);
     let connector = lanes.connector();
-    let access = Arc::new(Access::new(Arc::clone(&connector), outbound.clone(), local_rx.clone()).with_port_book(ports));
+    // 每条流结束时的摘要里写这对节点的连接走的路，入口和出口问的是同一个。
+    let routes: SharedRoutes = Arc::new(EndpointRoutes(Arc::clone(&endpoint)));
+    let access =
+        Access::new(Arc::clone(&connector), outbound.clone(), local_rx.clone()).with_port_book(ports).with_routes(Arc::clone(&routes));
+    let access = Arc::new(access);
     // 透明访问打开时，出口一侧连本机的服务改用发起节点的虚拟 IP 做源地址：同一个拨号器，由它来开关。
     let intercept = Intercept::start(config.intercept.enabled, local_rx.clone(), Arc::clone(&access), outbound.clone());
+    // 出口测试和替别人连用的是同一个拨号器：同一份出站策略。
+    let (exit_test_answers_tx, exit_test_answers) = mpsc::channel(4);
+    let exit_tests = Arc::new(ExitTests::new(outbound.clone(), exit_test_answers_tx));
     // 出口接力 UDP 端口转发时和入口共用一个开数据报上下文的：对端发回来的数据报只由入口的那一个分发。
-    let exit = Arc::new(Exit::new(local_rx.clone(), outbound, connector).with_quota_state(quota).with_opener(access.datagram_opener()));
+    let exit = Exit::new(local_rx.clone(), outbound, connector)
+        .with_quota_state(quota)
+        .with_opener(access.datagram_opener())
+        .with_forward_health(access.forward_health())
+        .with_routes(routes);
+    let exit = Arc::new(exit);
     let follow_lanes = tokio::spawn(Arc::clone(&lanes).follow(local_rx.clone()));
     // 主动测试：测量服务和出口一起接别的节点开过来的流；结果经长连接送给 controller。
     let (test_reports_tx, test_reports) = mpsc::channel(32);
@@ -279,6 +293,11 @@ pub async fn run(
                     }
                 }),
                 test_reports,
+                exit_tests: Box::new({
+                    let exit_tests = Arc::clone(&exit_tests);
+                    move |request, host, port| exit_tests.order(request, host, port)
+                }),
+                exit_test_answers,
                 state,
                 timing: Timing::default(),
             });
@@ -614,8 +633,13 @@ mod tests {
         netmap.me.exit = Some(ExitRole::default());
         netmap.me.relay = Some(RelayRole::default());
         netmap.relay_clients = vec![RelayClient { id: peer, key: PublicKey::from_bytes([2; 32]) }];
-        netmap.me.forward_targets =
-            vec![ForwardTarget { id: 1, protocol: ForwardProtocol::Tcp, addr: "127.0.0.1:5432".parse().unwrap(), listener: peer }];
+        netmap.me.forward_targets = vec![ForwardTarget {
+            id: 1,
+            protocol: ForwardProtocol::Tcp,
+            addr: "127.0.0.1:5432".parse().unwrap(),
+            listener: peer,
+            proxy_protocol: None,
+        }];
         netmap
     }
 

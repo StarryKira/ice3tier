@@ -45,8 +45,10 @@ use crate::netmap::{Attachment, ForwardProtocol, ListenerProtocol, Netmap, Profi
 use crate::update::{Platform, SelfUpdateBlocker, SignedManifest, UpdateStatus, UpdateTiming, Version};
 
 pub mod diag;
+pub mod exit_test;
 
 pub use diag::{TestOrder, TestReport};
+pub use exit_test::ExitTestResult;
 
 /// 一帧最长多少字节。netmap 随对端数量增长，千级节点时在几百 KB。
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
@@ -172,6 +174,11 @@ pub enum ToController {
     },
     /// 主动测试里这一端看到的结果（[`diag`]）。
     TestReport(Box<TestReport>),
+    /// 对 [`ToNode::ExitTest`] 的回答（[`exit_test`]）。
+    ExitTestAnswer {
+        request: u64,
+        result: Box<ExitTestResult>,
+    },
 }
 
 /// controller 发给节点的消息。
@@ -236,6 +243,15 @@ pub enum ToNode {
     /// 这个测试结束了（做完了，或者被取消了）：关掉它的时间窗，停下手上的事，还没报的马上报。
     TestEnd {
         test: u64,
+    },
+    /// 让出口节点按它的出站策略试着连一个目标（[`exit_test`]），节点用 [`ToController::ExitTestAnswer`] 回答。
+    ///
+    /// 节点协议没有为它升版：比它旧的节点（第 1 版起）跳过这条消息，controller 等不到回答就说没有回答。
+    ExitTest {
+        request: u64,
+        /// 域名或者地址（IPv6 不带方括号）。
+        host: String,
+        port: u16,
     },
 }
 
@@ -688,6 +704,40 @@ pub struct ForwardReport {
     pub state: ListenState,
     #[serde(flatten)]
     pub traffic: ListenTraffic,
+    /// 这条转发的流最近一次在目标那里失败；之后有流成功了就是 `None`。旧版本的节点不报。
+    #[serde(default)]
+    pub target_failure: Option<TargetFailureReport>,
+}
+
+/// 端口转发的流最近一次在目标那里失败（白皮书 §9.6 的"目标连不上"）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetFailureReport {
+    pub cause: TargetCause,
+    /// 多少秒之前。用相对的时间，两边的时钟不用对齐。
+    pub secs_ago: u64,
+}
+
+/// 端口转发的一条流在目标那里没有成功的原因，给界面按自己的语言写。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum TargetCause {
+    /// 目标地址拒绝了连接：那个端口上没有程序在听。
+    Refused,
+    /// 连目标地址超时。
+    Timeout,
+    /// 目标地址所在的网络或主机不可达。
+    Unreachable,
+    /// 目标节点没有这条转发：它没有声明可以作为端口转发的目标，或者它的配置还不是最新的。
+    NotDeclared,
+    /// 目标节点的访问规则不允许监听节点访问它。
+    AccessDenied,
+    /// 监听节点到目标节点开不出流：目标节点不在线，或者两者之间没有路。
+    NodeUnreachable,
+    /// 别的原因（目标节点在排空、出口内部出错等），见监听节点的日志。
+    Other,
+    /// 比这个程序新的节点报的、这里不认识的原因。
+    #[serde(other)]
+    Unknown,
 }
 
 /// 一个监听上的连接和流量。
@@ -1224,14 +1274,23 @@ mod tests {
             protocol: ForwardProtocol::Tcp,
             state: ListenState::Listening { local: "127.0.0.1:41000".parse().unwrap() },
             traffic: ListenTraffic { connections: 2, bytes_up: 10, bytes_down: 20 },
+            target_failure: Some(TargetFailureReport { cause: TargetCause::Refused, secs_ago: 4 }),
         };
         assert_eq!(
             serde_json::to_value(&forward).unwrap(),
             serde_json::json!({
                 "id": 7, "bind": "127.0.0.1:0", "protocol": "tcp", "state": { "state": "listening", "local": "127.0.0.1:41000" },
-                "connections": 2, "bytes_up": 10, "bytes_down": 20
+                "connections": 2, "bytes_up": 10, "bytes_down": 20, "target_failure": { "cause": { "code": "refused" }, "secs_ago": 4 }
             })
         );
+        let older: ForwardReport = serde_json::from_value(serde_json::json!({
+            "id": 7, "bind": "127.0.0.1:0", "protocol": "tcp", "state": { "state": "virtual" }
+        }))
+        .unwrap();
+        assert_eq!(older.target_failure, None, "旧版本的节点不报目标连不上");
+        let newer: TargetFailureReport =
+            serde_json::from_value(serde_json::json!({ "cause": { "code": "later" }, "secs_ago": 1 })).unwrap();
+        assert_eq!(newer.cause, TargetCause::Unknown);
         let in_use =
             serde_json::to_value(ListenState::PortInUse { detail: "Address in use".into(), cause: Some(BindCause::AddressInUse) }).unwrap();
         assert_eq!(

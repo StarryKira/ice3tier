@@ -43,7 +43,8 @@ def udp_direct(lab: Lab, work: Path, t: Checks) -> None:
         start_udp_echo(echo, port)
     a, b = Node(lab.host("a"), work, 1), Node(lab.host("b"), work, 2, declare=("exit",))
     a.start_static(a.netmap(peers=[b.as_peer(exit=True)]))
-    b.start_static(b.netmap(peers=[a.as_peer()], me={"exit": {}}))
+    # 出口默认不限端口；这里写明只放行 80 和 443，测端口白名单对 UDP 也管用。
+    b.start_static(b.netmap(peers=[a.as_peer()], me={"exit": {"ports": [80, 443]}}))
 
     answer = socks5_udp(a.host, echo.ip, 443, b"ping", user=b.virtual_ip)
     seen, data = echoed(answer)
@@ -64,7 +65,7 @@ def udp_direct(lab: Lab, work: Path, t: Checks) -> None:
     seen, data = echoed(socks5_udp(a.host, echo.ip, 8080, b"local"))
     t.check("不写用户名：从本机出去，不受出口的端口限制", (seen, data) == (a.host.ip, b"local"), f"{seen!r} {data!r}")
     refused = socks5_udp(a.host, echo.ip, 8080, b"blocked", user=b.virtual_ip, tries=3)
-    t.check("出口不放行 80 / 443 以外的端口：报文被丢掉", refused is None, f"回来的是 {refused!r}")
+    t.check("出口写了端口白名单：80 / 443 以外的端口的报文被丢掉", refused is None, f"回来的是 {refused!r}")
     t.check("出口的日志里有拒绝的原因", "出口不允许目标端口 8080" in b.read_log())
     if t.failures:
         print(tail(a.read_log()), tail(b.read_log()), sep="\n  ---\n")

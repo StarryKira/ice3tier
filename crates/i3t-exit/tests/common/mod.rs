@@ -89,7 +89,7 @@ pub fn peer(raw: u32, exit: Option<PeerExit>) -> Peer {
 
 /// `me` 号节点的 netmap：另外两个节点都是它的对端，互相都能访问。gw 是出口（局域网开关关着），默认只放行 80 和 443。
 pub fn netmap(me: u32) -> Netmap {
-    let exit_of = |raw: u32| (raw == GW).then_some(PeerExit { lan: false, class: None });
+    let exit_of = |raw: u32| (raw == GW).then_some(PeerExit { lan: false, class: None, optimistic: None });
     Netmap {
         version: 1,
         network: Network {
@@ -308,7 +308,8 @@ impl Node {
             move || own_endpoints.lock().unwrap().clone()
         });
         let mut access = Access::new(Arc::clone(&connector), outbound.clone(), receiver.clone());
-        let mut exit = Exit::new(receiver, outbound, connector).with_opener(access.datagram_opener());
+        let mut exit =
+            Exit::new(receiver, outbound, connector).with_opener(access.datagram_opener()).with_forward_health(access.forward_health());
         if let Some(udp_idle) = udp_idle {
             exit = exit.with_datagram_idle_timeout(udp_idle);
             access = access.with_udp_idle_timeout(udp_idle);

@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use i3t_conn::{Connector, Payload, RecvStream, SendStream, StreamCode};
 use i3t_proto::NodeId;
-use i3t_proto::flow::{Class, Open, Reason};
+use i3t_proto::flow::{Class, Open, OpenPing, Reason};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
@@ -41,6 +41,34 @@ pub async fn open<C: Connector>(
     // 首批数据本身就是 TLS 时，跑在独占 TCP 上的流之后不再加密第二次。
     send.end_header(Payload::for_first_data(first_data));
     Ok(Pending { send, recv, class: request.class, started })
+}
+
+/// 在和 `peer` 的连接上量一个往返（`i3t ping`）：开一条流（不走独占 TCP），写一个往返测量的 OPEN，等对端的 REPLY。
+/// 返回从写出 OPEN 到读到 REPLY 用了多久。
+///
+/// 和 `peer` 之间还没有连接时，这一次包括建立连接的时间；要量连接本身的往返，先调一次把连接建起来。
+///
+/// # Errors
+///
+/// 开流失败返回 [`FlowError::Connect`]；对端的访问规则不允许本节点访问它时是 [`FlowError::Refused`]（状态是
+/// [`Status::AccessDenied`](i3t_proto::flow::Status::AccessDenied)）；对端的版本太旧不认这种 OPEN 时，它用
+/// [`Reason::ProtocolError`] 重置流，这里是 [`FlowError::Read`]。
+pub async fn ping<C: Connector>(connector: &C, peer: NodeId) -> Result<std::time::Duration, FlowError> {
+    let (mut send, mut recv) = connector.open(peer).await?;
+    send.set_priority(relay::priority_of(Class::Interactive));
+    let mut bytes = Vec::with_capacity(OpenPing::LEN);
+    OpenPing.encode(&mut bytes);
+    let started = Instant::now();
+    send.write_all(&bytes).await.map_err(FlowError::Write)?;
+    let reply = header::read_reply(&mut recv).await;
+    let elapsed = started.elapsed();
+    // 回答之后对端就结束了它那个方向；这一端也正常结束，读不读到 EOF 都无所谓。
+    let _ = send.shutdown().await;
+    match reply {
+        Ok(reply) if reply.status.is_ok() => Ok(elapsed),
+        Ok(reply) => Err(FlowError::Refused(reply)),
+        Err(error) => Err(error),
+    }
 }
 
 /// 已经发出 OPEN、还没有读 REPLY 的流。
@@ -91,12 +119,12 @@ impl<S: SendStream, R: RecvStream> Pending<S, R> {
     /// REPLY 在往客户端搬运的那个方向上读：对端拒绝了，或者流出了别的问题，客户端的连接被重置（RST），
     /// 结果在 [`Summary::end`] 里。
     pub async fn relay(self, client: TcpStream) -> Summary {
-        relay::run(self.parts(true), client, future::pending(), &Unmetered).await
+        relay::run(self.parts(true), client, future::pending(), &Unmetered, None).await
     }
 
     /// 和 [`relay`](Self::relay) 一样，只是可以取消（`cancel` 完成时用它给的原因码结束），每一段数据写出去之前先过 `meter`。
     pub async fn relay_metered(self, client: TcpStream, cancel: impl Future<Output = Reason>, meter: &impl Meter) -> Summary {
-        relay::run(self.parts(true), client, cancel, meter).await
+        relay::run(self.parts(true), client, cancel, meter, None).await
     }
 
     fn parts(self, reply_pending: bool) -> Parts<S, R> {

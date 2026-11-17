@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lab as lablib  # noqa: E402
-from harness import Checks, Node, current_route, route_changes, shape_between, start_whoami, tail  # noqa: E402
+from harness import Checks, Node, current_route, flow_routes, route_changes, shape_between, start_whoami, tail  # noqa: E402
 from lab import Lab, NatKind, Shape, wait_until  # noqa: E402
 
 
@@ -163,6 +163,11 @@ def graceful_relay_shutdown(lab: Lab, work: Path, t: Checks) -> None:
     t.check("通知是 r1 退出时自己发的", "relay 即将下线" in r1.read_log(), tail(r1.read_log(), 8))
     ok, detail = finished_intact(download, size)
     t.check("下载途中正常停掉正在用的 relay，下载没有断", ok, detail)
+    summaries = flow_routes(a)
+    t.check("这条流结束时的摘要写出开始时经 r1、结束时经 r2、中间换过路",
+            (f"经 #{r1.id}", f"经 #{r2.id}", "true") in summaries, str(summaries[-3:]))
+    exit_side = flow_routes(b)
+    t.check("出口那一侧的摘要也写着它到 a 的路换过", any(changed == "true" for _, _, changed in exit_side), str(exit_side[-3:]))
     if t.failures:
         print(tail(a.read_log(), 40), tail(r1.read_log(), 20), sep="\n  ---\n")
 

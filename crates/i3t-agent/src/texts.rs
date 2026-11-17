@@ -44,6 +44,8 @@ pub(crate) struct Texts {
     pub(crate) probe_refused: &'static str,
     pub(crate) query_running: fn(&str) -> String,
     pub(crate) status_unreadable: &'static str,
+    /// `i3t ping` 的节点写得不对。
+    pub(crate) bad_peer: fn(&str) -> String,
 }
 
 /// 连 controller 时每一步出错的说明。`i3t run` 的长连接用中文的这一份（它出错只进日志），交互的命令用当前语言的。
@@ -104,6 +106,7 @@ static ZH: Texts = Texts {
     probe_refused: "controller 拒绝了握手",
     query_running: |error| format!("问不到正在运行的节点：{error}"),
     status_unreadable: "正在运行的节点给的状态读不懂",
+    bad_peer: |peer| format!("{peer:?} 不是节点名或者虚拟 IP"),
 };
 
 /// 中文的连接说明。长连接的日志一直用这一份。
@@ -165,6 +168,7 @@ static EN: Texts = Texts {
     probe_refused: "The controller refused the handshake",
     query_running: |error| format!("Couldn't ask the running node: {error}"),
     status_unreadable: "The running node's status is unreadable",
+    bad_peer: |peer| format!("{peer:?} isn't a node name or virtual IP"),
 };
 
 const TEMPLATE_ZH: &str = r#"# ice3tier 节点的配置。改完重启 i3t 生效。`i3t set …` 改的也是这个文件。

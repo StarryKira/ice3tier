@@ -21,9 +21,11 @@ def direct_exit(lab: Lab, work: Path, t: Checks) -> None:
     """两个公网节点直连；a 用代理的用户名指定从 b 出去。"""
     web = lab.host("web")
     start_whoami(web)
+    start_whoami(web, 8080)
     a, b = Node(lab.host("a"), work, 1), Node(lab.host("b"), work, 2, declare=("exit",))
     a.start_static(a.netmap(peers=[b.as_peer(exit=True)]))
-    b.start_static(b.netmap(peers=[a.as_peer()], me={"exit": {}}))
+    # 出口默认不限端口；这里写明只放行 80 和 443，测端口白名单。
+    b.start_static(b.netmap(peers=[a.as_peer()], me={"exit": {"ports": [80, 443]}}))
 
     seen = a.curl(f"http://{web.ip}/", via=b)
     t.check("SOCKS5：用户名写 b，目标看到的来源是 b 的地址", seen.stdout == b.host.ip, f"看到 {seen.stdout!r} {seen.stderr.strip()}")
@@ -34,7 +36,7 @@ def direct_exit(lab: Lab, work: Path, t: Checks) -> None:
     big = a.curl(f"http://{web.ip}/bytes/20000000", via=b, extra=("-o", "/dev/null", "-w", "%{size_download}"))
     t.check("经出口下载 20MB，字节数对得上", big.stdout == "20000000", f"下载了 {big.stdout!r} {big.stderr.strip()}")
     refused = a.curl(f"http://{web.ip}:8080/", via=b)
-    t.check("出口不放行 80 / 443 以外的端口", refused.returncode != 0)
+    t.check("出口写了端口白名单：不放行 80 / 443 以外的端口", refused.returncode != 0 and refused.stdout == "", f"{refused.stdout!r}")
     if t.failures:
         print(tail(a.read_log()), tail(b.read_log()), sep="\n  ---\n")
 

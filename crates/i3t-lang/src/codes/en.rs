@@ -6,10 +6,12 @@ use i3t_model::admin::{
     SkipCause, TokenState, UpdateWait,
 };
 use i3t_model::control::diag::{ChoiceCode, HopSource, PathPick, TestCode, TransferEnd};
+use i3t_model::control::exit_test::{ExitTestCause, ExitVia};
 use i3t_model::control::{
     BindCause, DirectKind, InterceptCause, InterceptState, LegTransport, ListenState, NameService, RejectCause, RelayState, Route,
-    RouteCause, RouteHint,
+    RouteCause, RouteHint, TargetCause,
 };
+use i3t_model::netmap::IpFamily;
 use i3t_model::update::{FailureKind, SelfUpdateBlocker, UpdateCause, UpdateStatus};
 
 use super::{Codes, Names, cost_ms, relays};
@@ -35,6 +37,9 @@ pub(super) static CODES: Codes = Codes {
     api_error,
     lane_block,
     forward_status,
+    target_cause,
+    exit_test_cause,
+    exit_via,
     token_state,
     credential_state,
     exit_health,
@@ -415,6 +420,54 @@ const fn forward_status(status: ForwardStatus) -> &'static str {
         ForwardStatus::ListenerOffline => "listener offline",
         ForwardStatus::TargetOffline => "target offline",
         ForwardStatus::Active => "in effect",
+    }
+}
+
+const fn target_cause(cause: TargetCause) -> &'static str {
+    match cause {
+        TargetCause::Refused => "target refused",
+        TargetCause::Timeout => "target timed out",
+        TargetCause::Unreachable => "target unreachable",
+        TargetCause::NotDeclared => "target node lacks this forward",
+        TargetCause::AccessDenied => "target node denies access",
+        TargetCause::NodeUnreachable => "target node unreachable",
+        TargetCause::Other => "target failed",
+        TargetCause::Unknown => "target failed",
+    }
+}
+
+fn exit_test_cause(cause: &ExitTestCause) -> String {
+    let family = |family: IpFamily| match family {
+        IpFamily::Ipv4 => "IPv4",
+        IpFamily::Ipv6 => "IPv6",
+        IpFamily::Any => "any",
+    };
+    match cause {
+        ExitTestCause::Busy => "Another test is running or just ran on the exit; try again shortly".to_owned(),
+        ExitTestCause::BadTarget => "The exit can't read this target".to_owned(),
+        ExitTestCause::NotEnabled => "Not an exit".to_owned(),
+        ExitTestCause::LanNotEnabled => "LAN address: the exit doesn't allow LAN access".to_owned(),
+        ExitTestCause::PortNotAllowed { port } => format!("Port {port} isn't allowed on this exit"),
+        ExitTestCause::FamilyUnavailable { family: wanted } => format!("The exit only uses {} and the target has none", family(*wanted)),
+        ExitTestCause::AddressNotAllowed { address } => format!("The exit doesn't connect others to {address}"),
+        ExitTestCause::NotOnLan { address } => format!("{address} isn't on a network the exit is attached to"),
+        ExitTestCause::NameNotFound => "No such name".to_owned(),
+        ExitTestCause::ResolverFailed => "Resolver error".to_owned(),
+        ExitTestCause::Timeout => "Timed out".to_owned(),
+        ExitTestCause::Refused => "Connection refused".to_owned(),
+        ExitTestCause::Unreachable => "Unreachable".to_owned(),
+        ExitTestCause::UpstreamFailed => "Can't reach the exit's upstream proxy".to_owned(),
+        ExitTestCause::Closed => "Closed before the handshake finished".to_owned(),
+        ExitTestCause::Alert => "TLS alert from the server".to_owned(),
+        ExitTestCause::Other | ExitTestCause::Unknown => "Other reason, see the exit's log".to_owned(),
+    }
+}
+
+const fn exit_via(via: ExitVia) -> &'static str {
+    match via {
+        ExitVia::Direct => "direct",
+        ExitVia::Upstream => "via upstream proxy",
+        ExitVia::Unknown => "unknown route out",
     }
 }
 

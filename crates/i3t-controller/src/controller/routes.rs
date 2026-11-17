@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use i3t_model::admin::{
     BackboneRelay, BackboneView, MatrixEntry, MatrixNode, NetworkId, NodeRoute, PathLeg, PathSource, PathView, RouteMatrix, RouteTable,
 };
-use i3t_model::control::{BackboneRow, PathDetail, Route, RouteAnswer, RouteEntry, RouteKind, ToNode};
+use i3t_model::control::{BackboneRow, ExitTestResult, PathDetail, Route, RouteAnswer, RouteEntry, RouteKind, ToNode};
 use i3t_proto::NodeId;
 use tokio::sync::oneshot;
 
@@ -57,9 +57,11 @@ pub(crate) struct PendingQuery {
 
 /// 回答交给谁。问的是什么，答的就得是什么。
 #[derive(Debug)]
-enum Reply {
+pub(super) enum Reply {
     Route(oneshot::Sender<RouteAnswer>),
     Backbone(oneshot::Sender<Vec<BackboneRow>>),
+    /// 出口测试（`exit_test` 模块）。
+    ExitTest(oneshot::Sender<ExitTestResult>),
 }
 
 impl Reply {
@@ -67,6 +69,7 @@ impl Reply {
         match self {
             Self::Route(reply) => reply.is_closed(),
             Self::Backbone(reply) => reply.is_closed(),
+            Self::ExitTest(reply) => reply.is_closed(),
         }
     }
 }
@@ -336,7 +339,7 @@ impl Inner {
     }
 
     /// 给节点发一条查询，记下谁在等回答。发不出去时返回 `None`。
-    fn query(&mut self, node: NodeId, message: impl FnOnce(u64) -> ToNode, reply: Reply) -> Option<()> {
+    pub(super) fn query(&mut self, node: NodeId, message: impl FnOnce(u64) -> ToNode, reply: Reply) -> Option<()> {
         // 没有人等的查询顺手清掉：节点一直不回答的话，它们不会自己消失。
         self.route_queries.retain(|_, pending| !pending.reply.is_closed());
         let request = self.next_request();
@@ -361,6 +364,14 @@ impl Inner {
         if let Some(Reply::Backbone(reply)) = self.take_query(node, request, |reply| matches!(reply, Reply::Backbone(_))) {
             // 问的人等不及已经走了也没有关系。
             let _dropped = reply.send(rows);
+        }
+    }
+
+    /// 出口节点回答了一个出口测试。
+    pub(super) fn exit_test_answered(&mut self, node: NodeId, request: u64, result: ExitTestResult) {
+        if let Some(Reply::ExitTest(reply)) = self.take_query(node, request, |reply| matches!(reply, Reply::ExitTest(_))) {
+            // 问的人等不及已经走了也没有关系。
+            let _dropped = reply.send(result);
         }
     }
 

@@ -7,7 +7,7 @@ use i3t_model::admin::{
 };
 use i3t_model::control::{
     BindCause, CredentialUsage, Declared, ExitObservation, ExitReport, ForwardReport, ListenState, ListenTraffic, ListenerReport,
-    QuotaUsage, Report, ToController,
+    QuotaUsage, Report, TargetCause, TargetFailureReport, ToController,
 };
 use i3t_model::netmap::{self, ExitRole, ForwardProtocol, ListenerProtocol};
 use i3t_proto::flow::Class;
@@ -43,6 +43,7 @@ fn forward(listen_node: i3t_proto::NodeId, target_node: i3t_proto::NodeId, bind:
         allow_from: Vec::new(),
         enabled: true,
         class: None,
+        proxy_protocol: None,
     }
 }
 
@@ -208,6 +209,7 @@ fn listener_and_forward_status_reported_by_the_node_shows_up_including_its_built
                 protocol: ForwardProtocol::Tcp,
                 state: ListenState::Listening { local },
                 traffic,
+                target_failure: None,
             },
             ForwardReport {
                 id: busy.id,
@@ -215,6 +217,7 @@ fn listener_and_forward_status_reported_by_the_node_shows_up_including_its_built
                 protocol: ForwardProtocol::Tcp,
                 state: ListenState::PortInUse { detail: "Address already in use".to_owned(), cause: Some(BindCause::AddressInUse) },
                 traffic: ListenTraffic::default(),
+                target_failure: Some(TargetFailureReport { cause: TargetCause::Timeout, secs_ago: 30 }),
             },
         ],
         ..report(3)
@@ -233,6 +236,11 @@ fn listener_and_forward_status_reported_by_the_node_shows_up_including_its_built
         "端口写 0 时报的是挑定的端口"
     );
     assert!(matches!(forwards[1].listen.as_ref().map(|listen| &listen.state), Some(ListenState::PortInUse { .. })));
+    assert_eq!(forwards[0].target_failure, None);
+    let failure = forwards[1].target_failure.expect("监听节点报了目标连不上");
+    assert_eq!(failure.cause, TargetCause::Timeout);
+    let now = lab.controller.lock().clock.now();
+    assert!((now - 32..=now - 30).contains(&failure.at), "按 controller 的时钟换算成 30 秒之前：{} 对 {now}", failure.at);
 
     let on_node = lab.controller.node_listeners(network.id, gw.id).unwrap();
     assert!(on_node.online && on_node.reported_secs_ago.is_some());
@@ -264,13 +272,15 @@ fn a_forward_may_leave_its_port_to_the_node_except_on_a_virtual_ip() {
 }
 
 #[test]
-fn classes_set_on_the_network_listener_forward_and_exit_reach_the_netmaps() {
+fn classes_and_the_optimistic_reply_set_on_the_network_listener_forward_and_exit_reach_the_netmaps() {
     let mut lab = Lab::new();
     let network = lab.network("home");
     let mut laptop = lab.join(network.id, &[]);
     let mut exit = lab.join_with(network.id, &[], CAN_DO_ALL);
     lab.controller.update_network(network.id, &UpdateNetwork { class: Some(Some(Class::Reliable)), ..UpdateNetwork::default() }).unwrap();
-    lab.controller.enable_exit(network.id, exit.id, ExitRole { class: Some(Class::Bulk), ..ExitRole::default() }).unwrap();
+    lab.controller
+        .enable_exit(network.id, exit.id, ExitRole { class: Some(Class::Bulk), optimistic: Some(false), ..ExitRole::default() })
+        .unwrap();
     let mut socks = listener(laptop.id, "socks", "127.0.0.1:1080", false);
     socks.config.class = Some(Class::Interactive);
     socks.config.optimistic = Some(false);
@@ -286,9 +296,29 @@ fn classes_set_on_the_network_listener_forward_and_exit_reach_the_netmaps() {
     assert_eq!((netmap.me.listeners[0].class, netmap.me.listeners[0].optimistic), (Some(Class::Interactive), Some(false)));
     assert_eq!(netmap.me.forwards[0].class, Some(Class::Interactive));
     assert_eq!(netmap.peer(exit.id).unwrap().exit.unwrap().class, Some(Class::Bulk), "入口按出口的默认值挑等级");
+    assert_eq!(netmap.peer(exit.id).unwrap().exit.unwrap().optimistic, Some(false), "入口按出口的设置决定等不等应答");
     assert_eq!(lab.controller.network(network.id).unwrap().class, Some(Class::Reliable));
     lab.controller.update_network(network.id, &UpdateNetwork { class: Some(None), ..UpdateNetwork::default() }).unwrap();
     assert_eq!(lab.controller.network(network.id).unwrap().class, None, "写 null 改回 auto");
+}
+
+#[test]
+fn a_tcp_forward_can_ask_its_target_node_for_a_proxy_protocol_header_and_a_udp_one_cannot() {
+    let mut lab = Lab::new();
+    let network = lab.network("home");
+    let mut laptop = lab.join(network.id, &[]);
+    let mut target = lab.join_with(network.id, &[], CAN_DO_ALL);
+    let mut input = forward(laptop.id, target.id, "127.0.0.1:9000");
+    input.proxy_protocol = Some(netmap::ProxyProtocol::V2);
+    let created = lab.controller.create_forward(network.id, input.clone()).unwrap();
+    assert_eq!(created.proxy_protocol, Some(netmap::ProxyProtocol::V2));
+    lab.settle(&mut [&mut laptop, &mut target]);
+    assert_eq!(target.netmap().me.forward_targets[0].proxy_protocol, Some(netmap::ProxyProtocol::V2), "目标节点收到这一项");
+    assert_eq!(lab.controller.forwards(network.id).unwrap()[0].proxy_protocol, Some(netmap::ProxyProtocol::V2), "存下来了");
+
+    let udp = ForwardInput { protocol: ForwardProtocol::Udp, bind: "127.0.0.1:9001".parse().unwrap(), ..input };
+    let refused = lab.controller.create_forward(network.id, udp).unwrap_err();
+    assert_eq!((refused.what().as_deref(), refused.field()), (Some("tcp_only"), Some("proxy_protocol")));
 }
 
 #[test]

@@ -61,7 +61,7 @@ const HELP: Help = Help {
     bandwidth: "Bandwidth limit",
     exit_group: "Exits",
     exit_enable: "Enable or change an exit. The node declares it first: i3t set can-exit on",
-    exit_ports: "Allowed internet ports, comma-separated; any for all",
+    exit_ports: "Allowed internet ports: any (the default) or a list such as 80,443 to allow only those",
     exit_lan: "Allow its LAN",
     exit_upstream: "Upstream SOCKS5 proxy",
     exit_quota: "Traffic quota per period, e.g. 500G",
@@ -70,6 +70,8 @@ const HELP: Help = Help {
     exit_connects: "New connections per minute (per source node and target)",
     exit_disable: "Disable an exit",
     exit_list: "List exits",
+    exit_test: "Have an exit try a target under its own policy: resolve, connect, TLS handshake on port 443",
+    exit_test_target: "host[:port], port defaults to 443",
     group_group: "Groups",
     group_list: "List groups",
     group_show: "Show a group's members and rules",
@@ -116,11 +118,13 @@ const HELP: Help = Help {
     listener_default: "Default action: local, reject or exit:<NODE>",
     listener_fixed_exit: "Fixed exit",
     listener_optimistic: "Optimistic reply: on doesn't wait for the peer",
+    exit_optimistic: "Optimistic reply: on doesn't wait for the exit (a listener's own setting wins)",
     listener_delete: "Delete a listener",
     forward_group: "Port forwards",
     forward_list: "List port forwards",
     forward_add: "Create a port forward. Port 0 lets the listening node pick; the target declares first: i3t set can-forward on",
     forward_udp: "UDP (default TCP)",
+    forward_proxy_protocol: "send a PROXY protocol header so the service sees the initiating node's virtual IP (TCP only)",
     forward_enable: "Enable a port forward",
     forward_disable: "Disable a port forward",
     forward_delete: "Delete a port forward",
@@ -191,6 +195,7 @@ const VALUES: Values = Values {
     relays: "RELAY,…",
     version: "VERSION",
     source: "SOURCE",
+    target: "TARGET",
 };
 
 const UI: Ui = Ui {
@@ -248,6 +253,13 @@ const UI: Ui = Ui {
     draining: "Draining",
     quota: "Traffic quota",
     seen_by: |name| format!("Seen by {name}"),
+    resolve_step: "Resolve",
+    connect_step: "Connect",
+    tls_step: "TLS",
+    exit_refused: "Exit refuses",
+    tls_done: "Handshake done (certificate not checked)",
+    family_only: |family| format!("{family} only"),
+    exit_unanswered: |name| format!("{name} didn't answer: too old, or not done within 20 seconds"),
     exit_seen: |flows, target, refused, exit, unreachable| {
         format!("flows {flows}, target failures {target}, refused {refused}, exit failures {exit}, exit unreachable {unreachable}")
     },

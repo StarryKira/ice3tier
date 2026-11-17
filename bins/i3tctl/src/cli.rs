@@ -7,7 +7,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use i3t_lang::Lang;
-use i3t_model::netmap::{IpFamily, LaneMode, Profile, Reach, RoutingMode};
+use i3t_model::netmap::{IpFamily, LaneMode, Profile, ProxyProtocol, Reach, RoutingMode};
 use i3t_proto::flow::Class;
 use ipnet::{IpNet, Ipv4Net};
 
@@ -268,7 +268,7 @@ pub enum RelayCommand {
 pub enum ExitCommand {
     Enable {
         node: String,
-        #[arg(long, default_value = "80,443")]
+        #[arg(long, default_value = "any")]
         ports: PortList,
         #[arg(long)]
         lan: bool,
@@ -286,11 +286,17 @@ pub enum ExitCommand {
         connects_per_minute: Option<u32>,
         #[arg(long)]
         class: Option<ClassArg>,
+        #[arg(long)]
+        optimistic: Option<OnOff>,
     },
     Disable {
         node: String,
     },
     List,
+    Test {
+        node: String,
+        target: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -410,6 +416,8 @@ pub enum ForwardCommand {
         disabled: bool,
         #[arg(long)]
         class: Option<ClassArg>,
+        #[arg(long, value_parser = parse_proxy_protocol)]
+        proxy_protocol: Option<ProxyProtocol>,
     },
     Enable {
         id: u32,
@@ -544,6 +552,14 @@ impl From<FamilyArg> for IpFamily {
 /// 独占 TCP 的设置。模型里的解析报的是中文，这里按语言说。
 fn parse_lane(text: &str) -> Result<LaneMode, String> {
     text.parse().map_err(|_| (texts().ui.must_be)("off, udp_fallback, always"))
+}
+
+fn parse_proxy_protocol(text: &str) -> Result<ProxyProtocol, String> {
+    match text {
+        "v1" => Ok(ProxyProtocol::V1),
+        "v2" => Ok(ProxyProtocol::V2),
+        _ => Err((texts().ui.must_be)("v1, v2")),
+    }
 }
 
 /// 字节数：数字加可选的单位 K、M、G、T（按 1000 进位，和网络流量的计法一样）。
@@ -812,9 +828,13 @@ fn describe(command: clap::Command, h: &Help, v: &Values) -> clap::Command {
                         .mut_arg("family", |arg| arg.help(h.exit_family).value_name("any|ipv4|ipv6"))
                         .mut_arg("connects_per_minute", |arg| arg.help(h.exit_connects).value_name(v.count))
                         .mut_arg("class", |arg| class(arg.help(h.class)))
+                        .mut_arg("optimistic", |arg| on_off(arg.help(h.exit_optimistic)))
                 })
                 .mut_subcommand("disable", |sub| sub.about(h.exit_disable).mut_arg("node", node))
                 .mut_subcommand("list", |sub| sub.about(h.exit_list))
+                .mut_subcommand("test", |sub| {
+                    sub.about(h.exit_test).mut_arg("node", node).mut_arg("target", |arg| arg.help(h.exit_test_target).value_name(v.target))
+                })
         })
         .mut_subcommand("group", |sub| {
             sub.about(h.group_group)
@@ -905,6 +925,7 @@ fn describe(command: clap::Command, h: &Help, v: &Values) -> clap::Command {
                         .mut_arg("allow_from", |arg| arg.help(h.allow_from).value_name(v.cidr))
                         .mut_arg("disabled", |arg| arg.help(h.create_disabled))
                         .mut_arg("class", |arg| class(arg.help(h.class)))
+                        .mut_arg("proxy_protocol", |arg| arg.help(h.forward_proxy_protocol).value_name("v1|v2"))
                 })
                 .mut_subcommand("enable", |sub| sub.about(h.forward_enable).mut_arg("id", id))
                 .mut_subcommand("disable", |sub| sub.about(h.forward_disable).mut_arg("id", id))

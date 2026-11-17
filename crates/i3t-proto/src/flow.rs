@@ -23,6 +23,13 @@
 //! +------+------+----------+----------+===========+----------+----------+
 //!            1        8          1         4n          8         4（毫秒）
 //!
+//! OPEN（往返测量，`i3t ping` 用，见 [`OpenPing`]）
+//! +------+------+
+//! | 0x04 | 0x00 |
+//! +------+------+
+//! 接受方读到它就回一个成功的 REPLY（状态 0x00，没有说明），然后结束这条流。访问规则和每个对端的流数上限照常在读 OPEN 之前查。
+//! 比它旧的接受方不认这一种，用 [`Reason::ProtocolError`] 重置这条流。
+//!
 //! 标志        bit 0～1  服务等级：0 auto，1 interactive，2 reliable，3 bulk
 //!             bit 2     后面有凭据名
 //!             bit 3     后面有客户端地址
@@ -114,6 +121,7 @@ pub const MAX_DETAIL_LEN: usize = u8::MAX as usize;
 const KIND_OPEN_STREAM: u8 = 0x01;
 const KIND_OPEN_DATAGRAMS: u8 = 0x02;
 const KIND_OPEN_MEASURE: u8 = 0x03;
+const KIND_OPEN_PING: u8 = 0x04;
 
 const FLAG_CLASS: u8 = 0b0000_0011;
 const FLAG_CREDENTIAL: u8 = 0b0000_0100;
@@ -540,12 +548,33 @@ impl OpenDatagrams {
     }
 }
 
-/// 对端开过来的一条流上的第一样东西：它要一条流，要建立一个数据报上下文，还是要一条测量流。
+/// 对端开过来的一条流上的第一样东西：它要一条流，要建立一个数据报上下文，要一条测量流，还是只量一个往返。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Opening {
     Stream(Open),
     Datagrams(OpenDatagrams),
     Measure(OpenMeasure),
+    Ping(OpenPing),
+}
+
+/// 往返测量的 OPEN：接受方马上回一个成功的 REPLY。从写出它到读到 REPLY 就是这对节点的连接上的一个往返（`i3t ping`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OpenPing;
+
+impl OpenPing {
+    /// 编码之后的长度。
+    pub const LEN: usize = 2;
+
+    pub fn encode(self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&[KIND_OPEN_PING, 0]);
+    }
+
+    fn after_kind(flags: u8) -> Result<Self, Halt> {
+        if flags != 0 {
+            return Err(DecodeError::ReservedFlags(flags).into());
+        }
+        Ok(Self)
+    }
 }
 
 impl Opening {
@@ -562,6 +591,7 @@ impl Opening {
             (KIND_OPEN_STREAM, flags) => Open::after_kind(reader, flags).map(Self::Stream),
             (KIND_OPEN_DATAGRAMS, flags) => OpenDatagrams::after_kind(reader, flags).map(Self::Datagrams),
             (KIND_OPEN_MEASURE, mode) => OpenMeasure::after_kind(reader, mode).map(Self::Measure),
+            (KIND_OPEN_PING, flags) => OpenPing::after_kind(flags).map(Self::Ping),
             (kind, _) => Err(DecodeError::UnknownKind(kind).into()),
         })
     }
@@ -1178,7 +1208,12 @@ mod tests {
             assert_eq!(read_incrementally(&bytes, Opening::decode), Ok((Opening::Datagrams(request), bytes.len())));
         }
         assert_eq!(Opening::decode(&[0x00, 0]), Err(DecodeError::UnknownKind(0x00)));
-        assert_eq!(Opening::decode(&[0x04, 0]), Err(DecodeError::UnknownKind(0x04)));
+        assert_eq!(Opening::decode(&[0x05, 0]), Err(DecodeError::UnknownKind(0x05)));
+        let mut ping = Vec::new();
+        OpenPing.encode(&mut ping);
+        assert_eq!(ping.len(), OpenPing::LEN);
+        assert_eq!(read_incrementally(&ping, Opening::decode), Ok((Opening::Ping(OpenPing), 2)), "0x04 是往返测量");
+        assert_eq!(Opening::decode(&[0x04, 1]), Err(DecodeError::ReservedFlags(1)));
         assert_eq!(Opening::decode(&[0x03, 0]), Err(DecodeError::UnknownMeasureMode(0)), "0x03 是测量流");
         assert_eq!(Opening::decode(&[0x01, 0x10]), Err(DecodeError::ReservedFlags(0x10)));
         assert_eq!(Opening::decode(&[0x02]), Ok(Decoded::Incomplete { more: 1 }));

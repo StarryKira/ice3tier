@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use i3t_access::{Access, AccessStatus, EgressPolicy, ListenCause, ListenState, LocalEgress, PortBook};
+use i3t_access::{Access, AccessStatus, EgressPolicy, ListenCause, ListenState, LocalEgress, PortBook, TargetCause};
 use i3t_conn::{RecvStream, SendStream};
 use i3t_flow::memory::{MemoryAcceptor, MemoryConnector, MemoryMesh};
 use i3t_flow::{Handler, Request};
@@ -77,7 +77,7 @@ fn netmap() -> Netmap {
             outbound: true,
             endpoints: Vec::new(),
             attached: Vec::new(),
-            exit: Some(PeerExit { lan: true, class: None }),
+            exit: Some(PeerExit { lan: true, class: None, optimistic: None }),
             dial_out_only: false,
             keep_alive: false,
             lane: LaneMode::Off,
@@ -120,21 +120,68 @@ async fn echo_server() -> SocketAddr {
     addr
 }
 
-/// 对端节点的替身：记下每个建流请求，接受它，然后把流接到一个回显服务上。
+/// 一个最小的 HTTP 服务：读完一个请求（`Content-Length` 或者 chunked 的请求体，请求头里有 `Expect: 100-continue` 时先回 100），
+/// 把收到的整个请求原样作为应答的正文发回去，然后关连接。
+async fn origin_server() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut request = Vec::new();
+                let mut chunk = [0; 4096];
+                let head_end = loop {
+                    if let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                        break end + 4;
+                    }
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(read, 0, "请求头还没完就结束了");
+                    request.extend_from_slice(&chunk[..read]);
+                };
+                let head = String::from_utf8_lossy(&request[..head_end]).to_ascii_lowercase();
+                if head.contains("\r\nexpect: 100-continue\r\n") {
+                    stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await.unwrap();
+                }
+                let length = head.split("\r\n").find_map(|line| line.strip_prefix("content-length: ")).map(|n| n.parse::<usize>().unwrap());
+                let complete = |request: &[u8]| match length {
+                    Some(length) => request.len() >= head_end + length,
+                    // 测试里的 chunked 请求体最后一块之前总有别的块。
+                    None if head.contains("transfer-encoding: chunked") => {
+                        let body = &request[head_end..];
+                        body.windows(5).any(|window| window == b"\r\n0\r\n") && body.ends_with(b"\r\n\r\n")
+                    }
+                    None => true,
+                };
+                while !complete(&request) {
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(read, 0, "请求体还没完就结束了");
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                let answer = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", request.len());
+                stream.write_all(&[answer.as_bytes(), &request].concat()).await.unwrap();
+            });
+        }
+    });
+    addr
+}
+
+/// 对端节点的替身：记下每个建流请求，接受它，然后把流接到一个回显服务上；去互联网 80 端口的接到 [`origin_server`]。
 struct EchoPeer {
     opens: mpsc::UnboundedSender<Open>,
     echo: SocketAddr,
+    origin: SocketAddr,
 }
 
 impl Handler for EchoPeer {
     async fn handle<S: SendStream, R: RecvStream>(&self, request: Request<S, R>) {
         assert_eq!(request.peer(), node(ME));
         self.opens.send(request.open().clone()).unwrap();
-        // 端口 9 当作"目标拒绝连接"，测拒绝怎么告诉客户端。
-        if matches!(request.open().target, Target::Internet { port: 9, .. }) {
+        // 端口 9（和 9 号端口转发）当作"目标拒绝连接"，测拒绝怎么告诉客户端。
+        if matches!(request.open().target, Target::Internet { port: 9, .. } | Target::Forward { id: 9 }) {
             return request.refuse(&Reply::new(Status::ConnectionRefused, "端口没开")).await;
         }
-        let target = TcpStream::connect(self.echo).await.unwrap();
+        let to = if matches!(request.open().target, Target::Internet { port: 80, .. }) { self.origin } else { self.echo };
+        let target = TcpStream::connect(to).await.unwrap();
         let flow = request.accept().await.unwrap();
         flow.relay(target, future::pending()).await;
     }
@@ -185,7 +232,7 @@ impl World {
         let connector = LaneConnector::new(Arc::new(connector), my_lanes, lane_mesh.choose());
         let acceptor = LaneAcceptor::<MemoryAcceptor>::new(Arc::new(acceptor), peer_lanes);
         let (opens_sender, opens) = mpsc::unbounded_channel();
-        let peer = Arc::new(EchoPeer { opens: opens_sender, echo: echo_server().await });
+        let peer = Arc::new(EchoPeer { opens: opens_sender, echo: echo_server().await, origin: origin_server().await });
         tokio::spawn(async move { i3t_flow::serve(&acceptor, peer).await });
 
         let (sender, receiver) = watch::channel(Arc::new(netmap));
@@ -395,6 +442,56 @@ i3t_lane::on_both_transports! {
     }
 }
 
+i3t_lane::on_both_transports! {
+    async fn a_forward_says_why_its_target_cannot_be_reached_until_a_stream_gets_through() {
+        let mut netmap = netmap();
+        let mut offline = netmap.peers[0].clone();
+        (offline.id, offline.name, offline.virtual_ip, offline.key) = (node(3), "nas".into(), [10, 66, 0, 3].into(), PublicKey::from_bytes([3; 32]));
+        netmap.peers.push(offline);
+        let mut to_offline = forward(8, ForwardProtocol::Tcp, "127.0.0.1:0");
+        to_offline.target = node(3);
+        netmap.me.forwards = vec![forward(7, ForwardProtocol::Tcp, "127.0.0.1:0"), forward(9, ForwardProtocol::Tcp, "127.0.0.1:0"), to_offline];
+        let mut world = World::start(netmap).await;
+        let cause = |world: &World, id: u32| {
+            world.access.status().forwards.iter().find(|forward| forward.id == id).unwrap().target_failure.map(|failure| failure.cause)
+        };
+        let eventually = async |world: &World, id: u32, expected: Option<TargetCause>| {
+            timeout(PATIENCE, async {
+                while cause(world, id) != expected {
+                    sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("转发 {id} 应该是 {expected:?}，现在是 {:?}", cause(world, id)));
+        };
+
+        let mut stream = TcpStream::connect(world.forward(7).await).await.unwrap();
+        assert_echo(&mut stream).await;
+        drop(stream);
+        let _ = world.next_open().await;
+
+        // 目标拒绝：客户端的连接被重置，转发记下原因。
+        let mut refused = TcpStream::connect(world.forward(9).await).await.unwrap();
+        refused.write_all(b"hello").await.unwrap();
+        let _ = timeout(PATIENCE, refused.read_to_end(&mut Vec::new())).await.unwrap();
+        assert_eq!(world.next_open().await.target, Target::Forward { id: 9 });
+        eventually(&world, 9, Some(TargetCause::Refused)).await;
+
+        // 目标节点开不出流。
+        let mut unreachable = TcpStream::connect(world.forward(8).await).await.unwrap();
+        let _ = timeout(PATIENCE, unreachable.read_to_end(&mut Vec::new())).await.unwrap();
+        eventually(&world, 8, Some(TargetCause::NodeUnreachable)).await;
+        assert_eq!(cause(&world, 7), None, "通着的转发没有记录");
+
+        // 那条转发改成指向一个通着的目标之后，一条流成功了，记录就清掉。
+        world.update(|netmap| netmap.me.forwards[2].target = node(GW)).await;
+        let mut stream = TcpStream::connect(world.forward(8).await).await.unwrap();
+        assert_echo(&mut stream).await;
+        drop(stream);
+        eventually(&world, 8, None).await;
+    }
+}
+
 /// 本进程里一条 TCP 连接（按本端和对端的端口找）的保活计时器还有多久到；没有在走的保活计时器时是 `None`。
 /// 读的是 `/proc/net/tcp`，所以只有 Linux 上有。
 #[cfg(target_os = "linux")]
@@ -555,10 +652,13 @@ async fn unsupported_and_malformed_http_requests_get_the_right_status() {
     let mut world = World::start(netmap).await;
     let http = world.listener("http").await;
 
-    let oversized = format!("CONNECT example.com:443 HTTP/1.1\r\nX-Padding: {}\r\n\r\n", "a".repeat(9000));
+    let oversized = format!("CONNECT example.com:443 HTTP/1.1\r\nX-Padding: {}\r\n\r\n", "a".repeat(40_000));
     let unknown_exit = format!("CONNECT example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic {}\r\n\r\n", STANDARD.encode("nobody:"));
     let cases = [
-        ("GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n", "405 Method Not Allowed"),
+        ("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n", "400 Bad Request"),
+        ("GET https://example.com/ HTTP/1.1\r\n\r\n", "501 Not Implemented"),
+        ("POST http://example.com/ HTTP/1.1\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\n\r\n", "400 Bad Request"),
+        ("POST http://example.com/ HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n", "400 Bad Request"),
         ("CONNECT example.com HTTP/1.1\r\n\r\n", "400 Bad Request"),
         ("CONNECT example.com:443 HTTP/3\r\n\r\n", "400 Bad Request"),
         ("\x05\x01\x00 this is not http\r\n\r\n", "400 Bad Request"),
@@ -816,7 +916,7 @@ i3t_lane::on_both_transports! {
         let mut tagged = forward(7, ForwardProtocol::Tcp, "127.0.0.1:0");
         tagged.class = Some(Class::Interactive);
         map.me.forwards = vec![tagged, forward(8, ForwardProtocol::Tcp, "127.0.0.1:0")];
-        map.peers[0].exit = Some(PeerExit { lan: true, class: Some(Class::Bulk) });
+        map.peers[0].exit = Some(PeerExit { lan: true, class: Some(Class::Bulk), optimistic: None });
         map.network.class = Some(Class::Interactive);
         let mut world = World::start(map).await;
         let (socks, plain) = (world.listener("socks").await, world.listener("plain").await);
@@ -862,6 +962,16 @@ i3t_lane::on_both_transports! {
         let usage = world.access.exit_usage();
         assert_eq!(usage.len(), 1);
         assert_eq!((usage[0].exit, usage[0].flows, usage[0].failed_by_target), (node(GW), 2, 2), "两次都是目标的问题");
+
+        // 出口也可以关掉乐观回复；监听器自己设了的以监听器为准。
+        world.update(|netmap| netmap.peers[0].exit.as_mut().unwrap().optimistic = Some(false)).await;
+        let (code, _stream) = socks5_connect(socks, "gw", "", "example.com", 9).await;
+        assert_eq!(code, 5, "出口关掉了乐观回复：这个没有设的监听器也等应答");
+        world.next_open().await;
+        world.update(|netmap| netmap.me.listeners[1].optimistic = Some(true)).await;
+        let (code, _stream) = socks5_connect(world.listener("careful").await, "gw", "", "example.com", 9).await;
+        assert_eq!(code, 0, "监听器打开了乐观回复，盖过出口的");
+        world.next_open().await;
     }
 }
 
@@ -923,5 +1033,107 @@ async fn intercepted_connections_to_no_node_to_ourselves_or_straight_to_the_entr
     *original.lock().unwrap() = "10.66.0.2:22".parse().unwrap();
     let mut stream = TcpStream::connect(entry).await.unwrap();
     assert_reset(&mut stream).await;
+    world.assert_no_open();
+}
+
+/// 把一个明文 HTTP 请求发给代理，读到连接结束，返回读到的全部。
+async fn plain_http(proxy: SocketAddr, request: &[u8]) -> String {
+    let mut stream = TcpStream::connect(proxy).await.unwrap();
+    stream.write_all(request).await.unwrap();
+    let mut answer = Vec::new();
+    // 代理在应答之后关连接，正常关和重置都算结束。
+    let _ = timeout(PATIENCE, stream.read_to_end(&mut answer)).await.expect("代理应该回完应答并关掉连接");
+    String::from_utf8(answer).unwrap()
+}
+
+fn basic(credentials: &str) -> String {
+    format!("Proxy-Authorization: Basic {}\r\n", STANDARD.encode(credentials))
+}
+
+i3t_lane::on_both_transports! {
+    async fn a_plain_http_request_is_forwarded_with_a_clean_head_and_nothing_after_it() {
+        let mut netmap = netmap();
+        netmap.me.listeners = vec![listener("http", ListenerProtocol::Http, "127.0.0.1:0")];
+        let mut world = World::start(netmap).await;
+        let http = world.listener("http").await;
+
+        // 流水线里排在后面的请求（带着别的凭据）不能到目标那里去。
+        let request = format!(
+            "GET http://example.com/index.html?q=1 HTTP/1.1\r\nHost: example.com\r\n{}Proxy-Connection: keep-alive\r\nAccept: */*\r\n\r\n\
+             GET http://example.com/second HTTP/1.1\r\n{}\r\n",
+            basic("gw+c-i:"),
+            basic("gw:other")
+        );
+        let answer = plain_http(http, request.as_bytes()).await;
+        let expected = "GET /index.html?q=1 HTTP/1.1\r\nHost: example.com\r\nAccept: */*\r\nConnection: close\r\n\r\n";
+        assert_eq!(answer, format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{expected}", expected.len()));
+        assert_eq!(world.next_open().await, Open { target: internet("example.com", 80), class: Class::Interactive, origin: Origin::default() });
+        world.assert_no_open();
+    }
+}
+
+i3t_lane::on_both_transports! {
+    async fn plain_http_bodies_arrive_whole_by_length_by_chunks_and_after_100_continue() {
+        let mut netmap = netmap();
+        netmap.me.listeners = vec![listener("http", ListenerProtocol::Http, "127.0.0.1:0")];
+        let mut world = World::start(netmap).await;
+        let http = world.listener("http").await;
+        let auth = basic("gw:");
+
+        let answer = plain_http(http, format!("POST http://example.com/form HTTP/1.1\r\n{auth}Content-Length: 11\r\n\r\nhello worldEXTRA").as_bytes()).await;
+        assert!(answer.ends_with("Content-Length: 11\r\nConnection: close\r\n\r\nhello world"), "{answer:?}");
+
+        let chunks = "4\r\nWiki\r\n5;x=y\r\npedia\r\n0\r\nX-Sum: 9\r\n\r\n";
+        let answer = plain_http(http, format!("PUT http://example.com/ HTTP/1.1\r\n{auth}Transfer-Encoding: chunked\r\n\r\n{chunks}").as_bytes()).await;
+        assert!(answer.ends_with(&format!("Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n{chunks}")), "{answer:?}");
+
+        // 客户端等到 100 才发请求体。
+        let mut stream = TcpStream::connect(http).await.unwrap();
+        let head = format!("POST http://example.com/big HTTP/1.1\r\n{auth}Content-Length: 70000\r\nExpect: 100-continue\r\n\r\n");
+        exchange(&mut stream, head.as_bytes(), b"HTTP/1.1 100 Continue\r\n\r\n").await;
+        let body = vec![b'b'; 70_000];
+        for part in body.chunks(7000) {
+            stream.write_all(part).await.unwrap();
+        }
+        let mut answer = Vec::new();
+        timeout(PATIENCE, stream.read_to_end(&mut answer)).await.expect("应答应该回来").unwrap();
+        assert!(answer.starts_with(b"HTTP/1.1 200 OK\r\n") && answer.ends_with(&body), "{:?}", String::from_utf8_lossy(&answer[..200]));
+
+        for _ in 0..3 {
+            assert_eq!(world.next_open().await.target, internet("example.com", 80));
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_refused_plain_http_request_gets_a_status_code() {
+    let mut netmap = netmap();
+    netmap.me.listeners = vec![listener("http", ListenerProtocol::Http, "127.0.0.1:0")];
+    // 就算监听器要求乐观回复，明文 HTTP 也等对端的 REPLY：客户端拿到的是状态码，不是断开。
+    netmap.me.listeners[0].optimistic = Some(true);
+    let mut world = World::start(netmap).await;
+    let http = world.listener("http").await;
+
+    let answer = plain_http(http, format!("GET http://example.com:9/ HTTP/1.1\r\n{}\r\n", basic("gw:")).as_bytes()).await;
+    assert!(answer.starts_with("HTTP/1.1 502 Bad Gateway\r\n"), "{answer:?}");
+    assert_eq!(world.next_open().await.target, internet("example.com", 9));
+
+    let answer = plain_http(http, format!("GET http://example.com/ HTTP/1.1\r\n{}\r\n", basic("nobody:")).as_bytes()).await;
+    assert!(answer.starts_with("HTTP/1.1 403 Forbidden\r\n"), "{answer:?}");
+    world.assert_no_open();
+}
+
+#[tokio::test]
+async fn a_plain_http_request_without_an_exit_goes_out_locally_on_a_loopback_listener() {
+    let mut netmap = netmap();
+    netmap.me.listeners = vec![listener("http", ListenerProtocol::Http, "127.0.0.1:0")];
+    let mut world = World::start(netmap).await;
+    let origin = origin_server().await;
+
+    let request = format!("POST http://127.0.0.1:{}/up HTTP/1.1\r\nContent-Length: 4\r\n\r\nbodyGET /next HTTP/1.1\r\n\r\n", origin.port());
+    let answer = plain_http(world.listener("http").await, request.as_bytes()).await;
+    let expected = format!("POST /up HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody", origin.port());
+    assert!(answer.ends_with(&expected), "{answer:?}");
+    assert_eq!(*world.egress.calls.lock().unwrap(), [("127.0.0.1".to_owned(), origin.port(), EgressPolicy::Unrestricted)]);
     world.assert_no_open();
 }

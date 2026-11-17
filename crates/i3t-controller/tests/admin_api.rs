@@ -48,11 +48,11 @@ struct Member {
 }
 
 impl Member {
-    /// 等 controller 发来的下一条查询（路由的或者骨干矩阵的），跳过别的消息。
+    /// 等 controller 发来的下一条查询（路由的、骨干矩阵的、出口测试），跳过别的消息。
     async fn next_query(&mut self) -> ToNode {
         loop {
             let message = tokio::time::timeout(common::PATIENCE, self.inbox.recv()).await.unwrap().unwrap();
-            if matches!(message, ToNode::RouteQuery { .. } | ToNode::BackboneQuery { .. }) {
+            if matches!(message, ToNode::RouteQuery { .. } | ToNode::BackboneQuery { .. } | ToNode::ExitTest { .. }) {
                 return message;
             }
         }
@@ -352,9 +352,9 @@ async fn a_node_can_be_inspected_changed_and_deleted() {
     assert_eq!(
         serde_json::to_value(exit.exit.unwrap()).unwrap(),
         json!({
-            "ports": [80, 443], "lan": true, "bandwidth_mbps": null, "upstream_socks5": null,
-            // 后来加的出口设置，没写的取默认值。
-            "quota_bytes": null, "quota_reset_day": 1, "family": "any", "connects_per_minute": null, "class": null
+            "ports": null, "lan": true, "bandwidth_mbps": null, "upstream_socks5": null,
+            // 后来加的出口设置，没写的取默认值。端口默认不限。
+            "quota_bytes": null, "quota_reset_day": 1, "family": "any", "connects_per_minute": null, "class": null, "optimistic": null
         })
     );
     let pinned: model::Node = api.ok(Method::PATCH, &path, Some(json!({ "pinned_relays": [relay.id] }))).await;
@@ -1221,6 +1221,7 @@ async fn exits_and_listen_status_are_served_from_what_the_nodes_report() {
         protocol: i3t_model::netmap::ForwardProtocol::Tcp,
         state: i3t_model::control::ListenState::Listening { local: "127.0.0.1:43210".parse().unwrap() },
         traffic: i3t_model::control::ListenTraffic::default(),
+        target_failure: Some(i3t_model::control::TargetFailureReport { cause: i3t_model::control::TargetCause::Refused, secs_ago: 0 }),
     }];
     api.controller.handle(laptop.session, REMOTE, ToController::Report(Report { run: 2, forwards, ..Report::default() })).unwrap();
 
@@ -1234,6 +1235,8 @@ async fn exits_and_listen_status_are_served_from_what_the_nodes_report() {
     let listed: Value = api.ok(Method::GET, &format!("{base}/forwards"), None).await;
     assert_eq!(listed[0]["listen"]["state"], json!("listening"));
     assert_eq!(listed[0]["listen"]["local"], json!("127.0.0.1:43210"));
+    assert_eq!(listed[0]["target_failure"]["cause"], json!({ "code": "refused" }));
+    assert!(listed[0]["target_failure"]["at"].as_u64().is_some_and(|at| at > 1_700_000_000), "{}", listed[0]["target_failure"]);
     let on_node: model::NodeListeners = api.ok(Method::GET, &format!("{base}/nodes/{}/listeners", laptop.id), None).await;
     assert_eq!(on_node.forwards.len(), 1);
     assert_eq!(on_node.forwards[0].id, created.id);
@@ -1398,4 +1401,49 @@ async fn groups_are_listed_created_read_renamed_changed_and_deleted_through_the_
     );
     let by_ref: Vec<model::LogEntry> = api.ok(Method::GET, &format!("/log?ref=group:{servers}"), None).await;
     assert_eq!(by_ref.len(), 7);
+}
+
+#[tokio::test]
+async fn an_exit_is_asked_to_test_a_target_and_its_answer_is_passed_on() {
+    use i3t_model::control::exit_test::{ConnectStep, ExitTestCause, ExitTestResult, ExitVia};
+
+    let mut api = Api::new();
+    let network = api.network("home").await;
+    let base = format!("/networks/{}", network.id);
+    let mut exit = api.join_as(network.id, &modern_hello("0.2.0", CAN_DO_ALL)).await;
+    let laptop = api.join(network.id, Declared::default()).await;
+    let old = api.join(network.id, CAN_DO_ALL).await;
+    for node in [exit.id, old.id] {
+        api.ok::<model::Node>(Method::PUT, &format!("{base}/nodes/{node}/exit"), Some(json!({}))).await;
+    }
+    let unanswered: Value = api.ok(Method::POST, &format!("{base}/exits/{}/test", old.id), Some(json!({ "target": "example.com" }))).await;
+    assert_eq!((&unanswered["answered"], &unanswered["result"]), (&json!(false), &json!(null)), "最初那一版的节点不会被问");
+
+    let not_exit = api
+        .fails(Method::POST, &format!("{base}/exits/{}/test", laptop.id), Some(json!({ "target": "example.com" })), StatusCode::NOT_FOUND)
+        .await;
+    assert_eq!(not_exit.what.as_deref(), Some("exit"));
+    let malformed = api
+        .fails(Method::POST, &format!("{base}/exits/{}/test", exit.id), Some(json!({ "target": "exa mple.com" })), StatusCode::BAD_REQUEST)
+        .await;
+    assert_eq!((malformed.what.as_deref(), malformed.field.as_deref()), (Some("malformed"), Some("target")));
+
+    let request = api.request(Method::POST, &format!("{base}/exits/{}/test", exit.id), Some(&json!({ "target": "example.com:8443" })));
+    let asking = tokio::spawn(api.router.clone().oneshot(request));
+    let ToNode::ExitTest { request, host, port } = exit.next_query().await else { panic!("出口应该被问到") };
+    assert_eq!((host.as_str(), port), ("example.com", 8443));
+    let result = ExitTestResult {
+        via: ExitVia::Direct,
+        refused: None,
+        resolve: None,
+        connect: Some(ConnectStep { ms: 30, address: None, cause: Some(ExitTestCause::Refused) }),
+        tls: None,
+    };
+    api.controller.handle(exit.session, REMOTE, ToController::ExitTestAnswer { request, result: Box::new(result) }).unwrap();
+    let response = asking.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let view: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!((&view["target"], &view["answered"]), (&json!("example.com:8443"), &json!(true)));
+    assert_eq!(view["node"]["id"], json!(exit.id.get()));
+    assert_eq!(view["result"]["connect"], json!({ "ms": 30, "address": null, "cause": { "code": "refused" } }));
 }

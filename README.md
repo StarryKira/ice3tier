@@ -86,6 +86,9 @@ curl -x socks5h://<家里那台的节点名>@127.0.0.1:1080 https://example.com
 
 # 访问另一个节点上的服务（目标写它的虚拟 IP 或全名，不需要它是出口）
 curl -x socks5h://127.0.0.1:1080 http://nas.home.i3t:8080/
+
+# HTTP 入口：https 走 CONNECT，http:// 的地址直接转发，所以 http_proxy 和 https_proxy 都可以指向它
+export http_proxy=http://<家里那台的节点名>@127.0.0.1:1081 https_proxy=http://<家里那台的节点名>@127.0.0.1:1081
 ```
 
 不会用代理的工具可以让 `i3t connect` 替它连，比如 ssh：
@@ -119,7 +122,9 @@ Linux 上可以用 `i3t tune` 检查会影响节点表现的内核参数（UDP �
 
 性能档位：`low-footprint`（一个核、几百 MB 内存的机器）、`balanced`（默认）、`high-throughput`（对端多、流量大）。在 Web 界面的节点页或者 `i3tctl node set <节点名> --profile low-footprint` 给一个节点选；没有选的节点用本机 `config.toml` 里的（`i3t set profile low-footprint`），其中每一项也可以单独改。各档位的内容见 [docs/architecture.md](docs/architecture.md) 的性能一节。
 
-节点的本机设置在状态目录的 `config.toml` 里，每一项都有注释。`i3t status` 查看节点的状态，`i3t routes` 查看到各个对端现在怎么走。
+节点的本机设置在状态目录的 `config.toml` 里，每一项都有注释。`i3t status` 查看节点的状态，`i3t routes` 查看到各个对端现在怎么走，
+`i3t ping <节点>` 在到那个节点的连接上量几个往返。`i3tctl exit test <出口> <主机[:端口]>` 让一个出口按它自己的规矩试着连一个目标，
+说出解析、连接、TLS 握手各花多久、卡在哪一步。
 
 三个程序（和发布工具 `i3t-release`）在终端上的文字跟着系统的语言：简体中文或英文。要指定的话设环境变量 `I3T_LANG=zh-CN` 或 `I3T_LANG=en`。`config.toml` 的注释用第一次写它时的语言；日志不翻译。
 

@@ -14,7 +14,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lab as lablib  # noqa: E402
-from harness import Checks, Controller, Node, binary, create_groups, group_names, start_whoami, tail  # noqa: E402
+from harness import (  # noqa: E402
+    Checks, Controller, Node, binary, blob_digest, blob_file, create_groups, eventually_value, group_names, plain_http, start_blob_server,
+    start_header_echo, start_proxy_protocol_echo, start_whoami, tail,
+)
 from lab import Lab, NatKind, wait_until  # noqa: E402
 
 
@@ -233,12 +236,227 @@ def groups(lab: Lab, work: Path, t: Checks) -> None:
         print(tail(a.read_log()), tail(b.read_log()), tail(controller.log.read_text(errors="replace")), sep="\n  ---\n")
 
 
+def plain_http_proxy(lab: Lab, work: Path, t: Checks) -> None:
+    """HTTP 入口转发明文 HTTP（不用 CONNECT）：凭据和出口来自 Proxy-Authorization，代理自己的头不到目标，请求体完整，
+    大的下载完整，出口的端口白名单按 URL 里的端口查，不是出口的节点被拒绝。"""
+    web, echo = lab.host("web"), lab.host("echo")
+    start_blob_server(web, work)
+    start_whoami(web, 8080)
+    start_header_echo(echo)
+    controller = Controller(lab.host("ctl"), work)
+    controller.ctl("network", "create", "lab")
+    a, ex, b = Node(lab.host("a"), work), Node(lab.host("ex"), work, declare=("exit",)), Node(lab.host("b"), work)
+    for node in (a, ex, b):
+        node.join(controller)
+    # 出口默认不限端口；这里写明只放行 80 和 443，测端口白名单按 URL 里的端口查。
+    controller.ctl("exit", "enable", str(ex.id), "--ports", "80,443")
+
+    small = eventually(lambda: plain_http(a, f"http://{web.ip}/blob/1000", user=ex.name), lambda r: r[0] == "200")
+    t.check("curl -x http://出口@入口 http://… 经出口取回", small[0] == "200", f"{small}")
+    headers = plain_http(a, f"http://{echo.ip}/path?q=1", user=ex.name, extra=("-H", "X-Test: kept"))
+    seen = headers[1].lower()
+    t.check("目标收到的请求行只有路径", headers[1].startswith("GET /path?q=1 HTTP/1.1"), headers[1][:200])
+    t.check("Proxy-Authorization 和逐跳的头没有到目标，别的头都在，Host 是 URL 里的",
+            "proxy-" not in seen and "keep-alive" not in seen and "x-test: kept" in seen and f"host: {echo.ip}" in seen
+            and "connection: close" in seen, headers[1])
+
+    big = 30_000_000
+    code, digest, error = plain_http(a, f"http://{web.ip}/blob/{big}", user=ex.name, timeout=120)
+    t.check("30 MB 的下载完整", code == "200" and digest == blob_digest(big), f"{code} {error}")
+    upload = blob_file(a, 3_000_000)
+    code, body, error = plain_http(a, f"http://{web.ip}/digest", user=ex.name, extra=("--data-binary", f"@{upload}"))
+    t.check("3 MB 的 POST（curl 先发 Expect: 100-continue）完整到达", code == "200" and body == blob_digest(3_000_000), f"{code} {body!r} {error}")
+    code, body, error = plain_http(a, f"http://{web.ip}/digest", user=ex.name,
+                                   extra=("--data-binary", "hello", "-H", "Transfer-Encoding: chunked", "-H", "Expect:"))
+    t.check("chunked 的请求体原样转给目标（这个服务只认 Content-Length，所以读到的是空的）", code == "200", f"{code} {body!r} {error}")
+
+    whoami = plain_http(a, f"http://{web.ip}:8080/", user=ex.name)
+    t.check("出口只放行 80 和 443，URL 里写 8080 被拒绝：403", whoami[0] == "403", f"{whoami}")
+    refused = plain_http(a, f"http://{web.ip}/blob/10", user=b.name)
+    t.check("b 不是出口：403", refused[0] == "403", f"{refused}")
+    unknown = plain_http(a, f"http://{web.ip}/blob/10", user="nobody")
+    t.check("没有这个节点：403，和没有权限一样", unknown[0] == "403", f"{unknown}")
+    proxy_env = a.host.run("env", f"http_proxy=http://{ex.name}:x@127.0.0.1:1081", "curl", "-sS", "--max-time", "20", "-o", "/dev/null",
+                           "-w", "%{http_code}", f"http://{web.ip}/blob/10", check=False)
+    t.check("http_proxy 环境变量指向入口就能用", proxy_env.stdout == "200", f"{proxy_env.stdout!r} {proxy_env.stderr.strip()}")
+    if t.failures:
+        print(tail(a.read_log()), tail(ex.read_log()), sep="\n  ---\n")
+
+
+def forward_target(lab: Lab, work: Path, t: Checks) -> None:
+    """端口转发说出目标连不上：原因和时间，直到有一条连接成功；命令行的列表里写成一句话。"""
+    controller = Controller(lab.host("ctl"), work)
+    controller.ctl("network", "create", "lab")
+    a, c = Node(lab.host("a"), work), Node(lab.host("c"), work, declare=("forward",))
+    for node in (a, c):
+        node.join(controller)
+    controller.ctl("forward", "add", str(a.id), "127.0.0.1:9000", str(c.id), "127.0.0.1:8090")
+    local = lambda: a.host.run("curl", "-sS", "--max-time", "6", "http://127.0.0.1:9000/", check=False)  # noqa: E731
+    failure = lambda: controller.ctl("forward", "list")[0]["target_failure"]  # noqa: E731
+
+    wait_until(lambda: ":9000 " in a.host.run("ss", "-lnt").stdout, timeout=20, what="a 开始监听转发的端口")
+    t.check("c 的 8090 上没有服务：a 上的连接被重置", local().returncode != 0)
+    seen = eventually(lambda: (local(), failure())[1], lambda found: found is not None, timeout=30)
+    t.check("转发报出目标拒绝连接，带着时间", seen is not None and seen["cause"] == {"code": "refused"} and seen["at"] > 1_700_000_000, str(seen))
+    text = controller.host.run(binary("i3tctl"), "--token", controller.token, "forward", "list", check=False).stdout
+    t.check("命令行的列表里写成一句话", "目标拒绝连接" in text, text)
+
+    start_whoami(c.host, 8090, bind="127.0.0.1")
+    through = eventually(local, lambda r: r.returncode == 0)
+    t.check("服务起来之后连接成功", through.stdout == "127.0.0.1", f"{through.stdout!r} {through.stderr.strip()}")
+    cleared = eventually(failure, lambda found: found is None, timeout=30)
+    t.check("有一条连接成功之后记录清掉", cleared is None, str(cleared))
+    if t.failures:
+        print(tail(a.read_log()), tail(c.read_log()), sep="\n  ---\n")
+
+
+def proxy_protocol(lab: Lab, work: Path, t: Checks) -> None:
+    """端口转发可以给目标发 PROXY protocol 的头（v1、v2）：认它的服务看到的是发起节点的虚拟 IP，而不是 127.0.0.1；
+    UDP 的转发不能设。"""
+    controller = Controller(lab.host("ctl"), work)
+    controller.ctl("network", "create", "lab")
+    a, c = Node(lab.host("a"), work), Node(lab.host("c"), work, declare=("forward",))
+    for node in (a, c):
+        node.join(controller)
+    start_proxy_protocol_echo(c.host, 8095)
+    controller.ctl("forward", "add", str(a.id), "127.0.0.1:9001", str(c.id), "127.0.0.1:8095", "--proxy-protocol", "v1")
+    controller.ctl("forward", "add", str(a.id), "127.0.0.1:9002", str(c.id), "127.0.0.1:8095", "--proxy-protocol", "v2")
+    controller.ctl("forward", "add", str(a.id), "127.0.0.1:9003", str(c.id), "127.0.0.1:8095")
+    get = lambda port: a.host.run("curl", "-sS", "--max-time", "6", f"http://127.0.0.1:{port}/", check=False)  # noqa: E731
+
+    for port, version in [(9001, "v1"), (9002, "v2")]:
+        seen = eventually(lambda: get(port), lambda r: r.returncode == 0)
+        t.check(f"PROXY protocol {version}：服务看到 a 的虚拟 IP", seen.stdout == a.virtual_ip, f"{seen.stdout!r} {seen.stderr.strip()}")
+    plain = eventually(lambda: get(9003), lambda r: r.returncode == 0)
+    t.check("没有设的转发不发头", plain.stdout == "no proxy header", f"{plain.stdout!r} {plain.stderr.strip()}")
+    t.check("转发的设置里有这一项", [f["proxy_protocol"] for f in controller.ctl("forward", "list")] == ["v1", "v2", None])
+    udp = controller.ctl("forward", "add", str(a.id), "127.0.0.1:9004", str(c.id), "127.0.0.1:8095", "--udp", "--proxy-protocol", "v1",
+                         check=False)
+    t.check("UDP 的转发不能设", udp.returncode != 0 and "PROXY protocol" in udp.stderr, udp.stderr.strip())
+    if t.failures:
+        print(tail(a.read_log()), tail(c.read_log()), sep="\n  ---\n")
+
+
+def exit_optimistic(lab: Lab, work: Path, t: Checks) -> None:
+    """出口可以关掉乐观回复：经它的连接等它的应答，客户端拿到"连接被拒绝"而不是连上之后被重置；监听器自己的设置排在前面。"""
+    web = lab.host("web")
+    controller = Controller(lab.host("ctl"), work)
+    controller.ctl("network", "create", "lab")
+    a, ex = Node(lab.host("a"), work), Node(lab.host("ex"), work, declare=("exit",))
+    for node in (a, ex):
+        node.join(controller)
+    controller.ctl("exit", "enable", str(ex.id))
+    # web 的 443 上没有服务：出口连过去被拒绝。
+    closed = f"http://{web.ip}:443/"
+    default = eventually(lambda: socks(a, closed, user=ex.name), lambda r: "reset" in r.stderr.lower())
+    t.check("默认：先说连上了，之后被重置", default.returncode == 56 and "reset" in default.stderr.lower(), f"{default.returncode} {default.stderr.strip()}")
+    controller.ctl("exit", "enable", str(ex.id), "--optimistic", "off")
+    careful = eventually(lambda: socks(a, closed, user=ex.name), lambda r: r.returncode == 97)
+    t.check("出口关掉乐观回复：客户端拿到 SOCKS5 的连接被拒绝", careful.returncode == 97, f"{careful.returncode} {careful.stderr.strip()}")
+    t.check("出口的设置里有这一项", controller.node(ex)["exit"]["optimistic"] is False, str(controller.node(ex)["exit"]))
+    controller.ctl("listener", "add", str(a.id), "eager", "127.0.0.1:1090", "--optimistic", "on")
+    eager = lambda: a.host.run("curl", "-sS", "--max-time", "8", "-x", f"socks5h://{ex.name}@127.0.0.1:1090", closed,  # noqa: E731
+                               check=False, timeout=15)
+    seen = eventually(eager, lambda r: r.returncode == 56)
+    t.check("监听器打开了乐观回复，以监听器为准", seen.returncode == 56, f"{seen.returncode} {seen.stderr.strip()}")
+    if t.failures:
+        print(tail(a.read_log()), tail(ex.read_log()), sep="\n  ---\n")
+
+
+def exit_test(lab: Lab, work: Path, t: Checks) -> None:
+    """i3tctl exit test：出口按它自己的策略试着连一个目标，说出解析、连接、TLS 握手各花多久、经什么出去；
+    它不替别人连的目标被拒绝，原因和别人经它访问时一样；出口节点一次只做一个。"""
+    web = lab.host("web")
+    start_blob_server(web, work)
+    controller = Controller(lab.host("ctl"), work)
+    controller.ctl("network", "create", "lab")
+    a, ex = Node(lab.host("a"), work), Node(lab.host("ex"), work, declare=("exit",))
+    for node in (a, ex):
+        node.join(controller)
+    controller.ctl("exit", "enable", str(ex.id))
+    test = lambda target: controller.ctl("exit", "test", ex.name, target)  # noqa: E731
+
+    seen = eventually_value(lambda: test(f"{web.ip}:443"), lambda view: (view["result"] or {}).get("tls") is not None, timeout=30)
+    result = seen["result"] or {}
+    t.check("回答了：经直接连，连上了，TLS 握手完成", seen["answered"] and result["via"] == "direct" and result["refused"] is None
+            and result["connect"]["address"] == f"{web.ip}:443" and result["connect"]["cause"] is None and result["tls"]["cause"] is None,
+            str(seen))
+    t.check("写成地址的目标不用解析", result.get("resolve") is None, str(result))
+    time.sleep(2.1)
+    seen = test("localhost:443")["result"]
+    t.check("域名解析出来是回环地址：解析这一步有地址，出口不连，原因是地址不允许",
+            seen["resolve"] is not None and "127.0.0.1" in seen["resolve"]["addresses"] and seen["refused"]["code"] == "address_not_allowed"
+            and seen["connect"] is None, str(seen))
+    busy = test(f"{web.ip}:80")["result"]
+    t.check("两秒之内再测：出口节点说忙", busy["refused"] == {"code": "busy"}, str(busy))
+    time.sleep(2.1)
+    closed = test(f"{web.ip}:9")["result"]
+    t.check("目标端口没有服务：连接被拒绝；不是 443 不做握手", closed["connect"]["cause"] == {"code": "refused"} and closed["tls"] is None,
+            str(closed))
+    time.sleep(2.1)
+    lan = test("192.168.1.10:80")["result"]
+    t.check("局域网的地址：出口没有打开局域网访问", lan["refused"] == {"code": "lan_not_enabled"}, str(lan))
+
+    controller.ctl("exit", "enable", str(ex.id), "--ports", "443")
+    time.sleep(2.1)
+    port = eventually_value(lambda: test(f"{web.ip}:80")["result"], lambda result: result["refused"] is not None, timeout=20)
+    t.check("出口只放行 443：测 80 被拒绝，说出端口", port["refused"] == {"code": "port_not_allowed", "port": 80}, str(port))
+    time.sleep(2.1)
+    text = controller.host.run(binary("i3tctl"), "--token", controller.token, "exit", "test", ex.name, f"{web.ip}:80", check=False).stdout
+    t.check("命令行写成一句话", "端口 80 不在出口允许的范围里" in text, text)
+    not_exit = controller.ctl("exit", "test", a.name, f"{web.ip}:443", check=False)
+    t.check("不是出口的节点不能测", not_exit.returncode != 0, not_exit.stderr.strip())
+    if t.failures:
+        print(tail(ex.read_log()), tail(controller.log.read_text(errors="replace")), sep="\n  ---\n")
+
+
+def ping(lab: Lab, work: Path, t: Checks) -> None:
+    """i3t ping：在到另一个节点的连接上量往返，说出走的路；不认识的节点、访问规则不允许、对端离线各有一句明白话。"""
+    controller = Controller(lab.host("ctl"), work)
+    controller.ctl("network", "create", "lab")
+    create_groups(controller, "ops", "boxes")
+    a, b, c = Node(lab.host("a"), work), Node(lab.host("b"), work), Node(lab.host("c"), work)
+    a.join(controller, "ops")
+    b.join(controller, "ops")
+    c.join(controller, "boxes")
+    for rule in controller.ctl("rule", "list"):
+        controller.ctl("rule", "delete", str(rule["id"]))
+    controller.ctl("rule", "add", "ops", "ops")
+    controller.ctl("rule", "add", "boxes", "ops", "--one-way")
+    run = lambda *args: a.host.run(binary("i3t"), "--state-dir", str(a.state), "ping", *args, check=False, timeout=20)  # noqa: E731
+
+    seen = eventually(lambda: run(b.name), lambda r: r.returncode == 0 and "直连" in r.stdout)
+    t.check("ping b：5 个往返都回来了，走的是直连", seen.returncode == 0 and "5 个往返，回来 5 个" in seen.stdout and "直连" in seen.stdout,
+            f"{seen.stdout!r} {seen.stderr.strip()}")
+    print(seen.stdout.rstrip(), flush=True)
+    by_ip = run(b.virtual_ip, "--count", "2")
+    t.check("用虚拟 IP、只量 2 个", by_ip.returncode == 0 and "2 个往返" in by_ip.stdout, f"{by_ip.stdout!r} {by_ip.stderr.strip()}")
+    unknown = run("nobody")
+    t.check("不认识的节点：说出来，失败退出", unknown.returncode != 0 and "没有 nobody" in unknown.stderr, unknown.stderr.strip())
+    one_way = eventually(lambda: run(c.name), lambda r: "不允许" in r.stderr)
+    t.check("只有 c 能访问 a：a ping c 说访问规则不允许", one_way.returncode != 0 and "访问规则不允许本节点访问 c" in one_way.stderr,
+            one_way.stderr.strip())
+    t.check("ping 自己说是自己", "本节点自己" in run(a.name).stderr)
+    b.stop()
+    gone = run(b.name)
+    t.check("b 停了：说连不上", gone.returncode != 0 and ("连不上 b" in gone.stderr or "都没有回来" in gone.stdout),
+            f"{gone.stdout!r} {gone.stderr.strip()}")
+    if t.failures:
+        print(tail(a.read_log()), tail(b.read_log()), sep="\n  ---\n")
+
+
 SCENARIOS = {
     "node_service": node_service,
     "port_forward": port_forward,
     "lan_behind_exit": lan_behind_exit,
     "public_listener": public_listener,
     "groups": groups,
+    "plain_http_proxy": plain_http_proxy,
+    "forward_target": forward_target,
+    "proxy_protocol": proxy_protocol,
+    "exit_optimistic": exit_optimistic,
+    "exit_test": exit_test,
+    "ping": ping,
 }
 
 

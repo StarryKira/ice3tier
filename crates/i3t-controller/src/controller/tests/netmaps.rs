@@ -197,6 +197,7 @@ fn a_forward_is_delivered_to_both_ends_only_while_the_listener_may_access_the_ta
         allow_from: vec!["127.0.0.0/8".parse().unwrap()],
         enabled: true,
         class: None,
+        proxy_protocol: None,
     };
     let created = lab.controller.create_forward(network.id, input.clone()).unwrap();
     assert_eq!(created.status, i3t_model::admin::ForwardStatus::AccessDenied);
@@ -213,7 +214,13 @@ fn a_forward_is_delivered_to_both_ends_only_while_the_listener_may_access_the_ta
     let serving = lab.netmap(target).me.forward_targets;
     assert_eq!(
         serving,
-        vec![netmap::ForwardTarget { id: created.id, protocol: ForwardProtocol::Udp, addr: input.target_addr, listener: listen }]
+        vec![netmap::ForwardTarget {
+            id: created.id,
+            protocol: ForwardProtocol::Udp,
+            addr: input.target_addr,
+            listener: listen,
+            proxy_protocol: None
+        }]
     );
     let bystander_map = lab.netmap(bystander);
     assert!(bystander_map.me.forwards.is_empty() && bystander_map.me.forward_targets.is_empty());
@@ -253,7 +260,7 @@ fn peer_details_follow_least_privilege() {
     lab.settle(&mut [&mut exit]);
 
     let seen_by_user = lab.netmap(user).peer(exit.id).cloned().unwrap();
-    assert_eq!(seen_by_user.exit, Some(netmap::PeerExit { lan: true, class: None }));
+    assert_eq!(seen_by_user.exit, Some(netmap::PeerExit { lan: true, class: None, optimistic: None }));
     assert!(seen_by_user.keep_alive);
     assert_eq!(seen_by_user.attached, vec![Attachment { relay, rtt_ms: 30 }]);
     let expected: Vec<std::net::SocketAddr> =

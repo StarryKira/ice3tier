@@ -4,6 +4,7 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 
+use i3t_flow::Framing;
 use i3t_proto::flow::{Host, Reason, Reply, Status};
 use socket2::SockRef;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -51,11 +52,15 @@ pub(crate) struct Copied {
 ///
 /// 半关闭照常传递。和经过流的搬运一样，任何一头异常结束（包括被取消）时另一头看到的是重置而不是正常结束：
 /// 两条连接一开始就设成"关闭时发 RST"，两个方向都正常结束了才改回去。每一段数据都记到 `meter` 上。
+///
+/// 有 `framing` 时客户端发来的只有它划出来的那一段送给目标，规矩和经过流时一样（[`i3t_flow::Flow::relay_framed`]）：
+/// 这一段完整之后不再读客户端，也不关目标的写，等目标的应答发完；没完整客户端就结束了，算异常。
 pub(crate) async fn relay(
     mut client: TcpStream,
     mut target: TcpStream,
     meter: &IngressMeter<'_>,
     cancel: impl Future<Output = Reason>,
+    framing: Option<&mut (dyn Framing + Send)>,
 ) -> io::Result<Copied> {
     client.set_zero_linger()?;
     target.set_zero_linger()?;
@@ -63,7 +68,12 @@ pub(crate) async fn relay(
     {
         let (client_read, client_write) = client.split();
         let (target_read, target_write) = target.split();
-        let upward = copy(client_read, target_write, meter, true, &mut from_client);
+        let upward = async {
+            match framing {
+                Some(framing) => copy_framed(client_read, target_write, meter, framing, &mut from_client).await,
+                None => copy(client_read, target_write, meter, true, &mut from_client).await,
+            }
+        };
         let downward = copy(target_read, client_write, meter, false, &mut from_target);
         tokio::select! {
             copied = async { tokio::try_join!(upward, downward) } => { copied?; }
@@ -73,6 +83,29 @@ pub(crate) async fn relay(
     SockRef::from(&client).set_linger(None)?;
     SockRef::from(&target).set_linger(None)?;
     Ok(Copied { from_client, from_target })
+}
+
+/// 客户端到目标的方向，只送 `framing` 划出来的那一段。
+async fn copy_framed(
+    mut from: ReadHalf<'_>,
+    mut to: WriteHalf<'_>,
+    meter: &IngressMeter<'_>,
+    framing: &mut (dyn Framing + Send),
+    count: &mut u64,
+) -> io::Result<()> {
+    let mut buf = vec![0; i3t_flow::buffer_len()];
+    while !framing.is_complete() {
+        let read = from.read(&mut buf).await?;
+        if read == 0 {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "请求体还没有完整，客户端就结束了"));
+        }
+        let len = framing.take(&buf[..read]).map_err(|reason| io::Error::other(format!("请求体写得不对：{reason:?}")))?;
+        meter.record(true, len);
+        to.write_all(&buf[..len]).await?;
+        // usize 不会比 u64 宽，这里不会截断。
+        *count += len as u64;
+    }
+    Ok(())
 }
 
 /// 一个方向：读到 EOF 就把另一头的写关掉。
@@ -114,7 +147,7 @@ mod tests {
         let counted = std::sync::Arc::clone(&listen);
         let relay = tokio::spawn(async move {
             let meter = IngressMeter { listen: &counted, credential: None, exit: None };
-            relay(client_far, target_far, &meter, std::future::pending()).await
+            relay(client_far, target_far, &meter, std::future::pending(), None).await
         });
 
         client.write_all(b"request").await.unwrap();
@@ -140,7 +173,7 @@ mod tests {
         let relay = tokio::spawn(async move {
             let listen = Tally::default();
             let meter = IngressMeter { listen: &listen, credential: None, exit: None };
-            relay(client_far, target_far, &meter, std::future::pending()).await
+            relay(client_far, target_far, &meter, std::future::pending(), None).await
         });
 
         client.write_all(b"request").await.unwrap();
@@ -162,11 +195,11 @@ mod tests {
         let relay = tokio::spawn(async move {
             let listen = Tally::default();
             let meter = IngressMeter { listen: &listen, credential: None, exit: None };
-            relay(client_far, target_far, &meter, async move {
+            let stop = async move {
                 let _ = stopped.await;
                 Reason::LimitReached
-            })
-            .await
+            };
+            relay(client_far, target_far, &meter, stop, None).await
         });
         client.write_all(b"x").await.unwrap();
         target.read_exact(&mut [0; 1]).await.unwrap();

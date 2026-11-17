@@ -7,14 +7,15 @@ use i3t_lang::table::{Fields, Table};
 use i3t_lang::{Lang, NONE, optional};
 use i3t_model::admin::{
     AccessCheck, AccessGraph, BackboneView, CreatedCredential, CreatedEnrollToken, Credential, DeletedGroup, Direction, EnrollTokenInfo,
-    ExitView, ForcedUpdates, Forward, Group, GroupRef, LaneEffect, ListenStatus, Listener, LogEntry, Network, Node, NodeAccess, NodeDetail,
-    NodeListeners, NodeRef, NodeUpdate, Overview, PairLaneSide, PairView, PathLeg, PathSource, PathView, RelayEnabled, RouteMatrix,
-    RouteTable, Rule, Status, UpdateOverview,
+    ExitTestView, ExitView, ForcedUpdates, Forward, Group, GroupRef, LaneEffect, ListenStatus, Listener, LogEntry, Network, Node,
+    NodeAccess, NodeDetail, NodeListeners, NodeRef, NodeUpdate, Overview, PairLaneSide, PairView, PathLeg, PathSource, PathView,
+    RelayEnabled, RouteMatrix, RouteTable, Rule, Status, UpdateOverview,
 };
+use i3t_model::control::exit_test::ExitTestCause;
 use i3t_model::control::{
     DirectKind, InterceptReport, InterceptState, LaneCounts, LaneReport, LegTransport, PathSegment, PeerLanes, PerformanceReport, Route,
 };
-use i3t_model::netmap::{DefaultAction, Profile};
+use i3t_model::netmap::{DefaultAction, IpFamily, Profile};
 use i3t_model::update::UpdateTiming;
 use i3t_proto::NodeId;
 
@@ -160,6 +161,36 @@ pub fn node_listeners(view: &NodeListeners) {
         table.row(vec![forward.id.to_string(), name, forward.bind.to_string(), label(&forward.protocol), connections, traffic, state]);
     }
     print_table(&table, t.none_found);
+}
+
+pub fn exit_test(view: &ExitTestView) {
+    let (t, lang, codes) = context();
+    let Some(result) = &view.result else {
+        println!("{}", (t.exit_unanswered)(&view.node.name));
+        return;
+    };
+    println!("{}", lang.paren(&format!("{} → {}", view.node.name, view.target), (codes.exit_via)(result.via)));
+    let ms = |ms: u32| format!("{ms} ms");
+    let outcome = |cause: Option<&ExitTestCause>, ok: String| cause.map_or(ok, codes.exit_test_cause);
+    let mut fields = Fields::new(2);
+    if let Some(step) = &result.resolve {
+        let mut found = lang.list(&step.addresses);
+        if step.family != IpFamily::Any {
+            found = format!("{found}  {}", (t.family_only)(&label(&step.family)));
+        }
+        fields.add(t.resolve_step, format!("{}  {}", ms(step.ms), outcome(step.cause.as_ref(), found)));
+    }
+    if let Some(step) = &result.connect {
+        let address = step.address.map(|address| address.to_string()).unwrap_or_default();
+        fields.add(t.connect_step, format!("{}  {}", ms(step.ms), outcome(step.cause.as_ref(), address)));
+    }
+    if let Some(step) = &result.tls {
+        fields.add(t.tls_step, format!("{}  {}", ms(step.ms), outcome(step.cause.as_ref(), t.tls_done.to_owned())));
+    }
+    if let Some(cause) = &result.refused {
+        fields.add(t.exit_refused, (codes.exit_test_cause)(cause));
+    }
+    fields.print();
 }
 
 pub fn exits(exits: &[ExitView]) {
@@ -322,7 +353,7 @@ pub fn node_detail(detail: &NodeDetail) {
     let exit = node.exit.as_ref().map_or_else(
         || t.disabled.to_owned(),
         |exit| {
-            let ports = exit.ports.as_ref().map_or_else(|| "any".to_owned(), |ports| lang.list(ports));
+            let ports = exit.ports.as_ref().map_or_else(|| t.unlimited.to_owned(), |ports| lang.list(ports));
             (t.exit_settings)(&ports, &yes_no(exit.lan), &bandwidth(exit.bandwidth_mbps), &optional(exit.upstream_socks5))
         },
     );
@@ -841,12 +872,17 @@ pub fn forwards(forwards: &[Forward]) {
     let mut table = Table::new(&t.forwards_header);
     for forward in forwards {
         let [state, connections, traffic] = listen_cells(forward.listen.as_ref());
+        let status = (codes.forward_status)(forward.status);
+        let status = match &forward.target_failure {
+            Some(failure) => lang.paren(status, (codes.target_cause)(failure.cause)),
+            None => status.to_owned(),
+        };
         table.row(vec![
             forward.id.to_string(),
             label(&forward.protocol),
             format!("#{} {}", forward.listen_node, forward.bind),
             format!("#{} {}", forward.target_node, forward.target_addr),
-            (codes.forward_status)(forward.status).to_owned(),
+            status,
             state,
             connections,
             traffic,

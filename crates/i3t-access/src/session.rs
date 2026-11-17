@@ -10,7 +10,7 @@ use std::time::Duration;
 use i3t_conn::Connector;
 use i3t_conn::contract::Datagrams;
 use i3t_flow::datagram::Opener;
-use i3t_flow::{End, FlowError, Summary};
+use i3t_flow::{End, FlowError, Framing, Summary};
 use i3t_model::Netmap;
 use i3t_model::netmap::{Credential, Forward, Listener, ListenerProtocol, TokenHash};
 use i3t_proto::NodeId;
@@ -24,9 +24,11 @@ use crate::credential;
 use crate::egress::{self, EgressPolicy, LocalEgress};
 use crate::failure::Failure;
 use crate::first_data::{self, FIRST_BYTE_WAIT};
+use crate::forward_health::{ForwardHealth, TargetCause};
 use crate::manager::{Connection, Counters, PortBook};
 use crate::message::{Parsed, Parser, ProxyAuth};
 use crate::route::{self, Route};
+use crate::routes::{RouteAtStart, RouteSpan, SharedRoutes};
 use crate::selector::Selector;
 use crate::usage::{ExitTally, IngressMeter, Usage};
 use crate::{http, socks5, udp};
@@ -59,6 +61,10 @@ pub(crate) struct Shared<C: Datagrams, E> {
     pub udp_idle_timeout: Duration,
     /// 透明访问这一路的连接数和流量。
     pub intercept: Counters,
+    /// 端口转发的目标最近连不上的记录。
+    pub forward_health: ForwardHealth,
+    /// 到各个对端现在走哪条路，写进每条流结束时的摘要。
+    pub routes: SharedRoutes,
 }
 
 impl<C: Datagrams, E> Shared<C, E> {
@@ -160,10 +166,28 @@ impl Front {
     }
 }
 
+/// 客户端要做什么。
+enum Command {
+    /// 一条隧道：SOCKS5 或 HTTP 的 CONNECT。
+    Connect,
+    /// SOCKS5 的 UDP ASSOCIATE。
+    UdpAssociate,
+    /// 转发一个明文 HTTP 请求。
+    Forward(Plain),
+}
+
+/// 一个要转发的明文 HTTP 请求，已经准备好随 OPEN 发出。
+struct Plain {
+    /// 改写好的请求头，加上握手时一起读进来的那部分请求体。
+    first: Vec<u8>,
+    /// 请求体剩下的部分到哪里为止。
+    body: http::BodyFraming,
+}
+
 /// 握手得到的结果：客户端要做什么、去哪里，认证里写了什么。
 struct Ask {
-    command: socks5::Command,
-    /// CONNECT 的目标；UDP ASSOCIATE 时是客户端自称会用来发报文的地址。
+    command: Command,
+    /// CONNECT 和明文 HTTP 的目标；UDP ASSOCIATE 时是客户端自称会用来发报文的地址。
     host: Host,
     port: u16,
     /// 用户名；没有做认证时是空的。
@@ -219,6 +243,10 @@ async fn socks5_handshake(client: &mut Client, credentials: &[Credential], requi
 
     match client.read(socks5::Request::parse).await {
         Ok(socks5::Request { command, host, port }) => {
+            let command = match command {
+                socks5::Command::Connect => Command::Connect,
+                socks5::Command::UdpAssociate => Command::UdpAssociate,
+            };
             Some(Ask { command, host, port, username: auth.map(|auth| auth.username).unwrap_or_default(), credential })
         }
         Err(Broken::Malformed(error)) => {
@@ -231,10 +259,10 @@ async fn socks5_handshake(client: &mut Client, credentials: &[Credential], requi
     }
 }
 
-/// HTTP 握手：一个 CONNECT 请求。失败时已经回了相应的应答，返回 `None`。
+/// HTTP 握手：一个 CONNECT 请求，或者一个要转发的明文 HTTP 请求。失败时已经回了相应的应答，返回 `None`。
 async fn http_handshake(client: &mut Client, credentials: &[Credential], required: bool) -> Option<Ask> {
-    let connect = match client.read(http::Connect::parse).await {
-        Ok(connect) => connect,
+    let request = match client.read(http::Request::parse).await {
+        Ok(request) => request,
         Err(Broken::Malformed(error)) => {
             tracing::info!(%error, "拒绝了一个 HTTP 代理请求");
             // 写不出去说明客户端已经走了。
@@ -243,14 +271,30 @@ async fn http_handshake(client: &mut Client, credentials: &[Credential], require
         }
         Err(broken) => return give_up("请求", &broken),
     };
-    let Ok(credential) = authorize(credentials, required, connect.auth.as_ref()) else {
-        tracing::info!(presented = connect.auth.is_some(), "拒绝了一个 HTTP 代理请求：没有带凭据，或者凭据不对");
+    let (command, host, port, auth) = match request {
+        http::Request::Connect(http::Connect { host, port, auth }) => (Command::Connect, host, port, auth),
+        http::Request::Forward(http::Forward { host, port, auth, head, body }) => {
+            // 握手时多读进来的是请求体的开头，属于这个请求的那一截随请求头一起发出；后面的（流水线里的下一个请求）丢掉。
+            let mut body = body.framing();
+            let buffered = std::mem::take(&mut client.buffer);
+            let Ok(taken) = body.take(&buffered) else {
+                tracing::info!("拒绝了一个明文 HTTP 请求：chunked 的请求体写得不对");
+                // 写不出去说明客户端已经走了。
+                let _ = client.stream.write_all(http::Response::BadRequest.as_bytes()).await;
+                return None;
+            };
+            let first = [head.as_slice(), &buffered[..taken]].concat();
+            (Command::Forward(Plain { first, body }), host, port, auth)
+        }
+    };
+    let Ok(credential) = authorize(credentials, required, auth.as_ref()) else {
+        tracing::info!(presented = auth.is_some(), "拒绝了一个 HTTP 代理请求：没有带凭据，或者凭据不对");
         // 写不出去说明客户端已经走了。
         let _ = client.stream.write_all(http::Response::ProxyAuthenticationRequired.as_bytes()).await;
         return None;
     };
-    let username = connect.auth.map(|auth| auth.username).unwrap_or_default();
-    Some(Ask { command: socks5::Command::Connect, host: connect.host, port: connect.port, username, credential })
+    let username = auth.map(|auth| auth.username).unwrap_or_default();
+    Some(Ask { command, host, port, username, credential })
 }
 
 /// 握手读到一半读不下去了：连接出错、客户端走了，或者发来的根本不是这种协议。没有什么可回的，记一行就放弃。
@@ -319,7 +363,7 @@ pub(crate) async fn proxy<C: Connector + Datagrams, E: LocalEgress>(
         None => None,
     };
     let limit = Limit { netmap: shared.netmap.clone(), credential: ask.credential.as_ref().map(|credential| credential.token) };
-    if ask.command == socks5::Command::UdpAssociate {
+    if matches!(ask.command, Command::UdpAssociate) {
         // 每个报文各有各的目标，往哪里去等报文来了再判断。
         let origin = Origin { credential: ask.credential.map(|credential| credential.name), client: origin_address(from) };
         let meter = IngressMeter { listen: &connection.traffic, credential: slot.as_ref().map(|slot| slot.traffic()), exit: None };
@@ -339,9 +383,13 @@ pub(crate) async fn proxy<C: Connector + Datagrams, E: LocalEgress>(
     };
 
     let class = route::class_for(netmap, selector.class, listener.class, &route);
+    let plain = match ask.command {
+        Command::Forward(plain) => Some(plain),
+        Command::Connect | Command::UdpAssociate => None,
+    };
     match route {
         Route::Flow { peer, target, optimistic } => {
-            let optimistic = listener.optimistic.unwrap_or(optimistic);
+            let optimistic = route::optimistic_for(netmap, listener.optimistic, peer, &target, optimistic);
             let exit = target.needs_exit().then(|| shared.usage.exit(peer));
             if let Some(exit) = &exit {
                 exit.started();
@@ -355,16 +403,17 @@ pub(crate) async fn proxy<C: Connector + Datagrams, E: LocalEgress>(
             let request = Open { target, class, origin };
             tracing::debug!(%peer, kind = request.target.kind(), ?class, optimistic, "代理请求经对端节点出去");
             let flow = Outbound { peer, request: &request, meter, exit: exit.as_deref(), limit };
-            if optimistic {
+            // 明文 HTTP 总是等 REPLY：目标的应答本来就在 REPLY 之后才到，等它不多花时间，被拒绝时客户端还能拿到状态码。
+            if optimistic && plain.is_none() {
                 without_waiting(shared, client, front, flow).await;
             } else {
-                after_reply(shared, client, front, flow).await;
+                after_reply(shared, client, front, flow, plain).await;
             }
         }
         Route::Local { policy } => {
             tracing::debug!(?policy, "代理请求就地出站");
             let meter = IngressMeter { listen: &connection.traffic, credential: slot.as_ref().map(|slot| slot.traffic()), exit: None };
-            locally(shared, client, front, Destination { host: &ask.host, port: ask.port, policy }, meter, limit).await;
+            locally(shared, client, front, Destination { host: &ask.host, port: ask.port, policy, plain }, meter, limit).await;
         }
     }
 }
@@ -418,13 +467,14 @@ async fn without_waiting<C: Connector + Datagrams, E>(shared: &Shared<C, E>, mut
     };
     // 首批数据随 OPEN 一起发出，不经过搬运时的关卡，在这里补记。
     meter.record(true, first_data.len());
+    let route = RouteAtStart::now(&*shared.routes, peer);
     match i3t_flow::open(&*shared.connector, peer, request, &first_data).await {
         Ok(pending) => {
             let summary = pending.relay_metered(client.stream, limit.reached(), &meter).await;
             if let (Some(exit), End::Refused(reply)) = (exit, &summary.end) {
                 exit.refused_with(reply.status);
             }
-            log_summary(peer, request, &summary);
+            log_summary(peer, request, &summary, &route.ended(&*shared.routes));
         }
         Err(error) => {
             if let Some(exit) = exit {
@@ -437,11 +487,25 @@ async fn without_waiting<C: Connector + Datagrams, E>(shared: &Shared<C, E>, mut
 }
 
 /// 不用乐观回复：等对端说连上了，才告诉客户端；对端拒绝时客户端拿到的是具体的错误码。
-async fn after_reply<C: Connector + Datagrams, E>(shared: &Shared<C, E>, mut client: Client, front: Front, flow: Outbound<'_>) {
+///
+/// 转发明文 HTTP 请求（`plain`）时首批数据是改写好的请求，连上之后没有"连上了"要告诉客户端，目标的应答就是给它的回答；
+/// 之后只搬这个请求剩下的请求体。
+async fn after_reply<C: Connector + Datagrams, E>(
+    shared: &Shared<C, E>,
+    mut client: Client,
+    front: Front,
+    flow: Outbound<'_>,
+    plain: Option<Plain>,
+) {
     let Outbound { peer, request, meter, exit, limit } = flow;
     // 客户端这时还没有收到应答，通常什么都没有发；万一握手时多读进来了一点，就当作首批数据。
-    meter.record(true, client.buffer.len());
-    let opened = match i3t_flow::open(&*shared.connector, peer, request, &client.buffer).await {
+    let (first_data, mut body) = match plain {
+        Some(Plain { first, body }) => (first, Some(body)),
+        None => (std::mem::take(&mut client.buffer), None),
+    };
+    meter.record(true, first_data.len());
+    let route = RouteAtStart::now(&*shared.routes, peer);
+    let opened = match i3t_flow::open(&*shared.connector, peer, request, &first_data).await {
         Ok(pending) => pending.established().await,
         Err(error) => {
             if let Some(exit) = exit {
@@ -465,11 +529,17 @@ async fn after_reply<C: Connector + Datagrams, E>(shared: &Shared<C, E>, mut cli
             return client.fail(front, Failure::ExitUnavailable).await;
         }
     };
-    if let Err(error) = client.stream.write_all(&front.established()).await {
-        tracing::debug!(%error, "客户端在应答写出去之前断开了");
-        return flow.abort(Reason::ClientReset);
-    }
-    log_summary(peer, request, &flow.relay_metered(client.stream, limit.reached(), &meter).await);
+    let summary = match &mut body {
+        Some(body) => flow.relay_framed(client.stream, limit.reached(), &meter, body).await,
+        None => {
+            if let Err(error) = client.stream.write_all(&front.established()).await {
+                tracing::debug!(%error, "客户端在应答写出去之前断开了");
+                return flow.abort(Reason::ClientReset);
+            }
+            flow.relay_metered(client.stream, limit.reached(), &meter).await
+        }
+    };
+    log_summary(peer, request, &summary, &route.ended(&*shared.routes));
 }
 
 /// 就地出站要去的地方。
@@ -477,6 +547,8 @@ struct Destination<'a> {
     host: &'a Host,
     port: u16,
     policy: EgressPolicy,
+    /// 转发的是一个明文 HTTP 请求。
+    plain: Option<Plain>,
 }
 
 /// 就地出站：本机直接连目标，连上了才告诉客户端。
@@ -488,7 +560,7 @@ async fn locally<C: Datagrams, E: LocalEgress>(
     meter: IngressMeter<'_>,
     limit: Limit,
 ) {
-    let Destination { host, port, policy } = destination;
+    let Destination { host, port, policy, plain } = destination;
     let mut target = match shared.egress.connect(host, port, policy).await {
         Ok(target) => target,
         Err(reply) => {
@@ -496,16 +568,23 @@ async fn locally<C: Datagrams, E: LocalEgress>(
             return client.fail(front, Failure::from(reply.status)).await;
         }
     };
-    let prepared = async {
-        client.stream.write_all(&front.established()).await?;
+    let (first_data, mut body) = match plain {
+        Some(Plain { first, body }) => (first, Some(body)),
         // 握手时多读进来的字节是客户端发给目标的。
-        target.write_all(&client.buffer).await
+        None => (std::mem::take(&mut client.buffer), None),
+    };
+    let prepared = async {
+        if body.is_none() {
+            client.stream.write_all(&front.established()).await?;
+        }
+        target.write_all(&first_data).await
     };
     if let Err(error) = prepared.await {
         return tracing::debug!(%error, "就地出站的连接在开始搬运之前断开了");
     }
-    meter.record(true, client.buffer.len());
-    match egress::relay(client.stream, target, &meter, limit.reached()).await {
+    meter.record(true, first_data.len());
+    let framing = body.as_mut().map(|body| body as &mut (dyn Framing + Send));
+    match egress::relay(client.stream, target, &meter, limit.reached(), framing).await {
         Ok(copied) => tracing::info!(sent = copied.from_client, received = copied.from_target, "就地出站的连接结束"),
         Err(error) => tracing::info!(%error, "就地出站的连接异常结束，两头都已重置"),
     }
@@ -538,10 +617,18 @@ pub(crate) async fn forward<C: Connector + Datagrams, E>(
     let origin = Origin { credential: None, client: origin_address(from) };
     let class = forward.class.or(netmap.network.class).unwrap_or_default();
     let request = Open { target: Target::Forward { id: forward.id }, class, origin };
+    let route = RouteAtStart::now(&*shared.routes, forward.target);
     match i3t_flow::open(&*shared.connector, forward.target, &request, &first_data).await {
-        Ok(pending) => log_summary(forward.target, &request, &pending.relay_metered(stream, future::pending(), &meter).await),
+        Ok(pending) => {
+            let summary = pending.relay_metered(stream, future::pending(), &meter).await;
+            if let Some(outcome) = TargetCause::of_summary(&summary) {
+                shared.forward_health.record(forward.id, outcome);
+            }
+            log_summary(forward.target, &request, &summary, &route.ended(&*shared.routes));
+        }
         Err(error) => {
             tracing::info!(target = %forward.target, ?error, "到目标节点建流失败，重置了端口转发的连接");
+            shared.forward_health.record(forward.id, Err(TargetCause::NodeUnreachable));
             reset(stream);
         }
     }
@@ -553,8 +640,8 @@ pub(crate) fn origin_address(from: SocketAddr) -> Option<SocketAddr> {
     (!ip.is_loopback()).then(|| SocketAddr::new(ip, from.port()))
 }
 
-/// 每条流结束时的一行摘要。不记目标地址，只记它是哪一类。
-pub(crate) fn log_summary(peer: NodeId, request: &Open, summary: &Summary) {
+/// 每条流结束时的一行摘要（白皮书 §13）。不记目标地址，只记它是哪一类；记这对节点的连接开始和结束时走的路、中间换没换过。不采样。
+pub(crate) fn log_summary(peer: NodeId, request: &Open, summary: &Summary, route: &RouteSpan) {
     tracing::info!(
         %peer,
         kind = request.target.kind(),
@@ -563,6 +650,9 @@ pub(crate) fn log_summary(peer: NodeId, request: &Open, summary: &Summary) {
         received = summary.from_flow.bytes,
         first_byte_ms = summary.from_flow.first_byte.map(|elapsed| elapsed.as_millis()),
         end = ?summary.end,
+        route_start = %route.start_label(),
+        route_end = %route.end_label(),
+        route_changed = route.changed,
         "流结束"
     );
 }

@@ -3,7 +3,7 @@
 //! | 入口 | 说明 |
 //! |---|---|
 //! | SOCKS5 监听器 | `CONNECT` 和 `UDP ASSOCIATE`，不认证或者用户名密码认证 |
-//! | HTTP 代理监听器 | `CONNECT`，`Proxy-Authorization: Basic` |
+//! | HTTP 代理监听器 | `CONNECT`，和明文 HTTP 的转发（`GET http://…`，一条流一个请求），`Proxy-Authorization: Basic` |
 //! | 端口转发 | 监听一个端口。TCP 的每条连接变成到目标节点的一条流；UDP 的每个客户端地址是一个会话，走数据报上下文 |
 //! | 透明访问（Linux） | 内核改到本机的、发往对端虚拟 IP 的连接（[`Access::intercept_tcp`]），每条变成到那个对端的一条流；UDP 报文（[`Access::intercept_udp`]）按（应用，目标）分成会话，走数据报上下文 |
 //!
@@ -20,11 +20,13 @@ mod credential;
 mod egress;
 mod failure;
 mod first_data;
+mod forward_health;
 mod http;
 mod intercept;
 mod manager;
 mod message;
 mod route;
+mod routes;
 mod selector;
 mod session;
 mod socks5;
@@ -32,7 +34,10 @@ mod udp;
 mod usage;
 
 pub use egress::{EgressPolicy, LocalEgress};
+pub use forward_health::{ForwardHealth, TargetCause, TargetFailure};
 pub use intercept::InterceptStatus;
 pub use manager::{Access, AccessStatus, Active, ForwardStatus, ListenCause, ListenState, ListenerStatus, NoPortBook, PortBook, Traffic};
+pub use route::is_lan_literal;
+pub use routes::{CurrentRoute, NoRoutes, RouteAtStart, RouteLabel, RouteSpan, Routes, SharedRoutes};
 pub use udp::intercept::Diversion;
 pub use usage::{CredentialSnapshot, ExitSnapshot, Tally};

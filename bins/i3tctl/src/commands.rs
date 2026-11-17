@@ -5,9 +5,9 @@ use std::net::Ipv4Addr;
 use anyhow::{Context, anyhow, bail};
 use i3t_model::admin::diag::{CreateTest, MatrixRun, MatrixState, TestState, TestView};
 use i3t_model::admin::{
-    CreateCredential, CreateEnrollToken, CreateGroup, CreateNetwork, CreateRule, Credential, CredentialState, Direction, ForceUpdate,
-    Forward, ForwardInput, Group, GroupId, GroupMembers, ListenerInput, Network, NetworkId, Node, PairInput, RelaySettings, ResumeUpdate,
-    Succeed, UpdateCredential, UpdateGroup, UpdateNetwork, UpdateNode, UpdateRule, UpdateSettings,
+    CreateCredential, CreateEnrollToken, CreateGroup, CreateNetwork, CreateRule, Credential, CredentialState, Direction, ExitTestInput,
+    ForceUpdate, Forward, ForwardInput, Group, GroupId, GroupMembers, ListenerInput, Network, NetworkId, Node, PairInput, RelaySettings,
+    ResumeUpdate, Succeed, UpdateCredential, UpdateGroup, UpdateNetwork, UpdateNode, UpdateRule, UpdateSettings,
 };
 use i3t_model::netmap::{DefaultAction, ExitRole, ForwardProtocol, Listener, ListenerProtocol};
 use i3t_model::update::UpdateTiming;
@@ -413,7 +413,19 @@ impl Session {
     async fn exit_command(&self, command: ExitCommand) -> anyhow::Result<()> {
         let network = self.network().await?.id;
         match command {
-            ExitCommand::Enable { node, ports, lan, bandwidth, upstream_socks5, quota, reset_day, family, connects_per_minute, class } => {
+            ExitCommand::Enable {
+                node,
+                ports,
+                lan,
+                bandwidth,
+                upstream_socks5,
+                quota,
+                reset_day,
+                family,
+                connects_per_minute,
+                class,
+                optimistic,
+            } => {
                 let node = self.node(network, &node).await?;
                 let settings = ExitRole {
                     ports: ports.0,
@@ -425,6 +437,7 @@ impl Session {
                     family: family.into(),
                     connects_per_minute,
                     class: class.map(Into::into),
+                    optimistic: optimistic.map(|on| on.0),
                 };
                 self.show(
                     self.send(Method::PUT, &format!("/networks/{network}/nodes/{}/exit", node.id), &settings).await?,
@@ -436,6 +449,11 @@ impl Session {
                 self.show(self.delete(&format!("/networks/{network}/nodes/{}/exit", node.id)).await?, render::node_changed)
             }
             ExitCommand::List => self.show_list(self.get(&format!("/networks/{network}/exits")).await?, render::exits),
+            ExitCommand::Test { node, target } => {
+                let node = self.node(network, &node).await?;
+                let input = ExitTestInput { target };
+                self.show(self.send(Method::POST, &format!("/networks/{network}/exits/{}/test", node.id), &input).await?, render::exit_test)
+            }
         }
     }
 
@@ -583,7 +601,7 @@ impl Session {
         let forwards = format!("/networks/{network}/forwards");
         match command {
             ForwardCommand::List => self.show_list(self.get(&forwards).await?, render::forwards),
-            ForwardCommand::Add { listen_node, bind, target_node, target_addr, udp, name, allow_from, disabled, class } => {
+            ForwardCommand::Add { listen_node, bind, target_node, target_addr, udp, name, allow_from, disabled, class, proxy_protocol } => {
                 let input = ForwardInput {
                     name,
                     protocol: if udp { ForwardProtocol::Udp } else { ForwardProtocol::Tcp },
@@ -594,6 +612,7 @@ impl Session {
                     allow_from,
                     enabled: !disabled,
                     class: class.map(Into::into),
+                    proxy_protocol,
                 };
                 self.show(self.send(Method::POST, &forwards, &input).await?, render::forward)
             }
@@ -621,6 +640,7 @@ impl Session {
             allow_from: forward.allow_from,
             enabled,
             class: forward.class,
+            proxy_protocol: forward.proxy_protocol,
         };
         self.show(self.send(Method::PUT, &format!("{forwards}/{id}"), &input).await?, render::forward)
     }

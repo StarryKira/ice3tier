@@ -1,7 +1,7 @@
 //! 一个只够本机用的 HTTP：服务端回答 `GET`，客户端发一个 `GET`。
 //!
-//! 节点在回环地址上开两个小接口：给 Prometheus 抓的 `/metrics`，和给 `i3t status`、`i3t routes` 问的本机状态接口。
-//! 它们都只有"一个不带请求体的 GET，回一段文本"这一种用法，所以不值得为此让节点程序带上一个完整的 HTTP 库：
+//! 节点在回环地址上开两个小接口：给 Prometheus 抓的 `/metrics`，和给 `i3t status`、`i3t routes`、`i3t ping` 问的本机状态接口。
+//! 它们都只有"一个不带请求体的 GET（参数在查询串里），回一段文本"这一种用法，所以不值得为此让节点程序带上一个完整的 HTTP 库：
 //! 每条连接只处理一个请求，回完就关。
 
 use std::future::Future;
@@ -26,6 +26,8 @@ pub(crate) struct Request {
     pub(crate) method: String,
     /// 路径，不带查询串。
     pub(crate) path: String,
+    /// `?` 后面的查询串，原样；没有时是空的。
+    pub(crate) query: String,
     /// `Authorization: Bearer <令牌>` 里的令牌。
     pub(crate) bearer: Option<String>,
 }
@@ -133,8 +135,13 @@ fn parse_request(head: &str) -> Option<Request> {
         let (name, value) = line.split_once(':')?;
         name.eq_ignore_ascii_case("authorization").then(|| value.trim().strip_prefix("Bearer ")).flatten()
     });
-    let path = target.split('?').next().unwrap_or(target);
-    Some(Request { method: method.to_owned(), path: path.to_owned(), bearer: bearer.map(|token| token.trim().to_owned()) })
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    Some(Request {
+        method: method.to_owned(),
+        path: path.to_owned(),
+        query: query.to_owned(),
+        bearer: bearer.map(|token| token.trim().to_owned()),
+    })
 }
 
 /// 向 `addr` 发一个 `GET`，返回应答体。
@@ -215,7 +222,10 @@ mod tests {
         let head =
             "GET /metrics?format=text HTTP/1.1\r\nHost: 127.0.0.1:20333\r\nUser-Agent: curl/8\r\nauthorization:  Bearer  abc \r\n\r\n";
         let request = parse_request(head).unwrap();
-        assert_eq!(request, Request { method: "GET".into(), path: "/metrics".into(), bearer: Some("abc".into()) });
+        assert_eq!(
+            request,
+            Request { method: "GET".into(), path: "/metrics".into(), query: "format=text".into(), bearer: Some("abc".into()) }
+        );
         assert_eq!(parse_request("GET /x HTTP/1.0\r\n\r\n").unwrap().bearer, None);
         assert!(parse_request("GET x HTTP/1.1\r\n\r\n").is_none() && parse_request("\r\n\r\n").is_none());
     }

@@ -21,7 +21,8 @@ use anyhow::{Context, anyhow, bail, ensure};
 use i3t_crypto::{NodeKey, tls};
 use i3t_model::Netmap;
 use i3t_model::control::{
-    BackboneRow, Hello, MAX_FRAME_LEN, Report, RouteAnswer, RouteEntry, RouteKind, Signal, TestOrder, TestReport, ToController, ToNode,
+    BackboneRow, ExitTestResult, Hello, MAX_FRAME_LEN, Report, RouteAnswer, RouteEntry, RouteKind, Signal, TestOrder, TestReport,
+    ToController, ToNode,
 };
 use i3t_model::update::{Platform, SignedManifest, UpdateTiming, Version};
 use i3t_proto::NodeId;
@@ -240,6 +241,10 @@ pub struct LinkSetup {
     pub tests: Box<dyn Fn(TestMessage) + Send + Sync>,
     /// 主动测试的结果从这里取出来送给 controller。没有连着的时候留在队列里，连上之后再送（controller 不认的会丢掉）。
     pub test_reports: mpsc::Receiver<TestReport>,
+    /// controller 的出口测试交给它：编号、主机、端口。在长连接的任务里调用，不能阻塞。
+    pub exit_tests: Box<dyn Fn(u64, String, u16) + Send + Sync>,
+    /// 出口测试做完的结果从这里取出来送给 controller。
+    pub exit_test_answers: mpsc::Receiver<(u64, ExitTestResult)>,
     /// 收到的 netmap 存到这里，下次启动时用。
     pub state: StateDir,
     pub timing: Timing,
@@ -462,10 +467,14 @@ impl Worker {
                         }
                         ToNode::Test(order) => (self.setup.tests)(TestMessage::Order(*order)),
                         ToNode::TestEnd { test } => (self.setup.tests)(TestMessage::End(test)),
+                        ToNode::ExitTest { request, host, port } => (self.setup.exit_tests)(request, host, port),
                     }
                 }
                 Some(report) = self.setup.test_reports.recv() => {
                     write_message(&mut writer, &ToController::TestReport(Box::new(report))).await?;
+                }
+                Some((request, result)) = self.setup.exit_test_answers.recv() => {
+                    write_message(&mut writer, &ToController::ExitTestAnswer { request, result: Box::new(result) }).await?;
                 }
                 Some((to, signal)) = self.outgoing.recv() => {
                     write_message(&mut writer, &ToController::Signal { to, signal }).await?;
@@ -705,6 +714,7 @@ fn kind_of(message: &ToNode) -> &'static str {
         ToNode::BackboneQuery { .. } => "backbone_query",
         ToNode::Test(_) => "test",
         ToNode::TestEnd { .. } => "test_end",
+        ToNode::ExitTest { .. } => "exit_test",
     }
 }
 
@@ -809,6 +819,8 @@ mod tests {
             report_now: Arc::new(Notify::new()),
             tests: Box::new(|_| {}),
             test_reports: mpsc::channel(1).1,
+            exit_tests: Box::new(|_, _, _| {}),
+            exit_test_answers: mpsc::channel(1).1,
             state,
             timing,
         };

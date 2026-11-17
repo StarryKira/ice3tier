@@ -11,7 +11,7 @@ use common::{
     ECHO_LEN, GW, LAPTOP, NAS, PUBLIC_IP, Target, World, assert_echo, assert_reset, closed_port, credential, drain, echo_server,
     eventually, http_connect, listener, node, non_loopback_address, peer_mut, socks5,
 };
-use i3t_access::ListenState;
+use i3t_access::{ListenState, TargetCause};
 use i3t_model::netmap::{DefaultAction, ExitRole, Forward, ForwardProtocol, ForwardTarget, ListenerProtocol, PeerExit};
 use tokio::net::TcpStream;
 
@@ -206,8 +206,8 @@ async fn local_egress_on_a_non_loopback_listener_needs_the_exit_role_and_obeys_i
     assert_eq!(socks5(lan, auth, PUBLIC_IP, 443).await.failed(), 2);
     assert!(world.laptop.system.connected().is_empty());
 
-    // 启用出口之后可以，但套用出口的策略：默认只放行 80 和 443，内网地址不行。
-    world.laptop.update(|netmap| netmap.me.exit = Some(ExitRole::default())).await;
+    // 启用出口之后可以，但套用出口的策略：端口白名单（这里写了只放行 80 和 443），内网地址不行。
+    world.laptop.update(|netmap| netmap.me.exit = Some(ExitRole { ports: Some(vec![80, 443]), ..ExitRole::default() })).await;
     let mut stream = socks5(lan, auth, PUBLIC_IP, 443).await.connected();
     assert_echo(&mut stream).await;
     assert_eq!(socks5(lan, auth, PUBLIC_IP, 8443).await.failed(), 2);
@@ -231,7 +231,7 @@ i3t_lane::on_both_transports! {
         assert_eq!(world.gw.exit.stats().total, 0);
 
         // 入口以为开着，出口自己知道没开：出口拒绝。局域网目标要等出口的应答，所以客户端拿到的还是错误码。
-        world.laptop.update(|netmap| peer_mut(netmap, GW).exit = Some(PeerExit { lan: true, class: None })).await;
+        world.laptop.update(|netmap| peer_mut(netmap, GW).exit = Some(PeerExit { lan: true, class: None, optimistic: None })).await;
         assert_eq!(lan_target().await.failed(), 2);
         assert_eq!(world.gw.exit.stats().refused, 1);
         assert!(world.gw.system.connected().is_empty());
@@ -265,7 +265,7 @@ i3t_lane::on_both_transports! {
         world
             .nas
             .update(|netmap| {
-                netmap.me.forward_targets.push(ForwardTarget { id: 7, protocol: ForwardProtocol::Tcp, addr: echo, listener: node(LAPTOP) });
+                netmap.me.forward_targets.push(ForwardTarget { id: 7, protocol: ForwardProtocol::Tcp, addr: echo, listener: node(LAPTOP), proxy_protocol: None });
             })
             .await;
 
@@ -294,8 +294,8 @@ i3t_lane::on_both_transports! {
             .nas
             .update(|netmap| {
                 netmap.me.forward_targets = vec![
-                    ForwardTarget { id: 7, protocol: ForwardProtocol::Tcp, addr: target.addr(), listener: node(GW) },
-                    ForwardTarget { id: 7, protocol: ForwardProtocol::Udp, addr: target.addr(), listener: node(LAPTOP) },
+                    ForwardTarget { id: 7, protocol: ForwardProtocol::Tcp, addr: target.addr(), listener: node(GW), proxy_protocol: None },
+                    ForwardTarget { id: 7, protocol: ForwardProtocol::Udp, addr: target.addr(), listener: node(LAPTOP), proxy_protocol: None },
                 ];
             })
             .await;
@@ -336,7 +336,7 @@ i3t_lane::on_both_transports! {
             .nas
             .update(|netmap| {
                 netmap.me.forwards.push(tcp_forward(9, "10.66.0.3:8080", NAS));
-                netmap.me.forward_targets.push(ForwardTarget { id: 9, protocol: ForwardProtocol::Tcp, addr: echo, listener: node(NAS) });
+                netmap.me.forward_targets.push(ForwardTarget { id: 9, protocol: ForwardProtocol::Tcp, addr: echo, listener: node(NAS), proxy_protocol: None });
             })
             .await;
         assert_eq!(status.forwards[0].state, ListenState::Virtual, "虚拟 IP 不是网卡上的地址，绑不了也不需要绑");
@@ -365,10 +365,114 @@ async fn a_forward_that_points_at_an_overlay_address_is_refused_instead_of_being
     world
         .nas
         .update(|netmap| {
-            netmap.me.forward_targets.push(ForwardTarget { id: 7, protocol: ForwardProtocol::Tcp, addr: overlay, listener: node(LAPTOP) });
+            netmap.me.forward_targets.push(ForwardTarget {
+                id: 7,
+                protocol: ForwardProtocol::Tcp,
+                addr: overlay,
+                listener: node(LAPTOP),
+                proxy_protocol: None,
+            });
         })
         .await;
     let mut stream = TcpStream::connect(world.laptop.forward(7).await).await.unwrap();
     assert_reset(&drain(&mut stream).await.1);
     assert!(world.nas.system.connected().is_empty(), "nas 没有去连那个地址");
+}
+
+/// `node` 上编号是 `id` 的转发最近一次在目标那里失败的原因。
+fn target_cause(node: &common::Node, id: u32) -> Option<TargetCause> {
+    node.access.status().forwards.iter().find(|forward| forward.id == id)?.target_failure.map(|failure| failure.cause)
+}
+
+#[tokio::test]
+async fn a_forward_reports_a_target_that_refuses_on_the_listening_node_and_clears_once_it_answers() {
+    let world = World::new().await;
+    let closed = closed_port().await;
+    // 一条普通的转发：laptop 监听，nas 去连；一条监听在 nas 虚拟 IP 上、nas 自己去连的转发。
+    world.laptop.update(|netmap| netmap.me.forwards.push(tcp_forward(7, "127.0.0.1:0", NAS))).await;
+    world
+        .nas
+        .update(|netmap| {
+            netmap.me.forwards.push(tcp_forward(9, "10.66.0.3:8080", NAS));
+            for (id, listener) in [(7, LAPTOP), (9, NAS)] {
+                netmap.me.forward_targets.push(ForwardTarget {
+                    id,
+                    protocol: ForwardProtocol::Tcp,
+                    addr: closed,
+                    listener: node(listener),
+                    proxy_protocol: None,
+                });
+            }
+        })
+        .await;
+
+    let mut stream = TcpStream::connect(world.laptop.forward(7).await).await.unwrap();
+    assert_reset(&drain(&mut stream).await.1);
+    assert_eq!(target_cause(&world.laptop, 7), Some(TargetCause::Refused), "监听节点从 nas 的拒绝里知道原因");
+    assert_eq!(socks5(world.socks().await, None, "10.66.0.3", 8080).await.failed(), 5);
+    assert_eq!(target_cause(&world.nas, 9), Some(TargetCause::Refused), "虚拟 IP 上的转发记在 nas 自己那里");
+
+    let echo = echo_server().await;
+    world.nas.update(|netmap| netmap.me.forward_targets.iter_mut().for_each(|target| target.addr = echo)).await;
+    let mut stream = TcpStream::connect(world.laptop.forward(7).await).await.unwrap();
+    assert_echo(&mut stream).await;
+    drop(stream);
+    let mut stream = socks5(world.socks().await, None, "10.66.0.3", 8080).await.connected();
+    assert_echo(&mut stream).await;
+    assert_eq!(target_cause(&world.nas, 9), None, "连上了就清掉");
+    drop(stream);
+    tokio::time::timeout(common::PATIENCE, async {
+        while target_cause(&world.laptop, 7).is_some() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("一条流成功之后监听节点上的记录清掉");
+}
+
+i3t_lane::on_both_transports! {
+    async fn a_forward_with_proxy_protocol_tells_the_service_the_initiators_virtual_ip() {
+        use i3t_model::netmap::ProxyProtocol;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let world = World::new().await;
+        let (v1, v2) = (Target::bind("127.0.0.1").await, Target::bind("127.0.0.1").await);
+        world.laptop.update(|netmap| netmap.me.forwards.push(tcp_forward(7, "127.0.0.1:0", NAS))).await;
+        world
+            .nas
+            .update(|netmap| {
+                netmap.me.forwards.push(tcp_forward(9, "10.66.0.3:8080", NAS));
+                let target = |id, addr, listener, proxy_protocol| ForwardTarget {
+                    id,
+                    protocol: ForwardProtocol::Tcp,
+                    addr,
+                    listener: node(listener),
+                    proxy_protocol: Some(proxy_protocol),
+                };
+                netmap.me.forward_targets.push(target(7, v1.addr(), LAPTOP, ProxyProtocol::V1));
+                netmap.me.forward_targets.push(target(9, v2.addr(), NAS, ProxyProtocol::V2));
+            })
+            .await;
+
+        // 普通的转发：laptop 监听，服务看到的是 laptop 的虚拟 IP，后面紧跟着客户端的数据。
+        let mut client = TcpStream::connect(world.laptop.forward(7).await).await.unwrap();
+        client.write_all(b"hello").await.unwrap();
+        let mut service = v1.accept().await;
+        let port = service.peer_addr().unwrap().port();
+        let expected = format!("PROXY TCP4 10.66.0.1 127.0.0.1 {port} {}\r\nhello", v1.addr().port());
+        let mut received = vec![0; expected.len()];
+        tokio::time::timeout(common::PATIENCE, service.read_exact(&mut received)).await.unwrap().unwrap();
+        assert_eq!(String::from_utf8(received).unwrap(), expected);
+
+        // 监听在 nas 虚拟 IP 上的转发：经它进来的是 laptop（SOCKS5 入口在 laptop 上），v2 的头。
+        let _client = socks5(world.socks().await, None, "10.66.0.3", 8080).await.connected();
+        let mut service = v2.accept().await;
+        let mut header = [0; 28];
+        tokio::time::timeout(common::PATIENCE, service.read_exact(&mut header)).await.unwrap().unwrap();
+        assert_eq!(&header[..16], b"\r\n\r\n\0\r\nQUIT\n\x21\x11\x00\x0c");
+        assert_eq!(&header[16..20], &[10, 66, 0, 1], "来源是发起节点的虚拟 IP");
+        assert_eq!(&header[20..24], &[127, 0, 0, 1]);
+        assert_eq!(u16::from_be_bytes([header[24], header[25]]), service.peer_addr().unwrap().port());
+        assert_eq!(u16::from_be_bytes([header[26], header[27]]), v2.addr().port());
+    }
 }

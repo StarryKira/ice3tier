@@ -130,7 +130,7 @@ impl Session {
         let Self { reply, peer, port, class, connection } = self;
         // 客户端是本机的程序，不写来源地址。
         let origin = Origin { credential: None, client: None };
-        let Some(mut context) = open_context(&shared, peer, class, origin, &mut outgoing).await else { return };
+        let Ok(mut context) = open_context(&shared, peer, class, origin, &mut outgoing).await else { return };
         let sender = context.sender();
         let target = Target::Node { port };
         tracing::debug!(%peer, port, "被拦截的 UDP 会话建立");

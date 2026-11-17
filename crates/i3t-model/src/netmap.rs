@@ -225,8 +225,9 @@ pub struct RelayRole {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExitRole {
-    /// 互联网目标允许的端口。没有值表示不限制。局域网目标不受它限制。
-    #[serde(default = "default_exit_ports")]
+    /// 互联网目标允许的端口。没有值（默认）表示不限制；写了列表就只允许这些。局域网目标不受它限制。
+    /// 不管端口一律不连的地址（私有、回环、链路本地、运营商级 NAT、云平台元数据、节点和覆盖网的地址）照样不连。
+    #[serde(default)]
     pub ports: Option<Vec<u16>>,
     /// 允许把流送往本机网卡直连的网段。
     #[serde(default)]
@@ -253,12 +254,16 @@ pub struct ExitRole {
     /// 经这个出口的流的默认服务等级，排在用户名和监听器的设置之后、网络的默认值之前。
     #[serde(default)]
     pub class: Option<Class>,
+    /// 经这个出口的流用不用乐观回复（不等出口的 REPLY 就告诉客户端连上了），盖过按目标种类的默认值；
+    /// 监听器自己设了的话以监听器的为准。没有值时按目标的种类：互联网目标用，局域网目标不用。
+    #[serde(default)]
+    pub optimistic: Option<bool>,
 }
 
 impl Default for ExitRole {
     fn default() -> Self {
         Self {
-            ports: default_exit_ports(),
+            ports: None,
             lan: false,
             bandwidth_mbps: None,
             upstream_socks5: None,
@@ -267,13 +272,9 @@ impl Default for ExitRole {
             family: IpFamily::default(),
             connects_per_minute: None,
             class: None,
+            optimistic: None,
         }
     }
-}
-
-// serde 的 `default = "..."` 要的是一个返回字段类型的函数，所以这里返回 Option。
-fn default_exit_ports() -> Option<Vec<u16>> {
-    Some(vec![80, 443])
 }
 
 const fn default_quota_reset_day() -> u8 {
@@ -401,6 +402,9 @@ pub struct PeerExit {
     /// 这个出口的默认服务等级（[`ExitRole::class`]）。入口给经它出去的流挑等级时要用。
     #[serde(default)]
     pub class: Option<Class>,
+    /// 这个出口的乐观回复设置（[`ExitRole::optimistic`]）。入口决定等不等 REPLY 时要用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optimistic: Option<bool>,
 }
 
 /// 一个启用了的 relay。
@@ -511,6 +515,18 @@ pub struct ForwardTarget {
     pub addr: SocketAddr,
     /// 监听这条转发的节点。只有它开过来的流才能用这一条。
     pub listener: NodeId,
+    /// 连上之后先给目标发一个 PROXY protocol 的头，说出发起节点的虚拟 IP（只有 TCP 的转发有）。
+    /// 旧版本的节点不认这一项，照旧不发。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_protocol: Option<ProxyProtocol>,
+}
+
+/// PROXY protocol 的哪一版（HAProxy 的规范）：v1 是一行文字，v2 是二进制的头。服务说它认哪一版就用哪一版。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyProtocol {
+    V1,
+    V2,
 }
 
 /// 一个接入凭据。入口只保存令牌的哈希。
@@ -680,11 +696,14 @@ mod tests {
     }
 
     #[test]
-    fn exit_ports_default_to_web_and_null_means_unrestricted() {
+    fn exit_ports_default_to_unrestricted_and_a_list_restricts() {
         let default: ExitRole = serde_json::from_str("{}").unwrap();
-        assert_eq!(default.ports, Some(vec![80, 443]));
+        assert_eq!((default.ports.clone(), ExitRole::default().ports), (None, None));
         let any: ExitRole = serde_json::from_str(r#"{"ports": null}"#).unwrap();
         assert_eq!(any.ports, None);
+        let listed: ExitRole = serde_json::from_str(r#"{"ports": [80, 443]}"#).unwrap();
+        assert_eq!(listed.ports, Some(vec![80, 443]));
+        assert_eq!(serde_json::to_value(&default).unwrap()["ports"], serde_json::Value::Null, "写出来的总有这一项，旧版本读到的也是不限");
     }
 
     #[test]
@@ -744,7 +763,7 @@ mod tests {
         assert_eq!((forward.class, forward.bind.port()), (None, 0));
         assert_eq!(minimal().network.class, None);
         let peer_exit: PeerExit = serde_json::from_value(serde_json::json!({ "lan": true, "class": "bulk" })).unwrap();
-        assert_eq!(peer_exit, PeerExit { lan: true, class: Some(Class::Bulk) });
+        assert_eq!(peer_exit, PeerExit { lan: true, class: Some(Class::Bulk), optimistic: None });
         let quota: ExitRole = serde_json::from_value(serde_json::json!({ "family": "ipv4", "quota_bytes": 1_000_000 })).unwrap();
         assert_eq!((quota.family, quota.quota_bytes), (IpFamily::Ipv4, Some(1_000_000)));
     }

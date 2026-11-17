@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 
 use i3t_model::admin::{ForwardInput, NetworkId};
-use i3t_model::netmap::ForwardProtocol;
+use i3t_model::netmap::{ForwardProtocol, ProxyProtocol};
 use i3t_proto::NodeId;
 use i3t_proto::flow::Class;
 use ipnet::IpNet;
@@ -32,6 +32,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<ForwardRecord> {
             allow_from: row.get::<_, Json<Vec<IpNet>>>("allow_from")?.0,
             enabled: row.get("enabled")?,
             class: row.get::<_, Option<Json<Class>>>("class")?.map(|json| json.0),
+            proxy_protocol: row.get::<_, Option<Json<ProxyProtocol>>>("proxy_protocol")?.map(|json| json.0),
         },
     })
 }
@@ -42,8 +43,10 @@ impl Store {
     /// 写数据库失败。
     pub fn insert_forward(&self, network: NetworkId, config: &ForwardInput) -> Result<u32, StoreError> {
         self.conn.execute(
-            "INSERT INTO forwards (network_id, name, protocol, listen_node, bind, target_node, target_addr, allow_from, enabled, class)
-             VALUES (:network, :name, :protocol, :listen_node, :bind, :target_node, :target_addr, :allow_from, :enabled, :class)",
+            "INSERT INTO forwards (network_id, name, protocol, listen_node, bind, target_node, target_addr, allow_from, enabled, class,
+                                   proxy_protocol)
+             VALUES (:network, :name, :protocol, :listen_node, :bind, :target_node, :target_addr, :allow_from, :enabled, :class,
+                     :proxy_protocol)",
             named_params! {
                 ":network": SqlNetwork(network),
                 ":name": config.name,
@@ -55,6 +58,7 @@ impl Store {
                 ":allow_from": Json(&config.allow_from),
                 ":enabled": config.enabled,
                 ":class": config.class.map(Json),
+                ":proxy_protocol": config.proxy_protocol.map(Json),
             },
         )?;
         Ok(row_id(self.conn.last_insert_rowid())?)
@@ -90,7 +94,7 @@ impl Store {
         self.conn.execute(
             "UPDATE forwards SET name = :name, protocol = :protocol, listen_node = :listen_node, bind = :bind,
                                  target_node = :target_node, target_addr = :target_addr, allow_from = :allow_from, enabled = :enabled,
-                                 class = :class
+                                 class = :class, proxy_protocol = :proxy_protocol
              WHERE id = :id",
             named_params! {
                 ":id": id,
@@ -103,6 +107,7 @@ impl Store {
                 ":allow_from": Json(&config.allow_from),
                 ":enabled": config.enabled,
                 ":class": config.class.map(Json),
+                ":proxy_protocol": config.proxy_protocol.map(Json),
             },
         )?;
         Ok(())
@@ -142,6 +147,7 @@ mod tests {
             allow_from: Vec::new(),
             enabled: true,
             class: None,
+            proxy_protocol: Some(ProxyProtocol::V2),
         }
     }
 
@@ -158,6 +164,7 @@ mod tests {
             allow_from: vec!["10.0.0.0/8".parse().unwrap()],
             enabled: false,
             class: Some(i3t_proto::flow::Class::Interactive),
+            proxy_protocol: None,
             ..original
         };
         store.update_forward(id, &replacement).unwrap();

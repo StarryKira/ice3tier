@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use bytes::Bytes;
 use i3t_conn::Connector;
 use i3t_conn::contract::Datagrams;
+use i3t_flow::FlowError;
 use i3t_model::netmap::{Forward, ForwardProtocol};
 use i3t_proto::flow::{Class, Origin, Target};
 use tokio::net::UdpSocket;
@@ -27,6 +28,7 @@ use tokio::time;
 use tracing::Instrument;
 
 use super::{MAX_UDP_PAYLOAD, OUTGOING_BACKLOG, open_context, owned};
+use crate::forward_health::TargetCause;
 use crate::manager::{Counters, allowed};
 use crate::session::{Shared, origin_address};
 use crate::usage::Tally;
@@ -162,7 +164,20 @@ impl Session {
     async fn run<C: Connector + Datagrams, E>(self, shared: Arc<Shared<C, E>>, forward: Forward, mut outgoing: mpsc::Receiver<Bytes>) {
         let _active = self.active;
         let origin = Origin { credential: None, client: origin_address(self.client) };
-        let Some(mut context) = open_context(&shared, forward.target, self.class, origin, &mut outgoing).await else { return };
+        // 会话开不开得起来是 UDP 的转发唯一看得到的"目标连不连得上"：报文发出去之后目标收没收到，UDP 不说。
+        let mut context = match open_context(&shared, forward.target, self.class, origin, &mut outgoing).await {
+            Ok(context) => {
+                shared.forward_health.record(forward.id, Ok(()));
+                context
+            }
+            Err(error) => {
+                let cause = match error {
+                    FlowError::Refused(reply) => TargetCause::of(reply.status).unwrap_or(TargetCause::Other),
+                    _ => TargetCause::NodeUnreachable,
+                };
+                return shared.forward_health.record(forward.id, Err(cause));
+            }
+        };
         let sender = context.sender();
         let target = Target::Forward { id: forward.id };
         tracing::debug!(target = %forward.target, "UDP 端口转发的会话建立");

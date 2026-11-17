@@ -94,6 +94,10 @@ impl Controller {
                 Ok(())
             }
             ToController::TestReport(report) => inner.test_reported(session.node, *report),
+            ToController::ExitTestAnswer { request, result } => {
+                inner.exit_test_answered(session.node, request, *result);
+                Ok(())
+            }
             ToController::Report(report) => inner.report(session.node, report),
             ToController::Ack { version } => inner.ack(session.node, version),
             ToController::Signal { to, signal } => {

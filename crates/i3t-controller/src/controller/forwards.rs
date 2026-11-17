@@ -1,6 +1,7 @@
 //! 端口转发的增删改，和每条转发现在的状态。
 
 use i3t_model::admin::{Forward, ForwardInput, ForwardStatus, LogRef, NetworkId, RefKind};
+use i3t_model::netmap::ForwardProtocol;
 use serde_json::{Value, json};
 
 use super::nodes::{is_connectable, require_node};
@@ -130,6 +131,8 @@ impl Inner {
             status,
             class: config.class,
             listen: self.forward_listen_status(config.listen_node, record.id),
+            target_failure: self.forward_target_failure(config.listen_node, record.id),
+            proxy_protocol: config.proxy_protocol,
         }
     }
 }
@@ -147,6 +150,10 @@ fn check(store: &Store, network: NetworkId, replacing: Option<u32>, mut config: 
     // 虚拟 IP 上的转发不占操作系统的端口，没有"空闲的端口"可挑，要写明。
     if config.bind.port() == 0 && config.bind.ip() == std::net::IpAddr::V4(listener.virtual_ip) {
         return Err(Error::invalid_field("bind", "zero_port", "监听在虚拟 IP 上的端口转发要写明端口，不能是 0"));
+    }
+    // PROXY protocol 的头是给 TCP 的服务读的：v1 没有 UDP 的写法，v2 的要加在每个报文前面，认它的 UDP 服务几乎没有。
+    if config.proxy_protocol.is_some() && config.protocol == ForwardProtocol::Udp {
+        return Err(Error::invalid_field("proxy_protocol", "tcp_only", "PROXY protocol 只用在 TCP 的端口转发上"));
     }
     if !is_connectable(&config.target_addr) {
         return Err(Error::invalid_field(
