@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Hash, Plus, X } from 'lucide-react'
+import { ChevronRight, DoorOpen, Globe, Hash, Plus, Server, Workflow, X } from 'lucide-react'
 import { type KeyboardEvent, type ReactNode, useId, useState } from 'react'
 import { Link } from 'react-router'
 
@@ -100,7 +100,7 @@ type ExitForm = ReturnType<typeof useExitForm>
 /** 出口的设置，一行一项（端口限制在单独的卡片里）。 */
 function ExitSettingsList({ ctl }: { ctl: ExitForm }) {
   const { form, setForm, commit, problems, shown, save } = ctl
-  const ids = { lan: useId(), quota: useId(), family: useId(), connects: useId(), upstream: useId() }
+  const ids = { lan: useId(), quota: useId(), family: useId(), connects: useId() }
   const classId = useId()
 
   return (
@@ -192,23 +192,6 @@ function ExitSettingsList({ ctl }: { ctl: ExitForm }) {
             value={form.serviceClass}
             inheritLabel={d.exitFormClassNone}
             onChange={(serviceClass) => commit({ ...form, serviceClass })}
-          />
-        </SettingRow>
-
-        <SettingRow
-          label={d.exitFormUpstream}
-          hint={d.exitFormUpstreamHint}
-          htmlFor={ids.upstream}
-          error={shown('upstream')}
-        >
-          <Input
-            id={ids.upstream}
-            className="w-56 font-mono"
-            placeholder="127.0.0.1:1080"
-            value={form.upstream}
-            onChange={(event) => setForm({ ...form, upstream: event.target.value })}
-            onBlur={() => commit(form, 'upstream')}
-            onKeyDown={onEnter(() => commit(form, 'upstream'))}
           />
         </SettingRow>
       </div>
@@ -364,6 +347,138 @@ function ExitPortsCard({ node, ctl }: { node: NodeDetail; ctl: ExitForm }) {
           <PortsEditor ctl={ctl} />
         </div>
       ) : null}
+    </BoxCard>
+  )
+}
+
+/** 示意图里的一站：图标块、名字，下面一行小字。每一站一样高。 */
+function Hop({ icon, label, sub, dim }: { icon: ReactNode; label: string; sub: string; dim: boolean }) {
+  return (
+    <div
+      className={cn(
+        'flex h-14 items-center gap-2.5 rounded-lg border bg-card px-3 whitespace-nowrap transition-opacity',
+        dim && 'opacity-40',
+      )}
+    >
+      <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-foreground/80 [&>svg]:size-4">
+        {icon}
+      </span>
+      <div>
+        <p className="text-[13px] leading-5 font-medium">{label}</p>
+        <p className="text-xs leading-4 text-muted-foreground tabular">{sub}</p>
+      </div>
+    </div>
+  )
+}
+
+/** 两站之间的线，撑满中间的宽度，末端一个箭头。 */
+function FlowLine({ dim, className }: { dim: boolean; className?: string }) {
+  return (
+    <div className={cn('flex items-center transition-opacity', dim && 'opacity-40', className)}>
+      <div className="h-px flex-1 bg-border-strong" />
+      <ChevronRight aria-hidden className="-ml-1.5 size-4 shrink-0 text-faint" />
+    </div>
+  )
+}
+
+/**
+ * 两条路线上下对照：不经本机代理（出口直接到网站，中间一根长线跨过代理那一格）、经本机代理。
+ * 现在生效的那条正常显示、标着"现在"，另一条淡下去。两条放在同一个网格里，几站上下对齐。
+ * 读屏读的是下面那句话，图本身不读。
+ */
+function UpstreamDiagram({ node, proxy }: { node: NodeDetail; proxy: string | null }) {
+  const on = proxy !== null
+  const label = (text: string, active: boolean) => (
+    <p className={cn('col-span-full flex items-center gap-2 text-xs text-muted-foreground', !active && 'opacity-60')}>
+      {text}
+      {active ? <Badge tone="accent">{d.upstreamNow}</Badge> : null}
+    </p>
+  )
+  const users = (dim: boolean) => (
+    <Hop icon={<Server />} label={d.upstreamDiagUsers} sub={d.upstreamDiagUsersSub} dim={dim} />
+  )
+  const exit = (dim: boolean) => <Hop icon={<DoorOpen />} label={node.name} sub={d.upstreamDiagExit} dim={dim} />
+  return (
+    <figure className="overflow-x-auto rounded-lg bg-muted/50 p-4">
+      <div
+        aria-hidden
+        className="grid min-w-[34rem] grid-cols-[auto_minmax(1.25rem,1fr)_auto_minmax(1.25rem,1fr)_auto_minmax(1.25rem,1fr)_auto] items-center gap-y-2"
+      >
+        {label(d.upstreamRouteDirect, !on)}
+        {users(on)}
+        <FlowLine dim={on} />
+        {exit(on)}
+        <FlowLine dim={on} className="col-span-3" />
+        <Hop icon={<Globe />} label={d.upstreamDiagSite} sub={d.upstreamDiagSeesExit} dim={on} />
+
+        <div className="col-span-full h-2" />
+        {label(d.upstreamRouteProxy, on)}
+        {users(!on)}
+        <FlowLine dim={!on} />
+        {exit(!on)}
+        <FlowLine dim={!on} />
+        <Hop icon={<Workflow />} label={d.upstreamDiagProxy} sub={proxy ?? d.upstreamDiagProxySub} dim={!on} />
+        <FlowLine dim={!on} />
+        <Hop icon={<Globe />} label={d.upstreamDiagSite} sub={d.upstreamDiagSeesProxy} dim={!on} />
+      </div>
+      <figcaption className="sr-only">{on ? d.upstreamDiagOn : d.upstreamDiagOff(node.name)}</figcaption>
+    </figure>
+  )
+}
+
+/**
+ * 再经本机代理出去，单独一张卡片：默认关着。打开之后填出口机器上另一个代理程序（如 Clash）的 SOCKS5 地址，
+ * 离开输入框或回车时保存；地址没填好之前不保存，出口照旧直接出去。上面一张图说明流量怎么走。
+ */
+function ExitUpstreamCard({ node, ctl }: { node: NodeDetail; ctl: ExitForm }) {
+  const { form, setForm, commit, shown } = ctl
+  const inputId = useId()
+  const saved = node.exit?.upstream_socks5 ?? null
+  // 开关打开、地址还没填时，开关要看起来开着：这个状态只在页面上，服务器上还是没有代理。
+  const [opened, setOpened] = useState(false)
+  const on = saved !== null || opened
+
+  return (
+    <BoxCard data-testid="exit-upstream">
+      <header className="flex items-center justify-between gap-4 px-5 py-4">
+        <div className="flex min-w-0 items-center gap-3.5">
+          <span
+            aria-hidden
+            className="flex size-10 shrink-0 items-center justify-center rounded-lg border bg-muted/60 text-foreground/80"
+          >
+            <Workflow className="size-5" />
+          </span>
+          <div className="min-w-0">
+            <h2 className="text-[15px] leading-6 font-semibold">{d.upstreamTitle}</h2>
+            <p className="text-[13px] text-muted-foreground">{d.upstreamDesc}</p>
+          </div>
+        </div>
+        <Switch
+          aria-label={d.upstreamSwitch(node.name)}
+          checked={on}
+          onCheckedChange={(next) => {
+            setOpened(next)
+            if (!next) commit({ ...form, upstream: '' })
+          }}
+        />
+      </header>
+      <div className="space-y-4 border-t px-5 py-4">
+        <UpstreamDiagram node={node} proxy={saved} />
+        {on ? (
+          <SettingRow label={d.upstreamAddr} hint={d.upstreamAddrHint} htmlFor={inputId} error={shown('upstream')}>
+            <Input
+              id={inputId}
+              className="w-56 font-mono"
+              placeholder="127.0.0.1:7890"
+              autoFocus={saved === null}
+              value={form.upstream}
+              onChange={(event) => setForm({ ...form, upstream: event.target.value })}
+              onBlur={() => form.upstream.trim() !== '' && commit(form, 'upstream')}
+              onKeyDown={onEnter(() => commit(form, 'upstream'))}
+            />
+          </SettingRow>
+        ) : null}
+      </div>
     </BoxCard>
   )
 }
@@ -552,6 +667,7 @@ export function ExitEnabledLayout({ network, node, exit, renderCard }: ExitEnabl
       <div className="space-y-5">
         {renderCard(<ExitSettingsList ctl={ctl} />)}
         <ExitPortsCard node={node} ctl={ctl} />
+        <ExitUpstreamCard node={node} ctl={ctl} />
       </div>
       <div className="space-y-5">
         <ExitUsageCard network={network} node={node} />

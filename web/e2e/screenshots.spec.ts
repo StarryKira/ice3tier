@@ -486,6 +486,8 @@ test('有数据时：节点详情', async () => {
   await shot('node-detail-exit-wide', { fullPage: false })
   await page.getByTestId('exit-ports').scrollIntoViewIfNeeded()
   await shot('node-detail-exit-ports', { fullPage: false })
+  await page.getByTestId('exit-upstream').scrollIntoViewIfNeeded()
+  await shot('node-detail-exit-upstream', { fullPage: false })
   await page.setViewportSize({ width: 1280, height: 800 })
   await page.getByRole('tab', { name: d.tabForward }).click()
   await expect(page.getByTestId('capability-forward')).toBeVisible()
