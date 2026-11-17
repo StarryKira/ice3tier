@@ -54,6 +54,11 @@ function nodeOption(node: { ip: string }): Locator {
   return page.getByRole('option', { name: new RegExp(`${node.ip.replaceAll('.', '\\.')}(?!\\d)`) })
 }
 
+/** 策略页的两种看法：策略表、关系图。 */
+async function showPolicies(view: 'list' | 'graph'): Promise<void> {
+  await page.getByRole('radio', { name: view === 'list' ? t.access.viewList : t.access.viewGraph }).click()
+}
+
 function groupPoint(group: string, members: number): Locator {
   return page.getByTestId('group-graph').locator(`[aria-label="${t.access.graph.groupNodeLabel(group, members)}"]`)
 }
@@ -286,8 +291,10 @@ test('在节点列表上编辑节点的分组：只能选已有的', async () =>
   await expect(page.getByTestId(`node-row-${server.name}`)).toBeVisible()
 })
 
-test('加一条规则，关系图跟着变；停用默认规则后按分组收紧', async () => {
+test('加一条策略，关系图跟着变；停用默认策略后按分组收紧', async () => {
   await goTo(page, t.nav.access)
+  await expect(page.getByRole('switch', { name: t.access.ruleSwitch('default') })).toBeChecked()
+  await showPolicies('graph')
   await expect(page.getByTestId('group-graph')).toBeVisible()
   // 现在：三个分组，一条默认规则画成 All 上的一个环。
   await expect(groupPoint('All', 2)).toBeVisible()
@@ -295,6 +302,7 @@ test('加一条规则，关系图跟着变；停用默认规则后按分组收�
   await expect(groupPoint('laptops', 1)).toBeVisible()
   await expect(ruleEdge('default', true)).toHaveCount(1)
   await expect(page.getByTestId('group-graph').locator('.react-flow__edge')).toHaveCount(1)
+  await showPolicies('list')
 
   const d = t.access.dialog
   await page.getByRole('button', { name: t.access.newRule }).click()
@@ -324,8 +332,10 @@ test('加一条规则，关系图跟着变；停用默认规则后按分组收�
   const ssh = rules.find((rule) => rule.name === 'ssh')
   expect(ssh).toMatchObject({ src: { name: 'laptops' }, dst: { name: 'servers' }, direction: 'one_way' })
   await expect(page.getByTestId(`rule-row-${ssh?.id ?? 0}`)).toBeVisible()
+  await showPolicies('graph')
   await expect(ruleEdge('ssh', true)).toHaveCount(1)
   await expect(page.getByTestId('group-graph').locator('.react-flow__edge')).toHaveCount(2)
+  await showPolicies('list')
   // 界面上说出来：默认规则开着时别的规则不起限制作用。
   await expect(page.getByText(t.access.allOpenNotice)).toBeVisible()
   await clearToasts(page)
@@ -336,6 +346,7 @@ test('加一条规则，关系图跟着变；停用默认规则后按分组收�
   await expect(question).toContainText(t.access.lossBody(1))
   await question.getByRole('button', { name: t.access.disableConfirm }).click()
   await expectToast(page, t.access.disabledToast('default'))
+  await showPolicies('graph')
   await expect(ruleEdge('default', false)).toHaveCount(1)
   await expect(ruleEdge('default', true)).toHaveCount(0)
   await expect(page.getByText(t.access.allOpenNotice)).toHaveCount(0)

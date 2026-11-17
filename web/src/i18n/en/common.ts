@@ -3,6 +3,7 @@ import type { Messages } from '../messages'
 const plural = (n: number, one: string, many: string) => (n === 1 ? `1 ${one}` : `${n} ${many}`)
 
 export const common: Messages['common'] = {
+  searchShortcut: 'Ctrl K',
   appName: 'ice3tier',
   language: 'Language',
   appearance: 'Theme',

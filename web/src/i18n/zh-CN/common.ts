@@ -1,5 +1,6 @@
 /** 到处用到的词、错误、校验、时间。 */
 export const common = {
+  searchShortcut: 'Ctrl K',
   appName: 'ice3tier',
   language: '语言',
   appearance: '外观',

@@ -1,12 +1,16 @@
 /** 分组：分组页，以及节点、注册令牌上选分组的控件。 */
 export const groups = {
   title: '分组',
-  subtitle: '访问规则在分组之间生效',
+  subtitle: '访问策略在分组之间生效',
   create: '新建分组',
   loadFailed: '无法加载分组',
-  colName: '名字',
+  colName: '名称',
   colNodes: '节点',
-  colRules: '规则',
+  colRules: '策略',
+  searchPlaceholder: '搜索分组',
+  noMatch: '没有匹配的分组',
+  nodesCount: (n: number) => `${n} 个节点`,
+  rulesCount: (n: number) => `${n} 条策略`,
   builtin: '内置',
   builtinTip: '包含所有节点，不能改名或删除',
   members: '成员',
@@ -33,7 +37,7 @@ export const groups = {
   deleteImpact: (nodes: number, rules: number) => {
     const parts = [
       nodes > 0 ? `它将从 ${nodes} 个节点上移除。` : null,
-      rules > 0 ? `用到它的 ${rules} 条规则一并删除，依靠它们的访问随之撤销。` : null,
+      rules > 0 ? `用到它的 ${rules} 条策略一并删除，依靠它们的访问随之撤销。` : null,
     ].filter((part): part is string => part !== null)
     return parts.length === 0 ? null : parts.join('')
   },

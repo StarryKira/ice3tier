@@ -57,18 +57,20 @@ const planned = (id: PlannedId): NavItem => ({
 })
 
 /**
- * 侧栏的结构：每天会看的三项在最上面，不加标题；然后按"在做哪一类事"分区，管理类的在最后。
+ * 侧栏的结构：每天会看的两项在最上面，不加标题；然后按"在做哪一类事"分区，管理类的在最后。
  * 每个页面只有这一个入口。详情页没有自己的入口，打开时它所属的列表项保持高亮。
  */
 export const NAV_GROUPS: readonly NavGroup[] = [
   {
     id: 'main',
-    items: [
-      item('overview', () => t.nav.overview, LayoutDashboard),
-      item('nodes', () => t.nav.nodes, Server),
-      item('access', () => t.nav.access, ShieldCheck),
-      item('groups', () => t.nav.groups, Boxes),
-    ],
+    items: [item('overview', () => t.nav.overview, LayoutDashboard), item('nodes', () => t.nav.nodes, Server)],
+  },
+  {
+    id: 'control',
+    get label() {
+      return t.nav.groupControl
+    },
+    items: [item('groups', () => t.nav.groups, Boxes), item('access', () => t.nav.access, ShieldCheck)],
   },
   {
     id: 'access',

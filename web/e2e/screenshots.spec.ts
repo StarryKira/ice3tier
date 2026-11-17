@@ -153,7 +153,7 @@ test('空的网络：每个页面没有数据时的样子', async () => {
   await page.getByRole('button', { name: t.addNode.done }).click()
 
   await goTo(page, t.nav.access)
-  await expect(page.getByTestId('group-graph')).toBeVisible()
+  await expect(page.getByRole('switch', { name: t.access.ruleSwitch('default') })).toBeVisible()
   await shot('access-default-rule-only')
 
   for (const [name, file, marker] of [
@@ -578,7 +578,6 @@ test('有数据时：拓扑和路径诊断', async () => {
 
 test('有数据时：访问控制', async () => {
   await goTo(page, t.nav.access)
-  await expect(page.getByTestId('group-graph')).toBeVisible()
   await expect(page.getByTestId('rule-row-2')).toBeVisible()
   await shot('access-all-open')
 
@@ -587,9 +586,13 @@ test('有数据时：访问控制', async () => {
   await expect(page.getByRole('alertdialog')).toBeVisible()
   await shot('access-disable-default-confirm', { fullPage: false })
   await page.getByRole('button', { name: t.access.disableConfirm }).click()
-  await expect(page.getByTestId('unconnected')).toContainText(counted(t.access.graph.unconnected))
+  await expect(page.getByTestId('unconnected')).toBeVisible()
   await clearToasts(page)
   await shot('access-tightened')
+  await page.getByRole('radio', { name: t.access.viewGraph }).click()
+  await expect(page.getByTestId('group-graph')).toBeVisible()
+  await shot('access-graph')
+  await page.getByRole('radio', { name: t.access.viewList }).click()
 
   const rd = t.access.dialog
   await page.getByRole('button', { name: t.access.newRule }).click()
@@ -605,6 +608,7 @@ test('有数据时：访问控制', async () => {
   await dialog.getByRole('button', { name: t.common.cancel, exact: true }).click()
   await page.getByRole('button', { name: t.common.discardConfirm }).click()
 
+  await page.getByRole('radio', { name: t.access.viewGraph }).click()
   await page.getByRole('radio', { name: t.access.graph.byNode }).click()
   await page.getByRole('combobox', { name: t.access.graph.nodePickLabel, exact: true }).click()
   await page.getByRole('option', { name: /gw-hk/ }).click()
@@ -622,7 +626,7 @@ test('有数据时：访问控制', async () => {
   await expect(page.getByTestId('check-laptop-nas-home')).toContainText(c.allowed)
   await shot('access-check')
   await page.getByRole('button', { name: c.close }).click()
-  await page.getByRole('radio', { name: t.access.graph.byGroup }).click()
+  await page.getByRole('radio', { name: t.access.viewList }).click()
 })
 
 test('有数据时：分组', async () => {
@@ -814,7 +818,7 @@ test('窄一些的笔记本宽度', async () => {
   await goTo(page, t.nav.access)
   await expect(page.getByTestId('rule-row-2')).toBeVisible()
   await shot('narrow-access-rules')
-  await page.getByRole('radio', { name: t.access.tabGraph }).click()
+  await page.getByRole('radio', { name: t.access.viewGraph }).click()
   await expect(page.getByTestId('group-graph')).toBeVisible()
   await shot('narrow-access-graph')
   await goTo(page, t.nav.forwards)

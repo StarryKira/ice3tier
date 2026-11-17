@@ -24,7 +24,7 @@ export const networks: Messages['networks'] = {
   cidrHint: 'Can only be expanded once nodes join',
   cidrOverlaps: (other, otherCidr) => `Overlaps network ${other} (${otherCidr})`,
   cidrShared: 'Inside 100.64.0.0/10, which may clash with the network an exit sits in',
-  noteDefaultRule: 'Includes rule all ⇄ all: every node can reach every other',
+  noteDefaultRule: 'Includes policy all ⇄ all: every node can reach every other',
   noteIsolation: 'Networks are fully isolated from each other',
 
   settingsTitle: (name) => `${name} settings`,
@@ -59,7 +59,7 @@ export const networks: Messages['networks'] = {
   settingsSaved: 'Settings saved',
 
   dangerTitle: 'Delete network',
-  dangerBody: "Deletes its rules, credentials and enrollment tokens. This can't be undone.",
+  dangerBody: "Deletes its policies, credentials and enrollment tokens. This can't be undone.",
   dangerNotEmpty: (n) => `Delete its ${count(n, 'node', 'nodes')} first`,
   viewNodes: 'View nodes',
   deleteButton: 'Delete network…',

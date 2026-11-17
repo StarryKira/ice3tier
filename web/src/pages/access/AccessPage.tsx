@@ -1,18 +1,21 @@
 import { useQuery } from '@tanstack/react-query'
-import { Plus, ScanSearch, ShieldOff } from 'lucide-react'
+import { Plus, ScanSearch, ShieldOff, X } from 'lucide-react'
 import { useState } from 'react'
 import { useSearchParams } from 'react-router'
 
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
 import { type AccessGraph, type GroupId, type Network, type NodeId, type Rule } from '@/api/types'
+import { isAllToAll } from '@/access/reach'
+import { GroupChip } from '@/components/groups'
 import { InfoTip } from '@/components/info-tip'
-import { NodeLink, NodeSelect } from '@/components/node'
+import { NodeSelect } from '@/components/node'
 import { Notice } from '@/components/notice'
+import { SearchBox } from '@/components/search-box'
+import { Toolbar } from '@/components/table'
 import { Canvas, Page, PageHeader } from '@/components/page'
 import { EmptyState, ErrorState, SkeletonBlock } from '@/components/states'
 import { Button } from '@/components/ui/button'
-import { Card, CardHeader } from '@/components/ui/card'
 import { Segmented } from '@/components/ui/segmented'
 import { t } from '@/i18n'
 import { formatList } from '@/lib/format'
@@ -23,7 +26,6 @@ import { useNetwork } from '@/pages/networks/context'
 
 import { AccessCheck } from './AccessCheck'
 import { GroupGraphView } from './GroupGraphView'
-import { GroupPanel } from './GroupPanel'
 import { NodeGraphView } from './NodeGraphView'
 import { RuleDialog, type RuleDraft } from './RuleDialog'
 import { RuleList } from './RuleList'
@@ -131,8 +133,9 @@ function NodeView({ network, graph, focus, onFocus }: NodeViewProps) {
 }
 
 /**
- * 访问控制：左边规则，右边关系图，放在同一个页面上。
- * 一条规则只有一行，改一下、右边的图跟着变，这种即时的因果是这个页面的全部价值。窗口窄时改成两个标签页。
+ * 策略：上面一行搜索和"列表 / 关系图"的切换，下面是占满宽度的策略表（照 NetBird 的样子），或者关系图。
+ * 从操作记录点过来的（`?rule=<编号>`）那条策略一开始就亮着；`?group=<编号>` 只列出用到这个分组的策略；
+ * `?show=graph` 打开关系图，`?view=node&node=<编号>` 是关系图的按节点看（出口页的链接用它）。
  */
 export function AccessPage() {
   useDocumentTitle(t.access.title)
@@ -141,18 +144,17 @@ export function AccessPage() {
   const nodes = useQuery(q.nodes(network.id))
   const [params, setParams] = useSearchParams()
 
-  const view: View = params.get('view') === 'node' ? 'node' : 'groups'
+  const graphView: View = params.get('view') === 'node' ? 'node' : 'groups'
+  const show: 'list' | 'graph' = params.get('show') === 'graph' || graphView === 'node' ? 'graph' : 'list'
   const focus = numberParam(params, 'node')
   const checking = params.get('check') === '1'
   const checkFrom = numberParam(params, 'from')
   const checkTo = numberParam(params, 'to')
+  const groupFilter = numberParam(params, 'group')
 
-  const [panel, setPanel] = useState<'rules' | 'graph'>('rules')
   const [editor, setEditor] = useState<Editor>(null)
-  const [hovered, setHovered] = useState<number | null>(null)
-  // 从操作记录点过来的（`?rule=<编号>`）那条规则一开始就选中；`?group=<编号>` 亮出那个分组。
+  const [search, setSearch] = useState('')
   const [selected, setSelected] = useState<number | null>(() => numberParam(params, 'rule'))
-  const [activeGroup, setActiveGroup] = useState<GroupId | null>(() => numberParam(params, 'group'))
 
   const update = (changes: Record<string, string | null>) => {
     const next = new URLSearchParams(params)
@@ -171,7 +173,19 @@ export function AccessPage() {
 
   const data = graph.data
   const all = allGroupId(data?.groups)
-  const enabledCount = data?.rules.filter((rule) => rule.enabled).length ?? 0
+  const filterGroup = data?.groups.find((group) => group.id === groupFilter)
+  const needle = search.trim().toLowerCase()
+  const rules = (data?.rules ?? []).filter(
+    (rule) =>
+      (groupFilter === null || rule.src.id === groupFilter || rule.dst.id === groupFilter) &&
+      (needle === '' || [rule.name, rule.src.name, rule.dst.name].some((text) => text.toLowerCase().includes(needle))),
+  )
+  const pending = (data?.unacknowledged ?? []).filter(
+    (node) => nodes.data?.find((candidate) => candidate.id === node.id)?.online !== false,
+  )
+  // 文档里的那句提醒要出现在界面上：All ⇄ All 开着时，别的策略看不出效果。
+  const allOpen = data?.rules.some((rule) => rule.enabled && isAllToAll(rule)) ?? false
+  const othersEnabled = data?.rules.some((rule) => rule.enabled && !isAllToAll(rule)) ?? false
 
   return (
     <Page fill className="@container">
@@ -213,127 +227,122 @@ export function AccessPage() {
         <SkeletonBlock lines={6} />
       ) : (
         <>
-          <Segmented
-            aria-label={t.access.layoutLabel}
-            value={panel}
-            onChange={setPanel}
-            options={[
-              { value: 'rules', label: t.access.tabRules },
-              { value: 'graph', label: t.access.tabGraph },
-            ]}
-            className="mb-6 self-start @4xl:hidden"
-          />
-          <div className="grid flex-1 grid-cols-1 gap-x-12 gap-y-10 @4xl:grid-cols-[minmax(0,26rem)_minmax(0,1fr)]">
-            <div className={cn('space-y-12', panel === 'graph' && 'hidden @4xl:block')}>
-              <Card>
-                <CardHeader
-                  title={t.access.rulesTitle}
-                  tip={t.access.rulesHint}
-                  description={data.rules.length > 0 ? t.access.rulesCount(enabledCount, data.rules.length) : undefined}
-                />
-                {data.rules.length === 0 ? (
-                  <EmptyState
-                    icon={ShieldOff}
-                    title={t.access.emptyTitle}
-                    action={
-                      <>
-                        <Button
-                          pending={restore.isPending}
-                          disabled={all === undefined}
-                          onClick={() => all !== undefined && restore.mutate(all)}
-                        >
-                          {t.access.restoreDefault}
-                        </Button>
-                        <Button variant="primary" onClick={() => setEditor({ rule: null })}>
-                          <Plus aria-hidden />
-                          {t.access.newRule}
-                        </Button>
-                      </>
-                    }
-                  />
-                ) : (
-                  <RuleList
-                    network={network}
-                    graph={data}
-                    highlighted={hovered ?? selected}
-                    focused={selected}
-                    onHighlight={setHovered}
-                    onEdit={(rule) => setEditor({ rule })}
-                  />
-                )}
-              </Card>
+          <Toolbar>
+            {show === 'list' ? (
+              <SearchBox value={search} onChange={setSearch} placeholder={t.access.searchPlaceholder} />
+            ) : (
+              <Segmented
+                aria-label={g.viewLabel}
+                value={graphView}
+                onChange={(next) => update({ view: next === 'groups' ? null : next })}
+                options={[
+                  { value: 'groups', label: g.byGroup },
+                  { value: 'node', label: g.byNode },
+                ]}
+              />
+            )}
+            {filterGroup !== undefined && show === 'list' ? (
+              <span className="inline-flex h-9 items-center gap-1.5 rounded-md border px-2.5 text-[13px]">
+                <GroupChip name={filterGroup.name} builtin={filterGroup.builtin} />
+                <button
+                  type="button"
+                  aria-label={t.access.clearGroupFilter(filterGroup.name)}
+                  className="rounded-sm text-muted-foreground hover:text-foreground"
+                  onClick={() => update({ group: null })}
+                >
+                  <X className="size-3.5" aria-hidden />
+                </button>
+              </span>
+            ) : null}
+            <Segmented
+              aria-label={t.access.viewLabel}
+              value={show}
+              onChange={(next) => update({ show: next === 'list' ? null : next, view: null, node: null })}
+              options={[
+                { value: 'list', label: t.access.viewList },
+                { value: 'graph', label: t.access.viewGraph },
+              ]}
+              className="ml-auto"
+            />
+          </Toolbar>
 
-              <Card>
-                <CardHeader title={t.access.groupsPanel.title} />
-                <GroupPanel network={network} graph={data} active={activeGroup} />
-              </Card>
-            </div>
+          <div className="mb-4 space-y-2 empty:hidden">
+            {/* 离线的节点上线时才拿新配置，不算"没确认"：只说在线却还没确认的。 */}
+            {pending.length > 0 ? (
+              <Notice tone="warn">{g.unacked(formatList(pending.map((node) => node.name)))}</Notice>
+            ) : null}
+            {allOpen && othersEnabled ? <Notice tone="warn">{t.access.allOpenNotice}</Notice> : null}
+            {/* 只在有节点没被任何策略连通时出现：它们互相到不了，也到不了别人。 */}
+            {data.unconnected.length > 0 ? (
+              <div data-testid="unconnected">
+                <Notice tone="warn">
+                  {t.access.unconnectedNotice(
+                    data.unconnected.length,
+                    formatList(data.unconnected.map((node) => node.name)),
+                  )}
+                </Notice>
+              </div>
+            ) : null}
+          </div>
 
-            <Card className={cn('flex flex-col', panel === 'rules' && 'hidden @4xl:flex')}>
-              <CardHeader
-                title={g.title}
+          {show === 'list' ? (
+            data.rules.length === 0 ? (
+              <EmptyState
+                icon={ShieldOff}
+                title={t.access.emptyTitle}
                 action={
-                  <Segmented
-                    aria-label={g.viewLabel}
-                    size="sm"
-                    value={view}
-                    onChange={(next) => update({ view: next === 'groups' ? null : next })}
-                    options={[
-                      { value: 'groups', label: g.byGroup },
-                      { value: 'node', label: g.byNode },
-                    ]}
-                  />
+                  <>
+                    <Button
+                      pending={restore.isPending}
+                      disabled={all === undefined}
+                      onClick={() => all !== undefined && restore.mutate(all)}
+                    >
+                      {t.access.restoreDefault}
+                    </Button>
+                    <Button variant="primary" onClick={() => setEditor({ rule: null })}>
+                      <Plus aria-hidden />
+                      {t.access.newRule}
+                    </Button>
+                  </>
                 }
               />
-              {data.unacknowledged.length > 0 ? (
-                <Notice tone="warn" className="mb-3">
-                  {g.unacked(formatList(data.unacknowledged.map((node) => node.name)))}
-                </Notice>
-              ) : null}
-
-              {view === 'groups' ? (
-                <>
-                  <Canvas data-testid="group-graph">
-                    <GroupGraphView
-                      graph={data}
-                      highlightedRule={hovered ?? selected}
-                      activeGroup={activeGroup}
-                      onRuleClick={setSelected}
-                      onRuleOpen={(id) => {
-                        const rule = data.rules.find((candidate) => candidate.id === id)
-                        if (rule !== undefined) setEditor({ rule })
-                      }}
-                      onRuleHover={setHovered}
-                      onGroupClick={(group) => {
-                        setActiveGroup(group)
-                        setPanel('rules')
-                      }}
-                    />
-                  </Canvas>
-                  <div className="flex items-center gap-2 pt-3">
-                    <Legend />
-                    <InfoTip>{g.edgeHint}</InfoTip>
-                  </div>
-                </>
-              ) : (
-                <NodeView network={network} graph={data} focus={focus} onFocus={(id) => update({ node: String(id) })} />
-              )}
-
-              {/* 只在有节点没被任何规则连通时出现：它们互相到不了，也到不了别人。 */}
-              {data.unconnected.length > 0 ? (
-                <div className="mt-6 border-t pt-4 text-[13px]" data-testid="unconnected">
-                  <p className="font-medium text-warn">{g.unconnected(data.unconnected.length)}</p>
-                  <ul className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1">
-                    {data.unconnected.map((node) => (
-                      <li key={node.id}>
-                        <NodeLink network={network.id} node={node} className="font-normal" />
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-            </Card>
-          </div>
+            ) : rules.length === 0 ? (
+              <EmptyState icon={ScanSearch} title={t.access.noMatch} />
+            ) : (
+              <RuleList
+                network={network}
+                graph={data}
+                rules={rules}
+                focused={selected}
+                onEdit={(rule) => setEditor({ rule })}
+              />
+            )
+          ) : graphView === 'groups' ? (
+            <div className="flex flex-1 flex-col">
+              <Canvas data-testid="group-graph">
+                <GroupGraphView
+                  graph={data}
+                  highlightedRule={selected}
+                  activeGroup={groupFilter}
+                  onRuleClick={setSelected}
+                  onRuleOpen={(id) => {
+                    const rule = data.rules.find((candidate) => candidate.id === id)
+                    if (rule !== undefined) setEditor({ rule })
+                  }}
+                  onRuleHover={() => undefined}
+                  onGroupClick={(group) => update({ show: null, view: null, group: String(group) })}
+                />
+              </Canvas>
+              <div className="flex items-center gap-2 pt-3">
+                <Legend />
+                <InfoTip>{g.edgeHint}</InfoTip>
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-1 flex-col">
+              <NodeView network={network} graph={data} focus={focus} onFocus={(id) => update({ node: String(id) })} />
+            </div>
+          )}
         </>
       )}
 

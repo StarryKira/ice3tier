@@ -21,7 +21,7 @@ export const networks = {
   cidrHint: '有节点后只能扩大',
   cidrOverlaps: (other: string, otherCidr: string) => `与网络 ${other}（${otherCidr}）重叠`,
   cidrShared: '位于 100.64.0.0/10 内，可能与出口所在的网络冲突',
-  noteDefaultRule: '自带规则 all ⇄ all：所有节点互通',
+  noteDefaultRule: '自带策略 all ⇄ all：所有节点互通',
   noteIsolation: '网络之间完全隔离',
 
   settingsTitle: (name: string) => `${name} 的设置`,
@@ -56,13 +56,13 @@ export const networks = {
   settingsSaved: '设置已保存',
 
   dangerTitle: '删除网络',
-  dangerBody: '规则、凭据和注册令牌一并删除，无法恢复',
+  dangerBody: '策略、凭据和注册令牌一并删除，无法恢复',
   dangerNotEmpty: (n: number) => `网络中还有 ${n} 个节点，需先删除`,
   viewNodes: '查看节点',
   deleteButton: '删除网络…',
   deleteTitle: (name: string) => `删除网络 ${name}？`,
   deleteBody: (rules: number, credentials: number, tokens: number) =>
-    `${rules} 条规则、${credentials} 个凭据和 ${tokens} 个未使用的注册令牌将一并删除。此操作无法恢复。`,
+    `${rules} 条策略、${credentials} 个凭据和 ${tokens} 个未使用的注册令牌将一并删除。此操作无法恢复。`,
   deleteConfirm: '删除网络',
   deleted: (name: string) => `网络 ${name} 已删除`,
   notFoundTitle: '网络不存在',

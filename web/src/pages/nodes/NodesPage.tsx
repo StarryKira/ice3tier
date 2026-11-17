@@ -10,7 +10,6 @@ import {
   Pencil,
   Plus,
   RadioTower,
-  Search,
   Server,
   Trash2,
   X,
@@ -47,11 +46,11 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Field } from '@/components/ui/field'
-import { fieldBase } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Segmented } from '@/components/ui/segmented'
 import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
+import { SearchBox } from '@/components/search-box'
 import { t } from '@/i18n'
 import { nodeIssues } from '@/lib/nodeIssues'
 import { forceAbility } from '@/lib/nodeUpdate'
@@ -265,7 +264,6 @@ export function NodesPage() {
 
   // 搜索框自己的内容；停顿一会儿才写进 URL。
   const [searchText, setSearchText] = useState(filters.search)
-  const searchRef = useRef<HTMLInputElement>(null)
 
   /** 改筛选条件：回到第一页，并清空勾选，避免对看不见的行做批量操作。 */
   const applyFilters = (patch: Partial<NodeFilters>) => {
@@ -287,18 +285,6 @@ export function NodesPage() {
     // 只在输入变化时重新计时。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchText])
-
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
-        event.preventDefault()
-        searchRef.current?.focus()
-        searchRef.current?.select()
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [])
 
   const all = useMemo(() => nodes.data ?? [], [nodes.data])
   const issues = useMemo(() => new Map(all.map((node) => [node.id, nodeIssues(node, all)])), [all])
@@ -457,30 +443,7 @@ export function NodesPage() {
         ) : (
           <>
             <Toolbar>
-              <div className="relative w-72">
-                <Search
-                  className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-faint"
-                  aria-hidden
-                />
-                <input
-                  ref={searchRef}
-                  type="search"
-                  value={searchText}
-                  onChange={(event) => setSearchText(event.target.value)}
-                  placeholder={t.nodes.searchPlaceholder}
-                  aria-label={t.nodes.searchPlaceholder}
-                  aria-keyshortcuts="Control+K"
-                  autoComplete="off"
-                  spellCheck={false}
-                  className={cn(fieldBase, 'h-9 pr-14 pl-8.5 [&::-webkit-search-cancel-button]:hidden')}
-                />
-                <kbd
-                  aria-hidden
-                  className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 rounded-sm bg-muted px-1 font-sans text-[11px] text-muted-foreground"
-                >
-                  {t.nodes.searchShortcut}
-                </kbd>
-              </div>
+              <SearchBox value={searchText} onChange={setSearchText} placeholder={t.nodes.searchPlaceholder} />
               <Segmented
                 aria-label={t.nodes.filterStatus}
                 value={filters.status}

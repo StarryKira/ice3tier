@@ -118,7 +118,7 @@ export const topology = {
   panelTitle: '两个方向',
   forward: (a: string, b: string) => `${a} → ${b}`,
   legNoData: '没有数据',
-  legNoDataHint: '两个节点未被规则连通，或发送方尚未上报',
+  legNoDataHint: '两个节点未被策略连通，或发送方尚未上报',
   legStale: (age: string) => `已过期，${age}上报`,
   toPath: '路径诊断',
   matrixCaption: '路由矩阵：行是发送方，列是接收方',
@@ -186,7 +186,7 @@ export const path = {
   sourceHint: {
     query: '发送方刚刚应答',
     report: '发送方未应答（离线、版本旧或超时），显示它最近一次上报',
-    not_peers: '发送方的配置中没有对端：规则未连通，或配置尚未下发',
+    not_peers: '发送方的配置中没有对端：策略未连通，或配置尚未下发',
     none: '发送方没有上报过到这个对端的路由',
     unknown: 'controller 给出了未知的来源',
   },
@@ -195,7 +195,7 @@ export const path = {
   sinceUnknown: '启动以来未切换',
   /** 节点自己说的原因（原话），跟在"切换于…"和"原因"后面。 */
   reasonLabel: '原因',
-  notPeersTitle: '两个节点未被规则连通',
+  notPeersTitle: '两个节点未被策略连通',
   toAccess: '检查访问',
   toTopology: '在拓扑中查看',
   mode: { direct_first: '默认', lowest_cost: '延迟优先' },

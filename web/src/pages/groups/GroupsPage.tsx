@@ -1,5 +1,16 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ChevronDown, EllipsisVertical, Pencil, Plus, Trash2, X } from 'lucide-react'
+import {
+  Boxes,
+  ChevronDown,
+  EllipsisVertical,
+  type LucideIcon,
+  Pencil,
+  Plus,
+  Server,
+  ShieldCheck,
+  Trash2,
+  X,
+} from 'lucide-react'
 import { Fragment, useState } from 'react'
 
 import { errorDetail, errorMessage } from '@/api/client'
@@ -12,8 +23,9 @@ import { FormDialog } from '@/components/form-dialog'
 import { NodeLink, NodeSelect } from '@/components/node'
 import { Notice } from '@/components/notice'
 import { Page, PageHeader } from '@/components/page'
-import { ErrorState, SkeletonRows } from '@/components/states'
-import { Table, Td, Th, Tr } from '@/components/table'
+import { SearchBox } from '@/components/search-box'
+import { EmptyState, ErrorState, SkeletonRows } from '@/components/states'
+import { Table, Td, Th, Toolbar, Tr } from '@/components/table'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -38,6 +50,23 @@ const g = t.groups
 
 /** 表格的列数：名字、节点、规则、操作。成员那一行横跨全部。 */
 const COLUMNS = 4
+
+/** 一个数，放在带框的小格子里，前面一个图标（照 NetBird 的样子）；是 0 时整个变淡。 */
+function CountBox({ icon: Icon, value, label }: { icon: LucideIcon; value: number; label: string }) {
+  return (
+    <span
+      role="img"
+      aria-label={label}
+      className={cn(
+        'inline-flex h-7 min-w-16 items-center justify-center gap-1.5 rounded-md border px-2.5 text-[13px] tabular',
+        value === 0 ? 'border-border/60 text-faint' : 'bg-muted/40 text-foreground',
+      )}
+    >
+      <Icon className="size-3.5" aria-hidden />
+      {value}
+    </span>
+  )
+}
 
 interface NameDialogProps {
   network: Network
@@ -189,6 +218,7 @@ export function GroupsPage() {
   const focus = useFocusRow(groups.data)
   // 从操作记录、访问控制页点过来的那个分组，一开始就展开成员。
   const [open, setOpen] = useState<GroupId | null>(focus.focus)
+  const [search, setSearch] = useState('')
   const [editing, setEditing] = useState<{ group: Group | null } | null>(null)
 
   const remove = useAction(network.id, {
@@ -214,7 +244,8 @@ export function GroupsPage() {
     if (confirmed) remove.mutate(group)
   }
 
-  const list = groups.data ?? []
+  const needle = search.trim().toLowerCase()
+  const list = (groups.data ?? []).filter((group) => needle === '' || group.name.toLowerCase().includes(needle))
   const all = nodes.data ?? []
 
   return (
@@ -234,15 +265,20 @@ export function GroupsPage() {
           {g.focusMissing(focus.focus ?? 0)}
         </Notice>
       ) : null}
+      <Toolbar>
+        <SearchBox value={search} onChange={setSearch} placeholder={g.searchPlaceholder} />
+      </Toolbar>
       {groups.isError ? (
         <ErrorState title={g.loadFailed} error={groups.error} onRetry={() => void groups.refetch()} />
+      ) : groups.isSuccess && list.length === 0 ? (
+        <EmptyState icon={Boxes} title={g.noMatch} />
       ) : (
         <Table>
           <thead>
             <tr>
               <Th>{g.colName}</Th>
-              <Th numeric>{g.colNodes}</Th>
-              <Th numeric>{g.colRules}</Th>
+              <Th>{g.colNodes}</Th>
+              <Th>{g.colRules}</Th>
               <Th className="w-40">
                 <span className="sr-only">{t.common.moreActions}</span>
               </Th>
@@ -261,7 +297,8 @@ export function GroupsPage() {
                     data-testid={`group-row-${group.name}`}
                   >
                     <Td>
-                      <span className="inline-flex items-center gap-2">
+                      <span className="inline-flex items-center gap-2.5">
+                        <Boxes className="size-4 text-muted-foreground" aria-hidden />
                         <span className="font-medium">{group.name}</span>
                         {group.builtin ? (
                           <Tooltip content={g.builtinTip}>
@@ -272,8 +309,16 @@ export function GroupsPage() {
                         ) : null}
                       </span>
                     </Td>
-                    <Td numeric>{group.nodes.length}</Td>
-                    <Td numeric>{group.rules.length}</Td>
+                    <Td>
+                      <CountBox icon={Server} value={group.nodes.length} label={g.nodesCount(group.nodes.length)} />
+                    </Td>
+                    <Td>
+                      <CountBox
+                        icon={ShieldCheck}
+                        value={group.rules.length}
+                        label={g.rulesCount(group.rules.length)}
+                      />
+                    </Td>
                     <Td className="pl-0">
                       <div className="flex items-center justify-end gap-1">
                         <Button

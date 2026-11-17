@@ -4,12 +4,16 @@ const count = (n: number, one: string, many: string) => (n === 1 ? `1 ${one}` : 
 
 export const groups: Messages['groups'] = {
   title: 'Groups',
-  subtitle: 'Access rules apply between groups',
+  subtitle: 'Access policies apply between groups',
   create: 'Create group',
   loadFailed: "Couldn't load groups",
   colName: 'Name',
   colNodes: 'Nodes',
-  colRules: 'Rules',
+  colRules: 'Policies',
+  searchPlaceholder: 'Search groups',
+  noMatch: 'No matching groups',
+  nodesCount: (n) => (n === 1 ? '1 node' : `${n} nodes`),
+  rulesCount: (n) => (n === 1 ? '1 policy' : `${n} policies`),
   builtin: 'Built-in',
   builtinTip: "Contains every node; can't be renamed or deleted",
   members: 'Members',

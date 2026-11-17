@@ -10,7 +10,7 @@ export const overview = {
   hideFix: '收起',
   view: '查看',
   viewNode: '查看节点',
-  viewRules: '查看规则',
+  viewRules: '查看策略',
   viewRoutes: '查看路由',
 
   /** 一条问题：先说对象和状态，细节在它链接的页面上。 */
@@ -43,8 +43,8 @@ export const overview = {
     both: '双向',
     oneWay: '单向',
     disabled: '已停用',
-    noRules: '没有适用的规则',
-    ruleLabel: (rule: string, how: string) => `规则 ${rule}：${how}`,
+    noRules: '没有适用的策略',
+    ruleLabel: (rule: string, how: string) => `策略 ${rule}：${how}`,
     flowBoth: (a: string, b: string) => `${a} 与 ${b} 互相可访问`,
     flowOut: (a: string, b: string) => `${a} 可访问 ${b}`,
     flowIn: (a: string, b: string) => `${b} 可访问 ${a}`,
