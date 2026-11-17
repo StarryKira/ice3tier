@@ -100,7 +100,7 @@ const TO_PC = pathTo(4, [
 ])
 
 describe('路由', () => {
-  it('写清楚 P2P 还是中继、下一跳和跳数；右边是延迟优先会怎么走', async () => {
+  it('路径写清楚 P2P 还是中继、经过谁；延迟优先不同时写它怎么走、快多少，相同时只写相同', async () => {
     fakeApi({
       'GET /networks/1/nodes/1/routes': ROUTES,
       'GET /networks/1/nodes': [
@@ -114,22 +114,25 @@ describe('路由', () => {
       'GET /networks/1/path': (call) => (call.query.get('to') === '2' ? TO_NAS : TO_PC),
     })
     renderWithApp(<RoutesTab network={NETWORK} node={node} />)
-    expect(await screen.findByText(d.routesModeNow(d.routingDirectFirst))).toBeVisible()
+    expect(await screen.findByTestId('routes-mode')).toHaveTextContent(d.routingDirectFirst)
 
     const nas = (await screen.findByText('10.66.0.2')).closest('tr')
     if (nas === null) throw new Error('没有 nas 那一行')
+    // 路径一格：中继、经 hk、首段 UDP；延迟 150 ms。
     expect(within(nas).getByText(d.routesRelay)).toBeVisible()
+    expect(nas).toHaveTextContent(d.viaRelay('hk'))
     expect(nas).toHaveTextContent(t.routes.relayLeg('UDP'))
-    // 现在：下一跳 hk、两跳、150 ms；延迟优先：下一跳 tokyo、三跳、90 ms。
-    await waitFor(() => expect(nas).toHaveTextContent('tokyo'))
-    const cells = within(nas)
-      .getAllByRole('cell')
-      .map((cell) => cell.textContent)
-    expect(cells.slice(2, 8)).toEqual(['hk', '2', t.common.ms(150), 'tokyo', '3', t.common.ms(90)])
+    expect(nas).toHaveTextContent(t.common.ms(150))
+    // 换成延迟优先：经 tokyo → hk，90 ms，快 60 ms。
+    await waitFor(() => expect(nas).toHaveTextContent(d.viaRelay('tokyo → hk')))
+    expect(nas).toHaveTextContent(t.common.ms(90))
+    expect(nas).toHaveTextContent(d.routesFaster(60))
 
+    // 直连的那一行：P2P 直连、局域网；延迟优先也一样，只写"相同"。
     const pc = screen.getByText('10.66.0.4').closest('tr')
     if (pc === null) throw new Error('没有 pc 那一行')
     expect(within(pc).getByText(d.routesP2P)).toBeVisible()
-    expect(within(pc).getAllByText(d.routesDirectHop)).toHaveLength(2)
+    expect(pc).toHaveTextContent(t.routes.directKind.lan)
+    await waitFor(() => expect(within(pc).getByText(d.routesSame)).toBeVisible())
   })
 })
