@@ -9,7 +9,6 @@ export const addNode: Messages['addNode'] = {
   declareRelay: 'Can relay',
   declareRelayHint: 'Other nodes must be able to reach its port',
   declareExit: 'Can be an exit',
-  declareForward: 'Can be a port forward target',
   declareNote: 'Declares only; enable it on the node page',
   advanced: 'Advanced',
   ttlLabel: 'Token expires in',

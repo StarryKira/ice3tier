@@ -124,9 +124,11 @@ test.afterAll(async () => {
 test('准备：出口 gw 和入口 laptop 跑起来；还有一个只注册过、从没跑起来的节点', async () => {
   test.setTimeout(120_000)
   await controller.api('POST', '/networks', { name: 'home' })
-  const gw = await controller.enroll({ flags: ['--can-exit', '--can-forward'] })
+  const gw = await controller.enroll({ flags: ['--can-exit'] })
   const laptop = await controller.enroll()
   await controller.api('PATCH', `${NET}/nodes/1`, { name: 'gw' })
+  // 端口转发的目标是管理员的开关（0.1.11 起），不是节点的声明。
+  await controller.api('PATCH', `${NET}/nodes/1`, { forward_target: true })
   await controller.api('PATCH', `${NET}/nodes/2`, { name: 'laptop' })
   nodes.gw = { handle: gw, id: 1, ip: '10.66.0.1' }
   nodes.laptop = { handle: laptop, id: 2, ip: '10.66.0.2' }

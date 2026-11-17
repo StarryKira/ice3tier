@@ -121,7 +121,7 @@ export const nodes = {
     editIp: '修改虚拟 IP',
     key: '公钥',
     system: '系统',
-    publicAddr: '公网地址',
+    egressIp: '出口 IP',
     region: '地区',
     version: '版本',
     joined: '加入时间',

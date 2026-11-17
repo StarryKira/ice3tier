@@ -36,11 +36,13 @@ const TTL_CHOICES = [
 /** 等了多久之后给出"还没连上？"的排查提示。 */
 const STUCK_AFTER_SECS = 60
 
-/** 三个"可以承担"的勾选。只有 relay 带一句提醒：它要公网可达，勾错了也起不了作用。 */
+/**
+ * 两个"可以承担"的勾选。只有 relay 带一句提醒：它要公网可达，勾错了也起不了作用。
+ * 端口转发的目标不用节点声明（0.1.11 起在节点详情里打开），所以这里没有它。
+ */
 const DECLARE_ROWS: readonly { capability: Capability; label: () => string; hint?: () => string }[] = [
   { capability: 'relay', label: () => t.addNode.declareRelay, hint: () => t.addNode.declareRelayHint },
   { capability: 'exit', label: () => t.addNode.declareExit },
-  { capability: 'forward', label: () => t.addNode.declareForward },
 ]
 
 function Step({ index, title, children }: { index: number; title: string; children: ReactNode }) {

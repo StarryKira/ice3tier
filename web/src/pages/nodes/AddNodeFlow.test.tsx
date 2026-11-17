@@ -96,11 +96,12 @@ describe('添加节点', () => {
     renderWithApp(<AddNodeFlow network={NETWORK} />)
     await user.click(screen.getByRole('checkbox', { name: containing(t.addNode.declareRelay) }))
     expect(command()).toHaveTextContent(`echo ${placeholder()} | i3t join --can-relay`)
-    await user.click(screen.getByRole('checkbox', { name: containing(t.addNode.declareForward) }))
     await user.click(screen.getByRole('checkbox', { name: containing(t.addNode.declareExit) }))
-    expect(command()).toHaveTextContent(`echo ${placeholder()} | i3t join --can-exit --can-relay --can-forward`)
+    expect(command()).toHaveTextContent(`echo ${placeholder()} | i3t join --can-exit --can-relay`)
     await user.click(screen.getByRole('checkbox', { name: containing(t.addNode.declareRelay) }))
-    expect(command()).toHaveTextContent(`echo ${placeholder()} | i3t join --can-exit --can-forward`)
+    expect(command()).toHaveTextContent(`echo ${placeholder()} | i3t join --can-exit`)
+    // 端口转发的目标在节点详情里打开，不在这里勾。
+    expect(screen.getAllByRole('checkbox')).toHaveLength(2)
   })
 
   it('换平台，命令跟着变', async () => {

@@ -386,7 +386,7 @@ export const serviceClass: Messages['serviceClass'] = {
   interactive: 'Low latency',
   reliable: 'No loss',
   bulk: 'Background',
-  autoDesc: 'Small requests first; big downloads yield',
+  autoDesc: 'Small requests first; big downloads yield; nothing dropped',
   interactiveDesc: 'Lowest latency; stale UDP packets are dropped',
   reliableDesc: 'Not even a UDP packet is lost; latency second',
   bulkDesc: 'Yields to other traffic; throughput first',

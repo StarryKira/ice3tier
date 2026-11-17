@@ -197,7 +197,7 @@ test('添加节点：令牌、命令、节点加入', async () => {
 test('准备数据', async () => {
   test.setTimeout(180_000)
   const net = '/networks/1'
-  // gw-hk 是第一个节点，已经声明了 relay；再补上出口和转发目标的声明。声明在节点重启后才上报，所以这里在它启动之前就改好了的不算，
+  // gw-hk 是第一个节点，已经声明了 relay；再补上出口的声明。声明在节点重启后才上报，所以这里在它启动之前就改好了的不算，
   // 直接用加入时的参数准备其余几个。
   for (const name of ['servers', 'home', 'laptops']) {
     groups[name] = (await controller.api<{ id: number }>('POST', `${net}/groups`, { name })).id
@@ -205,7 +205,7 @@ test('准备数据', async () => {
   const group = (name: string) => groups[name] ?? 0
   nodes.nas = await controller.enroll({
     groups: [group('servers'), group('home')],
-    flags: ['--can-forward', '--can-exit'],
+    flags: ['--can-exit'],
   })
   nodes.laptop = await controller.enroll({ groups: [group('laptops')] })
   nodes.office = await controller.enroll({ groups: [group('laptops')] })
@@ -288,6 +288,8 @@ test('准备数据', async () => {
     fixed_exit: 2,
   })
 
+  // nas 是端口转发的目标：0.1.11 起是管理员的开关，不是节点的声明。
+  await controller.api('PATCH', `${net}/nodes/2`, { forward_target: true })
   await controller.api('POST', `${net}/forwards`, {
     name: 'web',
     protocol: 'tcp',

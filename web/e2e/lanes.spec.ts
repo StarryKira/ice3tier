@@ -114,9 +114,11 @@ test.afterAll(async () => {
 test('准备：gw 是 relay（TCP 地址在回环上），laptop 上一条到 gw 的端口转发；nas 不是 relay', async () => {
   test.setTimeout(120_000)
   await controller.api('POST', '/networks', { name: 'home' })
-  const gw = await controller.enroll({ flags: ['--can-relay', '--can-forward'] })
+  const gw = await controller.enroll({ flags: ['--can-relay'] })
   const laptop = await controller.enroll()
   const nas = await controller.enroll()
+  // 端口转发的目标是管理员的开关（0.1.11 起），不是节点的声明。
+  await controller.api('PATCH', `${NET}/nodes/1`, { forward_target: true })
   nodes.gw = { handle: gw, id: 1 }
   nodes.laptop = { handle: laptop, id: 2 }
   nodes.nas = { handle: nas, id: 3 }

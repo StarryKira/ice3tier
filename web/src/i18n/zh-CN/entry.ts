@@ -382,7 +382,7 @@ export const serviceClass = {
   interactive: '低延迟',
   reliable: '不丢包',
   bulk: '后台',
-  autoDesc: '小请求优先，大下载自动让路',
+  autoDesc: '小请求优先，大下载让路，不丢包',
   interactiveDesc: '延迟最低；过时的 UDP 包会被丢弃',
   reliableDesc: 'UDP 也一个包不丢，延迟次之',
   bulkDesc: '给其他流量让路，吞吐优先',

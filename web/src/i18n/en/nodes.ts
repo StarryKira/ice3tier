@@ -129,7 +129,7 @@ export const nodes: Messages['nodes'] = {
     editIp: 'Change virtual IP',
     key: 'Public key',
     system: 'Operating system',
-    publicAddr: 'Public address',
+    egressIp: 'Egress IP',
     region: 'Region',
     version: 'Version',
     joined: 'Joined',

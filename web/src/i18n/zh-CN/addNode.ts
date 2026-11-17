@@ -8,7 +8,6 @@ export const addNode = {
   declareRelay: '可作为中继',
   declareRelayHint: '别的节点要能连上它的端口',
   declareExit: '可作为出口',
-  declareForward: '可作为端口转发目标',
   declareNote: '只是声明，启用在节点详情中进行',
   advanced: '高级',
   ttlLabel: '令牌有效期',

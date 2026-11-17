@@ -57,7 +57,13 @@ function InfoCard({ network, node, onEditIp }: TabProps & { onEditIp: () => void
   const relays = useQuery(q.nodes(network.id))
   const hasRelay = (relays.data ?? []).some((other) => other.relay !== null)
   const synced = node.acked_version >= node.netmap_version
-  const publicIp = node.observed_endpoint === null ? null : hostOf(node.observed_endpoint)
+  // 0.1.11 起 controller 给出出口 IP（在 NAT 后面、controller 从内网看到它时也对）；更早的看 controller 看到的地址。
+  const egressIp =
+    node.egress_ip !== undefined
+      ? node.egress_ip
+      : node.observed_endpoint === null
+        ? null
+        : hostOf(node.observed_endpoint)
   const country = node.country ?? null
 
   return (
@@ -84,8 +90,8 @@ function InfoCard({ network, node, onEditIp }: TabProps & { onEditIp: () => void
         >
           <span className="tabular">{node.virtual_ip}</span>
         </DetailRow>
-        <DetailRow icon={<NetworkIcon />} label={d.publicAddr} copy={publicIp ?? undefined}>
-          {publicIp ?? '—'}
+        <DetailRow icon={<NetworkIcon />} label={d.egressIp} copy={egressIp ?? undefined}>
+          <span className="tabular">{egressIp ?? '—'}</span>
         </DetailRow>
         <DetailRow icon={<Globe />} label={d.fqdn} copy={node.fqdn}>
           {node.fqdn}

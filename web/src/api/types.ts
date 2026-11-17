@@ -300,6 +300,11 @@ export interface Node {
    * 不知道（内网地址、从没连上过、库里没有）是 `null`。比这个界面旧的 controller 没有这个字段。
    */
   country?: string | null
+  /**
+   * 0.1.11 起：节点出去上网用的公网 IP（`country` 按它算）。controller 只从内网地址看到过它时是 `null`。
+   * 比这个界面旧的 controller 没有这个字段，看 `observed_endpoint`。
+   */
+  egress_ip?: string | null
 }
 
 export interface Attachment {

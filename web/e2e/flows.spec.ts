@@ -28,7 +28,7 @@ const NET = '/networks/1'
 let controller: Controller
 let page: Page
 
-/** 两个节点：`server` 是在 servers 分组里、声明了可以作为转发目标的那个；`laptop` 是后加入的。 */
+/** 两个节点：`server` 是在 servers 分组里、后来做端口转发目标的那个；`laptop` 是后加入的。 */
 let server: { handle: NodeHandle; id: number; name: string; ip: string }
 let laptop: { handle: NodeHandle; id: number; name: string; ip: string }
 
@@ -161,11 +161,14 @@ test('生成注册令牌，拿到加入命令，节点加入后出现在界面�
   await page.keyboard.press('Enter')
   await page.keyboard.press('Escape')
   await expect(page.getByRole('listbox')).toHaveCount(0)
-  await dialog.getByRole('checkbox', { name: t.addNode.declareForward }).check()
-  await expect(joinCommand()).toHaveText(`echo ${t.addNode.tokenPlaceholder} | i3t join --can-forward`)
+  const relayBox = dialog.getByRole('checkbox', { name: new RegExp(t.addNode.declareRelay) })
+  await relayBox.check()
+  await expect(joinCommand()).toHaveText(`echo ${t.addNode.tokenPlaceholder} | i3t join --can-relay`)
+  await relayBox.uncheck()
+  await expect(joinCommand()).toHaveText(`echo ${t.addNode.tokenPlaceholder} | i3t join`)
 
   await dialog.getByRole('button', { name: t.addNode.generate }).click()
-  await expect(joinCommand()).toHaveText(/^echo i3t-[A-Za-z0-9_-]+ \| i3t join --can-forward$/)
+  await expect(joinCommand()).toHaveText(/^echo i3t-[A-Za-z0-9_-]+ \| i3t join$/)
   await expect(dialog.getByText(t.addNode.shownOnce)).toBeVisible()
   await expect(dialog.getByText(t.addNode.waiting)).toBeVisible()
   const tokens = await controller.api<{ groups: { name: string }[] }[]>('GET', `${NET}/tokens`)
@@ -186,7 +189,8 @@ test('生成注册令牌，拿到加入命令，节点加入后出现在界面�
   expect(joined).toMatchObject({
     virtual_ip: '10.66.0.1',
     groups: [{ name: 'servers' }],
-    declared: { exit: false, relay: false, forward: true },
+    declared: { exit: false, relay: false },
+    forward_target: false,
   })
   server = { handle, id: joined.id, name: joined.name, ip: joined.virtual_ip }
   await expect(page.getByTestId('node-joined')).toContainText(t.addNode.joined(server.name, server.ip))
@@ -516,6 +520,11 @@ test('新建端口转发，再删除', async () => {
   await expect(page.getByRole('listbox')).toHaveCount(0)
   await targetSide.getByRole('combobox', { name: d.node }).click()
   await nodeOption(server).click()
+  // 目标还没打开端口转发：对话框里就能打开，不用去节点上声明。
+  await expect(targetSide.getByText(d.targetOff(server.name))).toBeVisible()
+  await targetSide.getByRole('button', { name: d.targetTurnOn }).click()
+  await expectToast(page, t.nodes.detail.forwardOnToast(server.name))
+  await expect(targetSide.getByText(d.targetOff(server.name))).toBeHidden()
   // 即时检查：转发不绕过访问规则。laptop → server 由刚才那条规则允许。
   await expect(page.getByTestId('forward-check')).toContainText(d.checkAllowed(laptop.name, server.name, 'ssh'))
 
