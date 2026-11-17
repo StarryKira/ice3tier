@@ -2,7 +2,8 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -62,6 +63,18 @@ struct Inner<S> {
     interfaces: Mutex<Option<Interfaces>>,
     own_endpoints: Option<OwnEndpoints>,
     lookups: Lookups,
+    /// 透明访问打开着：连本机服务时用发起节点的虚拟 IP 做源地址（[`Outbound::set_presenting`]）。
+    presenting: AtomicBool,
+}
+
+/// 一次连接经什么出去。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Via {
+    Direct,
+    /// 出口配的上游 SOCKS5 代理。
+    Upstream(SocketAddr),
+    /// 替这个发起节点连本机的服务或者端口转发的目标；它的虚拟 IP 可能被用作源地址（[`presentable`]）。
+    Initiator(Ipv4Addr),
 }
 
 /// 谁要解析域名。同时进行的解析按它分开限额。
@@ -128,8 +141,15 @@ impl<S> std::fmt::Debug for Outbound<S> {
 impl<S: System> Outbound<S> {
     /// `netmap` 只在就地出站时用：那时没有别人给出该按哪一版配置判断。
     pub fn new(netmap: watch::Receiver<Arc<Netmap>>, system: S) -> Self {
-        let inner =
-            Inner { system, netmap, dns: Mutex::default(), interfaces: Mutex::new(None), own_endpoints: None, lookups: Lookups::default() };
+        let inner = Inner {
+            system,
+            netmap,
+            dns: Mutex::default(),
+            interfaces: Mutex::new(None),
+            own_endpoints: None,
+            lookups: Lookups::default(),
+            presenting: AtomicBool::new(false),
+        };
         Self { inner: Arc::new(inner) }
     }
 
@@ -149,10 +169,16 @@ impl<S: System> Outbound<S> {
         self
     }
 
+    /// 打开或者关掉"以发起节点的虚拟 IP 连本机的服务"（白皮书 §9.5）。装配层在透明访问的规则装好之后打开它，拆掉之前关掉；
+    /// 关着的时候和以前一样，用本机自己的地址去连。哪些连接用得上见 [`presentable`]。
+    pub fn set_presenting(&self, on: bool) {
+        self.inner.presenting.store(on, Ordering::Relaxed);
+    }
+
     /// 互联网目标：本节点必须是出口，端口要在允许的范围里，解析出来的每一个地址都要过出站策略。
     pub(crate) async fn internet(&self, netmap: &Netmap, host: &Host, port: u16, asker: Asker) -> Result<TcpStream, Reply> {
         let (role, targets) = self.internet_targets(netmap, host, port, asker).await?;
-        self.connect_first(targets, CONNECT_TIMEOUT, role.upstream_socks5).await
+        self.connect_first(targets, CONNECT_TIMEOUT, role.upstream_socks5.map_or(Via::Direct, Via::Upstream)).await
     }
 
     /// 互联网目标的检查。通过的话返回可以去连的地址，流和数据报用的是同一份检查。
@@ -213,7 +239,7 @@ impl<S: System> Outbound<S> {
     /// 局域网目标：本节点必须是出口并且打开了局域网开关，地址必须在本机某块网卡直连的网段里。端口不受限制。
     pub(crate) async fn lan(&self, netmap: &Netmap, addr: SocketAddr) -> Result<TcpStream, Reply> {
         let target = self.lan_target(netmap, addr)?;
-        self.connect_first([target], CONNECT_TIMEOUT, None).await
+        self.connect_first([target], CONNECT_TIMEOUT, Via::Direct).await
     }
 
     /// 局域网目标的检查。通过的话返回可以去连的地址，流和数据报用的是同一份检查。
@@ -242,13 +268,13 @@ impl<S: System> Outbound<S> {
         }
     }
 
-    /// 本节点自己的服务：只用本机的非回环地址去连。
+    /// 本节点自己的服务：只用本机的非回环地址去连。`initiator` 是发起节点的虚拟 IP。
     ///
     /// 所以只监听 127.0.0.1 的服务连不上，不会因为装了这个程序就对组网可见；要暴露这样的服务得显式配端口转发。
     /// 本机有几个地址就挨个试：服务可能只监听在其中一个上。
-    pub(crate) async fn node_port(&self, port: u16) -> Result<TcpStream, Reply> {
+    pub(crate) async fn node_port(&self, port: u16, initiator: Ipv4Addr) -> Result<TcpStream, Reply> {
         let targets = self.node_targets(port)?;
-        self.connect_first(targets, LOCAL_CONNECT_TIMEOUT, None).await
+        self.connect_first(targets, LOCAL_CONNECT_TIMEOUT, Via::Initiator(initiator)).await
     }
 
     /// 本机的非回环地址加上 `port`，IPv4 在前：只监听 0.0.0.0 的服务最常见。
@@ -277,14 +303,29 @@ impl<S: System> Outbound<S> {
     }
 
     /// 端口转发指向的地址。回环地址和局域网地址都可以：下发给本节点的端口转发就是访问它们的显式途径。
-    pub(crate) async fn forward(&self, addr: SocketAddr) -> Result<TcpStream, Reply> {
-        self.connect_first([addr], CONNECT_TIMEOUT, None).await
+    /// `initiator` 是发起节点（转发的监听节点）的虚拟 IP。覆盖网的地址不连（[`Outbound::not_overlay`]）。
+    pub(crate) async fn forward(&self, addr: SocketAddr, initiator: Ipv4Addr) -> Result<TcpStream, Reply> {
+        self.not_overlay(addr)?;
+        self.connect_first([addr], CONNECT_TIMEOUT, Via::Initiator(initiator)).await
     }
 
-    /// 回环监听器上的就地出站：调用者是本机的程序，不加任何限制。
+    /// 回环监听器上的就地出站：调用者是本机的程序，不加任何限制，只是不连覆盖网的地址。
     async fn unrestricted(&self, host: &Host, port: u16) -> Result<TcpStream, Reply> {
-        let targets = self.resolve(host, Asker::Local).await?.into_iter().map(|ip| SocketAddr::new(ip, port));
-        self.connect_first(targets, CONNECT_TIMEOUT, None).await
+        let targets: Vec<SocketAddr> = self.resolve(host, Asker::Local).await?.into_iter().map(|ip| SocketAddr::new(ip, port)).collect();
+        for target in &targets {
+            self.not_overlay(*target)?;
+        }
+        self.connect_first(targets, CONNECT_TIMEOUT, Via::Direct).await
+    }
+
+    /// 本节点自己去连的地址不能是覆盖网的地址：那些地址只在组网里有意义，到它们的连接是到那个节点开的流。
+    /// 端口转发写了这样的地址、或者一个域名解析成了这样的地址时直接拒绝，不当作普通的地址去连：
+    /// 透明访问打开着的时候，那样的连接会被本机的拦截规则绕回组网里。
+    pub(crate) fn not_overlay(&self, addr: SocketAddr) -> Result<(), Reply> {
+        if netmap::is_overlay_address(&self.inner.netmap.borrow().network, addr.ip().to_canonical()) {
+            return Err(Reply::new(Status::PolicyDenied, "目标是覆盖网的地址：要访问那个节点，开到它的流"));
+        }
+        Ok(())
     }
 
     /// 域名对应的地址，最多 [`MAX_ADDRESSES`] 个。本来就是地址的不用解析。
@@ -348,15 +389,10 @@ impl<S: System> Outbound<S> {
     }
 
     /// 挨个尝试 `targets`，返回第一条连上的连接。都连不上时返回其中最说明问题的那个失败。
-    async fn connect_first(
-        &self,
-        targets: impl IntoIterator<Item = SocketAddr>,
-        timeout: Duration,
-        upstream: Option<SocketAddr>,
-    ) -> Result<TcpStream, Reply> {
+    async fn connect_first(&self, targets: impl IntoIterator<Item = SocketAddr>, timeout: Duration, via: Via) -> Result<TcpStream, Reply> {
         let mut failure: Option<Reply> = None;
         for target in targets {
-            let attempt = match time::timeout(timeout, self.connect_one(target, upstream)).await {
+            let attempt = match time::timeout(timeout, self.connect_one(target, via)).await {
                 Ok(attempt) => attempt,
                 Err(_) => Err(Reply::new(Status::TimedOut, format!("{timeout:?} 之内没有连上"))),
             };
@@ -375,9 +411,13 @@ impl<S: System> Outbound<S> {
         Err(failure.unwrap_or_else(|| Reply::new(Status::Unreachable, "没有可以连的地址")))
     }
 
-    async fn connect_one(&self, target: SocketAddr, upstream: Option<SocketAddr>) -> Result<TcpStream, Reply> {
-        let Some(proxy) = upstream else {
-            return self.inner.system.connect(target).await.map_err(|error| Reply::new(connect_status(&error), error.to_string()));
+    async fn connect_one(&self, target: SocketAddr, via: Via) -> Result<TcpStream, Reply> {
+        let system = &self.inner.system;
+        let reply = |error: io::Error| Reply::new(connect_status(&error), error.to_string());
+        let proxy = match via {
+            Via::Direct => return system.connect(target).await.map_err(reply),
+            Via::Initiator(initiator) => return self.connect_local(target, initiator).await.map_err(reply),
+            Via::Upstream(proxy) => proxy,
         };
         let mut stream = self
             .inner
@@ -388,6 +428,43 @@ impl<S: System> Outbound<S> {
         upstream::connect(&mut stream, target).await?;
         Ok(stream)
     }
+}
+
+impl<S: System> Outbound<S> {
+    /// 连本机的服务或者端口转发的目标。透明访问打开着、`target` 又是本机的非回环地址时，以发起节点的虚拟 IP 为源地址。
+    async fn connect_local(&self, target: SocketAddr, initiator: Ipv4Addr) -> io::Result<TcpStream> {
+        let system = &self.inner.system;
+        let presented = self.inner.presenting.load(Ordering::Relaxed) && {
+            let interfaces = self.interfaces().unwrap_or_else(|_| Arc::from([]));
+            let netmap = self.inner.netmap.borrow();
+            presentable(&netmap.network, netmap.me.virtual_ip, initiator, target, &interfaces)
+        };
+        if !presented {
+            return system.connect(target).await;
+        }
+        match system.connect_presenting(initiator, target).await {
+            Err(error) if matches!(error.kind(), io::ErrorKind::PermissionDenied | io::ErrorKind::AddrNotAvailable) => {
+                tracing::warn!(%error, %initiator, %target, "用发起节点的虚拟 IP 做源地址连不了（权限或者地址），这一次用本机的地址去连");
+                system.connect(target).await
+            }
+            connected => connected,
+        }
+    }
+}
+
+/// 连 `target` 时能不能用 `initiator`（发起节点的虚拟 IP）做源地址。四个条件都要满足：
+///
+/// - 它确实是这个网络里一个别的节点的地址：来自连接的握手认出的发起节点，在网络的地址段里，不是本节点自己；
+/// - `target` 是 IPv4：虚拟 IP 只有 IPv4；
+/// - `target` 是本机网卡上的地址：服务回的包要在本机投递回来（`i3t_intercept` 的策略路由），别的机器上的服务回不来；
+/// - `target` 不是回环地址：内核不肯把源地址是回环地址的包发往别的地址，回环上的服务回不了包（端口转发到
+///   `127.0.0.1` 的那些照旧用回环地址）。
+fn presentable(network: &Network, me: Ipv4Addr, initiator: Ipv4Addr, target: SocketAddr, interfaces: &[IpNet]) -> bool {
+    let IpAddr::V4(target) = target.ip().to_canonical() else { return false };
+    network.cidr.contains(&initiator)
+        && initiator != me
+        && !target.is_loopback()
+        && interfaces.iter().any(|net| net.addr() == IpAddr::V4(target))
 }
 
 impl<S: System> LocalEgress for Outbound<S> {
@@ -406,7 +483,9 @@ impl<S: System> LocalEgress for Outbound<S> {
             EgressPolicy::Unrestricted => {
                 let addresses = self.resolve(host, Asker::Local).await?;
                 let first = addresses.first().ok_or_else(|| Reply::new(Status::Unreachable, "没有可以发的地址"))?;
-                SocketAddr::new(*first, port)
+                let destination = SocketAddr::new(*first, port);
+                self.not_overlay(destination)?;
+                destination
             }
             EgressPolicy::Exit => {
                 let netmap = Arc::clone(&self.inner.netmap.borrow());
@@ -486,6 +565,33 @@ mod tests {
     use socket2::SockRef;
 
     use super::*;
+
+    #[test]
+    fn only_an_authenticated_peers_address_is_presented_and_only_to_this_machines_own_non_loopback_addresses() {
+        let network = Network {
+            name: "home".into(),
+            domain: "home.i3t".into(),
+            cidr: "10.66.0.0/16".parse().unwrap(),
+            routing: Default::default(),
+            max_relay_hops: 2,
+            reach: Default::default(),
+            class: None,
+        };
+        let me = Ipv4Addr::new(10, 66, 0, 1);
+        let peer = Ipv4Addr::new(10, 66, 0, 2);
+        let interfaces: Vec<IpNet> =
+            ["127.0.0.1/8", "192.168.1.20/24", "10.66.0.1/32", "2001:db8::20/64"].iter().map(|net| net.parse().unwrap()).collect();
+        let at = |text: &str| text.parse::<SocketAddr>().unwrap();
+
+        assert!(presentable(&network, me, peer, at("192.168.1.20:22"), &interfaces), "本机网卡上的地址");
+        assert!(presentable(&network, me, peer, at("10.66.0.1:22"), &interfaces), "本节点自己的虚拟 IP 也在本机网卡上");
+        assert!(presentable(&network, me, peer, at("[::ffff:192.168.1.20]:22"), &interfaces), "映射地址按 IPv4 看");
+        assert!(!presentable(&network, me, peer, at("127.0.0.1:5432"), &interfaces), "回环上的服务回不了包");
+        assert!(!presentable(&network, me, peer, at("192.168.1.30:80"), &interfaces), "局域网里别的机器回不了包");
+        assert!(!presentable(&network, me, peer, at("[2001:db8::20]:22"), &interfaces), "虚拟 IP 只有 IPv4");
+        assert!(!presentable(&network, me, me, at("192.168.1.20:22"), &interfaces), "不冒充本节点自己");
+        assert!(!presentable(&network, me, Ipv4Addr::new(10, 67, 0, 2), at("192.168.1.20:22"), &interfaces), "不在网络的地址段里");
+    }
 
     #[test]
     fn connect_errors_are_attributed_to_the_target_unless_they_are_local() {

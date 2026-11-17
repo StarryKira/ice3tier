@@ -55,7 +55,9 @@ const BUSY_LOG_EVERY: Duration = Duration::from_secs(60);
 ///      解析出来的地址按地址族挑过之后，每个都过出站策略；
 ///    - 局域网：本节点启用了出口并打开了局域网开关，配额和建连预算同上，地址在本机网卡直连的网段里；
 ///    - 本节点的端口：只用本机的非回环地址去连。那个端口上有监听在虚拟 IP 上的端口转发时，按那条转发处理：
-///      目标是本节点就去连它指向的地址，目标是别的节点就到那个节点开一条流，把两条流接起来；
+///      目标是本节点就去连它指向的地址，目标是别的节点就到那个节点开一条流，把两条流接起来。
+///      透明访问打开着时（[`Outbound::set_presenting`]），连本机的非回环地址用发起节点的虚拟 IP 做源地址，
+///      服务看到的是对端而不是本机；这个地址只取自连接的握手认出的发起节点，建流请求里写的什么都不算；
 ///    - 端口转发：必须是下发给本节点、并且由发起节点监听的那一条。不需要本节点是出口。
 /// 4. 连上目标之后回成功，开始搬运。访问权限被收回，或者放行这条流的能力被收回（出口、局域网开关、端口转发，
 ///    见 `grant` 模块）时，正在搬运的流被重置，原因码是 [`Reason::AccessRevoked`]。
@@ -199,10 +201,10 @@ impl<S: System, C: Connector + Datagrams> Exit<S, C> {
                 }
                 Some(forward) => {
                     let addr = virtual_forward_target(netmap, initiator, forward)?;
-                    let stream = self.outbound.forward(addr).await?;
+                    let stream = self.outbound.forward(addr, initiator.virtual_ip).await?;
                     Ok((local(stream), Grant::VirtualForward { port: *port, id: forward.id, target: forward.target, addr: Some(addr) }))
                 }
-                None => Ok((local(self.outbound.node_port(*port).await?), Grant::NodeService)),
+                None => Ok((local(self.outbound.node_port(*port, initiator.virtual_ip).await?), Grant::NodeService)),
             },
             Target::Forward { id } => {
                 let listed = netmap
@@ -211,7 +213,10 @@ impl<S: System, C: Connector + Datagrams> Exit<S, C> {
                     .iter()
                     .find(|entry| entry.id == *id && entry.listener == peer && entry.protocol == ForwardProtocol::Tcp);
                 match listed {
-                    Some(entry) => Ok((local(self.outbound.forward(entry.addr).await?), Grant::Forward { id: *id, addr: entry.addr })),
+                    Some(entry) => {
+                        let stream = self.outbound.forward(entry.addr, initiator.virtual_ip).await?;
+                        Ok((local(stream), Grant::Forward { id: *id, addr: entry.addr }))
+                    }
                     None => Err(Reply::new(Status::UnknownForward, "没有下发给这个节点、由发起节点监听的这条 TCP 端口转发")),
                 }
             }

@@ -40,6 +40,10 @@ pub struct Help {
     pub connect_via: &'static str,
     pub tune: &'static str,
     pub tune_apply: &'static str,
+    pub intercept: &'static str,
+    pub intercept_status: &'static str,
+    pub hosts: &'static str,
+    pub hosts_apply: &'static str,
     pub self_check: &'static str,
 }
 
@@ -173,6 +177,26 @@ pub struct Ui {
     pub tune_files_unknown: fn(&str) -> String,
     pub tune_rto_cap: &'static str,
     pub tune_no_rto_cap: &'static str,
+
+    /// 透明访问只在 Linux 上有。
+    pub intercept_linux_only: &'static str,
+    pub intercept: &'static str,
+    /// 这台机器上缺的程序，`i3t set intercept on` 之后说。
+    pub intercept_missing: fn(&str) -> String,
+    pub intercept_removed: &'static str,
+    pub intercept_remove_failed: &'static str,
+    pub packet_filter: &'static str,
+    pub policy_rule: &'static str,
+    pub route: &'static str,
+    pub link: &'static str,
+    /// 那张表：链的名字，集合里有几个对端。
+    pub table_summary: fn(&str, &str, usize) -> String,
+    pub unreadable: fn(&str) -> String,
+    pub nothing_installed: &'static str,
+    pub leftover: &'static str,
+    pub intercept_active: fn(usize, &str) -> String,
+    pub hosts_written: fn(usize, &str) -> String,
+    pub hosts_write_failed: fn(&str) -> String,
 }
 
 static ZH: Texts = Texts {
@@ -194,6 +218,10 @@ static ZH: Texts = Texts {
         connect_via: "经这个出口节点出去",
         tune: "检查影响节点的内核参数（Linux），只看不改",
         tune_apply: "写入建议的值并持久化，要 root",
+        intercept: "透明访问（Linux）",
+        intercept_status: "透明访问的状态，和它在系统里装了什么",
+        hosts: "网络里的名字写成 /etc/hosts 的几行（给没有 systemd-resolved 的机器）",
+        hosts_apply: "写进 /etc/hosts，只换上次写的那一段，要 root",
         self_check: "自检：读配置和状态，和 controller 握手",
     },
     values: Values { dir: "目录", file: "文件", host: "地址", port: "端口", exit: "出口" },
@@ -324,6 +352,23 @@ static ZH: Texts = Texts {
         tune_files_unknown: |error| format!("能同时打开的文件数：读不到（{error}）"),
         tune_rto_cap: "TCP 重传上限：支持。lane 和 TCP 中转断网之后，路一通最多 2 秒就恢复",
         tune_no_rto_cap: "TCP 重传上限：这个内核不支持（Linux 6.15 起才有）。lane 和 TCP 中转断网之后恢复得慢，最多要再等断开时长的一半",
+
+        intercept_linux_only: "透明访问只在 Linux 上有",
+        intercept: "透明访问",
+        intercept_missing: |missing| format!("这台机器上缺：{missing}"),
+        intercept_removed: "拆掉了上次留下的透明访问规则",
+        intercept_remove_failed: "上次留下的透明访问规则拆不掉（要 root）",
+        packet_filter: "包过滤",
+        policy_rule: "路由规则",
+        route: "路由",
+        link: "网卡",
+        table_summary: |table, chains, peers| format!("{table}：{chains}；{peers} 个对端"),
+        unreadable: |error| format!("读不了（要 root）：{error}"),
+        nothing_installed: "系统里没有透明访问装的东西",
+        leftover: "节点没在运行，这些是上次留下的：下次启动时换掉，i3t set intercept off 现在就拆掉",
+        intercept_active: |active, traffic| format!("{active} 个连接，{traffic}"),
+        hosts_written: |count, path| format!("{path} 里写了 {count} 个名字"),
+        hosts_write_failed: |path| format!("写 {path}：要 root，sudo i3t hosts --apply"),
     },
 };
 
@@ -346,6 +391,10 @@ static EN: Texts = Texts {
         connect_via: "Go out through this exit node",
         tune: "Check kernel parameters that affect the node (Linux); read-only",
         tune_apply: "Apply and persist the suggested values; needs root",
+        intercept: "Transparent access (Linux)",
+        intercept_status: "Transparent access state and what it installed in the system",
+        hosts: "Names in the network as /etc/hosts lines (for machines without systemd-resolved)",
+        hosts_apply: "Write them into /etc/hosts, replacing only the block written last time; needs root",
         self_check: "Self-check: read configuration and state, handshake with the controller",
     },
     values: Values { dir: "DIR", file: "FILE", host: "HOST", port: "PORT", exit: "EXIT" },
@@ -426,7 +475,7 @@ static EN: Texts = Texts {
         no_peers: "No peers: no node in the configuration can reach this one",
         update_record_unreadable: "Update record unreadable",
         profile: "Profile",
-        profile_running: |profile, threads| format!("{profile}, {threads} worker threads"),
+        profile_running: |profile, threads| format!("{profile}, worker threads: {threads}"),
         restart_pending: "fully applies after a restart",
         cannot_self_update: "Can't update itself",
 
@@ -483,5 +532,22 @@ static EN: Texts = Texts {
         tune_rto_cap: "TCP retransmission cap: supported. Lanes and TCP relay legs resume within 2 s once a blackout ends",
         tune_no_rto_cap: "TCP retransmission cap: not supported by this kernel (Linux 6.15+). After a blackout, lanes and TCP relay legs \
                           resume late, up to half the blackout's length",
+
+        intercept_linux_only: "Transparent access is only available on Linux",
+        intercept: "Transparent access",
+        intercept_missing: |missing| format!("Missing on this machine: {missing}"),
+        intercept_removed: "Removed transparent access rules left from the last run",
+        intercept_remove_failed: "Can't remove transparent access rules left from the last run (needs root)",
+        packet_filter: "Packet filter",
+        policy_rule: "Routing rule",
+        route: "Route",
+        link: "Link",
+        table_summary: |table, chains, peers| format!("{table}: {chains}; {peers} peers"),
+        unreadable: |error| format!("unreadable (needs root): {error}"),
+        nothing_installed: "Nothing from transparent access in the system",
+        leftover: "Node not running; these are left from the last run: the next start replaces them, i3t set intercept off removes them now",
+        intercept_active: |active, traffic| format!("{active} connections, {traffic}"),
+        hosts_written: |count, path| format!("Wrote {count} names to {path}"),
+        hosts_write_failed: |path| format!("Writing {path}: needs root, sudo i3t hosts --apply"),
     },
 };

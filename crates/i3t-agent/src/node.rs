@@ -39,6 +39,7 @@ use crate::control::{ControlLink, LinkSetup, LinkState, TestMessage, Timing};
 use crate::diag::{Diag, NodeHandler};
 use crate::drain::Drain;
 use crate::flows;
+use crate::intercept::Intercept;
 use crate::join::hello;
 use crate::lanes::NodeLanes;
 use crate::local::LocalServers;
@@ -201,6 +202,8 @@ pub async fn run(
     let lanes = Arc::new(NodeLanes::new(&key, Arc::clone(&endpoint))?);
     let connector = lanes.connector();
     let access = Arc::new(Access::new(Arc::clone(&connector), outbound.clone(), local_rx.clone()).with_port_book(ports));
+    // 透明访问打开时，出口一侧连本机的服务改用发起节点的虚拟 IP 做源地址：同一个拨号器，由它来开关。
+    let intercept = Intercept::start(config.intercept.enabled, local_rx.clone(), Arc::clone(&access), outbound.clone());
     // 出口接力 UDP 端口转发时和入口共用一个开数据报上下文的：对端发回来的数据报只由入口的那一个分发。
     let exit = Arc::new(Exit::new(local_rx.clone(), outbound, connector).with_quota_state(quota).with_opener(access.datagram_opener()));
     let follow_lanes = tokio::spawn(Arc::clone(&lanes).follow(local_rx.clone()));
@@ -239,6 +242,7 @@ pub async fn run(
         update: update_rx,
         flows: flows_rx.clone(),
         performance: performance_rx,
+        intercept: intercept.state(),
     }));
     let count_flows = tokio::spawn({
         let runtime = Arc::clone(&runtime);
@@ -321,6 +325,7 @@ pub async fn run(
     };
 
     tracing::info!("节点停止");
+    intercept.stop().await;
     drop(local_servers);
     save_quota.abort();
     persist::save_quota_now(&state_for_quota, &exit);

@@ -222,6 +222,7 @@ impl Inner {
             credential_connections: BTreeMap::new(),
             lanes: None,
             performance: None,
+            intercept: None,
             throughput_tests: hello.throughput_tests,
         };
         self.drop_route_queries(node.id);
@@ -320,7 +321,8 @@ impl Inner {
             live.tx_bytes = report.tx_bytes;
             live.rx_bytes = report.rx_bytes;
             live.lanes = report.lanes.as_deref().cloned();
-            live.performance.clone_from(&report.performance);
+            live.performance = report.performance.as_deref().cloned();
+            live.intercept = report.intercept.as_deref().cloned();
         }
         let Report { run, credentials, exit, exits, listeners, forwards, .. } = report;
         self.usage_reported(&node, UsageReport { run, credentials, exit, exits, listeners, forwards })?;

@@ -11,6 +11,7 @@
 //! | [`performance`] | 性能档位：预设加上本机的覆盖，落实成线程数、缓冲、窗口和空闲回收的时间 |
 //! | `lanes` | 独占 TCP（lane）：和共用的连接装成一个连接层，跟着 netmap 拨谁、接谁 |
 //! | [`drain`] | 排空：更新之前不再接新的流 |
+//! | `intercept` | 透明访问（Linux）：按本机配置把规则装进系统、跟着 netmap 改、停下时拆掉；名字服务 |
 //! | `diag` | 主动测试：收 controller 的指令，按本机的规矩量、配合，送回结果；测量服务 |
 //! | [`selfcheck`] | 新程序的自检（`i3t self-check`） |
 //! | [`status`]、[`local`] | 运行着的节点的状态，和本机问它的接口（`i3t status`、`i3t routes`、`/metrics`） |
@@ -23,6 +24,7 @@ mod diag;
 pub mod drain;
 mod flows;
 mod http;
+pub mod intercept;
 pub mod join;
 mod lanes;
 pub mod local;

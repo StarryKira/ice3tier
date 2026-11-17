@@ -15,7 +15,8 @@
 - **按分组的访问控制。** 把节点放进分组，规则只有一种：分组 a 里的节点可以访问分组 b 里的节点。每个网络自带分组 `All`，默认 All 可以访问 All。
 - **集中管理。** 一个 controller 加一个 Web 界面，管理网络、节点、规则、出口、端口转发，查看拓扑和任意两个节点之间现在怎么走。可以建多个互相隔离的网络。
 - **节点自己更新。** 发布包带签名，节点经 controller 取包、验签、替换、重启，新程序起不来就自己换回旧的。
-- **不用虚拟网卡。** 不改系统的路由表和 DNS，基本功能不需要管理员权限。
+- **透明访问（Linux，可选）。** 打开之后，本机的程序不配代理就能直接连别的节点的虚拟 IP 或名字，比如 `ssh nas.home.i3t`。
+- **不用虚拟网卡。** 不改系统的路由表和 DNS（透明访问除外，它要打开才有），基本功能不需要管理员权限。
 
 不做的事：三层隧道（TUN / TAP）、协议伪装、面向公众的共享中转、多管理员与权限体系。
 
@@ -93,6 +94,25 @@ curl -x socks5h://127.0.0.1:1080 http://nas.home.i3t:8080/
 ssh -o ProxyCommand='i3t connect %h %p' nas                 # 连网络里叫 nas 的节点
 ssh -o ProxyCommand='i3t connect --via home %h %p' 192.168.1.10   # 经 home 这个出口连它局域网里的机器
 ```
+
+**透明访问（Linux）。** 打开之后这台机器上的程序不用代理，直接连别的节点：`ssh 10.66.0.5`、`curl http://nas.home.i3t:8080/`。
+
+```sh
+sudo i3t set intercept on     # 写进 config.toml，重启 i3t 生效
+sudo systemctl restart i3t
+i3t intercept status          # 状态，和它在系统里装了什么
+```
+
+节点进程要 root，或者 `CAP_NET_ADMIN` 和 `CAP_NET_BIND_SERVICE`：以 `i3t` 用户跑的系统服务用 `sudo systemctl edit i3t` 加上
+
+```ini
+[Service]
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+```
+
+系统里还要有 `nft`（nftables）和 `ip`（iproute2）。它装一张包过滤的表、一条策略路由和一块不走流量的网卡 `i3t0`，节点停下时全部拆掉。
+有 systemd-resolved 的机器上名字直接能用；没有的用 `sudo i3t hosts --apply` 把名字写进 `/etc/hosts`。别的节点这样连到本机的服务时，
+本机打开了透明访问的话，服务看到的是对端的虚拟 IP。做法见 [docs/architecture.md](docs/architecture.md) 的透明访问一节。
 
 Linux 上可以用 `i3t tune` 检查会影响节点表现的内核参数（UDP 缓冲的上限、TCP 的拥塞控制等），它只列出建议；`sudo i3t tune --apply` 才会改。它也说明这个内核能不能给 TCP 的重传设上限（Linux 6.15 起）：能的话，lane 和 TCP 中转断网之后恢复得快。
 

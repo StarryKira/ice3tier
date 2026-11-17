@@ -744,3 +744,210 @@ def blackout_between(a: Host, b: Host, base, on: bool) -> None:
 def rto_cap_supported() -> bool:
     """这个内核能不能给 TCP 的重传定时器设上限（Linux 6.15 起，和 sysctl tcp_rto_max_ms 同时出现）。"""
     return Path("/proc/sys/net/ipv4/tcp_rto_max_ms").exists()
+
+
+# 下面是透明访问（test_intercept.py）用的。
+
+def intercept_on(node: Node) -> None:
+    """在节点的配置文件里打开透明访问。要在节点启动之前。"""
+    add_node_config(node, "[intercept]\nenabled = true\n")
+
+
+def system_snapshot(host: Host) -> dict[str, str]:
+    """一台主机的包过滤规则、路由规则、全部路由表、网卡和地址。透明访问拆掉之后要和装之前一模一样。"""
+    return {
+        "nft": host.run("nft", "list", "ruleset").stdout,
+        "rules": host.run("ip", "rule", "show").stdout,
+        "routes": host.run("ip", "route", "show", "table", "all").stdout,
+        "links": host.run("ip", "-o", "link", "show").stdout,
+        "addresses": host.run("ip", "-o", "addr", "show").stdout,
+    }
+
+
+def settled_snapshot(host: Host, timeout: float = 10) -> dict[str, str]:
+    """一台刚建好的主机的快照，等它不再变了再取：内核在网卡起来一两秒之后才加上 IPv6 链路本地的地址（先是 tentative）和路由。"""
+    deadline = time.monotonic() + timeout
+    previous = system_snapshot(host)
+    while time.monotonic() < deadline:
+        time.sleep(0.5)
+        current = system_snapshot(host)
+        if current == previous and "fe80::" in current["routes"] and "tentative" not in current["addresses"]:
+            return current
+        previous = current
+    return previous
+
+
+def snapshot_difference(before: dict[str, str], after: dict[str, str]) -> str:
+    """两份快照不一样的地方，给失败的检查看；一样时是空的。"""
+    import difflib
+
+    parts = []
+    for key in before:
+        if before[key] != after[key]:
+            diff = difflib.unified_diff(before[key].splitlines(), after[key].splitlines(), lineterm="", n=0)
+            parts.append(f"[{key}] " + " | ".join(line for line in diff if line[:1] in "+-" and line[:3] not in ("+++", "---")))
+    return "；".join(parts)
+
+
+def use_nameserver(address: str) -> None:
+    """让实验环境里的程序（glibc 的解析器）把查询发给 `address`，像一台机器上的系统解析器把网络的域名转给节点那样。
+
+    /etc/resolv.conf 在这台机器上通常指向 /run 下面 systemd-resolved 的文件；实验环境的 /run 是自己的一块 tmpfs，
+    就写那里。不是那样的话，在自己的挂载命名空间里把一个文件绑到 /etc/resolv.conf 上。
+    """
+    resolv = Path("/etc/resolv.conf")
+    text = f"nameserver {address}\noptions timeout:2 attempts:1\n"
+    target = resolv.resolve()
+    if str(target).startswith("/run/"):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+        return
+    local = Path("/run/i3t-e2e-resolv.conf")
+    local.write_text(text)
+    subprocess.run(["mount", "--bind", str(local), "/etc/resolv.conf"], check=True)
+
+
+def private_hosts_file() -> Path:
+    """在自己的挂载命名空间里给 /etc/hosts 换一份可以写的副本，返回它。`i3t hosts --apply` 写的就是它。"""
+    copy = Path("/run/i3t-e2e-hosts")
+    copy.write_text(Path("/etc/hosts").read_text())
+    subprocess.run(["mount", "--bind", str(copy), "/etc/hosts"], check=True)
+    return copy
+
+
+# 不经代理直接连一个地址：连上要多久、读到了什么、怎么失败的。参数：地址、端口、要发的文字、时限。打印 JSON。
+DIAL = r"""
+import json, socket, sys, time
+host, port, send, limit = sys.argv[1], int(sys.argv[2]), sys.argv[3], float(sys.argv[4])
+start = time.monotonic()
+result = {}
+try:
+    s = socket.create_connection((host, port), timeout=limit)
+    result["connected"] = round(time.monotonic() - start, 3)
+    result["local"] = s.getsockname()[0]
+    if send:
+        s.sendall(send.encode())
+    data = b""
+    while len(data) < 65536:
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        data += chunk
+    result["data"] = data.decode(errors="replace")
+except OSError as error:
+    result["error"] = type(error).__name__
+result["seconds"] = round(time.monotonic() - start, 3)
+print(json.dumps(result))
+"""
+
+
+def dial(host: Host, address: str, port: int, send: str = "", limit: float = 10) -> dict:
+    """从 `host` 上不经代理直接连 `address:port`（透明访问打开时被拦截），见 `DIAL`。"""
+    done = host.run(sys.executable, "-c", DIAL, address, str(port), send, str(limit), check=False, timeout=limit + 15)
+    return json.loads(done.stdout) if done.stdout.strip() else {"error": done.stderr.strip()[-300:]}
+
+
+# 一个先说话的服务（像 SSH）：连上就发一行横幅，然后关掉。参数：监听地址、端口、横幅。
+BANNER = r"""
+import socket, sys
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind((sys.argv[1], int(sys.argv[2])))
+s.listen(64)
+while True:
+    conn, peer = s.accept()
+    conn.sendall((sys.argv[3] + " " + peer[0] + "\r\n").encode())
+    conn.close()
+"""
+
+
+def start_banner(host: Host, port: int, banner: str) -> None:
+    host.spawn(sys.executable, "-c", BANNER, "0.0.0.0", str(port), banner)
+    wait_until(lambda: f":{port} " in host.run("ss", "-lnt").stdout, what=f"{host.name} 上的横幅服务启动")
+
+
+# 不经代理发一个 UDP 报文、收回答：回答的内容（十六进制）和它的来源。参数：地址、端口、载荷（十六进制）、最多发几次。
+UDP_DIAL = r"""
+import json, socket, sys, time
+address, port, payload, tries = sys.argv[1], int(sys.argv[2]), bytes.fromhex(sys.argv[3]), int(sys.argv[4])
+udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+udp.settimeout(1.5)
+result = {}
+start = time.monotonic()
+for _ in range(tries):
+    try:
+        udp.sendto(payload, (address, port))
+    except OSError as error:
+        result["error"] = type(error).__name__
+        break
+    try:
+        data, source = udp.recvfrom(65535)
+    except socket.timeout:
+        continue
+    except OSError as error:
+        result["error"] = type(error).__name__
+        break
+    result["data"], result["source"] = data.hex(), f"{source[0]}:{source[1]}"
+    break
+result["seconds"] = round(time.monotonic() - start, 3)
+print(json.dumps(result))
+"""
+
+
+def udp_dial(host: Host, address: str, port: int, payload: bytes, tries: int = 6) -> dict:
+    done = host.run(sys.executable, "-c", UDP_DIAL, address, str(port), payload.hex(), str(tries), check=False, timeout=tries * 2 + 15)
+    return json.loads(done.stdout) if done.stdout.strip() else {"error": done.stderr.strip()[-300:]}
+
+
+# 不经代理直接连 TICKER，收 `seconds` 秒，打印 JSON：超过 0.5 秒的停顿、收到的字节数、流是不是提前断了。参数：地址、端口、秒数。
+TICKER_DIRECT = r"""
+import json, socket, sys, time
+target, port, seconds = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
+s = socket.create_connection((target, port), timeout=10)
+end = time.monotonic() + seconds
+s.settimeout(0.5)
+last, gaps, total, ended = time.monotonic(), [], 0, None
+while time.monotonic() < end:
+    try:
+        data = s.recv(65536)
+    except socket.timeout:
+        continue
+    except OSError as error:
+        ended = repr(error)
+        break
+    if not data:
+        ended = "eof"
+        break
+    now = time.monotonic()
+    if now - last > 0.5:
+        gaps.append(round(now - last, 2))
+    last, total = now, total + len(data)
+print(json.dumps({"gaps": gaps, "bytes": total, "ended": ended}))
+"""
+
+
+# 数发往覆盖网的地址段、真的从 up0 出去了的包：一张只计数的表，挂在 postrouting 的最后。透明访问的规则拒绝掉的包到不了这里。
+LEAK_WATCH = """
+table ip leakwatch {
+    chain post {
+        type filter hook postrouting priority 300; policy accept;
+        oifname "up0" ip daddr 10.66.0.0/16 counter
+    }
+}
+"""
+
+
+def watch_leaks(host: Host, on: bool = True) -> None:
+    """在 `host` 上装上（或者去掉）`LEAK_WATCH`。"""
+    host.run("nft", "delete", "table", "ip", "leakwatch", check=False)
+    if on:
+        host.run("nft", "-f", "-", input=LEAK_WATCH)
+
+
+def leaked(host: Host) -> int:
+    """`LEAK_WATCH` 数到的包。"""
+    import re
+
+    text = host.run("nft", "list", "table", "ip", "leakwatch").stdout
+    found = re.search(r"counter packets (\d+)", text)
+    return int(found.group(1)) if found else -1

@@ -24,7 +24,7 @@ use crate::credential;
 use crate::egress::{self, EgressPolicy, LocalEgress};
 use crate::failure::Failure;
 use crate::first_data::{self, FIRST_BYTE_WAIT};
-use crate::manager::{Connection, PortBook};
+use crate::manager::{Connection, Counters, PortBook};
 use crate::message::{Parsed, Parser, ProxyAuth};
 use crate::route::{self, Route};
 use crate::selector::Selector;
@@ -57,6 +57,8 @@ pub(crate) struct Shared<C: Datagrams, E> {
     pub drained: AtomicU64,
     /// UDP 端口转发的会话没有报文往来多久之后回收。
     pub udp_idle_timeout: Duration,
+    /// 透明访问这一路的连接数和流量。
+    pub intercept: Counters,
 }
 
 impl<C: Datagrams, E> Shared<C, E> {
@@ -130,7 +132,7 @@ impl Client {
 }
 
 /// 用 RST 关掉一条连接。设不上 SO_LINGER 时退化成普通的关闭，没有更好的办法。
-fn reset(stream: TcpStream) {
+pub(crate) fn reset(stream: TcpStream) {
     let _ = stream.set_zero_linger();
     drop(stream);
 }
@@ -552,7 +554,7 @@ pub(crate) fn origin_address(from: SocketAddr) -> Option<SocketAddr> {
 }
 
 /// 每条流结束时的一行摘要。不记目标地址，只记它是哪一类。
-fn log_summary(peer: NodeId, request: &Open, summary: &Summary) {
+pub(crate) fn log_summary(peer: NodeId, request: &Open, summary: &Summary) {
     tracing::info!(
         %peer,
         kind = request.target.kind(),

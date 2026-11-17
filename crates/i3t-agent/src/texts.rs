@@ -81,7 +81,7 @@ static ZH: Texts = Texts {
     },
     metrics_not_loopback: |addr| format!("metrics.listen = \"{addr}\" 不是回环地址：指标接口没有认证，只能写 127.0.0.1 或 [::1]。"),
     same_proxy_address: |addr| format!("proxy.socks5 和 proxy.http 不能用同一个地址 {addr}"),
-    unknown_setting: |other| format!("没有设置项 {other}：可以写 can-exit、can-relay、can-forward、throughput-tests、profile"),
+    unknown_setting: |other| format!("没有设置项 {other}：可以写 can-exit、can-relay、can-forward、throughput-tests、profile、intercept"),
     not_a_switch: |other| format!("\"{other}\" 不是开关的值：写 on 或 off"),
     unknown_profile: |other| format!("没有档位 \"{other}\"：可以写 low-footprint、balanced、high-throughput"),
     performance_range: |key, low, high| format!("performance.{key} 要在 {low} 到 {high} 之间"),
@@ -133,7 +133,9 @@ static EN: Texts = Texts {
         format!("metrics.listen = \"{addr}\" isn't a loopback address: the metrics endpoint has no authentication.")
     },
     same_proxy_address: |addr| format!("proxy.socks5 and proxy.http can't share the address {addr}"),
-    unknown_setting: |other| format!("No setting {other}: possible values: can-exit, can-relay, can-forward, throughput-tests, profile"),
+    unknown_setting: |other| {
+        format!("No setting {other}: possible values: can-exit, can-relay, can-forward, throughput-tests, profile, intercept")
+    },
     not_a_switch: |other| format!("\"{other}\" isn't a switch value: write on or off"),
     unknown_profile: |other| format!("No profile \"{other}\": possible values: low-footprint, balanced, high-throughput"),
     performance_range: |key, low, high| format!("performance.{key} must be between {low} and {high}"),
@@ -205,6 +207,12 @@ profile = "balanced"
 # idle_close_secs = 300     # 没有流之后多久关闭连接，0 是不关
 # return_memory = false     # 每分钟把空着的内存还给系统
 
+# 透明访问（只在 Linux 上）：本机的程序不配代理，直接连别的节点的虚拟 IP 或者 <名字>.<网络的域名>。
+# 装包过滤规则、策略路由和网卡 i3t0，节点停下时拆掉；节点进程要有 CAP_NET_ADMIN 和 CAP_NET_BIND_SERVICE。
+# i3t set intercept on 改的是这一行，i3t intercept status 列出装了什么。
+[intercept]
+enabled = false
+
 [log]
 # 日志级别：error、warn、info、debug、trace。
 level = "info"
@@ -250,6 +258,12 @@ profile = "balanced"
 # connection_window_mb = 64 # Most data one connection holds, each way
 # idle_close_secs = 300     # Close a connection this long after its last stream; 0 never
 # return_memory = false     # Give unused memory back to the system every minute
+
+# Transparent access (Linux only): programs here reach other nodes by virtual IP or <name>.<network domain>, no proxy settings.
+# Installs packet-filter rules, a routing rule and a link i3t0, removed when the node stops; needs CAP_NET_ADMIN and CAP_NET_BIND_SERVICE.
+# i3t set intercept on edits this line; i3t intercept status lists what is installed.
+[intercept]
+enabled = false
 
 [log]
 # Log level: error, warn, info, debug, trace.

@@ -4,7 +4,16 @@
 
 对应的 Rust 类型在 `crates/i3t-model/src/admin.rs`，实现在 `crates/i3t-controller/src/admin.rs`。文档和代码不一致时以代码为准，并请修正文档。
 
-> **最新一次新增**（性能档位）。管理员可以给每个节点选一个性能档位，节点报它实际在用的。正文里新加的地方标着「新增」。这一次的清单：
+> **最新一次新增**（透明访问）。Linux 节点可以在本机打开透明访问：本机的程序不配代理，直接连别的节点的虚拟 IP 或者名字。
+> 它改的是那台机器的网络配置，只能在节点上打开（`i3t set intercept on`），管理接口只看状态。这一次的清单：
+>
+> - 节点详情 `NodeDetail` 多了 `intercept`（结构 `InterceptReport`）：开着、关着、开不起来（原因是代码 `InterceptCause`）、这个平台上没有；
+>   开着时拦截哪些协议、服务看不看得到对端的虚拟 IP、名字怎么解析（`NameService`），和这一路的连接数、流量（第 5 节）。
+> - 节点协议没有升版：上报里的 `intercept` 旧的 controller 忽略，旧的节点不报（是 `null`）。
+>
+> 已有接口的路径、请求体和应答里原有的字段都没有变。
+>
+> **上一次新增**（性能档位）。管理员可以给每个节点选一个性能档位，节点报它实际在用的。这一次的清单：
 >
 > - 节点 `Node` 多了 `profile`：管理员给它选的档位，`"low_footprint"`、`"balanced"`、`"high_throughput"`，没有选时是 `null`（第 5 节）。
 > - 改节点（`PATCH …/nodes/{node}`）可以写 `profile`；写 `null` 是不再指定，节点改用它本机配置文件里的（第 5 节）。
@@ -15,7 +24,7 @@
 >
 > 已有接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **上一次改动**（分组取代标签）。原来的"标签"只是节点、注册令牌和规则上的一串文字；现在它是**分组**：一样单独的东西，
+> **再上一次改动**（分组取代标签）。原来的"标签"只是节点、注册令牌和规则上的一串文字；现在它是**分组**：一样单独的东西，
 > 有编号和名字，有自己的接口（第 18 节）。这是改名，旧的写法不再收，也没有别名。这一次的清单：
 >
 > - 去掉的：`POST /networks/{network}/tags/rename` 和它的 `RenameTag`、`RenamedTag`；`Node.tags`、`UpdateNode.tags`；
@@ -35,7 +44,7 @@
 > - 升级时数据库原地迁移：节点、注册令牌、规则里出现过的每个标签成为同名的分组，`all` 成为 `All`，成员和规则跟着走。
 >   旧的操作记录的参数也改成了新的写法。
 >
-> **再上一次新增**（代码和参数）。界面要能用自己的语言写出 controller 和节点说的事，所以给人看的那些中文原话旁边
+> **更早的新增**（代码和参数）。界面要能用自己的语言写出 controller 和节点说的事，所以给人看的那些中文原话旁边
 > 多了代码和写成一句话要用到的值；原话照旧在，给日志和旧的客户端。正文里新加的地方标着「新增」。这一次的清单：
 >
 > - 约定（1.2 节）：原话旁边的**原因**是一个对象 `{ "code": 代码, …这个代码要用到的值 }`，叫 `cause`（或者 `check_cause`）；
@@ -639,7 +648,16 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   "flows": 2,
   "tx_bytes": 1024,
   "rx_bytes": 4096,
-  "performance": { "profile": "balanced", "threads": 2, "restart_pending": false, "overrides": [] }
+  "performance": { "profile": "balanced", "threads": 2, "restart_pending": false, "overrides": [] },
+  "intercept": {
+    "state": "on",
+    "udp": true,
+    "source_address": true,
+    "names": { "state": "resolved" },
+    "active": 2,
+    "up_bytes": 18240,
+    "down_bytes": 912311
+  }
 }
 ```
 
@@ -654,6 +672,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `lanes` | 「新增」独占 TCP 的状况，结构是 `LaneReport`（第 12 节）。节点不在线、版本太旧没有报、或者还没有上报过时是 `null` |
 | `reported_secs_ago` | 「新增」节点最近一次上报是多少秒之前，上面这几项（`lanes`、`flows`、流量、`mapping_varies`）都是那一次报的。这次连接上还没有上报过、或者不在线时是 `null` |
 | `performance` | 「新增」节点实际在用的性能档位（`PerformanceReport`），见下表。节点不在线、版本太旧没有报、或者还没有上报过时是 `null` |
+| `intercept` | 「新增」透明访问的状况（`InterceptReport`），见下面。节点不在线、版本太旧没有报、或者还没有上报过时是 `null`；节点没有打开时是 `{ "state": "off", … }` |
 
 「新增」`PerformanceReport`：
 
@@ -663,6 +682,42 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `threads` | 节点的工作线程数，进程启动时定 |
 | `restart_pending` | `true`：档位换了，工作线程数要等节点重启才变；别的项已经生效。界面可以提示"重启节点后完全生效" |
 | `overrides` | 节点本机配置文件里单独改了的项，写的是配置文件里的键名：`"threads"`、`"stream_buffer_kb"`、`"stream_window_kb"`、`"connection_window_mb"`、`"idle_close_secs"`、`"return_memory"`（以后可能增加，不认识的照样显示）。这些项不跟着档位走；空数组表示全部按档位 |
+
+「新增」`InterceptReport`：透明访问（Linux 上的套接字级拦截，见 [architecture.md](architecture.md) 的 5.10）。`state` 是代码，同一层是这个状态要用到的值：
+
+| `state` | 含义 | 同一层的值 |
+|---|---|---|
+| `off` | 没有打开（默认） | |
+| `on` | 打开着，系统里的规则都装好了 | `udp`：UDP 也被拦截。`source_address`：别的节点经透明访问连到本机的服务时，服务看到的是那个节点的虚拟 IP。`names`：名字怎么解析，见下表 |
+| `failed` | 节点本机配置里打开了，但是装不上；系统里什么都没有留下，代理和端口转发照常 | `cause`：原因（`InterceptCause`），见下表 |
+| `unsupported` | 这个平台上没有（只有 Linux 有） | |
+
+不认识的 `state` 当作 `unknown`。另外三个字段每个状态都有：`active`（正在进行的被拦截的连接和 UDP 会话）、`up_bytes`、`down_bytes`
+（这次运行以来经透明访问发出、收到的字节数）。界面上可以写成"透明访问：开着（TCP、UDP），名字经 systemd-resolved，2 个连接"；
+没有开关：要在节点上执行 `i3t set intercept on`（或者 `off`），然后重启 i3t。
+
+`names`（`NameService`），也是 `{ "state": 代码, … }`：
+
+| `state` | 含义 |
+|---|---|
+| `resolved` | systemd-resolved 把网络的域名交给节点的名字服务：本机的程序直接用 `<名字>.<域名>` |
+| `no_resolver` | 名字服务开着（节点虚拟 IP 的 53 端口），但这台机器没有 systemd-resolved：名字要写进 `/etc/hosts`（`i3t hosts --apply`）。按虚拟 IP 照常可用 |
+| `failed` | 名字服务没有开起来，`cause` 是原因（`InterceptCause`）。按虚拟 IP 照常可用 |
+
+`cause`（`InterceptCause`）是 `{ "code": 代码, … }`：
+
+| `code` | 含义 | 同一层的值 |
+|---|---|---|
+| `no_permission` | 节点进程缺能力 | `missing`：能力的名字，写法和 systemd 的 `AmbientCapabilities=` 一样（`"CAP_NET_ADMIN"`、`"CAP_NET_BIND_SERVICE"`） |
+| `program_missing` | 系统里没有这个程序 | `program`：`"nft"`（装 nftables）或者 `"ip"`（装 iproute2） |
+| `command_failed` | 一个程序报错退出（比如内核不认某条规则，或者 systemd-resolved 不接受设置） | `program`（`"nft"`、`"ip"`、`"resolvectl"`），`detail`：它的原话 |
+| `port_in_use` | 端口被占着（入口的 `127.0.0.1:1`，或者名字服务的 `<虚拟 IP>:53`） | `address` |
+| `bind_failed` | 别的原因绑不上 | `address`，`detail`：系统的原话 |
+| `table_in_use` | 策略路由用的路由表里有别的程序的路由 | `table`：表的编号（2033） |
+| `link_in_use` | 已经有一块同名的网卡，不是 ice3tier 建的 | `link`：`"i3t0"` |
+| `range_in_use` | 网络的地址段和这台机器所在的一个真实网络重叠（本机网卡上的地址，或者 `main` 表里默认路由之外的一条路由）：装上会把它从那个网络上切下来，所以什么都没装 | `with`：重叠的那个地址或者路由，写法和 `ip` 一样，比如 `"192.168.1.5/24 dev eth0"`、`"10.0.0.0/8 dev tun0"` |
+
+不认识的 `code` 当作 `unknown`。
 
 `mapping_varies`、`flows`、`tx_bytes`、`rx_bytes`、`lanes` 是节点这次连接期间最近一次上报的值；节点不在线时是 `null` 和 0。
 

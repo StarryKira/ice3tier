@@ -11,7 +11,9 @@ use i3t_model::admin::{
     NodeListeners, NodeRef, NodeUpdate, Overview, PairLaneSide, PairView, PathLeg, PathSource, PathView, RelayEnabled, RouteMatrix,
     RouteTable, Rule, Status, UpdateOverview,
 };
-use i3t_model::control::{DirectKind, LaneCounts, LaneReport, LegTransport, PathSegment, PeerLanes, PerformanceReport, Route};
+use i3t_model::control::{
+    DirectKind, InterceptReport, InterceptState, LaneCounts, LaneReport, LegTransport, PathSegment, PeerLanes, PerformanceReport, Route,
+};
 use i3t_model::netmap::{DefaultAction, Profile};
 use i3t_model::update::UpdateTiming;
 use i3t_proto::NodeId;
@@ -330,6 +332,9 @@ pub fn node_detail(detail: &NodeDetail) {
     fields.add(t.reach, node.reach.as_ref().map_or_else(|| t.from_network.to_owned(), label));
     fields.add(t.pinned, lang.list(node.pinned_relays.iter().map(|relay| format!("#{relay}"))));
     fields.add(t.profile, profile_summary(node.profile, detail.performance.as_ref()));
+    if let Some(intercept) = &detail.intercept {
+        fields.add(t.intercept, intercept_summary(intercept));
+    }
     fields.add("netmap", (t.netmap_versions)(node.netmap_version, node.sent_version, node.acked_version));
     fields.add(t.endpoints, lang.list(&detail.endpoints));
     fields.add(t.observed, optional(detail.observed_endpoint));
@@ -345,6 +350,19 @@ pub fn node_detail(detail: &NodeDetail) {
     fields.print();
     if let Some(lanes) = &detail.lanes {
         lane_report(lanes);
+    }
+}
+
+/// 节点报的透明访问：状态，开着时加上连接数和流量。
+fn intercept_summary(report: &InterceptReport) -> String {
+    let (t, lang, codes) = context();
+    let state = (codes.intercept_state)(&report.state);
+    match report.state {
+        InterceptState::On { .. } => {
+            let traffic = format!("↑ {}  ↓ {}", lang.bytes(report.up_bytes), lang.bytes(report.down_bytes));
+            lang.list([state, (t.intercept_active)(report.active, &traffic)])
+        }
+        InterceptState::Off | InterceptState::Failed { .. } | InterceptState::Unsupported | InterceptState::Unknown => state,
     }
 }
 

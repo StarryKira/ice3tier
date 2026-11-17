@@ -9,8 +9,8 @@ use i3t_conn::{Endpoint, RouteChange};
 use i3t_exit::{Exit, ExitStats, Os, Outbound};
 use i3t_model::Netmap;
 use i3t_model::control::{
-    BackboneRow, CredentialUsage, ExitObservation, ExitReport, ForwardReport, ListenTraffic, ListenerReport, PerformanceReport, QuotaUsage,
-    Report, Route, RouteAnswer, RouteSince, SelfUpdate,
+    BackboneRow, CredentialUsage, ExitObservation, ExitReport, ForwardReport, InterceptReport, InterceptState, ListenTraffic,
+    ListenerReport, PerformanceReport, QuotaUsage, Report, Route, RouteAnswer, RouteSince, SelfUpdate,
 };
 use i3t_model::update::UpdateStatus;
 use i3t_proto::NodeId;
@@ -53,6 +53,8 @@ pub(crate) struct Runtime {
     pub(crate) flows: watch::Receiver<usize>,
     /// 正在用的性能档位。
     pub(crate) performance: watch::Receiver<PerformanceReport>,
+    /// 透明访问的状态。
+    pub(crate) intercept: watch::Receiver<InterceptState>,
     pub(crate) history: RouteHistory,
     relay_activity: Mutex<RelayActivity>,
 }
@@ -71,11 +73,13 @@ pub(crate) struct Parts {
     pub(crate) update: watch::Receiver<UpdateStatus>,
     pub(crate) flows: watch::Receiver<usize>,
     pub(crate) performance: watch::Receiver<PerformanceReport>,
+    pub(crate) intercept: watch::Receiver<InterceptState>,
 }
 
 impl Runtime {
     pub(crate) fn new(parts: Parts) -> Self {
-        let Parts { program, self_update, controller, endpoint, lanes, exit, access, netmap, link, update, flows, performance } = parts;
+        let Parts { program, self_update, controller, endpoint, lanes, exit, access, netmap, link, update, flows, performance, intercept } =
+            parts;
         Self {
             program,
             self_update,
@@ -92,6 +96,7 @@ impl Runtime {
             update,
             flows,
             performance,
+            intercept,
             history: RouteHistory::default(),
             relay_activity: Mutex::default(),
         }
@@ -105,7 +110,8 @@ impl Runtime {
             .iter()
             .map(|listener| listener.active.get())
             .chain(status.forwards.iter().map(|forward| forward.active.get()))
-            .sum();
+            .sum::<usize>()
+            + self.access.intercept_status().active.get();
         let exit = usize::try_from(self.exit.stats().active).unwrap_or(usize::MAX);
         let lanes = usize::try_from(self.lanes.status().total.in_use).unwrap_or(usize::MAX);
         let forwarding =
@@ -151,13 +157,19 @@ impl Runtime {
                 },
             })
             .collect();
-        let ingress_up: u64 =
-            listeners.iter().map(|listener| listener.traffic.bytes_up).chain(forwards.iter().map(|forward| forward.traffic.bytes_up)).sum();
+        let intercept = self.intercept_report();
+        let ingress_up: u64 = listeners
+            .iter()
+            .map(|listener| listener.traffic.bytes_up)
+            .chain(forwards.iter().map(|forward| forward.traffic.bytes_up))
+            .sum::<u64>()
+            .saturating_add(intercept.up_bytes);
         let ingress_down: u64 = listeners
             .iter()
             .map(|listener| listener.traffic.bytes_down)
             .chain(forwards.iter().map(|forward| forward.traffic.bytes_down))
-            .sum();
+            .sum::<u64>()
+            .saturating_add(intercept.down_bytes);
         Report {
             endpoints: self.endpoint.endpoints(),
             mapping_varies: self.endpoint.mapping_varies(),
@@ -177,7 +189,19 @@ impl Runtime {
             forwards,
             route_kinds: self.endpoint.path_reports().iter().filter_map(route_detail::kind).collect(),
             lanes: Some(Box::new(self.lanes.report())),
-            performance: Some(self.performance.borrow().clone()),
+            performance: Some(Box::new(self.performance.borrow().clone())),
+            intercept: Some(Box::new(intercept)),
+        }
+    }
+
+    /// 透明访问的状态和这一路的计数。
+    pub(crate) fn intercept_report(&self) -> InterceptReport {
+        let status = self.access.intercept_status();
+        InterceptReport {
+            state: self.intercept.borrow().clone(),
+            active: count(status.active.get()),
+            up_bytes: status.traffic.up(),
+            down_bytes: status.traffic.down(),
         }
     }
 

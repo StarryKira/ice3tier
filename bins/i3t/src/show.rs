@@ -5,7 +5,7 @@ use i3t_agent::state::StateDir;
 use i3t_agent::status::{Link, LiveListener, LiveStatus};
 use i3t_lang::table::{Fields, Table};
 use i3t_lang::{Lang, NONE, optional};
-use i3t_model::control::{BindCause, LaneReport};
+use i3t_model::control::{BindCause, InterceptReport, InterceptState, LaneReport};
 use i3t_model::update::UpdateStatus;
 use i3t_proto::NodeId;
 
@@ -76,6 +76,9 @@ pub fn status(live: &LiveStatus) {
         }
         fields.add(t.profile, summary);
     }
+    if let Some(intercept) = live.intercept.as_ref().filter(|intercept| intercept.state != InterceptState::Off) {
+        fields.add(t.intercept, intercept_line(intercept));
+    }
     fields.print();
 
     println!("\n{}", t.listeners);
@@ -92,6 +95,19 @@ pub fn status(live: &LiveStatus) {
 
     println!("\n{}", t.routes);
     route_table(live);
+}
+
+/// 透明访问的状态，一行：状态本身，开着时加上连接数和流量。
+pub(crate) fn intercept_line(report: &InterceptReport) -> String {
+    let (t, lang) = context();
+    let state = (lang.codes().intercept_state)(&report.state);
+    match report.state {
+        InterceptState::On { .. } => {
+            let traffic = format!("↑ {}  ↓ {}", lang.bytes(report.up_bytes), lang.bytes(report.down_bytes));
+            lang.list([state, (t.intercept_active)(usize::try_from(report.active).unwrap_or(usize::MAX), &traffic)])
+        }
+        InterceptState::Off | InterceptState::Failed { .. } | InterceptState::Unsupported | InterceptState::Unknown => state,
+    }
 }
 
 fn print_table(table: &Table) {

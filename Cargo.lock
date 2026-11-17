@@ -822,6 +822,7 @@ dependencies = [
  "anyhow",
  "clap",
  "i3t-agent",
+ "i3t-intercept",
  "i3t-lang",
  "i3t-model",
  "i3t-proto",
@@ -865,6 +866,7 @@ dependencies = [
  "i3t-crypto",
  "i3t-exit",
  "i3t-flow",
+ "i3t-intercept",
  "i3t-lane",
  "i3t-lang",
  "i3t-metrics",
@@ -971,6 +973,7 @@ dependencies = [
  "i3t-access",
  "i3t-conn",
  "i3t-flow",
+ "i3t-intercept",
  "i3t-lane",
  "i3t-model",
  "i3t-proto",
@@ -997,6 +1000,18 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "i3t-intercept"
+version = "0.1.6"
+dependencies = [
+ "ipnet",
+ "libc",
+ "serde_json",
+ "socket2",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]

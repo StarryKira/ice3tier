@@ -315,6 +315,9 @@ pub struct Ui {
     pub from_network: &'static str,
     pub pinned: &'static str,
     pub profile: &'static str,
+    pub intercept: &'static str,
+    /// 透明访问开着时的连接数和流量。
+    pub intercept_active: fn(u32, &str) -> String,
     /// 管理员没有选档位：节点用本机配置文件里的。
     pub profile_local: &'static str,
     /// 节点报的：在用的档位、工作线程数。

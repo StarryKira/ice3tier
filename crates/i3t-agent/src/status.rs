@@ -7,7 +7,9 @@ use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 
 use i3t_access::ListenState;
-use i3t_model::control::{self, BindCause, CredentialUsage, ExitReport, LaneReport, PerformanceReport, Route, RouteSince, SelfUpdate};
+use i3t_model::control::{
+    self, BindCause, CredentialUsage, ExitReport, InterceptReport, LaneReport, PerformanceReport, Route, RouteSince, SelfUpdate,
+};
 use i3t_model::netmap::Attachment;
 use i3t_model::update::UpdateStatus;
 use serde::{Deserialize, Serialize};
@@ -49,6 +51,8 @@ pub struct LiveStatus {
     pub lanes: Option<LaneReport>,
     /// 正在用的性能档位。旧版本的节点不给。
     pub performance: Option<PerformanceReport>,
+    /// 透明访问。旧版本的节点不给。
+    pub intercept: Option<InterceptReport>,
 }
 
 /// 和 controller 的那条长连接。
@@ -196,6 +200,7 @@ impl LiveStatus {
             credentials: runtime.credential_usage(),
             lanes: lanes_used.then_some(lanes),
             performance: Some(runtime.performance.borrow().clone()),
+            intercept: Some(runtime.intercept_report()),
         }
     }
 }

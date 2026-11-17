@@ -2,7 +2,7 @@
 
 use std::future::Future;
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use if_addrs::IfAddr;
 use ipnet::IpNet;
@@ -25,6 +25,15 @@ pub trait System: Send + Sync + 'static {
 
     /// 建一条到 `addr` 的 TCP 连接。连接的选项（NODELAY、保活）由调用者设置。
     fn connect(&self, addr: SocketAddr) -> impl Future<Output = io::Result<TcpStream>> + Send;
+
+    /// 以 `source`（发起节点的虚拟 IP）为源地址建一条到本机服务 `addr` 的 TCP 连接：透明访问打开时，
+    /// 本机的服务看到的是对端的虚拟 IP（见 `i3t_intercept::socket::connect_presenting`）。
+    ///
+    /// 默认就是 [`connect`](Self::connect)，不管源地址：测试里的替身用它；什么时候用源地址由出站那一层决定，不在这里。
+    fn connect_presenting(&self, source: Ipv4Addr, addr: SocketAddr) -> impl Future<Output = io::Result<TcpStream>> + Send {
+        let _ = source;
+        self.connect(addr)
+    }
 
     /// 发往 `addr` 的 UDP 报文实际发到哪个地址。
     ///
@@ -79,6 +88,11 @@ impl System for Os {
 
     async fn connect(&self, addr: SocketAddr) -> io::Result<TcpStream> {
         TcpStream::connect(addr).await
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn connect_presenting(&self, source: Ipv4Addr, addr: SocketAddr) -> io::Result<TcpStream> {
+        i3t_intercept::socket::connect_presenting(source, addr).await
     }
 }
 

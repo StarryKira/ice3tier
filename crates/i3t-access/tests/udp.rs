@@ -522,3 +522,79 @@ fn non_loopback_address() -> Option<IpAddr> {
     socket.connect("192.0.2.1:9").ok()?;
     socket.local_addr().ok().map(|addr| addr.ip()).filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
 }
+
+/// 透明访问的 UDP 入口的替身：一个普通的 UDP 端口，每个报文"原来要发往的地址"由测试定；回给应用的套接字是另一个普通的端口
+/// （真的系统里它以原目标为源地址，见 `i3t_intercept::socket`）。
+struct FakeDiversion {
+    socket: UdpSocket,
+    original: Arc<Mutex<SocketAddr>>,
+    /// 开过的回给应用的套接字：（原目标，应用的地址，套接字自己的地址）。
+    replies: Arc<Mutex<Vec<(SocketAddr, SocketAddr, SocketAddr)>>>,
+}
+
+impl i3t_access::Diversion for FakeDiversion {
+    async fn recv(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr, SocketAddr)> {
+        let (len, from) = self.socket.recv_from(buf).await?;
+        Ok((len, from, *self.original.lock().unwrap()))
+    }
+
+    fn reply_socket(&self, local: SocketAddr, client: SocketAddr) -> std::io::Result<UdpSocket> {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
+        socket.connect(client)?;
+        socket.set_nonblocking(true)?;
+        self.replies.lock().unwrap().push((local, client, socket.local_addr()?));
+        UdpSocket::from_std(socket)
+    }
+}
+
+#[tokio::test]
+async fn intercepted_datagrams_are_one_context_per_application_and_destination_and_replies_come_back_on_their_own_socket() {
+    let mut map = netmap();
+    map.peers.push(Peer { id: node(3), virtual_ip: [10, 66, 0, 3].into(), outbound: false, name: "hidden".into(), ..map.peers[0].clone() });
+    let mut world = World::start(map).await;
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let entry = socket.local_addr().unwrap();
+    let original = Arc::new(Mutex::new("10.66.0.2:53".parse::<SocketAddr>().unwrap()));
+    let replies = Arc::new(Mutex::new(Vec::new()));
+    let diversion = FakeDiversion { socket, original: Arc::clone(&original), replies: Arc::clone(&replies) };
+    let access = Arc::clone(&world.access);
+    tokio::spawn(async move { access.intercept_udp(diversion).await });
+
+    let app = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    app.send_to(b"query", entry).await.unwrap();
+    let open = world.next_open().await;
+    assert_eq!(open.origin.client, None, "本机的程序不写来源地址");
+    assert_eq!(world.next_target().await, Target::Node { port: 53 });
+    let mut buf = [0; 64];
+    let (len, from) = timeout(PATIENCE, app.recv_from(&mut buf)).await.expect("回答应该回来").unwrap();
+    assert_eq!(&buf[..len], b"query");
+    let (local, client, reply_at) = replies.lock().unwrap()[0];
+    assert_eq!((local, client, from), ("10.66.0.2:53".parse().unwrap(), app.local_addr().unwrap(), reply_at), "回答从会话自己的套接字发出");
+
+    // 内核之后把这个应用发往同一个目标的报文直接交给会话的套接字。
+    app.send_to(b"again", reply_at).await.unwrap();
+    assert_eq!(world.next_target().await, Target::Node { port: 53 });
+    let (len, _) = timeout(PATIENCE, app.recv_from(&mut buf)).await.expect("回答应该回来").unwrap();
+    assert_eq!(&buf[..len], b"again");
+    assert!(world.opens.try_recv().is_err(), "同一个会话只开一个上下文");
+    let status = world.access.intercept_status();
+    assert_eq!((status.active.get(), status.traffic.up(), status.traffic.down()), (1, 10, 10));
+
+    // 不能访问的对端、不是节点的地址：丢掉，不开上下文。
+    for target in ["10.66.0.3:53", "10.66.0.9:53", "192.168.1.1:53"] {
+        *original.lock().unwrap() = target.parse().unwrap();
+        app.send_to(b"nope", entry).await.unwrap();
+    }
+    sleep(QUIET).await;
+    assert!(world.opens.try_recv().is_err());
+    assert_eq!(replies.lock().unwrap().len(), 1);
+
+    // 空闲之后会话回收。
+    timeout(PATIENCE, async {
+        while world.access.intercept_status().active.get() != 0 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("空闲的会话要回收");
+}

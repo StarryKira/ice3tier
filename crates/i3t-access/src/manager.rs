@@ -27,7 +27,7 @@ use crate::usage::{CredentialSnapshot, ExitSnapshot, Tally, Usage};
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
 /// `accept` 出错之后歇多久再试。文件描述符用完这类错误不歇一下会空转。
-const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+pub(crate) const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
 /// UDP 端口转发的会话没有报文往来多久之后回收（白皮书 §9.6）。
 const UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -66,7 +66,7 @@ impl PortBook for NoPortBook {
 /// 节点排空时（[`Access::set_draining`]）监听照常开着，新的请求得到明确的拒绝：代理监听器回 SOCKS5 的 0x01、
 /// HTTP 的 503；端口转发没有地方回错误，TCP 的连接被重置，UDP 不建新的会话。已经建立的连接照常跑完。
 pub struct Access<C: Datagrams, E> {
-    shared: Arc<Shared<C, E>>,
+    pub(crate) shared: Arc<Shared<C, E>>,
     published: Mutex<AccessStatus>,
 }
 
@@ -86,6 +86,7 @@ impl<C: Connector + Datagrams, E: LocalEgress> Access<C, E> {
             draining: Mutex::new(None),
             drained: AtomicU64::new(0),
             udp_idle_timeout: UDP_IDLE_TIMEOUT,
+            intercept: Counters::default(),
         };
         Self { shared: Arc::new(shared), published: Mutex::default() }
     }
@@ -356,7 +357,7 @@ impl ListenState {
 
 /// 一个监听上现在有多少条连接（UDP 的端口转发是多少个会话）。读到的是调用那一刻的值，不是状态生成时的。
 #[derive(Debug, Clone)]
-pub struct Active(Arc<AtomicUsize>);
+pub struct Active(pub(crate) Arc<AtomicUsize>);
 
 impl Active {
     #[must_use]
@@ -367,7 +368,7 @@ impl Active {
 
 /// 一个监听上这次运行以来的流量。读到的是调用那一刻的值。
 #[derive(Debug, Clone)]
-pub struct Traffic(Arc<Tally>);
+pub struct Traffic(pub(crate) Arc<Tally>);
 
 impl Traffic {
     /// 客户端发进来的字节数。

@@ -969,7 +969,7 @@ impl Control {
     /// 本节点的候选端点：网卡地址，relay 和地址查询服务器看到的地址，路由器上映射出来的地址。
     fn refresh_endpoints(&mut self, now: Instant) {
         if self.local_refreshed.is_none_or(|at| now.saturating_duration_since(at) >= LOCAL_ADDRESS_REFRESH) {
-            let local = self.shared.port.local_candidates();
+            let local = outside_overlay(self.shared.port.local_candidates(), &self.netmap);
             if local != self.local_candidates {
                 // 网卡地址变了多半是换了网络：网关可能也换了，端口映射要重新申请。头一次读到地址不算变化。
                 if let (Some(mapper), true) = (&self.portmap, self.local_refreshed.is_some()) {
@@ -1600,6 +1600,12 @@ fn direct_policy<'a>(
 }
 
 /// 映射出来的端口是不是随对端变化。要有两个以上的观察点看到同一个地址族的地址才知道。
+/// 去掉覆盖网的地址：透明访问打开时本节点的虚拟 IP 在一块本机的网卡上（`i3t-intercept`），它只在组网里有意义，
+/// 别的节点连不上它，也不该去试。
+fn outside_overlay(candidates: Vec<SocketAddr>, netmap: &Netmap) -> Vec<SocketAddr> {
+    candidates.into_iter().filter(|addr| !i3t_model::netmap::is_overlay_address(&netmap.network, addr.ip().to_canonical())).collect()
+}
+
 fn mapping_varies(observed: &[SocketAddr]) -> Option<bool> {
     let verdict = |family: fn(&SocketAddr) -> bool| {
         let mut seen = observed.iter().filter(|addr| family(addr));
@@ -1632,6 +1638,22 @@ mod tests {
 
     fn addr(text: &str) -> SocketAddr {
         text.parse().unwrap()
+    }
+
+    #[test]
+    fn overlay_addresses_on_local_interfaces_are_never_candidates() {
+        let netmap: Netmap = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "network": { "name": "test", "domain": "test.i3t", "cidr": "10.66.0.0/16" },
+            "me": { "id": 1, "name": "me", "virtual_ip": "10.66.0.1" }
+        }))
+        .unwrap();
+        let local = vec![addr("192.168.1.5:20330"), addr("10.66.0.1:20330"), addr("[2001:db8::5]:20330"), addr("10.67.0.1:20330")];
+        assert_eq!(
+            outside_overlay(local, &netmap),
+            [addr("192.168.1.5:20330"), addr("[2001:db8::5]:20330"), addr("10.67.0.1:20330")],
+            "透明访问的网卡上的虚拟 IP 不公布给别人"
+        );
     }
 
     #[test]

@@ -489,7 +489,7 @@ fn a_chosen_profile_reaches_only_that_node_and_its_report_shows_in_the_detail() 
 
     let running =
         PerformanceReport { profile: Profile::LowFootprint, threads: 2, restart_pending: true, overrides: vec!["threads".into()] };
-    a.send(&lab.controller, ToController::Report(Report { performance: Some(running.clone()), ..Report::default() }));
+    a.send(&lab.controller, ToController::Report(Report { performance: Some(Box::new(running.clone())), ..Report::default() }));
     assert_eq!(lab.controller.node(network.id, a.id).unwrap().performance, Some(running));
     assert_eq!(lab.controller.node(network.id, b.id).unwrap().performance, None, "旧版本或者还没报过的节点没有");
 
@@ -497,4 +497,37 @@ fn a_chosen_profile_reaches_only_that_node_and_its_report_shows_in_the_detail() 
     assert_eq!(cleared.profile, None);
     lab.settle(&mut [&mut a]);
     assert_eq!(a.netmap().me.profile, None);
+}
+
+#[test]
+fn the_reported_intercept_state_shows_in_the_node_detail_and_nothing_is_sent_back() {
+    use i3t_model::control::{InterceptCause, InterceptReport, InterceptState, NameService};
+
+    let mut lab = Lab::new();
+    let network = lab.network("home");
+    let mut a = lab.join(network.id, &[]);
+    let mut b = lab.join(network.id, &[]);
+    lab.settle(&mut [&mut a, &mut b]);
+    let version = a.netmap().version;
+
+    let on = InterceptReport {
+        state: InterceptState::On { udp: true, source_address: true, names: NameService::NoResolver },
+        active: 3,
+        up_bytes: 100,
+        down_bytes: 200,
+    };
+    a.send(&lab.controller, ToController::Report(Report { intercept: Some(Box::new(on.clone())), ..Report::default() }));
+    assert_eq!(lab.controller.node(network.id, a.id).unwrap().intercept, Some(on));
+    assert_eq!(lab.controller.node(network.id, b.id).unwrap().intercept, None, "旧版本或者还没报过的节点没有");
+
+    let failed = InterceptReport {
+        state: InterceptState::Failed { cause: InterceptCause::ProgramMissing { program: "nft".into() } },
+        active: 0,
+        up_bytes: 0,
+        down_bytes: 0,
+    };
+    a.send(&lab.controller, ToController::Report(Report { intercept: Some(Box::new(failed.clone())), ..Report::default() }));
+    assert_eq!(lab.controller.node(network.id, a.id).unwrap().intercept, Some(failed));
+    lab.settle(&mut [&mut a]);
+    assert_eq!(a.netmap().version, version, "透明访问是本机的事，controller 不因此改 netmap");
 }

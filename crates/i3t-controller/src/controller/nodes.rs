@@ -51,6 +51,7 @@ impl Controller {
             lanes: live.and_then(|live| live.lanes.clone()),
             reported_secs_ago: live.and_then(|live| live.reported_at).map(|at| at.elapsed().as_secs()),
             performance: live.and_then(|live| live.performance.clone()),
+            intercept: live.and_then(|live| live.intercept.clone()),
         })
     }
 

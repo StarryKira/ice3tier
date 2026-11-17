@@ -378,9 +378,91 @@ pub struct Report {
     /// 独占 TCP（lane）的状况。没有为任何对端打开时也报（全是 0）；旧版本的节点不报。
     #[serde(default)]
     pub lanes: Option<Box<LaneReport>>,
-    /// 节点正在用的性能档位。旧版本的节点不报。
+    /// 节点正在用的性能档位。旧版本的节点不报。装在 `Box` 里只是为了让消息的枚举不至于太大，JSON 里没有区别。
     #[serde(default)]
-    pub performance: Option<PerformanceReport>,
+    pub performance: Option<Box<PerformanceReport>>,
+    /// 透明访问（Linux 上的套接字级拦截）的状况。没有打开时也报（`off`）；旧版本的节点不报。装在 `Box` 里，同上。
+    #[serde(default)]
+    pub intercept: Option<Box<InterceptReport>>,
+}
+
+/// 透明访问在一个节点上的状况（白皮书 §9.5）：本机的程序不配代理，直接连别的节点的虚拟 IP 或者名字。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterceptReport {
+    #[serde(flatten)]
+    pub state: InterceptState,
+    /// 正在进行的被拦截的连接和 UDP 会话。
+    #[serde(default)]
+    pub active: u32,
+    /// 这次运行以来经透明访问发出、收到的字节数。
+    #[serde(default)]
+    pub up_bytes: u64,
+    #[serde(default)]
+    pub down_bytes: u64,
+}
+
+/// 透明访问是开着、关着，还是开不起来。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum InterceptState {
+    /// 没有打开（默认）。
+    Off,
+    /// 打开着，系统里的规则都装好了。
+    On {
+        /// UDP 也被拦截。
+        udp: bool,
+        /// 别的节点经透明访问连到本机的服务时，服务看到的是那个节点的虚拟 IP。
+        source_address: bool,
+        names: NameService,
+    },
+    /// 本机配置里打开了，但是装不上。系统里什么都没有留下。
+    Failed { cause: InterceptCause },
+    /// 这个平台上没有透明访问（只有 Linux 有）。
+    Unsupported,
+    /// 比这个程序新的节点报的、这里不认识的状态。
+    #[serde(other)]
+    Unknown,
+}
+
+/// 透明访问打开时，`<节点>.<网络的域名>` 怎么解析。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum NameService {
+    /// systemd-resolved 把网络的域名交给本节点的名字服务：本机的程序直接用名字就行。
+    Resolved,
+    /// 名字服务开着（本节点虚拟 IP 的 53 端口），这台机器没有 systemd-resolved：名字要写进 `/etc/hosts`（`i3t hosts`），
+    /// 或者让本机的解析器把网络的域名转给它。
+    NoResolver,
+    /// 名字服务没有开起来。按虚拟 IP 访问照常可用。
+    Failed { cause: InterceptCause },
+    #[serde(other)]
+    Unknown,
+}
+
+/// 透明访问（或者它的名字服务）开不起来的原因，给界面按自己的语言写。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum InterceptCause {
+    /// 节点进程缺这些能力：`CAP_NET_ADMIN`、`CAP_NET_BIND_SERVICE`（写法和 systemd 的 `AmbientCapabilities=` 一样）。
+    NoPermission { missing: Vec<String> },
+    /// 系统里没有这个程序：`nft`（nftables）、`ip`（iproute2）。
+    ProgramMissing { program: String },
+    /// 一个程序报错退出，`detail` 是它的原话（比如内核不认某条规则）。
+    CommandFailed { program: String, detail: String },
+    /// 这个地址的端口被占着。
+    PortInUse { address: SocketAddr },
+    /// 别的原因绑不上这个地址，`detail` 是系统的原话。
+    BindFailed { address: SocketAddr, detail: String },
+    /// 策略路由用的那张路由表里有别的程序的路由。
+    TableInUse { table: u32 },
+    /// 已经有一块同名的网卡，不是 ice3tier 建的。
+    LinkInUse { link: String },
+    /// 网络的地址段和这台机器所在的一个真实网络重叠，装上会把它从那个网络上切下来。`with` 是重叠的那个地址或者路由，
+    /// 写法和 `ip` 一样：`192.168.1.5/24 dev eth0`、`10.0.0.0/8 dev tun0`。
+    RangeInUse { with: String },
+    /// 比这个程序新的节点报的、这里不认识的原因。
+    #[serde(other)]
+    Unknown,
 }
 
 /// 节点正在用的性能档位（白皮书 §12.1）。
@@ -985,6 +1067,46 @@ pub enum Signal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_intercept_report_is_a_state_code_with_its_values_and_survives_newer_codes() {
+        let on = InterceptReport {
+            state: InterceptState::On { udp: true, source_address: true, names: NameService::Resolved },
+            active: 2,
+            up_bytes: 10,
+            down_bytes: 20,
+        };
+        let json = serde_json::to_value(&on).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "state": "on", "udp": true, "source_address": true, "names": { "state": "resolved" },
+                                "active": 2, "up_bytes": 10, "down_bytes": 20 })
+        );
+        assert_eq!(serde_json::from_value::<InterceptReport>(json).unwrap(), on);
+
+        let failed = InterceptReport {
+            state: InterceptState::Failed { cause: InterceptCause::NoPermission { missing: vec!["CAP_NET_ADMIN".into()] } },
+            active: 0,
+            up_bytes: 0,
+            down_bytes: 0,
+        };
+        let json = serde_json::to_value(&failed).unwrap();
+        assert_eq!(json["cause"], serde_json::json!({ "code": "no_permission", "missing": ["CAP_NET_ADMIN"] }));
+        assert_eq!(serde_json::from_value::<InterceptReport>(json).unwrap(), failed);
+
+        let overlap = InterceptCause::RangeInUse { with: "192.168.1.5/24 dev eth0".into() };
+        assert_eq!(
+            serde_json::to_value(&overlap).unwrap(),
+            serde_json::json!({ "code": "range_in_use", "with": "192.168.1.5/24 dev eth0" })
+        );
+        let newer: InterceptReport = serde_json::from_value(serde_json::json!({ "state": "paused" })).unwrap();
+        assert_eq!(newer.state, InterceptState::Unknown);
+        let newer: InterceptReport =
+            serde_json::from_value(serde_json::json!({ "state": "failed", "cause": { "code": "solar_flare" } })).unwrap();
+        assert_eq!(newer.state, InterceptState::Failed { cause: InterceptCause::Unknown });
+        let older: Report = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(older.intercept, None, "旧的节点不报");
+    }
 
     #[test]
     fn enroll_token_round_trips_and_hides_its_secret() {

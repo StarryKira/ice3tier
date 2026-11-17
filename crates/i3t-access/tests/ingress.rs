@@ -850,3 +850,64 @@ i3t_lane::on_both_transports! {
         assert_eq!((usage[0].exit, usage[0].flows, usage[0].failed_by_target), (node(GW), 2, 2), "两次都是目标的问题");
     }
 }
+
+/// 透明访问的入口：每条连接"原来要去的地址"由测试定（真的系统里是内核的 `SO_ORIGINAL_DST`）。
+async fn intercepting(world: &World) -> (SocketAddr, Arc<Mutex<SocketAddr>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let entry = listener.local_addr().unwrap();
+    let original = Arc::new(Mutex::new(entry));
+    let access = Arc::clone(&world.access);
+    let chosen = Arc::clone(&original);
+    tokio::spawn(async move { access.intercept_tcp(listener, move |_| Ok(*chosen.lock().unwrap())).await });
+    (entry, original)
+}
+
+/// 连接被重置（或者关掉），没有数据。
+async fn assert_reset(stream: &mut TcpStream) {
+    let end = timeout(PATIENCE, stream.read_to_end(&mut Vec::new())).await.expect("连接应该很快结束");
+    assert!(end.is_err() || end.unwrap() == 0);
+}
+
+i3t_lane::on_both_transports! {
+    async fn an_intercepted_connection_becomes_a_flow_to_the_node_whose_virtual_ip_it_was_for() {
+        let mut world = World::start(netmap()).await;
+        let (entry, original) = intercepting(&world).await;
+        *original.lock().unwrap() = "10.66.0.2:22".parse().unwrap();
+        let mut stream = TcpStream::connect(entry).await.unwrap();
+        assert_echo(&mut stream).await;
+        let open = world.next_open().await;
+        assert_eq!(open.target, Target::Node { port: 22 });
+        assert_eq!(open.origin, Origin { credential: None, client: None }, "本机的程序不写来源地址");
+        let status = world.access.intercept_status();
+        assert_eq!(status.active.get(), 1);
+        assert_eq!((status.traffic.up(), status.traffic.down()), (21, 21), "流量记在透明访问这一路上");
+        drop(stream);
+        timeout(PATIENCE, async {
+            while world.access.intercept_status().active.get() != 0 {
+                sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("连接结束之后不再算进来");
+    }
+}
+
+#[tokio::test]
+async fn intercepted_connections_to_no_node_to_ourselves_or_straight_to_the_entry_are_reset_without_a_flow() {
+    let mut map = netmap();
+    map.peers.push(Peer { id: node(3), virtual_ip: [10, 66, 0, 3].into(), outbound: false, name: "hidden".into(), ..map.peers[0].clone() });
+    let mut world = World::start(map).await;
+    let (entry, original) = intercepting(&world).await;
+    for target in ["10.66.0.9:22", "10.66.0.1:22", "10.66.0.3:22", "192.168.1.5:22", &entry.to_string()] {
+        *original.lock().unwrap() = target.parse().unwrap();
+        let mut stream = TcpStream::connect(entry).await.unwrap();
+        assert_reset(&mut stream).await;
+    }
+    world.assert_no_open();
+
+    world.access.set_draining(Some("准备更新".to_owned()));
+    *original.lock().unwrap() = "10.66.0.2:22".parse().unwrap();
+    let mut stream = TcpStream::connect(entry).await.unwrap();
+    assert_reset(&mut stream).await;
+    world.assert_no_open();
+}

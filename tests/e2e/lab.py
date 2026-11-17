@@ -293,3 +293,20 @@ def wait_until(condition, timeout: float = 15, interval: float = 0.2, what: str 
 def chunks(items: Sequence, size: int) -> Iterator[Sequence]:
     for start in range(0, len(items), size):
         yield items[start:start + size]
+
+
+def private_link(lab: Lab, host: Host, name: str, network: str) -> Host:
+    """给 `host` 加一块连着一台新机器 `name` 的网卡，像一个只有这两台机器的内网：`network` 里的第一个地址在 `host` 上，
+    第二个在新机器上。这个网段和"互联网"无关，可以和覆盖网的地址段重叠（透明访问的重叠检查要用）。"""
+    net = ipaddress.IPv4Network(network)
+    ours, theirs = net.network_address + 1, net.network_address + 2
+    lab._add_namespace(name)
+    port = f"p-{name}"[:15]
+    sh("ip", "link", "add", port, "netns", host.name, "type", "veth", "peer", "name", "up0", "netns", name)
+    sh("ip", "-n", host.name, "addr", "add", f"{ours}/{net.prefixlen}", "dev", port)
+    sh("ip", "-n", host.name, "link", "set", port, "up")
+    sh("ip", "-n", name, "addr", "add", f"{theirs}/{net.prefixlen}", "dev", "up0")
+    sh("ip", "-n", name, "link", "set", "up0", "up")
+    other = Host(lab, name, str(theirs))
+    lab.hosts[name] = other
+    return other

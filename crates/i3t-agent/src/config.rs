@@ -35,6 +35,8 @@ pub struct Config {
     #[serde(default)]
     pub performance: PerformanceConfig,
     #[serde(default)]
+    pub intercept: Intercept,
+    #[serde(default)]
     pub log: Log,
 }
 
@@ -97,7 +99,7 @@ impl Config {
             text.parse().map_err(|err| anyhow::anyhow!("{err}")).with_context(|| (texts().config_error)(path))?;
         let (section, key) = change.setting().key();
         document[section][key] = match change {
-            Change::Declare(_, on) | Change::ThroughputTests(on) => toml_edit::value(on),
+            Change::Declare(_, on) | Change::ThroughputTests(on) | Change::Intercept(on) => toml_edit::value(on),
             Change::Profile(profile) => toml_edit::value(profile.spelling()),
         };
         let updated = document.to_string();
@@ -140,6 +142,7 @@ impl Default for Config {
             metrics: Metrics::default(),
             tests: Tests::default(),
             performance: PerformanceConfig::default(),
+            intercept: Intercept::default(),
             log: Log::default(),
         }
     }
@@ -185,7 +188,7 @@ impl Capability {
     }
 }
 
-/// `i3t set` 能改的项：三项声明、接不接受吞吐测试、性能档位。
+/// `i3t set` 能改的项：三项声明、接不接受吞吐测试、性能档位、透明访问。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setting {
     Declare(Capability),
@@ -193,6 +196,8 @@ pub enum Setting {
     ThroughputTests,
     /// controller 没有选档位时用的性能档位（`[performance] profile`）。
     Profile,
+    /// 透明访问（`[intercept] enabled`）。
+    Intercept,
 }
 
 impl Setting {
@@ -202,6 +207,7 @@ impl Setting {
             Self::Declare(capability) => ("declare", capability.key()),
             Self::ThroughputTests => ("tests", "throughput"),
             Self::Profile => ("performance", "profile"),
+            Self::Intercept => ("intercept", "enabled"),
         }
     }
 
@@ -219,12 +225,13 @@ impl Setting {
         Ok(match self {
             Self::Declare(capability) => Change::Declare(capability, switch()?),
             Self::ThroughputTests => Change::ThroughputTests(switch()?),
+            Self::Intercept => Change::Intercept(switch()?),
             Self::Profile => Change::Profile(value.parse().map_err(|_| anyhow::anyhow!((texts().unknown_profile)(value)))?),
         })
     }
 }
 
-/// 命令行上的写法：`can-exit`、`can-relay`、`can-forward`、`throughput-tests`、`profile`。
+/// 命令行上的写法：`can-exit`、`can-relay`、`can-forward`、`throughput-tests`、`profile`、`intercept`。
 impl FromStr for Setting {
     type Err = anyhow::Error;
 
@@ -232,6 +239,7 @@ impl FromStr for Setting {
         match s {
             "throughput-tests" => Ok(Self::ThroughputTests),
             "profile" => Ok(Self::Profile),
+            "intercept" => Ok(Self::Intercept),
             other => other.parse().map(Self::Declare).map_err(|_| anyhow::anyhow!((texts().unknown_setting)(other))),
         }
     }
@@ -243,6 +251,7 @@ impl fmt::Display for Setting {
             Self::Declare(capability) => capability.fmt(f),
             Self::ThroughputTests => f.write_str("throughput-tests"),
             Self::Profile => f.write_str("profile"),
+            Self::Intercept => f.write_str("intercept"),
         }
     }
 }
@@ -253,6 +262,7 @@ pub enum Change {
     Declare(Capability, bool),
     ThroughputTests(bool),
     Profile(Profile),
+    Intercept(bool),
 }
 
 impl Change {
@@ -262,6 +272,7 @@ impl Change {
             Self::Declare(capability, _) => Setting::Declare(capability),
             Self::ThroughputTests(_) => Setting::ThroughputTests,
             Self::Profile(_) => Setting::Profile,
+            Self::Intercept(_) => Setting::Intercept,
         }
     }
 }
@@ -270,7 +281,7 @@ impl Change {
 impl fmt::Display for Change {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Declare(_, on) | Self::ThroughputTests(on) => f.write_str(if *on { "on" } else { "off" }),
+            Self::Declare(_, on) | Self::ThroughputTests(on) | Self::Intercept(on) => f.write_str(if *on { "on" } else { "off" }),
             Self::Profile(profile) => f.write_str(profile.spelling()),
         }
     }
@@ -435,6 +446,17 @@ const MAX_STREAM_WINDOW_KB: u64 = i3t_conn::MAX_STREAM_WINDOW as u64 / 1024;
 fn profile_spelling<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Profile, D::Error> {
     let text = String::deserialize(deserializer)?;
     text.parse().map_err(|_| serde::de::Error::custom((texts().unknown_profile)(&text)))
+}
+
+/// 透明访问（`[intercept]`，只在 Linux 上）：本机的程序不配代理，直接连别的节点的虚拟 IP 或者名字。
+///
+/// 它改这台机器的网络配置（包过滤规则、策略路由、一块 dummy 网卡），所以只能在本机打开，controller 开不了；
+/// 节点进程要有 `CAP_NET_ADMIN` 和 `CAP_NET_BIND_SERVICE`（root 都有）。做法见 `i3t_intercept`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Intercept {
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -609,6 +631,24 @@ mod tests {
         assert!(error_of("[performance]\nthreads = 0\n").contains(&(texts().performance_range)("threads", 1, 256)));
         assert!(error_of("[performance]\nstream_window_kb = 4096\n").contains("stream_window_kb"), "流窗口不能超过连接层的上限");
         assert!(error_of("[performance]\nwindow = 1\n").contains("window"));
+    }
+
+    #[test]
+    fn intercept_is_off_by_default_and_switched_by_name_keeping_the_comments() {
+        assert!(!Config::default().intercept.enabled);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let setting: Setting = "intercept".parse().unwrap();
+        assert_eq!(setting, Setting::Intercept);
+        Config::set(&path, setting.change("on").unwrap()).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            texts().template.replace("[intercept]\nenabled = false", "[intercept]\nenabled = true")
+        );
+        assert!(Config::load(&path).unwrap().intercept.enabled);
+        Config::set(&path, setting.change("off").unwrap()).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), texts().template);
+        assert!(error_of("[intercept]\nenable = true\n").contains("enable"));
     }
 
     #[test]

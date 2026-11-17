@@ -493,6 +493,7 @@ impl<S: System, C: Connector + Datagrams> Session<'_, S, C> {
                 }
                 Some(forward) => {
                     let addr = virtual_forward_target(netmap, initiator, forward)?;
+                    self.outbound.not_overlay(addr)?;
                     (addr, Grant::VirtualForward { port: *port, id: forward.id, target: forward.target, addr: Some(addr) })
                 }
                 None => (self.outbound.udp_node(*port)?, Grant::NodeService),
@@ -504,7 +505,10 @@ impl<S: System, C: Connector + Datagrams> Session<'_, S, C> {
                     .iter()
                     .find(|entry| entry.id == *id && entry.listener == self.peer && entry.protocol == ForwardProtocol::Udp);
                 match listed {
-                    Some(entry) => (entry.addr, Grant::Forward { id: *id, addr: entry.addr }),
+                    Some(entry) => {
+                        self.outbound.not_overlay(entry.addr)?;
+                        (entry.addr, Grant::Forward { id: *id, addr: entry.addr })
+                    }
                     None => return Err(Reply::new(Status::UnknownForward, "没有下发给这个节点、由发起节点监听的这条 UDP 端口转发")),
                 }
             }

@@ -6,7 +6,10 @@ use i3t_model::admin::{
     TokenState, UpdateWait,
 };
 use i3t_model::control::diag::{ChoiceCode, HopSource, PathPick, TestCode, TransferEnd};
-use i3t_model::control::{BindCause, DirectKind, LegTransport, ListenState, RejectCause, RelayState, Route, RouteCause, RouteHint};
+use i3t_model::control::{
+    BindCause, DirectKind, InterceptCause, InterceptState, LegTransport, ListenState, NameService, RejectCause, RelayState, Route,
+    RouteCause, RouteHint,
+};
 use i3t_model::update::{FailureKind, SelfUpdateBlocker, UpdateCause, UpdateStatus};
 
 use super::{Codes, Names, cost_ms, relays};
@@ -45,6 +48,9 @@ pub(super) static CODES: Codes = Codes {
     hop_source,
     path_pick,
     transfer_end,
+    intercept_state,
+    intercept_cause,
+    name_service,
 };
 
 fn route(route: &Route, names: Names<'_>) -> String {
@@ -457,5 +463,42 @@ const fn transfer_end(end: TransferEnd) -> &'static str {
         TransferEnd::Bytes => "到字节上限",
         TransferEnd::Time => "到时长上限",
         TransferEnd::Unknown => "未知",
+    }
+}
+
+fn intercept_state(state: &InterceptState) -> String {
+    match state {
+        InterceptState::Off => "没开".to_owned(),
+        InterceptState::On { udp, names, .. } => format!("开着（{}；{}）", if *udp { "TCP、UDP" } else { "TCP" }, name_service(names)),
+        InterceptState::Failed { cause } => format!("开不起来：{}", intercept_cause(cause)),
+        InterceptState::Unsupported => "这个平台上没有".to_owned(),
+        InterceptState::Unknown => "未知".to_owned(),
+    }
+}
+
+fn intercept_cause(cause: &InterceptCause) -> String {
+    match cause {
+        InterceptCause::NoPermission { missing } => format!("缺 {}", missing.join("、")),
+        InterceptCause::ProgramMissing { program } => match program.as_str() {
+            "nft" => "找不到 nft（装 nftables）".to_owned(),
+            "ip" => "找不到 ip（装 iproute2）".to_owned(),
+            other => format!("找不到 {other}"),
+        },
+        InterceptCause::CommandFailed { program, detail } => format!("{program} 报错：{detail}"),
+        InterceptCause::PortInUse { address } => format!("{address} 被占用"),
+        InterceptCause::BindFailed { address, detail } => format!("绑不上 {address}：{detail}"),
+        InterceptCause::TableInUse { table } => format!("路由表 {table} 被别的程序占着"),
+        InterceptCause::LinkInUse { link } => format!("已经有一块别人的网卡 {link}"),
+        InterceptCause::RangeInUse { with } => format!("网络的地址段和本机的 {with} 重叠"),
+        InterceptCause::Unknown => "未知原因".to_owned(),
+    }
+}
+
+fn name_service(names: &NameService) -> String {
+    match names {
+        NameService::Resolved => "名字经 systemd-resolved".to_owned(),
+        NameService::NoResolver => "没有 systemd-resolved，名字用 i3t hosts".to_owned(),
+        NameService::Failed { cause } => format!("名字解析不了：{}", intercept_cause(cause)),
+        NameService::Unknown => "名字：未知".to_owned(),
     }
 }

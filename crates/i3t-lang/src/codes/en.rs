@@ -6,7 +6,10 @@ use i3t_model::admin::{
     SkipCause, TokenState, UpdateWait,
 };
 use i3t_model::control::diag::{ChoiceCode, HopSource, PathPick, TestCode, TransferEnd};
-use i3t_model::control::{BindCause, DirectKind, LegTransport, ListenState, RejectCause, RelayState, Route, RouteCause, RouteHint};
+use i3t_model::control::{
+    BindCause, DirectKind, InterceptCause, InterceptState, LegTransport, ListenState, NameService, RejectCause, RelayState, Route,
+    RouteCause, RouteHint,
+};
 use i3t_model::update::{FailureKind, SelfUpdateBlocker, UpdateCause, UpdateStatus};
 
 use super::{Codes, Names, cost_ms, relays};
@@ -45,6 +48,9 @@ pub(super) static CODES: Codes = Codes {
     hop_source,
     path_pick,
     transfer_end,
+    intercept_state,
+    intercept_cause,
+    name_service,
 };
 
 fn route(route: &Route, names: Names<'_>) -> String {
@@ -555,5 +561,42 @@ const fn transfer_end(end: TransferEnd) -> &'static str {
         TransferEnd::Bytes => "byte limit",
         TransferEnd::Time => "time limit",
         TransferEnd::Unknown => "unknown",
+    }
+}
+
+fn intercept_state(state: &InterceptState) -> String {
+    match state {
+        InterceptState::Off => "off".to_owned(),
+        InterceptState::On { udp, names, .. } => format!("on ({}; {})", if *udp { "TCP, UDP" } else { "TCP" }, name_service(names)),
+        InterceptState::Failed { cause } => format!("can't start: {}", intercept_cause(cause)),
+        InterceptState::Unsupported => "not available on this platform".to_owned(),
+        InterceptState::Unknown => "unknown".to_owned(),
+    }
+}
+
+fn intercept_cause(cause: &InterceptCause) -> String {
+    match cause {
+        InterceptCause::NoPermission { missing } => format!("missing {}", missing.join(", ")),
+        InterceptCause::ProgramMissing { program } => match program.as_str() {
+            "nft" => "nft not found (install nftables)".to_owned(),
+            "ip" => "ip not found (install iproute2)".to_owned(),
+            other => format!("{other} not found"),
+        },
+        InterceptCause::CommandFailed { program, detail } => format!("{program} failed: {detail}"),
+        InterceptCause::PortInUse { address } => format!("{address} in use"),
+        InterceptCause::BindFailed { address, detail } => format!("can't bind {address}: {detail}"),
+        InterceptCause::TableInUse { table } => format!("routing table {table} is used by another program"),
+        InterceptCause::LinkInUse { link } => format!("a link {link} exists that isn't ice3tier's"),
+        InterceptCause::RangeInUse { with } => format!("the network's range overlaps {with} on this machine"),
+        InterceptCause::Unknown => "unknown cause".to_owned(),
+    }
+}
+
+fn name_service(names: &NameService) -> String {
+    match names {
+        NameService::Resolved => "names via systemd-resolved".to_owned(),
+        NameService::NoResolver => "no systemd-resolved, names via i3t hosts".to_owned(),
+        NameService::Failed { cause } => format!("names unavailable: {}", intercept_cause(cause)),
+        NameService::Unknown => "names: unknown".to_owned(),
     }
 }

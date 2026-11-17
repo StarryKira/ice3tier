@@ -3,6 +3,8 @@
 //! 终端上的文字跟着系统的语言（见 `i3t_lang`），日志不翻译。
 
 mod connect;
+#[cfg(target_os = "linux")]
+mod intercept;
 mod show;
 mod texts;
 #[cfg(target_os = "linux")]
@@ -80,7 +82,20 @@ enum Command {
         #[arg(long)]
         apply: bool,
     },
+    Intercept {
+        #[command(subcommand)]
+        command: InterceptCommand,
+    },
+    Hosts {
+        #[arg(long)]
+        apply: bool,
+    },
     SelfCheck,
+}
+
+#[derive(Subcommand)]
+enum InterceptCommand {
+    Status,
 }
 
 /// `i3t set` 的设置项。解析的错误由节点的文字目录按语言写。
@@ -103,7 +118,7 @@ fn command(lang: Lang) -> clap::Command {
         .mut_subcommand("run", |sub| sub.about(h.run).mut_arg("static", |arg| arg.help(h.run_static).value_name(v.file)))
         .mut_subcommand("set", |sub| {
             sub.about(h.set)
-                .mut_arg("setting", |arg| arg.value_name("can-exit|can-relay|can-forward|throughput-tests|profile"))
+                .mut_arg("setting", |arg| arg.value_name("can-exit|can-relay|can-forward|throughput-tests|profile|intercept"))
                 .mut_arg("value", |arg| arg.value_name("on|off|low-footprint|balanced|high-throughput"))
         })
         .mut_subcommand("status", |sub| sub.about(h.status))
@@ -116,6 +131,8 @@ fn command(lang: Lang) -> clap::Command {
                 .mut_arg("via", |arg| arg.help(h.connect_via).value_name(v.exit))
         })
         .mut_subcommand("tune", |sub| sub.about(h.tune).mut_arg("apply", |arg| arg.help(h.tune_apply)))
+        .mut_subcommand("intercept", |sub| sub.about(h.intercept).mut_subcommand("status", |sub| sub.about(h.intercept_status)))
+        .mut_subcommand("hosts", |sub| sub.about(h.hosts).mut_arg("apply", |arg| arg.help(h.hosts_apply)))
         .mut_subcommand("self-check", |sub| sub.about(h.self_check))
 }
 
@@ -171,6 +188,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
         Command::Set { setting, value } => {
             let change = setting.change(&value)?;
+            if matches!(change, Change::Intercept(_)) && !cfg!(target_os = "linux") {
+                bail!(t.intercept_linux_only);
+            }
             Config::set(&state.config_path(), change)?;
             println!("{}", (t.setting_set)(&setting.to_string(), &change.to_string()));
             match change {
@@ -181,6 +201,11 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     if let Some(chosen) = chosen.filter(|chosen| *chosen != profile) {
                         println!("{}", (t.profile_chosen)(chosen.spelling()));
                     }
+                }
+                Change::Intercept(on) => {
+                    // 问的时候出错也当它在运行：只有确实没有节点在运行，才去拆上次留下的东西。
+                    let running = current_thread()?.block_on(local::query(&state)).map_or(true, |live| live.is_some());
+                    after_intercept_set(on, running);
                 }
                 Change::Declare(_, false) | Change::ThroughputTests(_) => {}
             }
@@ -212,6 +237,11 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let config = Config::load(&state.config_path())?;
             tune(config.port, apply)?;
         }
+        Command::Intercept { command: InterceptCommand::Status } => {
+            let live = current_thread()?.block_on(local::query(&state))?;
+            intercept_status(live.as_ref())?;
+        }
+        Command::Hosts { apply } => hosts(&state, apply)?,
         Command::SelfCheck => {
             // 不初始化日志：调用它的旧程序把标准错误的最后一段当作失败的原因报给 controller，那里只该有原因本身。
             if let Err(failure) = current_thread()?.block_on(selfcheck::self_check(&state, &version)) {
@@ -243,6 +273,35 @@ fn tune(port: u16, apply: bool) -> anyhow::Result<()> {
 #[cfg(not(target_os = "linux"))]
 fn tune(_port: u16, _apply: bool) -> anyhow::Result<()> {
     bail!(texts().ui.tune_linux_only)
+}
+
+#[cfg(target_os = "linux")]
+fn after_intercept_set(on: bool, running: bool) {
+    intercept::after_set(on, running);
+}
+
+#[cfg(not(target_os = "linux"))]
+fn after_intercept_set(_on: bool, _running: bool) {}
+
+#[cfg(target_os = "linux")]
+fn intercept_status(live: Option<&i3t_agent::status::LiveStatus>) -> anyhow::Result<()> {
+    intercept::status(live);
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn intercept_status(_live: Option<&i3t_agent::status::LiveStatus>) -> anyhow::Result<()> {
+    bail!(texts().ui.intercept_linux_only)
+}
+
+#[cfg(target_os = "linux")]
+fn hosts(state: &StateDir, apply: bool) -> anyhow::Result<()> {
+    intercept::hosts(state, apply)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn hosts(_state: &StateDir, _apply: bool) -> anyhow::Result<()> {
+    bail!(texts().ui.intercept_linux_only)
 }
 
 /// 从本机连一个监听地址该用的地址：绑在"所有地址"上的监听，连它的回环地址。
@@ -394,6 +453,12 @@ mod tests {
         ));
         assert!(parse(&["i3t", "set", "can-fly", "on"]).is_err());
         assert!(matches!(parse(&["i3t", "connect", "nas", "22", "--via", "home"]).unwrap().command, Command::Connect { .. }));
+        assert!(matches!(parse(&["i3t", "set", "intercept", "on"]).unwrap().command, Command::Set { setting: Setting::Intercept, .. }));
+        assert!(matches!(
+            parse(&["i3t", "intercept", "status"]).unwrap().command,
+            Command::Intercept { command: InterceptCommand::Status }
+        ));
+        assert!(matches!(parse(&["i3t", "hosts", "--apply"]).unwrap().command, Command::Hosts { apply: true }));
     }
 
     #[cfg(unix)]

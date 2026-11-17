@@ -12,7 +12,10 @@ use i3t_model::admin::{
     TokenState, UpdateWait,
 };
 use i3t_model::control::diag::{ChoiceCode, HopSource, PathPick, TestCode, TransferEnd};
-use i3t_model::control::{BindCause, DirectKind, LegTransport, ListenState, RejectCause, RelayState, Route, RouteCause, RouteHint};
+use i3t_model::control::{
+    BindCause, DirectKind, InterceptCause, InterceptState, LegTransport, ListenState, NameService, RejectCause, RelayState, Route,
+    RouteCause, RouteHint,
+};
 use i3t_model::update::{SelfUpdateBlocker, UpdateCause, UpdateStatus};
 use i3t_proto::NodeId;
 
@@ -63,6 +66,10 @@ pub struct Codes {
     pub hop_source: fn(HopSource) -> &'static str,
     pub path_pick: fn(PathPick) -> &'static str,
     pub transfer_end: fn(TransferEnd) -> &'static str,
+    /// 透明访问的状态，一短句：开着（拦截什么、名字怎么解析）、没开、开不起来（为什么）。
+    pub intercept_state: fn(&InterceptState) -> String,
+    pub intercept_cause: fn(&InterceptCause) -> String,
+    pub name_service: fn(&NameService) -> String,
 }
 
 impl Lang {
@@ -129,6 +136,28 @@ mod tests {
                 field: Some("groups[1]".into()),
             }),
         ];
+        let intercept = [
+            InterceptState::Off,
+            InterceptState::On { udp: true, source_address: true, names: NameService::Resolved },
+            InterceptState::On { udp: false, source_address: true, names: NameService::NoResolver },
+            InterceptState::Failed { cause: InterceptCause::NoPermission { missing: vec!["CAP_NET_ADMIN".into()] } },
+            InterceptState::Failed { cause: InterceptCause::ProgramMissing { program: "nft".into() } },
+            InterceptState::Failed { cause: InterceptCause::CommandFailed { program: "nft".into(), detail: "x".into() } },
+            InterceptState::Failed { cause: InterceptCause::PortInUse { address: "127.0.0.1:1".parse().expect("地址") } },
+            InterceptState::Failed {
+                cause: InterceptCause::BindFailed { address: "127.0.0.1:1".parse().expect("地址"), detail: "x".into() },
+            },
+            InterceptState::Failed { cause: InterceptCause::TableInUse { table: 2033 } },
+            InterceptState::Failed { cause: InterceptCause::LinkInUse { link: "i3t0".into() } },
+            InterceptState::Failed { cause: InterceptCause::RangeInUse { with: "192.168.1.5/24 dev eth0".into() } },
+            InterceptState::Failed { cause: InterceptCause::Unknown },
+            InterceptState::Unsupported,
+            InterceptState::Unknown,
+        ];
+        out.extend(intercept.iter().map(codes.intercept_state));
+        out.push((codes.name_service)(&NameService::Failed {
+            cause: InterceptCause::PortInUse { address: "10.66.0.1:53".parse().expect("地址") },
+        }));
         let causes = [
             RouteCause::NoRouteYet,
             RouteCause::TestPinned,

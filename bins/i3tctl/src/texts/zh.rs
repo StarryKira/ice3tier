@@ -284,6 +284,8 @@ const UI: Ui = Ui {
     from_network: "用网络的",
     pinned: "固定挂靠的 relay",
     profile: "性能档位",
+    intercept: "透明访问",
+    intercept_active: |active, traffic| format!("{active} 个连接，{traffic}"),
     profile_local: "节点本机决定",
     profile_running: |profile, threads| format!("在用 {profile}，{threads} 个工作线程"),
     restart_pending: "重启后才全部生效",

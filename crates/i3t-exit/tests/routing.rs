@@ -355,3 +355,20 @@ i3t_lane::on_both_transports! {
         assert_eq!(world.nas.system.connected().len(), 2);
     }
 }
+
+#[tokio::test]
+async fn a_forward_that_points_at_an_overlay_address_is_refused_instead_of_being_dialled() {
+    let world = World::new().await;
+    world.laptop.update(|netmap| netmap.me.forwards.push(tcp_forward(7, "127.0.0.1:0", NAS))).await;
+    // 覆盖网的地址只在组网里有意义：nas 不把它当普通地址去连，透明访问打开时那样的连接会绕回组网。
+    let overlay = "10.66.0.9:80".parse().unwrap();
+    world
+        .nas
+        .update(|netmap| {
+            netmap.me.forward_targets.push(ForwardTarget { id: 7, protocol: ForwardProtocol::Tcp, addr: overlay, listener: node(LAPTOP) });
+        })
+        .await;
+    let mut stream = TcpStream::connect(world.laptop.forward(7).await).await.unwrap();
+    assert_reset(&drain(&mut stream).await.1);
+    assert!(world.nas.system.connected().is_empty(), "nas 没有去连那个地址");
+}

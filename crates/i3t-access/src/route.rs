@@ -104,7 +104,7 @@ pub(crate) fn class_for(netmap: &Netmap, username: Option<Class>, configured: Op
 }
 
 /// 目标指的是不是组网里的一个节点。不是组网目标时返回 `None`；是的话给出那个对端，或者不能访问它的原因。
-fn mesh_node<'a>(netmap: &'a Netmap, host: &Host) -> Option<Result<&'a Peer, Denied>> {
+pub(crate) fn mesh_node<'a>(netmap: &'a Netmap, host: &Host) -> Option<Result<&'a Peer, Denied>> {
     let peer = match host {
         Host::Ip(ip) => {
             let IpAddr::V4(ip) = ip.to_canonical() else { return None };

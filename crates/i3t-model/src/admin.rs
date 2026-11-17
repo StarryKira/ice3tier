@@ -20,8 +20,8 @@ use ipnet::{IpNet, Ipv4Net};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::control::{
-    BackboneLink, Declared, DirectKind, ExitObservation, ExitReport, LaneReport, LegTransport, ListenState, ListenTraffic, PathCandidate,
-    PeerLanes, PerformanceReport, RelayState, Route, RouteCause, RouteSince, SelfUpdate,
+    BackboneLink, Declared, DirectKind, ExitObservation, ExitReport, InterceptReport, LaneReport, LegTransport, ListenState, ListenTraffic,
+    PathCandidate, PeerLanes, PerformanceReport, RelayState, Route, RouteCause, RouteSince, SelfUpdate,
 };
 use crate::netmap::{Attachment, ExitRole, ForwardProtocol, LaneMode, ListenerProtocol, Profile, Reach, RoutingMode};
 use crate::update::{FailureKind, SelfUpdateBlocker, UpdateCause, UpdateStatus, UpdateTiming, Version};
@@ -601,6 +601,9 @@ pub struct NodeDetail {
     /// 节点本次连接期间最近一次报的、它实际在用的性能档位。不在线、旧版本、或者还没报过时是 `null`。
     #[serde(default)]
     pub performance: Option<PerformanceReport>,
+    /// 节点本次连接期间最近一次报的透明访问的状况。不在线、旧版本、或者还没报过时是 `null`。
+    #[serde(default)]
+    pub intercept: Option<InterceptReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1657,6 +1660,7 @@ mod tests {
             lanes: None,
             reported_secs_ago: Some(4),
             performance: None,
+            intercept: None,
         };
         let value = serde_json::to_value(&detail).unwrap();
         assert_eq!(value["attached"], json!([{ "relay": 9, "rtt_ms": 12 }]));
