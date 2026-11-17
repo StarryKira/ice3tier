@@ -7,7 +7,7 @@ use std::fs;
 use std::time::Duration;
 
 use i3t_crypto::NodeKey;
-use i3t_model::admin::{ErrorCode, NetworkId, PackageState, RelaySettings, UpdateSettings, UpdateWait};
+use i3t_model::admin::{ErrorCode, NetworkId, PackageState, RelaySettings, UpdateNode, UpdateSettings, UpdateWait};
 use i3t_model::control::{Declared, Hello, MAX_PACKAGE_CHUNK, SelfUpdate, ToController};
 use i3t_model::update::{
     Artifact, FailureKind, LATEST_DIR, MANIFEST_FILE, Manifest, NODE_PROGRAM, Platform, SIGNATURE_FILE, SelfUpdateBlocker, Sha256,
@@ -54,6 +54,32 @@ impl Publisher {
     }
 
     fn publish_with(&self, key: &NodeKey, release: &str, min_controller: &str, programs: &[(&str, &[u8])]) {
+        let artifacts = self.place(release, programs);
+        let manifest = Manifest {
+            version: version(release),
+            min_controller: version(min_controller),
+            published: 1_763_200_000,
+            artifacts,
+            security_floor: None,
+        };
+        self.sign_as_latest(key, &manifest);
+    }
+
+    /// 发布一个写了安全下限的版本。
+    fn publish_with_floor(&self, release: &str, floor: &str, programs: &[(&str, &[u8])]) {
+        let artifacts = self.place(release, programs);
+        let manifest = Manifest {
+            version: version(release),
+            min_controller: version("0.0.0"),
+            published: 1_763_200_000,
+            artifacts,
+            security_floor: Some(version(floor)),
+        };
+        self.sign_as_latest(&self.key, &manifest);
+    }
+
+    /// 把各个平台的程序放进这个版本的目录，返回清单里的那一项项。
+    fn place(&self, release: &str, programs: &[(&str, &[u8])]) -> BTreeMap<String, Artifact> {
         let mut artifacts = BTreeMap::new();
         for (platform, content) in programs {
             let path = self.program_path(release, platform);
@@ -67,8 +93,12 @@ impl Publisher {
             };
             artifacts.insert((*platform).to_owned(), artifact);
         }
-        let manifest = Manifest { version: version(release), min_controller: version(min_controller), published: 1_763_200_000, artifacts };
-        let signed = sign_manifest(key, serde_json::to_string_pretty(&manifest).unwrap());
+        artifacts
+    }
+
+    /// 签清单，再把它放到"最新"的位置上。
+    fn sign_as_latest(&self, key: &NodeKey, manifest: &Manifest) {
+        let signed = sign_manifest(key, serde_json::to_string_pretty(manifest).unwrap());
         let latest = self.root.path().join(LATEST_DIR);
         fs::create_dir_all(&latest).unwrap();
         fs::write(latest.join(MANIFEST_FILE), &signed.manifest).unwrap();
@@ -505,6 +535,105 @@ fn turning_auto_update_off_offers_nothing_and_withdraws_pending_orders() {
     fleet.controller().set_update_settings(&on).unwrap();
     pending.receive();
     assert_eq!(pending.orders.len(), 2);
+}
+
+/// 管理员打开或者关掉一个节点的自动更新。
+fn switch_auto_update(fleet: &Fleet, member: &Member, on: bool) {
+    let request = UpdateNode { auto_update: Some(on), ..UpdateNode::default() };
+    let node = fleet.controller().update_node(fleet.network, member.id, &request).unwrap();
+    assert_eq!(node.auto_update, on);
+}
+
+#[test]
+fn a_node_with_its_own_switch_off_is_left_alone_until_an_admin_forces_it() {
+    let mut fleet = Fleet::new();
+    let mut kept = fleet.node(OLD);
+    switch_auto_update(&fleet, &kept, false);
+    let mut pending = fleet.node(OLD);
+    fleet.release();
+    assert_eq!(fleet.last_order(&mut kept), None, "它自己的开关关着");
+    assert!(fleet.last_order(&mut pending).is_some(), "别的节点照常");
+    let update = fleet.update_of(&kept);
+    assert_eq!((update.available, update.ordered, update.waiting), (Some(version(NEW)), None, None), "只标出有新版本，等管理员点");
+    assert_eq!(fleet.controller().update_overview().unwrap().nodes.outdated, 1);
+
+    // 关掉还没换上去的那个：和关掉全局的开关一样撤回，别的节点不受影响。
+    switch_auto_update(&fleet, &pending, false);
+    pending.receive();
+    assert_eq!((pending.cancels, fleet.update_of(&pending).ordered), (1, None));
+    kept.receive();
+    assert_eq!(kept.cancels, 0);
+
+    // 打开就轮到它；全局的开关关着时两个都要开着才算。
+    switch_auto_update(&fleet, &pending, true);
+    assert_eq!(fleet.last_order(&mut pending), Some((version(NEW), UpdateTiming::Idle)));
+    fleet.controller().set_update_settings(&UpdateSettings { auto_update: Some(false), ..UpdateSettings::default() }).unwrap();
+    switch_auto_update(&fleet, &kept, true);
+    assert_eq!(fleet.last_order(&mut kept), None, "全局的开关关着");
+    switch_auto_update(&fleet, &kept, false);
+    fleet.controller().set_update_settings(&UpdateSettings { auto_update: Some(true), ..UpdateSettings::default() }).unwrap();
+    assert_eq!(fleet.last_order(&mut kept), None, "它自己的又关了");
+
+    // "立即更新"不看它的开关。
+    fleet.controller().force_update(fleet.network, kept.id, UpdateTiming::Now).unwrap();
+    assert_eq!(fleet.last_order(&mut kept), Some((version(NEW), UpdateTiming::Now)));
+}
+
+#[test]
+fn a_relay_with_its_switch_off_does_not_hold_up_the_other_relays() {
+    let mut fleet = Fleet::new();
+    let mut skipped = fleet.relay(OLD);
+    switch_auto_update(&fleet, &skipped, false);
+    let (mut first, mut second) = (fleet.relay(OLD), fleet.relay(OLD));
+    fleet.release();
+    assert_eq!(fleet.last_order(&mut skipped), None, "开关关着的 relay 不排队，也就不占轮次");
+    assert!(fleet.last_order(&mut first).is_some(), "编号最小的 relay 开关关着，轮到下一个");
+    assert_eq!(fleet.last_order(&mut second), None);
+    assert_eq!(fleet.update_of(&second).waiting, Some(UpdateWait::RelayTurn));
+
+    // 轮到的 relay 被关掉开关：指令撤回，这一轮马上让给下一个。
+    switch_auto_update(&fleet, &first, false);
+    first.receive();
+    assert_eq!(first.cancels, 1);
+    assert!(fleet.last_order(&mut second).is_some(), "不用等它");
+    assert_eq!(fleet.update_of(&first).waiting, None);
+
+    // "全部更新"不看开关：开关关着的 relay 照样排队。
+    let forced = fleet.controller().force_update_all(UpdateTiming::Now).unwrap();
+    let ids: Vec<_> = forced.queued.iter().map(|node| node.id).collect();
+    assert_eq!(ids, [skipped.id, first.id], "第二个 relay 占着这一轮");
+}
+
+#[test]
+fn nodes_below_the_security_floor_are_marked_and_nothing_else_changes() {
+    let mut fleet = Fleet::new();
+    let mut old = fleet.node(OLD);
+    let current = fleet.node(NEW);
+    fleet.publisher.publish_with_floor(NEW, NEW, &[(LINUX, b"the fixed program")]);
+    fleet.sync();
+
+    let overview = fleet.controller().update_overview().unwrap();
+    assert_eq!(overview.release.and_then(|release| release.security_floor), Some(version(NEW)));
+    assert!(fleet.update_of(&old).security);
+    assert!(!fleet.update_of(&current).security, "已经是下限那一版的节点没有已知的安全问题");
+    assert_eq!(fleet.last_order(&mut old), Some((version(NEW), UpdateTiming::Idle)), "照常是自动的、空闲时的更新");
+
+    // 开关关着的节点也标出来：这是告诉人的，人决定。
+    let kept = fleet.node("0.0.9");
+    switch_auto_update(&fleet, &kept, false);
+    let update = fleet.update_of(&kept);
+    assert!(update.security && update.ordered.is_none());
+
+    // 下一个发布没有写下限：不再标。不在线的节点也按版本号算。
+    fleet.controller().disconnect(kept.session);
+    fleet.publisher.publish("0.3.0", &[(LINUX, b"a later program")]);
+    fleet.sync();
+    assert_eq!(fleet.controller().update_overview().unwrap().release.and_then(|release| release.security_floor), None);
+    assert!(!fleet.update_of(&kept).security);
+    fleet.publisher.publish_with_floor("0.4.0", "0.3.0", &[(LINUX, b"an even later program")]);
+    fleet.sync();
+    assert!(fleet.update_of(&kept).security, "带下去的下限：跳过了几版的节点照样知道");
+    assert!(fleet.update_of(&current).security, "{NEW} 也比新的下限旧了");
 }
 
 #[test]

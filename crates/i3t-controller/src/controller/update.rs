@@ -14,6 +14,9 @@
 //!
 //! 暂停只信得过的失败：节点报的失败只有在 controller 确实让它装过这个版本时才暂停，并且只暂停它所在的网络。
 //! 见 [`Inner::version_rejected`]。
+//!
+//! 清单写了安全下限时，版本比它旧的节点在管理 API 里标成有安全更新（`NodeUpdate::security`）。这只是告诉人的：
+//! 让谁更新、强不强制都不看它，人看了自己决定。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -535,7 +538,14 @@ impl Inner {
                 if self.updates.release.as_ref() == Some(&release) {
                     tracing::debug!(%version, source, "查了发布源，最新的正式版没有变");
                 } else {
-                    tracing::info!(%version, min_controller = %release.manifest.min_controller, source, "发布源上有新的正式版");
+                    let security_floor = release.manifest.security_floor.as_ref().map(ToString::to_string);
+                    tracing::info!(
+                        %version,
+                        min_controller = %release.manifest.min_controller,
+                        security_floor = security_floor.as_deref().unwrap_or("-"),
+                        source,
+                        "发布源上有新的正式版"
+                    );
                     self.store.log(
                         now,
                         None,
@@ -790,7 +800,15 @@ impl Inner {
                 .update_failure
                 .clone()
                 .filter(|failure| !node.version.parse::<Version>().is_ok_and(|running| running >= failure.version)),
+            security: self.below_security_floor(node),
         }
+    }
+
+    /// 节点在跑的版本比已知的最新发布写的安全下限旧。看的是已知的发布，不管 controller 够不够新、它有没有这个平台的包：
+    /// 这是告诉人的，人可以手动更新。版本号看不懂时说不上来，算 `false`。
+    fn below_security_floor(&self, node: &NodeRecord) -> bool {
+        let Some(release) = &self.updates.release else { return false };
+        node.version.parse::<Version>().is_ok_and(|running| release.manifest.is_below_security_floor(&running))
     }
 
     pub(super) fn update_overview(&self) -> Result<UpdateOverview, Error> {
@@ -814,6 +832,7 @@ impl Inner {
                 controller_too_old: manifest.min_controller > updates.version,
                 newer_than_controller: manifest.version > updates.version,
                 packages: packages.collect(),
+                security_floor: manifest.security_floor.clone(),
             }
         });
         let mut counts = UpdateCounts::default();

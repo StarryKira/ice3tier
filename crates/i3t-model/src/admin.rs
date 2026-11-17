@@ -320,6 +320,10 @@ pub struct Node {
     /// 节点上报的主机名；旧版本的节点不报，是空的。
     #[serde(default)]
     pub hostname: String,
+    /// 管理员的开关：这个节点要不要自动更新。新节点是开着的。它和全局的开关（[`UpdateOverview::auto_update`]）都开着，
+    /// controller 才自动让它更新；管理员点的"立即更新"不看它。比这个字段旧的 controller 不给，读成 `true`。
+    #[serde(default = "enabled_by_default")]
+    pub auto_update: bool,
     /// 这个节点的程序更新（白皮书 §10.5）。
     #[serde(default)]
     pub update: NodeUpdate,
@@ -361,6 +365,10 @@ pub struct NodeUpdate {
     pub waiting: Option<UpdateWait>,
     /// 它最近一次"这个版本在这台机器上不能用"的失败。有这条记录时，自动更新不会再让它装同一个版本。
     pub failure: Option<UpdateFailure>,
+    /// 它正在运行的版本有已知的安全问题：比 controller 知道的最新发布写的安全下限（[`ReleaseInfo::security_floor`]）旧。
+    /// 只是告诉人的，怎么更新不因它而变。比这个字段旧的 controller 不给，读成 `false`。
+    #[serde(default)]
+    pub security: bool,
 }
 
 /// controller 发给节点的一条更新指令。
@@ -465,6 +473,10 @@ pub struct ReleaseInfo {
     pub newer_than_controller: bool,
     /// 发布里各个平台的节点程序，和它们在 controller 上的缓存情况。
     pub packages: Vec<PackageInfo>,
+    /// 清单写的安全下限：最低的没有已知安全问题的版本，比它旧的节点的 [`NodeUpdate::security`] 是 `true`。
+    /// 清单没有写、或者比这个字段旧的 controller 是 `null`。
+    #[serde(default)]
+    pub security_floor: Option<Version>,
 }
 
 /// 发布里一个平台的节点程序。
@@ -661,6 +673,9 @@ pub struct UpdateNode {
     /// 管理员的开关：可以作为端口转发的目标（[`Node::forward_target`]）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forward_target: Option<bool>,
+    /// 管理员的开关：自动更新这个节点（[`Node::auto_update`]）。关掉时撤回给它的、还没换上去的自动更新。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_update: Option<bool>,
 }
 
 /// 区分"字段没写"和"字段写了 `null`"：前者读成 `None`，后者读成 `Some(None)`。
@@ -1713,7 +1728,26 @@ mod tests {
         }))
         .unwrap();
         assert_eq!((node.hostname.as_str(), node.update.clone()), ("", NodeUpdate::default()));
-        assert_eq!(serde_json::to_value(&node).unwrap()["update"]["status"], json!({ "state": "idle" }));
+        assert!(node.auto_update, "比这个字段旧的 controller 只有全局的开关，每个节点都按开着读");
+        assert!(!node.update.security);
+        let wire = serde_json::to_value(&node).unwrap();
+        assert_eq!(wire["update"]["status"], json!({ "state": "idle" }));
+        assert_eq!((wire["auto_update"].clone(), wire["update"]["security"].clone()), (json!(true), json!(false)));
+    }
+
+    #[test]
+    fn release_info_always_says_its_security_floor_and_reads_without_it() {
+        let old = json!({
+            "version": "0.3.0", "published": 1, "min_controller": "0.2.0", "controller_too_old": false, "newer_than_controller": false,
+            "packages": []
+        });
+        let mut info: ReleaseInfo = serde_json::from_value(old).unwrap();
+        assert_eq!(info.security_floor, None);
+        assert_eq!(serde_json::to_value(&info).unwrap()["security_floor"], json!(null), "没有下限时写成 null，字段总是在");
+        info.security_floor = Some(Version::new(0, 2, 5));
+        assert_eq!(serde_json::to_value(&info).unwrap()["security_floor"], json!("0.2.5"));
+        let request: UpdateNode = serde_json::from_value(json!({ "auto_update": false })).unwrap();
+        assert_eq!(request, UpdateNode { auto_update: Some(false), ..UpdateNode::default() });
     }
 
     #[test]

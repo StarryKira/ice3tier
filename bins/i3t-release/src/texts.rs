@@ -30,6 +30,7 @@ pub struct Help {
     pub manifest_dir: &'static str,
     pub manifest_key: &'static str,
     pub min_controller: &'static str,
+    pub security_floor: &'static str,
     pub verify: &'static str,
     pub verify_dir: &'static str,
     pub verify_key: &'static str,
@@ -74,6 +75,10 @@ pub struct Ui {
     pub check_signature: fn(&str, &str) -> String,
     /// 签名正确：版本，正式版还是预发布版，需要的 controller 最低版本。
     pub verified: fn(&str, &str, &str) -> String,
+    /// 清单写了安全下限：那个版本。
+    pub security_floor: fn(&str) -> String,
+    /// 安全下限比这次发布的版本新：下限，这次的版本。
+    pub floor_above_version: fn(&str, &str) -> String,
     pub file_ok: fn(&str, &str) -> String,
     /// 一个文件和清单对不上：平台，文件名，哪里不对。
     pub file_bad: fn(&str, &str, &str) -> String,
@@ -95,6 +100,7 @@ static ZH: Texts = Texts {
         manifest_dir: "发布目录。里面的节点程序要叫 i3t-<平台>，例如 i3t-linux-x86_64、i3t-windows-x86_64.exe",
         manifest_key: "发布签名密钥的文件（keygen 生成的那个）",
         min_controller: "这个版本的节点需要的 controller 最低版本。比它旧的 controller 不会下发这个版本",
+        security_floor: "安全下限：最低的没有已知安全问题的版本，比它旧的节点标为有安全更新。默认没有；写了就每一版都带上",
         verify: "核对一个发布目录：清单的签名，以及清单里每个文件的大小和 SHA-256",
         verify_dir: "发布目录",
         verify_key: "只认这一把公钥（base64url）。不给的话用编译在本程序里的发布公钥，和节点认的一样",
@@ -131,6 +137,8 @@ static ZH: Texts = Texts {
         parse_signature: |file| format!("解析 {file}"),
         check_signature: |file, keys| format!("核对 {file} 的签名（认的公钥：{keys}）"),
         verified: |version, kind, min| format!("版本 {version}（{kind}），需要 controller {min} 或更新，签名正确"),
+        security_floor: |floor| format!("安全下限 {floor}：比它旧的版本有已知的安全问题"),
+        floor_above_version: |floor, version| format!("安全下限 {floor} 比这次发布的版本 {version} 还新"),
         file_ok: |platform, file| format!("  通过  {platform:<16} {file}"),
         file_bad: |platform, file, error| format!("  不符  {platform:<16} {file}：{error}"),
         mismatched: |count| format!("清单里有 {count} 个文件和目录里的对不上"),
@@ -152,6 +160,7 @@ static EN: Texts = Texts {
         manifest_dir: "Release directory. Node programs in it are named i3t-<PLATFORM>, e.g. i3t-linux-x86_64, i3t-windows-x86_64.exe",
         manifest_key: "File of the release signing key (the one keygen wrote)",
         min_controller: "Oldest controller version the nodes of this release need. Older controllers don't offer it",
+        security_floor: "Security floor: the lowest version without a known security problem; older nodes are marked as having a security update. None by default; once set, carry it in every release",
         verify: "Check a release directory: the manifest's signature, and the size and SHA-256 of every file in it",
         verify_dir: "Release directory",
         verify_key: "Accept only this public key (base64url). Without it, the release keys compiled into this program, as nodes do",
@@ -190,6 +199,8 @@ static EN: Texts = Texts {
         parse_signature: |file| format!("Parsing {file}"),
         check_signature: |file, keys| format!("Checking the signature of {file} (trusted keys: {keys})"),
         verified: |version, kind, min| format!("Version {version} ({kind}), needs controller {min} or newer, signature valid"),
+        security_floor: |floor| format!("Security floor {floor}: older versions have a known security problem"),
+        floor_above_version: |floor, version| format!("The security floor {floor} is newer than this release {version}"),
         file_ok: |platform, file| format!("  ok        {platform:<16} {file}"),
         file_bad: |platform, file, error| format!("  mismatch  {platform:<16} {file}: {error}"),
         mismatched: |count| format!("Files that don't match the manifest: {count}"),

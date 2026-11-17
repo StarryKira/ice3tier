@@ -114,13 +114,16 @@ class Release:
         self.root = work / "releases"
         (self.root / "latest" / "download").mkdir(parents=True)
 
-    def publish(self, version: str, program: Path) -> None:
-        """发布 `version`：节点程序是 `program`。先放好这个版本的文件，再把清单放到"最新"的位置上。"""
+    def publish(self, version: str, program: Path, *, security_floor: str | None = None) -> None:
+        """发布 `version`：节点程序是 `program`，清单写上安全下限 `security_floor`（有的话）。
+        先放好这个版本的文件，再把清单放到"最新"的位置上。"""
         directory = self.root / "download" / f"v{version}"
         directory.mkdir(parents=True)
         shutil.copy2(program, directory / ARTIFACT)
+        floor = ["--security-floor", security_floor] if security_floor else []
         signed = subprocess.run(
-            [str(STAGE / "i3t-release"), "manifest", "--version", version, "--dir", str(directory), "--key", str(STAGE / "release.key")],
+            [str(STAGE / "i3t-release"), "manifest", "--version", version, "--dir", str(directory), "--key", str(STAGE / "release.key"),
+             *floor],
             capture_output=True, text=True)
         if signed.returncode != 0:
             raise RuntimeError(f"签发布清单失败：{signed.stderr.strip()}")
@@ -529,6 +532,69 @@ def download_resumes_after_link_loss(lab: Lab, work: Path, t: Checks) -> None:
         print(tail(a.read_log(), 60), tail(controller.log.read_text(errors="replace"), 30), sep="\n  ---\n")
 
 
+def ctl_text(controller: Controller, *args: str) -> str:
+    """i3tctl 给人看的输出（不加 --json），语言是测试定下的中文。"""
+    return controller.host.run(binary("i3tctl"), "--token", controller.token, *args).stdout
+
+
+def node_switch_and_security_floor(lab: Lab, work: Path, t: Checks) -> None:
+    """按节点关掉自动更新：关着的节点不被自动更新，关掉时撤回还没换上去的那次，"立即更新"照样管用；
+    发布写了安全下限，比它旧的节点被标出来，只是告诉人。"""
+    old, new = versions()
+    controller, release, web = setup(lab, work, auto=True)
+    a, b, c = (SupervisedNode(lab.host(name), work, declare=("exit",) if name == "b" else ()) for name in "abc")
+    for node in (a, b, c):
+        node.join(controller)
+    controller.ctl("exit", "enable", str(b.id))
+    kept = controller.ctl("node", "set", str(c.id), "--auto-update", "off")
+    t.check("新节点的自动更新开着，c 的被关掉了", controller.node(a)["auto_update"] is True and kept["auto_update"] is False, str(kept))
+    url = f"http://{web.ip}/"
+    t.check("a 经 b 出得去", reaches(a, url, b, b.host.ip))
+
+    # a 经 b 的下载让 a 和 b 都停在“等待空闲”上：新程序准备好了，还没换上去。
+    download, size = slow_download(a, url, b, 30)
+    time.sleep(2)
+    release.publish(new, STAGE / "new" / "i3t", security_floor=new)
+    checked = controller.ctl("update", "check")
+    t.check("controller 读到了清单里的安全下限", (checked["release"] or {}).get("security_floor") == new, str(checked["release"]))
+    t.check("比下限旧的节点都标着有安全更新",
+            all(update_of(controller, node)["security"] is True for node in (a, b, c)), str([update_of(controller, n) for n in (a, b, c)]))
+    both_waiting = waited(lambda: all(state_of(controller, node) == "waiting_for_idle" for node in (a, b)), 30, "a 和 b 等待空闲")
+    t.check("开着的 a 和 b 取了包、过了自检，在等空闲", both_waiting, f"a: {update_of(controller, a)['status']}，b: {update_of(controller, b)['status']}")
+    t.check("开关关着的 c 没有收到自动更新，只标出有新版本",
+            update_of(controller, c)["ordered"] is None and update_of(controller, c)["available"] == new and c.count("controller 要求更新") == 0,
+            str(update_of(controller, c)))
+
+    controller.ctl("node", "set", str(a.id), "--auto-update", "off")
+    withdrawn = waited(lambda: "controller 撤回了更新的要求" in a.read_log() and state_of(controller, a) == "idle", 15, "a 的更新被撤回")
+    t.check("关掉 a 的开关：还没换上去的自动更新被撤回", withdrawn and update_of(controller, a)["ordered"] is None,
+            f"{update_of(controller, a)}\n{tail(a.read_log(), 6)}")
+    t.check("b 不受影响，还在等空闲", state_of(controller, b) == "waiting_for_idle", str(update_of(controller, b)["status"]))
+
+    ok, detail = finished_intact(download, size)
+    t.check("下载完整地结束了", ok, detail)
+    t.check("流结束之后 b 更新到新版本", wait_version(controller, b, new), controller.node(b)["version"])
+    t.check("更新到下限那一版的 b 不再标着有安全更新", update_of(controller, b)["security"] is False, str(update_of(controller, b)))
+    time.sleep(5)
+    t.check("开关关着的 a 和 c 没有换程序，也没有重启",
+            all(node.installed_version() == old and node.count("节点启动") == 1 for node in (a, c)),
+            f"a: {a.installed_version()}，c: {c.installed_version()}")
+
+    overview = ctl_text(controller, "update", "show")
+    t.check("i3tctl update show 写明了安全下限", f"低于 {new} 的版本有已知的安全问题" in overview, overview)
+    shown = ctl_text(controller, "node", "show", str(c.id))
+    t.check("i3tctl node show 写明了安全更新和关着的自动更新",
+            f"有新版本 {new}（安全更新）" in shown and any("自动更新" in line and "关" in line for line in shown.splitlines()), shown)
+
+    controller.ctl("node", "set", str(c.id), "--auto-update", "on")
+    t.check("打开 c 的开关之后它自动更新到新版本", wait_version(controller, c, new), controller.node(c)["version"])
+    controller.ctl("update", "node", str(a.id))
+    t.check("开关关着的 a 由管理员点了“立即更新”，照样更新", wait_version(controller, a, new), controller.node(a)["version"])
+    t.check("更新之后照样互通", reaches(a, url, b, b.host.ip))
+    if t.failures:
+        print(tail(a.read_log(), 40), tail(controller.log.read_text(errors="replace"), 30), sep="\n  ---\n")
+
+
 SCENARIOS = {
     "forced_update": forced_update,
     "idle_waits_for_flows": idle_waits_for_flows,
@@ -536,6 +602,7 @@ SCENARIOS = {
     "download_resumes_after_link_loss": download_resumes_after_link_loss,
     "rollback_pauses_rollout": rollback_pauses_rollout,
     "broken_release_is_stopped_by_self_check": broken_release_is_stopped_by_self_check,
+    "node_switch_and_security_floor": node_switch_and_security_floor,
 }
 
 

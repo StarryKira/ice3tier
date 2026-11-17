@@ -40,6 +40,8 @@ pub struct NodeRecord {
     pub pinned_relays: Vec<NodeId>,
     /// 管理员给它选的性能档位；没有选时是 `None`，节点用本机配置文件里的。
     pub profile: Option<Profile>,
+    /// 管理员的开关：自动更新这个节点。新节点是开着的。
+    pub auto_update: bool,
     /// 节点最近上报的候选端点。
     pub endpoints: Vec<SocketAddr>,
     /// 节点最近上报的网卡地址；旧版本的节点不报，是 `None`。
@@ -107,6 +109,7 @@ impl NodeRecord {
             reach: row.get::<_, Option<Json<Reach>>>("reach")?.map(|json| json.0),
             pinned_relays: row.get::<_, Json<Vec<NodeId>>>("pinned_relays")?.0,
             profile: row.get::<_, Option<Json<Profile>>>("profile")?.map(|json| json.0),
+            auto_update: row.get("auto_update")?,
             endpoints: row.get::<_, Json<Vec<SocketAddr>>>("endpoints")?.0,
             local_addresses: row.get::<_, Option<Json<Vec<IpAddr>>>>("local_addresses")?.map(|json| json.0),
             observed: row.get::<_, Option<Text<SocketAddr>>>("observed")?.map(|text| text.0),
@@ -238,7 +241,8 @@ impl Store {
         self.conn.execute(
             "UPDATE nodes SET name = :name, virtual_ip = :ip, declared = :declared, forward_target = :forward_target, relay = :relay, exit = :exit,
                               dial_out_only = :dial_out_only, routing = :routing, reach = :reach, pinned_relays = :pinned,
-                              profile = :profile, platform = :platform, version = :version, hostname = :hostname, self_update = :self_update
+                              profile = :profile, auto_update = :auto_update, platform = :platform, version = :version,
+                              hostname = :hostname, self_update = :self_update
              WHERE id = :id",
             named_params! {
                 ":id": SqlNode(node.id),
@@ -253,6 +257,7 @@ impl Store {
                 ":reach": node.reach.map(Json),
                 ":pinned": Json(&node.pinned_relays),
                 ":profile": node.profile.map(Json),
+                ":auto_update": node.auto_update,
                 ":platform": node.platform,
                 ":version": node.version,
                 ":hostname": node.hostname,
@@ -269,6 +274,16 @@ impl Store {
     /// 写数据库失败。
     pub fn set_node_forward_target(&self, id: NodeId, on: bool) -> Result<(), StoreError> {
         self.conn.execute("UPDATE nodes SET forward_target = ?2 WHERE id = ?1", params![SqlNode(id), on])?;
+        Ok(())
+    }
+
+    /// 只改节点"自动更新"的开关。继任时用，理由同 [`Store::set_node_forward_target`]。
+    ///
+    /// # Errors
+    ///
+    /// 写数据库失败。
+    pub fn set_node_auto_update(&self, id: NodeId, on: bool) -> Result<(), StoreError> {
+        self.conn.execute("UPDATE nodes SET auto_update = ?2 WHERE id = ?1", params![SqlNode(id), on])?;
         Ok(())
     }
 
@@ -446,6 +461,7 @@ mod tests {
         node.reach = Some(Reach::DirectOnly);
         node.pinned_relays = vec![NodeId::new(9).unwrap()];
         node.profile = Some(Profile::LowFootprint);
+        node.auto_update = false;
         node.hostname = "nas-01.lan".to_owned();
         node.self_update = Some(SelfUpdate::from(Some(SelfUpdateBlocker::Container)));
         store.update_node(&node).unwrap();
@@ -503,6 +519,7 @@ mod tests {
         let network = store.insert_network(&home()).unwrap();
         let node = store.node(store.insert_node(&new_node(network, 1)).unwrap()).unwrap().unwrap();
         assert_eq!((node.hostname.as_str(), node.self_update, node.update_failure), ("", None, None));
+        assert!(node.auto_update, "新节点的自动更新是开着的");
         assert_eq!(node.local_addresses, None, "没报过网卡地址和报了一个空表不一样");
     }
 

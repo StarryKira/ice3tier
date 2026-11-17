@@ -574,6 +574,8 @@ fn an_existing_node_can_be_made_the_successor_of_an_offline_one() {
     let other = lab.join_offline(network.id, &[], Declared::default());
     rename(&lab, network.id, old.id, "nas-01");
     lab.switch_on_forward_target(network.id, old.id);
+    let keep_off = UpdateNode { auto_update: Some(false), ..UpdateNode::default() };
+    lab.controller.update_node(network.id, old.id, &keep_off).unwrap();
     lab.controller.create_forward(network.id, forward(other, old.id)).unwrap();
     lab.settle(&mut [&mut old]);
     let old_address = lab.controller.node(network.id, old.id).unwrap().node.virtual_ip;
@@ -591,6 +593,7 @@ fn an_existing_node_can_be_made_the_successor_of_an_offline_one() {
     let inherited = &lab.controller.forwards(network.id).unwrap()[0];
     assert_eq!((inherited.target_node, inherited.enabled, inherited.status), (replacement, true, ForwardStatus::ListenerOffline));
     assert!(node.forward_target, "继承了开关，不用声明什么");
+    assert!(!node.auto_update, "管理员不让自动更新的是这个身份，换了机器也一样");
     assert_eq!(lab.netmap(replacement).me.forward_targets.len(), 1);
     assert_eq!(lab.netmap(other).peers[0].virtual_ip, old_address);
     assert_eq!(lab.netmap(other).peers[0].id, replacement);

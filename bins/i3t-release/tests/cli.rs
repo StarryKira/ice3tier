@@ -165,6 +165,42 @@ fn a_prerelease_is_reported_as_one() {
 }
 
 #[test]
+fn a_security_floor_is_written_only_when_given_and_reported_by_verify() {
+    let plain = Release::signed("0.3.0");
+    assert!(!plain.manifest_text().contains("security_floor"), "默认没有下限，清单和以前一样");
+    assert_eq!(plain.as_a_node_sees_it().unwrap().security_floor, None);
+    assert!(!stdout(&plain.verify()).contains("安全下限"));
+
+    let release = Release::prepared();
+    let output = tool(&[
+        "manifest",
+        "--version",
+        "0.3.0",
+        "--dir",
+        text(&release.dir),
+        "--key",
+        text(&release.key_file),
+        "--security-floor",
+        "0.2.5",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("安全下限 0.2.5"), "{}", stdout(&output));
+    assert!(release.manifest_text().contains("\"security_floor\": \"0.2.5\""), "{}", release.manifest_text());
+    assert_eq!(release.as_a_node_sees_it().unwrap().security_floor.map(|floor| floor.to_string()).as_deref(), Some("0.2.5"));
+    let report = stdout(&release.verify());
+    assert!(report.contains("安全下限 0.2.5：比它旧的版本有已知的安全问题"), "{report}");
+    let english = stdout(&tool_in("en", &["verify", "--dir", text(&release.dir), "--key", &release.public_key]));
+    assert!(english.contains("Security floor 0.2.5"), "{english}");
+
+    // 这一版自己不能比下限旧。
+    let too_high = Release::prepared();
+    let args = ["manifest", "--version", "0.3.0", "--dir", text(&too_high.dir), "--key", text(&too_high.key_file)];
+    let output = tool(&[&args[..], &["--security-floor", "0.3.1"]].concat());
+    assert!(!output.status.success() && stderr(&output).contains("安全下限 0.3.1"), "{}", stderr(&output));
+    assert!(!too_high.dir.join(MANIFEST_FILE).exists());
+}
+
+#[test]
 fn manifest_refuses_to_overwrite_a_signed_release() {
     let release = Release::signed("0.3.0");
     let before = (release.manifest_text(), fs::read(release.dir.join(SIGNATURE_FILE)).unwrap());

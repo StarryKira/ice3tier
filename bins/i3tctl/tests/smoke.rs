@@ -371,8 +371,9 @@ async fn the_command_line_drives_a_running_controller() {
     assert!(!refused.status.success() && !i3t_lang::cli::has_chinese(&said) && said.contains("network_not_empty"), "{said}");
 }
 
-/// 在 `root` 里摆一个发布源（布局见 `docs/releasing.md` 第 6 节）：`version` 的 Linux 节点程序，清单用 `key` 签。
-fn publish(root: &std::path::Path, key: &NodeKey, version: &str, program: &[u8]) {
+/// 在 `root` 里摆一个发布源（布局见 `docs/releasing.md` 第 6 节）：`version` 的 Linux 节点程序，清单用 `key` 签，
+/// 写上安全下限 `security_floor`（有的话）。
+fn publish(root: &std::path::Path, key: &NodeKey, version: &str, security_floor: Option<&str>, program: &[u8]) {
     let version: i3t_model::update::Version = version.parse().unwrap();
     let file = "i3t-linux-x86_64".to_owned();
     let release = root.join(version.release_dir());
@@ -385,6 +386,7 @@ fn publish(root: &std::path::Path, key: &NodeKey, version: &str, program: &[u8])
         min_controller: "0.0.0".parse().unwrap(),
         published: 1_763_200_000,
         artifacts: [("linux-x86_64".to_owned(), artifact)].into(),
+        security_floor: security_floor.map(|floor| floor.parse().unwrap()),
     };
     let signed = sign_manifest(key, serde_json::to_string(&manifest).unwrap());
     let latest = root.join(LATEST_DIR);
@@ -429,9 +431,11 @@ async fn updates_routes_and_paths_can_be_driven_from_the_command_line() {
     // 查发布源：先是什么都没有，然后有了一个版本。
     let empty = fixture.ok(&["update", "check"]).await;
     assert!(empty.contains("检查失败") && empty.contains("还没有查到"), "{empty}");
-    publish(source.path(), &release_key, "0.2.0", b"the new program");
+    publish(source.path(), &release_key, "0.2.0", Some("0.2.0"), b"the new program");
     let checked = fixture.ok(&["update", "check"]).await;
     assert!(Fixture::has_line(&checked, &["最新版本", "0.2.0"]) && Fixture::has_line(&checked, &["linux-x86_64", "不需要"]), "{checked}");
+    assert!(Fixture::has_line(&checked, &["安全", "低于 0.2.0 的版本有已知的安全问题"]), "{checked}");
+    assert_eq!(fixture.json(&["update", "show"]).await["release"]["security_floor"], "0.2.0");
     assert!(checked.contains("controller 也有新版本 0.2.0"), "{checked}");
     assert!(Fixture::has_line(&fixture.ok(&["status"]).await, &["新版本", "0.2.0"]));
     fixture.english(&["update", "show"]).await;
@@ -451,10 +455,27 @@ async fn updates_routes_and_paths_can_be_driven_from_the_command_line() {
     fixture.report(&laptop, Report { update: Some(UpdateStatus::Idle), ..Report::default() });
     let nodes = fixture.ok(&["update", "nodes"]).await;
     let row = |name: &str| nodes.lines().find(|line| line.contains(name)).unwrap_or_else(|| panic!("{nodes}")).to_owned();
-    assert!(row("laptop").contains("0.2.0") && row("laptop").contains("是") && row("laptop").contains("有新版本 0.2.0"), "{nodes}");
-    assert!(row("node-2").contains("版本太旧"), "{nodes}");
+    assert!(
+        row("laptop").contains("0.2.0") && row("laptop").contains("是") && row("laptop").contains("有新版本 0.2.0（安全更新）"),
+        "{nodes}"
+    );
+    assert!(row("node-2").contains("版本太旧") && row("node-2").contains("开"), "{nodes}");
     let detail = fixture.ok(&["node", "show", "laptop"]).await;
-    assert!(Fixture::has_line(&detail, &["主机名", "Laptop.lan"]) && Fixture::has_line(&detail, &["更新", "有新版本 0.2.0"]), "{detail}");
+    assert!(
+        Fixture::has_line(&detail, &["主机名", "Laptop.lan"]) && Fixture::has_line(&detail, &["更新", "有新版本 0.2.0（安全更新）"]),
+        "{detail}"
+    );
+    assert!(Fixture::has_line(&detail, &["自动更新", "开"]), "{detail}");
+    let off = fixture.json(&["node", "set", "laptop", "--auto-update", "off"]).await;
+    assert_eq!((off["auto_update"].clone(), off["update"]["security"].clone()), (false.into(), true.into()));
+    assert!(Fixture::has_line(&fixture.ok(&["node", "show", "laptop"]).await, &["自动更新", "关"]));
+    let english = fixture.english(&["node", "show", "laptop"]).await;
+    assert!(
+        english.contains("0.2.0 available (security update)") && Fixture::has_line(&english, &["Automatic updates", "off"]),
+        "{english}"
+    );
+    assert!(fixture.english(&["update", "show"]).await.contains("versions below 0.2.0 have a known security problem"));
+    fixture.english(&["update", "nodes"]).await;
 
     // 强制更新：包还没有取回来时先排着；取回来之后指令发出去。
     assert!(fixture.fails(&["update", "node", "node-2"]).await.contains("cannot_self_update"));

@@ -46,6 +46,7 @@ const HELP: Help = Help {
     node_reach: "路径限制；default 用网络的",
     node_profile: "性能档位；default 用节点本机配置文件里的",
     node_forward_target: "可以作为端口转发的目标：别的节点经转发能访问它的回环和局域网",
+    node_auto_update: "自动更新这个节点；全局的自动更新也开着才生效",
     node_pin: "固定挂靠的中继，可写多次",
     node_unpin: "不再固定挂靠的中继",
     node_delete: "删除节点。名字和虚拟 IP 90 天内不再分配",
@@ -140,7 +141,7 @@ const HELP: Help = Help {
     update_group: "节点更新",
     update_show: "更新设置和状态",
     update_set: "修改更新设置",
-    update_auto: "自动更新",
+    update_auto: "全部节点的自动更新；单个节点用 node set --auto-update",
     update_source: "发布源：URL、目录或 default",
     update_check: "检查发布源",
     update_nodes: "各节点的更新情况",
@@ -354,6 +355,8 @@ const UI: Ui = Ui {
     auto_update: "自动更新",
     source: "发布源",
     latest: "最新版本",
+    security: "安全",
+    security_floor: |floor| format!("低于 {floor} 的版本有已知的安全问题"),
     not_found_yet: "还没有查到",
     checked: "上次检查",
     check_failed: "检查失败",
@@ -366,7 +369,7 @@ const UI: Ui = Ui {
     deleted_node: "已删除的节点",
     paused: |version, node, at, why| format!("{version} 已暂停：{node} 于 {at} 更新失败，{why}"),
     resume_hint: |version| format!("继续：i3tctl update resume {version}"),
-    node_updates_header: ["编号", "名字", "状态", "版本", "新版本", "自己更新", "更新"],
+    node_updates_header: ["编号", "名字", "状态", "版本", "新版本", "自己更新", "自动更新", "更新"],
     too_old: "版本太旧",
     updating_to: |version| format!("更新到 {version}"),
     nothing_to_update: "没有可以下发的版本",
@@ -379,6 +382,8 @@ const UI: Ui = Ui {
     ordered_to: |version, timing| format!("已下发：{timing}更新到 {version}"),
     available: |version| format!("有新版本 {version}"),
     up_to_date: "已是最新",
+    security_update: "安全更新",
+    security_problem: "这个版本有已知的安全问题",
 
     access_header: ["方向", "节点", "虚拟 IP", "规则"],
     can_reach: "可以访问",
@@ -568,6 +573,9 @@ fn log(entry: &LogEntry) -> Option<String> {
                 }
                 if let Some(on) = get("forward_target").and_then(serde_json::Value::as_bool) {
                     out.push(if on { "可以作为转发目标" } else { "不再作为转发目标" }.to_owned());
+                }
+                if let Some(on) = get("auto_update").and_then(serde_json::Value::as_bool) {
+                    out.push(format!("自动更新{}", if on { "开" } else { "关" }));
                 }
                 lang.list(out)
             });

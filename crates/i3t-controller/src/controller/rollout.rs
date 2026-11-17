@@ -6,16 +6,19 @@
 //!   不满足的节点从不下发，管理员强制也不行。
 //! - **等节点先上报**：节点连上来之后，要等它的第一次上报到了才给它下发。上报里有它的更新状态，
 //!   它可能正带着"这个版本在我这里失败过"回来；不等的话会先把同一个版本又发给它一遍。
-//! - **自动更新**（时机是"空闲时"）：开关开着，这个版本在节点所在的网络里没有被暂停，这个节点没有在这个版本上失败过。
-//!   节点自己等到没有流才换程序。
-//! - **强制更新**（"立刻"或者"排空后"）：管理员点的，不看开关、暂停和以前的失败。
+//! - **自动更新**（时机是"空闲时"）：全局的开关和这个节点自己的开关都开着，这个版本在节点所在的网络里没有被暂停，
+//!   这个节点没有在这个版本上失败过。节点自己等到没有流才换程序。
+//! - **强制更新**（"立刻"或者"排空后"）：管理员点的，不看两个开关、暂停和以前的失败。
 //! - **包**：要更新的节点所用平台的包取回来之前不下发，先去取。
 //! - **relay 一个一个来**：同一个网络里一次只让一个 relay 更新，它更新完、重新上线并且站稳之后才轮到下一个，
 //!   这样节点换路时总有别的 relay 可用。轮到的 relay 离线期间一直等它，不跳过：它要是更新之后再也没有回来，
 //!   多半是新版本有问题，这时候接着更新别的 relay 只会把 relay 全部搞掉。管理员单独点的"立即更新"不排这个队。
+//!   自己的自动更新开关关着的 relay 不在队里：它拿不到自动的指令，也就不占轮次；轮到它的时候关掉它的开关，
+//!   它的指令被撤回，这一轮随即让给下一个，别的 relay 不用等它。
 //! - **网络里唯一的 relay** 没有特别的处理：节点自己知道它是不是唯一的 relay、有没有在替人转发，
 //!   "空闲时"的时机下它把正在转发也算作不空闲。
-//! - **撤回**：自动更新不该再做的时候（开关关了、版本被暂停了），给还没做完的节点发撤回，节点没有换上去的话就此停下。
+//! - **撤回**：自动更新不该再做的时候（全局的或者节点自己的开关关了、版本被暂停了），给还没做完的节点发撤回，
+//!   节点没有换上去的话就此停下。
 //!
 //! 离线的节点什么都不用记：它重新连上来的时候和别的节点一样过一遍这些规矩。
 
@@ -96,7 +99,8 @@ impl Inner {
         let forced = self.updates.forced.get(&node.id);
         let failed_this_version =
             node.update_failure.as_ref().is_some_and(|failure| failure.version == version && failure.kind == FailureKind::VersionRejected);
-        let automatic = self.updates.auto_update() && !self.updates.is_paused_in(&version, node.network) && !failed_this_version;
+        let automatic =
+            self.updates.auto_update() && node.auto_update && !self.updates.is_paused_in(&version, node.network) && !failed_this_version;
         let wanted = forced.map(|forced| forced.timing).or(automatic.then_some(UpdateTiming::Idle)).filter(|_| can_be_ordered);
 
         let waiting = wanted.and_then(|timing| {
@@ -234,7 +238,8 @@ impl Inner {
             return false;
         }
         match &live.order {
-            Some(order) => order.failed,
+            // 不该再让它更新了（开关关了、版本被暂停了）：这次 `roll_out` 接着就撤回它的指令，这一轮不用等到下一次才让出来。
+            Some(order) => order.failed || self.plan(node).wanted.is_none(),
             // 在线、还是旧版本、这次连接上还没有发过指令：还该让它更新的话马上会重发，这一轮接着是它的。
             None => self.plan(node).wanted.is_none(),
         }

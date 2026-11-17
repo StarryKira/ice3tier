@@ -73,6 +73,7 @@ pub struct Help {
     pub node_reach: &'static str,
     pub node_profile: &'static str,
     pub node_forward_target: &'static str,
+    pub node_auto_update: &'static str,
     pub node_pin: &'static str,
     pub node_unpin: &'static str,
     pub node_delete: &'static str,
@@ -408,6 +409,9 @@ pub struct Ui {
     pub auto_update: &'static str,
     pub source: &'static str,
     pub latest: &'static str,
+    /// 发布写了安全下限：标签，和"比哪个版本旧的有已知的安全问题"。
+    pub security: &'static str,
+    pub security_floor: fn(&str) -> String,
     pub not_found_yet: &'static str,
     pub checked: &'static str,
     pub check_failed: &'static str,
@@ -418,7 +422,7 @@ pub struct Ui {
     pub deleted_node: &'static str,
     pub paused: fn(&str, &str, &str, &str) -> String,
     pub resume_hint: fn(&str) -> String,
-    pub node_updates_header: [&'static str; 7],
+    pub node_updates_header: [&'static str; 8],
     pub too_old: &'static str,
     pub updating_to: fn(&str) -> String,
     pub nothing_to_update: &'static str,
@@ -431,6 +435,9 @@ pub struct Ui {
     pub ordered_to: fn(&str, &str) -> String,
     pub available: fn(&str) -> String,
     pub up_to_date: &'static str,
+    /// 节点的版本比安全下限旧：跟在更新情况后面的括注；没有可以更新到的版本时单说一句。
+    pub security_update: &'static str,
+    pub security_problem: &'static str,
 
     pub access_header: [&'static str; 4],
     pub can_reach: &'static str,
@@ -642,7 +649,7 @@ mod tests {
             ("node.update", json!({ "node": 2, "node_name": "laptop", "changes": {
                 "name": { "from": "laptop", "to": "lap" }, "virtual_ip": { "from": "10.66.0.2", "to": "10.66.0.9" },
                 "groups": [{ "group": 4, "group_name": "servers" }],
-                "dial_out_only": true, "routing": "lowest_cost", "reach": null, "pinned_relays": [1]
+                "dial_out_only": true, "routing": "lowest_cost", "reach": null, "pinned_relays": [1], "auto_update": false
             } })),
             ("node.delete", json!({ "node": 2, "node_name": "laptop", "virtual_ip": "10.66.0.2" })),
             ("node.succeed", json!({ "node": 2, "node_name": "laptop", "predecessor": 9, "predecessor_name": "old" })),
@@ -710,6 +717,9 @@ mod tests {
         assert!(members.contains("boxes") && members.contains("laptop") && members.contains("#7"), "{members}");
         let rule = (zh::TEXTS.log)(find("rule.create")).unwrap();
         assert!(rule.contains("All") && rule.contains("servers"), "规则写分组的名字：{rule}");
+        let changed = (zh::TEXTS.log)(find("node.update")).unwrap();
+        assert!(changed.contains("自动更新关"), "{changed}");
+        assert!((en::TEXTS.log)(find("node.update")).unwrap().contains("automatic updates off"));
     }
 
     /// 参数里的每一个数都换成 1。

@@ -44,6 +44,7 @@ manifest.json.sig                清单的签名
 | `min_controller` | 这个版本的节点需要的 controller 最低版本。controller 比它旧时不下发这个版本，界面提示先更新 controller |
 | `published` | 发布时间，Unix 秒 |
 | `artifacts` | 每个平台的节点程序：文件名、字节数、SHA-256 |
+| `security_floor` | 可选：最低的没有已知安全问题的版本，比它旧的节点被标成有安全更新。没有就没有这个字段。见第 5 节的"安全下限" |
 
 `manifest.json.sig` 只有一行：签名的 base64url（64 字节，不带填充）。
 
@@ -133,6 +134,7 @@ kWB8NBoJtLGX7mZwXgMSZ1C8RkUDpkdOphusy_JhEk0
 
 1. 改版本号。节点报的、`i3t --version` 显示的，是 `bins/i3t/Cargo.toml` 里的版本号；它必须和标签一致，否则流水线第一步就会停下。三个程序的版本号保持一样。
 2. 如果这个版本的节点不能和旧的 controller 一起工作，把 `.github/workflows/release.yml` 顶上的 `MIN_CONTROLLER` 改成需要的最低版本。
+   如果这个版本修了安全问题，或者上一版写着安全下限，签名时要带上安全下限（见下面的"安全下限"）。
 3. 提交，打标签 `v<版本号>`（例如 `v0.3.0`，预发布版 `v0.3.0-rc.1`），推上去。
 
 流水线（`.github/workflows/release.yml`）接下来：
@@ -155,6 +157,22 @@ gh release edit v0.3.0 --repo fuqiuluo/ice3tier --draft=false --latest   # 预�
 ```
 
 `i3t-release` 用和这次发布同一份代码编译（`cargo build --release -p i3t-release`），这样第三行验的就是节点认的公钥。`manifest` 不会覆盖已经存在的清单；`--min-controller` 不写的话是 `0.0.0`，也就是不作要求。
+
+**安全下限。** 一个版本修了安全问题时，在它的清单里写上安全下限：最低的没有已知安全问题的版本，通常就是这一版。
+
+```sh
+i3t-release manifest --version 0.3.0 --dir dist --key release.key --security-floor 0.3.0
+```
+
+- controller 把版本比下限旧的节点标成有安全更新（管理 API 里节点的 `update.security`，`i3tctl` 写明这个版本有已知的安全问题）。
+  只是告诉人：自动更新照常按开关走，不会因此强制，什么时候更新由人决定。
+- 什么时候写：修的问题让别人能做到不该做到的事（越过访问规则、看到或者改动别人的流量、在节点上执行东西、远程把节点弄垮）。普通的 bug 不写，
+  免得"安全更新"成了噪音。
+- 写了就要一版一版带下去：之后的每一版都写上同一个下限（又修了新的问题就换成新的那一版），直到比它旧的版本早就没有人在用。controller
+  只看它知道的最新那一版的清单，哪一版没写，比下限旧的节点就不再被标出来，跳过了几版的节点也就不知道自己有安全问题。
+- 下限不能比这一版新，`i3t-release` 会拒绝。不写就没有，清单和没有这个字段之前一个字节不差。`i3t-release verify` 会把写着的下限打印出来。
+- 私钥在 CI 里时，下限写在 `.github/workflows/release.yml` 开头的 `SECURITY_FLOOR` 里（平时留空），流水线签名时带上它。
+- 旧的节点和 controller 照样认写了下限的清单（签名盖的是原文的字节，解析时不认识的字段忽略），只是不显示这个提示。
 
 **预发布版。** 版本号带预发布标识就是预发布版，清单上看得出来（`i3t-release verify` 会写明）。它不在 latest 下面，controller 查最新版时取不到它；正在运行正式版的节点即使收到它的清单也不装。要试用预发布版，手动在节点上换上它，之后这个节点可以一路更新到后面的预发布版和正式版。
 

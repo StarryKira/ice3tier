@@ -16,6 +16,9 @@ env:
   CARGO_TERM_COLOR: always
   # 这个版本的节点需要的 controller 最低版本，写进清单。节点从哪个版本起不兼容旧的 controller，就在发那个版本之前改这里。
   MIN_CONTROLLER: "0.1.0"
+  # 安全下限：比它旧的版本有已知的安全问题，写进清单，界面据此把升级标成安全更新。没有就留空。
+  # 定了之后每次发布都带着，直到更旧的版本早就没人用了（docs/releasing.md）。
+  SECURITY_FLOOR: ""
   # 额外信任的一把发布公钥，编译进节点（仓库变量，不是密钥）。项目自己不设；改了代码另行发布的人设成自己的公钥。
   I3T_RELEASE_EXTRA_KEY: ${{ vars.I3T_RELEASE_EXTRA_KEY }}
 
@@ -165,7 +168,8 @@ jobs:
           key="$RUNNER_TEMP/release.key"
           trap 'rm -f "$key"' EXIT
           printf '%s\n' "$SIGNING_KEY" > "$key"
-          tool/i3t-release manifest --version "$VERSION" --dir dist --key "$key" --min-controller "$MIN_CONTROLLER"
+          tool/i3t-release manifest --version "$VERSION" --dir dist --key "$key" --min-controller "$MIN_CONTROLLER" \
+            ${SECURITY_FLOOR:+--security-floor "$SECURITY_FLOOR"}
           echo "signed=true" >> "$GITHUB_OUTPUT"
       # 不带 --key：用的是编译进去的公钥。签名用错了钥匙的话在这里就失败，不会发出一个节点不认的版本。
       - name: Verify with the keys the nodes trust

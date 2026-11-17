@@ -156,6 +156,11 @@ impl Publisher {
 
     /// 发布 `version`：放好各个平台的程序，签清单，再把清单放到"最新"的位置上。
     pub fn publish(&self, version: &str, programs: &[(&str, &[u8])]) {
+        self.publish_with_floor(version, None, programs);
+    }
+
+    /// 同 [`Publisher::publish`]，清单里写上安全下限 `floor`（有的话）。
+    pub fn publish_with_floor(&self, version: &str, floor: Option<&str>, programs: &[(&str, &[u8])]) {
         let version: Version = version.parse().unwrap();
         let mut artifacts = std::collections::BTreeMap::new();
         for (platform, content) in programs {
@@ -167,7 +172,13 @@ impl Publisher {
             let artifact = Artifact { file, size: u64::try_from(content.len()).unwrap(), sha256: Sha256::from_bytes(hash) };
             artifacts.insert((*platform).to_owned(), artifact);
         }
-        let manifest = Manifest { version, min_controller: "0.0.0".parse().unwrap(), published: 1_763_200_000, artifacts };
+        let manifest = Manifest {
+            version,
+            min_controller: "0.0.0".parse().unwrap(),
+            published: 1_763_200_000,
+            artifacts,
+            security_floor: floor.map(|floor| floor.parse().unwrap()),
+        };
         let signed = sign_manifest(&self.key, serde_json::to_string_pretty(&manifest).unwrap());
         let latest = self.root.path().join(LATEST_DIR);
         std::fs::create_dir_all(&latest).unwrap();

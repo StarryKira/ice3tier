@@ -6,7 +6,7 @@
 //! i3t-linux-x86_64            各个平台的节点程序，名字是 i3t-<平台>，Windows 上加 .exe
 //! i3t-windows-x86_64.exe
 //! …
-//! manifest.json               清单：版本号，以及上面每个文件的大小和 SHA-256
+//! manifest.json               清单：版本号，上面每个文件的大小和 SHA-256，修了安全问题时还有安全下限
 //! manifest.json.sig           清单的签名
 //! ```
 //!
@@ -56,6 +56,8 @@ enum Command {
         key: PathBuf,
         #[arg(long, default_value = "0.0.0")]
         min_controller: Version,
+        #[arg(long)]
+        security_floor: Option<Version>,
     },
     Verify {
         #[arg(long)]
@@ -78,6 +80,7 @@ fn command(lang: Lang) -> clap::Command {
                 .mut_arg("dir", |arg| arg.help(h.manifest_dir).value_name(v.dir))
                 .mut_arg("key", |arg| arg.help(h.manifest_key).value_name(v.file))
                 .mut_arg("min_controller", |arg| arg.help(h.min_controller).value_name(v.version))
+                .mut_arg("security_floor", |arg| arg.help(h.security_floor).value_name(v.version))
         })
         .mut_subcommand("verify", |sub| {
             sub.about(h.verify)
@@ -91,7 +94,9 @@ fn main() -> ExitCode {
     let cli: Cli = i3t_lang::cli::parse(command(lang), lang);
     let result = match cli.command {
         Command::Keygen { out } => keygen(&out),
-        Command::Manifest { version, dir, key, min_controller } => manifest(version, min_controller, &dir, &key),
+        Command::Manifest { version, dir, key, min_controller, security_floor } => {
+            manifest(version, min_controller, security_floor, &dir, &key)
+        }
         Command::Verify { dir, key } => verify(&dir, key),
     };
     match result {
@@ -128,8 +133,12 @@ fn create_private(path: &Path) -> io::Result<File> {
     OpenOptions::new().write(true).create_new(true).open(path)
 }
 
-fn manifest(version: Version, min_controller: Version, dir: &Path, key_file: &Path) -> anyhow::Result<()> {
+/// `security_floor` 是这次发布写的安全下限；它不能比这次发布的版本新，否则这一版自己也算有安全问题。
+fn manifest(version: Version, min_controller: Version, security_floor: Option<Version>, dir: &Path, key_file: &Path) -> anyhow::Result<()> {
     let t = &texts().ui;
+    if let Some(floor) = &security_floor {
+        ensure!(*floor <= version, (t.floor_above_version)(&floor.to_string(), &version.to_string()));
+    }
     let shown = key_file.display().to_string();
     let pem = fs::read_to_string(key_file).with_context(|| (t.read_key)(&shown))?;
     let key = NodeKey::from_pem(&pem).with_context(|| (t.parse_key)(&shown))?;
@@ -141,7 +150,7 @@ fn manifest(version: Version, min_controller: Version, dir: &Path, key_file: &Pa
     let artifacts = node_programs(dir)?;
     ensure!(!artifacts.is_empty(), (t.no_programs)(&dir.display().to_string(), NODE_PROGRAM));
     let published = SystemTime::now().duration_since(UNIX_EPOCH).context(t.clock_before_1970)?.as_secs();
-    let manifest = Manifest { version, min_controller, published, artifacts };
+    let manifest = Manifest { version, min_controller, published, artifacts, security_floor };
     let text = serde_json::to_string_pretty(&manifest).context(t.encode_manifest)? + "\n";
     let signed = sign_manifest(&key, text);
 
@@ -149,6 +158,7 @@ fn manifest(version: Version, min_controller: Version, dir: &Path, key_file: &Pa
     write_new(&signature_path, format!("{}\n", signed.signature).as_bytes())?;
 
     println!("{}", (t.signed)(&manifest.version.to_string(), release_kind(&manifest), &key.public().to_string()));
+    print_security_floor(&manifest);
     for (platform, artifact) in &manifest.artifacts {
         println!("{}", (t.artifact)(platform, &artifact.file, artifact.size, &artifact.sha256.to_string()));
     }
@@ -202,6 +212,12 @@ fn release_kind(manifest: &Manifest) -> &'static str {
     if manifest.is_prerelease() { t.prerelease } else { t.release }
 }
 
+fn print_security_floor(manifest: &Manifest) {
+    if let Some(floor) = &manifest.security_floor {
+        println!("{}", (texts().ui.security_floor)(&floor.to_string()));
+    }
+}
+
 fn verify(dir: &Path, key: Option<PublicKey>) -> anyhow::Result<()> {
     let (t, lang) = (&texts().ui, i3t_lang::current());
     let read = |name: &str| fs::read_to_string(dir.join(name)).with_context(|| (t.read)(&dir.join(name).display().to_string()));
@@ -210,6 +226,7 @@ fn verify(dir: &Path, key: Option<PublicKey>) -> anyhow::Result<()> {
     let keys = key.map_or_else(TrustedKeys::compiled_in, TrustedKeys::from);
     let manifest = keys.verify(&signed).with_context(|| (t.check_signature)(MANIFEST_FILE, &lang.list(keys.iter())))?;
     println!("{}", (t.verified)(&manifest.version.to_string(), release_kind(&manifest), &manifest.min_controller.to_string()));
+    print_security_floor(&manifest);
 
     let mut mismatched = 0;
     for (platform, artifact) in &manifest.artifacts {
@@ -302,12 +319,30 @@ mod tests {
             (ui.mismatched)(1),
             (ui.all_match)(1),
             (ui.size_differs)(1, 1),
+            (ui.security_floor)("0.3.0"),
+            (ui.floor_above_version)("0.4.0", "0.3.0"),
             ui.untrusted_key.to_owned(),
         ];
         for text in said {
             assert!(!has_chinese(&text), "{text}");
             assert_eq!(plural_after_one(&text), None, "{text}");
         }
+    }
+
+    #[test]
+    fn the_security_floor_is_optional_and_must_be_a_version() {
+        let args = |extra: &[&str]| {
+            let base = ["i3t-release", "manifest", "--version", "0.3.0", "--dir", "dist", "--key", "release.key"];
+            base.iter().chain(extra).map(|arg| OsString::from(*arg)).collect::<Vec<_>>()
+        };
+        let floor = |extra: &[&str]| {
+            let cli: Cli = try_parse_from(command(Lang::English), Lang::English, args(extra)).unwrap();
+            let Command::Manifest { security_floor, .. } = cli.command else { panic!("应该解析成 manifest") };
+            security_floor.map(|floor| floor.to_string())
+        };
+        assert_eq!(floor(&[]), None, "不写就没有下限");
+        assert_eq!(floor(&["--security-floor", "0.2.5"]).as_deref(), Some("0.2.5"));
+        assert!(try_parse_from::<Cli>(command(Lang::English), Lang::English, args(&["--security-floor", "x"])).is_err());
     }
 
     #[test]

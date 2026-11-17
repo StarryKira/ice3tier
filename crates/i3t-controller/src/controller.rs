@@ -509,6 +509,7 @@ impl Inner {
             sent_version: state.sent,
             acked_version: state.acked,
             hostname: record.hostname.clone(),
+            auto_update: record.auto_update,
             update: self.node_update(record),
             attached: record.attached.clone(),
             country: egress.and_then(crate::geo::country),

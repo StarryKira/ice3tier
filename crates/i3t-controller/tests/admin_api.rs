@@ -853,6 +853,50 @@ async fn update_settings_checks_and_forced_updates_work_over_the_api() {
 }
 
 #[tokio::test]
+async fn a_node_can_be_kept_off_automatic_updates_and_a_security_floor_is_shown_over_the_api() {
+    let publisher = Publisher::new();
+    let cache = tempfile::tempdir().unwrap();
+    let mut api = Api::around(publisher.controller(Timing::default(), cache.path()), &WebUi::NotIncluded);
+    let network = api.network("home").await;
+    let old = api.join_as(network.id, &modern_hello("0.1.0", Declared::default())).await;
+    let current = api.join_as(network.id, &modern_hello("0.2.0", Declared::default())).await;
+    let node_path = |node: NodeId| format!("/networks/{}/nodes/{node}", network.id);
+
+    let (_, raw) = api.call(Method::GET, &node_path(old.id), None).await;
+    assert_eq!((raw["auto_update"].clone(), raw["update"]["security"].clone()), (json!(true), json!(false)), "新节点开着，还没有发布");
+
+    publisher.publish_with_floor("0.2.0", Some("0.2.0"), &[("linux-x86_64", b"the fixed program")]);
+    let _: model::UpdateOverview = api.ok(Method::POST, "/update/check", Some(json!({}))).await;
+    let (_, overview) = api.call(Method::GET, "/update", None).await;
+    assert_eq!(overview["release"]["security_floor"], json!("0.2.0"));
+    let (_, nodes) = api.call(Method::GET, &format!("/networks/{}/nodes", network.id), None).await;
+    let security: Vec<_> = nodes.as_array().unwrap().iter().map(|node| (node["id"].clone(), node["update"]["security"].clone())).collect();
+    assert_eq!(security, [(json!(old.id.get()), json!(true)), (json!(current.id.get()), json!(false))]);
+    let (_, update) = api.call(Method::GET, &format!("{}/update", node_path(old.id)), None).await;
+    assert_eq!(update["security"], json!(true));
+
+    let changed: model::Node = api.ok(Method::PATCH, &node_path(old.id), Some(json!({ "auto_update": false }))).await;
+    assert!(!changed.auto_update && changed.update.security, "开关只管自动更新，安全更新照旧标着");
+    let (_, raw) = api.call(Method::GET, &node_path(old.id), None).await;
+    assert_eq!(raw["auto_update"], json!(false));
+    let log: Vec<model::LogEntry> = api.ok(Method::GET, "/log", None).await;
+    let entry = log.iter().find(|entry| entry.action == "node.update").unwrap();
+    assert_eq!(entry.params["changes"], json!({ "auto_update": false }));
+    assert!(entry.detail.contains("自动更新 关"), "{}", entry.detail);
+    let untouched: model::Node = api.ok(Method::PATCH, &node_path(old.id), Some(json!({ "name": "nas" }))).await;
+    assert!(!untouched.auto_update, "没写的开关不动");
+
+    // 下一个发布不再写下限：谁都不标。
+    publisher.publish("0.3.0", &[("linux-x86_64", b"a later program")]);
+    let checked: model::UpdateOverview = api.ok(Method::POST, "/update/check", Some(json!({}))).await;
+    assert_eq!(checked.release.unwrap().security_floor, None);
+    let (_, overview) = api.call(Method::GET, "/update", None).await;
+    assert_eq!(overview["release"]["security_floor"], json!(null), "字段总是在，没有下限时是 null");
+    let update: model::NodeUpdate = api.ok(Method::GET, &format!("{}/update", node_path(old.id)), None).await;
+    assert!(!update.security);
+}
+
+#[tokio::test]
 async fn the_route_matrix_and_the_path_between_two_nodes_are_served() {
     let mut api = Api::new();
     let network = api.network("home").await;

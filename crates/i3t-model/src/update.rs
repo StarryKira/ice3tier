@@ -279,6 +279,12 @@ pub struct Manifest {
     /// 各个平台上的节点程序，键是平台名（[`Platform`] 的写法）。
     /// 键留成字符串：以后出现写法不同的平台名时，旧程序只是用不上那一项，不至于整份清单都读不了。
     pub artifacts: BTreeMap<String, Artifact>,
+    /// 最低的没有已知安全问题的版本：比它旧的版本有已知的安全问题。没有写是 `None`，清单里也就没有这个字段。
+    ///
+    /// 只是告诉人的，怎么下发更新不因它而变。发布的人从修了问题的那一版起每一版都带上它，跳过了几版的节点照样知道。
+    /// 比这个字段旧的程序照样认这份清单：签名盖的是原文的字节，解析时不认识的字段忽略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_floor: Option<Version>,
 }
 
 impl Manifest {
@@ -286,6 +292,12 @@ impl Manifest {
     #[must_use]
     pub fn artifact(&self, platform: &Platform) -> Option<&Artifact> {
         self.artifacts.get(platform.as_str())
+    }
+
+    /// 运行着 `running` 的节点有没有已知的安全问题：比 [`Manifest::security_floor`] 旧。清单没有写下限时总是 `false`。
+    #[must_use]
+    pub fn is_below_security_floor(&self, running: &Version) -> bool {
+        self.security_floor.as_ref().is_some_and(|floor| running < floor)
     }
 
     /// 预发布版的清单：版本号带预发布标识。它不会被放到 [`LATEST_DIR`] 下面，节点对它也另有规矩（见 `i3t-update`）。
@@ -647,6 +659,7 @@ mod tests {
                 ("linux-x86_64".to_owned(), artifact("i3t-linux-x86_64")),
                 ("windows-x86_64".to_owned(), artifact("i3t-windows-x86_64.exe")),
             ]),
+            security_floor: None,
         }
     }
 
@@ -667,6 +680,22 @@ mod tests {
             })
         );
         assert_eq!(serde_json::from_value::<Manifest>(value).unwrap(), manifest());
+    }
+
+    #[test]
+    fn a_security_floor_is_written_only_when_there_is_one_and_marks_older_versions() {
+        let without = serde_json::to_value(manifest()).unwrap();
+        assert!(without.get("security_floor").is_none(), "没有下限的清单和这个字段出现之前一个字节不差");
+        let manifest = Manifest { security_floor: Some(version("0.2.5")), ..manifest() };
+        let value = serde_json::to_value(&manifest).unwrap();
+        assert_eq!(value["security_floor"], json!("0.2.5"));
+        assert_eq!(serde_json::from_value::<Manifest>(value).unwrap(), manifest);
+        for (running, below) in [("0.2.4", true), ("0.2.5-rc.1", true), ("0.2.5", false), ("0.3.0", false)] {
+            assert_eq!(manifest.is_below_security_floor(&version(running)), below, "{running}");
+        }
+        assert!(!Manifest { security_floor: None, ..manifest }.is_below_security_floor(&version("0.0.1")));
+        let malformed = json!({ "version": "0.3.0", "min_controller": "0.2.0", "published": 1, "artifacts": {}, "security_floor": "x" });
+        assert!(serde_json::from_value::<Manifest>(malformed).is_err(), "下限是签名盖着的，写错了就是清单不对");
     }
 
     #[test]

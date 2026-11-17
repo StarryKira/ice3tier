@@ -4,7 +4,23 @@
 
 对应的 Rust 类型在 `crates/i3t-model/src/admin.rs`，实现在 `crates/i3t-controller/src/admin.rs`。文档和代码不一致时以代码为准，并请修正文档。
 
-> **最新一次改动**（端口转发的目标由管理员打开；QoS；路由表上的直连状态和另一种选路模式）。这一次的清单：
+> **最新一次改动**（按节点关掉自动更新；发布可以说明它修了安全问题）。这一次的清单：
+>
+> - 新的字段：`Node.auto_update`（`true`、`false`，新节点和升级前已有的节点都是 `true`），节点自己的自动更新开关。全局的
+>   `UpdateOverview.auto_update` 和它都开着，controller 才自动让这个节点更新。用 `PATCH …/nodes/{node}` 的 `{ "auto_update": false }`
+>   改（第 5 节）；关掉时撤回已经给它、还没有换上去的自动更新，和关掉全局的开关一样。"立即更新"和"全部更新"不看它（第 14 节）。
+> - 新的字段：`NodeUpdate.security`（节点的 `update.security`，`GET …/nodes/{node}/update` 里也有）：`true` 表示它正在运行的版本比
+>   已知的最新发布写的安全下限旧，有已知的安全问题；`UpdateOverview.release.security_floor`：那个下限，字符串，发布没有写是 `null`（第 14 节）。
+>   只是告诉人的：让谁更新、强不强制都不因它而变。
+> - 操作记录 `node.update` 的 `changes` 里可以有 `auto_update`（第 3 节）。
+> - 发布清单可以多一个 `security_floor`（见 [releasing.md](releasing.md)）。签名盖的是清单的原文，旧的节点和 controller 照样验得过、
+>   照样认这份清单，只是不知道这个字段。
+> - 升级时数据库原地迁移：已有的节点 `auto_update` 都是 `true`，和以前一样只看全局的开关。
+> - 节点协议没有升版：开关和标记都只在 controller 上；转给节点的清单原文里可能多了 `security_floor`，节点不看它。
+>
+> 别的接口的路径、请求体和应答里原有的字段都没有变。
+>
+> **上一次改动**（端口转发的目标由管理员打开；QoS；路由表上的直连状态和另一种选路模式）。这一次的清单：
 >
 > - 改了规则：端口转发的目标不再由节点声明，只看管理员的开关。新的字段 `Node.forward_target`（`true`、`false`，新节点是 `false`），
 >   用 `PATCH …/nodes/{node}` 的 `{ "forward_target": true }` 打开（第 5 节）。谁控制了 controller，谁就能经转发碰到目标机器能碰到的一切。
@@ -22,7 +38,7 @@
 >
 > 别的接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **上一次改动**（出口没有带宽上限；以前用默认端口启用的出口改成不限端口）。这一次的清单：
+> **再上一次改动**（出口没有带宽上限；以前用默认端口启用的出口改成不限端口）。这一次的清单：
 >
 > - 去掉的字段：出口的设置（`Node.exit`、`PUT …/exit`、`ExitView.settings`）里的 `bandwidth_mbps`，出口不再限速（第 5.6 节）。
 >   请求体里还写着它的照收（写 0 也不报错），没有作用；应答里没有它。relay 的 `bandwidth_mbps`（第 5.5 节）是另一回事，照旧。
@@ -33,7 +49,7 @@
 >
 > 别的接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **再上一次改动**（relay 的地址由 controller 找出来，地址段重叠的提醒，时间序列）。relay 的地址不再由人填：
+> **更早的改动**（relay 的地址由 controller 找出来，地址段重叠的提醒，时间序列）。relay 的地址不再由人填：
 > controller 从三处找出来（节点上声明的、controller 看到的、节点网卡上的），谁连得上它，它就是谁的 relay（第 5.5 节）。这一次的清单：
 >
 > - 改了写法的字段：节点的 `relay`（第 5 节）从填的设置变成 `RelayView`：
@@ -435,7 +451,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `network.update` | `network`、`network_name`，以及改完之后的 `cidr`、`routing`、`max_relay_hops`、`reach`、`class` |
 | `network.delete` | `network`、`network_name` |
 | `node.enroll` | `node`、`node_name`、`virtual_ip`、`token`（用的注册令牌的编号）、`predecessor`、`predecessor_name`（继任的原节点；不是继任时是 `null`） |
-| `node.update` | `node`、`node_name`（改之前的名字）、`changes`：改了的项，没改的不在里面。`name` 和 `virtual_ip` 写成 `{ "from": …, "to": … }`，`groups`、`dial_out_only`、`routing`、`reach`、`pinned_relays`、「新增」`profile`、「新增」`forward_target` 是改之后的值（`profile` 是 `null` 表示不再指定）；`groups` 的每一项是 `{ "group": 编号, "group_name": 名字 }`，不含 `All` |
+| `node.update` | `node`、`node_name`（改之前的名字）、`changes`：改了的项，没改的不在里面。`name` 和 `virtual_ip` 写成 `{ "from": …, "to": … }`，`groups`、`dial_out_only`、`routing`、`reach`、`pinned_relays`、「新增」`profile`、「新增」`forward_target`、「新增」`auto_update` 是改之后的值（`profile` 是 `null` 表示不再指定）；`groups` 的每一项是 `{ "group": 编号, "group_name": 名字 }`，不含 `All` |
 | `node.delete` | `node`、`node_name`、`virtual_ip` |
 | `node.succeed` | `node`、`node_name`、`virtual_ip`（继任之前的），`predecessor`、`predecessor_name`、`predecessor_virtual_ip` |
 | `node.relay.enable`、`node.relay.disable`、`node.exit.enable`、`node.exit.disable`、`node.relay.withdrawn`、`node.exit.withdrawn` | `node`、`node_name` |
@@ -656,13 +672,15 @@ TCP 的流在任何取值下都是可靠的，取值只决定同一条连接上�
   "sent_version": 6,
   "acked_version": 0,
   "hostname": "edge-hk-01.example.net",
+  "auto_update": true,
   "update": {
     "self_update": { "able": true, "blocker": null },
     "available": "0.3.0",
     "status": { "state": "waiting_for_idle", "version": "0.3.0" },
     "ordered": { "version": "0.3.0", "timing": "idle" },
     "waiting": null,
-    "failure": null
+    "failure": null,
+    "security": true
   },
   "attached": [],
   "country": "JP",
@@ -697,7 +715,8 @@ TCP 的流在任何取值下都是可靠的，取值只决定同一条连接上�
 | `sent_version` | 最近一次发给它的版本 |
 | `acked_version` | 它确认已经应用的版本。小于 `netmap_version` 说明它还在用旧的配置（例如不在线） |
 | `hostname` | 「新增」节点上报的主机名，原样；旧版本的节点不报，是 `""`。主机名后来变了，`name` 不跟着变 |
-| `update` | 「新增」这个节点的程序更新：能不能自己更新、有没有新版本、进行到哪一步。结构是 `NodeUpdate`，见第 14 节 |
+| `auto_update` | 「新增」管理员的开关：这个节点要不要自动更新，`true` 或 `false`。新节点是 `true`，升级之前就有的节点也是。全局的开关（第 14 节 `UpdateOverview.auto_update`）和它都开着，controller 才自动让它更新；"立即更新"和"全部更新"不看它。用 `PATCH …/nodes/{node}` 改。比这个文档旧的 controller 没有这个字段，按 `true` 读 |
+| `update` | 「新增」这个节点的程序更新：能不能自己更新、有没有新版本、进行到哪一步、「新增」它的版本有没有已知的安全问题（`security`）。结构是 `NodeUpdate`，见第 14 节 |
 | `attached` | 「新增」节点挂靠的 relay（节点编号）和到它们的往返延迟（毫秒），取自它最近的上报；离线时是它离线前报的。以前只在节点详情里有，现在列表里也有：数"有几个节点挂靠在这个 relay 上"只要一次 `GET …/nodes`。「新增」`shared` 为 `true` 的那几个不是节点按延迟自己挑的，是 controller 要它另外挂的（见 5.5 的"两边都连得上的 relay"）；为 `false` 时省略 |
 | `country` | 「新增」出口地址（`egress_ip`）所在的国家或地区，ISO 3166-1 的两个大写字母（`"JP"`）。controller 查程序自带的离线地址库（DB-IP 的 IP to Country Lite，<https://db-ip.com>，CC BY 4.0），不联网。没有出口地址、库里没有时是 `null`；比这个文档旧的 controller 没有这个字段。「新增」以前取的是 controller 看到的来源地址，节点在 controller 的局域网里时因此没有国家 |
 | `egress_ip` | 「新增」出口地址：这个节点的流量出去时，互联网看到的公网地址，只读。controller 看到的来源地址（`observed_endpoint` 的 IP）是公网地址时就是它；不是（节点在 controller 所在的局域网里、或者和 controller 在同一台机器上而 controller 没有配对外的地址）时，取 relay 看到的公网地址（节点上报的，见 5.5），几个 relay 看到的不一样时取看到它的 relay 最多的那个，一样多时取最近一次看到的。只从内网地址被看到过时是 `null`，`country` 也是 `null`。不查任何外部的服务。出口配了上游代理（`upstream_socks5`）时，经它出去的流量其实是从代理那里出去的，这里不知道。界面上显示国旗时，旁边的 IP 用它，不用 `observed_endpoint` |
@@ -745,13 +764,15 @@ TCP 的流在任何取值下都是可靠的，取值只决定同一条连接上�
   "sent_version": 4,
   "acked_version": 0,
   "hostname": "laptop",
+  "auto_update": false,
   "update": {
     "self_update": { "able": true, "blocker": null },
     "available": null,
     "status": { "state": "idle" },
     "ordered": null,
     "waiting": null,
-    "failure": null
+    "failure": null,
+    "security": false
   },
   "endpoints": ["192.168.1.5:20330"],
   "observed_endpoint": "198.51.100.7:20330",
@@ -853,6 +874,7 @@ TCP 的流在任何取值下都是可靠的，取值只决定同一条连接上�
 | `pinned_relays` | 整个替换固定的挂靠 relay，最多 8 个，每个都必须是这个网络里启用了的 relay；`[]` 表示不固定 |
 | `profile` | 「新增」性能档位：`"low_footprint"`、`"balanced"`、`"high_throughput"`；写 `null` 表示不再指定，节点改用它本机配置文件里的。缓冲、窗口和空闲回收的时间在节点收到新配置时就生效，工作线程数要节点重启才变（节点详情的 `performance.restart_pending`）。不认识的值是 `400 invalid_request`，`field` 是 `profile` |
 | `forward_target` | 「新增」`true` 或 `false`：可以作为端口转发的目标（`Node.forward_target`）。关掉时指向它的转发不被删、不被停用，只是不生效 |
+| `auto_update` | 「新增」`true` 或 `false`：自动更新这个节点（`Node.auto_update`）。关掉时，已经下发给它、还没有换上去的自动更新被叫停，和关掉全局的开关一样；之后它只标出"有新版本"，等管理员点"立即更新"。打开时，全局的开关也开着的话它马上按自动更新的规矩轮到 |
 
 全部可省略。`routing`、`reach` 和「新增」`profile` 是仅有的几个"写 `null` 有含义"的字段。
 
@@ -1858,9 +1880,10 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
 让谁更新的规矩（界面上需要解释"为什么这个节点还没更新"时用）：
 
 - 只有**能更新的节点**才会收到指令：在线、版本比已知的发布旧、发布里有它的平台的包、它自己报了能自己更新（`update.self_update.able`）。不满足的节点强制也不行。
-- **自动更新**（`auto_update` 开着）给这些节点下发 `idle`，除非这个版本被暂停了，或者这个节点在这个版本上失败过。
-- **强制更新**不看开关、暂停和以前的失败。
-- **relay 一个一个来**：同一个网络里一次只让一个 relay 更新，它更新完、重新连上来再过 30 秒，才轮到下一个。轮到的那个 relay 离线期间别的 relay 一直等。单独对一个 relay 点"立即更新"不排这个队；"全部更新"里的 relay 照样排队。网络里唯一的 relay 会等到没有人经它转发才更新（这一条是节点自己判断的，时机是 `idle` 时生效）。
+- **自动更新**（全局的 `auto_update` 和「新增」节点自己的 `Node.auto_update` 都开着）给这些节点下发 `idle`，除非这个版本被暂停了，或者这个节点在这个版本上失败过。
+- **强制更新**不看两个开关、暂停和以前的失败。
+- **relay 一个一个来**：同一个网络里一次只让一个 relay 更新，它更新完、重新连上来再过 30 秒，才轮到下一个。轮到的那个 relay 离线期间别的 relay 一直等。单独对一个 relay 点"立即更新"不排这个队；"全部更新"里的 relay 照样排队。网络里唯一的 relay 会等到没有人经它转发才更新（这一条是节点自己判断的，时机是 `idle` 时生效）。「新增」自己的自动更新开关关着的 relay 不在这个队里：它拿不到自动更新的指令，也就不占轮次，别的 relay 不等它；轮到它的时候关掉它的开关，它的指令被撤回，这一轮马上让给下一个。
+- 「新增」**安全更新**：发布可以写一个安全下限（`release.security_floor`，最低的没有已知安全问题的版本）。版本比它旧的节点 `update.security` 是 `true`，界面可以把它的"立即更新"标红。只是告诉人的：上面这些规矩一条都不因它而变，自动更新照常按开关走，不会因此强制。
 - **暂停**：节点报告"这个版本在我这台机器上不能用"（自检不通过，或者装上之后连不上 controller、已经换回旧程序）时，controller 记下这次失败，暂停这个版本对其余节点的自动更新，还没换上去的节点被叫停。管理员看过之后用 `POST /update/resume` 继续；失败过的那个节点仍然不会被自动更新到这个版本，要对它点"立即更新"才会再试。
 - 「新增」**暂停只认信得过的失败，只管失败的节点所在的网络**，免得一个出了问题的节点（甚至另一个网络里的节点）把所有网络的更新卡住：
   - 只有 controller 确实让这个节点装过这个版本（自动的或者强制的指令），它的失败才会让这个版本暂停。没让它装过的节点报的失败只记在它自己头上（它不会被自动更新到这个版本），另外记一条 `update.failure` 操作记录。controller 让节点装过哪个版本只记在内存里：controller 在下发和节点报告失败之间重启的话，这次失败不暂停，同一个网络里下一个失败的节点会让它暂停。
@@ -1891,7 +1914,8 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
     "packages": [
       { "platform": "linux-aarch64", "file": "i3t-linux-aarch64", "size": 17100288, "state": "not_needed", "error": null, "cause": null },
       { "platform": "linux-x86_64", "file": "i3t-linux-x86_64", "size": 18234880, "state": "cached", "error": null, "cause": null }
-    ]
+    ],
+    "security_floor": "0.2.4"
   },
   "checked_at": 1794798564,
   "check_error": null,
@@ -1912,7 +1936,7 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
 
 | 字段 | 含义 |
 |---|---|
-| `auto_update` | 自动更新的开关，默认开 |
+| `auto_update` | 自动更新的开关，默认开。「新增」它管全部节点；每个节点还有自己的开关（`Node.auto_update`），两个都开着才自动更新 |
 | `source` | 发布源：一个 `http://` 或 `https://` 的地址前缀，或者 controller 所在机器上一个目录的绝对路径 |
 | `source_is_default` | `source` 是不是项目默认的发布源 |
 | `controller_version` | controller 自己的版本 |
@@ -1922,6 +1946,7 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
 | `release.controller_too_old` | `true` 时 controller 比 `min_controller` 旧：这个版本不会下发给任何节点，界面应当提示先手动更新 controller |
 | `release.newer_than_controller` | `true` 时这个版本比 controller 自己新：提醒管理员手动更新 controller（和 `GET /status` 的 `newer_version` 是一回事） |
 | `release.packages` | 发布里各个平台的节点程序，按平台名排。`state` 见下表；`error` 是最近一次取这个包失败的原因，没有失败是 `null`；「新增」`cause` 是它的代码（`ReleaseCause`，见下表） |
+| `release.security_floor` | 「新增」发布写的安全下限：最低的没有已知安全问题的版本，比它旧的节点的 `update.security` 是 `true`。界面可以写成"低于 0.2.4 的版本有已知的安全问题"。发布没有写是 `null`；比这个文档旧的 controller 没有这个字段，按 `null` 读 |
 | `checked_at` | 最近一次查发布源的时间；还没有查过是 `null` |
 | `check_error` | 最近一次查发布源失败的原因（连不上、清单的签名不对、最新版是预发布版）；成功是 `null`。失败时 `release` 保持上一次查到的 |
 | `check_cause` | 「新增」`check_error` 的代码（`ReleaseCause`，见下表）；成功是 `null` |
@@ -1962,7 +1987,7 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
 
 | 字段 | 含义 |
 |---|---|
-| `auto_update` | 自动更新的开关。关掉时，已经下发、还没有换上去的自动更新被叫停；之后节点列表里只标出"有新版本"，等管理员点 |
+| `auto_update` | 自动更新的开关。关掉时，已经下发、还没有换上去的自动更新被叫停；之后节点列表里只标出"有新版本"，等管理员点。「新增」单个节点的开关用 `PATCH …/nodes/{node}` 的 `auto_update`，这里改不到它 |
 | `source` | 发布源。写 `null` 表示改回项目默认的。发布源变了的话 controller 马上去查一次（在后台，不等它查完才应答）；已知的发布在查到新的之前保持不变 |
 
 应答：`UpdateOverview`。
@@ -1989,7 +2014,7 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
 
 ### POST /update/force
 
-"全部更新"：让全部网络里所有能更新的节点立即更新，不管自动更新开没开。
+"全部更新"：让全部网络里所有能更新的节点立即更新，不管自动更新开没开（全局的和「新增」节点自己的都不管）。
 
 ```json
 { "timing": "now" }
@@ -2044,7 +2069,8 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
   "status": { "state": "idle" },
   "ordered": null,
   "waiting": null,
-  "failure": null
+  "failure": null,
+  "security": true
 }
 ```
 
@@ -2056,6 +2082,7 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
 | `ordered` | controller 在这次连接上发给它、还在做的更新指令：`version` 和 `timing`。没有是 `null` |
 | `waiting` | controller 想让它更新、但指令还没有发的原因：`"package"`（它的平台的包还没有从发布源取回来）、`"relay_turn"`（它是 relay，在等前一个 relay 更新完重新上线）。没有在等是 `null` |
 | `failure` | 它最近一次"这个版本在这台机器上不能用"的失败：`version`、`kind`（总是 `"version_rejected"`）、`reason`（节点报的原因）、「新增」`cause`（原因的代码，`UpdateCause`，见下表；这个字段出现之前的记录、或者旧版本的节点报的是 `null`）、`at`（时间）。有这条记录时，自动更新不会再让它装同一个版本。没有是 `null`。节点后来跑上了那个版本（或者更新的），或者管理员对它点了"立即更新"，这条记录就清掉 |
+| `security` | 「新增」`true`：它正在运行的版本比 controller 知道的最新发布写的安全下限（`release.security_floor`）旧，有已知的安全问题，界面可以把"立即更新"标红。发布没有写下限、它的版本号看不懂时是 `false`。不管它在不在线、能不能自己更新、自己的自动更新开没开都给出；`available` 是 `null`（比如发布里没有它的平台的包）时只能手动更新。只是告诉人的：不改变让谁更新、强不强制。比这个文档旧的 controller 没有这个字段，按 `false` 读 |
 
 `self_update.blocker`：
 
@@ -2107,7 +2134,7 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
 
 ### POST /networks/{network}/nodes/{node}/update
 
-"立即更新"：让一个节点立即更新到已知的最新版，不管自动更新开没开、这个版本有没有被暂停、它以前有没有在这个版本上失败过。
+"立即更新"：让一个节点立即更新到已知的最新版，不管自动更新开没开（全局的和「新增」它自己的）、这个版本有没有被暂停、它以前有没有在这个版本上失败过。
 
 ```json
 { "timing": "after_drain" }

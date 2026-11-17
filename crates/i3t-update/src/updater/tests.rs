@@ -71,6 +71,7 @@ fn signed_manifest(key: &NodeKey, version: &str, platform: &Platform, package: &
         min_controller: Version::new(0, 1, 0),
         published: 1_763_200_000,
         artifacts: BTreeMap::from([(platform.to_string(), artifact)]),
+        security_floor: None,
     };
     sign_manifest(key, serde_json::to_string_pretty(&manifest).unwrap())
 }
@@ -90,6 +91,17 @@ fn a_newer_signed_manifest_with_a_package_for_this_platform_is_accepted() {
     assert_eq!(offer.version, version(NEW));
     assert_eq!(offer.artifact.size, 9);
     assert_eq!(offer.artifact.file, Platform::current().program_file("i3t"));
+}
+
+#[test]
+fn a_security_floor_in_the_manifest_changes_nothing_on_the_node() {
+    let node = Node::new();
+    let manifest = node.manifest(NEW, "新程序");
+    let mut value: serde_json::Value = serde_json::from_str(&manifest.manifest).unwrap();
+    value["security_floor"] = serde_json::json!(NEW);
+    let with_floor = sign_manifest(&node.release_key, serde_json::to_string_pretty(&value).unwrap());
+    let offer = node.process(OLD).check(&with_floor, UpdateTiming::Idle).unwrap();
+    assert_eq!((offer.version, offer.artifact), (version(NEW), node.process(OLD).check(&manifest, UpdateTiming::Idle).unwrap().artifact));
 }
 
 #[test]

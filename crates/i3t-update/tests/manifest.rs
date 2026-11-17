@@ -25,6 +25,7 @@ fn manifest(version: &str) -> Manifest {
             artifact("macos-aarch64", 4),
             artifact("macos-x86_64", 5),
         ]),
+        security_floor: None,
     }
 }
 
@@ -120,6 +121,88 @@ fn a_prerelease_manifest_is_recognisable_after_verification() {
     assert!(verified.is_prerelease());
     assert!(verified.version < "0.3.0".parse().unwrap());
     assert!(verified.version > "0.2.9".parse().unwrap());
+}
+
+/// 0.1.10 的发布工具写出来的清单：没有安全下限这个字段。格式照 `i3t-release manifest`（两格缩进的 JSON，末尾一个换行）。
+const MANIFEST_WITHOUT_FLOOR: &str = r#"{
+  "version": "0.1.11",
+  "min_controller": "0.0.0",
+  "published": 1763200000,
+  "artifacts": {
+    "linux-x86_64": {
+      "file": "i3t-linux-x86_64",
+      "size": 12345678,
+      "sha256": "0101010101010101010101010101010101010101010101010101010101010101"
+    }
+  }
+}
+"#;
+
+/// 安全下限这个字段出现之前的程序（0.1.10）眼里的清单：同样的类型，少这一个字段，不拒绝不认识的字段。
+#[derive(Debug, PartialEq, Eq, serde::Deserialize)]
+struct ManifestBeforeSecurityFloor {
+    version: Version,
+    min_controller: Version,
+    published: u64,
+    artifacts: BTreeMap<String, Artifact>,
+}
+
+/// 那时的 `TrustedKeys::verify`：对着原文的字节验签，验过了再把同一份字节解析成那时的清单。
+fn verify_like_before(key: &NodeKey, signed: &SignedManifest) -> ManifestBeforeSecurityFloor {
+    let signature = i3t_crypto::Signature::from_bytes(*signed.signature.as_bytes());
+    i3t_crypto::verify(&key.public(), MANIFEST_PURPOSE, signed.manifest.as_bytes(), &signature).expect("签名盖的是原文的字节");
+    serde_json::from_slice(signed.manifest.as_bytes()).expect("不认识的字段忽略")
+}
+
+#[test]
+fn a_manifest_with_a_security_floor_verifies_for_new_and_older_readers() {
+    let key = NodeKey::generate().unwrap();
+    let with_floor = Manifest { security_floor: Some("0.3.0".parse().unwrap()), ..manifest("0.3.0") };
+    let text = serde_json::to_string_pretty(&with_floor).unwrap() + "\n";
+    assert!(text.contains("\"security_floor\": \"0.3.0\""), "{text}");
+    let signed = sign_manifest(&key, text);
+
+    let verified = TrustedKeys::from(key.public()).verify(&signed).unwrap();
+    assert_eq!(verified, with_floor);
+    assert!(verified.is_below_security_floor(&"0.2.9".parse().unwrap()));
+
+    let before = verify_like_before(&key, &signed);
+    let plain = manifest("0.3.0");
+    assert_eq!(
+        before,
+        ManifestBeforeSecurityFloor {
+            version: plain.version,
+            min_controller: plain.min_controller,
+            published: plain.published,
+            artifacts: plain.artifacts
+        },
+        "旧的程序读到的清单只是少了这个字段"
+    );
+}
+
+#[test]
+fn a_manifest_without_a_security_floor_verifies_for_new_and_older_readers() {
+    let key = NodeKey::generate().unwrap();
+    // 旧的发布工具签的清单，新的程序照样认，下限是没有。
+    let signed = sign_manifest(&key, MANIFEST_WITHOUT_FLOOR.to_owned());
+    let verified = TrustedKeys::from(key.public()).verify(&signed).unwrap();
+    assert_eq!((verified.version.to_string(), verified.security_floor.clone()), ("0.1.11".to_owned(), None));
+    assert!(!verified.is_below_security_floor(&"0.0.1".parse().unwrap()));
+    assert_eq!(verify_like_before(&key, &signed).version, verified.version);
+
+    // 新的发布工具不写下限时，写出来的和旧的一个字节不差：旧的程序看到的就是它一直看到的。
+    let artifacts = BTreeMap::from([(
+        "linux-x86_64".to_owned(),
+        Artifact { file: "i3t-linux-x86_64".to_owned(), size: 12_345_678, sha256: Sha256::from_bytes([1; 32]) },
+    )]);
+    let written = Manifest {
+        version: "0.1.11".parse().unwrap(),
+        min_controller: Version::new(0, 0, 0),
+        published: 1_763_200_000,
+        artifacts,
+        security_floor: None,
+    };
+    assert_eq!(serde_json::to_string_pretty(&written).unwrap() + "\n", MANIFEST_WITHOUT_FLOOR);
 }
 
 #[test]

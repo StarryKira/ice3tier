@@ -47,6 +47,11 @@ fn yes_no(value: bool) -> String {
     if value { t.yes } else { t.no }.to_owned()
 }
 
+fn on_off(on: bool) -> String {
+    let t = &texts().ui;
+    if on { t.on } else { t.off }.to_owned()
+}
+
 fn online(online: bool) -> &'static str {
     let t = &texts().ui;
     if online { t.online } else { t.offline }
@@ -403,6 +408,7 @@ pub fn node_detail(detail: &NodeDetail) {
     fields.add(t.version, format!("{} / {}", node.version, node.platform));
     fields.add(t.hostname, if node.hostname.is_empty() { NONE.to_owned() } else { node.hostname.clone() });
     fields.add(t.update, update_summary(&node.update));
+    fields.add(t.auto_update, on_off(node.auto_update));
     let declared = [node.declared.relay.then_some(t.relay), node.declared.exit.then_some(t.exit)];
     fields.add(t.declared, lang.list(declared.into_iter().flatten()));
     if let Some(address) = node.declared.relay_address {
@@ -748,12 +754,17 @@ pub fn backbone(view: &BackboneView) {
 pub fn update_overview(overview: &UpdateOverview) {
     let (t, lang, codes) = context();
     let mut fields = Fields::new(0);
-    fields.add(t.auto_update, if overview.auto_update { t.on } else { t.off }.to_owned());
+    fields.add(t.auto_update, on_off(overview.auto_update));
     let source = if overview.source_is_default { lang.paren(&overview.source, t.default) } else { overview.source.clone() };
     fields.add(t.source, source);
     fields.add("controller", overview.controller_version.to_string());
     match &overview.release {
-        Some(release) => fields.add(t.latest, lang.paren(&release.version.to_string(), &lang.time(release.published))),
+        Some(release) => {
+            fields.add(t.latest, lang.paren(&release.version.to_string(), &lang.time(release.published)));
+            if let Some(floor) = &release.security_floor {
+                fields.add(t.security, (t.security_floor)(&floor.to_string()));
+            }
+        }
         None => fields.add(t.latest, t.not_found_yet.to_owned()),
     }
     fields.add(t.checked, overview.checked_at.map_or_else(|| t.never.to_owned(), |at| lang.time(at)));
@@ -807,6 +818,7 @@ pub fn node_updates(nodes: &[Node]) {
             node.version.clone(),
             optional(node.update.available.as_ref()),
             ability,
+            on_off(node.auto_update),
             update_summary(&node.update),
         ]);
     }
@@ -835,9 +847,9 @@ pub fn forced_updates(forced: &ForcedUpdates) {
     fields.print();
 }
 
-/// 一个节点的更新情况，一短句。
+/// 一个节点的更新情况，一短句。它的版本有已知的安全问题时说出来。
 fn update_summary(update: &NodeUpdate) -> String {
-    let (t, _, codes) = context();
+    let (t, lang, codes) = context();
     let progress = match &update.status {
         i3t_model::update::UpdateStatus::Idle | i3t_model::update::UpdateStatus::Unknown => None,
         status => Some((codes.update_status)(status)),
@@ -850,11 +862,14 @@ fn update_summary(update: &NodeUpdate) -> String {
     let order = update.ordered.as_ref().map(|order| (t.ordered_to)(&order.version.to_string(), timing(order.timing)));
     let waiting = update.waiting.map(|waiting| (codes.update_wait)(waiting).to_owned());
     let parts: Vec<String> = [progress, order, waiting].into_iter().flatten().collect();
-    match (&update.available, parts.is_empty()) {
+    let summary = match (&update.available, parts.is_empty()) {
         (_, false) => parts.join(t.clauses),
         (Some(version), true) => (t.available)(&version.to_string()),
+        // 没有可以让它更新到的版本（比如发布里没有它的平台），版本却有安全问题：不能说"已是最新"。
+        (None, true) if update.security => return t.security_problem.to_owned(),
         (None, true) => t.up_to_date.to_owned(),
-    }
+    };
+    if update.security { lang.paren(&summary, t.security_update) } else { summary }
 }
 
 pub fn node_access(access: &NodeAccess) {

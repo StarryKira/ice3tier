@@ -46,6 +46,7 @@ const HELP: Help = Help {
     node_reach: "Path restriction; default uses the network's",
     node_profile: "Performance profile; default uses the node's local configuration file",
     node_forward_target: "Can be a port forward target: other nodes reach its loopback and LAN through forwards",
+    node_auto_update: "Update this node automatically; needs automatic updates on for all nodes too",
     node_pin: "Pinned relay; repeatable",
     node_unpin: "Clear pinned relays",
     node_delete: "Delete a node. Its name and virtual IP stay reserved for 90 days",
@@ -140,7 +141,7 @@ const HELP: Help = Help {
     update_group: "Node updates",
     update_show: "Update settings and status",
     update_set: "Change update settings",
-    update_auto: "Automatic updates",
+    update_auto: "Automatic updates for all nodes; for one node: node set --auto-update",
     update_source: "Release source: URL, directory or default",
     update_check: "Check the release source",
     update_nodes: "Updates per node",
@@ -354,6 +355,8 @@ const UI: Ui = Ui {
     auto_update: "Automatic updates",
     source: "Release source",
     latest: "Latest version",
+    security: "Security",
+    security_floor: |floor| format!("versions below {floor} have a known security problem"),
     not_found_yet: "none found yet",
     checked: "Last checked",
     check_failed: "Check failed",
@@ -366,7 +369,7 @@ const UI: Ui = Ui {
     deleted_node: "a deleted node",
     paused: |version, node, at, why| format!("{version} paused: {node} failed at {at}, {why}"),
     resume_hint: |version| format!("Resume: i3tctl update resume {version}"),
-    node_updates_header: ["ID", "NAME", "STATE", "VERSION", "AVAILABLE", "SELF-UPDATE", "UPDATE"],
+    node_updates_header: ["ID", "NAME", "STATE", "VERSION", "AVAILABLE", "SELF-UPDATE", "AUTO", "UPDATE"],
     too_old: "too old",
     updating_to: |version| format!("Updating to {version}"),
     nothing_to_update: "Nothing to update to",
@@ -379,6 +382,8 @@ const UI: Ui = Ui {
     ordered_to: |version, timing| format!("Ordered: {version} {timing}"),
     available: |version| format!("{version} available"),
     up_to_date: "Up to date",
+    security_update: "security update",
+    security_problem: "This version has a known security problem",
 
     access_header: ["DIRECTION", "NODE", "VIRTUAL-IP", "RULES"],
     can_reach: "can reach",
@@ -582,6 +587,9 @@ fn log(entry: &LogEntry) -> Option<String> {
                 }
                 if let Some(on) = get("forward_target").and_then(serde_json::Value::as_bool) {
                     out.push(if on { "forward target on" } else { "forward target off" }.to_owned());
+                }
+                if let Some(on) = get("auto_update").and_then(serde_json::Value::as_bool) {
+                    out.push(if on { "automatic updates on" } else { "automatic updates off" }.to_owned());
                 }
                 lang.list(out)
             });

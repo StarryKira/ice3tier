@@ -348,7 +348,7 @@ impl Session {
                 let request = UpdateNode { groups: Some(self.group_ids(network, &groups).await?), ..UpdateNode::default() };
                 self.show(self.send(Method::PATCH, &format!("{nodes}/{}", node.id), &request).await?, render::node_changed)
             }
-            NodeCommand::Set { node, ip, dial_out_only, routing, reach, profile, forward_target, pins, unpin } => {
+            NodeCommand::Set { node, ip, dial_out_only, routing, reach, profile, forward_target, auto_update, pins, unpin } => {
                 let node = self.node(network, &node).await?;
                 let mut pinned_relays = if unpin { Some(Vec::new()) } else { None };
                 if !pins.is_empty() {
@@ -365,6 +365,7 @@ impl Session {
                     reach: reach.map(crate::cli::Inherit::into_override),
                     profile: profile.map(crate::cli::Inherit::into_override),
                     forward_target: forward_target.map(|switch| switch.0),
+                    auto_update: auto_update.map(|switch| switch.0),
                     pinned_relays,
                     ..UpdateNode::default()
                 };

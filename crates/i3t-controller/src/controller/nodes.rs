@@ -99,6 +99,11 @@ impl Controller {
                 let state = if node.forward_target { "打开" } else { "关闭" };
                 tracing::info!(node = %id, name = %node.name, "管理员{state}了它作为端口转发目标的开关");
             }
+            node.auto_update = request.auto_update.unwrap_or(node.auto_update);
+            if node.auto_update != before.auto_update {
+                let state = if node.auto_update { "打开" } else { "关闭" };
+                tracing::info!(node = %id, name = %node.name, "管理员{state}了这个节点的自动更新");
+            }
             store.update_node(&node)?;
             if node.groups != before.groups {
                 store.set_node_groups(id, &node.groups)?;
@@ -123,6 +128,10 @@ impl Controller {
             inner.holders_and(id)
         };
         inner.refresh(network.id, seeds, None)?;
+        // 开关关掉时撤回还没换上去的自动更新，打开时轮到它；和全局的开关一样。
+        if after.auto_update != before.auto_update {
+            inner.roll_out()?;
+        }
         self.wake_if_needed(&inner);
         Ok(inner.node_view(&network, &groups, &after, now, &inner.reach_index(network.id)?))
     }
@@ -252,7 +261,8 @@ impl Controller {
     /// 把 `id` 指定为已下线节点 `predecessor` 的继任：继承它的虚拟 IP、名字、所在的分组（和自己的合并），
     /// 以及指向它的端口转发、监听器和节点对设置；然后删掉 `predecessor`。
     ///
-    /// relay、出口和端口转发目标不继承：要在新机器上重新声明，再重新启用。
+    /// relay 和出口不继承：要在新机器上重新声明，再重新启用。管理员的两个开关跟着身份走：可以作为端口转发的目标（打开的），
+    /// 和关掉的自动更新（管理员不让自动更新的是这个身份，换了机器也一样）。
     ///
     /// # Errors
     ///
@@ -292,6 +302,8 @@ impl Controller {
         tracing::info!(node = %id, %predecessor, name = %node.name, "节点继任");
         inner.forget_node(predecessor);
         inner.refresh(network.id, Seeds::All, None)?;
+        // 继任者可能接过了关掉的自动更新：撤回已经给它的自动更新。
+        inner.roll_out()?;
         self.wake_if_needed(&inner);
         Ok(inner.node_view(&network, &inner.store.groups(network.id)?, &node, now, &inner.reach_index(network.id)?))
     }
@@ -377,6 +389,9 @@ pub(super) fn inherit(store: &Store, network: NetworkId, old: &NodeRecord, succe
     // 端口转发的目标是管理员的开关，和分组一样随身份交给继任者：继承来的转发照旧生效，外部配置不用改。
     if old.forward_target && !successor.forward_target {
         store.set_node_forward_target(successor.id, true)?;
+    }
+    if !old.auto_update && successor.auto_update {
+        store.set_node_auto_update(successor.id, false)?;
     }
     Ok(())
 }
@@ -466,6 +481,9 @@ fn update_params(before: &NodeRecord, after: &NodeRecord, groups: &[GroupRecord]
     if before.forward_target != after.forward_target {
         changes.insert("forward_target".to_owned(), json!(after.forward_target));
     }
+    if before.auto_update != after.auto_update {
+        changes.insert("auto_update".to_owned(), json!(after.auto_update));
+    }
     json!({ "node": after.id, "node_name": before.name, "changes": changes })
 }
 
@@ -492,6 +510,9 @@ fn describe_update(before: &NodeRecord, after: &NodeRecord, groups: &[GroupRecor
     }
     if before.profile != after.profile {
         changes.push(format!("性能档位 {}", after.profile.map_or("本机决定", |profile| profile.as_str())));
+    }
+    if before.auto_update != after.auto_update {
+        changes.push(format!("自动更新 {}", switch(after.auto_update)));
     }
     if changes.is_empty() {
         format!("节点 {}：没有变化", after.name)

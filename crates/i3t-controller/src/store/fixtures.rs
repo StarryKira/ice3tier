@@ -65,6 +65,7 @@ pub(crate) fn record(seed: u8) -> NodeRecord {
         reach: None,
         pinned_relays: Vec::new(),
         profile: None,
+        auto_update: true,
         endpoints: Vec::new(),
         local_addresses: None,
         observed: None,

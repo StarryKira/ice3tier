@@ -234,6 +234,8 @@ pub enum NodeCommand {
         profile: Option<Inherit<ProfileArg>>,
         #[arg(long)]
         forward_target: Option<OnOff>,
+        #[arg(long)]
+        auto_update: Option<OnOff>,
         #[arg(long = "pin")]
         pins: Vec<String>,
         #[arg(long, conflicts_with = "pins")]
@@ -816,6 +818,7 @@ fn describe(command: clap::Command, h: &Help, v: &Values) -> clap::Command {
                         .mut_arg("reach", |arg| arg.help(h.node_reach).value_name("any|direct-only|relay-only|default"))
                         .mut_arg("profile", |arg| arg.help(h.node_profile).value_name("low-footprint|balanced|high-throughput|default"))
                         .mut_arg("forward_target", |arg| on_off(arg.help(h.node_forward_target)))
+                        .mut_arg("auto_update", |arg| on_off(arg.help(h.node_auto_update)))
                         .mut_arg("pins", |arg| node(arg.help(h.node_pin)))
                         .mut_arg("unpin", |arg| arg.help(h.node_unpin))
                 })
@@ -1119,6 +1122,11 @@ mod tests {
         assert!(matches!(parse(&["routes"]).command, Command::Routes));
         assert!(matches!(parse(&["backbone"]).command, Command::Backbone));
         assert!(fails(&["update", "set", "--auto", "maybe"]));
+        assert!(matches!(
+            parse(&["node", "set", "nas", "--auto-update", "off"]).command,
+            Command::Node(NodeCommand::Set { auto_update: Some(OnOff(false)), forward_target: None, .. })
+        ));
+        assert!(fails(&["node", "set", "nas", "--auto-update", "maybe"]));
     }
 
     #[test]

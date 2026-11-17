@@ -24,6 +24,7 @@ pub(super) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0011_exits_any_port_and_no_bandwidth.sql"),
     include_str!("migrations/0012_relay_reach_pair_congestion_route_switches.sql"),
     include_str!("migrations/0013_forward_target_switch.sql"),
+    include_str!("migrations/0014_node_auto_update.sql"),
 ];
 
 #[cfg(test)]
@@ -353,5 +354,27 @@ mod tests {
             let raw: String = store.conn.query_row("SELECT declared FROM nodes WHERE id = ?1", [id], |row| row.get(0)).unwrap();
             assert!(serde_json::from_str::<Value>(&raw).unwrap().get("forward").is_none(), "节点 {id} 的声明里没有 forward 了");
         }
+    }
+
+    /// 第 14 版之前：自动更新只有全局的开关。
+    const BEFORE_NODE_AUTO_UPDATE: usize = 13;
+
+    #[test]
+    fn every_existing_node_keeps_automatic_updates_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("controller.db");
+        {
+            let store = Store::prepare(Connection::open(&path).unwrap(), &MIGRATIONS[..BEFORE_NODE_AUTO_UPDATE]).unwrap();
+            home_network(&store.conn);
+            for (id, name) in [(1, "nas"), (2, "hk")] {
+                home_node(&store.conn, id, name);
+            }
+            store.conn.execute("UPDATE nodes SET forward_target = 1 WHERE id = 2", []).unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), u32::try_from(MIGRATIONS.len()).unwrap());
+        let node = |id: u32| store.node(i3t_proto::NodeId::new(id).unwrap()).unwrap().unwrap();
+        assert!(node(1).auto_update && node(2).auto_update, "以前只有全局的开关，已有的节点都按开着算");
+        assert!(node(2).forward_target, "别的开关不动");
     }
 }
