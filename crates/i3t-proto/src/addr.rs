@@ -102,7 +102,8 @@ impl Reply {
             _ => return None,
         };
         let &[hi, lo] = rest else { return None };
-        Some(Self { nonce, observed: SocketAddr::new(ip, u16::from_be_bytes([hi, lo])) })
+        // 和编码一致：IPv4 映射的 IPv6 地址就是那个 IPv4 地址，只有一种写法。
+        Some(Self { nonce, observed: SocketAddr::new(ip.to_canonical(), u16::from_be_bytes([hi, lo])) })
     }
 }
 
@@ -129,6 +130,18 @@ mod tests {
         assert_eq!(Query::parse(&bytes[..31]), None);
         assert_eq!(Query::parse(&[0x0b; 32]), None);
         assert_eq!(Query::parse(&[]), None);
+    }
+
+    #[test]
+    fn an_ipv4_address_sent_in_ipv6_clothes_is_read_as_ipv4() {
+        let mut bytes = vec![KIND_REPLY];
+        bytes.extend_from_slice(&NONCE);
+        bytes.push(FAMILY_V6);
+        bytes.extend_from_slice(&Ipv4Addr::new(192, 0, 2, 7).to_ipv6_mapped().octets());
+        bytes.extend_from_slice(&4433u16.to_be_bytes());
+        let reply = Reply::parse(&bytes).unwrap();
+        assert_eq!(reply.observed, "192.0.2.7:4433".parse().unwrap());
+        assert_eq!(Reply::parse(&reply.to_bytes()), Some(reply), "读出来的应答再写再读，还是它");
     }
 
     #[test]

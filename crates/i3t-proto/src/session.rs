@@ -119,7 +119,9 @@ pub(crate) fn take_addr(bytes: &[u8]) -> Option<(SocketAddr, &[u8])> {
         _ => return None,
     };
     let (&port, rest) = rest.split_first_chunk::<2>()?;
-    Some((SocketAddr::new(ip, u16::from_be_bytes(port)), rest))
+    // 编码把 IPv4 映射的 IPv6 地址写成 IPv4（[`put_addr`]）。对方硬把它按 IPv6 写过来时，这里也给出 IPv4：
+    // 同一个地址只有一种写法，拿它和本机的地址比才比得上。
+    Some((SocketAddr::new(ip.to_canonical(), u16::from_be_bytes(port)), rest))
 }
 
 /// 请求帧开头共同的部分：类型、节点编号、随机数。`kind` 对不上或者长度不够 `min_len` 时返回 `None`。
@@ -561,6 +563,20 @@ mod tests {
         assert_eq!(&bytes[93..], [0, 0, 0]);
         assert_eq!(Auth::parse(&bytes), Some(auth));
         assert_eq!(Frame::parse(&bytes), Some(Frame::Auth(auth)));
+    }
+
+    #[test]
+    fn an_ipv4_address_sent_in_ipv6_clothes_is_read_as_ipv4() {
+        // 地址族写的是 6，地址是 ::ffff:192.0.2.7。
+        let mut bytes = vec![6];
+        bytes.extend_from_slice(&Ipv4Addr::new(192, 0, 2, 7).to_ipv6_mapped().octets());
+        bytes.extend_from_slice(&4433u16.to_be_bytes());
+        let (addr, rest) = take_addr(&bytes).unwrap();
+        assert_eq!((addr, rest), ("192.0.2.7:4433".parse().unwrap(), &[][..]));
+
+        let mut again = Vec::new();
+        put_addr(&mut again, addr);
+        assert_eq!(take_addr(&again), Some((addr, &[][..])), "读出来的地址再写再读，还是它");
     }
 
     #[test]

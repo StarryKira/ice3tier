@@ -156,7 +156,8 @@ impl<'a> Frames<'a> {
         if body.len() > MAX_DATAGRAM_BODY_LEN {
             return Err(SplitError::BodyTooLarge { len: body.len() });
         }
-        if body.len() <= max_len.saturating_sub(DatagramHeader::LEN) {
+        // 内容不超过 [`MAX_DATAGRAM_BODY_LEN`]，加上头不会溢出。
+        if body.len() + DatagramHeader::LEN <= max_len {
             return Ok(Self { recipient, context, plan: Plan::Whole(Some(body)) });
         }
         let room = max_len.saturating_sub(DatagramHeader::FRAGMENT_LEN);
@@ -284,8 +285,11 @@ mod tests {
         for max_len in [0, DatagramHeader::LEN, DatagramHeader::FRAGMENT_LEN] {
             assert_eq!(split(100, max_len), Err(SplitError::FrameTooSmall { len: 100, max_len }), "{max_len}");
         }
-        // 空的内容不需要地方。
+        // 空的内容只要放得下头。放不下头时不能照样给出一帧。
         assert_eq!(split(0, DatagramHeader::LEN), Ok(1));
+        for max_len in [0, 1, DatagramHeader::LEN - 1] {
+            assert_eq!(split(0, max_len), Err(SplitError::FrameTooSmall { len: 0, max_len }), "{max_len}");
+        }
     }
 
     #[test]
