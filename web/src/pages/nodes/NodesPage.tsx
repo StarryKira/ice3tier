@@ -4,10 +4,12 @@ import {
   CircleArrowUp,
   CircleMinus,
   CirclePlus,
+  DoorOpen,
   EllipsisVertical,
   ListFilter,
   Pencil,
   Plus,
+  RadioTower,
   Search,
   Server,
   Trash2,
@@ -85,18 +87,39 @@ const SEARCH_DEBOUNCE_MS = 300
 const roleLabel = (role: RoleFilter): string => (role === 'relay' ? t.nodes.roleRelay : t.nodes.roleExit)
 
 /** 角色的小徽标，跟在名字后面。`attached` 给了时，relay 的徽标上写着有几个节点挂靠在它上面，悬停有一句话。 */
-export function RoleBadges({ node, attached }: { node: Node; attached?: number }) {
+interface RoleBadgesProps {
+  node: Node
+  attached?: number
+  /** `sm` 用在列表里，挂着几个节点写在 relay 后面；`md` 用在详情页的名字旁边，带图标，挂着几个节点只在悬停里写。 */
+  size?: 'sm' | 'md'
+}
+
+export function RoleBadges({ node, attached, size = 'sm' }: RoleBadgesProps) {
+  const md = size === 'md'
+  const className = md ? 'h-6 gap-1.5 rounded-md px-2 [&_svg]:size-3.5' : undefined
   return (
     <>
       {node.relay !== null ? (
         <Tooltip content={attached === undefined ? null : t.nodes.roleRelayAttached(attached)}>
-          <Badge tabIndex={attached === undefined ? undefined : 0} data-testid={`relay-badge-${node.name}`}>
+          <Badge
+            tabIndex={attached === undefined ? undefined : 0}
+            data-testid={`relay-badge-${node.name}`}
+            className={className}
+          >
+            {md ? <RadioTower aria-hidden /> : null}
             {t.nodes.roleRelay}
-            {attached !== undefined && attached > 0 ? <span className="tabular opacity-80">· {attached}</span> : null}
+            {!md && attached !== undefined && attached > 0 ? (
+              <span className="tabular opacity-80">· {attached}</span>
+            ) : null}
           </Badge>
         </Tooltip>
       ) : null}
-      {node.exit !== null ? <Badge>{t.nodes.roleExit}</Badge> : null}
+      {node.exit !== null ? (
+        <Badge className={className}>
+          {md ? <DoorOpen aria-hidden /> : null}
+          {t.nodes.roleExit}
+        </Badge>
+      ) : null}
     </>
   )
 }

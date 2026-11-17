@@ -6,6 +6,7 @@ import {
   History,
   Pencil,
   Replace,
+  Server,
   ServerOff,
   Trash2,
 } from 'lucide-react'
@@ -18,7 +19,8 @@ import { CopyText } from '@/components/copy'
 import { ForceUpdateDialog } from '@/components/force-update'
 import { Page } from '@/components/page'
 import { EmptyState, ErrorState, SkeletonBlock } from '@/components/states'
-import { IssueIcon, OnlineDot, StatusDot } from '@/components/status'
+import { IssueIcon, StatusDot, StatusText } from '@/components/status'
+import { OsIcon } from '@/components/os-icon'
 import { ReasonButton } from '@/components/update'
 import { Button } from '@/components/ui/button'
 import {
@@ -53,6 +55,12 @@ import { UpdateTab } from './detail/UpdateTab'
 import { RoleBadges } from './NodesPage'
 
 const d = t.nodes.detail
+
+/** 名字下面那一行里的分隔：一道细竖线。 */
+function MetaDivider() {
+  return <span aria-hidden className="h-3 w-px bg-border-strong" />
+}
+
 const TABS = ['overview', 'settings', 'routes', 'lanes', 'access', 'listen', 'related', 'update'] as const
 type Tab = (typeof TABS)[number]
 
@@ -130,7 +138,7 @@ export function NodeDetailPage() {
 
   return (
     <Page className="@container">
-      <nav aria-label={t.nav.breadcrumb} className="mb-3 flex items-center gap-1.5 text-base text-muted-foreground">
+      <nav aria-label={t.nav.breadcrumb} className="mb-5 flex items-center gap-1.5 text-base text-muted-foreground">
         <Link to={listPath} className="rounded-sm hover:text-foreground hover:underline">
           {t.nodes.title}
         </Link>
@@ -140,40 +148,45 @@ export function NodeDetailPage() {
         </span>
       </nav>
 
-      <header className="mb-8 flex items-start justify-between gap-6">
-        <div className="min-w-0">
-          <h1 className="flex flex-wrap items-center gap-2.5 text-[22px] leading-[30px] font-bold tracking-tight">
-            <OnlineDot online={node.online} className="[&>span:first-child]:size-2.5" />
-            <span className="truncate">{node.name}</span>
-            <Tooltip content={t.nodes.rename}>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                className="[&_svg]:text-faint hover:[&_svg]:text-foreground"
-                onClick={() => setDialog('rename')}
-                aria-label={t.nodes.rename}
-              >
-                <Pencil aria-hidden />
-              </Button>
-            </Tooltip>
-            {/* 徽标跟着 22 像素的名字放大一档，在列表里是小的那一档。 */}
-            <span className="inline-flex items-center gap-1.5 [&>span]:h-6 [&>span]:px-2 [&>span]:text-[13px]">
-              <RoleBadges node={node} attached={attachedCount(nodes.data ?? [], node.id)} />
-            </span>
-            {issue !== undefined ? <IssueIcon message={issue.message} tone={issue.tone} /> : null}
-          </h1>
-          {/* 名字下面一行：在线与否、虚拟 IP、域名，中间一个圆点隔开，和名字左对齐。点值就复制（悬停有说明），不另画复制图标，间距才匀。 */}
-          <p className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 pl-5 text-sm text-muted-foreground">
-            <span>{node.online ? t.common.online : t.common.offline}</span>
-            <span aria-hidden className="text-faint">
-              ·
-            </span>
-            <CopyText value={node.virtual_ip} className="text-foreground [&>svg]:hidden" />
-            <span aria-hidden className="text-faint">
-              ·
-            </span>
-            <CopyText value={node.fqdn} mono={false} className="[&>svg]:hidden" />
-          </p>
+      <header className="mb-8 flex items-center justify-between gap-6">
+        <div className="flex min-w-0 items-center gap-4">
+          {/* 左边一块是它的系统，和下面两行一样高，名字和状态都从它右边对齐开始。 */}
+          <span
+            aria-hidden
+            className="flex size-[52px] shrink-0 items-center justify-center rounded-xl border bg-muted/60 text-foreground/80"
+          >
+            <OsIcon platform={node.platform} className="size-6" fallback={<Server className="size-6" />} />
+          </span>
+          <div className="min-w-0">
+            <div className="flex min-w-0 items-center gap-1.5">
+              <h1 className="truncate text-[22px] leading-[30px] font-bold tracking-tight">{node.name}</h1>
+              <Tooltip content={t.nodes.rename}>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  className="size-7 shrink-0 text-faint hover:text-foreground [&_svg]:size-3.5"
+                  onClick={() => setDialog('rename')}
+                  aria-label={t.nodes.rename}
+                >
+                  <Pencil aria-hidden />
+                </Button>
+              </Tooltip>
+              <span className="ml-1 flex shrink-0 items-center gap-1.5">
+                <RoleBadges node={node} attached={attachedCount(nodes.data ?? [], node.id)} size="md" />
+                {issue !== undefined ? <IssueIcon message={issue.message} tone={issue.tone} /> : null}
+              </span>
+            </div>
+            {/* 名字下面一行：状态、虚拟 IP、域名，同一种字、同一个颜色，细竖线隔开。点值就复制（悬停有说明），不另画复制图标，间距才匀。 */}
+            <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] leading-5 text-muted-foreground">
+              <StatusText tone={node.online ? 'ok' : 'idle'} className="gap-1.5 text-muted-foreground">
+                {node.online ? t.common.online : t.common.offline}
+              </StatusText>
+              <MetaDivider />
+              <CopyText value={node.virtual_ip} mono={false} className="tabular [&>svg]:hidden" />
+              <MetaDivider />
+              <CopyText value={node.fqdn} mono={false} className="[&>svg]:hidden" />
+            </p>
+          </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {/* 有新版本时才出现；不能点时置灰，悬停写原因和做法。 */}

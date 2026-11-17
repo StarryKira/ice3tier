@@ -1,3 +1,5 @@
+import { type ReactNode } from 'react'
+
 import { cn } from '@/lib/utils'
 
 /**
@@ -23,9 +25,18 @@ function shapeOf(platform: string): string | null {
   return null
 }
 
-export function OsIcon({ platform, className }: { platform: string; className?: string }) {
+export function OsIcon({
+  platform,
+  fallback = null,
+  className,
+}: {
+  platform: string
+  /** 认不出系统时画的东西，默认什么都不画。 */
+  fallback?: ReactNode
+  className?: string
+}) {
   const shape = shapeOf(platform)
-  if (shape === null) return null
+  if (shape === null) return fallback
   return (
     <svg viewBox="0 0 24 24" aria-hidden className={cn('size-3.5 shrink-0 fill-current', className)}>
       <path d={shape} />
