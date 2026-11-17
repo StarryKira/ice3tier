@@ -188,6 +188,7 @@ pub(crate) fn run(port: u16, apply_changes: bool) -> anyhow::Result<()> {
     }
     table.print();
     print_open_file_limit();
+    print_rto_cap(i3t_underlay::tcp_recovery::rto_cap_supported());
 
     let wanted = findings.iter().filter(|finding| matches!(finding.verdict, Verdict::Change(_))).count();
     if wanted == 0 {
@@ -203,6 +204,12 @@ pub(crate) fn run(port: u16, apply_changes: bool) -> anyhow::Result<()> {
     std::fs::write(PERSIST_FILE, persisted(&existing, &changed)).with_context(|| (t.tune_persist_failed)(PERSIST_FILE))?;
     println!("\n{}", (t.tune_changed)(changed.len(), PERSIST_FILE));
     Ok(())
+}
+
+/// 内核能不能给 TCP 的重传定时器设上限。节点自己在 lane 和 TCP 中转的 socket 上设，不用改内核参数，这里只报告。
+fn print_rto_cap(supported: bool) {
+    let t = &texts().ui;
+    println!("{}", if supported { t.tune_rto_cap } else { t.tune_no_rto_cap });
 }
 
 /// 能同时打开的文件数。它不是内核参数，这里只报告：`i3t run` 启动时自己会把软上限抬到硬上限。

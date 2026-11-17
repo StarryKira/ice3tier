@@ -22,6 +22,9 @@ pub(crate) struct Texts {
     pub(crate) metrics_not_loopback: fn(&str) -> String,
     pub(crate) same_proxy_address: fn(&str) -> String,
     pub(crate) unknown_setting: fn(&str) -> String,
+    pub(crate) not_a_switch: fn(&str) -> String,
+    pub(crate) unknown_profile: fn(&str) -> String,
+    pub(crate) performance_range: fn(&str, u64, u64) -> String,
     pub(crate) not_an_address: fn(&str) -> String,
     pub(crate) create_state_dir: fn(&Path) -> String,
     pub(crate) restrict_state_dir: fn(&Path) -> String,
@@ -78,7 +81,10 @@ static ZH: Texts = Texts {
     },
     metrics_not_loopback: |addr| format!("metrics.listen = \"{addr}\" 不是回环地址：指标接口没有认证，只能写 127.0.0.1 或 [::1]。"),
     same_proxy_address: |addr| format!("proxy.socks5 和 proxy.http 不能用同一个地址 {addr}"),
-    unknown_setting: |other| format!("没有设置项 {other}：可以写 can-exit、can-relay、can-forward、throughput-tests"),
+    unknown_setting: |other| format!("没有设置项 {other}：可以写 can-exit、can-relay、can-forward、throughput-tests、profile"),
+    not_a_switch: |other| format!("\"{other}\" 不是开关的值：写 on 或 off"),
+    unknown_profile: |other| format!("没有档位 \"{other}\"：可以写 low-footprint、balanced、high-throughput"),
+    performance_range: |key, low, high| format!("performance.{key} 要在 {low} 到 {high} 之间"),
     not_an_address: |text| format!("\"{text}\" 不是地址：写成 \"127.0.0.1:1080\" 这样的“地址:端口”，或者 \"off\""),
     create_state_dir: |path| format!("创建状态目录 {}", path.display()),
     restrict_state_dir: |path| format!("收紧状态目录 {} 的权限", path.display()),
@@ -127,7 +133,10 @@ static EN: Texts = Texts {
         format!("metrics.listen = \"{addr}\" isn't a loopback address: the metrics endpoint has no authentication.")
     },
     same_proxy_address: |addr| format!("proxy.socks5 and proxy.http can't share the address {addr}"),
-    unknown_setting: |other| format!("No setting {other}: possible values: can-exit, can-relay, can-forward, throughput-tests"),
+    unknown_setting: |other| format!("No setting {other}: possible values: can-exit, can-relay, can-forward, throughput-tests, profile"),
+    not_a_switch: |other| format!("\"{other}\" isn't a switch value: write on or off"),
+    unknown_profile: |other| format!("No profile \"{other}\": possible values: low-footprint, balanced, high-throughput"),
+    performance_range: |key, low, high| format!("performance.{key} must be between {low} and {high}"),
     not_an_address: |text| format!("\"{text}\" isn't an address: write \"127.0.0.1:1080\" (address:port) or \"off\""),
     create_state_dir: |path| format!("Creating the state directory {}", path.display()),
     restrict_state_dir: |path| format!("Restricting the state directory {}", path.display()),
@@ -184,6 +193,18 @@ listen = "127.0.0.1:20333"
 # 接受吞吐测试：每个方向最多 5 秒或 20 MB。按流量计费的机器可以写 false（i3t set throughput-tests off）。
 throughput = true
 
+# 性能档位：low-footprint（一个核、几百 MB 内存的机器）、balanced、high-throughput（对端多、流量大）。
+# controller 给这个节点选了档位时以它为准。i3t set profile <档位> 改的是这一行。
+[performance]
+profile = "balanced"
+# 下面各项不写就用档位的值；写了就盖过档位，不管档位是谁选的。
+# threads = 2               # 工作线程。只有一个对端在忙的机器、纯粹的 relay 写 1 最快。改了要重启
+# stream_buffer_kb = 16     # 每条流每个方向的搬运缓冲
+# stream_window_kb = 2048   # 每条流的接收窗口，最大 2048
+# connection_window_mb = 64 # 一条连接上收、发各自最多压住多少数据
+# idle_close_secs = 300     # 没有流之后多久关闭连接，0 是不关
+# return_memory = false     # 每分钟把空着的内存还给系统
+
 [log]
 # 日志级别：error、warn、info、debug、trace。
 level = "info"
@@ -217,6 +238,18 @@ listen = "127.0.0.1:20333"
 [tests]
 # Accept throughput tests: up to 5 s or 20 MB each way. Metered machines can set false (i3t set throughput-tests off).
 throughput = true
+
+# Performance profile: low-footprint (one core, a few hundred MB of memory), balanced, high-throughput (many peers, heavy traffic).
+# A profile chosen for this node on the controller applies instead. i3t set profile <profile> edits this line.
+[performance]
+profile = "balanced"
+# Each item below defaults to the profile's value; set here, it overrides the profile, whoever chose it.
+# threads = 2               # Worker threads. 1 is fastest with one busy peer or on a pure relay. Needs a restart
+# stream_buffer_kb = 16     # Copy buffer per stream and direction
+# stream_window_kb = 2048   # Receive window per stream, at most 2048
+# connection_window_mb = 64 # Most data one connection holds, each way
+# idle_close_secs = 300     # Close a connection this long after its last stream; 0 never
+# return_memory = false     # Give unused memory back to the system every minute
 
 [log]
 # Log level: error, warn, info, debug, trace.

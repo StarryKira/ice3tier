@@ -69,6 +69,8 @@ pub struct Ui {
     pub start_runtime: &'static str,
     pub setting_set: fn(&str, &str) -> String,
     pub declare_hint: &'static str,
+    /// `i3t set profile` 之后：controller 给这个节点选了别的档位，配置文件里的这一项现在不起作用。
+    pub profile_chosen: fn(&str) -> String,
     pub not_running: &'static str,
     pub routes_not_running: &'static str,
     pub socks5_off: &'static str,
@@ -125,6 +127,10 @@ pub struct Ui {
     pub routes_header: [&'static str; 5],
     pub no_peers: &'static str,
     pub update_record_unreadable: &'static str,
+    pub profile: &'static str,
+    /// 在用的档位和工作线程数。
+    pub profile_running: fn(&str, u32) -> String,
+    pub restart_pending: &'static str,
     pub cannot_self_update: &'static str,
 
     pub socks5_unreachable: fn(&str) -> String,
@@ -165,6 +171,8 @@ pub struct Ui {
     pub tune_files: fn(u64, u64) -> String,
     pub tune_files_low: &'static str,
     pub tune_files_unknown: fn(&str) -> String,
+    pub tune_rto_cap: &'static str,
+    pub tune_no_rto_cap: &'static str,
 }
 
 static ZH: Texts = Texts {
@@ -177,7 +185,7 @@ static ZH: Texts = Texts {
         can_forward: "声明可以作为端口转发的目标",
         run: "运行节点",
         run_static: "测试用：从这个 JSON 文件读 netmap，不连 controller",
-        set: "修改本机的声明和开关，重启 i3t 后生效",
+        set: "修改本机的声明、开关和性能档位，重启 i3t 后生效",
         status: "节点状态",
         routes: "到各个对端的路由",
         key: "节点公钥（没有时生成）",
@@ -204,6 +212,7 @@ static ZH: Texts = Texts {
         start_runtime: "启动运行时",
         setting_set: |setting, state| format!("{setting} 已设为 {state}，重启 i3t 后生效"),
         declare_hint: "声明本身不启用任何东西：要管理员在 WebUI 上启用。",
+        profile_chosen: |profile| format!("controller 给这个节点选了 {profile}，以它为准。"),
         not_running: "节点没有在运行（上面是本机的配置）",
         routes_not_running: "节点没有在运行：先 i3t run",
         socks5_off: "配置文件里关掉了 SOCKS5 入口（proxy.socks5 = \"off\"），i3t connect 要经它出去",
@@ -260,6 +269,9 @@ static ZH: Texts = Texts {
         routes_header: ["对端", "虚拟 IP", "路", "延迟 ms", "换上"],
         no_peers: "没有对端：配置里没有和它有访问关系的节点",
         update_record_unreadable: "更新的记录读不了",
+        profile: "性能档位",
+        profile_running: |profile, threads| format!("{profile}，{threads} 个工作线程"),
+        restart_pending: "重启后才全部生效",
         cannot_self_update: "不能自己更新",
 
         socks5_unreachable: |proxy| format!("连不上本机节点的 SOCKS5 入口 {proxy}：节点在运行吗？"),
@@ -310,6 +322,8 @@ static ZH: Texts = Texts {
         tune_files: |soft, hard| format!("能同时打开的文件数：软上限 {soft}，硬上限 {hard}。i3t run 启动时会把软上限抬到硬上限"),
         tune_files_low: "硬上限偏低，流多的出口和 relay 可能不够用：系统服务的 LimitNOFILE 管它。",
         tune_files_unknown: |error| format!("能同时打开的文件数：读不到（{error}）"),
+        tune_rto_cap: "TCP 重传上限：支持。lane 和 TCP 中转断网之后，路一通最多 2 秒就恢复",
+        tune_no_rto_cap: "TCP 重传上限：这个内核不支持（Linux 6.15 起才有）。lane 和 TCP 中转断网之后恢复得慢，最多要再等断开时长的一半",
     },
 };
 
@@ -323,7 +337,7 @@ static EN: Texts = Texts {
         can_forward: "Declare it can be a port forward target",
         run: "Run the node",
         run_static: "For tests: read the netmap from this JSON file instead of the controller",
-        set: "Change local declarations and switches; restart i3t to apply",
+        set: "Change local declarations, switches and the performance profile; restart i3t to apply",
         status: "Node status",
         routes: "Routes to peers",
         key: "Node public key (generated if missing)",
@@ -350,6 +364,7 @@ static EN: Texts = Texts {
         start_runtime: "Starting the runtime",
         setting_set: |setting, state| format!("{setting} set to {state}; restart i3t to apply"),
         declare_hint: "Declaring enables nothing: an admin enables it in the WebUI.",
+        profile_chosen: |profile| format!("The controller chose {profile} for this node; that one applies."),
         not_running: "Node not running (above: local configuration)",
         routes_not_running: "Node not running: start it with i3t run",
         socks5_off: "The SOCKS5 entry is off in the configuration (proxy.socks5 = \"off\"); i3t connect goes through it",
@@ -410,6 +425,9 @@ static EN: Texts = Texts {
         routes_header: ["PEER", "VIRTUAL-IP", "ROUTE", "RTT-MS", "SINCE"],
         no_peers: "No peers: no node in the configuration can reach this one",
         update_record_unreadable: "Update record unreadable",
+        profile: "Profile",
+        profile_running: |profile, threads| format!("{profile}, {threads} worker threads"),
+        restart_pending: "fully applies after a restart",
         cannot_self_update: "Can't update itself",
 
         socks5_unreachable: |proxy| format!("Can't reach the local node's SOCKS5 entry at {proxy}: is the node running?"),
@@ -462,5 +480,8 @@ static EN: Texts = Texts {
         },
         tune_files_low: "The hard limit is low for busy exits and relays: LimitNOFILE in the service sets it.",
         tune_files_unknown: |error| format!("Open files: unknown ({error})"),
+        tune_rto_cap: "TCP retransmission cap: supported. Lanes and TCP relay legs resume within 2 s once a blackout ends",
+        tune_no_rto_cap: "TCP retransmission cap: not supported by this kernel (Linux 6.15+). After a blackout, lanes and TCP relay legs \
+                          resume late, up to half the blackout's length",
     },
 };

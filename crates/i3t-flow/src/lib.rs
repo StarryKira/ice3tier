@@ -38,5 +38,5 @@ pub use acceptor::{Handler, OPEN_DEADLINE, Request, Screening, serve};
 pub use error::FlowError;
 pub use initiator::{Pending, open};
 pub use meter::{Direction, Meter, Unmetered};
-pub use relay::{End, Flow, KEEPALIVE, Summary, Traffic, keep_alive};
+pub use relay::{DEFAULT_BUFFER_LEN, End, Flow, KEEPALIVE, Summary, Traffic, buffer_len, keep_alive, set_buffer_len};
 pub use splice::Spliced;

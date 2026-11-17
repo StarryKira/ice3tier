@@ -7,7 +7,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use i3t_lang::Lang;
-use i3t_model::netmap::{IpFamily, LaneMode, Reach, RoutingMode};
+use i3t_model::netmap::{IpFamily, LaneMode, Profile, Reach, RoutingMode};
 use i3t_proto::flow::Class;
 use ipnet::{IpNet, Ipv4Net};
 
@@ -221,6 +221,8 @@ pub enum NodeCommand {
         routing: Option<Inherit<RoutingArg>>,
         #[arg(long)]
         reach: Option<Inherit<ReachArg>>,
+        #[arg(long)]
+        profile: Option<Inherit<ProfileArg>>,
         #[arg(long = "pin")]
         pins: Vec<String>,
         #[arg(long, conflicts_with = "pins")]
@@ -482,6 +484,23 @@ impl From<RoutingArg> for RoutingMode {
         match arg {
             RoutingArg::DirectFirst => Self::DirectFirst,
             RoutingArg::LowestCost => Self::LowestCost,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum ProfileArg {
+    LowFootprint,
+    Balanced,
+    HighThroughput,
+}
+
+impl From<ProfileArg> for Profile {
+    fn from(arg: ProfileArg) -> Self {
+        match arg {
+            ProfileArg::LowFootprint => Self::LowFootprint,
+            ProfileArg::Balanced => Self::Balanced,
+            ProfileArg::HighThroughput => Self::HighThroughput,
         }
     }
 }
@@ -755,6 +774,7 @@ fn describe(command: clap::Command, h: &Help, v: &Values) -> clap::Command {
                         .mut_arg("dial_out_only", |arg| on_off(arg.help(h.node_dial_out_only)))
                         .mut_arg("routing", |arg| arg.help(h.node_routing).value_name("direct-first|lowest-cost|default"))
                         .mut_arg("reach", |arg| arg.help(h.node_reach).value_name("any|direct-only|relay-only|default"))
+                        .mut_arg("profile", |arg| arg.help(h.node_profile).value_name("low-footprint|balanced|high-throughput|default"))
                         .mut_arg("pins", |arg| node(arg.help(h.node_pin)))
                         .mut_arg("unpin", |arg| arg.help(h.node_unpin))
                 })

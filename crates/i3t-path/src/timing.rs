@@ -81,6 +81,13 @@ pub(crate) const HANDSHAKE_TRIES: u8 = 4;
 /// 保活没有回答时不这样等，照样尽快拆掉重连。真实链路上量过（晚高峰，丢包两成）：卡住的 TCP 三分之二
 /// 等 20 秒也不恢复，而新拨一条通常不到 1 秒就握上手；能自己恢复的那三分之一，恢复得也不比重连快。
 pub(crate) const TCP_HANDSHAKE_STEP: Duration = Duration::from_secs(4);
+/// 到 relay 的 TCP 上，发出去的数据这么久没有被确认，内核就放弃这条连接（`TCP_USER_TIMEOUT`，和重传上限一起设，
+/// 见 `i3t_underlay::tcp_recovery`）。
+///
+/// 上面这一层自己判断这条 TCP 的死活：会话建立之后保活连续 3 次没有回答（最多 4.5 秒左右）就拆掉重连，握手时每一步等
+/// [`TCP_HANDSHAKE_STEP`]。所以这里取 10 秒：比上面那一层能等的都长，TCP 不会先把它判死；上面那一层换掉它之后，
+/// 关掉的那个 socket 在内核里也最多再留这么久。
+pub(crate) const TCP_LEG_GIVE_UP: Duration = Duration::from_secs(10);
 /// UDP 和 TCP 同时试的时候，UDP 这么久还没握上手就先用 TCP。
 pub(crate) const UDP_HEAD_START: Duration = Duration::from_secs(1);
 /// 走着 TCP 的节点多久再试一次 UDP。

@@ -9,8 +9,8 @@ use i3t_conn::{Endpoint, RouteChange};
 use i3t_exit::{Exit, ExitStats, Os, Outbound};
 use i3t_model::Netmap;
 use i3t_model::control::{
-    BackboneRow, CredentialUsage, ExitObservation, ExitReport, ForwardReport, ListenTraffic, ListenerReport, QuotaUsage, Report, Route,
-    RouteAnswer, RouteSince, SelfUpdate,
+    BackboneRow, CredentialUsage, ExitObservation, ExitReport, ForwardReport, ListenTraffic, ListenerReport, PerformanceReport, QuotaUsage,
+    Report, Route, RouteAnswer, RouteSince, SelfUpdate,
 };
 use i3t_model::update::UpdateStatus;
 use i3t_proto::NodeId;
@@ -51,6 +51,8 @@ pub(crate) struct Runtime {
     pub(crate) update: watch::Receiver<UpdateStatus>,
     /// 活跃的流的数量，更新等它变成零。
     pub(crate) flows: watch::Receiver<usize>,
+    /// 正在用的性能档位。
+    pub(crate) performance: watch::Receiver<PerformanceReport>,
     pub(crate) history: RouteHistory,
     relay_activity: Mutex<RelayActivity>,
 }
@@ -68,11 +70,12 @@ pub(crate) struct Parts {
     pub(crate) link: Option<watch::Receiver<LinkState>>,
     pub(crate) update: watch::Receiver<UpdateStatus>,
     pub(crate) flows: watch::Receiver<usize>,
+    pub(crate) performance: watch::Receiver<PerformanceReport>,
 }
 
 impl Runtime {
     pub(crate) fn new(parts: Parts) -> Self {
-        let Parts { program, self_update, controller, endpoint, lanes, exit, access, netmap, link, update, flows } = parts;
+        let Parts { program, self_update, controller, endpoint, lanes, exit, access, netmap, link, update, flows, performance } = parts;
         Self {
             program,
             self_update,
@@ -88,6 +91,7 @@ impl Runtime {
             link,
             update,
             flows,
+            performance,
             history: RouteHistory::default(),
             relay_activity: Mutex::default(),
         }
@@ -173,6 +177,7 @@ impl Runtime {
             forwards,
             route_kinds: self.endpoint.path_reports().iter().filter_map(route_detail::kind).collect(),
             lanes: Some(Box::new(self.lanes.report())),
+            performance: Some(self.performance.borrow().clone()),
         }
     }
 

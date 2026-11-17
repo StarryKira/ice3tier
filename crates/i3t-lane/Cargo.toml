@@ -12,6 +12,7 @@ bytes.workspace = true
 i3t-conn = { path = "../i3t-conn" }
 i3t-crypto = { path = "../i3t-crypto" }
 i3t-proto = { path = "../i3t-proto" }
+i3t-underlay = { path = "../i3t-underlay" }
 ring.workspace = true
 rustls.workspace = true
 socket2.workspace = true

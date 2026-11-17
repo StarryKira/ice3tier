@@ -8,6 +8,7 @@
 //! | [`control`] | 连 controller 的那条长连接：注册、收 netmap、上报、转发信令、取更新包、回答路由查询 |
 //! | [`join`] | 用注册令牌加入网络 |
 //! | [`node`] | 把各层装成一个运行着的节点 |
+//! | [`performance`] | 性能档位：预设加上本机的覆盖，落实成线程数、缓冲、窗口和空闲回收的时间 |
 //! | `lanes` | 独占 TCP（lane）：和共用的连接装成一个连接层，跟着 netmap 拨谁、接谁 |
 //! | [`drain`] | 排空：更新之前不再接新的流 |
 //! | `diag` | 主动测试：收 controller 的指令，按本机的规矩量、配合，送回结果；测量服务 |
@@ -25,8 +26,10 @@ mod http;
 pub mod join;
 mod lanes;
 pub mod local;
+mod memory;
 mod metrics;
 pub mod node;
+pub mod performance;
 mod persist;
 pub mod program;
 mod route_detail;

@@ -40,7 +40,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use i3t_crypto::{NodeKey, tls};
 use i3t_model::Netmap;
 use i3t_model::admin::{LogEntry, NetworkId, Node, NodeRef, Status, Timestamp};
-use i3t_model::control::{ForwardReport, LaneReport, ListenerReport, ToNode};
+use i3t_model::control::{ForwardReport, LaneReport, ListenerReport, PerformanceReport, ToNode};
 use i3t_model::update::{UpdateStatus, Version};
 use i3t_proto::{NodeId, PublicKey};
 use tokio::sync::{Notify, mpsc};
@@ -182,6 +182,8 @@ pub(crate) struct Live {
     pub(crate) credential_connections: BTreeMap<u32, u32>,
     /// 最近一次上报里独占 TCP 的状况。
     pub(crate) lanes: Option<LaneReport>,
+    /// 最近一次上报里节点实际在用的性能档位。
+    pub(crate) performance: Option<PerformanceReport>,
     /// 节点说它接不接受吞吐测试（本机配置文件里的开关）。
     pub(crate) throughput_tests: bool,
 }
@@ -445,6 +447,7 @@ impl Inner {
             routing: record.routing,
             reach: record.reach,
             pinned_relays: record.pinned_relays.clone(),
+            profile: record.profile,
             platform: record.platform.clone(),
             version: record.version.clone(),
             online,

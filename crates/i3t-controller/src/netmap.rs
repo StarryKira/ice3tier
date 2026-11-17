@@ -210,6 +210,7 @@ impl NetworkView {
                 forward_targets,
                 // 固定的 relay 里已经不是 relay 的那些不下发：节点连不上它们，只会白等。
                 pinned_relays: me.pinned_relays.iter().copied().filter(|relay| *relay != id && relays.contains(relay)).collect(),
+                profile: me.profile,
             },
             peers,
             relays: relay_list,

@@ -635,6 +635,7 @@ mod tests {
                 forwards: Vec::new(),
                 forward_targets: Vec::new(),
                 pinned_relays: Vec::new(),
+                profile: None,
             },
             peers: Vec::new(),
             relays: Vec::new(),

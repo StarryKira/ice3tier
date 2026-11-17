@@ -71,6 +71,7 @@ pub struct Help {
     pub node_dial_out_only: &'static str,
     pub node_routing: &'static str,
     pub node_reach: &'static str,
+    pub node_profile: &'static str,
     pub node_pin: &'static str,
     pub node_unpin: &'static str,
     pub node_delete: &'static str,
@@ -313,6 +314,13 @@ pub struct Ui {
     pub dial_out_only: &'static str,
     pub from_network: &'static str,
     pub pinned: &'static str,
+    pub profile: &'static str,
+    /// 管理员没有选档位：节点用本机配置文件里的。
+    pub profile_local: &'static str,
+    /// 节点报的：在用的档位、工作线程数。
+    pub profile_running: fn(&str, u32) -> String,
+    pub restart_pending: &'static str,
+    pub local_overrides: fn(&str) -> String,
     pub netmap_versions: fn(u64, u64, u64) -> String,
     pub endpoints: &'static str,
     pub observed: &'static str,

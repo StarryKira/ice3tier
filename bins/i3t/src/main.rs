@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, bail};
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
-use i3t_agent::config::{Config, Setting};
+use clap::{CommandFactory, Parser, Subcommand};
+use i3t_agent::config::{Change, Config, Setting};
 use i3t_agent::join::{JoinOptions, join};
 use i3t_agent::node::{self, Outcome, Source};
 use i3t_agent::program::Program;
@@ -65,7 +65,7 @@ enum Command {
     Set {
         #[arg(value_parser = parse_setting)]
         setting: Setting,
-        state: Switch,
+        value: String,
     },
     Status,
     Routes,
@@ -81,12 +81,6 @@ enum Command {
         apply: bool,
     },
     SelfCheck,
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-enum Switch {
-    On,
-    Off,
 }
 
 /// `i3t set` 的设置项。解析的错误由节点的文字目录按语言写。
@@ -109,8 +103,8 @@ fn command(lang: Lang) -> clap::Command {
         .mut_subcommand("run", |sub| sub.about(h.run).mut_arg("static", |arg| arg.help(h.run_static).value_name(v.file)))
         .mut_subcommand("set", |sub| {
             sub.about(h.set)
-                .mut_arg("setting", |arg| arg.value_name("can-exit|can-relay|can-forward|throughput-tests"))
-                .mut_arg("state", |arg| arg.value_name("on|off"))
+                .mut_arg("setting", |arg| arg.value_name("can-exit|can-relay|can-forward|throughput-tests|profile"))
+                .mut_arg("value", |arg| arg.value_name("on|off|low-footprint|balanced|high-throughput"))
         })
         .mut_subcommand("status", |sub| sub.about(h.status))
         .mut_subcommand("routes", |sub| sub.about(h.routes))
@@ -167,19 +161,28 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             // 程序文件在哪里要趁早查：更新换过文件之后，系统报出来的就不是原来的位置了。
             let program = Program::detect(version)?;
             let source = r#static.map_or(Source::Controller, Source::Static);
-            let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().context(t.start_runtime)?;
-            return Ok(match runtime.block_on(node::run(state, source, program, shutdown_signal()))? {
+            let threads = node::starting_performance(&state, &source)?.threads;
+            let runtime = runtime(threads).context(t.start_runtime)?;
+            return Ok(match runtime.block_on(node::run(state, source, program, threads, shutdown_signal()))? {
                 Outcome::Stopped => ExitCode::SUCCESS,
                 // 程序文件换过了：请看护程序（systemd 之类）把进程重新拉起来。
                 Outcome::Restart => ExitCode::from(RESTART_EXIT_CODE),
             });
         }
-        Command::Set { setting, state: switch } => {
-            let on = matches!(switch, Switch::On);
-            Config::set(&state.config_path(), setting, on)?;
-            println!("{}", (t.setting_set)(&setting.to_string(), if on { "on" } else { "off" }));
-            if on && matches!(setting, Setting::Declare(_)) {
-                println!("{}", t.declare_hint);
+        Command::Set { setting, value } => {
+            let change = setting.change(&value)?;
+            Config::set(&state.config_path(), change)?;
+            println!("{}", (t.setting_set)(&setting.to_string(), &change.to_string()));
+            match change {
+                Change::Declare(_, true) => println!("{}", t.declare_hint),
+                Change::Profile(profile) => {
+                    // 读不出上次的 netmap 只是少一句提示。
+                    let chosen = state.netmap().ok().flatten().and_then(|netmap| netmap.me.profile);
+                    if let Some(chosen) = chosen.filter(|chosen| *chosen != profile) {
+                        println!("{}", (t.profile_chosen)(chosen.spelling()));
+                    }
+                }
+                Change::Declare(_, false) | Change::ThroughputTests(_) => {}
             }
         }
         Command::Status => {
@@ -251,6 +254,34 @@ fn reachable_locally(listen: SocketAddr) -> SocketAddr {
     };
     SocketAddr::new(ip, listen.port())
 }
+
+/// `i3t run` 的运行时：一个工作线程时是单线程的运行时，多个时是多线程的（线程数由性能档位定，见 `i3t_agent::performance`）。
+///
+/// 同时让 glibc 的分配器尽快把空出来的内存还给系统。本机实验环境里空闲的节点因此少占约 1.4MB，满速搬运的 CPU 量不出差别。
+fn runtime(threads: usize) -> std::io::Result<tokio::runtime::Runtime> {
+    return_memory_promptly();
+    if threads <= 1 {
+        return tokio::runtime::Builder::new_current_thread().enable_all().build();
+    }
+    tokio::runtime::Builder::new_multi_thread().worker_threads(threads).enable_all().build()
+}
+
+/// glibc 默认会把释放的内存留在进程里，大块的阈值还会随用量往上调，一次大流量之后常驻内存就降不下来。
+/// 把两个阈值固定在 128KB：大于它的分配直接向系统要、用完就还，堆顶空出这么多就还。
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn return_memory_promptly() {
+    const THRESHOLD: libc::c_int = 128 * 1024;
+    for (option, name) in [(libc::M_TRIM_THRESHOLD, "M_TRIM_THRESHOLD"), (libc::M_MMAP_THRESHOLD, "M_MMAP_THRESHOLD")] {
+        // SAFETY: `mallopt` 只改分配器的参数，不碰任何调用方的内存；两个参数都是 glibc 认识的选项，值在它允许的范围里。
+        // 这时还没有别的线程。
+        if unsafe { libc::mallopt(option, THRESHOLD) } == 0 {
+            tracing::debug!(option = name, "glibc 不接受这个分配器参数");
+        }
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn return_memory_promptly() {}
 
 /// 只做一两次网络往返的子命令用的运行时。
 fn current_thread() -> anyhow::Result<tokio::runtime::Runtime> {
@@ -356,7 +387,11 @@ mod tests {
     #[test]
     fn commands_parse_and_a_wrong_setting_is_refused() {
         let parse = |args: &[&str]| try_parse_from::<Cli>(command(Lang::English), Lang::English, args.iter().map(OsString::from));
-        assert!(matches!(parse(&["i3t", "set", "can-exit", "on"]).unwrap().command, Command::Set { state: Switch::On, .. }));
+        assert!(matches!(parse(&["i3t", "set", "can-exit", "on"]).unwrap().command, Command::Set { setting: Setting::Declare(_), .. }));
+        assert!(matches!(
+            parse(&["i3t", "set", "profile", "low-footprint"]).unwrap().command,
+            Command::Set { setting: Setting::Profile, .. }
+        ));
         assert!(parse(&["i3t", "set", "can-fly", "on"]).is_err());
         assert!(matches!(parse(&["i3t", "connect", "nas", "22", "--via", "home"]).unwrap().command, Command::Connect { .. }));
     }

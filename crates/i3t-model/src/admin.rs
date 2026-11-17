@@ -21,9 +21,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::control::{
     BackboneLink, Declared, DirectKind, ExitObservation, ExitReport, LaneReport, LegTransport, ListenState, ListenTraffic, PathCandidate,
-    PeerLanes, RelayState, Route, RouteCause, RouteSince, SelfUpdate,
+    PeerLanes, PerformanceReport, RelayState, Route, RouteCause, RouteSince, SelfUpdate,
 };
-use crate::netmap::{Attachment, ExitRole, ForwardProtocol, LaneMode, ListenerProtocol, Reach, RoutingMode};
+use crate::netmap::{Attachment, ExitRole, ForwardProtocol, LaneMode, ListenerProtocol, Profile, Reach, RoutingMode};
 use crate::update::{FailureKind, SelfUpdateBlocker, UpdateCause, UpdateStatus, UpdateTiming, Version};
 
 pub mod diag;
@@ -315,6 +315,9 @@ pub struct Node {
     /// controller 查自带的离线地址库得出。内网地址、从没连上过、库里没有时是 `null`。
     #[serde(default)]
     pub country: Option<String>,
+    /// 管理员给它选的性能档位；`null` 表示没有选，节点用本机配置文件里的（默认 `balanced`）。节点实际在用的见节点详情的 `performance`。
+    #[serde(default)]
+    pub profile: Option<Profile>,
 }
 
 /// 一个节点的程序更新：能不能自己更新、有没有新版本、进行到哪一步。
@@ -595,6 +598,9 @@ pub struct NodeDetail {
     /// 上面这些上报的值（`lanes`、`flows`、流量、`mapping_varies`）是多少秒之前报的；这次连接上还没有上报过是 `null`。
     #[serde(default)]
     pub reported_secs_ago: Option<u64>,
+    /// 节点本次连接期间最近一次报的、它实际在用的性能档位。不在线、旧版本、或者还没报过时是 `null`。
+    #[serde(default)]
+    pub performance: Option<PerformanceReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -618,6 +624,9 @@ pub struct UpdateNode {
     /// 整个替换固定的挂靠 relay；空数组表示不固定。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_relays: Option<Vec<NodeId>>,
+    /// 性能档位。写 `null` 表示不再指定，节点改用本机配置文件里的。
+    #[serde(default, deserialize_with = "nullable", skip_serializing_if = "Option::is_none")]
+    pub profile: Option<Option<Profile>>,
 }
 
 /// 区分"字段没写"和"字段写了 `null`"：前者读成 `None`，后者读成 `Some(None)`。
@@ -1647,11 +1656,29 @@ mod tests {
             rx_bytes: 0,
             lanes: None,
             reported_secs_ago: Some(4),
+            performance: None,
         };
         let value = serde_json::to_value(&detail).unwrap();
         assert_eq!(value["attached"], json!([{ "relay": 9, "rtt_ms": 12 }]));
         assert_eq!(value["reported_secs_ago"], json!(4));
         assert_eq!(serde_json::from_value::<NodeDetail>(value).unwrap(), detail);
+    }
+
+    #[test]
+    fn a_profile_is_chosen_cleared_and_reported_as_codes() {
+        let set: UpdateNode = serde_json::from_value(json!({ "profile": "low_footprint" })).unwrap();
+        assert_eq!(set.profile, Some(Some(Profile::LowFootprint)));
+        let cleared: UpdateNode = serde_json::from_value(json!({ "profile": null })).unwrap();
+        assert_eq!(cleared.profile, Some(None), "null 是不再指定，和没写不一样");
+        assert_eq!(serde_json::from_value::<UpdateNode>(json!({})).unwrap().profile, None);
+        assert_eq!(serde_json::to_value(UpdateNode::default()).unwrap(), json!({}));
+
+        let report =
+            PerformanceReport { profile: Profile::HighThroughput, threads: 4, restart_pending: true, overrides: vec!["threads".into()] };
+        let value = serde_json::to_value(&report).unwrap();
+        assert_eq!(value, json!({ "profile": "high_throughput", "threads": 4, "restart_pending": true, "overrides": ["threads"] }));
+        let newer: PerformanceReport = serde_json::from_value(json!({ "profile": "turbo", "threads": 8 })).unwrap();
+        assert_eq!(newer.profile, Profile::Balanced, "比本程序新的档位读成默认的");
     }
 
     #[test]

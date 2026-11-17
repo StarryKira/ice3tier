@@ -14,6 +14,7 @@ i3t-agent = { path = "../../crates/i3t-agent" }
 i3t-lang = { path = "../../crates/i3t-lang" }
 i3t-model = { path = "../../crates/i3t-model" }
 i3t-proto = { path = "../../crates/i3t-proto" }
+i3t-underlay = { path = "../../crates/i3t-underlay" }
 i3t-update = { path = "../../crates/i3t-update" }
 tokio.workspace = true
 tracing.workspace = true
@@ -24,3 +25,6 @@ workspace = true
 
 [target."cfg(unix)".dependencies]
 rlimit = "0.11.0"
+
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc = "0.2.191"

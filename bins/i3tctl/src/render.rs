@@ -11,8 +11,8 @@ use i3t_model::admin::{
     NodeListeners, NodeRef, NodeUpdate, Overview, PairLaneSide, PairView, PathLeg, PathSource, PathView, RelayEnabled, RouteMatrix,
     RouteTable, Rule, Status, UpdateOverview,
 };
-use i3t_model::control::{DirectKind, LaneCounts, LaneReport, LegTransport, PathSegment, PeerLanes, Route};
-use i3t_model::netmap::DefaultAction;
+use i3t_model::control::{DirectKind, LaneCounts, LaneReport, LegTransport, PathSegment, PeerLanes, PerformanceReport, Route};
+use i3t_model::netmap::{DefaultAction, Profile};
 use i3t_model::update::UpdateTiming;
 use i3t_proto::NodeId;
 
@@ -329,6 +329,7 @@ pub fn node_detail(detail: &NodeDetail) {
     fields.add(t.routing, node.routing.as_ref().map_or_else(|| t.from_network.to_owned(), label));
     fields.add(t.reach, node.reach.as_ref().map_or_else(|| t.from_network.to_owned(), label));
     fields.add(t.pinned, lang.list(node.pinned_relays.iter().map(|relay| format!("#{relay}"))));
+    fields.add(t.profile, profile_summary(node.profile, detail.performance.as_ref()));
     fields.add("netmap", (t.netmap_versions)(node.netmap_version, node.sent_version, node.acked_version));
     fields.add(t.endpoints, lang.list(&detail.endpoints));
     fields.add(t.observed, optional(detail.observed_endpoint));
@@ -345,6 +346,21 @@ pub fn node_detail(detail: &NodeDetail) {
     if let Some(lanes) = &detail.lanes {
         lane_report(lanes);
     }
+}
+
+/// 管理员选的档位，加上节点报的实际情况（在线并且报过时）。
+fn profile_summary(chosen: Option<Profile>, running: Option<&PerformanceReport>) -> String {
+    let (t, lang, _) = context();
+    let chosen = chosen.map_or(t.profile_local, Profile::spelling);
+    let Some(running) = running else { return chosen.to_owned() };
+    let mut notes = vec![(t.profile_running)(running.profile.spelling(), running.threads)];
+    if running.restart_pending {
+        notes.push(t.restart_pending.to_owned());
+    }
+    if !running.overrides.is_empty() {
+        notes.push((t.local_overrides)(&lang.list(&running.overrides)));
+    }
+    lang.paren(chosen, &lang.list(notes))
 }
 
 fn bandwidth(mbps: Option<u32>) -> String {

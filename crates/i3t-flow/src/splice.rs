@@ -13,7 +13,7 @@ use i3t_conn::{RecvStream, SendStream, StreamAborted, StreamCode};
 use i3t_proto::flow::Reason;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::relay::{BUFFER_LEN, End, Flow, Parts};
+use crate::relay::{End, Flow, Parts, buffer_len};
 
 /// 一次对接的结果。
 #[derive(Debug)]
@@ -93,7 +93,7 @@ async fn both(
 }
 
 async fn pump(recv: &mut impl RecvStream, send: &mut impl SendStream, count: &mut u64) -> Result<(), Broken> {
-    let mut buf = vec![0; BUFFER_LEN];
+    let mut buf = vec![0; buffer_len()];
     loop {
         let len = recv.read(&mut buf).await.map_err(Broken::Io)?;
         if len == 0 {

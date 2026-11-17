@@ -63,6 +63,7 @@ fn netmap() -> Netmap {
             forwards: Vec::new(),
             forward_targets: Vec::new(),
             pinned_relays: Vec::new(),
+            profile: None,
         },
         peers: vec![Peer {
             id: node(GW),

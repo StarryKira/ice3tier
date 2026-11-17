@@ -665,3 +665,82 @@ def create_groups(controller: Controller, *names: str) -> None:
 def group_names(controller: Controller, node: Node) -> list[str]:
     """controller 眼里这个节点所在的分组（不含 All）。"""
     return [group["name"] for group in controller.node(node)["groups"]]
+
+
+# 下面是断网之后恢复的场景（test_recovery.py）用的。
+
+# 一个每 10 毫秒发一个 64 字节小消息的 TCP 服务，一直发到客户端断开。参数：监听地址、端口。
+TICKER = r"""
+import socket, sys, threading, time
+def serve(conn):
+    conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    try:
+        while True:
+            conn.sendall(b"t" * 64)
+            time.sleep(0.01)
+    except OSError:
+        pass
+    finally:
+        conn.close()
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind((sys.argv[1], int(sys.argv[2])))
+s.listen(64)
+while True:
+    conn, _ = s.accept()
+    threading.Thread(target=serve, args=(conn,), daemon=True).start()
+"""
+
+# 经本机的 SOCKS5 入口连 TICKER，收 `seconds` 秒，打印 JSON：超过 0.5 秒的停顿（每一段的起止，单调时钟），
+# 收到的字节数，流是不是提前断了。参数：用户名（出口的虚拟 IP）、目标地址、端口、秒数。
+TICKER_CLIENT = r"""
+import json, socket, struct, sys, time
+user, target, port, seconds = sys.argv[1], sys.argv[2], int(sys.argv[3]), float(sys.argv[4])
+s = socket.create_connection(("127.0.0.1", 1080), timeout=30)
+s.sendall(b"\x05\x01\x02"); assert s.recv(2) == b"\x05\x02"
+s.sendall(bytes([1, len(user)]) + user.encode() + b"\x00"); assert s.recv(2) == b"\x01\x00"
+s.sendall(b"\x05\x01\x00\x01" + socket.inet_aton(target) + struct.pack("!H", port))
+reply = b""
+while len(reply) < 10:
+    reply += s.recv(10 - len(reply))
+assert reply[1] == 0, reply
+end = time.monotonic() + seconds
+s.settimeout(0.5)
+last, gaps, total, ended = time.monotonic(), [], 0, None
+while time.monotonic() < end:
+    try:
+        data = s.recv(65536)
+    except socket.timeout:
+        continue
+    except OSError as error:
+        ended = repr(error)
+        break
+    if not data:
+        ended = "eof"
+        break
+    now = time.monotonic()
+    if now - last > 0.5:
+        gaps.append([last, now])
+    last, total = now, total + len(data)
+print(json.dumps({"gaps": gaps, "bytes": total, "ended": ended, "last": last}))
+"""
+
+
+def start_ticker(host: Host, port: int = 80) -> None:
+    host.spawn(sys.executable, "-c", TICKER, "0.0.0.0", str(port))
+    wait_until(lambda: f":{port} " in host.run("ss", "-lnt").stdout, what=f"{host.name} 上的 ticker 服务启动")
+
+
+def blackout_between(a: Host, b: Host, base, on: bool) -> None:
+    """`a` 和 `b` 之间的包全部丢掉（netem 100% 丢包，`on`），或者恢复成 `base`（`lab.Shape`，可以是 `None`）。别的流量不受影响。"""
+    import dataclasses
+
+    from lab import Shape
+
+    shape = dataclasses.replace(base or Shape(), loss_pct=100) if on else base
+    shape_between(a, b, shape)
+
+
+def rto_cap_supported() -> bool:
+    """这个内核能不能给 TCP 的重传定时器设上限（Linux 6.15 起，和 sysctl tcp_rto_max_ms 同时出现）。"""
+    return Path("/proc/sys/net/ipv4/tcp_rto_max_ms").exists()

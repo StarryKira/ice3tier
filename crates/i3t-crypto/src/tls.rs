@@ -40,7 +40,11 @@ pub fn client_config(key: &NodeKey, expected: PublicKey, alpn: &[u8]) -> Result<
 ///
 /// TLS 库不接受这份配置（不会发生在 [`Identity::new`] 签出来的证书上）。
 pub fn client_config_with(identity: &Identity, expected: PublicKey, alpn: &[u8]) -> Result<ClientConfig, TlsError> {
-    let provider = provider();
+    client_config_for(identity, expected, alpn, Cipher::detect())
+}
+
+fn client_config_for(identity: &Identity, expected: PublicKey, alpn: &[u8], cipher: Cipher) -> Result<ClientConfig, TlsError> {
+    let provider = provider(cipher);
     let verifier = PinnedServer { expected, algorithms: provider.signature_verification_algorithms };
     let mut config = ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])?
@@ -77,13 +81,20 @@ pub fn server_config_with(
     is_allowed: impl Fn(&PublicKey) -> bool + Send + Sync + 'static,
     alpn: &[u8],
 ) -> Result<ServerConfig, TlsError> {
-    let provider = provider();
-    let verifier = AllowedClients { is_allowed: Box::new(is_allowed), algorithms: provider.signature_verification_algorithms };
+    server_config_for(identity, Box::new(is_allowed), alpn, Cipher::detect())
+}
+
+fn server_config_for(identity: &Identity, is_allowed: Box<IsAllowed>, alpn: &[u8], cipher: Cipher) -> Result<ServerConfig, TlsError> {
+    let provider = provider(cipher);
+    let verifier = AllowedClients { is_allowed, algorithms: provider.signature_verification_algorithms };
     let mut config = ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_client_cert_verifier(Arc::new(verifier))
         .with_single_cert(vec![identity.certificate.clone()], identity.private_key.clone_key())?;
     config.alpn_protocols = vec![alpn.to_vec()];
+    // 没有 AES 指令的一方要 ChaCha20：做服务端时按自己的顺序挑；有 AES 指令时照客户端的顺序，客户端没有 AES 指令就会把 ChaCha20 排在前面。
+    // 两边谁缺 AES 指令，这条连接就用 ChaCha20。
+    config.ignore_client_order = cipher == Cipher::ChaCha20;
     Ok(config)
 }
 
@@ -126,8 +137,51 @@ pub fn peer_key(end_entity: &CertificateDer<'_>) -> Result<PublicKey, TlsError> 
     Ok(PublicKey::from_bytes(key))
 }
 
-fn provider() -> Arc<CryptoProvider> {
-    Arc::new(ring::default_provider())
+/// 优先用哪一种加密。
+///
+/// CPU 有 AES 指令时 AES-GCM 最省：本机实验环境里（有 AES 和向量指令的 x86）满速传输每 GB 0.67 秒 CPU，ChaCha20-Poly1305 是 1.02 秒，
+/// 吞吐也低三分之一；AES-128 和 AES-256 量不出差别。没有 AES 指令的 CPU（不少 ARM 板子）上 AES-GCM 要用软件慢慢算，ChaCha20 快得多，
+/// 这一点本机量不了，是这类 CPU 上的通行做法。所以按 CPU 能力选，不分性能档位。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cipher {
+    AesGcm,
+    ChaCha20,
+}
+
+impl Cipher {
+    /// 这台机器该优先哪一种。查一次，之后都用这个结论。
+    fn detect() -> Self {
+        static DETECTED: std::sync::LazyLock<Cipher> =
+            std::sync::LazyLock::new(|| if aes_in_hardware() { Cipher::AesGcm } else { Cipher::ChaCha20 });
+        *DETECTED
+    }
+}
+
+/// CPU 有没有 AES 指令和配套的无进位乘法（GCM 要用）。
+fn aes_in_hardware() -> bool {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        std::arch::is_x86_feature_detected!("aes") && std::arch::is_x86_feature_detected!("pclmulqdq")
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        std::arch::is_aarch64_feature_detected!("aes") && std::arch::is_aarch64_feature_detected!("pmull")
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        false
+    }
+}
+
+/// TLS 1.3 的三个套件都留着，只排先后。AES-128-GCM 一定要在：QUIC 的 Initial 包用它。
+fn provider(cipher: Cipher) -> Arc<CryptoProvider> {
+    use rustls::crypto::ring::cipher_suite::{TLS13_AES_128_GCM_SHA256, TLS13_AES_256_GCM_SHA384, TLS13_CHACHA20_POLY1305_SHA256};
+    let mut provider = ring::default_provider();
+    provider.cipher_suites = match cipher {
+        Cipher::AesGcm => vec![TLS13_AES_256_GCM_SHA384, TLS13_AES_128_GCM_SHA256, TLS13_CHACHA20_POLY1305_SHA256],
+        Cipher::ChaCha20 => vec![TLS13_CHACHA20_POLY1305_SHA256, TLS13_AES_128_GCM_SHA256, TLS13_AES_256_GCM_SHA384],
+    };
+    Arc::new(provider)
 }
 
 /// 用节点密钥自签一张证书，连同私钥一起交给 TLS。
@@ -192,8 +246,11 @@ impl ServerCertVerifier for PinnedServer {
     }
 }
 
+/// 接受一方问"认不认这把公钥"的回调。
+type IsAllowed = dyn Fn(&PublicKey) -> bool + Send + Sync;
+
 struct AllowedClients {
-    is_allowed: Box<dyn Fn(&PublicKey) -> bool + Send + Sync>,
+    is_allowed: Box<IsAllowed>,
     algorithms: WebPkiSupportedAlgorithms,
 }
 
@@ -317,6 +374,27 @@ mod tests {
         let mut received = [0; 4];
         server.reader().read_exact(&mut received).unwrap();
         assert_eq!(&received, b"ping");
+    }
+
+    #[test]
+    fn the_side_without_aes_instructions_gets_chacha20_whichever_side_it_is() {
+        let (alice, bob) = (Identity::new(&NodeKey::generate().unwrap()).unwrap(), Identity::new(&NodeKey::generate().unwrap()).unwrap());
+        let bob_public = bob.certificate.clone();
+        let bob_key = peer_key(&bob_public).unwrap();
+        let negotiated = |client: Cipher, server: Cipher| {
+            let client = client_config_for(&alice, bob_key, ALPN, client).unwrap();
+            let server = server_config_for(&bob, Box::new(|_| true), ALPN, server).unwrap();
+            let (client, server) = handshake(client, server);
+            let (client, server) = (client.unwrap(), server.unwrap());
+            let suite = client.negotiated_cipher_suite().unwrap().suite();
+            assert_eq!(Some(suite), server.negotiated_cipher_suite().map(|suite| suite.suite()));
+            suite
+        };
+        use rustls::CipherSuite::{TLS13_AES_256_GCM_SHA384 as AES, TLS13_CHACHA20_POLY1305_SHA256 as CHACHA};
+        assert_eq!(negotiated(Cipher::AesGcm, Cipher::AesGcm), AES);
+        assert_eq!(negotiated(Cipher::ChaCha20, Cipher::AesGcm), CHACHA, "客户端缺 AES 指令");
+        assert_eq!(negotiated(Cipher::AesGcm, Cipher::ChaCha20), CHACHA, "服务端缺 AES 指令");
+        assert_eq!(negotiated(Cipher::ChaCha20, Cipher::ChaCha20), CHACHA);
     }
 
     #[test]

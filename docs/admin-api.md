@@ -4,7 +4,18 @@
 
 对应的 Rust 类型在 `crates/i3t-model/src/admin.rs`，实现在 `crates/i3t-controller/src/admin.rs`。文档和代码不一致时以代码为准，并请修正文档。
 
-> **最新一次改动**（分组取代标签）。原来的"标签"只是节点、注册令牌和规则上的一串文字；现在它是**分组**：一样单独的东西，
+> **最新一次新增**（性能档位）。管理员可以给每个节点选一个性能档位，节点报它实际在用的。正文里新加的地方标着「新增」。这一次的清单：
+>
+> - 节点 `Node` 多了 `profile`：管理员给它选的档位，`"low_footprint"`、`"balanced"`、`"high_throughput"`，没有选时是 `null`（第 5 节）。
+> - 改节点（`PATCH …/nodes/{node}`）可以写 `profile`；写 `null` 是不再指定，节点改用它本机配置文件里的（第 5 节）。
+> - 节点详情 `NodeDetail` 多了 `performance`（结构 `PerformanceReport`）：节点实际在用的档位、工作线程数、是不是要重启才全部生效、
+>   本机配置文件改了哪些项（第 5 节）。
+> - 操作记录 `node.update` 的 `changes` 里可以有 `profile`（第 3 节）。
+> - 节点协议没有升版：档位在节点的 netmap 里，旧的节点忽略它；节点上报里的 `performance` 旧的 controller 忽略，旧的节点不报。
+>
+> 已有接口的路径、请求体和应答里原有的字段都没有变。
+>
+> **上一次改动**（分组取代标签）。原来的"标签"只是节点、注册令牌和规则上的一串文字；现在它是**分组**：一样单独的东西，
 > 有编号和名字，有自己的接口（第 18 节）。这是改名，旧的写法不再收，也没有别名。这一次的清单：
 >
 > - 去掉的：`POST /networks/{network}/tags/rename` 和它的 `RenameTag`、`RenamedTag`；`Node.tags`、`UpdateNode.tags`；
@@ -24,7 +35,7 @@
 > - 升级时数据库原地迁移：节点、注册令牌、规则里出现过的每个标签成为同名的分组，`all` 成为 `All`，成员和规则跟着走。
 >   旧的操作记录的参数也改成了新的写法。
 >
-> **上一次新增**（代码和参数）。界面要能用自己的语言写出 controller 和节点说的事，所以给人看的那些中文原话旁边
+> **再上一次新增**（代码和参数）。界面要能用自己的语言写出 controller 和节点说的事，所以给人看的那些中文原话旁边
 > 多了代码和写成一句话要用到的值；原话照旧在，给日志和旧的客户端。正文里新加的地方标着「新增」。这一次的清单：
 >
 > - 约定（1.2 节）：原话旁边的**原因**是一个对象 `{ "code": 代码, …这个代码要用到的值 }`，叫 `cause`（或者 `check_cause`）；
@@ -44,7 +55,7 @@
 >
 > 已有接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **再上一次新增**（主动测试）。这一次的清单：
+> **更早的新增**（主动测试）。这一次的清单：
 >
 > - 新接口：`POST`、`GET /networks/{network}/tests`（发起一个主动测试、列出最近的测试），`GET /networks/{network}/tests/{id}`、
 >   `POST …/tests/{id}/cancel`（看一个测试的进度和结果、取消它），`POST`、`GET /networks/{network}/tests/matrix`、
@@ -334,7 +345,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `network.update` | `network`、`network_name`，以及改完之后的 `cidr`、`routing`、`max_relay_hops`、`reach`、`class` |
 | `network.delete` | `network`、`network_name` |
 | `node.enroll` | `node`、`node_name`、`virtual_ip`、`token`（用的注册令牌的编号）、`predecessor`、`predecessor_name`（继任的原节点；不是继任时是 `null`） |
-| `node.update` | `node`、`node_name`（改之前的名字）、`changes`：改了的项，没改的不在里面。`name` 和 `virtual_ip` 写成 `{ "from": …, "to": … }`，`groups`、`dial_out_only`、`routing`、`reach`、`pinned_relays` 是改之后的值；`groups` 的每一项是 `{ "group": 编号, "group_name": 名字 }`，不含 `All` |
+| `node.update` | `node`、`node_name`（改之前的名字）、`changes`：改了的项，没改的不在里面。`name` 和 `virtual_ip` 写成 `{ "from": …, "to": … }`，`groups`、`dial_out_only`、`routing`、`reach`、`pinned_relays`、「新增」`profile` 是改之后的值（`profile` 是 `null` 表示不再指定）；`groups` 的每一项是 `{ "group": 编号, "group_name": 名字 }`，不含 `All` |
 | `node.delete` | `node`、`node_name`、`virtual_ip` |
 | `node.succeed` | `node`、`node_name`、`virtual_ip`（继任之前的），`predecessor`、`predecessor_name`、`predecessor_virtual_ip` |
 | `node.relay.enable`、`node.relay.disable`、`node.exit.enable`、`node.exit.disable`、`node.relay.withdrawn`、`node.exit.withdrawn` | `node`、`node_name` |
@@ -544,7 +555,8 @@ controller 自己的情况。也用来检查地址和令牌对不对。
     "failure": null
   },
   "attached": [],
-  "country": "JP"
+  "country": "JP",
+  "profile": null
 }
 ```
 
@@ -575,6 +587,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `update` | 「新增」这个节点的程序更新：能不能自己更新、有没有新版本、进行到哪一步。结构是 `NodeUpdate`，见第 14 节 |
 | `attached` | 「新增」节点挂靠的 relay（节点编号）和到它们的往返延迟（毫秒），取自它最近的上报；离线时是它离线前报的。以前只在节点详情里有，现在列表里也有：数"有几个节点挂靠在这个 relay 上"只要一次 `GET …/nodes` |
 | `country` | 「新增」公网地址（controller 看到的来源地址，详情里的 `observed_endpoint`）所在的国家或地区，ISO 3166-1 的两个大写字母（`"JP"`）。controller 查程序自带的离线地址库（DB-IP 的 IP to Country Lite，<https://db-ip.com>，CC BY 4.0），不联网。内网地址、从没连上过、库里没有时是 `null`；比这个文档旧的 controller 没有这个字段 |
+| `profile` | 「新增」管理员给它选的性能档位：`"low_footprint"`（低占用）、`"balanced"`（默认）、`"high_throughput"`（高速度）；`null` 表示没有选，节点用它本机配置文件里的（没写就是 `balanced`）。节点实际在用的见详情里的 `performance`。比这个文档旧的 controller 没有这个字段。各档位的内容见 [architecture.md](architecture.md) 的性能一节 |
 
 **能力的启用。** relay、出口和端口转发的目标都要节点先在本地声明（`declared` 里对应的字段是 `true`），管理员才能启用。没有声明时，启用的请求得到 `409 not_declared`，`message` 里写着要在节点上执行的命令（`i3t set can-relay on`、`i3t set can-exit on`、`i3t set can-forward on`）。界面上应当在 `declared` 里对应字段是 `false` 时把开关置灰并显示这个做法。节点撤回声明时，已经启用的能力随之关闭（`relay` 或 `exit` 变回 `null`，指向它的端口转发被停用），并在操作记录里留下 `node.*.withdrawn`；节点再声明回来，能力不会自己打开。
 
@@ -625,7 +638,8 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   "mapping_varies": false,
   "flows": 2,
   "tx_bytes": 1024,
-  "rx_bytes": 4096
+  "rx_bytes": 4096,
+  "performance": { "profile": "balanced", "threads": 2, "restart_pending": false, "overrides": [] }
 }
 ```
 
@@ -639,6 +653,16 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `tx_bytes`、`rx_bytes` | 节点启动以来发出和收到的字节数 |
 | `lanes` | 「新增」独占 TCP 的状况，结构是 `LaneReport`（第 12 节）。节点不在线、版本太旧没有报、或者还没有上报过时是 `null` |
 | `reported_secs_ago` | 「新增」节点最近一次上报是多少秒之前，上面这几项（`lanes`、`flows`、流量、`mapping_varies`）都是那一次报的。这次连接上还没有上报过、或者不在线时是 `null` |
+| `performance` | 「新增」节点实际在用的性能档位（`PerformanceReport`），见下表。节点不在线、版本太旧没有报、或者还没有上报过时是 `null` |
+
+「新增」`PerformanceReport`：
+
+| 字段 | 含义 |
+|---|---|
+| `profile` | 现在生效的档位：管理员选了的话是它，否则是节点本机配置文件里的。取值同 `Node.profile`；比这个文档新的节点报了不认识的档位时读成 `"balanced"` |
+| `threads` | 节点的工作线程数，进程启动时定 |
+| `restart_pending` | `true`：档位换了，工作线程数要等节点重启才变；别的项已经生效。界面可以提示"重启节点后完全生效" |
+| `overrides` | 节点本机配置文件里单独改了的项，写的是配置文件里的键名：`"threads"`、`"stream_buffer_kb"`、`"stream_window_kb"`、`"connection_window_mb"`、`"idle_close_secs"`、`"return_memory"`（以后可能增加，不认识的照样显示）。这些项不跟着档位走；空数组表示全部按档位 |
 
 `mapping_varies`、`flows`、`tx_bytes`、`rx_bytes`、`lanes` 是节点这次连接期间最近一次上报的值；节点不在线时是 `null` 和 0。
 
@@ -659,8 +683,9 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `routing` | 一种选路模式；写 `null` 表示改回用网络的默认值 |
 | `reach` | 一种路径限制；写 `null` 表示改回用网络的默认值 |
 | `pinned_relays` | 整个替换固定的挂靠 relay，最多 8 个，每个都必须是这个网络里启用了的 relay；`[]` 表示不固定 |
+| `profile` | 「新增」性能档位：`"low_footprint"`、`"balanced"`、`"high_throughput"`；写 `null` 表示不再指定，节点改用它本机配置文件里的。缓冲、窗口和空闲回收的时间在节点收到新配置时就生效，工作线程数要节点重启才变（节点详情的 `performance.restart_pending`）。不认识的值是 `400 invalid_request`，`field` 是 `profile` |
 
-全部可省略。`routing` 和 `reach` 是仅有的两个"写 `null` 有含义"的字段。
+全部可省略。`routing`、`reach` 和「新增」`profile` 是仅有的几个"写 `null` 有含义"的字段。
 
 应答：`Node`。
 错误：`name_taken`、`name_cooling_down`、`address_taken`、`address_cooling_down`、`address_out_of_range`、`invalid_request`、`not_found`（固定的 relay 不在这个网络里；「新增」`groups` 里有不存在的分组，`what` 是 `group`，`field` 是 `groups[序号]`，见 18.1 节）。

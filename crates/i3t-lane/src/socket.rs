@@ -5,6 +5,7 @@
 //! | `TCP_NODELAY` | 开 | 流式的小块响应要立刻走 |
 //! | 内核保活 | 静默 25 秒开始，间隔 10 秒，3 次 | lane 穿过家用路由器，静默久了映射会被悄悄回收；探测也让死掉的 lane 在一分钟左右被发现 |
 //! | `TCP_USER_TIMEOUT`（Linux） | 空闲 90 秒；开流之后、对端第一次回话之前 15 秒；流里 120 秒 | 已发出的数据这么久没有被确认就判连接已死 |
+//! | `TCP_RTO_MAX_MS`（Linux 6.15 起） | 2 秒 | 断网之后路一通，最多 2 秒就重传，不用等加倍了的重传定时器（见 `i3t_underlay::tcp_recovery`） |
 //! | `TCP_NOTSENT_LOWAT`（Linux） | 128 KB | 内核里还没发出去的数据有上限，内存跟着有上限 |
 //!
 //! 流没有空闲时限：一个模型可以想好几分钟不说话。
@@ -12,6 +13,7 @@
 use std::io;
 use std::time::Duration;
 
+use i3t_underlay::tcp_recovery::Recovery;
 use socket2::{SockRef, TcpKeepalive};
 use tokio::net::TcpStream;
 
@@ -44,7 +46,10 @@ pub(crate) fn configure(stream: &TcpStream) -> io::Result<()> {
     #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "windows", target_os = "freebsd"))]
     let keepalive = keepalive.with_retries(KEEPALIVE_PROBES);
     socket.set_tcp_keepalive(&keepalive)?;
-    set_user_timeout(stream, IDLE_USER_TIMEOUT);
+    // 重传上限总是和放弃时限一起设；内核没有上限这个选项时照旧只设放弃时限。之后各阶段只换放弃时限，上限留着。
+    if !Recovery::giving_up_after(IDLE_USER_TIMEOUT).apply(stream) {
+        set_user_timeout(stream, IDLE_USER_TIMEOUT);
+    }
     limit_unsent(&socket)
 }
 

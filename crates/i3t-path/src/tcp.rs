@@ -9,11 +9,13 @@ use i3t_proto::Datagram;
 use i3t_proto::datagram::RelayHeader;
 use i3t_proto::session::{Echo, Frame, Refused};
 use i3t_underlay::tcp_leg::{self, FrameQueue, FrameReader, FrameSender};
+use i3t_underlay::tcp_recovery::Recovery;
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 
 use crate::control::Ctrl;
 use crate::table::{RelaySlot, Shared};
+use crate::timing::TCP_LEG_GIVE_UP;
 
 /// 每个地址连多久算连不上。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
@@ -63,6 +65,9 @@ async fn run(shared: &Shared, relay: &RelaySlot, conn: u64, addrs: &[SocketAddr]
     let Some(stream) = connect(addrs).await else { return "连不上" };
     if tcp_leg::configure(&stream).is_err() {
         return "设置不了 socket 选项";
+    }
+    if !Recovery::giving_up_after(TCP_LEG_GIVE_UP).apply(&stream) {
+        tracing::debug!(relay = %relay.id, "到 relay 的 TCP 没有设重传上限（内核不支持），断网之后恢复得慢一些");
     }
     if shared.ctrl.send(Ctrl::Tcp { relay: relay.id, conn, event: TcpEvent::Connected }).await.is_err() {
         return "路径层已经停了";

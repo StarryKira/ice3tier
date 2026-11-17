@@ -50,6 +50,7 @@ impl Controller {
             rx_bytes: live.map_or(0, |live| live.rx_bytes),
             lanes: live.and_then(|live| live.lanes.clone()),
             reported_secs_ago: live.and_then(|live| live.reported_at).map(|at| at.elapsed().as_secs()),
+            performance: live.and_then(|live| live.performance.clone()),
         })
     }
 
@@ -85,6 +86,7 @@ impl Controller {
             node.dial_out_only = request.dial_out_only.unwrap_or(node.dial_out_only);
             node.routing = request.routing.unwrap_or(node.routing);
             node.reach = request.reach.unwrap_or(node.reach);
+            node.profile = request.profile.unwrap_or(node.profile);
             store.update_node(&node)?;
             if node.groups != before.groups {
                 store.set_node_groups(id, &node.groups)?;
@@ -446,6 +448,9 @@ fn update_params(before: &NodeRecord, after: &NodeRecord, groups: &[GroupRecord]
     if before.pinned_relays != after.pinned_relays {
         changes.insert("pinned_relays".to_owned(), json!(after.pinned_relays));
     }
+    if before.profile != after.profile {
+        changes.insert("profile".to_owned(), json!(after.profile));
+    }
     json!({ "node": after.id, "node_name": before.name, "changes": changes })
 }
 
@@ -469,6 +474,9 @@ fn describe_update(before: &NodeRecord, after: &NodeRecord, groups: &[GroupRecor
     }
     if before.pinned_relays != after.pinned_relays {
         changes.push(format!("固定的挂靠 relay {}", listed(after.pinned_relays.iter().map(|relay| format!("#{relay}")))));
+    }
+    if before.profile != after.profile {
+        changes.push(format!("性能档位 {}", after.profile.map_or("本机决定", |profile| profile.as_str())));
     }
     if changes.is_empty() {
         format!("节点 {}：没有变化", after.name)

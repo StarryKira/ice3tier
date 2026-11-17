@@ -69,6 +69,13 @@ pub fn status(live: &LiveStatus) {
     if let Some(quota) = live.exit.as_ref().and_then(|exit| exit.quota) {
         fields.add(t.quota, format!("{} / {}", lang.bytes(quota.used_bytes), lang.bytes(quota.limit_bytes)));
     }
+    if let Some(performance) = &live.performance {
+        let mut summary = (t.profile_running)(performance.profile.spelling(), performance.threads);
+        if performance.restart_pending {
+            summary = lang.paren(&summary, t.restart_pending);
+        }
+        fields.add(t.profile, summary);
+    }
     fields.print();
 
     println!("\n{}", t.listeners);

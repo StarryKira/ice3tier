@@ -214,8 +214,18 @@ impl PeerSlot {
     }
 
     /// 收到了它的一个连接包（不管从哪条路来的）。
-    pub(crate) fn received(&self, clock: &Clock) {
-        self.last_rx.touch(clock);
+    ///
+    /// 它静默了 [`SILENCE`] 以上又出现时，把留着的包补发一遍（见 [`flush`](Self::flush)）。路断的时候两头都在退避：
+    /// 恢复路的那一头会补发自己的包，可另一头的路一直是"通的"（比如它到 relay 的那一段没断，断的是对端到 relay 的那一段），
+    /// 它不知道路恢复了，只能等自己退避到很久之后的下一次重传。实测（对端经 TCP 中转、那一段断开 20 秒）：发数据的这一头
+    /// 被拥塞窗口卡着，连收到的包都不确认，对端的连接 30 秒没有收到任何东西，空闲超时断掉。对端的包一到就补发，
+    /// 它收到之后回确认，两头的丢包检测都立刻恢复。没断过的连接两次保活之间也会补发一两个重复的小包，代价可以忽略。
+    pub(crate) fn received(&self, shared: &Shared) {
+        let reappeared = self.last_rx.elapsed(&shared.clock).is_some_and(|silent| silent >= SILENCE);
+        self.last_rx.touch(&shared.clock);
+        if reappeared {
+            self.flush(shared, Instant::now());
+        }
     }
 
     /// 现在有没有路。
@@ -517,6 +527,26 @@ mod tests {
         // 留得太久的不再补发：对面拿它算出来的延迟没有意义。
         slot.flush(&shared, now + STASH_MAX_AGE + Duration::from_secs(1));
         assert_eq!(receive(&working).await, None);
+    }
+
+    #[tokio::test]
+    async fn packets_kept_while_the_peer_was_silent_are_resent_when_it_is_heard_from_again() {
+        let shared = shared();
+        let receiver = UdpPort::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let slot = PeerSlot::new(NodeId::new(2).unwrap());
+        slot.set_hop(Hop::Direct(receiver.local_addr()));
+        slot.received(&shared);
+        // 对端一直没有回音：路"通着"，包照样发出去（这里收到的是第一次发送），同时留了底。
+        tokio::time::sleep(STASH_WHEN_SILENT + Duration::from_millis(50)).await;
+        slot.send(&shared, &Packets { contents: &[7; 100], segment_size: None, ecn: None }).unwrap();
+        assert_eq!(receive(&receiver).await, Some(vec![7; 100]));
+        tokio::time::sleep(SILENCE).await;
+        // 对端又出现了：留着的包再发一遍。
+        slot.received(&shared);
+        assert_eq!(receive(&receiver).await, Some(vec![7; 100]), "静默之后对端的包一到就补发");
+        // 包连续地来的时候不补发。
+        slot.received(&shared);
+        assert_eq!(receive(&receiver).await, None);
     }
 
     #[tokio::test]

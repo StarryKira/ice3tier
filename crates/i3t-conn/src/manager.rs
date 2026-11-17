@@ -22,13 +22,12 @@ use crate::contract::{Datagram, DatagramSendError, DatagramSender, Incoming, Ope
 use crate::quic::{self, SERVER_NAME};
 use crate::socket;
 use crate::stream::{self, RecvHalf, SendHalf, StreamCount};
+use crate::tuning::Tuning;
 
 /// 建立连接的时限（白皮书 §5.4）。没有 relay 可走时，这段时间花在等直连打通上。
 const DIAL_TIMEOUT: Duration = Duration::from_secs(5);
 /// 对端连进来时握手的时限。
 const WELCOME_TIMEOUT: Duration = Duration::from_secs(10);
-/// 没有流之后多久关闭连接（白皮书 §6.5）。这样 N 个节点不会留下 N² 条常驻连接和保活流量。
-const IDLE_CLOSE: Duration = Duration::from_secs(300);
 /// 两边同时拨号会留下两条连接。多出来的那一条没有流之后这么久就关。
 const DUPLICATE_IDLE_CLOSE: Duration = Duration::from_secs(10);
 /// 多久看一次连接是不是空闲。
@@ -137,7 +136,8 @@ pub(crate) struct Manager {
     quic: quinn::Endpoint,
     paths: Arc<Paths>,
     netmap: watch::Receiver<Arc<Netmap>>,
-    transport: Arc<TransportConfig>,
+    /// 现在的档位设置和按它建好的传输参数。之后拨出的连接用它；空闲回收每次检查时读它。
+    tuning: Mutex<(Tuning, Arc<TransportConfig>)>,
     peers: Mutex<HashMap<NodeId, PeerEntry>>,
     next_serial: AtomicU64,
     /// 对端连进来、还在握手的连接。
@@ -164,7 +164,7 @@ impl Manager {
             quic,
             paths,
             netmap,
-            transport: quic::transport(),
+            tuning: Mutex::new((Tuning::default(), quic::transport(&Tuning::default()))),
             peers: Mutex::new(HashMap::new()),
             next_serial: AtomicU64::new(0),
             handshakes: Arc::default(),
@@ -172,6 +172,22 @@ impl Manager {
             datagrams,
             closed: watch::Sender::new(false),
         })
+    }
+
+    fn tuning(&self) -> std::sync::MutexGuard<'_, (Tuning, Arc<TransportConfig>)> {
+        self.tuning.lock().expect("connection tuning mutex poisoned")
+    }
+
+    /// 换掉接受连接一方的配置，之后连进来的连接用它。
+    pub(crate) fn set_server_config(&self, server: quinn::ServerConfig) {
+        self.quic.set_server_config(Some(server));
+    }
+
+    /// 换上新的档位设置，返回之后建立的连接要用的传输参数（对端连进来的那一侧由调用方装到端点上）。
+    pub(crate) fn tune(&self, tuning: Tuning) -> Arc<TransportConfig> {
+        let transport = quic::transport(&tuning);
+        *self.tuning() = (tuning, Arc::clone(&transport));
+        transport
     }
 
     fn peers(&self) -> std::sync::MutexGuard<'_, HashMap<NodeId, PeerEntry>> {
@@ -248,7 +264,8 @@ impl Manager {
             return Err(OpenError::NoRoute(peer));
         }
         let lost = |reason: String| OpenError::ConnectionLost { peer, reason };
-        let config = quic::client(&self.key, peer_key, Arc::clone(&self.transport)).map_err(|error| lost(error.to_string()))?;
+        let transport = Arc::clone(&self.tuning().1);
+        let config = quic::client(&self.key, peer_key, transport).map_err(|error| lost(error.to_string()))?;
         let connecting = match self.quic.connect_with(config, socket::virtual_addr(peer), SERVER_NAME) {
             Ok(connecting) => connecting,
             Err(ConnectError::EndpointStopping) => return Err(OpenError::Closed),
@@ -396,7 +413,8 @@ impl Manager {
         let idle = conn.streams.idle_since()?.elapsed();
         let preferred = self.preferred(peer).is_some_and(|preferred| Arc::ptr_eq(&preferred, conn));
         let keep_alive = self.netmap.borrow().peer(peer).is_some_and(|info| info.keep_alive);
-        let (limit, reason) = idle_limit(preferred, keep_alive)?;
+        let idle_close = self.tuning().0.idle_close;
+        let (limit, reason) = idle_limit(preferred, keep_alive, idle_close)?;
         (idle >= limit).then_some(reason)
     }
 
@@ -625,11 +643,12 @@ impl HandshakeGate {
 ///
 /// `preferred`：到这个对端开新的流用的就是这一条。不是的话它是两边同时拨号多出来的那一条，很快就关。
 /// `keep_alive`：netmap 把这个对端设成了常驻。它可能连不进去，关掉之后只能等它再连过来，所以不回收。
-fn idle_limit(preferred: bool, keep_alive: bool) -> Option<(Duration, &'static str)> {
-    match (preferred, keep_alive) {
-        (false, _) => Some((DUPLICATE_IDLE_CLOSE, "到同一个对端有两条连接，多出来的这一条空闲了")),
-        (true, true) => None,
-        (true, false) => Some((IDLE_CLOSE, "没有流超过 5 分钟")),
+/// `idle_close`：档位定的空闲回收时间（白皮书 §6.5），默认 5 分钟，这样 N 个节点不会留下 N² 条常驻连接和保活流量；`None` 不回收。
+fn idle_limit(preferred: bool, keep_alive: bool, idle_close: Option<Duration>) -> Option<(Duration, &'static str)> {
+    match (preferred, keep_alive, idle_close) {
+        (false, _, _) => Some((DUPLICATE_IDLE_CLOSE, "到同一个对端有两条连接，多出来的这一条空闲了")),
+        (true, true, _) | (true, false, None) => None,
+        (true, false, Some(limit)) => Some((limit, "没有流超过了档位定的空闲回收时间")),
     }
 }
 
@@ -768,11 +787,16 @@ mod tests {
     }
 
     #[test]
-    fn idle_connections_are_closed_after_five_minutes_unless_the_peer_is_kept_alive() {
-        assert_eq!(idle_limit(true, false).map(|(limit, _)| limit), Some(Duration::from_secs(300)));
-        assert_eq!(idle_limit(true, true), None, "常驻的对端不回收");
-        // 多出来的那一条连接很快就关，常驻也一样：留着的是另一条。
-        assert_eq!(idle_limit(false, false).map(|(limit, _)| limit), Some(DUPLICATE_IDLE_CLOSE));
-        assert_eq!(idle_limit(false, true).map(|(limit, _)| limit), Some(DUPLICATE_IDLE_CLOSE));
+    fn idle_connections_are_closed_after_the_profile_time_unless_the_peer_is_kept_alive() {
+        let default = Tuning::default().idle_close;
+        assert_eq!(idle_limit(true, false, default).map(|(limit, _)| limit), Some(Duration::from_secs(300)));
+        assert_eq!(idle_limit(true, false, Some(Duration::from_secs(60))).map(|(limit, _)| limit), Some(Duration::from_secs(60)));
+        assert_eq!(idle_limit(true, true, default), None, "常驻的对端不回收");
+        assert_eq!(idle_limit(true, false, None), None, "档位说不回收");
+        // 多出来的那一条连接很快就关，常驻和不回收的档位也一样：留着的是另一条。
+        for idle_close in [default, None] {
+            assert_eq!(idle_limit(false, false, idle_close).map(|(limit, _)| limit), Some(DUPLICATE_IDLE_CLOSE));
+            assert_eq!(idle_limit(false, true, idle_close).map(|(limit, _)| limit), Some(DUPLICATE_IDLE_CLOSE));
+        }
     }
 }

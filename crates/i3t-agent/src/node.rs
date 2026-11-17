@@ -19,7 +19,7 @@
 use std::ffi::OsString;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,7 +28,7 @@ use i3t_access::Access;
 use i3t_conn::{Endpoint, EndpointConfig};
 use i3t_exit::{Exit, Os, Outbound, QuotaState};
 use i3t_model::Netmap;
-use i3t_model::control::{Hello, SelfUpdate};
+use i3t_model::control::{Hello, PerformanceReport, SelfUpdate};
 use i3t_model::netmap::{Listener, ListenerProtocol};
 use i3t_model::update::UpdateStatus;
 use i3t_update::{RolledBack, Startup, Updater, UpdaterConfig};
@@ -42,6 +42,8 @@ use crate::flows;
 use crate::join::hello;
 use crate::lanes::NodeLanes;
 use crate::local::LocalServers;
+use crate::memory;
+use crate::performance::Performance;
 use crate::persist::{self, StatePorts};
 use crate::program::Program;
 use crate::runtime::{NodeAccess, NodeExit, Parts, Runtime};
@@ -70,23 +72,47 @@ pub enum Outcome {
     Restart,
 }
 
+/// 进程启动时该用的性能档位设置：按本机配置文件，和 controller 上次下发的（或者静态 netmap 里写的）档位。
+/// 运行时要按它的线程数来建，所以在 [`run`] 之前单独算。
+///
+/// # Errors
+///
+/// 配置文件有错，或者静态模式下 netmap 文件读不了。还没有加入网络不算错：那时 [`run`] 自己会报。
+pub fn starting_performance(state: &StateDir, source: &Source) -> anyhow::Result<Performance> {
+    let config = Config::load(&state.config_path())?;
+    let netmap = match source {
+        Source::Controller => state.netmap()?,
+        Source::Static(path) => Some(read_static(path)?),
+    };
+    Ok(Performance::resolve(netmap.and_then(|netmap| netmap.me.profile), &config.performance))
+}
+
+fn read_static(path: &Path) -> anyhow::Result<Netmap> {
+    let text = std::fs::read(path).with_context(|| format!("读 netmap 文件 {}", path.display()))?;
+    serde_json::from_slice(&text).with_context(|| format!("解析 netmap 文件 {}", path.display()))
+}
+
 /// 运行节点，直到 `shutdown` 完成、controller 吊销了这个节点，或者程序文件换过了需要重启。
+///
+/// `threads` 是运行时实际的工作线程数（见 [`starting_performance`]）：档位换了、要的线程数和它不同时，上报里说要重启。
 ///
 /// # Errors
 ///
 /// 配置文件有错、还没有加入网络、端口绑不上，或者运行中被 controller 吊销、拒绝。
-pub async fn run(state: StateDir, source: Source, program: Program, shutdown: impl Future<Output = ()>) -> anyhow::Result<Outcome> {
+pub async fn run(
+    state: StateDir,
+    source: Source,
+    program: Program,
+    threads: usize,
+    shutdown: impl Future<Output = ()>,
+) -> anyhow::Result<Outcome> {
     let config = Config::load(&state.config_path())?;
     let (key, initial) = match &source {
         Source::Controller => {
             let key = state.key()?.context(NOT_JOINED)?;
             (key, state.netmap()?.context(NOT_JOINED)?)
         }
-        Source::Static(path) => {
-            let text = std::fs::read(path).with_context(|| format!("读 netmap 文件 {}", path.display()))?;
-            let netmap: Netmap = serde_json::from_slice(&text).with_context(|| format!("解析 netmap 文件 {}", path.display()))?;
-            (state.key_or_generate()?, netmap)
-        }
+        Source::Static(path) => (state.key_or_generate()?, read_static(path)?),
     };
     let controller = match source {
         Source::Controller => Some(state.controller()?.context(NOT_JOINED)?),
@@ -152,6 +178,11 @@ pub async fn run(state: StateDir, source: Source, program: Program, shutdown: im
         })
         .with_context(|| format!("绑定端口 {}", config.port))?,
     );
+    let performance = Performance::resolve(initial.me.profile, &config.performance);
+    tracing::info!(profile = %performance.profile, threads, overrides = ?performance.overrides, "性能档位");
+    apply(&performance, &endpoint);
+    let (performance_tx, performance_rx) = watch::channel(performance.report(threads));
+    let give_back_memory = tokio::spawn(memory::give_back());
     // 出口不替别人连本节点自己对外的地址（反射地址、路由器映射出来的地址），这些地址数据面最清楚。
     // 两份都要：候选端点里有本机网卡上的地址，"别人看到的地址"在只经 relay 的节点上也有。
     let outbound = Outbound::new(local_rx.clone(), Os).with_own_endpoints({
@@ -207,6 +238,7 @@ pub async fn run(state: StateDir, source: Source, program: Program, shutdown: im
         link: controller.is_some().then_some(link_state_rx),
         update: update_rx,
         flows: flows_rx.clone(),
+        performance: performance_rx,
     }));
     let count_flows = tokio::spawn({
         let runtime = Arc::clone(&runtime);
@@ -271,6 +303,7 @@ pub async fn run(state: StateDir, source: Source, program: Program, shutdown: im
                 drain: &mut drain,
                 updater: updater.as_deref(),
                 awaiting_confirmation,
+                performance: Tuned { current: performance, threads, report: &performance_tx },
             };
             let outcome = managed.run(updates, shutdown).await;
             if matches!(outcome, Ok(Outcome::Restart)) {
@@ -292,6 +325,7 @@ pub async fn run(state: StateDir, source: Source, program: Program, shutdown: im
     save_quota.abort();
     persist::save_quota_now(&state_for_quota, &exit);
     count_flows.abort();
+    give_back_memory.abort();
     follow_routes.abort();
     follow_lanes.abort();
     serve_access.abort();
@@ -337,6 +371,43 @@ struct Managed<'a> {
     updater: Option<&'a Updater>,
     /// 正在运行的是刚换上来、还没有被确认的新版本。
     awaiting_confirmation: bool,
+    performance: Tuned<'a>,
+}
+
+/// 正在用的性能档位设置。controller 换了档位就换。
+struct Tuned<'a> {
+    current: Performance,
+    /// 运行时实际的工作线程数。
+    threads: usize,
+    report: &'a watch::Sender<PerformanceReport>,
+}
+
+impl Tuned<'_> {
+    /// netmap 里的档位（或者本机配置）变了的话，换上新的设置。线程数要重启才变，上报里说明。
+    fn follow(&mut self, netmap: &Netmap, config: &Config, endpoint: &Endpoint) {
+        let next = Performance::resolve(netmap.me.profile, &config.performance);
+        if next == self.current {
+            return;
+        }
+        let restart = next.threads != self.threads;
+        tracing::info!(
+            profile = %next.profile,
+            threads = next.threads,
+            running_threads = self.threads,
+            "性能档位换了：缓冲、窗口和空闲回收的时间立刻生效{}",
+            if restart { "，工作线程数要重启才变" } else { "" }
+        );
+        apply(&next, endpoint);
+        self.report.send_replace(next.report(self.threads));
+        self.current = next;
+    }
+}
+
+/// 把档位里立刻生效的设置交给各层。
+fn apply(performance: &Performance, endpoint: &Endpoint) {
+    i3t_flow::set_buffer_len(performance.stream_buffer);
+    endpoint.tune(performance.tuning);
+    memory::set_returning(performance.return_memory);
 }
 
 impl Managed<'_> {
@@ -348,7 +419,20 @@ impl Managed<'_> {
         updates: Option<impl Future<Output = i3t_update::RestartRequired>>,
         shutdown: impl Future<Output = ()>,
     ) -> anyhow::Result<Outcome> {
-        let Self { link, link_state, endpoint, lanes, exit, access, local, config, drain, updater, mut awaiting_confirmation } = self;
+        let Self {
+            link,
+            link_state,
+            endpoint,
+            lanes,
+            exit,
+            access,
+            local,
+            config,
+            drain,
+            updater,
+            mut awaiting_confirmation,
+            mut performance,
+        } = self;
         let signals = link.signal_sender();
         endpoint.set_signal_hook(move |to, signal| {
             // 信令是尽力而为的：队列满了就丢，路径层自己会重试。
@@ -382,6 +466,7 @@ impl Managed<'_> {
                 Ok(()) = netmaps.changed() => {
                     netmaps.borrow_and_update();
                     relocalize(&netmaps);
+                    performance.follow(&netmaps.borrow(), config, endpoint);
                 }
                 draining = drain.changed() => {
                     if draining {

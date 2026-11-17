@@ -41,7 +41,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use i3t_proto::{NodeId, PublicKey};
 use serde::{Deserialize, Serialize};
 
-use crate::netmap::{Attachment, ForwardProtocol, ListenerProtocol, Netmap, RoutingMode};
+use crate::netmap::{Attachment, ForwardProtocol, ListenerProtocol, Netmap, Profile, RoutingMode};
 use crate::update::{Platform, SelfUpdateBlocker, SignedManifest, UpdateStatus, UpdateTiming, Version};
 
 pub mod diag;
@@ -378,6 +378,32 @@ pub struct Report {
     /// 独占 TCP（lane）的状况。没有为任何对端打开时也报（全是 0）；旧版本的节点不报。
     #[serde(default)]
     pub lanes: Option<Box<LaneReport>>,
+    /// 节点正在用的性能档位。旧版本的节点不报。
+    #[serde(default)]
+    pub performance: Option<PerformanceReport>,
+}
+
+/// 节点正在用的性能档位（白皮书 §12.1）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PerformanceReport {
+    /// 现在生效的档位：管理员选了的话是它，否则是本机配置文件里的。比本程序新的节点报了不认识的档位时读成 `balanced`。
+    #[serde(default, deserialize_with = "known_profile")]
+    pub profile: Profile,
+    /// 运行时的工作线程数。
+    #[serde(default)]
+    pub threads: u32,
+    /// 档位或者本机的设置改过、其中要重启才生效的部分（工作线程数）还没有生效。
+    #[serde(default)]
+    pub restart_pending: bool,
+    /// 本机配置文件单独改了的项，写的是配置文件里的键名（`threads`、`idle_close_secs`、`return_memory` 等）。
+    #[serde(default)]
+    pub overrides: Vec<String>,
+}
+
+/// 不认识的档位读成默认的，不让整条上报因此解析失败。
+fn known_profile<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Profile, D::Error> {
+    let raw = serde_json::Value::deserialize(deserializer)?;
+    Ok(raw.as_str().and_then(|text| text.parse().ok()).unwrap_or_default())
 }
 
 /// 一个节点上独占 TCP（lane）的状况。

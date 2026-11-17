@@ -47,9 +47,6 @@ pub(crate) struct Copied {
     pub from_target: u64,
 }
 
-/// 每个方向一块这么大的缓冲区。
-const BUFFER_LEN: usize = 16 * 1024;
-
 /// 在客户端和目标这两条 TCP 连接之间双向搬运，直到两个方向都结束，或者 `cancel` 完成。
 ///
 /// 半关闭照常传递。和经过流的搬运一样，任何一头异常结束（包括被取消）时另一头看到的是重置而不是正常结束：
@@ -80,7 +77,8 @@ pub(crate) async fn relay(
 
 /// 一个方向：读到 EOF 就把另一头的写关掉。
 async fn copy(mut from: ReadHalf<'_>, mut to: WriteHalf<'_>, meter: &IngressMeter<'_>, upward: bool, count: &mut u64) -> io::Result<()> {
-    let mut buf = vec![0; BUFFER_LEN];
+    // 和经节点搬运的流用同一个大小（性能档位定的，见 `i3t_flow::set_buffer_len`）。
+    let mut buf = vec![0; i3t_flow::buffer_len()];
     loop {
         let len = from.read(&mut buf).await?;
         if len == 0 {

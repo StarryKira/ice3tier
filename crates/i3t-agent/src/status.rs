@@ -7,7 +7,7 @@ use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 
 use i3t_access::ListenState;
-use i3t_model::control::{self, BindCause, CredentialUsage, ExitReport, LaneReport, Route, RouteSince, SelfUpdate};
+use i3t_model::control::{self, BindCause, CredentialUsage, ExitReport, LaneReport, PerformanceReport, Route, RouteSince, SelfUpdate};
 use i3t_model::netmap::Attachment;
 use i3t_model::update::UpdateStatus;
 use serde::{Deserialize, Serialize};
@@ -47,6 +47,8 @@ pub struct LiveStatus {
     pub credentials: Vec<CredentialUsage>,
     /// 独占 TCP（lane）。没有为任何对端打开、也从来没用过时没有。
     pub lanes: Option<LaneReport>,
+    /// 正在用的性能档位。旧版本的节点不给。
+    pub performance: Option<PerformanceReport>,
 }
 
 /// 和 controller 的那条长连接。
@@ -193,6 +195,7 @@ impl LiveStatus {
             exit: netmap.me.exit.is_some().then(|| exit_report(&exit)),
             credentials: runtime.credential_usage(),
             lanes: lanes_used.then_some(lanes),
+            performance: Some(runtime.performance.borrow().clone()),
         }
     }
 }

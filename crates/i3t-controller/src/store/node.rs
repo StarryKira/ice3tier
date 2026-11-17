@@ -5,7 +5,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use i3t_model::admin::{GroupId, NetworkId, RelaySettings, Timestamp, UpdateFailure};
 use i3t_model::control::{Declared, SelfUpdate};
-use i3t_model::netmap::{Attachment, ExitRole, Reach, RoutingMode};
+use i3t_model::netmap::{Attachment, ExitRole, Profile, Reach, RoutingMode};
 use i3t_proto::{NodeId, PublicKey};
 use rusqlite::{OptionalExtension, Row, named_params, params};
 
@@ -35,6 +35,8 @@ pub struct NodeRecord {
     pub routing: Option<RoutingMode>,
     pub reach: Option<Reach>,
     pub pinned_relays: Vec<NodeId>,
+    /// 管理员给它选的性能档位；没有选时是 `None`，节点用本机配置文件里的。
+    pub profile: Option<Profile>,
     /// 节点最近上报的候选端点。
     pub endpoints: Vec<SocketAddr>,
     /// controller 看到的来源 IP 加上节点自报的 UDP 端口。
@@ -84,6 +86,7 @@ impl NodeRecord {
             routing: row.get::<_, Option<Json<RoutingMode>>>("routing")?.map(|json| json.0),
             reach: row.get::<_, Option<Json<Reach>>>("reach")?.map(|json| json.0),
             pinned_relays: row.get::<_, Json<Vec<NodeId>>>("pinned_relays")?.0,
+            profile: row.get::<_, Option<Json<Profile>>>("profile")?.map(|json| json.0),
             endpoints: row.get::<_, Json<Vec<SocketAddr>>>("endpoints")?.0,
             observed: row.get::<_, Option<Text<SocketAddr>>>("observed")?.map(|text| text.0),
             attached: row.get::<_, Json<Vec<Attachment>>>("attached")?.0,
@@ -202,7 +205,7 @@ impl Store {
         self.conn.execute(
             "UPDATE nodes SET name = :name, virtual_ip = :ip, declared = :declared, relay = :relay, exit = :exit,
                               dial_out_only = :dial_out_only, routing = :routing, reach = :reach, pinned_relays = :pinned,
-                              platform = :platform, version = :version, hostname = :hostname, self_update = :self_update
+                              profile = :profile, platform = :platform, version = :version, hostname = :hostname, self_update = :self_update
              WHERE id = :id",
             named_params! {
                 ":id": SqlNode(node.id),
@@ -215,6 +218,7 @@ impl Store {
                 ":routing": node.routing.map(Json),
                 ":reach": node.reach.map(Json),
                 ":pinned": Json(&node.pinned_relays),
+                ":profile": node.profile.map(Json),
                 ":platform": node.platform,
                 ":version": node.version,
                 ":hostname": node.hostname,
@@ -377,6 +381,7 @@ mod tests {
         node.routing = Some(RoutingMode::LowestCost);
         node.reach = Some(Reach::DirectOnly);
         node.pinned_relays = vec![NodeId::new(9).unwrap()];
+        node.profile = Some(Profile::LowFootprint);
         node.hostname = "nas-01.lan".to_owned();
         node.self_update = Some(SelfUpdate::from(Some(SelfUpdateBlocker::Container)));
         store.update_node(&node).unwrap();

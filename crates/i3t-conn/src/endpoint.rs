@@ -25,6 +25,7 @@ use crate::manager::{DATAGRAM_BACKLOG, DatagramHandle, DatagramQueues, Manager};
 use crate::quic::{self, QuicConfigError};
 use crate::socket::PathSocket;
 use crate::stream::{RecvHalf, SendHalf};
+use crate::tuning::Tuning;
 
 /// relay 宣布自己要停之后，还继续转发多久。挂靠它的节点收到通知就会换路，这段时间是留给它们换的。
 const RELAY_LEAVE_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
@@ -62,6 +63,8 @@ pub struct Endpoint {
     paths: Arc<Paths>,
     relay: Arc<Relay>,
     manager: Arc<Manager>,
+    /// 接受连接一方的配置。换档位时换掉里面的传输参数再装回 QUIC 库。
+    server: quinn::ServerConfig,
     incoming: tokio::sync::Mutex<mpsc::Receiver<Incoming<SendHalf, RecvHalf>>>,
     datagrams: DatagramInbox,
     /// 装配方提供的信令出口。
@@ -96,8 +99,9 @@ impl Endpoint {
         let allowed = netmap.clone();
         let server = quic::server(&key, move |key| allowed.borrow().peers.iter().any(|peer| peer.key == *key))?;
         let socket = PathSocket::new(Arc::clone(&paths), me);
-        let quic = quinn::Endpoint::new_with_abstract_socket(quic::endpoint(&key)?, Some(server), socket, Arc::new(quinn::TokioRuntime))
-            .map_err(EndpointError::Quic)?;
+        let quic =
+            quinn::Endpoint::new_with_abstract_socket(quic::endpoint(&key)?, Some(server.clone()), socket, Arc::new(quinn::TokioRuntime))
+                .map_err(EndpointError::Quic)?;
 
         let (incoming_tx, incoming_rx) = mpsc::channel(INCOMING_BACKLOG);
         let (to_acceptor, for_acceptor) = mpsc::channel(DATAGRAM_BACKLOG);
@@ -121,7 +125,18 @@ impl Endpoint {
 
         let tasks = [tokio::spawn(Arc::clone(&manager).accept_loop()), tokio::spawn(Arc::clone(&manager).follow_netmap())];
         tracing::info!(node = %me, addr = %port.local_addr(), "数据面启动");
-        Ok(Self { port, paths, relay, manager, incoming: tokio::sync::Mutex::new(incoming_rx), datagrams, signal_hook, tasks })
+        Ok(Self { port, paths, relay, manager, server, incoming: tokio::sync::Mutex::new(incoming_rx), datagrams, signal_hook, tasks })
+    }
+
+    /// 换上性能档位的连接设置（见 [`Tuning`]）。刚绑定好的端点用的是 [`Tuning::default`]。
+    ///
+    /// 窗口对之后建立的连接生效，两个方向（本端拨出的、对端连进来的）都是；已有的连接保持原样。空闲回收的时间立刻生效。
+    pub fn tune(&self, tuning: Tuning) {
+        let transport = self.manager.tune(tuning);
+        let mut server = self.server.clone();
+        server.transport_config(transport);
+        self.manager.set_server_config(server);
+        tracing::info!(?tuning, "连接层的档位设置换了");
     }
 
     /// UDP 端口实际绑定的地址。

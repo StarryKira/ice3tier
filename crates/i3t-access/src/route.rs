@@ -209,6 +209,7 @@ mod tests {
                 forwards: Vec::new(),
                 forward_targets: Vec::new(),
                 pinned_relays: Vec::new(),
+                profile: None,
             },
             peers: vec![
                 peer(2, "gw", Some(PeerExit { lan: true, class: None })),

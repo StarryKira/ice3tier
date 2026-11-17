@@ -475,7 +475,7 @@ impl Paths {
             }
             let buf = &mut bufs[filled];
             match self.shared.table().peers.get(&peer) {
-                Some(slot) if packet.len() <= buf.len() => slot.received(&self.shared.clock),
+                Some(slot) if packet.len() <= buf.len() => slot.received(&self.shared),
                 Some(_) | None => continue,
             }
             buf[..packet.len()].copy_from_slice(&packet);
@@ -553,7 +553,7 @@ impl Paths {
             Ok(Datagram::Conn(_)) => match table.direct.get(&from) {
                 Some(slot) => {
                     slot.last_rx_direct.touch(clock);
-                    slot.received(clock);
+                    slot.received(&self.shared);
                     Verdict::Packet { slot, skip: 0 }
                 }
                 None => Verdict::Drop,
@@ -572,7 +572,7 @@ impl Paths {
                     (Some(_), Some(frame)) if vouched => self.relayed_probe(header.src, frame).map_or(Verdict::Drop, Verdict::Control),
                     // 空的连接包不交上去：它会成为一个长度为 0 的包，连接层没有理由收到这种东西。
                     (Some(slot), None) if vouched && !packet.is_empty() => {
-                        slot.received(clock);
+                        slot.received(&self.shared);
                         Verdict::Packet { slot, skip: RelayHeader::LEN }
                     }
                     (Some(_) | None, _) => Verdict::Drop,
@@ -587,7 +587,7 @@ impl Paths {
                             Some(frame) => self.relayed_probe(header.src, frame).map_or(Verdict::Drop, Verdict::Control),
                             None if packet.is_empty() => Verdict::Drop,
                             None => {
-                                slot.received(clock);
+                                slot.received(&self.shared);
                                 Verdict::Packet { slot, skip: header.encoded_len() }
                             }
                         }

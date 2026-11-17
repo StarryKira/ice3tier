@@ -44,6 +44,7 @@ const HELP: Help = Help {
     node_dial_out_only: "Dial out only",
     node_routing: "Routing mode; default uses the network's",
     node_reach: "Path restriction; default uses the network's",
+    node_profile: "Performance profile; default uses the node's local configuration file",
     node_pin: "Pinned relay; repeatable",
     node_unpin: "Clear pinned relays",
     node_delete: "Delete a node. Its name and virtual IP stay reserved for 90 days",
@@ -282,6 +283,11 @@ const UI: Ui = Ui {
     dial_out_only: "Dial out only",
     from_network: "network's",
     pinned: "Pinned relays",
+    profile: "Profile",
+    profile_local: "node's own",
+    profile_running: |profile, threads| format!("running {profile}, {threads} worker threads"),
+    restart_pending: "fully applies after a restart",
+    local_overrides: |items| format!("local overrides: {items}"),
     netmap_versions: |current, sent, acked| format!("v{current}, sent {sent}, acknowledged {acked}"),
     endpoints: "Endpoints",
     observed: "Observed address",
@@ -533,6 +539,9 @@ fn log(entry: &LogEntry) -> Option<String> {
                 }
                 if get("pinned_relays").is_some() {
                     out.push("pinned relays".to_owned());
+                }
+                if let Some(profile) = get("profile") {
+                    out.push(format!("performance profile {}", profile.as_str().unwrap_or("default")));
                 }
                 lang.list(out)
             });

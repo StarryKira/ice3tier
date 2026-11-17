@@ -466,3 +466,35 @@ fn a_lane_setting_reaches_both_nodes_and_the_pair_view_says_why_it_does_not_work
     let left: Vec<_> = lab.controller.pairs(network.id).unwrap().into_iter().map(|pair| (pair.setting.a, pair.setting.b)).collect();
     assert_eq!(left, vec![(entry.min(old.id), entry.max(old.id))]);
 }
+
+#[test]
+fn a_chosen_profile_reaches_only_that_node_and_its_report_shows_in_the_detail() {
+    use i3t_model::control::PerformanceReport;
+    use i3t_model::netmap::Profile;
+
+    let mut lab = Lab::new();
+    let network = lab.network("home");
+    let mut a = lab.join(network.id, &[]);
+    let mut b = lab.join(network.id, &[]);
+    lab.settle(&mut [&mut a, &mut b]);
+    assert_eq!(a.netmap().me.profile, None, "没有选档位时节点用自己的");
+
+    let low = UpdateNode { profile: Some(Some(Profile::LowFootprint)), ..UpdateNode::default() };
+    let node = lab.controller.update_node(network.id, a.id, &low).unwrap();
+    assert_eq!(node.profile, Some(Profile::LowFootprint));
+    let version_of_b = b.netmap().version;
+    lab.settle(&mut [&mut a, &mut b]);
+    assert_eq!(a.netmap().me.profile, Some(Profile::LowFootprint));
+    assert_eq!(b.netmap().version, version_of_b, "别的节点的 netmap 不因为它的档位变");
+
+    let running =
+        PerformanceReport { profile: Profile::LowFootprint, threads: 2, restart_pending: true, overrides: vec!["threads".into()] };
+    a.send(&lab.controller, ToController::Report(Report { performance: Some(running.clone()), ..Report::default() }));
+    assert_eq!(lab.controller.node(network.id, a.id).unwrap().performance, Some(running));
+    assert_eq!(lab.controller.node(network.id, b.id).unwrap().performance, None, "旧版本或者还没报过的节点没有");
+
+    let cleared = lab.controller.update_node(network.id, a.id, &UpdateNode { profile: Some(None), ..UpdateNode::default() }).unwrap();
+    assert_eq!(cleared.profile, None);
+    lab.settle(&mut [&mut a]);
+    assert_eq!(a.netmap().me.profile, None);
+}

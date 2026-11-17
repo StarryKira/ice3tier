@@ -355,6 +355,12 @@ async fn a_node_can_be_inspected_changed_and_deleted() {
     );
     let pinned: model::Node = api.ok(Method::PATCH, &path, Some(json!({ "pinned_relays": [relay.id] }))).await;
     assert_eq!(pinned.pinned_relays, vec![relay.id]);
+    let profiled: Value = api.ok(Method::PATCH, &path, Some(json!({ "profile": "high_throughput" }))).await;
+    assert_eq!(profiled["profile"], json!("high_throughput"));
+    let unprofiled: Value = api.ok(Method::PATCH, &path, Some(json!({ "profile": null }))).await;
+    assert_eq!(unprofiled["profile"], Value::Null);
+    let bad = api.fails(Method::PATCH, &path, Some(json!({ "profile": "turbo" })), StatusCode::BAD_REQUEST).await;
+    assert_eq!(bad.field.as_deref(), Some("profile"));
     let disabled: model::Node = api.ok(Method::DELETE, &format!("{relay_path}/exit"), None).await;
     assert!(disabled.exit.is_none() && disabled.relay.is_some());
     let disabled: model::Node = api.ok(Method::DELETE, &format!("{relay_path}/relay"), None).await;

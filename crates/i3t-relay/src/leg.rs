@@ -17,6 +17,7 @@ use std::time::Duration;
 use i3t_proto::session::Frame;
 use i3t_proto::{Datagram, NodeId};
 use i3t_underlay::tcp_leg::{self, FrameReader};
+use i3t_underlay::tcp_recovery::Recovery;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
@@ -272,6 +273,9 @@ async fn serve(inner: &Inner, stream: TcpStream, addr: SocketAddr, handshake: Ha
         tracing::debug!(from = %addr, %error, "给 TCP 中转设置选项失败");
         return "设置不了 socket 选项";
     }
+    // 重传上限和放弃时限一起设（见 `i3t_underlay::tcp_recovery`）。放弃时限取会话的有效期：relay 自己留着一条没有任何帧的
+    // TCP 也就这么久，TCP 不会比它先判死，也不会在它关掉之后还留着。
+    Recovery::giving_up_after(SESSION_TTL).apply(&stream);
     let addr = SocketAddr::new(addr.ip().to_canonical(), addr.port());
     let conn = inner.next_conn();
     let (read_half, write_half) = stream.into_split();

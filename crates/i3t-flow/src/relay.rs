@@ -33,6 +33,7 @@
 use std::fmt;
 use std::future::Future;
 use std::io;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -49,8 +50,26 @@ use crate::engine::{Gate, PumpError, Splicer};
 use crate::meter::{Direction, Meter, Unmetered};
 use crate::{FlowError, header};
 
-/// 每个方向一块这么大的缓冲区。流的数量可以上万，所以不取更大的。
-pub(crate) const BUFFER_LEN: usize = 16 * 1024;
+/// 每个方向一块缓冲区，默认这么大。流的数量可以上万，所以不取更大的。
+pub const DEFAULT_BUFFER_LEN: usize = 16 * 1024;
+
+/// 现在的缓冲区大小，见 [`set_buffer_len`]。
+static BUFFER_LEN: AtomicUsize = AtomicUsize::new(DEFAULT_BUFFER_LEN);
+
+/// 设每条流每个方向的搬运缓冲区有多大（性能档位的一项，白皮书 §12.1）。之后开始搬运的流用它，已经在搬的不变。
+///
+/// 这块缓冲区在流活着的时候一直占着，所以它乘上流的条数就是搬运本身的内存：本机实验环境里 2000 条开着的流，
+/// 16KB 时入口和出口各多用约 45MB；4KB 时少这么多，代价是满速搬运的每 GB CPU 多两成左右。
+/// 整个进程一个值，由装配方按档位设；不到 1KB 的按 1KB 算。
+pub fn set_buffer_len(len: usize) {
+    BUFFER_LEN.store(len.max(1024), Ordering::Relaxed);
+}
+
+/// 现在的搬运缓冲区大小。
+#[must_use]
+pub fn buffer_len() -> usize {
+    BUFFER_LEN.load(Ordering::Relaxed)
+}
 
 /// 和流对接的 TCP 连接静默多久之后内核开始发保活探测，以及探测的间隔。
 ///
@@ -358,7 +377,7 @@ async fn tcp_to_flow<S: SendStream, M: Meter>(
     progress: Progress<'_, M>,
 ) -> Result<(), Abort> {
     let Progress { started, class, meter } = progress;
-    let mut buf = vec![0; BUFFER_LEN];
+    let mut buf = vec![0; buffer_len()];
     let mut demotable = class == Class::Auto;
     loop {
         let len = tcp.read(&mut buf).await.map_err(Abort::Tcp)?;
@@ -398,7 +417,7 @@ async fn flow_to_tcp<R: RecvStream, M: Meter>(
     if let Some(raw) = recv.wait_raw().await {
         return raw_to_tcp(raw, tcp, lane, traffic, progress).await;
     }
-    let mut buf = vec![0; BUFFER_LEN];
+    let mut buf = vec![0; buffer_len()];
     loop {
         let len = recv.read(&mut buf).await.map_err(Abort::Flow)?;
         if len == 0 {

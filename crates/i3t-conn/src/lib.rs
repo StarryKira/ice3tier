@@ -36,6 +36,7 @@ mod manager;
 mod quic;
 mod socket;
 mod stream;
+mod tuning;
 
 pub use contract::{
     Acceptor, Connector, Datagram, DatagramSendError, DatagramSender, Datagrams, Incoming, OpenError, Payload, Priority, RawRead, RawWrite,
@@ -53,3 +54,4 @@ pub use i3t_underlay::{Direction, PacketFilter};
 pub use manager::DatagramHandle;
 pub use quic::QuicConfigError;
 pub use stream::{DROPPED_STREAM_CODE, RecvHalf, SendHalf};
+pub use tuning::{MAX_STREAM_WINDOW, Tuning};

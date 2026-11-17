@@ -14,6 +14,7 @@ use std::str::FromStr;
 
 use anyhow::{Context, bail};
 use i3t_model::control::Declared;
+use i3t_model::netmap::Profile;
 use serde::Deserialize;
 
 use crate::texts::texts;
@@ -31,6 +32,8 @@ pub struct Config {
     pub metrics: Metrics,
     #[serde(default)]
     pub tests: Tests,
+    #[serde(default)]
+    pub performance: PerformanceConfig,
     #[serde(default)]
     pub log: Log,
 }
@@ -79,21 +82,24 @@ impl Config {
     ///
     /// 文件读写失败，或者现有的内容解析不了。
     pub fn set_declared(path: &Path, capability: Capability, on: bool) -> anyhow::Result<()> {
-        Self::set(path, Setting::Declare(capability), on)
+        Self::set(path, Change::Declare(capability, on))
     }
 
-    /// 把配置文件里的一个开关改成 `on`，注释和排版原样保留。文件不存在时先写出模板。
+    /// 改配置文件里的一项，注释和排版原样保留。文件不存在时先写出模板。
     ///
     /// # Errors
     ///
     /// 文件读写失败，或者现有的内容解析不了。
-    pub fn set(path: &Path, setting: Setting, on: bool) -> anyhow::Result<()> {
+    pub fn set(path: &Path, change: Change) -> anyhow::Result<()> {
         Self::write_template_if_missing(path)?;
         let text = fs::read_to_string(path).with_context(|| (texts().read_config)(path))?;
         let mut document: toml_edit::DocumentMut =
             text.parse().map_err(|err| anyhow::anyhow!("{err}")).with_context(|| (texts().config_error)(path))?;
-        let (section, key) = setting.key();
-        document[section][key] = toml_edit::value(on);
+        let (section, key) = change.setting().key();
+        document[section][key] = match change {
+            Change::Declare(_, on) | Change::ThroughputTests(on) => toml_edit::value(on),
+            Change::Profile(profile) => toml_edit::value(profile.spelling()),
+        };
         let updated = document.to_string();
         // 改完先整个验一遍，不把一个读不回来的文件写下去。
         Self::parse(&updated).with_context(|| (texts().config_error)(path))?;
@@ -121,7 +127,7 @@ impl Config {
         {
             bail!((texts().same_proxy_address)(&socks5.to_string()));
         }
-        Ok(())
+        self.performance.validate()
     }
 }
 
@@ -133,6 +139,7 @@ impl Default for Config {
             proxy: Proxy::default(),
             metrics: Metrics::default(),
             tests: Tests::default(),
+            performance: PerformanceConfig::default(),
             log: Log::default(),
         }
     }
@@ -178,12 +185,14 @@ impl Capability {
     }
 }
 
-/// `i3t set` 能改的开关：三项声明，和接不接受吞吐测试。
+/// `i3t set` 能改的项：三项声明、接不接受吞吐测试、性能档位。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setting {
     Declare(Capability),
     /// 接不接受管理员发起的吞吐测试（`[tests] throughput`）。
     ThroughputTests,
+    /// controller 没有选档位时用的性能档位（`[performance] profile`）。
+    Profile,
 }
 
 impl Setting {
@@ -192,17 +201,37 @@ impl Setting {
         match self {
             Self::Declare(capability) => ("declare", capability.key()),
             Self::ThroughputTests => ("tests", "throughput"),
+            Self::Profile => ("performance", "profile"),
         }
+    }
+
+    /// 这一项改成命令行上写的 `value`：开关写 `on` 或 `off`，档位写它的名字。
+    ///
+    /// # Errors
+    ///
+    /// 值的写法不对。
+    pub fn change(self, value: &str) -> anyhow::Result<Change> {
+        let switch = || match value {
+            "on" => Ok(true),
+            "off" => Ok(false),
+            other => Err(anyhow::anyhow!((texts().not_a_switch)(other))),
+        };
+        Ok(match self {
+            Self::Declare(capability) => Change::Declare(capability, switch()?),
+            Self::ThroughputTests => Change::ThroughputTests(switch()?),
+            Self::Profile => Change::Profile(value.parse().map_err(|_| anyhow::anyhow!((texts().unknown_profile)(value)))?),
+        })
     }
 }
 
-/// 命令行上的写法：`can-exit`、`can-relay`、`can-forward`、`throughput-tests`。
+/// 命令行上的写法：`can-exit`、`can-relay`、`can-forward`、`throughput-tests`、`profile`。
 impl FromStr for Setting {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "throughput-tests" => Ok(Self::ThroughputTests),
+            "profile" => Ok(Self::Profile),
             other => other.parse().map(Self::Declare).map_err(|_| anyhow::anyhow!((texts().unknown_setting)(other))),
         }
     }
@@ -213,6 +242,36 @@ impl fmt::Display for Setting {
         match self {
             Self::Declare(capability) => capability.fmt(f),
             Self::ThroughputTests => f.write_str("throughput-tests"),
+            Self::Profile => f.write_str("profile"),
+        }
+    }
+}
+
+/// `i3t set` 的一次修改：哪一项，改成什么。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+    Declare(Capability, bool),
+    ThroughputTests(bool),
+    Profile(Profile),
+}
+
+impl Change {
+    #[must_use]
+    pub const fn setting(self) -> Setting {
+        match self {
+            Self::Declare(capability, _) => Setting::Declare(capability),
+            Self::ThroughputTests(_) => Setting::ThroughputTests,
+            Self::Profile(_) => Setting::Profile,
+        }
+    }
+}
+
+/// 命令行上的写法：`on`、`off`，或者档位的名字。
+impl fmt::Display for Change {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Declare(_, on) | Self::ThroughputTests(on) => f.write_str(if *on { "on" } else { "off" }),
+            Self::Profile(profile) => f.write_str(profile.spelling()),
         }
     }
 }
@@ -324,6 +383,58 @@ impl Default for Tests {
 
 const fn default_true() -> bool {
     true
+}
+
+/// 性能档位和逐项的覆盖（`[performance]`）。档位的值和它们的来历见 [`crate::performance`]。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PerformanceConfig {
+    /// controller 没有给这个节点选档位时用的档位。写法是 `low-footprint`、`balanced`、`high-throughput`。
+    #[serde(default, deserialize_with = "profile_spelling")]
+    pub profile: Profile,
+    pub threads: Option<u32>,
+    pub stream_buffer_kb: Option<u32>,
+    pub stream_window_kb: Option<u32>,
+    pub connection_window_mb: Option<u32>,
+    /// 0 是不因为空闲关闭。
+    pub idle_close_secs: Option<u64>,
+    pub return_memory: Option<bool>,
+}
+
+impl PerformanceConfig {
+    /// 每一项的范围。流窗口的上限是连接层的硬上限（见 [`i3t_conn::MAX_STREAM_WINDOW`]）。
+    const RANGES: [(&'static str, u64, u64); 4] = [
+        ("threads", 1, 256),
+        ("stream_buffer_kb", 1, 1024),
+        ("stream_window_kb", 64, MAX_STREAM_WINDOW_KB),
+        ("connection_window_mb", 1, 4095),
+    ];
+
+    fn validate(&self) -> anyhow::Result<()> {
+        let values = [
+            self.threads.map(u64::from),
+            self.stream_buffer_kb.map(u64::from),
+            self.stream_window_kb.map(u64::from),
+            self.connection_window_mb.map(u64::from),
+        ];
+        for ((key, low, high), value) in Self::RANGES.into_iter().zip(values) {
+            if let Some(value) = value
+                && !(low..=high).contains(&value)
+            {
+                bail!((texts().performance_range)(key, low, high));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 流窗口最多能写多少 KB。
+const MAX_STREAM_WINDOW_KB: u64 = i3t_conn::MAX_STREAM_WINDOW as u64 / 1024;
+
+/// 配置文件里的档位用命令行的写法（`low-footprint`），也认 JSON 的写法（`low_footprint`）。
+fn profile_spelling<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Profile, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    text.parse().map_err(|_| serde::de::Error::custom((texts().unknown_profile)(&text)))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -470,12 +581,34 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let setting: Setting = "throughput-tests".parse().unwrap();
-        Config::set(&path, setting, false).unwrap();
+        Config::set(&path, setting.change("off").unwrap()).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), texts().template.replace("throughput = true", "throughput = false"));
         assert!(!Config::load(&path).unwrap().tests.throughput);
         assert_eq!(setting.to_string(), "throughput-tests");
         assert_eq!("can-relay".parse::<Setting>().unwrap(), Setting::Declare(Capability::Relay));
         assert!("throughput".parse::<Setting>().unwrap_err().to_string().contains("throughput-tests"));
+    }
+
+    #[test]
+    fn the_profile_is_set_by_name_and_each_item_has_a_range() {
+        assert_eq!(Config::default().performance, PerformanceConfig::default());
+        assert_eq!(Config::default().performance.profile, Profile::Balanced);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let change = Setting::Profile.change("low-footprint").unwrap();
+        assert_eq!(change.to_string(), "low-footprint");
+        Config::set(&path, change).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), texts().template.replace("profile = \"balanced\"", "profile = \"low-footprint\""));
+        assert_eq!(Config::load(&path).unwrap().performance.profile, Profile::LowFootprint);
+        assert!(Setting::Profile.change("fast").unwrap_err().to_string().contains("high-throughput"));
+        assert!(Setting::ThroughputTests.change("yes").is_err());
+
+        let tuned = Config::parse("[performance]\nprofile = \"high_throughput\"\nthreads = 8\nidle_close_secs = 0\n").unwrap();
+        assert_eq!((tuned.performance.profile, tuned.performance.threads), (Profile::HighThroughput, Some(8)));
+        assert!(error_of("[performance]\nprofile = \"turbo\"\n").contains("turbo"));
+        assert!(error_of("[performance]\nthreads = 0\n").contains(&(texts().performance_range)("threads", 1, 256)));
+        assert!(error_of("[performance]\nstream_window_kb = 4096\n").contains("stream_window_kb"), "流窗口不能超过连接层的上限");
+        assert!(error_of("[performance]\nwindow = 1\n").contains("window"));
     }
 
     #[test]

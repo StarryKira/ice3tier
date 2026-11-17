@@ -153,6 +153,7 @@ pub(crate) mod tests {
                     target(9, ForwardProtocol::Tcp, "127.0.0.1:5432", LAPTOP),
                 ],
                 pinned_relays: Vec::new(),
+                profile: None,
             },
             peers: vec![peer(LAPTOP), peer(NAS)],
             relays: Vec::new(),

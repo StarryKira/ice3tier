@@ -148,6 +148,72 @@ pub struct LocalNode {
     /// 管理员固定的挂靠 relay；空表示自己挑延迟最低的。
     #[serde(default)]
     pub pinned_relays: Vec<NodeId>,
+    /// 管理员给这个节点选的性能档位；没有值时节点用本机配置文件里的。比本程序新的 controller 下发了这里不认识的档位时
+    /// 也读成没有值。
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "tolerant_profile")]
+    pub profile: Option<Profile>,
+}
+
+/// 性能档位（白皮书 §12.1）：一组预设，节点按它定线程数、缓冲和空闲回收的时间。各项的值在节点上定（`i3t-agent`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Profile {
+    /// 低占用：给一个核、几百 MB 内存的机器长期运行。
+    LowFootprint,
+    /// 默认。
+    #[default]
+    Balanced,
+    /// 高速度：流量大、对端多的机器。
+    HighThroughput,
+}
+
+impl Profile {
+    pub const ALL: [Self; 3] = [Self::LowFootprint, Self::Balanced, Self::HighThroughput];
+
+    /// 在 netmap 和管理接口里的写法。
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LowFootprint => "low_footprint",
+            Self::Balanced => "balanced",
+            Self::HighThroughput => "high_throughput",
+        }
+    }
+
+    /// 在配置文件和命令行里的写法。
+    #[must_use]
+    pub const fn spelling(self) -> &'static str {
+        match self {
+            Self::LowFootprint => "low-footprint",
+            Self::Balanced => "balanced",
+            Self::HighThroughput => "high-throughput",
+        }
+    }
+}
+
+impl fmt::Display for Profile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// 两种写法都认：`low_footprint`（JSON）和 `low-footprint`（配置文件、命令行）。
+impl FromStr for Profile {
+    type Err = UnknownProfile;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL.into_iter().find(|profile| profile.as_str() == s || profile.spelling() == s).ok_or_else(|| UnknownProfile(s.to_owned()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("不认识的性能档位 {0:?}：可以是 low-footprint、balanced、high-throughput")]
+pub struct UnknownProfile(pub String);
+
+/// netmap 里的档位：不认识的值读成没有值，不让整份 netmap 因为一个新的档位而读不了。
+fn tolerant_profile<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Profile>, D::Error> {
+    let text = Option::<String>::deserialize(deserializer)?;
+    Ok(text.and_then(|text| text.parse().ok()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -540,6 +606,29 @@ pub fn is_overlay_address(network: &Network, addr: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_profile_is_optional_and_an_unknown_one_reads_as_none() {
+        let mut netmap = minimal();
+        assert_eq!(netmap.me.profile, None);
+        assert!(!serde_json::to_string(&netmap).unwrap().contains("profile"), "没有选档位时 netmap 里不出现这个字段");
+        netmap.me.profile = Some(Profile::LowFootprint);
+        let json = serde_json::to_value(&netmap).unwrap();
+        assert_eq!(json["me"]["profile"], "low_footprint");
+        assert_eq!(serde_json::from_value::<Netmap>(json.clone()).unwrap(), netmap);
+        let mut newer = json;
+        newer["me"]["profile"] = "turbo".into();
+        assert_eq!(serde_json::from_value::<Netmap>(newer).unwrap().me.profile, None);
+    }
+
+    #[test]
+    fn profiles_read_in_both_spellings() {
+        for profile in Profile::ALL {
+            assert_eq!(profile.as_str().parse::<Profile>().unwrap(), profile);
+            assert_eq!(profile.spelling().parse::<Profile>().unwrap(), profile);
+        }
+        assert!("fast".parse::<Profile>().is_err());
+    }
 
     fn minimal() -> Netmap {
         serde_json::from_value(serde_json::json!({

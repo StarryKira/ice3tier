@@ -44,6 +44,7 @@ const HELP: Help = Help {
     node_dial_out_only: "只拨出",
     node_routing: "选路模式；default 用网络的",
     node_reach: "路径限制；default 用网络的",
+    node_profile: "性能档位；default 用节点本机配置文件里的",
     node_pin: "固定挂靠的 relay，可写多次",
     node_unpin: "不再固定挂靠的 relay",
     node_delete: "删除节点。名字和虚拟 IP 90 天内不再分配",
@@ -282,6 +283,11 @@ const UI: Ui = Ui {
     dial_out_only: "只拨出",
     from_network: "用网络的",
     pinned: "固定挂靠的 relay",
+    profile: "性能档位",
+    profile_local: "节点本机决定",
+    profile_running: |profile, threads| format!("在用 {profile}，{threads} 个工作线程"),
+    restart_pending: "重启后才全部生效",
+    local_overrides: |items| format!("本机改了 {items}"),
     netmap_versions: |current, sent, acked| format!("第 {current} 版，已发 {sent}，已确认 {acked}"),
     endpoints: "候选端点",
     observed: "看到的地址",
@@ -519,6 +525,9 @@ fn log(entry: &LogEntry) -> Option<String> {
                 }
                 if get("pinned_relays").is_some() {
                     out.push("固定挂靠的 relay".to_owned());
+                }
+                if let Some(profile) = get("profile") {
+                    out.push(format!("性能档位 {}", profile.as_str().unwrap_or("默认")));
                 }
                 lang.list(out)
             });
