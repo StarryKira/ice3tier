@@ -447,6 +447,33 @@ exit 0"#;
     }
 
     #[tokio::test]
+    async fn an_update_abandoned_during_the_self_check_takes_the_unchecked_program_away() {
+        let node = Node::installed();
+        // 自检迟迟不结束：这期间 controller 撤回了更新，调用方丢弃这个 future。
+        let release = node.release(NEW, &fake_program(NEW, "sleep 30"));
+        let old = node.process(OLD);
+        let (_flows_tx, mut flows) = watch::channel(0);
+        {
+            let update = old.update(&release.signed, UpdateTiming::Now, &release.source, &mut flows);
+            tokio::pin!(update);
+            let mut status = old.status();
+            let checking = async {
+                while !matches!(*status.borrow_and_update(), UpdateStatus::SelfCheck { .. }) || node.bin() != ["i3t", "i3t.new"] {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            };
+            tokio::select! {
+                result = &mut update => panic!("自检还没有结束，更新不该有结果：{result:?}"),
+                () = checking => {}
+            }
+        }
+        assert_eq!(node.bin(), ["i3t"], "没验过的新程序不留在程序旁边");
+        assert_eq!(node.running_program(), fake_program(OLD, "exit 0"));
+        // 取下来的包还在：再来一次不用重新取。
+        assert!(node.update_dir().iter().any(|name| name.starts_with("staged-")), "{:?}", node.update_dir());
+    }
+
+    #[tokio::test]
     async fn a_version_that_failed_its_self_check_is_not_retried_automatically() {
         let node = Node::installed();
         let release = node.release(NEW, &fake_program(NEW, FAILS));

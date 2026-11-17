@@ -357,13 +357,15 @@ impl Updater {
 
         self.status.send_replace(UpdateStatus::SelfCheck { version: version.clone() });
         let candidate = self.files.candidate();
+        // 从这里到自检通过，新程序是没验过的：这一段里不管怎么离开（自检不通过，或者这次更新被放弃、这个 future 被丢弃），它都被收走。
+        let unchecked = Unchecked::new(candidate.clone());
         let (files, from) = (self.files.clone(), package.clone());
         tokio::task::spawn_blocking(move || files.place_candidate(&from))
             .await
             .expect("拷贝文件的线程不会 panic：里面只有文件操作")
             .map_err(UpdateError::io("把新程序放到", &candidate))?;
         if let Err(rejected) = self_check::run_candidate(&candidate, &self.self_check_args, version, self_check::TIMEOUT).await {
-            discard(&candidate);
+            drop(unchecked);
             discard(&package);
             let _transition = self.transition();
             let mut state = self.state.load()?;
@@ -378,6 +380,7 @@ impl Updater {
             self.state.save(&state)?;
             return Err(error);
         }
+        unchecked.passed();
         tracing::info!(%version, "新程序的自检通过了");
         Ok(())
     }
@@ -568,6 +571,31 @@ impl Updater {
             .map(|entry| entry.path())
             .filter(|path| Some(path.as_path()) != keep)
             .for_each(|path| discard(&path));
+    }
+}
+
+/// 放在程序旁边、还没有通过自检的新程序。自检通过之前它被丢掉，文件就删掉：没验过的程序不留在程序旁边。
+///
+/// 准备新版本的 future 可以随时被丢弃（controller 撤回了更新、换了时机），所以收走它靠的是析构，不是某一条返回路径。
+/// 见过的情形：一个节点自检到一半，别的节点先报了这个版本失败，controller 撤回指令，坏的 `i3t.new` 就留了下来。
+struct Unchecked(Option<PathBuf>);
+
+impl Unchecked {
+    fn new(candidate: PathBuf) -> Self {
+        Self(Some(candidate))
+    }
+
+    /// 自检通过了：文件留着，等着换上去。
+    fn passed(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for Unchecked {
+    fn drop(&mut self) {
+        if let Some(candidate) = &self.0 {
+            discard(candidate);
+        }
     }
 }
 
