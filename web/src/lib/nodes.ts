@@ -17,3 +17,16 @@ export function attachedCount(nodes: readonly Pick<Node, 'id' | 'attached'>[], r
   return nodes.filter((node) => node.id !== relay && node.attached.some((attachment) => attachment.relay === relay))
     .length
 }
+
+/**
+ * 能不能当端口转发的目标。0.1.11 起看管理员在界面上的开关（`forward_target`）；
+ * 更早的 controller 没有这个字段，看节点自己的声明。
+ */
+export function canBeForwardTarget(node: Pick<Node, 'declared' | 'forward_target'>): boolean {
+  return node.forward_target ?? node.declared.forward ?? false
+}
+
+/** 这个 controller 用的是开关（0.1.11 起），而不是节点的声明。 */
+export function forwardTargetBySwitch(node: Pick<Node, 'forward_target'>): boolean {
+  return node.forward_target !== undefined
+}

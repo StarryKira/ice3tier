@@ -20,7 +20,7 @@ import { Switch } from '@/components/ui/switch'
 import { t, useLocale } from '@/i18n'
 import { exitUsage } from '@/lib/commands'
 import { countryName } from '@/lib/region'
-import { attachedCount, nodeName } from '@/lib/nodes'
+import { attachedCount, canBeForwardTarget, forwardTargetBySwitch, nodeName } from '@/lib/nodes'
 import { relayAddresses } from '@/lib/relay'
 import { type Capability } from '@/lib/product'
 import { cn } from '@/lib/utils'
@@ -485,15 +485,59 @@ export function ExitTab({ network, node, onWaiting }: CapabilityTabProps) {
  * 端口转发的目标没有开关：声明过的节点可以被选作转发的目标。卡片顶上是声明的情况，下面是指向它的端口转发。
  */
 export function ForwardTab({ network, node, onWaiting }: CapabilityTabProps) {
-  const watch = useDeclareWatch(node.declared.forward, onWaiting)
+  const confirm = useConfirm()
+  const watch = useDeclareWatch(node.declared.forward ?? false, onWaiting)
   const nodes = useQuery(q.nodes(network.id))
   const forwards = useQuery(q.forwards(network.id))
   const all = nodes.data ?? []
   const mine = (forwards.data ?? []).filter((forward) => forward.target_node === node.id)
   const manage = networkPath(network.id, 'forwards')
+  // 0.1.11 起是管理员的开关；更早的 controller 看节点自己的声明（没声明时写怎么声明）。
+  const bySwitch = forwardTargetBySwitch(node)
+  const on = canBeForwardTarget(node)
+  const toggle = useAction(network.id, {
+    mutationFn: (next: boolean) => api.updateNode(network.id, node.id, { forward_target: next }),
+    success: (_saved: unknown, next: boolean) => (next ? d.forwardOnToast(node.name) : d.forwardOffToast(node.name)),
+  })
+
+  const onSwitch = async (next: boolean) => {
+    // 关掉时，指向它的转发都停下（配置留着，打开就恢复）：有这样的转发时问一句。
+    if (!next && mine.length > 0) {
+      const confirmed = await confirm({
+        title: d.forwardOffTitle(node.name),
+        body: d.forwardOffBody(mine.length),
+        confirmLabel: d.forwardOffConfirm,
+      })
+      if (!confirmed) return
+    }
+    toggle.mutate(next)
+  }
+
+  const list =
+    mine.length > 0 ? (
+      <ul className="divide-y border-t">
+        {mine.map((forward) => {
+          const view = forwardStatusView(forward, all)
+          return (
+            <li key={forward.id} className="flex min-h-11 flex-wrap items-center gap-x-4 gap-y-1 px-5 py-2.5 text-sm">
+              <span className="min-w-0 font-medium">{forwardLabel(forward)}</span>
+              <span className="flex min-w-0 flex-wrap items-center gap-1.5 text-[13px] text-muted-foreground">
+                <span>{nodeName(all, forward.listen_node)}</span>
+                <span className="tabular">{forward.bind}</span>
+                <ArrowRight className="size-3.5" aria-label={t.forwards.dialog.arrow} />
+                <span className="tabular">{forward.target_addr}</span>
+              </span>
+              <StatusText tone={view.tone} className="ml-auto text-[13px]">
+                {view.label}
+              </StatusText>
+            </li>
+          )
+        })}
+      </ul>
+    ) : null
 
   let body: ReactNode
-  if (!node.declared.forward) {
+  if (!bySwitch && !on) {
     body = (
       <CardNote>
         <NotDeclared capability="forward" node={node} open={watch.open} onToggle={watch.toggle} />
@@ -505,39 +549,18 @@ export function ForwardTab({ network, node, onWaiting }: CapabilityTabProps) {
         <SkeletonBlock lines={2} />
       </CardNote>
     )
+  } else if (!on && mine.length === 0) {
+    body = null
   } else {
     body = (
       <>
         <div className="flex min-h-11 items-center justify-between gap-4 px-5 py-2 text-[13px] text-muted-foreground">
-          <span>{d.forwardCount(mine.length)}</span>
+          <span>{on ? d.forwardCount(mine.length) : d.forwardPaused(mine.length)}</span>
           <Link to={manage} className="rounded-sm text-primary underline-offset-4 hover:underline">
             {d.relatedManage}
           </Link>
         </div>
-        {mine.length > 0 ? (
-          <ul className="divide-y border-t">
-            {mine.map((forward) => {
-              const view = forwardStatusView(forward, all)
-              return (
-                <li
-                  key={forward.id}
-                  className="flex min-h-11 flex-wrap items-center gap-x-4 gap-y-1 px-5 py-2.5 text-sm"
-                >
-                  <span className="min-w-0 font-medium">{forwardLabel(forward)}</span>
-                  <span className="flex min-w-0 flex-wrap items-center gap-1.5 text-[13px] text-muted-foreground">
-                    <span>{nodeName(all, forward.listen_node)}</span>
-                    <span className="tabular">{forward.bind}</span>
-                    <ArrowRight className="size-3.5" aria-label={t.forwards.dialog.arrow} />
-                    <span className="tabular">{forward.target_addr}</span>
-                  </span>
-                  <StatusText tone={view.tone} className="ml-auto text-[13px]">
-                    {view.label}
-                  </StatusText>
-                </li>
-              )
-            })}
-          </ul>
-        ) : null}
+        {list}
       </>
     )
   }
@@ -550,9 +573,18 @@ export function ForwardTab({ network, node, onWaiting }: CapabilityTabProps) {
       description={d.forwardDesc}
       flash={watch.flash}
       control={
-        <StatusText tone={node.declared.forward ? 'ok' : 'idle'} className="text-[13px]">
-          {node.declared.forward ? d.forwardDeclared : d.forwardNotDeclared}
-        </StatusText>
+        bySwitch ? (
+          <Switch
+            aria-label={d.forwardSwitch(node.name)}
+            checked={on}
+            disabled={toggle.isPending}
+            onCheckedChange={(next) => void onSwitch(next)}
+          />
+        ) : (
+          <StatusText tone={on ? 'ok' : 'idle'} className="text-[13px]">
+            {on ? d.forwardDeclared : d.forwardNotDeclared}
+          </StatusText>
+        )
       }
     >
       {watch.flash ? <Arrived /> : null}

@@ -290,6 +290,13 @@ export const nodes = {
     forwardDesc: '本机或局域网的服务可作为端口转发目标',
     forwardDeclared: '已声明',
     forwardNotDeclared: '未声明',
+    forwardSwitch: (name: string) => `允许把 ${name} 作为端口转发的目标`,
+    forwardOnToast: (name: string) => `${name} 现在可以作为端口转发的目标`,
+    forwardOffToast: (name: string) => `${name} 不再作为端口转发的目标`,
+    forwardOffTitle: (name: string) => `不再把 ${name} 作为端口转发的目标？`,
+    forwardOffBody: (n: number) => `指向它的 ${n} 条端口转发会暂停，配置保留，再打开就恢复。`,
+    forwardOffConfirm: '关闭',
+    forwardPaused: (n: number) => `${n} 条端口转发指向它，现在暂停`,
     forwardCount: (n: number) => `${n} 条端口转发指向它`,
     rowBandwidth: '带宽',
 

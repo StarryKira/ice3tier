@@ -295,6 +295,7 @@ export const forwards = {
   examplePublishDesc: '在公网节点的 0.0.0.0 监听，转发到另一节点局域网内的地址',
   emptyNoNodes: '网络中还没有节点',
   noTargets: '没有节点可作为转发目标',
+  noTargetsSwitchBody: '在目标节点的「端口转发」标签页里打开开关。',
   noTargetsBody: '在目标节点上运行，然后重启 i3t：',
 
   dialog: {
@@ -324,6 +325,8 @@ export const forwards = {
     protocol: '协议',
     tcp: 'TCP',
     udp: 'UDP',
+    targetOff: (name: string) => `${name} 还没打开「可作为端口转发目标」，转发将以停用状态创建`,
+    targetTurnOn: '打开',
     targetHowTo: (name: string) => `${name} 未声明，转发将以停用状态创建`,
     targetAddress: '地址',
     targetSelf: '目标节点本机',

@@ -306,6 +306,14 @@ export const nodes: Messages['nodes'] = {
     forwardDesc: 'Services on this node or its LAN can be port forward targets',
     forwardDeclared: 'Declared',
     forwardNotDeclared: 'Not declared',
+    forwardSwitch: (name) => `Allow ${name} as a port forward target`,
+    forwardOnToast: (name) => `${name} can now be a port forward target`,
+    forwardOffToast: (name) => `${name} is no longer a port forward target`,
+    forwardOffTitle: (name) => `Stop using ${name} as a port forward target?`,
+    forwardOffBody: (n) =>
+      `${count(n, 'port forward', 'port forwards')} pointing at it will pause; they stay configured and resume when you turn it back on.`,
+    forwardOffConfirm: 'Turn off',
+    forwardPaused: (n) => `${count(n, 'port forward points', 'port forwards point')} at it, paused now`,
     forwardCount: (n) => `${count(n, 'port forward targets', 'port forwards target')} it`,
     rowBandwidth: 'Bandwidth',
 

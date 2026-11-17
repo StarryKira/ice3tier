@@ -10,7 +10,7 @@ import { useConfirm } from '@/components/confirm'
 import { CodeBlock, CopyText } from '@/components/copy'
 import { TrafficText } from '@/components/usage'
 import { NodeLink } from '@/components/node'
-import { nodeName } from '@/lib/nodes'
+import { canBeForwardTarget, forwardTargetBySwitch, nodeName } from '@/lib/nodes'
 import { Notice } from '@/components/notice'
 import { Page, PageHeader } from '@/components/page'
 import { EmptyState, ErrorState, SkeletonRows } from '@/components/states'
@@ -111,7 +111,8 @@ export function ForwardsPage() {
   const list = forwards.data ?? []
   const empty = forwards.isSuccess && list.length === 0
   const noNodes = nodes.isSuccess && all.length === 0
-  const noTargets = nodes.isSuccess && all.length > 0 && !all.some((node) => node.declared.forward)
+  const noTargets = nodes.isSuccess && all.length > 0 && !all.some((node) => canBeForwardTarget(node))
+  const targetsBySwitch = all.some((node) => forwardTargetBySwitch(node))
 
   const onDelete = async (forward: Forward) => {
     const connections = forward.listen?.connections ?? 0
@@ -188,10 +189,16 @@ export function ForwardsPage() {
             {noTargets ? (
               <div className="mt-6 w-full max-w-2xl text-left">
                 <Notice tone="warn" title={f.noTargets}>
-                  {f.noTargetsBody}
-                  <CodeBlock copy={declareCommand('forward')} className="mt-2 bg-card/70">
-                    {declareCommand('forward')}
-                  </CodeBlock>
+                  {targetsBySwitch ? (
+                    f.noTargetsSwitchBody
+                  ) : (
+                    <>
+                      {f.noTargetsBody}
+                      <CodeBlock copy={declareCommand('forward')} className="mt-2 bg-card/70">
+                        {declareCommand('forward')}
+                      </CodeBlock>
+                    </>
+                  )}
                 </Notice>
               </div>
             ) : null}

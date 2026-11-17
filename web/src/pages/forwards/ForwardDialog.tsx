@@ -19,6 +19,7 @@ import { FormDialog } from '@/components/form-dialog'
 import { NodeSelect } from '@/components/node'
 import { Notice } from '@/components/notice'
 import { ruleLabel } from '@/lib/rules'
+import { Button } from '@/components/ui/button'
 import { Field } from '@/components/ui/field'
 import { Input, Textarea } from '@/components/ui/input'
 import { RadioCards } from '@/components/ui/radio-cards'
@@ -31,6 +32,7 @@ import { WAITING_INTERVAL } from '@/lib/polling'
 import { formatList } from '@/lib/format'
 import { classLabel } from '@/lib/serviceClass'
 import { normalizeCidrList, splitList, validateCidrList, validatePort, validateTitle } from '@/lib/validate'
+import { canBeForwardTarget, forwardTargetBySwitch, nodeName } from '@/lib/nodes'
 import { networkPath } from '@/pages/networks/context'
 
 const d = t.forwards.dialog
@@ -94,7 +96,12 @@ export function ForwardDialog({ network, forward, scope: presetScope, open, onCl
   const [touched, setTouched] = useState(false)
   const [dirty, setDirty] = useState(false)
 
-  const targetDeclared = target === undefined || target.declared.forward
+  const targetDeclared = target === undefined || canBeForwardTarget(target)
+  // 0.1.11 起目标是管理员的开关：没打开时这里就能打开，不用去节点上声明。
+  const turnOn = useAction(network.id, {
+    mutationFn: (id: NodeId) => api.updateNode(network.id, id, { forward_target: true }),
+    success: (_saved: unknown, id: NodeId) => t.nodes.detail.forwardOnToast(nodeName(all, id)),
+  })
   if (awaiting !== !targetDeclared) setAwaiting(!targetDeclared)
 
   const check = useQuery({
@@ -293,11 +300,24 @@ export function ForwardDialog({ network, forward, scope: presetScope, open, onCl
               />
             )}
           </Field>
-          {target !== undefined && !target.declared.forward ? (
-            <div>
-              <Notice tone="warn">{d.targetHowTo(target.name)}</Notice>
-              <DeclareHowTo capability="forward" nodeName={target.name} waiting className="mt-2" />
-            </div>
+          {target !== undefined && !canBeForwardTarget(target) ? (
+            forwardTargetBySwitch(target) ? (
+              <Notice
+                tone="warn"
+                action={
+                  <Button size="sm" pending={turnOn.isPending} onClick={() => turnOn.mutate(target.id)}>
+                    {d.targetTurnOn}
+                  </Button>
+                }
+              >
+                {d.targetOff(target.name)}
+              </Notice>
+            ) : (
+              <div>
+                <Notice tone="warn">{d.targetHowTo(target.name)}</Notice>
+                <DeclareHowTo capability="forward" nodeName={target.name} waiting className="mt-2" />
+              </div>
+            )
           ) : null}
           <div>
             <p id={targetKindLabel} className="mb-2 text-[13px] font-medium">

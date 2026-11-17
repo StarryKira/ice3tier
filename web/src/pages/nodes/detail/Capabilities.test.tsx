@@ -7,7 +7,7 @@ import { t } from '@/i18n'
 import { makeNode } from '@/test/fixtures'
 import { fakeApi, NETWORK, renderWithApp } from '@/test/harness'
 
-import { RelayTab } from './Capabilities'
+import { ForwardTab, RelayTab } from './Capabilities'
 
 const d = t.nodes.detail
 
@@ -99,5 +99,30 @@ describe('relay 这一页', () => {
 
     await user.click(screen.getByRole('button', { name: d.reachDismiss }))
     expect(screen.queryByTestId('relay-reachability')).not.toBeInTheDocument()
+  })
+})
+
+describe('端口转发这一页', () => {
+  it('0.1.11 起是管理员的开关：没有"如何声明"，打开就发 PATCH', async () => {
+    const user = userEvent.setup()
+    const node = detail({ forward_target: false })
+    const api = fakeApi({
+      'GET /networks/1/nodes': [node],
+      'GET /networks/1/forwards': [],
+      'PATCH /networks/1/nodes/1': { ...node, forward_target: true },
+    })
+    renderWithApp(<ForwardTab network={NETWORK} node={node} onWaiting={() => undefined} />)
+    expect(screen.queryByRole('button', { name: t.declare.howTo })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('switch', { name: d.forwardSwitch('hk') }))
+    await waitFor(() => expect(api.callsTo('PATCH /networks/1/nodes/1')[0]?.body).toEqual({ forward_target: true }))
+    expect(await screen.findByText(d.forwardOnToast('hk'))).toBeVisible()
+  })
+
+  it('更早的 controller 没有开关：照旧看节点的声明，没声明时写怎么声明', () => {
+    fakeApi({ 'GET /networks/1/nodes': [], 'GET /networks/1/forwards': [] })
+    const node = detail({ declared: { exit: false, relay: false, forward: false } })
+    renderWithApp(<ForwardTab network={NETWORK} node={node} onWaiting={() => undefined} />)
+    expect(screen.queryByRole('switch')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: t.declare.howTo })).toBeVisible()
   })
 })

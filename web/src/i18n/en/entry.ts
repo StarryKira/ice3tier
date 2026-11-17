@@ -301,6 +301,7 @@ export const forwards: Messages['forwards'] = {
   examplePublishDesc: 'Listen on 0.0.0.0 on a public node, forward to a LAN address behind another node',
   emptyNoNodes: 'The network has no nodes yet',
   noTargets: 'No node can be a forward target',
+  noTargetsSwitchBody: "Turn on the switch in the target node's Port forwarding tab.",
   noTargetsBody: 'On the target node, run this, then restart i3t:',
 
   dialog: {
@@ -330,6 +331,8 @@ export const forwards: Messages['forwards'] = {
     protocol: 'Protocol',
     tcp: 'TCP',
     udp: 'UDP',
+    targetOff: (name) => `${name} is not allowed as a port forward target yet; the forward will be created disabled`,
+    targetTurnOn: 'Allow',
     targetHowTo: (name) => `${name} hasn't declared it; the forward is created disabled`,
     targetAddress: 'Address',
     targetSelf: 'Target node itself',

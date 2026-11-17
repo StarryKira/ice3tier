@@ -187,7 +187,8 @@ export interface Overview {
 export interface Declared {
   exit: boolean
   relay: boolean
-  forward: boolean
+  /** 0.1.11 起没有了：端口转发的目标改由管理员在界面上打开（`Node.forward_target`），不用节点声明。 */
+  forward?: boolean
 }
 
 /** 中继的一个地址从哪里来：节点上声明的、controller 看到的、节点网卡上的。`unknown` 是更新的 controller 才有的取值。 */
@@ -269,6 +270,8 @@ export interface Node {
   /** 它所在的分组，按名字排。内置的 `All` 不列出：每个节点都在里面。 */
   groups: GroupRef[]
   declared: Declared
+  /** 0.1.11 起：管理员打开了"可作为端口转发的目标"。更早的 controller 没有这个字段，看 `declared.forward`。 */
+  forward_target?: boolean
   relay: RelaySettings | null
   exit: ExitSettings | null
   dial_out_only: boolean
@@ -327,6 +330,8 @@ export interface UpdateNode {
   /** 写 `null` 表示改回用网络的默认值。 */
   reach?: Reach | null
   pinned_relays?: NodeId[]
+  /** 0.1.11 起：打开或关掉"可作为端口转发的目标"。 */
+  forward_target?: boolean
 }
 
 export interface Succeed {
