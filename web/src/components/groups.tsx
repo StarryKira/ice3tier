@@ -1,8 +1,9 @@
-import { Boxes, Check, ChevronsUpDown, Search, Server, X } from 'lucide-react'
+import { Boxes, ChevronsUpDown, Search, Server, X } from 'lucide-react'
 import { type KeyboardEvent, useId, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router'
 
 import { type Group, type GroupRef, type NetworkId } from '@/api/types'
+import { CheckMark } from '@/components/ui/check-mark'
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
@@ -123,22 +124,6 @@ const firstPickable = (rows: readonly Pick<Group, 'builtin'>[]): number =>
     0,
     rows.findIndex((group) => !group.builtin),
   )
-
-/** 列表里的勾选框，只是样子：点的是整行。 */
-function CheckMark({ checked, locked }: { checked: boolean; locked: boolean }) {
-  return (
-    <span
-      aria-hidden
-      className={cn(
-        'flex size-4 shrink-0 items-center justify-center rounded-[4px] border transition-colors',
-        checked ? 'border-primary bg-primary text-primary-foreground' : 'border-faint bg-card',
-        locked && 'opacity-50',
-      )}
-    >
-      {checked ? <Check className="size-3" style={{ strokeWidth: 3 }} /> : null}
-    </span>
-  )
-}
 
 /**
  * 选分组：框里是选中的分组，点开是一个能搜索的列表，每行一个分组、它有几个节点、一个勾选框。

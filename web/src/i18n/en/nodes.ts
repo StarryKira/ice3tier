@@ -284,9 +284,9 @@ export const nodes: Messages['nodes'] = {
     dialOutOnlyHint: "Accepts no incoming connections and skips hole punching; peers it can't reach go through a relay",
     pinnedLabel: 'Pinned relays',
     pinnedHint: (max) => `Without a pin the node picks the lowest-latency relay. Up to ${max}.`,
+    pinnedAuto: 'Automatic (lowest latency)',
+    pinnedSearch: 'Search relays',
     pinnedNone: 'No relays in this network',
-    pinnedAdd: 'Add relay',
-    pinnedRemove: (name) => `Unpin ${name}`,
     pinnedNotRelay: 'Not a relay',
     settingSaved: 'Saved',
 

@@ -272,9 +272,9 @@ export const nodes = {
     dialOutOnlyHint: '不接受别的节点连进来，也不打洞；连不上的对端经中继',
     pinnedLabel: '指定的中继',
     pinnedHint: (max: number) => `不选时节点自动选延迟最低的。最多 ${max} 个。`,
+    pinnedAuto: '自动（延迟最低）',
+    pinnedSearch: '搜索中继',
     pinnedNone: '网络中没有已启用的中继',
-    pinnedAdd: '添加中继',
-    pinnedRemove: (name: string) => `取消固定 ${name}`,
     pinnedNotRelay: '已不是中继',
     settingSaved: '已保存',
 

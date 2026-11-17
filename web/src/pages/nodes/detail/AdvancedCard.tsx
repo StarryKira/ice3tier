@@ -1,20 +1,17 @@
 import { useQuery } from '@tanstack/react-query'
-import { RadioTower, X } from 'lucide-react'
 import { type ReactNode, useId } from 'react'
 
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
 import { type Network, type NodeDetail, type NodeId, type Reach, type RoutingMode, type UpdateNode } from '@/api/types'
-import { Combobox } from '@/components/combobox'
 import { InfoTip } from '@/components/info-tip'
-import { OnlineDot } from '@/components/status'
-import { Badge } from '@/components/ui/badge'
 import { BoxCard, BoxCardHeader } from '@/components/ui/card'
 import { NativeSelect } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { t } from '@/i18n'
-import { nodeName } from '@/lib/nodes'
 import { MAX_PINNED_RELAYS } from '@/lib/product'
+
+import { RelayPicker } from './RelayPicker'
 
 const d = t.nodes.detail
 
@@ -94,8 +91,6 @@ export function AdvancedCard({ network, node }: { network: Network; node: NodeDe
     success: d.settingSaved,
   })
 
-  const relays = (nodes.data ?? []).filter((other) => other.relay !== null && other.id !== node.id)
-  const available = relays.filter((relay) => !node.pinned_relays.includes(relay.id))
   const setPinned = (pinned: NodeId[]) => save.mutate({ pinned_relays: pinned })
 
   return (
@@ -145,51 +140,15 @@ export function AdvancedCard({ network, node }: { network: Network; node: NodeDe
           />
         </SettingRow>
 
-        <SettingRow label={d.pinnedLabel} hint={d.pinnedHint(MAX_PINNED_RELAYS)} labelId={pinnedId} stacked>
-          <ul aria-labelledby={pinnedId} className="flex flex-wrap items-center gap-1.5">
-            {node.pinned_relays.map((id) => {
-              const relay = (nodes.data ?? []).find((other) => other.id === id)
-              const name = nodeName(nodes.data ?? [], id)
-              return (
-                <li
-                  key={id}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-md bg-muted pr-1 pl-2 text-[13px] [&>svg]:size-3.5"
-                >
-                  <RadioTower className="shrink-0 text-muted-foreground" aria-hidden />
-                  {name}
-                  {relay?.relay == null ? <Badge tone="warn">{d.pinnedNotRelay}</Badge> : null}
-                  <button
-                    type="button"
-                    disabled={save.isPending}
-                    onClick={() => setPinned(node.pinned_relays.filter((other) => other !== id))}
-                    aria-label={d.pinnedRemove(name)}
-                    className="flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
-                  >
-                    <X className="size-3.5" aria-hidden />
-                  </button>
-                </li>
-              )
-            })}
-            {node.pinned_relays.length < MAX_PINNED_RELAYS ? (
-              <li className="w-56">
-                <Combobox<NodeId>
-                  value={null}
-                  onChange={(id) => setPinned([...node.pinned_relays, id])}
-                  options={available.map((relay) => ({
-                    value: relay.id,
-                    label: relay.name,
-                    hint: relay.relay?.region === '' ? relay.virtual_ip : relay.relay?.region,
-                    leading: <OnlineDot online={relay.online} />,
-                  }))}
-                  placeholder={d.pinnedAdd}
-                  searchPlaceholder={t.select.nodeSearch}
-                  emptyText={relays.length === 0 ? d.pinnedNone : t.select.nodeEmpty}
-                  disabled={save.isPending}
-                  aria-label={d.pinnedAdd}
-                />
-              </li>
-            ) : null}
-          </ul>
+        <SettingRow label={d.pinnedLabel} hint={d.pinnedHint(MAX_PINNED_RELAYS)} htmlFor={pinnedId}>
+          <RelayPicker
+            id={pinnedId}
+            nodes={nodes.data ?? []}
+            self={node.id}
+            value={node.pinned_relays}
+            onChange={setPinned}
+            busy={save.isPending}
+          />
         </SettingRow>
       </div>
     </BoxCard>

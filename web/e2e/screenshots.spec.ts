@@ -493,6 +493,13 @@ test('有数据时：节点详情', async () => {
   await expect(page.getByTestId('declare-command')).toBeVisible()
   await shot('node-detail-not-declared')
 
+  // 概览上的"指定的中继"：点开是能搜索的勾选列表。
+  await page.getByRole('tab', { name: d.tabOverview }).click()
+  await page.getByRole('combobox', { name: d.pinnedLabel }).click()
+  await expect(page.getByRole('listbox', { name: d.pinnedLabel })).toBeVisible()
+  await shot('node-detail-pinned-relays', { fullPage: false })
+  await page.keyboard.press('Escape')
+
   await page.getByRole('tab', { name: d.tabRoutes }).click()
   await expect(page.getByRole('columnheader', { name: d.colPath })).toBeVisible()
   await shot('node-detail-routes')
