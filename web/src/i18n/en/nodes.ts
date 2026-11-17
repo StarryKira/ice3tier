@@ -261,8 +261,6 @@ export const nodes: Messages['nodes'] = {
     exitUsersRules: 'Access rules',
     exitUsersNone: 'No node can reach it: add an access rule',
     exitNotAllowed: 'No longer allowed',
-    exitNeverUsed: 'Not used',
-    exitFlows: (n) => count(n, 'flow', 'flows'),
     exitUsageBody: 'Use its virtual IP as the proxy username:',
 
     forwardTitle: 'Port forward target',

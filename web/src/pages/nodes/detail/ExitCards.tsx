@@ -20,6 +20,7 @@ import { t } from '@/i18n'
 import { formatBytes } from '@/lib/format'
 import { formatAge } from '@/lib/time'
 import { quotaView } from '@/lib/usage'
+import { cn } from '@/lib/utils'
 import { MAX_QUOTA_RESET_DAY } from '@/lib/validate'
 import { networkPath } from '@/pages/networks/context'
 import { exitHealthView } from '@/pages/exits/exitView'
@@ -319,16 +320,13 @@ interface UserRow {
   id: NodeId
   name: string
   allowed: boolean
-  flows: number | null
   up: number
   down: number
-  /** 失败的几种，没有的不写。 */
-  failures: string[]
 }
 
 /**
- * 能用它的节点：访问规则允许访问它的节点都能把它当出口。每行写它经这个出口走了多少（那个节点自己看到的），
- * 没用过的写"没用过"；用过、但规则现在已经不允许的也列出来，标明。按流量排。
+ * 能用它的节点：访问规则允许访问它的节点都能把它当出口。每行一样高：名字，右边是它经这个出口发出和收到的字节
+ * （那个节点自己看到的，没用过就是 0）。用过、但规则现在已经不允许的也列出来，标明。按流量排。
  */
 export function ExitUsersCard({ network, node }: { network: Network; node: NodeDetail }) {
   const access = useQuery(q.nodeAccess(network.id, node.id))
@@ -337,33 +335,21 @@ export function ExitUsersCard({ network, node }: { network: Network; node: NodeD
   const view = exits.data?.find((candidate) => candidate.node.id === node.id)
   const allowed = new Set((access.data?.reachable_by ?? []).map((edge) => edge.node.id))
 
-  const rows: UserRow[] = []
-  for (const edge of access.data?.reachable_by ?? []) {
-    rows.push({ id: edge.node.id, name: edge.node.name, allowed: true, flows: null, up: 0, down: 0, failures: [] })
-  }
+  const rows: UserRow[] = (access.data?.reachable_by ?? []).map((edge) => ({
+    id: edge.node.id,
+    name: edge.node.name,
+    allowed: true,
+    up: 0,
+    down: 0,
+  }))
   for (const seen of view?.observed ?? []) {
     let row = rows.find((candidate) => candidate.id === seen.by.id)
     if (row === undefined) {
-      row = {
-        id: seen.by.id,
-        name: seen.by.name,
-        allowed: allowed.has(seen.by.id),
-        flows: null,
-        up: 0,
-        down: 0,
-        failures: [],
-      }
+      row = { id: seen.by.id, name: seen.by.name, allowed: allowed.has(seen.by.id), up: 0, down: 0 }
       rows.push(row)
     }
-    row.flows = seen.flows
     row.up = seen.bytes_up
     row.down = seen.bytes_down
-    row.failures = [
-      seen.failed_by_target > 0 ? `${e.rowFailedTarget} ${seen.failed_by_target}` : null,
-      seen.refused > 0 ? `${e.rowRefused} ${seen.refused}` : null,
-      seen.failed_by_exit > 0 ? `${e.rowFailedExit} ${seen.failed_by_exit}` : null,
-      seen.unreachable > 0 ? `${e.rowUnreachable} ${seen.unreachable}` : null,
-    ].filter((part): part is string => part !== null)
   }
   rows.sort((x, y) => y.up + y.down - (x.up + x.down) || x.name.localeCompare(y.name))
   const info = (id: NodeId) => nodes.data?.find((candidate) => candidate.id === id)
@@ -391,24 +377,15 @@ export function ExitUsersCard({ network, node }: { network: Network; node: NodeD
       ) : (
         <ul className="divide-y" aria-label={d.exitUsersTitle}>
           {rows.map((row) => (
-            <li key={row.id} className="flex min-h-12 flex-col justify-center gap-0.5 px-5 py-2.5">
-              <div className="flex items-center justify-between gap-4">
-                <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-sm">
-                  <NodeLink network={network.id} node={{ id: row.id, name: row.name }} online={info(row.id)?.online} />
-                  <Flag code={info(row.id)?.country} />
-                  {row.allowed ? null : <Badge tone="warn">{d.exitNotAllowed}</Badge>}
-                </div>
-                <span className="shrink-0 text-sm tabular">
-                  {row.flows === null ? (
-                    <span className="text-[13px] text-muted-foreground">{d.exitNeverUsed}</span>
-                  ) : (
-                    `↑ ${formatBytes(row.up)} ↓ ${formatBytes(row.down)}`
-                  )}
-                </span>
+            <li key={row.id} className="flex min-h-12 items-center justify-between gap-4 px-5 py-2.5">
+              <div className="flex min-w-0 items-center gap-2 text-sm">
+                <NodeLink network={network.id} node={{ id: row.id, name: row.name }} online={info(row.id)?.online} />
+                <Flag code={info(row.id)?.country} />
+                {row.allowed ? null : <Badge tone="warn">{d.exitNotAllowed}</Badge>}
               </div>
-              {row.flows === null ? null : (
-                <p className="text-xs text-muted-foreground">{[d.exitFlows(row.flows), ...row.failures].join(' · ')}</p>
-              )}
+              <span className={cn('shrink-0 text-sm tabular', row.up + row.down === 0 && 'text-muted-foreground')}>
+                ↑ {formatBytes(row.up)} ↓ {formatBytes(row.down)}
+              </span>
             </li>
           ))}
         </ul>

@@ -252,8 +252,6 @@ export const nodes = {
     exitUsersRules: '访问规则',
     exitUsersNone: '没有节点能访问它：在访问控制里加一条规则',
     exitNotAllowed: '规则已不允许',
-    exitNeverUsed: '没用过',
-    exitFlows: (n: number) => `${n} 条流`,
     exitUsageBody: '代理用户名填它的虚拟 IP：',
 
     forwardTitle: '端口转发目标',
