@@ -223,7 +223,7 @@ impl Member {
 
     /// 上报一次，带着这个更新进度。
     pub(crate) fn report_update(&self, controller: &Controller, status: UpdateStatus) {
-        self.send(controller, ToController::Report(Report { update: Some(status), ..Report::default() }));
+        self.send(controller, ToController::Report(Box::new(Report { update: Some(status), ..Report::default() })));
     }
 
     /// 确认收到的最新一份 netmap。

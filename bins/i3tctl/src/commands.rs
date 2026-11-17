@@ -416,6 +416,11 @@ impl Session {
                 let node = self.node(network, &node).await?;
                 self.show(self.delete(&format!("/networks/{network}/nodes/{}/relay", node.id)).await?, render::node_changed)
             }
+            RelayCommand::List => {
+                let nodes: Value = self.get(&format!("/networks/{network}/nodes")).await?;
+                let relays = nodes.as_array().into_iter().flatten().filter(|node| !node["relay"].is_null()).cloned().collect();
+                self.show_list(Value::Array(relays), render::relays)
+            }
         }
     }
 
@@ -646,9 +651,9 @@ impl Session {
         let pairs = format!("/networks/{network}/pairs");
         match command {
             PairCommand::List => self.show_list(self.get(&pairs).await?, render::pairs),
-            PairCommand::Set { a, b, keep_alive, lane } => {
+            PairCommand::Set { a, b, keep_alive, lane, congestion } => {
                 let (a, b) = (self.node(network, &a).await?.id, self.node(network, &b).await?.id);
-                let input = PairInput { keep_alive: keep_alive.map(|on| on.0), lane };
+                let input = PairInput { keep_alive: keep_alive.map(|on| on.0), lane, congestion: congestion.map(|arg| arg.0) };
                 self.show(self.send(Method::PUT, &format!("{pairs}/{a}/{b}"), &input).await?, render::pair)
             }
             PairCommand::Unset { a, b } => {

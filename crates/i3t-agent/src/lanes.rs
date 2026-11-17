@@ -244,6 +244,7 @@ mod tests {
             dial_out_only: false,
             keep_alive: false,
             lane,
+            congestion: None,
         });
         id
     }

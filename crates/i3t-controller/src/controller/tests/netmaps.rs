@@ -243,20 +243,20 @@ fn peer_details_follow_least_privilege() {
     let user = lab.join_offline(network.id, &["users"], Declared::default());
     lab.controller.enable_relay(network.id, relay, relay_settings()).unwrap();
     lab.controller.enable_exit(network.id, exit.id, ExitRole { lan: true, ports: None, ..ExitRole::default() }).unwrap();
-    lab.controller.set_pair(network.id, user, exit.id, PairInput { keep_alive: Some(true), lane: None }).unwrap();
+    lab.controller.set_pair(network.id, user, exit.id, PairInput { keep_alive: Some(true), lane: None, congestion: None }).unwrap();
     let report = Report {
         endpoints: vec!["192.168.1.5:20330".parse().unwrap(), "203.0.113.50:20330".parse().unwrap(), "192.168.1.5:20330".parse().unwrap()],
         // 挂靠关系里只有真的是 relay 的才下发，并且按延迟排。
-        attached: vec![Attachment { relay: user, rtt_ms: 1 }, Attachment { relay, rtt_ms: 30 }],
+        attached: vec![Attachment { relay: user, rtt_ms: 1, shared: false }, Attachment { relay, rtt_ms: 30, shared: false }],
         ..Report::default()
     };
-    lab.controller.handle(exit.session, REMOTE, ToController::Report(report)).unwrap();
+    lab.controller.handle(exit.session, REMOTE, ToController::Report(Box::new(report))).unwrap();
     lab.settle(&mut [&mut exit]);
 
     let seen_by_user = lab.netmap(user).peer(exit.id).cloned().unwrap();
     assert_eq!(seen_by_user.exit, Some(netmap::PeerExit { lan: true, class: None, optimistic: None }));
     assert!(seen_by_user.keep_alive);
-    assert_eq!(seen_by_user.attached, vec![Attachment { relay, rtt_ms: 30 }]);
+    assert_eq!(seen_by_user.attached, vec![Attachment { relay, rtt_ms: 30, shared: false }]);
     let expected: Vec<std::net::SocketAddr> =
         vec!["192.168.1.5:20330".parse().unwrap(), "203.0.113.50:20330".parse().unwrap(), std::net::SocketAddr::new(REMOTE, 20330)];
     assert_eq!(seen_by_user.endpoints, expected);
@@ -379,7 +379,7 @@ fn the_pair_view_says_how_old_each_lane_report_is_and_whether_new_tcp_streams_us
     let mut member = lab.join_as(network.id, &hello);
     lab.settle(&mut [&mut relay, &mut member]);
     lab.controller.enable_relay(network.id, relay.id, relay_settings()).unwrap();
-    let lane = PairInput { keep_alive: None, lane: Some(LaneMode::UdpFallback) };
+    let lane = PairInput { keep_alive: None, lane: Some(LaneMode::UdpFallback), congestion: None };
     lab.controller.set_pair(network.id, relay.id, member.id, lane).unwrap();
     let report = |peer, udp_path| {
         let lanes = PeerLanes {
@@ -392,10 +392,10 @@ fn the_pair_view_says_how_old_each_lane_report_is_and_whether_new_tcp_streams_us
             udp_path,
             counts: i3t_model::control::LaneCounts::default(),
         };
-        ToController::Report(Report {
+        ToController::Report(Box::new(Report {
             lanes: Some(Box::new(LaneReport { peers: vec![lanes], ..LaneReport::default() })),
             ..Report::default()
-        })
+        }))
     };
     member.send(&lab.controller, report(relay.id, Some(false)));
     relay.send(&lab.controller, report(member.id, Some(true)));
@@ -411,7 +411,9 @@ fn the_pair_view_says_how_old_each_lane_report_is_and_whether_new_tcp_streams_us
     assert_eq!(opening, expected, "共用连接上没有 UDP 的那一边在 lane 上开新的 TCP 流");
     assert_eq!(lab.controller.node(network.id, member.id).unwrap().reported_secs_ago, Some(0));
 
-    lab.controller.set_pair(network.id, relay.id, member.id, PairInput { keep_alive: None, lane: Some(LaneMode::Always) }).unwrap();
+    lab.controller
+        .set_pair(network.id, relay.id, member.id, PairInput { keep_alive: None, lane: Some(LaneMode::Always), congestion: None })
+        .unwrap();
     assert!(lab.controller.pairs(network.id).unwrap()[0].lane_effect.as_ref().unwrap().opening.is_empty(), "只在 udp_fallback 时说");
 }
 
@@ -421,7 +423,7 @@ fn a_lane_setting_reaches_both_nodes_and_the_pair_view_says_why_it_does_not_work
     let network = lab.network("home");
     let entry = lab.join_offline(network.id, &[], CAN_DO_ALL);
     let exit = lab.join_offline(network.id, &[], CAN_DO_ALL);
-    let lane = |mode| PairInput { keep_alive: None, lane: Some(mode) };
+    let lane = |mode| PairInput { keep_alive: None, lane: Some(mode), congestion: None };
 
     let view = lab.controller.set_pair(network.id, exit, entry, lane(LaneMode::Always)).unwrap();
     assert_eq!((view.setting.a, view.setting.b, view.setting.keep_alive, view.setting.lane), (entry, exit, false, LaneMode::Always));
@@ -440,7 +442,8 @@ fn a_lane_setting_reaches_both_nodes_and_the_pair_view_says_why_it_does_not_work
     assert!(effect.summary.contains("共用的连接"), "要说明共用的连接和它的路照常在：{}", effect.summary);
 
     // 只改常驻，独占 TCP 的设置不变。
-    let view = lab.controller.set_pair(network.id, entry, exit, PairInput { keep_alive: Some(true), lane: None }).unwrap();
+    let view =
+        lab.controller.set_pair(network.id, entry, exit, PairInput { keep_alive: Some(true), lane: None, congestion: None }).unwrap();
     assert_eq!((view.setting.keep_alive, view.setting.lane), (true, LaneMode::Always));
     let view = lab.controller.set_pair(network.id, entry, exit, lane(LaneMode::UdpFallback)).unwrap();
     assert_eq!((view.setting.keep_alive, view.setting.lane), (true, LaneMode::UdpFallback));
@@ -490,7 +493,7 @@ fn a_chosen_profile_reaches_only_that_node_and_its_report_shows_in_the_detail() 
 
     let running =
         PerformanceReport { profile: Profile::LowFootprint, threads: 2, restart_pending: true, overrides: vec!["threads".into()] };
-    a.send(&lab.controller, ToController::Report(Report { performance: Some(Box::new(running.clone())), ..Report::default() }));
+    a.send(&lab.controller, ToController::Report(Box::new(Report { performance: Some(Box::new(running.clone())), ..Report::default() })));
     assert_eq!(lab.controller.node(network.id, a.id).unwrap().performance, Some(running));
     assert_eq!(lab.controller.node(network.id, b.id).unwrap().performance, None, "旧版本或者还没报过的节点没有");
 
@@ -517,7 +520,7 @@ fn the_reported_intercept_state_shows_in_the_node_detail_and_nothing_is_sent_bac
         up_bytes: 100,
         down_bytes: 200,
     };
-    a.send(&lab.controller, ToController::Report(Report { intercept: Some(Box::new(on.clone())), ..Report::default() }));
+    a.send(&lab.controller, ToController::Report(Box::new(Report { intercept: Some(Box::new(on.clone())), ..Report::default() })));
     assert_eq!(lab.controller.node(network.id, a.id).unwrap().intercept, Some(on));
     assert_eq!(lab.controller.node(network.id, b.id).unwrap().intercept, None, "旧版本或者还没报过的节点没有");
 
@@ -527,8 +530,37 @@ fn the_reported_intercept_state_shows_in_the_node_detail_and_nothing_is_sent_bac
         up_bytes: 0,
         down_bytes: 0,
     };
-    a.send(&lab.controller, ToController::Report(Report { intercept: Some(Box::new(failed.clone())), ..Report::default() }));
+    a.send(&lab.controller, ToController::Report(Box::new(Report { intercept: Some(Box::new(failed.clone())), ..Report::default() })));
     assert_eq!(lab.controller.node(network.id, a.id).unwrap().intercept, Some(failed));
     lab.settle(&mut [&mut a]);
     assert_eq!(a.netmap().version, version, "透明访问是本机的事，controller 不因此改 netmap");
+}
+
+#[test]
+fn a_report_reaches_the_peers_almost_at_once_but_a_burst_of_reports_is_published_at_most_once_a_window() {
+    use std::time::{Duration, Instant};
+
+    let window = Duration::from_secs(1);
+    let mut lab = Lab::with_timing(super::super::Timing { ack_coalesce: Duration::ZERO, report_coalesce: window, ..Default::default() });
+    let network = lab.network("home");
+    let mut watcher = lab.join(network.id, &[]);
+    let mut first = lab.join(network.id, &[]);
+    let mut second = lab.join(network.id, &[]);
+    lab.settle(&mut [&mut watcher, &mut first, &mut second]);
+    let endpoint = |port: u16| Report { endpoints: vec![std::net::SocketAddr::from(([203, 0, 113, 7], port))], ..Report::default() };
+    let due = |lab: &Lab| lab.controller.lock().dirty.get(&watcher.id).map(|deferred| deferred.due);
+
+    let reported = Instant::now();
+    lab.controller.handle(first.session, REMOTE, ToController::Report(Box::new(endpoint(1000)))).unwrap();
+    let lead = due(&lab).expect("对端的 netmap 要重算");
+    assert!(lead < reported + window / 2, "离上一次够久了：不等满一个窗口");
+
+    // 紧接着又一个节点报了：还没发的那一次带上它，不另排。
+    lab.controller.handle(second.session, REMOTE, ToController::Report(Box::new(endpoint(2000)))).unwrap();
+    assert_eq!(due(&lab), Some(lead));
+
+    // 那一次发出去之后马上又有变化：等到上一次之后满一个窗口，不一阵阵地发。
+    lab.controller.lock().dirty.clear();
+    lab.controller.handle(first.session, REMOTE, ToController::Report(Box::new(endpoint(3000)))).unwrap();
+    assert!(due(&lab).is_some_and(|next| next >= lead + window), "同一个节点两次之间至少隔一个窗口");
 }

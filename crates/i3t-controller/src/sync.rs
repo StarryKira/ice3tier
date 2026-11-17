@@ -29,6 +29,8 @@ pub(crate) struct NodeSync {
     awaiting_undial: BTreeMap<NodeId, u64>,
     /// 最近一次给它发 netmap 的时刻，用来判断确认是不是等得太久了。
     pub sent_at: Option<Instant>,
+    /// 最近一次因为别的节点的上报（端点、挂靠、连得上哪些 relay）给它排的重算的时刻，见 `Inner::defer_report`。
+    pub report_due: Option<Instant>,
 }
 
 impl NodeSync {

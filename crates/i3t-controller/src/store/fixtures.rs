@@ -5,7 +5,7 @@ use i3t_model::control::Declared;
 use i3t_model::netmap::{Reach, RoutingMode};
 use i3t_proto::{NodeId, PublicKey};
 
-use super::{NewNetwork, NewNode, Store};
+use super::{NetmapState, NewNetwork, NewNode, NodeRecord, Store};
 
 pub(crate) fn home() -> NewNetwork {
     NewNetwork {
@@ -45,4 +45,38 @@ pub(crate) fn store_with_nodes(count: u8) -> (Store, NetworkId, Vec<NodeId>) {
     let network = store.insert_network(&home()).unwrap();
     let nodes = (1..=count).map(|seed| store.insert_node(&new_node(network, seed)).unwrap()).collect();
     (store, network, nodes)
+}
+
+/// 第 `seed` 个节点的记录，不经过存储：只用来测按记录算东西的函数。别的字段按需要改。
+pub(crate) fn record(seed: u8) -> NodeRecord {
+    NodeRecord {
+        id: NodeId::new(u32::from(seed)).unwrap(),
+        network: NetworkId(1),
+        key: key(seed),
+        name: format!("node-{seed}"),
+        virtual_ip: [10, 66, 0, seed].into(),
+        groups: Default::default(),
+        declared: Declared::default(),
+        relay: None,
+        exit: None,
+        dial_out_only: false,
+        routing: None,
+        reach: None,
+        pinned_relays: Vec::new(),
+        profile: None,
+        endpoints: Vec::new(),
+        local_addresses: None,
+        observed: None,
+        attached: Vec::new(),
+        relay_reach: Vec::new(),
+        platform: String::new(),
+        version: String::new(),
+        hostname: String::new(),
+        self_update: None,
+        update_failure: None,
+        created_at: 0,
+        last_seen_at: None,
+        netmap: NetmapState::default(),
+        enrolled_with: None,
+    }
 }

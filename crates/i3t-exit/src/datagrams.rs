@@ -640,6 +640,7 @@ mod tests {
                 forward_targets: Vec::new(),
                 pinned_relays: Vec::new(),
                 profile: None,
+                shared_relays: Vec::new(),
             },
             peers: Vec::new(),
             relays: Vec::new(),

@@ -248,6 +248,7 @@ mod tests {
             dial_out_only: false,
             keep_alive: false,
             lane: LaneMode::Off,
+            congestion: None,
         };
         Netmap {
             version: 1,
@@ -274,6 +275,7 @@ mod tests {
                 forward_targets: Vec::new(),
                 pinned_relays: Vec::new(),
                 profile: None,
+                shared_relays: Vec::new(),
             },
             peers: vec![peer(2, "nas", true), peer(3, "phone", false)],
             relays: Vec::new(),

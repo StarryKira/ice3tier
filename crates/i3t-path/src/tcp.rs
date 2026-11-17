@@ -1,5 +1,6 @@
 //! 节点一侧到 relay 的那条 TCP（UDP 用不了时的退路）。握手的规则在 [`crate::relays`]，这里只管连接和搬运。
 
+use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -66,7 +67,7 @@ pub(crate) fn spawn(shared: Arc<Shared>, relay: Arc<RelaySlot>, conn: u64, addrs
 }
 
 async fn run(shared: &Shared, relay: &RelaySlot, conn: u64, addrs: &[SocketAddr], queue: FrameQueue) -> &'static str {
-    let Some((stream, addr)) = connect(addrs).await else { return "连不上" };
+    let Ok((stream, addr)) = connect_first(addrs).await else { return "连不上" };
     if tcp_leg::configure(&stream).is_err() {
         return "设置不了 socket 选项";
     }
@@ -83,12 +84,20 @@ async fn run(shared: &Shared, relay: &RelaySlot, conn: u64, addrs: &[SocketAddr]
     }
 }
 
-/// 按顺序去连 `addrs`：每隔 [`CONNECT_STAGGER`]（或者前一个失败时马上）开始连下一个，几个同时在连，先连上的那个为准，
-/// 别的放下。全都连不上时返回 `None`。
-async fn connect(addrs: &[SocketAddr]) -> Option<(TcpStream, SocketAddr)> {
+/// 按顺序去连 `addrs`：每隔 250 毫秒（或者前一个失败时马上）开始连下一个，几个同时在连，先连上的那个为准，
+/// 别的放下。每个地址最多等 4 秒。所以排在前面的地址连不上（不回答）时，后面的好地址不用等它超时。
+///
+/// relay 的几个地址（controller 找出来的，白皮书 §7.2）不一定都连得上：到 relay 的 TCP 中转和独占 TCP（`i3t-lane`）
+/// 都这样连。调用方按"上一次连上的排最前"排好 `addrs`。
+///
+/// # Errors
+///
+/// 全都连不上：最后一个失败的原因；全都超时（或者 `addrs` 是空的）时是 [`io::ErrorKind::TimedOut`]。
+pub async fn connect_first(addrs: &[SocketAddr]) -> io::Result<(TcpStream, SocketAddr)> {
     let mut pending = addrs.iter().copied();
     let mut attempts = JoinSet::new();
     let mut next_start = tokio::time::Instant::now();
+    let mut last_error = io::Error::new(io::ErrorKind::TimedOut, "没有连得上的地址");
     loop {
         let more = pending.len() > 0;
         tokio::select! {
@@ -99,16 +108,17 @@ async fn connect(addrs: &[SocketAddr]) -> Option<(TcpStream, SocketAddr)> {
                 next_start = tokio::time::Instant::now() + CONNECT_STAGGER;
             }
             Some(done) = attempts.join_next() => match done {
-                Ok((addr, Ok(Ok(stream)))) => return Some((stream, addr)),
+                Ok((addr, Ok(Ok(stream)))) => return Ok((stream, addr)),
                 Ok((addr, Ok(Err(error)))) => {
-                    tracing::debug!(%addr, %error, "连 relay 的 TCP 失败");
+                    tracing::debug!(%addr, %error, "连 TCP 失败");
+                    last_error = error;
                     next_start = tokio::time::Instant::now();
                 }
-                Ok((addr, Err(_))) => tracing::debug!(%addr, "连 relay 的 TCP 超时"),
+                Ok((addr, Err(_))) => tracing::debug!(%addr, "连 TCP 超时"),
                 // 连接的任务不会 panic，也只在这里被放下。
                 Err(_) => {}
             },
-            else => return None,
+            else => return Err(last_error),
         }
     }
 }
@@ -151,5 +161,41 @@ async fn read(shared: &Shared, relay: &RelaySlot, conn: u64, mut reader: FrameRe
             }
             Ok(_) | Err(_) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    /// 一个不回答握手的地址：监听着、却从不接受连接，等着接受的队列已经满了，再来的 SYN 内核直接丢掉。
+    /// 返回那个地址和占着队列的东西（丢掉它们地址就不"死"了）。
+    async fn silent_address() -> (SocketAddr, tokio::net::TcpListener, TcpStream) {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = socket.listen(0).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let filler = TcpStream::connect(addr).await.unwrap();
+        (addr, listener, filler)
+    }
+
+    #[tokio::test]
+    async fn an_address_that_never_answers_does_not_hold_up_the_next_one() {
+        // 排在前面的地址不回答：错开一点时间就去连下一个，不等它超时。
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live = listener.local_addr().unwrap();
+        let (dead, _queue, _filler) = silent_address().await;
+        assert!(tokio::time::timeout(Duration::from_millis(300), TcpStream::connect(dead)).await.is_err(), "这个地址应该不回答");
+        let started = tokio::time::Instant::now();
+        let (_stream, addr) = connect_first(&[dead, live]).await.unwrap();
+        assert_eq!(addr, live);
+        assert!(started.elapsed() < Duration::from_secs(1), "等了 {:?}", started.elapsed());
+
+        // 一个也连不上：说出最后一个的原因。
+        drop(listener);
+        assert!(connect_first(&[live]).await.is_err());
+        assert_eq!(connect_first(&[]).await.unwrap_err().kind(), io::ErrorKind::TimedOut);
     }
 }

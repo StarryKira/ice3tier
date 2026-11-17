@@ -25,7 +25,7 @@ fn via(peer: NodeId, relay: NodeId) -> RouteEntry {
 
 fn report(member: &Member, controller: &Controller, routes: Vec<RouteEntry>, full: bool) {
     let report = Report { routes, routes_full: full, update: Some(UpdateStatus::Idle), ..Report::default() };
-    member.send(controller, ToController::Report(report));
+    member.send(controller, ToController::Report(Box::new(report)));
 }
 
 /// 三个互相看得见的节点：两个懂新协议的，一个最初那一版的。
@@ -93,6 +93,55 @@ fn an_offline_node_keeps_its_last_routes_marked_stale_and_ages() {
 }
 
 #[tokio::test]
+async fn route_views_show_flows_traffic_who_uses_a_relay_and_the_recent_switches() {
+    use i3t_model::control::{PeerUse, RelayPairUse, RelayUse, RouteSwitch};
+
+    let mut lab = Lab::new();
+    let network = lab.network("home").id;
+    let capable = Hello { declared: CAN_DO_ALL, ..modern_hello("0.2.0") };
+    let (mut a, mut b, mut old) = (lab.join_as(network, &capable), lab.join_as(network, &capable), lab.join_as(network, &capable));
+    lab.settle(&mut [&mut a, &mut b, &mut old]);
+    lab.controller.enable_relay(network, b.id, RelaySettings::default()).unwrap();
+    let used = PeerUse { peer: b.id, flows: 3, tx_bytes: 4096, rx_bytes: 1024 };
+    let relayed = Route::Relay { relays: vec![b.id] };
+    let direct_route = direct(b.id, 12).route;
+    let switches = vec![
+        RouteSwitch { peer: b.id, from: Route::None, to: relayed.clone(), cause: RouteCause::RelayReady, age_secs: 30 },
+        RouteSwitch { peer: b.id, from: relayed.clone(), to: direct_route.clone(), cause: RouteCause::DirectVerified, age_secs: 5 },
+        RouteSwitch { peer: NodeId::new(99).unwrap(), from: Route::None, to: relayed.clone(), cause: RouteCause::RelayReady, age_secs: 1 },
+    ];
+    let report = Report {
+        routes: vec![direct(b.id, 12), via(old.id, b.id)],
+        routes_full: true,
+        peer_use: vec![used],
+        switches,
+        ..Report::default()
+    };
+    a.send(&lab.controller, ToController::Report(Box::new(report)));
+    let users = RelayUse { window_secs: 10, pairs: vec![RelayPairUse { from: a.id, to: old.id, bytes: 50_000 }], other_bytes: 7 };
+    b.send(&lab.controller, ToController::Report(Box::new(Report { relay_use: Some(users.clone()), ..Report::default() })));
+
+    // 节点的路由表：有连接的对端写着流数和流量，没有连接的是空的。
+    let table = lab.controller.routes(network, a.id).unwrap();
+    let row = |peer: NodeId| table.routes.iter().find(|entry| entry.peer.id == peer).unwrap();
+    assert_eq!((row(b.id).flows, row(b.id).tx_bytes, row(b.id).rx_bytes), (Some(3), Some(4096), Some(1024)));
+    assert_eq!((row(old.id).flows, row(old.id).tx_bytes), (None, None));
+
+    // relay 说谁在用它。
+    let relay = lab.controller.nodes(network).unwrap().into_iter().find(|node| node.id == b.id).unwrap();
+    assert_eq!(relay.relay.unwrap().users, Some(users));
+
+    // 换路的历史：新的在前，网络之外的对端不记。
+    let controller = std::sync::Arc::new(lab.controller);
+    let view = controller.path_view(network, a.id, b.id, None, None).unwrap();
+    let steps: Vec<(Route, Route, RouteCause)> =
+        view.forward.switches.iter().map(|switch| (switch.from.clone(), switch.to.clone(), switch.cause.clone())).collect();
+    assert_eq!(steps, [(relayed.clone(), direct_route, RouteCause::DirectVerified), (Route::None, relayed, RouteCause::RelayReady)]);
+    assert!(view.forward.switches[0].at > view.forward.switches[1].at);
+    assert!(view.reverse.switches.is_empty(), "另一个方向没有报过");
+}
+
+#[tokio::test]
 async fn a_path_is_asked_from_both_ends_and_falls_back_to_the_last_report() {
     let (lab, network, mut a, mut b, mut old) = three_nodes();
     report(&a, &lab.controller, vec![direct(b.id, 12), direct(old.id, 15)], true);
@@ -117,25 +166,27 @@ async fn a_path_is_asked_from_both_ends_and_falls_back_to_the_last_report() {
         rtt_ms: Some(8),
         since: Some(since.clone()),
         detail: None,
+        connection_rtt_ms: Some(11),
     };
     a.send(&controller, ToController::RouteAnswer { request: to_a, answer });
     b.send(
         &controller,
         ToController::RouteAnswer {
             request: to_b,
-            answer: RouteAnswer { peer: a.id, route: None, rtt_ms: None, since: None, detail: None },
+            answer: RouteAnswer { peer: a.id, route: None, rtt_ms: None, since: None, detail: None, connection_rtt_ms: None },
         },
     );
     let view = asking.await.unwrap();
     assert_eq!((view.forward.from.id, view.forward.to.id, view.reverse.from.id), (a.id, b.id, b.id));
     assert_eq!((view.forward.source, view.forward.rtt_ms, view.forward.age_secs), (PathSource::Query, Some(8), Some(0)));
+    assert_eq!(view.forward.connection_rtt_ms, Some(11), "推算的和连接实测的并排给出");
     assert_eq!(view.forward.since, Some(since));
     assert!(matches!(view.forward.route, Some(Route::Direct { .. })));
     assert_eq!((view.reverse.source, view.reverse.route.clone()), (PathSource::NotPeers, None), "b 说 a 不在它的 netmap 里");
 
     // 最初那一版的节点不懂这条查询，不问它，用它上报的；a 不回答，等几秒等不到就也用上报的。
     let view = controller.path(network, a.id, old.id).await.unwrap();
-    assert_eq!((view.forward.source, view.forward.rtt_ms), (PathSource::Report, Some(15)));
+    assert_eq!((view.forward.source, view.forward.rtt_ms, view.forward.connection_rtt_ms), (PathSource::Report, Some(15), None));
     assert_eq!(view.reverse.source, PathSource::Report);
     assert_eq!(view.reverse.route, Some(Route::Relay { relays: vec![b.id] }));
     old.receive();
@@ -151,7 +202,8 @@ async fn a_path_is_asked_from_both_ends_and_falls_back_to_the_last_report() {
         tokio::time::sleep(Duration::from_millis(100)).await;
         b.receive();
         let request = b.queries.last().unwrap().0;
-        let forged = RouteAnswer { peer: old.id, route: Some(Route::None), rtt_ms: None, since: None, detail: None };
+        let forged =
+            RouteAnswer { peer: old.id, route: Some(Route::None), rtt_ms: None, since: None, detail: None, connection_rtt_ms: None };
         a.send(&controller, ToController::RouteAnswer { request, answer: forged.clone() });
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!asking.is_finished(), "a 替 b 答的不算");
@@ -171,7 +223,7 @@ fn kind(peer: NodeId, direct: Option<DirectKind>, relay_leg: Option<LegTransport
 
 fn report_with_kinds(member: &Member, controller: &Controller, routes: Vec<RouteEntry>, kinds: Vec<RouteKind>, full: bool) {
     let report = Report { routes, route_kinds: kinds, routes_full: full, update: Some(UpdateStatus::Idle), ..Report::default() };
-    member.send(controller, ToController::Report(report));
+    member.send(controller, ToController::Report(Box::new(report)));
 }
 
 #[test]
@@ -235,7 +287,14 @@ async fn a_path_shows_the_candidates_the_sender_weighed_and_why_it_chose_one() {
             candidate(Route::Direct { addr: "198.51.100.9:20330".parse().unwrap() }, 45_000, false),
         ],
     };
-    let answer = RouteAnswer { peer: b.id, route: Some(chosen.clone()), rtt_ms: Some(30), since: None, detail: Some(detail) };
+    let answer = RouteAnswer {
+        peer: b.id,
+        route: Some(chosen.clone()),
+        rtt_ms: Some(30),
+        since: None,
+        detail: Some(detail),
+        connection_rtt_ms: None,
+    };
     a.send(&controller, ToController::RouteAnswer { request, answer });
     // b 不回答：退回到它上报的那一份，直连的类型取自上报。
     b.receive();

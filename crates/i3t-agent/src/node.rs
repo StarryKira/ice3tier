@@ -55,6 +55,8 @@ use crate::update::Driver;
 
 /// 进程退出之前，等最后一次上报写出去最多等多久。controller 不在线的话没有什么可等的。
 const FAREWELL_TIMEOUT: Duration = Duration::from_secs(2);
+/// 多久看一次别的节点找到本节点要用的东西（候选端点、挂靠的 relay）变了没有。
+const REACHABILITY_CHECK: Duration = Duration::from_millis(100);
 
 /// netmap 从哪里来。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -466,6 +468,7 @@ impl Managed<'_> {
         });
         let mut netmaps = link.netmap();
         let mut states = link.state();
+        endpoint.set_controller_online(*states.borrow() == LinkState::Online);
         let relocalize = |netmaps: &watch::Receiver<Arc<Netmap>>| {
             local.send_replace(Arc::new(localize(&netmaps.borrow(), config)));
         };
@@ -509,6 +512,7 @@ impl Managed<'_> {
                 Ok(()) = states.changed() => {
                     let state = *states.borrow_and_update();
                     link_state.send_replace(state);
+                    endpoint.set_controller_online(state == LinkState::Online);
                     match state {
                         LinkState::Revoked => bail!("controller 吊销了这个节点"),
                         LinkState::Rejected => bail!("controller 不认这个节点了（它可能已经被删除）。要重新加入网络：echo <令牌> | i3t join"),
@@ -549,14 +553,15 @@ impl Managed<'_> {
 
 /// 别的节点怎么找到本节点（候选端点、挂靠的 relay）一有变化就马上上报，不等定时上报。
 ///
-/// 延迟的小幅波动不算变化，否则每秒都在报。
+/// 延迟的小幅波动不算变化，否则每秒都在报。每 [`REACHABILITY_CHECK`] 看一次：两个节点刚上线时，对端要等这份上报
+/// （controller 再转进它的 netmap）才知道经哪个 relay 找得到本节点，晚一秒看就晚一秒通。看一次只是读两份现成的状态。
 async fn report_when_reachability_changes(endpoint: Arc<Endpoint>, report_now: Arc<Notify>) {
     let snapshot = |endpoint: &Endpoint| {
         let relays: Vec<_> = endpoint.attached().into_iter().map(|attachment| attachment.relay).collect();
         (endpoint.endpoints(), relays)
     };
     let mut last = snapshot(&endpoint);
-    let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    let mut tick = tokio::time::interval(REACHABILITY_CHECK);
     loop {
         tick.tick().await;
         let now = snapshot(&endpoint);

@@ -144,7 +144,7 @@ fn things_in_another_network_are_not_found_through_this_one() {
     not_found(controller.create_listener(home.id, default_elsewhere).unwrap_err());
     not_found(controller.create_forward(home.id, forward(ours, theirs)).unwrap_err());
     not_found(controller.create_forward(home.id, forward(theirs, ours)).unwrap_err());
-    not_found(controller.set_pair(home.id, ours, theirs, PairInput { keep_alive: Some(true), lane: None }).unwrap_err());
+    not_found(controller.set_pair(home.id, ours, theirs, PairInput { keep_alive: Some(true), lane: None, congestion: None }).unwrap_err());
     not_found(
         controller.create_token(home.id, &CreateEnrollToken { successor_of: Some(theirs), ..CreateEnrollToken::default() }).unwrap_err(),
     );
@@ -459,7 +459,7 @@ fn a_successor_enrolled_by_token_inherits_identity_and_configuration() {
     let referring_listener = lab.controller.create_listener(network.id, via_exit).unwrap();
     let to_old = lab.controller.create_forward(network.id, forward(other, old.id)).unwrap();
     let from_old = lab.controller.create_forward(network.id, forward(old.id, other)).unwrap();
-    lab.controller.set_pair(network.id, old.id, other, PairInput { keep_alive: Some(true), lane: None }).unwrap();
+    lab.controller.set_pair(network.id, old.id, other, PairInput { keep_alive: Some(true), lane: None, congestion: None }).unwrap();
     let pin = UpdateNode { pinned_relays: Some(vec![old.id]), ..UpdateNode::default() };
     lab.controller.update_node(network.id, other, &pin).unwrap();
     lab.settle(&mut [&mut old]);
@@ -492,7 +492,10 @@ fn a_successor_enrolled_by_token_inherits_identity_and_configuration() {
     assert_eq!(forwards.iter().find(|f| f.id == from_old.id).unwrap().listen_node, new.id);
     let pairs = lab.controller.pairs(network.id).unwrap();
     let settings: Vec<_> = pairs.into_iter().map(|pair| pair.setting).collect();
-    assert_eq!(settings, vec![i3t_model::admin::PairSetting { a: other, b: new.id, keep_alive: true, lane: LaneMode::Off }]);
+    assert_eq!(
+        settings,
+        vec![i3t_model::admin::PairSetting { a: other, b: new.id, keep_alive: true, lane: LaneMode::Off, congestion: None }]
+    );
     assert!(lab.controller.node(network.id, other).unwrap().node.pinned_relays.is_empty(), "原来的 relay 没了，固定它的节点解除固定");
 
     assert_eq!(new.netmap().me.forward_targets.len(), 1);
@@ -680,7 +683,9 @@ fn every_log_entry_carries_the_named_values_its_sentence_needs() {
     let web = lab.controller.create_forward(network.id, forward(laptop, nas)).unwrap();
     lab.controller.replace_forward(network.id, web.id, ForwardInput { enabled: false, ..forward(laptop, nas) }).unwrap();
     lab.controller.delete_forward(network.id, web.id).unwrap();
-    lab.controller.set_pair(network.id, nas, laptop, PairInput { keep_alive: Some(true), lane: Some(LaneMode::Always) }).unwrap();
+    lab.controller
+        .set_pair(network.id, nas, laptop, PairInput { keep_alive: Some(true), lane: Some(LaneMode::Always), congestion: None })
+        .unwrap();
     lab.controller.delete_pair(network.id, laptop, nas).unwrap();
     lab.controller.enable_relay(network.id, nas, RelaySettings::default()).unwrap();
     lab.controller.disable_relay(network.id, nas).unwrap();

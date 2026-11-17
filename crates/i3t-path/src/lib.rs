@@ -62,6 +62,7 @@ pub use diag::{
 pub use paths::{PacketMeta, PathConfig, Paths, RoutePin, TestGuard};
 pub use report::{BackboneLink, BackboneRow, CandidateReport, DirectKind, LegReport, PathReport, RelayLeg};
 pub use table::Packets;
+pub use tcp::connect_first;
 
 /// 本节点的 relay 角色，路径层要它做的几件事。实现在 `i3t-relay`。
 ///
@@ -134,4 +135,5 @@ pub(crate) struct Status {
     pub(crate) attached: Vec<Attachment>,
     pub(crate) reports: Vec<PathReport>,
     pub(crate) backbone: Vec<BackboneRow>,
+    pub(crate) relay_tries: Vec<i3t_model::control::RelayTry>,
 }

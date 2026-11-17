@@ -32,8 +32,8 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use i3t_crypto::{NodeKey, Signature};
 use i3t_model::Netmap;
-use i3t_model::control::{Route, RouteCause, RouteEntry, RouteHint, Signal};
-use i3t_model::netmap::{Attachment, Reach, RoutingMode};
+use i3t_model::control::{MAX_RELAY_TRIES, RelayTry, Route, RouteCause, RouteEntry, RouteHint, Signal};
+use i3t_model::netmap::{Attachment, MAX_SHARED_RELAYS, Reach, RoutingMode};
 use i3t_proto::backbone::{Link, LinkQuality, RelayState, Row};
 use i3t_proto::datagram::{MAX_RELAY_HOPS, RelayPath};
 use i3t_proto::probe::TestId;
@@ -103,6 +103,10 @@ const OVERLOAD_HOLD: Duration = Duration::from_secs(30);
 const NEWCOMER_BATCH: Duration = Duration::from_millis(500);
 /// 一个对端的候选路径最多报多少条给界面。
 const MAX_REPORTED_CANDIDATES: usize = 16;
+/// 每分钟的 UDP 询问没有回答的 relay，隔这么久用一次会话（UDP 和 TCP 一起）去试：看它是只有 TCP 连得上，还是根本连不上。
+const PROBE_AGAIN: Duration = Duration::from_secs(600);
+/// 这样的一次试最多多久。同一时刻只试一个，所以网络里 relay 再多，多出来的也只有一个会话。
+const PROBE_LIMIT: Duration = Duration::from_secs(20);
 
 /// 交给控制任务处理的事情。
 #[derive(Debug)]
@@ -284,8 +288,15 @@ pub(crate) struct Control {
     legs: HashMap<NodeId, TcpLegHandle>,
     /// 按来源地址认 relay：一个地址可能是好几个 relay 的（不同局域网里的内网地址会撞），所以是一个列表。
     relay_by_addr: HashMap<SocketAddr, Vec<NodeId>>,
+    /// 按延迟自己挑的挂靠对象（或者管理员固定的）。
     attached: Vec<NodeId>,
+    /// controller 要本节点另外挂靠的（netmap 的 `shared_relays`），去掉已经在 `attached` 里的。
+    shared_relays: Vec<NodeId>,
     attach_reviewed: Option<Instant>,
+    /// 正在用会话试的、UDP 询问没有回答的那个 relay，和开始的时刻（见 [`PROBE_AGAIN`]）。
+    probing: Option<(NodeId, Instant)>,
+    /// 最近一次公布的状态里挂靠着的 relay（[`Control::attachment_ids`]）。变了就不等刷新的间隔马上公布。
+    published_attachments: Vec<NodeId>,
     addr_query: AddrQuery,
     local_candidates: Vec<SocketAddr>,
     local_refreshed: Option<Instant>,
@@ -371,7 +382,10 @@ impl Control {
             legs: HashMap::new(),
             relay_by_addr: HashMap::new(),
             attached: Vec::new(),
+            shared_relays: Vec::new(),
             attach_reviewed: None,
+            probing: None,
+            published_attachments: Vec::new(),
             addr_query: AddrQuery::new(addr_servers),
             local_candidates: Vec::new(),
             local_refreshed: None,
@@ -1027,7 +1041,9 @@ impl Control {
             self.evaluated = Some(now);
         }
         let changed = self.update_routes(now, window);
-        if changed || self.status_refreshed.is_none_or(|at| now.saturating_duration_since(at) >= STATUS_REFRESH) {
+        // 挂靠的 relay 变了（会话刚建好、刚断）也马上公布：别的节点要靠上报的挂靠才找得到本节点，晚半秒就晚通半秒。
+        let attachments_changed = self.attachment_ids() != self.published_attachments;
+        if changed || attachments_changed || self.status_refreshed.is_none_or(|at| now.saturating_duration_since(at) >= STATUS_REFRESH) {
             self.publish_status(now);
         }
     }
@@ -1155,6 +1171,17 @@ impl Control {
             .collect();
         let chosen =
             if self.allow_relay { relays::choose_attached(&self.attached, &standings, &self.netmap.me.pinned_relays) } else { Vec::new() };
+        // controller 为了让别的节点到得了本节点而要它另外挂靠的。本节点连不上的照样留着试：连不上的结果会报上去，controller 再换一个。
+        let shared: Vec<NodeId> = if self.allow_relay {
+            let extra = self.netmap.me.shared_relays.iter().copied();
+            extra.filter(|id| self.relays.contains_key(id) && !chosen.contains(id)).take(MAX_SHARED_RELAYS).collect()
+        } else {
+            Vec::new()
+        };
+        if shared != self.shared_relays {
+            tracing::info!(from = ?self.shared_relays, to = ?shared, "另外挂靠的 relay 变了：controller 要本节点挂上去，好让连不上本节点那几个 relay 的对端也到得了");
+            self.shared_relays = shared;
+        }
         if chosen != self.attached {
             let avoided = |id: &NodeId| self.relays.get(id).is_some_and(|entry| entry.state != RelayState::Serving);
             let reason = if !self.allow_relay {
@@ -1175,7 +1202,7 @@ impl Control {
     fn poll_relays(&mut self, now: Instant, active: &HashSet<NodeId>) {
         let serving = self.shared.local_relay.get().is_some_and(|local| local.status().is_some());
         let lowest_cost = self.mode == RoutingMode::LowestCost && self.allow_relay && !active.is_empty();
-        let mut wanted: HashSet<NodeId> = self.attached.iter().copied().collect();
+        let mut wanted: HashSet<NodeId> = self.attached.iter().chain(&self.shared_relays).copied().collect();
         if self.allow_relay {
             // 能通到活跃对端的 relay 都连着（对端自己是 relay 的话也包括它）：走 relay 时要经它们，走直连时它们是随时能退回去的备用路。
             for (&id, peer) in self.peers.iter().filter(|(id, _)| active.contains(id)) {
@@ -1197,6 +1224,9 @@ impl Control {
             // 主动测试指定的路径上，本节点这一头的第一个 relay：测试期间保持会话，平时可能不连它。
             wanted.extend(self.windows.values().filter(|window| window.is_open(now)).flat_map(|window| window.relays.iter().copied()));
         }
+        if let Some(relay) = self.probe(now, &wanted) {
+            wanted.insert(relay);
+        }
         let survey = self.allow_relay && self.netmap.me.pinned_relays.is_empty();
         let Self { shared, key, relays, legs, next_conn, .. } = self;
         let who = Identity { me: shared.me, key };
@@ -1214,6 +1244,67 @@ impl Control {
             entry.link.poll(now, who, urgent, survey, &mut wire);
         }
         self.sync_relay_targets();
+    }
+
+    /// 用一次会话去试一个 UDP 询问没有回答的 relay（见 [`PROBE_AGAIN`]），返回现在正在试的那个。
+    ///
+    /// 每分钟的询问只走 UDP：问不到的 relay 也许只有 TCP 连得上。用会话试一次（UDP 和 TCP 一起），结果就是三种之一，
+    /// 报给 controller 的"连得上哪些 relay"才说得准。试完就放手，同一时刻只试一个。
+    fn probe(&mut self, now: Instant, wanted: &HashSet<NodeId>) -> Option<NodeId> {
+        if let Some((relay, started)) = self.probing {
+            let finished = self.relays.get(&relay).is_none_or(|entry| {
+                let tried_since = entry.link.last_try(now).is_some_and(|(_, at)| at >= started);
+                tried_since || now.saturating_duration_since(started) >= PROBE_LIMIT
+            });
+            if !finished {
+                return Some(relay);
+            }
+            let outcome = self.relays.get(&relay).and_then(|entry| entry.link.last_try(now)).map(|(outcome, _)| outcome);
+            tracing::debug!(%relay, ?outcome, "UDP 询问没有回答的 relay 用会话试过了");
+            self.probing = None;
+        }
+        if !self.allow_relay {
+            return None;
+        }
+        let due = |entry: &RelayEntry| entry.link.last_try(now).is_none_or(|(_, at)| now.saturating_duration_since(at) >= PROBE_AGAIN);
+        let (relay, _) = self
+            .relays
+            .iter()
+            .filter(|(id, entry)| !wanted.contains(id) && entry.link.survey_silent(now) && due(entry))
+            .min_by_key(|(id, entry)| (entry.link.last_try(now).map(|(_, at)| at), **id))?;
+        let relay = *relay;
+        tracing::debug!(%relay, "这个 relay 的 UDP 询问没有回答：用会话（UDP 和 TCP 一起）试一次");
+        self.probing = Some((relay, now));
+        Some(relay)
+    }
+
+    /// 现在挂靠着、会话通着的 relay（自己挑的和另外挂的），按编号排。对外公布的挂靠就是它们。
+    fn attachment_ids(&self) -> Vec<NodeId> {
+        let mut ids: Vec<NodeId> = self
+            .attached
+            .iter()
+            .chain(&self.shared_relays)
+            .copied()
+            .filter(|id| self.relays.get(id).is_some_and(|entry| entry.link.rtt().is_some()))
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// 本节点试过的各个 relay 连没连上，报给 controller（白皮书 §7.2）。有会话的在前，然后是连得上的、连不上的，最多 [`MAX_RELAY_TRIES`] 个。
+    fn relay_tries(&self, now: Instant) -> Vec<RelayTry> {
+        let mut tries: Vec<(bool, RelayTry)> = self
+            .relays
+            .iter()
+            .filter_map(|(&relay, entry)| {
+                let (outcome, at) = entry.link.last_try(now)?;
+                let age_secs = u32::try_from(now.saturating_duration_since(at).as_secs()).unwrap_or(u32::MAX);
+                let seen_as = entry.link.seen_as(now);
+                Some((entry.link.leg().is_some(), RelayTry { relay, outcome, age_secs, seen_as }))
+            })
+            .collect();
+        tries.sort_unstable_by_key(|(session, entry)| (!session, !entry.outcome.reached(), entry.age_secs, entry.relay));
+        tries.into_iter().take(MAX_RELAY_TRIES).map(|(_, entry)| entry).collect()
     }
 
     fn poll_directs(&mut self, now: Instant) {
@@ -1464,16 +1555,18 @@ impl Control {
 
     fn publish_status(&mut self, now: Instant) {
         self.status_refreshed = Some(now);
+        self.published_attachments = self.attachment_ids();
         let mut routes: Vec<RouteEntry> = self
             .peers
             .iter()
             .map(|(&id, peer)| RouteEntry { peer: id, route: peer.route.to_route(), rtt_ms: self.route_rtt_ms(id, peer) })
             .collect();
         routes.sort_unstable_by_key(|entry| entry.peer);
-        let mut attached: Vec<Attachment> = self
-            .attached
-            .iter()
-            .filter_map(|id| Some(Attachment { relay: *id, rtt_ms: self.relays.get(id)?.link.rtt()?.millis() }))
+        let own = self.attached.iter().map(|id| (id, false));
+        let shared = self.shared_relays.iter().map(|id| (id, true));
+        let mut attached: Vec<Attachment> = own
+            .chain(shared)
+            .filter_map(|(id, shared)| Some(Attachment { relay: *id, rtt_ms: self.relays.get(id)?.link.rtt()?.millis(), shared }))
             .collect();
         attached.sort_by_key(|attachment| attachment.rtt_ms);
 
@@ -1508,6 +1601,7 @@ impl Control {
             attached,
             reports,
             backbone,
+            relay_tries: self.relay_tries(now),
         };
         *self.shared.status.lock().expect("path status mutex poisoned") = status;
     }

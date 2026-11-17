@@ -490,3 +490,61 @@ async fn a_peer_that_is_itself_a_relay_is_reached_through_the_session_with_it_no
 async fn a_node_without_udp_reaches_relay_peers_over_its_tcp_session_with_them_not_through_another_relay() {
     relay_peers_are_reached_without_a_detour(true).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn both_ends_use_the_pairs_congestion_control_and_a_change_applies_to_the_next_connection() {
+    let (a, b) = (Node::start(1), Node::start(2));
+    let cubic = |node| Peer { congestion: Some("cubic"), ..Peer::direct(node) };
+    a.apply(&View { peers: &[cubic(&b)], ..View::default() });
+    b.apply(&View { peers: &[cubic(&a)], ..View::default() });
+    let _echo = b.spawn_echo();
+    echo_once(&a, &b, b"over cubic").await;
+    assert_eq!(a.endpoint.congestion(b.id), "cubic", "拨出的一方按节点对的设置");
+    assert_eq!(b.endpoint.congestion(a.id), "cubic", "接受连接的一方也按节点对的设置，管它自己发出的方向");
+
+    // 改回默认：已经建立的连接不换，空闲回收之后新建的连接才用默认的。
+    let quick = i3t_conn::Tuning { idle_close: Some(Duration::from_millis(500)), ..i3t_conn::Tuning::default() };
+    a.apply(&View { peers: &[Peer::direct(&b)], ..View::default() });
+    b.apply(&View { peers: &[Peer::direct(&a)], ..View::default() });
+    a.wait_knows(&b).await;
+    assert_eq!(a.endpoint.congestion(b.id), "cubic", "已有的连接不换拥塞控制");
+    a.endpoint.tune(quick);
+    b.endpoint.tune(quick);
+    let deadline = Instant::now() + 3 * SOON;
+    while a.endpoint.congestion(b.id) != "bbr" || b.endpoint.congestion(a.id) != "bbr" {
+        assert!(Instant::now() < deadline, "空闲的连接一直没有被回收");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    echo_once(&a, &b, b"over bbr").await;
+    assert_eq!((a.endpoint.congestion(b.id), b.endpoint.congestion(a.id)), ("bbr".to_owned(), "bbr".to_owned()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn each_peer_shows_its_open_flows_and_the_traffic_of_its_connections() {
+    let (a, b) = (Node::start(1), Node::start(2));
+    a.apply(&View { peers: &[Peer::direct(&b)], ..View::default() });
+    b.apply(&View { peers: &[Peer::direct(&a)], ..View::default() });
+    let _echo = b.spawn_echo();
+    assert!(a.endpoint.peer_use().is_empty(), "还没有连接");
+
+    let (mut send, mut recv) = tokio::time::timeout(SOON, a.endpoint.open(b.id)).await.expect("开流超时").unwrap();
+    send.write_all(&[7; 100_000]).await.unwrap();
+    let mut echoed = vec![0; 100_000];
+    recv.read_exact(&mut echoed).await.unwrap();
+    let used = a.endpoint.peer_use();
+    assert_eq!(used.len(), 1);
+    assert_eq!((used[0].peer, used[0].flows), (b.id, 1), "开着的这条流");
+    assert!(used[0].tx_bytes >= 100_000 && used[0].rx_bytes >= 100_000, "{used:?}");
+
+    // 流结束之后（两半都放下了）不再算。
+    send.shutdown().await.unwrap();
+    let mut rest = Vec::new();
+    recv.read_to_end(&mut rest).await.unwrap();
+    drop((send, recv));
+    let deadline = Instant::now() + SOON;
+    while a.endpoint.peer_use()[0].flows != 0 {
+        assert!(Instant::now() < deadline, "结束的流一直还算着");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(b.endpoint.peer_use()[0].rx_bytes >= 100_000, "另一端也数得到");
+}

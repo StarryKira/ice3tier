@@ -150,7 +150,7 @@ impl Api {
         let session = self.controller.enroll(key, &secret, hello, REMOTE, outbox).unwrap();
         if hello.protocol > 0 {
             let report = Report { update: Some(UpdateStatus::Idle), ..Report::default() };
-            self.controller.handle(session, REMOTE, ToController::Report(report)).unwrap();
+            self.controller.handle(session, REMOTE, ToController::Report(Box::new(report))).unwrap();
         }
         Member { id: session.node, key, session, inbox }
     }
@@ -299,7 +299,7 @@ async fn a_node_can_be_inspected_changed_and_deleted() {
         routes: vec![RouteEntry { peer: relay.id, route: Route::Relay { relays: vec![relay.id] }, rtt_ms: Some(30) }],
         ..Report::default()
     };
-    api.controller.handle(node.session, REMOTE, ToController::Report(report)).unwrap();
+    api.controller.handle(node.session, REMOTE, ToController::Report(Box::new(report))).unwrap();
     let detail: model::NodeDetail = api.ok(Method::GET, &path, None).await;
     assert_eq!(detail.node.id, node.id);
     assert_eq!(detail.endpoints, vec!["192.168.1.5:20330".parse().unwrap()]);
@@ -353,7 +353,10 @@ async fn a_node_can_be_inspected_changed_and_deleted() {
     let enabled: model::Node = api.ok(Method::PUT, &format!("{relay_path}/relay"), Some(settings)).await;
     assert_eq!(
         serde_json::to_value(enabled.relay.unwrap()).unwrap(),
-        json!({ "addresses": [{ "address": "198.51.100.7:20330", "source": "observed" }], "bandwidth_mbps": 200 })
+        json!({
+            "addresses": [{ "address": "198.51.100.7:20330", "source": "observed" }], "bandwidth_mbps": 200,
+            "reach": { "reached": 0, "unreached": 0, "unknown": 1 }, "users": null
+        })
     );
     let plain: model::Node = api.ok(Method::PUT, &format!("{relay_path}/relay"), Some(json!({}))).await;
     assert_eq!(plain.relay.unwrap().bandwidth_mbps, None, "{{}} 就是不限带宽地启用");
@@ -593,7 +596,7 @@ async fn the_overview_counts_things_and_the_log_records_changes() {
     api.ok::<model::Node>(Method::PUT, &format!("{base}/nodes/{}/relay", a.id), Some(json!({ "udp": ["203.0.113.7:20330"] }))).await;
     api.call(Method::POST, &format!("{base}/tokens"), Some(json!({}))).await;
     let report = Report { routes: vec![RouteEntry { peer: a.id, route: Route::None, rtt_ms: None }], ..Report::default() };
-    api.controller.handle(b.session, REMOTE, ToController::Report(report)).unwrap();
+    api.controller.handle(b.session, REMOTE, ToController::Report(Box::new(report))).unwrap();
 
     let overview: model::Overview = api.ok(Method::GET, &format!("{base}/overview"), None).await;
     assert_eq!(
@@ -795,7 +798,9 @@ async fn update_settings_checks_and_forced_updates_work_over_the_api() {
         reason: "自检没有通过".into(),
         cause: Some(UpdateCause::SelfCheck { exit_code: Some(2), output: "读不了 config.toml".into() }),
     };
-    api.controller.handle(member.session, REMOTE, ToController::Report(Report { update: Some(failed), ..Report::default() })).unwrap();
+    api.controller
+        .handle(member.session, REMOTE, ToController::Report(Box::new(Report { update: Some(failed), ..Report::default() })))
+        .unwrap();
     let paused: model::UpdateOverview = api.ok(Method::GET, "/update", None).await;
     assert_eq!((paused.paused.len(), paused.nodes.failed, paused.nodes.manual), (1, 1, 1));
     let (_, raw) = api.call(Method::GET, "/update", None).await;
@@ -835,7 +840,9 @@ async fn the_route_matrix_and_the_path_between_two_nodes_are_served() {
     let a = api.join(network.id, Declared::default()).await;
     let b = api.join(network.id, Declared::default()).await;
     let routes = vec![RouteEntry { peer: b.id, route: Route::Relay { relays: vec![b.id] }, rtt_ms: Some(25) }];
-    api.controller.handle(a.session, REMOTE, ToController::Report(Report { routes, routes_full: true, ..Report::default() })).unwrap();
+    api.controller
+        .handle(a.session, REMOTE, ToController::Report(Box::new(Report { routes, routes_full: true, ..Report::default() })))
+        .unwrap();
 
     let (_, raw) = api.call(Method::GET, &format!("/networks/{}/routes", network.id), None).await;
     assert_eq!(raw["nodes"][0], json!({ "id": a.id.get(), "name": "node-1", "virtual_ip": "10.66.0.1", "online": true }));
@@ -862,7 +869,8 @@ async fn the_route_matrix_and_the_path_between_two_nodes_are_served() {
             "from": { "id": b.id.get(), "name": "node-2", "virtual_ip": "10.66.0.2" },
             "to": { "id": a.id.get(), "name": "node-1", "virtual_ip": "10.66.0.1" },
             "source": "none", "route": null, "rtt_ms": null, "age_secs": null, "since": null,
-            "direct": null, "relay_leg": null, "mode": null, "reason": null, "cause": null, "candidates": null
+            "direct": null, "relay_leg": null, "mode": null, "reason": null, "cause": null, "candidates": null,
+            "connection_rtt_ms": null, "switches": []
         })
     );
 
@@ -927,7 +935,7 @@ async fn path_candidates_route_details_and_the_backbone_are_served() {
         routes_full: true,
         ..Report::default()
     };
-    api.controller.handle(a.session, REMOTE, ToController::Report(report)).unwrap();
+    api.controller.handle(a.session, REMOTE, ToController::Report(Box::new(report))).unwrap();
 
     // 路由表和矩阵里有直连的类型。
     let (_, table) = api.call(Method::GET, &format!("/networks/{}/nodes/{}/routes", network.id, a.id), None).await;
@@ -949,9 +957,16 @@ async fn path_candidates_route_details_and_the_backbone_are_served() {
         cause: Some(RouteCause::DirectVerified),
         candidates: vec![PathCandidate { route: direct.clone(), cost_us: 13_600, legs: vec![segment], load_percent: 0, current: true }],
     };
-    let answer = RouteAnswer { peer: b.id, route: Some(direct.clone()), rtt_ms: Some(12), since: None, detail: Some(detail) };
+    let answer = RouteAnswer {
+        peer: b.id,
+        route: Some(direct.clone()),
+        rtt_ms: Some(12),
+        since: None,
+        detail: Some(detail),
+        connection_rtt_ms: None,
+    };
     api.controller.handle(a.session, REMOTE, ToController::RouteAnswer { request: to_a, answer }).unwrap();
-    let plain = RouteAnswer { peer: a.id, route: Some(Route::None), rtt_ms: None, since: None, detail: None };
+    let plain = RouteAnswer { peer: a.id, route: Some(Route::None), rtt_ms: None, since: None, detail: None, connection_rtt_ms: None };
     api.controller.handle(b.session, REMOTE, ToController::RouteAnswer { request: to_b, answer: plain }).unwrap();
     let response = asking.await.unwrap().unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -995,7 +1010,8 @@ async fn path_candidates_route_details_and_the_backbone_are_served() {
         json!([{
             "relay": { "id": relay.id.get(), "name": "node-1", "virtual_ip": "10.66.0.1" }, "online": true, "state": "draining",
             "load_percent": 40, "age_ms": 900, "reported_by": a.id.get(),
-            "links": [{ "to": relay.id.get(), "rtt_ms": null, "jitter_ms": 0, "loss_permille": 1000 }]
+            "links": [{ "to": relay.id.get(), "rtt_ms": null, "jitter_ms": 0, "loss_permille": 1000 }],
+            "reach": { "reached": 0, "unreached": 0, "unknown": 2 }
         }])
     );
     assert_eq!(view["answered"].as_array().map(Vec::len), Some(3));
@@ -1072,7 +1088,7 @@ async fn enabling_a_relay_answers_with_a_reachability_check_that_only_advises() 
     let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
     let relay = api.controller.enroll(PublicKey::from_bytes([77; PublicKey::LEN]), &secret, &hello, loopback, outbox).unwrap();
     let local = Report { local_addresses: Some(vec!["127.0.0.2".parse().unwrap()].into()), ..Report::default() };
-    api.controller.handle(relay, loopback, ToController::Report(local)).unwrap();
+    api.controller.handle(relay, loopback, ToController::Report(Box::new(local))).unwrap();
     let closed = std::net::SocketAddr::new("127.0.0.2".parse().unwrap(), good.port());
     let path = format!("/networks/{}/nodes/{}/relay", network.id, relay.node);
     let enabled: model::RelayEnabled = api.ok(Method::PUT, &path, Some(json!({}))).await;
@@ -1115,7 +1131,7 @@ async fn credentials_get_limits_usage_a_prefix_and_a_visible_revoked_state_over_
         credentials: vec![i3t_model::control::CredentialUsage { id, bytes: 1500, connections: 1, last_used_secs_ago: Some(3) }],
         ..Report::default()
     };
-    api.controller.handle(gateway.session, REMOTE, ToController::Report(report)).unwrap();
+    api.controller.handle(gateway.session, REMOTE, ToController::Report(Box::new(report))).unwrap();
     let listed: Vec<model::Credential> = api.ok(Method::GET, &format!("{base}/credentials"), None).await;
     assert_eq!((listed[0].usage.bytes, listed[0].usage.connections, listed[0].state), (1500, 1, model::CredentialState::Exhausted));
     assert!(api.controller.netmap_of(gateway.id).unwrap().unwrap().credentials[0].exhausted);
@@ -1189,11 +1205,11 @@ async fn status_overview_node_list_routes_and_groups_carry_what_the_web_ui_asked
     let status: Value = api.ok(Method::GET, "/status", None).await;
     assert!(status.get("data_dir").is_some_and(Value::is_null), "内存里的 controller 没有数据目录：{status}");
 
-    let attached = vec![i3t_model::netmap::Attachment { relay: relay.id, rtt_ms: 9 }];
+    let attached = vec![i3t_model::netmap::Attachment { relay: relay.id, rtt_ms: 9, shared: false }];
     let routes = vec![RouteEntry { peer: relay.id, route: Route::Relay { relays: vec![relay.id] }, rtt_ms: Some(9) }];
     let report =
         Report { flows: 4, tx_bytes: 10, rx_bytes: 20, attached: attached.clone(), routes, routes_full: true, ..Report::default() };
-    api.controller.handle(member.session, REMOTE, ToController::Report(report)).unwrap();
+    api.controller.handle(member.session, REMOTE, ToController::Report(Box::new(report))).unwrap();
 
     let nodes: Vec<model::Node> = api.ok(Method::GET, &format!("{base}/nodes"), None).await;
     assert_eq!(nodes.iter().find(|node| node.id == member.id).unwrap().attached, attached);
@@ -1232,7 +1248,11 @@ async fn exits_and_listen_status_are_served_from_what_the_nodes_report() {
 
     let exit_report = i3t_model::control::ExitReport { total: 3, refused: 1, ..Default::default() };
     api.controller
-        .handle(exit.session, REMOTE, ToController::Report(Report { run: 1, exit: Some(Box::new(exit_report)), ..Report::default() }))
+        .handle(
+            exit.session,
+            REMOTE,
+            ToController::Report(Box::new(Report { run: 1, exit: Some(Box::new(exit_report)), ..Report::default() })),
+        )
         .unwrap();
     let forwards = vec![i3t_model::control::ForwardReport {
         id: created.id,
@@ -1242,7 +1262,9 @@ async fn exits_and_listen_status_are_served_from_what_the_nodes_report() {
         traffic: i3t_model::control::ListenTraffic::default(),
         target_failure: Some(i3t_model::control::TargetFailureReport { cause: i3t_model::control::TargetCause::Refused, secs_ago: 0 }),
     }];
-    api.controller.handle(laptop.session, REMOTE, ToController::Report(Report { run: 2, forwards, ..Report::default() })).unwrap();
+    api.controller
+        .handle(laptop.session, REMOTE, ToController::Report(Box::new(Report { run: 2, forwards, ..Report::default() })))
+        .unwrap();
 
     let exits: Vec<model::ExitView> = api.ok(Method::GET, &format!("{base}/exits"), None).await;
     assert_eq!(exits.len(), 1);
@@ -1503,7 +1525,7 @@ async fn a_node_whose_interface_is_inside_the_range_carries_a_warning() {
     let a = api.join(network.id, Declared::default()).await;
     let local =
         Report { local_addresses: Some(vec!["10.66.5.5".parse().unwrap(), "192.168.1.9".parse().unwrap()].into()), ..Report::default() };
-    api.controller.handle(a.session, REMOTE, ToController::Report(local)).unwrap();
+    api.controller.handle(a.session, REMOTE, ToController::Report(Box::new(local))).unwrap();
     let node: Value = api.ok(Method::GET, &format!("/networks/{}/nodes/{}", network.id, a.id), None).await;
     assert_eq!(node["warnings"], json!([{ "code": "range_overlap", "address": "10.66.5.5" }]));
     let overview: Value = api.ok(Method::GET, &format!("/networks/{}/overview", network.id), None).await;

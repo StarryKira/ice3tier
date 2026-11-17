@@ -234,7 +234,7 @@ fn nodes_that_cannot_update_themselves_are_never_told_to() {
     let mut blocked = fleet.node_as(&blocked_hello);
     // 最初那一版的节点：不懂更新的消息，发给它它会断开。
     let mut ancient = fleet.lab.join_as(fleet.network, &hello(Declared::default()));
-    ancient.send(fleet.controller(), ToController::Report(Default::default()));
+    ancient.send(fleet.controller(), ToController::Report(Box::default()));
     fleet.sync();
     assert_eq!((fleet.last_order(&mut blocked), fleet.last_order(&mut ancient)), (None, None));
 

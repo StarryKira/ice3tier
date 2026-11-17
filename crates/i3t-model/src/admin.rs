@@ -21,9 +21,11 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::control::{
     BackboneLink, Declared, DirectKind, ExitObservation, ExitReport, InterceptReport, LaneReport, LegTransport, ListenState, ListenTraffic,
-    PathCandidate, PeerLanes, PerformanceReport, RelayState, Route, RouteCause, RouteSince, SelfUpdate, TargetCause,
+    PathCandidate, PeerLanes, PerformanceReport, RelayState, RelayUse, Route, RouteCause, RouteSince, SelfUpdate, TargetCause, TryOutcome,
 };
-use crate::netmap::{Attachment, ExitRole, ForwardProtocol, LaneMode, ListenerProtocol, Profile, ProxyProtocol, Reach, RoutingMode};
+use crate::netmap::{
+    Attachment, Congestion, ExitRole, ForwardProtocol, LaneMode, ListenerProtocol, Profile, ProxyProtocol, Reach, RoutingMode,
+};
 use crate::update::{FailureKind, SelfUpdateBlocker, UpdateCause, UpdateStatus, UpdateTiming, Version};
 
 pub mod diag;
@@ -318,10 +320,16 @@ pub struct Node {
     /// 以前只在节点详情里有；放进列表里，界面数"有几个节点挂靠在这个 relay 上"只要一次请求。
     #[serde(default)]
     pub attached: Vec<Attachment>,
-    /// 公网地址（controller 看到的来源地址）所在的国家或地区，ISO 3166-1 的两个大写字母（`"JP"`），
-    /// controller 查自带的离线地址库得出。内网地址、从没连上过、库里没有时是 `null`。
+    /// 出口地址（[`Node::egress_ip`]）所在的国家或地区，ISO 3166-1 的两个大写字母（`"JP"`），
+    /// controller 查自带的离线地址库得出。没有出口地址、库里没有时是 `null`。
     #[serde(default)]
     pub country: Option<String>,
+    /// 出口地址：这个节点发往互联网的流量出去时，互联网看到的公网地址。controller 看到的来源地址是公网地址时就是它；
+    /// 不是（节点在 controller 所在的局域网里、或者同一台机器上）时取 relay 看到的公网地址，几个 relay 看到的不一样时取看到它的
+    /// relay 最多的那个（一样多时取最近一次看到的）。只从内网地址被看到过时是 `null`。出口配了上游代理时，经它出去的流量其实是从
+    /// 代理那里出去的，这里不知道。
+    #[serde(default)]
+    pub egress_ip: Option<IpAddr>,
     /// 管理员给它选的性能档位；`null` 表示没有选，节点用本机配置文件里的（默认 `balanced`）。节点实际在用的见节点详情的 `performance`。
     #[serde(default)]
     pub profile: Option<Profile>,
@@ -614,6 +622,9 @@ pub struct NodeDetail {
     /// 节点本次连接期间最近一次报的透明访问的状况。不在线、旧版本、或者还没报过时是 `null`。
     #[serde(default)]
     pub intercept: Option<InterceptReport>,
+    /// 这个节点是 relay 时：报过试它的结果的每个节点，按节点编号排，最多是网络里的节点数。不是 relay 时是 `null`。
+    #[serde(default)]
+    pub reached_by: Option<Vec<ReachEntry>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -666,6 +677,33 @@ pub struct RelayView {
     pub addresses: Vec<RelayAddress>,
     /// 转发的带宽上限；`null` 表示不限。
     pub bandwidth_mbps: Option<u32>,
+    /// 在线的节点里有几个连得上它（白皮书 §7.2，节点自己上报的）。只是情况，不是毛病：只有一部分节点连得上的 relay 照样是那些节点的 relay。
+    #[serde(default)]
+    pub reach: RelayReach,
+    /// 谁在用它：最近一个统计时段里它替哪些节点对转发了多少，取自它最近一次上报。不在线、版本太旧不报时是 `null`。
+    #[serde(default)]
+    pub users: Option<RelayUse>,
+}
+
+/// 在线的节点（不算 relay 自己）最近一次试一个 relay 的结果，数出来的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RelayReach {
+    /// 连得上的（UDP 或者 TCP）。
+    pub reached: u32,
+    /// 试过、连不上的。
+    pub unreached: u32,
+    /// 还没有报过的（刚上线，或者版本太旧不报）。
+    pub unknown: u32,
+}
+
+/// 一个节点最近一次试某个 relay 的结果（节点详情的 `reached_by` 里的一项）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReachEntry {
+    pub node: NodeRef,
+    pub online: bool,
+    pub outcome: TryOutcome,
+    /// 什么时候试的。有会话的节点每次上报都更新它；结果没有变时 controller 最多五分钟记一次。
+    pub at: Timestamp,
 }
 
 /// 一个 relay 最多有几个地址。多出来的（多半是网卡上的）不下发：节点每个都要试，试的都是同一台机器。
@@ -700,6 +738,8 @@ pub enum NodeWarning {
     /// 节点的一个网卡地址落在网络的虚拟地址段里（白皮书 §4.6）：在这台机器上，连这个地址段里的虚拟 IP 可能连到真实网络上去，
     /// 透明访问也装不上。`address` 是那个网卡地址。
     RangeOverlap { address: IpAddr },
+    /// 这个 relay 启用着，在线的节点里试过它的有 `tried` 个，一个也没有连上。只是如实说一句：哪天有节点连得上它，它就是那些节点的 relay。
+    RelayUnreached { tried: u32 },
     #[serde(other)]
     Unknown,
 }
@@ -745,6 +785,14 @@ pub struct NodeRoute {
     /// 经 relay 时，节点到第一个 relay 的那一段走的是 UDP 还是 TCP；节点没有说时是 `null`。
     #[serde(default)]
     pub relay_leg: Option<LegTransport>,
+    /// 和这个对端的共用连接上现在开着几条流、节点启动以来两个方向各走了多少字节，取自节点最近一次上报。
+    /// 现在没有连接、节点不在线或者版本太旧不报时是 `null`。
+    #[serde(default)]
+    pub flows: Option<u32>,
+    #[serde(default)]
+    pub tx_bytes: Option<u64>,
+    #[serde(default)]
+    pub rx_bytes: Option<u64>,
 }
 
 /// 整个网络的路由矩阵：每个节点到它的各个对端现在怎么走，取自各节点最近的上报（白皮书 §7.7）。
@@ -824,6 +872,25 @@ pub struct PathLeg {
     /// 空数组是发送方手上还没有任何测量值。
     #[serde(default)]
     pub candidates: Option<Vec<PathCandidate>>,
+    /// 这对节点之间的连接自己量的往返时间（毫秒）。`rtt_ms` 是路由层按各段的探测推算的，和它放在一起看：差得多说明测量失真。
+    /// 只有现问到、有连接、并且发送方的版本会说时才有。
+    #[serde(default)]
+    pub connection_rtt_ms: Option<u32>,
+    /// 这个方向最近的换路，新的在前。一对节点两个方向一共留 [`KEEP_SWITCHES`] 条，controller 从节点的上报里攒的，重启之后还在。
+    #[serde(default)]
+    pub switches: Vec<SwitchView>,
+}
+
+/// 一对节点（两个方向一共）留几条换路的记录。
+pub const KEEP_SWITCHES: usize = 20;
+
+/// 一次换路：什么时候、从什么换成了什么、为什么（原因的代码，[`RouteCause`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwitchView {
+    pub at: Timestamp,
+    pub from: Route,
+    pub to: Route,
+    pub cause: RouteCause,
 }
 
 /// 网络里 relay 之间的延迟矩阵（白皮书 §7.7），每个 relay 一行。
@@ -853,6 +920,9 @@ pub struct BackboneRelay {
     pub reported_by: Option<NodeId>,
     /// 它到别的 relay 的链路。`to` 是 relay 的节点编号。
     pub links: Vec<BackboneLink>,
+    /// 在线的节点里有几个连得上它，同 [`RelayView::reach`]。
+    #[serde(default)]
+    pub reach: RelayReach,
 }
 
 /// 一段路径的数据是从哪里来的。
@@ -1219,6 +1289,9 @@ pub struct PairSetting {
     /// 这一对节点之间承载 TCP 连接的流用不用独占 TCP（lane）。
     #[serde(default)]
     pub lane: LaneMode,
+    /// 这一对节点之间的连接用哪种拥塞控制；`null` 表示用节点的默认（BBR）。
+    #[serde(default)]
+    pub congestion: Option<Congestion>,
 }
 
 /// 改一对节点的设置。没有写的项不变（这一对还没有设置时取默认值）。
@@ -1228,6 +1301,9 @@ pub struct PairInput {
     pub keep_alive: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lane: Option<LaneMode>,
+    /// 写 `null` 表示改回节点的默认。
+    #[serde(default, deserialize_with = "nullable", skip_serializing_if = "Option::is_none")]
+    pub congestion: Option<Option<Congestion>>,
 }
 
 /// 节点对视图里的一项：设置，加上独占 TCP 起不起作用、两边报上来的状况。
@@ -1707,14 +1783,19 @@ mod tests {
     #[test]
     fn a_pair_view_keeps_the_setting_flat_and_a_pair_input_may_leave_things_out() {
         let input: PairInput = serde_json::from_str(r#"{"lane": "always"}"#).unwrap();
-        assert_eq!(input, PairInput { keep_alive: None, lane: Some(LaneMode::Always) });
+        assert_eq!(input, PairInput { keep_alive: None, lane: Some(LaneMode::Always), congestion: None });
         assert_eq!(serde_json::from_str::<PairInput>(r#"{"keep_alive": true}"#).unwrap().lane, None, "旧的请求体照样能用");
         assert!(serde_json::from_str::<PairInput>(r#"{"lane": "sometimes"}"#).is_err());
+        let cubic: PairInput = serde_json::from_str(r#"{"congestion": "cubic"}"#).unwrap();
+        assert_eq!(cubic.congestion, Some(Some(Congestion::Cubic)));
+        let cleared: PairInput = serde_json::from_str(r#"{"congestion": null}"#).unwrap();
+        assert_eq!(cleared.congestion, Some(None), "null 是改回默认，和没写不一样");
+        assert!(serde_json::from_str::<PairInput>(r#"{"congestion": "reno"}"#).is_err());
 
         let a = NodeId::new(1).unwrap();
         let b = NodeId::new(2).unwrap();
         let view = PairView {
-            setting: PairSetting { a, b, keep_alive: true, lane: LaneMode::UdpFallback },
+            setting: PairSetting { a, b, keep_alive: true, lane: LaneMode::UdpFallback, congestion: Some(Congestion::Cubic) },
             lane_effect: Some(LaneEffect {
                 effective: false,
                 blocked: vec![LaneBlock::NoRelay, LaneBlock::NodeTooOld { node: b }],
@@ -1726,12 +1807,13 @@ mod tests {
         };
         let value = serde_json::to_value(&view).unwrap();
         assert_eq!((&value["a"], &value["keep_alive"], &value["lane"]), (&json!(1), &json!(true), &json!("udp_fallback")));
+        assert_eq!(value["congestion"], json!("cubic"));
         assert_eq!(value["lane_effect"]["blocked"], json!([{ "reason": "no_relay" }, { "reason": "node_too_old", "node": 2 }]));
         assert_eq!(value["lane_effect"]["opening"], json!([{ "node": 1, "udp_path": false, "lanes": false }]));
         assert_eq!(serde_json::from_value::<PairView>(value).unwrap(), view);
         // 旧的 controller 给的节点对没有独占 TCP 的设置。
         let old: PairSetting = serde_json::from_value(json!({ "a": 1, "b": 2, "keep_alive": false })).unwrap();
-        assert_eq!(old.lane, LaneMode::Off);
+        assert_eq!((old.lane, old.congestion), (LaneMode::Off, None));
     }
 
     #[test]
@@ -1756,6 +1838,7 @@ mod tests {
             reported_secs_ago: Some(4),
             performance: None,
             intercept: None,
+            reached_by: None,
         };
         let value = serde_json::to_value(&detail).unwrap();
         assert_eq!(value["attached"], json!([{ "relay": 9, "rtt_ms": 12 }]));

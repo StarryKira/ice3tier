@@ -47,22 +47,24 @@ pub struct Peer<'a> {
     pub attached: &'a [&'a Node],
     pub keep_alive: bool,
     pub dial_out_only: bool,
+    /// 这一对节点的拥塞控制（`"bbr"`、`"cubic"`）；不写就是节点的默认。
+    pub congestion: Option<&'static str>,
 }
 
 impl<'a> Peer<'a> {
     /// 知道地址、没有挂靠任何 relay 的对端。
     pub fn direct(node: &'a Node) -> Self {
-        Self { node, endpoints: true, attached: &[], keep_alive: false, dial_out_only: false }
+        Self { node, endpoints: true, attached: &[], keep_alive: false, dial_out_only: false, congestion: None }
     }
 
     /// 不知道地址、挂靠在 `relays` 上的对端。
     pub fn via(node: &'a Node, relays: &'a [&'a Node]) -> Self {
-        Self { node, endpoints: false, attached: relays, keep_alive: false, dial_out_only: false }
+        Self { node, endpoints: false, attached: relays, keep_alive: false, dial_out_only: false, congestion: None }
     }
 
     /// 知道地址、也挂靠在 `relays` 上的对端。
     pub fn both(node: &'a Node, relays: &'a [&'a Node]) -> Self {
-        Self { node, endpoints: true, attached: relays, keep_alive: false, dial_out_only: false }
+        Self { node, endpoints: true, attached: relays, keep_alive: false, dial_out_only: false, congestion: None }
     }
 }
 
@@ -239,6 +241,7 @@ fn build_netmap(me: NodeId, view: &View<'_>) -> Arc<Netmap> {
                 "attached": attachments(peer.attached),
                 "keep_alive": peer.keep_alive,
                 "dial_out_only": peer.dial_out_only,
+                "congestion": peer.congestion,
             })
         })
         .collect();

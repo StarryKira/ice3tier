@@ -19,7 +19,6 @@ use i3t_underlay::{PacketFilter, UdpPort};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 
-use crate::congestion::Algorithm;
 use crate::contract::{Acceptor, Connector, Datagram, Datagrams, Incoming, OpenError};
 use crate::manager::{DATAGRAM_BACKLOG, DatagramHandle, DatagramQueues, Manager};
 use crate::quic::{self, QuicConfigError};
@@ -63,8 +62,6 @@ pub struct Endpoint {
     paths: Arc<Paths>,
     relay: Arc<Relay>,
     manager: Arc<Manager>,
-    /// 接受连接一方的配置。换档位时换掉里面的传输参数再装回 QUIC 库。
-    server: quinn::ServerConfig,
     incoming: tokio::sync::Mutex<mpsc::Receiver<Incoming<SendHalf, RecvHalf>>>,
     datagrams: DatagramInbox,
     /// 装配方提供的信令出口。
@@ -108,7 +105,7 @@ impl Endpoint {
         let (to_initiator, for_initiator) = mpsc::channel(DATAGRAM_BACKLOG);
         let queues = DatagramQueues { acceptor: to_acceptor, initiator: to_initiator };
         let datagrams = DatagramInbox { acceptor: for_acceptor.into(), initiator: for_initiator.into() };
-        let manager = Manager::new(key, quic, Arc::clone(&paths), netmap, incoming_tx, queues);
+        let manager = Manager::new(key, (quic, server), Arc::clone(&paths), netmap, incoming_tx, queues);
 
         // 信令两条路都走：已经有连接的话在连接里送（有 relay 的网络因此不依赖 controller），同时交给装配方的钩子。
         let signal_hook: Arc<RwLock<Option<SignalHook>>> = Arc::default();
@@ -125,18 +122,23 @@ impl Endpoint {
 
         let tasks = [tokio::spawn(Arc::clone(&manager).accept_loop()), tokio::spawn(Arc::clone(&manager).follow_netmap())];
         tracing::info!(node = %me, addr = %port.local_addr(), "数据面启动");
-        Ok(Self { port, paths, relay, manager, server, incoming: tokio::sync::Mutex::new(incoming_rx), datagrams, signal_hook, tasks })
+        Ok(Self { port, paths, relay, manager, incoming: tokio::sync::Mutex::new(incoming_rx), datagrams, signal_hook, tasks })
     }
 
     /// 换上性能档位的连接设置（见 [`Tuning`]）。刚绑定好的端点用的是 [`Tuning::default`]。
     ///
     /// 窗口对之后建立的连接生效，两个方向（本端拨出的、对端连进来的）都是；已有的连接保持原样。空闲回收的时间立刻生效。
     pub fn tune(&self, tuning: Tuning) {
-        let transport = self.manager.tune(tuning);
-        let mut server = self.server.clone();
-        server.transport_config(transport);
-        self.manager.set_server_config(server);
+        self.manager.tune(tuning);
         tracing::info!(?tuning, "连接层的档位设置换了");
+    }
+
+    /// controller 现在连不连得上。装配方在长连接的状态变化时告诉它；从没告诉过时当作连得上。
+    ///
+    /// 连不上、到某个对端又没有经 relay 的路时，到它的空闲连接先不回收：关掉之后打洞的信令无路可走，连接建不回来（白皮书 §5.4）。
+    /// 连上之后下一次检查（一秒之内）照常回收。
+    pub fn set_controller_online(&self, online: bool) {
+        self.manager.set_controller_online(online);
     }
 
     /// UDP 端口实际绑定的地址。
@@ -175,6 +177,34 @@ impl Endpoint {
     #[must_use]
     pub fn attached(&self) -> Vec<Attachment> {
         self.paths.attached()
+    }
+
+    /// 到 `peer` 的连接自己量的往返时间（QUIC 的平滑 RTT）。没有连接时是 `None`。
+    ///
+    /// 路由层按各段的探测推算一条路的延迟（[`routes`](Self::routes) 里的 `rtt_ms`）；这个是真实的数据走完全程量出来的，
+    /// 两个对着看能发现测量失真（白皮书 §13）。只读，不影响选路。
+    #[must_use]
+    pub fn connection_rtt(&self, peer: NodeId) -> Option<std::time::Duration> {
+        self.manager.connection_rtt(peer)
+    }
+
+    /// 和各个对端之间的共用连接上现在开着几条流、本节点启动以来两个方向各走了多少字节（线上的，关掉的连接也算），
+    /// 只有现在有连接的对端，流量大的在前，最多 [`MAX_PEER_USE`](i3t_model::control::MAX_PEER_USE) 个。给路由视图用（白皮书 §7.7）。
+    #[must_use]
+    pub fn peer_use(&self) -> Vec<i3t_model::control::PeerUse> {
+        self.manager.peer_use(i3t_model::control::MAX_PEER_USE)
+    }
+
+    /// 本节点是 relay 时：谁在用它，见 [`Relay::users`]。
+    #[must_use]
+    pub fn relay_use(&self) -> Option<i3t_model::control::RelayUse> {
+        self.relay.users()
+    }
+
+    /// 本节点试过的各个 relay 连没连上、它们看到的本节点 IP。上报给 controller 用，见 [`Paths::relay_tries`]。
+    #[must_use]
+    pub fn relay_tries(&self) -> Vec<i3t_model::control::RelayTry> {
+        self.paths.relay_tries()
     }
 
     /// 到每个对端考虑过哪些路径、各自测到的代价，以及为什么选了现在这条。给路由视图和路径诊断用。
@@ -254,10 +284,11 @@ impl Endpoint {
         self.paths.hops(peer, path).await
     }
 
-    /// 连接用的拥塞控制：`"bbr"` 或者 `"cubic"`。吞吐测试的结果要说明它是在哪一种下面量的。
+    /// 到 `peer` 的连接用的拥塞控制：`"bbr"` 或者 `"cubic"`。还没有连接时是新建的连接会用的那一种（节点对的设置，
+    /// 没有设置时是节点的默认）。吞吐测试的结果要说明它是在哪一种下面量的。
     #[must_use]
-    pub fn congestion(&self) -> String {
-        Algorithm::from_env().to_string()
+    pub fn congestion(&self, peer: NodeId) -> String {
+        self.manager.congestion(peer).to_string()
     }
 
     /// 本节点启用为 relay 时，它在 UDP 端口的同一个端口号上听 TCP。开头是 TLS 握手记录的连接（独占 TCP）交给 `handoff`，

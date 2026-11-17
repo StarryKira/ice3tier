@@ -1,6 +1,6 @@
 //! 一个运行着的节点的各个部分，放在一处：上报、回答路由查询、本机状态接口和指标都从这里读。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -10,7 +10,8 @@ use i3t_exit::{Exit, ExitStats, Os, Outbound};
 use i3t_model::Netmap;
 use i3t_model::control::{
     BackboneRow, CredentialUsage, ExitObservation, ExitReport, ForwardReport, InterceptReport, InterceptState, ListenTraffic,
-    ListenerReport, MAX_LOCAL_ADDRESSES, PerformanceReport, QuotaUsage, Report, Route, RouteAnswer, RouteSince, SelfUpdate,
+    ListenerReport, MAX_LOCAL_ADDRESSES, MAX_REPORTED_SWITCHES, PerformanceReport, QuotaUsage, Report, Route, RouteAnswer, RouteSince,
+    RouteSwitch, SelfUpdate,
 };
 use i3t_model::update::UpdateStatus;
 use i3t_proto::NodeId;
@@ -201,6 +202,10 @@ impl Runtime {
             lanes: Some(Box::new(self.lanes.report())),
             performance: Some(Box::new(self.performance.borrow().clone())),
             intercept: Some(Box::new(intercept)),
+            relays: self.endpoint.relay_tries(),
+            peer_use: self.endpoint.peer_use(),
+            relay_use: self.endpoint.relay_use(),
+            switches: self.history.take_unreported(),
         }
     }
 
@@ -256,10 +261,13 @@ impl Runtime {
                 rtt_ms: entry.rtt_ms,
                 since: self.history.since(peer),
                 detail: self.endpoint.path_report(peer).as_ref().map(route_detail::detail),
+                connection_rtt_ms: self.endpoint.connection_rtt(peer).map(millis),
             },
             // 在 netmap 里、路由层还没有它的条目（刚下发）：对它还没有路。
-            None if known => RouteAnswer { peer, route: Some(Route::None), rtt_ms: None, since: None, detail: None },
-            None => RouteAnswer { peer, route: None, rtt_ms: None, since: None, detail: None },
+            None if known => {
+                RouteAnswer { peer, route: Some(Route::None), rtt_ms: None, since: None, detail: None, connection_rtt_ms: None }
+            }
+            None => RouteAnswer { peer, route: None, rtt_ms: None, since: None, detail: None, connection_rtt_ms: None },
         }
     }
 
@@ -291,14 +299,23 @@ pub(crate) fn exit_report(stats: &ExitStats) -> ExitReport {
 }
 
 /// 上报里的计数都是 `u32`。真的数不下时停在最大值。
+/// 毫秒数，装不下时停在最大值。
+fn millis(duration: std::time::Duration) -> u32 {
+    u32::try_from(duration.as_millis()).unwrap_or(u32::MAX)
+}
+
 fn count(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 /// 到每个对端的路上一次是什么时候、因为什么换的。路由层只在换路的那一刻说一次原因，这里把它记下来。
+///
+/// 另外攒着还没有报给 controller 的换路（controller 给每对节点留一段历史，白皮书 §7.7），最多
+/// [`MAX_REPORTED_SWITCHES`] 条：controller 连不上的时候满了就丢最早的。
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RouteHistory {
     changes: Arc<Mutex<BTreeMap<NodeId, (Instant, RouteChange)>>>,
+    unreported: Arc<Mutex<VecDeque<(Instant, RouteSwitch)>>>,
 }
 
 impl RouteHistory {
@@ -313,7 +330,24 @@ impl RouteHistory {
     }
 
     fn record(&self, change: RouteChange) {
-        self.changes.lock().expect("route history mutex poisoned").insert(change.peer, (Instant::now(), change));
+        let now = Instant::now();
+        let mut changes = self.changes.lock().expect("route history mutex poisoned");
+        let from = changes.get(&change.peer).map_or(Route::None, |(_, previous)| previous.route.clone());
+        let switch = RouteSwitch { peer: change.peer, from, to: change.route.clone(), cause: change.cause.clone(), age_secs: 0 };
+        changes.insert(change.peer, (now, change));
+        drop(changes);
+        let mut unreported = self.unreported.lock().expect("route history mutex poisoned");
+        if unreported.len() >= MAX_REPORTED_SWITCHES {
+            unreported.pop_front();
+        }
+        unreported.push_back((now, switch));
+    }
+
+    /// 取走还没有报过的换路，早的在前。上报的时候调用：取走了就不再报，那一次上报没有送到 controller 的话就少了这几条。
+    pub(crate) fn take_unreported(&self) -> Vec<RouteSwitch> {
+        let taken = std::mem::take(&mut *self.unreported.lock().expect("route history mutex poisoned"));
+        let age = |at: Instant| u32::try_from(at.elapsed().as_secs()).unwrap_or(u32::MAX);
+        taken.into_iter().map(|(at, switch)| RouteSwitch { age_secs: age(at), ..switch }).collect()
     }
 
     /// 一直记录换路事件，直到路由层关闭。
@@ -360,6 +394,11 @@ mod tests {
         assert_eq!(since.cause, Some(RouteCause::RelayReady), "原因的代码跟着原话一起记下");
         assert!(since.secs_ago <= 1);
         assert_eq!(history.since(NodeId::new(3).unwrap()), None);
+        let switches = history.take_unreported();
+        let steps: Vec<(Route, Route)> = switches.iter().map(|switch| (switch.from.clone(), switch.to.clone())).collect();
+        assert_eq!(steps, [(Route::None, Route::None), (Route::None, Route::Relay { relays: vec![NodeId::new(9).unwrap()] })]);
+        assert_eq!(switches[1].cause, RouteCause::RelayReady);
+        assert!(history.take_unreported().is_empty(), "报过的不再报");
 
         drop(tx);
         tokio::time::timeout(Duration::from_secs(5), following).await.expect("路由层关闭之后应该停").unwrap();

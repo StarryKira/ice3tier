@@ -10,7 +10,7 @@ use super::super::testing::{CAN_DO_ALL, Lab, REMOTE, hello};
 
 fn report_local(addresses: &[&str]) -> ToController {
     let local = addresses.iter().map(|text| text.parse().unwrap()).collect();
-    ToController::Report(Report { local_addresses: Some(local), ..Report::default() })
+    ToController::Report(Box::new(Report { local_addresses: Some(local), ..Report::default() }))
 }
 
 fn addr(text: &str) -> SocketAddr {

@@ -9,7 +9,7 @@ use i3t_model::control::diag::{ChoiceCode, HopSource, PathPick, TestCode, Transf
 use i3t_model::control::exit_test::{ExitTestCause, ExitVia};
 use i3t_model::control::{
     BindCause, DirectKind, InterceptCause, InterceptState, LegTransport, ListenState, NameService, RejectCause, RelayState, Route,
-    RouteCause, RouteHint, TargetCause,
+    RouteCause, RouteHint, TargetCause, TryOutcome,
 };
 use i3t_model::netmap::IpFamily;
 use i3t_model::update::{FailureKind, SelfUpdateBlocker, UpdateCause, UpdateStatus};
@@ -34,6 +34,7 @@ pub(super) static CODES: Codes = Codes {
     skip_cause,
     reach_cause,
     address_source,
+    try_outcome,
     node_warning,
     reject_cause,
     api_error,
@@ -289,6 +290,15 @@ const fn reach_cause(cause: ReachCause) -> &'static str {
     }
 }
 
+const fn try_outcome(outcome: TryOutcome) -> &'static str {
+    match outcome {
+        TryOutcome::Udp => "UDP",
+        TryOutcome::Tcp => "TCP only",
+        TryOutcome::Unreached => "unreached",
+        TryOutcome::Unknown => "unknown",
+    }
+}
+
 const fn address_source(source: AddressSource) -> &'static str {
     match source {
         AddressSource::Declared => "declared on the node",
@@ -301,6 +311,7 @@ const fn address_source(source: AddressSource) -> &'static str {
 fn node_warning(warning: &NodeWarning) -> String {
     match warning {
         NodeWarning::RangeOverlap { address } => format!("interface address {address} is inside the network's range"),
+        NodeWarning::RelayUnreached { tried } => format!("{tried} online nodes tried this relay; none reached it"),
         NodeWarning::Unknown => "unknown warning".to_owned(),
     }
 }

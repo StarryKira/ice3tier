@@ -67,6 +67,7 @@ fn netmap() -> Netmap {
             forward_targets: Vec::new(),
             pinned_relays: Vec::new(),
             profile: None,
+            shared_relays: Vec::new(),
         },
         peers: vec![Peer {
             id: node(GW),
@@ -81,6 +82,7 @@ fn netmap() -> Netmap {
             dial_out_only: false,
             keep_alive: false,
             lane: LaneMode::Off,
+            congestion: None,
         }],
         relays: Vec::new(),
         relay_clients: Vec::new(),

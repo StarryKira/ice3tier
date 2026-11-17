@@ -10,7 +10,7 @@ use i3t_model::admin::{
     AccessCheck, AccessGraph, BackboneView, CreatedCredential, CreatedEnrollToken, Credential, DeletedGroup, Direction, EnrollTokenInfo,
     ExitTestView, ExitView, ForcedUpdates, Forward, Group, GroupRef, LaneEffect, ListenStatus, Listener, LogEntry, Network, Node,
     NodeAccess, NodeDetail, NodeListeners, NodeRef, NodeUpdate, Overview, PairLaneSide, PairView, PathLeg, PathSource, PathView,
-    RelayEnabled, RouteMatrix, RouteTable, Rule, Status, UpdateOverview,
+    RelayEnabled, RelayReach, RouteMatrix, RouteTable, Rule, Status, UpdateOverview,
 };
 use i3t_model::control::exit_test::ExitTestCause;
 use i3t_model::control::{
@@ -316,6 +316,34 @@ pub fn nodes(nodes: &[Node]) {
     print_table(&table, t.no_nodes);
 }
 
+/// 启用了的 relay：在线的节点里几个连得上它（节点自己上报的，只是情况，不是毛病）、它的地址、带宽上限，
+/// 和最近一个统计时段里每秒转发多少。
+pub fn relays(nodes: &[Node]) {
+    let (t, lang, _) = context();
+    let mut table = Table::new(&t.relays_header);
+    for node in nodes {
+        let Some(relay) = &node.relay else { continue };
+        table.row(vec![
+            node.id.to_string(),
+            node.name.clone(),
+            online(node.online).to_owned(),
+            reach_cell(&relay.reach),
+            relay.addresses.len().to_string(),
+            bandwidth(relay.bandwidth_mbps),
+            optional(relay.users.as_ref().map(|users| {
+                let total = users.pairs.iter().map(|pair| pair.bytes).fold(users.other_bytes, u64::saturating_add);
+                format!("{}/s", lang.bytes(total / u64::from(users.window_secs.max(1))))
+            })),
+        ]);
+    }
+    print_table(&table, t.no_relays);
+}
+
+/// 在线的节点里连得上、连不上、没报的个数，写成 `3/1/0`。
+fn reach_cell(reach: &RelayReach) -> String {
+    format!("{}/{}/{}", reach.reached, reach.unreached, reach.unknown)
+}
+
 fn roles(node: &Node) -> String {
     let (t, lang, _) = context();
     lang.list([node.relay.is_some().then_some(t.relay), node.exit.is_some().then_some(t.exit)].into_iter().flatten())
@@ -389,6 +417,9 @@ pub fn node_detail(detail: &NodeDetail) {
         },
     );
     fields.add(t.relay, relay);
+    if let Some(relay) = &node.relay {
+        fields.add(t.relay_reach, (t.reach_counts)(relay.reach.reached, relay.reach.unreached, relay.reach.unknown));
+    }
     let exit = node.exit.as_ref().map_or_else(
         || t.disabled.to_owned(),
         |exit| {
@@ -408,7 +439,13 @@ pub fn node_detail(detail: &NodeDetail) {
     fields.add("netmap", (t.netmap_versions)(node.netmap_version, node.sent_version, node.acked_version));
     fields.add(t.endpoints, lang.list(&detail.endpoints));
     fields.add(t.observed, optional(detail.observed_endpoint));
-    fields.add(t.attached, lang.list(node.attached.iter().map(|attachment| format!("#{} {} ms", attachment.relay, attachment.rtt_ms))));
+    let egress = node.egress_ip.map(|ip| node.country.as_ref().map_or_else(|| ip.to_string(), |country| format!("{ip} {country}")));
+    fields.add(t.egress, optional(egress));
+    let attached = node.attached.iter().map(|attachment| {
+        let line = format!("#{} {} ms", attachment.relay, attachment.rtt_ms);
+        if attachment.shared { lang.paren(&line, t.shared_attachment) } else { line }
+    });
+    fields.add(t.attached, lang.list(attached));
     if detail.mapping_varies == Some(true) {
         fields.add(t.nat, t.mapping_varies.to_owned());
     }
@@ -423,6 +460,31 @@ pub fn node_detail(detail: &NodeDetail) {
     fields.print();
     if let Some(lanes) = &detail.lanes {
         lane_report(lanes);
+    }
+    if let Some(users) = node.relay.as_ref().and_then(|relay| relay.users.as_ref()).filter(|users| !users.pairs.is_empty()) {
+        println!();
+        let rate = |bytes: u64| format!("{}/s", lang.bytes(bytes / u64::from(users.window_secs.max(1))));
+        let mut table = Table::new(&t.relay_users_header);
+        for pair in &users.pairs {
+            table.row(vec![format!("#{}", pair.from), format!("#{}", pair.to), rate(pair.bytes)]);
+        }
+        if users.other_bytes > 0 {
+            table.row(vec![t.relay_users_other.to_owned(), String::new(), rate(users.other_bytes)]);
+        }
+        table.print();
+    }
+    if let Some(reached_by) = detail.reached_by.as_ref().filter(|entries| !entries.is_empty()) {
+        println!();
+        let mut table = Table::new(&t.reached_by_header);
+        for entry in reached_by {
+            table.row(vec![
+                entry.node.name.clone(),
+                online(entry.online).to_owned(),
+                (codes.try_outcome)(entry.outcome).to_owned(),
+                lang.time(entry.at),
+            ]);
+        }
+        table.print();
     }
 }
 
@@ -475,6 +537,11 @@ pub fn routes(table: &RouteTable) {
             optional(entry.rtt_ms),
             kind_cell(&entry.route, entry.direct, entry.relay_leg),
             lang.ago(entry.since_secs),
+            optional(entry.flows),
+            match (entry.tx_bytes, entry.rx_bytes) {
+                (Some(tx), Some(rx)) => format!("{} / {}", lang.bytes(tx), lang.bytes(rx)),
+                _ => NONE.to_owned(),
+            },
         ]);
     }
     print_table(&rows, t.no_peers);
@@ -532,6 +599,7 @@ pub fn path(view: &PathView) {
             format!("{} → {}", leg.from.name, leg.to.name),
             route,
             optional(leg.rtt_ms),
+            optional(leg.connection_rtt_ms),
             kind,
             (codes.path_source)(leg.source).to_owned(),
             leg.age_secs.map_or_else(|| NONE.to_owned(), |age| lang.ago(age)),
@@ -545,6 +613,22 @@ pub fn path(view: &PathView) {
     }
     for leg in [&view.forward, &view.reverse] {
         path_candidates(leg, &name);
+    }
+    for leg in [&view.forward, &view.reverse] {
+        path_switches(leg, &name);
+    }
+}
+
+/// 一个方向最近的换路：什么时候、从什么换成了什么、为什么。
+fn path_switches(leg: &PathLeg, name: &dyn Fn(NodeId) -> String) {
+    let (t, lang, codes) = context();
+    if leg.switches.is_empty() {
+        return;
+    }
+    println!("\n{}", (t.switches_of)(&leg.from.name, &leg.to.name));
+    for switch in &leg.switches {
+        let step = format!("{} → {}", (codes.route)(&switch.from, name), (codes.route)(&switch.to, name));
+        println!("  {}  {}  {}", lang.time(switch.at), step, (codes.route_cause)(&switch.cause, name));
     }
 }
 
@@ -628,6 +712,7 @@ pub fn backbone(view: &BackboneView) {
             optional(relay.reported_by.map(|from| {
                 view.answered.iter().find(|node| node.id == from).map_or_else(|| format!("#{from}"), |node| node.name.clone())
             })),
+            reach_cell(&relay.reach),
             lang.list(links),
         ]);
     }
@@ -958,6 +1043,7 @@ pub fn pairs(pairs: &[PairView]) {
             format!("#{}", setting.b),
             yes_no(setting.keep_alive),
             setting.lane.to_string(),
+            setting.congestion.map_or_else(|| t.congestion_default.to_owned(), |algorithm| algorithm.to_string()),
             effect,
             in_use.to_string(),
             fallbacks.to_string(),
@@ -973,6 +1059,7 @@ pub fn pair(pair: &PairView) {
     let mut fields = Fields::new(2);
     fields.add(t.keep_alive, yes_no(setting.keep_alive));
     fields.add(t.lanes, setting.lane.to_string());
+    fields.add(t.congestion, setting.congestion.map_or_else(|| t.congestion_default.to_owned(), |algorithm| algorithm.to_string()));
     let names = |id: NodeId| format!("#{id}");
     if let Some(effect) = &pair.lane_effect {
         fields.add(t.lane_effect, lane_effect_cell(effect));

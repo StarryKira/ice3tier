@@ -14,8 +14,8 @@ use i3t_model::netmap::{Credential, Forward, ForwardTarget, LocalNode, Network, 
 use i3t_proto::NodeId;
 
 use crate::access::AccessMap;
-use crate::node_addresses;
 use crate::store::{CredentialRecord, ForwardRecord, GroupRecord, NetworkRecord, NodeRecord, Store, StoreError};
+use crate::{node_addresses, relay_reach};
 
 /// 下发给对端的候选端点最多这么多个。正常的节点只有几个；多出来的没有用，只会让每个对端都去探测。
 pub(crate) const MAX_ENDPOINTS: usize = 16;
@@ -182,6 +182,13 @@ impl NetworkView {
             .collect();
         let relay_clients =
             if me.relay.is_some() { other_nodes().map(|node| RelayClient { id: node.id, key: node.key }).collect() } else { Vec::new() };
+        // 不用 relay 的节点不挂靠，也不为它找；对端不用 relay 的也不算。
+        let shared_relays = if self.reach_of(me) == Reach::DirectOnly {
+            Vec::new()
+        } else {
+            let peers = relations.keys().filter_map(|peer| self.nodes.get(peer)).filter(|peer| self.reach_of(peer) != Reach::DirectOnly);
+            relay_reach::shared_relays(me, peers, &relays)
+        };
 
         Some(Netmap {
             version: 0,
@@ -209,6 +216,7 @@ impl NetworkView {
                 // 固定的 relay 里已经不是 relay 的那些不下发：节点连不上它们，只会白等。
                 pinned_relays: me.pinned_relays.iter().copied().filter(|relay| *relay != id && relays.contains(relay)).collect(),
                 profile: me.profile,
+                shared_relays,
             },
             peers,
             relays: relay_list,
@@ -240,6 +248,7 @@ impl NetworkView {
             dial_out_only: peer.dial_out_only,
             keep_alive: self.pairs.iter().any(|pair| pair.a == low && pair.b == high && pair.keep_alive),
             lane: self.pairs.iter().find(|pair| pair.a == low && pair.b == high).map(|pair| pair.lane).unwrap_or_default(),
+            congestion: self.pairs.iter().find(|pair| pair.a == low && pair.b == high).and_then(|pair| pair.congestion),
         }
     }
 }

@@ -12,6 +12,7 @@ use crate::access::AccessMap;
 use crate::error::{Entity, Error};
 use crate::netmap::NetworkView;
 use crate::node_addresses;
+use crate::relay_reach::ReachIndex;
 use crate::store::is_pending;
 
 impl Controller {
@@ -26,6 +27,7 @@ impl Controller {
         let now = inner.clock.now();
         let online_nodes: Vec<NodeRef> = view.nodes.values().filter(|node| inner.is_online(node.id)).map(node_ref).collect();
         let live = inner.live.values().filter(|live| live.network == network);
+        let reach = ReachIndex::new(view.nodes.values(), |id| inner.is_online(id));
         Ok(Overview {
             network,
             nodes: count(view.nodes.len()),
@@ -47,7 +49,8 @@ impl Controller {
                 .values()
                 .flat_map(|node| {
                     let warnings = node_addresses::warnings(node, view.network.cidr);
-                    warnings.into_iter().map(|warning| NetworkWarning { node: node_ref(node), warning })
+                    let unreached = node.relay.as_ref().and_then(|_| reach.warning(node.id));
+                    warnings.into_iter().chain(unreached).map(|warning| NetworkWarning { node: node_ref(node), warning })
                 })
                 .collect(),
         })

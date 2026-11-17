@@ -22,6 +22,7 @@ pub(super) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0009_forward_proxy_protocol.sql"),
     include_str!("migrations/0010_found_relay_addresses_and_stats.sql"),
     include_str!("migrations/0011_exits_any_port_and_no_bandwidth.sql"),
+    include_str!("migrations/0012_relay_reach_pair_congestion_route_switches.sql"),
 ];
 
 #[cfg(test)]

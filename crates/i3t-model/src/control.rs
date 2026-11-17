@@ -143,7 +143,8 @@ pub enum ToController {
         hello: Hello,
     },
     Hello(Hello),
-    Report(Report),
+    /// 装在 `Box` 里只是为了让消息的枚举不至于太大，JSON 里没有区别。
+    Report(Box<Report>),
     /// 节点已经应用了这个版本的 netmap。
     Ack {
         version: u64,
@@ -412,6 +413,116 @@ pub struct Report {
     /// 透明访问（Linux 上的套接字级拦截）的状况。没有打开时也报（`off`）；旧版本的节点不报。装在 `Box` 里，同上。
     #[serde(default)]
     pub intercept: Option<Box<InterceptReport>>,
+    /// 节点试过的 relay 连没连上（白皮书 §7.2：谁连得上，它就是谁的 relay），最多 [`MAX_RELAY_TRIES`] 个，有会话的排在前面。
+    /// 每次上报都是完整的一份。旧版本的节点不报。
+    #[serde(default)]
+    pub relays: Vec<RelayTry>,
+    /// 到各个对端的共用连接上现在开着几条流、两个方向各走了多少字节（白皮书 §7.7），只有现在有连接的对端，
+    /// 最多 [`MAX_PEER_USE`] 个，流量大的在前。每次上报都是完整的一份。旧版本的节点不报。
+    #[serde(default)]
+    pub peer_use: Vec<PeerUse>,
+    /// 本节点是 relay 时：上一个统计时段里它替哪些节点对转发了多少（白皮书 §7.7 的"谁在用这个 relay"）。不是 relay、旧版本的节点不报。
+    #[serde(default)]
+    pub relay_use: Option<RelayUse>,
+    /// 上一次上报之后的换路，最多 [`MAX_REPORTED_SWITCHES`] 条，早的在前。报过就不再报。旧版本的节点不报。
+    #[serde(default)]
+    pub switches: Vec<RouteSwitch>,
+}
+
+/// [`Report::peer_use`] 最多报几个对端。
+pub const MAX_PEER_USE: usize = 256;
+
+/// 到一个对端的共用连接现在的用量。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerUse {
+    pub peer: NodeId,
+    /// 现在开着的流（共用连接上的，两边谁开的都算；独占 TCP 上的不在这里）。
+    pub flows: u32,
+    /// 本节点启动以来在和它的连接上发出、收到的字节数（线上的，含 QUIC 的开销），连接关了重建也接着累计。
+    pub tx_bytes: u64,
+    pub rx_bytes: u64,
+}
+
+/// [`RelayUse::pairs`] 最多报几对。
+pub const MAX_RELAY_USERS: usize = 16;
+
+/// relay 在一个统计时段里替各个节点对转发了多少（白皮书 §7.7）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayUse {
+    /// 统计时段多长（秒）。
+    pub window_secs: u32,
+    /// 转发得最多的几对，最多 [`MAX_RELAY_USERS`] 对，多的在前。
+    #[serde(default)]
+    pub pairs: Vec<RelayPairUse>,
+    /// 其余的节点对加起来转发了多少字节。
+    #[serde(default)]
+    pub other_bytes: u64,
+}
+
+/// 一个节点对在一个统计时段里经这个 relay 转发的字节数，含中转头。`from` 是发出包的节点，`to` 是收包的节点，两个方向分开算。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayPairUse {
+    pub from: NodeId,
+    pub to: NodeId,
+    pub bytes: u64,
+}
+
+/// [`Report::switches`] 最多报几条。
+pub const MAX_REPORTED_SWITCHES: usize = 64;
+
+/// 一次换路（白皮书 §7.5、§13 的决策日志）：到这个对端的路从什么换成了什么、为什么。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteSwitch {
+    pub peer: NodeId,
+    pub from: Route,
+    pub to: Route,
+    pub cause: RouteCause,
+    /// 多少秒之前换的。
+    #[serde(default)]
+    pub age_secs: u32,
+}
+
+/// [`Report::relays`] 最多报几个。节点试的是 netmap 里的每个 relay（挂靠和经过的用会话，别的每分钟用 UDP 问一次），
+/// 网络里 relay 再多，报的也只有这么多：有会话的、连得上的排在前面。
+pub const MAX_RELAY_TRIES: usize = 32;
+
+/// 节点最近一次试一个 relay 的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayTry {
+    pub relay: NodeId,
+    pub outcome: TryOutcome,
+    /// 多少秒之前试的；现在有会话的是 0。报的是相对的时间：节点的钟不一定准，controller 换成自己的时间。
+    #[serde(default)]
+    pub age_secs: u32,
+    /// 这个 relay 看到的本节点的 IP（中转会话的应答里带着的），没有会话时没有。controller 拿它定节点的出口地址。
+    #[serde(default)]
+    pub seen_as: Option<IpAddr>,
+}
+
+/// 试一个 relay 的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TryOutcome {
+    /// 经 UDP 连上了（中转会话，或者每分钟一次的询问得到了回答）。
+    Udp,
+    /// UDP 连不上，经 TCP 连上了。
+    Tcp,
+    /// UDP 和 TCP 都试了，都没连上。
+    Unreached,
+    /// 比本程序新的一方说的、这里不认识的结果。
+    #[serde(other)]
+    Unknown,
+}
+
+impl TryOutcome {
+    /// 连上了没有。
+    #[must_use]
+    pub const fn reached(self) -> bool {
+        match self {
+            Self::Udp | Self::Tcp => true,
+            Self::Unreached | Self::Unknown => false,
+        }
+    }
 }
 
 /// 透明访问在一个节点上的状况（白皮书 §9.5）：本机的程序不配代理，直接连别的节点的虚拟 IP 或者名字。
@@ -876,6 +987,10 @@ pub struct RouteAnswer {
     /// 选路的细节：模式、考虑过的候选路径和各自的代价、为什么是现在这条。旧版本的节点不报，对端不在 netmap 里时也没有。
     #[serde(default)]
     pub detail: Option<PathDetail>,
+    /// 到这个对端的连接自己量的往返时间（毫秒，QUIC 的平滑 RTT），这对节点之间没有连接时没有。`rtt_ms` 是路由层按各段的探测
+    /// 推算的，两个放在一起看：差得多说明哪一段的测量失真（白皮书 §13）。旧版本的节点不报。
+    #[serde(default)]
+    pub connection_rtt_ms: Option<u32>,
 }
 
 /// 一条路的细节。说不出来的项是 `None`。
@@ -1341,6 +1456,7 @@ mod tests {
             rtt_ms: Some(12),
             since: Some(RouteSince { secs_ago: 30, reason: "直连打通了".to_owned(), cause: Some(RouteCause::DirectVerified) }),
             detail: None,
+            connection_rtt_ms: Some(14),
         };
         let wire = serde_json::to_value(ToController::RouteAnswer { request: 9, answer: answer.clone() }).unwrap();
         assert_eq!(
@@ -1348,11 +1464,12 @@ mod tests {
             serde_json::json!({
                 "type": "route_answer", "request": 9,
                 "answer": { "peer": 4, "route": { "via": "direct", "addr": "1.2.3.4:20330" }, "rtt_ms": 12,
-                            "since": { "secs_ago": 30, "reason": "直连打通了", "cause": { "code": "direct_verified" } }, "detail": null }
+                            "since": { "secs_ago": 30, "reason": "直连打通了", "cause": { "code": "direct_verified" } }, "detail": null,
+                            "connection_rtt_ms": 14 }
             })
         );
         let unknown: RouteAnswer = serde_json::from_value(serde_json::json!({ "peer": 4, "route": null })).unwrap();
-        assert_eq!(unknown, RouteAnswer { peer, route: None, rtt_ms: None, since: None, detail: None });
+        assert_eq!(unknown, RouteAnswer { peer, route: None, rtt_ms: None, since: None, detail: None, connection_rtt_ms: None });
     }
 
     #[test]
@@ -1375,8 +1492,14 @@ mod tests {
                 current: true,
             }],
         };
-        let answer =
-            RouteAnswer { peer, route: Some(Route::Relay { relays: vec![relay] }), rtt_ms: Some(39), since: None, detail: Some(detail) };
+        let answer = RouteAnswer {
+            peer,
+            route: Some(Route::Relay { relays: vec![relay] }),
+            rtt_ms: Some(39),
+            since: None,
+            detail: Some(detail),
+            connection_rtt_ms: None,
+        };
         let wire = serde_json::to_value(&answer).unwrap();
         assert_eq!(wire["detail"]["mode"], "lowest_cost");
         assert_eq!(wire["detail"]["relay_leg"], "tcp");

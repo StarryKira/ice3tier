@@ -25,7 +25,7 @@ fn two_unconnected(lab: &mut Lab) -> (i3t_model::admin::NetworkId, Member, Membe
 
 fn report_endpoints(lab: &Lab, member: &Member, endpoint: &str) {
     let report = Report { endpoints: vec![endpoint.parse().unwrap()], ..Report::default() };
-    lab.controller.handle(member.session, REMOTE, ToController::Report(report)).unwrap();
+    lab.controller.handle(member.session, REMOTE, ToController::Report(Box::new(report))).unwrap();
 }
 
 #[test]
@@ -202,7 +202,7 @@ fn reported_counters_and_routes_show_up_in_the_admin_views() {
         ],
         ..Report::default()
     };
-    lab.controller.handle(a.session, REMOTE, ToController::Report(report)).unwrap();
+    lab.controller.handle(a.session, REMOTE, ToController::Report(Box::new(report))).unwrap();
 
     let detail = lab.controller.node(network.id, a.id).unwrap();
     assert_eq!((detail.mapping_varies, detail.flows, detail.tx_bytes, detail.rx_bytes), (Some(true), 3, 1_000, 2_000));
@@ -216,7 +216,7 @@ fn reported_counters_and_routes_show_up_in_the_admin_views() {
     // 只报变化的部分：后来的上报覆盖同一个对端的那一项。
     let direct = Route::Direct { addr: "203.0.113.9:20330".parse().unwrap() };
     let update = Report { routes: vec![RouteEntry { peer: b.id, route: direct.clone(), rtt_ms: Some(12) }], ..Report::default() };
-    lab.controller.handle(a.session, REMOTE, ToController::Report(update)).unwrap();
+    lab.controller.handle(a.session, REMOTE, ToController::Report(Box::new(update))).unwrap();
     let table = lab.controller.routes(network.id, a.id).unwrap();
     assert_eq!((table.routes[0].route.clone(), table.routes[0].rtt_ms), (direct, Some(12)));
     assert!(lab.controller.overview(network.id).unwrap().unreachable_pairs.is_empty());
@@ -299,7 +299,7 @@ fn a_new_connection_replaces_the_old_one() {
     assert_eq!(second.netmap().version, first.netmap().version, "新连接上先收到当前的 netmap");
 
     // 旧连接收尾时不能把节点标成离线，它上面迟到的消息也不算数。
-    lab.controller.handle(first.session, REMOTE, ToController::Report(Report { flows: 9, ..Report::default() })).unwrap();
+    lab.controller.handle(first.session, REMOTE, ToController::Report(Box::new(Report { flows: 9, ..Report::default() }))).unwrap();
     lab.controller.disconnect(first.session);
     let detail = lab.controller.node(network.id, first.id).unwrap();
     assert!(detail.node.online);

@@ -2,7 +2,7 @@
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -10,7 +10,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use i3t_crypto::NodeKey;
 use i3t_crypto::tls;
 use i3t_model::Netmap;
-use i3t_model::control::Signal;
+use i3t_model::control::{PeerUse, Signal};
 use i3t_path::Paths;
 use i3t_proto::flow::{DatagramHeader, MAX_DATAGRAM_BODY_LEN, Recipient};
 use i3t_proto::{NodeId, PublicKey};
@@ -18,6 +18,7 @@ use quinn::rustls::pki_types::CertificateDer;
 use quinn::{ConnectError, SendDatagramError, TransportConfig, VarInt};
 use tokio::sync::{Notify, mpsc, watch};
 
+use crate::congestion::Algorithm;
 use crate::contract::{Datagram, DatagramSendError, DatagramSender, Incoming, OpenError};
 use crate::quic::{self, SERVER_NAME};
 use crate::socket;
@@ -95,11 +96,17 @@ struct Conn {
     /// 越新的越大。
     serial: u64,
     streams: Arc<StreamCount>,
+    /// 空闲够久了，却因为关掉就建不回来而留着（见 [`hold_idle`]）。只用来让开始和结束各记一行日志。
+    held: AtomicBool,
+    /// 这条连接建立时用的拥塞控制。连接一直用它，节点对的设置后来改了也不变。
+    algorithm: Algorithm,
 }
 
 #[derive(Default)]
 struct PeerEntry {
     conns: Vec<Arc<Conn>>,
+    /// 和这个对端之间已经关掉的连接一共发出、收到的字节数（线上的）。现在的连接的数另外从 QUIC 库读。
+    closed_traffic: (u64, u64),
     /// 同一时刻只有一个任务在拨这个对端，别的等它的结果。
     dial: Arc<tokio::sync::Mutex<()>>,
     /// 有新的连接登记进来时通知：正在拨号的人可以改用对端连进来的那一条。
@@ -136,8 +143,15 @@ pub(crate) struct Manager {
     quic: quinn::Endpoint,
     paths: Arc<Paths>,
     netmap: watch::Receiver<Arc<Netmap>>,
-    /// 现在的档位设置和按它建好的传输参数。之后拨出的连接用它；空闲回收每次检查时读它。
-    tuning: Mutex<(Tuning, Arc<TransportConfig>)>,
+    /// 现在的档位设置和按它建好的配置。之后建立的连接用它；空闲回收每次检查时读它。
+    configs: Mutex<Configs>,
+    /// 接受连接一方的配置里不随档位和拥塞控制变的那部分（TLS）。
+    server: quinn::ServerConfig,
+    /// 节点对没有指定拥塞控制时用哪一种（环境变量 `I3T_CONGESTION`，没有就是 BBR），进程启动时定。
+    default_algorithm: Algorithm,
+    /// controller 现在连得上：打洞的信令有路可走。装配方没有说过时当作连得上（静态模式没有 controller 可失去），
+    /// 空闲回收照旧。
+    controller_online: AtomicBool,
     peers: Mutex<HashMap<NodeId, PeerEntry>>,
     next_serial: AtomicU64,
     /// 对端连进来、还在握手的连接。
@@ -151,12 +165,13 @@ pub(crate) struct Manager {
 impl Manager {
     pub(crate) fn new(
         key: Arc<NodeKey>,
-        quic: quinn::Endpoint,
+        endpoint: (quinn::Endpoint, quinn::ServerConfig),
         paths: Arc<Paths>,
         netmap: watch::Receiver<Arc<Netmap>>,
         incoming: mpsc::Sender<Stream>,
         datagrams: DatagramQueues,
     ) -> Arc<Self> {
+        let (quic, server) = endpoint;
         let me = netmap.borrow().me.id;
         Arc::new(Self {
             me,
@@ -164,7 +179,10 @@ impl Manager {
             quic,
             paths,
             netmap,
-            tuning: Mutex::new((Tuning::default(), quic::transport(&Tuning::default()))),
+            configs: Mutex::new(Configs::new(Tuning::default(), &server)),
+            server,
+            default_algorithm: Algorithm::from_env(),
+            controller_online: AtomicBool::new(true),
             peers: Mutex::new(HashMap::new()),
             next_serial: AtomicU64::new(0),
             handshakes: Arc::default(),
@@ -174,20 +192,36 @@ impl Manager {
         })
     }
 
-    fn tuning(&self) -> std::sync::MutexGuard<'_, (Tuning, Arc<TransportConfig>)> {
-        self.tuning.lock().expect("connection tuning mutex poisoned")
+    fn configs(&self) -> std::sync::MutexGuard<'_, Configs> {
+        self.configs.lock().expect("connection configs mutex poisoned")
     }
 
-    /// 换掉接受连接一方的配置，之后连进来的连接用它。
-    pub(crate) fn set_server_config(&self, server: quinn::ServerConfig) {
-        self.quic.set_server_config(Some(server));
+    /// 换上新的档位设置。之后建立的连接（本端拨出的、对端连进来的）用它，已有的连接保持原样。
+    pub(crate) fn tune(&self, tuning: Tuning) {
+        let configs = Configs::new(tuning, &self.server);
+        // 认不出是哪个对端的连接请求（不会走到握手）也要有一份配置可用：用默认的拥塞控制。
+        self.quic.set_server_config(Some(configs.server(self.default_algorithm).as_ref().clone()));
+        *self.configs() = configs;
     }
 
-    /// 换上新的档位设置，返回之后建立的连接要用的传输参数（对端连进来的那一侧由调用方装到端点上）。
-    pub(crate) fn tune(&self, tuning: Tuning) -> Arc<TransportConfig> {
-        let transport = quic::transport(&tuning);
-        *self.tuning() = (tuning, Arc::clone(&transport));
-        transport
+    /// 和 `peer` 之间新建的连接用哪种拥塞控制：节点对设置了的话用它，否则用节点的默认（白皮书 §6.3）。
+    pub(crate) fn algorithm_for(&self, peer: NodeId) -> Algorithm {
+        let chosen = self.netmap.borrow().peer(peer).and_then(|info| info.congestion);
+        chosen.map_or(self.default_algorithm, Algorithm::from)
+    }
+
+    /// 到 `peer` 的连接（开新流用的那一条）自己量的往返时间。没有连接时是 `None`。
+    pub(crate) fn connection_rtt(&self, peer: NodeId) -> Option<Duration> {
+        self.preferred(peer).map(|conn| conn.quic.rtt())
+    }
+
+    /// 到 `peer` 的连接现在用的拥塞控制；还没有连接时是新建的连接会用的那一种。
+    pub(crate) fn congestion(&self, peer: NodeId) -> Algorithm {
+        self.preferred(peer).map_or_else(|| self.algorithm_for(peer), |conn| conn.algorithm)
+    }
+
+    pub(crate) fn set_controller_online(&self, online: bool) {
+        self.controller_online.store(online, Ordering::Relaxed);
     }
 
     fn peers(&self) -> std::sync::MutexGuard<'_, HashMap<NodeId, PeerEntry>> {
@@ -264,7 +298,8 @@ impl Manager {
             return Err(OpenError::NoRoute(peer));
         }
         let lost = |reason: String| OpenError::ConnectionLost { peer, reason };
-        let transport = Arc::clone(&self.tuning().1);
+        let algorithm = self.algorithm_for(peer);
+        let transport = self.configs().transport(algorithm);
         let config = quic::client(&self.key, peer_key, transport).map_err(|error| lost(error.to_string()))?;
         let connecting = match self.quic.connect_with(config, socket::virtual_addr(peer), SERVER_NAME) {
             Ok(connecting) => connecting,
@@ -272,7 +307,7 @@ impl Manager {
             Err(error) => return Err(lost(error.to_string())),
         };
         match tokio::time::timeout_at(deadline, connecting).await {
-            Ok(Ok(connection)) => Ok(self.register(peer, connection, self.me, peer_key)),
+            Ok(Ok(connection)) => Ok(self.register(peer, connection, Origin { dialer: self.me, key: peer_key, algorithm })),
             Ok(Err(error)) => {
                 tracing::info!(%peer, %error, "和对端的握手失败");
                 Err(lost(error.to_string()))
@@ -285,9 +320,11 @@ impl Manager {
     }
 
     /// 登记一条握手完成的连接，并开始接收它上面的流。
-    fn register(self: &Arc<Self>, peer: NodeId, quic: quinn::Connection, dialer: NodeId, key: PublicKey) -> Arc<Conn> {
+    fn register(self: &Arc<Self>, peer: NodeId, quic: quinn::Connection, origin: Origin) -> Arc<Conn> {
         let serial = self.next_serial.fetch_add(1, Ordering::Relaxed);
-        let conn = Arc::new(Conn { quic, dialer, key, serial, streams: StreamCount::new() });
+        let Origin { dialer, key, algorithm } = origin;
+        let streams = StreamCount::new();
+        let conn = Arc::new(Conn { quic, dialer, key, serial, streams, held: AtomicBool::new(false), algorithm });
         let surplus = {
             let mut peers = self.peers();
             let entry = peers.entry(peer).or_default();
@@ -295,7 +332,7 @@ impl Manager {
             entry.arrived.notify_waiters();
             entry.take_surplus()
         };
-        tracing::info!(%peer, %dialer, "和对端的连接建立");
+        tracing::info!(%peer, %dialer, congestion = %algorithm, "和对端的连接建立");
         for old in surplus {
             tracing::info!(%peer, dialer = %old.dialer, "和这个对端的连接超过了 {MAX_CONNS_PER_PEER} 条，关闭最旧的一条");
             old.quic.close(VarInt::from_u32(CLOSE_SURPLUS), b"too many connections");
@@ -306,8 +343,35 @@ impl Manager {
 
     fn forget(&self, peer: NodeId, conn: &Arc<Conn>) {
         if let Some(entry) = self.peers().get_mut(&peer) {
+            let before = entry.conns.len();
             entry.conns.retain(|other| !Arc::ptr_eq(other, conn));
+            if entry.conns.len() < before {
+                let (sent, received) = traffic(&conn.quic);
+                entry.closed_traffic = (entry.closed_traffic.0.saturating_add(sent), entry.closed_traffic.1.saturating_add(received));
+            }
         }
+    }
+
+    /// 和各个对端之间现在的连接上开着几条流、本节点启动以来两个方向各走了多少字节（关掉的连接也算），
+    /// 只有现在有连接的对端，流量大的在前，最多 `limit` 个。
+    pub(crate) fn peer_use(&self, limit: usize) -> Vec<PeerUse> {
+        let peers = self.peers();
+        let mut used: Vec<PeerUse> = peers
+            .iter()
+            .filter(|(_, entry)| entry.conns.iter().any(|conn| conn.quic.close_reason().is_none()))
+            .map(|(&peer, entry)| {
+                let flows = entry.conns.iter().map(|conn| conn.streams.open()).sum::<usize>();
+                let (sent, received) = entry
+                    .conns
+                    .iter()
+                    .map(|conn| traffic(&conn.quic))
+                    .fold(entry.closed_traffic, |(a, b), (c, d)| (a.saturating_add(c), b.saturating_add(d)));
+                PeerUse { peer, flows: u32::try_from(flows).unwrap_or(u32::MAX), tx_bytes: sent, rx_bytes: received }
+            })
+            .collect();
+        used.sort_unstable_by_key(|entry| (std::cmp::Reverse(entry.tx_bytes.saturating_add(entry.rx_bytes)), entry.peer));
+        used.truncate(limit);
+        used
     }
 
     /// 一条连接的一生：接收对端开过来的流、数据报和信令，空闲够久就关掉。
@@ -413,9 +477,22 @@ impl Manager {
         let idle = conn.streams.idle_since()?.elapsed();
         let preferred = self.preferred(peer).is_some_and(|preferred| Arc::ptr_eq(&preferred, conn));
         let keep_alive = self.netmap.borrow().peer(peer).is_some_and(|info| info.keep_alive);
-        let idle_close = self.tuning().0.idle_close;
+        let idle_close = self.configs().tuning.idle_close;
         let (limit, reason) = idle_limit(preferred, keep_alive, idle_close)?;
-        (idle >= limit).then_some(reason)
+        if idle < limit {
+            return None;
+        }
+        // 只有到了该关的时候才去问路径层，平时每秒的检查不碰它。
+        let online = self.controller_online.load(Ordering::Relaxed);
+        let hold = hold_idle(preferred, online, || self.paths.has_relay_path(peer));
+        if hold != conn.held.swap(hold, Ordering::Relaxed) {
+            if hold {
+                tracing::info!(%peer, "空闲的连接先不关：controller 连不上，也没有 relay 可以退回去，关掉就建不回来");
+            } else {
+                tracing::info!(%peer, online, "controller 又连上了，或者有了经 relay 的路：空闲的连接照常回收");
+            }
+        }
+        (!hold).then_some(reason)
     }
 
     /// 接受对端连进来的连接，直到本端关闭。
@@ -459,7 +536,10 @@ impl Manager {
 
     /// 和一个连进来的对端握手，核对它是谁。`slot` 在握手结束（成功或者失败）之前占着握手的名额。
     async fn welcome(self: Arc<Self>, incoming: quinn::Incoming, claimed: NodeId, slot: HandshakeSlot) {
-        let connecting = match incoming.accept() {
+        // 拥塞控制按它自称的对端选：握手之后核对公钥，对不上的连接本来就要关掉。
+        let algorithm = self.algorithm_for(claimed);
+        let server = self.configs().server(algorithm);
+        let connecting = match incoming.accept_with(server) {
             Ok(connecting) => connecting,
             Err(error) => {
                 tracing::debug!(peer = %claimed, %error, "对端连进来的连接没有接成");
@@ -483,7 +563,7 @@ impl Manager {
         // 对端是谁只看握手里的公钥。包是从哪个节点的路上来的（`claimed`）必须和它对得上，
         // 不然这条连接的回包会被送到另一个节点那里去。
         match self.identify(&connection) {
-            Some((peer, key)) if peer == claimed => drop(self.register(peer, connection, peer, key)),
+            Some((peer, key)) if peer == claimed => drop(self.register(peer, connection, Origin { dialer: peer, key, algorithm })),
             identified => {
                 tracing::warn!(peer = %claimed, identified = ?identified.map(|(peer, _)| peer), "连进来的对端的公钥和它自称的节点对不上，关闭连接");
                 connection.close(VarInt::from_u32(CLOSE_IDENTITY), b"identity mismatch");
@@ -552,6 +632,56 @@ impl Manager {
     pub(crate) fn abort(&self) {
         self.closed.send_replace(true);
         self.quic.close(VarInt::from_u32(CLOSE_SHUTDOWN), b"shutdown");
+    }
+}
+
+/// 一条连接在线上发出、收到的字节数（含 QUIC 自己的开销和重传）。
+fn traffic(connection: &quinn::Connection) -> (u64, u64) {
+    let stats = connection.stats();
+    (stats.udp_tx.bytes, stats.udp_rx.bytes)
+}
+
+/// 一条连接是谁拨的、对端握手时的公钥、用的拥塞控制。
+#[derive(Debug, Clone, Copy)]
+struct Origin {
+    dialer: NodeId,
+    key: PublicKey,
+    algorithm: Algorithm,
+}
+
+/// 按一份档位设置建好的配置：每种拥塞控制一份传输参数，和用它的、接受连接一方的配置。
+///
+/// 拥塞控制在 QUIC 库里是按连接的传输参数选的，建立之后不能换，所以每种各备一份，建连接时按节点对的设置挑。
+struct Configs {
+    tuning: Tuning,
+    bbr: (Arc<TransportConfig>, Arc<quinn::ServerConfig>),
+    cubic: (Arc<TransportConfig>, Arc<quinn::ServerConfig>),
+}
+
+impl Configs {
+    fn new(tuning: Tuning, server: &quinn::ServerConfig) -> Self {
+        let build = |algorithm: Algorithm| {
+            let transport = quic::transport(&tuning, algorithm);
+            let mut server = server.clone();
+            server.transport_config(Arc::clone(&transport));
+            (transport, Arc::new(server))
+        };
+        Self { tuning, bbr: build(Algorithm::Bbr), cubic: build(Algorithm::Cubic) }
+    }
+
+    fn of(&self, algorithm: Algorithm) -> &(Arc<TransportConfig>, Arc<quinn::ServerConfig>) {
+        match algorithm {
+            Algorithm::Bbr => &self.bbr,
+            Algorithm::Cubic => &self.cubic,
+        }
+    }
+
+    fn transport(&self, algorithm: Algorithm) -> Arc<TransportConfig> {
+        Arc::clone(&self.of(algorithm).0)
+    }
+
+    fn server(&self, algorithm: Algorithm) -> Arc<quinn::ServerConfig> {
+        Arc::clone(&self.of(algorithm).1)
     }
 }
 
@@ -650,6 +780,16 @@ fn idle_limit(preferred: bool, keep_alive: bool, idle_close: Option<Duration>) -
         (true, true, _) | (true, false, None) => None,
         (true, false, Some(limit)) => Some((limit, "没有流超过了档位定的空闲回收时间")),
     }
+}
+
+/// 到了空闲回收的时间，这条连接是不是要先留着（白皮书 §5.4）。
+///
+/// 关掉的连接要重建，握手的包得有路走：经 relay，或者重新打洞，而打洞的信令要经 controller。两样都没有的时候
+/// （controller 连不上，到这个对端也没有经 relay 的路），关掉的连接就建不回来了，所以先留着；controller 又连上了、
+/// 或者有了经 relay 的路，下一次检查（每秒一次）就照常回收。多出来的那一条（`preferred` 为假）照样关：留着的是另一条。
+/// `relay_path` 只在需要时才问。
+fn hold_idle(preferred: bool, controller_online: bool, relay_path: impl FnOnce() -> bool) -> bool {
+    preferred && !controller_online && !relay_path()
 }
 
 /// 一条流剩下的内容读不完整的原因。
@@ -798,5 +938,15 @@ mod tests {
             assert_eq!(idle_limit(false, false, idle_close).map(|(limit, _)| limit), Some(DUPLICATE_IDLE_CLOSE));
             assert_eq!(idle_limit(false, true, idle_close).map(|(limit, _)| limit), Some(DUPLICATE_IDLE_CLOSE));
         }
+    }
+
+    #[test]
+    fn an_idle_connection_is_held_only_while_neither_the_controller_nor_a_relay_could_bring_it_back() {
+        assert!(hold_idle(true, false, || false), "controller 连不上、也没有经 relay 的路：关掉就建不回来");
+        assert!(!hold_idle(true, true, || false), "controller 连得上：信令有路走，照常回收");
+        assert!(!hold_idle(true, false, || true), "有经 relay 的路：照常回收");
+        assert!(!hold_idle(false, false, || false), "多出来的那一条照样关，留着的是另一条");
+        // controller 连得上时不去问路径层。
+        assert!(!hold_idle(true, true, || unreachable!("controller 连得上时不该问有没有经 relay 的路")));
     }
 }

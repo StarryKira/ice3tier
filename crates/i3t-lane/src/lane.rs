@@ -7,7 +7,6 @@
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
 use i3t_crypto::tls::{self, Identity, TlsError};
@@ -186,40 +185,30 @@ pub(crate) struct Dial<'a> {
     pub(crate) deadline: Instant,
 }
 
-/// 每个地址最多等多久连上。
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
-
 /// 拨一条 lane：连上、握手、把 HELLO 排进待发的密文。HELLO 不在这里写出去，调用方可以让后面的帧和它一起走。
 ///
-/// 地址按顺序试，第一个连得上的就用；返回用的是哪一个，下一次先试它。
+/// 对方是 relay，有几个地址（controller 找出来的），不一定都连得上。和路径层连 relay 的 TCP 中转一样
+/// （[`i3t_path::connect_first`]）：按顺序错开一点时间一起连，先连上的那个为准，不回答的地址不让后面的等它超时。
+/// 返回用的是哪一个，下一次先试它。
 ///
 /// # Errors
 ///
 /// 都连不上、握手失败（包括对端的公钥不对），或者过了 `deadline`。
 pub(crate) async fn dial(dial: Dial<'_>) -> Result<(Lane, SocketAddr), LaneError> {
     let Dial { addrs, config, peer, purpose, epoch, deadline } = dial;
-    let mut last_error = LaneError::Protocol("没有可以拨的地址");
-    for &addr in addrs {
-        let connect_deadline = deadline.min(Instant::now() + CONNECT_TIMEOUT);
-        let socket = match timeout_at(connect_deadline, TcpStream::connect(addr)).await {
-            Ok(Ok(socket)) => socket,
-            Ok(Err(error)) => {
-                last_error = LaneError::Io(error);
-                continue;
-            }
-            Err(_) => {
-                last_error = LaneError::Deadline(CONNECT_TIMEOUT);
-                continue;
-            }
-        };
-        let established = timeout_at(deadline, establish(socket, config, peer, purpose, epoch)).await;
-        return match established {
-            Ok(Ok(lane)) => Ok((lane, addr)),
-            Ok(Err(error)) => Err(error),
-            Err(_) => Err(LaneError::Deadline(deadline.saturating_duration_since(Instant::now()))),
-        };
+    if addrs.is_empty() {
+        return Err(LaneError::Protocol("没有可以拨的地址"));
     }
-    Err(last_error)
+    let (socket, addr) = match timeout_at(deadline, i3t_path::connect_first(addrs)).await {
+        Ok(Ok(connected)) => connected,
+        Ok(Err(error)) => return Err(LaneError::Io(error)),
+        Err(_) => return Err(LaneError::Deadline(deadline.saturating_duration_since(Instant::now()))),
+    };
+    match timeout_at(deadline, establish(socket, config, peer, purpose, epoch)).await {
+        Ok(Ok(lane)) => Ok((lane, addr)),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(LaneError::Deadline(deadline.saturating_duration_since(Instant::now()))),
+    }
 }
 
 async fn establish(socket: TcpStream, config: Arc<ClientConfig>, peer: NodeId, purpose: Purpose, epoch: u64) -> Result<Lane, LaneError> {

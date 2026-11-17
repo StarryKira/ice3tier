@@ -10,6 +10,7 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use i3t_model::netmap::Congestion;
 use quinn::congestion::{ControllerFactory, CubicConfig};
 
 use self::bbr::BbrConfig;
@@ -32,7 +33,8 @@ pub(crate) enum Algorithm {
 }
 
 impl Algorithm {
-    /// 临时指定拥塞控制的环境变量，取值 `cubic` 或 `bbr`。做对比测试时用；正式的配置入口还没有。
+    /// 指定节点默认的拥塞控制的环境变量，取值 `cubic` 或 `bbr`。做对比测试时用；正式的配置是节点对的设置
+    /// （`i3tctl pair set … --congestion`），它盖过这里。
     pub(crate) const ENV: &str = "I3T_CONGESTION";
 
     /// 环境变量 [`Self::ENV`] 指定的那一种；没有设置或者值看不懂时用默认的。
@@ -57,6 +59,15 @@ impl Algorithm {
         match self {
             Self::Cubic => "cubic",
             Self::Bbr => "bbr",
+        }
+    }
+}
+
+impl From<Congestion> for Algorithm {
+    fn from(congestion: Congestion) -> Self {
+        match congestion {
+            Congestion::Bbr => Self::Bbr,
+            Congestion::Cubic => Self::Cubic,
         }
     }
 }

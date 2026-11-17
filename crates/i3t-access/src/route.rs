@@ -186,6 +186,7 @@ mod tests {
             dial_out_only: false,
             keep_alive: false,
             lane: LaneMode::Off,
+            congestion: None,
         }
     }
 
@@ -218,6 +219,7 @@ mod tests {
                 forward_targets: Vec::new(),
                 pinned_relays: Vec::new(),
                 profile: None,
+                shared_relays: Vec::new(),
             },
             peers: vec![
                 peer(2, "gw", Some(PeerExit { lan: true, class: None, optimistic: None })),

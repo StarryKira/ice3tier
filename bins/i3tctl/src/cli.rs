@@ -8,7 +8,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use i3t_lang::Lang;
 use i3t_model::admin::stats::Series;
-use i3t_model::netmap::{IpFamily, LaneMode, Profile, ProxyProtocol, Reach, RoutingMode};
+use i3t_model::netmap::{Congestion, IpFamily, LaneMode, Profile, ProxyProtocol, Reach, RoutingMode};
 use i3t_proto::flow::Class;
 use ipnet::{IpNet, Ipv4Net};
 
@@ -265,6 +265,7 @@ pub enum RelayCommand {
     Disable {
         node: String,
     },
+    List,
 }
 
 #[derive(Subcommand)]
@@ -435,7 +436,7 @@ pub enum ForwardCommand {
 pub enum PairCommand {
     List,
     // 至少要改一项。
-    #[command(group(clap::ArgGroup::new("setting").required(true).multiple(true).args(["keep_alive", "lane"])))]
+    #[command(group(clap::ArgGroup::new("setting").required(true).multiple(true).args(["keep_alive", "lane", "congestion"])))]
     Set {
         a: String,
         b: String,
@@ -443,6 +444,8 @@ pub enum PairCommand {
         keep_alive: Option<OnOff>,
         #[arg(long, value_parser = parse_lane)]
         lane: Option<LaneMode>,
+        #[arg(long, value_parser = parse_congestion)]
+        congestion: Option<CongestionArg>,
     },
     #[command(alias = "delete")]
     Unset {
@@ -553,6 +556,17 @@ impl From<FamilyArg> for IpFamily {
 /// 独占 TCP 的设置。模型里的解析报的是中文，这里按语言说。
 fn parse_lane(text: &str) -> Result<LaneMode, String> {
     text.parse().map_err(|_| (texts().ui.must_be)("off, udp_fallback, always"))
+}
+
+/// `--congestion` 的值：一种拥塞控制，或者 `default`（改回节点的默认）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CongestionArg(pub Option<Congestion>);
+
+fn parse_congestion(text: &str) -> Result<CongestionArg, String> {
+    match text {
+        "default" => Ok(CongestionArg(None)),
+        _ => text.parse().map(|algorithm| CongestionArg(Some(algorithm))).map_err(|_| (texts().ui.must_be)("bbr, cubic, default")),
+    }
 }
 
 fn parse_proxy_protocol(text: &str) -> Result<ProxyProtocol, String> {
@@ -816,6 +830,7 @@ fn describe(command: clap::Command, h: &Help, v: &Values) -> clap::Command {
                     sub.about(h.relay_enable).mut_arg("node", node).mut_arg("bandwidth", |arg| arg.help(h.bandwidth).value_name("MBIT/S"))
                 })
                 .mut_subcommand("disable", |sub| sub.about(h.relay_disable).mut_arg("node", node))
+                .mut_subcommand("list", |sub| sub.about(h.relay_list))
         })
         .mut_subcommand("exit", |sub| {
             sub.about(h.exit_group)
@@ -942,6 +957,7 @@ fn describe(command: clap::Command, h: &Help, v: &Values) -> clap::Command {
                         .mut_arg("b", node)
                         .mut_arg("keep_alive", |arg| on_off(arg.help(h.pair_keep_alive)))
                         .mut_arg("lane", |arg| arg.help(h.pair_lane).value_name("off|udp_fallback|always"))
+                        .mut_arg("congestion", |arg| arg.help(h.pair_congestion).value_name("bbr|cubic|default"))
                 })
                 .mut_subcommand("unset", |sub| sub.about(h.pair_unset).mut_arg("a", node).mut_arg("b", node))
         })
@@ -1137,6 +1153,16 @@ mod tests {
         assert!(matches!(parse(&["node", "listeners", "gw"]).command, Command::Node(NodeCommand::Listeners { .. })));
         assert!(matches!(parse(&["pair", "set", "a", "b", "--lane", "always"]).command, Command::Pair(PairCommand::Set { .. })));
         assert!(fails(&["pair", "set", "a", "b", "--lane", "sometimes"]));
+        let Command::Pair(PairCommand::Set { congestion, .. }) = parse(&["pair", "set", "a", "b", "--congestion", "cubic"]).command else {
+            panic!("应该是 pair set")
+        };
+        assert_eq!(congestion, Some(CongestionArg(Some(Congestion::Cubic))));
+        let Command::Pair(PairCommand::Set { congestion, .. }) = parse(&["pair", "set", "a", "b", "--congestion", "default"]).command
+        else {
+            panic!("应该是 pair set")
+        };
+        assert_eq!(congestion, Some(CongestionArg(None)), "default 是改回节点的默认");
+        assert!(fails(&["pair", "set", "a", "b", "--congestion", "reno"]));
     }
 
     #[test]

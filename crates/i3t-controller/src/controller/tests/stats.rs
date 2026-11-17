@@ -26,13 +26,13 @@ fn reports_become_points_every_five_minutes_and_hours_are_averaged() {
     let start = Instant::now();
 
     let report = |flows, tx| {
-        ToController::Report(Report {
+        ToController::Report(Box::new(Report {
             flows,
             tx_bytes: tx,
             run: 7,
-            attached: vec![Attachment { relay: relay.id, rtt_ms: 5 }],
+            attached: vec![Attachment { relay: relay.id, rtt_ms: 5, shared: false }],
             ..Report::default()
-        })
+        }))
     };
     a.send(&lab.controller, report(2, 0));
     a.send(&lab.controller, report(4, 1_000));

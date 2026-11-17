@@ -9,7 +9,7 @@ use i3t_model::control::diag::{ChoiceCode, HopSource, PathPick, TestCode, Transf
 use i3t_model::control::exit_test::{ExitTestCause, ExitVia};
 use i3t_model::control::{
     BindCause, DirectKind, InterceptCause, InterceptState, LegTransport, ListenState, NameService, RejectCause, RelayState, Route,
-    RouteCause, RouteHint, TargetCause,
+    RouteCause, RouteHint, TargetCause, TryOutcome,
 };
 use i3t_model::netmap::IpFamily;
 use i3t_model::update::{FailureKind, SelfUpdateBlocker, UpdateCause, UpdateStatus};
@@ -34,6 +34,7 @@ pub(super) static CODES: Codes = Codes {
     skip_cause,
     reach_cause,
     address_source,
+    try_outcome,
     node_warning,
     reject_cause,
     api_error,
@@ -289,6 +290,15 @@ const fn reach_cause(cause: ReachCause) -> &'static str {
     }
 }
 
+const fn try_outcome(outcome: TryOutcome) -> &'static str {
+    match outcome {
+        TryOutcome::Udp => "UDP",
+        TryOutcome::Tcp => "只有 TCP",
+        TryOutcome::Unreached => "连不上",
+        TryOutcome::Unknown => "未知",
+    }
+}
+
 const fn address_source(source: AddressSource) -> &'static str {
     match source {
         AddressSource::Declared => "节点上声明的",
@@ -301,6 +311,7 @@ const fn address_source(source: AddressSource) -> &'static str {
 fn node_warning(warning: &NodeWarning) -> String {
     match warning {
         NodeWarning::RangeOverlap { address } => format!("网卡地址 {address} 在网络的地址段里"),
+        NodeWarning::RelayUnreached { tried } => format!("在线的节点里有 {tried} 个试过这个中继，都没连上"),
         NodeWarning::Unknown => "未知的提醒".to_owned(),
     }
 }

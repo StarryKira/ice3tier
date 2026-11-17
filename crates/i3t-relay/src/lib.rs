@@ -35,6 +35,7 @@ mod leg;
 mod limit;
 pub mod relay;
 mod session;
+mod users;
 
 pub use counters::{DropReason, RelayCounters};
 pub use relay::{Relay, TcpHandoff};

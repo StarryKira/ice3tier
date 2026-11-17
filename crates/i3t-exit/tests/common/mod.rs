@@ -84,6 +84,7 @@ pub fn peer(raw: u32, exit: Option<PeerExit>) -> Peer {
         dial_out_only: false,
         keep_alive: false,
         lane: LaneMode::Off,
+        congestion: None,
     }
 }
 
@@ -115,6 +116,7 @@ pub fn netmap(me: u32) -> Netmap {
             forward_targets: Vec::new(),
             pinned_relays: Vec::new(),
             profile: None,
+            shared_relays: Vec::new(),
         },
         peers: [LAPTOP, GW, NAS].into_iter().filter(|&raw| raw != me).map(|raw| peer(raw, exit_of(raw))).collect(),
         relays: Vec::new(),

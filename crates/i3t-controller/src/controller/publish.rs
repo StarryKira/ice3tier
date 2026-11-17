@@ -21,6 +21,8 @@ use crate::sync::NodeSync;
 
 /// 延后的重算失败之后多久再试。
 const RETRY_DELAY: Duration = Duration::from_secs(1);
+/// 别的节点的上报引起的重算，一个节点有一阵没有这样的重算了时，等这么久就做：同一刻到的几份上报合成一次。
+const REPORT_LEAD: Duration = Duration::from_millis(50);
 
 /// 一次重算从哪些节点开始。和它们的访问关系有变化的对端会被自动带上。
 pub(crate) enum Seeds {
@@ -209,6 +211,32 @@ impl Inner {
     pub(crate) fn stop_waiting_for(&mut self, network: NetworkId, node: NodeId) {
         let released = self.sync.get_mut(&node).map(NodeSync::confirm_all).unwrap_or_default();
         self.defer(network, released, self.timing.ack_coalesce);
+    }
+
+    /// 别的节点的上报（端点、挂靠、连得上哪些 relay）引起的重算：每个节点两次这样的重算至少隔 `report_coalesce`，
+    /// 可是离上一次已经够久时，这一次只等 [`REPORT_LEAD`]。
+    ///
+    /// 这样两个节点刚上线时，对端的挂靠信息不用等满一个 `report_coalesce` 才到（经 relay 的第一个请求原来要多等将近一秒）；
+    /// 许多节点同时挂上来时，每个节点照旧最多每 `report_coalesce` 收到一份因此重算的 netmap，不会一阵阵地发。
+    /// 已经排着、并且不比这更晚的重算照旧，这次的变化跟着它一起算（重算读的是那时存储里的东西）。
+    pub(crate) fn defer_report(&mut self, network: NetworkId, nodes: impl IntoIterator<Item = NodeId>) {
+        let now = Instant::now();
+        let window = self.timing.report_coalesce;
+        for node in nodes {
+            let sync = self.sync.entry(node).or_default();
+            let due = (now + REPORT_LEAD).max(sync.report_due.map_or(now, |last| last + window));
+            match self.dirty.get_mut(&node) {
+                Some(pending) if pending.due <= due => {}
+                Some(pending) => {
+                    pending.due = due;
+                    sync.report_due = Some(due);
+                }
+                None => {
+                    self.dirty.insert(node, Deferred { network, due });
+                    sync.report_due = Some(due);
+                }
+            }
+        }
     }
 
     /// 过 `delay` 之后重算这些节点。已经排着的取较早的时间，所以不断有新的变化也推迟不了它。

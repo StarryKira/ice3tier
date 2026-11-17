@@ -122,11 +122,30 @@ pub(crate) fn render(runtime: &Runtime) -> String {
             );
         }
     }
+    // 预测和实际（白皮书 §13）：路由层按各段的探测推算的延迟，和连接自己量的往返时间。只有到对端有连接时才有。
+    for entry in &routes {
+        let Some(actual) = runtime.endpoint.connection_rtt(entry.peer) else { continue };
+        let peer = name_of(entry.peer);
+        out.gauge("i3t_peer_connection_rtt_ms", "到每个对端的连接自己量的往返时间（毫秒）", &[("peer", &peer)], millis(actual));
+        if let Some(deviation) = rtt_deviation_ms(entry.rtt_ms, actual) {
+            let help = "到每个对端的连接实际的往返时间减去路由层按各段推算的（毫秒）：差得多说明测量失真";
+            out.gauge("i3t_peer_rtt_deviation_ms", help, &[("peer", &peer)], deviation);
+        }
+    }
 
     lane_metrics(&mut out, &runtime.lanes.status(), &name_of);
 
     out.gauge("i3t_update_state", "程序更新进行到哪一步", &[("state", update_label(&runtime.update.borrow()))], 1.0);
     out.finish()
+}
+
+fn millis(duration: std::time::Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
+/// 连接实际的往返时间比路由层推算的多出多少毫秒（少了是负的）。推算不出来时没有。
+fn rtt_deviation_ms(predicted_ms: Option<u32>, actual: std::time::Duration) -> Option<f64> {
+    predicted_ms.map(|predicted| millis(actual) - f64::from(predicted))
 }
 
 /// 独占 TCP（lane）：每个打开了它的对端一组，加上全节点的握手失败。
@@ -218,6 +237,14 @@ mod tests {
     use i3t_model::update::Version;
 
     use super::*;
+
+    #[test]
+    fn the_deviation_is_what_the_connection_measured_minus_what_the_legs_predicted() {
+        let actual = std::time::Duration::from_micros(52_500);
+        assert_eq!(rtt_deviation_ms(Some(40), actual), Some(12.5));
+        assert_eq!(rtt_deviation_ms(Some(60), actual), Some(-7.5), "比推算的快是负的");
+        assert_eq!(rtt_deviation_ms(None, actual), None, "推算不出来时没有");
+    }
 
     #[test]
     fn drop_reasons_become_snake_case_labels() {

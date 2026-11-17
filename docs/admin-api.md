@@ -434,7 +434,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `credential.exhausted` | `credential`、`credential_name`、`used_bytes`、`max_bytes` |
 | `listener.create`、`listener.update`、`listener.delete` | `listener`、`listener_name`、`node`、`node_name`、`bind`、`protocol` |
 | `forward.create`、`forward.update`、`forward.delete` | `forward`、`forward_name`、`protocol`、`listen_node`、`listen_node_name`、`bind`、`target_node`、`target_node_name`、`target_addr`、`enabled` |
-| `pair.set` | `a`、`a_name`、`b`、`b_name`（`a` 的编号小），`keep_alive`、`lane` |
+| `pair.set` | `a`、`a_name`、`b`、`b_name`（`a` 的编号小），`keep_alive`、`lane`、「新增」`congestion`（`null` 是节点的默认） |
 | `pair.delete` | `a`、`a_name`、`b`、`b_name` |
 | `update.settings` | `auto_update`、`source`、`source_is_default` |
 | `update.release` | `version` |
@@ -596,7 +596,9 @@ controller 自己的情况。也用来检查地址和令牌对不对。
       { "address": "203.0.113.7:20330", "source": "observed" },
       { "address": "192.168.1.20:20330", "source": "local" }
     ],
-    "bandwidth_mbps": 200
+    "bandwidth_mbps": 200,
+    "reach": { "reached": 3, "unreached": 1, "unknown": 0 },
+    "users": { "window_secs": 10, "pairs": [{ "from": 2, "to": 3, "bytes": 5242880 }], "other_bytes": 0 }
   },
   "exit": {
     "ports": null,
@@ -632,6 +634,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   },
   "attached": [],
   "country": "JP",
+  "egress_ip": "203.0.113.7",
   "profile": null,
   "warnings": []
 }
@@ -662,9 +665,10 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `acked_version` | 它确认已经应用的版本。小于 `netmap_version` 说明它还在用旧的配置（例如不在线） |
 | `hostname` | 「新增」节点上报的主机名，原样；旧版本的节点不报，是 `""`。主机名后来变了，`name` 不跟着变 |
 | `update` | 「新增」这个节点的程序更新：能不能自己更新、有没有新版本、进行到哪一步。结构是 `NodeUpdate`，见第 14 节 |
-| `attached` | 「新增」节点挂靠的 relay（节点编号）和到它们的往返延迟（毫秒），取自它最近的上报；离线时是它离线前报的。以前只在节点详情里有，现在列表里也有：数"有几个节点挂靠在这个 relay 上"只要一次 `GET …/nodes` |
-| `country` | 「新增」公网地址（controller 看到的来源地址，详情里的 `observed_endpoint`）所在的国家或地区，ISO 3166-1 的两个大写字母（`"JP"`）。controller 查程序自带的离线地址库（DB-IP 的 IP to Country Lite，<https://db-ip.com>，CC BY 4.0），不联网。内网地址、从没连上过、库里没有时是 `null`；比这个文档旧的 controller 没有这个字段 |
-| `warnings` | 「新增」controller 发现的、值得提醒的情况（`NodeWarning`），按节点最近一次报的东西算，离线时是它离线前报的；没有时是 `[]`。只是提醒，不挡着任何事。现在只有一种：`{ "code": "range_overlap", "address": "10.66.200.7" }`，节点的一个网卡地址落在网络的虚拟地址段里（`address` 是那个网卡地址）：在这台机器上连这个地址段里的虚拟 IP 可能连到真实的网络上去，透明访问也装不上。界面可以提示换一个地址段，或者换掉那个网络。不认识的 `code` 当作 `unknown` |
+| `attached` | 「新增」节点挂靠的 relay（节点编号）和到它们的往返延迟（毫秒），取自它最近的上报；离线时是它离线前报的。以前只在节点详情里有，现在列表里也有：数"有几个节点挂靠在这个 relay 上"只要一次 `GET …/nodes`。「新增」`shared` 为 `true` 的那几个不是节点按延迟自己挑的，是 controller 要它另外挂的（见 5.5 的"两边都连得上的 relay"）；为 `false` 时省略 |
+| `country` | 「新增」出口地址（`egress_ip`）所在的国家或地区，ISO 3166-1 的两个大写字母（`"JP"`）。controller 查程序自带的离线地址库（DB-IP 的 IP to Country Lite，<https://db-ip.com>，CC BY 4.0），不联网。没有出口地址、库里没有时是 `null`；比这个文档旧的 controller 没有这个字段。「新增」以前取的是 controller 看到的来源地址，节点在 controller 的局域网里时因此没有国家 |
+| `egress_ip` | 「新增」出口地址：这个节点的流量出去时，互联网看到的公网地址，只读。controller 看到的来源地址（`observed_endpoint` 的 IP）是公网地址时就是它；不是（节点在 controller 所在的局域网里、或者和 controller 在同一台机器上而 controller 没有配对外的地址）时，取 relay 看到的公网地址（节点上报的，见 5.5），几个 relay 看到的不一样时取看到它的 relay 最多的那个，一样多时取最近一次看到的。只从内网地址被看到过时是 `null`，`country` 也是 `null`。不查任何外部的服务。出口配了上游代理（`upstream_socks5`）时，经它出去的流量其实是从代理那里出去的，这里不知道。界面上显示国旗时，旁边的 IP 用它，不用 `observed_endpoint` |
+| `warnings` | 「新增」controller 发现的、值得提醒的情况（`NodeWarning`），按节点最近一次报的东西算，离线时是它离线前报的；没有时是 `[]`。只是提醒，不挡着任何事。现在只有一种：`{ "code": "range_overlap", "address": "10.66.200.7" }`，节点的一个网卡地址落在网络的虚拟地址段里（`address` 是那个网卡地址）：在这台机器上连这个地址段里的虚拟 IP 可能连到真实的网络上去，透明访问也装不上。界面可以提示换一个地址段，或者换掉那个网络。「新增」`{ "code": "relay_unreached", "tried": 3 }`：这个节点是启用着的 relay，在线的节点里试过它的有 `tried` 个，一个也没有连上（5.5 的 `reach`）。只是如实说一句，不是毛病：有一个节点连得上它就没有这条。不认识的 `code` 当作 `unknown` |
 | `profile` | 「新增」管理员给它选的性能档位：`"low_footprint"`（低占用）、`"balanced"`（默认）、`"high_throughput"`（高速度）；`null` 表示没有选，节点用它本机配置文件里的（没写就是 `balanced`）。节点实际在用的见详情里的 `performance`。比这个文档旧的 controller 没有这个字段。各档位的内容见 [architecture.md](architecture.md) 的性能一节 |
 
 **能力的启用。** relay、出口和端口转发的目标都要节点先在本地声明（`declared` 里对应的字段是 `true`），管理员才能启用。没有声明时，启用的请求得到 `409 not_declared`，`message` 里写着要在节点上执行的命令（`i3t set can-relay on`、`i3t set can-exit on`、`i3t set can-forward on`）。界面上应当在 `declared` 里对应字段是 `false` 时把开关置灰并显示这个做法。节点撤回声明时，已经启用的能力随之关闭（`relay` 或 `exit` 变回 `null`，指向它的端口转发被停用），并在操作记录里留下 `node.*.withdrawn`；节点再声明回来，能力不会自己打开。
@@ -742,6 +746,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `reported_secs_ago` | 「新增」节点最近一次上报是多少秒之前，上面这几项（`lanes`、`flows`、流量、`mapping_varies`）都是那一次报的。这次连接上还没有上报过、或者不在线时是 `null` |
 | `performance` | 「新增」节点实际在用的性能档位（`PerformanceReport`），见下表。节点不在线、版本太旧没有报、或者还没有上报过时是 `null` |
 | `intercept` | 「新增」透明访问的状况（`InterceptReport`），见下面。节点不在线、版本太旧没有报、或者还没有上报过时是 `null`；节点没有打开时是 `{ "state": "off", … }` |
+| `reached_by` | 「新增」这个节点是 relay 时：报过试它的结果的每个节点（`ReachEntry`），按节点编号排，最多是网络里的节点数；不是 relay 时是 `null`。见 5.5 |
 
 「新增」`PerformanceReport`：
 
@@ -854,6 +859,8 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | 字段 | 含义 |
 |---|---|
 | `addresses` | 别的节点经哪些地址连它，只读。按节点去试的顺序，去掉重复的，最多 8 个。每个地址 UDP 和 TCP 都用。还不知道任何地址时是 `[]` |
+| `users` | 「新增」谁在用它（`RelayUse`）：上一个统计时段里它替哪些节点对转发了多少，取自它最近一次上报。`window_secs` 是统计时段的长度（10 秒）；`pairs` 是转发得最多的节点对，最多 16 对，多的在前，每项是 `{ "from": 发出包的节点, "to": 收包的节点, "bytes": 字节数（含中转头） }`，两个方向分开算；`other_bytes` 是其余的节点对加起来。relay 在一个时段里最多单独数 1024 对，再多的算进 `other_bytes`。除以 `window_secs` 就是每秒的量。relay 不在线、版本太旧不报时是 `null` |
+| `reach` | 「新增」在线的节点（不算它自己）最近一次试它的结果数出来的（`RelayReach`）：`reached` 连得上（UDP 或者 TCP），`unreached` 试过、连不上，`unknown` 还没有报过（刚上线、或者版本太旧不报）。只是情况：只有一部分节点连得上的 relay 照样是那些节点的 relay，界面不要标成错误 |
 | `addresses[].address` | `地址:端口` |
 | `addresses[].source` | 从哪里来：`"declared"`、`"observed"`、`"local"`，见下表。不认识的值当作 `unknown` |
 | `bandwidth_mbps` | 转发的带宽上限；`null` 表示不限 |
@@ -867,7 +874,30 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 这些地址都来自存储里的东西：节点离线时还是它最后的那一组，controller 重启之后也一样。哪一处变了（节点换了网络、改了声明），
 地址跟着变，全网的节点随即收到新的配置。节点拿到一个 relay 的几个地址之后同时去试，用回答的那个；UDP 过不去的自动走 TCP，不用谁说明。
 
-显示 relay 在哪里时，用节点的 `country`（controller 看到的地址所在的国家或地区）。
+显示 relay 在哪里时，用节点的 `country`（出口地址所在的国家或地区）。
+
+「新增」**谁连得上它。** 节点每次上报都带着它试过的各个 relay 连没连上（`udp`、`tcp` 是只有 TCP 连得上、`unreached` 是 UDP 和 TCP 都试了、
+都没连上），最多 32 个，有会话的排在前面。节点试的是配置里的每个 relay：挂靠的、经过的用会话（UDP 和 TCP 一起），别的每分钟用 UDP 问一次延迟，
+问不到的每十分钟用会话试一次（同一时刻只试一个）。controller 每个节点对每个 relay 只留最近一次（结果没变时时刻最多五分钟记一次），节点和
+relay 都在时一直留着，所以每个节点最多 32 项。`RelayView.reach` 是数出来的个数，节点详情的 `reached_by` 是每个节点的那一项：
+
+`ReachEntry`：
+
+| 字段 | 含义 |
+|---|---|
+| `node` | 试的节点（`NodeRef`） |
+| `online` | 它现在在不在线 |
+| `outcome` | `"udp"`、`"tcp"`（UDP 连不上，TCP 连得上）、`"unreached"`（都连不上）。不认识的当作 `unknown` |
+| `at` | 什么时候试的。有会话的节点每次上报都是"刚刚"，结果没有变时 controller 最多五分钟记一次，所以最多晚五分钟 |
+
+只有启用着的 relay、在线的节点里试过它的一个也没有连上时，它的节点和总览上有一条 `relay_unreached` 的提醒（第 5 节的 `warnings`）。
+
+「新增」**两边都连得上的 relay。** 一个节点自己按延迟挑两个 relay 挂靠（`attached` 里 `shared` 为 `false` 的）；经 relay 到它的节点要连得上其中一个。
+挑出来的两个只有它那边连得上（同一个国家、同一个局域网里的服务器）时，远处的对端就够不着它。controller 按各节点上报的结果，给每一对互相访问的节点看：
+两个方向是不是都有一个"发送方连得上、接收方挂着"的 relay（一边自己就是 relay、另一边连得上它也算）。缺的话，在两边都连得上的 relay 里挑一个
+（两边已经挂着的优先，再按编号），让没挂着的一边另外挂上去：下发给它的配置里写着这几个（最多 4 个，为越多对端需要的越先），它挂上去之后报的挂靠里
+这几个的 `shared` 是 `true`。controller 算这件事时只看节点自己挑的那几个，所以挂上去之后结果不变，不会来回换。两边没有共同连得上的 relay 时什么也不做
+（延迟优先的网络里也许还有经几个 relay 的路）。
 
 应答：`Node`（`relay` 字段是刚写入的设置和找出来的地址），「新增」加上同一层的 `reachability`（这个结构叫 `RelayEnabled`）：
 
@@ -972,7 +1002,10 @@ relay 的带宽上限（第 5.5 节）是另一回事，照旧。
       "age_secs": 4,
       "since_secs": 3600,
       "direct": "punched",
-      "relay_leg": null
+      "relay_leg": null,
+      "flows": 2,
+      "tx_bytes": 1048576,
+      "rx_bytes": 20971520
     },
     {
       "peer": { "id": 3, "name": "node-3", "virtual_ip": "10.66.0.3" },
@@ -981,7 +1014,10 @@ relay 的带宽上限（第 5.5 节）是另一回事，照旧。
       "age_secs": 4,
       "since_secs": 40,
       "direct": null,
-      "relay_leg": null
+      "relay_leg": null,
+      "flows": null,
+      "tx_bytes": null,
+      "rx_bytes": null
     }
   ]
 }
@@ -1001,8 +1037,10 @@ relay 的带宽上限（第 5.5 节）是另一回事，照旧。
 
 | 字段 | 含义 |
 |---|---|
-| `direct` | 走直连时，这条直连是怎么建立起来的：`"lan"`（同一个局域网）、`"ipv6"`（对端的 IPv6 地址）、`"reachable"`（对端的这个地址本来就连得上：公网地址、端口转发、端口映射，没有用到打洞）、`"punched"`（交换打洞信令之后打通的）。比 controller 新的节点报了这里不认识的类型时是 `"unknown"`。不是直连时是 `null` |
+| `direct` | 走直连时，这条直连是怎么建立起来的：`"lan"`（同一个局域网）、`"ipv6"`（对端的 IPv6 地址）、`"reachable"`（不用打洞也建得起来：一边的探测在打洞之前就得到了回答，也就是有一边的地址本来就连得上——公网地址、端口转发、端口映射）、`"punched"`（要两边在打洞的那一轮里同时发才通）。比 controller 新的节点报了这里不认识的类型时是 `"unknown"`。不是直连时是 `null`。「新增」两端各自按自己看到的判断：一边先探测到了另一边时，两端说的都是 `"reachable"`（以前先被探测到的那一端说 `"punched"`）。还会不一样的情形只有一种：打洞信令比对端的探测先到、这一端已经在那一轮里发了探测，这一端说 `"punched"`，另一端说 `"reachable"`；读法是"两边在同一轮里碰上的，至少有一边的地址本来就连得上" |
 | `relay_leg` | 经 relay 时，节点到第一个 relay 的那一段走的是 `"udp"` 还是 `"tcp"`（UDP 用不了时的 TCP 中转）。不是经 relay、或者节点的版本太旧不报时是 `null` |
+| `flows` | 「新增」这个节点和对端之间的共用连接上现在开着几条流（两边谁开的都算；独占 TCP 上的流不在这里，见第 12 节的 `lanes`）。和对端现在没有连接、或者节点的版本太旧不报时是 `null` |
+| `tx_bytes`、`rx_bytes` | 「新增」节点启动以来在和这个对端的连接上发出、收到的字节数：线上的字节，含 QUIC 自己的开销和重传，连接关了重建也接着累计。有没有同 `flows`。节点每次上报最多带 256 个对端（流量大的在前），超出的是 `null` |
 
 ### GET /networks/{network}/nodes/{node}/listeners「新增」
 
@@ -1557,7 +1595,7 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
 `PairSetting`：
 
 ```json
-{ "a": 1, "b": 2, "keep_alive": true, "lane": "always" }
+{ "a": 1, "b": 2, "keep_alive": true, "lane": "always", "congestion": null }
 ```
 
 | 字段 | 含义 |
@@ -1565,6 +1603,8 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
 | `a`、`b` | 两个节点的编号，`a` 小于 `b` |
 | `keep_alive` | 为 `true` 时这一对节点之间的连接常驻，不因为没有流而关闭 |
 | `lane` | 「新增」这一对节点之间承载 TCP 连接的流（代理的 CONNECT、TCP 端口转发）用不用独占 TCP：每条用户连接在两个节点之间独占一条 TCP，而不是共用连接里的一条流。`"off"`（默认）：不用。`"udp_fallback"`：开流的一方到对方的共用连接上没有 UDP 的路（UDP 不通、只能经 relay 的 TCP 中转）时，新的 TCP 流走独占 TCP。`"always"`：新的 TCP 流都走独占 TCP。取不到独占 TCP 时（池空了、对方在排空、拨不通）流悄悄改走共用的连接，只在计数里记一笔；已经在跑的流不会换传输，改设置也不影响它们 |
+
+| `congestion` | 「新增」这一对节点之间的连接用哪种拥塞控制：`"bbr"`（节点自己写的 BBR，不把随机丢包当作拥塞）或 `"cubic"`（QUIC 库自带的，每次丢包都减速）；`null` 是用节点的默认（BBR）。两个节点的配置里是同一个值，两边各自按它管自己往外发的方向。只对之后建立的连接生效：已经建立的连接一直用建立时的那一种，到它空闲回收（或者节点重启）之后新建的连接才换。旧版本的节点不认，照旧用它自己的默认。比这个文档新的 controller 存了不认识的值时读成 `null` |
 
 独占 TCP 要两个节点里至少有一个启用了 relay、有已知的 TCP 地址：另一个节点拨它的节点端口（relay 在同一个端口号上听 TCP）。两个都能被拨时，各自用自己拨的连接往对方开流。UDP 应用的数据、数据报和别的流始终走共用的连接，这一对节点之间的共用连接和它的路照常保持（路由视图里显示的是它的路）。
 
@@ -1659,18 +1699,20 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
 
 ### GET /networks/{network}/pairs
 
-有设置的节点对。应答是 `PairView` 的数组。没有列出的节点对用默认值（`keep_alive` 为 `false`，`lane` 为 `"off"`）。
+有设置的节点对。应答是 `PairView` 的数组。没有列出的节点对用默认值（`keep_alive` 为 `false`，`lane` 为 `"off"`，「新增」`congestion` 为 `null`）。
 
 ### PUT /networks/{network}/pairs/{a}/{b}
 
 写下一对节点的设置。路径里两个节点的先后顺序无所谓。「新增」每一项都可以省略：没写的项保持原样，这一对还没有设置时取默认值。
 
 ```json
-{ "keep_alive": true, "lane": "udp_fallback" }
+{ "keep_alive": true, "lane": "udp_fallback", "congestion": "cubic" }
 ```
 
+「新增」`congestion` 写 `null` 是改回节点的默认，和不写（保持原样）不一样。
+
 应答：`PairView`。
-错误：`invalid_request`（两个编号相同，或者 `lane` 不是那三个值之一）、`not_found`。
+错误：`invalid_request`（两个编号相同，`lane` 不是那三个值之一，或者「新增」`congestion` 不是 `bbr`、`cubic`、`null`）、`not_found`。
 
 改了 `lane` 之后，两个节点各自的配置里马上是同一个值；还在跑的流不受影响。
 
@@ -2073,6 +2115,11 @@ controller 先向两端各问一次"到对端现在会怎么走"，节点用当�
     "mode": "direct_first",
     "reason": "直连地址 203.0.113.7:20330 验证通过，改走直连",
     "cause": { "code": "direct_verified" },
+    "connection_rtt_ms": 13,
+    "switches": [
+      { "at": 1794798224, "from": { "via": "relay", "relays": [3] }, "to": { "via": "direct", "addr": "203.0.113.7:20330" },
+        "cause": { "code": "direct_verified" } }
+    ],
     "candidates": [
       {
         "route": { "via": "direct", "addr": "203.0.113.7:20330" },
@@ -2106,7 +2153,9 @@ controller 先向两端各问一次"到对端现在会怎么走"，节点用当�
     "mode": null,
     "reason": null,
     "cause": null,
-    "candidates": null
+    "candidates": null,
+    "connection_rtt_ms": null,
+    "switches": []
   }
 }
 ```
@@ -2126,6 +2175,8 @@ controller 先向两端各问一次"到对端现在会怎么走"，节点用当�
 | `reason` | 「新增」发送方的路由层说的"为什么是现在这条路"，给人看的一句话。有没有同 `mode` |
 | `cause` | 「新增」`reason` 的代码（`RouteCause`，见下表）。有 `reason` 而旧版本的节点不给代码时是 `null` |
 | `candidates` | 「新增」发送方考虑过的候选路径（`PathCandidate`），按代价从低到高，最多 16 条。有没有同 `mode`：`null` 是不知道，`[]` 是发送方手上还没有任何测量值（没有测过的路不在里面）。默认模式不按代价选，但代价照样算出来给人看 |
+| `switches` | 「新增」这个方向最近的换路（`SwitchView`），新的在前：`at` 什么时候（controller 的时间，节点报的是"多少秒之前"），`from`、`to` 从什么路换成了什么路（写法同 `route`），`cause` 为什么（`RouteCause`，见下）。controller 从节点的上报里攒的：节点每次上报带上一次以来的换路（最多 64 条，controller 连不上时满了丢最早的），存在数据库里，controller 重启之后还在。一对节点两个方向一共留最近的 20 条，一个网络一共最多一万条；节点删掉时跟着删。不管 `source` 是什么都有，没有时是 `[]` |
+| `connection_rtt_ms` | 「新增」这对节点之间的连接自己量的往返时间（毫秒，QUIC 的平滑 RTT）。`rtt_ms` 是发送方的路由层按各段的探测推算的，两个放在一起看：差得多说明某一段的测量失真（白皮书 §13），选路不受它影响。只有 `source` 是 `"query"`、两个节点之间有连接、并且发送方的版本会说时才有，否则 `null`。节点的指标里也有：`i3t_peer_connection_rtt_ms{peer}` 是它，`i3t_peer_rtt_deviation_ms{peer}` 是它减去推算的（毫秒，比推算的快是负的） |
 
 「新增」`RouteCause`：节点的路由层说的"为什么是这条路"。`hint` 是直接的起因（`RouteHint`，见下一张表）；`previous`、`relays` 是节点编号。
 
@@ -2185,7 +2236,8 @@ relay 之间的延迟矩阵。每个 relay 自己测它到别的 relay 的延迟
       "load_percent": 12,
       "age_ms": 1800,
       "reported_by": 2,
-      "links": [ { "to": 5, "rtt_ms": 150, "jitter_ms": 2, "loss_permille": 5 } ]
+      "links": [ { "to": 5, "rtt_ms": 150, "jitter_ms": 2, "loss_permille": 5 } ],
+      "reach": { "reached": 4, "unreached": 0, "unknown": 1 }
     },
     {
       "relay": { "id": 5, "name": "la-relay", "virtual_ip": "10.66.0.5" },
@@ -2194,7 +2246,8 @@ relay 之间的延迟矩阵。每个 relay 自己测它到别的 relay 的延迟
       "load_percent": null,
       "age_ms": null,
       "reported_by": null,
-      "links": []
+      "links": [],
+      "reach": { "reached": 0, "unreached": 0, "unknown": 5 }
     }
   ],
   "answered": [ { "id": 2, "name": "laptop", "virtual_ip": "10.66.0.2" } ]
@@ -2210,6 +2263,7 @@ relay 之间的延迟矩阵。每个 relay 自己测它到别的 relay 的延迟
 | `relays[].age_ms` | 这一行是多少毫秒之前的（回答的节点收到它到现在）。节点不留超过两分钟的行，所以不会更旧。没有这一行时是 `null` |
 | `relays[].reported_by` | 这一行是从哪个节点问来的（节点编号）；没有这一行时是 `null` |
 | `relays[].links` | 它到别的 relay 的链路（`BackboneLink`）：`to` 是另一个 relay 的节点编号，`rtt_ms` 是往返延迟（毫秒，`null` 表示连不上），`jitter_ms` 是抖动（毫秒），`loss_permille` 是丢包率（千分之几）。只有这个网络里的 relay |
+| `relays[].reach` | 「新增」在线的节点里几个连得上它，同 5.5 的 `RelayView.reach`。这一项不用问节点，总是有 |
 | `answered` | 这次回答了的节点。是空的时候（没有在线的、版本够新的节点）每个 relay 的行都是 `null` |
 
 错误：`not_found`（没有这个网络）。

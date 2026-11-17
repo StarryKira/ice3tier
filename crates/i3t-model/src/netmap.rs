@@ -152,7 +152,14 @@ pub struct LocalNode {
     /// 也读成没有值。
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "tolerant_profile")]
     pub profile: Option<Profile>,
+    /// 除了自己按延迟挑的之外还要挂靠的 relay（白皮书 §7.2）：有的对端连不上本节点挑的那几个、本节点也连不上它们挂靠的，
+    /// controller 按各节点上报的"连得上哪些 relay"找一个两边都连得上的，让两边都挂上去。最多 [`MAX_SHARED_RELAYS`] 个。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared_relays: Vec<NodeId>,
 }
+
+/// [`LocalNode::shared_relays`] 最多几个：加上自己挑的两个，一个节点同时保持的中转会话不超过六个。
+pub const MAX_SHARED_RELAYS: usize = 4;
 
 /// 性能档位（白皮书 §12.1）：一组预设，节点按它定线程数、缓冲和空闲回收的时间。各项的值在节点上定（`i3t-agent`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -332,7 +339,56 @@ pub struct Peer {
     /// 比本程序新的 controller 下发了这里不认识的值时按 `off` 处理。
     #[serde(default, deserialize_with = "tolerant_lane_mode")]
     pub lane: LaneMode,
+    /// 和这个对端之间的连接用哪种拥塞控制（白皮书 §6.3）；没有值时用节点自己的默认（BBR）。一对节点各自的 netmap 里互相看到同一个值，
+    /// 两边各自按它管自己往外发的那个方向。只对之后建立的连接生效。比本程序新的 controller 下发了不认识的值时按没有值处理。
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "tolerant_congestion")]
+    pub congestion: Option<Congestion>,
 }
+
+/// netmap 里的拥塞控制设置：不认识的值按没有设置，不让整份 netmap 因为一个新的取值而读不了。
+fn tolerant_congestion<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Congestion>, D::Error> {
+    let text = Option::<String>::deserialize(deserializer)?;
+    Ok(text.and_then(|text| text.parse().ok()))
+}
+
+/// 连接用哪种拥塞控制（白皮书 §6.3）。只有程序里已经有的两种。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Congestion {
+    /// 自己写的 BBR，节点的默认：不把随机丢包当作拥塞，长距离、有丢包的链路上快得多。
+    Bbr,
+    /// QUIC 库自带的 Cubic：每次丢包都减速。和别的 Cubic 流共用一个很深的缓冲时比 BBR 抢得到带宽。
+    Cubic,
+}
+
+impl Congestion {
+    /// 在 netmap、管理接口和命令行里的写法。
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bbr => "bbr",
+            Self::Cubic => "cubic",
+        }
+    }
+}
+
+impl fmt::Display for Congestion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Congestion {
+    type Err = UnknownCongestion;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        [Self::Bbr, Self::Cubic].into_iter().find(|algorithm| algorithm.as_str() == s).ok_or_else(|| UnknownCongestion(s.to_owned()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("不认识的拥塞控制 {0:?}：可以是 bbr、cubic")]
+pub struct UnknownCongestion(pub String);
 
 /// netmap 里的独占 TCP 设置：不认识的值按 `off`，不让整份 netmap 因为一个新的取值而读不了。
 fn tolerant_lane_mode<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<LaneMode, D::Error> {
@@ -393,6 +449,10 @@ pub struct UnknownLaneMode(pub String);
 pub struct Attachment {
     pub relay: NodeId,
     pub rtt_ms: u32,
+    /// 不是节点按延迟自己挑的，是 controller 为了让连不上它那几个 relay 的对端也到得了它，要它另外挂靠的
+    /// （[`LocalNode::shared_relays`]）。controller 算谁还缺一个共同的 relay 时只看节点自己挑的那几个，不然算出来的结果会来回变。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -691,6 +751,21 @@ mod tests {
         for mode in [LaneMode::Off, LaneMode::UdpFallback, LaneMode::Always] {
             assert_eq!(serde_json::to_value(mode).unwrap(), mode.as_str());
             assert_eq!(mode.as_str().parse::<LaneMode>(), Ok(mode));
+        }
+    }
+
+    #[test]
+    fn a_pair_congestion_setting_is_optional_and_one_from_a_newer_controller_reads_as_the_default() {
+        assert_eq!(minimal().peers[0].congestion, None, "旧的 controller 不发这一项");
+        let mut value = serde_json::to_value(minimal()).unwrap();
+        assert!(value["peers"][0].get("congestion").is_none(), "没有设置时不写，旧的节点看到的和以前一样");
+        value["peers"][0]["congestion"] = serde_json::json!("cubic");
+        assert_eq!(serde_json::from_value::<Netmap>(value.clone()).unwrap().peers[0].congestion, Some(Congestion::Cubic));
+        value["peers"][0]["congestion"] = serde_json::json!("vegas");
+        assert_eq!(serde_json::from_value::<Netmap>(value).unwrap().peers[0].congestion, None);
+        assert!("vegas".parse::<Congestion>().unwrap_err().to_string().contains("cubic"));
+        for algorithm in [Congestion::Bbr, Congestion::Cubic] {
+            assert_eq!(algorithm.as_str().parse::<Congestion>(), Ok(algorithm));
         }
     }
 

@@ -40,7 +40,7 @@ pub(super) async fn initiate(diag: &Diag, order: &TestOrder) -> TestReport {
     let reach = diag.reach();
     let mut report = TestReport { test: order.test, role: Some(TestRole::Initiator), last: true, ..TestReport::default() };
     // 本机关掉了吞吐测试的话，自己发起的测试也不量吞吐。
-    let throughput = order.items.throughput.then_some(()).filter(|()| diag.throughput).map(|()| endpoint.congestion());
+    let throughput = order.items.throughput.then_some(()).filter(|()| diag.throughput).map(|()| endpoint.congestion(order.peer));
     let throughput_off = order.items.throughput && !diag.throughput;
 
     let mut direct = None;
@@ -219,7 +219,7 @@ async fn measure_path(
             down: None,
             failure: Some(TestCode::ThroughputOff),
             transport: "quic".to_owned(),
-            congestion: endpoint.congestion(),
+            congestion: endpoint.congestion(order.peer),
             limit_bytes: THROUGHPUT_BYTES,
             limit_ms: millis(THROUGHPUT_TIME),
             pinned: false,

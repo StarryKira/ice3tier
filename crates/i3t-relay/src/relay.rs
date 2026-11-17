@@ -9,6 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use i3t_crypto::{NodeKey, Signature};
 use i3t_model::Netmap;
+use i3t_model::control::RelayUse;
 use i3t_path::RelayStatus;
 use i3t_proto::backbone::{Link, RelayState, Row};
 use i3t_proto::datagram::{self, MAX_RELAY_HOPS, RelayHeader, RouteHeader};
@@ -24,6 +25,7 @@ use crate::counters::{Counters, DropReason, RelayCounters};
 use crate::leg;
 use crate::limit::{Bandwidth, HandshakeLimiter, RefusalLimiter};
 use crate::session::{Binding, Origin, SESSION_TTL, Sessions};
+use crate::users::Users;
 
 /// 一个中转帧最长多少字节。再长的不是正常节点发的。
 const MAX_RELAYED_LEN: usize = RouteHeader::MAX_LEN + MAX_CONN_PACKET_LEN as usize;
@@ -72,6 +74,8 @@ pub(crate) struct Inner {
     keepalive_refusals: Mutex<RefusalLimiter>,
     handshakes: Mutex<HandshakeLimiter>,
     counters: Counters,
+    /// 谁在用这个 relay：按节点对数的转发量（[`crate::users`]）。
+    users: Mutex<Users>,
     local: OnceLock<LocalDelivery>,
     /// TCP 中转腿靠它知道 relay 被停用了。
     enabled: watch::Sender<bool>,
@@ -171,6 +175,7 @@ impl Relay {
             keepalive_refusals: Mutex::new(RefusalLimiter::default()),
             handshakes: Mutex::new(HandshakeLimiter::new(now)),
             counters: Counters::default(),
+            users: Mutex::new(Users::new(now)),
             local: OnceLock::new(),
             enabled: watch::Sender::new(false),
             next_conn: AtomicU64::new(1),
@@ -272,6 +277,18 @@ impl Relay {
         if self.inner.local.set(Box::new(deliver)).is_err() {
             tracing::warn!("relay 的本地投递入口已经设过了，忽略这一次");
         }
+    }
+
+    /// 谁在用它：上一个统计时段（10 秒）里替哪些节点对转发了多少，最多的十几对，其余的合成一个数（白皮书 §7.7）。
+    /// 本节点没有启用 relay 时是 `None`。
+    ///
+    /// # Panics
+    ///
+    /// 锁中毒（之前持锁的地方 panic 过）。
+    #[must_use]
+    pub fn users(&self) -> Option<RelayUse> {
+        let enabled = self.inner.read().enabled;
+        enabled.then(|| self.inner.users.lock().expect("relay users mutex poisoned").last(Instant::now()))
     }
 
     /// 现在的计数。
@@ -636,12 +653,13 @@ impl Inner {
             return;
         }
         let now = Instant::now();
-        let (hop, src, header_len) = match Datagram::parse(first) {
+        let (hop, src, dst, header_len) = match Datagram::parse(first) {
             Ok(Datagram::Relayed { header, packet }) => {
-                (self.next_hop(source, header, &session::payload_echo(packet), now), header.src, RelayHeader::LEN)
+                (self.next_hop(source, header, &session::payload_echo(packet), now), header.src, header.dst, RelayHeader::LEN)
             }
             Ok(Datagram::Routed { header, packet }) => {
-                (self.next_hop_on_route(source, &header, &session::payload_echo(packet), now), header.src, header.encoded_len())
+                let hop = self.next_hop_on_route(source, &header, &session::payload_echo(packet), now);
+                (hop, header.src, header.dst, header.encoded_len())
             }
             _ => {
                 self.counters.dropped(DropReason::Malformed, packets);
@@ -652,7 +670,10 @@ impl Inner {
             Ok(NextHop::Local) => self.deliver_locally(src, run, stride, header_len),
             Ok(NextHop::Session(binding)) => {
                 if self.admit(src, run.len(), now) {
-                    self.send(&binding, ecn, run, stride);
+                    let sent = self.send(&binding, ecn, run, stride);
+                    if sent > 0 {
+                        self.users.lock().expect("relay users mutex poisoned").forwarded(src, dst, sent, now);
+                    }
                 } else {
                     self.counters.dropped(DropReason::RateLimited, packets);
                 }
@@ -749,25 +770,31 @@ impl Inner {
         self.bandwidth.lock().expect("relay bandwidth mutex poisoned").as_mut().is_none_or(|bandwidth| bandwidth.admit(src, bytes, now))
     }
 
-    fn send(&self, binding: &Binding, ecn: Option<Ecn>, run: &[u8], stride: usize) {
+    /// 把一串数据报送到会话上，返回送出去了多少字节。
+    fn send(&self, binding: &Binding, ecn: Option<Ecn>, run: &[u8], stride: usize) -> usize {
         match binding {
             Binding::Udp(destination) => {
                 let packets = run.len().div_ceil(stride);
                 let segment_size = (run.len() > stride).then_some(stride);
                 if self.port.send_or_drop(&Transmit { destination: *destination, contents: run, segment_size, ecn }) {
                     self.counters.forwarded(packets, run.len());
+                    run.len()
                 } else {
                     self.counters.dropped(DropReason::SendBufferFull, packets);
+                    0
                 }
             }
             Binding::Tcp { sender, .. } => {
+                let mut sent = 0;
                 for datagram in run.chunks(stride) {
                     if sender.try_send(Bytes::copy_from_slice(datagram)) {
                         self.counters.forwarded(1, datagram.len());
+                        sent += datagram.len();
                     } else {
                         self.counters.dropped(DropReason::QueueFull, 1);
                     }
                 }
+                sent
             }
         }
     }

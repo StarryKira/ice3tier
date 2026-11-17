@@ -10,7 +10,10 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 
 use i3t_model::admin::LogRef;
-use i3t_model::control::{Hello, MAX_LOCAL_ADDRESSES, MAX_PACKAGE_CHUNK, Report, Signal, ToController, ToNode};
+use i3t_model::control::{
+    Hello, MAX_LOCAL_ADDRESSES, MAX_PACKAGE_CHUNK, MAX_PEER_USE, MAX_RELAY_USERS, MAX_REPORTED_SWITCHES, RelayTry, Report, RouteSwitch,
+    Signal, ToController, ToNode,
+};
 use i3t_model::netmap::Attachment;
 use i3t_model::update::{Platform, Version};
 use i3t_proto::{NodeId, PublicKey};
@@ -21,8 +24,8 @@ use super::usage::UsageReport;
 use super::{Controller, Inner, Live, Seeds};
 use crate::error::{Error, Rejection, error_chain};
 use crate::netmap::MAX_ENDPOINTS;
-use crate::node_addresses;
-use crate::store::NodeRecord;
+use crate::store::{NewSwitch, NodeRecord};
+use crate::{node_addresses, relay_reach};
 
 /// 一个节点最多报这么多个挂靠的 relay。默认只挂靠 2 个。
 const MAX_ATTACHMENTS: usize = 16;
@@ -99,7 +102,7 @@ impl Controller {
                 inner.exit_test_answered(session.node, request, *result);
                 Ok(())
             }
-            ToController::Report(report) => inner.report(session.node, report),
+            ToController::Report(report) => inner.report(session.node, *report),
             ToController::Ack { version } => inner.ack(session.node, version),
             ToController::Signal { to, signal } => {
                 inner.signal(session.node, to, signal);
@@ -243,6 +246,8 @@ impl Inner {
             throughput_tests: hello.throughput_tests,
             remote,
             port: hello.port,
+            peer_use: BTreeMap::new(),
+            relay_use: None,
         };
         self.drop_route_queries(node.id);
         if self.live.insert(node.id, live).is_some() {
@@ -394,7 +399,13 @@ impl Inner {
             live.lanes = report.lanes.as_deref().cloned();
             live.performance = report.performance.as_deref().cloned();
             live.intercept = report.intercept.as_deref().cloned();
+            live.peer_use = report.peer_use.iter().take(MAX_PEER_USE).map(|used| (used.peer, *used)).collect();
+            live.relay_use = report.relay_use.clone().map(|mut used| {
+                used.pairs.truncate(MAX_RELAY_USERS);
+                used
+            });
         }
+        self.switches_reported(&node, &report.switches)?;
         let Report { run, credentials, exit, exits, listeners, forwards, .. } = report;
         self.usage_reported(&node, UsageReport { run, credentials, exit, exits, listeners, forwards })?;
         let report =
@@ -403,6 +414,8 @@ impl Inner {
         if let Some(status) = report.update {
             self.update_reported(&node, status)?;
         }
+
+        self.relay_tries_reported(&node, &report.relays)?;
 
         if let Some(local) = report.local_addresses {
             let mut local = local.into_vec();
@@ -427,7 +440,50 @@ impl Inner {
         tracing::debug!(node = %id, endpoints = endpoints.len(), attached = attached.len(), "节点的端点或挂靠关系变了");
         self.store.set_node_report(id, &endpoints, &attached)?;
         let holders = self.holders_of(id);
-        self.defer(node.network, holders, self.timing.report_coalesce);
+        self.defer_report(node.network, holders);
+        // 它自己的 netmap 也要重算：它要另外挂靠哪些 relay（`shared_relays`）是按它自己挑的那几个算的。
+        // 这一份不算进"别的节点的上报引起的"那条节奏里，不然它会把紧跟着到的对端的挂靠信息推后一个窗口。
+        self.defer(node.network, [id], self.timing.report_coalesce);
+        Ok(())
+    }
+
+    /// 节点报的换路记进历史（白皮书 §7.7）。只记对端还是这个网络里的节点的；一次最多 [`MAX_REPORTED_SWITCHES`] 条。
+    fn switches_reported(&mut self, node: &NodeRecord, switches: &[RouteSwitch]) -> Result<(), Error> {
+        let now = self.clock.now();
+        for switch in switches.iter().take(MAX_REPORTED_SWITCHES) {
+            if self.store.node(switch.peer)?.is_none_or(|peer| peer.network != node.network) {
+                continue;
+            }
+            self.store.insert_switch(&NewSwitch {
+                network: node.network,
+                from: node.id,
+                to: switch.peer,
+                at: now.saturating_sub(switch.age_secs.into()),
+                previous: switch.from.clone(),
+                route: switch.to.clone(),
+                cause: switch.cause.clone(),
+            })?;
+        }
+        Ok(())
+    }
+
+    /// 节点报的"试过的 relay 连没连上"（白皮书 §7.2），并进存着的那一份。连得上与否变了时，它和它的对端的 netmap 要重算：
+    /// 两个节点之间缺不缺一个共同的 relay 跟着变。
+    fn relay_tries_reported(&mut self, node: &NodeRecord, tries: &[RelayTry]) -> Result<(), Error> {
+        if tries.is_empty() && node.relay_reach.is_empty() {
+            return Ok(());
+        }
+        let relays: BTreeSet<NodeId> =
+            self.store.relay_nodes()?.into_iter().filter(|(network, _)| *network == node.network).map(|(_, id)| id).collect();
+        let Some(merged) = relay_reach::merge(&node.relay_reach, tries, node.id, &relays, self.clock.now()) else { return Ok(()) };
+        self.store.set_node_relay_reach(node.id, &merged.records)?;
+        if merged.reach_changed {
+            let reached: Vec<NodeId> = merged.records.iter().filter(|record| record.outcome.reached()).map(|record| record.relay).collect();
+            tracing::debug!(node = %node.id, ?reached, "节点连得上的 relay 变了");
+            let holders = self.holders_of(node.id);
+            self.defer_report(node.network, holders);
+            self.defer(node.network, [node.id], self.timing.report_coalesce);
+        }
         Ok(())
     }
 
@@ -495,12 +551,12 @@ fn same_endpoints(old: &[SocketAddr], new: &[SocketAddr]) -> bool {
     old.len() == new.len() && new.iter().all(|endpoint| old.contains(endpoint))
 }
 
-/// 挂靠关系有没有值得告诉对端的变化：挂靠的 relay 换了，或者到某个 relay 的延迟变了不少。
+/// 挂靠关系有没有值得告诉对端的变化：挂靠的 relay 换了（包括从自己挑的变成另外挂的），或者到某个 relay 的延迟变了不少。
 fn attachments_differ(old: &[Attachment], new: &[Attachment]) -> bool {
     old.len() != new.len()
         || new.iter().any(|attachment| {
             let Some(previous) = old.iter().find(|previous| previous.relay == attachment.relay) else { return true };
-            attachment.rtt_ms.abs_diff(previous.rtt_ms) > RTT_NOISE_MS.max(previous.rtt_ms / 4)
+            previous.shared != attachment.shared || attachment.rtt_ms.abs_diff(previous.rtt_ms) > RTT_NOISE_MS.max(previous.rtt_ms / 4)
         })
 }
 
@@ -509,7 +565,7 @@ mod tests {
     use super::*;
 
     fn attachment(relay: u32, rtt_ms: u32) -> Attachment {
-        Attachment { relay: NodeId::new(relay).unwrap(), rtt_ms }
+        Attachment { relay: NodeId::new(relay).unwrap(), rtt_ms, shared: false }
     }
 
     #[test]

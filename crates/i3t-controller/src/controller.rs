@@ -44,7 +44,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use i3t_crypto::{NodeKey, tls};
 use i3t_model::Netmap;
 use i3t_model::admin::{LogEntry, NetworkId, Node, NodeRef, RelayView, Status, Timestamp};
-use i3t_model::control::{ForwardReport, InterceptReport, LaneReport, ListenerReport, PerformanceReport, ToNode};
+use i3t_model::control::{ForwardReport, InterceptReport, LaneReport, ListenerReport, PeerUse, PerformanceReport, RelayUse, ToNode};
 use i3t_model::update::{UpdateStatus, Version};
 use i3t_proto::{NodeId, PublicKey};
 use tokio::sync::{Notify, mpsc};
@@ -52,6 +52,7 @@ use tokio::sync::{Notify, mpsc};
 use crate::error::{Entity, Error};
 use crate::gate::Throttle;
 use crate::netmap::NetworkView;
+use crate::relay_reach::{self, ReachIndex};
 use crate::store::{DIGEST_LEN, GroupRecord, LogFilter, NetworkRecord, NodeRecord, Store};
 use crate::sync::NodeSync;
 use crate::{node_addresses, secret};
@@ -201,6 +202,10 @@ pub(crate) struct Live {
     /// 这条连接的来源 IP 和节点自报的端口。controller 对外地址的主机后来才知道时，靠它们重算 controller 看到的地址。
     pub(crate) remote: IpAddr,
     pub(crate) port: u16,
+    /// 最近一次上报里到各个对端的连接上的流数和流量（最多 [`MAX_PEER_USE`](i3t_model::control::MAX_PEER_USE) 个）。
+    pub(crate) peer_use: BTreeMap<NodeId, PeerUse>,
+    /// 节点是 relay 时，最近一次上报里谁在用它。
+    pub(crate) relay_use: Option<RelayUse>,
 }
 
 pub(crate) struct Deferred {
@@ -452,13 +457,27 @@ impl Inner {
         self.next_request
     }
 
+    /// 网络里每个 relay 被在线的节点连上的情况（[`ReachIndex`]）。手上已经有全部节点的记录时直接用 [`ReachIndex::new`]。
+    pub(crate) fn reach_index(&self, network: NetworkId) -> Result<ReachIndex, Error> {
+        let nodes = self.store.nodes(network)?;
+        Ok(ReachIndex::new(&nodes, |id| self.is_online(id)))
+    }
+
     /// 管理 API 里的节点：存储里的记录，加上它现在在不在线、netmap 发到了第几版。
-    /// `groups` 是这个网络的全部分组（[`Store::groups`] 的顺序），用来写出它所在分组的名字。
-    pub(crate) fn node_view(&self, network: &NetworkRecord, groups: &[GroupRecord], record: &NodeRecord, now: Timestamp) -> Node {
+    /// `groups` 是这个网络的全部分组（[`Store::groups`] 的顺序），用来写出它所在分组的名字；`reach` 是这个网络的 [`ReachIndex`]。
+    pub(crate) fn node_view(
+        &self,
+        network: &NetworkRecord,
+        groups: &[GroupRecord],
+        record: &NodeRecord,
+        now: Timestamp,
+        reach: &ReachIndex,
+    ) -> Node {
         let online = self.is_online(record.id);
         // 只是注册时连上过（`i3t join`）不算在线过：节点真的跑起来连上了才有"最近在线"。
         let running = self.live.get(&record.id).is_some_and(|live| !live.enrolling);
         let state = self.sync.get(&record.id).map_or(record.netmap, |sync| sync.state);
+        let egress = relay_reach::egress_ip(record);
         Node {
             id: record.id,
             network: record.network,
@@ -471,6 +490,8 @@ impl Inner {
             relay: record.relay.as_ref().map(|settings| RelayView {
                 addresses: node_addresses::relay_addresses(record, network.cidr),
                 bandwidth_mbps: settings.bandwidth_mbps,
+                reach: reach.of(record.id),
+                users: self.live.get(&record.id).and_then(|live| live.relay_use.clone()),
             }),
             exit: record.exit.clone(),
             dial_out_only: record.dial_out_only,
@@ -489,8 +510,12 @@ impl Inner {
             hostname: record.hostname.clone(),
             update: self.node_update(record),
             attached: record.attached.clone(),
-            country: record.observed.and_then(|address| crate::geo::country(address.ip())),
-            warnings: node_addresses::warnings(record, network.cidr),
+            country: egress.and_then(crate::geo::country),
+            egress_ip: egress,
+            warnings: node_addresses::warnings(record, network.cidr)
+                .into_iter()
+                .chain(record.relay.as_ref().and_then(|_| reach.warning(record.id)))
+                .collect(),
         }
     }
 

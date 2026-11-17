@@ -619,7 +619,7 @@ mod tests {
     fn peer_attached_to(relays: &[u32]) -> PeerState {
         PeerState {
             key: PublicKey::from_bytes([2; 32]),
-            attached: relays.iter().zip(1..).map(|(&relay, rtt_ms)| Attachment { relay: node(relay), rtt_ms }).collect(),
+            attached: relays.iter().zip(1..).map(|(&relay, rtt_ms)| Attachment { relay: node(relay), rtt_ms, shared: false }).collect(),
             endpoints: Vec::new(),
             is_relay: false,
             dial_out_only: false,
@@ -698,7 +698,7 @@ mod tests {
         let (me, peer) = (node(1), node(2));
         let listed = |rtts: &[(u32, u32)], current: u32| {
             let mut state = peer_attached_to(&[]);
-            state.attached = rtts.iter().map(|&(relay, rtt_ms)| Attachment { relay: node(relay), rtt_ms }).collect();
+            state.attached = rtts.iter().map(|&(relay, rtt_ms)| Attachment { relay: node(relay), rtt_ms, shared: false }).collect();
             relay_candidates(me, peer, &state, Some(node(current))).skip(2).collect::<Vec<_>>()
         };
         // 对端到两个 relay 的延迟差不多，这一次上报把顺序换了：现在走着的 9 还是排在前面。

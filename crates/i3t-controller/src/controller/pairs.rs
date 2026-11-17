@@ -1,8 +1,8 @@
-//! 节点对设置：连接常驻，和独占 TCP（lane）。
+//! 节点对设置：连接常驻、独占 TCP（lane）和拥塞控制。
 
 use i3t_model::admin::{LaneBlock, LaneEffect, LaneOpening, LogRef, NetworkId, PairInput, PairLaneSide, PairSetting, PairView};
 use i3t_model::control::LANE_REVISION;
-use i3t_model::netmap::LaneMode;
+use i3t_model::netmap::{Congestion, LaneMode};
 use i3t_proto::NodeId;
 use serde_json::{Value, json};
 
@@ -10,7 +10,7 @@ use super::nodes::require_node;
 use super::{Controller, Inner, Seeds, switch};
 use crate::error::{Entity, Error, InField};
 use crate::node_addresses;
-use crate::store::{NodeRecord, Store};
+use crate::store::{NodeRecord, PairOptions, Store};
 
 impl Controller {
     /// 一个网络里全部的节点对设置，带着独占 TCP 起不起作用、两边报上来的状况。
@@ -42,14 +42,16 @@ impl Controller {
             let before = store.pair(a, b)?;
             let keep_alive = input.keep_alive.unwrap_or(before.as_ref().is_some_and(|pair| pair.keep_alive));
             let lane = input.lane.unwrap_or(before.as_ref().map_or(LaneMode::Off, |pair| pair.lane));
-            store.set_pair(a, b, keep_alive, lane)?;
+            let congestion = input.congestion.unwrap_or(before.as_ref().and_then(|pair| pair.congestion));
+            store.set_pair(a, b, PairOptions { keep_alive, lane, congestion })?;
             let lane_text = match lane {
                 LaneMode::Off => "不用",
                 LaneMode::UdpFallback => "UDP 不通时用",
                 LaneMode::Always => "总是用",
             };
-            let detail = format!("节点 #{a} 和 #{b}：连接常驻 {}，独占 TCP {lane_text}", switch(keep_alive));
-            let params = json!({ "keep_alive": keep_alive, "lane": lane });
+            let congestion_text = congestion.map_or("节点的默认", Congestion::as_str);
+            let detail = format!("节点 #{a} 和 #{b}：连接常驻 {}，独占 TCP {lane_text}，拥塞控制 {congestion_text}", switch(keep_alive));
+            let params = json!({ "keep_alive": keep_alive, "lane": lane, "congestion": congestion });
             store.log_refs(
                 now,
                 Some(network),
@@ -58,7 +60,7 @@ impl Controller {
                 &[LogRef::node(a), LogRef::node(b)],
                 pair_params(store, a, b, params)?,
             )?;
-            Ok::<_, Error>(PairSetting { a: a.min(b), b: a.max(b), keep_alive, lane })
+            Ok::<_, Error>(PairSetting { a: a.min(b), b: a.max(b), keep_alive, lane, congestion })
         })?;
         inner.refresh(network, Seeds::of([a, b]), None)?;
         self.wake_if_needed(&inner);

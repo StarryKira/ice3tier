@@ -11,6 +11,7 @@ description = "ice3tier 的独占 TCP（lane）：一对节点之间每条用户
 bytes.workspace = true
 i3t-conn = { path = "../i3t-conn" }
 i3t-crypto = { path = "../i3t-crypto" }
+i3t-path = { path = "../i3t-path" }
 i3t-proto = { path = "../i3t-proto" }
 i3t-underlay = { path = "../i3t-underlay" }
 ring.workspace = true

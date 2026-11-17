@@ -135,6 +135,11 @@ struct Candidate {
     pinged: Option<Instant>,
     /// 是从对端在本地网段上发的信标里得知的。
     lan: bool,
+    /// 最近一次本端往这个地址发探测。
+    probed: Option<Instant>,
+    /// 最近一次对端从这个地址"不请自来"地探测本端：那时本端没有往这个地址发过东西，也没有在打洞的那一轮里。
+    /// 这说明本端的地址本来就连得上，这条路不用打洞也建得起来（见 [`DirectPath::kind`]）。
+    unsolicited: Option<Instant>,
     /// 这个地址来的 PING 的验签额度。
     budget: Budget,
 }
@@ -144,8 +149,8 @@ struct Pending {
     nonce: Nonce,
     addr: SocketAddr,
     sent: Instant,
-    /// 发这个探测的时候，对端已经在这一轮里和本端通过气了（发来过打洞信令或者探测）。
-    /// 它得到回答的话，这条直连算是打洞打通的；不然就是对端的地址本来就连得上。
+    /// 发这个探测的时候，正在打洞的那一轮里：刚从对端收到过打洞信令。它得到回答的话，这条直连算是打洞打通的
+    /// （除非对端先不请自来地探测过本端，见 [`Candidate::unsolicited`]）；不然就是对端的地址本来就连得上。
     coordinated: bool,
 }
 
@@ -221,8 +226,8 @@ pub(crate) struct DirectPath {
     active: Option<Active>,
     punch: Punch,
     last_request: Option<Instant>,
-    /// 最近一次从对端收到打洞信令或者探测。
-    heard: Option<Instant>,
+    /// 最近一次从对端收到打洞信令。
+    signalled: Option<Instant>,
     /// 两边的公网地址相同：对端的私有地址多半和本节点在同一个局域网里。
     same_nat: bool,
     /// 上一次因为信令立刻发一轮探测的时刻。
@@ -239,7 +244,7 @@ impl DirectPath {
             active: None,
             punch: Punch::Idle,
             last_request: None,
-            heard: None,
+            signalled: None,
             same_nat: false,
             signal_volley: None,
             loopback: false,
@@ -257,6 +262,11 @@ impl DirectPath {
     }
 
     /// 在用的直连是怎么建立起来的。
+    ///
+    /// `Punched` 说的是这条路要两边在打洞的那一轮里同时发才通，`Reachable` 是不用：本端的探测在打洞之前就得到了回答
+    /// （对端的地址本来就连得上），或者对端在打洞之前就探测到了本端（本端的地址本来就连得上）。两端各自按自己看到的判断，
+    /// 一边先探测到另一边时两端说的都是 `Reachable`。还会不一样的情形只有一种：打洞信令比对端的探测先到，本端已经在那一轮里
+    /// 发了探测，这时本端说 `Punched`；它只说明两边是在同一轮里碰上的，不说明谁的地址连不上。
     pub(crate) fn kind(&self) -> Option<DirectKind> {
         let active = self.active.as_ref()?;
         Some(if self.is_lan(active.addr) {
@@ -389,7 +399,7 @@ impl DirectPath {
         for &addr in endpoints.iter().take(MAX_SIGNALLED) {
             self.learn(addr, now);
         }
-        self.heard = Some(now);
+        self.signalled = Some(now);
         let mut actions = Vec::new();
         if is_request {
             actions.push(Action::Signal(Signal::PunchReply { endpoints: policy.local.to_vec() }));
@@ -416,10 +426,14 @@ impl DirectPath {
     /// 从 `from` 收到了对端的 PING（签名已经验过，PONG 由外面去回）。返回要不要向 `from` 发一个反方向的 PING。
     pub(crate) fn on_ping(&mut self, from: SocketAddr, now: Instant) -> Option<Action> {
         self.learn(from, now);
+        let quiet = |at: Option<Instant>| at.is_none_or(|at| now.saturating_duration_since(at) >= PENDING_TTL);
+        let in_round = !quiet(self.signalled);
         if let Some(candidate) = self.candidate_mut(from) {
             candidate.pinged = Some(now);
+            if !in_round && quiet(candidate.probed) {
+                candidate.unsolicited = Some(now);
+            }
         }
-        self.heard = Some(now);
         if self.active.as_ref().is_some_and(|active| active.addr == from) {
             return None;
         }
@@ -465,7 +479,10 @@ impl DirectPath {
             // 局域网直连无条件优先（白皮书 §7.1）：已经在用公网地址时，局域网地址验证通过就换过去。别的情况先到先得。
             Some(active) if !ifaddr::is_private(from.ip()) || ifaddr::is_private(active.addr.ip()) => None,
             Some(_) | None => {
-                self.active = Some(Active::new(from, sample, answered.coordinated, now));
+                let unsolicited = self.candidates.iter().any(|candidate| {
+                    candidate.addr == from && candidate.unsolicited.is_some_and(|at| now.saturating_duration_since(at) < PENDING_TTL)
+                });
+                self.active = Some(Active::new(from, sample, answered.coordinated && !unsolicited, now));
                 self.punch = Punch::Idle;
                 Some(Change::Up { addr: from })
             }
@@ -572,7 +589,10 @@ impl DirectPath {
         if self.pending.len() == MAX_PENDING {
             self.pending.pop_front();
         }
-        let coordinated = self.heard.is_some_and(|heard| now.saturating_duration_since(heard) < PENDING_TTL);
+        let coordinated = self.signalled.is_some_and(|signalled| now.saturating_duration_since(signalled) < PENDING_TTL);
+        if let Some(candidate) = self.candidate_mut(to) {
+            candidate.probed = Some(now);
+        }
         self.pending.push_back(Pending { nonce, addr: to, sent: now, coordinated });
         Action::Ping { to, nonce }
     }
@@ -607,7 +627,17 @@ impl DirectPath {
             self.candidates.swap_remove(oldest);
         }
         let budget = Budget::new(CANDIDATE_VERIFIES_PER_SEC, CANDIDATE_VERIFY_BURST, now);
-        self.candidates.push(Candidate { addr, reported: false, refreshed: now, proven: None, pinged: None, lan: false, budget });
+        self.candidates.push(Candidate {
+            addr,
+            reported: false,
+            refreshed: now,
+            proven: None,
+            pinged: None,
+            lan: false,
+            probed: None,
+            unsolicited: None,
+            budget,
+        });
         true
     }
 
@@ -1142,11 +1172,22 @@ mod tests {
         assert_eq!(punched.on_pong(to, &nonce, start + 130 * MS), Some(Change::Up { addr: peer }));
         assert_eq!(punched.kind(), Some(DirectKind::Punched));
 
-        // 对端先来探测本端（它那边的 NAT 因此开了口子），本端反过来验证通过：同样是协调出来的。
+        // 对端在打洞之前就探测到了本端，本端反过来验证通过：本端的地址本来就连得上，这条路不用打洞，
+        // 和对端那边（它的探测头一次就得到了回答）说的一样。
         let mut dialled = DirectPath::new();
         let Some(Action::Ping { to, nonce }) = dialled.on_ping(peer, start) else { panic!("应该反向验证") };
         dialled.on_pong(to, &nonce, start + 20 * MS);
-        assert_eq!(dialled.kind(), Some(DirectKind::Punched));
+        assert_eq!(dialled.kind(), Some(DirectKind::Reachable));
+
+        // 打洞信令先到，本端已经在那一轮里往对端发了探测，对端的探测才到：两边是在同一轮里碰上的。
+        let mut met = DirectPath::new();
+        met.set_reported(&[peer], start);
+        let volley = met.on_signal(&Signal::PunchRequest { endpoints: vec![peer] }, start, &policy(&local));
+        assert!(!pings(&volley).is_empty());
+        assert!(met.on_ping(peer, start + 10 * MS).is_none(), "刚往这个地址发过探测，不再反向验证");
+        let (to, nonce) = pings(&volley)[0];
+        met.on_pong(to, &nonce, start + 30 * MS);
+        assert_eq!(met.kind(), Some(DirectKind::Punched));
 
         let (v6, _up) = established(addr("[2001:db8::7]:20330"));
         assert_eq!(v6.kind(), Some(DirectKind::Ipv6));

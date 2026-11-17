@@ -12,6 +12,7 @@ use serde_json::{Map, Value, json};
 use super::groups::resolve_groups;
 use super::{COOLDOWN_SECS, Controller, Inner, Seeds, address, listed, naming, switch};
 use crate::error::{Capability, Entity, Error, InField};
+use crate::relay_reach::{self, ReachIndex};
 use crate::store::{CooldownKind, GroupRecord, NetworkRecord, NodeRecord, Store, is_pending};
 
 /// 一个节点最多固定几个挂靠 relay。只是防止填错。
@@ -28,7 +29,9 @@ impl Controller {
         let network = inner.require_network(network)?;
         let now = inner.clock.now();
         let groups = inner.store.groups(network.id)?;
-        Ok(inner.store.nodes(network.id)?.iter().map(|record| inner.node_view(&network, &groups, record, now)).collect())
+        let records = inner.store.nodes(network.id)?;
+        let reach = ReachIndex::new(&records, |id| inner.is_online(id));
+        Ok(records.iter().map(|record| inner.node_view(&network, &groups, record, now, &reach)).collect())
     }
 
     /// # Errors
@@ -39,8 +42,11 @@ impl Controller {
         let network = inner.require_network(network)?;
         let record = inner.require_node(network.id, id)?;
         let live = inner.live.get(&id);
+        let records = inner.store.nodes(network.id)?;
+        let reach = ReachIndex::new(&records, |id| inner.is_online(id));
+        let reached_by = record.relay.as_ref().map(|_| relay_reach::reached_by(&records, id, |id| inner.is_online(id)));
         Ok(NodeDetail {
-            node: inner.node_view(&network, &inner.store.groups(network.id)?, &record, inner.clock.now()),
+            node: inner.node_view(&network, &inner.store.groups(network.id)?, &record, inner.clock.now(), &reach),
             endpoints: record.endpoints,
             observed_endpoint: record.observed,
             mapping_varies: live.and_then(|live| live.mapping_varies),
@@ -51,6 +57,7 @@ impl Controller {
             reported_secs_ago: live.and_then(|live| live.reported_at).map(|at| at.elapsed().as_secs()),
             performance: live.and_then(|live| live.performance.clone()),
             intercept: live.and_then(|live| live.intercept.clone()),
+            reached_by,
         })
     }
 
@@ -101,7 +108,7 @@ impl Controller {
         let seeds = if after.relay.is_some() && before.name != after.name { Seeds::All } else { inner.holders_and(id) };
         inner.refresh(network.id, seeds, None)?;
         self.wake_if_needed(&inner);
-        Ok(inner.node_view(&network, &groups, &after, now))
+        Ok(inner.node_view(&network, &groups, &after, now, &inner.reach_index(network.id)?))
     }
 
     /// 把节点启用为 relay，或者改它的 relay 设置。
@@ -187,7 +194,7 @@ impl Controller {
         // relay 的更新要排队，是不是 relay 变了，该轮到谁也跟着变。
         inner.roll_out()?;
         self.wake_if_needed(&inner);
-        Ok(inner.node_view(&network, &inner.store.groups(network.id)?, &node, now))
+        Ok(inner.node_view(&network, &inner.store.groups(network.id)?, &node, now, &inner.reach_index(network.id)?))
     }
 
     /// 删掉一个节点：吊销它的公钥，立即把它从所有节点的 netmap 里去掉。
@@ -270,7 +277,7 @@ impl Controller {
         inner.forget_node(predecessor);
         inner.refresh(network.id, Seeds::All, None)?;
         self.wake_if_needed(&inner);
-        Ok(inner.node_view(&network, &inner.store.groups(network.id)?, &node, now))
+        Ok(inner.node_view(&network, &inner.store.groups(network.id)?, &node, now, &inner.reach_index(network.id)?))
     }
 }
 

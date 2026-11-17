@@ -311,3 +311,25 @@ async fn lanes_come_back_after_a_drain_is_called_off_or_the_draining_node_restar
     wait_for("出口对重启之后的入口照常开流", Duration::from_secs(10), || pair.exit.lanes.can_open(pair.entry.id)).await;
     round_trip_from_exit(&pair).await;
 }
+
+#[tokio::test]
+async fn an_address_that_never_answers_does_not_hold_up_the_dial() {
+    // relay 的地址有好几个，只有一部分连得上。排在前面的这个不回答握手：监听着、却从不接受连接，
+    // 等着接受的队列已经满了，再来的 SYN 内核直接丢掉。
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let silent = socket.listen(0).unwrap();
+    let dead = silent.local_addr().unwrap();
+    let _queue_full = TcpStream::connect(dead).await.unwrap();
+    assert!(timeout(Duration::from_millis(300), TcpStream::connect(dead)).await.is_err(), "这个地址应该不回答");
+
+    let mut entry = Node::new(id(1), quick());
+    let exit = Node::new(id(2), quick());
+    let entry_addr = entry.listen("127.0.0.1:0".parse().unwrap()).await;
+    entry.lanes.set_peers([exit.peer(Vec::new())]).unwrap();
+    let started = Instant::now();
+    exit.lanes.set_peers([entry.peer(vec![dead, entry_addr])]).unwrap();
+    wait_for("控制 lane 建好", Duration::from_secs(10), || entry.lanes.can_open(exit.id)).await;
+    // 原来一个接一个地连，要先等那个地址超时（3 秒）。现在和到 relay 的 TCP 中转一样错开 250 毫秒一起连，先连上的为准。
+    assert!(started.elapsed() < Duration::from_millis(1500), "等了 {:?}", started.elapsed());
+}

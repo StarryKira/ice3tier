@@ -15,7 +15,7 @@ use i3t_model::control::diag::{ChoiceCode, HopSource, PathPick, TestCode, Transf
 use i3t_model::control::exit_test::{ExitTestCause, ExitVia};
 use i3t_model::control::{
     BindCause, DirectKind, InterceptCause, InterceptState, LegTransport, ListenState, NameService, RejectCause, RelayState, Route,
-    RouteCause, RouteHint, TargetCause,
+    RouteCause, RouteHint, TargetCause, TryOutcome,
 };
 use i3t_model::update::{SelfUpdateBlocker, UpdateCause, UpdateStatus};
 use i3t_proto::NodeId;
@@ -52,6 +52,8 @@ pub struct Codes {
     pub address_source: fn(AddressSource) -> &'static str,
     /// controller 对一个节点的提醒，一短句。
     pub node_warning: fn(&NodeWarning) -> String,
+    /// 一个节点最近一次试某个 relay 的结果：`UDP`、`只有 TCP`、`连不上`。
+    pub try_outcome: fn(TryOutcome) -> &'static str,
     /// controller 为什么不接受这个节点（`i3t join` 被拒绝时）。
     pub reject_cause: fn(RejectCause) -> &'static str,
     /// 管理 API 的错误。中文直接用 controller 的原话；别的语言按错误码和 `what`、`field` 写。

@@ -45,7 +45,8 @@ const DATAGRAM_RECV_BUFFER: usize = 256 * 1024;
 /// 要装得下一个切成片的最大的 UDP 报文（64KB 多一点）。
 const DATAGRAM_SEND_BUFFER: usize = 256 * 1024;
 
-pub(crate) fn transport(tuning: &Tuning) -> Arc<TransportConfig> {
+/// 一条连接的传输参数：档位定的窗口，和这条连接用的拥塞控制（节点对的设置，见 [`Algorithm`]）。
+pub(crate) fn transport(tuning: &Tuning, algorithm: Algorithm) -> Arc<TransportConfig> {
     // 两条路（直连、经 relay）对连接报同一个最大包长，探测出来的大包换了路也发得出去。
     let mut mtu = MtuDiscoveryConfig::default();
     mtu.upper_bound(MAX_CONN_PACKET_LEN);
@@ -61,8 +62,8 @@ pub(crate) fn transport(tuning: &Tuning) -> Arc<TransportConfig> {
         .max_idle_timeout(Some(IdleTimeout::from(VarInt::from_u32(IDLE_TIMEOUT_MS))))
         .mtu_discovery_config(Some(mtu))
         // 默认用自己写的 BBR；库自带的那份不能用（窄带宽上多发一倍流量，带宽估计只升不降）。
-        // 环境变量 I3T_CONGESTION=cubic 可以换回 Cubic，做对比测试时用。
-        .congestion_controller_factory(Algorithm::from_env().factory())
+        // 节点对可以设成 Cubic；没有设置时环境变量 I3T_CONGESTION=cubic 也可以换回 Cubic，做对比测试时用。
+        .congestion_controller_factory(algorithm.factory())
         .datagram_receive_buffer_size(Some(DATAGRAM_RECV_BUFFER))
         .datagram_send_buffer_size(DATAGRAM_SEND_BUFFER);
     Arc::new(transport)
@@ -101,7 +102,7 @@ pub(crate) fn server(
 ) -> Result<ServerConfig, QuicConfigError> {
     let crypto = QuicServerConfig::try_from(tls::server_config(key, is_allowed, ALPN)?).map_err(|_| QuicConfigError::CipherSuite)?;
     let mut server = ServerConfig::with_crypto(Arc::new(crypto));
-    server.transport_config(transport(&Tuning::default()));
+    server.transport_config(transport(&Tuning::default(), Algorithm::from_env()));
     // 对端在 QUIC 库眼里的地址是固定的虚拟地址，不会变。
     server.migration(false);
     Ok(server)

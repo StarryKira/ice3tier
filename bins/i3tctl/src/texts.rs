@@ -82,6 +82,7 @@ pub struct Help {
     pub relay_group: &'static str,
     pub relay_enable: &'static str,
     pub relay_disable: &'static str,
+    pub relay_list: &'static str,
     pub bandwidth: &'static str,
     pub exit_group: &'static str,
     pub exit_enable: &'static str,
@@ -157,6 +158,7 @@ pub struct Help {
     pub pair_set: &'static str,
     pub pair_keep_alive: &'static str,
     pub pair_lane: &'static str,
+    pub pair_congestion: &'static str,
     pub pair_unset: &'static str,
     pub access_group: &'static str,
     pub access_graph: &'static str,
@@ -357,17 +359,34 @@ pub struct Ui {
     pub netmap_versions: fn(u64, u64, u64) -> String,
     pub endpoints: &'static str,
     pub observed: &'static str,
+    /// 出口地址和它所在的国家或地区。
+    pub egress: &'static str,
     pub attached: &'static str,
+    /// 另外挂靠的 relay（controller 要它挂上去，好让别的节点到得了它）。
+    pub shared_attachment: &'static str,
+    /// 在线的节点里几个连得上、几个连不上、几个没报。
+    pub reach_counts: fn(u32, u32, u32) -> String,
+    pub relay_reach: &'static str,
+    /// 试过一个 relay 的节点：节点、在线、结果、时间。
+    pub reached_by_header: [&'static str; 4],
+    /// 谁在用这个 relay：从、到、每秒多少字节。
+    pub relay_users_header: [&'static str; 3],
+    /// 其余的节点对合起来。
+    pub relay_users_other: &'static str,
+    /// 这个方向最近的换路。
+    pub switches_of: fn(&str, &str) -> String,
+    pub relays_header: [&'static str; 7],
     pub nat: &'static str,
     pub mapping_varies: &'static str,
     pub reported: &'static str,
 
-    pub routes_header: [&'static str; 6],
+    pub routes_header: [&'static str; 8],
     pub no_peers: &'static str,
     pub matrix_header: [&'static str; 6],
     pub stale: &'static str,
     pub never_reported: &'static str,
-    pub path_header: [&'static str; 6],
+    /// 方向、路、路由层推算的延迟、连接自己量的往返时间、方式、来源、数据。
+    pub path_header: [&'static str; 7],
     pub switched_ago: fn(&str) -> String,
     pub path_from_report: fn(&str) -> String,
     pub path_no_data: &'static str,
@@ -378,7 +397,7 @@ pub struct Ui {
     pub candidates_header: [&'static str; 5],
     pub segment: fn(&str, &str, &str, &str, &str) -> String,
     pub no_relays: &'static str,
-    pub backbone_header: [&'static str; 7],
+    pub backbone_header: [&'static str; 8],
     pub backbone_link: fn(&str, u32, u32, &str) -> String,
     pub backbone_down: fn(&str) -> String,
     pub backbone_nobody: &'static str,
@@ -434,10 +453,13 @@ pub struct Ui {
     pub listener: &'static str,
     pub forwards_header: [&'static str; 10],
     pub no_forwards: &'static str,
-    pub pairs_header: [&'static str; 7],
+    pub pairs_header: [&'static str; 8],
     pub no_pairs: &'static str,
     pub keep_alive: &'static str,
     pub lanes: &'static str,
+    pub congestion: &'static str,
+    /// 节点对没有指定拥塞控制：用节点的默认。
+    pub congestion_default: &'static str,
     pub lane_effect: &'static str,
     pub in_effect: &'static str,
     pub no_effect: &'static str,

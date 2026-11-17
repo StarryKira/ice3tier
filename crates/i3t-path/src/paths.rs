@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use i3t_crypto::NodeKey;
 use i3t_model::Netmap;
-use i3t_model::control::{RouteEntry, Signal};
+use i3t_model::control::{Route, RouteEntry, Signal};
 use i3t_model::netmap::Attachment;
 use i3t_proto::datagram::{RelayHeader, RouteHeader};
 use i3t_proto::probe::{TestId, TestPing, TestPong};
@@ -357,6 +357,15 @@ impl Paths {
         self.status().attached.clone()
     }
 
+    /// 本节点试过的各个 relay 连没连上、它们看到的本节点 IP，报给 controller 用（白皮书 §7.2）。
+    ///
+    /// 试的是 netmap 里的每个 relay：挂靠的、经过的用会话（UDP 和 TCP 一起），别的每分钟用 UDP 问一次延迟，问不到的每十分钟
+    /// 用会话试一次（同一时刻只试一个）。有会话的排在前面，最多 [`i3t_model::control::MAX_RELAY_TRIES`] 个。
+    #[must_use]
+    pub fn relay_tries(&self) -> Vec<i3t_model::control::RelayTry> {
+        self.status().relay_tries.clone()
+    }
+
     /// 订阅换路事件。每一次换路都有一条，带着给人看的原因。
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<RouteChange> {
@@ -374,6 +383,19 @@ impl Paths {
     #[must_use]
     pub fn path_report(&self, peer: NodeId) -> Option<PathReport> {
         self.status().reports.iter().find(|report| report.peer == peer).cloned()
+    }
+
+    /// 到 `peer` 有没有经 relay 的路：现在就走着，或者最近一次算的候选里有（本节点有会话的 relay 接得上对端挂靠的 relay）。
+    ///
+    /// 连接层靠它判断一条空闲的连接关掉之后还建不建得回来（白皮书 §5.4）：直连要靠信令重新打洞，经 relay 的不用。
+    #[must_use]
+    pub fn has_relay_path(&self, peer: NodeId) -> bool {
+        let relayed = |route: &Route| matches!(route, Route::Relay { .. });
+        self.status()
+            .reports
+            .iter()
+            .find(|report| report.peer == peer)
+            .is_some_and(|report| relayed(&report.route) || report.candidates.iter().any(|candidate| relayed(&candidate.route)))
     }
 
     /// 本节点手上的骨干矩阵：每个 relay 最新的一行（它的状态、负载、到别的 relay 的延迟），过期的不在里面。

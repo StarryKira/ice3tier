@@ -47,6 +47,7 @@ pub mod netmap;
 mod node_addresses;
 pub mod node_server;
 mod reachability;
+mod relay_reach;
 pub mod release;
 mod secret;
 mod server;

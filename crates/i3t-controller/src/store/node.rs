@@ -4,10 +4,11 @@ use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use i3t_model::admin::{GroupId, NetworkId, RelaySettings, Timestamp, UpdateFailure};
-use i3t_model::control::{Declared, SelfUpdate};
+use i3t_model::control::{Declared, SelfUpdate, TryOutcome};
 use i3t_model::netmap::{Attachment, ExitRole, Profile, Reach, RoutingMode};
 use i3t_proto::{NodeId, PublicKey};
 use rusqlite::{OptionalExtension, Row, named_params, params};
+use serde::{Deserialize, Serialize};
 
 use super::codec::{Json, SqlIp, SqlKey, SqlNetwork, SqlNode, Text, Unsigned};
 use super::{DIGEST_LEN, Store, StoreError};
@@ -44,6 +45,8 @@ pub struct NodeRecord {
     /// controller 看到的来源 IP 加上节点自报的 UDP 端口。
     pub observed: Option<SocketAddr>,
     pub attached: Vec<Attachment>,
+    /// 节点最近一次试各个 relay 的结果，按 relay 编号排，最多 [`MAX_RELAY_TRIES`](i3t_model::control::MAX_RELAY_TRIES) 项。
+    pub relay_reach: Vec<ReachRecord>,
     pub platform: String,
     pub version: String,
     /// 节点上报的主机名；旧版本的节点不报，是空的。
@@ -57,6 +60,18 @@ pub struct NodeRecord {
     pub netmap: NetmapState,
     /// 注册时所用令牌的哈希。回答丢了的节点拿同一个令牌重试时靠它认出来。
     pub enrolled_with: Option<[u8; DIGEST_LEN]>,
+}
+
+/// 节点最近一次试一个 relay 的结果（白皮书 §7.2），controller 存着的样子。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReachRecord {
+    pub relay: NodeId,
+    pub outcome: TryOutcome,
+    /// 什么时候试的，controller 的时间。
+    pub at: Timestamp,
+    /// 这个 relay 看到的节点的 IP。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen_as: Option<IpAddr>,
 }
 
 /// 一个节点的 netmap 下发到了哪一步。
@@ -93,6 +108,7 @@ impl NodeRecord {
             local_addresses: row.get::<_, Option<Json<Vec<IpAddr>>>>("local_addresses")?.map(|json| json.0),
             observed: row.get::<_, Option<Text<SocketAddr>>>("observed")?.map(|text| text.0),
             attached: row.get::<_, Json<Vec<Attachment>>>("attached")?.0,
+            relay_reach: row.get::<_, Json<Vec<ReachRecord>>>("relay_reach")?.0,
             platform: row.get("platform")?,
             version: row.get("version")?,
             hostname: row.get("hostname")?,
@@ -265,6 +281,16 @@ impl Store {
         Ok(())
     }
 
+    /// 记下节点试各个 relay 的结果。
+    ///
+    /// # Errors
+    ///
+    /// 写数据库失败。
+    pub fn set_node_relay_reach(&self, id: NodeId, reach: &[ReachRecord]) -> Result<(), StoreError> {
+        self.conn.execute("UPDATE nodes SET relay_reach = ?2 WHERE id = ?1", params![SqlNode(id), Json(reach)])?;
+        Ok(())
+    }
+
     /// 记下节点上报的网卡地址。
     ///
     /// # Errors
@@ -360,9 +386,9 @@ impl Store {
         self.conn.execute("UPDATE forwards SET listen_node = ?2 WHERE listen_node = ?1", ids)?;
         self.conn.execute("UPDATE forwards SET target_node = ?2 WHERE target_node = ?1", ids)?;
         self.conn.execute(
-            "INSERT OR IGNORE INTO pair_settings (node_a, node_b, keep_alive, lane)
-             SELECT MIN(peer, ?2), MAX(peer, ?2), keep_alive, lane
-             FROM (SELECT CASE WHEN node_a = ?1 THEN node_b ELSE node_a END AS peer, keep_alive, lane
+            "INSERT OR IGNORE INTO pair_settings (node_a, node_b, keep_alive, lane, congestion)
+             SELECT MIN(peer, ?2), MAX(peer, ?2), keep_alive, lane, congestion
+             FROM (SELECT CASE WHEN node_a = ?1 THEN node_b ELSE node_a END AS peer, keep_alive, lane, congestion
                    FROM pair_settings WHERE node_a = ?1 OR node_b = ?1)
              WHERE peer <> ?2",
             ids,
@@ -410,11 +436,21 @@ mod tests {
         store.update_node(&node).unwrap();
 
         let endpoints: Vec<SocketAddr> = vec!["192.168.1.5:20330".parse().unwrap(), "[2001:db8::1]:20330".parse().unwrap()];
-        let attached = vec![Attachment { relay: NodeId::new(9).unwrap(), rtt_ms: 12 }];
+        let attached = vec![Attachment { relay: NodeId::new(9).unwrap(), rtt_ms: 12, shared: false }];
         store.set_node_report(id, &endpoints, &attached).unwrap();
         store.set_node_observed(id, Some("198.51.100.4:20330".parse().unwrap())).unwrap();
         let local: Vec<IpAddr> = vec!["192.168.1.5".parse().unwrap(), "10.66.3.7".parse().unwrap()];
         store.set_node_local_addresses(id, &local).unwrap();
+        let reach = vec![
+            ReachRecord {
+                relay: NodeId::new(9).unwrap(),
+                outcome: TryOutcome::Tcp,
+                at: 1_500,
+                seen_as: Some("198.51.100.4".parse().unwrap()),
+            },
+            ReachRecord { relay: NodeId::new(11).unwrap(), outcome: TryOutcome::Unreached, at: 1_400, seen_as: None },
+        ];
+        store.set_node_relay_reach(id, &reach).unwrap();
         store.set_node_last_seen(id, 2_000).unwrap();
         store.set_node_netmap(id, 5, &[7; DIGEST_LEN]).unwrap();
         store.set_node_sent(id, 5).unwrap();
@@ -433,6 +469,7 @@ mod tests {
         node.attached = attached;
         node.observed = Some("198.51.100.4:20330".parse().unwrap());
         node.local_addresses = Some(local);
+        node.relay_reach = reach;
         node.last_seen_at = Some(2_000);
         node.netmap = NetmapState { version: 5, digest: Some([7; DIGEST_LEN]), sent: 5, acked: 4 };
         assert_eq!(store.node(id).unwrap(), Some(node.clone()));

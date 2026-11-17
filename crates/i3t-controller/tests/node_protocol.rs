@@ -81,8 +81,10 @@ async fn report_changes_propagate_to_peers() {
     assert!(peer.netmap().peer(reporter_id).is_some_and(|peer| peer.outbound) && peer.netmap().relays.len() == 1);
 
     let endpoint: SocketAddr = "203.0.113.50:40000".parse().unwrap();
-    let attached = i3t_model::netmap::Attachment { relay: relay.id(), rtt_ms: 12 };
-    reporter.send(ToController::Report(Report { endpoints: vec![endpoint], attached: vec![attached], ..Report::default() })).await;
+    let attached = i3t_model::netmap::Attachment { relay: relay.id(), rtt_ms: 12, shared: false };
+    reporter
+        .send(ToController::Report(Box::new(Report { endpoints: vec![endpoint], attached: vec![attached], ..Report::default() })))
+        .await;
     peer.until("上报的端点和挂靠关系出现在对端的 netmap 里", |netmap| {
         netmap.peer(reporter_id).is_some_and(|peer| peer.endpoints.contains(&endpoint) && peer.attached == vec![attached])
     })
@@ -90,9 +92,90 @@ async fn report_changes_propagate_to_peers() {
 
     // 同样的内容再报一次，对端不会收到新的 netmap。
     let version = peer.netmap().version;
-    reporter.send(ToController::Report(Report { endpoints: vec![endpoint], attached: vec![attached], ..Report::default() })).await;
+    reporter
+        .send(ToController::Report(Box::new(Report { endpoints: vec![endpoint], attached: vec![attached], ..Report::default() })))
+        .await;
     assert!(peer.stays_quiet(Duration::from_millis(200)).await);
     assert_eq!(running.controller.netmap_of(peer.id()).unwrap().unwrap().version, version);
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn nodes_that_share_no_relay_are_told_to_meet_on_one_both_reach_and_who_reaches_a_relay_is_shown() {
+    use i3t_model::admin::{NodeWarning, RelayReach};
+    use i3t_model::control::{RelayTry, TryOutcome};
+    use i3t_model::netmap::Attachment;
+
+    let running = Running::start(fast_timing()).await;
+    let network = running.network("home");
+    let mut home = running.join(network.id, &[]).await;
+    let mut abroad = running.join(network.id, &[]).await;
+    let mut relays = Vec::new();
+    for _ in 0..3 {
+        let mut relay = Node::new();
+        relay.declared = Declared { relay: true, ..Declared::default() };
+        relay.enroll(&running, &running.secret(network.id, &[])).await.unwrap();
+        running.controller.enable_relay(network.id, relay.id(), RelaySettings::default()).unwrap();
+        relays.push(relay);
+    }
+    let [local_1, local_2, everyone] = [relays[0].id(), relays[1].id(), relays[2].id()];
+    let tried = |relay, outcome, seen_as: &str| RelayTry { relay, outcome, age_secs: 0, seen_as: Some(seen_as.parse().unwrap()) };
+    let own = |relay, rtt_ms| Attachment { relay, rtt_ms, shared: false };
+
+    // 家里的节点挑了两个只有家里连得上的 relay；国外的节点只连得上第三个。家里的节点也连得上第三个。
+    let home_tries = vec![
+        tried(local_1, TryOutcome::Udp, "203.0.113.20"),
+        tried(local_2, TryOutcome::Udp, "203.0.113.20"),
+        tried(everyone, TryOutcome::Udp, "203.0.113.20"),
+    ];
+    let abroad_tries = vec![
+        tried(everyone, TryOutcome::Tcp, "198.51.100.30"),
+        RelayTry { relay: local_1, outcome: TryOutcome::Unreached, age_secs: 40, seen_as: None },
+        RelayTry { relay: local_2, outcome: TryOutcome::Unreached, age_secs: 40, seen_as: None },
+    ];
+    let home_report = Report { attached: vec![own(local_1, 2), own(local_2, 3)], relays: home_tries, ..Report::default() };
+    home.send(ToController::Report(Box::new(home_report))).await;
+    abroad
+        .send(ToController::Report(Box::new(Report { attached: vec![own(everyone, 80)], relays: abroad_tries, ..Report::default() })))
+        .await;
+
+    // 家里的节点要另外挂上两边都连得上的那个；国外的节点不用（家里的节点连得上它挂的那个）。
+    home.until("家里的节点被要求另外挂靠两边都连得上的 relay", |netmap| netmap.me.shared_relays == vec![everyone]).await;
+    abroad
+        .until("国外的节点看到家里的节点的挂靠", |netmap| {
+            netmap.peer(home.id()).is_some_and(|peer| peer.attached.len() == 2)
+        })
+        .await;
+    assert!(abroad.netmap().me.shared_relays.is_empty());
+
+    // 每个 relay 有几个在线的节点连得上：只有家里连得上的照样不提醒，只是如实数出来。
+    let listed = running.controller.nodes(network.id).unwrap();
+    let relay_view = |id| listed.iter().find(|node| node.id == id).unwrap().clone();
+    assert_eq!(relay_view(local_1).relay.unwrap().reach, RelayReach { reached: 1, unreached: 1, unknown: 2 });
+    assert!(relay_view(local_1).warnings.is_empty(), "有节点连得上就不是毛病");
+    let detail = running.controller.node(network.id, local_1).unwrap();
+    let by: Vec<_> = detail.reached_by.unwrap().iter().map(|entry| (entry.node.id, entry.outcome)).collect();
+    assert_eq!(by, [(home.id(), TryOutcome::Udp), (abroad.id(), TryOutcome::Unreached)]);
+    assert_eq!(running.controller.node(network.id, home.id()).unwrap().reached_by, None, "不是 relay");
+
+    // 没有一个在线的节点连得上的 relay 有一条如实的提醒，总览里也有。
+    let nobody = vec![RelayTry { relay: local_2, outcome: TryOutcome::Unreached, age_secs: 0, seen_as: None }];
+    home.send(ToController::Report(Box::new(Report { attached: vec![own(local_1, 2)], relays: nobody, ..Report::default() }))).await;
+    eventually("家里的节点也连不上第二个 relay 了", || {
+        running.controller.nodes(network.id).unwrap().iter().any(|node| node.id == local_2 && !node.warnings.is_empty())
+    })
+    .await;
+    let warned = running.controller.overview(network.id).unwrap().warnings;
+    assert_eq!(
+        warned.iter().map(|entry| (entry.node.id, entry.warning)).collect::<Vec<_>>(),
+        [(local_2, NodeWarning::RelayUnreached { tried: 2 })]
+    );
+
+    // 出口地址：controller 看到的是回环地址（不是公网地址），所以用 relay 看到的那个，国家从它查。
+    let home_node = running.controller.node(network.id, home.id()).unwrap().node;
+    assert_eq!(home_node.egress_ip, Some("203.0.113.20".parse().unwrap()));
+    let abroad_node = running.controller.node(network.id, abroad.id()).unwrap().node;
+    assert_eq!(abroad_node.egress_ip, Some("198.51.100.30".parse().unwrap()), "TCP 上看到的地址照样是出口地址");
     running.shutdown().await;
 }
 
@@ -262,7 +345,7 @@ async fn the_controller_sends_heartbeats_when_idle_and_drops_silent_nodes() {
     node.connect(&running).await.unwrap();
     for _ in 0..8 {
         tokio::time::sleep(Duration::from_millis(150)).await;
-        node.send(ToController::Report(Report::default())).await;
+        node.send(ToController::Report(Box::default())).await;
     }
     assert!(running.controller.node(network.id, id).unwrap().node.online);
     running.shutdown().await;
@@ -310,7 +393,7 @@ async fn unknown_message_types_are_skipped_without_dropping_the_connection() {
     let mut frame = u32::try_from(body.len()).unwrap().to_be_bytes().to_vec();
     frame.extend_from_slice(&body);
     node.link().send_raw(&frame).await;
-    node.send(ToController::Report(Report { flows: 5, ..Report::default() })).await;
+    node.send(ToController::Report(Box::new(Report { flows: 5, ..Report::default() }))).await;
     eventually("后面的消息照常处理", || running.controller.node(network.id, id).unwrap().flows == 5).await;
     running.shutdown().await;
 }
@@ -371,8 +454,8 @@ async fn a_node_is_told_to_update_and_fetches_the_package_in_chunks_over_the_lin
     let mut node = Node::new();
     node.modern = Some("0.1.0");
     node.enroll(&running, &running.secret(network.id, &[])).await.unwrap();
-    node.send(ToController::Report(Report { update: Some(UpdateStatus::Idle), routes_full: true, ..Report::default() })).await;
-    old.send(ToController::Report(Report::default())).await;
+    node.send(ToController::Report(Box::new(Report { update: Some(UpdateStatus::Idle), routes_full: true, ..Report::default() }))).await;
+    old.send(ToController::Report(Box::default())).await;
     let wanted = || running.controller.update_overview().unwrap().release.unwrap().packages[0].state == PackageState::Fetching;
     eventually("controller 知道这个平台的包有人要", wanted).await;
     // 后台任务在测试里是关着的，替它取一次包。
@@ -431,7 +514,14 @@ async fn a_route_query_goes_to_the_node_and_its_answer_comes_back_to_the_caller(
     let asking = tokio::spawn(async move { controller.path(network.id, from, to).await.unwrap() });
     let ToNode::RouteQuery { request, peer } = next_other(&mut asked).await else { panic!("应该收到路由查询") };
     assert_eq!(peer, to);
-    let answer = RouteAnswer { peer, route: Some(Route::Relay { relays: vec![to] }), rtt_ms: Some(31), since: None, detail: None };
+    let answer = RouteAnswer {
+        peer,
+        route: Some(Route::Relay { relays: vec![to] }),
+        rtt_ms: Some(31),
+        since: None,
+        detail: None,
+        connection_rtt_ms: None,
+    };
     asked.send(ToController::RouteAnswer { request, answer }).await;
 
     let view = timeout(PATIENCE, asking).await.unwrap().unwrap();

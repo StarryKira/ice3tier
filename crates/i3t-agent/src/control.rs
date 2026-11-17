@@ -514,7 +514,7 @@ impl Worker {
         report.routes_full = !session.reported;
         (report.routes, report.route_kinds) = session.routes_to_report(report.routes, report.route_kinds);
         session.reported = true;
-        write_message(writer, &ToController::Report(report)).await
+        write_message(writer, &ToController::Report(Box::new(report))).await
     }
 
     fn pass_on(&self, command: UpdateCommand) {
@@ -781,7 +781,7 @@ pub(crate) mod testing {
     pub(crate) async fn expect_report(stream: &mut ServerStream<TcpStream>) -> Report {
         loop {
             if let ToController::Report(report) = expect(stream).await {
-                return report;
+                return *report;
             }
         }
     }
@@ -814,7 +814,7 @@ mod tests {
             initial: Arc::new(netmap(1)),
             hello: hello_rx,
             report: Box::new(|| Report { flows: 3, ..Report::default() }),
-            route: Box::new(|peer| RouteAnswer { peer, route: None, rtt_ms: None, since: None, detail: None }),
+            route: Box::new(|peer| RouteAnswer { peer, route: None, rtt_ms: None, since: None, detail: None, connection_rtt_ms: None }),
             backbone: Box::new(Vec::new),
             report_now: Arc::new(Notify::new()),
             tests: Box::new(|_| {}),
@@ -1033,7 +1033,14 @@ mod tests {
         let controller = FakeController::start().await;
         let (_dir, state) = temp_state();
         let (mut setup, _hello) = setup(&controller, state, QUIET);
-        setup.route = Box::new(|peer| RouteAnswer { peer, route: Some(Route::None), rtt_ms: Some(5), since: None, detail: None });
+        setup.route = Box::new(|peer| RouteAnswer {
+            peer,
+            route: Some(Route::None),
+            rtt_ms: Some(5),
+            since: None,
+            detail: None,
+            connection_rtt_ms: Some(6),
+        });
         let _link = ControlLink::spawn(setup);
         let (mut stream, _) = controller.accept().await;
         let _: ToController = expect(&mut stream).await;

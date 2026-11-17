@@ -8,10 +8,11 @@
 //! 回答了 CHALLENGE、握手却走不完的地址（地址和别的 relay 撞了，回答的是另一台机器）这一轮里不再试，剩下的地址马上接着试。
 //! TCP 一个接一个地错开一点时间去连（见 [`crate::tcp`]），上一次握手成功的地址排在最前，失败的排在最后。
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use i3t_crypto::{NodeKey, Signature};
+use i3t_model::control::TryOutcome;
 use i3t_model::netmap::Relay;
 use i3t_proto::session::{Accepted, Auth, Echo, Frame, Init, Nonce, Ping, RefusalReason, Refused};
 use i3t_proto::{NodeId, PublicKey};
@@ -26,6 +27,8 @@ pub(crate) const ATTACH_COUNT: usize = 2;
 const FAILING_AFTER: Duration = Duration::from_secs(10);
 /// TCP 多久连不上就算这次失败。
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// 不保持会话的 relay 每分钟问一次延迟（INIT / CHALLENGE），这么久没有回答就算这一次没问到。
+const SURVEY_SILENCE: Duration = Duration::from_secs(3);
 
 /// 本节点是谁，用来填帧和签名。
 #[derive(Debug, Clone, Copy)]
@@ -122,6 +125,10 @@ pub(crate) struct RelayLink {
     probe_interval: Duration,
     /// 要不要给这段链路发探测包列。
     training: bool,
+    /// 最近一次试的结果和时刻（见 [`last_try`](Self::last_try)）。
+    tried: Option<(TryOutcome, Instant)>,
+    /// 它最近看到的本节点的 IP：UDP 和 TCP 上的会话应答里都有。TCP 上的那个不能当直连的候选端点，但出口地址就是它。
+    seen: Option<(IpAddr, Instant)>,
 }
 
 impl RelayLink {
@@ -155,6 +162,8 @@ impl RelayLink {
             next_survey: now,
             probe_interval: PROBE_INTERVAL,
             training: false,
+            tried: None,
+            seen: None,
         }
     }
 
@@ -340,6 +349,26 @@ impl RelayLink {
         self.observed.filter(|(_, at)| now.saturating_duration_since(*at) < ESTIMATE_TTL).map(|(addr, _)| addr)
     }
 
+    /// 最近一次试它的结果和时刻。现在有会话的就是现在、会话走的传输；不然是最近一次会话的尝试（UDP 和 TCP 一起试的）
+    /// 或者每分钟一次的 UDP 询问得到了回答。只有 UDP 询问没有回答、还没用会话试过的，没有结果（见 [`survey_silent`](Self::survey_silent)）。
+    pub(crate) fn last_try(&self, now: Instant) -> Option<(TryOutcome, Instant)> {
+        match self.leg() {
+            Some(Leg::Udp(_)) => Some((TryOutcome::Udp, now)),
+            Some(Leg::Tcp) => Some((TryOutcome::Tcp, now)),
+            None => self.tried,
+        }
+    }
+
+    /// 它最近看到的本节点的 IP。有会话时随保活的应答刷新；会话没了之后照旧是最后看到的那个，过了估计的有效期就不算。
+    pub(crate) fn seen_as(&self, now: Instant) -> Option<IpAddr> {
+        self.seen.filter(|(_, at)| now.saturating_duration_since(*at) < ESTIMATE_TTL).map(|(ip, _)| ip)
+    }
+
+    /// 不保持会话时每分钟一次的 UDP 询问这一次没有回答：UDP 到不了它，TCP 还没试过。
+    pub(crate) fn survey_silent(&self, now: Instant) -> bool {
+        !self.wanted && self.survey.is_some_and(|(_, sent)| now.saturating_duration_since(sent) >= SURVEY_SILENCE)
+    }
+
     /// 推进定时器。`urgent`：有包正经它发出去，却有一阵没有从它收到任何东西了。
     /// `survey`：不保持会话时要不要定期测一下延迟。
     pub(crate) fn poll(&mut self, now: Instant, who: Identity<'_>, urgent: bool, survey: bool, wire: &mut dyn Wire) {
@@ -432,6 +461,7 @@ impl RelayLink {
     }
 
     fn attempt_failed(&mut self, now: Instant) {
+        self.tried = Some((TryOutcome::Unreached, now));
         self.attempt = None;
         self.fell_back = false;
         self.failures = self.failures.saturating_add(1);
@@ -496,6 +526,8 @@ impl RelayLink {
         match step.event {
             Some(Event::Up { observed }) => {
                 self.observed = Some((observed, now));
+                self.seen = Some((observed.ip().to_canonical(), now));
+                self.tried = Some((TryOutcome::Udp, now));
                 self.attempt = None;
                 self.failures = 0;
                 self.fell_back = false;
@@ -538,7 +570,11 @@ impl RelayLink {
             self.send_tcp(send, who, wire);
         }
         match step.event {
-            Some(Event::Up { .. }) => {
+            Some(Event::Up { observed }) => {
+                self.seen = Some((observed.ip().to_canonical(), now));
+                if !self.udp.is_up() {
+                    self.tried = Some((TryOutcome::Tcp, now));
+                }
                 self.attempt = None;
                 self.failures = 0;
                 // 这一轮没有同时试 UDP 的话（见 `fell_back`），连上之后马上在后台试一次：UDP 要是恢复了，不用等半分钟。
@@ -582,6 +618,7 @@ impl RelayLink {
             Frame::Challenge(challenge) => {
                 if let Some((_, sent)) = self.survey.take_if(|(nonce, _)| *nonce == challenge.nonce) {
                     self.surveyed = Some((now.saturating_duration_since(sent), now));
+                    self.tried = Some((TryOutcome::Udp, now));
                     self.next_survey = now + RELAY_SURVEY;
                 } else if self.udp_target.is_none_or(|target| target == from) && self.udp_candidates().contains(&from) {
                     let step = self.udp.on_challenge(challenge, now);
@@ -601,6 +638,7 @@ impl RelayLink {
             Frame::Pong(pong) => {
                 if let Some(observed) = self.udp.on_pong(pong, now) {
                     self.observed = Some((observed, now));
+                    self.seen = Some((observed.ip().to_canonical(), now));
                 }
             }
             // 错误帧要和它回显的字节一起看，见 [`on_udp_refusal`](Self::on_udp_refusal)。
@@ -662,8 +700,10 @@ impl RelayLink {
             Frame::Challenge(challenge) => tcp.session.on_challenge(challenge, now),
             Frame::Ok(ok) if genuine => tcp.session.on_ok(ok, now),
             Frame::Pong(pong) => {
-                // TCP 上看到的地址是那条 TCP 的，不是 UDP 的候选端点，不记。
-                tcp.session.on_pong(pong, now);
+                // TCP 上看到的地址是那条 TCP 的，不是 UDP 的候选端点，不记成 `observed`；出口地址照样是它。
+                if let Some(observed) = tcp.session.on_pong(pong, now) {
+                    self.seen = Some((observed.ip().to_canonical(), now));
+                }
                 Step::default()
             }
             Frame::Error(_) | Frame::Ok(_) | Frame::Init(_) | Frame::Auth(_) | Frame::Ping(_) => Step::default(),
@@ -1428,6 +1468,52 @@ mod tests {
         assert_eq!(setup.wire.udp.len(), 3);
     }
 
+    #[test]
+    fn a_try_is_remembered_as_udp_tcp_only_or_unreached_together_with_the_address_the_relay_saw() {
+        let ip = |text: &str| text.parse::<IpAddr>().unwrap();
+        let mut setup = Setup::new(&["198.51.100.9:20330"], &["198.51.100.9:20330"]);
+        assert_eq!(setup.link.last_try(setup.start), None, "还没试过");
+        setup.poll(Duration::ZERO);
+        setup.complete_udp(10 * MS);
+        let now = setup.start + 20 * MS;
+        assert_eq!(setup.link.last_try(now), Some((TryOutcome::Udp, now)), "有会话时就是现在");
+        assert_eq!(setup.link.seen_as(now), Some(ip("203.0.113.7")));
+
+        // UDP 一直没有回音，经 TCP 连上：只有 TCP 连得上。TCP 上看到的地址照样是出口地址。
+        let mut setup = Setup::new(&["198.51.100.9:20330"], &["198.51.100.9:20330"]);
+        let up = setup.start + setup.fall_back_to_tcp();
+        assert_eq!(setup.link.last_try(up).map(|(outcome, _)| outcome), Some(TryOutcome::Tcp));
+        assert_eq!(setup.link.seen_as(up), Some(ip("203.0.113.7")));
+
+        // 两种都连不上：这一轮失败，记成连不上。
+        let mut setup = Setup::new(&["198.51.100.9:20330"], &["198.51.100.9:20330"]);
+        let mut at = Duration::ZERO;
+        while setup.link.last_try(setup.start + at).is_none() {
+            setup.poll(at);
+            at += 100 * MS;
+            assert!(at < Duration::from_secs(30), "该算这一轮失败了");
+        }
+        assert_eq!(setup.link.last_try(setup.start + at).map(|(outcome, _)| outcome), Some(TryOutcome::Unreached));
+    }
+
+    #[test]
+    fn an_unanswered_survey_says_udp_does_not_get_through_and_an_answered_one_counts_as_reached() {
+        let mut setup = Setup::new(&["198.51.100.9:20330"], &["198.51.100.9:20330"]);
+        setup.link.set_wanted(false, setup.start, &mut setup.wire);
+        let key = NodeKey::generate().unwrap();
+        let who = Identity { me: node(ME), key: &key };
+        setup.link.poll(setup.start, who, false, true, &mut setup.wire);
+        assert!(!setup.link.survey_silent(setup.start + MS), "刚问");
+        assert!(setup.link.survey_silent(setup.start + SURVEY_SILENCE), "问了没有回答");
+        assert_eq!(setup.link.last_try(setup.start + SURVEY_SILENCE), None, "只试了 UDP，还说不上连不连得上");
+
+        let Frame::Init(init) = setup.last_udp() else { panic!("询问用的是 INIT") };
+        setup.udp_frame(Frame::Challenge(Challenge { nonce: init.nonce, cookie: [0; 16] }), 40 * MS);
+        assert!(!setup.link.survey_silent(setup.start + SURVEY_SILENCE));
+        assert_eq!(setup.link.last_try(setup.start + SECOND), Some((TryOutcome::Udp, setup.start + 40 * MS)));
+    }
+
+    const SECOND: Duration = Duration::from_secs(1);
     const DEAD: &str = "198.51.100.9:20330";
     const LAN: &str = "192.168.1.5:20330";
     const MAPPED: &str = "203.0.113.9:40330";

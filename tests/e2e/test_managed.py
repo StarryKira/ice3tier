@@ -13,7 +13,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lab as lablib  # noqa: E402
-from harness import Checks, Controller, Node, binary, create_groups, start_whoami, tail  # noqa: E402
+from harness import (Checks, Controller, Node, RestoredController, add_node_config, binary, controller_data, create_groups,  # noqa: E402
+                     start_whoami, tail)
 from lab import Lab, NatKind, wait_until  # noqa: E402
 
 
@@ -350,6 +351,107 @@ def relay_in_a_lan(lab: Lab, work: Path, t: Checks) -> None:
         print(tail(inside.read_log(), 30), tail(outside.read_log(), 20), sep="\n  ---\n")
 
 
+def relay_for_half(lab: Lab, work: Path, t: Checks) -> None:
+    """两个中继只有家里（一个局域网里）的节点连得上，离家里的节点最近；第三个谁都连得上。外面的节点照样经两边共同的那个到达
+    家里的节点，中继列表上如实写着谁连得上谁，只有部分节点连得上的中继不算毛病。"""
+    web = lab.host("web")
+    start_whoami(web)
+    controller = Controller(lab.host("ctl"), work)
+    controller.ctl("network", "create", "lab")
+    home = lab.nat("nat-h", NatKind.CONE)
+    near = [Node(home.host(name), work, declare=("relay",)) for name in ("rh1", "rh2")]
+    a = Node(home.host("a"), work, declare=("exit",))
+    everyone = Node(lab.host("rall"), work, declare=("relay",))
+    everyone.host.shape(lablib.Shape(rtt_ms=40))
+    b = Node(lab.nat("nat-b", NatKind.SYMMETRIC).host("b"), work)
+    for node in (*near, a, everyone, b):
+        node.join(controller)
+    for relay in (*near, everyone):
+        controller.ctl("relay", "enable", str(relay.id))
+    controller.ctl("exit", "enable", str(a.id))
+    url, expect = f"http://{web.ip}/", home.ip
+
+    def attached(node: Node) -> list[tuple[int, bool]]:
+        return sorted((entry["relay"], entry.get("shared", False)) for entry in controller.node(node)["attached"])
+
+    try:
+        wait_until(lambda: (everyone.id, True) in attached(a), timeout=60, what="a 另外挂上两边都连得上的中继")
+    except TimeoutError:
+        pass
+    own = sorted(relay.id for relay in near)
+    t.check("a 自己挑的是家里那两个，另外挂上了两边都连得上的那个", attached(a) == [*[(id, False) for id in own], (everyone.id, True)],
+            str(attached(a)))
+    t.check("外面的节点经共同的中继用上家里的出口", reaches(b, url, a, expect, timeout=60))
+    route = wait_route(controller, b, a, "relay")
+    t.check("b 到 a 经两边都连得上的中继", route == {"via": "relay", "relays": [everyone.id]}, str(route))
+
+    def reach_of(relay: Node) -> dict:
+        listed = {entry["id"]: entry for entry in controller.ctl("relay", "list")}
+        return (listed.get(relay.id, {}).get("relay") or {}).get("reach", {})
+
+    try:
+        wait_until(lambda: reach_of(near[0]).get("unknown") == 0, timeout=60, what="每个在线的节点都报了试 rh1 的结果")
+    except TimeoutError:
+        pass
+    # rall 也连得上 rh1：rh1 自己连着 rall，家里的路由器放行 rall 回来的包。外面的 b 连不上。
+    reach = reach_of(near[0])
+    t.check("中继列表：家里的节点连得上 rh1，外面的 b 连不上", reach.get("reached", 0) >= 2 and reach.get("unreached") == 1, str(reach))
+    shown = controller.ctl("node", "show", str(near[0].id))
+    outcomes = {entry["node"]["id"]: entry["outcome"] for entry in shown["reached_by"] or []}
+    t.check("节点详情写着谁连不上它", outcomes.get(b.id) == "unreached" and outcomes.get(a.id) in ("udp", "tcp"), str(outcomes))
+    t.check("只有部分节点连得上的中继没有提醒", shown["warnings"] == [] and controller.ctl("overview")["warnings"] == [], str(shown["warnings"]))
+    listed = controller.host.run(binary("i3tctl"), "--token", controller.token, "relay", "list", check=False).stdout
+    counts = f"{reach.get('reached')}/{reach.get('unreached')}/{reach.get('unknown')}"
+    t.check("i3tctl relay list 列出各个中继连得上的节点数", near[0].name in listed and counts in listed, listed)
+    t.check("a 的出口地址是家里的公网地址", controller.node(a)["egress_ip"] == home.ip, str(controller.node(a)["egress_ip"]))
+    if t.failures:
+        print(tail(a.read_log(), 30), tail(b.read_log(), 30), tail(controller.log.read_text(errors="replace"), 10), sep="\n  ---\n")
+
+
+def idle_held_offline(lab: Lab, work: Path, t: Checks) -> None:
+    """没有 relay、controller 又停了：空闲的连接不回收（关掉就建不回来）；controller 回来之后照常回收。"""
+    web = lab.host("web")
+    start_whoami(web)
+    controller = Controller(lab.host("ctl"), work)
+    controller.ctl("network", "create", "lab")
+    a = Node(lab.nat("nat-a", NatKind.CONE).host("a"), work)
+    b = Node(lab.nat("nat-b", NatKind.CONE).host("b"), work, declare=("exit",))
+    for node in (a, b):
+        add_node_config(node, "[performance]\nidle_close_secs = 3\n")
+        node.join(controller)
+    controller.ctl("exit", "enable", str(b.id))
+    url, expect = f"http://{web.ip}/", lab.hosts["nat-b"].ip
+    closed, held = "和对端的连接结束", "空闲的连接先不关"
+
+    t.check("打洞直连，a 经 b 访问", reaches(a, url, b, expect, timeout=40))
+    try:
+        wait_until(lambda: closed in a.read_log(), timeout=15, what="空闲的连接被回收")
+    except TimeoutError:
+        pass
+    t.check("controller 在线时，空闲 3 秒的连接照常回收", closed in a.read_log(), tail(a.read_log(), 8))
+
+    mark = len(a.read_log())
+    t.check("又建起一条连接", reaches(a, url, b, expect, timeout=20))
+    controller.host.stop(controller.proc)
+    try:
+        wait_until(lambda: "和 controller 的连接断了" in a.read_log()[mark:], timeout=15, what="a 发现 controller 不在了")
+    except TimeoutError:
+        pass
+    time.sleep(8)
+    since = a.read_log()[mark:]
+    t.check("controller 停了、没有 relay：空闲的连接留着，并且说明了原因", closed not in since and held in since, tail(since, 8))
+    t.check("留着的连接照常能用", a.curl(url, via=b, timeout=6).stdout == expect)
+
+    RestoredController(controller.host, work, controller_data(controller), controller.token)
+    try:
+        wait_until(lambda: closed in a.read_log()[mark:], timeout=60, what="controller 回来之后回收")
+    except TimeoutError:
+        pass
+    t.check("controller 回来之后照常回收", closed in a.read_log()[mark:], tail(a.read_log()[mark:], 8))
+    if t.failures:
+        print(tail(a.read_log(), 30), tail(b.read_log(), 20), sep="\n  ---\n")
+
+
 def range_overlap_warning(lab: Lab, work: Path, t: Checks) -> None:
     """节点所在的一个真实网络落在网络的地址段里：节点上和总览里有一条提醒，什么都不拦。"""
     controller = Controller(lab.host("ctl"), work)
@@ -382,6 +484,8 @@ SCENARIOS = {
     "relay_on_declared_address": relay_on_declared_address,
     "relay_in_a_lan": relay_in_a_lan,
     "range_overlap_warning": range_overlap_warning,
+    "relay_for_half": relay_for_half,
+    "idle_held_offline": idle_held_offline,
 }
 
 

@@ -34,7 +34,7 @@ const fn quic_priority(priority: Priority) -> i32 {
     }
 }
 
-/// 一条连接上现在开着多少个流方向，以及最近一次变成零是什么时候。连接靠它判断自己是不是空闲。
+/// 一条连接上现在开着多少条流，以及最近一次变成零是什么时候。连接靠它判断自己是不是空闲。
 #[derive(Debug)]
 pub(crate) struct StreamCount {
     open: AtomicUsize,
@@ -44,6 +44,11 @@ pub(crate) struct StreamCount {
 impl StreamCount {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self { open: AtomicUsize::new(0), idle_since: Mutex::new(Instant::now()) })
+    }
+
+    /// 现在开着的流（两半里至少还有一半没有放下的）。
+    pub(crate) fn open(&self) -> usize {
+        self.open.load(Ordering::Acquire)
     }
 
     /// 没有流的话，从什么时候起没有的。
@@ -57,7 +62,7 @@ impl StreamCount {
     }
 }
 
-/// 一个流方向活着的时候占着的计数。
+/// 一条流活着（两个方向里至少还有一个没放下）的时候占着的计数。
 #[derive(Debug)]
 struct StreamGuard(Arc<StreamCount>);
 
@@ -72,7 +77,9 @@ impl Drop for StreamGuard {
 
 /// 把 QUIC 库的一对流包装成契约里的两个方向。
 pub(crate) fn wrap(send: quinn::SendStream, recv: quinn::RecvStream, count: &Arc<StreamCount>) -> (SendHalf, RecvHalf) {
-    (SendHalf { inner: send, ended: false, _open: count.enter() }, RecvHalf { inner: recv, _open: count.enter() })
+    // 两个方向共用一个计数：流的两半都放下了，这条流才不算开着。
+    let open = Arc::new(count.enter());
+    (SendHalf { inner: send, ended: false, _open: Arc::clone(&open) }, RecvHalf { inner: recv, _open: open })
 }
 
 /// 一条流的发送方向。
@@ -84,7 +91,7 @@ pub struct SendHalf {
     inner: quinn::SendStream,
     /// 已经正常结束或者重置过了，丢弃时不用再做什么。
     ended: bool,
-    _open: StreamGuard,
+    _open: Arc<StreamGuard>,
 }
 
 impl AsyncWrite for SendHalf {
@@ -147,7 +154,7 @@ impl Drop for SendHalf {
 #[derive(Debug)]
 pub struct RecvHalf {
     inner: quinn::RecvStream,
-    _open: StreamGuard,
+    _open: Arc<StreamGuard>,
 }
 
 impl AsyncRead for RecvHalf {

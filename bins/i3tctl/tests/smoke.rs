@@ -133,7 +133,7 @@ impl Fixture {
     }
 
     fn report(&self, member: &Member, report: Report) {
-        self.controller.handle(member.session, REMOTE, ToController::Report(report)).unwrap();
+        self.controller.handle(member.session, REMOTE, ToController::Report(Box::new(report))).unwrap();
     }
 }
 

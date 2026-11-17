@@ -23,6 +23,7 @@ use tokio::sync::oneshot;
 
 use super::{Controller, Inner, Live, node_ref};
 use crate::error::Error;
+use crate::relay_reach::ReachIndex;
 use crate::server::blocking;
 use crate::store::NodeRecord;
 
@@ -95,12 +96,14 @@ impl Controller {
         let record = inner.require_node(network, id)?;
         let peers = inner.store.nodes(network)?;
         let now = Instant::now();
+        let used = inner.live.get(&id).map(|live| &live.peer_use);
         let routes = inner.current_routes(id).map(|reported| {
             let age_secs = now.saturating_duration_since(reported.at).as_secs();
             let known = reported.entries.values().filter_map(|entry| {
                 let peer = peers.iter().find(|peer| peer.id == entry.peer)?;
                 let since = reported.since.get(&entry.peer).map_or(reported.at, |since| *since);
                 let kind = reported.kinds.get(&entry.peer);
+                let use_of = used.and_then(|used| used.get(&entry.peer));
                 Some(NodeRoute {
                     peer: node_ref(peer),
                     route: entry.route.clone(),
@@ -109,6 +112,9 @@ impl Controller {
                     since_secs: now.saturating_duration_since(since).as_secs(),
                     direct: kind.and_then(|kind| kind.direct),
                     relay_leg: kind.and_then(|kind| kind.relay_leg),
+                    flows: use_of.map(|use_of| use_of.flows),
+                    tx_bytes: use_of.map(|use_of| use_of.tx_bytes),
+                    rx_bytes: use_of.map(|use_of| use_of.rx_bytes),
                 })
             });
             known.collect()
@@ -198,7 +204,10 @@ impl Controller {
     ) -> Result<PathView, Error> {
         let inner = self.lock();
         let (from, to) = (inner.require_node(network, from)?, inner.require_node(network, to)?);
-        Ok(PathView { forward: inner.path_leg(&from, &to, forward), reverse: inner.path_leg(&to, &from, reverse) })
+        let history = |from: &NodeRecord, to: &NodeRecord| inner.store.switches(from.id, to.id);
+        let forward = PathLeg { switches: history(&from, &to)?, ..inner.path_leg(&from, &to, forward) };
+        let reverse = PathLeg { switches: history(&to, &from)?, ..inner.path_leg(&to, &from, reverse) };
+        Ok(PathView { forward, reverse })
     }
 
     /// 网络里 relay 之间的延迟矩阵：现问几个在线的节点，每个 relay 取最新的那一行。最多等几秒。
@@ -246,6 +255,7 @@ impl Controller {
                 }
             }
         }
+        let reach = ReachIndex::new(&nodes, |id| inner.is_online(id));
         let rows = nodes.iter().filter(|node| node.relay.is_some()).map(|node| {
             let found = freshest.remove(&node.id);
             BackboneRelay {
@@ -256,6 +266,7 @@ impl Controller {
                 age_ms: found.as_ref().map(|(_, row)| row.age_ms),
                 reported_by: found.as_ref().map(|(from, _)| *from),
                 links: found.map(|(_, row)| row.links).unwrap_or_default(),
+                reach: reach.of(node.id),
             }
         });
         let answered = answers.iter().filter_map(|(from, _)| nodes.iter().find(|node| node.id == *from).map(node_ref));
@@ -409,6 +420,8 @@ impl Inner {
             reason: None,
             cause: None,
             candidates: None,
+            connection_rtt_ms: None,
+            switches: Vec::new(),
         };
         let reported = self.routes.get(&from.id);
         // 上报里的细节只在说的是同一条路时才用得上。
@@ -418,9 +431,9 @@ impl Inner {
             reported.kinds.get(&to.id).copied()
         };
         match answer {
-            Some(RouteAnswer { route: Some(route), rtt_ms, since, detail, .. }) => {
+            Some(RouteAnswer { route: Some(route), rtt_ms, since, detail, connection_rtt_ms, .. }) => {
                 let kind = reported_kind(&route);
-                let leg = leg(PathSource::Query, Some(route), rtt_ms, Some(0), since);
+                let leg = PathLeg { connection_rtt_ms, ..leg(PathSource::Query, Some(route), rtt_ms, Some(0), since) };
                 match detail {
                     Some(detail) => with_detail(leg, detail),
                     None => PathLeg { direct: kind.and_then(|kind| kind.direct), relay_leg: kind.and_then(|kind| kind.relay_leg), ..leg },

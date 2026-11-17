@@ -86,13 +86,13 @@ fn credential_usage_from_ingress_reports_adds_up_and_an_exhausted_credential_is_
     assert_eq!((delivered.id, delivered.exhausted), (id, false));
 
     let usage = |bytes, connections| CredentialUsage { id, bytes, connections, last_used_secs_ago: Some(0) };
-    gateway.send(&lab.controller, ToController::Report(Report { credentials: vec![usage(6_000, 2)], ..report(7) }));
+    gateway.send(&lab.controller, ToController::Report(Box::new(Report { credentials: vec![usage(6_000, 2)], ..report(7) })));
     let shown = lab.controller.credentials(network.id).unwrap().remove(0);
     assert_eq!((shown.usage.bytes, shown.usage.connections, shown.state), (6_000, 2, CredentialState::Active));
     assert!(shown.usage.last_used_at.is_some());
 
     // 同一次运行里报的是累计数：只把新增的加上。
-    gateway.send(&lab.controller, ToController::Report(Report { credentials: vec![usage(11_000, 1)], ..report(7) }));
+    gateway.send(&lab.controller, ToController::Report(Box::new(Report { credentials: vec![usage(11_000, 1)], ..report(7) })));
     lab.settle(&mut [&mut gateway]);
     let shown = lab.controller.credentials(network.id).unwrap().remove(0);
     assert_eq!((shown.usage.bytes, shown.state), (11_000, CredentialState::Exhausted));
@@ -142,9 +142,9 @@ fn an_exit_keeps_its_own_counts_and_the_initiators_view_for_cross_checking_and_h
     let quota = QuotaUsage { limit_bytes: 1_000_000, used_bytes: 400, period_start: 1, period_end: 2 };
     let counts =
         |total, failed_by_exit, refused| ExitReport { total, failed_by_exit, refused, quota: Some(quota), ..ExitReport::default() };
-    exit.send(&lab.controller, ToController::Report(Report { exit: Some(Box::new(counts(10, 0, 0))), ..report(1) }));
+    exit.send(&lab.controller, ToController::Report(Box::new(Report { exit: Some(Box::new(counts(10, 0, 0))), ..report(1) })));
     // 被拒绝的和目标的问题都不算出口坏了，只有它自己的失败算。
-    exit.send(&lab.controller, ToController::Report(Report { exit: Some(Box::new(counts(40, 1, 25))), ..report(1) }));
+    exit.send(&lab.controller, ToController::Report(Box::new(Report { exit: Some(Box::new(counts(40, 1, 25))), ..report(1) })));
     let observed = ExitObservation {
         exit: exit.id,
         flows: 31,
@@ -155,7 +155,7 @@ fn an_exit_keeps_its_own_counts_and_the_initiators_view_for_cross_checking_and_h
         failed_by_exit: 1,
         unreachable: 0,
     };
-    laptop.send(&lab.controller, ToController::Report(Report { exits: vec![observed.clone()], ..report(9) }));
+    laptop.send(&lab.controller, ToController::Report(Box::new(Report { exits: vec![observed.clone()], ..report(9) })));
 
     let views = lab.controller.exits(network.id).unwrap();
     assert_eq!(views.len(), 1, "只有启用了出口的节点");
@@ -165,7 +165,7 @@ fn an_exit_keeps_its_own_counts_and_the_initiators_view_for_cross_checking_and_h
     assert_eq!(view.observed.len(), 1);
     assert_eq!((view.observed[0].by.id, view.observed[0].counts.clone()), (laptop.id, observed));
 
-    exit.send(&lab.controller, ToController::Report(Report { exit: Some(Box::new(counts(50, 5, 25))), ..report(1) }));
+    exit.send(&lab.controller, ToController::Report(Box::new(Report { exit: Some(Box::new(counts(50, 5, 25))), ..report(1) })));
     assert_eq!(lab.controller.exit(network.id, exit.id).unwrap().health, ExitHealth::Degraded, "40 个请求里 5 个是出口自己的问题");
     assert!(lab.controller.exit(network.id, laptop.id).is_err(), "不是出口的节点没有出口的视图");
 }
@@ -222,7 +222,7 @@ fn listener_and_forward_status_reported_by_the_node_shows_up_including_its_built
         ],
         ..report(3)
     };
-    gw.send(&lab.controller, ToController::Report(report));
+    gw.send(&lab.controller, ToController::Report(Box::new(report)));
 
     let listeners = lab.controller.listeners(network.id, None).unwrap();
     assert_eq!(
@@ -373,8 +373,8 @@ fn the_overview_adds_up_flows_and_traffic_of_online_nodes() {
     let network = lab.network("home");
     let a = lab.join(network.id, &[]);
     let b = lab.join(network.id, &[]);
-    a.send(&lab.controller, ToController::Report(Report { flows: 2, tx_bytes: 100, rx_bytes: 1000, ..Report::default() }));
-    b.send(&lab.controller, ToController::Report(Report { flows: 3, tx_bytes: 50, rx_bytes: 5, ..Report::default() }));
+    a.send(&lab.controller, ToController::Report(Box::new(Report { flows: 2, tx_bytes: 100, rx_bytes: 1000, ..Report::default() })));
+    b.send(&lab.controller, ToController::Report(Box::new(Report { flows: 3, tx_bytes: 50, rx_bytes: 5, ..Report::default() })));
     let overview = lab.controller.overview(network.id).unwrap();
     assert_eq!((overview.flows, overview.tx_bytes, overview.rx_bytes), (5, 150, 1005));
     lab.controller.disconnect(b.session);
@@ -387,8 +387,8 @@ fn the_node_list_carries_the_relays_each_node_is_attached_to() {
     let network = lab.network("home");
     let relay = lab.join_with(network.id, &[], CAN_DO_ALL);
     let member = lab.join(network.id, &[]);
-    let attached = vec![netmap::Attachment { relay: relay.id, rtt_ms: 12 }];
-    member.send(&lab.controller, ToController::Report(Report { attached: attached.clone(), ..Report::default() }));
+    let attached = vec![netmap::Attachment { relay: relay.id, rtt_ms: 12, shared: false }];
+    member.send(&lab.controller, ToController::Report(Box::new(Report { attached: attached.clone(), ..Report::default() })));
     let nodes = lab.controller.nodes(network.id).unwrap();
     assert_eq!(nodes.iter().find(|node| node.id == member.id).unwrap().attached, attached);
     assert!(nodes.iter().filter(|node| node.attached.iter().any(|attachment| attachment.relay == relay.id)).count() == 1);

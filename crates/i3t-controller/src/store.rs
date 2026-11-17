@@ -22,6 +22,7 @@ mod pair;
 mod rule;
 mod schema;
 mod stats;
+mod switch;
 mod test;
 mod token;
 
@@ -35,9 +36,11 @@ pub use credential::CredentialRecord;
 pub use forward::ForwardRecord;
 pub use group::{BUILTIN_GROUP, GroupRecord, folded};
 pub use network::{NetworkRecord, NewNetwork};
-pub use node::{NetmapState, NewNode, NodeRecord};
+pub use node::{NetmapState, NewNode, NodeRecord, ReachRecord};
 pub use oplog::LogFilter;
+pub use pair::PairOptions;
 pub use stats::StatPoint;
+pub use switch::NewSwitch;
 pub use test::KEEP_PER_PAIR;
 pub use token::{NewToken, RETENTION_SECS, TokenRecord, is_pending, token_at};
 

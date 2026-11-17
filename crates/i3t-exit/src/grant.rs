@@ -110,6 +110,7 @@ pub(crate) mod tests {
             dial_out_only: false,
             keep_alive: false,
             lane: LaneMode::Off,
+            congestion: None,
         }
     }
 
@@ -159,6 +160,7 @@ pub(crate) mod tests {
                 ],
                 pinned_relays: Vec::new(),
                 profile: None,
+                shared_relays: Vec::new(),
             },
             peers: vec![peer(LAPTOP), peer(NAS)],
             relays: Vec::new(),

@@ -86,44 +86,20 @@ pub(crate) fn declarable(address: SocketAddr, cidr: Ipv4Net) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use i3t_model::control::Declared;
 
     use super::*;
-    use crate::store::NetmapState;
 
     const CIDR: &str = "10.66.0.0/16";
 
     fn node(observed: Option<&str>, local: Option<&[&str]>, declared: Option<&str>) -> NodeRecord {
         NodeRecord {
-            id: i3t_proto::NodeId::new(1).unwrap(),
-            network: i3t_model::admin::NetworkId(1),
-            key: i3t_proto::PublicKey::from_bytes([1; 32]),
             name: "r".to_owned(),
-            virtual_ip: "10.66.0.1".parse().unwrap(),
-            groups: BTreeSet::new(),
             declared: Declared { relay: true, relay_address: declared.map(|text| text.parse().unwrap()), ..Declared::default() },
-            relay: None,
-            exit: None,
-            dial_out_only: false,
-            routing: None,
-            reach: None,
-            pinned_relays: Vec::new(),
-            profile: None,
             endpoints: vec!["192.168.9.9:20330".parse().unwrap()],
             local_addresses: local.map(|ips| ips.iter().map(|ip| ip.parse().unwrap()).collect()),
             observed: observed.map(|text| text.parse().unwrap()),
-            attached: Vec::new(),
-            platform: String::new(),
-            version: String::new(),
-            hostname: String::new(),
-            self_update: None,
-            update_failure: None,
-            created_at: 0,
-            last_seen_at: None,
-            netmap: NetmapState::default(),
-            enrolled_with: None,
+            ..crate::store::fixtures::record(1)
         }
     }
 
