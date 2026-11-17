@@ -1,5 +1,5 @@
 import { useQueries, useQuery } from '@tanstack/react-query'
-import { Copy, EllipsisVertical, Pencil, Plus, RadioTower, Trash2 } from 'lucide-react'
+import { Copy, Pencil, Plus, RadioTower, Trash2 } from 'lucide-react'
 import { Fragment, type ReactNode, useState } from 'react'
 import { Link } from 'react-router'
 
@@ -16,15 +16,10 @@ import { EmptyState, ErrorState, SkeletonRows } from '@/components/states'
 import { Table, TableNote, Td, Th, Tr } from '@/components/table'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
+import { DropdownMenuItem, DropdownMenuSeparator } from '@/components/ui/dropdown-menu'
 import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
+import { RowActions } from '@/components/row-actions'
 import { t } from '@/i18n'
 import { copyText } from '@/lib/clipboard'
 import { listenerUsage } from '@/lib/commands'
@@ -150,28 +145,21 @@ export function ListenersPage() {
   )
 
   const actions = (listener: Listener): ReactNode => (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon-sm" aria-label={t.common.actionsFor(listener.name)}>
-          <EllipsisVertical aria-hidden />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent>
-        <DropdownMenuItem onSelect={() => setEditor({ listener })}>
-          <Pencil aria-hidden />
-          {l.menuEdit}
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => copyUsage(listener)}>
-          <Copy aria-hidden />
-          {l.menuCopy}
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem danger onSelect={() => void onDelete(listener)}>
-          <Trash2 aria-hidden />
-          {l.menuDelete}
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <RowActions label={t.common.actionsFor(listener.name)}>
+      <DropdownMenuItem onSelect={() => setEditor({ listener })}>
+        <Pencil aria-hidden />
+        {l.menuEdit}
+      </DropdownMenuItem>
+      <DropdownMenuItem onSelect={() => copyUsage(listener)}>
+        <Copy aria-hidden />
+        {l.menuCopy}
+      </DropdownMenuItem>
+      <DropdownMenuSeparator />
+      <DropdownMenuItem danger onSelect={() => void onDelete(listener)}>
+        <Trash2 aria-hidden />
+        {l.menuDelete}
+      </DropdownMenuItem>
+    </RowActions>
   )
 
   return (

@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { ChevronDown, Copy, DoorOpen, EllipsisVertical, Plus, Power, SlidersHorizontal } from 'lucide-react'
+import { ChevronDown, Copy, DoorOpen, Plus, Power, SlidersHorizontal } from 'lucide-react'
 import { Fragment, type ReactNode, useId, useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 
@@ -17,18 +17,13 @@ import { EmptyState, ErrorState, SkeletonRows } from '@/components/states'
 import { IssueIcon, OnlineDot, StatusText } from '@/components/status'
 import { Table, Td, Th, Tr } from '@/components/table'
 import { Button } from '@/components/ui/button'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
+import { DropdownMenuItem, DropdownMenuSeparator } from '@/components/ui/dropdown-menu'
 import { RadioCards } from '@/components/ui/radio-cards'
 import { Skeleton } from '@/components/ui/skeleton'
 import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
 import { TrafficText, UsageBar } from '@/components/usage'
+import { RowActions } from '@/components/row-actions'
 import { t } from '@/i18n'
 import { copyText } from '@/lib/clipboard'
 import { declareCommand, exitUsage } from '@/lib/commands'
@@ -509,36 +504,29 @@ export function ExitsPage() {
                         <Users network={network} node={view.node} />
                       </Td>
                       <Td className="pl-0 text-right">
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <Button variant="ghost" size="icon-sm" aria-label={t.common.actionsFor(view.node.name)}>
-                              <EllipsisVertical aria-hidden />
-                            </Button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent>
-                            <DropdownMenuItem
-                              onSelect={() =>
-                                void copyText(exitUsage(view.node.virtual_ip)).then((ok) =>
-                                  ok ? toast.success(e.usageCopied) : toast.error(t.common.copyFailed),
-                                )
-                              }
-                            >
-                              <Copy aria-hidden />
-                              {e.menuCopy}
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                              onSelect={() => void navigate(`${nodePath(network.id, view.node.id)}?tab=exit`)}
-                            >
-                              <SlidersHorizontal aria-hidden />
-                              {e.menuEdit}
-                            </DropdownMenuItem>
-                            <DropdownMenuSeparator />
-                            <DropdownMenuItem danger onSelect={() => void onDisable(view)}>
-                              <Power aria-hidden />
-                              {e.menuDisable}
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
+                        <RowActions label={t.common.actionsFor(view.node.name)}>
+                          <DropdownMenuItem
+                            onSelect={() =>
+                              void copyText(exitUsage(view.node.virtual_ip)).then((ok) =>
+                                ok ? toast.success(e.usageCopied) : toast.error(t.common.copyFailed),
+                              )
+                            }
+                          >
+                            <Copy aria-hidden />
+                            {e.menuCopy}
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            onSelect={() => void navigate(`${nodePath(network.id, view.node.id)}?tab=exit`)}
+                          >
+                            <SlidersHorizontal aria-hidden />
+                            {e.menuEdit}
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem danger onSelect={() => void onDisable(view)}>
+                            <Power aria-hidden />
+                            {e.menuDisable}
+                          </DropdownMenuItem>
+                        </RowActions>
                       </Td>
                     </Tr>
                     {expanded ? (

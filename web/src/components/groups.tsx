@@ -3,11 +3,11 @@ import { type KeyboardEvent, useId, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router'
 
 import { type Group, type GroupRef, type NetworkId } from '@/api/types'
+import { ChipList } from '@/components/chip'
+import { CHIP_SIZE } from '@/components/chip-size'
 import { CheckMark } from '@/components/ui/check-mark'
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
-import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
-import { formatList } from '@/lib/format'
 import { ALL_GROUP, byGroupName, groupRef, isAllGroup } from '@/lib/groups'
 import { cn } from '@/lib/utils'
 import { networkPath } from '@/pages/networks/context'
@@ -23,11 +23,6 @@ interface GroupChipProps {
   size?: 'sm' | 'md'
   className?: string
 }
-
-const CHIP_SIZE = {
-  sm: 'h-5.5 max-w-44 gap-1 rounded-sm px-1.5 text-xs [&>svg]:size-3',
-  md: 'h-7 max-w-60 gap-1.5 rounded-md px-2 text-[13px] [&>svg]:size-3.5',
-} as const
 
 /**
  * 分组的样子，全站一致：分组的图标加名字，浅灰底。内置的 `All` 是空心的细框，表示它不是管理员加上去的。
@@ -66,26 +61,14 @@ export function GroupChip({ name, builtin: flag, onRemove, muted = false, size =
 
 /** 一串分组：显示前几个，其余折成"+N"，悬停看全部。 */
 export function GroupList({ groups, max = 2, empty }: { groups: readonly GroupRef[]; max?: number; empty?: string }) {
-  if (groups.length === 0) return <span className="text-[13px] text-muted-foreground">{empty ?? t.common.none}</span>
-  const shown = groups.slice(0, max)
-  const rest = groups.slice(max).map((group) => group.name)
   return (
-    <span className="inline-flex flex-wrap items-center gap-1">
-      {shown.map((group) => (
-        <GroupChip key={group.id} name={group.name} builtin={group.builtin} />
-      ))}
-      {rest.length > 0 ? (
-        <Tooltip content={formatList(rest)}>
-          <span
-            tabIndex={0}
-            aria-label={t.groups.picker.more(rest.length, formatList(rest))}
-            className="rounded-sm px-1 text-xs text-muted-foreground tabular"
-          >
-            +{rest.length}
-          </span>
-        </Tooltip>
-      ) : null}
-    </span>
+    <ChipList
+      items={groups}
+      max={max}
+      empty={empty}
+      name={(group) => group.name}
+      render={(group) => <GroupChip key={group.id} name={group.name} builtin={group.builtin} />}
+    />
   )
 }
 

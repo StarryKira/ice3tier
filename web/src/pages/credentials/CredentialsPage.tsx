@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Ban, EllipsisVertical, Eraser, KeyRound, Plus, SlidersHorizontal, Trash2 } from 'lucide-react'
+import { Ban, Eraser, KeyRound, Plus, SlidersHorizontal, Trash2 } from 'lucide-react'
 import { Fragment, useState } from 'react'
 import { Link } from 'react-router'
 
@@ -18,17 +18,12 @@ import { EmptyState, ErrorState, SkeletonRows } from '@/components/states'
 import { RelativeTime, StatusText } from '@/components/status'
 import { Table, TableNote, Td, Th, Tr } from '@/components/table'
 import { Button } from '@/components/ui/button'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
+import { DropdownMenuItem, DropdownMenuSeparator } from '@/components/ui/dropdown-menu'
 import { Field } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Tooltip } from '@/components/ui/tooltip'
 import { BytesInput, UsageBar } from '@/components/usage'
+import { RowActions } from '@/components/row-actions'
 import { t } from '@/i18n'
 import { listenerUsage } from '@/lib/commands'
 import { type ByteUnit, bytesToField, formatBytes } from '@/lib/format'
@@ -458,43 +453,36 @@ export function CredentialsPage() {
                           )}
                         </Td>
                         <Td className="pl-0 text-right" data-keep>
-                          <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                              <Button variant="ghost" size="icon-sm" aria-label={t.common.actionsFor(credential.name)}>
-                                <EllipsisVertical aria-hidden />
-                              </Button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent>
-                              <DropdownMenuItem disabled={!view.editable} onSelect={() => setEditing(credential)}>
-                                <SlidersHorizontal aria-hidden />
-                                <span>
-                                  {c.menuEdit}
-                                  {view.editable ? null : (
-                                    <span className="block text-xs text-muted-foreground">{c.revokedNoEdit}</span>
-                                  )}
-                                </span>
+                          <RowActions label={t.common.actionsFor(credential.name)}>
+                            <DropdownMenuItem disabled={!view.editable} onSelect={() => setEditing(credential)}>
+                              <SlidersHorizontal aria-hidden />
+                              <span>
+                                {c.menuEdit}
+                                {view.editable ? null : (
+                                  <span className="block text-xs text-muted-foreground">{c.revokedNoEdit}</span>
+                                )}
+                              </span>
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              disabled={!view.editable || credential.usage.bytes === 0}
+                              onSelect={() => void onReset(credential)}
+                            >
+                              <Eraser aria-hidden />
+                              {c.menuReset}
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            {view.deleteStep === 'revoke' ? (
+                              <DropdownMenuItem danger onSelect={() => void onRevoke(credential)}>
+                                <Ban aria-hidden />
+                                {c.menuRevoke}
                               </DropdownMenuItem>
-                              <DropdownMenuItem
-                                disabled={!view.editable || credential.usage.bytes === 0}
-                                onSelect={() => void onReset(credential)}
-                              >
-                                <Eraser aria-hidden />
-                                {c.menuReset}
+                            ) : (
+                              <DropdownMenuItem danger onSelect={() => void onRemove(credential)}>
+                                <Trash2 aria-hidden />
+                                {c.menuRemove}
                               </DropdownMenuItem>
-                              <DropdownMenuSeparator />
-                              {view.deleteStep === 'revoke' ? (
-                                <DropdownMenuItem danger onSelect={() => void onRevoke(credential)}>
-                                  <Ban aria-hidden />
-                                  {c.menuRevoke}
-                                </DropdownMenuItem>
-                              ) : (
-                                <DropdownMenuItem danger onSelect={() => void onRemove(credential)}>
-                                  <Trash2 aria-hidden />
-                                  {c.menuRemove}
-                                </DropdownMenuItem>
-                              )}
-                            </DropdownMenuContent>
-                          </DropdownMenu>
+                            )}
+                          </RowActions>
                         </Td>
                       </Tr>
                       {/* 用完了要人处理：原因和下一步单独占一行，是一句完整的话。 */}

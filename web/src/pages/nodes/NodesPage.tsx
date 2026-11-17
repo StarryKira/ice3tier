@@ -5,7 +5,6 @@ import {
   CircleMinus,
   CirclePlus,
   DoorOpen,
-  EllipsisVertical,
   ListFilter,
   Pencil,
   Plus,
@@ -32,19 +31,14 @@ import { Page, PageHeader } from '@/components/page'
 import { EmptyState, ErrorState, NoMatches, SkeletonRows } from '@/components/states'
 import { Flag } from '@/components/flag'
 import { IssueIcon, RelativeTime, StatusDot } from '@/components/status'
-import { SortTh, Table, TableFooter, Td, Th, Toolbar, Tr } from '@/components/table'
+import { CellButton, RowsTotal, SortTh, Table, TableFooter, Td, Th, Toolbar, Tr } from '@/components/table'
+import { RowActions } from '@/components/row-actions'
 import { GroupList, GroupsLink } from '@/components/groups'
 import { VersionCell } from '@/components/update'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
+import { DropdownMenuItem, DropdownMenuSeparator } from '@/components/ui/dropdown-menu'
 import { Field } from '@/components/ui/field'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Segmented } from '@/components/ui/segmented'
@@ -628,14 +622,10 @@ export function NodesPage() {
                         </div>
                       </Td>
                       <Td>
-                        <button
-                          type="button"
+                        <CellButton
                           onClick={() => setDialog({ kind: 'groups', node })}
                           aria-label={t.nodes.editGroupsOf(node.name)}
-                          className={cn(
-                            '-mx-1.5 rounded-md px-1.5 py-1 text-left hover:bg-muted',
-                            node.groups.length === 0 && 'text-[13px] text-muted-foreground',
-                          )}
+                          className={cn(node.groups.length === 0 && 'text-[13px] text-muted-foreground')}
                         >
                           {node.groups.length === 0 ? (
                             <span className="inline-flex items-center gap-1">
@@ -645,7 +635,7 @@ export function NodesPage() {
                           ) : (
                             <GroupList groups={node.groups} />
                           )}
-                        </button>
+                        </CellButton>
                       </Td>
                       <Td className="text-[13px] whitespace-nowrap">
                         {/* 在线与否的圆点在这一格的最前面，和"在线""3 分钟前"这句话放在一起。 */}
@@ -672,33 +662,26 @@ export function NodesPage() {
                         <VersionCell node={node} />
                       </Td>
                       <Td className="pl-0 text-right" data-keep>
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <Button variant="ghost" size="icon-sm" aria-label={t.common.actionsFor(node.name)}>
-                              <EllipsisVertical aria-hidden />
-                            </Button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent>
-                            <DropdownMenuItem onSelect={() => void navigate(nodePath(network.id, node.id))}>
-                              <Server aria-hidden />
-                              {t.nodes.menuDetails}
-                            </DropdownMenuItem>
-                            <DropdownMenuItem onSelect={() => setDialog({ kind: 'rename', node })}>
-                              <Pencil aria-hidden />
-                              {t.nodes.menuRename}
-                            </DropdownMenuItem>
-                            <DropdownMenuItem onSelect={() => setDialog({ kind: 'groups', node })}>
-                              <Boxes aria-hidden />
-                              {t.nodes.menuGroups}
-                            </DropdownMenuItem>
-                            <UpdateMenuItem node={node} onSelect={() => setDialog({ kind: 'update', node })} />
-                            <DropdownMenuSeparator />
-                            <DropdownMenuItem danger onSelect={() => void deleteNode(node)}>
-                              <Trash2 aria-hidden />
-                              {t.nodes.menuDelete}
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
+                        <RowActions label={t.common.actionsFor(node.name)}>
+                          <DropdownMenuItem onSelect={() => void navigate(nodePath(network.id, node.id))}>
+                            <Server aria-hidden />
+                            {t.nodes.menuDetails}
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onSelect={() => setDialog({ kind: 'rename', node })}>
+                            <Pencil aria-hidden />
+                            {t.nodes.menuRename}
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onSelect={() => setDialog({ kind: 'groups', node })}>
+                            <Boxes aria-hidden />
+                            {t.nodes.menuGroups}
+                          </DropdownMenuItem>
+                          <UpdateMenuItem node={node} onSelect={() => setDialog({ kind: 'update', node })} />
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem danger onSelect={() => void deleteNode(node)}>
+                            <Trash2 aria-hidden />
+                            {t.nodes.menuDelete}
+                          </DropdownMenuItem>
+                        </RowActions>
                       </Td>
                     </Tr>
                   )
@@ -712,10 +695,7 @@ export function NodesPage() {
 
             {visible.length > 0 ? (
               <TableFooter>
-                <span className="tabular">
-                  {t.common.rowsTotal(visible.length)}
-                  {hasActiveFilters(filters) && visible.length !== all.length ? ` / ${all.length}` : ''}
-                </span>
+                <RowsTotal shown={visible.length} total={hasActiveFilters(filters) ? all.length : undefined} />
                 {pages > 1 ? (
                   <div className="flex items-center gap-2">
                     <Button size="sm" disabled={currentPage <= 1} onClick={() => setPage(currentPage - 1)}>

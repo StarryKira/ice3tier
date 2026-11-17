@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 
 import { type Group, type NodeRef, type Rule } from '@/api/types'
 import { setLocale, t } from '@/i18n'
+import { FOCUSED_ROW } from '@/lib/useFocusRow'
 import { makeNode } from '@/test/fixtures'
 import { fakeApi, NETWORK, renderWithApp } from '@/test/harness'
 
@@ -49,14 +50,18 @@ const g = () => t.groups
 
 describe('分组页', () => {
   for (const locale of ['zh-CN', 'en'] as const) {
-    it(`一行一个分组：节点数、规则数；All 在最前面，标着内置，没有改名、删除（${locale}）`, async () => {
+    it(`一行一个分组：成员、用到它的策略写成小标签；All 在最前面，标着内置，没有菜单（${locale}）`, async () => {
       setLocale(locale, { remember: false })
       setup()
       render()
       const all = await screen.findByTestId('group-row-All')
       expect(all).toHaveTextContent(g().builtin)
       const cells = within(screen.getByTestId('group-row-laptops')).getAllByRole('cell')
-      expect(cells.slice(0, 3).map((cell) => cell.textContent)).toEqual(['laptops', '1', '1'])
+      expect(cells[0]).toHaveTextContent('laptops')
+      expect(cells[1]).toHaveTextContent('laptop')
+      expect(cells[2]).toHaveTextContent('ssh')
+      // 没有策略的分组写一句"没有策略"。
+      expect(within(all).getAllByRole('cell')[2]).toHaveTextContent(g().noRules)
       expect(screen.queryByRole('button', { name: t.common.actionsFor('All') })).not.toBeInTheDocument()
       expect(screen.getByRole('button', { name: t.common.actionsFor('laptops') })).toBeVisible()
       const rows = screen.getAllByTestId(/^group-row-/)
@@ -171,7 +176,7 @@ describe('分组页', () => {
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
   })
 
-  it('成员：展开看，叉号移除，选一个节点添加；All 的成员只能看', async () => {
+  it('成员：点成员那一格打开，叉号移除，选一个节点添加；All 的成员只能看', async () => {
     const user = userEvent.setup()
     const api = setup()
     api.use({
@@ -189,17 +194,18 @@ describe('分组页', () => {
     await user.click(await screen.findByRole('option', { name: /gw/ }))
     await waitFor(() => expect(api.callsTo('PUT /networks/1/groups/3/nodes/1')).toHaveLength(1))
 
-    await user.click(screen.getByRole('button', { name: g().membersOf('All') }))
-    const all = await screen.findByTestId('group-members-All')
-    expect(all).toHaveTextContent(g().allMembers)
+    await user.click(screen.getByRole('button', { name: t.common.done }))
+    // All 的成员直接写在那一格里，不能点开改。
+    const all = screen.getByTestId('group-row-All')
+    expect(all).toHaveTextContent('gw')
     expect(within(all).queryByRole('button')).not.toBeInTheDocument()
-    expect(within(all).queryByRole('combobox')).not.toBeInTheDocument()
   })
 
-  it('从操作记录点过来（?focus=）：那一行展开；已经删掉了的说一句', async () => {
+  it('从操作记录点过来（?focus=）：那一行亮起来；已经删掉了的说一句', async () => {
     setup()
     const { unmount } = render('/n/1/groups?focus=3')
-    expect(await screen.findByTestId('group-members-laptops')).toBeVisible()
+    const row = await screen.findByTestId('group-row-laptops')
+    expect(row.className).toContain(FOCUSED_ROW.split(' ')[0] ?? '')
     unmount()
     setup()
     render('/n/1/groups?focus=77')

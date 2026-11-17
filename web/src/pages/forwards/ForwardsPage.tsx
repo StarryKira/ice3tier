@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeftRight, ArrowRight, Copy, EllipsisVertical, Pencil, Plus, Trash2 } from 'lucide-react'
+import { ArrowLeftRight, ArrowRight, Copy, Pencil, Plus, Trash2 } from 'lucide-react'
 import { Fragment, useState } from 'react'
 import { Link } from 'react-router'
 
@@ -18,16 +18,11 @@ import { StatusText } from '@/components/status'
 import { Table, TableNote, Td, Th, Tr } from '@/components/table'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
+import { DropdownMenuItem, DropdownMenuSeparator } from '@/components/ui/dropdown-menu'
 import { Switch } from '@/components/ui/switch'
 import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
+import { RowActions } from '@/components/row-actions'
 import { t } from '@/i18n'
 import { copyText } from '@/lib/clipboard'
 import { parseSocketAddr } from '@/lib/cidr'
@@ -305,34 +300,27 @@ export function ForwardsPage() {
                           </Tooltip>
                         </Td>
                         <Td className="pl-0 text-right" data-keep>
-                          <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                              <Button variant="ghost" size="icon-sm" aria-label={t.common.actionsFor(label)}>
-                                <EllipsisVertical aria-hidden />
-                              </Button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent>
-                              <DropdownMenuItem onSelect={() => setEditor({ forward })}>
-                                <Pencil aria-hidden />
-                                {f.menuEdit}
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                onSelect={() =>
-                                  void copyText(forwardAddress(forward, view)).then((ok) =>
-                                    ok ? toast.success(f.addressCopied) : toast.error(t.common.copyFailed),
-                                  )
-                                }
-                              >
-                                <Copy aria-hidden />
-                                {f.menuCopy}
-                              </DropdownMenuItem>
-                              <DropdownMenuSeparator />
-                              <DropdownMenuItem danger onSelect={() => void onDelete(forward)}>
-                                <Trash2 aria-hidden />
-                                {f.menuDelete}
-                              </DropdownMenuItem>
-                            </DropdownMenuContent>
-                          </DropdownMenu>
+                          <RowActions label={t.common.actionsFor(label)}>
+                            <DropdownMenuItem onSelect={() => setEditor({ forward })}>
+                              <Pencil aria-hidden />
+                              {f.menuEdit}
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onSelect={() =>
+                                void copyText(forwardAddress(forward, view)).then((ok) =>
+                                  ok ? toast.success(f.addressCopied) : toast.error(t.common.copyFailed),
+                                )
+                              }
+                            >
+                              <Copy aria-hidden />
+                              {f.menuCopy}
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem danger onSelect={() => void onDelete(forward)}>
+                              <Trash2 aria-hidden />
+                              {f.menuDelete}
+                            </DropdownMenuItem>
+                          </RowActions>
                         </Td>
                       </Tr>
                       {/* 原因和下一步单独占一行，是一句完整的话，不挤在状态那一格里。 */}

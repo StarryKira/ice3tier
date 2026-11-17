@@ -12,7 +12,7 @@ import { InfoTip } from '@/components/info-tip'
 import { NodeSelect } from '@/components/node'
 import { Notice } from '@/components/notice'
 import { SearchBox } from '@/components/search-box'
-import { Toolbar } from '@/components/table'
+import { RowsTotal, TableFooter, Toolbar } from '@/components/table'
 import { Canvas, Page, PageHeader } from '@/components/page'
 import { EmptyState, ErrorState, SkeletonBlock } from '@/components/states'
 import { Button } from '@/components/ui/button'
@@ -309,13 +309,18 @@ export function AccessPage() {
             ) : rules.length === 0 ? (
               <EmptyState icon={ScanSearch} title={t.access.noMatch} />
             ) : (
-              <RuleList
-                network={network}
-                graph={data}
-                rules={rules}
-                focused={selected}
-                onEdit={(rule) => setEditor({ rule })}
-              />
+              <>
+                <RuleList
+                  network={network}
+                  graph={data}
+                  rules={rules}
+                  focused={selected}
+                  onEdit={(rule) => setEditor({ rule })}
+                />
+                <TableFooter>
+                  <RowsTotal shown={rules.length} total={data.rules.length} />
+                </TableFooter>
+              </>
             )
           ) : graphView === 'groups' ? (
             <div className="flex flex-1 flex-col">

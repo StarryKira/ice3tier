@@ -142,6 +142,8 @@ test('建两个分组：servers、laptops', async () => {
     await dialog.getByRole('button', { name: g.createSubmit }).click()
     await expectToast(page, g.created(name))
     await expect(dialog).toBeHidden()
+    // 新建之后接着打开它的成员；这里先不加，关掉。
+    await page.getByRole('dialog', { name: g.membersOf(name) }).getByRole('button', { name: t.common.done }).click()
   }
   const groups = await controller.api<{ name: string; builtin: boolean }[]>('GET', `${NET}/groups`)
   expect(groups.map((group) => group.name)).toEqual(['All', 'laptops', 'servers'])

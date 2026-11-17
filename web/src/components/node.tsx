@@ -2,8 +2,9 @@ import { type ReactNode } from 'react'
 import { Link } from 'react-router'
 
 import { type Node, type NodeId, type NodeRef } from '@/api/types'
+import { Chip, ChipList } from '@/components/chip'
 import { Combobox, type ComboOption } from '@/components/combobox'
-import { OnlineDot } from '@/components/status'
+import { OnlineDot, StatusDot } from '@/components/status'
 import { t } from '@/i18n'
 import { nodePath } from '@/lib/nodes'
 import { cn } from '@/lib/utils'
@@ -69,6 +70,45 @@ export function NodeSelect({ nodes, value, onChange, placeholder, disabledReason
       placeholder={placeholder ?? t.select.nodePlaceholder}
       searchPlaceholder={t.select.nodeSearch}
       emptyText={t.select.nodeEmpty}
+    />
+  )
+}
+
+/** 节点的小标签：前面是在线与否的圆点，和分组、策略的小标签一个样子。 */
+export function NodeChip({ name, online }: { name: string; online?: boolean }) {
+  return (
+    <Chip
+      lead={
+        <StatusDot
+          tone={online === false ? 'idle' : 'ok'}
+          label={online === false ? t.common.offline : t.common.online}
+        />
+      }
+    >
+      {name}
+    </Chip>
+  )
+}
+
+/** 一串节点：显示前几个，其余折成"+N"。 */
+export function NodeList({
+  nodes,
+  online,
+  max = 3,
+  empty,
+}: {
+  nodes: readonly NodeRef[]
+  online: (id: NodeId) => boolean | undefined
+  max?: number
+  empty?: ReactNode
+}) {
+  return (
+    <ChipList
+      items={nodes}
+      max={max}
+      empty={empty}
+      name={(node) => node.name}
+      render={(node) => <NodeChip key={node.id} name={node.name} online={online(node.id)} />}
     />
   )
 }

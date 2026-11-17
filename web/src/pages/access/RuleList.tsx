@@ -1,19 +1,14 @@
-import { EllipsisVertical, MoveHorizontal, MoveRight, Pencil, Trash2 } from 'lucide-react'
+import { Pencil, Trash2 } from 'lucide-react'
 import { useEffect, useRef } from 'react'
 
 import { type AccessGraph, type Direction, type GroupRef, type Network, type Rule } from '@/api/types'
 import { isAllToAll } from '@/access/reach'
 import { GroupChip } from '@/components/groups'
+import { RowActions } from '@/components/row-actions'
+import { DirectionMark } from '@/components/rule'
 import { Table, Td, Th, Tr } from '@/components/table'
 import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
+import { DropdownMenuItem, DropdownMenuSeparator } from '@/components/ui/dropdown-menu'
 import { Switch } from '@/components/ui/switch'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
@@ -45,30 +40,19 @@ function GroupCell({ group, graph }: { group: GroupRef; graph: AccessGraph }) {
   )
 }
 
-/** 方向：一个带框的长箭头，双向两头都有。启用时是绿色的，停用时是灰的。 */
-function DirectionBox({ direction, enabled }: { direction: Direction; enabled: boolean }) {
-  const Icon = direction === 'both' ? MoveHorizontal : MoveRight
-  const label = direction === 'both' ? a.directionBoth : a.directionOneWay
+/** 方向：箭头加一个词，和别的表格里的文字一样大小。 */
+function DirectionCell({ direction }: { direction: Direction }) {
   return (
-    <Tooltip content={label}>
-      <span
-        tabIndex={0}
-        role="img"
-        aria-label={label}
-        className={cn(
-          'inline-flex h-7 w-16 items-center justify-center rounded-md border',
-          enabled ? 'border-ok/50 bg-ok-soft text-ok' : 'border-border text-faint',
-        )}
-      >
-        <Icon className="size-5" strokeWidth={1.5} aria-hidden />
-      </span>
-    </Tooltip>
+    <span className="inline-flex items-center gap-1.5 text-[13px] whitespace-nowrap">
+      <DirectionMark direction={direction} />
+      {direction === 'both' ? a.directionBoth : a.directionOneWay}
+    </span>
   )
 }
 
 /**
- * 策略表（照 NetBird 的样子）：一条策略一行，名字（前面一个圆点：启用是绿的）、启用开关、来源、方向、目标。
- * 停用的来源和目标变淡，开关照样能拨。策略只有"允许"，没有顺序和优先级，所以按编号排、不给拖动。
+ * 策略表，和节点、分组的表一个样子：一条策略一行，名字、启用开关、来源、方向、目标、操作菜单。
+ * 停用的那几格变淡，开关照样能拨。策略只有"允许"，没有顺序和优先级，所以按编号排、不给拖动。
  */
 export function RuleList({ network, graph, rules, focused, onEdit }: RuleListProps) {
   const actions = useRuleActions(network, graph)
@@ -104,14 +88,10 @@ export function RuleList({ network, graph, rules, focused, onEdit }: RuleListPro
               }}
               data-testid={`rule-row-${rule.id}`}
               data-highlighted={focused === rule.id || undefined}
-              className={cn('h-14', focused === rule.id && 'bg-accent/60')}
+              className={cn('h-16 hover:bg-muted/50', focused === rule.id && 'bg-accent/60 hover:bg-accent')}
             >
               <Td>
                 <span className="inline-flex items-center gap-2.5">
-                  <span
-                    aria-hidden
-                    className={cn('size-2 shrink-0 rounded-full', rule.enabled ? 'bg-ok-dot' : 'bg-idle-dot')}
-                  />
                   {rule.name === '' ? (
                     <span className="text-muted-foreground">{a.unnamed}</span>
                   ) : (
@@ -137,31 +117,24 @@ export function RuleList({ network, graph, rules, focused, onEdit }: RuleListPro
               <Td className={cn(!rule.enabled && 'opacity-55')}>
                 <GroupCell group={rule.src} graph={graph} />
               </Td>
-              <Td>
-                <DirectionBox direction={rule.direction} enabled={rule.enabled} />
+              <Td className={cn(!rule.enabled && 'opacity-55')}>
+                <DirectionCell direction={rule.direction} />
               </Td>
               <Td className={cn(!rule.enabled && 'opacity-55')}>
                 <GroupCell group={rule.dst} graph={graph} />
               </Td>
-              <Td>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" size="icon-sm" aria-label={a.ruleActions(label)}>
-                      <EllipsisVertical aria-hidden />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent>
-                    <DropdownMenuItem onSelect={() => onEdit(rule)}>
-                      <Pencil aria-hidden />
-                      {a.menuEdit}
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem danger onSelect={() => void actions.destroy(rule)}>
-                      <Trash2 aria-hidden />
-                      {a.menuDelete}
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+              <Td className="pl-0 text-right">
+                <RowActions label={a.ruleActions(label)}>
+                  <DropdownMenuItem onSelect={() => onEdit(rule)}>
+                    <Pencil aria-hidden />
+                    {a.menuEdit}
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem danger onSelect={() => void actions.destroy(rule)}>
+                    <Trash2 aria-hidden />
+                    {a.menuDelete}
+                  </DropdownMenuItem>
+                </RowActions>
               </Td>
             </Tr>
           )

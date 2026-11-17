@@ -173,8 +173,9 @@ test('分组页：All 在最前面；新建分组，名字的写法不对、重�
     await dialog.getByRole('button', { name: g.createSubmit }).click()
     await expectToast(page, g.created(group))
     await expect(dialog).toBeHidden()
-    // 新建的分组展开着，接着就能添加成员。
+    // 新建之后接着打开它的成员，就能添加。
     await expect(page.getByTestId(`group-members-${group}`)).toContainText(g.noMembers)
+    await page.getByRole('button', { name: t.common.done }).click()
     if (group === 'servers') await page.getByRole('button', { name: g.create }).click()
   }
   expect(Object.keys(await groupsByName())).toEqual(['All', 'laptops', 'servers'])

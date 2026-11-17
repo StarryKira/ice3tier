@@ -637,7 +637,8 @@ test('有数据时：分组', async () => {
 
   await page.getByRole('button', { name: g.membersOf('servers') }).click()
   await expect(page.getByTestId('group-members-servers')).toBeVisible()
-  await shot('groups-members')
+  await shot('groups-members', { fullPage: false })
+  await page.getByRole('button', { name: t.common.done }).click()
 
   await page.getByRole('button', { name: g.create }).click()
   const create = page.getByRole('dialog', { name: g.createTitle })
@@ -983,7 +984,6 @@ test('英文：长度最要紧的几页', async ({ browser }) => {
 
   await english.goto(`${controller.baseUrl}/n/1/groups`)
   await expect(english.getByTestId('group-row-servers')).toBeVisible()
-  await english.getByRole('button', { name: en.groups.membersOf('servers') }).click()
   await enShot('groups')
   await english.getByRole('button', { name: en.common.actionsFor('home') }).click()
   await english.getByRole('menuitem', { name: en.groups.menuDelete }).click()

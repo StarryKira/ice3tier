@@ -148,6 +148,6 @@ describe('一串分组', () => {
     )
     expect(screen.getByText('a')).toBeVisible()
     expect(screen.queryByText('c')).not.toBeInTheDocument()
-    expect(screen.getByLabelText(t.groups.picker.more(2, `c${t.common.listSeparator}d`))).toHaveTextContent('+2')
+    expect(screen.getByLabelText(t.common.moreItems(2, `c${t.common.listSeparator}d`))).toHaveTextContent('+2')
   })
 })

@@ -104,3 +104,26 @@ export function Toolbar({ className, ...props }: ComponentProps<'div'>) {
 export function TableNote({ className, ...props }: ComponentProps<'p'>) {
   return <p className={cn('-mx-3 border-t px-3 pt-3 text-[13px] text-muted-foreground', className)} {...props} />
 }
+
+/**
+ * 表格里能点的一格（节点的分组、分组的成员）：看着是格子里的内容，悬停时浅灰底，点开改它。
+ */
+export function CellButton({ className, ...props }: ComponentProps<'button'>) {
+  return (
+    <button
+      type="button"
+      className={cn('-mx-1.5 rounded-md px-1.5 py-1 text-left hover:bg-muted', className)}
+      {...props}
+    />
+  )
+}
+
+/** 表格下面的"共 N 项"；筛过时写成"共 N 项 / 全部"。 */
+export function RowsTotal({ shown, total }: { shown: number; total?: number }) {
+  return (
+    <span className="tabular">
+      {t.common.rowsTotal(shown)}
+      {total !== undefined && total !== shown ? ` / ${total}` : ''}
+    </span>
+  )
+}
