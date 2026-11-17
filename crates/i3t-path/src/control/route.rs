@@ -642,6 +642,7 @@ mod tests {
             pin: None,
             pinned: false,
             policy_route: RouteKey::None,
+            other_mode: None,
         }
     }
 

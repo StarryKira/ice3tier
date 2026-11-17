@@ -9,6 +9,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use i3t_model::Netmap;
 use i3t_model::control::Route;
 use i3t_proto::NodeId;
 
@@ -70,33 +71,40 @@ pub struct RouteSpan {
 }
 
 impl RouteSpan {
-    /// 写进日志的样子：`直连 203.0.113.7:20330`、`经 #3 → #5`、`不可达`，不知道是 `?`。
+    /// 写进日志的样子：`直连 203.0.113.7:20330`、`经 hk-1 → la-1`、`不可达`，不知道是 `?`。relay 的名字从 `netmap` 里找
+    /// （[`Netmap::node_name`]，和 `i3t routes`、`i3t ping` 一样），找不到的写 `#编号`。
     #[must_use]
-    pub fn start_label(&self) -> RouteLabel<'_> {
-        RouteLabel(self.start.as_ref())
+    pub fn start_label<'a>(&'a self, netmap: &'a Netmap) -> RouteLabel<'a> {
+        RouteLabel { route: self.start.as_ref(), netmap }
     }
 
     #[must_use]
-    pub fn end_label(&self) -> RouteLabel<'_> {
-        RouteLabel(self.end.as_ref())
+    pub fn end_label<'a>(&'a self, netmap: &'a Netmap) -> RouteLabel<'a> {
+        RouteLabel { route: self.end.as_ref(), netmap }
     }
 }
 
 /// 一条路写进日志的样子。
 #[derive(Debug, Clone, Copy)]
-pub struct RouteLabel<'a>(Option<&'a Route>);
+pub struct RouteLabel<'a> {
+    route: Option<&'a Route>,
+    netmap: &'a Netmap,
+}
 
 impl fmt::Display for RouteLabel<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0 {
+        match self.route {
             None => f.write_str("?"),
             Some(Route::None) => f.write_str("不可达"),
             Some(Route::Direct { addr }) => write!(f, "直连 {addr}"),
             Some(Route::Relay { relays }) => {
                 f.write_str("经 ")?;
                 for (index, relay) in relays.iter().enumerate() {
-                    let arrow = if index == 0 { "" } else { " → " };
-                    write!(f, "{arrow}#{relay}")?;
+                    f.write_str(if index == 0 { "" } else { " → " })?;
+                    match self.netmap.node_name(*relay) {
+                        Some(name) => f.write_str(name)?,
+                        None => write!(f, "#{relay}")?,
+                    }
                 }
                 Ok(())
             }
@@ -129,12 +137,74 @@ mod tests {
         Route::Direct { addr: "203.0.113.7:20330".parse().unwrap() }
     }
 
+    /// 本节点 1（laptop，自己也是 relay），relay 3（hk，不是对端），对端 5（nas，也是 relay）。
+    fn netmap() -> Netmap {
+        use i3t_model::netmap::{LaneMode, LocalNode, Network, Peer, Relay};
+        use i3t_proto::PublicKey;
+
+        let node = |raw: u32| NodeId::new(raw).unwrap();
+        let relay = |raw: u32, name: &str| Relay {
+            id: node(raw),
+            key: PublicKey::from_bytes([1; 32]),
+            name: name.into(),
+            udp: Vec::new(),
+            tcp: Vec::new(),
+        };
+        let nas = Peer {
+            id: node(5),
+            key: PublicKey::from_bytes([5; 32]),
+            name: "nas".into(),
+            virtual_ip: [10, 66, 0, 5].into(),
+            inbound: true,
+            outbound: true,
+            endpoints: Vec::new(),
+            attached: Vec::new(),
+            exit: None,
+            dial_out_only: false,
+            keep_alive: false,
+            lane: LaneMode::Off,
+            congestion: None,
+        };
+        Netmap {
+            version: 1,
+            network: Network {
+                name: "home".into(),
+                domain: "home.i3t".into(),
+                cidr: "10.66.0.0/16".parse().unwrap(),
+                routing: Default::default(),
+                max_relay_hops: 2,
+                reach: Default::default(),
+                class: None,
+            },
+            me: LocalNode {
+                id: node(1),
+                name: "laptop".into(),
+                virtual_ip: [10, 66, 0, 1].into(),
+                routing: None,
+                reach: None,
+                dial_out_only: false,
+                relay: None,
+                exit: None,
+                listeners: Vec::new(),
+                forwards: Vec::new(),
+                forward_targets: Vec::new(),
+                pinned_relays: Vec::new(),
+                profile: None,
+                shared_relays: Vec::new(),
+            },
+            peers: vec![nas],
+            relays: vec![relay(3, "hk")],
+            relay_clients: Vec::new(),
+            credentials: Vec::new(),
+        }
+    }
+
     #[test]
     fn a_flow_that_kept_its_route_says_so() {
         let routes = Fake(Mutex::new(Some(CurrentRoute { route: direct(), since_switch: Some(Duration::from_secs(60)) })));
         let span = RouteAtStart::now(&routes, peer()).ended(&routes);
         assert_eq!(span, RouteSpan { start: Some(direct()), end: Some(direct()), changed: false });
-        assert_eq!(span.start_label().to_string(), "直连 203.0.113.7:20330");
+        assert_eq!(span.start_label(&netmap()).to_string(), "直连 203.0.113.7:20330");
     }
 
     #[test]
@@ -149,14 +219,23 @@ mod tests {
         *routes.0.lock().unwrap() = Some(CurrentRoute { route: relayed.clone(), since_switch: Some(Duration::ZERO) });
         let span = start.ended(&routes);
         assert_eq!((span.end.clone(), span.changed), (Some(relayed), true));
-        assert_eq!(span.end_label().to_string(), "经 #3 → #5");
+        assert_eq!(span.end_label(&netmap()).to_string(), "经 hk → nas");
     }
 
     #[test]
     fn without_a_route_view_the_route_is_unknown() {
         let span = RouteAtStart::now(&NoRoutes, peer()).ended(&NoRoutes);
         assert_eq!(span, RouteSpan { start: None, end: None, changed: false });
-        assert_eq!(span.start_label().to_string(), "?");
-        assert_eq!(RouteLabel(Some(&Route::None)).to_string(), "不可达");
+        let netmap = netmap();
+        assert_eq!(span.start_label(&netmap).to_string(), "?");
+        assert_eq!(RouteLabel { route: Some(&Route::None), netmap: &netmap }.to_string(), "不可达");
+    }
+
+    #[test]
+    fn relays_in_the_log_are_named_like_everywhere_else_and_unknown_ones_by_number() {
+        let netmap = netmap();
+        let via = Route::Relay { relays: [3, 1, 5, 7].map(|raw| NodeId::new(raw).unwrap()).to_vec() };
+        let label = RouteLabel { route: Some(&via), netmap: &netmap };
+        assert_eq!(label.to_string(), "经 hk → laptop → nas → #7", "relay 列表、本节点自己、对端都认得出来");
     }
 }

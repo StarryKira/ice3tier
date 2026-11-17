@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""UDP 的端到端测试：SOCKS5 的 UDP ASSOCIATE 经出口出去（直连和经 relay）、真的 DNS 查询、UDP 的端口转发。
+"""UDP 的端到端测试：SOCKS5 的 UDP ASSOCIATE 经出口出去（直连和经 relay）、真的 DNS 查询、UDP 的端口转发、丢包的线上不丢报文。
 
 节点用静态的 netmap 运行，不需要 controller。
 
@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import tempfile
@@ -19,7 +20,55 @@ import lab as lablib  # noqa: E402
 from harness import (  # noqa: E402
     Checks, Node, dns_a_records, dns_query, socks5_udp, start_dns, start_udp_echo, tail, udp_exchange,
 )
-from lab import Lab, NatKind  # noqa: E402
+from lab import Lab, NatKind, Shape  # noqa: E402
+
+# 经 SOCKS5 的 UDP ASSOCIATE 一口气发一串编了号的报文，打印回来了哪些编号（JSON 数组）。
+# 参数：代理地址、代理端口、用户名（可以为空）、目标、目标端口、报文个数。
+# 先发一个报文、等到它的回音，确认两个节点之间的连接已经建好；之后的报文每 2 毫秒一个，最后最多再等 20 秒收齐。
+SOCKS5_UDP_BURST = r"""
+import json, socket, struct, sys, time
+proxy_host, proxy_port, user, target, port, count = sys.argv[1:7]
+control = socket.create_connection((proxy_host, int(proxy_port)), timeout=10)
+if user:
+    control.sendall(b"\x05\x01\x02")
+    assert control.recv(2) == b"\x05\x02"
+    control.sendall(bytes([1, len(user)]) + user.encode() + b"\x00")
+    assert control.recv(2) == b"\x01\x00"
+else:
+    control.sendall(b"\x05\x01\x00")
+    assert control.recv(2) == b"\x05\x00"
+control.sendall(b"\x05\x03\x00\x01" + bytes(6))
+reply = b""
+while len(reply) < 10:
+    reply += control.recv(10 - len(reply))
+relay = (socket.inet_ntoa(reply[4:8]), struct.unpack("!H", reply[8:10])[0])
+head = b"\x00\x00\x00\x01" + socket.inet_aton(target) + struct.pack("!H", int(port))
+udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+udp.settimeout(1.5)
+for _ in range(20):
+    udp.sendto(head + b"warm-up", relay)
+    try:
+        if udp.recvfrom(65535)[0].endswith(b"warm-up"):
+            break
+    except socket.timeout:
+        continue
+else:
+    sys.exit("连接没有建起来")
+for index in range(int(count)):
+    udp.sendto(head + b"n%d" % index, relay)
+    time.sleep(0.002)
+seen, deadline = set(), time.monotonic() + 20
+udp.settimeout(0.5)
+while len(seen) < int(count) and time.monotonic() < deadline:
+    try:
+        data = udp.recvfrom(65535)[0]
+    except socket.timeout:
+        continue
+    tail = data[10:].rpartition(b"|")[2]
+    if tail.startswith(b"n"):
+        seen.add(int(tail[1:]))
+print(json.dumps(sorted(seen)))
+"""
 
 
 def echoed(answer: dict | None) -> tuple[str, bytes]:
@@ -99,7 +148,7 @@ def dns(lab: Lab, work: Path, t: Checks) -> None:
     resolver = lab.host("resolver")
     server = start_dns(resolver, resolver.ip, 53, "e2e.example", "11.22.33.44")
     a = Node(lab.host("a"), work, 1)
-    b = Node(lab.host("b"), work, 2, declare=("exit", "forward"))
+    b = Node(lab.host("b"), work, 2, declare=("exit",))
     start_dns(b.host, "127.0.0.1", 5300, "forwarded.example", "11.55.66.77")
     forward = {"id": 1, "protocol": "udp", "bind": "127.0.0.1:5353", "target": b.id}
     target = {"id": 1, "protocol": "udp", "addr": "127.0.0.1:5300", "listener": a.id}
@@ -136,7 +185,8 @@ def dns(lab: Lab, work: Path, t: Checks) -> None:
 def udp_forward(lab: Lab, work: Path, t: Checks) -> None:
     """UDP 的端口转发：a 的本地端口通到 b 回环上的 UDP 服务；没有下发给 b 的转发不通。"""
     a = Node(lab.host("a"), work, 1)
-    b = Node(lab.host("b"), work, 2, declare=("forward",))
+    # b 没有声明什么：端口转发的目标由下发的配置决定（controller 那边是管理员的开关）。
+    b = Node(lab.host("b"), work, 2)
     start_udp_echo(b.host, 7000, bind="127.0.0.1")
     forwards = [{"id": 1, "protocol": "udp", "bind": "127.0.0.1:9000", "target": b.id},
                 {"id": 2, "protocol": "udp", "bind": "127.0.0.1:9001", "target": b.id}]
@@ -157,7 +207,35 @@ def udp_forward(lab: Lab, work: Path, t: Checks) -> None:
         print(tail(a.read_log()), tail(b.read_log()), sep="\n  ---\n")
 
 
-SCENARIOS = {"udp_direct": udp_direct, "udp_via_relay": udp_via_relay, "dns": dns, "udp_forward": udp_forward}
+def udp_lossy(lab: Lab, work: Path, t: Checks) -> None:
+    """a 和 b 之间的线丢包（每个方向 10%）：默认的 QoS（自动）下 UDP 报文一个都不丢；要低延迟（interactive）的才会丢。"""
+    echo = lab.host("echo")
+    start_udp_echo(echo, 443)
+    a, b = Node(lab.host("a"), work, 1), Node(lab.host("b"), work, 2, declare=("exit",))
+    a.start_static(a.netmap(peers=[b.as_peer(exit=True)]))
+    b.start_static(b.netmap(peers=[a.as_peer()], me={"exit": {}}))
+    seen, _ = echoed(socks5_udp(a.host, echo.ip, 443, b"before", user=b.virtual_ip))
+    t.check("丢包之前：经 b 通了", seen == b.host.ip, f"看到 {seen!r}")
+    a.host.shape(Shape(rtt_ms=20, loss_pct=10))
+
+    count = 200
+
+    def burst(user: str) -> list[int]:
+        done = a.host.run(sys.executable, "-c", SOCKS5_UDP_BURST, "127.0.0.1", "1080", user, echo.ip, "443", str(count),
+                          check=False, timeout=90)
+        if done.returncode != 0:
+            raise RuntimeError(f"SOCKS5 UDP 客户端出错：{done.stderr.strip()[-500:]}")
+        return json.loads(done.stdout)
+
+    kept = burst(b.virtual_ip)
+    t.check(f"自动（默认）：{count} 个报文经丢包的线全部来回", kept == list(range(count)), f"回来 {len(kept)} 个")
+    fresh = burst(f"{b.virtual_ip}+c-i")
+    t.check("低延迟（interactive）：同一条线上丢了一些，说明线确实在丢包", 0 < len(fresh) < count, f"回来 {len(fresh)} 个")
+    if t.failures:
+        print(tail(a.read_log()), tail(b.read_log()), sep="\n  ---\n")
+
+
+SCENARIOS = {"udp_direct": udp_direct, "udp_via_relay": udp_via_relay, "dns": dns, "udp_forward": udp_forward, "udp_lossy": udp_lossy}
 
 
 def main() -> int:

@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lab as lablib  # noqa: E402
 from harness import (Checks, Controller, Node, RestoredController, add_node_config, binary, controller_data, create_groups,  # noqa: E402
-                     start_whoami, tail)
+                     eventually_value, start_whoami, tail)
 from lab import Lab, NatKind, wait_until  # noqa: E402
 
 
@@ -113,6 +113,12 @@ def route_of(controller: Controller, node: Node, peer: Node) -> dict:
     return next((route["route"] for route in routes if route["peer"]["id"] == peer.id), {})
 
 
+def direct_status_of(controller: Controller, node: Node, peer: Node) -> dict:
+    """`node` 最近上报的、到 `peer` 的直连在哪一步；还没有报过时是空的。"""
+    routes = controller.ctl("node", "routes", str(node.id))["routes"]
+    return next((route.get("direct_status") or {} for route in routes if route["peer"]["id"] == peer.id), {})
+
+
 def wait_route(controller: Controller, node: Node, peer: Node, via: str, timeout: float = 30) -> dict:
     try:
         wait_until(lambda: route_of(controller, node, peer).get("via") == via, timeout=timeout, what=f"{node.name} 到 {peer.name} 的路变成 {via}")
@@ -173,6 +179,11 @@ def relay_then_direct(lab: Lab, work: Path, t: Checks) -> None:
     controller.ctl("relay", "enable", str(r.id))
     url, expect = f"http://{web.ip}/", lab.hosts["nat-b"].ip
     wait_until(lambda: all(controller.ctl("node", "show", str(node.id))["attached"] for node in (a, b)), timeout=20, what="两个节点挂靠上 relay")
+    # 两个节点还没有说过话：直连一次也没有试过，路由表这样说，而不是看起来像"直连失败了"。
+    untried = eventually_value(lambda: direct_status_of(controller, a, b), lambda status: bool(status), timeout=20)
+    t.check("没有说过话的两个节点：直连是 not_tried", untried.get("state") == "not_tried" and untried.get("attempted_at") is None, str(untried))
+    table = controller.host.run(binary("i3tctl"), "--token", controller.token, "node", "routes", str(a.id), check=False).stdout
+    t.check("命令行的路由表上写着直连未尝试", "未尝试" in table, table)
 
     started = time.monotonic()
     download, size = slow_download(a, url, b, 30)
@@ -182,6 +193,8 @@ def relay_then_direct(lab: Lab, work: Path, t: Checks) -> None:
     route = wait_route(controller, a, b, "direct", timeout=75)
     switched_during_download = download.poll() is None
     t.check("之后换到了直连", route.get("via") == "direct", str(route))
+    verified = direct_status_of(controller, a, b)
+    t.check("直连是 verified，带着最近一次尝试的时间", verified.get("state") == "verified" and verified.get("attempted_at"), str(verified))
     t.check("换路发生在下载进行当中", switched_during_download)
     ok, detail = finished_intact(download, size)
     t.check("换路没有打断下载，字节数对得上", ok, detail)

@@ -57,7 +57,8 @@ enum Command {
         can_exit: bool,
         #[arg(long)]
         can_relay: bool,
-        #[arg(long)]
+        // 以前的声明，照收、不起作用：端口转发的目标由管理员打开。
+        #[arg(long, hide = true)]
         can_forward: bool,
     },
     Run {
@@ -125,15 +126,12 @@ fn command(lang: Lang) -> clap::Command {
         .about(h.about)
         .mut_arg("state_dir", |arg| arg.help(h.state_dir).value_name(v.dir))
         .mut_subcommand("join", |sub| {
-            sub.about(h.join)
-                .mut_arg("can_exit", |arg| arg.help(h.can_exit))
-                .mut_arg("can_relay", |arg| arg.help(h.can_relay))
-                .mut_arg("can_forward", |arg| arg.help(h.can_forward))
+            sub.about(h.join).mut_arg("can_exit", |arg| arg.help(h.can_exit)).mut_arg("can_relay", |arg| arg.help(h.can_relay))
         })
         .mut_subcommand("run", |sub| sub.about(h.run).mut_arg("static", |arg| arg.help(h.run_static).value_name(v.file)))
         .mut_subcommand("set", |sub| {
             sub.about(h.set)
-                .mut_arg("setting", |arg| arg.value_name("can-exit|can-relay|can-forward|relay-address|throughput-tests|profile|intercept"))
+                .mut_arg("setting", |arg| arg.value_name("can-exit|can-relay|relay-address|throughput-tests|profile|intercept"))
                 .mut_arg("value", |arg| arg.value_name("on|off|low-footprint|balanced|high-throughput|IP:PORT"))
         })
         .mut_subcommand("status", |sub| sub.about(h.status))
@@ -180,7 +178,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Join { can_exit, can_relay, can_forward } => {
             let mut token = String::new();
             std::io::stdin().read_to_string(&mut token).context(t.read_token)?;
-            let options = JoinOptions { can_exit, can_relay, can_forward };
+            if can_forward {
+                println!("{}", t.forward_by_admin);
+            }
+            let options = JoinOptions { can_exit, can_relay };
             let program = Program::detect(version)?;
             let netmap = current_thread()?.block_on(join(&state, &token, options, &program))?;
             println!("{}", (t.joined)(&netmap.network.name));
@@ -213,6 +214,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             if matches!(change, Change::Intercept(_)) && !cfg!(target_os = "linux") {
                 bail!(t.intercept_linux_only);
             }
+            if let Change::CanForward(_) = change {
+                println!("{}", t.forward_by_admin);
+                return Ok(ExitCode::SUCCESS);
+            }
             Config::set(&state.config_path(), change)?;
             println!("{}", (t.setting_set)(&setting.to_string(), &change.to_string()));
             match change {
@@ -229,7 +234,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     let running = current_thread()?.block_on(local::query(&state)).map_or(true, |live| live.is_some());
                     after_intercept_set(on, running);
                 }
-                Change::Declare(_, false) | Change::RelayAddress(_) | Change::ThroughputTests(_) => {}
+                Change::Declare(_, false) | Change::CanForward(_) | Change::RelayAddress(_) | Change::ThroughputTests(_) => {}
             }
         }
         Command::Status => {

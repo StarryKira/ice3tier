@@ -160,7 +160,7 @@ fn hello(declared: Declared) -> Hello {
     Hello { version: "0.1.0".to_owned(), platform: "linux-x86_64".to_owned(), declared, port: 20330, ..Hello::default() }
 }
 
-const CAN_DO_ALL: Declared = Declared { exit: true, relay: true, forward: true, relay_address: None };
+const CAN_DO_ALL: Declared = Declared { exit: true, relay: true, relay_address: None };
 
 #[tokio::test]
 async fn requests_without_the_admin_token_are_refused() {
@@ -491,7 +491,13 @@ async fn credentials_listeners_forwards_and_pairs_round_trip() {
     let network = api.network("home").await;
     let base = format!("/networks/{}", network.id);
     let gateway = api.join(network.id, Declared::default()).await;
-    let target = api.join(network.id, CAN_DO_ALL).await;
+    // 端口转发的目标不用声明什么：管理员打开它的开关。
+    let target = api.join(network.id, Declared::default()).await;
+    let (_, raw) = api.call(Method::GET, &format!("{base}/nodes/{}", target.id), None).await;
+    assert_eq!((raw["forward_target"].clone(), raw["declared"].get("forward")), (json!(false), None), "新节点的开关关着，声明里没有它");
+    let switched: model::Node =
+        api.ok(Method::PATCH, &format!("{base}/nodes/{}", target.id), Some(json!({ "forward_target": true }))).await;
+    assert!(switched.forward_target);
 
     let (status, created) =
         api.call(Method::POST, &format!("{base}/credentials"), Some(json!({ "name": "phone", "max_concurrent": 8 }))).await;
@@ -543,10 +549,23 @@ async fn credentials_listeners_forwards_and_pairs_round_trip() {
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(created_forward["status"], json!("active"));
     let forward_id = created_forward["id"].as_u64().unwrap();
-    let undeclared = json!({ "protocol": "udp", "listen_node": target.id, "bind": "127.0.0.1:5353", "target_node": gateway.id, "target_addr": "127.0.0.1:53" });
-    let refused = api.fails(Method::POST, &format!("{base}/forwards"), Some(undeclared), StatusCode::CONFLICT).await;
-    assert_eq!(refused.code, model::ErrorCode::NotDeclared);
-    assert!(refused.message.contains("i3t set can-forward on"), "{}", refused.message);
+    let switched_off = json!({ "protocol": "udp", "listen_node": target.id, "bind": "127.0.0.1:5353", "target_node": gateway.id, "target_addr": "127.0.0.1:53" });
+    let (status, refused) = api.call(Method::POST, &format!("{base}/forwards"), Some(switched_off)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        (refused["error"]["code"].clone(), refused["error"]["what"].clone(), refused["error"]["field"].clone()),
+        (json!("forward_target_off"), json!(null), json!("target_node"))
+    );
+    let message = refused["error"]["message"].as_str().unwrap();
+    assert!(message.contains("--forward-target on"), "{message}");
+    // 关掉开关：转发留着、还是启用的，状态说明它不生效；再打开就回来。
+    let target_path = format!("{base}/nodes/{}", target.id);
+    api.ok::<model::Node>(Method::PATCH, &target_path, Some(json!({ "forward_target": false }))).await;
+    let (_, listed) = api.call(Method::GET, &format!("{base}/forwards"), None).await;
+    assert_eq!((listed[0]["enabled"].clone(), listed[0]["status"].clone()), (json!(true), json!("forward_target_off")));
+    api.ok::<model::Node>(Method::PATCH, &target_path, Some(json!({ "forward_target": true }))).await;
+    let (_, listed) = api.call(Method::GET, &format!("{base}/forwards"), None).await;
+    assert_eq!(listed[0]["status"], json!("active"));
     let mut paused = forward.clone();
     paused["enabled"] = json!(false);
     let replaced: model::Forward = api.ok(Method::PUT, &format!("{base}/forwards/{forward_id}"), Some(paused)).await;
@@ -931,7 +950,7 @@ async fn path_candidates_route_details_and_the_backbone_are_served() {
     let direct = Route::Direct { addr: "198.51.100.9:20330".parse().unwrap() };
     let report = Report {
         routes: vec![RouteEntry { peer: b.id, route: direct.clone(), rtt_ms: Some(12) }],
-        route_kinds: vec![RouteKind { peer: b.id, direct: Some(DirectKind::Lan), relay_leg: None }],
+        route_kinds: vec![RouteKind { peer: b.id, direct: Some(DirectKind::Lan), relay_leg: None, direct_status: None, alternative: None }],
         routes_full: true,
         ..Report::default()
     };
@@ -1242,6 +1261,7 @@ async fn exits_and_listen_status_are_served_from_what_the_nodes_report() {
     let laptop = api.join(network.id, Declared::default()).await;
     api.ok::<model::Node>(Method::PUT, &format!("{base}/nodes/{}/exit", exit.id), Some(json!({ "quota_bytes": 5000, "family": "ipv4" })))
         .await;
+    api.ok::<model::Node>(Method::PATCH, &format!("{base}/nodes/{}", exit.id), Some(json!({ "forward_target": true }))).await;
     let forward = json!({ "protocol": "tcp", "listen_node": laptop.id, "bind": "127.0.0.1:0", "target_node": exit.id, "target_addr": "127.0.0.1:22" });
     let created: model::Forward = api.ok(Method::POST, &format!("{base}/forwards"), Some(forward)).await;
     assert_eq!(created.bind.port(), 0, "端口写 0 由节点挑");

@@ -164,8 +164,9 @@ def graceful_relay_shutdown(lab: Lab, work: Path, t: Checks) -> None:
     ok, detail = finished_intact(download, size)
     t.check("下载途中正常停掉正在用的 relay，下载没有断", ok, detail)
     summaries = flow_routes(a)
+    # relay 写名字（netmap 里的名字，和 i3t routes 一样）。
     t.check("这条流结束时的摘要写出开始时经 r1、结束时经 r2、中间换过路",
-            (f"经 #{r1.id}", f"经 #{r2.id}", "true") in summaries, str(summaries[-3:]))
+            (f"经 {r1.name}", f"经 {r2.name}", "true") in summaries, str(summaries[-3:]))
     exit_side = flow_routes(b)
     t.check("出口那一侧的摘要也写着它到 a 的路换过", any(changed == "true" for _, _, changed in exit_side), str(exit_side[-3:]))
     if t.failures:

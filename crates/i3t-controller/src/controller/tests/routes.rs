@@ -218,7 +218,7 @@ async fn a_path_is_asked_from_both_ends_and_falls_back_to_the_last_report() {
 }
 
 fn kind(peer: NodeId, direct: Option<DirectKind>, relay_leg: Option<LegTransport>) -> RouteKind {
-    RouteKind { peer, direct, relay_leg }
+    RouteKind { peer, direct, relay_leg, direct_status: None, alternative: None }
 }
 
 fn report_with_kinds(member: &Member, controller: &Controller, routes: Vec<RouteEntry>, kinds: Vec<RouteKind>, full: bool) {
@@ -252,6 +252,44 @@ fn route_lists_say_how_a_direct_path_was_made_and_how_the_first_relay_leg_travel
     // 细节说的对端不在这次报的条目里：不记。
     report_with_kinds(&a, &lab.controller, Vec::new(), vec![kind(old.id, Some(DirectKind::Lan), None)], false);
     assert_eq!(lab.controller.routes(network, a.id).unwrap().routes[1].direct, None);
+}
+
+#[test]
+fn route_lists_say_where_the_direct_path_stands_and_what_the_other_mode_would_pick() {
+    use i3t_model::control::{DirectCause, DirectState, DirectStatus, RouteAlternative};
+
+    let (lab, network, a, b, old) = three_nodes();
+    let failed = DirectStatus { state: DirectState::Failed, kind: None, cause: Some(DirectCause::NoAnswer), attempted_secs_ago: Some(30) };
+    let never = DirectStatus { state: DirectState::NotTried, kind: None, cause: None, attempted_secs_ago: None };
+    let kinds = vec![
+        RouteKind { direct_status: Some(failed), ..kind(b.id, None, Some(LegTransport::Udp)) },
+        RouteKind {
+            direct_status: Some(never),
+            alternative: Some(RouteAlternative { route: Route::Relay { relays: vec![b.id] }, rtt_ms: Some(48) }),
+            ..kind(old.id, None, Some(LegTransport::Udp))
+        },
+    ];
+    let before = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    report_with_kinds(&a, &lab.controller, vec![via(b.id, old.id), via(old.id, old.id)], kinds, true);
+    // 旧版本的节点不报。
+    report(&b, &lab.controller, vec![direct(a.id, 13)], true);
+
+    let table = lab.controller.routes(network, a.id).unwrap();
+    let to_b = table.routes[0].direct_status.unwrap();
+    assert_eq!((to_b.state, to_b.kind, to_b.cause), (DirectState::Failed, None, Some(DirectCause::NoAnswer)));
+    let at = to_b.attempted_at.unwrap();
+    assert!(at + 30 >= before && at + 30 <= before + 2, "节点说 30 秒之前，换成 controller 的时刻：{at} {before}");
+    let to_old = table.routes[1].direct_status.unwrap();
+    assert_eq!((to_old.state, to_old.attempted_at), (DirectState::NotTried, None));
+    assert_eq!(lab.controller.routes(network, b.id).unwrap().routes[0].direct_status, None);
+    assert_eq!(table.routes[0].alternative, None, "节点没有报另一种模式会选的路");
+    let other = table.routes[1].alternative.clone().unwrap();
+    assert_eq!((other.route, other.rtt_ms), (Route::Relay { relays: vec![b.id] }, Some(48)), "另一种模式会选的路原样给出");
+    let raw = serde_json::to_value(&table.routes[0]).unwrap();
+    assert_eq!(
+        raw["direct_status"],
+        serde_json::json!({ "state": "failed", "kind": null, "cause": { "code": "no_answer" }, "attempted_at": at })
+    );
 }
 
 #[tokio::test]

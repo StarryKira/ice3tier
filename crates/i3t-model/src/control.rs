@@ -282,7 +282,7 @@ pub struct Hello {
     pub version: String,
     /// 操作系统和架构，例如 `linux-x86_64`。
     pub platform: String,
-    #[serde(default)]
+    #[serde(default, serialize_with = "Declared::serialize_for_older_controllers")]
     pub declared: Declared,
     /// 节点绑定的 UDP 端口。controller 把它和看到的来源 IP 拼成一个候选端点。
     #[serde(default)]
@@ -329,19 +329,34 @@ fn known_blocker<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Op
 
 /// 节点在本地声明的"可以承担"。声明本身不启用任何东西，启用由管理员在 WebUI 上决定；
 /// 没有声明的能力 controller 启用不了。
+///
+/// 端口转发的目标不在这里：它只由管理员的开关决定（`Node::forward_target`），节点不声明。旧版本的节点报的 `forward` 被忽略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Declared {
     #[serde(default)]
     pub exit: bool,
     #[serde(default)]
     pub relay: bool,
-    /// 可以被配成端口转发的目标。
-    #[serde(default)]
-    pub forward: bool,
     /// 节点上声明的 relay 地址（`i3t set relay-address`）：只有人知道的那一种，机房或者路由器上映射进来的地址。
     /// 节点启用为 relay 时，它排在 controller 找出来的地址前面（白皮书 §7.2）。旧版本的节点不报。
     #[serde(default)]
     pub relay_address: Option<SocketAddr>,
+}
+
+impl Declared {
+    /// [`Hello`] 里的写法：多带一个总是 `true` 的 `forward`。
+    ///
+    /// 旧版本的 controller 只给报了 `forward` 的节点下发端口转发，节点不报时还会把指向它的转发全部停用。
+    /// 新的节点总是报 `true`，旧的 controller 因此照旧下发、照旧让管理员配；配不配由管理员定，和新的规则一样。
+    fn serialize_for_older_controllers<S: serde::Serializer>(declared: &Self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            #[serde(flatten)]
+            declared: &'a Declared,
+            forward: bool,
+        }
+        Wire { declared, forward: true }.serialize(serializer)
+    }
 }
 
 /// 节点的定期上报，默认每 10 秒一次。
@@ -994,7 +1009,7 @@ pub struct RouteAnswer {
 }
 
 /// 一条路的细节。说不出来的项是 `None`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteKind {
     pub peer: NodeId,
     /// 走直连时，这条直连是怎么建立起来的。
@@ -1003,6 +1018,74 @@ pub struct RouteKind {
     /// 经 relay 时，本节点到第一个 relay 的那一段走的是 UDP 还是 TCP。
     #[serde(default)]
     pub relay_leg: Option<LegTransport>,
+    /// 直连现在在哪一步，不管现在走不走它。旧版本的节点不报。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_status: Option<DirectStatus>,
+    /// 本节点没在用的那种选路模式此刻会选的路（默认模式下是延迟优先会选的，反过来也一样），按选路器自己的规则、用手上的候选算，
+    /// 不为它另外探测。和现在的路一样、或者没有可比的时没有；旧版本的节点不报。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alternative: Option<RouteAlternative>,
+}
+
+/// 另一种选路模式会选的路。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteAlternative {
+    pub route: Route,
+    /// 这条路上的往返延迟（毫秒），和 [`RouteEntry::rtt_ms`] 的算法一样；没有测量值时没有。
+    #[serde(default)]
+    pub rtt_ms: Option<u32>,
+}
+
+/// 到一个对端的直连现在在哪一步（白皮书 §7.7）：取自路径层为直连的尝试和退避记着的状态，不为它另外探测。
+/// 直连在一对节点第一次用到时才去试，所以两个从没说过话的节点之间是"还没有试过"，不是"失败了"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectStatus {
+    pub state: DirectState,
+    /// `verified` 时：这条直连是怎么建立起来的。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<DirectKind>,
+    /// 最近一次失败的原因：`failed` 时是这一次的，`trying` 时是上一次的；通着、从没失败过时没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<DirectCause>,
+    /// 最近一次尝试是多少秒之前开始的；从来没有试过时没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempted_secs_ago: Option<u64>,
+}
+
+/// 直连的状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectState {
+    /// 还没有试过：这一对节点还没有用过，或者不能由本节点去试（只经 relay、对端只主动连接）。
+    NotTried,
+    /// 正在试。
+    Trying,
+    /// 验证通过，可以用（走不走它看选路）。
+    Verified,
+    /// 试过没有通，或者通过的直连后来断了。按退避再试。
+    Failed,
+    /// 比这个程序新的节点报的、这里不认识的状态。
+    #[serde(other)]
+    Unknown,
+}
+
+/// 直连上一次为什么没有成：`{ "code": … }`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum DirectCause {
+    /// 试满了一次的时限，对端的哪个候选地址都没有回答。
+    NoAnswer,
+    /// 手上没有对端的任何候选地址。
+    NoCandidates,
+    /// 用着的直连上探测连续超时。
+    Timeouts,
+    /// 用着的直连上探测丢了超过 20%。
+    Loss,
+    /// 两个节点闲着，用着的直连很久没有验证，放下了；再用到时重新试。
+    Stale,
+    /// 比这个程序新的节点报的、这里不认识的原因。
+    #[serde(other)]
+    Unknown,
 }
 
 /// 直连是怎么建立起来的（白皮书 §7.7）。
@@ -1138,6 +1221,41 @@ pub enum RelayState {
 fn known<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned>(deserializer: D) -> Result<Option<T>, D::Error> {
     let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
     Ok(raw.and_then(|value| serde_json::from_value(value).ok()))
+}
+
+impl Route {
+    /// 这条路经过的 relay，按经过的顺序；不经 relay 时是空的。
+    #[must_use]
+    pub fn relays(&self) -> &[NodeId] {
+        match self {
+            Self::Relay { relays } => relays,
+            Self::None | Self::Direct { .. } => &[],
+        }
+    }
+}
+
+impl RouteCause {
+    /// 这个原因里说到的 relay（原来经过的那几个）。
+    #[must_use]
+    pub fn relays(&self) -> &[NodeId] {
+        match self {
+            Self::RelayChanged { previous, .. } => previous,
+            Self::Cheaper { previous, .. } => previous.relays(),
+            Self::NoRouteYet
+            | Self::TestPinned
+            | Self::TestEnded
+            | Self::DirectVerified
+            | Self::DirectLost { .. }
+            | Self::RelayReady
+            | Self::LegChanged { .. }
+            | Self::Unreachable { .. }
+            | Self::PeerRemoved
+            | Self::Lan
+            | Self::LowestCost { .. }
+            | Self::Failover { .. }
+            | Self::Unknown => &[],
+        }
+    }
 }
 
 /// 一条路是多久之前换上的，以及换的原因。
@@ -1324,6 +1442,21 @@ mod tests {
         assert_eq!(body.declared, Declared::default());
         let again: ToController = serde_json::from_str(&serde_json::to_string(&hello).unwrap()).unwrap();
         assert_eq!(again, hello);
+    }
+
+    #[test]
+    fn a_hello_tells_older_controllers_it_may_be_a_forward_target_and_an_old_declaration_is_ignored() {
+        let declared = Declared { exit: true, ..Declared::default() };
+        let hello = Hello { declared, ..Hello::default() };
+        let sent = serde_json::to_value(&hello).unwrap();
+        assert_eq!(sent["declared"], serde_json::json!({ "exit": true, "relay": false, "relay_address": null, "forward": true }));
+        assert_eq!(serde_json::to_value(declared).unwrap().get("forward"), None, "管理接口里的声明没有 forward");
+
+        let old: Hello = serde_json::from_value(serde_json::json!({
+            "version": "0.1.0", "platform": "linux-x86_64", "declared": { "exit": false, "relay": true, "forward": true }
+        }))
+        .unwrap();
+        assert_eq!(old.declared, Declared { relay: true, ..Declared::default() });
     }
 
     #[test]
@@ -1544,11 +1677,30 @@ mod tests {
     fn route_kinds_are_optional_in_a_report() {
         let old: Report = serde_json::from_value(serde_json::json!({ "routes": [], "routes_full": true })).unwrap();
         assert!(old.route_kinds.is_empty());
-        let kind = RouteKind { peer: NodeId::new(4).unwrap(), direct: Some(DirectKind::Punched), relay_leg: None };
+        let kind = RouteKind {
+            peer: NodeId::new(4).unwrap(),
+            direct: Some(DirectKind::Punched),
+            relay_leg: None,
+            direct_status: None,
+            alternative: None,
+        };
         let report = Report { route_kinds: vec![kind], ..Report::default() };
         let wire = serde_json::to_value(&report).unwrap();
         assert_eq!(wire["route_kinds"], serde_json::json!([{ "peer": 4, "direct": "punched", "relay_leg": null }]));
         assert_eq!(serde_json::from_value::<Report>(wire).unwrap(), report);
+    }
+
+    #[test]
+    fn the_direct_status_has_a_code_for_its_state_and_cause_and_reads_unknown_values() {
+        let failed =
+            DirectStatus { state: DirectState::Failed, kind: None, cause: Some(DirectCause::NoAnswer), attempted_secs_ago: Some(42) };
+        let wire = serde_json::to_value(failed).unwrap();
+        assert_eq!(wire, serde_json::json!({ "state": "failed", "cause": { "code": "no_answer" }, "attempted_secs_ago": 42 }));
+        let never: DirectStatus = serde_json::from_value(serde_json::json!({ "state": "not_tried" })).unwrap();
+        assert_eq!((never.state, never.cause, never.attempted_secs_ago), (DirectState::NotTried, None, None));
+        let newer: DirectStatus =
+            serde_json::from_value(serde_json::json!({ "state": "parked", "cause": { "code": "firewall", "port": 1 } })).unwrap();
+        assert_eq!((newer.state, newer.cause), (DirectState::Unknown, Some(DirectCause::Unknown)));
     }
 
     #[test]

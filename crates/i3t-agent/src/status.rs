@@ -15,6 +15,8 @@ use i3t_model::update::UpdateStatus;
 use serde::{Deserialize, Serialize};
 
 use crate::control::LinkState;
+use crate::ping::{RelayName, relay_names};
+use crate::route_detail;
 use crate::runtime::{Runtime, exit_report};
 
 /// 一个运行着的节点现在的样子。
@@ -39,6 +41,9 @@ pub struct LiveStatus {
     /// 挂靠的 relay 和到它们的延迟。
     pub attached: Vec<Attachment>,
     pub routes: Vec<LiveRoute>,
+    /// `attached`、`routes`（路和换路的原因）里说到的 relay 的名字，和 `i3t ping` 一样按
+    /// [`Netmap::node_name`](i3t_model::Netmap::node_name) 找。旧版本的节点不给，那时只写编号。
+    pub relays: Vec<RelayName>,
     pub listeners: Vec<LiveListener>,
     pub update: LiveUpdate,
     /// 本节点启用为 relay 时有值。
@@ -93,6 +98,9 @@ pub struct LiveRoute {
     /// 这条路是多久之前换上的、为什么。这次启动以来没有换过时没有。
     #[serde(default)]
     pub since: Option<RouteSince>,
+    /// 直连现在在哪一步，不管现在走不走它。旧版本的节点不给。
+    #[serde(default)]
+    pub direct_status: Option<control::DirectStatus>,
 }
 
 /// 一个代理监听器，或者一条端口转发的监听一侧。
@@ -148,8 +156,10 @@ impl LiveStatus {
     pub(crate) fn of(runtime: &Runtime) -> Self {
         let netmap = runtime.netmap.borrow().clone();
         let update = runtime.update.borrow().clone();
+        let reports = runtime.endpoint.path_reports();
         let routes = runtime.endpoint.routes().into_iter().map(|entry| {
             let peer = netmap.peer(entry.peer);
+            let report = reports.iter().find(|report| report.peer == entry.peer);
             LiveRoute {
                 peer: entry.peer.get(),
                 name: peer.map_or_else(|| format!("#{}", entry.peer), |peer| peer.name.clone()),
@@ -157,6 +167,7 @@ impl LiveStatus {
                 route: entry.route,
                 rtt_ms: entry.rtt_ms,
                 since: runtime.history.since(entry.peer),
+                direct_status: report.map(|report| route_detail::direct_status(&report.direct_status)),
             }
         });
         let access = runtime.access.status();
@@ -170,6 +181,13 @@ impl LiveStatus {
             bytes_down: forward.traffic.down(),
             ..listener_of(format!("forward-{}", forward.id), forward.bind, &forward.state, forward.active.get())
         });
+        let routes: Vec<LiveRoute> = routes.collect();
+        let attached = runtime.endpoint.attached();
+        let on_routes = routes.iter().flat_map(|entry| {
+            let cause = entry.since.as_ref().and_then(|since| since.cause.as_ref()).map_or(&[][..], control::RouteCause::relays);
+            entry.route.relays().iter().chain(cause).copied()
+        });
+        let relays = relay_names(&netmap, attached.iter().map(|attachment| attachment.relay).chain(on_routes));
         let exit = runtime.exit.stats();
         let counters = runtime.endpoint.relay_counters();
         let lanes = runtime.lanes.report();
@@ -186,8 +204,9 @@ impl LiveStatus {
             flows: *runtime.flows.borrow(),
             endpoints: runtime.endpoint.endpoints(),
             mapping_varies: runtime.endpoint.mapping_varies(),
-            attached: runtime.endpoint.attached(),
-            routes: routes.collect(),
+            attached,
+            routes,
+            relays,
             listeners: listeners.chain(forwards).collect(),
             update: LiveUpdate { draining: exit.draining, status: update, self_update: Some(runtime.self_update) },
             relay: netmap.me.relay.is_some().then(|| LiveRelay {

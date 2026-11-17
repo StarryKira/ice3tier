@@ -21,8 +21,8 @@ use anyhow::{Context, anyhow, bail, ensure};
 use i3t_crypto::{NodeKey, tls};
 use i3t_model::Netmap;
 use i3t_model::control::{
-    BackboneRow, ExitTestResult, Hello, MAX_FRAME_LEN, Report, RouteAnswer, RouteEntry, RouteKind, Signal, TestOrder, TestReport,
-    ToController, ToNode,
+    BackboneRow, DirectStatus, ExitTestResult, Hello, MAX_FRAME_LEN, Report, RouteAnswer, RouteEntry, RouteKind, Signal, TestOrder,
+    TestReport, ToController, ToNode,
 };
 use i3t_model::update::{Platform, SignedManifest, UpdateTiming, Version};
 use i3t_proto::NodeId;
@@ -57,6 +57,9 @@ const CHUNK_TIMEOUT: Duration = Duration::from_secs(30);
 const PROBE_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// 路由上的延迟变化不超过这个数（毫秒）、也不超过原来的四分之一时，不算变化，不重新上报。
 const RTT_NOISE_MS: u32 = 10;
+
+/// 直连"最近一次尝试是多少秒之前"折算之后差这么多秒以内，算同一次尝试：秒数是取整的，两次上报之间也有几十毫秒的出入。
+const ATTEMPT_SLACK_SECS: u64 = 2;
 
 /// 用注册令牌里的一次性密钥加入网络，返回 controller 给这个节点的第一份 netmap。
 ///
@@ -349,11 +352,19 @@ struct Worker {
     requests: mpsc::Receiver<Request>,
 }
 
+/// 上报过的一条路：条目、它的细节，和什么时候报的（细节里有"多少秒之前"，要按报的时刻比）。
+#[derive(Debug, Clone)]
+struct ReportedRoute {
+    entry: RouteEntry,
+    kind: Option<RouteKind>,
+    at: Instant,
+}
+
 /// 一条连接期间的状态。连接断了就整个丢掉，等回答的人因此知道被打断了。
 #[derive(Default)]
 struct Session {
     /// 这条连接上报过的路由表和每条路的细节：下一次只报和它不同的条目。
-    reported_routes: BTreeMap<NodeId, (RouteEntry, Option<RouteKind>)>,
+    reported_routes: BTreeMap<NodeId, ReportedRoute>,
     /// 发出去、还在等回答的取包请求。
     chunks: BTreeMap<u64, oneshot::Sender<Result<Vec<u8>, SourceError>>>,
     next_request: u64,
@@ -555,14 +566,15 @@ impl Session {
     ///
     /// 细节说的对端不在路由表里的不报：controller 只认和条目一起来的细节。
     fn routes_to_report(&mut self, current: Vec<RouteEntry>, kinds: Vec<RouteKind>) -> (Vec<RouteEntry>, Vec<RouteKind>) {
-        let kinds: BTreeMap<NodeId, RouteKind> = kinds.into_iter().map(|kind| (kind.peer, kind)).collect();
+        let mut kinds: BTreeMap<NodeId, RouteKind> = kinds.into_iter().map(|kind| (kind.peer, kind)).collect();
         let current: Vec<(RouteEntry, Option<RouteKind>)> = current
             .into_iter()
             .map(|entry| {
-                let kind = kinds.get(&entry.peer).copied();
+                let kind = kinds.remove(&entry.peer);
                 (entry, kind)
             })
             .collect();
+        let now = Instant::now();
         let first = !self.reported;
         if first {
             self.reported_routes.clear();
@@ -576,25 +588,55 @@ impl Session {
                     || self
                         .reported_routes
                         .get(&entry.peer)
-                        .is_none_or(|(before, before_kind)| differs(before, entry) || before_kind != kind)
+                        .is_none_or(|before| differs(&before.entry, entry) || kind_differs(before, kind.as_ref(), now))
             })
             .collect();
-        self.reported_routes.extend(changed.iter().map(|(entry, kind)| (entry.peer, (entry.clone(), *kind))));
-        let kinds = changed.iter().filter_map(|(_, kind)| *kind).collect();
-        (changed.into_iter().map(|(entry, _)| entry).collect(), kinds)
+        self.reported_routes
+            .extend(changed.iter().map(|(entry, kind)| (entry.peer, ReportedRoute { entry: entry.clone(), kind: kind.clone(), at: now })));
+        let (entries, kinds): (Vec<RouteEntry>, Vec<Option<RouteKind>>) = changed.into_iter().unzip();
+        (entries, kinds.into_iter().flatten().collect())
     }
 }
 
 /// 一条路由和上次报的比，有没有值得再报一次的变化：路换了，或者延迟变了不少。
 fn differs(before: &RouteEntry, now: &RouteEntry) -> bool {
-    if before.route != now.route {
-        return true;
-    }
-    match (before.rtt_ms, now.rtt_ms) {
+    before.route != now.route || rtt_differs(before.rtt_ms, now.rtt_ms)
+}
+
+/// 延迟变了不少：超过 [`RTT_NOISE_MS`]，也超过原来的四分之一。
+fn rtt_differs(before: Option<u32>, now: Option<u32>) -> bool {
+    match (before, now) {
         (Some(before), Some(now)) => before.abs_diff(now) > RTT_NOISE_MS.max(before / 4),
         (None, None) => false,
         (Some(_), None) | (None, Some(_)) => true,
     }
+}
+
+/// 一条路的细节和上次报的比，有没有值得再报一次的变化。直连"最近一次尝试是多少秒之前"随时间自己往上涨，
+/// 按报的时刻折算之后差不过 [`ATTEMPT_SLACK_SECS`] 秒的，说的还是同一次尝试，不算变化。
+fn kind_differs(before: &ReportedRoute, now_kind: Option<&RouteKind>, now: Instant) -> bool {
+    let (Some(before_kind), Some(now_kind)) = (before.kind.as_ref(), now_kind) else {
+        return before.kind.is_some() || now_kind.is_some();
+    };
+    let elapsed = now.saturating_duration_since(before.at).as_secs();
+    let attempted = |kind: &RouteKind| kind.direct_status.and_then(|status| status.attempted_secs_ago);
+    let same_attempt = match (attempted(before_kind), attempted(now_kind)) {
+        (Some(then), Some(ago)) => then.saturating_add(elapsed).abs_diff(ago) <= ATTEMPT_SLACK_SECS,
+        (None, None) => true,
+        (Some(_), None) | (None, Some(_)) => false,
+    };
+    // 另一种模式会选的路：路变了才算，延迟按和路由条目一样的门槛比。
+    let alternative_differs = match (&before_kind.alternative, &now_kind.alternative) {
+        (Some(before), Some(now)) => before.route != now.route || rtt_differs(before.rtt_ms, now.rtt_ms),
+        (None, None) => false,
+        (Some(_), None) | (None, Some(_)) => true,
+    };
+    let rest = |kind: &RouteKind| RouteKind {
+        direct_status: kind.direct_status.map(|status| DirectStatus { attempted_secs_ago: None, ..status }),
+        alternative: None,
+        ..kind.clone()
+    };
+    !same_attempt || alternative_differs || rest(before_kind) != rest(now_kind)
 }
 
 /// 一条连接上的读取任务，以及它读出来的消息。
@@ -804,6 +846,40 @@ mod tests {
 
     /// 定时上报要很久以后才到：收到的上报只能是报到时的那一次，或者测试自己要的。
     const QUIET: Timing = Timing { report_interval: Duration::from_secs(3600), idle_timeout: Duration::from_secs(3600), ..FAST };
+
+    #[test]
+    fn a_route_detail_is_reported_again_only_when_it_says_something_new() {
+        use i3t_model::control::{DirectCause, DirectState, RouteAlternative};
+
+        let peer = NodeId::new(2).unwrap();
+        let entry = RouteEntry { peer, route: Route::Relay { relays: vec![NodeId::new(9).unwrap()] }, rtt_ms: Some(40) };
+        let status = |ago| DirectStatus {
+            state: DirectState::Failed,
+            kind: None,
+            cause: Some(DirectCause::NoAnswer),
+            attempted_secs_ago: Some(ago),
+        };
+        let kind = |ago, rtt| RouteKind {
+            peer,
+            direct: None,
+            relay_leg: None,
+            direct_status: Some(status(ago)),
+            alternative: Some(RouteAlternative { route: Route::None, rtt_ms: rtt }),
+        };
+        let reported_at = Instant::now();
+        let before = ReportedRoute { entry, kind: Some(kind(10, Some(30))), at: reported_at };
+        let later = reported_at + Duration::from_secs(20);
+        assert!(!kind_differs(&before, Some(&kind(30, Some(30))), later), "同一次尝试，只是过了 20 秒");
+        assert!(kind_differs(&before, Some(&kind(1, Some(30))), later), "又试了一次");
+        assert!(!kind_differs(&before, Some(&kind(30, Some(33))), later), "另一种模式的延迟小幅波动不算");
+        assert!(kind_differs(&before, Some(&kind(30, Some(80))), later), "延迟变了不少");
+        let verified = RouteKind {
+            direct_status: Some(DirectStatus { state: DirectState::Verified, cause: None, ..status(30) }),
+            ..kind(30, Some(30))
+        };
+        assert!(kind_differs(&before, Some(&verified), later), "直连通了");
+        assert!(kind_differs(&before, None, later), "细节没了");
+    }
 
     fn setup(controller: &FakeController, state: StateDir, timing: Timing) -> (LinkSetup, watch::Sender<Hello>) {
         let hello = Hello { version: "0.1.0".into(), platform: "test".into(), ..Hello::default() };
@@ -1077,7 +1153,13 @@ mod tests {
             route: Route::Direct { addr: "203.0.113.5:20330".parse().unwrap() },
             rtt_ms: Some(10),
         };
-        let kind = |raw: u32, direct: DirectKind| RouteKind { peer: peer(raw), direct: Some(direct), relay_leg: None };
+        let kind = |raw: u32, direct: DirectKind| RouteKind {
+            peer: peer(raw),
+            direct: Some(direct),
+            relay_leg: None,
+            direct_status: None,
+            alternative: None,
+        };
         let table = Arc::new(std::sync::Mutex::new((vec![direct(2), direct(3)], vec![kind(2, DirectKind::Lan), kind(7, DirectKind::Lan)])));
         let current = Arc::clone(&table);
         setup.report = Box::new(move || {

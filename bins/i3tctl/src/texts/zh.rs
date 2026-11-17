@@ -33,7 +33,7 @@ const HELP: Help = Help {
     network_max_relay_hops: "最大中转级数，1 到 4",
     routing: "选路模式",
     reach: "路径限制",
-    class: "服务等级",
+    class: "QoS：auto 自动、interactive 低延迟、reliable 不丢包、bulk 后台",
     node_group: "节点",
     node_list: "节点列表",
     node_show: "节点详情",
@@ -45,6 +45,7 @@ const HELP: Help = Help {
     node_routing: "选路模式；default 用网络的",
     node_reach: "路径限制；default 用网络的",
     node_profile: "性能档位；default 用节点本机配置文件里的",
+    node_forward_target: "可以作为端口转发的目标：别的节点经转发能访问它的回环和局域网",
     node_pin: "固定挂靠的中继，可写多次",
     node_unpin: "不再固定挂靠的中继",
     node_delete: "删除节点。名字和虚拟 IP 90 天内不再分配",
@@ -120,7 +121,7 @@ const HELP: Help = Help {
     listener_delete: "删除监听器",
     forward_group: "端口转发",
     forward_list: "端口转发列表",
-    forward_add: "新建端口转发。监听端口写 0 由监听节点挑；目标节点要先声明：i3t set can-forward on",
+    forward_add: "新建端口转发。监听端口写 0 由监听节点挑；目标节点要先打开：i3tctl node set <节点> --forward-target on",
     forward_udp: "UDP（默认 TCP）",
     forward_proxy_protocol: "连上目标后先发 PROXY protocol 头，服务看到发起节点的虚拟 IP（只有 TCP）",
     forward_enable: "启用端口转发",
@@ -274,13 +275,14 @@ const UI: Ui = Ui {
     routing: "选路模式",
     reach: "路径限制",
     max_relay_hops: "最大中转级数",
-    class: "服务等级",
+    class: "QoS",
 
     nodes_header: ["编号", "名字", "虚拟 IP", "状态", "角色", "版本", "平台", "分组"],
     no_nodes: "还没有节点",
     exit: "出口",
     relay: "中继",
     forward: "端口转发",
+    forward_target: "转发目标",
     groups: "分组",
     roles: "角色",
     reachability: "从 controller 试连：",
@@ -328,7 +330,7 @@ const UI: Ui = Ui {
     mapping_varies: "端口映射随对端变化，打不了洞",
     reported: "上报",
 
-    routes_header: ["对端", "虚拟 IP", "路", "延迟 ms", "方式", "换上", "流", "流量 ↑/↓"],
+    routes_header: ["对端", "虚拟 IP", "路", "延迟 ms", "方式", "直连", "另一种模式", "换上", "流", "流量 ↑/↓"],
     no_peers: "没有对端",
     matrix_header: ["从", "到", "路", "延迟 ms", "方式", "上报"],
     stale: "过期",
@@ -563,6 +565,9 @@ fn log(entry: &LogEntry) -> Option<String> {
                 }
                 if let Some(profile) = get("profile") {
                     out.push(format!("性能档位 {}", profile.as_str().unwrap_or("默认")));
+                }
+                if let Some(on) = get("forward_target").and_then(serde_json::Value::as_bool) {
+                    out.push(if on { "可以作为转发目标" } else { "不再作为转发目标" }.to_owned());
                 }
                 lang.list(out)
             });

@@ -176,6 +176,7 @@ fn listener_and_forward_status_reported_by_the_node_shows_up_including_its_built
     let network = lab.network("home");
     let gw = lab.join(network.id, &[]);
     let target = lab.join_with(network.id, &[], CAN_DO_ALL);
+    lab.switch_on_forward_target(network.id, target.id);
     let configured = lab.controller.create_listener(network.id, listener(gw.id, "lan", "192.168.1.5:1080", true)).unwrap();
     let auto = lab.controller.create_forward(network.id, forward(gw.id, target.id, "127.0.0.1:0")).unwrap();
     let busy = lab.controller.create_forward(network.id, forward(gw.id, target.id, "127.0.0.1:8080")).unwrap();
@@ -259,6 +260,7 @@ fn a_forward_may_leave_its_port_to_the_node_except_on_a_virtual_ip() {
     let network = lab.network("home");
     let listen = lab.join_offline(network.id, &[], Declared::default());
     let target = lab.join_offline(network.id, &[], CAN_DO_ALL);
+    lab.switch_on_forward_target(network.id, target);
     let first = lab.controller.create_forward(network.id, forward(listen, target, "127.0.0.1:0")).unwrap();
     lab.controller.create_forward(network.id, forward(listen, target, "127.0.0.1:0")).expect("端口写 0 的各挑各的，不算冲突");
     assert_eq!(
@@ -285,6 +287,7 @@ fn classes_and_the_optimistic_reply_set_on_the_network_listener_forward_and_exit
     socks.config.class = Some(Class::Interactive);
     socks.config.optimistic = Some(false);
     lab.controller.create_listener(network.id, socks).unwrap();
+    lab.switch_on_forward_target(network.id, exit.id);
     let mut tagged = forward(laptop.id, exit.id, "127.0.0.1:9000");
     tagged.class = Some(Class::Interactive);
     let created = lab.controller.create_forward(network.id, tagged).unwrap();
@@ -308,6 +311,7 @@ fn a_tcp_forward_can_ask_its_target_node_for_a_proxy_protocol_header_and_a_udp_o
     let network = lab.network("home");
     let mut laptop = lab.join(network.id, &[]);
     let mut target = lab.join_with(network.id, &[], CAN_DO_ALL);
+    lab.switch_on_forward_target(network.id, target.id);
     let mut input = forward(laptop.id, target.id, "127.0.0.1:9000");
     input.proxy_protocol = Some(netmap::ProxyProtocol::V2);
     let created = lab.controller.create_forward(network.id, input.clone()).unwrap();

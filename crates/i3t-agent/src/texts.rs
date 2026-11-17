@@ -84,9 +84,7 @@ static ZH: Texts = Texts {
     },
     metrics_not_loopback: |addr| format!("metrics.listen = \"{addr}\" 不是回环地址：指标接口没有认证，只能写 127.0.0.1 或 [::1]。"),
     same_proxy_address: |addr| format!("proxy.socks5 和 proxy.http 不能用同一个地址 {addr}"),
-    unknown_setting: |other| {
-        format!("没有设置项 {other}：可以写 can-exit、can-relay、can-forward、relay-address、throughput-tests、profile、intercept")
-    },
+    unknown_setting: |other| format!("没有设置项 {other}：可以写 can-exit、can-relay、relay-address、throughput-tests、profile、intercept"),
     not_a_switch: |other| format!("\"{other}\" 不是开关的值：写 on 或 off"),
     unknown_profile: |other| format!("没有档位 \"{other}\"：可以写 low-footprint、balanced、high-throughput"),
     bad_relay_address: |text| {
@@ -143,9 +141,7 @@ static EN: Texts = Texts {
     },
     same_proxy_address: |addr| format!("proxy.socks5 and proxy.http can't share the address {addr}"),
     unknown_setting: |other| {
-        format!(
-            "No setting {other}: possible values: can-exit, can-relay, can-forward, relay-address, throughput-tests, profile, intercept"
-        )
+        format!("No setting {other}: possible values: can-exit, can-relay, relay-address, throughput-tests, profile, intercept")
     },
     not_a_switch: |other| format!("\"{other}\" isn't a switch value: write on or off"),
     unknown_profile: |other| format!("No profile \"{other}\": possible values: low-footprint, balanced, high-throughput"),
@@ -196,8 +192,6 @@ relay = false
 # 中继的另一个地址，只有机房或路由器把另一个 IP 上的端口映射到这台机器时才要写，比如：
 # relay_address = "203.0.113.9:40330"
 # 也可以执行 i3t set relay-address 203.0.113.9:40330。别的地址由 controller 自己找出来。
-# 端口转发的目标：别的节点经它访问它的回环地址和局域网里指定的服务。
-forward = false
 
 # 本机的代理入口，只给这台机器上的程序用。不需要的写 "off"。
 [proxy]
@@ -251,8 +245,6 @@ relay = false
 # Another address of the relay. Only needed when a provider or router maps a port on another IP to this machine, e.g.:
 # relay_address = "203.0.113.9:40330"
 # Or run: i3t set relay-address 203.0.113.9:40330. The controller finds the other addresses itself.
-# Port forward target: other nodes reach chosen services on its loopback and LAN through it.
-forward = false
 
 # Local proxy entries, for programs on this machine only. "off" turns one off.
 [proxy]

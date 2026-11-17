@@ -52,7 +52,7 @@ use crate::diag::{
 use crate::direct::{Action, Change, DirectPath, Policy};
 use crate::matrix::Matrix;
 use crate::relays::{self, Complaint, Identity, Leg, RelayLink, Standing, Wire};
-use crate::report::{BackboneLink, BackboneRow, CandidateReport, LegReport, PathReport, RelayLeg};
+use crate::report::{Alternative, BackboneLink, BackboneRow, CandidateReport, LegReport, PathReport, RelayLeg};
 use crate::routing::{Candidate, Entry, PathId, Selector};
 use crate::table::{self, Hop, PeerSlot, RelaySlot, Shared, Table};
 use crate::tcp::{self, TcpEvent, TcpLegHandle};
@@ -218,6 +218,10 @@ struct PeerState {
     /// 选路规则此刻选的路。没有固定时就是 `route`；固定期间选路规则照样每一轮都选，"现在走着的 relay"这类判断看的是它，
     /// 所以测试结束之后回到的是没有这次测试时会走的那条路。
     policy_route: RouteKey,
+    /// 本节点没在用的那种选路模式此刻会选的路，给界面比较用（[`PathReport::alternative`]），不影响选路。
+    /// 默认模式下每个评估窗口按延迟优先的规则算一次，延迟优先模式下每一轮按默认模式的规则算。
+    /// 外层是 `None`：还没有算过；里层是 `None`：那种模式此刻没有路可走。
+    other_mode: Option<Option<PathId>>,
 }
 
 /// 一次正在进行的直连尝试（主动测试）。
@@ -606,6 +610,7 @@ impl Control {
                     pin: None,
                     pinned: false,
                     policy_route: RouteKey::None,
+                    other_mode: None,
                 }
             });
             if peer.key != info.key {
@@ -1438,11 +1443,15 @@ impl Control {
             let mut why = None;
             let path = match mode {
                 RoutingMode::DirectFirst => {
+                    let chosen = view.direct_first(id, peer);
                     if window {
-                        // 默认模式不拿代价做选择，算出来只是给界面看的。
+                        // 默认模式不拿代价做选择，算出来只是给界面看的：候选和它们的代价，以及延迟优先模式会选哪条。
                         peer.candidates = view.candidates(id, peer);
+                        let usable: Vec<&Candidate> =
+                            peer.candidates.iter().filter(|candidate| view.resolve(id, peer, candidate.path).is_some()).collect();
+                        peer.other_mode = Some(active::lowest_cost_path(&usable, chosen));
                     }
-                    view.direct_first(id, peer)
+                    chosen
                 }
                 RoutingMode::LowestCost => {
                     let current = peer.selector.current();
@@ -1454,6 +1463,8 @@ impl Control {
                         peer.candidates = found;
                         why = peer.selector.choose(now, &peer.candidates, window, &mut random_below);
                     }
+                    // 给界面比较：默认模式此刻会选哪条。它本来就是每一轮都算的东西，不多花什么。
+                    peer.other_mode = Some(view.direct_first(id, peer));
                     peer.selector.current()
                 }
             };
@@ -1610,8 +1621,16 @@ impl Control {
     fn route_rtt_ms(&self, id: NodeId, peer: &PeerState) -> Option<u32> {
         match peer.route {
             RouteKey::None => None,
-            RouteKey::Direct(_) => peer.direct.active().map(|(_, rtt)| rtt.millis()),
-            RouteKey::Relay { path, .. } => match *path.as_slice() {
+            RouteKey::Direct(addr) => self.path_rtt_ms(id, peer, PathId::Direct(addr)),
+            RouteKey::Relay { path, .. } => self.path_rtt_ms(id, peer, PathId::Relays(path)),
+        }
+    }
+
+    /// 一条路径上的往返延迟，和路由表里现在这条路的算法一样。
+    fn path_rtt_ms(&self, id: NodeId, peer: &PeerState, path: PathId) -> Option<u32> {
+        match path {
+            PathId::Direct(_) => peer.direct.active().map(|(_, rtt)| rtt.millis()),
+            PathId::Relays(path) => match *path.as_slice() {
                 // 经一个 relay 的延迟是两段之和：本节点到 relay 是自己测的，relay 到对端是对端上报的。
                 [relay] => {
                     let near = self.relays.get(&relay).and_then(|entry| entry.link.rtt()).map(|rtt| rtt.millis());
@@ -1685,6 +1704,15 @@ impl Control {
             reason: peer.reason.text.clone(),
             cause: Some(peer.reason.cause.clone()),
             since_switch_ms: peer.switched.map(|at| u64::try_from(now.saturating_duration_since(at).as_millis()).unwrap_or(u64::MAX)),
+            direct_status: peer.direct.status(now),
+            alternative: peer.other_mode.filter(|other| *other != current).map(|other| Alternative {
+                route: match other {
+                    None => Route::None,
+                    Some(PathId::Direct(addr)) => Route::Direct { addr },
+                    Some(PathId::Relays(relays)) => Route::Relay { relays: relays.as_slice().to_vec() },
+                },
+                rtt_ms: other.and_then(|path| self.path_rtt_ms(id, peer, path)),
+            }),
             candidates,
         }
     }

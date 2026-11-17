@@ -241,12 +241,7 @@ impl Session {
     /// 把命令行上写的节点（编号、名字或虚拟 IP）找出来。
     async fn node(&self, network: NetworkId, reference: &str) -> anyhow::Result<Node> {
         let nodes: Vec<Node> = self.client.get(&format!("/networks/{network}/nodes")).await?;
-        let by_id = reference.parse::<NodeId>().ok();
-        let by_ip = reference.parse::<Ipv4Addr>().ok();
-        let found = nodes
-            .into_iter()
-            .find(|node| Some(node.id) == by_id || Some(node.virtual_ip) == by_ip || node.name.eq_ignore_ascii_case(reference));
-        found.ok_or_else(|| anyhow!((texts().ui.no_such_node)(reference)))
+        pick_node(&nodes, reference).cloned()
     }
 
     /// 把命令行上写的分组找出来：先按名字（不分大小写），没有叫这个名字的再当编号。分组的名字可以全是数字，所以名字优先。
@@ -353,7 +348,7 @@ impl Session {
                 let request = UpdateNode { groups: Some(self.group_ids(network, &groups).await?), ..UpdateNode::default() };
                 self.show(self.send(Method::PATCH, &format!("{nodes}/{}", node.id), &request).await?, render::node_changed)
             }
-            NodeCommand::Set { node, ip, dial_out_only, routing, reach, profile, pins, unpin } => {
+            NodeCommand::Set { node, ip, dial_out_only, routing, reach, profile, forward_target, pins, unpin } => {
                 let node = self.node(network, &node).await?;
                 let mut pinned_relays = if unpin { Some(Vec::new()) } else { None };
                 if !pins.is_empty() {
@@ -369,6 +364,7 @@ impl Session {
                     routing: routing.map(crate::cli::Inherit::into_override),
                     reach: reach.map(crate::cli::Inherit::into_override),
                     profile: profile.map(crate::cli::Inherit::into_override),
+                    forward_target: forward_target.map(|switch| switch.0),
                     pinned_relays,
                     ..UpdateNode::default()
                 };
@@ -387,8 +383,10 @@ impl Session {
                 self.show(self.send(Method::POST, &format!("{nodes}/{}/succeed", node.id), &request).await?, render::node_changed)
             }
             NodeCommand::Routes { node } => {
-                let node = self.node(network, &node).await?;
-                self.show(self.get(&format!("{nodes}/{}/routes", node.id)).await?, render::routes)
+                // 节点列表也用来把路上的 relay 写成名字：relay 不一定是这个节点的对端。
+                let all: Vec<Node> = self.client.get(&nodes).await?;
+                let node = pick_node(&all, &node)?;
+                self.show(self.get(&format!("{nodes}/{}/routes", node.id)).await?, |table| render::routes(table, &all))
             }
             NodeCommand::Access { node } => {
                 let node = self.node(network, &node).await?;
@@ -711,6 +709,15 @@ impl Session {
             }
         }
     }
+}
+
+/// 命令行上写的节点：编号、虚拟 IP 或者名字（不分大小写）。
+fn pick_node<'a>(nodes: &'a [Node], reference: &str) -> anyhow::Result<&'a Node> {
+    let by_id = reference.parse::<NodeId>().ok();
+    let by_ip = reference.parse::<Ipv4Addr>().ok();
+    let found =
+        nodes.iter().find(|node| Some(node.id) == by_id || Some(node.virtual_ip) == by_ip || node.name.eq_ignore_ascii_case(reference));
+    found.ok_or_else(|| anyhow!((texts().ui.no_such_node)(reference)))
 }
 
 /// 按名字或编号在网络列表里找一个。

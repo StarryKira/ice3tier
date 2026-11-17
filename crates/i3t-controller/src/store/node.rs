@@ -26,8 +26,10 @@ pub struct NodeRecord {
     /// 它所在的分组。内置分组 `All` 不在里面：每个节点本来就在。
     /// 读的时候从成员表里取；写的时候用 [`Store::set_node_groups`]，[`Store::update_node`] 不写它。
     pub groups: BTreeSet<GroupId>,
-    /// 节点自己声明的"可以承担"。
+    /// 节点自己声明的"可以承担"（relay、出口）。
     pub declared: Declared,
+    /// 管理员的开关：可以作为端口转发的目标。节点不声明它。
+    pub forward_target: bool,
     /// 管理员启用了 relay 时有值。
     pub relay: Option<RelaySettings>,
     /// 管理员启用了出口时有值。
@@ -97,6 +99,7 @@ impl NodeRecord {
             virtual_ip: row.get::<_, SqlIp>("virtual_ip")?.0,
             groups: row.get::<_, Json<BTreeSet<GroupId>>>("groups")?.0,
             declared: row.get::<_, Json<Declared>>("declared")?.0,
+            forward_target: row.get("forward_target")?,
             relay: row.get::<_, Option<Json<RelaySettings>>>("relay")?.map(|json| json.0),
             exit: row.get::<_, Option<Json<ExitRole>>>("exit")?.map(|json| json.0),
             dial_out_only: row.get("dial_out_only")?,
@@ -224,7 +227,7 @@ impl Store {
         Ok(self.conn.query_row("SELECT COUNT(*) FROM nodes WHERE ?1 IS NULL OR network_id = ?1", params![network], |row| row.get(0))?)
     }
 
-    /// 写回一个节点的身份和设置：名字、虚拟 IP、声明、启用的能力、各个开关，以及它自我介绍里的
+    /// 写回一个节点的身份和设置：名字、虚拟 IP、声明、启用的能力（含端口转发的目标）、各个开关，以及它自我介绍里的
     /// 平台、版本、主机名和能不能自己更新。
     /// 所在的分组、上报的内容、最近在线时间、netmap 的进度和更新失败的记录各有各的方法，不在这里写。
     ///
@@ -233,7 +236,7 @@ impl Store {
     /// 写数据库失败，包括名字或虚拟 IP 和别的节点重复。
     pub fn update_node(&self, node: &NodeRecord) -> Result<(), StoreError> {
         self.conn.execute(
-            "UPDATE nodes SET name = :name, virtual_ip = :ip, declared = :declared, relay = :relay, exit = :exit,
+            "UPDATE nodes SET name = :name, virtual_ip = :ip, declared = :declared, forward_target = :forward_target, relay = :relay, exit = :exit,
                               dial_out_only = :dial_out_only, routing = :routing, reach = :reach, pinned_relays = :pinned,
                               profile = :profile, platform = :platform, version = :version, hostname = :hostname, self_update = :self_update
              WHERE id = :id",
@@ -242,6 +245,7 @@ impl Store {
                 ":name": node.name,
                 ":ip": SqlIp(node.virtual_ip),
                 ":declared": Json(node.declared),
+                ":forward_target": node.forward_target,
                 ":relay": node.relay.as_ref().map(Json),
                 ":exit": node.exit.as_ref().map(Json),
                 ":dial_out_only": node.dial_out_only,
@@ -255,6 +259,16 @@ impl Store {
                 ":self_update": node.self_update.map(Json),
             },
         )?;
+        Ok(())
+    }
+
+    /// 只改节点"可以作为端口转发的目标"的开关。继任时用：那时这一行别的列刚被别处改过，不能拿手上的旧记录整个写回去。
+    ///
+    /// # Errors
+    ///
+    /// 写数据库失败。
+    pub fn set_node_forward_target(&self, id: NodeId, on: bool) -> Result<(), StoreError> {
+        self.conn.execute("UPDATE nodes SET forward_target = ?2 WHERE id = ?1", params![SqlNode(id), on])?;
         Ok(())
     }
 
@@ -423,7 +437,8 @@ mod tests {
         node.name = "nas-01".to_owned();
         node.groups = [store.insert_group(network, "servers").unwrap(), store.insert_group(network, "home").unwrap()].into();
         store.set_node_groups(id, &node.groups).unwrap();
-        node.declared = Declared { exit: true, relay: true, forward: false, relay_address: Some("203.0.113.9:40330".parse().unwrap()) };
+        node.declared = Declared { exit: true, relay: true, relay_address: Some("203.0.113.9:40330".parse().unwrap()) };
+        node.forward_target = true;
         node.relay = Some(RelaySettings { bandwidth_mbps: Some(200) });
         node.exit = Some(ExitRole { ports: None, lan: true, ..ExitRole::default() });
         node.dial_out_only = true;

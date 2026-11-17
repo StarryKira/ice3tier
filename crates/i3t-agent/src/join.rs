@@ -14,7 +14,6 @@ use crate::state::{ControllerInfo, StateDir};
 pub struct JoinOptions {
     pub can_exit: bool,
     pub can_relay: bool,
-    pub can_forward: bool,
 }
 
 /// 用注册令牌加入网络，把结果存进状态目录，返回 controller 给的第一份 netmap。
@@ -32,8 +31,7 @@ pub async fn join(state: &StateDir, token: &str, options: JoinOptions, program: 
 
     let config_path = state.config_path();
     Config::write_template_if_missing(&config_path)?;
-    let declared =
-        [(Capability::Exit, options.can_exit), (Capability::Relay, options.can_relay), (Capability::Forward, options.can_forward)];
+    let declared = [(Capability::Exit, options.can_exit), (Capability::Relay, options.can_relay)];
     for (capability, _) in declared.into_iter().filter(|&(_, on)| on) {
         Config::set_declared(&config_path, capability, true)?;
     }

@@ -4,7 +4,25 @@
 
 对应的 Rust 类型在 `crates/i3t-model/src/admin.rs`，实现在 `crates/i3t-controller/src/admin.rs`。文档和代码不一致时以代码为准，并请修正文档。
 
-> **最新一次改动**（出口没有带宽上限；以前用默认端口启用的出口改成不限端口）。这一次的清单：
+> **最新一次改动**（端口转发的目标由管理员打开；QoS；路由表上的直连状态和另一种选路模式）。这一次的清单：
+>
+> - 改了规则：端口转发的目标不再由节点声明，只看管理员的开关。新的字段 `Node.forward_target`（`true`、`false`，新节点是 `false`），
+>   用 `PATCH …/nodes/{node}` 的 `{ "forward_target": true }` 打开（第 5 节）。谁控制了 controller，谁就能经转发碰到目标机器能碰到的一切。
+> - 新的错误码：`409 forward_target_off`（要启用的转发的目标节点开关关着，`what` 是 `null`，`field` 是 `target_node`），代替了端口转发的 `not_declared`。
+>   `not_declared` 的 `what` 只剩 `relay`、`exit`（第 2 节）。
+> - 新的取值：端口转发的 `status` 多了 `"forward_target_off"`（目标的开关关着：转发留着、`enabled` 不变，只是不下发），排在 `"disabled"` 后面（第 11 节）。
+> - 去掉的：`Node.declared.forward`；转发的 `status` 的 `"target_not_declared"`；操作记录不再记 `node.forward.withdrawn`（以前的记录照旧在）。
+>   操作记录 `node.update` 的 `changes` 里可以有 `forward_target`（第 3 节）。
+> - 新的字段：路由表 `NodeRoute.direct_status`（`DirectStatusView`：直连在哪一步，`not_tried`、`trying`、`verified`、`failed`，原因 `DirectCause`，
+>   最近一次尝试的时间）和 `NodeRoute.alternative`（节点没在用的那种选路模式此刻会选的路）（第 5 节）。
+> - 改了说法：服务等级叫 QoS，取值有给人看的名字（自动、低延迟、不丢包、后台），字段和取值的写法不变；新加的 `Class` 一节写明了每个取值做什么（第 4 节）。
+> - 升级时数据库原地迁移：声明过可以作为端口转发目标的节点，`forward_target` 是 `true`，指向它们的转发照旧生效。
+> - 节点协议没有升版：路由细节里的 `direct_status`、`alternative` 旧的 controller 忽略，旧的节点不报（是 `null`）。新的节点在 Hello 里总是报
+>   `forward: true`，旧的 controller 因此照旧给它下发转发；旧的节点还要自己的声明，见 [architecture.md](architecture.md) §4。
+>
+> 别的接口的路径、请求体和应答里原有的字段都没有变。
+>
+> **上一次改动**（出口没有带宽上限；以前用默认端口启用的出口改成不限端口）。这一次的清单：
 >
 > - 去掉的字段：出口的设置（`Node.exit`、`PUT …/exit`、`ExitView.settings`）里的 `bandwidth_mbps`，出口不再限速（第 5.6 节）。
 >   请求体里还写着它的照收（写 0 也不报错），没有作用；应答里没有它。relay 的 `bandwidth_mbps`（第 5.5 节）是另一回事，照旧。
@@ -15,7 +33,7 @@
 >
 > 别的接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **上一次改动**（relay 的地址由 controller 找出来，地址段重叠的提醒，时间序列）。relay 的地址不再由人填：
+> **再上一次改动**（relay 的地址由 controller 找出来，地址段重叠的提醒，时间序列）。relay 的地址不再由人填：
 > controller 从三处找出来（节点上声明的、controller 看到的、节点网卡上的），谁连得上它，它就是谁的 relay（第 5.5 节）。这一次的清单：
 >
 > - 改了写法的字段：节点的 `relay`（第 5 节）从填的设置变成 `RelayView`：
@@ -38,7 +56,7 @@
 >
 > 别的接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **再上一次新增**（入口、出口、端口转发和两个运维命令）。这一次的清单：
+> **更早的新增**（入口、出口、端口转发和两个运维命令）。这一次的清单：
 >
 > - 新接口：`POST /networks/{network}/exits/{node}/test`，出口测试（第 17 节）。新的结构 `ExitTestInput`、`ExitTestView`、`ExitTestResult`、
 >   `ResolveStep`、`ConnectStep`、`TlsStep`，原因的代码 `ExitTestCause`。
@@ -164,7 +182,7 @@
 > - 新接口：`PATCH /networks/{network}/credentials/{id}`（改上限、清零用量，第 9 节）；`GET /networks/{network}/exits`、`GET /networks/{network}/exits/{node}`（出口的设置、用量、健康，第 17 节）；`GET /networks/{network}/nodes/{node}/listeners`（节点上全部监听的状态，含节点自己开的回环入口，第 5 节）；`POST /networks/{network}/tags/rename`（标签改名；后来标签被分组取代，这个接口已经去掉，见最新一次改动）。
 > - 已有接口新的查询参数：`GET /log` 的 `before`、`network`、`action`、`ref`（翻页和过滤，第 3 节）；`GET /networks/{network}/tokens` 的 `all`（连用掉的和过期的也列出，第 6 节）。
 > - 新的字段：`Status.data_dir`；`Network.class`（`POST`、`PATCH /networks` 也收）；`Overview.flows`、`tx_bytes`、`rx_bytes`；`Node.attached`（以前只在节点详情里，现在列表里也有，详情的 JSON 没有变）；`NodeRoute.age_secs`、`since_secs`；出口设置（`Node.exit`、`PUT …/exit`）的 `quota_bytes`、`quota_reset_day`、`family`、`connects_per_minute`、`class`；`EnrollTokenInfo.prefix`、`state`、`used_at`、`used_by`；`Credential.prefix`、`max_bytes`、`state`、`revoked_at`、`usage`（`POST …/credentials` 也收 `max_bytes`）；`Listener.class`、`optimistic`、`status`；`Forward.class`、`listen`（`ForwardInput` 也收 `class`）；`LogEntry.refs`；`PUT …/relay` 的应答多了 `reachability`。
-> - 新的取值：`ExitRole.family` 是 `"any"`、`"ipv4"`、`"ipv6"`；服务等级（`class`）是 `"auto"`、`"interactive"`、`"reliable"`、`"bulk"`；新的结构 `ListenStatus`（第 11.1 节）、`ExitView`（第 17 节）、`NodeListeners`（第 5 节）、`RelayEnabled`（第 5.5 节）、`RenamedTag`（已经去掉）。
+> - 新的取值：`ExitRole.family` 是 `"any"`、`"ipv4"`、`"ipv6"`；QoS（`class`）是 `"auto"`、`"interactive"`、`"reliable"`、`"bulk"`；新的结构 `ListenStatus`（第 11.1 节）、`ExitView`（第 17 节）、`NodeListeners`（第 5 节）、`RelayEnabled`（第 5.5 节）、`RenamedTag`（已经去掉）。
 > - 操作记录多了四种 `action`：`credential.update`、`credential.revoke`、`credential.exhausted`（凭据的流量上限用完了，controller 自己记的）、`tag.rename`（已经去掉）。`credential.delete` 现在是"彻底删掉一个已经吊销的凭据"。
 > - 行为上的变化：
 >   - `DELETE /networks/{network}/credentials/{id}` 第一次是吊销：凭据留在列表里，`state` 是 `"revoked"`；对已经吊销的再删一次才彻底删掉（第 9 节）。
@@ -295,7 +313,7 @@
 | `invalid_request` | 哪里不对：`too_small`（地址段太小）、`zero`（不能是 0）、`zero_port`（端口不能是 0）、`too_many`、`out_of_range`、`empty`、`too_long`、`malformed`（写法不对）、`all_digits`（名字全是数字）、`same_node`（两个节点是同一个）、`builtin`（内置分组 `All` 不能改名、删除、增减成员）、`required`（非回环地址的监听器必须要求凭据；「新增」节点、relay、出口的时间序列要写 `node`）、`missing`（`a`、`b` 只写了一个）、`not_relay`（不是启用了的 relay）、`not_connectable`（不是能连上的地址）、`not_allowed`（立即更新的时机不能是 `idle`；「新增」网络的时间序列不能写 `node`）、`duplicate`（路径里 relay 重复；同一个节点既要加入分组又要移出）、`with_successor`（继任的令牌不能预设虚拟 IP）、`no_default`（默认的地址段都被占了）、`needs_quality`（测吞吐要同时测质量）、`revoked`（凭据已经吊销）、「新增」`tcp_only`（只有 TCP 的端口转发能设 PROXY protocol）；请求本身读不出来时是 `content_type`、`syntax`、`data`（JSON 里某个字段不对，`field` 是它）、`body`、`query`、`path`；请求方法不对（405）是 `method` |
 | `name_taken` | 「新增」分组的名字被占用时是 `group`；别的名字是 `null` |
 | `conflict` | 挡着的东西：`listener`（这个节点上已经有监听器在这个地址上，`field` 是 `bind`）、`forward`（同上，端口转发）、`token`（这个虚拟 IP 已经预设在另一个注册令牌上，`field` 是 `virtual_ip`） |
-| `not_declared` | 没有声明的能力：`relay`、`exit`、`forward`。要在节点上执行的命令是 `i3t set can-<这个值> on` |
+| `not_declared` | 没有声明的能力：`relay`、`exit`。要在节点上执行的命令是 `i3t set can-<这个值> on`。「去掉」`forward`：端口转发的目标不再由节点声明，见 `forward_target_off` |
 | `cannot_self_update` | `container`、`package_manager`、`read_only_dir`（节点说的原因，见第 14 节的 `self_update.blocker`）、`too_old`（版本太旧，不懂更新）、`unknown`（节点说不能、没有说原因） |
 | `no_update` | `no_release`、`controller_too_old`、`unreadable_version`、`up_to_date`、`no_package`，和第 14 节 `SkipCause` 的代码一样 |
 | `unauthorized` | `missing`（没带令牌）、`wrong`（令牌不对） |
@@ -317,7 +335,8 @@
 | 409 | `range_exhausted` | 地址段里没有空闲地址了 |
 | 409 | `range_not_superset` | 网络里已经有节点，新的地址段必须包含原来的 |
 | 409 | `network_not_empty` | 网络里还有节点，不能删除 |
-| 409 | `not_declared` | 节点没有在本地声明可以承担这项能力（relay、出口、端口转发的目标）。`message` 里写着要在节点上执行的命令 |
+| 409 | `not_declared` | 节点没有在本地声明可以承担这项能力（relay、出口）。`message` 里写着要在节点上执行的命令 |
+| 409 | `forward_target_off` | 「新增」要启用的端口转发的目标节点没有打开 `forward_target`（第 5 节）。`what` 是 `null`，`field` 是 `target_node`；`message` 里写着打开它的命令。代替了以前端口转发的 `not_declared` |
 | 409 | `predecessor_online` | 要被继任的节点还在线 |
 | 409 | `conflict` | 和已有的配置冲突：同一个监听地址上已经有监听器或同协议的转发；虚拟 IP 已经预设在另一个令牌上 |
 | 409 | `node_offline` | 「新增」要让它立即更新的节点不在线 |
@@ -401,7 +420,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `refs` | 「新增」这条记录说的是哪些东西，界面可以据此做成链接。每一项是 `{ "kind": 种类, "id": 编号 }`，种类是 `"network"`、`"node"`、`"group"`、`"token"`、`"rule"`、`"credential"`、`"listener"`、`"forward"`（以后可能增加，不认识的种类请忽略）。东西后来被删掉了，编号还在。这个字段出现之前的记录是 `[]` |
 | `params` | 「新增」按名字给出的参数，只用 `action` 和它们就能把这条记录写成一句话：东西的编号挨着它当时的名字（`node` 和 `node_name`）。每种操作有哪些参数见下表。这个字段出现之前的记录是 `{}`，那时只能显示 `detail` |
 
-`action` 的取值：`admin.token`、`network.create`、`network.update`、`network.delete`、`node.enroll`、`node.update`、`node.delete`、`node.succeed`、`node.relay.enable`、`node.relay.disable`、`node.relay.withdrawn`、`node.exit.enable`、`node.exit.disable`、`node.exit.withdrawn`、`node.forward.withdrawn`、`token.create`、`token.delete`、`rule.create`、`rule.update`、`rule.delete`、`credential.create`、`credential.delete`、`listener.create`、`listener.update`、`listener.delete`、`forward.create`、`forward.update`、`forward.delete`、`pair.set`、`pair.delete`，以及「新增」`update.settings`、`update.release`（发布源上有了新的正式版）、`update.pause`（节点更新失败，版本被暂停；它记在那个节点所在的网络上）、`update.resume`、`update.force`（记在节点所在的网络上）、`update.force_all`，以及「新增」`credential.update`（改上限、清零用量）、`credential.revoke`（吊销）、`credential.exhausted`（凭据的流量上限用完了，controller 自己记的），以及「新增」`update.failure`（节点说某个版本在它那里不能用，但 controller 没有让它装过这个版本，所以不暂停；记在那个节点所在的网络上），以及「新增」`test.start`（发起了一个主动测试，`refs` 是两个节点）、`test.cancel`、`test.matrix`（开始一次全网矩阵，`refs` 是网络）、`test.matrix.cancel`，以及「新增」`group.create`、`group.rename`、`group.delete`、`group.members`（分组的成员变了，第 18 节）。`credential.delete` 现在是彻底删掉一个已经吊销的凭据。带 `withdrawn` 的三种是节点撤回了本地声明、controller 随之关闭能力时记的。最多保留最近的一万条。
+`action` 的取值：`admin.token`、`network.create`、`network.update`、`network.delete`、`node.enroll`、`node.update`、`node.delete`、`node.succeed`、`node.relay.enable`、`node.relay.disable`、`node.relay.withdrawn`、`node.exit.enable`、`node.exit.disable`、`node.exit.withdrawn`、`node.forward.withdrawn`、`token.create`、`token.delete`、`rule.create`、`rule.update`、`rule.delete`、`credential.create`、`credential.delete`、`listener.create`、`listener.update`、`listener.delete`、`forward.create`、`forward.update`、`forward.delete`、`pair.set`、`pair.delete`，以及「新增」`update.settings`、`update.release`（发布源上有了新的正式版）、`update.pause`（节点更新失败，版本被暂停；它记在那个节点所在的网络上）、`update.resume`、`update.force`（记在节点所在的网络上）、`update.force_all`，以及「新增」`credential.update`（改上限、清零用量）、`credential.revoke`（吊销）、`credential.exhausted`（凭据的流量上限用完了，controller 自己记的），以及「新增」`update.failure`（节点说某个版本在它那里不能用，但 controller 没有让它装过这个版本，所以不暂停；记在那个节点所在的网络上），以及「新增」`test.start`（发起了一个主动测试，`refs` 是两个节点）、`test.cancel`、`test.matrix`（开始一次全网矩阵，`refs` 是网络）、`test.matrix.cancel`，以及「新增」`group.create`、`group.rename`、`group.delete`、`group.members`（分组的成员变了，第 18 节）。`credential.delete` 现在是彻底删掉一个已经吊销的凭据。带 `withdrawn` 的是节点撤回了本地声明、controller 随之关闭能力时记的；「去掉」`node.forward.withdrawn` 不再记（端口转发的目标不再由节点声明，见第 5 节），以前记下的照旧在。最多保留最近的一万条。
 
 不认识的 `action` 请显示 `detail`。分组出现之前的记录里可能还有 `tag.rename`，它没有新的写法，只能显示 `detail`。
 
@@ -416,11 +435,11 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `network.update` | `network`、`network_name`，以及改完之后的 `cidr`、`routing`、`max_relay_hops`、`reach`、`class` |
 | `network.delete` | `network`、`network_name` |
 | `node.enroll` | `node`、`node_name`、`virtual_ip`、`token`（用的注册令牌的编号）、`predecessor`、`predecessor_name`（继任的原节点；不是继任时是 `null`） |
-| `node.update` | `node`、`node_name`（改之前的名字）、`changes`：改了的项，没改的不在里面。`name` 和 `virtual_ip` 写成 `{ "from": …, "to": … }`，`groups`、`dial_out_only`、`routing`、`reach`、`pinned_relays`、「新增」`profile` 是改之后的值（`profile` 是 `null` 表示不再指定）；`groups` 的每一项是 `{ "group": 编号, "group_name": 名字 }`，不含 `All` |
+| `node.update` | `node`、`node_name`（改之前的名字）、`changes`：改了的项，没改的不在里面。`name` 和 `virtual_ip` 写成 `{ "from": …, "to": … }`，`groups`、`dial_out_only`、`routing`、`reach`、`pinned_relays`、「新增」`profile`、「新增」`forward_target` 是改之后的值（`profile` 是 `null` 表示不再指定）；`groups` 的每一项是 `{ "group": 编号, "group_name": 名字 }`，不含 `All` |
 | `node.delete` | `node`、`node_name`、`virtual_ip` |
 | `node.succeed` | `node`、`node_name`、`virtual_ip`（继任之前的），`predecessor`、`predecessor_name`、`predecessor_virtual_ip` |
 | `node.relay.enable`、`node.relay.disable`、`node.exit.enable`、`node.exit.disable`、`node.relay.withdrawn`、`node.exit.withdrawn` | `node`、`node_name` |
-| `node.forward.withdrawn` | `node`、`node_name`、`forwards`（停用了几条转发） |
+| `node.forward.withdrawn` | `node`、`node_name`、`forwards`（停用了几条转发）。「去掉」不再记，只有以前的记录里有 |
 | `token.create` | `token`、`prefix`、`expires_at`、`groups`（每一项是 `{ "group": 编号, "group_name": 名字 }`）、`virtual_ip`、`successor_of` |
 | `token.delete` | `token`、`prefix` |
 | `rule.create`、`rule.update`、`rule.delete` | `rule`、`rule_name`、`src`、`src_name`、`dst`、`dst_name`（两头的分组的编号和名字）、`direction`、`enabled`（改完之后的，删除时是删之前的） |
@@ -477,7 +496,19 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `reach` | 对可用路径的限制 |
 | `created_at` | 创建时间 |
 | `nodes` | 网络里有多少个节点 |
-| `class` | 「新增」网络的默认服务等级：`"auto"`、`"interactive"`、`"reliable"`、`"bulk"`；`null` 表示 `auto`。一条流的等级按这个顺序取第一个有的：代理用户名里的 `+c-` 标记、监听器（或端口转发）的 `class`、出口的 `class`（只有经出口出去的流）、网络的 `class` |
+| `class` | 「新增」网络的默认 QoS：`"auto"`（自动）、`"interactive"`（低延迟）、`"reliable"`（不丢包）、`"bulk"`（后台）；`null` 表示 `auto`。一条流的 QoS 按这个顺序取第一个有的：代理用户名里的 `+c-` 标记、监听器（或端口转发）的 `class`、出口的 `class`（只有经出口出去的流）、网络的 `class`。「新增」每个取值做什么、给人看的名字见下面的 `Class` |
+
+「新增」`Class`：QoS 的取值。字段、参数和取值的写法不变；界面上叫 QoS，取值写名字。
+
+| 取值 | 名字（中文 / 英文） | 做什么 |
+|---|---|---|
+| `"auto"` | 自动 / Auto | 默认。TCP 的流开始排在前面，这一端在它上面发出 1 MB 之后让位到后台那一档；UDP 的数据报一个都不丢 |
+| `"interactive"` | 低延迟 / Low latency | TCP 的流排在前面；UDP 的数据报走连接上不可靠的通道，来不及发的旧数据报丢掉，路上丢了不重传，换来最低的延迟。只有它会丢数据报，要自己选 |
+| `"reliable"` | 不丢包 / No loss | TCP 的流居中；UDP 的数据报一个都不丢 |
+| `"bulk"` | 后台 / Background | TCP 的流让位；UDP 的数据报一个都不丢 |
+
+TCP 的流在任何取值下都是可靠的，取值只决定同一条连接上谁先发。"一个都不丢"说的是路上：每个数据报单独走一条流，由连接重传，
+先后不保证；应用取得太慢时收的一方照样丢新来的。代理用户名里的写法：`+c-a`、`+c-i`、`+c-r`、`+c-b`。
 
 ### GET /networks
 
@@ -590,7 +621,8 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   "fqdn": "node-1.home.i3t",
   "virtual_ip": "10.66.0.1",
   "groups": [{ "id": 3, "name": "servers", "builtin": false }],
-  "declared": { "exit": true, "relay": true, "forward": true, "relay_address": null },
+  "declared": { "exit": true, "relay": true, "relay_address": null },
+  "forward_target": true,
   "relay": {
     "addresses": [
       { "address": "203.0.113.7:20330", "source": "observed" },
@@ -649,7 +681,8 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `fqdn` | 全名：`<name>.<网络的 domain>` |
 | `virtual_ip` | 虚拟 IP。加入时分配（地址段里最小的空闲地址），之后不变，除非管理员改 |
 | `groups` | 「新增」它所在的分组（`GroupRef`：`{ "id": 分组编号, "name": 名字, "builtin": 是不是 All }`），按名字排（不分大小写）。内置的 `All` 不列出：每个节点都在里面 |
-| `declared` | 节点在本地声明的"可以承担"：`exit` 出口、`relay`、`forward` 端口转发的目标。由节点上报，这里只读。「新增」`relay_address`：节点上声明的 relay 地址（`i3t set relay-address <地址:端口>`，机房或路由器映射进来的那个），没有声明是 `null`；比这个文档旧的节点不报，也是 `null` |
+| `declared` | 节点在本地声明的"可以承担"：`exit` 出口、`relay`。由节点上报，这里只读。「去掉」`forward`：端口转发的目标不再由节点声明，看 `forward_target`。「新增」`relay_address`：节点上声明的 relay 地址（`i3t set relay-address <地址:端口>`，机房或路由器映射进来的那个），没有声明是 `null`；比这个文档旧的节点不报，也是 `null` |
+| `forward_target` | 「新增」管理员的开关：可以作为端口转发的目标，`true` 或 `false`，新节点是 `false`。用 `PATCH …/nodes/{node}` 改，见下面的"能力的启用" |
 | `relay` | 启用为 relay 时是它的地址和设置（`RelayView`，见 5.5），否则 `null` |
 | `exit` | 启用为出口时是它的设置（见 5.6），否则 `null` |
 | `dial_out_only` | 只主动连接：不接受别人主动发来的连接，不参与打洞 |
@@ -671,7 +704,12 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `warnings` | 「新增」controller 发现的、值得提醒的情况（`NodeWarning`），按节点最近一次报的东西算，离线时是它离线前报的；没有时是 `[]`。只是提醒，不挡着任何事。现在只有一种：`{ "code": "range_overlap", "address": "10.66.200.7" }`，节点的一个网卡地址落在网络的虚拟地址段里（`address` 是那个网卡地址）：在这台机器上连这个地址段里的虚拟 IP 可能连到真实的网络上去，透明访问也装不上。界面可以提示换一个地址段，或者换掉那个网络。「新增」`{ "code": "relay_unreached", "tried": 3 }`：这个节点是启用着的 relay，在线的节点里试过它的有 `tried` 个，一个也没有连上（5.5 的 `reach`）。只是如实说一句，不是毛病：有一个节点连得上它就没有这条。不认识的 `code` 当作 `unknown` |
 | `profile` | 「新增」管理员给它选的性能档位：`"low_footprint"`（低占用）、`"balanced"`（默认）、`"high_throughput"`（高速度）；`null` 表示没有选，节点用它本机配置文件里的（没写就是 `balanced`）。节点实际在用的见详情里的 `performance`。比这个文档旧的 controller 没有这个字段。各档位的内容见 [architecture.md](architecture.md) 的性能一节 |
 
-**能力的启用。** relay、出口和端口转发的目标都要节点先在本地声明（`declared` 里对应的字段是 `true`），管理员才能启用。没有声明时，启用的请求得到 `409 not_declared`，`message` 里写着要在节点上执行的命令（`i3t set can-relay on`、`i3t set can-exit on`、`i3t set can-forward on`）。界面上应当在 `declared` 里对应字段是 `false` 时把开关置灰并显示这个做法。节点撤回声明时，已经启用的能力随之关闭（`relay` 或 `exit` 变回 `null`，指向它的端口转发被停用），并在操作记录里留下 `node.*.withdrawn`；节点再声明回来，能力不会自己打开。
+**能力的启用。** 三种能力：relay、出口、端口转发的目标。relay 和出口要节点先在本地声明（`declared` 里对应的字段是 `true`），管理员才能启用。没有声明时，启用的请求得到 `409 not_declared`，`message` 里写着要在节点上执行的命令（`i3t set can-relay on`、`i3t set can-exit on`）。界面上应当在 `declared` 里对应字段是 `false` 时把开关置灰并显示这个做法。节点撤回声明时，已经启用的能力随之关闭（`relay` 或 `exit` 变回 `null`），并在操作记录里留下 `node.*.withdrawn`；节点再声明回来，能力不会自己打开。
+
+「新增」端口转发的目标只要管理员的开关 `forward_target`，节点不声明：`PATCH …/nodes/{node}` 写 `{ "forward_target": true }` 打开，`false` 关掉。
+这意味着谁控制了 controller（管理令牌被盗、controller 被攻破、配错了），谁就能经一条转发碰到目标机器能碰到的一切：它的回环上的服务和它所在的局域网。
+开关关着时，指向它的转发启用不了（`409 forward_target_off`）。关掉开关不被拦：指向它的转发留着、`enabled` 不变，只是不下发（两端都不），
+`status` 是 `forward_target_off`；再打开就回来。升级时数据库原地迁移：以前声明过可以作为端口转发目标的节点，开关是打开的。
 
 ### GET /networks/{network}/nodes
 
@@ -690,7 +728,8 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   "fqdn": "laptop.home.i3t",
   "virtual_ip": "10.66.0.2",
   "groups": [{ "id": 2, "name": "laptops", "builtin": false }],
-  "declared": { "exit": false, "relay": false, "forward": false, "relay_address": null },
+  "declared": { "exit": false, "relay": false, "relay_address": null },
+  "forward_target": false,
   "relay": null,
   "exit": null,
   "dial_out_only": false,
@@ -813,6 +852,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `reach` | 一种路径限制；写 `null` 表示改回用网络的默认值 |
 | `pinned_relays` | 整个替换固定的挂靠 relay，最多 8 个，每个都必须是这个网络里启用了的 relay；`[]` 表示不固定 |
 | `profile` | 「新增」性能档位：`"low_footprint"`、`"balanced"`、`"high_throughput"`；写 `null` 表示不再指定，节点改用它本机配置文件里的。缓冲、窗口和空闲回收的时间在节点收到新配置时就生效，工作线程数要节点重启才变（节点详情的 `performance.restart_pending`）。不认识的值是 `400 invalid_request`，`field` 是 `profile` |
+| `forward_target` | 「新增」`true` 或 `false`：可以作为端口转发的目标（`Node.forward_target`）。关掉时指向它的转发不被删、不被停用，只是不生效 |
 
 全部可省略。`routing`、`reach` 和「新增」`profile` 是仅有的几个"写 `null` 有含义"的字段。
 
@@ -954,7 +994,7 @@ relay 都在时一直留着，所以每个节点最多 32 项。`RelayView.reach
 | `quota_reset_day` | 否 | 「新增」账期从每个月的哪一天开始（UTC 的 0 点），1 到 28，默认 1 |
 | `family` | 否 | 「新增」互联网目标只连哪一种地址：`"any"`（默认）、`"ipv4"`、`"ipv6"`。域名解析出来的地址里只取这一种；目标是另一种地址、或者域名没有这种地址时拒绝 |
 | `connects_per_minute` | 否 | 「新增」建连预算：同一个发起节点每分钟最多让出口向同一个互联网或局域网目标（主机加端口）新建多少条连接；`null` 或省略表示不限。可以一下子用完一分钟的额度，之后按每分钟这么多恢复。超出时请求被拒绝（SOCKS5 的 `0x01`、HTTP 的 `429`） |
-| `class` | 否 | 「新增」经这个出口的流的默认服务等级，见第 4 节 `Network.class` 的先后顺序；`null` 表示没有 |
+| `class` | 否 | 「新增」经这个出口的流的默认 QoS，见第 4 节 `Network.class` 的先后顺序；`null` 表示没有 |
 | `optimistic` | 否 | 「新增」经这个出口的流（互联网和局域网目标）用不用乐观回复：`true` 时入口不等出口的应答就告诉客户端连上了，`false` 时一律等（客户端拿到准确的错误码）；`null` 或省略时按目标的种类（互联网目标不等，局域网目标等）。监听器自己设了 `optimistic` 的以监听器为准（第 10 节）：先看监听器，再看出口，最后按目标的种类。明文 HTTP 的转发不管哪一项都等应答 |
 
 请求体写 `{}` 就是用默认设置启用。「新增」配额、建连预算都不能写 0（不限制就不写）。
@@ -979,7 +1019,7 @@ relay 的带宽上限（第 5.5 节）是另一回事，照旧。
 { "predecessor": 2 }
 ```
 
-`{node}` 继承 `predecessor` 的虚拟 IP、名字、分组（和它自己已经在的分组合并），以及指向 `predecessor` 的端口转发、监听器和节点对设置；然后 `predecessor` 被删掉，它的公钥被吊销。节点编号不继承，`{node}` 还是它自己的编号。relay、出口不继承：要在新机器上重新声明，再重新启用。继承来的、以它为目标的端口转发，在它没有声明"可以作为端口转发的目标"时是停用的。
+`{node}` 继承 `predecessor` 的虚拟 IP、名字、分组（和它自己已经在的分组合并），以及指向 `predecessor` 的端口转发、监听器和节点对设置；然后 `predecessor` 被删掉，它的公钥被吊销。节点编号不继承，`{node}` 还是它自己的编号。relay、出口不继承：要在新机器上重新声明，再重新启用。「新增」`forward_target` 和分组一样随身份继承（`predecessor` 打开着的，`{node}` 也打开），继承来的、以它为目标的端口转发照常生效。
 
 也可以在生成注册令牌时用 `successor_of` 指名继任（见第 6 节），效果相同。
 
@@ -1005,7 +1045,9 @@ relay 的带宽上限（第 5.5 节）是另一回事，照旧。
       "relay_leg": null,
       "flows": 2,
       "tx_bytes": 1048576,
-      "rx_bytes": 20971520
+      "rx_bytes": 20971520,
+      "direct_status": { "state": "verified", "kind": "punched", "cause": null, "attempted_at": 1794795000 },
+      "alternative": { "route": { "via": "relay", "relays": [5] }, "rtt_ms": 31 }
     },
     {
       "peer": { "id": 3, "name": "node-3", "virtual_ip": "10.66.0.3" },
@@ -1017,7 +1059,9 @@ relay 的带宽上限（第 5.5 节）是另一回事，照旧。
       "relay_leg": null,
       "flows": null,
       "tx_bytes": null,
-      "rx_bytes": null
+      "rx_bytes": null,
+      "direct_status": { "state": "failed", "kind": null, "cause": { "code": "no_answer" }, "attempted_at": 1794798500 },
+      "alternative": null
     }
   ]
 }
@@ -1041,6 +1085,19 @@ relay 的带宽上限（第 5.5 节）是另一回事，照旧。
 | `relay_leg` | 经 relay 时，节点到第一个 relay 的那一段走的是 `"udp"` 还是 `"tcp"`（UDP 用不了时的 TCP 中转）。不是经 relay、或者节点的版本太旧不报时是 `null` |
 | `flows` | 「新增」这个节点和对端之间的共用连接上现在开着几条流（两边谁开的都算；独占 TCP 上的流不在这里，见第 12 节的 `lanes`）。和对端现在没有连接、或者节点的版本太旧不报时是 `null` |
 | `tx_bytes`、`rx_bytes` | 「新增」节点启动以来在和这个对端的连接上发出、收到的字节数：线上的字节，含 QUIC 自己的开销和重传，连接关了重建也接着累计。有没有同 `flows`。节点每次上报最多带 256 个对端（流量大的在前），超出的是 `null` |
+| `direct_status` | 「新增」到这个对端的直连现在在哪一步，不管现在走不走它（`DirectStatusView`，见下）。节点的版本太旧不报时是 `null` |
+| `alternative` | 「新增」这个节点没在用的那种选路模式此刻会选的路：`{ "route": 路（写法同 `route`）, "rtt_ms": 延迟或 null }`。节点用默认模式时是延迟优先会选的（按选路器的代价，从现在的路出发、用它的差距 max(5 ms, 10%) 算，局域网直连优先），用延迟优先时是默认模式会选的（有验证过的直连就直连，否则照常挑一个 relay）；那种模式没有路可走时 `route` 是 `{ "via": "none" }`。节点用自己手上的候选算，不为它另外探测，默认模式下每 5 秒的评估窗口算一次。和现在的路一样、节点还没有算过、或者它的版本太旧不报时是 `null`。有了它，比较两种模式不用再按对端各问一次 `GET …/path` |
+
+「新增」`DirectStatusView`：取自节点的路径层为直连的尝试和退避记着的状态，不为它另外探测。直连只在一对节点用到时才去试
+（有包要发给对端），失败了按退避再试，主动测试立刻试，见 [architecture.md](architecture.md) §5.3。所以两个从没说过话的节点之间是
+`not_tried`，路由表上的路是第一条流会走的那条（经 relay 时是对端自己挂的 relay），不说明直连失败了。
+
+| 字段 | 含义 |
+|---|---|
+| `state` | `"not_tried"`：还没有试过（这一对还没有用过，或者不能由这个节点去试：只经 relay、对端只主动连接）；`"trying"`：正在试；`"verified"`：通着（走不走它看选路）；`"failed"`：试过没有通，或者通过的直连后来断了，按退避再试。不认识的当作 `unknown` |
+| `kind` | `verified` 时：怎么通的，取值同 `direct`；别的时候是 `null` |
+| `cause` | 最近一次失败的原因（`DirectCause`，`{ "code": … }`）：`failed` 时是这一次的，`trying` 时是上一次的；通着、从没失败过时是 `null`。`code` 是 `no_answer`（试满了一次的时限，对端的哪个地址都没有回答）、`no_candidates`（手上没有对端的任何地址）、`timeouts`（用着的直连上探测连续超时）、`loss`（用着的直连上丢包超过 20%）、`stale`（两边闲着，用着的直连很久没有验证，放下了；再用到时重新试）。不认识的 `code` 当作 `unknown` |
+| `attempted_at` | 最近一次尝试开始的时间（controller 的时钟：节点报"多少秒之前"，controller 收到时换算）；从来没有试过时是 `null` |
 
 ### GET /networks/{network}/nodes/{node}/listeners「新增」
 
@@ -1404,7 +1461,7 @@ relay 的带宽上限（第 5.5 节）是另一回事，照旧。
 | `require_credential` | 要求调用者在密码字段里带凭据。`bind` 不是回环地址时必须是 `true` |
 | `default_action` | 调用者没有写用户名、目标又不是组网地址时怎么办，见下。`null` 时按 `bind` 取默认：回环地址是就地出站，其他地址是拒绝 |
 | `fixed_exit` | 固定出口（节点编号）：这个监听器上的流量都从这个节点出去；`null` 表示不固定 |
-| `class` | 「新增」这个监听器上的流的默认服务等级（`"auto"`、`"interactive"`、`"reliable"`、`"bulk"`）。用户名里写了 `+c-` 时以用户名为准；`null` 时看出口和网络的默认值 |
+| `class` | 「新增」这个监听器上的流的默认 QoS（`"auto"`、`"interactive"`、`"reliable"`、`"bulk"`）。用户名里写了 `+c-` 时以用户名为准；`null` 时看出口和网络的默认值 |
 | `optimistic` | 「新增」乐观回复：`true` 时不等对端的应答就告诉客户端连上了（省一个全程往返，失败只能表现为随后被断开），`false` 时一律等（客户端拿到准确的错误码）。`null` 时看出口的设置（「新增」`Node.exit.optimistic`，只管经出口出去的流），出口也没有设时按目标的种类：互联网目标不等，组网目标（节点的服务、局域网）等。「新增」明文 HTTP 的转发（`GET http://…`）不管这一项都等：目标的应答本来就在对端的应答之后才到，等它不多花时间 |
 | `status` | 「新增」节点最近一次报的这个监听器的状态、连接数和流量，写法见 11.1 节的 `ListenStatus`。节点不在线、还没有报过，或者版本太旧不报时是 `null`。只读，创建和替换时不用写 |
 
@@ -1477,12 +1534,12 @@ relay 的带宽上限（第 5.5 节）是另一回事，照旧。
 | `protocol` | `"tcp"` 或 `"udp"` |
 | `listen_node` | 监听节点 |
 | `bind` | 监听节点上的监听地址。IP 是监听节点的虚拟 IP 时不占用操作系统的端口，只对组网里被允许访问它的节点可达。「新增」端口可以写 0：监听节点自己挑一个空闲的端口，挑定之后重启也不变，挑的是哪个看 `listen.local`；监听在虚拟 IP 上的不能写 0。「新增」监听在虚拟 IP 上、目标是别的节点的 TCP 转发现在可以用：监听节点替发起节点到目标节点开一条流再接起来，访问规则两段都要允许（发起节点能访问监听节点，监听节点能访问目标节点）；UDP 的也一样，监听节点到目标节点另开一个数据报上下文接力 |
-| `target_node` | 目标节点。必须声明过"可以作为端口转发的目标"才能启用 |
+| `target_node` | 目标节点。「新增」它的 `forward_target`（第 5 节）打开着才能启用 |
 | `target_addr` | 目标节点去连的地址，不能是 `0.0.0.0`，端口不能是 0 |
 | `allow_from` | 来源白名单；空表示不限制 |
 | `enabled` | 开关 |
 | `status` | 现在的状态，只读，见下 |
-| `class` | 「新增」这条转发上的流的服务等级；`null` 时用网络的默认值 |
+| `class` | 「新增」这条转发上的流的 QoS；`null` 时用网络的默认值 |
 | `listen` | 「新增」监听节点最近一次报的这条转发的监听状态、连接数和流量，写法见 11.1 节的 `ListenStatus`。节点不在线或者还没有报过时是 `null`。只读 |
 | `proxy_protocol` | 「新增」目标节点连上目标之后先发一个 PROXY protocol 的头（HAProxy 的规范）：`"v1"`（一行文字）、`"v2"`（二进制）；`null`（默认）是不发。认它的服务（nginx 的 `proxy_protocol`、HAProxy、Postfix 等）据此看到发起节点（监听节点）的虚拟 IP，不是目标节点自己的地址：在 Linux 上透明访问打开着时服务本来就看得到，别的平台上和只听回环的服务靠它。头里的来源只取自连接的握手认出的发起节点，端口是目标节点这一侧这条 TCP 的端口，目的是它连到的地址；目标是 IPv6 时来源写成 IPv4 映射的地址。只有 TCP 的转发能设（UDP 的转发写了是 `400 invalid_request`，`what` 是 `tcp_only`）：v1 没有 UDP 的写法，v2 要加在每个报文前面，认它的 UDP 服务几乎没有。比这个文档旧的目标节点不认这一项，照旧不发 |
 | `target_failure` | 「新增」目标连不上：这条转发的流最近一次在目标那里失败的原因（`cause`，`TargetCause`，见下表）和时间（`at`，按 controller 的时钟）。之后有一条流成功了就变回 `null`；从来没有失败过、监听节点不在线、或者它的版本太旧不报时也是 `null`。只读 |
@@ -1491,14 +1548,17 @@ relay 的带宽上限（第 5.5 节）是另一回事，照旧。
 
 | 取值 | 含义 |
 |---|---|
-| `"target_not_declared"` | 目标节点没有声明（或者撤回了声明）可以作为端口转发的目标。这时转发是停用的，也启用不了。界面应当提示在目标节点上执行 `i3t set can-forward on` |
 | `"disabled"` | 被停用了（`enabled` 是 `false`） |
+| `"forward_target_off"` | 「新增」目标节点的 `forward_target` 关着：转发留着、还是启用的，只是没有下发。打开开关就回来。界面可以提示打开它（`i3tctl node set <节点> --forward-target on`） |
 | `"access_denied"` | 访问规则不允许监听节点访问目标节点，转发没有下发。转发不绕过访问规则 |
 | `"listener_offline"` | 监听节点不在线 |
 | `"target_offline"` | 目标节点不在线 |
 | `"active"` | 已经下发，两端都在线 |
 
-「新增」"端口被占用"这类监听上的状态在 `listen` 里，"目标连不上"在 `target_failure` 里，都不在 `status` 里（`status` 的取值没有变）：
+「去掉」`"target_not_declared"`：端口转发的目标不再由节点声明，它的位置由 `"forward_target_off"` 代替，排在 `"disabled"` 后面。
+不认识的 `status` 当作 `unknown`。
+
+「新增」"端口被占用"这类监听上的状态在 `listen` 里，"目标连不上"在 `target_failure` 里，都不在 `status` 里：
 界面可以在 `status` 是 `"active"` 时再看 `listen.state` 和 `target_failure`。
 
 「新增」`target_failure` 是监听节点看到的：它开到目标节点的流被目标节点拒绝时，拒绝里的状态就是原因（目标节点知道为什么），
@@ -1513,7 +1573,7 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
 | `refused` | 目标地址拒绝了连接：那个端口上没有程序在听 |
 | `timeout` | 连目标地址超时 |
 | `unreachable` | 目标地址所在的网络或主机不可达 |
-| `not_declared` | 目标节点没有这条转发：它没有声明可以作为端口转发的目标（`i3t set can-forward on`），或者它的配置还没有更新 |
+| `not_declared` | 目标节点没有这条转发：它的配置还没有更新，或者它的版本比这个文档旧、本机又没有声明（那样的节点还要 `i3t set can-forward on`，见 [architecture.md](architecture.md) 的 §4） |
 | `access_denied` | 目标节点的访问规则不允许监听节点访问它 |
 | `node_unreachable` | 监听节点到目标节点开不出流：目标节点不在线，或者两者之间没有路 |
 | `other` | 别的原因（目标节点在排空、内部出错等），见监听节点的日志 |
@@ -1578,7 +1638,7 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
 `protocol`、`listen_node`、`bind`、`target_node`、`target_addr` 必填；`name` 默认 `""`，`allow_from` 默认 `[]`，`enabled` 默认 `true`，「新增」`class`、`proxy_protocol` 默认 `null`。
 
 应答：`201`，`Forward`。
-错误：`not_declared`（`enabled` 是 `true` 而目标节点没有声明）、`conflict`（监听节点上同一个地址已经有一条同协议的转发；端口写 0 的不算）、`invalid_request`（「新增」监听在虚拟 IP 上而端口写 0；「新增」UDP 的转发写了 `proxy_protocol`，`what` 是 `tcp_only`）、`not_found`（节点不在这个网络里）。
+错误：「新增」`forward_target_off`（`enabled` 是 `true` 而目标节点的 `forward_target` 关着；本来就启用着、指向同一个目标的转发在开关关着时照样能改），`conflict`（监听节点上同一个地址已经有一条同协议的转发；端口写 0 的不算）、`invalid_request`（「新增」监听在虚拟 IP 上而端口写 0；「新增」UDP 的转发写了 `proxy_protocol`，`what` 是 `tcp_only`）、`not_found`（节点不在这个网络里）。
 
 ### PUT /networks/{network}/forwards/{id}
 

@@ -81,14 +81,15 @@ def port_forward(lab: Lab, work: Path, t: Checks) -> None:
     """端口转发：把目标节点回环上的服务转发到监听节点的本地端口，以及转发到目标节点的虚拟 IP 上。"""
     controller = Controller(lab.host("ctl"), work)
     controller.ctl("network", "create", "lab")
-    a, c, d = Node(lab.host("a"), work), Node(lab.host("c"), work, declare=("forward",)), Node(lab.host("d"), work)
+    a, c, d = Node(lab.host("a"), work), Node(lab.host("c"), work), Node(lab.host("d"), work)
     for node in (a, c, d):
         node.join(controller)
+    controller.forward_target(c)
     for node in (c, d):
         start_whoami(node.host, 8081, bind="127.0.0.1")
 
     refused = controller.ctl("forward", "add", str(a.id), "127.0.0.1:9001", str(d.id), "127.0.0.1:8081", check=False)
-    t.check("目标节点没有声明时配不了转发，并且提示要执行的命令", refused.returncode != 0 and "i3t set can-forward on" in refused.stderr,
+    t.check("目标节点的开关关着时配不了转发，并且提示怎么打开", refused.returncode != 0 and "--forward-target on" in refused.stderr,
             refused.stderr.strip())
 
     controller.ctl("forward", "add", str(a.id), "127.0.0.1:9000", str(c.id), "127.0.0.1:8081")
@@ -108,6 +109,49 @@ def port_forward(lab: Lab, work: Path, t: Checks) -> None:
     controller.ctl("forward", "delete", str(forwards[0]["id"]))
     gone = eventually(local, lambda r: r.returncode != 0)
     t.check("删掉转发之后本地端口不再可用", gone.returncode != 0)
+    if t.failures:
+        print(tail(a.read_log()), tail(c.read_log()), sep="\n  ---\n")
+
+
+def forward_switch(lab: Lab, work: Path, t: Checks) -> None:
+    """端口转发的目标由管理员打开：节点不用声明（旧配置里的 forward = true 照收、不起作用）；关掉开关，转发留着、不生效；再打开就回来。"""
+    controller = Controller(lab.host("ctl"), work)
+    controller.ctl("network", "create", "lab")
+    # c 的配置文件还是以前的写法，声明了 forward：照样读得进来，什么也不决定。
+    a, c = Node(lab.host("a"), work), Node(lab.host("c"), work, declare=("forward",))
+    for node in (a, c):
+        node.join(controller)
+    start_whoami(c.host, 8081, bind="127.0.0.1")
+    seen = controller.node(c)
+    t.check("新节点的开关关着，声明里没有 forward", seen["forward_target"] is False and "forward" not in seen["declared"], str(seen))
+    old_set = c.host.run(binary("i3t"), "--state-dir", str(c.state), "set", "can-forward", "on", check=False)
+    t.check("i3t set can-forward 照收，说明由管理员打开，配置文件不变",
+            old_set.returncode == 0 and "--forward-target on" in old_set.stdout and "forward = true" in (c.state / "config.toml").read_text(),
+            f"{old_set.stdout!r} {old_set.stderr.strip()}")
+    refused = controller.ctl("forward", "add", str(a.id), "127.0.0.1:9000", str(c.id), "127.0.0.1:8081", check=False)
+    t.check("开关关着：配不了转发，错误码是 forward_target_off", refused.returncode != 0 and "forward_target_off" in refused.stderr,
+            refused.stderr.strip())
+
+    controller.forward_target(c)
+    created = controller.ctl("forward", "add", str(a.id), "127.0.0.1:9000", str(c.id), "127.0.0.1:8081")
+    local = lambda: a.host.run("curl", "-sS", "--max-time", "6", "http://127.0.0.1:9000/", check=False)  # noqa: E731
+    status = lambda: next(entry for entry in controller.ctl("forward", "list") if entry["id"] == created["id"])  # noqa: E731
+    seen = eventually(local, lambda r: r.returncode == 0)
+    t.check("打开开关之后转发通到 c 回环上的服务", seen.stdout == "127.0.0.1", f"{seen.stdout!r} {seen.stderr.strip()}")
+
+    controller.forward_target(c, on=False)
+    parked = status()
+    t.check("关掉开关：转发还在、还是启用的，状态说明不生效",
+            parked["enabled"] is True and parked["status"] == "forward_target_off", str(parked))
+    gone = eventually(lambda: a.host.run("ss", "-lnt").stdout, lambda out: ":9000 " not in out)
+    t.check("关掉开关：a 不再监听转发的端口", ":9000 " not in gone)
+    t.check("关掉开关：连不上了", local().returncode != 0)
+    text = controller.host.run(binary("i3tctl"), "--token", controller.token, "forward", "list", check=False).stdout
+    t.check("命令行的列表里写成一句话", "目标的转发开关关着" in text, text)
+
+    controller.forward_target(c)
+    back = eventually(local, lambda r: r.returncode == 0)
+    t.check("再打开：转发回来了", back.stdout == "127.0.0.1" and status()["status"] == "active", f"{back.stdout!r} {back.stderr.strip()}")
     if t.failures:
         print(tail(a.read_log()), tail(c.read_log()), sep="\n  ---\n")
 
@@ -287,9 +331,10 @@ def forward_target(lab: Lab, work: Path, t: Checks) -> None:
     """端口转发说出目标连不上：原因和时间，直到有一条连接成功；命令行的列表里写成一句话。"""
     controller = Controller(lab.host("ctl"), work)
     controller.ctl("network", "create", "lab")
-    a, c = Node(lab.host("a"), work), Node(lab.host("c"), work, declare=("forward",))
+    a, c = Node(lab.host("a"), work), Node(lab.host("c"), work)
     for node in (a, c):
         node.join(controller)
+    controller.forward_target(c)
     controller.ctl("forward", "add", str(a.id), "127.0.0.1:9000", str(c.id), "127.0.0.1:8090")
     local = lambda: a.host.run("curl", "-sS", "--max-time", "6", "http://127.0.0.1:9000/", check=False)  # noqa: E731
     failure = lambda: controller.ctl("forward", "list")[0]["target_failure"]  # noqa: E731
@@ -315,9 +360,10 @@ def proxy_protocol(lab: Lab, work: Path, t: Checks) -> None:
     UDP 的转发不能设。"""
     controller = Controller(lab.host("ctl"), work)
     controller.ctl("network", "create", "lab")
-    a, c = Node(lab.host("a"), work), Node(lab.host("c"), work, declare=("forward",))
+    a, c = Node(lab.host("a"), work), Node(lab.host("c"), work)
     for node in (a, c):
         node.join(controller)
+    controller.forward_target(c)
     start_proxy_protocol_echo(c.host, 8095)
     controller.ctl("forward", "add", str(a.id), "127.0.0.1:9001", str(c.id), "127.0.0.1:8095", "--proxy-protocol", "v1")
     controller.ctl("forward", "add", str(a.id), "127.0.0.1:9002", str(c.id), "127.0.0.1:8095", "--proxy-protocol", "v2")
@@ -449,7 +495,8 @@ def ping(lab: Lab, work: Path, t: Checks) -> None:
     t.check("ping 自己说是自己", "本节点自己" in run(a.name).stderr)
     b.stop()
     gone = run(b.name)
-    t.check("b 停了：说连不上", gone.returncode != 0 and ("连不上 b" in gone.stderr or "都没有回来" in gone.stdout),
+    t.check("b 停了：说连不上，或者连接没有及时建起来", gone.returncode != 0
+            and ("连不上 b" in gone.stderr or "没有及时建起来" in gone.stderr or "都没有回来" in gone.stdout),
             f"{gone.stdout!r} {gone.stderr.strip()}")
     if t.failures:
         print(tail(a.read_log()), tail(b.read_log()), sep="\n  ---\n")
@@ -458,6 +505,7 @@ def ping(lab: Lab, work: Path, t: Checks) -> None:
 SCENARIOS = {
     "node_service": node_service,
     "port_forward": port_forward,
+    "forward_switch": forward_switch,
     "lan_behind_exit": lan_behind_exit,
     "public_listener": public_listener,
     "groups": groups,

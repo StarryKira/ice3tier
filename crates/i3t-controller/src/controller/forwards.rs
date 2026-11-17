@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use super::nodes::{is_connectable, require_node};
 use super::{Controller, Inner, Seeds, naming};
 use crate::access::AccessMap;
-use crate::error::{Capability, Entity, Error, InField};
+use crate::error::{Entity, Error, InField};
 use crate::netmap::NetworkView;
 use crate::store::{ForwardRecord, Store};
 
@@ -26,7 +26,7 @@ impl Controller {
 
     /// # Errors
     ///
-    /// 两个节点不都在这个网络里；要启用而目标节点没有声明可以作为端口转发的目标；
+    /// 两个节点不都在这个网络里；要启用而目标节点的开关（可以作为端口转发的目标）关着；
     /// 地址不合法；监听节点上同一个地址已经有一条同协议的转发。
     pub fn create_forward(&self, network: NetworkId, input: ForwardInput) -> Result<Forward, Error> {
         let mut inner = self.lock();
@@ -59,7 +59,7 @@ impl Controller {
         let now = inner.clock.now();
         let (before, record) = inner.store.atomically(|store| {
             let before = store.forward(network, id)?.ok_or(Error::NotFound(Entity::Forward))?;
-            let config = check(store, network, Some(id), input)?;
+            let config = check(store, network, Some(&before), input)?;
             store.update_forward(id, &config)?;
             store.log_refs(
                 now,
@@ -104,11 +104,12 @@ impl Inner {
 
     fn forward_view(&self, view: &NetworkView, access: &AccessMap<'_>, record: &ForwardRecord) -> Forward {
         let config = &record.config;
-        let declared = view.nodes.get(&config.target_node).is_some_and(|target| target.declared.forward);
-        let status = if !declared {
-            ForwardStatus::TargetNotDeclared
-        } else if !config.enabled {
+        let switched_on = view.nodes.get(&config.target_node).is_some_and(|target| target.forward_target);
+        // 停用是这条转发自己的设置，排在目标的开关前面：开关打开之后它也不会生效。
+        let status = if !config.enabled {
             ForwardStatus::Disabled
+        } else if !switched_on {
+            ForwardStatus::ForwardTargetOff
         } else if !view.forward_is_deliverable(access, record) {
             ForwardStatus::AccessDenied
         } else if !self.is_online(config.listen_node) {
@@ -138,13 +139,15 @@ impl Inner {
 }
 
 /// 检查一条转发的配置。`replacing` 是正在被替换的那一条，查冲突时不和它自己比。
-fn check(store: &Store, network: NetworkId, replacing: Option<u32>, mut config: ForwardInput) -> Result<ForwardInput, Error> {
+fn check(store: &Store, network: NetworkId, replacing: Option<&ForwardRecord>, mut config: ForwardInput) -> Result<ForwardInput, Error> {
     config.name = naming::title("端口转发", &config.name, false).in_field("name")?;
     let listener = require_node(store, network, config.listen_node).in_field("listen_node")?;
     let target = require_node(store, network, config.target_node).in_field("target_node")?;
-    // 目标节点要自己声明过才行：controller 不能把一台没有声明的机器的回环和局域网转发出去。
-    if config.enabled && !target.declared.forward {
-        return Err(Error::NotDeclared { node: target.name, capability: Capability::Forward }.in_field("target_node"));
+    // 目标节点的开关要打开：一台机器的回环和局域网经转发对外，要管理员对这台机器明确地点过头。
+    // 拦的是"新启用"：本来就启用着、指向同一个节点的转发在开关关着时照样能改，它留着，开关打开就生效（见 `forward_view`）。
+    let already_enabled = replacing.is_some_and(|before| before.config.enabled && before.config.target_node == config.target_node);
+    if config.enabled && !already_enabled && !target.forward_target {
+        return Err(Error::ForwardTargetOff(target.name).in_field("target_node"));
     }
     // 端口写 0 是让监听节点自己挑一个空闲的端口（挑定之后重启不变，挑的是哪个看它的上报）。
     // 虚拟 IP 上的转发不占操作系统的端口，没有"空闲的端口"可挑，要写明。
@@ -164,7 +167,7 @@ fn check(store: &Store, network: NetworkId, replacing: Option<u32>, mut config: 
     }
     // 端口写 0 的各挑各的端口，不算冲突。
     let clash = store.forwards(network)?.into_iter().find(|other| {
-        Some(other.id) != replacing
+        Some(other.id) != replacing.map(|before| before.id)
             && other.config.listen_node == config.listen_node
             && other.config.protocol == config.protocol
             && other.config.bind == config.bind

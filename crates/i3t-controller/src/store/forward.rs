@@ -4,7 +4,6 @@ use std::net::SocketAddr;
 
 use i3t_model::admin::{ForwardInput, NetworkId};
 use i3t_model::netmap::{ForwardProtocol, ProxyProtocol};
-use i3t_proto::NodeId;
 use i3t_proto::flow::Class;
 use ipnet::IpNet;
 use rusqlite::{OptionalExtension, Row, named_params, params};
@@ -120,19 +119,12 @@ impl Store {
         self.conn.execute("DELETE FROM forwards WHERE id = ?1", params![id])?;
         Ok(())
     }
-
-    /// 停用指向 `target` 的全部转发，返回停用了几条。目标节点撤回声明时用。
-    ///
-    /// # Errors
-    ///
-    /// 写数据库失败。
-    pub fn disable_forwards_to(&self, target: NodeId) -> Result<usize, StoreError> {
-        Ok(self.conn.execute("UPDATE forwards SET enabled = 0 WHERE target_node = ?1 AND enabled = 1", params![SqlNode(target)])?)
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    use i3t_proto::NodeId;
+
     use super::*;
     use crate::store::fixtures::store_with_nodes;
 
@@ -171,18 +163,6 @@ mod tests {
         assert_eq!(store.forward(network, id).unwrap(), Some(ForwardRecord { id, config: replacement }));
         store.delete_forward(id).unwrap();
         assert_eq!(store.forward(network, id).unwrap(), None);
-    }
-
-    #[test]
-    fn forwards_to_a_node_can_be_disabled_together() {
-        let (store, network, nodes) = store_with_nodes(3);
-        let to_b = store.insert_forward(network, &config(nodes[0], nodes[1])).unwrap();
-        let also_to_b = store.insert_forward(network, &config(nodes[2], nodes[1])).unwrap();
-        let to_c = store.insert_forward(network, &config(nodes[0], nodes[2])).unwrap();
-        assert_eq!(store.disable_forwards_to(nodes[1]).unwrap(), 2);
-        assert_eq!(store.disable_forwards_to(nodes[1]).unwrap(), 0);
-        let enabled = |id| store.forward(network, id).unwrap().unwrap().config.enabled;
-        assert!(!enabled(to_b) && !enabled(also_to_b) && enabled(to_c));
     }
 
     #[test]

@@ -8,13 +8,15 @@ use i3t_model::admin::{
 use i3t_model::control::diag::{ChoiceCode, HopSource, PathPick, TestCode, TransferEnd};
 use i3t_model::control::exit_test::{ExitTestCause, ExitVia};
 use i3t_model::control::{
-    BindCause, DirectKind, InterceptCause, InterceptState, LegTransport, ListenState, NameService, RejectCause, RelayState, Route,
-    RouteCause, RouteHint, TargetCause, TryOutcome,
+    BindCause, DirectCause, DirectKind, DirectState, DirectStatus, InterceptCause, InterceptState, LegTransport, ListenState, NameService,
+    RejectCause, RelayState, Route, RouteCause, RouteHint, TargetCause, TryOutcome,
 };
 use i3t_model::netmap::IpFamily;
 use i3t_model::update::{FailureKind, SelfUpdateBlocker, UpdateCause, UpdateStatus};
+use i3t_proto::flow::Class;
 
 use super::{Codes, Names, cost_ms, relays};
+use crate::Lang;
 
 pub(super) static CODES: Codes = Codes {
     route,
@@ -59,6 +61,8 @@ pub(super) static CODES: Codes = Codes {
     intercept_state,
     intercept_cause,
     name_service,
+    class,
+    direct_status,
 };
 
 fn route(route: &Route, names: Names<'_>) -> String {
@@ -394,10 +398,12 @@ fn api_error(error: &ApiError) -> String {
             let command = match what {
                 Some("relay") => "i3t set can-relay on",
                 Some("exit") => "i3t set can-exit on",
-                Some("forward") => "i3t set can-forward on",
                 _ => "i3t set can-… on",
             };
             format!("Node hasn't declared it. Run '{command}' on the node first.")
+        }
+        ErrorCode::ForwardTargetOff => {
+            "Target node isn't switched on as a forward target (i3tctl node set <node> --forward-target on)".to_owned()
         }
         ErrorCode::PredecessorOnline => "Node to replace is still online".to_owned(),
         ErrorCode::Conflict => format!("Conflicts with an existing {}{field}", thing(what)),
@@ -442,12 +448,13 @@ fn lane_block(block: &LaneBlock, names: Names<'_>) -> String {
 
 const fn forward_status(status: ForwardStatus) -> &'static str {
     match status {
-        ForwardStatus::TargetNotDeclared => "target not declared",
         ForwardStatus::Disabled => "disabled",
+        ForwardStatus::ForwardTargetOff => "target switched off",
         ForwardStatus::AccessDenied => "no access",
         ForwardStatus::ListenerOffline => "listener offline",
         ForwardStatus::TargetOffline => "target offline",
         ForwardStatus::Active => "in effect",
+        ForwardStatus::Unknown => "unknown",
     }
 }
 
@@ -680,5 +687,44 @@ fn name_service(names: &NameService) -> String {
         NameService::NoResolver => "no systemd-resolved, names via i3t hosts".to_owned(),
         NameService::Failed { cause } => format!("names unavailable: {}", intercept_cause(cause)),
         NameService::Unknown => "names: unknown".to_owned(),
+    }
+}
+
+const fn class(class: Class) -> &'static str {
+    match class {
+        Class::Auto => "Auto",
+        Class::Interactive => "Low latency",
+        Class::Reliable => "No loss",
+        Class::Bulk => "Background",
+    }
+}
+
+fn direct_status(status: &DirectStatus) -> String {
+    let state = match status.state {
+        DirectState::NotTried => "not tried",
+        DirectState::Trying => "trying",
+        DirectState::Verified => "verified",
+        DirectState::Failed => "failed",
+        DirectState::Unknown => "unknown",
+    };
+    let aside: Vec<String> = match status.state {
+        DirectState::Verified => status.kind.map(|kind| direct_kind(kind).to_owned()).into_iter().collect(),
+        DirectState::Failed => {
+            let cause = status.cause.map(|cause| direct_cause(cause).to_owned());
+            cause.into_iter().chain(status.attempted_secs_ago.map(|ago| Lang::English.ago(ago))).collect()
+        }
+        DirectState::NotTried | DirectState::Trying | DirectState::Unknown => Vec::new(),
+    };
+    if aside.is_empty() { state.to_owned() } else { format!("{state} ({})", aside.join(", ")) }
+}
+
+const fn direct_cause(cause: DirectCause) -> &'static str {
+    match cause {
+        DirectCause::NoAnswer => "no answer",
+        DirectCause::NoCandidates => "no peer address",
+        DirectCause::Timeouts => "probes timed out",
+        DirectCause::Loss => "too much loss",
+        DirectCause::Stale => "dropped while idle",
+        DirectCause::Unknown => "unknown cause",
     }
 }

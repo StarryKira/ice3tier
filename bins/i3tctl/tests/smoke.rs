@@ -187,7 +187,7 @@ async fn the_command_line_drives_a_running_controller() {
     fixture.ok(&["token", "delete", &tokens[0]["id"].to_string()]).await;
 
     let _plain = fixture.join(1, Declared::default()).await;
-    let _capable = fixture.join(2, Declared { exit: true, relay: true, forward: true, relay_address: None }).await;
+    let _capable = fixture.join(2, Declared { exit: true, relay: true, relay_address: None }).await;
     let nodes = fixture.ok(&["node", "list"]).await;
     assert!(nodes.contains("10.66.0.1") && nodes.contains("10.66.0.2") && nodes.contains("在线"), "{nodes}");
     // 节点可以用编号、虚拟 IP 或名字指代。
@@ -286,9 +286,11 @@ async fn the_command_line_drives_a_running_controller() {
         .await;
     let listeners = fixture.ok(&["listener", "list", "--node", "laptop"]).await;
     assert!(listeners.contains("192.168.1.5:1080") && listeners.contains("exit:#2"), "{listeners}");
-    assert!(
-        fixture.fails(&["forward", "add", "nas-01", "127.0.0.1:8080", "laptop", "127.0.0.1:80"]).await.contains("i3t set can-forward on")
-    );
+    let refused = fixture.fails(&["forward", "add", "laptop", "127.0.0.1:8080", "nas-01", "192.168.1.10:80"]).await;
+    assert!(refused.contains("forward_target_off") && refused.contains("--forward-target on"), "{refused}");
+    fixture.ok(&["node", "set", "nas-01", "--forward-target", "on"]).await;
+    assert!(Fixture::has_line(&fixture.ok(&["node", "show", "nas-01"]).await, &["转发目标", "是"]));
+    assert!(fixture.ok(&["node", "list"]).await.contains("中继、转发目标"));
     let forward = fixture.json(&["forward", "add", "laptop", "127.0.0.1:8080", "nas-01", "192.168.1.10:80", "--name", "web"]).await;
     assert_eq!(forward["status"], "active");
     let forward_id = forward["id"].to_string();

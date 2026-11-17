@@ -144,6 +144,7 @@ impl From<Error> for Failure {
             | ErrorCode::RangeNotSuperset
             | ErrorCode::NetworkNotEmpty
             | ErrorCode::NotDeclared
+            | ErrorCode::ForwardTargetOff
             | ErrorCode::PredecessorOnline
             | ErrorCode::Conflict
             | ErrorCode::NodeOffline

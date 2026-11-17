@@ -14,11 +14,12 @@ use i3t_model::admin::{
 use i3t_model::control::diag::{ChoiceCode, HopSource, PathPick, TestCode, TransferEnd};
 use i3t_model::control::exit_test::{ExitTestCause, ExitVia};
 use i3t_model::control::{
-    BindCause, DirectKind, InterceptCause, InterceptState, LegTransport, ListenState, NameService, RejectCause, RelayState, Route,
-    RouteCause, RouteHint, TargetCause, TryOutcome,
+    BindCause, DirectKind, DirectStatus, InterceptCause, InterceptState, LegTransport, ListenState, NameService, RejectCause, RelayState,
+    Route, RouteCause, RouteHint, TargetCause, TryOutcome,
 };
 use i3t_model::update::{SelfUpdateBlocker, UpdateCause, UpdateStatus};
 use i3t_proto::NodeId;
+use i3t_proto::flow::Class;
 
 use crate::Lang;
 
@@ -83,6 +84,10 @@ pub struct Codes {
     pub intercept_state: fn(&InterceptState) -> String,
     pub intercept_cause: fn(&InterceptCause) -> String,
     pub name_service: fn(&NameService) -> String,
+    /// QoS 的一个取值的名字：`自动`、`低延迟`、`不丢包`、`后台`。配置和命令行上照旧写 `auto` 这些。
+    pub class: fn(Class) -> &'static str,
+    /// 直连在哪一步，一短句：`未尝试`、`尝试中`、`已通（局域网）`、`失败（没有回应，3 分钟前）`。
+    pub direct_status: fn(&DirectStatus) -> String,
 }
 
 impl Lang {
@@ -109,6 +114,7 @@ fn cost_ms(micros: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use i3t_model::admin::ErrorCode;
+    use i3t_model::control::{DirectCause, DirectState};
     use i3t_model::update::{FailureKind, Version};
 
     use super::*;
@@ -202,6 +208,27 @@ mod tests {
         ];
         out.extend(exit_tests.iter().map(codes.exit_test_cause));
         out.extend([ExitVia::Direct, ExitVia::Upstream, ExitVia::Unknown].map(|via| (codes.exit_via)(via).to_owned()));
+        out.extend([Class::Auto, Class::Interactive, Class::Reliable, Class::Bulk].map(|class| (codes.class)(class).to_owned()));
+        let status = |state, cause| DirectStatus { state, kind: Some(DirectKind::Lan), cause, attempted_secs_ago: Some(200) };
+        out.extend(
+            [
+                status(DirectState::NotTried, None),
+                status(DirectState::Trying, None),
+                status(DirectState::Verified, None),
+                status(DirectState::Unknown, None),
+            ]
+            .iter()
+            .map(codes.direct_status),
+        );
+        let causes = [
+            DirectCause::NoAnswer,
+            DirectCause::NoCandidates,
+            DirectCause::Timeouts,
+            DirectCause::Loss,
+            DirectCause::Stale,
+            DirectCause::Unknown,
+        ];
+        out.extend(causes.iter().map(|cause| (codes.direct_status)(&status(DirectState::Failed, Some(*cause)))));
         out.push((codes.name_service)(&NameService::Failed {
             cause: InterceptCause::PortInUse { address: "10.66.0.1:53".parse().expect("地址") },
         }));
@@ -297,5 +324,16 @@ mod tests {
             let check = (codes.update_cause)(&UpdateCause::SelfCheck { exit_code: Some(3), output: "boom".into() });
             assert!(check.contains('3') && check.contains("boom"), "{check}");
         }
+    }
+
+    #[test]
+    fn the_direct_status_is_short_with_the_kind_or_the_cause_and_when() {
+        let status = |state, cause| DirectStatus { state, kind: Some(DirectKind::Lan), cause, attempted_secs_ago: Some(200) };
+        let zh = Lang::ZhCn.codes();
+        assert_eq!((zh.direct_status)(&status(DirectState::NotTried, None)), "未尝试");
+        assert_eq!((zh.direct_status)(&status(DirectState::Verified, None)), "已通（局域网）");
+        assert_eq!((zh.direct_status)(&status(DirectState::Failed, Some(DirectCause::NoAnswer))), "失败（没有回应，3 分 20 秒前）");
+        let en = Lang::English.codes();
+        assert_eq!((en.direct_status)(&status(DirectState::Failed, Some(DirectCause::NoAnswer))), "failed (no answer, 3m 20s ago)");
     }
 }

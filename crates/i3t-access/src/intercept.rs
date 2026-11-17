@@ -120,7 +120,7 @@ async fn carry<C: Connector + Datagrams, E>(
     match i3t_flow::open(&*shared.connector, peer, &request, &first_data).await {
         Ok(pending) => {
             let summary = pending.relay_metered(stream, future::pending(), &meter).await;
-            session::log_summary(peer, &request, &summary, &route.ended(&*shared.routes));
+            session::log_summary(peer, &request, &summary, &route.ended(&*shared.routes), &shared.netmap.borrow());
         }
         Err(error) => {
             tracing::info!(%peer, ?error, "到对端节点建流失败，重置了被拦截的连接");

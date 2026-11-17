@@ -110,6 +110,7 @@ fn things_in_another_network_are_not_found_through_this_one() {
     let (home, office) = (lab.network("home"), lab.network("office"));
     let ours = lab.join_offline(home.id, &[], CAN_DO_ALL);
     let theirs = lab.join_offline(office.id, &[], CAN_DO_ALL);
+    lab.switch_on_forward_target(office.id, theirs);
     let controller = &lab.controller;
     let not_found = |error: Error| assert_eq!(error.code(), ErrorCode::NotFound, "{error}");
 
@@ -323,15 +324,18 @@ fn enabling_an_undeclared_capability_is_refused_and_names_the_command_to_run() {
     let cases = [
         (lab.controller.enable_relay(network.id, plain, RelaySettings::default()).map(drop), "i3t set can-relay on"),
         (lab.controller.enable_exit(network.id, plain, ExitRole::default()).map(drop), "i3t set can-exit on"),
-        (lab.controller.create_forward(network.id, forward(other, plain)).map(drop), "i3t set can-forward on"),
     ];
     for (result, command) in cases {
         let error = result.unwrap_err();
         assert_eq!(error.code(), ErrorCode::NotDeclared);
         assert!(error.to_string().contains(command) && error.to_string().contains("nas-01"), "{error}");
     }
+    // 端口转发的目标不看声明，看管理员的开关。
+    let error = lab.controller.create_forward(network.id, forward(other, plain)).unwrap_err();
+    assert_eq!((error.code(), error.what(), error.field()), (ErrorCode::ForwardTargetOff, None, Some("target_node")));
+    assert!(error.to_string().contains("i3tctl node set nas-01 --forward-target on"), "{error}");
     let node = lab.controller.node(network.id, plain).unwrap().node;
-    assert!(node.relay.is_none() && node.exit.is_none());
+    assert!(node.relay.is_none() && node.exit.is_none() && !node.forward_target);
     assert!(lab.controller.forwards(network.id).unwrap().is_empty());
 }
 
@@ -381,6 +385,7 @@ fn withdrawing_a_declaration_turns_the_capability_off() {
     let listener_node = lab.join_offline(network.id, &[], Declared::default());
     lab.controller.enable_relay(network.id, node.id, RelaySettings::default()).unwrap();
     lab.controller.enable_exit(network.id, node.id, ExitRole::default()).unwrap();
+    lab.switch_on_forward_target(network.id, node.id);
     let forward_id = lab.controller.create_forward(network.id, forward(listener_node, node.id)).unwrap().id;
     lab.settle(&mut [&mut node]);
     assert!(node.netmap().me.relay.is_some() && node.netmap().me.exit.is_some());
@@ -396,52 +401,99 @@ fn withdrawing_a_declaration_turns_the_capability_off() {
     assert!(node.netmap().me.exit.is_none() && node.netmap().me.relay.is_some());
     assert!(lab.netmap(listener_node).peers[0].exit.is_none());
 
-    // 重新连上来时什么都不声明了：relay 关掉，指向它的转发停用。
+    // 重新连上来时什么都不声明了：relay 关掉。端口转发的目标不是声明出来的，指向它的转发照旧。
     lab.controller.disconnect(node.session);
     let mut node = lab.connect(node.key, Declared::default()).unwrap();
     lab.settle(&mut [&mut node]);
     let view = lab.controller.node(network.id, node.id).unwrap().node;
-    assert!(view.relay.is_none() && view.exit.is_none());
-    assert!(node.netmap().me.relay.is_none() && node.netmap().relay_clients.is_empty() && node.netmap().me.forward_targets.is_empty());
-    assert!(lab.netmap(listener_node).relays.is_empty() && lab.netmap(listener_node).me.forwards.is_empty());
+    assert!(view.relay.is_none() && view.exit.is_none() && view.forward_target);
+    assert!(node.netmap().me.relay.is_none() && node.netmap().relay_clients.is_empty());
+    assert!(lab.netmap(listener_node).relays.is_empty());
+    assert_eq!((node.netmap().me.forward_targets.len(), lab.netmap(listener_node).me.forwards.len()), (1, 1));
     let stored = &lab.controller.forwards(network.id).unwrap()[0];
-    assert_eq!((stored.id, stored.enabled, stored.status), (forward_id, false, ForwardStatus::TargetNotDeclared));
+    assert_eq!((stored.id, stored.enabled, stored.status), (forward_id, true, ForwardStatus::ListenerOffline));
 
     // 再声明回来，能力也不会自己打开：启用是管理员的事。
     lab.controller.disconnect(node.session);
     let node = lab.connect(node.key, CAN_DO_ALL).unwrap();
-    assert!(node.netmap().me.relay.is_none() && node.netmap().me.forward_targets.is_empty());
-    assert_eq!(lab.controller.forwards(network.id).unwrap()[0].status, ForwardStatus::Disabled);
+    assert!(node.netmap().me.relay.is_none());
     let actions: Vec<String> = lab.controller.oplog(50).unwrap().into_iter().map(|entry| entry.action).collect();
-    for action in ["node.relay.withdrawn", "node.exit.withdrawn", "node.forward.withdrawn"] {
+    for action in ["node.relay.withdrawn", "node.exit.withdrawn"] {
         assert!(actions.iter().any(|logged| logged == action), "{action} 不在操作记录里：{actions:?}");
     }
+    assert!(!actions.iter().any(|logged| logged == "node.forward.withdrawn"), "{actions:?}");
 }
 
 #[test]
-fn a_forward_can_only_be_enabled_towards_a_node_that_declared_it() {
+fn a_forward_can_only_be_enabled_towards_a_node_whose_switch_is_on() {
     let mut lab = Lab::new();
     let network = lab.network("home");
     let listen = lab.join_offline(network.id, &[], Declared::default());
-    let target = lab.join_offline(network.id, &[], Declared { forward: true, ..Declared::default() });
-    let undeclared = lab.join_offline(network.id, &[], Declared::default());
+    // 目标节点什么都没有声明：开关是管理员的。
+    let target = lab.join_offline(network.id, &[], Declared::default());
+    let switched_off = lab.join_offline(network.id, &[], CAN_DO_ALL);
+    assert!(!lab.controller.node(network.id, target).unwrap().node.forward_target, "新节点的开关关着");
+    lab.switch_on_forward_target(network.id, target);
+    assert!(lab.controller.node(network.id, target).unwrap().node.forward_target);
 
     let created = lab.controller.create_forward(network.id, forward(listen, target)).unwrap();
     assert_eq!(created.status, ForwardStatus::ListenerOffline);
-    // 监听节点自己不需要声明什么。
+    // 监听节点自己不需要什么开关。
     assert_eq!(lab.netmap(listen).me.forwards.len(), 1);
     assert_eq!(lab.netmap(target).me.forward_targets.len(), 1);
 
-    let retarget = ForwardInput { target_node: undeclared, ..forward(listen, target) };
-    assert_eq!(lab.controller.replace_forward(network.id, created.id, retarget.clone()).unwrap_err().code(), ErrorCode::NotDeclared);
-    // 停用着的转发可以指向没声明的节点，但它不会被下发，也启用不了。
+    let retarget = ForwardInput { target_node: switched_off, ..forward(listen, target) };
+    let refused = lab.controller.replace_forward(network.id, created.id, retarget.clone()).unwrap_err();
+    assert_eq!(refused.code(), ErrorCode::ForwardTargetOff, "声明了别的能力也不算");
+    // 停用着的转发可以指向开关关着的节点，但它不会被下发，也启用不了。
     let parked = lab.controller.replace_forward(network.id, created.id, ForwardInput { enabled: false, ..retarget }).unwrap();
-    assert_eq!(parked.status, ForwardStatus::TargetNotDeclared);
-    assert!(lab.netmap(listen).me.forwards.is_empty() && lab.netmap(undeclared).me.forward_targets.is_empty());
+    assert_eq!(parked.status, ForwardStatus::Disabled);
+    assert!(lab.netmap(listen).me.forwards.is_empty() && lab.netmap(switched_off).me.forward_targets.is_empty());
     assert!(lab.netmap(target).me.forward_targets.is_empty());
 
     let same_bind = lab.controller.create_forward(network.id, forward(listen, target));
     assert_eq!(same_bind.unwrap_err().code(), ErrorCode::Conflict, "同一个监听地址上不能有两条同协议的转发");
+}
+
+#[test]
+fn switching_a_target_off_keeps_its_forwards_configured_but_out_of_effect_until_it_is_on_again() {
+    use serde_json::{Value, json};
+
+    let mut lab = Lab::new();
+    let network = lab.network("home");
+    let mut listen = lab.join(network.id, &[]);
+    let mut target = lab.join(network.id, &[]);
+    lab.switch_on_forward_target(network.id, target.id);
+    let created = lab.controller.create_forward(network.id, forward(listen.id, target.id)).unwrap();
+    lab.settle(&mut [&mut listen, &mut target]);
+    assert_eq!(lab.controller.forwards(network.id).unwrap()[0].status, ForwardStatus::Active);
+    assert_eq!((listen.netmap().me.forwards.len(), target.netmap().me.forward_targets.len()), (1, 1));
+
+    let off = UpdateNode { forward_target: Some(false), ..UpdateNode::default() };
+    assert!(!lab.controller.update_node(network.id, target.id, &off).unwrap().forward_target, "关掉不被拦");
+    lab.settle(&mut [&mut listen, &mut target]);
+    let parked = &lab.controller.forwards(network.id).unwrap()[0];
+    assert_eq!((parked.enabled, parked.status), (true, ForwardStatus::ForwardTargetOff), "转发留着，标明不生效");
+    assert!(listen.netmap().me.forwards.is_empty() && target.netmap().me.forward_targets.is_empty(), "两端都不再下发");
+    // 留着的转发照样能改，改的时候不必先停用它；新的转发启用不了。
+    let renamed = ForwardInput { name: "db".to_owned(), ..forward(listen.id, target.id) };
+    assert_eq!(lab.controller.replace_forward(network.id, created.id, renamed).unwrap().status, ForwardStatus::ForwardTargetOff);
+    let another = ForwardInput { bind: "127.0.0.1:8081".parse().unwrap(), ..forward(listen.id, target.id) };
+    assert_eq!(lab.controller.create_forward(network.id, another).unwrap_err().code(), ErrorCode::ForwardTargetOff);
+
+    lab.switch_on_forward_target(network.id, target.id);
+    lab.settle(&mut [&mut listen, &mut target]);
+    assert_eq!(lab.controller.forwards(network.id).unwrap()[0].status, ForwardStatus::Active);
+    assert_eq!((listen.netmap().me.forwards.len(), target.netmap().me.forward_targets.len()), (1, 1), "打开就回来");
+    let changes: Vec<Value> = lab
+        .controller
+        .oplog(50)
+        .unwrap()
+        .into_iter()
+        .filter(|entry| entry.action == "node.update")
+        .map(|entry| Value::Object(entry.params)["changes"].clone())
+        .collect();
+    assert_eq!(changes[..2], [json!({ "forward_target": true }), json!({ "forward_target": false })], "开关的改动进操作记录");
 }
 
 #[test]
@@ -457,6 +509,8 @@ fn a_successor_enrolled_by_token_inherits_identity_and_configuration() {
     let mut via_exit = listener(other, "via", "127.0.0.1:1081", false);
     via_exit.config.fixed_exit = Some(old.id);
     let referring_listener = lab.controller.create_listener(network.id, via_exit).unwrap();
+    lab.switch_on_forward_target(network.id, old.id);
+    lab.switch_on_forward_target(network.id, other);
     let to_old = lab.controller.create_forward(network.id, forward(other, old.id)).unwrap();
     let from_old = lab.controller.create_forward(network.id, forward(old.id, other)).unwrap();
     lab.controller.set_pair(network.id, old.id, other, PairInput { keep_alive: Some(true), lane: None, congestion: None }).unwrap();
@@ -472,14 +526,15 @@ fn a_successor_enrolled_by_token_inherits_identity_and_configuration() {
     assert_eq!(lab.enroll(new_key, &secret, Declared::default()).err(), Some(Rejection::PredecessorOnline));
     lab.controller.disconnect(old.session);
 
-    // 新机器只声明了可以作为端口转发的目标。
-    let mut new = lab.enroll(new_key, &secret, Declared { forward: true, ..Declared::default() }).unwrap();
+    // 新机器什么都没有声明。
+    let mut new = lab.enroll(new_key, &secret, Declared::default()).unwrap();
     lab.settle(&mut [&mut new]);
     assert!(new.id > old.id, "继任者是一个新节点，编号不沿用");
     let view = lab.controller.node(network.id, new.id).unwrap().node;
     assert_eq!((view.name.as_str(), view.virtual_ip), ("nas-01", old_view.virtual_ip));
     assert_eq!(group_names(&view.groups), ["rebuilt", "servers"], "令牌预设的分组和原节点所在的分组合在一起");
     assert!(view.relay.is_none() && view.exit.is_none(), "relay 和出口要重新声明、重新启用");
+    assert!(view.forward_target, "端口转发目标的开关是管理员的，随身份交给继任者");
     assert_eq!(lab.controller.node(network.id, old.id).unwrap_err().code(), ErrorCode::NotFound);
     assert_eq!(lab.connect(old.key, CAN_DO_ALL).err(), Some(Rejection::UnknownKey), "原来的公钥被吊销了");
 
@@ -488,7 +543,7 @@ fn a_successor_enrolled_by_token_inherits_identity_and_configuration() {
     assert_eq!(listeners.iter().find(|l| l.id == referring_listener.id).unwrap().config.fixed_exit, Some(new.id));
     let forwards = lab.controller.forwards(network.id).unwrap();
     let inherited_target = forwards.iter().find(|f| f.id == to_old.id).unwrap();
-    assert_eq!((inherited_target.target_node, inherited_target.enabled), (new.id, true), "新机器声明了，转发照常");
+    assert_eq!((inherited_target.target_node, inherited_target.enabled), (new.id, true), "转发照常");
     assert_eq!(forwards.iter().find(|f| f.id == from_old.id).unwrap().listen_node, new.id);
     let pairs = lab.controller.pairs(network.id).unwrap();
     let settings: Vec<_> = pairs.into_iter().map(|pair| pair.setting).collect();
@@ -518,6 +573,7 @@ fn an_existing_node_can_be_made_the_successor_of_an_offline_one() {
     let mut old = lab.join_with(network.id, &["servers"], CAN_DO_ALL);
     let other = lab.join_offline(network.id, &[], Declared::default());
     rename(&lab, network.id, old.id, "nas-01");
+    lab.switch_on_forward_target(network.id, old.id);
     lab.controller.create_forward(network.id, forward(other, old.id)).unwrap();
     lab.settle(&mut [&mut old]);
     let old_address = lab.controller.node(network.id, old.id).unwrap().node.virtual_ip;
@@ -533,7 +589,9 @@ fn an_existing_node_can_be_made_the_successor_of_an_offline_one() {
     assert_eq!(group_names(&node.groups), ["new", "servers"]);
     assert_eq!(lab.controller.nodes(network.id).unwrap().len(), 2);
     let inherited = &lab.controller.forwards(network.id).unwrap()[0];
-    assert_eq!((inherited.target_node, inherited.enabled, inherited.status), (replacement, false, ForwardStatus::TargetNotDeclared));
+    assert_eq!((inherited.target_node, inherited.enabled, inherited.status), (replacement, true, ForwardStatus::ListenerOffline));
+    assert!(node.forward_target, "继承了开关，不用声明什么");
+    assert_eq!(lab.netmap(replacement).me.forward_targets.len(), 1);
     assert_eq!(lab.netmap(other).peers[0].virtual_ip, old_address);
     assert_eq!(lab.netmap(other).peers[0].id, replacement);
 }
@@ -645,6 +703,7 @@ fn every_log_entry_carries_the_named_values_its_sentence_needs() {
     let nas = lab.join_with(network.id, &["servers"], CAN_DO_ALL).id;
     let laptop = lab.join(network.id, &[]).id;
     rename(&lab, network.id, laptop, "laptop");
+    lab.switch_on_forward_target(network.id, nas);
     let rule = lab
         .controller
         .create_rule(

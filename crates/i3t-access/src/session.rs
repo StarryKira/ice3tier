@@ -474,7 +474,7 @@ async fn without_waiting<C: Connector + Datagrams, E>(shared: &Shared<C, E>, mut
             if let (Some(exit), End::Refused(reply)) = (exit, &summary.end) {
                 exit.refused_with(reply.status);
             }
-            log_summary(peer, request, &summary, &route.ended(&*shared.routes));
+            log_summary(peer, request, &summary, &route.ended(&*shared.routes), &shared.netmap.borrow());
         }
         Err(error) => {
             if let Some(exit) = exit {
@@ -539,7 +539,7 @@ async fn after_reply<C: Connector + Datagrams, E>(
             flow.relay_metered(client.stream, limit.reached(), &meter).await
         }
     };
-    log_summary(peer, request, &summary, &route.ended(&*shared.routes));
+    log_summary(peer, request, &summary, &route.ended(&*shared.routes), &shared.netmap.borrow());
 }
 
 /// 就地出站要去的地方。
@@ -624,7 +624,7 @@ pub(crate) async fn forward<C: Connector + Datagrams, E>(
             if let Some(outcome) = TargetCause::of_summary(&summary) {
                 shared.forward_health.record(forward.id, outcome);
             }
-            log_summary(forward.target, &request, &summary, &route.ended(&*shared.routes));
+            log_summary(forward.target, &request, &summary, &route.ended(&*shared.routes), &shared.netmap.borrow());
         }
         Err(error) => {
             tracing::info!(target = %forward.target, ?error, "到目标节点建流失败，重置了端口转发的连接");
@@ -640,8 +640,9 @@ pub(crate) fn origin_address(from: SocketAddr) -> Option<SocketAddr> {
     (!ip.is_loopback()).then(|| SocketAddr::new(ip, from.port()))
 }
 
-/// 每条流结束时的一行摘要（白皮书 §13）。不记目标地址，只记它是哪一类；记这对节点的连接开始和结束时走的路、中间换没换过。不采样。
-pub(crate) fn log_summary(peer: NodeId, request: &Open, summary: &Summary, route: &RouteSpan) {
+/// 每条流结束时的一行摘要（白皮书 §13）。不记目标地址，只记它是哪一类；记这对节点的连接开始和结束时走的路（relay 写名字，
+/// 从 `netmap` 里找）、中间换没换过。不采样。
+pub(crate) fn log_summary(peer: NodeId, request: &Open, summary: &Summary, route: &RouteSpan, netmap: &Netmap) {
     tracing::info!(
         %peer,
         kind = request.target.kind(),
@@ -650,8 +651,8 @@ pub(crate) fn log_summary(peer: NodeId, request: &Open, summary: &Summary, route
         received = summary.from_flow.bytes,
         first_byte_ms = summary.from_flow.first_byte.map(|elapsed| elapsed.as_millis()),
         end = ?summary.end,
-        route_start = %route.start_label(),
-        route_end = %route.end_label(),
+        route_start = %route.start_label(netmap),
+        route_end = %route.end_label(netmap),
         route_changed = route.changed,
         "流结束"
     );

@@ -95,13 +95,13 @@ impl NetworkView {
             .collect()
     }
 
-    /// 一条端口转发现在该不该下发：启用了，目标节点声明过可以作为目标，并且监听节点被允许访问目标节点。
+    /// 一条端口转发现在该不该下发：启用了，目标节点的开关（可以作为端口转发的目标）打开着，并且监听节点被允许访问目标节点。
     #[must_use]
     pub fn forward_is_deliverable(&self, access: &AccessMap<'_>, forward: &ForwardRecord) -> bool {
         let config = &forward.config;
-        let declared = self.nodes.get(&config.target_node).is_some_and(|target| target.declared.forward);
+        let switched_on = self.nodes.get(&config.target_node).is_some_and(|target| target.forward_target);
         let permitted = config.listen_node == config.target_node || access.allows(config.listen_node, config.target_node);
-        config.enabled && declared && self.nodes.contains_key(&config.listen_node) && permitted
+        config.enabled && switched_on && self.nodes.contains_key(&config.listen_node) && permitted
     }
 
     fn reach_of(&self, node: &NodeRecord) -> Reach {

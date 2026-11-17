@@ -94,6 +94,11 @@ impl Controller {
             node.routing = request.routing.unwrap_or(node.routing);
             node.reach = request.reach.unwrap_or(node.reach);
             node.profile = request.profile.unwrap_or(node.profile);
+            node.forward_target = request.forward_target.unwrap_or(node.forward_target);
+            if node.forward_target != before.forward_target {
+                let state = if node.forward_target { "打开" } else { "关闭" };
+                tracing::info!(node = %id, name = %node.name, "管理员{state}了它作为端口转发目标的开关");
+            }
             store.update_node(&node)?;
             if node.groups != before.groups {
                 store.set_node_groups(id, &node.groups)?;
@@ -105,7 +110,18 @@ impl Controller {
             Ok::<_, Error>((before, node, groups))
         })?;
         // relay 的名字写在全网每个节点的 netmap 里；别的改动只影响 netmap 里有它的节点。
-        let seeds = if after.relay.is_some() && before.name != after.name { Seeds::All } else { inner.holders_and(id) };
+        // 开关只管指向它的转发：两端的节点（监听节点不一定在它的 netmap 里，比如访问规则不允许时）。
+        let seeds = if after.relay.is_some() && before.name != after.name {
+            Seeds::All
+        } else if after.forward_target != before.forward_target {
+            let listeners = inner.store.forwards(network.id)?.into_iter().filter(|forward| forward.config.target_node == id);
+            let mut seeds = inner.holders_of(id);
+            seeds.insert(id);
+            seeds.extend(listeners.map(|forward| forward.config.listen_node));
+            Seeds::Nodes(seeds)
+        } else {
+            inner.holders_and(id)
+        };
         inner.refresh(network.id, seeds, None)?;
         self.wake_if_needed(&inner);
         Ok(inner.node_view(&network, &groups, &after, now, &inner.reach_index(network.id)?))
@@ -358,9 +374,9 @@ pub(super) fn inherit(store: &Store, network: NetworkId, old: &NodeRecord, succe
     // 让出了名字和地址的那一行已经读不出来，先删掉它，后面才能再遍历这个网络的节点。
     store.delete_node(old.id)?;
     unpin_everywhere(store, network, old.id)?;
-    // 端口转发的目标要节点自己声明过才行。继任者没有声明时，继承来的转发先停用。
-    if !successor.declared.forward {
-        store.disable_forwards_to(successor.id)?;
+    // 端口转发的目标是管理员的开关，和分组一样随身份交给继任者：继承来的转发照旧生效，外部配置不用改。
+    if old.forward_target && !successor.forward_target {
+        store.set_node_forward_target(successor.id, true)?;
     }
     Ok(())
 }
@@ -446,6 +462,9 @@ fn update_params(before: &NodeRecord, after: &NodeRecord, groups: &[GroupRecord]
     }
     if before.profile != after.profile {
         changes.insert("profile".to_owned(), json!(after.profile));
+    }
+    if before.forward_target != after.forward_target {
+        changes.insert("forward_target".to_owned(), json!(after.forward_target));
     }
     json!({ "node": after.id, "node_name": before.name, "changes": changes })
 }

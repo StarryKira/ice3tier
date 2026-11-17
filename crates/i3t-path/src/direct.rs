@@ -26,7 +26,7 @@ use i3t_underlay::ifaddr;
 
 use crate::budget::Budget;
 use crate::estimate::{Estimate, Quality, Train};
-use crate::report::DirectKind;
+use crate::report::{DirectFailureCause, DirectKind, DirectState, DirectStatus};
 use crate::timing::{MAX_TIMEOUTS, PROBE_INTERVAL, PUNCH_ATTEMPT, PUNCH_BACKOFF, PUNCH_IDLE_RETRY, PUNCH_VOLLEYS, Rtt, SILENCE};
 
 /// 一个对端最多记多少个候选地址。对端上报的、信令里带来的、探测里看到的都算。
@@ -111,6 +111,15 @@ impl DownReason {
             Self::Timeouts => RouteHint::DirectTimeouts,
             Self::Loss => RouteHint::DirectLoss,
             Self::Stale => RouteHint::DirectStale,
+        }
+    }
+
+    /// 给界面看的"直连上一次为什么没有成"。
+    const fn failure(self) -> DirectFailureCause {
+        match self {
+            Self::Timeouts => DirectFailureCause::Timeouts,
+            Self::Loss => DirectFailureCause::Loss,
+            Self::Stale => DirectFailureCause::Stale,
         }
     }
 }
@@ -234,6 +243,9 @@ pub(crate) struct DirectPath {
     signal_volley: Option<Instant>,
     /// 回环地址可以当候选：本节点自己就绑在回环上（测试里几个节点在同一台机器上）。
     loopback: bool,
+    /// 最近一次尝试开始的时刻，和最近一次失败的原因：只记下来给界面看（[`DirectPath::status`]），不影响什么时候去试。
+    attempted: Option<Instant>,
+    failure: Option<DirectFailureCause>,
 }
 
 impl DirectPath {
@@ -248,6 +260,8 @@ impl DirectPath {
             same_nat: false,
             signal_volley: None,
             loopback: false,
+            attempted: None,
+            failure: None,
         }
     }
 
@@ -278,6 +292,19 @@ impl DirectPath {
         } else {
             DirectKind::Reachable
         })
+    }
+
+    /// 直连现在在哪一步，给界面看：读的是尝试和退避的状态，不改它们。
+    pub(crate) fn status(&self, now: Instant) -> DirectStatus {
+        let state = match (self.kind(), self.punch, self.failure) {
+            (Some(_), _, _) => DirectState::Verified,
+            (None, Punch::Attempt { .. }, _) => DirectState::Trying,
+            (None, Punch::Idle | Punch::Backoff { .. } | Punch::Exhausted { .. }, Some(_)) => DirectState::Failed,
+            (None, Punch::Idle | Punch::Backoff { .. } | Punch::Exhausted { .. }, None) => DirectState::NotTried,
+        };
+        let attempted_ms = self.attempted.map(|at| u64::try_from(now.saturating_duration_since(at).as_millis()).unwrap_or(u64::MAX));
+        let failure = if state == DirectState::Verified { None } else { self.failure };
+        DirectStatus { state, kind: self.kind(), failure, attempted_ms }
     }
 
     /// 在用的直连是不是局域网直连。两种模式下它都无条件优先（白皮书 §7.1）。
@@ -418,6 +445,7 @@ impl DirectPath {
             };
             self.signal_volley = Some(now);
             self.punch = Punch::Attempt { round, started: now, volleys: 1 };
+            self.attempted = Some(now);
             actions.extend(self.volley(now));
         }
         actions
@@ -484,6 +512,7 @@ impl DirectPath {
                 });
                 self.active = Some(Active::new(from, sample, answered.coordinated && !unsolicited, now));
                 self.punch = Punch::Idle;
+                self.failure = None;
                 Some(Change::Up { addr: from })
             }
         }
@@ -497,6 +526,7 @@ impl DirectPath {
             self.punch = Punch::Idle;
             if self.active.as_ref().is_some_and(|active| now.saturating_duration_since(active.confirmed) > STALE) {
                 self.active = None;
+                self.failure = Some(DownReason::Stale.failure());
                 step.change = Some(Change::Down { reason: DownReason::Stale });
             }
             return step;
@@ -530,6 +560,7 @@ impl DirectPath {
                 };
                 if let Some(reason) = verdict {
                     self.active = None;
+                    self.failure = Some(reason.failure());
                     // 路是断了的话马上从头重试；只是丢包多的话它多半还能验证通过，立刻重试只会来回切，所以隔一阵再说。
                     self.punch = match reason {
                         DownReason::Loss => Punch::Exhausted { retry_at: now + PUNCH_IDLE_RETRY },
@@ -562,6 +593,10 @@ impl DirectPath {
             waiting @ (Punch::Attempt { .. } | Punch::Backoff { .. } | Punch::Exhausted { .. }) => waiting,
         };
         let Punch::Attempt { round, started, volleys } = self.punch else { return };
+        if started == now && volleys == 0 {
+            // 这一次尝试是刚才开始的（从空闲、退避或者整轮失败里出来）。
+            self.attempted = Some(now);
+        }
         let elapsed = now.saturating_duration_since(started);
         if PUNCH_VOLLEYS.get(volleys).is_some_and(|&at| elapsed >= at) {
             if volleys == 0 && policy.signal {
@@ -571,6 +606,7 @@ impl DirectPath {
             self.punch = Punch::Attempt { round, started, volleys: volleys + 1 };
         }
         if elapsed >= PUNCH_ATTEMPT {
+            self.failure = Some(if self.candidates.is_empty() { DirectFailureCause::NoCandidates } else { DirectFailureCause::NoAnswer });
             self.punch = match PUNCH_BACKOFF.get(round) {
                 Some(&wait) => Punch::Backoff { round, until: now + wait },
                 None => Punch::Exhausted { retry_at: now + PUNCH_IDLE_RETRY },
@@ -701,6 +737,68 @@ mod tests {
         let up = start + 20 * MS;
         assert_eq!(path.on_pong(to, &nonce, up), Some(Change::Up { addr: peer }));
         (path, up)
+    }
+
+    #[test]
+    fn the_status_tells_not_tried_from_trying_from_failed_without_changing_when_it_tries() {
+        let start = Instant::now();
+        let peer = addr("203.0.113.7:20330");
+        let mut path = DirectPath::new();
+        path.set_reported(&[peer], start);
+        // 这一对节点还没有用过：不去试，也就说"还没有试过"。
+        let idle = Policy { wanted: false, ..policy(&[]) };
+        assert!(path.poll(start, &idle).actions.is_empty());
+        let status = path.status(start);
+        assert_eq!((status.state, status.failure, status.attempted_ms), (DirectState::NotTried, None, None));
+
+        // 用到了：开始试。
+        let step = path.poll(start, &policy(&[]));
+        assert!(!pings(&step.actions).is_empty());
+        assert_eq!(path.status(start + 100 * MS).state, DirectState::Trying);
+        assert_eq!(path.status(start + 100 * MS).attempted_ms, Some(100));
+
+        // 一次尝试的时限里没有回答：失败，原因是没有回答；退避照旧。
+        let mut now = start;
+        while now < start + PUNCH_ATTEMPT {
+            now += 100 * MS;
+            path.poll(now, &policy(&[]));
+        }
+        assert!(matches!(path.punch, Punch::Backoff { round: 0, .. }), "{:?}", path.punch);
+        let failed = path.status(now);
+        assert_eq!((failed.state, failed.failure, failed.kind), (DirectState::Failed, Some(DirectFailureCause::NoAnswer), None));
+        assert_eq!(failed.attempted_ms, Some(u64::try_from((now - start).as_millis()).unwrap()), "最近一次尝试是开始时那一次");
+
+        // 对端不再活跃：失败的记录还在，不会变回"没有试过"。
+        path.poll(now + 10 * MS, &idle);
+        assert_eq!(path.status(now + 10 * MS).state, DirectState::Failed);
+    }
+
+    #[test]
+    fn a_verified_path_reports_its_kind_and_a_lost_one_why_it_went() {
+        let peer = addr("203.0.113.7:20330");
+        let (mut path, up) = established(peer);
+        let status = path.status(up);
+        assert_eq!((status.state, status.kind, status.failure), (DirectState::Verified, Some(DirectKind::Reachable), None));
+
+        // 闲着太久，放下了。
+        let idle = Policy { wanted: false, ..policy(&[]) };
+        let later = up + STALE + MS;
+        assert_eq!(path.poll(later, &idle).change, Some(Change::Down { reason: DownReason::Stale }));
+        let status = path.status(later);
+        assert_eq!((status.state, status.failure), (DirectState::Failed, Some(DirectFailureCause::Stale)));
+    }
+
+    #[test]
+    fn with_no_candidate_to_try_the_failure_says_so() {
+        let start = Instant::now();
+        let mut path = DirectPath::new();
+        let mut now = start;
+        path.poll(now, &policy(&[]));
+        while now <= start + PUNCH_ATTEMPT {
+            now += 100 * MS;
+            path.poll(now, &policy(&[]));
+        }
+        assert_eq!(path.status(now).failure, Some(DirectFailureCause::NoCandidates));
     }
 
     #[test]

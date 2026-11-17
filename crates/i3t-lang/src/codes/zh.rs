@@ -8,13 +8,15 @@ use i3t_model::admin::{
 use i3t_model::control::diag::{ChoiceCode, HopSource, PathPick, TestCode, TransferEnd};
 use i3t_model::control::exit_test::{ExitTestCause, ExitVia};
 use i3t_model::control::{
-    BindCause, DirectKind, InterceptCause, InterceptState, LegTransport, ListenState, NameService, RejectCause, RelayState, Route,
-    RouteCause, RouteHint, TargetCause, TryOutcome,
+    BindCause, DirectCause, DirectKind, DirectState, DirectStatus, InterceptCause, InterceptState, LegTransport, ListenState, NameService,
+    RejectCause, RelayState, Route, RouteCause, RouteHint, TargetCause, TryOutcome,
 };
 use i3t_model::netmap::IpFamily;
 use i3t_model::update::{FailureKind, SelfUpdateBlocker, UpdateCause, UpdateStatus};
+use i3t_proto::flow::Class;
 
 use super::{Codes, Names, cost_ms, relays};
+use crate::Lang;
 
 pub(super) static CODES: Codes = Codes {
     route,
@@ -59,6 +61,8 @@ pub(super) static CODES: Codes = Codes {
     intercept_state,
     intercept_cause,
     name_service,
+    class,
+    direct_status,
 };
 
 fn route(route: &Route, names: Names<'_>) -> String {
@@ -345,12 +349,13 @@ fn lane_block(block: &LaneBlock, names: Names<'_>) -> String {
 
 const fn forward_status(status: ForwardStatus) -> &'static str {
     match status {
-        ForwardStatus::TargetNotDeclared => "目标没有声明",
         ForwardStatus::Disabled => "已停用",
+        ForwardStatus::ForwardTargetOff => "目标的转发开关关着",
         ForwardStatus::AccessDenied => "访问规则不允许",
         ForwardStatus::ListenerOffline => "监听节点离线",
         ForwardStatus::TargetOffline => "目标节点离线",
         ForwardStatus::Active => "生效",
+        ForwardStatus::Unknown => "未知",
     }
 }
 
@@ -583,5 +588,44 @@ fn name_service(names: &NameService) -> String {
         NameService::NoResolver => "没有 systemd-resolved，名字用 i3t hosts".to_owned(),
         NameService::Failed { cause } => format!("名字解析不了：{}", intercept_cause(cause)),
         NameService::Unknown => "名字：未知".to_owned(),
+    }
+}
+
+const fn class(class: Class) -> &'static str {
+    match class {
+        Class::Auto => "自动",
+        Class::Interactive => "低延迟",
+        Class::Reliable => "不丢包",
+        Class::Bulk => "后台",
+    }
+}
+
+fn direct_status(status: &DirectStatus) -> String {
+    let state = match status.state {
+        DirectState::NotTried => "未尝试",
+        DirectState::Trying => "尝试中",
+        DirectState::Verified => "已通",
+        DirectState::Failed => "失败",
+        DirectState::Unknown => "未知",
+    };
+    let aside: Vec<String> = match status.state {
+        DirectState::Verified => status.kind.map(|kind| direct_kind(kind).to_owned()).into_iter().collect(),
+        DirectState::Failed => {
+            let cause = status.cause.map(|cause| direct_cause(cause).to_owned());
+            cause.into_iter().chain(status.attempted_secs_ago.map(|ago| Lang::ZhCn.ago(ago))).collect()
+        }
+        DirectState::NotTried | DirectState::Trying | DirectState::Unknown => Vec::new(),
+    };
+    if aside.is_empty() { state.to_owned() } else { format!("{state}（{}）", aside.join("，")) }
+}
+
+const fn direct_cause(cause: DirectCause) -> &'static str {
+    match cause {
+        DirectCause::NoAnswer => "没有回应",
+        DirectCause::NoCandidates => "没有对端的地址",
+        DirectCause::Timeouts => "探测超时",
+        DirectCause::Loss => "丢包太多",
+        DirectCause::Stale => "闲置后放下",
+        DirectCause::Unknown => "未知原因",
     }
 }

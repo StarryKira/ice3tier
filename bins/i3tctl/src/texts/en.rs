@@ -33,7 +33,7 @@ const HELP: Help = Help {
     network_max_relay_hops: "Max relay hops, 1 to 4",
     routing: "Routing mode",
     reach: "Path restriction",
-    class: "Service class",
+    class: "QoS: auto (Auto), interactive (Low latency), reliable (No loss), bulk (Background)",
     node_group: "Nodes",
     node_list: "List nodes",
     node_show: "Node details",
@@ -45,6 +45,7 @@ const HELP: Help = Help {
     node_routing: "Routing mode; default uses the network's",
     node_reach: "Path restriction; default uses the network's",
     node_profile: "Performance profile; default uses the node's local configuration file",
+    node_forward_target: "Can be a port forward target: other nodes reach its loopback and LAN through forwards",
     node_pin: "Pinned relay; repeatable",
     node_unpin: "Clear pinned relays",
     node_delete: "Delete a node. Its name and virtual IP stay reserved for 90 days",
@@ -120,7 +121,7 @@ const HELP: Help = Help {
     listener_delete: "Delete a listener",
     forward_group: "Port forwards",
     forward_list: "List port forwards",
-    forward_add: "Create a port forward. Port 0 lets the listening node pick; the target declares first: i3t set can-forward on",
+    forward_add: "Create a port forward. Port 0 lets the listening node pick; switch the target on first: i3tctl node set <node> --forward-target on",
     forward_udp: "UDP (default TCP)",
     forward_proxy_protocol: "send a PROXY protocol header so the service sees the initiating node's virtual IP (TCP only)",
     forward_enable: "Enable a port forward",
@@ -274,13 +275,14 @@ const UI: Ui = Ui {
     routing: "Routing mode",
     reach: "Path restriction",
     max_relay_hops: "Max relay hops",
-    class: "Service class",
+    class: "QoS",
 
     nodes_header: ["ID", "NAME", "VIRTUAL-IP", "STATE", "ROLES", "VERSION", "PLATFORM", "GROUPS"],
     no_nodes: "No nodes yet",
     exit: "exit",
     relay: "relay",
     forward: "forward",
+    forward_target: "forward target",
     groups: "Groups",
     roles: "Roles",
     reachability: "Reachability from the controller:",
@@ -328,7 +330,7 @@ const UI: Ui = Ui {
     mapping_varies: "Port mapping varies by peer; no hole punching",
     reported: "Reported",
 
-    routes_header: ["PEER", "VIRTUAL-IP", "ROUTE", "RTT-MS", "KIND", "SINCE", "FLOWS", "TRAFFIC ↑/↓"],
+    routes_header: ["PEER", "VIRTUAL-IP", "ROUTE", "RTT-MS", "KIND", "DIRECT", "OTHER-MODE", "SINCE", "FLOWS", "TRAFFIC ↑/↓"],
     no_peers: "No peers",
     matrix_header: ["FROM", "TO", "ROUTE", "RTT-MS", "KIND", "REPORTED"],
     stale: "stale",
@@ -577,6 +579,9 @@ fn log(entry: &LogEntry) -> Option<String> {
                 }
                 if let Some(profile) = get("profile") {
                     out.push(format!("performance profile {}", profile.as_str().unwrap_or("default")));
+                }
+                if let Some(on) = get("forward_target").and_then(serde_json::Value::as_bool) {
+                    out.push(if on { "forward target on" } else { "forward target off" }.to_owned());
                 }
                 lang.list(out)
             });

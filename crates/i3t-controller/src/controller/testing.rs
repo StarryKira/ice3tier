@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use i3t_crypto::NodeKey;
 use i3t_model::Netmap;
-use i3t_model::admin::{CreateEnrollToken, CreateGroup, CreateNetwork, GroupId, Network, NetworkId};
+use i3t_model::admin::{CreateEnrollToken, CreateGroup, CreateNetwork, GroupId, Network, NetworkId, UpdateNode};
 use i3t_model::control::{Declared, EnrollToken, Hello, PROTOCOL_REVISION, Report, SelfUpdate, Signal, TestOrder, ToController, ToNode};
 use i3t_model::update::{SignedManifest, UpdateStatus, UpdateTiming};
 use i3t_proto::{NodeId, PublicKey};
@@ -97,6 +97,12 @@ impl Lab {
         let secret = self.secret(network, &request);
         let key = self.fresh_key();
         self.enroll(key, &secret, declared).expect("注册应该成功")
+    }
+
+    /// 管理员打开节点"可以作为端口转发的目标"的开关。
+    pub(crate) fn switch_on_forward_target(&self, network: NetworkId, node: NodeId) {
+        let request = UpdateNode { forward_target: Some(true), ..UpdateNode::default() };
+        self.controller.update_node(network, node, &request).expect("打开开关应该成功");
     }
 
     pub(crate) fn join(&mut self, network: NetworkId, groups: &[&str]) -> Member {
@@ -267,4 +273,4 @@ pub(crate) fn modern_hello(version: &str) -> Hello {
     }
 }
 
-pub(crate) const CAN_DO_ALL: Declared = Declared { exit: true, relay: true, forward: true, relay_address: None };
+pub(crate) const CAN_DO_ALL: Declared = Declared { exit: true, relay: true, relay_address: None };

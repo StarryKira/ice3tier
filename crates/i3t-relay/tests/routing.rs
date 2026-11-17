@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use i3t_model::control::Route;
 use i3t_model::netmap::RoutingMode;
-use i3t_path::{DirectKind, RelayLeg};
+use i3t_path::{DirectKind, DirectState, RelayLeg};
 use i3t_proto::backbone::RelayState;
 use i3t_relay::DropReason;
 use i3t_underlay::lan::{GROUP_V4, Interfaces, LanConfig};
@@ -75,6 +75,9 @@ async fn a_stream_is_carried_over_a_two_relay_route() {
     let hops: Vec<_> = only.legs.iter().map(|leg| (leg.from, leg.to)).collect();
     assert_eq!(hops, [(a.id, r1.id), (r1.id, r2.id), (r2.id, d.id)]);
     assert!(a.paths.routes().iter().any(|entry| entry.peer == d.id && entry.rtt_ms.is_some()));
+    // 默认模式只经一个 relay：D 挂的 R2，A 够不着。路由表上说出来：另一种模式此刻没有路可走。
+    let other = report.alternative.as_ref().expect("另一种模式算过了");
+    assert_eq!((&other.route, other.rtt_ms), (&Route::None, None));
 
     // 一条已经在传的流照样经过这条路，一块不丢。
     let transfer = Transfer::start(&a, &d, 200).await;
@@ -401,10 +404,18 @@ async fn two_nodes_on_the_same_segment_find_each_other_through_beacons_and_go_di
     assert_eq!(b.route_to(&a), Route::Direct { addr: a.addr() });
     let report = a.paths.path_report(b.id).unwrap();
     assert_eq!(report.direct, Some(DirectKind::Lan), "信标里看到的地址验证通过之后是局域网直连：{report:?}");
-    // C 没有开局域网发现：没有人看得到它，它也看不到别人。
+    assert_eq!((report.direct_status.state, report.direct_status.kind), (DirectState::Verified, Some(DirectKind::Lan)));
+    // C 没有开局域网发现：没有人看得到它，它也看不到别人。用到它之前直连一次也没有试过。
+    assert_eq!(a.paths.path_report(c.id).unwrap().direct_status.state, DirectState::NotTried);
     a.paths.activate(c.id);
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(a.route_to(&c), Route::None);
+    // 路由视图每半秒刷新一次。
+    eventually("用到了 C 就去试直连", Duration::from_secs(3), || {
+        let tried = a.paths.path_report(c.id).unwrap().direct_status;
+        tried.state != DirectState::NotTried && tried.attempted_ms.is_some()
+    })
+    .await;
 }
 
 /// 一个只会 NAT-PMP 的假网关。公网地址是 `EXTERNAL`，映射出来的外部端口和内部端口同号。记下收到的映射请求。

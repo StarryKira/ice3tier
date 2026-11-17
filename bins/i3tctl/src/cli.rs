@@ -232,6 +232,8 @@ pub enum NodeCommand {
         reach: Option<Inherit<ReachArg>>,
         #[arg(long)]
         profile: Option<Inherit<ProfileArg>>,
+        #[arg(long)]
+        forward_target: Option<OnOff>,
         #[arg(long = "pin")]
         pins: Vec<String>,
         #[arg(long, conflicts_with = "pins")]
@@ -813,6 +815,7 @@ fn describe(command: clap::Command, h: &Help, v: &Values) -> clap::Command {
                         .mut_arg("routing", |arg| arg.help(h.node_routing).value_name("direct-first|lowest-cost|default"))
                         .mut_arg("reach", |arg| arg.help(h.node_reach).value_name("any|direct-only|relay-only|default"))
                         .mut_arg("profile", |arg| arg.help(h.node_profile).value_name("low-footprint|balanced|high-throughput|default"))
+                        .mut_arg("forward_target", |arg| on_off(arg.help(h.node_forward_target)))
                         .mut_arg("pins", |arg| node(arg.help(h.node_pin)))
                         .mut_arg("unpin", |arg| arg.help(h.node_unpin))
                 })

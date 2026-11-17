@@ -318,19 +318,6 @@ impl Inner {
             let params = json!({ "node": node.id, "node_name": node.name });
             self.store.log_refs(now, Some(node.network), "node.exit.withdrawn", &detail, &[LogRef::node(node.id)], params)?;
         }
-        if !node.declared.forward {
-            let pointing_here = self.store.forwards(node.network)?.into_iter().filter(|forward| forward.config.target_node == node.id);
-            let listeners: Vec<NodeId> =
-                pointing_here.filter(|forward| forward.config.enabled).map(|forward| forward.config.listen_node).collect();
-            if !listeners.is_empty() {
-                let disabled = self.store.disable_forwards_to(node.id)?;
-                affected.extend(listeners);
-                tracing::warn!(node = %node.id, name = %node.name, disabled, "节点没有声明可以作为端口转发的目标，停用指向它的转发");
-                let detail = format!("节点 {} 没有声明可以作为端口转发的目标，指向它的 {disabled} 条转发已停用", node.name);
-                let params = json!({ "node": node.id, "node_name": node.name, "forwards": disabled });
-                self.store.log_refs(now, Some(node.network), "node.forward.withdrawn", &detail, &[LogRef::node(node.id)], params)?;
-            }
-        }
         if *node != before {
             self.store.update_node(node)?;
         }

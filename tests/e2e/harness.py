@@ -91,6 +91,10 @@ class Controller:
         """controller 眼里这个节点现在的样子。"""
         return next(entry for entry in self.ctl("node", "list") if entry["key"] == node.key)
 
+    def forward_target(self, node: "Node", on: bool = True) -> None:
+        """管理员打开（或者关掉）节点"可以作为端口转发的目标"的开关。节点自己不声明它。"""
+        self.ctl("node", "set", str(node.id), "--forward-target", "on" if on else "off")
+
 
 class Node:
     """实验环境里的一个 ice3tier 节点。"""

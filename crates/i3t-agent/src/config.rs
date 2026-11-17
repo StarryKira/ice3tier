@@ -93,6 +93,9 @@ impl Config {
     ///
     /// 文件读写失败，或者现有的内容解析不了。
     pub fn set(path: &Path, change: Change) -> anyhow::Result<()> {
+        if let Change::CanForward(_) = change {
+            return Ok(());
+        }
         Self::write_template_if_missing(path)?;
         let text = fs::read_to_string(path).with_context(|| (texts().read_config)(path))?;
         let mut document: toml_edit::DocumentMut =
@@ -100,6 +103,7 @@ impl Config {
         let (section, key) = change.setting().key();
         match change {
             Change::Declare(_, on) | Change::ThroughputTests(on) | Change::Intercept(on) => document[section][key] = toml_edit::value(on),
+            Change::CanForward(_) => {}
             Change::Profile(profile) => document[section][key] = toml_edit::value(profile.spelling()),
             Change::RelayAddress(Some(address)) => document[section][key] = toml_edit::value(address.to_string()),
             Change::RelayAddress(None) => {
@@ -171,8 +175,10 @@ pub struct Declare {
     pub exit: bool,
     #[serde(default)]
     pub relay: bool,
-    #[serde(default)]
-    pub forward: bool,
+    /// 以前的"可以作为端口转发的目标"。现在只由管理员在 controller 上打开，本机不声明：这一项照收、不起作用，
+    /// 写着它的旧配置文件照样读得进来。
+    #[serde(default, rename = "forward")]
+    _forward: bool,
     /// 作为 relay 时，别的节点还可以经这个地址连它（白皮书 §7.2）：只有人知道的那一种，机房或者路由器把另一个地址上的端口
     /// 映射到这台机器。只一个：一台机器的端口映射到外面通常就是一个地址；controller 从网卡和连接上找出来的地址照样都用。
     #[serde(default)]
@@ -181,7 +187,7 @@ pub struct Declare {
 
 impl From<Declare> for Declared {
     fn from(declare: Declare) -> Self {
-        Self { exit: declare.exit, relay: declare.relay, forward: declare.forward, relay_address: declare.relay_address }
+        Self { exit: declare.exit, relay: declare.relay, relay_address: declare.relay_address }
     }
 }
 
@@ -193,12 +199,11 @@ fn is_relay_address(address: SocketAddr) -> bool {
     address.port() != 0 && !unusable
 }
 
-/// 可以在本机声明的三种能力。
+/// 可以在本机声明的两种能力。端口转发的目标不在这里：它只由管理员打开（见 [`Setting::CanForward`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capability {
     Exit,
     Relay,
-    Forward,
 }
 
 impl Capability {
@@ -206,15 +211,17 @@ impl Capability {
         match self {
             Self::Exit => "exit",
             Self::Relay => "relay",
-            Self::Forward => "forward",
         }
     }
 }
 
-/// `i3t set` 能改的项：三项声明、声明的 relay 地址、接不接受吞吐测试、性能档位、透明访问。
+/// `i3t set` 能改的项：两项声明、声明的 relay 地址、接不接受吞吐测试、性能档位、透明访问，和不再起作用的 `can-forward`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setting {
     Declare(Capability),
+    /// 以前的"声明可以作为端口转发的目标"。现在由管理员在 controller 上打开，这一项照收、什么也不改，
+    /// 照着旧的说明和脚本执行也不出错。
+    CanForward,
     /// 声明的 relay 地址（`[declare] relay_address`）。
     RelayAddress,
     /// 接不接受管理员发起的吞吐测试（`[tests] throughput`）。
@@ -230,6 +237,8 @@ impl Setting {
     const fn key(self) -> (&'static str, &'static str) {
         match self {
             Self::Declare(capability) => ("declare", capability.key()),
+            // 以前写在这里；现在不写（见 `Config::set`）。
+            Self::CanForward => ("declare", "forward"),
             Self::RelayAddress => ("declare", "relay_address"),
             Self::ThroughputTests => ("tests", "throughput"),
             Self::Profile => ("performance", "profile"),
@@ -250,6 +259,7 @@ impl Setting {
         };
         Ok(match self {
             Self::Declare(capability) => Change::Declare(capability, switch()?),
+            Self::CanForward => Change::CanForward(switch()?),
             Self::ThroughputTests => Change::ThroughputTests(switch()?),
             Self::Intercept => Change::Intercept(switch()?),
             Self::Profile => Change::Profile(value.parse().map_err(|_| anyhow::anyhow!((texts().unknown_profile)(value)))?),
@@ -273,6 +283,7 @@ impl FromStr for Setting {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            "can-forward" => Ok(Self::CanForward),
             "relay-address" => Ok(Self::RelayAddress),
             "throughput-tests" => Ok(Self::ThroughputTests),
             "profile" => Ok(Self::Profile),
@@ -286,6 +297,7 @@ impl fmt::Display for Setting {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Declare(capability) => capability.fmt(f),
+            Self::CanForward => f.write_str("can-forward"),
             Self::RelayAddress => f.write_str("relay-address"),
             Self::ThroughputTests => f.write_str("throughput-tests"),
             Self::Profile => f.write_str("profile"),
@@ -298,6 +310,8 @@ impl fmt::Display for Setting {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Change {
     Declare(Capability, bool),
+    /// 什么也不改，见 [`Setting::CanForward`]。
+    CanForward(bool),
     /// 声明的 relay 地址；`None` 是不再声明。
     RelayAddress(Option<SocketAddr>),
     ThroughputTests(bool),
@@ -310,6 +324,7 @@ impl Change {
     pub const fn setting(self) -> Setting {
         match self {
             Self::Declare(capability, _) => Setting::Declare(capability),
+            Self::CanForward(_) => Setting::CanForward,
             Self::RelayAddress(_) => Setting::RelayAddress,
             Self::ThroughputTests(_) => Setting::ThroughputTests,
             Self::Profile(_) => Setting::Profile,
@@ -322,7 +337,9 @@ impl Change {
 impl fmt::Display for Change {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Declare(_, on) | Self::ThroughputTests(on) | Self::Intercept(on) => f.write_str(if *on { "on" } else { "off" }),
+            Self::Declare(_, on) | Self::CanForward(on) | Self::ThroughputTests(on) | Self::Intercept(on) => {
+                f.write_str(if *on { "on" } else { "off" })
+            }
             Self::Profile(profile) => f.write_str(profile.spelling()),
             Self::RelayAddress(Some(address)) => address.fmt(f),
             Self::RelayAddress(None) => f.write_str("off"),
@@ -330,7 +347,7 @@ impl fmt::Display for Change {
     }
 }
 
-/// 命令行上的写法：`can-exit`、`can-relay`、`can-forward`。
+/// 命令行上的写法：`can-exit`、`can-relay`。
 impl FromStr for Capability {
     type Err = anyhow::Error;
 
@@ -338,7 +355,6 @@ impl FromStr for Capability {
         match s {
             "can-exit" => Ok(Self::Exit),
             "can-relay" => Ok(Self::Relay),
-            "can-forward" => Ok(Self::Forward),
             other => bail!((texts().unknown_setting)(other)),
         }
     }
@@ -720,9 +736,24 @@ mod tests {
 
     #[test]
     fn capabilities_use_the_command_line_spelling() {
-        for capability in [Capability::Exit, Capability::Relay, Capability::Forward] {
+        for capability in [Capability::Exit, Capability::Relay] {
             assert_eq!(capability.to_string().parse::<Capability>().unwrap(), capability);
         }
         assert!("exit".parse::<Capability>().is_err());
+    }
+
+    #[test]
+    fn the_old_forward_declaration_is_still_accepted_and_changes_nothing() {
+        let old = Config::parse("[declare]\nexit = true\nforward = true\n").unwrap();
+        assert!(old.declare.exit, "写着 forward 的旧配置文件照样读得进来");
+        assert_eq!(Declared::from(old.declare), Declared { exit: true, ..Declared::default() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let setting: Setting = "can-forward".parse().unwrap();
+        assert_eq!((setting, setting.to_string()), (Setting::CanForward, "can-forward".to_owned()));
+        Config::set(&path, setting.change("on").unwrap()).unwrap();
+        assert!(!path.exists(), "什么也不写");
+        assert!(setting.change("yes").is_err(), "值照旧要写 on 或 off");
     }
 }

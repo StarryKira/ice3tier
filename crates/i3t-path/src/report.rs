@@ -26,6 +26,52 @@ pub enum DirectKind {
     Punched,
 }
 
+/// 到一个对端的直连现在在哪一步（白皮书 §7.7）。从路径层为直连的尝试和退避记着的状态里读出来，不为它另外探测，
+/// 也不改什么时候去试：一对节点第一次用到时试，失败了按退避重试，主动测试立刻试（docs/architecture.md §5.3）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectStatus {
+    pub state: DirectState,
+    /// `Verified` 时：直连是怎么建立起来的。
+    #[serde(default)]
+    pub kind: Option<DirectKind>,
+    /// 最近一次失败的原因。通着的时候没有；正在试的时候是上一次的。
+    #[serde(default)]
+    pub failure: Option<DirectFailureCause>,
+    /// 最近一次尝试是多少毫秒之前开始的；从来没有试过时是 `None`。
+    #[serde(default)]
+    pub attempted_ms: Option<u64>,
+}
+
+/// 直连的状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectState {
+    /// 还没有试过：这一对节点还没有用过（直连只在第一次用到时去试），或者不能由本端去试（只经 relay、对端只主动连接）。
+    NotTried,
+    /// 正在试：向对端的候选地址发探测，等它回答。
+    Trying,
+    /// 验证通过，可以用。
+    Verified,
+    /// 试过了，没有通；或者通过的直连后来断了。按退避再试。
+    Failed,
+}
+
+/// 直连上一次为什么没有成。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectFailureCause {
+    /// 试满了一次的时限，对端的哪个候选地址都没有回答。
+    NoAnswer,
+    /// 手上没有对端的任何候选地址，没有地方可以试。
+    NoCandidates,
+    /// 用着的直连上探测连续超时。
+    Timeouts,
+    /// 用着的直连上探测丢了超过 20%。
+    Loss,
+    /// 这一对节点闲着，用着的直连很久没有验证过，放下了。
+    Stale,
+}
+
 /// 经 relay 时，本节点到路径上第一个 relay 的那一段用的传输。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -86,8 +132,23 @@ pub struct PathReport {
     pub cause: Option<RouteCause>,
     /// 上一次换路是多少毫秒之前；从来没有过路时是 `None`。
     pub since_switch_ms: Option<u64>,
+    /// 直连现在在哪一步，不管现在走不走它。
+    pub direct_status: DirectStatus,
+    /// 本节点没在用的那种选路模式此刻会选的路：默认模式下是延迟优先会选的（代价最低，按选路器的差距从现在的路算），
+    /// 延迟优先模式下是默认模式会选的（有验证过的直连就直连，否则照常挑 relay）。那种模式没有路可走时是 [`Route::None`]。
+    /// 和现在的路一样、或者还没有算过（默认模式下第一个评估窗口之前）时是 `None`。
+    #[serde(default)]
+    pub alternative: Option<Alternative>,
     /// 考虑过的候选路径，按代价从低到高。没有任何测量值的路径不在里面。
     pub candidates: Vec<CandidateReport>,
+}
+
+/// 另一种选路模式会选的路。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Alternative {
+    pub route: Route,
+    /// 这条路上的往返延迟，毫秒，和路由表里现在这条路的算法一样；没有测量值时是 `None`。
+    pub rtt_ms: Option<u32>,
 }
 
 /// 骨干矩阵里的一条链路。

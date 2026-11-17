@@ -60,7 +60,10 @@ pub use diag::{
     TrainError, TrainReport, TrainSpec,
 };
 pub use paths::{PacketMeta, PathConfig, Paths, RoutePin, TestGuard};
-pub use report::{BackboneLink, BackboneRow, CandidateReport, DirectKind, LegReport, PathReport, RelayLeg};
+pub use report::{
+    Alternative, BackboneLink, BackboneRow, CandidateReport, DirectFailureCause, DirectKind, DirectState, DirectStatus, LegReport,
+    PathReport, RelayLeg,
+};
 pub use table::Packets;
 pub use tcp::connect_first;
 

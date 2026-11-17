@@ -14,7 +14,8 @@ use i3t_model::admin::{
 };
 use i3t_model::control::exit_test::ExitTestCause;
 use i3t_model::control::{
-    DirectKind, InterceptReport, InterceptState, LaneCounts, LaneReport, LegTransport, PathSegment, PeerLanes, PerformanceReport, Route,
+    DirectKind, DirectStatus, InterceptReport, InterceptState, LaneCounts, LaneReport, LegTransport, PathSegment, PeerLanes,
+    PerformanceReport, Route,
 };
 use i3t_model::netmap::{DefaultAction, IpFamily, Profile};
 use i3t_model::update::UpdateTiming;
@@ -32,7 +33,7 @@ fn context() -> (&'static Ui, Lang, &'static Codes) {
     (&crate::texts::texts_in(lang).ui, lang, lang.codes())
 }
 
-/// 枚举在 JSON 里的写法（`direct_first` 之类）。命令行上要写的值（选路模式、协议、服务等级）照这个显示，和参数的写法一致。
+/// 枚举在 JSON 里的写法（`direct_first` 之类）。命令行上要写的值（选路模式、协议）照这个显示，和参数的写法一致；QoS 显示它的名字（`codes.class`）。
 pub fn label<T: serde::Serialize>(value: &T) -> String {
     match serde_json::to_value(value) {
         Ok(serde_json::Value::String(text)) => text,
@@ -285,7 +286,7 @@ pub fn networks(networks: &[Network]) {
 }
 
 pub fn network(network: &Network) {
-    let (t, _, _) = context();
+    let (t, _, codes) = context();
     println!("{} #{}", network.name, network.id);
     let mut fields = Fields::new(2);
     fields.add(t.domain, network.domain.clone());
@@ -294,7 +295,7 @@ pub fn network(network: &Network) {
     fields.add(t.routing, label(&network.routing));
     fields.add(t.reach, label(&network.reach));
     fields.add(t.max_relay_hops, network.max_relay_hops.to_string());
-    fields.add(t.class, network.class.as_ref().map_or_else(|| "auto".to_owned(), label));
+    fields.add(t.class, (codes.class)(network.class.unwrap_or_default()).to_owned());
     fields.print();
 }
 
@@ -346,7 +347,9 @@ fn reach_cell(reach: &RelayReach) -> String {
 
 fn roles(node: &Node) -> String {
     let (t, lang, _) = context();
-    lang.list([node.relay.is_some().then_some(t.relay), node.exit.is_some().then_some(t.exit)].into_iter().flatten())
+    let roles =
+        [node.relay.is_some().then_some(t.relay), node.exit.is_some().then_some(t.exit), node.forward_target.then_some(t.forward_target)];
+    lang.list(roles.into_iter().flatten())
 }
 
 /// 改动节点之后的回显：现在是什么样。
@@ -400,8 +403,7 @@ pub fn node_detail(detail: &NodeDetail) {
     fields.add(t.version, format!("{} / {}", node.version, node.platform));
     fields.add(t.hostname, if node.hostname.is_empty() { NONE.to_owned() } else { node.hostname.clone() });
     fields.add(t.update, update_summary(&node.update));
-    let declared =
-        [node.declared.relay.then_some(t.relay), node.declared.exit.then_some(t.exit), node.declared.forward.then_some(t.forward)];
+    let declared = [node.declared.relay.then_some(t.relay), node.declared.exit.then_some(t.exit)];
     fields.add(t.declared, lang.list(declared.into_iter().flatten()));
     if let Some(address) = node.declared.relay_address {
         fields.add(t.declared_address, address.to_string());
@@ -428,6 +430,7 @@ pub fn node_detail(detail: &NodeDetail) {
         },
     );
     fields.add(t.exit, exit);
+    fields.add(t.forward_target, yes_no(node.forward_target));
     fields.add(t.dial_out_only, yes_no(node.dial_out_only));
     fields.add(t.routing, node.routing.as_ref().map_or_else(|| t.from_network.to_owned(), label));
     fields.add(t.reach, node.reach.as_ref().map_or_else(|| t.from_network.to_owned(), label));
@@ -522,20 +525,40 @@ fn bandwidth(mbps: Option<u32>) -> String {
     mbps.map_or_else(|| t.unlimited.to_owned(), |mbps| format!("{mbps} Mbit/s"))
 }
 
-pub fn routes(table: &RouteTable) {
+/// 一个节点的路由表。`nodes` 是网络里的节点，用来把路上的 relay 写成名字（relay 不一定是这个节点的对端）。
+pub fn routes(table: &RouteTable, nodes: &[Node]) {
     let (t, lang, codes) = context();
     if !table.online {
         println!("{}", (t.node_offline)(&table.node.name));
         return;
     }
+    let name = |id: NodeId| nodes.iter().find(|node| node.id == id).map_or_else(|| format!("#{id}"), |node| node.name.clone());
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs());
     let mut rows = Table::new(&t.routes_header);
     for entry in &table.routes {
+        let direct = entry.direct_status.map_or_else(
+            || NONE.to_owned(),
+            |view| {
+                // controller 给的是时刻；写成"多久之前"，和节点上 `i3t routes` 的一样。
+                let attempted_secs_ago = view.attempted_at.map(|at| now.saturating_sub(at));
+                (codes.direct_status)(&DirectStatus { state: view.state, kind: view.kind, cause: view.cause, attempted_secs_ago })
+            },
+        );
         rows.row(vec![
             entry.peer.name.clone(),
             entry.peer.virtual_ip.to_string(),
-            (codes.route)(&entry.route, &|id| format!("#{id}")),
+            (codes.route)(&entry.route, &name),
             optional(entry.rtt_ms),
             kind_cell(&entry.route, entry.direct, entry.relay_leg),
+            direct,
+            // 这个节点没在用的那种选路模式此刻会选的路。
+            entry.alternative.as_ref().map_or_else(
+                || NONE.to_owned(),
+                |other| {
+                    let route = (codes.route)(&other.route, &name);
+                    other.rtt_ms.map_or_else(|| route.clone(), |rtt| format!("{route}  {rtt} ms"))
+                },
+            ),
             lang.ago(entry.since_secs),
             optional(entry.flows),
             match (entry.tx_bytes, entry.rx_bytes) {

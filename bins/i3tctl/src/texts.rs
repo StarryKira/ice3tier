@@ -72,6 +72,7 @@ pub struct Help {
     pub node_routing: &'static str,
     pub node_reach: &'static str,
     pub node_profile: &'static str,
+    pub node_forward_target: &'static str,
     pub node_pin: &'static str,
     pub node_unpin: &'static str,
     pub node_delete: &'static str,
@@ -319,6 +320,8 @@ pub struct Ui {
     pub exit: &'static str,
     pub relay: &'static str,
     pub forward: &'static str,
+    /// 角色和节点详情里的"可以作为端口转发的目标"。
+    pub forward_target: &'static str,
     pub groups: &'static str,
     pub roles: &'static str,
     pub reachability: &'static str,
@@ -380,7 +383,7 @@ pub struct Ui {
     pub mapping_varies: &'static str,
     pub reported: &'static str,
 
-    pub routes_header: [&'static str; 8],
+    pub routes_header: [&'static str; 10],
     pub no_peers: &'static str,
     pub matrix_header: [&'static str; 6],
     pub stale: &'static str,

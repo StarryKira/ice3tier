@@ -15,7 +15,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use i3t_model::admin::{
-    BackboneRelay, BackboneView, MatrixEntry, MatrixNode, NetworkId, NodeRoute, PathLeg, PathSource, PathView, RouteMatrix, RouteTable,
+    BackboneRelay, BackboneView, DirectStatusView, MatrixEntry, MatrixNode, NetworkId, NodeRoute, PathLeg, PathSource, PathView,
+    RouteMatrix, RouteTable, Timestamp,
 };
 use i3t_model::control::{BackboneRow, ExitTestResult, PathDetail, Route, RouteAnswer, RouteEntry, RouteKind, ToNode};
 use i3t_proto::NodeId;
@@ -38,14 +39,35 @@ const MAX_CANDIDATES: usize = 16;
 #[derive(Debug)]
 pub(crate) struct Reported {
     pub(crate) entries: BTreeMap<NodeId, RouteEntry>,
-    /// 各条路的细节：直连的类型、到第一个 relay 的那一段的传输。节点说不出来（或者版本太旧不报）的对端不在里面。
-    kinds: BTreeMap<NodeId, RouteKind>,
+    /// 各条路的细节：直连的类型、到第一个 relay 的那一段的传输、直连在哪一步。节点说不出来（或者版本太旧不报）的对端不在里面。
+    kinds: BTreeMap<NodeId, ReportedKind>,
     /// 每一条路 controller 第一次看到它的时刻：路换了才重新算，只是延迟变了不算。
     since: BTreeMap<NodeId, Instant>,
     /// 最近一次上报的时刻。没有变化的条目节点不重复报，所以整张表都是"截至这个时刻"的。
     pub(crate) at: Instant,
     /// 是节点的哪一条连接报的。不是它现在这条连接报的，就是过期的：它离线了，或者重新连上来之后还没有上报。
     conn: u64,
+}
+
+/// 一条路的细节，和收到它时按 controller 的时钟换算出来的最近一次直连尝试的时刻。
+///
+/// 节点报的是"多少秒之前"，细节没变时不重报，所以收到时换算一次就一直对。
+#[derive(Debug, Clone)]
+struct ReportedKind {
+    kind: RouteKind,
+    attempted_at: Option<Timestamp>,
+}
+
+impl ReportedKind {
+    fn new(kind: RouteKind, now: Timestamp) -> Self {
+        let attempted = kind.direct_status.and_then(|status| status.attempted_secs_ago);
+        Self { attempted_at: attempted.map(|ago| now.saturating_sub(ago)), kind }
+    }
+
+    fn direct_status(&self) -> Option<DirectStatusView> {
+        let status = self.kind.direct_status?;
+        Some(DirectStatusView { state: status.state, kind: status.kind, cause: status.cause, attempted_at: self.attempted_at })
+    }
 }
 
 /// 一条发出去、还在等回答的查询。
@@ -110,11 +132,13 @@ impl Controller {
                     rtt_ms: entry.rtt_ms,
                     age_secs,
                     since_secs: now.saturating_duration_since(since).as_secs(),
-                    direct: kind.and_then(|kind| kind.direct),
-                    relay_leg: kind.and_then(|kind| kind.relay_leg),
+                    direct: kind.and_then(|kind| kind.kind.direct),
+                    relay_leg: kind.and_then(|kind| kind.kind.relay_leg),
                     flows: use_of.map(|use_of| use_of.flows),
                     tx_bytes: use_of.map(|use_of| use_of.tx_bytes),
                     rx_bytes: use_of.map(|use_of| use_of.rx_bytes),
+                    direct_status: kind.and_then(ReportedKind::direct_status),
+                    alternative: kind.and_then(|kind| kind.kind.alternative.clone()),
                 })
             });
             known.collect()
@@ -146,8 +170,8 @@ impl Controller {
                     rtt_ms: entry.rtt_ms,
                     age_secs,
                     stale,
-                    direct: kind.and_then(|kind| kind.direct),
-                    relay_leg: kind.and_then(|kind| kind.relay_leg),
+                    direct: kind.and_then(|kind| kind.kind.direct),
+                    relay_leg: kind.and_then(|kind| kind.kind.relay_leg),
                 }
             })
         });
@@ -294,6 +318,7 @@ impl Inner {
     pub(super) fn routes_reported(&mut self, id: NodeId, routes: Vec<RouteEntry>, kinds: Vec<RouteKind>, full: bool) {
         let (Some(sync), Some(live)) = (self.sync.get(&id), self.live.get(&id)) else { return };
         let now = Instant::now();
+        let wall = self.clock.now();
         let reported = self.routes.entry(id).or_insert_with(|| Reported {
             entries: BTreeMap::new(),
             kinds: BTreeMap::new(),
@@ -313,7 +338,7 @@ impl Inner {
         let kinds: BTreeMap<NodeId, RouteKind> = kinds.into_iter().map(|kind| (kind.peer, kind)).collect();
         for entry in routes.into_iter().filter(|entry| sync.knows(entry.peer)) {
             match kinds.get(&entry.peer) {
-                Some(kind) => reported.kinds.insert(entry.peer, *kind),
+                Some(kind) => reported.kinds.insert(entry.peer, ReportedKind::new(kind.clone(), wall)),
                 None => reported.kinds.remove(&entry.peer),
             };
             if before.get(&entry.peer) == Some(&entry.route) {
@@ -428,7 +453,7 @@ impl Inner {
         let reported_kind = |route: &Route| {
             let reported = reported?;
             reported.entries.get(&to.id).filter(|entry| entry.route == *route)?;
-            reported.kinds.get(&to.id).copied()
+            reported.kinds.get(&to.id).map(|kind| kind.kind.clone())
         };
         match answer {
             Some(RouteAnswer { route: Some(route), rtt_ms, since, detail, connection_rtt_ms, .. }) => {
@@ -436,7 +461,11 @@ impl Inner {
                 let leg = PathLeg { connection_rtt_ms, ..leg(PathSource::Query, Some(route), rtt_ms, Some(0), since) };
                 match detail {
                     Some(detail) => with_detail(leg, detail),
-                    None => PathLeg { direct: kind.and_then(|kind| kind.direct), relay_leg: kind.and_then(|kind| kind.relay_leg), ..leg },
+                    None => PathLeg {
+                        direct: kind.as_ref().and_then(|kind| kind.direct),
+                        relay_leg: kind.and_then(|kind| kind.relay_leg),
+                        ..leg
+                    },
                 }
             }
             Some(RouteAnswer { route: None, .. }) => leg(PathSource::NotPeers, None, None, Some(0), None),
@@ -444,7 +473,7 @@ impl Inner {
                 Some((entry, at)) => {
                     let kind = reported_kind(&entry.route);
                     let leg = leg(PathSource::Report, Some(entry.route.clone()), entry.rtt_ms, Some(at.elapsed().as_secs()), None);
-                    PathLeg { direct: kind.and_then(|kind| kind.direct), relay_leg: kind.and_then(|kind| kind.relay_leg), ..leg }
+                    PathLeg { direct: kind.as_ref().and_then(|kind| kind.direct), relay_leg: kind.and_then(|kind| kind.relay_leg), ..leg }
                 }
                 None => leg(PathSource::None, None, None, None, None),
             },

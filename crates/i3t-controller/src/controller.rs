@@ -487,6 +487,7 @@ impl Inner {
             virtual_ip: record.virtual_ip,
             groups: groups.iter().filter(|group| record.groups.contains(&group.id)).map(GroupRecord::to_ref).collect(),
             declared: record.declared,
+            forward_target: record.forward_target,
             relay: record.relay.as_ref().map(|settings| RelayView {
                 addresses: node_addresses::relay_addresses(record, network.cidr),
                 bandwidth_mbps: settings.bandwidth_mbps,

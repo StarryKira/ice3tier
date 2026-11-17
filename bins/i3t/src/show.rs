@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use i3t_agent::config::Config;
-use i3t_agent::ping::{PingOutcome, PingReport};
+use i3t_agent::ping::{PingOutcome, PingReport, RelayName};
 use i3t_agent::state::StateDir;
 use i3t_agent::status::{Link, LiveListener, LiveStatus};
 use i3t_lang::table::{Fields, Table};
@@ -26,7 +26,7 @@ pub fn local(state: &StateDir) -> anyhow::Result<()> {
     let mut fields = Fields::new(0);
     fields.add(t.state_dir, state.path().display().to_string());
     fields.add(t.port, config.port.to_string());
-    let declared = [(config.declare.exit, t.exit), (config.declare.relay, t.relay), (config.declare.forward, t.forward_target)];
+    let declared = [(config.declare.exit, t.exit), (config.declare.relay, t.relay)];
     fields.add(t.declared, lang.list(declared.into_iter().filter_map(|(on, name)| on.then_some(name))));
     if let Some(address) = config.declare.relay_address {
         fields.add(t.relay_address, address.to_string());
@@ -64,7 +64,9 @@ pub fn status(live: &LiveStatus) {
     if live.mapping_varies == Some(true) {
         fields.add(t.nat, t.mapping_varies.to_owned());
     }
-    fields.add(t.attached, lang.list(live.attached.iter().map(|attachment| format!("#{} {} ms", attachment.relay, attachment.rtt_ms))));
+    let attached =
+        live.attached.iter().map(|attachment| format!("{} {} ms", relay_name(&live.relays, attachment.relay), attachment.rtt_ms));
+    fields.add(t.attached, lang.list(attached));
     if let Some(relay) = &live.relay {
         fields.add(t.relay, (t.relay_counts)(relay.sessions, relay.forwarded_packets, &lang.bytes(relay.forwarded_bytes), relay.dropped));
     }
@@ -189,6 +191,7 @@ pub fn ping(asked: &str, report: &PingReport) -> bool {
         PingOutcome::NotAllowed => Some((t.ping_not_allowed)(&name)),
         PingOutcome::Refused => Some((t.ping_refused)(&name)),
         PingOutcome::Unreachable => Some((t.ping_unreachable)(&name)),
+        PingOutcome::ConnectTimeout => Some((t.ping_connect_timeout)(&name)),
         PingOutcome::Unsupported => Some((t.ping_unsupported)(&name)),
         PingOutcome::Busy => Some(t.ping_busy.to_owned()),
         PingOutcome::Unknown => Some((t.ping_unknown)(&name)),
@@ -214,8 +217,7 @@ pub fn ping(asked: &str, report: &PingReport) -> bool {
 fn ping_route(report: &PingReport) -> String {
     let (t, lang) = context();
     let codes = lang.codes();
-    let names =
-        |id: NodeId| report.relays.iter().find(|relay| relay.id == id.get()).map_or_else(|| format!("#{id}"), |relay| relay.name.clone());
+    let names = |id: NodeId| relay_name(&report.relays, id);
     let route = |route: &Route| (codes.route)(route, &names);
     match (report.route_start.as_ref(), report.route_end.as_ref()) {
         (Some(start), Some(end)) if start != end => (t.ping_route_changed)(&route(start), &route(end)),
@@ -224,11 +226,16 @@ fn ping_route(report: &PingReport) -> String {
     }
 }
 
+/// 一个 relay 写成名字。名字是节点给的（应答里的 `relays`，节点按 netmap 找：relay 列表、对端、它自己），
+/// `i3t status` 的挂靠、`i3t routes` 和 `i3t ping` 都用这一个；节点没有给的写 `#编号`。
+fn relay_name(relays: &[RelayName], id: NodeId) -> String {
+    relays.iter().find(|relay| relay.id == id.get()).map_or_else(|| format!("#{id}"), |relay| relay.name.clone())
+}
+
 fn route_table(live: &LiveStatus) {
     let (t, lang) = context();
     let codes = lang.codes();
-    let name =
-        |id: NodeId| live.routes.iter().find(|route| route.peer == id.get()).map_or_else(|| format!("#{id}"), |route| route.name.clone());
+    let name = |id: NodeId| relay_name(&live.relays, id);
     let mut table = Table::new(&t.routes_header).indented(2);
     for entry in &live.routes {
         let since = entry.since.as_ref().map_or_else(
@@ -238,7 +245,15 @@ fn route_table(live: &LiveStatus) {
                 lang.labelled(&lang.ago(since.secs_ago), &why)
             },
         );
-        table.row(vec![entry.name.clone(), optional(entry.virtual_ip), (codes.route)(&entry.route, &name), optional(entry.rtt_ms), since]);
+        let direct = entry.direct_status.as_ref().map_or_else(|| NONE.to_owned(), codes.direct_status);
+        table.row(vec![
+            entry.name.clone(),
+            optional(entry.virtual_ip),
+            (codes.route)(&entry.route, &name),
+            optional(entry.rtt_ms),
+            direct,
+            since,
+        ]);
     }
     print_table(&table);
 }
@@ -301,6 +316,13 @@ mod tests {
         let nameless = PingReport { relays: Vec::new(), ..report(Some(&via_hk), Some(&via_hk)) };
         assert_eq!(ping_route(&nameless), route(&via_hk), "旧版本的节点不给名字：写编号");
         assert_eq!(ping_route(&report(None, None)), t.unknown);
+    }
+
+    #[test]
+    fn relays_are_named_from_what_the_node_gave_and_by_number_otherwise() {
+        let relays = [RelayName { id: 4, name: "hk".into() }];
+        assert_eq!(relay_name(&relays, NodeId::new(4).unwrap()), "hk");
+        assert_eq!(relay_name(&relays, NodeId::new(5).unwrap()), "#5");
     }
 
     #[test]

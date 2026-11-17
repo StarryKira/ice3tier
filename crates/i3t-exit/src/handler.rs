@@ -365,6 +365,7 @@ impl<S: System, C: Connector + Datagrams> Handler for Exit<S, C> {
                 };
                 self.counters.finished(&summary);
                 let route = route.ended(&*self.routes);
+                let netmap = Arc::clone(&self.netmap.borrow());
                 tracing::info!(
                     %peer,
                     ?class,
@@ -373,8 +374,8 @@ impl<S: System, C: Connector + Datagrams> Handler for Exit<S, C> {
                     from_target = summary.from_tcp.bytes,
                     first_byte_ms = summary.from_tcp.first_byte.map(|elapsed| elapsed.as_millis()),
                     end = ?summary.end,
-                    route_start = %route.start_label(),
-                    route_end = %route.end_label(),
+                    route_start = %route.start_label(&netmap),
+                    route_end = %route.end_label(&netmap),
                     route_changed = route.changed,
                     "流结束"
                 );
@@ -390,14 +391,15 @@ impl<S: System, C: Connector + Datagrams> Handler for Exit<S, C> {
                 let spliced = flow.splice(onward, revoked).await;
                 self.counters.spliced(spliced.near_to_far, spliced.far_to_near, matches!(spliced.end, End::Clean));
                 let route = route.ended(&*self.routes);
+                let netmap = Arc::clone(&self.netmap.borrow());
                 tracing::info!(
                     %peer,
                     ?class,
                     to_target = spliced.near_to_far,
                     from_target = spliced.far_to_near,
                     end = ?spliced.end,
-                    route_start = %route.start_label(),
-                    route_end = %route.end_label(),
+                    route_start = %route.start_label(&netmap),
+                    route_end = %route.end_label(&netmap),
                     route_changed = route.changed,
                     "接力到端口转发目标节点的流结束"
                 );

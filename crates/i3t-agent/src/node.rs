@@ -581,7 +581,8 @@ pub(crate) const BUILTIN_LISTENERS: [&str; 2] = ["local-socks5", "local-http"];
 ///
 /// - 加上配置文件里的本机代理入口；
 /// - 去掉本机没有声明过的能力。controller 被攻破或者管理员密码被盗时，它也不能把一台没有声明的机器
-///   变成出口、relay 或者端口转发的目标。
+///   变成出口或者 relay。端口转发的目标不在此列：它只由管理员打开，下发来的转发照收（白皮书 §9.6），
+///   所以 controller 能经转发碰到这台机器能碰到的一切。
 ///
 /// 排空不在这里管：监听照常开着，由入口和出口模块明确拒绝新的请求（见 [`drain`](crate::drain)）。
 #[must_use]
@@ -594,10 +595,6 @@ pub fn localize(netmap: &Netmap, config: &Config) -> Netmap {
     if !declared.relay && netmap.me.relay.take().is_some() {
         netmap.relay_clients.clear();
         tracing::warn!("controller 把本节点启用成了 relay，但本机没有声明可以作为 relay，不生效。要声明请执行 i3t set can-relay on");
-    }
-    if !declared.forward && !netmap.me.forward_targets.is_empty() {
-        netmap.me.forward_targets.clear();
-        tracing::warn!("controller 把本节点配成了端口转发的目标，但本机没有声明，不生效。要声明请执行 i3t set can-forward on");
     }
     let local = [
         (BUILTIN_LISTENERS[0], config.proxy.socks5.addr(), ListenerProtocol::Socks5),
@@ -649,15 +646,16 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_that_were_not_declared_locally_are_stripped() {
+    fn capabilities_that_were_not_declared_locally_are_stripped_but_forwards_are_taken_as_pushed() {
         let local = localize(&enabled_everything(), &Config::default());
         assert!(local.me.exit.is_none() && local.me.relay.is_none());
-        assert!(local.relay_clients.is_empty() && local.me.forward_targets.is_empty());
+        assert!(local.relay_clients.is_empty());
+        assert_eq!(local.me.forward_targets.len(), 1, "端口转发的目标只看管理员的开关，本机不声明");
     }
 
     #[test]
     fn declared_capabilities_are_kept() {
-        let config = Config::parse("[declare]\nexit = true\nrelay = true\nforward = true\n").unwrap();
+        let config = Config::parse("[declare]\nexit = true\nrelay = true\n").unwrap();
         let local = localize(&enabled_everything(), &config);
         assert!(local.me.exit.is_some() && local.me.relay.is_some());
         assert_eq!((local.relay_clients.len(), local.me.forward_targets.len()), (1, 1));

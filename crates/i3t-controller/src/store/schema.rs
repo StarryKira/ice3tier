@@ -23,6 +23,7 @@ pub(super) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0010_found_relay_addresses_and_stats.sql"),
     include_str!("migrations/0011_exits_any_port_and_no_bandwidth.sql"),
     include_str!("migrations/0012_relay_reach_pair_congestion_route_switches.sql"),
+    include_str!("migrations/0013_forward_target_switch.sql"),
 ];
 
 #[cfg(test)]
@@ -321,5 +322,36 @@ mod tests {
         let relay_only = node(6);
         assert_eq!(relay_only.exit, None, "不是出口的节点照旧不是");
         assert_eq!(relay_only.relay, Some(i3t_model::admin::RelaySettings { bandwidth_mbps: Some(100) }), "relay 的带宽上限不动");
+    }
+
+    /// 第 13 版之前：端口转发的目标由节点自己声明（`declared.forward`）。
+    const BEFORE_FORWARD_TARGET_SWITCH: usize = 12;
+
+    #[test]
+    fn a_node_that_declared_itself_a_forward_target_gets_the_switch_on_and_the_declaration_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("controller.db");
+        let declared = [
+            (1, "nas", r#"{"exit":false,"relay":false,"forward":true}"#),
+            (2, "hk", r#"{"exit":true,"relay":true,"forward":false,"relay_address":"203.0.113.9:40330"}"#),
+            (3, "phone", "{}"),
+        ];
+        {
+            let store = Store::prepare(Connection::open(&path).unwrap(), &MIGRATIONS[..BEFORE_FORWARD_TARGET_SWITCH]).unwrap();
+            home_network(&store.conn);
+            for (id, name, declared) in declared {
+                home_node(&store.conn, id, name);
+                store.conn.execute("UPDATE nodes SET declared = ?2 WHERE id = ?1", rusqlite::params![id, declared]).unwrap();
+            }
+        }
+        let store = Store::open(&path).unwrap();
+        let node = |id: u32| store.node(i3t_proto::NodeId::new(id).unwrap()).unwrap().unwrap();
+        assert_eq!((node(1).forward_target, node(2).forward_target, node(3).forward_target), (true, false, false));
+        let hk = node(2).declared;
+        assert_eq!((hk.exit, hk.relay, hk.relay_address), (true, true, Some("203.0.113.9:40330".parse().unwrap())), "别的声明不动");
+        for id in 1..=3 {
+            let raw: String = store.conn.query_row("SELECT declared FROM nodes WHERE id = ?1", [id], |row| row.get(0)).unwrap();
+            assert!(serde_json::from_str::<Value>(&raw).unwrap().get("forward").is_none(), "节点 {id} 的声明里没有 forward 了");
+        }
     }
 }

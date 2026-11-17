@@ -198,7 +198,7 @@ impl Runtime {
             exits: self.exit_observations(),
             listeners,
             forwards,
-            route_kinds: self.endpoint.path_reports().iter().filter_map(route_detail::kind).collect(),
+            route_kinds: self.endpoint.path_reports().iter().map(route_detail::kind).collect(),
             lanes: Some(Box::new(self.lanes.report())),
             performance: Some(Box::new(self.performance.borrow().clone())),
             intercept: Some(Box::new(intercept)),

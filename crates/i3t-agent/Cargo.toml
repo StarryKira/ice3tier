@@ -38,6 +38,7 @@ workspace = true
 [dev-dependencies]
 i3t-flow = { path = "../i3t-flow", features = ["test-util"] }
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 i3t-intercept = { path = "../i3t-intercept" }

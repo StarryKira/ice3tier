@@ -497,16 +497,31 @@ fn lowest_cost_choice(candidates: &[Candidate], current: Option<&Candidate>) -> 
         cost_ms: Some(candidate.cost_ms),
         cheaper: None,
     };
-    if let Some(lan) = candidates.iter().find(|candidate| candidate.lan) {
-        return chosen(lan, ChoiceReason::Lan);
-    }
-    let Some(cheapest) = candidates.first() else { return ModeChoice::none() };
-    match current {
-        Some(current) if current.path != cheapest.path && !routing::beats_by_margin(current.cost_ms, cheapest.cost_ms) => ModeChoice {
+    let usable: Vec<&Candidate> = candidates.iter().collect();
+    let Some(path) = lowest_cost_path(&usable, current.map(|current| current.path)) else { return ModeChoice::none() };
+    let Some(picked) = candidates.iter().find(|candidate| candidate.path == path) else { return ModeChoice::none() };
+    match candidates.first() {
+        _ if picked.lan => chosen(picked, ChoiceReason::Lan),
+        Some(cheapest) if cheapest.path != path => ModeChoice {
             cheaper: Some(CheaperPath { route: route_of(cheapest.path), cost_ms: cheapest.cost_ms }),
-            ..chosen(current, ChoiceReason::WithinMargin)
+            ..chosen(picked, ChoiceReason::WithinMargin)
         },
-        Some(_) | None => chosen(cheapest, ChoiceReason::LowestCost),
+        Some(_) | None => chosen(picked, ChoiceReason::LowestCost),
+    }
+}
+
+/// 延迟优先模式从 `current` 出发此刻会选的路径（`candidates` 按代价从低到高，都是此刻走得了的）。规则同 [`lowest_cost_choice`]：
+/// 局域网直连优先；代价最低的比现在的路便宜得够换过去就是它，不够就还是现在的路。没有候选时是 `None`。
+pub(super) fn lowest_cost_path(candidates: &[&Candidate], current: Option<PathId>) -> Option<PathId> {
+    if let Some(lan) = candidates.iter().find(|candidate| candidate.lan) {
+        return Some(lan.path);
+    }
+    let cheapest = candidates.first()?;
+    match current.and_then(|path| candidates.iter().find(|candidate| candidate.path == path)) {
+        Some(current) if current.path != cheapest.path && !routing::beats_by_margin(current.cost_ms, cheapest.cost_ms) => {
+            Some(current.path)
+        }
+        Some(_) | None => Some(cheapest.path),
     }
 }
 
@@ -551,6 +566,18 @@ mod tests {
 
     fn relay_route(relay: u32) -> Route {
         Route::Relay { relays: vec![NodeId::new(relay).unwrap()] }
+    }
+
+    #[test]
+    fn the_lowest_cost_pick_for_the_route_table_follows_the_same_rule() {
+        let (on_direct, near, far) = (direct(74.3), via(3, 74.1), via(4, 20.0));
+        let path = |candidate: &Candidate| candidate.path;
+        assert_eq!(lowest_cost_path(&[&near, &on_direct], Some(path(&on_direct))), Some(path(&on_direct)), "便宜得不够：还是现在的路");
+        assert_eq!(lowest_cost_path(&[&far, &on_direct], Some(path(&on_direct))), Some(path(&far)), "便宜得够：换过去");
+        assert_eq!(lowest_cost_path(&[&near, &on_direct], None), Some(path(&near)), "现在没有路：直接取最低的");
+        let lan = Candidate { lan: true, ..direct(90.0) };
+        assert_eq!(lowest_cost_path(&[&far, &lan], Some(path(&far))), Some(path(&lan)), "局域网直连无条件优先");
+        assert_eq!(lowest_cost_path(&[], Some(path(&far))), None, "没有候选就没有路");
     }
 
     #[test]

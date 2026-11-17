@@ -44,6 +44,15 @@ impl Netmap {
         self.relays.iter().find(|relay| relay.id == id)
     }
 
+    /// 一个节点的名字，用来把路上的 relay 写成名字：先找 relay 列表，再找对端，最后是本节点自己。
+    /// relay 不一定是对端（访问规则没有连通它们），也可能是本节点自己；哪里都没有时是 `None`，显示时写编号。
+    /// 显示路的地方（`i3t routes`、`i3t status`、`i3t ping`、流结束的日志）都用它。
+    #[must_use]
+    pub fn node_name(&self, id: NodeId) -> Option<&str> {
+        let name = self.relay(id).map(|relay| &relay.name).or_else(|| self.peer(id).map(|peer| &peer.name));
+        name.or_else(|| (self.me.id == id).then_some(&self.me.name)).map(String::as_str)
+    }
+
     /// 按虚拟 IP 找对端。
     #[must_use]
     pub fn peer_by_ip(&self, ip: Ipv4Addr) -> Option<&Peer> {
@@ -716,6 +725,23 @@ mod tests {
             }]
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn a_node_is_named_from_the_relay_list_then_the_peers_then_itself() {
+        let mut netmap = minimal();
+        let relay = |raw: u32, name: &str| Relay {
+            id: NodeId::new(raw).unwrap(),
+            key: PublicKey::from_bytes([9; 32]),
+            name: name.into(),
+            udp: Vec::new(),
+            tcp: Vec::new(),
+        };
+        netmap.relays = vec![relay(9, "hk"), relay(2, "nas-relay")];
+        let name = |raw: u32| netmap.node_name(NodeId::new(raw).unwrap());
+        assert_eq!((name(9), name(2), name(1), name(7)), (Some("hk"), Some("nas-relay"), Some("laptop"), None));
+        netmap.relays.clear();
+        assert_eq!(netmap.node_name(NodeId::new(2).unwrap()), Some("nas-01"), "不在 relay 列表里的对端");
     }
 
     #[test]

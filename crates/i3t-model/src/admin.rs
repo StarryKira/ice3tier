@@ -20,8 +20,9 @@ use ipnet::{IpNet, Ipv4Net};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::control::{
-    BackboneLink, Declared, DirectKind, ExitObservation, ExitReport, InterceptReport, LaneReport, LegTransport, ListenState, ListenTraffic,
-    PathCandidate, PeerLanes, PerformanceReport, RelayState, RelayUse, Route, RouteCause, RouteSince, SelfUpdate, TargetCause, TryOutcome,
+    BackboneLink, Declared, DirectCause, DirectKind, DirectState, ExitObservation, ExitReport, InterceptReport, LaneReport, LegTransport,
+    ListenState, ListenTraffic, PathCandidate, PeerLanes, PerformanceReport, RelayState, RelayUse, Route, RouteAlternative, RouteCause,
+    RouteSince, SelfUpdate, TargetCause, TryOutcome,
 };
 use crate::netmap::{
     Attachment, Congestion, ExitRole, ForwardProtocol, LaneMode, ListenerProtocol, Profile, ProxyProtocol, Reach, RoutingMode,
@@ -124,8 +125,10 @@ pub enum ErrorCode {
     RangeNotSuperset,
     /// 网络里还有节点，不能删除。
     NetworkNotEmpty,
-    /// 节点没有在本地声明可以承担这项能力。
+    /// 节点没有在本地声明可以承担这项能力（relay、出口）。
     NotDeclared,
+    /// 端口转发的目标节点没有打开管理员的开关（[`Node::forward_target`]），启用不了指向它的转发。
+    ForwardTargetOff,
     /// 要被继任的节点还在线。
     PredecessorOnline,
     /// 和已有的配置冲突（例如同一个监听地址上已经有一条转发）。
@@ -286,8 +289,12 @@ pub struct Node {
     pub virtual_ip: Ipv4Addr,
     /// 它所在的分组，按名字排（不分大小写）。内置分组 `All` 每个节点都在，不在这里列出。
     pub groups: Vec<GroupRef>,
-    /// 节点在本地声明的"可以承担"。没有声明的能力启用不了。
+    /// 节点在本地声明的"可以承担"（relay、出口）。没有声明的能力启用不了。
     pub declared: Declared,
+    /// 管理员的开关：可以作为端口转发的目标。新节点是关着的。关着时 controller 不给它下发转发，也启用不了指向它的转发；
+    /// 节点自己不声明，也不拒绝：controller 能经转发碰到这台机器能碰到的一切（它的回环和局域网）。比这个字段旧的 controller 不给，读成 `false`。
+    #[serde(default)]
+    pub forward_target: bool,
     /// 启用为 relay 时有值：它的地址（controller 找出来的）和设置。
     pub relay: Option<RelayView>,
     /// 启用为出口时有值。
@@ -651,6 +658,9 @@ pub struct UpdateNode {
     /// 性能档位。写 `null` 表示不再指定，节点改用本机配置文件里的。
     #[serde(default, deserialize_with = "nullable", skip_serializing_if = "Option::is_none")]
     pub profile: Option<Option<Profile>>,
+    /// 管理员的开关：可以作为端口转发的目标（[`Node::forward_target`]）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forward_target: Option<bool>,
 }
 
 /// 区分"字段没写"和"字段写了 `null`"：前者读成 `None`，后者读成 `Some(None)`。
@@ -793,6 +803,24 @@ pub struct NodeRoute {
     pub tx_bytes: Option<u64>,
     #[serde(default)]
     pub rx_bytes: Option<u64>,
+    /// 直连现在在哪一步，不管现在走不走它；节点的版本太旧不报时是 `null`。
+    #[serde(default)]
+    pub direct_status: Option<DirectStatusView>,
+    /// 这个节点没在用的那种选路模式此刻会选的路和它的延迟；和现在的路一样、没有可比的、或者节点的版本太旧不报时是 `null`。
+    #[serde(default)]
+    pub alternative: Option<RouteAlternative>,
+}
+
+/// 到一个对端的直连现在在哪一步（[`DirectStatus`](crate::control::DirectStatus) 在管理接口里的样子：时间换成了 controller 的时钟）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectStatusView {
+    pub state: DirectState,
+    /// `verified` 时：这条直连是怎么建立起来的；别的时候是 `null`。
+    pub kind: Option<DirectKind>,
+    /// 最近一次失败的原因；通着、从没失败过时是 `null`。
+    pub cause: Option<DirectCause>,
+    /// 最近一次尝试开始的时间；从来没有试过时是 `null`。
+    pub attempted_at: Option<Timestamp>,
 }
 
 /// 整个网络的路由矩阵：每个节点到它的各个对端现在怎么走，取自各节点最近的上报（白皮书 §7.7）。
@@ -1267,16 +1295,19 @@ pub struct ForwardInput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ForwardStatus {
-    /// 目标节点没有声明（或者撤回了声明）可以作为端口转发的目标。这时转发一定是停用的，也启用不了。
-    TargetNotDeclared,
     /// 被停用了。
     Disabled,
+    /// 目标节点的开关（[`Node::forward_target`]）关着：转发留着，没有下发，开关打开就回来。
+    ForwardTargetOff,
     /// 访问规则不允许监听节点访问目标节点，转发没有下发。
     AccessDenied,
     ListenerOffline,
     TargetOffline,
     /// 已经下发，两端都在线。
     Active,
+    /// 比本程序新的 controller 说的、这里不认识的状态（以前的 `target_not_declared` 也读成它）。
+    #[serde(other)]
+    Unknown,
 }
 
 /// 一对节点之间的设置。`a` 的编号小于 `b`。

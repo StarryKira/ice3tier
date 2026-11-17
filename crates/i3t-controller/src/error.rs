@@ -47,6 +47,8 @@ pub enum Error {
     NetworkNotEmpty(String),
     #[error("节点 {node} 没有声明{capability}。在节点上执行 `{command}` 之后才能启用", command = capability.command())]
     NotDeclared { node: String, capability: Capability },
+    #[error("节点 {0} 没有打开\"可以作为端口转发的目标\"。在 controller 上打开：`i3tctl node set {0} --forward-target on`")]
+    ForwardTargetOff(String),
     #[error("节点 {0} 还在线。只有已经下线的节点才能被继任")]
     PredecessorOnline(String),
     /// 和已有的配置冲突。`with` 是挡着的东西。
@@ -125,6 +127,7 @@ impl Error {
             Self::RangeNotSuperset(_) => ErrorCode::RangeNotSuperset,
             Self::NetworkNotEmpty(_) => ErrorCode::NetworkNotEmpty,
             Self::NotDeclared { .. } => ErrorCode::NotDeclared,
+            Self::ForwardTargetOff(_) => ErrorCode::ForwardTargetOff,
             Self::PredecessorOnline(_) => ErrorCode::PredecessorOnline,
             Self::Conflict { .. } => ErrorCode::Conflict,
             Self::NodeOffline(_) => ErrorCode::NodeOffline,
@@ -154,7 +157,7 @@ impl Error {
     /// - `conflict`：挡着的东西；
     /// - `cannot_self_update`：节点说的原因（`container` 之类），或者 `too_old`、`unknown`；
     /// - `no_update`：[`SkipCause`] 的代码；
-    /// - `not_declared`：没有声明的能力（`relay`、`exit`、`forward`）；
+    /// - `not_declared`：没有声明的能力（`relay`、`exit`）；
     /// - `internal`：出错的环节（`store`、`io` 之类）。日志里有细节，应答里只有这一个词。
     #[must_use]
     pub fn what(&self) -> Option<String> {
@@ -187,6 +190,7 @@ impl Error {
             | Self::RangeExhausted(_)
             | Self::RangeNotSuperset(_)
             | Self::NetworkNotEmpty(_)
+            | Self::ForwardTargetOff(_)
             | Self::PredecessorOnline(_)
             | Self::NodeOffline(_)
             | Self::TooSoon(_)
@@ -321,12 +325,11 @@ impl fmt::Display for Entity {
     }
 }
 
-/// 要节点先在本地声明、管理员才能启用的三种能力。
+/// 要节点先在本地声明、管理员才能启用的两种能力。端口转发的目标只要管理员的开关（[`Error::ForwardTargetOff`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capability {
     Relay,
     Exit,
-    Forward,
 }
 
 impl Capability {
@@ -336,7 +339,6 @@ impl Capability {
         match self {
             Self::Relay => "relay",
             Self::Exit => "exit",
-            Self::Forward => "forward",
         }
     }
 
@@ -346,7 +348,6 @@ impl Capability {
         match self {
             Self::Relay => "i3t set can-relay on",
             Self::Exit => "i3t set can-exit on",
-            Self::Forward => "i3t set can-forward on",
         }
     }
 }
@@ -357,7 +358,6 @@ impl fmt::Display for Capability {
         f.write_str(match self {
             Self::Relay => "可以作为中继",
             Self::Exit => "可以作为出口",
-            Self::Forward => "可以作为端口转发的目标",
         })
     }
 }
@@ -422,11 +422,7 @@ mod tests {
 
     #[test]
     fn an_undeclared_capability_names_the_command_to_run_on_the_node() {
-        let cases = [
-            (Capability::Exit, "i3t set can-exit on"),
-            (Capability::Relay, "i3t set can-relay on"),
-            (Capability::Forward, "i3t set can-forward on"),
-        ];
+        let cases = [(Capability::Exit, "i3t set can-exit on"), (Capability::Relay, "i3t set can-relay on")];
         for (capability, command) in cases {
             let error = Error::NotDeclared { node: "nas-01".to_owned(), capability };
             let message = error.to_string();

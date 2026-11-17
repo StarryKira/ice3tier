@@ -25,8 +25,9 @@ use crate::socket;
 use crate::stream::{self, RecvHalf, SendHalf, StreamCount};
 use crate::tuning::Tuning;
 
-/// 建立连接的时限（白皮书 §5.4）。没有 relay 可走时，这段时间花在等直连打通上。
-const DIAL_TIMEOUT: Duration = Duration::from_secs(5);
+/// 建立连接的时限（白皮书 §5.4）：等到一条路，加上握手，一共这么久。没有 relay 可走时，这段时间花在等直连打通上。
+/// 上层要等"连接建起来"时按它算（`i3t ping` 的第一个往返）。
+pub const DIAL_TIMEOUT: Duration = Duration::from_secs(5);
 /// 对端连进来时握手的时限。
 const WELCOME_TIMEOUT: Duration = Duration::from_secs(10);
 /// 两边同时拨号会留下两条连接。多出来的那一条没有流之后这么久就关。

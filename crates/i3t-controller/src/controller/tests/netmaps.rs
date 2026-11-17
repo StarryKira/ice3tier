@@ -181,6 +181,7 @@ fn a_forward_is_delivered_to_both_ends_only_while_the_listener_may_access_the_ta
     let listen = lab.join_offline(network.id, &["laptops"], Declared::default());
     let target = lab.join_offline(network.id, &["servers"], CAN_DO_ALL);
     let bystander = lab.join_offline(network.id, &["laptops"], CAN_DO_ALL);
+    lab.switch_on_forward_target(network.id, target);
     let input = ForwardInput {
         name: "db".to_owned(),
         protocol: ForwardProtocol::Udp,

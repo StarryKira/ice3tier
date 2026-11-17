@@ -8,16 +8,42 @@ use std::time::Duration;
 
 use i3t_access::{CurrentRoute, Routes};
 
-use i3t_conn::{BackboneRow, CandidateReport, DirectKind, Endpoint, LegReport, PathReport, RelayLeg};
+use i3t_conn::{
+    BackboneRow, CandidateReport, DirectFailureCause, DirectKind, DirectState, DirectStatus, Endpoint, LegReport, PathReport, RelayLeg,
+};
 use i3t_model::control::{self, PathCandidate, PathDetail, PathSegment, Route, RouteKind};
 use i3t_proto::NodeId;
 use i3t_proto::backbone::RelayState;
 
-/// 现在这条路的细节：直连是怎么建立的，或者经 relay 时第一段走的是 UDP 还是 TCP。
-/// 说不出任何细节的对端返回 `None`，上报里就不带它。
-pub(crate) fn kind(report: &PathReport) -> Option<RouteKind> {
+/// 现在这条路的细节：直连是怎么建立的，或者经 relay 时第一段走的是 UDP 还是 TCP；以及直连在哪一步，不管走不走它。
+/// 路由层对每个对端都说得出直连在哪一步，所以每个对端都有。
+pub(crate) fn kind(report: &PathReport) -> RouteKind {
     let (direct, relay_leg) = (direct_kind(report), report.relay_leg.map(leg_transport));
-    (direct.is_some() || relay_leg.is_some()).then_some(RouteKind { peer: report.peer, direct, relay_leg })
+    let alternative =
+        report.alternative.as_ref().map(|other| control::RouteAlternative { route: other.route.clone(), rtt_ms: other.rtt_ms });
+    RouteKind { peer: report.peer, direct, relay_leg, direct_status: Some(direct_status(&report.direct_status)), alternative }
+}
+
+/// 路由层说的直连在哪一步写成协议里的样子。
+pub(crate) fn direct_status(status: &DirectStatus) -> control::DirectStatus {
+    control::DirectStatus {
+        state: match status.state {
+            DirectState::NotTried => control::DirectState::NotTried,
+            DirectState::Trying => control::DirectState::Trying,
+            DirectState::Verified => control::DirectState::Verified,
+            DirectState::Failed => control::DirectState::Failed,
+        },
+        kind: status.kind.map(direct_kind_of),
+        cause: status.failure.map(|failure| match failure {
+            DirectFailureCause::NoAnswer => control::DirectCause::NoAnswer,
+            DirectFailureCause::NoCandidates => control::DirectCause::NoCandidates,
+            DirectFailureCause::Timeouts => control::DirectCause::Timeouts,
+            DirectFailureCause::Loss => control::DirectCause::Loss,
+            DirectFailureCause::Stale => control::DirectCause::Stale,
+        }),
+        // 不足一秒的算 0：刚开始的尝试是"0 秒之前"。
+        attempted_secs_ago: status.attempted_ms.map(|ms| ms / 1000),
+    }
 }
 
 pub(crate) const fn leg_transport(leg: RelayLeg) -> control::LegTransport {
@@ -156,6 +182,13 @@ mod tests {
             reason: "直连代价最低".to_owned(),
             cause: Some(control::RouteCause::Lan),
             since_switch_ms: Some(1500),
+            direct_status: DirectStatus {
+                state: DirectState::Failed,
+                kind: None,
+                failure: Some(DirectFailureCause::NoAnswer),
+                attempted_ms: Some(2600),
+            },
+            alternative: None,
             candidates: vec![CandidateReport {
                 route: Route::Relay { relays: vec![id(9)] },
                 cost_ms: 41.25,
@@ -179,19 +212,28 @@ mod tests {
         let candidate = &detail.candidates[0];
         assert_eq!((candidate.cost_us, candidate.load_percent, candidate.current), (41_250, 30, false));
         assert_eq!(candidate.legs[0], PathSegment { from: id(1), to: id(9), rtt_us: 20_400, jitter_us: 500, loss_permille: 12 });
-        assert_eq!(kind(&report(direct, Some(DirectKind::Punched))).map(|kind| kind.direct), Some(Some(control::DirectKind::Punched)));
+        assert_eq!(kind(&report(direct, Some(DirectKind::Punched))).direct, Some(control::DirectKind::Punched));
     }
 
     #[test]
-    fn a_relayed_path_has_no_direct_kind_and_says_nothing_in_the_report() {
+    fn a_relayed_path_has_no_direct_kind_but_says_where_the_direct_path_stands() {
         let relayed = report(Route::Relay { relays: vec![id(9)] }, Some(DirectKind::Reachable));
         assert_eq!(detail(&relayed).direct, None, "直连的类型只说现在走的直连");
-        assert_eq!(kind(&relayed), None);
+        let failed = control::DirectStatus {
+            state: control::DirectState::Failed,
+            kind: None,
+            cause: Some(control::DirectCause::NoAnswer),
+            attempted_secs_ago: Some(2),
+        };
+        assert_eq!(
+            kind(&relayed),
+            RouteKind { peer: id(4), direct: None, relay_leg: None, direct_status: Some(failed), alternative: None }
+        );
 
         // 经 relay 时报的是到第一个 relay 那一段走的传输。
         let over_tcp = PathReport { relay_leg: Some(RelayLeg::Tcp), ..relayed };
         assert_eq!(detail(&over_tcp).relay_leg, Some(control::LegTransport::Tcp));
-        assert_eq!(kind(&over_tcp), Some(RouteKind { peer: id(4), direct: None, relay_leg: Some(control::LegTransport::Tcp) }));
+        assert_eq!(kind(&over_tcp).relay_leg, Some(control::LegTransport::Tcp));
     }
 
     #[test]

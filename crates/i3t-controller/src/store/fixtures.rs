@@ -57,6 +57,7 @@ pub(crate) fn record(seed: u8) -> NodeRecord {
         virtual_ip: [10, 66, 0, seed].into(),
         groups: Default::default(),
         declared: Declared::default(),
+        forward_target: false,
         relay: None,
         exit: None,
         dial_out_only: false,

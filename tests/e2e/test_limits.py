@@ -126,9 +126,10 @@ def forward_auto_port(lab: Lab, work: Path, t: Checks) -> None:
     """端口写 0 的端口转发：节点挑一个端口，管理 API 报出来，节点重启之后还是这个端口。"""
     controller = Controller(lab.host("ctl"), work)
     controller.ctl("network", "create", "lab")
-    a, target = Node(lab.host("a"), work), Node(lab.host("t"), work, declare=("forward",))
+    a, target = Node(lab.host("a"), work), Node(lab.host("t"), work)
     for node in (a, target):
         node.join(controller)
+    controller.forward_target(target)
     start_whoami(target.host, 8081, bind="127.0.0.1")
     created = controller.ctl("forward", "add", str(a.id), "127.0.0.1:0", str(target.id), "127.0.0.1:8081")
 
@@ -163,9 +164,10 @@ def port_in_use(lab: Lab, work: Path, t: Checks) -> None:
     """监听端口被别的程序占着：管理 API 里这条转发显示端口被占用。"""
     controller = Controller(lab.host("ctl"), work)
     controller.ctl("network", "create", "lab")
-    a, target = Node(lab.host("a"), work), Node(lab.host("t"), work, declare=("forward",))
+    a, target = Node(lab.host("a"), work), Node(lab.host("t"), work)
     for node in (a, target):
         node.join(controller)
+    controller.forward_target(target)
     hold_port(a.host, 9555)
     created = controller.ctl("forward", "add", str(a.id), "127.0.0.1:9555", str(target.id), "127.0.0.1:8081")
 
@@ -182,9 +184,10 @@ def virtual_forward_relay(lab: Lab, work: Path, t: Checks) -> None:
     """监听在 gw 虚拟 IP 上、目标是另一个节点的端口转发：gw 替发起节点接力，TCP 和 UDP 都行。"""
     controller = Controller(lab.host("ctl"), work)
     controller.ctl("network", "create", "lab")
-    a, gw, target = Node(lab.host("a"), work), Node(lab.host("gw"), work), Node(lab.host("t"), work, declare=("forward",))
+    a, gw, target = Node(lab.host("a"), work), Node(lab.host("gw"), work), Node(lab.host("t"), work)
     for node in (a, gw, target):
         node.join(controller)
+    controller.forward_target(target)
     start_whoami(target.host, 8081, bind="127.0.0.1")
     start_udp_echo(target.host, 7000, bind="127.0.0.1")
     controller.ctl("forward", "add", str(gw.id), f"{gw.virtual_ip}:9200", str(target.id), "127.0.0.1:8081")
