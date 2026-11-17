@@ -29,7 +29,7 @@ impl GroupRecord {
     /// 管理 API 里指代它的写法：编号和现在的名字。
     #[must_use]
     pub fn to_ref(&self) -> GroupRef {
-        GroupRef { id: self.id, name: self.name.clone() }
+        GroupRef { id: self.id, name: self.name.clone(), builtin: self.builtin }
     }
 
     fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {

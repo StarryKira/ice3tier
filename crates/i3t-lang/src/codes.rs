@@ -196,6 +196,34 @@ mod tests {
     }
 
     #[test]
+    fn english_counts_read_right_for_one() {
+        let codes = Lang::English.codes();
+        let names: Names<'_> = &name;
+        let route_causes = [
+            RouteCause::LowestCost { candidates: 1, cost_us: Some(1_000) },
+            RouteCause::Failover { hint: RouteHint::RelayDraining, candidates: 1, cost_us: Some(1_000) },
+            RouteCause::Cheaper { previous: Route::None, previous_cost_us: 1_000, cost_us: 1_000, windows: 1 },
+        ];
+        let mut said: Vec<String> = route_causes.iter().map(|cause| (codes.route_cause)(cause, names)).collect();
+        let version = || "0.2.0".parse::<Version>().expect("合法的版本号");
+        said.push((codes.update_status)(&UpdateStatus::Downloading { version: version(), received: 1, total: 1 }));
+        said.extend(
+            [
+                UpdateCause::Corrupt { expected_size: 1, actual_size: 1 },
+                UpdateCause::NotConfirmed { minutes: 1 },
+                UpdateCause::StartsUnconfirmed { starts: 1 },
+            ]
+            .iter()
+            .map(|cause| (codes.update_cause)(cause)),
+        );
+        said.push((codes.release_cause)(&ReleaseCause::Mismatch { file: "i3t-linux-x86_64".into(), expected_size: 1, actual_size: 1 }));
+        said.push((codes.intercept_state)(&InterceptState::Failed { cause: InterceptCause::TableInUse { table: 1 } }));
+        for text in said {
+            assert_eq!(crate::cli::plural_after_one(&text), None, "{text}");
+        }
+    }
+
+    #[test]
     fn group_errors_say_it_is_a_group_in_english() {
         let error =
             |code, what: &str, field: &str| ApiError { code, message: "原话".into(), what: Some(what.into()), field: Some(field.into()) };

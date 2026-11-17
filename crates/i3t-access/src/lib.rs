@@ -33,6 +33,6 @@ mod usage;
 
 pub use egress::{EgressPolicy, LocalEgress};
 pub use intercept::InterceptStatus;
-pub use manager::{Access, AccessStatus, Active, ForwardStatus, ListenState, ListenerStatus, NoPortBook, PortBook, Traffic};
+pub use manager::{Access, AccessStatus, Active, ForwardStatus, ListenCause, ListenState, ListenerStatus, NoPortBook, PortBook, Traffic};
 pub use udp::intercept::Diversion;
 pub use usage::{CredentialSnapshot, ExitSnapshot, Tally};

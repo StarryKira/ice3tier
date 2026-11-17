@@ -424,6 +424,7 @@ const UI: Ui = Ui {
     quality_header: ["路", "为什么测", "回答", "丢包 %", "去程 %", "回程 %", "最小 ms", "平均 ms", "P95 ms", "抖动 ms", "代价 ms", "结果"],
     mode_choices: "两种选路模式的选择",
     choices_header: ["方向", "模式", "现在", "默认", "延迟优先"],
+    cheaper_path: |route, ms| format!("；更便宜：{route} {ms} ms"),
     note: "注意",
     direct_capability: "直连",
     already_direct: "已经直连",

@@ -1,5 +1,8 @@
 //! 透明访问在本机的几个命令（只在 Linux 上）：`i3t set intercept` 之后的检查和清理、`i3t intercept status`、`i3t hosts`。
 //!
+//! `/etc/hosts` 里 `i3t hosts --apply` 写的那一段不随透明访问拆掉：那是管理员写进去的文件，只有 `i3t hosts --remove` 去掉它。
+//! 透明访问关着、那一段还在时，`i3t intercept status` 和 `i3t set intercept off` 提醒一句：没有拦截时这些名字指向的地址走默认路由，连不上。
+//!
 //! 装、拆都是运行着的节点做的（`i3t_agent` 的 `intercept` 模块）；这里只读系统里有什么，以及节点没在运行时
 //! 把上次留下的东西拆掉。
 
@@ -10,11 +13,12 @@ use i3t_agent::intercept::names_of;
 use i3t_agent::state::StateDir;
 use i3t_agent::status::LiveStatus;
 use i3t_intercept::machine::Shell;
-use i3t_intercept::names::{hosts_block, replace_hosts_block};
+use i3t_intercept::names::{hosts_block, remove_hosts_block, replace_hosts_block};
 use i3t_intercept::{Capability, CommandError, Program, Survey, TABLE, setup};
 use i3t_lang::table::Fields;
-use i3t_model::control::InterceptCause;
+use i3t_model::control::{InterceptCause, InterceptState};
 
+use crate::HostsAction;
 use crate::texts::texts;
 
 const HOSTS: &str = "/etc/hosts";
@@ -34,21 +38,35 @@ pub(crate) fn after_set(on: bool, running: bool) {
         }
         return;
     }
-    // 节点在运行时由它在停下的时候拆；它停下之后再起来，看到关着也会拆掉留下的。
+    remove_leftover(running);
+    names_left_behind();
+}
+
+/// 节点没在运行时拆掉上次留下的。节点在运行时由它在停下的时候拆；它停下之后再起来，看到关着也会拆掉留下的。
+fn remove_leftover(running: bool) {
     if running || Capability::missing().contains(&Capability::NetAdmin) || Shell::locate(Program::Nft).is_none() {
         return;
     }
     if !Survey::take(&mut Shell).found_any() {
         return;
     }
+    let t = &texts().ui;
     match setup::remove(&mut Shell) {
         Ok(()) => println!("{}", t.intercept_removed),
         Err(_) => println!("{}", t.intercept_remove_failed),
     }
 }
 
+/// `/etc/hosts` 里还有 `i3t hosts --apply` 写的那一段时说一句，指出去掉它的命令。读不了这个文件就不说。
+fn names_left_behind() {
+    if fs::read_to_string(HOSTS).is_ok_and(|hosts| remove_hosts_block(&hosts).is_some()) {
+        println!("{}", (texts().ui.hosts_left)(HOSTS));
+    }
+}
+
 /// `i3t intercept status`：运行着的节点说的状态，和系统里属于透明访问的每一样东西。
-pub(crate) fn status(live: Option<&LiveStatus>) {
+/// `configured` 是配置文件里打开了没有，节点没在运行时按它算透明访问关没关。
+pub(crate) fn status(live: Option<&LiveStatus>, configured: bool) {
     let t = &texts().ui;
     let lang = i3t_lang::current();
     if let Some(report) = live.and_then(|live| live.intercept.as_ref()) {
@@ -82,6 +100,13 @@ pub(crate) fn status(live: Option<&LiveStatus>) {
     if live.is_none() && survey.found_any() {
         println!("{}", t.leftover);
     }
+    let off = match live.and_then(|live| live.intercept.as_ref()) {
+        Some(report) => report.state == InterceptState::Off,
+        None => !configured,
+    };
+    if off {
+        names_left_behind();
+    }
 }
 
 /// 一个命令为什么失败：程序自己的原话；没有这个程序时按代码写。
@@ -94,18 +119,31 @@ fn said(error: &CommandError) -> String {
     }
 }
 
-/// `i3t hosts`：按最后一份 netmap 写出 `/etc/hosts` 的那一段；`apply` 时写进去，只换上次写的那一段。
-pub(crate) fn hosts(state: &StateDir, apply: bool) -> anyhow::Result<()> {
+/// `i3t hosts`：按最后一份 netmap 写出 `/etc/hosts` 的那一段；写进去时只换上次写的那一段，去掉时只去掉那一段，别的字节不动。
+pub(crate) fn hosts(state: &StateDir, action: HostsAction) -> anyhow::Result<()> {
     let t = &texts().ui;
+    let command = if action == HostsAction::Remove { "i3t hosts --remove" } else { "i3t hosts --apply" };
+    let failed = || (t.hosts_write_failed)(HOSTS, command);
+    if action == HostsAction::Remove {
+        let existing = fs::read_to_string(HOSTS).with_context(failed)?;
+        match remove_hosts_block(&existing) {
+            Some(rest) => {
+                fs::write(HOSTS, rest).with_context(failed)?;
+                println!("{}", (t.hosts_removed)(HOSTS));
+            }
+            None => println!("{}", (t.hosts_no_block)(HOSTS)),
+        }
+        return Ok(());
+    }
     let netmap = state.netmap()?.context(t.not_joined)?;
     let names = names_of(&netmap);
     let block = hosts_block(&names);
-    if !apply {
+    if action == HostsAction::Print {
         print!("{block}");
         return Ok(());
     }
-    let existing = fs::read_to_string(HOSTS).with_context(|| (t.hosts_write_failed)(HOSTS))?;
-    fs::write(HOSTS, replace_hosts_block(&existing, &block)).with_context(|| (t.hosts_write_failed)(HOSTS))?;
+    let existing = fs::read_to_string(HOSTS).with_context(failed)?;
+    fs::write(HOSTS, replace_hosts_block(&existing, &block)).with_context(failed)?;
     println!("{}", (t.hosts_written)(names.len(), HOSTS));
     Ok(())
 }

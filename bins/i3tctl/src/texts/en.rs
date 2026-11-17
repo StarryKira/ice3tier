@@ -235,7 +235,7 @@ const UI: Ui = Ui {
     no_exits: "No exits yet",
     health: "Health",
     recent: "Last 5 minutes",
-    recent_requests: |requests, failures| format!("{requests} requests, {failures} exit failures"),
+    recent_requests: |requests, failures| format!("requests {requests}, exit failures {failures}"),
     ports: "Ports",
     lan: "LAN",
     bandwidth: "Bandwidth limit",
@@ -249,7 +249,7 @@ const UI: Ui = Ui {
     quota: "Traffic quota",
     seen_by: |name| format!("Seen by {name}"),
     exit_seen: |flows, target, refused, exit, unreachable| {
-        format!("{flows} flows, target failures {target}, refused {refused}, exit failures {exit}, exit unreachable {unreachable}")
+        format!("flows {flows}, target failures {target}, refused {refused}, exit failures {exit}, exit unreachable {unreachable}")
     },
 
     networks_header: ["ID", "NAME", "RANGE", "NODES", "ROUTING", "RESTRICTION", "MAX-HOPS"],
@@ -285,7 +285,7 @@ const UI: Ui = Ui {
     pinned: "Pinned relays",
     profile: "Profile",
     intercept: "Transparent access",
-    intercept_active: |active, traffic| format!("{active} connections, {traffic}"),
+    intercept_active: |active, traffic| format!("connections {active}, {traffic}"),
     profile_local: "node's own",
     profile_running: |profile, threads| format!("running {profile}, worker threads: {threads}"),
     restart_pending: "fully applies after a restart",
@@ -437,14 +437,15 @@ const UI: Ui = Ui {
     ],
     mode_choices: "Choices of the two routing modes",
     choices_header: ["DIRECTION", "MODE", "CURRENT", "DEFAULT", "LOWEST-LATENCY"],
+    cheaper_path: |route, ms| format!("; cheaper: {route} {ms} ms"),
     note: "Note",
     direct_capability: "Direct",
     already_direct: "already direct",
     reason: "Reason",
     connected: "connected",
     not_connected: "not connected",
-    direct_side: |connected, udp, candidates| format!("{connected}, UDP {udp}, {candidates} candidate addresses"),
-    other_way_back: |other, answered| format!("{other} of {answered} answers came back on the peer's own route"),
+    direct_side: |connected, udp, candidates| format!("{connected}, UDP {udp}, candidate addresses {candidates}"),
+    other_way_back: |other, answered| format!("Answers that came back on the peer's own route: {other} of {answered}"),
     throughput_title: "Throughput",
     throughput_header: ["ROUTE", "UP-MBIT/S", "UP", "UP-MS", "DOWN-MBIT/S", "DOWN", "DOWN-MS", "PINNED", "RESULT"],
     throughput_note: |transport, congestion, bytes, ms| {
@@ -453,7 +454,7 @@ const UI: Ui = Ui {
     tests_header: ["ID", "A", "B", "STATE", "STARTED", "DIRECT", "AVG-MS", "ITEMS"],
     no_tests: "No tests",
     matrix: "Test matrix",
-    matrix_progress: |finished, total, concurrency| format!("{finished}/{total} pairs, {concurrency} at a time"),
+    matrix_progress: |finished, total, concurrency| format!("pairs {finished}/{total}, {concurrency} at a time"),
     cells_header: ["PAIR", "TEST", "DIRECT", "DIRECT-MS", "ROUTE", "AVG-MS", "LOSS-%", "RESULT"],
 
     no_token: "No admin token: use --token or I3T_ADMIN_TOKEN",
@@ -557,7 +558,7 @@ fn log(entry: &LogEntry) -> Option<String> {
         "node.exit.enable" => format!("Exit enabled on {}", node()),
         "node.exit.disable" => format!("Exit disabled on {}", node()),
         "node.exit.withdrawn" => format!("{} withdrew its declaration; exit disabled", node()),
-        "node.forward.withdrawn" => format!("{} withdrew its declaration; {} port forwards disabled", node(), p.text("forwards")),
+        "node.forward.withdrawn" => format!("{} withdrew its declaration; port forwards disabled: {}", node(), p.text("forwards")),
         "token.create" => format!("Enrollment token #{} created ({}…)", p.text("token"), p.text("prefix")),
         "token.delete" => format!("Enrollment token #{} deleted", p.text("token")),
         "rule.create" => format!("Rule #{} created: {} {} {}", p.text("rule"), src(), arrow(), dst()),
@@ -613,7 +614,7 @@ fn log(entry: &LogEntry) -> Option<String> {
         "update.force_all" => format!("Update all nodes {}: {}", timing(), p.text("nodes")),
         "test.start" => format!("Active test #{}: {} → {}", p.text("test"), p.thing("a_name", "a"), p.thing("b_name", "b")),
         "test.cancel" => format!("Active test #{} cancelled", p.text("test")),
-        "test.matrix" => format!("Test matrix #{} started: {} pairs", p.text("matrix"), p.text("pairs")),
+        "test.matrix" => format!("Test matrix #{} started (pairs: {})", p.text("matrix"), p.text("pairs")),
         "test.matrix.cancel" => "Test matrix cancelled".to_owned(),
         _ => return None,
     })

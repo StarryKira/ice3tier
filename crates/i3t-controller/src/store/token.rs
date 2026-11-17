@@ -38,7 +38,8 @@ pub fn is_pending(token: &TokenRecord, now: Timestamp) -> bool {
 
 /// 读令牌时顺带取出用它加入的节点（没有用过或者那个节点后来被删掉时没有），和它预设的分组（JSON 数组）。
 const SELECT: &str = "SELECT enroll_tokens.*, nodes.name AS used_by_name, nodes.virtual_ip AS used_by_ip,
-                             (SELECT json_group_array(json_object('id', groups.id, 'name', groups.name))
+                             (SELECT json_group_array(json_object('id', groups.id, 'name', groups.name,
+                                                                  'builtin', json(CASE WHEN groups.builtin THEN 'true' ELSE 'false' END)))
                               FROM token_groups JOIN groups ON groups.id = token_groups.group_id
                               WHERE token_groups.token_id = enroll_tokens.id) AS groups
                       FROM enroll_tokens LEFT JOIN nodes ON nodes.id = enroll_tokens.used_by";
@@ -198,7 +199,7 @@ mod tests {
         let id = store.insert_token(&new).unwrap();
         let record = store.token_by_hash(&[9; DIGEST_LEN]).unwrap().unwrap();
         assert_eq!(record.id, id);
-        assert_eq!(record.groups, vec![GroupRef { id: servers, name: "servers".to_owned() }]);
+        assert_eq!(record.groups, vec![GroupRef { id: servers, name: "servers".to_owned(), builtin: false }]);
         store.delete_group(servers).unwrap();
         assert!(store.token(id).unwrap().unwrap().groups.is_empty(), "删掉的分组也从令牌上去掉");
         let record = store.token(id).unwrap().unwrap();

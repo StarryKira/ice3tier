@@ -5,6 +5,9 @@
 //! - 启动时：配置里打开了就装；没打开、但上次（崩溃、被杀掉）留下了东西，有权限的话把它拆掉。
 //! - netmap 变了：能访问的对端变了只换内核里的那个集合；本节点的虚拟 IP、网络的地址段或者域名变了就整个重装。
 //! - 停下时全部拆掉。进程被杀掉来不及拆的，下次启动时被认出来、换掉。
+//! - 装着的时候每隔 5 秒再查一次网络的地址段和这台机器所在的真实网络重不重叠（后来才有的地址和路由：
+//!   DHCP 换了地址、VPN 连上）。重叠了就当场全部拆掉，状态是 `failed`、`range_in_use`；因为重叠没装（或者拆掉）的，
+//!   照样隔这么久查一次，重叠没了就再装上。查不清的那一次（`ip` 读不出来）什么也不改：装着的照旧装着，没装的照旧不装。
 //!
 //! 装不上不影响节点别的功能：上报里说清楚原因（[`InterceptState::Failed`]），代理和端口转发照常。
 //! 系统命令是阻塞的，放在阻塞线程里执行：低占用档位的运行时只有一个工作线程，不能让它等。
@@ -93,6 +96,7 @@ mod platform {
     use std::io;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::Arc;
+    use std::time::Duration;
 
     use i3t_access::Diversion;
     use i3t_exit::{Os, Outbound};
@@ -108,6 +112,10 @@ mod platform {
     use tokio::task::JoinHandle;
 
     use crate::runtime::NodeAccess;
+
+    /// 透明访问装着（或者因为地址段重叠没装）的时候，隔多久再查一次重叠。每次是两个 `ip` 命令，几毫秒的 CPU；
+    /// 机器后来进了一个重叠的网络时，最多这么久它就不再被切断。
+    const RANGE_RECHECK: Duration = Duration::from_secs(5);
 
     pub(super) fn start(
         enabled: bool,
@@ -151,9 +159,11 @@ mod platform {
         }
     }
 
-    /// 装上、跟着 netmap 改、收到停止就拆掉。
+    /// 装上、跟着 netmap 改、隔一阵再查地址段的重叠、收到停止就拆掉。
     async fn supervise(parts: Parts, state: watch::Sender<InterceptState>, mut stop: oneshot::Receiver<()>) {
         let mut netmap = parts.netmap.clone();
+        let mut recheck = tokio::time::interval_at(tokio::time::Instant::now() + RANGE_RECHECK, RANGE_RECHECK);
+        recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             let current = Arc::clone(&netmap.borrow_and_update());
             let mut session = match Session::open(&parts, &current).await {
@@ -169,6 +179,9 @@ mod platform {
                 }
             };
             let reinstall = loop {
+                // 装着的要查会不会被切断；因为重叠没装的要查重叠还在不在。别的原因（权限、程序、别人占着的网卡）不会自己没了。
+                let watching =
+                    session.is_some() || matches!(*state.borrow(), InterceptState::Failed { cause: InterceptCause::RangeInUse { .. } });
                 tokio::select! {
                     _ = &mut stop => break false,
                     changed = netmap.changed() => {
@@ -176,11 +189,38 @@ mod platform {
                             break false;
                         }
                         let next = Arc::clone(&netmap.borrow_and_update());
-                        // 装不上的原因（权限、程序、别人占着的网卡）不会因为 netmap 变了就没了，要重启节点再试。
                         if let Some(session) = session.as_mut()
                             && !session.follow(&next).await
                         {
                             break true;
+                        }
+                    }
+                    _ = recheck.tick(), if watching => {
+                        let cidr = netmap.borrow().network.cidr;
+                        match blocking(move |shell| setup::overlapping(shell, cidr)).await {
+                            Ok(Some(with)) => {
+                                if let Some(installed) = session.take() {
+                                    tracing::warn!(
+                                        %with,
+                                        "网络的地址段和本机后来进的一个网络重叠了，透明访问当场拆掉，免得把这台机器从那个网络上切下来；重叠没了再装上"
+                                    );
+                                    installed.close().await;
+                                }
+                                let failed = InterceptState::Failed { cause: InterceptCause::RangeInUse { with } };
+                                state.send_if_modified(|current| {
+                                    if *current == failed {
+                                        return false;
+                                    }
+                                    *current = failed;
+                                    true
+                                });
+                            }
+                            Ok(None) if session.is_none() => {
+                                tracing::info!("和网络地址段重叠的网络没了，透明访问再装上");
+                                break true;
+                            }
+                            Ok(None) => {}
+                            Err(error) => tracing::debug!(%error, "查不清地址段和本机的网络重不重叠，这一次什么也不改"),
                         }
                     }
                 }
@@ -192,7 +232,6 @@ mod platform {
                 state.send_replace(InterceptState::Off);
                 return;
             }
-            tracing::info!("本节点的虚拟 IP、网络的地址段或者域名变了，透明访问整个重装");
         }
     }
 
@@ -255,6 +294,7 @@ mod platform {
         async fn follow(&mut self, netmap: &Netmap) -> bool {
             let next = plan_of(netmap);
             if next.own != self.plan.own || next.cidr != self.plan.cidr || !netmap.network.domain.eq_ignore_ascii_case(&self.domain) {
+                tracing::info!("本节点的虚拟 IP、网络的地址段或者域名变了，透明访问整个重装");
                 return false;
             }
             if next.peers == self.plan.peers {

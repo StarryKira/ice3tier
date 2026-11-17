@@ -89,6 +89,8 @@ enum Command {
     Hosts {
         #[arg(long)]
         apply: bool,
+        #[arg(long, conflicts_with = "apply")]
+        remove: bool,
     },
     SelfCheck,
 }
@@ -96,6 +98,14 @@ enum Command {
 #[derive(Subcommand)]
 enum InterceptCommand {
     Status,
+}
+
+/// `i3t hosts` 做什么：打印那一段、写进 `/etc/hosts`（`--apply`）、从里面去掉（`--remove`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostsAction {
+    Print,
+    Apply,
+    Remove,
 }
 
 /// `i3t set` 的设置项。解析的错误由节点的文字目录按语言写。
@@ -132,7 +142,9 @@ fn command(lang: Lang) -> clap::Command {
         })
         .mut_subcommand("tune", |sub| sub.about(h.tune).mut_arg("apply", |arg| arg.help(h.tune_apply)))
         .mut_subcommand("intercept", |sub| sub.about(h.intercept).mut_subcommand("status", |sub| sub.about(h.intercept_status)))
-        .mut_subcommand("hosts", |sub| sub.about(h.hosts).mut_arg("apply", |arg| arg.help(h.hosts_apply)))
+        .mut_subcommand("hosts", |sub| {
+            sub.about(h.hosts).mut_arg("apply", |arg| arg.help(h.hosts_apply)).mut_arg("remove", |arg| arg.help(h.hosts_remove))
+        })
         .mut_subcommand("self-check", |sub| sub.about(h.self_check))
 }
 
@@ -239,9 +251,18 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
         Command::Intercept { command: InterceptCommand::Status } => {
             let live = current_thread()?.block_on(local::query(&state))?;
-            intercept_status(live.as_ref())?;
+            // 读不了配置文件只是少一句提示。
+            let configured = Config::load(&state.config_path()).is_ok_and(|config| config.intercept.enabled);
+            intercept_status(live.as_ref(), configured)?;
         }
-        Command::Hosts { apply } => hosts(&state, apply)?,
+        Command::Hosts { apply, remove } => {
+            let action = match (apply, remove) {
+                (true, _) => HostsAction::Apply,
+                (false, true) => HostsAction::Remove,
+                (false, false) => HostsAction::Print,
+            };
+            hosts(&state, action)?;
+        }
         Command::SelfCheck => {
             // 不初始化日志：调用它的旧程序把标准错误的最后一段当作失败的原因报给 controller，那里只该有原因本身。
             if let Err(failure) = current_thread()?.block_on(selfcheck::self_check(&state, &version)) {
@@ -284,23 +305,23 @@ fn after_intercept_set(on: bool, running: bool) {
 fn after_intercept_set(_on: bool, _running: bool) {}
 
 #[cfg(target_os = "linux")]
-fn intercept_status(live: Option<&i3t_agent::status::LiveStatus>) -> anyhow::Result<()> {
-    intercept::status(live);
+fn intercept_status(live: Option<&i3t_agent::status::LiveStatus>, configured: bool) -> anyhow::Result<()> {
+    intercept::status(live, configured);
     Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
-fn intercept_status(_live: Option<&i3t_agent::status::LiveStatus>) -> anyhow::Result<()> {
+fn intercept_status(_live: Option<&i3t_agent::status::LiveStatus>, _configured: bool) -> anyhow::Result<()> {
     bail!(texts().ui.intercept_linux_only)
 }
 
 #[cfg(target_os = "linux")]
-fn hosts(state: &StateDir, apply: bool) -> anyhow::Result<()> {
-    intercept::hosts(state, apply)
+fn hosts(state: &StateDir, action: HostsAction) -> anyhow::Result<()> {
+    intercept::hosts(state, action)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn hosts(_state: &StateDir, _apply: bool) -> anyhow::Result<()> {
+fn hosts(_state: &StateDir, _action: HostsAction) -> anyhow::Result<()> {
     bail!(texts().ui.intercept_linux_only)
 }
 
@@ -458,7 +479,9 @@ mod tests {
             parse(&["i3t", "intercept", "status"]).unwrap().command,
             Command::Intercept { command: InterceptCommand::Status }
         ));
-        assert!(matches!(parse(&["i3t", "hosts", "--apply"]).unwrap().command, Command::Hosts { apply: true }));
+        assert!(matches!(parse(&["i3t", "hosts", "--apply"]).unwrap().command, Command::Hosts { apply: true, remove: false }));
+        assert!(matches!(parse(&["i3t", "hosts", "--remove"]).unwrap().command, Command::Hosts { apply: false, remove: true }));
+        assert!(parse(&["i3t", "hosts", "--apply", "--remove"]).is_err(), "写进去和去掉只能选一个");
     }
 
     #[cfg(unix)]

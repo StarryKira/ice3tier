@@ -512,6 +512,23 @@ pub struct ModeChoice {
     pub reason: ChoiceReason,
     /// 这条路的代价，毫秒；候选里没有它（没有测量值）时是 `None`。
     pub cost_ms: Option<f64>,
+    /// [`ChoiceReason::WithinMargin`] 时：比选的这条（现在的路）便宜、却没有便宜到要换的那条候选。别的时候是 `None`。
+    pub cheaper: Option<CheaperPath>,
+}
+
+impl ModeChoice {
+    /// 没有能走的路。
+    pub(crate) fn none() -> Self {
+        Self { route: Route::None, reason: ChoiceReason::NoPath, cost_ms: None, cheaper: None }
+    }
+}
+
+/// 更便宜、但不够换过去的一条候选路径。
+#[derive(Debug, Clone, PartialEq)]
+pub struct CheaperPath {
+    pub route: Route,
+    /// 毫秒。
+    pub cost_ms: f64,
 }
 
 /// 为什么选这条路。
@@ -529,6 +546,8 @@ pub enum ChoiceReason {
     PeerRelay,
     /// 延迟优先：候选里代价最低的。
     LowestCost,
+    /// 延迟优先：留在现在的路上。有更便宜的候选，但没有便宜到选路器换路要的差距（`max(5ms, 10%)`）。
+    WithinMargin,
     /// 没有能走的路。
     NoPath,
 }

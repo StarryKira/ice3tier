@@ -395,6 +395,18 @@ pub struct Choice {
     /// 这条路的代价，微秒；没有测量值时是 `null`。
     #[serde(default)]
     pub cost_us: Option<u64>,
+    /// `reason` 是 [`ChoiceCode::WithinMargin`] 时：比选的这条（现在的路）便宜、却没有便宜到要换的那条候选。别的时候，
+    /// 和不报它的旧节点，是 `null`。
+    #[serde(default)]
+    pub cheaper: Option<CheaperPath>,
+}
+
+/// 更便宜、但不够换过去的一条候选路径。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheaperPath {
+    pub route: Route,
+    /// 微秒。
+    pub cost_us: u64,
 }
 
 /// 为什么选这条路。
@@ -413,6 +425,8 @@ pub enum ChoiceCode {
     PeerRelay,
     /// 候选里代价最低的。
     LowestCost,
+    /// 延迟优先：留在现在的路上。有更便宜的候选（`cheaper`），但没有便宜到选路器换路要的差距（`max(5ms, 10%)`）。
+    WithinMargin,
     /// 没有能走的路。
     NoPath,
     #[serde(other)]
@@ -500,6 +514,24 @@ mod tests {
         assert_eq!(wire["throughput"]["up"]["stopped_by"], "bytes");
         assert_eq!(wire["throughput"]["failure"], "throughput_off");
         assert_eq!(serde_json::from_value::<PathMeasure>(wire).unwrap(), path);
+    }
+
+    #[test]
+    fn a_choice_that_stays_within_the_margin_names_the_cheaper_path_and_old_reports_still_read() {
+        let choice = Choice {
+            route: Some(Route::Direct { addr: "203.0.113.7:20330".parse().unwrap() }),
+            reason: ChoiceCode::WithinMargin,
+            cost_us: Some(74_300),
+            cheaper: Some(CheaperPath { route: Route::Relay { relays: vec![node(3)] }, cost_us: 74_100 }),
+        };
+        let wire = serde_json::to_value(&choice).unwrap();
+        assert_eq!(wire["reason"], "within_margin");
+        assert_eq!(wire["cheaper"], serde_json::json!({ "route": { "via": "relay", "relays": [3] }, "cost_us": 74_100 }));
+        assert_eq!(serde_json::from_value::<Choice>(wire).unwrap(), choice);
+        let old: Choice = serde_json::from_value(serde_json::json!({ "route": null, "reason": "no_path", "cost_us": null })).unwrap();
+        assert_eq!((old.reason, old.cheaper), (ChoiceCode::NoPath, None));
+        let newer: Choice = serde_json::from_value(serde_json::json!({ "reason": "something_new" })).unwrap();
+        assert_eq!(newer.reason, ChoiceCode::Unknown);
     }
 
     #[test]

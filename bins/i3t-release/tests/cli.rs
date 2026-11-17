@@ -11,8 +11,13 @@ use i3t_model::update::{MANIFEST_FILE, Manifest, Platform, SIGNATURE_FILE, Signe
 use i3t_proto::PublicKey;
 use i3t_update::{FileDigest, ManifestError, TrustedKeys};
 
+/// 跑一次工具。文字跟着系统的语言，这里的断言按中文写，所以固定成中文；英文的见 `the_english_texts_follow_the_language`。
 fn tool(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_i3t-release")).args(args).output().unwrap()
+    tool_in("zh-CN", args)
+}
+
+fn tool_in(lang: &str, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_i3t-release")).env("I3T_LANG", lang).args(args).output().unwrap()
 }
 
 fn stdout(output: &Output) -> String {
@@ -137,6 +142,18 @@ fn a_fresh_release_verifies() {
     let report = stdout(&output);
     assert!(report.contains("版本 0.3.0（正式版）"), "{report}");
     assert_eq!(report.matches("通过").count(), 3, "{report}");
+}
+
+#[test]
+fn the_english_texts_follow_the_language() {
+    let release = Release::signed("0.3.0");
+    fs::remove_file(release.dir.join("i3t-windows-x86_64.exe")).unwrap();
+    let output = tool_in("en", &["verify", "--dir", text(&release.dir), "--key", &release.public_key]);
+    let (report, error) = (stdout(&output), stderr(&output));
+    assert!(report.contains("Version 0.3.0 (release)") && report.matches("  ok  ").count() == 2, "{report}");
+    assert!(report.contains("mismatch  windows-x86_64") && error.contains("don't match the manifest: 1"), "{report}{error}");
+    let help = stdout(&tool_in("en", &["manifest", "--help"]));
+    assert!(help.contains("Release directory") && !help.contains("发布"), "{help}");
 }
 
 #[test]

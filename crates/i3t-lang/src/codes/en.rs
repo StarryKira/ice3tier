@@ -76,12 +76,12 @@ fn route_cause(cause: &RouteCause, names: Names<'_>) -> String {
         RouteCause::Unreachable { hint } => route_hint(*hint).to_owned(),
         RouteCause::PeerRemoved => "Peer no longer in this node's configuration".to_owned(),
         RouteCause::Lan => "Same LAN, direct first".to_owned(),
-        RouteCause::LowestCost { candidates, cost_us } => format!("Lowest cost of {candidates} candidates{}", cost(*cost_us)),
+        RouteCause::LowestCost { candidates, cost_us } => format!("Lowest cost (candidates {candidates}){}", cost(*cost_us)),
         RouteCause::Failover { hint, candidates, cost_us } => {
-            format!("{}, switched at once to the lowest cost of {candidates} candidates{}", route_hint(*hint), cost(*cost_us))
+            format!("{}, switched at once to the lowest cost (candidates {candidates}){}", route_hint(*hint), cost(*cost_us))
         }
         RouteCause::Cheaper { previous, previous_cost_us, cost_us, windows } => format!(
-            "Cheaper than {} for {windows} windows: {} ms, was {} ms",
+            "Cheaper than {} (windows in a row: {windows}): {} ms, was {} ms",
             route(previous, names),
             cost_ms(*cost_us),
             cost_ms(*previous_cost_us)
@@ -166,7 +166,7 @@ const fn bind_cause(cause: BindCause) -> &'static str {
 fn update_status(status: &UpdateStatus) -> String {
     match status {
         UpdateStatus::Idle => "Not updating".to_owned(),
-        UpdateStatus::Downloading { version, received, total } => format!("Downloading {version} ({received}/{total} bytes)"),
+        UpdateStatus::Downloading { version, received, total } => format!("Downloading {version} ({received}/{total} B)"),
         UpdateStatus::Verifying { version } => format!("Verifying {version}"),
         UpdateStatus::SelfCheck { version } => format!("Self-checking {version}"),
         UpdateStatus::WaitingForIdle { version } => format!("{version} ready, waiting for idle"),
@@ -199,7 +199,7 @@ fn update_cause(cause: &UpdateCause) -> String {
         UpdateCause::RestartPending { installed } => format!("{installed} installed, restart pending"),
         UpdateCause::Unavailable { detail } => format!("Package unavailable: {detail}"),
         UpdateCause::Corrupt { expected_size, actual_size } => {
-            format!("Package doesn't match the manifest ({actual_size} bytes, expected {expected_size})")
+            format!("Package doesn't match the manifest ({actual_size} B, expected {expected_size} B)")
         }
         UpdateCause::SelfCheck { exit_code: Some(code), output } => format!("Self-check failed (exit code {code}): {output}"),
         UpdateCause::SelfCheck { exit_code: None, output } => format!("Self-check failed: {output}"),
@@ -207,7 +207,7 @@ fn update_cause(cause: &UpdateCause) -> String {
         UpdateCause::Io { path, error } => format!("Couldn't read or write {path}: {error}"),
         UpdateCause::StateUnreadable { path } => format!("Update state file {path} unreadable"),
         UpdateCause::NotConfirmed { minutes } => format!("New program didn't reach the controller in {minutes} min, rolled back"),
-        UpdateCause::StartsUnconfirmed { starts } => format!("New program didn't reach the controller in {starts} starts, rolled back"),
+        UpdateCause::StartsUnconfirmed { starts } => format!("New program didn't reach the controller (starts: {starts}), rolled back"),
         UpdateCause::Unknown => "Unknown reason".to_owned(),
     }
 }
@@ -239,7 +239,7 @@ fn release_cause(cause: &ReleaseCause) -> String {
         ReleaseCause::Prerelease { version } => format!("Latest {version} is a pre-release; skipped"),
         ReleaseCause::BadFileName { file } => format!("Bad file name: {file}"),
         ReleaseCause::Mismatch { file, expected_size, actual_size } => {
-            format!("{file} doesn't match the manifest ({actual_size} bytes, expected {expected_size})")
+            format!("{file} doesn't match the manifest ({actual_size} B, expected {expected_size} B)")
         }
         ReleaseCause::Internal => "Controller internal error".to_owned(),
         ReleaseCause::Unknown => "Unknown reason".to_owned(),
@@ -531,6 +531,7 @@ const fn choice(code: ChoiceCode) -> &'static str {
         ChoiceCode::OwnRelay => "peer attached here",
         ChoiceCode::PeerRelay => "peer's relay",
         ChoiceCode::LowestCost => "lowest cost",
+        ChoiceCode::WithinMargin => "stays: not cheaper by the switch margin",
         ChoiceCode::NoPath => "no route",
         ChoiceCode::Unknown => "unknown",
     }

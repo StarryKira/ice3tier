@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use i3t_access::{Access, AccessStatus, EgressPolicy, ListenState, LocalEgress, PortBook};
+use i3t_access::{Access, AccessStatus, EgressPolicy, ListenCause, ListenState, LocalEgress, PortBook};
 use i3t_conn::{RecvStream, SendStream};
 use i3t_flow::memory::{MemoryAcceptor, MemoryConnector, MemoryMesh};
 use i3t_flow::{Handler, Request};
@@ -462,7 +462,7 @@ async fn forwards_that_take_no_socket_are_reported_as_such() {
     assert!(matches!(status.forwards[3].state, ListenState::Listening { .. }), "UDP 的端口转发和 TCP 的一样监听");
     assert_eq!(status.forwards[4].state, ListenState::Virtual, "目标是别的节点的 UDP 转发也由出口接力");
     assert!(
-        matches!(&status.forwards[5].state, ListenState::Unsupported { reason } if reason.contains("端口")),
+        matches!(&status.forwards[5].state, ListenState::Unsupported { reason, cause: ListenCause::VirtualPortZero } if reason.contains("端口")),
         "{:?}",
         status.forwards[5].state
     );
@@ -695,6 +695,20 @@ async fn a_port_already_taken_by_another_program_is_reported_as_in_use() {
     assert!(matches!(&status.forwards[0].state, ListenState::PortInUse { reason } if !reason.is_empty()), "{:?}", status.forwards[0].state);
     assert!(matches!(&status.listeners[0].state, ListenState::PortInUse { .. }), "{:?}", status.listeners[0].state);
     drop(squatter);
+}
+
+#[tokio::test]
+async fn an_address_not_on_this_machine_is_reported_with_its_kind() {
+    let mut map = netmap();
+    // 192.0.2.0/24 是文档用的地址段，不会在测试机的网卡上。
+    map.me.listeners = vec![listener("socks", ListenerProtocol::Socks5, "192.0.2.1:1080")];
+    let world = World::start(map).await;
+    let status = world.settled().await;
+    assert!(
+        matches!(&status.listeners[0].state, ListenState::Failed { reason, cause: ListenCause::AddressNotAvailable } if !reason.is_empty()),
+        "{:?}",
+        status.listeners[0].state
+    );
 }
 
 i3t_lane::on_both_transports! {

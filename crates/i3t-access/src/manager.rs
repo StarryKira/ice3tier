@@ -219,9 +219,9 @@ impl<C: Connector + Datagrams, E: LocalEgress> Access<C, E> {
                             tracing::info!(listen = %key, "这条端口转发监听在本节点的虚拟 IP 上，不占用操作系统的端口");
                             (ListenState::Virtual, None)
                         }
-                        Plan::Unsupported(reason) => {
+                        Plan::Unsupported { reason, cause } => {
                             tracing::warn!(listen = %key, reason, "这条端口转发不能用");
-                            (ListenState::Unsupported { reason: reason.to_owned() }, None)
+                            (ListenState::Unsupported { reason: reason.to_owned(), cause }, None)
                         }
                     };
                     kept.push(Bound { key, state, counters, task });
@@ -285,10 +285,9 @@ impl<C: Connector + Datagrams, E: LocalEgress> Access<C, E> {
                 if previous_failure != Some(reason.as_str()) {
                     tracing::warn!(listen = %key, %bind, %reason, "绑定失败，这个监听处于失败状态，之后会重试");
                 }
-                let state = if error.kind() == io::ErrorKind::AddrInUse {
-                    ListenState::PortInUse { reason }
-                } else {
-                    ListenState::Failed { reason }
+                let state = match ListenCause::from(error.kind()) {
+                    ListenCause::AddressInUse => ListenState::PortInUse { reason },
+                    cause => ListenState::Failed { reason, cause },
                 };
                 (state, None)
             }
@@ -335,22 +334,50 @@ pub struct ForwardStatus {
 pub enum ListenState {
     /// 正在监听。`local` 是实际绑定的地址：配置里端口写 0 时，这里是挑定的端口。
     Listening { local: SocketAddr },
-    /// 端口已经被别的程序占用。不去抢，每隔一段时间和每次 netmap 变化时重试。
+    /// 端口已经被别的程序占用（原因的种类就是 [`ListenCause::AddressInUse`]）。不去抢，每隔一段时间和每次 netmap 变化时重试。
     PortInUse { reason: String },
-    /// 别的原因没有绑上，`reason` 是系统给的原因。同样会重试。
-    Failed { reason: String },
+    /// 别的原因没有绑上，`reason` 是系统给的原话，`cause` 是它的种类。同样会重试。
+    Failed { reason: String, cause: ListenCause },
     /// 监听在本节点的虚拟 IP 上的端口转发：不占用操作系统的端口，由出口模块在别的节点访问这个端口时接住。
     Virtual,
-    /// 这种配置节点不支持，`reason` 说明为什么。不重试，配置改了才重新判断。
-    Unsupported { reason: String },
+    /// 这种配置节点不支持，`reason` 说明为什么，`cause` 是哪一种。不重试，配置改了才重新判断。
+    Unsupported { reason: String, cause: ListenCause },
 }
 
 impl ListenState {
     /// 绑定失败（会重试）时的原因。
     fn failure(&self) -> Option<&str> {
         match self {
-            Self::PortInUse { reason } | Self::Failed { reason } => Some(reason),
+            Self::PortInUse { reason } | Self::Failed { reason, .. } => Some(reason),
             Self::Listening { .. } | Self::Virtual | Self::Unsupported { .. } => None,
+        }
+    }
+}
+
+/// 一个监听没有开起来的原因是哪一种，和 [`ListenState`] 里给人看的那句话放在一起：上层按它归类，不用去读那句话。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ListenCause {
+    /// 端口被别的程序占着。
+    AddressInUse,
+    /// 没有权限（比如普通用户绑 1024 以下的端口）。
+    PermissionDenied,
+    /// 地址不在这台机器上。
+    AddressNotAvailable,
+    /// 别的系统错误，见那句话。
+    Other,
+    /// 不是系统的错误：监听在本节点虚拟 IP 上的端口转发没有写端口号。
+    VirtualPortZero,
+}
+
+/// 绑定失败时系统错误的种类。
+impl From<io::ErrorKind> for ListenCause {
+    fn from(kind: io::ErrorKind) -> Self {
+        match kind {
+            io::ErrorKind::AddrInUse => Self::AddressInUse,
+            io::ErrorKind::PermissionDenied => Self::PermissionDenied,
+            io::ErrorKind::AddrNotAvailable => Self::AddressNotAvailable,
+            _ => Self::Other,
         }
     }
 }
@@ -420,7 +447,7 @@ impl std::fmt::Display for Key {
 enum Plan {
     Bind,
     Virtual,
-    Unsupported(&'static str),
+    Unsupported { reason: &'static str, cause: ListenCause },
 }
 
 fn wanted(netmap: &Netmap) -> Vec<(Key, Plan)> {
@@ -433,7 +460,9 @@ fn wanted(netmap: &Netmap) -> Vec<(Key, Plan)> {
         let plan = if forward.bind.ip() != netmap.me.virtual_ip {
             Plan::Bind
         } else if forward.bind.port() == 0 {
-            Plan::Unsupported("监听在虚拟 IP 上的端口转发不占操作系统的端口，要写明端口号")
+            Plan::Unsupported {
+                reason: "监听在虚拟 IP 上的端口转发不占操作系统的端口，要写明端口号", cause: ListenCause::VirtualPortZero
+            }
         } else {
             Plan::Virtual
         };
@@ -563,6 +592,18 @@ pub(crate) fn allowed(allow_from: &[IpNet], from: SocketAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bind_failure_carries_the_kind_of_the_system_error() {
+        // 真的去绑绑不上的地址：错误的种类是这个平台给的。
+        let elsewhere = std::net::TcpListener::bind("192.0.2.1:0").unwrap_err();
+        assert_eq!(ListenCause::from(elsewhere.kind()), ListenCause::AddressNotAvailable, "{elsewhere}");
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let again = std::net::TcpListener::bind(taken.local_addr().unwrap()).unwrap_err();
+        assert_eq!(ListenCause::from(again.kind()), ListenCause::AddressInUse, "{again}");
+        assert_eq!(ListenCause::from(io::ErrorKind::PermissionDenied), ListenCause::PermissionDenied);
+        assert_eq!(ListenCause::from(io::ErrorKind::InvalidInput), ListenCause::Other);
+    }
 
     #[test]
     fn an_empty_allow_list_admits_everyone_and_a_filled_one_only_its_networks() {

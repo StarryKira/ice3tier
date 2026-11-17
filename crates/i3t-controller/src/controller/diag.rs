@@ -556,6 +556,7 @@ mod tests {
             route: Some(Route::Direct { addr: "203.0.113.7:20330".parse().unwrap() }),
             reason: ChoiceCode::Direct,
             cost_us: Some(12_000),
+            cheaper: None,
         };
         Decision { mode: None, current: None, direct_first: choice.clone(), lowest_cost: choice, candidates: Vec::new() }
     }

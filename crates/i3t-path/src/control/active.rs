@@ -12,12 +12,12 @@ use tokio::sync::oneshot;
 use super::route::{RouteKey, View};
 use super::{Attempt, Control, PeerState};
 use crate::diag::{
-    Admission, ChoiceReason, DirectAttempt, DirectFailure, HopReport, HopSource, MAX_PIN, ModeChoice, Pin, RouteDecision, Side, TestPath,
-    TestSpec, TrainError, TrainReport, TrainRun, TrainSpec, Window,
+    Admission, CheaperPath, ChoiceReason, DirectAttempt, DirectFailure, HopReport, HopSource, MAX_PIN, ModeChoice, Pin, RouteDecision,
+    Side, TestPath, TestSpec, TrainError, TrainReport, TrainRun, TrainSpec, Window,
 };
 use crate::relays::Leg;
 use crate::report::{CandidateReport, RelayLeg};
-use crate::routing::{Candidate, PathId};
+use crate::routing::{self, Candidate, PathId};
 use crate::table::{Hop, send_frame_via};
 
 impl Control {
@@ -379,7 +379,7 @@ impl Control {
         let direct_first = match view.direct_first(id, peer) {
             Some(path @ PathId::Direct(_)) => {
                 let reason = if peer.direct.is_lan_active() { ChoiceReason::Lan } else { ChoiceReason::Direct };
-                ModeChoice { route: route_of(path), reason, cost_ms: cost_of(path) }
+                ModeChoice { route: route_of(path), reason, cost_ms: cost_of(path), cheaper: None }
             }
             Some(path @ PathId::Relays(relays)) => {
                 let reason = match relays.first() {
@@ -387,18 +387,12 @@ impl Control {
                     first if first == me => ChoiceReason::OwnRelay,
                     _ => ChoiceReason::PeerRelay,
                 };
-                ModeChoice { route: route_of(path), reason, cost_ms: cost_of(path) }
+                ModeChoice { route: route_of(path), reason, cost_ms: cost_of(path), cheaper: None }
             }
-            None => ModeChoice { route: i3t_model::control::Route::None, reason: ChoiceReason::NoPath, cost_ms: None },
+            None => ModeChoice::none(),
         };
-        let lowest_cost = match candidates.iter().find(|candidate| candidate.lan).or_else(|| candidates.first()) {
-            Some(candidate) => ModeChoice {
-                route: route_of(candidate.path),
-                reason: if candidate.lan { ChoiceReason::Lan } else { ChoiceReason::LowestCost },
-                cost_ms: Some(candidate.cost_ms),
-            },
-            None => ModeChoice { route: i3t_model::control::Route::None, reason: ChoiceReason::NoPath, cost_ms: None },
-        };
+        let current = path_of(peer.policy_route).and_then(|path| candidates.iter().find(|candidate| candidate.path == path));
+        let lowest_cost = lowest_cost_choice(&candidates, current);
         // 不算直连时默认模式会经的 relay：同一套规则，只是假装直连不可用。
         let without_direct = View { allow_direct: false, ..self.view(&entries, now) };
         let default_relay = match without_direct.direct_first(id, peer) {
@@ -483,12 +477,41 @@ fn route_of(path: PathId) -> i3t_model::control::Route {
     }
 }
 
-fn candidate_report(candidate: &Candidate, current: RouteKey) -> CandidateReport {
-    let current = match current {
+fn path_of(route: RouteKey) -> Option<PathId> {
+    match route {
         RouteKey::None => None,
         RouteKey::Direct(addr) => Some(PathId::Direct(addr)),
         RouteKey::Relay { path, .. } => Some(PathId::Relays(path)),
+    }
+}
+
+/// 延迟优先模式从这一对现在走的路（`current`，它在候选里时）出发会选哪条：局域网直连无条件优先；
+/// 代价最低的候选比现在的路便宜得够选路器换过去（[`routing::beats_by_margin`]）就是它，不够就还是现在的路，
+/// 并带上那条更便宜的。现在的路不在候选里（没有路、断了）时选路器立刻换到最低的，不看差距。
+///
+/// 只看差距：连续几个评估窗口、换路之后的停留期、刚重连的 relay 要等的那一段是时间上的条件，一次快照里看不出来。
+fn lowest_cost_choice(candidates: &[Candidate], current: Option<&Candidate>) -> ModeChoice {
+    let chosen = |candidate: &Candidate, reason| ModeChoice {
+        route: route_of(candidate.path),
+        reason,
+        cost_ms: Some(candidate.cost_ms),
+        cheaper: None,
     };
+    if let Some(lan) = candidates.iter().find(|candidate| candidate.lan) {
+        return chosen(lan, ChoiceReason::Lan);
+    }
+    let Some(cheapest) = candidates.first() else { return ModeChoice::none() };
+    match current {
+        Some(current) if current.path != cheapest.path && !routing::beats_by_margin(current.cost_ms, cheapest.cost_ms) => ModeChoice {
+            cheaper: Some(CheaperPath { route: route_of(cheapest.path), cost_ms: cheapest.cost_ms }),
+            ..chosen(current, ChoiceReason::WithinMargin)
+        },
+        Some(_) | None => chosen(cheapest, ChoiceReason::LowestCost),
+    }
+}
+
+fn candidate_report(candidate: &Candidate, current: RouteKey) -> CandidateReport {
+    let current = path_of(current);
     CandidateReport {
         route: route_of(candidate.path),
         cost_ms: candidate.cost_ms,
@@ -506,5 +529,59 @@ fn candidate_report(candidate: &Candidate, current: RouteKey) -> CandidateReport
         load_percent: candidate.load_percent,
         current: Some(candidate.path) == current,
         relay_leg: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use i3t_model::control::Route;
+    use i3t_proto::datagram::RelayPath;
+
+    use super::*;
+
+    fn direct(cost_ms: f64) -> Candidate {
+        let addr: SocketAddr = "203.0.113.7:20330".parse().unwrap();
+        Candidate { path: PathId::Direct(addr), legs: Vec::new(), cost_ms, load_percent: 0, lan: false, settled: true }
+    }
+
+    fn via(relay: u32, cost_ms: f64) -> Candidate {
+        let path = PathId::Relays(RelayPath::new(&[NodeId::new(relay).unwrap()]).unwrap());
+        Candidate { path, legs: Vec::new(), cost_ms, load_percent: 0, lan: false, settled: true }
+    }
+
+    fn relay_route(relay: u32) -> Route {
+        Route::Relay { relays: vec![NodeId::new(relay).unwrap()] }
+    }
+
+    #[test]
+    fn a_slightly_cheaper_relay_does_not_move_a_pair_off_its_current_path() {
+        let (on_direct, relay) = (direct(74.3), via(3, 74.1));
+        let choice = lowest_cost_choice(&[relay.clone(), on_direct.clone()], Some(&on_direct));
+        assert_eq!((choice.reason, choice.cost_ms), (ChoiceReason::WithinMargin, Some(74.3)), "{choice:?}");
+        assert!(matches!(choice.route, Route::Direct { .. }), "还是现在的直连：{choice:?}");
+        assert_eq!(choice.cheaper, Some(CheaperPath { route: relay_route(3), cost_ms: 74.1 }), "更便宜的那条和它的代价也在");
+    }
+
+    #[test]
+    fn a_candidate_cheaper_by_the_selectors_margin_is_the_choice() {
+        let current = direct(74.3);
+        let choice = lowest_cost_choice(&[via(3, 60.0), current.clone()], Some(&current));
+        assert_eq!((choice.route, choice.reason, choice.cheaper), (relay_route(3), ChoiceReason::LowestCost, None));
+        // 代价高的时候差距按比例算：200ms 的路，181ms 的不够，180ms 的够。
+        let current = direct(200.0);
+        assert_eq!(lowest_cost_choice(&[via(3, 181.0), current.clone()], Some(&current)).reason, ChoiceReason::WithinMargin);
+        assert_eq!(lowest_cost_choice(&[via(3, 180.0), current.clone()], Some(&current)).reason, ChoiceReason::LowestCost);
+    }
+
+    #[test]
+    fn without_a_usable_current_path_the_cheapest_is_taken_at_once_and_a_lan_path_always_wins() {
+        let candidates = [via(3, 30.0), via(4, 31.0)];
+        let choice = lowest_cost_choice(&candidates, None);
+        assert_eq!((choice.route, choice.reason), (relay_route(3), ChoiceReason::LowestCost), "没有路时不看差距");
+        let on_cheapest = lowest_cost_choice(&candidates, Some(&candidates[0]));
+        assert_eq!((on_cheapest.route, on_cheapest.reason, on_cheapest.cheaper), (relay_route(3), ChoiceReason::LowestCost, None));
+        let lan = Candidate { lan: true, ..direct(40.0) };
+        assert_eq!(lowest_cost_choice(&[via(3, 30.0), lan], Some(&candidates[0])).reason, ChoiceReason::Lan);
+        assert_eq!(lowest_cost_choice(&[], None), ModeChoice::none());
     }
 }

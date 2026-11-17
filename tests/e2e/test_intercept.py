@@ -11,8 +11,9 @@
 - leftover：节点被杀掉（来不及拆）之后再启动，留下的东西被认出来、换掉，不多出一份；`i3t set intercept off` 在节点没运行时
   把留下的拆掉。
 - reroute：一条被拦截的连接开着的时候，两个节点之间的路从直连换到 relay，连接不断。
-- managed：节点把状态报给 controller，管理接口的节点详情里有它；`i3t hosts` 写出名字。
+- managed：节点把状态报给 controller，管理接口的节点详情里有它；`i3t hosts` 写出名字，`i3t hosts --remove` 再去掉。
 - overlap：这台机器自己在一个和覆盖网的地址段重叠的内网里：什么都不装，状态说出重叠的是哪个地址，那个内网照常通。
+- appears：透明访问开着的时候，另一块网卡上多了一个地址段里的地址：几秒之内全部拆掉，那个网络照常通；地址去掉之后再装上。
 """
 
 from __future__ import annotations
@@ -244,6 +245,19 @@ def managed(lab: Lab, work: Path, t: Checks) -> None:
     t.check("再写一次只换那一段", hosts.read_text().count("b.lab.i3t") == 1, hosts.read_text())
     by_name = a.host.run("curl", "-sS", "--max-time", "10", "http://b.lab.i3t:8080/", check=False)
     t.check("靠 /etc/hosts 按名字连", by_name.stdout == b.host.ip, f"{by_name.stdout!r} {by_name.stderr.strip()}")
+
+    # 透明访问关着、那一段还在：b 没打开透明访问，它的状态命令提醒；a 开着，不提醒。
+    hint = "i3t hosts --remove"
+    t.check("透明访问关着的节点：i3t intercept status 说 /etc/hosts 里还有名字", hint in i3t(b, "intercept", "status").stdout)
+    t.check("透明访问开着的节点不提醒", hint not in i3t(a, "intercept", "status").stdout)
+    switched = i3t(a, "set", "intercept", "off")
+    t.check("i3t set intercept off 也提醒", hint in switched.stdout, switched.stdout + switched.stderr)
+    removed = i3t(a, "hosts", "--remove")
+    t.check("i3t hosts --remove 只去掉那一段，文件和写之前一个字节也不差",
+            removed.returncode == 0 and hosts.read_text() == original, removed.stdout + removed.stderr)
+    again = i3t(a, "hosts", "--remove")
+    t.check("再去掉一次：说没有，文件不动", again.returncode == 0 and "没有" in again.stdout and hosts.read_text() == original, again.stdout)
+    t.check("去掉之后不再提醒", hint not in i3t(b, "intercept", "status").stdout)
     if t.failures:
         print(tail(a.read_log(), 30), tail(controller.log.read_text(errors="replace")), sep="\n  ---\n")
 
@@ -282,7 +296,51 @@ def overlap(lab: Lab, work: Path, t: Checks) -> None:
         print(tail(a.read_log(), 30))
 
 
-SCENARIOS = {"access": access, "leftover": leftover, "reroute": reroute, "managed": managed, "overlap": overlap}
+def appears(lab: Lab, work: Path, t: Checks) -> None:
+    """透明访问开着的时候，a 的另一块网卡上多了一个地址段里的地址（DHCP 换了地址、VPN 连上）：当场拆掉，地址去掉之后再装上。"""
+    a, b = Node(lab.host("a"), work, 1), Node(lab.host("b"), work, 2)
+    # 先是一个和地址段无关的内网，后来它换成了 10.66.200.0/24。
+    lan = private_link(lab, a.host, "lan", "192.168.77.0/24")
+    intercept_on(a)
+    start_whoami(lan, 8080)
+    start_whoami(b.host, 8080)
+    a.start_static(a.netmap(peers=[b.as_peer()]))
+    b.start_static(b.netmap(peers=[a.as_peer()]))
+    wait_open(a)
+    # b 没有打开透明访问：它照旧用本机自己的地址去连服务。
+    seen = a.host.run("curl", "-sS", "--max-time", "10", f"http://{b.virtual_ip}:8080/", check=False)
+    t.check("开始时透明访问照常可用", seen.stdout == b.host.ip, f"{seen.stdout!r} {seen.stderr.strip()}")
+
+    def installed() -> bool:
+        return "table ip i3t" in a.host.run("nft", "list", "ruleset").stdout
+
+    a.host.run("ip", "addr", "add", "10.66.200.1/24", "dev", "p-lan")
+    lan.run("ip", "addr", "add", "10.66.200.2/24", "dev", "up0")
+    started = time.monotonic()
+    wait_until(lambda: not installed(), timeout=20, what="a 拆掉透明访问")
+    took = time.monotonic() - started
+    t.check("多了一个地址段里的地址：几秒之内全部拆掉", took < 10, f"{took:.1f}s")
+    t.check("日志说出为什么拆", "重叠了，透明访问当场拆掉" in a.read_log(), tail(a.read_log()))
+    status = i3t(a, "intercept", "status").stdout
+    t.check("i3t intercept status 说出重叠的是哪个地址", "开不起来" in status and "10.66.200.1/24 dev p-lan" in status, status)
+    real = a.host.run("curl", "-sS", "--max-time", "10", "http://10.66.200.2:8080/", check=False)
+    t.check("那个网络照常通", real.stdout == "10.66.200.1", f"{real.stdout!r} {real.stderr.strip()}")
+    proxied = a.curl(f"http://{b.virtual_ip}:8080/")
+    t.check("节点别的功能照常：经本机入口访问 b", proxied.stdout == b.host.ip, f"{proxied.stdout!r} {proxied.stderr.strip()}")
+
+    a.host.run("ip", "addr", "del", "10.66.200.1/24", "dev", "p-lan")
+    started = time.monotonic()
+    wait_until(installed, timeout=20, what="a 再装上透明访问")
+    took = time.monotonic() - started
+    t.check("地址去掉之后几秒之内再装上", took < 10 and "透明访问再装上" in a.read_log(), f"{took:.1f}s")
+    wait_until(lambda: "开着" in i3t(a, "intercept", "status").stdout, timeout=5, what="状态变回开着")
+    again = a.host.run("curl", "-sS", "--max-time", "10", f"http://{b.virtual_ip}:8080/", check=False)
+    t.check("再装上之后透明访问照常可用", again.stdout == b.host.ip, f"{again.stdout!r} {again.stderr.strip()}")
+    if t.failures:
+        print(tail(a.read_log(), 30))
+
+
+SCENARIOS = {"access": access, "leftover": leftover, "reroute": reroute, "managed": managed, "overlap": overlap, "appears": appears}
 
 
 def main() -> int:

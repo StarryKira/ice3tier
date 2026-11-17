@@ -14,8 +14,8 @@ use i3t_conn::{
 use i3t_flow::FlowError;
 use i3t_flow::measure::{Measured, measure};
 use i3t_model::control::diag::{
-    Choice, ChoiceCode, Decision, DirectSide, Hop, HopSource, Latency, PathMeasure, PathPick, TestCode, TestRole, Throughput, Transfer,
-    TransferEnd,
+    CheaperPath, Choice, ChoiceCode, Decision, DirectSide, Hop, HopSource, Latency, PathMeasure, PathPick, TestCode, TestRole, Throughput,
+    Transfer, TransferEnd,
 };
 use i3t_model::control::{Route, TestOrder, TestReport};
 use i3t_model::netmap::Reach;
@@ -363,9 +363,14 @@ fn decision(decision: &RouteDecision) -> Decision {
             ChoiceReason::OwnRelay => ChoiceCode::OwnRelay,
             ChoiceReason::PeerRelay => ChoiceCode::PeerRelay,
             ChoiceReason::LowestCost => ChoiceCode::LowestCost,
+            ChoiceReason::WithinMargin => ChoiceCode::WithinMargin,
             ChoiceReason::NoPath => ChoiceCode::NoPath,
         },
         cost_us: choice.cost_ms.map(|cost| u64::from(micros(cost))),
+        cheaper: choice
+            .cheaper
+            .as_ref()
+            .map(|cheaper| CheaperPath { route: cheaper.route.clone(), cost_us: u64::from(micros(cheaper.cost_ms)) }),
     };
     Decision {
         mode: Some(decision.mode),

@@ -1158,6 +1158,7 @@ dependencies = [
  "anyhow",
  "clap",
  "i3t-crypto",
+ "i3t-lang",
  "i3t-model",
  "i3t-proto",
  "i3t-update",

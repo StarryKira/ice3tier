@@ -201,6 +201,12 @@ pub(crate) fn direct_first(
     })
 }
 
+/// 代价是 `challenger_ms` 的路比代价是 `current_ms` 的现在的路便宜得够不够换过去：至少 `max(5ms, 10%)`（模块文档第 3 条）。
+/// 选路器和主动测试的路由决定（"延迟优先会怎么做"）用的都是它。
+pub(crate) fn beats_by_margin(current_ms: f64, challenger_ms: f64) -> bool {
+    current_ms - challenger_ms >= (current_ms * SWITCH_MARGIN_RATIO).max(SWITCH_MARGIN_MS)
+}
+
 /// 换路的原因。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Why {
@@ -263,10 +269,9 @@ impl Selector {
         if !window {
             return None;
         }
-        let margin = (current.cost_ms * SWITCH_MARGIN_RATIO).max(SWITCH_MARGIN_MS);
         let cheaper: Vec<&Candidate> = candidates
             .iter()
-            .filter(|candidate| candidate.settled && candidate.path != current.path && current.cost_ms - candidate.cost_ms >= margin)
+            .filter(|candidate| candidate.settled && candidate.path != current.path && beats_by_margin(current.cost_ms, candidate.cost_ms))
             .collect();
         let near = near_best(&cheaper);
         // 上一个窗口考察的那条路还在"明显更便宜"的一组里就接着数；不在了就从头数另一条。

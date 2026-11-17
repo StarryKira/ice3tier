@@ -17,6 +17,8 @@ use std::net::Ipv4Addr;
 use std::thread;
 use std::time::Duration;
 
+use ipnet::Ipv4Net;
+
 use crate::machine::{CommandError, Machine, Program};
 use crate::overlap;
 use crate::plan::{self, Plan, REMOVE_TABLE};
@@ -116,6 +118,18 @@ fn delete_rule(machine: &mut impl Machine) -> Result<(), CommandError> {
         Err(error) if !error.says("no such file") => Err(error),
         Ok(_) | Err(_) => Ok(()),
     }
+}
+
+/// 网络的地址段 `cidr` 和这台机器上的哪个地址或者路由重叠（写法同 [`SetupError::RangeInUse`]）；不重叠时是 `None`。
+///
+/// [`install`] 自己会查。装上之后也要隔一阵再查：机器后来才有的地址和路由（DHCP 换了地址、VPN 连上）一样会被切断，
+/// 这时调用方应当当场 [`remove`]，重叠没了再装。[`LINK`] 上自己的虚拟 IP 和经它的路由不算。
+///
+/// # Errors
+///
+/// 读不了或者读不懂本机的地址、路由。
+pub fn overlapping(machine: &mut impl Machine, cidr: Ipv4Net) -> Result<Option<String>, CommandError> {
+    overlap::find(machine, cidr)
 }
 
 /// 只换掉对端的集合（访问规则或者对端变了）。表不在时（被别人删掉了）报错，调用方应该整个重装。
@@ -584,6 +598,28 @@ mod tests {
         let error = install(&mut fake, &plan([10, 66, 0, 1], &[])).unwrap_err();
         assert!(matches!(error, SetupError::RangeInUse { .. }), "{error:?}");
         assert!(Survey::take(&mut fake).is_clean(), "留下的规则同样会切断那个网络，要拆掉");
+    }
+
+    #[test]
+    fn an_overlap_that_appears_while_installed_is_seen_and_installing_again_works_once_it_is_gone() {
+        let mut fake = ordinary();
+        let plan = plan([10, 66, 0, 1], &[[10, 66, 0, 5]]);
+        install(&mut fake, &plan).unwrap();
+        assert_eq!(overlapping(&mut fake, plan.cidr), Ok(None), "装着时自己的网卡上的虚拟 IP 不算");
+        // VPN 连上了：一块新网卡，上面一个地址段里的地址，main 表里一条到它网段的路由。
+        fake.addresses.push(("tun0", "10.66.3.7/24"));
+        fake.main_routes.push(("10.66.3.0/24", "tun0"));
+        assert_eq!(overlapping(&mut fake, plan.cidr), Ok(Some("10.66.3.7/24 dev tun0".into())));
+        remove(&mut fake).unwrap();
+        assert!(Survey::take(&mut fake).is_clean());
+        assert!(matches!(install(&mut fake, &plan), Err(SetupError::RangeInUse { .. })), "还重叠着就不装");
+        // 只剩路由也算：VPN 的地址去掉了，路由还在。
+        fake.addresses.pop();
+        assert_eq!(overlapping(&mut fake, plan.cidr), Ok(Some("10.66.3.0/24 dev tun0".into())));
+        fake.main_routes.pop();
+        assert_eq!(overlapping(&mut fake, plan.cidr), Ok(None));
+        install(&mut fake, &plan).unwrap();
+        installed_everything(&fake, "10.66.0.1");
     }
 
     #[test]

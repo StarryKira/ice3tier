@@ -439,6 +439,8 @@ pub struct Ui {
     pub quality_header: [&'static str; 12],
     pub mode_choices: &'static str,
     pub choices_header: [&'static str; 5],
+    /// 延迟优先不换路时，那条更便宜的候选：路，代价（毫秒）。接在选择的说明后面，自己带着分隔的标点。
+    pub cheaper_path: fn(&str, &str) -> String,
     pub note: &'static str,
     pub direct_capability: &'static str,
     pub already_direct: &'static str,
@@ -653,6 +655,51 @@ mod tests {
         assert!(members.contains("boxes") && members.contains("laptop") && members.contains("#7"), "{members}");
         let rule = (zh::TEXTS.log)(find("rule.create")).unwrap();
         assert!(rule.contains("All") && rule.contains("servers"), "规则写分组的名字：{rule}");
+    }
+
+    /// 参数里的每一个数都换成 1。
+    fn ones(value: &mut Value) {
+        match value {
+            Value::Number(number) => *number = 1.into(),
+            Value::Array(items) => items.iter_mut().for_each(ones),
+            Value::Object(fields) => fields.values_mut().for_each(ones),
+            Value::Null | Value::Bool(_) | Value::String(_) => {}
+        }
+    }
+
+    #[test]
+    fn english_counts_read_right_for_one() {
+        let mut said: Vec<String> = every_action()
+            .into_iter()
+            .map(|mut entry| {
+                entry.params.values_mut().for_each(ones);
+                (en::TEXTS.log)(&entry).unwrap_or_default()
+            })
+            .collect();
+        let ui = &en::TEXTS.ui;
+        let counts = LaneCounts::default();
+        said.extend([
+            (ui.of_online)(1, 1),
+            (ui.recent_requests)(1, 1),
+            (ui.per_minute)(1),
+            (ui.exit_requests)(1, 1, 1, 1),
+            (ui.exit_seen)(1, 1, 1, 1, 1),
+            (ui.intercept_active)(1, "↑ 1 B  ↓ 1 B"),
+            (ui.profile_running)("balanced", 1),
+            (ui.netmap_versions)(1, 1, 1),
+            (ui.update_counts)(1, 1, 1, 1, 1, 1),
+            (ui.peer_lanes)(true, true, 1, 1, 1, &(ui.lane_counts)(&counts, "1 B")),
+            (ui.handshake_failure_counts)(1, 1, 1, 1, 1),
+            (ui.group_deleted)("servers", 1, 1),
+            (ui.direct_side)("yes", "ok", 1),
+            (ui.other_way_back)(1, 1),
+            (ui.throughput_note)("quic", "bbr", "1 B", 1),
+            (ui.matrix_progress)(1, 1, 1),
+            (ui.wait_timeout)(1),
+        ]);
+        for text in said {
+            assert_eq!(i3t_lang::cli::plural_after_one(&text), None, "{text}");
+        }
     }
 
     #[test]

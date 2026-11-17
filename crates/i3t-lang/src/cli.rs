@@ -332,6 +332,24 @@ pub fn has_chinese(text: &str) -> bool {
     text.chars().any(|ch| matches!(ch, '\u{3000}'..='\u{303f}' | '\u{3400}'..='\u{9fff}' | '\u{ff00}'..='\u{ffef}'))
 }
 
+/// 英文里一个数后面直接跟着复数名词、而这个数是 1 的地方（`1 nodes`）：返回那两个词。测试拿 1 去调文字目录里带数的函数，
+/// 用它检查英文没有写成这个样子；要么用中性的写法（`nodes: 1`、`nodes 1`），要么分单复数。
+///
+/// 只认单独的 `1`（前面可以是括号），不认 `v1`、`#1`、`1.5`、`1/2` 里的；后面的词全是字母、以 `s` 结尾，
+/// 单位 `ms` 和几个以 `s` 结尾的动词（`1 is …`）不算。
+#[must_use]
+pub fn plural_after_one(text: &str) -> Option<String> {
+    const NOT_PLURAL: [&str; 5] = ["ms", "is", "was", "has", "does"];
+    let words: Vec<&str> = text.split_whitespace().collect();
+    words.windows(2).find_map(|pair| {
+        let number = pair[0].trim_start_matches(['(', '[', '（']);
+        let noun = pair[1].trim_end_matches(|ch: char| !ch.is_ascii_alphabetic());
+        let plural =
+            noun.len() > 1 && noun.ends_with('s') && noun.chars().all(|ch| ch.is_ascii_alphabetic()) && !NOT_PLURAL.contains(&noun);
+        (number == "1" && plural).then(|| format!("{} {}", pair[0], pair[1]))
+    })
+}
+
 /// clap 自己的英文在帮助里可能留下的词。测试用来检查中文的帮助里没有漏掉它们。
 pub const CLAP_ENGLISH: [&str; 10] =
     ["Usage", "Options", "Arguments", "Commands", "Print help", "Print version", "[default:", "[env:", "possible values", "Global"];
@@ -361,6 +379,26 @@ mod tests {
     use clap::{Parser, Subcommand};
 
     use super::*;
+
+    #[test]
+    fn a_plural_noun_after_a_lone_one_is_caught_and_neutral_forms_pass() {
+        assert_eq!(plural_after_one("v3, 1 peers, 0 relays").as_deref(), Some("1 peers,"));
+        assert_eq!(plural_after_one("Lowest cost of (1 candidates)").as_deref(), Some("(1 candidates)"));
+        for fine in [
+            "peers 1, relays 0",
+            "nodes: 1",
+            "1 peer",
+            "1 ms",
+            "#1 deleted",
+            "v1 is out",
+            "1.5 seconds",
+            "1/1 pairs",
+            "1 B",
+            "table 1 is used",
+        ] {
+            assert_eq!(plural_after_one(fine), None, "{fine}");
+        }
+    }
 
     // 一个小的命令行，覆盖各种参数的写法。说明不用文档注释写：那会成为它的中文说明。
     #[derive(Parser, Debug)]

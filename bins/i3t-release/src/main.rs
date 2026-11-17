@@ -11,22 +11,31 @@
 //! ```
 //!
 //! 目录里别的文件（controller、命令行工具）不进清单：它们不走节点的自动更新。
+//!
+//! 终端上的文字跟着系统的语言（见 `i3t_lang`，可以用 `I3T_LANG` 指定）。标准输出上 `keygen` 只有公钥那一行，给脚本接。
+
+mod texts;
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail, ensure};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use i3t_crypto::NodeKey;
+use i3t_lang::Lang;
 use i3t_model::update::{Artifact, MANIFEST_FILE, Manifest, NODE_PROGRAM, Platform, SIGNATURE_FILE, SignedManifest, Version};
 use i3t_proto::PublicKey;
 use i3t_update::{FileDigest, TrustedKeys, sign_manifest};
 
+use crate::texts::texts;
+
+// 帮助的文字在文字目录里（`texts`），由 `command` 按语言装上去，所以这里不写文档注释：clap 会把它们当成说明。
 #[derive(Parser)]
-#[command(name = "i3t-release", version, about = "ice3tier 的发布工具")]
+#[command(name = "i3t-release", version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -34,55 +43,75 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// 生成一把新的发布签名密钥，写进文件（只有属主可读），并打印它的公钥
     Keygen {
-        /// 私钥写到哪个文件。已经存在的文件不会被覆盖
-        #[arg(long, value_name = "文件")]
+        #[arg(long)]
         out: PathBuf,
     },
-    /// 为发布目录里的节点程序生成 manifest.json 并签名，得到 manifest.json.sig
     Manifest {
-        /// 这次发布的版本号，例如 0.3.0；预发布版写成 0.3.0-rc.1
-        #[arg(long, value_name = "版本号")]
+        #[arg(long)]
         version: Version,
-        /// 发布目录。里面的节点程序要叫 i3t-<平台>，例如 i3t-linux-x86_64、i3t-windows-x86_64.exe
-        #[arg(long, value_name = "目录")]
+        #[arg(long)]
         dir: PathBuf,
-        /// 发布签名密钥的文件（keygen 生成的那个）
-        #[arg(long, value_name = "文件")]
+        #[arg(long)]
         key: PathBuf,
-        /// 这个版本的节点需要的 controller 最低版本。比它旧的 controller 不会下发这个版本
-        #[arg(long, value_name = "版本号", default_value = "0.0.0")]
+        #[arg(long, default_value = "0.0.0")]
         min_controller: Version,
     },
-    /// 核对一个发布目录：清单的签名，以及清单里每个文件的大小和 SHA-256
     Verify {
-        /// 发布目录
-        #[arg(long, value_name = "目录")]
+        #[arg(long)]
         dir: PathBuf,
-        /// 只认这一把公钥（base64url）。不给的话用编译在本程序里的发布公钥，和节点认的一样
         // base64url 的字符里有 `-`，公钥可能以它开头，不能被当成另一个选项。
-        #[arg(long, value_name = "公钥", allow_hyphen_values = true)]
+        #[arg(long, allow_hyphen_values = true)]
         key: Option<PublicKey>,
     },
 }
 
-fn main() -> anyhow::Result<()> {
-    match Cli::parse().command {
+/// 命令行的定义，帮助按 `lang` 写。
+fn command(lang: Lang) -> clap::Command {
+    let (h, v) = (&texts::texts_in(lang).help, &texts::texts_in(lang).values);
+    Cli::command()
+        .about(h.about)
+        .mut_subcommand("keygen", |sub| sub.about(h.keygen).mut_arg("out", |arg| arg.help(h.keygen_out).value_name(v.file)))
+        .mut_subcommand("manifest", |sub| {
+            sub.about(h.manifest)
+                .mut_arg("version", |arg| arg.help(h.manifest_version).value_name(v.version))
+                .mut_arg("dir", |arg| arg.help(h.manifest_dir).value_name(v.dir))
+                .mut_arg("key", |arg| arg.help(h.manifest_key).value_name(v.file))
+                .mut_arg("min_controller", |arg| arg.help(h.min_controller).value_name(v.version))
+        })
+        .mut_subcommand("verify", |sub| {
+            sub.about(h.verify)
+                .mut_arg("dir", |arg| arg.help(h.verify_dir).value_name(v.dir))
+                .mut_arg("key", |arg| arg.help(h.verify_key).value_name(v.key))
+        })
+}
+
+fn main() -> ExitCode {
+    let lang = i3t_lang::set(Lang::detect());
+    let cli: Cli = i3t_lang::cli::parse(command(lang), lang);
+    let result = match cli.command {
         Command::Keygen { out } => keygen(&out),
         Command::Manifest { version, dir, key, min_controller } => manifest(version, min_controller, &dir, &key),
         Command::Verify { dir, key } => verify(&dir, key),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("i3t-release: {}", lang.chain(error.chain()));
+            ExitCode::FAILURE
+        }
     }
 }
 
 fn keygen(out: &Path) -> anyhow::Result<()> {
-    let key = NodeKey::generate().context("生成密钥")?;
-    let mut file = create_private(out).with_context(|| format!("创建 {}（已经存在的文件不会被覆盖）", out.display()))?;
-    file.write_all(key.to_pem().as_bytes()).and_then(|()| file.sync_all()).with_context(|| format!("写 {}", out.display()))?;
+    let t = &texts().ui;
+    let shown = out.display().to_string();
+    let key = NodeKey::generate().context(t.generate_key)?;
+    let mut file = create_private(out).with_context(|| (t.create_key_file)(&shown))?;
+    file.write_all(key.to_pem().as_bytes()).and_then(|()| file.sync_all()).with_context(|| (t.write)(&shown))?;
     // 标准输出上只有公钥，方便脚本接；给人看的话走标准错误。
     println!("{}", key.public());
-    eprintln!("私钥已经写到 {}。上面这一行是公钥：节点只认编译在程序里的公钥，", out.display());
-    eprintln!("所以要么把它加进 i3t-update 的公钥列表，要么编译时设 I3T_RELEASE_EXTRA_KEY=<公钥>。");
+    eprintln!("{}", (t.key_written)(&shown));
     Ok(())
 }
 
@@ -100,49 +129,50 @@ fn create_private(path: &Path) -> io::Result<File> {
 }
 
 fn manifest(version: Version, min_controller: Version, dir: &Path, key_file: &Path) -> anyhow::Result<()> {
-    let pem = fs::read_to_string(key_file).with_context(|| format!("读签名密钥 {}", key_file.display()))?;
-    let key = NodeKey::from_pem(&pem).with_context(|| format!("解析签名密钥 {}", key_file.display()))?;
+    let t = &texts().ui;
+    let shown = key_file.display().to_string();
+    let pem = fs::read_to_string(key_file).with_context(|| (t.read_key)(&shown))?;
+    let key = NodeKey::from_pem(&pem).with_context(|| (t.parse_key)(&shown))?;
     let (manifest_path, signature_path) = (dir.join(MANIFEST_FILE), dir.join(SIGNATURE_FILE));
     for path in [&manifest_path, &signature_path] {
-        ensure!(!path.exists(), "{} 已经存在。签过名的清单不覆盖；确实要重做的话先把它删掉", path.display());
+        ensure!(!path.exists(), (t.already_signed)(&path.display().to_string()));
     }
 
     let artifacts = node_programs(dir)?;
-    ensure!(
-        !artifacts.is_empty(),
-        "{} 里没有节点程序。它们应该叫 {NODE_PROGRAM}-<平台>，例如 {NODE_PROGRAM}-linux-x86_64、{NODE_PROGRAM}-windows-x86_64.exe",
-        dir.display()
-    );
-    let published = SystemTime::now().duration_since(UNIX_EPOCH).context("系统时钟早于 1970 年")?.as_secs();
+    ensure!(!artifacts.is_empty(), (t.no_programs)(&dir.display().to_string(), NODE_PROGRAM));
+    let published = SystemTime::now().duration_since(UNIX_EPOCH).context(t.clock_before_1970)?.as_secs();
     let manifest = Manifest { version, min_controller, published, artifacts };
-    let text = serde_json::to_string_pretty(&manifest).context("生成清单")? + "\n";
+    let text = serde_json::to_string_pretty(&manifest).context(t.encode_manifest)? + "\n";
     let signed = sign_manifest(&key, text);
 
     write_new(&manifest_path, signed.manifest.as_bytes())?;
     write_new(&signature_path, format!("{}\n", signed.signature).as_bytes())?;
 
-    println!("版本 {}（{}），签名用的公钥 {}", manifest.version, release_kind(&manifest), key.public());
+    println!("{}", (t.signed)(&manifest.version.to_string(), release_kind(&manifest), &key.public().to_string()));
     for (platform, artifact) in &manifest.artifacts {
-        println!("  {platform:<16} {}  {} 字节  {}", artifact.file, artifact.size, artifact.sha256);
+        println!("{}", (t.artifact)(platform, &artifact.file, artifact.size, &artifact.sha256.to_string()));
     }
-    println!("已写出 {} 和 {}", manifest_path.display(), signature_path.display());
+    println!("{}", (t.written)(&manifest_path.display().to_string(), &signature_path.display().to_string()));
     if !TrustedKeys::compiled_in().iter().any(|trusted| *trusted == key.public()) {
-        eprintln!("注意：这把钥匙不在本程序编译进去的发布公钥里。同样编译出来的节点不会认这份清单。");
+        eprintln!("{}", t.untrusted_key);
     }
     Ok(())
 }
 
 /// 目录里各个平台的节点程序，以平台名为键。别的文件不管。
 fn node_programs(dir: &Path) -> anyhow::Result<BTreeMap<String, Artifact>> {
+    let t = &texts().ui;
+    let read_dir = || (t.read_dir)(&dir.display().to_string());
     let mut artifacts = BTreeMap::new();
-    for entry in fs::read_dir(dir).with_context(|| format!("读目录 {}", dir.display()))? {
-        let entry = entry.with_context(|| format!("读目录 {}", dir.display()))?;
+    for entry in fs::read_dir(dir).with_context(read_dir)? {
+        let entry = entry.with_context(read_dir)?;
         let Some(file) = entry.file_name().to_str().map(str::to_owned) else { continue };
         let Some(platform) = node_program_platform(&file) else { continue };
         let path = entry.path();
-        ensure!(path.is_file(), "{} 不是一个普通文件", path.display());
-        let digest = FileDigest::of_file(&path).with_context(|| format!("读 {}", path.display()))?;
-        ensure!(digest.size > 0, "{} 是空的", path.display());
+        let shown = path.display().to_string();
+        ensure!(path.is_file(), (t.not_a_file)(&shown));
+        let digest = FileDigest::of_file(&path).with_context(|| (t.read)(&shown))?;
+        ensure!(digest.size > 0, (t.empty_file)(&shown));
         artifacts.insert(platform.to_string(), Artifact { file, size: digest.size, sha256: digest.sha256 });
     }
     Ok(artifacts)
@@ -164,52 +194,56 @@ fn write_new(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         file.write_all(bytes)?;
         file.sync_all()
     };
-    write().with_context(|| format!("写 {}", path.display()))
+    write().with_context(|| (texts().ui.write)(&path.display().to_string()))
 }
 
 fn release_kind(manifest: &Manifest) -> &'static str {
-    if manifest.is_prerelease() { "预发布版" } else { "正式版" }
+    let t = &texts().ui;
+    if manifest.is_prerelease() { t.prerelease } else { t.release }
 }
 
 fn verify(dir: &Path, key: Option<PublicKey>) -> anyhow::Result<()> {
-    let read = |name: &str| fs::read_to_string(dir.join(name)).with_context(|| format!("读 {}", dir.join(name).display()));
+    let (t, lang) = (&texts().ui, i3t_lang::current());
+    let read = |name: &str| fs::read_to_string(dir.join(name)).with_context(|| (t.read)(&dir.join(name).display().to_string()));
     let signed =
-        SignedManifest::from_files(read(MANIFEST_FILE)?, &read(SIGNATURE_FILE)?).with_context(|| format!("解析 {SIGNATURE_FILE}"))?;
+        SignedManifest::from_files(read(MANIFEST_FILE)?, &read(SIGNATURE_FILE)?).with_context(|| (t.parse_signature)(SIGNATURE_FILE))?;
     let keys = key.map_or_else(TrustedKeys::compiled_in, TrustedKeys::from);
-    let manifest = keys.verify(&signed).with_context(|| {
-        let trusted: Vec<String> = keys.iter().map(ToString::to_string).collect();
-        format!("核对 {MANIFEST_FILE} 的签名（认的公钥：{}）", trusted.join("、"))
-    })?;
-    println!("版本 {}（{}），需要 controller {} 或更新，签名正确", manifest.version, release_kind(&manifest), manifest.min_controller);
+    let manifest = keys.verify(&signed).with_context(|| (t.check_signature)(MANIFEST_FILE, &lang.list(keys.iter())))?;
+    println!("{}", (t.verified)(&manifest.version.to_string(), release_kind(&manifest), &manifest.min_controller.to_string()));
 
     let mut mismatched = 0;
     for (platform, artifact) in &manifest.artifacts {
         match check_file(dir, artifact) {
-            Ok(()) => println!("  通过  {platform:<16} {}", artifact.file),
+            Ok(()) => println!("{}", (t.file_ok)(platform, &artifact.file)),
             Err(error) => {
-                println!("  不符  {platform:<16} {}：{error:#}", artifact.file);
+                println!("{}", (t.file_bad)(platform, &artifact.file, &lang.chain(error.chain())));
                 mismatched += 1;
             }
         }
     }
-    ensure!(mismatched == 0, "清单里有 {mismatched} 个文件和目录里的对不上");
-    println!("清单里的 {} 个文件都核对无误", manifest.artifacts.len());
+    ensure!(mismatched == 0, (t.mismatched)(mismatched));
+    println!("{}", (t.all_match)(manifest.artifacts.len()));
     Ok(())
 }
 
 fn check_file(dir: &Path, artifact: &Artifact) -> anyhow::Result<()> {
+    let t = &texts().ui;
     // 清单是签过名的，但文件名要拿去拼路径，还是只认不带目录的名字。
-    ensure!(Path::new(&artifact.file).file_name().is_some_and(|name| name == artifact.file.as_str()), "文件名里不应该有目录");
-    let digest = FileDigest::of_file(&dir.join(&artifact.file)).context("读不了")?;
+    ensure!(Path::new(&artifact.file).file_name().is_some_and(|name| name == artifact.file.as_str()), t.directory_in_name);
+    let digest = FileDigest::of_file(&dir.join(&artifact.file)).context(t.unreadable)?;
     if digest.size != artifact.size {
-        bail!("大小是 {} 字节，清单上是 {} 字节", digest.size, artifact.size);
+        bail!((t.size_differs)(digest.size, artifact.size));
     }
-    ensure!(digest.sha256 == artifact.sha256, "SHA-256 是 {}，清单上是 {}", digest.sha256, artifact.sha256);
+    ensure!(digest.sha256 == artifact.sha256, (t.sha256_differs)(&digest.sha256.to_string(), &artifact.sha256.to_string()));
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+
+    use i3t_lang::cli::{CLAP_ENGLISH, all_help, has_chinese, plural_after_one, try_parse_from};
+
     use super::*;
 
     #[test]
@@ -239,15 +273,48 @@ mod tests {
     }
 
     #[test]
-    fn command_line_is_well_formed() {
-        use clap::CommandFactory;
-        Cli::command().debug_assert();
+    fn the_help_of_every_command_is_written_in_each_language_without_the_other() {
+        for lang in Lang::ALL {
+            i3t_lang::cli::localize(command(lang), lang).debug_assert();
+        }
+        for (path, help) in all_help(command(Lang::English), Lang::English) {
+            assert!(!has_chinese(&help), "{path} 的英文帮助里有中文：\n{help}");
+        }
+        for (path, help) in all_help(command(Lang::ZhCn), Lang::ZhCn) {
+            for english in CLAP_ENGLISH {
+                assert!(!help.contains(english), "{path} 的中文帮助里有 {english}：\n{help}");
+            }
+            assert!(has_chinese(&help), "{path}：\n{help}");
+        }
+    }
+
+    #[test]
+    fn the_english_texts_have_no_chinese_and_read_right_for_one() {
+        let ui = &texts::texts_in(Lang::English).ui;
+        let said = [
+            (ui.key_written)("release.key"),
+            (ui.no_programs)("dist", NODE_PROGRAM),
+            (ui.signed)("0.3.0", ui.release, "KEY"),
+            (ui.artifact)("linux-x86_64", "i3t-linux-x86_64", 1, "ab"),
+            (ui.check_signature)(MANIFEST_FILE, "KEY"),
+            (ui.verified)("0.3.0", ui.prerelease, "0.2.0"),
+            (ui.file_bad)("linux-x86_64", "i3t-linux-x86_64", ui.unreadable),
+            (ui.mismatched)(1),
+            (ui.all_match)(1),
+            (ui.size_differs)(1, 1),
+            ui.untrusted_key.to_owned(),
+        ];
+        for text in said {
+            assert!(!has_chinese(&text), "{text}");
+            assert_eq!(plural_after_one(&text), None, "{text}");
+        }
     }
 
     #[test]
     fn a_public_key_starting_with_a_hyphen_is_still_a_value() {
         let key = format!("-{}", "A".repeat(42));
-        let cli = Cli::try_parse_from(["i3t-release", "verify", "--dir", "dist", "--key", &key]).unwrap();
+        let args = ["i3t-release", "verify", "--dir", "dist", "--key", &key].map(OsString::from);
+        let cli: Cli = try_parse_from(command(Lang::English), Lang::English, args).unwrap();
         let Command::Verify { key: Some(parsed), .. } = cli.command else { panic!("应该解析成 verify") };
         assert_eq!(parsed.to_string(), key);
     }

@@ -328,7 +328,7 @@ mod tests {
     }
 
     fn choice() -> Choice {
-        Choice { route: Some(Route::Relay { relays: vec![node(9)] }), reason: ChoiceCode::PeerRelay, cost_us: Some(30_000) }
+        Choice { route: Some(Route::Relay { relays: vec![node(9)] }), reason: ChoiceCode::PeerRelay, cost_us: Some(30_000), cheaper: None }
     }
 
     fn decision() -> Decision {

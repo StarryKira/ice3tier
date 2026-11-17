@@ -81,7 +81,7 @@ mod tests {
     }
 
     fn rule(id: u32, src: GroupId, dst: GroupId, direction: Direction) -> Rule {
-        let group = |id: GroupId| GroupRef { id, name: format!("g{id}") };
+        let group = |id: GroupId| GroupRef { id, name: format!("g{id}"), builtin: id == ALL };
         Rule { id, name: String::new(), src: group(src), dst: group(dst), direction, enabled: true }
     }
 

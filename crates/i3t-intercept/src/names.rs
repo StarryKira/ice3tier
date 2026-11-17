@@ -4,14 +4,15 @@
 //!
 //! - **名字服务**（[`Names::answer`]）：一个只认网络自己的域名的 DNS 应答者，听在本节点虚拟 IP 的 53 端口上，
 //!   systemd-resolved 只把这个域名下的查询发给它。域名之外的名字一律回 REFUSED：它不是这台机器的解析器。
-//! - **hosts 文件**（[`hosts_block`]、[`replace_hosts_block`]）：没有 systemd-resolved 的机器用 `i3t hosts` 打印或者
-//!   写进 `/etc/hosts` 的一段，前后有标记，再写一次只换这一段。
+//! - **hosts 文件**（[`hosts_block`]、[`replace_hosts_block`]、[`remove_hosts_block`]）：没有 systemd-resolved 的机器用
+//!   `i3t hosts` 打印或者写进 `/etc/hosts` 的一段，前后有标记，再写一次只换这一段，`i3t hosts --remove` 只去掉这一段。
 //!
 //! 只有全名（`nas.home.i3t`）；短名字（`nas`）可能是局域网里的另一台机器，不去抢。
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::net::Ipv4Addr;
+use std::ops::Range;
 
 /// 回答里的 TTL。名字可以改、对端可以增减，所以不长。
 const TTL_SECS: u32 = 30;
@@ -187,27 +188,34 @@ pub fn hosts_block(names: &Names) -> String {
     block
 }
 
-/// 把 `hosts`（`/etc/hosts` 原来的内容）里上次写的那一段换成 `block`；没有的话加在最后。别的行一个字也不动。
+/// 上次写的那一段在 `hosts` 里占的字节：从开头标记那一行的行首，到结尾标记那一行的换行符之后。
+/// 有开头没有结尾的不算：不知道它到哪里为止，就一个字也不动。
+fn hosts_block_span(hosts: &str) -> Option<Range<usize>> {
+    let mut lines = hosts.split_inclusive('\n').scan(0, |offset, line| {
+        let start = *offset;
+        *offset += line.len();
+        Some((start..*offset, line.trim_end()))
+    });
+    let begin = lines.find(|(_, line)| *line == HOSTS_BEGIN)?.0.start;
+    let end = lines.find(|(_, line)| *line == HOSTS_END)?.0.end;
+    Some(begin..end)
+}
+
+/// 把 `hosts`（`/etc/hosts` 原来的内容）里上次写的那一段换成 `block`；没有的话加在最后。别的字节一个也不动。
 #[must_use]
 pub fn replace_hosts_block(hosts: &str, block: &str) -> String {
-    let begin = hosts.lines().position(|line| line.trim_end() == HOSTS_BEGIN);
-    let end = begin.and_then(|begin| hosts.lines().skip(begin).position(|line| line.trim_end() == HOSTS_END).map(|offset| begin + offset));
-    let lines: Vec<&str> = hosts.lines().collect();
-    let (before, after): (&[&str], &[&str]) = match (begin, end) {
-        (Some(begin), Some(end)) => (&lines[..begin], &lines[end + 1..]),
-        _ => (&lines, &[]),
-    };
-    let mut out = String::new();
-    for line in before {
-        out.push_str(line);
-        out.push('\n');
+    match hosts_block_span(hosts) {
+        Some(span) => [&hosts[..span.start], block, &hosts[span.end..]].concat(),
+        None if hosts.is_empty() || hosts.ends_with('\n') => [hosts, block].concat(),
+        None => [hosts, "\n", block].concat(),
     }
-    out.push_str(block);
-    for line in after {
-        out.push_str(line);
-        out.push('\n');
-    }
-    out
+}
+
+/// `hosts` 里去掉上次写的那一段之后的样子，别的字节一个也不动；没有那一段时是 `None`。
+#[must_use]
+pub fn remove_hosts_block(hosts: &str) -> Option<String> {
+    let span = hosts_block_span(hosts)?;
+    Some([&hosts[..span.start], &hosts[span.end..]].concat())
 }
 
 #[cfg(test)]
@@ -302,5 +310,20 @@ mod tests {
         let second = replace_hosts_block(&with_more, &changed);
         assert_eq!(second, format!("{original}{changed}192.168.1.1 router\n"), "只换那一段，后面别人的行留着");
         assert_eq!(replace_hosts_block(&second, &changed), second, "再写一次不变");
+        assert_eq!(replace_hosts_block("127.0.0.1 localhost", &block), format!("127.0.0.1 localhost\n{block}"), "最后一行没有换行符");
+    }
+
+    #[test]
+    fn removing_the_hosts_block_leaves_every_other_byte_as_it_was() {
+        let block = hosts_block(&names());
+        // 别人的行：Windows 的换行、行尾的空白、没有结尾换行符的最后一行。
+        let (before, after) = ("127.0.0.1 localhost\r\n# keep  \n\n", "192.168.1.1 router\t# no newline");
+        let hosts = format!("{before}{block}{after}");
+        assert_eq!(remove_hosts_block(&hosts).as_deref(), Some(format!("{before}{after}").as_str()));
+        assert_eq!(remove_hosts_block(before), None, "没有那一段：不动");
+        let unfinished = format!("{before}{HOSTS_BEGIN}\n10.66.0.5\tnas.home.i3t\n");
+        assert_eq!(remove_hosts_block(&unfinished), None, "没有结尾标记：不知道到哪里为止，不动");
+        let replaced = replace_hosts_block(&hosts, &block);
+        assert_eq!(replaced, hosts, "换成同样的一段：一个字节也不变");
     }
 }

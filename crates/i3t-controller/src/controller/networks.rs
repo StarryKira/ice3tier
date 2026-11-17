@@ -64,7 +64,7 @@ impl Controller {
                 class: request.class,
             })?;
             let all = store.builtin_group(id)?.ok_or(Error::NotFound(Entity::Group))?;
-            let all = GroupRef { id: all, name: BUILTIN_GROUP.to_owned() };
+            let all = GroupRef { id: all, name: BUILTIN_GROUP.to_owned(), builtin: true };
             let default_rule =
                 Rule { id: 0, name: "default".to_owned(), src: all.clone(), dst: all, direction: Direction::Both, enabled: true };
             store.insert_rule(id, &default_rule)?;

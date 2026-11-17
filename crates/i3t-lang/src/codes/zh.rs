@@ -433,6 +433,7 @@ const fn choice(code: ChoiceCode) -> &'static str {
         ChoiceCode::OwnRelay => "对端挂靠本节点",
         ChoiceCode::PeerRelay => "对端挂靠的 relay",
         ChoiceCode::LowestCost => "代价最低",
+        ChoiceCode::WithinMargin => "不换：便宜得不够换路",
         ChoiceCode::NoPath => "没有路",
         ChoiceCode::Unknown => "未知",
     }

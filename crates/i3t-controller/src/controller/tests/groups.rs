@@ -43,6 +43,28 @@ fn group_names_follow_the_rule_and_are_unique_ignoring_case() {
 }
 
 #[test]
+fn every_group_reference_says_whether_it_is_the_builtin_one() {
+    let mut lab = Lab::new();
+    let network = lab.network("home").id;
+    let server = lab.join(network, &["servers"]);
+    add_rule(&lab, network, "servers", "All", Direction::OneWay);
+    let servers = lab.group(network, "servers");
+    lab.controller.create_token(network, &CreateEnrollToken { groups: vec![servers], ..CreateEnrollToken::default() }).unwrap();
+
+    let rules = lab.controller.rules(network).unwrap();
+    let ends: Vec<(&str, bool, &str, bool)> =
+        rules.iter().map(|rule| (rule.src.name.as_str(), rule.src.builtin, rule.dst.name.as_str(), rule.dst.builtin)).collect();
+    assert_eq!(ends, [("All", true, "All", true), ("servers", false, "All", true)], "默认规则两头都是内置的");
+    let node = lab.controller.node(network, server.id).unwrap().node;
+    assert_eq!((node.groups[0].name.as_str(), node.groups[0].builtin), ("servers", false));
+    let token = &lab.controller.tokens(network, false).unwrap()[0];
+    assert!(token.groups.iter().all(|group| !group.builtin) && !token.groups.is_empty(), "{:?}", token.groups);
+    let all = lab.group(network, "All");
+    let shown = lab.controller.group(network, all).unwrap();
+    assert!(shown.rules.iter().all(|rule| rule.dst.builtin), "分组的视图里的规则也一样");
+}
+
+#[test]
 fn renaming_keeps_members_and_rules_because_they_hold_the_id() {
     let mut lab = Lab::new();
     let network = lab.network("home").id;

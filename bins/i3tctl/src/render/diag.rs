@@ -189,11 +189,16 @@ fn throughput_lines(paths: &[&PathResult], name: &dyn Fn(NodeId) -> String) {
 }
 
 fn choice_text(choice: &Choice, name: &dyn Fn(NodeId) -> String) -> String {
-    let (_, lang, codes) = context();
+    let (t, lang, codes) = context();
     let route =
         choice.route.as_ref().map_or_else(|| (codes.route)(&i3t_model::control::Route::None, name), |route| (codes.route)(route, name));
     let cost = choice.cost_us.map(|cost| format!(", {} ms", lang.millis(cost))).unwrap_or_default();
-    lang.paren(&route, &format!("{}{cost}", (codes.choice)(choice.reason)))
+    let cheaper = choice
+        .cheaper
+        .as_ref()
+        .map(|cheaper| (t.cheaper_path)(&(codes.route)(&cheaper.route, name), &lang.millis(cheaper.cost_us)))
+        .unwrap_or_default();
+    lang.paren(&route, &format!("{}{cost}{cheaper}", (codes.choice)(choice.reason)))
 }
 
 fn decision_row(decision: &DecisionView, name: &dyn Fn(NodeId) -> String) -> Vec<String> {
@@ -278,6 +283,24 @@ mod tests {
     use i3t_model::control::diag::TestCode;
 
     use super::*;
+
+    #[test]
+    fn a_choice_that_stays_on_the_current_path_shows_the_cheaper_one_with_both_costs() {
+        let name = |id: NodeId| format!("n{id}");
+        let choice = Choice {
+            route: Some(i3t_model::control::Route::Direct { addr: "203.0.113.7:20330".parse().unwrap() }),
+            reason: i3t_model::control::diag::ChoiceCode::WithinMargin,
+            cost_us: Some(74_300),
+            cheaper: Some(i3t_model::control::diag::CheaperPath {
+                route: i3t_model::control::Route::Relay { relays: vec![NodeId::new(3).unwrap()] },
+                cost_us: 74_100,
+            }),
+        };
+        let text = choice_text(&choice, &name);
+        assert!(text.contains("74.3") && text.contains("74.1") && text.contains("n3"), "{text}");
+        let plain = choice_text(&Choice { cheaper: None, ..choice }, &name);
+        assert!(!plain.contains("n3"), "{plain}");
+    }
 
     #[test]
     fn a_problem_names_the_node_and_reads_from_its_code() {

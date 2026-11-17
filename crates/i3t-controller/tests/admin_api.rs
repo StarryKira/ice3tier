@@ -254,7 +254,7 @@ async fn enrolment_tokens_show_their_text_only_once() {
     let text = created["token"].as_str().unwrap();
     let token: EnrollToken = text.parse().unwrap();
     assert_eq!((token.controller.as_str(), token.key), ("ctl.example.com:20331", api.controller.public_key()));
-    assert_eq!(created["groups"], json!([{ "id": servers, "name": "Servers" }]));
+    assert_eq!(created["groups"], json!([{ "id": servers, "name": "Servers", "builtin": false }]));
     assert_eq!(created["virtual_ip"], json!("10.66.0.9"));
     assert_eq!(created["expires_at"].as_u64().unwrap() - created["created_at"].as_u64().unwrap(), 600);
 
@@ -318,7 +318,11 @@ async fn a_node_can_be_inspected_changed_and_deleted() {
         json!({ "name": "Laptop", "groups": [laptops, all], "dial_out_only": true, "routing": "lowest_cost", "reach": "relay_only" });
     let changed: model::Node = api.ok(Method::PATCH, &path, Some(patch)).await;
     assert_eq!((changed.name.as_str(), changed.fqdn.as_str()), ("laptop", "laptop.home.i3t"));
-    assert_eq!(serde_json::to_value(&changed.groups).unwrap(), json!([{ "id": laptops, "name": "laptops" }]), "All 不列出");
+    assert_eq!(
+        serde_json::to_value(&changed.groups).unwrap(),
+        json!([{ "id": laptops, "name": "laptops", "builtin": false }]),
+        "All 不列出"
+    );
     assert!(changed.dial_out_only && changed.routing.is_some() && changed.reach.is_some());
     let cleared: model::Node = api.ok(Method::PATCH, &path, Some(json!({ "routing": null }))).await;
     assert!(cleared.routing.is_none() && cleared.reach.is_some() && cleared.name == "laptop");
@@ -402,7 +406,7 @@ async fn rules_and_the_access_views_follow_each_other() {
 
     let rules: Vec<model::Rule> = api.ok(Method::GET, &format!("{base}/rules"), None).await;
     assert_eq!(rules.len(), 1);
-    let builtin = json!({ "id": all, "name": "All" });
+    let builtin = json!({ "id": all, "name": "All", "builtin": true });
     assert_eq!(
         serde_json::to_value(&rules[0]).unwrap(),
         json!({ "id": rules[0].id, "name": "default", "src": builtin, "dst": builtin, "direction": "both", "enabled": true })
@@ -421,7 +425,7 @@ async fn rules_and_the_access_views_follow_each_other() {
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(
         (created["src"].clone(), created["direction"].clone(), created["enabled"].clone()),
-        (json!({ "id": laptops, "name": "Laptops" }), json!("one_way"), json!(true))
+        (json!({ "id": laptops, "name": "Laptops", "builtin": false }), json!("one_way"), json!(true))
     );
     let rule_id = created["id"].as_u64().unwrap();
     let by_name =
@@ -1183,7 +1187,7 @@ async fn status_overview_node_list_routes_and_groups_carry_what_the_web_ui_asked
     api.ok::<model::Node>(Method::PATCH, &format!("{base}/nodes/{}", member.id), Some(json!({ "groups": [laptops] }))).await;
     api.ok::<model::Group>(Method::PATCH, &format!("{base}/groups/{laptops}"), Some(json!({ "name": "phones" }))).await;
     let node: model::NodeDetail = api.ok(Method::GET, &format!("{base}/nodes/{}", member.id), None).await;
-    assert_eq!(serde_json::to_value(&node.node.groups).unwrap(), json!([{ "id": laptops, "name": "phones" }]));
+    assert_eq!(serde_json::to_value(&node.node.groups).unwrap(), json!([{ "id": laptops, "name": "phones", "builtin": false }]));
     let (_, raw) = api.call(Method::GET, &format!("{base}/nodes/{}", member.id), None).await;
     assert!(raw.get("tags").is_none(), "标签没有了，也没有别名：{raw}");
     let gone =

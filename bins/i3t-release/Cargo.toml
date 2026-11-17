@@ -11,6 +11,7 @@ description = "ice3tier 的发布工具：生成并签署发布清单"
 anyhow.workspace = true
 clap.workspace = true
 i3t-crypto = { path = "../../crates/i3t-crypto" }
+i3t-lang = { path = "../../crates/i3t-lang" }
 i3t-model = { path = "../../crates/i3t-model" }
 i3t-proto = { path = "../../crates/i3t-proto" }
 i3t-update = { path = "../../crates/i3t-update" }

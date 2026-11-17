@@ -6,16 +6,16 @@ use rusqlite::{OptionalExtension, Row, params};
 use super::codec::{Json, SqlGroup, SqlNetwork, row_id};
 use super::{Store, StoreError};
 
-/// 读规则时顺带取出两头分组的名字。
-const SELECT: &str = "SELECT rules.*, src.name AS src_name, dst.name AS dst_name
+/// 读规则时顺带取出两头分组的名字，和它是不是内置的 `All`。
+const SELECT: &str = "SELECT rules.*, src.name AS src_name, src.builtin AS src_builtin, dst.name AS dst_name, dst.builtin AS dst_builtin
                       FROM rules JOIN groups AS src ON src.id = rules.src JOIN groups AS dst ON dst.id = rules.dst";
 
 fn from_row(row: &Row<'_>) -> rusqlite::Result<Rule> {
     Ok(Rule {
         id: row.get("id")?,
         name: row.get("name")?,
-        src: GroupRef { id: row.get::<_, SqlGroup>("src")?.0, name: row.get("src_name")? },
-        dst: GroupRef { id: row.get::<_, SqlGroup>("dst")?.0, name: row.get("dst_name")? },
+        src: GroupRef { id: row.get::<_, SqlGroup>("src")?.0, name: row.get("src_name")?, builtin: row.get("src_builtin")? },
+        dst: GroupRef { id: row.get::<_, SqlGroup>("dst")?.0, name: row.get("dst_name")?, builtin: row.get("dst_builtin")? },
         direction: row.get::<_, Json<Direction>>("direction")?.0,
         enabled: row.get("enabled")?,
     })
@@ -94,8 +94,8 @@ mod tests {
         let mut rule = Rule {
             id: 0,
             name: "laptops reach servers".to_owned(),
-            src: GroupRef { id: laptops, name: "laptops".to_owned() },
-            dst: GroupRef { id: servers, name: "servers".to_owned() },
+            src: GroupRef { id: laptops, name: "laptops".to_owned(), builtin: false },
+            dst: GroupRef { id: servers, name: "servers".to_owned(), builtin: false },
             direction: Direction::OneWay,
             enabled: true,
         };

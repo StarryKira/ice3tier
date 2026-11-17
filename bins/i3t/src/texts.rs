@@ -44,6 +44,7 @@ pub struct Help {
     pub intercept_status: &'static str,
     pub hosts: &'static str,
     pub hosts_apply: &'static str,
+    pub hosts_remove: &'static str,
     pub self_check: &'static str,
 }
 
@@ -196,7 +197,12 @@ pub struct Ui {
     pub leftover: &'static str,
     pub intercept_active: fn(usize, &str) -> String,
     pub hosts_written: fn(usize, &str) -> String,
-    pub hosts_write_failed: fn(&str) -> String,
+    /// 写 `/etc/hosts` 失败：文件，要用 sudo 再执行的命令。
+    pub hosts_write_failed: fn(&str, &str) -> String,
+    pub hosts_removed: fn(&str) -> String,
+    pub hosts_no_block: fn(&str) -> String,
+    /// 透明访问关着，`/etc/hosts` 里还有 `i3t hosts --apply` 写的名字。
+    pub hosts_left: fn(&str) -> String,
 }
 
 static ZH: Texts = Texts {
@@ -222,6 +228,7 @@ static ZH: Texts = Texts {
         intercept_status: "透明访问的状态，和它在系统里装了什么",
         hosts: "网络里的名字写成 /etc/hosts 的几行（给没有 systemd-resolved 的机器）",
         hosts_apply: "写进 /etc/hosts，只换上次写的那一段，要 root",
+        hosts_remove: "从 /etc/hosts 去掉写进去的那一段，要 root",
         self_check: "自检：读配置和状态，和 controller 握手",
     },
     values: Values { dir: "目录", file: "文件", host: "地址", port: "端口", exit: "出口" },
@@ -368,7 +375,10 @@ static ZH: Texts = Texts {
         leftover: "节点没在运行，这些是上次留下的：下次启动时换掉，i3t set intercept off 现在就拆掉",
         intercept_active: |active, traffic| format!("{active} 个连接，{traffic}"),
         hosts_written: |count, path| format!("{path} 里写了 {count} 个名字"),
-        hosts_write_failed: |path| format!("写 {path}：要 root，sudo i3t hosts --apply"),
+        hosts_write_failed: |path, command| format!("写 {path}：要 root，sudo {command}"),
+        hosts_removed: |path| format!("从 {path} 去掉了 i3t hosts 写的那一段"),
+        hosts_no_block: |path| format!("{path} 里没有 i3t hosts 写的那一段"),
+        hosts_left: |path| format!("{path} 里还有 i3t hosts --apply 写的名字：sudo i3t hosts --remove 去掉"),
     },
 };
 
@@ -395,6 +405,7 @@ static EN: Texts = Texts {
         intercept_status: "Transparent access state and what it installed in the system",
         hosts: "Names in the network as /etc/hosts lines (for machines without systemd-resolved)",
         hosts_apply: "Write them into /etc/hosts, replacing only the block written last time; needs root",
+        hosts_remove: "Remove that block from /etc/hosts; needs root",
         self_check: "Self-check: read configuration and state, handshake with the controller",
     },
     values: Values { dir: "DIR", file: "FILE", host: "HOST", port: "PORT", exit: "EXIT" },
@@ -433,7 +444,7 @@ static EN: Texts = Texts {
         forward_target: "port forward target",
         not_joined: "Not joined yet: create an enrollment token under \"Add node\" in the WebUI, then echo <TOKEN> | i3t join",
         network: "Network",
-        netmap: |version, peers, relays| format!("v{version}, {peers} peers, {relays} relays"),
+        netmap: |version, peers, relays| format!("v{version}, peers {peers}, relays {relays}"),
         running: |version, uptime| format!("Running i3t {version}, up {uptime}"),
         link_static: "static mode, no controller",
         link_online: "connected",
@@ -447,7 +458,7 @@ static EN: Texts = Texts {
         mapping_varies: "Port mapping varies by peer; no hole punching",
         attached: "Attached",
         relay_counts: |sessions, packets, bytes, dropped| {
-            format!("{sessions} sessions, {packets} packets forwarded ({bytes}), {dropped} dropped")
+            format!("sessions {sessions}, packets forwarded {packets} ({bytes}), dropped {dropped}")
         },
         update: "Update",
         state: "State",
@@ -467,7 +478,7 @@ static EN: Texts = Texts {
         down: "down",
         handshake_failures: |total, deadline, unknown_key, tls, protocol, busy| {
             format!(
-                "{total} incoming handshakes failed: timeout {deadline}, unknown key {unknown_key}, TLS {tls}, protocol {protocol}, too many {busy}"
+                "Incoming handshakes failed: {total} (timeout {deadline}, unknown key {unknown_key}, TLS {tls}, protocol {protocol}, too many {busy})"
             )
         },
         routes: "Routes",
@@ -521,7 +532,7 @@ static EN: Texts = Texts {
         tune_write_failed: |key| format!("Writing {key} failed: needs root, sudo i3t tune --apply"),
         tune_file_header: "Written by i3t tune --apply; see i3t tune for the reasons.",
         tune_nothing: "Nothing to change",
-        tune_wanted: |count, file| format!("{count} changes suggested. sudo i3t tune --apply applies them now and writes {file}"),
+        tune_wanted: |count, file| format!("Changes suggested: {count}. sudo i3t tune --apply applies them now and writes {file}"),
         tune_persist_failed: |file| format!("Applied, but writing {file} failed; a reboot reverts them"),
         tune_changed: |count, file| format!("Changed {count}, applied and written to {file}"),
         tune_files: |soft, hard| {
@@ -542,12 +553,43 @@ static EN: Texts = Texts {
         policy_rule: "Routing rule",
         route: "Route",
         link: "Link",
-        table_summary: |table, chains, peers| format!("{table}: {chains}; {peers} peers"),
+        table_summary: |table, chains, peers| format!("{table}: {chains}; peers {peers}"),
         unreadable: |error| format!("unreadable (needs root): {error}"),
         nothing_installed: "Nothing from transparent access in the system",
         leftover: "Node not running; these are left from the last run: the next start replaces them, i3t set intercept off removes them now",
-        intercept_active: |active, traffic| format!("{active} connections, {traffic}"),
-        hosts_written: |count, path| format!("Wrote {count} names to {path}"),
-        hosts_write_failed: |path| format!("Writing {path}: needs root, sudo i3t hosts --apply"),
+        intercept_active: |active, traffic| format!("connections {active}, {traffic}"),
+        hosts_written: |count, path| format!("Names written to {path}: {count}"),
+        hosts_write_failed: |path, command| format!("Writing {path}: needs root, sudo {command}"),
+        hosts_removed: |path| format!("Removed the i3t hosts block from {path}"),
+        hosts_no_block: |path| format!("No i3t hosts block in {path}"),
+        hosts_left: |path| format!("{path} still has names from i3t hosts --apply: sudo i3t hosts --remove"),
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use i3t_lang::cli::plural_after_one;
+
+    use super::*;
+
+    #[test]
+    fn english_counts_read_right_for_one() {
+        let ui = &EN.ui;
+        let said = [
+            (ui.netmap)(1, 1, 1),
+            (ui.relay_counts)(1, 1, "1 B", 1),
+            (ui.handshake_failures)(1, 1, 1, 1, 1, 1),
+            (ui.profile_running)("balanced", 1),
+            (ui.tune_wanted)(1, "/etc/sysctl.d/90-i3t.conf"),
+            (ui.tune_changed)(1, "/etc/sysctl.d/90-i3t.conf"),
+            (ui.tune_files)(1, 1),
+            (ui.table_summary)("table ip i3t", "intercept", 1),
+            (ui.intercept_active)(1, "↑ 1 B  ↓ 1 B"),
+            (ui.hosts_written)(1, "/etc/hosts"),
+            (ui.handshake_timeout)(1),
+        ];
+        for text in said {
+            assert_eq!(plural_after_one(&text), None, "{text}");
+        }
+    }
+}

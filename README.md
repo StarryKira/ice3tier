@@ -103,15 +103,16 @@ sudo systemctl restart i3t
 i3t intercept status          # 状态，和它在系统里装了什么
 ```
 
-节点进程要 root，或者 `CAP_NET_ADMIN` 和 `CAP_NET_BIND_SERVICE`：以 `i3t` 用户跑的系统服务用 `sudo systemctl edit i3t` 加上
+节点进程要 root，或者 `CAP_NET_ADMIN` 和 `CAP_NET_BIND_SERVICE`：以 `i3t` 用户跑的系统服务（`deploy/systemd/i3t.service`）装上
+[`deploy/systemd/i3t.service.d/intercept.conf`](deploy/systemd/i3t.service.d/intercept.conf)，里面写着为什么只要这两项：
 
-```ini
-[Service]
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+```sh
+sudo install -D -m 0644 deploy/systemd/i3t.service.d/intercept.conf /etc/systemd/system/i3t.service.d/intercept.conf
+sudo systemctl daemon-reload && sudo systemctl restart i3t
 ```
 
 系统里还要有 `nft`（nftables）和 `ip`（iproute2）。它装一张包过滤的表、一条策略路由和一块不走流量的网卡 `i3t0`，节点停下时全部拆掉。
-有 systemd-resolved 的机器上名字直接能用；没有的用 `sudo i3t hosts --apply` 把名字写进 `/etc/hosts`。别的节点这样连到本机的服务时，
+有 systemd-resolved 的机器上名字直接能用；没有的用 `sudo i3t hosts --apply` 把名字写进 `/etc/hosts`，`sudo i3t hosts --remove` 再去掉。别的节点这样连到本机的服务时，
 本机打开了透明访问的话，服务看到的是对端的虚拟 IP。做法见 [docs/architecture.md](docs/architecture.md) 的透明访问一节。
 
 Linux 上可以用 `i3t tune` 检查会影响节点表现的内核参数（UDP 缓冲的上限、TCP 的拥塞控制等），它只列出建议；`sudo i3t tune --apply` 才会改。它也说明这个内核能不能给 TCP 的重传设上限（Linux 6.15 起）：能的话，lane 和 TCP 中转断网之后恢复得快。
@@ -120,7 +121,7 @@ Linux 上可以用 `i3t tune` 检查会影响节点表现的内核参数（UDP �
 
 节点的本机设置在状态目录的 `config.toml` 里，每一项都有注释。`i3t status` 查看节点的状态，`i3t routes` 查看到各个对端现在怎么走。
 
-三个程序在终端上的文字跟着系统的语言：简体中文或英文。要指定的话设环境变量 `I3T_LANG=zh-CN` 或 `I3T_LANG=en`。`config.toml` 的注释用第一次写它时的语言；日志不翻译。
+三个程序（和发布工具 `i3t-release`）在终端上的文字跟着系统的语言：简体中文或英文。要指定的话设环境变量 `I3T_LANG=zh-CN` 或 `I3T_LANG=en`。`config.toml` 的注释用第一次写它时的语言；日志不翻译。
 
 ## 构建
 

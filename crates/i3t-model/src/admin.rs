@@ -156,6 +156,9 @@ pub struct NodeRef {
 pub struct GroupRef {
     pub id: GroupId,
     pub name: String,
+    /// 是不是内置的 `All`：界面不用按名字认它。比这个字段旧的 controller 不给，读成 `false`。
+    #[serde(default)]
+    pub builtin: bool,
 }
 
 /// controller 自己的情况。也用来检查地址和令牌对不对。
@@ -1776,18 +1779,21 @@ mod tests {
 
     #[test]
     fn groups_are_referenced_by_id_and_shown_with_their_name() {
-        let laptops = GroupRef { id: GroupId(2), name: "Laptops".to_owned() };
+        let laptops = GroupRef { id: GroupId(2), name: "Laptops".to_owned(), builtin: false };
         let rule = Rule {
             id: 5,
             name: "ssh".to_owned(),
             src: laptops.clone(),
-            dst: GroupRef { id: GroupId(1), name: "All".to_owned() },
+            dst: GroupRef { id: GroupId(1), name: "All".to_owned(), builtin: true },
             direction: Direction::OneWay,
             enabled: true,
         };
         let value = serde_json::to_value(&rule).unwrap();
-        assert_eq!(value["src"], json!({ "id": 2, "name": "Laptops" }));
+        assert_eq!(value["src"], json!({ "id": 2, "name": "Laptops", "builtin": false }));
+        assert_eq!(value["dst"], json!({ "id": 1, "name": "All", "builtin": true }), "内置的 All 不用按名字认");
         assert_eq!(serde_json::from_value::<Rule>(value).unwrap(), rule);
+        let old: GroupRef = serde_json::from_value(json!({ "id": 2, "name": "Laptops" })).unwrap();
+        assert_eq!(old, laptops, "旧的 controller 不给 builtin");
 
         let group = Group { id: GroupId(2), name: "Laptops".to_owned(), builtin: false, nodes: Vec::new(), rules: vec![rule] };
         let value = serde_json::to_value(&group).unwrap();

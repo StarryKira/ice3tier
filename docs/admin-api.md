@@ -4,7 +4,20 @@
 
 对应的 Rust 类型在 `crates/i3t-model/src/admin.rs`，实现在 `crates/i3t-controller/src/admin.rs`。文档和代码不一致时以代码为准，并请修正文档。
 
-> **最新一次新增**（透明访问）。Linux 节点可以在本机打开透明访问：本机的程序不配代理，直接连别的节点的虚拟 IP 或者名字。
+> **最新一次新增**（几处小的补充）。这一次的清单：
+>
+> - 分组的引用 `GroupRef` 多了 `builtin`：是不是内置的 `All`，界面不用按名字认它。用到它的地方都有：节点的 `groups`（第 5 节）、
+>   注册令牌的 `groups`（第 6 节）、规则的 `src`、`dst`（第 7 节，也包括分组和访问关系图里列出的规则）。操作记录的参数不是 `GroupRef`，没有变（第 3 节）。
+> - 主动测试的路由决定（第 19 节的 `RouteResult`）：延迟优先模式的选择 `lowest_cost` 按节点选路器自己的差距（max(5 ms, 10%)）
+>   从这一对现在走的路算。更便宜的候选便宜得不够换路时，选择是现在的路，`reason` 是新的代码 `within_margin`，
+>   `Choice` 新的字段 `cheaper`（`{ "route", "cost_us" }`）是那条更便宜的；别的时候 `cheaper` 是 `null`。
+> - 透明访问（第 5 节的 `InterceptCause`）：`range_in_use` 现在也会在运行中出现：装着的时候节点每 5 秒再查一次网络的地址段
+>   和这台机器的网络重不重叠，重叠了当场拆掉、报 `failed` 和 `range_in_use`，重叠没了自己再装上，`state` 变回 `on`。
+> - 节点协议没有升版：上报里的 `cheaper` 旧的 controller 忽略，`within_margin` 旧的 controller 读成 `unknown`；旧的节点不报。
+>
+> 已有接口的路径、请求体和应答里原有的字段都没有变。
+>
+> **上一次新增**（透明访问）。Linux 节点可以在本机打开透明访问：本机的程序不配代理，直接连别的节点的虚拟 IP 或者名字。
 > 它改的是那台机器的网络配置，只能在节点上打开（`i3t set intercept on`），管理接口只看状态。这一次的清单：
 >
 > - 节点详情 `NodeDetail` 多了 `intercept`（结构 `InterceptReport`）：开着、关着、开不起来（原因是代码 `InterceptCause`）、这个平台上没有；
@@ -13,7 +26,7 @@
 >
 > 已有接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **上一次新增**（性能档位）。管理员可以给每个节点选一个性能档位，节点报它实际在用的。这一次的清单：
+> **再上一次新增**（性能档位）。管理员可以给每个节点选一个性能档位，节点报它实际在用的。这一次的清单：
 >
 > - 节点 `Node` 多了 `profile`：管理员给它选的档位，`"low_footprint"`、`"balanced"`、`"high_throughput"`，没有选时是 `null`（第 5 节）。
 > - 改节点（`PATCH …/nodes/{node}`）可以写 `profile`；写 `null` 是不再指定，节点改用它本机配置文件里的（第 5 节）。
@@ -24,7 +37,7 @@
 >
 > 已有接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **再上一次改动**（分组取代标签）。原来的"标签"只是节点、注册令牌和规则上的一串文字；现在它是**分组**：一样单独的东西，
+> **更早的改动**（分组取代标签）。原来的"标签"只是节点、注册令牌和规则上的一串文字；现在它是**分组**：一样单独的东西，
 > 有编号和名字，有自己的接口（第 18 节）。这是改名，旧的写法不再收，也没有别名。这一次的清单：
 >
 > - 去掉的：`POST /networks/{network}/tags/rename` 和它的 `RenameTag`、`RenamedTag`；`Node.tags`、`UpdateNode.tags`；
@@ -523,7 +536,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   "name": "node-1",
   "fqdn": "node-1.home.i3t",
   "virtual_ip": "10.66.0.1",
-  "groups": [{ "id": 3, "name": "servers" }],
+  "groups": [{ "id": 3, "name": "servers", "builtin": false }],
   "declared": { "exit": true, "relay": true, "forward": true },
   "relay": {
     "udp": ["203.0.113.7:20330"],
@@ -577,7 +590,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `name` | 名字，之后可以改。「新增」节点加入时取它上报的主机名：只取第一段（`nas.lan` 取 `nas`），转成小写，名字里不能有的字符换成连字符；同一个网络里重名（或者那个名字还在冷却期）就加 `-2`、`-3`……。主机名取不出合法的名字（空的、全是数字、不是 ASCII、`localhost`、`node-<数字>`）或者节点的版本太旧没有报主机名时，叫 `node-<编号>` |
 | `fqdn` | 全名：`<name>.<网络的 domain>` |
 | `virtual_ip` | 虚拟 IP。加入时分配（地址段里最小的空闲地址），之后不变，除非管理员改 |
-| `groups` | 「新增」它所在的分组（`GroupRef`：`{ "id": 分组编号, "name": 名字 }`），按名字排（不分大小写）。内置的 `All` 不列出：每个节点都在里面 |
+| `groups` | 「新增」它所在的分组（`GroupRef`：`{ "id": 分组编号, "name": 名字, "builtin": 是不是 All }`），按名字排（不分大小写）。内置的 `All` 不列出：每个节点都在里面 |
 | `declared` | 节点在本地声明的"可以承担"：`exit` 出口、`relay`、`forward` 端口转发的目标。由节点上报，这里只读 |
 | `relay` | 启用为 relay 时是它的设置（见 5.5），否则 `null` |
 | `exit` | 启用为出口时是它的设置（见 5.6），否则 `null` |
@@ -616,7 +629,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   "name": "laptop",
   "fqdn": "laptop.home.i3t",
   "virtual_ip": "10.66.0.2",
-  "groups": [{ "id": 2, "name": "laptops" }],
+  "groups": [{ "id": 2, "name": "laptops", "builtin": false }],
   "declared": { "exit": false, "relay": false, "forward": false },
   "relay": null,
   "exit": null,
@@ -715,7 +728,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `bind_failed` | 别的原因绑不上 | `address`，`detail`：系统的原话 |
 | `table_in_use` | 策略路由用的路由表里有别的程序的路由 | `table`：表的编号（2033） |
 | `link_in_use` | 已经有一块同名的网卡，不是 ice3tier 建的 | `link`：`"i3t0"` |
-| `range_in_use` | 网络的地址段和这台机器所在的一个真实网络重叠（本机网卡上的地址，或者 `main` 表里默认路由之外的一条路由）：装上会把它从那个网络上切下来，所以什么都没装 | `with`：重叠的那个地址或者路由，写法和 `ip` 一样，比如 `"192.168.1.5/24 dev eth0"`、`"10.0.0.0/8 dev tun0"` |
+| `range_in_use` | 网络的地址段和这台机器所在的一个真实网络重叠（本机网卡上的地址，或者 `main` 表里默认路由之外的一条路由）：装上会把它从那个网络上切下来，所以什么都没装。「新增」装着的时候节点每 5 秒再查一次：后来才重叠的（DHCP 换了地址、VPN 连上）当场全部拆掉，报这个；重叠没了，节点自己再装上，`state` 变回 `on`，不用重启 | `with`：重叠的那个地址或者路由，写法和 `ip` 一样，比如 `"192.168.1.5/24 dev eth0"`、`"10.0.0.0/8 dev tun0"` |
 
 不认识的 `code` 当作 `unknown`。
 
@@ -970,7 +983,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   "network": 1,
   "created_at": 1794798564,
   "expires_at": 1794802164,
-  "groups": [{ "id": 3, "name": "servers" }],
+  "groups": [{ "id": 3, "name": "servers", "builtin": false }],
   "virtual_ip": null,
   "successor_of": null,
   "prefix": "i3t-eyJzIjoiSmFY",
@@ -1020,7 +1033,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   "network": 1,
   "created_at": 1794798564,
   "expires_at": 1794802164,
-  "groups": [{ "id": 3, "name": "servers" }],
+  "groups": [{ "id": 3, "name": "servers", "builtin": false }],
   "virtual_ip": null,
   "successor_of": null,
   "prefix": "i3t-eyJzIjoiSmFY",
@@ -1050,12 +1063,12 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 ```json
 {
   "id": 2, "name": "ssh",
-  "src": { "id": 2, "name": "laptops" }, "dst": { "id": 3, "name": "servers" },
+  "src": { "id": 2, "name": "laptops", "builtin": false }, "dst": { "id": 3, "name": "servers", "builtin": false },
   "direction": "one_way", "enabled": true
 }
 ```
 
-「新增」`src` 和 `dst` 是 `GroupRef`：分组的编号和它现在的名字。
+「新增」`src` 和 `dst` 是 `GroupRef`：分组的编号和它现在的名字，`builtin` 说它是不是内置的 `All`。
 
 ### GET /networks/{network}/rules
 
@@ -1106,20 +1119,20 @@ controller 自己的情况。也用来检查地址和令牌对不对。
         { "id": 2, "name": "laptop", "virtual_ip": "10.66.0.2" },
         { "id": 3, "name": "node-3", "virtual_ip": "10.66.0.3" }
       ],
-      "rules": [{ "id": 1, "name": "default", "src": { "id": 1, "name": "All" }, "dst": { "id": 1, "name": "All" }, "direction": "both", "enabled": false }]
+      "rules": [{ "id": 1, "name": "default", "src": { "id": 1, "name": "All", "builtin": true }, "dst": { "id": 1, "name": "All", "builtin": true }, "direction": "both", "enabled": false }]
     },
     {
       "id": 2, "name": "laptops", "builtin": false, "nodes": [{ "id": 2, "name": "laptop", "virtual_ip": "10.66.0.2" }],
-      "rules": [{ "id": 2, "name": "ssh", "src": { "id": 2, "name": "laptops" }, "dst": { "id": 3, "name": "servers" }, "direction": "one_way", "enabled": true }]
+      "rules": [{ "id": 2, "name": "ssh", "src": { "id": 2, "name": "laptops", "builtin": false }, "dst": { "id": 3, "name": "servers", "builtin": false }, "direction": "one_way", "enabled": true }]
     },
     {
       "id": 3, "name": "servers", "builtin": false, "nodes": [{ "id": 1, "name": "node-1", "virtual_ip": "10.66.0.1" }],
-      "rules": [{ "id": 2, "name": "ssh", "src": { "id": 2, "name": "laptops" }, "dst": { "id": 3, "name": "servers" }, "direction": "one_way", "enabled": true }]
+      "rules": [{ "id": 2, "name": "ssh", "src": { "id": 2, "name": "laptops", "builtin": false }, "dst": { "id": 3, "name": "servers", "builtin": false }, "direction": "one_way", "enabled": true }]
     }
   ],
   "rules": [
-    { "id": 1, "name": "default", "src": { "id": 1, "name": "All" }, "dst": { "id": 1, "name": "All" }, "direction": "both", "enabled": false },
-    { "id": 2, "name": "ssh", "src": { "id": 2, "name": "laptops" }, "dst": { "id": 3, "name": "servers" }, "direction": "one_way", "enabled": true }
+    { "id": 1, "name": "default", "src": { "id": 1, "name": "All", "builtin": true }, "dst": { "id": 1, "name": "All", "builtin": true }, "direction": "both", "enabled": false },
+    { "id": 2, "name": "ssh", "src": { "id": 2, "name": "laptops", "builtin": false }, "dst": { "id": 3, "name": "servers", "builtin": false }, "direction": "one_way", "enabled": true }
   ],
   "unconnected": [{ "id": 3, "name": "node-3", "virtual_ip": "10.66.0.3" }],
   "unacknowledged": []
@@ -1145,7 +1158,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
   "to": { "id": 1, "name": "node-1", "virtual_ip": "10.66.0.1" },
   "allowed": true,
   "rules": [
-    { "id": 2, "name": "ssh", "src": { "id": 2, "name": "laptops" }, "dst": { "id": 3, "name": "servers" }, "direction": "one_way", "enabled": true }
+    { "id": 2, "name": "ssh", "src": { "id": 2, "name": "laptops", "builtin": false }, "dst": { "id": 3, "name": "servers", "builtin": false }, "direction": "one_way", "enabled": true }
   ]
 }
 ```
@@ -2175,8 +2188,11 @@ Prometheus 的文本格式（`Content-Type: text/plain; version=0.0.4`）。**�
 `GroupRef` 是指代一个分组时附带的名字（现在的名字），节点的 `groups`、注册令牌的 `groups`、规则的 `src` 和 `dst` 用它：
 
 ```json
-{ "id": 3, "name": "servers" }
+{ "id": 3, "name": "servers", "builtin": false }
 ```
+
+「新增」`builtin`：是不是内置的 `All`，界面不用按名字认它。比这个文档旧的 controller 不给这个字段（当作 `false`，再按名字认）。
+操作记录的参数里的分组还是 `group` 加 `group_name` 那样写，没有这个字段（第 3 节）。
 
 `Group`：
 
@@ -2187,7 +2203,7 @@ Prometheus 的文本格式（`Content-Type: text/plain; version=0.0.4`）。**�
   "builtin": false,
   "nodes": [{ "id": 1, "name": "nas", "virtual_ip": "10.66.0.1" }],
   "rules": [
-    { "id": 2, "name": "ssh", "src": { "id": 2, "name": "laptops" }, "dst": { "id": 3, "name": "servers" }, "direction": "one_way", "enabled": true }
+    { "id": 2, "name": "ssh", "src": { "id": 2, "name": "laptops", "builtin": false }, "dst": { "id": 3, "name": "servers", "builtin": false }, "direction": "one_way", "enabled": true }
   ]
 }
 ```
@@ -2248,7 +2264,7 @@ Prometheus 的文本格式（`Content-Type: text/plain; version=0.0.4`）。**�
   "name": "servers",
   "nodes": [{ "id": 1, "name": "nas", "virtual_ip": "10.66.0.1" }],
   "rules": [
-    { "id": 2, "name": "ssh", "src": { "id": 2, "name": "laptops" }, "dst": { "id": 3, "name": "servers" }, "direction": "one_way", "enabled": true }
+    { "id": 2, "name": "ssh", "src": { "id": 2, "name": "laptops", "builtin": false }, "dst": { "id": 3, "name": "servers", "builtin": false }, "direction": "one_way", "enabled": true }
   ],
   "tokens": [4]
 }
@@ -2403,8 +2419,8 @@ Prometheus 的文本格式（`Content-Type: text/plain; version=0.0.4`）。**�
     "state": "done", "problem": null,
     "forward": {
       "from": 2, "to": 5, "mode": "direct_first", "current": { "via": "direct", "addr": "203.0.113.7:20330" },
-      "direct_first": { "route": { "via": "direct", "addr": "203.0.113.7:20330" }, "reason": "direct", "cost_us": 74300 },
-      "lowest_cost": { "route": { "via": "relay", "relays": [3] }, "reason": "lowest_cost", "cost_us": 55200 },
+      "direct_first": { "route": { "via": "direct", "addr": "203.0.113.7:20330" }, "reason": "direct", "cost_us": 74300, "cheaper": null },
+      "lowest_cost": { "route": { "via": "relay", "relays": [3] }, "reason": "lowest_cost", "cost_us": 55200, "cheaper": null },
       "candidates": [ { "route": { "via": "relay", "relays": [3] }, "cost_us": 55200, "legs": [], "load_percent": 0, "current": false } ]
     },
     "reverse": { "from": 5, "to": 2, "…": "同上，是 nas 那一端算的" }
@@ -2498,7 +2514,16 @@ Prometheus 的文本格式（`Content-Type: text/plain; version=0.0.4`）。**�
 
 短时间的吞吐测试受拥塞控制启动阶段的影响，结果偏低；界面应当把 `congestion` 和 `ms` 一起显示。
 
-`RouteResult`：`state`、`problem`、`forward`（`a` 到 `b`，`a` 算的）、`reverse`（`b` 到 `a`，`b` 算的；它没有报时是 `null`）。每个方向是 `DecisionView`：`from`、`to`、`mode`（发送方现在用的模式）、`current`（现在走的路）、`direct_first` 和 `lowest_cost`（`Choice`：`route`，没有能走的路时是 `null`；`reason`；`cost_us`）、`candidates`（`PathCandidate` 的数组，第 15 节）。`Choice.reason`：`lan`（局域网直连无条件优先）、`direct`（默认模式：直连可用就走直连）、`peer_is_relay`（对端自己就是 relay）、`own_relay`（对端挂在发送方自己的 relay 上）、`peer_relay`（对端挂靠的 relay）、`lowest_cost`（候选里代价最低的）、`no_path`。这是按当前的测量值现算的结论，不含延迟优先模式的迟滞：节点真的换过去还要满足迟滞的条件。
+`RouteResult`：`state`、`problem`、`forward`（`a` 到 `b`，`a` 算的）、`reverse`（`b` 到 `a`，`b` 算的；它没有报时是 `null`）。每个方向是 `DecisionView`：`from`、`to`、`mode`（发送方现在用的模式）、`current`（现在走的路）、`direct_first` 和 `lowest_cost`（`Choice`：`route`，没有能走的路时是 `null`；`reason`；`cost_us`；「新增」`cheaper`，见下）、`candidates`（`PathCandidate` 的数组，第 15 节）。`Choice.reason`：`lan`（局域网直连无条件优先）、`direct`（默认模式：直连可用就走直连）、`peer_is_relay`（对端自己就是 relay）、`own_relay`（对端挂在发送方自己的 relay 上）、`peer_relay`（对端挂靠的 relay）、`lowest_cost`（候选里代价最低的）、「新增」`within_margin`（延迟优先模式留在现在的路上：有更便宜的候选，但没有便宜到选路器换路要的差距 max(5 ms, 10%)）、`no_path`。
+
+「新增」延迟优先模式的选择是从这一对现在走的路（`current`）出发算的，和节点的选路器用同一个差距：代价最低的候选比现在的路便宜至少 max(5 ms, 10%) 时是它（`lowest_cost`）；便宜得不够时还是现在的路（`within_margin`，`route` 和 `cost_us` 是现在的路的），那条更便宜的在 `cheaper` 里：`{ "route": 路, "cost_us": 代价 }`，两条路的代价都在。别的 `reason`、比这个文档旧的节点报的，`cheaper` 是 `null`。现在的路不在候选里（没有路、断了）时节点立刻换到最低的，不看差距。
+
+```json
+"lowest_cost": { "route": { "via": "direct", "addr": "203.0.113.7:20330" }, "reason": "within_margin", "cost_us": 74300,
+                 "cheaper": { "route": { "via": "relay", "relays": [3] }, "cost_us": 74100 } }
+```
+
+这是按当前的测量值现算的结论，只含差距，不含时间上的条件：节点真的换过去还要连续 3 个评估窗口都便宜这么多、过了换路之后的停留期，刚重连的 relay 还要等它稳住。
 
 ### GET /networks/{network}/tests
 
