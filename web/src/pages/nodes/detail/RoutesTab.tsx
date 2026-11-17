@@ -97,9 +97,17 @@ function modeHint(entry: NodeRoute): string | undefined {
   }
 }
 
-/** 路径长度：直连一段；经中继是中继数加一。 */
-const lengthOf = (route: Route): number | null =>
-  route.via === 'direct' ? 1 : route.via === 'relay' ? route.relays.length + 1 : null
+/**
+ * 两端之间经过的别的节点：经中继时的中继，去掉本节点自己和对端自己（本节点是中继、对端挂在它上面，或者对端是中继、
+ * 本节点挂在它上面，中间都没有别人）。P2P 是空的；走不通是 `null`。
+ */
+function middleOf(route: Route, self: NodeId, peer: NodeId): NodeId[] | null {
+  if (route.via === 'none') return null
+  return route.via === 'direct' ? [] : route.relays.filter((id) => id !== self && id !== peer)
+}
+
+/** 路径长度：中间经过的节点数加一。 */
+const lengthOf = (middle: readonly NodeId[] | null): number | null => (middle === null ? null : middle.length + 1)
 
 type Leg = 'udp' | 'tcp' | 'unknown' | null
 
@@ -125,25 +133,15 @@ function ModeBadge({ route, peerOnline, hint }: { route: Route; peerOnline: bool
   return hint === undefined ? badge : <Tooltip content={hint}>{badge}</Tooltip>
 }
 
-/**
- * 下一跳：经中继时是第一个中继。P2P、或者中继就是对端自己（对端是中继、直接连它的中继会话，没有经过别人）
- * 是 `null`，写一道横线。
- */
-function nextHopOf(route: Route, peer: NodeId): NodeId | null {
-  if (route.via !== 'relay') return null
-  const own = route.relays.length === 1 && route.relays[0] === peer
-  return own ? null : (route.relays[0] ?? null)
-}
-
 const dash = <span className="text-muted-foreground">—</span>
 
-/** 下一跳的名字。经好几个中继时，悬停写出整条（后面几个看路径长度就知道有）。 */
-function NextHop({ route, peer, nodes }: { route: Route; peer: NodeId; nodes: readonly Node[] }) {
-  const hop = nextHopOf(route, peer)
-  if (hop === null) return dash
+/** 下一跳：中间经过的第一个节点；中间没有别人时是一道横线。经好几个时，悬停写出整条（路径长度也看得出来）。 */
+function NextHop({ middle, nodes }: { middle: readonly NodeId[] | null; nodes: readonly Node[] }) {
+  const hop = middle?.[0]
+  if (middle === null || hop === undefined) return dash
   const name = <span className="whitespace-nowrap">{nodeName(nodes, hop)}</span>
-  if (route.via !== 'relay' || route.relays.length < 2) return name
-  const chain = route.relays.map((id) => nodeName(nodes, id)).join(' → ')
+  if (middle.length < 2) return name
+  const chain = middle.map((id) => nodeName(nodes, id)).join(' → ')
   return (
     <Tooltip content={d.routesViaChain(chain)}>
       <span tabIndex={0} className="cursor-help rounded-sm">
@@ -154,17 +152,17 @@ function NextHop({ route, peer, nodes }: { route: Route; peer: NodeId; nodes: re
 }
 
 /** 下一跳的虚拟 IP。 */
-function NextHopIp({ route, peer, nodes }: { route: Route; peer: NodeId; nodes: readonly Node[] }) {
-  const hop = nextHopOf(route, peer)
-  const ip = hop === null ? undefined : nodes.find((candidate) => candidate.id === hop)?.virtual_ip
+function NextHopIp({ middle, nodes }: { middle: readonly NodeId[] | null; nodes: readonly Node[] }) {
+  const hop = middle?.[0]
+  const ip = hop === undefined ? undefined : nodes.find((candidate) => candidate.id === hop)?.virtual_ip
   return ip === undefined ? dash : <span className="whitespace-nowrap tabular">{ip}</span>
 }
 
 const p = t.routes.protocol
 
 /**
- * 协议：前面是业务协议，后面是底层的传输。共用的连接是 QUIC，底下 UDP 或 TCP（UDP 不通时到中继改走 TCP，
- * 黄字，悬停有一句解释；不知道底下是什么时只写 QUIC）。这一对在节点对里打开了 ice3proxy 时，下面再写一行。
+ * 协议：共用的连接是 QUIC，平常写 QUIC/UDP。到中继 UDP 不通、QUIC 的包装在 TCP 里送过去时只写 TCP（黄字，
+ * 悬停有一句解释）。不知道底下是什么时只写 QUIC。这一对在节点对里打开了 ice3proxy 时，下面再写一行。
  * 走不通时是一道横线。
  */
 function Protocol({ route, leg, lane }: { route: Route; leg: Leg; lane: boolean }) {
@@ -173,7 +171,7 @@ function Protocol({ route, leg, lane }: { route: Route; leg: Leg; lane: boolean 
     leg === 'tcp' ? (
       <Tooltip content={t.routes.relayLegHint.tcp}>
         <span tabIndex={0} className="cursor-help rounded-sm whitespace-nowrap text-warn">
-          {p.over(p.quic, t.routes.legTransport.tcp)}
+          {t.routes.legTransport.tcp}
         </span>
       </Tooltip>
     ) : (
@@ -195,9 +193,16 @@ function Protocol({ route, leg, lane }: { route: Route; leg: Leg; lane: boolean 
   )
 }
 
-/** 一条路底下的传输：P2P 直连只用 UDP；经中继时是到第一个中继那一段的传输。 */
-const legOf = (route: Route, reported: Leg): Leg =>
-  route.via === 'direct' ? 'udp' : route.via === 'relay' ? reported : null
+/**
+ * 一条路底下的传输：P2P 直连只用 UDP；经中继时是到第一个中继那一段的传输（`reported`）。本节点自己就是那个中继、
+ * 对端挂在它上面时，这一段是对端连过来的：看对端连本节点用的是什么（`peerLeg`，取自本节点的 `reached_by`）。
+ */
+function legOf(route: Route, self: NodeId, reported: Leg, peerLeg: Leg): Leg {
+  if (route.via === 'direct') return 'udp'
+  if (route.via !== 'relay') return null
+  if (route.relays[0] === self) return route.relays.length === 1 ? peerLeg : null
+  return reported
+}
 
 /** 一个小图标链接：悬停写它是什么，读屏读的也是这句。 */
 function IconLink({ to, label, icon }: { to: string; label: string; icon: ReactNode }) {
@@ -357,7 +362,10 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
               // 走不通、对端离线的行淡下去：名字和"不可达"照常能看清。
               const dim = entry.route.via === 'none' || peer?.online === false
               const fade = cn(dim && 'opacity-50')
-              const nowLeg = legOf(entry.route, entry.relay_leg ?? null)
+              const peerOutcome = node.reached_by?.find((reach) => reach.node.id === entry.peer.id)?.outcome
+              const peerLeg: Leg = peerOutcome === 'udp' || peerOutcome === 'tcp' ? peerOutcome : null
+              const nowLeg = legOf(entry.route, node.id, entry.relay_leg ?? null, peerLeg)
+              const nowMiddle = middleOf(entry.route, node.id, entry.peer.id)
               const directHint = modeHint(entry)
 
               // 没有内容的格子每列一道横线，和左边一组一样，不合并成一格。
@@ -377,15 +385,13 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
                 otherCells = dashes
               } else {
                 const altRoute = alternative.route
-                // 候选路径不说传输：经的第一个中继和现在一样时，传输也一样；否则不知道。
-                const altLeg: Leg =
-                  altRoute.via === 'direct'
-                    ? 'udp'
-                    : altRoute.via === 'relay' &&
-                        entry.route.via === 'relay' &&
-                        altRoute.relays[0] === entry.route.relays[0]
-                      ? (entry.relay_leg ?? null)
-                      : null
+                // 另一条路不说传输：经的第一个中继和现在一样时，传输也一样；否则不知道。
+                const sameFirst =
+                  altRoute.via === 'relay' &&
+                  entry.route.via === 'relay' &&
+                  altRoute.relays[0] === entry.route.relays[0]
+                const altLeg = legOf(altRoute, node.id, sameFirst ? (entry.relay_leg ?? null) : null, peerLeg)
+                const altMiddle = middleOf(altRoute, node.id, entry.peer.id)
                 const rtt = alternative.rtt
                 const delta = rtt === null || entry.rtt_ms === null ? null : rtt - entry.rtt_ms
                 otherCells = (
@@ -394,16 +400,16 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
                       <ModeBadge route={altRoute} peerOnline={peerOnline} />
                     </Td>
                     <Td className={cn(BAND, 'text-sm')}>
-                      <NextHop route={altRoute} peer={entry.peer.id} nodes={all} />
+                      <NextHop middle={altMiddle} nodes={all} />
                     </Td>
                     <Td className={cn(BAND, 'text-[13px]')}>
-                      <NextHopIp route={altRoute} peer={entry.peer.id} nodes={all} />
+                      <NextHopIp middle={altMiddle} nodes={all} />
                     </Td>
                     <Td className={cn(BAND, 'text-[13px]')}>
                       <Protocol route={altRoute} leg={altLeg} lane={lanes.has(entry.peer.id)} />
                     </Td>
                     <Td className={BAND}>
-                      <span className="text-sm tabular">{lengthOf(altRoute) ?? '—'}</span>
+                      <span className="text-sm tabular">{lengthOf(altMiddle) ?? '—'}</span>
                     </Td>
                     <Td className={cn(BAND, 'whitespace-nowrap')}>
                       {rtt === null ? (
@@ -434,16 +440,16 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
                     <ModeBadge route={entry.route} peerOnline={peerOnline} hint={directHint} />
                   </Td>
                   <Td className={cn('text-sm', fade)}>
-                    <NextHop route={entry.route} peer={entry.peer.id} nodes={all} />
+                    <NextHop middle={nowMiddle} nodes={all} />
                   </Td>
                   <Td className={cn('text-[13px]', fade)}>
-                    <NextHopIp route={entry.route} peer={entry.peer.id} nodes={all} />
+                    <NextHopIp middle={nowMiddle} nodes={all} />
                   </Td>
                   <Td className={cn('text-[13px]', fade)}>
                     <Protocol route={entry.route} leg={nowLeg} lane={lanes.has(entry.peer.id)} />
                   </Td>
                   <Td className={fade}>
-                    <span className="text-sm tabular">{lengthOf(entry.route) ?? '—'}</span>
+                    <span className="text-sm tabular">{lengthOf(nowMiddle) ?? '—'}</span>
                   </Td>
                   <Td className={fade}>
                     {entry.rtt_ms === null ? (

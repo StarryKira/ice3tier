@@ -326,6 +326,16 @@ export interface NodeDetail extends Node {
   rx_bytes: number
   /** ice3proxy 的状况。不在线、版本太旧没有报、还没有上报过是 `null`；比界面旧的 controller 不写。 */
   lanes?: LaneReport | null
+  /** 0.1.11 起，这个节点是中继时：各个节点连它连得上没有、用的什么。不是中继时是 `null`。 */
+  reached_by?: ReachEntry[] | null
+}
+
+export interface ReachEntry {
+  node: NodeRef
+  online: boolean
+  /** `tcp`：UDP 连不上，TCP 连得上。不认识的当作 `unknown`。 */
+  outcome: 'udp' | 'tcp' | 'unreached' | 'unknown'
+  at: Timestamp
 }
 
 export interface UpdateNode {

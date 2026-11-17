@@ -203,7 +203,7 @@ describe('路由', () => {
       d.routesRelay,
       'hk',
       '10.66.0.3',
-      'QUIC/TCP',
+      'TCP',
       '2',
       t.common.ms(150),
       d.routesP2P,
@@ -238,5 +238,34 @@ describe('路由', () => {
     ])
     expect(api.callsTo('GET /networks/1/path')).toHaveLength(0)
     expect(screen.queryByRole('button', { name: d.routesRecompute(d.routingLowestCost) })).toBeNull()
+  })
+
+  it('本节点自己是中继、对端挂在它上面：中间没有别人，协议看对端连本节点用的什么', async () => {
+    fakeApi({
+      'GET /networks/1/nodes/1/routes': {
+        ...ROUTES,
+        routes: [
+          {
+            ...TO_NAS_ROUTE,
+            route: { via: 'relay', relays: [1] },
+            relay_leg: null,
+            direct_status: { state: 'not_tried', kind: null, cause: null, attempted_at: null },
+            alternative: null,
+          },
+        ],
+      } satisfies RouteTable,
+      'GET /networks/1/nodes': [makeNode(1, 'laptop'), makeNode(2, 'nas')],
+    })
+    const relay: NodeDetail = {
+      ...node,
+      reached_by: [{ node: ref(2, 'nas'), online: true, outcome: 'tcp', at: 1 }],
+    }
+    renderWithApp(<RoutesTab network={NETWORK} node={relay} />)
+    const nas = (await screen.findByText('10.66.0.2')).closest('tr')
+    if (nas === null) throw new Error('没有 nas 那一行')
+    const cells = within(nas)
+      .getAllByRole('cell')
+      .map((cell) => cell.textContent)
+    expect(cells.slice(1, 7)).toEqual([d.routesRelay, '—', '—', 'TCP', '1', t.common.ms(150)])
   })
 })
