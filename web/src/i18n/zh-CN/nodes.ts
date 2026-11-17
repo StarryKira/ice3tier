@@ -255,6 +255,10 @@ export const nodes = {
     exitPortsTitle: '端口限制',
     exitPortsDesc: '打开后只放行下面这些端口的互联网目标；局域网目标不受限制',
     exitPortsSwitch: (name: string) => `限制 ${name} 的出口端口`,
+    exitPortsAdd: '添加端口',
+    exitPortsCommon: '常用',
+    exitPortsRemove: (port: number) => `移除端口 ${port}`,
+    exitPortsHelp: '输入端口后按回车、逗号或空格添加；加了、去了都马上生效。只限制互联网目标',
     exitUsageBody: '代理用户名填它的虚拟 IP：',
 
     forwardTitle: '端口转发目标',

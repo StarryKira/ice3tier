@@ -264,6 +264,10 @@ export const nodes: Messages['nodes'] = {
     exitPortsTitle: 'Port restriction',
     exitPortsDesc: 'When on, only these ports are allowed for internet targets; LAN targets are not affected',
     exitPortsSwitch: (name) => `Restrict the exit ports of ${name}`,
+    exitPortsAdd: 'Add port',
+    exitPortsCommon: 'Common',
+    exitPortsRemove: (port) => `Remove port ${port}`,
+    exitPortsHelp: 'Type a port and press Enter, comma or space; changes apply at once. Internet targets only',
     exitUsageBody: 'Use its virtual IP as the proxy username:',
 
     forwardTitle: 'Port forward target',

@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Hash } from 'lucide-react'
+import { Hash, Plus, X } from 'lucide-react'
 import { type KeyboardEvent, type ReactNode, useId, useState } from 'react'
 import { Link } from 'react-router'
 
@@ -22,7 +22,8 @@ import { formatBytes } from '@/lib/format'
 import { formatAge } from '@/lib/time'
 import { quotaView } from '@/lib/usage'
 import { cn } from '@/lib/utils'
-import { MAX_QUOTA_RESET_DAY } from '@/lib/validate'
+import { COMMON_PORTS, portName } from '@/lib/ports'
+import { MAX_QUOTA_RESET_DAY, splitList, validatePort } from '@/lib/validate'
 import { networkPath } from '@/pages/networks/context'
 import { exitHealthView } from '@/pages/exits/exitView'
 
@@ -216,13 +217,124 @@ function ExitSettingsList({ ctl }: { ctl: ExitForm }) {
   )
 }
 
+/** 列表里现在的端口：输入框里的字解析出来的，写错的那一项不算。 */
+function portsOf(raw: string): number[] {
+  return [
+    ...new Set(
+      splitList(raw)
+        .filter((item) => validatePort(item) === null)
+        .map(Number),
+    ),
+  ].sort((x, y) => x - y)
+}
+
+/**
+ * 允许的端口：一个端口一个小块（旁边写着它通常是什么协议），叉号去掉；输入框里回车、逗号或空格加上；
+ * 下面一排常用的端口一点就加。加了、去了都马上保存。一个都不剩时不保存，说"至少一个端口"。
+ */
+function PortsEditor({ ctl }: { ctl: ExitForm }) {
+  const { form, commit } = ctl
+  const [draft, setDraft] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const inputId = useId()
+  const ports = portsOf(form.ports)
+
+  const save = (next: number[]) => {
+    setError(next.length === 0 ? t.validate.portListEmpty : null)
+    commit({ ...form, limitPorts: true, ports: next.join(', ') }, 'ports')
+  }
+
+  const addDraft = () => {
+    const items = splitList(draft)
+    if (items.length === 0) return
+    const bad = items.find((item) => validatePort(item) !== null)
+    if (bad !== undefined) {
+      setError(t.validate.portListItem(bad))
+      return
+    }
+    setDraft('')
+    save([...new Set([...ports, ...items.map(Number)])].sort((x, y) => x - y))
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex min-h-9 flex-wrap items-center gap-1.5">
+        <ul className="contents" aria-label={d.exitFormPorts}>
+          {ports.map((port) => (
+            <li
+              key={port}
+              className="inline-flex h-7 items-center gap-1.5 rounded-md bg-muted pr-1 pl-2 text-[13px] tabular"
+            >
+              <span className="font-medium">{port}</span>
+              {portName(port) !== undefined ? <span className="text-muted-foreground">{portName(port)}</span> : null}
+              <button
+                type="button"
+                onClick={() => save(ports.filter((other) => other !== port))}
+                aria-label={d.exitPortsRemove(port)}
+                className="flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
+              >
+                <X className="size-3.5" aria-hidden />
+              </button>
+            </li>
+          ))}
+        </ul>
+        <Input
+          id={inputId}
+          aria-label={d.exitPortsAdd}
+          inputMode="numeric"
+          autoFocus={ports.length === 0}
+          placeholder={d.exitPortsAdd}
+          className="h-7 w-28 tabular"
+          value={draft}
+          onChange={(event) => {
+            setError(null)
+            // 打了逗号或空格就当作一个端口写完了。
+            if (/[,\s]$/.test(event.target.value)) {
+              setDraft(event.target.value)
+              const items = splitList(event.target.value)
+              if (items.length > 0 && items.every((item) => validatePort(item) === null)) {
+                setDraft('')
+                save([...new Set([...ports, ...items.map(Number)])].sort((x, y) => x - y))
+              }
+              return
+            }
+            setDraft(event.target.value)
+          }}
+          onBlur={addDraft}
+          onKeyDown={onEnter(addDraft)}
+        />
+      </div>
+      {error !== null ? (
+        <p role="alert" className="text-[13px] text-danger">
+          {error}
+        </p>
+      ) : null}
+      <div className="flex flex-wrap items-center gap-1.5 text-[13px]">
+        <span className="mr-1 text-muted-foreground">{d.exitPortsCommon}</span>
+        {COMMON_PORTS.filter((port) => !ports.includes(port)).map((port) => (
+          <button
+            key={port}
+            type="button"
+            onClick={() => save([...ports, port].sort((x, y) => x - y))}
+            className="inline-flex h-7 items-center gap-1 rounded-md border border-dashed px-2 text-muted-foreground transition-colors hover:border-border-strong hover:text-foreground"
+          >
+            <Plus className="size-3.5" aria-hidden />
+            <span className="tabular">{port}</span>
+            {portName(port) !== undefined ? <span className="text-faint">{portName(port)}</span> : null}
+          </button>
+        ))}
+      </div>
+      <p className="text-xs text-muted-foreground">{d.exitPortsHelp}</p>
+    </div>
+  )
+}
+
 /**
  * 端口限制，单独一张卡片：默认关着（任何端口都放行）。打开之后填允许的端口，离开输入框或回车时保存；
  * 端口没填好之前不保存，开关看起来开着，出口照旧不限。只限制互联网目标，局域网目标不受它管。
  */
 function ExitPortsCard({ node, ctl }: { node: NodeDetail; ctl: ExitForm }) {
-  const { form, setForm, commit, shown } = ctl
-  const portsId = useId()
+  const { form, setForm, commit } = ctl
   return (
     <BoxCard data-testid="exit-ports">
       <header className="flex items-center justify-between gap-4 px-5 py-4">
@@ -248,19 +360,8 @@ function ExitPortsCard({ node, ctl }: { node: NodeDetail; ctl: ExitForm }) {
         />
       </header>
       {form.limitPorts ? (
-        <div className="border-t">
-          <SettingRow label={d.exitFormPorts} hint={d.exitFormPortsHint} htmlFor={portsId} error={shown('ports')}>
-            <Input
-              id={portsId}
-              className="w-56 font-mono"
-              placeholder="80, 443"
-              autoFocus={form.ports === ''}
-              value={form.ports}
-              onChange={(event) => setForm({ ...form, ports: event.target.value })}
-              onBlur={() => commit(form, 'ports')}
-              onKeyDown={onEnter(() => commit(form, 'ports'))}
-            />
-          </SettingRow>
+        <div className="border-t px-5 py-4">
+          <PortsEditor ctl={ctl} />
         </div>
       ) : null}
     </BoxCard>
