@@ -1,0 +1,5 @@
+# libFuzzer 跑出来的东西：工作语料、崩溃输入、覆盖率。要留下的输入拷进 seeds/ 或 regressions/。
+/target/
+/corpus/
+/artifacts/
+/coverage/

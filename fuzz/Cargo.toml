@@ -1,0 +1,110 @@
+[package]
+name = "i3t-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "ice3tier 的 fuzz 目标：线上格式、SOCKS5、HTTP、首批数据、relay、名字服务、控制消息的解析"
+
+[package.metadata]
+cargo-fuzz = true
+
+# 自成一个 workspace：不是根目录 workspace 的成员，平常的构建、测试和 CI 都碰不到它。
+[workspace]
+
+[dependencies]
+bytes = "1.12.1"
+i3t-access = { path = "../crates/i3t-access" }
+i3t-conn = { path = "../crates/i3t-conn" }
+i3t-crypto = { path = "../crates/i3t-crypto" }
+# 内存里的连接层（`i3t_flow::memory`）：入口的 fuzz 目标里，对端节点是它上面的一个替身。
+i3t-flow = { path = "../crates/i3t-flow", features = ["test-util"] }
+i3t-intercept = { path = "../crates/i3t-intercept" }
+i3t-model = { path = "../crates/i3t-model" }
+i3t-proto = { path = "../crates/i3t-proto" }
+i3t-relay = { path = "../crates/i3t-relay" }
+i3t-underlay = { path = "../crates/i3t-underlay" }
+libfuzzer-sys = "0.4.13"
+ring = "0.17.14"
+serde = "1.0.229"
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", features = ["full"] }
+
+[lints.clippy]
+unwrap_used = "warn"
+cast_possible_truncation = "warn"
+needless_pass_by_value = "warn"
+fn_params_excessive_bools = "warn"
+undocumented_unsafe_blocks = "warn"
+wildcard_imports = "warn"
+return_self_not_must_use = "warn"
+
+[[bin]]
+name = "datagram"
+path = "fuzz_targets/datagram.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "flow_open"
+path = "fuzz_targets/flow_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "flow_datagram"
+path = "fuzz_targets/flow_datagram.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tcp_frame"
+path = "fuzz_targets/tcp_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "relay_udp"
+path = "fuzz_targets/relay_udp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "names_dns"
+path = "fuzz_targets/names_dns.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "control_json"
+path = "fuzz_targets/control_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "access_socks5"
+path = "fuzz_targets/access_socks5.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "access_http"
+path = "fuzz_targets/access_http.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "access_forward"
+path = "fuzz_targets/access_forward.rs"
+test = false
+doc = false
+bench = false
