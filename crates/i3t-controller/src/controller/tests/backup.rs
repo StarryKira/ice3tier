@@ -189,7 +189,7 @@ fn a_backup_that_fails_halfway_leaves_nothing_behind() {
 
 #[cfg(unix)]
 #[test]
-fn the_key_in_a_backup_is_readable_only_by_its_owner() {
+fn the_key_and_the_database_are_readable_only_by_their_owner_and_so_are_their_backups() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = tempfile::tempdir().unwrap();
@@ -197,6 +197,14 @@ fn the_key_in_a_backup_is_readable_only_by_its_owner() {
     drop(Controller::open(&data, ADDR.to_owned()).unwrap());
     let backup = Controller::back_up(&data, &dir.path().join("backup")).unwrap();
     let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode(&data.join(KEY_FILE)), 0o600);
-    assert_eq!(mode(&backup.dir.join(KEY_FILE)), 0o600);
+    for file in [KEY_FILE, DATABASE_FILE] {
+        assert_eq!(mode(&data.join(file)), 0o600, "{file}");
+        assert_eq!(mode(&backup.dir.join(file)), 0o600, "备份里的 {file}");
+    }
+
+    // 早先的版本建的数据库谁都可读：再打开一次就收紧了，里面的东西还在。
+    fs::set_permissions(data.join(DATABASE_FILE), fs::Permissions::from_mode(0o644)).unwrap();
+    let reopened = Controller::open(&data, ADDR.to_owned()).unwrap();
+    assert!(reopened.admin_token.is_none(), "还是原来那个数据库，管理令牌已经有了");
+    assert_eq!(mode(&data.join(DATABASE_FILE)), 0o600);
 }

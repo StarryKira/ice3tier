@@ -209,7 +209,9 @@ impl Controller {
     pub fn open(data_dir: &Path, public_addr: String) -> Result<Opened, Error> {
         fs::create_dir_all(data_dir).map_err(|source| Error::Io { path: data_dir.to_owned(), source })?;
         let key = load_or_create_key(&data_dir.join(KEY_FILE))?;
-        let store = Store::open(&data_dir.join(DATABASE_FILE))?;
+        let database = data_dir.join(DATABASE_FILE);
+        keep_private(&database)?;
+        let store = Store::open(&database)?;
         let mut controller = Self::new(store, key, public_addr, Timing::default())?.with_release_cache(data_dir.join(update::CACHE_DIR));
         controller.data_dir = Some(data_dir.to_owned());
         let admin_token = if controller.has_admin_token() { None } else { Some(controller.issue_admin_token()?) };
@@ -538,7 +540,7 @@ fn load_or_create_key(path: &Path) -> Result<NodeKey, Error> {
         Ok(pem) => NodeKey::from_pem(&pem).map_err(|source| Error::Key { path: path.to_owned(), source }),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             let key = NodeKey::generate().map_err(Error::KeyGeneration)?;
-            create_key_file(path)
+            create_private_file(path)
                 .and_then(|file| write_synced(file, key.to_pem().as_bytes()))
                 .map_err(|source| Error::Io { path: path.to_owned(), source })?;
             tracing::info!(path = %path.display(), public = %key.public(), "生成了 controller 的密钥");
@@ -548,14 +550,44 @@ fn load_or_create_key(path: &Path) -> Result<NodeKey, Error> {
     }
 }
 
-/// 新建一个密钥文件，已经有了就失败，不覆盖。生成密钥和备份都用它，所以两边的权限一样。
-fn create_key_file(path: &Path) -> std::io::Result<fs::File> {
+/// 新建一个只有属主可读的文件，已经有了就失败，不覆盖。密钥、数据库和它们的备份都用它，所以权限处处一样。
+fn create_private_file(path: &Path) -> std::io::Result<fs::File> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
-    // 私钥文件只有属主可读。别的平台靠数据目录本身的权限。
+    // 别的平台靠数据目录本身的权限。
     #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, PRIVATE_MODE);
     options.open(path)
+}
+
+/// 只有属主可读写。
+#[cfg(unix)]
+const PRIVATE_MODE: u32 = 0o600;
+
+/// 数据库只有属主可读：里面有令牌和凭据的摘要、每个节点的地址。
+///
+/// 还没有数据库时先建一个空文件（SQLite 肯在空文件里建库），已经有了就把权限收紧，早先的版本建的是谁都可读的。
+/// 旁边的 `-wal`、`-shm` 是 SQLite 照主文件的权限建的，上次没有正常退出留下来的也一起收紧。
+fn keep_private(database: &Path) -> Result<(), Error> {
+    match create_private_file(database) {
+        Ok(_) => return Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(source) => return Err(Error::Io { path: database.to_owned(), source }),
+    }
+    #[cfg(unix)]
+    for suffix in ["", "-wal", "-shm"] {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut path = database.as_os_str().to_owned();
+        path.push(suffix);
+        let path = PathBuf::from(path);
+        match fs::set_permissions(&path, fs::Permissions::from_mode(PRIVATE_MODE)) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(Error::Io { path, source }),
+        }
+    }
+    Ok(())
 }
 
 /// 写完并且落盘之后才算写好。

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use i3t_crypto::NodeKey;
 
-use super::{Controller, DATABASE_FILE, KEY_FILE, create_key_file, write_synced};
+use super::{Controller, DATABASE_FILE, KEY_FILE, create_private_file, write_synced};
 use crate::error::Error;
 use crate::store::Store;
 
@@ -100,11 +100,11 @@ impl Written {
 
     fn fill(&mut self, database: &Path, pem: &str) -> Result<Vec<BackupFile>, Error> {
         // 先自己建出这个空文件（`VACUUM INTO` 也肯往空文件里写），它才确定是这次建的，失败时可以放心删掉。
-        let (snapshot, file) = self.create(DATABASE_FILE, |path| File::options().write(true).create_new(true).open(path))?;
+        let (snapshot, file) = self.create(DATABASE_FILE, create_private_file)?;
         Store::snapshot(database, &snapshot)?;
         file.sync_all().map_err(io_error(&snapshot))?;
 
-        let (key, file) = self.create(KEY_FILE, create_key_file)?;
+        let (key, file) = self.create(KEY_FILE, create_private_file)?;
         write_synced(file, pem.as_bytes()).map_err(io_error(&key))?;
 
         // 目录项也要落盘，不然断电之后文件可能不在目录里。Windows 上不能这样打开目录，也不需要。
