@@ -311,8 +311,8 @@ impl<T: DatagramSender> ContextSender<T> {
 
     /// 发一个数据报。发起方给的 `target` 是它要去哪里，接受方给的是它从哪里来。
     ///
-    /// 等级是 `reliable` 的上下文里，这里会等到连接收下这个数据报（对端来不及收时就是在这里等）；
-    /// 别的等级不等待，连接来不及发时丢的是排在最前面的旧数据报。
+    /// 默认一个都不丢（[`Class::keeps_every_datagram`]）：这里会等到连接收下这个数据报，对端来不及收时就是在这里等。
+    /// 等级是 `interactive` 的上下文不等待，连接来不及发时丢的是排在最前面的旧数据报。
     ///
     /// # Errors
     ///
@@ -323,7 +323,7 @@ impl<T: DatagramSender> ContextSender<T> {
         target.encode(&mut body);
         body.extend_from_slice(payload);
 
-        if self.class == Class::Reliable {
+        if self.class.keeps_every_datagram() {
             // 流没有长度限制，整个内容就是一帧。
             for frame in Frames::split(self.to, self.context, 0, &body, usize::MAX)? {
                 self.transport.send_reliable(self.peer, frame.into()).await?;

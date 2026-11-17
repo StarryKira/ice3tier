@@ -180,20 +180,34 @@ macro_rules! wire_enum {
 wire_enum! {
     /// 服务等级：同一条连接上流与流之间谁先发，以及 UDP 应用的数据怎么送。
     ///
-    /// 流在任何等级下都是可靠的，等级只决定调度上的先后。真正可以选择"丢"的只有数据报。
+    /// 流在任何等级下都是可靠的，等级只决定调度上的先后。真正可以选择"丢"的只有数据报，而且只有 `Interactive`
+    /// 会丢（[`Class::keeps_every_datagram`]）：默认不丢包，要低延迟的应用自己选。
     /// 配置里（netmap、管理 API）写成小写的名字：`"auto"`、`"interactive"`、`"reliable"`、`"bulk"`。
     #[derive(Default, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
     pub enum Class: u8 {
-        /// 开始按 interactive 对待，流量大了之后让位。数据报走不可靠的通道。
+        /// 开始按 interactive 的先后对待，流量大了之后让位。数据报一个都不丢，和 `Reliable` 一样送。
         #[default]
         Auto = 0,
-        /// 尾延迟最重要：调度优先。数据报走不可靠的通道，过期即丢。
+        /// 尾延迟最重要：调度优先。数据报走不可靠的通道，过期即丢。只有它会丢数据报。
         Interactive = 1,
         /// 一个报文都不丢，延迟次之：普通调度。数据报每个单独开一条单向流，由连接重传，互相不阻塞。
         Reliable = 2,
-        /// 吞吐优先，调度上让位。对数据报没有意义，按 `Auto` 处理。
+        /// 吞吐优先，调度上让位。数据报一个都不丢。
         Bulk = 3,
+    }
+}
+
+impl Class {
+    /// 这个等级的数据报是不是一个都不丢：每个单独开一条单向流，由连接重传。
+    ///
+    /// 只有 `Interactive` 不是：它的数据报走连接的不可靠通道，来不及发时丢掉旧的，换来最低的延迟。
+    #[must_use]
+    pub const fn keeps_every_datagram(self) -> bool {
+        match self {
+            Self::Auto | Self::Reliable | Self::Bulk => true,
+            Self::Interactive => false,
+        }
     }
 }
 

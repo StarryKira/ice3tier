@@ -407,18 +407,19 @@ async fn a_context_is_collected_after_the_idle_timeout_and_the_next_datagram_ope
 }
 
 #[tokio::test]
-async fn the_reliable_class_delivers_every_datagram_under_loss_while_the_default_class_may_drop() {
+async fn the_default_class_delivers_every_datagram_under_loss_while_the_interactive_class_may_drop() {
     const COUNT: u32 = 150;
     let world = World::new().await;
     world.gw.system.redirect(&public(443), udp_echo_server().await);
-    let reliable = udp_associate(world.socks().await, Some(("gw+c-r", ""))).await;
-    let plain = udp_associate(world.socks().await, gw_user()).await;
+    // 不写等级就是默认的 auto：一个都不丢。要低延迟的自己写 interactive，那个会丢。
+    let kept = udp_associate(world.socks().await, gw_user()).await;
+    let fresh = udp_associate(world.socks().await, Some(("gw+c-i", ""))).await;
 
     // 两个节点之间不保证送达的数据报每三个丢一个，两个方向都算。
     let seen = AtomicUsize::new(0);
     world.mesh.set_datagram_filter(Some(Box::new(move |_, _, _| seen.fetch_add(1, Ordering::Relaxed) % 3 != 2)));
 
-    for client in [&reliable, &plain] {
+    for client in [&kept, &fresh] {
         for index in 0..COUNT {
             client.send(PUBLIC_IP, 443, &index.to_be_bytes()).await;
             // 客户端和中继端口之间是真的 UDP：别一口气塞满内核的缓冲区。
@@ -428,20 +429,20 @@ async fn the_reliable_class_delivers_every_datagram_under_loss_while_the_default
         }
     }
 
-    // 等级是 reliable 的：每个报文都回来了，一个不少（先后不保证）。
+    // 默认等级的：每个报文都回来了，一个不少（先后不保证）。
     let mut echoed = BTreeSet::new();
     for _ in 0..COUNT {
-        let (source, data) = reliable.recv().await;
+        let (source, data) = kept.recv().await;
         assert_eq!(source, public(443));
         assert!(echoed.insert(u32::from_be_bytes(data.try_into().unwrap())), "同一个报文回来了两次");
     }
     assert_eq!(echoed, (0..COUNT).collect());
-    reliable.assert_silent(QUIET).await;
+    kept.assert_silent(QUIET).await;
 
-    // 默认等级的：去的路上丢一些，回来的路上再丢一些。
+    // interactive 的：去的路上丢一些，回来的路上再丢一些。
     let mut survived = 0;
     let mut buf = [0; 64];
-    while timeout(QUIET, plain.socket.recv_from(&mut buf)).await.is_ok() {
+    while timeout(QUIET, fresh.socket.recv_from(&mut buf)).await.is_ok() {
         survived += 1;
     }
     assert!((1..COUNT).contains(&survived), "不保证送达的报文回来了 {survived} 个");

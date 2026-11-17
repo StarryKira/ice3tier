@@ -163,7 +163,7 @@ async fn a_datagram_larger_than_the_connection_allows_is_fragmented_and_reassemb
         seen.lock().unwrap().push(frame.len());
         true
     })));
-    let (near, mut far) = world.context(Class::Auto).await;
+    let (near, mut far) = world.context(Class::Interactive).await;
 
     // 一个小的不用切；一个 5000 字节的要切成 18 片，每片不超过连接允许的长度。
     near.sender().send(&dns(), b"small").await.unwrap();
@@ -187,7 +187,7 @@ async fn a_datagram_larger_than_the_connection_allows_is_fragmented_and_reassemb
 #[tokio::test]
 async fn a_datagram_that_cannot_be_carried_is_refused_and_the_context_goes_on() {
     let mut world = World::new(None);
-    let (near, mut far) = world.context(Class::Auto).await;
+    let (near, mut far) = world.context(Class::Interactive).await;
     // 目标占 7 字节，再加 65529 字节的载荷就超过了内容的上限。
     let too_long = vec![0; MAX_DATAGRAM_BODY_LEN - 6];
     let error = near.sender().send(&from("203.0.113.53:53"), &too_long).await.unwrap_err();
@@ -204,7 +204,7 @@ async fn a_datagram_that_cannot_be_carried_is_refused_and_the_context_goes_on() 
 async fn losing_one_fragment_loses_that_datagram_only() {
     let mut world = World::new(None);
     world.mesh.set_max_datagram_len(300);
-    let (near, mut far) = world.context(Class::Auto).await;
+    let (near, mut far) = world.context(Class::Interactive).await;
 
     // 第一个报文的第三片丢了。
     let seen = world.lose_every(1000);
@@ -220,12 +220,15 @@ async fn losing_one_fragment_loses_that_datagram_only() {
 }
 
 #[tokio::test]
-async fn the_reliable_class_delivers_every_datagram_under_loss_while_the_default_class_drops_some() {
+async fn every_class_but_interactive_delivers_every_datagram_under_loss() {
     const COUNT: u32 = 200;
     let mut world = World::new(None);
     world.mesh.set_max_datagram_len(300);
-    let (plain, mut plain_far) = world.context(Class::Auto).await;
-    let (reliable, mut reliable_far) = world.context(Class::Reliable).await;
+    let (fresh, mut fresh_far) = world.context(Class::Interactive).await;
+    let mut kept = Vec::new();
+    for class in [Class::Auto, Class::Reliable, Class::Bulk] {
+        kept.push((class, world.context(class).await));
+    }
     world.lose_every(3);
 
     for index in 0..COUNT {
@@ -233,25 +236,29 @@ async fn the_reliable_class_delivers_every_datagram_under_loss_while_the_default
         let len = if index % 10 == 0 { 1500 } else { 40 };
         let mut datagram = index.to_be_bytes().to_vec();
         datagram.resize(len, 0x55);
-        plain.sender().send(&dns(), &datagram).await.unwrap();
-        reliable.sender().send(&dns(), &datagram).await.unwrap();
+        fresh.sender().send(&dns(), &datagram).await.unwrap();
+        for (_, (near, _)) in &kept {
+            near.sender().send(&dns(), &datagram).await.unwrap();
+        }
     }
 
-    // 可靠的那个上下文：一个不少，内容原样，大的也没有被切坏。
-    let mut arrived = Vec::new();
-    for _ in 0..COUNT {
-        let received = next(&mut reliable_far).await;
-        let index = u32::from_be_bytes(received.payload[..4].try_into().unwrap());
-        assert_eq!(received.payload.len(), if index % 10 == 0 { 1500 } else { 40 });
-        arrived.push(index);
+    // 默认的等级（auto）、reliable 和 bulk：一个不少，内容原样，大的也没有被切坏。
+    for (class, (_, far)) in &mut kept {
+        let mut arrived = Vec::new();
+        for _ in 0..COUNT {
+            let received = next(far).await;
+            let index = u32::from_be_bytes(received.payload[..4].try_into().unwrap());
+            assert_eq!(received.payload.len(), if index % 10 == 0 { 1500 } else { 40 }, "{class:?}");
+            arrived.push(index);
+        }
+        arrived.sort_unstable();
+        assert_eq!(arrived, (0..COUNT).collect::<Vec<_>>(), "{class:?}");
+        assert_quiet(far).await;
     }
-    arrived.sort_unstable();
-    assert_eq!(arrived, (0..COUNT).collect::<Vec<_>>());
-    assert_quiet(&mut reliable_far).await;
 
-    // 默认的那个：丢了一部分。切成六片的大报文只要丢一片就整个没了。
+    // interactive：丢了一部分。切成六片的大报文只要丢一片就整个没了。
     let mut survived = 0;
-    while let Ok(Ok(received)) = timeout(QUIET, plain_far.recv()).await {
+    while let Ok(Ok(received)) = timeout(QUIET, fresh_far.recv()).await {
         assert!(u32::from_be_bytes(received.payload[..4].try_into().unwrap()) < COUNT);
         survived += 1;
     }
