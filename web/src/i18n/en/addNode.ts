@@ -7,7 +7,7 @@ export const addNode: Messages['addNode'] = {
   groupsHint: 'Applied when the node joins',
   declareLabel: 'Declare',
   declareRelay: 'Can relay',
-  declareRelayHint: 'Needs a publicly reachable port',
+  declareRelayHint: 'Other nodes must be able to reach its port',
   declareExit: 'Can be an exit',
   declareForward: 'Can be a port forward target',
   declareNote: 'Declares only; enable it on the node page',

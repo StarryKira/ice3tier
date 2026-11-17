@@ -254,7 +254,7 @@ function CountryValue({ code }: { code: string | null }) {
   )
 }
 
-/** 中继的地址：自动取它的公网 IP 加端口（不能改），下面一行说明会跟着公网 IP 变。 */
+/** 中继的地址：自动发现（不能改），下面一行说明不用填。 */
 function RelayAddresses({ udp, tcp }: { udp: readonly string[]; tcp: readonly string[] }) {
   const addresses = [...new Set([...udp, ...tcp])]
   return (

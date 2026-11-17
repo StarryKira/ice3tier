@@ -6,7 +6,7 @@ export const addNode = {
   groupsHint: '节点加入时生效',
   declareLabel: '声明',
   declareRelay: '可作为中继',
-  declareRelayHint: '需要公网可达的端口',
+  declareRelayHint: '别的节点要能连上它的端口',
   declareExit: '可作为出口',
   declareForward: '可作为端口转发目标',
   declareNote: '只是声明，启用在节点详情中进行',

@@ -15,8 +15,8 @@ import { parseOptionalPositiveInt } from '@/lib/validate'
 const d = t.nodes.detail
 
 /**
- * 中继的地址：controller 看到的这台机器的公网 IP 加上它的端口，不由人填（白皮书 §7.2）。
- * 节点从没连上过、controller 还不知道它的公网 IP 时是 `null`：这时不能启用。
+ * 中继的地址由 controller 自动发现，界面上不能填也不能改。接口改成给出地址列表之前，用 controller 看到的地址。
+ * 节点从没连上过、还没发现任何地址时是 `null`：这时不能启用。
  */
 function relayAddress(node: Pick<NodeDetail, 'observed_endpoint' | 'relay'>): string | null {
   return node.observed_endpoint ?? node.relay?.udp[0] ?? node.relay?.tcp[0] ?? null
@@ -31,7 +31,7 @@ interface RelayDialogProps {
 }
 
 /**
- * 启用中继：写明其他节点会经哪个地址连它（不能改，公网 IP 变了自动跟着变），可以填一个带宽上限。
+ * 启用中继：写明其他节点会经哪个地址连它（自动发现，不能改），可以填一个带宽上限。
  * 防火墙要放行的端口写在页脚。启用之后没有"修改"：要改带宽上限就先停用再启用。
  */
 export function RelayDialog({ network, node, onClose, onSaved }: RelayDialogProps) {
