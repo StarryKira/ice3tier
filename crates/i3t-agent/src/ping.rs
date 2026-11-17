@@ -2,7 +2,7 @@
 //!
 //! 每个往返是连接上新开的一条流：写一个往返测量的 OPEN，对端读到就回一个成功的 REPLY（`i3t_flow::ping`）。
 //! 对端先按它的访问规则和每个对端的流数上限筛过，所以访问规则不允许时拿到的是明确的拒绝。到对端还没有连接时，
-//! 第一个往返先把连接建起来，它不算在结果里。结果里有这一段时间开始和结束时这对节点的连接走的路。
+//! 第一个往返先把连接建起来，它不算在结果里。结果里有这一段时间开始和结束时这对节点的连接走的路，和路上的 relay 的名字。
 //!
 //! 只能由本机问（本机状态接口要令牌），一次只做一个，最多 [`MAX_COUNT`] 个往返、[`DEADLINE`] 之内做完；
 //! 只能问本节点配置里的节点，所以它不能拿来扫描别的地址。
@@ -52,11 +52,19 @@ pub struct PingReport {
     pub received: u32,
     /// 回来了的往返各用了多少微秒，按发出的顺序。
     pub rtts_us: Vec<u64>,
-    /// 开始和结束时这对节点的连接走的路；不知道时是 `None`。
+    /// 开始和结束时这对节点的连接走的路；不知道时是 `None`。两条不一样才算换了路：中间换过又换回来的不算，
+    /// 那种来回只在流日志里记（`route_changed`）。
     pub route_start: Option<Route>,
     pub route_end: Option<Route>,
-    /// 中间换过路（换过又换回来的也算）。
-    pub route_changed: bool,
+    /// 上面两条路经过的 relay 的名字，按出现的先后，不重复。旧版本的节点不给，那时只写编号。
+    pub relays: Vec<RelayName>,
+}
+
+/// 一个 relay 的编号和名字。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayName {
+    pub id: u32,
+    pub name: String,
 }
 
 /// 被问的节点。
@@ -156,7 +164,8 @@ pub(crate) async fn ping(runtime: &Runtime, target: &str, count: u32) -> PingRep
         }
     }
     let span = route.ended(&routes);
-    (report.route_start, report.route_end, report.route_changed) = (span.start, span.end, span.changed);
+    report.relays = relay_names(&netmap, [span.start.as_ref(), span.end.as_ref()]);
+    (report.route_start, report.route_end) = (span.start, span.end);
     tracing::info!(peer = %id, outcome = ?report.outcome, sent = report.sent, received = report.received, "ping 做完了");
     report
 }
@@ -181,6 +190,32 @@ fn find<'a>(netmap: &'a Netmap, target: &str) -> Result<&'a i3t_model::netmap::P
     found.ok_or(PingOutcome::UnknownNode)
 }
 
+/// `routes` 经过的 relay 的名字，按出现的先后，不重复。relay 一般在 netmap 的 relay 列表里；对端自己是 relay、
+/// 经的是本节点自己的 relay 时也认得出来。哪里都找不到的不给，显示时写编号。
+fn relay_names<'a>(netmap: &Netmap, routes: impl IntoIterator<Item = Option<&'a Route>>) -> Vec<RelayName> {
+    let on_routes = routes.into_iter().flatten().flat_map(|route| match route {
+        Route::Relay { relays } => relays.as_slice(),
+        Route::None | Route::Direct { .. } => &[],
+    });
+    let mut names: Vec<RelayName> = Vec::new();
+    for &id in on_routes {
+        if names.iter().any(|known| known.id == id.get()) {
+            continue;
+        }
+        let name = netmap
+            .relays
+            .iter()
+            .find(|relay| relay.id == id)
+            .map(|relay| &relay.name)
+            .or_else(|| netmap.peer(id).map(|peer| &peer.name))
+            .or_else(|| (netmap.me.id == id).then_some(&netmap.me.name));
+        if let Some(name) = name {
+            names.push(RelayName { id: id.get(), name: name.clone() });
+        }
+    }
+    names
+}
+
 /// 一个往返没有成，是哪一种。
 fn outcome_of(error: &FlowError) -> PingOutcome {
     match error {
@@ -194,7 +229,7 @@ fn outcome_of(error: &FlowError) -> PingOutcome {
 
 #[cfg(test)]
 mod tests {
-    use i3t_model::netmap::{LaneMode, LocalNode, Network, Peer};
+    use i3t_model::netmap::{LaneMode, LocalNode, Network, Peer, Relay};
     use i3t_proto::{NodeId, PublicKey};
 
     use super::*;
@@ -258,6 +293,20 @@ mod tests {
         }
         assert_eq!(find(&netmap, "printer").map(|peer| peer.id.get()), Err(PingOutcome::UnknownNode));
         assert!(!find(&netmap, "phone").unwrap().outbound, "只能被它访问的节点找得到，由调用方说不允许");
+    }
+
+    #[test]
+    fn relays_on_the_routes_are_named_once_from_the_netmap() {
+        let mut netmap = netmap();
+        let hk =
+            Relay { id: NodeId::new(9).unwrap(), key: PublicKey::from_bytes([9; 32]), name: "hk".into(), udp: Vec::new(), tcp: Vec::new() };
+        netmap.relays.push(hk);
+        let via = |ids: &[u32]| Route::Relay { relays: ids.iter().map(|&id| NodeId::new(id).unwrap()).collect() };
+        let names = relay_names(&netmap, [Some(&via(&[9, 2])), Some(&via(&[9, 1, 7]))]);
+        let names: Vec<(u32, &str)> = names.iter().map(|relay| (relay.id, relay.name.as_str())).collect();
+        assert_eq!(names, [(9, "hk"), (2, "nas"), (1, "laptop")], "对端自己、本节点自己也认得出来；哪里都没有的 7 不给");
+        let direct = Route::Direct { addr: "203.0.113.7:20330".parse().unwrap() };
+        assert!(relay_names(&netmap, [Some(&direct), None]).is_empty());
     }
 
     #[test]

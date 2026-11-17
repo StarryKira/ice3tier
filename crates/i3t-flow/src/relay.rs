@@ -24,7 +24,7 @@
 //!
 //! 流在独占 TCP（lane）上、并且负载不再加密（用户自己的 TLS 原样过去）时，那个方向在 lane 交出原始的 socket 之后
 //! （[`SendStream::take_raw`]、[`RecvStream::wait_raw`]）直接在两条 TCP 之间搬（[`crate::engine`]，Linux 上是 splice），
-//! 不再经过流的接口。结局的传法和上表一样：EOF 对 FIN，出错对 RST；计量、配额和带宽照样在每一段上记。
+//! 不再经过流的接口。结局的传法和上表一样：EOF 对 FIN，出错对 RST；计量和配额照样在每一段上记。
 //!
 //! 流往对端节点发数据的优先级跟着服务等级（[`priority_of`]）：同一条连接上，interactive 的流先于 bulk 的流发出。
 //! `auto` 的流开始时按 interactive 对待，这一端在它上面发出的数据累计超过 [`AUTO_DEMOTE_AFTER`] 之后降到 bulk 的优先级。

@@ -357,11 +357,12 @@ async fn a_node_can_be_inspected_changed_and_deleted() {
     );
     let plain: model::Node = api.ok(Method::PUT, &format!("{relay_path}/relay"), Some(json!({}))).await;
     assert_eq!(plain.relay.unwrap().bandwidth_mbps, None, "{{}} 就是不限带宽地启用");
-    let exit: model::Node = api.ok(Method::PUT, &format!("{relay_path}/exit"), Some(json!({ "lan": true }))).await;
+    // 出口没有带宽上限：早先的界面还会发的 bandwidth_mbps 照收（连 0 也是），没有作用，应答里没有它。
+    let exit: model::Node = api.ok(Method::PUT, &format!("{relay_path}/exit"), Some(json!({ "lan": true, "bandwidth_mbps": 0 }))).await;
     assert_eq!(
         serde_json::to_value(exit.exit.unwrap()).unwrap(),
         json!({
-            "ports": null, "lan": true, "bandwidth_mbps": null, "upstream_socks5": null,
+            "ports": null, "lan": true, "upstream_socks5": null,
             // 后来加的出口设置，没写的取默认值。端口默认不限。
             "quota_bytes": null, "quota_reset_day": 1, "family": "any", "connects_per_minute": null, "class": null, "optimistic": null
         })

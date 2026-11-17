@@ -278,7 +278,6 @@ pub struct Ui {
     pub recent_requests: fn(u64, u64) -> String,
     pub ports: &'static str,
     pub lan: &'static str,
-    pub bandwidth: &'static str,
     pub family: &'static str,
     pub connects: &'static str,
     pub per_minute: fn(u32) -> String,
@@ -294,6 +293,8 @@ pub struct Ui {
     pub tls_step: &'static str,
     /// 出口按它的策略不连。
     pub exit_refused: &'static str,
+    /// 出口没有做这次测试：另一个测试正在做或者刚做过。
+    pub exit_busy: fn(&str) -> String,
     /// TLS 握手完成，证书没有检查。
     pub tls_done: &'static str,
     /// 出口只连某一种地址：`只连 IPv4`。
@@ -338,7 +339,8 @@ pub struct Ui {
     pub declared_address: &'static str,
     pub warnings: &'static str,
     pub stats_header: [&'static str; 2],
-    pub exit_settings: fn(&str, &str, &str, &str) -> String,
+    /// 出口的端口、局域网和上游代理。
+    pub exit_settings: fn(&str, &str, &str) -> String,
     pub dial_out_only: &'static str,
     pub from_network: &'static str,
     pub pinned: &'static str,

@@ -99,6 +99,9 @@ def enable_relay(lab: Lab, work: Path, t: Checks) -> None:
     except TimeoutError:
         pass
     t.check("a 上报的路由显示经 relay", route_to_b() == {"via": "relay", "relays": [r.id]}, str(route_to_b()))
+    pinged = a.host.run(binary("i3t"), "--state-dir", str(a.state), "ping", b.name, check=False, timeout=20)
+    t.check("i3t ping 写 relay 的名字，不写编号", pinged.returncode == 0 and f"经 {r.name}" in pinged.stdout and f"#{r.id}" not in pinged.stdout,
+            f"{pinged.stdout!r} {pinged.stderr.strip()}")
     if t.failures:
         print(tail(a.read_log(), 25), tail(b.read_log(), 25), tail(r.read_log(), 25), sep="\n  ---\n")
 

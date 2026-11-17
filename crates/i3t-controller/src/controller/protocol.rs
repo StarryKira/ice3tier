@@ -301,7 +301,7 @@ impl Inner {
             node.relay = None;
             whole_network = true;
             tracing::warn!(node = %node.id, name = %node.name, "节点撤回了可以作为 relay 的声明，关闭它的 relay");
-            let detail = format!("节点 {} 撤回了声明，relay 已关闭", node.name);
+            let detail = format!("节点 {} 撤回了声明，中继已关闭", node.name);
             let params = json!({ "node": node.id, "node_name": node.name });
             self.store.log_refs(now, Some(node.network), "node.relay.withdrawn", &detail, &[LogRef::node(node.id)], params)?;
         }

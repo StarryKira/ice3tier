@@ -223,6 +223,9 @@ pub struct RelayRole {
     pub bandwidth_mbps: Option<u32>,
 }
 
+/// 出口的设置：netmap 里本节点的出口角色，也是管理接口里出口的设置（`PUT …/exit`）和 controller 存着的那一份。
+///
+/// 出口没有带宽上限。早先的 `bandwidth_mbps` 照收，没有作用（不认识的字段一律忽略）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExitRole {
     /// 互联网目标允许的端口。没有值（默认）表示不限制；写了列表就只允许这些。局域网目标不受它限制。
@@ -232,8 +235,6 @@ pub struct ExitRole {
     /// 允许把流送往本机网卡直连的网段。
     #[serde(default)]
     pub lan: bool,
-    #[serde(default)]
-    pub bandwidth_mbps: Option<u32>,
     /// 把流交给本机配置的一个 SOCKS5 代理去连目标，而不是自己直接连。
     #[serde(default)]
     pub upstream_socks5: Option<SocketAddr>,
@@ -265,7 +266,6 @@ impl Default for ExitRole {
         Self {
             ports: None,
             lan: false,
-            bandwidth_mbps: None,
             upstream_socks5: None,
             quota_bytes: None,
             quota_reset_day: default_quota_reset_day(),
@@ -703,6 +703,13 @@ mod tests {
         let listed: ExitRole = serde_json::from_str(r#"{"ports": [80, 443]}"#).unwrap();
         assert_eq!(listed.ports, Some(vec![80, 443]));
         assert_eq!(serde_json::to_value(&default).unwrap()["ports"], serde_json::Value::Null, "写出来的总有这一项，旧版本读到的也是不限");
+    }
+
+    #[test]
+    fn an_exit_has_no_bandwidth_limit_and_an_old_setting_carrying_one_still_reads() {
+        let old: ExitRole = serde_json::from_value(serde_json::json!({ "lan": true, "bandwidth_mbps": 50 })).unwrap();
+        assert_eq!(old, ExitRole { lan: true, ..ExitRole::default() });
+        assert!(serde_json::to_value(&old).unwrap().get("bandwidth_mbps").is_none(), "写出来的没有这一项");
     }
 
     #[test]

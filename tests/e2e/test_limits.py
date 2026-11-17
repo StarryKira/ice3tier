@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""限额、用量和状态的端到端测试：出口的带宽上限和配额、接入凭据的用量和流量上限、自动挑端口的端口转发、端口被占用。
+"""限额、用量和状态的端到端测试：出口的配额、接入凭据的用量和流量上限、自动挑端口的端口转发、端口被占用。
 
     python3 tests/e2e/test_limits.py [场景名...]
 """
@@ -46,24 +46,6 @@ def ready_exit(lab: Lab, work: Path, *settings: str) -> tuple[Controller, Node, 
     # 等出口的设置到了两边：能经它下载一点东西就是到了。
     eventually_value(lambda: timed_download(a, url + "1000", via=ex, timeout=6), lambda result: result[0] == 0 and result[1] == 1000)
     return controller, a, ex, url
-
-
-def bandwidth_cap(lab: Lab, work: Path, t: Checks) -> None:
-    """出口的带宽上限：经它的下载被限在上限附近，去掉上限之后快得多。"""
-    controller, a, ex, url = ready_exit(lab, work, "--bandwidth", "4")
-    size = 2_000_000
-    code, received, seconds = timed_download(a, url + str(size), via=ex)
-    rate_mbit = received * 8 / seconds / 1e6 if seconds else 0
-    t.check("限速之下下载完整", code == 0 and received == size, f"退出码 {code}，收到 {received}")
-    t.check("4 Mbit/s 的上限把 2MB 的下载限在 5 Mbit/s 以内", 0 < rate_mbit <= 5, f"{rate_mbit:.2f} Mbit/s，用了 {seconds:.2f} 秒")
-
-    controller.ctl("exit", "enable", str(ex.id))
-    code, received, seconds = eventually_value(lambda: timed_download(a, url + str(size), via=ex), lambda result: result[2] and result[2] < 1.5,
-                                               timeout=20)
-    fast = received * 8 / seconds / 1e6 if seconds else 0
-    t.check("去掉上限之后明显更快", code == 0 and fast > 3 * rate_mbit, f"{fast:.2f} Mbit/s 对比 {rate_mbit:.2f} Mbit/s")
-    if t.failures:
-        print(tail(ex.read_log()), sep="\n")
 
 
 def quota_runs_out(lab: Lab, work: Path, t: Checks) -> None:
@@ -222,7 +204,6 @@ def virtual_forward_relay(lab: Lab, work: Path, t: Checks) -> None:
 
 
 SCENARIOS = {
-    "bandwidth_cap": bandwidth_cap,
     "quota_runs_out": quota_runs_out,
     "credential_usage_and_limit": credential_usage_and_limit,
     "forward_auto_port": forward_auto_port,

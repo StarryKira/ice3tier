@@ -81,7 +81,7 @@ i3t_lane::on_both_transports! {
 
         // 和这些流无关的变化不影响它们。
         world.gw.update(|netmap| peer_mut(netmap, NAS).keep_alive = true).await;
-        world.gw.update(|netmap| netmap.me.exit.as_mut().unwrap().bandwidth_mbps = Some(1000)).await;
+        world.gw.update(|netmap| netmap.me.exit.as_mut().unwrap().connects_per_minute = Some(1000)).await;
         assert_echo(&mut on_443).await;
 
         // 出口不再允许 443：那条流断开，80 的照常。

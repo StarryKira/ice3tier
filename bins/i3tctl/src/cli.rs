@@ -276,8 +276,6 @@ pub enum ExitCommand {
         #[arg(long)]
         lan: bool,
         #[arg(long)]
-        bandwidth: Option<u32>,
-        #[arg(long)]
         upstream_socks5: Option<SocketAddr>,
         #[arg(long)]
         quota: Option<ByteSize>,
@@ -826,7 +824,6 @@ fn describe(command: clap::Command, h: &Help, v: &Values) -> clap::Command {
                         .mut_arg("node", node)
                         .mut_arg("ports", |arg| arg.help(h.exit_ports).value_name(v.ports))
                         .mut_arg("lan", |arg| arg.help(h.exit_lan))
-                        .mut_arg("bandwidth", |arg| arg.help(h.bandwidth).value_name("MBIT/S"))
                         .mut_arg("upstream_socks5", |arg| arg.help(h.exit_upstream).value_name(v.address))
                         .mut_arg("quota", |arg| arg.help(h.exit_quota).value_name(v.size))
                         .mut_arg("reset_day", |arg| arg.help(h.exit_reset_day).value_name(v.day))

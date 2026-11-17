@@ -1,4 +1,4 @@
-//! 出口上的约束（带宽上限、配额、建连预算、地址族）、排空，以及监听在虚拟 IP 上、目标是别的节点的端口转发。
+//! 出口上的约束（配额、建连预算、地址族）、排空，以及监听在虚拟 IP 上、目标是别的节点的端口转发。
 
 // clippy.toml 里的 allow-unwrap-in-tests 只管 #[test] 函数，管不到集成测试里的辅助函数。这里 unwrap 失败就是测试失败。
 #![allow(clippy::unwrap_used)]
@@ -7,7 +7,7 @@ mod common;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::{
     GW, LAPTOP, NAS, PUBLIC_IP, Target, UdpTarget, World, assert_echo, assert_reset, drain, echo_server, listener, node, peer_mut, socks5,
@@ -15,9 +15,8 @@ use common::{
 };
 use i3t_exit::{Exit, Outbound};
 use i3t_model::netmap::{ExitRole, Forward, ForwardProtocol, ForwardTarget, IpFamily, ListenerProtocol};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::watch;
-use tokio::time::timeout;
 
 /// 在本机起一个服务：每条连接一上来就写 `len` 字节，然后关掉。
 async fn sender(len: usize) -> SocketAddr {
@@ -46,24 +45,6 @@ async fn careful_socks(world: &World) -> SocketAddr {
         })
         .await;
     world.laptop.listener("careful").await
-}
-
-i3t_lane::on_both_transports! {
-    async fn the_bandwidth_cap_holds_a_download_to_its_rate() {
-        let world = World::new().await;
-        world.gw.system.redirect(&format!("{PUBLIC_IP}:443"), sender(600_000).await);
-        world.gw.update(|netmap| netmap.me.exit = Some(ExitRole { bandwidth_mbps: Some(8), ..ExitRole::default() })).await;
-
-        let started = Instant::now();
-        let mut stream = socks5(world.socks().await, Some(("gw", "")), PUBLIC_IP, 443).await.connected();
-        let mut received = Vec::new();
-        timeout(Duration::from_secs(10), stream.read_to_end(&mut received)).await.unwrap().unwrap();
-        let took = started.elapsed();
-        assert_eq!(received.len(), 600_000, "限速不丢数据");
-        // 每秒 100 万字节，开头能突发 10 万字节：60 万字节至少要半秒。
-        assert!(took >= Duration::from_millis(450), "8 Mbit/s 的上限下载 600KB 只用了 {took:?}");
-        assert!(took < Duration::from_secs(3), "也不该慢得离谱：{took:?}");
-    }
 }
 
 i3t_lane::on_both_transports! {

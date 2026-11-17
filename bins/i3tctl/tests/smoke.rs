@@ -218,6 +218,9 @@ async fn the_command_line_drives_a_running_controller() {
     assert!(fixture.fails(&["relay", "enable", "nas-01", "--udp", "203.0.113.7:20330"]).await.contains("--udp"), "地址不再由人填");
     fixture.ok(&["relay", "enable", "nas-01"]).await;
     fixture.ok(&["exit", "enable", "nas-01", "--ports", "any", "--lan"]).await;
+    assert!(fixture.fails(&["exit", "enable", "nas-01", "--bandwidth", "50"]).await.contains("--bandwidth"), "出口没有带宽上限");
+    let exits = fixture.ok(&["exit", "list"]).await;
+    assert!(exits.contains("nas-01") && !exits.contains("带宽"), "{exits}");
     let nas = fixture.json(&["node", "show", "nas-01"]).await;
     let found = &nas["relay"]["addresses"][0];
     assert_eq!(found["source"], "observed", "{nas}");

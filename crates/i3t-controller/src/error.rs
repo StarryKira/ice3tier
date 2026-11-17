@@ -355,7 +355,7 @@ impl Capability {
 impl fmt::Display for Capability {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Relay => "可以作为 relay",
+            Self::Relay => "可以作为中继",
             Self::Exit => "可以作为出口",
             Self::Forward => "可以作为端口转发的目标",
         })
@@ -444,8 +444,8 @@ mod tests {
             (ErrorCode::NotFound, Some("node"), Some("pinned_relays"))
         );
         assert_eq!(missing.to_string(), "没有这个节点", "字段不改原话");
-        let zero = Error::invalid_field("bandwidth_mbps", "zero", "带宽上限不能是 0").in_field("exit");
-        assert_eq!((zero.what().as_deref(), zero.field()), (Some("zero"), Some("bandwidth_mbps")), "最里面的字段算数");
+        let zero = Error::invalid_field("ports", "zero", "端口不能是 0").in_field("exit");
+        assert_eq!((zero.what().as_deref(), zero.field()), (Some("zero"), Some("ports")), "最里面的字段算数");
         let conflict = Error::Conflict { with: Entity::Listener, message: "x".into() };
         assert_eq!((conflict.code(), conflict.what().as_deref()), (ErrorCode::Conflict, Some("listener")));
         let blocked = Error::CannotSelfUpdate {

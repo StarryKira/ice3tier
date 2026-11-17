@@ -26,7 +26,7 @@ pub struct ExitStats {
     pub datagrams_from_target: u64,
     /// 因为目标没有通过检查（访问规则、出站策略等）而丢掉的数据报。每个这样的目标另外在下面按原因计一次。
     pub datagrams_refused: u64,
-    /// 出口的带宽不够、或者配额用完而丢掉的数据报，两个方向都算。
+    /// 配额用完而丢掉的数据报，两个方向都算。
     pub datagrams_limited: u64,
     /// 没有建成的请求里，归因于目标的：域名不存在、拒绝连接、不可达、超时。
     pub failed_by_target: u64,
@@ -132,7 +132,7 @@ impl Counters {
         self.datagrams_refused.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// 因为带宽或者配额丢掉了一个数据报。
+    /// 因为配额用完丢掉了一个数据报。
     pub(crate) fn datagram_limited(&self) {
         self.datagrams_limited.fetch_add(1, Ordering::Relaxed);
     }

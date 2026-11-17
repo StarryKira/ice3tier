@@ -86,7 +86,7 @@ pub struct Ui {
     /// `i3t ping` 的结果：发了几个、回来几个、最短、平均、最长（毫秒，已经写好）。
     pub ping_summary: fn(u32, u32, &str, &str, &str) -> String,
     pub ping_all_lost: fn(u32) -> String,
-    /// 开始和结束时的路，中间换过路。
+    /// 开始和结束时的路不一样：开始时的、结束时的。
     pub ping_route_changed: fn(&str, &str) -> String,
     pub ping_unknown_node: fn(&str) -> String,
     pub ping_myself: &'static str,
@@ -277,7 +277,7 @@ static ZH: Texts = Texts {
             format!("{sent} 个往返，回来 {received} 个，丢 {}：最短 {min}，平均 {avg}，最长 {max}", sent.saturating_sub(received))
         },
         ping_all_lost: |sent| format!("{sent} 个往返都没有回来"),
-        ping_route_changed: |start, end| format!("{start} → {end}（中间换过路）"),
+        ping_route_changed: |start, end| format!("{start} → {end}"),
         ping_unknown_node: |node| format!("本节点的配置里没有 {node}：没有这个节点，或者访问规则没有把它和本节点连起来"),
         ping_myself: "这是本节点自己",
         ping_not_allowed: |node| format!("访问规则不允许本节点访问 {node}（只允许它访问本节点）"),
@@ -472,7 +472,7 @@ static EN: Texts = Texts {
             format!("{sent} round trips, {received} back, {} lost: min {min}, avg {avg}, max {max}", sent.saturating_sub(received))
         },
         ping_all_lost: |sent| format!("None of {sent} round trips came back"),
-        ping_route_changed: |start, end| format!("{start} → {end} (route changed)"),
+        ping_route_changed: |start, end| format!("{start} → {end}"),
         ping_unknown_node: |node| format!("{node} isn't in this node's configuration: no such node, or no access rule connects them"),
         ping_myself: "That is this node",
         ping_not_allowed: |node| format!("Access rules don't allow this node to reach {node} (only the other way)"),

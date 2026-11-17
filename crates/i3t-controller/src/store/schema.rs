@@ -21,6 +21,7 @@ pub(super) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0008_node_profile.sql"),
     include_str!("migrations/0009_forward_proxy_protocol.sql"),
     include_str!("migrations/0010_found_relay_addresses_and_stats.sql"),
+    include_str!("migrations/0011_exits_any_port_and_no_bandwidth.sql"),
 ];
 
 #[cfg(test)]
@@ -226,6 +227,26 @@ mod tests {
         }
     }
 
+    /// 第 7 版以后的表结构里的一个网络 `home`（编号 1）。
+    fn home_network(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO networks (id, name, cidr, routing, max_relay_hops, reach, created_at) VALUES (1, 'home', '10.66.0.0/16', '\"direct_first\"', 2, '\"any\"', 1)",
+            [],
+        )
+        .unwrap();
+    }
+
+    /// 第 7 版以后的表结构里 `home` 的一个节点，没有启用任何能力。
+    fn home_node(conn: &Connection, id: u32, name: &str) {
+        conn.execute(
+            "INSERT INTO nodes (id, network_id, public_key, name, virtual_ip, declared, dial_out_only, pinned_relays, endpoints,
+                                attached, platform, version, created_at, netmap_version, sent_version, acked_version)
+             VALUES (?1, 1, ?2, ?3, ?4, '{}', 0, '[]', '[]', '[]', 'linux-x86_64', '0.1.0', 1, 0, 0, 0)",
+            rusqlite::params![id, vec![u8::try_from(id).unwrap(); 32], name, 0x0a42_0000 + id],
+        )
+        .unwrap();
+    }
+
     /// 第 10 版之前：relay 的地址和区域是管理员填的。
     const BEFORE_FOUND_ADDRESSES: usize = 9;
 
@@ -235,23 +256,9 @@ mod tests {
         let path = dir.path().join("controller.db");
         {
             let store = Store::prepare(Connection::open(&path).unwrap(), &MIGRATIONS[..BEFORE_FOUND_ADDRESSES]).unwrap();
-            store
-                .conn
-                .execute(
-                    "INSERT INTO networks (id, name, cidr, routing, max_relay_hops, reach, created_at) VALUES (1, 'home', '10.66.0.0/16', '\"direct_first\"', 2, '\"any\"', 1)",
-                    [],
-                )
-                .unwrap();
+            home_network(&store.conn);
             for (id, name) in [(1, "hk"), (2, "nas")] {
-                store
-                    .conn
-                    .execute(
-                        "INSERT INTO nodes (id, network_id, public_key, name, virtual_ip, declared, dial_out_only, pinned_relays, endpoints,
-                                            attached, platform, version, created_at, netmap_version, sent_version, acked_version)
-                         VALUES (?1, 1, ?2, ?3, ?4, '{}', 0, '[]', '[]', '[]', 'linux-x86_64', '0.1.0', 1, 0, 0, 0)",
-                        rusqlite::params![id, vec![u8::try_from(id).unwrap(); 32], name, 0x0a42_0000 + id],
-                    )
-                    .unwrap();
+                home_node(&store.conn, id, name);
             }
             let typed = r#"{"udp":["203.0.113.7:20330"],"tcp":["203.0.113.7:20330"],"region":"hk","bandwidth_mbps":200}"#;
             store.conn.execute("UPDATE nodes SET relay = ?1 WHERE id = 1", [typed]).unwrap();
@@ -265,5 +272,53 @@ mod tests {
         let nas = store.node(i3t_proto::NodeId::new(2).unwrap()).unwrap().unwrap();
         assert_eq!(nas.relay, None, "不是 relay 的节点照旧不是");
         assert!(store.conn.prepare("SELECT network_id, series, node_id, step, at, value FROM stats").is_ok());
+    }
+
+    /// 第 11 版之前：不写端口启用的出口存着 `[80, 443]`，出口有带宽上限。
+    const BEFORE_EXITS_ANY_PORT: usize = 10;
+
+    #[test]
+    fn exits_stored_with_the_old_default_ports_become_any_port_and_every_exit_loses_its_bandwidth() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("controller.db");
+        let exits = [
+            (1, "old-default", Some(r#"{"ports":[80,443],"lan":false,"bandwidth_mbps":50,"upstream_socks5":null,"family":"any"}"#)),
+            (2, "reversed", Some(r#"{"ports":[443,80],"lan":true,"bandwidth_mbps":10,"quota_bytes":1000,"quota_reset_day":5}"#)),
+            (3, "https-only", Some(r#"{"ports":[443],"lan":false,"bandwidth_mbps":20}"#)),
+            (4, "three-ports", Some(r#"{"ports":[80,443,8080],"lan":false,"bandwidth_mbps":30}"#)),
+            (5, "any-port", Some(r#"{"ports":null,"lan":false,"bandwidth_mbps":40}"#)),
+            (6, "relay-only", None),
+        ];
+        {
+            let store = Store::prepare(Connection::open(&path).unwrap(), &MIGRATIONS[..BEFORE_EXITS_ANY_PORT]).unwrap();
+            home_network(&store.conn);
+            for (id, name, exit) in exits {
+                home_node(&store.conn, id, name);
+                store.conn.execute("UPDATE nodes SET exit = ?2 WHERE id = ?1", rusqlite::params![id, exit]).unwrap();
+            }
+            store.conn.execute(r#"UPDATE nodes SET relay = '{"bandwidth_mbps":100}' WHERE id = 6"#, []).unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), u32::try_from(MIGRATIONS.len()).unwrap());
+        let stored = |id: u32| -> Option<Value> {
+            let raw: Option<String> = store.conn.query_row("SELECT exit FROM nodes WHERE id = ?1", [id], |row| row.get(0)).unwrap();
+            raw.map(|raw| serde_json::from_str(&raw).unwrap())
+        };
+        let ports = |id: u32| stored(id).unwrap()["ports"].clone();
+        assert_eq!((ports(1), ports(2)), (Value::Null, Value::Null), "正好是 80 和 443 的，哪个在前都改成不限");
+        assert_eq!((ports(3), ports(4)), (json!([443]), json!([80, 443, 8080])), "别的列表是人特意写的，照旧");
+        assert_eq!(ports(5), Value::Null);
+        for id in 1..=5 {
+            assert!(stored(id).unwrap().get("bandwidth_mbps").is_none(), "出口 {id} 的带宽上限去掉了");
+        }
+        assert_eq!(stored(2).unwrap(), json!({ "ports": null, "lan": true, "quota_bytes": 1000, "quota_reset_day": 5 }), "别的设置不动");
+
+        let node = |id: u32| store.node(i3t_proto::NodeId::new(id).unwrap()).unwrap().unwrap();
+        let reversed = node(2).exit.unwrap();
+        assert_eq!((reversed.ports, reversed.lan, reversed.quota_bytes, reversed.quota_reset_day), (None, true, Some(1000), 5));
+        assert_eq!(node(4).exit.unwrap().ports, Some(vec![80, 443, 8080]));
+        let relay_only = node(6);
+        assert_eq!(relay_only.exit, None, "不是出口的节点照旧不是");
+        assert_eq!(relay_only.relay, Some(i3t_model::admin::RelaySettings { bandwidth_mbps: Some(100) }), "relay 的带宽上限不动");
     }
 }

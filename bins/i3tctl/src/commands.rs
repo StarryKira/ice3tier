@@ -422,24 +422,11 @@ impl Session {
     async fn exit_command(&self, command: ExitCommand) -> anyhow::Result<()> {
         let network = self.network().await?.id;
         match command {
-            ExitCommand::Enable {
-                node,
-                ports,
-                lan,
-                bandwidth,
-                upstream_socks5,
-                quota,
-                reset_day,
-                family,
-                connects_per_minute,
-                class,
-                optimistic,
-            } => {
+            ExitCommand::Enable { node, ports, lan, upstream_socks5, quota, reset_day, family, connects_per_minute, class, optimistic } => {
                 let node = self.node(network, &node).await?;
                 let settings = ExitRole {
                     ports: ports.0,
                     lan,
-                    bandwidth_mbps: bandwidth,
                     upstream_socks5,
                     quota_bytes: quota.map(|quota| quota.0),
                     quota_reset_day: reset_day,

@@ -402,8 +402,15 @@ def exit_test(lab: Lab, work: Path, t: Checks) -> None:
     port = eventually_value(lambda: test(f"{web.ip}:80")["result"], lambda result: result["refused"] is not None, timeout=20)
     t.check("出口只放行 443：测 80 被拒绝，说出端口", port["refused"] == {"code": "port_not_allowed", "port": 80}, str(port))
     time.sleep(2.1)
-    text = controller.host.run(binary("i3tctl"), "--token", controller.token, "exit", "test", ex.name, f"{web.ip}:80", check=False).stdout
+    said = lambda target: controller.host.run(binary("i3tctl"), "--token", controller.token, "exit", "test", ex.name, target,  # noqa: E731
+                                              check=False).stdout
+    text = said(f"{web.ip}:80")
     t.check("命令行写成一句话", "端口 80 不在出口允许的范围里" in text, text)
+    text = said(f"{web.ip}:443")
+    t.check("命令行：出口忙时单独一句，不放在“出口不连”下面", "ex 正忙" in text and "出口不连" not in text, text)
+    time.sleep(2.1)
+    text = said(f"{web.ip}:443")
+    t.check("命令行：不到 1 毫秒的写成 <1 ms，不写 0 ms", "连接" in text and " 0 ms" not in text, text)
     not_exit = controller.ctl("exit", "test", a.name, f"{web.ip}:443", check=False)
     t.check("不是出口的节点不能测", not_exit.returncode != 0, not_exit.stderr.strip())
     if t.failures:
@@ -429,6 +436,9 @@ def ping(lab: Lab, work: Path, t: Checks) -> None:
     t.check("ping b：5 个往返都回来了，走的是直连", seen.returncode == 0 and "5 个往返，回来 5 个" in seen.stdout and "直连" in seen.stdout,
             f"{seen.stdout!r} {seen.stderr.strip()}")
     print(seen.stdout.rstrip(), flush=True)
+    route = seen.stdout.splitlines()[0].partition("  ")[2] if seen.stdout else ""
+    start, arrow, end = route.partition(" → ")
+    t.check("路没变就不写成 开始 → 结束", not arrow or start != end, route)
     by_ip = run(b.virtual_ip, "--count", "2")
     t.check("用虚拟 IP、只量 2 个", by_ip.returncode == 0 and "2 个往返" in by_ip.stdout, f"{by_ip.stdout!r} {by_ip.stderr.strip()}")
     unknown = run("nobody")

@@ -195,7 +195,7 @@ impl Inner {
             return Err(Error::invalid_field("items", "empty", "至少要做一项测试"));
         }
         if input.throughput && !items.iter().any(|item| matches!(item, TestItem::DirectQuality | TestItem::RelayQuality)) {
-            return Err(Error::invalid_field("throughput", "needs_quality", "吞吐是在测质量的路径上量的：要同时测直连质量或者 relay 质量"));
+            return Err(Error::invalid_field("throughput", "needs_quality", "吞吐是在测质量的路径上量的：要同时测直连质量或者中继质量"));
         }
         if input.via.len() > MAX_VIA {
             return Err(Error::invalid_field("via", "too_many", format!("最多指定 {MAX_VIA} 条路径")));
@@ -205,16 +205,16 @@ impl Inner {
                 return Err(Error::invalid_field(
                     "via",
                     "out_of_range",
-                    format!("一条路径经过 1 到 {} 个 relay（网络的最大中转级数）", network.max_relay_hops),
+                    format!("一条路径经过 1 到 {} 个中继（网络的最大中转级数）", network.max_relay_hops),
                 ));
             }
             if path.iter().enumerate().any(|(index, relay)| path[..index].contains(relay)) {
-                return Err(Error::invalid_field("via", "duplicate", "一条路径里同一个 relay 不能出现两次"));
+                return Err(Error::invalid_field("via", "duplicate", "一条路径里同一个中继不能出现两次"));
             }
             for relay in path {
                 let node = self.require_node(network.id, *relay).in_field("via")?;
                 if node.relay.is_none() {
-                    return Err(Error::invalid_field("via", "not_relay", format!("节点 {} 没有启用为 relay，不能出现在路径里", node.name)));
+                    return Err(Error::invalid_field("via", "not_relay", format!("节点 {} 没有启用为中继，不能出现在路径里", node.name)));
                 }
             }
         }
@@ -362,7 +362,7 @@ impl Inner {
             .map(|item| match item {
                 TestItem::Direct => "直连能力",
                 TestItem::DirectQuality => "直连质量",
-                TestItem::RelayQuality => "relay 质量",
+                TestItem::RelayQuality => "中继质量",
                 TestItem::Route => "选路",
             })
             .collect();

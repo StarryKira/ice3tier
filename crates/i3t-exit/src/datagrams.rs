@@ -104,7 +104,7 @@ impl Drop for ContextSlot<'_> {
 /// 一个目标检查之后的结论。
 #[derive(Debug, Clone, Copy)]
 enum Outcome {
-    /// 可以发，报文实际发到 `real`。`exit_traffic` 为真时这是出口流量（互联网或局域网目标），要过带宽和配额。
+    /// 可以发，报文实际发到 `real`。`exit_traffic` 为真时这是出口流量（互联网或局域网目标），要记配额。
     Allowed {
         real: SocketAddr,
         exit_traffic: bool,
@@ -358,9 +358,9 @@ impl<S: System, C: Connector + Datagrams> Session<'_, S, C> {
                 return false;
             }
         };
-        if exit_traffic && !self.limits.admit_datagram(true, datagram.payload.len()) {
+        if exit_traffic && !self.limits.admit_datagram(datagram.payload.len()) {
             self.counters.datagram_limited();
-            tracing::trace!(peer = %self.peer, "丢掉一个发往目标的数据报：出口的带宽不够，或者配额用完了");
+            tracing::trace!(peer = %self.peer, "丢掉一个发往目标的数据报：出口的配额用完了");
             return false;
         }
         match self.socket.send_to(&datagram.payload, real).await {
@@ -389,9 +389,9 @@ impl<S: System, C: Connector + Datagrams> Session<'_, S, C> {
             tracing::trace!(peer = %self.peer, "丢掉 UDP 端口上收到的一个报文：没有往它的来源发过报文");
             return false;
         };
-        if source.exit_traffic && !self.limits.admit_datagram(false, payload.len()) {
+        if source.exit_traffic && !self.limits.admit_datagram(payload.len()) {
             self.counters.datagram_limited();
-            tracing::trace!(peer = %self.peer, "丢掉目标发回来的一个数据报：出口的带宽不够，或者配额用完了");
+            tracing::trace!(peer = %self.peer, "丢掉目标发回来的一个数据报：出口的配额用完了");
             return false;
         }
         match sender.send(&source.target, payload).await {

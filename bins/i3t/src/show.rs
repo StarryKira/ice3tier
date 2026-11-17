@@ -197,13 +197,8 @@ pub fn ping(asked: &str, report: &PingReport) -> bool {
         eprintln!("{failure}");
         return false;
     }
-    let codes = lang.codes();
-    let names = |id: NodeId| format!("#{id}");
-    let route = |route: Option<&Route>| route.map_or_else(|| t.unknown.to_owned(), |route| (codes.route)(route, &names));
-    let start = route(report.route_start.as_ref());
-    let path = if report.route_changed { (t.ping_route_changed)(&start, &route(report.route_end.as_ref())) } else { start };
     let peer = report.peer.as_ref().map_or_else(|| name.clone(), |peer| lang.paren(&peer.name, &peer.virtual_ip.to_string()));
-    println!("{peer}  {path}");
+    println!("{peer}  {}", ping_route(report));
     let (Some(min), Some(max)) = (report.rtts_us.iter().min(), report.rtts_us.iter().max()) else {
         println!("{}", (t.ping_all_lost)(report.sent));
         return false;
@@ -212,6 +207,21 @@ pub fn ping(asked: &str, report: &PingReport) -> bool {
     let ms = |micros: u64| format!("{:.1} ms", Duration::from_micros(micros).as_secs_f64() * 1000.0);
     println!("{}", (t.ping_summary)(report.sent, report.received, &ms(*min), &ms(avg), &ms(*max)));
     true
+}
+
+/// `i3t ping` 量的这段时间里走的路。开始和结束时的路不一样才写成"开始 → 结束"：中间换过又换回来的，对看结果的人来说路没有变。
+/// relay 写名字，和 `i3t routes` 一样；旧版本的节点不给名字，那时写编号。
+fn ping_route(report: &PingReport) -> String {
+    let (t, lang) = context();
+    let codes = lang.codes();
+    let names =
+        |id: NodeId| report.relays.iter().find(|relay| relay.id == id.get()).map_or_else(|| format!("#{id}"), |relay| relay.name.clone());
+    let route = |route: &Route| (codes.route)(route, &names);
+    match (report.route_start.as_ref(), report.route_end.as_ref()) {
+        (Some(start), Some(end)) if start != end => (t.ping_route_changed)(&route(start), &route(end)),
+        (Some(known), _) | (None, Some(known)) => route(known),
+        (None, None) => t.unknown.to_owned(),
+    }
 }
 
 fn route_table(live: &LiveStatus) {
@@ -252,6 +262,7 @@ fn update(live: &LiveStatus) -> String {
 
 #[cfg(test)]
 mod tests {
+    use i3t_agent::ping::RelayName;
     use i3t_agent::status::LiveUpdate;
     use i3t_model::control::SelfUpdate;
     use i3t_model::update::SelfUpdateBlocker;
@@ -269,6 +280,27 @@ mod tests {
         assert!(blocked.contains(t.cannot_self_update) && blocked.contains((codes.blocker)(SelfUpdateBlocker::Container)), "{blocked}");
         let waiting = update(&with(UpdateStatus::WaitingForIdle { version: "0.2.0".parse().unwrap() }, None));
         assert!(waiting.contains("0.2.0"), "{waiting}");
+    }
+
+    #[test]
+    fn ping_names_relays_and_shows_a_change_only_when_the_route_at_the_end_differs() {
+        let (t, lang) = context();
+        let route = |route: &Route| (lang.codes().route)(route, &|id: NodeId| format!("#{id}"));
+        let direct = Route::Direct { addr: "203.0.113.7:20330".parse().unwrap() };
+        let via_hk = Route::Relay { relays: vec![NodeId::new(4).unwrap()] };
+        let report = |start: Option<&Route>, end: Option<&Route>| PingReport {
+            route_start: start.cloned(),
+            route_end: end.cloned(),
+            relays: vec![RelayName { id: 4, name: "hk".into() }],
+            ..PingReport::default()
+        };
+        assert_eq!(ping_route(&report(Some(&direct), Some(&direct))), route(&direct), "同一条路：不写箭头");
+        let changed = ping_route(&report(Some(&direct), Some(&via_hk)));
+        assert_eq!(changed, (t.ping_route_changed)(&route(&direct), &ping_route(&report(Some(&via_hk), None))));
+        assert!(changed.contains("hk") && !changed.contains("#4"), "relay 写名字：{changed}");
+        let nameless = PingReport { relays: Vec::new(), ..report(Some(&via_hk), Some(&via_hk)) };
+        assert_eq!(ping_route(&nameless), route(&via_hk), "旧版本的节点不给名字：写编号");
+        assert_eq!(ping_route(&report(None, None)), t.unknown);
     }
 
     #[test]

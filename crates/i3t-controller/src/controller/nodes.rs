@@ -371,13 +371,13 @@ fn unpin_everywhere(store: &Store, network: NetworkId, relay: NodeId) -> Result<
 
 fn check_pinned_relays(store: &Store, node: &NodeRecord, pinned: &[NodeId]) -> Result<Vec<NodeId>, Error> {
     if pinned.len() > MAX_PINNED_RELAYS {
-        return Err(Error::invalid_field("pinned_relays", "too_many", format!("最多固定 {MAX_PINNED_RELAYS} 个挂靠 relay")));
+        return Err(Error::invalid_field("pinned_relays", "too_many", format!("最多固定 {MAX_PINNED_RELAYS} 个挂靠的中继")));
     }
     let mut checked = Vec::with_capacity(pinned.len());
     for &relay in pinned {
         let record = require_node(store, node.network, relay).in_field("pinned_relays")?;
         if relay == node.id || record.relay.is_none() {
-            return Err(Error::invalid_field("pinned_relays", "not_relay", format!("节点 {} 不是可以挂靠的 relay", record.name)));
+            return Err(Error::invalid_field("pinned_relays", "not_relay", format!("节点 {} 不是可以挂靠的中继", record.name)));
         }
         if !checked.contains(&relay) {
             checked.push(relay);
@@ -400,9 +400,6 @@ fn check_exit_settings(mut settings: ExitRole) -> Result<ExitRole, Error> {
         }
         ports.sort_unstable();
         ports.dedup();
-    }
-    if settings.bandwidth_mbps == Some(0) {
-        return Err(Error::invalid_field("bandwidth_mbps", "zero", "带宽上限不能是 0；不限制就不要填"));
     }
     if settings.upstream_socks5.is_some_and(|address| !is_connectable(&address)) {
         return Err(Error::invalid_field("upstream_socks5", "not_connectable", "上游代理的地址不是一个能连上的地址"));
@@ -465,7 +462,7 @@ fn describe_update(before: &NodeRecord, after: &NodeRecord, groups: &[GroupRecor
         changes.push("选路设置".to_owned());
     }
     if before.pinned_relays != after.pinned_relays {
-        changes.push(format!("固定的挂靠 relay {}", listed(after.pinned_relays.iter().map(|relay| format!("#{relay}")))));
+        changes.push(format!("固定挂靠的中继 {}", listed(after.pinned_relays.iter().map(|relay| format!("#{relay}")))));
     }
     if before.profile != after.profile {
         changes.push(format!("性能档位 {}", after.profile.map_or("本机决定", |profile| profile.as_str())));

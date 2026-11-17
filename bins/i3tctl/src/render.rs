@@ -189,13 +189,22 @@ pub fn node_listeners(view: &NodeListeners) {
 }
 
 pub fn exit_test(view: &ExitTestView) {
+    print!("{}", exit_test_text(view));
+}
+
+/// 出口测试的结果，每行以换行结尾。
+fn exit_test_text(view: &ExitTestView) -> String {
     let (t, lang, codes) = context();
     let Some(result) = &view.result else {
-        println!("{}", (t.exit_unanswered)(&view.node.name));
-        return;
+        return format!("{}\n", (t.exit_unanswered)(&view.node.name));
     };
-    println!("{}", lang.paren(&format!("{} → {}", view.node.name, view.target), (codes.exit_via)(result.via)));
-    let ms = |ms: u32| format!("{ms} ms");
+    // 出口忙着不是它的策略不连这个目标：一句话说完，不列步骤。
+    if result.refused == Some(ExitTestCause::Busy) {
+        return format!("{}\n", (t.exit_busy)(&view.node.name));
+    }
+    let header = lang.paren(&format!("{} → {}", view.node.name, view.target), (codes.exit_via)(result.via));
+    // 节点报的是舍去零头的整毫秒：0 是不到 1 毫秒，不是什么都没做。JSON 里照旧是 0。
+    let ms = |ms: u32| if ms == 0 { "<1 ms".to_owned() } else { format!("{ms} ms") };
     let outcome = |cause: Option<&ExitTestCause>, ok: String| cause.map_or(ok, codes.exit_test_cause);
     let mut fields = Fields::new(2);
     if let Some(step) = &result.resolve {
@@ -215,7 +224,7 @@ pub fn exit_test(view: &ExitTestView) {
     if let Some(cause) = &result.refused {
         fields.add(t.exit_refused, (codes.exit_test_cause)(cause));
     }
-    fields.print();
+    format!("{header}\n{fields}")
 }
 
 pub fn exits(exits: &[ExitView]) {
@@ -235,7 +244,6 @@ pub fn exits(exits: &[ExitView]) {
         fields.add(t.recent, (t.recent_requests)(exit.recent_requests, exit.recent_failures));
         fields.add(t.ports, settings.ports.as_ref().map_or_else(unlimited, |ports| lang.list(ports)));
         fields.add(t.lan, yes_no(settings.lan));
-        fields.add(t.bandwidth, settings.bandwidth_mbps.map_or_else(unlimited, |mbps| format!("{mbps} Mbit/s")));
         fields.add(t.family, label(&settings.family));
         fields.add(t.connects, settings.connects_per_minute.map_or_else(unlimited, |count| (t.per_minute)(count)));
         if let Some(usage) = &exit.usage {
@@ -385,7 +393,7 @@ pub fn node_detail(detail: &NodeDetail) {
         || t.disabled.to_owned(),
         |exit| {
             let ports = exit.ports.as_ref().map_or_else(|| t.unlimited.to_owned(), |ports| lang.list(ports));
-            (t.exit_settings)(&ports, &yes_no(exit.lan), &bandwidth(exit.bandwidth_mbps), &optional(exit.upstream_socks5))
+            (t.exit_settings)(&ports, &yes_no(exit.lan), &optional(exit.upstream_socks5))
         },
     );
     fields.add(t.exit, exit);
@@ -446,6 +454,7 @@ fn profile_summary(chosen: Option<Profile>, running: Option<&PerformanceReport>)
     lang.paren(chosen, &lang.list(notes))
 }
 
+/// relay 的带宽上限。出口没有带宽上限。
 fn bandwidth(mbps: Option<u32>) -> String {
     let (t, _, _) = context();
     mbps.map_or_else(|| t.unlimited.to_owned(), |mbps| format!("{mbps} Mbit/s"))
@@ -1061,6 +1070,8 @@ fn node_name(node: &NodeRef) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use i3t_model::control::exit_test::{ConnectStep, ExitTestResult, ExitVia, TlsStep};
+
     use super::*;
 
     #[test]
@@ -1075,5 +1086,36 @@ mod tests {
         assert_eq!(kind_cell(&Route::Relay { relays: vec![relay] }, Some(DirectKind::Lan), Some(LegTransport::Tcp)), "TCP");
         assert_eq!(kind_cell(&direct, None, Some(LegTransport::Tcp)), NONE, "节点没有说的时候是短横");
         assert_eq!(label(&i3t_model::netmap::RoutingMode::LowestCost), "lowest_cost");
+    }
+
+    fn tested(result: ExitTestResult) -> ExitTestView {
+        let node = NodeRef { id: NodeId::new(3).unwrap(), name: "gw".into(), virtual_ip: "10.66.0.3".parse().unwrap() };
+        ExitTestView { node, target: "192.168.1.5:443".into(), answered: true, result: Some(result) }
+    }
+
+    #[test]
+    fn a_busy_exit_gets_its_own_line_and_not_the_policy_label() {
+        let (t, _, codes) = context();
+        let busy = ExitTestResult { via: ExitVia::Direct, refused: Some(ExitTestCause::Busy), resolve: None, connect: None, tls: None };
+        let text = exit_test_text(&tested(busy));
+        assert_eq!(text, format!("{}\n", (t.exit_busy)("gw")));
+        assert!(!text.contains(t.exit_refused) && !text.contains((codes.exit_test_cause)(&ExitTestCause::Busy).as_str()), "{text}");
+        let refused = ExitTestCause::PortNotAllowed { port: 25 };
+        let policy = ExitTestResult { via: ExitVia::Direct, refused: Some(refused), resolve: None, connect: None, tls: None };
+        assert!(exit_test_text(&tested(policy)).contains(t.exit_refused), "策略不连的照旧在它的标签下");
+    }
+
+    #[test]
+    fn times_under_a_millisecond_do_not_read_as_zero() {
+        let address = "192.168.1.5:443".parse().unwrap();
+        let result = ExitTestResult {
+            via: ExitVia::Direct,
+            refused: None,
+            resolve: None,
+            connect: Some(ConnectStep { ms: 0, address: Some(address), cause: None }),
+            tls: Some(TlsStep { ms: 3, cause: None }),
+        };
+        let text = exit_test_text(&tested(result));
+        assert!(text.contains("<1 ms") && text.contains("3 ms") && !text.contains(" 0 ms"), "{text}");
     }
 }
