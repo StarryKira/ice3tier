@@ -226,7 +226,7 @@ export const listeners = {
     fixedExitNone: '无',
     usage: '用法',
     advanced: '高级',
-    classLabel: '服务等级',
+    classLabel: 'QoS',
     classHint: '用户名中的 +c- 优先',
     classInherit: '跟随出口和网络',
     optimisticLabel: '乐观应答',
@@ -320,7 +320,7 @@ export const forwards = {
     portHint: '留空由节点选择空闲端口',
     portPlaceholder: '自动',
     portMeshRequired: '在虚拟 IP 上监听需指定端口',
-    classLabel: '服务等级',
+    classLabel: 'QoS',
     protocol: '协议',
     tcp: 'TCP',
     udp: 'UDP',
@@ -370,18 +370,18 @@ export const listen = {
   builtinTip: '节点按本机 config.toml 开启，仅供本机程序使用，在该节点上修改',
 }
 
-/** 服务等级（auto / interactive / reliable / bulk）。 */
+/** QoS（auto / interactive / reliable / bulk）。界面上不叫"服务等级"。 */
 export const serviceClass = {
   auto: '自动',
-  interactive: '交互',
-  reliable: '可靠',
-  bulk: '大流量',
-  autoDesc: '先按交互，流量大时让位',
-  interactiveDesc: '延迟优先，过期的 UDP 丢弃',
-  reliableDesc: '不丢包，延迟次之',
-  bulkDesc: '吞吐优先，让位于其他流',
+  interactive: '低延迟',
+  reliable: '不丢包',
+  bulk: '后台',
+  autoDesc: '小请求优先，大下载自动让路',
+  interactiveDesc: '延迟最低；过时的 UDP 包会被丢弃',
+  reliableDesc: 'UDP 也一个包不丢，延迟次之',
+  bulkDesc: '给其他流量让路，吞吐优先',
   inheritNetwork: (value: string) => `跟随网络（${value}）`,
-  value: (name: string) => `等级 ${name}`,
+  value: (name: string) => `QoS ${name}`,
 }
 
 export const pairs = {

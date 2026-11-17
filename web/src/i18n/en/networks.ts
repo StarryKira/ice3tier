@@ -53,7 +53,7 @@ export const networks: Messages['networks'] = {
   reachDirectOnlyDesc: "No relays. Pairs that can't connect directly are unreachable.",
   reachRelayOnly: 'Relay only',
   reachRelayOnlyDesc: 'Never direct. Public addresses stay hidden from peers.',
-  classLabel: 'Default service class',
+  classLabel: 'Default QoS',
   classHint: 'Proxy usernames, listeners, port forwards and exits take precedence',
   saveSettings: 'Save',
   settingsSaved: 'Settings saved',

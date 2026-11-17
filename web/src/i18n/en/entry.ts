@@ -232,7 +232,7 @@ export const listeners: Messages['listeners'] = {
     fixedExitNone: 'None',
     usage: 'Usage',
     advanced: 'Advanced',
-    classLabel: 'Service class',
+    classLabel: 'QoS',
     classHint: 'A +c- tag in the username takes precedence',
     classInherit: 'Inherit from exit and network',
     optimisticLabel: 'Optimistic reply',
@@ -326,7 +326,7 @@ export const forwards: Messages['forwards'] = {
     portHint: 'Leave empty to let the node pick a free port',
     portPlaceholder: 'Auto',
     portMeshRequired: 'Required when listening on the virtual IP',
-    classLabel: 'Service class',
+    classLabel: 'QoS',
     protocol: 'Protocol',
     tcp: 'TCP',
     udp: 'UDP',
@@ -377,15 +377,15 @@ export const listen: Messages['listen'] = {
 
 export const serviceClass: Messages['serviceClass'] = {
   auto: 'Auto',
-  interactive: 'Interactive',
-  reliable: 'Reliable',
-  bulk: 'Bulk',
-  autoDesc: 'Interactive first, yields when heavy',
-  interactiveDesc: 'Lowest latency; stale UDP is dropped',
-  reliableDesc: 'No loss; latency second',
-  bulkDesc: 'Throughput; yields to other flows',
+  interactive: 'Low latency',
+  reliable: 'No loss',
+  bulk: 'Background',
+  autoDesc: 'Small requests first; big downloads yield',
+  interactiveDesc: 'Lowest latency; stale UDP packets are dropped',
+  reliableDesc: 'Not even a UDP packet is lost; latency second',
+  bulkDesc: 'Yields to other traffic; throughput first',
   inheritNetwork: (value) => `Network default (${value})`,
-  value: (name) => `Class ${name}`,
+  value: (name) => `QoS ${name}`,
 }
 
 export const pairs: Messages['pairs'] = {

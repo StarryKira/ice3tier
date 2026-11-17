@@ -238,7 +238,7 @@ export const nodes: Messages['nodes'] = {
     exitFormConnects: 'Connection rate',
     exitFormConnectsUnit: 'per minute',
     exitFormConnectsHint: 'New connections per node to one destination per minute; bursts allowed',
-    exitFormClass: 'Default service class',
+    exitFormClass: 'Default QoS',
     exitFormClassNone: 'Network default',
     exitFormMore: 'Quota and limits',
     exitFormUpstream: 'Upstream SOCKS5 proxy',

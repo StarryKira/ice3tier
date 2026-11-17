@@ -229,7 +229,7 @@ export const nodes = {
     exitFormConnects: '建连速率',
     exitFormConnectsUnit: '次/分钟',
     exitFormConnectsHint: '每个节点对同一目标每分钟的新连接数，可突发',
-    exitFormClass: '默认服务等级',
+    exitFormClass: '默认 QoS',
     exitFormClassNone: '跟随网络',
     exitFormMore: '配额与限制',
     exitFormUpstream: '上游 SOCKS5 代理',

@@ -172,7 +172,7 @@ target/release/i3t run
 | 只主动连接       | outbound only            | `dial_out_only` | 不接受别的节点连进来，也不打洞；不叫只拨出                |
 | 选路模式         | routing mode             | `--routing`     | 默认 default，延迟优先 lowest latency                     |
 | 路径限制         | path restriction         | `--reach`       | 不限 any，只直连 direct only，只经中继 relay only         |
-| 服务等级         | service class            | `--class`       | 自动 auto，交互 interactive，可靠 reliable，大流量 bulk   |
+| QoS              | QoS                      | `--class`       | 自动 auto，低延迟 interactive，不丢包 reliable，后台 bulk；不叫服务等级 |
 | 流               | flow                     |                 |                                                           |
 | 连接             | connection               |                 |                                                           |
 | 流量             | traffic                  |                 | 字节数                                                    |

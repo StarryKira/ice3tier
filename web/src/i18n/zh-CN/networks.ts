@@ -50,7 +50,7 @@ export const networks = {
   reachDirectOnlyDesc: '不用中继，无法直连的节点对不可达',
   reachRelayOnly: '只经中继',
   reachRelayOnlyDesc: '不直连，不向对端暴露公网地址',
-  classLabel: '默认服务等级',
+  classLabel: '默认 QoS',
   classHint: '代理用户名、监听器、端口转发和出口的设置优先',
   saveSettings: '保存',
   settingsSaved: '设置已保存',
