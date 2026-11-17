@@ -154,7 +154,7 @@ function fixPath(network: number, fix: LaneFix): string {
     case 'tcp_address':
       return `${nodePath(network, fix.node)}?tab=relay`
     case 'update':
-      return `${nodePath(network, fix.node)}?tab=update`
+      return nodePath(network, fix.node)
     case 'access':
       return `${networkPath(network, 'access')}?check=1&from=${fix.from}&to=${fix.to}`
   }

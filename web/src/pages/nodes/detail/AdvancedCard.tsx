@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { useId } from 'react'
+import { Link } from 'react-router'
 
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
@@ -31,6 +32,11 @@ export function AdvancedCard({ network, node }: { network: Network; node: NodeDe
   const dialId = useId()
   const dialHintId = useId()
   const pinnedId = useId()
+  const autoUpdateId = useId()
+  const autoUpdateHintId = useId()
+  // 全局的自动更新关着时，节点自己的开关开着也不会自动更新：说明里写出来，并给去设置的链接。
+  const overview = useQuery(q.update())
+  const globalOff = overview.data?.auto_update === false
   const save = useAction(network.id, {
     mutationFn: (body: UpdateNode) => api.updateNode(network.id, node.id, body),
     success: d.settingSaved,
@@ -95,6 +101,35 @@ export function AdvancedCard({ network, node }: { network: Network; node: NodeDe
             busy={save.isPending}
           />
         </SettingRow>
+
+        {/* 0.1.12 起的 controller 才有这个开关；更早的没有这个字段，不显示。 */}
+        {node.auto_update !== undefined ? (
+          <SettingRow
+            label={d.autoUpdate}
+            description={
+              globalOff ? (
+                <>
+                  {d.autoUpdateGlobalOff}{' '}
+                  <Link to="/settings/updates" className="text-primary hover:underline">
+                    {d.autoUpdateSettings}
+                  </Link>
+                </>
+              ) : (
+                d.autoUpdateHint
+              )
+            }
+            descriptionId={autoUpdateHintId}
+            htmlFor={autoUpdateId}
+          >
+            <Switch
+              id={autoUpdateId}
+              aria-describedby={autoUpdateHintId}
+              checked={node.auto_update}
+              disabled={save.isPending}
+              onCheckedChange={(checked) => save.mutate({ auto_update: checked })}
+            />
+          </SettingRow>
+        ) : null}
       </div>
     </BoxCard>
   )

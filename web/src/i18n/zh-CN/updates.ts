@@ -252,18 +252,11 @@ export const updates = {
   },
 
   detail: {
-    tab: '更新',
-    current: '当前版本',
-    available: '可更新到',
-    selfUpdate: '自行更新',
-    state: '状态',
-    order: '已下发',
-    orderValue: (version: string, when: keyof typeof timing) => `${timing[when]}更新到 ${version}`,
-    failure: '上次失败',
-    none: '无',
+    upgrade: (version: string) => `升级到 ${version}`,
+    securityTip: '这个版本修了安全问题，尽快升级',
+    manualTitle: (name: string, version: string) => `手动将 ${name} 更新到 ${version}`,
     manualDownload: (platform: string) => `在这台机器上运行（${platform}）：`,
     manualNoPlatform: '从发布页下载对应的程序，替换现有的程序',
-    goSettings: '更新设置',
   },
 
   /** 节点列表版本一列的图标。 */

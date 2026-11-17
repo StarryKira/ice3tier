@@ -245,18 +245,11 @@ export const updates: Messages['updates'] = {
   },
 
   detail: {
-    tab: 'Updates',
-    current: 'Current version',
-    available: 'Available',
-    selfUpdate: 'Self-update',
-    state: 'Status',
-    order: 'Ordered',
-    orderValue: (version, when) => `Update to ${version} ${timing[when]}`,
-    failure: 'Last failure',
-    none: 'None',
+    upgrade: (version) => `Upgrade to ${version}`,
+    securityTip: 'This version fixes a security problem. Upgrade soon',
+    manualTitle: (name, version) => `Update ${name} to ${version} by hand`,
     manualDownload: (platform) => `On the machine (${platform}), run:`,
     manualNoPlatform: 'Download the binary from the releases page and replace the current one',
-    goSettings: 'Update settings',
   },
 
   icon: {

@@ -132,23 +132,23 @@ test('节点列表标出有新版本和要手动更新的；详情里写出不�
   await expect(page.getByTestId('node-row-boxed').getByTestId('update-mark-manual')).toBeVisible()
   const u = t.updates
 
+  // 概览上版本右边的"升级到"：不能自己更新的点开是手动的做法。
   await page.getByRole('link', { name: 'boxed', exact: true }).click()
-  await page.getByRole('tab', { name: u.detail.tab }).click()
+  await page.getByRole('button', { name: u.detail.upgrade(kit.newVersion) }).click()
   await expect(page.getByTestId('node-self-update')).toContainText(u.blocker.container)
   await expect(page.getByTestId('node-self-update')).toContainText(u.blocker.containerHow)
-  await expect(page.getByRole('button', { name: u.force.button }).first()).toBeDisabled()
+  await page.keyboard.press('Escape')
 
-  await page.goto(`${controller.baseUrl}/n/1/nodes/${nodes.locked.id}?tab=update`)
+  await page.goto(`${controller.baseUrl}/n/1/nodes/${nodes.locked.id}`)
+  await page.getByRole('button', { name: u.detail.upgrade(kit.newVersion) }).click()
   await expect(page.getByTestId('node-self-update')).toContainText(u.blocker.read_only_dir)
   await expect(page.getByTestId('node-self-update').locator('pre')).toContainText('curl -fLo i3t')
 })
 
 test('立即更新的确认框写出后果；取消就什么都不发', async () => {
-  await page.goto(`${controller.baseUrl}/n/1/nodes/${nodes.able.id}?tab=update`)
+  await page.goto(`${controller.baseUrl}/n/1/nodes/${nodes.able.id}`)
   const u = t.updates
-  await expect(page.getByTestId('node-self-update')).toContainText(u.blocker.able)
-  await expect(page.getByTestId('node-update-state')).toContainText(u.state.available(kit.newVersion))
-  await page.getByRole('button', { name: u.force.button }).first().click()
+  await page.getByRole('button', { name: u.detail.upgrade(kit.newVersion) }).click()
   const dialog = page.getByRole('dialog', { name: u.force.title('able', kit.newVersion) })
   await expect(dialog).toContainText(u.force.idleBody)
   await dialog.getByRole('button', { name: t.common.cancel, exact: true }).click()

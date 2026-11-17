@@ -1,15 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import {
-  ChevronRight,
-  CircleArrowUp,
-  EllipsisVertical,
-  History,
-  Pencil,
-  Replace,
-  Server,
-  ServerOff,
-  Trash2,
-} from 'lucide-react'
+import { ChevronRight, EllipsisVertical, History, Pencil, Replace, Server, ServerOff, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 
@@ -17,12 +7,10 @@ import { ApiError } from '@/api/client'
 import { q } from '@/api/queries'
 import { type Network, type NodeDetail } from '@/api/types'
 import { CopyText } from '@/components/copy'
-import { ForceUpdateDialog } from '@/components/force-update'
 import { Page } from '@/components/page'
 import { EmptyState, ErrorState, SkeletonBlock } from '@/components/states'
-import { IssueIcon, StatusDot, StatusText } from '@/components/status'
+import { IssueIcon, StatusText } from '@/components/status'
 import { OsIcon } from '@/components/os-icon'
-import { ReasonButton } from '@/components/update'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -36,7 +24,7 @@ import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
 import { nodeIssues } from '@/lib/nodeIssues'
 import { attachedCount } from '@/lib/nodes'
-import { forceAbility, isUpdating } from '@/lib/nodeUpdate'
+import { isUpdating } from '@/lib/nodeUpdate'
 import { LIVE_INTERVAL, WAITING_INTERVAL } from '@/lib/polling'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { networkPath, useNetwork } from '@/pages/networks/context'
@@ -49,7 +37,6 @@ import { EditIpDialog, SucceedDialog } from './detail/dialogs'
 import { LanesTab } from './detail/LanesTab'
 import { OverviewTab } from './detail/OverviewTab'
 import { RoutesTab } from './detail/RoutesTab'
-import { UpdateTab } from './detail/UpdateTab'
 import { RoleBadges } from './NodesPage'
 
 const d = t.nodes.detail
@@ -59,7 +46,7 @@ function MetaDivider() {
   return <span aria-hidden className="h-3 w-px bg-border-strong" />
 }
 
-const TABS = ['overview', 'relay', 'exit', 'forward', 'routes', 'lanes', 'update'] as const
+const TABS = ['overview', 'relay', 'exit', 'forward', 'routes', 'lanes'] as const
 type Tab = (typeof TABS)[number]
 
 /**
@@ -96,7 +83,7 @@ export function NodeDetailPage() {
   })
   const nodes = useQuery(q.nodes(network.id))
   const deleteNode = useDeleteNode(network)
-  const [dialog, setDialog] = useState<'rename' | 'ip' | 'succeed' | 'update' | null>(null)
+  const [dialog, setDialog] = useState<'rename' | 'ip' | 'succeed' | null>(null)
 
   const node = detail.data
   useDocumentTitle(node?.name ?? t.nodes.title)
@@ -137,9 +124,6 @@ export function NodeDetailPage() {
   }
 
   const issue = nodeIssues(node, nodes.data ?? [])[0]
-  const ability = forceAbility(node)
-  // 「更新」标签上的小圆点：有新版本，或者上次更新失败了。
-  const updateMarked = node.update.available !== null || issue?.kind === 'update_failed'
   // 独占 TCP 默认不用：只有和哪个对端之间打开了，才有这个标签页。
   const showLanes = (node.lanes?.peers.length ?? 0) > 0 || tab === 'lanes'
 
@@ -196,13 +180,6 @@ export function NodeDetailPage() {
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {/* 有新版本时才出现；不能点时置灰，悬停写原因和做法。 */}
-          {node.update.available !== null ? (
-            <ReasonButton reason={ability.ok ? null : ability.reason} onClick={() => setDialog('update')}>
-              <CircleArrowUp aria-hidden />
-              {t.updates.force.button}
-            </ReasonButton>
-          ) : null}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" aria-label={d.more}>
@@ -253,10 +230,6 @@ export function NodeDetailPage() {
           <TabsTrigger value="forward">{d.tabForward}</TabsTrigger>
           <TabsTrigger value="routes">{d.tabRoutes}</TabsTrigger>
           {showLanes ? <TabsTrigger value="lanes">{d.tabLanes}</TabsTrigger> : null}
-          <TabsTrigger value="update">
-            {t.updates.detail.tab}
-            {updateMarked ? <StatusDot tone={issue?.kind === 'update_failed' ? 'danger' : 'warn'} /> : null}
-          </TabsTrigger>
         </TabsList>
         <TabsContent value="overview">
           <OverviewTab network={network} node={node} onEditIp={() => setDialog('ip')} />
@@ -277,9 +250,6 @@ export function NodeDetailPage() {
         <TabsContent value="lanes">
           <LanesTab network={network} node={node} />
         </TabsContent>
-        <TabsContent value="update">
-          <UpdateTab node={node} />
-        </TabsContent>
       </Tabs>
 
       {dialog === 'rename' ? (
@@ -289,7 +259,6 @@ export function NodeDetailPage() {
       {dialog === 'succeed' ? (
         <SucceedDialog network={network} node={node} open onClose={() => setDialog(null)} />
       ) : null}
-      {dialog === 'update' ? <ForceUpdateDialog node={node} onClose={() => setDialog(null)} /> : null}
     </Page>
   )
 }

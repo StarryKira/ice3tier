@@ -13,7 +13,6 @@ import {
   RefreshCw,
 } from 'lucide-react'
 import { useId } from 'react'
-import { Link } from 'react-router'
 
 import { q } from '@/api/queries'
 import { type Network, type NodeDetail } from '@/api/types'
@@ -21,10 +20,8 @@ import { DateTimeValue, DetailList, DetailRow } from '@/components/detail-list'
 import { Flag } from '@/components/flag'
 import { GroupsLink } from '@/components/groups'
 import { InfoTip } from '@/components/info-tip'
-import { IceStack } from '@/components/layout/BrandMark'
 import { Notice } from '@/components/notice'
 import { OnlineDot } from '@/components/status'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { BoxCard } from '@/components/ui/card'
 import { Tooltip } from '@/components/ui/tooltip'
@@ -34,6 +31,7 @@ import { countryName } from '@/lib/region'
 
 import { NodeGroupsEditor } from '../actions'
 import { AdvancedCard } from './AdvancedCard'
+import { VersionRow } from './NodeVersion'
 
 const d = t.nodes.detail
 
@@ -138,16 +136,7 @@ function InfoCard({ network, node, onEditIp }: TabProps & { onEditIp: () => void
             <DateTimeValue at={node.last_seen_at} />
           )}
         </DetailRow>
-        <DetailRow icon={<IceStack className="size-4" />} label={d.version}>
-          <span className="inline-flex items-center gap-2">
-            {node.update.available !== null ? (
-              <Link to="?tab=update" className="rounded-sm">
-                <Badge tone="warn">{t.updates.icon.available(node.update.available)}</Badge>
-              </Link>
-            ) : null}
-            <span className="tabular">{node.version === '' ? '—' : node.version}</span>
-          </span>
-        </DetailRow>
+        <VersionRow node={node} />
         <DetailRow icon={<RefreshCw />} label={d.config}>
           {synced ? (
             d.configSynced(node.netmap_version)

@@ -289,6 +289,8 @@ export interface Node {
   /** 节点上报的主机名，原样；旧版本的节点不报，是 `""`。主机名后来变了，`name` 不跟着变。 */
   hostname: string
   update: NodeUpdate
+  /** 0.1.12 起：这个节点自己的自动更新开关，默认开。全局的开关也开着时它才会被自动更新。更早的 controller 没有这个字段。 */
+  auto_update?: boolean
   /** 节点挂靠的 relay 和到它们的往返延迟，取自它最近的上报；离线时是它离线前报的。 */
   attached: Attachment[]
   /**
@@ -332,6 +334,8 @@ export interface UpdateNode {
   pinned_relays?: NodeId[]
   /** 0.1.11 起：打开或关掉"可作为端口转发的目标"。 */
   forward_target?: boolean
+  /** 0.1.12 起：打开或关掉这个节点的自动更新。 */
+  auto_update?: boolean
 }
 
 export interface Succeed {
@@ -786,6 +790,8 @@ export interface NodeUpdate {
   ordered: UpdateOrder | null
   waiting: UpdateWait | null
   failure: UpdateFailure | null
+  /** 0.1.12 起：它的版本低于最新发布的 `security_floor`（有已知的安全问题）。没有这个字段当作 `false`。 */
+  security?: boolean
 }
 
 export type PackageState = 'not_needed' | 'fetching' | 'cached' | 'failed' | 'unknown'
@@ -809,6 +815,8 @@ export interface ReleaseInfo {
   /** 这个版本比 controller 自己新：controller 要手动更新。 */
   newer_than_controller: boolean
   packages: PackageInfo[]
+  /** 0.1.12 起：没有已知安全问题的最低版本；比它旧的节点要尽快更新。 */
+  security_floor?: string | null
 }
 
 export interface PausedVersion {

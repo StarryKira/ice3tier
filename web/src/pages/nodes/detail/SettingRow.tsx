@@ -7,7 +7,7 @@ interface SettingRowProps {
   /** 悬停在 ⓘ 上看的说明。 */
   hint?: string
   /** 直接写在名字下面的说明：不看就不懂这一项时用它，不用 `hint`。控件用 `aria-describedby` 指向 `descriptionId`。 */
-  description?: string
+  description?: ReactNode
   descriptionId?: string
   /** 名字是哪个控件的 `<label>`；不给时名字是一段带 `labelId` 的文字（控件用 `aria-labelledby` 指向它）。 */
   htmlFor?: string
