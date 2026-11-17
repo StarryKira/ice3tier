@@ -60,7 +60,7 @@ function Pending() {
 }
 
 /** 卡片标题：名字，后面一个灰色的数。 */
-function CountTitle({ title, count, testId }: { title: string; count?: number; testId?: string }) {
+function CountTitle({ title, count, testId }: { title: ReactNode; count?: number; testId?: string }) {
   return (
     <span className="inline-flex items-center gap-2">
       {title}
@@ -261,11 +261,28 @@ function pairRows(entries: readonly MatrixEntry[], relay: NodeId): PairRow[] {
   return rows.sort((x, y) => (x.rtt ?? Infinity) - (y.rtt ?? Infinity))
 }
 
+const MARK = '\u0000'
+
+/** 一句话里的节点名字换成一个灰底的小块，和周围的字区分开（"经 atl 中转的节点对"）。 */
+function NamedText({ text, name }: { text: (name: string) => string; name: string }) {
+  const [before = '', after = ''] = text(MARK).split(MARK)
+  return (
+    <>
+      {before.trimEnd()}
+      <span className="mx-1 inline-flex items-center rounded-md bg-muted px-1.5 py-px text-[13px] font-medium">
+        {name}
+      </span>
+      {after.trimStart()}
+    </>
+  )
+}
+
 /**
  * 经这个中继中转的节点对：哪两个节点、延迟；经过不止这一个中继时，第二行写出经过的中继。
  * 回答"这个中继在帮谁转"；"已连接的节点"只说明谁连着它。数据来自各节点上报的路由表，和路由矩阵一样。
+ * 每行的两个名字和箭头上下对齐：列表是一个网格，每行是它的子网格。
  */
-export function RelayPairsCard({ network, relay }: { network: Network; relay: NodeId }) {
+export function RelayPairsCard({ network, relay, relayName }: { network: Network; relay: NodeId; relayName: string }) {
   const matrix = useQuery(q.matrix(network.id))
   const names = matrix.data?.nodes ?? []
   const rows = pairRows(matrix.data?.entries ?? [], relay)
@@ -275,7 +292,12 @@ export function RelayPairsCard({ network, relay }: { network: Network; relay: No
   return (
     <BoxCard data-testid="relay-pairs">
       <BoxCardHeader
-        title={<CountTitle title={d.relayPairsTitle} count={matrix.isSuccess ? rows.length : undefined} />}
+        title={
+          <CountTitle
+            title={<NamedText text={d.relayPairsTitle} name={relayName} />}
+            count={matrix.isSuccess ? rows.length : undefined}
+          />
+        }
         tip={d.relayPairsTip}
         action={
           <TopologyLink network={network} view="matrix">
@@ -286,29 +308,32 @@ export function RelayPairsCard({ network, relay }: { network: Network; relay: No
       {matrix.isPending ? (
         <Pending />
       ) : rows.length === 0 ? (
-        <Empty>{d.relayPairsNone}</Empty>
+        <Empty>{d.relayPairsNone(relayName)}</Empty>
       ) : (
-        <ul className="divide-y" aria-label={d.relayPairsTitle}>
+        <ul
+          className="grid grid-cols-[max-content_auto_max-content_minmax(0,1fr)_auto] gap-x-2.5 divide-y"
+          aria-label={d.relayPairsTitle(relayName)}
+        >
           {rows.map((row) => (
-            <Row
+            <li
               key={row.key}
-              left={
-                <>
-                  <NodeLink
-                    network={network.id}
-                    node={{ id: row.from, name: name(row.from) }}
-                    online={online(row.from)}
-                  />
-                  <span className="text-faint" aria-label={row.both ? d.relayBoth : d.relayOneWay}>
-                    {row.both ? '⇄' : '→'}
-                  </span>
-                  <NodeLink network={network.id} node={{ id: row.to, name: name(row.to) }} online={online(row.to)} />
-                  {row.stale ? <Badge tone="outline">{t.routes.stale}</Badge> : null}
-                </>
-              }
-              right={<Rtt ms={row.rtt} />}
-              sub={row.relays.length > 1 ? d.relayVia(row.relays.map(name).join(' → ')) : null}
-            />
+              className="col-span-full grid min-h-12 grid-cols-subgrid content-center items-center gap-y-0.5 px-5 py-2.5 text-sm"
+            >
+              <NodeLink network={network.id} node={{ id: row.from, name: name(row.from) }} online={online(row.from)} />
+              <span className="text-center text-faint" aria-label={row.both ? d.relayBoth : d.relayOneWay}>
+                {row.both ? '⇄' : '→'}
+              </span>
+              <NodeLink network={network.id} node={{ id: row.to, name: name(row.to) }} online={online(row.to)} />
+              <span>{row.stale ? <Badge tone="outline">{t.routes.stale}</Badge> : null}</span>
+              <span className="justify-self-end">
+                <Rtt ms={row.rtt} />
+              </span>
+              {row.relays.length > 1 ? (
+                <span className="col-span-full text-xs text-muted-foreground">
+                  {d.relayVia(row.relays.map(name).join(' → '))}
+                </span>
+              ) : null}
+            </li>
           ))}
         </ul>
       )}

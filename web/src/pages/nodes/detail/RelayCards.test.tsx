@@ -76,8 +76,8 @@ const BACKBONE: BackboneView = {
 describe('中继页的卡片', () => {
   it('经它中转的节点对：两个方向都经它的合成一行，路径里写出经过的每个中继，按延迟排', async () => {
     fakeApi({ 'GET /networks/1/routes': MATRIX })
-    renderWithApp(<RelayPairsCard network={NETWORK} relay={1} />)
-    const list = await screen.findByRole('list', { name: d.relayPairsTitle })
+    renderWithApp(<RelayPairsCard network={NETWORK} relay={1} relayName="hk" />)
+    const list = await screen.findByRole('list', { name: d.relayPairsTitle('hk') })
     const rows = within(list).getAllByRole('listitem')
     // laptop ⇄ nas（40 ms），pc → nas（经 tokyo、hk，120 ms）。不经 hk 的、一端是 hk 的都不在里面。
     expect(rows).toHaveLength(2)

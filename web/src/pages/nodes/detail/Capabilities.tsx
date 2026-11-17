@@ -396,7 +396,7 @@ export function RelayTab({ network, node, onWaiting }: CapabilityTabProps) {
         <ConnectedNodesCard network={network} relay={node.id} nodes={nodes.data ?? []} />
       </div>
       <div className="space-y-5">
-        <RelayPairsCard network={network} relay={node.id} />
+        <RelayPairsCard network={network} relay={node.id} relayName={node.name} />
         <RelayLinksCard network={network} relay={node.id} />
       </div>
     </div>
