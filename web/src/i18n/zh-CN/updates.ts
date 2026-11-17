@@ -254,6 +254,8 @@ export const updates = {
   detail: {
     upgrade: (version: string) => `升级到 ${version}`,
     securityTip: '这个版本修了安全问题，尽快升级',
+    securityBadge: '有安全问题',
+    securityManual: '当前版本有已知的安全问题，发布里没有这台机器能用的包，只能手动更新',
     manualTitle: (name: string, version: string) => `手动将 ${name} 更新到 ${version}`,
     manualDownload: (platform: string) => `在这台机器上运行（${platform}）：`,
     manualNoPlatform: '从发布页下载对应的程序，替换现有的程序',

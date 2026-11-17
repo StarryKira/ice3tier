@@ -6,6 +6,7 @@ import { DetailRow } from '@/components/detail-list'
 import { ForceUpdateDialog } from '@/components/force-update'
 import { IceStack } from '@/components/layout/BrandMark'
 import { ManualUpdate, ReasonButton, UpdateStateView } from '@/components/update'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogBody, DialogContent, DialogFooter } from '@/components/ui/dialog'
 import { Tooltip } from '@/components/ui/tooltip'
@@ -52,9 +53,22 @@ export function VersionRow({ node }: { node: NodeDetail }) {
 function UpgradeButton({ node }: { node: NodeDetail }) {
   const [open, setOpen] = useState(false)
   const version = node.update.available
-  if (version === null) return null
-
   const security = node.update.security === true
+  // 有安全问题、却没有能装的版本（发布里没有它的平台的包等）：只能手动换，没有可以点的。
+  if (version === null) {
+    if (!security) return null
+    return (
+      <Tooltip content={u.detail.securityManual}>
+        <span tabIndex={0} className="ml-2 inline-flex shrink-0 cursor-help rounded-md">
+          <Badge tone="danger">
+            <ShieldAlert aria-hidden className="size-3.5" />
+            {u.detail.securityBadge}
+          </Badge>
+        </span>
+      </Tooltip>
+    )
+  }
+
   const block = selfUpdateBlock(node.update)
   const ability = forceAbility(node)
   // 不能自己更新时按钮照样能点，点开是手动的做法；别的原因（离线、正在换）才置灰。

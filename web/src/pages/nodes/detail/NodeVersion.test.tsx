@@ -51,6 +51,15 @@ describe('概览上的版本', () => {
     expect((await screen.findAllByText(u.detail.securityTip)).length).toBeGreaterThan(0)
   })
 
+  it('有安全问题却没有能装的版本：红色的标记，悬停说只能手动更新', async () => {
+    fakeApi({ 'GET /update': makeOverview() })
+    renderWithApp(<VersionRow node={detail({ update: makeUpdate({ available: null, security: true }) })} />)
+    const badge = await screen.findByText(u.detail.securityBadge)
+    expect(screen.queryByRole('button')).toBeNull()
+    await userEvent.hover(badge)
+    expect((await screen.findAllByText(u.detail.securityManual)).length).toBeGreaterThan(0)
+  })
+
   it('不能自己更新时按钮照样能点，点开是手动更新的做法', async () => {
     fakeApi({ 'GET /update': makeOverview() })
     const update = makeUpdate({ available: '0.1.11', self_update: { able: false, blocker: 'read_only_dir' } })

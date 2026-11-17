@@ -247,6 +247,9 @@ export const updates: Messages['updates'] = {
   detail: {
     upgrade: (version) => `Upgrade to ${version}`,
     securityTip: 'This version fixes a security problem. Upgrade soon',
+    securityBadge: 'Security issue',
+    securityManual:
+      'This version has a known security problem and the release has no package for this machine; update it by hand',
     manualTitle: (name, version) => `Update ${name} to ${version} by hand`,
     manualDownload: (platform) => `On the machine (${platform}), run:`,
     manualNoPlatform: 'Download the binary from the releases page and replace the current one',
