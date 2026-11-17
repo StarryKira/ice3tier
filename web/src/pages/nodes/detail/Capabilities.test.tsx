@@ -40,6 +40,37 @@ describe('relay 这一页', () => {
     await waitFor(() => expect(screen.getByTestId('relay-attached')).toHaveTextContent('2'))
   })
 
+  it('已连接的节点单独一张卡片：延迟、首选还是备用、指定的、它还连着哪些中继', async () => {
+    fakeApi({
+      'GET /networks/1/nodes': [
+        makeNode(1, 'hk', { relay: RELAY }),
+        makeNode(9, 'tokyo', { relay: RELAY }),
+        makeNode(2, 'laptop', {
+          attached: [
+            { relay: 1, rtt_ms: 30 },
+            { relay: 9, rtt_ms: 12 },
+          ],
+        }),
+        makeNode(3, 'nas', { attached: [{ relay: 1, rtt_ms: 8 }], pinned_relays: [1] }),
+        makeNode(4, 'pc', { pinned_relays: [1] }),
+      ],
+    })
+    renderWithApp(<RelayTab network={NETWORK} node={detail({ relay: RELAY })} onWaiting={() => undefined} />)
+    const rows = await screen.findAllByRole('row')
+    // 表头一行，然后按延迟排：nas、laptop；只指定了、没连着的 pc 在最后。
+    expect(rows.map((row) => row.querySelector('td a')?.textContent ?? null)).toEqual([
+      null,
+      `${t.common.online}nas`,
+      `${t.common.online}laptop`,
+      `${t.common.online}pc`,
+    ])
+    expect(rows[1]).toHaveTextContent(d.relayRankFirst)
+    expect(rows[1]).toHaveTextContent(d.relayPinnedTag)
+    expect(rows[2]).toHaveTextContent(d.relayRankBackup)
+    expect(rows[2]).toHaveTextContent(`tokyo ${t.common.ms(12)}`)
+    expect(rows[3]).toHaveTextContent(d.relayNotConnected)
+  })
+
   it('启用之后写出 controller 试连的结果：连不上是一条建议，不是错误', async () => {
     const user = userEvent.setup()
     const reply: RelayEnabled = {

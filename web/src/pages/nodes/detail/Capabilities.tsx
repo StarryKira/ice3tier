@@ -18,7 +18,7 @@ import { SkeletonBlock } from '@/components/states'
 import { StatusText } from '@/components/status'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { BoxCard } from '@/components/ui/card'
+import { BoxCard, BoxCardHeader } from '@/components/ui/card'
 import { Switch } from '@/components/ui/switch'
 import { t, useLocale } from '@/i18n'
 import { exitUsage } from '@/lib/commands'
@@ -275,46 +275,129 @@ function RelayAddresses({ udp, tcp }: { udp: readonly string[]; tcp: readonly st
   )
 }
 
-/**
- * 连着这个中继的节点：名字、虚拟 IP、延迟，按延迟排。指定用它、但现在没连着的也列出来，排在后面。
- */
-function ConnectedNodes({ network, relay, nodes }: { network: Network; relay: NodeId; nodes: readonly Node[] }) {
-  const rows = nodes
+interface ConnectedRow {
+  node: Node
+  /** 到这个中继的延迟；没连着（只是指定了它）时是 `null`。 */
+  rtt: number | null
+  /** 这个中继是它延迟最低的那个：别的节点经中继找它时走这一个。 */
+  preferred: boolean
+  pinned: boolean
+  /** 它连着的其他中继，按延迟排。 */
+  others: { id: NodeId; rtt: number }[]
+}
+
+function connectedRows(relay: NodeId, nodes: readonly Node[]): ConnectedRow[] {
+  return nodes
     .filter((node) => node.attached.some((entry) => entry.relay === relay) || node.pinned_relays.includes(relay))
-    .map((node) => ({
-      node,
-      rtt: node.attached.find((entry) => entry.relay === relay)?.rtt_ms ?? null,
-      pinned: node.pinned_relays.includes(relay),
-    }))
+    .map((node) => {
+      const sorted = [...node.attached].sort((a, b) => a.rtt_ms - b.rtt_ms)
+      return {
+        node,
+        rtt: sorted.find((entry) => entry.relay === relay)?.rtt_ms ?? null,
+        preferred: sorted[0]?.relay === relay,
+        pinned: node.pinned_relays.includes(relay),
+        others: sorted
+          .filter((entry) => entry.relay !== relay)
+          .map((entry) => ({ id: entry.relay, rtt: entry.rtt_ms })),
+      }
+    })
     .sort((a, b) => (a.rtt ?? Infinity) - (b.rtt ?? Infinity))
+}
+
+/**
+ * 连着这个中继的节点，单独一张卡片：节点（在线、国旗、名字）、虚拟 IP、延迟、
+ * 这个中继对它是首选还是备用、是不是它指定的、它还连着哪些中继。按延迟排；
+ * 指定了它、但现在没连着的排在最后。
+ */
+function ConnectedNodesCard({ network, relay, nodes }: { network: Network; relay: NodeId; nodes: readonly Node[] }) {
+  const rows = connectedRows(relay, nodes)
   const connected = rows.filter((row) => row.rtt !== null).length
+  const cell = 'px-3 py-2.5 first:pl-5 last:pr-5'
+  const head = 'h-9 px-3 text-left text-xs font-medium whitespace-nowrap text-muted-foreground first:pl-5 last:pr-5'
 
   return (
-    <section className="border-t">
-      <h3 className="flex min-h-11 items-center gap-1.5 px-5 py-2.5 text-sm font-medium">
-        {d.relayConnectedTitle}
-        <span data-testid="relay-attached" className="font-normal text-muted-foreground tabular">
-          {connected}
-        </span>
-        <InfoTip>{d.relayAttachedTip}</InfoTip>
-      </h3>
+    <BoxCard>
+      <BoxCardHeader
+        title={
+          <span className="inline-flex items-center gap-2">
+            {d.relayConnectedTitle}
+            <span data-testid="relay-attached" className="text-sm font-normal text-muted-foreground tabular">
+              {connected}
+            </span>
+          </span>
+        }
+        tip={d.relayAttachedTip}
+      />
       {rows.length === 0 ? (
-        <p className="border-t px-5 py-4 text-[13px] text-muted-foreground">{d.relayConnectedNone}</p>
+        <p className="px-5 py-6 text-center text-[13px] text-muted-foreground">{d.relayConnectedNone}</p>
       ) : (
-        <ul className="divide-y border-t">
-          {rows.map(({ node, rtt, pinned }) => (
-            <li key={node.id} className="flex min-h-11 items-center gap-3 px-5 py-2 text-sm">
-              <NodeLink network={network.id} node={node} online={node.online} />
-              <span className="text-[13px] text-muted-foreground tabular">{node.virtual_ip}</span>
-              {pinned ? <Badge tone="outline">{d.relayPinnedTag}</Badge> : null}
-              <span className="ml-auto text-[13px] text-muted-foreground tabular">
-                {rtt === null ? d.relayNotConnected : t.common.ms(rtt)}
-              </span>
-            </li>
-          ))}
-        </ul>
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse text-sm">
+            <thead>
+              <tr className="border-b">
+                <th scope="col" className={head}>
+                  {d.relayColNode}
+                </th>
+                <th scope="col" className={head}>
+                  {d.virtualIp}
+                </th>
+                <th scope="col" className={cn(head, 'text-right')}>
+                  {d.relayColRtt}
+                </th>
+                <th scope="col" className={head}>
+                  <span className="inline-flex items-center gap-1">
+                    {d.relayColRank}
+                    <InfoTip>{d.relayRankTip}</InfoTip>
+                  </span>
+                </th>
+                <th scope="col" className={head}>
+                  {d.relayColOthers}
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr key={row.node.id} className="border-b last:border-b-0">
+                  <td className={cell}>
+                    <span className="inline-flex items-center gap-2">
+                      <NodeLink network={network.id} node={row.node} online={row.node.online} />
+                      <Flag code={row.node.country} />
+                    </span>
+                  </td>
+                  <td className={cn(cell, 'text-muted-foreground tabular')}>{row.node.virtual_ip}</td>
+                  <td className={cn(cell, 'text-right tabular', row.rtt === null && 'text-muted-foreground')}>
+                    {row.rtt === null ? d.relayNotConnected : t.common.ms(row.rtt)}
+                  </td>
+                  <td className={cell}>
+                    <span className="inline-flex items-center gap-1.5">
+                      {row.rtt === null ? null : row.preferred ? (
+                        <Badge tone="relay">{d.relayRankFirst}</Badge>
+                      ) : (
+                        <Badge>{d.relayRankBackup}</Badge>
+                      )}
+                      {row.pinned ? <Badge tone="outline">{d.relayPinnedTag}</Badge> : null}
+                    </span>
+                  </td>
+                  <td className={cn(cell, 'text-[13px] text-muted-foreground')}>
+                    {row.others.length === 0 ? (
+                      '—'
+                    ) : (
+                      <span className="flex flex-wrap gap-x-3 gap-y-0.5">
+                        {row.others.map((other) => (
+                          <span key={other.id} className="whitespace-nowrap">
+                            {nodeName(nodes, other.id)} <span className="tabular">{t.common.ms(other.rtt)}</span>
+                          </span>
+                        ))}
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
-    </section>
+    </BoxCard>
   )
 }
 
@@ -378,7 +461,6 @@ export function RelayTab({ network, node, onWaiting }: CapabilityTabProps) {
           </Stat>
           <Stat label={d.rowBandwidth}>{bandwidthValue(relay.bandwidth_mbps)}</Stat>
         </StatGrid>
-        <ConnectedNodes network={network} relay={node.id} nodes={nodes.data ?? []} />
       </>
     )
   } else if (!node.declared.relay) {
@@ -396,37 +478,40 @@ export function RelayTab({ network, node, onWaiting }: CapabilityTabProps) {
   }
 
   return (
-    <CapabilityCard
-      testId="capability-relay"
-      icon={<RadioTower />}
-      title={d.relayTitle}
-      tip={d.withdrawnNote}
-      description={d.relayDesc}
-      flash={watch.flash}
-      control={
-        <Switch
-          aria-label={d.relaySwitch(node.name)}
-          checked={enabled || enabling}
-          disabled={!(enabled || node.declared.relay) || disable.isPending}
-          onCheckedChange={onSwitch}
-        />
-      }
-    >
-      {watch.flash ? <Arrived /> : null}
-      {/* 保存之后马上就有：不等页面重新取到节点。 */}
-      {reachability !== null ? (
-        <ReachabilityNotice results={reachability} onDismiss={() => setReachability(null)} />
-      ) : null}
-      {body}
-      {enabling ? (
-        <RelayDialog
-          network={network}
-          node={node}
-          onClose={() => setEnabling(false)}
-          onSaved={(saved) => setReachability(saved.reachability.length > 0 ? saved.reachability : null)}
-        />
-      ) : null}
-    </CapabilityCard>
+    <div className="space-y-5">
+      <CapabilityCard
+        testId="capability-relay"
+        icon={<RadioTower />}
+        title={d.relayTitle}
+        tip={d.withdrawnNote}
+        description={d.relayDesc}
+        flash={watch.flash}
+        control={
+          <Switch
+            aria-label={d.relaySwitch(node.name)}
+            checked={enabled || enabling}
+            disabled={!(enabled || node.declared.relay) || disable.isPending}
+            onCheckedChange={onSwitch}
+          />
+        }
+      >
+        {watch.flash ? <Arrived /> : null}
+        {/* 保存之后马上就有：不等页面重新取到节点。 */}
+        {reachability !== null ? (
+          <ReachabilityNotice results={reachability} onDismiss={() => setReachability(null)} />
+        ) : null}
+        {body}
+        {enabling ? (
+          <RelayDialog
+            network={network}
+            node={node}
+            onClose={() => setEnabling(false)}
+            onSaved={(saved) => setReachability(saved.reachability.length > 0 ? saved.reachability : null)}
+          />
+        ) : null}
+      </CapabilityCard>
+      {enabled ? <ConnectedNodesCard network={network} relay={node.id} nodes={nodes.data ?? []} /> : null}
+    </div>
   )
 }
 
