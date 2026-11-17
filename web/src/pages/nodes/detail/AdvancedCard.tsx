@@ -28,7 +28,11 @@ const INHERIT = 'inherit'
 
 interface SettingRowProps {
   label: string
-  hint: string
+  /** 悬停在 ⓘ 上看的说明。 */
+  hint?: string
+  /** 直接写在名字下面的说明：不看就不懂这一项时用它，不用 `hint`。控件用 `aria-describedby` 指向 `descriptionId`。 */
+  description?: string
+  descriptionId?: string
   /** 名字是哪个控件的 `<label>`；不给时名字是一段带 `labelId` 的文字（控件用 `aria-labelledby` 指向它）。 */
   htmlFor?: string
   labelId?: string
@@ -38,11 +42,27 @@ interface SettingRowProps {
 }
 
 /** 一项设置：左边是名字和悬停的说明，右边是控件。行和信息卡一样高、一样的字。 */
-function SettingRow({ label, hint, htmlFor, labelId, stacked = false, children }: SettingRowProps) {
+function SettingRow({
+  label,
+  hint,
+  description,
+  descriptionId,
+  htmlFor,
+  labelId,
+  stacked = false,
+  children,
+}: SettingRowProps) {
   const name = (
-    <div className="flex min-w-0 items-center gap-1.5 text-sm">
-      {htmlFor !== undefined ? <label htmlFor={htmlFor}>{label}</label> : <span id={labelId}>{label}</span>}
-      <InfoTip>{hint}</InfoTip>
+    <div className="min-w-0">
+      <div className="flex items-center gap-1.5 text-sm">
+        {htmlFor !== undefined ? <label htmlFor={htmlFor}>{label}</label> : <span id={labelId}>{label}</span>}
+        {hint !== undefined ? <InfoTip>{hint}</InfoTip> : null}
+      </div>
+      {description !== undefined ? (
+        <p id={descriptionId} className="mt-0.5 text-[13px] text-muted-foreground">
+          {description}
+        </p>
+      ) : null}
     </div>
   )
   if (stacked) {
@@ -67,6 +87,7 @@ export function AdvancedCard({ network, node }: { network: Network; node: NodeDe
   const routingId = useId()
   const reachId = useId()
   const dialId = useId()
+  const dialHintId = useId()
   const pinnedId = useId()
   const save = useAction(network.id, {
     mutationFn: (body: UpdateNode) => api.updateNode(network.id, node.id, body),
@@ -114,9 +135,10 @@ export function AdvancedCard({ network, node }: { network: Network; node: NodeDe
           </NativeSelect>
         </SettingRow>
 
-        <SettingRow label={d.dialOutOnly} hint={d.dialOutOnlyHint} htmlFor={dialId}>
+        <SettingRow label={d.dialOutOnly} description={d.dialOutOnlyHint} descriptionId={dialHintId} htmlFor={dialId}>
           <Switch
             id={dialId}
+            aria-describedby={dialHintId}
             checked={node.dial_out_only}
             disabled={save.isPending}
             onCheckedChange={(checked) => save.mutate({ dial_out_only: checked })}

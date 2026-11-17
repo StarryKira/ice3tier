@@ -281,7 +281,7 @@ export const nodes: Messages['nodes'] = {
     reachHint:
       'Direct only: never via relay; unreachable without a direct path. Relay only: never direct; its public address stays hidden.',
     dialOutOnly: 'Outbound only',
-    dialOutOnlyHint: 'Accepts no inbound connections and skips hole punching',
+    dialOutOnlyHint: "Accepts no incoming connections and skips hole punching; peers it can't reach go through a relay",
     pinnedLabel: 'Pinned relays',
     pinnedHint: (max) => `Without a pin the node picks the lowest-latency relay. Up to ${max}.`,
     pinnedNone: 'No relays in this network',
