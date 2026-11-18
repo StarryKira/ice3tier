@@ -53,6 +53,9 @@ def punch_and_udp_blocked(lab: Lab, work: Path, t: Checks) -> None:
     c_host.block_udp()
     c = Node(c_host, work)
     for node in (r, a, b, c):
+        # 这个场景考的是测试自己去建立直连、报出用了多久。对端不多的节点不等流量就会去试直连，
+        # 那样测试开始时路已经在了，报的是"本来就有"，没有用时：这里把它关掉。
+        node.env = {"I3T_TEST_EAGER_DIRECT_PEERS": "0"}
         node.join(controller)
     controller.ctl("relay", "enable", str(r.id))
     attached(controller, a, b, c, timeout=40)
