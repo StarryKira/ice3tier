@@ -22,8 +22,6 @@ export type Version = string
 export type RoutingMode = 'direct_first' | 'lowest_cost'
 export type Reach = 'any' | 'direct_only' | 'relay_only'
 export type Direction = 'both' | 'one_way'
-/** 节点上报的监听用的协议；`mixed` 是同一个端口上 SOCKS5 和 HTTP 都认的代理。 */
-export type ListenerProtocol = 'socks5' | 'http' | 'mixed'
 export type ForwardProtocol = 'tcp' | 'udp'
 
 /**
