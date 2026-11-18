@@ -25,7 +25,6 @@ export const keys = {
   node: (network: NetworkId, node: NodeId) => ['n', network, 'node', node] as const,
   routes: (network: NetworkId, node: NodeId) => ['n', network, 'node', node, 'routes'] as const,
   nodeAccess: (network: NetworkId, node: NodeId) => ['n', network, 'node', node, 'access'] as const,
-  nodeListeners: (network: NetworkId, node: NodeId) => ['n', network, 'node', node, 'listeners'] as const,
   tokens: (network: NetworkId, all = false) => ['n', network, 'tokens', all ? 'all' : 'pending'] as const,
   groups: (network: NetworkId) => ['n', network, 'groups'] as const,
   group: (network: NetworkId, group: GroupId) => ['n', network, 'group', group] as const,
@@ -87,13 +86,6 @@ export const q = {
     }),
   nodeAccess: (network: NetworkId, node: NodeId) =>
     queryOptions({ queryKey: keys.nodeAccess(network, node), queryFn: () => api.nodeAccess(network, node) }),
-  /** 节点上的监听：状态、连接数和流量都来自节点的上报。 */
-  nodeListeners: (network: NetworkId, node: NodeId) =>
-    queryOptions({
-      queryKey: keys.nodeListeners(network, node),
-      queryFn: () => api.nodeListeners(network, node),
-      refetchInterval: LIVE_INTERVAL,
-    }),
   /** 令牌随时可能被别处的机器用掉，跟着轮询。 */
   tokens: (network: NetworkId, all = false) =>
     queryOptions({

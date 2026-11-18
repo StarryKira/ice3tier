@@ -29,7 +29,6 @@ import {
   type NodeAccess,
   type NodeDetail,
   type NodeId,
-  type NodeListeners,
   type NodeUpdate,
   type Overview,
   type Proxy,
@@ -90,9 +89,6 @@ export const api = {
     request<Node>('POST', `${net(network)}/nodes/${node}/succeed`, { body }),
   routes: (network: NetworkId, node: NodeId) => request<RouteTable>('GET', `${net(network)}/nodes/${node}/routes`),
   nodeAccess: (network: NetworkId, node: NodeId) => request<NodeAccess>('GET', `${net(network)}/nodes/${node}/access`),
-  /** 节点上的全部监听，含它按本机配置文件自己开的回环入口。 */
-  nodeListeners: (network: NetworkId, node: NodeId) =>
-    request<NodeListeners>('GET', `${net(network)}/nodes/${node}/listeners`),
 
   /** `all` 时连用掉的和过期的也列出（它们在 30 天之后被清掉）；否则只有还能用的。 */
   tokens: (network: NetworkId, all = false) =>

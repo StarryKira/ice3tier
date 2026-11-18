@@ -534,34 +534,6 @@ export interface ListenTraffic {
 /** 由监听节点每 10 秒上报一次。 */
 export type ListenStatus = ListenState & ListenTraffic
 
-/** 节点上的一个代理监听：controller 下发的，或者节点按本机配置文件自己开的回环入口（`builtin`）。 */
-export type NodeListener = {
-  /** 代理的编号；节点按本机配置自己开的回环入口（默认关着）没有编号。 */
-  id: number | null
-  builtin: boolean
-  name: string
-  bind: string
-  protocol: ListenerProtocol
-} & ListenStatus
-
-/** 一条端口转发的监听一侧。 */
-export type NodeForwardListen = {
-  id: number
-  bind: string
-  protocol: ForwardProtocol
-} & ListenStatus
-
-/** 节点上的全部监听，取自它最近的上报。 */
-export interface NodeListeners {
-  node: NodeRef
-  /** 不在线时两个列表都是空的。 */
-  online: boolean
-  /** 这次连接上还没有上报过是 `null`。 */
-  reported_secs_ago: number | null
-  listeners: NodeListener[]
-  forwards: NodeForwardListen[]
-}
-
 /**
  * 按这个顺序取第一个符合的。`forward_target_off` 是 0.1.11 起的（目标关了"可作为端口转发的目标"），
  * `target_not_declared` 是更早的 controller 的。比界面新的 controller 可能报这里没有的值，当作未知。
