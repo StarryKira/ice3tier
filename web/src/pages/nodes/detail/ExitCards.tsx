@@ -93,7 +93,7 @@ function useExitForm(network: Network, node: NodeDetail, exit: ExitSettings) {
 type ExitForm = ReturnType<typeof useExitForm>
 
 /**
- * 出口的设置，都在出口卡片里，一行一项。端口限制和"再经本机代理出去"也是一行一个开关，
+ * 出口的设置，都在出口卡片里，一行一项。端口限制和"二次代理"也是一行一个开关，
  * 打开之后在那一行下面填端口、代理的地址。
  */
 function ExitSettingsList({ node, ctl }: { node: NodeDetail; ctl: ExitForm }) {
@@ -217,7 +217,7 @@ function ExitSettingsList({ node, ctl }: { node: NodeDetail; ctl: ExitForm }) {
           ) : null}
         </div>
 
-        {/* 再经本机代理出去：默认关着；打开之后填这台机器上另一个代理程序（如 Clash）的地址。 */}
+        {/* 二次代理：默认关着；打开之后填这台机器上另一个代理程序（如 Clash）的地址。 */}
         <div data-testid="exit-upstream">
           <SettingRow label={d.upstreamTitle} hint={d.upstreamDesc} htmlFor={ids.upstream}>
             <Switch
@@ -373,7 +373,7 @@ function PortsEditor({ ctl }: { ctl: ExitForm }) {
 }
 
 /**
- * 打开"再经本机代理出去"之后的一行路线：用它的节点 → 这个出口 → 本机代理 → 网站，网站看到的是代理的地址。
+ * 打开"二次代理"之后的一行路线：用它的节点 → 这个出口 → 二次代理 → 网站，网站看到的是代理的地址。
  * 读屏读的是下面那句话，图本身不读。
  */
 function UpstreamRoute({ node, proxy }: { node: NodeDetail; proxy: string | null }) {
