@@ -419,8 +419,11 @@ def relay_for_half(lab: Lab, work: Path, t: Checks) -> None:
     t.check("a 自己挑的是家里那两个，另外挂上了两边都连得上的那个", attached(a) == [*[(id, False) for id in own], (everyone.id, True)],
             str(attached(a)))
     t.check("外面的节点经共同的中继用上家里的出口", reaches(b, url, a, expect, timeout=60))
-    route = wait_route(controller, b, a, "relay")
-    t.check("b 到 a 经两边都连得上的中继", route == {"via": "relay", "relays": [everyone.id]}, str(route))
+    # a 挂上共同的中继之前，这一对可能先走过一串中继（默认模式没有共同的中继时的退路），有了共同的中继就换到它上面；
+    # 路由表是节点隔一会儿报一次的，所以等这条路出现，而不是看到第一条经中继的路就断言。
+    shared = {"via": "relay", "relays": [everyone.id]}
+    route = eventually_value(lambda: route_of(controller, b, a), lambda found: found == shared, timeout=40, interval=1)
+    t.check("b 到 a 经两边都连得上的中继", route == shared, str(route))
 
     def reach_of(relay: Node) -> dict:
         listed = {entry["id"]: entry for entry in controller.ctl("relay", "list")}
@@ -602,7 +605,7 @@ def two_islands(lab: Lab, work: Path, t: Checks) -> None:
     cause = (path.get("forward") or {}).get("cause") or {}
     t.check("路径的原因：没有两端都用得上的中继", cause.get("code") == "no_shared_relay", str(path.get("forward", {}).get("reason")))
     shown = controller.host.run(binary("i3tctl"), "--token", controller.token, "path", str(o.id), str(a.id), check=False).stdout
-    t.check("i3tctl path 写着为什么经一串中继", "没有两端都用得上的中继" in shown and f"#{p.id} → #{h.id}" in shown, shown)
+    t.check("i3tctl path 写着为什么经一串中继（中继写的是名字）", "没有两端都用得上的中继" in shown and f"{p.name} → {h.name}" in shown, shown)
     print(f"   计时：节点加入到外面的节点用上家里的服务 {took:.1f} 秒", flush=True)
 
     # 一个两边都连得上的中继出现了：这一对少绕路，换到它上面。
