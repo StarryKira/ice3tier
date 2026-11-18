@@ -1,36 +1,16 @@
-//! 限额、用量和状态：凭据的上限和用量、出口的用量和健康、监听的状态、自动挑端口的端口转发、服务等级、
+//! 用量和状态：出口的用量和健康、监听的状态、自动挑端口的端口转发、服务等级、
 //! 注册令牌的记录、操作记录里提到的东西、"最近在线"。
 
-use i3t_model::admin::{
-    CreateCredential, CreateEnrollToken, CredentialState, ExitHealth, ForwardInput, ListenStatus, ListenerInput, LogRef, RefKind,
-    TokenState, UpdateCredential, UpdateNetwork,
-};
+use i3t_model::admin::{CreateEnrollToken, ExitHealth, ForwardInput, LogRef, ProxyStatus, RefKind, TokenState, UpdateNetwork};
 use i3t_model::control::{
-    BindCause, CredentialUsage, Declared, ExitObservation, ExitReport, ForwardReport, ListenState, ListenTraffic, ListenerReport,
-    QuotaUsage, Report, TargetCause, TargetFailureReport, ToController,
+    BindCause, Declared, ExitObservation, ExitReport, ForwardReport, ListenState, ListenTraffic, ListenerReport, ProxyReport, QuotaUsage,
+    Report, TargetCause, TargetFailureReport, ToController,
 };
 use i3t_model::netmap::{self, ExitRole, ForwardProtocol, ListenerProtocol};
 use i3t_proto::flow::Class;
 
-use super::super::testing::{CAN_DO_ALL, Lab};
+use super::super::testing::{CAN_DO_ALL, Lab, proxy};
 use crate::store::LogFilter;
-
-fn listener(node: i3t_proto::NodeId, name: &str, bind: &str, require_credential: bool) -> ListenerInput {
-    ListenerInput {
-        node,
-        config: netmap::Listener {
-            name: name.to_owned(),
-            bind: bind.parse().unwrap(),
-            protocol: ListenerProtocol::Socks5,
-            allow_from: Vec::new(),
-            require_credential,
-            default_action: None,
-            fixed_exit: None,
-            class: None,
-            optimistic: None,
-        },
-    }
-}
 
 fn forward(listen_node: i3t_proto::NodeId, target_node: i3t_proto::NodeId, bind: &str) -> ForwardInput {
     ForwardInput {
@@ -67,65 +47,6 @@ fn joining_alone_does_not_count_as_having_been_online() {
     lab.controller.disconnect(running.session);
     let node = lab.controller.node(network.id, joined.id).unwrap().node;
     assert!(!node.online && node.last_seen_at.is_some(), "离线之后留着最近在线的时间");
-}
-
-#[test]
-fn credential_usage_from_ingress_reports_adds_up_and_an_exhausted_credential_is_flagged_in_the_netmap() {
-    let mut lab = Lab::new();
-    let network = lab.network("home");
-    let mut gateway = lab.join(network.id, &[]);
-    lab.controller.create_listener(network.id, listener(gateway.id, "public", "0.0.0.0:3128", true)).unwrap();
-    let created = lab
-        .controller
-        .create_credential(network.id, &CreateCredential { name: "phone".to_owned(), max_concurrent: None, max_bytes: Some(10_000) })
-        .unwrap();
-    let id = created.credential.id;
-    assert_eq!(created.credential.prefix, created.token[..6], "前缀就是令牌的开头");
-    lab.settle(&mut [&mut gateway]);
-    let delivered = gateway.netmap().credentials[0].clone();
-    assert_eq!((delivered.id, delivered.exhausted), (id, false));
-
-    let usage = |bytes, connections| CredentialUsage { id, bytes, connections, last_used_secs_ago: Some(0) };
-    gateway.send(&lab.controller, ToController::Report(Box::new(Report { credentials: vec![usage(6_000, 2)], ..report(7) })));
-    let shown = lab.controller.credentials(network.id).unwrap().remove(0);
-    assert_eq!((shown.usage.bytes, shown.usage.connections, shown.state), (6_000, 2, CredentialState::Active));
-    assert!(shown.usage.last_used_at.is_some());
-
-    // 同一次运行里报的是累计数：只把新增的加上。
-    gateway.send(&lab.controller, ToController::Report(Box::new(Report { credentials: vec![usage(11_000, 1)], ..report(7) })));
-    lab.settle(&mut [&mut gateway]);
-    let shown = lab.controller.credentials(network.id).unwrap().remove(0);
-    assert_eq!((shown.usage.bytes, shown.state), (11_000, CredentialState::Exhausted));
-    assert!(gateway.netmap().credentials[0].exhausted, "用完了：入口要据此拒绝新的连接、断开正在进行的");
-
-    // 调高上限，不用重新签发令牌。
-    let raised = UpdateCredential { max_bytes: Some(Some(20_000)), ..UpdateCredential::default() };
-    assert_eq!(lab.controller.update_credential(network.id, id, &raised).unwrap().state, CredentialState::Active);
-    lab.settle(&mut [&mut gateway]);
-    assert!(!gateway.netmap().credentials[0].exhausted);
-    assert_eq!(gateway.netmap().credentials[0].token, delivered.token, "令牌没有变");
-
-    // 用量清零。
-    let reset = UpdateCredential { reset_usage: true, ..UpdateCredential::default() };
-    assert_eq!(lab.controller.update_credential(network.id, id, &reset).unwrap().usage.bytes, 0);
-    assert!(
-        lab.controller
-            .update_credential(network.id, id, &UpdateCredential { max_bytes: Some(Some(0)), ..UpdateCredential::default() })
-            .is_err()
-    );
-
-    // 吊销：记录还在，状态是吊销，入口不再拿到它。
-    lab.controller.delete_credential(network.id, id).unwrap();
-    lab.settle(&mut [&mut gateway]);
-    let revoked = lab.controller.credentials(network.id).unwrap().remove(0);
-    assert_eq!(revoked.state, CredentialState::Revoked);
-    assert!(revoked.revoked_at.is_some());
-    assert!(gateway.netmap().credentials.is_empty());
-    let taken =
-        lab.controller.create_credential(network.id, &CreateCredential { name: "phone".to_owned(), max_concurrent: None, max_bytes: None });
-    assert!(taken.is_err(), "吊销了的还占着名字");
-    lab.controller.delete_credential(network.id, id).unwrap();
-    assert!(lab.controller.credentials(network.id).unwrap().is_empty(), "再删一次才彻底删掉");
 }
 
 #[test]
@@ -171,27 +92,35 @@ fn an_exit_keeps_its_own_counts_and_the_initiators_view_for_cross_checking_and_h
 }
 
 #[test]
-fn listener_and_forward_status_reported_by_the_node_shows_up_including_its_builtin_listeners() {
+fn proxy_and_forward_status_reported_by_the_node_shows_up_including_its_local_entries() {
     let mut lab = Lab::new();
     let network = lab.network("home");
     let gw = lab.join(network.id, &[]);
     let target = lab.join_with(network.id, &[], CAN_DO_ALL);
     lab.switch_on_forward_target(network.id, target.id);
-    let configured = lab.controller.create_listener(network.id, listener(gw.id, "lan", "192.168.1.5:1080", true)).unwrap();
+    lab.controller.enable_exit(network.id, target.id, ExitRole::default()).unwrap();
+    let configured = lab.controller.create_proxy(network.id, proxy(gw.id, "192.168.1.5:1080", target.id)).unwrap();
     let auto = lab.controller.create_forward(network.id, forward(gw.id, target.id, "127.0.0.1:0")).unwrap();
     let busy = lab.controller.create_forward(network.id, forward(gw.id, target.id, "127.0.0.1:8080")).unwrap();
-    assert_eq!((configured.status.clone(), auto.listen.clone()), (None, None), "还没有报过");
+    assert_eq!((configured.status.clone(), auto.listen.clone()), (ProxyStatus::Pending, None), "还没有报过");
 
     let traffic = ListenTraffic { connections: 1, bytes_up: 10, bytes_down: 20 };
     let local = "127.0.0.1:41000".parse().unwrap();
     let report = Report {
+        proxies: vec![ProxyReport {
+            id: configured.id,
+            bind: "192.168.1.5:1080".parse().unwrap(),
+            state: ListenState::Listening { local: "192.168.1.5:1080".parse().unwrap() },
+            traffic,
+        }],
         listeners: vec![
+            // 旧版本的节点也在这里报 controller 下发的监听器：不认。
             ListenerReport {
                 name: "lan".to_owned(),
-                bind: "192.168.1.5:1080".parse().unwrap(),
+                bind: "192.168.1.5:1081".parse().unwrap(),
                 protocol: ListenerProtocol::Socks5,
                 builtin: false,
-                state: ListenState::Listening { local: "192.168.1.5:1080".parse().unwrap() },
+                state: ListenState::Listening { local: "192.168.1.5:1081".parse().unwrap() },
                 traffic,
             },
             ListenerReport {
@@ -225,11 +154,9 @@ fn listener_and_forward_status_reported_by_the_node_shows_up_including_its_built
     };
     gw.send(&lab.controller, ToController::Report(Box::new(report)));
 
-    let listeners = lab.controller.listeners(network.id, None).unwrap();
-    assert_eq!(
-        listeners[0].status,
-        Some(ListenStatus { state: ListenState::Listening { local: "192.168.1.5:1080".parse().unwrap() }, traffic })
-    );
+    let proxies = lab.controller.proxies(network.id, None).unwrap();
+    assert_eq!(proxies[0].status, ProxyStatus::Listening { local: "192.168.1.5:1080".parse().unwrap() });
+    assert_eq!(proxies[0].usage, traffic);
     let forwards = lab.controller.forwards(network.id).unwrap();
     assert_eq!(
         forwards[0].listen.as_ref().map(|listen| listen.state.clone()),
@@ -251,7 +178,8 @@ fn listener_and_forward_status_reported_by_the_node_shows_up_including_its_built
     assert_eq!(on_node.forwards.len(), 2);
 
     lab.controller.disconnect(gw.session);
-    assert_eq!(lab.controller.listeners(network.id, None).unwrap()[0].status, None, "节点不在线时没有状态");
+    let offline = lab.controller.proxies(network.id, None).unwrap().remove(0);
+    assert_eq!((offline.status, offline.usage.connections), (ProxyStatus::NodeOffline, 0), "节点不在线");
 }
 
 #[test]
@@ -274,7 +202,7 @@ fn a_forward_may_leave_its_port_to_the_node_except_on_a_virtual_ip() {
 }
 
 #[test]
-fn classes_and_the_optimistic_reply_set_on_the_network_listener_forward_and_exit_reach_the_netmaps() {
+fn classes_and_the_optimistic_reply_set_on_the_network_proxy_forward_and_exit_reach_the_netmaps() {
     let mut lab = Lab::new();
     let network = lab.network("home");
     let mut laptop = lab.join(network.id, &[]);
@@ -283,10 +211,10 @@ fn classes_and_the_optimistic_reply_set_on_the_network_listener_forward_and_exit
     lab.controller
         .enable_exit(network.id, exit.id, ExitRole { class: Some(Class::Bulk), optimistic: Some(false), ..ExitRole::default() })
         .unwrap();
-    let mut socks = listener(laptop.id, "socks", "127.0.0.1:1080", false);
-    socks.config.class = Some(Class::Interactive);
-    socks.config.optimistic = Some(false);
-    lab.controller.create_listener(network.id, socks).unwrap();
+    let mut socks = proxy(laptop.id, "127.0.0.1:1080", exit.id);
+    socks.class = Some(Class::Interactive);
+    socks.optimistic = Some(false);
+    lab.controller.create_proxy(network.id, socks).unwrap();
     lab.switch_on_forward_target(network.id, exit.id);
     let mut tagged = forward(laptop.id, exit.id, "127.0.0.1:9000");
     tagged.class = Some(Class::Interactive);
@@ -296,7 +224,7 @@ fn classes_and_the_optimistic_reply_set_on_the_network_listener_forward_and_exit
 
     let netmap = laptop.netmap();
     assert_eq!(netmap.network.class, Some(Class::Reliable));
-    assert_eq!((netmap.me.listeners[0].class, netmap.me.listeners[0].optimistic), (Some(Class::Interactive), Some(false)));
+    assert_eq!((netmap.me.proxies[0].class, netmap.me.proxies[0].optimistic), (Some(Class::Interactive), Some(false)));
     assert_eq!(netmap.me.forwards[0].class, Some(Class::Interactive));
     assert_eq!(netmap.peer(exit.id).unwrap().exit.unwrap().class, Some(Class::Bulk), "入口按出口的默认值挑等级");
     assert_eq!(netmap.peer(exit.id).unwrap().exit.unwrap().optimistic, Some(false), "入口按出口的设置决定等不等应答");
@@ -356,17 +284,16 @@ fn log_entries_name_what_they_are_about() {
     let mut lab = Lab::new();
     let network = lab.network("home");
     let node = lab.join_offline(network.id, &[], Declared::default());
-    let credential = lab
-        .controller
-        .create_credential(network.id, &CreateCredential { name: "c".to_owned(), max_concurrent: None, max_bytes: None })
-        .unwrap();
+    let exit = lab.join_offline(network.id, &[], CAN_DO_ALL);
+    lab.controller.enable_exit(network.id, exit, ExitRole::default()).unwrap();
+    let created = lab.controller.create_proxy(network.id, proxy(node, "127.0.0.1:1080", exit)).unwrap();
     let about_node =
         lab.controller.oplog_filtered(&LogFilter { limit: 10, reference: Some(LogRef::node(node)), ..LogFilter::default() }).unwrap();
-    assert_eq!(about_node.iter().map(|entry| entry.action.as_str()).collect::<Vec<_>>(), ["node.enroll"]);
-    let about_credential = LogRef::new(RefKind::Credential, credential.credential.id);
-    let entries =
-        lab.controller.oplog_filtered(&LogFilter { limit: 10, reference: Some(about_credential), ..LogFilter::default() }).unwrap();
-    assert_eq!(entries[0].action, "credential.create");
+    assert_eq!(about_node.iter().map(|entry| entry.action.as_str()).collect::<Vec<_>>(), ["proxy.create", "node.enroll"]);
+    let about_proxy = LogRef::new(RefKind::Proxy, created.id);
+    let entries = lab.controller.oplog_filtered(&LogFilter { limit: 10, reference: Some(about_proxy), ..LogFilter::default() }).unwrap();
+    assert_eq!(entries[0].action, "proxy.create");
+    assert_eq!(entries[0].refs, [about_proxy, LogRef::node(node), LogRef::node(exit)]);
     let by_network = lab.controller.oplog_filtered(&LogFilter { limit: 100, network: Some(network.id), ..LogFilter::default() }).unwrap();
     assert!(by_network.iter().all(|entry| entry.network == Some(network.id)));
 }

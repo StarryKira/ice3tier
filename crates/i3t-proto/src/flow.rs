@@ -458,7 +458,8 @@ impl Target {
 /// 这条流在入口那边是怎么来的。只用于统计和日志，不参与访问控制：对端认的是发起节点，不是这里写的东西。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Origin {
-    /// 调用者用的接入凭据的名字。超过 [`MAX_CREDENTIAL_LEN`] 字节时编码会截断。
+    /// 调用者用的接入凭据的名字。超过 [`MAX_CREDENTIAL_LEN`] 字节时编码会截断。接入凭据去掉之后入口不再写它，
+    /// 线上的写法留着：旧版本的入口还会发，照样读得出来。
     pub credential: Option<String>,
     /// 入口看到的客户端地址。
     pub client: Option<SocketAddr>,

@@ -19,9 +19,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use i3t_conn::Connector;
 use i3t_conn::contract::Datagrams;
-use i3t_flow::datagram::{OutboundSocket, Received};
+use i3t_flow::datagram::Received;
 use i3t_model::Netmap;
-use i3t_model::netmap::Listener;
 use i3t_proto::NodeId;
 use i3t_proto::flow::{Class, Host, Origin, Target};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -30,9 +29,8 @@ use tokio::sync::mpsc;
 use tracing::Instrument;
 
 use super::{MAX_UDP_PAYLOAD, OUTGOING_BACKLOG, open_context, owned};
-use crate::egress::{EgressPolicy, LocalEgress};
+use crate::entry::Entry;
 use crate::route::{self, Route};
-use crate::selector::Selector;
 use crate::session::Shared;
 use crate::socks5::{self, UdpPacket};
 use crate::usage::{ExitTally, IngressMeter};
@@ -42,9 +40,6 @@ const RETURN_BACKLOG: usize = 64;
 
 /// 一个关联最多为多少个被拒绝的目标各记一行日志。再多的照样丢，只是不再记。
 const MAX_LOGGED_REFUSALS: usize = 64;
-
-/// 就地出站时最多记多少个发过报文的地址。满了清空重新记。
-const MAX_LOCAL_DESTINATIONS: usize = 256;
 
 /// 发往对端节点的一个报文。
 struct Outgoing {
@@ -89,26 +84,6 @@ impl Client {
     }
 }
 
-/// 就地出站用的端口，以及往哪些地址发过报文：只有它们发回来的才转给客户端。
-struct LocalRelay {
-    socket: OutboundSocket,
-    buf: Vec<u8>,
-    destinations: HashSet<SocketAddr>,
-}
-
-impl LocalRelay {
-    fn bind() -> io::Result<Self> {
-        Ok(Self { socket: OutboundSocket::bind()?, buf: vec![0; MAX_UDP_PAYLOAD], destinations: HashSet::new() })
-    }
-
-    /// 等就地出站的端口上的下一个报文。还没有这个端口时一直等下去。
-    async fn recv(local: &mut Option<Self>) -> io::Result<(Bytes, SocketAddr)> {
-        let Some(local) = local else { return std::future::pending().await };
-        let (len, from) = local.socket.recv_from(&mut local.buf).await?;
-        Ok((owned(&local.buf[..len]), from))
-    }
-}
-
 /// 一个关联里来往了多少报文。
 #[derive(Debug, Default)]
 struct Tally {
@@ -118,12 +93,12 @@ struct Tally {
     dropped: u64,
 }
 
-struct Association<'a, C: Datagrams, E> {
-    shared: &'a Arc<Shared<C, E>>,
-    listener: &'a Listener,
-    selector: Selector,
+struct Association<'a, C: Datagrams> {
+    shared: &'a Arc<Shared<C>>,
+    /// 关联建立那一刻这个端口的设置。
+    entry: Entry,
     origin: Origin,
-    /// 报文的字节数记到监听器和凭据上。
+    /// 报文的字节数记到这个代理上。
     meter: IngressMeter<'a>,
     /// 经出口出去的报文，发起这一侧看到的计数。
     exits: HashMap<NodeId, Arc<ExitTally>>,
@@ -132,7 +107,6 @@ struct Association<'a, C: Datagrams, E> {
     /// 到每个对端节点的上下文的队列。任务结束（上下文没开成、被对端回收）之后队列是关着的，下一个报文会重新开。
     peers: HashMap<NodeId, mpsc::Sender<Outgoing>>,
     returns: mpsc::Sender<Return>,
-    local: Option<LocalRelay>,
     logged_refusals: HashSet<(Host, u16)>,
     tally: Tally,
 }
@@ -141,7 +115,6 @@ struct Association<'a, C: Datagrams, E> {
 pub(crate) struct Ask<'a> {
     /// 请求里客户端写的"我会从这里发"。
     pub(crate) declared: (Host, u16),
-    pub(crate) selector: Selector,
     pub(crate) origin: Origin,
     pub(crate) meter: IngressMeter<'a>,
 }
@@ -149,14 +122,14 @@ pub(crate) struct Ask<'a> {
 /// 处理一个 UDP ASSOCIATE 请求，直到那条 TCP 连接结束。
 ///
 /// `control` 是客户端的 TCP 连接，请求已经读走、还没有应答。
-pub(crate) async fn run<C: Connector + Datagrams, E: LocalEgress>(
-    shared: &Arc<Shared<C, E>>,
-    listener: &Listener,
+pub(crate) async fn run<C: Connector + Datagrams>(
+    shared: &Arc<Shared<C>>,
+    entry: Entry,
     mut control: TcpStream,
     tcp_peer: SocketAddr,
     ask: Ask<'_>,
 ) {
-    let Ask { declared, selector, origin, meter } = ask;
+    let Ask { declared, origin, meter } = ask;
     let bound = async {
         let relay = UdpSocket::bind((control.local_addr()?.ip(), 0)).await?;
         let addr = relay.local_addr()?;
@@ -179,8 +152,7 @@ pub(crate) async fn run<C: Connector + Datagrams, E: LocalEgress>(
     let (returns, mut returned) = mpsc::channel(RETURN_BACKLOG);
     let mut association = Association {
         shared,
-        listener,
-        selector,
+        entry,
         origin,
         meter,
         exits: HashMap::new(),
@@ -188,7 +160,6 @@ pub(crate) async fn run<C: Connector + Datagrams, E: LocalEgress>(
         client: Client::new(tcp_peer, &declared.0, declared.1),
         peers: HashMap::new(),
         returns,
-        local: None,
         logged_refusals: HashSet::new(),
         tally: Tally::default(),
     };
@@ -216,10 +187,6 @@ pub(crate) async fn run<C: Connector + Datagrams, E: LocalEgress>(
                     None => tracing::debug!(%peer, "丢掉对端节点送回来的一个报文：它的来源在 SOCKS5 里写不出来"),
                 }
             }
-            received = LocalRelay::recv(&mut association.local) => match received {
-                Ok((payload, from)) => association.on_local_datagram(from, &payload).await,
-                Err(error) => tracing::debug!(%error, "就地出站的 UDP 端口收报文时出错"),
-            },
         }
     };
     let Tally { from_client, to_client, dropped } = association.tally;
@@ -227,7 +194,7 @@ pub(crate) async fn run<C: Connector + Datagrams, E: LocalEgress>(
     // 这里丢弃 `association`：各个上下文的队列随之关闭，它们的任务各自把上下文正常结束。
 }
 
-impl<C: Connector + Datagrams, E: LocalEgress> Association<'_, C, E> {
+impl<C: Connector + Datagrams> Association<'_, C> {
     /// 处理中继端口上收到的一个报文。
     async fn on_client_datagram(&mut self, from: SocketAddr, datagram: &[u8]) {
         if !self.client.admits(from) {
@@ -243,13 +210,12 @@ impl<C: Connector + Datagrams, E: LocalEgress> Association<'_, C, E> {
         };
         // 每个报文都按当时的 netmap 判断，和每条 CONNECT 一样。
         let netmap = Arc::clone(&self.shared.netmap.borrow());
-        match route::decide(&netmap, self.listener, &self.selector, &packet.host, packet.port) {
-            Ok(route @ Route::Flow { .. }) => {
-                let class = route::class_for(&netmap, self.selector.class, self.listener.class, &route);
-                let Route::Flow { peer, target, .. } = route else { return };
+        match route::decide(&netmap, self.entry.exit, &packet.host, packet.port) {
+            Ok(route) => {
+                let class = route::class_for(&netmap, self.entry.class, &route);
+                let Route { peer, target, .. } = route;
                 self.forward_to_peer(peer, target, class, packet.data);
             }
-            Ok(Route::Local { policy }) => self.locally(&packet, policy).await,
             Err(reason) => {
                 self.tally.dropped += 1;
                 if self.first_refusal(&packet) {
@@ -289,52 +255,6 @@ impl<C: Connector + Datagrams, E: LocalEgress> Association<'_, C, E> {
         }
     }
 
-    /// 就地出站：从本机直接把报文发给目标。
-    async fn locally(&mut self, packet: &UdpPacket<'_>, policy: EgressPolicy) {
-        // 域名在这里解析；解析器慢的时候这个关联的别的报文跟着等，解析结果是有缓存的。
-        let destination = match self.shared.egress.udp_destination(&packet.host, packet.port, policy).await {
-            Ok(destination) => destination,
-            Err(reply) => {
-                self.tally.dropped += 1;
-                if self.first_refusal(packet) {
-                    tracing::info!(?policy, status = ?reply.status, detail = %reply.detail, "就地出站拒绝了发往一个目标的 UDP 报文");
-                }
-                return;
-            }
-        };
-        let local = match &mut self.local {
-            Some(local) => local,
-            None => match LocalRelay::bind() {
-                Ok(local) => self.local.insert(local),
-                Err(error) => {
-                    self.tally.dropped += 1;
-                    return tracing::warn!(%error, "就地出站绑不出 UDP 端口，报文被丢掉");
-                }
-            },
-        };
-        if local.destinations.len() >= MAX_LOCAL_DESTINATIONS && !local.destinations.contains(&destination) {
-            local.destinations.clear();
-        }
-        local.destinations.insert(destination);
-        match local.socket.send_to(packet.data, destination).await {
-            Ok(()) => {
-                self.tally.from_client += 1;
-                self.meter.record(true, packet.data.len());
-            }
-            Err(error) => {
-                self.tally.dropped += 1;
-                tracing::debug!(%error, "就地出站的一个 UDP 报文没有发出去");
-            }
-        }
-    }
-
-    /// 就地出站的端口上收到了一个报文。只转往它发过报文的地址发回来的。
-    async fn on_local_datagram(&mut self, from: SocketAddr, payload: &[u8]) {
-        if self.local.as_ref().is_some_and(|local| local.destinations.contains(&from)) {
-            self.deliver_to_client(Host::Ip(from.ip()), from.port(), payload).await;
-        }
-    }
-
     /// 把一个报文发回客户端，前面带着它的来源。
     async fn deliver_to_client(&mut self, host: Host, port: u16, data: &[u8]) {
         // 客户端还没有发过报文的话，不知道往哪里回。
@@ -367,8 +287,8 @@ fn source_address(netmap: &Netmap, peer: NodeId, source: Target) -> Option<(Host
 }
 
 /// 一个关联到一个对端节点的上下文：开上下文，然后在队列和上下文之间搬运，直到关联结束或者上下文结束。
-async fn serve_peer<C: Connector + Datagrams, E>(
-    shared: Arc<Shared<C, E>>,
+async fn serve_peer<C: Connector + Datagrams>(
+    shared: Arc<Shared<C>>,
     peer: NodeId,
     class: Class,
     origin: Origin,

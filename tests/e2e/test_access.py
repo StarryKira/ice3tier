@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""接入方式的端到端测试：节点上的服务、端口转发、出口背后的局域网、对外开放的代理入口，以及分组决定谁能访问谁。
+"""接入方式的端到端测试：节点上的服务、端口转发、出口背后的局域网、对外开放的代理，以及分组决定谁能访问谁。
 
     python3 tests/e2e/test_access.py [场景名...]
 """
@@ -15,22 +15,20 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lab as lablib  # noqa: E402
 from harness import (  # noqa: E402
-    Checks, Controller, Node, binary, blob_digest, blob_file, create_groups, eventually_value, group_names, plain_http, start_blob_server,
-    start_header_echo, start_proxy_protocol_echo, start_whoami, tail,
+    Checks, Controller, Node, Proxy, binary, blob_digest, blob_file, create_groups, eventually_value, group_names, hold_port, plain_http,
+    start_blob_server, start_header_echo, start_proxy_protocol_echo, start_whoami, tail,
 )
 from lab import Lab, NatKind, wait_until  # noqa: E402
 
 
-def socks(node: Node, url: str, user: str = "", timeout: float = 8):
-    """从 `node` 所在的机器经它的本机 SOCKS5 入口访问 `url`；`user` 是代理的用户名。"""
-    auth = f"{user}@" if user else ""
-    return node.host.run("curl", "-sS", "--max-time", str(timeout), "-x", f"socks5h://{auth}127.0.0.1:1080", url, check=False, timeout=timeout + 5)
+def socks(node: Node, url: str, via: Node | None = None, timeout: float = 8):
+    """从 `node` 所在的机器经 SOCKS5 访问 `url`：经它上面经 `via` 出去的代理，`via` 是 `None` 时经本机的组网入口。"""
+    return node.curl(url, via=via, timeout=timeout)
 
 
-def connect(node: Node, host: str, port: int, *, via: str = "", timeout: float = 15):
+def connect(node: Node, host: str, port: int, *, state: Path | None = None, timeout: float = 15):
     """用 `i3t connect` 从 `node` 连到 `host:port`，发一个 HTTP 请求，返回进程的结果（标准输出是对面的应答）。"""
-    exit_args = ("--via", via) if via else ()
-    return node.host.run(binary("i3t"), "--state-dir", str(node.state), "connect", host, str(port), *exit_args,
+    return node.host.run(binary("i3t"), "--state-dir", str(state or node.state), "connect", host, str(port),
                          input="GET / HTTP/1.0\r\n\r\n", check=False, timeout=timeout)
 
 
@@ -61,8 +59,10 @@ def node_service(lab: Lab, work: Path, t: Checks) -> None:
     t.check("用全名 b.lab.i3t 访问", by_name.stdout == b.host.ip, by_name.stderr.strip())
     loopback_only = socks(a, f"http://{b.virtual_ip}:8081/")
     t.check("只监听 127.0.0.1 的服务到不了", loopback_only.returncode != 0)
-    as_exit = socks(a, "http://11.0.0.2/", user=b.virtual_ip)
-    t.check("b 没有启用出口，不能经它上网", as_exit.returncode != 0)
+    as_exit = controller.ctl("proxy", "add", str(a.id), "127.0.0.1:11000", str(b.id), check=False)
+    t.check("b 没有启用出口，建不了经它出去的代理", as_exit.returncode != 0 and "exit_not_enabled" in as_exit.stderr, as_exit.stderr.strip())
+    outside = socks(a, "http://11.0.0.2/")
+    t.check("组网入口到不了网络之外", outside.returncode != 0, outside.stdout)
 
     piped = connect(a, "b.lab.i3t", 8080)
     t.check("i3t connect 把标准输入输出接到 b 上的服务", piped.returncode == 0 and piped.stdout.endswith(b.host.ip),
@@ -73,6 +73,12 @@ def node_service(lab: Lab, work: Path, t: Checks) -> None:
     refused = connect(a, b.virtual_ip, 8081)
     t.check("i3t connect 连不上时以失败退出，标准输出上什么都没有", refused.returncode != 0 and refused.stdout == "",
             f"{refused.returncode} {refused.stdout!r} {refused.stderr.strip()}")
+    # 配置文件里没有打开组网入口（节点默认不开）：说怎么打开。
+    bare = work / "bare-state"
+    bare.mkdir(exist_ok=True)
+    off = connect(a, "b", 8080, state=bare)
+    t.check("没有打开组网入口时 i3t connect 说怎么打开", off.returncode != 0 and 'socks5 = \"127.0.0.1:1080\"' in off.stderr,
+            f"{off.returncode} {off.stderr.strip()}")
     if t.failures:
         print(tail(a.read_log()), tail(b.read_log()), sep="\n  ---\n")
 
@@ -170,21 +176,21 @@ def lan_behind_exit(lab: Lab, work: Path, t: Checks) -> None:
 
     controller.ctl("exit", "enable", str(b.id))
     wait_until(lambda: controller.node(b)["exit"] is not None, what="出口启用")
+    controller.add_proxy(a, b)
     # 等出口的配置到了两个节点上，否则"到不了"可能只是因为配置还没到。
     wait_until(lambda: "出口" in b.read_log() or controller.node(b)["acked_version"] == controller.node(b)["netmap_version"], what="出口的配置下发")
-    t.check("没开局域网开关时到不了出口背后的局域网", socks(a, url, user=b.virtual_ip).returncode != 0)
+    t.check("没开局域网开关时到不了出口背后的局域网", socks(a, url, via=b).returncode != 0)
     controller.ctl("exit", "enable", str(b.id), "--lan")
-    seen = eventually(lambda: socks(a, url, user=b.virtual_ip), lambda r: r.returncode == 0)
+    seen = eventually(lambda: socks(a, url, via=b), lambda r: r.returncode == 0)
     t.check("打开开关之后可以访问，局域网里的机器看到的来源是出口在局域网里的地址", seen.stdout == b.host.ip, f"{seen.stdout!r} {seen.stderr.strip()}")
-    piped = connect(a, printer.ip, 80, via=b.virtual_ip)
-    t.check("i3t connect --via 经出口连到它局域网里的机器", piped.returncode == 0 and piped.stdout.endswith(b.host.ip),
-            f"{piped.returncode} {piped.stdout!r} {piped.stderr.strip()}")
+    t.check("组网入口不经出口，到不了出口背后的局域网", socks(a, url).returncode != 0)
     if t.failures:
         print(tail(a.read_log()), tail(b.read_log()), sep="\n  ---\n")
 
 
-def public_listener(lab: Lab, work: Path, t: Checks) -> None:
-    """对外开放的代理入口：必须带凭据；用户名仍然指定出口。"""
+def public_proxy(lab: Lab, work: Path, t: Checks) -> None:
+    """对外开放的代理：认它自己的用户名和密码（没写时 controller 生成一对），一个端口上 SOCKS5 和 HTTP 都说；
+    换一对密码之后旧的不能用了；端口被别的程序占着时状态说出来。"""
     web = lab.host("web")
     start_whoami(web)
     controller = Controller(lab.host("ctl"), work)
@@ -194,22 +200,43 @@ def public_listener(lab: Lab, work: Path, t: Checks) -> None:
         node.join(controller)
     controller.ctl("exit", "enable", str(ex.id))
     outsider = lab.host("outsider")
-    credential = controller.ctl("credential", "create", "phone")["token"]
-    controller.ctl("listener", "add", str(gw.id), "public", "0.0.0.0:3128", "--http", "--require-credential")
+    created = controller.add_proxy(gw, ex, bind="0.0.0.0", port=3128)
     url = f"http://{web.ip}/"
+    t.check("不在回环上、没写用户名密码：controller 生成了一对", created["username"].startswith("u-") and len(created["password"]) == 32,
+            str(created))
 
-    def via(password: str | None):
-        auth = f"{ex.virtual_ip}:{password}@" if password is not None else ""
-        return outsider.run("curl", "-sS", "--max-time", "8", "-p", "-x", f"http://{auth}{gw.host.ip}:3128", "-o", "/dev/null",
+    def through(proxy: Proxy, scheme: str = "http"):
+        flags = ("-p",) if scheme == "http" else ()
+        return outsider.run("curl", "-sS", "--max-time", "8", *flags, "-x", proxy.url(scheme), "-o", "/dev/null",
                             "-w", "%{http_connect} %{http_code}", url, check=False)
 
-    wait_until(lambda: ":3128 " in gw.host.run("ss", "-lnt").stdout, timeout=20, what="入口开始监听")
-    t.check("不带凭据：407", via(None).stdout.startswith("407"), via(None).stdout)
-    t.check("凭据不对：407", via("wrong").stdout.startswith("407"), via("wrong").stdout)
-    good = eventually(lambda: via(credential), lambda r: r.stdout == "200 200")
-    t.check("凭据正确：经指定的出口访问成功", good.stdout == "200 200", f"{good.stdout!r} {good.stderr.strip()}")
-    seen = outsider.run("curl", "-sS", "--max-time", "8", "-p", "-x", f"http://{ex.virtual_ip}:{credential}@{gw.host.ip}:3128", url, check=False)
-    t.check("目标看到的来源是出口的地址", seen.stdout == ex.host.ip, f"{seen.stdout!r}")
+    right = Proxy(gw.host.ip, 3128, created["username"], created["password"])
+    t.check("HTTP 不带用户名密码：407", through(Proxy(gw.host.ip, 3128)).stdout.startswith("407"), through(Proxy(gw.host.ip, 3128)).stdout)
+    wrong = Proxy(gw.host.ip, 3128, created["username"], "wrong")
+    t.check("HTTP 密码不对：407", through(wrong).stdout.startswith("407"), through(wrong).stdout)
+    good = eventually(lambda: through(right), lambda r: r.stdout == "200 200")
+    t.check("HTTP 用户名密码对：经代理的出口访问成功", good.stdout == "200 200", f"{good.stdout!r} {good.stderr.strip()}")
+    socks5 = outsider.run("curl", "-sS", "--max-time", "8", "-x", right.url("socks5h"), url, check=False)
+    t.check("同一个端口上的 SOCKS5：目标看到的来源是出口的地址", socks5.stdout == ex.host.ip, f"{socks5.stdout!r} {socks5.stderr.strip()}")
+    refused = outsider.run("curl", "-sS", "--max-time", "8", "-x", wrong.url("socks5h"), url, check=False)
+    t.check("SOCKS5 密码不对：认证不过", refused.returncode != 0 and refused.stdout == "", f"{refused.stdout!r}")
+    anonymous = outsider.run("curl", "-sS", "--max-time", "8", "-x", Proxy(gw.host.ip, 3128).url("socks5h"), url, check=False)
+    t.check("SOCKS5 不给用户名密码：没有可用的认证方法", anonymous.returncode != 0 and anonymous.stdout == "", f"{anonymous.stdout!r}")
+
+    # 管理员自己定一对，旧的就不能用了。
+    controller.ctl("proxy", "set", str(created["id"]), "--username", "alice", "--password", "s3cret")
+    alice = Proxy(gw.host.ip, 3128, "alice", "s3cret")
+    switched = eventually(lambda: through(alice), lambda r: r.stdout == "200 200")
+    t.check("改成管理员定的用户名密码：新的能用", switched.stdout == "200 200", switched.stdout)
+    t.check("旧的不能用了", through(right).stdout.startswith("407"), through(right).stdout)
+    shown = controller.proxy(created["id"])
+    t.check("管理员再看得到密码", (shown["username"], shown["password"]) == ("alice", "s3cret"), str(shown))
+
+    hold_port(gw.host, 3999)
+    busy = controller.add_proxy(gw, ex, port=3999, wait=False, default=False)
+    seen = controller.wait_proxy(busy["id"], "port_in_use")
+    t.check("端口被别的程序占着：状态是 port_in_use，带着系统的原话", seen["status"]["code"] == "port_in_use" and seen["status"].get("detail"),
+            str(seen["status"]))
     if t.failures:
         print(tail(gw.read_log()), tail(ex.read_log()), sep="\n  ---\n")
 
@@ -281,23 +308,26 @@ def groups(lab: Lab, work: Path, t: Checks) -> None:
 
 
 def plain_http_proxy(lab: Lab, work: Path, t: Checks) -> None:
-    """HTTP 入口转发明文 HTTP（不用 CONNECT）：凭据和出口来自 Proxy-Authorization，代理自己的头不到目标，请求体完整，
-    大的下载完整，出口的端口白名单按 URL 里的端口查，不是出口的节点被拒绝。"""
+    """代理转发明文 HTTP（不用 CONNECT）：经代理的出口出去，代理自己的头不到目标，请求体完整，
+    大的下载完整，出口的端口白名单按 URL 里的端口查，出口停用了的代理被拒绝。"""
     web, echo = lab.host("web"), lab.host("echo")
     start_blob_server(web, work)
     start_whoami(web, 8080)
     start_header_echo(echo)
     controller = Controller(lab.host("ctl"), work)
     controller.ctl("network", "create", "lab")
-    a, ex, b = Node(lab.host("a"), work), Node(lab.host("ex"), work, declare=("exit",)), Node(lab.host("b"), work)
+    a, ex, b = Node(lab.host("a"), work), Node(lab.host("ex"), work, declare=("exit",)), Node(lab.host("b"), work, declare=("exit",))
     for node in (a, ex, b):
         node.join(controller)
     # 出口默认不限端口；这里写明只放行 80 和 443，测端口白名单按 URL 里的端口查。
     controller.ctl("exit", "enable", str(ex.id), "--ports", "80,443")
+    controller.add_proxy(a, ex)
+    controller.ctl("exit", "enable", str(b.id))
+    via_b = controller.add_proxy(a, b)
 
-    small = eventually(lambda: plain_http(a, f"http://{web.ip}/blob/1000", user=ex.name), lambda r: r[0] == "200")
-    t.check("curl -x http://出口@入口 http://… 经出口取回", small[0] == "200", f"{small}")
-    headers = plain_http(a, f"http://{echo.ip}/path?q=1", user=ex.name, extra=("-H", "X-Test: kept"))
+    small = eventually(lambda: plain_http(a, f"http://{web.ip}/blob/1000", via=ex), lambda r: r[0] == "200")
+    t.check("curl -x http://代理 http://… 经代理的出口取回", small[0] == "200", f"{small}")
+    headers = plain_http(a, f"http://{echo.ip}/path?q=1", via=ex, extra=("-H", "X-Test: kept"))
     seen = headers[1].lower()
     t.check("目标收到的请求行只有路径", headers[1].startswith("GET /path?q=1 HTTP/1.1"), headers[1][:200])
     t.check("Proxy-Authorization 和逐跳的头没有到目标，别的头都在，Host 是 URL 里的",
@@ -305,24 +335,27 @@ def plain_http_proxy(lab: Lab, work: Path, t: Checks) -> None:
             and "connection: close" in seen, headers[1])
 
     big = 30_000_000
-    code, digest, error = plain_http(a, f"http://{web.ip}/blob/{big}", user=ex.name, timeout=120)
+    code, digest, error = plain_http(a, f"http://{web.ip}/blob/{big}", via=ex, timeout=120)
     t.check("30 MB 的下载完整", code == "200" and digest == blob_digest(big), f"{code} {error}")
     upload = blob_file(a, 3_000_000)
-    code, body, error = plain_http(a, f"http://{web.ip}/digest", user=ex.name, extra=("--data-binary", f"@{upload}"))
+    code, body, error = plain_http(a, f"http://{web.ip}/digest", via=ex, extra=("--data-binary", f"@{upload}"))
     t.check("3 MB 的 POST（curl 先发 Expect: 100-continue）完整到达", code == "200" and body == blob_digest(3_000_000), f"{code} {body!r} {error}")
-    code, body, error = plain_http(a, f"http://{web.ip}/digest", user=ex.name,
+    code, body, error = plain_http(a, f"http://{web.ip}/digest", via=ex,
                                    extra=("--data-binary", "hello", "-H", "Transfer-Encoding: chunked", "-H", "Expect:"))
     t.check("chunked 的请求体原样转给目标（这个服务只认 Content-Length，所以读到的是空的）", code == "200", f"{code} {body!r} {error}")
 
-    whoami = plain_http(a, f"http://{web.ip}:8080/", user=ex.name)
+    whoami = plain_http(a, f"http://{web.ip}:8080/", via=ex)
     t.check("出口只放行 80 和 443，URL 里写 8080 被拒绝：403", whoami[0] == "403", f"{whoami}")
-    refused = plain_http(a, f"http://{web.ip}/blob/10", user=b.name)
-    t.check("b 不是出口：403", refused[0] == "403", f"{refused}")
-    unknown = plain_http(a, f"http://{web.ip}/blob/10", user="nobody")
-    t.check("没有这个节点：403，和没有权限一样", unknown[0] == "403", f"{unknown}")
-    proxy_env = a.host.run("env", f"http_proxy=http://{ex.name}:x@127.0.0.1:1081", "curl", "-sS", "--max-time", "20", "-o", "/dev/null",
+    first = eventually(lambda: plain_http(a, f"http://{web.ip}/blob/10", via=b), lambda r: r[0] == "200")
+    t.check("经 b 出去的代理先是好的", first[0] == "200", f"{first}")
+    controller.ctl("exit", "disable", str(b.id))
+    refused = eventually(lambda: plain_http(a, f"http://{web.ip}/blob/10", via=b), lambda r: r[0] == "403")
+    t.check("b 停用了出口：代理还在监听，请求得到 403", refused[0] == "403", f"{refused}")
+    status = controller.wait_proxy(via_b["id"], "exit_disabled")["status"]
+    t.check("代理的状态说出口没有启用", status["code"] == "exit_disabled", str(status))
+    proxy_env = a.host.run("env", f"http_proxy={a.entry(ex).url('http')}", "curl", "-sS", "--max-time", "20", "-o", "/dev/null",
                            "-w", "%{http_code}", f"http://{web.ip}/blob/10", check=False)
-    t.check("http_proxy 环境变量指向入口就能用", proxy_env.stdout == "200", f"{proxy_env.stdout!r} {proxy_env.stderr.strip()}")
+    t.check("http_proxy 环境变量指向代理就能用", proxy_env.stdout == "200", f"{proxy_env.stdout!r} {proxy_env.stderr.strip()}")
     if t.failures:
         print(tail(a.read_log()), tail(ex.read_log()), sep="\n  ---\n")
 
@@ -384,7 +417,7 @@ def proxy_protocol(lab: Lab, work: Path, t: Checks) -> None:
 
 
 def exit_optimistic(lab: Lab, work: Path, t: Checks) -> None:
-    """出口可以关掉乐观回复：经它的连接等它的应答，客户端拿到"连接被拒绝"而不是连上之后被重置；监听器自己的设置排在前面。"""
+    """出口可以关掉乐观回复：经它的连接等它的应答，客户端拿到"连接被拒绝"而不是连上之后被重置；代理自己的设置排在前面。"""
     web = lab.host("web")
     controller = Controller(lab.host("ctl"), work)
     controller.ctl("network", "create", "lab")
@@ -392,19 +425,18 @@ def exit_optimistic(lab: Lab, work: Path, t: Checks) -> None:
     for node in (a, ex):
         node.join(controller)
     controller.ctl("exit", "enable", str(ex.id))
+    controller.add_proxy(a, ex)
     # web 的 443 上没有服务：出口连过去被拒绝。
     closed = f"http://{web.ip}:443/"
-    default = eventually(lambda: socks(a, closed, user=ex.name), lambda r: "reset" in r.stderr.lower())
+    default = eventually(lambda: socks(a, closed, via=ex), lambda r: "reset" in r.stderr.lower())
     t.check("默认：先说连上了，之后被重置", default.returncode == 56 and "reset" in default.stderr.lower(), f"{default.returncode} {default.stderr.strip()}")
     controller.ctl("exit", "enable", str(ex.id), "--optimistic", "off")
-    careful = eventually(lambda: socks(a, closed, user=ex.name), lambda r: r.returncode == 97)
+    careful = eventually(lambda: socks(a, closed, via=ex), lambda r: r.returncode == 97)
     t.check("出口关掉乐观回复：客户端拿到 SOCKS5 的连接被拒绝", careful.returncode == 97, f"{careful.returncode} {careful.stderr.strip()}")
     t.check("出口的设置里有这一项", controller.node(ex)["exit"]["optimistic"] is False, str(controller.node(ex)["exit"]))
-    controller.ctl("listener", "add", str(a.id), "eager", "127.0.0.1:1090", "--optimistic", "on")
-    eager = lambda: a.host.run("curl", "-sS", "--max-time", "8", "-x", f"socks5h://{ex.name}@127.0.0.1:1090", closed,  # noqa: E731
-                               check=False, timeout=15)
-    seen = eventually(eager, lambda r: r.returncode == 56)
-    t.check("监听器打开了乐观回复，以监听器为准", seen.returncode == 56, f"{seen.returncode} {seen.stderr.strip()}")
+    controller.add_proxy(a, ex, "--optimistic", "on", port=1090, default=False)
+    seen = eventually(lambda: a.curl(closed, through=Proxy("127.0.0.1", 1090), timeout=8), lambda r: r.returncode == 56)
+    t.check("代理打开了乐观回复，以代理为准", seen.returncode == 56, f"{seen.returncode} {seen.stderr.strip()}")
     if t.failures:
         print(tail(a.read_log()), tail(ex.read_log()), sep="\n  ---\n")
 
@@ -507,7 +539,7 @@ SCENARIOS = {
     "port_forward": port_forward,
     "forward_switch": forward_switch,
     "lan_behind_exit": lan_behind_exit,
-    "public_listener": public_listener,
+    "public_proxy": public_proxy,
     "groups": groups,
     "plain_http_proxy": plain_http_proxy,
     "forward_target": forward_target,

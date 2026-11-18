@@ -11,11 +11,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use common::{
-    GW, LAPTOP, NAS, PATIENCE, PUBLIC_IP, UdpTarget, World, eventually, node, peer_mut, socks5_udp_packet, udp_associate,
+    GW, LAPTOP, NAS, PATIENCE, PUBLIC_IP, UdpTarget, World, eventually, node, peer_mut, proxy, socks5_udp_packet, udp_associate,
     udp_associate_from, udp_echo_server,
 };
 use i3t_exit::ExitStats;
-use i3t_model::netmap::{ExitRole, Forward, ForwardProtocol, ForwardTarget, PeerExit};
+use i3t_model::netmap::{ExitRole, Forward, ForwardProtocol, ForwardTarget, ListenerProtocol, PeerExit};
+use i3t_proto::flow::Class;
 use tokio::net::UdpSocket;
 use tokio::time::{sleep, timeout};
 
@@ -29,10 +30,6 @@ fn public(port: u16) -> String {
 /// 另一个"公网地址"。
 const OTHER_PUBLIC_IP: &str = "93.184.216.35";
 
-fn gw_user() -> Option<(&'static str, &'static str)> {
-    Some(("gw", ""))
-}
-
 /// 等出口把到现在为止的报文都处理完，返回那时的计数。
 async fn settled(world: &World, what: &str, done: impl Fn(&ExitStats) -> bool) -> ExitStats {
     eventually(what, || done(&world.gw.exit.stats())).await;
@@ -40,10 +37,10 @@ async fn settled(world: &World, what: &str, done: impl Fn(&ExitStats) -> bool) -
 }
 
 #[tokio::test]
-async fn udp_through_the_exit_named_by_the_username_reaches_the_target_and_comes_back() {
+async fn udp_through_the_proxy_exit_reaches_the_target_and_comes_back() {
     let world = World::new().await;
     world.gw.system.redirect(&public(443), udp_echo_server().await);
-    let client = udp_associate(world.socks().await, gw_user()).await;
+    let client = udp_associate(world.socks().await, None).await;
     assert!(client.relay.ip().is_loopback(), "中继端口绑在客户端连过来的那个地址上：{}", client.relay);
 
     client.send(PUBLIC_IP, 443, b"ping through the mesh").await;
@@ -68,7 +65,7 @@ async fn one_context_is_one_port_on_the_exit_whatever_the_destination() {
     let (first, second) = (UdpTarget::bind("127.0.0.1").await, UdpTarget::bind("127.0.0.1").await);
     world.gw.system.redirect(&public(443), first.addr());
     world.gw.system.redirect(&format!("{OTHER_PUBLIC_IP}:443"), second.addr());
-    let client = udp_associate(world.socks().await, gw_user()).await;
+    let client = udp_associate(world.socks().await, None).await;
 
     client.send(PUBLIC_IP, 443, b"to the first").await;
     client.send(OTHER_PUBLIC_IP, 443, b"to the second").await;
@@ -91,7 +88,7 @@ async fn one_context_is_one_port_on_the_exit_whatever_the_destination() {
     client.assert_silent(QUIET).await;
 
     // 另一个关联是另一个上下文，在出口上是另一个端口。
-    let other = udp_associate(world.socks().await, gw_user()).await;
+    let other = udp_associate(world.socks().await, None).await;
     other.send(PUBLIC_IP, 443, b"another association").await;
     assert_ne!(first.recv().await.1, seen_by_first);
 }
@@ -126,7 +123,7 @@ async fn a_dns_style_query_to_a_domain_name_is_resolved_on_the_exit_and_answered
     world.gw.system.name("dns.example", &[PUBLIC_IP]);
     let server = UdpTarget::bind("127.0.0.1").await;
     world.gw.system.redirect(&public(53), server.addr());
-    let client = udp_associate(world.socks().await, gw_user()).await;
+    let client = udp_associate(world.socks().await, None).await;
 
     for id in [0x1234, 0x1235] {
         // 目标写的是域名：入口不解析，原样交给出口。
@@ -153,7 +150,7 @@ async fn an_internet_target_needs_the_exit_to_be_enabled_and_the_port_to_be_allo
         world.gw.system.redirect(&public(port), target.addr());
     }
     world.gw.update(|netmap| netmap.me.exit = Some(ExitRole { ports: Some(vec![80, 443]), ..ExitRole::default() })).await;
-    let client = udp_associate(world.socks().await, gw_user()).await;
+    let client = udp_associate(world.socks().await, None).await;
 
     // 端口不在出口允许的范围里（这里写了只有 80 和 443）：报文被丢掉。
     client.send(PUBLIC_IP, 53, b"dns").await;
@@ -175,7 +172,7 @@ async fn an_internet_target_needs_the_exit_to_be_enabled_and_the_port_to_be_allo
     target.assert_untouched(QUIET).await;
 
     // 入口知道一个节点不是出口时，自己就丢了，连上下文都不开。
-    let nas_client = udp_associate(world.socks().await, Some(("nas", ""))).await;
+    let nas_client = udp_associate(world.socks_via_nas().await, None).await;
     nas_client.send(PUBLIC_IP, 443, b"via a node that is no exit").await;
     sleep(QUIET).await;
     assert_eq!(world.nas.exit.stats().total, 0);
@@ -191,7 +188,7 @@ async fn addresses_that_are_not_public_are_refused_even_when_a_domain_name_resol
     for forbidden in ["127.0.0.1:443", "100.64.0.1:443", "10.0.0.5:443", "10.66.0.2:443"] {
         world.gw.system.redirect(forbidden, target.addr());
     }
-    let client = udp_associate(world.socks().await, gw_user()).await;
+    let client = udp_associate(world.socks().await, None).await;
 
     // 回环、运营商级 NAT 这些写成字面量的地址，入口按互联网目标交给出口，出口的出站策略拒绝。
     // 解析出来的地址里只要有一个不该去，整个域名都拒绝。
@@ -218,7 +215,7 @@ async fn a_lan_target_needs_the_lan_switch_and_an_address_on_an_attached_subnet(
     world.gw.system.redirect("192.168.1.10:161", printer.addr());
     // laptop 以为 gw 开了局域网开关，所以入口放行；gw 自己其实没开。
     world.laptop.update(|netmap| peer_mut(netmap, GW).exit = Some(PeerExit { lan: true, class: None, optimistic: None })).await;
-    let client = udp_associate(world.socks().await, gw_user()).await;
+    let client = udp_associate(world.socks().await, None).await;
 
     client.send("192.168.77.10", 161, b"snmp").await;
     let stats = settled(&world, "没开局域网开关的出口拒绝了报文", |stats| stats.datagrams_refused == 1).await;
@@ -246,7 +243,7 @@ async fn an_exit_with_an_upstream_proxy_does_not_send_udp_around_it() {
     world.gw.system.redirect(&public(443), target.addr());
     let upstream = Some("127.0.0.1:1".parse().unwrap());
     world.gw.update(|netmap| netmap.me.exit = Some(ExitRole { upstream_socks5: upstream, ..ExitRole::default() })).await;
-    let client = udp_associate(world.socks().await, gw_user()).await;
+    let client = udp_associate(world.socks().await, None).await;
 
     client.send(PUBLIC_IP, 443, b"must not bypass the upstream").await;
     settled(&world, "配了上游代理的出口拒绝了 UDP", |stats| stats.datagrams_refused == 1).await;
@@ -257,7 +254,7 @@ async fn an_exit_with_an_upstream_proxy_does_not_send_udp_around_it() {
 async fn the_access_rule_is_checked_when_the_context_opens_and_revoking_it_ends_the_context() {
     let world = World::new().await;
     world.gw.system.redirect(&public(443), udp_echo_server().await);
-    let client = udp_associate(world.socks().await, gw_user()).await;
+    let client = udp_associate(world.socks().await, None).await;
     client.send(PUBLIC_IP, 443, b"allowed").await;
     assert_eq!(client.recv().await.1, b"allowed");
 
@@ -274,17 +271,17 @@ async fn the_access_rule_is_checked_when_the_context_opens_and_revoking_it_ends_
 }
 
 #[tokio::test]
-async fn an_overlay_address_is_a_udp_service_on_that_node_whatever_the_username_says() {
+async fn an_overlay_address_is_a_udp_service_on_that_node_whichever_exit_the_proxy_has() {
     let world = World::new().await;
     // nas 的假网卡地址是 192.168.77.5，把它上面的 5353 引到测试服务。nas 不是出口。
     world.nas.system.redirect("192.168.77.5:5353", udp_echo_server().await);
 
-    for username in [None, gw_user()] {
-        let client = udp_associate(world.socks().await, username).await;
+    for proxy in [world.socks().await, world.socks_via_nas().await] {
+        let client = udp_associate(proxy, None).await;
         for host in ["10.66.0.3", "nas.home.i3t"] {
             client.send(host, 5353, b"mdns").await;
             // 回来的报文报的是那个节点的虚拟 IP：客户端当初就是往那里发的。
-            assert_eq!(client.recv().await, ("10.66.0.3:5353".to_owned(), b"mdns".to_vec()), "{username:?} {host}");
+            assert_eq!(client.recv().await, ("10.66.0.3:5353".to_owned(), b"mdns".to_vec()), "{proxy} {host}");
         }
     }
     assert_eq!(world.gw.exit.stats().total, 0, "组网地址不会被交给出口");
@@ -293,18 +290,17 @@ async fn an_overlay_address_is_a_udp_service_on_that_node_whatever_the_username_
 }
 
 #[tokio::test]
-async fn without_a_username_a_loopback_listener_sends_udp_from_this_machine() {
+async fn datagrams_through_a_proxy_leave_from_its_exit_and_never_from_this_machine() {
     let world = World::new().await;
     let echo = udp_echo_server().await;
-    world.laptop.system.redirect(&public(53), echo);
+    world.gw.system.redirect(&public(53), echo);
     let client = udp_associate(world.socks().await, None).await;
 
-    // 回环监听器的调用者是本机的程序：不经过任何出口，也不套出口的端口限制。
-    client.send(PUBLIC_IP, 53, b"local egress").await;
+    client.send(PUBLIC_IP, 53, b"via the exit").await;
     let (source, data) = client.recv().await;
-    assert_eq!((source, data), (echo.to_string(), b"local egress".to_vec()), "来源是报文实际从哪里回来的");
-    assert_eq!(world.laptop.system.udp_destinations(), [public(53).parse::<SocketAddr>().unwrap()]);
-    assert_eq!(world.gw.exit.stats().total, 0);
+    assert_eq!((source, data), (public(53), b"via the exit".to_vec()));
+    assert!(world.laptop.system.udp_destinations().is_empty(), "代理所在的节点自己不往外发");
+    assert_eq!(world.gw.exit.stats().total, 1);
 }
 
 #[tokio::test]
@@ -312,7 +308,7 @@ async fn the_association_and_its_contexts_end_when_the_tcp_connection_closes() {
     let world = World::new().await;
     let target = UdpTarget::bind("127.0.0.1").await;
     world.gw.system.redirect(&public(443), target.addr());
-    let client = udp_associate(world.socks().await, gw_user()).await;
+    let client = udp_associate(world.socks().await, None).await;
     client.send(PUBLIC_IP, 443, b"while the control connection is open").await;
     target.recv().await;
     assert_eq!(world.gw.exit.stats().active, 1);
@@ -334,7 +330,7 @@ async fn only_the_client_that_made_the_association_may_use_its_relay_port() {
     let packet = socks5_udp_packet(PUBLIC_IP, 443, b"from somebody else");
 
     // 客户端发过第一个报文之后，同一个地址的别的端口发来的不认。
-    let client = udp_associate(world.socks().await, gw_user()).await;
+    let client = udp_associate(world.socks().await, None).await;
     client.send(PUBLIC_IP, 443, b"from the client").await;
     let (_, exit_port) = target.recv().await;
     let other_port = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -353,7 +349,7 @@ async fn only_the_client_that_made_the_association_may_use_its_relay_port() {
     // 请求里写明了自己地址和端口的客户端：别人抢在它前面发也没有用。
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let [hi, lo] = socket.local_addr().unwrap().port().to_be_bytes();
-    let declared = udp_associate_from(world.socks().await, gw_user(), socket, [127, 0, 0, 1, hi, lo]).await;
+    let declared = udp_associate_from(world.socks().await, None, socket, [127, 0, 0, 1, hi, lo]).await;
     other_port.send_to(&packet, declared.relay).await.unwrap();
     target.assert_untouched(QUIET).await;
     declared.send(PUBLIC_IP, 443, b"from the declared port").await;
@@ -365,7 +361,7 @@ async fn fragmented_and_malformed_socks5_udp_packets_are_dropped() {
     let world = World::new().await;
     let target = UdpTarget::bind("127.0.0.1").await;
     world.gw.system.redirect(&public(443), target.addr());
-    let client = udp_associate(world.socks().await, gw_user()).await;
+    let client = udp_associate(world.socks().await, None).await;
 
     let mut fragment = socks5_udp_packet(PUBLIC_IP, 443, b"a fragment");
     fragment[2] = 1;
@@ -386,7 +382,7 @@ async fn a_context_is_collected_after_the_idle_timeout_and_the_next_datagram_ope
     let world = World::with_udp_idle(Duration::from_millis(300)).await;
     let target = UdpTarget::bind("127.0.0.1").await;
     world.gw.system.redirect(&public(443), target.addr());
-    let client = udp_associate(world.socks().await, gw_user()).await;
+    let client = udp_associate(world.socks().await, None).await;
 
     // 有报文往来的时候不回收：前后一秒，一直是同一个上下文。
     for _ in 0..10 {
@@ -411,9 +407,18 @@ async fn the_default_class_delivers_every_datagram_under_loss_while_the_interact
     const COUNT: u32 = 150;
     let world = World::new().await;
     world.gw.system.redirect(&public(443), udp_echo_server().await);
-    // 不写等级就是默认的 auto：一个都不丢。要低延迟的自己写 interactive，那个会丢。
-    let kept = udp_associate(world.socks().await, gw_user()).await;
-    let fresh = udp_associate(world.socks().await, Some(("gw+c-i", ""))).await;
+    // 不设等级就是默认的 auto：一个都不丢。要低延迟的在代理上设 interactive，那个会丢。
+    let interactive = world
+        .laptop
+        .update(|netmap| {
+            let mut proxy = proxy(5, ListenerProtocol::Socks5, "127.0.0.1:0", GW);
+            proxy.class = Some(Class::Interactive);
+            netmap.me.proxies.push(proxy);
+        })
+        .await;
+    assert_eq!(interactive.proxies.len(), 5);
+    let kept = udp_associate(world.socks().await, None).await;
+    let fresh = udp_associate(world.laptop.proxy(5).await, None).await;
 
     // 两个节点之间不保证送达的数据报每三个丢一个，两个方向都算。
     let seen = AtomicUsize::new(0);
@@ -587,7 +592,7 @@ async fn a_peer_may_hold_only_so_many_contexts_at_once() {
     // 每个关联到 gw 是一个上下文。128 个都通。
     let mut clients = Vec::new();
     for index in 0..128u32 {
-        let client = udp_associate(socks, gw_user()).await;
+        let client = udp_associate(socks, None).await;
         client.send(PUBLIC_IP, 443, &index.to_be_bytes()).await;
         assert_eq!(client.recv().await.1, index.to_be_bytes());
         clients.push(client);
@@ -595,7 +600,7 @@ async fn a_peer_may_hold_only_so_many_contexts_at_once() {
     assert_eq!(world.gw.exit.stats().active, 128);
 
     // 第 129 个被出口拒绝：它不会多占一个端口。
-    let one_too_many = udp_associate(socks, gw_user()).await;
+    let one_too_many = udp_associate(socks, None).await;
     one_too_many.send(PUBLIC_IP, 443, b"over the limit").await;
     let stats = settled(&world, "第 129 个上下文被拒绝", |stats| stats.total == 129 && stats.active == 128).await;
     assert_eq!(stats.refused, 1);
@@ -604,7 +609,7 @@ async fn a_peer_may_hold_only_so_many_contexts_at_once() {
     // 结束一个，就空出一个。入口在上一次被拒绝之后会歇几秒才重新去开，所以这里用一个新的关联。
     clients.pop();
     settled(&world, "结束的上下文让出了名额", |stats| stats.active == 127).await;
-    let replacement = udp_associate(socks, gw_user()).await;
+    let replacement = udp_associate(socks, None).await;
     replacement.send(PUBLIC_IP, 443, b"fits again").await;
     assert_eq!(replacement.recv().await.1, b"fits again");
 }

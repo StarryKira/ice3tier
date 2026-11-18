@@ -52,20 +52,32 @@ def join_and_exit(lab: Lab, work: Path, t: Checks) -> None:
     wait_until(lambda: all(controller.node(node)["online"] for node in (a, b)), what="两个节点上线")
 
     url = f"http://{web.ip}/"
-    t.check("出口没启用时不能把 b 当出口", a.curl(url, via=b, timeout=6).returncode != 0)
+    refused = controller.ctl("proxy", "add", str(a.id), "127.0.0.1:11000", str(b.id), check=False)
+    t.check("出口没启用时建不了经 b 出去的代理", refused.returncode != 0 and "exit_not_enabled" in refused.stderr, refused.stderr.strip())
     refused = controller.ctl("exit", "enable", str(a.id), check=False)
     t.check("没有声明的节点启用不了出口，并且提示要执行的命令", refused.returncode != 0 and "i3t set can-exit on" in refused.stderr,
             refused.stderr.strip())
+    refused = controller.ctl("proxy", "add", str(a.id), "127.0.0.1:11000", str(a.id), check=False)
+    t.check("出口不能是监听的节点自己", refused.returncode != 0 and "exit_is_node" in refused.stderr, refused.stderr.strip())
     controller.ctl("exit", "enable", str(b.id))
-    t.check("启用出口之后，不用重启节点就能用", reaches(a, url, b, b.host.ip))
-    by_name = a.host.run("curl", "-sS", "--max-time", "8", "-x", "socks5h://b@127.0.0.1:1080", url, check=False)
-    t.check("用户名可以写节点名", by_name.stdout == b.host.ip, by_name.stderr.strip())
+    proxy = controller.add_proxy(a, b)
+    t.check("建好代理之后，不用重启节点就能经 b 出去", reaches(a, url, b, b.host.ip))
+    shown = controller.wait_proxy(proxy["id"])
+    t.check("代理的状态是在监听", shown["status"] == {"code": "listening", "local": f"127.0.0.1:{a.proxies[b.id].port}"}, str(shown["status"]))
+    exits = controller.ctl("exit", "list")
+    t.check("出口的视图列出经它出去的代理", [entry["id"] for entry in exits[0]["proxies"]] == [proxy["id"]], str(exits[0]["proxies"]))
 
     rules = controller.ctl("rule", "list")
     controller.ctl("rule", "delete", str(rules[0]["id"]))
     t.check("删掉 All <-> All 之后互相不可达", blocked(a, url, b))
+    t.check("代理留着，状态说访问规则不让它访问出口", controller.proxy(proxy["id"])["status"]["code"] == "access_denied",
+            str(controller.proxy(proxy["id"])["status"]))
     controller.ctl("rule", "add", "laptop", "server", "--one-way")
     t.check("加上 laptop -> server 之后 a 又能用 b", reaches(a, url, b, b.host.ip))
+    b.stop()
+    offline = controller.wait_proxy(proxy["id"], "exit_offline", timeout=60)
+    t.check("出口离线时代理的状态说出口离线", offline["status"]["code"] == "exit_offline", str(offline["status"]))
+    b.start()
 
     controller.ctl("node", "delete", str(a.id))
     wait_until(lambda: a.proc.poll() is not None, timeout=20, what="被删除的节点自己退出")
@@ -86,6 +98,7 @@ def enable_relay(lab: Lab, work: Path, t: Checks) -> None:
     for node in (r, a, b):
         node.join(controller)
     controller.ctl("exit", "enable", str(b.id))
+    controller.add_proxy(a, b)
     url, expect = f"http://{web.ip}/", lab.hosts["nat-b"].ip
 
     t.check("没有 relay 时这对节点不可达", a.curl(url, via=b, timeout=10).returncode != 0)
@@ -132,7 +145,7 @@ def slow_download(node: Node, url: str, via: Node, megabytes: int, rate: str = "
     import subprocess
     size = megabytes * 1_000_000
     cmd = node.host.cmd("curl", "-sS", "--max-time", "120", "--limit-rate", rate, "-o", "/dev/null", "-w", "%{size_download}",
-                        "-x", f"socks5h://{via.virtual_ip}@127.0.0.1:1080", f"{url}bytes/{size}")
+                        "-x", node.entry(via).url("socks5h"), f"{url}bytes/{size}")
     return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True), size
 
 
@@ -152,6 +165,7 @@ def hole_punch(lab: Lab, work: Path, t: Checks) -> None:
     for node in (a, b):
         node.join(controller)
     controller.ctl("exit", "enable", str(b.id))
+    controller.add_proxy(a, b)
     url, expect = f"http://{web.ip}/", lab.hosts["nat-b"].ip
 
     t.check("没有 relay，靠打洞也能到达", reaches(a, url, b, expect, timeout=40))
@@ -179,6 +193,7 @@ def relay_then_direct(lab: Lab, work: Path, t: Checks) -> None:
     for node in (r, a, b):
         node.join(controller)
     controller.ctl("exit", "enable", str(b.id))
+    controller.add_proxy(a, b)
     controller.ctl("relay", "enable", str(r.id))
     url, expect = f"http://{web.ip}/", lab.hosts["nat-b"].ip
     wait_until(lambda: all(controller.ctl("node", "show", str(node.id))["attached"] for node in (a, b)), timeout=20, what="两个节点挂靠上 relay")
@@ -218,6 +233,7 @@ def tcp_relay(lab: Lab, work: Path, t: Checks) -> None:
     for node in (r, a, b):
         node.join(controller)
     controller.ctl("exit", "enable", str(b.id))
+    controller.add_proxy(a, b)
     controller.ctl("relay", "enable", str(r.id))
     url, expect = f"http://{web.ip}/", lab.hosts["nat-b"].ip
 
@@ -247,6 +263,7 @@ def relay_failover(lab: Lab, work: Path, t: Checks) -> None:
     for node in (r1, r2, a, b):
         node.join(controller)
     controller.ctl("exit", "enable", str(b.id))
+    controller.add_proxy(a, b)
     for relay in (r1, r2):
         controller.ctl("relay", "enable", str(relay.id))
     url, expect = f"http://{web.ip}/", lab.hosts["nat-b"].ip
@@ -288,6 +305,7 @@ def relay_without_udp(lab: Lab, work: Path, t: Checks) -> None:
     for node in (r, a, b):
         node.join(controller)
     controller.ctl("exit", "enable", str(b.id))
+    controller.add_proxy(a, b)
     enabled = controller.ctl("relay", "enable", str(r.id))
     addresses = [entry["address"] for entry in enabled["relay"]["addresses"]]
     t.check("启用时不填地址，controller 找出了 relay 的地址", addresses[:1] == [r.endpoint], str(enabled["relay"]))
@@ -317,6 +335,7 @@ def relay_on_declared_address(lab: Lab, work: Path, t: Checks) -> None:
     for node in (r, a, b):
         node.join(controller)
     controller.ctl("exit", "enable", str(b.id))
+    controller.add_proxy(a, b)
     enabled_at = time.monotonic()
     controller.ctl("relay", "enable", str(r.id))
     relay = relay_record(controller, r)
@@ -385,6 +404,7 @@ def relay_for_half(lab: Lab, work: Path, t: Checks) -> None:
     for relay in (*near, everyone):
         controller.ctl("relay", "enable", str(relay.id))
     controller.ctl("exit", "enable", str(a.id))
+    controller.add_proxy(b, a)
     url, expect = f"http://{web.ip}/", home.ip
 
     def attached(node: Node) -> list[tuple[int, bool]]:
@@ -584,6 +604,7 @@ def idle_held_offline(lab: Lab, work: Path, t: Checks) -> None:
         add_node_config(node, "[performance]\nidle_close_secs = 3\n")
         node.join(controller)
     controller.ctl("exit", "enable", str(b.id))
+    controller.add_proxy(a, b)
     url, expect = f"http://{web.ip}/", lab.hosts["nat-b"].ip
     closed, held = "和对端的连接结束", "空闲的连接先不关"
 

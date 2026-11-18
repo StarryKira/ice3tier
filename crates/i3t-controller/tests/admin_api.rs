@@ -17,8 +17,8 @@ use i3t_controller::{Admitted, Controller, Timing, admin};
 use i3t_crypto::NodeKey;
 use i3t_model::admin as model;
 use i3t_model::control::{
-    BackboneLink, BackboneRow, Declared, DirectKind, EnrollToken, Hello, PathCandidate, PathDetail, PathSegment, RelayState, Report, Route,
-    RouteAnswer, RouteCause, RouteEntry, RouteKind, SelfUpdate, ToController, ToNode,
+    BackboneLink, BackboneRow, BindCause, Declared, DirectKind, EnrollToken, Hello, ListenState, ListenTraffic, PathCandidate, PathDetail,
+    PathSegment, ProxyReport, RelayState, Report, Route, RouteAnswer, RouteCause, RouteEntry, RouteKind, SelfUpdate, ToController, ToNode,
 };
 use i3t_model::netmap::RoutingMode;
 use i3t_model::update::{FailureKind, UpdateCause, UpdateStatus, UpdateTiming};
@@ -486,7 +486,7 @@ async fn rules_and_the_access_views_follow_each_other() {
 }
 
 #[tokio::test]
-async fn credentials_listeners_forwards_and_pairs_round_trip() {
+async fn proxies_forwards_and_pairs_round_trip() {
     let mut api = Api::new();
     let network = api.network("home").await;
     let base = format!("/networks/{}", network.id);
@@ -499,47 +499,83 @@ async fn credentials_listeners_forwards_and_pairs_round_trip() {
         api.ok(Method::PATCH, &format!("{base}/nodes/{}", target.id), Some(json!({ "forward_target": true }))).await;
     assert!(switched.forward_target);
 
-    let (status, created) =
-        api.call(Method::POST, &format!("{base}/credentials"), Some(json!({ "name": "phone", "max_concurrent": 8 }))).await;
+    // 代理：经 exit 出去。不在回环上、不写名字和用户名密码时 controller 取名字、生成一对。
+    let exit = api.join(network.id, CAN_DO_ALL).await;
+    api.ok::<model::Node>(Method::PUT, &format!("{base}/nodes/{}/exit", exit.id), Some(json!({}))).await;
+    let gateway_name = raw_name(&api, &base, gateway.id).await;
+    let request = json!({ "node": gateway.id, "bind": "192.168.1.5:1080", "exit": exit.id, "allow_from": ["192.168.1.0/24"] });
+    let (status, created) = api.call(Method::POST, &format!("{base}/proxies"), Some(request)).await;
     assert_eq!(status, StatusCode::CREATED);
-    let secret = created["token"].as_str().unwrap().to_owned();
-    assert_eq!((created["name"].clone(), created["max_concurrent"].clone()), (json!("phone"), json!(8)));
-    let (_, listed) = api.call(Method::GET, &format!("{base}/credentials"), None).await;
-    assert_eq!(listed.as_array().unwrap().len(), 1);
-    assert!(listed[0].get("token").is_none() && !listed.to_string().contains(&secret), "凭据的令牌查不回来");
-    let duplicate = api.fails(Method::POST, &format!("{base}/credentials"), Some(json!({ "name": "phone" })), StatusCode::CONFLICT).await;
-    assert_eq!(duplicate.code, model::ErrorCode::NameTaken);
-
-    let listener = json!({
-        "node": gateway.id, "name": "lan", "bind": "192.168.1.5:1080", "protocol": "socks5", "allow_from": ["192.168.1.0/24"],
-        "require_credential": true, "default_action": { "action": "exit", "node": target.id }, "fixed_exit": null
-    });
-    let (status, created_listener) = api.call(Method::POST, &format!("{base}/listeners"), Some(listener.clone())).await;
-    assert_eq!(status, StatusCode::CREATED);
-    let listener_id = created_listener["id"].as_u64().unwrap();
-    let mut expected = listener.clone();
-    expected["id"] = json!(listener_id);
-    // 后来加的字段：等级、乐观回复（请求里没写，是 null），节点报的状态（还没报，是 null）。
-    expected["class"] = json!(null);
-    expected["optimistic"] = json!(null);
-    expected["status"] = json!(null);
-    assert_eq!(created_listener, expected, "监听器的应答就是请求的字段加上 id");
-    let open = json!({ "node": gateway.id, "name": "open", "bind": "0.0.0.0:8080", "protocol": "http" });
-    let refused = api.fails(Method::POST, &format!("{base}/listeners"), Some(open), StatusCode::BAD_REQUEST).await;
-    assert!(refused.message.contains("require_credential"), "{}", refused.message);
-    let local = json!({ "node": target.id, "name": "local", "bind": "127.0.0.1:1080", "protocol": "http" });
-    api.ok::<model::Listener>(Method::POST, &format!("{base}/listeners"), Some(local)).await;
-    let all: Vec<model::Listener> = api.ok(Method::GET, &format!("{base}/listeners"), None).await;
+    let proxy_id = created["id"].as_u64().unwrap();
+    let (username, password) = (created["username"].as_str().unwrap().to_owned(), created["password"].as_str().unwrap().to_owned());
+    assert!(username.starts_with("u-") && password.len() == 32, "{username} {password}");
+    assert_eq!(
+        created,
+        json!({
+            "id": proxy_id, "name": format!("{gateway_name}-1080"), "node": gateway.id, "bind": "192.168.1.5:1080", "protocol": "mixed",
+            "exit": exit.id, "username": username, "password": password, "enabled": true, "allow_from": ["192.168.1.0/24"],
+            "class": null, "optimistic": null, "status": { "code": "pending" }, "connections": 0, "bytes_up": 0, "bytes_down": 0
+        }),
+        "节点在线、还没有报"
+    );
+    let shown: Value = api.ok(Method::GET, &format!("{base}/proxies/{proxy_id}"), None).await;
+    assert_eq!(shown["password"], json!(password), "密码查得回来");
+    let local = json!({ "node": target.id, "name": "local", "bind": "127.0.0.1:1080", "exit": exit.id, "protocol": "http" });
+    let local: model::Proxy = api.ok(Method::POST, &format!("{base}/proxies"), Some(local)).await;
+    assert_eq!((local.username.as_str(), local.password.as_str()), ("", ""), "回环上的可以不认证");
+    let all: Vec<model::Proxy> = api.ok(Method::GET, &format!("{base}/proxies"), None).await;
     assert_eq!(all.len(), 2);
-    let on_gateway: Vec<model::Listener> = api.ok(Method::GET, &format!("{base}/listeners?node={}", gateway.id), None).await;
-    assert_eq!(on_gateway.iter().map(|listener| u64::from(listener.id)).collect::<Vec<_>>(), vec![listener_id]);
-    let mut replacement = listener.clone();
-    replacement["default_action"] = json!({ "action": "reject" });
-    replacement["bind"] = json!("192.168.1.5:1081");
-    let replaced: model::Listener = api.ok(Method::PUT, &format!("{base}/listeners/{listener_id}"), Some(replacement)).await;
-    assert_eq!(replaced.config.bind, "192.168.1.5:1081".parse().unwrap());
-    assert_eq!(api.controller.netmap_of(gateway.id).unwrap().unwrap().credentials.len(), 1, "有监听器要求凭据的节点拿到凭据");
-    assert!(api.controller.netmap_of(target.id).unwrap().unwrap().credentials.is_empty());
+    let on_gateway: Vec<model::Proxy> = api.ok(Method::GET, &format!("{base}/proxies?node={}", gateway.id), None).await;
+    assert_eq!(on_gateway.iter().map(|proxy| u64::from(proxy.id)).collect::<Vec<_>>(), vec![proxy_id]);
+    let netmap = api.controller.netmap_of(gateway.id).unwrap().unwrap();
+    assert!(netmap.me.proxies[0].auth.is_some() && !serde_json::to_string(&netmap).unwrap().contains(&password));
+    let exits: Vec<model::ExitView> = api.ok(Method::GET, &format!("{base}/exits"), None).await;
+    let through = exits[0].proxies.iter().map(|proxy| u64::from(proxy.id)).collect::<Vec<_>>();
+    assert_eq!(through, [proxy_id, u64::from(local.id)], "出口的视图列出经它出去的代理");
+
+    // 出错时说是哪一项。
+    let refusals = [
+        (
+            json!({ "node": gateway.id, "bind": "127.0.0.1:2000", "exit": exit.id, "username": "u" }),
+            StatusCode::BAD_REQUEST,
+            "credentials_incomplete",
+            "password",
+        ),
+        (
+            json!({ "node": gateway.id, "bind": "127.0.0.1:2000", "exit": exit.id, "password": "p" }),
+            StatusCode::BAD_REQUEST,
+            "credentials_incomplete",
+            "username",
+        ),
+        (json!({ "node": gateway.id, "bind": "127.0.0.1:2000", "exit": gateway.id }), StatusCode::BAD_REQUEST, "exit_is_node", "exit"),
+        (json!({ "node": gateway.id, "bind": "127.0.0.1:2000", "exit": target.id }), StatusCode::CONFLICT, "exit_not_enabled", "exit"),
+        (json!({ "node": gateway.id, "bind": "192.168.1.5:1080", "exit": exit.id }), StatusCode::CONFLICT, "conflict", "bind"),
+    ];
+    for (request, status, code, field) in refusals {
+        let (got, body) = api.call(Method::POST, &format!("{base}/proxies"), Some(request.clone())).await;
+        assert_eq!((got, &body["error"]["code"], &body["error"]["field"]), (status, &json!(code), &json!(field)), "{request}");
+    }
+    let no_exit = api
+        .fails(
+            Method::POST,
+            &format!("{base}/proxies"),
+            Some(json!({ "node": gateway.id, "bind": "127.0.0.1:2000" })),
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    assert_eq!((no_exit.what.as_deref(), no_exit.field.as_deref()), (Some("data"), Some("exit")), "出口必填");
+
+    // 只改写了的字段；只写 enabled 也行。
+    let patched: model::Proxy =
+        api.ok(Method::PATCH, &format!("{base}/proxies/{proxy_id}"), Some(json!({ "name": "lan", "bind": "192.168.1.5:1081" }))).await;
+    assert_eq!((patched.name.as_str(), patched.bind.port(), patched.password.as_str()), ("lan", 1081, password.as_str()));
+    let paused: Value = api.ok(Method::PATCH, &format!("{base}/proxies/{proxy_id}"), Some(json!({ "enabled": false }))).await;
+    assert_eq!((paused["enabled"].clone(), paused["status"].clone()), (json!(false), json!({ "code": "disabled" })));
+    assert!(api.controller.netmap_of(gateway.id).unwrap().unwrap().me.proxies.is_empty(), "停用的不下发");
+    for gone in ["listeners", "credentials"] {
+        let error = api.fails(Method::GET, &format!("{base}/{gone}"), None, StatusCode::NOT_FOUND).await;
+        assert_eq!(error.what.as_deref(), Some("endpoint"), "{gone} 去掉了，不是别名");
+    }
 
     let forward = json!({
         "name": "web", "protocol": "tcp", "listen_node": gateway.id, "bind": "127.0.0.1:8080",
@@ -591,18 +627,17 @@ async fn credentials_listeners_forwards_and_pairs_round_trip() {
         .await;
     assert_eq!(same.code, model::ErrorCode::InvalidRequest);
 
-    for path in [pair_path, format!("{base}/forwards/{forward_id}"), format!("{base}/listeners/{listener_id}")] {
+    for path in [pair_path, format!("{base}/forwards/{forward_id}"), format!("{base}/proxies/{proxy_id}")] {
         let (status, body) = api.call(Method::DELETE, &path, None).await;
         assert_eq!((status, body), (StatusCode::NO_CONTENT, Value::Null), "{path}");
         api.fails(Method::DELETE, &path, None, StatusCode::NOT_FOUND).await;
     }
-    // 凭据第一次删是吊销（记录留着），第二次才彻底删掉。
-    let credential = format!("{base}/credentials/{}", created["id"]);
-    for _ in 0..2 {
-        let (status, body) = api.call(Method::DELETE, &credential, None).await;
-        assert_eq!((status, body), (StatusCode::NO_CONTENT, Value::Null), "{credential}");
-    }
-    api.fails(Method::DELETE, &credential, None, StatusCode::NOT_FOUND).await;
+}
+
+/// 节点现在的名字。
+async fn raw_name(api: &Api, base: &str, node: NodeId) -> String {
+    let (_, raw) = api.call(Method::GET, &format!("{base}/nodes/{node}"), None).await;
+    raw["name"].as_str().unwrap().to_owned()
 }
 
 #[tokio::test]
@@ -971,14 +1006,16 @@ async fn vague_errors_say_what_was_wrong_and_which_field() {
     assert_eq!((rule.what.as_deref(), rule.field), (Some("rule"), None));
 
     let node = api.join(network.id, Declared::default()).await;
-    let listener = json!({ "node": node.id.get(), "name": "a", "bind": "127.0.0.1:1080", "protocol": "socks5" });
-    let _: model::Listener = api.ok(Method::POST, &format!("/networks/{}/listeners", network.id), Some(listener.clone())).await;
-    let twin = json!({ "node": node.id.get(), "name": "b", "bind": "127.0.0.1:1080", "protocol": "socks5" });
-    let clash = api.fails(Method::POST, &format!("/networks/{}/listeners", network.id), Some(twin), StatusCode::CONFLICT).await;
-    assert_eq!((clash.code, clash.what.as_deref(), clash.field.as_deref()), (model::ErrorCode::Conflict, Some("listener"), Some("bind")));
-    let exit = json!({ "node": node.id.get(), "name": "c", "bind": "127.0.0.1:1081", "protocol": "socks5", "fixed_exit": 99 });
-    let exit = api.fails(Method::POST, &format!("/networks/{}/listeners", network.id), Some(exit), StatusCode::NOT_FOUND).await;
-    assert_eq!((exit.what.as_deref(), exit.field.as_deref()), (Some("node"), Some("fixed_exit")));
+    let gw = api.join(network.id, CAN_DO_ALL).await;
+    api.ok::<model::Node>(Method::PUT, &format!("/networks/{}/nodes/{}/exit", network.id, gw.id), Some(json!({}))).await;
+    let proxy = json!({ "node": node.id.get(), "name": "a", "bind": "127.0.0.1:1080", "exit": gw.id });
+    let _: model::Proxy = api.ok(Method::POST, &format!("/networks/{}/proxies", network.id), Some(proxy.clone())).await;
+    let twin = json!({ "node": node.id.get(), "name": "b", "bind": "127.0.0.1:1080", "exit": gw.id });
+    let clash = api.fails(Method::POST, &format!("/networks/{}/proxies", network.id), Some(twin), StatusCode::CONFLICT).await;
+    assert_eq!((clash.code, clash.what.as_deref(), clash.field.as_deref()), (model::ErrorCode::Conflict, Some("proxy"), Some("bind")));
+    let exit = json!({ "node": node.id.get(), "name": "c", "bind": "127.0.0.1:1081", "exit": 99 });
+    let exit = api.fails(Method::POST, &format!("/networks/{}/proxies", network.id), Some(exit), StatusCode::NOT_FOUND).await;
+    assert_eq!((exit.what.as_deref(), exit.field.as_deref()), (Some("node"), Some("exit")));
 }
 
 #[tokio::test]
@@ -1174,46 +1211,61 @@ async fn enabling_a_relay_answers_with_a_reachability_check_that_only_advises() 
 }
 
 #[tokio::test]
-async fn credentials_get_limits_usage_a_prefix_and_a_visible_revoked_state_over_the_api() {
+async fn a_proxy_shows_what_its_node_reports_and_why_it_cannot_work_although_it_listens() {
     let mut api = Api::new();
     let network = api.network("home").await;
     let base = format!("/networks/{}", network.id);
     let gateway = api.join(network.id, Declared::default()).await;
-    let listener = json!({ "node": gateway.id, "name": "lan", "bind": "0.0.0.0:3128", "protocol": "http", "require_credential": true });
-    api.ok::<model::Listener>(Method::POST, &format!("{base}/listeners"), Some(listener)).await;
+    let exit = api.join(network.id, CAN_DO_ALL).await;
+    api.ok::<model::Node>(Method::PUT, &format!("{base}/nodes/{}/exit", exit.id), Some(json!({}))).await;
+    let request = json!({ "node": gateway.id, "bind": "0.0.0.0:3128", "exit": exit.id, "protocol": "http" });
+    let created: model::Proxy = api.ok(Method::POST, &format!("{base}/proxies"), Some(request)).await;
+    let path = format!("{base}/proxies/{}", created.id);
 
-    let created: model::CreatedCredential =
-        api.ok(Method::POST, &format!("{base}/credentials"), Some(json!({ "name": "phone", "max_bytes": 1000 }))).await;
-    let id = created.credential.id;
-    assert_eq!((created.credential.prefix.as_str(), created.credential.max_bytes), (&created.token[..6], Some(1000)));
-    let usage = model::CredentialUsage::default();
-    assert_eq!((created.credential.state, created.credential.usage), (model::CredentialState::Active, usage));
+    let local = "0.0.0.0:3128".parse().unwrap();
+    let traffic = ListenTraffic { connections: 2, bytes_up: 10, bytes_down: 20 };
+    let state = |state| Report { run: 5, proxies: vec![ProxyReport { id: created.id, bind: local, state, traffic }], ..Report::default() };
+    api.controller.handle(gateway.session, REMOTE, ToController::Report(Box::new(state(ListenState::Listening { local })))).unwrap();
+    let shown: Value = api.ok(Method::GET, &path, None).await;
+    assert_eq!(
+        (shown["status"].clone(), shown["connections"].clone(), shown["bytes_down"].clone()),
+        (json!({ "code": "listening", "local": "0.0.0.0:3128" }), json!(2), json!(20))
+    );
+    let in_use = ListenState::PortInUse { detail: "Address already in use".into(), cause: Some(BindCause::AddressInUse) };
+    api.controller.handle(gateway.session, REMOTE, ToController::Report(Box::new(state(in_use)))).unwrap();
+    let shown: Value = api.ok(Method::GET, &path, None).await;
+    assert_eq!(
+        shown["status"],
+        json!({ "code": "port_in_use", "detail": "Address already in use", "cause": { "code": "address_in_use" } })
+    );
 
-    let report = Report {
-        run: 5,
-        credentials: vec![i3t_model::control::CredentialUsage { id, bytes: 1500, connections: 1, last_used_secs_ago: Some(3) }],
-        ..Report::default()
-    };
-    api.controller.handle(gateway.session, REMOTE, ToController::Report(Box::new(report))).unwrap();
-    let listed: Vec<model::Credential> = api.ok(Method::GET, &format!("{base}/credentials"), None).await;
-    assert_eq!((listed[0].usage.bytes, listed[0].usage.connections, listed[0].state), (1500, 1, model::CredentialState::Exhausted));
-    assert!(api.controller.netmap_of(gateway.id).unwrap().unwrap().credentials[0].exhausted);
+    // 在监听，出口却用不了：出口离线、出口停用、规则不让访问出口。
+    api.controller.handle(gateway.session, REMOTE, ToController::Report(Box::new(state(ListenState::Listening { local })))).unwrap();
+    api.controller.disconnect(exit.session);
+    let shown: Value = api.ok(Method::GET, &path, None).await;
+    assert_eq!(shown["status"], json!({ "code": "exit_offline", "local": "0.0.0.0:3128" }));
+    api.ok::<model::Node>(Method::DELETE, &format!("{base}/nodes/{}/exit", exit.id), None).await;
+    let shown: Value = api.ok(Method::GET, &path, None).await;
+    assert_eq!(shown["status"]["code"], json!("exit_disabled"), "出口停用之后代理留着、照样下发");
+    assert_eq!(api.controller.netmap_of(gateway.id).unwrap().unwrap().me.proxies.len(), 1);
+    let renamed: Value = api.ok(Method::PATCH, &path, Some(json!({ "name": "lan" }))).await;
+    assert_eq!(renamed["name"], json!("lan"), "只改名字不因为出口停用了而被拦住");
+    api.ok::<Value>(Method::PATCH, &path, Some(json!({ "enabled": false }))).await;
+    let refused = api.fails(Method::PATCH, &path, Some(json!({ "enabled": true })), StatusCode::CONFLICT).await;
+    assert_eq!((refused.code, refused.field.as_deref()), (model::ErrorCode::ExitNotEnabled, Some("exit")), "再启用要出口是启用着的");
 
-    let patched: model::Credential =
-        api.ok(Method::PATCH, &format!("{base}/credentials/{id}"), Some(json!({ "max_bytes": null, "max_concurrent": 2 }))).await;
-    assert_eq!((patched.max_bytes, patched.max_concurrent, patched.state), (None, Some(2), model::CredentialState::Active));
-    let reset: model::Credential = api.ok(Method::PATCH, &format!("{base}/credentials/{id}"), Some(json!({ "reset_usage": true }))).await;
-    assert_eq!(reset.usage.bytes, 0);
-    api.fails(Method::PATCH, &format!("{base}/credentials/{id}"), Some(json!({ "max_concurrent": 0 })), StatusCode::BAD_REQUEST).await;
-
-    let (status, _) = api.call(Method::DELETE, &format!("{base}/credentials/{id}"), None).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    let listed: Vec<model::Credential> = api.ok(Method::GET, &format!("{base}/credentials"), None).await;
-    assert_eq!(listed[0].state, model::CredentialState::Revoked, "吊销之后看得到，不会消失");
-    assert!(api.controller.netmap_of(gateway.id).unwrap().unwrap().credentials.is_empty());
-    api.call(Method::DELETE, &format!("{base}/credentials/{id}"), None).await;
-    let listed: Vec<model::Credential> = api.ok(Method::GET, &format!("{base}/credentials"), None).await;
-    assert!(listed.is_empty());
+    // 出口回来了，规则却不让访问它：启用不了；启用着的代理状态说明为什么。
+    api.ok::<model::Node>(Method::PUT, &format!("{base}/nodes/{}/exit", exit.id), Some(json!({}))).await;
+    api.ok::<Value>(Method::PATCH, &path, Some(json!({ "enabled": true }))).await;
+    let rules: Vec<model::Rule> = api.ok(Method::GET, &format!("{base}/rules"), None).await;
+    api.call(Method::DELETE, &format!("{base}/rules/{}", rules[0].id), None).await;
+    let shown: Value = api.ok(Method::GET, &path, None).await;
+    assert_eq!(shown["status"], json!({ "code": "access_denied", "local": "0.0.0.0:3128" }));
+    let check: Value = api.ok(Method::GET, &format!("{base}/access/check?from={}&to={}", gateway.id, exit.id), None).await;
+    assert_eq!(check["allowed"], json!(false), "界面保存之前可以先问规则");
+    api.ok::<Value>(Method::PATCH, &path, Some(json!({ "enabled": false }))).await;
+    let refused = api.fails(Method::PATCH, &path, Some(json!({ "enabled": true })), StatusCode::CONFLICT).await;
+    assert_eq!((refused.code, refused.field.as_deref()), (model::ErrorCode::AccessDenied, Some("exit")));
 }
 
 #[tokio::test]

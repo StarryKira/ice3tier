@@ -6,11 +6,11 @@ use std::time::Instant;
 
 use i3t_access::Access;
 use i3t_conn::{Endpoint, RouteChange};
-use i3t_exit::{Exit, ExitStats, Os, Outbound};
+use i3t_exit::{Exit, ExitStats, Os};
 use i3t_model::Netmap;
 use i3t_model::control::{
-    BackboneRow, CredentialUsage, ExitObservation, ExitReport, ForwardReport, InterceptReport, InterceptState, ListenTraffic,
-    ListenerReport, MAX_LOCAL_ADDRESSES, MAX_REPORTED_SWITCHES, PerformanceReport, QuotaUsage, Report, Route, RouteAnswer, RouteSince,
+    BackboneRow, ExitObservation, ExitReport, ForwardReport, InterceptReport, InterceptState, ListenTraffic, ListenerReport,
+    MAX_LOCAL_ADDRESSES, MAX_REPORTED_SWITCHES, PerformanceReport, ProxyReport, QuotaUsage, Report, Route, RouteAnswer, RouteSince,
     RouteSwitch, SelfUpdate,
 };
 use i3t_model::update::UpdateStatus;
@@ -20,7 +20,6 @@ use tokio::sync::{broadcast, watch};
 use crate::control::LinkState;
 use crate::flows::{self, RelayActivity, Sample};
 use crate::lanes::{self, NodeLanes};
-use crate::node::BUILTIN_LISTENERS;
 use crate::program::Program;
 use crate::route_detail;
 use crate::status::{listen_state, target_failure};
@@ -28,7 +27,7 @@ use crate::status::{listen_state, target_failure};
 /// 节点里的出口：流经共用的连接或者 lane 进来。
 pub(crate) type NodeExit = Exit<Os, lanes::Connector>;
 /// 节点里的入口：TCP 流按节点对的设置走 lane 或者共用的连接。
-pub(crate) type NodeAccess = Access<lanes::Connector, Outbound<Os>>;
+pub(crate) type NodeAccess = Access<lanes::Connector>;
 
 /// 一个运行着的节点。
 pub(crate) struct Runtime {
@@ -107,9 +106,10 @@ impl Runtime {
     pub(crate) fn sample_flows(&self) -> Sample {
         let status = self.access.status();
         let ingress: usize = status
-            .listeners
+            .proxies
             .iter()
-            .map(|listener| listener.active.get())
+            .map(|proxy| proxy.active.get())
+            .chain(status.local.iter().map(|entry| entry.active.get()))
             .chain(status.forwards.iter().map(|forward| forward.active.get()))
             .sum::<usize>()
             + self.access.intercept_status().active.get();
@@ -124,22 +124,33 @@ impl Runtime {
     pub(crate) fn report(&self) -> Report {
         let stats = self.exit.stats();
         let access = self.access.status();
-        let configured = &self.netmap.borrow().me.listeners;
-        let listeners: Vec<ListenerReport> = access
-            .listeners
+        let proxies: Vec<ProxyReport> = access
+            .proxies
             .iter()
-            .map(|listener| ListenerReport {
-                name: listener.name.clone(),
-                bind: listener.bind,
-                protocol: listener.protocol,
-                // 名字是本机入口的名字、地址也是它的：本机配置文件开的那一个（controller 在同一个地址上配了监听器时，那一个不会被加进来）。
-                builtin: BUILTIN_LISTENERS.contains(&listener.name.as_str())
-                    && configured.iter().filter(|config| config.bind == listener.bind).count() <= 1,
-                state: listen_state(&listener.state),
+            .map(|proxy| ProxyReport {
+                id: proxy.id,
+                bind: proxy.bind,
+                state: listen_state(&proxy.state),
                 traffic: ListenTraffic {
-                    connections: count(listener.active.get()),
-                    bytes_up: listener.traffic.up(),
-                    bytes_down: listener.traffic.down(),
+                    connections: count(proxy.active.get()),
+                    bytes_up: proxy.traffic.up(),
+                    bytes_down: proxy.traffic.down(),
+                },
+            })
+            .collect();
+        let listeners: Vec<ListenerReport> = access
+            .local
+            .iter()
+            .map(|entry| ListenerReport {
+                name: entry.name.clone(),
+                bind: entry.bind,
+                protocol: entry.protocol,
+                builtin: true,
+                state: listen_state(&entry.state),
+                traffic: ListenTraffic {
+                    connections: count(entry.active.get()),
+                    bytes_up: entry.traffic.up(),
+                    bytes_down: entry.traffic.down(),
                 },
             })
             .collect();
@@ -160,15 +171,17 @@ impl Runtime {
             })
             .collect();
         let intercept = self.intercept_report();
-        let ingress_up: u64 = listeners
+        let ingress_up: u64 = proxies
             .iter()
-            .map(|listener| listener.traffic.bytes_up)
+            .map(|proxy| proxy.traffic.bytes_up)
+            .chain(listeners.iter().map(|listener| listener.traffic.bytes_up))
             .chain(forwards.iter().map(|forward| forward.traffic.bytes_up))
             .sum::<u64>()
             .saturating_add(intercept.up_bytes);
-        let ingress_down: u64 = listeners
+        let ingress_down: u64 = proxies
             .iter()
-            .map(|listener| listener.traffic.bytes_down)
+            .map(|proxy| proxy.traffic.bytes_down)
+            .chain(listeners.iter().map(|listener| listener.traffic.bytes_down))
             .chain(forwards.iter().map(|forward| forward.traffic.bytes_down))
             .sum::<u64>()
             .saturating_add(intercept.down_bytes);
@@ -193,9 +206,9 @@ impl Runtime {
             routes_full: false,
             update: Some(self.update.borrow().clone()),
             run: self.run,
-            credentials: self.credential_usage(),
             exit: Some(Box::new(exit_report(&stats))),
             exits: self.exit_observations(),
+            proxies,
             listeners,
             forwards,
             route_kinds: self.endpoint.path_reports().iter().map(route_detail::kind).collect(),
@@ -218,19 +231,6 @@ impl Runtime {
             up_bytes: status.traffic.up(),
             down_bytes: status.traffic.down(),
         }
-    }
-
-    /// 各个接入凭据的用量。没有编号的（旧版本的 controller 下发的）报不了，跳过。
-    pub(crate) fn credential_usage(&self) -> Vec<CredentialUsage> {
-        let usage = self.access.credential_usage().into_iter().filter(|usage| usage.id != 0);
-        usage
-            .map(|usage| CredentialUsage {
-                id: usage.id,
-                bytes: usage.bytes_up.saturating_add(usage.bytes_down),
-                connections: usage.connections,
-                last_used_secs_ago: usage.last_used.map(|ago| ago.as_secs()),
-            })
-            .collect()
     }
 
     /// 本节点作为发起方，经各个出口出去的流。

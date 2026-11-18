@@ -366,28 +366,25 @@ impl fmt::Display for Capability {
     }
 }
 
-/// 本机的代理入口。
+/// 本机的组网入口（`[proxy]`）：只通到组网里的节点，不经出口、不认证，只能绑回环地址。默认都不开：
+/// 节点不打开任何没有配过的代理端口。以前的版本默认开着 1080 和 1081，配置文件里写了这两个地址的照旧开着，意思变成了"只通到节点"。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Proxy {
-    #[serde(default = "default_socks5")]
+    #[serde(default = "off")]
     pub socks5: ProxyBind,
-    #[serde(default = "default_http")]
+    #[serde(default = "off")]
     pub http: ProxyBind,
 }
 
 impl Default for Proxy {
     fn default() -> Self {
-        Self { socks5: default_socks5(), http: default_http() }
+        Self { socks5: ProxyBind::Off, http: ProxyBind::Off }
     }
 }
 
-fn default_socks5() -> ProxyBind {
-    ProxyBind::At(SocketAddr::from(([127, 0, 0, 1], 1080)))
-}
-
-fn default_http() -> ProxyBind {
-    ProxyBind::At(SocketAddr::from(([127, 0, 0, 1], 1081)))
+const fn off() -> ProxyBind {
+    ProxyBind::Off
 }
 
 /// 一个只给本机用的入口（代理、指标接口）绑在哪里，或者不开。配置文件里写地址，或者写 `"off"`。

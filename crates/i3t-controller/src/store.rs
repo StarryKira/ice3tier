@@ -9,16 +9,15 @@
 
 mod codec;
 mod cooldown;
-mod credential;
 #[cfg(test)]
 pub(crate) mod fixtures;
 mod forward;
 mod group;
-mod listener;
 mod network;
 mod node;
 mod oplog;
 mod pair;
+mod proxy;
 mod rule;
 mod schema;
 mod stats;
@@ -32,13 +31,13 @@ use std::time::Duration;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 pub use cooldown::CooldownKind;
-pub use credential::CredentialRecord;
 pub use forward::ForwardRecord;
 pub use group::{BUILTIN_GROUP, GroupRecord, folded};
 pub use network::{NetworkRecord, NewNetwork};
 pub use node::{NetmapState, NewNode, NodeRecord, ReachRecord};
 pub use oplog::LogFilter;
 pub use pair::PairOptions;
+pub use proxy::ProxyRecord;
 pub use stats::StatPoint;
 pub use switch::NewSwitch;
 pub use test::KEEP_PER_PAIR;

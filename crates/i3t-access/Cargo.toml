@@ -16,7 +16,6 @@ i3t-model = { path = "../i3t-model" }
 i3t-proto = { path = "../i3t-proto" }
 i3t-underlay = { path = "../i3t-underlay" }
 ipnet.workspace = true
-ring.workspace = true
 socket2.workspace = true
 subtle = "2.6.1"
 thiserror.workspace = true

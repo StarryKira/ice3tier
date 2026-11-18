@@ -465,7 +465,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-access"
-version = "0.1.8"
+version = "0.1.14"
 dependencies = [
  "base64",
  "bytes",
@@ -473,8 +473,8 @@ dependencies = [
  "i3t-flow",
  "i3t-model",
  "i3t-proto",
+ "i3t-underlay",
  "ipnet",
- "ring",
  "socket2",
  "subtle",
  "thiserror",
@@ -484,7 +484,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-conn"
-version = "0.1.8"
+version = "0.1.14"
 dependencies = [
  "bytes",
  "i3t-crypto",
@@ -504,7 +504,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-crypto"
-version = "0.1.8"
+version = "0.1.14"
 dependencies = [
  "base64",
  "i3t-proto",
@@ -516,7 +516,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-flow"
-version = "0.1.8"
+version = "0.1.14"
 dependencies = [
  "bytes",
  "i3t-conn",
@@ -544,7 +544,6 @@ dependencies = [
  "i3t-relay",
  "i3t-underlay",
  "libfuzzer-sys",
- "ring",
  "serde",
  "serde_json",
  "tokio",
@@ -552,7 +551,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-intercept"
-version = "0.1.8"
+version = "0.1.14"
 dependencies = [
  "ipnet",
  "libc",
@@ -564,11 +563,12 @@ dependencies = [
 
 [[package]]
 name = "i3t-model"
-version = "0.1.8"
+version = "0.1.14"
 dependencies = [
  "base64",
  "i3t-proto",
  "ipnet",
+ "ring",
  "serde",
  "serde_json",
  "thiserror",
@@ -576,7 +576,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-path"
-version = "0.1.8"
+version = "0.1.14"
 dependencies = [
  "bytes",
  "i3t-crypto",
@@ -591,7 +591,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-proto"
-version = "0.1.8"
+version = "0.1.14"
 dependencies = [
  "base64",
  "bytes",
@@ -601,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-relay"
-version = "0.1.8"
+version = "0.1.14"
 dependencies = [
  "bytes",
  "i3t-crypto",
@@ -618,7 +618,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-underlay"
-version = "0.1.8"
+version = "0.1.14"
 dependencies = [
  "bytes",
  "i3t-proto",

@@ -1,15 +1,12 @@
 //! 每个节点拿到的 netmap：最小权限，内容变了才动版本号，只发给受影响的节点。
 
-use i3t_model::admin::{
-    CreateCredential, Direction, ForwardInput, LaneBlock, LaneOpening, ListenerInput, PairInput, RelaySettings, UpdateNode,
-};
+use i3t_model::admin::{Direction, ForwardInput, LaneBlock, LaneOpening, PairInput, RelaySettings, UpdateNode, UpdateProxy};
 use i3t_model::control::{Declared, Hello, Report, ToController};
-use i3t_model::netmap::{self, Attachment, ExitRole, ForwardProtocol, LaneMode, ListenerProtocol, Reach, TokenHash};
+use i3t_model::netmap::{self, Attachment, ExitRole, ForwardProtocol, LaneMode, ListenerProtocol, Reach, Verifier};
 
 use super::super::Controller;
-use super::super::testing::{CAN_DO_ALL, Lab, REMOTE};
+use super::super::testing::{CAN_DO_ALL, Lab, REMOTE, proxy};
 use super::{add_rule, drop_default_rule, peer_ids, relations, rename};
-use crate::secret;
 
 /// 启用 relay 的设置：只有带宽上限，地址由 controller 自己找出来。
 fn relay_settings() -> RelaySettings {
@@ -28,7 +25,7 @@ fn the_default_network_is_fully_connected() {
         assert!(netmap.peers.iter().all(|peer| peer.inbound && peer.outbound));
         assert_eq!(netmap.me.id, node);
         assert_eq!((netmap.network.name.as_str(), netmap.network.domain.as_str()), ("home", "home.i3t"));
-        assert!(netmap.relays.is_empty() && netmap.relay_clients.is_empty() && netmap.credentials.is_empty());
+        assert!(netmap.relays.is_empty() && netmap.relay_clients.is_empty() && netmap.me.proxies.is_empty());
         assert!(netmap.me.relay.is_none() && netmap.me.exit.is_none(), "能力默认全关");
     }
     let first = lab.controller.node(network.id, nodes[0]).unwrap().node;
@@ -81,11 +78,12 @@ fn two_networks_never_see_each_other() {
     let theirs = lab.join_offline(office.id, &["shared"], CAN_DO_ALL);
     let their_relay = lab.join_offline(office.id, &["shared"], CAN_DO_ALL);
     lab.controller.enable_relay(office.id, their_relay, relay_settings()).unwrap();
-    lab.controller.create_credential(office.id, &CreateCredential { name: "c".to_owned(), max_concurrent: None, max_bytes: None }).unwrap();
+    lab.controller.enable_exit(office.id, their_relay, ExitRole::default()).unwrap();
+    lab.controller.create_proxy(office.id, proxy(theirs, "127.0.0.1:1080", their_relay)).unwrap();
     add_rule(&lab, home.id, "shared", "shared", Direction::Both);
 
     let netmap = lab.netmap(ours);
-    assert!(netmap.peers.is_empty() && netmap.relays.is_empty() && netmap.relay_clients.is_empty() && netmap.credentials.is_empty());
+    assert!(netmap.peers.is_empty() && netmap.relays.is_empty() && netmap.relay_clients.is_empty() && netmap.me.proxies.is_empty());
     assert_eq!(netmap.network.name, "home");
     assert_eq!(peer_ids(&lab.netmap(theirs)), vec![their_relay]);
     assert_eq!(lab.netmap(their_relay).relay_clients.iter().map(|client| client.id).collect::<Vec<_>>(), vec![theirs]);
@@ -131,46 +129,45 @@ fn relays_are_listed_for_everyone_but_relay_clients_only_for_relays() {
 }
 
 #[test]
-fn credentials_go_only_to_nodes_with_a_listener_that_requires_them() {
+fn a_proxy_goes_only_to_its_node_with_a_verifier_and_never_the_password() {
     let mut lab = Lab::new();
     let network = lab.network("home");
     let gateway = lab.join_offline(network.id, &[], Declared::default());
-    let plain = lab.join_offline(network.id, &[], Declared::default());
-    let listener = |node, bind: &str, require_credential| ListenerInput {
-        node,
-        config: netmap::Listener {
-            name: "l".to_owned(),
-            bind: bind.parse().unwrap(),
-            protocol: ListenerProtocol::Http,
-            allow_from: vec!["192.168.1.0/24".parse().unwrap()],
-            require_credential,
-            default_action: None,
-            fixed_exit: Some(plain),
-            class: None,
-            optimistic: None,
-        },
-    };
-    let created = lab
-        .controller
-        .create_credential(network.id, &CreateCredential { name: "phone".to_owned(), max_concurrent: Some(4), max_bytes: None })
-        .unwrap();
-    assert!(lab.netmap(gateway).credentials.is_empty());
+    let exit = lab.join_offline(network.id, &[], CAN_DO_ALL);
+    lab.controller.enable_exit(network.id, exit, ExitRole::default()).unwrap();
+    let mut input = proxy(gateway, "192.168.1.5:8080", exit);
+    input.protocol = ListenerProtocol::Http;
+    input.allow_from = vec!["192.168.1.0/24".parse().unwrap()];
+    let created = lab.controller.create_proxy(network.id, input).unwrap();
+    let local = lab.controller.create_proxy(network.id, proxy(gateway, "127.0.0.1:8080", exit)).unwrap();
 
-    let on_gateway = lab.controller.create_listener(network.id, listener(gateway, "192.168.1.5:8080", true)).unwrap();
-    lab.controller.create_listener(network.id, listener(plain, "127.0.0.1:8080", false)).unwrap();
     let netmap = lab.netmap(gateway);
-    assert_eq!(netmap.me.listeners, vec![on_gateway.config.clone()]);
-    assert_eq!(netmap.credentials.len(), 1);
-    let delivered = &netmap.credentials[0];
-    assert_eq!((delivered.name.as_str(), delivered.max_concurrent), ("phone", Some(4)));
-    assert_eq!(delivered.token, TokenHash::from_bytes(secret::sha256(created.token.as_bytes())), "入口拿到的是令牌文本的 SHA-256");
-    assert!(!serde_json::to_string(&netmap).unwrap().contains(&created.token), "令牌本身不下发");
-    assert!(lab.netmap(plain).credentials.is_empty() && lab.netmap(plain).me.listeners.len() == 1);
+    let [lan, open] = &netmap.me.proxies[..] else { panic!("{:?}", netmap.me.proxies) };
+    assert_eq!(
+        (lan.id, lan.bind, lan.protocol, lan.exit, lan.allow_from.len()),
+        (created.id, created.bind, ListenerProtocol::Http, exit, 1)
+    );
+    let verifier = lan.auth.expect("不在回环上的代理一定要认证");
+    assert_eq!(verifier.hash_of(created.username.as_bytes(), created.password.as_bytes()), verifier.hash.0);
+    let text = serde_json::to_string(&netmap).unwrap();
+    assert!(!text.contains(&created.password) && !text.contains(&created.username), "用户名和密码都不下发，只有校验值");
+    assert_eq!((open.id, open.auth), (local.id, None), "回环上没有写用户名和密码的不认证");
+    assert!(lab.netmap(exit).me.proxies.is_empty(), "出口拿不到经它出去的代理");
 
-    lab.controller.delete_credential(network.id, created.credential.id).unwrap();
-    assert!(lab.netmap(gateway).credentials.is_empty());
-    lab.controller.delete_listener(network.id, on_gateway.id).unwrap();
-    assert!(lab.netmap(gateway).me.listeners.is_empty());
+    // 改了密码，盐跟着换。
+    let before: Verifier = verifier;
+    let changed = UpdateProxy { password: Some("another".into()), ..UpdateProxy::default() };
+    lab.controller.update_proxy(network.id, created.id, changed).unwrap();
+    let after = lab.netmap(gateway).me.proxies[0].auth.unwrap();
+    assert_ne!(after.salt, before.salt);
+    assert_eq!(after.hash_of(created.username.as_bytes(), b"another"), after.hash.0);
+
+    // 停用的不下发，删掉的也没了。
+    let off = UpdateProxy { enabled: Some(false), ..UpdateProxy::default() };
+    lab.controller.update_proxy(network.id, local.id, off).unwrap();
+    assert_eq!(lab.netmap(gateway).me.proxies.iter().map(|proxy| proxy.id).collect::<Vec<_>>(), [created.id]);
+    lab.controller.delete_proxy(network.id, created.id).unwrap();
+    assert!(lab.netmap(gateway).me.proxies.is_empty());
 }
 
 #[test]

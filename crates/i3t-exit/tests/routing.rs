@@ -1,4 +1,4 @@
-//! 一个请求往哪里去：用户名指定出口、组网目标、默认动作、局域网、端口转发。
+//! 一个请求往哪里去：代理的出口、组网目标、局域网、端口转发。
 
 // clippy.toml 里的 allow-unwrap-in-tests 只管 #[test] 函数，管不到集成测试里的辅助函数。这里 unwrap 失败就是测试失败。
 #![allow(clippy::unwrap_used)]
@@ -8,11 +8,11 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    ECHO_LEN, GW, LAPTOP, NAS, PUBLIC_IP, Target, World, assert_echo, assert_reset, closed_port, credential, drain, echo_server,
-    eventually, http_connect, listener, node, non_loopback_address, peer_mut, socks5,
+    ECHO_LEN, GW, LAPTOP, NAS, PUBLIC_IP, Target, World, assert_echo, assert_reset, closed_port, drain, echo_server, eventually,
+    http_connect, node, non_loopback_address, peer_mut, proxy, socks5,
 };
 use i3t_access::{ListenState, TargetCause};
-use i3t_model::netmap::{DefaultAction, ExitRole, Forward, ForwardProtocol, ForwardTarget, ListenerProtocol, PeerExit};
+use i3t_model::netmap::{ExitRole, Forward, ForwardProtocol, ForwardTarget, ListenerProtocol, PeerExit};
 use tokio::net::TcpStream;
 
 fn public(port: u16) -> String {
@@ -20,15 +20,16 @@ fn public(port: u16) -> String {
 }
 
 i3t_lane::on_both_transports! {
-    async fn the_username_names_the_exit_by_virtual_ip_or_by_name() {
+    async fn a_proxy_leaves_through_its_exit_whatever_the_username_says() {
         let world = World::new().await;
         world.gw.system.redirect(&public(443), echo_server().await);
 
-        for username in ["10.66.0.2", "gw", "GW", "gw.home.i3t", "10.66.0.2+c-i", "gw+c-b"] {
+        // 用户名不再选出口：写什么都从代理的出口出去。
+        for username in ["10.66.0.2", "nas", "NAS", "nas.home.i3t", "10.66.0.3+c-i", "gw+c-b"] {
             let mut stream = socks5(world.socks().await, Some((username, "")), PUBLIC_IP, 443).await.connected();
             assert_echo(&mut stream).await;
         }
-        for username in ["10.66.0.2", "gw"] {
+        for username in ["10.66.0.3", "gw"] {
             let (status, mut stream) = http_connect(world.http().await, &public(443), Some((username, ""))).await;
             assert_eq!(status, 200);
             assert_echo(&mut stream).await;
@@ -53,10 +54,10 @@ i3t_lane::on_both_transports! {
         world.gw.system.redirect(&public(443), echo_server().await);
 
         for host in ["api.example.com", "API.Example.COM", "api.example.com."] {
-            let mut stream = socks5(world.socks().await, Some(("gw", "")), host, 443).await.connected();
+            let mut stream = socks5(world.socks().await, None, host, 443).await.connected();
             assert_echo(&mut stream).await;
         }
-        let (status, mut stream) = http_connect(world.http().await, "api.example.com:443", Some(("gw", ""))).await;
+        let (status, mut stream) = http_connect(world.http().await, "api.example.com:443", None).await;
         assert_eq!(status, 200);
         assert_echo(&mut stream).await;
 
@@ -69,9 +70,9 @@ i3t_lane::on_both_transports! {
     async fn an_ipv6_literal_target_goes_through_the_exit() {
         let world = World::new().await;
         world.gw.system.redirect("[2606:4700::1111]:443", echo_server().await);
-        let mut stream = socks5(world.socks().await, Some(("gw", "")), "2606:4700::1111", 443).await.connected();
+        let mut stream = socks5(world.socks().await, None, "2606:4700::1111", 443).await.connected();
         assert_echo(&mut stream).await;
-        let (status, mut stream) = http_connect(world.http().await, "[2606:4700::1111]:443", Some(("gw", ""))).await;
+        let (status, mut stream) = http_connect(world.http().await, "[2606:4700::1111]:443", None).await;
         assert_eq!(status, 200);
         assert_echo(&mut stream).await;
     }
@@ -106,13 +107,13 @@ i3t_lane::on_both_transports! {
 }
 
 i3t_lane::on_both_transports! {
-    async fn an_overlay_target_is_a_service_on_that_node_whatever_the_username_says() {
+    async fn an_overlay_target_is_a_service_on_that_node_whichever_exit_the_proxy_has() {
         let world = World::new().await;
         // nas 的假网卡地址是 192.168.77.5，把它上面的 8080 引到测试服务。
         world.nas.system.redirect("192.168.77.5:8080", echo_server().await);
 
-        for username in [None, Some(("gw", "")), Some(("+c-i", ""))] {
-            let mut stream = socks5(world.socks().await, username, "10.66.0.3", 8080).await.connected();
+        for proxy in [world.socks().await, world.socks_via_nas().await, world.socks().await] {
+            let mut stream = socks5(proxy, None, "10.66.0.3", 8080).await.connected();
             assert_echo(&mut stream).await;
         }
         assert_eq!(world.gw.exit.stats().total, 0, "组网地址不会被交给出口去连");
@@ -121,110 +122,45 @@ i3t_lane::on_both_transports! {
 }
 
 #[tokio::test]
-async fn without_a_username_a_loopback_listener_dials_from_this_machine() {
-    let world = World::new().await;
-    let echo = echo_server().await;
-    world.laptop.system.name("intranet.corp", &["127.0.0.1"]);
-
-    // 回环监听器不加限制：本机的程序本来就能自己去连这些地址。
-    let mut stream = socks5(world.socks().await, None, "127.0.0.1", echo.port()).await.connected();
-    assert_echo(&mut stream).await;
-    let (status, mut stream) = http_connect(world.http().await, &format!("intranet.corp:{}", echo.port()), None).await;
-    assert_eq!(status, 200);
-    assert_echo(&mut stream).await;
-
-    // 就地出站是连上了才告诉客户端，所以失败有准确的错误码。
-    assert_eq!(socks5(world.socks().await, None, "127.0.0.1", closed_port().await.port()).await.failed(), 5);
-    assert_eq!(socks5(world.socks().await, None, "no-such-host.corp", 80).await.failed(), 4);
-    assert_eq!(http_connect(world.http().await, "no-such-host.corp:80", None).await.0, 502);
-
-    assert_eq!((world.gw.exit.stats().total, world.nas.exit.stats().total), (0, 0), "没有任何东西经过别的节点");
-}
-
-i3t_lane::on_both_transports! {
-    async fn the_default_action_can_be_reject_or_a_fixed_exit() {
-        let world = World::new().await;
-        world.gw.system.redirect(&public(443), echo_server().await);
-        world.laptop.update(|netmap| netmap.me.listeners[0].default_action = Some(DefaultAction::Reject)).await;
-
-        // 拒绝：没有写出口的请求被拒绝，写了出口的照常。
-        assert_eq!(socks5(world.socks().await, None, PUBLIC_IP, 443).await.failed(), 2);
-        let mut stream = socks5(world.socks().await, Some(("gw", "")), PUBLIC_IP, 443).await.connected();
-        assert_echo(&mut stream).await;
-
-        // 默认走 gw：不写用户名也从 gw 出去；写了别的出口就按写的来。
-        world.laptop.update(|netmap| netmap.me.listeners[0].default_action = Some(DefaultAction::Exit { node: node(GW) })).await;
-        let mut stream = socks5(world.socks().await, None, PUBLIC_IP, 443).await.connected();
-        assert_echo(&mut stream).await;
-        assert_eq!(socks5(world.socks().await, Some(("nas", "")), PUBLIC_IP, 443).await.failed(), 2, "nas 不是出口");
-        assert!(world.laptop.system.connected().is_empty());
-    }
-}
-
-i3t_lane::on_both_transports! {
-    async fn a_fixed_exit_carries_everything_that_is_not_a_mesh_target() {
-        let world = World::new().await;
-        world.gw.system.redirect(&public(443), echo_server().await);
-        world.nas.system.redirect("192.168.77.5:8080", echo_server().await);
-        world.laptop.update(|netmap| netmap.me.listeners[1].fixed_exit = Some(node(GW))).await;
-
-        // 不写用户名、写了别的节点，都从固定的出口出去。
-        for auth in [None, Some(("nas", "")), Some(("10.66.0.99", ""))] {
-            let (status, mut stream) = http_connect(world.http().await, &public(443), auth).await;
-            assert_eq!(status, 200);
-            assert_echo(&mut stream).await;
-        }
-        assert_eq!(world.gw.exit.stats().total, 3);
-
-        // 组网地址仍然是访问那个节点的服务。
-        let (status, mut stream) = http_connect(world.http().await, "10.66.0.3:8080", None).await;
-        assert_eq!(status, 200);
-        assert_echo(&mut stream).await;
-        assert_eq!(world.nas.exit.stats().total, 1);
-    }
-}
-
-#[tokio::test]
-async fn local_egress_on_a_non_loopback_listener_needs_the_exit_role_and_obeys_its_policy() {
+async fn a_proxy_never_goes_out_from_its_own_node() {
     let world = World::new().await;
     let echo = echo_server().await;
     world.laptop.system.redirect(&public(443), echo);
-    world.laptop.system.redirect(&public(8443), echo);
-    world
-        .laptop
-        .update(|netmap| {
-            let mut open_to_lan = listener("lan", ListenerProtocol::Socks5, "0.0.0.0:0");
-            open_to_lan.default_action = Some(DefaultAction::Local);
-            netmap.me.listeners.push(open_to_lan);
-            netmap.credentials.push(credential("gateway", "token", None));
-        })
-        .await;
-    let lan = world.laptop.listener("lan").await;
-    let auth = Some(("", "token"));
+    world.laptop.update(|netmap| netmap.me.exit = Some(ExitRole::default())).await;
+    // 静态的 netmap 可以把出口写成本节点自己（controller 不收）：本节点不在自己的对端里，按"没有这个出口"拒绝。
+    world.laptop.update(|netmap| netmap.me.proxies.push(proxy(5, ListenerProtocol::Socks5, "127.0.0.1:0", LAPTOP))).await;
+    let mirror = world.laptop.proxy(5).await;
 
-    // laptop 不是出口：不替别人从本机出去。
-    assert_eq!(socks5(lan, auth, PUBLIC_IP, 443).await.failed(), 2);
-    assert!(world.laptop.system.connected().is_empty());
+    assert_eq!(socks5(mirror, None, PUBLIC_IP, 443).await.failed(), 2);
+    assert_eq!(socks5(mirror, None, "127.0.0.1", echo.port()).await.failed(), 2);
+    assert!(world.laptop.system.connected().is_empty(), "没有从本机出去");
+    assert_eq!((world.gw.exit.stats().total, world.nas.exit.stats().total), (0, 0));
+}
 
-    // 启用出口之后可以，但套用出口的策略：端口白名单（这里写了只放行 80 和 443），内网地址不行。
-    world.laptop.update(|netmap| netmap.me.exit = Some(ExitRole { ports: Some(vec![80, 443]), ..ExitRole::default() })).await;
-    let mut stream = socks5(lan, auth, PUBLIC_IP, 443).await.connected();
-    assert_echo(&mut stream).await;
-    assert_eq!(socks5(lan, auth, PUBLIC_IP, 8443).await.failed(), 2);
-    assert_eq!(socks5(lan, auth, "127.0.0.1", 443).await.failed(), 2);
-    assert_eq!(socks5(lan, auth, "192.168.77.10", 443).await.failed(), 2);
-    assert_eq!(world.laptop.system.connected(), [public(443).parse().unwrap()]);
+i3t_lane::on_both_transports! {
+    async fn a_proxy_whose_exit_is_no_exit_refuses_on_the_spot_but_still_reaches_the_mesh() {
+        let world = World::new().await;
+        world.nas.system.redirect("192.168.77.5:8080", echo_server().await);
 
-    // 同一台机器上的回环监听器不受这些限制。
-    let mut stream = socks5(world.socks().await, None, "127.0.0.1", echo.port()).await.connected();
-    assert_echo(&mut stream).await;
+        // nas 不是出口：入口从 netmap 里就知道，客户端马上拿到拒绝，不去打扰 nas。
+        assert_eq!(socks5(world.socks_via_nas().await, None, PUBLIC_IP, 443).await.failed(), 2);
+        assert_eq!(http_connect(world.http_via_nas().await, &public(443), None).await.0, 403);
+        assert_eq!(world.nas.exit.stats().total, 0);
+
+        // 组网地址仍然是访问那个节点的服务，不经出口。
+        let (status, mut stream) = http_connect(world.http_via_nas().await, "10.66.0.3:8080", None).await;
+        assert_eq!(status, 200);
+        assert_echo(&mut stream).await;
+        assert_eq!(world.nas.exit.stats().total, 1);
+        assert!(world.laptop.system.connected().is_empty());
+    }
 }
 
 i3t_lane::on_both_transports! {
     async fn a_lan_target_needs_the_lan_switch_and_a_directly_attached_subnet() {
         let world = World::new().await;
         world.gw.system.redirect("192.168.77.10:8080", echo_server().await);
-        let lan_target = || async { socks5(world.socks().await, Some(("gw", "")), "192.168.77.10", 8080).await };
+        let lan_target = || async { socks5(world.socks().await, None, "192.168.77.10", 8080).await };
 
         // 开关关着，入口从 netmap 里就知道：直接拒绝，不去打扰出口。
         assert_eq!(lan_target().await.failed(), 2);
@@ -240,13 +176,13 @@ i3t_lane::on_both_transports! {
         world.gw.update(|netmap| netmap.me.exit = Some(ExitRole { lan: true, ..ExitRole::default() })).await;
         let mut stream = lan_target().await.connected();
         assert_echo(&mut stream).await;
-        let (status, mut stream) = http_connect(world.http().await, "192.168.77.10:8080", Some(("gw", ""))).await;
+        let (status, mut stream) = http_connect(world.http().await, "192.168.77.10:8080", None).await;
         assert_eq!(status, 200);
         assert_echo(&mut stream).await;
 
         // 路由器后面的别的网段、回环、覆盖网、元数据地址都不算局域网。
         for host in ["192.168.99.10", "10.0.0.1", "169.254.169.254", "fd00::10"] {
-            assert_eq!(socks5(world.socks().await, Some(("gw", "")), host, 8080).await.failed(), 2, "{host}");
+            assert_eq!(socks5(world.socks().await, None, host, 8080).await.failed(), 2, "{host}");
         }
         assert_eq!(world.gw.system.connected(), ["192.168.77.10:8080".parse().unwrap(); 2]);
     }

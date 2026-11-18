@@ -1,6 +1,6 @@
 //! netmap：一个节点运行所需要的全部配置。
 //!
-//! controller 按最小权限为每个节点单独算一份：只有它能访问或者能访问它的对端，只有它用得上的凭据。
+//! controller 按最小权限为每个节点单独算一份：只有它能访问或者能访问它的对端，只有它自己的代理和端口转发。
 //! 节点不需要知道标签和访问规则，它拿到的是编译之后的结果（每个对端上的 [`Peer::inbound`] 和 [`Peer::outbound`]）。
 
 use std::fmt;
@@ -10,6 +10,7 @@ use std::str::FromStr;
 use i3t_proto::flow::Class;
 use i3t_proto::{NodeId, PublicKey};
 use ipnet::{IpNet, Ipv4Net};
+use ring::digest;
 use serde::{Deserialize, Serialize};
 
 /// 一个节点的完整配置。版本号每次变更加一，节点用它确认自己应用到了哪一版。
@@ -28,9 +29,6 @@ pub struct Netmap {
     /// 只有本节点启用为 relay 时才有：网络里全部节点的编号和公钥，用来认证中转会话。
     #[serde(default)]
     pub relay_clients: Vec<RelayClient>,
-    /// 本节点上要求凭据的监听器认哪些凭据。
-    #[serde(default)]
-    pub credentials: Vec<Credential>,
 }
 
 impl Netmap {
@@ -81,7 +79,7 @@ pub struct Network {
     pub max_relay_hops: u8,
     #[serde(default)]
     pub reach: Reach,
-    /// 网络的默认服务等级：用户名、监听器、端口转发、出口都没有指定等级时用它；没有值时是 `auto`。
+    /// 网络的默认服务等级：代理、端口转发、出口都没有指定等级时用它；没有值时是 `auto`。
     #[serde(default)]
     pub class: Option<Class>,
 }
@@ -146,8 +144,9 @@ pub struct LocalNode {
     /// 启用为出口时有值。没有值时本节点拒绝一切目标在本机之外的建流请求（下发给它的端口转发除外）。
     #[serde(default)]
     pub exit: Option<ExitRole>,
+    /// 本节点上的代理。比这一版旧的 netmap 里的 `listeners` 和 `credentials` 不再认：它们说的是去掉了的写法。
     #[serde(default)]
-    pub listeners: Vec<Listener>,
+    pub proxies: Vec<Proxy>,
     /// 本节点负责监听的端口转发。
     #[serde(default)]
     pub forwards: Vec<Forward>,
@@ -268,11 +267,11 @@ pub struct ExitRole {
     /// 没有值表示不限。可以短时间用完一分钟的额度，之后按每分钟这么多的速度恢复。
     #[serde(default)]
     pub connects_per_minute: Option<u32>,
-    /// 经这个出口的流的默认服务等级，排在用户名和监听器的设置之后、网络的默认值之前。
+    /// 经这个出口的流的默认服务等级，排在代理自己的设置之后、网络的默认值之前。
     #[serde(default)]
     pub class: Option<Class>,
     /// 经这个出口的流用不用乐观回复（不等出口的 REPLY 就告诉客户端连上了），盖过按目标种类的默认值；
-    /// 监听器自己设了的话以监听器的为准。没有值时按目标的种类：互联网目标用，局域网目标不用。
+    /// 代理自己设了的话以代理的为准。没有值时按目标的种类：互联网目标用，局域网目标不用。
     #[serde(default)]
     pub optimistic: Option<bool>,
 }
@@ -497,58 +496,162 @@ pub struct RelayClient {
     pub key: PublicKey,
 }
 
-/// 一个代理入口。
+/// 一个代理：在本节点的 `bind` 上监听，请求经出口节点 `exit` 出去。
+///
+/// 目标在组网里的（节点的虚拟 IP、带网络域名后缀的节点名）不经出口，直接去那个节点；
+/// 写成私有地址的目标是出口所在的局域网，要出口打开了局域网。出口不能是本节点自己。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Listener {
+pub struct Proxy {
+    /// controller 上的编号，节点上报这个代理的状态时按它对上。静态模式的 netmap 里自己编，不重复就行。
+    pub id: u32,
     pub name: String,
     pub bind: SocketAddr,
+    #[serde(default)]
     pub protocol: ListenerProtocol,
+    /// 请求经哪个节点出去。
+    pub exit: NodeId,
+    /// 用户名和密码的校验值。没有时不认证：只在回环地址上可以这样，绑在别的地址上又没有它的代理，节点一律拒绝。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<Verifier>,
     /// 来源白名单；空表示不限制。
     #[serde(default)]
     pub allow_from: Vec<IpNet>,
-    /// 要求调用者在密码字段里带凭据。绑定在非回环地址上的监听器必须要求。
-    #[serde(default)]
-    pub require_credential: bool,
-    /// 没有写用户名、目标又不是组网地址时怎么办。没有值时按绑定地址取默认：回环地址是就地出站，其他地址是拒绝。
-    #[serde(default)]
-    pub default_action: Option<DefaultAction>,
-    /// 固定出口：这个监听器上的流量都从这个节点出去，给不能设置代理用户名的应用用。
-    #[serde(default)]
-    pub fixed_exit: Option<NodeId>,
-    /// 这个监听器上的流的默认服务等级。用户名里写了等级时以用户名为准；没有值时看出口和网络的默认值。
+    /// 这个代理上的流的服务等级；没有值时看出口和网络的默认值。
     #[serde(default)]
     pub class: Option<Class>,
     /// 乐观回复（白皮书 §8.1）：`true` 时不等对端的应答就告诉客户端连上了，`false` 时一律等。
-    /// 没有值时按目标的种类取默认：互联网目标不等，组网目标（节点的服务、局域网）等。
+    /// 没有值时看出口的设置，出口也没有设时按目标的种类：互联网目标不等，组网目标（节点的服务、局域网）等。
     #[serde(default)]
     pub optimistic: Option<bool>,
 }
 
-impl Listener {
-    /// 这个监听器实际生效的默认动作。
-    #[must_use]
-    pub fn effective_default_action(&self) -> DefaultAction {
-        self.default_action.unwrap_or(if self.bind.ip().is_loopback() { DefaultAction::Local } else { DefaultAction::Reject })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// 一个监听端口说哪种代理协议。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ListenerProtocol {
+    /// 两种都说：看客户端发来的第一个字节，`0x05` 是 SOCKS5，别的是 HTTP。
+    #[default]
+    Mixed,
     Socks5,
     Http,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
-pub enum DefaultAction {
-    /// 就地出站：从本节点自己的网络出去。
-    Local,
-    Reject,
-    /// 固定走某个出口节点。
-    Exit {
-        node: NodeId,
-    },
+impl ListenerProtocol {
+    /// 在 netmap、管理接口和命令行里的写法。
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Mixed => "mixed",
+            Self::Socks5 => "socks5",
+            Self::Http => "http",
+        }
+    }
+}
+
+impl fmt::Display for ListenerProtocol {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ListenerProtocol {
+    type Err = UnknownListenerProtocol;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        [Self::Mixed, Self::Socks5, Self::Http]
+            .into_iter()
+            .find(|protocol| protocol.as_str() == s)
+            .ok_or_else(|| UnknownListenerProtocol(s.to_owned()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("不认识的代理协议 {0:?}：可以是 mixed、socks5、http")]
+pub struct UnknownListenerProtocol(pub String);
+
+/// 代理的用户名和密码的校验值：`SHA-256(盐 ‖ SHA-256(用户名) ‖ 密码)`。
+///
+/// 监听的节点只要核对，拿到的是它而不是密码：读到 netmap 的人拿它登录不了。盐每个代理一份，改密码时换，
+/// 两个代理用同一个密码看不出来。用户名先哈希成定长再接上密码，两段的分界不会有歧义。
+/// 密码是管理员写的，可能不长，所以校验值和 netmap 一样只该在节点和 controller 手里。
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Verifier {
+    pub salt: Hex<{ Verifier::SALT_LEN }>,
+    pub hash: Hex<{ Verifier::HASH_LEN }>,
+}
+
+impl Verifier {
+    pub const SALT_LEN: usize = 16;
+    pub const HASH_LEN: usize = 32;
+
+    /// 按 `salt` 算出 `username` 和 `password` 的校验值。
+    #[must_use]
+    pub fn derive(salt: [u8; Self::SALT_LEN], username: &[u8], password: &[u8]) -> Self {
+        let name = digest::digest(&digest::SHA256, username);
+        let mut context = digest::Context::new(&digest::SHA256);
+        context.update(&salt);
+        context.update(name.as_ref());
+        context.update(password);
+        let hash = context.finish().as_ref().try_into().expect("SHA-256 的输出是 32 字节");
+        Self { salt: Hex(salt), hash: Hex(hash) }
+    }
+
+    /// 客户端给的用户名和密码按同一个盐算出来的哈希。比较要由调用者做成常量时间的。
+    #[must_use]
+    pub fn hash_of(&self, username: &[u8], password: &[u8]) -> [u8; Self::HASH_LEN] {
+        Self::derive(self.salt.0, username, password).hash.0
+    }
+}
+
+/// 校验值不是密码，但打出来也没有用，日志里只留盐的开头。
+impl fmt::Debug for Verifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Verifier({:02x}{:02x}…)", self.salt.0[0], self.salt.0[1])
+    }
+}
+
+/// 定长的字节串，文本形式是小写十六进制。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Hex<const N: usize>(pub [u8; N]);
+
+impl<const N: usize> fmt::Display for Hex<N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("应该是 {0} 个十六进制字符")]
+pub struct InvalidHex(usize);
+
+impl<const N: usize> FromStr for Hex<N> {
+    type Err = InvalidHex;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let digits = s.as_bytes();
+        if digits.len() != 2 * N {
+            return Err(InvalidHex(2 * N));
+        }
+        let mut bytes = [0; N];
+        for (byte, pair) in bytes.iter_mut().zip(digits.chunks_exact(2)) {
+            let text = std::str::from_utf8(pair).map_err(|_| InvalidHex(2 * N))?;
+            *byte = u8::from_str_radix(text, 16).map_err(|_| InvalidHex(2 * N))?;
+        }
+        Ok(Self(bytes))
+    }
+}
+
+impl<const N: usize> Serialize for Hex<N> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de, const N: usize> Deserialize<'de> for Hex<N> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;
+        text.parse().map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -595,87 +698,6 @@ pub struct ForwardTarget {
 pub enum ProxyProtocol {
     V1,
     V2,
-}
-
-/// 一个接入凭据。入口只保存令牌的哈希。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Credential {
-    pub name: String,
-    pub token: TokenHash,
-    #[serde(default)]
-    pub max_concurrent: Option<u32>,
-    /// controller 上的编号。入口按它上报每个凭据的用量；旧版本的 controller 不给，读成 0。
-    #[serde(default)]
-    pub id: u32,
-    /// 这个凭据的流量上限已经用完：入口拒绝它的新连接，并断开它正在进行的连接。
-    /// 用量是 controller 汇总各个入口的上报算出来的，所以从用完到这里变成 `true` 有一个上报周期左右的滞后。
-    #[serde(default)]
-    pub exhausted: bool,
-}
-
-/// 凭据令牌的 SHA-256。文本形式是 64 个小写十六进制字符。
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TokenHash([u8; Self::LEN]);
-
-impl TokenHash {
-    pub const LEN: usize = 32;
-
-    #[must_use]
-    pub const fn from_bytes(bytes: [u8; Self::LEN]) -> Self {
-        Self(bytes)
-    }
-
-    #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; Self::LEN] {
-        &self.0
-    }
-}
-
-impl fmt::Display for TokenHash {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
-    }
-}
-
-/// 哈希不是秘密，但打出来也没有用，日志里只留开头。
-impl fmt::Debug for TokenHash {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "TokenHash({:02x}{:02x}{:02x}{:02x}…)", self.0[0], self.0[1], self.0[2], self.0[3])
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("凭据的哈希应该是 64 个十六进制字符")]
-pub struct InvalidTokenHash;
-
-impl FromStr for TokenHash {
-    type Err = InvalidTokenHash;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let digits = s.as_bytes();
-        if digits.len() != 2 * Self::LEN {
-            return Err(InvalidTokenHash);
-        }
-        let mut bytes = [0; Self::LEN];
-        for (byte, pair) in bytes.iter_mut().zip(digits.chunks_exact(2)) {
-            let text = std::str::from_utf8(pair).map_err(|_| InvalidTokenHash)?;
-            *byte = u8::from_str_radix(text, 16).map_err(|_| InvalidTokenHash)?;
-        }
-        Ok(Self(bytes))
-    }
-}
-
-impl Serialize for TokenHash {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_str(self)
-    }
-}
-
-impl<'de> Deserialize<'de> for TokenHash {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let text = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;
-        text.parse().map_err(serde::de::Error::custom)
-    }
 }
 
 /// 一个地址是不是落在网络的虚拟地址段里。
@@ -751,7 +773,7 @@ mod tests {
         assert_eq!(netmap.network.max_relay_hops, 2);
         assert_eq!(netmap.network.reach, Reach::Any);
         assert!(netmap.me.relay.is_none() && netmap.me.exit.is_none());
-        assert!(netmap.relays.is_empty() && netmap.credentials.is_empty());
+        assert!(netmap.relays.is_empty() && netmap.me.proxies.is_empty());
         assert!(netmap.peers[0].endpoints.is_empty());
     }
 
@@ -827,44 +849,58 @@ mod tests {
     }
 
     #[test]
-    fn listener_default_action_follows_the_bind_address() {
-        let listener = |bind: &str| Listener {
-            name: "l".into(),
-            bind: bind.parse().unwrap(),
-            protocol: ListenerProtocol::Socks5,
-            allow_from: Vec::new(),
-            require_credential: false,
-            default_action: None,
-            fixed_exit: None,
-            class: None,
-            optimistic: None,
-        };
-        assert_eq!(listener("127.0.0.1:1080").effective_default_action(), DefaultAction::Local);
-        assert_eq!(listener("192.168.1.5:1080").effective_default_action(), DefaultAction::Reject);
-        assert_eq!(listener("0.0.0.0:1080").effective_default_action(), DefaultAction::Reject);
+    fn a_proxy_defaults_to_mixed_without_authentication_and_an_older_netmap_with_listeners_still_reads() {
+        let proxy: Proxy =
+            serde_json::from_value(serde_json::json!({ "id": 3, "name": "p", "bind": "127.0.0.1:1080", "exit": 2 })).unwrap();
+        assert_eq!((proxy.protocol, proxy.auth, proxy.allow_from.len()), (ListenerProtocol::Mixed, None, 0));
+        assert!(serde_json::to_value(&proxy).unwrap().get("auth").is_none(), "没有认证时不写");
+        let mut old = serde_json::to_value(minimal()).unwrap();
+        old["me"]["listeners"] = serde_json::json!([{ "name": "l", "bind": "127.0.0.1:1080", "protocol": "socks5" }]);
+        old["credentials"] = serde_json::json!([{ "name": "c", "token": "0f".repeat(32) }]);
+        assert_eq!(serde_json::from_value::<Netmap>(old).unwrap(), minimal(), "旧的 controller 下发的监听器和凭据不再认");
+        for protocol in [ListenerProtocol::Mixed, ListenerProtocol::Socks5, ListenerProtocol::Http] {
+            assert_eq!(serde_json::to_value(protocol).unwrap(), protocol.as_str());
+            assert_eq!(protocol.as_str().parse::<ListenerProtocol>(), Ok(protocol));
+        }
+        assert!("socks4".parse::<ListenerProtocol>().unwrap_err().to_string().contains("mixed"));
     }
 
     #[test]
-    fn token_hash_text_form_round_trips() {
-        let hash = TokenHash::from_bytes([0x0f; 32]);
+    fn a_verifier_admits_only_the_same_user_name_and_password_and_differs_per_salt() {
+        let verifier = Verifier::derive([7; 16], b"alice", b"s3cret");
+        assert_eq!(verifier.hash_of(b"alice", b"s3cret"), verifier.hash.0);
+        for (username, password) in [(&b"alice"[..], &b"S3cret"[..]), (b"alic", b"es3cret"), (b"alice", b""), (b"", b"s3cret")] {
+            assert_ne!(verifier.hash_of(username, password), verifier.hash.0, "{username:?} {password:?}");
+        }
+        assert_ne!(Verifier::derive([8; 16], b"alice", b"s3cret").hash, verifier.hash, "盐不同，同一个密码的校验值也不同");
+        let json = serde_json::to_value(verifier).unwrap();
+        assert_eq!(json["salt"], "07".repeat(16));
+        assert_eq!(serde_json::from_value::<Verifier>(json).unwrap(), verifier);
+        assert!(!format!("{verifier:?}").contains(&verifier.hash.to_string()), "Debug 不打出哈希");
+        // 用户名先哈希，再和盐、密码接起来：和测试脚本里的写法一样（tests/e2e/harness.py）。
+        let name = digest::digest(&digest::SHA256, b"alice");
+        let whole = digest::digest(&digest::SHA256, &[&[7u8; 16][..], name.as_ref(), b"s3cret"].concat());
+        assert_eq!(whole.as_ref(), verifier.hash.0);
+    }
+
+    #[test]
+    fn hex_text_form_round_trips() {
+        let hash = Hex([0x0f; 32]);
         let text = hash.to_string();
         assert_eq!(text, "0f".repeat(32));
-        assert_eq!(text.parse::<TokenHash>(), Ok(hash));
-        assert_eq!("0f".parse::<TokenHash>(), Err(InvalidTokenHash));
-        assert_eq!("zz".repeat(32).parse::<TokenHash>(), Err(InvalidTokenHash));
+        assert_eq!(text.parse::<Hex<32>>(), Ok(hash));
+        assert_eq!("0f".parse::<Hex<32>>(), Err(InvalidHex(64)));
+        assert_eq!("zz".repeat(32).parse::<Hex<32>>(), Err(InvalidHex(64)));
     }
 
     #[test]
-    fn limits_classes_and_credential_state_default_when_an_older_controller_omits_them() {
+    fn limits_and_classes_default_when_an_older_controller_omits_them() {
         let exit: ExitRole = serde_json::from_value(serde_json::json!({ "ports": [443], "lan": true })).unwrap();
         assert_eq!(
             (exit.quota_bytes, exit.quota_reset_day, exit.family, exit.connects_per_minute, exit.class),
             (None, 1, IpFamily::Any, None, None)
         );
         assert_eq!(exit, ExitRole { ports: Some(vec![443]), lan: true, ..ExitRole::default() });
-        let credential: Credential =
-            serde_json::from_value(serde_json::json!({ "name": "phone", "token": "0f".repeat(32), "max_concurrent": 2 })).unwrap();
-        assert_eq!((credential.id, credential.exhausted), (0, false));
         let forward: Forward =
             serde_json::from_value(serde_json::json!({ "id": 4, "protocol": "tcp", "bind": "127.0.0.1:0", "target": 2 })).unwrap();
         assert_eq!((forward.class, forward.bind.port()), (None, 0));

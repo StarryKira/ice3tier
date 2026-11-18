@@ -67,7 +67,7 @@ class Run:
 
 def one_blackout(entry: Node, exit_node: Node, web: Host, a: Host, b: Host, blackout: int, on_path) -> Run:
     """在 `a` 和 `b` 之间断开 `blackout` 秒，同时经出口收着 ticker 的消息。`on_path()` 在断开之前问一次：流走的是不是要测的那一段。"""
-    client = subprocess.Popen(entry.host.cmd(sys.executable, "-c", TICKER_CLIENT, exit_node.virtual_ip, web.ip, "80",
+    client = subprocess.Popen(entry.host.cmd(sys.executable, "-c", TICKER_CLIENT, str(entry.entry(exit_node).port), web.ip, "80",
                                              str(BEFORE + blackout + AFTER)), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     time.sleep(BEFORE)
     path_ok = on_path()
@@ -118,7 +118,8 @@ def lane(lab: Lab, work: Path, t: Checks) -> None:
     home = lab.nat("home", NatKind.CONE)
     exit_node = Node(home.host("exit"), work, 2, declare=("exit",))
     entry_netmap = entry.netmap(me={"relay": {}}, relays=[entry.as_relay()], relay_clients=[entry, exit_node],
-                                peers=[lane_peer(exit_node, lane="always", endpoints=False, attached=[(entry, 5)], exit=True)])
+                                peers=[lane_peer(exit_node, lane="always", endpoints=False, attached=[(entry, 5)], exit=True)],
+                                proxies=[entry.proxy_to(exit_node)])
     exit_netmap = exit_node.netmap(me={"exit": {}}, relays=[entry.as_relay()], peers=[lane_peer(entry, lane="always")])
     blackout_between(entry.host, home, BASE, False)
     results = {}
@@ -156,7 +157,8 @@ def relay_leg(lab: Lab, work: Path, t: Checks) -> None:
     exit_node = Node(lab.host("exit"), work, 2, declare=("exit",))
     relays = [relay.as_relay()]
     relay_netmap = relay.netmap(me={"relay": {}}, relays=relays, relay_clients=[entry, exit_node, relay])
-    entry_netmap = entry.netmap(relays=relays, peers=[exit_node.as_peer(exit=True, endpoints=False, attached=[(relay, 1)])])
+    entry_netmap = entry.netmap(relays=relays, peers=[exit_node.as_peer(exit=True, endpoints=False, attached=[(relay, 1)])],
+                                proxies=[entry.proxy_to(exit_node)])
     exit_netmap = exit_node.netmap(me={"exit": {}}, relays=relays, peers=[entry.as_peer(endpoints=False, attached=[(relay, 1)])])
     blackout_between(entry_host, relay.host, BASE, False)
     results = {}

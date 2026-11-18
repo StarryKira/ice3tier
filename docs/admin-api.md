@@ -4,7 +4,35 @@
 
 对应的 Rust 类型在 `crates/i3t-model/src/admin.rs`，实现在 `crates/i3t-controller/src/admin.rs`。文档和代码不一致时以代码为准，并请修正文档。
 
-> **最新一次改动**（一串中继；relay 之间的骨干可以走 TCP；对端不多的节点不等流量就试直连）。这一次的清单：
+> **最新一次改动**（代理取代监听器和接入凭据）。代理是一样单独的东西："在节点 A 上监听，经出口节点 B（另一个启用了出口的节点）出去，
+> 认一对用户名和密码"（第 10 节）。旧的写法不再收，也没有别名。这一次的清单：
+>
+> - 新接口：`GET`、`POST /networks/{network}/proxies`，`GET`、`PATCH`、`DELETE /networks/{network}/proxies/{id}`（第 10 节）。
+>   新的结构 `Proxy`、`ProxyStatus`、`CreateProxy`、`UpdateProxy`。
+> - 去掉的接口：`/networks/{network}/credentials` 和 `/networks/{network}/listeners` 下面的全部，连同结构 `Credential`、`Listener`
+>   （和它的 `require_credential`、`default_action`、`fixed_exit`）。用户名不再选出口，也不再带 `+c-` 的 QoS 标记；密码不再是凭据的令牌；
+>   没有了"就地出站"（从监听的节点自己出去）。凭据的并发上限、流量上限、吊销和用量记录跟着去掉（第 9 节）。
+> - 新的错误码（第 2 节）：`409 exit_not_enabled`（出口节点没有启用出口）、`400 exit_is_node`（出口就是监听的节点）、`409 access_denied`
+>   （访问规则不让监听的节点访问出口），这三个的 `field` 是 `exit`；`400 credentials_incomplete`（用户名和密码只写了一个，`field` 是没写的那一个）。
+>   `invalid_request` 的 `what`：`required` 现在是"没有出口的代理要启用"（`field` 是 `exit`），去掉了 `revoked`；`not_found`、`conflict`
+>   的 `what` 里 `listener`、`credential` 换成 `proxy`。
+> - 改了写法的应答：总览 `Overview` 的 `listeners`、`credentials` 换成 `proxies`（第 4 节）；出口 `ExitView` 多了 `proxies`（经它出去的代理，
+>   第 17 节）；`GET …/nodes/{node}/listeners` 的 `listeners[].id` 是代理的编号，`protocol` 可以是 `"mixed"`（第 5 节）；操作记录的 `refs`
+>   种类 `listener` 换成 `proxy`，新的 `action` `proxy.create`、`proxy.update`、`proxy.delete`，不再记 `credential.*`、`listener.*`（第 3 节）。
+> - QoS 的先后（第 4 节）：代理（或端口转发）的 `class`，经出口出去的流再看出口的 `class`，最后是网络的。乐观回复：代理的 `optimistic`、
+>   出口的、目标的种类（第 10 节）。
+> - 行为上的变化：节点不再默认在 `127.0.0.1:1080`、`1081` 上开 SOCKS5 和 HTTP 入口。节点本机的配置文件里写了 `[proxy]` 的 `socks5`、`http`
+>   才开，并且只通到组网里的节点（虚拟 IP、节点的名字），不经出口、不从本机出去。用以前的配置模板生成的配置文件里写着这两个地址，
+>   那样的节点照旧开着，只是变成只通组网。这两个入口照旧出现在 `GET …/nodes/{node}/listeners` 里（`builtin` 是 `true`）。
+> - 升级时数据库原地迁移（第 10 节的"升级"）：每个监听器成为同一个编号的代理；要过凭据的（不在回环地址上的一定要过）得到一对生成的用户名和密码；
+>   有出口的（固定出口，或者默认动作是走某个出口）出口就是它，没有的停用、状态是 `exit_missing`；凭据和它们的用量记录删掉。
+> - 节点协议没有升版：netmap 里的代理在 `me.proxies`，旧的节点不认它，它上面的代理一直是 `pending`，旧的节点照旧按它自己的默认开着 1080、1081；
+>   新的节点不理会旧的 controller 下发的监听器和凭据，上报里的 `proxies` 旧的 controller 忽略。入口和出口之间的流没有变，新旧节点做入口、
+>   做出口可以混着用。
+>
+> 别的接口的路径、请求体和应答里原有的字段都没有变。
+>
+> **上一次改动**（一串中继；relay 之间的骨干可以走 TCP；对端不多的节点不等流量就试直连）。这一次的清单：
 >
 > - 新的取值：`RouteCause` 多了 `no_shared_relay`（字段 `hint`，可以是 `null`）：默认模式下没有一个 relay 两端都用得上，这一对经一串 relay
 >   （第 15 节）。主动测试的路由决定 `Choice.reason` 多了 `no_shared_relay`（第 19 节）。`RouteHint` 的 `shortcut` 也说"原来经一串 relay、现在一个就够了"。
@@ -17,7 +45,7 @@
 >
 > 别的接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **上一次改动**（按节点关掉自动更新；发布可以说明它修了安全问题）。这一次的清单：
+> **再上一次改动**（按节点关掉自动更新；发布可以说明它修了安全问题）。这一次的清单：
 >
 > - 新的字段：`Node.auto_update`（`true`、`false`，新节点和升级前已有的节点都是 `true`），节点自己的自动更新开关。全局的
 >   `UpdateOverview.auto_update` 和它都开着，controller 才自动让这个节点更新。用 `PATCH …/nodes/{node}` 的 `{ "auto_update": false }`
@@ -33,7 +61,7 @@
 >
 > 别的接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **再上一次改动**（端口转发的目标由管理员打开；QoS；路由表上的直连状态和另一种选路模式）。这一次的清单：
+> **更早的改动**（端口转发的目标由管理员打开；QoS；路由表上的直连状态和另一种选路模式）。这一次的清单：
 >
 > - 改了规则：端口转发的目标不再由节点声明，只看管理员的开关。新的字段 `Node.forward_target`（`true`、`false`，新节点是 `false`），
 >   用 `PATCH …/nodes/{node}` 的 `{ "forward_target": true }` 打开（第 5 节）。谁控制了 controller，谁就能经转发碰到目标机器能碰到的一切。
@@ -286,7 +314,8 @@
 
 - **网络和节点的名字**：字母、数字、连字符，不能以连字符开头或结尾，最长 63 个字符，不能全是数字。大写会被转成小写。节点名在一个网络里唯一，网络名在整个 controller 里唯一。
 - 「新增」**分组的名字**：1 到 32 个字符，字母（任何文字的都行）、数字、连字符、下划线，首尾的空白会被去掉。保留写的大小写；在一个网络里不分大小写唯一，内置分组占着 `All`。见第 18 节。
-- **规则、凭据、监听器、端口转发的名字**：给人看的一小段文字，最长 64 个字符，不能有控制字符，首尾的空白会被去掉。凭据和监听器的名字不能是空的。
+- **规则、代理、端口转发的名字**：给人看的一小段文字，最长 64 个字符，不能有控制字符，首尾的空白会被去掉。代理的名字在一个节点上唯一，
+  省略（或者是空的）时 controller 取 `<节点名>-<端口>`，这个节点上已经有了就再接 `-2`、`-3`……
 
 几个到处用到的枚举：
 
@@ -299,7 +328,8 @@
 | | `"relay_only"` | 不建立直连，不向对端暴露公网地址 |
 | `direction` | `"both"` | `src <-> dst`，两边可以互相访问 |
 | | `"one_way"` | `src -> dst`，只有 `src` 一侧能发起 |
-| `protocol`（监听器） | `"socks5"`、`"http"` | |
+| `protocol`（代理） | `"mixed"` | 同一个端口上 SOCKS5 和 HTTP 代理都说：按客户端发来的第一个字节分（`0x05` 是 SOCKS5，别的是 HTTP）。默认 |
+| | `"socks5"`、`"http"` | 只说一种 |
 | `protocol`（端口转发） | `"tcp"`、`"udp"` | |
 
 `NodeRef` 是指代一个节点时附带的最少信息，很多应答里用到：
@@ -310,7 +340,7 @@
 
 ### 1.4 网络是硬隔离
 
-除了 `/status`、`/log` 和 `/networks`，所有接口都在某一个网络下面（`/networks/{network}/…`，`{network}` 是网络编号）。路径里指的节点、分组、规则、凭据、监听器、端口转发、令牌必须属于这个网络，否则是 `404 not_found`，和不存在一样。请求体里引用的节点（固定出口、端口转发的两端、继任的对象等）和分组也必须在同一个网络里。
+除了 `/status`、`/log` 和 `/networks`，所有接口都在某一个网络下面（`/networks/{network}/…`，`{network}` 是网络编号）。路径里指的节点、分组、规则、代理、端口转发、令牌必须属于这个网络，否则是 `404 not_found`，和不存在一样。请求体里引用的节点（代理的节点和出口、端口转发的两端、继任的对象等）和分组也必须在同一个网络里。
 
 ## 2. 错误
 
@@ -338,10 +368,10 @@
 
 | `code` | `what` |
 |---|---|
-| `not_found` | 找不到的东西：`network`、`node`、`group`、`token`、`rule`、`credential`、`listener`、`forward`、`pair`（节点对设置）、`paused_version`、`exit`、`test`、`matrix`；路径不是一个接口时是 `endpoint`。请求体里引用的东西找不到时 `field` 是引用它的那一项，比如 `fixed_exit`、`pinned_relays`、`successor_of`、`via`、`src`、`dst`、`groups[1]`、`add[0]`、`remove[2]` |
-| `invalid_request` | 哪里不对：`too_small`（地址段太小）、`zero`（不能是 0）、`zero_port`（端口不能是 0）、`too_many`、`out_of_range`、`empty`、`too_long`、`malformed`（写法不对）、`all_digits`（名字全是数字）、`same_node`（两个节点是同一个）、`builtin`（内置分组 `All` 不能改名、删除、增减成员）、`required`（非回环地址的监听器必须要求凭据；「新增」节点、relay、出口的时间序列要写 `node`）、`missing`（`a`、`b` 只写了一个）、`not_relay`（不是启用了的 relay）、`not_connectable`（不是能连上的地址）、`not_allowed`（立即更新的时机不能是 `idle`；「新增」网络的时间序列不能写 `node`）、`duplicate`（路径里 relay 重复；同一个节点既要加入分组又要移出）、`with_successor`（继任的令牌不能预设虚拟 IP）、`no_default`（默认的地址段都被占了）、`needs_quality`（测吞吐要同时测质量）、`revoked`（凭据已经吊销）、「新增」`tcp_only`（只有 TCP 的端口转发能设 PROXY protocol）；请求本身读不出来时是 `content_type`、`syntax`、`data`（JSON 里某个字段不对，`field` 是它）、`body`、`query`、`path`；请求方法不对（405）是 `method` |
+| `not_found` | 找不到的东西：`network`、`node`、`group`、`token`、`rule`、`proxy`、`forward`、`pair`（节点对设置）、`paused_version`、`exit`、`test`、`matrix`；路径不是一个接口时是 `endpoint`。请求体里引用的东西找不到时 `field` 是引用它的那一项，比如代理的 `node`、`exit`，`pinned_relays`、`successor_of`、`via`、`src`、`dst`、`groups[1]`、`add[0]`、`remove[2]` |
+| `invalid_request` | 哪里不对：`too_small`（地址段太小）、`zero`（不能是 0）、`zero_port`（端口不能是 0）、`too_many`、`out_of_range`、`empty`、`too_long`、`malformed`（写法不对）、`all_digits`（名字全是数字）、`same_node`（两个节点是同一个）、`builtin`（内置分组 `All` 不能改名、删除、增减成员）、`required`（「新增」没有出口的代理要启用，`field` 是 `exit`；节点、relay、出口的时间序列要写 `node`）、`missing`（`a`、`b` 只写了一个）、`not_relay`（不是启用了的 relay）、`not_connectable`（不是能连上的地址）、`not_allowed`（立即更新的时机不能是 `idle`；「新增」网络的时间序列不能写 `node`）、`duplicate`（路径里 relay 重复；同一个节点既要加入分组又要移出）、`with_successor`（继任的令牌不能预设虚拟 IP）、`no_default`（默认的地址段都被占了）、`needs_quality`（测吞吐要同时测质量）、「新增」`tcp_only`（只有 TCP 的端口转发能设 PROXY protocol）；请求本身读不出来时是 `content_type`、`syntax`、`data`（JSON 里某个字段不对，`field` 是它）、`body`、`query`、`path`；请求方法不对（405）是 `method` |
 | `name_taken` | 「新增」分组的名字被占用时是 `group`；别的名字是 `null` |
-| `conflict` | 挡着的东西：`listener`（这个节点上已经有监听器在这个地址上，`field` 是 `bind`）、`forward`（同上，端口转发）、`token`（这个虚拟 IP 已经预设在另一个注册令牌上，`field` 是 `virtual_ip`） |
+| `conflict` | 挡着的东西：`proxy`（这个节点上已经有代理在这个地址上，`field` 是 `bind`）、`forward`（同上，端口转发）、`token`（这个虚拟 IP 已经预设在另一个注册令牌上，`field` 是 `virtual_ip`） |
 | `not_declared` | 没有声明的能力：`relay`、`exit`。要在节点上执行的命令是 `i3t set can-<这个值> on`。「去掉」`forward`：端口转发的目标不再由节点声明，见 `forward_target_off` |
 | `cannot_self_update` | `container`、`package_manager`、`read_only_dir`（节点说的原因，见第 14 节的 `self_update.blocker`）、`too_old`（版本太旧，不懂更新）、`unknown`（节点说不能、没有说原因） |
 | `no_update` | `no_release`、`controller_too_old`、`unreadable_version`、`up_to_date`、`no_package`，和第 14 节 `SkipCause` 的代码一样 |
@@ -356,7 +386,7 @@
 | 400 | `invalid_request` | 请求本身不合法：JSON 解析不了、缺字段、路径里的编号不是数字、名字的写法不对、地址不合法、数值超出范围、要改内置分组 `All` |
 | 405 | `invalid_request` | 这个路径不支持这种请求方法 |
 | 400 | `address_out_of_range` | 虚拟 IP 不在网络的地址段里，或者是网络地址、广播地址 |
-| 409 | `name_taken` | 名字已经被占用（网络名；同一网络里的节点名、凭据名、分组名；同一节点上的监听器名） |
+| 409 | `name_taken` | 名字已经被占用（网络名；同一网络里的节点名、分组名；同一节点上的代理名，`field` 是 `name`） |
 | 409 | `name_cooling_down` | 名字属于一个刚删除的节点，还在冷却期（90 天） |
 | 409 | `address_taken` | 虚拟 IP 已经分给了另一个节点 |
 | 409 | `address_cooling_down` | 虚拟 IP 属于一个刚删除的节点，还在冷却期（90 天） |
@@ -367,7 +397,11 @@
 | 409 | `not_declared` | 节点没有在本地声明可以承担这项能力（relay、出口）。`message` 里写着要在节点上执行的命令 |
 | 409 | `forward_target_off` | 「新增」要启用的端口转发的目标节点没有打开 `forward_target`（第 5 节）。`what` 是 `null`，`field` 是 `target_node`；`message` 里写着打开它的命令。代替了以前端口转发的 `not_declared` |
 | 409 | `predecessor_online` | 要被继任的节点还在线 |
-| 409 | `conflict` | 和已有的配置冲突：同一个监听地址上已经有监听器或同协议的转发；虚拟 IP 已经预设在另一个令牌上 |
+| 409 | `conflict` | 和已有的配置冲突：同一个节点的同一个地址上已经有代理，或者同协议的转发；虚拟 IP 已经预设在另一个令牌上 |
+| 409 | `exit_not_enabled` | 「新增」代理的出口节点没有启用出口（`field` 是 `exit`）。只在会让代理生效的那一下查：新建、启用、换出口、换监听的节点 |
+| 400 | `exit_is_node` | 「新增」代理的出口就是监听的节点自己（`field` 是 `exit`）。不支持从监听的节点自己出去 |
+| 409 | `access_denied` | 「新增」访问规则不让代理的监听节点访问它的出口节点（`field` 是 `exit`）。查的时机同 `exit_not_enabled` |
+| 400 | `credentials_incomplete` | 「新增」代理的用户名和密码只写了一个（`field` 是没写的那一个：`username` 或 `password`） |
 | 409 | `node_offline` | 「新增」要让它立即更新的节点不在线 |
 | 409 | `cannot_self_update` | 「新增」节点不能自己更新：在容器里、是包管理器装的、程序所在的目录不可写，或者它的版本太旧不懂更新。`message` 里写着原因 |
 | 409 | `no_update` | 「新增」没有可以让这个节点更新到的版本：还没有查到发布、它已经是最新的、发布里没有它的平台的包，或者 controller 自己太旧。`message` 里写着是哪一种 |
@@ -416,8 +450,8 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `limit` | 最多返回多少条，默认 100，上限 1000 |
 | `before` | 「新增」只要编号比它小的。翻页：下一页写上一页最后一条的 `id` |
 | `network` | 「新增」只要这个网络的（网络编号） |
-| `action` | 「新增」只要这种操作，或者以它加一个点开头的操作：`node` 包括 `node.update`、`node.relay.enable` 等，`credential.create` 只是它自己 |
-| `ref` | 「新增」只要提到这样东西的，写成 `<种类>:<编号>`，例如 `node:3`、`credential:1`。种类见下面的 `refs`。写法不对是 `400 invalid_request` |
+| `action` | 「新增」只要这种操作，或者以它加一个点开头的操作：`node` 包括 `node.update`、`node.relay.enable` 等，`proxy.create` 只是它自己 |
+| `ref` | 「新增」只要提到这样东西的，写成 `<种类>:<编号>`，例如 `node:3`、`proxy:1`。种类见下面的 `refs`。写法不对是 `400 invalid_request` |
 
 几个条件同时写时要都满足。
 
@@ -446,10 +480,10 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `network` | 属于哪个网络；和网络无关的操作是 `null` |
 | `action` | 做了什么，见下 |
 | `detail` | 给人看的说明 |
-| `refs` | 「新增」这条记录说的是哪些东西，界面可以据此做成链接。每一项是 `{ "kind": 种类, "id": 编号 }`，种类是 `"network"`、`"node"`、`"group"`、`"token"`、`"rule"`、`"credential"`、`"listener"`、`"forward"`（以后可能增加，不认识的种类请忽略）。东西后来被删掉了，编号还在。这个字段出现之前的记录是 `[]` |
+| `refs` | 「新增」这条记录说的是哪些东西，界面可以据此做成链接。每一项是 `{ "kind": 种类, "id": 编号 }`，种类是 `"network"`、`"node"`、`"group"`、`"token"`、`"rule"`、「新增」`"proxy"`、`"forward"`（以后可能增加，不认识的种类请忽略）。东西后来被删掉了，编号还在。这个字段出现之前的记录是 `[]`。「新增」代理出现之前的记录里的 `"listener"` 在升级时改成了 `"proxy"`（监听器成为同一个编号的代理）；`"credential"` 照旧留着，现在是不认识的种类 |
 | `params` | 「新增」按名字给出的参数，只用 `action` 和它们就能把这条记录写成一句话：东西的编号挨着它当时的名字（`node` 和 `node_name`）。每种操作有哪些参数见下表。这个字段出现之前的记录是 `{}`，那时只能显示 `detail` |
 
-`action` 的取值：`admin.token`、`network.create`、`network.update`、`network.delete`、`node.enroll`、`node.update`、`node.delete`、`node.succeed`、`node.relay.enable`、`node.relay.disable`、`node.relay.withdrawn`、`node.exit.enable`、`node.exit.disable`、`node.exit.withdrawn`、`node.forward.withdrawn`、`token.create`、`token.delete`、`rule.create`、`rule.update`、`rule.delete`、`credential.create`、`credential.delete`、`listener.create`、`listener.update`、`listener.delete`、`forward.create`、`forward.update`、`forward.delete`、`pair.set`、`pair.delete`，以及「新增」`update.settings`、`update.release`（发布源上有了新的正式版）、`update.pause`（节点更新失败，版本被暂停；它记在那个节点所在的网络上）、`update.resume`、`update.force`（记在节点所在的网络上）、`update.force_all`，以及「新增」`credential.update`（改上限、清零用量）、`credential.revoke`（吊销）、`credential.exhausted`（凭据的流量上限用完了，controller 自己记的），以及「新增」`update.failure`（节点说某个版本在它那里不能用，但 controller 没有让它装过这个版本，所以不暂停；记在那个节点所在的网络上），以及「新增」`test.start`（发起了一个主动测试，`refs` 是两个节点）、`test.cancel`、`test.matrix`（开始一次全网矩阵，`refs` 是网络）、`test.matrix.cancel`，以及「新增」`group.create`、`group.rename`、`group.delete`、`group.members`（分组的成员变了，第 18 节）。`credential.delete` 现在是彻底删掉一个已经吊销的凭据。带 `withdrawn` 的是节点撤回了本地声明、controller 随之关闭能力时记的；「去掉」`node.forward.withdrawn` 不再记（端口转发的目标不再由节点声明，见第 5 节），以前记下的照旧在。最多保留最近的一万条。
+`action` 的取值：`admin.token`、`network.create`、`network.update`、`network.delete`、`node.enroll`、`node.update`、`node.delete`、`node.succeed`、`node.relay.enable`、`node.relay.disable`、`node.relay.withdrawn`、`node.exit.enable`、`node.exit.disable`、`node.exit.withdrawn`、`node.forward.withdrawn`、`token.create`、`token.delete`、`rule.create`、`rule.update`、`rule.delete`、「新增」`proxy.create`、`proxy.update`、`proxy.delete`、`forward.create`、`forward.update`、`forward.delete`、`pair.set`、`pair.delete`，以及「新增」`update.settings`、`update.release`（发布源上有了新的正式版）、`update.pause`（节点更新失败，版本被暂停；它记在那个节点所在的网络上）、`update.resume`、`update.force`（记在节点所在的网络上）、`update.force_all`，以及「新增」`update.failure`（节点说某个版本在它那里不能用，但 controller 没有让它装过这个版本，所以不暂停；记在那个节点所在的网络上），以及「新增」`test.start`（发起了一个主动测试，`refs` 是两个节点）、`test.cancel`、`test.matrix`（开始一次全网矩阵，`refs` 是网络）、`test.matrix.cancel`，以及「新增」`group.create`、`group.rename`、`group.delete`、`group.members`（分组的成员变了，第 18 节）。「去掉」`credential.*`、`listener.*` 不再记（凭据去掉了，监听器成了代理），以前记下的照旧在，只能显示 `detail`。带 `withdrawn` 的是节点撤回了本地声明、controller 随之关闭能力时记的；「去掉」`node.forward.withdrawn` 不再记（端口转发的目标不再由节点声明，见第 5 节），以前记下的照旧在。最多保留最近的一万条。
 
 不认识的 `action` 请显示 `detail`。分组出现之前的记录里可能还有 `tag.rename`，它没有新的写法，只能显示 `detail`。
 
@@ -476,11 +510,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `group.rename` | `group`、`from`、`to`（改之前和改之后的名字） |
 | `group.delete` | `group`、`group_name`、`nodes`（从几个节点上去掉了它）、`rules`（一起删掉了几条规则）、`tokens`（从几个还没用掉的注册令牌上去掉了它）。`refs` 是这个分组和这些节点、规则、令牌 |
 | `group.members` | `group`、`group_name`、`added`、`removed`：加入、移出的节点，每一项是 `{ "node": 编号, "node_name": 名字 }`，本来就在（或者本来就不在）的不算。`refs` 是这个分组和这些节点 |
-| `credential.create` | `credential`、`credential_name`、`max_concurrent`、`max_bytes` |
-| `credential.update` | `credential`、`credential_name`、`max_concurrent`、`max_bytes`（新的上限，`null` 是不限）、`reset_usage` |
-| `credential.revoke`、`credential.delete` | `credential`、`credential_name` |
-| `credential.exhausted` | `credential`、`credential_name`、`used_bytes`、`max_bytes` |
-| `listener.create`、`listener.update`、`listener.delete` | `listener`、`listener_name`、`node`、`node_name`、`bind`、`protocol` |
+| `proxy.create`、`proxy.update`、`proxy.delete` | 「新增」`proxy`、`proxy_name`、`node`、`node_name`（监听的节点）、`bind`、`protocol`、`exit`、`exit_name`（出口节点，没有时是 `null`）、`enabled`（改完之后的，删除时是删之前的）。用户名和密码不记 |
 | `forward.create`、`forward.update`、`forward.delete` | `forward`、`forward_name`、`protocol`、`listen_node`、`listen_node_name`、`bind`、`target_node`、`target_node_name`、`target_addr`、`enabled` |
 | `pair.set` | `a`、`a_name`、`b`、`b_name`（`a` 的编号小），`keep_alive`、`lane`、「新增」`congestion`（`null` 是节点的默认） |
 | `pair.delete` | `a`、`a_name`、`b`、`b_name` |
@@ -525,7 +555,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `reach` | 对可用路径的限制 |
 | `created_at` | 创建时间 |
 | `nodes` | 网络里有多少个节点 |
-| `class` | 「新增」网络的默认 QoS：`"auto"`（自动）、`"interactive"`（低延迟）、`"reliable"`（不丢包）、`"bulk"`（后台）；`null` 表示 `auto`。一条流的 QoS 按这个顺序取第一个有的：代理用户名里的 `+c-` 标记、监听器（或端口转发）的 `class`、出口的 `class`（只有经出口出去的流）、网络的 `class`。「新增」每个取值做什么、给人看的名字见下面的 `Class` |
+| `class` | 「新增」网络的默认 QoS：`"auto"`（自动）、`"interactive"`（低延迟）、`"reliable"`（不丢包）、`"bulk"`（后台）；`null` 表示 `auto`。一条流的 QoS 按这个顺序取第一个有的：代理（或端口转发）的 `class`、出口的 `class`（只有经出口出去的流）、网络的 `class`。「去掉」代理用户名里的 `+c-` 标记。「新增」每个取值做什么、给人看的名字见下面的 `Class` |
 
 「新增」`Class`：QoS 的取值。字段、参数和取值的写法不变；界面上叫 QoS，取值写名字。
 
@@ -537,7 +567,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 | `"bulk"` | 后台 / Background | TCP 的流让位；UDP 的数据报一个都不丢 |
 
 TCP 的流在任何取值下都是可靠的，取值只决定同一条连接上谁先发。"一个都不丢"说的是路上：每个数据报单独走一条流，由连接重传，
-先后不保证；应用取得太慢时收的一方照样丢新来的。代理用户名里的写法：`+c-a`、`+c-i`、`+c-r`、`+c-b`。
+先后不保证；应用取得太慢时收的一方照样丢新来的。
 
 ### GET /networks
 
@@ -582,7 +612,7 @@ TCP 的流在任何取值下都是可靠的，取值只决定同一条连接上�
 
 ### DELETE /networks/{network}
 
-删掉一个空的网络，连同它的分组、规则、凭据和注册令牌。
+删掉一个空的网络，连同它的分组、规则和注册令牌。
 
 应答：`204`。
 错误：`network_not_empty`。
@@ -599,9 +629,8 @@ TCP 的流在任何取值下都是可靠的，取值只决定同一条连接上�
   "relays": 1,
   "exits": 1,
   "rules": 1,
-  "listeners": 0,
+  "proxies": 2,
   "forwards": 0,
-  "credentials": 0,
   "pending_tokens": 0,
   "online_nodes": [
     { "id": 1, "name": "node-1", "virtual_ip": "10.66.0.1" },
@@ -627,7 +656,7 @@ TCP 的流在任何取值下都是可靠的，取值只决定同一条连接上�
 |---|---|
 | `nodes`、`online` | 节点数、在线的节点数 |
 | `relays`、`exits` | 启用了 relay、启用了出口的节点数 |
-| `rules`、`listeners`、`forwards`、`credentials` | 各自的数量（规则包括停用的） |
+| `rules`、`proxies`、`forwards` | 各自的数量（规则、代理包括停用的）。「新增」`proxies` 代替了 `listeners` 和 `credentials` |
 | `pending_tokens` | 还没被用掉、也没过期的注册令牌数 |
 | `online_nodes` | 在线的节点，`NodeRef` 的数组 |
 | `unreachable_pairs` | 两端都在线、但至少一端上报"没有可用的路"的节点对：直连不通，也没有 relay 可走。`a` 的编号小于 `b` |
@@ -896,7 +925,7 @@ TCP 的流在任何取值下都是可靠的，取值只决定同一条连接上�
 
 ### DELETE /networks/{network}/nodes/{node}
 
-删掉节点：吊销它的公钥，立即把它从所有节点的配置里去掉；它要是在线，会收到吊销通知并被断开。它的监听器、和它有关的端口转发与节点对设置一起删掉。它的虚拟 IP 和名字进入 90 天的冷却期，期间不分给别的节点。
+删掉节点：吊销它的公钥，立即把它从所有节点的配置里去掉；它要是在线，会收到吊销通知并被断开。监听在它上面的代理、和它有关的端口转发与节点对设置一起删掉；「新增」经它出去的代理留着，`exit` 变成 `null`、停用，状态是 `exit_missing`，选好新的出口再启用。它的虚拟 IP 和名字进入 90 天的冷却期，期间不分给别的节点。
 
 应答：`204`。
 
@@ -1030,9 +1059,11 @@ relay 都在时一直留着，所以每个节点最多 32 项。`RelayView.reach
 | `family` | 否 | 「新增」互联网目标只连哪一种地址：`"any"`（默认）、`"ipv4"`、`"ipv6"`。域名解析出来的地址里只取这一种；目标是另一种地址、或者域名没有这种地址时拒绝 |
 | `connects_per_minute` | 否 | 「新增」建连预算：同一个发起节点每分钟最多让出口向同一个互联网或局域网目标（主机加端口）新建多少条连接；`null` 或省略表示不限。可以一下子用完一分钟的额度，之后按每分钟这么多恢复。超出时请求被拒绝（SOCKS5 的 `0x01`、HTTP 的 `429`） |
 | `class` | 否 | 「新增」经这个出口的流的默认 QoS，见第 4 节 `Network.class` 的先后顺序；`null` 表示没有 |
-| `optimistic` | 否 | 「新增」经这个出口的流（互联网和局域网目标）用不用乐观回复：`true` 时入口不等出口的应答就告诉客户端连上了，`false` 时一律等（客户端拿到准确的错误码）；`null` 或省略时按目标的种类（互联网目标不等，局域网目标等）。监听器自己设了 `optimistic` 的以监听器为准（第 10 节）：先看监听器，再看出口，最后按目标的种类。明文 HTTP 的转发不管哪一项都等应答 |
+| `optimistic` | 否 | 「新增」经这个出口的流（互联网和局域网目标）用不用乐观回复：`true` 时入口不等出口的应答就告诉客户端连上了，`false` 时一律等（客户端拿到准确的错误码）；`null` 或省略时按目标的种类（互联网目标不等，局域网目标等）。代理自己设了 `optimistic` 的以代理为准（第 10 节）：先看代理，再看出口，最后按目标的种类。明文 HTTP 的转发不管哪一项都等应答 |
 
 请求体写 `{}` 就是用默认设置启用。「新增」配额、建连预算都不能写 0（不限制就不写）。
+
+「新增」经出口出去要一个代理：在别的节点上建一个以它为出口的代理（第 10 节）。
 
 「新增」出口没有带宽上限。早先的请求体里的 `bandwidth_mbps` 照收（写 0 也不再报错），没有任何作用；应答和 `Node.exit` 里不再有它。
 relay 的带宽上限（第 5.5 节）是另一回事，照旧。
@@ -1042,7 +1073,7 @@ relay 的带宽上限（第 5.5 节）是另一回事，照旧。
 
 ### DELETE /networks/{network}/nodes/{node}/exit
 
-停用出口。本来就没启用时也成功。
+停用出口。本来就没启用时也成功。「新增」以它为出口的代理留着、照样监听，新的请求被拒绝，状态是 `exit_disabled`；再启用就回来。
 
 应答：`Node`（`exit` 是 `null`）。
 
@@ -1054,7 +1085,7 @@ relay 的带宽上限（第 5.5 节）是另一回事，照旧。
 { "predecessor": 2 }
 ```
 
-`{node}` 继承 `predecessor` 的虚拟 IP、名字、分组（和它自己已经在的分组合并），以及指向 `predecessor` 的端口转发、监听器和节点对设置；然后 `predecessor` 被删掉，它的公钥被吊销。节点编号不继承，`{node}` 还是它自己的编号。relay、出口不继承：要在新机器上重新声明，再重新启用。「新增」`forward_target` 和分组一样随身份继承（`predecessor` 打开着的，`{node}` 也打开），继承来的、以它为目标的端口转发照常生效。
+`{node}` 继承 `predecessor` 的虚拟 IP、名字、分组（和它自己已经在的分组合并），以及指向 `predecessor` 的端口转发、代理（监听在它上面的，和经它出去的）和节点对设置；然后 `predecessor` 被删掉，它的公钥被吊销。节点编号不继承，`{node}` 还是它自己的编号。relay、出口不继承：要在新机器上重新声明，再重新启用。「新增」`forward_target` 和分组一样随身份继承（`predecessor` 打开着的，`{node}` 也打开），继承来的、以它为目标的端口转发照常生效。
 
 也可以在生成注册令牌时用 `successor_of` 指名继任（见第 6 节），效果相同。
 
@@ -1137,7 +1168,7 @@ relay 的带宽上限（第 5.5 节）是另一回事，照旧。
 
 ### GET /networks/{network}/nodes/{node}/listeners「新增」
 
-节点上的全部监听，取自它最近的上报：controller 下发的代理监听器、节点按本机配置文件自己开的回环入口（`local-socks5`、`local-http`）、端口转发的监听一侧。应答是 `NodeListeners`：
+节点上的全部监听，取自它最近的上报：controller 下发的代理、节点按本机配置文件自己开的组网入口（`local-socks5`、`local-http`，「新增」只有配置文件里写了 `[proxy]` 才有，只通到组网里的节点）、端口转发的监听一侧。应答是 `NodeListeners`：
 
 ```json
 {
@@ -1145,7 +1176,7 @@ relay 的带宽上限（第 5.5 节）是另一回事，照旧。
   "online": true,
   "reported_secs_ago": 4,
   "listeners": [
-    { "id": 1, "builtin": false, "name": "lan", "bind": "192.168.1.5:1080", "protocol": "socks5",
+    { "id": 1, "builtin": false, "name": "lan", "bind": "192.168.1.5:1080", "protocol": "mixed",
       "state": "listening", "local": "192.168.1.5:1080", "connections": 2, "bytes_up": 1024, "bytes_down": 40960 },
     { "id": null, "builtin": true, "name": "local-socks5", "bind": "127.0.0.1:1080", "protocol": "socks5",
       "state": "port_in_use", "detail": "Address already in use (os error 98)", "connections": 0, "bytes_up": 0, "bytes_down": 0 }
@@ -1161,8 +1192,9 @@ relay 的带宽上限（第 5.5 节）是另一回事，照旧。
 |---|---|
 | `online` | 节点在不在线。不在线时两个列表都是空的 |
 | `reported_secs_ago` | 节点最近一次上报是多少秒之前；这次连接上还没有上报过是 `null` |
-| `listeners[].id` | controller 上的监听器编号；节点自己开的回环入口没有，是 `null` |
-| `listeners[].builtin` | 节点按本机配置文件自己开的回环入口（不是 controller 下发的） |
+| `listeners[].id` | 代理的编号（第 10 节）；节点自己开的组网入口没有，是 `null` |
+| `listeners[].builtin` | 节点按本机配置文件自己开的组网入口（不是 controller 下发的） |
+| `listeners[].protocol` | 代理的是 `"mixed"`、`"socks5"`、`"http"`；组网入口是 `"socks5"`、`"http"` |
 | `forwards[].id` | 端口转发的编号 |
 | 其余 | `bind` 是配置里写的地址，状态、连接数、流量的写法见 11.1 节的 `ListenStatus` |
 
@@ -1389,154 +1421,174 @@ relay 的带宽上限（第 5.5 节）是另一回事，照旧。
 
 节点视图见第 5 节的 `GET /networks/{network}/nodes/{node}/access`。
 
-## 9. 接入凭据
+## 9. 接入凭据「去掉」
 
-凭据是 controller 签发的令牌，调用者把它填在代理的密码字段里。它属于一个网络，在这个网络里所有要求凭据的监听器上都能用。
+全网共用的接入凭据（`/networks/{network}/credentials` 下面的接口、`Credential`）去掉了：每个代理有它自己的用户名和密码（第 10 节）。
+跟着去掉的有凭据的并发上限、流量上限、吊销、用量记录，和"密码字段里填凭据的令牌"这种用法。升级时凭据连同用量记录一起删掉；
+要过凭据的监听器成为有一对生成的用户名和密码的代理，见第 10 节的"升级"。
 
-`Credential`：
+## 10. 代理
 
-```json
-{
-  "id": 1, "name": "phone", "max_concurrent": 8, "created_at": 1794798564,
-  "prefix": "I7bRtu", "max_bytes": 10000000000, "state": "active", "revoked_at": null,
-  "usage": { "bytes": 123456789, "connections": 2, "last_used_at": 1794799000 }
-}
-```
+「新增」代理代替了监听器：在节点 `node` 的 `bind` 上监听，请求经出口节点 `exit` 出去，认一对用户名和密码。`exit` 必须是另一个、
+启用了出口的节点，访问规则要让 `node` 能访问 `exit`。一个端口可以同时说 SOCKS5 和 HTTP 代理（`protocol` 是 `"mixed"`，默认）：
+按客户端发来的第一个字节分，`0x05` 是 SOCKS5，别的都当作 HTTP。HTTP 代理除了 `CONNECT` 也转发明文 HTTP 的请求（`GET http://…`，
+见 [architecture.md](architecture.md) 的 5.6）。
 
-| 字段 | 含义 |
-|---|---|
-| `max_concurrent` | 同时进行的连接数上限（每个入口各自数），`null` 表示不限 |
-| `prefix` | 「新增」令牌的开头 6 个字符，不是秘密，用来认出是哪一个凭据（和调用者填在密码字段里的对得上）。这个字段出现之前签发的凭据是 `""` |
-| `max_bytes` | 「新增」流量上限（字节）：经各个入口用它搬运的字节数（客户端发出的和收到的相加）到了这个数，它就停用，直到上限调高或者用量清零。`null` 表示不限 |
-| `state` | 「新增」`"active"`、`"exhausted"`（流量上限用完了：入口拒绝它的新连接，客户端看到 SOCKS5 的 `0x02` 或 HTTP 的 `429`；正在进行的连接也被断开）、`"revoked"`（吊销了：入口不再认它） |
-| `revoked_at` | 「新增」吊销的时间；没有吊销是 `null` |
-| `usage.bytes` | 「新增」签发（或者上次清零）以来经它搬运的字节数。各个入口每 10 秒上报一次，所以有十几秒的滞后；从用完到被拦下，最多多用一个上报周期的量 |
-| `usage.connections` | 「新增」现在在线的入口上正在进行的连接数（UDP ASSOCIATE 算一条） |
-| `usage.last_used_at` | 「新增」最近一次有连接用它的时间；从来没有用过是 `null` |
+请求的目标去哪里：
 
-### GET /networks/{network}/credentials
+- 组网里的节点（虚拟 IP、`<名字>.<网络>.i3t`，或者只写名字）：直接到那个节点，不经出口，要访问规则让 `node` 能访问它。
+- 别的目标都经出口：互联网目标按出口的设置（端口、地址族、配额、建连预算等，第 5.6 节）；出口所在局域网的地址要出口打开了 `lan`。
 
-应答是 `Credential` 的数组，「新增」包括吊销了的。令牌查不回来。
+用户名只用来认证，不选出口，也不带 QoS 的标记。没有"从监听的节点自己出去"：要从一台机器出去，就把它启用为出口，在别的节点上建经它出去的代理。
 
-### POST /networks/{network}/credentials
-
-```json
-{ "name": "phone", "max_concurrent": 8, "max_bytes": 10000000000 }
-```
-
-`name` 必填，在网络里唯一（吊销了的凭据还占着名字，见下）；`max_concurrent`、「新增」`max_bytes` 可省略，不能是 0。
-
-应答：`201`，`Credential` 的全部字段加上 `token`：
-
-```json
-{
-  "id": 1, "name": "phone", "max_concurrent": 8, "created_at": 1794798564, "prefix": "I7bRtu", "max_bytes": 10000000000,
-  "state": "active", "revoked_at": null, "usage": { "bytes": 0, "connections": 0, "last_used_at": null },
-  "token": "I7bRtukVyLJzSGhIbQPcl8bjl9ZjLvFsI2PTJUaKnKU"
-}
-```
-
-`token` **只在这个应答里出现一次**。
-
-错误：`name_taken`、`invalid_request`。
-
-### PATCH /networks/{network}/credentials/{id}「新增」
-
-改上限、清零用量，不用重新签发令牌；新的设置随即下发给各个入口。
-
-```json
-{ "max_concurrent": null, "max_bytes": 20000000000, "reset_usage": true }
-```
-
-| 字段 | 含义 |
-|---|---|
-| `max_concurrent` | 新的并发上限；写 `null` 表示不限 |
-| `max_bytes` | 新的流量上限；写 `null` 表示不限 |
-| `reset_usage` | `true` 时把 `usage.bytes` 清零（比如开始一个新的计费周期） |
-
-全部可省略，省略表示不改。`max_concurrent` 和 `max_bytes` 是"写 `null` 有含义"的字段。
-
-应答：`Credential`。
-错误：`invalid_request`（上限是 0；凭据已经吊销）、`not_found`。
-
-### DELETE /networks/{network}/credentials/{id}
-
-吊销一个凭据：入口不再认它。「新增」记录留着，`state` 是 `"revoked"`，看得到它用过多少；对已经吊销的凭据再删一次，记录才被彻底删掉，名字才能给新的凭据用。正在进行的连接不因吊销而断开（和别的配置变更一样不打断手上的流）。应答：`204`。
-
-## 10. 监听器
-
-监听器是某个节点上的一个代理入口（SOCKS5，或者 HTTP 代理：「新增」除了 CONNECT 也转发明文 HTTP 的请求，见 [architecture.md](architecture.md) 的 5.6）。
-
-`Listener`：
+`Proxy`：
 
 ```json
 {
   "id": 1,
-  "node": 2,
   "name": "lan",
+  "node": 2,
   "bind": "192.168.1.5:1080",
-  "protocol": "socks5",
+  "protocol": "mixed",
+  "exit": 1,
+  "username": "u-3f9a21c0",
+  "password": "9d4e0c6b1a7f2e8d5c3b0a9f8e7d6c5b",
+  "enabled": true,
   "allow_from": ["192.168.1.0/24"],
-  "require_credential": true,
-  "default_action": { "action": "exit", "node": 1 },
-  "fixed_exit": null,
   "class": null,
   "optimistic": null,
-  "status": { "state": "listening", "local": "192.168.1.5:1080", "connections": 2, "bytes_up": 1024, "bytes_down": 40960 }
+  "status": { "code": "listening", "local": "192.168.1.5:1080" },
+  "connections": 2,
+  "bytes_up": 1024,
+  "bytes_down": 40960
 }
 ```
 
 | 字段 | 含义 |
 |---|---|
-| `id` | 监听器编号 |
-| `node` | 它开在哪个节点上 |
+| `id` | 代理编号 |
 | `name` | 名字，在一个节点上唯一 |
+| `node` | 监听的节点（节点编号） |
 | `bind` | 监听地址，端口不能是 0 |
-| `protocol` | `"socks5"` 或 `"http"` |
+| `protocol` | `"mixed"`（SOCKS5 和 HTTP 都说）、`"socks5"`、`"http"` |
+| `exit` | 出口节点（节点编号）。只有升级前就有、当时没有出口的代理，和出口节点被删掉了的代理是 `null`（状态 `exit_missing`） |
+| `username`、`password` | 用户名和密码，原样存着、原样给出，管理员可以再看、再复制。都是 `""` 表示不认证，只有回环地址上的代理可以这样。见下面的"认证" |
+| `enabled` | 开关。停用的代理不下发，节点不监听 |
 | `allow_from` | 来源白名单（地址段的数组）；空表示不限制 |
-| `require_credential` | 要求调用者在密码字段里带凭据。`bind` 不是回环地址时必须是 `true` |
-| `default_action` | 调用者没有写用户名、目标又不是组网地址时怎么办，见下。`null` 时按 `bind` 取默认：回环地址是就地出站，其他地址是拒绝 |
-| `fixed_exit` | 固定出口（节点编号）：这个监听器上的流量都从这个节点出去；`null` 表示不固定 |
-| `class` | 「新增」这个监听器上的流的默认 QoS（`"auto"`、`"interactive"`、`"reliable"`、`"bulk"`）。用户名里写了 `+c-` 时以用户名为准；`null` 时看出口和网络的默认值 |
-| `optimistic` | 「新增」乐观回复：`true` 时不等对端的应答就告诉客户端连上了（省一个全程往返，失败只能表现为随后被断开），`false` 时一律等（客户端拿到准确的错误码）。`null` 时看出口的设置（「新增」`Node.exit.optimistic`，只管经出口出去的流），出口也没有设时按目标的种类：互联网目标不等，组网目标（节点的服务、局域网）等。「新增」明文 HTTP 的转发（`GET http://…`）不管这一项都等：目标的应答本来就在对端的应答之后才到，等它不多花时间 |
-| `status` | 「新增」节点最近一次报的这个监听器的状态、连接数和流量，写法见 11.1 节的 `ListenStatus`。节点不在线、还没有报过，或者版本太旧不报时是 `null`。只读，创建和替换时不用写 |
+| `class` | 这个代理上的流的 QoS（`"auto"`、`"interactive"`、`"reliable"`、`"bulk"`）；`null` 时看出口的，再看网络的（第 4 节） |
+| `optimistic` | 乐观回复：`true` 时不等对端的应答就告诉客户端连上了（省一个全程往返，失败只能表现为随后被断开），`false` 时一律等（客户端拿到准确的错误码）。`null` 时看出口的设置（`Node.exit.optimistic`，只管经出口出去的流），出口也没有设时按目标的种类：互联网目标不等，组网目标（节点的服务、局域网）等。明文 HTTP 的转发（`GET http://…`）不管这一项都等：目标的应答本来就在对端的应答之后才到，等它不多花时间 |
+| `status` | 现在能不能用，按 controller 知道的算，见下。只读 |
+| `connections`、`bytes_up`、`bytes_down` | 监听的节点最近一次报的现在的连接数（UDP ASSOCIATE 算一条），和这次运行以来客户端发进来的、发回给客户端的字节数（节点重启从零算）。节点不在线、还没有报过时都是 0，那时 `status` 说明为什么。只读 |
 
-`default_action` 有三种：
+`status` 是一个对象，`code` 是状态，同一层是这个状态要用到的值。按下表的顺序，排在前面的先看：
 
-| 写法 | 含义 |
-|---|---|
-| `{ "action": "local" }` | 就地出站：从监听器所在的节点自己的网络出去 |
-| `{ "action": "reject" }` | 拒绝 |
-| `{ "action": "exit", "node": 1 }` | 固定走这个出口节点 |
+| `code` | 别的字段 | 含义 |
+|---|---|---|
+| `"exit_missing"` | — | 没有出口：升级前就有、当时没有出口的代理，或者出口节点被删掉了。`PATCH` 写上 `exit` 才能启用 |
+| `"disabled"` | — | 停用了（`enabled` 是 `false`） |
+| `"node_offline"` | — | 监听的节点不在线 |
+| `"pending"` | — | 下发了，监听的节点还没有报它的状态：刚建好或者刚改过（节点每 10 秒报一次），或者节点的版本比这份文档旧、不懂代理 |
+| `"port_in_use"` | `detail`、`cause` | 端口被别的程序占着，节点不去抢，每 10 秒再试。`detail` 是系统的原话，`cause` 是 11.1 节的 `BindCause` |
+| `"bind_failed"` | `detail`、`cause` | 别的原因没有绑上（地址不在这台机器上、没有权限等），同样会重试 |
+| `"exit_disabled"` | `local` | 在监听，但出口节点后来停用了出口：新的请求被拒绝（SOCKS5 的 `0x02`、HTTP 的 `403`）。去组网里的节点的照常 |
+| `"access_denied"` | `local` | 在监听，但访问规则后来变了，不让监听的节点访问出口节点：经出口的请求被拒绝 |
+| `"exit_offline"` | `local` | 在监听，但出口节点不在线 |
+| `"listening"` | `local` | 在监听，能用。`local` 是实际绑定的地址 |
 
-被当作出口引用的节点（`fixed_exit`、`default_action` 里的 `node`）被删掉时，这两个字段自动变回 `null`。
+例子：`{ "code": "port_in_use", "detail": "Address already in use (os error 98)", "cause": { "code": "address_in_use" } }`。
+不认识的 `code` 当作 `unknown`。
 
-### GET /networks/{network}/listeners
+出口和访问规则只在会让代理生效的那一下查（新建、启用、换出口、换监听的节点），不满足时是错误（`exit_not_enabled`、`access_denied`）；
+之后出口被停用、规则变了，代理留着、照样下发、照样监听，状态说明为什么用不了。只改名字、密码这些的 `PATCH` 不因此被拒绝。
 
-网络里全部节点上的监听器，按编号排。查询参数 `node`（可省略，节点编号）：只列这个节点上的。应答是 `Listener` 的数组。
+**认证**：
 
-### POST /networks/{network}/listeners
+- `bind` 不在回环地址上的代理一定认证。用户名和密码都不写（或者都写 `""`）时 controller 生成一对：用户名是 `u-` 加 8 个十六进制字符，
+  密码是 32 个十六进制字符（128 位），只用字母和数字，放进代理的网址里不用转义。
+- 回环地址上的代理可以不认证：两个都不写就是不认证，本机的程序不填用户名密码就能用（填了也不看）；写了就要对上。
+- 只写一个是 `400 credentials_incomplete`。用户名和密码各自最长 255 字节，不能有控制字符；用户名里不能有冒号（HTTP 的 Basic 认证按第一个冒号切分）。
+- SOCKS5 用用户名/密码认证（RFC 1929）：要认证的代理只接受这一种，客户端没有提供时回"没有可接受的方法"（`0xFF`）；用户名或密码不对时认证失败、断开。
+  HTTP 用 `Proxy-Authorization: Basic …`：没有或者不对时回 `407`，带 `Proxy-Authenticate: Basic realm="i3t"`。
+- 密码只在 controller 上：数据库里原样存着（数据库文件只有属主读得了，管理接口要管理令牌），应答里原样给出，操作记录不记。
+  下发给节点的只是校验值：SHA-256(盐 ‖ SHA-256(用户名) ‖ 密码)，盐每个代理一份（16 字节），用户名或者密码一改就换。节点上没有密码，
+  节点的日志里也不写用户名和密码。
 
-请求体是 `Listener` 去掉 `id`：
+### GET /networks/{network}/proxies
+
+网络里全部节点上的代理，按编号排。查询参数 `node`（可省略，节点编号）：只列监听在这个节点上的。应答是 `Proxy` 的数组。
+
+### GET /networks/{network}/proxies/{id}
+
+应答：`Proxy`。
+
+### POST /networks/{network}/proxies
 
 ```json
-{ "node": 2, "name": "local", "bind": "127.0.0.1:1080", "protocol": "http" }
+{ "node": 2, "bind": "192.168.1.5:1080", "exit": 1 }
 ```
 
-`node`、`name`、`bind`、`protocol` 必填；`allow_from` 默认 `[]`，`require_credential` 默认 `false`，`default_action`、`fixed_exit`、「新增」`class`、`optimistic` 默认 `null`。
+| 字段 | 必填 | 含义 |
+|---|---|---|
+| `node` | 是 | 监听的节点 |
+| `bind` | 是 | 监听地址 |
+| `exit` | 是 | 出口节点：另一个启用了出口的节点 |
+| `name` | 否 | 省略或者写 `""` 时是 `<节点名>-<端口>`（比如 `laptop-1080`），这个节点上已经有了就再接 `-2`、`-3`…… |
+| `protocol` | 否 | 默认 `"mixed"` |
+| `username`、`password` | 否 | 见上面的"认证"。不在回环地址上、两个都省略时 controller 生成一对，在应答里 |
+| `enabled` | 否 | 默认 `true` |
+| `allow_from` | 否 | 默认 `[]` |
+| `class`、`optimistic` | 否 | 默认 `null` |
 
-应答：`201`，`Listener`。
-错误：`invalid_request`（非回环地址却不要求凭据、端口是 0、名字是空的）、`name_taken`（这个节点上已经有同名的监听器）、`conflict`（这个节点上已经有监听器监听在同一个地址）、`not_found`（节点或引用的出口节点不在这个网络里）。
+应答：`201`，`Proxy`（生成的用户名和密码就在里面）。
+错误：`exit_not_enabled`、`exit_is_node`、`access_denied`（`field` 都是 `exit`），`credentials_incomplete`（`field` 是没写的那一个），
+`invalid_request`（端口是 0：`zero_port`，`field` 是 `bind`；名字、用户名、密码的写法不对：`too_long`、`malformed`），
+`name_taken`（这个节点上已经有同名的代理，`field` 是 `name`），`conflict`（这个节点上已经有代理监听在同一个地址，`what` 是 `proxy`，`field` 是 `bind`），
+`not_found`（节点或者出口节点不在这个网络里，`field` 是 `node` 或 `exit`）。
 
-### PUT /networks/{network}/listeners/{id}
+### PATCH /networks/{network}/proxies/{id}
 
-整个替换一个监听器，请求体同创建。可以换到另一个节点上。
+只改写了的字段，可以写的有 `node`（换到另一个节点上）、`name`、`bind`、`exit`、`protocol`、`username`、`password`、`enabled`、`allow_from`、`class`、`optimistic`，
+都可省略。只开关一个代理就写 `{ "enabled": false }`。`class`、`optimistic` 写 `null` 是不再指定；`exit` 写 `null` 等于没写（不能去掉出口）。
+`username` 和 `password` 写 `""` 是清掉：两个都清掉时，回环地址上的代理不再认证，别的地址上的由 controller 重新生成一对；
+从回环地址换到别的地址、原来又不认证时也生成一对。
 
-应答：`Listener`。错误同创建。
+```json
+{ "username": "alice", "password": "s3cret" }
+```
 
-### DELETE /networks/{network}/listeners/{id}
+应答：`Proxy`。
+错误：同创建；没有出口（`exit_missing`）的代理要启用而没有写 `exit` 时是 `400 invalid_request`（`what` 是 `required`，`field` 是 `exit`）。
 
-应答：`204`。
+### DELETE /networks/{network}/proxies/{id}
+
+应答：`204`。节点随即关掉这个端口；正在进行的连接不断开（和别的配置变更一样不打断手上的流）。
+
+### 升级
+
+升级到有代理的版本时，数据库原地迁移，每个监听器成为同一个编号的代理（名字、地址、协议、`allow_from`、`class`、`optimistic` 照旧）：
+
+- 出口：固定了出口的，出口是它；没有固定、默认动作是"走某个出口"的，出口是那一个；都没有的（默认动作是就地出站或者拒绝），
+  以及出口是监听节点自己的，没有出口：`exit` 是 `null`、停用，状态是 `exit_missing`，选好出口才能启用。
+- 认证：要求凭据的监听器（不在回环地址上的一定要求）得到一对生成的用户名和密码（写法同上），不会因为凭据没了就变成谁都能用；
+  回环地址上不要求凭据的不认证。原来的用户（填凭据令牌、用户名写出口的）要换成代理的用户名和密码。
+- 凭据和它们的用量记录删掉；操作记录 `refs` 里的 `listener` 改成 `proxy`。
+
+例子：监听器
+
+```json
+{ "id": 3, "node": 2, "name": "lan", "bind": "192.168.1.5:1080", "protocol": "socks5", "allow_from": [],
+  "require_credential": true, "default_action": null, "fixed_exit": 1, "class": null, "optimistic": null }
+```
+
+成为代理
+
+```json
+{ "id": 3, "node": 2, "name": "lan", "bind": "192.168.1.5:1080", "protocol": "socks5", "exit": 1,
+  "username": "u-5b0e7d21", "password": "c41f0a9e6d2b8f3a7e1c5d9b0a4f6e2d", "enabled": true, "allow_from": [], "class": null, "optimistic": null, … }
+```
+
+回环地址上、不要求凭据、默认动作是"走出口 4"的 `127.0.0.1:1090` 成为 `exit` 是 4、`username` 和 `password` 是 `""` 的代理；
+默认动作是就地出站的成为 `exit` 是 `null`、`enabled` 是 `false` 的代理。
 
 ## 11. 端口转发
 
@@ -1618,7 +1670,7 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
 
 ### 11.1 ListenStatus「新增」
 
-一个监听（代理监听器、端口转发的监听一侧）现在的样子，由监听节点每 10 秒上报一次：
+一个监听（代理、节点自己的组网入口、端口转发的监听一侧）现在的样子，由监听节点每 10 秒上报一次：
 
 ```json
 { "state": "listening", "local": "127.0.0.1:41873", "connections": 1, "bytes_up": 512, "bytes_down": 8192 }
@@ -1840,11 +1892,8 @@ ice3proxy 要两个节点里至少有一个启用了 relay、有已知的 TCP �
 | DELETE | `/networks/{network}/tokens/{id}` | 收回注册令牌 |
 | GET、POST | `/networks/{network}/rules` | 列出、新建规则 |
 | PATCH、DELETE | `/networks/{network}/rules/{id}` | 修改、删除规则 |
-| GET、POST | `/networks/{network}/credentials` | 列出、签发凭据 |
-| PATCH | `/networks/{network}/credentials/{id}` | 「新增」改凭据的上限、清零用量 |
-| DELETE | `/networks/{network}/credentials/{id}` | 吊销凭据；对吊销了的再删一次就彻底删掉 |
-| GET、POST | `/networks/{network}/listeners` | 列出、新建监听器 |
-| PUT、DELETE | `/networks/{network}/listeners/{id}` | 替换、删除监听器 |
+| GET、POST | `/networks/{network}/proxies` | 「新增」列出、新建代理 |
+| GET、PATCH、DELETE | `/networks/{network}/proxies/{id}` | 「新增」一个代理、修改、删除 |
 | GET、POST | `/networks/{network}/forwards` | 列出、新建端口转发 |
 | PUT、DELETE | `/networks/{network}/forwards/{id}` | 替换、删除端口转发 |
 | GET | `/networks/{network}/pairs` | 列出节点对设置 |
@@ -1858,7 +1907,7 @@ ice3proxy 要两个节点里至少有一个启用了 relay、有已知的 TCP �
 | GET、POST | `/networks/{network}/nodes/{node}/update` | 「新增」一个节点的更新情况；让它立即更新 |
 | GET | `/networks/{network}/routes` | 「新增」整个网络的路由矩阵 |
 | GET | `/networks/{network}/path` | 「新增」两个节点之间两个方向的当前路径 |
-| GET | `/networks/{network}/nodes/{node}/listeners` | 「新增」节点上全部监听的状态（含节点自己开的回环入口） |
+| GET | `/networks/{network}/nodes/{node}/listeners` | 「新增」节点上全部监听的状态（代理、节点自己开的组网入口、端口转发） |
 | GET | `/networks/{network}/exits` | 「新增」启用了的出口：设置、用量、健康、用它的节点看到的 |
 | GET | `/networks/{network}/exits/{node}` | 「新增」一个出口 |
 | POST | `/networks/{network}/exits/{node}/test` | 「新增」出口测试：让出口按它的策略试着连一个目标 |
@@ -2427,6 +2476,14 @@ Prometheus 的文本格式（`Content-Type: text/plain; version=0.0.4`）。**�
         "failed_by_target": 12, "refused": 3, "failed_by_exit": 0, "unreachable": 1,
         "reported_secs_ago": 7
       }
+    ],
+    "proxies": [
+      {
+        "id": 1, "name": "lan", "node": 2, "bind": "192.168.1.5:1080", "protocol": "mixed", "exit": 1,
+        "username": "u-3f9a21c0", "password": "9d4e0c6b1a7f2e8d5c3b0a9f8e7d6c5b", "enabled": true, "allow_from": [],
+        "class": null, "optimistic": null, "status": { "code": "listening", "local": "192.168.1.5:1080" },
+        "connections": 2, "bytes_up": 1024, "bytes_down": 40960
+      }
     ]
   }
 ]
@@ -2440,6 +2497,7 @@ Prometheus 的文本格式（`Content-Type: text/plain; version=0.0.4`）。**�
 | `usage` | 出口最近一次报的计数（`ExitReport`），没有报过是 `null`。`active` 是现在正在处理的流；其余是出口这次运行以来的累计：`total` 收到的建流请求（含 UDP 的数据报上下文），`bytes_to_target`、`bytes_from_target` 搬运的字节数，`failed_by_target`、`refused`、`failed_by_exit` 没建成的请求按归因分，`aborted` 建成之后没有正常结束的。`draining` 是它正在排空。`quota` 在配了配额时是本账期的配额、已用（可能略超过配额：超出的那一段流是在用完的那一刻被断开的）、账期的开始和结束（Unix 秒，按出口节点自己的时钟）；没配配额是 `null` |
 | `reported_secs_ago` | `usage` 是多少秒之前报的 |
 | `observed` | 用过这个出口的节点各自看到的：`by` 是哪个节点；`flows` 它经这个出口发起的流，`bytes_up`、`bytes_down` 它发出、收到的字节数，`failed_by_target`、`refused`、`failed_by_exit` 出口回的拒绝按归因分，`unreachable` 到出口开流就失败了（出口根本没看到）；`exit` 是这个出口的编号。都是那个节点这次运行以来的累计。`reported_secs_ago` 是多少秒之前报的 |
+| `proxies` | 「新增」经这个出口出去的代理（`Proxy`，第 10 节），按编号排，和 `GET …/proxies` 里的一样，包括停用的 |
 
 ### GET /networks/{network}/exits/{node}
 

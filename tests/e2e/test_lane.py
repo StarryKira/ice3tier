@@ -79,7 +79,8 @@ def public_entry(lab: Lab, work: Path, lane: str, *, tcp_blocked: bool = False, 
         set_nat_timeouts(home, *nat_timeouts)
     exit_node = Node(home.host("exit"), work, 2, declare=("exit",))
     entry.start_static(entry.netmap(me={"relay": {}}, relays=[entry.as_relay()], relay_clients=[entry, exit_node],
-                                    peers=[lane_peer(exit_node, lane=lane, endpoints=False, attached=[(entry, 5)], exit=True)]))
+                                    peers=[lane_peer(exit_node, lane=lane, endpoints=False, attached=[(entry, 5)], exit=True)],
+                                    proxies=[entry.proxy_to(exit_node)]))
     entry_peer = {**lane_peer(entry, lane=lane), **(exit_view_of_entry or {})}
     exit_node.start_static(exit_node.netmap(me={"exit": {}}, relays=[entry.as_relay()], peers=[entry_peer]))
     pair = Pair(lab, work, entry, exit_node, web, cert)
@@ -96,7 +97,8 @@ def public_exit(lab: Lab, work: Path, lane: str) -> Pair:
     entry = Node(office.host("entry"), work, 1)
     exit_node.start_static(exit_node.netmap(me={"exit": {}, "relay": {}}, relays=[exit_node.as_relay()], relay_clients=[entry, exit_node],
                                             peers=[lane_peer(entry, lane=lane, endpoints=False, attached=[(exit_node, 5)])]))
-    entry.start_static(entry.netmap(relays=[exit_node.as_relay()], peers=[lane_peer(exit_node, lane=lane, exit=True)]))
+    entry.start_static(entry.netmap(relays=[exit_node.as_relay()], peers=[lane_peer(exit_node, lane=lane, exit=True)],
+                                    proxies=[entry.proxy_to(exit_node)]))
     return Pair(lab, work, entry, exit_node, web, cert)
 
 
@@ -213,7 +215,7 @@ def udp_fallback(lab: Lab, work: Path, t: Checks) -> None:
 
 BURST = r"""
 import hashlib, json, random, socket, struct, sys, threading, time
-proxy_port, user, target, size, count = int(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5])
+proxy_port, target, size, count = int(sys.argv[1]), sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
 expected = hashlib.sha256(random.Random(size).randbytes(size)).hexdigest()
 start = threading.Barrier(count)
 results = []
@@ -222,10 +224,8 @@ def one():
         start.wait()
         began = time.monotonic()
         s = socket.create_connection(("127.0.0.1", proxy_port), timeout=60)
-        s.sendall(b"\x05\x01\x02")
-        assert s.recv(2) == b"\x05\x02"
-        s.sendall(bytes([1, len(user)]) + user.encode() + b"\x00")
-        assert s.recv(2) == b"\x01\x00"
+        s.sendall(b"\x05\x01\x00")
+        assert s.recv(2) == b"\x05\x00"
         s.sendall(b"\x05\x01\x00\x01" + socket.inet_aton(target) + struct.pack("!H", 80))
         reply = b""
         while len(reply) < 10:
@@ -263,7 +263,7 @@ def burst_drains_pool(lab: Lab, work: Path, t: Checks) -> None:
     count, size = 300, 200_000
     before = p.entry_lanes()
     began = time.monotonic()
-    done = p.entry.host.run(sys.executable, "-c", BURST, "1080", p.exit.virtual_ip, p.web.ip, str(size), str(count), check=False,
+    done = p.entry.host.run(sys.executable, "-c", BURST, str(p.entry.entry(p.exit).port), p.web.ip, str(size), str(count), check=False,
                             timeout=180)
     took = time.monotonic() - began
     result = json.loads(done.stdout) if done.stdout.strip() else {"ok": 0, "errors": [done.stderr[-300:]]}
@@ -323,7 +323,7 @@ def exit_restart(lab: Lab, work: Path, t: Checks) -> None:
     if not t.check("lane 拨好", holder_ready(p), lane_line(p.entry, p.exit)):
         return
     for how, sig in (("正常重启（SIGTERM）", signal.SIGTERM), ("崩溃后重启（SIGKILL）", signal.SIGKILL)):
-        running = subprocess.Popen(p.entry.host.cmd("bash", "-c", f"curl -sS --max-time 60 -x socks5h://{p.exit.virtual_ip}@127.0.0.1:1080 "
+        running = subprocess.Popen(p.entry.host.cmd("bash", "-c", f"curl -sS --max-time 60 -x {p.entry.entry(p.exit).url('socks5h')} "
                                                     f"-o /dev/null '{p.url('slow/20/4000000')}'; echo \"exit=$?\""),
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         time.sleep(3)
@@ -360,7 +360,7 @@ def silent_stream_outlives_nat_mapping(lab: Lab, work: Path, t: Checks) -> None:
     procs = []
     for tls in (False, True):
         tls_args = f"--cacert {p.cert}" if tls else ""
-        script = (f"curl -sS --max-time 120 -x socks5h://{p.exit.virtual_ip}@127.0.0.1:1080 {tls_args} "
+        script = (f"curl -sS --max-time 120 -x {p.entry.entry(p.exit).url('socks5h')} {tls_args} "
                   f"'{p.url(f'slow/70/{size}', tls=tls)}' | sha256sum | cut -d' ' -f1")
         procs.append((tls, subprocess.Popen(p.entry.host.cmd("bash", "-c", script), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)))
     for tls, proc in procs:
@@ -388,6 +388,7 @@ def managed_drain(lab: Lab, work: Path, t: Checks) -> None:
         node.join(controller)
     controller.ctl("relay", "enable", str(entry.id))
     controller.ctl("exit", "enable", str(exit_node.id))
+    controller.add_proxy(entry, exit_node)
     view = controller.ctl("pair", "set", entry.name, exit_node.name, "--lane", "always")
     effect = view.get("lane_effect") or {}
     t.check("节点对视图说设置起作用，由出口拨入口", effect.get("effective") is True and effect.get("dialers") == [exit_node.id], json.dumps(view))

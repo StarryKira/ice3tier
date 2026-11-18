@@ -64,17 +64,18 @@ pub(crate) fn render(runtime: &Runtime) -> String {
         out.gauge("i3t_exit_quota_used_bytes", "出口本账期已经用掉的流量（字节）", &[], bytes_gauge(quota.used_bytes));
     }
 
-    for usage in runtime.access.credential_usage() {
-        let labels = |direction| [("credential", usage.name.as_str()), ("direction", direction)];
-        let help = "经每个接入凭据搬运的字节数，up 是客户端发出的，down 是发回给客户端的";
-        out.counter("i3t_credential_bytes_total", help, &labels("up"), usage.bytes_up);
-        out.counter("i3t_credential_bytes_total", help, &labels("down"), usage.bytes_down);
-        out.gauge(
-            "i3t_credential_connections",
-            "每个接入凭据现在的连接数",
-            &[("credential", usage.name.as_str())],
-            f64::from(usage.connections),
-        );
+    for proxy in runtime.access.status().proxies {
+        let name = netmap
+            .me
+            .proxies
+            .iter()
+            .find(|config| config.id == proxy.id)
+            .map_or_else(|| format!("#{}", proxy.id), |config| config.name.clone());
+        let labels = |direction| [("proxy", name.as_str()), ("direction", direction)];
+        let help = "经每个代理搬运的字节数，up 是客户端发出的，down 是发回给客户端的";
+        out.counter("i3t_proxy_bytes_total", help, &labels("up"), proxy.traffic.up());
+        out.counter("i3t_proxy_bytes_total", help, &labels("down"), proxy.traffic.down());
+        out.gauge("i3t_proxy_connections", "每个代理现在的连接数", &[("proxy", name.as_str())], as_gauge(proxy.active.get()));
     }
 
     let name_of = |peer| netmap.peer(peer).map_or_else(|| format!("#{peer}"), |peer| peer.name.clone());

@@ -81,8 +81,6 @@ enum Command {
     Connect {
         host: String,
         port: u16,
-        #[arg(long)]
-        via: Option<String>,
     },
     Tune {
         #[arg(long)]
@@ -146,7 +144,6 @@ fn command(lang: Lang) -> clap::Command {
             sub.about(h.connect)
                 .mut_arg("host", |arg| arg.help(h.connect_host).value_name(v.host))
                 .mut_arg("port", |arg| arg.value_name(v.port))
-                .mut_arg("via", |arg| arg.help(h.connect_via).value_name(v.exit))
         })
         .mut_subcommand("tune", |sub| sub.about(h.tune).mut_arg("apply", |arg| arg.help(h.tune_apply)))
         .mut_subcommand("intercept", |sub| sub.about(h.intercept).mut_subcommand("status", |sub| sub.about(h.intercept_status)))
@@ -257,11 +254,11 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             None => bail!(t.routes_not_running),
         },
         Command::Key => println!("{}", state.key_or_generate()?.public()),
-        Command::Connect { host, port, via } => {
+        Command::Connect { host, port } => {
             let config = Config::load(&state.config_path())?;
             let Some(listen) = config.proxy.socks5.addr() else { bail!(t.socks5_off) };
             let domain = state.netmap()?.map(|netmap| netmap.network.domain);
-            let destination = Destination::new(host, port, via, domain.as_deref());
+            let destination = Destination::new(host, port, domain.as_deref());
             let runtime = current_thread()?;
             let result = runtime.block_on(connect::connect(reachable_locally(listen), &destination));
             // 读标准输入的那个线程可能还卡在读上，它是取消不了的：不等它，直接退出。
@@ -496,7 +493,8 @@ mod tests {
             Command::Set { setting: Setting::Profile, .. }
         ));
         assert!(parse(&["i3t", "set", "can-fly", "on"]).is_err());
-        assert!(matches!(parse(&["i3t", "connect", "nas", "22", "--via", "home"]).unwrap().command, Command::Connect { .. }));
+        assert!(matches!(parse(&["i3t", "connect", "nas", "22"]).unwrap().command, Command::Connect { .. }));
+        assert!(parse(&["i3t", "connect", "nas", "22", "--via", "home"]).is_err(), "出口不再由用户名选，--via 去掉了");
         assert!(matches!(parse(&["i3t", "set", "intercept", "on"]).unwrap().command, Command::Set { setting: Setting::Intercept, .. }));
         assert!(matches!(
             parse(&["i3t", "intercept", "status"]).unwrap().command,

@@ -152,7 +152,7 @@ pub(crate) mod tests {
                 dial_out_only: false,
                 relay: None,
                 exit: Some(ExitRole { lan: true, ..ExitRole::default() }),
-                listeners: Vec::new(),
+                proxies: Vec::new(),
                 forwards: vec![forward(7, ForwardProtocol::Tcp, 9100, GW), forward(8, ForwardProtocol::Udp, 5353, NAS)],
                 forward_targets: vec![
                     target(7, ForwardProtocol::Tcp, "127.0.0.1:8081", GW),
@@ -165,7 +165,6 @@ pub(crate) mod tests {
             peers: vec![peer(LAPTOP), peer(NAS)],
             relays: Vec::new(),
             relay_clients: Vec::new(),
-            credentials: Vec::new(),
         }
     }
 

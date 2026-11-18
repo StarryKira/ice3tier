@@ -7,7 +7,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use i3t_access::{EgressPolicy, LocalEgress};
 use i3t_model::Netmap;
 use i3t_model::control::exit_test::{ConnectStep, ExitTestCause, ExitTestResult, ExitVia, ResolveStep};
 use i3t_model::netmap::{self, ExitRole, IpFamily, Network};
@@ -44,12 +43,11 @@ const INTERFACES_TTL: Duration = Duration::from_secs(5);
 /// 每秒几十个就能把线程池占满。正常的解析几十毫秒就回来，加上缓存，同时在解析的很少超过十几个。
 const MAX_LOOKUPS: usize = 64;
 
-/// 其中一个请求方（一个发起节点，或者本机的就地出站）最多同时占多少个。一个节点刷解析时只占满它自己的这一份，
+/// 其中一个请求方（一个发起节点，或者本机的出口测试）最多同时占多少个。一个节点刷解析时只占满它自己的这一份，
 /// 别的节点和本机照常解析。浏览器一下子打开几十个域名时多出来的排一会儿队，每个只等几十毫秒。
 const MAX_LOOKUPS_PER_ASKER: usize = 16;
 
-/// 出站的拨号器。出口处理别人的流时用它，入口就地出站时也用它（它实现了 [`LocalEgress`]），
-/// 所以两条路是同一份出站策略、同一个解析缓存。克隆出来的是同一个。
+/// 出站的拨号器。出口处理别人的流和出口测试都用它，所以两者是同一份出站策略、同一个解析缓存。克隆出来的是同一个。
 pub struct Outbound<S = Os> {
     inner: Arc<Inner<S>>,
 }
@@ -83,7 +81,7 @@ enum Via {
 pub(crate) enum Asker {
     /// 一个发起节点：出口替它连互联网目标。
     Peer(NodeId),
-    /// 本机：入口的就地出站。
+    /// 本机：出口测试。
     Local,
 }
 
@@ -140,7 +138,7 @@ impl<S> std::fmt::Debug for Outbound<S> {
 }
 
 impl<S: System> Outbound<S> {
-    /// `netmap` 只在就地出站时用：那时没有别人给出该按哪一版配置判断。
+    /// `netmap` 是本节点当前的那一份：查覆盖网的地址段、出口测试时用，那时没有别人给出该按哪一版配置判断。
     pub fn new(netmap: watch::Receiver<Arc<Netmap>>, system: S) -> Self {
         let inner = Inner {
             system,
@@ -389,15 +387,6 @@ impl<S: System> Outbound<S> {
         self.connect_first([addr], CONNECT_TIMEOUT, Via::Initiator(initiator)).await
     }
 
-    /// 回环监听器上的就地出站：调用者是本机的程序，不加任何限制，只是不连覆盖网的地址。
-    async fn unrestricted(&self, host: &Host, port: u16) -> Result<TcpStream, Reply> {
-        let targets: Vec<SocketAddr> = self.resolve(host, Asker::Local).await?.into_iter().map(|ip| SocketAddr::new(ip, port)).collect();
-        for target in &targets {
-            self.not_overlay(*target)?;
-        }
-        self.connect_first(targets, CONNECT_TIMEOUT, Via::Direct).await
-    }
-
     /// 本节点自己去连的地址不能是覆盖网的地址：那些地址只在组网里有意义，到它们的连接是到那个节点开的流。
     /// 端口转发写了这样的地址、或者一个域名解析成了这样的地址时直接拒绝，不当作普通的地址去连：
     /// 透明访问打开着的时候，那样的连接会被本机的拦截规则绕回组网里。
@@ -547,35 +536,6 @@ fn presentable(network: &Network, me: Ipv4Addr, initiator: Ipv4Addr, target: Soc
         && initiator != me
         && !target.is_loopback()
         && interfaces.iter().any(|net| net.addr() == IpAddr::V4(target))
-}
-
-impl<S: System> LocalEgress for Outbound<S> {
-    async fn connect(&self, host: &Host, port: u16, policy: EgressPolicy) -> Result<TcpStream, Reply> {
-        match policy {
-            EgressPolicy::Unrestricted => self.unrestricted(host, port).await,
-            EgressPolicy::Exit => {
-                let netmap = Arc::clone(&self.inner.netmap.borrow());
-                self.internet(&netmap, host, port, Asker::Local).await
-            }
-        }
-    }
-
-    async fn udp_destination(&self, host: &Host, port: u16, policy: EgressPolicy) -> Result<SocketAddr, Reply> {
-        let destination = match policy {
-            EgressPolicy::Unrestricted => {
-                let addresses = self.resolve(host, Asker::Local).await?;
-                let first = addresses.first().ok_or_else(|| Reply::new(Status::Unreachable, "没有可以发的地址"))?;
-                let destination = SocketAddr::new(*first, port);
-                self.not_overlay(destination)?;
-                destination
-            }
-            EgressPolicy::Exit => {
-                let netmap = Arc::clone(&self.inner.netmap.borrow());
-                self.udp_internet(&netmap, host, port, Asker::Local).await?
-            }
-        };
-        Ok(self.udp_route(destination))
-    }
 }
 
 /// 出站停在了哪一步、为什么。

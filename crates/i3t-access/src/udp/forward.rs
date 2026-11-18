@@ -46,8 +46,8 @@ const MAX_LOGGED_REFUSALS: usize = 64;
 ///
 /// `counters` 记这条转发现在有多少个会话、搬了多少字节。转发的设置每个报文都从当前的 netmap 里取，所以改白名单不用重新绑定。
 /// `bind` 是配置里写的地址（端口可能是 0），用它在 netmap 里认出这条转发。
-pub(crate) async fn serve<C: Connector + Datagrams, E: Send + Sync + 'static>(
-    shared: Arc<Shared<C, E>>,
+pub(crate) async fn serve<C: Connector + Datagrams>(
+    shared: Arc<Shared<C>>,
     id: u32,
     bind: SocketAddr,
     socket: UdpSocket,
@@ -161,7 +161,7 @@ struct Session {
 
 impl Session {
     /// 开到目标节点的上下文，然后在客户端和上下文之间搬运，直到空闲太久或者上下文结束。
-    async fn run<C: Connector + Datagrams, E>(self, shared: Arc<Shared<C, E>>, forward: Forward, mut outgoing: mpsc::Receiver<Bytes>) {
+    async fn run<C: Connector + Datagrams>(self, shared: Arc<Shared<C>>, forward: Forward, mut outgoing: mpsc::Receiver<Bytes>) {
         let _active = self.active;
         let origin = Origin { credential: None, client: origin_address(self.client) };
         // 会话开不开得起来是 UDP 的转发唯一看得到的"目标连不连得上"：报文发出去之后目标收没收到，UDP 不说。

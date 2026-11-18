@@ -3,7 +3,7 @@
 //! 两种请求：
 //!
 //! - `CONNECT 主机:端口 HTTP/1.x`：隧道。请求头里只看 `Proxy-Authorization: Basic`，别的跳过。
-//! - 完整地址的请求（`GET http://主机[:端口]/路径 HTTP/1.x`，任何方法）：明文 HTTP 的转发代理。凭据和出口的写法和 `CONNECT`
+//! - 完整地址的请求（`GET http://主机[:端口]/路径 HTTP/1.x`，任何方法）：明文 HTTP 的转发代理。用户名和密码和 `CONNECT`
 //!   一样来自 `Proxy-Authorization`，去往 URL 里的主机和端口（不写是 80）。入口把请求头改写好（[`Forward::head`]）随 OPEN 发出，
 //!   之后只搬这个请求的请求体（[`body`]）。
 //!
@@ -170,7 +170,7 @@ fn authorization(fields: &[Field<'_>]) -> Result<Option<ProxyAuth>, HttpError> {
     parse_basic(field.value)
 }
 
-/// 不往目标传的头：逐跳的，和代理自己的（`Proxy-Authorization` 里是凭据）。`Host` 换成 URL 里的。
+/// 不往目标传的头：逐跳的，和代理自己的（`Proxy-Authorization` 里是用户名和密码）。`Host` 换成 URL 里的。
 fn dropped(field: &Field<'_>) -> bool {
     ["connection", "keep-alive", "te", "upgrade", "host"].iter().any(|name| field.is(name))
         || field.name.get(..6).is_some_and(|prefix| prefix.eq_ignore_ascii_case("proxy-"))
@@ -311,7 +311,7 @@ fn parse_authority(text: &str, default_port: Option<u16>) -> Result<(Host, u16),
 
 /// `Basic <base64(用户名:密码)>`。用的不是 Basic 时当作没有带认证。
 ///
-/// 按第一个冒号切分，所以用户名里不能有冒号，这也是虚拟 IPv6 不能当用户名的原因。
+/// 按第一个冒号切分，所以用户名里不能有冒号（controller 不收这样的用户名）。
 fn parse_basic(value: &str) -> Result<Option<ProxyAuth>, HttpError> {
     let Some((scheme, token)) = value.split_once(' ') else { return Ok(None) };
     if !scheme.eq_ignore_ascii_case("basic") {

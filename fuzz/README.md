@@ -33,12 +33,12 @@ cargo fuzz run control_json corpus/control_json seeds/control_json -- -dict=dict
 | `relay_udp` | relay 收到的 UDP（`Relay::handle_udp`）：握手、保活、一级和多级中转、一批里发往不同节点的数据报，来源是有会话的节点、骨干上的 relay 或陌生地址 | 不 panic。环境里两个节点和另一个 relay 已经握好手（`src/relay.rs`），所以转发的路径走得到 |
 | `names_dns` | 透明访问的名字服务收到的 DNS 报文（`Names::answer`） | 有回答时编号照抄、标着是应答、不比请求长出一条 A 记录以上 |
 | `control_json` | 节点和 controller 之间的 JSON 消息（`ToController`、`ToNode`，含经连接带的打洞信令），注册令牌的文本 | 读得出来的写回 JSON 再读，内容不变 |
-| `access_socks5` | SOCKS5 入口：问候、用户名密码认证（用户名是出口和服务等级的写法）、CONNECT / UDP ASSOCIATE，之后的选路和首批数据；UDP 关联里每个报文的头 | 入口在客户端关掉写的一半之后 5 秒之内关连接 |
-| `access_http` | HTTP 代理入口：CONNECT 和普通 `http://` 请求的转发、`Proxy-Authorization: Basic`、请求体的分帧（`Content-Length`、`chunked`、尾部） | 同上 |
+| `access_socks5` | SOCKS5 入口：问候、用户名密码认证、CONNECT / UDP ASSOCIATE，之后的选路和首批数据；两种协议都说的端口按第一个字节分；UDP 关联里每个报文的头 | 入口在客户端关掉写的一半之后 5 秒之内关连接 |
+| `access_http` | HTTP 代理入口：CONNECT 和普通 `http://` 请求的转发、`Proxy-Authorization: Basic`、请求体的分帧（`Content-Length`、`chunked`、尾部）；两种协议都说的端口按第一个字节分 | 同上 |
 | `access_forward` | TCP 端口转发的首批数据：TLS ClientHello 那条记录要读完整，别的有多少读多少 | 同上 |
 
-`access_*` 三个目标从入口的监听器进去：入口里这些解析器都是 crate 私有的。`src/access.rs` 在回环上起一个入口，
-对端节点是内存连接层上的替身，就地出站和对端都连到一个回环上的"目标"；每个输入是一条 TCP 连接上客户端发的全部字节
+`access_*` 三个目标从入口监听的端口进去：入口里这些解析器都是 crate 私有的。`src/access.rs` 在回环上起一个入口，
+几个代理都经对端 `gw` 出去，它是内存连接层上的替身，连到一个回环上的"目标"；每个输入是一条 TCP 连接上客户端发的全部字节
 （第二个字节可以把它切成两次发）。所以它们一秒只跑几百个输入，比别的目标慢两三个数量级。
 
 ## 种子和字典

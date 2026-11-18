@@ -2,7 +2,7 @@
 
 use i3t_model::admin::diag::{CellState, ItemState, MatrixState, TestState};
 use i3t_model::admin::{
-    AddressSource, ApiError, CredentialState, ExitHealth, ForwardStatus, LaneBlock, NodeWarning, PackageState, PathSource, ReachCause,
+    AddressSource, ApiError, ExitHealth, ForwardStatus, LaneBlock, NodeWarning, PackageState, PathSource, ProxyStatus, ReachCause,
     ReleaseCause, SkipCause, TokenState, UpdateWait,
 };
 use i3t_model::control::diag::{ChoiceCode, HopSource, PathPick, TestCode, TransferEnd};
@@ -46,7 +46,7 @@ pub(super) static CODES: Codes = Codes {
     exit_test_cause,
     exit_via,
     token_state,
-    credential_state,
+    proxy_status,
     exit_health,
     path_source,
     test_code,
@@ -418,12 +418,22 @@ const fn token_state(state: TokenState) -> &'static str {
     }
 }
 
-const fn credential_state(state: CredentialState) -> &'static str {
-    match state {
-        CredentialState::Active => "可用",
-        CredentialState::Exhausted => "流量用完",
-        CredentialState::Revoked => "已吊销",
-        CredentialState::Unknown => "未知",
+fn proxy_status(status: &ProxyStatus) -> String {
+    match status {
+        ProxyStatus::Listening { local } => format!("监听在 {local}"),
+        ProxyStatus::Disabled => "已停用".to_owned(),
+        ProxyStatus::Pending => "等节点报上来".to_owned(),
+        ProxyStatus::NodeOffline => "节点离线".to_owned(),
+        ProxyStatus::PortInUse { .. } => "端口被占用".to_owned(),
+        ProxyStatus::BindFailed { cause, detail } => match cause {
+            Some(cause) => format!("没有绑上：{}", bind_cause(*cause)),
+            None => format!("没有绑上：{detail}"),
+        },
+        ProxyStatus::ExitDisabled { .. } => "出口节点没有启用出口".to_owned(),
+        ProxyStatus::AccessDenied { .. } => "访问规则不允许它访问出口".to_owned(),
+        ProxyStatus::ExitOffline { .. } => "出口离线".to_owned(),
+        ProxyStatus::ExitMissing => "没有出口：选好出口才能启用".to_owned(),
+        ProxyStatus::Unknown => "未知".to_owned(),
     }
 }
 

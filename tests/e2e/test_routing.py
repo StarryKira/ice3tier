@@ -32,7 +32,7 @@ def start_download(node: Node, url: str, via: Node, megabytes: float, rate: str)
     """在后台开始一次限速下载，返回进程和应有的字节数。限速是为了让它持续一两分钟，中间好换路。"""
     size = int(megabytes * 1_000_000)
     cmd = node.host.cmd("curl", "-sS", "--max-time", "400", "--limit-rate", rate, "-o", "/dev/null", "-w", "%{size_download}",
-                        "-x", f"socks5h://{via.virtual_ip}@127.0.0.1:1080", f"{url}bytes/{size}")
+                        "-x", node.entry(via).url("socks5h"), f"{url}bytes/{size}")
     return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True), size
 
 
@@ -70,7 +70,7 @@ def lowest_cost_two_relays(lab: Lab, work: Path, t: Checks) -> None:
     lowest_cost = {"routing": "lowest_cost"}
     for relay in (r1, r2):
         relay.start_static(relay.netmap(me={"relay": {}}, relays=relays, relay_clients=[a, d, r1, r2]))
-    a.start_static(a.netmap(peers=[d.as_peer(attached=[(r2, 10)], exit=True)], relays=relays, me=lowest_cost))
+    a.start_static(a.netmap(peers=[d.as_peer(attached=[(r2, 10)], exit=True)], relays=relays, me=lowest_cost, proxies=[a.proxy_to(d)]))
     d.start_static(d.netmap(peers=[a.as_peer(attached=[(r1, 10)])], relays=relays, me={"exit": {}, **lowest_cost}))
 
     url = f"http://{web.ip}/"
@@ -81,7 +81,7 @@ def lowest_cost_two_relays(lab: Lab, work: Path, t: Checks) -> None:
     reasons = [reason for route, reason in route_changes(a, d) if route == two_relays]
     t.check("换路的原因里写着代价", bool(reasons) and "延迟优先" in reasons[-1] and "ms" in reasons[-1], str(reasons))
     fast = a.host.run("curl", "-sS", "--max-time", "10", "-o", "/dev/null", "-w", "%{time_total}", "-x",
-                      f"socks5h://{d.virtual_ip}@127.0.0.1:1080", url, check=False)
+                      a.entry(d).url("socks5h"), url, check=False)
     t.check("经两个 relay 的请求确实比直连的往返快", fast.returncode == 0 and float(fast.stdout or 9) < 0.110, f"用了 {fast.stdout!r} 秒")
 
     download, size = start_download(a, url, d, 30, rate="200k")
@@ -111,7 +111,7 @@ def same_lan(lab: Lab, work: Path, t: Checks) -> None:
     nat = lab.nat("nat-x", NatKind.SYMMETRIC)
     a = Node(nat.host("a"), work, 1)
     b = Node(nat.host("b"), work, 2, declare=("exit",))
-    a.start_static(a.netmap(peers=[b.as_peer(endpoints=False, exit=True)]))
+    a.start_static(a.netmap(peers=[b.as_peer(endpoints=False, exit=True)], proxies=[a.proxy_to(b)]))
     b.start_static(b.netmap(peers=[a.as_peer(endpoints=False)], me={"exit": {}}))
 
     url = f"http://{web.ip}/"
@@ -143,7 +143,7 @@ def graceful_relay_shutdown(lab: Lab, work: Path, t: Checks) -> None:
         relay.start_static(relay.netmap(me={"relay": {}}, relays=relays, relay_clients=[a, b, r1, r2]))
     # 两个节点都在对称型 NAT 后面，只能经 relay。默认模式：用对端挂靠表里排第一的 r1。
     attached = [(r1, 5), (r2, 6)]
-    a.start_static(a.netmap(peers=[b.as_peer(endpoints=False, attached=attached, exit=True)], relays=relays))
+    a.start_static(a.netmap(peers=[b.as_peer(endpoints=False, attached=attached, exit=True)], relays=relays, proxies=[a.proxy_to(b)]))
     b.start_static(b.netmap(peers=[a.as_peer(endpoints=False, attached=attached)], relays=relays, me={"exit": {}}))
 
     url, expect = f"http://{web.ip}/", lab.hosts["nat-b"].ip

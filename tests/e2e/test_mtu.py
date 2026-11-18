@@ -103,6 +103,7 @@ def tcp_only_node_behind_a_black_hole(lab: Lab, work: Path, t: Checks) -> None:
         seen = controller.node(s)
         return seen["online"] and seen["acked_version"] > 0 and seen["acked_version"] == seen["netmap_version"]
     t.check("黑洞后面的节点拿到了 netmap、在线", waited(netmap_applied, 60), tail(s.read_log(), 8))
+    controller.add_proxy(s, exit_node)
     attached = waited(lambda: attached_over_tcp(s, relay) and attached_over_tcp(s, exit_node), 60)
     t.check("它经 TCP 挂上了两个 relay", attached, tail(s.read_log(), 8))
     reached = waited(lambda: any("中转会话建立" in line and f"node={s.id}" in line for line in exit_node.read_log().splitlines()), 60)

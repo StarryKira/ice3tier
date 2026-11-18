@@ -27,7 +27,6 @@ use tracing::Instrument;
 
 use super::forward::MAX_SESSIONS;
 use super::{MAX_UDP_PAYLOAD, OUTGOING_BACKLOG, open_context, owned};
-use crate::egress::LocalEgress;
 use crate::manager::{Access, Connection};
 use crate::route;
 use crate::session::Shared;
@@ -48,7 +47,7 @@ pub trait Diversion: Send + Sync + 'static {
     fn reply_socket(&self, local: SocketAddr, client: SocketAddr) -> io::Result<UdpSocket>;
 }
 
-impl<C: Connector + Datagrams, E: LocalEgress> Access<C, E> {
+impl<C: Connector + Datagrams> Access<C> {
     /// 接住内核交过来的 UDP 报文，直到这个 future 被丢弃。
     pub async fn intercept_udp(&self, diversion: impl Diversion) {
         let shared = &self.shared;
@@ -90,7 +89,7 @@ impl<C: Connector + Datagrams, E: LocalEgress> Access<C, E> {
 }
 
 /// 一个新的（应用，目标）能不能开会话，能的话是到哪个对端。
-fn admit<C: Datagrams, E>(shared: &Shared<C, E>, refused: &mut HashSet<SocketAddr>, original: SocketAddr, open: usize) -> Option<NodeId> {
+fn admit<C: Datagrams>(shared: &Shared<C>, refused: &mut HashSet<SocketAddr>, original: SocketAddr, open: usize) -> Option<NodeId> {
     if open >= MAX_SESSIONS {
         tracing::debug!(%original, "丢掉了一个被拦截的 UDP 报文：会话到了上限（{MAX_SESSIONS} 个），等旧的会话空闲回收");
         return None;
@@ -126,7 +125,7 @@ struct Session {
 }
 
 impl Session {
-    async fn run<C: Connector + Datagrams, E>(self, shared: Arc<Shared<C, E>>, mut outgoing: mpsc::Receiver<Bytes>) {
+    async fn run<C: Connector + Datagrams>(self, shared: Arc<Shared<C>>, mut outgoing: mpsc::Receiver<Bytes>) {
         let Self { reply, peer, port, class, connection } = self;
         // 客户端是本机的程序，不写来源地址。
         let origin = Origin { credential: None, client: None };

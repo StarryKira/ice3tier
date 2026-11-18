@@ -155,7 +155,7 @@ mod tests {
         store.log_refs(1, Some(network), "node.update", "a", &[node(3)], json!({})).unwrap();
         store.log_refs(2, Some(network), "node.relay.enable", "b", &[node(30)], json!({})).unwrap();
         store.log_refs(3, None, "update.force_all", "c", &[], json!({})).unwrap();
-        store.log_refs(4, Some(network), "credential.create", "d", &[LogRef::new(RefKind::Credential, 3)], json!({})).unwrap();
+        store.log_refs(4, Some(network), "proxy.create", "d", &[LogRef::new(RefKind::Proxy, 3)], json!({})).unwrap();
         store.log(5, Some(network), "nodes.weird", "e", json!({})).unwrap();
         let ids = |filter: LogFilter| {
             store.oplog_filtered(&LogFilter { limit: 100, ..filter }).unwrap().iter().map(|entry| entry.at).collect::<Vec<_>>()
@@ -169,7 +169,7 @@ mod tests {
         assert_eq!(ids(LogFilter { action: Some("node".into()), ..LogFilter::default() }), [2, 1], "nodes.weird 不算 node 开头的操作");
         assert_eq!(ids(LogFilter { action: Some("node.relay.enable".into()), ..LogFilter::default() }), [2]);
         assert_eq!(ids(LogFilter { action: Some("update.force_all".into()), ..LogFilter::default() }), [3]);
-        assert_eq!(ids(LogFilter { reference: Some(node(3)), ..LogFilter::default() }), [1], "节点 3，不是节点 30，也不是凭据 3");
+        assert_eq!(ids(LogFilter { reference: Some(node(3)), ..LogFilter::default() }), [1], "节点 3，不是节点 30，也不是代理 3");
         assert_eq!(store.oplog(10).unwrap()[3].refs, [node(30)]);
     }
 }

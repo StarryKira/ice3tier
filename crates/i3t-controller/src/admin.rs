@@ -23,9 +23,9 @@ use axum::{Json, Router};
 use i3t_model::admin::diag::{CreateTest, TestQuery};
 use i3t_model::admin::stats::SeriesQuery;
 use i3t_model::admin::{
-    API_PREFIX, ApiError, CreateCredential, CreateEnrollToken, CreateGroup, CreateNetwork, CreateRule, ErrorBody, ErrorCode, ExitTestInput,
-    ForceUpdate, ForwardInput, GroupId, GroupMembers, ListenerInput, LogRef, NetworkId, PairInput, RelayEnabled, RelaySettings,
-    ResumeUpdate, Succeed, UpdateCredential, UpdateGroup, UpdateNetwork, UpdateNode, UpdateRule, UpdateSettings,
+    API_PREFIX, ApiError, CreateEnrollToken, CreateGroup, CreateNetwork, CreateProxy, CreateRule, ErrorBody, ErrorCode, ExitTestInput,
+    ForceUpdate, ForwardInput, GroupId, GroupMembers, LogRef, NetworkId, PairInput, RelayEnabled, RelaySettings, ResumeUpdate, Succeed,
+    UpdateGroup, UpdateNetwork, UpdateNode, UpdateProxy, UpdateRule, UpdateSettings,
 };
 use i3t_model::netmap::ExitRole;
 use i3t_proto::NodeId;
@@ -89,10 +89,8 @@ pub fn router(controller: Arc<Controller>, webui: &WebUi) -> Router {
         .route(&format!("{network}/tokens/{{id}}"), axum::routing::delete(delete_token))
         .route(&format!("{network}/rules"), get(list_rules).post(create_rule))
         .route(&format!("{network}/rules/{{id}}"), axum::routing::patch(update_rule).delete(delete_rule))
-        .route(&format!("{network}/credentials"), get(list_credentials).post(create_credential))
-        .route(&format!("{network}/credentials/{{id}}"), axum::routing::patch(update_credential).delete(delete_credential))
-        .route(&format!("{network}/listeners"), get(list_listeners).post(create_listener))
-        .route(&format!("{network}/listeners/{{id}}"), put(replace_listener).delete(delete_listener))
+        .route(&format!("{network}/proxies"), get(list_proxies).post(create_proxy))
+        .route(&format!("{network}/proxies/{{id}}"), get(show_proxy).patch(update_proxy).delete(delete_proxy))
         .route(&format!("{network}/forwards"), get(list_forwards).post(create_forward))
         .route(&format!("{network}/forwards/{{id}}"), put(replace_forward).delete(delete_forward))
         .route(&format!("{network}/pairs"), get(list_pairs))
@@ -134,7 +132,9 @@ impl From<Error> for Failure {
         let status = match code {
             ErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
             ErrorCode::NotFound => StatusCode::NOT_FOUND,
-            ErrorCode::InvalidRequest | ErrorCode::AddressOutOfRange => StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest | ErrorCode::AddressOutOfRange | ErrorCode::ExitIsNode | ErrorCode::CredentialsIncomplete => {
+                StatusCode::BAD_REQUEST
+            }
             ErrorCode::NameTaken
             | ErrorCode::NameCoolingDown
             | ErrorCode::AddressTaken
@@ -151,7 +151,9 @@ impl From<Error> for Failure {
             | ErrorCode::CannotSelfUpdate
             | ErrorCode::NoUpdate
             | ErrorCode::TooSoon
-            | ErrorCode::Busy => StatusCode::CONFLICT,
+            | ErrorCode::Busy
+            | ErrorCode::ExitNotEnabled
+            | ErrorCode::AccessDenied => StatusCode::CONFLICT,
             // `ErrorCode` 以后可能加新的值；这里没有专门对应的一律按内部错误报。
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -328,7 +330,7 @@ struct TokenQuery {
 }
 
 #[derive(Deserialize)]
-struct ListenerQuery {
+struct ProxyQuery {
     node: Option<NodeId>,
 }
 
@@ -498,14 +500,6 @@ async fn remove_member(State(app): State<App>, Path((network, group, node)): Pat
     ok(&app, move |controller| controller.remove_member(network, group, node)).await
 }
 
-async fn update_credential(
-    State(app): State<App>,
-    Path((network, id)): Path<(NetworkId, u32)>,
-    Body(request): Body<UpdateCredential>,
-) -> Reply {
-    ok(&app, move |controller| controller.update_credential(network, id, &request)).await
-}
-
 async fn list_networks(State(app): State<App>) -> Reply {
     ok(&app, Controller::networks).await
 }
@@ -614,32 +608,24 @@ async fn delete_rule(State(app): State<App>, Path((network, id)): Path<(NetworkI
     deleted(&app, move |controller| controller.delete_rule(network, id)).await
 }
 
-async fn list_credentials(State(app): State<App>, Path(network): Path<NetworkId>) -> Reply {
-    ok(&app, move |controller| controller.credentials(network)).await
+async fn list_proxies(State(app): State<App>, Path(network): Path<NetworkId>, Query(query): Query<ProxyQuery>) -> Reply {
+    ok(&app, move |controller| controller.proxies(network, query.node)).await
 }
 
-async fn create_credential(State(app): State<App>, Path(network): Path<NetworkId>, Body(request): Body<CreateCredential>) -> Reply {
-    created(&app, move |controller| controller.create_credential(network, &request)).await
+async fn create_proxy(State(app): State<App>, Path(network): Path<NetworkId>, Body(input): Body<CreateProxy>) -> Reply {
+    created(&app, move |controller| controller.create_proxy(network, input)).await
 }
 
-async fn delete_credential(State(app): State<App>, Path((network, id)): Path<(NetworkId, u32)>) -> Reply {
-    deleted(&app, move |controller| controller.delete_credential(network, id)).await
+async fn show_proxy(State(app): State<App>, Path((network, id)): Path<(NetworkId, u32)>) -> Reply {
+    ok(&app, move |controller| controller.proxy(network, id)).await
 }
 
-async fn list_listeners(State(app): State<App>, Path(network): Path<NetworkId>, Query(query): Query<ListenerQuery>) -> Reply {
-    ok(&app, move |controller| controller.listeners(network, query.node)).await
+async fn update_proxy(State(app): State<App>, Path((network, id)): Path<(NetworkId, u32)>, Body(input): Body<UpdateProxy>) -> Reply {
+    ok(&app, move |controller| controller.update_proxy(network, id, input)).await
 }
 
-async fn create_listener(State(app): State<App>, Path(network): Path<NetworkId>, Body(input): Body<ListenerInput>) -> Reply {
-    created(&app, move |controller| controller.create_listener(network, input)).await
-}
-
-async fn replace_listener(State(app): State<App>, Path((network, id)): Path<(NetworkId, u32)>, Body(input): Body<ListenerInput>) -> Reply {
-    ok(&app, move |controller| controller.replace_listener(network, id, input)).await
-}
-
-async fn delete_listener(State(app): State<App>, Path((network, id)): Path<(NetworkId, u32)>) -> Reply {
-    deleted(&app, move |controller| controller.delete_listener(network, id)).await
+async fn delete_proxy(State(app): State<App>, Path((network, id)): Path<(NetworkId, u32)>) -> Reply {
+    deleted(&app, move |controller| controller.delete_proxy(network, id)).await
 }
 
 async fn list_forwards(State(app): State<App>, Path(network): Path<NetworkId>) -> Reply {

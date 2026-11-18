@@ -2,7 +2,7 @@
 
 use i3t_model::admin::diag::{CellState, ItemState, MatrixState, TestState};
 use i3t_model::admin::{
-    AddressSource, ApiError, CredentialState, ErrorCode, ExitHealth, ForwardStatus, LaneBlock, NodeWarning, PackageState, PathSource,
+    AddressSource, ApiError, ErrorCode, ExitHealth, ForwardStatus, LaneBlock, NodeWarning, PackageState, PathSource, ProxyStatus,
     ReachCause, ReleaseCause, SkipCause, TokenState, UpdateWait,
 };
 use i3t_model::control::diag::{ChoiceCode, HopSource, PathPick, TestCode, TransferEnd};
@@ -46,7 +46,7 @@ pub(super) static CODES: Codes = Codes {
     exit_test_cause,
     exit_via,
     token_state,
-    credential_state,
+    proxy_status,
     exit_health,
     path_source,
     test_code,
@@ -347,8 +347,7 @@ fn api_error(error: &ApiError) -> String {
         Some("group") => "group",
         Some("token") => "enrollment token",
         Some("rule") => "rule",
-        Some("credential") => "credential",
-        Some("listener") => "listener",
+        Some("proxy") => "proxy",
         Some("forward") => "port forward",
         Some("pair") => "node pair setting",
         Some("paused_version") => "paused version",
@@ -382,7 +381,6 @@ fn api_error(error: &ApiError) -> String {
                 Some("with_successor") => "can't be set together with a successor",
                 Some("no_default") => "no free default range",
                 Some("needs_quality") => "needs a quality test",
-                Some("revoked") => "credential revoked",
                 Some("method") => "method not allowed",
                 Some(_) | None => "invalid",
             };
@@ -435,6 +433,10 @@ fn api_error(error: &ApiError) -> String {
         }
         ErrorCode::TooSoon => "Too soon; try again shortly".to_owned(),
         ErrorCode::Busy => "Busy or already finished".to_owned(),
+        ErrorCode::ExitNotEnabled => format!("The exit node isn't enabled as an exit{field}"),
+        ErrorCode::ExitIsNode => format!("The exit must be another node, not the one listening{field}"),
+        ErrorCode::AccessDenied => format!("The access rules don't let the node reach the exit{field}"),
+        ErrorCode::CredentialsIncomplete => format!("Give both user name and password, or neither{field}"),
         ErrorCode::Internal => "Controller internal error; see its log".to_owned(),
         // 比这个程序新的 controller 才有的错误码：只能说出错了，原话是中文的。
         _ => "Request failed".to_owned(),
@@ -519,12 +521,22 @@ const fn token_state(state: TokenState) -> &'static str {
     }
 }
 
-const fn credential_state(state: CredentialState) -> &'static str {
-    match state {
-        CredentialState::Active => "active",
-        CredentialState::Exhausted => "limit reached",
-        CredentialState::Revoked => "revoked",
-        CredentialState::Unknown => "unknown",
+fn proxy_status(status: &ProxyStatus) -> String {
+    match status {
+        ProxyStatus::Listening { local } => format!("listening on {local}"),
+        ProxyStatus::Disabled => "disabled".to_owned(),
+        ProxyStatus::Pending => "waiting for the node".to_owned(),
+        ProxyStatus::NodeOffline => "node offline".to_owned(),
+        ProxyStatus::PortInUse { .. } => "port in use".to_owned(),
+        ProxyStatus::BindFailed { cause, detail } => match cause {
+            Some(cause) => format!("bind failed: {}", bind_cause(*cause)),
+            None => format!("bind failed: {detail}"),
+        },
+        ProxyStatus::ExitDisabled { .. } => "exit node isn't an exit".to_owned(),
+        ProxyStatus::AccessDenied { .. } => "rules don't allow reaching the exit".to_owned(),
+        ProxyStatus::ExitOffline { .. } => "exit offline".to_owned(),
+        ProxyStatus::ExitMissing => "no exit; choose one to enable it".to_owned(),
+        ProxyStatus::Unknown => "unknown".to_owned(),
     }
 }
 

@@ -20,7 +20,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time;
 use tracing::Instrument;
 
-use crate::egress::LocalEgress;
 use crate::first_data::{self, FIRST_BYTE_WAIT};
 use crate::manager::{ACCEPT_BACKOFF, Access, Active, Connection, Traffic};
 use crate::route;
@@ -37,7 +36,7 @@ pub struct InterceptStatus {
     pub traffic: Traffic,
 }
 
-impl<C: Connector + Datagrams, E: LocalEgress> Access<C, E> {
+impl<C: Connector + Datagrams> Access<C> {
     /// 接住内核改过来的 TCP 连接，直到这个 future 被丢弃。`original` 取回一条连接原来要去的地址
     /// （Linux 上是 `SO_ORIGINAL_DST`）。
     pub async fn intercept_tcp(
@@ -72,8 +71,8 @@ impl<C: Connector + Datagrams, E: LocalEgress> Access<C, E> {
 }
 
 /// 把一条被拦截的连接接到它原来要去的那个对端。
-async fn carry<C: Connector + Datagrams, E>(
-    shared: Arc<Shared<C, E>>,
+async fn carry<C: Connector + Datagrams>(
+    shared: Arc<Shared<C>>,
     mut stream: TcpStream,
     original: io::Result<SocketAddr>,
     connection: Connection,
@@ -110,7 +109,7 @@ async fn carry<C: Connector + Datagrams, E>(
         Ok(first_data) => first_data,
         Err(error) => return tracing::debug!(%error, "客户端在发出数据之前断开了"),
     };
-    let meter = IngressMeter { listen: &connection.traffic, credential: None, exit: None };
+    let meter = IngressMeter { listen: &connection.traffic, exit: None };
     meter.record(true, first_data.len());
     // 客户端是本机的程序，和回环上的代理入口一样不写来源地址。
     let origin = Origin { credential: None, client: None };

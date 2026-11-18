@@ -3,37 +3,20 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
 use i3t_model::admin::{
-    AddressSource, CreateCredential, CreateEnrollToken, CreateNetwork, Direction, ErrorCode, ForwardInput, ForwardStatus, ListenerInput,
-    PairInput, RelayAddress, RelaySettings, UpdateNetwork, UpdateNode,
+    AddressSource, CreateEnrollToken, CreateNetwork, Direction, ErrorCode, ForwardInput, ForwardStatus, PairInput, RelayAddress,
+    RelaySettings, UpdateNetwork, UpdateNode, UpdateProxy,
 };
 use i3t_model::control::{Declared, EnrollToken, ToController};
-use i3t_model::netmap::{self, DefaultAction, ExitRole, ForwardProtocol, LaneMode, ListenerProtocol};
+use i3t_model::netmap::{ExitRole, ForwardProtocol, LaneMode};
 use i3t_proto::NodeId;
 
 use super::super::COOLDOWN_SECS;
-use super::super::testing::{CAN_DO_ALL, Lab, REMOTE, hello};
+use super::super::testing::{CAN_DO_ALL, Lab, REMOTE, hello, proxy};
 use super::{add_rule, drop_default_rule, rename};
 use crate::error::{Error, Rejection};
 
 fn ip(text: &str) -> Ipv4Addr {
     text.parse().unwrap()
-}
-
-fn listener(node: NodeId, name: &str, bind: &str, require_credential: bool) -> ListenerInput {
-    ListenerInput {
-        node,
-        config: netmap::Listener {
-            name: name.to_owned(),
-            bind: bind.parse().unwrap(),
-            protocol: ListenerProtocol::Socks5,
-            allow_from: Vec::new(),
-            require_credential,
-            default_action: None,
-            fixed_exit: None,
-            class: None,
-            optimistic: None,
-        },
-    }
 }
 
 fn forward(listen_node: NodeId, target_node: NodeId) -> ForwardInput {
@@ -110,7 +93,9 @@ fn things_in_another_network_are_not_found_through_this_one() {
     let (home, office) = (lab.network("home"), lab.network("office"));
     let ours = lab.join_offline(home.id, &[], CAN_DO_ALL);
     let theirs = lab.join_offline(office.id, &[], CAN_DO_ALL);
+    let theirs_too = lab.join_offline(office.id, &[], CAN_DO_ALL);
     lab.switch_on_forward_target(office.id, theirs);
+    lab.controller.enable_exit(office.id, theirs_too, ExitRole::default()).unwrap();
     let controller = &lab.controller;
     let not_found = |error: Error| assert_eq!(error.code(), ErrorCode::NotFound, "{error}");
 
@@ -125,24 +110,18 @@ fn things_in_another_network_are_not_found_through_this_one() {
 
     let their_rule = controller.rules(office.id).unwrap()[0].id;
     not_found(controller.delete_rule(home.id, their_rule).unwrap_err());
-    let their_credential =
-        controller.create_credential(office.id, &CreateCredential { name: "c".to_owned(), max_concurrent: None, max_bytes: None }).unwrap();
-    not_found(controller.delete_credential(home.id, their_credential.credential.id).unwrap_err());
     let their_token = controller.create_token(office.id, &CreateEnrollToken::default()).unwrap();
     not_found(controller.delete_token(home.id, their_token.info.id).unwrap_err());
-    let their_listener = controller.create_listener(office.id, listener(theirs, "l", "127.0.0.1:1080", false)).unwrap();
-    not_found(controller.delete_listener(home.id, their_listener.id).unwrap_err());
+    let their_proxy = controller.create_proxy(office.id, proxy(theirs, "127.0.0.1:1080", theirs_too)).unwrap();
+    not_found(controller.delete_proxy(home.id, their_proxy.id).unwrap_err());
+    not_found(controller.proxy(home.id, their_proxy.id).unwrap_err());
+    not_found(controller.update_proxy(home.id, their_proxy.id, UpdateProxy::default()).unwrap_err());
     let their_forward = controller.create_forward(office.id, forward(theirs, theirs)).unwrap();
     not_found(controller.delete_forward(home.id, their_forward.id).unwrap_err());
 
     // 这个网络里的配置也引用不了别的网络的节点。
-    not_found(controller.create_listener(home.id, listener(theirs, "l", "127.0.0.1:1080", false)).unwrap_err());
-    let mut exit_elsewhere = listener(ours, "l", "127.0.0.1:1080", false);
-    exit_elsewhere.config.fixed_exit = Some(theirs);
-    not_found(controller.create_listener(home.id, exit_elsewhere).unwrap_err());
-    let mut default_elsewhere = listener(ours, "l", "127.0.0.1:1080", false);
-    default_elsewhere.config.default_action = Some(DefaultAction::Exit { node: theirs });
-    not_found(controller.create_listener(home.id, default_elsewhere).unwrap_err());
+    not_found(controller.create_proxy(home.id, proxy(theirs, "127.0.0.1:1080", ours)).unwrap_err());
+    not_found(controller.create_proxy(home.id, proxy(ours, "127.0.0.1:1080", theirs)).unwrap_err());
     not_found(controller.create_forward(home.id, forward(ours, theirs)).unwrap_err());
     not_found(controller.create_forward(home.id, forward(theirs, ours)).unwrap_err());
     not_found(controller.set_pair(home.id, ours, theirs, PairInput { keep_alive: Some(true), lane: None, congestion: None }).unwrap_err());
@@ -152,9 +131,8 @@ fn things_in_another_network_are_not_found_through_this_one() {
     let pin = UpdateNode { pinned_relays: Some(vec![theirs]), ..UpdateNode::default() };
     not_found(controller.update_node(home.id, ours, &pin).unwrap_err());
 
-    assert!(controller.listeners(home.id, None).unwrap().is_empty());
+    assert!(controller.proxies(home.id, None).unwrap().is_empty());
     assert!(controller.forwards(home.id).unwrap().is_empty());
-    assert!(controller.credentials(home.id).unwrap().is_empty());
     assert!(controller.tokens(home.id, false).unwrap().is_empty());
 }
 
@@ -505,10 +483,9 @@ fn a_successor_enrolled_by_token_inherits_identity_and_configuration() {
     rename(&lab, network.id, old.id, "nas-01");
     lab.controller.enable_relay(network.id, old.id, RelaySettings::default()).unwrap();
     lab.controller.enable_exit(network.id, old.id, ExitRole::default()).unwrap();
-    let own_listener = lab.controller.create_listener(network.id, listener(old.id, "local", "127.0.0.1:1080", false)).unwrap();
-    let mut via_exit = listener(other, "via", "127.0.0.1:1081", false);
-    via_exit.config.fixed_exit = Some(old.id);
-    let referring_listener = lab.controller.create_listener(network.id, via_exit).unwrap();
+    lab.controller.enable_exit(network.id, other, ExitRole::default()).unwrap();
+    let own_proxy = lab.controller.create_proxy(network.id, proxy(old.id, "127.0.0.1:1080", other)).unwrap();
+    let referring_proxy = lab.controller.create_proxy(network.id, proxy(other, "127.0.0.1:1081", old.id)).unwrap();
     lab.switch_on_forward_target(network.id, old.id);
     lab.switch_on_forward_target(network.id, other);
     let to_old = lab.controller.create_forward(network.id, forward(other, old.id)).unwrap();
@@ -538,9 +515,10 @@ fn a_successor_enrolled_by_token_inherits_identity_and_configuration() {
     assert_eq!(lab.controller.node(network.id, old.id).unwrap_err().code(), ErrorCode::NotFound);
     assert_eq!(lab.connect(old.key, CAN_DO_ALL).err(), Some(Rejection::UnknownKey), "原来的公钥被吊销了");
 
-    let listeners = lab.controller.listeners(network.id, None).unwrap();
-    assert_eq!(listeners.iter().find(|l| l.id == own_listener.id).unwrap().node, new.id);
-    assert_eq!(listeners.iter().find(|l| l.id == referring_listener.id).unwrap().config.fixed_exit, Some(new.id));
+    let proxies = lab.controller.proxies(network.id, None).unwrap();
+    assert_eq!(proxies.iter().find(|p| p.id == own_proxy.id).unwrap().node, new.id);
+    let referring = proxies.iter().find(|p| p.id == referring_proxy.id).unwrap();
+    assert_eq!((referring.exit, referring.enabled), (Some(new.id), true), "经它出去的代理改成经继任者出去");
     let forwards = lab.controller.forwards(network.id).unwrap();
     let inherited_target = forwards.iter().find(|f| f.id == to_old.id).unwrap();
     assert_eq!((inherited_target.target_node, inherited_target.enabled), (new.id, true), "转发照常");
@@ -554,7 +532,7 @@ fn a_successor_enrolled_by_token_inherits_identity_and_configuration() {
     assert!(lab.controller.node(network.id, other).unwrap().node.pinned_relays.is_empty(), "原来的 relay 没了，固定它的节点解除固定");
 
     assert_eq!(new.netmap().me.forward_targets.len(), 1);
-    assert_eq!(new.netmap().me.listeners.len(), 1);
+    assert_eq!(new.netmap().me.proxies.len(), 1);
     assert!(new.netmap().peers[0].keep_alive);
     let seen_by_other = lab.netmap(other);
     assert_eq!(seen_by_other.peers.len(), 1);
@@ -649,24 +627,6 @@ fn a_token_presets_groups_and_groups_decide_access() {
 }
 
 #[test]
-fn a_listener_outside_loopback_must_require_a_credential() {
-    let mut lab = Lab::new();
-    let network = lab.network("home");
-    let node = lab.join_offline(network.id, &[], Declared::default());
-    let create = |input| lab.controller.create_listener(network.id, input);
-
-    let open_to_lan = create(listener(node, "lan", "192.168.1.5:1080", false)).unwrap_err();
-    assert_eq!(open_to_lan.code(), ErrorCode::InvalidRequest);
-    assert!(open_to_lan.to_string().contains("require_credential"), "{open_to_lan}");
-    assert_eq!(create(listener(node, "any", "0.0.0.0:1080", false)).unwrap_err().code(), ErrorCode::InvalidRequest);
-    create(listener(node, "lan", "192.168.1.5:1080", true)).unwrap();
-    create(listener(node, "local", "127.0.0.1:1080", false)).unwrap();
-    assert_eq!(create(listener(node, "local", "127.0.0.1:1090", false)).unwrap_err().code(), ErrorCode::NameTaken);
-    assert_eq!(create(listener(node, "again", "127.0.0.1:1080", false)).unwrap_err().code(), ErrorCode::Conflict);
-    assert_eq!(lab.controller.listeners(network.id, Some(node)).unwrap().len(), 2);
-}
-
-#[test]
 fn changes_are_written_to_the_operation_log_without_secrets() {
     let mut lab = Lab::new();
     let network = lab.network("home");
@@ -674,21 +634,33 @@ fn changes_are_written_to_the_operation_log_without_secrets() {
     let secret = created.token.parse::<EnrollToken>().unwrap().secret;
     let key = lab.fresh_key();
     let node = lab.enroll(key, &secret, Declared::default()).unwrap();
-    let credential = lab
-        .controller
-        .create_credential(network.id, &CreateCredential { name: "phone".to_owned(), max_concurrent: None, max_bytes: None })
-        .unwrap();
+    let exit = lab.join_offline(network.id, &[], CAN_DO_ALL);
+    lab.controller.enable_exit(network.id, exit, ExitRole::default()).unwrap();
+    let guarded = lab.controller.create_proxy(network.id, proxy(node.id, "0.0.0.0:1080", exit)).unwrap();
     rename(&lab, network.id, node.id, "laptop");
     lab.controller.delete_node(network.id, node.id).unwrap();
 
     let log = lab.controller.oplog(100).unwrap();
     let actions: Vec<&str> = log.iter().rev().map(|entry| entry.action.as_str()).collect();
-    assert_eq!(actions, ["network.create", "token.create", "node.enroll", "credential.create", "node.update", "node.delete"]);
+    assert_eq!(
+        actions,
+        [
+            "network.create",
+            "token.create",
+            "node.enroll",
+            "token.create",
+            "node.enroll",
+            "node.exit.enable",
+            "proxy.create",
+            "node.update",
+            "node.delete"
+        ]
+    );
     assert!(log.iter().all(|entry| entry.network == Some(network.id)));
     for entry in &log {
         let params = serde_json::Value::Object(entry.params.clone()).to_string();
         for text in [&entry.detail, &params] {
-            assert!(!text.contains(&secret) && !text.contains(&credential.token) && !text.contains(&created.token), "{entry:?}");
+            assert!(!text.contains(&secret) && !text.contains(&guarded.password) && !text.contains(&created.token), "{entry:?}");
         }
     }
 }
@@ -696,7 +668,7 @@ fn changes_are_written_to_the_operation_log_without_secrets() {
 /// 每种操作的记录都带着按名字给出的参数，名字是当时的名字。
 #[test]
 fn every_log_entry_carries_the_named_values_its_sentence_needs() {
-    use i3t_model::admin::{CreateGroup, CreateRule, GroupMembers, PairInput, UpdateCredential, UpdateGroup, UpdateRule};
+    use i3t_model::admin::{CreateGroup, CreateRule, GroupMembers, PairInput, UpdateGroup, UpdateRule};
     use serde_json::{Value, json};
 
     let mut lab = Lab::new();
@@ -730,18 +702,12 @@ fn every_log_entry_carries_the_named_values_its_sentence_needs() {
     lab.controller.delete_group(network.id, spare).unwrap();
     let regroup = UpdateNode { groups: Some(vec![servers]), ..UpdateNode::default() };
     lab.controller.update_node(network.id, laptop, &regroup).unwrap();
-    let credential = lab
-        .controller
-        .create_credential(network.id, &CreateCredential { name: "phone".into(), max_concurrent: Some(4), max_bytes: None })
-        .unwrap()
-        .credential;
-    let limits = UpdateCredential { max_concurrent: Some(None), reset_usage: true, ..UpdateCredential::default() };
-    lab.controller.update_credential(network.id, credential.id, &limits).unwrap();
-    lab.controller.delete_credential(network.id, credential.id).unwrap();
-    lab.controller.delete_credential(network.id, credential.id).unwrap();
-    let entry = lab.controller.create_listener(network.id, listener(laptop, "local", "127.0.0.1:1080", false)).unwrap();
-    lab.controller.replace_listener(network.id, entry.id, listener(laptop, "local", "127.0.0.1:1081", false)).unwrap();
-    lab.controller.delete_listener(network.id, entry.id).unwrap();
+    let mut local = proxy(laptop, "127.0.0.1:1080", nas);
+    (local.name, local.enabled) = ("local".into(), false);
+    let entry = lab.controller.create_proxy(network.id, local).unwrap();
+    let moved = UpdateProxy { bind: Some("127.0.0.1:1081".parse().unwrap()), ..UpdateProxy::default() };
+    lab.controller.update_proxy(network.id, entry.id, moved).unwrap();
+    lab.controller.delete_proxy(network.id, entry.id).unwrap();
     let web = lab.controller.create_forward(network.id, forward(laptop, nas)).unwrap();
     lab.controller.replace_forward(network.id, web.id, ForwardInput { enabled: false, ..forward(laptop, nas) }).unwrap();
     lab.controller.delete_forward(network.id, web.id).unwrap();
@@ -796,18 +762,14 @@ fn every_log_entry_carries_the_named_values_its_sentence_needs() {
     assert_eq!(params("group.delete"), json!({ "group": spare, "group_name": "spare", "nodes": 1, "rules": 0, "tokens": 0 }));
     let regrouped = &log.iter().find(|entry| entry.action == "node.update").unwrap().params;
     assert_eq!(regrouped["changes"], json!({ "groups": [{ "group": servers, "group_name": "boxes" }] }));
-    assert_eq!(params("credential.create")["credential_name"], "phone");
-    let limits = params("credential.update");
-    assert_eq!((&limits["max_concurrent"], &limits["reset_usage"]), (&Value::Null, &json!(true)));
-    assert_eq!(params("credential.revoke")["credential"], json!(credential.id));
-    assert_eq!(params("credential.delete")["credential_name"], "phone");
-    let listened = params("listener.create");
+    let created = params("proxy.create");
     assert_eq!(
-        (&listened["node_name"], &listened["bind"], &listened["listener_name"]),
-        (&json!("laptop"), &json!("127.0.0.1:1080"), &json!("local"))
+        (&created["node_name"], &created["bind"], &created["proxy_name"], &created["exit"], &created["enabled"]),
+        (&json!("laptop"), &json!("127.0.0.1:1080"), &json!("local"), &nas_id, &json!(false))
     );
-    assert_eq!(params("listener.update")["bind"], "127.0.0.1:1081");
-    assert_eq!(params("listener.delete")["listener"], json!(entry.id));
+    assert!(created.get("password").is_none() && created.get("username").is_none(), "用户名和密码不进操作记录");
+    assert_eq!(params("proxy.update")["bind"], "127.0.0.1:1081");
+    assert_eq!(params("proxy.delete")["proxy"], json!(entry.id));
     let forwarded = params("forward.create");
     assert_eq!(
         (&forwarded["listen_node_name"], &forwarded["target_node"], &forwarded["enabled"]),

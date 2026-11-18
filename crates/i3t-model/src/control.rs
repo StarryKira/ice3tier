@@ -399,9 +399,6 @@ pub struct Report {
     /// controller 靠它分辨"节点重启了，计数从头开始"和"计数还在往上涨"。旧版本的节点不报，读成 0。
     #[serde(default)]
     pub run: u64,
-    /// 入口上各个接入凭据的用量。这次运行里没有用过的凭据不在里面。
-    #[serde(default)]
-    pub credentials: Vec<CredentialUsage>,
     /// 本节点替别人连目标（出口一侧）的计数，以及它自己的限制用到了哪里。旧版本的节点不报。
     /// 装在 `Box` 里只是为了让消息的枚举不至于太大，JSON 里没有区别。
     #[serde(default)]
@@ -409,7 +406,11 @@ pub struct Report {
     /// 本节点作为发起方经各个出口出去的流：发起一方自己看到的字节数和失败，用来和出口的上报交叉核对。
     #[serde(default)]
     pub exits: Vec<ExitObservation>,
-    /// 代理监听器的状态，包括节点按本机配置文件自己开的那几个。
+    /// 节点上的代理（netmap 里的 `me.proxies`）的状态，按编号。旧版本的节点不报。
+    #[serde(default)]
+    pub proxies: Vec<ProxyReport>,
+    /// 节点按本机配置文件自己开的组网入口（`[proxy]`，只通到组网里的节点）的状态。
+    /// 旧版本的节点在这里也报 controller 下发的监听器，新的 controller 不看那些。
     #[serde(default)]
     pub listeners: Vec<ListenerReport>,
     /// 本节点负责监听的端口转发的状态。
@@ -743,21 +744,6 @@ pub struct LaneHandshakeFailures {
     pub busy: u64,
 }
 
-/// 一个接入凭据在一个入口上的用量。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CredentialUsage {
-    /// 凭据在 controller 上的编号（netmap 里的 [`Credential::id`](crate::netmap::Credential::id)）。
-    pub id: u32,
-    /// 这次运行以来经这个凭据搬运的字节数：客户端发出的和收到的相加。
-    pub bytes: u64,
-    /// 现在正在进行的连接（UDP ASSOCIATE 也算一条）。
-    #[serde(default)]
-    pub connections: u32,
-    /// 最近一次有连接用它是多少秒之前。用间隔而不是时刻：节点和 controller 的时钟不一定对得上。
-    #[serde(default)]
-    pub last_used_secs_ago: Option<u64>,
-}
-
 /// 出口一侧的计数。都是这次运行以来的累计，`active` 除外。
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -817,14 +803,27 @@ pub struct ExitObservation {
     pub unreachable: u64,
 }
 
-/// 一个代理监听器现在的状态。
+/// 一个代理现在的状态。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProxyReport {
+    /// 代理的编号（netmap 里的 [`Proxy::id`](crate::netmap::Proxy::id)）。
+    pub id: u32,
+    /// 节点手上那一版配置里的监听地址。controller 据此分辨这份状态说的是不是现在的设置。
+    pub bind: SocketAddr,
+    pub state: ListenState,
+    #[serde(flatten)]
+    pub traffic: ListenTraffic,
+}
+
+/// 节点按本机配置文件自己开的一个组网入口现在的状态。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListenerReport {
     pub name: String,
     /// 配置里写的绑定地址。
     pub bind: SocketAddr,
     pub protocol: ListenerProtocol,
-    /// 节点按本机的配置文件自己开的回环入口（`local-socks5`、`local-http`），不是 controller 下发的。
+    /// 节点按本机的配置文件自己开的入口（`local-socks5`、`local-http`）。新的节点报的总是 `true`；
+    /// 旧版本的节点也报 controller 下发的监听器，那些是 `false`。
     #[serde(default)]
     pub builtin: bool,
     pub state: ListenState,
@@ -1527,8 +1526,8 @@ mod tests {
     #[test]
     fn a_report_from_an_older_node_reads_without_usage_and_status() {
         let old: Report = serde_json::from_value(serde_json::json!({ "flows": 3, "tx_bytes": 10, "rx_bytes": 20 })).unwrap();
-        assert_eq!((old.run, old.exit.clone(), old.credentials.len(), old.exits.len()), (0, None, 0, 0));
-        assert!(old.listeners.is_empty() && old.forwards.is_empty());
+        assert_eq!((old.run, old.exit.clone(), old.exits.len()), (0, None, 0));
+        assert!(old.listeners.is_empty() && old.forwards.is_empty() && old.proxies.is_empty());
     }
 
     #[test]
@@ -1569,10 +1568,23 @@ mod tests {
         assert_eq!(newer, ListenState::Failed { detail: "x".into(), cause: Some(BindCause::Unknown) });
         assert_eq!(serde_json::from_value::<ListenState>(serde_json::json!({ "state": "later" })).unwrap(), ListenState::Unknown);
 
-        let usage = CredentialUsage { id: 3, bytes: 4096, connections: 1, last_used_secs_ago: Some(5) };
-        let wire = serde_json::to_value(&usage).unwrap();
-        assert_eq!(wire, serde_json::json!({ "id": 3, "bytes": 4096, "connections": 1, "last_used_secs_ago": 5 }));
-        assert_eq!(serde_json::from_value::<CredentialUsage>(wire).unwrap(), usage);
+        let proxy = ProxyReport {
+            id: 3,
+            bind: "127.0.0.1:1080".parse().unwrap(),
+            state: ListenState::Listening { local: "127.0.0.1:1080".parse().unwrap() },
+            traffic: ListenTraffic { connections: 1, bytes_up: 5, bytes_down: 6 },
+        };
+        let wire = serde_json::to_value(&proxy).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "id": 3, "bind": "127.0.0.1:1080", "state": { "state": "listening", "local": "127.0.0.1:1080" },
+                "connections": 1, "bytes_up": 5, "bytes_down": 6
+            })
+        );
+        assert_eq!(serde_json::from_value::<ProxyReport>(wire).unwrap(), proxy);
+        let older: Report = serde_json::from_value(serde_json::json!({ "credentials": [{ "id": 3, "bytes": 4096 }] })).unwrap();
+        assert!(older.proxies.is_empty(), "旧版本的节点报的凭据用量不再看");
 
         let exit = ExitReport {
             quota: Some(QuotaUsage { limit_bytes: 100, used_bytes: 40, period_start: 1, period_end: 2 }),

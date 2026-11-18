@@ -29,10 +29,9 @@ use i3t_flow::memory::{MemoryAcceptor, MemoryConnector, MemoryMesh};
 use i3t_lane::testing::LaneMesh;
 use i3t_lane::{LaneAcceptor, LaneConnector};
 use i3t_model::Netmap;
-use i3t_model::netmap::{Credential, ExitRole, LaneMode, Listener, ListenerProtocol, LocalNode, Network, Peer, PeerExit, TokenHash};
+use i3t_model::netmap::{ExitRole, LaneMode, ListenerProtocol, LocalNode, Network, Peer, PeerExit, Proxy, Verifier};
 use i3t_proto::{NodeId, PublicKey};
 use ipnet::IpNet;
-use ring::digest;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::watch;
@@ -111,7 +110,7 @@ pub fn netmap(me: u32) -> Netmap {
             dial_out_only: false,
             relay: None,
             exit: (me == GW).then(ExitRole::default),
-            listeners: Vec::new(),
+            proxies: Vec::new(),
             forwards: Vec::new(),
             forward_targets: Vec::new(),
             pinned_relays: Vec::new(),
@@ -121,33 +120,33 @@ pub fn netmap(me: u32) -> Netmap {
         peers: [LAPTOP, GW, NAS].into_iter().filter(|&raw| raw != me).map(|raw| peer(raw, exit_of(raw))).collect(),
         relays: Vec::new(),
         relay_clients: Vec::new(),
-        credentials: Vec::new(),
     }
 }
 
-pub fn listener(name: &str, protocol: ListenerProtocol, bind: &str) -> Listener {
-    Listener {
-        name: name.into(),
+/// laptop 上 [`World`] 一开始就有的代理：1、2 经 gw 出去，3、4 经 nas（nas 默认不是出口），各一个 SOCKS5 和一个 HTTP。
+pub const SOCKS_VIA_GW: u32 = 1;
+pub const HTTP_VIA_GW: u32 = 2;
+pub const SOCKS_VIA_NAS: u32 = 3;
+pub const HTTP_VIA_NAS: u32 = 4;
+
+/// 经 `exit` 号节点出去、不认证的代理。
+pub fn proxy(id: u32, protocol: ListenerProtocol, bind: &str, exit: u32) -> Proxy {
+    Proxy {
+        id,
+        name: format!("p{id}"),
         bind: bind.parse().unwrap(),
         protocol,
+        exit: node(exit),
+        auth: None,
         allow_from: Vec::new(),
-        require_credential: false,
-        default_action: None,
-        fixed_exit: None,
         class: None,
         optimistic: None,
     }
 }
 
-pub fn credential(name: &str, token: &str, max_concurrent: Option<u32>) -> Credential {
-    let hash = digest::digest(&digest::SHA256, token.as_bytes());
-    Credential {
-        name: name.into(),
-        token: TokenHash::from_bytes(hash.as_ref().try_into().unwrap()),
-        max_concurrent,
-        id: 1,
-        exhausted: false,
-    }
+/// `username` 和 `password` 的校验值，代理的 `auth` 用它。
+pub fn verifier(username: &str, password: &str) -> Verifier {
+    Verifier::derive([7; 16], username.as_bytes(), password.as_bytes())
 }
 
 /// 找到 netmap 里的一个对端来改。
@@ -285,7 +284,7 @@ pub struct Node {
     pub system: FakeSystem,
     /// 数据面报出来的本节点的候选端点（反射地址、端口映射拿到的地址）。测试往里放什么，出口就认为自己对外是什么地址。
     pub own_endpoints: Arc<Mutex<Vec<SocketAddr>>>,
-    pub access: Arc<Access<LaneConnector<MemoryConnector>, Outbound<FakeSystem>>>,
+    pub access: Arc<Access<LaneConnector<MemoryConnector>>>,
     pub exit: Arc<Exit<FakeSystem, LaneConnector<MemoryConnector>>>,
     netmap: watch::Sender<Arc<Netmap>>,
 }
@@ -309,7 +308,7 @@ impl Node {
             let own_endpoints = Arc::clone(&own_endpoints);
             move || own_endpoints.lock().unwrap().clone()
         });
-        let mut access = Access::new(Arc::clone(&connector), outbound.clone(), receiver.clone());
+        let mut access = Access::new(Arc::clone(&connector), receiver.clone());
         let mut exit =
             Exit::new(receiver, outbound, connector).with_opener(access.datagram_opener()).with_forward_health(access.forward_health());
         if let Some(udp_idle) = udp_idle {
@@ -353,11 +352,11 @@ impl Node {
         .expect("入口应该很快应用完新的 netmap")
     }
 
-    /// 一个代理监听器实际监听的地址。
-    pub async fn listener(&self, name: &str) -> SocketAddr {
+    /// 一个代理实际监听的地址。
+    pub async fn proxy(&self, id: u32) -> SocketAddr {
         let status = self.settled().await;
-        let listener = status.listeners.iter().find(|listener| listener.name == name).unwrap_or_else(|| panic!("没有叫 {name} 的监听器"));
-        local_addr(&listener.state)
+        let proxy = status.proxies.iter().find(|proxy| proxy.id == id).unwrap_or_else(|| panic!("没有 {id} 号代理"));
+        local_addr(&proxy.state)
     }
 
     /// 一条端口转发实际监听的地址。
@@ -376,7 +375,7 @@ fn local_addr(state: &ListenState) -> SocketAddr {
     }
 }
 
-/// 三个节点。laptop 上有一个 SOCKS5 监听器 `socks` 和一个 HTTP 监听器 `http`，都在回环上。
+/// 三个节点。laptop 上有经 gw 和经 nas 出去的 SOCKS5 和 HTTP 代理（[`SOCKS_VIA_GW`] 等），都在回环上、不认证。
 pub struct World {
     pub mesh: MemoryMesh,
     pub lanes: LaneMesh,
@@ -399,8 +398,12 @@ impl World {
         let mesh = MemoryMesh::new();
         let lanes = LaneMesh::for_current_test();
         let mut laptop = netmap(LAPTOP);
-        laptop.me.listeners =
-            vec![listener("socks", ListenerProtocol::Socks5, "127.0.0.1:0"), listener("http", ListenerProtocol::Http, "127.0.0.1:0")];
+        laptop.me.proxies = vec![
+            proxy(SOCKS_VIA_GW, ListenerProtocol::Socks5, "127.0.0.1:0", GW),
+            proxy(HTTP_VIA_GW, ListenerProtocol::Http, "127.0.0.1:0", GW),
+            proxy(SOCKS_VIA_NAS, ListenerProtocol::Socks5, "127.0.0.1:0", NAS),
+            proxy(HTTP_VIA_NAS, ListenerProtocol::Http, "127.0.0.1:0", NAS),
+        ];
         let laptop = Node::start_with_udp_idle(&mesh, &lanes, laptop, udp_idle).await;
         let gw = Node::start_with_udp_idle(&mesh, &lanes, netmap(GW), udp_idle).await;
         let nas = Node::start_with_udp_idle(&mesh, &lanes, netmap(NAS), udp_idle).await;
@@ -409,12 +412,24 @@ impl World {
         world
     }
 
+    /// laptop 上经 gw 出去的 SOCKS5 代理。
     pub async fn socks(&self) -> SocketAddr {
-        self.laptop.listener("socks").await
+        self.laptop.proxy(SOCKS_VIA_GW).await
     }
 
+    /// laptop 上经 gw 出去的 HTTP 代理。
     pub async fn http(&self) -> SocketAddr {
-        self.laptop.listener("http").await
+        self.laptop.proxy(HTTP_VIA_GW).await
+    }
+
+    /// laptop 上经 nas 出去的 SOCKS5 代理。
+    pub async fn socks_via_nas(&self) -> SocketAddr {
+        self.laptop.proxy(SOCKS_VIA_NAS).await
+    }
+
+    /// laptop 上经 nas 出去的 HTTP 代理。
+    pub async fn http_via_nas(&self) -> SocketAddr {
+        self.laptop.proxy(HTTP_VIA_NAS).await
     }
 }
 
@@ -461,9 +476,17 @@ pub async fn echo_server() -> SocketAddr {
     Target::bind("127.0.0.1").await.echo()
 }
 
-/// 一个没有人监听的本机端口。
+/// 一个没有人监听、连过去被拒绝的本机端口，在这个测试进程结束之前一直如此。
+///
+/// 端口由一个只绑定、不监听的 socket 占着：连它被内核当场拒绝，别的 socket 也绑不到它。以前是绑一下就放掉，
+/// 跑满整个工作区的测试时偶尔有别的测试的监听正好拿到这个端口，连过去就连上了，对面随后正常关掉，
+/// 客户端看到的是正常结束而不是"被拒绝"之后的重置。socket 故意不关：几个文件描述符，换来端口不会被别人拿走。
 pub async fn closed_port() -> SocketAddr {
-    TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap()
+    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+    socket.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into()).unwrap();
+    let addr = socket.local_addr().unwrap().as_socket().unwrap();
+    std::mem::forget(socket);
+    addr
 }
 
 /// [`assert_echo`] 每次发出去多少字节。
@@ -523,11 +546,11 @@ impl Socks5 {
     }
 }
 
-/// 做一次 SOCKS5 握手。`auth` 是用户名和密码；没有时客户端只提供"不认证"。
+/// 做一次 SOCKS5 握手。`auth` 是用户名和密码，这时客户端只提供用户名密码认证；没有时只提供"不认证"。
 pub async fn socks5(proxy: SocketAddr, auth: Option<(&str, &str)>, host: &str, port: u16) -> Socks5 {
     timeout(PATIENCE, async {
         let mut stream = TcpStream::connect(proxy).await.unwrap();
-        stream.write_all(if auth.is_some() { &[5, 2, 0, 2] } else { &[5, 1, 0] }).await.unwrap();
+        stream.write_all(if auth.is_some() { &[5, 1, 2] } else { &[5, 1, 0] }).await.unwrap();
         let mut selection = [0; 2];
         stream.read_exact(&mut selection).await.unwrap();
         match (selection, auth) {
@@ -684,7 +707,7 @@ pub async fn udp_associate(proxy: SocketAddr, auth: Option<(&str, &str)>) -> Udp
 pub async fn udp_associate_from(proxy: SocketAddr, auth: Option<(&str, &str)>, socket: UdpSocket, declared: [u8; 6]) -> UdpAssociation {
     timeout(PATIENCE, async {
         let mut control = TcpStream::connect(proxy).await.unwrap();
-        control.write_all(if auth.is_some() { &[5, 2, 0, 2] } else { &[5, 1, 0] }).await.unwrap();
+        control.write_all(if auth.is_some() { &[5, 1, 2] } else { &[5, 1, 0] }).await.unwrap();
         let mut selection = [0; 2];
         control.read_exact(&mut selection).await.unwrap();
         if let Some((username, password)) = auth {

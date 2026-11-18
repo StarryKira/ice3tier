@@ -242,7 +242,7 @@ def slow_download(node: Node, url: str, via: Node, megabytes: int, rate: str = "
     """在后台开始一次限速下载，返回进程和应该下到的字节数。限速是为了让它持续几十秒。"""
     size = megabytes * 1_000_000
     cmd = node.host.cmd("curl", "-sS", "--max-time", "180", "--limit-rate", rate, "-o", "/dev/null", "-w", "%{size_download}",
-                        "-x", f"socks5h://{via.virtual_ip}@127.0.0.1:1080", f"{url}bytes/{size}")
+                        "-x", node.entry(via).url("socks5h"), f"{url}bytes/{size}")
     return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True), size
 
 
@@ -273,6 +273,8 @@ def forced_update(lab: Lab, work: Path, t: Checks) -> None:
     for node in (a, b, c):
         node.join(controller)
     controller.ctl("exit", "enable", str(b.id))
+    for node in (a, c):
+        controller.add_proxy(node, b)
     url = f"http://{web.ip}/"
     t.check("更新之前 a 经 b 出得去", reaches(a, url, b, b.host.ip))
     seen = controller.node(a)["update"]
@@ -332,6 +334,7 @@ def idle_waits_for_flows(lab: Lab, work: Path, t: Checks) -> None:
     for node in (a, b):
         node.join(controller)
     controller.ctl("exit", "enable", str(b.id))
+    controller.add_proxy(a, b)
     url = f"http://{web.ip}/"
     t.check("a 经 b 出得去", reaches(a, url, b, b.host.ip))
 
@@ -366,6 +369,7 @@ def rollback_pauses_rollout(lab: Lab, work: Path, t: Checks) -> None:
     for node in (a, b):
         node.join(controller)
     controller.ctl("exit", "enable", str(b.id))
+    controller.add_proxy(a, b)
     url = f"http://{web.ip}/"
     t.check("a 经 b 出得去", reaches(a, url, b, b.host.ip))
 
@@ -430,6 +434,7 @@ def broken_release_is_stopped_by_self_check(lab: Lab, work: Path, t: Checks) -> 
     for node in (a, b):
         node.join(controller)
     controller.ctl("exit", "enable", str(b.id))
+    controller.add_proxy(a, b)
     url = f"http://{web.ip}/"
 
     program = work / "broken-i3t"
@@ -459,6 +464,10 @@ def drain_then_update(lab: Lab, work: Path, t: Checks) -> None:
     for node in (a, b, c):
         node.join(controller)
     controller.ctl("exit", "enable", str(b.id))
+    for node in (a, c):
+        controller.add_proxy(node, b)
+    start_whoami(c.host, 8080)
+    on_c = f"http://{c.virtual_ip}:8080/"
     url = f"http://{web.ip}/"
     t.check("a 和 c 都能经 b 出去", reaches(a, url, b, b.host.ip) and reaches(c, url, b, b.host.ip))
     release.publish(new, STAGE / "new" / "i3t")
@@ -476,15 +485,15 @@ def drain_then_update(lab: Lab, work: Path, t: Checks) -> None:
     refused = c.curl(url, via=b, timeout=8)
     t.check("排空期间别的节点经 b 的新请求被拒绝", refused.returncode != 0 and refused.stdout != b.host.ip, f"{refused.stdout!r} {refused.stderr.strip()}")
     t.check("b 记下了拒绝的原因", "节点正在排空" in b.read_log(), tail(b.read_log(), 6))
-    local = b.curl(url, timeout=5)
-    t.check("排空期间 b 自己的代理入口也关着", local.returncode != 0, f"{local.stdout!r} {local.stderr.strip()}")
+    local = b.curl(on_c, timeout=5)
+    t.check("排空期间 b 自己的组网入口也拒绝新的请求", local.returncode != 0, f"{local.stdout!r} {local.stderr.strip()}")
     t.check("i3t status 说明节点正在排空", "正在排空" in b.i3t("status").stdout, b.i3t("status").stdout[-400:])
     t.check("手上的流还在跑，b 还没有重启", download.poll() is None and b.count("节点启动") == 1)
 
     ok, detail = finished_intact(download, size)
     t.check("排空开始之前就在跑的下载完整地结束了", ok, detail)
     t.check("流跑完之后 b 更新到新版本", wait_version(controller, b, new), controller.node(b)["version"])
-    t.check("重启之后 b 重新接受新的流", reaches(c, url, b, b.host.ip) and b.curl(url, timeout=8).stdout == b.host.ip)
+    t.check("重启之后 b 重新接受新的流", reaches(c, url, b, b.host.ip) and b.curl(on_c, timeout=8).stdout == c.host.ip)
     if t.failures:
         print(tail(b.read_log(), 50), tail(c.read_log(), 20), sep="\n  ---\n")
 
@@ -546,6 +555,7 @@ def node_switch_and_security_floor(lab: Lab, work: Path, t: Checks) -> None:
     for node in (a, b, c):
         node.join(controller)
     controller.ctl("exit", "enable", str(b.id))
+    controller.add_proxy(a, b)
     kept = controller.ctl("node", "set", str(c.id), "--auto-update", "off")
     t.check("新节点的自动更新开着，c 的被关掉了", controller.node(a)["auto_update"] is True and kept["auto_update"] is False, str(kept))
     url = f"http://{web.ip}/"

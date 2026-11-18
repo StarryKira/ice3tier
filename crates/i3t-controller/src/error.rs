@@ -51,6 +51,18 @@ pub enum Error {
     ForwardTargetOff(String),
     #[error("节点 {0} 还在线。只有已经下线的节点才能被继任")]
     PredecessorOnline(String),
+    /// 代理的出口节点没有启用出口。
+    #[error("节点 {0} 没有启用出口：先把它启用成出口，或者选别的出口")]
+    ExitNotEnabled(String),
+    /// 代理的出口是监听的节点自己。
+    #[error("出口要是另一个节点：不支持从监听的节点自己出去")]
+    ExitIsNode,
+    /// 访问规则不让代理的监听节点访问它的出口。
+    #[error("访问规则不允许 {node} 访问 {exit}：先加一条让 {node} 能访问 {exit} 的规则")]
+    AccessDenied { node: String, exit: String },
+    /// 代理的用户名和密码只写了一个。
+    #[error("用户名和密码要么都写，要么都不写（不在回环地址上的代理都不写时由 controller 生成一对）")]
+    CredentialsIncomplete,
     /// 和已有的配置冲突。`with` 是挡着的东西。
     #[error("{message}")]
     Conflict { with: Entity, message: String },
@@ -129,6 +141,10 @@ impl Error {
             Self::NotDeclared { .. } => ErrorCode::NotDeclared,
             Self::ForwardTargetOff(_) => ErrorCode::ForwardTargetOff,
             Self::PredecessorOnline(_) => ErrorCode::PredecessorOnline,
+            Self::ExitNotEnabled(_) => ErrorCode::ExitNotEnabled,
+            Self::ExitIsNode => ErrorCode::ExitIsNode,
+            Self::AccessDenied { .. } => ErrorCode::AccessDenied,
+            Self::CredentialsIncomplete => ErrorCode::CredentialsIncomplete,
             Self::Conflict { .. } => ErrorCode::Conflict,
             Self::NodeOffline(_) => ErrorCode::NodeOffline,
             Self::CannotSelfUpdate { .. } => ErrorCode::CannotSelfUpdate,
@@ -192,6 +208,10 @@ impl Error {
             | Self::NetworkNotEmpty(_)
             | Self::ForwardTargetOff(_)
             | Self::PredecessorOnline(_)
+            | Self::ExitNotEnabled(_)
+            | Self::ExitIsNode
+            | Self::AccessDenied { .. }
+            | Self::CredentialsIncomplete
             | Self::NodeOffline(_)
             | Self::TooSoon(_)
             | Self::Busy(_) => return None,
@@ -269,8 +289,7 @@ pub enum Entity {
     Node,
     Token,
     Rule,
-    Credential,
-    Listener,
+    Proxy,
     Forward,
     PairSetting,
     PausedVersion,
@@ -292,8 +311,7 @@ impl Entity {
             Self::Node => "node",
             Self::Token => "token",
             Self::Rule => "rule",
-            Self::Credential => "credential",
-            Self::Listener => "listener",
+            Self::Proxy => "proxy",
             Self::Forward => "forward",
             Self::PairSetting => "pair",
             Self::PausedVersion => "paused_version",
@@ -312,8 +330,7 @@ impl fmt::Display for Entity {
             Self::Node => "节点",
             Self::Token => "注册令牌",
             Self::Rule => "规则",
-            Self::Credential => "凭据",
-            Self::Listener => "监听器",
+            Self::Proxy => "代理",
             Self::Forward => "端口转发",
             Self::PairSetting => "节点对设置",
             Self::PausedVersion => "被暂停的版本",
@@ -442,8 +459,10 @@ mod tests {
         assert_eq!(missing.to_string(), "没有这个节点", "字段不改原话");
         let zero = Error::invalid_field("ports", "zero", "端口不能是 0").in_field("exit");
         assert_eq!((zero.what().as_deref(), zero.field()), (Some("zero"), Some("ports")), "最里面的字段算数");
-        let conflict = Error::Conflict { with: Entity::Listener, message: "x".into() };
-        assert_eq!((conflict.code(), conflict.what().as_deref()), (ErrorCode::Conflict, Some("listener")));
+        let conflict = Error::Conflict { with: Entity::Proxy, message: "x".into() };
+        assert_eq!((conflict.code(), conflict.what().as_deref()), (ErrorCode::Conflict, Some("proxy")));
+        let exit = Error::ExitNotEnabled("gw".into()).in_field("exit");
+        assert_eq!((exit.code(), exit.what(), exit.field()), (ErrorCode::ExitNotEnabled, None, Some("exit")));
         let blocked = Error::CannotSelfUpdate {
             node: "nas".into(),
             reason: "x".into(),

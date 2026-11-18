@@ -7,19 +7,18 @@
 
 mod address;
 mod backup;
-mod credentials;
 mod diag;
 mod enrollment;
 mod exit_test;
 mod forwards;
 mod groups;
-mod listeners;
 mod metrics;
 mod naming;
 mod networks;
 mod nodes;
 mod pairs;
 mod protocol;
+mod proxies;
 mod publish;
 mod rollout;
 mod routes;
@@ -44,7 +43,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use i3t_crypto::{NodeKey, tls};
 use i3t_model::Netmap;
 use i3t_model::admin::{LogEntry, NetworkId, Node, NodeRef, RelayView, Status, Timestamp};
-use i3t_model::control::{ForwardReport, InterceptReport, LaneReport, ListenerReport, PeerUse, PerformanceReport, RelayUse, ToNode};
+use i3t_model::control::{
+    ForwardReport, InterceptReport, LaneReport, ListenerReport, PeerUse, PerformanceReport, ProxyReport, RelayUse, ToNode,
+};
 use i3t_model::update::{UpdateStatus, Version};
 use i3t_proto::{NodeId, PublicKey};
 use tokio::sync::{Notify, mpsc};
@@ -186,11 +187,10 @@ pub(crate) struct Live {
     pub(crate) enrolling: bool,
     /// 这次连接上最近一次上报的时刻；还没有上报过时是 `None`。
     pub(crate) reported_at: Option<Instant>,
-    /// 最近一次上报里的监听器和端口转发的状态。
+    /// 最近一次上报里的代理、节点按本机配置开的组网入口和端口转发的状态。
+    pub(crate) proxies: Vec<ProxyReport>,
     pub(crate) listeners: Vec<ListenerReport>,
     pub(crate) forwards: Vec<ForwardReport>,
-    /// 最近一次上报里各个凭据（按编号）现在的连接数。
-    pub(crate) credential_connections: BTreeMap<u32, u32>,
     /// 最近一次上报里 ice3proxy 的状况。
     pub(crate) lanes: Option<LaneReport>,
     /// 最近一次上报里节点实际在用的性能档位。

@@ -21,11 +21,11 @@ pub(crate) enum Failure {
     TimedOut,
     /// 到不了出口节点，或者出口节点自己出了问题。
     ExitUnavailable,
-    /// 凭据的并发连接数到了上限，或者本节点在出口上同时开着的流到了出口给每个节点的上限。
+    /// 本节点在出口上同时开着的流到了出口给每个节点的上限。
     TooManyConnections,
     /// 节点正在排空，不接新的连接：入口自己，或者请求要去的出口。客户端应该换一个，或者稍后再试。
     Draining,
-    /// 流量的限额用完了：出口本账期的配额，或者凭据的流量上限。
+    /// 流量的限额用完了：出口本账期的配额。
     LimitReached,
     /// 超过了出口的建连预算：同一个目标短时间里连得太多。
     RateLimited,
@@ -57,7 +57,7 @@ impl Failure {
     }
 }
 
-/// 对端（或者就地出站的拨号器）给出的失败状态怎么告诉客户端。
+/// 对端给出的失败状态怎么告诉客户端。
 impl From<Status> for Failure {
     fn from(status: Status) -> Self {
         match status {

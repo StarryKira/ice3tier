@@ -375,16 +375,14 @@ impl Store {
         Ok(())
     }
 
-    /// 删掉一个节点，连同它上面的监听器、和它有关的端口转发、节点对设置、指名继任它的注册令牌。
-    /// 别的节点的监听器里把它当出口的地方改回没有设置。
+    /// 删掉一个节点，连同它上面的代理、和它有关的端口转发、节点对设置、指名继任它的注册令牌。
+    /// 别的节点上经它出去的代理没有了出口，停用，等管理员选一个新的。
     ///
     /// # Errors
     ///
     /// 写数据库失败。
     pub fn delete_node(&self, id: NodeId) -> Result<(), StoreError> {
-        self.conn
-            .execute("UPDATE listeners SET default_action = NULL, default_exit = NULL WHERE default_exit = ?1", params![SqlNode(id)])?;
-        self.conn.execute("UPDATE listeners SET fixed_exit = NULL WHERE fixed_exit = ?1", params![SqlNode(id)])?;
+        self.conn.execute("UPDATE proxies SET exit_id = NULL, enabled = 0 WHERE exit_id = ?1", params![SqlNode(id)])?;
         self.conn.execute("DELETE FROM nodes WHERE id = ?1", params![SqlNode(id)])?;
         Ok(())
     }
@@ -400,7 +398,7 @@ impl Store {
         Ok(())
     }
 
-    /// 把指向 `old` 的东西改成指向 `new`：`old` 上的监听器、把它当出口的监听器、它参与的端口转发和节点对设置，
+    /// 把指向 `old` 的东西改成指向 `new`：`old` 上的代理、经它出去的代理、它参与的端口转发和节点对设置，
     /// 它所在的分组（和 `new` 已经在的合并）。继任时用，之后 `old` 可以删掉而这些配置还在。
     ///
     /// # Errors
@@ -408,10 +406,11 @@ impl Store {
     /// 写数据库失败。
     pub fn repoint_node(&self, old: NodeId, new: NodeId) -> Result<(), StoreError> {
         let ids = params![SqlNode(old), SqlNode(new)];
-        // 新节点自己已经有同名的监听器、或者和同一个对端已经有设置时，保留新节点的，旧的随旧节点一起删掉。
-        self.conn.execute("UPDATE OR IGNORE listeners SET node_id = ?2 WHERE node_id = ?1", ids)?;
-        self.conn.execute("UPDATE listeners SET default_exit = ?2 WHERE default_exit = ?1", ids)?;
-        self.conn.execute("UPDATE listeners SET fixed_exit = ?2 WHERE fixed_exit = ?1", ids)?;
+        // 新节点自己已经有同名的代理、或者和同一个对端已经有设置时，保留新节点的，旧的随旧节点一起删掉。
+        self.conn.execute("UPDATE OR IGNORE proxies SET node_id = ?2 WHERE node_id = ?1", ids)?;
+        self.conn.execute("UPDATE proxies SET exit_id = ?2 WHERE exit_id = ?1", ids)?;
+        // 出口成了监听的节点自己：不支持，当作没有出口。
+        self.conn.execute("UPDATE proxies SET exit_id = NULL, enabled = 0 WHERE exit_id = node_id", [])?;
         self.conn.execute("UPDATE forwards SET listen_node = ?2 WHERE listen_node = ?1", ids)?;
         self.conn.execute("UPDATE forwards SET target_node = ?2 WHERE target_node = ?1", ids)?;
         self.conn.execute(

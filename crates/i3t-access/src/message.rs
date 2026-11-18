@@ -15,15 +15,14 @@ pub(crate) type Parser<T, E> = fn(&[u8]) -> Result<Option<Parsed<T>>, E>;
 
 /// 客户端在代理认证里给出的用户名和密码。
 ///
-/// 用户名不是调用者的身份，它写的是出口节点和服务等级（见 [`crate::selector`]）。
-/// 密码字段在要求凭据的监听器上带接入凭据。
+/// 代理设了用户名和密码时两个都要对上（[`crate::entry::Gate`]）。
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ProxyAuth {
     pub username: String,
     pub password: Password,
 }
 
-/// 密码字段的内容。它可能是接入凭据，所以不能进日志：`Debug` 不打印内容。
+/// 密码字段的内容。它是代理的密码，不能进日志：`Debug` 不打印内容。
 #[derive(PartialEq, Eq)]
 pub(crate) struct Password(Vec<u8>);
 

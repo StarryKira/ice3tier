@@ -7,8 +7,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use i3t_access::{ListenCause, ListenState, TargetCause, TargetFailure};
 use i3t_model::control::{
-    self, BindCause, CredentialUsage, ExitReport, InterceptReport, LaneReport, PerformanceReport, Route, RouteSince, SelfUpdate,
-    TargetFailureReport,
+    self, BindCause, ExitReport, InterceptReport, LaneReport, PerformanceReport, Route, RouteSince, SelfUpdate, TargetFailureReport,
 };
 use i3t_model::netmap::Attachment;
 use i3t_model::update::UpdateStatus;
@@ -50,8 +49,6 @@ pub struct LiveStatus {
     pub relay: Option<LiveRelay>,
     /// 本节点替别人连目标（出口一侧）的计数，配额用到了哪里。
     pub exit: Option<ExitReport>,
-    /// 入口上各个接入凭据这次运行以来的用量。
-    pub credentials: Vec<CredentialUsage>,
     /// ice3proxy（lane）。没有为任何对端打开、也从来没用过时没有。
     pub lanes: Option<LaneReport>,
     /// 正在用的性能档位。旧版本的节点不给。
@@ -103,10 +100,10 @@ pub struct LiveRoute {
     pub direct_status: Option<control::DirectStatus>,
 }
 
-/// 一个代理监听器，或者一条端口转发的监听一侧。
+/// 一个代理、一个组网入口，或者一条端口转发的监听一侧。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveListener {
-    /// 监听器的名字；端口转发是 `forward-<编号>`。
+    /// 代理的名字，组网入口是 `local-socks5`、`local-http`，端口转发是 `forward-<编号>`。
     pub name: String,
     /// 配置里写的绑定地址。
     pub bind: SocketAddr,
@@ -171,10 +168,23 @@ impl LiveStatus {
             }
         });
         let access = runtime.access.status();
-        let listeners = access.listeners.iter().map(|listener| LiveListener {
-            bytes_up: listener.traffic.up(),
-            bytes_down: listener.traffic.down(),
-            ..listener_of(listener.name.clone(), listener.bind, &listener.state, listener.active.get())
+        let proxies = access.proxies.iter().map(|proxy| {
+            let name = netmap
+                .me
+                .proxies
+                .iter()
+                .find(|config| config.id == proxy.id)
+                .map_or_else(|| format!("proxy-{}", proxy.id), |config| config.name.clone());
+            LiveListener {
+                bytes_up: proxy.traffic.up(),
+                bytes_down: proxy.traffic.down(),
+                ..listener_of(name, proxy.bind, &proxy.state, proxy.active.get())
+            }
+        });
+        let local = access.local.iter().map(|entry| LiveListener {
+            bytes_up: entry.traffic.up(),
+            bytes_down: entry.traffic.down(),
+            ..listener_of(entry.name.clone(), entry.bind, &entry.state, entry.active.get())
         });
         let forwards = access.forwards.iter().map(|forward| LiveListener {
             bytes_up: forward.traffic.up(),
@@ -207,7 +217,7 @@ impl LiveStatus {
             attached,
             routes,
             relays,
-            listeners: listeners.chain(forwards).collect(),
+            listeners: proxies.chain(local).chain(forwards).collect(),
             update: LiveUpdate { draining: exit.draining, status: update, self_update: Some(runtime.self_update) },
             relay: netmap.me.relay.is_some().then(|| LiveRelay {
                 sessions: counters.sessions,
@@ -216,7 +226,6 @@ impl LiveStatus {
                 dropped: counters.dropped_total(),
             }),
             exit: netmap.me.exit.is_some().then(|| exit_report(&exit)),
-            credentials: runtime.credential_usage(),
             lanes: lanes_used.then_some(lanes),
             performance: Some(runtime.performance.borrow().clone()),
             intercept: Some(runtime.intercept_report()),

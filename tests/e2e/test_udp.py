@@ -18,21 +18,21 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lab as lablib  # noqa: E402
 from harness import (  # noqa: E402
-    Checks, Node, dns_a_records, dns_query, socks5_udp, start_dns, start_udp_echo, tail, udp_exchange,
+    Checks, Node, Proxy, dns_a_records, dns_query, socks5_udp, start_dns, start_udp_echo, tail, udp_exchange,
 )
 from lab import Lab, NatKind, Shape  # noqa: E402
 
 # 经 SOCKS5 的 UDP ASSOCIATE 一口气发一串编了号的报文，打印回来了哪些编号（JSON 数组）。
-# 参数：代理地址、代理端口、用户名（可以为空）、目标、目标端口、报文个数。
+# 参数：代理地址、代理端口、用户名、密码（都空时不认证）、目标、目标端口、报文个数。
 # 先发一个报文、等到它的回音，确认两个节点之间的连接已经建好；之后的报文每 2 毫秒一个，最后最多再等 20 秒收齐。
 SOCKS5_UDP_BURST = r"""
 import json, socket, struct, sys, time
-proxy_host, proxy_port, user, target, port, count = sys.argv[1:7]
+proxy_host, proxy_port, user, password, target, port, count = sys.argv[1:8]
 control = socket.create_connection((proxy_host, int(proxy_port)), timeout=10)
-if user:
+if user or password:
     control.sendall(b"\x05\x01\x02")
     assert control.recv(2) == b"\x05\x02"
-    control.sendall(bytes([1, len(user)]) + user.encode() + b"\x00")
+    control.sendall(bytes([1, len(user)]) + user.encode() + bytes([len(password)]) + password.encode())
     assert control.recv(2) == b"\x01\x00"
 else:
     control.sendall(b"\x05\x01\x00")
@@ -86,18 +86,20 @@ def last_route(node: Node, peer: Node) -> str:
 
 
 def udp_direct(lab: Lab, work: Path, t: Checks) -> None:
-    """两个公网节点直连；a 上的 SOCKS5 客户端发 UDP，用户名指定从 b 出去。"""
+    """两个公网节点直连；a 上的 SOCKS5 客户端经 a 上经 b 出去的代理发 UDP。"""
     echo = lab.host("echo")
     for port in (443, 8080):
         start_udp_echo(echo, port)
     a, b = Node(lab.host("a"), work, 1), Node(lab.host("b"), work, 2, declare=("exit",))
-    a.start_static(a.netmap(peers=[b.as_peer(exit=True)]))
+    start_udp_echo(b.host, 9999)
+    reliable = a.proxy_to(b, port=11102, protocol="socks5", default=False, **{"class": "reliable"})
+    a.start_static(a.netmap(peers=[b.as_peer(exit=True)], proxies=[a.proxy_to(b), reliable]))
     # 出口默认不限端口；这里写明只放行 80 和 443，测端口白名单对 UDP 也管用。
     b.start_static(b.netmap(peers=[a.as_peer()], me={"exit": {"ports": [80, 443]}}))
 
-    answer = socks5_udp(a.host, echo.ip, 443, b"ping", user=b.virtual_ip)
+    answer = socks5_udp(a, echo.ip, 443, b"ping", via=b)
     seen, data = echoed(answer)
-    t.check("用户名写 b：UDP 报文到了目标，回音回来了", data == b"ping", f"回来的是 {answer!r}")
+    t.check("经 b 出去的代理：UDP 报文到了目标，回音回来了", data == b"ping", f"回来的是 {answer!r}")
     t.check("目标看到的来源是 b 的地址", seen == b.host.ip, f"看到 {seen!r}")
     t.check("回音带的来源是目标的地址和端口", answer is not None and (answer["source"], answer["port"]) == (echo.ip, 443), f"{answer!r}")
     route = last_route(a, b)
@@ -105,15 +107,17 @@ def udp_direct(lab: Lab, work: Path, t: Checks) -> None:
 
     # 比两个节点之间一个包装得下的长：在节点之间切片、重组，两头看不出来。
     large = bytes(index % 251 for index in range(4000))
-    seen, data = echoed(socks5_udp(a.host, echo.ip, 443, large, user=b.virtual_ip))
+    seen, data = echoed(socks5_udp(a, echo.ip, 443, large, via=b))
     t.check("4000 字节的报文原样来回", data == large and seen == b.host.ip, f"回来 {len(data)} 字节，来源 {seen!r}")
 
-    seen, data = echoed(socks5_udp(a.host, echo.ip, 443, b"reliable", user=f"{b.virtual_ip}+c-r"))
-    t.check("等级写 reliable（每个报文走一条单向流）也通", (seen, data) == (b.host.ip, b"reliable"), f"{seen!r} {data!r}")
+    seen, data = echoed(socks5_udp(a, echo.ip, 443, b"reliable", through=Proxy("127.0.0.1", 11102)))
+    t.check("QoS 设成 reliable 的代理（每个报文走一条单向流）也通", (seen, data) == (b.host.ip, b"reliable"), f"{seen!r} {data!r}")
 
-    seen, data = echoed(socks5_udp(a.host, echo.ip, 8080, b"local"))
-    t.check("不写用户名：从本机出去，不受出口的端口限制", (seen, data) == (a.host.ip, b"local"), f"{seen!r} {data!r}")
-    refused = socks5_udp(a.host, echo.ip, 8080, b"blocked", user=b.virtual_ip, tries=3)
+    outside = socks5_udp(a, echo.ip, 8080, b"outside", tries=3)
+    t.check("组网入口没有出口：发往网络之外的报文被丢掉", outside is None, f"回来的是 {outside!r}")
+    seen, data = echoed(socks5_udp(a, b.virtual_ip, 9999, b"mesh"))
+    t.check("组网入口：发往 b 的虚拟 IP 的报文到了 b 上的服务", (seen, data) == (b.host.ip, b"mesh"), f"{seen!r} {data!r}")
+    refused = socks5_udp(a, echo.ip, 8080, b"blocked", via=b, tries=3)
     t.check("出口写了端口白名单：80 / 443 以外的端口的报文被丢掉", refused is None, f"回来的是 {refused!r}")
     t.check("出口的日志里有拒绝的原因", "出口不允许目标端口 8080" in b.read_log())
     if t.failures:
@@ -128,16 +132,16 @@ def udp_via_relay(lab: Lab, work: Path, t: Checks) -> None:
     a = Node(lab.nat("nat-a", NatKind.SYMMETRIC).host("a"), work, 1)
     b = Node(lab.nat("nat-b", NatKind.SYMMETRIC).host("b"), work, 2, declare=("exit",))
     r.start_static(r.netmap(me={"relay": {}}, relays=[r.as_relay()], relay_clients=[a, b, r]))
-    a.start_static(a.netmap(peers=[b.as_peer(endpoints=False, attached=[(r, 5)], exit=True)], relays=[r.as_relay()]))
+    a.start_static(a.netmap(peers=[b.as_peer(endpoints=False, attached=[(r, 5)], exit=True)], relays=[r.as_relay()], proxies=[a.proxy_to(b)]))
     b.start_static(b.netmap(peers=[a.as_peer(endpoints=False, attached=[(r, 5)])], relays=[r.as_relay()], me={"exit": {}}))
 
-    seen, data = echoed(socks5_udp(a.host, echo.ip, 443, b"through the relay", user=b.virtual_ip, tries=15))
+    seen, data = echoed(socks5_udp(a, echo.ip, 443, b"through the relay", via=b, tries=15))
     t.check("经 relay：UDP 报文到了目标，回音回来了", data == b"through the relay", f"回来的是 {data!r}")
     t.check("目标看到的来源是 b 所在 NAT 的公网地址", seen == lab.hosts["nat-b"].ip, f"看到 {seen!r}")
     route = last_route(a, b)
     t.check("两个节点之间走的是 relay", "Relay" in route or "经 relay" in route, route)
     large = bytes(index % 251 for index in range(4000))
-    seen, data = echoed(socks5_udp(a.host, echo.ip, 443, large, user=b.virtual_ip))
+    seen, data = echoed(socks5_udp(a, echo.ip, 443, large, via=b))
     t.check("经 relay：4000 字节的报文原样来回", data == large, f"回来 {len(data)} 字节")
     if t.failures:
         print(tail(a.read_log()), tail(b.read_log()), tail(r.read_log()), sep="\n  ---\n")
@@ -152,12 +156,12 @@ def dns(lab: Lab, work: Path, t: Checks) -> None:
     start_dns(b.host, "127.0.0.1", 5300, "forwarded.example", "11.55.66.77")
     forward = {"id": 1, "protocol": "udp", "bind": "127.0.0.1:5353", "target": b.id}
     target = {"id": 1, "protocol": "udp", "addr": "127.0.0.1:5300", "listener": a.id}
-    a.start_static(a.netmap(peers=[b.as_peer(exit=True)], me={"forwards": [forward]}))
+    a.start_static(a.netmap(peers=[b.as_peer(exit=True)], me={"forwards": [forward]}, proxies=[a.proxy_to(b)]))
     b.start_static(b.netmap(peers=[a.as_peer()], me={"exit": {"ports": [53]}, "forward_targets": [target]}))
 
     # 一、SOCKS5 的 UDP ASSOCIATE：请求是自己拼的 DNS 报文，回答它的是真的 DNS 服务器。
     query = dns_query("e2e.example")
-    answer = socks5_udp(a.host, resolver.ip, 53, query, user=b.virtual_ip)
+    answer = socks5_udp(a, resolver.ip, 53, query, via=b)
     try:
         addresses = dns_a_records(answer["data"], query) if answer else []
     except ValueError as err:
@@ -212,24 +216,25 @@ def udp_lossy(lab: Lab, work: Path, t: Checks) -> None:
     echo = lab.host("echo")
     start_udp_echo(echo, 443)
     a, b = Node(lab.host("a"), work, 1), Node(lab.host("b"), work, 2, declare=("exit",))
-    a.start_static(a.netmap(peers=[b.as_peer(exit=True)]))
+    interactive = a.proxy_to(b, port=11202, default=False, **{"class": "interactive"})
+    a.start_static(a.netmap(peers=[b.as_peer(exit=True)], proxies=[a.proxy_to(b), interactive]))
     b.start_static(b.netmap(peers=[a.as_peer()], me={"exit": {}}))
-    seen, _ = echoed(socks5_udp(a.host, echo.ip, 443, b"before", user=b.virtual_ip))
+    seen, _ = echoed(socks5_udp(a, echo.ip, 443, b"before", via=b))
     t.check("丢包之前：经 b 通了", seen == b.host.ip, f"看到 {seen!r}")
     a.host.shape(Shape(rtt_ms=20, loss_pct=10))
 
     count = 200
 
-    def burst(user: str) -> list[int]:
-        done = a.host.run(sys.executable, "-c", SOCKS5_UDP_BURST, "127.0.0.1", "1080", user, echo.ip, "443", str(count),
-                          check=False, timeout=90)
+    def burst(proxy: Proxy) -> list[int]:
+        done = a.host.run(sys.executable, "-c", SOCKS5_UDP_BURST, proxy.host, str(proxy.port), proxy.username, proxy.password, echo.ip,
+                          "443", str(count), check=False, timeout=90)
         if done.returncode != 0:
             raise RuntimeError(f"SOCKS5 UDP 客户端出错：{done.stderr.strip()[-500:]}")
         return json.loads(done.stdout)
 
-    kept = burst(b.virtual_ip)
+    kept = burst(a.entry(b))
     t.check(f"自动（默认）：{count} 个报文经丢包的线全部来回", kept == list(range(count)), f"回来 {len(kept)} 个")
-    fresh = burst(f"{b.virtual_ip}+c-i")
+    fresh = burst(Proxy("127.0.0.1", 11202))
     t.check("低延迟（interactive）：同一条线上丢了一些，说明线确实在丢包", 0 < len(fresh) < count, f"回来 {len(fresh)} 个")
     if t.failures:
         print(tail(a.read_log()), tail(b.read_log()), sep="\n  ---\n")

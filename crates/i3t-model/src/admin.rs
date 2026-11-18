@@ -7,7 +7,8 @@
 //! - 时间都是 Unix 秒（[`Timestamp`]）。
 //! - 名字以 `Create`、`Update` 开头或以 `Input` 结尾的是请求体，其余是应答体。
 //! - `Update*` 里的字段都可以省略，省略表示不改。个别字段可以写 `null`，表示清掉这项设置，见各字段的说明。
-//! - 令牌的明文只在创建它的那一次应答里出现（[`CreatedEnrollToken`]、[`CreatedCredential`]），controller 只存哈希。
+//! - 注册令牌的明文只在创建它的那一次应答里出现（[`CreatedEnrollToken`]），controller 只存哈希。
+//!   代理的密码不一样：controller 原样存着，[`Proxy`] 里每次都给，管理员可以再看、再复制。
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -20,9 +21,9 @@ use ipnet::{IpNet, Ipv4Net};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::control::{
-    BackboneLink, Declared, DirectCause, DirectKind, DirectState, ExitObservation, ExitReport, InterceptReport, LaneReport, LegTransport,
-    ListenState, ListenTraffic, PathCandidate, PeerLanes, PerformanceReport, RelayState, RelayUse, Route, RouteAlternative, RouteCause,
-    RouteSince, SelfUpdate, TargetCause, TryOutcome,
+    BackboneLink, BindCause, Declared, DirectCause, DirectKind, DirectState, ExitObservation, ExitReport, InterceptReport, LaneReport,
+    LegTransport, ListenState, ListenTraffic, PathCandidate, PeerLanes, PerformanceReport, RelayState, RelayUse, Route, RouteAlternative,
+    RouteCause, RouteSince, SelfUpdate, TargetCause, TryOutcome,
 };
 use crate::netmap::{
     Attachment, Congestion, ExitRole, ForwardProtocol, LaneMode, ListenerProtocol, Profile, ProxyProtocol, Reach, RoutingMode,
@@ -143,6 +144,14 @@ pub enum ErrorCode {
     TooSoon,
     /// 这个网络正在跑一次全网矩阵，或者要取消的测试已经结束了。
     Busy,
+    /// 代理的出口节点没有启用出口。
+    ExitNotEnabled,
+    /// 代理的出口就是监听的节点自己：不支持从监听的节点自己出去。
+    ExitIsNode,
+    /// 访问规则不让代理的监听节点访问它的出口节点。
+    AccessDenied,
+    /// 代理的用户名和密码只写了一个。
+    CredentialsIncomplete,
     /// controller 内部出错。
     Internal,
     #[serde(other)]
@@ -249,9 +258,8 @@ pub struct Overview {
     pub relays: u32,
     pub exits: u32,
     pub rules: u32,
-    pub listeners: u32,
+    pub proxies: u32,
     pub forwards: u32,
-    pub credentials: u32,
     /// 还没被用掉、也没过期的注册令牌。
     pub pending_tokens: u32,
     pub online_nodes: Vec<NodeRef>,
@@ -1101,98 +1109,129 @@ const fn enabled_by_default() -> bool {
     true
 }
 
-/// 一个接入凭据。令牌本身查不回来。
+/// 一个代理：在节点 `node` 的 `bind` 上监听，请求经出口节点 `exit` 出去，认用户名和密码。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Credential {
+pub struct Proxy {
     pub id: u32,
     pub name: String,
-    /// 同时进行的连接数上限；`null` 表示不限。
-    pub max_concurrent: Option<u32>,
-    pub created_at: Timestamp,
-    /// 令牌的开头一小段，不是秘密，用来认出是哪一个凭据。这个字段出现之前签发的凭据是空的。
-    #[serde(default)]
-    pub prefix: String,
-    /// 流量上限，字节：经各个入口用它搬运的字节数（两个方向相加）到了这个数，它就停用，直到上限调高或者用量清零。
-    /// `null` 表示不限。
-    #[serde(default)]
-    pub max_bytes: Option<u64>,
-    #[serde(default)]
-    pub state: CredentialState,
-    /// 吊销的时间；没有吊销是 `null`。
-    #[serde(default)]
-    pub revoked_at: Option<Timestamp>,
-    #[serde(default)]
-    pub usage: CredentialUsage,
+    /// 监听的节点。
+    pub node: NodeId,
+    pub bind: SocketAddr,
+    pub protocol: ListenerProtocol,
+    /// 出口节点。只有升级前就有、当时没有固定出口的代理是 `null`（状态是 `exit_missing`）：选好出口之前启用不了。
+    pub exit: Option<NodeId>,
+    /// 用户名和密码，原样存着，管理员可以再看、再复制。都是空的表示不认证，只有回环地址上的代理可以这样。
+    pub username: String,
+    pub password: String,
+    pub enabled: bool,
+    /// 来源白名单（地址段）；空表示不限制。
+    pub allow_from: Vec<IpNet>,
+    /// 这个代理上的流的 QoS；`null` 时看出口和网络的默认值。
+    pub class: Option<Class>,
+    /// 乐观回复；`null` 时看出口的设置，再按目标的种类。
+    pub optimistic: Option<bool>,
+    pub status: ProxyStatus,
+    /// 节点最近一次报的连接数和流量（`connections`、`bytes_up`、`bytes_down`，这次运行以来），和代理的别的字段在同一层。
+    /// 节点不在线、还没有报过时都是 0，那时 `status` 说明为什么。
+    #[serde(flatten)]
+    pub usage: ListenTraffic,
 }
 
-/// 一个凭据现在能不能用。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CredentialState {
-    #[default]
-    Active,
-    /// 流量上限用完了。入口拒绝它的新连接，断开正在进行的连接。
-    Exhausted,
-    /// 被吊销了。入口不再认它；记录留着，看得到它用过多少。
-    Revoked,
+/// 一个代理现在能不能用，按 controller 知道的算。排在前面的先看：停用了的不看监听，监听不上的不看出口。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum ProxyStatus {
+    /// 没有出口：升级前就有、当时没有固定出口的代理，或者出口节点被删掉了。选好出口才能启用。
+    ExitMissing,
+    Disabled,
+    NodeOffline,
+    /// 下发了，节点还没有报它的状态（刚改过，或者节点的版本太旧不懂代理）。
+    Pending,
+    /// 端口被别的程序占着，节点每 10 秒再试。
+    PortInUse {
+        detail: String,
+        cause: Option<BindCause>,
+    },
+    /// 别的原因没有绑上，`detail` 是系统的原话。
+    BindFailed {
+        detail: String,
+        cause: Option<BindCause>,
+    },
+    /// 在监听，但是出口节点没有启用出口。
+    ExitDisabled {
+        local: SocketAddr,
+    },
+    /// 在监听，但是访问规则不让监听的节点访问出口节点。
+    AccessDenied {
+        local: SocketAddr,
+    },
+    /// 在监听，但是出口节点不在线。
+    ExitOffline {
+        local: SocketAddr,
+    },
+    /// 在监听，能用。`local` 是实际绑定的地址。
+    Listening {
+        local: SocketAddr,
+    },
+    /// 比这个程序新的 controller 给的、这里不认识的状态。
     #[serde(other)]
     Unknown,
 }
 
-/// 一个凭据的用量，各个入口上报的汇总。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct CredentialUsage {
-    /// 签发（或者上次清零）以来经它搬运的字节数，两个方向相加。流量上限比的就是它。
-    pub bytes: u64,
-    /// 现在在线的入口上正在进行的连接数。
-    pub connections: u32,
-    /// 最近一次有连接用它的时间；从来没有用过是 `null`。
-    pub last_used_at: Option<Timestamp>,
-}
-
+/// 新建一个代理。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateCredential {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_concurrent: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_bytes: Option<u64>,
-}
-
-/// 改一个凭据的上限，不用重新签发令牌。字段都可以省略。
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct UpdateCredential {
-    /// 写 `null` 表示不限。
-    #[serde(default, deserialize_with = "nullable", skip_serializing_if = "Option::is_none")]
-    pub max_concurrent: Option<Option<u32>>,
-    /// 写 `null` 表示不限。
-    #[serde(default, deserialize_with = "nullable", skip_serializing_if = "Option::is_none")]
-    pub max_bytes: Option<Option<u64>>,
-    /// `true` 时把用量清零（比如开始一个新的计费周期）。
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub reset_usage: bool,
-}
-
-/// 创建凭据的应答。`token` 是调用者填在代理密码字段里的东西，只在这里出现一次。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreatedCredential {
-    #[serde(flatten)]
-    pub credential: Credential,
-    pub token: String,
-}
-
-/// 一个节点上的一个代理入口。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Listener {
-    pub id: u32,
-    /// 它开在哪个节点上。
+pub struct CreateProxy {
     pub node: NodeId,
-    #[serde(flatten)]
-    pub config: crate::netmap::Listener,
-    /// 节点最近一次报的这个监听器的状态。节点不在线、还没有报过，或者版本太旧不报时是 `null`。
+    /// 可省略：controller 取 `<节点名>-<端口>`，这个节点上已经有了就再接 `-2`、`-3`……
     #[serde(default)]
-    pub status: Option<ListenStatus>,
+    pub name: String,
+    pub bind: SocketAddr,
+    pub exit: NodeId,
+    #[serde(default)]
+    pub protocol: ListenerProtocol,
+    /// 不是回环地址时两个都不写，controller 生成一对；写就两个都写。
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password: String,
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub allow_from: Vec<IpNet>,
+    #[serde(default)]
+    pub class: Option<Class>,
+    #[serde(default)]
+    pub optimistic: Option<bool>,
+}
+
+/// 改一个代理。字段都可以省略，省略表示不改。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct UpdateProxy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<NodeId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind: Option<SocketAddr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<NodeId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<ListenerProtocol>,
+    /// 写空字符串是清掉；两个都清掉时，回环地址上的代理不再认证，别的地址上的由 controller 重新生成一对。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_from: Option<Vec<IpNet>>,
+    /// 写 `null` 表示不再指定。
+    #[serde(default, deserialize_with = "nullable", skip_serializing_if = "Option::is_none")]
+    pub class: Option<Option<Class>>,
+    /// 写 `null` 表示不再指定。
+    #[serde(default, deserialize_with = "nullable", skip_serializing_if = "Option::is_none")]
+    pub optimistic: Option<Option<bool>>,
 }
 
 /// 节点报的一个监听（代理监听器或者端口转发的监听一侧）现在的状态、连接数和流量。
@@ -1204,7 +1243,7 @@ pub struct ListenStatus {
     pub traffic: ListenTraffic,
 }
 
-/// 一个节点上的全部监听：controller 下发的监听器、节点按本机配置自己开的回环入口、端口转发的监听一侧。
+/// 一个节点上的全部监听：controller 下发的代理、节点按本机配置自己开的组网入口、端口转发的监听一侧。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeListeners {
     pub node: NodeRef,
@@ -1217,9 +1256,9 @@ pub struct NodeListeners {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeListener {
-    /// controller 上的监听器编号；节点自己开的回环入口没有，是 `null`。
+    /// 代理的编号；节点按本机配置自己开的组网入口没有，是 `null`。
     pub id: Option<u32>,
-    /// 节点按本机的配置文件自己开的回环入口（`local-socks5`、`local-http`）。
+    /// 节点按本机的配置文件自己开的组网入口（`local-socks5`、`local-http`，只通到组网里的节点）。
     pub builtin: bool,
     pub name: String,
     pub bind: SocketAddr,
@@ -1236,14 +1275,6 @@ pub struct NodeForwardListen {
     pub protocol: ForwardProtocol,
     #[serde(flatten)]
     pub status: ListenStatus,
-}
-
-/// 创建或者整个替换一个监听器。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ListenerInput {
-    pub node: NodeId,
-    #[serde(flatten)]
-    pub config: crate::netmap::Listener,
 }
 
 /// 一条端口转发。
@@ -1522,7 +1553,7 @@ impl FromStr for LogRef {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("应该写成 <种类>:<编号>，例如 node:3；种类是 network、node、group、token、rule、credential、listener、forward 之一")]
+#[error("应该写成 <种类>:<编号>，例如 node:3；种类是 network、node、group、token、rule、proxy、forward 之一")]
 pub struct InvalidLogRef;
 
 /// 操作记录里提到的东西是哪一种。
@@ -1534,9 +1565,9 @@ pub enum RefKind {
     Group,
     Token,
     Rule,
-    Credential,
-    Listener,
+    Proxy,
     Forward,
+    /// 不认识的种类，包括升级之前的记录里提到的接入凭据（`credential`）。
     #[serde(other)]
     Unknown,
 }
@@ -1675,6 +1706,8 @@ pub struct ExitView {
     pub reported_secs_ago: Option<u64>,
     /// 用过这个出口的节点各自看到的计数（各自这次运行以来的累计），和出口自己报的交叉核对。
     pub observed: Vec<ExitObserved>,
+    /// 经这个出口出去的代理，按编号排，和 `GET …/proxies` 里的一样。
+    pub proxies: Vec<Proxy>,
 }
 
 /// 出口的健康：只看归因于出口自己的失败（解析器出错、内部错误），目标的问题和被拒绝都不算。
@@ -1806,27 +1839,60 @@ mod tests {
     }
 
     #[test]
-    fn listener_fields_sit_next_to_its_id_and_node() {
-        let listener: Listener = serde_json::from_value(json!({
-            "id": 3, "node": 7, "name": "lan", "bind": "192.168.1.5:1080", "protocol": "socks5",
-            "require_credential": true, "default_action": { "action": "exit", "node": 9 }
-        }))
-        .unwrap();
-        assert_eq!(listener.node, NodeId::new(7).unwrap());
-        assert!(listener.config.require_credential);
-        let value = serde_json::to_value(&listener).unwrap();
-        assert_eq!(value["bind"], json!("192.168.1.5:1080"));
-        assert_eq!(value["default_action"], json!({ "action": "exit", "node": 9 }));
+    fn a_proxy_is_written_with_its_status_code_and_usage() {
+        let proxy = Proxy {
+            id: 3,
+            name: "lan".into(),
+            node: NodeId::new(7).unwrap(),
+            bind: "192.168.1.5:1080".parse().unwrap(),
+            protocol: ListenerProtocol::Mixed,
+            exit: NodeId::new(9),
+            username: "u-1a2b3c4d".into(),
+            password: "pw".into(),
+            enabled: true,
+            allow_from: Vec::new(),
+            class: None,
+            optimistic: None,
+            status: ProxyStatus::Listening { local: "192.168.1.5:1080".parse().unwrap() },
+            usage: ListenTraffic { connections: 2, bytes_up: 10, bytes_down: 20 },
+        };
+        let value = serde_json::to_value(&proxy).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "id": 3, "name": "lan", "node": 7, "bind": "192.168.1.5:1080", "protocol": "mixed", "exit": 9,
+                "username": "u-1a2b3c4d", "password": "pw", "enabled": true, "allow_from": [], "class": null, "optimistic": null,
+                "status": { "code": "listening", "local": "192.168.1.5:1080" },
+                "connections": 2, "bytes_up": 10, "bytes_down": 20
+            })
+        );
+        assert_eq!(serde_json::from_value::<Proxy>(value).unwrap(), proxy);
+        let failed = ProxyStatus::BindFailed { detail: "x".into(), cause: Some(BindCause::PermissionDenied) };
+        assert_eq!(
+            serde_json::to_value(&failed).unwrap(),
+            json!({ "code": "bind_failed", "detail": "x", "cause": { "code": "permission_denied" } })
+        );
+        assert_eq!(serde_json::to_value(ProxyStatus::ExitMissing).unwrap(), json!({ "code": "exit_missing" }));
+        let offline = ProxyStatus::ExitOffline { local: "127.0.0.1:1080".parse().unwrap() };
+        assert_eq!(serde_json::to_value(&offline).unwrap(), json!({ "code": "exit_offline", "local": "127.0.0.1:1080" }));
+        assert_eq!(serde_json::from_value::<ProxyStatus>(json!({ "code": "later" })).unwrap(), ProxyStatus::Unknown);
+    }
+
+    #[test]
+    fn creating_a_proxy_needs_the_node_bind_and_exit_and_updates_tell_omitted_from_cleared() {
+        let created: CreateProxy = serde_json::from_value(json!({ "node": 2, "bind": "127.0.0.1:1080", "exit": 3 })).unwrap();
+        assert_eq!(
+            (created.protocol, created.enabled, created.username.as_str(), created.name.as_str()),
+            (ListenerProtocol::Mixed, true, "", "")
+        );
+        assert!(serde_json::from_value::<CreateProxy>(json!({ "node": 2, "name": "p", "bind": "127.0.0.1:1080" })).is_err());
+        let cleared: UpdateProxy = serde_json::from_value(json!({ "class": null, "enabled": false })).unwrap();
+        assert_eq!((cleared.class, cleared.optimistic, cleared.enabled), (Some(None), None, Some(false)));
+        assert_eq!(serde_json::to_value(UpdateProxy::default()).unwrap(), json!({}));
     }
 
     #[test]
     fn responses_from_an_older_controller_read_with_the_new_fields_defaulted() {
-        let credential: Credential =
-            serde_json::from_value(json!({ "id": 1, "name": "phone", "max_concurrent": 8, "created_at": 5 })).unwrap();
-        assert_eq!(
-            (credential.state, credential.max_bytes, credential.usage, credential.prefix.as_str()),
-            (CredentialState::Active, None, CredentialUsage::default(), "")
-        );
         let token: EnrollTokenInfo = serde_json::from_value(json!({
             "id": 1, "network": 1, "created_at": 1, "expires_at": 2, "groups": [], "virtual_ip": null, "successor_of": null
         }))
@@ -1937,7 +2003,7 @@ mod tests {
             bind: "127.0.0.1:1080".parse().unwrap(),
             protocol: ListenerProtocol::Socks5,
             status: ListenStatus {
-                state: ListenState::PortInUse { detail: "地址已经在用".into(), cause: Some(crate::control::BindCause::AddressInUse) },
+                state: ListenState::PortInUse { detail: "地址已经在用".into(), cause: Some(BindCause::AddressInUse) },
                 traffic: ListenTraffic { connections: 0, bytes_up: 1, bytes_down: 2 },
             },
         };
@@ -1989,22 +2055,15 @@ mod tests {
 
     #[test]
     fn log_refs_are_written_as_kind_and_id() {
-        let reference = LogRef::new(RefKind::Credential, 4);
-        assert_eq!(serde_json::to_value(reference).unwrap(), json!({ "kind": "credential", "id": 4 }));
-        assert_eq!(reference.to_string(), "credential:4");
+        let reference = LogRef::new(RefKind::Proxy, 4);
+        assert_eq!(serde_json::to_value(reference).unwrap(), json!({ "kind": "proxy", "id": 4 }));
+        assert_eq!(reference.to_string(), "proxy:4");
+        let old: LogRef = serde_json::from_value(json!({ "kind": "credential", "id": 4 })).unwrap();
+        assert_eq!(old.kind, RefKind::Unknown, "升级之前的记录里提到的凭据");
         assert_eq!("node:3".parse::<LogRef>(), Ok(LogRef::new(RefKind::Node, 3)));
-        for bad in ["node", "node:x", "planet:3", ":3", "unknown:1"] {
+        for bad in ["node", "node:x", "planet:3", ":3", "unknown:1", "credential:4", "listener:2"] {
             assert_eq!(bad.parse::<LogRef>(), Err(InvalidLogRef), "{bad}");
         }
-    }
-
-    #[test]
-    fn update_credential_tells_an_omitted_limit_from_a_cleared_one() {
-        let cleared: UpdateCredential = serde_json::from_value(json!({ "max_bytes": null })).unwrap();
-        assert_eq!((cleared.max_bytes, cleared.max_concurrent, cleared.reset_usage), (Some(None), None, false));
-        let set: UpdateCredential = serde_json::from_value(json!({ "max_bytes": 1000, "reset_usage": true })).unwrap();
-        assert_eq!((set.max_bytes, set.reset_usage), (Some(Some(1000)), true));
-        assert_eq!(serde_json::to_value(UpdateCredential::default()).unwrap(), json!({}));
     }
 
     #[test]

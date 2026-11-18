@@ -185,7 +185,7 @@ mod tests {
                 dial_out_only: false,
                 relay: None,
                 exit: None,
-                listeners: Vec::new(),
+                proxies: Vec::new(),
                 forwards: Vec::new(),
                 forward_targets: Vec::new(),
                 pinned_relays: Vec::new(),
@@ -195,7 +195,6 @@ mod tests {
             peers: vec![nas],
             relays: vec![relay(3, "hk")],
             relay_clients: Vec::new(),
-            credentials: Vec::new(),
         }
     }
 

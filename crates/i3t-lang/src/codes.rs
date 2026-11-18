@@ -8,7 +8,7 @@ mod zh;
 
 use i3t_model::admin::diag::{CellState, ItemState, MatrixState, TestState};
 use i3t_model::admin::{
-    AddressSource, ApiError, CredentialState, ExitHealth, ForwardStatus, LaneBlock, NodeWarning, PackageState, PathSource, ReachCause,
+    AddressSource, ApiError, ExitHealth, ForwardStatus, LaneBlock, NodeWarning, PackageState, PathSource, ProxyStatus, ReachCause,
     ReleaseCause, SkipCause, TokenState, UpdateWait,
 };
 use i3t_model::control::diag::{ChoiceCode, HopSource, PathPick, TestCode, TransferEnd};
@@ -68,7 +68,8 @@ pub struct Codes {
     /// 出口经什么连目标：`直接连`、`经上游代理`。
     pub exit_via: fn(ExitVia) -> &'static str,
     pub token_state: fn(TokenState) -> &'static str,
-    pub credential_state: fn(CredentialState) -> &'static str,
+    /// 一个代理现在能不能用，一短句：`监听在 127.0.0.1:1080`、`出口离线`。
+    pub proxy_status: fn(&ProxyStatus) -> String,
     pub exit_health: fn(ExitHealth) -> &'static str,
     pub path_source: fn(PathSource) -> &'static str,
     pub test_code: fn(TestCode) -> &'static str,

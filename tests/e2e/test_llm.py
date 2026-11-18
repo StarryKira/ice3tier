@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LLM 网关负载的端到端测试：网关程序在入口节点旁边，经入口的代理入口把每个上游 API 请求送到出口节点，从出口的网络出去。
+"""LLM 网关负载的端到端测试：网关程序在入口节点旁边，经入口节点上经出口出去的代理把每个上游 API 请求送到出口节点，从出口的网络出去。
 
 上游是 bench/llmgw 里模拟的 LLM API（HTTPS），放在实验环境"互联网"上的一台主机上；负载端 i3t-llmgw load 在入口那台机器上扮演网关。
 每个场景先做功能上的检查（通过 / 失败），再打一张测量表，留着和以后的运行对比。
@@ -103,12 +103,9 @@ class Load:
         self.scenario.write_text(scenario_toml(name, duration_s, groups, stall_ms))
         self.out = work / f"{name}.json"
         self.table = work / f"{name}.txt"
-        exit_ip = gw.exit.virtual_ip
-        proxy_url = {
-            "socks5": f"socks5://{exit_ip}@127.0.0.1:1080",
-            "http": f"http://{exit_ip}@127.0.0.1:1081",
-            "direct": "direct",
-        }[proxy]
+        # 入口上经出口出去的代理是 mixed 的：SOCKS5 和 HTTP 都连同一个端口。
+        through = gw.entry.entry(gw.exit)
+        proxy_url = {"socks5": through.url("socks5"), "http": through.url("http"), "direct": "direct"}[proxy]
         label = label or f"经入口和出口，节点对设置{pair_label()}"
         cmd = [binary("i3t-llmgw"), "load", "--scenario", str(self.scenario), "--target", f"https://{gw.api.ip}",
                "--ca", str(gw.ca), "--proxy", proxy_url, "--out", str(self.out), "--quiet", "--label", label]
@@ -257,7 +254,7 @@ class Deployment:
     def probe(self, timeout: float = 5) -> tuple[bool, str]:
         """经入口和出口请求一次上游的 /health。返回是否成功，以及失败时 curl 怎么说。"""
         done = self.entry.host.run("curl", "-sS", "--max-time", str(timeout), "--cacert", str(self.ca), "-x",
-                                   f"socks5h://{self.exit.virtual_ip}@127.0.0.1:1080", f"https://{self.api.ip}/health",
+                                   self.entry.entry(self.exit).url("socks5h"), f"https://{self.api.ip}/health",
                                    check=False, timeout=timeout + 5)
         return done.stdout == "ok", (done.stderr.strip() or done.stdout.strip())
 
@@ -296,7 +293,8 @@ class Gateway(Deployment):
             entry, exit_node,
             entry_view=exit_node.as_peer(endpoints=False, attached=[(entry, 5)], exit=True),
             exit_view=entry.as_peer())
-        entry.start_static(entry.netmap(me={"relay": {}}, relays=[entry.as_relay()], relay_clients=[entry, exit_node], peers=[self.exit_peer]))
+        entry.start_static(entry.netmap(me={"relay": {}}, relays=[entry.as_relay()], relay_clients=[entry, exit_node], peers=[self.exit_peer],
+                                        proxies=[entry.proxy_to(exit_node)]))
         self.start_exit()
         self.wait_ready()
 
@@ -579,7 +577,7 @@ def route_change_mid_stream(lab: Lab, work: Path, t: Checks) -> None:
         entry, exit_node,
         entry_view={**exit_node.as_peer(endpoints=False, attached=attached, exit=True), "endpoints": [f"{home.ip}:20330"]},
         exit_view={**entry.as_peer(endpoints=False, attached=attached), "endpoints": [f"{office.ip}:20330"]})
-    entry.start_static(entry.netmap(peers=[exit_peer], relays=relays))
+    entry.start_static(entry.netmap(peers=[exit_peer], relays=relays, proxies=[entry.proxy_to(exit_node)]))
     exit_node.start_static(exit_node.netmap(peers=[entry_peer], relays=relays, me={"exit": {}}))
     gw = Deployment(lab, work, api, ca, entry, exit_node, (r1, r2))
     gw.wait_ready()

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
-    GW, LAPTOP, NAS, PUBLIC_IP, Target, UdpTarget, World, assert_echo, assert_reset, drain, echo_server, listener, node, peer_mut, socks5,
+    GW, LAPTOP, NAS, PUBLIC_IP, Target, UdpTarget, World, assert_echo, assert_reset, drain, echo_server, node, peer_mut, proxy, socks5,
     udp_associate,
 };
 use i3t_exit::{Exit, Outbound};
@@ -34,17 +34,17 @@ async fn sender(len: usize) -> SocketAddr {
     addr
 }
 
-/// laptop 上再加一个关掉了乐观回复的 SOCKS5 监听器，好让客户端拿到出口给的准确的错误码。
+/// laptop 上再加一个经 gw 出去、关掉了乐观回复的 SOCKS5 代理，好让客户端拿到出口给的准确的错误码。
 async fn careful_socks(world: &World) -> SocketAddr {
     world
         .laptop
         .update(|netmap| {
-            let mut careful = listener("careful", ListenerProtocol::Socks5, "127.0.0.1:0");
+            let mut careful = proxy(5, ListenerProtocol::Socks5, "127.0.0.1:0", GW);
             careful.optimistic = Some(false);
-            netmap.me.listeners.push(careful);
+            netmap.me.proxies.push(careful);
         })
         .await;
-    world.laptop.listener("careful").await
+    world.laptop.proxy(5).await
 }
 
 i3t_lane::on_both_transports! {
@@ -55,7 +55,7 @@ i3t_lane::on_both_transports! {
         let careful = careful_socks(&world).await;
 
         // 下载到一半配额用完：流在那一刻被断开，客户端看到的是重置，不是正常结束。
-        let mut stream = socks5(world.socks().await, Some(("gw", "")), PUBLIC_IP, 443).await.connected();
+        let mut stream = socks5(world.socks().await, None, PUBLIC_IP, 443).await.connected();
         let (data, end) = drain(&mut stream).await;
         assert_reset(&end);
         assert!(data.len() <= 100_000, "配额之外的数据不再送出：收到 {}", data.len());
@@ -65,7 +65,7 @@ i3t_lane::on_both_transports! {
         assert!(quota.period.start <= quota.period.end);
 
         // 新的请求直接拒绝，状态说明是配额用完了：SOCKS5 回 0x02。
-        assert_eq!(socks5(careful, Some(("gw", "")), PUBLIC_IP, 443).await.failed(), 2);
+        assert_eq!(socks5(careful, None, PUBLIC_IP, 443).await.failed(), 2);
         assert_eq!(world.gw.exit.stats().refused, 1);
 
         // 节点重启：用量从存下来的那一份接着记，配额还是用完的。
@@ -90,11 +90,11 @@ i3t_lane::on_both_transports! {
         let careful = careful_socks(&world).await;
 
         for _ in 0..2 {
-            let mut stream = socks5(careful, Some(("gw", "")), PUBLIC_IP, 443).await.connected();
+            let mut stream = socks5(careful, None, PUBLIC_IP, 443).await.connected();
             assert_echo(&mut stream).await;
         }
-        assert_eq!(socks5(careful, Some(("gw", "")), PUBLIC_IP, 443).await.failed(), 1, "第三次超过了预算");
-        let mut other = socks5(careful, Some(("gw", "")), PUBLIC_IP, 80).await.connected();
+        assert_eq!(socks5(careful, None, PUBLIC_IP, 443).await.failed(), 1, "第三次超过了预算");
+        let mut other = socks5(careful, None, PUBLIC_IP, 80).await.connected();
         assert_echo(&mut other).await;
         assert_eq!(world.gw.exit.stats().refused, 1);
         assert_eq!(world.gw.system.connected().len(), 3, "被拒绝的那一次没有去连目标");
@@ -111,11 +111,11 @@ i3t_lane::on_both_transports! {
         world.gw.update(|netmap| netmap.me.exit = Some(ExitRole { family: IpFamily::Ipv4, ..ExitRole::default() })).await;
         let careful = careful_socks(&world).await;
 
-        let mut stream = socks5(careful, Some(("gw", "")), "dual.example", 443).await.connected();
+        let mut stream = socks5(careful, None, "dual.example", 443).await.connected();
         assert_echo(&mut stream).await;
         assert_eq!(world.gw.system.connected(), [format!("{PUBLIC_IP}:443").parse().unwrap()], "IPv6 的地址没有去试");
-        assert_eq!(socks5(careful, Some(("gw", "")), "v6.example", 443).await.failed(), 2);
-        assert_eq!(socks5(careful, Some(("gw", "")), "2606:4700::1", 443).await.failed(), 2);
+        assert_eq!(socks5(careful, None, "v6.example", 443).await.failed(), 2);
+        assert_eq!(socks5(careful, None, "2606:4700::1", 443).await.failed(), 2);
         assert_eq!(world.gw.system.connected().len(), 1);
     }
 }
@@ -125,11 +125,11 @@ i3t_lane::on_both_transports! {
         let world = World::new().await;
         world.gw.system.redirect(&format!("{PUBLIC_IP}:443"), echo_server().await);
         let careful = careful_socks(&world).await;
-        let mut established = socks5(careful, Some(("gw", "")), PUBLIC_IP, 443).await.connected();
+        let mut established = socks5(careful, None, PUBLIC_IP, 443).await.connected();
         assert_echo(&mut established).await;
 
         world.gw.exit.set_draining(Some("节点正在排空，准备更新到 0.2.0 后重启".to_owned()));
-        assert_eq!(socks5(careful, Some(("gw", "")), PUBLIC_IP, 443).await.failed(), 1, "SOCKS5 回 0x01：换一个出口或者稍后再试");
+        assert_eq!(socks5(careful, None, PUBLIC_IP, 443).await.failed(), 1, "SOCKS5 回 0x01：换一个出口或者稍后再试");
         assert_eq!(socks5(careful, None, "10.66.0.2", 22).await.failed(), 1, "节点自己的服务也不接");
         let stats = world.gw.exit.stats();
         assert_eq!((stats.drained, stats.refused, stats.failed_by_exit, stats.draining), (2, 2, 0, true), "排空不算出口坏了");
@@ -137,12 +137,12 @@ i3t_lane::on_both_transports! {
 
         // 不能访问这个节点的发起方看不出它在排空。
         world.gw.update(|netmap| peer_mut(netmap, LAPTOP).inbound = false).await;
-        assert_eq!(socks5(careful, Some(("gw", "")), PUBLIC_IP, 443).await.failed(), 2);
+        assert_eq!(socks5(careful, None, PUBLIC_IP, 443).await.failed(), 2);
         assert_eq!(world.gw.exit.stats().drained, 2);
 
         world.gw.update(|netmap| peer_mut(netmap, LAPTOP).inbound = true).await;
         world.gw.exit.set_draining(None);
-        let mut stream = socks5(careful, Some(("gw", "")), PUBLIC_IP, 443).await.connected();
+        let mut stream = socks5(careful, None, PUBLIC_IP, 443).await.connected();
         assert_echo(&mut stream).await;
     }
 }

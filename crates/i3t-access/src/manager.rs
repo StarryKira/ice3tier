@@ -1,4 +1,4 @@
-//! 监听的管理：按 netmap 开关代理监听器和端口转发的监听。
+//! 监听的管理：按 netmap 开关代理和端口转发的监听，加上本机配置文件里的组网入口。
 
 use std::io;
 use std::net::SocketAddr;
@@ -18,12 +18,12 @@ use tokio::task::JoinHandle;
 use tokio::time;
 use tracing::Instrument;
 
-use crate::egress::LocalEgress;
+use crate::entry::{Entry, LocalEntry};
 use crate::forward_health::{ForwardHealth, TargetFailure};
 use crate::routes::{NoRoutes, SharedRoutes};
 use crate::session::{self, Shared};
 use crate::udp;
-use crate::usage::{CredentialSnapshot, ExitSnapshot, Tally, Usage};
+use crate::usage::{ExitSnapshot, Tally, Usage};
 
 /// 绑定失败的监听隔多久重试一次。端口被别的程序占着时不去抢，等它让出来。
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
@@ -57,32 +57,33 @@ impl PortBook for NoPortBook {
     fn remember(&self, _forward: u32, _port: u16) {}
 }
 
-/// 一个节点的入口：代理监听器和端口转发。
+/// 一个节点的入口：代理、本机的组网入口和端口转发。
 ///
-/// 监听什么完全由 netmap 决定（`me.listeners` 和 `me.forwards`）。netmap 变了，只动变了的那几个监听；
-/// 已经建立的连接各自跑在自己的任务里，监听被关掉也不受影响。
+/// 代理和端口转发的监听由 netmap 决定（`me.proxies` 和 `me.forwards`），组网入口在构造时给定（[`Access::with_local_entries`]）。
+/// netmap 变了，只动变了的那几个监听；已经建立的连接各自跑在自己的任务里，监听被关掉也不受影响。
+/// 一个组网入口和某个代理绑同一个地址时让给代理。
 ///
-/// UDP 也从这里进来：SOCKS5 监听器上的 UDP ASSOCIATE，以及协议是 UDP 的端口转发。它们到对端节点走数据报上下文，
+/// UDP 也从这里进来：SOCKS5 上的 UDP ASSOCIATE，以及协议是 UDP 的端口转发。它们到对端节点走数据报上下文，
 /// 所以 `C` 除了能开流，还要能收发数据报。
 ///
-/// 节点排空时（[`Access::set_draining`]）监听照常开着，新的请求得到明确的拒绝：代理监听器回 SOCKS5 的 0x01、
+/// 节点排空时（[`Access::set_draining`]）监听照常开着，新的请求得到明确的拒绝：代理回 SOCKS5 的 0x01、
 /// HTTP 的 503；端口转发没有地方回错误，TCP 的连接被重置，UDP 不建新的会话。已经建立的连接照常跑完。
-pub struct Access<C: Datagrams, E> {
-    pub(crate) shared: Arc<Shared<C, E>>,
+pub struct Access<C: Datagrams> {
+    pub(crate) shared: Arc<Shared<C>>,
     published: Mutex<AccessStatus>,
 }
 
-impl<C: Connector + Datagrams, E: LocalEgress> Access<C, E> {
-    /// `connector` 用来到对端节点开流和数据报上下文，`egress` 用来就地出站。这里还不开始监听，要调用 [`run`](Self::run)。
+impl<C: Connector + Datagrams> Access<C> {
+    /// `connector` 用来到对端节点开流和数据报上下文。这里还不开始监听，要调用 [`run`](Self::run)。
     ///
     /// `connector` 收的是 `Arc`：连接层的同一个端点通常既是开流的一方、又是接受流的一方，要和出口那一侧共用。
-    pub fn new(connector: Arc<C>, egress: E, netmap: watch::Receiver<Arc<Netmap>>) -> Self {
+    pub fn new(connector: Arc<C>, netmap: watch::Receiver<Arc<Netmap>>) -> Self {
         let opener = Arc::new(Opener::new(Arc::clone(&connector)));
         let shared = Shared {
             connector,
             opener,
-            egress,
             netmap,
+            local: Vec::new(),
             usage: Usage::default(),
             ports: Arc::new(NoPortBook),
             draining: Mutex::new(None),
@@ -103,6 +104,17 @@ impl<C: Connector + Datagrams, E: LocalEgress> Access<C, E> {
     #[must_use]
     pub fn with_udp_idle_timeout(mut self, timeout: Duration) -> Self {
         self.shared_mut("with_udp_idle_timeout").udp_idle_timeout = timeout;
+        self
+    }
+
+    /// 本机配置文件里的组网入口：不认证、只通到组网里的节点（[`LocalEntry`]）。不设时没有。
+    ///
+    /// # Panics
+    ///
+    /// 在 [`run`](Self::run) 已经开始之后调用。
+    #[must_use]
+    pub fn with_local_entries(mut self, entries: Vec<LocalEntry>) -> Self {
+        self.shared_mut("with_local_entries").local = entries;
         self
     }
 
@@ -135,7 +147,7 @@ impl<C: Connector + Datagrams, E: LocalEgress> Access<C, E> {
         Arc::clone(&self.shared.opener)
     }
 
-    fn shared_mut(&mut self, what: &str) -> &mut Shared<C, E> {
+    fn shared_mut(&mut self, what: &str) -> &mut Shared<C> {
         Arc::get_mut(&mut self.shared).unwrap_or_else(|| panic!("{what}() 要在 run() 之前调用：那时还没有监听拿着这些设置"))
     }
 
@@ -170,7 +182,7 @@ impl<C: Connector + Datagrams, E: LocalEgress> Access<C, E> {
         }
     }
 
-    /// 每个监听器和每条端口转发现在的状态。
+    /// 每个代理、组网入口和端口转发现在的状态。
     #[must_use]
     pub fn status(&self) -> AccessStatus {
         let mut status = self.published.lock().expect("access status mutex poisoned").clone();
@@ -202,12 +214,6 @@ impl<C: Connector + Datagrams, E: LocalEgress> Access<C, E> {
         self.shared.drained.load(Ordering::Relaxed)
     }
 
-    /// 这次运行以来每个用过的接入凭据的用量。
-    #[must_use]
-    pub fn credential_usage(&self) -> Vec<CredentialSnapshot> {
-        self.shared.usage.credentials()
-    }
-
     /// 这次运行以来经各个出口出去的流，本节点作为发起方看到的。
     #[must_use]
     pub fn exit_usage(&self) -> Vec<ExitSnapshot> {
@@ -216,9 +222,9 @@ impl<C: Connector + Datagrams, E: LocalEgress> Access<C, E> {
 
     /// 让 `bound` 和 `netmap` 要求的监听一致：关掉不再需要的，绑定新增的，重试上次没绑上的。
     async fn reconcile(&self, netmap: &Netmap, bound: &mut Vec<Bound>) {
-        let wanted = wanted(netmap);
+        let wanted = wanted(netmap, &self.shared.local);
 
-        // 先关后开：监听器改了名字但地址没变时，新的要等旧的让出端口才绑得上。
+        // 先关后开：代理换了编号但地址没变时，新的要等旧的让出端口才绑得上。
         let mut kept = Vec::with_capacity(wanted.len());
         for existing in bound.drain(..) {
             if wanted.iter().any(|(key, _)| *key == existing.key) {
@@ -255,13 +261,16 @@ impl<C: Connector + Datagrams, E: LocalEgress> Access<C, E> {
         }
         *bound = kept;
 
-        let mut status = AccessStatus { version: netmap.version, listeners: Vec::new(), forwards: Vec::new() };
+        let mut status = AccessStatus { version: netmap.version, proxies: Vec::new(), local: Vec::new(), forwards: Vec::new() };
         for entry in bound.iter() {
             let (state, active, traffic) =
                 (entry.state.clone(), Active(Arc::clone(&entry.counters.active)), Traffic(Arc::clone(&entry.counters.traffic)));
             match &entry.key {
-                Key::Listener { name, bind, protocol } => {
-                    status.listeners.push(ListenerStatus { name: name.clone(), bind: *bind, protocol: *protocol, state, active, traffic });
+                Key::Proxy { id, bind } => {
+                    status.proxies.push(ProxyStatus { id: *id, bind: *bind, state, active, traffic });
+                }
+                Key::Local { name, bind, protocol } => {
+                    status.local.push(ListenerStatus { name: name.clone(), bind: *bind, protocol: *protocol, state, active, traffic });
                 }
                 Key::Forward { id, bind, protocol } => {
                     let forward = ForwardStatus { id: *id, bind: *bind, protocol: *protocol, state, active, traffic, target_failure: None };
@@ -284,7 +293,7 @@ impl<C: Connector + Datagrams, E: LocalEgress> Access<C, E> {
                 Some(port) => (SocketAddr::new(configured.ip(), port), false),
                 None => (configured, true),
             },
-            Key::Forward { .. } | Key::Listener { .. } => (configured, false),
+            Key::Forward { .. } | Key::Proxy { .. } | Key::Local { .. } => (configured, false),
         };
         let started = match key {
             Key::Forward { id, protocol: ForwardProtocol::Udp, .. } => UdpSocket::bind(bind).await.map(|socket| {
@@ -293,7 +302,7 @@ impl<C: Connector + Datagrams, E: LocalEgress> Access<C, E> {
                 let sessions = udp::forward::serve(Arc::clone(&self.shared), *id, configured, socket, counters.clone());
                 (local, tokio::spawn(sessions.instrument(span)))
             }),
-            Key::Forward { protocol: ForwardProtocol::Tcp, .. } | Key::Listener { .. } => {
+            Key::Forward { protocol: ForwardProtocol::Tcp, .. } | Key::Proxy { .. } | Key::Local { .. } => {
                 i3t_underlay::tcp_mss::listen(bind).map(|listener| {
                     let local = listener.local_addr().unwrap_or(bind);
                     (local, tokio::spawn(accept_loop(Arc::clone(&self.shared), key.clone(), listener, counters.clone())))
@@ -329,11 +338,25 @@ impl<C: Connector + Datagrams, E: LocalEgress> Access<C, E> {
 pub struct AccessStatus {
     /// 这些状态是按哪一版 netmap 算的。
     pub version: u64,
-    pub listeners: Vec<ListenerStatus>,
+    pub proxies: Vec<ProxyStatus>,
+    /// 本机配置文件里的组网入口。
+    pub local: Vec<ListenerStatus>,
     pub forwards: Vec<ForwardStatus>,
 }
 
-/// 一个代理监听器的状态。
+/// 一个代理的状态。
+#[derive(Debug, Clone)]
+pub struct ProxyStatus {
+    /// netmap 里的编号（[`i3t_model::netmap::Proxy::id`]）。
+    pub id: u32,
+    /// 配置里写的绑定地址。
+    pub bind: SocketAddr,
+    pub state: ListenState,
+    pub active: Active,
+    pub traffic: Traffic,
+}
+
+/// 一个组网入口的状态。
 #[derive(Debug, Clone)]
 pub struct ListenerStatus {
     pub name: String,
@@ -449,17 +472,19 @@ pub(crate) struct Counters {
     pub(crate) traffic: Arc<Tally>,
 }
 
-/// 一个监听是谁。地址或协议变了就是另一个监听（要重新绑定）；别的设置变了还是同一个，新的连接按新的设置处理。
+/// 一个监听是谁。地址变了（端口转发是协议变了也算）就是另一个监听，要重新绑定；别的设置变了还是同一个，
+/// 新的连接按新的设置处理，所以代理改协议、出口、用户名密码都不用重新绑定。
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Key {
-    Listener { name: String, bind: SocketAddr, protocol: ListenerProtocol },
+    Proxy { id: u32, bind: SocketAddr },
+    Local { name: String, bind: SocketAddr, protocol: ListenerProtocol },
     Forward { id: u32, bind: SocketAddr, protocol: ForwardProtocol },
 }
 
 impl Key {
     const fn bind(&self) -> SocketAddr {
         match self {
-            Self::Listener { bind, .. } | Self::Forward { bind, .. } => *bind,
+            Self::Proxy { bind, .. } | Self::Local { bind, .. } | Self::Forward { bind, .. } => *bind,
         }
     }
 }
@@ -467,7 +492,8 @@ impl Key {
 impl std::fmt::Display for Key {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Listener { name, bind, protocol } => write!(f, "监听器 {name}（{protocol:?}，{bind}）"),
+            Self::Proxy { id, bind } => write!(f, "代理 {id}（{bind}）"),
+            Self::Local { name, bind, protocol } => write!(f, "组网入口 {name}（{protocol}，{bind}）"),
             Self::Forward { id, bind, protocol } => write!(f, "端口转发 {id}（{protocol:?}，{bind}）"),
         }
     }
@@ -481,12 +507,13 @@ enum Plan {
     Unsupported { reason: &'static str, cause: ListenCause },
 }
 
-fn wanted(netmap: &Netmap) -> Vec<(Key, Plan)> {
-    let listeners = netmap
-        .me
-        .listeners
+fn wanted(netmap: &Netmap, local: &[LocalEntry]) -> Vec<(Key, Plan)> {
+    let proxies = netmap.me.proxies.iter().map(|proxy| (Key::Proxy { id: proxy.id, bind: proxy.bind }, Plan::Bind));
+    // controller 也可以给同一个地址配一个代理，那时以 controller 的为准。
+    let local = local
         .iter()
-        .map(|listener| (Key::Listener { name: listener.name.clone(), bind: listener.bind, protocol: listener.protocol }, Plan::Bind));
+        .filter(|entry| !netmap.me.proxies.iter().any(|proxy| proxy.bind == entry.bind))
+        .map(|entry| (Key::Local { name: entry.name.clone(), bind: entry.bind, protocol: entry.protocol }, Plan::Bind));
     let forwards = netmap.me.forwards.iter().map(|forward| {
         let plan = if forward.bind.ip() != netmap.me.virtual_ip {
             Plan::Bind
@@ -501,7 +528,7 @@ fn wanted(netmap: &Netmap) -> Vec<(Key, Plan)> {
     });
     let mut wanted: Vec<(Key, Plan)> = Vec::new();
     // 配置里重复的条目只留第一个：同一个地址本来也只能绑一次。
-    for entry in listeners.chain(forwards) {
+    for entry in proxies.chain(local).chain(forwards) {
         if !wanted.iter().any(|(key, _)| *key == entry.0) {
             wanted.push(entry);
         }
@@ -537,12 +564,7 @@ impl Drop for Bound {
     }
 }
 
-async fn accept_loop<C: Connector + Datagrams, E: LocalEgress>(
-    shared: Arc<Shared<C, E>>,
-    key: Key,
-    listener: TcpListener,
-    counters: Counters,
-) {
+async fn accept_loop<C: Connector + Datagrams>(shared: Arc<Shared<C>>, key: Key, listener: TcpListener, counters: Counters) {
     loop {
         match listener.accept().await {
             Ok((stream, from)) => {
@@ -577,14 +599,8 @@ impl Drop for Connection {
     }
 }
 
-/// 处理一条刚接受的连接。监听器的设置每次都从当前的 netmap 里取，所以改设置不需要重新绑定。
-async fn serve<C: Connector + Datagrams, E: LocalEgress>(
-    shared: Arc<Shared<C, E>>,
-    key: Key,
-    stream: TcpStream,
-    from: SocketAddr,
-    connection: Connection,
-) {
+/// 处理一条刚接受的连接。代理的设置每次都从当前的 netmap 里取，所以改设置不需要重新绑定。
+async fn serve<C: Connector + Datagrams>(shared: Arc<Shared<C>>, key: Key, stream: TcpStream, from: SocketAddr, connection: Connection) {
     let netmap = Arc::clone(&shared.netmap.borrow());
     if let Err(error) = stream.set_nodelay(true) {
         tracing::debug!(%error, "设置不了 TCP_NODELAY");
@@ -594,15 +610,18 @@ async fn serve<C: Connector + Datagrams, E: LocalEgress>(
         tracing::debug!(%error, "客户端连接打不开内核保活，客户端悄悄消失时这条连接要等到有数据要发才会发现");
     }
     match key {
-        Key::Listener { name, bind, protocol } => {
-            let current =
-                netmap.me.listeners.iter().find(|listener| listener.name == name && listener.bind == bind && listener.protocol == protocol);
+        Key::Proxy { id, bind } => {
             // 找不到说明它刚从 netmap 里删掉，监听马上就会关。
-            let Some(listener) = current else { return };
-            if !allowed(&listener.allow_from, from) {
-                return tracing::info!("拒绝了一条连接：来源不在这个监听器的白名单里");
+            let Some(proxy) = netmap.me.proxies.iter().find(|proxy| proxy.id == id && proxy.bind == bind) else { return };
+            if !allowed(&proxy.allow_from, from) {
+                return tracing::info!("拒绝了一条连接：来源不在这个代理的白名单里");
             }
-            session::proxy(&shared, &netmap, listener, stream, from, &connection).await;
+            session::proxy(&shared, &netmap, Entry::proxy(proxy), stream, from, &connection).await;
+        }
+        Key::Local { name, .. } => {
+            let Some(local) = shared.local.iter().find(|entry| entry.name == name) else { return };
+            let entry = Entry::local(local);
+            session::proxy(&shared, &netmap, entry, stream, from, &connection).await;
         }
         Key::Forward { id, bind, .. } => {
             let Some(forward) = netmap.me.forwards.iter().find(|forward| forward.id == id && forward.bind == bind) else { return };

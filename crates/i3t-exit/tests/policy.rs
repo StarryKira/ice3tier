@@ -1,4 +1,4 @@
-//! 谁能用、能去哪里：访问规则、出口的能力与出站策略、接入凭据。
+//! 谁能用、能去哪里：访问规则、出口的能力与出站策略、代理的用户名和密码。
 
 // clippy.toml 里的 allow-unwrap-in-tests 只管 #[test] 函数，管不到集成测试里的辅助函数。这里 unwrap 失败就是测试失败。
 #![allow(clippy::unwrap_used)]
@@ -9,14 +9,14 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use common::{
-    GW, LAPTOP, NAS, PATIENCE, PUBLIC_IP, Socks5, World, assert_echo, assert_reset, credential, drain, echo_server, eventually,
-    http_connect, listener, peer_mut, socks5,
+    GW, LAPTOP, NAS, PATIENCE, PUBLIC_IP, Socks5, World, assert_echo, assert_reset, drain, echo_server, eventually, http_connect, peer_mut,
+    proxy, socks5, verifier,
 };
 use i3t_exit::ResolveError;
 use i3t_model::netmap::{ExitRole, ListenerProtocol, PeerExit};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio::time::{sleep, timeout};
+use tokio::time::timeout;
 
 fn public(port: u16) -> String {
     format!("{PUBLIC_IP}:{port}")
@@ -87,32 +87,27 @@ i3t_lane::on_both_transports! {
 }
 
 #[tokio::test]
-async fn an_exit_named_in_the_username_fails_the_same_way_whether_unknown_or_forbidden() {
+async fn a_proxy_exit_fails_the_same_way_whether_unknown_or_forbidden() {
     let world = World::new().await;
     world.gw.system.redirect(&public(443), echo_server().await);
     let socks = world.socks().await;
+    world.laptop.update(|netmap| netmap.me.proxies.push(proxy(5, ListenerProtocol::Mixed, "127.0.0.1:0", 99))).await;
+    let unknown = world.laptop.proxy(5).await;
 
+    // 出口不在 netmap 里，和访问规则不允许 laptop 访问出口：同一个应答。
+    let mut codes = vec![socks5(unknown, None, PUBLIC_IP, 443).await.failed()];
     world.laptop.update(|netmap| peer_mut(netmap, GW).outbound = false).await;
-    let codes = [
-        socks5(socks, Some(("10.66.0.99", "")), PUBLIC_IP, 443).await.failed(),
-        socks5(socks, Some(("nobody", "")), PUBLIC_IP, 443).await.failed(),
-        socks5(socks, Some(("10.66.0.2", "")), PUBLIC_IP, 443).await.failed(),
-        socks5(socks, Some(("gw", "")), PUBLIC_IP, 443).await.failed(),
-        socks5(socks, Some(("fd00::2", "")), PUBLIC_IP, 443).await.failed(),
-        socks5(socks, Some(("gw+x-unknown", "")), PUBLIC_IP, 443).await.failed(),
-    ];
-    assert_eq!(codes, [2; 6]);
-    let statuses = [
-        http_connect(world.http().await, &public(443), Some(("10.66.0.99", ""))).await.0,
-        http_connect(world.http().await, &public(443), Some(("gw", ""))).await.0,
-    ];
+    codes.push(socks5(socks, None, PUBLIC_IP, 443).await.failed());
+    codes.push(socks5(socks, Some(("anything", "")), PUBLIC_IP, 443).await.failed());
+    assert_eq!(codes, [2; 3]);
+    let statuses = [http_connect(unknown, &public(443), None).await.0, http_connect(world.http().await, &public(443), None).await.0];
     assert_eq!(statuses, [403; 2]);
     assert_eq!(world.gw.exit.stats().total, 0);
 
     // 出口一侧的访问规则也挡得住：laptop 以为可以，gw 不认。互联网目标用的是乐观回复，所以表现为连上之后被重置。
     world.laptop.update(|netmap| peer_mut(netmap, GW).outbound = true).await;
     world.gw.update(|netmap| peer_mut(netmap, LAPTOP).inbound = false).await;
-    let mut stream = socks5(socks, Some(("gw", "")), PUBLIC_IP, 443).await.connected();
+    let mut stream = socks5(socks, None, PUBLIC_IP, 443).await.connected();
     assert_reset(&drain(&mut stream).await.1);
     assert_eq!(world.gw.exit.stats().refused, 1);
     assert!(world.gw.system.connected().is_empty());
@@ -125,13 +120,13 @@ i3t_lane::on_both_transports! {
         world.nas.system.redirect("192.168.77.5:8080", echo_server().await);
 
         // laptop 的 netmap 里 nas 不是出口：入口直接拒绝。
-        assert_eq!(socks5(world.socks().await, Some(("nas", "")), PUBLIC_IP, 443).await.failed(), 2);
-        assert_eq!(http_connect(world.http().await, &public(443), Some(("nas", ""))).await.0, 403);
+        assert_eq!(socks5(world.socks_via_nas().await, None, PUBLIC_IP, 443).await.failed(), 2);
+        assert_eq!(http_connect(world.http_via_nas().await, &public(443), None).await.0, 403);
         assert_eq!(world.nas.exit.stats().total, 0);
 
         // laptop 以为 nas 是出口，nas 自己没有启用：能力由节点自己执行，不靠别人不来找它。
         world.laptop.update(|netmap| peer_mut(netmap, NAS).exit = Some(PeerExit::default())).await;
-        let mut stream = socks5(world.socks().await, Some(("nas", "")), PUBLIC_IP, 443).await.connected();
+        let mut stream = socks5(world.socks_via_nas().await, None, PUBLIC_IP, 443).await.connected();
         assert_reset(&drain(&mut stream).await.1);
         assert_eq!(world.nas.exit.stats().refused, 1);
         assert!(world.nas.system.connected().is_empty());
@@ -142,7 +137,7 @@ i3t_lane::on_both_transports! {
 
         // 启用之后就可以了。
         world.nas.update(|netmap| netmap.me.exit = Some(ExitRole::default())).await;
-        let mut stream = socks5(world.socks().await, Some(("nas", "")), PUBLIC_IP, 443).await.connected();
+        let mut stream = socks5(world.socks_via_nas().await, None, PUBLIC_IP, 443).await.connected();
         assert_echo(&mut stream).await;
     }
 }
@@ -158,11 +153,11 @@ i3t_lane::on_both_transports! {
         // 默认不限端口；写了白名单（这里是 80 和 443）就只放行这些。
         world.gw.update(|netmap| netmap.me.exit = Some(ExitRole { ports: Some(vec![80, 443]), ..ExitRole::default() })).await;
         for port in [80, 443] {
-            let mut stream = socks5(world.socks().await, Some(("gw", "")), PUBLIC_IP, port).await.connected();
+            let mut stream = socks5(world.socks().await, None, PUBLIC_IP, port).await.connected();
             assert_echo(&mut stream).await;
         }
         for port in [8443, 22] {
-            let mut stream = socks5(world.socks().await, Some(("gw", "")), PUBLIC_IP, port).await.connected();
+            let mut stream = socks5(world.socks().await, None, PUBLIC_IP, port).await.connected();
             assert_reset(&drain(&mut stream).await.1);
         }
         assert_eq!(world.gw.exit.stats().refused, 2);
@@ -170,13 +165,13 @@ i3t_lane::on_both_transports! {
 
         // 白名单可以改；没有白名单就是不限制。
         world.gw.update(|netmap| netmap.me.exit = Some(ExitRole { ports: Some(vec![8443]), ..ExitRole::default() })).await;
-        let mut stream = socks5(world.socks().await, Some(("gw", "")), PUBLIC_IP, 8443).await.connected();
+        let mut stream = socks5(world.socks().await, None, PUBLIC_IP, 8443).await.connected();
         assert_echo(&mut stream).await;
-        let mut stream = socks5(world.socks().await, Some(("gw", "")), PUBLIC_IP, 443).await.connected();
+        let mut stream = socks5(world.socks().await, None, PUBLIC_IP, 443).await.connected();
         assert_reset(&drain(&mut stream).await.1);
 
         world.gw.update(|netmap| netmap.me.exit = Some(ExitRole::default())).await;
-        let mut stream = socks5(world.socks().await, Some(("gw", "")), PUBLIC_IP, 22).await.connected();
+        let mut stream = socks5(world.socks().await, None, PUBLIC_IP, 22).await.connected();
         assert_echo(&mut stream).await;
     }
 }
@@ -220,19 +215,19 @@ i3t_lane::on_both_transports! {
             "rebind.example",
         ];
         for name in names {
-            let mut stream = socks5(world.socks().await, Some(("gw", "")), name, 443).await.connected();
+            let mut stream = socks5(world.socks().await, None, name, 443).await.connected();
             assert_reset(&drain(&mut stream).await.1);
         }
         // 直接写地址也一样。回环和运营商级 NAT 的地址在入口那边算不上局域网字面量，是按互联网目标发过来的。
         for literal in ["127.0.0.1", "100.64.0.9", "0.0.0.0", "::1", "224.0.0.1"] {
-            let mut stream = socks5(world.socks().await, Some(("gw", "")), literal, 443).await.connected();
+            let mut stream = socks5(world.socks().await, None, literal, 443).await.connected();
             assert_reset(&drain(&mut stream).await.1);
         }
         assert!(world.gw.system.connected().is_empty(), "检查在连接之前：{:?}", world.gw.system.connected());
         let stats = world.gw.exit.stats();
         assert_eq!((stats.refused, stats.failed_by_target, stats.failed_by_exit), (15, 0, 0));
 
-        let mut stream = socks5(world.socks().await, Some(("gw", "")), "good.example", 443).await.connected();
+        let mut stream = socks5(world.socks().await, None, "good.example", 443).await.connected();
         assert_echo(&mut stream).await;
     }
 }
@@ -246,7 +241,7 @@ i3t_lane::on_both_transports! {
         gw.redirect(&public(443), common::closed_port().await);
 
         for name in ["no-such-name.example", "empty.example", "broken-resolver.example", PUBLIC_IP, "1.1.1.1"] {
-            let mut stream = socks5(world.socks().await, Some(("gw", "")), name, 443).await.connected();
+            let mut stream = socks5(world.socks().await, None, name, 443).await.connected();
             assert_reset(&drain(&mut stream).await.1);
         }
         // 两个域名不存在、一个拒绝连接、一个不可达算目标的；解析器出错算出口的。
@@ -266,7 +261,7 @@ i3t_lane::on_both_transports! {
         let client = tokio::spawn({
             let socks = world.socks().await;
             async move {
-                let mut stream = socks5(socks, Some(("gw", "")), "api.example.com", 443).await.connected();
+                let mut stream = socks5(socks, None, "api.example.com", 443).await.connected();
                 assert_echo(&mut stream).await;
             }
         });
@@ -283,93 +278,58 @@ i3t_lane::on_both_transports! {
         client.await.unwrap();
 
         // 策略照常在前面：不允许的端口根本不会去找上游。
-        let mut stream = socks5(world.socks().await, Some(("gw", "")), "api.example.com", 8443).await.connected();
+        let mut stream = socks5(world.socks().await, None, "api.example.com", 8443).await.connected();
         assert_reset(&drain(&mut stream).await.1);
         upstream.assert_untouched(Duration::from_millis(50)).await;
     }
 }
 
-/// laptop 上加两个对局域网开放的监听器，和一个凭据。
-async fn open_to_lan(world: &World, max_concurrent: Option<u32>) -> (SocketAddr, SocketAddr) {
+/// laptop 上加两个对局域网开放、经 gw 出去的代理，认 `alice` 和 `s3cret`：一个 SOCKS5，一个两种协议都说。
+async fn open_to_lan(world: &World) -> (SocketAddr, SocketAddr) {
     world
         .laptop
         .update(|netmap| {
-            netmap.me.listeners.push(listener("lan-socks", ListenerProtocol::Socks5, "0.0.0.0:0"));
-            netmap.me.listeners.push(listener("lan-http", ListenerProtocol::Http, "0.0.0.0:0"));
-            netmap.credentials.push(credential("other", "another-token", None));
-            netmap.credentials.push(credential("gateway", "s3cret-token", max_concurrent));
+            for (id, protocol) in [(5, ListenerProtocol::Socks5), (6, ListenerProtocol::Mixed)] {
+                let mut lan = proxy(id, protocol, "0.0.0.0:0", GW);
+                lan.auth = Some(verifier("alice", "s3cret"));
+                netmap.me.proxies.push(lan);
+            }
         })
         .await;
-    (world.laptop.listener("lan-socks").await, world.laptop.listener("lan-http").await)
+    (world.laptop.proxy(5).await, world.laptop.proxy(6).await)
 }
 
 i3t_lane::on_both_transports! {
-    async fn a_listener_open_to_others_demands_the_credential_in_the_password_field() {
+    async fn a_proxy_open_to_others_demands_its_user_name_and_password() {
         let world = World::new().await;
         world.gw.system.redirect(&public(443), echo_server().await);
-        let (socks, http) = open_to_lan(&world, None).await;
+        let (socks, mixed) = open_to_lan(&world).await;
 
         // 没有带。
         assert!(matches!(socks5(socks, None, PUBLIC_IP, 443).await, Socks5::NoAcceptableMethod));
-        assert_eq!(http_connect(http, &public(443), None).await.0, 407);
+        assert!(matches!(socks5(mixed, None, PUBLIC_IP, 443).await, Socks5::NoAcceptableMethod));
+        assert_eq!(http_connect(mixed, &public(443), None).await.0, 407);
 
-        // 带错了：别的字符串、空的、凭据的名字、令牌的哈希都不行。
-        let hash = credential("gateway", "s3cret-token", None).token.to_string();
-        for password in ["wrong", "", "gateway", "S3cret-token", hash.as_str()] {
-            assert!(matches!(socks5(socks, Some(("gw", password)), PUBLIC_IP, 443).await, Socks5::AuthRejected), "{password:?}");
-            assert_eq!(http_connect(http, &public(443), Some(("gw", password))).await.0, 407, "{password:?}");
+        // 带错了：错的密码、错的用户名、空的、两个对调、校验值本身都不行。
+        let hash = verifier("alice", "s3cret").hash.to_string();
+        for (username, password) in [("alice", "wrong"), ("bob", "s3cret"), ("alice", ""), ("", ""), ("s3cret", "alice"), ("alice", hash.as_str())] {
+            assert!(matches!(socks5(socks, Some((username, password)), PUBLIC_IP, 443).await, Socks5::AuthRejected), "{username}:{password}");
+            assert_eq!(http_connect(mixed, &public(443), Some((username, password))).await.0, 407, "{username}:{password}");
         }
         assert_eq!(world.gw.exit.stats().total, 0);
 
-        // 带对了：用户名照常写出口节点。
-        let mut stream = socks5(socks, Some(("gw", "s3cret-token")), PUBLIC_IP, 443).await.connected();
+        // 带对了：从代理的出口出去，两种协议都一样。
+        let mut stream = socks5(socks, Some(("alice", "s3cret")), PUBLIC_IP, 443).await.connected();
         assert_echo(&mut stream).await;
-        let (status, mut stream) = http_connect(http, &public(443), Some(("10.66.0.2", "another-token"))).await;
+        let mut stream = socks5(mixed, Some(("alice", "s3cret")), PUBLIC_IP, 443).await.connected();
+        assert_echo(&mut stream).await;
+        let (status, mut stream) = http_connect(mixed, &public(443), Some(("alice", "s3cret"))).await;
         assert_eq!(status, 200);
         assert_echo(&mut stream).await;
+        eventually("gw 处理完三条流", || world.gw.exit.stats().total == 3).await;
 
-        // 凭据只证明"可以用这个入口"，去哪里还是按规则：没有写出口，非回环监听器的默认动作是拒绝。
-        assert_eq!(socks5(socks, Some(("", "s3cret-token")), PUBLIC_IP, 443).await.failed(), 2);
-
-        // 回环上的监听器不要求凭据。
-        let mut stream = socks5(world.socks().await, Some(("gw", "")), PUBLIC_IP, 443).await.connected();
+        // 回环上不认证的代理给什么都行。
+        let mut stream = socks5(world.socks().await, None, PUBLIC_IP, 443).await.connected();
         assert_echo(&mut stream).await;
-    }
-}
-
-i3t_lane::on_both_transports! {
-    async fn a_credential_is_held_to_its_concurrent_connection_limit() {
-        let world = World::new().await;
-        world.gw.system.redirect(&public(443), echo_server().await);
-        let (socks, http) = open_to_lan(&world, Some(2)).await;
-        let auth = Some(("gw", "s3cret-token"));
-
-        let mut first = socks5(socks, auth, PUBLIC_IP, 443).await.connected();
-        let (status, mut second) = http_connect(http, &public(443), auth).await;
-        assert_eq!(status, 200);
-        assert_echo(&mut first).await;
-        assert_echo(&mut second).await;
-
-        // 第三条超过了上限。别的凭据不受影响。
-        assert_eq!(socks5(socks, auth, PUBLIC_IP, 443).await.failed(), 1);
-        assert_eq!(http_connect(http, &public(443), auth).await.0, 429);
-        let mut other = socks5(socks, Some(("gw", "another-token")), PUBLIC_IP, 443).await.connected();
-        assert_echo(&mut other).await;
-
-        // 放掉一条，名额就回来了。
-        drop(first);
-        let mut third = timeout(PATIENCE, async {
-            loop {
-                match socks5(socks, auth, PUBLIC_IP, 443).await {
-                    Socks5::Connected(stream) => break stream,
-                    Socks5::Failed(1) => sleep(Duration::from_millis(5)).await,
-                    other => panic!("不应该是 {other:?}"),
-                }
-            }
-        })
-        .await
-        .expect("名额应该很快归还");
-        assert_echo(&mut third).await;
-        assert_echo(&mut second).await;
     }
 }

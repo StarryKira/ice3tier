@@ -25,7 +25,6 @@ i3t-proto = { path = "../crates/i3t-proto" }
 i3t-relay = { path = "../crates/i3t-relay" }
 i3t-underlay = { path = "../crates/i3t-underlay" }
 libfuzzer-sys = "0.4.13"
-ring = "0.17.14"
 serde = "1.0.229"
 serde_json = "1.0.154"
 tokio = { version = "1.54.1", features = ["full"] }

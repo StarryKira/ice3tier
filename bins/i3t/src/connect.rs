@@ -6,8 +6,11 @@
 //! ssh -o ProxyCommand='i3t connect %h %p' nas
 //! ```
 //!
-//! 连接经本机节点的 SOCKS5 入口出去（配置文件里的 `proxy.socks5`），所以节点要在运行。目标写节点的名字、
-//! 全名或者虚拟 IP；加了 `--via <出口>` 时，目标是从那个出口节点的网络里看到的地址。
+//! 连接经本机节点的组网入口出去（配置文件里的 `proxy.socks5`，默认不开），所以节点要在运行、入口要打开。目标是网络里的节点：
+//! 名字、全名或者虚拟 IP。这个入口不经出口，到不了网络之外的地址；要经出口出去用 WebUI 里配的代理。
+//!
+//! 没有做成"经本机状态接口直接接到节点上、不要监听的端口"：那个接口是一问一答就关的 HTTP，要把连接整个交给数据面得改它的约定，
+//! 不如开着组网入口简单。
 //!
 //! 标准输出是数据通道，这里除了数据什么都不往它上面写；出错的说明都在标准错误上。
 
@@ -20,36 +23,30 @@ use tokio::net::TcpStream;
 use crate::texts::texts;
 
 const SOCKS_VERSION: u8 = 5;
-/// 用户名密码认证这个子协议自己的版本号（RFC 1929）。
-const AUTH_VERSION: u8 = 1;
 const METHOD_NONE: u8 = 0x00;
-const METHOD_PASSWORD: u8 = 0x02;
 const METHOD_REFUSED: u8 = 0xff;
 const COMMAND_CONNECT: u8 = 1;
 const ADDR_V4: u8 = 1;
 const ADDR_NAME: u8 = 3;
 const ADDR_V6: u8 = 4;
 
-/// 要连到哪里。
+/// 要连到哪里：网络里的一个节点上的端口。
 #[derive(Debug)]
 pub(crate) struct Destination {
     pub(crate) host: String,
     pub(crate) port: u16,
-    /// 从哪个出口节点的网络出去。`None` 表示目标本身就是网络里的节点。
-    pub(crate) via: Option<String>,
 }
 
 impl Destination {
-    /// `host` 是用户写的目标。没有 `via` 时目标是网络里的节点，只写了名字（`nas`）的补成全名（`nas.home.i3t`）：
-    /// 节点的入口只认全名和虚拟 IP，而 ssh 传过来的往往就是那个短名字。`domain` 是本节点所在网络的域名，
-    /// 还没有加入网络时是 `None`，这时原样使用。
-    pub(crate) fn new(host: String, port: u16, via: Option<String>, domain: Option<&str>) -> Self {
-        let bare_name = via.is_none() && !host.contains('.') && host.parse::<IpAddr>().is_err();
+    /// `host` 是用户写的目标。只写了名字（`nas`）的补成全名（`nas.home.i3t`）：节点的入口只认全名和虚拟 IP，
+    /// 而 ssh 传过来的往往就是那个短名字。`domain` 是本节点所在网络的域名，还没有加入网络时是 `None`，这时原样使用。
+    pub(crate) fn new(host: String, port: u16, domain: Option<&str>) -> Self {
+        let bare_name = !host.contains('.') && host.parse::<IpAddr>().is_err();
         let host = match domain {
             Some(domain) if bare_name => format!("{host}.{domain}"),
             Some(_) | None => host,
         };
-        Self { host, port, via }
+        Self { host, port }
     }
 }
 
@@ -62,21 +59,18 @@ pub(crate) async fn connect(proxy: SocketAddr, destination: &Destination) -> any
     pipe(stream).await
 }
 
-/// 走完 SOCKS5 的握手：协商认证方式，（有出口时）报上用户名，发 CONNECT，读回复。
+/// 走完 SOCKS5 的握手：不认证（组网入口只在回环上，不认证），发 CONNECT，读回复。
 async fn negotiate(stream: &mut (impl AsyncRead + AsyncWrite + Unpin), destination: &Destination) -> anyhow::Result<()> {
     let t = &texts().ui;
-    // 出口节点写在用户名里，所以有出口时只提用户名密码这一种方式。
-    let method = if destination.via.is_some() { METHOD_PASSWORD } else { METHOD_NONE };
-    stream.write_all(&[SOCKS_VERSION, 1, method]).await.context(t.socks5_talk)?;
+    stream.write_all(&[SOCKS_VERSION, 1, METHOD_NONE]).await.context(t.socks5_talk)?;
     let mut chosen = [0u8; 2];
     stream.read_exact(&mut chosen).await.context(t.socks5_talk)?;
     ensure!(chosen[0] == SOCKS_VERSION, t.not_socks5);
-    match (chosen[1], &destination.via) {
-        (METHOD_NONE, None) => {}
-        (METHOD_PASSWORD, Some(exit)) => authenticate(stream, exit).await?,
-        (METHOD_REFUSED, None) => bail!(t.needs_credential),
-        (METHOD_REFUSED, Some(_)) => bail!(t.no_exit_by_name),
-        (other, _) => bail!((t.unknown_method)(other)),
+    match chosen[1] {
+        METHOD_NONE => {}
+        // 回环上的端口被 controller 配成了要密码的代理：那是别的东西，不是组网入口。
+        METHOD_REFUSED => bail!(t.socks5_off),
+        other => bail!((t.unknown_method)(other)),
     }
 
     stream.write_all(&request(destination)?).await.context(t.socks5_talk)?;
@@ -96,20 +90,6 @@ async fn negotiate(stream: &mut (impl AsyncRead + AsyncWrite + Unpin), destinati
         0 => Ok(()),
         code => bail!(i3t_lang::current().labelled(&(t.cannot_reach)(&destination.describe()), (t.refusal)(code))),
     }
-}
-
-/// 用户名密码认证：用户名是出口节点，密码留空（回环上的入口不查密码）。
-async fn authenticate(stream: &mut (impl AsyncRead + AsyncWrite + Unpin), exit: &str) -> anyhow::Result<()> {
-    let t = &texts().ui;
-    let name_len = u8::try_from(exit.len()).ok().filter(|len| *len > 0).with_context(|| (t.name_length)(exit))?;
-    let mut message = vec![AUTH_VERSION, name_len];
-    message.extend_from_slice(exit.as_bytes());
-    message.push(0);
-    stream.write_all(&message).await.context(t.socks5_talk)?;
-    let mut answer = [0u8; 2];
-    stream.read_exact(&mut answer).await.context(t.socks5_talk)?;
-    ensure!(answer[1] == 0, (t.exit_refused)(exit));
-    Ok(())
 }
 
 /// CONNECT 请求。目标是地址时按地址发，否则按名字发，由节点去解析。
@@ -138,11 +118,7 @@ fn request(destination: &Destination) -> anyhow::Result<Vec<u8>> {
 
 impl Destination {
     fn describe(&self) -> String {
-        let target = format!("{}:{}", self.host, self.port);
-        match &self.via {
-            Some(exit) => (texts().ui.via_exit)(&target, exit),
-            None => target,
-        }
+        format!("{}:{}", self.host, self.port)
     }
 }
 
@@ -177,8 +153,8 @@ mod tests {
 
     use super::*;
 
-    fn to(host: &str, port: u16, via: Option<&str>) -> Destination {
-        Destination { host: host.to_owned(), port, via: via.map(str::to_owned) }
+    fn to(host: &str, port: u16) -> Destination {
+        Destination { host: host.to_owned(), port }
     }
 
     /// 让 `negotiate` 和一个照剧本答话的假入口对话：`replies` 是它依次回的内容，返回握手的结果和它收到的全部字节。
@@ -198,29 +174,21 @@ mod tests {
 
     #[tokio::test]
     async fn a_node_name_is_sent_as_a_name_without_authentication() {
-        let (result, sent) = talk(&to("nas", 22, None), &[&[5, 0], ACCEPTED_V4]).await;
+        let (result, sent) = talk(&to("nas", 22), &[&[5, 0], ACCEPTED_V4]).await;
         result.unwrap();
         assert_eq!(sent, [&[5, 1, 0][..], &[5, 1, 0, 3, 3], b"nas", &[0, 22]].concat());
     }
 
     #[tokio::test]
     async fn addresses_are_sent_as_addresses() {
-        let (result, sent) = talk(&to("10.77.0.3", 8080, None), &[&[5, 0], ACCEPTED_V4]).await;
+        let (result, sent) = talk(&to("10.77.0.3", 8080), &[&[5, 0], ACCEPTED_V4]).await;
         result.unwrap();
         assert_eq!(sent[3..], [5, 1, 0, 1, 10, 77, 0, 3, 0x1f, 0x90]);
 
-        let (result, sent) = talk(&to("fd00::3", 443, None), &[&[5, 0], ACCEPTED_V4]).await;
+        let (result, sent) = talk(&to("fd00::3", 443), &[&[5, 0], ACCEPTED_V4]).await;
         result.unwrap();
         assert_eq!(sent[3..7], [5, 1, 0, 4]);
         assert_eq!(sent.len(), 3 + 4 + 16 + 2);
-    }
-
-    #[tokio::test]
-    async fn an_exit_goes_into_the_user_name_with_an_empty_password() {
-        let (result, sent) = talk(&to("192.168.1.10", 22, Some("home")), &[&[5, 2], &[1, 0], ACCEPTED_V4]).await;
-        result.unwrap();
-        let expected = [&[5, 1, 2][..], &[1, 4], b"home", &[0], &[5, 1, 0, 1, 192, 168, 1, 10, 0, 22]].concat();
-        assert_eq!(sent, expected);
     }
 
     #[tokio::test]
@@ -232,7 +200,7 @@ mod tests {
             server.write_all(&[5, 0]).await.unwrap();
             server.write_all(&reply).await.unwrap();
             server.write_all(b"first bytes of the session").await.unwrap();
-            negotiate(&mut client, &to("nas", 22, None)).await.unwrap();
+            negotiate(&mut client, &to("nas", 22)).await.unwrap();
             let mut rest = [0u8; 26];
             client.read_exact(&mut rest).await.unwrap();
             assert_eq!(&rest, b"first bytes of the session", "握手之后读到的第一个字节就是数据");
@@ -242,48 +210,37 @@ mod tests {
     #[tokio::test]
     async fn a_refusal_names_the_destination_and_the_reason() {
         let refused = [5, 2, 0, 1, 0, 0, 0, 0, 0, 0];
-        let (result, _) = talk(&to("nas", 22, None), &[&[5, 0], &refused]).await;
+        let (result, _) = talk(&to("nas", 22), &[&[5, 0], &refused]).await;
         let message = result.unwrap_err().to_string();
         assert!(message.contains("nas:22") && message.contains((texts().ui.refusal)(2)), "{message}");
-
-        let unreachable = [5, 3, 0, 1, 0, 0, 0, 0, 0, 0];
-        let (result, _) = talk(&to("10.0.0.9", 22, Some("home")), &[&[5, 2], &[1, 0], &unreachable]).await;
-        let message = result.unwrap_err().to_string();
-        assert!(message.contains(&(texts().ui.via_exit)("10.0.0.9:22", "home")) && message.contains((texts().ui.refusal)(3)), "{message}");
     }
 
     #[tokio::test]
-    async fn an_entry_that_demands_credentials_is_explained() {
-        let (result, _) = talk(&to("nas", 22, None), &[&[5, 0xff]]).await;
-        assert_eq!(result.unwrap_err().to_string(), texts().ui.needs_credential);
-        let (result, _) = talk(&to("nas", 22, Some("home")), &[&[5, 2], &[1, 1]]).await;
-        assert_eq!(result.unwrap_err().to_string(), (texts().ui.exit_refused)("home"));
+    async fn a_port_that_wants_a_password_is_not_the_mesh_entry() {
+        let (result, _) = talk(&to("nas", 22), &[&[5, 0xff]]).await;
+        assert_eq!(result.unwrap_err().to_string(), texts().ui.socks5_off);
     }
 
     #[tokio::test]
     async fn something_that_is_not_socks5_is_recognised() {
-        let (result, _) = talk(&to("nas", 22, None), &[b"HTTP/1.1 400 Bad Request\r\n"]).await;
+        let (result, _) = talk(&to("nas", 22), &[b"HTTP/1.1 400 Bad Request\r\n"]).await;
         assert_eq!(result.unwrap_err().to_string(), texts().ui.not_socks5);
     }
 
     #[test]
     fn a_bare_node_name_gets_the_networks_domain_and_nothing_else_is_touched() {
-        let host = |host: &str, via: Option<&str>, domain: Option<&str>| {
-            Destination::new(host.to_owned(), 22, via.map(str::to_owned), domain).host
-        };
-        assert_eq!(host("nas", None, Some("home.i3t")), "nas.home.i3t");
-        assert_eq!(host("nas.home.i3t", None, Some("home.i3t")), "nas.home.i3t");
-        assert_eq!(host("10.77.0.3", None, Some("home.i3t")), "10.77.0.3");
-        assert_eq!(host("fd00::3", None, Some("home.i3t")), "fd00::3");
-        // 经出口时目标是出口那边的名字，不是网络里的节点。
-        assert_eq!(host("printer", Some("gw"), Some("home.i3t")), "printer");
-        assert_eq!(host("nas", None, None), "nas", "还没有加入网络，不知道域名");
+        let host = |host: &str, domain: Option<&str>| Destination::new(host.to_owned(), 22, domain).host;
+        assert_eq!(host("nas", Some("home.i3t")), "nas.home.i3t");
+        assert_eq!(host("nas.home.i3t", Some("home.i3t")), "nas.home.i3t");
+        assert_eq!(host("10.77.0.3", Some("home.i3t")), "10.77.0.3");
+        assert_eq!(host("fd00::3", Some("home.i3t")), "fd00::3");
+        assert_eq!(host("nas", None), "nas", "还没有加入网络，不知道域名");
     }
 
     #[test]
     fn names_that_do_not_fit_are_refused_before_anything_is_sent() {
-        assert!(request(&to("", 22, None)).is_err());
-        assert!(request(&to(&"a".repeat(256), 22, None)).is_err());
-        assert!(request(&to(&"a".repeat(255), 22, None)).is_ok());
+        assert!(request(&to("", 22)).is_err());
+        assert!(request(&to(&"a".repeat(256), 22)).is_err());
+        assert!(request(&to(&"a".repeat(255), 22)).is_ok());
     }
 }

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import textwrap
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from lab import Host, wait_until
@@ -17,6 +19,38 @@ BIN_DIR = Path(os.environ.get("I3T_BIN_DIR", REPO / "target" / "release"))
 # 程序在终端上说的话跟着系统的语言。测试读其中的一些（多数用 --json），按中文写的，所以这里定下来：测试启动的程序都继承它。
 os.environ["I3T_LANG"] = "zh-CN"
 NETWORK = {"name": "lab", "domain": "lab.i3t", "cidr": "10.66.0.0/16"}
+
+# 节点本机配置文件里的组网入口（`[proxy]`）：只通到组网里的节点，不认证、没有出口。节点默认不开，测试里的节点默认开着
+# （`Node(local_entry=False)` 不开），访问组网里的节点就经它。
+LOCAL_SOCKS5 = 1080
+LOCAL_HTTP = 1081
+# 经出口出去的代理：在节点 A 上监听、经出口节点 B 出去。没有写端口时监听在 PROXY_PORT_BASE + B 的编号上。
+PROXY_PORT_BASE = 11000
+
+
+@dataclass
+class Proxy:
+    """客户端眼里的一个代理：连哪里，用户名和密码（不认证时是空的）。组网入口也是这样一个。"""
+    host: str
+    port: int
+    username: str = ""
+    password: str = ""
+
+    def url(self, scheme: str) -> str:
+        """`socks5h://用户名:密码@127.0.0.1:11002` 这样的写法。"""
+        login = f"{self.username}:{self.password}@" if self.username or self.password else ""
+        return f"{scheme}://{login}{self.host}:{self.port}"
+
+    @property
+    def address(self) -> str:
+        return f"{self.host}:{self.port}"
+
+
+def verifier(username: str, password: str) -> dict:
+    """静态 netmap 里代理的 `auth`：SHA-256(盐 ‖ SHA-256(用户名) ‖ 密码)，和 `i3t_model::netmap::Verifier` 一样。"""
+    salt = os.urandom(16)
+    digest = hashlib.sha256(salt + hashlib.sha256(username.encode()).digest() + password.encode()).hexdigest()
+    return {"salt": salt.hex(), "hash": digest}
 
 # 一个只回答"你是从哪个地址连过来的"的 HTTP 服务。用它确认流量是从哪个节点的出口出去的。
 WHOAMI = r"""
@@ -95,11 +129,35 @@ class Controller:
         """管理员打开（或者关掉）节点"可以作为端口转发的目标"的开关。节点自己不声明它。"""
         self.ctl("node", "set", str(node.id), "--forward-target", "on" if on else "off")
 
+    def add_proxy(self, node: "Node", exit: "Node", *args: str, port: int | None = None, bind: str = "127.0.0.1",
+                  username: str = "", password: str = "", wait: bool = True, default: bool = True) -> dict:
+        """经 controller 在 `node` 上建一个经 `exit` 出去的代理（`i3tctl proxy add`），之后 `node.curl(via=exit)` 这些就走它。
+        `args` 是另外的选项（`--protocol socks5` 之类）。`wait` 时等到节点上这个端口开始监听（不等节点上报：它每 10 秒报一次，
+        要看状态用 `wait_proxy`）。`default` 是假时不把它当作经 `exit` 出去的那一个（`curl(via=exit)` 不走它）。返回代理的 JSON。"""
+        port = port or PROXY_PORT_BASE + exit.id
+        login = [*(["--username", username] if username else []), *(["--password", password] if password else [])]
+        created = self.ctl("proxy", "add", str(node.id), f"{bind}:{port}", str(exit.id), *login, *args)
+        host = "127.0.0.1" if bind in ("127.0.0.1", "0.0.0.0") else bind
+        if default:
+            node.proxies[exit.id] = Proxy(host, port, created["username"], created["password"])
+        if wait:
+            wait_until(lambda: f":{port} " in node.host.run("ss", "-lnt").stdout, what=f"{node.name} 上的代理 {bind}:{port} 开始监听")
+        return created
+
+    def proxy(self, proxy_id: int) -> dict:
+        return self.ctl("proxy", "show", str(proxy_id))
+
+    def wait_proxy(self, proxy_id: int, code: str = "listening", timeout: float = 60) -> dict:
+        """等代理的状态变成 `code`（节点每 10 秒上报一次），返回那时的代理。"""
+        wait_until(lambda: self.proxy(proxy_id)["status"]["code"] == code, timeout=timeout,
+                   what=f"代理 #{proxy_id} 的状态变成 {code}（现在是 {self.proxy(proxy_id)['status']}）")
+        return self.proxy(proxy_id)
+
 
 class Node:
     """实验环境里的一个 ice3tier 节点。"""
 
-    def __init__(self, host: Host, work: Path, node_id: int = 0, *, declare: tuple[str, ...] = ()) -> None:
+    def __init__(self, host: Host, work: Path, node_id: int = 0, *, declare: tuple[str, ...] = (), local_entry: bool = True) -> None:
         self.host = host
         self.id = node_id
         self.name = host.name
@@ -111,7 +169,10 @@ class Node:
         # 启动节点时另外给的环境变量（测试用的开关）。
         self.env: dict[str, str] = {}
         declared = "\n".join(f"{name} = true" for name in declare)
-        (self.state / "config.toml").write_text(f"port = 20330\n[declare]\n{declared}\n[log]\nlevel = \"debug\"\n")
+        entries = f"[proxy]\nsocks5 = \"127.0.0.1:{LOCAL_SOCKS5}\"\nhttp = \"127.0.0.1:{LOCAL_HTTP}\"\n" if local_entry else ""
+        (self.state / "config.toml").write_text(f"port = 20330\n[declare]\n{declared}\n{entries}[log]\nlevel = \"debug\"\n")
+        # 这个节点上经出口出去的代理，按出口的编号：`proxy_to`（静态的 netmap）或者 `Controller.add_proxy` 记进来。
+        self.proxies: dict[int, Proxy] = {}
         self.key = host.run(binary("i3t"), "--state-dir", str(self.state), "key").stdout.strip()
 
     @property
@@ -132,10 +193,33 @@ class Node:
     def as_relay(self) -> dict:
         return {"id": self.id, "key": self.key, "name": self.name, "udp": [self.endpoint], "tcp": [self.endpoint]}
 
+    def proxy_to(self, exit: "Node", *, port: int | None = None, bind: str = "127.0.0.1", protocol: str = "mixed",
+                 username: str = "", password: str = "", default: bool = True, **settings) -> dict:
+        """静态 netmap 里的一个代理：在这个节点上监听、经 `exit` 出去（放进 `netmap(proxies=…)`）。`default` 时之后
+        `curl(via=exit)` 这些就走它。写了用户名和密码时 netmap 里只有它们的校验值。
+        `settings` 是代理的别的设置（`class`、`optimistic`、`allow_from`）。"""
+        port = port or PROXY_PORT_BASE + exit.id
+        entry = {"id": port, "name": f"via-{exit.name}", "bind": f"{bind}:{port}", "protocol": protocol, "exit": exit.id, **settings}
+        if username or password:
+            entry["auth"] = verifier(username, password)
+        host = "127.0.0.1" if bind in ("127.0.0.1", "0.0.0.0") else bind
+        if default:
+            self.proxies[exit.id] = Proxy(host, port, username, password)
+        return entry
+
+    def entry(self, via: "Node | None", protocol: str = "socks5") -> Proxy:
+        """客户端从这个节点出去时连的代理：经 `via` 出去的那个，`via` 是 `None` 时是本机的组网入口（只到组网里的节点）。"""
+        if via is None:
+            return Proxy("127.0.0.1", LOCAL_SOCKS5 if protocol == "socks5" else LOCAL_HTTP)
+        if via.id not in self.proxies:
+            raise KeyError(f"{self.name} 上没有经 {via.name} 出去的代理：先 proxy_to 或者 Controller.add_proxy")
+        return self.proxies[via.id]
+
     def netmap(self, *, peers: list[dict] = (), relays: list[dict] = (), me: dict | None = None,
-               relay_clients: list["Node"] = (), version: int = 1) -> dict:
+               relay_clients: list["Node"] = (), proxies: list[dict] = (), version: int = 1) -> dict:
+        own = {"proxies": list(proxies)} if proxies else {}
         return {"version": version, "network": NETWORK,
-                "me": {"id": self.id, "name": self.name, "virtual_ip": self.virtual_ip, **(me or {})},
+                "me": {"id": self.id, "name": self.name, "virtual_ip": self.virtual_ip, **own, **(me or {})},
                 "peers": list(peers), "relays": list(relays),
                 "relay_clients": [{"id": node.id, "key": node.key} for node in relay_clients]}
 
@@ -175,14 +259,15 @@ class Node:
         return self.log.read_text(errors="replace") if self.log.exists() else ""
 
     def curl(self, url: str, *, via: "Node | None" = None, proxy: str = "socks5", timeout: float = 20,
-             extra: tuple[str, ...] = ()) -> subprocess.CompletedProcess:
-        """从这个节点所在的机器上，经它的本机代理入口访问 `url`。`via` 是代理用户名里写的出口节点。"""
-        user = f"{via.virtual_ip}@" if via else ""
+             extra: tuple[str, ...] = (), through: Proxy | None = None) -> subprocess.CompletedProcess:
+        """从这个节点所在的机器上访问 `url`：经这个节点上经 `via` 出去的代理，`via` 是 `None` 时经本机的组网入口。
+        `through` 直接给出要连的代理（测认证时用）。`proxy` 是说哪种协议：`socks5` 或者 `http`（CONNECT）。"""
+        target = through or self.entry(via, proxy)
         if proxy == "socks5":
-            proxy_args = ["-x", f"socks5h://{user}127.0.0.1:1080"]
+            proxy_args = ["-x", target.url("socks5h")]
         else:
             # -p 让 curl 对明文 HTTP 也走 CONNECT 的隧道（不用 -p 的明文转发见 plain_http）。
-            proxy_args = ["-p", "-x", f"http://{user.rstrip('@') + ':x@' if via else ''}127.0.0.1:1081"]
+            proxy_args = ["-p", "-x", target.url("http")]
         return self.host.run("curl", "-sS", "--max-time", str(timeout), *proxy_args, *extra, url, check=False, timeout=timeout + 5)
 
 
@@ -264,16 +349,16 @@ while True:
 """
 
 # 一个最小的 SOCKS5 UDP 客户端：做 UDP ASSOCIATE，经中继端口发一个报文，打印回来的报文（JSON）；等不到就打印 null。
-# 参数：代理地址、代理端口、用户名（可以为空）、目标、目标端口、载荷（十六进制）、最多发几次。
+# 参数：代理地址、代理端口、用户名、密码（都空时不认证）、目标、目标端口、载荷（十六进制）、最多发几次。
 # 第一个报文要等两个节点之间建好连接才出得去，所以每隔一秒半重发一次，直到有回音。
 SOCKS5_UDP = r"""
 import json, socket, struct, sys
-proxy_host, proxy_port, user, target, port, payload, tries = sys.argv[1:8]
+proxy_host, proxy_port, user, password, target, port, payload, tries = sys.argv[1:9]
 control = socket.create_connection((proxy_host, int(proxy_port)), timeout=10)
-if user:
+if user or password:
     control.sendall(b"\x05\x01\x02")
     assert control.recv(2) == b"\x05\x02", "代理应该选中用户名密码认证"
-    control.sendall(bytes([1, len(user)]) + user.encode() + b"\x00")
+    control.sendall(bytes([1, len(user)]) + user.encode() + bytes([len(password)]) + password.encode())
     assert control.recv(2) == b"\x01\x00", "认证应该通过"
 else:
     control.sendall(b"\x05\x01\x00")
@@ -358,10 +443,13 @@ def start_dns(host: Host, bind: str, port: int, name: str, address: str) -> str:
     return server
 
 
-def socks5_udp(host: Host, target: str, port: int, payload: bytes, *, user: str = "", tries: int = 10) -> dict | None:
-    """从 `host` 上经它的本机 SOCKS5 入口发一个 UDP 报文给 `target:port`，返回回来的报文：来源地址、端口和数据。"""
-    done = host.run(sys.executable, "-c", SOCKS5_UDP, "127.0.0.1", "1080", user, target, str(port), payload.hex(), str(tries),
-                    check=False, timeout=tries * 2 + 15)
+def socks5_udp(node: Node, target: str, port: int, payload: bytes, *, via: Node | None = None, through: Proxy | None = None,
+               tries: int = 10) -> dict | None:
+    """从 `node` 所在的机器经它上面经 `via` 出去的代理（`via` 是 `None` 时经组网入口；`through` 直接给出代理）
+    发一个 UDP 报文给 `target:port`，返回回来的报文：来源地址、端口和数据。"""
+    proxy = through or node.entry(via)
+    done = node.host.run(sys.executable, "-c", SOCKS5_UDP, proxy.host, str(proxy.port), proxy.username, proxy.password, target, str(port),
+                         payload.hex(), str(tries), check=False, timeout=tries * 2 + 15)
     if done.returncode != 0:
         raise RuntimeError(f"SOCKS5 UDP 客户端出错：{done.stderr.strip()[-500:]}")
     answer = json.loads(done.stdout)
@@ -411,14 +499,11 @@ def eventually_value(action, ok, timeout: float = 30, interval: float = 0.5):
         time.sleep(interval)
 
 
-def timed_download(node: Node, url: str, *, via: Node | None = None, user: str | None = None, timeout: float = 60):
-    """从 `node` 所在的机器经它的本机 SOCKS5 入口下载 `url`，返回 (curl 的退出码, 下载的字节数, 用了多少秒)。
-
-    `user` 是代理的用户名；不写时用 `via` 的虚拟 IP。
-    """
-    name = user if user is not None else (via.virtual_ip if via else "")
-    auth = f"{name}@" if name else ""
-    done = node.host.run("curl", "-sS", "--max-time", str(timeout), "-x", f"socks5h://{auth}127.0.0.1:1080", "-o", "/dev/null",
+def timed_download(node: Node, url: str, *, via: Node | None = None, through: Proxy | None = None, timeout: float = 60):
+    """从 `node` 所在的机器经它上面经 `via` 出去的代理（或者 `through` 这个代理）下载 `url`，
+    返回 (curl 的退出码, 下载的字节数, 用了多少秒)。"""
+    proxy = through or node.entry(via)
+    done = node.host.run("curl", "-sS", "--max-time", str(timeout), "-x", proxy.url("socks5h"), "-o", "/dev/null",
                          "-w", "%{size_download} %{time_total}", url, check=False, timeout=timeout + 5)
     size, seconds = (done.stdout.split() + ["0", "0"])[:2]
     return done.returncode, int(float(size)), float(seconds)
@@ -526,15 +611,13 @@ def start_blob_server(host: Host, work: Path) -> Path:
 
 def fetch(node: Node, url: str, *, via: Node | None, cert: Path | None = None, proxy: str = "socks5", timeout: float = 60,
           upload: Path | None = None) -> tuple[int, str, str]:
-    """从 `node` 所在的机器经它的本机代理入口取 `url`，返回 (curl 的退出码, 应答体, curl 的错误输出)。
+    """从 `node` 所在的机器经它上面经 `via` 出去的代理（`via` 是 `None` 时经组网入口）取 `url`，
+    返回 (curl 的退出码, 应答体, curl 的错误输出)。
 
     应答体比 1KB 长、或者不是文本时换成它的 SHA-256（十六进制）。`upload` 是要 POST 上去的文件。
     """
-    user = f"{via.virtual_ip}@" if via else ""
-    if proxy == "socks5":
-        proxy_args = f"-x socks5h://{user}127.0.0.1:1080"
-    else:
-        proxy_args = f"-p -x http://{user.rstrip('@') + ':x@' if via else ''}127.0.0.1:1081"
+    entry = node.entry(via, proxy)
+    proxy_args = f"-x {entry.url('socks5h')}" if proxy == "socks5" else f"-p -x {entry.url('http')}"
     tls = f"--cacert {cert}" if cert else ""
     body = f"--data-binary @{upload} -H 'Content-Type: application/octet-stream'" if upload else ""
     answer = node.state / "answer"
@@ -698,14 +781,13 @@ while True:
     threading.Thread(target=serve, args=(conn,), daemon=True).start()
 """
 
-# 经本机的 SOCKS5 入口连 TICKER，收 `seconds` 秒，打印 JSON：超过 0.5 秒的停顿（每一段的起止，单调时钟），
-# 收到的字节数，流是不是提前断了。参数：用户名（出口的虚拟 IP）、目标地址、端口、秒数。
+# 经一个不认证的 SOCKS5 代理连 TICKER，收 `seconds` 秒，打印 JSON：超过 0.5 秒的停顿（每一段的起止，单调时钟），
+# 收到的字节数，流是不是提前断了。参数：代理的端口（在 127.0.0.1 上）、目标地址、端口、秒数。
 TICKER_CLIENT = r"""
 import json, socket, struct, sys, time
-user, target, port, seconds = sys.argv[1], sys.argv[2], int(sys.argv[3]), float(sys.argv[4])
-s = socket.create_connection(("127.0.0.1", 1080), timeout=30)
-s.sendall(b"\x05\x01\x02"); assert s.recv(2) == b"\x05\x02"
-s.sendall(bytes([1, len(user)]) + user.encode() + b"\x00"); assert s.recv(2) == b"\x01\x00"
+proxy_port, target, port, seconds = int(sys.argv[1]), sys.argv[2], int(sys.argv[3]), float(sys.argv[4])
+s = socket.create_connection(("127.0.0.1", proxy_port), timeout=30)
+s.sendall(b"\x05\x01\x00"); assert s.recv(2) == b"\x05\x00"
 s.sendall(b"\x05\x01\x00\x01" + socket.inet_aton(target) + struct.pack("!H", port))
 reply = b""
 while len(reply) < 10:
@@ -1018,12 +1100,13 @@ def start_header_echo(host: Host, port: int = 80) -> None:
     wait_until(lambda: f":{port} " in host.run("ss", "-lnt").stdout, what=f"{host.name} 上的请求头回显服务启动")
 
 
-def plain_http(node: Node, url: str, *, user: str = "", extra: tuple[str, ...] = (), timeout: float = 60) -> tuple[str, str, str]:
-    """从 `node` 所在的机器经它本机的 HTTP 入口（127.0.0.1:1081）以明文 HTTP 代理的方式取 `url`（不用 CONNECT），
-    `user` 是代理的用户名。返回 (状态码, 应答体或者它的 SHA-256, curl 的错误输出)：应答体比 4KB 长时换成摘要。"""
-    auth = f"{user}:x@" if user else ""
+def plain_http(node: Node, url: str, *, via: Node | None = None, through: Proxy | None = None, extra: tuple[str, ...] = (),
+               timeout: float = 60) -> tuple[str, str, str]:
+    """从 `node` 所在的机器经它上面经 `via` 出去的代理（`via` 是 `None` 时经组网入口的 HTTP 那一个；`through` 直接给出代理）
+    以明文 HTTP 代理的方式取 `url`（不用 CONNECT）。返回 (状态码, 应答体或者它的 SHA-256, curl 的错误输出)：应答体比 4KB 长时换成摘要。"""
+    proxy = through or node.entry(via, "http")
     answer = node.state / "plain-answer"
-    done = node.host.run("curl", "-sS", "--max-time", str(timeout), "-x", f"http://{auth}127.0.0.1:1081", *extra, "-o", str(answer),
+    done = node.host.run("curl", "-sS", "--max-time", str(timeout), "-x", proxy.url("http"), *extra, "-o", str(answer),
                          "-w", "%{http_code}", url, check=False, timeout=timeout + 5)
     body = ""
     if answer.exists():

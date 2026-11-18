@@ -237,9 +237,9 @@ impl Inner {
             order: None,
             enrolling,
             reported_at: None,
+            proxies: Vec::new(),
             listeners: Vec::new(),
             forwards: Vec::new(),
-            credential_connections: BTreeMap::new(),
             lanes: None,
             performance: None,
             intercept: None,
@@ -393,10 +393,9 @@ impl Inner {
             });
         }
         self.switches_reported(&node, &report.switches)?;
-        let Report { run, credentials, exit, exits, listeners, forwards, .. } = report;
-        self.usage_reported(&node, UsageReport { run, credentials, exit, exits, listeners, forwards })?;
-        let report =
-            Report { credentials: Vec::new(), exits: Vec::new(), listeners: Vec::new(), forwards: Vec::new(), exit: None, ..report };
+        let Report { run, exit, exits, proxies, listeners, forwards, .. } = report;
+        self.usage_reported(&node, UsageReport { run, exit, exits, proxies, listeners, forwards });
+        let report = Report { exits: Vec::new(), proxies: Vec::new(), listeners: Vec::new(), forwards: Vec::new(), exit: None, ..report };
         self.routes_reported(id, report.routes, report.route_kinds, report.routes_full);
         if let Some(status) = report.update {
             self.update_reported(&node, status)?;

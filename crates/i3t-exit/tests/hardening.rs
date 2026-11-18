@@ -30,17 +30,13 @@ fn public(port: u16) -> String {
     format!("{PUBLIC_IP}:{port}")
 }
 
-fn gw() -> Option<(&'static str, &'static str)> {
-    Some(("gw", ""))
-}
-
 fn forward(id: u32, protocol: ForwardProtocol, bind: &str, target: u32) -> Forward {
     Forward { id, protocol, bind: bind.parse().unwrap(), target: node(target), allow_from: Vec::new(), class: None }
 }
 
 /// 经 gw 连 `host:port`，确认通了。
 async fn established(world: &World, host: &str, port: u16) -> TcpStream {
-    let mut stream = socks5(world.socks().await, gw(), host, port).await.connected();
+    let mut stream = socks5(world.socks().await, None, host, port).await.connected();
     assert_echo(&mut stream).await;
     stream
 }
@@ -149,7 +145,7 @@ async fn turning_the_lan_switch_off_stops_udp_in_both_directions_but_other_chang
     world.gw.system.redirect("192.168.77.10:161", printer.addr());
     world.laptop.update(|netmap| peer_mut(netmap, GW).exit = Some(PeerExit { lan: true, class: None, optimistic: None })).await;
     world.gw.update(|netmap| netmap.me.exit = Some(ExitRole { lan: true, ..ExitRole::default() })).await;
-    let client = udp_associate(world.socks().await, gw()).await;
+    let client = udp_associate(world.socks().await, None).await;
     client.send("192.168.77.10", 161, b"snmp").await;
     let (_, exit_port) = printer.recv().await;
 
@@ -173,7 +169,7 @@ i3t_lane::on_both_transports! {
         world.gw.system.redirect(&public(443), echo_server().await);
         let node_address: SocketAddr = public(20330).parse().unwrap();
         let refused = || async {
-            let mut stream = socks5(world.socks().await, gw(), PUBLIC_IP, 443).await.connected();
+            let mut stream = socks5(world.socks().await, None, PUBLIC_IP, 443).await.connected();
             assert_cut(&mut stream).await;
         };
         drop(established(&world, PUBLIC_IP, 443).await);
@@ -215,7 +211,7 @@ async fn udp_through_the_exit_does_not_reach_node_addresses_either() {
     let world = World::new().await;
     world.gw.system.redirect(&public(443), udp_echo_server().await);
     *world.gw.own_endpoints.lock().unwrap() = vec![public(20330).parse().unwrap()];
-    let client = udp_associate(world.socks().await, gw()).await;
+    let client = udp_associate(world.socks().await, None).await;
 
     client.send(PUBLIC_IP, 443, b"to the router").await;
     client.assert_silent(QUIET).await;
@@ -255,7 +251,7 @@ async fn a_full_udp_forward_leaves_room_for_other_udp_to_the_same_node() {
     assert_eq!(world.gw.exit.stats().active, 64, "转发不会开出更多的上下文");
 
     // laptop 经 gw 的别的 UDP 不受影响。
-    let other = udp_associate(world.socks().await, gw()).await;
+    let other = udp_associate(world.socks().await, None).await;
     other.send(PUBLIC_IP, 443, b"still room").await;
     assert_eq!(other.recv().await.1, b"still room");
 }

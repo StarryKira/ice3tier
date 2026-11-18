@@ -24,12 +24,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
-use i3t_access::{Access, SharedRoutes};
+use i3t_access::{Access, LocalEntry, SharedRoutes};
 use i3t_conn::{Endpoint, EndpointConfig};
 use i3t_exit::{Exit, Os, Outbound, QuotaState};
 use i3t_model::Netmap;
 use i3t_model::control::{Hello, PerformanceReport, SelfUpdate};
-use i3t_model::netmap::{Listener, ListenerProtocol};
+use i3t_model::netmap::ListenerProtocol;
 use i3t_model::update::UpdateStatus;
 use i3t_update::{RolledBack, Startup, Updater, UpdaterConfig};
 use tokio::sync::{Notify, mpsc, watch};
@@ -209,8 +209,10 @@ pub async fn run(
     let connector = lanes.connector();
     // 每条流结束时的摘要里写这对节点的连接走的路，入口和出口问的是同一个。
     let routes: SharedRoutes = Arc::new(EndpointRoutes(Arc::clone(&endpoint)));
-    let access =
-        Access::new(Arc::clone(&connector), outbound.clone(), local_rx.clone()).with_port_book(ports).with_routes(Arc::clone(&routes));
+    let access = Access::new(Arc::clone(&connector), local_rx.clone())
+        .with_local_entries(local_entries(&config))
+        .with_port_book(ports)
+        .with_routes(Arc::clone(&routes));
     let access = Arc::new(access);
     // 透明访问打开时，出口一侧连本机的服务改用发起节点的虚拟 IP 做源地址：同一个拨号器，由它来开关。
     let intercept = Intercept::start(config.intercept.enabled, local_rx.clone(), Arc::clone(&access), outbound.clone());
@@ -574,17 +576,23 @@ async fn report_when_reachability_changes(endpoint: Arc<Endpoint>, report_now: A
     }
 }
 
-/// 节点按本机配置文件自己开的回环代理入口的名字。上报时据此标出哪些监听器不是 controller 下发的。
-pub(crate) const BUILTIN_LISTENERS: [&str; 2] = ["local-socks5", "local-http"];
+/// 本机配置文件里的组网入口（`[proxy]`，默认都关着）：不认证、没有出口，只通到组网里的节点。
+///
+/// controller 在同一个地址上配了代理时让给它（入口模块自己处理，见 [`Access`]）。
+pub(crate) fn local_entries(config: &Config) -> Vec<LocalEntry> {
+    [
+        ("local-socks5", config.proxy.socks5.addr(), ListenerProtocol::Socks5),
+        ("local-http", config.proxy.http.addr(), ListenerProtocol::Http),
+    ]
+    .into_iter()
+    .filter_map(|(name, bind, protocol)| Some(LocalEntry { name: name.to_owned(), bind: bind?, protocol }))
+    .collect()
+}
 
-/// 把 controller 下发的 netmap 按本机的配置调整成各层实际使用的样子。
-///
-/// 做两件事：
-///
-/// - 加上配置文件里的本机代理入口；
-/// - 去掉本机没有声明过的能力。controller 被攻破或者管理员密码被盗时，它也不能把一台没有声明的机器
-///   变成出口或者 relay。端口转发的目标不在此列：它只由管理员打开，下发来的转发照收（白皮书 §9.6），
-///   所以 controller 能经转发碰到这台机器能碰到的一切。
+/// 把 controller 下发的 netmap 按本机的配置调整成各层实际使用的样子：去掉本机没有声明过的能力。
+/// controller 被攻破或者管理员密码被盗时，它也不能把一台没有声明的机器变成出口或者 relay。
+/// 端口转发的目标不在此列：它只由管理员打开，下发来的转发照收（白皮书 §9.6），
+/// 所以 controller 能经转发碰到这台机器能碰到的一切。
 ///
 /// 排空不在这里管：监听照常开着，由入口和出口模块明确拒绝新的请求（见 [`drain`](crate::drain)）。
 #[must_use]
@@ -597,28 +605,6 @@ pub fn localize(netmap: &Netmap, config: &Config) -> Netmap {
     if !declared.relay && netmap.me.relay.take().is_some() {
         netmap.relay_clients.clear();
         tracing::warn!("controller 把本节点启用成了 relay，但本机没有声明可以作为 relay，不生效。要声明请执行 i3t set can-relay on");
-    }
-    let local = [
-        (BUILTIN_LISTENERS[0], config.proxy.socks5.addr(), ListenerProtocol::Socks5),
-        (BUILTIN_LISTENERS[1], config.proxy.http.addr(), ListenerProtocol::Http),
-    ];
-    for (name, bind, protocol) in local {
-        let Some(bind) = bind else { continue };
-        // controller 也可以给同一个地址配监听器，那时以 controller 的为准。
-        if netmap.me.listeners.iter().any(|listener| listener.bind == bind) {
-            continue;
-        }
-        netmap.me.listeners.push(Listener {
-            name: name.to_owned(),
-            bind,
-            protocol,
-            allow_from: Vec::new(),
-            require_credential: false,
-            default_action: None,
-            fixed_exit: None,
-            class: None,
-            optimistic: None,
-        });
     }
     netmap
 }
@@ -664,25 +650,13 @@ mod tests {
     }
 
     #[test]
-    fn local_proxy_listeners_are_added_unless_switched_off_or_taken() {
-        let names = |netmap: &Netmap| netmap.me.listeners.iter().map(|listener| listener.name.clone()).collect::<Vec<_>>();
-        assert_eq!(names(&localize(&netmap(1), &Config::default())), ["local-socks5", "local-http"]);
-
-        let only_http = Config::parse("[proxy]\nsocks5 = \"off\"\n").unwrap();
-        assert_eq!(names(&localize(&netmap(1), &only_http)), ["local-http"]);
-
-        let mut managed = netmap(1);
-        managed.me.listeners.push(Listener {
-            name: "from-controller".into(),
-            bind: "127.0.0.1:1080".parse().unwrap(),
-            protocol: ListenerProtocol::Socks5,
-            allow_from: Vec::new(),
-            require_credential: false,
-            default_action: None,
-            fixed_exit: None,
-            class: None,
-            optimistic: None,
-        });
-        assert_eq!(names(&localize(&managed, &Config::default())), ["from-controller", "local-http"]);
+    fn local_mesh_entries_are_off_unless_the_configuration_names_an_address() {
+        assert!(local_entries(&Config::default()).is_empty(), "节点默认不开任何代理端口");
+        let both = Config::parse("[proxy]\nsocks5 = \"127.0.0.1:1080\"\nhttp = \"127.0.0.1:1081\"\n").unwrap();
+        let entries = local_entries(&both);
+        let summary: Vec<_> = entries.iter().map(|entry| (entry.name.as_str(), entry.bind.port(), entry.protocol)).collect();
+        assert_eq!(summary, [("local-socks5", 1080, ListenerProtocol::Socks5), ("local-http", 1081, ListenerProtocol::Http)]);
+        let only_http = Config::parse("[proxy]\nsocks5 = \"off\"\nhttp = \"127.0.0.1:1081\"\n").unwrap();
+        assert_eq!(local_entries(&only_http).len(), 1);
     }
 }

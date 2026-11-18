@@ -400,7 +400,7 @@ mod tests {
                 dial_out_only: false,
                 relay: None,
                 exit: None,
-                listeners: Vec::new(),
+                proxies: Vec::new(),
                 forwards: Vec::new(),
                 forward_targets: Vec::new(),
                 pinned_relays: Vec::new(),
@@ -410,7 +410,6 @@ mod tests {
             peers: vec![peer(2, "nas", true), peer(3, "phone", false)],
             relays: Vec::new(),
             relay_clients: Vec::new(),
-            credentials: Vec::new(),
         }
     }
 

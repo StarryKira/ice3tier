@@ -97,12 +97,14 @@ impl Greeting {
 
     /// 选一种认证方法；没有可用的时返回 `None`。
     ///
-    /// 客户端肯给用户名密码就选它，即使监听器不要求凭据：出口节点写在用户名里，选了"不认证"就拿不到了。
-    pub(crate) const fn choose(self, credential_required: bool) -> Option<Method> {
-        if self.offers_password {
-            Some(Method::Password)
-        } else if self.offers_none && !credential_required {
+    /// 要用户名和密码时只能选它。不要时客户端肯"不认证"就选不认证，只提用户名密码的也接受（给了什么都不看）。
+    pub(crate) const fn choose(self, password_required: bool) -> Option<Method> {
+        if password_required {
+            if self.offers_password { Some(Method::Password) } else { None }
+        } else if self.offers_none {
             Some(Method::None)
+        } else if self.offers_password {
+            Some(Method::Password)
         } else {
             None
         }
@@ -351,12 +353,15 @@ mod tests {
     fn greeting_lists_the_offered_methods() {
         let parsed = Greeting::parse(&[5, 2, 0, 2]).unwrap().unwrap();
         assert_eq!(parsed.len, 4);
-        assert_eq!(parsed.value.choose(false), Some(Method::Password));
+        assert_eq!(parsed.value.choose(false), Some(Method::None), "不要认证时选不认证");
         assert_eq!(parsed.value.choose(true), Some(Method::Password));
 
         let none_only = Greeting::parse(&[5, 1, 0]).unwrap().unwrap().value;
         assert_eq!(none_only.choose(false), Some(Method::None));
-        assert_eq!(none_only.choose(true), None, "要求凭据的监听器不接受不认证");
+        assert_eq!(none_only.choose(true), None, "要用户名和密码的代理不接受不认证");
+
+        let password_only = Greeting::parse(&[5, 1, 2]).unwrap().unwrap().value;
+        assert_eq!(password_only.choose(false), Some(Method::Password), "只提用户名密码的客户端也让它用");
 
         let gssapi_only = Greeting::parse(&[5, 1, 1]).unwrap().unwrap().value;
         assert_eq!(gssapi_only.choose(false), None);

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""限额、用量和状态的端到端测试：出口的配额、接入凭据的用量和流量上限、自动挑端口的端口转发、端口被占用。
+"""限额、用量和状态的端到端测试：出口的配额、代理的用量、自动挑端口的端口转发、端口被占用。
 
     python3 tests/e2e/test_limits.py [场景名...]
 """
@@ -42,6 +42,7 @@ def ready_exit(lab: Lab, work: Path, *settings: str) -> tuple[Controller, Node, 
     for node in (a, ex):
         node.join(controller)
     controller.ctl("exit", "enable", str(ex.id), *settings)
+    controller.add_proxy(a, ex)
     url = f"http://{web.ip}/bytes/"
     # 等出口的设置到了两边：能经它下载一点东西就是到了。
     eventually_value(lambda: timed_download(a, url + "1000", via=ex, timeout=6), lambda result: result[0] == 0 and result[1] == 1000)
@@ -76,8 +77,8 @@ def quota_runs_out(lab: Lab, work: Path, t: Checks) -> None:
         print(tail(ex.read_log()), tail(a.read_log()), sep="\n  ---\n")
 
 
-def credential_usage_and_limit(lab: Lab, work: Path, t: Checks) -> None:
-    """接入凭据：经对外的入口用了它之后，管理 API 看得到用量；调低流量上限之后它被拦下。"""
+def proxy_usage(lab: Lab, work: Path, t: Checks) -> None:
+    """代理的用量：经对外开放的代理下载之后，管理 API 里这个代理有连接数和流量，节点的监听视图和指标里也有；删掉它端口就关了。"""
     web = lab.host("web")
     start_whoami(web)
     controller = Controller(lab.host("ctl"), work)
@@ -86,38 +87,33 @@ def credential_usage_and_limit(lab: Lab, work: Path, t: Checks) -> None:
     for node in (gw, ex):
         node.join(controller)
     controller.ctl("exit", "enable", str(ex.id))
-    created = controller.ctl("credential", "create", "phone")
-    token, credential_id = created["token"], created["id"]
-    t.check("凭据带着认得出来的前缀", token.startswith(created["prefix"]) and len(created["prefix"]) == 6, created["prefix"])
-    controller.ctl("listener", "add", str(gw.id), "public", "0.0.0.0:3128", "--http", "--require-credential")
-    wait_until(lambda: ":3128 " in gw.host.run("ss", "-lnt").stdout, timeout=20, what="入口开始监听")
+    created = controller.add_proxy(gw, ex, "--protocol", "http", bind="0.0.0.0", port=3128)
     outsider = lab.host("outsider")
+    login = f"{created['username']}:{created['password']}"
 
     def fetch(size: int):
-        return outsider.run("curl", "-sS", "--max-time", "10", "-p", "-x", f"http://{ex.virtual_ip}:{token}@{gw.host.ip}:3128",
+        return outsider.run("curl", "-sS", "--max-time", "10", "-p", "-x", f"http://{login}@{gw.host.ip}:3128",
                             "-o", "/dev/null", "-w", "%{http_connect} %{http_code} %{size_download}", f"http://{web.ip}/bytes/{size}",
                             check=False)
 
     first = eventually_value(lambda: fetch(200_000), lambda result: result.stdout == "200 200 200000")
-    t.check("经对外的入口用凭据下载", first.stdout == "200 200 200000", f"{first.stdout!r} {first.stderr.strip()}")
+    t.check("经对外开放的代理下载", first.stdout == "200 200 200000", f"{first.stdout!r} {first.stderr.strip()}")
+    seen = eventually_value(lambda: controller.proxy(created["id"]), lambda proxy: proxy["bytes_down"] >= 200_000)
+    t.check("管理 API 里看得到这个代理的流量", seen["bytes_down"] >= 200_000 and seen["bytes_up"] > 0, str(seen))
+    t.check("状态是在监听，监听的是 0.0.0.0:3128", seen["status"] == {"code": "listening", "local": "0.0.0.0:3128"}, str(seen["status"]))
+    on_node = controller.ctl("node", "listeners", str(gw.id))["listeners"]
+    listed = [entry for entry in on_node if entry["id"] == created["id"]]
+    t.check("节点的监听视图里有它，带着编号，在监听", bool(listed) and not listed[0]["builtin"] and listed[0]["state"] == "listening"
+            and listed[0]["bytes_down"] >= 200_000, str(on_node))
+    local = [entry["name"] for entry in on_node if entry["builtin"]]
+    t.check("节点的监听视图里也有本机配置的组网入口", sorted(local) == ["local-http", "local-socks5"], str(on_node))
+    metrics = gw.host.run("curl", "-sS", "--max-time", "5", "http://127.0.0.1:20333/metrics", check=False).stdout
+    t.check("节点的指标里有每个代理的流量", f'i3t_proxy_bytes_total{{proxy="{created["name"]}",direction="down"}}' in metrics,
+            "\n".join(line for line in metrics.splitlines() if "proxy" in line)[:500])
 
-    def credential() -> dict:
-        return next(entry for entry in controller.ctl("credential", "list") if entry["id"] == credential_id)
-
-    seen = eventually_value(credential, lambda entry: entry["usage"]["bytes"] >= 200_000)
-    t.check("管理 API 里看得到凭据的用量", seen["usage"]["bytes"] >= 200_000 and seen["usage"]["last_used_at"] is not None, f"{seen}")
-
-    controller.ctl("credential", "set", str(credential_id), "--max-bytes", "100K")
-    refused = eventually_value(lambda: fetch(1000), lambda result: result.stdout.startswith("429"), timeout=20)
-    t.check("调低流量上限之后它被拦下（429）", refused.stdout.startswith("429"), f"{refused.stdout!r}")
-    t.check("凭据的状态是用完了", credential()["state"] == "exhausted", f"{credential()}")
-
-    controller.ctl("credential", "set", str(credential_id), "--reset-usage")
-    again = eventually_value(lambda: fetch(1000), lambda result: result.stdout == "200 200 1000", timeout=20)
-    t.check("用量清零之后又能用，令牌不用换", again.stdout == "200 200 1000", f"{again.stdout!r}")
-
-    controller.ctl("credential", "delete", str(credential_id))
-    t.check("吊销之后凭据还在列表里，状态是吊销", credential()["state"] == "revoked")
+    controller.ctl("proxy", "delete", str(created["id"]))
+    wait_until(lambda: ":3128 " not in gw.host.run("ss", "-lnt").stdout, timeout=20, what="删掉的代理不再监听")
+    t.check("删掉之后端口关了", ":3128 " not in gw.host.run("ss", "-lnt").stdout)
     if t.failures:
         print(tail(gw.read_log()), tail(controller.log.read_text(errors="replace")), sep="\n  ---\n")
 
@@ -195,7 +191,7 @@ def virtual_forward_relay(lab: Lab, work: Path, t: Checks) -> None:
 
     seen = eventually_value(lambda: a.curl(f"http://{gw.virtual_ip}:9200/", timeout=6), lambda result: result.returncode == 0)
     t.check("TCP：经 gw 的虚拟 IP 到了 t 回环上的服务", seen.stdout == "127.0.0.1", f"{seen.stdout!r} {seen.stderr.strip()}")
-    answer = eventually_value(lambda: socks5_udp(a.host, gw.virtual_ip, 9300, b"relayed", tries=3), lambda answer: answer is not None)
+    answer = eventually_value(lambda: socks5_udp(a, gw.virtual_ip, 9300, b"relayed", tries=3), lambda answer: answer is not None)
     source, data = (answer["data"].partition(b"|")[0].decode(), answer["data"].partition(b"|")[2]) if answer else ("", b"")
     t.check("UDP：经 gw 的虚拟 IP 到了 t 回环上的服务", data == b"relayed" and source.startswith("127.0.0.1"), f"{answer}")
     t.check("UDP：回来的报文报成从 gw 的那个端口来的", bool(answer) and answer["source"] == gw.virtual_ip and answer["port"] == 9300, f"{answer}")
@@ -208,7 +204,7 @@ def virtual_forward_relay(lab: Lab, work: Path, t: Checks) -> None:
 
 SCENARIOS = {
     "quota_runs_out": quota_runs_out,
-    "credential_usage_and_limit": credential_usage_and_limit,
+    "proxy_usage": proxy_usage,
     "forward_auto_port": forward_auto_port,
     "port_in_use": port_in_use,
     "virtual_forward_relay": virtual_forward_relay,

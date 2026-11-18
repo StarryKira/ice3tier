@@ -7,17 +7,17 @@ use i3t_lang::table::{Fields, Table};
 use i3t_lang::{Lang, NONE, optional};
 use i3t_model::admin::stats::{SeriesView, Unit};
 use i3t_model::admin::{
-    AccessCheck, AccessGraph, BackboneView, CreatedCredential, CreatedEnrollToken, Credential, DeletedGroup, Direction, EnrollTokenInfo,
-    ExitTestView, ExitView, ForcedUpdates, Forward, Group, GroupRef, LaneEffect, ListenStatus, Listener, LogEntry, Network, Node,
-    NodeAccess, NodeDetail, NodeListeners, NodeRef, NodeUpdate, Overview, PairLaneSide, PairView, PathLeg, PathSource, PathView,
-    RelayEnabled, RelayReach, RouteMatrix, RouteTable, Rule, Status, UpdateOverview,
+    AccessCheck, AccessGraph, BackboneView, CreatedEnrollToken, DeletedGroup, Direction, EnrollTokenInfo, ExitTestView, ExitView,
+    ForcedUpdates, Forward, Group, GroupRef, LaneEffect, ListenStatus, LogEntry, Network, Node, NodeAccess, NodeDetail, NodeListeners,
+    NodeRef, NodeUpdate, Overview, PairLaneSide, PairView, PathLeg, PathSource, PathView, Proxy, RelayEnabled, RelayReach, RouteMatrix,
+    RouteTable, Rule, Status, UpdateOverview,
 };
 use i3t_model::control::exit_test::ExitTestCause;
 use i3t_model::control::{
     DirectKind, DirectStatus, InterceptReport, InterceptState, LaneCounts, LaneReport, LegTransport, PathSegment, PeerLanes,
     PerformanceReport, Route,
 };
-use i3t_model::netmap::{DefaultAction, IpFamily, Profile};
+use i3t_model::netmap::{IpFamily, ListenerProtocol, Profile};
 use i3t_model::update::UpdateTiming;
 use i3t_proto::NodeId;
 
@@ -78,9 +78,8 @@ pub fn overview(overview: &Overview) {
     fields.add(t.relays, overview.relays.to_string());
     fields.add(t.exits, overview.exits.to_string());
     fields.add(t.rules, overview.rules.to_string());
-    fields.add(t.listeners, overview.listeners.to_string());
+    fields.add(t.proxies, overview.proxies.to_string());
     fields.add(t.forwards, overview.forwards.to_string());
-    fields.add(t.credentials, overview.credentials.to_string());
     fields.add(t.pending_tokens, overview.pending_tokens.to_string());
     fields.add(t.flows, overview.flows.to_string());
     fields.add(t.traffic, format!("↑ {}  ↓ {}", lang.bytes(overview.tx_bytes), lang.bytes(overview.rx_bytes)));
@@ -268,6 +267,12 @@ pub fn exits(exits: &[ExitView]) {
             let traffic = format!("↑ {}  ↓ {}", lang.bytes(counts.bytes_up), lang.bytes(counts.bytes_down));
             let failures = (t.exit_seen)(counts.flows, counts.failed_by_target, counts.refused, counts.failed_by_exit, counts.unreachable);
             fields.add(&(t.seen_by)(&seen.by.name), format!("{failures}  {traffic}"));
+        }
+        for proxy in &exit.proxies {
+            fields.add(
+                t.proxy,
+                format!("#{} {}  #{} {}  {}", proxy.id, proxy.name, proxy.node, proxy.bind, (codes.proxy_status)(&proxy.status)),
+            );
         }
         fields.print();
     }
@@ -950,87 +955,55 @@ const fn arrow(direction: Direction) -> &'static str {
     }
 }
 
-pub fn credentials(credentials: &[Credential]) {
+pub fn proxies(proxies: &[Proxy]) {
     let (t, lang, codes) = context();
-    let mut table = Table::new(&t.credentials_header);
-    for credential in credentials {
+    let mut table = Table::new(&t.proxies_header);
+    for proxy in proxies {
         table.row(vec![
-            credential.id.to_string(),
-            credential.prefix.clone(),
-            (codes.credential_state)(credential.state).to_owned(),
-            optional(credential.max_concurrent),
-            optional(credential.max_bytes.map(|bytes| lang.bytes(bytes))),
-            lang.bytes(credential.usage.bytes),
-            credential.usage.connections.to_string(),
-            optional(credential.usage.last_used_at.map(|at| lang.time(at))),
-            credential.name.clone(),
+            proxy.id.to_string(),
+            format!("#{}", proxy.node),
+            proxy.bind.to_string(),
+            label(&proxy.protocol),
+            optional(proxy.exit.map(|exit| format!("#{exit}"))),
+            if proxy.username.is_empty() { t.no.to_owned() } else { proxy.username.clone() },
+            (codes.proxy_status)(&proxy.status),
+            format!("{}  ↑ {}  ↓ {}", proxy.usage.connections, lang.bytes(proxy.usage.bytes_up), lang.bytes(proxy.usage.bytes_down)),
+            proxy.name.clone(),
         ]);
     }
-    print_table(&table, t.no_credentials);
+    print_table(&table, t.no_proxies);
 }
 
-pub fn credential(credential: &Credential) {
+/// 一个代理，带用户名和密码（管理员要能再复制它们），和一行用法。
+pub fn proxy(proxy: &Proxy) {
     let (t, lang, codes) = context();
-    println!(
-        "{}",
-        lang.paren(&format!("{} #{} {}", t.credential, credential.id, credential.name), (codes.credential_state)(credential.state))
-    );
+    println!("{}", lang.paren(&format!("{} #{} {}", t.proxy, proxy.id, proxy.name), &(codes.proxy_status)(&proxy.status)));
     let mut fields = Fields::new(2);
-    fields.add(t.connection_limit, credential.max_concurrent.map_or_else(|| t.unlimited.to_owned(), |count| count.to_string()));
-    fields.add(t.traffic_limit, credential.max_bytes.map_or_else(|| t.unlimited.to_owned(), |bytes| lang.bytes(bytes)));
-    fields.add(t.usage, lang.bytes(credential.usage.bytes));
-    fields.print();
-}
-
-pub fn created_credential(created: &CreatedCredential) {
-    let (t, _, _) = context();
-    println!("{}\n", (t.credential_created)(created.credential.id, &created.credential.name));
-    println!("    {}\n", created.token);
-    println!("{}", t.credential_use);
-}
-
-pub fn listeners(listeners: &[Listener]) {
-    let (t, _, _) = context();
-    let mut table = Table::new(&t.listeners_header);
-    for listener in listeners {
-        table.row(listener_row(listener));
+    fields.add(t.listen_node, format!("#{}", proxy.node));
+    fields.add(t.listen_at, format!("{}  {}", proxy.bind, label(&proxy.protocol)));
+    fields.add(t.exit, optional(proxy.exit.map(|exit| format!("#{exit}"))));
+    let anonymous = proxy.username.is_empty() && proxy.password.is_empty();
+    if anonymous {
+        fields.add(t.username, t.no_authentication.to_owned());
+    } else {
+        fields.add(t.username, proxy.username.clone());
+        fields.add(t.password, proxy.password.clone());
     }
-    print_table(&table, t.no_listeners);
-}
-
-pub fn listener(listener: &Listener) {
-    let (t, _, _) = context();
-    println!(
-        "{} #{} {}  #{} {} {}",
-        t.listener,
-        listener.id,
-        listener.config.name,
-        listener.node,
-        listener.config.bind,
-        label(&listener.config.protocol)
+    if !proxy.allow_from.is_empty() {
+        fields.add(t.allowed_from, lang.list(&proxy.allow_from));
+    }
+    fields.add(
+        t.usage,
+        format!("{}  ↑ {}  ↓ {}", proxy.usage.connections, lang.bytes(proxy.usage.bytes_up), lang.bytes(proxy.usage.bytes_down)),
     );
-}
-
-fn listener_row(listener: &Listener) -> Vec<String> {
-    let (_, lang, codes) = context();
-    let config = &listener.config;
-    let default_action = match config.effective_default_action() {
-        DefaultAction::Local => "local".to_owned(),
-        DefaultAction::Reject => "reject".to_owned(),
-        DefaultAction::Exit { node } => format!("exit:#{node}"),
+    // 写成网址：大多数程序的代理设置照抄就行。地址写 0.0.0.0 时换成节点上的某个地址，这里写不出来，照原样。
+    let login = if anonymous { String::new() } else { format!("{}:{}@", proxy.username, proxy.password) };
+    let scheme = match proxy.protocol {
+        ListenerProtocol::Http => "http",
+        ListenerProtocol::Mixed | ListenerProtocol::Socks5 => "socks5h",
     };
-    vec![
-        listener.id.to_string(),
-        format!("#{}", listener.node),
-        config.bind.to_string(),
-        label(&config.protocol),
-        yes_no(config.require_credential),
-        default_action,
-        optional(config.fixed_exit.map(|node| format!("#{node}"))),
-        lang.list(&config.allow_from),
-        listener.status.as_ref().map_or_else(|| NONE.to_owned(), |status| (codes.listen_state)(&status.state)),
-        config.name.clone(),
-    ]
+    fields.add(t.proxy_use, format!("{scheme}://{login}{}", proxy.bind));
+    fields.print();
 }
 
 pub fn forwards(forwards: &[Forward]) {

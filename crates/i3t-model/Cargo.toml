@@ -11,6 +11,7 @@ description = "ice3tier 控制面的数据：netmap、节点与 controller 之�
 base64.workspace = true
 i3t-proto = { path = "../i3t-proto" }
 ipnet.workspace = true
+ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

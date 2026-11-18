@@ -1,7 +1,7 @@
 //! 给一个节点算它的 netmap。
 //!
 //! 最小权限：对端只列和它有访问关系的节点；relay 列全网的（relay 不受访问规则约束）；
-//! 全网节点的编号和公钥只给 relay（认证中转会话要用）；凭据只给有监听器要求凭据的节点，吊销了的不给。
+//! 全网节点的编号和公钥只给 relay（认证中转会话要用）；代理只给它监听的那个节点，带着用户名和密码的校验值，不带密码。
 //!
 //! 这里算出来的内容不带版本号。版本号由下发的一方管：内容的摘要变了才加一。
 
@@ -9,12 +9,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 
 use i3t_model::Netmap;
-use i3t_model::admin::{GroupId, Listener, NetworkId, PairSetting, Rule};
-use i3t_model::netmap::{Credential, Forward, ForwardTarget, LocalNode, Network, Peer, PeerExit, Reach, Relay, RelayClient, RelayRole};
+use i3t_model::admin::{GroupId, NetworkId, PairSetting, Rule};
+use i3t_model::netmap::{Forward, ForwardTarget, LocalNode, Network, Peer, PeerExit, Proxy, Reach, Relay, RelayClient, RelayRole};
 use i3t_proto::NodeId;
 
 use crate::access::AccessMap;
-use crate::store::{CredentialRecord, ForwardRecord, GroupRecord, NetworkRecord, NodeRecord, Store, StoreError};
+use crate::store::{ForwardRecord, GroupRecord, NetworkRecord, NodeRecord, ProxyRecord, Store, StoreError};
 use crate::{node_addresses, relay_reach};
 
 /// 下发给对端的候选端点最多这么多个。正常的节点只有几个；多出来的没有用，只会让每个对端都去探测。
@@ -44,9 +44,8 @@ pub struct NetworkView {
     /// 全部分组，内置的在最前面，其余按名字排。
     pub groups: Vec<GroupRecord>,
     pub rules: Vec<Rule>,
-    pub listeners: Vec<Listener>,
+    pub proxies: Vec<ProxyRecord>,
     pub forwards: Vec<ForwardRecord>,
-    pub credentials: Vec<CredentialRecord>,
     pub pairs: Vec<PairSetting>,
 }
 
@@ -63,9 +62,8 @@ impl NetworkView {
             nodes: store.nodes(id)?.into_iter().map(|node| (node.id, node)).collect(),
             groups: store.groups(id)?,
             rules: store.rules(id)?,
-            listeners: store.listeners(id)?,
+            proxies: store.proxies(id)?,
             forwards: store.forwards(id)?,
-            credentials: store.credentials(id)?,
             pairs: store.pairs(id)?,
         }))
     }
@@ -151,24 +149,26 @@ impl NetworkView {
             })
             .collect();
 
-        let listeners: Vec<_> =
-            self.listeners.iter().filter(|listener| listener.node == id).map(|listener| listener.config.clone()).collect();
-        let credentials = if listeners.iter().any(|listener| listener.require_credential) {
-            // 吊销了的不下发：入口不再认它。用完了的照样下发，带着标记：入口要据此断开它正在进行的连接。
-            self.credentials
-                .iter()
-                .filter(|record| !record.is_revoked())
-                .map(|record| Credential {
-                    name: record.credential.name.clone(),
-                    token: record.token,
-                    max_concurrent: record.credential.max_concurrent,
-                    id: record.credential.id,
-                    exhausted: record.is_exhausted(),
+        // 启用了的、有出口的才下发。出口没有启用、访问规则不让访问出口的照样下发：节点照样监听，
+        // 不在组网里的目标被它拒绝，代理的状态说明为什么（见 `controller::proxies`）。
+        let proxies = self
+            .proxies
+            .iter()
+            .filter(|proxy| proxy.node == id && proxy.enabled)
+            .filter_map(|proxy| {
+                Some(Proxy {
+                    id: proxy.id,
+                    name: proxy.name.clone(),
+                    bind: proxy.bind,
+                    protocol: proxy.protocol,
+                    exit: proxy.exit?,
+                    auth: proxy.verifier(),
+                    allow_from: proxy.allow_from.clone(),
+                    class: proxy.class,
+                    optimistic: proxy.optimistic,
                 })
-                .collect()
-        } else {
-            Vec::new()
-        };
+            })
+            .collect();
 
         let other_nodes = || self.nodes.values().filter(|node| node.id != id);
         // relay 的地址是 controller 找出来的（白皮书 §7.2），UDP 和 TCP 是同一组：节点自己挑连得上的那个。
@@ -210,7 +210,7 @@ impl NetworkView {
                 dial_out_only: me.dial_out_only,
                 relay: me.relay.as_ref().map(|settings| RelayRole { bandwidth_mbps: settings.bandwidth_mbps }),
                 exit: me.exit.clone(),
-                listeners,
+                proxies,
                 forwards,
                 forward_targets,
                 // 固定的 relay 里已经不是 relay 的那些不下发：节点连不上它们，只会白等。
@@ -221,7 +221,6 @@ impl NetworkView {
             peers,
             relays: relay_list,
             relay_clients,
-            credentials,
         })
     }
 

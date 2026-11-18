@@ -1,4 +1,5 @@
-//! 负载端到上游的第一段：直接连，或者经代理入口（SOCKS5、HTTP CONNECT）。代理的用户名就是要走的出口节点。
+//! 负载端到上游的第一段：直接连，或者经 ice3tier 的代理（SOCKS5、HTTP CONNECT）。走哪个出口是代理自己定的，
+//! 网址里的用户名和密码是这个代理认的那一对（回环上不认证的代理可以不写）。
 
 use std::fmt;
 use std::io;
@@ -48,9 +49,9 @@ impl FromStr for Proxy {
             return Ok(Self::Direct);
         }
         let (scheme, rest) =
-            text.split_once("://").ok_or_else(|| format!("代理地址 {text:?} 缺少 scheme，例如 socks5://出口@127.0.0.1:1080"))?;
+            text.split_once("://").ok_or_else(|| format!("代理地址 {text:?} 缺少 scheme，例如 socks5://用户名:密码@127.0.0.1:1080"))?;
         let rest = rest.trim_end_matches('/');
-        // 用户名里可能有点号（虚拟 IP），没有 @；主机部分在最后一个 @ 之后。
+        // 用户名里可能有点号，没有 @；主机部分在最后一个 @ 之后。
         let (userinfo, server) = match rest.rsplit_once('@') {
             Some((userinfo, server)) => (Some(userinfo), server),
             None => (None, rest),
@@ -255,14 +256,15 @@ mod tests {
 
     #[test]
     fn proxy_urls_parse_with_dotted_user_names_and_display_without_passwords() {
-        let socks: Proxy = "socks5h://10.66.0.2@127.0.0.1:1080".parse().unwrap();
+        let socks: Proxy = "socks5h://u-1a2b.3c@127.0.0.1:1080".parse().unwrap();
         assert_eq!(
             socks,
-            Proxy::Socks5 { server: "127.0.0.1:1080".into(), auth: Some(Auth { user: "10.66.0.2".into(), password: String::new() }) }
+            Proxy::Socks5 { server: "127.0.0.1:1080".into(), auth: Some(Auth { user: "u-1a2b.3c".into(), password: String::new() }) }
         );
-        let http: Proxy = "http://home+c-i:secret@gw:3128/".parse().unwrap();
-        assert_eq!(http, Proxy::Http { server: "gw:3128".into(), auth: Some(Auth { user: "home+c-i".into(), password: "secret".into() }) });
-        assert_eq!(http.to_string(), "http://home+c-i@gw:3128");
+        let http: Proxy = "http://gateway:secret@gw:3128/".parse().unwrap();
+        assert_eq!(http, Proxy::Http { server: "gw:3128".into(), auth: Some(Auth { user: "gateway".into(), password: "secret".into() }) });
+        assert_eq!(http.to_string(), "http://gateway@gw:3128");
+        assert_eq!("socks5://127.0.0.1:1080".parse::<Proxy>().unwrap(), Proxy::Socks5 { server: "127.0.0.1:1080".into(), auth: None });
         assert_eq!("direct".parse::<Proxy>().unwrap(), Proxy::Direct);
         assert!("socks4://a:1".parse::<Proxy>().is_err());
         assert!("socks5://127.0.0.1".parse::<Proxy>().is_err());
@@ -287,9 +289,9 @@ mod tests {
             conn.read_exact(&mut greeting).await.unwrap();
             assert_eq!(greeting, [5, 1, 2]);
             conn.write_all(&[5, 2]).await.unwrap();
-            let mut auth = [0_u8; 6];
+            let mut auth = [0_u8; 7];
             conn.read_exact(&mut auth).await.unwrap();
-            assert_eq!(auth, [1, 3, b'e', b'x', b'1', 0]);
+            assert_eq!(auth, [1, 3, b'g', b'w', b'1', 1, b'p']);
             conn.write_all(&[1, 0]).await.unwrap();
             let mut request = [0_u8; 10];
             conn.read_exact(&mut request).await.unwrap();
@@ -300,7 +302,7 @@ mod tests {
             conn.read_exact(&mut ping).await.unwrap();
             conn.write_all(&ping).await.unwrap();
         });
-        let proxy: Proxy = format!("socks5://ex1@{addr}").parse().unwrap();
+        let proxy: Proxy = format!("socks5://gw1:p@{addr}").parse().unwrap();
         let mut tunnel = proxy.connect("11.0.0.6", 443).await.unwrap();
         tunnel.write_all(b"ping").await.unwrap();
         let mut echo = [0_u8; 4];

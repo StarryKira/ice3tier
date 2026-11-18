@@ -265,32 +265,26 @@ async fn the_command_line_drives_a_running_controller() {
     assert!(fixture.ok(&["access", "graph"]).await.contains("laptops"));
     assert!(fixture.ok(&["node", "access", "nas-01"]).await.contains("可被访问"));
 
-    // 凭据、监听器、端口转发、节点对。
-    let credential = fixture.json(&["credential", "create", "phone", "--max-concurrent", "4"]).await;
-    assert_eq!(credential["token"].as_str().unwrap().len(), 43);
-    assert!(fixture.ok(&["credential", "list"]).await.contains("phone"));
-    assert!(fixture.fails(&["listener", "add", "laptop", "lan", "192.168.1.5:1080"]).await.contains("require_credential"));
-    fixture
-        .ok(&[
-            "listener",
-            "add",
-            "laptop",
-            "lan",
-            "192.168.1.5:1080",
-            "--require-credential",
-            "--default",
-            "exit:nas-01",
-            "--allow-from",
-            "192.168.1.0/24",
-        ])
-        .await;
-    let listeners = fixture.ok(&["listener", "list", "--node", "laptop"]).await;
-    assert!(listeners.contains("192.168.1.5:1080") && listeners.contains("exit:#2"), "{listeners}");
+    // 代理、端口转发、节点对。
+    let refused = fixture.fails(&["proxy", "add", "laptop", "192.168.1.5:1080", "nas-01"]).await;
+    assert!(refused.contains("exit_not_enabled") && refused.contains("没有启用出口"), "出口停用着：{refused}");
+    fixture.ok(&["exit", "enable", "nas-01"]).await;
+    let proxy = fixture.json(&["proxy", "add", "laptop", "192.168.1.5:1080", "nas-01", "--allow-from", "192.168.1.0/24"]).await;
+    let password = proxy["password"].as_str().unwrap().to_owned();
+    assert!(proxy["username"].as_str().unwrap().starts_with("u-") && password.len() == 32, "{proxy}");
+    let proxy_id = proxy["id"].to_string();
+    let shown = fixture.ok(&["proxy", "show", &proxy_id]).await;
+    assert!(shown.contains(&password) && shown.contains("socks5h://u-") && shown.contains("192.168.1.0/24"), "{shown}");
+    let proxies = fixture.ok(&["proxy", "list", "--node", "laptop"]).await;
+    assert!(proxies.contains("192.168.1.5:1080") && proxies.contains("#2") && proxies.contains("laptop-1080"), "{proxies}");
+    let paused = fixture.json(&["proxy", "set", &proxy_id, "--enabled", "off", "--name", "lan"]).await;
+    assert_eq!((&paused["status"]["code"], &paused["name"]), (&json!("disabled"), &json!("lan")));
+    assert!(fixture.fails(&["proxy", "set", &proxy_id, "--exit", "laptop"]).await.contains("exit_is_node"));
     let refused = fixture.fails(&["forward", "add", "laptop", "127.0.0.1:8080", "nas-01", "192.168.1.10:80"]).await;
     assert!(refused.contains("forward_target_off") && refused.contains("--forward-target on"), "{refused}");
     fixture.ok(&["node", "set", "nas-01", "--forward-target", "on"]).await;
     assert!(Fixture::has_line(&fixture.ok(&["node", "show", "nas-01"]).await, &["转发目标", "是"]));
-    assert!(fixture.ok(&["node", "list"]).await.contains("中继、转发目标"));
+    assert!(fixture.ok(&["node", "list"]).await.contains("中继、出口、转发目标"), "代理要出口，nas-01 又启用成了出口");
     let forward = fixture.json(&["forward", "add", "laptop", "127.0.0.1:8080", "nas-01", "192.168.1.10:80", "--name", "web"]).await;
     assert_eq!(forward["status"], "active");
     let forward_id = forward["id"].to_string();
@@ -321,7 +315,7 @@ async fn the_command_line_drives_a_running_controller() {
     // 删除。--json 时没有应答体的操作什么都不输出。
     fixture.ok(&["pair", "unset", "laptop", "nas-01"]).await;
     fixture.ok(&["forward", "delete", &forward_id]).await;
-    assert_eq!(fixture.ok(&["--json", "credential", "delete", &credential["id"].to_string()]).await, "");
+    assert_eq!(fixture.ok(&["--json", "proxy", "delete", &proxy_id]).await, "");
     assert!(fixture.ok(&["node", "delete", "laptop"]).await.contains("节点 laptop 已删除"));
     assert_eq!(fixture.json(&["node", "list"]).await.as_array().unwrap().len(), 1);
     assert!(fixture.fails(&["network", "delete", "home"]).await.contains("network_not_empty"));
@@ -341,8 +335,7 @@ async fn the_command_line_drives_a_running_controller() {
         &["group", "show", "servers"],
         &["token", "list", "--all"],
         &["access", "graph"],
-        &["credential", "list"],
-        &["listener", "list"],
+        &["proxy", "list"],
         &["forward", "list"],
         &["log", "--limit", "100"],
         &["--help"],

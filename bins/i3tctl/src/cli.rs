@@ -8,7 +8,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use i3t_lang::Lang;
 use i3t_model::admin::stats::Series;
-use i3t_model::netmap::{Congestion, IpFamily, LaneMode, Profile, ProxyProtocol, Reach, RoutingMode};
+use i3t_model::netmap::{Congestion, IpFamily, LaneMode, ListenerProtocol, Profile, ProxyProtocol, Reach, RoutingMode};
 use i3t_proto::flow::Class;
 use ipnet::{IpNet, Ipv4Net};
 
@@ -62,9 +62,7 @@ pub enum Command {
     #[command(subcommand)]
     Rule(RuleCommand),
     #[command(subcommand)]
-    Credential(CredentialCommand),
-    #[command(subcommand)]
-    Listener(ListenerCommand),
+    Proxy(ProxyCommand),
     #[command(subcommand)]
     Forward(ForwardCommand),
     #[command(subcommand)]
@@ -351,57 +349,98 @@ pub enum RuleCommand {
 }
 
 #[derive(Subcommand)]
-pub enum CredentialCommand {
-    List,
-    Create {
+pub enum ProxyCommand {
+    List {
+        #[arg(long)]
+        node: Option<String>,
+    },
+    Show {
+        id: u32,
+    },
+    Add {
+        node: String,
+        bind: SocketAddr,
+        exit: String,
+        #[arg(long, default_value = "")]
         name: String,
         #[arg(long)]
-        max_concurrent: Option<u32>,
+        protocol: Option<ProtocolArg>,
+        #[arg(long, default_value = "")]
+        username: String,
+        #[arg(long, default_value = "")]
+        password: String,
         #[arg(long)]
-        max_bytes: Option<ByteSize>,
+        allow_from: Vec<IpNet>,
+        #[arg(long)]
+        class: Option<ClassArg>,
+        #[arg(long)]
+        optimistic: Option<OnOff>,
+        #[arg(long)]
+        disabled: bool,
     },
+    // 至少要改一项。
+    #[command(group(clap::ArgGroup::new("change").required(true).multiple(true).args([
+        "node", "name", "bind", "exit", "protocol", "username", "password", "allow_from", "class", "optimistic", "enabled"
+    ])))]
     Set {
         id: u32,
         #[arg(long)]
-        max_concurrent: Option<Limit<u32>>,
+        node: Option<String>,
         #[arg(long)]
-        max_bytes: Option<Limit<ByteSize>>,
+        name: Option<String>,
         #[arg(long)]
-        reset_usage: bool,
+        bind: Option<SocketAddr>,
+        #[arg(long)]
+        exit: Option<String>,
+        #[arg(long)]
+        protocol: Option<ProtocolArg>,
+        #[arg(long)]
+        username: Option<String>,
+        #[arg(long)]
+        password: Option<String>,
+        #[arg(long, num_args = 0..)]
+        allow_from: Option<Vec<IpNet>>,
+        #[arg(long)]
+        class: Option<Inherit<ClassArg>>,
+        #[arg(long)]
+        optimistic: Option<Inherit<OnOffArg>>,
+        #[arg(long)]
+        enabled: Option<OnOff>,
     },
     Delete {
         id: u32,
     },
 }
 
-#[derive(Subcommand)]
-pub enum ListenerCommand {
-    List {
-        #[arg(long)]
-        node: Option<String>,
-    },
-    Add {
-        node: String,
-        name: String,
-        bind: SocketAddr,
-        #[arg(long)]
-        http: bool,
-        #[arg(long)]
-        allow_from: Vec<IpNet>,
-        #[arg(long)]
-        require_credential: bool,
-        #[arg(long = "default")]
-        default_action: Option<String>,
-        #[arg(long)]
-        fixed_exit: Option<String>,
-        #[arg(long)]
-        class: Option<ClassArg>,
-        #[arg(long)]
-        optimistic: Option<OnOff>,
-    },
-    Delete {
-        id: u32,
-    },
+/// 代理说哪种协议。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ProtocolArg {
+    Mixed,
+    Socks5,
+    Http,
+}
+
+impl From<ProtocolArg> for ListenerProtocol {
+    fn from(arg: ProtocolArg) -> Self {
+        match arg {
+            ProtocolArg::Mixed => Self::Mixed,
+            ProtocolArg::Socks5 => Self::Socks5,
+            ProtocolArg::Http => Self::Http,
+        }
+    }
+}
+
+/// 开关写成 `on`、`off` 的又一种写法，给要能写 `default`（[`Inherit`]）的地方用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OnOffArg {
+    On,
+    Off,
+}
+
+impl From<OnOffArg> for bool {
+    fn from(arg: OnOffArg) -> Self {
+        arg == OnOffArg::On
+    }
 }
 
 #[derive(Subcommand)]
@@ -606,31 +645,6 @@ impl std::str::FromStr for ByteSize {
         };
         let count: u64 = digits.trim().parse().map_err(|_| wrong())?;
         count.checked_mul(scale).map(Self).ok_or_else(|| texts().ui.too_large.to_owned())
-    }
-}
-
-/// 一个可以清掉的上限：写一个值，或者写 `none` 表示不限。
-#[derive(Clone, Copy)]
-pub enum Limit<T> {
-    None,
-    Value(T),
-}
-
-impl<T: std::str::FromStr<Err: std::fmt::Display>> std::str::FromStr for Limit<T> {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == "none" { Ok(Self::None) } else { s.parse().map(Self::Value).map_err(|err| (texts().ui.or_write)(&err.to_string(), "none")) }
-    }
-}
-
-impl<T> Limit<T> {
-    /// 管理 API 里的写法：`None` 表示不限。
-    pub fn into_option<U: From<T>>(self) -> Option<U> {
-        match self {
-            Self::None => None,
-            Self::Value(value) => Some(U::from(value)),
-        }
     }
 }
 
@@ -898,41 +912,40 @@ fn describe(command: clap::Command, h: &Help, v: &Values) -> clap::Command {
                 .mut_subcommand("disable", |sub| sub.about(h.rule_disable).mut_arg("id", id))
                 .mut_subcommand("delete", |sub| sub.about(h.rule_delete).mut_arg("id", id))
         })
-        .mut_subcommand("credential", |sub| {
-            sub.about(h.credential_group)
-                .mut_subcommand("list", |sub| sub.about(h.credential_list))
-                .mut_subcommand("create", |sub| {
-                    sub.about(h.credential_create)
-                        .mut_arg("name", |arg| arg.value_name(v.name))
-                        .mut_arg("max_concurrent", |arg| arg.help(h.credential_max_concurrent).value_name(v.count))
-                        .mut_arg("max_bytes", |arg| arg.help(h.credential_max_bytes).value_name(v.size))
+        .mut_subcommand("proxy", |sub| {
+            sub.about(h.proxy_group)
+                .mut_subcommand("list", |sub| sub.about(h.proxy_list).mut_arg("node", |arg| node(arg.help(h.proxy_list_node))))
+                .mut_subcommand("show", |sub| sub.about(h.proxy_show).mut_arg("id", id))
+                .mut_subcommand("add", |sub| {
+                    sub.about(h.proxy_add)
+                        .mut_arg("node", node)
+                        .mut_arg("bind", |arg| arg.help(h.proxy_bind).value_name(v.address))
+                        .mut_arg("exit", |arg| node(arg.help(h.proxy_exit)))
+                        .mut_arg("name", |arg| arg.help(h.proxy_name).value_name(v.name))
+                        .mut_arg("protocol", |arg| arg.help(h.proxy_protocol))
+                        .mut_arg("username", |arg| arg.help(h.proxy_username).value_name(v.name))
+                        .mut_arg("password", |arg| arg.help(h.proxy_password).value_name(v.password))
+                        .mut_arg("allow_from", |arg| arg.help(h.allow_from).value_name(v.cidr))
+                        .mut_arg("class", |arg| class(arg.help(h.class)))
+                        .mut_arg("optimistic", |arg| on_off(arg.help(h.proxy_optimistic)))
+                        .mut_arg("disabled", |arg| arg.help(h.create_disabled))
                 })
                 .mut_subcommand("set", |sub| {
-                    sub.about(h.credential_set)
+                    sub.about(h.proxy_set)
                         .mut_arg("id", id)
-                        .mut_arg("max_concurrent", |arg| arg.help(h.credential_set_max_concurrent).value_name(v.count))
-                        .mut_arg("max_bytes", |arg| arg.help(h.credential_set_max_bytes).value_name(v.size))
-                        .mut_arg("reset_usage", |arg| arg.help(h.credential_reset_usage))
+                        .mut_arg("node", |arg| node(arg.help(h.proxy_set_node)))
+                        .mut_arg("name", |arg| arg.help(h.name).value_name(v.name))
+                        .mut_arg("bind", |arg| arg.help(h.proxy_bind).value_name(v.address))
+                        .mut_arg("exit", |arg| node(arg.help(h.proxy_exit)))
+                        .mut_arg("protocol", |arg| arg.help(h.proxy_protocol))
+                        .mut_arg("username", |arg| arg.help(h.proxy_set_credentials).value_name(v.name))
+                        .mut_arg("password", |arg| arg.help(h.proxy_set_credentials).value_name(v.password))
+                        .mut_arg("allow_from", |arg| arg.help(h.proxy_set_allow_from).value_name(v.cidr))
+                        .mut_arg("class", |arg| arg.help(h.proxy_set_class).value_name("auto|interactive|reliable|bulk|default"))
+                        .mut_arg("optimistic", |arg| arg.help(h.proxy_set_optimistic).value_name("on|off|default"))
+                        .mut_arg("enabled", |arg| on_off(arg.help(h.proxy_enabled)))
                 })
-                .mut_subcommand("delete", |sub| sub.about(h.credential_delete).mut_arg("id", id))
-        })
-        .mut_subcommand("listener", |sub| {
-            sub.about(h.listener_group)
-                .mut_subcommand("list", |sub| sub.about(h.listener_list).mut_arg("node", |arg| node(arg.help(h.listener_list_node))))
-                .mut_subcommand("add", |sub| {
-                    sub.about(h.listener_add)
-                        .mut_arg("node", node)
-                        .mut_arg("name", |arg| arg.value_name(v.name))
-                        .mut_arg("bind", |arg| arg.value_name(v.address))
-                        .mut_arg("http", |arg| arg.help(h.listener_http))
-                        .mut_arg("allow_from", |arg| arg.help(h.allow_from).value_name(v.cidr))
-                        .mut_arg("require_credential", |arg| arg.help(h.listener_require_credential))
-                        .mut_arg("default_action", |arg| arg.help(h.listener_default).value_name(v.action))
-                        .mut_arg("fixed_exit", |arg| node(arg.help(h.listener_fixed_exit)))
-                        .mut_arg("class", |arg| class(arg.help(h.class)))
-                        .mut_arg("optimistic", |arg| on_off(arg.help(h.listener_optimistic)))
-                })
-                .mut_subcommand("delete", |sub| sub.about(h.listener_delete).mut_arg("id", id))
+                .mut_subcommand("delete", |sub| sub.about(h.proxy_delete).mut_arg("id", id))
         })
         .mut_subcommand("forward", |sub| {
             sub.about(h.forward_group)
@@ -1136,12 +1149,30 @@ mod tests {
         assert_eq!("1234".parse::<ByteSize>(), Ok(ByteSize(1234)));
         assert_eq!("10GB".parse::<ByteSize>(), Ok(ByteSize(10_000_000_000)));
         assert!("10X".parse::<ByteSize>().is_err() && "lots".parse::<ByteSize>().is_err());
-        assert!(matches!("none".parse::<Limit<ByteSize>>(), Ok(Limit::None)));
-        assert!(matches!("1K".parse::<Limit<ByteSize>>(), Ok(Limit::Value(ByteSize(1000)))));
         assert!(matches!(
-            parse(&["credential", "set", "3", "--max-bytes", "none", "--reset-usage"]).command,
-            Command::Credential(CredentialCommand::Set { id: 3, reset_usage: true, .. })
+            parse(&["proxy", "add", "laptop", "0.0.0.0:1080", "gw", "--protocol", "socks5"]).command,
+            Command::Proxy(ProxyCommand::Add { protocol: Some(ProtocolArg::Socks5), disabled: false, .. })
         ));
+        assert!(matches!(
+            parse(&["proxy", "set", "3", "--enabled", "off", "--class", "default", "--optimistic", "on"]).command,
+            Command::Proxy(ProxyCommand::Set {
+                id: 3,
+                enabled: Some(OnOff(false)),
+                class: Some(Inherit::Default),
+                optimistic: Some(Inherit::Value(OnOffArg::On)),
+                ..
+            })
+        ));
+        assert!(
+            matches!(
+                parse(&["proxy", "set", "3", "--allow-from"]).command,
+                Command::Proxy(ProxyCommand::Set { allow_from: Some(sources), .. }) if sources.is_empty()
+            ),
+            "只写 --allow-from 是清掉白名单"
+        );
+        assert!(fails(&["proxy", "set", "3"]), "至少要改一项");
+        assert!(fails(&["proxy", "add", "laptop", "0.0.0.0:1080"]), "出口必填");
+        assert!(fails(&["listener", "list"]) && fails(&["credential", "list"]), "去掉了");
         assert!(matches!(
             parse(&["exit", "enable", "gw", "--quota", "1G", "--family", "ipv4"]).command,
             Command::Exit(ExitCommand::Enable { quota: Some(ByteSize(1_000_000_000)), .. })

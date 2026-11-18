@@ -7,6 +7,7 @@ mod limits;
 mod model;
 mod netmaps;
 mod ordering;
+mod proxies;
 mod routes;
 mod stats;
 mod update;

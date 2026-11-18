@@ -1,12 +1,10 @@
-//! 节点报上来的用量和状态在 controller 这一侧（白皮书 §9.2、§9.3、§9.6）：
+//! 节点报上来的用量和状态在 controller 这一侧（白皮书 §9.3、§9.6）：
 //!
-//! - **凭据**：每个入口报它这次运行以来每个凭据搬了多少字节。增量加到凭据的用量上（存在数据库里，见 `store::credential`）；
-//!   用量到了流量上限，凭据在 netmap 里被标成用完，入口拒绝它的新连接并断开正在进行的。
 //! - **出口**：出口报它自己的计数（按归因分的失败、配额、是不是在排空）；用它的节点各自报它们看到的。两份都留着给界面交叉核对。
 //!   健康只看出口自己报的、归因于它自己的失败，取最近 5 分钟。
-//! - **监听**：每个节点报它的代理监听器和端口转发的监听状态、连接数和流量，界面直接显示。
+//! - **监听**：每个节点报它的代理、本机的组网入口和端口转发的监听状态、连接数和流量，界面直接显示。
 //!
-//! 除了凭据的用量，这些都只在内存里：节点离线之后留着它最后报的那一份，controller 重启就没有了，等节点重新上报。
+//! 这些都只在内存里：节点离线之后留着它最后报的那一份，controller 重启就没有了，等节点重新上报。
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -14,12 +12,13 @@ use std::time::{Duration, Instant};
 use i3t_model::admin::{
     ExitHealth, ExitObserved, ExitView, ForwardFailure, ListenStatus, NetworkId, NodeForwardListen, NodeListener, NodeListeners,
 };
-use i3t_model::control::{CredentialUsage, ExitObservation, ExitReport};
+use i3t_model::control::{ExitObservation, ExitReport, ForwardReport, ListenerReport, ProxyReport};
 use i3t_proto::NodeId;
-use serde_json::json;
 
-use super::{Controller, Inner, Seeds, node_ref};
+use super::{Controller, Inner, node_ref};
+use crate::access::AccessMap;
 use crate::error::{Entity, Error};
+use crate::netmap::NetworkView;
 use crate::store::NodeRecord;
 
 /// 健康看最近这么久。
@@ -27,9 +26,8 @@ const HEALTH_WINDOW: Duration = Duration::from_secs(5 * 60);
 /// 归因于出口自己的失败至少这么多次、并且占请求的这么大比例，才算不健康。偶尔一次解析器超时不算。
 const DEGRADED_MIN_FAILURES: u64 = 3;
 const DEGRADED_RATIO_PERCENT: u64 = 10;
-/// 一个节点最多报这么多个监听、这么多个凭据、这么多个出口。乱报的节点占不了太多内存。
+/// 一个节点最多报这么多个监听、这么多个出口。乱报的节点占不了太多内存。
 const MAX_LISTENS: usize = 256;
-const MAX_CREDENTIALS: usize = 4096;
 const MAX_EXITS: usize = 256;
 
 /// 出口和用出口的节点报的计数。
@@ -122,9 +120,9 @@ impl Controller {
     /// 没有这个网络，或者读存储失败。
     pub fn exits(&self, network: NetworkId) -> Result<Vec<ExitView>, Error> {
         let inner = self.lock();
-        inner.require_network(network)?;
-        let nodes = inner.store.nodes(network)?;
-        Ok(nodes.iter().filter_map(|node| inner.exit_view(&nodes, node)).collect())
+        let view = NetworkView::load(&inner.store, network)?.ok_or(Error::NotFound(Entity::Network))?;
+        let access = view.access();
+        Ok(view.nodes.values().filter_map(|node| inner.exit_view(&view, &access, node)).collect())
     }
 
     /// 一个出口。
@@ -135,12 +133,12 @@ impl Controller {
     pub fn exit(&self, network: NetworkId, id: NodeId) -> Result<ExitView, Error> {
         let inner = self.lock();
         inner.require_node(network, id)?;
-        let nodes = inner.store.nodes(network)?;
-        let node = nodes.iter().find(|node| node.id == id).ok_or(Error::NotFound(Entity::Node))?;
-        inner.exit_view(&nodes, node).ok_or(Error::NotFound(Entity::Exit))
+        let view = NetworkView::load(&inner.store, network)?.ok_or(Error::NotFound(Entity::Network))?;
+        let node = view.nodes.get(&id).ok_or(Error::NotFound(Entity::Node))?;
+        inner.exit_view(&view, &view.access(), node).ok_or(Error::NotFound(Entity::Exit))
     }
 
-    /// 一个节点上的全部监听：controller 下发的监听器、节点自己开的回环入口、端口转发的监听一侧，取自它最近的上报。
+    /// 一个节点上的全部监听：controller 下发的代理、节点按本机配置开的组网入口、端口转发的监听一侧，取自它最近的上报。
     ///
     /// # Errors
     ///
@@ -148,19 +146,31 @@ impl Controller {
     pub fn node_listeners(&self, network: NetworkId, id: NodeId) -> Result<NodeListeners, Error> {
         let inner = self.lock();
         let record = inner.require_node(network, id)?;
-        let configured = inner.store.listeners(network)?;
+        let configured = inner.store.proxies(network)?;
         let live = inner.live.get(&id);
-        let listeners = live.map(|live| &live.listeners[..]).unwrap_or_default().iter().map(|report| NodeListener {
-            id: configured
-                .iter()
-                .find(|listener| !report.builtin && listener.node == id && listener.config.name == report.name)
-                .map(|listener| listener.id),
-            builtin: report.builtin,
-            name: report.name.clone(),
-            bind: report.bind,
-            protocol: report.protocol,
-            status: ListenStatus { state: report.state.clone(), traffic: report.traffic },
+        let proxies = live.map(|live| &live.proxies[..]).unwrap_or_default().iter().filter_map(|report| {
+            // 刚删掉的代理节点还在报，不列。
+            let proxy = configured.iter().find(|proxy| proxy.id == report.id && proxy.node == id)?;
+            Some(NodeListener {
+                id: Some(proxy.id),
+                builtin: false,
+                name: proxy.name.clone(),
+                bind: report.bind,
+                protocol: proxy.protocol,
+                status: ListenStatus { state: report.state.clone(), traffic: report.traffic },
+            })
         });
+        // 比代理旧的节点在这里也报 controller 下发的监听器，那些已经不存在了，不列。
+        let local =
+            live.map(|live| &live.listeners[..]).unwrap_or_default().iter().filter(|report| report.builtin).map(|report| NodeListener {
+                id: None,
+                builtin: true,
+                name: report.name.clone(),
+                bind: report.bind,
+                protocol: report.protocol,
+                status: ListenStatus { state: report.state.clone(), traffic: report.traffic },
+            });
+        let listeners = proxies.chain(local);
         let forwards = live.map(|live| &live.forwards[..]).unwrap_or_default().iter().map(|report| NodeForwardListen {
             id: report.id,
             bind: report.bind,
@@ -178,13 +188,13 @@ impl Controller {
 }
 
 impl Inner {
-    fn exit_view(&self, nodes: &[NodeRecord], node: &NodeRecord) -> Option<ExitView> {
+    fn exit_view(&self, view: &NetworkView, access: &AccessMap<'_>, node: &NodeRecord) -> Option<ExitView> {
         let settings = node.exit.clone()?;
         let online = self.is_online(node.id);
         let seen = self.usage.exits.get(&node.id);
         let recent = seen.map(ExitSeen::recent).unwrap_or_default();
         let observed = self.usage.observed.iter().filter(|((exit, _), _)| *exit == node.id).filter_map(|(&(_, by), observed)| {
-            let by = nodes.iter().find(|candidate| candidate.id == by)?;
+            let by = view.nodes.get(&by)?;
             Some(ExitObserved { by: node_ref(by), counts: observed.counts.clone(), reported_secs_ago: observed.at.elapsed().as_secs() })
         });
         Some(ExitView {
@@ -197,14 +207,13 @@ impl Inner {
             usage: seen.map(|seen| seen.report.clone()),
             reported_secs_ago: seen.map(|seen| seen.at.elapsed().as_secs()),
             observed: observed.collect(),
+            proxies: view
+                .proxies
+                .iter()
+                .filter(|proxy| proxy.exit == Some(node.id))
+                .map(|proxy| self.proxy_view(view, access, proxy))
+                .collect(),
         })
-    }
-
-    /// 一个监听器最近一次报的状态。
-    pub(crate) fn listener_status(&self, node: NodeId, name: &str) -> Option<ListenStatus> {
-        let live = self.live.get(&node)?;
-        let report = live.listeners.iter().find(|report| !report.builtin && report.name == name)?;
-        Some(ListenStatus { state: report.state.clone(), traffic: report.traffic })
     }
 
     /// 一条端口转发的监听一侧最近一次报的状态。
@@ -221,83 +230,31 @@ impl Inner {
         Some(ForwardFailure { cause: failure.cause, at: self.clock.now().saturating_sub(failure.secs_ago.saturating_add(since_report)) })
     }
 
-    /// 一个凭据现在在各个在线的入口上一共有多少条连接。
-    pub(crate) fn credential_connections(&self, network: NetworkId, id: u32) -> u32 {
-        let live = self.live.values().filter(|live| live.network == network);
-        live.filter_map(|live| live.credential_connections.get(&id)).fold(0, |total, connections| total.saturating_add(*connections))
-    }
-
-    /// 记下一个节点上报里的用量和状态。凭据因此用完（或者不再用完）时，下发给入口的 netmap 随之更新。
-    pub(super) fn usage_reported(&mut self, node: &NodeRecord, report: UsageReport) -> Result<(), Error> {
-        let UsageReport { run, credentials, exit, exits, listeners, forwards } = report;
+    /// 记下一个节点上报里的用量和状态。
+    pub(super) fn usage_reported(&mut self, node: &NodeRecord, report: UsageReport) {
+        let UsageReport { run, exit, exits, proxies, listeners, forwards } = report;
         let now = Instant::now();
         if let Some(live) = self.live.get_mut(&node.id) {
             live.reported_at = Some(now);
+            live.proxies = proxies.into_iter().take(MAX_LISTENS).collect();
             live.listeners = listeners.into_iter().take(MAX_LISTENS).collect();
             live.forwards = forwards.into_iter().take(MAX_LISTENS).collect();
-            live.credential_connections = credentials.iter().take(MAX_CREDENTIALS).map(|usage| (usage.id, usage.connections)).collect();
         }
         if let Some(exit) = exit {
             self.usage.exit_reported(node.id, run, *exit, now);
         }
         self.usage.observed(node.id, exits, now);
-        // 旧版本的节点不报运行编号，它的累计数没法安全地换成增量，不算。
-        if run == 0 || credentials.is_empty() {
-            return Ok(());
-        }
-        let wall = self.clock.now();
-        let mut flipped = false;
-        for usage in credentials.into_iter().take(MAX_CREDENTIALS) {
-            flipped |= self.credential_used(node, run, &usage, wall)?;
-        }
-        if flipped {
-            let seeds = self.nodes_requiring_credentials(node.network)?;
-            self.refresh(node.network, seeds, None)?;
-        }
-        Ok(())
-    }
-
-    /// 把一个凭据的用量记上。返回它是不是因此用完了（或者不再用完）。
-    fn credential_used(&mut self, node: &NodeRecord, run: u64, usage: &CredentialUsage, now: u64) -> Result<bool, Error> {
-        // 入口只能报它自己网络里的凭据。
-        let Some(before) = self.store.credential(node.network, usage.id)? else { return Ok(false) };
-        let last_used = usage.last_used_secs_ago.map(|ago| now.saturating_sub(ago));
-        let added = self.store.record_credential_usage(usage.id, node.id, run, usage.bytes, last_used)?;
-        if added == 0 {
-            return Ok(false);
-        }
-        let after = self.store.credential(node.network, usage.id)?.ok_or(Error::NotFound(Entity::Credential))?;
-        let flipped = before.is_exhausted() != after.is_exhausted();
-        if flipped {
-            tracing::info!(credential = %after.credential.name, used = after.credential.usage.bytes, max = ?after.credential.max_bytes, "凭据的流量上限用完了，通知各个入口");
-            let refs = [i3t_model::admin::LogRef::new(i3t_model::admin::RefKind::Credential, usage.id)];
-            let detail = format!("凭据 {} 的流量上限用完了（已用 {} 字节）", after.credential.name, after.credential.usage.bytes);
-            let params = json!({
-                "credential": usage.id,
-                "credential_name": after.credential.name,
-                "used_bytes": after.credential.usage.bytes,
-                "max_bytes": after.credential.max_bytes,
-            });
-            self.store.log_refs(now, Some(node.network), "credential.exhausted", &detail, &refs, params)?;
-        }
-        Ok(flipped)
-    }
-
-    /// 凭据只下发给有监听器要求凭据的节点，所以凭据变了只重算它们。
-    pub(crate) fn nodes_requiring_credentials(&self, network: NetworkId) -> Result<Seeds, Error> {
-        let listeners = self.store.listeners(network)?;
-        Ok(Seeds::of(listeners.into_iter().filter(|listener| listener.config.require_credential).map(|listener| listener.node)))
     }
 }
 
 /// 一次上报里和用量、状态有关的部分。
 pub(super) struct UsageReport {
     pub(super) run: u64,
-    pub(super) credentials: Vec<CredentialUsage>,
     pub(super) exit: Option<Box<ExitReport>>,
     pub(super) exits: Vec<ExitObservation>,
-    pub(super) listeners: Vec<i3t_model::control::ListenerReport>,
-    pub(super) forwards: Vec<i3t_model::control::ForwardReport>,
+    pub(super) proxies: Vec<ProxyReport>,
+    pub(super) listeners: Vec<ListenerReport>,
+    pub(super) forwards: Vec<ForwardReport>,
 }
 
 #[cfg(test)]

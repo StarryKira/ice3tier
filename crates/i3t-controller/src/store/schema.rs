@@ -25,6 +25,7 @@ pub(super) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0012_relay_reach_pair_congestion_route_switches.sql"),
     include_str!("migrations/0013_forward_target_switch.sql"),
     include_str!("migrations/0014_node_auto_update.sql"),
+    include_str!("migrations/0015_proxies.sql"),
 ];
 
 #[cfg(test)]
@@ -168,6 +169,84 @@ mod tests {
             json!({ "dial_out_only": true, "groups": [{ "group": id(home, "home"), "group_name": "home" }, { "group": id(home, "servers"), "group_name": "servers" }] })
         );
         assert_eq!(params("tag.rename")["from"], "a", "没有新写法的旧记录原样留着");
+    }
+
+    /// 第 15 版之前：监听器和接入凭据。
+    const BEFORE_PROXIES: usize = 14;
+
+    #[test]
+    fn listeners_become_proxies_with_their_exit_and_credentials_go_away() {
+        use crate::store::fixtures::{home, new_node};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("controller.db");
+        let nodes: Vec<i3t_proto::NodeId> = {
+            let store = Store::prepare(Connection::open(&path).unwrap(), &MIGRATIONS[..BEFORE_PROXIES]).unwrap();
+            let network = store.insert_network(&home()).unwrap();
+            let nodes: Vec<_> = (1..=3).map(|seed| store.insert_node(&new_node(network, seed)).unwrap()).collect();
+            let (a, b) = (nodes[0].get(), nodes[1].get());
+            store
+                .conn
+                .execute_batch(&format!(
+                    r#"
+                INSERT INTO listeners (id, node_id, name, bind, protocol, allow_from, require_credential, default_action, default_exit, fixed_exit, class, optimistic)
+                VALUES (4, {a}, 'fixed', '127.0.0.1:1080', '"socks5"', '[]', 0, NULL, NULL, {b}, '"bulk"', 0),
+                       (5, {a}, 'by-default', '0.0.0.0:1081', '"http"', '["192.168.1.0/24"]', 1, 'exit', {b}, NULL, NULL, NULL),
+                       (6, {a}, 'local', '127.0.0.1:1082', '"socks5"', '[]', 0, 'local', NULL, NULL, NULL, NULL),
+                       (7, {a}, 'guarded', '[::1]:1083', '"socks5"', '[]', 1, NULL, NULL, NULL, NULL, NULL),
+                       (8, {b}, 'itself', '127.0.0.1:1084', '"socks5"', '[]', 0, NULL, NULL, {b}, NULL, NULL);
+                INSERT INTO credentials (id, network_id, name, token_hash, max_concurrent, created_at) VALUES (1, 1, 'phone', x'00', NULL, 1);
+                INSERT INTO credential_counters (credential_id, node_id, run, bytes) VALUES (1, {a}, 1, 10);
+                INSERT INTO oplog (at, network_id, action, detail, refs, params) VALUES
+                    (1, 1, 'listener.create', 'x', '[{{"kind":"listener","id":4}},{{"kind":"node","id":{a}}}]', '{{}}'),
+                    (2, 1, 'credential.create', 'x', '[{{"kind":"credential","id":1}}]', '{{}}');
+                "#
+                ))
+                .unwrap();
+            nodes
+        };
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), u32::try_from(MIGRATIONS.len()).unwrap());
+        let proxies = store.proxies(i3t_model::admin::NetworkId(1)).unwrap();
+        let summary: Vec<_> = proxies.iter().map(|proxy| (proxy.id, proxy.name.as_str(), proxy.exit, proxy.enabled)).collect();
+        assert_eq!(
+            summary,
+            [
+                (4, "fixed", Some(nodes[1]), true),
+                (5, "by-default", Some(nodes[1]), true),
+                (6, "local", None, false),
+                (7, "guarded", None, false),
+                (8, "itself", None, false),
+            ],
+            "固定出口和默认走的出口成了代理的出口；没有出口的、出口是自己的停用"
+        );
+        let fixed = &proxies[0];
+        assert_eq!(
+            (fixed.protocol, fixed.class, fixed.optimistic),
+            (i3t_model::netmap::ListenerProtocol::Socks5, Some(i3t_proto::flow::Class::Bulk), Some(false))
+        );
+        assert_eq!((fixed.username.as_str(), fixed.password.as_str()), ("", ""), "回环上不要求凭据的不认证");
+        for guarded in [&proxies[1], &proxies[3]] {
+            assert!(guarded.username.starts_with("u-") && guarded.username.len() == 10, "{}", guarded.username);
+            assert!(guarded.password.len() == 32 && guarded.password.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            assert!(guarded.verifier().is_some(), "要求过凭据的不会变成谁都能用");
+        }
+        assert_ne!(proxies[1].password, proxies[3].password);
+        assert_ne!(proxies[0].salt, proxies[1].salt);
+        assert_eq!(proxies[1].allow_from, vec!["192.168.1.0/24".parse::<ipnet::IpNet>().unwrap()]);
+        for gone in ["listeners", "credentials", "credential_counters"] {
+            assert!(store.conn.prepare(&format!("SELECT * FROM {gone}")).is_err(), "{gone} 去掉了");
+        }
+        let log = store.oplog(10).unwrap();
+        let refs = |action: &str| log.iter().find(|entry| entry.action == action).unwrap().refs.clone();
+        assert_eq!(
+            refs("listener.create")[0],
+            i3t_model::admin::LogRef::new(i3t_model::admin::RefKind::Proxy, 4),
+            "提到的监听器成了同一个编号的代理"
+        );
+        assert_eq!(refs("credential.create")[0].kind, i3t_model::admin::RefKind::Unknown);
+        // 迁移之后新建的代理编号接着往下排。
+        let next = crate::store::ProxyRecord { id: 0, name: "new".into(), ..proxies[0].clone() };
+        assert!(store.insert_proxy(&crate::store::ProxyRecord { bind: "127.0.0.1:2000".parse().unwrap(), ..next }).unwrap() > 8);
     }
 
     #[test]

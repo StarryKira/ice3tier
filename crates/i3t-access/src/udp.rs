@@ -37,8 +37,8 @@ const MAX_UDP_PAYLOAD: usize = 65_535;
 type MeshContext<C> = Context<<C as Connector>::Send, <C as Connector>::Recv, <C as Datagrams>::Sender>;
 
 /// 到 `peer` 开一个上下文。失败时记一行日志，把这段时间里排进 `queue` 的报文都丢掉，然后返回错误。
-async fn open_context<C: Connector + Datagrams, E, T>(
-    shared: &Arc<Shared<C, E>>,
+async fn open_context<C: Connector + Datagrams, T>(
+    shared: &Arc<Shared<C>>,
     peer: NodeId,
     class: Class,
     origin: Origin,

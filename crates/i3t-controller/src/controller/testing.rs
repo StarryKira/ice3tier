@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use i3t_crypto::NodeKey;
 use i3t_model::Netmap;
-use i3t_model::admin::{CreateEnrollToken, CreateGroup, CreateNetwork, GroupId, Network, NetworkId, UpdateNode};
+use i3t_model::admin::{CreateEnrollToken, CreateGroup, CreateNetwork, CreateProxy, GroupId, Network, NetworkId, UpdateNode};
 use i3t_model::control::{Declared, EnrollToken, Hello, PROTOCOL_REVISION, Report, SelfUpdate, Signal, TestOrder, ToController, ToNode};
 use i3t_model::update::{SignedManifest, UpdateStatus, UpdateTiming};
 use i3t_proto::{NodeId, PublicKey};
@@ -274,3 +274,20 @@ pub(crate) fn modern_hello(version: &str) -> Hello {
 }
 
 pub(crate) const CAN_DO_ALL: Declared = Declared { exit: true, relay: true, relay_address: None };
+
+/// 新建一个代理的请求：在 `node` 的 `bind` 上监听，经 `exit` 出去，其余取默认（`mixed`、启用、不写名字和用户名密码）。
+pub(crate) fn proxy(node: NodeId, bind: &str, exit: NodeId) -> CreateProxy {
+    CreateProxy {
+        node,
+        name: String::new(),
+        bind: bind.parse().expect("测试写的地址"),
+        exit,
+        protocol: Default::default(),
+        username: String::new(),
+        password: String::new(),
+        enabled: true,
+        allow_from: Vec::new(),
+        class: None,
+        optimistic: None,
+    }
+}

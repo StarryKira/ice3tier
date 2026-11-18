@@ -80,7 +80,9 @@ static ZH: Texts = Texts {
     create_config: |path| format!("创建配置文件 {}", path.display()),
     port_zero: "port 不能是 0：别的节点要按固定的端口找它",
     proxy_not_loopback: |name, addr| {
-        format!("{name} = \"{addr}\" 不是回环地址：本机的代理入口只能写 127.0.0.1 或 [::1]。给别的机器用的入口在 WebUI 的监听器里配置。")
+        format!(
+            "{name} = \"{addr}\" 不是回环地址：本机的组网入口只能写 127.0.0.1 或 [::1]。给别的机器用的、经出口出去的代理在 WebUI 的代理里配置。"
+        )
     },
     metrics_not_loopback: |addr| format!("metrics.listen = \"{addr}\" 不是回环地址：指标接口没有认证，只能写 127.0.0.1 或 [::1]。"),
     same_proxy_address: |addr| format!("proxy.socks5 和 proxy.http 不能用同一个地址 {addr}"),
@@ -132,8 +134,8 @@ static EN: Texts = Texts {
     port_zero: "port can't be 0: other nodes find this one at a fixed port",
     proxy_not_loopback: |name, addr| {
         format!(
-            "{name} = \"{addr}\" isn't a loopback address: local proxy entries take 127.0.0.1 or [::1]. \
-             Entries for other machines are listeners in the WebUI."
+            "{name} = \"{addr}\" isn't a loopback address: the local mesh entries take 127.0.0.1 or [::1]. \
+             Proxies for other machines, leaving through an exit, are set up under Proxies in the WebUI."
         )
     },
     metrics_not_loopback: |addr| {
@@ -193,10 +195,12 @@ relay = false
 # relay_address = "203.0.113.9:40330"
 # 也可以执行 i3t set relay-address 203.0.113.9:40330。别的地址由 controller 自己找出来。
 
-# 本机的代理入口，只给这台机器上的程序用。不需要的写 "off"。
+# 本机的组网入口：这台机器上的程序经它访问组网里的节点（只到节点，不经出口，不认证）。默认不开；
+# i3t connect 要用 socks5 这一个。要开就写回环上的地址，比如 socks5 = "127.0.0.1:1080"。
+# 经出口出去的代理在 WebUI 的代理里配置。
 [proxy]
-socks5 = "127.0.0.1:1080"
-http = "127.0.0.1:1081"
+socks5 = "off"
+http = "off"
 
 # 本机的指标接口（Prometheus）：http://<地址>/metrics。只能绑回环地址。不需要的写 "off"。
 [metrics]
@@ -246,10 +250,12 @@ relay = false
 # relay_address = "203.0.113.9:40330"
 # Or run: i3t set relay-address 203.0.113.9:40330. The controller finds the other addresses itself.
 
-# Local proxy entries, for programs on this machine only. "off" turns one off.
+# Local mesh entries: programs on this machine reach the nodes of the network through them (nodes only, no exit,
+# no authentication). Off by default; i3t connect needs the socks5 one. To turn one on write a loopback address,
+# e.g. socks5 = "127.0.0.1:1080". Proxies that leave through an exit are set up under Proxies in the WebUI.
 [proxy]
-socks5 = "127.0.0.1:1080"
-http = "127.0.0.1:1081"
+socks5 = "off"
+http = "off"
 
 # Local metrics endpoint (Prometheus): http://<address>/metrics. Loopback only. "off" turns it off.
 [metrics]

@@ -5,11 +5,11 @@ use std::net::Ipv4Addr;
 use anyhow::{Context, anyhow, bail};
 use i3t_model::admin::diag::{CreateTest, MatrixRun, MatrixState, TestState, TestView};
 use i3t_model::admin::{
-    CreateCredential, CreateEnrollToken, CreateGroup, CreateNetwork, CreateRule, Credential, CredentialState, Direction, ExitTestInput,
-    ForceUpdate, Forward, ForwardInput, Group, GroupId, GroupMembers, ListenerInput, Network, NetworkId, Node, PairInput, RelaySettings,
-    ResumeUpdate, Succeed, UpdateCredential, UpdateGroup, UpdateNetwork, UpdateNode, UpdateRule, UpdateSettings,
+    CreateEnrollToken, CreateGroup, CreateNetwork, CreateProxy, CreateRule, Direction, ExitTestInput, ForceUpdate, Forward, ForwardInput,
+    Group, GroupId, GroupMembers, Network, NetworkId, Node, PairInput, RelaySettings, ResumeUpdate, Succeed, UpdateGroup, UpdateNetwork,
+    UpdateNode, UpdateProxy, UpdateRule, UpdateSettings,
 };
-use i3t_model::netmap::{DefaultAction, ExitRole, ForwardProtocol, Listener, ListenerProtocol};
+use i3t_model::netmap::{ExitRole, ForwardProtocol};
 use i3t_model::update::UpdateTiming;
 use i3t_proto::NodeId;
 use reqwest::Method;
@@ -18,8 +18,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::cli::{
-    AccessCommand, Cli, Command, CredentialCommand, ExitCommand, ForwardCommand, GroupCommand, ListenerCommand, NetworkCommand,
-    NetworkSettings, NodeCommand, PairCommand, RelayCommand, RuleCommand, TestItemArg, TestsCommand, TokenCommand, UpdateCommand,
+    AccessCommand, Cli, Command, ExitCommand, ForwardCommand, GroupCommand, NetworkCommand, NetworkSettings, NodeCommand, PairCommand,
+    ProxyCommand, RelayCommand, RuleCommand, TestItemArg, TestsCommand, TokenCommand, UpdateCommand,
 };
 use crate::client::{Client, decode};
 use crate::render;
@@ -50,8 +50,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Group(command) => session.group_command(command).await,
         Command::Token(command) => session.token_command(command).await,
         Command::Rule(command) => session.rule_command(command).await,
-        Command::Credential(command) => session.credential_command(command).await,
-        Command::Listener(command) => session.listener_command(command).await,
+        Command::Proxy(command) => session.proxy_command(command).await,
         Command::Forward(command) => session.forward_command(command).await,
         Command::Pair(command) => session.pair_command(command).await,
         Command::Access(command) => session.access_command(command).await,
@@ -508,89 +507,61 @@ impl Session {
         }
     }
 
-    async fn credential_command(&self, command: CredentialCommand) -> anyhow::Result<()> {
+    async fn proxy_command(&self, command: ProxyCommand) -> anyhow::Result<()> {
         let network = self.network().await?.id;
-        let credentials = format!("/networks/{network}/credentials");
+        let proxies = format!("/networks/{network}/proxies");
         match command {
-            CredentialCommand::List => self.show_list(self.get(&credentials).await?, render::credentials),
-            CredentialCommand::Create { name, max_concurrent, max_bytes } => {
-                let request = CreateCredential { name, max_concurrent, max_bytes: max_bytes.map(|size| size.0) };
-                self.show(self.send(Method::POST, &credentials, &request).await?, render::created_credential)
-            }
-            CredentialCommand::Set { id, max_concurrent, max_bytes, reset_usage } => {
-                let request = UpdateCredential {
-                    max_concurrent: max_concurrent.map(crate::cli::Limit::into_option),
-                    max_bytes: max_bytes.map(crate::cli::Limit::into_option),
-                    reset_usage,
-                };
-                self.show(self.send(Method::PATCH, &format!("{credentials}/{id}"), &request).await?, render::credential)
-            }
-            CredentialCommand::Delete { id } => {
-                // 第一次删是吊销，对吊销了的再删一次才是删掉：先看一眼它现在的样子，好说清楚做的是哪一种。
-                let existing: Vec<Credential> = self.client.get(&credentials).await?;
-                let revoked = existing.iter().any(|credential| credential.id == id && credential.state == CredentialState::Revoked);
-                self.delete(&format!("{credentials}/{id}")).await?;
-                let ui = &texts().ui;
-                self.done(&if revoked { (ui.credential_deleted)(id) } else { (ui.credential_revoked)(id) });
-                Ok(())
-            }
-        }
-    }
-
-    async fn listener_command(&self, command: ListenerCommand) -> anyhow::Result<()> {
-        let network = self.network().await?.id;
-        let listeners = format!("/networks/{network}/listeners");
-        match command {
-            ListenerCommand::List { node } => {
+            ProxyCommand::List { node } => {
                 let path = match node {
-                    Some(reference) => format!("{listeners}?node={}", self.node(network, &reference).await?.id),
-                    None => listeners,
+                    Some(reference) => format!("{proxies}?node={}", self.node(network, &reference).await?.id),
+                    None => proxies,
                 };
-                self.show_list(self.get(&path).await?, render::listeners)
+                self.show_list(self.get(&path).await?, render::proxies)
             }
-            ListenerCommand::Add {
-                node,
-                name,
-                bind,
-                http,
-                allow_from,
-                require_credential,
-                default_action,
-                fixed_exit,
-                class,
-                optimistic,
-            } => {
-                let node = self.node(network, &node).await?.id;
-                let default_action = match default_action.as_deref() {
-                    None => None,
-                    Some("local") => Some(DefaultAction::Local),
-                    Some("reject") => Some(DefaultAction::Reject),
-                    Some(other) => {
-                        let exit = other.strip_prefix("exit:").with_context(|| (texts().ui.bad_default_action)(other))?;
-                        Some(DefaultAction::Exit { node: self.node(network, exit).await?.id })
-                    }
-                };
-                let fixed_exit = match fixed_exit {
-                    Some(reference) => Some(self.node(network, &reference).await?.id),
-                    None => None,
-                };
-                let protocol = if http { ListenerProtocol::Http } else { ListenerProtocol::Socks5 };
-                let config = Listener {
+            ProxyCommand::Show { id } => self.show(self.get(&format!("{proxies}/{id}")).await?, render::proxy),
+            ProxyCommand::Add { node, bind, exit, name, protocol, username, password, allow_from, class, optimistic, disabled } => {
+                let request = CreateProxy {
+                    node: self.node(network, &node).await?.id,
                     name,
                     bind,
-                    protocol,
+                    exit: self.node(network, &exit).await?.id,
+                    protocol: protocol.map(Into::into).unwrap_or_default(),
+                    username,
+                    password,
+                    enabled: !disabled,
                     allow_from,
-                    require_credential,
-                    default_action,
-                    fixed_exit,
                     class: class.map(Into::into),
                     optimistic: optimistic.map(|on| on.0),
                 };
-                self.show(self.send(Method::POST, &listeners, &ListenerInput { node, config }).await?, render::listener)
+                self.show(self.send(Method::POST, &proxies, &request).await?, render::proxy)
             }
-            ListenerCommand::Delete { id } => {
-                self.delete(&format!("{listeners}/{id}")).await?;
-                self.done(&(texts().ui.listener_deleted)(id));
+            ProxyCommand::Set { id, node, name, bind, exit, protocol, username, password, allow_from, class, optimistic, enabled } => {
+                let node = match node {
+                    Some(reference) => Some(self.node(network, &reference).await?.id),
+                    None => None,
+                };
+                let exit = match exit {
+                    Some(reference) => Some(self.node(network, &reference).await?.id),
+                    None => None,
+                };
+                let request = UpdateProxy {
+                    node,
+                    name,
+                    bind,
+                    exit,
+                    protocol: protocol.map(Into::into),
+                    username,
+                    password,
+                    enabled: enabled.map(|on| on.0),
+                    allow_from,
+                    class: class.map(crate::cli::Inherit::into_override),
+                    optimistic: optimistic.map(crate::cli::Inherit::into_override),
+                };
+                self.show(self.send(Method::PATCH, &format!("{proxies}/{id}"), &request).await?, render::proxy)
+            }
+            ProxyCommand::Delete { id } => {
+                self.delete(&format!("{proxies}/{id}")).await?;
+                self.done(&(texts().ui.proxy_deleted)(id));
                 Ok(())
             }
         }
