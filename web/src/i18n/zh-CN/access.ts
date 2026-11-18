@@ -85,6 +85,8 @@ export const access = {
     byNode: '按节点',
     edgeHint: '点击连线高亮策略，双击编辑',
     members: (n: number) => `${n} 个节点`,
+    membersOnline: (n: number, up: number) => `${n} 个节点 · ${up} 在线`,
+    within: '组内互通',
     groupNodeLabel: (group: string, n: number) => `分组 ${group}，${n} 个节点`,
     ungrouped: (n: number) => `仅在 All（${n}）`,
     ungroupedSub: '只有 All 的策略适用',

@@ -1,5 +1,7 @@
 import {
   type AriaLabelConfig,
+  Background,
+  BackgroundVariant,
   Controls,
   type Edge,
   type Node,
@@ -37,7 +39,7 @@ function ariaLabels(): Partial<AriaLabelConfig> {
   }
 }
 
-const FIT = { padding: 0.08, maxZoom: 1.1 } as const
+const FIT = { padding: 0.12, maxZoom: 1.2 } as const
 
 /**
  * 画布的大小一变就重新缩放到刚好看全。
@@ -96,6 +98,13 @@ export function GraphCanvas<N extends Node, E extends Edge>(props: ReactFlowProp
       {...rest}
     >
       {/* 左上角：分组沿一个圆排开，四个角是空的；左下角留给"只在 All 里"的那个点，右下角有画图库的署名。 */}
+      {/* 淡淡的点阵：看得出是一块画布，又不抢内容。SVG 的图案里用不了 CSS 变量，按亮暗给颜色。 */}
+      <Background
+        variant={BackgroundVariant.Dots}
+        gap={18}
+        size={1.2}
+        color={theme === 'dark' ? '#3a3a40' : '#d4d4d8'}
+      />
       <Controls showInteractive={false} position="top-left" />
       <FitOnResize />
       {children}

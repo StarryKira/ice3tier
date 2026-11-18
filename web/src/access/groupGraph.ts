@@ -45,8 +45,8 @@ export interface GroupGraphShape {
 export const UNGROUPED_ID = 'ungrouped'
 export const groupPointId = (group: GroupId): string => `group:${group}`
 
-/** 画点用的尺寸，布局和连线的几何都按它算。 */
-export const GROUP_NODE = { width: 148, height: 58 } as const
+/** 画点用的尺寸：宽是定的；高随内容（成员、组内的策略），这里是没量到时的估计。 */
+export const GROUP_NODE = { width: 232, height: 96 } as const
 
 /**
  * 布局：All 固定在最上面，其余分组沿一个圆排开。分组不多（个人用户通常几个），圆上的连线交叉最少，
@@ -54,7 +54,7 @@ export const GROUP_NODE = { width: 148, height: 58 } as const
  */
 function layout(count: number): { x: number; y: number }[] {
   if (count === 1) return [{ x: 0, y: 0 }]
-  const radius = Math.max(150, count * 44)
+  const radius = Math.max(230, count * 64)
   return Array.from({ length: count }, (_, index) => {
     const angle = -Math.PI / 2 + (2 * Math.PI * index) / count
     return { x: Math.round(radius * Math.cos(angle)), y: Math.round(radius * Math.sin(angle)) }
@@ -83,7 +83,7 @@ export function buildGroupGraph(graph: AccessGraph): GroupGraphShape {
   const ungrouped = (graph.groups.find((group) => group.builtin)?.nodes ?? []).filter((node) => !grouped.has(node.id))
   // 只有 All 一个分组时，"只在 All 里"就是全部节点，再画一个点是重复的。
   if (ungrouped.length > 0 && ordered.length > 1) {
-    const radius = Math.max(150, ordered.length * 44)
+    const radius = Math.max(230, ordered.length * 64)
     points.push({
       id: UNGROUPED_ID,
       kind: 'ungrouped',

@@ -8,7 +8,6 @@ import { q, useAction } from '@/api/queries'
 import { type AccessGraph, type GroupId, type Network, type NodeId, type Rule } from '@/api/types'
 import { isAllToAll } from '@/access/reach'
 import { GroupChip } from '@/components/groups'
-import { InfoTip } from '@/components/info-tip'
 import { NodeSelect } from '@/components/node'
 import { Notice } from '@/components/notice'
 import { SearchBox } from '@/components/search-box'
@@ -21,7 +20,6 @@ import { t } from '@/i18n'
 import { formatList } from '@/lib/format'
 import { allGroupId } from '@/lib/groups'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
-import { cn } from '@/lib/utils'
 import { useNetwork } from '@/pages/networks/context'
 
 import { AccessCheck } from './AccessCheck'
@@ -40,29 +38,6 @@ function numberParam(params: URLSearchParams, key: string): number | null {
   if (raw === null) return null
   const value = Number(raw)
   return Number.isInteger(value) && value > 0 ? value : null
-}
-
-function Legend() {
-  const sample = 'h-0 w-7 border-t-[1.5px]'
-  return (
-    <ul className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-muted-foreground" aria-hidden>
-      <li className="flex items-center gap-1.5">
-        <span>◀</span>
-        <span className={cn(sample, 'border-foreground/70')} />
-        <span>▶</span>
-        {g.legendBoth}
-      </li>
-      <li className="flex items-center gap-1.5">
-        <span className={cn(sample, 'border-foreground/70')} />
-        <span>▶</span>
-        {g.legendOneWay}
-      </li>
-      <li className="flex items-center gap-1.5">
-        <span className={cn(sample, 'border-dashed border-idle-dot')} />
-        {g.legendDisabled}
-      </li>
-    </ul>
-  )
 }
 
 interface NodeViewProps {
@@ -87,7 +62,7 @@ function NodeView({ network, graph, focus, onFocus }: NodeViewProps) {
           {g.nodePending}
         </Notice>
       ) : null}
-      <Canvas data-testid="node-graph">
+      <Canvas data-testid="node-graph" className="border bg-card">
         {focus === null ? (
           <EmptyState icon={ScanSearch} title={g.nodePick} className="h-full justify-center" />
         ) : access.isError ? (
@@ -324,9 +299,10 @@ export function AccessPage() {
             )
           ) : graphView === 'groups' ? (
             <div className="flex flex-1 flex-col">
-              <Canvas data-testid="group-graph">
+              <Canvas data-testid="group-graph" className="border bg-card">
                 <GroupGraphView
                   graph={data}
+                  online={(id) => nodes.data?.find((node) => node.id === id)?.online}
                   highlightedRule={selected}
                   activeGroup={groupFilter}
                   onRuleClick={setSelected}
@@ -338,10 +314,6 @@ export function AccessPage() {
                   onGroupClick={(group) => update({ show: null, view: null, group: String(group) })}
                 />
               </Canvas>
-              <div className="flex items-center gap-2 pt-3">
-                <Legend />
-                <InfoTip>{g.edgeHint}</InfoTip>
-              </div>
             </div>
           ) : (
             <div className="flex flex-1 flex-col">

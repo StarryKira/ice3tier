@@ -89,6 +89,8 @@ export const access: Messages['access'] = {
     byNode: 'By node',
     edgeHint: 'Click a line to highlight its policy; double-click to edit it',
     members: nodes,
+    membersOnline: (n, up) => `${n === 1 ? '1 node' : `${n} nodes`} · ${up} online`,
+    within: 'Within the group',
     groupNodeLabel: (group, n) => `Group ${group}, ${nodes(n)}`,
     ungrouped: (n) => `Only in All (${n})`,
     ungroupedSub: 'Only policies on All apply',

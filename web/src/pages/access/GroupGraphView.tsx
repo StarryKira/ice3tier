@@ -1,5 +1,6 @@
 import {
   BaseEdge,
+  Panel,
   type Edge,
   EdgeLabelRenderer,
   type EdgeProps,
@@ -11,11 +12,11 @@ import {
   useInternalNode,
   useNodesState,
 } from '@xyflow/react'
-import { Clock } from 'lucide-react'
+import { Boxes, Clock } from 'lucide-react'
 import { useEffect, useMemo } from 'react'
 
-import { type AccessGraph, type GroupId } from '@/api/types'
-import { curveBetween, loopAround, type Rect } from '@/access/geometry'
+import { type AccessGraph, type GroupId, type NodeId } from '@/api/types'
+import { curveBetween, type Rect } from '@/access/geometry'
 import {
   buildGroupGraph,
   GROUP_NODE,
@@ -24,6 +25,9 @@ import {
   type RuleLine,
   UNGROUPED_ID,
 } from '@/access/groupGraph'
+import { InfoTip } from '@/components/info-tip'
+import { NodeList } from '@/components/node'
+import { DirectionMark, PolicyList } from '@/components/rule'
 import { ruleLabel } from '@/lib/rules'
 import { t, useLocale } from '@/i18n'
 import { cn } from '@/lib/utils'
@@ -34,38 +38,93 @@ import { useEdgeColors } from '@/access/colors'
 const g = t.access.graph
 
 // 不叫 `group`：那是画图的库自带的一种点，会带上它自己的框和底色。
-type GroupFlowNode = Node<{ point: GroupPoint; active: boolean }, 'groupPoint'>
+type GroupFlowNode = Node<
+  {
+    point: GroupPoint
+    active: boolean
+    /** 两头都是这个分组的策略：不画成绕回自己的环，写在卡片里。 */
+    selfRules: RuleLine[]
+    highlightedRule: number | null
+    online: (id: NodeId) => boolean | undefined
+    onRuleClick: (ruleId: number) => void
+    onRuleOpen: (ruleId: number) => void
+  },
+  'groupPoint'
+>
 type RuleFlowEdge = Edge<{ line: RuleLine; highlighted: boolean; showLabel: boolean }, 'rule'>
 
 /** 连线不从固定的接口出发，而是按两个点的位置算，所以接口藏在点的正中，只是让画图的库认这条线。 */
 const HIDDEN_HANDLE = { left: '50%', top: '50%', opacity: 0, pointerEvents: 'none' } as const
 
+/**
+ * 一个分组是一张卡片：名字（All 标着内置），有几个节点、几个在线，前几个成员；组内互通的策略写在最下面，
+ * 点它选中、双击编辑，和点图上的线一样。
+ */
 function GroupNodeView({ data }: NodeProps<GroupFlowNode>) {
-  const { point, active } = data
+  const { point, active, selfRules, highlightedRule, online, onRuleClick, onRuleOpen } = data
   const ungrouped = point.group === null
+  const up = point.members.filter((member) => online(member.id) !== false).length
   return (
     <div
-      style={{ width: GROUP_NODE.width, height: GROUP_NODE.height }}
+      style={{ width: GROUP_NODE.width }}
       className={cn(
-        'flex flex-col justify-center rounded-lg border border-border-strong bg-card px-3.5 transition-colors',
-        ungrouped && 'border-dashed bg-transparent',
-        active && 'border-primary outline-2 outline-offset-0 outline-primary',
+        'rounded-lg border bg-card shadow-xs transition-colors',
+        ungrouped && 'border-dashed bg-card/60 shadow-none',
+        active && 'border-primary ring-2 ring-primary/30',
       )}
     >
       <Handle type="target" position={Position.Top} style={HIDDEN_HANDLE} isConnectable={false} />
       <Handle type="source" position={Position.Top} style={HIDDEN_HANDLE} isConnectable={false} />
-      <span className="truncate text-sm font-semibold">
-        {point.group === null ? g.ungrouped(point.members.length) : point.group.name}
-      </span>
-      <span className="flex items-center gap-1.5 text-xs text-muted-foreground tabular">
-        {ungrouped ? g.ungroupedSub : g.members(point.members.length)}
-        {point.pending > 0 ? (
-          <span className="inline-flex items-center gap-0.5 text-warn" title={g.unackedBadge(point.pending)}>
-            <Clock className="size-3" aria-hidden />
-            {point.pending}
+      <div className="space-y-2 px-3.5 py-3">
+        <div className="flex items-center gap-2">
+          <Boxes className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+          <span className="truncate text-sm font-semibold">
+            {point.group === null ? g.ungrouped(point.members.length) : point.group.name}
           </span>
-        ) : null}
-      </span>
+          {point.group?.builtin === true ? (
+            <span className="rounded-sm border px-1 text-[11px] leading-4 text-muted-foreground">
+              {t.groups.builtin}
+            </span>
+          ) : null}
+        </div>
+        <p className="flex items-center gap-1.5 text-xs text-muted-foreground tabular">
+          {ungrouped ? g.ungroupedSub : g.membersOnline(point.members.length, up)}
+          {point.pending > 0 ? (
+            <span className="inline-flex items-center gap-0.5 text-warn" title={g.unackedBadge(point.pending)}>
+              <Clock className="size-3" aria-hidden />
+              {point.pending}
+            </span>
+          ) : null}
+        </p>
+        {point.members.length > 0 ? <NodeList nodes={point.members} online={online} max={3} /> : null}
+      </div>
+      {selfRules.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-1.5 border-t px-3.5 py-2 text-xs text-muted-foreground">
+          <DirectionMark direction="both" />
+          {g.within}
+          {selfRules.map((line) => (
+            <button
+              key={line.id}
+              type="button"
+              aria-label={g.edgeLabel(ruleLabel(line), line.enabled ? g.edgeEnabled : g.edgeDisabled)}
+              onClick={(event) => {
+                event.stopPropagation()
+                onRuleClick(line.ruleId)
+              }}
+              onDoubleClick={(event) => {
+                event.stopPropagation()
+                onRuleOpen(line.ruleId)
+              }}
+              className={cn(
+                'nodrag rounded-sm',
+                line.ruleId === highlightedRule && 'ring-2 ring-primary ring-offset-1 ring-offset-card',
+              )}
+            >
+              <PolicyList rules={[{ ...line, id: line.ruleId }]} />
+            </button>
+          ))}
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -85,9 +144,7 @@ function RuleEdgeView({ id, source, target, data, markerStart, markerEnd, style 
   const targetRect = rectOf(useInternalNode(target))
   if (sourceRect === null || targetRect === null || data === undefined) return null
   const { line, highlighted, showLabel } = data
-  const path = line.loop
-    ? loopAround(sourceRect, line.index)
-    : curveBetween(sourceRect, targetRect, line.index, line.siblings)
+  const path = curveBetween(sourceRect, targetRect, line.index, line.siblings)
   return (
     <>
       <BaseEdge
@@ -119,6 +176,44 @@ function RuleEdgeView({ id, source, target, data, markerStart, markerEnd, style 
   )
 }
 
+/** 图例：画在画布的右上角。线型的样子是小段 SVG，和图上的线一样画。 */
+function Legend() {
+  const sample = (dashed: boolean, both: boolean) => (
+    <svg width="34" height="10" viewBox="0 0 34 10" aria-hidden className="text-foreground/60">
+      {both ? <path d="M1 5 L7 2 L7 8 Z" fill="currentColor" /> : null}
+      <line
+        x1={both ? 6 : 1}
+        y1="5"
+        x2="28"
+        y2="5"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeDasharray={dashed ? '4 3' : undefined}
+      />
+      {dashed ? null : <path d="M33 5 L27 2 L27 8 Z" fill="currentColor" />}
+    </svg>
+  )
+  return (
+    <Panel position="top-right">
+      <div className="flex items-center gap-3.5 rounded-md border bg-card/90 px-3 py-1.5 text-xs text-muted-foreground shadow-xs backdrop-blur-sm">
+        <span className="inline-flex items-center gap-1.5">
+          {sample(false, true)}
+          {g.legendBoth}
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          {sample(false, false)}
+          {g.legendOneWay}
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          {sample(true, false)}
+          {g.legendDisabled}
+        </span>
+        <InfoTip>{g.edgeHint}</InfoTip>
+      </div>
+    </Panel>
+  )
+}
+
 const nodeTypes = { groupPoint: GroupNodeView }
 const edgeTypes = { rule: RuleEdgeView }
 
@@ -127,6 +222,8 @@ const ALWAYS_LABEL_UP_TO = 10
 
 interface GroupGraphViewProps {
   graph: AccessGraph
+  /** 节点在不在线：成员前面的圆点用。 */
+  online: (id: NodeId) => boolean | undefined
   highlightedRule: number | null
   activeGroup: GroupId | null
   onRuleClick: (ruleId: number) => void
@@ -141,6 +238,7 @@ interface GroupGraphViewProps {
  */
 export function GroupGraphView({
   graph,
+  online,
   highlightedRule,
   activeGroup,
   onRuleClick,
@@ -160,7 +258,15 @@ export function GroupGraphView({
       type: 'groupPoint',
       // 用户拖动过的位置保留着；分组的集合变了（signature 变了）才重新排。
       position: current.find((node) => node.id === point.id)?.position ?? { x: point.x, y: point.y },
-      data: { point, active: point.group !== null && point.group.id === activeGroup },
+      data: {
+        point,
+        active: point.group !== null && point.group.id === activeGroup,
+        selfRules: shape.lines.filter((line) => line.loop && line.source === point.id),
+        highlightedRule,
+        online,
+        onRuleClick,
+        onRuleOpen,
+      },
       ariaLabel:
         point.group === null
           ? g.ungrouped(point.members.length)
@@ -174,7 +280,7 @@ export function GroupGraphView({
     setNodes((current) => toNodes(current))
     // toNodes 用到的都列在下面了；语言变了，点上的说明也要换。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shape, activeGroup, setNodes, locale])
+  }, [shape, activeGroup, highlightedRule, online, setNodes, locale])
 
   useEffect(() => {
     setNodes(toNodes([]))
@@ -184,27 +290,29 @@ export function GroupGraphView({
 
   const edges = useMemo<RuleFlowEdge[]>(
     () =>
-      shape.lines.map((line) => {
-        const highlighted = line.ruleId === highlightedRule
-        const color = highlighted ? colors.highlighted : line.enabled ? colors.enabled : colors.disabled
-        const marker = { type: MarkerType.ArrowClosed, color, width: 16, height: 16 }
-        return {
-          id: line.id,
-          type: 'rule',
-          source: line.source,
-          target: line.target,
-          data: { line, highlighted, showLabel: shape.lines.length <= ALWAYS_LABEL_UP_TO },
-          markerEnd: marker,
-          markerStart: line.direction === 'both' ? marker : undefined,
-          style: {
-            stroke: color,
-            strokeWidth: highlighted ? 2.4 : 1.5,
-            strokeDasharray: line.enabled ? undefined : '6 5',
-          },
-          zIndex: highlighted ? 10 : 0,
-          ariaLabel: g.edgeLabel(ruleLabel(line), line.enabled ? g.edgeEnabled : g.edgeDisabled),
-        }
-      }),
+      shape.lines
+        .filter((line) => !line.loop)
+        .map((line) => {
+          const highlighted = line.ruleId === highlightedRule
+          const color = highlighted ? colors.highlighted : line.enabled ? colors.enabled : colors.disabled
+          const marker = { type: MarkerType.ArrowClosed, color, width: 16, height: 16 }
+          return {
+            id: line.id,
+            type: 'rule',
+            source: line.source,
+            target: line.target,
+            data: { line, highlighted, showLabel: shape.lines.length <= ALWAYS_LABEL_UP_TO },
+            markerEnd: marker,
+            markerStart: line.direction === 'both' ? marker : undefined,
+            style: {
+              stroke: color,
+              strokeWidth: highlighted ? 2.4 : 1.5,
+              strokeDasharray: line.enabled ? undefined : '6 5',
+            },
+            zIndex: highlighted ? 10 : 0,
+            ariaLabel: g.edgeLabel(ruleLabel(line), line.enabled ? g.edgeEnabled : g.edgeDisabled),
+          }
+        }),
     // 线上的说明来自目录：语言变了要重新算。
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [shape.lines, highlightedRule, locale, colors],
@@ -232,6 +340,8 @@ export function GroupGraphView({
           if (line !== undefined) onRuleClick(line.ruleId)
         }
       }}
-    />
+    >
+      <Legend />
+    </GraphCanvas>
   )
 }
