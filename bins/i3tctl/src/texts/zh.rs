@@ -330,6 +330,7 @@ const UI: Ui = Ui {
     relays_header: ["编号", "名字", "状态", "在线的节点", "地址", "带宽上限", "转发/秒"],
     nat: "NAT",
     mapping_varies: "端口映射随对端变化，打不了洞",
+    no_udp: "用不了 UDP：连得上的中继都只经 TCP",
     reported: "上报",
 
     routes_header: ["对端", "虚拟 IP", "路", "延迟 ms", "方式", "直连", "另一种模式", "换上", "流", "流量 ↑/↓"],

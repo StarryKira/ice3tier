@@ -383,6 +383,8 @@ pub struct Ui {
     pub relays_header: [&'static str; 7],
     pub nat: &'static str,
     pub mapping_varies: &'static str,
+    /// controller 认定节点用不了 UDP 时的一行。
+    pub no_udp: &'static str,
     pub reported: &'static str,
 
     pub routes_header: [&'static str; 10],

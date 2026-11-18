@@ -356,6 +356,11 @@ pub struct Node {
     /// controller 发现的、值得提醒的情况，按节点最近一次报的东西算（离线时是它离线前报的）。没有时是空的。
     #[serde(default)]
     pub warnings: Vec<NodeWarning>,
+    /// controller 认定这个节点用不了 UDP：它报的连得上的 relay 里没有一个经 UDP，并且至少有一个别人经 UDP 连得上的 relay
+    /// 它只经 TCP 连上；这样持续了两分钟。它和别的节点之间的路上总有一段 TCP，没有设置的节点对（`udp_fallback`）
+    /// 因此用 ice3proxy。比这个字段旧的 controller 不报，读成 `false`。
+    #[serde(default)]
+    pub no_udp: bool,
 }
 
 /// 一个节点的程序更新：能不能自己更新、有没有新版本、进行到哪一步。

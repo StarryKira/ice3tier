@@ -84,6 +84,7 @@ pub fn peer(raw: u32, exit: Option<PeerExit>) -> Peer {
         keep_alive: false,
         lane: LaneMode::Off,
         congestion: None,
+        no_udp: false,
     }
 }
 

@@ -361,6 +361,11 @@ pub struct Peer {
     /// 两边各自按它管自己往外发的那个方向。只对之后建立的连接生效。比本程序新的 controller 下发了不认识的值时按没有值处理。
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "tolerant_congestion")]
     pub congestion: Option<Congestion>,
+    /// 对端用不了 UDP：它连上的 relay 一个也不经 UDP（controller 认定的，见管理接口的 `Node.no_udp`）。
+    /// `udp_fallback` 下本节点到它的路即使自己这一段有 UDP，也按没有 UDP 的路算：那条路上总有一段是它的 TCP。
+    /// 旧的 controller 不发，读成 `false`；旧的节点不认。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_udp: bool,
 }
 
 /// netmap 里的拥塞控制设置：不认识的值按没有设置，不让整份 netmap 因为一个新的取值而读不了。

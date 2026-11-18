@@ -122,6 +122,35 @@ fn is_public(ip: IpAddr) -> bool {
     }
 }
 
+/// 按上报的结果看用不了 UDP 的节点：它连得上的 relay 里没有一个经 UDP，并且至少有一个它只经 TCP 连上的 relay，
+/// 别的节点经 UDP 连得上。`nodes` 是一个网络里的全部节点（在线的和离线的：离线的报过的照样是证据）。
+///
+/// 只经 TCP 连上一个本来就没有 UDP 的 relay，说明不了这个节点自己：那个 relay 谁都只能经 TCP 连。所以要有一个别人经 UDP
+/// 连得上的 relay 作对照。只有一个 relay、或者 relay 都没有 UDP 的网络里谁都认定不了，那里的路本来就绕不开 TCP 的那一段，
+/// 节点自己这一段就看得出来。结果只是这一刻的证据，什么时候算数见 `controller::no_udp`。
+pub(crate) fn without_udp<'a>(nodes: impl IntoIterator<Item = &'a NodeRecord>) -> BTreeSet<NodeId> {
+    let nodes: Vec<&NodeRecord> = nodes.into_iter().collect();
+    let udp_relays: BTreeSet<NodeId> = nodes
+        .iter()
+        .flat_map(|node| relays_tried(node))
+        .filter(|record| record.outcome == TryOutcome::Udp)
+        .map(|record| record.relay)
+        .collect();
+    nodes
+        .iter()
+        .filter(|node| {
+            relays_tried(node).all(|record| record.outcome != TryOutcome::Udp)
+                && relays_tried(node).any(|record| record.outcome == TryOutcome::Tcp && udp_relays.contains(&record.relay))
+        })
+        .map(|node| node.id)
+        .collect()
+}
+
+/// 节点试过的 relay，不算它自己。
+fn relays_tried(node: &NodeRecord) -> impl Iterator<Item = &ReachRecord> {
+    node.relay_reach.iter().filter(move |record| record.relay != node.id)
+}
+
 /// 一个网络里每个 relay 被在线的节点连上的情况，一次请求数一遍。
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ReachIndex {
@@ -287,6 +316,26 @@ mod tests {
             relay_reach: reached.iter().map(|relay| reach(*relay, TryOutcome::Udp, 1_000, None)).collect(),
             ..record(seed)
         }
+    }
+
+    #[test]
+    fn a_node_counts_as_without_udp_only_against_a_relay_others_reach_over_udp() {
+        let with = |seed: u8, records: Vec<ReachRecord>| NodeRecord { relay_reach: records, ..record(seed) };
+        let (udp, tcp, gone) = (TryOutcome::Udp, TryOutcome::Tcp, TryOutcome::Unreached);
+        // 节点 1、2 是 relay；3 只经 TCP 连上 1，1 别人经 UDP 连得上：3 用不了 UDP。
+        let nodes = [
+            with(1, vec![reach(2, tcp, 0, None)]),
+            with(2, vec![reach(1, udp, 0, None)]),
+            with(3, vec![reach(1, tcp, 0, None), reach(2, gone, 0, None)]),
+            with(4, vec![reach(1, udp, 0, None), reach(2, tcp, 0, None)]),
+            with(5, vec![reach(2, tcp, 0, None)]),
+            with(6, Vec::new()),
+        ];
+        let found = without_udp(&nodes);
+        assert_eq!(found, relays(&[3]), "4 经 UDP 连得上 1；1、5 只连上了没有 UDP 的 2（谁都只能经 TCP 连它），说明不了它们；6 还没报过");
+        // relay 2 自己也用不了 UDP：它只经 TCP 连上了 1，而 1 别人经 UDP 连得上。
+        let nodes = [with(2, vec![reach(1, tcp, 0, None), reach(2, udp, 0, None)]), with(4, vec![reach(1, udp, 0, None)])];
+        assert_eq!(without_udp(&nodes), relays(&[2]), "自己那一项不算");
     }
 
     #[test]

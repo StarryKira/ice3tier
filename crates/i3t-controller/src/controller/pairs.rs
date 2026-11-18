@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use super::nodes::require_node;
 use super::{Controller, Inner, Seeds, switch};
 use crate::error::{Entity, Error, InField};
+use crate::netmap::NodeFacts;
 use crate::node_addresses;
 use crate::store::{NodeRecord, PairOptions, Store};
 
@@ -131,6 +132,16 @@ fn pair_params(store: &Store, a: NodeId, b: NodeId, extra: Value) -> Result<Valu
     Ok(params)
 }
 
+impl NodeFacts for Inner {
+    fn dials_on_demand(&self, node: NodeId) -> bool {
+        self.on_demand_lanes(node)
+    }
+
+    fn has_no_udp(&self, node: NodeId) -> bool {
+        self.no_udp(node)
+    }
+}
+
 impl Inner {
     /// 节点懂不懂按需拨 ice3proxy（节点协议 [`LANE_DEFAULT_REVISION`] 起）：没有设置的节点对，两个节点都懂才给默认的 `udp_fallback`。
     ///
@@ -199,9 +210,9 @@ impl Inner {
             let dialers = dialers.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join("、");
             let when = match setting.lane {
                 LaneMode::UdpFallback => {
-                    "开流的一方到对方的共用连接上它自己这一段没有 UDP、和对方之间的 ice3proxy 建着时，\
-                     新的 TCP 流（代理的 CONNECT、TCP 端口转发）每条独占一条 TCP；拨号的一方也只在它这一段没有 UDP 时才拨，\
-                     UDP 回来一阵之后放手。"
+                    "开流的一方到对方的共用连接上没有 UDP 的路（它自己这一段没有 UDP，或者对方用不了 UDP）、\
+                     和对方之间的 ice3proxy 建着时，新的 TCP 流（代理的 CONNECT、TCP 端口转发）每条独占一条 TCP；\
+                     拨号的一方也只在这时才拨，UDP 回来一阵之后放手。"
                 }
                 LaneMode::Always | LaneMode::Off => {
                     "新的 TCP 流（代理的 CONNECT、TCP 端口转发）每条独占一条 TCP，取不到时悄悄改走共用的连接。"

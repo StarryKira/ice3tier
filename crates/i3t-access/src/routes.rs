@@ -164,6 +164,7 @@ mod tests {
             keep_alive: false,
             lane: LaneMode::Off,
             congestion: None,
+            no_udp: false,
         };
         Netmap {
             version: 1,

@@ -80,6 +80,7 @@ fn netmap() -> Netmap {
             keep_alive: false,
             lane: LaneMode::Off,
             congestion: None,
+            no_udp: false,
         }],
         relays: Vec::new(),
         relay_clients: Vec::new(),

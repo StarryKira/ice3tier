@@ -15,6 +15,7 @@ mod groups;
 mod metrics;
 mod naming;
 mod networks;
+mod no_udp;
 mod nodes;
 mod pairs;
 mod protocol;
@@ -32,7 +33,7 @@ mod update;
 mod usage;
 mod views;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::net::IpAddr;
@@ -94,6 +95,11 @@ pub struct Timing {
     /// 一个 relay 更新完重新连上来之后，过这么久才轮到同一个网络里的下一个 relay 更新：
     /// 挂靠它的节点要重新建好中转会话，换路的时候才有路可换。
     pub relay_settle: Duration,
+    /// 节点报的结果说它用不了 UDP，要一直这样这么久才认定（见 `no_udp`）。
+    ///
+    /// 有 UDP 的节点也会一阵子只经 TCP 连着 relay：会话让 UDP 先走一秒，没握上手就先用 TCP，30 秒之后再试 UDP；
+    /// 没有会话的 relay 每分钟用 UDP 问一次延迟。两分钟里这两样都至少轮过一次，有 UDP 的节点总会有一个 relay 经 UDP 回答。
+    pub no_udp_settle: Duration,
 }
 
 impl Default for Timing {
@@ -106,6 +112,7 @@ impl Default for Timing {
             liveness_timeout: Duration::from_secs(35),
             handshake_timeout: Duration::from_secs(10),
             relay_settle: Duration::from_secs(30),
+            no_udp_settle: Duration::from_secs(120),
         }
     }
 }
@@ -147,6 +154,10 @@ pub(crate) struct Inner {
     /// 每个节点最近一次说的节点协议是第几版。节点离线之后留着；controller 重启就没有了，节点重新连上来时再知道。
     /// 没有设置的节点对给不给默认的 ice3proxy 看它（见 `pairs`）。
     pub(crate) protocols: BTreeMap<NodeId, u32>,
+    /// 报的结果说它用不了 UDP 的节点，和从什么时候起（见 `no_udp`）。controller 重启时按存储里的结果重新建。
+    pub(crate) no_udp: BTreeMap<NodeId, no_udp::NoUdp>,
+    /// 有节点报的 relay 结果变了、要重新看谁用不了 UDP 的网络。
+    pub(crate) no_udp_dirty: BTreeSet<NetworkId>,
     /// 等着延后重算的节点。
     pub(crate) dirty: BTreeMap<NodeId, Deferred>,
     /// 各个节点最近上报的路由表。节点离线之后留着，界面上显示成过期的；controller 重启就没有了。
@@ -252,6 +263,8 @@ impl Controller {
             sync: BTreeMap::new(),
             live: BTreeMap::new(),
             protocols: BTreeMap::new(),
+            no_udp: BTreeMap::new(),
+            no_udp_dirty: BTreeSet::new(),
             dirty: BTreeMap::new(),
             routes: BTreeMap::new(),
             usage: usage::Usage::default(),
@@ -386,7 +399,7 @@ impl Controller {
         let Some(record) = inner.store.node(node)? else { return Ok(None) };
         let Some(view) = NetworkView::load(&inner.store, record.network)? else { return Ok(None) };
         let Some(sync) = inner.sync.get(&node) else { return Ok(None) };
-        let netmap = view.compile(&view.access(), node, &sync.relations, |node| inner.on_demand_lanes(node));
+        let netmap = view.compile(&view.access(), node, &sync.relations, &*inner);
         Ok(netmap.map(|netmap| Netmap { version: sync.state.version, ..netmap }))
     }
 
@@ -420,6 +433,7 @@ impl Controller {
     /// 或者有 relay 更新完在等站稳。有包要取时另外叫醒管发布的后台任务。
     pub(crate) fn wake_if_needed(&self, inner: &Inner) {
         if !inner.dirty.is_empty()
+            || !inner.no_udp_dirty.is_empty()
             || inner.sync.values().any(NodeSync::is_waiting)
             || inner.updates.next_rollout.is_some()
             || !inner.diag.is_idle()
@@ -523,11 +537,13 @@ impl Inner {
                 .into_iter()
                 .chain(record.relay.as_ref().and_then(|_| reach.warning(record.id)))
                 .collect(),
+            no_udp: self.no_udp(record.id),
         }
     }
 
     fn tick(&mut self, now: Instant, wall: Timestamp) -> Result<Option<Instant>, Error> {
         self.give_up_on_slow_acks(now);
+        let no_udp = self.no_udp_tick(now)?;
         let next = self.flush_due(now)?;
         if self.updates.next_rollout.is_some_and(|at| at <= now) {
             self.roll_out()?;
@@ -541,7 +557,7 @@ impl Inner {
         let waiting = self.sync.values().any(NodeSync::is_waiting).then(|| now + self.timing.ack_timeout.min(SWEEP_INTERVAL));
         let tests = self.tests_tick(now)?;
         let stats = self.stats_tick(now, wall)?;
-        Ok([next, waiting, self.updates.next_rollout, tests, Some(stats)].into_iter().flatten().min())
+        Ok([next, no_udp, waiting, self.updates.next_rollout, tests, Some(stats)].into_iter().flatten().min())
     }
 }
 

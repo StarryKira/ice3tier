@@ -330,6 +330,7 @@ const UI: Ui = Ui {
     relays_header: ["ID", "NAME", "STATE", "ONLINE-NODES", "ADDRESSES", "BANDWIDTH", "FORWARDED/S"],
     nat: "NAT",
     mapping_varies: "Port mapping varies by peer; no hole punching",
+    no_udp: "No UDP: every relay it reaches is reached over TCP only",
     reported: "Reported",
 
     routes_header: ["PEER", "VIRTUAL-IP", "ROUTE", "RTT-MS", "KIND", "DIRECT", "OTHER-MODE", "SINCE", "FLOWS", "TRAFFIC ↑/↓"],

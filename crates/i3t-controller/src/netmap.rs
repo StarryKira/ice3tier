@@ -22,6 +22,15 @@ use crate::{node_addresses, relay_reach};
 /// 下发给对端的候选端点最多这么多个。正常的节点只有几个；多出来的没有用，只会让每个对端都去探测。
 pub(crate) const MAX_ENDPOINTS: usize = 16;
 
+/// 算 netmap 要用的、存储里没有的事：controller 从节点的连接和上报里知道的。
+pub trait NodeFacts {
+    /// 节点懂不懂按需拨 ice3proxy：没有设置的节点对，两个节点都懂才是默认的 [`LaneMode::PAIR_DEFAULT`]，否则是 `off`
+    /// （旧的节点在 `udp_fallback` 下一直拨着，不能让它因为 controller 升级就拨起来）。
+    fn dials_on_demand(&self, node: NodeId) -> bool;
+    /// 认定这个节点用不了 UDP，写进别的节点的 netmap 里它那一项（[`Peer::no_udp`]）。
+    fn has_no_udp(&self, node: NodeId) -> bool;
+}
+
 /// 一个节点的 netmap 里，它和某个对端之间的访问关系。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Relation {
@@ -117,15 +126,14 @@ impl NetworkView {
     /// `relations` 决定它的对端列表：键是对端，值是两个方向各通不通。它通常就是规则算出来的
     /// [`NetworkView::target_relations`]，变更还在按顺序生效的途中时会暂时落后于规则。
     /// `access` 是 [`NetworkView::access`] 的结果，由调用方传进来是为了给一批节点算的时候只建一次。
-    /// `on_demand` 说一个节点懂不懂按需拨 ice3proxy：没有设置的节点对，两个节点都懂才是默认的
-    /// [`LaneMode::PAIR_DEFAULT`]，否则是 `off`（旧的节点在 `udp_fallback` 下一直拨着，不能让它因为 controller 升级就拨起来）。
+    /// `facts` 是存储里没有、controller 知道的事（见 [`NodeFacts`]）。
     #[must_use]
     pub fn compile(
         &self,
         access: &AccessMap<'_>,
         id: NodeId,
         relations: &BTreeMap<NodeId, Relation>,
-        on_demand: impl Fn(NodeId) -> bool,
+        facts: &impl NodeFacts,
     ) -> Option<Netmap> {
         let me = self.nodes.get(&id)?;
         let relays = self.relay_ids();
@@ -133,7 +141,7 @@ impl NetworkView {
         let peers = relations
             .iter()
             .filter(|&(&peer, relation)| peer != id && !relation.is_empty())
-            .filter_map(|(peer, &relation)| Some(self.peer(me, self.nodes.get(peer)?, relation, &relays, &on_demand)))
+            .filter_map(|(peer, &relation)| Some(self.peer(me, self.nodes.get(peer)?, relation, &relays, facts)))
             .collect();
 
         let deliverable = || self.forwards.iter().filter(|forward| self.forward_is_deliverable(access, forward));
@@ -234,21 +242,14 @@ impl NetworkView {
         })
     }
 
-    fn peer(
-        &self,
-        me: &NodeRecord,
-        peer: &NodeRecord,
-        relation: Relation,
-        relays: &BTreeSet<NodeId>,
-        on_demand: &impl Fn(NodeId) -> bool,
-    ) -> Peer {
+    fn peer(&self, me: &NodeRecord, peer: &NodeRecord, relation: Relation, relays: &BTreeSet<NodeId>, facts: &impl NodeFacts) -> Peer {
         let mut attached: Vec<_> = peer.attached.iter().copied().filter(|attachment| relays.contains(&attachment.relay)).collect();
         attached.sort_by_key(|attachment| (attachment.rtt_ms, attachment.relay));
         let (low, high) = (me.id.min(peer.id), me.id.max(peer.id));
         let stored = self.pairs.iter().find(|pair| pair.a == low && pair.b == high);
         let lane = match stored {
             Some(pair) => pair.lane,
-            None if on_demand(me.id) && on_demand(peer.id) => LaneMode::PAIR_DEFAULT,
+            None if facts.dials_on_demand(me.id) && facts.dials_on_demand(peer.id) => LaneMode::PAIR_DEFAULT,
             None => LaneMode::Off,
         };
         Peer {
@@ -271,6 +272,7 @@ impl NetworkView {
             keep_alive: stored.is_some_and(|pair| pair.keep_alive),
             lane,
             congestion: stored.and_then(|pair| pair.congestion),
+            no_udp: facts.has_no_udp(peer.id),
         }
     }
 }

@@ -9,11 +9,13 @@
 //! - 两个节点都能拨对方时，各自用自己拨的 lane 开流：补 lane 是本地的事，不用经过对方的 POOL 往返，
 //!   每边的池跟着它自己开流的速率走；代价是两边各有一条控制 lane。
 //! - `always`：能拨的对端一直拨着（控制 lane 和几条空闲的）。
-//! - `udp_fallback`（没有设置的节点对默认就是它）：按需拨。本节点到对端有路、并且本节点这一段连续 [`SETTLE`] 没有 UDP 才拨；
+//! - `udp_fallback`（没有设置的节点对默认就是它）：按需拨。到对端有路、并且路上没有 UDP 连续 [`SETTLE`] 才拨；
 //!   UDP 回来了（或者没有路了）满 [`HOLD`] 才放手，之后什么都不连。没有路不算没有 UDP：对端离线时不去拨它。
-//!   开流的一方也只看自己这一段：没有 UDP、并且和对端之间的 lane 建着（控制 lane 在）时新的 TCP 流走 lane；
+//!   "路上没有 UDP"是：本节点自己这一段没有 UDP，或者 controller 说对端用不了 UDP（netmap 里它的 `no_udp`）。
+//!   后一样是因为节点只看得见自己这一段：经一个 UDP 的中继到一个没有 UDP 的中继时，自己这一段有 UDP，路上却有一段 TCP。
+//!   开流的一方按同样的判断：路上没有 UDP、并且和对端之间的 lane 建着（控制 lane 在）时新的 TCP 流走 lane；
 //!   lane 没建着（对方还没拨上来，或者本节点刚开始拨）就直接走共用的连接，不等，也不记作改走。
-//!   经第三个 relay 时两边各看各的一段：没有 UDP 的那一段在不拨号的一方时，拨号方看到自己这一段有 UDP、不拨，这一对就不走 lane。
+//!   剩下看不见的：两边都有 UDP、只是这条路经过的某一段（比如两个中继之间）是 TCP。
 //! - 本节点的公网地址变了（家宽重拨）：拨出去的 lane 换新的 epoch 重拨（[`Lanes::address_changed`]）。
 //! - 排空：告诉对端不再在和本节点之间的 lane 上开流（[`Lanes::go_away`]）；排空撤销了就恢复（[`Lanes::come_back`]）。
 
@@ -62,17 +64,33 @@ pub(crate) struct NodeLanes {
     lanes: Arc<Lanes>,
     endpoint: Arc<Endpoint>,
     /// 每个打开了 lane、并且至少一边能被拨的对端的设置。开流时按它选。
-    modes: Arc<RwLock<HashMap<NodeId, LaneMode>>>,
+    settings: Arc<RwLock<HashMap<NodeId, Setting>>>,
     /// netmap 给的计划，和现在拨着谁。
     dialling: Mutex<Dialling>,
     timing: Timing,
+}
+
+/// netmap 里和一个对端之间的 ice3proxy 的设置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Setting {
+    mode: LaneMode,
+    /// controller 说对端用不了 UDP（[`i3t_model::netmap::Peer::no_udp`]）。
+    no_udp: bool,
+}
+
+impl Setting {
+    /// 按 `udp_fallback` 的算法，到对端的路上有没有 UDP：本节点这一段（`own`，见 [`Endpoint::udp_path`]）有 UDP、
+    /// 并且对端不是用不了 UDP 的节点。没有路时是 `None`，不管对端怎样：没有路不算没有 UDP。
+    fn udp_path(self, own: Option<bool>) -> Option<bool> {
+        own.map(|udp| udp && !self.no_udp)
+    }
 }
 
 /// 按 netmap 要开 lane 的对端，和现在拨着谁。
 #[derive(Debug, Default)]
 struct Dialling {
     /// 要开 lane 的对端和它们的设置。本节点能拨的带着它的地址，不管现在拨不拨。
-    plan: Vec<(LanePeer, LaneMode)>,
+    plan: Vec<(LanePeer, Setting)>,
     on_demand: OnDemand,
     /// 上一次交给 [`Lanes::set_peers`] 时拨着的对端。
     dialled: BTreeSet<NodeId>,
@@ -87,7 +105,7 @@ impl NodeLanes {
     pub(crate) fn new(key: &NodeKey, endpoint: Arc<Endpoint>) -> anyhow::Result<Self> {
         let lanes = Lanes::new(key, LaneConfig::default()).context("用节点密钥给 ice3proxy 签证书")?;
         let timing = Timing { settle: SETTLE, hold: hold() };
-        Ok(Self { lanes: Arc::new(lanes), endpoint, modes: Arc::default(), dialling: Mutex::default(), timing })
+        Ok(Self { lanes: Arc::new(lanes), endpoint, settings: Arc::default(), dialling: Mutex::default(), timing })
     }
 
     /// 入口和出口开流用的连接层。
@@ -102,10 +120,14 @@ impl NodeLanes {
 
     /// 一条到 `peer` 的 TCP 流该不该走 lane。
     fn choose(&self) -> Choose {
-        let (modes, endpoint, lanes) = (Arc::clone(&self.modes), Arc::clone(&self.endpoint), Arc::clone(&self.lanes));
+        let (settings, endpoint, lanes) = (Arc::clone(&self.settings), Arc::clone(&self.endpoint), Arc::clone(&self.lanes));
         Arc::new(move |peer| {
-            let mode = modes.read().expect("lane modes lock poisoned").get(&peer).copied();
-            takes_lane(mode, || endpoint.udp_path(peer), || lanes.can_open(peer))
+            let setting = settings.read().expect("lane settings lock poisoned").get(&peer).copied();
+            takes_lane(
+                setting.map(|setting| setting.mode),
+                || setting.and_then(|setting| setting.udp_path(endpoint.udp_path(peer))),
+                || lanes.can_open(peer),
+            )
         })
     }
 
@@ -115,13 +137,13 @@ impl NodeLanes {
         // 只在本节点是 relay、并且真有对端要拨过来时才让 relay 分辨：不用 lane 的节点上 relay 的 TCP 端口和原来一模一样。
         let handoff = netmap.me.relay.is_some() && !plan.is_empty();
         let mut dialling = self.dialling.lock().expect("lane dialling mutex poisoned");
-        let modes: HashMap<NodeId, LaneMode> = plan.iter().map(|(peer, mode)| (peer.id, *mode)).collect();
-        dialling.on_demand.retain(|peer| modes.get(&peer) == Some(&LaneMode::UdpFallback));
+        let settings: HashMap<NodeId, Setting> = plan.iter().map(|(peer, setting)| (peer.id, *setting)).collect();
+        dialling.on_demand.retain(|peer| settings.get(&peer).is_some_and(|setting| setting.mode == LaneMode::UdpFallback));
         dialling.plan = plan;
         if !self.dial(&mut dialling, Instant::now(), true) {
             return;
         }
-        *self.modes.write().expect("lane modes lock poisoned") = modes;
+        *self.settings.write().expect("lane settings lock poisoned") = settings;
         if dialling.handoff != handoff {
             dialling.handoff = handoff;
             self.endpoint.set_lane_handoff(handoff.then(|| {
@@ -142,11 +164,13 @@ impl NodeLanes {
         let Dialling { plan, on_demand, dialled, .. } = dialling;
         let wanted: BTreeSet<NodeId> = plan
             .iter()
-            .filter(|(peer, mode)| {
+            .filter(|(peer, setting)| {
                 !peer.dial.is_empty()
-                    && match mode {
+                    && match setting.mode {
                         LaneMode::Always => true,
-                        LaneMode::UdpFallback => on_demand.wants(peer.id, self.endpoint.udp_path(peer.id), now, self.timing),
+                        LaneMode::UdpFallback => {
+                            on_demand.wants(peer.id, setting.udp_path(self.endpoint.udp_path(peer.id)), now, self.timing)
+                        }
                         LaneMode::Off => false,
                     }
             })
@@ -163,11 +187,12 @@ impl NodeLanes {
             tracing::error!(%error, "ice3proxy 的设置没能生效");
             return false;
         }
-        let on_demand_peer = |id: &NodeId| plan.iter().any(|(peer, mode)| peer.id == *id && *mode == LaneMode::UdpFallback);
-        for peer in wanted.difference(dialled).filter(|id| on_demand_peer(id)) {
-            tracing::info!(%peer, settle = ?self.timing.settle, "到这个节点的共用连接上本节点这一段已经这么久没有 UDP，开始拨 ice3proxy");
+        let on_demand = |id: &NodeId| plan.iter().find(|(peer, setting)| peer.id == *id && setting.mode == LaneMode::UdpFallback);
+        for (peer, setting) in wanted.difference(dialled).filter_map(&on_demand) {
+            let why = if setting.no_udp { "controller 说对端用不了 UDP" } else { "本节点这一段没有 UDP" };
+            tracing::info!(peer = %peer.id, settle = ?self.timing.settle, why, "到这个节点的路上已经这么久没有 UDP，开始拨 ice3proxy");
         }
-        for peer in dialled.difference(&wanted).filter(|id| on_demand_peer(id)) {
+        for peer in dialled.difference(&wanted).filter(|id| on_demand(id).is_some()) {
             tracing::info!(%peer, hold = ?self.timing.hold, "到这个节点的共用连接有 UDP 的路（或者没有路）已经这么久，不再拨 ice3proxy");
         }
         *dialled = wanted;
@@ -216,19 +241,34 @@ impl NodeLanes {
     /// 给人看、往上报的状况：只列值得看的对端（见 [`listed`]），全节点的合计照旧。
     pub(crate) fn listed_status(&self) -> LaneStatus {
         let mut status = self.lanes.status();
-        let modes = self.modes.read().expect("lane modes lock poisoned");
-        status.peers.retain(|peer| listed(peer, modes.get(&peer.peer).copied(), || self.endpoint.udp_path(peer.peer)));
+        status.peers.retain(|peer| {
+            let setting = self.setting(peer.peer);
+            listed(peer, setting.map(|setting| setting.mode), || self.udp_path(peer.peer))
+        });
         status
     }
 
-    /// lane 的状况写成上报的样子，带上每个对端的共用连接现在有没有 UDP 的路（`udp_fallback` 按它决定开流走不走 lane、拨不拨）。
+    /// lane 的状况写成上报的样子，带上到每个对端的路上有没有 UDP（`udp_fallback` 按它决定开流走不走 lane、拨不拨）。
     pub(crate) fn report(&self) -> LaneReport {
-        report(&self.listed_status(), |peer| self.endpoint.udp_path(peer))
+        report(&self.listed_status(), |peer| self.udp_path(peer))
+    }
+
+    fn setting(&self, peer: NodeId) -> Option<Setting> {
+        self.settings.read().expect("lane settings lock poisoned").get(&peer).copied()
+    }
+
+    /// 按 `udp_fallback` 的算法，到 `peer` 的路上有没有 UDP（见 [`Setting::udp_path`]）。
+    fn udp_path(&self, peer: NodeId) -> Option<bool> {
+        let own = self.endpoint.udp_path(peer);
+        match self.setting(peer) {
+            Some(setting) => setting.udp_path(own),
+            None => own,
+        }
     }
 }
 
-/// 一条到对端的 TCP 流走不走 lane。`udp_path`（见 [`Endpoint::udp_path`]）和 `lanes_up`（和对端之间的控制 lane 在）
-/// 只在 `udp_fallback` 时才问。
+/// 一条到对端的 TCP 流走不走 lane。`udp_path`（到对端的路上有没有 UDP，见 [`Setting::udp_path`]）和 `lanes_up`
+/// （和对端之间的控制 lane 在）只在 `udp_fallback` 时才问。
 ///
 /// `udp_fallback` 时 lane 没建着就不去试：拨号方按需才拨，对方还没拨上来是常有的事，不是失败，
 /// 试了也只是马上改走共用的连接，还要记一笔改走。`always` 照旧去试，取不到才改走并记下来。
@@ -241,7 +281,7 @@ fn takes_lane(mode: Option<LaneMode>, udp_path: impl FnOnce() -> Option<bool>, l
 }
 
 /// 一个对端值不值得列出来（上报、`i3t status`、本机的 `/metrics`）。`always` 的都列；`udp_fallback` 的只列现在要用或者正在用的：
-/// 拨着、控制 lane 在、有空闲的、在用的或者在拨的 lane，或者本节点到它的共用连接没有 UDP 的路。
+/// 拨着、控制 lane 在、有空闲的、在用的或者在拨的 lane，或者到它的路上没有 UDP。
 ///
 /// 默认的设置下网络里每个 relay 都和别的节点"打开"了 ice3proxy，两边都有 UDP 的一对什么都没连，列出来只是一屏的零。
 /// 累计的计数不让它留着：它们在全节点的合计里。
@@ -317,13 +357,14 @@ impl OnDemand {
 }
 
 /// 要开 lane 的对端和它们的设置。两边都不能被拨的对端不在里面。
-fn plan(netmap: &Netmap) -> Vec<(LanePeer, LaneMode)> {
+fn plan(netmap: &Netmap) -> Vec<(LanePeer, Setting)> {
     let me_relay = netmap.me.relay.is_some();
     let wanted = netmap.peers.iter().filter(|peer| peer.lane != LaneMode::Off);
     wanted
         .filter_map(|peer| {
             let dial: Vec<_> = netmap.relays.iter().find(|relay| relay.id == peer.id).map(|relay| relay.tcp.clone()).unwrap_or_default();
-            (me_relay || !dial.is_empty()).then_some((LanePeer { id: peer.id, key: peer.key, dial }, peer.lane))
+            let setting = Setting { mode: peer.lane, no_udp: peer.no_udp };
+            (me_relay || !dial.is_empty()).then_some((LanePeer { id: peer.id, key: peer.key, dial }, setting))
         })
         .collect()
 }
@@ -416,6 +457,7 @@ mod tests {
             keep_alive: false,
             lane,
             congestion: None,
+            no_udp: false,
         });
         id
     }
@@ -444,12 +486,12 @@ mod tests {
         relay(&mut map, relay_without_tcp, &[]);
         relay(&mut map, by_default, &["203.0.113.6:20330"]);
 
-        let planned: Vec<_> = plan(&map).into_iter().map(|(peer, mode)| (peer.id, peer.dial.len(), mode)).collect();
+        let planned: Vec<_> = plan(&map).into_iter().map(|(peer, setting)| (peer.id, peer.dial.len(), setting.mode)).collect();
         assert_eq!(planned, vec![(public, 1, LaneMode::Always), (by_default, 1, LaneMode::UdpFallback)], "两边都不能被拨的对端当作 off");
 
         // 本节点自己是 relay：别人拨过来，不能被拨的对端也要登记（只接受它拨来的）。
         map.me.relay = Some(RelayRole::default());
-        let planned: Vec<_> = plan(&map).into_iter().map(|(peer, mode)| (peer.id, peer.dial.len(), mode)).collect();
+        let planned: Vec<_> = plan(&map).into_iter().map(|(peer, setting)| (peer.id, peer.dial.len(), setting.mode)).collect();
         assert_eq!(
             planned,
             vec![
@@ -500,6 +542,26 @@ mod tests {
         demand.wants(peer, Some(false), at(2000), timing);
         demand.retain(|_| false);
         assert!(demand.watched.is_empty(), "设置不再是 udp_fallback 的对端忘掉");
+    }
+
+    #[test]
+    fn a_peer_known_to_have_no_udp_makes_the_path_count_as_without_udp_unless_there_is_no_route() {
+        let plain = Setting { mode: LaneMode::UdpFallback, no_udp: false };
+        let without = Setting { no_udp: true, ..plain };
+        assert_eq!([Some(true), Some(false), None].map(|own| plain.udp_path(own)), [Some(true), Some(false), None]);
+        assert_eq!(
+            [Some(true), Some(false), None].map(|own| without.udp_path(own)),
+            [Some(false), Some(false), None],
+            "本节点这一段有 UDP 也不算：路上总有对端的那一段 TCP；没有路照旧不算没有 UDP"
+        );
+
+        // 它从 netmap 来：对端那一项的 no_udp。
+        let mut map = netmap(1);
+        let relay_without_udp = with_peer(&mut map, 2, LaneMode::PAIR_DEFAULT);
+        map.peers[0].no_udp = true;
+        relay(&mut map, relay_without_udp, &["203.0.113.2:20330"]);
+        let planned: Vec<_> = plan(&map).into_iter().map(|(peer, setting)| (peer.id, setting)).collect();
+        assert_eq!(planned, vec![(relay_without_udp, without)]);
     }
 
     #[test]

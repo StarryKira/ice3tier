@@ -470,6 +470,8 @@ impl Inner {
             self.store.relay_nodes()?.into_iter().filter(|(network, _)| *network == node.network).map(|(_, id)| id).collect();
         let Some(merged) = relay_reach::merge(&node.relay_reach, tries, node.id, &relays, self.clock.now()) else { return Ok(()) };
         self.store.set_node_relay_reach(node.id, &merged.records)?;
+        // UDP 换成 TCP（或者反过来）不改变连不连得上，下面不重算；用不用得了 UDP 另外看（见 `no_udp`）。
+        self.no_udp_dirty.insert(node.network);
         if merged.reach_changed {
             let reached: Vec<NodeId> = merged.records.iter().filter(|record| record.outcome.reached()).map(|record| record.relay).collect();
             tracing::debug!(node = %node.id, ?reached, "节点连得上的 relay 变了");

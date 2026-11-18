@@ -477,6 +477,9 @@ pub fn node_detail(detail: &NodeDetail, names: &Names) {
     if detail.mapping_varies == Some(true) {
         fields.add(t.nat, t.mapping_varies.to_owned());
     }
+    if node.no_udp {
+        fields.add("UDP", t.no_udp.to_owned());
+    }
     fields.add(t.flows, detail.flows.to_string());
     fields.add(t.traffic, format!("↑ {}  ↓ {}", lang.bytes(detail.tx_bytes), lang.bytes(detail.rx_bytes)));
     if let Some(ago) = detail.reported_secs_ago {

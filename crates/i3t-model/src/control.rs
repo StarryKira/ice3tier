@@ -660,7 +660,7 @@ pub struct LaneReport {
     #[serde(default)]
     pub handshake_failures: LaneHandshakeFailures,
     /// 设置是 `always` 的每个对端，和 `udp_fallback` 的对端里现在要用或者正在用的：本节点拨着它、和它之间的控制 lane 在、
-    /// 有空闲、在用或在拨的 lane，或者本节点到它的共用连接没有 UDP 的路。有 UDP 的路（或者没有路）、什么都没连着的对端不列。
+    /// 有空闲、在用或在拨的 lane，或者本节点到它的路上没有 UDP（见 [`PeerLanes::udp_path`]）。路上有 UDP（或者没有路）、什么都没连着的对端不列。
     #[serde(default)]
     pub peers: Vec<PeerLanes>,
 }
@@ -684,8 +684,9 @@ pub struct PeerLanes {
     /// 本节点拨出去、停在它那里等它取用的 lane。
     #[serde(default)]
     pub parked_at_peer: u64,
-    /// 本节点到它的共用连接现在有没有 UDP 的路（直连，或者经 UDP 连着的 relay）。设置是 `udp_fallback` 时，
-    /// 没有才在 lane 上开新的 TCP 流，拨号方也只在这时拨。旧版本的节点不报；现在到它没有路时也是 `None`。
+    /// 本节点到它的路上现在有没有 UDP：本节点这一段有 UDP（直连，或者经 UDP 连着的 relay），并且它不是 controller 认定
+    /// 用不了 UDP 的节点（netmap 里的 [`no_udp`](crate::netmap::Peer::no_udp)）。设置是 `udp_fallback` 时，
+    /// 没有才在 lane 上开新的 TCP 流，拨号方也只在这时拨。旧版本的节点不报，或者只报自己这一段；现在到它没有路时是 `None`。
     #[serde(default)]
     pub udp_path: Option<bool>,
     #[serde(default, flatten)]

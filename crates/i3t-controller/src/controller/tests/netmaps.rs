@@ -663,3 +663,62 @@ fn a_report_reaches_the_peers_almost_at_once_but_a_burst_of_reports_is_published
     lab.controller.handle(first.session, REMOTE, ToController::Report(Box::new(endpoint(3000)))).unwrap();
     assert!(due(&lab).is_some_and(|next| next >= lead + window), "同一个节点两次之间至少隔一个窗口");
 }
+
+#[test]
+fn a_node_whose_relays_answer_only_over_tcp_is_held_without_udp_after_a_while_and_its_peers_are_told() {
+    use std::time::Duration;
+
+    use i3t_crypto::NodeKey;
+    use i3t_model::control::{LANE_DEFAULT_REVISION, RelayTry, TryOutcome};
+
+    use crate::store::Store;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("controller.db");
+    let settle = Duration::from_millis(300);
+    let timing =
+        super::super::Timing { ack_coalesce: Duration::ZERO, report_coalesce: Duration::ZERO, no_udp_settle: settle, ..Default::default() };
+    let open =
+        || Controller::new(Store::open(&path).unwrap(), NodeKey::generate().unwrap(), "ctl.example.com:20331".to_owned(), timing).unwrap();
+    let mut lab = Lab::around(open());
+    let network = lab.network("home");
+    let relay_hello = Hello { protocol: LANE_DEFAULT_REVISION, ..super::super::testing::hello(CAN_DO_ALL) };
+    let (mut r, mut s) = (lab.join_as(network.id, &relay_hello), lab.join_as(network.id, &relay_hello));
+    let mut y = join_speaking(&mut lab, network.id, LANE_DEFAULT_REVISION);
+    for relay in [r.id, s.id] {
+        lab.controller.enable_relay(network.id, relay, relay_settings()).unwrap();
+    }
+    let tries = |entries: &[(i3t_proto::NodeId, TryOutcome)]| {
+        let relays = entries.iter().map(|&(relay, outcome)| RelayTry { relay, outcome, age_secs: 0, seen_as: None }).collect();
+        ToController::Report(Box::new(Report { relays, ..Report::default() }))
+    };
+    // y 经 UDP 连得上 r（r 有 UDP），经 TCP 才连得上 s；s 连 r 也只经 TCP。
+    y.send(&lab.controller, tries(&[(r.id, TryOutcome::Udp), (s.id, TryOutcome::Tcp)]));
+    s.send(&lab.controller, tries(&[(r.id, TryOutcome::Tcp)]));
+    lab.settle(&mut [&mut r, &mut s, &mut y]);
+    let flag = |lab: &Lab, node| lab.controller.node(network.id, node).unwrap().node.no_udp;
+    assert!(!flag(&lab, s.id), "证据要成立一阵才算数");
+    assert!(!y.netmap().peer(s.id).unwrap().no_udp);
+
+    std::thread::sleep(settle);
+    lab.settle(&mut [&mut r, &mut s, &mut y]);
+    assert!(flag(&lab, s.id), "只经 TCP 连上一个别人经 UDP 连得上的 relay，又没有一个经 UDP：认定 s 用不了 UDP");
+    assert!(!flag(&lab, y.id) && !flag(&lab, r.id), "y 经 UDP 连上了 r；r 只报过它自己，没有证据");
+    assert!(y.netmap().peer(s.id).unwrap().no_udp && r.netmap().peer(s.id).unwrap().no_udp, "s 的对端都知道");
+    assert!(!s.netmap().peer(y.id).unwrap().no_udp);
+
+    // controller 重启：存储里的证据还成立，马上就算数，对端的 netmap 不用先改掉再改回来。
+    let version = y.netmap().version;
+    drop(lab);
+    let mut lab = Lab::around(open());
+    assert!(flag(&lab, s.id), "重启之后不重新等");
+    let mut y = lab.connect_as(y.key, &Hello { protocol: LANE_DEFAULT_REVISION, ..super::super::testing::modern_hello("0.1.19") }).unwrap();
+    assert_eq!(y.netmap().version, version, "netmap 没变");
+    let mut s = lab.connect_as(s.key, &relay_hello).unwrap();
+
+    // s 又经 UDP 连上了 r：马上不算，对端随之知道。
+    s.send(&lab.controller, tries(&[(r.id, TryOutcome::Udp)]));
+    lab.settle(&mut [&mut s, &mut y]);
+    assert!(!flag(&lab, s.id));
+    assert!(!y.netmap().peer(s.id).unwrap().no_udp);
+}
