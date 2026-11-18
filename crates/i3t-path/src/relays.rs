@@ -371,6 +371,22 @@ impl RelayLink {
         }
     }
 
+    /// 报给别的节点的延迟（挂靠表里的那个数）：它们拿它当"经这个 relay 到本节点"的最后一段。
+    ///
+    /// 走 UDP 时是平滑延迟。走 TCP 时是本节点自己给这一段算代价用的同一个数（最近几分钟的平均，停顿和卡死都算在里面，
+    /// 见 `crate::estimate`）：不然同一条 TCP 两头用两把尺子，对端报来的平滑延迟总比这一头按平均算的便宜，
+    /// 经它的路就显得比实际好。真实链路上见过：一个节点连过来的 TCP 会话一会儿一断，报来的延迟却一直是最低的，
+    /// 选路每次按代价换过去，半分钟之后又因为会话断了换走。估计过期了（很久没有回答）时退回平滑延迟。
+    pub(crate) fn reported_rtt(&self, now: Instant) -> Option<Rtt> {
+        match self.leg()? {
+            Leg::Udp(_) => self.udp.rtt(),
+            Leg::Tcp => {
+                let session = &self.tcp.as_ref()?.session;
+                session.quality(now).map(|quality| Rtt::new(quality.rtt)).or_else(|| session.rtt())
+            }
+        }
+    }
+
     /// 现在在用的那个会话上测到的延迟、抖动和丢包。没有会话，或者估计过期了，是 `None`。
     pub(crate) fn quality(&self, now: Instant) -> Option<Quality> {
         match self.leg()? {
@@ -1487,6 +1503,22 @@ mod tests {
         // 没有回答的保活等了多久算（三次超时，0.9 秒多），也在里面：重连之后不是只剩握手那两个漂亮的样本。
         assert!(quality.rtt > 70 * MS && quality.rtt < 120 * MS, "断开之前的样本和那一次停顿都还在：{quality:?}");
         assert_eq!((quality.jitter, quality.lost, quality.probes), (Duration::ZERO, 0, 0), "停顿已经算在延迟里了：{quality:?}");
+        // 报给别的节点的也是这个数，不是平滑延迟：那个数里看不出这条 TCP 刚卡死过。
+        let smoothed = setup.link.rtt().expect("有会话").get();
+        let reported = setup.link.reported_rtt(setup.start + again).expect("有会话").get();
+        assert!(smoothed < 40 * MS, "平滑延迟还是握手和保活那二十来毫秒：{smoothed:?}");
+        assert_eq!(reported, quality.rtt, "两头用同一把尺子");
+    }
+
+    #[test]
+    fn a_leg_over_udp_reports_its_smoothed_round_trip() {
+        let mut setup = Setup::new(&["198.51.100.9:20330"], &["198.51.100.9:20330"]);
+        setup.poll(Duration::ZERO);
+        setup.complete_udp(30 * MS);
+        let now = setup.start + 30 * MS;
+        assert!(matches!(setup.link.leg(), Some(Leg::Udp(_))));
+        assert_eq!(setup.link.reported_rtt(now), setup.link.rtt(), "走 UDP 的一段照旧");
+        assert!(setup.link.reported_rtt(now).is_some());
     }
 
     #[test]

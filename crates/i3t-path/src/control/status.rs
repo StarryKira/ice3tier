@@ -45,7 +45,9 @@ impl Control {
         let shared = self.shared_relays.iter().map(|id| (id, true));
         let mut attached: Vec<Attachment> = own
             .chain(shared)
-            .filter_map(|(id, shared)| Some(Attachment { relay: *id, rtt_ms: self.relays.get(id)?.link.rtt()?.millis(), shared }))
+            .filter_map(|(id, shared)| {
+                Some(Attachment { relay: *id, rtt_ms: self.relays.get(id)?.link.reported_rtt(now)?.millis(), shared })
+            })
             .collect();
         attached.sort_by_key(|attachment| attachment.rtt_ms);
 
