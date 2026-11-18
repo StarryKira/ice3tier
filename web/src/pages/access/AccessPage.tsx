@@ -169,7 +169,7 @@ export function AccessPage() {
         description={t.access.subtitle}
         actions={
           <>
-            <Button onClick={() => update({ check: checking ? null : '1' })} aria-pressed={checking}>
+            <Button onClick={() => update({ check: '1' })}>
               <ScanSearch aria-hidden />
               {t.access.check}
             </Button>
@@ -192,7 +192,11 @@ export function AccessPage() {
             update({ from: from === null ? null : String(from), to: to === null ? null : String(to) })
           }
           onClose={() => update({ check: null, from: null, to: null })}
-          onCreateRule={(draft) => setEditor({ rule: null, draft })}
+          onCreateRule={(draft) => {
+            // 先关掉检查，再打开新建策略：不叠两层对话框。
+            update({ check: null, from: null, to: null })
+            setEditor({ rule: null, draft })
+          }}
         />
       ) : null}
 

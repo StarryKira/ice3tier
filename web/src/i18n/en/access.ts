@@ -146,6 +146,5 @@ export const access: Messages['access'] = {
     noGroups: 'All only',
     createRule: 'Create policy',
     loadFailed: "Couldn't check",
-    close: 'Close access check',
   },
 }

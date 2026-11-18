@@ -372,7 +372,8 @@ test('加一条策略，关系图跟着变；停用默认策略后按分组收�
   await expect(page.getByTestId(`check-${laptop.name}-${server.name}`)).toContainText(c.allowed)
   await expect(page.getByTestId(`check-${laptop.name}-${server.name}`)).toContainText(c.byRules('ssh'))
   await expect(page.getByTestId(`check-${server.name}-${laptop.name}`)).toContainText(c.denied)
-  await page.getByRole('button', { name: c.close }).click()
+  await check.getByRole('button', { name: t.common.close }).click()
+  await expect(check).toHaveCount(0)
 
   // 按节点看：laptop 能访问 server，没有谁能访问 laptop。
   await page.getByRole('radio', { name: t.access.graph.byNode }).click()

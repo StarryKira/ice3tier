@@ -142,6 +142,5 @@ export const access = {
     noGroups: '仅 All',
     createRule: '新建策略',
     loadFailed: '无法检查',
-    close: '关闭访问检查',
   },
 }

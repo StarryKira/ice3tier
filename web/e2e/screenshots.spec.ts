@@ -609,8 +609,9 @@ test('有数据时：访问控制', async () => {
   await check.getByRole('combobox', { name: c.to }).click()
   await page.getByRole('option', { name: /nas-home/ }).click()
   await expect(page.getByTestId('check-laptop-nas-home')).toContainText(c.allowed)
-  await shot('access-check')
-  await page.getByRole('button', { name: c.close }).click()
+  await shot('access-check', { fullPage: false })
+  await check.getByRole('button', { name: t.common.close }).click()
+  await expect(check).toHaveCount(0)
   await page.getByRole('radio', { name: t.access.viewList }).click()
 })
 
