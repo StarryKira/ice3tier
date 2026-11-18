@@ -138,7 +138,8 @@ export interface FlowStop {
 }
 
 /**
- * 列表还是空的时候：虚线框铺满标题下面剩下的地方，正中一行图说明流量怎么走，下面标题、一句话和按钮。
+ * 列表还是空的时候：虚线框铺满标题下面剩下的地方；里面的东西靠上、居中：
+ * 标题，一句话，一行图说明流量怎么走，再是按钮。
  */
 export function FlowEmpty({
   stops,
@@ -152,8 +153,10 @@ export function FlowEmpty({
   children?: ReactNode
 }) {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-5 rounded-xl border border-dashed px-6 py-12 text-center">
-      <div aria-hidden className="flex flex-wrap items-center justify-center gap-2">
+    <div className="flex flex-1 flex-col items-center rounded-xl border border-dashed px-6 pt-16 pb-12 text-center">
+      <h2 className="text-base font-semibold">{title}</h2>
+      <p className="mt-1.5 max-w-md text-[13px] leading-relaxed text-muted-foreground">{body}</p>
+      <div aria-hidden className="mt-8 flex flex-wrap items-center justify-center gap-2">
         {stops.map(({ icon: Icon, label }, index) => (
           <Fragment key={label}>
             {index > 0 ? <ChevronRight className="size-4 shrink-0 text-faint" /> : null}
@@ -164,11 +167,7 @@ export function FlowEmpty({
           </Fragment>
         ))}
       </div>
-      <div>
-        <p className="text-[15px] font-semibold">{title}</p>
-        <p className="mt-1 text-[13px] text-muted-foreground">{body}</p>
-      </div>
-      {children}
+      <div className="mt-8 flex w-full flex-col items-center gap-5">{children}</div>
     </div>
   )
 }
