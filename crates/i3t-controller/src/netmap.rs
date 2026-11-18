@@ -10,7 +10,9 @@ use std::net::SocketAddr;
 
 use i3t_model::Netmap;
 use i3t_model::admin::{GroupId, NetworkId, PairSetting, Rule};
-use i3t_model::netmap::{Forward, ForwardTarget, LocalNode, Network, Peer, PeerExit, Proxy, Reach, Relay, RelayClient, RelayRole};
+use i3t_model::netmap::{
+    Forward, ForwardTarget, LaneMode, LocalNode, Network, Peer, PeerExit, Proxy, Reach, Relay, RelayClient, RelayRole,
+};
 use i3t_proto::NodeId;
 
 use crate::access::AccessMap;
@@ -115,15 +117,23 @@ impl NetworkView {
     /// `relations` 决定它的对端列表：键是对端，值是两个方向各通不通。它通常就是规则算出来的
     /// [`NetworkView::target_relations`]，变更还在按顺序生效的途中时会暂时落后于规则。
     /// `access` 是 [`NetworkView::access`] 的结果，由调用方传进来是为了给一批节点算的时候只建一次。
+    /// `on_demand` 说一个节点懂不懂按需拨 ice3proxy：没有设置的节点对，两个节点都懂才是默认的
+    /// [`LaneMode::PAIR_DEFAULT`]，否则是 `off`（旧的节点在 `udp_fallback` 下一直拨着，不能让它因为 controller 升级就拨起来）。
     #[must_use]
-    pub fn compile(&self, access: &AccessMap<'_>, id: NodeId, relations: &BTreeMap<NodeId, Relation>) -> Option<Netmap> {
+    pub fn compile(
+        &self,
+        access: &AccessMap<'_>,
+        id: NodeId,
+        relations: &BTreeMap<NodeId, Relation>,
+        on_demand: impl Fn(NodeId) -> bool,
+    ) -> Option<Netmap> {
         let me = self.nodes.get(&id)?;
         let relays = self.relay_ids();
 
         let peers = relations
             .iter()
             .filter(|&(&peer, relation)| peer != id && !relation.is_empty())
-            .filter_map(|(peer, &relation)| Some(self.peer(me, self.nodes.get(peer)?, relation, &relays)))
+            .filter_map(|(peer, &relation)| Some(self.peer(me, self.nodes.get(peer)?, relation, &relays, &on_demand)))
             .collect();
 
         let deliverable = || self.forwards.iter().filter(|forward| self.forward_is_deliverable(access, forward));
@@ -224,10 +234,23 @@ impl NetworkView {
         })
     }
 
-    fn peer(&self, me: &NodeRecord, peer: &NodeRecord, relation: Relation, relays: &BTreeSet<NodeId>) -> Peer {
+    fn peer(
+        &self,
+        me: &NodeRecord,
+        peer: &NodeRecord,
+        relation: Relation,
+        relays: &BTreeSet<NodeId>,
+        on_demand: &impl Fn(NodeId) -> bool,
+    ) -> Peer {
         let mut attached: Vec<_> = peer.attached.iter().copied().filter(|attachment| relays.contains(&attachment.relay)).collect();
         attached.sort_by_key(|attachment| (attachment.rtt_ms, attachment.relay));
         let (low, high) = (me.id.min(peer.id), me.id.max(peer.id));
+        let stored = self.pairs.iter().find(|pair| pair.a == low && pair.b == high);
+        let lane = match stored {
+            Some(pair) => pair.lane,
+            None if on_demand(me.id) && on_demand(peer.id) => LaneMode::PAIR_DEFAULT,
+            None => LaneMode::Off,
+        };
         Peer {
             id: peer.id,
             key: peer.key,
@@ -245,9 +268,9 @@ impl NetworkView {
                 optimistic: exit.optimistic,
             }),
             dial_out_only: peer.dial_out_only,
-            keep_alive: self.pairs.iter().any(|pair| pair.a == low && pair.b == high && pair.keep_alive),
-            lane: self.pairs.iter().find(|pair| pair.a == low && pair.b == high).map(|pair| pair.lane).unwrap_or_default(),
-            congestion: self.pairs.iter().find(|pair| pair.a == low && pair.b == high).and_then(|pair| pair.congestion),
+            keep_alive: stored.is_some_and(|pair| pair.keep_alive),
+            lane,
+            congestion: stored.and_then(|pair| pair.congestion),
         }
     }
 }

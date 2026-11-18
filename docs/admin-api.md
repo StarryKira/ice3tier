@@ -4,7 +4,24 @@
 
 对应的 Rust 类型在 `crates/i3t-model/src/admin.rs`，实现在 `crates/i3t-controller/src/admin.rs`。文档和代码不一致时以代码为准，并请修正文档。
 
-> **最新一次改动**（代理取代监听器和接入凭据）。代理是一样单独的东西："在节点 A 上监听，经出口节点 B（另一个启用了出口的节点）出去，
+> **最新一次改动**（没有设置的节点对默认用 ice3proxy：没有 UDP 的路时用）。这一次的清单：
+>
+> - 行为上的变化：没有存下设置的节点对，ice3proxy 是 `"udp_fallback"`，以前是 `"off"`（第 12 节）。`udp_fallback` 本身也改了：拨号的一方
+>   只在它这一段没有 UDP 的路时才拨（连续 40 秒没有才开始，UDP 回来满 10 分钟才放手），两边都有 UDP 的一对什么都不连；
+>   开流的一方和对方之间的 ice3proxy 没建着时直接走共用的连接，不等，也不记作改走。存下的 `off`、`always`、`udp_fallback` 照旧。
+> - 新接口：`GET /networks/{network}/pairs/{a}/{b}`，一对节点的 `PairView`，没有设置的也有（第 12 节）。
+> - 新的字段：`PairView.stored`（这一对有没有存下的设置；`false` 时各项是默认值）。列表和 `PUT` 的应答里总是 `true`。
+> - 改了说法：`LaneOpening.lanes` 还要它那一边的控制连接在；`LaneReport.peers` 不再列有 UDP 的路、什么都没连着的 `udp_fallback` 对端；
+>   `PeerLanes.dials` 是"现在拨不拨"；`PeerLanes.udp_path` 现在没有路时也是 `null`；`node_too_old` 在没有设置的一对上要节点协议第 5 版（第 12 节）。
+> - `PUT …/pairs/{a}/{b}` 给还没有设置的一对写设置、没写 `lane` 时，存下的是默认值 `"udp_fallback"`，以前是 `"off"`。
+>   升级之前存下的行照旧：只因为设了常驻或者拥塞控制才有的一行，`lane` 存的是当时的默认值 `"off"`，和特意设的 `"off"` 分不出来，照旧不用。
+> - 节点协议升到第 5 版：controller 只给两个节点都是第 5 版起的一对下发默认的 `udp_fallback`；有一个旧的，这一对照旧是 `off`，
+>   旧的节点不会因为 controller 升级就拨起每一个 relay。新的节点和旧的 controller：旧的 controller 不下发默认值，新的节点照旧什么都不拨；
+>   存下的 `udp_fallback` 在新的节点上按需拨。
+>
+> 别的接口的路径、请求体和应答里原有的字段都没有变。
+>
+> **上一次改动**（代理取代监听器和接入凭据）。代理是一样单独的东西："在节点 A 上监听，经出口节点 B（另一个启用了出口的节点）出去，
 > 认一对用户名和密码"（第 10 节）。旧的写法不再收，也没有别名。这一次的清单：
 >
 > - 新接口：`GET`、`POST /networks/{network}/proxies`，`GET`、`PATCH`、`DELETE /networks/{network}/proxies/{id}`（第 10 节）。
@@ -32,7 +49,7 @@
 >
 > 别的接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **上一次改动**（一串中继；relay 之间的骨干可以走 TCP；对端不多的节点不等流量就试直连）。这一次的清单：
+> **再上一次改动**（一串中继；relay 之间的骨干可以走 TCP；对端不多的节点不等流量就试直连）。这一次的清单：
 >
 > - 新的取值：`RouteCause` 多了 `no_shared_relay`（字段 `hint`，可以是 `null`）：默认模式下没有一个 relay 两端都用得上，这一对经一串 relay
 >   （第 15 节）。主动测试的路由决定 `Choice.reason` 多了 `no_shared_relay`（第 19 节）。`RouteHint` 的 `shortcut` 也说"原来经一串 relay、现在一个就够了"。
@@ -45,7 +62,7 @@
 >
 > 别的接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **再上一次改动**（按节点关掉自动更新；发布可以说明它修了安全问题）。这一次的清单：
+> **更早的改动**（按节点关掉自动更新；发布可以说明它修了安全问题）。这一次的清单：
 >
 > - 新的字段：`Node.auto_update`（`true`、`false`，新节点和升级前已有的节点都是 `true`），节点自己的自动更新开关。全局的
 >   `UpdateOverview.auto_update` 和它都开着，controller 才自动让这个节点更新。用 `PATCH …/nodes/{node}` 的 `{ "auto_update": false }`
@@ -1750,11 +1767,15 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
 |---|---|
 | `a`、`b` | 两个节点的编号，`a` 小于 `b` |
 | `keep_alive` | 为 `true` 时这一对节点之间的连接常驻，不因为没有流而关闭 |
-| `lane` | 「新增」这一对节点之间承载 TCP 连接的流（代理的 CONNECT、TCP 端口转发）用不用 ice3proxy：每条用户连接在两个节点之间独占一条 TCP，而不是共用连接里的一条流。`"off"`（默认）：不用。`"udp_fallback"`：开流的一方到对方的共用连接上没有 UDP 的路（UDP 不通、只能经 relay 的 TCP 中转）时，新的 TCP 流走 ice3proxy。`"always"`：新的 TCP 流都走 ice3proxy。取不到 ice3proxy 时（池空了、对方在排空、拨不通）流悄悄改走共用的连接，只在计数里记一笔；已经在跑的流不会换传输，改设置也不影响它们 |
+| `lane` | 「新增」这一对节点之间承载 TCP 连接的流（代理的 CONNECT、TCP 端口转发）用不用 ice3proxy：每条用户连接在两个节点之间独占一条 TCP，而不是共用连接里的一条流。`"off"`：不用。`"udp_fallback"`（「新增」没有设置的节点对的默认，见下）：没有 UDP 的路时用。拨号的一方只在它到对方的共用连接上它自己这一段连续 40 秒没有 UDP（UDP 不通、只能经 relay 的 TCP 中转）时才拨，UDP 回来（或者没有路了）满 10 分钟才放手，两边都有 UDP 时什么都不连；开流的一方它自己这一段没有 UDP、并且和对方之间的 ice3proxy 建着时，新的 TCP 流走 ice3proxy，没建着就直接走共用的连接，不等，也不记作改走。`"always"`：拨号的一方一直拨着，新的 TCP 流都走 ice3proxy。取不到 ice3proxy 时（池空了、对方在排空、拨不通）流悄悄改走共用的连接，只在计数里记一笔；已经在跑的流不会换传输，改设置也不影响它们 |
 
 | `congestion` | 「新增」这一对节点之间的连接用哪种拥塞控制：`"bbr"`（节点自己写的 BBR，不把随机丢包当作拥塞）或 `"cubic"`（QUIC 库自带的，每次丢包都减速）；`null` 是用节点的默认（BBR）。两个节点的配置里是同一个值，两边各自按它管自己往外发的方向。只对之后建立的连接生效：已经建立的连接一直用建立时的那一种，到它空闲回收（或者节点重启）之后新建的连接才换。旧版本的节点不认，照旧用它自己的默认。比这个文档新的 controller 存了不认识的值时读成 `null` |
 
 ice3proxy 要两个节点里至少有一个启用了 relay、有已知的 TCP 地址：另一个节点拨它的节点端口（relay 在同一个端口号上听 TCP）。两个都能被拨时，各自用自己拨的连接往对方开流。UDP 应用的数据、数据报和别的流始终走共用的连接，这一对节点之间的共用连接和它的路照常保持（路由视图里显示的是它的路）。
+
+「新增」**默认。** 没有存下设置的一对是 `udp_fallback`，只要两个节点都懂按需拨号（节点协议第 5 版起）；有一个比它旧，这一对照旧是 `off`：旧的节点在 `udp_fallback` 下不管有没有 UDP 都一直拨着，只升级 controller 不能让它们去拨每一个 relay。存下的设置照原样发给新旧节点。代价：没有 UDP 的路的每一对，拨号的一方拨着一条控制连接，接受的一方那里停着几条（平时 4 条）空闲的，都是 TCP；有 UDP 的一对什么都不连。
+
+「新增」**两边各看各的一段。** 拨号的一方和开流的一方都只看自己到对方的那一段有没有 UDP。经第三个 relay 时，没有 UDP 的那一段在不拨号的一方（启用了 relay、被拨的那个）时，拨号的一方看到自己这一段有 UDP、不拨，这一对就不走 ice3proxy（`lane_effect.opening` 里那一边的 `lanes` 是 `false`、`udp_path` 是 `false`）。两个节点直接经其中一个的 relay 时两边看的是同一段，没有这个问题。
 
 ### PairView「新增」
 
@@ -1762,7 +1783,7 @@ ice3proxy 要两个节点里至少有一个启用了 relay、有已知的 TCP �
 
 ```json
 {
-  "a": 1, "b": 2, "keep_alive": false, "lane": "always",
+  "a": 1, "b": 2, "keep_alive": false, "lane": "always", "stored": true,
   "lane_effect": {
     "effective": true,
     "blocked": [],
@@ -1787,13 +1808,14 @@ ice3proxy 要两个节点里至少有一个启用了 relay、有已知的 TCP �
 
 | 字段 | 含义 |
 |---|---|
+| `stored` | 「新增」这一对有没有存下的设置。`false` 时各项都是默认值（`keep_alive` 是 `false`，`lane` 是默认的 `"udp_fallback"`，`congestion` 是 `null`），界面可以写"默认：没有 UDP 的路时用"。只有 `GET …/pairs/{a}/{b}` 会给出 `false`；列表和 `PUT` 的应答里都是存下的设置 |
 | `lane_effect` | `lane` 不是 `"off"` 时有：设置起不起作用。`lane` 是 `"off"` 时是 `null` |
-| `lane_effect.effective` | 起作用：至少一边能被拨，两个节点都懂 ice3proxy，访问规则连通了它们 |
+| `lane_effect.effective` | 起作用：至少一边能被拨，两个节点都懂 ice3proxy（没有存下设置的一对：都懂按需拨号），访问规则连通了它们 |
 | `lane_effect.blocked` | 不起作用的原因，`LaneBlock` 的数组，起作用时是 `[]`。不起作用时这一对的流都走共用的连接 |
 | `lane_effect.dialers` | 拨号的节点：对方启用了 relay、有 TCP 地址的那一个（或者两个） |
 | `lane_effect.summary` | 给人看的一句说明（中文原话）。界面用 `effective`、`blocked`、`dialers` 写 |
-| `lane_effect.opening` | 「新增」设置是 `udp_fallback` 时，两个节点各自开新的 TCP 流现在走不走 ice3proxy，`LaneOpening` 的数组：`node` 是开流的节点，`udp_path` 是它到对方的共用连接现在有没有 UDP 的路（直连，或者经 UDP 连着的 relay），`lanes` 是它现在开的新 TCP 流走 ice3proxy（设置起作用并且 `udp_path` 是 `false`；取不到 lane 时照样悄悄改走共用的连接，见 `lanes` 里的 `control` 和 `fallbacks`）。只有在线、并且报了 `udp_path` 的节点在里面；设置是别的值时是 `[]` |
-| `lanes` | 两个节点各自报上来的、和对方之间的 ice3proxy，`PairLaneSide` 的数组。不在线、版本太旧、或者没有为对方打开的节点不在里面。设置刚改成 `off` 时，还有流在跑的一边仍然会报 |
+| `lane_effect.opening` | 「新增」设置是 `udp_fallback` 时，两个节点各自开新的 TCP 流现在走不走 ice3proxy，`LaneOpening` 的数组：`node` 是开流的节点，`udp_path` 是它到对方的共用连接现在有没有 UDP 的路（直连，或者经 UDP 连着的 relay），`lanes` 是它现在开的新 TCP 流走 ice3proxy：设置起作用、`udp_path` 是 `false`，并且「新增」它报的和对方之间的控制连接在（`lanes` 里它那一边的 `control`）；控制连接在、却取不到 lane 时照样悄悄改走共用的连接，见 `fallbacks`。只有在线、并且报了和对方之间的状况的节点在里面（`udp_fallback` 下有 UDP、什么都没连着的一边不报，见 `LaneReport.peers`）；设置是别的值时是 `[]`。界面判断"这一对现在用着 ice3proxy"：`opening` 里有一个 `lanes` 是 `true`，或者 `lanes` 里有一边的 `in_use` 大于 0 |
+| `lanes` | 两个节点各自报上来的、和对方之间的 ice3proxy，`PairLaneSide` 的数组。不在线、版本太旧、没有为对方打开，或者「新增」`udp_fallback` 下自己到对方有 UDP 的路（或者没有路）、什么都没连着（见 `LaneReport.peers`）的节点不在里面 |
 
 `LaneBlock` 用 `reason` 区分：
 
@@ -1801,7 +1823,7 @@ ice3proxy 要两个节点里至少有一个启用了 relay、有已知的 TCP �
 |---|---|---|
 | `no_relay` | | 两个节点都没有启用 relay，没有哪一边的 TCP 端口在听 |
 | `no_tcp_address` | `node` | 这个节点启用了 relay，但 controller 还不知道它的任何地址（它还没有连上来过） |
-| `node_too_old` | `node` | 这个节点在线，但版本太旧，不懂 ice3proxy（节点协议第 3 版起才懂）。离线的节点不判断 |
+| `node_too_old` | `node` | 这个节点在线，但版本太旧，不懂 ice3proxy（节点协议第 3 版起才懂）；「新增」没有存下设置的一对（默认的 `udp_fallback`）要第 5 版起，比它旧的节点在这样的一对上是 `off`。离线的节点不判断 |
 | `not_connected` | | 访问规则没有连通这两个节点 |
 
 `PairLaneSide` 是 `{ "node": 报的节点, "lanes": PeerLanes, "reported_secs_ago": 秒 }`；「新增」`reported_secs_ago` 是这些数是多少秒之前报的。`PeerLanes` 是一个节点上和一个对端之间的 ice3proxy：
@@ -1809,12 +1831,12 @@ ice3proxy 要两个节点里至少有一个启用了 relay、有已知的 TCP �
 | 字段 | 含义 |
 |---|---|
 | `peer` | 对端 |
-| `dials` | 这个节点拨不拨对端 |
+| `dials` | 这个节点现在拨不拨对端（`udp_fallback` 下按需拨，不拨的时候是 `false`） |
 | `control` | 和对端之间的控制连接在不在。不在时新的 TCP 流走共用的连接 |
 | `idle` | 对端拨来、停在这个节点等它开流时取用的空闲连接 |
 | `ready` | 这个节点拨好、留给自己开流的空闲连接 |
 | `parked_at_peer` | 这个节点拨出去、停在对端那里的空闲连接 |
-| `udp_path` | 「新增」这个节点到对端的共用连接现在有没有 UDP 的路；`udp_fallback` 时没有才在 ice3proxy 上开新的 TCP 流。旧版本的节点不报，是 `null` |
+| `udp_path` | 「新增」这个节点到对端的共用连接现在有没有 UDP 的路；`udp_fallback` 时没有才在 ice3proxy 上开新的 TCP 流、才拨。旧版本的节点不报，是 `null`；「新增」现在到对端没有路时也是 `null` |
 | 其余 | `LaneCounts` 的字段，平铺在同一层 |
 
 `LaneCounts`（从节点启动算起的累计，`in_use`、`dialling` 是现在的值）：
@@ -1843,15 +1865,20 @@ ice3proxy 要两个节点里至少有一个启用了 relay、有已知的 TCP �
 }
 ```
 
-`total` 是全节点的 `LaneCounts`（对端去掉之后也不减）；`handshake_failures` 是别人拨进来、没有握手成功的连接，按原因分：`deadline` 没有在时限之内完成，`unknown_key` 公钥不认识或者已经吊销，`tls` 别的 TLS 错误，`protocol` 握手之后的第一个帧不对，或者连接在那之前断了、读写出错，`busy` 还没握手完的连接太多被挤掉的；`peers` 是每个打开了 ice3proxy 的对端。
+`total` 是全节点的 `LaneCounts`（对端去掉之后也不减）；`handshake_failures` 是别人拨进来、没有握手成功的连接，按原因分：`deadline` 没有在时限之内完成，`unknown_key` 公钥不认识或者已经吊销，`tls` 别的 TLS 错误，`protocol` 握手之后的第一个帧不对，或者连接在那之前断了、读写出错，`busy` 还没握手完的连接太多被挤掉的；`peers` 是设置为 `always` 的每个对端，和「新增」`udp_fallback`（包括默认）的对端里现在要用或者正在用的：节点拨着它、和它之间的控制连接在、有空闲的或在用的或在拨的连接，或者节点到它的共用连接没有 UDP 的路。节点到它有 UDP 的路（或者没有路）、什么都没连着的不列（默认的设置下每个 relay 都和别的节点打开了 ice3proxy，列出来只是一串零）；它们以前的计数在 `total` 里。
 
 ### GET /networks/{network}/pairs
 
-有设置的节点对。应答是 `PairView` 的数组。没有列出的节点对用默认值（`keep_alive` 为 `false`，`lane` 为 `"off"`，「新增」`congestion` 为 `null`）。
+有设置的节点对。应答是 `PairView` 的数组。没有列出的节点对用默认值（`keep_alive` 为 `false`，`lane` 为「新增」`"udp_fallback"`（以前是 `"off"`，两个节点都懂按需拨号时才这样下发，见上），「新增」`congestion` 为 `null`）。
+
+### GET /networks/{network}/pairs/{a}/{b}「新增」
+
+一对节点的 `PairView`，有没有存下设置都有：没有的是默认值，`stored` 是 `false`，`lane_effect`、`lanes` 照样算。路径里两个节点的先后顺序无所谓。
+错误：`invalid_request`（两个编号相同）、`not_found`（节点不在这个网络里）。
 
 ### PUT /networks/{network}/pairs/{a}/{b}
 
-写下一对节点的设置。路径里两个节点的先后顺序无所谓。「新增」每一项都可以省略：没写的项保持原样，这一对还没有设置时取默认值。
+写下一对节点的设置。路径里两个节点的先后顺序无所谓。「新增」每一项都可以省略：没写的项保持原样，这一对还没有设置时取默认值（`lane` 存下的是那时的默认值 `"udp_fallback"`）。
 
 ```json
 { "keep_alive": true, "lane": "udp_fallback", "congestion": "cubic" }
@@ -1866,7 +1893,7 @@ ice3proxy 要两个节点里至少有一个启用了 relay、有已知的 TCP �
 
 ### DELETE /networks/{network}/pairs/{a}/{b}
 
-去掉一对节点的设置，回到默认。应答：`204`。这一对本来没有设置时是 `404 not_found`。节点被删除时，它所在的节点对设置随之删掉。
+去掉一对节点的设置，回到默认（「新增」ice3proxy 回到 `udp_fallback`）。应答：`204`。这一对本来没有设置时是 `404 not_found`。节点被删除时，它所在的节点对设置随之删掉。
 
 ## 13. 接口一览
 
@@ -1897,7 +1924,7 @@ ice3proxy 要两个节点里至少有一个启用了 relay、有已知的 TCP �
 | GET、POST | `/networks/{network}/forwards` | 列出、新建端口转发 |
 | PUT、DELETE | `/networks/{network}/forwards/{id}` | 替换、删除端口转发 |
 | GET | `/networks/{network}/pairs` | 列出节点对设置 |
-| PUT、DELETE | `/networks/{network}/pairs/{a}/{b}` | 设置、去掉一对节点的设置 |
+| GET、PUT、DELETE | `/networks/{network}/pairs/{a}/{b}` | 「新增」一对节点的设置和状况（没有设置的也有）；设置、去掉一对节点的设置 |
 | GET | `/networks/{network}/access/graph` | 访问关系的分组视图 |
 | GET | `/networks/{network}/access/check` | 访问检查 |
 | GET、PATCH | `/update` | 「新增」更新的设置和现状；改设置 |

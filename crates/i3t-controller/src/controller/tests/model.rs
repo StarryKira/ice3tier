@@ -525,9 +525,10 @@ fn a_successor_enrolled_by_token_inherits_identity_and_configuration() {
     assert_eq!(forwards.iter().find(|f| f.id == from_old.id).unwrap().listen_node, new.id);
     let pairs = lab.controller.pairs(network.id).unwrap();
     let settings: Vec<_> = pairs.into_iter().map(|pair| pair.setting).collect();
+    // 只设过常驻：ice3proxy 是设的时候的默认值，存下来跟着身份交给继任者。
     assert_eq!(
         settings,
-        vec![i3t_model::admin::PairSetting { a: other, b: new.id, keep_alive: true, lane: LaneMode::Off, congestion: None }]
+        vec![i3t_model::admin::PairSetting { a: other, b: new.id, keep_alive: true, lane: LaneMode::PAIR_DEFAULT, congestion: None }]
     );
     assert!(lab.controller.node(network.id, other).unwrap().node.pinned_relays.is_empty(), "原来的 relay 没了，固定它的节点解除固定");
 

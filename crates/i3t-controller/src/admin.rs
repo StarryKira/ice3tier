@@ -94,7 +94,7 @@ pub fn router(controller: Arc<Controller>, webui: &WebUi) -> Router {
         .route(&format!("{network}/forwards"), get(list_forwards).post(create_forward))
         .route(&format!("{network}/forwards/{{id}}"), put(replace_forward).delete(delete_forward))
         .route(&format!("{network}/pairs"), get(list_pairs))
-        .route(&format!("{network}/pairs/{{a}}/{{b}}"), put(set_pair).delete(delete_pair))
+        .route(&format!("{network}/pairs/{{a}}/{{b}}"), get(get_pair).put(set_pair).delete(delete_pair))
         .route(&format!("{network}/access/graph"), get(access_graph))
         .route(&format!("{network}/access/check"), get(access_check))
         .fallback(no_such_endpoint)
@@ -646,6 +646,10 @@ async fn delete_forward(State(app): State<App>, Path((network, id)): Path<(Netwo
 
 async fn list_pairs(State(app): State<App>, Path(network): Path<NetworkId>) -> Reply {
     ok(&app, move |controller| controller.pairs(network)).await
+}
+
+async fn get_pair(State(app): State<App>, Path((network, a, b)): Path<(NetworkId, NodeId, NodeId)>) -> Reply {
+    ok(&app, move |controller| controller.pair(network, a, b)).await
 }
 
 async fn set_pair(State(app): State<App>, Path((network, a, b)): Path<(NetworkId, NodeId, NodeId)>, Body(input): Body<PairInput>) -> Reply {

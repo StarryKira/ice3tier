@@ -146,7 +146,7 @@ impl Inner {
 
     fn publish(&mut self, view: &NetworkView, access: &AccessMap<'_>, id: NodeId, force: bool) -> Result<(), Error> {
         let relations = self.effective_relations(view, access, id);
-        let Some(mut netmap) = view.compile(access, id, &relations) else { return Ok(()) };
+        let Some(mut netmap) = view.compile(access, id, &relations, |node| self.on_demand_lanes(node)) else { return Ok(()) };
         // 摘要是对不带版本号的内容算的，所以"内容没变"和"版本号不加"是一回事。
         let digest = secret::sha256(&serde_json::to_vec(&netmap)?);
 

@@ -3,10 +3,12 @@
 
     python3 tests/e2e/test_lane.py [场景名...]
 
-除了 managed_drain，节点都用静态的 netmap 运行：两边互相看到的对端条目里写着 `"lane"`，
+前几个场景的节点用静态的 netmap 运行：两边互相看到的对端条目里写着 `"lane"`，
 启用了 relay 的那一边在 netmap 的 relays 里带着它的 TCP 地址，另一边拨它。计数从节点本机的 /metrics 读。
 
-managed_drain 由 controller 管理（节点对设置、排空、更新），要用 test_update.py 编的那一套程序（第一次会编译几分钟）。
+default_where_udp_is_missing、default_follows_udp 由 controller 管理，节点对都没有设置（默认的 udp_fallback，
+存下的设置只用来对照），用 I3T_BIN_DIR 里的程序。managed_drain 也由 controller 管理（节点对设置、排空、更新），
+要用 test_update.py 编的那一套程序（第一次会编译几分钟）。
 """
 
 from __future__ import annotations
@@ -22,11 +24,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import harness  # noqa: E402
 import lab as lablib  # noqa: E402
-from harness import (Checks, Node, binary, blob_digest, blob_file, block_tcp_port, fetch, lane_counts, lane_line,  # noqa: E402
-                     lane_peer, set_nat_timeouts, start_blob_server, tail)
+from harness import (Checks, Controller, Node, binary, blob_digest, blob_file, block_tcp_port, fetch, lane_counts,  # noqa: E402
+                     lane_line, lane_peer, set_nat_timeouts, start_blob_server, tail)
 from lab import Host, Lab, NatKind, wait_until  # noqa: E402
 
 BIG = 20_000_000
+# udp_fallback 下 UDP 回来之后拨号方还拨多少秒才放手，测试里调短（程序里是 10 分钟）。
+HOLD_SWITCH = "I3T_TEST_LANE_HOLD"
 
 
 def waited(condition, timeout: float, interval: float = 0.5) -> bool:
@@ -67,8 +71,9 @@ class Pair:
 
 
 def public_entry(lab: Lab, work: Path, lane: str, *, tcp_blocked: bool = False, exit_view_of_entry: dict | None = None,
-                 nat_timeouts: tuple[int, int] | None = None) -> Pair:
-    """入口在公网上并且兼做 relay；出口在家用 NAT 后面，拨入口的 TCP 端口。"""
+                 nat_timeouts: tuple[int, int] | None = None, hold: int | None = None) -> Pair:
+    """入口在公网上并且兼做 relay；出口在家用 NAT 后面，拨入口的 TCP 端口。`hold` 是 udp_fallback 下 UDP 回来之后
+    出口还拨多少秒（I3T_TEST_LANE_HOLD，不写是程序的 10 分钟）。"""
     web = lab.host("web")
     cert = start_blob_server(web, work)
     entry = Node(lab.host("entry"), work, 1, declare=("relay",))
@@ -78,6 +83,8 @@ def public_entry(lab: Lab, work: Path, lane: str, *, tcp_blocked: bool = False, 
     if nat_timeouts:
         set_nat_timeouts(home, *nat_timeouts)
     exit_node = Node(home.host("exit"), work, 2, declare=("exit",))
+    if hold is not None:
+        exit_node.env = {HOLD_SWITCH: str(hold)}
     entry.start_static(entry.netmap(me={"relay": {}}, relays=[entry.as_relay()], relay_clients=[entry, exit_node],
                                     peers=[lane_peer(exit_node, lane=lane, endpoints=False, attached=[(entry, 5)], exit=True)],
                                     proxies=[entry.proxy_to(exit_node)]))
@@ -169,12 +176,21 @@ def firewalled_entry_dials_public_exit(lab: Lab, work: Path, t: Checks) -> None:
         p.logs()
 
 
+def no_lanes(node: Node, peer: Node) -> bool:
+    """`node` 和 `peer` 之间什么 lane 都没有：没有控制 lane，没有空闲的、在用的、在拨的。"""
+    c = lane_counts(node, peer)
+    return c["control_up"] == 0 and c["dialling"] == 0 and c["in_use"] == 0 and c["parked_here"] + c["ready"] + c["parked_at_peer"] == 0
+
+
 def udp_fallback(lab: Lab, work: Path, t: Checks) -> None:
-    """udp_fallback：UDP 通的时候流走共用的连接；出口的 UDP 被挡住、只能经 TCP 中转时新的流走 lane；UDP 恢复后回到共用的连接。"""
-    p = public_entry(lab, work, "udp_fallback")
-    if not t.check("lane 照样拨好备着", holder_ready(p), lane_line(p.entry, p.exit)):
-        p.logs()
-        return
+    """udp_fallback：UDP 通的时候什么都不拨，流走共用的连接；出口的 UDP 被挡住、只能经 TCP 中转时出口拨起来，新的流走 lane；
+    UDP 恢复后新的流回到共用的连接，过了保持时间出口放手。"""
+    hold = 15
+    p = public_entry(lab, work, "udp_fallback", hold=hold)
+    wait_until(lambda: p.fetch("blob/10", timeout=5)[0] == 0, timeout=40, what="经出口访问到数据服务")
+    time.sleep(5)
+    t.check("UDP 通：出口不拨 lane，两边什么都不连着", no_lanes(p.entry, p.exit) and no_lanes(p.exit, p.entry),
+            f"{lane_line(p.entry, p.exit)}；{lane_line(p.exit, p.entry)}")
     before = p.entry_lanes()
     ok, detail = p.intact(2_000_000)
     t.check("UDP 通：下载完整", ok, detail)
@@ -186,6 +202,9 @@ def udp_fallback(lab: Lab, work: Path, t: Checks) -> None:
     switched = waited(lambda: "到 relay 的中转会话建立（TCP）" in p.exit.read_log(), 60)
     t.check("出口的 UDP 被挡住之后经 TCP 连上入口", switched, tail(p.exit.read_log(), 10))
     print(f"  UDP 挡住之后 {time.monotonic() - blocked:.1f} 秒出口经 TCP 连上了入口", flush=True)
+    # 出口这一段要连续 40 秒没有 UDP 才拨（到 relay 的会话 30 秒之后会再试一次 UDP）。
+    t.check("没有 UDP 的路一阵之后出口拨起来，入口那里有了它停过来的 lane", holder_ready(p, 90), lane_line(p.entry, p.exit))
+    print(f"  UDP 挡住之后 {time.monotonic() - blocked:.1f} 秒入口那里有了出口停过来的 lane", flush=True)
 
     def on_lane() -> bool:
         claims = p.entry_lanes()["claims"]
@@ -207,8 +226,12 @@ def udp_fallback(lab: Lab, work: Path, t: Checks) -> None:
     back = waited(off_lane, 120, interval=2)
     t.check("UDP 恢复之后新的流回到共用的连接", back, lane_line(p.entry, p.exit))
     print(f"  UDP 放开之后 {time.monotonic() - opened:.1f} 秒新的流回到共用的连接", flush=True)
-    t.check("始终没有流改走（取不到 lane）", p.entry_lanes()["fallbacks"] == 0)
-    p.report()
+    let_go = waited(lambda: no_lanes(p.entry, p.exit) and no_lanes(p.exit, p.entry), 120 + hold, interval=1)
+    t.check(f"UDP 恢复之后过了保持时间（{hold} 秒）出口放手，两边什么都不连着", let_go,
+            f"{lane_line(p.entry, p.exit)}；{lane_line(p.exit, p.entry)}")
+    print(f"  UDP 放开之后 {time.monotonic() - opened:.1f} 秒出口放手", flush=True)
+    t.check("始终没有流改走（取不到 lane），也没有拨号失败", p.entry_lanes()["fallbacks"] == 0 and p.exit_lanes()["dial_failures"] == 0,
+            f"{p.entry_lanes()}；{p.exit_lanes()}")
     if t.failures:
         p.logs()
 
@@ -374,6 +397,183 @@ def silent_stream_outlives_nat_mapping(lab: Lab, work: Path, t: Checks) -> None:
     p.report()
 
 
+def established_to(host: Host, ip: str, port: int = 20330) -> list[str]:
+    """`host` 上连到 `ip:port`、建立着的 TCP 连接，一条一行。"""
+    done = host.run("ss", "-Htn", "state", "established", f"( dst {ip} and dport = :{port} )", check=False)
+    return [line for line in done.stdout.splitlines() if line.strip()]
+
+
+class Managed:
+    """由 controller 管理的一个小网络：公网上的 relay（兼做出口），和场景自己加的节点。节点对都没有设置，除非场景自己设。"""
+
+    def __init__(self, lab: Lab, work: Path) -> None:
+        self.lab, self.work = lab, work
+        self.web = lab.host("web")
+        self.cert = start_blob_server(self.web, work)
+        self.controller = Controller(lab.host("ctl"), work)
+        self.controller.ctl("network", "create", "lab")
+        self.relay = Node(lab.host("relay"), work, declare=("relay", "exit"))
+        self.relay.join(self.controller)
+        self.controller.ctl("relay", "enable", str(self.relay.id))
+        self.controller.ctl("exit", "enable", str(self.relay.id))
+
+    def node(self, host: Host, *, udp: bool = True, exit: bool = False, hold: int | None = None) -> Node:
+        """加一个节点。`udp` 是假时它加入之前就用不了 UDP；`exit` 时启用它的出口；`hold` 见 `public_entry`。"""
+        node = Node(host, self.work, declare=("exit",) if exit else ())
+        if hold is not None:
+            node.env = {HOLD_SWITCH: str(hold)}
+        if not udp:
+            host.block_udp()
+        node.join(self.controller)
+        if exit:
+            self.controller.ctl("exit", "enable", str(node.id))
+        return node
+
+    def url(self, size: int) -> str:
+        return f"http://{self.web.ip}/blob/{size}"
+
+    def intact(self, node: Node, via: Node, size: int, timeout: float = 60) -> tuple[bool, str]:
+        code, digest, err = fetch(node, self.url(size), via=via, timeout=timeout)
+        return code == 0 and digest == blob_digest(size), f"curl 退出码 {code}，{err.strip()[-300:]}"
+
+    def pair(self, a: Node, b: Node) -> dict:
+        """`i3tctl pair show`：这一对的设置和状况，没有设置的也有。旧的 i3tctl 没有这个命令时是空的。"""
+        done = self.controller.ctl("pair", "show", a.name, b.name, check=False)
+        return json.loads(done.stdout) if done.returncode == 0 and done.stdout.strip() else {}
+
+    def logs(self, *nodes: Node) -> None:
+        print(*(tail(node.read_log(), 25) for node in nodes), sep="\n  ---\n")
+
+
+def lanes_up(holder: Node, dialler: Node, timeout: float) -> bool:
+    """`holder` 那里有 `dialler` 拨来的控制 lane 和停着的 lane。"""
+    return waited(lambda: (c := lane_counts(holder, dialler))["control_up"] == 1 and c["parked_here"] >= 1, timeout)
+
+
+def default_where_udp_is_missing(lab: Lab, work: Path, t: Checks) -> None:
+    """没有节点对设置（默认的 udp_fallback）：没有 UDP 的节点和它拨得到的 relay 之间，TCP 流走 ice3proxy，头一条流不因为取 lane 耽误；
+    有 UDP 的一对一分钟之后什么 lane 都没有（存下 udp_fallback 的也一样）；存下 off 的一对没有 UDP 也不拨。"""
+    m = Managed(lab, work)
+    relay, ctl = m.relay, m.controller
+    started = time.monotonic()
+    # s：用不了 UDP（像宿迁那台），兼做出口。n、q：公网上，UDP 好好的；q 和 relay 存下了 udp_fallback。
+    # o：存下了 off，之后 UDP 也被挡住。
+    s = m.node(lab.nat("home", NatKind.CONE).host("s"), udp=False, exit=True)
+    n = m.node(lab.host("n"))
+    q = m.node(lab.host("q"))
+    o = m.node(lab.nat("office", NatKind.CONE).host("o"), exit=True)
+    ctl.ctl("pair", "set", relay.name, q.name, "--lane", "udp_fallback")
+    ctl.ctl("pair", "set", relay.name, o.name, "--lane", "off")
+    o.host.block_udp()
+    ctl.add_proxy(relay, s)
+    ctl.add_proxy(s, relay)
+    ctl.add_proxy(relay, o)
+    ctl.add_proxy(n, relay)
+
+    # 头一条流：这时 s 多半还没拨上来，流直接走共用的连接，不等 lane、不记失败。
+    first = None
+    deadline = time.monotonic() + 60
+    while first is None and time.monotonic() < deadline:
+        began = time.monotonic()
+        if m.intact(relay, s, 100_000, timeout=20)[0]:
+            first = time.monotonic() - began
+        else:
+            time.sleep(0.5)
+    c = lane_counts(relay, s)
+    t.check("经没有 UDP 的出口访问得到", first is not None)
+    t.check("头一条流没有取 lane 失败、没有等补拨、没有记作改走", c["claims_failed"] == 0 and c["claim_wait_ms"] < 500 and c["fallbacks"] == 0,
+            str(c))
+    print(f"  头一条流用了 {first or 0:.2f} 秒", flush=True)
+
+    # (a) s 这一段没有 UDP：连续 40 秒之后它拨 relay，之后的流走 ice3proxy。
+    t.check("s 拨起来：relay 那里有了它的控制 lane 和停着的 lane", lanes_up(relay, s, 120), lane_line(relay, s))
+    print(f"  加入之后 {time.monotonic() - started:.1f} 秒 relay 那里有了 s 停过来的 lane", flush=True)
+    before, s_before = lane_counts(relay, s), lane_counts(s, relay)
+    ok, detail = m.intact(relay, s, 2_000_000)
+    after = lane_counts(relay, s)
+    t.check("经 s 出去的下载走 ice3proxy（relay 取了 lane，lane 上搬了 2MB），完整", ok and after["claims"] > before["claims"] and
+            after["carried_bytes"] - before["carried_bytes"] >= 2_000_000, f"{detail}；{before} → {after}")
+    ok, detail = m.intact(s, relay, 2_000_000)
+    s_after = lane_counts(s, relay)
+    t.check("s 自己经 relay 出去的下载走它自己拨的 lane，完整", ok and s_after["carried_bytes"] - s_before["carried_bytes"] >= 2_000_000,
+            f"{detail}；{s_before} → {s_after}")
+    t.check("没有流改走、没有取 lane 失败", lane_counts(relay, s)["fallbacks"] == 0 and lane_counts(relay, s)["claims_failed"] == 0 and
+            lane_counts(s, relay)["fallbacks"] == 0, f"{lane_line(relay, s)}；{lane_line(s, relay)}")
+
+    def in_use_by_default() -> bool:
+        view = m.pair(relay, s)
+        opening = {side["node"]: side for side in (view.get("lane_effect") or {}).get("opening", [])}
+        return view.get("stored") is False and view.get("lane") == "udp_fallback" and opening.get(relay.id, {}).get("lanes") is True
+    t.check("节点对视图：没有设置、用默认的 udp_fallback，relay 现在在 ice3proxy 上开新的 TCP 流", waited(in_use_by_default, 30, 2),
+            json.dumps(m.pair(relay, s))[:800])
+
+    # (c) 存下 off 的一对：没有 UDP 也不拨，流照常走共用的连接。
+    ok, detail = m.intact(relay, o, 1_000_000)
+    t.check("存下 off、没有 UDP 的 o：下载完整", ok, detail)
+    co, oc = lane_counts(relay, o), lane_counts(o, relay)
+    t.check("存下 off 的一对什么 lane 都没有，也没有改走", no_lanes(relay, o) and no_lanes(o, relay) and co["claims"] + co["fallbacks"] +
+            oc["dial_failures"] == 0, f"{co}；{oc}")
+
+    # (b) 有 UDP 的一对：一分钟之后什么 lane 都没有，存下 udp_fallback 的也一样。
+    ok, detail = m.intact(n, relay, 1_000_000)
+    t.check("有 UDP 的 n 经 relay 出去：下载完整，不碰 lane", ok and lane_counts(n, relay)["carried_bytes"] == 0, detail)
+    time.sleep(max(0.0, started + 60 - time.monotonic()))
+    for node, how in ((n, "没有设置"), (q, "存下 udp_fallback")):
+        t.check(f"有 UDP 的 {node.name}（{how}）一分钟之后：没有控制 lane、没有空闲的、没有在拨的，两边都是",
+                no_lanes(node, relay) and no_lanes(relay, node) and lane_counts(node, relay)["dial_failures"] == 0,
+                f"{lane_line(node, relay)}；{lane_line(relay, node)}")
+        connections = established_to(node.host, relay.host.ip)
+        t.check(f"{node.name} 到 relay 的节点端口没有一条 TCP 连接", connections == [], "\n".join(connections))
+    if t.failures:
+        m.logs(relay, s, q)
+
+
+def default_follows_udp(lab: Lab, work: Path, t: Checks) -> None:
+    """没有节点对设置：节点的 UDP 回来之后，过了保持时间它放开拨的 lane；UDP 又没了，一阵之后 lane 又回来。"""
+    hold = 30
+    m = Managed(lab, work)
+    relay = m.relay
+    s = m.node(lab.nat("home", NatKind.CONE).host("s"), udp=False, exit=True, hold=hold)
+    m.controller.add_proxy(relay, s)
+    wait_until(lambda: m.intact(relay, s, 10, timeout=5)[0], timeout=60, what="经 s 访问到数据服务")
+    t.check("没有 UDP：s 拨起来", lanes_up(relay, s, 120), lane_line(relay, s))
+
+    def on_lane() -> bool:
+        claims = lane_counts(relay, s)["claims"]
+        return m.intact(relay, s, 1_000_000)[0] and lane_counts(relay, s)["claims"] > claims
+
+    t.check("没有 UDP：流走 ice3proxy", waited(on_lane, 30, 1), lane_line(relay, s))
+
+    s.host.block_udp(False)
+    opened = time.monotonic()
+
+    def off_lane() -> bool:
+        claims = lane_counts(relay, s)["claims"]
+        return m.intact(relay, s, 1_000_000)[0] and lane_counts(relay, s)["claims"] == claims
+
+    t.check("UDP 回来之后新的流回到共用的连接", waited(off_lane, 150, 2), lane_line(relay, s))
+    print(f"  UDP 放开之后 {time.monotonic() - opened:.1f} 秒新的流回到共用的连接", flush=True)
+    let_go = waited(lambda: no_lanes(relay, s) and no_lanes(s, relay), 150 + hold, 1)
+    released = time.monotonic() - opened
+    t.check(f"UDP 回来之后 s 放开拨的 lane，两边什么都不连着", let_go, f"{lane_line(relay, s)}；{lane_line(s, relay)}")
+    t.check(f"放手不早于保持时间（{hold} 秒）", released >= hold - 2, f"UDP 放开之后 {released:.1f} 秒就放手了")
+    print(f"  UDP 放开之后 {released:.1f} 秒 s 放手", flush=True)
+    # 到 relay 的中转会话走着 TCP 时，最多 30 秒之后再试 UDP；那之后 s 到 relay 的节点端口上一条 TCP 都不该有。
+    gone = waited(lambda: established_to(s.host, relay.host.ip) == [], 45, 1)
+    t.check("放手之后 s 到 relay 的节点端口上没有 TCP 连接（lane 都关了，中转会话也回到 UDP）", gone,
+            "\n".join(established_to(s.host, relay.host.ip)))
+
+    s.host.block_udp()
+    blocked = time.monotonic()
+    t.check("UDP 又没了：一阵之后 s 又拨起来", lanes_up(relay, s, 150), lane_line(relay, s))
+    print(f"  UDP 挡住之后 {time.monotonic() - blocked:.1f} 秒 s 又拨起来", flush=True)
+    t.check("之后的流又走 ice3proxy", waited(on_lane, 30, 1), lane_line(relay, s))
+    t.check("始终没有流改走、没有取 lane 失败、没有拨号失败", lane_counts(relay, s)["fallbacks"] + lane_counts(relay, s)["claims_failed"] +
+            lane_counts(s, relay)["dial_failures"] == 0, f"{lane_line(relay, s)}；{lane_line(s, relay)}")
+    if t.failures:
+        m.logs(relay, s)
+
+
 def managed_drain(lab: Lab, work: Path, t: Checks) -> None:
     """由 controller 管理：管理员打开一对节点的 ice3proxy，两边报上状况；出口排空后更新：lane 上跑着的流跑完，新的请求被拒绝，更新重启之后新的流又走 lane。"""
     import test_update as upd
@@ -429,7 +629,7 @@ def managed_drain(lab: Lab, work: Path, t: Checks) -> None:
     print(f"  {lane_line(entry, exit_node)}\n  {lane_line(exit_node, entry)}", flush=True)
     controller.ctl("pair", "unset", entry.name, exit_node.name)
     off = waited(lambda: lane_counts(entry, exit_node)["control_up"] == 0 and lane_counts(entry, exit_node)["parked_here"] == 0, 30)
-    t.check("去掉节点对设置之后 lane 关掉", off, lane_line(entry, exit_node))
+    t.check("去掉节点对设置回到默认（udp_fallback）：两边都有 UDP 的路，lane 关掉", off, lane_line(entry, exit_node))
     if t.failures:
         print(tail(entry.read_log(), 30), tail(exit_node.read_log(), 30), sep="\n  ---\n")
     for node in upd.RUNNING:
@@ -446,6 +646,8 @@ SCENARIOS = {
     "access_denied": access_denied,
     "exit_restart": exit_restart,
     "silent_stream_outlives_nat_mapping": silent_stream_outlives_nat_mapping,
+    "default_where_udp_is_missing": default_where_udp_is_missing,
+    "default_follows_udp": default_follows_udp,
     "managed_drain": managed_drain,
 }
 

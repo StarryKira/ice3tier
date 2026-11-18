@@ -478,6 +478,10 @@ pub enum ForwardCommand {
 #[derive(Subcommand)]
 pub enum PairCommand {
     List,
+    Show {
+        a: String,
+        b: String,
+    },
     // 至少要改一项。
     #[command(group(clap::ArgGroup::new("setting").required(true).multiple(true).args(["keep_alive", "lane", "congestion"])))]
     Set {
@@ -966,6 +970,7 @@ fn describe(command: clap::Command, h: &Help, v: &Values) -> clap::Command {
         .mut_subcommand("pair", |sub| {
             sub.about(h.pair_group)
                 .mut_subcommand("list", |sub| sub.about(h.pair_list))
+                .mut_subcommand("show", |sub| sub.about(h.pair_show).mut_arg("a", node).mut_arg("b", node))
                 .mut_subcommand("set", |sub| {
                     sub.about(h.pair_set)
                         .mut_arg("a", node)

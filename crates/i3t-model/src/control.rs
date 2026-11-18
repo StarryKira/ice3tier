@@ -64,10 +64,17 @@ pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 ///   比它旧的节点不懂 ice3proxy，controller 据此说明节点对的设置为什么不起作用。
 /// - 4：认识 [`ToNode::Test`]、[`ToNode::TestEnd`]，会回 [`ToController::TestReport`]（主动测试），
 ///   在 [`Hello::throughput_tests`] 里说本机接不接受吞吐测试。
-pub const PROTOCOL_REVISION: u32 = 4;
+/// - 5：`udp_fallback` 的拨号方按需拨：到对端的路上本节点这一段没有 UDP 时才拨，UDP 回来一阵之后放手。
+///   比它旧的节点在 `udp_fallback` 下一直拨着，所以 controller 只给这一版起的节点下发没有设置的节点对的默认值
+///   （[`LaneMode::PAIR_DEFAULT`](crate::netmap::LaneMode::PAIR_DEFAULT)，见 [`LANE_DEFAULT_REVISION`]）。
+pub const PROTOCOL_REVISION: u32 = 5;
 
 /// 从这一版节点协议起节点懂 ice3proxy。
 pub const LANE_REVISION: u32 = 3;
+
+/// 从这一版节点协议起，`udp_fallback` 只在需要时拨：没有设置的节点对，两个节点都到了这一版，controller 才按默认的
+/// `udp_fallback` 下发；有一个比它旧，这一对照旧是 `off`。
+pub const LANE_DEFAULT_REVISION: u32 = 5;
 
 /// 从这一版节点协议起节点懂主动测试。
 pub const TEST_REVISION: u32 = 4;
@@ -652,7 +659,8 @@ pub struct LaneReport {
     /// 别人拨进来、没有握手成功的连接，按原因分。分不到对端名下，只有全节点的。
     #[serde(default)]
     pub handshake_failures: LaneHandshakeFailures,
-    /// 每个打开了 ice3proxy 的对端。
+    /// 设置是 `always` 的每个对端，和 `udp_fallback` 的对端里现在要用或者正在用的：本节点拨着它、和它之间的控制 lane 在、
+    /// 有空闲、在用或在拨的 lane，或者本节点到它的共用连接没有 UDP 的路。有 UDP 的路（或者没有路）、什么都没连着的对端不列。
     #[serde(default)]
     pub peers: Vec<PeerLanes>,
 }
@@ -661,7 +669,7 @@ pub struct LaneReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerLanes {
     pub peer: NodeId,
-    /// 本节点拨不拨它（它的 TCP 端口本节点连得上，并且按设置现在要用）。
+    /// 本节点现在拨不拨它（它的 TCP 端口本节点连得上，并且按设置现在要用：`always` 一直拨，`udp_fallback` 按需拨）。
     #[serde(default)]
     pub dials: bool,
     /// 和它之间的控制 lane 在不在。不在时新的 TCP 流走共用的连接。
@@ -677,7 +685,7 @@ pub struct PeerLanes {
     #[serde(default)]
     pub parked_at_peer: u64,
     /// 本节点到它的共用连接现在有没有 UDP 的路（直连，或者经 UDP 连着的 relay）。设置是 `udp_fallback` 时，
-    /// 没有才在 lane 上开新的 TCP 流。旧版本的节点不报。
+    /// 没有才在 lane 上开新的 TCP 流，拨号方也只在这时拨。旧版本的节点不报；现在到它没有路时也是 `None`。
     #[serde(default)]
     pub udp_path: Option<bool>,
     #[serde(default, flatten)]

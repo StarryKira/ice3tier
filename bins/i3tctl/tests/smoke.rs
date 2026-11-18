@@ -293,17 +293,23 @@ async fn the_command_line_drives_a_running_controller() {
     assert_eq!(fixture.json(&["forward", "disable", &forward_id]).await["status"], "disabled");
     assert_eq!(fixture.json(&["forward", "enable", &forward_id]).await["enabled"], true);
     assert!(fixture.ok(&["forward", "list"]).await.contains("#2 192.168.1.10:80"));
+    // 没有设置的一对也看得到：各项都是默认值，ice3proxy 默认是 udp_fallback。
+    let unset = fixture.json(&["pair", "show", "nas-01", "laptop"]).await;
+    assert_eq!((&unset["stored"], &unset["lane"], &unset["keep_alive"]), (&json!(false), &json!("udp_fallback"), &json!(false)), "{unset}");
+    assert!(Fixture::has_line(&fixture.ok(&["pair", "show", "laptop", "nas-01"]).await, &["ice3proxy", "udp_fallback（默认）"]));
+    assert!(fixture.ok(&["pair", "list"]).await.contains("没有列出的节点对用默认"), "列表下面说没有列出的用什么");
     fixture.ok(&["pair", "set", "nas-01", "laptop", "--keep-alive", "on"]).await;
     let pairs = fixture.json(&["pair", "list"]).await;
     assert_eq!(
-        (&pairs[0]["a"], &pairs[0]["b"], &pairs[0]["keep_alive"], &pairs[0]["lane"]),
-        (&json!(1), &json!(2), &json!(true), &json!("off"))
+        (&pairs[0]["a"], &pairs[0]["b"], &pairs[0]["keep_alive"], &pairs[0]["lane"], &pairs[0]["stored"]),
+        (&json!(1), &json!(2), &json!(true), &json!("udp_fallback"), &json!(true)),
+        "只设了常驻：ice3proxy 存下的是设的时候的默认值"
     );
     // 只改 ice3proxy，常驻不变；设置起不起作用要说出来。
-    let pair = fixture.json(&["pair", "set", "nas-01", "laptop", "--lane", "udp_fallback"]).await;
-    assert_eq!((&pair["keep_alive"], &pair["lane"]), (&json!(true), &json!("udp_fallback")));
+    let pair = fixture.json(&["pair", "set", "nas-01", "laptop", "--lane", "always"]).await;
+    assert_eq!((&pair["keep_alive"], &pair["lane"]), (&json!(true), &json!("always")));
     assert!(pair["lane_effect"]["effective"].is_boolean(), "{pair}");
-    assert!(fixture.ok(&["pair", "list"]).await.contains("udp_fallback"));
+    assert!(fixture.ok(&["pair", "list"]).await.contains("always"));
     assert!(fixture.fails(&["pair", "set", "nas-01", "laptop", "--lane", "sometimes"]).await.contains("udp_fallback"));
     assert!(fixture.fails(&["pair", "set", "nas-01", "laptop"]).await.contains("--lane"), "至少要改一项");
 
@@ -316,6 +322,7 @@ async fn the_command_line_drives_a_running_controller() {
 
     // 删除。--json 时没有应答体的操作什么都不输出。
     fixture.ok(&["pair", "unset", "laptop", "nas-01"]).await;
+    assert_eq!(fixture.json(&["pair", "show", "laptop", "nas-01"]).await["stored"], json!(false), "去掉之后回到默认");
     fixture.ok(&["forward", "delete", &forward_id]).await;
     assert_eq!(fixture.ok(&["--json", "proxy", "delete", &proxy_id]).await, "");
     assert!(fixture.ok(&["node", "delete", "laptop"]).await.contains("节点 laptop 已删除"));

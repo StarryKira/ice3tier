@@ -646,6 +646,10 @@ impl Session {
         let pairs = format!("/networks/{network}/pairs");
         match command {
             PairCommand::List => self.show_list(self.get(&pairs).await?, render::pairs),
+            PairCommand::Show { a, b } => {
+                let (a, b) = (self.node(network, &a).await?.id, self.node(network, &b).await?.id);
+                self.show(self.get(&format!("{pairs}/{a}/{b}")).await?, render::pair)
+            }
             PairCommand::Set { a, b, keep_alive, lane, congestion } => {
                 let (a, b) = (self.node(network, &a).await?.id, self.node(network, &b).await?.id);
                 let input = PairInput { keep_alive: keep_alive.map(|on| on.0), lane, congestion: congestion.map(|arg| arg.0) };

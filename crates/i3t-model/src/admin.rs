@@ -1372,6 +1372,14 @@ pub struct PairSetting {
     pub congestion: Option<Congestion>,
 }
 
+impl PairSetting {
+    /// 没有存下设置的一对：各项都是默认值。两个节点的先后顺序无所谓。
+    #[must_use]
+    pub fn unset(a: NodeId, b: NodeId) -> Self {
+        Self { a: a.min(b), b: a.max(b), keep_alive: false, lane: LaneMode::PAIR_DEFAULT, congestion: None }
+    }
+}
+
 /// 改一对节点的设置。没有写的项不变（这一对还没有设置时取默认值）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PairInput {
@@ -1389,12 +1397,20 @@ pub struct PairInput {
 pub struct PairView {
     #[serde(flatten)]
     pub setting: PairSetting,
+    /// 这一对有没有存下的设置。没有时各项都是默认值：连接不常驻，ice3proxy 是 [`LaneMode::PAIR_DEFAULT`]（没有 UDP 的路时用），
+    /// 拥塞控制用节点的默认。比这个字段旧的 controller 只列存下的设置，读成 `true`。
+    #[serde(default = "stored_by_default")]
+    pub stored: bool,
     /// ice3proxy 的设置起不起作用。`lane` 是 `off` 时没有。
     #[serde(default)]
     pub lane_effect: Option<LaneEffect>,
     /// 两个节点各自报上来的、和对方之间的 lane（不在线或者没报的节点不在里面）。
     #[serde(default)]
     pub lanes: Vec<PairLaneSide>,
+}
+
+const fn stored_by_default() -> bool {
+    true
 }
 
 /// ice3proxy 的设置起不起作用，为什么。
@@ -1424,8 +1440,9 @@ pub struct LaneOpening {
     pub node: NodeId,
     /// 它到对方的共用连接现在有没有 UDP 的路。
     pub udp_path: bool,
-    /// 它现在开的新 TCP 流走 ice3proxy：设置起作用，并且共用连接上没有 UDP 的路。取不到 lane 时（控制连接不在、池空了）
-    /// 照样悄悄改走共用的连接，见 `lanes` 里的 `control` 和 `fallbacks`。
+    /// 它现在开的新 TCP 流走 ice3proxy：设置起作用，共用连接上没有 UDP 的路，并且它和对方之间的控制连接在（它报的 `control`）。
+    /// 控制连接不在时（拨号方还没拨上来，或者拨号方那一段有 UDP、不拨）新的流直接走共用的连接；控制连接在、却取不到 lane 时
+    /// （池空了、对方在排空）也悄悄改走共用的连接，记在 `lanes` 的 `fallbacks` 里。
     pub lanes: bool,
 }
 
@@ -1437,7 +1454,8 @@ pub enum LaneBlock {
     NoRelay,
     /// 启用了 relay 的这个节点还没有已知的地址（它还没有连上过 controller）。
     NoTcpAddress { node: NodeId },
-    /// 这个节点的版本太旧，不懂 ice3proxy（或者还从来没有连上过 controller）。
+    /// 这个节点的版本太旧，不懂 ice3proxy；没有存下设置的一对（默认的 `udp_fallback`）是不懂按需拨号，
+    /// 见 [`LANE_DEFAULT_REVISION`](crate::control::LANE_DEFAULT_REVISION)。
     NodeTooOld { node: NodeId },
     /// 访问规则没有连通这两个节点：它们互相不在对方的 netmap 里。
     NotConnected,
@@ -1928,6 +1946,7 @@ mod tests {
         let b = NodeId::new(2).unwrap();
         let view = PairView {
             setting: PairSetting { a, b, keep_alive: true, lane: LaneMode::UdpFallback, congestion: Some(Congestion::Cubic) },
+            stored: false,
             lane_effect: Some(LaneEffect {
                 effective: false,
                 blocked: vec![LaneBlock::NoRelay, LaneBlock::NodeTooOld { node: b }],
@@ -1942,7 +1961,11 @@ mod tests {
         assert_eq!(value["congestion"], json!("cubic"));
         assert_eq!(value["lane_effect"]["blocked"], json!([{ "reason": "no_relay" }, { "reason": "node_too_old", "node": 2 }]));
         assert_eq!(value["lane_effect"]["opening"], json!([{ "node": 1, "udp_path": false, "lanes": false }]));
-        assert_eq!(serde_json::from_value::<PairView>(value).unwrap(), view);
+        assert_eq!(value["stored"], json!(false), "没有存下的设置：各项都是默认值");
+        assert_eq!(serde_json::from_value::<PairView>(value.clone()).unwrap(), view);
+        let mut older = value;
+        older.as_object_mut().unwrap().remove("stored");
+        assert!(serde_json::from_value::<PairView>(older).unwrap().stored, "旧的 controller 只列存下的设置");
         // 旧的 controller 给的节点对没有 ice3proxy 的设置。
         let old: PairSetting = serde_json::from_value(json!({ "a": 1, "b": 2, "keep_alive": false })).unwrap();
         assert_eq!((old.lane, old.congestion), (LaneMode::Off, None));

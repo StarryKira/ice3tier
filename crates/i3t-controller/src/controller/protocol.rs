@@ -329,6 +329,13 @@ impl Inner {
             let holders = self.holders_of(node.id);
             self.defer(node.network, holders, self.timing.report_coalesce);
         }
+        // 没有设置的节点对给不给默认的 ice3proxy，要看两个节点都懂不懂按需拨号：它的对端的 netmap 里写着它们之间的这一项。
+        let on_demand_before = self.on_demand_lanes(node.id);
+        self.protocols.insert(node.id, hello.protocol);
+        if self.on_demand_lanes(node.id) != on_demand_before {
+            let holders = self.holders_of(node.id);
+            self.defer(node.network, holders, self.timing.report_coalesce);
+        }
         // relay 的地址写在全网每个节点的 netmap 里（白皮书 §7.2）：声明的或者 controller 看到的地址变了，大家都要知道。
         if node.relay.is_some() && node_addresses::relay_addresses(node, cidr) != addresses_before {
             tracing::info!(node = %node.id, name = %node.name, "relay 的地址变了");

@@ -612,6 +612,11 @@ async fn proxies_forwards_and_pairs_round_trip() {
     assert_eq!(serde_json::to_value(listed[0].status).unwrap(), json!("target_offline"));
 
     let pair_path = format!("{base}/pairs/{}/{}", target.id, gateway.id);
+    // 没有设置的一对也查得到：各项是默认值，`stored` 是 false。
+    let (status, unset) = api.call(Method::GET, &pair_path, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!((&unset["stored"], &unset["lane"], &unset["keep_alive"]), (&json!(false), &json!("udp_fallback"), &json!(false)), "{unset}");
+    api.fails(Method::GET, &format!("{base}/pairs/{0}/{0}", gateway.id), None, StatusCode::BAD_REQUEST).await;
     let pair: model::PairSetting = api.ok(Method::PUT, &pair_path, Some(json!({ "keep_alive": true }))).await;
     assert_eq!((pair.a, pair.b, pair.keep_alive), (gateway.id, target.id, true), "编号小的在前");
     let pairs: Vec<model::PairSetting> = api.ok(Method::GET, &format!("{base}/pairs"), None).await;
@@ -627,11 +632,13 @@ async fn proxies_forwards_and_pairs_round_trip() {
         .await;
     assert_eq!(same.code, model::ErrorCode::InvalidRequest);
 
-    for path in [pair_path, format!("{base}/forwards/{forward_id}"), format!("{base}/proxies/{proxy_id}")] {
+    for path in [pair_path.clone(), format!("{base}/forwards/{forward_id}"), format!("{base}/proxies/{proxy_id}")] {
         let (status, body) = api.call(Method::DELETE, &path, None).await;
         assert_eq!((status, body), (StatusCode::NO_CONTENT, Value::Null), "{path}");
         api.fails(Method::DELETE, &path, None, StatusCode::NOT_FOUND).await;
     }
+    let (_, back) = api.call(Method::GET, &pair_path, None).await;
+    assert_eq!(back["stored"], json!(false), "去掉设置之后回到默认");
 }
 
 /// 节点现在的名字。

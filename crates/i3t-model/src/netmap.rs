@@ -352,7 +352,8 @@ pub struct Peer {
     /// 到这个对端的连接常驻，不因为没有流而关闭。
     #[serde(default)]
     pub keep_alive: bool,
-    /// 和这个对端之间承载 TCP 连接的流用不用 ice3proxy（lane）。一对节点各自的 netmap 里互相看到同一个值。
+    /// 和这个对端之间承载 TCP 连接的流用不用 ice3proxy（lane）。一对节点各自的 netmap 里互相看到同一个值
+    /// （没有设置的一对是默认值，两个节点都够新才是，见 [`LaneMode::PAIR_DEFAULT`]）。
     /// 比本程序新的 controller 下发了这里不认识的值时按 `off` 处理。
     #[serde(default, deserialize_with = "tolerant_lane_mode")]
     pub lane: LaneMode,
@@ -417,6 +418,9 @@ fn tolerant_lane_mode<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Resu
 ///
 /// 要两个节点里至少有一个启用了 relay、它的 TCP 端口另一个连得上（见 [`Relay::tcp`]），否则不起作用，按 `off` 走。
 /// UDP 应用的数据和别的流始终走共用的连接。
+///
+/// `Default` 是 `Off`：netmap 和应答里没有这一项（旧的 controller）时就是不用。没有存下设置的节点对用的是
+/// [`LaneMode::PAIR_DEFAULT`]，两者不是一回事。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LaneMode {
@@ -424,12 +428,17 @@ pub enum LaneMode {
     #[default]
     Off,
     /// 共用的连接到对端的路上没有 UDP（UDP 不通、只能经 relay 的 TCP 中转）时，新的 TCP 流走 ice3proxy。
+    /// 拨号方也只在这时拨，UDP 回来一阵之后放手：两边都有 UDP 的路时什么都不连。
     UdpFallback,
-    /// 能开出 ice3proxy 时新的 TCP 流都走它。
+    /// 能开出 ice3proxy 时新的 TCP 流都走它。拨号方一直拨着。
     Always,
 }
 
 impl LaneMode {
+    /// 没有存下设置的节点对用的值。controller 只把它发给两个节点都懂按需拨号的一对
+    /// （节点协议 [`LANE_DEFAULT_REVISION`](crate::control::LANE_DEFAULT_REVISION) 起），别的照旧是 `off`。
+    pub const PAIR_DEFAULT: Self = Self::UdpFallback;
+
     /// 在 netmap、管理接口和命令行里的写法。
     #[must_use]
     pub const fn as_str(self) -> &'static str {

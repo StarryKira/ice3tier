@@ -409,10 +409,110 @@ fn the_pair_view_says_how_old_each_lane_report_is_and_whether_new_tcp_streams_us
     assert_eq!(opening, expected, "共用连接上没有 UDP 的那一边在 lane 上开新的 TCP 流");
     assert_eq!(lab.controller.node(network.id, member.id).unwrap().reported_secs_ago, Some(0));
 
+    // 没有 UDP、控制 lane 却不在（拨号方那一段有 UDP，不拨；或者还没拨上来）：新的流直接走共用的连接。
+    let mut down = report(relay.id, Some(false));
+    if let ToController::Report(report) = &mut down {
+        report.lanes.as_mut().unwrap().peers[0].control = false;
+    }
+    member.send(&lab.controller, down);
+    let opening = lab.controller.pairs(network.id).unwrap().remove(0).lane_effect.unwrap().opening;
+    let member_side = opening.iter().find(|side| side.node == member.id).unwrap();
+    assert_eq!((member_side.udp_path, member_side.lanes), (false, false), "lane 没建着时不说走 ice3proxy");
+
     lab.controller
         .set_pair(network.id, relay.id, member.id, PairInput { keep_alive: None, lane: Some(LaneMode::Always), congestion: None })
         .unwrap();
     assert!(lab.controller.pairs(network.id).unwrap()[0].lane_effect.as_ref().unwrap().opening.is_empty(), "只在 udp_fallback 时说");
+}
+
+/// 一个说着指定版本节点协议的节点加入，保持在线。
+fn join_speaking(lab: &mut Lab, network: i3t_model::admin::NetworkId, protocol: u32) -> super::super::testing::Member {
+    let hello = Hello { protocol, ..super::super::testing::modern_hello("0.1.19") };
+    lab.join_as(network, &hello)
+}
+
+#[test]
+fn a_pair_without_a_setting_gets_udp_fallback_only_when_both_nodes_dial_on_demand() {
+    use i3t_model::control::LANE_DEFAULT_REVISION;
+
+    let mut lab = Lab::new();
+    let network = lab.network("home");
+    let mut a = join_speaking(&mut lab, network.id, LANE_DEFAULT_REVISION);
+    let mut b = join_speaking(&mut lab, network.id, LANE_DEFAULT_REVISION);
+    // 上一版的节点：懂 ice3proxy，但在 udp_fallback 下一直拨着。
+    let mut old = join_speaking(&mut lab, network.id, LANE_DEFAULT_REVISION - 1);
+    lab.settle(&mut [&mut a, &mut b, &mut old]);
+    let lane_of = |member: &super::super::testing::Member, peer| member.netmap().peer(peer).unwrap().lane;
+
+    assert_eq!((lane_of(&a, b.id), lane_of(&b, a.id)), (LaneMode::UdpFallback, LaneMode::UdpFallback), "没有设置：默认的 udp_fallback");
+    assert_eq!((lane_of(&a, old.id), lane_of(&old, a.id)), (LaneMode::Off, LaneMode::Off), "有一个是旧节点：照旧是 off，两边一样");
+    assert!(lab.controller.pairs(network.id).unwrap().is_empty(), "默认值不是存下的设置，列表里没有");
+
+    // 存下的设置照原样：off 就是 off；旧节点也照样拿到存下的 always。
+    let set = |mode| PairInput { keep_alive: None, lane: Some(mode), congestion: None };
+    lab.controller.set_pair(network.id, a.id, b.id, set(LaneMode::Off)).unwrap();
+    lab.controller.set_pair(network.id, a.id, old.id, set(LaneMode::Always)).unwrap();
+    lab.settle(&mut [&mut a, &mut b, &mut old]);
+    assert_eq!((lane_of(&a, b.id), lane_of(&b, a.id)), (LaneMode::Off, LaneMode::Off), "存下的 off");
+    assert_eq!((lane_of(&a, old.id), lane_of(&old, a.id)), (LaneMode::Always, LaneMode::Always));
+    // 去掉设置回到默认。
+    lab.controller.delete_pair(network.id, a.id, b.id).unwrap();
+    lab.controller.delete_pair(network.id, a.id, old.id).unwrap();
+    lab.settle(&mut [&mut a, &mut b, &mut old]);
+    assert_eq!((lane_of(&a, b.id), lane_of(&a, old.id)), (LaneMode::UdpFallback, LaneMode::Off));
+
+    // 旧节点更新之后重新连上来：它的对端随之拿到默认值，不用等别的变化。
+    lab.controller.disconnect(old.session);
+    let mut updated =
+        lab.connect_as(old.key, &Hello { protocol: LANE_DEFAULT_REVISION, ..super::super::testing::modern_hello("0.1.19") }).unwrap();
+    lab.settle(&mut [&mut a, &mut b, &mut updated]);
+    assert_eq!((lane_of(&a, updated.id), lane_of(&updated, a.id)), (LaneMode::UdpFallback, LaneMode::UdpFallback));
+    // 又换回旧的程序（回滚）：两边回到 off。
+    lab.controller.disconnect(updated.session);
+    let mut rolled_back =
+        lab.connect_as(old.key, &Hello { protocol: LANE_DEFAULT_REVISION - 1, ..super::super::testing::modern_hello("0.1.18") }).unwrap();
+    lab.settle(&mut [&mut a, &mut b, &mut rolled_back]);
+    assert_eq!((lane_of(&a, rolled_back.id), lane_of(&rolled_back, a.id)), (LaneMode::Off, LaneMode::Off));
+}
+
+#[test]
+fn the_view_of_a_pair_without_a_setting_says_it_is_the_default_and_what_stops_it() {
+    use i3t_model::control::{LANE_DEFAULT_REVISION, LANE_REVISION};
+
+    let mut lab = Lab::new();
+    let network = lab.network("home");
+    let declared = Hello { protocol: LANE_DEFAULT_REVISION, ..super::super::testing::hello(CAN_DO_ALL) };
+    let mut relay = lab.join_as(network.id, &declared);
+    let mut member = join_speaking(&mut lab, network.id, LANE_DEFAULT_REVISION);
+    let mut old = join_speaking(&mut lab, network.id, LANE_REVISION);
+    lab.settle(&mut [&mut relay, &mut member, &mut old]);
+    lab.controller.enable_relay(network.id, relay.id, relay_settings()).unwrap();
+
+    let view = lab.controller.pair(network.id, member.id, relay.id).unwrap();
+    assert!(!view.stored, "没有存下的设置");
+    let setting = view.setting;
+    assert_eq!((setting.a, setting.b), (relay.id.min(member.id), relay.id.max(member.id)), "先后顺序无所谓");
+    assert_eq!((setting.keep_alive, setting.lane, setting.congestion), (false, LaneMode::UdpFallback, None), "各项都是默认值");
+    let effect = view.lane_effect.unwrap();
+    assert!(effect.effective && effect.dialers == vec![member.id], "{effect:?}");
+    assert!(effect.summary.starts_with("没有设置，用默认"), "{}", effect.summary);
+
+    // 默认值要两边都懂按需拨号；存下的设置只要懂 ice3proxy。
+    let blocked = lab.controller.pair(network.id, old.id, relay.id).unwrap().lane_effect.unwrap().blocked;
+    assert_eq!(blocked, vec![LaneBlock::NodeTooOld { node: old.id }]);
+    let stored = PairInput { keep_alive: None, lane: Some(LaneMode::UdpFallback), congestion: None };
+    let view = lab.controller.set_pair(network.id, old.id, relay.id, stored).unwrap();
+    assert!(view.stored && view.lane_effect.unwrap().effective, "存下的 udp_fallback 照旧发给旧节点");
+
+    // 只设常驻的新的一对：ice3proxy 存下的是默认值。
+    let keep = PairInput { keep_alive: Some(true), lane: None, congestion: None };
+    let view = lab.controller.set_pair(network.id, member.id, relay.id, keep).unwrap();
+    assert!(view.stored);
+    assert_eq!((view.setting.keep_alive, view.setting.lane), (true, LaneMode::PAIR_DEFAULT));
+
+    assert_eq!(lab.controller.pair(network.id, member.id, member.id).unwrap_err().code(), i3t_model::admin::ErrorCode::InvalidRequest);
+    let other = lab.network("work");
+    assert_eq!(lab.controller.pair(other.id, member.id, relay.id).unwrap_err().code(), i3t_model::admin::ErrorCode::NotFound);
 }
 
 #[test]
@@ -459,7 +559,8 @@ fn a_lane_setting_reaches_both_nodes_and_the_pair_view_says_why_it_does_not_work
     let pair = pairs.iter().find(|pair| (pair.setting.a, pair.setting.b) == (entry, exit)).unwrap();
     assert_eq!(pair.lane_effect.as_ref().unwrap().blocked, vec![LaneBlock::NotConnected]);
 
-    // 去掉设置回到 off；节点删掉时它的设置一起没了。
+    // 去掉设置回到默认：这两个节点说的是最初那一版节点协议，不懂按需拨号，默认的 udp_fallback 不发给它们，是 off；
+    // 节点删掉时它的设置一起没了。
     add_rule(&lab, network.id, "all", "all", Direction::Both);
     lab.controller.delete_pair(network.id, entry, exit).unwrap();
     assert_eq!(lab.netmap(exit).peer(entry).unwrap().lane, LaneMode::Off);

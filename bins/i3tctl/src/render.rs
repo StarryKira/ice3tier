@@ -1070,6 +1070,7 @@ pub fn pairs(pairs: &[PairView]) {
         ]);
     }
     print_table(&table, t.no_pairs);
+    println!("{}", t.pairs_default);
 }
 
 pub fn pair(pair: &PairView) {
@@ -1078,7 +1079,8 @@ pub fn pair(pair: &PairView) {
     println!("#{} ↔ #{}", setting.a, setting.b);
     let mut fields = Fields::new(2);
     fields.add(t.keep_alive, yes_no(setting.keep_alive));
-    fields.add(t.lanes, setting.lane.to_string());
+    let lane = setting.lane.to_string();
+    fields.add(t.lanes, if pair.stored { lane } else { lang.paren(&lane, t.pair_default) });
     fields.add(t.congestion, setting.congestion.map_or_else(|| t.congestion_default.to_owned(), |algorithm| algorithm.to_string()));
     let names = |id: NodeId| format!("#{id}");
     if let Some(effect) = &pair.lane_effect {

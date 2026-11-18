@@ -144,6 +144,9 @@ pub(crate) struct Inner {
     pub(crate) sync: BTreeMap<NodeId, NodeSync>,
     /// 现在连着的节点。
     pub(crate) live: BTreeMap<NodeId, Live>,
+    /// 每个节点最近一次说的节点协议是第几版。节点离线之后留着；controller 重启就没有了，节点重新连上来时再知道。
+    /// 没有设置的节点对给不给默认的 ice3proxy 看它（见 `pairs`）。
+    pub(crate) protocols: BTreeMap<NodeId, u32>,
     /// 等着延后重算的节点。
     pub(crate) dirty: BTreeMap<NodeId, Deferred>,
     /// 各个节点最近上报的路由表。节点离线之后留着，界面上显示成过期的；controller 重启就没有了。
@@ -248,6 +251,7 @@ impl Controller {
             clock: Clock::default(),
             sync: BTreeMap::new(),
             live: BTreeMap::new(),
+            protocols: BTreeMap::new(),
             dirty: BTreeMap::new(),
             routes: BTreeMap::new(),
             usage: usage::Usage::default(),
@@ -382,7 +386,8 @@ impl Controller {
         let Some(record) = inner.store.node(node)? else { return Ok(None) };
         let Some(view) = NetworkView::load(&inner.store, record.network)? else { return Ok(None) };
         let Some(sync) = inner.sync.get(&node) else { return Ok(None) };
-        Ok(view.compile(&view.access(), node, &sync.relations).map(|netmap| Netmap { version: sync.state.version, ..netmap }))
+        let netmap = view.compile(&view.access(), node, &sync.relations, |node| inner.on_demand_lanes(node));
+        Ok(netmap.map(|netmap| Netmap { version: sync.state.version, ..netmap }))
     }
 
     /// 做到期的后台工作：延后的下发、不再等迟迟不确认的节点、清理过期的令牌和冷却记录。

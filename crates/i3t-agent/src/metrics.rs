@@ -134,7 +134,7 @@ pub(crate) fn render(runtime: &Runtime) -> String {
         }
     }
 
-    lane_metrics(&mut out, &runtime.lanes.status(), &name_of);
+    lane_metrics(&mut out, &runtime.lanes.listed_status(), &name_of);
 
     let update = update_label(&runtime.update.borrow());
     out.gauge("i3t_update_state", "程序更新进行到哪一步", &[("state", &update)], 1.0);
@@ -150,7 +150,8 @@ fn rtt_deviation_ms(predicted_ms: Option<u32>, actual: std::time::Duration) -> O
     predicted_ms.map(|predicted| millis(actual) - f64::from(predicted))
 }
 
-/// ice3proxy（lane）：每个打开了它的对端一组，加上全节点的握手失败。
+/// ice3proxy（lane）：每个列出来的对端一组（`always` 的，和 `udp_fallback` 里现在要用或者正在用的，见 `lanes::listed`），
+/// 加上全节点的握手失败。
 fn lane_metrics(out: &mut Exposition, status: &LaneStatus, name_of: &impl Fn(NodeId) -> String) {
     for peer in &status.peers {
         let name = name_of(peer.peer);
