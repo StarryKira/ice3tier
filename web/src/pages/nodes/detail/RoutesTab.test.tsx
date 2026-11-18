@@ -187,7 +187,30 @@ describe('路由', () => {
       lanes: {
         total: LANE_COUNTS,
         handshake_failures: { deadline: 0, unknown_key: 0, tls: 0, protocol: 0, busy: 0 },
-        peers: [{ ...LANE_COUNTS, peer: 4, dials: true, control: true, idle: 0, ready: 0, parked_at_peer: 0 }],
+        peers: [
+          {
+            ...LANE_COUNTS,
+            peer: 4,
+            dials: true,
+            control: true,
+            idle: 0,
+            ready: 0,
+            parked_at_peer: 0,
+            udp_path: false,
+          },
+          // UDP 回来了，控制连接还留着：没有设置的一对，新的连接已经不走 ice3proxy。
+          {
+            ...LANE_COUNTS,
+            in_use: 0,
+            peer: 2,
+            dials: true,
+            control: true,
+            idle: 0,
+            ready: 0,
+            parked_at_peer: 0,
+            udp_path: true,
+          },
+        ],
       },
     }
     renderWithApp(<RoutesTab network={NETWORK} node={withLane} />)
@@ -236,6 +259,11 @@ describe('路由', () => {
       '1',
       t.common.ms(2),
     ])
+    // ice3proxy 那一行点了去节点对页看这一对。
+    expect(
+      within(pc).getAllByRole('link', { name: t.routes.protocol.over(t.routes.protocol.lane, 'TCP') })[0],
+    ).toHaveAttribute('href', '/n/1/pairs?a=1&b=4')
+    expect(within(nas).queryByRole('link', { name: t.routes.protocol.over(t.routes.protocol.lane, 'TCP') })).toBeNull()
     expect(api.callsTo('GET /networks/1/path')).toHaveLength(0)
     expect(screen.queryByRole('button', { name: d.routesRecompute(d.routingLowestCost) })).toBeNull()
   })

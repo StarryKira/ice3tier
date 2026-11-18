@@ -312,6 +312,11 @@ export interface Node {
    * 比这个界面旧的 controller 没有这个字段，看 `observed_endpoint`。
    */
   egress_ip?: string | null
+  /**
+   * 0.1.19 起：controller 认定这个节点用不了 UDP（连上的中继都只经 TCP，持续了两分钟）。
+   * 它和别的节点之间的 TCP 连接因此走 ice3proxy。更早的 controller 没有这个字段，按 `false` 算。
+   */
+  no_udp?: boolean
 }
 
 export interface Attachment {
@@ -577,7 +582,7 @@ export interface ForwardInput {
 
 /**
  * ice3proxy（lane）：一对节点之间承载 TCP 连接的流各用一条只属于它的 TCP，而不是共用那一条连接里的一条流。
- * `udp_fallback`：开流的一方到对方的共用连接上没有 UDP 的路时才用。
+ * `udp_fallback`：开流的一方到对方的路上没有 UDP 时才用（0.1.19 起是没有设置的节点对的默认）。
  */
 export type LaneMode = 'off' | 'udp_fallback' | 'always'
 
@@ -611,6 +616,18 @@ export interface LaneEffect {
   dialers: NodeId[]
   /** controller 写的一句中文。界面按 `blocked` 用自己的话写，只在原因不认识时用它。 */
   summary: string
+  /** 设置是 `udp_fallback` 时，两个节点各自开新的 TCP 流现在走不走 ice3proxy；别的设置是 `[]`。旧的 controller 不写。 */
+  opening?: LaneOpening[]
+}
+
+/** `udp_fallback` 下一个节点开新的 TCP 流现在走哪里。没报过的节点（有 UDP、什么都没连着）不在里面。 */
+export interface LaneOpening {
+  /** 开流的节点。 */
+  node: NodeId
+  /** 它到对方的路上现在有没有 UDP（对方用不了 UDP 时是 `false`）。 */
+  udp_path: boolean
+  /** 它现在开的新 TCP 流走 ice3proxy：设置起作用，没有 UDP，和对方之间的控制连接在。 */
+  lanes: boolean
 }
 
 /** ice3proxy 的计数，从节点启动算起的累计；`in_use`、`dialling` 是现在的值。 */
@@ -639,7 +656,7 @@ export interface LaneCounts {
 /** 一个节点上和一个对端之间的 ice3proxy。 */
 export interface PeerLanes extends LaneCounts {
   peer: NodeId
-  /** 这个节点拨不拨对端。 */
+  /** 这个节点现在拨不拨对端（`udp_fallback` 下按需拨）。 */
   dials: boolean
   /** 和对端之间的控制连接在不在。不在时新的 TCP 流走共用的连接。 */
   control: boolean
@@ -649,6 +666,11 @@ export interface PeerLanes extends LaneCounts {
   ready: number
   /** 这个节点拨出去、停在对端那里的空闲连接。 */
   parked_at_peer: number
+  /**
+   * 这个节点到对端的路上现在有没有 UDP（对端用不了 UDP 时是 `false`）；`udp_fallback` 下没有才拨、才走 ice3proxy。
+   * 旧版本的节点不报、现在没有路时是 `null`；更早的 controller 不写。
+   */
+  udp_path?: boolean | null
 }
 
 export interface PairLaneSide {
@@ -659,6 +681,11 @@ export interface PairLaneSide {
 
 /** 节点对的接口应答的：设置，加上 ice3proxy 起不起作用、两个节点各自报的状况。 */
 export interface PairView extends PairSetting {
+  /**
+   * 0.1.19 起：这一对有没有存下的设置。`false` 时各项都是默认值，只有 `GET …/pairs/{a}/{b}` 会这样答；
+   * 列表和 `PUT` 的应答里总是 `true`。更早的 controller 没有这个字段，按 `true` 算。
+   */
+  stored?: boolean
   /** `lane` 是 `off` 时是 `null`。比界面旧的 controller 不写。 */
   lane_effect?: LaneEffect | null
   /** 不在线、版本太旧、没有为对方打开的节点不在里面。比界面旧的 controller 不写。 */
@@ -679,7 +706,7 @@ export interface LaneReport {
   /** 全节点的合计（对端去掉之后也不减）。 */
   total: LaneCounts
   handshake_failures: LaneHandshakeFailures
-  /** 每个打开了 ice3proxy 的对端。 */
+  /** 设置为 `always` 的对端，和 `udp_fallback`（包括默认）的对端里现在要用或者正在用的。 */
   peers: PeerLanes[]
 }
 

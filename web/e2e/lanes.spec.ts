@@ -214,6 +214,23 @@ test('改回"不用"：只发这一项，状态不再显示', async () => {
   await clearToasts(page)
 })
 
+test('恢复默认：这一对不在列表里了；从地址打开它，标着默认，在待命（回环上有 UDP，谁都不拨）', async () => {
+  const row = page.getByTestId('pair-row-gw-laptop')
+  await row.getByRole('button', { name: t.pairs.removeFor('gw', 'laptop') }).click()
+  await expectToast(page, t.pairs.removed('gw', 'laptop'))
+  await expect(row).toHaveCount(0)
+  await clearToasts(page)
+
+  await page.goto(`${controller.baseUrl}/n/1/pairs?a=${nodes.laptop.id}&b=${nodes.gw.id}`)
+  const unset = page.getByTestId('pair-row-gw-laptop')
+  await expect(unset.getByText(t.pairs.defaultBadge, { exact: true })).toBeVisible()
+  await expect(unset.getByRole('combobox', { name: l.select('gw', 'laptop') })).toHaveValue('udp_fallback')
+  // 上一步的连接刚断：节点下一次上报（10 秒一次）之前还算在用。
+  await expect(unset.getByTestId('lane-effect-gw-laptop')).toContainText(l.standby, { timeout: 30_000 })
+  await expect(unset.getByTestId('lane-effect-gw-laptop')).toContainText(l.hasUdp)
+  await expect(unset.getByRole('button', { name: t.pairs.removeFor('gw', 'laptop') })).toHaveCount(0)
+})
+
 test('两个节点都不是 relay：设置不起作用，说为什么，给出启用 relay 的那一步', async () => {
   await controller.api('PUT', `${NET}/pairs/${nodes.laptop.id}/${nodes.nas.id}`, { lane: 'udp_fallback' })
   await page.reload()

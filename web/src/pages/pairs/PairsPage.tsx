@@ -14,6 +14,7 @@ import { Page, PageHeader } from '@/components/page'
 import { EmptyState, ErrorState, SkeletonRows } from '@/components/states'
 import { StatusText } from '@/components/status'
 import { Table, TableNote, Td, Th, Tr } from '@/components/table'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Field } from '@/components/ui/field'
 import { NativeSelect } from '@/components/ui/input'
@@ -25,6 +26,7 @@ import { formatBytes } from '@/lib/format'
 import {
   handshakeParts,
   handshakeTotal,
+  LANE_DEFAULT,
   LANE_MODES,
   type LaneFix,
   laneEffectView,
@@ -32,6 +34,7 @@ import {
   laneModeLabel,
   lanesReported,
   pairGlance,
+  pairStored,
 } from '@/lib/lanes'
 import { relayHasTcp } from '@/lib/relay'
 import { nodeName, nodePath } from '@/lib/nodes'
@@ -53,13 +56,16 @@ interface AddPairDialogProps {
   onClose: () => void
 }
 
-/** 添加节点对：两个节点和两项设置。连接常驻默认开着，和以前只有这一项时一样。 */
+/**
+ * 添加节点对：两个节点和两项设置。连接常驻默认开着，和以前只有这一项时一样；ice3proxy 默认选着没有设置时的那一项，
+ * 选"不用"才是特意关掉它。两项都和默认一样时不用添加。
+ */
 function AddPairDialog({ network, existing, open, onClose }: AddPairDialogProps) {
   const nodes = useQuery(q.nodes(network.id))
   const [a, setA] = useState<NodeId | null>(null)
   const [b, setB] = useState<NodeId | null>(null)
   const [keepAlive, setKeepAlive] = useState(true)
-  const [lane, setLane] = useState<LaneMode>('off')
+  const [lane, setLane] = useState<LaneMode>(LANE_DEFAULT)
   const [touched, setTouched] = useState(false)
   const keepAliveId = useId()
   const laneLabel = useId()
@@ -85,7 +91,7 @@ function AddPairDialog({ network, existing, open, onClose }: AddPairDialogProps)
         ? p.same
         : exists
           ? p.exists
-          : !keepAlive && lane === 'off'
+          : !keepAlive && lane === LANE_DEFAULT
             ? p.nothingSet
             : null
 
@@ -173,6 +179,11 @@ function LaneDetails({ network, pair, names }: { network: Network; pair: PairVie
   ]
   const dash = <span className="text-muted-foreground">{l.notReported}</span>
   const rows: { label: ReactNode; value: (side: (typeof sides)[number]) => ReactNode }[] = [
+    {
+      label: <TipHeader label={l.row.udpPath} tip={l.row.udpPathTip} />,
+      value: ({ report }) =>
+        report?.lanes.udp_path == null ? dash : report.lanes.udp_path ? l.row.udpPathYes : l.row.udpPathNo,
+    },
     {
       label: <TipHeader label={l.row.control} tip={l.row.controlTip} />,
       value: ({ report }) => (report === undefined ? dash : report.lanes.control ? l.row.controlUp : l.row.controlDown),
@@ -262,8 +273,10 @@ function LaneDetails({ network, pair, names }: { network: Network; pair: PairVie
 
 /**
  * 节点对设置：连接常驻和 ice3proxy（lane）。设置的控件改了立即生效；ice3proxy 不是"不用"时，
- * 写着它起不起作用、谁拨号，不起作用时下面一行是原因和修好它的那一步；两个节点报的计数一眼看几个，其余的点开看。
- * 从节点详情过来时地址里带着 `a`、`b`：那一对亮出来，详情展开。
+ * 写着它起不起作用、谁拨号（"没有 UDP 时用"还分在用和待命），不起作用时下面一行是原因和修好它的那一步；
+ * 两个节点报的计数一眼看几个，其余的点开看。
+ * 从节点详情过来时地址里带着 `a`、`b`：那一对亮出来，详情展开。它没有设置时单独取来，标着"默认"排在最前面，
+ * 改一项就存下来，成为列表里的一行。
  */
 export function PairsPage() {
   useDocumentTitle(p.title)
@@ -302,11 +315,20 @@ export function PairsPage() {
   })
 
   const list = pairs.data ?? []
-  const empty = pairs.isSuccess && list.length === 0
+  const focusListed = list.some((pair) => pairKey(pair.a, pair.b) === focusKey)
+  const focusDefault = useQuery({
+    ...q.pair(network.id, focus.a ?? 0, focus.b ?? 0),
+    enabled: focusKey !== null && focus.a !== focus.b && pairs.isSuccess && !focusListed,
+  })
+  const rows: readonly PairView[] =
+    focusDefault.data !== undefined && !pairStored(focusDefault.data) && !focusListed
+      ? [focusDefault.data, ...list]
+      : list
+  const empty = pairs.isSuccess && rows.length === 0
   const tooFew = nodes.isSuccess && all.length < 2
   // 状态那一列只在有哪一对开着 ice3proxy 时画；计数的几列只在有数可看（或者马上就会有）时画。不然它们整列都是空的。
-  const effectShown = list.some((pair) => laneMode(pair) !== 'off')
-  const lanesShown = list.some((pair) => lanesReported(pair) || pair.lane_effect?.effective === true)
+  const effectShown = rows.some((pair) => laneMode(pair) !== 'off')
+  const lanesShown = rows.some((pair) => lanesReported(pair) || pair.lane_effect?.effective === true)
   const columns = 4 + (effectShown ? 1 : 0) + (lanesShown ? 4 : 0)
   const addButton = (
     <Button variant="primary" onClick={() => setAdding(true)} disabled={tooFew}>
@@ -325,7 +347,7 @@ export function PairsPage() {
           <EmptyState
             icon={Link2}
             title={p.emptyTitle}
-            description={tooFew ? p.emptyNeedTwo : undefined}
+            description={tooFew ? p.emptyNeedTwo : p.defaultNote}
             action={addButton}
           />
         ) : (
@@ -358,8 +380,9 @@ export function PairsPage() {
               </thead>
               <tbody>
                 {pairs.isPending ? <SkeletonRows columns={columns} rows={2} /> : null}
-                {list.map((pair) => {
+                {rows.map((pair) => {
                   const [a, b] = names(pair)
+                  const stored = pairStored(pair)
                   const key = pairKey(pair.a, pair.b)
                   const mode = laneMode(pair)
                   const effect = laneEffectView(pair, all)
@@ -390,6 +413,13 @@ export function PairsPage() {
                               node={{ id: pair.b, name: b }}
                               online={all.find((node) => node.id === pair.b)?.online}
                             />
+                            {stored ? null : (
+                              <Tooltip content={p.defaultBadgeTip}>
+                                <Badge tone="outline" tabIndex={0}>
+                                  {p.defaultBadge}
+                                </Badge>
+                              </Tooltip>
+                            )}
                           </span>
                         </Td>
                         <Td>
@@ -419,11 +449,11 @@ export function PairsPage() {
                           <Td className="whitespace-nowrap" data-testid={`lane-effect-${a}-${b}`}>
                             {effect.kind === 'off' ? null : (
                               <>
-                                <StatusText tone={effect.kind === 'effective' ? 'ok' : 'warn'}>
+                                <StatusText tone={effect.kind === 'blocked' ? 'warn' : effect.standby ? 'idle' : 'ok'}>
                                   {effect.label}
                                 </StatusText>
-                                {effect.kind === 'effective' && effect.dialers !== null ? (
-                                  <div className="mt-0.5 text-xs text-muted-foreground">{effect.dialers}</div>
+                                {effect.kind === 'effective' && effect.detail !== null ? (
+                                  <div className="mt-0.5 text-xs text-muted-foreground">{effect.detail}</div>
                                 ) : null}
                               </>
                             )}
@@ -456,17 +486,19 @@ export function PairsPage() {
                               />
                             </Button>
                           ) : null}
-                          <Tooltip content={p.remove}>
-                            <Button
-                              variant="ghost"
-                              size="icon-sm"
-                              aria-label={p.removeFor(a, b)}
-                              disabled={remove.isPending}
-                              onClick={() => remove.mutate(pair)}
-                            >
-                              <Trash2 aria-hidden />
-                            </Button>
-                          </Tooltip>
+                          {stored ? (
+                            <Tooltip content={p.remove}>
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
+                                aria-label={p.removeFor(a, b)}
+                                disabled={remove.isPending}
+                                onClick={() => remove.mutate(pair)}
+                              >
+                                <Trash2 aria-hidden />
+                              </Button>
+                            </Tooltip>
+                          ) : null}
                         </Td>
                       </Tr>
                       {reasons.length > 0 ? (
@@ -507,8 +539,9 @@ export function PairsPage() {
               </tbody>
             </Table>
             <TableNote>
+              <span className="block">{p.defaultNote}</span>
               <span className="block">{p.keepAliveHint}</span>
-              {list.some((pair) => laneMode(pair) !== 'off') ? <span className="block">{l.routeNote}</span> : null}
+              {rows.some((pair) => laneMode(pair) !== 'off') ? <span className="block">{l.routeNote}</span> : null}
             </TableNote>
           </>
         )}

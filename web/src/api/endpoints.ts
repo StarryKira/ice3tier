@@ -168,6 +168,8 @@ export const api = {
     request<Group>('DELETE', `${net(network)}/groups/${group}/nodes/${node}`),
 
   pairs: (network: NetworkId) => request<PairView[]>('GET', `${net(network)}/pairs`),
+  /** 一对节点，有没有存下设置都有（0.1.19 起）。 */
+  pair: (network: NetworkId, a: NodeId, b: NodeId) => request<PairView>('GET', `${net(network)}/pairs/${a}/${b}`),
   setPair: (network: NetworkId, a: NodeId, b: NodeId, body: PairInput) =>
     request<PairView>('PUT', `${net(network)}/pairs/${a}/${b}`, { body }),
   deletePair: (network: NetworkId, a: NodeId, b: NodeId) =>

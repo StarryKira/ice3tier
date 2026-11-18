@@ -34,6 +34,7 @@ export const keys = {
   proxies: (network: NetworkId) => ['n', network, 'proxies'] as const,
   forwards: (network: NetworkId) => ['n', network, 'forwards'] as const,
   pairs: (network: NetworkId) => ['n', network, 'pairs'] as const,
+  pair: (network: NetworkId, a: NodeId, b: NodeId) => ['n', network, 'pair', a, b] as const,
   exits: (network: NetworkId) => ['n', network, 'exits'] as const,
   matrix: (network: NetworkId) => ['n', network, 'matrix'] as const,
   path: (network: NetworkId, from: NodeId, to: NodeId) => ['n', network, 'path', from, to] as const,
@@ -129,6 +130,13 @@ export const q = {
   /** 带着两个节点报的 ice3proxy 的计数。 */
   pairs: (network: NetworkId) =>
     queryOptions({ queryKey: keys.pairs(network), queryFn: () => api.pairs(network), refetchInterval: LIVE_INTERVAL }),
+  /** 一对节点，没有存下设置的也有（`stored` 是 `false`）。 */
+  pair: (network: NetworkId, a: NodeId, b: NodeId) =>
+    queryOptions({
+      queryKey: keys.pair(network, a, b),
+      queryFn: () => api.pair(network, a, b),
+      refetchInterval: LIVE_INTERVAL,
+    }),
   /** 出口的设置、用量、健康，和用它的节点看到的。 */
   exits: (network: NetworkId) =>
     queryOptions({ queryKey: keys.exits(network), queryFn: () => api.exits(network), refetchInterval: LIVE_INTERVAL }),

@@ -36,6 +36,8 @@ export const nodes = {
   roleRelayAttached: (n: number) =>
     n === 0 ? '还没有节点可经过本节点中继' : `${n} 个节点可经过本节点中继连接其他的节点`,
   roleExit: '出口',
+  noUdp: '没有 UDP',
+  noUdpTip: '连中继都只能走 TCP；它和别的节点之间的 TCP 连接走 ice3proxy',
   roleExitUsers: (n: number) => (n === 0 ? '还没有节点可经过本节点访问互联网' : `${n} 个节点可经过本节点访问互联网`),
 
   emptyTitle: '还没有节点',

@@ -41,6 +41,8 @@ export const nodes: Messages['nodes'] = {
       ? 'No node relays through this node yet'
       : `${count(n, 'node', 'nodes')} can relay through this node to reach others`,
   roleExit: 'Exit',
+  noUdp: 'No UDP',
+  noUdpTip: 'Reaches relays over TCP only; its TCP connections to other nodes use ice3proxy',
   roleExitUsers: (n) =>
     n === 0
       ? 'No node can reach the internet through this node yet'

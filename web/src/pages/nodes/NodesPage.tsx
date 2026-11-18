@@ -79,7 +79,10 @@ const SEARCH_DEBOUNCE_MS = 300
 
 const roleLabel = (role: RoleFilter): string => (role === 'relay' ? t.nodes.roleRelay : t.nodes.roleExit)
 
-/** 角色的小徽标，跟在名字后面。`attached` 给了时，relay 的徽标上写着有几个节点挂靠在它上面，悬停有一句话。 */
+/**
+ * 角色的小徽标，跟在名字后面。`attached` 给了时，relay 的徽标上写着有几个节点挂靠在它上面，悬停有一句话。
+ * controller 认定节点用不了 UDP 时，后面再跟一个"没有 UDP"的线框标记，悬停说它的 TCP 连接因此走 ice3proxy。
+ */
 interface RoleBadgesProps {
   node: Node
   attached?: number
@@ -114,6 +117,13 @@ export function RoleBadges({ node, attached, exitUsers, size = 'sm' }: RoleBadge
           <Badge tabIndex={exitUsers === undefined ? undefined : 0} className={className}>
             {md ? <DoorOpen aria-hidden /> : null}
             {t.nodes.roleExit}
+          </Badge>
+        </Tooltip>
+      ) : null}
+      {node.no_udp === true ? (
+        <Tooltip content={t.nodes.noUdpTip}>
+          <Badge tone="outline" tabIndex={0} data-testid={`no-udp-badge-${node.name}`} className={className}>
+            {t.nodes.noUdp}
           </Badge>
         </Tooltip>
       ) : null}

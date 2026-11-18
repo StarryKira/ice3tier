@@ -26,6 +26,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
 import { formatBytes } from '@/lib/format'
+import { pairLaneMode, peerUsesLanes } from '@/lib/lanes'
 import { unmeasuredOwnRelay } from '@/lib/unmeasured'
 import { nodeName } from '@/lib/nodes'
 import { REPORT_INTERVAL_SECS } from '@/lib/product'
@@ -155,10 +156,10 @@ const p = t.routes.protocol
 
 /**
  * 协议：共用的连接是 QUIC，平常写 QUIC/UDP。到中继 UDP 不通、QUIC 的包装在 TCP 里送过去时只写 TCP（黄字，
- * 悬停有一句解释）。不知道底下是什么时只写 QUIC。这一对在节点对里打开了 ice3proxy 时，下面再写一行。
- * 走不通时是一道横线。
+ * 悬停有一句解释）。不知道底下是什么时只写 QUIC。这一对的 TCP 连接现在走 ice3proxy 时，下面再写一行，
+ * 点了去节点对页看这一对（`lane` 是那里的地址）。走不通时是一道横线。
  */
-function Protocol({ route, leg, lane }: { route: Route; leg: Leg; lane: boolean }) {
+function Protocol({ route, leg, lane }: { route: Route; leg: Leg; lane: string | null }) {
   if (route.via === 'none') return <span className="text-muted-foreground">—</span>
   const quic =
     leg === 'tcp' ? (
@@ -170,17 +171,17 @@ function Protocol({ route, leg, lane }: { route: Route; leg: Leg; lane: boolean 
     ) : (
       <span className="whitespace-nowrap">{leg === 'udp' ? p.over(p.quic, t.routes.legTransport.udp) : p.quic}</span>
     )
-  if (!lane) return quic
+  if (lane === null) return quic
   return (
     <span className="flex flex-col leading-[18px]">
       {quic}
       <Tooltip content={p.laneHint}>
-        <span
-          tabIndex={0}
-          className="cursor-help self-start rounded-sm text-xs whitespace-nowrap text-muted-foreground"
+        <Link
+          to={lane}
+          className="self-start rounded-sm text-xs whitespace-nowrap text-muted-foreground hover:text-foreground hover:underline"
         >
           {p.over(p.lane, t.routes.legTransport.tcp)}
-        </span>
+        </Link>
       </Tooltip>
     </span>
   )
@@ -249,8 +250,15 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
     for (const path of paths) void path.refetch()
   }
   const computing = paths.some((path) => path.isFetching)
-  // 打开了 ice3proxy、控制连接在的对端：它们之间的 TCP 连接走 ice3proxy。
-  const lanes = new Set((node.lanes?.peers ?? []).filter((lane) => lane.control).map((lane) => lane.peer))
+  // TCP 连接现在走 ice3proxy 的对端。没有存下设置的一对是默认的"没有 UDP 时用"，所以要节点对的设置才分得清。
+  const pairs = useQuery(q.pairs(network.id))
+  const lanes = new Set(
+    (node.lanes?.peers ?? [])
+      .filter((peer) => peerUsesLanes(peer, pairLaneMode(pairs.data, node.id, peer.peer)))
+      .map((peer) => peer.peer),
+  )
+  const laneTo = (peer: NodeId) =>
+    lanes.has(peer) ? `${networkPath(network.id, 'pairs')}?a=${node.id}&b=${peer}` : null
   // 都是自己报的新节点时不用重新算：每次上报都是新的。
   const asksPaths = view === 'table' && rows.some((entry) => !reportsAlternative(entry))
   const empty = routes.isSuccess && (!routes.data.online || routes.data.routes.length === 0)
@@ -446,7 +454,7 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
                       <NextHopIp middle={altMiddle} nodes={all} />
                     </Td>
                     <Td className={cn(BAND, 'text-[13px]')}>
-                      <Protocol route={altRoute} leg={altLeg} lane={lanes.has(entry.peer.id)} />
+                      <Protocol route={altRoute} leg={altLeg} lane={laneTo(entry.peer.id)} />
                     </Td>
                     <Td className={BAND}>
                       <span className="text-sm tabular">{lengthOf(altMiddle) ?? '—'}</span>
@@ -492,7 +500,7 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
                     <NextHopIp middle={nowMiddle} nodes={all} />
                   </Td>
                   <Td className={cn('text-[13px]', fade)}>
-                    <Protocol route={entry.route} leg={nowLeg} lane={lanes.has(entry.peer.id)} />
+                    <Protocol route={entry.route} leg={nowLeg} lane={laneTo(entry.peer.id)} />
                   </Td>
                   <Td className={fade}>
                     <span className="text-sm tabular">{lengthOf(nowMiddle) ?? '—'}</span>

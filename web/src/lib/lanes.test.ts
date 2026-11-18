@@ -8,12 +8,17 @@ import { makeNode, makePair, makePeerLanes } from '@/test/fixtures'
 import {
   handshakeParts,
   handshakeTotal,
-  lanesReported,
+  LANE_DEFAULT,
   laneBytes,
   laneEffectView,
+  laneInUse,
   laneMode,
+  lanesReported,
   pairGlance,
+  pairLaneMode,
+  pairStored,
   peerGlance,
+  peerUsesLanes,
   relayCandidate,
 } from './lanes'
 
@@ -44,9 +49,78 @@ describe('ice3proxy 起不起作用', () => {
 
   it('生效：写出哪一边拨号，两边都能拨时说两边', () => {
     const one = makePair(1, 3, { lane: 'always', lane_effect: effect({ effective: true, dialers: [1] }) })
-    expect(laneEffectView(one, NODES)).toEqual({ kind: 'effective', label: l.effective, dialers: l.dials('laptop') })
+    expect(laneEffectView(one, NODES)).toEqual({
+      kind: 'effective',
+      label: l.effective,
+      detail: l.dials('laptop'),
+      standby: false,
+    })
     const both = makePair(1, 3, { lane: 'always', lane_effect: effect({ effective: true, dialers: [1, 3] }) })
-    expect(laneEffectView(both, NODES)).toMatchObject({ dialers: l.bothDial })
+    expect(laneEffectView(both, NODES)).toMatchObject({ detail: l.bothDial })
+  })
+
+  it('没有 UDP 时用：有一边的新连接走它是在用；有 UDP 是待命；发现没有 UDP、还没连上是正在连接', () => {
+    const fallback = (extra: Partial<LaneEffect>, lanes: PairView['lanes'] = []) =>
+      makePair(1, 3, { lane: 'udp_fallback', lanes, lane_effect: effect({ effective: true, dialers: [1], ...extra }) })
+    const using = fallback({ opening: [{ node: 1, udp_path: false, lanes: true }] })
+    expect(laneEffectView(using, NODES)).toEqual({
+      kind: 'effective',
+      label: l.inUse,
+      detail: l.dials('laptop'),
+      standby: false,
+    })
+    // 两边都有 UDP：谁都不报，`opening` 是空的。
+    expect(laneEffectView(fallback({ opening: [] }), NODES)).toEqual({
+      kind: 'effective',
+      label: l.standby,
+      detail: l.hasUdp,
+      standby: true,
+    })
+    const coming = fallback({ opening: [{ node: 1, udp_path: false, lanes: false }] })
+    expect(laneEffectView(coming, NODES)).toMatchObject({ label: l.standby, detail: l.connecting })
+    // UDP 回来了，还有连接没走完：在用。
+    const draining = fallback({ opening: [{ node: 1, udp_path: true, lanes: false }] }, [
+      { node: 3, lanes: makePeerLanes(1, { in_use: 2 }) },
+    ])
+    expect(laneEffectView(draining, NODES)).toMatchObject({ label: l.inUse })
+    // 比 0.1.19 旧的 controller 不写 `opening`：分不出来，照旧说生效。
+    expect(laneEffectView(fallback({}), NODES)).toMatchObject({ label: l.effective, standby: false })
+  })
+
+  it('没有设置的一对：默认是没有 UDP 时用', () => {
+    expect(LANE_DEFAULT).toBe('udp_fallback')
+    expect(pairStored(makePair(1, 2, { stored: false }))).toBe(false)
+    // 比 0.1.19 旧的 controller 只答得出存下的。
+    expect(pairStored(makePair(1, 2))).toBe(true)
+    const stored = [makePair(1, 2, { lane: 'always' }), makePair(2, 3, { lane: 'off' })]
+    expect(pairLaneMode(stored, 2, 1)).toBe('always')
+    expect(pairLaneMode(stored, 3, 2)).toBe('off')
+    expect(pairLaneMode(stored, 1, 3)).toBe('udp_fallback')
+    expect(pairLaneMode(undefined, 1, 3)).toBe('udp_fallback')
+  })
+
+  it('一对现在用没用着：一边的新连接走它，或者一边有在用的连接', () => {
+    expect(laneInUse(makePair(1, 2))).toBe(false)
+    const opening = makePair(1, 2, {
+      lane: 'udp_fallback',
+      lane_effect: effect({ effective: true, opening: [{ node: 2, udp_path: false, lanes: true }] }),
+    })
+    expect(laneInUse(opening)).toBe(true)
+    const busy = makePair(1, 2, { lane: 'always', lanes: [{ node: 1, lanes: makePeerLanes(2, { in_use: 1 }) }] })
+    expect(laneInUse(busy)).toBe(true)
+  })
+
+  it('节点详情里的一个对端：控制连接在、没有 UDP 才走它；总是用时有 UDP 也走；有在用的连接就算', () => {
+    const peer = (extra: Parameters<typeof makePeerLanes>[1]) => makePeerLanes(2, extra)
+    expect(peerUsesLanes(peer({ control: true, udp_path: false }), 'udp_fallback')).toBe(true)
+    // UDP 回来之后控制连接还留着：新的连接已经不走它了。
+    expect(peerUsesLanes(peer({ control: true, udp_path: true }), 'udp_fallback')).toBe(false)
+    expect(peerUsesLanes(peer({ control: true, udp_path: true }), 'always')).toBe(true)
+    expect(peerUsesLanes(peer({ control: false, udp_path: false }), 'udp_fallback')).toBe(false)
+    expect(peerUsesLanes(peer({ control: true, udp_path: false }), 'off')).toBe(false)
+    expect(peerUsesLanes(peer({ control: false, in_use: 3 }), 'off')).toBe(true)
+    // 旧的节点不报有没有 UDP：只看控制连接。
+    expect(peerUsesLanes(peer({ control: true }), 'udp_fallback')).toBe(true)
   })
 
   it('两个节点都不是 relay：原因用界面自己的话写，修法是在其中一个上启用 relay', () => {
@@ -120,7 +194,7 @@ describe('ice3proxy 起不起作用', () => {
     const effective = makePair(1, 3, { lane: 'always', lane_effect: effect({ effective: true, dialers: [1] }) })
     expect(laneEffectView(effective, NODES)).toMatchObject({
       label: en.pairs.lane.effective,
-      dialers: en.pairs.lane.dials('laptop'),
+      detail: en.pairs.lane.dials('laptop'),
     })
   })
 })

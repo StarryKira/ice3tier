@@ -134,9 +134,62 @@ describe('节点对页', () => {
     renderWithApp(<PairsPage />, { network: NETWORK, route: '/n/1/pairs?a=2&b=1' })
     expect(await screen.findByRole('table', { name: l.detailsFor('hk', 'laptop') })).toBeVisible()
   })
+
+  it('过来的那一对没有设置：单独取来，标着默认，没有恢复默认；改一项就存下来', async () => {
+    const unset = makePair(2, 3, {
+      stored: false,
+      keep_alive: false,
+      lane: 'udp_fallback',
+      lane_effect: {
+        effective: true,
+        blocked: [],
+        dialers: [2],
+        summary: '没有设置，用默认。',
+        opening: [{ node: 3, udp_path: false, lanes: true }],
+      },
+      lanes: [{ node: 3, lanes: makePeerLanes(2, { in_use: 1, udp_path: false }) }],
+    })
+    const api = setup([], {
+      'GET /networks/1/pairs/3/2': unset,
+      'PUT /networks/1/pairs/2/3': (call) => ({ ...unset, stored: true, ...(call.body as object) }),
+    })
+    renderWithApp(<PairsPage />, { network: NETWORK, route: '/n/1/pairs?a=3&b=2' })
+    const row = await screen.findByTestId('pair-row-laptop-nas')
+    expect(within(row).getByText(p.defaultBadge)).toBeVisible()
+    const select = within(row).getByRole('combobox', { name: l.select('laptop', 'nas') })
+    expect(select).toHaveValue('udp_fallback')
+    expect(within(row).getByTestId('lane-effect-laptop-nas')).toHaveTextContent(l.inUse)
+    expect(within(row).queryByRole('button', { name: p.removeFor('laptop', 'nas') })).toBeNull()
+    // 详情里写着 nas 到 laptop 没有 UDP。
+    const details = await screen.findByRole('table', { name: l.detailsFor('laptop', 'nas') })
+    expect(within(details).getByRole('row', { name: new RegExp(`^${l.row.udpPath}`) })).toHaveTextContent(
+      l.row.udpPathNo,
+    )
+
+    await userEvent.selectOptions(select, 'off')
+    await waitFor(() => expect(api.callsTo('PUT /networks/1/pairs/2/3')).toHaveLength(1))
+    expect(api.callsTo('PUT /networks/1/pairs/2/3')[0]?.body).toEqual({ lane: 'off' })
+  })
 })
 
 describe('添加节点对', () => {
+  it('ice3proxy 默认选着没有设置时的那一项', async () => {
+    const api = setup([], { 'PUT /networks/1/pairs/2/3': makePair(2, 3) })
+    renderWithApp(<PairsPage />, { network: NETWORK })
+    await screen.findByText(p.emptyTitle)
+    expect(screen.getByText(p.defaultNote)).toBeVisible()
+    await userEvent.click(screen.getByRole('button', { name: p.add }))
+    const dialog = screen.getByRole('dialog', { name: p.dialogTitle })
+    expect(within(dialog).getByRole('radio', { name: l.modes.udp_fallback })).toBeChecked()
+    await userEvent.click(within(dialog).getByRole('combobox', { name: p.nodeA }))
+    await userEvent.click(screen.getByRole('option', { name: /laptop/ }))
+    await userEvent.click(within(dialog).getByRole('combobox', { name: p.nodeB }))
+    await userEvent.click(screen.getByRole('option', { name: /nas/ }))
+    await userEvent.click(within(dialog).getByRole('button', { name: p.submit }))
+    await waitFor(() => expect(api.callsTo('PUT /networks/1/pairs/2/3')).toHaveLength(1))
+    expect(api.callsTo('PUT /networks/1/pairs/2/3')[0]?.body).toEqual({ keep_alive: true, lane: 'udp_fallback' })
+  })
+
   it('两个节点和两项设置一起提交', async () => {
     const api = setup([], { 'PUT /networks/1/pairs/2/3': makePair(2, 3) })
     renderWithApp(<PairsPage />, { network: NETWORK })
@@ -154,7 +207,7 @@ describe('添加节点对', () => {
     expect(api.callsTo('PUT /networks/1/pairs/2/3')[0]?.body).toEqual({ keep_alive: true, lane: 'always' })
   })
 
-  it('两项都是默认时不提交，说要至少开一项', async () => {
+  it('两项都和默认一样时不提交，说出来', async () => {
     const api = setup([])
     renderWithApp(<PairsPage />, { network: NETWORK })
     await screen.findByText(p.emptyTitle)

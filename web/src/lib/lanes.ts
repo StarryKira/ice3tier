@@ -25,6 +25,12 @@ const l = t.pairs.lane
 /** 下拉里的顺序。 */
 export const LANE_MODES = ['off', 'udp_fallback', 'always'] as const satisfies readonly LaneMode[]
 
+/**
+ * 没有存下设置的节点对用的（0.1.19 起）。两个节点里有一个比 0.1.19 旧时 controller 给这一对的是 `off`，
+ * 那样的节点也不报 ice3proxy，界面上看不出差别。
+ */
+export const LANE_DEFAULT: LaneMode = 'udp_fallback'
+
 /** 比界面旧的 controller 不写 `lane`，按 `off` 算。 */
 export function laneMode(pair: Pick<PairView, 'lane'>): LaneMode {
   return pair.lane ?? 'off'
@@ -32,6 +38,39 @@ export function laneMode(pair: Pick<PairView, 'lane'>): LaneMode {
 
 export function laneModeLabel(mode: LaneMode): string {
   return l.modes[mode]
+}
+
+/** 比 0.1.19 旧的 controller 不写 `stored`：那时只有存下的才答得出来。 */
+export function pairStored(pair: Pick<PairView, 'stored'>): boolean {
+  return pair.stored ?? true
+}
+
+/** 一对节点的设置：存下的那一行，没有就是默认。 */
+export function pairLaneMode(stored: readonly PairView[] | undefined, a: NodeId, b: NodeId): LaneMode {
+  const pair = stored?.find((row) => (row.a === a && row.b === b) || (row.a === b && row.b === a))
+  return pair === undefined ? LANE_DEFAULT : laneMode(pair)
+}
+
+/**
+ * 一对节点现在用着 ice3proxy：有一边开的新 TCP 流走它（`udp_fallback` 下没有 UDP、控制连接在），
+ * 或者有一边报了在用的连接。
+ */
+export function laneInUse(pair: PairView): boolean {
+  return (
+    (pair.lane_effect?.opening ?? []).some((side) => side.lanes) ||
+    (pair.lanes ?? []).some((side) => side.lanes.in_use > 0)
+  )
+}
+
+/**
+ * 节点详情里，一个对端的 TCP 连接现在走不走 ice3proxy：有在用的连接；或者控制连接在，并且设置是"总是用"、
+ * 或者到对端的路上没有 UDP（旧的节点不报有没有 UDP，只看控制连接）。
+ * `udp_fallback` 下 UDP 回来之后控制连接还会留 10 分钟，那时新的连接已经不走它了。
+ */
+export function peerUsesLanes(peer: PeerLanes, mode: LaneMode): boolean {
+  if (peer.in_use > 0) return true
+  if (!peer.control || mode === 'off') return false
+  return mode === 'always' || peer.udp_path !== true
 }
 
 /** 有节点报了这一对之间的 ice3proxy：设置起作用之后，或者刚关掉、还有流在跑的时候。没有报的就没有数可看。 */
@@ -60,8 +99,10 @@ export type LaneEffectView =
   | {
       kind: 'effective'
       label: string
-      /** 谁拨号；controller 没说时是 `null`。 */
-      dialers: string | null
+      /** 下面一行：谁拨号（controller 没说时是 `null`）；`udp_fallback` 还没用上时是为什么没用。 */
+      detail: string | null
+      /** `udp_fallback` 有 UDP、用不上的时候：设置起作用，只是现在不需要。 */
+      standby: boolean
     }
   | { kind: 'blocked'; label: string; reasons: LaneReason[] }
 
@@ -128,7 +169,13 @@ export function laneEffectView(pair: PairView, nodes: readonly NodeInfo[]): Lane
         : effect.dialers.length === 1
           ? l.dials(nodeName(nodes, effect.dialers[0] ?? 0))
           : null
-    return { kind: 'effective', label: l.effective, dialers }
+    // 旧的 controller 不写 `opening`：分不出用没用上，照旧只说生效。
+    if (laneMode(pair) !== 'udp_fallback' || effect.opening === undefined)
+      return { kind: 'effective', label: l.effective, detail: dialers, standby: false }
+    if (laneInUse(pair)) return { kind: 'effective', label: l.inUse, detail: dialers, standby: false }
+    // 有一边已经发现没有 UDP，还在等（连续 40 秒才拨）或者正在拨。
+    const coming = effect.opening.some((side) => !side.udp_path)
+    return { kind: 'effective', label: l.standby, detail: coming ? l.connecting : l.hasUdp, standby: true }
   }
   const known = effect.blocked.map((block) => reasonOf(block, pair, nodes))
   const reasons = known.filter((reason): reason is LaneReason => reason !== null)
