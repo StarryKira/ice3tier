@@ -9,12 +9,12 @@ use i3t_model::admin::diag::{
 use i3t_model::control::diag::{Choice, Hop, Latency};
 use i3t_proto::NodeId;
 
-use super::{context, label};
+use super::{Names, context, label};
 
-/// 节点编号写成名字：测试的两端和矩阵里的节点有名字，别的（relay）写成 `#编号`。
-fn namer(nodes: &[&NodeRef]) -> impl Fn(NodeId) -> String + use<> {
+/// 节点编号写成名字：测试的两端和矩阵里的节点按结果里记的名字（节点后来删了、改名了也还是当时的），别的（relay）按 `names`。
+fn namer<'a>(nodes: &[&NodeRef], names: &'a Names) -> impl Fn(NodeId) -> String + use<'a> {
     let known: Vec<(NodeId, String)> = nodes.iter().map(|node| (node.id, node.name.clone())).collect();
-    move |id| known.iter().find(|(known, _)| *known == id).map_or_else(|| format!("#{id}"), |(_, name)| name.clone())
+    move |id| known.iter().find(|(known, _)| *known == id).map_or_else(|| names.of(id), |(_, name)| name.clone())
 }
 
 /// 一个原因：`nas：UDP 不通`。
@@ -37,9 +37,9 @@ fn route_text(path: &PathResult, name: &dyn Fn(NodeId) -> String) -> String {
     path.route.as_ref().map_or_else(|| NONE.to_owned(), |route| (codes.route)(route, name))
 }
 
-pub fn test(view: &TestView) {
+pub fn test(view: &TestView, names: &Names) {
     let (t, lang, codes) = context();
-    let name = namer(&[&view.a, &view.b]);
+    let name = namer(&[&view.a, &view.b], names);
     let items = lang.list(view.request.items.iter().map(label));
     let throughput = if view.request.throughput { format!(" + {}", t.throughput) } else { String::new() };
     println!(
@@ -241,10 +241,10 @@ pub fn tests(views: &[TestView]) {
     if rows.is_empty() { println!("{}", t.no_tests) } else { rows.print() }
 }
 
-pub fn matrix(run: &MatrixRun) {
+pub fn matrix(run: &MatrixRun, names: &Names) {
     let (t, lang, codes) = context();
     let nodes: Vec<&NodeRef> = run.nodes.iter().collect();
-    let name = namer(&nodes);
+    let name = namer(&nodes, names);
     println!(
         "{} #{}  {}  {}  {}",
         t.matrix,

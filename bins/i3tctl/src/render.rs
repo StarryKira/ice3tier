@@ -27,6 +27,20 @@ mod diag;
 
 pub use diag::{matrix, test, tests};
 
+/// 把节点编号写成名字用的表：路上的 relay、代理监听的节点这些，应答里只有编号。表里没有的写成 `#编号`。
+#[derive(Debug, Default)]
+pub struct Names(Vec<(NodeId, String)>);
+
+impl Names {
+    pub fn new(nodes: &[Node]) -> Self {
+        Self(nodes.iter().map(|node| (node.id, node.name.clone())).collect())
+    }
+
+    pub fn of(&self, id: NodeId) -> String {
+        self.0.iter().find(|(known, _)| *known == id).map_or_else(|| format!("#{id}"), |(_, name)| name.clone())
+    }
+}
+
 /// 这一次要用的文字、语言和代码的写法。
 fn context() -> (&'static Ui, Lang, &'static Codes) {
     let lang = i3t_lang::current();
@@ -232,7 +246,7 @@ fn exit_test_text(view: &ExitTestView) -> String {
     format!("{header}\n{fields}")
 }
 
-pub fn exits(exits: &[ExitView]) {
+pub fn exits(exits: &[ExitView], names: &Names) {
     let (t, lang, codes) = context();
     if exits.is_empty() {
         println!("{}", t.no_exits);
@@ -271,7 +285,7 @@ pub fn exits(exits: &[ExitView]) {
         for proxy in &exit.proxies {
             fields.add(
                 t.proxy,
-                format!("#{} {}  #{} {}  {}", proxy.id, proxy.name, proxy.node, proxy.bind, (codes.proxy_status)(&proxy.status)),
+                format!("#{} {}  {} {}  {}", proxy.id, proxy.name, names.of(proxy.node), proxy.bind, (codes.proxy_status)(&proxy.status)),
             );
         }
         fields.print();
@@ -395,7 +409,7 @@ pub fn relay_enabled(enabled: &RelayEnabled) {
     }
 }
 
-pub fn node_detail(detail: &NodeDetail) {
+pub fn node_detail(detail: &NodeDetail, names: &Names) {
     let (t, lang, codes) = context();
     let node = &detail.node;
     println!("{} #{}", node.name, node.id);
@@ -445,7 +459,7 @@ pub fn node_detail(detail: &NodeDetail) {
     fields.add(t.dial_out_only, yes_no(node.dial_out_only));
     fields.add(t.routing, node.routing.as_ref().map_or_else(|| t.from_network.to_owned(), label));
     fields.add(t.reach, node.reach.as_ref().map_or_else(|| t.from_network.to_owned(), label));
-    fields.add(t.pinned, lang.list(node.pinned_relays.iter().map(|relay| format!("#{relay}"))));
+    fields.add(t.pinned, lang.list(node.pinned_relays.iter().map(|relay| names.of(*relay))));
     fields.add(t.profile, profile_summary(node.profile, detail.performance.as_ref()));
     if let Some(intercept) = &detail.intercept {
         fields.add(t.intercept, intercept_summary(intercept));
@@ -456,7 +470,7 @@ pub fn node_detail(detail: &NodeDetail) {
     let egress = node.egress_ip.map(|ip| node.country.as_ref().map_or_else(|| ip.to_string(), |country| format!("{ip} {country}")));
     fields.add(t.egress, optional(egress));
     let attached = node.attached.iter().map(|attachment| {
-        let line = format!("#{} {} ms", attachment.relay, attachment.rtt_ms);
+        let line = format!("{} {} ms", names.of(attachment.relay), attachment.rtt_ms);
         if attachment.shared { lang.paren(&line, t.shared_attachment) } else { line }
     });
     fields.add(t.attached, lang.list(attached));
@@ -480,7 +494,7 @@ pub fn node_detail(detail: &NodeDetail) {
         let rate = |bytes: u64| format!("{}/s", lang.bytes(bytes / u64::from(users.window_secs.max(1))));
         let mut table = Table::new(&t.relay_users_header);
         for pair in &users.pairs {
-            table.row(vec![format!("#{}", pair.from), format!("#{}", pair.to), rate(pair.bytes)]);
+            table.row(vec![names.of(pair.from), names.of(pair.to), rate(pair.bytes)]);
         }
         if users.other_bytes > 0 {
             table.row(vec![t.relay_users_other.to_owned(), String::new(), rate(users.other_bytes)]);
@@ -536,14 +550,14 @@ fn bandwidth(mbps: Option<u32>) -> String {
     mbps.map_or_else(|| t.unlimited.to_owned(), |mbps| format!("{mbps} Mbit/s"))
 }
 
-/// 一个节点的路由表。`nodes` 是网络里的节点，用来把路上的 relay 写成名字（relay 不一定是这个节点的对端）。
-pub fn routes(table: &RouteTable, nodes: &[Node]) {
+/// 一个节点的路由表。路上的 relay 按 `names` 写成名字（relay 不一定是这个节点的对端）。
+pub fn routes(table: &RouteTable, names: &Names) {
     let (t, lang, codes) = context();
     if !table.online {
         println!("{}", (t.node_offline)(&table.node.name));
         return;
     }
-    let name = |id: NodeId| nodes.iter().find(|node| node.id == id).map_or_else(|| format!("#{id}"), |node| node.name.clone());
+    let name = |id: NodeId| names.of(id);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs());
     let mut rows = Table::new(&t.routes_header);
     for entry in &table.routes {
@@ -617,14 +631,9 @@ pub fn route_matrix(matrix: &RouteMatrix) {
     }
 }
 
-pub fn path(view: &PathView) {
+pub fn path(view: &PathView, names: &Names) {
     let (t, lang, codes) = context();
-    let name = |id: NodeId| {
-        [&view.forward.from, &view.forward.to]
-            .into_iter()
-            .find(|node| node.id == id)
-            .map_or_else(|| format!("#{id}"), |node| node.name.clone())
-    };
+    let name = |id: NodeId| names.of(id);
     let mut rows = Table::new(&t.path_header);
     for leg in [&view.forward, &view.reverse] {
         let route = leg.route.as_ref().map_or_else(|| NONE.to_owned(), |route| (codes.route)(route, &name));
@@ -955,16 +964,16 @@ const fn arrow(direction: Direction) -> &'static str {
     }
 }
 
-pub fn proxies(proxies: &[Proxy]) {
+pub fn proxies(proxies: &[Proxy], names: &Names) {
     let (t, lang, codes) = context();
     let mut table = Table::new(&t.proxies_header);
     for proxy in proxies {
         table.row(vec![
             proxy.id.to_string(),
-            format!("#{}", proxy.node),
+            names.of(proxy.node),
             proxy.bind.to_string(),
             label(&proxy.protocol),
-            optional(proxy.exit.map(|exit| format!("#{exit}"))),
+            optional(proxy.exit.map(|exit| names.of(exit))),
             if proxy.username.is_empty() { t.no.to_owned() } else { proxy.username.clone() },
             (codes.proxy_status)(&proxy.status),
             format!("{}  ↑ {}  ↓ {}", proxy.usage.connections, lang.bytes(proxy.usage.bytes_up), lang.bytes(proxy.usage.bytes_down)),
@@ -975,13 +984,13 @@ pub fn proxies(proxies: &[Proxy]) {
 }
 
 /// 一个代理，带用户名和密码（管理员要能再复制它们），和一行用法。
-pub fn proxy(proxy: &Proxy) {
+pub fn proxy(proxy: &Proxy, names: &Names) {
     let (t, lang, codes) = context();
     println!("{}", lang.paren(&format!("{} #{} {}", t.proxy, proxy.id, proxy.name), &(codes.proxy_status)(&proxy.status)));
     let mut fields = Fields::new(2);
-    fields.add(t.listen_node, format!("#{}", proxy.node));
+    fields.add(t.listen_node, names.of(proxy.node));
     fields.add(t.listen_at, format!("{}  {}", proxy.bind, label(&proxy.protocol)));
-    fields.add(t.exit, optional(proxy.exit.map(|exit| format!("#{exit}"))));
+    fields.add(t.exit, optional(proxy.exit.map(|exit| names.of(exit))));
     let anonymous = proxy.username.is_empty() && proxy.password.is_empty();
     if anonymous {
         fields.add(t.username, t.no_authentication.to_owned());

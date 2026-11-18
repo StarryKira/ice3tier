@@ -58,7 +58,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Path { a, b } => {
             let network = session.network().await?.id;
             let (a, b) = (session.node(network, &a).await?.id, session.node(network, &b).await?.id);
-            session.show(session.get(&format!("/networks/{network}/path?from={a}&to={b}")).await?, render::path)
+            let names = session.names(network).await?;
+            session.show(session.get(&format!("/networks/{network}/path?from={a}&to={b}")).await?, |view| render::path(view, &names))
         }
         Command::Routes => {
             let network = session.network().await?.id;
@@ -178,17 +179,19 @@ impl Session {
         let request = CreateTest { a, b, items, throughput: args.throughput, via };
         let started: TestView = decode(self.send(Method::POST, &format!("/networks/{network}/tests"), &request).await?)?;
         let path = format!("/networks/{network}/tests/{}", started.id);
+        let names = self.names(network).await?;
         if args.no_wait {
-            return self.show(self.get(&path).await?, render::test);
+            return self.show(self.get(&path).await?, |view| render::test(view, &names));
         }
         self.waiting(&(texts().ui.test_started)(started.id));
         let finished = self.wait(&path, |view: &TestView| view.state != TestState::Running).await?;
-        self.show(finished, render::test)
+        self.show(finished, |view| render::test(view, &names))
     }
 
     async fn tests_command(&self, command: TestsCommand) -> anyhow::Result<()> {
         let network = self.network().await?.id;
         let tests = format!("/networks/{network}/tests");
+        let names = self.names(network).await?;
         match command {
             TestsCommand::List { a, b, limit } => {
                 let mut query = format!("{tests}?limit={limit}");
@@ -200,23 +203,25 @@ impl Session {
                 }
                 self.show_list(self.get(&query).await?, render::tests)
             }
-            TestsCommand::Show { id } => self.show(self.get(&format!("{tests}/{id}")).await?, render::test),
-            TestsCommand::Cancel { id } => self.show(self.send(Method::POST, &format!("{tests}/{id}/cancel"), &()).await?, render::test),
+            TestsCommand::Show { id } => self.show(self.get(&format!("{tests}/{id}")).await?, |view| render::test(view, &names)),
+            TestsCommand::Cancel { id } => {
+                self.show(self.send(Method::POST, &format!("{tests}/{id}/cancel"), &()).await?, |view| render::test(view, &names))
+            }
             TestsCommand::Matrix { show, cancel, no_wait } => {
                 let path = format!("{tests}/matrix");
                 if show {
-                    return self.show(self.get(&path).await?, render::matrix);
+                    return self.show(self.get(&path).await?, |run| render::matrix(run, &names));
                 }
                 if cancel {
-                    return self.show(self.send(Method::POST, &format!("{path}/cancel"), &()).await?, render::matrix);
+                    return self.show(self.send(Method::POST, &format!("{path}/cancel"), &()).await?, |run| render::matrix(run, &names));
                 }
                 let started = self.send(Method::POST, &path, &()).await?;
                 if no_wait {
-                    return self.show(started, render::matrix);
+                    return self.show(started, |run| render::matrix(run, &names));
                 }
                 self.waiting(texts().ui.matrix_started);
                 let finished = self.wait(&path, |run: &MatrixRun| run.state != MatrixState::Running).await?;
-                self.show(finished, render::matrix)
+                self.show(finished, |run| render::matrix(run, &names))
             }
         }
     }
@@ -238,6 +243,15 @@ impl Session {
     }
 
     /// 把命令行上写的节点（编号、名字或虚拟 IP）找出来。
+    /// 把应答里的节点编号写成名字用的表。`--json` 时应答原样输出，用不着，不去取。
+    async fn names(&self, network: NetworkId) -> anyhow::Result<render::Names> {
+        if self.json {
+            return Ok(render::Names::default());
+        }
+        let nodes: Vec<Node> = self.client.get(&format!("/networks/{network}/nodes")).await?;
+        Ok(render::Names::new(&nodes))
+    }
+
     async fn node(&self, network: NetworkId, reference: &str) -> anyhow::Result<Node> {
         let nodes: Vec<Node> = self.client.get(&format!("/networks/{network}/nodes")).await?;
         pick_node(&nodes, reference).cloned()
@@ -335,7 +349,8 @@ impl Session {
             NodeCommand::List => self.show_list(self.get(&nodes).await?, render::nodes),
             NodeCommand::Show { node } => {
                 let node = self.node(network, &node).await?;
-                self.show(self.get(&format!("{nodes}/{}", node.id)).await?, render::node_detail)
+                let names = self.names(network).await?;
+                self.show(self.get(&format!("{nodes}/{}", node.id)).await?, |detail| render::node_detail(detail, &names))
             }
             NodeCommand::Rename { node, name } => {
                 let node = self.node(network, &node).await?;
@@ -386,7 +401,8 @@ impl Session {
                 // 节点列表也用来把路上的 relay 写成名字：relay 不一定是这个节点的对端。
                 let all: Vec<Node> = self.client.get(&nodes).await?;
                 let node = pick_node(&all, &node)?;
-                self.show(self.get(&format!("{nodes}/{}/routes", node.id)).await?, |table| render::routes(table, &all))
+                let names = render::Names::new(&all);
+                self.show(self.get(&format!("{nodes}/{}/routes", node.id)).await?, |table| render::routes(table, &names))
             }
             NodeCommand::Access { node } => {
                 let node = self.node(network, &node).await?;
@@ -447,7 +463,10 @@ impl Session {
                 let node = self.node(network, &node).await?;
                 self.show(self.delete(&format!("/networks/{network}/nodes/{}/exit", node.id)).await?, render::node_changed)
             }
-            ExitCommand::List => self.show_list(self.get(&format!("/networks/{network}/exits")).await?, render::exits),
+            ExitCommand::List => {
+                let names = self.names(network).await?;
+                self.show_list(self.get(&format!("/networks/{network}/exits")).await?, |exits| render::exits(exits, &names))
+            }
             ExitCommand::Test { node, target } => {
                 let node = self.node(network, &node).await?;
                 let input = ExitTestInput { target };
@@ -516,9 +535,13 @@ impl Session {
                     Some(reference) => format!("{proxies}?node={}", self.node(network, &reference).await?.id),
                     None => proxies,
                 };
-                self.show_list(self.get(&path).await?, render::proxies)
+                let names = self.names(network).await?;
+                self.show_list(self.get(&path).await?, |proxies| render::proxies(proxies, &names))
             }
-            ProxyCommand::Show { id } => self.show(self.get(&format!("{proxies}/{id}")).await?, render::proxy),
+            ProxyCommand::Show { id } => {
+                let names = self.names(network).await?;
+                self.show(self.get(&format!("{proxies}/{id}")).await?, |proxy| render::proxy(proxy, &names))
+            }
             ProxyCommand::Add { node, bind, exit, name, protocol, username, password, allow_from, class, optimistic, disabled } => {
                 let request = CreateProxy {
                     node: self.node(network, &node).await?.id,
@@ -533,7 +556,8 @@ impl Session {
                     class: class.map(Into::into),
                     optimistic: optimistic.map(|on| on.0),
                 };
-                self.show(self.send(Method::POST, &proxies, &request).await?, render::proxy)
+                let names = self.names(network).await?;
+                self.show(self.send(Method::POST, &proxies, &request).await?, |proxy| render::proxy(proxy, &names))
             }
             ProxyCommand::Set { id, node, name, bind, exit, protocol, username, password, allow_from, class, optimistic, enabled } => {
                 let node = match node {
@@ -557,7 +581,8 @@ impl Session {
                     class: class.map(crate::cli::Inherit::into_override),
                     optimistic: optimistic.map(crate::cli::Inherit::into_override),
                 };
-                self.show(self.send(Method::PATCH, &format!("{proxies}/{id}"), &request).await?, render::proxy)
+                let names = self.names(network).await?;
+                self.show(self.send(Method::PATCH, &format!("{proxies}/{id}"), &request).await?, |proxy| render::proxy(proxy, &names))
             }
             ProxyCommand::Delete { id } => {
                 self.delete(&format!("{proxies}/{id}")).await?;

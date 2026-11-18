@@ -275,8 +275,10 @@ async fn the_command_line_drives_a_running_controller() {
     let proxy_id = proxy["id"].to_string();
     let shown = fixture.ok(&["proxy", "show", &proxy_id]).await;
     assert!(shown.contains(&password) && shown.contains("socks5h://u-") && shown.contains("192.168.1.0/24"), "{shown}");
+    assert!(Fixture::has_line(&shown, &["监听节点", "laptop"]) && Fixture::has_line(&shown, &["出口", "nas-01"]), "节点写名字：{shown}");
     let proxies = fixture.ok(&["proxy", "list", "--node", "laptop"]).await;
-    assert!(proxies.contains("192.168.1.5:1080") && proxies.contains("#2") && proxies.contains("laptop-1080"), "{proxies}");
+    // 监听的节点和出口写的是名字，不是 #1、#2。
+    assert!(Fixture::has_line(&proxies, &["laptop", "192.168.1.5:1080", "nas-01", "laptop-1080"]) && !proxies.contains("#2"), "{proxies}");
     let paused = fixture.json(&["proxy", "set", &proxy_id, "--enabled", "off", "--name", "lan"]).await;
     assert_eq!((&paused["status"]["code"], &paused["name"]), (&json!("disabled"), &json!("lan")));
     assert!(fixture.fails(&["proxy", "set", &proxy_id, "--exit", "laptop"]).await.contains("exit_is_node"));
