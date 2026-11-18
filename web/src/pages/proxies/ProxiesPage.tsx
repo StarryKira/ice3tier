@@ -43,7 +43,7 @@ function addressOf(proxy: Proxy): string {
   })
 }
 
-/** 没有代理时的样子：一行图说明代理是怎么走的，下面一个新建的按钮。 */
+/** 没有代理时的样子：虚线框铺满标题下面剩下的地方，正中一行图说明代理是怎么走的，下面一个新建的按钮。 */
 function Empty({ onCreate }: { onCreate: () => void }) {
   const stop = (icon: ReactNode, label: string) => (
     <span className="inline-flex items-center gap-2 rounded-lg border bg-card px-3 py-2 text-[13px] whitespace-nowrap [&>svg]:size-4 [&>svg]:text-muted-foreground">
@@ -53,7 +53,7 @@ function Empty({ onCreate }: { onCreate: () => void }) {
   )
   const arrow = <ChevronRight aria-hidden className="size-4 shrink-0 text-faint" />
   return (
-    <div className="flex flex-col items-center gap-5 rounded-xl border border-dashed px-6 py-12 text-center">
+    <div className="flex flex-1 flex-col items-center justify-center gap-5 rounded-xl border border-dashed px-6 py-12 text-center">
       <div aria-hidden className="flex flex-wrap items-center justify-center gap-2">
         {stop(<Smartphone />, s.flow.device)}
         {arrow}
@@ -109,7 +109,7 @@ export function ProxiesPage() {
   }
 
   return (
-    <Page>
+    <Page fill>
       <PageHeader
         title={s.title}
         description={s.subtitle}
