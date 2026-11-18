@@ -59,6 +59,11 @@ export type KnownErrorCode =
   /** §19：同一对节点刚测过 / 正在测，或者矩阵正在跑。 */
   | 'too_soon'
   | 'busy'
+  /** 代理（新的 `/proxies`）：出口没打开、出口就是入口、策略不允许入口访问出口、用户名和密码只填了一个。 */
+  | 'exit_not_enabled'
+  | 'exit_is_node'
+  | 'access_denied'
+  | 'credentials_incomplete'
   | 'internal'
 
 export interface ErrorBody {
@@ -1107,7 +1112,17 @@ export interface ExitView {
   /** 没有报过是 `null`。 */
   usage: ExitReport | null
   reported_secs_ago: number | null
-  observed: ExitObserved[]
+  /** 旧的 controller：谁经它出去过（按用户名选出口）。代理改版之后没有了。 */
+  observed?: ExitObserved[]
+  /** 代理改版之后：出口是这个节点的代理。 */
+  proxies?: {
+    id: number
+    name: string
+    node: NodeId
+    bind: string
+    enabled: boolean
+    status: { code: string } | null
+  }[]
 }
 
 /* 分组（文档 §18）。 */

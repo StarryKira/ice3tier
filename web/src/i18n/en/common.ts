@@ -99,6 +99,10 @@ export const errors: Messages['errors'] = {
     no_update: 'No update available',
     too_soon: 'Tested just now; try again shortly',
     busy: 'Already running; try again shortly',
+    exit_not_enabled: 'That node does not have its exit on',
+    exit_is_node: 'The exit cannot be the entry node itself',
+    access_denied: "Policies don't let the entry node reach the exit",
+    credentials_incomplete: 'Fill in both the username and the password, or neither',
     internal: 'Internal controller error',
   },
   group: {

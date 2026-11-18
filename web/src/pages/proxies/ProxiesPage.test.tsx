@@ -145,6 +145,33 @@ describe('代理页', () => {
     })
   })
 
+  it('controller 拒绝时按原因码写在对应的那一项下面', async () => {
+    const user = userEvent.setup()
+    fakeApi({
+      'GET /networks/1/proxies': [proxy()],
+      'GET /networks/1/nodes': [nas, tokyo],
+      'GET /networks/1/access/check': { from: nas, to: tokyo, allowed: true, rules: [] },
+      'PATCH /networks/1/proxies/1': () =>
+        new Response(
+          JSON.stringify({ error: { code: 'exit_not_enabled', message: '原话', what: null, field: 'exit' } }),
+          { status: 409, headers: { 'Content-Type': 'application/json' } },
+        ),
+    })
+    renderWithApp(<ProxiesPage />, { network: NETWORK })
+    await user.click(await screen.findByRole('button', { name: t.common.actionsFor('phone') }))
+    await user.click(await screen.findByRole('menuitem', { name: s.menuEdit }))
+    const dialog = await screen.findByRole('dialog', { name: d.editTitle('phone') })
+    const port = within(dialog).getByRole('textbox', { name: d.port })
+    await user.clear(port)
+    await user.type(port, '1081')
+    await user.click(within(dialog).getByRole('button', { name: t.common.save }))
+    await waitFor(() =>
+      expect(within(dialog).getByRole('combobox', { name: d.exit })).toHaveAccessibleDescription(
+        new RegExp(t.errors.codes.exit_not_enabled),
+      ),
+    )
+  })
+
   it('策略不允许入口访问出口：当场说', async () => {
     const user = userEvent.setup()
     fakeApi({

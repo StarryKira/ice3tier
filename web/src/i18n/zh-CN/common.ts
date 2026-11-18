@@ -99,6 +99,10 @@ export const errors = {
     no_update: '没有可用的更新',
     too_soon: '刚测过，稍后再试',
     busy: '正在进行中，稍后再试',
+    exit_not_enabled: '这台节点没有打开出口',
+    exit_is_node: '出口不能是入口节点自己',
+    access_denied: '策略不允许入口节点访问出口节点',
+    credentials_incomplete: '用户名和密码要么都填，要么都不填',
     internal: 'controller 内部错误',
   },
   /** 分组的错误（§18.1）：码加上 `what` 才说得清。 */

@@ -426,8 +426,10 @@ function Stat({ label, hint, children }: { label: string; hint?: string; childre
 function ExitUsageCard({ network, node }: { network: Network; node: NodeDetail }) {
   const exits = useQuery(q.exits(network.id))
   const listeners = useQuery(q.listeners(network.id))
-  const proxies = (listeners.data ?? []).filter((listener) => exitOf(listener) === node.id).length
   const view = exits.data?.find((candidate) => candidate.node.id === node.id)
+  // 代理改版之后出口的视图里直接有经它出去的代理；更早的 controller 从监听器里数。
+  const proxies =
+    view?.proxies?.length ?? (listeners.data ?? []).filter((listener) => exitOf(listener) === node.id).length
   const health = view === undefined ? null : exitHealthView(view)
   const usage = view?.usage ?? null
 

@@ -4,7 +4,7 @@ import { useState } from 'react'
 import { Link } from 'react-router'
 
 import { api } from '@/api/endpoints'
-import { formError, formErrorDetail, formFailure } from '@/api/formErrors'
+import { fieldError, formError, formErrorDetail, formFailure } from '@/api/formErrors'
 import { q, useAction } from '@/api/queries'
 import { type Network, type NodeId, type Proxy, type ProxyInput, type ProxyProtocol } from '@/api/types'
 import { CodeBlock } from '@/components/copy'
@@ -101,7 +101,13 @@ export function ProxyDialog({ network, proxy, onClose }: ProxyDialogProps) {
     success: (saved) => (proxy === null ? d.created(saved.name) : d.saved(saved.name)),
     toastError: false,
   })
-  const failure = formFailure(save.error, { conflict: 'port' } as const)
+  const failure = formFailure(save.error, {
+    conflict: 'port',
+    exit_not_enabled: 'exit',
+    exit_is_node: 'entry',
+    access_denied: 'entry',
+    credentials_incomplete: 'username',
+  } as const)
 
   const change =
     <T,>(setter: (value: T) => void) =>
@@ -154,7 +160,7 @@ export function ProxyDialog({ network, proxy, onClose }: ProxyDialogProps) {
       onSubmit={submit}
     >
       <div className="grid grid-cols-2 gap-4">
-        <Field label={d.exit} hint={d.exitHint} error={shown(exitProblem)}>
+        <Field label={d.exit} hint={d.exitHint} error={shown(exitProblem) ?? fieldError(failure, 'exit')}>
           {(props) => (
             <NodeSelect
               {...props}
@@ -165,7 +171,7 @@ export function ProxyDialog({ network, proxy, onClose }: ProxyDialogProps) {
             />
           )}
         </Field>
-        <Field label={d.entry} hint={d.entryHint} error={shown(entryProblem)}>
+        <Field label={d.entry} hint={d.entryHint} error={shown(entryProblem) ?? fieldError(failure, 'entry')}>
           {(props) => (
             <NodeSelect
               {...props}
@@ -228,7 +234,7 @@ export function ProxyDialog({ network, proxy, onClose }: ProxyDialogProps) {
             </div>
           )}
         </Field>
-        <Field label={d.port} error={shown(portProblem)}>
+        <Field label={d.port} error={shown(portProblem) ?? fieldError(failure, 'port')}>
           {(props) => (
             <Input
               {...props}
@@ -241,7 +247,11 @@ export function ProxyDialog({ network, proxy, onClose }: ProxyDialogProps) {
       </div>
 
       <div className="grid grid-cols-2 gap-4">
-        <Field label={d.username} error={shown(authProblem)} hint={loopback ? d.authOptional : d.authRequired}>
+        <Field
+          label={d.username}
+          error={shown(authProblem) ?? fieldError(failure, 'username')}
+          hint={loopback ? d.authOptional : d.authRequired}
+        >
           {(props) => (
             <Input
               {...props}
