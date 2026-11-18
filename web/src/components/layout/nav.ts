@@ -2,7 +2,6 @@ import {
   Activity,
   ArrowLeftRight,
   Boxes,
-  DoorOpen,
   KeyRound,
   LayoutDashboard,
   Link2,
@@ -67,7 +66,6 @@ export const NAV_GROUPS: readonly NavGroup[] = [
       return t.nav.groupAccess
     },
     items: [
-      item('exits', () => t.nav.exits, DoorOpen),
       item('listeners', () => t.nav.listeners, RadioTower),
       item('credentials', () => t.nav.credentials, KeyRound),
       item('forwards', () => t.nav.forwards, ArrowLeftRight),

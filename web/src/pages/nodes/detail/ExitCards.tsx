@@ -25,7 +25,7 @@ import { cn } from '@/lib/utils'
 import { COMMON_PORTS, portName } from '@/lib/ports'
 import { MAX_QUOTA_RESET_DAY, splitList, validatePort } from '@/lib/validate'
 import { networkPath } from '@/pages/networks/context'
-import { exitHealthView } from '@/pages/exits/exitView'
+import { exitHealthView } from '@/lib/exitView'
 
 import { useSaveExit } from './exitActions'
 import {

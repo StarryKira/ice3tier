@@ -12,7 +12,7 @@ import { t } from '@/i18n'
 import { listenView } from '@/lib/listenState'
 import { nodeName, nodePath } from '@/lib/nodes'
 import { quotaView } from '@/lib/usage'
-import { exitHealthView } from '@/pages/exits/exitView'
+import { exitHealthView } from '@/lib/exitView'
 import { forwardLabel, forwardStatusView } from '@/pages/forwards/status'
 import { networkPath } from '@/pages/networks/context'
 import { AddNodeDialog } from '@/pages/nodes/AddNodeDialog'
@@ -130,7 +130,7 @@ export function AttentionChip({ network, nodes }: { network: Network; nodes: rea
     attention.push({
       key: `exit:${exit.node.id}`,
       text,
-      action: <GoLink to={`${networkPath(network.id, 'exits')}?focus=${exit.node.id}`}>{o.view}</GoLink>,
+      action: <GoLink to={`${nodePath(network.id, exit.node.id)}?tab=exit`}>{o.view}</GoLink>,
     })
   }
   for (const credential of credentials.data ?? []) {

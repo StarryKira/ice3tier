@@ -178,18 +178,14 @@ test('出口配额：在节点详情里配上，下载之后出口页有本账�
   const done = await download(`socks5h://${nodes.gw.ip}@127.0.0.1:${nodes.laptop.handle.socksPort ?? 0}`)
   expect(done.code, done.stderr).toBe(0)
 
-  await goTo(page, t.nav.exits)
-  const usage = page.getByTestId('exit-usage-gw')
+  // 节点详情的出口标签：本账期的配额进度、健康，和用它的节点各自看到的量。
+  await page.goto(`${controller.baseUrl}/n/1/nodes/${nodes.gw.id}?tab=exit`)
+  const usage = page.getByTestId('exit-usage')
   const meter = usage.getByRole('meter', { name: t.exits.quotaLabel('gw') })
   await expect(meter).toBeVisible({ timeout: 40_000 })
   await expect(usage).toContainText(/MB \/ 1\.0 GB/, { timeout: 40_000 })
   await expect(usage).toContainText(t.exits.quotaResets('').trim())
-  // 对照：出口报的和 laptop 看到的并排放着。
-  await page.getByRole('button', { name: t.exits.detailsFor('gw') }).click()
-  const table = page.getByRole('table', { name: t.exits.detailsFor('gw') })
-  await expect(table.getByRole('columnheader', { name: t.exits.exitReported, exact: true })).toBeVisible()
-  await expect(table.getByRole('columnheader', { name: 'laptop', exact: true })).toBeVisible({ timeout: 30_000 })
-  await expect(page.getByTestId('exit-health-gw')).toBeVisible()
+  await expect(page.getByTestId('exit-users')).toContainText('laptop', { timeout: 30_000 })
 })
 
 test('凭据：经要求凭据的监听器用过之后有用量；改上限让它用完；吊销；再彻底删掉', async () => {

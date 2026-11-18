@@ -11,7 +11,6 @@ import { Page } from '@/components/page'
 import { SkeletonBlock } from '@/components/states'
 import { Card } from '@/components/ui/card'
 import { CredentialsPage } from '@/pages/credentials/CredentialsPage'
-import { ExitsPage } from '@/pages/exits/ExitsPage'
 import { ForwardsPage } from '@/pages/forwards/ForwardsPage'
 import { GroupsPage } from '@/pages/groups/GroupsPage'
 import { ListenersPage } from '@/pages/listeners/ListenersPage'
@@ -79,7 +78,8 @@ export function AppRoutes() {
             <Route path="nodes/:node" element={<NodeDetailPage />} />
             <Route path="access" element={<Lazy page={AccessPage} />} />
             <Route path="groups" element={<GroupsPage />} />
-            <Route path="exits" element={<ExitsPage />} />
+            {/* 出口页去掉了：出口是节点的一种身份，在节点详情里看和改；旧链接去节点列表、只看出口。 */}
+            <Route path="exits" element={<Navigate to="../nodes?role=exit" replace />} />
             <Route path="listeners" element={<ListenersPage />} />
             <Route path="credentials" element={<CredentialsPage />} />
             <Route path="forwards" element={<ForwardsPage />} />

@@ -23,7 +23,6 @@ export const nav = {
   groups: '分组',
   access: '策略',
   groupAccess: '接入',
-  exits: '出口',
   listeners: '监听器',
   credentials: '凭据',
   forwards: '端口转发',

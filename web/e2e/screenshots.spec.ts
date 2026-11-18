@@ -161,7 +161,6 @@ test('空的网络：每个页面没有数据时的样子', async () => {
   await page.getByRole('radio', { name: t.access.viewList }).click()
 
   for (const [name, file, marker] of [
-    [t.nav.exits, 'exits-empty', t.exits.emptyTitle],
     [t.nav.listeners, 'listeners-empty', t.listeners.emptyTitle],
     [t.nav.credentials, 'credentials-empty', t.credentials.emptyTitle],
     [t.nav.forwards, 'forwards-empty', t.forwards.emptyTitle],
@@ -668,17 +667,6 @@ test('有数据时：分组', async () => {
 })
 
 test('有数据时：接入', async () => {
-  await goTo(page, t.nav.exits)
-  await expect(page.getByTestId('exit-row-nas-home')).toBeVisible()
-  await shot('exits')
-  await page.getByRole('button', { name: t.exits.detailsFor('nas-home') }).click()
-  await expect(page.getByTestId('exit-crosscheck-nas-home')).toBeVisible()
-  await shot('exits-crosscheck')
-  await page.getByRole('button', { name: t.exits.enable }).click()
-  await expect(page.getByRole('dialog', { name: t.exits.dialogTitle })).toBeVisible()
-  await shot('exits-enable-dialog', { fullPage: false })
-  await page.getByRole('button', { name: t.common.cancel, exact: true }).click()
-
   await goTo(page, t.nav.listeners)
   await expect(page.getByTestId('listener-row-lan')).toBeVisible()
   await shot('listeners')
@@ -800,10 +788,7 @@ test('有数据时：管理区和设置', async () => {
 test('连通性测试：真的测一对在线的节点，再跑一次全网', async () => {
   test.setTimeout(120_000)
   const ts = t.tests
-  await page
-    .getByRole('navigation', { name: t.nav.label })
-    .getByRole('link', { name: ts.title })
-    .click()
+  await page.getByRole('navigation', { name: t.nav.label }).getByRole('link', { name: ts.title }).click()
   await page.getByRole('combobox', { name: ts.nodeA }).click()
   await page.getByRole('option', { name: /laptop/ }).click()
   await expect(page.getByRole('listbox')).toHaveCount(0)
@@ -845,9 +830,6 @@ test('窄一些的笔记本宽度', async () => {
   await goTo(page, t.nav.forwards)
   await expect(page.getByTestId('forward-row-web')).toBeVisible()
   await shot('narrow-forwards')
-  await goTo(page, t.nav.exits)
-  await expect(page.getByTestId('exit-row-nas-home')).toBeVisible()
-  await shot('narrow-exits')
   await goTo(page, t.nav.credentials)
   await expect(page.getByTestId('credential-row-phone')).toBeVisible()
   await shot('narrow-credentials')
@@ -1022,10 +1004,6 @@ test('英文：长度最要紧的几页', async ({ browser }) => {
   await expect(english.getByRole('listbox', { name: en.groups.picker.options })).toBeVisible()
   await enShot('node-detail-group-picker', { fullPage: false })
   await english.keyboard.press('Escape')
-
-  await english.goto(`${controller.baseUrl}/n/1/exits`)
-  await expect(english.getByTestId('exit-row-nas-home')).toBeVisible()
-  await enShot('exits')
 
   await english.goto(`${controller.baseUrl}/n/1/forwards`)
   await expect(english.getByTestId('forward-row-web')).toBeVisible()

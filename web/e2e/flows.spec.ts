@@ -143,7 +143,10 @@ test('建两个分组：servers、laptops', async () => {
     await expectToast(page, g.created(name))
     await expect(dialog).toBeHidden()
     // 新建之后接着打开它的成员；这里先不加，关掉。
-    await page.getByRole('dialog', { name: g.membersOf(name) }).getByRole('button', { name: t.common.done }).click()
+    await page
+      .getByRole('dialog', { name: g.membersOf(name) })
+      .getByRole('button', { name: t.common.done })
+      .click()
   }
   const groups = await controller.api<{ name: string; builtin: boolean }[]>('GET', `${NET}/groups`)
   expect(groups.map((group) => group.name)).toEqual(['All', 'laptops', 'servers'])
@@ -382,20 +385,6 @@ test('加一条策略，关系图跟着变；停用默认策略后按分组收�
 })
 
 test('启用出口：节点没有声明时说明原因和要执行的命令，声明一到开关自己变为可用', async () => {
-  // 出口页：没有出口，也没有节点声明过。给出要执行的命令。
-  await goTo(page, t.nav.exits)
-  await expect(page.getByText(t.exits.emptyTitle)).toBeVisible()
-  await expect(page.getByText(t.exits.emptyNoneBody)).toBeVisible()
-  await expect(page.getByTestId('declare-command')).toHaveText('i3t set can-exit on')
-
-  // "启用出口"里没有声明的节点照样列出来，只是不能选。
-  await page.getByRole('button', { name: t.exits.enable }).click()
-  const dialog = page.getByRole('dialog', { name: t.exits.dialogTitle })
-  await expect(dialog.getByText(t.exits.notDeclared)).toBeVisible()
-  await expect(dialog.getByText(server.name, { exact: true })).toBeVisible()
-  await expect(dialog.getByRole('button', { name: t.exits.submit })).toBeDisabled()
-  await dialog.getByRole('button', { name: t.common.cancel, exact: true }).click()
-
   // controller 自己也不答应（界面上的置灰不是唯一的一道关）。
   const refused = await fetch(`${controller.baseUrl}/api/v1${NET}/nodes/${server.id}/exit`, {
     method: 'PUT',
@@ -457,9 +446,10 @@ test('启用出口：节点没有声明时说明原因和要执行的命令，�
   expect(node?.exit).toMatchObject({ ports: null })
   await clearToasts(page)
 
-  // 出口页现在列出它。
-  await goTo(page, t.nav.exits)
-  await expect(page.getByTestId(`exit-row-${server.name}`)).toBeVisible()
+  // 节点列表按"出口"筛：只剩它。
+  await page.goto(`${controller.baseUrl}/n/1/nodes?role=exit`)
+  await expect(page.getByTestId(`node-row-${server.name}`)).toBeVisible()
+  await expect(page.locator('[data-testid^="node-row-"]')).toHaveCount(1)
 })
 
 test('新建凭据：令牌只显示一次', async () => {
