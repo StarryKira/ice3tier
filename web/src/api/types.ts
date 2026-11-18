@@ -56,6 +56,9 @@ export type KnownErrorCode =
   | 'node_offline'
   | 'cannot_self_update'
   | 'no_update'
+  /** §19：同一对节点刚测过 / 正在测，或者矩阵正在跑。 */
+  | 'too_soon'
+  | 'busy'
   | 'internal'
 
 export interface ErrorBody {
@@ -1146,4 +1149,185 @@ export interface DeletedGroup {
   rules: Rule[]
   /** 预设了它、现在不再预设的注册令牌的编号。 */
   tokens: number[]
+}
+
+/* 主动测试（文档 §19）。 */
+
+export type TestItem = 'direct' | 'direct_quality' | 'relay_quality' | 'route'
+
+export interface CreateTest {
+  a: NodeId
+  b: NodeId
+  items?: TestItem[]
+  throughput?: boolean
+  /** relay 质量测哪几条路径（最多 2 条），每条按 a 到 b 的顺序列出经过的 relay。 */
+  via?: NodeId[][]
+}
+
+/** 一项或整个测试做不了、没做成的原因。界面按 `code` 写，`node` 说是哪个节点的；`message` 只是兜底。 */
+export interface TestProblem {
+  code: string
+  node: NodeId | null
+  message: string
+}
+
+export type TestState = 'running' | 'done' | 'failed' | 'cancelled'
+export type TestItemState = 'pending' | 'done' | 'skipped' | 'failed'
+
+export interface DirectSide {
+  node: NodeId
+  ok: boolean
+  already: boolean
+  kind: DirectKind | null
+  elapsed_ms: number | null
+  failure: string | null
+  /** 这一端的 UDP 通不通；不知道是 `null`。 */
+  udp: boolean | null
+  mapping_varies: boolean | null
+  candidates: number | null
+}
+
+export interface DirectResult {
+  state: TestItemState
+  ok: boolean | null
+  kind: DirectKind | null
+  elapsed_ms: number | null
+  already: boolean | null
+  problem: TestProblem | null
+  sides: DirectSide[]
+}
+
+export interface Latency {
+  probes: number
+  answered: number
+  min_us: number | null
+  avg_us: number | null
+  p95_us: number | null
+  jitter_us: number | null
+  loss_permille: number | null
+  loss_up_permille: number | null
+  loss_down_permille: number | null
+  same_path: number | null
+  interval_ms: number
+  duration_ms: number
+}
+
+export interface Hop {
+  from: NodeId
+  to: NodeId
+  rtt_us: number | null
+  jitter_us: number | null
+  loss_permille: number | null
+  source: 'measured' | 'backbone' | 'reported' | 'unknown'
+}
+
+export interface Transfer {
+  bytes: number
+  ms: number
+  bits_per_second: number
+  /** `bytes`、`time`、`finished`；比界面新的节点可能报别的。 */
+  stopped_by: string
+}
+
+export interface ThroughputResult {
+  state: TestItemState
+  problem: TestProblem | null
+  up: Transfer | null
+  down: Transfer | null
+  failure: string | null
+  transport: string
+  congestion: string | null
+  limit_bytes: number
+  limit_ms: number
+  pinned: boolean
+  shared_connection: boolean
+}
+
+export type PickedBy = 'direct' | 'direct_first' | 'lowest_cost' | 'admin'
+
+export interface PathResult {
+  state: TestItemState
+  route: Route | null
+  picked_by: PickedBy[]
+  problem: TestProblem | null
+  latency: Latency | null
+  cost_us: number | null
+  hops: Hop[]
+  relay_leg: LegTransport | null
+  throughput: ThroughputResult | null
+}
+
+export type ChoiceReason =
+  'lan' | 'direct' | 'peer_is_relay' | 'own_relay' | 'peer_relay' | 'lowest_cost' | 'within_margin' | 'no_path'
+
+export interface Choice {
+  route: Route | null
+  /** 一般是 `ChoiceReason`；比界面新的节点可能报别的，界面原样显示。 */
+  reason: string
+  cost_us: number | null
+  /** `within_margin` 时那条更便宜、但没有便宜到换路的候选。 */
+  cheaper?: { route: Route; cost_us: number } | null
+}
+
+export interface DecisionView {
+  from: NodeId
+  to: NodeId
+  mode: RoutingMode
+  current: Route | null
+  direct_first: Choice
+  lowest_cost: Choice
+  candidates: PathCandidate[]
+}
+
+export interface RouteResult {
+  state: TestItemState
+  problem: TestProblem | null
+  forward: DecisionView | null
+  reverse: DecisionView | null
+}
+
+export interface TestView {
+  id: number
+  network: NetworkId
+  a: NodeRef
+  b: NodeRef
+  state: TestState
+  request: { items: TestItem[]; throughput: boolean; via: NodeId[][] }
+  started_at: Timestamp
+  finished_at: Timestamp | null
+  matrix: number | null
+  error: TestProblem | null
+  direct: DirectResult | null
+  direct_quality: PathResult | null
+  relay_quality: PathResult[]
+  route: RouteResult | null
+  notes: TestProblem[]
+}
+
+export type MatrixCellState = 'pending' | 'running' | 'done' | 'failed' | 'skipped' | 'cancelled'
+
+export interface MatrixCell {
+  a: NodeId
+  b: NodeId
+  state: MatrixCellState
+  test: number | null
+  direct_ok: boolean | null
+  direct_kind: DirectKind | null
+  direct_elapsed_ms: number | null
+  route: Route | null
+  latency: Latency | null
+  problem: TestProblem | null
+}
+
+export interface MatrixRun {
+  id: number
+  network: NetworkId
+  state: 'running' | 'done' | 'cancelled'
+  started_at: Timestamp
+  finished_at: Timestamp | null
+  concurrency: number
+  total: number
+  finished: number
+  nodes: NodeRef[]
+  cells: MatrixCell[]
 }

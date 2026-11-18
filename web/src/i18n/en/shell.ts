@@ -53,16 +53,3 @@ export const switcher: Messages['switcher'] = {
   heading: 'Networks',
   switched: (name) => `Switched to ${name}`,
 }
-
-export const planned: Messages['planned'] = {
-  badge: 'Planned',
-  note: 'The controller does not provide the needed API yet',
-  meanwhile: 'For now',
-  tests: {
-    title: 'Connectivity tests',
-    summary:
-      'Controller-initiated tests between node pairs: whether they connect directly, latency direct and via relay, with history.',
-    needs: 'Missing API: start a test, read results',
-    meanwhile: 'Path diagnosis for one pair, Topology for the whole network',
-  },
-}

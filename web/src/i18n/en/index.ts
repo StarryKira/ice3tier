@@ -10,7 +10,8 @@ import { nodes } from './nodes'
 import { overview } from './overview'
 import { path, routes, topology } from './routes'
 import { settings } from './settings'
-import { nav, planned, signIn, switcher } from './shell'
+import { nav, signIn, switcher } from './shell'
+import { tests } from './tests'
 import { updates, version } from './updates'
 
 /** English. 和 `zh-CN/` 同样按页面分文件，在这里合成一个对象。 */
@@ -24,7 +25,6 @@ export const en: Messages = {
   signIn,
   nav,
   switcher,
-  planned,
   version,
   capability,
   declare,
@@ -48,4 +48,5 @@ export const en: Messages = {
   routes,
   topology,
   path,
+  tests,
 }

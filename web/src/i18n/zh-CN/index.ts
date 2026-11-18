@@ -9,7 +9,8 @@ import { nodes } from './nodes'
 import { overview } from './overview'
 import { path, routes, topology } from './routes'
 import { settings } from './settings'
-import { nav, planned, signIn, switcher } from './shell'
+import { nav, signIn, switcher } from './shell'
+import { tests } from './tests'
 import { updates, version } from './updates'
 
 /** 简体中文的全部界面文字。按页面分在同一个目录的几个文件里，在这里合成一个对象。 */
@@ -23,7 +24,6 @@ export const zhCN = {
   signIn,
   nav,
   switcher,
-  planned,
   version,
   capability,
   declare,
@@ -47,4 +47,5 @@ export const zhCN = {
   routes,
   topology,
   path,
+  tests,
 }

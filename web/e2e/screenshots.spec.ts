@@ -797,13 +797,29 @@ test('有数据时：管理区和设置', async () => {
   await shot('settings-about')
 })
 
-test('计划中的页面，和找不到的东西', async () => {
+test('连通性测试：真的测一对在线的节点，再跑一次全网', async () => {
+  test.setTimeout(120_000)
+  const ts = t.tests
   await page
     .getByRole('navigation', { name: t.nav.label })
-    .getByRole('link', { name: new RegExp(literal(t.nav.tests)) })
+    .getByRole('link', { name: ts.title })
     .click()
-  await expect(page.getByRole('heading', { name: new RegExp(literal(t.nav.tests)) })).toBeVisible()
-  await shot('planned-tests')
+  await page.getByRole('combobox', { name: ts.nodeA }).click()
+  await page.getByRole('option', { name: /laptop/ }).click()
+  await expect(page.getByRole('listbox')).toHaveCount(0)
+  await page.getByRole('combobox', { name: ts.nodeB }).click()
+  await page.getByRole('option', { name: /gw-hk/ }).click()
+  await page.getByRole('button', { name: ts.start }).click()
+  await expect(page.getByTestId('test-state')).toHaveText(ts.state.done, { timeout: 60_000 })
+  await shot('tests-result')
+
+  await page.getByRole('tab', { name: ts.tabMatrix }).click()
+  await page.getByRole('button', { name: ts.matrixStart }).click()
+  await expect(page.getByTestId('matrix-progress')).toContainText(ts.matrixState.done, { timeout: 90_000 })
+  await shot('tests-matrix')
+})
+
+test('找不到的东西', async () => {
   await page.goto(`${controller.baseUrl}/n/1/nodes/999`)
   await expect(page.getByText(t.nodes.detail.notFoundTitle)).toBeVisible()
   await shot('node-not-found')

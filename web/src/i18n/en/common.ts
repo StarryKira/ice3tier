@@ -64,7 +64,6 @@ export const common: Messages['common'] = {
   reportedAgo: (age) => `Updated ${age}`,
   listSeparator: ', ',
   sentences: (first, second) => `${first}. ${second}`,
-  withPlanned: (label) => `${label} (planned)`,
 }
 
 export const errors: Messages['errors'] = {
@@ -98,6 +97,8 @@ export const errors: Messages['errors'] = {
     node_offline: 'Node is offline',
     cannot_self_update: "Node can't update itself",
     no_update: 'No update available',
+    too_soon: 'Tested just now; try again shortly',
+    busy: 'Already running; try again shortly',
     internal: 'Internal controller error',
   },
   group: {

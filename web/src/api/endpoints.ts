@@ -10,6 +10,7 @@ import {
   type CreateGroup,
   type CreateNetwork,
   type CreateRule,
+  type CreateTest,
   type Credential,
   type DeletedGroup,
   type EnrollTokenInfo,
@@ -26,6 +27,7 @@ import {
   type ListenerInput,
   type LogEntry,
   type LogQuery,
+  type MatrixRun,
   type Network,
   type NetworkId,
   type Node,
@@ -53,6 +55,7 @@ import {
   type UpdateOverview,
   type UpdateRule,
   type UpdateSettings,
+  type TestView,
 } from './types'
 
 /**
@@ -145,6 +148,15 @@ export const api = {
   /** controller 先向两端各问一次，问不到的方向退回到上报的数据，所以最多要等 3 秒左右。 */
   path: (network: NetworkId, from: NodeId, to: NodeId, signal?: AbortSignal) =>
     request<PathView>('GET', `${net(network)}/path`, { query: { from, to }, signal }),
+  /** 主动测试（§19）：发起马上应答，测试在后台进行；进行中每秒问一次。 */
+  createTest: (network: NetworkId, body: CreateTest) => request<TestView>('POST', `${net(network)}/tests`, { body }),
+  test: (network: NetworkId, id: number) => request<TestView>('GET', `${net(network)}/tests/${id}`),
+  tests: (network: NetworkId, pair?: { a: NodeId; b: NodeId }, limit = 20) =>
+    request<TestView[]>('GET', `${net(network)}/tests`, { query: { ...pair, limit } }),
+  cancelTest: (network: NetworkId, id: number) => request<TestView>('POST', `${net(network)}/tests/${id}/cancel`),
+  testMatrix: (network: NetworkId) => request<MatrixRun>('GET', `${net(network)}/tests/matrix`),
+  startTestMatrix: (network: NetworkId) => request<MatrixRun>('POST', `${net(network)}/tests/matrix`),
+  cancelTestMatrix: (network: NetworkId) => request<MatrixRun>('POST', `${net(network)}/tests/matrix/cancel`),
   /** relay 之间的延迟矩阵。controller 现问几个节点，最多等 3 秒左右。 */
   backbone: (network: NetworkId, signal?: AbortSignal) =>
     request<BackboneView>('GET', `${net(network)}/backbone`, { signal }),

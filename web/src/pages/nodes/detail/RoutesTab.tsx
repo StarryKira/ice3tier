@@ -1,5 +1,5 @@
 import { useQueries, useQuery } from '@tanstack/react-query'
-import { Route as RouteIcon, RotateCw, Waypoints } from 'lucide-react'
+import { Activity, Route as RouteIcon, RotateCw, Waypoints } from 'lucide-react'
 import { type ReactNode } from 'react'
 import { Link } from 'react-router'
 
@@ -29,6 +29,7 @@ import { nodeName } from '@/lib/nodes'
 import { REPORT_INTERVAL_SECS } from '@/lib/product'
 import { formatAge, formatDuration } from '@/lib/time'
 import { cn } from '@/lib/utils'
+import { networkPath } from '@/pages/networks/context'
 import { pairPath } from '@/topology/pair'
 
 const d = t.nodes.detail
@@ -484,6 +485,12 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
                         to={pairPath(network.id, 'diagnosis', node.id, entry.peer.id)}
                         label={d.routesDiagnose}
                         icon={<RouteIcon />}
+                      />
+                      {/* 直连没试过、没通的时候最想点它：去连通性测试，这一对已经选好。 */}
+                      <IconLink
+                        to={`${networkPath(network.id, 'tests')}?a=${node.id}&b=${entry.peer.id}`}
+                        label={t.tests.testAction}
+                        icon={<Activity />}
                       />
                     </span>
                   </Td>

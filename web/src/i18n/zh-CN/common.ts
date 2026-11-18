@@ -63,7 +63,6 @@ export const common = {
   listSeparator: '、',
   /** 两句话接成一段：前一句没有句号时用。 */
   sentences: (first: string, second: string) => `${first}。${second}`,
-  withPlanned: (label: string) => `${label}（计划中）`,
 }
 
 export const errors = {
@@ -98,6 +97,8 @@ export const errors = {
     node_offline: '节点离线',
     cannot_self_update: '节点无法自行更新',
     no_update: '没有可用的更新',
+    too_soon: '刚测过，稍后再试',
+    busy: '正在进行中，稍后再试',
     internal: 'controller 内部错误',
   },
   /** 分组的错误（§18.1）：码加上 `what` 才说得清。 */

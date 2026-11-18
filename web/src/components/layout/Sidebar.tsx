@@ -27,34 +27,26 @@ interface ItemLinkProps {
   to: string
   label: string
   icon: NavItem['icon']
-  planned?: boolean
   collapsed: boolean
 }
 
-function ItemLink({ to, label, icon: Icon, planned = false, collapsed }: ItemLinkProps) {
+function ItemLink({ to, label, icon: Icon, collapsed }: ItemLinkProps) {
   // 和 NavLink 自己的判断一样：地址就是它，或者在它下面。这里自己算，样式才能是一个字符串——
   // 收起时外面套着悬停说明，它会把自己的 className 和这里的拼起来，拼不了函数。
   const { pathname } = useLocation()
   const active = pathname === to || pathname.startsWith(`${to}/`)
-  const name = planned ? t.common.withPlanned(label) : label
   const link = (
     <NavLink
       to={to}
-      aria-label={collapsed || planned ? name : undefined}
-      className={cn(
-        ROW,
-        collapsed ? 'justify-center px-[7px]' : 'px-2.5',
-        active ? ROW_ACTIVE : ROW_IDLE,
-        // 计划中的页面：整行淡一些，悬停时说明。
-        planned && !active && 'text-faint [&_svg]:text-faint/80',
-      )}
+      aria-label={collapsed ? label : undefined}
+      className={cn(ROW, collapsed ? 'justify-center px-[7px]' : 'px-2.5', active ? ROW_ACTIVE : ROW_IDLE)}
     >
       <Icon className="size-[18px] shrink-0" strokeWidth={1.75} aria-hidden />
       {collapsed ? null : <span className="min-w-0 flex-1 truncate">{label}</span>}
     </NavLink>
   )
-  return collapsed || planned ? (
-    <Tooltip content={name} side="right">
+  return collapsed ? (
+    <Tooltip content={label} side="right">
       {link}
     </Tooltip>
   ) : (
@@ -176,7 +168,6 @@ export function Sidebar({ current, collapsed, onToggle }: SidebarProps) {
                         to={item.to ?? networkPath(current.id, item.page)}
                         label={item.label}
                         icon={item.icon}
-                        planned={item.planned}
                         collapsed={collapsed}
                       />
                     </li>

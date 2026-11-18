@@ -1,4 +1,5 @@
 import {
+  Activity,
   ArrowLeftRight,
   Boxes,
   DoorOpen,
@@ -17,15 +18,12 @@ import {
 } from 'lucide-react'
 
 import { t } from '@/i18n'
-import { plannedEntry, type PlannedId } from '@/pages/planned/planned'
 
 export interface NavItem {
   /** 路径里的那一段：`/n/<网络>/<page>`。 */
   page: string
   label: string
   icon: LucideIcon
-  /** 计划中的页面：接口还没有，导航上带一个标记。 */
-  planned?: boolean
   /** 不属于某个网络的页面（设置）直接给出地址。 */
   to?: string
 }
@@ -45,15 +43,6 @@ const item = (page: string, label: () => string, icon: LucideIcon, to?: string):
   },
   icon,
   to,
-})
-
-const planned = (id: PlannedId): NavItem => ({
-  page: id,
-  get label() {
-    return plannedEntry(id).title
-  },
-  icon: plannedEntry(id).icon,
-  planned: true,
 })
 
 /**
@@ -92,7 +81,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
     items: [
       item('topology', () => t.nav.topology, Waypoints),
       item('diagnosis', () => t.nav.diagnosis, Route),
-      planned('tests'),
+      item('tests', () => t.nav.tests, Activity),
     ],
   },
   {

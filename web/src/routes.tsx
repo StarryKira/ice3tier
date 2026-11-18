@@ -25,7 +25,7 @@ import { NodesPage } from '@/pages/nodes/NodesPage'
 import { NotFoundPage } from '@/pages/NotFoundPage'
 import { OverviewPage } from '@/pages/overview/OverviewPage'
 import { PairsPage } from '@/pages/pairs/PairsPage'
-import { PlannedPage } from '@/pages/planned/PlannedPage'
+import { TestsPage } from '@/pages/tests/TestsPage'
 import { TokensPage } from '@/pages/tokens/TokensPage'
 
 // 访问控制页和拓扑页带着画图的库，单独成块：别的页面用不到它。
@@ -62,7 +62,6 @@ function PageFallback() {
  * 全部路由。地址的形状：网络在路径里（`/n/<网络编号>/…`），对象的编号在路径里，
  * 筛选、搜索、选中的一对节点在查询参数里；浏览器的前进后退能还原这些状态。
  *
- * 计划中的页面是 `<PlannedPage id="…" />`：接口有了之后，把那一行换成真正的页面组件。
  */
 export function AppRoutes() {
   return (
@@ -86,7 +85,7 @@ export function AppRoutes() {
             <Route path="forwards" element={<ForwardsPage />} />
             <Route path="topology" element={<Lazy page={TopologyPage} />} />
             <Route path="diagnosis" element={<Lazy page={PathPage} />} />
-            <Route path="tests" element={<PlannedPage id="tests" />} />
+            <Route path="tests" element={<TestsPage />} />
             <Route path="tokens" element={<TokensPage />} />
             <Route path="pairs" element={<PairsPage />} />
             <Route path="network" element={<NetworkPage />} />
