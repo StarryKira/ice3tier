@@ -88,8 +88,8 @@ impl Control {
         }
         let Some(peer) = self.peers.get_mut(&pong.src) else { return };
         // 对端从直连回答了本端经 relay 发的路径探测（它那个方向走的是直连）。
-        if peer.probe.pending.is_some_and(|(nonce, _)| nonce == pong.nonce) {
-            self.on_path_pong(pong.src, pong);
+        if peer.probe.pending.is_some_and(|(nonce, _)| nonce == pong.nonce) || peer.local_leg.expects(&pong.nonce) {
+            self.on_path_pong(pong.src, pong, now);
             return;
         }
         // 先看它是不是在回答本端发过的 PING，是才值得验签名。
@@ -141,10 +141,11 @@ impl Control {
         peer.slot.send_frame(&self.shared, &pong.to_bytes());
     }
 
-    /// 对端回答了本端的路径探测：现在这条路径确实送得到。
-    pub(super) fn on_path_pong(&mut self, from: NodeId, pong: &probe::Pong) {
+    /// 对端回答了本端的路径探测：现在这条路径确实送得到；或者是经本节点 relay 量那一段的探测（`View::local_leg`），记下往返用了多久。
+    pub(super) fn on_path_pong(&mut self, from: NodeId, pong: &probe::Pong, now: Instant) {
         let Some(peer) = self.peers.get_mut(&from) else { return };
-        if pong.src != from || pong.dst != self.shared.me || peer.probe.pending.is_none_or(|(nonce, _)| nonce != pong.nonce) {
+        let path_probe = peer.probe.pending.is_some_and(|(nonce, _)| nonce == pong.nonce);
+        if pong.src != from || pong.dst != self.shared.me || !(path_probe || peer.local_leg.expects(&pong.nonce)) {
             return;
         }
         let message = probe::Pong::signed_message(pong.src, pong.dst, &pong.nonce, pong.observed);
@@ -152,8 +153,12 @@ impl Control {
             tracing::debug!(peer = %from, "路径探测的回答签名不对，丢弃");
             return;
         }
-        peer.probe.pending = None;
-        peer.probe.missed = 0;
+        if path_probe {
+            peer.probe.pending = None;
+            peer.probe.missed = 0;
+        } else {
+            peer.local_leg.on_reply(&pong.nonce, now);
+        }
     }
 
     /// 在本地网段上看到了一个对端的信标：它的来源地址成为一个直连候选，照样要用带签名的探测验证过才用。

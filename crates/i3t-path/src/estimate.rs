@@ -7,10 +7,29 @@
 //!
 //! # 迟到的回答
 //!
-//! 等不到回答的探测记成丢失；它的回答后来又到了的话，再记一个延迟样本（不再算一次"没丢"）。走 TCP 的那一段
-//! 丢的包由 TCP 自己重传，探测不会真的丢，只会在停顿之后迟到：节点能测到的只有这条 TCP 的延迟和停顿。
-//! 这样一次停顿既算一次丢失（端到端的连接在这么久的停顿里也会判定丢包、重传），又让延迟和抖动跟着涨，
-//! 一条经常停顿的 TCP 在代价里就明显比一条顺畅的贵。
+//! 等不到回答的探测记成丢失；它的回答后来又到了的话，再记一个延迟样本（不再算一次"没丢"）。
+//! 走 UDP 的一段按平滑延迟、抖动和丢包算代价（[`Estimate::quality`]）。
+//!
+//! # 走 TCP 的一段
+//!
+//! 走 TCP 的那一段丢的包由 TCP 自己重传，探测不会真的丢，只会在停顿之后迟到：节点能测到的只有这条 TCP 的延迟和停顿。
+//! 上面那套用在它身上两头都不对（真实链路上量过：250～350 ms、丢包 5～8% 的线）。
+//! 稀疏的探测大多落在停顿之外，少数撞上一次重传：平滑延迟偏低，抖动（偏差的平滑值）却被这几个样本拉到一两百毫秒，
+//! 乘上抖动的权重之后比实测还贵一倍，而且一个样本就能让代价涨落几百毫秒，选路跟着来回换；同一时刻对端报上来的
+//! 同一条 TCP 只有平滑延迟，又便宜得多。流量在这样一条 TCP 上经历的是停顿本身：丢一个段，后面的包都等它重传。
+//! 所以走 TCP 的一段按最近 4 分钟里所有样本的平均延迟算（[`Estimate::over_tcp`]）：撞上停顿的样本按它真正用的时间算进去，
+//! 停顿多久、多常见都在这个数里，不再另外按抖动和丢包加一遍（那是同一件事算两次）。保活连续没有回答、
+//! 会话因此拆掉时，最早那个没有回答的探测等了多久也记一个样本（[`Estimate::stalled`]）：不然一条隔一会儿就卡死的 TCP，
+//! 窗口里只剩重连之后那些漂亮的样本。
+//!
+//! 这个平均是探测那样的轻负载下要等的时间。流量越密，撞上停顿的包越多：实验环境里一条 250 ms、丢 5% 的 TCP 上，
+//! 每秒 50 个包时的平均延迟比它高四成。所以它偏乐观，但各条 TCP 用的是同一把尺子，一个停顿只让它挪一点。
+//! 按高分位数或者再加上相邻样本之差估出来的数更接近满载时的样子，可是和原来的读法一样一跳几百毫秒。
+//!
+//! 窗口按时间而不是按个数：在评估的候选上的一段每 30 秒多一组探测包列，样本比只有保活的一段多三倍，按个数的话两种段平均的时间长短不一。
+//! 4 分钟是量出来的折中（拿实验环境里一条 250 ms、丢 5% 的 TCP 上的样本，模拟两条一样好的段让选路器比）：窗口短了，一阵停顿
+//! 在平均里留得够久、又没被别的样本冲淡，两条一样好的段之间每十分钟换两三次，比原来的读法还多；4 分钟时不到一次，
+//! 一条段真的变差四成之后 50 秒左右换走。
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -22,6 +41,10 @@ use crate::timing::{ESTIMATE_TTL, Rtt, TRAIN_INTERVAL, TRAIN_PROBES};
 
 /// 丢包率按最近这么多个探测算。一组探测包列是 10 个，所以大约是最近四组。
 const LOSS_WINDOW: usize = 40;
+/// 走 TCP 的一段的平均延迟按这么久之内的样本算（见模块文档）。
+const TCP_WINDOW: Duration = Duration::from_secs(240);
+/// 这个窗口里最多留多少个样本：在评估的候选上的一段 4 分钟大约 130 个，多出来的（有流量时提前的保活）挤掉最老的。
+const TCP_SAMPLES: usize = 160;
 /// 探测不到这么多个时不报丢包率：样本太少，丢一个就是百分之十几。
 const MIN_LOSS_SAMPLES: usize = 10;
 /// 超时的探测最多记多少个、记多久，等它们迟到的回答。再晚的回答就不当样本了：那样的停顿早就让会话判为断开。
@@ -36,6 +59,8 @@ pub(crate) struct Estimate {
     jitter: Duration,
     /// 最近的探测是不是丢了。
     outcomes: VecDeque<bool>,
+    /// 最近 [`TCP_WINDOW`] 里的延迟样本和它们的时刻，迟到的回答按它真正用的时间算。走 TCP 的一段按它们算（见模块文档）。
+    recent: VecDeque<(Instant, Duration)>,
     /// 最近一次得到回答的时刻。
     answered: Option<Instant>,
 }
@@ -63,7 +88,7 @@ impl Quality {
 
 impl Estimate {
     pub(crate) const fn new() -> Self {
-        Self { rtt: None, jitter: Duration::ZERO, outcomes: VecDeque::new(), answered: None }
+        Self { rtt: None, jitter: Duration::ZERO, outcomes: VecDeque::new(), recent: VecDeque::new(), answered: None }
     }
 
     /// 一个探测得到了回答，往返用了 `rtt`。
@@ -82,6 +107,12 @@ impl Estimate {
         self.measure(rtt, now);
     }
 
+    /// 走 TCP 的一段卡住了：一个探测等了 `waited` 也没有回答，会话因此拆掉，它的回答再也不会来了。
+    /// 只进 TCP 用的那个窗口（见模块文档），不改平滑延迟（它用来定探测的超时），也不算一次回答。
+    pub(crate) fn stalled(&mut self, waited: Duration, now: Instant) {
+        self.remember(waited, now);
+    }
+
     fn measure(&mut self, rtt: Duration, now: Instant) {
         match &mut self.rtt {
             Some(smoothed) => {
@@ -91,7 +122,17 @@ impl Estimate {
             }
             None => self.rtt = Some(Rtt::new(rtt)),
         }
+        self.remember(rtt, now);
         self.answered = Some(now);
+    }
+
+    fn remember(&mut self, rtt: Duration, now: Instant) {
+        while self.recent.front().is_some_and(|(at, _)| now.saturating_duration_since(*at) >= TCP_WINDOW)
+            || self.recent.len() >= TCP_SAMPLES
+        {
+            self.recent.pop_front();
+        }
+        self.recent.push_back((now, rtt));
     }
 
     fn record(&mut self, lost: bool) {
@@ -113,6 +154,19 @@ impl Estimate {
         let probes = self.outcomes.len();
         let (lost, probes) = if probes < MIN_LOSS_SAMPLES { (0, 0) } else { (self.outcomes.iter().filter(|&&lost| lost).count(), probes) };
         Some(Quality { rtt, jitter: self.jitter, lost, probes })
+    }
+
+    /// 这一段走在 TCP 里时的估计：延迟是最近 [`TCP_WINDOW`] 里所有样本的平均，停顿按它真正用的时间算在里面；
+    /// 抖动和丢包是 0，因为 TCP 把它们都变成了这份延迟（见模块文档）。和 [`quality`](Self::quality) 一样，
+    /// 从来没有得到过回答或者最近一次回答已经过期了是 `None`。
+    pub(crate) fn over_tcp(&self, now: Instant) -> Option<Quality> {
+        let fresh = self.answered.is_some_and(|at| now.saturating_duration_since(at) < ESTIMATE_TTL);
+        let window: Vec<Duration> =
+            self.recent.iter().filter(|(at, _)| now.saturating_duration_since(*at) < TCP_WINDOW).map(|(_, rtt)| *rtt).collect();
+        // 窗口里最多 [`TCP_SAMPLES`] 个，个数换成 u32 不会失败。
+        let count = u32::try_from(window.len()).ok().filter(|count| fresh && *count > 0)?;
+        let rtt = window.iter().sum::<Duration>() / count;
+        Some(Quality { rtt, jitter: Duration::ZERO, lost: 0, probes: 0 })
     }
 }
 
@@ -196,6 +250,69 @@ impl Train {
         self.pending.clear();
         self.overdue.clear();
         self.remaining = 0;
+    }
+
+    /// 等着迟到的回答的探测里最早发出的那个是什么时候发的。
+    pub(crate) fn oldest_overdue(&self) -> Option<Instant> {
+        self.overdue.iter().map(|(_, sent)| *sent).min()
+    }
+}
+
+/// 一个一个发的端到端探测：同一时刻最多一个在等回答，上一个发出去 `interval` 之后才发下一个。
+///
+/// 用在本节点自己的会话量不到、只能端到端去量的一段上：对端挂在本节点的 relay 上、又没有把本节点列进挂靠表时，
+/// "本节点的 relay → 对端"那一段（见 `control::route`）。对端回答这种探测有频率上限（同一个对端 200 毫秒一个），
+/// 所以不像 [`Train`] 那样连着发一组；没有回答的也不记成丢失（可能是被对端的频率上限挡掉的），回答迟到了照样记延迟样本。
+#[derive(Debug)]
+pub(crate) struct Sampler {
+    estimate: Estimate,
+    pending: Option<(Nonce, Instant)>,
+    /// 超时了、还在等迟到的回答的那些，借 [`Train`] 的记账。
+    late: Train,
+    sent: Option<Instant>,
+}
+
+impl Sampler {
+    pub(crate) const fn new() -> Self {
+        Self { estimate: Estimate::new(), pending: None, late: Train::new(), sent: None }
+    }
+
+    pub(crate) const fn measured(&self) -> &Estimate {
+        &self.estimate
+    }
+
+    /// 推进一步：在等的那个超时了就转去等它迟到的回答；该发下一个了就返回它的随机数。`wanted` 为假时不发新的。
+    pub(crate) fn poll(&mut self, now: Instant, wanted: bool, interval: Duration) -> Option<Nonce> {
+        let timeout = self.estimate.rtt().map_or(crate::timing::PROBE_TIMEOUT_MAX, Rtt::probe_timeout);
+        if let Some((nonce, sent)) = self.pending.filter(|(_, sent)| now.saturating_duration_since(*sent) >= timeout) {
+            self.late.overdue(nonce, sent);
+            self.pending = None;
+        }
+        // 只为了扔掉等得太久的那些；它不在列里，不会发新的。
+        self.late.poll(now, false, timeout, &mut self.estimate);
+        let due = self.pending.is_none() && self.sent.is_none_or(|at| now.saturating_duration_since(at) >= interval);
+        if !wanted || !due {
+            return None;
+        }
+        let nonce: Nonce = i3t_underlay::random_bytes();
+        self.pending = Some((nonce, now));
+        self.sent = Some(now);
+        Some(nonce)
+    }
+
+    /// 是不是在等这个随机数的回答（包括迟到的）。
+    pub(crate) fn expects(&self, nonce: &Nonce) -> bool {
+        self.pending.is_some_and(|(pending, _)| pending == *nonce) || self.late.expects(nonce)
+    }
+
+    /// 一个回答到了。是在回答本 sampler 发的探测时记一个样本，返回 `true`。
+    pub(crate) fn on_reply(&mut self, nonce: &Nonce, now: Instant) -> bool {
+        if let Some((_, sent)) = self.pending.filter(|(pending, _)| pending == nonce) {
+            self.pending = None;
+            self.estimate.measure(now.saturating_duration_since(sent), now);
+            return true;
+        }
+        self.late.on_reply(nonce, now, &mut self.estimate)
     }
 }
 
@@ -380,5 +497,118 @@ mod tests {
         assert!(!train.expects(&nonces[0]), "最多等 {OVERDUE_KEPT} 个，最老的先放弃");
         assert!(train.on_reply(&nonces[OVERDUE_KEPT], start + 500 * MS, &mut estimate));
         assert!(estimate.rtt().unwrap().get() > 20 * MS);
+    }
+
+    /// 实验环境里量到的一条 250 ms、两个方向各丢 5% 的 TCP 上探测的样子：多数回答就是 250 ms，撞上一次重传的要多等 400～600 ms。
+    /// 第 `index` 个样本。
+    fn lossy_tcp(index: u32) -> Duration {
+        if index % 7 == 3 { 750 * MS } else { 250 * MS }
+    }
+
+    #[test]
+    fn a_tcp_leg_costs_the_mean_delay_of_its_recent_probes_with_stalls_at_their_full_length() {
+        let now = Instant::now();
+        let mut estimate = Estimate::new();
+        for _ in 0..9 {
+            estimate.sample(250 * MS, now);
+        }
+        // 一个探测撞上了重传，超时之后 900 ms 才回答：按 900 ms 算进平均。
+        estimate.lost();
+        estimate.late_answer(900 * MS, now);
+        let tcp = estimate.over_tcp(now).unwrap();
+        assert_eq!(tcp, Quality { rtt: 315 * MS, jitter: Duration::ZERO, lost: 0, probes: 0 }, "停顿已经在平均里，不再按抖动和丢包加一遍");
+        assert!((tcp.segment().rtt_ms - 315.0).abs() < 1e-9 && tcp.segment().loss == 0.0);
+        assert_eq!(Estimate::new().over_tcp(now), None, "没有样本就是不知道");
+    }
+
+    #[test]
+    fn on_a_lossy_tcp_the_old_reading_costs_far_more_than_the_mean_and_one_stall_swings_it_by_hundreds_of_milliseconds() {
+        let start = Instant::now();
+        let every = Duration::from_secs(2);
+        let mut estimate = Estimate::new();
+        for index in 0..240 {
+            estimate.sample(lossy_tcp(index), start + every * index);
+        }
+        let now = start + every * 239;
+        let udp_cost = |estimate: &Estimate, now| crate::cost::path_cost(&[estimate.quality(now).unwrap().segment()], 0, 0.0);
+        let tcp_cost = |estimate: &Estimate, now| crate::cost::path_cost(&[estimate.over_tcp(now).unwrap().segment()], 0, 0.0);
+        let (old, new) = (udp_cost(&estimate, now), tcp_cost(&estimate, now));
+        // 4 分钟里的 120 个样本（第 120 到 239 个）的平均，就是一个探测平均要等的时间。
+        let mean = (120..240).map(|index| lossy_tcp(index).as_secs_f64() * 1000.0).sum::<f64>() / 120.0;
+        assert!((new - mean).abs() < 1e-6, "{new} 对 {mean}");
+        assert!(old > 1.5 * new, "平滑延迟加四倍的偏差：{old:.0} 对 {new:.0}");
+
+        // 再来一个停顿：新的读数挪 500/120 ms，旧的一下子涨好几百毫秒，选路跟着它来回换。
+        let later = now + every;
+        estimate.sample(750 * MS, later);
+        let (old_after, new_after) = (udp_cost(&estimate, later), tcp_cost(&estimate, later));
+        assert!(new_after - new < 5.0, "{new} → {new_after}");
+        assert!(old_after - old > 300.0, "{old} → {old_after}");
+    }
+
+    #[test]
+    fn a_tcp_leg_averages_the_last_four_minutes_and_a_fatal_stall_counts_without_refreshing_it() {
+        let start = Instant::now();
+        let mut estimate = Estimate::new();
+        for _ in 0..LOSS_WINDOW {
+            estimate.sample(900 * MS, start);
+        }
+        let later = start + TCP_WINDOW;
+        for _ in 0..9 {
+            estimate.sample(250 * MS, later);
+        }
+        assert_eq!(estimate.over_tcp(later).unwrap().rtt, 250 * MS, "4 分钟以前的那一阵不算了，不管当时有多少个样本");
+
+        // 保活一直没有回答、会话拆掉了：最早那个探测等了 4 秒，记一个样本。平滑延迟（定超时用）不动，也不算一次回答。
+        let srtt = estimate.rtt();
+        estimate.stalled(Duration::from_secs(4), later);
+        assert_eq!(estimate.over_tcp(later).unwrap().rtt, (250 * MS * 9 + Duration::from_secs(4)) / 10);
+        assert_eq!(estimate.rtt(), srtt);
+        assert_eq!(estimate.over_tcp(later + ESTIMATE_TTL), None, "只有停顿、没有新的回答：照样过期");
+
+        // 样本再密也只留最近的 [`TCP_SAMPLES`] 个。
+        for _ in 0..2 * TCP_SAMPLES {
+            estimate.sample(100 * MS, later);
+        }
+        assert_eq!(estimate.recent.len(), TCP_SAMPLES);
+        assert_eq!(estimate.over_tcp(later).unwrap().rtt, 100 * MS);
+    }
+
+    #[test]
+    fn the_sampler_keeps_one_probe_in_flight_and_sends_the_next_after_the_interval() {
+        let start = Instant::now();
+        let interval = Duration::from_secs(5);
+        let mut sampler = Sampler::new();
+        assert_eq!(sampler.poll(start, false, interval), None, "不需要的时候不发");
+        let first = sampler.poll(start, true, interval).unwrap();
+        assert!(sampler.expects(&first));
+        assert_eq!(sampler.poll(start + 100 * MS, true, interval), None, "一次只有一个在等回答");
+        assert!(sampler.on_reply(&first, start + 260 * MS));
+        assert!(!sampler.on_reply(&first, start + 270 * MS), "同一个回答只算一次");
+        assert_eq!(sampler.poll(start + 300 * MS, true, interval), None, "间隔没到");
+        assert!(sampler.poll(start + interval, true, interval).is_some());
+        let quality = sampler.measured().over_tcp(start + interval).unwrap();
+        assert_eq!(quality.rtt, 260 * MS);
+        assert!(!sampler.on_reply(&[0; 8], start + interval), "不是它发的");
+    }
+
+    #[test]
+    fn an_unanswered_sampler_probe_is_not_a_loss_and_its_late_answer_still_counts() {
+        let start = Instant::now();
+        let interval = Duration::from_secs(5);
+        let mut sampler = Sampler::new();
+        let first = sampler.poll(start, true, interval).unwrap();
+        sampler.on_reply(&first, start + 250 * MS);
+        let stalled = sampler.poll(start + interval, true, interval).unwrap();
+        // 等了超时（这里是延迟的 4 倍，1 秒）还没有回答：转去等它迟到的回答。下一个照样按间隔发。
+        assert_eq!(sampler.poll(start + interval + Duration::from_secs(1), true, interval), None);
+        assert!(sampler.expects(&stalled));
+        let next = sampler.poll(start + interval * 2, true, interval).unwrap();
+        // 迟到 1.2 秒的回答记一个样本；对端频率上限挡掉的那种永远不来，也不算丢包。
+        assert!(sampler.on_reply(&stalled, start + interval + 1200 * MS));
+        let measured = sampler.measured();
+        assert_eq!(measured.over_tcp(start + interval * 2).unwrap().rtt, (250 * MS + 1200 * MS) / 2);
+        assert_eq!(measured.quality(start + interval * 2).map(|quality| (quality.lost, quality.probes)), Some((0, 0)));
+        assert!(sampler.expects(&next));
     }
 }

@@ -14,13 +14,15 @@ use i3t_proto::backbone::RelayState;
 use i3t_proto::datagram::{RelayHeader, RelayPath, RouteHeader};
 
 use super::{PeerState, RelayEntry};
+use crate::SessionLeg;
 use crate::cost::Segment;
+use crate::diag::HopSource;
 use crate::matrix::Matrix;
 use crate::relays::Leg;
 use crate::routing::{self, Candidate, Destination, DirectLink, Entry, Graph, PathId, Why};
 use crate::table::{FrameHeader, Hop, Shared};
 use crate::tcp::TcpLegHandle;
-use crate::timing::{SETTLE, SWITCH_WINDOWS};
+use crate::timing::{PROBE_TIMEOUT_MAX, SETTLE, SWITCH_WINDOWS};
 
 /// 从没有路变成有路之后多久之内，选中的 relay 还不算"在用"，见 [`relay_in_use`]。
 const FIRST_ROUTE_GRACE: Duration = Duration::from_secs(1);
@@ -98,6 +100,41 @@ impl View<'_> {
     /// 对端在本节点自己的 relay 上有没有会话。
     fn local_session(&self, peer: NodeId) -> bool {
         self.shared.local_relay.get().is_some_and(|local| local.has_session(peer))
+    }
+
+    /// 对端挂在本节点自己的 relay 上时，"本节点的 relay → 对端"这一段此刻的测量值和它从哪里来。
+    /// 本节点这一头没有延迟（包直接交给对端的会话），这一段有多长全看对端的会话那一截：
+    ///
+    /// 1. 对端是 relay，它的会话就在本节点和它之间的那条骨干 TCP 上（[`crate::backbone`]）：本节点自己的会话也在这条 TCP 上，
+    ///    一直测着它，用自己的数（按 TCP 的算法，见 `crate::estimate`）。这和经它的 relay 的那条路是同一条 TCP，两条路的代价应该一样。
+    /// 2. 对端把本节点列进了挂靠表：用它报的延迟，那是它在这个会话上测的。
+    /// 3. 都没有：本节点经这个会话给对端发的端到端探测（[`crate::estimate::Sampler`]，对端从它自己的路回答）。
+    ///
+    /// 还没有量到时是 `None`。以前这时按 1 毫秒算，这条路就成了 2 毫秒、比什么都便宜。
+    pub(super) fn local_leg(&self, id: NodeId, peer: &PeerState) -> Option<(Segment, HopSource)> {
+        let theirs = self.shared.local_relay.get()?.session_leg(id)?;
+        self.known_local_leg(id, peer, theirs).or_else(|| {
+            let measured = peer.local_leg.measured();
+            let quality = if theirs == SessionLeg::Udp { measured.quality(self.now) } else { measured.over_tcp(self.now) };
+            quality.map(|quality| (quality.segment(), HopSource::Measured))
+        })
+    }
+
+    /// [`local_leg`](Self::local_leg) 里不用另外探测就知道的那两种（1 和 2）。都没有时本节点要自己去量。
+    pub(super) fn needs_local_probe(&self, id: NodeId, peer: &PeerState) -> bool {
+        let theirs = self.shared.local_relay.get().and_then(|local| local.session_leg(id));
+        theirs.is_some_and(|theirs| self.known_local_leg(id, peer, theirs).is_none())
+    }
+
+    fn known_local_leg(&self, id: NodeId, peer: &PeerState, theirs: SessionLeg) -> Option<(Segment, HopSource)> {
+        let shared_tcp = theirs != SessionLeg::Udp && self.legs.get(&id).is_some_and(|leg| leg.carries(theirs));
+        let own = self.relays.get(&id).filter(|_| shared_tcp).and_then(|entry| entry.link.quality(self.now));
+        if let Some(quality) = own {
+            return Some((quality.segment(), HopSource::Measured));
+        }
+        let me = self.shared.me;
+        let reported = peer.attached.iter().find(|attachment| attachment.relay == me);
+        reported.map(|attachment| (Segment::from_rtt_ms(f64::from(attachment.rtt_ms)), HopSource::Reported))
     }
 
     /// 经 `relay` 到 `peer` 的那个会话信得过，可以把流量换过去。
@@ -185,20 +222,16 @@ impl View<'_> {
         let mut exits: Vec<(NodeId, Option<Segment>)> = Vec::new();
         if self.allow_relay {
             entries.extend_from_slice(self.entries);
-            let local = self.local_session(id);
-            if local {
-                // 对端挂在本节点自己的 relay 上：包直接交给它的会话，本节点这一头没有延迟。
-                // 这条路上会断的是对端连过来的那个会话；它到本节点的延迟只有对端把本节点列进了挂靠表才知道，
-                // 不知道的时候下面按最小的算，那样的数不能拿来和别的路比代价。
-                let measured = peer.attached.iter().any(|attachment| attachment.relay == me);
-                entries.push(Entry { relay: me, segment: Segment::from_rtt_ms(0.0), settled: measured && self.settled(id, me) });
+            if self.local_session(id) {
+                // 对端挂在本节点自己的 relay 上：包直接交给它的会话，本节点这一头没有延迟，后面那一段见 `local_leg`。
+                // 还没有量到时按探测等回答的上限（1.5 秒）算：一般比量得到的路都贵，没有别的路时才走它；也不会因为代价换到它上面。
+                let leg = self.local_leg(id, peer).map(|(segment, _)| segment);
+                let unmeasured = Segment::from_rtt_ms(PROBE_TIMEOUT_MAX.as_secs_f64() * 1000.0);
+                entries.push(Entry { relay: me, segment: Segment::from_rtt_ms(0.0), settled: leg.is_some() && self.settled(id, me) });
+                exits.push((me, Some(leg.unwrap_or(unmeasured))));
             }
-            for attachment in peer.attached.iter().filter(|attachment| attachment.relay != id && (attachment.relay != me || local)) {
+            for attachment in peer.attached.iter().filter(|attachment| attachment.relay != id && attachment.relay != me) {
                 exits.push((attachment.relay, Some(Segment::from_rtt_ms(f64::from(attachment.rtt_ms)))));
-            }
-            if local && !exits.iter().any(|(relay, _)| *relay == me) {
-                // 对端的挂靠表里（还）没有本节点，但会话确实在：延迟不知道，按最小的算。
-                exits.push((me, Some(Segment::from_rtt_ms(1.0))));
             }
             if peer.is_relay {
                 exits.push((id, None));
@@ -709,6 +742,7 @@ mod tests {
             policy_route: RouteKey::None,
             other_mode: None,
             eager_from: None,
+            local_leg: crate::estimate::Sampler::new(),
         }
     }
 

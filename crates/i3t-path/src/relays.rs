@@ -1483,8 +1483,10 @@ mod tests {
         let again = setup.reconnect_tcp(died);
 
         let quality = setup.link.quality(setup.start + again).expect("重连之后马上就有估计");
-        assert_eq!(quality.lost, usize::from(crate::timing::MAX_TIMEOUTS), "断开之前没有回答的那几个保活还记着：{quality:?}");
-        assert!(quality.probes >= 13, "断开之前的样本也还在：{quality:?}");
+        // 走 TCP 的一段按最近的样本的平均延迟算（`crate::estimate`）。断开之前的十几个样本都是 20ms 左右；卡住的那一次按最早那个
+        // 没有回答的保活等了多久算（三次超时，0.9 秒多），也在里面：重连之后不是只剩握手那两个漂亮的样本。
+        assert!(quality.rtt > 70 * MS && quality.rtt < 120 * MS, "断开之前的样本和那一次停顿都还在：{quality:?}");
+        assert_eq!((quality.jitter, quality.lost, quality.probes), (Duration::ZERO, 0, 0), "停顿已经算在延迟里了：{quality:?}");
     }
 
     #[test]

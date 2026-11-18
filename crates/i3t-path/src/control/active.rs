@@ -453,7 +453,24 @@ impl Control {
                 None => unknown(from, to),
             });
         }
-        if let Some(&last) = list.last().filter(|last| **last != id) {
+        if list.last() == Some(&me) {
+            // 本节点自己的 relay：这一段是对端挂在它上面的那个会话，测量值和选路用的是同一个（见 `View::local_leg`）。
+            let leg = self.view(&[], now).local_leg(id, peer);
+            hops.push(leg.map_or_else(
+                || unknown(me, id),
+                |(segment, source)| {
+                    let measured = source == HopSource::Measured;
+                    HopReport {
+                        from: me,
+                        to: id,
+                        rtt_ms: Some(segment.rtt_ms),
+                        jitter_ms: measured.then_some(segment.jitter_ms),
+                        loss: measured.then_some(segment.loss),
+                        source,
+                    }
+                },
+            ));
+        } else if let Some(&last) = list.last().filter(|last| **last != id) {
             let reported = peer.attached.iter().find(|attachment| attachment.relay == last);
             hops.push(match reported {
                 Some(attachment) => HopReport {

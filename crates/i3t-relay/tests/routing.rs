@@ -446,7 +446,9 @@ async fn a_tcp_only_node_weighs_its_own_tcp_legs_and_moves_off_the_one_that_stal
     let (smooth, stalls) = (leg(&via_r1), leg(&via_r2));
     assert_eq!((report.relay_leg, smooth.relay_leg, stalls.relay_leg), (Some(RelayLeg::Tcp), Some(RelayLeg::Tcp), Some(RelayLeg::Tcp)));
     assert!(stalls.cost_ms > smooth.cost_ms + 20.0, "停顿的那条 TCP 应该贵得多：{report:?}");
-    assert!(stalls.legs[0].jitter_ms > smooth.legs[0].jitter_ms + 5.0, "停顿测出来是抖动：{report:?}");
+    // 走 TCP 的一段按最近探测的平均往返算（i3t_path 的 `estimate`）：停顿算在延迟里，不另外算成抖动和丢包。
+    assert!(stalls.legs[0].rtt_ms > smooth.legs[0].rtt_ms + 20.0, "停顿算在那一段的延迟里：{report:?}");
+    assert!(stalls.legs[0].jitter_ms == 0.0 && stalls.legs[0].loss == 0.0, "{report:?}");
 
     // 之后一直留在 R1 上，流一块不丢。
     for _ in 0..3 {

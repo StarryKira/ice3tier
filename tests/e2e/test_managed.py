@@ -14,7 +14,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lab as lablib  # noqa: E402
 from harness import (Checks, Controller, Node, RestoredController, add_node_config, binary, blob_digest, blob_file,  # noqa: E402
-                     controller_data, create_groups, eventually_value, fetch, start_blob_server, start_whoami, tail)
+                     controller_data, create_groups, ctl_wait, eventually_value, fetch, shape_between, start_blob_server,
+                     start_whoami, tail)
 from lab import Lab, NatKind, wait_until  # noqa: E402
 
 
@@ -498,6 +499,45 @@ def chain_through_relay_without_udp(lab: Lab, work: Path, t: Checks) -> None:
         print(tail(r1.read_log(), 25), tail(r2.read_log(), 40), tail(a.read_log(), 25), sep="\n  ---\n")
 
 
+def tcp_only_relay_prices_its_own_relay(lab: Lab, work: Path, t: Checks) -> None:
+    """没有 UDP 的中继 s（延迟优先）：经它自己的中继到对端的那条路按量到的算。对端 a 是中继时，这条路和经 a 的那条是同一条 TCP，
+    代价一样；对端 y 不是中继、也没有把 s 列进挂靠表时，s 经 y 的会话自己去量，不再是两三毫秒。"""
+    controller = Controller(lab.host("ctl"), work)
+    controller.ctl("network", "create", "lab")
+    s = Node(lab.host("s"), work, declare=("relay",))
+    a, r = (Node(lab.host(name), work, declare=("relay",)) for name in ("a", "r"))
+    y = Node(lab.host("y"), work)
+    # y 离 r、a 近，挂靠的是它们两个；s 离谁都是 100 ms 以上，只经 TCP，线上丢 3% 的包。
+    for one, other, rtt, loss in ((s, a, 100, 3), (s, r, 110, 3), (s, y, 120, 3), (a, r, 30, 0), (a, y, 20, 0), (r, y, 2, 0)):
+        shape_between(one.host, other.host, lablib.Shape(rtt_ms=rtt, loss_pct=loss))
+    s.host.block_udp()
+    for node in (a, r, y, s):
+        node.join(controller)
+    for relay in (a, r, s):
+        controller.ctl("relay", "enable", str(relay.id))
+    controller.ctl("node", "set", str(s.id), "--routing", "lowest-cost")
+
+    def candidates(peer: Node) -> dict[tuple, dict]:
+        # 有流量的对端 s 才为它选路、探测；y 也因此在 s 的中继上建会话（s 自己是中继，y 经它到 s）。
+        s.host.run(binary("i3t"), "--state-dir", str(s.state), "ping", peer.name, "--count", "1", check=False, timeout=20)
+        forward = controller.ctl("path", str(s.id), str(peer.id)).get("forward") or {}
+        return {tuple(entry["route"].get("relays") or ()): entry for entry in forward.get("candidates") or []}
+
+    own = (s.id,)
+    to_y = eventually_value(lambda: candidates(y), lambda found: own in found and found[own]["cost_us"] < 1_000_000, timeout=90, interval=3)
+    cost = to_y.get(own, {}).get("cost_us", 0) / 1000
+    t.check(f"经 s 自己的中继到 y：量到了（{cost:.0f} ms），不是两三毫秒，也不是没量到时的 1.5 秒", 100 < cost < 1000, str(to_y.get(own)))
+    to_a = eventually_value(lambda: candidates(a), lambda found: own in found and (a.id,) in found, timeout=60, interval=3)
+    costs = [to_a.get(path, {}).get("cost_us", 0) / 1000 for path in (own, (a.id,))]
+    t.check(f"到中继 a：经 s 自己的中继和经 a 的中继是同一条 TCP，代价一样（{costs[0]:.0f} / {costs[1]:.0f} ms）",
+            costs[0] > 50 and abs(costs[0] - costs[1]) < 1, str(to_a))
+    result = ctl_wait(controller, "test", s.name, y.name, "--via", s.name)
+    hops = next((entry.get("hops") or [] for entry in result.get("relay_quality") or [] if (entry.get("route") or {}).get("relays") == [s.id]), [])
+    t.check("主动测试里这一段写着是 s 自己量的", [(hop["from"], hop["to"], hop["source"]) for hop in hops] == [(s.id, y.id, "measured")], str(hops))
+    if t.failures:
+        print(tail(s.read_log(), 30), tail(y.read_log(), 15), sep="\n  ---\n")
+
+
 def two_islands(lab: Lab, work: Path, t: Checks) -> None:
     """家里的节点只连得上家里的中继 H（局域网地址），外面的节点只连得上公网的中继 P，H 和 P 连得上：默认模式下外面的节点经
     P → H 用家里节点上的服务，路由表说出为什么；两边都连得上的中继出现之后，这一对换到它上面。"""
@@ -673,6 +713,7 @@ SCENARIOS = {
     "idle_held_offline": idle_held_offline,
     "chain_through_relay_without_udp": chain_through_relay_without_udp,
     "two_islands": two_islands,
+    "tcp_only_relay_prices_its_own_relay": tcp_only_relay_prices_its_own_relay,
     "direct_without_traffic": direct_without_traffic,
 }
 

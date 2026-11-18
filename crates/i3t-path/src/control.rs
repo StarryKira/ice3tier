@@ -52,6 +52,7 @@ use crate::diag::{
     DirectAttempt, HopReport, Pin, RouteDecision, Side, TestPath, TestSpec, TrainError, TrainReport, TrainRun, TrainSpec, Window,
 };
 use crate::direct::{DirectPath, Policy};
+use crate::estimate::Sampler;
 use crate::matrix::Matrix;
 use crate::relays::{RelayLink, Wire};
 use crate::routing::{Candidate, PathId, Selector};
@@ -95,6 +96,9 @@ const PATH_PROBE_BUSY: Duration = Duration::from_secs(1);
 const PATH_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 /// 同一个对端的路径探测最多这么频繁地回答：验签名不便宜，对端正常情况下一秒才发一个。
 const PATH_PING_MIN_GAP: Duration = Duration::from_millis(200);
+/// 量"本节点的 relay → 对端"那一段的探测（见 [`View::local_leg`]）和经多级路径的探测至少隔这么久才发：两条路的延迟不一样，
+/// 发出去隔了这么久，到对端时一般也还隔着 [`PATH_PING_MIN_GAP`] 以上，不会有一个被它的频率上限挡掉。
+const LOCAL_PROBE_APART: Duration = Duration::from_millis(500);
 /// 被这样怀疑的路径多久之内不再用（除非没有别的路）。
 const SUSPECT_HOLD: Duration = Duration::from_secs(20);
 /// relay 宣布下线之后，多久之内把它排在别的 relay 后面。比通知本身的有效期短得多：它要是升级完很快回来了，
@@ -241,6 +245,8 @@ struct PeerState {
     other_mode: Option<Option<PathId>>,
     /// 不等流量就试到它的直连（见 [`EAGER_DIRECT_PEERS`]）：从这个时刻起。不这样试的对端是 `None`。
     eager_from: Option<Instant>,
+    /// 对端挂在本节点的 relay 上、这一段又没有别的测量值时，本节点经这个会话发的端到端探测（见 [`View::local_leg`]）。
+    local_leg: Sampler,
 }
 
 /// 一次正在进行的直连尝试（主动测试）。
@@ -527,7 +533,7 @@ impl Control {
                 }
             }
             Ctrl::Frame { frame: Inbound::PathProbe { peer, frame: probe::Frame::Ping(ping) }, .. } => self.on_path_ping(peer, &ping, now),
-            Ctrl::Frame { frame: Inbound::PathProbe { peer, frame: probe::Frame::Pong(pong) }, .. } => self.on_path_pong(peer, &pong),
+            Ctrl::Frame { frame: Inbound::PathProbe { peer, frame: probe::Frame::Pong(pong) }, .. } => self.on_path_pong(peer, &pong, now),
             Ctrl::Frame { from, frame: Inbound::Test { frame: probe::Frame::TestPing(ping), at, relayed } } => {
                 self.on_test_ping(from, &ping, at, relayed, now);
             }
@@ -655,6 +661,7 @@ impl Control {
                     policy_route: RouteKey::None,
                     other_mode: None,
                     eager_from: None,
+                    local_leg: Sampler::new(),
                 }
             });
             if peer.key != info.key {
@@ -877,6 +884,20 @@ impl Control {
                 RouteKey::None | RouteKey::Direct(_) | RouteKey::Relay { .. } => {
                     peer.probe = PathProbe { answered: peer.probe.answered, ..PathProbe::default() };
                 }
+            }
+            // 延迟优先要拿"经本节点的 relay"这条路和别的比，得知道对端的会话那一段多长（见 `View::local_leg`）。
+            // 和上面经多级路径的探测错开：对端回答同一个对端的路径探测有频率上限，挤在一起的会被它挡掉一个。
+            let apart = peer.probe.pending.is_none()
+                && peer.probe.last_sent.is_none_or(|at| now.saturating_duration_since(at) >= LOCAL_PROBE_APART);
+            let wanted = *mode == RoutingMode::LowestCost
+                && *allow_relay
+                && apart
+                && peer.slot.is_active(&shared.clock)
+                && view.needs_local_probe(id, peer);
+            if let Some(nonce) = peer.local_leg.poll(now, wanted, PROBE_INTERVAL) {
+                let message = probe::Ping::signed_message(shared.me, id, &nonce);
+                let signature = *key.sign(probe::Ping::PURPOSE, &message).as_bytes();
+                table::send_frame_via(shared, id, &Hop::Local, &probe::Ping { src: shared.me, dst: id, nonce, signature }.to_bytes());
             }
 
             let mut why = None;
@@ -1695,5 +1716,138 @@ mod tests {
         harness.control.poll_tests(now + Duration::from_secs(1));
         let attempt = answer.await.unwrap();
         assert_eq!((attempt.ok, attempt.failure, attempt.candidates), (false, Some(crate::diag::DirectFailure::NoCandidates), 0));
+    }
+
+    /// 本节点自己的 relay：`clients` 在它上面有会话，绑在给定的地方。发给它们的帧记下来。
+    #[derive(Default)]
+    struct OwnRelay {
+        clients: Vec<(NodeId, SessionLeg)>,
+        sent: std::sync::Mutex<Vec<(NodeId, Vec<u8>)>>,
+    }
+
+    impl crate::LocalRelay for OwnRelay {
+        fn handle_udp(&self, _from: SocketAddr, _ecn: Option<i3t_underlay::Ecn>, _data: &[u8], _stride: usize) {}
+
+        fn has_session(&self, client: NodeId) -> bool {
+            self.session_leg(client).is_some()
+        }
+
+        fn session_reopened(&self, _client: NodeId) -> Option<Duration> {
+            None
+        }
+
+        fn session_at(&self, _client: NodeId, _from: SocketAddr) -> bool {
+            false
+        }
+
+        fn send_to_client(&self, client: NodeId, contents: &[u8], _segment_size: Option<usize>, _ecn: Option<i3t_underlay::Ecn>) -> bool {
+            self.sent.lock().unwrap().push((client, contents.to_vec()));
+            true
+        }
+
+        fn session_leg(&self, client: NodeId) -> Option<SessionLeg> {
+            self.clients.iter().find(|(id, _)| *id == client).map(|(_, leg)| *leg)
+        }
+
+        fn handle_leg_frame(&self, _conn: u64, _addr: SocketAddr, _sender: &i3t_underlay::tcp_leg::FrameSender, _frame: &[u8]) {}
+
+        fn leg_closed(&self, _conn: u64) {}
+
+        fn status(&self) -> Option<crate::RelayStatus> {
+            None
+        }
+
+        fn publish_row(&self, _links: &[Link]) {}
+
+        fn broadcast(&self, _frame: &[u8]) {}
+    }
+
+    /// 本节点（延迟优先）的 relay 上挂着对端 2，绑在一条接进来的 TCP 上；对端 2 没有把本节点列进挂靠表，也没有别的路。
+    fn own_relay_harness() -> (Harness, Arc<OwnRelay>) {
+        let harness = Harness::with_me(&[(2, &[])], &serde_json::json!({ "routing": "lowest_cost", "reach": "relay_only" }));
+        let relay = Arc::new(OwnRelay { clients: vec![(node(2), SessionLeg::Accepted(7))], ..OwnRelay::default() });
+        harness.control.shared.local_relay.set(Arc::clone(&relay) as Arc<dyn crate::LocalRelay>).ok().unwrap();
+        harness.control.peers[&node(2)].slot.last_demand.touch(&harness.control.shared.clock);
+        (harness, relay)
+    }
+
+    fn own_relay_candidate(harness: &Harness) -> Candidate {
+        let path = PathId::Relays(RelayPath::new(&[node(ME)]).unwrap());
+        harness.control.peers[&node(2)]
+            .candidates
+            .iter()
+            .find(|candidate| candidate.path == path)
+            .cloned()
+            .expect("经本节点 relay 的那条路是候选")
+    }
+
+    /// 发给对端 2 的、经本节点 relay 的会话送去的端到端探测。
+    fn probes_sent(relay: &OwnRelay) -> Vec<probe::Ping> {
+        let sent = std::mem::take(&mut *relay.sent.lock().unwrap());
+        sent.iter()
+            .filter_map(|(client, frame)| match i3t_proto::Datagram::parse(frame) {
+                Ok(i3t_proto::Datagram::Relayed { header, packet }) if *client == node(2) && header.dst == node(2) => {
+                    match probe::Frame::parse(packet) {
+                        Some(probe::Frame::Ping(ping)) => Some(ping),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    const MS: Duration = Duration::from_millis(1);
+
+    #[tokio::test]
+    async fn the_leg_from_this_nodes_own_relay_is_measured_on_the_session_instead_of_being_priced_near_zero() {
+        let (mut harness, relay) = own_relay_harness();
+        let start = Instant::now();
+        harness.control.update_routes(start, true);
+        // 还没有量到：按探测等回答的上限算，不是以前的 2 毫秒；只有它一条路，照样走它，但不会因为代价换到它上面。
+        let unmeasured = own_relay_candidate(&harness);
+        assert!((unmeasured.cost_ms - (crate::timing::PROBE_TIMEOUT_MAX.as_secs_f64() * 1000.0 + 1.0)).abs() < 1e-6, "{unmeasured:?}");
+        assert!(!unmeasured.settled);
+        assert_eq!(harness.control.peers[&node(2)].route, RouteKey::Relay { path: RelayPath::new(&[node(ME)]).unwrap(), via: Via::Local });
+
+        // 同时经这个会话发了一个签名的端到端探测；对端从它自己的路回答，300 ms 之后到。
+        let pings = probes_sent(&relay);
+        assert_eq!(pings.len(), 1, "一次只发一个");
+        let message = probe::Ping::signed_message(node(ME), node(2), &pings[0].nonce);
+        assert!(
+            i3t_crypto::verify(&harness.control.key.public(), probe::Ping::PURPOSE, &message, &Signature::from_bytes(pings[0].signature))
+                .is_ok()
+        );
+        let pong = harness.pong(2, pings[0].nonce, addr("0.0.0.0:0"));
+        harness.control.on_path_pong(node(2), &pong, start + 300 * MS);
+        harness.control.update_routes(start + Duration::from_secs(1), true);
+        let measured = own_relay_candidate(&harness);
+        assert!((measured.cost_ms - 301.0).abs() < 1e-6, "量到的这一段（TCP 上按平均延迟）加上经一个 relay 的 1 ms：{measured:?}");
+        assert!(measured.settled, "量到了，会话也没有断过：可以拿来和别的路比");
+        assert!(probes_sent(&relay).is_empty(), "下一个要等探测的间隔");
+        harness.control.update_routes(start + PROBE_INTERVAL + 300 * MS, false);
+        let next = probes_sent(&relay);
+        assert_eq!(next.len(), 1);
+
+        // 签名不对的回答不算：还在等真的那个。
+        let mut forged = harness.pong(2, next[0].nonce, addr("0.0.0.0:0"));
+        forged.signature[0] ^= 1;
+        harness.control.on_path_pong(node(2), &forged, start + Duration::from_secs(6));
+        assert!(harness.control.peers[&node(2)].local_leg.expects(&next[0].nonce));
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_lists_this_node_among_its_relays_is_taken_at_its_word_and_not_probed() {
+        let (mut harness, relay) = own_relay_harness();
+        let mut netmap = (*harness.control.netmap).clone();
+        netmap.peers[0].attached = vec![Attachment { relay: node(ME), rtt_ms: 120, shared: false }];
+        let start = Instant::now();
+        harness.control.apply_netmap(Arc::new(netmap), start);
+        harness.control.update_routes(start, true);
+        let candidate = own_relay_candidate(&harness);
+        assert!((candidate.cost_ms - 121.0).abs() < 1e-6 && candidate.settled, "{candidate:?}");
+        assert!(probes_sent(&relay).is_empty(), "对端在这个会话上测着，不用另外探测");
+        let hops = harness.control.hops(node(2), TestPath::Relays(RelayPath::new(&[node(ME)]).unwrap()), start);
+        assert_eq!((hops.len(), hops[0].rtt_ms, hops[0].source), (1, Some(120.0), crate::diag::HopSource::Reported));
     }
 }

@@ -140,9 +140,9 @@ impl Session {
         self.estimate.rtt()
     }
 
-    /// 这段链路现在的估计；没有测到过或者过期了是 `None`。
+    /// 这段链路现在的估计；没有测到过或者过期了是 `None`。走在 TCP 里的会话按 TCP 的算法（[`Estimate::over_tcp`]）。
     pub(crate) fn quality(&self, now: Instant) -> Option<Quality> {
-        self.estimate.quality(now)
+        if self.reliable { self.estimate.over_tcp(now) } else { self.estimate.quality(now) }
     }
 
     /// 开始握手，返回要发的 INIT。
@@ -289,6 +289,10 @@ impl Session {
             None => (since_ping >= self.interval || (urgent && since_ping >= SILENCE), missed),
         };
         if missed >= MAX_TIMEOUTS {
+            // 走在 TCP 里的：最早那个没有回答的探测等了多久就是这一次停顿至少多长，它的回答再也不会来了（见 `crate::estimate`）。
+            if let Some(sent) = self.train.oldest_overdue().filter(|_| self.reliable) {
+                self.estimate.stalled(now.saturating_duration_since(sent), now);
+            }
             return self.fail("保活连续没有回应");
         }
         if !due {
@@ -604,6 +608,51 @@ mod tests {
         assert!((19.0..25.0).contains(&smooth), "顺畅的那条差不多就是它的延迟：{smooth}");
         // 一个只看平滑延迟的比较会觉得两条差不多；停顿让抖动、延迟和丢包一起涨，代价差出好几倍。
         assert!(stalling > 5.0 * smooth, "顺畅 {smooth:.1}ms，停顿 {stalling:.1}ms");
+    }
+
+    #[test]
+    fn a_tcp_session_dropped_for_silence_counts_how_long_it_stalled_in_its_delay() {
+        let start = Instant::now();
+        let mut session = Session::over_tcp(Estimate::new());
+        let Send::Init { nonce } = session.start(start, false) else { panic!("握手从 INIT 开始") };
+        session.on_challenge(&Challenge { nonce, cookie: COOKIE }, start + 250 * MS);
+        let up = start + 500 * MS;
+        assert!(session.on_ok(&ok(nonce), up).event.is_some());
+        assert_eq!(session.quality(up).map(|quality| quality.rtt), Some(250 * MS), "握手的两个往返");
+
+        // 之后这条 TCP 卡死了：保活一个也没有回答，三次超时之后会话拆掉。
+        let (mut now, mut first_ping) = (up, None);
+        let reason = loop {
+            now += 50 * MS;
+            assert!(now < up + Duration::from_secs(30), "保活没有回答，会话早该断了");
+            let step = session.poll(now, false);
+            if matches!(step.send, Some(Send::Ping { .. })) {
+                first_ping.get_or_insert(now);
+            }
+            if let Some(Event::Down { reason }) = step.event {
+                break reason;
+            }
+        };
+        assert_eq!(reason, "保活连续没有回应");
+        let stall = now.saturating_duration_since(first_ping.unwrap());
+        assert!(stall >= Duration::from_secs(3), "三次超时，每次 1 秒（延迟的 4 倍）：{stall:?}");
+        // 这一次停顿按它至少有多长算进平均：重连之后这条 TCP 不会只剩握手那两个漂亮的样本。
+        let quality = session.quality(now).unwrap();
+        assert_eq!(quality.rtt, (250 * MS * 2 + stall) / 3);
+        assert_eq!((quality.jitter, quality.lost), (Duration::ZERO, 0));
+    }
+
+    #[test]
+    fn a_udp_session_dropped_for_silence_does_not_turn_the_silence_into_delay() {
+        let (mut session, up) = established();
+        let mut now = up;
+        while session.is_up() {
+            now += 50 * MS;
+            session.poll(now, false);
+        }
+        // UDP 上没有回答的保活照旧记成丢失（丢包率要攒够样本才报），不记成一个长延迟的样本。
+        assert_eq!(session.quality(now).map(|quality| quality.rtt), Some(20 * MS));
+        assert_eq!(session.measured().over_tcp(now).map(|quality| quality.rtt), Some(20 * MS));
     }
 
     #[test]
