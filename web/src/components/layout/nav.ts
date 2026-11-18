@@ -3,7 +3,6 @@ import {
   Cable,
   ArrowLeftRight,
   Boxes,
-  KeyRound,
   LayoutDashboard,
   Link2,
   type LucideIcon,
@@ -65,11 +64,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
     get label() {
       return t.nav.groupAccess
     },
-    items: [
-      item('proxies', () => t.nav.proxies, Cable),
-      item('credentials', () => t.nav.credentials, KeyRound),
-      item('forwards', () => t.nav.forwards, ArrowLeftRight),
-    ],
+    items: [item('proxies', () => t.nav.proxies, Cable), item('forwards', () => t.nav.forwards, ArrowLeftRight)],
   },
   {
     id: 'diagnose',

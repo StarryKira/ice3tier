@@ -32,7 +32,6 @@ export const keys = {
   rules: (network: NetworkId) => ['n', network, 'rules'] as const,
   graph: (network: NetworkId) => ['n', network, 'graph'] as const,
   check: (network: NetworkId, from: NodeId, to: NodeId) => ['n', network, 'check', from, to] as const,
-  credentials: (network: NetworkId) => ['n', network, 'credentials'] as const,
   listeners: (network: NetworkId) => ['n', network, 'listeners'] as const,
   proxies: (network: NetworkId) => ['n', network, 'proxies'] as const,
   forwards: (network: NetworkId) => ['n', network, 'forwards'] as const,
@@ -122,13 +121,6 @@ export const q = {
     }),
   check: (network: NetworkId, from: NodeId, to: NodeId) =>
     queryOptions({ queryKey: keys.check(network, from, to), queryFn: () => api.accessCheck(network, from, to) }),
-  /** 用量和状态（用完、吊销）随入口的上报变化。 */
-  credentials: (network: NetworkId) =>
-    queryOptions({
-      queryKey: keys.credentials(network),
-      queryFn: () => api.credentials(network),
-      refetchInterval: LIVE_INTERVAL,
-    }),
   /** 每个监听器带着节点报的状态。 */
   /** 代理：状态和用量随入口节点的上报变化。 */
   proxies: (network: NetworkId) =>

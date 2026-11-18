@@ -1,6 +1,3 @@
-import { type Listener } from '@/api/types'
-
-import { parseSocketAddr } from './cidr'
 import {
   type Capability,
   CAPABILITY_CONFIG_KEY,
@@ -89,27 +86,4 @@ export function declareCommand(capability: Capability, on = true): string {
 /** 不用命令、直接改 config.toml 时要写的两行。 */
 export function declareConfig(capability: Capability): string {
   return `[declare]\n${CAPABILITY_CONFIG_KEY[capability]} = true`
-}
-
-const EXAMPLE_URL = 'https://example.com'
-
-interface ListenerUsageOptions {
-  /** 用户名处写的出口节点（虚拟 IP）。监听器固定了出口、或者不想指定出口时不给。 */
-  exit?: string
-  /** 密码处写的凭据。监听器要求凭据时给；不知道明文时给一个占位符。 */
-  credential?: string
-  /** 监听在 0.0.0.0 上时，地址要换成这台机器实际的地址，这里给一个占位的说法。 */
-  hostPlaceholder: string
-}
-
-/** 经一个监听器访问互联网的写法。SOCKS5 用 `socks5h`，域名交给出口节点解析。 */
-export function listenerUsage(listener: Pick<Listener, 'bind' | 'protocol'>, options: ListenerUsageOptions): string {
-  const scheme = listener.protocol === 'socks5' ? 'socks5h' : 'http'
-  const parsed = parseSocketAddr(listener.bind)
-  const unspecified = parsed !== null && (parsed.host === '0.0.0.0' || parsed.host === '::')
-  const address = parsed !== null && unspecified ? `${options.hostPlaceholder}:${parsed.port}` : listener.bind
-  let auth = ''
-  if (options.credential !== undefined) auth = `${options.exit ?? ''}:${options.credential}@`
-  else if (options.exit !== undefined) auth = `${options.exit}@`
-  return `curl -x ${scheme}://${auth}${address} ${EXAMPLE_URL}`
 }

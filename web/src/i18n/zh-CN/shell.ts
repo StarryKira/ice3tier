@@ -24,7 +24,6 @@ export const nav = {
   access: '策略',
   groupAccess: '接入',
   proxies: '代理',
-  credentials: '凭据',
   forwards: '端口转发',
   groupDiagnose: '诊断',
   topology: '拓扑',

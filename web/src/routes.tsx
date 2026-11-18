@@ -10,7 +10,6 @@ import { AppLayout } from '@/components/layout/AppLayout'
 import { Page } from '@/components/page'
 import { SkeletonBlock } from '@/components/states'
 import { Card } from '@/components/ui/card'
-import { CredentialsPage } from '@/pages/credentials/CredentialsPage'
 import { ForwardsPage } from '@/pages/forwards/ForwardsPage'
 import { GroupsPage } from '@/pages/groups/GroupsPage'
 import { networkPath } from '@/pages/networks/context'
@@ -83,7 +82,8 @@ export function AppRoutes() {
             {/* 监听器页去掉了：代理在出口节点详情的「代理出口」里。 */}
             <Route path="listeners" element={<Navigate to="../nodes?role=exit" replace />} />
             <Route path="proxies" element={<ProxiesPage />} />
-            <Route path="credentials" element={<CredentialsPage />} />
+            {/* 凭据页去掉了：认证是每个代理自己的用户名和密码。 */}
+            <Route path="credentials" element={<Navigate to="../proxies" replace />} />
             <Route path="forwards" element={<ForwardsPage />} />
             <Route path="topology" element={<Lazy page={TopologyPage} />} />
             <Route path="diagnosis" element={<Lazy page={PathPage} />} />

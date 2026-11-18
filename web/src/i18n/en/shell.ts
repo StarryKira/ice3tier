@@ -25,7 +25,6 @@ export const nav: Messages['nav'] = {
   access: 'Policies',
   groupAccess: 'Traffic',
   proxies: 'Proxies',
-  credentials: 'Credentials',
   forwards: 'Port forwards',
   groupDiagnose: 'Diagnostics',
   topology: 'Topology',

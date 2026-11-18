@@ -69,7 +69,6 @@ export function AttentionChip({ network, nodes }: { network: Network; nodes: rea
   const overview = useQuery(q.overview(network.id))
   const forwards = useQuery(q.forwards(network.id))
   const exits = useQuery(q.exits(network.id))
-  const credentials = useQuery(q.credentials(network.id))
   const listeners = useQuery(q.listeners(network.id))
 
   const data = overview.data
@@ -132,14 +131,6 @@ export function AttentionChip({ network, nodes }: { network: Network; nodes: rea
       key: `exit:${exit.node.id}`,
       text,
       action: <GoLink to={`${nodePath(network.id, exit.node.id)}?tab=exit`}>{o.view}</GoLink>,
-    })
-  }
-  for (const credential of credentials.data ?? []) {
-    if (credential.state !== 'exhausted') continue
-    attention.push({
-      key: `credential:${credential.id}`,
-      text: o.credentialExhausted(credential.name),
-      action: <GoLink to={`${networkPath(network.id, 'credentials')}?focus=${credential.id}`}>{o.view}</GoLink>,
     })
   }
   for (const listener of listeners.data ?? []) {

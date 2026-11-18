@@ -6,7 +6,6 @@ import {
   declareConfig,
   installCommands,
   joinFlags,
-  listenerUsage,
   NO_DECLARATIONS,
   programFor,
   runCommand,
@@ -91,42 +90,5 @@ describe('其余给用户执行的命令', () => {
 
   it('改配置文件的写法', () => {
     expect(declareConfig('exit')).toBe('[declare]\nexit = true')
-  })
-})
-
-describe('监听器的用法', () => {
-  const host = '<这台机器的地址>'
-
-  it('本机的 SOCKS5 入口，指定出口', () => {
-    expect(
-      listenerUsage({ bind: '127.0.0.1:1080', protocol: 'socks5' }, { exit: '10.66.0.2', hostPlaceholder: host }),
-    ).toBe('curl -x socks5h://10.66.0.2@127.0.0.1:1080 https://example.com')
-  })
-
-  it('HTTP 入口，不指定出口', () => {
-    expect(listenerUsage({ bind: '127.0.0.1:8118', protocol: 'http' }, { hostPlaceholder: host })).toBe(
-      'curl -x http://127.0.0.1:8118 https://example.com',
-    )
-  })
-
-  it('要求凭据：凭据写在密码的位置，没有出口时用户名留空', () => {
-    expect(
-      listenerUsage(
-        { bind: '192.168.1.5:1080', protocol: 'socks5' },
-        { credential: 'i3tc-secret', hostPlaceholder: host },
-      ),
-    ).toBe('curl -x socks5h://:i3tc-secret@192.168.1.5:1080 https://example.com')
-    expect(
-      listenerUsage(
-        { bind: '192.168.1.5:1080', protocol: 'socks5' },
-        { exit: '10.66.0.2', credential: 'i3tc-secret', hostPlaceholder: host },
-      ),
-    ).toBe('curl -x socks5h://10.66.0.2:i3tc-secret@192.168.1.5:1080 https://example.com')
-  })
-
-  it('监听在 0.0.0.0 上时地址换成占位的说法，端口保留', () => {
-    expect(listenerUsage({ bind: '0.0.0.0:1080', protocol: 'socks5' }, { hostPlaceholder: host })).toBe(
-      `curl -x socks5h://${host}:1080 https://example.com`,
-    )
   })
 })

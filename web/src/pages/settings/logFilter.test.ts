@@ -101,7 +101,7 @@ describe('记录里提到的东西，点了去哪里', () => {
     expect(refTarget({ kind: 'node', id: 3 }, 1)).toBe('/n/1/nodes/3')
     expect(refTarget({ kind: 'rule', id: 2 }, 1)).toBe('/n/1/access?rule=2')
     expect(refTarget({ kind: 'group', id: 9 }, 1)).toBe('/n/1/groups?focus=9')
-    expect(refTarget({ kind: 'credential', id: 5 }, 1)).toBe('/n/1/credentials?focus=5')
+    expect(refTarget({ kind: 'credential', id: 5 }, 1)).toBe('/n/1/proxies')
     expect(refTarget({ kind: 'listener', id: 6 }, 1)).toBe('/n/1/nodes?role=exit')
     expect(refTarget({ kind: 'forward', id: 7 }, 1)).toBe('/n/1/forwards?focus=7')
     // 用掉的令牌默认不列出，要切到"全部"。

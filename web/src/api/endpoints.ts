@@ -3,15 +3,12 @@ import {
   type AccessCheck,
   type AccessGraph,
   type BackboneView,
-  type CreateCredential,
-  type CreatedCredential,
   type CreatedEnrollToken,
   type CreateEnrollToken,
   type CreateGroup,
   type CreateNetwork,
   type CreateRule,
   type CreateTest,
-  type Credential,
   type DeletedGroup,
   type EnrollTokenInfo,
   type ExitInput,
@@ -50,7 +47,6 @@ import {
   type Rule,
   type Status,
   type Succeed,
-  type UpdateCredential,
   type UpdateGroup,
   type UpdateNetwork,
   type UpdateNode,
@@ -118,14 +114,7 @@ export const api = {
   accessCheck: (network: NetworkId, from: NodeId, to: NodeId) =>
     request<AccessCheck>('GET', `${net(network)}/access/check`, { query: { from, to } }),
 
-  credentials: (network: NetworkId) => request<Credential[]>('GET', `${net(network)}/credentials`),
-  createCredential: (network: NetworkId, body: CreateCredential) =>
-    request<CreatedCredential>('POST', `${net(network)}/credentials`, { body }),
-  updateCredential: (network: NetworkId, id: number, body: UpdateCredential) =>
-    request<Credential>('PATCH', `${net(network)}/credentials/${id}`, { body }),
   /** 第一次是吊销（记录留着，`state` 变成 `revoked`）；对已经吊销的再删一次才彻底删掉。 */
-  deleteCredential: (network: NetworkId, id: number) =>
-    request<undefined>('DELETE', `${net(network)}/credentials/${id}`),
 
   listeners: (network: NetworkId, node?: NodeId) =>
     request<Listener[]>('GET', `${net(network)}/listeners`, { query: { node } }),

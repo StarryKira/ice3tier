@@ -29,7 +29,6 @@ export const overview = {
   quotaNearly: (name: string, percent: number) => `出口 ${name}：配额已用 ${percent}%`,
   quotaExhausted: (name: string) => `出口 ${name}：配额已用完`,
   exitDegraded: (name: string, state: string) => `出口 ${name}：${state}`,
-  credentialExhausted: (name: string) => `凭据 ${name}：流量已用完`,
 
   /** 访问地图：总览的主体。 */
   map: {

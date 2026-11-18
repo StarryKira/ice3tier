@@ -31,7 +31,6 @@ export const overview: Messages['overview'] = {
   quotaNearly: (name, percent) => `Exit ${name}: ${percent}% of quota used`,
   quotaExhausted: (name) => `Exit ${name}: quota used up`,
   exitDegraded: (name, state) => `Exit ${name}: ${afterColon(state)}`,
-  credentialExhausted: (name) => `Credential ${name}: traffic limit reached`,
 
   map: {
     canvas: 'Access map',

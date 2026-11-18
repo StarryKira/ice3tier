@@ -510,50 +510,6 @@ export interface AccessCheck {
   rules: Rule[]
 }
 
-/** `exhausted`：流量上限用完了。`revoked`：吊销了，记录还留着。`unknown` 是比这个界面新的 controller 才有的取值。 */
-export type CredentialState = 'active' | 'exhausted' | 'revoked' | 'unknown'
-
-export interface CredentialUsage {
-  /** 签发（或者上次清零）以来经它搬运的字节数，两个方向相加。各个入口每 10 秒上报一次。 */
-  bytes: number
-  /** 现在在线的入口上正在进行的连接数。 */
-  connections: number
-  last_used_at: Timestamp | null
-}
-
-export interface Credential {
-  id: number
-  name: string
-  /** 同时进行的连接数上限（每个入口各自数）；`null` 表示不限。 */
-  max_concurrent: number | null
-  created_at: Timestamp
-  /** 令牌的开头 6 个字符，不是秘密。这个字段出现之前签发的凭据是 `""`。 */
-  prefix: string
-  /** 流量上限（字节）；`null` 表示不限。 */
-  max_bytes: number | null
-  state: CredentialState
-  revoked_at: Timestamp | null
-  usage: CredentialUsage
-}
-
-export interface CreateCredential {
-  name: string
-  max_concurrent?: number
-  max_bytes?: number
-}
-
-/** 改上限、清零用量，不用重新签发。省略的字段不改；两个上限写 `null` 表示不限。 */
-export interface UpdateCredential {
-  max_concurrent?: number | null
-  max_bytes?: number | null
-  reset_usage?: boolean
-}
-
-/** `token` 只在创建的应答里出现这一次。 */
-export interface CreatedCredential extends Credential {
-  token: string
-}
-
 export type DefaultAction = { action: 'local' } | { action: 'reject' } | { action: 'exit'; node: NodeId }
 
 /**

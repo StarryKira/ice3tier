@@ -452,64 +452,6 @@ test('启用出口：节点没有声明时说明原因和要执行的命令，�
   await expect(page.locator('[data-testid^="node-row-"]')).toHaveCount(1)
 })
 
-test('新建凭据：令牌只显示一次', async () => {
-  const c = t.credentials
-  await goTo(page, t.nav.credentials)
-  await expect(page.getByText(c.emptyTitle)).toBeVisible()
-  await page.getByRole('button', { name: c.issue }).click()
-  const form = page.getByRole('dialog', { name: c.createTitle })
-
-  // 名字不能是空的。
-  await form.getByRole('button', { name: c.submit, exact: true }).click()
-  await expect(form.getByText(t.validate.titleRequired)).toBeVisible()
-  expect(await controller.api<unknown[]>('GET', `${NET}/credentials`)).toHaveLength(0)
-
-  await form.getByLabel(c.nameLabel, { exact: true }).fill('phone')
-  await form.getByLabel(new RegExp(`^${c.maxLabel}`)).fill('4')
-  await form.getByRole('button', { name: c.submit, exact: true }).click()
-
-  const secretDialog = page.getByTestId('secret-dialog')
-  await expect(secretDialog).toBeVisible()
-  await expect(secretDialog.getByRole('heading', { name: c.secretTitle('phone') })).toBeVisible()
-  await expect(secretDialog.getByText(c.secretWarning)).toBeVisible()
-  const secret = ((await secretDialog.getByTestId('secret-value').textContent()) ?? '').trim()
-  expect(secret.length).toBeGreaterThan(20)
-
-  // 复制出去的是完整的令牌。
-  await secretDialog.getByRole('button', { name: c.copySecret }).click()
-  await expect(secretDialog.getByRole('button', { name: t.common.copied })).toBeVisible()
-  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(secret)
-
-  // 按 Esc 关不掉，只能点按钮。
-  await page.keyboard.press('Escape')
-  await expect(secretDialog).toBeVisible()
-  await secretDialog.getByRole('button', { name: c.savedClose }).click()
-  await expect(secretDialog).toBeHidden()
-
-  // 之后哪里都看不到它：列表里只有名字，刷新也一样，接口也不返回。
-  const row = page.getByTestId('credential-row-phone')
-  await expect(row).toBeVisible()
-  await expect(row).toContainText('4')
-  await expect(page.getByText(secret)).toHaveCount(0)
-  await page.reload()
-  await expect(page.getByTestId('credential-row-phone')).toBeVisible()
-  await expect(page.getByText(secret)).toHaveCount(0)
-  const listed = await controller.api<Record<string, unknown>[]>('GET', `${NET}/credentials`)
-  expect(listed).toHaveLength(1)
-  expect(listed[0]).toMatchObject({ name: 'phone', max_concurrent: 4 })
-  expect(JSON.stringify(listed)).not.toContain(secret)
-
-  // 重名的，controller 的话写在名字下面。
-  await page.getByRole('button', { name: c.issue }).click()
-  await form.getByLabel(c.nameLabel, { exact: true }).fill('phone')
-  await form.getByRole('button', { name: c.submit, exact: true }).click()
-  await expect(form.getByRole('alert')).toContainText(t.errors.codes.name_taken)
-  await expect(page.getByTestId('secret-dialog')).toHaveCount(0)
-  await form.getByRole('button', { name: t.common.cancel, exact: true }).click()
-  await page.getByRole('button', { name: t.common.discardConfirm }).click()
-  await expect(form).toBeHidden()
-})
-
 test('新建端口转发，再删除', async () => {
   await goTo(page, t.nav.forwards)
   const f = t.forwards

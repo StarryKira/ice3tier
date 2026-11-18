@@ -161,7 +161,6 @@ test('空的网络：每个页面没有数据时的样子', async () => {
   await page.getByRole('radio', { name: t.access.viewList }).click()
 
   for (const [name, file, marker] of [
-    [t.nav.credentials, 'credentials-empty', t.credentials.emptyTitle],
     [t.nav.forwards, 'forwards-empty', t.forwards.emptyTitle],
   ] as const) {
     await goTo(page, name)
@@ -673,25 +672,6 @@ test('有数据时：接入', async () => {
   await shot('node-exit', { fullPage: false })
   await page.setViewportSize({ width: 1280, height: 800 })
 
-  await goTo(page, t.nav.credentials)
-  await expect(page.getByTestId('credential-row-phone')).toBeVisible()
-  await shot('credentials')
-  const cr = t.credentials
-  await page.getByRole('button', { name: t.common.actionsFor('phone') }).click()
-  await page.getByRole('menuitem', { name: cr.menuEdit }).click()
-  const limits = page.getByRole('dialog', { name: cr.editTitle('phone') })
-  await limits.getByRole('textbox', { name: new RegExp(`^${literal(cr.maxBytesLabel)}`) }).fill('1')
-  await limits.getByRole('combobox', { name: cr.unitLabel }).selectOption('MB')
-  await shot('credentials-edit-limits', { fullPage: false })
-  await limits.getByRole('button', { name: t.common.cancel, exact: true }).click()
-  await page.getByRole('button', { name: t.common.discardConfirm }).click()
-  await page.getByRole('button', { name: cr.issue }).click()
-  await page.getByRole('dialog', { name: cr.createTitle }).getByLabel(cr.nameLabel, { exact: true }).fill('guest')
-  await page.getByRole('button', { name: cr.submit, exact: true }).click()
-  await expect(page.getByTestId('secret-dialog')).toBeVisible()
-  await shot('credentials-secret-shown-once', { fullPage: false })
-  await page.getByRole('button', { name: cr.savedClose }).click()
-
   await goTo(page, t.nav.forwards)
   await expect(page.getByTestId('forward-row-web')).toBeVisible()
   await shot('forwards')
@@ -826,9 +806,6 @@ test('窄一些的笔记本宽度', async () => {
   await goTo(page, t.nav.forwards)
   await expect(page.getByTestId('forward-row-web')).toBeVisible()
   await shot('narrow-forwards')
-  await goTo(page, t.nav.credentials)
-  await expect(page.getByTestId('credential-row-phone')).toBeVisible()
-  await shot('narrow-credentials')
   await page.goto(`${controller.baseUrl}/n/1/topology?a=3&b=2`)
   await expect(page.getByTestId('pair-panel')).toBeVisible()
   await shot('narrow-topology-pair')
@@ -1027,9 +1004,6 @@ test('英文：长度最要紧的几页', async ({ browser }) => {
   await english.getByRole('link', { name: 'gw-hk', exact: true }).click()
   await expect(english.getByRole('combobox', { name: en.nodes.detail.groups })).toBeVisible()
   await enShot('narrow-node-detail')
-  await english.goto(`${controller.baseUrl}/n/1/credentials`)
-  await expect(english.getByTestId('credential-row-phone')).toBeVisible()
-  await enShot('narrow-credentials')
 
   await english.setViewportSize({ width: 1280, height: 800 })
   await english.goto(`${controller.baseUrl}/n/1/pairs`)

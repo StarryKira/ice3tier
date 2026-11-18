@@ -39,7 +39,6 @@ let busyPort = 0
 /** 这台机器的一个私有 IPv4 地址：出口打开"允许访问本机局域网"后，经出口访问它算局域网目标。没有时跳过要它的测试。 */
 let lanIp: string | undefined
 const nodes = {} as Record<'gw' | 'laptop', { handle: NodeHandle; id: number; ip: string }>
-let credentialId = 0
 
 function privateIpv4(): string | undefined {
   const candidates = Object.values(networkInterfaces())
@@ -187,102 +186,6 @@ test('出口配额：在节点详情里配上，下载之后出口页有本账�
   await expect(usage).toContainText(t.exits.quotaResets('').trim())
 })
 
-test('凭据：经要求凭据的监听器用过之后有用量；改上限让它用完；吊销；再彻底删掉', async () => {
-  test.skip(lanIp === undefined, '这台机器没有私有 IPv4 地址，经出口访问局域网目标的测试做不了')
-  test.setTimeout(120_000)
-  const c = t.credentials
-  await goTo(page, t.nav.credentials)
-  await page.getByRole('button', { name: c.issue }).first().click()
-  const form = page.getByRole('dialog', { name: c.createTitle })
-  await form.getByLabel(c.nameLabel, { exact: true }).fill('phone')
-  await form.getByRole('button', { name: c.submit, exact: true }).click()
-  const secretDialog = page.getByTestId('secret-dialog')
-  const secret = ((await secretDialog.getByTestId('secret-value').textContent()) ?? '').trim()
-  await secretDialog.getByRole('button', { name: c.savedClose }).click()
-  const row = page.getByTestId('credential-row-phone')
-  await expect(row).toContainText(c.state.active)
-  await expect(row).toContainText(`${secret.slice(0, 6)}••••`)
-  await expect(row).toContainText(c.neverUsed)
-  credentialId = (await controller.api<{ id: number }[]>('GET', `${NET}/credentials`))[0]?.id ?? 0
-
-  // 一个开在 laptop 所有地址上、经 gw 出去的代理；开在本机以外，要凭据。
-  const port = await freePort()
-  const created = await controller.api<{ id: number }>('POST', `${NET}/listeners`, {
-    node: nodes.laptop.id,
-    name: 'lan',
-    bind: `0.0.0.0:${port}`,
-    protocol: 'socks5',
-    allow_from: ['127.0.0.0/8'],
-    require_credential: true,
-    fixed_exit: nodes.gw.id,
-  })
-  // 等它监听上，再用凭据经它下载。
-  await expect
-    .poll(
-      async () =>
-        (await controller.api<{ id: number; status: { state: string } | null }[]>('GET', `${NET}/listeners`)).find(
-          (listener) => listener.id === created.id,
-        )?.status?.state,
-      { timeout: 30_000 },
-    )
-    .toBe('listening')
-  // 出口的用量卡片上数得到这个代理。
-  await page.goto(`${controller.baseUrl}/n/1/nodes/${nodes.gw.id}?tab=exit`)
-  await expect(page.getByTestId('exit-proxies')).toContainText(t.nodes.detail.exitProxies(1))
-  const done = await download(`socks5h://${nodes.gw.ip}:${secret}@127.0.0.1:${port}`)
-  expect(done.code, done.stderr).toBe(0)
-
-  // 入口每 10 秒报一次用量。
-  await goTo(page, t.nav.credentials)
-  await expect(row).toContainText(/\d(\.\d)? MB/, { timeout: 45_000 })
-  await expect(row).not.toContainText(c.neverUsed)
-
-  // 改上限，不用重新新建：比已经用掉的还少，保存之前就说它会马上停用。
-  await page.getByRole('button', { name: t.common.actionsFor('phone') }).click()
-  await page.getByRole('menuitem', { name: c.menuEdit }).click()
-  const limits = page.getByRole('dialog', { name: c.editTitle('phone') })
-  await limits.getByRole('textbox', { name: new RegExp(`^${literal(c.maxBytesLabel)}`) }).fill('1')
-  await limits.getByRole('combobox', { name: c.unitLabel }).selectOption('MB')
-  await expect(limits.getByText(c.editWillExhaust)).toBeVisible()
-  await limits.getByRole('button', { name: c.editSubmit }).click()
-  await expectToast(page, c.edited('phone'))
-  await expect(row).toContainText(c.state.exhausted)
-  await expect(page.getByText(c.state.exhaustedDetail)).toBeVisible()
-  // 入口收到新的上限之后真的拒绝它。
-  await expect
-    .poll(async () => (await download(`socks5h://${nodes.gw.ip}:${secret}@127.0.0.1:${port}`)).code, {
-      timeout: 45_000,
-    })
-    .not.toBe(0)
-  await clearToasts(page)
-
-  // 吊销：危险确认，行留着，看得到用过多少。
-  await page.getByRole('button', { name: t.common.actionsFor('phone') }).click()
-  await page.getByRole('menuitem', { name: c.menuRevoke }).click()
-  const revoke = page.getByRole('alertdialog', { name: c.revokeTitle('phone') })
-  await expect(revoke.getByRole('button', { name: t.common.cancel })).toBeFocused()
-  await revoke.getByRole('button', { name: c.revokeConfirm }).click()
-  await expectToast(page, c.revoked('phone'))
-  await expect(row).toContainText(c.state.revoked)
-  await expect(row).toContainText(/MB/)
-  const listed = await controller.api<{ state: string }[]>('GET', `${NET}/credentials`)
-  expect(listed[0]?.state).toBe('revoked')
-  await clearToasts(page)
-
-  // 再删一次才彻底删掉。
-  await page.getByRole('button', { name: t.common.actionsFor('phone') }).click()
-  await expect(page.getByRole('menuitem', { name: c.menuRevoke })).toHaveCount(0)
-  await page.getByRole('menuitem', { name: c.menuRemove }).click()
-  await page
-    .getByRole('alertdialog', { name: c.removeTitle('phone') })
-    .getByRole('button', { name: c.removeConfirm })
-    .click()
-  await expectToast(page, c.removed('phone'))
-  await expect(row).toHaveCount(0)
-  expect(await controller.api<unknown[]>('GET', `${NET}/credentials`)).toHaveLength(0)
-  await clearToasts(page)
-})
-
 test('端口写 0 的转发：节点挑一个端口，列表里写出来，真的能连', async () => {
   test.setTimeout(90_000)
   await goTo(page, t.nav.forwards)
@@ -335,30 +238,41 @@ test('监听在被占用的端口上的转发：显示端口被占用、是哪�
 })
 
 test('操作记录：按操作筛，记录里的对象是链接；点过去对象已经删掉了会说', async () => {
+  // 一条建了又删掉的转发：记录里有它的两条。
+  const gone = await controller.api<{ id: number }>('POST', `${NET}/forwards`, {
+    name: 'gone',
+    protocol: 'tcp',
+    listen_node: nodes.laptop.id,
+    bind: `127.0.0.1:${await freePort()}`,
+    target_node: nodes.gw.id,
+    target_addr: '127.0.0.1:80',
+    enabled: false,
+  })
+  await controller.api('DELETE', `${NET}/forwards/${gone.id}`)
+
   await goToAdmin(page, t.nav.settings)
   const l = t.settings.log
-  const credentialRef = (id: number) => l.refLabels.credential(id)
+  const forwardRef = (id: number) => l.refLabels.forward(id)
   await page.getByRole('link', { name: t.settings.tabLog }).click()
-  await page.getByRole('combobox', { name: l.filterAction }).selectOption('credential')
-  await expect(page).toHaveURL(/action=credential/)
-  test.skip(lanIp === undefined, '前面关于凭据的测试被跳过了，没有可以点的记录')
+  await page.getByRole('combobox', { name: l.filterAction }).selectOption('forward')
+  await expect(page).toHaveURL(/action=forward/)
   const rows = page.locator('[data-testid^="log-row-"]')
-  // 签发、改上限、吊销、删除（可能还有一条"用完了"），都是凭据的，新的在前。
-  await expect(rows.first()).toContainText(l.actions['credential.delete'])
-  await expect(rows.last()).toContainText(l.actions['credential.create'])
-  for (const text of await rows.allTextContents()) expect(text).toContain(credentialRef(credentialId))
+  // 新的在前：删掉的那一条在最上面。
+  await expect(rows.first()).toContainText(l.actions['forward.delete'])
+  await expect(rows.first()).toContainText(forwardRef(gone.id))
 
-  // 只看和这个凭据有关的。
+  // 只看和这条转发有关的：建和删两条。
   await rows
     .first()
-    .getByRole('button', { name: l.filterByRef(credentialRef(credentialId)) })
+    .getByRole('button', { name: l.filterByRef(forwardRef(gone.id)) })
     .click()
-  await expect(page).toHaveURL(new RegExp(`ref=credential%3A${credentialId}`))
-  await expect(page.getByTestId('log-ref-filter')).toContainText(l.refChip(credentialRef(credentialId)))
+  await expect(page).toHaveURL(new RegExp(`ref=forward%3A${gone.id}`))
+  await expect(page.getByTestId('log-ref-filter')).toContainText(l.refChip(forwardRef(gone.id)))
+  await expect(rows).toHaveCount(2)
 
   // 记录里的节点写名字，点了去节点详情。
   await page.getByRole('combobox', { name: l.filterAction }).selectOption('')
-  await page.getByRole('button', { name: l.refRemove(credentialRef(credentialId)) }).click()
+  await page.getByRole('button', { name: l.refRemove(forwardRef(gone.id)) }).click()
   await page.getByRole('combobox', { name: l.filterAction }).selectOption('node.exit.enable')
   await page
     .getByRole('link', { name: l.refLabels.node(nodes.gw.id, 'gw') })
@@ -366,9 +280,9 @@ test('操作记录：按操作筛，记录里的对象是链接；点过去对�
     .click()
   await expect(page).toHaveURL(new RegExp(`/n/1/nodes/${nodes.gw.id}$`))
 
-  // 点一个已经彻底删掉的凭据：列表页上说一句。
-  await page.goto(`${controller.baseUrl}/settings/log?action=credential.create`)
-  await page.getByRole('link', { name: credentialRef(credentialId) }).click()
-  await expect(page).toHaveURL(new RegExp(`/n/1/credentials\\?focus=${credentialId}`))
-  await expect(page.getByText(t.credentials.focusMissing(credentialId))).toBeVisible()
+  // 点那条已经删掉的转发：列表页上说一句。
+  await page.goto(`${controller.baseUrl}/settings/log?action=forward.delete`)
+  await page.getByRole('link', { name: forwardRef(gone.id) }).first().click()
+  await expect(page).toHaveURL(new RegExp(`/n/1/forwards\\?focus=${gone.id}`))
+  await expect(page.getByText(t.forwards.focusMissing(gone.id))).toBeVisible()
 })

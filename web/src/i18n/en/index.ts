@@ -3,7 +3,7 @@ import { access, rules } from './access'
 import { addNode } from './addNode'
 import { common, confirm, errors, select, time, validate } from './common'
 import { capability, declare } from './declare'
-import { credentials, exits, forwards, listen, pairs, serviceClass, tokens } from './entry'
+import { exits, forwards, listen, pairs, serviceClass, tokens } from './entry'
 import { groups } from './groups'
 import { networks } from './networks'
 import { nodes } from './nodes'
@@ -37,7 +37,6 @@ export const en: Messages = {
   access,
   overview,
   exits,
-  credentials,
   forwards,
   listen,
   serviceClass,

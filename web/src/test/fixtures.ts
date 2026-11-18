@@ -1,5 +1,4 @@
 import {
-  type Credential,
   type EnrollTokenInfo,
   type ExitSettings,
   type ExitView,
@@ -125,21 +124,6 @@ export function makeExitView(id: number, name: string, extra: Partial<ExitView> 
     usage: null,
     reported_secs_ago: null,
     observed: [],
-    ...extra,
-  }
-}
-
-export function makeCredential(id: number, name: string, extra: Partial<Credential> = {}): Credential {
-  return {
-    id,
-    name,
-    max_concurrent: null,
-    created_at: 1_794_000_000,
-    prefix: 'I7bRtu',
-    max_bytes: null,
-    state: 'active',
-    revoked_at: null,
-    usage: { bytes: 0, connections: 0, last_used_at: null },
     ...extra,
   }
 }

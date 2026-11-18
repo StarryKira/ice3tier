@@ -116,7 +116,8 @@ export function refTarget(ref: LogRef, network: NetworkId | null): string | null
     case 'token':
       return `${networkPath(network, 'tokens')}?show=all&focus=${ref.id}`
     case 'credential':
-      return `${networkPath(network, 'credentials')}?focus=${ref.id}`
+      // 凭据没有了：以前的记录点过去是代理页（认证现在在代理上）。
+      return networkPath(network, 'proxies')
     case 'listener':
       // 代理（监听器）没有自己的页面了：在出口节点的「代理出口」里，去节点列表里的出口。
       return `${networkPath(network, 'nodes')}?role=exit`
