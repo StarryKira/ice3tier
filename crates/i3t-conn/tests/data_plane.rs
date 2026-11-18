@@ -275,8 +275,10 @@ async fn nodes_that_do_not_know_each_others_addresses_find_a_direct_path_through
     // netmap 里没有对方的端点，也没有人替它们转信令：只能靠已经建好的连接。
     through_relay(&a, &r, &b, false, None).await;
     b.spawn_echo();
+    // 第一条流不等直连，先经 relay：没有连接就没有信令，这时直连还不可能有。先看到经 relay 的路再开流；
+    // 开了流再看就晚了，机器忙的时候带内的信令可能已经把直连打通。
+    a.wait_route(&b, "经 relay", is_relay).await;
     let transfer = Transfer::start(&a, &b, 200).await;
-    assert!(is_relay(&a.route_to(&b)), "第一条流不等直连，先经 relay");
 
     a.wait_route(&b, "直连", is_direct).await;
     b.wait_route(&a, "直连", is_direct).await;

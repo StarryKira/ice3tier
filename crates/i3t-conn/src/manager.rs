@@ -279,9 +279,25 @@ impl Manager {
         let arrival = arrived.notified();
         tokio::pin!(arrival);
         arrival.as_mut().enable();
-        tokio::select! {
-            dialed = self.dial(peer) => dialed,
-            () = &mut arrival => self.preferred(peer).ok_or(OpenError::NoRoute(peer)),
+        // 拨号放在自己的任务里，对端的连接先到时也让它拨完，不半路丢掉。两边同时拨的时候，对端可能已经把本端这一条
+        // 登记了、正在上面开流：这时丢掉它，那些流跟着断（对端看到的是"closed by peer"）；对端要是也因为本端的连接先到
+        // 而丢了它那一条，两边就都没有连接可用，开流报"没有路"。多出来的一条不要紧，每个对端本来就留两条。
+        let manager = Arc::clone(self);
+        let mut dialing = tokio::spawn(async move { manager.dial(peer).await });
+        loop {
+            tokio::select! {
+                dialed = &mut dialing => {
+                    return dialed.unwrap_or_else(|error| Err(OpenError::ConnectionLost { peer, reason: error.to_string() }));
+                }
+                () = &mut arrival => {
+                    if let Some(conn) = self.preferred(peer) {
+                        return Ok(conn);
+                    }
+                    // 连进来的那一条已经没了：接着等自己拨的。
+                    arrival.set(arrived.notified());
+                    arrival.as_mut().enable();
+                }
+            }
         }
     }
 
