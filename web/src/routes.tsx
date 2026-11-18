@@ -13,7 +13,6 @@ import { Card } from '@/components/ui/card'
 import { CredentialsPage } from '@/pages/credentials/CredentialsPage'
 import { ForwardsPage } from '@/pages/forwards/ForwardsPage'
 import { GroupsPage } from '@/pages/groups/GroupsPage'
-import { ListenersPage } from '@/pages/listeners/ListenersPage'
 import { networkPath } from '@/pages/networks/context'
 import { pickCurrentNetwork } from '@/pages/networks/current'
 import { NetworkLayout } from '@/pages/networks/NetworkLayout'
@@ -80,7 +79,8 @@ export function AppRoutes() {
             <Route path="groups" element={<GroupsPage />} />
             {/* 出口页去掉了：出口是节点的一种身份，在节点详情里看和改；旧链接去节点列表、只看出口。 */}
             <Route path="exits" element={<Navigate to="../nodes?role=exit" replace />} />
-            <Route path="listeners" element={<ListenersPage />} />
+            {/* 监听器页去掉了：代理在出口节点详情的「代理出口」里。 */}
+            <Route path="listeners" element={<Navigate to="../nodes?role=exit" replace />} />
             <Route path="credentials" element={<CredentialsPage />} />
             <Route path="forwards" element={<ForwardsPage />} />
             <Route path="topology" element={<Lazy page={TopologyPage} />} />

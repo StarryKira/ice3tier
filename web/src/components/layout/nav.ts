@@ -7,7 +7,6 @@ import {
   Link2,
   type LucideIcon,
   Network,
-  RadioTower,
   Route,
   Server,
   Settings,
@@ -66,7 +65,6 @@ export const NAV_GROUPS: readonly NavGroup[] = [
       return t.nav.groupAccess
     },
     items: [
-      item('listeners', () => t.nav.listeners, RadioTower),
       item('credentials', () => t.nav.credentials, KeyRound),
       item('forwards', () => t.nav.forwards, ArrowLeftRight),
     ],

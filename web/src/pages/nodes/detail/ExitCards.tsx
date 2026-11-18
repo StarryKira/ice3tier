@@ -28,6 +28,7 @@ import { networkPath } from '@/pages/networks/context'
 import { exitHealthView } from '@/lib/exitView'
 
 import { useSaveExit } from './exitActions'
+import { ProxyEntriesCard } from './ProxyEntries'
 import {
   exitFormFrom,
   type ExitFormProblems,
@@ -670,6 +671,8 @@ export function ExitEnabledLayout({ network, node, exit, renderCard }: ExitEnabl
         <ExitUpstreamCard node={node} ctl={ctl} />
       </div>
       <div className="space-y-5">
+        {/* 经它出去的代理放在右栏最上面：宽屏时不用往下翻就看得到。 */}
+        <ProxyEntriesCard network={network} node={node} />
         <ExitUsageCard network={network} node={node} />
         <ExitUsersCard network={network} node={node} />
       </div>

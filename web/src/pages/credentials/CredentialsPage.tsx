@@ -247,7 +247,7 @@ function Usage({ network, token }: { network: Network; token: string }) {
         <div className="mt-2 space-y-3">
           <Notice>{c.noListener}</Notice>
           <Button asChild size="sm">
-            <Link to={networkPath(network.id, 'listeners')}>{c.newListener}</Link>
+            <Link to={`${networkPath(network.id, 'nodes')}?role=exit`}>{c.newListener}</Link>
           </Button>
         </div>
       ) : (
@@ -360,7 +360,7 @@ export function CredentialsPage() {
                 <>
                   <Button onClick={() => setIssuing(true)}>{c.issue}</Button>
                   <Button asChild variant="primary">
-                    <Link to={networkPath(network.id, 'listeners')}>{c.goListeners}</Link>
+                    <Link to={`${networkPath(network.id, 'nodes')}?role=exit`}>{c.goListeners}</Link>
                   </Button>
                 </>
               )

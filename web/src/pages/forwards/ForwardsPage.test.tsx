@@ -3,9 +3,8 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
 import { setLocale, t } from '@/i18n'
-import { makeForward, makeListener, makeNode } from '@/test/fixtures'
+import { makeForward, makeNode } from '@/test/fixtures'
 import { fakeApi, NETWORK, renderWithApp } from '@/test/harness'
-import { ListenersPage } from '@/pages/listeners/ListenersPage'
 
 import { ForwardsPage } from './ForwardsPage'
 
@@ -113,68 +112,8 @@ describe('端口转发的监听状态', () => {
   })
 })
 
-describe('监听器页列出节点自带的回环入口', () => {
-  it('controller 下发的带状态；自带的标出来，只能看', async () => {
-    fakeApi({
-      'GET /networks/1/listeners': [
-        makeListener(1, 1, 'lan', {
-          bind: '0.0.0.0:1088',
-          require_credential: true,
-          status: { state: 'port_in_use', detail: 'Address already in use', ...traffic },
-        }),
-      ],
-      'GET /networks/1/nodes': NODES,
-      'GET /networks/1/nodes/1/listeners': {
-        node: { id: 1, name: 'laptop', virtual_ip: '10.66.0.1' },
-        online: true,
-        reported_secs_ago: 4,
-        listeners: [
-          {
-            id: 1,
-            builtin: false,
-            name: 'lan',
-            bind: '0.0.0.0:1088',
-            protocol: 'socks5',
-            state: 'port_in_use',
-            detail: 'x',
-            ...traffic,
-          },
-          {
-            id: null,
-            builtin: true,
-            name: 'local-socks5',
-            bind: '127.0.0.1:1080',
-            protocol: 'socks5',
-            state: 'listening',
-            local: '127.0.0.1:1080',
-            ...traffic,
-          },
-        ],
-        forwards: [],
-      },
-      'GET /networks/1/nodes/2/listeners': {
-        node: { id: 2, name: 'gw-home', virtual_ip: '10.66.0.2' },
-        online: true,
-        reported_secs_ago: null,
-        listeners: [],
-        forwards: [],
-      },
-      'GET /networks/1/credentials': [],
-    })
-    renderWithApp(<ListenersPage />, { network: NETWORK })
-    const state = await screen.findByTestId('listener-state-lan')
-    expect(within(state).getByText(t.listen.portInUse)).toBeVisible()
-    expect(screen.getByText(t.listen.portInUseDetail('laptop', '1088'))).toBeVisible()
-    expect(screen.getByText('Address already in use')).toBeVisible()
-    const builtin = await screen.findByTestId('builtin-row-laptop-local-socks5')
-    expect(within(builtin).getByText(t.listen.builtin)).toBeVisible()
-    expect(within(builtin).getByText(t.listen.listening)).toBeVisible()
-    expect(within(builtin).queryByRole('button', { name: t.common.actionsFor('local-socks5') })).not.toBeInTheDocument()
-  })
-})
-
 describe('英文', () => {
-  it('转发和监听器的列表里没有中文，节点的原话照样显示', async () => {
+  it('转发列表里没有中文，节点的原话照样显示', async () => {
     setLocale('en', { remember: false })
     fakeApi({
       'GET /networks/1/forwards': [
@@ -188,51 +127,6 @@ describe('英文', () => {
     await screen.findByTestId('forward-row-web')
     expect(screen.getByText(t.listen.portInUseDetail('laptop', '8080'))).toBeVisible()
     expect(screen.getByText('Address already in use')).toBeVisible()
-    expect(document.body.textContent).not.toMatch(/\p{Script=Han}/u)
-  })
-
-  it('监听器列表里没有中文', async () => {
-    setLocale('en', { remember: false })
-    fakeApi({
-      'GET /networks/1/listeners': [
-        makeListener(1, 1, 'lan', {
-          bind: '0.0.0.0:1088',
-          require_credential: true,
-          allow_from: ['192.168.1.0/24', '10.0.0.0/8'],
-          status: { state: 'port_in_use', detail: 'Address already in use', ...traffic },
-        }),
-      ],
-      'GET /networks/1/nodes': NODES,
-      'GET /networks/1/nodes/1/listeners': {
-        node: { id: 1, name: 'laptop', virtual_ip: '10.66.0.1' },
-        online: true,
-        reported_secs_ago: 4,
-        listeners: [
-          {
-            id: null,
-            builtin: true,
-            name: 'local-socks5',
-            bind: '127.0.0.1:1080',
-            protocol: 'socks5',
-            state: 'listening',
-            local: '127.0.0.1:1080',
-            ...traffic,
-          },
-        ],
-        forwards: [],
-      },
-      'GET /networks/1/nodes/2/listeners': {
-        node: { id: 2, name: 'gw-home', virtual_ip: '10.66.0.2' },
-        online: true,
-        reported_secs_ago: null,
-        listeners: [],
-        forwards: [],
-      },
-      'GET /networks/1/credentials': [],
-    })
-    renderWithApp(<ListenersPage />, { network: NETWORK })
-    await screen.findByTestId('builtin-row-laptop-local-socks5')
-    expect(screen.getByText('Credential holders · Only 192.168.1.0/24, 10.0.0.0/8')).toBeVisible()
     expect(document.body.textContent).not.toMatch(/\p{Script=Han}/u)
   })
 })

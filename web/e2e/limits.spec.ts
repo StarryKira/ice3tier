@@ -206,21 +206,21 @@ test('凭据：经要求凭据的监听器用过之后有用量；改上限让�
   await expect(row).toContainText(c.neverUsed)
   credentialId = (await controller.api<{ id: number }[]>('GET', `${NET}/credentials`))[0]?.id ?? 0
 
-  // 一个对外的、要求凭据的监听器，开在 laptop 上；只收本机来的连接。
+  // 在 gw 的「代理出口」里加一个代理：开在 laptop 的所有地址上，经 gw 出去；开在本机以外，要凭据。
   const port = await freePort()
-  await controller.api('POST', `${NET}/listeners`, {
-    node: nodes.laptop.id,
-    name: 'lan',
-    bind: `0.0.0.0:${port}`,
-    protocol: 'socks5',
-    allow_from: ['127.0.0.0/8'],
-    require_credential: true,
-  })
+  const p = t.nodes.detail.proxy
+  await page.goto(`${controller.baseUrl}/n/1/nodes/${nodes.gw.id}?tab=exit`)
+  await page.getByTestId('proxy-entries').getByRole('button', { name: p.add }).click()
+  const add = page.getByRole('dialog', { name: p.addTitle('gw') })
+  await add.getByRole('combobox', { name: p.node }).click()
+  await page.getByRole('option', { name: /laptop/ }).click()
+  await add.getByRole('radio', { name: p.whereAll }).click()
+  await expect(add.getByText(p.needsCredential, { exact: false })).toBeVisible()
+  await add.getByRole('textbox', { name: p.port }).fill(String(port))
+  await add.getByRole('button', { name: p.add }).click()
+  await expectToast(page, p.added)
   // 等它监听上，再用凭据经它下载。
-  await goTo(page, t.nav.listeners)
-  await expect(page.getByTestId('listener-state-lan')).toContainText(t.listen.listening, { timeout: 30_000 })
-  // 节点自带的回环入口也列出来。
-  await expect(page.locator('[data-testid^="builtin-row-laptop-"]').first()).toBeVisible()
+  await expect(page.getByTestId('proxy-entries')).toContainText(t.listen.listening, { timeout: 30_000 })
   const done = await download(`socks5h://${nodes.gw.ip}:${secret}@127.0.0.1:${port}`)
   expect(done.code, done.stderr).toBe(0)
 

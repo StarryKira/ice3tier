@@ -11,6 +11,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { t } from '@/i18n'
 import { listenView } from '@/lib/listenState'
 import { nodeName, nodePath } from '@/lib/nodes'
+import { exitOf } from '@/lib/proxy'
 import { quotaView } from '@/lib/usage'
 import { exitHealthView } from '@/lib/exitView'
 import { forwardLabel, forwardStatusView } from '@/pages/forwards/status'
@@ -152,7 +153,7 @@ export function AttentionChip({ network, nodes }: { network: Network; nodes: rea
     attention.push({
       key: `listener:${listener.id}`,
       text: o.listenerBroken(listener.name, view.label),
-      action: <GoLink to={`${networkPath(network.id, 'listeners')}?focus=${listener.id}`}>{o.view}</GoLink>,
+      action: <GoLink to={`${nodePath(network.id, exitOf(listener) ?? listener.node)}?tab=exit`}>{o.view}</GoLink>,
     })
   }
   for (const forward of forwards.data ?? []) {

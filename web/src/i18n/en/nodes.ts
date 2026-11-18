@@ -40,7 +40,7 @@ export const nodes: Messages['nodes'] = {
     n === 0
       ? 'No node relays through this node yet'
       : `${count(n, 'node', 'nodes')} can relay through this node to reach others`,
-  roleExit: 'Exit',
+  roleExit: 'Proxy exit',
   roleExitUsers: (n) =>
     n === 0
       ? 'No node can reach the internet through this node yet'
@@ -114,7 +114,7 @@ export const nodes: Messages['nodes'] = {
     loadFailed: "Couldn't load node",
     tabOverview: 'Overview',
     tabRelay: 'Relay',
-    tabExit: 'Exit',
+    tabExit: 'Proxy exit',
     tabForward: 'Port forwarding',
     tabRoutes: 'Routes',
     more: 'More',
@@ -212,7 +212,42 @@ export const nodes: Messages['nodes'] = {
     relayOffGeneric: 'Connections relayed through it move to other relays.',
     relayOffConfirm: 'Disable relay',
 
-    exitTitle: 'Exit',
+    proxy: {
+      title: 'Proxy entries',
+      tip: "Devices set their proxy to an address here, and the traffic leaves through this node's network",
+      add: 'Add proxy',
+      addTitle: (exit) => `Add a proxy that leaves through ${exit}`,
+      editTitle: 'Edit proxy',
+      edit: 'Edit…',
+      remove: 'Delete',
+      removeTitle: (node, bind) => `Delete the proxy ${bind} on ${node}?`,
+      removeBody: 'Devices using this proxy are disconnected',
+      added: 'Proxy added',
+      saved: 'Proxy saved',
+      removed: 'Proxy deleted',
+      empty: (exit) => `No proxies leave through ${exit} yet`,
+      node: 'Open it on',
+      nodeHint: (exit) =>
+        `Devices connect to the proxy on this node and leave through ${exit}; ${exit} itself works too`,
+      protocol: 'Protocol',
+      address: 'Listen address',
+      whereLocal: 'This machine',
+      whereAll: 'All addresses',
+      whereMesh: 'Virtual IP',
+      whereCustom: 'Specific IP',
+      whereHint: {
+        local: '127.0.0.1: only programs on that machine can use it',
+        all: '0.0.0.0: phones, TVs and other devices on the LAN can use it too',
+        mesh: 'Only nodes allowed by a policy can use it',
+        custom: 'Listen on this one address only',
+      },
+      port: 'Port',
+      needsCredential: 'Off this machine, connections need a credential: put one in the proxy password.',
+      goCredentials: 'Issue credentials',
+      withCredential: 'credential required',
+      connections: (n) => (n === 1 ? '1 connection' : `${n} connections`),
+    },
+    exitTitle: 'Proxy exit',
     exitDesc: 'Nodes that can reach this node can use its internet access',
     exitSwitch: (name) => `Enable ${name} as exit`,
     exitPortsAny: 'Any port',

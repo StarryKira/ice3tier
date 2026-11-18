@@ -118,7 +118,8 @@ export function refTarget(ref: LogRef, network: NetworkId | null): string | null
     case 'credential':
       return `${networkPath(network, 'credentials')}?focus=${ref.id}`
     case 'listener':
-      return `${networkPath(network, 'listeners')}?focus=${ref.id}`
+      // 代理（监听器）没有自己的页面了：在出口节点的「代理出口」里，去节点列表里的出口。
+      return `${networkPath(network, 'nodes')}?role=exit`
     case 'forward':
       return `${networkPath(network, 'forwards')}?focus=${ref.id}`
   }

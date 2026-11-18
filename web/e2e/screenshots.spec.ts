@@ -161,7 +161,6 @@ test('空的网络：每个页面没有数据时的样子', async () => {
   await page.getByRole('radio', { name: t.access.viewList }).click()
 
   for (const [name, file, marker] of [
-    [t.nav.listeners, 'listeners-empty', t.listeners.emptyTitle],
     [t.nav.credentials, 'credentials-empty', t.credentials.emptyTitle],
     [t.nav.forwards, 'forwards-empty', t.forwards.emptyTitle],
   ] as const) {
@@ -667,14 +666,18 @@ test('有数据时：分组', async () => {
 })
 
 test('有数据时：接入', async () => {
-  await goTo(page, t.nav.listeners)
-  await expect(page.getByTestId('listener-row-lan')).toBeVisible()
-  await shot('listeners')
-  await page.getByRole('button', { name: t.listeners.create }).click()
-  const listener = page.getByRole('dialog', { name: t.listeners.dialog.createTitle })
-  await listener.getByRole('radio', { name: new RegExp(literal(t.listeners.dialog.whereOthers)) }).click()
-  await shot('listeners-dialog', { fullPage: false })
-  await listener.getByRole('button', { name: t.common.cancel, exact: true }).click()
+  // 代理出口：nas-home 是出口，代理入口里是经它出去的代理。
+  const px = t.nodes.detail.proxy
+  await page.goto(`${controller.baseUrl}/n/1/nodes/2?tab=exit`)
+  await expect(page.getByTestId('proxy-entries').locator('[data-testid^="proxy-entry-"]').first()).toBeVisible()
+  await page.setViewportSize({ width: 1680, height: 960 })
+  await shot('proxy-exit', { fullPage: false })
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await page.getByTestId('proxy-entries').getByRole('button', { name: px.add }).click()
+  const proxyDialog = page.getByRole('dialog', { name: px.addTitle('nas-home') })
+  await proxyDialog.getByRole('radio', { name: px.whereAll }).click()
+  await shot('proxy-dialog', { fullPage: false })
+  await proxyDialog.getByRole('button', { name: t.common.cancel, exact: true }).click()
   await page.getByRole('button', { name: t.common.discardConfirm }).click()
 
   await goTo(page, t.nav.credentials)
@@ -833,9 +836,6 @@ test('窄一些的笔记本宽度', async () => {
   await goTo(page, t.nav.credentials)
   await expect(page.getByTestId('credential-row-phone')).toBeVisible()
   await shot('narrow-credentials')
-  await goTo(page, t.nav.listeners)
-  await expect(page.getByTestId('listener-row-guests')).toBeVisible()
-  await shot('narrow-listeners')
   await page.goto(`${controller.baseUrl}/n/1/topology?a=3&b=2`)
   await expect(page.getByTestId('pair-panel')).toBeVisible()
   await shot('narrow-topology-pair')

@@ -144,7 +144,7 @@ describe('签发之后的"下一步"', () => {
     await user.click(within(dialog).getByRole('button', { name: c.submit }))
     const secret = await screen.findByTestId('secret-dialog')
     expect(within(secret).getByText(c.noListener)).toBeVisible()
-    expect(within(secret).getByRole('link', { name: c.newListener })).toHaveAttribute('href', '/n/1/listeners')
+    expect(within(secret).getByRole('link', { name: c.newListener })).toHaveAttribute('href', '/n/1/nodes?role=exit')
   })
 
   it('有的话，例子里是真实的地址和这个凭据', async () => {
@@ -165,7 +165,7 @@ describe('凭据列表', () => {
     renderWithApp(<CredentialsPage />, { network: NETWORK })
     expect(await screen.findByText(c.emptyTitle)).toBeVisible()
     expect(screen.getByText(c.noListener)).toBeVisible()
-    expect(screen.getByRole('link', { name: c.goListeners })).toHaveAttribute('href', '/n/1/listeners')
+    expect(screen.getByRole('link', { name: c.goListeners })).toHaveAttribute('href', '/n/1/nodes?role=exit')
   })
 
   it('取不到列表：说是哪一步、什么原因，可以重试', async () => {
