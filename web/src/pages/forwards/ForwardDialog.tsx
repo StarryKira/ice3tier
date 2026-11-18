@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowRight, CircleCheck } from 'lucide-react'
-import { useId, useState } from 'react'
+import { CircleCheck } from 'lucide-react'
+import { useState } from 'react'
 import { Link } from 'react-router'
 
 import { fieldError, formError, formErrorDetail, formFailure } from '@/api/formErrors'
@@ -22,9 +22,7 @@ import { ruleLabel } from '@/lib/rules'
 import { Button } from '@/components/ui/button'
 import { Field } from '@/components/ui/field'
 import { Input, Textarea } from '@/components/ui/input'
-import { RadioCards } from '@/components/ui/radio-cards'
 import { Segmented } from '@/components/ui/segmented'
-import { Switch } from '@/components/ui/switch'
 import { ClassSelect } from '@/components/usage'
 import { t } from '@/i18n'
 import { formatSocketAddr, isLoopbackHost, parseIpv4, parseSocketAddr } from '@/lib/cidr'
@@ -51,12 +49,10 @@ interface ForwardDialogProps {
 }
 
 /**
- * 新建和编辑转发。左右两块，中间一个箭头，读起来就是"从这里 → 到那里"。
+ * 新建和编辑转发，从上往下填：监听（哪台节点、哪个端口、谁能用），目标（哪台节点、哪个端口、本机还是局域网里的别的机器），
+ * 再是协议、QoS 和名字。两台节点不同时当场说策略允不允许。
  */
 export function ForwardDialog({ network, forward, scope: presetScope, open, onClose }: ForwardDialogProps) {
-  const scopeLabel = useId()
-  const targetKindLabel = useId()
-
   const bindParsed = forward === null ? null : parseSocketAddr(forward.bind)
   const targetParsed = forward === null ? null : parseSocketAddr(forward.target_addr)
 
@@ -91,7 +87,6 @@ export function ForwardDialog({ network, forward, scope: presetScope, open, onCl
   )
   const [targetPort, setTargetPort] = useState(targetParsed?.port.toString() ?? '')
   const [name, setName] = useState(forward?.name ?? '')
-  const [enabled, setEnabled] = useState(forward?.enabled ?? true)
   const [serviceClass, setServiceClass] = useState<ServiceClass | null>(forward?.class ?? null)
   const [touched, setTouched] = useState(false)
   const [dirty, setDirty] = useState(false)
@@ -174,19 +169,29 @@ export function ForwardDialog({ network, forward, scope: presetScope, open, onCl
         target_node: targetNode,
         target_addr: targetAddr,
         allow_from: scope === 'open' ? normalizeCidrList(splitList(allowFrom)) : [],
-        enabled: enabled && targetDeclared,
+        // 开关在列表的那一行里：新建时打开（目标还没打开时停用），编辑时保持原样。
+        enabled: (forward?.enabled ?? true) && targetDeclared,
         class: serviceClass,
       },
       { onSuccess: onClose },
     )
   }
 
+  /** 监听一侧的说明：谁能用这个端口。开给局域网或公网时下面有提醒和监听地址，不再重复。 */
+  const scopeHint =
+    scope === 'self'
+      ? d.whoSelfDesc
+      : scope === 'mesh'
+        ? listen === undefined
+          ? d.whoMeshDescNoNode
+          : d.whoMeshDesc(listen.virtual_ip)
+        : undefined
+
   return (
     <FormDialog
       open={open}
       onClose={onClose}
       title={forward === null ? d.createTitle : d.editTitle(forward.name === '' ? forward.bind : forward.name)}
-      size="lg"
       dirty={dirty}
       requireDirty={forward !== null}
       submitLabel={forward === null ? d.submitCreate : d.submitEdit}
@@ -195,34 +200,44 @@ export function ForwardDialog({ network, forward, scope: presetScope, open, onCl
       errorDetail={formErrorDetail(failure)}
       onSubmit={submit}
     >
-      <div className="grid grid-cols-[minmax(0,1fr)_2rem_minmax(0,1fr)] gap-x-4">
-        <fieldset className="space-y-4">
-          <legend className="mb-3 text-sm font-semibold">{d.listenSide}</legend>
+      <fieldset className="space-y-4">
+        <legend className="mb-3 text-sm font-semibold">{d.listenSide}</legend>
+        <div className="grid grid-cols-[minmax(0,1fr)_8rem] gap-4">
           <Field label={d.node} error={shown(problems.listenNode)}>
             {(props) => <NodeSelect {...props} nodes={all} value={listenNode} onChange={change(setListenNode)} />}
           </Field>
-          <div>
-            <p id={scopeLabel} className="mb-2 text-[13px] font-medium">
-              {d.who}
-            </p>
-            <RadioCards
-              aria-labelledby={scopeLabel}
+          <Field label={d.port} error={shown(problems.port) ?? fieldError(failure, 'port')}>
+            {(props) => (
+              <Input
+                {...props}
+                name="listen-port"
+                inputMode="numeric"
+                className="font-mono"
+                placeholder={scope === 'mesh' ? '8080' : d.portPlaceholder}
+                value={port}
+                onChange={(event) => change(setPort)(event.target.value)}
+              />
+            )}
+          </Field>
+        </div>
+        <Field label={d.who} hint={scopeHint}>
+          {() => (
+            <Segmented
+              aria-label={d.who}
               value={scope}
               onChange={change(setScope)}
               options={[
-                { value: 'self', title: d.whoSelf, description: d.whoSelfDesc },
-                {
-                  value: 'mesh',
-                  title: d.whoMesh,
-                  description: listen === undefined ? d.whoMeshDescNoNode : d.whoMeshDesc(listen.virtual_ip),
-                },
-                { value: 'open', title: d.whoOpen, description: d.whoOpenDesc },
+                { value: 'self', label: d.whoSelf },
+                { value: 'mesh', label: d.whoMesh },
+                { value: 'open', label: d.whoOpen },
               ]}
             />
-          </div>
-          {scope === 'open' ? (
-            <>
-              <Notice tone="warn">{d.openWarning}</Notice>
+          )}
+        </Field>
+        {scope === 'open' ? (
+          <>
+            <Notice tone="warn">{d.openWarning}</Notice>
+            <div className="grid grid-cols-2 gap-4">
               <Field label={d.address} hint={d.addressHint} error={shown(problems.openAddress)}>
                 {(props) => (
                   <Input
@@ -242,68 +257,49 @@ export function ForwardDialog({ network, forward, scope: presetScope, open, onCl
                 {(props) => (
                   <Textarea
                     {...props}
-                    rows={2}
-                    className="font-mono"
+                    rows={1}
+                    className="min-h-9 font-mono"
                     placeholder="192.168.1.0/24"
                     value={allowFrom}
                     onChange={(event) => change(setAllowFrom)(event.target.value)}
                   />
                 )}
               </Field>
-            </>
-          ) : null}
-          <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-4">
-            <Field
-              label={d.port}
-              hint={scope === 'mesh' ? undefined : d.portHint}
-              error={shown(problems.port) ?? fieldError(failure, 'port')}
-            >
+            </div>
+          </>
+        ) : null}
+      </fieldset>
+
+      {/* 分隔线画在外面一层：画在 fieldset 上的话，标题会压在线上。 */}
+      <div className="border-t pt-5">
+        <fieldset className="space-y-4">
+          <legend className="mb-3 text-sm font-semibold">{d.targetSide}</legend>
+          <div className="grid grid-cols-[minmax(0,1fr)_8rem] gap-4">
+            <Field label={d.node} error={shown(problems.targetNode) ?? fieldError(failure, 'targetNode')}>
               {(props) => (
-                <Input
+                <NodeSelect
                   {...props}
-                  name="listen-port"
-                  inputMode="numeric"
-                  className="w-32 font-mono"
-                  placeholder={scope === 'mesh' ? '8080' : d.portPlaceholder}
-                  value={port}
-                  onChange={(event) => change(setPort)(event.target.value)}
+                  // 没有打开的节点也列出来，不然用户会以为它丢了；选中之后说明怎么打开。
+                  nodes={all}
+                  value={targetNode}
+                  onChange={change(setTargetNode)}
                 />
               )}
             </Field>
-            <Field label={d.protocol}>
-              {() => (
-                <Segmented
-                  aria-label={d.protocol}
-                  value={protocol}
-                  onChange={change(setProtocol)}
-                  options={[
-                    { value: 'tcp', label: d.tcp },
-                    { value: 'udp', label: d.udp },
-                  ]}
-                  className="w-fit"
+            <Field label={d.targetPort} error={shown(problems.targetPort)}>
+              {(props) => (
+                <Input
+                  {...props}
+                  name="target-port"
+                  inputMode="numeric"
+                  className="font-mono"
+                  placeholder="80"
+                  value={targetPort}
+                  onChange={(event) => change(setTargetPort)(event.target.value)}
                 />
               )}
             </Field>
           </div>
-        </fieldset>
-
-        <div className="flex items-start justify-center pt-24 text-faint">
-          <ArrowRight className="size-5" aria-label={d.arrow} />
-        </div>
-
-        <fieldset className="space-y-4">
-          <legend className="mb-3 text-sm font-semibold">{d.targetSide}</legend>
-          <Field label={d.node} error={shown(problems.targetNode) ?? fieldError(failure, 'targetNode')}>
-            {(props) => (
-              <NodeSelect
-                {...props}
-                // 没有声明的节点也列出来，不然用户会以为它丢了；选中之后说明怎么声明。
-                nodes={all}
-                value={targetNode}
-                onChange={change(setTargetNode)}
-              />
-            )}
-          </Field>
           {target !== undefined && !canBeForwardTarget(target) ? (
             forwardTargetBySwitch(target) ? (
               <Notice
@@ -323,66 +319,40 @@ export function ForwardDialog({ network, forward, scope: presetScope, open, onCl
               </div>
             )
           ) : null}
-          <div>
-            <p id={targetKindLabel} className="mb-2 text-[13px] font-medium">
-              {d.targetAddress}
-            </p>
-            <RadioCards
-              aria-labelledby={targetKindLabel}
-              value={targetKind}
-              onChange={change(setTargetKind)}
-              options={[
-                { value: 'self', title: d.targetSelf },
-                { value: 'lan', title: d.targetLan },
-              ]}
-            />
-          </div>
-          <div className="grid grid-cols-[minmax(0,1fr)_8rem] gap-4">
-            {targetKind === 'lan' ? (
-              <Field label={d.targetIp} error={shown(problems.targetIp)}>
-                {(props) => (
+          <Field label={d.targetAddress} error={shown(problems.targetIp)}>
+            {() => (
+              <div className="space-y-2">
+                <Segmented
+                  aria-label={d.targetAddress}
+                  value={targetKind}
+                  onChange={change(setTargetKind)}
+                  options={[
+                    { value: 'self', label: d.targetSelf },
+                    { value: 'lan', label: d.targetLan },
+                  ]}
+                />
+                {targetKind === 'lan' ? (
                   <Input
-                    {...props}
+                    aria-label={d.targetIp}
                     name="target-ip"
                     className="font-mono"
                     placeholder="192.168.1.10"
                     value={targetIp}
                     onChange={(event) => change(setTargetIp)(event.target.value)}
                   />
-                )}
-              </Field>
-            ) : (
-              <div />
+                ) : null}
+              </div>
             )}
-            <Field label={d.targetPort} error={shown(problems.targetPort)}>
-              {(props) => (
-                <Input
-                  {...props}
-                  name="target-port"
-                  inputMode="numeric"
-                  className="font-mono"
-                  placeholder="80"
-                  value={targetPort}
-                  onChange={(event) => change(setTargetPort)(event.target.value)}
-                />
-              )}
-            </Field>
-          </div>
+          </Field>
         </fieldset>
       </div>
 
-      {/* 即时检查：转发不绕过访问规则。不拦着保存，因为规则以后还会变。 */}
-      <div aria-live="polite">
-        {listen !== undefined && target !== undefined ? (
-          listen.id === target.id ? (
-            <Notice>
-              {scope === 'mesh' && problems.port === null
-                ? t.common.sentences(d.checkSame, d.meshNote(bind))
-                : d.checkSame}
-            </Notice>
-          ) : check.data === undefined ? null : check.data.allowed ? (
+      {/* 即时检查：转发不绕过访问规则。不拦着保存，因为规则以后还会变。同一台节点上的不用查。 */}
+      <div aria-live="polite" className="empty:hidden">
+        {listen !== undefined && target !== undefined && listen.id !== target.id && check.data !== undefined ? (
+          check.data.allowed ? (
             <p className="flex items-center gap-1.5 text-[13px] text-ok" data-testid="forward-check">
-              <CircleCheck className="size-4" aria-hidden />
+              <CircleCheck className="size-4 shrink-0" aria-hidden />
               {d.checkAllowed(listen.name, target.name, formatList(check.data.rules.map(ruleLabel)))}
             </p>
           ) : (
@@ -403,30 +373,39 @@ export function ForwardDialog({ network, forward, scope: presetScope, open, onCl
         ) : null}
       </div>
 
-      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-6">
-        <Field label={d.name} optional={t.common.optional} error={shown(problems.name)}>
-          {(props) => (
-            <Input
-              {...props}
-              name="name"
-              placeholder="web"
-              value={name}
-              onChange={(event) => change(setName)(event.target.value)}
+      <div className="grid grid-cols-[auto_minmax(0,1fr)] gap-4 border-t pt-5">
+        <Field label={d.protocol}>
+          {() => (
+            <Segmented
+              aria-label={d.protocol}
+              value={protocol}
+              onChange={change(setProtocol)}
+              options={[
+                { value: 'tcp', label: d.tcp },
+                { value: 'udp', label: d.udp },
+              ]}
             />
           )}
         </Field>
-        <label className="flex h-9 items-center gap-2.5 text-sm">
-          <Switch checked={enabled && targetDeclared} disabled={!targetDeclared} onCheckedChange={change(setEnabled)} />
-          {d.enabled}
-        </label>
+        <Field label={d.classLabel}>
+          {(props) => (
+            <ClassSelect
+              {...props}
+              value={serviceClass}
+              inheritLabel={t.serviceClass.inheritNetwork(classLabel(network.class ?? 'auto'))}
+              onChange={change(setServiceClass)}
+            />
+          )}
+        </Field>
       </div>
-      <Field label={d.classLabel}>
+      <Field label={d.name} optional={t.common.optional} error={shown(problems.name)}>
         {(props) => (
-          <ClassSelect
+          <Input
             {...props}
-            value={serviceClass}
-            inheritLabel={t.serviceClass.inheritNetwork(classLabel(network.class ?? 'auto'))}
-            onChange={change(setServiceClass)}
+            name="name"
+            placeholder="web"
+            value={name}
+            onChange={(event) => change(setName)(event.target.value)}
           />
         )}
       </Field>
