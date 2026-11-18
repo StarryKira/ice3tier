@@ -26,6 +26,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 
 const PATIENCE: Duration = Duration::from_secs(10);
+/// 一条流上来回搬的字节数：比 TLS 的一个记录（16 KB）和套接字的缓冲都大得多。
+const BULK: u32 = 150_000;
 
 fn open_request() -> Open {
     Open { target: Target::Node { port: 443 }, class: Class::Auto, origin: Origin::default() }
@@ -333,8 +335,9 @@ async fn tls_server(acceptor: tokio_rustls::TlsAcceptor) -> SocketAddr {
 }
 
 /// 一条 passthrough 的流，两头是真的 TLS 客户端和服务器，中间三处录音：客户端到入口、lane、出口到服务器。
+/// 客户端发 `len` 字节，服务器倒着发回来。
 /// 返回 (客户端发出的, 服务器发出的, lane 上从出口到入口的, lane 上从入口到出口的)。
-async fn passthrough_with_recordings(splicer: Splicer, lane_chunk: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
+async fn passthrough_with_recordings(splicer: Splicer, lane_chunk: usize, len: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
     let pair = Pair::new(quick()).await;
     *pair.hop.chunk.lock().unwrap() = lane_chunk;
     pair.ready(1).await;
@@ -356,7 +359,7 @@ async fn passthrough_with_recordings(splicer: Splicer, lane_chunk: usize) -> (Ve
 
     let tcp = TcpStream::connect(from_client.addr).await.unwrap();
     let mut tls = connector.connect(user_tls::name(), tcp).await.unwrap();
-    let request: Vec<u8> = (0..150_000u32).map(|i| u8::try_from(i % 241).unwrap()).collect();
+    let request: Vec<u8> = (0..len).map(|i| u8::try_from(i % 241).unwrap()).collect();
     tls.write_all(&request).await.unwrap();
     tls.shutdown().await.unwrap();
     let mut answer = Vec::new();
@@ -391,7 +394,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 
 #[tokio::test]
 async fn passthrough_carries_the_inner_tls_records_unchanged_after_the_opening_exchange() {
-    let (client_sent, server_sent, exit_to_entry, entry_to_exit) = passthrough_with_recordings(Splicer::new(), 0).await;
+    let (client_sent, server_sent, exit_to_entry, entry_to_exit) = passthrough_with_recordings(Splicer::new(), 0, BULK).await;
     let hello = first_record_len(&client_sent);
     // 入口到出口：lane 自己的 TLS（握手、OPENING，里面装着 ClientHello）之后，正好是客户端在 ClientHello 之后发出的全部字节。
     assert!(entry_to_exit.ends_with(&client_sent[hello..]), "入口到出口的方向在开流之后必须是客户端的原始字节");
@@ -407,8 +410,10 @@ async fn passthrough_carries_the_inner_tls_records_unchanged_after_the_opening_e
 
 #[tokio::test]
 async fn passthrough_survives_a_lane_that_delivers_tiny_segments() {
-    for chunk in [1, 3, 100] {
-        let (client_sent, server_sent, exit_to_entry, entry_to_exit) = passthrough_with_recordings(Splicer::new(), chunk).await;
+    // 每段一两个字节时每个字节一次系统调用，量大了只是慢（十五万字节来回要七八秒，机器一忙就过了等待的上限，
+    // 看起来像流卡死了）。这里要看的是 TLS 的记录被切在任意位置也不出错：两万字节跨过一个记录的边界，够了。
+    for (chunk, len) in [(1, 20_000), (3, 20_000), (100, BULK)] {
+        let (client_sent, server_sent, exit_to_entry, entry_to_exit) = passthrough_with_recordings(Splicer::new(), chunk, len).await;
         let hello = first_record_len(&client_sent);
         assert!(entry_to_exit.ends_with(&client_sent[hello..]), "每段 {chunk} 字节");
         assert!(exit_to_entry.ends_with(&server_sent), "每段 {chunk} 字节");
@@ -418,8 +423,8 @@ async fn passthrough_survives_a_lane_that_delivers_tiny_segments() {
 #[tokio::test]
 async fn splice_and_user_space_copy_move_identical_bytes() {
     // 经过 lane 的真 TLS 流，两种引擎各跑一遍：TLS 能解开、内容对（在里面检查）。
-    let _ = passthrough_with_recordings(Splicer::new(), 0).await;
-    let _ = passthrough_with_recordings(Splicer::copying(), 0).await;
+    let _ = passthrough_with_recordings(Splicer::new(), 0, BULK).await;
+    let _ = passthrough_with_recordings(Splicer::copying(), 0, BULK).await;
 
     // 再直接比一次：同一份字节分别用两种引擎搬过两条 TCP。
     let data: Vec<u8> = (0..20_000_000u32).map(|i| u8::try_from((i * 7 + i / 255) % 256).unwrap()).collect();

@@ -294,7 +294,9 @@ async fn a_relay_that_announces_shutdown_is_left_at_once_and_the_stream_survives
     d.spawn_echo();
     let transfer = Transfer::start(&a, &d, 200).await;
     transfer.expect_progress(100).await;
-    assert_eq!(a.route_to(&d), Route::Relay { relays: vec![r1.id] });
+    // 到 R2 的会话可能先建好，头几个包就走了它；到 R1 的会话一建好路就换过去（R1 在对端的表里排第一，延迟低得多）。
+    // 机器忙的时候两个会话隔得开，所以等，而不是当场断言。
+    eventually("A 到 D 走 R1", SOON, || a.route_to(&d) == Route::Relay { relays: vec![r1.id] }).await;
     // 三个 relay 的延迟都量出来之后再动手，这样挂靠的去向是确定的。
     eventually("A 和 D 各挂靠两个 relay", SOON, || a.paths.attached().len() == 2 && d.paths.attached().len() == 2).await;
     let mut changes = a.paths.subscribe();
