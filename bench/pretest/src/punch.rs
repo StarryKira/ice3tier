@@ -73,8 +73,16 @@ async fn send(socket: &UdpSocket, message: &Message, to: SocketAddr) -> std::io:
 /// 汇合点。`alt` 是第二个端口，节点用它看自己的映射端口是否随目的地变化。
 pub async fn run_rendezvous(listen: SocketAddr, alt: Option<SocketAddr>) -> anyhow::Result<()> {
     let main = UdpSocket::bind(listen).await.with_context(|| format!("绑定 UDP {listen}"))?;
-    if let Some(alt) = alt {
-        let socket = UdpSocket::bind(alt).await.with_context(|| format!("绑定 UDP {alt}"))?;
+    let alt = match alt {
+        Some(alt) => Some(UdpSocket::bind(alt).await.with_context(|| format!("绑定 UDP {alt}"))?),
+        None => None,
+    };
+    serve_rendezvous(main, alt).await
+}
+
+/// 在已经绑好的套接字上当汇合点。`alt` 是只回答"你是谁"的第二个地址。
+async fn serve_rendezvous(main: UdpSocket, alt: Option<UdpSocket>) -> anyhow::Result<()> {
+    if let Some(socket) = alt {
         tokio::spawn(answer_who_am_i(socket));
     }
 
@@ -357,10 +365,11 @@ mod tests {
     /// 两个节点都在本机，没有 NAT：只验证汇合、探测、确认这套流程能走通。
     #[tokio::test]
     async fn two_local_peers_find_each_other() {
-        let rendezvous: SocketAddr = "127.0.0.1:20391".parse().unwrap();
-        let alt: SocketAddr = "127.0.0.1:20392".parse().unwrap();
-        tokio::spawn(run_rendezvous(rendezvous, Some(alt)));
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // 端口让系统挑，先绑好再开始：写死端口的话，机器上别的程序（或者同时跑着的另一份测试）占着就失败，
+        // 等一会儿再开始也不保证汇合点已经在听。
+        let (main, second) = (UdpSocket::bind("127.0.0.1:0").await.unwrap(), UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let (rendezvous, alt) = (main.local_addr().unwrap(), second.local_addr().unwrap());
+        tokio::spawn(serve_rendezvous(main, Some(second)));
 
         let peer = || PeerOpts {
             rendezvous,
