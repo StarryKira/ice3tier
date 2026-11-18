@@ -126,6 +126,14 @@ async fn a_dialler_that_came_back_on_a_new_address_makes_its_old_idle_lanes_go_a
     pair.exit.restart(slow);
     pair.introduce();
     wait_for("新的控制 lane 到达", Duration::from_secs(5), || pair.hop.connections() > old_connections).await;
+    // 等出口那一头的控制 lane 算建立了再往下：它要先收到入口的第一个帧，而入口是登记了新的 epoch、扔掉旧的空闲 lane 之后才发的。
+    // 只等"中间那一跳看到了新连接"不够：那时入口可能还没读到它，手里仍是那四条旧的（它没法知道它们死了），`ready(4)` 马上就满足，
+    // 接着取到的就是旧的。机器忙的时候这个测试因此失败过，和被测的行为无关。
+    let entry = pair.entry.id;
+    wait_for("出口的新控制 lane 建立", Duration::from_secs(5), || {
+        pair.exit.lanes.status().peer(entry).is_some_and(|peer| peer.control)
+    })
+    .await;
     pair.ready(4).await;
     // 入口取到的必须是新 epoch 的 lane：旧的装死，在上面开流会一直挂着。
     for _ in 0..8 {
