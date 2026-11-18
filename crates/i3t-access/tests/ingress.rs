@@ -779,6 +779,54 @@ impl PortBook for MemoryPortBook {
     }
 }
 
+/// 别的程序占着一个端口最多等多久。占着的通常是同一台机器上并行跑的别的测试，它结束了就让出来；
+/// 机器很忙时一个测试要跑十几秒。
+const HELD_ELSEWHERE: Duration = Duration::from_secs(30);
+
+impl World {
+    /// 等端口转发 `id` 监听在 `expected` 上。
+    ///
+    /// 挑定的端口空着的那一会儿（重启的间隙），别的程序可能正好绑上它：同一台机器上并行跑的测试一直在让系统挑端口，
+    /// 挑中刚空出来的这一个并不稀奇。入口答应的是这时报"端口被占用"、不换端口，等它让出来再绑回去，
+    /// 所以这期间只许看到这两种状态。入口每 10 秒重试一次绑不上的监听；这里看到"端口被占用"就把 netmap 的版本加一，
+    /// 让它马上重试，不用干等。
+    async fn listening_again(&self, id: u32, expected: SocketAddr) {
+        timeout(HELD_ELSEWHERE, async {
+            loop {
+                let status = self.settled().await;
+                match &status.forwards.iter().find(|forward| forward.id == id).unwrap().state {
+                    ListenState::Listening { local } => {
+                        assert_eq!(*local, expected, "端口转发 {id} 换了端口");
+                        return;
+                    }
+                    ListenState::PortInUse { .. } => {
+                        sleep(Duration::from_millis(20)).await;
+                        self.update(|_| {}).await;
+                    }
+                    other => panic!("端口转发 {id} 应该监听在 {expected}，或者在等别人让出这个端口：{other:?}"),
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("端口 {expected} 一直被别的程序占着"));
+    }
+}
+
+/// 替"别的程序"占住 `addr`。刚空出来的端口可能正被别人占着（见 [`World::listening_again`]），那就等它让出来。
+async fn squat(addr: SocketAddr) -> TcpListener {
+    timeout(HELD_ELSEWHERE, async {
+        loop {
+            match TcpListener::bind(addr).await {
+                Ok(listener) => break listener,
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse => sleep(Duration::from_millis(20)).await,
+                Err(error) => panic!("占不了 {addr}：{error}"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("端口 {addr} 一直被别的程序占着"))
+}
+
 i3t_lane::on_both_transports! {
     async fn a_forward_on_port_zero_gets_a_port_that_survives_a_restart() {
         let book = MemoryPortBook::default();
@@ -793,22 +841,22 @@ i3t_lane::on_both_transports! {
         assert_echo(&mut stream).await;
         drop(stream);
         first.manager.abort();
-        // 等监听真的关掉，再像重启那样从头开一个入口。
         let _ = first.manager.await;
-        sleep(Duration::from_millis(20)).await;
 
+        // 像重启那样从头开一个入口：还是同一个端口。
         let second = World::start_with(map.clone(), |access| access.with_port_book(Arc::new(book.clone()))).await;
-        assert_eq!((second.forward(7).await, second.forward(8).await), (tcp, udp), "重启之后还是同一个端口");
+        second.listening_again(7, tcp).await;
+        second.listening_again(8, udp).await;
         second.manager.abort();
         let _ = second.manager.await;
-        sleep(Duration::from_millis(20)).await;
 
-        // 记着的端口被别的程序占了：不换端口，照实报"端口被占用"。
-        let squatter = TcpListener::bind(tcp).await.unwrap();
+        // 记着的端口被别的程序占了：不换端口，照实报"端口被占用"；让出来之后绑回同一个端口。
+        let squatter = squat(tcp).await;
         let third = World::start_with(map, |access| access.with_port_book(Arc::new(book.clone()))).await;
         let status = third.settled().await;
         assert!(matches!(&status.forwards[0].state, ListenState::PortInUse { .. }), "{:?}", status.forwards[0].state);
         drop(squatter);
+        third.listening_again(7, tcp).await;
     }
 }
 

@@ -31,9 +31,30 @@ fn public(port: u16) -> String {
 const OTHER_PUBLIC_IP: &str = "93.184.216.35";
 
 /// 等出口把到现在为止的报文都处理完，返回那时的计数。
+///
+/// 等不到时把出口的计数和入口那边各条端口转发的状态一起报出来：看得出报文是在入口那里没发出去（上下文没开成），
+/// 还是到了出口以后。
 async fn settled(world: &World, what: &str, done: impl Fn(&ExitStats) -> bool) -> ExitStats {
-    eventually(what, || done(&world.gw.exit.stats())).await;
-    world.gw.exit.stats()
+    let waited = timeout(PATIENCE, async {
+        loop {
+            let stats = world.gw.exit.stats();
+            if done(&stats) {
+                return stats;
+            }
+            sleep(Duration::from_millis(2)).await;
+        }
+    });
+    waited.await.unwrap_or_else(|_| {
+        let forwards: Vec<_> = world
+            .laptop
+            .access
+            .status()
+            .forwards
+            .into_iter()
+            .map(|forward| (forward.id, forward.state, forward.active.get(), forward.target_failure))
+            .collect();
+        panic!("等了 {PATIENCE:?} 也没有等到：{what}\n出口的计数：{:?}\n入口的端口转发：{forwards:?}", world.gw.exit.stats())
+    })
 }
 
 #[tokio::test]

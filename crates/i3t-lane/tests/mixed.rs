@@ -141,13 +141,17 @@ async fn when_the_peer_refuses_our_lanes_streams_quietly_use_the_shared_connecti
     // 入口不认识出口的公钥：出口拨的 lane 在握手时就被拒绝，控制 lane 建不起来。
     pair.entry.lanes.set_peers([]).unwrap();
     wait_for("入口拒绝了出口的握手", Duration::from_secs(5), || pair.entry.lanes.status().handshake_failures.unknown_key > 0).await;
+    // 出口要经中间一跳读到入口的拒绝，才知道这次拨失败了，比入口记下拒绝晚一些。
+    wait_for("出口记下拨控制 lane 失败", Duration::from_secs(5), || {
+        pair.exit.lanes.status().peer(pair.entry.id).is_some_and(|status| status.counts.dial_failures > 0)
+    })
+    .await;
     let mesh = MemoryMesh::new();
     // 出口自己开流：用它自己拨的 lane，开不出来。
     let side = Side::new(&mesh, (pair.exit.id, &pair.exit.lanes), (pair.entry.id, &pair.entry.lanes));
     assert!(!side.round_trip().await);
     assert!(!side.round_trip().await);
     assert_eq!(fallbacks(&pair.exit.lanes, pair.entry.id), 2);
-    assert!(pair.exit.lanes.status().peer(pair.entry.id).unwrap().counts.dial_failures > 0);
 }
 
 #[tokio::test]

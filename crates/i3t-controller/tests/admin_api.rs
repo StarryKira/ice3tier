@@ -1157,11 +1157,21 @@ async fn the_static_directory_is_served_at_the_root_when_configured() {
 }
 
 /// 一个假的节点 UDP 端口：回答地址查询；和同一个端口号上的 TCP 监听。
+///
+/// 系统挑 UDP 端口的时候不看 TCP：同一个端口号的 TCP 可能正被别的程序用着（同一台机器上并行跑的测试一直在开连接），
+/// 那就另挑一个。
 async fn answering_relay() -> std::net::SocketAddr {
     use i3t_proto::addr::{Query, Reply};
-    let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let addr = udp.local_addr().unwrap();
-    let tcp = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let mut tries = 0;
+    let (udp, tcp, addr) = loop {
+        let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = udp.local_addr().unwrap();
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(tcp) => break (udp, tcp, addr),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse && tries < 16 => tries += 1,
+            Err(error) => panic!("{addr} 上的 TCP 绑不上：{error}"),
+        }
+    };
     tokio::spawn(async move {
         let mut buf = [0; 64];
         while let Ok((len, from)) = udp.recv_from(&mut buf).await {

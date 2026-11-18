@@ -1,7 +1,7 @@
 //! 下发的顺序和节奏：授权先到目的端，撤销先到发起端；上报引起的变化合并下发；删除立即生效。
 
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use i3t_model::admin::{Direction, ErrorCode};
 use i3t_model::control::{Declared, Report, Route, RouteEntry, Signal, ToController, ToNode};
@@ -154,17 +154,41 @@ fn a_node_that_never_acknowledges_stops_being_waited_for() {
 
 #[test]
 fn report_changes_reach_peers_once_however_often_the_node_flaps() {
-    let timing = Timing { ack_coalesce: Duration::ZERO, report_coalesce: Duration::from_millis(150), ..Timing::default() };
+    let window = Duration::from_millis(150);
+    let timing = Timing { ack_coalesce: Duration::ZERO, report_coalesce: window, ..Timing::default() };
     let mut lab = Lab::with_timing(timing);
     let network = lab.network("home");
     let mut flapping = lab.join(network.id, &[]);
     let mut peer = lab.join(network.id, &[]);
     lab.settle(&mut [&mut flapping, &mut peer]);
-    let (before_peer, before_self) = (peer.snapshots.len(), flapping.snapshots.len());
+    let before_self = flapping.snapshots.len();
+    let peer_id = peer.id;
+    let due = |lab: &Lab| lab.controller.lock().dirty.get(&peer_id).map(|deferred| deferred.due);
 
-    for port in 1..=20 {
+    // 安静了一阵之后的第一次变化不等满一个窗口就发出去（`defer_report`）。
+    report_endpoints(&lab, &flapping, "203.0.113.9:1");
+    let previous = due(&lab).expect("对端的 netmap 要重算");
+    std::thread::sleep(previous.saturating_duration_since(Instant::now()));
+    lab.controller.tick().unwrap();
+    assert_eq!(peer.receive(), 1, "到点发出去了");
+    let before_peer = peer.snapshots.len();
+
+    // 接着反复变化：都并进同一次重算，它离上一次至少一个窗口。
+    report_endpoints(&lab, &flapping, "203.0.113.5:1");
+    let closes = due(&lab).expect("对端的 netmap 要重算");
+    assert!(closes >= previous + window, "同一个对端因为上报而重算，两次之间至少隔一个窗口");
+    // tick 用的时间不晚于窗口关上之前的那一刻。机器忙的时候下面这些上报本身就可能比窗口长，那时到点发出去是对的；
+    // 这里测的是"窗口之内什么都不发"，不是这台机器够不够快。
+    let tick_inside_window = |lab: &Lab| {
+        let mut inner = lab.controller.lock();
+        let wall = inner.clock.now();
+        inner.tick(Instant::now().min(closes - Duration::from_millis(1)), wall).unwrap();
+    };
+    tick_inside_window(&lab);
+    for port in 2..=20 {
         report_endpoints(&lab, &flapping, &format!("203.0.113.5:{port}"));
-        lab.controller.tick().unwrap();
+        assert_eq!(due(&lab), Some(closes), "后来的变化跟着已经排着的那一次走，不推迟它，也不提前它");
+        tick_inside_window(&lab);
     }
     assert_eq!(peer.receive(), 0, "合并窗口之内什么都不发");
 

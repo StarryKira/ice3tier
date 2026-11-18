@@ -167,7 +167,9 @@ async fn in_the_default_mode_a_pair_with_no_relay_both_can_use_takes_a_chain_and
 
     // 一个两边都连得上的 relay S 出现了：这一对马上换到它上面，正在传的流不断。
     let transfer = Transfer::start(&o, &a, 200).await;
-    transfer.expect_progress(100).await;
+    // A 回来的路有时比 O 去的路晚几秒才算出来，那几秒里 O 经这一串发的端到端探测没人回答。有流量时它每秒探测一次：
+    // 在这一串上传一秒半，两头都有了路之后至少有一个探测得到回答，O 知道这一串是通的，下面换路的起因才是"少绕路"。
+    transfer.expect_progress(300).await;
     s.unblock();
     for relay in [&h, &p, &s] {
         relay.apply(&View { relays: &[&h, &p, &s], relay_clients: Some(&[&a, &o]), ..View::default() });
