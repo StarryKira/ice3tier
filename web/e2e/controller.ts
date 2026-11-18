@@ -266,10 +266,14 @@ export class Controller {
     const udp = await freePort()
     const socks = await freePort()
     const http = await freePort()
-    const config = readFileSync(configPath, 'utf8')
-      .replace(/^port = \d+$/m, `port = ${udp}`)
-      .replace(/^socks5 = .*$/m, `socks5 = "127.0.0.1:${socks}"`)
-      .replace(/^http = .*$/m, `http = "127.0.0.1:${http}"`)
+    // 本机的组网入口（`[proxy]`）0.1.15 起默认关着，只通到组网里的节点：测试用它去连别的节点（`touch`）。
+    // 去互联网要经代理（`/proxies`）。
+    let config = readFileSync(configPath, 'utf8').replace(/^port = \d+$/m, `port = ${udp}`)
+    config = /^socks5 = /m.test(config)
+      ? config
+          .replace(/^socks5 = .*$/m, `socks5 = "127.0.0.1:${socks}"`)
+          .replace(/^http = .*$/m, `http = "127.0.0.1:${http}"`)
+      : `${config.trimEnd()}\n\n[proxy]\nsocks5 = "127.0.0.1:${socks}"\nhttp = "127.0.0.1:${http}"\n`
     writeFileSync(configPath, config)
     // 每个节点用自己的一份程序文件：万一它被更新了，换掉的也只是这一份，不是构建出来的那一个。
     const program = options.program ?? this.ownProgram(node)

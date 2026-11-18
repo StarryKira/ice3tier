@@ -73,7 +73,7 @@ describe('代理页', () => {
       'GET /networks/1/proxies': [
         proxy(),
         proxy({ id: 2, name: 'tv', status: { code: 'access_denied' }, username: '' }),
-        proxy({ id: 3, name: 'old', enabled: false }),
+        proxy({ id: 3, name: 'old', enabled: false, status: { code: 'disabled' } }),
       ],
       'GET /networks/1/nodes': [nas, tokyo],
     })

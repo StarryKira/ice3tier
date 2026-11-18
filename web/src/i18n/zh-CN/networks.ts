@@ -61,8 +61,8 @@ export const networks = {
   viewNodes: '查看节点',
   deleteButton: '删除网络…',
   deleteTitle: (name: string) => `删除网络 ${name}？`,
-  deleteBody: (rules: number, credentials: number, tokens: number) =>
-    `${rules} 条策略、${credentials} 个凭据和 ${tokens} 个未使用的注册令牌将一并删除。此操作无法恢复。`,
+  deleteBody: (rules: number, proxies: number, tokens: number) =>
+    `${rules} 条策略、${proxies} 个代理和 ${tokens} 个未使用的注册令牌将一并删除。此操作无法恢复。`,
   deleteConfirm: '删除网络',
   deleted: (name: string) => `网络 ${name} 已删除`,
   notFoundTitle: '网络不存在',

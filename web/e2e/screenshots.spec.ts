@@ -161,6 +161,7 @@ test('空的网络：每个页面没有数据时的样子', async () => {
   await page.getByRole('radio', { name: t.access.viewList }).click()
 
   for (const [name, file, marker] of [
+    [t.nav.proxies, 'proxies-empty', t.proxies.emptyTitle],
     [t.nav.forwards, 'forwards-empty', t.forwards.emptyTitle],
   ] as const) {
     await goTo(page, name)
@@ -263,30 +264,21 @@ test('准备数据', async () => {
     enabled: false,
   })
 
-  const phone = await controller.api<{ token: string }>('POST', `${net}/credentials`, {
+  // 代理：gw-hk 上一个开在（这台机器没有的）局域网地址上的，监听不上；laptop 上一个只给本机的 HTTP 代理。都经 nas-home 出去。
+  await controller.api('POST', `${net}/proxies`, {
     name: 'phone',
-    max_concurrent: 8,
-    max_bytes: 64 * 1024 * 1024,
-  })
-  const tablet = await controller.api<{ token: string }>('POST', `${net}/credentials`, { name: 'tablet' })
-  const old = await controller.api<{ id: number }>('POST', `${net}/credentials`, { name: 'old-laptop' })
-  await controller.api('DELETE', `${net}/credentials/${old.id}`)
-
-  await controller.api('POST', `${net}/listeners`, {
     node: 1,
-    name: 'lan',
     bind: '192.168.1.5:1080',
-    protocol: 'socks5',
-    allow_from: ['192.168.1.0/24'],
-    require_credential: true,
-    default_action: { action: 'exit', node: 2 },
+    exit: 2,
+    username: 'phone',
+    password: 'phone-password',
   })
-  await controller.api('POST', `${net}/listeners`, {
-    node: 3,
+  await controller.api('POST', `${net}/proxies`, {
     name: 'fixed-nas',
+    node: 3,
     bind: '127.0.0.1:8118',
     protocol: 'http',
-    fixed_exit: 2,
+    exit: 2,
   })
 
   // nas 是端口转发的目标：0.1.11 起是管理员的开关，不是节点的声明。
@@ -352,16 +344,16 @@ test('准备数据', async () => {
     target_node: 2,
     target_addr: `127.0.0.1:${targetPort}`,
   })
-  // laptop 上一个要求凭据的入口，只收本机来的连接；用两个凭据经它从 nas-home 出去下载，造出用量。
+  // laptop 上一个对外的代理，只收本机来的连接；经它从 nas-home 出去下载，造出用量。
   const proxyPort = await freePort()
-  await controller.api('POST', `${net}/listeners`, {
-    node: 3,
+  await controller.api('POST', `${net}/proxies`, {
     name: 'guests',
+    node: 3,
     bind: `0.0.0.0:${proxyPort}`,
-    protocol: 'socks5',
+    exit: 2,
+    username: 'tablet',
+    password: 'tablet-password',
     allow_from: ['127.0.0.0/8'],
-    require_credential: true,
-    default_action: { action: 'exit', node: 2 },
     class: 'bulk',
   })
 
@@ -381,32 +373,18 @@ test('准备数据', async () => {
     .toBeGreaterThan(0)
 
   if (lanIp !== undefined) {
-    // 等 guests 监听上，再下载：一次经 laptop 本机的入口，两次各用一个凭据经 guests。
+    // 等 guests 监听上，再经它下载两次。
     await expect
       .poll(
         async () =>
-          (await controller.api<{ name: string; status: { state: string } | null }[]>('GET', `${net}/listeners`)).find(
-            (listener) => listener.name === 'guests',
-          )?.status?.state,
+          (await controller.api<{ name: string; status: { code: string } | null }[]>('GET', `${net}/proxies`)).find(
+            (proxy) => proxy.name === 'guests',
+          )?.status?.code,
         { timeout: 30_000 },
       )
       .toBe('listening')
-    await download(`socks5h://10.66.0.2@127.0.0.1:${nodes.laptop.socksPort ?? 0}`)
-    await download(`socks5h://10.66.0.2:${phone.token}@127.0.0.1:${proxyPort}`)
-    await download(`socks5h://10.66.0.2:${tablet.token}@127.0.0.1:${proxyPort}`)
-    await expect
-      .poll(
-        async () =>
-          (await controller.api<{ name: string; usage: { bytes: number } }[]>('GET', `${net}/credentials`)).find(
-            (credential) => credential.name === 'tablet',
-          )?.usage.bytes ?? 0,
-        { timeout: 40_000 },
-      )
-      .toBeGreaterThan(0)
-    // tablet 的上限比它已经用掉的少：用完了。
-    const credentials = await controller.api<{ id: number; name: string }[]>('GET', `${net}/credentials`)
-    const tabletId = credentials.find((credential) => credential.name === 'tablet')?.id ?? 0
-    await controller.api('PATCH', `${net}/credentials/${tabletId}`, { max_bytes: 1024 * 1024 })
+    await download(`socks5h://tablet:tablet-password@127.0.0.1:${proxyPort}`)
+    await download(`socks5h://tablet:tablet-password@127.0.0.1:${proxyPort}`)
     await expect
       .poll(async () => (await controller.api<{ usage: unknown }[]>('GET', `${net}/exits`))[0]?.usage ?? null, {
         timeout: 30_000,
@@ -665,6 +643,22 @@ test('有数据时：分组', async () => {
 })
 
 test('有数据时：接入', async () => {
+  // 代理页：三个代理，一个监听不上（这台机器没有那个局域网地址）；新建代理的对话框。
+  const px = t.proxies
+  await goTo(page, t.nav.proxies)
+  await expect(page.getByTestId('proxy-row-guests')).toContainText(px.status.listening)
+  await shot('proxies')
+  await page.getByRole('button', { name: px.create }).click()
+  const proxyDialog = page.getByRole('dialog', { name: px.dialog.createTitle })
+  await proxyDialog.getByRole('combobox', { name: px.dialog.exit }).click()
+  await page.getByRole('option', { name: /nas-home/ }).click()
+  await expect(page.getByRole('listbox')).toHaveCount(0)
+  await proxyDialog.getByRole('combobox', { name: px.dialog.entry }).click()
+  await page.getByRole('option', { name: /laptop/ }).click()
+  await shot('proxy-dialog', { fullPage: false })
+  await proxyDialog.getByRole('button', { name: t.common.cancel, exact: true }).click()
+  await page.getByRole('button', { name: t.common.discardConfirm }).click()
+
   // 出口：nas-home 的出口标签，左边一张设置卡片，右边用量。
   await page.goto(`${controller.baseUrl}/n/1/nodes/2?tab=exit`)
   await expect(page.getByTestId('exit-proxies')).toBeVisible()
@@ -747,11 +741,11 @@ test('有数据时：管理区和设置', async () => {
   await page.getByRole('link', { name: t.settings.tabLog }).click()
   await expect(page.getByRole('columnheader', { name: l.colEvent })).toBeVisible()
   await shot('settings-log')
-  await page.getByRole('combobox', { name: l.filterAction }).selectOption('credential')
+  await page.getByRole('combobox', { name: l.filterAction }).selectOption('proxy')
   await page
     .locator('[data-testid^="log-row-"]')
     .first()
-    .getByRole('button', { name: counted((n) => l.filterByRef(l.refLabels.credential(n))) })
+    .getByRole('button', { name: counted((n) => l.filterByRef(l.refLabels.proxy(n))) })
     .first()
     .click()
   await expect(page.getByTestId('log-ref-filter')).toBeVisible()

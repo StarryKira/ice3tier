@@ -64,8 +64,8 @@ export const networks: Messages['networks'] = {
   viewNodes: 'View nodes',
   deleteButton: 'Delete network…',
   deleteTitle: (name) => `Delete network ${name}?`,
-  deleteBody: (rules, credentials, tokens) =>
-    `${count(rules, 'rule', 'rules')}, ${count(credentials, 'credential', 'credentials')} and ${count(tokens, 'unused enrollment token', 'unused enrollment tokens')} will be deleted. This can't be undone.`,
+  deleteBody: (rules, proxies, tokens) =>
+    `${count(rules, 'rule', 'rules')}, ${count(proxies, 'proxy', 'proxies')} and ${count(tokens, 'unused enrollment token', 'unused enrollment tokens')} will be deleted. This can't be undone.`,
   deleteConfirm: 'Delete network',
   deleted: (name) => `Network ${name} deleted`,
   notFoundTitle: 'Network not found',

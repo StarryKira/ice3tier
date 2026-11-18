@@ -32,7 +32,6 @@ export const keys = {
   rules: (network: NetworkId) => ['n', network, 'rules'] as const,
   graph: (network: NetworkId) => ['n', network, 'graph'] as const,
   check: (network: NetworkId, from: NodeId, to: NodeId) => ['n', network, 'check', from, to] as const,
-  listeners: (network: NetworkId) => ['n', network, 'listeners'] as const,
   proxies: (network: NetworkId) => ['n', network, 'proxies'] as const,
   forwards: (network: NetworkId) => ['n', network, 'forwards'] as const,
   pairs: (network: NetworkId) => ['n', network, 'pairs'] as const,
@@ -127,12 +126,6 @@ export const q = {
     queryOptions({
       queryKey: keys.proxies(network),
       queryFn: () => api.proxies(network),
-      refetchInterval: LIVE_INTERVAL,
-    }),
-  listeners: (network: NetworkId) =>
-    queryOptions({
-      queryKey: keys.listeners(network),
-      queryFn: () => api.listeners(network),
       refetchInterval: LIVE_INTERVAL,
     }),
   forwards: (network: NetworkId) =>

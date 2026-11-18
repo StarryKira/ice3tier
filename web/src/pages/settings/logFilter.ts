@@ -18,7 +18,8 @@ export interface LogFilter {
 
 export const EMPTY_LOG_FILTER: LogFilter = { network: null, action: null, ref: null, search: '' }
 
-export const LOG_REF_KINDS = ['network', 'node', 'group', 'token', 'rule', 'credential', 'listener', 'forward'] as const
+/** `credential` 只在 0.1.15 之前的记录里有；监听器的记录在 0.1.15 迁移成了 `proxy`。 */
+export const LOG_REF_KINDS = ['network', 'node', 'group', 'token', 'rule', 'credential', 'proxy', 'forward'] as const
 
 export function isRefKind(kind: string): kind is LogRefKind {
   return (LOG_REF_KINDS as readonly string[]).includes(kind)
@@ -118,9 +119,8 @@ export function refTarget(ref: LogRef, network: NetworkId | null): string | null
     case 'credential':
       // 凭据没有了：以前的记录点过去是代理页（认证现在在代理上）。
       return networkPath(network, 'proxies')
-    case 'listener':
-      // 代理（监听器）没有自己的页面了：在出口节点的「代理出口」里，去节点列表里的出口。
-      return `${networkPath(network, 'nodes')}?role=exit`
+    case 'proxy':
+      return networkPath(network, 'proxies')
     case 'forward':
       return `${networkPath(network, 'forwards')}?focus=${ref.id}`
   }

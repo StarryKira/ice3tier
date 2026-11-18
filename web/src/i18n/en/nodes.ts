@@ -90,10 +90,10 @@ export const nodes: Messages['nodes'] = {
 
   deleteTitle: (name) => `Delete node ${name}?`,
   deleteLead: 'Its key is revoked and its connections close.',
-  deleteRefs: (forwards, listeners, pairs) => {
+  deleteRefs: (forwards, proxies, pairs) => {
     const parts = [
       forwards > 0 ? count(forwards, 'port forward', 'port forwards') : null,
-      listeners > 0 ? count(listeners, 'listener', 'listeners') : null,
+      proxies > 0 ? count(proxies, 'proxy', 'proxies') : null,
       pairs > 0 ? count(pairs, 'pair setting', 'pair settings') : null,
     ].filter((part): part is string => part !== null)
     return parts.length === 0 ? null : `Also deletes ${parts.join(', ')}.`

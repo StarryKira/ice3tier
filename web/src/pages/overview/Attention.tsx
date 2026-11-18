@@ -9,9 +9,8 @@ import { StatusDot } from '@/components/status'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { t } from '@/i18n'
-import { listenView } from '@/lib/listenState'
-import { nodeName, nodePath } from '@/lib/nodes'
-import { exitOf } from '@/lib/proxy'
+import { nodePath } from '@/lib/nodes'
+import { proxyStatus } from '@/lib/proxy'
 import { quotaView } from '@/lib/usage'
 import { exitHealthView } from '@/lib/exitView'
 import { forwardLabel, forwardStatusView } from '@/pages/forwards/status'
@@ -69,7 +68,7 @@ export function AttentionChip({ network, nodes }: { network: Network; nodes: rea
   const overview = useQuery(q.overview(network.id))
   const forwards = useQuery(q.forwards(network.id))
   const exits = useQuery(q.exits(network.id))
-  const listeners = useQuery(q.listeners(network.id))
+  const proxies = useQuery(q.proxies(network.id))
 
   const data = overview.data
   if (data === undefined) return null
@@ -133,18 +132,13 @@ export function AttentionChip({ network, nodes }: { network: Network; nodes: rea
       action: <GoLink to={`${nodePath(network.id, exit.node.id)}?tab=exit`}>{o.view}</GoLink>,
     })
   }
-  for (const listener of listeners.data ?? []) {
-    const host = all.find((node) => node.id === listener.node)
-    const view = listenView(listener.status, {
-      node: nodeName(all, listener.node),
-      bind: listener.bind,
-      online: host?.online ?? false,
-    })
-    if (!view.needsAttention) continue
+  for (const proxy of proxies.data ?? []) {
+    const status = proxyStatus(proxy)
+    if (!status.needsAttention) continue
     attention.push({
-      key: `listener:${listener.id}`,
-      text: o.listenerBroken(listener.name, view.label),
-      action: <GoLink to={`${nodePath(network.id, exitOf(listener) ?? listener.node)}?tab=exit`}>{o.view}</GoLink>,
+      key: `proxy:${proxy.id}`,
+      text: o.proxyBroken(proxy.name, t.proxies.status[status.code]),
+      action: <GoLink to={networkPath(network.id, 'proxies')}>{o.view}</GoLink>,
     })
   }
   for (const forward of forwards.data ?? []) {

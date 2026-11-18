@@ -72,10 +72,7 @@ describe('操作记录', () => {
     setup()
     renderWithApp(<LogTab />, { route: '/settings/log' })
     const row = await screen.findByTestId('log-row-150')
-    expect(within(row).getByRole('link', { name: s.refLabels.credential(5) })).toHaveAttribute(
-      'href',
-      '/n/1/proxies',
-    )
+    expect(within(row).getByRole('link', { name: s.refLabels.credential(5) })).toHaveAttribute('href', '/n/1/proxies')
     expect(await within(row).findByRole('link', { name: s.refLabels.node(2, 'laptop') })).toHaveAttribute(
       'href',
       '/n/1/nodes/2',

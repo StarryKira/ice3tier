@@ -52,7 +52,7 @@ function refLabel(ref: LogRef, names: ReadonlyMap<string, string>, networks: rea
     case 'token':
     case 'rule':
     case 'credential':
-    case 'listener':
+    case 'proxy':
     case 'forward':
       return s.refLabels[ref.kind](ref.id)
     default:

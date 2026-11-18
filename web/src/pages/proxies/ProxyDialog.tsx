@@ -103,9 +103,10 @@ export function ProxyDialog({ network, proxy, onClose }: ProxyDialogProps) {
   })
   const failure = formFailure(save.error, {
     conflict: 'port',
+    name_taken: 'name',
     exit_not_enabled: 'exit',
-    exit_is_node: 'entry',
-    access_denied: 'entry',
+    exit_is_node: 'exit',
+    access_denied: 'exit',
     credentials_incomplete: 'username',
   } as const)
 
@@ -302,7 +303,7 @@ export function ProxyDialog({ network, proxy, onClose }: ProxyDialogProps) {
         </Field>
       </div>
 
-      <Field label={d.name}>
+      <Field label={d.name} error={fieldError(failure, 'name')}>
         {(props) => (
           <Input
             {...props}

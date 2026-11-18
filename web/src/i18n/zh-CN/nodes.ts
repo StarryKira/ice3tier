@@ -81,10 +81,10 @@ export const nodes = {
 
   deleteTitle: (name: string) => `删除节点 ${name}？`,
   deleteLead: '密钥吊销，连接立即断开。',
-  deleteRefs: (forwards: number, listeners: number, pairs: number) => {
+  deleteRefs: (forwards: number, proxies: number, pairs: number) => {
     const parts = [
       forwards > 0 ? `${forwards} 条端口转发` : null,
-      listeners > 0 ? `${listeners} 个监听器` : null,
+      proxies > 0 ? `${proxies} 个代理` : null,
       pairs > 0 ? `${pairs} 项节点对设置` : null,
     ].filter((part): part is string => part !== null)
     return parts.length === 0 ? null : `同时删除 ${parts.join('、')}。`

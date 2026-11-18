@@ -20,8 +20,6 @@ import {
   type Group,
   type GroupId,
   type GroupMembers,
-  type Listener,
-  type ListenerInput,
   type LogEntry,
   type LogQuery,
   type MatrixRun,
@@ -116,18 +114,11 @@ export const api = {
 
   /** 第一次是吊销（记录留着，`state` 变成 `revoked`）；对已经吊销的再删一次才彻底删掉。 */
 
-  listeners: (network: NetworkId, node?: NodeId) =>
-    request<Listener[]>('GET', `${net(network)}/listeners`, { query: { node } }),
   proxies: (network: NetworkId) => request<Proxy[]>('GET', `${net(network)}/proxies`),
   createProxy: (network: NetworkId, body: ProxyInput) => request<Proxy>('POST', `${net(network)}/proxies`, { body }),
   updateProxy: (network: NetworkId, id: number, body: Partial<ProxyInput>) =>
     request<Proxy>('PATCH', `${net(network)}/proxies/${id}`, { body }),
   deleteProxy: (network: NetworkId, id: number) => request<undefined>('DELETE', `${net(network)}/proxies/${id}`),
-  createListener: (network: NetworkId, body: ListenerInput) =>
-    request<Listener>('POST', `${net(network)}/listeners`, { body }),
-  replaceListener: (network: NetworkId, id: number, body: ListenerInput) =>
-    request<Listener>('PUT', `${net(network)}/listeners/${id}`, { body }),
-  deleteListener: (network: NetworkId, id: number) => request<undefined>('DELETE', `${net(network)}/listeners/${id}`),
 
   forwards: (network: NetworkId) => request<Forward[]>('GET', `${net(network)}/forwards`),
   createForward: (network: NetworkId, body: ForwardInput) =>

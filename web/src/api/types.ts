@@ -22,7 +22,8 @@ export type Version = string
 export type RoutingMode = 'direct_first' | 'lowest_cost'
 export type Reach = 'any' | 'direct_only' | 'relay_only'
 export type Direction = 'both' | 'one_way'
-export type ListenerProtocol = 'socks5' | 'http'
+/** 节点上报的监听用的协议；`mixed` 是同一个端口上 SOCKS5 和 HTTP 都认的代理。 */
+export type ListenerProtocol = 'socks5' | 'http' | 'mixed'
 export type ForwardProtocol = 'tcp' | 'udp'
 
 /**
@@ -105,7 +106,7 @@ export interface Status {
 }
 
 /** 操作记录能指向的东西。以后可能增加，不认识的种类界面忽略。 */
-export type LogRefKind = 'network' | 'node' | 'group' | 'token' | 'rule' | 'credential' | 'listener' | 'forward'
+export type LogRefKind = 'network' | 'node' | 'group' | 'token' | 'rule' | 'credential' | 'proxy' | 'forward'
 
 export interface LogRef {
   /** 一般是 {@link LogRefKind} 之一；比这个界面新的 controller 可能写别的。 */
@@ -181,9 +182,9 @@ export interface Overview {
   relays: number
   exits: number
   rules: number
-  listeners: number
+  /** 代理的个数（替代原来的监听器和凭据）。 */
+  proxies: number
   forwards: number
-  credentials: number
   pending_tokens: number
   online_nodes: NodeRef[]
   unreachable_pairs: NodePair[]
@@ -510,8 +511,6 @@ export interface AccessCheck {
   rules: Rule[]
 }
 
-export type DefaultAction = { action: 'local' } | { action: 'reject' } | { action: 'exit'; node: NodeId }
-
 /**
  * 一个监听现在的样子（文档 §11.1）。`listening` 的 `local` 是实际绑定的地址：端口写 0 时是节点挑定的端口。
  * `unknown` 是比 controller 新的节点报的、它不认识的状态。
@@ -535,40 +534,9 @@ export interface ListenTraffic {
 /** 由监听节点每 10 秒上报一次。 */
 export type ListenStatus = ListenState & ListenTraffic
 
-export interface Listener {
-  id: number
-  node: NodeId
-  name: string
-  bind: string
-  protocol: ListenerProtocol
-  allow_from: string[]
-  require_credential: boolean
-  default_action: DefaultAction | null
-  fixed_exit: NodeId | null
-  /** 用户名里写了等级时以用户名为准；`null` 时看出口和网络的默认值。 */
-  class: ServiceClass | null
-  /** 乐观回复：`true` 不等对端的应答，`false` 一律等，`null` 按目标的种类（互联网目标不等，组网目标等）。 */
-  optimistic: boolean | null
-  /** 节点不在线、还没有报过，或者版本太旧不报时是 `null`。 */
-  status: ListenStatus | null
-}
-
-export interface ListenerInput {
-  node: NodeId
-  name: string
-  bind: string
-  protocol: ListenerProtocol
-  allow_from?: string[]
-  require_credential?: boolean
-  default_action?: DefaultAction | null
-  fixed_exit?: NodeId | null
-  class?: ServiceClass | null
-  optimistic?: boolean | null
-}
-
 /** 节点上的一个代理监听：controller 下发的，或者节点按本机配置文件自己开的回环入口（`builtin`）。 */
 export type NodeListener = {
-  /** 节点自己开的回环入口没有编号。 */
+  /** 代理的编号；节点按本机配置自己开的回环入口（默认关着）没有编号。 */
   id: number | null
   builtin: boolean
   name: string
@@ -1070,15 +1038,8 @@ export interface ExitView {
   reported_secs_ago: number | null
   /** 旧的 controller：谁经它出去过（按用户名选出口）。代理改版之后没有了。 */
   observed?: ExitObserved[]
-  /** 代理改版之后：出口是这个节点的代理。 */
-  proxies?: {
-    id: number
-    name: string
-    node: NodeId
-    bind: string
-    enabled: boolean
-    status: { code: string } | null
-  }[]
+  /** 0.1.15 起：出口是这个节点的代理（完整的代理对象，按编号排，停用的也在）。 */
+  proxies?: Proxy[]
 }
 
 /* 分组（文档 §18）。 */
@@ -1314,7 +1275,7 @@ export interface MatrixRun {
 
 /*
  * 代理（替代原来的监听器和凭据）：在节点 `node` 上监听 `bind`，流量从出口节点 `exit` 出去，
- * 用户名和密码认证。字段名按后端说定的写；它发布之前这几个类型还没有真的接口在用。
+ * 用户名和密码认证（0.1.15，文档 §10）。
  */
 
 /** `mixed`：同一个端口上 SOCKS5 和 HTTP 都认（按第一个字节分辨）。 */
@@ -1337,6 +1298,8 @@ export interface ProxyStatus {
   code: string
   /** 监听失败时节点报的原话。 */
   detail?: string | null
+  /** 监听失败的原因码（`port_in_use`、`bind_failed` 时有）。 */
+  cause?: unknown
   /** 实际在监听的地址。 */
   local?: string | null
 }
@@ -1357,9 +1320,10 @@ export interface Proxy {
   class: ServiceClass | null
   optimistic: boolean | null
   status: ProxyStatus | null
-  connections?: number
-  bytes_up?: number
-  bytes_down?: number
+  /** 入口节点不在线或者还没报过时是 0。 */
+  connections: number
+  bytes_up: number
+  bytes_down: number
 }
 
 export interface ProxyInput {

@@ -173,9 +173,32 @@ test('出口配额：在节点详情里配上，下载之后出口页有本账�
     .toMatchObject({ quota_bytes: 1024 * MB, quota_reset_day: 5, family: 'ipv4', lan: true })
   await clearToasts(page)
 
-  // laptop 上的程序经它本机的入口、用户名写 gw，下载一个文件：从 gw 出去。
-  const done = await download(`socks5h://${nodes.gw.ip}@127.0.0.1:${nodes.laptop.handle.socksPort ?? 0}`)
+  // 在代理页建一个代理：开在 laptop 上，经 gw 出去，用户名密码认证；再经它下载一个文件。
+  const px = t.proxies
+  const proxyPort = await freePort()
+  await goTo(page, t.nav.proxies)
+  await page.getByRole('button', { name: px.create }).click()
+  const add = page.getByRole('dialog', { name: px.dialog.createTitle })
+  await add.getByRole('combobox', { name: px.dialog.exit }).click()
+  await page.getByRole('option', { name: /gw/ }).click()
+  await expect(page.getByRole('listbox')).toHaveCount(0)
+  await add.getByRole('combobox', { name: px.dialog.entry }).click()
+  await page.getByRole('option', { name: /laptop/ }).click()
+  await add.getByRole('textbox', { name: px.dialog.port }).fill(String(proxyPort))
+  await add.getByRole('textbox', { name: px.dialog.username }).fill('e2e')
+  await add.getByLabel(px.dialog.password, { exact: true }).fill('e2e-password')
+  await add.getByRole('textbox', { name: px.dialog.name }).fill('laptop-gw')
+  await expect(add.getByText(`socks5://e2e:e2e-password@<${px.lanHost}>:${proxyPort}`)).toBeVisible()
+  await add.getByRole('button', { name: px.dialog.submitCreate }).click()
+  await expectToast(page, px.dialog.created('laptop-gw'))
+  const row = page.getByTestId('proxy-row-laptop-gw')
+  await expect(row).toContainText(px.status.listening, { timeout: 30_000 })
+  // 不带密码不行；带上就从 gw 出去。
+  const refused = await download(`socks5h://127.0.0.1:${proxyPort}`)
+  expect(refused.code).not.toBe(0)
+  const done = await download(`socks5h://e2e:e2e-password@127.0.0.1:${proxyPort}`)
   expect(done.code, done.stderr).toBe(0)
+  await expect(row).toContainText(/MB/, { timeout: 40_000 })
 
   // 节点详情的出口标签：本账期的配额进度、健康，和用它的节点各自看到的量。
   await page.goto(`${controller.baseUrl}/n/1/nodes/${nodes.gw.id}?tab=exit`)
@@ -184,6 +207,7 @@ test('出口配额：在节点详情里配上，下载之后出口页有本账�
   await expect(meter).toBeVisible({ timeout: 40_000 })
   await expect(usage).toContainText(/MB \/ 1\.0 GB/, { timeout: 40_000 })
   await expect(usage).toContainText(t.exits.quotaResets('').trim())
+  await expect(page.getByTestId('exit-proxies')).toContainText(t.nodes.detail.exitProxies(1))
 })
 
 test('端口写 0 的转发：节点挑一个端口，列表里写出来，真的能连', async () => {
@@ -282,7 +306,10 @@ test('操作记录：按操作筛，记录里的对象是链接；点过去对�
 
   // 点那条已经删掉的转发：列表页上说一句。
   await page.goto(`${controller.baseUrl}/settings/log?action=forward.delete`)
-  await page.getByRole('link', { name: forwardRef(gone.id) }).first().click()
+  await page
+    .getByRole('link', { name: forwardRef(gone.id) })
+    .first()
+    .click()
   await expect(page).toHaveURL(new RegExp(`/n/1/forwards\\?focus=${gone.id}`))
   await expect(page.getByText(t.forwards.focusMissing(gone.id))).toBeVisible()
 })

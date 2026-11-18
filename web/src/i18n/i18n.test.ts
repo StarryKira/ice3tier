@@ -55,7 +55,7 @@ describe('每种语言的目录都是完整的', () => {
   })
 
   it('英文：冒号后面的状态短语不大写开头，缩写不动', () => {
-    expect(en.overview.listenerBroken('lan', en.listen.failed)).toBe(`Listener lan: ${en.listen.failed.toLowerCase()}`)
+    expect(en.overview.proxyBroken('lan', en.proxies.status.port_in_use)).toBe('Proxy lan: port in use')
     expect(en.overview.forwardBlocked('web', en.forwards.status.targetOffline)).toMatch(/^Port forward web: target /)
   })
 

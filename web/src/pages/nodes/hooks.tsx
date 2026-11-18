@@ -21,17 +21,17 @@ export function useDeleteNode(network: Network): (node: Node) => Promise<boolean
 
   return async (node) => {
     // 数不出来（请求失败）就不写这一句，不拿猜的数字充数。
-    const [forwards, listeners, pairs] = await Promise.all([
+    const [forwards, proxies, pairs] = await Promise.all([
       client.query(q.forwards(network.id)).catch(() => null),
-      client.query(q.listeners(network.id)).catch(() => null),
+      client.query(q.proxies(network.id)).catch(() => null),
       client.query(q.pairs(network.id)).catch(() => null),
     ])
     const refs =
-      forwards === null || listeners === null || pairs === null
+      forwards === null || proxies === null || pairs === null
         ? null
         : t.nodes.deleteRefs(
             forwards.filter((forward) => forward.listen_node === node.id || forward.target_node === node.id).length,
-            listeners.filter((listener) => listener.node === node.id).length,
+            proxies.filter((proxy) => proxy.node === node.id || proxy.exit === node.id).length,
             pairs.filter((pair) => pair.a === node.id || pair.b === node.id).length,
           )
     const confirmed = await confirm({

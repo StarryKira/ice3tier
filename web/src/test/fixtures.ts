@@ -3,7 +3,6 @@ import {
   type ExitSettings,
   type ExitView,
   type Forward,
-  type Listener,
   type MatrixEntry,
   type Node,
   type NodeUpdate,
@@ -124,24 +123,6 @@ export function makeExitView(id: number, name: string, extra: Partial<ExitView> 
     usage: null,
     reported_secs_ago: null,
     observed: [],
-    ...extra,
-  }
-}
-
-export function makeListener(id: number, node: number, name: string, extra: Partial<Listener> = {}): Listener {
-  return {
-    id,
-    node,
-    name,
-    bind: '127.0.0.1:1088',
-    protocol: 'socks5',
-    allow_from: [],
-    require_credential: false,
-    default_action: null,
-    fixed_exit: null,
-    class: null,
-    optimistic: null,
-    status: null,
     ...extra,
   }
 }

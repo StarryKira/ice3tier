@@ -1,12 +1,47 @@
-import { type Listener, type NodeId, type ProxyProtocol } from '@/api/types'
+import { type Proxy, type ProxyProtocol } from '@/api/types'
+import { type Tone } from '@/components/status'
+import { t } from '@/i18n'
 
-/**
- * 一个代理（监听器）从哪个出口出去：固定了出口的就是它；没固定、默认动作是走某个出口的，是那个出口。
- * 别的（就地出站、拒绝、按用户名选）不算哪个出口的代理。
- */
-export function exitOf(listener: Pick<Listener, 'fixed_exit' | 'default_action'>): NodeId | null {
-  if (listener.fixed_exit !== null) return listener.fixed_exit
-  return listener.default_action?.action === 'exit' ? listener.default_action.node : null
+/** 状态码的色调：在监听是绿的；用户该去看一眼的（端口被占、出口不行、策略不允许、没有出口）是黄或红。 */
+const TONE: Record<string, Tone> = {
+  listening: 'ok',
+  disabled: 'idle',
+  pending: 'idle',
+  node_offline: 'idle',
+  port_in_use: 'danger',
+  bind_failed: 'danger',
+  exit_disabled: 'warn',
+  exit_offline: 'warn',
+  access_denied: 'danger',
+  exit_missing: 'warn',
+}
+
+/** 要用户去处理的状态：总览上提一句。停用的、等下发的、入口离线的不算。 */
+const NEEDS_ATTENTION = new Set([
+  'port_in_use',
+  'bind_failed',
+  'exit_disabled',
+  'exit_offline',
+  'access_denied',
+  'exit_missing',
+])
+
+export interface ProxyStatusView {
+  /** `t.proxies.status` 里的键；认不出的码是 `unknown`。 */
+  code: keyof typeof t.proxies.status
+  tone: Tone
+  needsAttention: boolean
+}
+
+/** 一个代理现在怎样：看 controller 给的状态码（它已经把停用、没有出口这些按先后排好了）。 */
+export function proxyStatus(proxy: Pick<Proxy, 'enabled' | 'status'>): ProxyStatusView {
+  const code = proxy.status?.code ?? (proxy.enabled ? 'pending' : 'disabled')
+  if (!Object.hasOwn(t.proxies.status, code)) return { code: 'unknown', tone: 'idle', needsAttention: false }
+  return {
+    code: code as keyof typeof t.proxies.status,
+    tone: TONE[code] ?? 'idle',
+    needsAttention: NEEDS_ATTENTION.has(code),
+  }
 }
 
 /**

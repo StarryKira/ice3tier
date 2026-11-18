@@ -11,7 +11,7 @@ import { NodeLink } from '@/components/node'
 import { Page, PageHeader } from '@/components/page'
 import { RowActions } from '@/components/row-actions'
 import { ErrorState, SkeletonRows } from '@/components/states'
-import { StatusText, type Tone } from '@/components/status'
+import { StatusText } from '@/components/status'
 import { RowsTotal, Table, TableFooter, Td, Th, Tr } from '@/components/table'
 import { Button } from '@/components/ui/button'
 import { DropdownMenuItem, DropdownMenuSeparator } from '@/components/ui/dropdown-menu'
@@ -21,7 +21,7 @@ import { t } from '@/i18n'
 import { parseSocketAddr } from '@/lib/cidr'
 import { formatBytes } from '@/lib/format'
 import { nodeName } from '@/lib/nodes'
-import { proxyUrl } from '@/lib/proxy'
+import { proxyStatus, proxyUrl } from '@/lib/proxy'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { cn } from '@/lib/utils'
 import { useNetwork } from '@/pages/networks/context'
@@ -29,27 +29,6 @@ import { useNetwork } from '@/pages/networks/context'
 import { ProxyDialog } from './ProxyDialog'
 
 const s = t.proxies
-
-const TONE: Record<string, Tone> = {
-  listening: 'ok',
-  disabled: 'idle',
-  pending: 'idle',
-  node_offline: 'idle',
-  port_in_use: 'danger',
-  bind_failed: 'danger',
-  exit_disabled: 'warn',
-  exit_offline: 'warn',
-  access_denied: 'danger',
-  exit_missing: 'warn',
-}
-
-/** 一个代理现在怎样：停用的就是停用；否则看 controller 给的状态码，认不出的当作未知。 */
-function statusOf(proxy: Proxy): { code: keyof typeof s.status; tone: Tone } {
-  const code = proxy.enabled ? (proxy.status?.code ?? 'pending') : 'disabled'
-  return Object.hasOwn(s.status, code)
-    ? { code: code as keyof typeof s.status, tone: TONE[code] ?? 'idle' }
-    : { code: 'unknown', tone: 'idle' }
-}
 
 /** 设备里要填的地址：监听所有地址的写成"局域网 IP"让人自己换。 */
 function addressOf(proxy: Proxy): string {
@@ -166,7 +145,7 @@ export function ProxiesPage() {
             <tbody>
               {proxies.isPending ? <SkeletonRows columns={7} rows={3} /> : null}
               {list.map((proxy) => {
-                const status = statusOf(proxy)
+                const status = proxyStatus(proxy)
                 const entry = all.find((node) => node.id === proxy.node)
                 const exit = proxy.exit === null ? undefined : all.find((node) => node.id === proxy.exit)
                 return (
@@ -230,9 +209,9 @@ export function ProxiesPage() {
                       ) : null}
                     </Td>
                     <Td className={cn('text-xs whitespace-nowrap text-muted-foreground tabular')}>
-                      {s.connections(proxy.connections ?? 0)}
+                      {s.connections(proxy.connections)}
                       <div>
-                        ↑ {formatBytes(proxy.bytes_up ?? 0)} ↓ {formatBytes(proxy.bytes_down ?? 0)}
+                        ↑ {formatBytes(proxy.bytes_up)} ↓ {formatBytes(proxy.bytes_down)}
                       </div>
                     </Td>
                     <Td className="pl-0 text-right">

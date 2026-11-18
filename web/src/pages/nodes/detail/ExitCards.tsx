@@ -20,7 +20,6 @@ import { quotaView } from '@/lib/usage'
 import { COMMON_PORTS, portName } from '@/lib/ports'
 import { MAX_QUOTA_RESET_DAY, splitList, validatePort } from '@/lib/validate'
 import { exitHealthView } from '@/lib/exitView'
-import { exitOf } from '@/lib/proxy'
 
 import { useSaveExit } from './exitActions'
 import {
@@ -425,11 +424,9 @@ function Stat({ label, hint, children }: { label: string; hint?: string; childre
  */
 function ExitUsageCard({ network, node }: { network: Network; node: NodeDetail }) {
   const exits = useQuery(q.exits(network.id))
-  const listeners = useQuery(q.listeners(network.id))
   const view = exits.data?.find((candidate) => candidate.node.id === node.id)
-  // 代理改版之后出口的视图里直接有经它出去的代理；更早的 controller 从监听器里数。
-  const proxies =
-    view?.proxies?.length ?? (listeners.data ?? []).filter((listener) => exitOf(listener) === node.id).length
+  // 出口的视图里直接有经它出去的代理。
+  const proxies = view?.proxies?.length ?? 0
   const health = view === undefined ? null : exitHealthView(view)
   const usage = view?.usage ?? null
 

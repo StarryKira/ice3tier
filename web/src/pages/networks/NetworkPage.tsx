@@ -225,7 +225,7 @@ function DangerZone({ network }: { network: Network }) {
     const confirmed = await confirm({
       tone: 'danger',
       title: n.deleteTitle(network.name),
-      body: counts === undefined ? n.dangerBody : n.deleteBody(counts.rules, counts.credentials, counts.pending_tokens),
+      body: counts === undefined ? n.dangerBody : n.deleteBody(counts.rules, counts.proxies, counts.pending_tokens),
       confirmLabel: n.deleteConfirm,
       typeToConfirm: network.name,
     })
