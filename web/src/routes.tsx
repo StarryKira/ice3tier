@@ -23,6 +23,7 @@ import { NodesPage } from '@/pages/nodes/NodesPage'
 import { NotFoundPage } from '@/pages/NotFoundPage'
 import { OverviewPage } from '@/pages/overview/OverviewPage'
 import { PairsPage } from '@/pages/pairs/PairsPage'
+import { ProxiesPage } from '@/pages/proxies/ProxiesPage'
 import { TestsPage } from '@/pages/tests/TestsPage'
 import { TokensPage } from '@/pages/tokens/TokensPage'
 
@@ -81,6 +82,7 @@ export function AppRoutes() {
             <Route path="exits" element={<Navigate to="../nodes?role=exit" replace />} />
             {/* 监听器页去掉了：代理在出口节点详情的「代理出口」里。 */}
             <Route path="listeners" element={<Navigate to="../nodes?role=exit" replace />} />
+            <Route path="proxies" element={<ProxiesPage />} />
             <Route path="credentials" element={<CredentialsPage />} />
             <Route path="forwards" element={<ForwardsPage />} />
             <Route path="topology" element={<Lazy page={TopologyPage} />} />

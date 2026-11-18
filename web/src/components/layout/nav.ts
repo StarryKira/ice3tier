@@ -1,5 +1,6 @@
 import {
   Activity,
+  Cable,
   ArrowLeftRight,
   Boxes,
   KeyRound,
@@ -65,6 +66,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
       return t.nav.groupAccess
     },
     items: [
+      item('proxies', () => t.nav.proxies, Cable),
       item('credentials', () => t.nav.credentials, KeyRound),
       item('forwards', () => t.nav.forwards, ArrowLeftRight),
     ],

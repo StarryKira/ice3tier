@@ -23,6 +23,7 @@ export const nav = {
   groups: '分组',
   access: '策略',
   groupAccess: '接入',
+  proxies: '代理',
   credentials: '凭据',
   forwards: '端口转发',
   groupDiagnose: '诊断',

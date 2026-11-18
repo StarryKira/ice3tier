@@ -10,6 +10,7 @@ import { overview } from './overview'
 import { path, routes, topology } from './routes'
 import { settings } from './settings'
 import { nav, signIn, switcher } from './shell'
+import { proxies } from './proxies'
 import { tests } from './tests'
 import { updates, version } from './updates'
 
@@ -47,4 +48,5 @@ export const zhCN = {
   topology,
   path,
   tests,
+  proxies,
 }

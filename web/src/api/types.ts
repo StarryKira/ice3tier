@@ -1331,3 +1331,64 @@ export interface MatrixRun {
   nodes: NodeRef[]
   cells: MatrixCell[]
 }
+
+/*
+ * 代理（替代原来的监听器和凭据）：在节点 `node` 上监听 `bind`，流量从出口节点 `exit` 出去，
+ * 用户名和密码认证。字段名按后端说定的写；它发布之前这几个类型还没有真的接口在用。
+ */
+
+/** `mixed`：同一个端口上 SOCKS5 和 HTTP 都认（按第一个字节分辨）。 */
+export type ProxyProtocol = 'mixed' | 'socks5' | 'http'
+
+export type ProxyStatusCode =
+  | 'listening'
+  | 'disabled'
+  | 'pending'
+  | 'node_offline'
+  | 'port_in_use'
+  | 'bind_failed'
+  | 'exit_disabled'
+  | 'exit_offline'
+  | 'access_denied'
+  | 'exit_missing'
+
+export interface ProxyStatus {
+  /** 一般是 `ProxyStatusCode`；比界面新的 controller 可能报别的，当作未知。 */
+  code: string
+  /** 监听失败时节点报的原话。 */
+  detail?: string | null
+  /** 实际在监听的地址。 */
+  local?: string | null
+}
+
+export interface Proxy {
+  id: number
+  name: string
+  /** 监听的节点（入口）。 */
+  node: NodeId
+  bind: string
+  protocol: ProxyProtocol
+  /** 出口节点；从旧的监听器迁移过来、没有出口的是 `null`（状态是 `exit_missing`）。 */
+  exit: NodeId | null
+  username: string
+  password: string
+  enabled: boolean
+  allow_from: string[]
+  class: ServiceClass | null
+  optimistic: boolean | null
+  status: ProxyStatus | null
+  connections?: number
+  bytes_up?: number
+  bytes_down?: number
+}
+
+export interface ProxyInput {
+  name?: string
+  node: NodeId
+  bind: string
+  protocol: ProxyProtocol
+  exit: NodeId
+  username: string
+  password: string
+  enabled?: boolean
+}
