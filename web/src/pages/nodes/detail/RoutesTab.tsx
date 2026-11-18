@@ -26,6 +26,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
 import { formatBytes } from '@/lib/format'
+import { unmeasuredOwnRelay } from '@/lib/unmeasured'
 import { nodeName } from '@/lib/nodes'
 import { REPORT_INTERVAL_SECS } from '@/lib/product'
 import { formatAge, formatDuration } from '@/lib/time'
@@ -72,10 +73,11 @@ const candidateRtt = (candidate: PathCandidate): number =>
 const reportsAlternative = (entry: NodeRoute): boolean =>
   entry.direct_status !== undefined && entry.direct_status !== null
 
-/** 另一种模式的那条路和它的延迟（不知道是 `null`）。 */
+/** 另一种模式的那条路和它的延迟（不知道是 `null`；经本节点自己的中继、那一段还没量到时 `unmeasured`）。 */
 interface Alternative {
   route: Route
   rtt: number | null
+  unmeasured: boolean
 }
 
 /** 经中继的那一行，悬停在"中继"上说直连怎么样了；P2P 的那一行说直连是怎么通的。旧的节点不报，就没有说明。 */
@@ -374,13 +376,28 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
                 const reportedAlt = entry.alternative ?? null
                 alternative =
                   reportedAlt !== null
-                    ? { route: reportedAlt.route, rtt: reportedAlt.rtt_ms }
+                    ? {
+                        route: reportedAlt.route,
+                        rtt: reportedAlt.rtt_ms,
+                        unmeasured: unmeasuredOwnRelay(
+                          reportedAlt.route,
+                          node.id,
+                          reportedAlt.rtt_ms === null ? null : reportedAlt.rtt_ms * 1000,
+                        ),
+                      }
                     : entry.route.via === 'none'
                       ? null
-                      : { route: entry.route, rtt: entry.rtt_ms }
+                      : { route: entry.route, rtt: entry.rtt_ms, unmeasured: false }
               } else {
                 const chosen = entry.route.via === 'none' ? null : chooseFor(other, path?.data?.forward.candidates)
-                alternative = chosen === null ? null : { route: chosen.route, rtt: candidateRtt(chosen) }
+                alternative =
+                  chosen === null
+                    ? null
+                    : {
+                        route: chosen.route,
+                        rtt: candidateRtt(chosen),
+                        unmeasured: unmeasuredOwnRelay(chosen.route, node.id, chosen.cost_us),
+                      }
                 pending = path?.isPending === true && auto && entry.route.via !== 'none'
               }
               // 走不通、对端离线的行淡下去：名字和"不可达"照常能看清。
@@ -415,7 +432,7 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
                   altRoute.relays[0] === entry.route.relays[0]
                 const altLeg = legOf(altRoute, node.id, sameFirst ? (entry.relay_leg ?? null) : null, peerLeg)
                 const altMiddle = middleOf(altRoute, node.id, entry.peer.id)
-                const rtt = alternative.rtt
+                const rtt = alternative.unmeasured ? null : alternative.rtt
                 const delta = rtt === null || entry.rtt_ms === null ? null : rtt - entry.rtt_ms
                 otherCells = (
                   <>
@@ -435,7 +452,13 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
                       <span className="text-sm tabular">{lengthOf(altMiddle) ?? '—'}</span>
                     </Td>
                     <Td className={cn(BAND, 'whitespace-nowrap')}>
-                      {rtt === null ? (
+                      {alternative.unmeasured ? (
+                        <Tooltip content={t.routes.unmeasuredHint}>
+                          <span tabIndex={0} className="cursor-help rounded-sm text-[13px] text-muted-foreground">
+                            {t.routes.unmeasured}
+                          </span>
+                        </Tooltip>
+                      ) : rtt === null ? (
                         <span className="text-muted-foreground">—</span>
                       ) : (
                         <span className="text-sm font-medium tabular">{t.common.ms(rtt)}</span>

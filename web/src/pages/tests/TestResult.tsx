@@ -5,6 +5,7 @@ import {
   type DecisionView,
   type DirectResult,
   type Node,
+  type NodeId,
   type PathResult,
   type RouteResult,
   type TestItemState,
@@ -21,6 +22,7 @@ import { BoxCard, BoxCardBody, BoxCardHeader, BoxCardList } from '@/components/u
 import { t } from '@/i18n'
 import { nodeName } from '@/lib/nodes'
 import { msText, permilleText, problemText, rateText, routeText } from '@/lib/tests'
+import { unmeasuredOwnRelay } from '@/lib/unmeasured'
 
 const s = t.tests
 
@@ -228,7 +230,20 @@ function PathCard({ title, result, nodes }: { title: string; result: PathResult;
 }
 
 /** 一种模式的选择：哪条路、为什么、代价；留在现在的路上时写那条更便宜的差多少。 */
-function ChoiceRow({ label, choice, inUse, nodes }: { label: string; choice: Choice; inUse: boolean; nodes: Named }) {
+function ChoiceRow({
+  label,
+  choice,
+  from,
+  inUse,
+  nodes,
+}: {
+  label: string
+  choice: Choice
+  from: NodeId
+  inUse: boolean
+  nodes: Named
+}) {
+  const unmeasured = unmeasuredOwnRelay(choice.route, from, choice.cost_us)
   const reason = Object.hasOwn(s.reasons, choice.reason)
     ? s.reasons[choice.reason as keyof typeof s.reasons]
     : choice.reason
@@ -245,9 +260,9 @@ function ChoiceRow({ label, choice, inUse, nodes }: { label: string; choice: Cho
       <span>{routeText(choice.route, nodes)}</span>
       <span className="ml-2 text-[13px] text-muted-foreground">
         {reason}
-        {choice.cost_us !== null ? ` · ${msText(choice.cost_us)}` : null}
+        {unmeasured ? ` · ${t.routes.unmeasured}` : choice.cost_us !== null ? ` · ${msText(choice.cost_us)}` : null}
       </span>
-      {cheaper !== null && choice.cost_us !== null ? (
+      {cheaper !== null && choice.cost_us !== null && !unmeasured ? (
         <span className="block text-xs text-muted-foreground">
           {s.withinMargin(routeText(cheaper.route, nodes), msText(choice.cost_us - cheaper.cost_us))}
         </span>
@@ -267,12 +282,14 @@ function Decision({ view, nodes }: { view: DecisionView; nodes: Named }) {
       </p>
       <BoxCardList>
         <ChoiceRow
+          from={view.from}
           label={s.modeDefault}
           choice={view.direct_first}
           inUse={view.mode === 'direct_first'}
           nodes={nodes}
         />
         <ChoiceRow
+          from={view.from}
           label={s.modeLowestCost}
           choice={view.lowest_cost}
           inUse={view.mode === 'lowest_cost'}

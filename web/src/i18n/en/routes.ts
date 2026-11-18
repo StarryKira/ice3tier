@@ -11,6 +11,8 @@ export const routes: Messages['routes'] = {
   hopSeparator: ' → ',
   factSeparator: ' · ',
   rtt: (ms) => `${ms} ms`,
+  unmeasured: 'Not measured',
+  unmeasuredHint: "The leg from this node's own relay to the peer hasn't been measured yet",
   rttUnknown: 'Latency unknown',
   stale: 'Stale',
   age: (age) => `Reported ${age}`,

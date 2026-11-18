@@ -10,6 +10,9 @@ export const routes = {
   /** 一条路的几样事实接成一句（悬停和读屏用）。 */
   factSeparator: '，',
   rtt: (ms: number) => `${ms} ms`,
+  /** 经本节点自己的 relay、那一段还没量到：代价是个占位的数，不写出来。 */
+  unmeasured: '未测',
+  unmeasuredHint: '经本节点自己的中继到对端的那一段还没量到',
   rttUnknown: '延迟未知',
   stale: '过期',
   age: (age: string) => `${age}上报`,

@@ -2,6 +2,7 @@ import { type NodeId, type PathCandidate, type PathLeg, type PathSource } from '
 import { type Tone } from '@/components/status'
 import { t } from '@/i18n'
 import { formatAge } from '@/lib/time'
+import { UNMEASURED_US, unmeasuredOwnRelay } from '@/lib/unmeasured'
 
 import {
   CLASS_TONE,
@@ -139,19 +140,22 @@ export function describeCandidates(leg: PathLeg, name: (id: NodeId) => string): 
     state: 'list',
     rows: candidates.map((candidate, index) => {
       const cls = classify(candidate.route)
+      const unmeasured = unmeasuredOwnRelay(candidate.route, leg.from.id, candidate.cost_us)
       return {
         key: `${index}:${routeText(candidate.route, String)}`,
         text: routeText(candidate.route, name),
         tone: CLASS_TONE[cls],
-        cost: formatMicros(candidate.cost_us),
+        cost: unmeasured ? t.routes.unmeasured : formatMicros(candidate.cost_us),
         legs: candidate.legs.map((segment) =>
-          p.legLine(
-            name(segment.from),
-            name(segment.to),
-            formatMicros(segment.rtt_us),
-            formatMicros(segment.jitter_us),
-            formatPermille(segment.loss_permille),
-          ),
+          unmeasured && segment.rtt_us >= UNMEASURED_US
+            ? `${name(segment.from)} → ${name(segment.to)}：${t.routes.unmeasured}`
+            : p.legLine(
+                name(segment.from),
+                name(segment.to),
+                formatMicros(segment.rtt_us),
+                formatMicros(segment.jitter_us),
+                formatPermille(segment.loss_permille),
+              ),
         ),
         load: candidate.route.via === 'relay' ? t.routes.percent(String(candidate.load_percent)) : '—',
         current: candidate.current,
