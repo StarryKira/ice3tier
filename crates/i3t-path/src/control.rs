@@ -58,7 +58,7 @@ use crate::relays::{RelayLink, Wire};
 use crate::routing::{Candidate, PathId, Selector};
 use crate::table::{self, Hop, PeerSlot, RelaySlot, Shared, Table};
 use crate::tcp::{self, TcpEvent, TcpLegHandle};
-use crate::timing::{EVAL_WINDOW, MAX_TIMEOUTS, PROBE_INTERVAL, TICK};
+use crate::timing::{EVAL_WINDOW, MAX_TIMEOUTS, PEER_ACTIVE, PROBE_INTERVAL, TICK};
 
 mod active;
 mod backbone;
@@ -247,6 +247,8 @@ struct PeerState {
     eager_from: Option<Instant>,
     /// 对端挂在本节点的 relay 上、这一段又没有别的测量值时，本节点经这个会话发的端到端探测（见 [`View::local_leg`]）。
     local_leg: Sampler,
+    /// 最近一次收到它的打洞信令的时刻：之后一段时间里陪它把直连试完（见 [`direct_policy`]）。
+    signalled: Option<Instant>,
 }
 
 /// 一次正在进行的直连尝试（主动测试）。
@@ -662,6 +664,7 @@ impl Control {
                     other_mode: None,
                     eager_from: None,
                     local_leg: Sampler::new(),
+                    signalled: None,
                 }
             });
             if peer.key != info.key {
@@ -1079,6 +1082,10 @@ fn observed_is_mine(observed: SocketAddr, local_network: bool, interfaces: &[Soc
 ///
 /// 一对正在用的节点（有包要发、或者有人要和它通信）要直连；小网络里不等流量的那些对端（[`EAGER_DIRECT_PEERS`]）过了错开的时刻也要。
 /// 后一种只是在路径层验证这条直连、照常保活和退避：不碰连接层，不建连接，也不让已有的连接晚关一点；第一条流来的时候路已经是直连。
+///
+/// 对端刚发来过打洞信令的也要（[`PeerState::signalled`]）：它想和本端建立直连，后面几轮探测要跟上。这不等于本端有包要发给它：
+/// 信令不算流量。原来算，小网络里对端每分钟不等流量地试一次直连，直连又永远打不通时（比如它没有 UDP），本端就每分钟
+/// 把它当成活跃的 45 秒：为它建一次临时的中转会话、把路换过去，会话回收之后路又换回来，一直这样来回。
 fn direct_policy<'a>(
     shared: &Shared,
     allow_direct: bool,
@@ -1091,8 +1098,9 @@ fn direct_policy<'a>(
     let clock = &shared.clock;
     let in_use = peer.slot.is_active(clock);
     let eager = peer.eager_from.is_some_and(|from| now >= from);
+    let answering = peer.signalled.is_some_and(|at| now.saturating_duration_since(at) < PEER_ACTIVE);
     Policy {
-        wanted: allow_direct && (in_use || eager),
+        wanted: allow_direct && (in_use || eager || answering),
         initiate: !peer.dial_out_only,
         signal: !node_dial_out_only && !peer.dial_out_only,
         silent: matches!(peer.route, RouteKey::Direct(_)) && table::unanswered(clock, &peer.slot.last_tx, &peer.slot.last_rx_direct),
@@ -1246,6 +1254,24 @@ mod tests {
         });
         let ids: Vec<u32> = eager_direct(&picky, EAGER_DIRECT_PEERS).iter().map(|id| id.get()).collect();
         assert_eq!(ids, [5]);
+    }
+
+    #[tokio::test]
+    async fn a_punch_signal_keeps_the_direct_attempt_going_but_is_not_traffic() {
+        let mut harness = Harness::new(&[(2, &[addr("203.0.113.2:20330")])]);
+        let now = Instant::now();
+        // 不是"不等流量就试"的对端：只看信令。
+        harness.control.peers.get_mut(&node(2)).unwrap().eager_from = None;
+        let wanted = |harness: &Harness, at: Instant| {
+            direct_policy(&harness.control.shared, true, false, RoutingMode::DirectFirst, &[], &harness.control.peers[&node(2)], at).wanted
+        };
+        assert!(!wanted(&harness, now), "没有流量也没有信令：不试");
+
+        harness.control.on_signal(node(2), &Signal::PunchRequest { endpoints: vec![addr("203.0.113.2:20330")] }, now);
+        let peer = &harness.control.peers[&node(2)];
+        assert!(!peer.slot.is_active(&harness.control.shared.clock), "信令不算流量：不为它建中转会话，也不动到它的路");
+        assert!(wanted(&harness, now + Duration::from_secs(1)), "陪它把直连试完");
+        assert!(!wanted(&harness, now + PEER_ACTIVE), "过了这一阵就不再试");
     }
 
     #[tokio::test]

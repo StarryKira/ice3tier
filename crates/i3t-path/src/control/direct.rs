@@ -36,8 +36,9 @@ impl Control {
             tracing::debug!(peer = %from, "本节点或者对端是只主动连接的，不参与打洞，忽略信令");
             return;
         }
-        // 信令是经 controller 或者已经认证的连接送来的，对端确实想和本端建立直连：把它当作活跃的，后面几轮探测才会跟上。
-        peer.slot.last_demand.touch(&self.shared.clock);
+        // 信令是经 controller 或者已经认证的连接送来的，对端确实想和本端建立直连：记下来，后面几轮探测才会跟上。
+        // 不把它当成有流量（见 `direct_policy`）：不为它建中转会话，也不动到它的路。
+        peer.signalled = Some(now);
         let actions = peer.direct.on_signal(signal, now, &policy);
         self.perform(from, actions);
     }

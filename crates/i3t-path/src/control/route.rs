@@ -744,6 +744,7 @@ mod tests {
             other_mode: None,
             eager_from: None,
             local_leg: crate::estimate::Sampler::new(),
+            signalled: None,
         }
     }
 

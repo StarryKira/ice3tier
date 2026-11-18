@@ -538,6 +538,39 @@ def tcp_only_relay_prices_its_own_relay(lab: Lab, work: Path, t: Checks) -> None
         print(tail(s.read_log(), 30), tail(y.read_log(), 15), sep="\n  ---\n")
 
 
+def idle_pair_without_direct_keeps_its_route(lab: Lab, work: Path, t: Checks) -> None:
+    """没有 UDP 的中继 s 和普通节点 y 之间没有流量，直连永远打不通。小网络里两边每分钟会不等流量地再试一次直连；
+    这种尝试不该让 y 以为 s 有流量：不然 y 每分钟为它建一次到 s 的中继的会话、把路换过去，45 秒后会话回收、路又换走。"""
+    controller = Controller(lab.host("ctl"), work)
+    controller.ctl("network", "create", "lab")
+    s = Node(lab.host("s"), work, declare=("relay",))
+    a, r = (Node(lab.host(name), work, declare=("relay",)) for name in ("a", "r"))
+    y = Node(lab.host("y"), work)
+    # y 挂靠的是离它近的 a 和 r；s 远，y 不挂靠它，到 s 的中继的会话只在 s 有流量时才临时建。
+    for one, other, rtt in ((s, a, 100), (s, r, 110), (s, y, 120), (a, r, 30), (a, y, 20), (r, y, 2)):
+        shape_between(one.host, other.host, lablib.Shape(rtt_ms=rtt))
+    s.host.block_udp()
+    for node in (a, r, y, s):
+        node.join(controller)
+    for relay in (a, r, s):
+        controller.ctl("relay", "enable", str(relay.id))
+    eventually_value(lambda: controller.ctl("node", "list"), lambda nodes: all(node.get("online") for node in nodes), timeout=40)
+
+    def changes() -> list[str]:
+        return [line for line in y.read_log().splitlines() if "到对端的路变了" in line and f"peer={s.id} " in line]
+
+    # 头半分钟里路怎么定下来的不管；之后两分多钟（两轮不等流量的尝试）里，到 s 的路不该再变。
+    time.sleep(30)
+    settled = len(changes())
+    time.sleep(140)
+    later = changes()[settled:]
+    t.check(f"y 到 s 的路在没有流量的两分多钟里没有变（变了 {len(later)} 次）", not later, "\n".join(later[-6:]))
+    sessions = [line for line in s.read_log().splitlines() if "中转会话建立" in line and f"node={y.id} " in line]
+    t.check(f"y 没有每分钟到 s 的中继上建一次会话（{len(sessions)} 次）", len(sessions) <= 1, "\n".join(sessions[-6:]))
+    if t.failures:
+        print(tail(y.read_log(), 20), tail(s.read_log(), 10), sep="\n  ---\n")
+
+
 def two_islands(lab: Lab, work: Path, t: Checks) -> None:
     """家里的节点只连得上家里的中继 H（局域网地址），外面的节点只连得上公网的中继 P，H 和 P 连得上：默认模式下外面的节点经
     P → H 用家里节点上的服务，路由表说出为什么；两边都连得上的中继出现之后，这一对换到它上面。"""
@@ -714,6 +747,7 @@ SCENARIOS = {
     "chain_through_relay_without_udp": chain_through_relay_without_udp,
     "two_islands": two_islands,
     "tcp_only_relay_prices_its_own_relay": tcp_only_relay_prices_its_own_relay,
+    "idle_pair_without_direct_keeps_its_route": idle_pair_without_direct_keeps_its_route,
     "direct_without_traffic": direct_without_traffic,
 }
 
