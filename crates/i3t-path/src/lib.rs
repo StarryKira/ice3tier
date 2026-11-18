@@ -15,6 +15,7 @@
 //! | `attach` | 节点一侧的中转会话：握手、保活 |
 //! | `relays` | 到一个 relay 的联系（UDP 和 TCP 同时试，优先 UDP），挂靠哪几个 relay |
 //! | `tcp` | 到 relay 的那条 TCP |
+//! | [`backbone`] | relay 和 relay 之间走 TCP 的骨干连接：一对 relay 一条，两个会话都在上面 |
 //! | `table` | 收发每个包时查的表 |
 //! | `budget` | 验签名的额度 |
 //! | [`report`] | 给界面看的选路情况和骨干矩阵 |
@@ -24,12 +25,14 @@
 //!
 //! - 默认模式：直连可用就走直连，否则经一个 relay。两个节点之间有直接的中转会话时用它
 //!   （对端自己是 relay，或者对端挂在本节点的 relay 上），不然用对端挂靠的 relay 里第一个能用的。
+//!   一个都用不了时（没有一个 relay 两端都用得上），经延迟优先模式的候选里代价最低的一串 relay。
 //! - 延迟优先：直连和经 1 到最大中转级数个 relay 的路径按代价比较，切换有迟滞；局域网直连无条件优先。
 //!
 //! 本节点同时是 relay 时，路径层还负责骨干：和别的 relay 保持会话并互测，把测到的这一行和手上别的 relay 的行
-//! 交给 [`LocalRelay`] 发给挂靠的节点。
+//! 交给 [`LocalRelay`] 发给挂靠的节点。两个 relay 之间 UDP 不通时，骨干上的这一段走一条 TCP（[`backbone`]）。
 
 mod attach;
+pub mod backbone;
 mod budget;
 mod control;
 mod cost;
@@ -53,7 +56,9 @@ use i3t_model::netmap::Attachment;
 use i3t_proto::NodeId;
 use i3t_proto::backbone::{Link, RelayState};
 use i3t_underlay::Ecn;
+use i3t_underlay::tcp_leg::FrameSender;
 
+pub use backbone::BackboneInbox;
 pub use cost::Segment;
 pub use diag::{
     ChoiceReason, DirectAttempt, DirectFailure, HopReport, HopSource, LatencySummary, ModeChoice, RouteDecision, Side, TestPath, TestSpec,
@@ -92,9 +97,16 @@ pub trait LocalRelay: Send + Sync + 'static {
     /// 这时 `segment_size` 是每个的长度。返回有没有送出去。
     fn send_to_client(&self, client: NodeId, contents: &[u8], segment_size: Option<usize>, ecn: Option<Ecn>) -> bool;
 
-    /// `client`（另一个 relay）在本节点的 relay 上是不是有走 UDP 的会话。
-    /// 骨干上的一条连接要两边互相都有会话才转发得过去，本节点报矩阵时靠它判断这条连接算不算通。
-    fn has_udp_session(&self, client: NodeId) -> bool;
+    /// `client`（另一个 relay）在本节点的 relay 上的会话绑定在哪里；没有会话是 `None`。
+    /// 骨干上的一条连接要两边互相都有会话、而且走的是同一种传输（同一条 TCP）才转发得过去，本节点报矩阵时靠它判断这条连接算不算通。
+    fn session_leg(&self, client: NodeId) -> Option<SessionLeg>;
+
+    /// 本节点的路径层拨向另一个 relay 的第 `conn` 条 TCP 上来了一帧归 relay 管的：那个 relay 在这条 TCP 上反过来和本节点的 relay
+    /// 建会话的握手和保活，或者它要本节点往下转的包（见 [`backbone`]）。`addr` 是这条 TCP 的对端地址，`sender` 往这条 TCP 里写。
+    fn handle_leg_frame(&self, conn: u64, addr: SocketAddr, sender: &FrameSender, frame: &[u8]);
+
+    /// 本节点的路径层拨出去的第 `conn` 条 TCP 没了：绑在上面的会话跟着关闭。
+    fn leg_closed(&self, conn: u64);
 
     /// 本节点的 relay 现在的状态和负载。没有启用 relay 时返回 `None`。
     fn status(&self) -> Option<RelayStatus>;
@@ -104,6 +116,16 @@ pub trait LocalRelay: Send + Sync + 'static {
 
     /// 把一帧原样发给所有会话：别的 relay 的矩阵行要这样传下去。
     fn broadcast(&self, frame: &[u8]);
+}
+
+/// 一个会话在本节点的 relay 上绑定在哪里（[`LocalRelay::session_leg`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionLeg {
+    Udp,
+    /// relay 接进来的一条 TCP，号是 relay 编的（就是它在 [`BackboneInbox`] 里报的那个号）。
+    Accepted(u64),
+    /// 本节点的路径层拨出去的一条 TCP，号是路径层编的（[`LocalRelay::handle_leg_frame`] 带过去的那个号）。
+    Dialled(u64),
 }
 
 /// 本节点的 relay 的状态。

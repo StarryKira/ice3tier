@@ -330,3 +330,25 @@ table inet noudpin {
 }
 """
     host.run("nft", "-f", "-", input=rules)
+
+
+def isolate(host: Host, *others: Host) -> None:
+    """`host` 和 `others` 之间什么都不通（所有协议、两个方向）：在 `host` 上丢掉发往和来自它们地址的包。可以调用几次，越加越多。
+    内网主机的对面要写它所在的 NAT（外面看到的是 NAT 的地址）。"""
+    cut = host.__dict__.setdefault("_isolated", set())
+    cut.update(other.ip for other in others)
+    addresses = ", ".join(sorted(cut))
+    host.run("nft", "delete", "table", "inet", "isolate", check=False)
+    rules = f"""
+table inet isolate {{
+    chain out {{
+        type filter hook output priority filter;
+        ip daddr {{ {addresses} }} drop
+    }}
+    chain in {{
+        type filter hook input priority filter;
+        ip saddr {{ {addresses} }} drop
+    }}
+}}
+"""
+    host.run("nft", "-f", "-", input=rules)

@@ -1247,6 +1247,7 @@ impl RouteCause {
             | Self::DirectVerified
             | Self::DirectLost { .. }
             | Self::RelayReady
+            | Self::NoSharedRelay { .. }
             | Self::LegChanged { .. }
             | Self::Unreachable { .. }
             | Self::PeerRemoved
@@ -1293,6 +1294,10 @@ pub enum RouteCause {
     LegChanged { transport: Option<LegTransport> },
     /// 换了一串 relay。`previous` 是原来经过的 relay。
     RelayChanged { hint: RouteHint, previous: Vec<NodeId> },
+    /// 默认模式：没有一个 relay 两端都用得上（直连也没有），所以经一串 relay：网络的最大中转级数以内、代价最低的那一串（`route` 里）。
+    /// `hint` 是离开原来那条路的起因；原来没有路时是 `null`。直连或者一个 relay 的路一有就换过去，原因照常是
+    /// `direct_verified`，或者 `relay_changed` 带 `shortcut`。
+    NoSharedRelay { hint: Option<RouteHint> },
     /// 没有路可走了。
     Unreachable { hint: RouteHint },
     /// 对端不在本节点的配置里了：访问规则不再连通它们，或者它被删掉了。
@@ -1334,7 +1339,7 @@ pub enum RouteHint {
     PathProbeSilent,
     /// 刚有路时先连上的不是对端排在前面的 relay，那个 relay 的会话随后也建好了。
     PreferredRelayReady,
-    /// 有了不绕路的中转会话（对端自己是 relay，或者对端挂在本节点的 relay 上）。
+    /// 有了少绕路的中转会话：对端自己是 relay，或者对端挂在本节点的 relay 上，或者原来经一串 relay、现在一个就够了。
     Shortcut,
     /// 原来的 relay 不可用（没有更具体的起因）。
     RelayUnavailable,

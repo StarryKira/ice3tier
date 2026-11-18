@@ -133,6 +133,25 @@ impl View<'_> {
         routing::direct_first(direct, order, |relay| self.usable(id, relay))
     }
 
+    /// 默认模式在直连和一个 relay 都走不了时退而求其次的一串 relay（白皮书 §7.1，"谁连得上，它就是谁的 relay"）：
+    /// `candidates`（延迟优先模式用的同一份候选，经 2 个到网络的最大中转级数个 relay）里此刻走得了的、代价最低的一串。
+    /// 现在走着的一串（`current`）还走得了、又没有被便宜 `max(5ms, 10%)` 以上的另一串比下去时，还是它
+    /// （和主动测试说"延迟优先会怎么选"是同一条规矩，[`super::active::lowest_cost_path`]），不跟着测量的起伏换。
+    pub(super) fn chain(&self, id: NodeId, peer: &PeerState, candidates: &[Candidate], current: Option<PathId>) -> Option<PathId> {
+        let usable: Vec<&Candidate> = candidates.iter().filter(|candidate| self.resolve(id, peer, candidate.path).is_some()).collect();
+        routing::fallback_chain(&usable, current)
+    }
+
+    /// 默认模式此刻会选的路：直连，一个 relay，都没有的话一串 relay（[`chain`](Self::chain)）。`candidates` 是候选路径，
+    /// `current` 是现在走着的那一串（不是一串时是 `None`）。
+    pub(super) fn default_route(&self, id: NodeId, peer: &PeerState, candidates: &[Candidate], current: Option<PathId>) -> Option<PathId> {
+        let single = self.direct_first(id, peer);
+        if single.is_some() {
+            return single;
+        }
+        self.chain(id, peer, candidates, current)
+    }
+
     /// 到这个对端的全部候选路径和它们的代价，按代价从低到高。
     pub(super) fn candidates(&self, id: NodeId, peer: &PeerState) -> Vec<Candidate> {
         let me = self.shared.me;
@@ -337,7 +356,7 @@ pub(crate) const fn hint_text(hint: RouteHint) -> &'static str {
         RouteHint::PeerNotAttached => "relay 说对端没有挂在它上面",
         RouteHint::PathProbeSilent => "经多个 relay 的路径上端到端的探测一直没有回音",
         RouteHint::PreferredRelayReady => "刚有路时先连上的不是对端排在前面的 relay，那个 relay 的会话随后也建好了",
-        RouteHint::Shortcut => "有了不绕路的中转会话",
+        RouteHint::Shortcut => "有了少绕路的中转会话",
         RouteHint::RelayUnavailable => "原来的 relay 不可用",
         RouteHint::RelayLost => "中转会话断开，没有别的路",
         RouteHint::RouteFailed => "原来的路不能用了",
@@ -426,8 +445,24 @@ pub(super) fn describe(peer: NodeId, from: RouteKey, to: RouteKey, hint: Option<
     };
     // 新的路是不是两个节点之间直接的中转会话。
     let is_shortcut = |path: RelayPath, via: Via| via == Via::Local || *path.as_slice() == [peer];
+    // 默认模式经一串 relay：只在没有一个 relay 两端都用得上的时候（见 `View::chain`）。
+    let chain = |path: RelayPath, via: Via, hint: Option<RouteHint>| {
+        let because = hint.map(|hint| format!("{}；", hint_text(hint))).unwrap_or_default();
+        Reason::new(
+            format!("{because}没有一个 relay 两端都用得上，经 {}（到第一个 relay 的会话走 {}）", relays_text(path), transport(via)),
+            RouteCause::NoSharedRelay { hint },
+        )
+    };
+    let is_chain = |path: RelayPath| path.as_slice().len() > 1;
     match (from, to) {
         (_, RouteKey::Direct(addr)) => Reason::new(format!("直连地址 {addr} 验证通过，改走直连"), RouteCause::DirectVerified),
+        (RouteKey::None, RouteKey::Relay { path, via }) if is_chain(path) => chain(path, via, None),
+        (RouteKey::Direct(_), RouteKey::Relay { path, via }) if is_chain(path) => {
+            chain(path, via, Some(hint.unwrap_or(RouteHint::DirectUnavailable)))
+        }
+        (RouteKey::Relay { path: old, .. }, RouteKey::Relay { path, via }) if old != path && is_chain(path) => {
+            chain(path, via, Some(hint.unwrap_or(RouteHint::RelayUnavailable)))
+        }
         (RouteKey::Direct(_), RouteKey::Relay { path, via }) => {
             let hint = hint.unwrap_or(RouteHint::DirectUnavailable);
             Reason::new(format!("{}，退回{}", hint_text(hint), relay_choice(path, via)), RouteCause::DirectLost { hint })
@@ -444,7 +479,9 @@ pub(super) fn describe(peer: NodeId, from: RouteKey, to: RouteKey, hint: Option<
             Reason::new(format!("到 relay {} 的会话改走 {}", path.first(), transport(via)), RouteCause::LegChanged { transport: leg })
         }
         (RouteKey::Relay { path: old, .. }, RouteKey::Relay { path, via }) => {
-            let hint = hint.unwrap_or(if is_shortcut(path, via) { RouteHint::Shortcut } else { RouteHint::RelayUnavailable });
+            // 从一串 relay 换到一个 relay 也是少绕了路。
+            let shorter = is_shortcut(path, via) || old.as_slice().len() > path.as_slice().len();
+            let hint = hint.unwrap_or(if shorter { RouteHint::Shortcut } else { RouteHint::RelayUnavailable });
             Reason::new(
                 format!("{}，从 {} 换到{}", hint_text(hint), relays_text(old), relay_choice(path, via)),
                 RouteCause::RelayChanged { hint, previous: old.as_slice().to_vec() },
@@ -515,18 +552,30 @@ mod tests {
         );
         assert_eq!(
             describe(peer, via_udp, itself, None).text,
-            "有了不绕路的中转会话，从 relay 9 换到对端自己的 relay（它本身就是 relay，会话走 TCP，不用绕别的 relay）"
+            "有了少绕路的中转会话，从 relay 9 换到对端自己的 relay（它本身就是 relay，会话走 TCP，不用绕别的 relay）"
         );
         assert_eq!(
             describe(peer, via_udp, local, None).text,
-            "有了不绕路的中转会话，从 relay 9 换到本节点自己的 relay（对端在它上面有会话，不用绕别的 relay）"
+            "有了少绕路的中转会话，从 relay 9 换到本节点自己的 relay（对端在它上面有会话，不用绕别的 relay）"
         );
 
-        // 从延迟优先换回默认模式时，原来的路可能是多级的。
+        // 默认模式在没有一个 relay 两端都用得上时经一串 relay，一有一个就够的 relay 就换过去：少绕了路。
         let two_hops = RouteKey::Relay { path: path(&[8, 9]), via: Via::Udp(addr("198.51.100.8:20330")) };
         assert_eq!(
+            describe(peer, RouteKey::None, two_hops, None).text,
+            "没有一个 relay 两端都用得上，经 relay 8 → 9（到第一个 relay 的会话走 UDP）"
+        );
+        assert_eq!(
+            describe(peer, direct, two_hops, Some(RouteHint::DirectTimeouts)).text,
+            "直连探测连续超时；没有一个 relay 两端都用得上，经 relay 8 → 9（到第一个 relay 的会话走 UDP）"
+        );
+        assert_eq!(
+            describe(peer, via_udp, two_hops, None).text,
+            "原来的 relay 不可用；没有一个 relay 两端都用得上，经 relay 8 → 9（到第一个 relay 的会话走 UDP）"
+        );
+        assert_eq!(
             describe(peer, two_hops, via_udp, None).text,
-            "原来的 relay 不可用，从 relay 8 → 9 换到对端挂靠的 relay 9（会话走 UDP）"
+            "有了少绕路的中转会话，从 relay 8 → 9 换到对端挂靠的 relay 9（会话走 UDP）"
         );
         let two_hops_tcp = RouteKey::Relay { path: path(&[8, 9]), via: Via::Tcp(4) };
         assert_eq!(describe(peer, two_hops, two_hops_tcp, None).text, "到 relay 8 的会话改走 TCP");
@@ -561,6 +610,18 @@ mod tests {
             RouteCause::RelayChanged { hint: RouteHint::RelayDraining, previous: vec![node(8)] }
         );
         assert_eq!(cause(via_udp, itself, None), RouteCause::RelayChanged { hint: RouteHint::Shortcut, previous: vec![node(9)] });
+        let two_hops = RouteKey::Relay { path: path(&[8, 9]), via: Via::Tcp(3) };
+        assert_eq!(cause(RouteKey::None, two_hops, None), RouteCause::NoSharedRelay { hint: None });
+        assert_eq!(cause(direct, two_hops, None), RouteCause::NoSharedRelay { hint: Some(RouteHint::DirectUnavailable) });
+        assert_eq!(
+            cause(via_udp, two_hops, Some(RouteHint::PeerNotAttached)),
+            RouteCause::NoSharedRelay { hint: Some(RouteHint::PeerNotAttached) }
+        );
+        assert_eq!(
+            cause(two_hops, via_udp, None),
+            RouteCause::RelayChanged { hint: RouteHint::Shortcut, previous: vec![node(8), node(9)] }
+        );
+        assert_eq!(cause(two_hops, direct, None), RouteCause::DirectVerified, "直连一通就换过去");
         assert_eq!(cause(direct, RouteKey::None, None), RouteCause::Unreachable { hint: RouteHint::DirectUnavailable });
         assert_eq!(cause(via_udp, RouteKey::None, None), RouteCause::Unreachable { hint: RouteHint::RelayLost });
 
@@ -643,6 +704,7 @@ mod tests {
             pinned: false,
             policy_route: RouteKey::None,
             other_mode: None,
+            eager_from: None,
         }
     }
 

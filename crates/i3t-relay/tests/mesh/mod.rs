@@ -236,6 +236,7 @@ impl Node {
         }));
         let relay = Arc::new(Relay::new(Arc::clone(&key), Arc::clone(&port), netmap_rx.clone()));
         paths.set_local_relay(Arc::clone(&relay) as Arc<dyn i3t_path::LocalRelay>);
+        relay.set_backbone_inbox(paths.backbone_inbox());
         let weak_paths = Arc::downgrade(&paths);
         relay.set_local_delivery(move |src, packet| {
             if let Some(paths) = weak_paths.upgrade() {

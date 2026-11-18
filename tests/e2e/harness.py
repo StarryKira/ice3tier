@@ -108,6 +108,8 @@ class Node:
         self.state.mkdir(parents=True, exist_ok=True)
         self.log = work / f"{host.name}.log"
         self.proc: subprocess.Popen | None = None
+        # 启动节点时另外给的环境变量（测试用的开关）。
+        self.env: dict[str, str] = {}
         declared = "\n".join(f"{name} = true" for name in declare)
         (self.state / "config.toml").write_text(f"port = 20330\n[declare]\n{declared}\n[log]\nlevel = \"debug\"\n")
         self.key = host.run(binary("i3t"), "--state-dir", str(self.state), "key").stdout.strip()
@@ -140,7 +142,8 @@ class Node:
     def start_static(self, netmap: dict) -> None:
         path = self.state / "static-netmap.json"
         path.write_text(json.dumps(netmap, indent=1))
-        self.proc = self.host.spawn(binary("i3t"), "--state-dir", str(self.state), "run", "--static", str(path), log=self.log)
+        self.proc = self.host.spawn(binary("i3t"), "--state-dir", str(self.state), "run", "--static", str(path), log=self.log,
+                                    env=self.env)
         wait_until(lambda: "节点启动" in self.read_log() or self.proc.poll() is not None, what=f"{self.name} 启动")
         if self.proc.poll() is not None:
             raise RuntimeError(f"{self.name} 启动失败：\n{self.read_log()[-2000:]}")
@@ -158,7 +161,7 @@ class Node:
         self.start()
 
     def start(self) -> None:
-        self.proc = self.host.spawn(binary("i3t"), "--state-dir", str(self.state), "run", log=self.log)
+        self.proc = self.host.spawn(binary("i3t"), "--state-dir", str(self.state), "run", log=self.log, env=self.env)
         wait_until(lambda: "节点启动" in self.read_log() or self.proc.poll() is not None, what=f"{self.name} 启动")
         if self.proc.poll() is not None:
             raise RuntimeError(f"{self.name} 启动失败：\n{self.read_log()[-2000:]}")

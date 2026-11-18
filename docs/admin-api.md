@@ -4,7 +4,20 @@
 
 对应的 Rust 类型在 `crates/i3t-model/src/admin.rs`，实现在 `crates/i3t-controller/src/admin.rs`。文档和代码不一致时以代码为准，并请修正文档。
 
-> **最新一次改动**（按节点关掉自动更新；发布可以说明它修了安全问题）。这一次的清单：
+> **最新一次改动**（一串中继；relay 之间的骨干可以走 TCP；对端不多的节点不等流量就试直连）。这一次的清单：
+>
+> - 新的取值：`RouteCause` 多了 `no_shared_relay`（字段 `hint`，可以是 `null`）：默认模式下没有一个 relay 两端都用得上，这一对经一串 relay
+>   （第 15 节）。主动测试的路由决定 `Choice.reason` 多了 `no_shared_relay`（第 19 节）。`RouteHint` 的 `shortcut` 也说"原来经一串 relay、现在一个就够了"。
+> - 行为上的变化：默认模式下，没有直连、也没有一个 relay 两端都用得上的一对节点经一串 relay（网络的最大中转级数以内、代价最低的那一串），
+>   以前是没有路。路由表、`GET …/path` 上和别的路一样，`route` 是 `{ "via": "relay", "relays": [...] }`。
+> - 行为上的变化：两个 relay 之间 UDP 不通时，骨干上的这一段走一条 TCP，骨干矩阵（第 15 节）里这一段有了延迟和丢包，以前是连不上（`null`）。
+> - 行为上的变化：本节点能访问的对端不超过 32 个时，节点不等流量就试到每个对端的直连，所以路由表的 `direct_status` 很快就是 `trying`、`verified`
+>   或者 `failed`，`route` 可以在没有任何流的时候就是 `direct`（第 5 节）。对端更多的网络照旧在第一次用到时才试。
+> - 节点协议没有升版：旧的 controller 把 `no_shared_relay` 读成 `unknown`。
+>
+> 别的接口的路径、请求体和应答里原有的字段都没有变。
+>
+> **上一次改动**（按节点关掉自动更新；发布可以说明它修了安全问题）。这一次的清单：
 >
 > - 新的字段：`Node.auto_update`（`true`、`false`，新节点和升级前已有的节点都是 `true`），节点自己的自动更新开关。全局的
 >   `UpdateOverview.auto_update` 和它都开着，controller 才自动让这个节点更新。用 `PATCH …/nodes/{node}` 的 `{ "auto_update": false }`
@@ -20,7 +33,7 @@
 >
 > 别的接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **上一次改动**（端口转发的目标由管理员打开；QoS；路由表上的直连状态和另一种选路模式）。这一次的清单：
+> **再上一次改动**（端口转发的目标由管理员打开；QoS；路由表上的直连状态和另一种选路模式）。这一次的清单：
 >
 > - 改了规则：端口转发的目标不再由节点声明，只看管理员的开关。新的字段 `Node.forward_target`（`true`、`false`，新节点是 `false`），
 >   用 `PATCH …/nodes/{node}` 的 `{ "forward_target": true }` 打开（第 5 节）。谁控制了 controller，谁就能经转发碰到目标机器能碰到的一切。
@@ -38,7 +51,7 @@
 >
 > 别的接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **再上一次改动**（出口没有带宽上限；以前用默认端口启用的出口改成不限端口）。这一次的清单：
+> **更早的改动**（出口没有带宽上限；以前用默认端口启用的出口改成不限端口）。这一次的清单：
 >
 > - 去掉的字段：出口的设置（`Node.exit`、`PUT …/exit`、`ExitView.settings`）里的 `bandwidth_mbps`，出口不再限速（第 5.6 节）。
 >   请求体里还写着它的照收（写 0 也不报错），没有作用；应答里没有它。relay 的 `bandwidth_mbps`（第 5.5 节）是另一回事，照旧。
@@ -1108,15 +1121,16 @@ relay 的带宽上限（第 5.5 节）是另一回事，照旧。
 | `flows` | 「新增」这个节点和对端之间的共用连接上现在开着几条流（两边谁开的都算；ice3proxy 上的流不在这里，见第 12 节的 `lanes`）。和对端现在没有连接、或者节点的版本太旧不报时是 `null` |
 | `tx_bytes`、`rx_bytes` | 「新增」节点启动以来在和这个对端的连接上发出、收到的字节数：线上的字节，含 QUIC 自己的开销和重传，连接关了重建也接着累计。有没有同 `flows`。节点每次上报最多带 256 个对端（流量大的在前），超出的是 `null` |
 | `direct_status` | 「新增」到这个对端的直连现在在哪一步，不管现在走不走它（`DirectStatusView`，见下）。节点的版本太旧不报时是 `null` |
-| `alternative` | 「新增」这个节点没在用的那种选路模式此刻会选的路：`{ "route": 路（写法同 `route`）, "rtt_ms": 延迟或 null }`。节点用默认模式时是延迟优先会选的（按选路器的代价，从现在的路出发、用它的差距 max(5 ms, 10%) 算，局域网直连优先），用延迟优先时是默认模式会选的（有验证过的直连就直连，否则照常挑一个 relay）；那种模式没有路可走时 `route` 是 `{ "via": "none" }`。节点用自己手上的候选算，不为它另外探测，默认模式下每 5 秒的评估窗口算一次。和现在的路一样、节点还没有算过、或者它的版本太旧不报时是 `null`。有了它，比较两种模式不用再按对端各问一次 `GET …/path` |
+| `alternative` | 「新增」这个节点没在用的那种选路模式此刻会选的路：`{ "route": 路（写法同 `route`）, "rtt_ms": 延迟或 null }`。节点用默认模式时是延迟优先会选的（按选路器的代价，从现在的路出发、用它的差距 max(5 ms, 10%) 算，局域网直连优先），用延迟优先时是默认模式会选的（有验证过的直连就直连，否则照常挑一个 relay，一个也用不了时一串 relay）；那种模式没有路可走时 `route` 是 `{ "via": "none" }`。节点用自己手上的候选算，不为它另外探测，默认模式下每 5 秒的评估窗口算一次。和现在的路一样、节点还没有算过、或者它的版本太旧不报时是 `null`。有了它，比较两种模式不用再按对端各问一次 `GET …/path` |
 
-「新增」`DirectStatusView`：取自节点的路径层为直连的尝试和退避记着的状态，不为它另外探测。直连只在一对节点用到时才去试
-（有包要发给对端），失败了按退避再试，主动测试立刻试，见 [architecture.md](architecture.md) §5.3。所以两个从没说过话的节点之间是
-`not_tried`，路由表上的路是第一条流会走的那条（经 relay 时是对端自己挂的 relay），不说明直连失败了。
+「新增」`DirectStatusView`：取自节点的路径层为直连的尝试和退避记着的状态，不为它另外探测。能访问的对端不超过 32 个的节点不等流量，
+启动之后就去试到每个对端的直连；更大的网络里直连只在一对节点用到时才去试（有包要发给对端）。失败了按退避再试，主动测试立刻试，
+见 [architecture.md](architecture.md) §5.3。所以大网络里两个从没说过话的节点之间是 `not_tried`，路由表上的路是第一条流会走的那条
+（经 relay 时是对端自己挂的 relay），不说明直连失败了；小网络里很快就是 `verified` 或者 `failed`，没有流也一样。
 
 | 字段 | 含义 |
 |---|---|
-| `state` | `"not_tried"`：还没有试过（这一对还没有用过，或者不能由这个节点去试：只经 relay、对端只主动连接）；`"trying"`：正在试；`"verified"`：通着（走不走它看选路）；`"failed"`：试过没有通，或者通过的直连后来断了，按退避再试。不认识的当作 `unknown` |
+| `state` | `"not_tried"`：还没有试过（这一对还没有用过而网络又多过 32 个对端，或者不能由这个节点去试：只经 relay、对端只主动连接、对端没有上报地址、访问规则不让访问它）；`"trying"`：正在试；`"verified"`：通着（走不走它看选路）；`"failed"`：试过没有通，或者通过的直连后来断了，按退避再试。不认识的当作 `unknown` |
 | `kind` | `verified` 时：怎么通的，取值同 `direct`；别的时候是 `null` |
 | `cause` | 最近一次失败的原因（`DirectCause`，`{ "code": … }`）：`failed` 时是这一次的，`trying` 时是上一次的；通着、从没失败过时是 `null`。`code` 是 `no_answer`（试满了一次的时限，对端的哪个地址都没有回答）、`no_candidates`（手上没有对端的任何地址）、`timeouts`（用着的直连上探测连续超时）、`loss`（用着的直连上丢包超过 20%）、`stale`（两边闲着，用着的直连很久没有验证，放下了；再用到时重新试）。不认识的 `code` 当作 `unknown` |
 | `attempted_at` | 最近一次尝试开始的时间（controller 的时钟：节点报"多少秒之前"，controller 收到时换算）；从来没有试过时是 `null` |
@@ -2277,6 +2291,7 @@ controller 先向两端各问一次"到对端现在会怎么走"，节点用当�
 | `relay_ready` | — | 原来没有路，中转会话可用了 |
 | `leg_changed` | `transport` | 还是经同一串 relay，到第一个 relay 的会话换了传输（`"udp"`、`"tcp"`）；`null` 时第一个 relay 就是发送方自己 |
 | `relay_changed` | `hint`、`previous` | 换了一串 relay；`previous` 是原来经过的 relay |
+| `no_shared_relay` | `hint` | 「新增」默认模式：没有一个 relay 两端都用得上（直连也没有），经一串 relay：网络的最大中转级数以内、代价最低的那一串。`hint` 是离开原来那条路的起因，原来没有路时是 `null`。直连或者一个 relay 的路一有就换过去（`direct_verified`，或者 `relay_changed` 带 `shortcut`） |
 | `unreachable` | `hint` | 没有路可走了 |
 | `peer_removed` | — | 对端不在发送方的配置里了：访问规则不再连通它们，或者它被删掉了 |
 | `lan` | — | 延迟优先：对端在同一个局域网里，局域网直连无条件优先 |
@@ -2284,7 +2299,7 @@ controller 先向两端各问一次"到对端现在会怎么走"，节点用当�
 | `failover` | `hint`、`candidates`、`cost_us` | 延迟优先：原来的路不能用了，不等迟滞，立刻换到剩下的候选里代价最低的 |
 | `cheaper` | `previous`、`previous_cost_us`、`cost_us`、`windows` | 延迟优先：新的路连续 `windows` 个评估窗口都比原来的路便宜得多；这里的 `previous` 是原来的路，写法同 `route` |
 
-`RouteHint`（字符串）：`direct_timeouts`（直连探测连续超时）、`direct_loss`（直连探测丢了超过 20%）、`direct_stale`（对端不活跃，直连地址过期了）、`direct_unavailable`（直连不可用，没有更具体的起因）、`relay_draining`（relay 通知即将下线）、`relay_overloaded`（relay 通知过载）、`relay_path_broken`（relay 说多级路径走不下去）、`peer_not_attached`（relay 说对端没有挂在它上面）、`path_probe_silent`（经多个 relay 的路径上端到端的探测一直没有回音）、`preferred_relay_ready`（对端排在前面的 relay 的会话建好了）、`shortcut`（有了不绕路的中转会话：对端自己是 relay，或者对端挂在发送方的 relay 上）、`relay_unavailable`（原来的 relay 不可用，没有更具体的起因）、`relay_lost`（中转会话断开，没有别的路）、`route_failed`（原来的路不能用了，没有更具体的起因）、`no_path`（没有任何可用的路径）。不认识的值当作 `unknown`。
+`RouteHint`（字符串）：`direct_timeouts`（直连探测连续超时）、`direct_loss`（直连探测丢了超过 20%）、`direct_stale`（对端不活跃，直连地址过期了）、`direct_unavailable`（直连不可用，没有更具体的起因）、`relay_draining`（relay 通知即将下线）、`relay_overloaded`（relay 通知过载）、`relay_path_broken`（relay 说多级路径走不下去）、`peer_not_attached`（relay 说对端没有挂在它上面）、`path_probe_silent`（经多个 relay 的路径上端到端的探测一直没有回音）、`preferred_relay_ready`（对端排在前面的 relay 的会话建好了）、`shortcut`（有了少绕路的中转会话：对端自己是 relay，或者对端挂在发送方的 relay 上，或者原来经一串 relay、现在一个就够了）、`relay_unavailable`（原来的 relay 不可用，没有更具体的起因）、`relay_lost`（中转会话断开，没有别的路）、`route_failed`（原来的路不能用了，没有更具体的起因）、`no_path`（没有任何可用的路径）。不认识的值当作 `unknown`。
 
 「新增」`PathCandidate`：
 
@@ -2850,7 +2865,7 @@ Prometheus 的文本格式（`Content-Type: text/plain; version=0.0.4`）。**�
 
 短时间的吞吐测试受拥塞控制启动阶段的影响，结果偏低；界面应当把 `congestion` 和 `ms` 一起显示。
 
-`RouteResult`：`state`、`problem`、`forward`（`a` 到 `b`，`a` 算的）、`reverse`（`b` 到 `a`，`b` 算的；它没有报时是 `null`）。每个方向是 `DecisionView`：`from`、`to`、`mode`（发送方现在用的模式）、`current`（现在走的路）、`direct_first` 和 `lowest_cost`（`Choice`：`route`，没有能走的路时是 `null`；`reason`；`cost_us`；「新增」`cheaper`，见下）、`candidates`（`PathCandidate` 的数组，第 15 节）。`Choice.reason`：`lan`（局域网直连无条件优先）、`direct`（默认模式：直连可用就走直连）、`peer_is_relay`（对端自己就是 relay）、`own_relay`（对端挂在发送方自己的 relay 上）、`peer_relay`（对端挂靠的 relay）、`lowest_cost`（候选里代价最低的）、「新增」`within_margin`（延迟优先模式留在现在的路上：有更便宜的候选，但没有便宜到选路器换路要的差距 max(5 ms, 10%)）、`no_path`。
+`RouteResult`：`state`、`problem`、`forward`（`a` 到 `b`，`a` 算的）、`reverse`（`b` 到 `a`，`b` 算的；它没有报时是 `null`）。每个方向是 `DecisionView`：`from`、`to`、`mode`（发送方现在用的模式）、`current`（现在走的路）、`direct_first` 和 `lowest_cost`（`Choice`：`route`，没有能走的路时是 `null`；`reason`；`cost_us`；「新增」`cheaper`，见下）、`candidates`（`PathCandidate` 的数组，第 15 节）。`Choice.reason`：`lan`（局域网直连无条件优先）、`direct`（默认模式：直连可用就走直连）、`peer_is_relay`（对端自己就是 relay）、`own_relay`（对端挂在发送方自己的 relay 上）、`peer_relay`（对端挂靠的 relay）、「新增」`no_shared_relay`（默认模式：没有一个 relay 两端都用得上，经候选里代价最低的一串 relay）、`lowest_cost`（候选里代价最低的）、「新增」`within_margin`（延迟优先模式留在现在的路上：有更便宜的候选，但没有便宜到选路器换路要的差距 max(5 ms, 10%)）、`no_path`。
 
 「新增」延迟优先模式的选择是从这一对现在走的路（`current`）出发算的，和节点的选路器用同一个差距：代价最低的候选比现在的路便宜至少 max(5 ms, 10%) 时是它（`lowest_cost`）；便宜得不够时还是现在的路（`within_margin`，`route` 和 `cost_us` 是现在的路的），那条更便宜的在 `cheaper` 里：`{ "route": 路, "cost_us": 代价 }`，两条路的代价都在。别的 `reason`、比这个文档旧的节点报的，`cheaper` 是 `null`。现在的路不在候选里（没有路、断了）时节点立刻换到最低的，不看差距。
 

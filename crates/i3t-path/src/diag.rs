@@ -544,6 +544,8 @@ pub enum ChoiceReason {
     OwnRelay,
     /// 对端挂靠的 relay（按对端报的延迟排第一个能用的）。
     PeerRelay,
+    /// 默认模式：没有一个 relay 两端都用得上，经候选里代价最低的一串 relay。
+    NoSharedRelay,
     /// 延迟优先：候选里代价最低的。
     LowestCost,
     /// 延迟优先：留在现在的路上。有更便宜的候选，但没有便宜到选路器换路要的差距（`max(5ms, 10%)`）。

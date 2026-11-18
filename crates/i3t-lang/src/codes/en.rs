@@ -85,6 +85,10 @@ fn route_cause(cause: &RouteCause, names: Names<'_>) -> String {
         RouteCause::LegChanged { transport: Some(transport) } => format!("Relay session moved to {}", leg(*transport)),
         RouteCause::LegChanged { transport: None } => "Moved to this node's own relay".to_owned(),
         RouteCause::RelayChanged { hint, previous } => format!("{}, was via {}", route_hint(*hint), relays(previous, names)),
+        RouteCause::NoSharedRelay { hint: None } => "No relay serves both ends, via a chain of relays".to_owned(),
+        RouteCause::NoSharedRelay { hint: Some(hint) } => {
+            format!("{}; no relay serves both ends, via a chain of relays", route_hint(*hint))
+        }
         RouteCause::Unreachable { hint } => route_hint(*hint).to_owned(),
         RouteCause::PeerRemoved => "Peer no longer in this node's configuration".to_owned(),
         RouteCause::Lan => "Same LAN, direct first".to_owned(),
@@ -618,6 +622,7 @@ const fn choice(code: ChoiceCode) -> &'static str {
         ChoiceCode::PeerIsRelay => "peer is a relay",
         ChoiceCode::OwnRelay => "peer attached here",
         ChoiceCode::PeerRelay => "peer's relay",
+        ChoiceCode::NoSharedRelay => "no relay serves both ends, a chain of relays",
         ChoiceCode::LowestCost => "lowest cost",
         ChoiceCode::WithinMargin => "stays: not cheaper by the switch margin",
         ChoiceCode::NoPath => "no route",

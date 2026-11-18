@@ -17,7 +17,8 @@ use crate::diag::{
 };
 use crate::relays::Leg;
 use crate::report::{CandidateReport, RelayLeg};
-use crate::routing::{self, Candidate, PathId};
+pub(super) use crate::routing::lowest_cost_path;
+use crate::routing::{Candidate, PathId};
 use crate::table::{Hop, send_frame_via};
 
 impl Control {
@@ -376,13 +377,15 @@ impl Control {
         let cost_of = |path: PathId| candidates.iter().find(|candidate| candidate.path == path).map(|candidate| candidate.cost_ms);
         let me = self.shared.me;
 
-        let direct_first = match view.direct_first(id, peer) {
+        let current_chain = path_of(peer.policy_route).filter(|path| matches!(path, PathId::Relays(relays) if relays.as_slice().len() > 1));
+        let direct_first = match view.default_route(id, peer, &candidates, current_chain) {
             Some(path @ PathId::Direct(_)) => {
                 let reason = if peer.direct.is_lan_active() { ChoiceReason::Lan } else { ChoiceReason::Direct };
                 ModeChoice { route: route_of(path), reason, cost_ms: cost_of(path), cheaper: None }
             }
             Some(path @ PathId::Relays(relays)) => {
                 let reason = match relays.first() {
+                    _ if relays.as_slice().len() > 1 => ChoiceReason::NoSharedRelay,
                     first if first == id => ChoiceReason::PeerIsRelay,
                     first if first == me => ChoiceReason::OwnRelay,
                     _ => ChoiceReason::PeerRelay,
@@ -395,7 +398,7 @@ impl Control {
         let lowest_cost = lowest_cost_choice(&candidates, current);
         // 不算直连时默认模式会经的 relay：同一套规则，只是假装直连不可用。
         let without_direct = View { allow_direct: false, ..self.view(&entries, now) };
-        let default_relay = match without_direct.direct_first(id, peer) {
+        let default_relay = match without_direct.default_route(id, peer, &candidates, current_chain) {
             Some(PathId::Relays(relays)) => Some(relays),
             Some(PathId::Direct(_)) | None => None,
         };
@@ -507,21 +510,6 @@ fn lowest_cost_choice(candidates: &[Candidate], current: Option<&Candidate>) -> 
             ..chosen(picked, ChoiceReason::WithinMargin)
         },
         Some(_) | None => chosen(picked, ChoiceReason::LowestCost),
-    }
-}
-
-/// 延迟优先模式从 `current` 出发此刻会选的路径（`candidates` 按代价从低到高，都是此刻走得了的）。规则同 [`lowest_cost_choice`]：
-/// 局域网直连优先；代价最低的比现在的路便宜得够换过去就是它，不够就还是现在的路。没有候选时是 `None`。
-pub(super) fn lowest_cost_path(candidates: &[&Candidate], current: Option<PathId>) -> Option<PathId> {
-    if let Some(lan) = candidates.iter().find(|candidate| candidate.lan) {
-        return Some(lan.path);
-    }
-    let cheapest = candidates.first()?;
-    match current.and_then(|path| candidates.iter().find(|candidate| candidate.path == path)) {
-        Some(current) if current.path != cheapest.path && !routing::beats_by_margin(current.cost_ms, cheapest.cost_ms) => {
-            Some(current.path)
-        }
-        Some(_) | None => Some(cheapest.path),
     }
 }
 

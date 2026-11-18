@@ -59,7 +59,8 @@ const STALE: Duration = Duration::from_secs(30);
 /// 外面决定的、这个对端此刻适用的限制。
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Policy<'a> {
-    /// 现在需要到这个对端的直连：它是活跃的，并且没有禁用直连。
+    /// 现在需要到这个对端的直连：它是活跃的（或者网络小，不等流量就试，见 `crate::control` 的 `EAGER_DIRECT_PEERS`），
+    /// 并且没有禁用直连。
     pub(crate) wanted: bool,
     /// 可以由本端主动去探测它的候选地址。对端是只主动连接的节点时不行：它不理陌生的探测，只能等它来找本端。
     pub(crate) initiate: bool,
@@ -386,8 +387,8 @@ impl DirectPath {
         self.candidates.iter().filter(fresh).map(|candidate| candidate.addr)
     }
 
-    /// netmap 里对端上报的端点。每次 netmap 更新都调用。
-    pub(crate) fn set_reported(&mut self, endpoints: &[SocketAddr], now: Instant) {
+    /// netmap 里对端上报的端点。每次 netmap 更新都调用。返回里面有没有新的候选地址。
+    pub(crate) fn set_reported(&mut self, endpoints: &[SocketAddr], now: Instant) -> bool {
         for candidate in &mut self.candidates {
             candidate.reported = endpoints.contains(&candidate.addr);
         }
@@ -401,6 +402,7 @@ impl DirectPath {
         if appeared {
             self.candidates_changed();
         }
+        appeared
     }
 
     /// 本节点自己的候选端点变了（换了网络、拿到了新的反射地址）。

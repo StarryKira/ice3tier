@@ -201,6 +201,32 @@ pub(crate) fn direct_first(
     })
 }
 
+/// 默认模式在直连和一个 relay 都走不了时用的一串 relay：`candidates`（此刻走得了的候选，按代价从低到高）里经两个以上 relay 的，
+/// 代价最低的一串；现在走着的一串（`current`）没有被便宜得够多的另一串比下去时还是它（[`lowest_cost_path`] 的规矩，
+/// 差距是选路器的 `max(5ms, 10%)`）。级数的上限在列候选的时候已经管了。没有这样的候选时是 `None`。
+pub(crate) fn fallback_chain(candidates: &[&Candidate], current: Option<PathId>) -> Option<PathId> {
+    let chains: Vec<&Candidate> = candidates
+        .iter()
+        .copied()
+        .filter(|candidate| matches!(candidate.path, PathId::Relays(path) if path.as_slice().len() > 1))
+        .collect();
+    lowest_cost_path(&chains, current)
+}
+
+/// 延迟优先模式从 `current` 出发此刻会选的路径（`candidates` 按代价从低到高，都是此刻走得了的）：
+/// 局域网直连优先；代价最低的比现在的路便宜得够换过去（[`beats_by_margin`]）就是它，不够就还是现在的路。没有候选时是 `None`。
+/// 只看差距：连续几个评估窗口、换路之后的停留期是时间上的条件，一次快照里看不出来。
+pub(crate) fn lowest_cost_path(candidates: &[&Candidate], current: Option<PathId>) -> Option<PathId> {
+    if let Some(lan) = candidates.iter().find(|candidate| candidate.lan) {
+        return Some(lan.path);
+    }
+    let cheapest = candidates.first()?;
+    match current.and_then(|path| candidates.iter().find(|candidate| candidate.path == path)) {
+        Some(current) if current.path != cheapest.path && !beats_by_margin(current.cost_ms, cheapest.cost_ms) => Some(current.path),
+        Some(_) | None => Some(cheapest.path),
+    }
+}
+
 /// 代价是 `challenger_ms` 的路比代价是 `current_ms` 的现在的路便宜得够不够换过去：至少 `max(5ms, 10%)`（模块文档第 3 条）。
 /// 选路器和主动测试的路由决定（"延迟优先会怎么做"）用的都是它。
 pub(crate) fn beats_by_margin(current_ms: f64, challenger_ms: f64) -> bool {
@@ -541,6 +567,53 @@ mod tests {
         assert_eq!(paths, [relays(&[B, D]), relays(&[D]), relays(&[A])], "到了 D 就停；A 自己的 relay 不再往骨干上绕");
         assert_eq!(found[0].legs.len(), 2, "对端自己是最后一个 relay，没有再往后的一段");
         assert!((found[0].cost_ms - 52.0).abs() < 1e-9);
+    }
+
+    /// 两个岛：本节点 A 只够得着 B（自己局域网里的 relay），对端 D 只挂在 C 上（它那边的 relay），B 和 C 之间有骨干，还有一条绕 E 的远路。
+    fn islands() -> Example {
+        const E: u32 = 10;
+        let now = Instant::now();
+        let mut matrix = Matrix::default();
+        row(&mut matrix, B, 0, &[(C, 40, 0), (E, 10, 0)], now);
+        row(&mut matrix, C, 0, &[(B, 40, 0), (E, 10, 0)], now);
+        row(&mut matrix, E, 0, &[(B, 10, 0), (C, 10, 0)], now);
+        Example { matrix, now, entries: vec![entry(B, segment(5.0, 0.0))], exits: vec![(node(C), Some(segment(5.0, 0.0)))] }
+    }
+
+    #[test]
+    fn with_no_direct_path_and_no_single_relay_the_default_mode_takes_the_cheapest_chain_within_the_hop_limit() {
+        let islands = islands();
+        let found = |max_hops| {
+            let mut found = islands.candidates(max_hops, false);
+            found.sort_by(|a, b| a.cost_ms.total_cmp(&b.cost_ms));
+            found
+        };
+        let three = found(3);
+        let usable: Vec<&Candidate> = three.iter().collect();
+        // 经 E 的那一串更便宜（10 + 10 对 40），三级以内的都算。
+        assert_eq!(fallback_chain(&usable, None), Some(relays(&[B, 10, C])));
+        let two = found(2);
+        let usable: Vec<&Candidate> = two.iter().collect();
+        assert_eq!(fallback_chain(&usable, None), Some(relays(&[B, C])), "网络只允许两级时就是 B → C");
+        assert_eq!(fallback_chain(&[], None), None, "没有候选就没有路");
+        // 一个 relay 的候选不算一串：它要是走得了，默认模式在这之前就选了它。
+        let single = candidate(relays(&[B]), 10.0);
+        assert_eq!(fallback_chain(&[&single], None), None);
+    }
+
+    #[test]
+    fn the_default_mode_keeps_its_chain_unless_another_is_cheaper_by_the_selectors_margin() {
+        let (current, close, far_cheaper) = (relays(&[B, C]), relays(&[B, 10, C]), relays(&[11, C]));
+        let options = [candidate(close, 95.0), candidate(current, 100.0)];
+        let usable: Vec<&Candidate> = options.iter().collect();
+        assert_eq!(fallback_chain(&usable, Some(current)), Some(current), "便宜 5ms 不够 10%：不跟着测量的起伏换");
+        let options = [candidate(far_cheaper, 80.0), candidate(current, 100.0)];
+        let usable: Vec<&Candidate> = options.iter().collect();
+        assert_eq!(fallback_chain(&usable, Some(current)), Some(far_cheaper));
+        // 现在那一串走不了了（不在候选里）：换到剩下的里面最便宜的。
+        let options = [candidate(close, 95.0)];
+        let usable: Vec<&Candidate> = options.iter().collect();
+        assert_eq!(fallback_chain(&usable, Some(current)), Some(close));
     }
 
     fn candidate(path: PathId, cost_ms: f64) -> Candidate {

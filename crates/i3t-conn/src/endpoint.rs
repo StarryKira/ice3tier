@@ -84,6 +84,7 @@ impl Endpoint {
 
         let relay = Arc::new(Relay::new(Arc::clone(&key), Arc::clone(&port), netmap.clone()));
         paths.set_local_relay(Arc::clone(&relay) as Arc<dyn i3t_path::LocalRelay>);
+        relay.set_backbone_inbox(paths.backbone_inbox());
         // relay 只拿路径层的弱引用：路径层已经拿着 relay 了，两边都是强引用的话谁也释放不掉。
         let weak_paths = Arc::downgrade(&paths);
         relay.set_local_delivery(move |src, packet| {

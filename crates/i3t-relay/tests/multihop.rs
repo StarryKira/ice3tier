@@ -222,7 +222,7 @@ async fn a_stranger_gets_at_most_one_small_error_and_nothing_is_reflected() {
 }
 
 #[tokio::test]
-async fn the_backbone_runs_over_udp_only_but_the_first_and_last_hop_may_be_tcp() {
+async fn the_backbone_may_run_over_tcp_and_so_may_the_first_and_last_hop() {
     let (a, d) = (Client::new(1).await, Client::new(2).await);
     let (before, after) = (Client::new(101).await, Client::new(102).await);
     let relay = TestRelay::start_in(&Net { role: Role::On, clients: &[&a, &d], relays: &[&before, &after], max_relay_hops: 3 });
@@ -241,15 +241,91 @@ async fn the_backbone_runs_over_udp_only_but_the_first_and_last_hop_may_be_tcp()
     after.send(&frame, &relay).await;
     assert_eq!(&d_tcp.recv().await[..], frame);
 
-    // 邻居 relay 的会话是 TCP 的：不算骨干，它发来的不转发，要送给它的也不送。
+    // 邻居 relay 和本节点之间 UDP 不通，它的会话在 TCP 上：骨干照样走这条 TCP，两个方向都转，路径的中间也可以是它。
     let mut before_tcp = TcpClient::connect_as(before.id, NodeKey::from_pem(&before.key.to_pem()).unwrap(), &relay).await;
     before_tcp.attach(&relay).await;
-    before_tcp.send(&routed(d.id, a.id, &[before.id, node(ME)], b"backbone over tcp")).await;
-    a_tcp.send(&routed(d.id, a.id, &[node(ME), before.id], b"to a tcp neighbour")).await;
-    assert_eq!(refused(&a_tcp.recv().await), Refused { reason: RefusalReason::RouteUnavailable, node: before.id });
+    let from_neighbour = routed(d.id, a.id, &[before.id, node(ME)], b"backbone over tcp");
+    before_tcp.send(&from_neighbour).await;
+    assert_eq!(&d_tcp.recv().await[..], from_neighbour);
+    let to_neighbour = routed(d.id, a.id, &[node(ME), before.id, after.id], b"to a tcp neighbour in the middle");
+    a_tcp.send(&to_neighbour).await;
+    assert_eq!(&before_tcp.recv().await[..], to_neighbour);
+    let through = routed(d.id, a.id, &[after.id, node(ME), before.id], b"udp neighbour to tcp neighbour");
+    after.send(&through, &relay).await;
+    assert_eq!(&before_tcp.recv().await[..], through);
     tokio::time::sleep(common::SILENCE).await;
-    assert_eq!(relay.relay().counters().dropped(DropReason::NoBackbone), 2);
-    assert_eq!(relay.relay().counters().forwarded_packets, 2);
+    assert_eq!(relay.relay().counters().dropped(DropReason::NoBackbone), 0);
+    assert_eq!(relay.relay().counters().forwarded_packets, 5);
+
+    // 一个普通节点的 TCP 会话不是骨干：它自称前一站是 relay 101，不转发。
+    a_tcp.send(&routed(d.id, a.id, &[before.id, node(ME)], b"a client posing as the neighbour")).await;
+    tokio::time::sleep(common::SILENCE).await;
+    assert_eq!(relay.relay().counters().dropped(DropReason::NoBackbone), 1);
+}
+
+#[tokio::test]
+async fn packets_a_tcp_neighbour_hands_over_for_this_node_are_delivered_on_its_word() {
+    let (a, peer) = (Client::new(1).await, Client::new(5).await);
+    let neighbour = Client::new(101).await;
+    let relay = TestRelay::start_in(&Net { role: Role::On, clients: &[&a], relays: &[&neighbour], max_relay_hops: 2 });
+    let delivered = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&delivered);
+    relay.relay().set_local_delivery(move |src, packet| sink.lock().unwrap().push((src, packet)));
+    let mut tcp = TcpClient::connect_as(neighbour.id, NodeKey::from_pem(&neighbour.key.to_pem()).unwrap(), &relay).await;
+    tcp.attach(&relay).await;
+    // 邻居替挂在它上面的节点 5 送来的（5 在本节点上没有会话）：经一个 relay 的，和经几个 relay、它排最后的。
+    tcp.send(&relayed(node(ME), peer.id, b"one hop")).await;
+    tcp.send(&routed(node(ME), peer.id, &[node(77), neighbour.id], b"last hop")).await;
+    tokio::time::sleep(common::SILENCE).await;
+    let got: Vec<(i3t_proto::NodeId, Vec<u8>)> = delivered.lock().unwrap().iter().map(|(src, packet)| (*src, packet.to_vec())).collect();
+    assert_eq!(got, [(peer.id, b"one hop".to_vec()), (peer.id, b"last hop".to_vec())]);
+
+    // 普通节点的 TCP 会话没有这个资格：它替别人送的，本节点不收。
+    let mut client = TcpClient::connect_as(a.id, NodeKey::from_pem(&a.key.to_pem()).unwrap(), &relay).await;
+    client.attach(&relay).await;
+    client.send(&relayed(node(ME), peer.id, b"not on its word")).await;
+    tokio::time::sleep(common::SILENCE).await;
+    assert_eq!(delivered.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_neighbour_relay_opens_its_session_on_a_connection_this_node_dialled_and_is_forwarded_to_over_it() {
+    let a = Client::new(1).await;
+    let neighbour = Client::new(101).await;
+    let relay = TestRelay::start_in(&Net { role: Role::On, clients: &[&a], relays: &[&neighbour], max_relay_hops: 2 });
+    a.attach(&relay).await;
+    // 本节点的路径层拨向邻居的一条 TCP（这里是一对本机的 socket）：一头的写入由它的队列来，另一头扮演邻居。
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (ours, theirs) = tokio::join!(tokio::net::TcpStream::connect(listener.local_addr().unwrap()), listener.accept());
+    let (ours, (theirs, _)) = (ours.unwrap(), theirs.unwrap());
+    let (sender, queue) = i3t_underlay::tcp_leg::frame_queue();
+    let _writer = tokio::spawn(i3t_underlay::tcp_leg::write_frames(ours.into_split().1, queue));
+    let mut reader = i3t_underlay::tcp_leg::FrameReader::new(theirs.into_split().0);
+    let mut next = async || tokio::time::timeout(common::WAIT, reader.next()).await.unwrap().unwrap().unwrap();
+    let leg = listener.local_addr().unwrap();
+
+    // 邻居在这条 TCP 上反过来握手：经路径层交进来，回话写进同一条 TCP。
+    let nonce = [9; 8];
+    relay.relay().handle_leg_frame(7, leg, &sender, &i3t_proto::session::Init { node: neighbour.id, nonce }.to_bytes());
+    let Some(Frame::Challenge(challenge)) = Frame::parse(&next().await) else { panic!("应该回 CHALLENGE") };
+    relay.relay().handle_leg_frame(7, leg, &sender, &neighbour.auth(node(ME), nonce, challenge.cookie).to_bytes());
+    let Some(Frame::Ok(ok)) = Frame::parse(&next().await) else { panic!("应该回 OK") };
+    common::verify_ok(&ok, &relay, neighbour.id, nonce);
+    assert_eq!(relay.relay().session_leg(neighbour.id), Some(i3t_path::SessionLeg::Dialled(7)));
+
+    // 骨干：经它的包写进这条 TCP；它交进来的包按它在这条 TCP 上的会话认。
+    let frame = routed(node(2), a.id, &[node(ME), neighbour.id], b"over the dialled leg");
+    a.send(&frame, &relay).await;
+    assert_eq!(&next().await[..], frame);
+    relay.relay().handle_leg_frame(7, leg, &sender, &routed(a.id, node(2), &[neighbour.id, node(ME)], b"back"));
+    assert_eq!(a.recv().await, routed(a.id, node(2), &[neighbour.id, node(ME)], b"back"));
+    // 另一条 TCP 冒充它不行。
+    relay.relay().handle_leg_frame(8, leg, &sender, &routed(a.id, node(2), &[neighbour.id, node(ME)], b"forged"));
+    a.expect_silence().await;
+
+    // 这条 TCP 没了：会话跟着关闭。
+    relay.relay().leg_closed(7);
+    assert_eq!(relay.relay().session_leg(neighbour.id), None);
 }
 
 #[tokio::test]

@@ -362,6 +362,7 @@ fn decision(decision: &RouteDecision) -> Decision {
             ChoiceReason::PeerIsRelay => ChoiceCode::PeerIsRelay,
             ChoiceReason::OwnRelay => ChoiceCode::OwnRelay,
             ChoiceReason::PeerRelay => ChoiceCode::PeerRelay,
+            ChoiceReason::NoSharedRelay => ChoiceCode::NoSharedRelay,
             ChoiceReason::LowestCost => ChoiceCode::LowestCost,
             ChoiceReason::WithinMargin => ChoiceCode::WithinMargin,
             ChoiceReason::NoPath => ChoiceCode::NoPath,

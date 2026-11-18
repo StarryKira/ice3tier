@@ -174,6 +174,13 @@ impl Paths {
         }
     }
 
+    /// 给本节点的 relay 的入口：别的 relay 拨进来的骨干 TCP 上归路径层的事从这里交进来（[`crate::backbone`]），
+    /// 交给 relay 的 `set_backbone_inbox`。它只拿着控制任务的队列，relay 拿着它不会让路径层释放不掉。
+    #[must_use]
+    pub fn backbone_inbox(&self) -> crate::BackboneInbox {
+        crate::BackboneInbox { ctrl: self.shared.ctrl.clone() }
+    }
+
     /// 信令从哪里送出去（`to` 是收信令的节点）。钩子在控制任务里被调用，不能阻塞。
     ///
     /// # Panics
@@ -833,9 +840,13 @@ mod tests {
             false
         }
 
-        fn has_udp_session(&self, client: NodeId) -> bool {
-            self.has_session(client)
+        fn session_leg(&self, client: NodeId) -> Option<crate::SessionLeg> {
+            self.has_session(client).then_some(crate::SessionLeg::Udp)
         }
+
+        fn handle_leg_frame(&self, _conn: u64, _addr: SocketAddr, _sender: &i3t_underlay::tcp_leg::FrameSender, _frame: &[u8]) {}
+
+        fn leg_closed(&self, _conn: u64) {}
 
         fn status(&self) -> Option<crate::RelayStatus> {
             None

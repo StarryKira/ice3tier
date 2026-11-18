@@ -13,8 +13,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lab as lablib  # noqa: E402
-from harness import (Checks, Controller, Node, RestoredController, add_node_config, binary, controller_data, create_groups,  # noqa: E402
-                     eventually_value, start_whoami, tail)
+from harness import (Checks, Controller, Node, RestoredController, add_node_config, binary, blob_digest, blob_file,  # noqa: E402
+                     controller_data, create_groups, eventually_value, fetch, start_blob_server, start_whoami, tail)
 from lab import Lab, NatKind, wait_until  # noqa: E402
 
 
@@ -173,6 +173,9 @@ def relay_then_direct(lab: Lab, work: Path, t: Checks) -> None:
     r = Node(lab.host("r"), work, declare=("relay",))
     a = Node(lab.nat("nat-a", NatKind.CONE).host("a"), work)
     b = Node(lab.nat("nat-b", NatKind.CONE).host("b"), work, declare=("exit",))
+    # 这里看的是对端多的网络（多过 32 个）：直连等第一次用到才试。小网络里不等流量就试，见 direct_without_traffic。
+    for node in (a, b):
+        node.env = {"I3T_TEST_EAGER_DIRECT_PEERS": "0"}
     for node in (r, a, b):
         node.join(controller)
     controller.ctl("exit", "enable", str(b.id))
@@ -421,6 +424,154 @@ def relay_for_half(lab: Lab, work: Path, t: Checks) -> None:
         print(tail(a.read_log(), 30), tail(b.read_log(), 30), tail(controller.log.read_text(errors="replace"), 10), sep="\n  ---\n")
 
 
+def backbone_rows(controller: Controller) -> dict[int, dict[int, int | None]]:
+    """controller 问来的骨干矩阵：每个 relay 到别的 relay 的延迟（毫秒，连不上是 None）。"""
+    return {row["relay"]["id"]: {link["to"]: link["rtt_ms"] for link in row["links"]} for row in controller.ctl("backbone")["relays"]}
+
+
+def chain_through_relay_without_udp(lab: Lab, work: Path, t: Checks) -> None:
+    """三个中继，中间那个的机房挡掉了 UDP：它和另外两个之间的骨干走 TCP，经它的一串中继两个方向各传 1 MB。"""
+    controller = Controller(lab.host("ctl"), work)
+    controller.ctl("network", "create", "lab", "--routing", "lowest-cost", "--max-relay-hops", "3")
+    r1, r2, r3 = (Node(lab.host(name), work, declare=("relay",)) for name in ("r1", "r2", "r3"))
+    a, d = Node(lab.host("a"), work), Node(lab.host("d"), work)
+    r2.host.block_udp()
+    # a 只够得着 r1，d 只够得着 r3，r1 和 r3 之间什么都不通：a 到 d 只有 r1 → r2 → r3 这一串。
+    lablib.isolate(a.host, r2.host, r3.host, d.host)
+    lablib.isolate(d.host, r1.host, r2.host)
+    lablib.isolate(r1.host, r3.host)
+    start_blob_server(d.host, work)
+    for node in (r1, r2, r3, a, d):
+        node.join(controller)
+    enabled = time.monotonic()
+    for relay in (r1, r2, r3):
+        controller.ctl("relay", "enable", str(relay.id))
+
+    def linked() -> bool:
+        rows = backbone_rows(controller)
+        return all(rows.get(x.id, {}).get(y.id) is not None for x, y in ((r1, r2), (r2, r1), (r2, r3), (r3, r2)))
+
+    try:
+        wait_until(linked, timeout=60, interval=1, what="r2 和 r1、r3 之间的骨干")
+    except TimeoutError:
+        pass
+    rows = backbone_rows(controller)
+    t.check("没有 UDP 的 r2 和 r1、r3 之间的骨干通了，延迟有数", linked(), str(rows))
+    t.check("r1 和 r3 之间照实是连不上", rows.get(r1.id, {}).get(r3.id) is None, str(rows))
+    r2_log = r2.read_log().splitlines()
+    over_tcp = [peer.name for peer in (r1, r3)
+                if any("中转会话建立" in line and f"node={peer.id} " in line and 'via="TCP"' in line for line in r2_log)]
+    t.check("r1、r3 在 r2 上的会话走 TCP", over_tcp == [r1.name, r3.name], "\n".join(r2_log[-12:]))
+    megabyte = 1 << 20
+    download = eventually_value(lambda: fetch(a, f"http://{d.virtual_ip}/blob/{megabyte}", via=None, timeout=30),
+                                lambda done: done[0] == 0, timeout=90, interval=2)
+    took = time.monotonic() - enabled
+    t.check(f"经 r1 → r2 → r3 下载 1 MB，内容完整（启用中继之后 {took:.1f} 秒）", download[:2] == (0, blob_digest(megabyte)), str(download))
+    upload = fetch(a, f"http://{d.virtual_ip}/digest", via=None, upload=blob_file(a, megabyte), timeout=60)
+    t.check("反方向上传 1 MB，内容完整", upload[:2] == (0, blob_digest(megabyte)), str(upload))
+    # 路由表是节点上报的，晚一点才到。
+    forward, backward = wait_route(controller, a, d, "relay"), wait_route(controller, d, a, "relay")
+    t.check("a 到 d 经三个中继", forward == {"via": "relay", "relays": [r1.id, r2.id, r3.id]}, str(forward))
+    t.check("d 到 a 倒过来经同样三个", backward == {"via": "relay", "relays": [r3.id, r2.id, r1.id]}, str(backward))
+    print(f"   计时：启用中继到第一次 1 MB 下载完成 {took:.1f} 秒", flush=True)
+    if t.failures:
+        print(tail(r1.read_log(), 25), tail(r2.read_log(), 40), tail(a.read_log(), 25), sep="\n  ---\n")
+
+
+def two_islands(lab: Lab, work: Path, t: Checks) -> None:
+    """家里的节点只连得上家里的中继 H（局域网地址），外面的节点只连得上公网的中继 P，H 和 P 连得上：默认模式下外面的节点经
+    P → H 用家里节点上的服务，路由表说出为什么；两边都连得上的中继出现之后，这一对换到它上面。"""
+    controller = Controller(lab.host("ctl"), work)
+    controller.ctl("network", "create", "lab")
+    home = lab.nat("nat-h", NatKind.CONE)
+    h = Node(home.host("rh"), work, declare=("relay",))
+    a = Node(home.host("a"), work)
+    p = Node(lab.host("rp"), work, declare=("relay",))
+    s = Node(lab.host("rs"), work, declare=("relay",))
+    o = Node(lab.host("o"), work)
+    lablib.isolate(a.host, p.host)
+    lablib.isolate(o.host, home)
+    start_whoami(a.host, 8080)
+    started = time.monotonic()
+    for node in (h, a, p, s, o):
+        node.join(controller)
+    for relay in (h, p):
+        controller.ctl("relay", "enable", str(relay.id))
+    url = f"http://{a.virtual_ip}:8080/"
+    served = eventually_value(lambda: o.curl(url, timeout=8), lambda done: done.returncode == 0 and done.stdout, timeout=90, interval=2)
+    took = time.monotonic() - started
+    t.check(f"外面的节点用上了家里节点上的服务（{took:.1f} 秒）", served.returncode == 0 and bool(served.stdout), served.stderr.strip())
+    route = wait_route(controller, o, a, "relay", timeout=10)
+    t.check("o 到 a 经 P → H", route == {"via": "relay", "relays": [p.id, h.id]}, str(route))
+    back = route_of(controller, a, o)
+    t.check("a 到 o 经 H → P", back == {"via": "relay", "relays": [h.id, p.id]}, str(back))
+    path = controller.ctl("path", str(o.id), str(a.id))
+    cause = (path.get("forward") or {}).get("cause") or {}
+    t.check("路径的原因：没有两端都用得上的中继", cause.get("code") == "no_shared_relay", str(path.get("forward", {}).get("reason")))
+    shown = controller.host.run(binary("i3tctl"), "--token", controller.token, "path", str(o.id), str(a.id), check=False).stdout
+    t.check("i3tctl path 写着为什么经一串中继", "没有两端都用得上的中继" in shown and f"#{p.id} → #{h.id}" in shown, shown)
+    print(f"   计时：节点加入到外面的节点用上家里的服务 {took:.1f} 秒", flush=True)
+
+    # 一个两边都连得上的中继出现了：这一对少绕路，换到它上面。
+    controller.ctl("relay", "enable", str(s.id))
+    route = {}
+    try:
+        wait_until(lambda: route_of(controller, o, a) == {"via": "relay", "relays": [s.id]}, timeout=60, interval=1,
+                   what="o 到 a 换到两边都连得上的中继")
+    except TimeoutError:
+        pass
+    route = route_of(controller, o, a)
+    t.check("两边都连得上的中继出现之后，o 到 a 只经它一个", route == {"via": "relay", "relays": [s.id]}, str(route))
+    path = controller.ctl("path", str(o.id), str(a.id))
+    cause = (path.get("forward") or {}).get("cause") or {}
+    t.check("换过去的原因是少绕了路", cause == {"code": "relay_changed", "hint": "shortcut", "previous": [p.id, h.id]}, str(cause))
+    t.check("服务照常能用", o.curl(url, timeout=8).returncode == 0)
+    if t.failures:
+        print(tail(o.read_log(), 30), tail(a.read_log(), 20), tail(h.read_log(), 20), tail(p.read_log(), 20), sep="\n  ---\n")
+
+
+def direct_without_traffic(lab: Lab, work: Path, t: Checks) -> None:
+    """对端不多的两个节点不等流量就试直连：两台公网机器上线之后很快就在路由表上是直连，它们之间一条流也没有；
+    对端多过上限的网络照旧等第一次用到（这里用测试的开关把上限压到 0）。"""
+    controller = Controller(lab.host("ctl"), work)
+    controller.ctl("network", "create", "lab")
+    a, b = Node(lab.host("a"), work), Node(lab.host("b"), work)
+    started = time.monotonic()
+    for node in (a, b):
+        node.join(controller)
+    try:
+        wait_until(lambda: all(route_of(controller, x, y).get("via") == "direct" for x, y in ((a, b), (b, a))), timeout=30,
+                   interval=0.5, what="两个节点之间的直连")
+    except TimeoutError:
+        pass
+    took = time.monotonic() - started
+    statuses = (direct_status_of(controller, a, b), direct_status_of(controller, b, a))
+    t.check(f"两边的路由表上都是直连、已验证（加入之后 {took:.1f} 秒）",
+            all(status.get("state") == "verified" for status in statuses) and route_of(controller, a, b).get("via") == "direct", str(statuses))
+    flows = [entry.get("flows") for entry in controller.ctl("node", "routes", str(a.id))["routes"]]
+    t.check("它们之间没有连接，也就没有流", flows == [None] and "和对端的连接建立" not in a.read_log() + b.read_log(), str(flows))
+    print(f"   计时：加入到两边都显示直连 {took:.1f} 秒", flush=True)
+
+    # 另一个网络（另一个 controller），两个节点的上限压到 0。
+    (work / "over").mkdir()
+    other = Controller(lab.host("ctl2"), work / "over")
+    other.ctl("network", "create", "lab")
+    c, e = Node(lab.host("c"), work / "over"), Node(lab.host("e"), work / "over")
+    for node in (c, e):
+        node.env = {"I3T_TEST_EAGER_DIRECT_PEERS": "0"}
+        node.join(other)
+    try:
+        wait_until(lambda: bool(direct_status_of(other, c, e)), timeout=20, what="c 上报到 e 的路")
+    except TimeoutError:
+        pass
+    time.sleep(8)
+    status = direct_status_of(other, c, e)
+    t.check("对端多过上限：不试，路由表上是未尝试", status.get("state") == "not_tried" and route_of(other, c, e).get("via") == "none",
+            f"{status} {route_of(other, c, e)}")
+    if t.failures:
+        print(tail(a.read_log(), 25), tail(b.read_log(), 15), sep="\n  ---\n")
+
+
 def idle_held_offline(lab: Lab, work: Path, t: Checks) -> None:
     """没有 relay、controller 又停了：空闲的连接不回收（关掉就建不回来）；controller 回来之后照常回收。"""
     web = lab.host("web")
@@ -499,6 +650,9 @@ SCENARIOS = {
     "range_overlap_warning": range_overlap_warning,
     "relay_for_half": relay_for_half,
     "idle_held_offline": idle_held_offline,
+    "chain_through_relay_without_udp": chain_through_relay_without_udp,
+    "two_islands": two_islands,
+    "direct_without_traffic": direct_without_traffic,
 }
 
 

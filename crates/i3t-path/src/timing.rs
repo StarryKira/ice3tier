@@ -100,8 +100,16 @@ pub(crate) const RELAY_SURVEY: Duration = Duration::from_secs(60);
 /// 测量结果的有效期，过期作废（白皮书 §7.3）。
 pub(crate) const ESTIMATE_TTL: Duration = Duration::from_secs(120);
 
-/// relay 和 relay 之间多久探测一次（白皮书 §7.3）。
+/// relay 和 relay 之间多久探测一次（白皮书 §7.3）。只管 UDP 上的会话，骨干走 TCP 时照 [`PROBE_INTERVAL`]（见 `crate::relays`）。
 pub(crate) const BACKBONE_PROBE_INTERVAL: Duration = Duration::from_secs(2);
+/// 骨干上：到对方的 UDP 会话通着、对方却这么久都没有经 UDP 在本节点上建会话，就当它连不上本节点，这一段改走本节点拨出去的 TCP。
+/// 对方的 netmap 晚到几秒、它的握手重试几次都在这之内；比它短的话，对方重启的那一阵会被误判。
+pub(crate) const ONE_SIDED_GRACE: Duration = Duration::from_secs(10);
+/// 骨干走 TCP、按编号不该本节点先拨时，等对方拨进来最多等多久，之后自己拨（对方可能连不进本节点）。
+/// 对方拨号要等它自己的 UDP 握不上手（两秒）再加上连 TCP、握手（连不上的地址每个最多四秒）。
+pub(crate) const DIAL_DEFER: Duration = Duration::from_secs(10);
+/// 借来的 TCP 上没有建成会话（对方不在上面回答，比如它是不懂这件事的旧版本）之后，多久之内不再借同一条。
+pub(crate) const OFFER_RETRY: Duration = Duration::from_secs(60);
 /// 给正在评估的候选路径发探测包列：多久一组，一组几个（白皮书 §7.3）。
 pub(crate) const TRAIN_INTERVAL: Duration = Duration::from_secs(30);
 pub(crate) const TRAIN_PROBES: u8 = 10;

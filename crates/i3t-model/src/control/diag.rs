@@ -423,6 +423,8 @@ pub enum ChoiceCode {
     OwnRelay,
     /// 对端挂靠的 relay。
     PeerRelay,
+    /// 默认模式：没有一个 relay 两端都用得上，经一串 relay（候选里代价最低的那一串）。
+    NoSharedRelay,
     /// 候选里代价最低的。
     LowestCost,
     /// 延迟优先：留在现在的路上。有更便宜的候选（`cheaper`），但没有便宜到选路器换路要的差距（`max(5ms, 10%)`）。

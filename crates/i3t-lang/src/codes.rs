@@ -241,6 +241,8 @@ mod tests {
             RouteCause::RelayReady,
             RouteCause::LegChanged { transport: Some(LegTransport::Tcp) },
             RouteCause::RelayChanged { hint: RouteHint::Shortcut, previous: vec![node(5)] },
+            RouteCause::NoSharedRelay { hint: None },
+            RouteCause::NoSharedRelay { hint: Some(RouteHint::RelayUnavailable) },
             RouteCause::Unreachable { hint: RouteHint::RelayLost },
             RouteCause::PeerRemoved,
             RouteCause::Lan,
@@ -324,6 +326,20 @@ mod tests {
             let check = (codes.update_cause)(&UpdateCause::SelfCheck { exit_code: Some(3), output: "boom".into() });
             assert!(check.contains('3') && check.contains("boom"), "{check}");
         }
+    }
+
+    #[test]
+    fn a_chain_used_in_the_default_mode_says_no_single_relay_serves_both_ends() {
+        let names: Names<'_> = &name;
+        let zh = Lang::ZhCn.codes();
+        assert_eq!((zh.route_cause)(&RouteCause::NoSharedRelay { hint: None }, names), "没有两端都用得上的中继，经多个中继");
+        assert_eq!(
+            (zh.route_cause)(&RouteCause::NoSharedRelay { hint: Some(RouteHint::DirectTimeouts) }, names),
+            "直连探测连续超时；没有两端都用得上的中继，经多个中继"
+        );
+        let en = Lang::English.codes();
+        assert_eq!((en.route_cause)(&RouteCause::NoSharedRelay { hint: None }, names), "No relay serves both ends, via a chain of relays");
+        assert_eq!((zh.choice)(ChoiceCode::NoSharedRelay), "没有两端都用得上的中继，经多个中继");
     }
 
     #[test]

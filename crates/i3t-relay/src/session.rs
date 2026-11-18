@@ -15,15 +15,23 @@ pub(crate) const SESSION_TTL: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Origin {
     Udp(SocketAddr),
-    /// relay 给每条接进来的 TCP 编的号。
-    Tcp(u64),
+    Tcp(TcpConn),
+}
+
+/// 一条 TCP 是哪一条。两种编号各数各的，所以分开：撞了号的话，一条连接上来的帧会被当成另一条上的会话发的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum TcpConn {
+    /// relay 接进来的，号是 relay 编的。
+    Accepted(u64),
+    /// 本节点的路径层拨向另一个 relay 的，号是路径层编的。那个 relay 在这条 TCP 上反过来和本节点建的会话绑在它上面（骨干，见 `crate::relay`）。
+    Dialled(u64),
 }
 
 /// 会话绑定在什么上面，也就是发给这个节点的包往哪里送。
 #[derive(Debug, Clone)]
 pub(crate) enum Binding {
     Udp(SocketAddr),
-    Tcp { conn: u64, sender: FrameSender },
+    Tcp { conn: TcpConn, sender: FrameSender },
 }
 
 impl Binding {
@@ -103,7 +111,7 @@ impl Sessions {
     }
 
     /// 一条 TCP 断了：绑定在它上面的会话跟着没有。节点这期间已经换到别处的会话不受影响。
-    pub(crate) fn close_tcp(&mut self, conn: u64) -> Vec<NodeId> {
+    pub(crate) fn close_tcp(&mut self, conn: TcpConn) -> Vec<NodeId> {
         let removed = self.remove_where(|_, session| session.binding.is(Origin::Tcp(conn)));
         self.broke.extend(&removed);
         removed
@@ -166,7 +174,11 @@ mod tests {
     }
 
     fn tcp(conn: u64) -> Binding {
-        Binding::Tcp { conn, sender: tcp_leg::frame_queue().0 }
+        Binding::Tcp { conn: TcpConn::Accepted(conn), sender: tcp_leg::frame_queue().0 }
+    }
+
+    fn accepted(conn: u64) -> Origin {
+        Origin::Tcp(TcpConn::Accepted(conn))
     }
 
     #[test]
@@ -176,7 +188,7 @@ mod tests {
         sessions.open(node(1), Binding::Udp(udp(4000)), NONCE, now);
         assert!(sessions.owned_by(node(1), Origin::Udp(udp(4000)), now));
         assert!(!sessions.owned_by(node(1), Origin::Udp(udp(4001)), now), "别的地址冒充不了");
-        assert!(!sessions.owned_by(node(1), Origin::Tcp(1), now));
+        assert!(!sessions.owned_by(node(1), accepted(1), now));
         assert!(!sessions.owned_by(node(2), Origin::Udp(udp(4000)), now), "同一个地址也不能冒充别的节点");
         assert_eq!(sessions.owned_nonce(node(1), Origin::Udp(udp(4000)), now), Some(NONCE));
         assert_eq!(sessions.owned_nonce(node(1), Origin::Udp(udp(4001)), now), None, "握手的随机数只告诉会话的主人");
@@ -206,9 +218,9 @@ mod tests {
         let now = Instant::now();
         let mut sessions = Sessions::default();
         sessions.open(node(1), tcp(7), NONCE, now);
-        assert!(sessions.owned_by(node(1), Origin::Tcp(7), now));
+        assert!(sessions.owned_by(node(1), accepted(7), now));
         sessions.open(node(1), Binding::Udp(udp(4000)), NONCE, now);
-        assert!(!sessions.owned_by(node(1), Origin::Tcp(7), now));
+        assert!(!sessions.owned_by(node(1), accepted(7), now));
         assert!(matches!(sessions.binding(node(1), now), Some(Binding::Udp(_))));
         assert_eq!(sessions.len(), 1);
     }
@@ -225,7 +237,7 @@ mod tests {
         sessions.open(node(1), tcp(8), NONCE, later);
         assert_eq!(sessions.reopened(node(1), later), Some(later));
         // 保活不改变这个时刻。
-        assert!(sessions.refresh(node(1), Origin::Tcp(8), later + Duration::from_secs(5)));
+        assert!(sessions.refresh(node(1), accepted(8), later + Duration::from_secs(5)));
         assert_eq!(sessions.reopened(node(1), later + Duration::from_secs(5)), Some(later));
         // 从 TCP 换到 UDP 不是断：还是原来那个时刻。
         sessions.open(node(1), Binding::Udp(udp(4000)), NONCE, later + Duration::from_secs(10));
@@ -240,7 +252,7 @@ mod tests {
         sessions.open(node(1), tcp(7), NONCE, start);
         sessions.open(node(2), Binding::Udp(udp(4000)), NONCE, start);
         sessions.open(node(3), Binding::Udp(udp(4001)), NONCE, start);
-        assert_eq!(sessions.close_tcp(7), [node(1)]);
+        assert_eq!(sessions.close_tcp(TcpConn::Accepted(7)), [node(1)]);
         let expired = start + SESSION_TTL;
         assert_eq!(sessions.sweep(expired).len(), 2);
 
@@ -263,8 +275,8 @@ mod tests {
         sessions.open(node(3), tcp(9), NONCE, now);
         // 节点 3 已经换回了 UDP，它原来那条 TCP 断开不该影响它。
         sessions.open(node(3), Binding::Udp(udp(4000)), NONCE, now);
-        assert_eq!(sessions.close_tcp(7), [node(1)]);
-        assert_eq!(sessions.close_tcp(9), []);
+        assert_eq!(sessions.close_tcp(TcpConn::Accepted(7)), [node(1)]);
+        assert_eq!(sessions.close_tcp(TcpConn::Accepted(9)), []);
         assert!(sessions.binding(node(2), now).is_some() && sessions.binding(node(3), now).is_some());
     }
 

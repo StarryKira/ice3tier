@@ -10,7 +10,7 @@ use bytes::Bytes;
 use i3t_crypto::{NodeKey, Signature};
 use i3t_model::Netmap;
 use i3t_model::control::RelayUse;
-use i3t_path::RelayStatus;
+use i3t_path::{BackboneInbox, RelayStatus, SessionLeg};
 use i3t_proto::backbone::{Link, RelayState, Row};
 use i3t_proto::datagram::{self, MAX_RELAY_HOPS, RelayHeader, RouteHeader};
 use i3t_proto::session::{self, Accepted, Auth, Challenge, Echo, Frame, Nonce, Pong, RefusalReason, Refused};
@@ -24,7 +24,7 @@ use crate::cookie::CookieJar;
 use crate::counters::{Counters, DropReason, RelayCounters};
 use crate::leg;
 use crate::limit::{Bandwidth, HandshakeLimiter, RefusalLimiter};
-use crate::session::{Binding, Origin, SESSION_TTL, Sessions};
+use crate::session::{Binding, Origin, SESSION_TTL, Sessions, TcpConn};
 use crate::users::Users;
 
 /// 一个中转帧最长多少字节。再长的不是正常节点发的。
@@ -45,9 +45,13 @@ type LocalDelivery = Box<dyn Fn(NodeId, Bytes) + Send + Sync>;
 /// # 多级中转
 ///
 /// 包头里写着要经过的全部 relay（[`i3t_proto::datagram`]）。本节点在路径上排第一时，只认来源节点自己的会话发来的；
-/// 排在后面时，只认路径上前一个 relay 发来的：它必须是 netmap 里的 relay，并且包就是从它在本节点上的那个 UDP 会话的地址来的。
-/// 往后送也是送到下一个 relay 在本节点上的会话。所以两个 relay 之间互相都有会话才转发得过去，这就是骨干上的一条连接。
-/// 路径比网络设的最大中转级数长的不转发。
+/// 排在后面时，只认路径上前一个 relay 发来的：它必须是 netmap 里的 relay，并且包就是从它在本节点上的会话绑定的地方来的
+/// （那个 UDP 地址，或者那条 TCP）。往后送也是送到下一个 relay 在本节点上的会话。所以两个 relay 之间互相都有会话才转发得过去，
+/// 这就是骨干上的一条连接。路径比网络设的最大中转级数长的不转发。
+///
+/// 两个 relay 之间 UDP 不通时，两个会话在同一条 TCP 上（[`i3t_path::backbone`]）：对方拨进来的，由这里的 TCP 监听接住，
+/// 上面属于路径层的帧交给 [`set_backbone_inbox`](Self::set_backbone_inbox) 给的入口；本节点的路径层拨出去的，
+/// 对方在上面建会话、要转发的帧由路径层交进来（[`handle_leg_frame`](Self::handle_leg_frame)）。
 ///
 /// # 下线
 ///
@@ -86,6 +90,8 @@ pub(crate) struct Inner {
     row_seq: AtomicU64,
     /// 同一个 TCP 端口上别的协议（ice3proxy）：开头字节认出来是它的连接交给这里。没有设时 TCP 端口上只有中转。
     pub(crate) tcp_handoff: RwLock<Option<TcpHandoff>>,
+    /// 别的 relay 拨进来的骨干 TCP 上归路径层的帧交给谁。没有设时这些帧丢掉，对方的会话照常。
+    inbox: OnceLock<BackboneInbox>,
 }
 
 /// 接过一条 TCP 连接：开头字节已经用 `peek` 看过，没有读走。
@@ -113,7 +119,7 @@ pub(crate) struct Source<'a> {
 
 pub(crate) enum Via<'a> {
     Udp,
-    Tcp { conn: u64, sender: &'a FrameSender },
+    Tcp { conn: TcpConn, sender: &'a FrameSender },
 }
 
 impl Source<'_> {
@@ -182,6 +188,7 @@ impl Relay {
             draining: AtomicBool::new(false),
             row_seq: AtomicU64::new(0),
             tcp_handoff: RwLock::new(None),
+            inbox: OnceLock::new(),
         });
         inner.apply(&netmap.borrow());
         let maintenance = tokio::spawn(maintain(Arc::clone(&inner), netmap));
@@ -297,10 +304,41 @@ impl Relay {
         self.inner.counters.snapshot(self.inner.read().sessions.len())
     }
 
-    /// `client` 在本 relay 上是不是有走 UDP 的会话。两个 relay 之间互相都有这样的会话，骨干上才转发得过去。
+    /// `client` 在本 relay 上的会话绑定在哪里；没有会话是 `None`。两个 relay 之间互相都有会话、而且在同一种传输上，骨干上才转发得过去。
+    #[must_use]
+    pub fn session_leg(&self, client: NodeId) -> Option<SessionLeg> {
+        Some(match self.inner.read().sessions.binding(client, Instant::now())? {
+            Binding::Udp(_) => SessionLeg::Udp,
+            Binding::Tcp { conn: TcpConn::Accepted(conn), .. } => SessionLeg::Accepted(*conn),
+            Binding::Tcp { conn: TcpConn::Dialled(conn), .. } => SessionLeg::Dialled(*conn),
+        })
+    }
+
+    /// `client` 在本 relay 上是不是有走 UDP 的会话。
     #[must_use]
     pub fn has_udp_session(&self, client: NodeId) -> bool {
-        matches!(self.inner.read().sessions.binding(client, Instant::now()), Some(Binding::Udp(_)))
+        self.session_leg(client) == Some(SessionLeg::Udp)
+    }
+
+    /// 别的 relay 拨进来的骨干 TCP 上，归路径层的帧（会话的应答、错误帧、矩阵行）和"它在上面建好了会话"交给 `inbox`。
+    /// 只能设一次，再设没有效果。
+    pub fn set_backbone_inbox(&self, inbox: BackboneInbox) {
+        if self.inner.inbox.set(inbox).is_err() {
+            tracing::warn!("relay 的骨干入口已经设过了，忽略这一次");
+        }
+    }
+
+    /// 本节点的路径层拨向另一个 relay 的第 `conn` 条 TCP 上，来了一帧归 relay 管的：那个 relay 反过来建会话的握手和保活，
+    /// 或者要本节点往下转的包。这条 TCP 的对端是 `addr`，回话写进 `sender`。规矩和 UDP、和接进来的 TCP 上一样。
+    pub fn handle_leg_frame(&self, conn: u64, addr: SocketAddr, sender: &FrameSender, frame: &[u8]) {
+        let addr = SocketAddr::new(addr.ip().to_canonical(), addr.port());
+        let source = Source { addr, via: Via::Tcp { conn: TcpConn::Dialled(conn), sender } };
+        self.inner.handle_tcp_frame(&source, frame);
+    }
+
+    /// 本节点的路径层拨出去的第 `conn` 条 TCP 没了：绑在上面的会话跟着关闭。
+    pub fn leg_closed(&self, conn: u64) {
+        self.inner.close_tcp(TcpConn::Dialled(conn));
     }
 
     /// 现在的状态和负载。本节点没有启用 relay 时返回 `None`。
@@ -353,8 +391,16 @@ impl i3t_path::LocalRelay for Relay {
         Self::send_to_client(self, client, contents, segment_size, ecn)
     }
 
-    fn has_udp_session(&self, client: NodeId) -> bool {
-        Self::has_udp_session(self, client)
+    fn session_leg(&self, client: NodeId) -> Option<SessionLeg> {
+        Self::session_leg(self, client)
+    }
+
+    fn handle_leg_frame(&self, conn: u64, addr: SocketAddr, sender: &FrameSender, frame: &[u8]) {
+        Self::handle_leg_frame(self, conn, addr, sender, frame);
+    }
+
+    fn leg_closed(&self, conn: u64) {
+        Self::leg_closed(self, conn);
     }
 
     fn status(&self) -> Option<RelayStatus> {
@@ -515,14 +561,52 @@ impl Inner {
     }
 
     /// 一条 TCP 断了，绑定在它上面的会话跟着关闭。
-    pub(crate) fn close_tcp(&self, conn: u64) {
+    pub(crate) fn close_tcp(&self, conn: TcpConn) {
         for node in self.write().sessions.close_tcp(conn) {
             tracing::info!(%node, "TCP 中转断开，中转会话关闭");
         }
     }
 
-    pub(crate) fn tcp_session_alive(&self, node: NodeId, conn: u64) -> bool {
+    pub(crate) fn tcp_session_alive(&self, node: NodeId, conn: TcpConn) -> bool {
         self.read().sessions.owned_by(node, Origin::Tcp(conn), Instant::now())
+    }
+
+    /// `node` 是 netmap 里别的 relay。
+    pub(crate) fn is_relay(&self, node: NodeId) -> bool {
+        self.read().relays.contains(&node)
+    }
+
+    pub(crate) fn inbox(&self) -> Option<&BackboneInbox> {
+        self.inbox.get()
+    }
+
+    /// 别的 relay 拨进来的骨干 TCP（第 `conn` 条，`neighbour` 在上面有会话）上的一帧，属于本节点自己的那些：
+    /// 本节点在对方那里的会话的应答和矩阵行交给路径层；对方送给本节点的包交给连接层（它替来源节点担保，
+    /// 和 UDP 上 relay 的地址来的包一样）。返回这一帧是不是就此处理完了；别的（对方的握手和保活、要往下转的包）照常由 relay 处理。
+    pub(crate) fn neighbour_frame(&self, neighbour: NodeId, conn: u64, frame: &Bytes) -> bool {
+        let me = self.read().me;
+        match Datagram::parse(frame) {
+            Ok(Datagram::Session(session)) if !session.is_request() => self.to_inbox(neighbour, conn, frame),
+            Ok(Datagram::Row(_)) => self.to_inbox(neighbour, conn, frame),
+            Ok(Datagram::Relayed { header, .. }) if header.dst == me => {
+                self.deliver_locally(header.src, frame, frame.len(), RelayHeader::LEN);
+                true
+            }
+            Ok(Datagram::Routed { header, .. })
+                if header.dst == me && header.relays.around(me).is_none() && header.relays.last() == neighbour =>
+            {
+                self.deliver_locally(header.src, frame, frame.len(), header.encoded_len());
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn to_inbox(&self, neighbour: NodeId, conn: u64, frame: &Bytes) -> bool {
+        if let Some(inbox) = self.inbox.get() {
+            inbox.frame(neighbour, conn, frame.clone());
+        }
+        true
     }
 
     /// TCP 上读出来的一帧。握手成功时返回建了会话的节点。
@@ -728,11 +812,9 @@ impl Inner {
                     return Err(Refusal { reason: DropReason::NoSession, reply: Some((reply, *payload)) });
                 }
             },
-            // 骨干只走 UDP（白皮书 §7.2：TCP 只用于节点到 relay），所以前一个 relay 的会话必须是绑定在这个 UDP 地址上的。
+            // 前一个 relay 的会话必须就绑定在帧来的地方：那个 UDP 地址，或者那条 TCP（两个 relay 之间 UDP 不通时骨干走 TCP）。
             Some(previous) => {
-                let from_neighbour = state.relays.contains(&previous)
-                    && matches!(source.via, Via::Udp)
-                    && state.sessions.owned_by(previous, source.origin(), now);
+                let from_neighbour = state.relays.contains(&previous) && state.sessions.owned_by(previous, source.origin(), now);
                 if !from_neighbour {
                     return Err(Refusal::silent(DropReason::NoBackbone));
                 }
@@ -760,7 +842,7 @@ impl Inner {
                 .map(NextHop::Session)
                 .ok_or_else(|| refusal(DropReason::PeerUnattached, RefusalReason::PeerUnattached, header.dst)),
             Some(next) => match state.sessions.binding(next, now) {
-                Some(binding @ Binding::Udp(_)) if state.relays.contains(&next) => Ok(NextHop::Session(binding.clone())),
+                Some(binding) if state.relays.contains(&next) => Ok(NextHop::Session(binding.clone())),
                 Some(_) | None => Err(refusal(DropReason::NoBackbone, RefusalReason::RouteUnavailable, next)),
             },
         }

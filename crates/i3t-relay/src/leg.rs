@@ -1,5 +1,8 @@
 //! relay 一侧的 TCP 中转：UDP 用不了的节点连上来，在这条 TCP 里做同样的握手、收发同样的帧。
 //!
+//! 拨进来的是 netmap 里别的 relay 时，这条 TCP 还是骨干上的一段（[`i3t_path::backbone`]）：本节点的路径层在上面反过来
+//! 和它建会话，所以这条 TCP 上来的应答、矩阵行和送给本节点的包交给路径层，别的照常。
+//!
 //! # 没有握手成功的连接
 //!
 //! 谁都可以连上来，所以还没有会话的连接要尽快打发掉，不能让人占着位子把只能走 TCP 的节点挡在外面：
@@ -26,7 +29,7 @@ use tokio::time::Instant;
 
 use crate::limit::source_key;
 use crate::relay::{Inner, Source, Via};
-use crate::session::SESSION_TTL;
+use crate::session::{SESSION_TTL, TcpConn};
 
 /// 连上来之后多久之内必须握手成功。没有会话的 TCP 不值得留着。
 ///
@@ -279,7 +282,8 @@ async fn serve(inner: &Inner, stream: TcpStream, addr: SocketAddr, handshake: Ha
     // TCP 也就这么久，TCP 不会比它先判死，也不会在它关掉之后还留着。
     Recovery::giving_up_after(SESSION_TTL).apply(&stream);
     let addr = SocketAddr::new(addr.ip().to_canonical(), addr.port());
-    let conn = inner.next_conn();
+    let id = inner.next_conn();
+    let conn = TcpConn::Accepted(id);
     let (read_half, write_half) = stream.into_split();
     let (sender, queue) = tcp_leg::frame_queue();
     let writer = tokio::spawn(tcp_leg::write_frames(write_half, queue));
@@ -305,10 +309,20 @@ async fn serve(inner: &Inner, stream: TcpStream, addr: SocketAddr, handshake: Ha
                     if owner.is_none() && !is_handshake(&frame) {
                         break "握手成功之前发来了别的帧";
                     }
+                    // 拨进来的是别的 relay：本节点自己在它那里的会话也在这条 TCP 上，那一部分的帧归路径层。
+                    let neighbour = owner.filter(|node| has_session && inner.is_relay(*node));
+                    if neighbour.is_some_and(|node| inner.neighbour_frame(node, id, &frame)) {
+                        continue;
+                    }
                     if let Some(node) = inner.handle_tcp_frame(&source, &frame) {
                         owner = Some(node);
                         // 握手成功了：不再占着"还没握手成功"的名额。
                         drop(handshake.take());
+                        if inner.is_relay(node)
+                            && let Some(inbox) = inner.inbox()
+                        {
+                            inbox.opened(node, id, addr, sender.clone());
+                        }
                     }
                 }
                 Ok(Ok(None)) => break "对方关闭",
@@ -319,6 +333,9 @@ async fn serve(inner: &Inner, stream: TcpStream, addr: SocketAddr, handshake: Ha
         }
     };
     inner.close_tcp(conn);
+    if let Some((node, inbox)) = owner.filter(|node| inner.is_relay(*node)).zip(inner.inbox()) {
+        inbox.closed(node, id);
+    }
     writer.abort();
     reason
 }

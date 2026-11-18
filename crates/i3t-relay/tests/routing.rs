@@ -11,7 +11,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use i3t_model::control::Route;
+use i3t_model::control::{Route, RouteCause, RouteHint};
 use i3t_model::netmap::RoutingMode;
 use i3t_path::{DirectKind, DirectState, RelayLeg};
 use i3t_proto::backbone::RelayState;
@@ -75,14 +75,114 @@ async fn a_stream_is_carried_over_a_two_relay_route() {
     let hops: Vec<_> = only.legs.iter().map(|leg| (leg.from, leg.to)).collect();
     assert_eq!(hops, [(a.id, r1.id), (r1.id, r2.id), (r2.id, d.id)]);
     assert!(a.paths.routes().iter().any(|entry| entry.peer == d.id && entry.rtt_ms.is_some()));
-    // 默认模式只经一个 relay：D 挂的 R2，A 够不着。路由表上说出来：另一种模式此刻没有路可走。
-    let other = report.alternative.as_ref().expect("另一种模式算过了");
-    assert_eq!((&other.route, other.rtt_ms), (&Route::None, None));
+    // D 挂的 R2 A 够不着，没有一个 relay 两边都用得上：默认模式也会经这一串，两种模式选的一样，路由表上就不另写一条。
+    assert_eq!(report.alternative, None);
 
     // 一条已经在传的流照样经过这条路，一块不丢。
     let transfer = Transfer::start(&a, &d, 200).await;
     transfer.expect_progress(300).await;
     transfer.finish().await;
+}
+
+/// 一个连不上的 TCP 地址：监听过、又关掉了的端口，连过去马上被拒绝。
+fn dead_tcp_address() -> SocketAddr {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_relay_without_udp_links_to_the_others_over_tcp_and_carries_a_chain_as_its_middle_hop() {
+    let (a, d) = (Node::start(1), Node::start(2));
+    let (r1, r2, r3) = (Node::start(7), Node::start(8), Node::start(9));
+    // R2 收发不了任何 UDP（它的机房挡掉了）。A 只够得着 R1，D 只够得着 R3；R1 和 R3 之间什么都不通。
+    r2.block(&[&a, &d, &r1, &r3]);
+    a.block(&[&d, &r2, &r3]);
+    d.block(&[&a, &r1, &r2]);
+    r1.block(&[&r3]);
+    r3.block(&[&r1]);
+    let (dead_r1, dead_r3) = (dead_tcp_address(), dead_tcp_address());
+    let relays = [&r1, &r2, &r3];
+    let backbone = View { relays: &relays, relay_clients: Some(&[&a, &d]), max_relay_hops: Some(3), ..View::default() };
+    r1.apply(&View { tcp_via: &[(&r3, dead_r3)], ..backbone });
+    r2.apply(&backbone);
+    r3.apply(&View { tcp_via: &[(&r1, dead_r1)], ..backbone });
+    for relay in relays {
+        relay.wait_relay_enabled().await;
+    }
+    let chain = View { relays: &relays, routing: Some("lowest_cost"), max_relay_hops: Some(3), udp_only: true, ..View::default() };
+    a.apply(&View { peers: &[Peer::via(&d, &[(&r3, 5)])], ..chain });
+    d.apply(&View { peers: &[Peer::via(&a, &[(&r1, 5)])], ..chain });
+    d.spawn_echo();
+
+    // 骨干上 R2 的两段走 TCP：矩阵里 R1—R2、R2—R3 都通，延迟是在 TCP 上量的。
+    let linked = |row_of: &Node, to: &Node| {
+        a.paths
+            .backbone()
+            .iter()
+            .any(|row| row.relay == row_of.id && row.links.iter().any(|link| link.to == to.id && link.rtt_ms.is_some()))
+    };
+    a.paths.activate(d.id);
+    eventually("R2 经 TCP 和 R1、R3 连上骨干", 3 * SOON, || {
+        linked(&r2, &r1) && linked(&r2, &r3) && linked(&r1, &r2) && linked(&r3, &r2)
+    })
+    .await;
+    assert!(!linked(&r1, &r3), "R1 和 R3 之间什么都不通");
+
+    // 1 MB 经 A → R1 → R2 → R3 → D 过去再回来：两个方向都经过 R2。
+    echo_once(&a, &d, &megabyte()).await;
+    assert_eq!(a.route_to(&d), Route::Relay { relays: vec![r1.id, r2.id, r3.id] });
+    assert_eq!(d.route_to(&a), Route::Relay { relays: vec![r3.id, r2.id, r1.id] });
+    let counters = r2.relay().counters();
+    assert!(counters.forwarded_bytes > 2 * 1024 * 1024, "一兆字节来回各一次都经过 R2：{counters:?}");
+    let transfer = Transfer::start(&a, &d, 200).await;
+    transfer.expect_progress(200).await;
+    transfer.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_the_default_mode_a_pair_with_no_relay_both_can_use_takes_a_chain_and_leaves_it_for_a_shared_relay() {
+    // 两个岛：家里的 A 只够得着 H，外面的 O 只够得着 P，H 和 P 之间有骨干。两个节点都是默认模式。
+    let (a, o) = (Node::start(1), Node::start(2));
+    let (h, p, s) = (Node::start(7), Node::start(8), Node::start(9));
+    a.block(&[&o, &p, &s]);
+    o.block(&[&a, &h, &s]);
+    for relay in [&h, &p] {
+        relay.apply(&View { relays: &[&h, &p], relay_clients: Some(&[&a, &o]), ..View::default() });
+        relay.wait_relay_enabled().await;
+    }
+    let islands = View { relays: &[&h, &p], udp_only: true, ..View::default() };
+    a.apply(&View { peers: &[Peer::via(&o, &[(&p, 5)])], ..islands });
+    o.apply(&View { peers: &[Peer::via(&a, &[(&h, 5)])], ..islands });
+    a.spawn_echo();
+    let mut changes = o.paths.subscribe();
+
+    echo_once(&o, &a, &megabyte()).await;
+    assert_eq!(o.route_to(&a), Route::Relay { relays: vec![p.id, h.id] });
+    assert_eq!(a.route_to(&o), Route::Relay { relays: vec![h.id, p.id] });
+    let report = o.paths.path_report(a.id).expect("A 是 O 的对端");
+    assert_eq!(report.mode, RoutingMode::DirectFirst);
+    assert_eq!(report.cause, Some(RouteCause::NoSharedRelay { hint: None }), "{}", report.reason);
+    assert!(report.reason.contains("没有一个 relay 两端都用得上"), "{}", report.reason);
+    let reasons = drain_reasons(&mut changes, &a);
+    assert!(reasons.iter().any(|reason| reason.contains(&format!("经 relay {} → {}", p.id, h.id))), "{reasons:?}");
+
+    // 一个两边都连得上的 relay S 出现了：这一对马上换到它上面，正在传的流不断。
+    let transfer = Transfer::start(&o, &a, 200).await;
+    transfer.expect_progress(100).await;
+    s.unblock();
+    for relay in [&h, &p, &s] {
+        relay.apply(&View { relays: &[&h, &p, &s], relay_clients: Some(&[&a, &o]), ..View::default() });
+    }
+    s.wait_relay_enabled().await;
+    let shared = View { relays: &[&h, &p, &s], udp_only: true, ..View::default() };
+    a.block(&[&o, &p]);
+    o.block(&[&a, &h]);
+    a.apply(&View { peers: &[Peer::via(&o, &[(&p, 5), (&s, 6)])], ..shared });
+    o.apply(&View { peers: &[Peer::via(&a, &[(&h, 5), (&s, 6)])], ..shared });
+    o.wait_route(&a, "经 S 一个 relay", |route| *route == Route::Relay { relays: vec![s.id] }).await;
+    transfer.expect_progress(100).await;
+    transfer.finish().await;
+    let report = o.paths.path_report(a.id).unwrap();
+    assert_eq!(report.cause, Some(RouteCause::RelayChanged { hint: RouteHint::Shortcut, previous: vec![p.id, h.id] }), "{}", report.reason);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
