@@ -1,4 +1,4 @@
-//! 节点对设置：连接常驻、独占 TCP（lane）和拥塞控制。
+//! 节点对设置：连接常驻、ice3proxy（lane）和拥塞控制。
 
 use i3t_model::admin::{LaneBlock, LaneEffect, LaneOpening, LogRef, NetworkId, PairInput, PairLaneSide, PairSetting, PairView};
 use i3t_model::control::LANE_REVISION;
@@ -13,7 +13,7 @@ use crate::node_addresses;
 use crate::store::{NodeRecord, PairOptions, Store};
 
 impl Controller {
-    /// 一个网络里全部的节点对设置，带着独占 TCP 起不起作用、两边报上来的状况。
+    /// 一个网络里全部的节点对设置，带着 ice3proxy 起不起作用、两边报上来的状况。
     ///
     /// # Errors
     ///
@@ -50,7 +50,7 @@ impl Controller {
                 LaneMode::Always => "总是用",
             };
             let congestion_text = congestion.map_or("节点的默认", Congestion::as_str);
-            let detail = format!("节点 #{a} 和 #{b}：连接常驻 {}，独占 TCP {lane_text}，拥塞控制 {congestion_text}", switch(keep_alive));
+            let detail = format!("节点 #{a} 和 #{b}：连接常驻 {}，ice3proxy {lane_text}，拥塞控制 {congestion_text}", switch(keep_alive));
             let params = json!({ "keep_alive": keep_alive, "lane": lane, "congestion": congestion });
             store.log_refs(
                 now,
@@ -124,7 +124,7 @@ impl Inner {
         Ok(PairView { setting, lane_effect, lanes })
     }
 
-    /// 独占 TCP 的设置在这一对节点上起不起作用。
+    /// ice3proxy 的设置在这一对节点上起不起作用。
     fn lane_effect(&self, network: NetworkId, setting: &PairSetting) -> Result<LaneEffect, Error> {
         let (a, b) = (self.require_node(network, setting.a)?, self.require_node(network, setting.b)?);
         let cidr = self.require_network(network)?.cidr;
@@ -164,7 +164,7 @@ impl Inner {
             let dialers = dialers.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join("、");
             format!(
                 "由 {dialers} 拨对方的 TCP 端口；{when}新的 TCP 流（代理的 CONNECT、TCP 端口转发）每条独占一条 TCP，取不到时悄悄改走共用的连接。\
-                 这一对节点之间共用的连接和它的路照常保持：UDP 应用的数据和别的流走它，路由视图显示的是它的路；走独占 TCP 的流不换路。",
+                 这一对节点之间共用的连接和它的路照常保持：UDP 应用的数据和别的流走它，路由视图显示的是它的路；走 ice3proxy 的流不换路。",
                 when = if setting.lane == LaneMode::UdpFallback { "共用的连接到对方没有 UDP 的路时，" } else { "" }
             )
         } else {

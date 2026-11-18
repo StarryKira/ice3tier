@@ -39,7 +39,7 @@ impl LaneError {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum OpenLaneError {
-    #[error("没有为节点 {0} 打开独占 TCP")]
+    #[error("没有为节点 {0} 打开 ice3proxy")]
     NotEnabled(NodeId),
     #[error("节点 {0} 的控制 lane 不在，现在没有它停在这里的 lane")]
     NoControl(NodeId),

@@ -186,7 +186,7 @@ pub(crate) fn control_arrived(inner: &Arc<Inner>, mut lane: Lane) {
     let (commands, receiver) = mpsc::unbounded_channel();
     let generation = {
         let mut peers = inner.lock_peers();
-        let Some(entry) = peers.get_mut(&peer) else { return inner.refuse(peer, "没有为这个节点打开独占 TCP") };
+        let Some(entry) = peers.get_mut(&peer) else { return inner.refuse(peer, "没有为这个节点打开 ice3proxy") };
         let holder = &mut entry.holder;
         if let Some(old) = holder.control.take() {
             let _ = old.commands.send(Command::Replace);
@@ -214,7 +214,7 @@ pub(crate) fn parked_arrived(inner: &Arc<Inner>, lane: Lane) {
     let mut peers = inner.lock_peers();
     let Some(entry) = peers.get_mut(&peer) else {
         drop(peers);
-        return inner.refuse(peer, "没有为这个节点打开独占 TCP");
+        return inner.refuse(peer, "没有为这个节点打开 ice3proxy");
     };
     let holder = &mut entry.holder;
     let refusal = match &holder.control {

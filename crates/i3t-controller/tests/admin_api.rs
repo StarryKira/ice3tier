@@ -580,7 +580,7 @@ async fn credentials_listeners_forwards_and_pairs_round_trip() {
     assert_eq!((pair.a, pair.b, pair.keep_alive), (gateway.id, target.id, true), "编号小的在前");
     let pairs: Vec<model::PairSetting> = api.ok(Method::GET, &format!("{base}/pairs"), None).await;
     assert_eq!(pairs, vec![pair]);
-    // 只改独占 TCP，常驻不变；应答说明设置起不起作用。
+    // 只改 ice3proxy，常驻不变；应答说明设置起不起作用。
     let view: model::PairView = api.ok(Method::PUT, &pair_path, Some(json!({ "lane": "always" }))).await;
     assert_eq!((view.setting.keep_alive, view.setting.lane), (true, i3t_model::netmap::LaneMode::Always));
     assert!(view.lane_effect.is_some_and(|effect| !effect.summary.is_empty()));

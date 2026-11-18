@@ -38,12 +38,12 @@ pub async fn open<C: Connector>(
     request.encode(&mut bytes);
     bytes.extend_from_slice(first_data);
     send.write_all(&bytes).await.map_err(FlowError::Write)?;
-    // 首批数据本身就是 TLS 时，跑在独占 TCP 上的流之后不再加密第二次。
+    // 首批数据本身就是 TLS 时，跑在 ice3proxy 上的流之后不再加密第二次。
     send.end_header(Payload::for_first_data(first_data));
     Ok(Pending { send, recv, class: request.class, started })
 }
 
-/// 在和 `peer` 的连接上量一个往返（`i3t ping`）：开一条流（不走独占 TCP），写一个往返测量的 OPEN，等对端的 REPLY。
+/// 在和 `peer` 的连接上量一个往返（`i3t ping`）：开一条流（不走 ice3proxy），写一个往返测量的 OPEN，等对端的 REPLY。
 /// 返回从写出 OPEN 到读到 REPLY 用了多久。
 ///
 /// 和 `peer` 之间还没有连接时，这一次包括建立连接的时间；要量连接本身的往返，先调一次把连接建起来。

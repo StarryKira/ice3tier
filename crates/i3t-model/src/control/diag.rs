@@ -329,7 +329,7 @@ pub struct Throughput {
     /// 量不了时的原因（对端拒绝、关掉了吞吐测试、流中途断了等）。
     #[serde(default)]
     pub failure: Option<TestCode>,
-    /// 用的传输。现在总是 `"quic"`：测量流走这一对节点之间共用的连接，不经独占 TCP。
+    /// 用的传输。现在总是 `"quic"`：测量流走这一对节点之间共用的连接，不经 ice3proxy。
     #[serde(default)]
     pub transport: String,
     /// 连接用的拥塞控制：`"bbr"` 或 `"cubic"`。

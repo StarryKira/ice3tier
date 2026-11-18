@@ -52,7 +52,7 @@ pub struct LiveStatus {
     pub exit: Option<ExitReport>,
     /// 入口上各个接入凭据这次运行以来的用量。
     pub credentials: Vec<CredentialUsage>,
-    /// 独占 TCP（lane）。没有为任何对端打开、也从来没用过时没有。
+    /// ice3proxy（lane）。没有为任何对端打开、也从来没用过时没有。
     pub lanes: Option<LaneReport>,
     /// 正在用的性能档位。旧版本的节点不给。
     pub performance: Option<PerformanceReport>,

@@ -132,7 +132,7 @@ const HELP: Help = Help {
     pair_list: "List node pairs",
     pair_set: "Set a node pair",
     pair_keep_alive: "Keep alive",
-    pair_lane: "TCP lanes",
+    pair_lane: "ice3proxy",
     pair_congestion: "Congestion control; default goes back to the node's default (bbr). Applies to connections made afterwards",
     pair_unset: "Reset a node pair to defaults",
     access_group: "Access",
@@ -409,10 +409,10 @@ const UI: Ui = Ui {
     listener: "Listener",
     forwards_header: ["ID", "PROTOCOL", "LISTEN", "TARGET", "STATUS", "LISTEN-STATE", "CONNECTIONS", "TRAFFIC", "ALLOWED", "NAME"],
     no_forwards: "No port forwards",
-    pairs_header: ["A", "B", "KEEP-ALIVE", "TCP-LANES", "CONGESTION", "EFFECT", "IN-USE", "FALLBACKS"],
+    pairs_header: ["A", "B", "KEEP-ALIVE", "ICE3PROXY", "CONGESTION", "EFFECT", "IN-USE", "FALLBACKS"],
     no_pairs: "No node pair settings",
     keep_alive: "Keep alive",
-    lanes: "TCP lanes",
+    lanes: "ice3proxy",
     congestion: "Congestion control",
     congestion_default: "default",
     lane_effect: "Effect",
@@ -421,7 +421,7 @@ const UI: Ui = Ui {
     dialers: "Dials",
     udp_path: "shared connection has UDP",
     no_udp_path: "shared connection has no UDP",
-    new_streams_on_lanes: "New TCP streams on lanes",
+    new_streams_on_lanes: "New TCP streams on ice3proxy",
     new_streams_shared: "New TCP streams on the shared connection",
     peer_lanes: |dials, control, idle, ready, parked, counts| {
         let dials = if dials { "dials" } else { "dialled" };
@@ -648,7 +648,7 @@ fn log(entry: &LogEntry) -> Option<String> {
                 p.text("target_addr")
             )
         }
-        "pair.set" => format!("Node pair {}: keep alive {}, TCP lanes {}", pair(), switch("keep_alive"), p.text("lane")),
+        "pair.set" => format!("Node pair {}: keep alive {}, ice3proxy {}", pair(), switch("keep_alive"), p.text("lane")),
         "pair.delete" => format!("Node pair {} reset to defaults", pair()),
         "update.settings" => format!("Automatic updates {}, release source {}", switch("auto_update"), p.text("source")),
         "update.release" => format!("New version {} on the release source", p.text("version")),

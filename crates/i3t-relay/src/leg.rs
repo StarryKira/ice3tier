@@ -125,11 +125,11 @@ async fn accept(inner: Arc<Inner>, listener: TcpListener) {
     }
 }
 
-/// 同一个端口上还接独占 TCP 时，连接多久之内要发来第一个字节，才知道它是哪一种。
+/// 同一个端口上还接 ice3proxy 时，连接多久之内要发来第一个字节，才知道它是哪一种。
 pub(crate) const CLASSIFY_TIMEOUT: Duration = Duration::from_secs(3);
-/// 独占 TCP 以 TLS 的握手记录开头。中转以 2 字节的帧长度开头，第一帧是很短的会话握手，高字节远小于它。
+/// ice3proxy 以 TLS 的握手记录开头。中转以 2 字节的帧长度开头，第一帧是很短的会话握手，高字节远小于它。
 const LANE_FIRST_BYTE: u8 = 0x16;
-/// 还没认出协议的 TCP，同一个来源同时最多几条。比中转的握手名额（8）大：一个拨独占 TCP 的节点池被抽干时
+/// 还没认出协议的 TCP，同一个来源同时最多几条。比中转的握手名额（8）大：一个拨 ice3proxy 的节点池被抽干时
 /// 一下子会拨上百条（它自己限制在 128 条以内），全都从同一个地址来，第一个字节一个往返之内就到。
 const MAX_UNCLASSIFIED_PER_SOURCE: usize = 256;
 /// 还没认出协议的 TCP，全部来源合计最多几条。

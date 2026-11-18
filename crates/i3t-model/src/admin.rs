@@ -629,7 +629,7 @@ pub struct NodeDetail {
     pub flows: u32,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
-    /// 节点本次连接期间最近一次报的独占 TCP（lane）的状况。不在线、旧版本、或者还没报过时是 `null`。
+    /// 节点本次连接期间最近一次报的 ice3proxy（lane）的状况。不在线、旧版本、或者还没报过时是 `null`。
     #[serde(default)]
     pub lanes: Option<LaneReport>,
     /// 上面这些上报的值（`lanes`、`flows`、流量、`mapping_varies`）是多少秒之前报的；这次连接上还没有上报过是 `null`。
@@ -1332,7 +1332,7 @@ pub struct PairSetting {
     pub b: NodeId,
     /// 这一对节点之间的连接常驻，不因为没有流而关闭。
     pub keep_alive: bool,
-    /// 这一对节点之间承载 TCP 连接的流用不用独占 TCP（lane）。
+    /// 这一对节点之间承载 TCP 连接的流用不用 ice3proxy（lane）。
     #[serde(default)]
     pub lane: LaneMode,
     /// 这一对节点之间的连接用哪种拥塞控制；`null` 表示用节点的默认（BBR）。
@@ -1352,12 +1352,12 @@ pub struct PairInput {
     pub congestion: Option<Option<Congestion>>,
 }
 
-/// 节点对视图里的一项：设置，加上独占 TCP 起不起作用、两边报上来的状况。
+/// 节点对视图里的一项：设置，加上 ice3proxy 起不起作用、两边报上来的状况。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairView {
     #[serde(flatten)]
     pub setting: PairSetting,
-    /// 独占 TCP 的设置起不起作用。`lane` 是 `off` 时没有。
+    /// ice3proxy 的设置起不起作用。`lane` 是 `off` 时没有。
     #[serde(default)]
     pub lane_effect: Option<LaneEffect>,
     /// 两个节点各自报上来的、和对方之间的 lane（不在线或者没报的节点不在里面）。
@@ -1365,10 +1365,10 @@ pub struct PairView {
     pub lanes: Vec<PairLaneSide>,
 }
 
-/// 独占 TCP 的设置起不起作用，为什么。
+/// ice3proxy 的设置起不起作用，为什么。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaneEffect {
-    /// 至少一个节点能拨另一个节点的 TCP 端口，两个节点都懂独占 TCP，访问规则连通了它们。
+    /// 至少一个节点能拨另一个节点的 TCP 端口，两个节点都懂 ice3proxy，访问规则连通了它们。
     pub effective: bool,
     /// 不起作用的原因，`effective` 为真时是空的。
     #[serde(default)]
@@ -1376,28 +1376,28 @@ pub struct LaneEffect {
     /// 拨号的节点：另一个节点启用了 relay、有已知的 TCP 地址。两个都能拨时各自用自己拨的 lane。
     #[serde(default)]
     pub dialers: Vec<NodeId>,
-    /// 给人看的说明。独占 TCP 只承载 TCP 流：这一对节点之间共用的连接和它的路照常存在，UDP 应用的数据和别的流走它，
+    /// 给人看的说明。ice3proxy 只承载 TCP 流：这一对节点之间共用的连接和它的路照常存在，UDP 应用的数据和别的流走它，
     /// 路由视图里显示的是共用连接的路。
     pub summary: String,
-    /// 设置是 `udp_fallback` 时，两个节点各自开新的 TCP 流现在走不走独占 TCP。只有在线、并且报了这一项的节点在里面；
+    /// 设置是 `udp_fallback` 时，两个节点各自开新的 TCP 流现在走不走 ice3proxy。只有在线、并且报了这一项的节点在里面；
     /// 设置是别的值时是空的。
     #[serde(default)]
     pub opening: Vec<LaneOpening>,
 }
 
-/// 一个节点开新的 TCP 流现在走不走独占 TCP（`udp_fallback` 时），按它自己看到的。
+/// 一个节点开新的 TCP 流现在走不走 ice3proxy（`udp_fallback` 时），按它自己看到的。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaneOpening {
     /// 开流的节点。
     pub node: NodeId,
     /// 它到对方的共用连接现在有没有 UDP 的路。
     pub udp_path: bool,
-    /// 它现在开的新 TCP 流走独占 TCP：设置起作用，并且共用连接上没有 UDP 的路。取不到 lane 时（控制连接不在、池空了）
+    /// 它现在开的新 TCP 流走 ice3proxy：设置起作用，并且共用连接上没有 UDP 的路。取不到 lane 时（控制连接不在、池空了）
     /// 照样悄悄改走共用的连接，见 `lanes` 里的 `control` 和 `fallbacks`。
     pub lanes: bool,
 }
 
-/// 独占 TCP 的设置不起作用的一个原因。
+/// ice3proxy 的设置不起作用的一个原因。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum LaneBlock {
@@ -1405,7 +1405,7 @@ pub enum LaneBlock {
     NoRelay,
     /// 启用了 relay 的这个节点还没有已知的地址（它还没有连上过 controller）。
     NoTcpAddress { node: NodeId },
-    /// 这个节点的版本太旧，不懂独占 TCP（或者还从来没有连上过 controller）。
+    /// 这个节点的版本太旧，不懂 ice3proxy（或者还从来没有连上过 controller）。
     NodeTooOld { node: NodeId },
     /// 访问规则没有连通这两个节点：它们互相不在对方的 netmap 里。
     NotConnected,
@@ -1876,7 +1876,7 @@ mod tests {
         assert_eq!(value["lane_effect"]["blocked"], json!([{ "reason": "no_relay" }, { "reason": "node_too_old", "node": 2 }]));
         assert_eq!(value["lane_effect"]["opening"], json!([{ "node": 1, "udp_path": false, "lanes": false }]));
         assert_eq!(serde_json::from_value::<PairView>(value).unwrap(), view);
-        // 旧的 controller 给的节点对没有独占 TCP 的设置。
+        // 旧的 controller 给的节点对没有 ice3proxy 的设置。
         let old: PairSetting = serde_json::from_value(json!({ "a": 1, "b": 2, "keep_alive": false })).unwrap();
         assert_eq!((old.lane, old.congestion), (LaneMode::Off, None));
     }

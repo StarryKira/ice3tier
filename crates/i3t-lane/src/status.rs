@@ -27,7 +27,7 @@ impl Counter {
         self.0.load(Ordering::Relaxed)
     }
 
-    /// 底下的原子数本身：交给别人去加（独占 TCP 交出去直接搬时，搬的一方往上加）。
+    /// 底下的原子数本身：交给别人去加（ice3proxy 交出去直接搬时，搬的一方往上加）。
     pub(crate) fn shared(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.0)
     }
@@ -125,7 +125,7 @@ pub struct LaneStatus {
     pub total: LaneCounts,
     /// 别人拨进来、没有成功的握手，按原因分。分不到对端名下，只有全节点的。
     pub handshake_failures: HandshakeFailures,
-    /// 每个打开了独占 TCP 的对端。
+    /// 每个打开了 ice3proxy 的对端。
     pub peers: Vec<PeerLaneStatus>,
 }
 

@@ -1,4 +1,4 @@
-//! 共用的连接和独占 TCP 装在一起：上层还是只看到一个 [`Connector`]、一个 [`Acceptor`]。
+//! 共用的连接和 ice3proxy 装在一起：上层还是只看到一个 [`Connector`]、一个 [`Acceptor`]。
 //!
 //! - [`LaneConnector`]：[`Connector::open_tcp`]（承载一条 TCP 连接的流）在调用方的选择函数说"这个对端走 lane"
 //!   并且现在开得出 lane 时走 lane；开不出来（池空等满了、控制 lane 不在、对方要走了、拨不通）就悄悄改走共用的连接，

@@ -4,7 +4,7 @@
 //!
 //! 现在有的：流（入口、出口各有多少在进行，出口一共收到过多少）、字节数、没建成的请求按归因分类、
 //! 出口的配额，按凭据的用量，经各个出口出去的流（发起这一侧看到的），relay 的转发和丢弃、
-//! 到每个对端走的是哪一种路和延迟、独占 TCP（lane）的水位和计数、和 controller 的连接、更新的状态。
+//! 到每个对端走的是哪一种路和延迟、ice3proxy（lane）的水位和计数、和 controller 的连接、更新的状态。
 //! 白皮书说的"不做交叉组合"：按凭据和按出口是两组各自独立的数，没有"某个凭据经某个出口"这样的组合。
 
 use i3t_conn::DropReason;
@@ -148,7 +148,7 @@ fn rtt_deviation_ms(predicted_ms: Option<u32>, actual: std::time::Duration) -> O
     predicted_ms.map(|predicted| millis(actual) - f64::from(predicted))
 }
 
-/// 独占 TCP（lane）：每个打开了它的对端一组，加上全节点的握手失败。
+/// ice3proxy（lane）：每个打开了它的对端一组，加上全节点的握手失败。
 fn lane_metrics(out: &mut Exposition, status: &LaneStatus, name_of: &impl Fn(NodeId) -> String) {
     for peer in &status.peers {
         let name = name_of(peer.peer);

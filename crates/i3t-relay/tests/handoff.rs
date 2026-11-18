@@ -1,4 +1,4 @@
-//! 同一个 TCP 端口上还接独占 TCP（lane）：按第一个字节分开，中转的限制照旧。
+//! 同一个 TCP 端口上还接 ice3proxy（lane）：按第一个字节分开，中转的限制照旧。
 
 // 这个文件里全是测试。clippy.toml 的 allow-unwrap-in-tests 只管 #[test] 函数本身，管不到它们调用的辅助函数。
 #![allow(clippy::unwrap_used)]
@@ -122,7 +122,7 @@ async fn hostile_first_bytes_go_down_the_relay_path_and_are_refused_there() {
         stream.write_all(garbage).await.unwrap();
         assert!(closed_within(&mut stream, Duration::from_secs(12)).await, "{garbage:?} 应该被断开");
     }
-    assert!(handed.try_recv().is_err(), "这些连接都不该交给独占 TCP");
+    assert!(handed.try_recv().is_err(), "这些连接都不该交给 ice3proxy");
 }
 
 #[tokio::test]

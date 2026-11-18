@@ -11,7 +11,7 @@
 //!
 //! 接收方也可以主动叫停（[`RecvStream::stop`]）：发送方之后的写会出错，[`StreamAborted::of`] 同样能取出原因码。
 //!
-//! # 独占 TCP（lane）要上层多做的事
+//! # ice3proxy（lane）要上层多做的事
 //!
 //! 一条流也可能跑在一条只属于它的 TCP 上（`i3t-lane`）。那时上层多做三件事，跑在共用连接上的流全部是空操作：
 //!
@@ -96,7 +96,7 @@ pub trait RecvStream: AsyncRead + Unpin + Send + 'static {
     }
 }
 
-/// 流的头之后，这个方向上的数据怎么走。只对跑在独占 TCP 上的流有意义。
+/// 流的头之后，这个方向上的数据怎么走。只对跑在 ice3proxy 上的流有意义。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Payload {
     /// 一直加密。
@@ -264,7 +264,7 @@ pub trait Connector: Send + Sync + 'static {
 
     /// 到 `peer` 开一条承载一条 TCP 连接的流（代理的 CONNECT、TCP 端口转发）。
     ///
-    /// 实现可以为这种流挑另一种传输（一对节点之间打开了独占 TCP 时，每条这样的流独占一条 TCP）。默认同 [`open`](Self::open)。
+    /// 实现可以为这种流挑另一种传输（一对节点之间打开了 ice3proxy 时，每条这样的流独占一条 TCP）。默认同 [`open`](Self::open)。
     fn open_tcp(&self, peer: NodeId) -> impl Future<Output = Result<(Self::Send, Self::Recv), OpenError>> + Send {
         self.open(peer)
     }

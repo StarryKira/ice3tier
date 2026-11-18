@@ -13,7 +13,7 @@
 //! 2. 每次连上 controller 就向更新库确认一次：新程序连上了 controller 才算更新成功。
 //! 3. controller 的指示交给 [`update`](crate::update)，包经长连接取，状态的每次变化马上上报。
 //! 4. 更新进行到"排空中"时不再接新的流（见 [`drain`](crate::drain)）：入口和出口都明确拒绝新的请求，监听照常开着；
-//!    对端不再在和本节点之间的独占 TCP 上开新的流。
+//!    对端不再在和本节点之间的 ice3proxy 上开新的流。
 //! 5. 程序文件换好之后把最后的状态报上去，然后返回 [`Outcome::Restart`]。
 
 use std::ffi::OsString;
@@ -204,7 +204,7 @@ pub async fn run(
     let quota =
         quota.map_or_else(QuotaState::default, |record| QuotaState { period_start: record.period_start, used_bytes: record.used_bytes });
     let ports = Arc::new(StatePorts::open(state.clone()));
-    // 入口和出口用的连接层：共用的连接，加上按节点对的设置给 TCP 流用的独占 TCP。
+    // 入口和出口用的连接层：共用的连接，加上按节点对的设置给 TCP 流用的 ice3proxy。
     let lanes = Arc::new(NodeLanes::new(&key, Arc::clone(&endpoint))?);
     let connector = lanes.connector();
     // 每条流结束时的摘要里写这对节点的连接走的路，入口和出口问的是同一个。

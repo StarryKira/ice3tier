@@ -152,8 +152,8 @@
 > - 路径 `PathLeg` 多了 `cause`，`since` 里也多了 `cause`（第 15 节）：为什么是现在这条路、为什么换到它。
 > - 节点更新（第 14 节）：`UpdateOverview.check_cause`、`packages[].cause`、`paused[].cause`、`ForcedUpdates.skipped[].cause`、
 >   节点的 `update.status.cause`（`failed` 时）、`update.failure.cause`。
-> - 独占 TCP（第 12 节）：`PairLaneSide.reported_secs_ago`（两边的计数是多少秒之前报的）、`LaneEffect.opening`（`udp_fallback` 时两个节点
->   各自开新的 TCP 流现在走不走独占 TCP）、`PeerLanes.udp_path`；节点详情 `NodeDetail.reported_secs_ago`（第 5 节）。
+> - ice3proxy（第 12 节）：`PairLaneSide.reported_secs_ago`（两边的计数是多少秒之前报的）、`LaneEffect.opening`（`udp_fallback` 时两个节点
+>   各自开新的 TCP 流现在走不走 ice3proxy）、`PeerLanes.udp_path`；节点详情 `NodeDetail.reported_secs_ago`（第 5 节）。
 > - 节点多了 `country`（第 5 节）：公网地址所在的国家或地区，ISO 3166-1 的两个大写字母，controller 查程序自带的离线地址库（DB-IP 的 IP to Country Lite，CC BY 4.0）得出；不知道时是 `null`。
 > - 节点协议没有升版：节点上报里新加的（`PeerLanes.udp_path`、监听状态和更新进度的 `cause`、路由回答里的 `cause`）都可以没有，
 >   旧的 controller 忽略它们，旧的节点不报。
@@ -172,9 +172,9 @@
 >
 > 已有接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **更早的新增**（独占 TCP）。这一次的清单：
+> **更早的新增**（ice3proxy）。这一次的清单：
 >
-> - 节点对设置多了 `lane`：这一对节点之间承载 TCP 连接的流用不用独占 TCP，`"off"`（默认）、`"udp_fallback"`、`"always"`（第 12 节）。
+> - 节点对设置多了 `lane`：这一对节点之间承载 TCP 连接的流用不用 ice3proxy，`"off"`（默认）、`"udp_fallback"`、`"always"`（第 12 节）。
 > - `GET /networks/{network}/pairs` 和 `PUT …/pairs/{a}/{b}` 的应答从 `PairSetting` 变成 `PairView`：原来的字段还在同一层，多了 `lane`、`lane_effect`（设置起不起作用、为什么、谁拨谁）和 `lanes`（两个节点各自报的状况）。新的结构 `PairView`、`LaneEffect`、`LaneBlock`、`PairLaneSide`、`PeerLanes`、`LaneCounts`、`LaneReport`、`LaneHandshakeFailures`（第 12 节）。
 > - 节点详情 `NodeDetail` 多了 `lanes`（第 5 节）。
 > - 行为上的变化：`PUT …/pairs/{a}/{b}` 的请求体里每一项都可以省略，没写的项保持原样（这一对还没有设置时取默认值）；以前只有 `keep_alive` 一项、必须写。
@@ -411,7 +411,7 @@ controller 自己的情况。也用来检查地址和令牌对不对。
 ```json
 [
   {
-    "id": 19, "at": 1794798564, "network": 1, "action": "pair.set", "detail": "节点 #2 和 #1：连接常驻 开，独占 TCP 不用",
+    "id": 19, "at": 1794798564, "network": 1, "action": "pair.set", "detail": "节点 #2 和 #1：连接常驻 开，ice3proxy 不用",
     "refs": [{ "kind": "node", "id": 2 }, { "kind": "node", "id": 1 }],
     "params": { "a": 1, "a_name": "nas", "b": 2, "b_name": "laptop", "keep_alive": true, "lane": "off" }
   },
@@ -802,7 +802,7 @@ TCP 的流在任何取值下都是可靠的，取值只决定同一条连接上�
 | `mapping_varies` | 映射出来的端口是不是随对端变化。`true` 时这台机器所在的网络基本打不了洞，界面应当提示。不在线或者还不知道时是 `null` |
 | `flows` | 正在进行的流的数量 |
 | `tx_bytes`、`rx_bytes` | 节点启动以来发出和收到的字节数 |
-| `lanes` | 「新增」独占 TCP 的状况，结构是 `LaneReport`（第 12 节）。节点不在线、版本太旧没有报、或者还没有上报过时是 `null` |
+| `lanes` | 「新增」ice3proxy 的状况，结构是 `LaneReport`（第 12 节）。节点不在线、版本太旧没有报、或者还没有上报过时是 `null` |
 | `reported_secs_ago` | 「新增」节点最近一次上报是多少秒之前，上面这几项（`lanes`、`flows`、流量、`mapping_varies`）都是那一次报的。这次连接上还没有上报过、或者不在线时是 `null` |
 | `performance` | 「新增」节点实际在用的性能档位（`PerformanceReport`），见下表。节点不在线、版本太旧没有报、或者还没有上报过时是 `null` |
 | `intercept` | 「新增」透明访问的状况（`InterceptReport`），见下面。节点不在线、版本太旧没有报、或者还没有上报过时是 `null`；节点没有打开时是 `{ "state": "off", … }` |
@@ -1105,7 +1105,7 @@ relay 的带宽上限（第 5.5 节）是另一回事，照旧。
 |---|---|
 | `direct` | 走直连时，这条直连是怎么建立起来的：`"lan"`（同一个局域网）、`"ipv6"`（对端的 IPv6 地址）、`"reachable"`（不用打洞也建得起来：一边的探测在打洞之前就得到了回答，也就是有一边的地址本来就连得上——公网地址、端口转发、端口映射）、`"punched"`（要两边在打洞的那一轮里同时发才通）。比 controller 新的节点报了这里不认识的类型时是 `"unknown"`。不是直连时是 `null`。「新增」两端各自按自己看到的判断：一边先探测到了另一边时，两端说的都是 `"reachable"`（以前先被探测到的那一端说 `"punched"`）。还会不一样的情形只有一种：打洞信令比对端的探测先到、这一端已经在那一轮里发了探测，这一端说 `"punched"`，另一端说 `"reachable"`；读法是"两边在同一轮里碰上的，至少有一边的地址本来就连得上" |
 | `relay_leg` | 经 relay 时，节点到第一个 relay 的那一段走的是 `"udp"` 还是 `"tcp"`（UDP 用不了时的 TCP 中转）。不是经 relay、或者节点的版本太旧不报时是 `null` |
-| `flows` | 「新增」这个节点和对端之间的共用连接上现在开着几条流（两边谁开的都算；独占 TCP 上的流不在这里，见第 12 节的 `lanes`）。和对端现在没有连接、或者节点的版本太旧不报时是 `null` |
+| `flows` | 「新增」这个节点和对端之间的共用连接上现在开着几条流（两边谁开的都算；ice3proxy 上的流不在这里，见第 12 节的 `lanes`）。和对端现在没有连接、或者节点的版本太旧不报时是 `null` |
 | `tx_bytes`、`rx_bytes` | 「新增」节点启动以来在和这个对端的连接上发出、收到的字节数：线上的字节，含 QUIC 自己的开销和重传，连接关了重建也接着累计。有没有同 `flows`。节点每次上报最多带 256 个对端（流量大的在前），超出的是 `null` |
 | `direct_status` | 「新增」到这个对端的直连现在在哪一步，不管现在走不走它（`DirectStatusView`，见下）。节点的版本太旧不报时是 `null` |
 | `alternative` | 「新增」这个节点没在用的那种选路模式此刻会选的路：`{ "route": 路（写法同 `route`）, "rtt_ms": 延迟或 null }`。节点用默认模式时是延迟优先会选的（按选路器的代价，从现在的路出发、用它的差距 max(5 ms, 10%) 算，局域网直连优先），用延迟优先时是默认模式会选的（有验证过的直连就直连，否则照常挑一个 relay）；那种模式没有路可走时 `route` 是 `{ "via": "none" }`。节点用自己手上的候选算，不为它另外探测，默认模式下每 5 秒的评估窗口算一次。和现在的路一样、节点还没有算过、或者它的版本太旧不报时是 `null`。有了它，比较两种模式不用再按对端各问一次 `GET …/path` |
@@ -1684,11 +1684,11 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
 |---|---|
 | `a`、`b` | 两个节点的编号，`a` 小于 `b` |
 | `keep_alive` | 为 `true` 时这一对节点之间的连接常驻，不因为没有流而关闭 |
-| `lane` | 「新增」这一对节点之间承载 TCP 连接的流（代理的 CONNECT、TCP 端口转发）用不用独占 TCP：每条用户连接在两个节点之间独占一条 TCP，而不是共用连接里的一条流。`"off"`（默认）：不用。`"udp_fallback"`：开流的一方到对方的共用连接上没有 UDP 的路（UDP 不通、只能经 relay 的 TCP 中转）时，新的 TCP 流走独占 TCP。`"always"`：新的 TCP 流都走独占 TCP。取不到独占 TCP 时（池空了、对方在排空、拨不通）流悄悄改走共用的连接，只在计数里记一笔；已经在跑的流不会换传输，改设置也不影响它们 |
+| `lane` | 「新增」这一对节点之间承载 TCP 连接的流（代理的 CONNECT、TCP 端口转发）用不用 ice3proxy：每条用户连接在两个节点之间独占一条 TCP，而不是共用连接里的一条流。`"off"`（默认）：不用。`"udp_fallback"`：开流的一方到对方的共用连接上没有 UDP 的路（UDP 不通、只能经 relay 的 TCP 中转）时，新的 TCP 流走 ice3proxy。`"always"`：新的 TCP 流都走 ice3proxy。取不到 ice3proxy 时（池空了、对方在排空、拨不通）流悄悄改走共用的连接，只在计数里记一笔；已经在跑的流不会换传输，改设置也不影响它们 |
 
 | `congestion` | 「新增」这一对节点之间的连接用哪种拥塞控制：`"bbr"`（节点自己写的 BBR，不把随机丢包当作拥塞）或 `"cubic"`（QUIC 库自带的，每次丢包都减速）；`null` 是用节点的默认（BBR）。两个节点的配置里是同一个值，两边各自按它管自己往外发的方向。只对之后建立的连接生效：已经建立的连接一直用建立时的那一种，到它空闲回收（或者节点重启）之后新建的连接才换。旧版本的节点不认，照旧用它自己的默认。比这个文档新的 controller 存了不认识的值时读成 `null` |
 
-独占 TCP 要两个节点里至少有一个启用了 relay、有已知的 TCP 地址：另一个节点拨它的节点端口（relay 在同一个端口号上听 TCP）。两个都能被拨时，各自用自己拨的连接往对方开流。UDP 应用的数据、数据报和别的流始终走共用的连接，这一对节点之间的共用连接和它的路照常保持（路由视图里显示的是它的路）。
+ice3proxy 要两个节点里至少有一个启用了 relay、有已知的 TCP 地址：另一个节点拨它的节点端口（relay 在同一个端口号上听 TCP）。两个都能被拨时，各自用自己拨的连接往对方开流。UDP 应用的数据、数据报和别的流始终走共用的连接，这一对节点之间的共用连接和它的路照常保持（路由视图里显示的是它的路）。
 
 ### PairView「新增」
 
@@ -1722,12 +1722,12 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
 | 字段 | 含义 |
 |---|---|
 | `lane_effect` | `lane` 不是 `"off"` 时有：设置起不起作用。`lane` 是 `"off"` 时是 `null` |
-| `lane_effect.effective` | 起作用：至少一边能被拨，两个节点都懂独占 TCP，访问规则连通了它们 |
+| `lane_effect.effective` | 起作用：至少一边能被拨，两个节点都懂 ice3proxy，访问规则连通了它们 |
 | `lane_effect.blocked` | 不起作用的原因，`LaneBlock` 的数组，起作用时是 `[]`。不起作用时这一对的流都走共用的连接 |
 | `lane_effect.dialers` | 拨号的节点：对方启用了 relay、有 TCP 地址的那一个（或者两个） |
 | `lane_effect.summary` | 给人看的一句说明（中文原话）。界面用 `effective`、`blocked`、`dialers` 写 |
-| `lane_effect.opening` | 「新增」设置是 `udp_fallback` 时，两个节点各自开新的 TCP 流现在走不走独占 TCP，`LaneOpening` 的数组：`node` 是开流的节点，`udp_path` 是它到对方的共用连接现在有没有 UDP 的路（直连，或者经 UDP 连着的 relay），`lanes` 是它现在开的新 TCP 流走独占 TCP（设置起作用并且 `udp_path` 是 `false`；取不到 lane 时照样悄悄改走共用的连接，见 `lanes` 里的 `control` 和 `fallbacks`）。只有在线、并且报了 `udp_path` 的节点在里面；设置是别的值时是 `[]` |
-| `lanes` | 两个节点各自报上来的、和对方之间的独占 TCP，`PairLaneSide` 的数组。不在线、版本太旧、或者没有为对方打开的节点不在里面。设置刚改成 `off` 时，还有流在跑的一边仍然会报 |
+| `lane_effect.opening` | 「新增」设置是 `udp_fallback` 时，两个节点各自开新的 TCP 流现在走不走 ice3proxy，`LaneOpening` 的数组：`node` 是开流的节点，`udp_path` 是它到对方的共用连接现在有没有 UDP 的路（直连，或者经 UDP 连着的 relay），`lanes` 是它现在开的新 TCP 流走 ice3proxy（设置起作用并且 `udp_path` 是 `false`；取不到 lane 时照样悄悄改走共用的连接，见 `lanes` 里的 `control` 和 `fallbacks`）。只有在线、并且报了 `udp_path` 的节点在里面；设置是别的值时是 `[]` |
+| `lanes` | 两个节点各自报上来的、和对方之间的 ice3proxy，`PairLaneSide` 的数组。不在线、版本太旧、或者没有为对方打开的节点不在里面。设置刚改成 `off` 时，还有流在跑的一边仍然会报 |
 
 `LaneBlock` 用 `reason` 区分：
 
@@ -1735,10 +1735,10 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
 |---|---|---|
 | `no_relay` | | 两个节点都没有启用 relay，没有哪一边的 TCP 端口在听 |
 | `no_tcp_address` | `node` | 这个节点启用了 relay，但 controller 还不知道它的任何地址（它还没有连上来过） |
-| `node_too_old` | `node` | 这个节点在线，但版本太旧，不懂独占 TCP（节点协议第 3 版起才懂）。离线的节点不判断 |
+| `node_too_old` | `node` | 这个节点在线，但版本太旧，不懂 ice3proxy（节点协议第 3 版起才懂）。离线的节点不判断 |
 | `not_connected` | | 访问规则没有连通这两个节点 |
 
-`PairLaneSide` 是 `{ "node": 报的节点, "lanes": PeerLanes, "reported_secs_ago": 秒 }`；「新增」`reported_secs_ago` 是这些数是多少秒之前报的。`PeerLanes` 是一个节点上和一个对端之间的独占 TCP：
+`PairLaneSide` 是 `{ "node": 报的节点, "lanes": PeerLanes, "reported_secs_ago": 秒 }`；「新增」`reported_secs_ago` 是这些数是多少秒之前报的。`PeerLanes` 是一个节点上和一个对端之间的 ice3proxy：
 
 | 字段 | 含义 |
 |---|---|
@@ -1748,7 +1748,7 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
 | `idle` | 对端拨来、停在这个节点等它开流时取用的空闲连接 |
 | `ready` | 这个节点拨好、留给自己开流的空闲连接 |
 | `parked_at_peer` | 这个节点拨出去、停在对端那里的空闲连接 |
-| `udp_path` | 「新增」这个节点到对端的共用连接现在有没有 UDP 的路；`udp_fallback` 时没有才在独占 TCP 上开新的 TCP 流。旧版本的节点不报，是 `null` |
+| `udp_path` | 「新增」这个节点到对端的共用连接现在有没有 UDP 的路；`udp_fallback` 时没有才在 ice3proxy 上开新的 TCP 流。旧版本的节点不报，是 `null` |
 | 其余 | `LaneCounts` 的字段，平铺在同一层 |
 
 `LaneCounts`（从节点启动算起的累计，`in_use`、`dialling` 是现在的值）：
@@ -1760,10 +1760,10 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
 | `claims` | 从对端停在这里的连接里取用的次数 |
 | `claims_waited`、`claim_wait_ms` | 其中池是空的、要等对端补拨的次数，和一共等了多少毫秒 |
 | `claims_failed` | 取不到的次数（等满了、控制连接不在、对端在排空） |
-| `fallbacks` | 本来要走独占 TCP、因为取不到改走了共用连接的流 |
+| `fallbacks` | 本来要走 ice3proxy、因为取不到改走了共用连接的流 |
 | `dial_failures` | 这个节点拨号失败的次数 |
 | `refused` | 握手成功、但因为用途或数量不对被关掉的连接（旧的、超过上限的、没有为对方打开的） |
-| `sealed_bytes` | 在独占 TCP 的 TLS 里搬运的流数据字节数（两个方向合计） |
+| `sealed_bytes` | 在 ice3proxy 的 TLS 里搬运的流数据字节数（两个方向合计） |
 | `passthrough_bytes` | 本来就是 TLS 的用户数据不再加密、在程序里搬运的字节数 |
 | `spliced_bytes` | 本来就是 TLS 的用户数据由内核直接搬运（Linux 上是 splice）的字节数 |
 
@@ -1777,7 +1777,7 @@ UDP 的转发只看得到会话开不开得起来（报文发出去之后目标�
 }
 ```
 
-`total` 是全节点的 `LaneCounts`（对端去掉之后也不减）；`handshake_failures` 是别人拨进来、没有握手成功的连接，按原因分：`deadline` 没有在时限之内完成，`unknown_key` 公钥不认识或者已经吊销，`tls` 别的 TLS 错误，`protocol` 握手之后的第一个帧不对，`busy` 还没握手完的连接太多被挤掉的；`peers` 是每个打开了独占 TCP 的对端。
+`total` 是全节点的 `LaneCounts`（对端去掉之后也不减）；`handshake_failures` 是别人拨进来、没有握手成功的连接，按原因分：`deadline` 没有在时限之内完成，`unknown_key` 公钥不认识或者已经吊销，`tls` 别的 TLS 错误，`protocol` 握手之后的第一个帧不对，`busy` 还没握手完的连接太多被挤掉的；`peers` 是每个打开了 ice3proxy 的对端。
 
 ### GET /networks/{network}/pairs
 
@@ -2677,7 +2677,7 @@ Prometheus 的文本格式（`Content-Type: text/plain; version=0.0.4`）。**�
 
 几条规矩：
 
-- **吞吐要明确要。** 吞吐测试每个方向最多 5 秒或 20MB，先到为止，消耗带宽和流量，所以只有请求里写了 `"throughput": true` 才量，并且只在测质量的路径上量。节点可以在本机关掉吞吐测试（配置文件 `[tests] throughput = false`，或者 `i3t set throughput-tests off`），那时吞吐这一项是 `skipped`，原因是 `throughput_off`。吞吐测的是这一对节点之间共用的那条连接：测量期间连接被暂时固定在被测的路径上，这一对节点之间别的流量也走这条路（结果里的 `shared_connection`），测完（或者测试被取消、出错）马上回到选路规则选的路。测量流不走独占 TCP，出口的流量配额不算它（它不是出口替别人搬运的流量）。
+- **吞吐要明确要。** 吞吐测试每个方向最多 5 秒或 20MB，先到为止，消耗带宽和流量，所以只有请求里写了 `"throughput": true` 才量，并且只在测质量的路径上量。节点可以在本机关掉吞吐测试（配置文件 `[tests] throughput = false`，或者 `i3t set throughput-tests off`），那时吞吐这一项是 `skipped`，原因是 `throughput_off`。吞吐测的是这一对节点之间共用的那条连接：测量期间连接被暂时固定在被测的路径上，这一对节点之间别的流量也走这条路（结果里的 `shared_connection`），测完（或者测试被取消、出错）马上回到选路规则选的路。测量流不走 ice3proxy，出口的流量配额不算它（它不是出口替别人搬运的流量）。
 - **路径限制照旧。** 只经 relay（`relay_only`）的节点不参加直连的两项：不试直连、不回答直连的探测，不向对端暴露地址；只用直连（`direct_only`）的节点不参加 relay 质量。这些项是 `skipped`，原因里写着是哪个节点。
 - **间隔。** 同一对节点两次测试至少隔 10 秒，带吞吐的至少隔 30 秒，同一对节点同时只有一个测试；否则 `409 too_soon` 或 `busy`。节点自己也守着差不多的间隔和"同时最多 8 个测试"。
 - **版本。** 节点协议第 4 版起节点才懂主动测试。有一端太旧、不在线，或者访问规则没有把两个节点连通时，测试照样建起来、立刻失败（`state` 是 `failed`），`error` 里写着原因和是哪个节点，历史里看得到。

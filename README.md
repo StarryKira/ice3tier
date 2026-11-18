@@ -138,7 +138,7 @@ sudo systemctl daemon-reload && sudo systemctl restart i3t
 有 systemd-resolved 的机器上名字直接能用；没有的用 `sudo i3t hosts --apply` 把名字写进 `/etc/hosts`，`sudo i3t hosts --remove` 再去掉。别的节点这样连到本机的服务时，
 本机打开了透明访问的话，服务看到的是对端的虚拟 IP。做法见 [docs/architecture.md](docs/architecture.md) 的透明访问一节。
 
-Linux 上可以用 `i3t tune` 检查会影响节点表现的内核参数（UDP 缓冲的上限、TCP 的拥塞控制等），它只列出建议；`sudo i3t tune --apply` 才会改。它也说明这个内核能不能给 TCP 的重传设上限（Linux 6.15 起）：能的话，lane 和 TCP 中转断网之后恢复得快。
+Linux 上可以用 `i3t tune` 检查会影响节点表现的内核参数（UDP 缓冲的上限、TCP 的拥塞控制等），它只列出建议；`sudo i3t tune --apply` 才会改。它也说明这个内核能不能给 TCP 的重传设上限（Linux 6.15 起）：能的话，ice3proxy 和 TCP 中转断网之后恢复得快。
 
 性能档位：`low-footprint`（一个核、几百 MB 内存的机器）、`balanced`（默认）、`high-throughput`（对端多、流量大）。在 Web 界面的节点页或者 `i3tctl node set <节点名> --profile low-footprint` 给一个节点选；没有选的节点用本机 `config.toml` 里的（`i3t set profile low-footprint`），其中每一项也可以单独改。各档位的内容见 [docs/architecture.md](docs/architecture.md) 的性能一节。
 

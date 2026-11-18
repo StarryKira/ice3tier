@@ -344,7 +344,7 @@ pub struct Peer {
     /// 到这个对端的连接常驻，不因为没有流而关闭。
     #[serde(default)]
     pub keep_alive: bool,
-    /// 和这个对端之间承载 TCP 连接的流用不用独占 TCP（lane）。一对节点各自的 netmap 里互相看到同一个值。
+    /// 和这个对端之间承载 TCP 连接的流用不用 ice3proxy（lane）。一对节点各自的 netmap 里互相看到同一个值。
     /// 比本程序新的 controller 下发了这里不认识的值时按 `off` 处理。
     #[serde(default, deserialize_with = "tolerant_lane_mode")]
     pub lane: LaneMode,
@@ -399,13 +399,13 @@ impl FromStr for Congestion {
 #[error("不认识的拥塞控制 {0:?}：可以是 bbr、cubic")]
 pub struct UnknownCongestion(pub String);
 
-/// netmap 里的独占 TCP 设置：不认识的值按 `off`，不让整份 netmap 因为一个新的取值而读不了。
+/// netmap 里的 ice3proxy 设置：不认识的值按 `off`，不让整份 netmap 因为一个新的取值而读不了。
 fn tolerant_lane_mode<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<LaneMode, D::Error> {
     let text = String::deserialize(deserializer)?;
     Ok(text.parse().unwrap_or_default())
 }
 
-/// 一对节点之间承载 TCP 连接的流用不用独占 TCP（lane，每条流一条只属于它的 TCP）。
+/// 一对节点之间承载 TCP 连接的流用不用 ice3proxy（lane，每条流一条只属于它的 TCP）。
 ///
 /// 要两个节点里至少有一个启用了 relay、它的 TCP 端口另一个连得上（见 [`Relay::tcp`]），否则不起作用，按 `off` 走。
 /// UDP 应用的数据和别的流始终走共用的连接。
@@ -415,9 +415,9 @@ pub enum LaneMode {
     /// 不用：所有的流都在共用的连接上。
     #[default]
     Off,
-    /// 共用的连接到对端的路上没有 UDP（UDP 不通、只能经 relay 的 TCP 中转）时，新的 TCP 流走独占 TCP。
+    /// 共用的连接到对端的路上没有 UDP（UDP 不通、只能经 relay 的 TCP 中转）时，新的 TCP 流走 ice3proxy。
     UdpFallback,
-    /// 能开出独占 TCP 时新的 TCP 流都走它。
+    /// 能开出 ice3proxy 时新的 TCP 流都走它。
     Always,
 }
 
@@ -451,7 +451,7 @@ impl FromStr for LaneMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("不认识的独占 TCP 设置 {0:?}：可以是 off、udp_fallback、always")]
+#[error("不认识的 ice3proxy 设置 {0:?}：可以是 off、udp_fallback、always")]
 pub struct UnknownLaneMode(pub String);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

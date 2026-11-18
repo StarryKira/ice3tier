@@ -132,7 +132,7 @@ const HELP: Help = Help {
     pair_list: "节点对列表",
     pair_set: "设置节点对",
     pair_keep_alive: "连接常驻",
-    pair_lane: "独占 TCP",
+    pair_lane: "ice3proxy",
     pair_congestion: "拥塞控制，default 是改回节点的默认（bbr）。对之后建立的连接生效",
     pair_unset: "节点对恢复默认",
     access_group: "访问关系",
@@ -409,10 +409,10 @@ const UI: Ui = Ui {
     listener: "监听器",
     forwards_header: ["编号", "协议", "监听", "目标", "状态", "监听状态", "连接", "流量", "来源白名单", "名字"],
     no_forwards: "没有端口转发",
-    pairs_header: ["A", "B", "连接常驻", "独占 TCP", "拥塞控制", "生效", "使用中", "回退"],
+    pairs_header: ["A", "B", "连接常驻", "ice3proxy", "拥塞控制", "生效", "使用中", "回退"],
     no_pairs: "没有节点对设置",
     keep_alive: "连接常驻",
-    lanes: "独占 TCP",
+    lanes: "ice3proxy",
     congestion: "拥塞控制",
     congestion_default: "默认",
     lane_effect: "生效",
@@ -421,7 +421,7 @@ const UI: Ui = Ui {
     dialers: "拨号",
     udp_path: "共用的连接有 UDP",
     no_udp_path: "共用的连接没有 UDP",
-    new_streams_on_lanes: "新的 TCP 流走独占 TCP",
+    new_streams_on_lanes: "新的 TCP 流走 ice3proxy",
     new_streams_shared: "新的 TCP 流走共用的连接",
     peer_lanes: |dials, control, idle, ready, parked, counts| {
         let dials = if dials { "拨号" } else { "被拨" };
@@ -634,7 +634,7 @@ fn log(entry: &LogEntry) -> Option<String> {
                 p.text("target_addr")
             )
         }
-        "pair.set" => format!("节点对 {}：连接常驻 {}，独占 TCP {}", pair(), switch("keep_alive"), p.text("lane")),
+        "pair.set" => format!("节点对 {}：连接常驻 {}，ice3proxy {}", pair(), switch("keep_alive"), p.text("lane")),
         "pair.delete" => format!("节点对 {} 恢复默认", pair()),
         "update.settings" => format!("自动更新 {}，发布源 {}", switch("auto_update"), p.text("source")),
         "update.release" => format!("发布源上有新版本 {}", p.text("version")),

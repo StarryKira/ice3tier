@@ -22,7 +22,7 @@
 //! 一头悄无声息地消失（断电、换了网络、NAT 回收了映射）之后，两头的资源在几分钟之内释放；活着的连接照常回应探测，一直留着。
 //! 活着却一直不说话的流占着的资源，由接受方按发起节点限制同时处理的流数来约束（[`crate::Handler::screen`]）。
 //!
-//! 流在独占 TCP（lane）上、并且负载不再加密（用户自己的 TLS 原样过去）时，那个方向在 lane 交出原始的 socket 之后
+//! 流在 ice3proxy（lane）上、并且负载不再加密（用户自己的 TLS 原样过去）时，那个方向在 lane 交出原始的 socket 之后
 //! （[`SendStream::take_raw`]、[`RecvStream::wait_raw`]）直接在两条 TCP 之间搬（[`crate::engine`]，Linux 上是 splice），
 //! 不再经过流的接口。结局的传法和上表一样：EOF 对 FIN，出错对 RST；计量和配额照样在每一段上记。
 //!
@@ -163,7 +163,7 @@ impl<S: SendStream, R: RecvStream> Flow<S, R> {
     /// 才结束：有的服务器把客户端的半关闭当作客户端走了，会丢下还没回完的应答。这一段还没完整 `tcp` 就读到了 EOF，
     /// 是被截断，按 TCP 出错处理（流被重置），不会让目标以为请求是完整的。
     ///
-    /// 流的头之后的字节一直经过这一层（不交给独占 TCP 直接搬）：要划分就得看得到它们。首批数据是 TLS 握手的流不该用它。
+    /// 流的头之后的字节一直经过这一层（不交给 ice3proxy 直接搬）：要划分就得看得到它们。首批数据是 TLS 握手的流不该用它。
     pub async fn relay_framed(
         self,
         tcp: TcpStream,
@@ -312,7 +312,7 @@ pub(crate) async fn run<S: SendStream, R: RecvStream>(
 
     let mut from_tcp = Traffic::default();
     let mut from_flow = Traffic::default();
-    // 流底下的独占 TCP（交出来直接搬的话）。正常结束时它也要恢复正常关闭。
+    // 流底下的 ice3proxy（交出来直接搬的话）。正常结束时它也要恢复正常关闭。
     let lane = OnceLock::new();
     let framed = framing.is_some();
     let outcome = {
@@ -344,7 +344,7 @@ pub(crate) async fn run<S: SendStream, R: RecvStream>(
             if let Some(lane) = lane.get()
                 && let Err(error) = SockRef::from(&**lane).set_linger(None)
             {
-                tracing::warn!(%error, "恢复不了独占 TCP 的 SO_LINGER，正常结束的流会以 RST 关闭");
+                tracing::warn!(%error, "恢复不了 ice3proxy 的 SO_LINGER，正常结束的流会以 RST 关闭");
             }
             End::Clean
         }
@@ -507,7 +507,7 @@ async fn flow_to_tcp<R: RecvStream, M: Meter>(
 /// 一个进程一个搬运引擎，管道池在里面。
 static ENGINE: LazyLock<Splicer> = LazyLock::new(Splicer::new);
 
-/// 不再加密的独占 TCP 上的搬运，每一段之前过 [`Meter`]，顺带记首字节时间、告诉底下的传输搬了多少。
+/// 不再加密的 ice3proxy 上的搬运，每一段之前过 [`Meter`]，顺带记首字节时间、告诉底下的传输搬了多少。
 struct MeterGate<'a, M> {
     meter: &'a M,
     direction: Direction,
@@ -516,7 +516,7 @@ struct MeterGate<'a, M> {
     counter: Counter<'a>,
 }
 
-/// 搬了多少要告诉谁：独占 TCP 的哪一个方向。
+/// 搬了多少要告诉谁：ice3proxy 的哪一个方向。
 enum Counter<'a> {
     Write(&'a RawWrite),
     Read(&'a RawRead),
@@ -537,7 +537,7 @@ impl<M: Meter> Gate for MeterGate<'_, M> {
     }
 }
 
-/// TCP 读到的，直接写进不再加密的独占 TCP。
+/// TCP 读到的，直接写进不再加密的 ice3proxy。
 async fn tcp_to_raw<M: Meter>(
     tcp: ReadHalf<'_>,
     raw: RawWrite,
@@ -561,7 +561,7 @@ async fn tcp_to_raw<M: Meter>(
     })
 }
 
-/// 不再加密的独占 TCP 上收到的，直接写进 TCP。
+/// 不再加密的 ice3proxy 上收到的，直接写进 TCP。
 async fn raw_to_tcp<M: Meter>(
     raw: RawRead,
     tcp: WriteHalf<'_>,

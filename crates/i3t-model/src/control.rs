@@ -60,13 +60,13 @@ pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 ///   [`ToNode::RouteQuery`]；从这一版起，解析不了的一帧只是被跳过。
 /// - 2：认识 [`ToNode::TryLater`]、[`ToNode::BackboneQuery`]；回答路由查询时带 [`RouteAnswer::detail`]，
 ///   上报时带 [`Report::route_kinds`]。
-/// - 3：认识 netmap 里对端的 [`lane`](crate::netmap::Peer::lane)（独占 TCP），上报时带 [`Report::lanes`]。
-///   比它旧的节点不懂独占 TCP，controller 据此说明节点对的设置为什么不起作用。
+/// - 3：认识 netmap 里对端的 [`lane`](crate::netmap::Peer::lane)（ice3proxy），上报时带 [`Report::lanes`]。
+///   比它旧的节点不懂 ice3proxy，controller 据此说明节点对的设置为什么不起作用。
 /// - 4：认识 [`ToNode::Test`]、[`ToNode::TestEnd`]，会回 [`ToController::TestReport`]（主动测试），
 ///   在 [`Hello::throughput_tests`] 里说本机接不接受吞吐测试。
 pub const PROTOCOL_REVISION: u32 = 4;
 
-/// 从这一版节点协议起节点懂独占 TCP。
+/// 从这一版节点协议起节点懂 ice3proxy。
 pub const LANE_REVISION: u32 = 3;
 
 /// 从这一版节点协议起节点懂主动测试。
@@ -419,7 +419,7 @@ pub struct Report {
     /// `routes` 只带变化的条目时这里也一样。节点说不出细节的对端不在里面。旧版本的节点不报。
     #[serde(default)]
     pub route_kinds: Vec<RouteKind>,
-    /// 独占 TCP（lane）的状况。没有为任何对端打开时也报（全是 0）；旧版本的节点不报。
+    /// ice3proxy（lane）的状况。没有为任何对端打开时也报（全是 0）；旧版本的节点不报。
     #[serde(default)]
     pub lanes: Option<Box<LaneReport>>,
     /// 节点正在用的性能档位。旧版本的节点不报。装在 `Box` 里只是为了让消息的枚举不至于太大，JSON 里没有区别。
@@ -451,7 +451,7 @@ pub const MAX_PEER_USE: usize = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerUse {
     pub peer: NodeId,
-    /// 现在开着的流（共用连接上的，两边谁开的都算；独占 TCP 上的不在这里）。
+    /// 现在开着的流（共用连接上的，两边谁开的都算；ice3proxy 上的不在这里）。
     pub flows: u32,
     /// 本节点启动以来在和它的连接上发出、收到的字节数（线上的，含 QUIC 的开销），连接关了重建也接着累计。
     pub tx_bytes: u64,
@@ -642,7 +642,7 @@ fn known_profile<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Pr
     Ok(raw.as_str().and_then(|text| text.parse().ok()).unwrap_or_default())
 }
 
-/// 一个节点上独占 TCP（lane）的状况。
+/// 一个节点上 ice3proxy（lane）的状况。
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LaneReport {
     /// 全节点的合计，从节点启动算起，对端去掉之后也不减。
@@ -651,7 +651,7 @@ pub struct LaneReport {
     /// 别人拨进来、没有握手成功的连接，按原因分。分不到对端名下，只有全节点的。
     #[serde(default)]
     pub handshake_failures: LaneHandshakeFailures,
-    /// 每个打开了独占 TCP 的对端。
+    /// 每个打开了 ice3proxy 的对端。
     #[serde(default)]
     pub peers: Vec<PeerLanes>,
 }
@@ -683,7 +683,7 @@ pub struct PeerLanes {
     pub counts: LaneCounts,
 }
 
-/// 独占 TCP 的计数和水位。全节点的合计和每个对端的是同一组。
+/// ice3proxy 的计数和水位。全节点的合计和每个对端的是同一组。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LaneCounts {
     /// 正在承载流的 lane。

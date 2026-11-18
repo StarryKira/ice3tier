@@ -442,7 +442,7 @@ fn a_lane_setting_reaches_both_nodes_and_the_pair_view_says_why_it_does_not_work
     assert_eq!(effect.dialers, vec![exit]);
     assert!(effect.summary.contains("共用的连接"), "要说明共用的连接和它的路照常在：{}", effect.summary);
 
-    // 只改常驻，独占 TCP 的设置不变。
+    // 只改常驻，ice3proxy 的设置不变。
     let view =
         lab.controller.set_pair(network.id, entry, exit, PairInput { keep_alive: Some(true), lane: None, congestion: None }).unwrap();
     assert_eq!((view.setting.keep_alive, view.setting.lane), (true, LaneMode::Always));
@@ -450,7 +450,7 @@ fn a_lane_setting_reaches_both_nodes_and_the_pair_view_says_why_it_does_not_work
     assert_eq!((view.setting.keep_alive, view.setting.lane), (true, LaneMode::UdpFallback));
     assert_eq!(lab.netmap(exit).peer(entry).unwrap().lane, LaneMode::UdpFallback);
 
-    // 在线的旧版本节点不懂独占 TCP。
+    // 在线的旧版本节点不懂 ice3proxy。
     let mut old = lab.join(network.id, &[]);
     lab.settle(&mut [&mut old]);
     let effect = lab.controller.set_pair(network.id, old.id, entry, lane(LaneMode::Always)).unwrap().lane_effect.unwrap();

@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "ice3tier 的独占 TCP（lane）：一对节点之间每条用户连接独占一条预先拨好、按公钥认证的 TCP"
+description = "ice3tier 的 ice3proxy（lane）：一对节点之间每条用户连接独占一条预先拨好、按公钥认证的 TCP"
 
 [dependencies]
 bytes.workspace = true

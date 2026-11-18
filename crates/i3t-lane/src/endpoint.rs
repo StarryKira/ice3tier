@@ -66,7 +66,7 @@ impl Default for LaneConfig {
     }
 }
 
-/// 一个打开了独占 TCP 的对端。
+/// 一个打开了 ice3proxy 的对端。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LanePeer {
     pub id: NodeId,
@@ -154,7 +154,7 @@ impl Lanes {
         Ok(Self { inner: Arc::new(inner), _shutdown: shutdown_sender })
     }
 
-    /// 换成新的一组打开了独占 TCP 的对端。netmap 每次变化时整组交进来。
+    /// 换成新的一组打开了 ice3proxy 的对端。netmap 每次变化时整组交进来。
     ///
     /// 不在里面的对端：它的空闲 lane 和控制 lane 关掉，它新拨来的 lane 在握手时被拒绝；正在承载流的 lane 不受影响。
     /// 公钥或者拨号地址变了的对端按新的重来一遍。要在 tokio 运行时里调用（拨号的任务在这里起）。
@@ -176,7 +176,7 @@ impl Lanes {
             let keep = wanted.iter().any(|peer| peer.id == *id && peer.key == entry.key);
             if !keep {
                 entry.holder.close();
-                tracing::info!(peer = %id, "不再为这个节点开独占 TCP");
+                tracing::info!(peer = %id, "不再为这个节点开 ice3proxy");
             }
             keep
         });
@@ -195,7 +195,7 @@ impl Lanes {
             entry.dial = configs.get(&peer.id).map(|config| {
                 let wake = Arc::new(Notify::new());
                 let task = tokio::spawn(dialler::run(Arc::clone(inner), peer.id, Arc::clone(&wake))).abort_handle();
-                tracing::info!(peer = %peer.id, addrs = ?peer.dial, "开始为这个节点拨独占 TCP");
+                tracing::info!(peer = %peer.id, addrs = ?peer.dial, "开始为这个节点拨 ice3proxy");
                 DialSide {
                     addrs: peer.dial.clone(),
                     config: Arc::clone(config),
@@ -319,7 +319,7 @@ impl Lanes {
             }
         }
         drop(peers);
-        tracing::info!("独占 TCP 进入排空：通知对端，不再拨新的 lane");
+        tracing::info!("ice3proxy 进入排空：通知对端，不再拨新的 lane");
     }
 
     /// 排空撤销了（更新没有继续下去）：重新在 lane 上接新的流。
@@ -339,7 +339,7 @@ impl Lanes {
             }
         }
         drop(peers);
-        tracing::info!("独占 TCP 撤销排空：控制 lane 重新建立之后照常开流");
+        tracing::info!("ice3proxy 撤销排空：控制 lane 重新建立之后照常开流");
     }
 
     /// 本节点的地址变了（家宽重拨等）：拨出去的 lane 多半已经死了而且不会收到重置。全部换一个新的 epoch 重拨。
@@ -421,7 +421,7 @@ impl Inner {
             let mut peers = self.lock_peers();
             let Some(entry) = peers.get_mut(&peer) else {
                 drop(peers);
-                return self.refuse(peer, "没有为这个节点打开独占 TCP");
+                return self.refuse(peer, "没有为这个节点打开 ice3proxy");
             };
             if entry.own_waiting >= MAX_OWN_WAITING_PER_PEER {
                 drop(peers);

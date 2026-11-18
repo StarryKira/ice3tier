@@ -1,7 +1,7 @@
 //! 测量流：主动测试（白皮书 §7.6）量吞吐用的流。格式见 [`i3t_proto::flow::OpenMeasure`]。
 //!
 //! - 发起方用 [`measure`] 开一条测量流，量一个方向：[`MeasureMode::Sink`] 是自己发、对端收（上行），
-//!   [`MeasureMode::Source`] 是对端发、自己收（下行）。要用共用的连接开（不经独占 TCP）：量的是那条连接现在走的路。
+//!   [`MeasureMode::Source`] 是对端发、自己收（下行）。要用共用的连接开（不经 ice3proxy）：量的是那条连接现在走的路。
 //! - 接受方从 [`crate::serve`] 拿到 [`MeasureRequest`]（[`crate::Handler::handle_measure`]），先自己决定接不接（测试编号、时间窗、
 //!   本机的开关），接的话调用 [`MeasureRequest::serve`]。接受方的上限（[`MeasureLimits`]）由它自己定，不管发起方要多少：
 //!   字节数和时长到了就停，另有一个总的时限，发起方不发数据、不读数据都占不住它。

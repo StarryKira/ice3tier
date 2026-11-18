@@ -139,7 +139,7 @@ fn listen_state(listener: &LiveListener) -> String {
     }
 }
 
-/// 独占 TCP：每个打开了它的对端一行。
+/// ice3proxy：每个打开了它的对端一行。
 fn print_lanes(live: &LiveStatus, lanes: &LaneReport) {
     let (t, lang) = context();
     println!("\n{}", t.lanes);

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""独占 TCP（lane）的端到端测试：一对入口—出口之间每条 TCP 流独占一条 TCP。
+"""ice3proxy（lane）的端到端测试：一对入口—出口之间每条 TCP 流独占一条 TCP。
 
     python3 tests/e2e/test_lane.py [场景名...]
 
@@ -375,7 +375,7 @@ def silent_stream_outlives_nat_mapping(lab: Lab, work: Path, t: Checks) -> None:
 
 
 def managed_drain(lab: Lab, work: Path, t: Checks) -> None:
-    """由 controller 管理：管理员打开一对节点的独占 TCP，两边报上状况；出口排空后更新：lane 上跑着的流跑完，新的请求被拒绝，更新重启之后新的流又走 lane。"""
+    """由 controller 管理：管理员打开一对节点的 ice3proxy，两边报上状况；出口排空后更新：lane 上跑着的流跑完，新的请求被拒绝，更新重启之后新的流又走 lane。"""
     import test_update as upd
 
     harness.BIN_DIR = upd.STAGE / "old"

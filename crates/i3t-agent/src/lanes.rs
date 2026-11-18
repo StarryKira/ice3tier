@@ -1,4 +1,4 @@
-//! 独占 TCP（lane）在节点里的接法。
+//! ice3proxy（lane）在节点里的接法。
 //!
 //! - 入口和出口用的连接层是共用的连接（[`Endpoint`]）和 lane 装在一起的（[`LaneConnector`]、[`LaneAcceptor`]）：
 //!   承载 TCP 连接的流按节点对的设置走 lane，别的流和数据报一律走共用的连接；两种流进同一个 `serve`，
@@ -52,7 +52,7 @@ impl NodeLanes {
     ///
     /// 用节点密钥签 lane 的证书失败。
     pub(crate) fn new(key: &NodeKey, endpoint: Arc<Endpoint>) -> anyhow::Result<Self> {
-        let lanes = Lanes::new(key, LaneConfig::default()).context("用节点密钥给独占 TCP 签证书")?;
+        let lanes = Lanes::new(key, LaneConfig::default()).context("用节点密钥给 ice3proxy 签证书")?;
         Ok(Self { lanes: Arc::new(lanes), endpoint, modes: Arc::default(), handoff: std::sync::Mutex::new(false) })
     }
 
@@ -88,7 +88,7 @@ impl NodeLanes {
         let handoff = netmap.me.relay.is_some() && !peers.is_empty();
         if let Err(error) = self.lanes.set_peers(peers) {
             // 签不了 TLS 配置是本机的问题，不会因为重试好起来；保留原来的设置，流照常走共用的连接。
-            tracing::error!(%error, "独占 TCP 的设置没能生效");
+            tracing::error!(%error, "ice3proxy 的设置没能生效");
             return;
         }
         *self.modes.write().expect("lane modes lock poisoned") = modes;

@@ -303,7 +303,7 @@ async fn the_command_line_drives_a_running_controller() {
         (&pairs[0]["a"], &pairs[0]["b"], &pairs[0]["keep_alive"], &pairs[0]["lane"]),
         (&json!(1), &json!(2), &json!(true), &json!("off"))
     );
-    // 只改独占 TCP，常驻不变；设置起不起作用要说出来。
+    // 只改 ice3proxy，常驻不变；设置起不起作用要说出来。
     let pair = fixture.json(&["pair", "set", "nas-01", "laptop", "--lane", "udp_fallback"]).await;
     assert_eq!((&pair["keep_alive"], &pair["lane"]), (&json!(true), &json!("udp_fallback")));
     assert!(pair["lane_effect"]["effective"].is_boolean(), "{pair}");

@@ -234,7 +234,7 @@ impl Endpoint {
     /// 到 `peer` 的共用连接现在走的路上有没有 UDP：直连，或者经 relay 时本节点这一段走 UDP；
     /// 本节点自己就是 relay 时，看对端在本节点上的中转会话是不是 UDP 的。没有路、或者这一段是 TCP 时是 `false`。
     ///
-    /// "UDP 不通时才用独占 TCP"按它来判断。经别的 relay 时只看得见本节点这一段，对端那一段走 TCP 时只有对端自己知道
+    /// "UDP 不通时才用 ice3proxy"按它来判断。经别的 relay 时只看得见本节点这一段，对端那一段走 TCP 时只有对端自己知道
     /// （那时由对端决定拨不拨）。
     #[must_use]
     pub fn path_has_udp(&self, peer: NodeId) -> bool {
@@ -291,7 +291,7 @@ impl Endpoint {
         self.manager.congestion(peer).to_string()
     }
 
-    /// 本节点启用为 relay 时，它在 UDP 端口的同一个端口号上听 TCP。开头是 TLS 握手记录的连接（独占 TCP）交给 `handoff`，
+    /// 本节点启用为 relay 时，它在 UDP 端口的同一个端口号上听 TCP。开头是 TLS 握手记录的连接（ice3proxy）交给 `handoff`，
     /// 别的照常当作中转。`None` 时那个端口上只有中转。见 [`i3t_relay::Relay::set_tcp_handoff`]。
     pub fn set_lane_handoff(&self, handoff: Option<i3t_relay::TcpHandoff>) {
         self.relay.set_tcp_handoff(handoff);

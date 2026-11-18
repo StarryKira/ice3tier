@@ -557,7 +557,7 @@ impl From<FamilyArg> for IpFamily {
     }
 }
 
-/// 独占 TCP 的设置。模型里的解析报的是中文，这里按语言说。
+/// ice3proxy 的设置。模型里的解析报的是中文，这里按语言说。
 fn parse_lane(text: &str) -> Result<LaneMode, String> {
     text.parse().map_err(|_| (texts().ui.must_be)("off, udp_fallback, always"))
 }

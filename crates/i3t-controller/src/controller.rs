@@ -191,7 +191,7 @@ pub(crate) struct Live {
     pub(crate) forwards: Vec<ForwardReport>,
     /// 最近一次上报里各个凭据（按编号）现在的连接数。
     pub(crate) credential_connections: BTreeMap<u32, u32>,
-    /// 最近一次上报里独占 TCP 的状况。
+    /// 最近一次上报里 ice3proxy 的状况。
     pub(crate) lanes: Option<LaneReport>,
     /// 最近一次上报里节点实际在用的性能档位。
     pub(crate) performance: Option<PerformanceReport>,

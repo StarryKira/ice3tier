@@ -8,7 +8,7 @@
 
 --long   sse_long_thinking 的静默从 75 秒改成 10 分钟。
 --pair   按节点对的设置，原样合进入口和出口互相看到的对端条目（静态 netmap 的 peers）。见 apply_pair_setting。
-         例如 '{"lane": "always"}' 让入口和出口之间的 TCP 流走独占 TCP；这时每次负载之后打出两边的 lane 计数。
+         例如 '{"lane": "always"}' 让入口和出口之间的 TCP 流走 ice3proxy；这时每次负载之后打出两边的 lane 计数。
 --keep   留下每个场景的工作目录：节点日志、场景文件、每次负载的结果 JSON 和表。
 
 需要 I3T_BIN_DIR 下有 i3t 和 i3t-llmgw（cargo build --release -p i3t -p i3t-llmgw）。
@@ -129,8 +129,8 @@ class Load:
         if not self.out.exists():
             raise RuntimeError(f"负载端没有写出结果（退出码 {self.proc.returncode}）：{text[-1500:]}")
         if "lane" in PAIR_SETTING:
-            # 节点对打开了独占 TCP：这次负载之后两边的 lane 计数（从启动累计），看流是不是真的走了 lane、有没有改走共用的连接。
-            print(f"  | 独占 TCP {lane_line(self.gw.entry, self.gw.exit)}\n  | 独占 TCP {lane_line(self.gw.exit, self.gw.entry)}", flush=True)
+            # 节点对打开了 ice3proxy：这次负载之后两边的 lane 计数（从启动累计），看流是不是真的走了 lane、有没有改走共用的连接。
+            print(f"  | ice3proxy {lane_line(self.gw.entry, self.gw.exit)}\n  | ice3proxy {lane_line(self.gw.exit, self.gw.entry)}", flush=True)
         return json.loads(self.out.read_text())
 
 
@@ -503,7 +503,7 @@ def tcp_only_exit(lab: Lab, work: Path, t: Checks) -> None:
 def tcp_only_exit_heavy(lab: Lab, work: Path, t: Checks) -> None:
     """出口只能经 TCP 连入口、这一段丢包 1%，负载比一条 TCP 带得动的大得多：约 220 条流、下行每秒 2MB 多。只在点名时运行。
 
-    共用的连接在这里带不动是已知的（一条 TCP 在这样的链路上只有每秒几百 KB），所以节点对没有开独占 TCP 时只记录结果，
+    共用的连接在这里带不动是已知的（一条 TCP 在这样的链路上只有每秒几百 KB），所以节点对没有开 ice3proxy 时只记录结果，
     不算失败；开了之后每条流都要完成。
     """
     gw = Gateway(lab, work)
@@ -529,7 +529,7 @@ def tcp_only_exit_heavy(lab: Lab, work: Path, t: Checks) -> None:
     else:
         done = sum(entry["count"] - entry["failed"] for entry in heavy["groups"])
         total = sum(entry["count"] for entry in heavy["groups"])
-        print(f"  节点对没有开独占 TCP：{total} 条流里 {done} 条按期望结束（只记录，不算失败）", flush=True)
+        print(f"  节点对没有开 ice3proxy：{total} 条流里 {done} 条按期望结束（只记录，不算失败）", flush=True)
 
 
 def waited(condition, timeout: float, interval: float = 0.5) -> bool:

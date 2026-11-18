@@ -429,7 +429,7 @@ def hold_port(host: Host, port: int) -> None:
     wait_until(lambda: f"127.0.0.1:{port} " in host.run("ss", "-lnt").stdout, what=f"{host.name} 上的 {port} 端口被占住")
 
 
-# 下面是独占 TCP（lane）的场景（test_lane.py）用的。
+# 下面是 ice3proxy（lane）的场景（test_lane.py）用的。
 
 # 一个按路径决定怎么回答的 HTTP 服务，同时听明文和 TLS。数据是按长度做种子的伪随机字节，测试那边算得出它的摘要，
 # 收到的字节一个不差才对得上。参数：监听地址、明文端口、TLS 端口、证书、私钥。
@@ -579,7 +579,7 @@ LANE_COUNTERS = ("claims", "claims_waited", "claims_failed", "fallbacks", "dial_
 
 
 def lane_counts(node: Node, peer: Node | None = None) -> dict[str, float]:
-    """`node` 上和 `peer`（不写时是全部对端）之间的独占 TCP 的计数和水位，读自它的 /metrics。"""
+    """`node` 上和 `peer`（不写时是全部对端）之间的 ice3proxy 的计数和水位，读自它的 /metrics。"""
     text = node_metrics(node)
     labels = {"peer": peer.name} if peer else {}
     counts = {name: metric(text, f"i3t_lane_{name}_total", **labels) for name in LANE_COUNTERS}
@@ -598,7 +598,7 @@ def lane_counts(node: Node, peer: Node | None = None) -> dict[str, float]:
 
 
 def lane_line(node: Node, peer: Node | None = None) -> str:
-    """一行给人看的独占 TCP 计数。"""
+    """一行给人看的 ice3proxy 计数。"""
     c = lane_counts(node, peer)
     return (f"{node.name}：控制 {c['control_up']:.0f}，空闲 {c['parked_here']:.0f}/{c['ready']:.0f}/{c['parked_at_peer']:.0f}，"
             f"在用 {c['in_use']:.0f}，取用 {c['claims']:.0f}（等过 {c['claims_waited']:.0f}，共 {c['claim_wait_ms']:.0f}ms，"
@@ -607,7 +607,7 @@ def lane_line(node: Node, peer: Node | None = None) -> str:
 
 
 def lane_peer(node: Node, *, lane: str, **options) -> dict:
-    """别的节点的 netmap 里打开了独占 TCP 的 `node`。"""
+    """别的节点的 netmap 里打开了 ice3proxy 的 `node`。"""
     return {**node.as_peer(**options), "lane": lane}
 
 
