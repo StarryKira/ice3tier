@@ -185,7 +185,6 @@ test('出口配额：在节点详情里配上，下载之后出口页有本账�
   await expect(meter).toBeVisible({ timeout: 40_000 })
   await expect(usage).toContainText(/MB \/ 1\.0 GB/, { timeout: 40_000 })
   await expect(usage).toContainText(t.exits.quotaResets('').trim())
-  await expect(page.getByTestId('exit-users')).toContainText('laptop', { timeout: 30_000 })
 })
 
 test('凭据：经要求凭据的监听器用过之后有用量；改上限让它用完；吊销；再彻底删掉', async () => {
@@ -206,21 +205,30 @@ test('凭据：经要求凭据的监听器用过之后有用量；改上限让�
   await expect(row).toContainText(c.neverUsed)
   credentialId = (await controller.api<{ id: number }[]>('GET', `${NET}/credentials`))[0]?.id ?? 0
 
-  // 在 gw 的「代理出口」里加一个代理：开在 laptop 的所有地址上，经 gw 出去；开在本机以外，要凭据。
+  // 一个开在 laptop 所有地址上、经 gw 出去的代理；开在本机以外，要凭据。
   const port = await freePort()
-  const p = t.nodes.detail.proxy
-  await page.goto(`${controller.baseUrl}/n/1/nodes/${nodes.gw.id}?tab=exit`)
-  await page.getByTestId('proxy-entries').getByRole('button', { name: p.add }).click()
-  const add = page.getByRole('dialog', { name: p.addTitle('gw') })
-  await add.getByRole('combobox', { name: p.node }).click()
-  await page.getByRole('option', { name: /laptop/ }).click()
-  await add.getByRole('radio', { name: p.whereAll }).click()
-  await expect(add.getByText(p.needsCredential, { exact: false })).toBeVisible()
-  await add.getByRole('textbox', { name: p.port }).fill(String(port))
-  await add.getByRole('button', { name: p.add }).click()
-  await expectToast(page, p.added)
+  const created = await controller.api<{ id: number }>('POST', `${NET}/listeners`, {
+    node: nodes.laptop.id,
+    name: 'lan',
+    bind: `0.0.0.0:${port}`,
+    protocol: 'socks5',
+    allow_from: ['127.0.0.0/8'],
+    require_credential: true,
+    fixed_exit: nodes.gw.id,
+  })
   // 等它监听上，再用凭据经它下载。
-  await expect(page.getByTestId('proxy-entries')).toContainText(t.listen.listening, { timeout: 30_000 })
+  await expect
+    .poll(
+      async () =>
+        (await controller.api<{ id: number; status: { state: string } | null }[]>('GET', `${NET}/listeners`)).find(
+          (listener) => listener.id === created.id,
+        )?.status?.state,
+      { timeout: 30_000 },
+    )
+    .toBe('listening')
+  // 出口的用量卡片上数得到这个代理。
+  await page.goto(`${controller.baseUrl}/n/1/nodes/${nodes.gw.id}?tab=exit`)
+  await expect(page.getByTestId('exit-proxies')).toContainText(t.nodes.detail.exitProxies(1))
   const done = await download(`socks5h://${nodes.gw.ip}:${secret}@127.0.0.1:${port}`)
   expect(done.code, done.stderr).toBe(0)
 

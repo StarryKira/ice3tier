@@ -40,7 +40,7 @@ export const nodes: Messages['nodes'] = {
     n === 0
       ? 'No node relays through this node yet'
       : `${count(n, 'node', 'nodes')} can relay through this node to reach others`,
-  roleExit: 'Proxy exit',
+  roleExit: 'Exit',
   roleExitUsers: (n) =>
     n === 0
       ? 'No node can reach the internet through this node yet'
@@ -114,7 +114,7 @@ export const nodes: Messages['nodes'] = {
     loadFailed: "Couldn't load node",
     tabOverview: 'Overview',
     tabRelay: 'Relay',
-    tabExit: 'Proxy exit',
+    tabExit: 'Exit',
     tabForward: 'Port forwarding',
     tabRoutes: 'Routes',
     more: 'More',
@@ -247,8 +247,14 @@ export const nodes: Messages['nodes'] = {
       withCredential: 'credential required',
       connections: (n) => (n === 1 ? '1 connection' : `${n} connections`),
     },
-    exitTitle: 'Proxy exit',
-    exitDesc: 'Nodes that can reach this node can use its internet access',
+    exitProxies: (n) =>
+      n === 0
+        ? 'No proxy leaves through here yet'
+        : n === 1
+          ? '1 proxy leaves through here'
+          : `${n} proxies leave through here`,
+    exitTitle: 'Exit',
+    exitDesc: "When on, proxies can leave through this node's network",
     exitSwitch: (name) => `Enable ${name} as exit`,
     exitPortsAny: 'Any port',
     exitPorts: (ports) => `Ports ${ports}`,

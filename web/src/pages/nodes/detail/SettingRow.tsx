@@ -1,6 +1,7 @@
 import { type ReactNode } from 'react'
 
 import { InfoTip } from '@/components/info-tip'
+import { cn } from '@/lib/utils'
 
 interface SettingRowProps {
   label: string
@@ -16,6 +17,8 @@ interface SettingRowProps {
   stacked?: boolean
   /** 这一项的值不对：写在这一行的最下面。 */
   error?: string | null
+  /** 外边距另给（嵌在别的行下面时去掉左右的留白）。 */
+  className?: string
   children: ReactNode
 }
 
@@ -29,6 +32,7 @@ export function SettingRow({
   labelId,
   stacked = false,
   error,
+  className,
   children,
 }: SettingRowProps) {
   const problem =
@@ -52,7 +56,7 @@ export function SettingRow({
   )
   if (stacked) {
     return (
-      <div className="px-5 py-3">
+      <div className={cn('px-5 py-3', className)}>
         <div className="flex min-h-7 items-center">{name}</div>
         <div className="mt-2">{children}</div>
         {problem}
@@ -60,7 +64,7 @@ export function SettingRow({
     )
   }
   return (
-    <div className="px-5 py-2.5">
+    <div className={cn('px-5 py-2.5', className)}>
       <div className="flex min-h-9 items-center justify-between gap-4">
         {name}
         <div className="shrink-0">{children}</div>

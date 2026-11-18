@@ -9,8 +9,6 @@ export const RELEASES_PAGE = 'https://github.com/fuqiuluo/ice3tier/releases'
 /** 节点绑定的端口的默认值。启用为 relay 的节点还在同一个端口号上监听 TCP。 */
 export const DEFAULT_NODE_PORT = 20330
 
-/** 每个节点自带的本机代理入口的默认地址（写在节点的 config.toml 里，可以改）。 */
-export const LOCAL_SOCKS5 = '127.0.0.1:1080'
 export const LOCAL_HTTP = '127.0.0.1:1081'
 
 /** 注册令牌默认的有效期，秒。 */

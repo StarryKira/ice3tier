@@ -1,15 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
-import { ChevronRight, DoorOpen, Globe, Hash, Plus, Server, Workflow, X } from 'lucide-react'
+import { ChevronRight, DoorOpen, Globe, Plus, Server, Workflow, X } from 'lucide-react'
 import { type KeyboardEvent, type ReactNode, useId, useState } from 'react'
-import { Link } from 'react-router'
 
 import { q } from '@/api/queries'
-import { type ExitSettings, type Network, type NodeDetail, type NodeId } from '@/api/types'
-import { Flag } from '@/components/flag'
-import { NodeLink } from '@/components/node'
+import { type ExitSettings, type Network, type NodeDetail } from '@/api/types'
 import { SkeletonBlock } from '@/components/states'
 import { StatusText } from '@/components/status'
-import { Badge } from '@/components/ui/badge'
 import { BoxCard, BoxCardHeader } from '@/components/ui/card'
 import { FormError } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
@@ -21,14 +17,12 @@ import { t } from '@/i18n'
 import { formatBytes } from '@/lib/format'
 import { formatAge } from '@/lib/time'
 import { quotaView } from '@/lib/usage'
-import { cn } from '@/lib/utils'
 import { COMMON_PORTS, portName } from '@/lib/ports'
 import { MAX_QUOTA_RESET_DAY, splitList, validatePort } from '@/lib/validate'
-import { networkPath } from '@/pages/networks/context'
 import { exitHealthView } from '@/lib/exitView'
+import { exitOf } from '@/lib/proxy'
 
 import { useSaveExit } from './exitActions'
-import { ProxyEntriesCard } from './ProxyEntries'
 import {
   exitFormFrom,
   type ExitFormProblems,
@@ -98,11 +92,19 @@ function useExitForm(network: Network, node: NodeDetail, exit: ExitSettings) {
 
 type ExitForm = ReturnType<typeof useExitForm>
 
-/** 出口的设置，一行一项（端口限制在单独的卡片里）。 */
-function ExitSettingsList({ ctl }: { ctl: ExitForm }) {
+/**
+ * 出口的设置，都在出口卡片里，一行一项。端口限制和"再经本机代理出去"也是一行一个开关，
+ * 打开之后在那一行下面填端口、代理的地址。
+ */
+function ExitSettingsList({ node, ctl }: { node: NodeDetail; ctl: ExitForm }) {
   const { form, setForm, commit, problems, shown, save } = ctl
-  const ids = { lan: useId(), quota: useId(), family: useId(), connects: useId() }
+  const ids = { lan: useId(), quota: useId(), family: useId(), connects: useId(), ports: useId(), upstream: useId() }
   const classId = useId()
+  const upstreamInput = useId()
+  const savedUpstream = node.exit?.upstream_socks5 ?? null
+  // 开关打开、地址还没填时，开关要看起来开着：这个状态只在页面上，服务器上还是没有代理。
+  const [upstreamOpened, setUpstreamOpened] = useState(false)
+  const upstreamOn = savedUpstream !== null || upstreamOpened
 
   return (
     <div>
@@ -195,6 +197,63 @@ function ExitSettingsList({ ctl }: { ctl: ExitForm }) {
             onChange={(serviceClass) => commit({ ...form, serviceClass })}
           />
         </SettingRow>
+
+        {/* 端口限制：默认关着（任何端口都放行）；打开之后填允许的端口。只限制互联网目标。 */}
+        <div data-testid="exit-ports">
+          <SettingRow label={d.exitPortsTitle} hint={d.exitPortsDesc} htmlFor={ids.ports}>
+            <Switch
+              id={ids.ports}
+              aria-label={d.exitPortsSwitch(node.name)}
+              checked={form.limitPorts}
+              onCheckedChange={(on) =>
+                on ? setForm({ ...form, limitPorts: true }) : commit({ ...form, limitPorts: false })
+              }
+            />
+          </SettingRow>
+          {form.limitPorts ? (
+            <div className="px-5 pb-4">
+              <PortsEditor ctl={ctl} />
+            </div>
+          ) : null}
+        </div>
+
+        {/* 再经本机代理出去：默认关着；打开之后填这台机器上另一个代理程序（如 Clash）的地址。 */}
+        <div data-testid="exit-upstream">
+          <SettingRow label={d.upstreamTitle} hint={d.upstreamDesc} htmlFor={ids.upstream}>
+            <Switch
+              id={ids.upstream}
+              aria-label={d.upstreamSwitch(node.name)}
+              checked={upstreamOn}
+              onCheckedChange={(next) => {
+                setUpstreamOpened(next)
+                if (!next) commit({ ...form, upstream: '' })
+              }}
+            />
+          </SettingRow>
+          {upstreamOn ? (
+            <div className="space-y-3 px-5 pb-4">
+              <SettingRow
+                label={d.upstreamAddr}
+                hint={d.upstreamAddrHint}
+                htmlFor={upstreamInput}
+                error={shown('upstream')}
+                className="px-0 py-0"
+              >
+                <Input
+                  id={upstreamInput}
+                  className="w-56 font-mono"
+                  placeholder="127.0.0.1:7890"
+                  autoFocus={savedUpstream === null}
+                  value={form.upstream}
+                  onChange={(event) => setForm({ ...form, upstream: event.target.value })}
+                  onBlur={() => form.upstream.trim() !== '' && commit(form, 'upstream')}
+                  onKeyDown={onEnter(() => commit(form, 'upstream'))}
+                />
+              </SettingRow>
+              <UpstreamRoute node={node} proxy={savedUpstream} />
+            </div>
+          ) : null}
+        </div>
       </div>
       <FormError message={save.error} detail={save.errorDetail} className="mx-5 mb-4" />
     </div>
@@ -314,173 +373,30 @@ function PortsEditor({ ctl }: { ctl: ExitForm }) {
 }
 
 /**
- * 端口限制，单独一张卡片：默认关着（任何端口都放行）。打开之后填允许的端口，离开输入框或回车时保存；
- * 端口没填好之前不保存，开关看起来开着，出口照旧不限。只限制互联网目标，局域网目标不受它管。
- */
-function ExitPortsCard({ node, ctl }: { node: NodeDetail; ctl: ExitForm }) {
-  const { form, setForm, commit } = ctl
-  return (
-    <BoxCard data-testid="exit-ports">
-      <header className="flex items-center justify-between gap-4 px-5 py-4">
-        {/* 和出口卡片的标题栏一样：左边一个图标块。 */}
-        <div className="flex min-w-0 items-center gap-3.5">
-          <span
-            aria-hidden
-            className="flex size-10 shrink-0 items-center justify-center rounded-lg border bg-muted/60 text-foreground/80"
-          >
-            <Hash className="size-5" />
-          </span>
-          <div className="min-w-0">
-            <h2 className="text-[15px] leading-6 font-semibold">{d.exitPortsTitle}</h2>
-            <p className="text-[13px] text-muted-foreground">{d.exitPortsDesc}</p>
-          </div>
-        </div>
-        <Switch
-          aria-label={d.exitPortsSwitch(node.name)}
-          checked={form.limitPorts}
-          onCheckedChange={(on) =>
-            on ? setForm({ ...form, limitPorts: true }) : commit({ ...form, limitPorts: false })
-          }
-        />
-      </header>
-      {form.limitPorts ? (
-        <div className="border-t px-5 py-4">
-          <PortsEditor ctl={ctl} />
-        </div>
-      ) : null}
-    </BoxCard>
-  )
-}
-
-/** 示意图里的一站：图标块、名字，下面一行小字。每一站一样高。 */
-function Hop({ icon, label, sub, dim }: { icon: ReactNode; label: string; sub: string; dim: boolean }) {
-  return (
-    <div
-      className={cn(
-        'flex h-14 items-center gap-2.5 rounded-lg border bg-card px-3 whitespace-nowrap transition-opacity',
-        dim && 'opacity-40',
-      )}
-    >
-      <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-foreground/80 [&>svg]:size-4">
-        {icon}
-      </span>
-      <div>
-        <p className="text-[13px] leading-5 font-medium">{label}</p>
-        <p className="text-xs leading-4 text-muted-foreground tabular">{sub}</p>
-      </div>
-    </div>
-  )
-}
-
-/** 两站之间的线，撑满中间的宽度，末端一个箭头。 */
-function FlowLine({ dim, className }: { dim: boolean; className?: string }) {
-  return (
-    <div className={cn('flex items-center transition-opacity', dim && 'opacity-40', className)}>
-      <div className="h-px flex-1 bg-border-strong" />
-      <ChevronRight aria-hidden className="-ml-1.5 size-4 shrink-0 text-faint" />
-    </div>
-  )
-}
-
-/**
- * 两条路线上下对照：不经本机代理（出口直接到网站，中间一根长线跨过代理那一格）、经本机代理。
- * 现在生效的那条正常显示、标着"现在"，另一条淡下去。两条放在同一个网格里，几站上下对齐。
+ * 打开"再经本机代理出去"之后的一行路线：用它的节点 → 这个出口 → 本机代理 → 网站，网站看到的是代理的地址。
  * 读屏读的是下面那句话，图本身不读。
  */
-function UpstreamDiagram({ node, proxy }: { node: NodeDetail; proxy: string | null }) {
-  const on = proxy !== null
-  const label = (text: string, active: boolean) => (
-    <p className={cn('col-span-full flex items-center gap-2 text-xs text-muted-foreground', !active && 'opacity-60')}>
-      {text}
-      {active ? <Badge tone="accent">{d.upstreamNow}</Badge> : null}
-    </p>
+function UpstreamRoute({ node, proxy }: { node: NodeDetail; proxy: string | null }) {
+  const stop = (icon: ReactNode, label: string) => (
+    <span className="inline-flex items-center gap-1.5 rounded-md border bg-card px-2 py-1 text-xs whitespace-nowrap [&>svg]:size-3.5 [&>svg]:text-muted-foreground">
+      {icon}
+      {label}
+    </span>
   )
-  const users = (dim: boolean) => (
-    <Hop icon={<Server />} label={d.upstreamDiagUsers} sub={d.upstreamDiagUsersSub} dim={dim} />
-  )
-  const exit = (dim: boolean) => <Hop icon={<DoorOpen />} label={node.name} sub={d.upstreamDiagExit} dim={dim} />
+  const arrow = <ChevronRight aria-hidden className="size-3.5 shrink-0 text-faint" />
   return (
-    <figure className="overflow-x-auto rounded-lg bg-muted/50 p-4">
-      <div
-        aria-hidden
-        className="grid min-w-[34rem] grid-cols-[auto_minmax(1.25rem,1fr)_auto_minmax(1.25rem,1fr)_auto_minmax(1.25rem,1fr)_auto] items-center gap-y-2"
-      >
-        {label(d.upstreamRouteDirect, !on)}
-        {users(on)}
-        <FlowLine dim={on} />
-        {exit(on)}
-        <FlowLine dim={on} className="col-span-3" />
-        <Hop icon={<Globe />} label={d.upstreamDiagSite} sub={d.upstreamDiagSeesExit} dim={on} />
-
-        <div className="col-span-full h-2" />
-        {label(d.upstreamRouteProxy, on)}
-        {users(!on)}
-        <FlowLine dim={!on} />
-        {exit(!on)}
-        <FlowLine dim={!on} />
-        <Hop icon={<Workflow />} label={d.upstreamDiagProxy} sub={proxy ?? d.upstreamDiagProxySub} dim={!on} />
-        <FlowLine dim={!on} />
-        <Hop icon={<Globe />} label={d.upstreamDiagSite} sub={d.upstreamDiagSeesProxy} dim={!on} />
-      </div>
-      <figcaption className="sr-only">{on ? d.upstreamDiagOn : d.upstreamDiagOff(node.name)}</figcaption>
+    <figure className="flex flex-wrap items-center gap-1.5 rounded-lg bg-muted/50 px-3 py-2.5">
+      <span aria-hidden className="contents">
+        {stop(<Server />, d.upstreamDiagUsers)}
+        {arrow}
+        {stop(<DoorOpen />, node.name)}
+        {arrow}
+        {stop(<Workflow />, proxy ?? d.upstreamDiagProxy)}
+        {arrow}
+        {stop(<Globe />, d.upstreamDiagSeesProxy)}
+      </span>
+      <figcaption className="sr-only">{d.upstreamDiagOn}</figcaption>
     </figure>
-  )
-}
-
-/**
- * 再经本机代理出去，单独一张卡片：默认关着。打开之后填出口机器上另一个代理程序（如 Clash）的 SOCKS5 地址，
- * 离开输入框或回车时保存；地址没填好之前不保存，出口照旧直接出去。上面一张图说明流量怎么走。
- */
-function ExitUpstreamCard({ node, ctl }: { node: NodeDetail; ctl: ExitForm }) {
-  const { form, setForm, commit, shown } = ctl
-  const inputId = useId()
-  const saved = node.exit?.upstream_socks5 ?? null
-  // 开关打开、地址还没填时，开关要看起来开着：这个状态只在页面上，服务器上还是没有代理。
-  const [opened, setOpened] = useState(false)
-  const on = saved !== null || opened
-
-  return (
-    <BoxCard data-testid="exit-upstream">
-      <header className="flex items-center justify-between gap-4 px-5 py-4">
-        <div className="flex min-w-0 items-center gap-3.5">
-          <span
-            aria-hidden
-            className="flex size-10 shrink-0 items-center justify-center rounded-lg border bg-muted/60 text-foreground/80"
-          >
-            <Workflow className="size-5" />
-          </span>
-          <div className="min-w-0">
-            <h2 className="text-[15px] leading-6 font-semibold">{d.upstreamTitle}</h2>
-            <p className="text-[13px] text-muted-foreground">{d.upstreamDesc}</p>
-          </div>
-        </div>
-        <Switch
-          aria-label={d.upstreamSwitch(node.name)}
-          checked={on}
-          onCheckedChange={(next) => {
-            setOpened(next)
-            if (!next) commit({ ...form, upstream: '' })
-          }}
-        />
-      </header>
-      <div className="space-y-4 border-t px-5 py-4">
-        <UpstreamDiagram node={node} proxy={saved} />
-        {on ? (
-          <SettingRow label={d.upstreamAddr} hint={d.upstreamAddrHint} htmlFor={inputId} error={shown('upstream')}>
-            <Input
-              id={inputId}
-              className="w-56 font-mono"
-              placeholder="127.0.0.1:7890"
-              autoFocus={saved === null}
-              value={form.upstream}
-              onChange={(event) => setForm({ ...form, upstream: event.target.value })}
-              onBlur={() => form.upstream.trim() !== '' && commit(form, 'upstream')}
-              onKeyDown={onEnter(() => commit(form, 'upstream'))}
-            />
-          </SettingRow>
-        ) : null}
-      </div>
-    </BoxCard>
   )
 }
 
@@ -509,6 +425,8 @@ function Stat({ label, hint, children }: { label: string; hint?: string; childre
  */
 function ExitUsageCard({ network, node }: { network: Network; node: NodeDetail }) {
   const exits = useQuery(q.exits(network.id))
+  const listeners = useQuery(q.listeners(network.id))
+  const proxies = (listeners.data ?? []).filter((listener) => exitOf(listener) === node.id).length
   const view = exits.data?.find((candidate) => candidate.node.id === node.id)
   const health = view === undefined ? null : exitHealthView(view)
   const usage = view?.usage ?? null
@@ -530,6 +448,10 @@ function ExitUsageCard({ network, node }: { network: Network; node: NodeDetail }
           )
         }
       />
+      {/* 有几个代理经这里出去：代理在代理页里建，这里只说个数。 */}
+      <p className="border-b px-5 py-2.5 text-[13px] text-muted-foreground" data-testid="exit-proxies">
+        {d.exitProxies(proxies)}
+      </p>
       {exits.isPending ? (
         <div className="px-5 py-4">
           <SkeletonBlock lines={2} />
@@ -548,11 +470,13 @@ function ExitUsageCard({ network, node }: { network: Network; node: NodeDetail }
               </UsageBar>
             </div>
           ) : null}
-          <dl className="grid grid-cols-2 gap-x-8 gap-y-5 px-5 py-5 @2xl:grid-cols-4">
+          <dl className="grid grid-cols-3 gap-x-6 gap-y-5 px-5 py-5">
             <Stat label={e.rowActive}>{usage.active}</Stat>
             <Stat label={e.rowRequests}>{usage.total}</Stat>
             <Stat label={e.rowTraffic}>
-              ↑ {formatBytes(usage.bytes_to_target)} ↓ {formatBytes(usage.bytes_from_target)}
+              <span className="whitespace-nowrap">
+                ↑ {formatBytes(usage.bytes_to_target)} ↓ {formatBytes(usage.bytes_from_target)}
+              </span>
             </Stat>
             <Stat label={e.rowFailedTarget}>{usage.failed_by_target}</Stat>
             <Stat label={e.rowRefused} hint={e.rowRefusedHint}>
@@ -571,84 +495,6 @@ function ExitUsageCard({ network, node }: { network: Network; node: NodeDetail }
   )
 }
 
-interface UserRow {
-  id: NodeId
-  name: string
-  allowed: boolean
-  up: number
-  down: number
-}
-
-/**
- * 能用它的节点：访问规则允许访问它的节点都能把它当出口。每行一样高：名字，右边是它经这个出口发出和收到的字节
- * （那个节点自己看到的，没用过就是 0）。用过、但规则现在已经不允许的也列出来，标明。按流量排。
- */
-function ExitUsersCard({ network, node }: { network: Network; node: NodeDetail }) {
-  const access = useQuery(q.nodeAccess(network.id, node.id))
-  const exits = useQuery(q.exits(network.id))
-  const nodes = useQuery(q.nodes(network.id))
-  const view = exits.data?.find((candidate) => candidate.node.id === node.id)
-  const allowed = new Set((access.data?.reachable_by ?? []).map((edge) => edge.node.id))
-
-  const rows: UserRow[] = (access.data?.reachable_by ?? []).map((edge) => ({
-    id: edge.node.id,
-    name: edge.node.name,
-    allowed: true,
-    up: 0,
-    down: 0,
-  }))
-  for (const seen of view?.observed ?? []) {
-    let row = rows.find((candidate) => candidate.id === seen.by.id)
-    if (row === undefined) {
-      row = { id: seen.by.id, name: seen.by.name, allowed: allowed.has(seen.by.id), up: 0, down: 0 }
-      rows.push(row)
-    }
-    row.up = seen.bytes_up
-    row.down = seen.bytes_down
-  }
-  rows.sort((x, y) => y.up + y.down - (x.up + x.down) || x.name.localeCompare(y.name))
-  const info = (id: NodeId) => nodes.data?.find((candidate) => candidate.id === id)
-
-  return (
-    <BoxCard data-testid="exit-users">
-      <BoxCardHeader
-        title={d.exitUsersTitle}
-        tip={e.usersTip}
-        action={
-          <Link
-            to={`${networkPath(network.id, 'access')}?view=node&node=${node.id}`}
-            className="rounded-sm text-[13px] text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
-          >
-            {d.exitUsersRules}
-          </Link>
-        }
-      />
-      {access.isPending ? (
-        <div className="px-5 py-4">
-          <SkeletonBlock lines={2} />
-        </div>
-      ) : rows.length === 0 ? (
-        <p className="px-5 py-6 text-center text-[13px] text-muted-foreground">{d.exitUsersNone}</p>
-      ) : (
-        <ul className="divide-y" aria-label={d.exitUsersTitle}>
-          {rows.map((row) => (
-            <li key={row.id} className="flex min-h-12 items-center justify-between gap-4 px-5 py-2.5">
-              <div className="flex min-w-0 items-center gap-2 text-sm">
-                <NodeLink network={network.id} node={{ id: row.id, name: row.name }} online={info(row.id)?.online} />
-                <Flag code={info(row.id)?.country} />
-                {row.allowed ? null : <Badge tone="warn">{d.exitNotAllowed}</Badge>}
-              </div>
-              <span className={cn('shrink-0 text-sm tabular', row.up + row.down === 0 && 'text-muted-foreground')}>
-                ↑ {formatBytes(row.up)} ↓ {formatBytes(row.down)}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </BoxCard>
-  )
-}
-
 interface ExitEnabledLayoutProps {
   network: Network
   node: NodeDetail
@@ -658,24 +504,14 @@ interface ExitEnabledLayoutProps {
 }
 
 /**
- * 启用了的出口：宽屏分两栏。左边是出口卡片（设置一行一项）和端口限制；右边是用量、能用它的节点。
- * 设置列表和端口限制共用一份表单。
+ * 启用了的出口：宽屏分两栏。左边是出口卡片（开关在标题栏，下面一行一项设置）；右边是用量。
  */
 export function ExitEnabledLayout({ network, node, exit, renderCard }: ExitEnabledLayoutProps) {
   const ctl = useExitForm(network, node, exit)
   return (
-    <div className="grid items-start gap-5 @6xl:grid-cols-2">
-      <div className="space-y-5">
-        {renderCard(<ExitSettingsList ctl={ctl} />)}
-        <ExitPortsCard node={node} ctl={ctl} />
-        <ExitUpstreamCard node={node} ctl={ctl} />
-      </div>
-      <div className="space-y-5">
-        {/* 经它出去的代理放在右栏最上面：宽屏时不用往下翻就看得到。 */}
-        <ProxyEntriesCard network={network} node={node} />
-        <ExitUsageCard network={network} node={node} />
-        <ExitUsersCard network={network} node={node} />
-      </div>
+    <div className="grid items-start gap-5 @6xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+      {renderCard(<ExitSettingsList node={node} ctl={ctl} />)}
+      <ExitUsageCard network={network} node={node} />
     </div>
   )
 }

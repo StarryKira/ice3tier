@@ -4,7 +4,6 @@ import {
   buildJoinCommand,
   declareCommand,
   declareConfig,
-  exitUsage,
   installCommands,
   joinFlags,
   listenerUsage,
@@ -92,10 +91,6 @@ describe('其余给用户执行的命令', () => {
 
   it('改配置文件的写法', () => {
     expect(declareConfig('exit')).toBe('[declare]\nexit = true')
-  })
-
-  it('经出口访问：用户名处是出口节点的虚拟 IP', () => {
-    expect(exitUsage('10.66.0.2')).toBe('curl -x socks5h://10.66.0.2@127.0.0.1:1080 https://example.com')
   })
 })
 

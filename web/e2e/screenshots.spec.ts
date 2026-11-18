@@ -486,7 +486,7 @@ test('有数据时：节点详情', async () => {
   await expect(page.getByTestId('capability-exit')).toBeVisible()
   await shot('node-detail-exit')
   await page.setViewportSize({ width: 1680, height: 960 })
-  await expect(page.getByTestId('exit-users')).toBeVisible()
+  await expect(page.getByTestId('exit-usage')).toBeVisible()
   await shot('node-detail-exit-wide', { fullPage: false })
   await page.getByTestId('exit-ports').scrollIntoViewIfNeeded()
   await shot('node-detail-exit-ports', { fullPage: false })
@@ -666,19 +666,12 @@ test('有数据时：分组', async () => {
 })
 
 test('有数据时：接入', async () => {
-  // 代理出口：nas-home 是出口，代理入口里是经它出去的代理。
-  const px = t.nodes.detail.proxy
+  // 出口：nas-home 的出口标签，左边一张设置卡片，右边用量。
   await page.goto(`${controller.baseUrl}/n/1/nodes/2?tab=exit`)
-  await expect(page.getByTestId('proxy-entries').locator('[data-testid^="proxy-entry-"]').first()).toBeVisible()
+  await expect(page.getByTestId('exit-proxies')).toBeVisible()
   await page.setViewportSize({ width: 1680, height: 960 })
-  await shot('proxy-exit', { fullPage: false })
+  await shot('node-exit', { fullPage: false })
   await page.setViewportSize({ width: 1280, height: 800 })
-  await page.getByTestId('proxy-entries').getByRole('button', { name: px.add }).click()
-  const proxyDialog = page.getByRole('dialog', { name: px.addTitle('nas-home') })
-  await proxyDialog.getByRole('radio', { name: px.whereAll }).click()
-  await shot('proxy-dialog', { fullPage: false })
-  await proxyDialog.getByRole('button', { name: t.common.cancel, exact: true }).click()
-  await page.getByRole('button', { name: t.common.discardConfirm }).click()
 
   await goTo(page, t.nav.credentials)
   await expect(page.getByTestId('credential-row-phone')).toBeVisible()

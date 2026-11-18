@@ -416,7 +416,7 @@ test('启用出口：节点没有声明时说明原因和要执行的命令，�
   await expect(page.getByTestId('not-declared-exit')).toHaveCount(0)
   await expect(exitRow.getByTestId('declare-command')).toHaveCount(0)
 
-  // 打开就按默认值启用，没有对话框；设置平铺在卡片里。端口限制是单独的一张卡片，默认关着。
+  // 打开就按默认值启用，没有对话框；设置平铺在卡片里，端口限制是其中一行，默认关着。
   await exitSwitch.click()
   await expectToast(page, t.nodes.detail.exitEnabledToast(server.name))
   await expect(exitSwitch).toBeChecked()
@@ -440,8 +440,8 @@ test('启用出口：节点没有声明时说明原因和要执行的命令，�
   await clearToasts(page)
   await portsSwitch.click()
   await expectToast(page, t.nodes.detail.exitSavedToast)
-  // 启用之后给出一个马上能用的例子，地址是这个节点真实的虚拟 IP。
-  await expect(exitRow.getByText(`curl -x socks5h://${server.ip}@127.0.0.1:1080 https://example.com`)).toBeVisible()
+  // 用量卡片上写着还没有代理经这里出去：代理在代理页里建，用户名不再选出口。
+  await expect(page.getByTestId('exit-proxies')).toContainText(t.nodes.detail.exitProxies(0))
   const node = (await apiNodes()).find((candidate) => candidate.id === server.id)
   expect(node?.exit).toMatchObject({ ports: null })
   await clearToasts(page)

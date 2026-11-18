@@ -5,7 +5,6 @@ import {
   type Capability,
   CAPABILITY_CONFIG_KEY,
   CAPABILITY_FLAG,
-  LOCAL_SOCKS5,
   PLATFORMS,
   type PlatformId,
   RELEASE_BASE,
@@ -93,11 +92,6 @@ export function declareConfig(capability: Capability): string {
 }
 
 const EXAMPLE_URL = 'https://example.com'
-
-/** 在某个节点本机，经它自带的代理入口，从 `exit` 这个出口访问互联网。用户名写出口节点的虚拟 IP。 */
-export function exitUsage(exitVirtualIp: string): string {
-  return `curl -x socks5h://${exitVirtualIp}@${LOCAL_SOCKS5} ${EXAMPLE_URL}`
-}
 
 interface ListenerUsageOptions {
   /** 用户名处写的出口节点（虚拟 IP）。监听器固定了出口、或者不想指定出口时不给。 */

@@ -7,7 +7,6 @@ import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
 import { type Network, type Node, type NodeDetail, type Reachability, type RelaySettings } from '@/api/types'
 import { useConfirm } from '@/components/confirm'
-import { CodeBlock } from '@/components/copy'
 import { DeclareHowTo } from '@/components/declare'
 import { Flag } from '@/components/flag'
 import { InfoTip } from '@/components/info-tip'
@@ -18,7 +17,6 @@ import { Button } from '@/components/ui/button'
 import { BoxCard } from '@/components/ui/card'
 import { Switch } from '@/components/ui/switch'
 import { t, useLocale } from '@/i18n'
-import { exitUsage } from '@/lib/commands'
 import { countryName } from '@/lib/region'
 import { attachedCount, canBeForwardTarget, forwardTargetBySwitch, nodeName } from '@/lib/nodes'
 import { relayAddresses } from '@/lib/relay'
@@ -459,26 +457,7 @@ export function ExitTab({ network, node, onWaiting }: CapabilityTabProps) {
       </div>
     )
   }
-  return (
-    <ExitEnabledLayout
-      network={network}
-      node={node}
-      exit={exit}
-      renderCard={(settings) =>
-        card(
-          <>
-            {settings}
-            <div className="border-t px-5 py-4">
-              <p className="text-[13px] text-muted-foreground">{d.exitUsageBody}</p>
-              <CodeBlock copy={exitUsage(node.virtual_ip)} className="mt-2">
-                {exitUsage(node.virtual_ip)}
-              </CodeBlock>
-            </div>
-          </>,
-        )
-      }
-    />
-  )
+  return <ExitEnabledLayout network={network} node={node} exit={exit} renderCard={(settings) => card(settings)} />
 }
 
 /**
