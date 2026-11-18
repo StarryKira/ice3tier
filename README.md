@@ -178,6 +178,12 @@ i3t-controller --data-dir /var/lib/i3t-controller --backup-to /srv/backup/i3t-co
 - 备份之后的改动都没有了。备份之后加入的节点会被当成不认识的节点拒绝，`i3t run` 停下并提示重新加入：生成一个新的注册令牌，`echo <令牌> | i3t join`，再 `i3t run`。备份之后删掉的节点又出现在列表里。
 - 旧版本做的备份照常能用：启动时数据库按新版本升级。
 
+## 平台
+
+- **Linux**（x86_64、aarch64）：开发和测试都在它上面，功能齐全。
+- **Windows、macOS**：节点、controller 和命令行都能构建，只有 Linux 才有的几样除外（透明访问、`i3t tune`、`i3t hosts`）。这两个系统上还没有实际运行验证过：Windows 版在 Wine 里跑通了 controller 和命令行（[tests/platform](tests/platform/README.md)），macOS 版只编译过。
+- Windows 上密钥和数据库靠所在目录的权限保护。默认的目录在用户自己的 `AppData` 里，别的用户读不到；用 `--state-dir`、`--data-dir` 换到别处时，要自己确认那个目录别人读不了。
+
 ## 构建
 
 需要 Rust 1.91 或更新的稳定版（根目录 `Cargo.toml` 的 `rust-version`）；Web 界面要 Node.js 22 和 pnpm。
