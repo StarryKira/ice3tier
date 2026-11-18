@@ -5,7 +5,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-# 监听地址、对外地址等写在 /etc/i3t/controller.env 里，见 deploy/install.sh 生成的模板。
+# 对外地址等写在 /etc/i3t/controller.env 里，比如：
+#   I3T_CONTROLLER_ARGS=--data-dir /var/lib/i3t-controller --public-addr ctl.example.com:20331
+# 别的选项见 i3t-controller --help。
 EnvironmentFile=/etc/i3t/controller.env
 ExecStart=/usr/local/bin/i3t-controller $I3T_CONTROLLER_ARGS
 User=i3t-controller

@@ -1,0 +1,21 @@
+// 透明访问的名字（README 的"透明访问"一节）：让以 i3t 用户跑的节点（deploy/systemd/i3t.service）设置 systemd-resolved。
+// systemd-resolved 按 polkit 决定一个不是 root 的进程能不能改网卡的 DNS，不认 CAP_NET_ADMIN；没有这条规则时，
+// 名字服务的状态是 failed（resolvectl 说 Access denied 或 Interactive authentication required），按虚拟 IP 照常可用。
+// 装上（要有 polkit，立刻生效，不用重启）：
+//
+//   sudo install -D -m 0644 50-i3t-resolved.rules /etc/polkit-1/rules.d/50-i3t-resolved.rules
+//   sudo systemctl restart i3t
+//
+// 代价：这四个动作不分网卡，i3t 用户因此能改这台机器上任何一块网卡的 DNS 设置，不只是它自己的 i3t0。
+// 不想给的话不装，名字用 sudo i3t hosts --apply 写进 /etc/hosts。
+polkit.addRule(function(action, subject) {
+    var allowed = [
+        "org.freedesktop.resolve1.set-dns-servers",
+        "org.freedesktop.resolve1.set-domains",
+        "org.freedesktop.resolve1.set-default-route",
+        "org.freedesktop.resolve1.revert"
+    ];
+    if (subject.user == "i3t" && allowed.indexOf(action.id) >= 0) {
+        return polkit.Result.YES;
+    }
+});

@@ -147,7 +147,7 @@ sudo systemctl daemon-reload && sudo systemctl restart i3t
 ```
 
 系统里还要有 `nft`（nftables）和 `ip`（iproute2）。它装一张包过滤的表、一条策略路由和一块不走流量的网卡 `i3t0`，节点停下时全部拆掉。
-有 systemd-resolved 的机器上名字直接能用；没有的用 `sudo i3t hosts --apply` 把名字写进 `/etc/hosts`，`sudo i3t hosts --remove` 再去掉。别的节点这样连到本机的服务时，
+有 systemd-resolved 的机器上名字直接能用（节点以 `i3t` 用户跑时，另外装一条 polkit 规则，[`deploy/polkit/50-i3t-resolved.rules`](deploy/polkit/50-i3t-resolved.rules)，里面写着装法和代价）；没有的用 `sudo i3t hosts --apply` 把名字写进 `/etc/hosts`，`sudo i3t hosts --remove` 再去掉。别的节点这样连到本机的服务时，
 本机打开了透明访问的话，服务看到的是对端的虚拟 IP。做法见 [docs/architecture.md](docs/architecture.md) 的透明访问一节。
 
 Linux 上可以用 `i3t tune` 检查会影响节点表现的内核参数（UDP 缓冲的上限、TCP 的拥塞控制等），它只列出建议；`sudo i3t tune --apply` 才会改。它也说明这个内核能不能给 TCP 的重传设上限（Linux 6.15 起）：能的话，ice3proxy 和 TCP 中转断网之后恢复得快。
@@ -180,7 +180,9 @@ i3t-controller --data-dir /var/lib/i3t-controller --backup-to /srv/backup/i3t-co
 
 ## 构建
 
-需要 Rust 1.88 或更新的稳定版；Web 界面要 Node.js 22 和 pnpm。
+需要 Rust 1.91 或更新的稳定版（根目录 `Cargo.toml` 的 `rust-version`）；Web 界面要 Node.js 22 和 pnpm。
+检查的工具链：1.91 要能编译（`cargo check --workspace --all-targets`）；CI 用的最新稳定版和开发用的 nightly 上
+`cargo clippy --workspace --all-targets -- -D warnings` 没有警告，CI 上 `cargo test --workspace` 全过。
 
 ```sh
 (cd web && pnpm install && pnpm build)   # 先构建 Web 界面，controller 会把它编进去；不构建的话 controller 没有界面，别的不受影响
