@@ -10,6 +10,7 @@ use i3t_proto::Datagram;
 use i3t_proto::datagram::RelayHeader;
 use i3t_proto::session::{Echo, Frame, Refused};
 use i3t_underlay::tcp_leg::{self, FrameQueue, FrameReader, FrameSender};
+use i3t_underlay::tcp_mss;
 use i3t_underlay::tcp_recovery::Recovery;
 use tokio::net::TcpStream;
 use tokio::task::{JoinHandle, JoinSet};
@@ -86,6 +87,7 @@ async fn run(shared: &Shared, relay: &RelaySlot, conn: u64, addrs: &[SocketAddr]
 
 /// 按顺序去连 `addrs`：每隔 250 毫秒（或者前一个失败时马上）开始连下一个，几个同时在连，先连上的那个为准，
 /// 别的放下。每个地址最多等 4 秒。所以排在前面的地址连不上（不回答）时，后面的好地址不用等它超时。
+/// 握手里通告压低的 MSS（[`tcp_mss`]）。
 ///
 /// relay 的几个地址（controller 找出来的，白皮书 §7.2）不一定都连得上：到 relay 的 TCP 中转和独占 TCP（`i3t-lane`）
 /// 都这样连。调用方按"上一次连上的排最前"排好 `addrs`。
@@ -103,7 +105,7 @@ pub async fn connect_first(addrs: &[SocketAddr]) -> io::Result<(TcpStream, Socke
         tokio::select! {
             () = tokio::time::sleep_until(next_start), if more => {
                 if let Some(addr) = pending.next() {
-                    attempts.spawn(async move { (addr, tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await) });
+                    attempts.spawn(async move { (addr, tokio::time::timeout(CONNECT_TIMEOUT, tcp_mss::connect(addr)).await) });
                 }
                 next_start = tokio::time::Instant::now() + CONNECT_STAGGER;
             }
@@ -189,9 +191,19 @@ mod tests {
         let (dead, _queue, _filler) = silent_address().await;
         assert!(tokio::time::timeout(Duration::from_millis(300), TcpStream::connect(dead)).await.is_err(), "这个地址应该不回答");
         let started = tokio::time::Instant::now();
-        let (_stream, addr) = connect_first(&[dead, live]).await.unwrap();
+        let (stream, addr) = connect_first(&[dead, live]).await.unwrap();
         assert_eq!(addr, live);
         assert!(started.elapsed() < Duration::from_secs(1), "等了 {:?}", started.elapsed());
+
+        // 连上的那一条通告压低的 MSS：对端（这里是一个什么都不设的监听者）发过来的分段不超过它。回环上不压的话是六万多。
+        #[cfg(unix)]
+        {
+            let accepted = listener.accept().await.unwrap().0;
+            let clamped = u32::from(tcp_mss::DEFAULT);
+            assert!(socket2::SockRef::from(&stream).tcp_mss().unwrap() <= clamped);
+            assert!(socket2::SockRef::from(&accepted).tcp_mss().unwrap() <= clamped, "对端按本端通告的 MSS 发");
+        }
+        drop(stream);
 
         // 一个也连不上：说出最后一个的原因。
         drop(listener);

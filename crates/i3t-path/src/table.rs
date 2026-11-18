@@ -28,6 +28,15 @@ use crate::{LocalRelay, RouteChange, Status};
 const STASH_PACKETS: usize = 4;
 /// 多久没有收到对端的包，就开始把发出去的包多留一份。比连接正常时两个确认之间的间隔长得多。
 const STASH_WHEN_SILENT: Duration = Duration::from_millis(500);
+/// 对端头一次、或者静默了 [`STASH_WHEN_SILENT`] 以上之后又发来包，之后这么久之内发给它的包也多留一份。
+///
+/// 这时两头的路往往还在定：对端刚重启、刚连上来，它在各个 relay 上的会话陆续建起来，本节点到它的路还会换一两次
+/// （relay 回"对端没挂在我这里"，或者更好的中转会话建好了）。回给它的头几个包（握手的应答、第一条流的回答）恰好在这时发出，
+/// 发出时对端刚说过话，不算可疑，以前不留底；路紧接着一换，它们留在了走不通的旧路上，连接只能等自己的重传：握手阶段 1 秒，
+/// 之后至少三个往返，而且每丢一次加倍。实验环境里量到（只有 TCP、往返 250ms 的节点重启后马上开流）：对端的应答经它还没挂上的
+/// relay 发出，0.1 毫秒到 150 毫秒之后换路，握手从 0.25 秒拖到 1.25 秒。留了底，换路时随补发一起从新路出去。
+/// 两秒盖得住慢路上的头几个往返；这段时间里只是多拷几个包，换路时多补发几个重复的包。
+const STASH_AFTER_CONTACT: Duration = Duration::from_secs(2);
 
 /// 连接层交下来的一批包：一个，或者若干个等长的首尾相接（最后一个可以短）。
 #[derive(Debug, Clone, Copy)]
@@ -181,6 +190,8 @@ pub(crate) struct PeerSlot {
     pub(crate) last_rx_direct: Stamp,
     /// 最近一次收到它的连接包，不管从哪条路来的。
     pub(crate) last_rx: Stamp,
+    /// 最近一次它头一次、或者静默了一阵之后又发来包的时刻，见 [`STASH_AFTER_CONTACT`]。
+    contact: Stamp,
     /// 当前的路可疑（探测没有回答），或者根本没有路。这时发的包多留一份，见 [`PeerSlot::flush`]。
     doubt: AtomicBool,
     inner: Mutex<SlotInner>,
@@ -194,6 +205,7 @@ impl PeerSlot {
             last_demand: Stamp::default(),
             last_rx_direct: Stamp::default(),
             last_rx: Stamp::default(),
+            contact: Stamp::default(),
             doubt: AtomicBool::new(true),
             inner: Mutex::new(SlotInner { hop: Hop::None, scratch: Vec::new(), stash: VecDeque::new() }),
         })
@@ -220,10 +232,15 @@ impl PeerSlot {
     /// 它不知道路恢复了，只能等自己退避到很久之后的下一次重传。实测（对端经 TCP 中转、那一段断开 20 秒）：发数据的这一头
     /// 被拥塞窗口卡着，连收到的包都不确认，对端的连接 30 秒没有收到任何东西，空闲超时断掉。对端的包一到就补发，
     /// 它收到之后回确认，两头的丢包检测都立刻恢复。没断过的连接两次保活之间也会补发一两个重复的小包，代价可以忽略。
+    ///
+    /// 它头一次、或者静默了 [`STASH_WHEN_SILENT`] 以上之后又发来包时，之后一小段时间里发给它的包也留底（[`STASH_AFTER_CONTACT`]）。
     pub(crate) fn received(&self, shared: &Shared) {
-        let reappeared = self.last_rx.elapsed(&shared.clock).is_some_and(|silent| silent >= SILENCE);
+        let silent = self.last_rx.elapsed(&shared.clock);
         self.last_rx.touch(&shared.clock);
-        if reappeared {
+        if silent.is_none_or(|silent| silent >= STASH_WHEN_SILENT) {
+            self.contact.touch(&shared.clock);
+        }
+        if silent.is_some_and(|silent| silent >= SILENCE) {
             self.flush(shared, Instant::now());
         }
     }
@@ -246,14 +263,19 @@ impl PeerSlot {
         self.last_tx.touch(&shared.clock);
         let mut inner = self.lock();
         let SlotInner { hop, scratch, stash } = &mut *inner;
-        // 路可疑、没有路，或者有一阵没有收到对端的任何包了：这个包多留一份。连接正常传数据时不会走到这里，
-        // 因为对面的确认是连续不断的。
-        let suspicious = self.doubt.load(Ordering::Relaxed) || !self.last_rx.within(&shared.clock, STASH_WHEN_SILENT);
+        // 路可疑、没有路，或者有一阵没有收到对端的任何包了，或者对端刚刚（又）出现：这个包多留一份。
+        // 连接正常传数据时不会走到这里，因为对面的确认是连续不断的。
+        let clock = &shared.clock;
+        let suspicious = self.doubt.load(Ordering::Relaxed)
+            || !self.last_rx.within(clock, STASH_WHEN_SILENT)
+            || self.contact.within(clock, STASH_AFTER_CONTACT);
         if suspicious && let Some(last) = packets.segments().last() {
-            if stash.len() == STASH_PACKETS {
-                stash.pop_front();
-            }
-            stash.push_back((Instant::now(), last.to_vec()));
+            // 放满了就挪用最旧的那一份的缓冲，不再分配。
+            let mut copy =
+                if stash.len() == STASH_PACKETS { stash.pop_front().map(|(_, copy)| copy).unwrap_or_default() } else { Vec::new() };
+            copy.clear();
+            copy.extend_from_slice(last);
+            stash.push_back((Instant::now(), copy));
         }
         match hop {
             Hop::None => Ok(()),
@@ -547,6 +569,59 @@ mod tests {
         // 包连续地来的时候不补发。
         slot.received(&shared);
         assert_eq!(receive(&receiver).await, None);
+    }
+
+    #[tokio::test]
+    async fn packets_answering_a_peer_that_just_appeared_are_resent_when_the_route_moves_right_after() {
+        let shared = shared();
+        // 回给对端的路其实走不通（对端还没挂到这个 relay 上），只是本节点还不知道。
+        let dead = UdpPort::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let slot = PeerSlot::new(NodeId::new(2).unwrap());
+        slot.set_hop(Hop::Direct(dead.local_addr()));
+        slot.set_doubt(false);
+        // 对端头一次发来包，本节点马上回答：发出时刚收到它的包，路也不可疑。
+        slot.received(&shared);
+        shared.port.writable().await.unwrap();
+        slot.send(&shared, &Packets { contents: &[3; 100], segment_size: None, ecn: None }).unwrap();
+        assert_eq!(receive(&dead).await, Some(vec![3; 100]));
+        // relay 回"它没挂在我这里"，路紧接着换了：回答要跟着从新路补发出去，不能只等连接自己的重传。
+        let working = UdpPort::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        slot.set_hop(Hop::Direct(working.local_addr()));
+        slot.flush(&shared, Instant::now());
+        assert_eq!(receive(&working).await, Some(vec![3; 100]));
+
+        // 静默了一阵又出现的对端也一样。
+        tokio::time::sleep(STASH_WHEN_SILENT).await;
+        slot.received(&shared);
+        shared.port.writable().await.unwrap();
+        slot.send(&shared, &Packets { contents: &[4; 100], segment_size: None, ecn: None }).unwrap();
+        assert_eq!(receive(&working).await, Some(vec![4; 100]));
+        slot.flush(&shared, Instant::now());
+        assert_eq!(receive(&working).await, Some(vec![3; 100]), "先留的先补发");
+        assert_eq!(receive(&working).await, Some(vec![4; 100]));
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_keeps_talking_is_not_copied_once_the_first_exchanges_are_over() {
+        let shared = shared();
+        let receiver = UdpPort::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let slot = PeerSlot::new(NodeId::new(2).unwrap());
+        slot.set_hop(Hop::Direct(receiver.local_addr()));
+        slot.set_doubt(false);
+        slot.received(&shared);
+        assert!(slot.contact.within(&shared.clock, STASH_AFTER_CONTACT), "头一次收到它的包：开始留底");
+        // 之后它一直在说话（间隔不到半秒），过了那一小段时间就不再留底，正常的流量不多拷一份。
+        let mut waited = Duration::ZERO;
+        while waited <= STASH_AFTER_CONTACT {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            waited += Duration::from_millis(200);
+            slot.received(&shared);
+        }
+        assert!(!slot.contact.within(&shared.clock, STASH_AFTER_CONTACT));
+        assert!(slot.lock().stash.is_empty());
+        shared.port.writable().await.unwrap();
+        slot.send(&shared, &Packets { contents: &[5; 100], segment_size: None, ecn: None }).unwrap();
+        assert!(slot.lock().stash.is_empty(), "连接正常时不留底");
     }
 
     #[tokio::test]

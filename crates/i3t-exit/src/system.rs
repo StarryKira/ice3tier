@@ -87,7 +87,8 @@ impl System for Os {
     }
 
     async fn connect(&self, addr: SocketAddr) -> io::Result<TcpStream> {
-        TcpStream::connect(addr).await
+        // 目标多半不是我们的程序：只有本端通告的 MSS 能让它别发路上送不到的大分段（见 `i3t_underlay::tcp_mss`）。
+        i3t_underlay::tcp_mss::connect(addr).await
     }
 
     #[cfg(target_os = "linux")]

@@ -53,11 +53,11 @@ impl Server {
     pub async fn bind(controller: Arc<Controller>, options: ServeOptions) -> Result<Self, Error> {
         let tls = Arc::new(controller.tls_config()?);
         let bind_error = |address: SocketAddr| move |source| Error::Bind { address, source };
-        let node_tcp = TcpListener::bind(options.node_listen).await.map_err(bind_error(options.node_listen))?;
+        let node_tcp = i3t_underlay::tcp_mss::listen(options.node_listen).map_err(bind_error(options.node_listen))?;
         // 节点按"和节点协议同一个端口号"去找地址查询，所以 UDP 跟着 TCP 实际绑到的端口走。
         let node_addr = node_tcp.local_addr().map_err(bind_error(options.node_listen))?;
         let node_udp = UdpSocket::bind(node_addr).await.map_err(bind_error(node_addr))?;
-        let admin = TcpListener::bind(options.admin_listen).await.map_err(bind_error(options.admin_listen))?;
+        let admin = i3t_underlay::tcp_mss::listen(options.admin_listen).map_err(bind_error(options.admin_listen))?;
         Ok(Self { controller, tls, node_tcp, node_udp, admin, webui: options.webui, follow_releases: options.follow_releases })
     }
 

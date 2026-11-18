@@ -154,6 +154,8 @@ pub async fn run(
 
     let key = Arc::new(key);
     let initial = Arc::new(initial);
+    // 在开出任何 TCP 之前（到 controller 的、到 relay 的、入口的监听），见 `i3t_underlay::tcp_mss`。
+    i3t_underlay::tcp_mss::set(config.performance.tcp_mss.unwrap_or(i3t_underlay::tcp_mss::DEFAULT));
     tracing::info!(
         node = %initial.me.name,
         virtual_ip = %initial.me.virtual_ip,

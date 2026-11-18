@@ -469,6 +469,9 @@ pub struct PerformanceConfig {
     /// 0 是不因为空闲关闭。
     pub idle_close_secs: Option<u64>,
     pub return_memory: Option<bool>,
+    /// 本节点开出去、接进来的 TCP 通告的最大分段长度（MSS）。不写是 [`i3t_underlay::tcp_mss::DEFAULT`]，0 是用系统的。
+    /// 不跟档位走：它是这台机器所在的网络的事（路径 MTU 黑洞，见 `i3t_underlay::tcp_mss`）。重启之后生效。
+    pub tcp_mss: Option<u16>,
 }
 
 impl PerformanceConfig {
@@ -493,6 +496,13 @@ impl PerformanceConfig {
             {
                 bail!((texts().performance_range)(key, low, high));
             }
+        }
+        let mss = i3t_underlay::tcp_mss::RANGE;
+        if let Some(value) = self.tcp_mss
+            && value != 0
+            && !mss.contains(&value)
+        {
+            bail!((texts().performance_range)("tcp_mss", u64::from(*mss.start()), u64::from(*mss.end())));
         }
         Ok(())
     }

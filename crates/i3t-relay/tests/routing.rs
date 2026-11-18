@@ -356,6 +356,68 @@ async fn a_tcp_only_node_weighs_its_own_tcp_legs_and_moves_off_the_one_that_stal
     transfer.finish().await;
 }
 
+/// 一个转发 TCP 的中间人，两个方向各晚 `one_way` 送到：像一条隔着几百毫秒的慢路。数据照原样、照原来的先后到。
+/// 返回节点该去连的地址。
+async fn slow_tcp(relay: SocketAddr, one_way: Duration) -> SocketAddr {
+    async fn delayed(mut from: tokio::net::tcp::OwnedReadHalf, mut to: tokio::net::tcp::OwnedWriteHalf, one_way: Duration) {
+        let (queue, mut queued) = tokio::sync::mpsc::unbounded_channel::<(tokio::time::Instant, Vec<u8>)>();
+        tokio::spawn(async move {
+            while let Some((due, data)) = queued.recv().await {
+                tokio::time::sleep_until(due).await;
+                if to.write_all(&data).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let mut buf = vec![0u8; 64 * 1024];
+        while let Ok(len @ 1..) = from.read(&mut buf).await {
+            if queue.send((tokio::time::Instant::now() + one_way, buf[..len].to_vec())).is_err() {
+                return;
+            }
+        }
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((node, _)) = listener.accept().await {
+            let Ok(upstream) = TcpStream::connect(relay).await else { continue };
+            let ((node_read, node_write), (relay_read, relay_write)) = (node.into_split(), upstream.into_split());
+            tokio::spawn(delayed(node_read, relay_write, one_way));
+            tokio::spawn(delayed(relay_read, node_write, one_way));
+        }
+    });
+    addr
+}
+
+/// 一对节点头一次说话时，对端的应答发在一个本节点还没挂上去的 relay 上（对端手上的 netmap 还是本节点重启之前的挂靠），
+/// relay 回"它没挂在我这里"，对端随即换路。换路时这个应答要跟着从新路补发出去：它发出时对端刚收到本节点的包，
+/// 不算可疑，以前不留底，丢在旧路上，连接只能等对端握手阶段 1 秒的重传，第一个往返因此慢了好几倍。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_answer_sent_through_a_relay_the_node_has_not_joined_follows_the_peer_onto_its_new_route() {
+    let (a, d, r1, r2) = (Node::start(1), Node::start(2), Node::start(8), Node::start(9));
+    // A 只能走 TCP，经一条往返 200ms 的慢路挂在 R1 上，没有挂在 R2 上。D 的 netmap 说 A 挂在 R2 上、而且更近。
+    a.block(&[&d, &r1, &r2]);
+    for relay in [&r1, &r2] {
+        relay.apply(&View { relays: &[&r1, &r2], relay_clients: Some(&[&a, &d]), ..View::default() });
+        relay.wait_relay_enabled().await;
+    }
+    let slow = slow_tcp(r1.addr(), Duration::from_millis(100)).await;
+    let tcp_via = [(&r1, slow)];
+    a.apply(&View { peers: &[Peer::via(&d, &[(&r1, 5)])], relays: &[&r1], tcp_via: &tcp_via, ..View::default() });
+    d.apply(&View { peers: &[Peer::via(&a, &[(&r2, 5), (&r1, 200)])], relays: &[&r1, &r2], ..View::default() });
+    d.spawn_echo();
+    let via = |relay: &Node| Route::Relay { relays: vec![relay.id] };
+    a.wait_route(&d, "经 R1（只能走 TCP 的慢路）", |route| *route == via(&r1)).await;
+    d.wait_route(&a, "经 R2（netmap 说 A 挂在那里）", |route| *route == via(&r2)).await;
+
+    let started = Instant::now();
+    echo_once(&a, &d, b"ping").await;
+    let took = started.elapsed();
+    // 握手一个往返、回声一个往返，加上 D 发现 R2 不认 A 再换路的工夫：半秒上下。应答丢在 R2 那里的话要多等 D 握手阶段的重传（1 秒）。
+    assert!(took < Duration::from_millis(900), "冷的一对节点，第一个往返用了 {took:?}");
+    assert_eq!(d.route_to(&a), via(&r1), "D 发现 A 不在 R2 上，改经 R1");
+}
+
 /// 这台机器的回环上组播通不通。不通的话（有的系统不让）局域网发现没法在测试里做。
 async fn loopback_multicast_works(group: SocketAddrV4) -> bool {
     let probe = async {

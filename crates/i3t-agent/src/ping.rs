@@ -4,6 +4,8 @@
 //! 对端先按它的访问规则和每个对端的流数上限筛过，所以访问规则不允许时拿到的是明确的拒绝。到对端还没有连接时，
 //! 第一个往返先把连接建起来，它不算在结果里，可以等到连接层自己建连接的时限（[`FIRST`]）：慢的路上（只有 TCP、隔着
 //! 几百毫秒、经 relay）建连接要几秒。那时还没有建起来，说的是"没有及时建起来"，不是"不在线"。
+//! 连接建起来了（或者本来就有）、第一个往返却迟迟不回来时，说的不是连接，而是往返：它最多再等 [`EACH`]，
+//! 之后照常量，回不来的算丢了。
 //! 结果里有这一段时间开始和结束时这对节点的连接走的路，和路上的 relay 的名字。
 //!
 //! 只能由本机问（本机状态接口要令牌），一次只做一个，最多 [`MAX_COUNT`] 个往返、[`DEADLINE`] 之内做完；
@@ -37,6 +39,8 @@ const INTERVAL: Duration = Duration::from_millis(200);
 const EACH: Duration = Duration::from_secs(1);
 /// 第一个往返（可能要先建连接）最多等多久：连接层建一条连接的时限，加上建好之后的那一个往返。
 const FIRST: Duration = i3t_conn::DIAL_TIMEOUT.saturating_add(EACH);
+/// 等第一个往返的时候多久看一次连接建起来了没有。
+const CONNECTED_CHECK: Duration = Duration::from_millis(50);
 /// 整个过程最多多久：本机状态接口的一次问答不超过 10 秒。
 pub const DEADLINE: Duration = Duration::from_secs(8);
 
@@ -147,8 +151,7 @@ pub(crate) async fn ping(runtime: &Runtime, target: &str, count: u32) -> PingRep
     let mut route = RouteAtStart::now(&routes, id);
     let deadline = Instant::now() + DEADLINE;
 
-    // 已经有连接时第一个往返不用建连接，等不到回答说的就是它不在线或者没有路。
-    let connected = runtime.endpoint.connection_rtt(id).is_some();
+    let connected = || runtime.endpoint.connection_rtt(id).is_some();
     match bring_up(endpoint, id, connected).await {
         Err(outcome) => report.outcome = outcome,
         Ok(()) => {
@@ -165,17 +168,48 @@ pub(crate) async fn ping(runtime: &Runtime, target: &str, count: u32) -> PingRep
     report
 }
 
-/// 第一个往返：把到 `peer` 的连接建起来，不算数。等满 [`FIRST`] 还没有回来：本来没有连接（`connected` 为假）时说的是
-/// 连接没有及时建起来；本来就有连接时不用建，说的是它不在线或者没有路。
-async fn bring_up<C: Connector>(connector: &C, peer: NodeId, connected: bool) -> Result<(), PingOutcome> {
-    let outcome = match time::timeout(FIRST, i3t_flow::ping(connector, peer)).await {
-        Ok(Ok(_)) => return Ok(()),
-        Ok(Err(error)) => outcome_of(&error),
-        Err(_) if connected => PingOutcome::Unreachable,
-        Err(_) => PingOutcome::ConnectTimeout,
-    };
-    tracing::info!(%peer, ?outcome, wait_ms = FIRST.as_millis(), "ping：第一个往返没有成");
-    Err(outcome)
+/// 第一个往返：把到 `peer` 的连接建起来，不算数。`connected` 说到 `peer` 现在有没有连接。
+///
+/// 连接建起来之前最多等 [`FIRST`]，等满了还没有连接，说的是连接没有及时建起来。连接建起来了（或者本来就有），这个往返
+/// 最多再等 [`EACH`]（也不超过 [`FIRST`]）：等不到它不能说连接没有建起来，也不能说对端不在线，所以不算失败，接着量，
+/// 回不来的往返算丢了。开流、读回答出错（被拒绝、没有路、连接断了、对端太旧）照旧是失败。
+async fn bring_up<C: Connector>(connector: &C, peer: NodeId, connected: impl Fn() -> bool) -> Result<(), PingOutcome> {
+    let started = Instant::now();
+    let warm_up = i3t_flow::ping(connector, peer);
+    tokio::pin!(warm_up);
+    let mut up_at = connected().then_some(started);
+    let mut check = time::interval(CONNECTED_CHECK);
+    loop {
+        let limit = up_at.map_or(started + FIRST, |at| (at + EACH).min(started + FIRST));
+        tokio::select! {
+            done = &mut warm_up => {
+                let outcome = match done {
+                    Ok(_) => return Ok(()),
+                    Err(error) => outcome_of(&error),
+                };
+                tracing::info!(%peer, ?outcome, waited_ms = started.elapsed().as_millis(), "ping：第一个往返没有成");
+                return Err(outcome);
+            }
+            () = time::sleep_until(limit) => break,
+            _ = check.tick(), if up_at.is_none() => {
+                if connected() {
+                    up_at = Some(Instant::now());
+                }
+            }
+        }
+    }
+    let waited_ms = started.elapsed().as_millis();
+    match up_at {
+        Some(at) => {
+            let up_ms = at.saturating_duration_since(started).as_millis();
+            tracing::info!(%peer, up_ms, waited_ms, "ping：连接建起来了，第一个往返没有及时回来，接着量");
+            Ok(())
+        }
+        None => {
+            tracing::info!(%peer, outcome = ?PingOutcome::ConnectTimeout, waited_ms, "ping：第一个往返没有成");
+            Err(PingOutcome::ConnectTimeout)
+        }
+    }
 }
 
 /// 连接建起来之后量 `count` 个往返（1 到 [`MAX_COUNT`]），到 `deadline` 为止，记进 `report`。
@@ -268,11 +302,21 @@ mod tests {
     }
 
     /// 一条慢的路：前 `slow_opens` 次开流各要等 `dial` 才开得出来（像是先要建连接），之后和内存里的连接一样快。
-    /// `dial` 是 `None` 时那几次一直开不出来。
+    /// `dial` 是 `None` 时那几次一直开不出来。开出过一条流之后 `up` 为真：连接建起来了。
+    /// `unanswered` 次开流开得出来，对端却一直不回答（第一条流在刚建好的连接上卡住）。
     struct SlowPath {
         inner: MemoryConnector,
+        silent: MemoryConnector,
         dial: Option<Duration>,
         slow_opens: AtomicU32,
+        unanswered: AtomicU32,
+        up: AtomicBool,
+    }
+
+    impl SlowPath {
+        fn connected(&self) -> bool {
+            self.up.load(Ordering::Acquire)
+        }
     }
 
     impl Connector for SlowPath {
@@ -280,7 +324,9 @@ mod tests {
         type Recv = MemoryRecv;
 
         fn open(&self, peer: NodeId) -> impl Future<Output = Result<(MemorySend, MemoryRecv), OpenError>> + Send {
-            let slow = self.slow_opens.fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| left.checked_sub(1)).is_ok();
+            let take = |left: &AtomicU32| left.fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| left.checked_sub(1)).is_ok();
+            let slow = take(&self.slow_opens);
+            let unanswered = take(&self.unanswered);
             let dial = self.dial;
             async move {
                 match (slow, dial) {
@@ -288,7 +334,9 @@ mod tests {
                     (true, Some(dial)) => time::sleep(dial).await,
                     (true, None) => std::future::pending().await,
                 }
-                self.inner.open(peer).await
+                let opened = if unanswered { self.silent.open(peer).await } else { self.inner.open(peer).await };
+                self.up.store(opened.is_ok(), Ordering::Release);
+                opened
             }
         }
     }
@@ -296,11 +344,24 @@ mod tests {
     const NAS: u32 = 2;
 
     fn slow_path(dial: Option<Duration>) -> SlowPath {
+        stuck_path(dial, 0)
+    }
+
+    /// 同 [`slow_path`]，另外开头 `unanswered` 条流对端不回答（它在另一个对端不读流的网里）。
+    fn stuck_path(dial: Option<Duration>, unanswered: u32) -> SlowPath {
         let mesh = MemoryMesh::new();
         let (_, acceptor) = mesh.join(NodeId::new(NAS).unwrap());
         tokio::spawn(async move { i3t_flow::serve(&acceptor, Arc::new(Answers)).await });
         let (inner, _) = mesh.join(NodeId::new(1).unwrap());
-        SlowPath { inner, dial, slow_opens: AtomicU32::new(1) }
+        let deaf = MemoryMesh::new();
+        let (_, never_read) = deaf.join(NodeId::new(NAS).unwrap());
+        // 接受方一直在，只是从来不读：开得出流，却等不到回答。
+        tokio::spawn(async move {
+            let _held = never_read;
+            std::future::pending::<()>().await;
+        });
+        let (silent, _) = deaf.join(NodeId::new(1).unwrap());
+        SlowPath { inner, silent, dial, slow_opens: AtomicU32::new(1), unanswered: AtomicU32::new(unanswered), up: AtomicBool::new(false) }
     }
 
     fn netmap() -> Netmap {
@@ -386,7 +447,7 @@ mod tests {
         let dial = i3t_conn::DIAL_TIMEOUT - Duration::from_millis(500);
         let path = slow_path(Some(dial));
         let started = Instant::now();
-        assert_eq!(bring_up(&path, NodeId::new(NAS).unwrap(), false).await, Ok(()));
+        assert_eq!(bring_up(&path, NodeId::new(NAS).unwrap(), || path.connected()).await, Ok(()));
         assert!(started.elapsed() >= dial, "第一个往返确实等了建连接的那几秒：{:?}", started.elapsed());
 
         let mut report = PingReport::default();
@@ -398,19 +459,50 @@ mod tests {
     async fn a_connection_that_does_not_come_up_is_reported_as_not_up_in_time_after_the_dial_timeout() {
         let path = slow_path(None);
         let started = Instant::now();
-        assert_eq!(bring_up(&path, NodeId::new(NAS).unwrap(), false).await, Err(PingOutcome::ConnectTimeout), "不是说它不在线");
+        let outcome = bring_up(&path, NodeId::new(NAS).unwrap(), || path.connected()).await;
+        assert_eq!(outcome, Err(PingOutcome::ConnectTimeout), "不是说它不在线");
         let waited = started.elapsed();
         assert!(waited >= i3t_conn::DIAL_TIMEOUT && waited <= FIRST, "等满连接层建连接的时限才放弃：{waited:?}");
-        // 本来就有连接、往返却回不来：不是连接没建起来，是它不在线或者没有路。
-        let stuck = slow_path(None);
-        assert_eq!(bring_up(&stuck, NodeId::new(NAS).unwrap(), true).await, Err(PingOutcome::Unreachable));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_first_round_trip_that_stalls_on_a_connection_that_is_up_is_counted_as_lost_not_as_a_connection_that_did_not_come_up() {
+        // 连接 250 毫秒就建起来了，第一条流却一直等不到回答（实际网络上见过：之后 5.7 秒都没有回来）。
+        let path = stuck_path(Some(Duration::from_millis(250)), 1);
+        let started = Instant::now();
+        assert_eq!(bring_up(&path, NodeId::new(NAS).unwrap(), || path.connected()).await, Ok(()), "不能说连接没有建起来");
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(250) + EACH && waited < Duration::from_millis(250) + EACH + CONNECTED_CHECK * 2,
+            "连接建起来之后只再等一个往返的时限：{waited:?}"
+        );
+
+        let mut report = PingReport::default();
+        measure(&path, NodeId::new(NAS).unwrap(), 3, started + DEADLINE, &mut report).await;
+        assert_eq!((report.sent, report.received), (3, 3), "之后的往返照常量");
+        // 量的往返本身也回不来时，是丢了：结论还是"量了"，由发出和回来的个数说话。
+        let path = stuck_path(Some(Duration::from_millis(250)), 4);
+        let started = Instant::now();
+        assert_eq!(bring_up(&path, NodeId::new(NAS).unwrap(), || path.connected()).await, Ok(()));
+        let mut report = PingReport::default();
+        measure(&path, NodeId::new(NAS).unwrap(), 5, started + DEADLINE, &mut report).await;
+        assert_eq!((report.outcome, report.received), (PingOutcome::Done, 2), "前三个丢了，后两个回来了：{report:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_round_trip_that_stalls_on_an_existing_connection_waits_one_round_trip_limit_not_the_dial_timeout() {
+        let path = stuck_path(Some(Duration::ZERO), 1);
+        path.up.store(true, Ordering::Release);
+        let started = Instant::now();
+        assert_eq!(bring_up(&path, NodeId::new(NAS).unwrap(), || path.connected()).await, Ok(()));
+        assert_eq!(started.elapsed(), EACH, "本来就有连接：不等建连接的时限");
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_measurement_stops_at_the_deadline() {
         let path = slow_path(Some(Duration::ZERO));
         let started = Instant::now();
-        bring_up(&path, NodeId::new(NAS).unwrap(), false).await.unwrap();
+        bring_up(&path, NodeId::new(NAS).unwrap(), || path.connected()).await.unwrap();
         let mut report = PingReport::default();
         measure(&path, NodeId::new(NAS).unwrap(), MAX_COUNT, started + INTERVAL * 2 + Duration::from_millis(1), &mut report).await;
         assert_eq!(report.sent, 3, "第一个立刻发，之后每隔一段发一个，过了时限就不再发");

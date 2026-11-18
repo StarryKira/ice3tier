@@ -23,3 +23,5 @@ workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+# 测试里读回连接的 MSS。
+socket2.workspace = true

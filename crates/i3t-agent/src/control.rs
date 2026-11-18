@@ -687,7 +687,7 @@ async fn connect(controller: &ControllerInfo, key: &NodeKey, said: &Connect) -> 
     // 校验器只比对公钥，不看名字；这里的名字只是 TLS 接口要求有一个。
     let name = ServerName::try_from("i3t").context(said.server_name)?;
     let handshake = async {
-        let tcp = TcpStream::connect(&controller.address).await.with_context(|| (said.tcp)(&controller.address))?;
+        let tcp = i3t_underlay::tcp_mss::connect_host(&controller.address).await.with_context(|| (said.tcp)(&controller.address))?;
         tcp.set_nodelay(true).context(said.nodelay)?;
         TlsConnector::from(Arc::new(config)).connect(name, tcp).await.context(said.handshake)
     };

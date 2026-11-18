@@ -293,10 +293,12 @@ impl<C: Connector + Datagrams, E: LocalEgress> Access<C, E> {
                 let sessions = udp::forward::serve(Arc::clone(&self.shared), *id, configured, socket, counters.clone());
                 (local, tokio::spawn(sessions.instrument(span)))
             }),
-            Key::Forward { protocol: ForwardProtocol::Tcp, .. } | Key::Listener { .. } => TcpListener::bind(bind).await.map(|listener| {
-                let local = listener.local_addr().unwrap_or(bind);
-                (local, tokio::spawn(accept_loop(Arc::clone(&self.shared), key.clone(), listener, counters.clone())))
-            }),
+            Key::Forward { protocol: ForwardProtocol::Tcp, .. } | Key::Listener { .. } => {
+                i3t_underlay::tcp_mss::listen(bind).map(|listener| {
+                    let local = listener.local_addr().unwrap_or(bind);
+                    (local, tokio::spawn(accept_loop(Arc::clone(&self.shared), key.clone(), listener, counters.clone())))
+                })
+            }
         };
         match started {
             Ok((local, task)) => {

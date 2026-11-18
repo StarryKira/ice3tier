@@ -50,6 +50,18 @@ struct Args {
 
     #[arg(long, conflicts_with = "reset_admin_token")]
     backup_to: Option<PathBuf>,
+
+    #[arg(long, default_value_t = i3t_underlay::tcp_mss::DEFAULT, value_parser = parse_mss)]
+    tcp_mss: u16,
+}
+
+/// `--tcp-mss`：0（用系统的），或者 [`i3t_underlay::tcp_mss::RANGE`] 之内。
+fn parse_mss(text: &str) -> Result<u16, String> {
+    let range = i3t_underlay::tcp_mss::RANGE;
+    match text.parse::<u16>() {
+        Ok(mss) if mss == 0 || range.contains(&mss) => Ok(mss),
+        _ => Err((texts::texts().bad_mss)(*range.start(), *range.end())),
+    }
 }
 
 /// 命令行的定义，帮助按 `lang` 写。
@@ -64,6 +76,7 @@ fn command(lang: Lang) -> clap::Command {
         .mut_arg("static_dir", |arg| arg.help(t.static_dir).value_name(t.dir))
         .mut_arg("reset_admin_token", |arg| arg.help(t.reset_admin_token))
         .mut_arg("backup_to", |arg| arg.help(t.backup_to).value_name(t.dir))
+        .mut_arg("tcp_mss", |arg| arg.help(t.tcp_mss).value_name(t.bytes))
 }
 
 fn main() -> ExitCode {
@@ -115,6 +128,8 @@ async fn serve(args: Args) -> anyhow::Result<()> {
     abort_on_panic();
     let public_addr = args.public_addr.expect("clap 保证：没有 --backup-to 时 --public-addr 是必须写的");
     check_public_addr(&public_addr)?;
+    // 在监听之前：节点连进来的控制连接和管理 API 都按它通告 MSS（见 `i3t_underlay::tcp_mss`）。
+    i3t_underlay::tcp_mss::set(args.tcp_mss);
     if let Some(dir) = &args.static_dir {
         // 目录写错了的话 WebUI 只会全是 404，不如启动时就说。
         if !dir.join("index.html").is_file() {

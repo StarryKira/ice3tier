@@ -115,6 +115,8 @@ pub(crate) fn survey(sysctl: &impl Sysctl, port: u16) -> Vec<Finding> {
         check("net.core.wmem_max", Want::AtLeast(UDP_BUFFER_BYTES), t.tune_wmem),
         check("net.ipv4.tcp_slow_start_after_idle", Want::Exactly("0"), t.tune_slow_start),
         check("net.ipv4.tcp_tw_reuse", Want::Exactly("1"), t.tune_tw_reuse),
+        // 1 是"发现黑洞之后才探"，2 是"一直用小的分段"：2 也算好，不改。
+        check("net.ipv4.tcp_mtu_probing", Want::AtLeast(1), t.tune_mtu_probing),
     ];
 
     let mut congestion = check("net.ipv4.tcp_congestion_control", Want::Exactly("bbr"), t.tune_bbr);
@@ -267,6 +269,7 @@ mod tests {
             ("net.core.wmem_max", "212992"),
             ("net.ipv4.tcp_slow_start_after_idle", "1"),
             ("net.ipv4.tcp_tw_reuse", "2"),
+            ("net.ipv4.tcp_mtu_probing", "0"),
             ("net.ipv4.tcp_congestion_control", "cubic"),
             ("net.ipv4.tcp_available_congestion_control", "reno cubic bbr"),
             ("net.ipv4.ip_local_reserved_ports", ""),
@@ -279,13 +282,18 @@ mod tests {
     }
 
     #[test]
-    fn an_untuned_machine_gets_the_five_changes() {
+    fn an_untuned_machine_gets_the_six_changes() {
         let findings = survey(&stock(), 20330);
         assert_eq!(verdict_of(&findings, "net.core.rmem_max"), &Verdict::Change("4194304".to_owned()));
         assert_eq!(verdict_of(&findings, "net.core.wmem_max"), &Verdict::Change("4194304".to_owned()));
         assert_eq!(verdict_of(&findings, "net.ipv4.tcp_slow_start_after_idle"), &Verdict::Change("0".to_owned()));
         assert_eq!(verdict_of(&findings, "net.ipv4.tcp_tw_reuse"), &Verdict::Change("1".to_owned()), "默认的 2 只对回环生效");
         assert_eq!(verdict_of(&findings, "net.ipv4.tcp_congestion_control"), &Verdict::Change("bbr".to_owned()));
+        assert_eq!(
+            verdict_of(&findings, "net.ipv4.tcp_mtu_probing"),
+            &Verdict::Change("1".to_owned()),
+            "0 时内核不会自己躲开路径 MTU 黑洞"
+        );
         assert_eq!(verdict_of(&findings, "net.ipv4.ip_local_reserved_ports"), &Verdict::Fine, "20330 不在随机端口的范围里，不用保留");
     }
 
@@ -293,8 +301,10 @@ mod tests {
     fn values_that_are_already_wide_enough_are_left_alone() {
         let mut machine = stock();
         machine.values.insert("net.core.rmem_max", "16777216".to_owned());
+        machine.values.insert("net.ipv4.tcp_mtu_probing", "2".to_owned());
         let findings = survey(&machine, 20330);
         assert_eq!(verdict_of(&findings, "net.core.rmem_max"), &Verdict::Fine, "只往大里改，不把已经更大的数改小");
+        assert_eq!(verdict_of(&findings, "net.ipv4.tcp_mtu_probing"), &Verdict::Fine, "2（一直用小的分段）也行");
     }
 
     #[test]
@@ -333,7 +343,7 @@ mod tests {
         let mut machine = stock();
         let findings = survey(&machine, 40000);
         let changed = apply(&mut machine, &findings).unwrap();
-        assert_eq!(changed.len(), 6);
+        assert_eq!(changed.len(), 7);
         assert!(survey(&machine, 40000).iter().all(|finding| finding.verdict == Verdict::Fine));
     }
 

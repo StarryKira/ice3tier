@@ -68,6 +68,8 @@ fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
     #[cfg(unix)]
     socket.set_reuse_address(true)?;
     socket.set_nonblocking(true)?;
+    // 接进来的中转和 lane 都继承它：对端发过来的分段不超过压低的 MSS（路径 MTU 黑洞，见 `i3t_underlay::tcp_mss`）。
+    i3t_underlay::tcp_mss::clamp(&socket);
     socket.bind(&addr.into())?;
     socket.listen(LISTEN_BACKLOG)?;
     TcpListener::from_std(socket.into())
@@ -319,4 +321,22 @@ async fn serve(inner: &Inner, stream: TcpStream, addr: SocketAddr, handshake: Ha
     inner.close_tcp(conn);
     writer.abort();
     reason
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn connections_accepted_by_the_relay_port_are_told_the_clamped_segment_size() {
+        // 连上来的一方自己什么都不设（像别的程序那样）：它发过来的分段照样不超过 relay 通告的 MSS。回环的 MTU 是 65536，
+        // 不压的话是六万多。lane 也是这个端口接进来的。
+        let listener = bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let (dialled, accepted) = tokio::join!(TcpStream::connect(listener.local_addr().unwrap()), listener.accept());
+        let (dialled, (accepted, _)) = (dialled.unwrap(), accepted.unwrap());
+        let mss = |stream: &TcpStream| socket2::SockRef::from(stream).tcp_mss().unwrap();
+        let clamped = u32::from(i3t_underlay::tcp_mss::DEFAULT);
+        assert!(mss(&dialled) <= clamped, "连上来的一方的 MSS 是 {}", mss(&dialled));
+        assert!(mss(&accepted) <= clamped, "接进来的连接的 MSS 是 {}", mss(&accepted));
+    }
 }
