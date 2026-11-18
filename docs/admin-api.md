@@ -1843,7 +1843,7 @@ ice3proxy 要两个节点里至少有一个启用了 relay、有已知的 TCP �
 }
 ```
 
-`total` 是全节点的 `LaneCounts`（对端去掉之后也不减）；`handshake_failures` 是别人拨进来、没有握手成功的连接，按原因分：`deadline` 没有在时限之内完成，`unknown_key` 公钥不认识或者已经吊销，`tls` 别的 TLS 错误，`protocol` 握手之后的第一个帧不对，`busy` 还没握手完的连接太多被挤掉的；`peers` 是每个打开了 ice3proxy 的对端。
+`total` 是全节点的 `LaneCounts`（对端去掉之后也不减）；`handshake_failures` 是别人拨进来、没有握手成功的连接，按原因分：`deadline` 没有在时限之内完成，`unknown_key` 公钥不认识或者已经吊销，`tls` 别的 TLS 错误，`protocol` 握手之后的第一个帧不对，或者连接在那之前断了、读写出错，`busy` 还没握手完的连接太多被挤掉的；`peers` 是每个打开了 ice3proxy 的对端。
 
 ### GET /networks/{network}/pairs
 
