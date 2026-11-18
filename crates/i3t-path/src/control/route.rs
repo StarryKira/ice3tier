@@ -225,6 +225,7 @@ impl View<'_> {
             if self.local_session(id) {
                 // 对端挂在本节点自己的 relay 上：包直接交给它的会话，本节点这一头没有延迟，后面那一段见 `local_leg`。
                 // 还没有量到时按探测等回答的上限（1.5 秒）算：一般比量得到的路都贵，没有别的路时才走它；也不会因为代价换到它上面。
+                // WebUI 认这个数：经本节点自己的 relay、代价不低于 1.5 秒的候选显示成「未测」。改这个上限或者这里的算法时要告诉前端。
                 let leg = self.local_leg(id, peer).map(|(segment, _)| segment);
                 let unmeasured = Segment::from_rtt_ms(PROBE_TIMEOUT_MAX.as_secs_f64() * 1000.0);
                 entries.push(Entry { relay: me, segment: Segment::from_rtt_ms(0.0), settled: leg.is_some() && self.settled(id, me) });
