@@ -1273,7 +1273,16 @@ export interface PathResult {
 }
 
 export type ChoiceReason =
-  'lan' | 'direct' | 'peer_is_relay' | 'own_relay' | 'peer_relay' | 'lowest_cost' | 'within_margin' | 'no_path'
+  | 'lan'
+  | 'direct'
+  | 'peer_is_relay'
+  | 'own_relay'
+  | 'peer_relay'
+  /** 0.1.14 起，默认模式：没有一个 relay 两端都用得上，经一串 relay。 */
+  | 'no_shared_relay'
+  | 'lowest_cost'
+  | 'within_margin'
+  | 'no_path'
 
 export interface Choice {
   route: Route | null

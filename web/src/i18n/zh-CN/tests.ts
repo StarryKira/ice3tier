@@ -75,6 +75,7 @@ export const tests = {
     peer_is_relay: '对端自己是中继',
     own_relay: '对端挂在本节点的中继上',
     peer_relay: '对端挂靠的中继',
+    no_shared_relay: '没有两端都用得上的中继，经一串中继',
     lowest_cost: '代价最低',
     within_margin: '留在现在的路上',
     no_path: '没有能走的路',

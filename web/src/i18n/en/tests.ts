@@ -76,6 +76,7 @@ export const tests: Messages['tests'] = {
     peer_is_relay: 'peer is a relay',
     own_relay: "peer uses this node's relay",
     peer_relay: "peer's relay",
+    no_shared_relay: 'no relay serves both ends, so a chain of relays',
     lowest_cost: 'lowest cost',
     within_margin: 'stays on the current path',
     no_path: 'no path',
