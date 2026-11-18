@@ -21,6 +21,7 @@ export const common: Messages['common'] = {
   copy: 'Copy',
   copied: 'Copied',
   copyFailed: "Couldn't copy",
+  viewPolicies: 'View policies',
   clickToCopy: 'Click to copy',
   copyValue: (value) => `Copy ${value}`,
   online: 'Online',

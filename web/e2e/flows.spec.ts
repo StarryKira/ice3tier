@@ -512,7 +512,7 @@ test('新建端口转发，再删除', async () => {
   await clearToasts(page)
 
   // 目标节点的"端口转发"标签页里列着指向它的这条转发。
-  await row.getByRole('link', { name: server.name, exact: true }).click()
+  await row.getByRole('link', { name: new RegExp(`${literal(server.name)}$`) }).click()
   await page.getByRole('tab', { name: t.nodes.detail.tabForward }).click()
   await expect(page.getByTestId('capability-forward').getByText('127.0.0.1:8080')).toBeVisible()
 

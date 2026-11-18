@@ -1,29 +1,36 @@
 import { useQuery } from '@tanstack/react-query'
-import { ChevronRight, Copy, DoorOpen, Globe, Pencil, Plus, Server, Smartphone, Trash2 } from 'lucide-react'
-import { type ReactNode, useState } from 'react'
+import { Copy, DoorOpen, Globe, Pencil, Plus, Server, Smartphone, Trash2 } from 'lucide-react'
+import { useState } from 'react'
 
 import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
 import { type Node, type Proxy } from '@/api/types'
 import { useConfirm } from '@/components/confirm'
-import { copyText } from '@/lib/clipboard'
-import { NodeLink } from '@/components/node'
+import {
+  Address,
+  EntryRow,
+  FlowEmpty,
+  NameCell,
+  NodeCell,
+  PoliciesLink,
+  ProtocolTag,
+  StatusCell,
+  UsageCell,
+} from '@/components/entry-list'
 import { Page, PageHeader } from '@/components/page'
 import { RowActions } from '@/components/row-actions'
 import { ErrorState, SkeletonRows } from '@/components/states'
-import { StatusText } from '@/components/status'
-import { RowsTotal, Table, TableFooter, Td, Th, Tr } from '@/components/table'
+import { RowsTotal, Table, TableFooter, Td, Th } from '@/components/table'
 import { Button } from '@/components/ui/button'
 import { DropdownMenuItem, DropdownMenuSeparator } from '@/components/ui/dropdown-menu'
 import { Switch } from '@/components/ui/switch'
 import { toast } from '@/components/ui/toast'
 import { t } from '@/i18n'
+import { copyText } from '@/lib/clipboard'
 import { parseSocketAddr } from '@/lib/cidr'
-import { formatBytes } from '@/lib/format'
 import { nodeName } from '@/lib/nodes'
-import { proxyStatus, proxyUrl } from '@/lib/proxy'
+import { proxyStatus, type ProxyStatusView, proxyUrl } from '@/lib/proxy'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
-import { cn } from '@/lib/utils'
 import { useNetwork } from '@/pages/networks/context'
 
 import { ProxyDialog } from './ProxyDialog'
@@ -43,41 +50,43 @@ function addressOf(proxy: Proxy): string {
   })
 }
 
-/** 没有代理时的样子：虚线框铺满标题下面剩下的地方，正中一行图说明代理是怎么走的，下面一个新建的按钮。 */
-function Empty({ onCreate }: { onCreate: () => void }) {
-  const stop = (icon: ReactNode, label: string) => (
-    <span className="inline-flex items-center gap-2 rounded-lg border bg-card px-3 py-2 text-[13px] whitespace-nowrap [&>svg]:size-4 [&>svg]:text-muted-foreground">
-      {icon}
-      {label}
-    </span>
-  )
-  const arrow = <ChevronRight aria-hidden className="size-4 shrink-0 text-faint" />
-  return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-5 rounded-xl border border-dashed px-6 py-12 text-center">
-      <div aria-hidden className="flex flex-wrap items-center justify-center gap-2">
-        {stop(<Smartphone />, s.flow.device)}
-        {arrow}
-        {stop(<Server />, s.flow.entry)}
-        {arrow}
-        {stop(<DoorOpen />, s.flow.exit)}
-        {arrow}
-        {stop(<Globe />, s.flow.internet)}
-      </div>
-      <div>
-        <p className="text-[15px] font-semibold">{s.emptyTitle}</p>
-        <p className="mt-1 text-[13px] text-muted-foreground">{s.emptyBody}</p>
-      </div>
-      <Button variant="primary" onClick={onCreate}>
-        <Plus aria-hidden />
-        {s.create}
-      </Button>
-    </div>
-  )
+/** 状态下面那一句原因：带具体的节点名。正常、停用的不写。 */
+function statusDetail(proxy: Proxy, code: ProxyStatusView['code'], entry: string, exit: string): string | null {
+  switch (code) {
+    case 'pending':
+      return t.listen.pendingDetail(entry)
+    case 'node_offline':
+      return s.backOnline(entry)
+    case 'port_in_use':
+      return t.listen.portInUseDetail(entry, String(parseSocketAddr(proxy.bind)?.port ?? proxy.bind))
+    case 'bind_failed':
+      return t.listen.failedDetail(entry, proxy.bind)
+    case 'exit_disabled':
+      return s.exitOffDetail(exit)
+    case 'exit_offline':
+      return s.backOnline(exit)
+    case 'access_denied':
+      return s.accessDeniedDetail(entry, exit)
+    case 'exit_missing':
+      return s.exitMissingDetail
+    case 'listening':
+    case 'disabled':
+    case 'unknown':
+      return null
+  }
 }
+
+/** 空的时候那一行图。文字在渲染时取：换了语言跟着变。 */
+const flow = () => [
+  { icon: Smartphone, label: s.flow.device },
+  { icon: Server, label: s.flow.entry },
+  { icon: DoorOpen, label: s.flow.exit },
+  { icon: Globe, label: s.flow.internet },
+]
 
 /**
  * 代理：在一台节点（入口）上开 SOCKS5 / HTTP 代理端口，流量经组网从另一台节点（出口）出去，用户名和密码认证。
- * 一行一个代理：入口（节点、协议、地址）、出口、认证、状态、用量；开关直接在行里拨。
+ * 和端口转发的列表一个排法（`components/entry-list`）：名称、启用、入口 → 出口、认证、状态和原因、用量。
  */
 export function ProxiesPage() {
   useDocumentTitle(s.title)
@@ -125,7 +134,12 @@ export function ProxiesPage() {
       {proxies.isError ? (
         <ErrorState title={s.loadFailed} error={proxies.error} onRetry={() => void proxies.refetch()} />
       ) : proxies.isSuccess && list.length === 0 ? (
-        <Empty onCreate={() => setEditing({ proxy: null })} />
+        <FlowEmpty stops={flow()} title={s.emptyTitle} body={s.emptyBody}>
+          <Button variant="primary" onClick={() => setEditing({ proxy: null })}>
+            <Plus aria-hidden />
+            {s.create}
+          </Button>
+        </FlowEmpty>
       ) : (
         <>
           <Table>
@@ -137,7 +151,7 @@ export function ProxiesPage() {
                 <Th>{s.colAuth}</Th>
                 <Th>{s.colStatus}</Th>
                 <Th>{s.colUsage}</Th>
-                <Th className="w-0">
+                <Th className="w-12">
                   <span className="sr-only">{t.common.moreActions}</span>
                 </Th>
               </tr>
@@ -148,73 +162,76 @@ export function ProxiesPage() {
                 const status = proxyStatus(proxy)
                 const entry = all.find((node) => node.id === proxy.node)
                 const exit = proxy.exit === null ? undefined : all.find((node) => node.id === proxy.exit)
+                const entryName = nodeName(all, proxy.node)
+                const exitName = proxy.exit === null ? '' : nodeName(all, proxy.exit)
+                const counted = proxy.connections > 0 || proxy.bytes_up > 0 || proxy.bytes_down > 0
+                const reported =
+                  status.code === 'port_in_use' || status.code === 'bind_failed' ? (proxy.status?.detail ?? null) : null
                 return (
-                  <Tr
-                    key={proxy.id}
-                    dimmed={!proxy.enabled}
-                    className="h-16 hover:bg-muted/50"
-                    data-testid={`proxy-row-${proxy.name}`}
-                  >
+                  <EntryRow key={proxy.id} dimmed={!proxy.enabled} data-testid={`proxy-row-${proxy.name}`}>
                     <Td>
-                      <span className="inline-flex items-center gap-3">
-                        <Switch
-                          aria-label={s.switchLabel(proxy.name)}
-                          checked={proxy.enabled}
-                          disabled={toggle.isPending && toggle.variables.proxy.id === proxy.id}
-                          onCheckedChange={(enabled) => toggle.mutate({ proxy, enabled })}
-                        />
-                        <span className="font-medium">{proxy.name}</span>
-                      </span>
+                      <NameCell
+                        toggle={
+                          <Switch
+                            aria-label={s.switchLabel(proxy.name)}
+                            checked={proxy.enabled}
+                            disabled={toggle.isPending && toggle.variables.proxy.id === proxy.id}
+                            onCheckedChange={(enabled) => toggle.mutate({ proxy, enabled })}
+                          />
+                        }
+                      >
+                        {proxy.name}
+                      </NameCell>
                     </Td>
                     <Td>
-                      <NodeLink
-                        network={network.id}
-                        node={{ id: proxy.node, name: nodeName(all, proxy.node) }}
-                        online={entry?.online}
-                      />
-                      <div className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-                        <span className="rounded-sm bg-muted px-1.5 leading-5">{s.protocol[proxy.protocol]}</span>
-                        <span className="font-mono">{proxy.status?.local ?? proxy.bind}</span>
-                      </div>
+                      <NodeCell network={network.id} node={{ id: proxy.node, name: entryName }} online={entry?.online}>
+                        <ProtocolTag>{s.protocol[proxy.protocol]}</ProtocolTag>
+                        <Address>{proxy.status?.local ?? proxy.bind}</Address>
+                      </NodeCell>
                     </Td>
                     <Td>
                       {proxy.exit === null ? (
                         <span className="text-muted-foreground">—</span>
                       ) : (
-                        <NodeLink
-                          network={network.id}
-                          node={{ id: proxy.exit, name: nodeName(all, proxy.exit) }}
-                          online={exit?.online}
-                        />
+                        <NodeCell network={network.id} node={{ id: proxy.exit, name: exitName }} online={exit?.online}>
+                          {exit?.egress_ip != null ? (
+                            <span title={s.exitIp}>
+                              <Address>{exit.egress_ip}</Address>
+                            </span>
+                          ) : null}
+                        </NodeCell>
                       )}
                     </Td>
-                    <Td className="text-[13px]">
+                    <Td className="text-[13px] whitespace-nowrap">
                       {proxy.username === '' ? (
                         <span className="text-muted-foreground">{s.noAuth}</span>
                       ) : (
                         <span className="font-mono">{proxy.username}</span>
                       )}
                     </Td>
+                    <Td data-keep>
+                      <StatusCell
+                        tone={status.tone}
+                        label={s.status[status.code]}
+                        detail={statusDetail(proxy, status.code, entryName, exitName)}
+                        action={
+                          status.code === 'access_denied' ? (
+                            <PoliciesLink network={network.id}>{t.common.viewPolicies}</PoliciesLink>
+                          ) : undefined
+                        }
+                        reported={reported}
+                      />
+                    </Td>
                     <Td>
-                      <StatusText tone={status.tone} className="text-[13px] whitespace-nowrap">
-                        {s.status[status.code]}
-                      </StatusText>
-                      {proxy.status?.detail != null && status.tone === 'danger' ? (
-                        <div
-                          className="mt-0.5 max-w-60 truncate text-xs text-muted-foreground"
-                          title={proxy.status.detail}
-                        >
-                          {proxy.status.detail}
-                        </div>
-                      ) : null}
+                      <UsageCell
+                        usage={
+                          status.code === 'listening' || counted
+                            ? { connections: proxy.connections, up: proxy.bytes_up, down: proxy.bytes_down }
+                            : null
+                        }
+                      />
                     </Td>
-                    <Td className={cn('text-xs whitespace-nowrap text-muted-foreground tabular')}>
-                      {s.connections(proxy.connections)}
-                      <div>
-                        ↑ {formatBytes(proxy.bytes_up)} ↓ {formatBytes(proxy.bytes_down)}
-                      </div>
-                    </Td>
-                    <Td className="pl-0 text-right">
+                    <Td className="pl-0 text-right" data-keep>
                       <RowActions label={t.common.actionsFor(proxy.name)}>
                         <DropdownMenuItem onSelect={() => setEditing({ proxy })}>
                           <Pencil aria-hidden />
@@ -222,7 +239,9 @@ export function ProxiesPage() {
                         </DropdownMenuItem>
                         <DropdownMenuItem
                           onSelect={() =>
-                            void copyText(addressOf(proxy)).then((ok) => (ok ? toast.success(s.copied) : undefined))
+                            void copyText(addressOf(proxy)).then((ok) =>
+                              ok ? toast.success(s.copied) : toast.error(t.common.copyFailed),
+                            )
                           }
                         >
                           <Copy aria-hidden />
@@ -235,7 +254,7 @@ export function ProxiesPage() {
                         </DropdownMenuItem>
                       </RowActions>
                     </Td>
-                  </Tr>
+                  </EntryRow>
                 )
               })}
             </tbody>

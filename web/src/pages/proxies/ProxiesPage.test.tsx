@@ -85,7 +85,7 @@ describe('代理页', () => {
     expect(row).toHaveTextContent('tokyo')
     expect(row).toHaveTextContent('u1')
     expect(row).toHaveTextContent(s.status.listening)
-    expect(row).toHaveTextContent(s.connections(2))
+    expect(row).toHaveTextContent(t.listen.connections(2))
     expect(screen.getByTestId('proxy-row-tv')).toHaveTextContent(s.status.access_denied)
     expect(screen.getByTestId('proxy-row-tv')).toHaveTextContent(s.noAuth)
     expect(screen.getByTestId('proxy-row-old')).toHaveTextContent(s.status.disabled)

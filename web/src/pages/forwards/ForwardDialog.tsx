@@ -36,14 +36,12 @@ import { networkPath } from '@/pages/networks/context'
 const d = t.forwards.dialog
 
 /** 谁能用这个端口：监听在回环地址、监听在虚拟 IP、监听在局域网地址或 0.0.0.0。 */
-export type ListenScope = 'self' | 'mesh' | 'open'
+type ListenScope = 'self' | 'mesh' | 'open'
 
 interface ForwardDialogProps {
   network: Network
   /** 要编辑的转发；新建时是 `null`。 */
   forward: Forward | null
-  /** 新建时预选的监听方式（空状态里的两个例子带过来）。 */
-  scope?: ListenScope
   open: boolean
   onClose: () => void
 }
@@ -52,7 +50,7 @@ interface ForwardDialogProps {
  * 新建和编辑转发，从上往下填：监听（哪台节点、哪个端口、谁能用），目标（哪台节点、哪个端口、本机还是局域网里的别的机器），
  * 再是协议、QoS 和名字。两台节点不同时当场说策略允不允许。
  */
-export function ForwardDialog({ network, forward, scope: presetScope, open, onClose }: ForwardDialogProps) {
+export function ForwardDialog({ network, forward, open, onClose }: ForwardDialogProps) {
   const bindParsed = forward === null ? null : parseSocketAddr(forward.bind)
   const targetParsed = forward === null ? null : parseSocketAddr(forward.target_addr)
 
@@ -66,7 +64,7 @@ export function ForwardDialog({ network, forward, scope: presetScope, open, onCl
   const target = all.find((node) => node.id === targetNode)
 
   const initialScope = (): ListenScope => {
-    if (bindParsed === null) return presetScope ?? 'self'
+    if (bindParsed === null) return 'self'
     if (isLoopbackHost(bindParsed.host)) return 'self'
     const owner = all.find((node) => node.id === forward?.listen_node)
     return owner?.virtual_ip === bindParsed.host ? 'mesh' : 'open'
@@ -363,7 +361,7 @@ export function ForwardDialog({ network, forward, scope: presetScope, open, onCl
                   to={networkPath(network.id, 'access')}
                   className="rounded-sm text-[13px] font-medium text-primary underline-offset-4 hover:underline"
                 >
-                  {t.forwards.viewRules}
+                  {t.common.viewPolicies}
                 </Link>
               }
             >

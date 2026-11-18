@@ -45,7 +45,7 @@ describe('端口转发的监听状态', () => {
     expect(within(screen.getByTestId('forward-row-db')).getByText(t.listen.pending)).toBeVisible()
   })
 
-  it('端口被占用：红色，下面一行写是哪台机器上的哪个端口，节点的原话在它下面', async () => {
+  it('端口被占用：红色，下面一行写是哪台机器上的哪个端口，悬停看全文和节点的原话', async () => {
     fakeApi({
       'GET /networks/1/forwards': [
         makeForward(5, 'web', { listen: { state: 'port_in_use', detail: 'Address already in use', ...traffic } }),
@@ -55,8 +55,9 @@ describe('端口转发的监听状态', () => {
     renderWithApp(<ForwardsPage />, { network: NETWORK })
     const row = await screen.findByTestId('forward-row-web')
     expect(within(row).getByText(t.listen.portInUse)).toBeVisible()
-    expect(screen.getByText(t.listen.portInUseDetail('laptop', '8080'))).toBeVisible()
-    expect(screen.getByText('Address already in use')).toBeVisible()
+    const detail = screen.getByText(t.listen.portInUseDetail('laptop', '8080'))
+    expect(detail).toBeVisible()
+    expect(detail).toHaveAttribute('title', `${t.listen.portInUseDetail('laptop', '8080')}\nAddress already in use`)
   })
 
   it('开关的时候把服务等级原样带上（PUT 是整个替换）', async () => {
@@ -113,7 +114,7 @@ describe('端口转发的监听状态', () => {
 })
 
 describe('英文', () => {
-  it('转发列表里没有中文，节点的原话照样显示', async () => {
+  it('转发列表里没有中文，节点的原话照样在悬停里', async () => {
     setLocale('en', { remember: false })
     fakeApi({
       'GET /networks/1/forwards': [
@@ -125,8 +126,10 @@ describe('英文', () => {
     })
     renderWithApp(<ForwardsPage />, { network: NETWORK })
     await screen.findByTestId('forward-row-web')
-    expect(screen.getByText(t.listen.portInUseDetail('laptop', '8080'))).toBeVisible()
-    expect(screen.getByText('Address already in use')).toBeVisible()
+    expect(screen.getByText(t.listen.portInUseDetail('laptop', '8080'))).toHaveAttribute(
+      'title',
+      expect.stringContaining('Address already in use') as string,
+    )
     expect(document.body.textContent).not.toMatch(/\p{Script=Han}/u)
   })
 })

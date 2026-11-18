@@ -18,6 +18,7 @@ export const common = {
   copy: '复制',
   copied: '已复制',
   copyFailed: '无法复制',
+  viewPolicies: '查看策略',
   clickToCopy: '点击复制',
   copyValue: (value: string) => `复制 ${value}`,
   online: '在线',
