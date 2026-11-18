@@ -29,7 +29,7 @@ use i3t_model::control::{TestOrder, TestReport};
 use i3t_model::netmap::Reach;
 use i3t_proto::NodeId;
 use i3t_proto::flow::{Reason, Reply, Status};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::runtime::NodeExit;
@@ -57,6 +57,9 @@ const MAX_PROBES: u32 = TRAIN_PROBES * 5;
 /// 访问规则不允许访问本节点的对端，在和本节点做吞吐测试期间同时最多有几条流被读 OPEN。
 /// 测量流一次一条，前一条收尾时和后一条会重叠一下，所以不是一。
 const EXEMPT_STREAMS: usize = 4;
+/// 同一个测试的上一条测量流还占着"正在测"时，新来的一条最多等它多久（见 [`Diag::admit_after_previous`]）。
+/// 要等的只是那条流的任务跑完最后几步，忙的机器上也就几十毫秒。
+const PREVIOUS_STREAM_WAIT: Duration = Duration::from_secs(1);
 
 /// 一个节点上的主动测试。
 pub(crate) struct Diag {
@@ -66,6 +69,8 @@ pub(crate) struct Diag {
     throughput: bool,
     reports: mpsc::Sender<TestReport>,
     state: Mutex<State>,
+    /// 一条测量流放开"正在测"时叫醒等着的下一条。
+    released: Notify,
 }
 
 #[derive(Default)]
@@ -96,7 +101,7 @@ impl Diag {
         throughput: bool,
         reports: mpsc::Sender<TestReport>,
     ) -> Self {
-        Self { endpoint, netmap, throughput, reports, state: Mutex::default() }
+        Self { endpoint, netmap, throughput, reports, state: Mutex::default(), released: Notify::new() }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -228,7 +233,7 @@ impl Diag {
     /// 测量服务：对端开来的一条测量流。
     async fn serve(&self, request: MeasureRequest<impl SendStream, impl RecvStream>) {
         let (peer, open) = (request.peer(), *request.open());
-        if let Err(code) = self.admit_stream(peer, &open) {
+        if let Err(code) = self.admit_after_previous(peer, &open).await {
             tracing::info!(test = open.test, %peer, ?code, "拒绝了一条测量流");
             return request.refuse(&Reply::new(Status::NotEnabled, code.text())).await;
         }
@@ -239,6 +244,27 @@ impl Diag {
         let limits = MeasureLimits { bytes: THROUGHPUT_BYTES, duration: THROUGHPUT_TIME };
         let served = request.serve(limits).await;
         tracing::info!(test = open.test, %peer, mode = ?open.mode, bytes = served.bytes, ms = served.elapsed.as_millis(), end = ?served.end, "测量流结束");
+    }
+
+    /// 同 [`admit_stream`](Self::admit_stream)，只是同一个测试的上一条测量流还占着"正在测"时，先等它放开。
+    ///
+    /// 发起方读到上一条的结果就开下一条（量完上行量下行），而这一头的那条流把结果写出去之后，它的任务还要再跑几步
+    /// 才放开"正在测"：机器忙的时候，下一条的 OPEN 会先到。那不是同时开了两条，拒绝的话下行就量不成了。
+    /// 最多等 [`PREVIOUS_STREAM_WAIT`]，真正同时开的两条照旧只接一条。
+    async fn admit_after_previous(&self, peer: NodeId, open: &i3t_proto::flow::OpenMeasure) -> Result<(), TestCode> {
+        let deadline = tokio::time::Instant::now() + PREVIOUS_STREAM_WAIT;
+        loop {
+            // 在看状态之前就开始听：中间放开的那一下也收得到。
+            let released = self.released.notified();
+            match self.admit_stream(peer, open) {
+                Err(TestCode::Busy) if self.lock().tests.get(&open.test).is_some_and(|session| session.measuring) => {
+                    if tokio::time::timeout_at(deadline, released).await.is_err() {
+                        return Err(TestCode::Busy);
+                    }
+                }
+                admitted => return admitted,
+            }
+        }
     }
 
     /// 能不能接这条测量流。能的话记下"正在测"。
@@ -283,6 +309,7 @@ impl Drop for StreamSlot<'_> {
         if let Some(session) = self.diag.lock().tests.get_mut(&self.test) {
             session.measuring = false;
         }
+        self.diag.released.notify_waiters();
     }
 }
 
@@ -448,6 +475,27 @@ mod tests {
         assert_eq!(switched_off.diag.admit_stream(node(2), &open(5, None)), Err(TestCode::ThroughputOff), "本机关掉了吞吐测试");
         let relay_only = test_node(Arc::new(NodeKey::generate().unwrap()), netmap(1, &peers(2..=2), "relay_only"), true);
         assert_eq!(relay_only.diag.admit_stream(node(2), &open(5, None)), Err(TestCode::RelayOnly));
+    }
+
+    #[tokio::test]
+    async fn the_next_measurement_stream_waits_for_the_previous_one_to_finish_instead_of_being_refused() {
+        let mut tested = test_node(Arc::new(NodeKey::generate().unwrap()), netmap(1, &peers(2..=2), "any"), true);
+        tested.diag.order(order(5, 2, TestRole::Responder, TestItems { throughput: true, ..TestItems::default() }));
+        next_report(&mut tested.reports).await;
+        let stream = open(5, None);
+        assert_eq!(tested.diag.admit_after_previous(node(2), &stream).await, Ok(()));
+
+        // 上行那一条的结果已经发出去，发起方开来了下行那一条，这一头那条流的任务还没放开"正在测"。
+        let finishing = StreamSlot { diag: &tested.diag, test: 5 };
+        let (admitted, ()) = tokio::join!(tested.diag.admit_after_previous(node(2), &stream), async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(finishing);
+        });
+        assert_eq!(admitted, Ok(()), "等上一条收完尾，不拒绝");
+
+        // 真正同时开的两条照旧只接一条。
+        let _measuring = StreamSlot { diag: &tested.diag, test: 5 };
+        assert_eq!(tested.diag.admit_after_previous(node(2), &stream).await, Err(TestCode::Busy), "同时一条");
     }
 
     /// 只提供测量服务的处理者：两个节点之间不用出口。

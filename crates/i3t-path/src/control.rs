@@ -1876,4 +1876,21 @@ mod tests {
         let hops = harness.control.hops(node(2), TestPath::Relays(RelayPath::new(&[node(ME)]).unwrap()), start);
         assert_eq!((hops.len(), hops[0].rtt_ms, hops[0].source), (1, Some(120.0), crate::diag::HopSource::Reported));
     }
+
+    #[tokio::test]
+    async fn a_multi_relay_path_that_answers_again_is_no_longer_blamed_for_the_next_switch() {
+        let mut harness = Harness::new(&[(2, &[])]);
+        let now = Instant::now();
+        let nonce = [7; 8];
+        // 经多个 relay 的路径上连着几个探测没有回音，可是没有别的路可换：起因记下了，路没换。
+        let peer = harness.control.peers.get_mut(&node(2)).unwrap();
+        peer.hint = Some(RouteHint::PathProbeSilent);
+        peer.probe.pending = Some((nonce, now));
+
+        let pong = harness.pong(2, nonce, addr("0.0.0.0:0"));
+        harness.control.on_path_pong(node(2), &pong, now + 20 * MS);
+        let peer = &harness.control.peers[&node(2)];
+        assert_eq!(peer.probe.pending, None, "等着的那个探测有了回答");
+        assert_eq!(peer.hint, None, "路径又送得到了，下一次换路不再算在探测没有回音上");
+    }
 }

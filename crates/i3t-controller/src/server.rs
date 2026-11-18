@@ -1,5 +1,6 @@
 //! 把 controller 的几个入口装在一起跑：节点协议（TCP）、地址查询（同一个端口号的 UDP）、管理 API，和后台任务。
 
+use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,12 +53,9 @@ impl Server {
     /// 有端口绑不上，或者准备 TLS 配置失败。
     pub async fn bind(controller: Arc<Controller>, options: ServeOptions) -> Result<Self, Error> {
         let tls = Arc::new(controller.tls_config()?);
-        let bind_error = |address: SocketAddr| move |source| Error::Bind { address, source };
-        let node_tcp = i3t_underlay::tcp_mss::listen(options.node_listen).map_err(bind_error(options.node_listen))?;
-        // 节点按"和节点协议同一个端口号"去找地址查询，所以 UDP 跟着 TCP 实际绑到的端口走。
-        let node_addr = node_tcp.local_addr().map_err(bind_error(options.node_listen))?;
-        let node_udp = UdpSocket::bind(node_addr).await.map_err(bind_error(node_addr))?;
-        let admin = i3t_underlay::tcp_mss::listen(options.admin_listen).map_err(bind_error(options.admin_listen))?;
+        let (node_tcp, node_udp) = bind_node(options.node_listen, UdpSocket::bind).await?;
+        let admin =
+            i3t_underlay::tcp_mss::listen(options.admin_listen).map_err(|source| Error::Bind { address: options.admin_listen, source })?;
         Ok(Self { controller, tls, node_tcp, node_udp, admin, webui: options.webui, follow_releases: options.follow_releases })
     }
 
@@ -121,6 +119,34 @@ impl Server {
             nodes.abort();
         }
         Ok(())
+    }
+}
+
+/// 端口写 0 时最多挑几次端口。同一个端口号的 UDP 正好被别的程序占着并不常见，几次之内总能挑到两个都空着的。
+const NODE_PORT_TRIES: usize = 16;
+
+/// 绑节点协议的 TCP 和同一个端口号的 UDP（节点按"和节点协议同一个端口号"去找地址查询）。`bind_udp` 平时是
+/// `UdpSocket::bind`。
+///
+/// 端口写 0 时系统挑的是 TCP 的端口，它挑的时候不看 UDP：同一个端口号的 UDP 可能正被别的程序占着。那就另挑一个，
+/// 挑过的先拿着，免得系统又挑回它。端口写明了的照实报错。
+async fn bind_node<F, Fut>(listen: SocketAddr, mut bind_udp: F) -> Result<(TcpListener, UdpSocket), Error>
+where
+    F: FnMut(SocketAddr) -> Fut,
+    Fut: Future<Output = io::Result<UdpSocket>>,
+{
+    let mut tried = Vec::new();
+    loop {
+        let tcp = i3t_underlay::tcp_mss::listen(listen).map_err(|source| Error::Bind { address: listen, source })?;
+        let addr = tcp.local_addr().map_err(|source| Error::Bind { address: listen, source })?;
+        match bind_udp(addr).await {
+            Ok(udp) => return Ok((tcp, udp)),
+            Err(source) if listen.port() == 0 && source.kind() == io::ErrorKind::AddrInUse && tried.len() < NODE_PORT_TRIES => {
+                tracing::debug!(%addr, "系统挑的端口上同一个端口号的 UDP 被别的程序占着，另挑一个");
+                tried.push(tcp);
+            }
+            Err(source) => return Err(Error::Bind { address: addr, source }),
+        }
     }
 }
 
@@ -221,5 +247,35 @@ pub(crate) async fn blocking<T: Send + 'static>(controller: &Arc<Controller>, ca
             // 运行时正在关闭，这个任务自己也马上会被丢弃。
             Err(_) => std::future::pending().await,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_node_port_left_to_the_system_moves_on_when_the_udp_of_the_same_number_is_taken() {
+        // 系统挑的第一个端口号上，UDP 正好被别的程序占着。
+        let mut squatters = Vec::new();
+        let bound = bind_node("127.0.0.1:0".parse().unwrap(), |addr| {
+            if squatters.is_empty() {
+                squatters.push(std::net::UdpSocket::bind(addr).unwrap());
+            }
+            UdpSocket::bind(addr)
+        })
+        .await;
+        let (tcp, udp) = bound.unwrap();
+        let (tcp, udp) = (tcp.local_addr().unwrap(), udp.local_addr().unwrap());
+        assert_eq!(tcp, udp, "TCP 和 UDP 在同一个端口号上");
+        assert_ne!(udp, squatters[0].local_addr().unwrap(), "另挑了一个端口");
+    }
+
+    #[tokio::test]
+    async fn a_node_port_written_out_is_not_changed_when_its_udp_is_taken() {
+        let squatter = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let taken = squatter.local_addr().unwrap();
+        let bound = bind_node(taken, UdpSocket::bind).await;
+        assert!(matches!(&bound, Err(Error::Bind { address, .. }) if *address == taken), "{:?}", bound.err());
     }
 }

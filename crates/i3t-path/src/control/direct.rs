@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::time::Instant;
 
 use i3t_crypto::Signature;
-use i3t_model::control::Signal;
+use i3t_model::control::{RouteHint, Signal};
 use i3t_proto::{NodeId, PublicKey, probe};
 use i3t_underlay::lan::Sighting;
 
@@ -157,6 +157,11 @@ impl Control {
         if path_probe {
             peer.probe.pending = None;
             peer.probe.missed = 0;
+            // 这条路径又送得到了。之前探测没有回音、又没有别的路可换时记下的起因已经过时，留着的话，
+            // 下一次换路（哪怕是因为有了少绕路的 relay）会被说成"探测一直没有回音"。
+            if peer.hint == Some(RouteHint::PathProbeSilent) {
+                peer.hint = None;
+            }
         } else {
             peer.local_leg.on_reply(&pong.nonce, now);
         }
