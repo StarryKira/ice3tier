@@ -1,8 +1,9 @@
-import { ChevronDown, Search, TriangleAlert } from 'lucide-react'
+import { ChevronDown, TriangleAlert } from 'lucide-react'
 import { type KeyboardEvent, useId, useState } from 'react'
 
 import { type Node, type NodeId } from '@/api/types'
 import { Flag } from '@/components/flag'
+import { PickerSearch } from '@/components/picker-search'
 import { OnlineDot } from '@/components/status'
 import { Badge } from '@/components/ui/badge'
 import { CheckMark } from '@/components/ui/check-mark'
@@ -132,30 +133,23 @@ export function RelayPicker({ id, nodes, self, value, onChange, busy = false, ..
         </button>
       </PopoverTrigger>
       <PopoverContent align="end" className="w-80 p-0">
-        <div className="flex items-center gap-2.5 border-b px-3">
-          <Search className="size-4 shrink-0 text-faint" aria-hidden />
-          <input
-            value={query}
-            onChange={(event) => {
-              setQuery(event.target.value)
-              setActive(0)
-            }}
-            onKeyDown={onSearchKey}
-            placeholder={d.pinnedSearch}
-            aria-label={d.pinnedSearch}
-            aria-controls={listId}
-            aria-activedescendant={rows.length > 0 ? `${listId}-${active}` : undefined}
-            autoComplete="off"
-            spellCheck={false}
-            className="h-11 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
-          />
-        </div>
+        <PickerSearch
+          value={query}
+          onChange={(next) => {
+            setQuery(next)
+            setActive(0)
+          }}
+          onKeyDown={onSearchKey}
+          placeholder={d.pinnedSearch}
+          listId={listId}
+          activeId={rows.length > 0 ? `${listId}-${active}` : undefined}
+        />
         <ul
           id={listId}
           role="listbox"
           aria-multiselectable
           aria-label={d.pinnedLabel}
-          className="max-h-72 overflow-y-auto p-1.5"
+          className="max-h-72 overflow-y-auto p-1"
         >
           {rows.map((row, index) => {
             const checked = chosen.has(row.id)

@@ -1,6 +1,7 @@
 import { Check, ChevronsUpDown, Plus } from 'lucide-react'
 import { type KeyboardEvent, type ReactNode, useId, useMemo, useState } from 'react'
 
+import { PickerSearch } from '@/components/picker-search'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { cn } from '@/lib/utils'
 
@@ -166,23 +167,17 @@ export function Combobox<V extends string | number>({
         </button>
       </PopoverTrigger>
       <PopoverContent className="w-(--radix-popover-trigger-width) min-w-64 p-0">
-        <div className="border-b p-2">
-          <input
-            value={query}
-            onChange={(event) => {
-              setQuery(event.target.value)
-              setActive(0)
-            }}
-            onKeyDown={onKeyDown}
-            placeholder={searchPlaceholder}
-            aria-label={searchPlaceholder}
-            aria-controls={listId}
-            aria-activedescendant={rows.length > 0 ? `${listId}-${active}` : undefined}
-            autoComplete="off"
-            spellCheck={false}
-            className="h-8 w-full rounded-md bg-muted px-2.5 text-sm outline-none placeholder:text-muted-foreground focus-visible:outline-2 focus-visible:outline-ring"
-          />
-        </div>
+        <PickerSearch
+          value={query}
+          onChange={(next) => {
+            setQuery(next)
+            setActive(0)
+          }}
+          onKeyDown={onKeyDown}
+          placeholder={searchPlaceholder}
+          listId={listId}
+          activeId={rows.length > 0 ? `${listId}-${active}` : undefined}
+        />
         <ul id={listId} role="listbox" className="max-h-64 overflow-y-auto p-1">
           {rows.length === 0 ? (
             <li className="px-2.5 py-3 text-center text-[13px] text-muted-foreground">{emptyText}</li>
@@ -200,7 +195,7 @@ export function Combobox<V extends string | number>({
                   onMouseEnter={() => setActive(index)}
                   onClick={() => choose(row)}
                   className={cn(
-                    'flex flex-col rounded-md px-2.5 py-1.5 text-sm',
+                    'flex flex-col rounded-md px-2 py-1.5 text-sm',
                     isActive && 'bg-muted',
                     row.error !== null && 'cursor-not-allowed',
                   )}
@@ -225,7 +220,7 @@ export function Combobox<V extends string | number>({
                 onMouseEnter={() => setActive(index)}
                 onClick={() => choose(row)}
                 className={cn(
-                  'flex cursor-pointer flex-col rounded-md px-2.5 py-1.5 text-sm',
+                  'flex cursor-pointer flex-col rounded-md px-2 py-1.5 text-sm',
                   isActive && 'bg-muted',
                   option.disabled === true && 'cursor-not-allowed',
                 )}

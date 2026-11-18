@@ -687,6 +687,12 @@ test('有数据时：接入', async () => {
   await forward.getByRole('radio', { name: new RegExp(literal(fd.whoOpen)) }).click()
   await expect(page.getByTestId('forward-check')).toBeVisible()
   await shot('forwards-dialog', { fullPage: false })
+  // 打开的节点下拉：搜索框、各行和关着的框左边对齐。
+  await forward.getByRole('group', { name: fd.targetSide }).getByRole('combobox', { name: fd.node }).click()
+  await expect(page.getByRole('listbox')).toBeVisible()
+  await shot('forwards-dialog-node-open', { fullPage: false })
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('listbox')).toHaveCount(0)
   await forward.getByRole('button', { name: t.common.cancel, exact: true }).click()
   await page.getByRole('button', { name: t.common.discardConfirm }).click()
 })

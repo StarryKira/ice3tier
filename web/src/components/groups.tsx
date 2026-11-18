@@ -1,10 +1,11 @@
-import { Boxes, ChevronsUpDown, Search, Server, X } from 'lucide-react'
+import { Boxes, ChevronsUpDown, Server, X } from 'lucide-react'
 import { type KeyboardEvent, useId, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router'
 
 import { type Group, type GroupRef, type NetworkId } from '@/api/types'
 import { ChipList } from '@/components/chip'
 import { CHIP_SIZE } from '@/components/chip-size'
+import { PickerSearch } from '@/components/picker-search'
 import { CheckMark } from '@/components/ui/check-mark'
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
 import { t } from '@/i18n'
@@ -235,30 +236,23 @@ export function GroupPicker({
         }}
         className="w-(--radix-popover-trigger-width) min-w-72 p-0"
       >
-        <div className="flex items-center gap-2.5 border-b px-3">
-          <Search className="size-4 shrink-0 text-faint" aria-hidden />
-          <input
-            value={query}
-            onChange={(event) => {
-              setQuery(event.target.value)
-              setActive(firstPickable(filter(event.target.value)))
-            }}
-            onKeyDown={onSearchKey}
-            placeholder={t.groups.picker.search}
-            aria-label={t.groups.picker.search}
-            aria-controls={listId}
-            aria-activedescendant={rows.length > 0 ? `${listId}-${active}` : undefined}
-            autoComplete="off"
-            spellCheck={false}
-            className="h-11 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
-          />
-        </div>
+        <PickerSearch
+          value={query}
+          onChange={(next) => {
+            setQuery(next)
+            setActive(firstPickable(filter(next)))
+          }}
+          onKeyDown={onSearchKey}
+          placeholder={t.groups.picker.search}
+          listId={listId}
+          activeId={rows.length > 0 ? `${listId}-${active}` : undefined}
+        />
         <ul
           id={listId}
           role="listbox"
           aria-multiselectable
           aria-label={t.groups.picker.options}
-          className="max-h-72 overflow-y-auto p-1.5"
+          className="max-h-72 overflow-y-auto p-1"
         >
           {rows.map((group, index) => {
             const checked = group.builtin || chosen.has(group.id)
