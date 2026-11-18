@@ -4,7 +4,7 @@ members = ["crates/*", "bins/*", "bench/pretest", "bench/llmgw"]
 
 [workspace.package]
 # 整个项目一个版本号，用 scripts/bump-version.sh 修改。
-version = "0.1.14"
+version = "0.1.15"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/fuqiuluo/ice3tier"
