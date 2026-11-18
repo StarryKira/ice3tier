@@ -18,6 +18,7 @@ import { cn } from '@/lib/utils'
 import { useNetwork } from '@/pages/networks/context'
 import { AddNodeDialog } from '@/pages/nodes/AddNodeDialog'
 import { useLineColors } from '@/topology/colors'
+import { LineSample } from '@/topology/line-edge'
 import { buildTopology, type Selection } from '@/topology/graph'
 import { nextPick, type Pair, readPair, writePair } from '@/topology/pair'
 
@@ -32,11 +33,7 @@ type View = 'graph' | 'matrix' | 'backbone'
 
 function GraphLegend() {
   const colors = useLineColors()
-  const line = (color: string, dash?: string, width = 1.6) => (
-    <svg width="28" height="8" aria-hidden className="shrink-0">
-      <line x1="1" y1="4" x2="27" y2="4" stroke={color} strokeWidth={width} strokeDasharray={dash} />
-    </svg>
-  )
+  const line = (color: string, dash?: string, width?: number) => <LineSample color={color} dash={dash} width={width} />
   return (
     <ul
       className="flex flex-wrap items-center gap-x-5 gap-y-1.5 text-xs text-muted-foreground"

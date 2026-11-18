@@ -1,7 +1,7 @@
 import { useQueries, useQuery } from '@tanstack/react-query'
 import { Activity, Route as RouteIcon, RotateCw, Waypoints } from 'lucide-react'
 import { type ReactNode } from 'react'
-import { Link } from 'react-router'
+import { Link, useSearchParams } from 'react-router'
 
 import { q } from '@/api/queries'
 import {
@@ -21,6 +21,7 @@ import { EmptyState, ErrorState, SkeletonRows } from '@/components/states'
 import { Table, Td, Th, Tr } from '@/components/table'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Segmented } from '@/components/ui/segmented'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
@@ -30,6 +31,9 @@ import { REPORT_INTERVAL_SECS } from '@/lib/product'
 import { formatAge, formatDuration } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import { networkPath } from '@/pages/networks/context'
+
+import { type Leg, legOf, lengthOf, middleOf, peerLegOf } from './routeParts'
+import { RouteStar } from './RouteStar'
 import { pairPath } from '@/topology/pair'
 
 const d = t.nodes.detail
@@ -97,20 +101,6 @@ function modeHint(entry: NodeRoute): string | undefined {
       return states.unknown
   }
 }
-
-/**
- * 两端之间经过的别的节点：经中继时的中继，去掉本节点自己和对端自己（本节点是中继、对端挂在它上面，或者对端是中继、
- * 本节点挂在它上面，中间都没有别人）。P2P 是空的；走不通是 `null`。
- */
-function middleOf(route: Route, self: NodeId, peer: NodeId): NodeId[] | null {
-  if (route.via === 'none') return null
-  return route.via === 'direct' ? [] : route.relays.filter((id) => id !== self && id !== peer)
-}
-
-/** 路径长度：中间经过的节点数加一。 */
-const lengthOf = (middle: readonly NodeId[] | null): number | null => (middle === null ? null : middle.length + 1)
-
-type Leg = 'udp' | 'tcp' | 'unknown' | null
 
 /** 方式：就写 P2P 或者中继，标签一样宽，上下对齐。`hint` 是悬停的说明：P2P 是怎么通的，中继时直连怎么样了。 */
 function ModeBadge({ route, peerOnline, hint }: { route: Route; peerOnline: boolean; hint?: string }) {
@@ -194,17 +184,6 @@ function Protocol({ route, leg, lane }: { route: Route; leg: Leg; lane: boolean 
   )
 }
 
-/**
- * 一条路底下的传输：P2P 直连只用 UDP；经中继时是到第一个中继那一段的传输（`reported`）。本节点自己就是那个中继、
- * 对端挂在它上面时，这一段是对端连过来的：看对端连本节点用的是什么（`peerLeg`，取自本节点的 `reached_by`）。
- */
-function legOf(route: Route, self: NodeId, reported: Leg, peerLeg: Leg): Leg {
-  if (route.via === 'direct') return 'udp'
-  if (route.via !== 'relay') return null
-  if (route.relays[0] === self) return route.relays.length === 1 ? peerLeg : null
-  return reported
-}
-
 /** 一个小图标链接：悬停写它是什么，读屏读的也是这句。 */
 function IconLink({ to, label, icon }: { to: string; label: string; icon: ReactNode }) {
   return (
@@ -220,13 +199,29 @@ function IconLink({ to, label, icon }: { to: string; label: string; icon: ReactN
   )
 }
 
+/** 路由的两种看法：表格（默认）和星状图，记在地址里（`?view=star`）。 */
+type View = 'table' | 'star'
+
 /**
- * 这个节点到其他节点怎么走，按它自己最近一次的上报。一行一个对端，两组同样的列：
+ * 这个节点到其他节点怎么走，按它自己最近一次的上报。右上角在表格和星状图之间切换。
+ * 表格一行一个对端，两组同样的列：
  * 现在走的、换成另一种选路模式会怎么走（方式、经过、协议、路径长度、延迟；另一种模式的延迟后面写比现在快多少、慢多少），
  * 再后面是流量、已持续多久。另一种模式从现问到的候选路径里挑；和现在一样时也照常写出来。
  * 走得通的按延迟排在前面，不可达的、对端离线的淡下去排在后面。
  */
 export function RoutesTab({ network, node }: { network: Network; node: NodeDetail }) {
+  const [search, setSearch] = useSearchParams()
+  const view: View = search.get('view') === 'star' ? 'star' : 'table'
+  const setView = (next: View) =>
+    setSearch(
+      (current) => {
+        const params = new URLSearchParams(current)
+        if (next === 'star') params.set('view', 'star')
+        else params.delete('view')
+        return params
+      },
+      { replace: true },
+    )
   const routes = useQuery(q.routes(network.id, node.id))
   const nodes = useQuery(q.nodes(network.id))
   const all = nodes.data ?? []
@@ -245,7 +240,7 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
   const paths = useQueries({
     queries: rows.map((entry) => ({
       ...q.path(network.id, node.id, entry.peer.id),
-      enabled: auto && !reportsAlternative(entry) && entry.route.via !== 'none',
+      enabled: view === 'table' && auto && !reportsAlternative(entry) && entry.route.via !== 'none',
     })),
   })
   const recompute = () => {
@@ -255,10 +250,11 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
   // 打开了 ice3proxy、控制连接在的对端：它们之间的 TCP 连接走 ice3proxy。
   const lanes = new Set((node.lanes?.peers ?? []).filter((lane) => lane.control).map((lane) => lane.peer))
   // 都是自己报的新节点时不用重新算：每次上报都是新的。
-  const asksPaths = rows.some((entry) => !reportsAlternative(entry))
+  const asksPaths = view === 'table' && rows.some((entry) => !reportsAlternative(entry))
+  const empty = routes.isSuccess && (!routes.data.online || routes.data.routes.length === 0)
 
   return (
-    <div className="space-y-4">
+    <div className={view === 'star' && !empty ? 'flex flex-1 flex-col gap-4' : 'space-y-4'}>
       <div className="flex items-center justify-between gap-4 text-[13px] text-muted-foreground">
         <p data-testid="routes-mode" className="flex items-center gap-2">
           {d.routesModeLabel}
@@ -284,6 +280,17 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
               </Button>
             </Tooltip>
           ) : null}
+          <Segmented
+            aria-label={d.routesView}
+            size="sm"
+            value={view}
+            onChange={setView}
+            options={[
+              { value: 'table', label: d.routesViewTable },
+              { value: 'star', label: d.routesViewStar },
+            ]}
+            className="ml-1"
+          />
         </div>
       </div>
       {routes.isError ? (
@@ -292,6 +299,22 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
         <EmptyState icon={RouteIcon} title={d.routesOffline} />
       ) : routes.isSuccess && routes.data.routes.length === 0 ? (
         <EmptyState icon={RouteIcon} title={d.routesEmpty} />
+      ) : view === 'star' ? (
+        routes.isPending ? (
+          <Skeleton className="h-96 w-full" />
+        ) : (
+          <RouteStar
+            network={network}
+            node={node}
+            nodes={all}
+            spokes={rows.map((entry) => ({
+              entry,
+              peer: all.find((candidate) => candidate.id === entry.peer.id),
+              leg: legOf(entry.route, node.id, entry.relay_leg ?? null, peerLegOf(node, entry.peer.id)),
+              middle: middleOf(entry.route, node.id, entry.peer.id),
+            }))}
+          />
+        )
       ) : (
         <Table>
           <thead>
@@ -363,8 +386,7 @@ export function RoutesTab({ network, node }: { network: Network; node: NodeDetai
               // 走不通、对端离线的行淡下去：名字和"不可达"照常能看清。
               const dim = entry.route.via === 'none' || peer?.online === false
               const fade = cn(dim && 'opacity-50')
-              const peerOutcome = node.reached_by?.find((reach) => reach.node.id === entry.peer.id)?.outcome
-              const peerLeg: Leg = peerOutcome === 'udp' || peerOutcome === 'tcp' ? peerOutcome : null
+              const peerLeg = peerLegOf(node, entry.peer.id)
               const nowLeg = legOf(entry.route, node.id, entry.relay_leg ?? null, peerLeg)
               const nowMiddle = middleOf(entry.route, node.id, entry.peer.id)
               const directHint = modeHint(entry)

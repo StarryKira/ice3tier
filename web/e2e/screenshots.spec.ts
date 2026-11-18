@@ -493,7 +493,13 @@ test('有数据时：节点详情', async () => {
   await shot('node-detail-routes')
   await page.setViewportSize({ width: 1680, height: 960 })
   await shot('node-detail-routes-wide', { fullPage: false })
+  // 右上角切成星状图：本节点在中间，对端围一圈。
+  await page.getByRole('radio', { name: d.routesViewStar }).click()
+  await expect(page.getByTestId('routes-star').locator('.react-flow__node-peer').first()).toBeVisible()
+  await shot('node-detail-routes-star', { fullPage: false })
   await page.setViewportSize({ width: 1280, height: 800 })
+  await shot('node-detail-routes-star-narrow', { fullPage: false })
+  await page.getByRole('radio', { name: d.routesViewTable }).click()
 
   await page.getByRole('tab', { name: d.tabOverview }).click()
   await page.getByRole('button', { name: d.editIp }).click()

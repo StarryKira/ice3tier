@@ -125,7 +125,8 @@ export function NodeDetailPage() {
   const issue = nodeIssues(node, nodes.data ?? [])[0]
 
   return (
-    <Page className="@container">
+    // 竖着排、占满面板：路由的星状图要铺满下面剩下的高度。
+    <Page fill className="@container">
       <nav aria-label={t.nav.breadcrumb} className="mb-5 flex items-center gap-1.5 text-base text-muted-foreground">
         <Link to={listPath} className="rounded-sm hover:text-foreground hover:underline">
           {t.nodes.title}
@@ -215,6 +216,7 @@ export function NodeDetailPage() {
       </header>
 
       <Tabs
+        className="flex flex-1 flex-col"
         value={tab}
         onValueChange={(next) => {
           setSearch(next === 'overview' ? {} : { tab: next }, { replace: true })
@@ -240,7 +242,7 @@ export function NodeDetailPage() {
         <TabsContent value="forward" className="max-w-5xl">
           <ForwardTab network={network} node={node} onWaiting={setWaiting} />
         </TabsContent>
-        <TabsContent value="routes">
+        <TabsContent value="routes" className="flex-col data-[state=active]:flex data-[state=active]:flex-1">
           <RoutesTab network={network} node={node} />
         </TabsContent>
       </Tabs>

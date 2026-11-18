@@ -268,4 +268,33 @@ describe('路由', () => {
       .map((cell) => cell.textContent)
     expect(cells.slice(1, 7)).toEqual([d.routesRelay, '—', '—', 'TCP', '1', t.common.ms(150)])
   })
+
+  it('右上角切成星状图：本节点在中间，一个对端一个框，写方式、协议和下一跳；点开是对端的星状图；不再去问另一种模式', async () => {
+    const user = userEvent.setup()
+    const api = fakeApi({
+      'GET /networks/1/nodes/1/routes': ROUTES,
+      'GET /networks/1/nodes': [makeNode(1, 'laptop'), makeNode(2, 'nas'), makeNode(3, 'hk'), makeNode(4, 'pc')],
+      'GET /networks/1/path': (call) => (call.query.get('to') === '2' ? TO_NAS : TO_PC),
+    })
+    renderWithApp(<RoutesTab network={NETWORK} node={node} />, { route: '/n/1/nodes/1?tab=routes&view=star' })
+    const star = await screen.findByTestId('routes-star')
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+    expect(within(star).getByRole('application', { name: d.routesStar('laptop') })).toBeInTheDocument()
+    // 画图的库量不出框的大小（测试里没有排版），框一直是藏着的：按 aria-label 找。
+    const nas = await within(star).findByLabelText(
+      d.routesStarPeer('nas', [d.routesRelay, t.common.ms(150), d.routesViaChain('hk')].join(t.common.listSeparator)),
+    )
+    expect(nas).toHaveAttribute('href', '/n/1/nodes/2?tab=routes&view=star')
+    expect(nas).toHaveTextContent('QUIC/UDP')
+    const pc = within(star).getByLabelText(
+      d.routesStarPeer('pc', [d.routesP2P, t.common.ms(2)].join(t.common.listSeparator)),
+    )
+    expect(pc).toHaveTextContent(d.routesP2P)
+    expect(api.callsTo('GET /networks/1/path')).toHaveLength(0)
+
+    // 切回表格：另一种模式又去问了。
+    await user.click(screen.getByRole('radio', { name: d.routesViewTable }))
+    expect(await screen.findByRole('table')).toBeInTheDocument()
+    await waitFor(() => expect(api.callsTo('GET /networks/1/path').length).toBeGreaterThan(0))
+  })
 })

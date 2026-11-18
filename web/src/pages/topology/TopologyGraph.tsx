@@ -1,40 +1,18 @@
-import {
-  BaseEdge,
-  type Edge,
-  EdgeLabelRenderer,
-  type EdgeProps,
-  Handle,
-  MarkerType,
-  type Node,
-  type NodeProps,
-  Position,
-  useInternalNode,
-} from '@xyflow/react'
+import { MarkerType, type Node, type NodeProps } from '@xyflow/react'
 import { useMemo, useRef } from 'react'
 
 import { type NodeId } from '@/api/types'
-import { curveBetween, type Rect } from '@/access/geometry'
 import { OnlineDot } from '@/components/status'
 import { t, useLocale } from '@/i18n'
 import { cn } from '@/lib/utils'
 import { GraphCanvas } from '@/pages/access/flow'
 import { type LineColors, useLineColors } from '@/topology/colors'
+import { HiddenHandles, LineEdgeView, type LineFlowEdge } from '@/topology/line-edge'
 import { type HighlightHop, layoutSignature, type TopoLink, type TopologyShape, type TopoPoint } from '@/topology/graph'
 
 const g = t.topology
 
 type TopoFlowNode = Node<{ point: TopoPoint; dimmed: boolean }, 'topo'>
-
-interface LineData extends Record<string, unknown> {
-  index: number
-  siblings: number
-  label: string | null
-  strong: boolean
-}
-type LineFlowEdge = Edge<LineData, 'line'>
-
-/** 连线不从固定的接口出发，而是按两个框的位置算，所以接口藏在框的正中，只是让画图的库认这条线。 */
-const HIDDEN_HANDLE = { left: '50%', top: '50%', opacity: 0, pointerEvents: 'none' } as const
 
 function TopoNodeView({ data }: NodeProps<TopoFlowNode>) {
   const { point, dimmed } = data
@@ -49,8 +27,7 @@ function TopoNodeView({ data }: NodeProps<TopoFlowNode>) {
         dimmed && 'opacity-35',
       )}
     >
-      <Handle type="target" position={Position.Top} style={HIDDEN_HANDLE} isConnectable={false} />
-      <Handle type="source" position={Position.Top} style={HIDDEN_HANDLE} isConnectable={false} />
+      <HiddenHandles />
       <span className="flex min-w-0 items-center gap-1.5">
         <OnlineDot online={node.online} />
         <span
@@ -73,41 +50,6 @@ function TopoNodeView({ data }: NodeProps<TopoFlowNode>) {
         {point.relay ? <span className="font-medium text-relay">{g.relayBadge}</span> : null}
       </span>
     </div>
-  )
-}
-
-function rectOf(node: ReturnType<typeof useInternalNode>): Rect | null {
-  if (node === undefined) return null
-  return {
-    x: node.internals.positionAbsolute.x,
-    y: node.internals.positionAbsolute.y,
-    width: node.measured.width ?? 0,
-    height: node.measured.height ?? 0,
-  }
-}
-
-function LineEdgeView({ id, source, target, data, markerEnd, style }: EdgeProps<LineFlowEdge>) {
-  const sourceRect = rectOf(useInternalNode(source))
-  const targetRect = rectOf(useInternalNode(target))
-  if (sourceRect === null || targetRect === null || data === undefined) return null
-  const path = curveBetween(sourceRect, targetRect, data.index, data.siblings)
-  return (
-    <>
-      <BaseEdge id={id} path={path.d} markerEnd={markerEnd} style={style} interactionWidth={14} />
-      {data.label !== null ? (
-        <EdgeLabelRenderer>
-          <span
-            style={{ transform: `translate(-50%, -50%) translate(${path.label.x}px, ${path.label.y}px)` }}
-            className={cn(
-              'pointer-events-none absolute rounded-sm bg-sidebar px-1 text-[11px] leading-4 tabular',
-              data.strong ? 'font-medium text-foreground' : 'text-muted-foreground',
-            )}
-          >
-            {data.label}
-          </span>
-        </EdgeLabelRenderer>
-      ) : null}
-    </>
   )
 }
 
