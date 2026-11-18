@@ -65,17 +65,3 @@ export function curveBetween(source: Rect, target: Rect, index = 0, siblings = 1
     label: { x: 0.25 * start.x + 0.5 * control.x + 0.25 * end.x, y: 0.25 * start.y + 0.5 * control.y + 0.25 * end.y },
   }
 }
-
-/** 一个点自己连自己：从右边出去绕一个小环回来。同一个点上有几个环时一个比一个大。 */
-export function loopAround(rect: Rect, index = 0): EdgePath {
-  const right = rect.x + rect.width
-  const cy = rect.y + rect.height / 2
-  const reach = 46 + index * 22
-  const spread = 12 + index * 6
-  const start: Point = { x: right, y: cy - spread }
-  const end: Point = { x: right, y: cy + spread }
-  return {
-    d: `M ${start.x} ${start.y} C ${right + reach} ${cy - spread - reach * 0.7}, ${right + reach} ${cy + spread + reach * 0.7}, ${end.x} ${end.y}`,
-    label: { x: right + reach * 0.78, y: cy },
-  }
-}

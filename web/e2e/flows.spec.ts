@@ -298,12 +298,12 @@ test('加一条策略，关系图跟着变；停用默认策略后按分组收�
   await expect(page.getByRole('switch', { name: t.access.ruleSwitch('default') })).toBeChecked()
   await showPolicies('graph')
   await expect(page.getByTestId('group-graph')).toBeVisible()
-  // 现在：三个分组，默认策略两头都是 All，写在 All 的卡片里，不是一条线。
-  await expect(groupPoint('All', 2)).toBeVisible()
-  await expect(groupPoint('servers', 1)).toBeVisible()
-  await expect(groupPoint('laptops', 1)).toBeVisible()
+  // 现在：只有默认策略 All ⇄ All，左右各一张 All，一根线；servers、laptops 还没有策略，写在角上。
+  await expect(groupPoint('All', 2)).toHaveCount(2)
+  await expect(groupPoint('servers', 1)).toHaveCount(0)
+  await expect(page.getByText(t.access.graph.unusedGroups(`laptops${t.common.listSeparator}servers`))).toBeVisible()
   await expect(ruleEdge('default', true)).toHaveCount(1)
-  await expect(page.getByTestId('group-graph').locator('.react-flow__edge')).toHaveCount(0)
+  await expect(page.getByTestId('group-graph').locator('.react-flow__edge')).toHaveCount(1)
   await showPolicies('list')
 
   const d = t.access.dialog
@@ -336,7 +336,10 @@ test('加一条策略，关系图跟着变；停用默认策略后按分组收�
   await expect(page.getByTestId(`rule-row-${ssh?.id ?? 0}`)).toBeVisible()
   await showPolicies('graph')
   await expect(ruleEdge('ssh', true)).toHaveCount(1)
-  await expect(page.getByTestId('group-graph').locator('.react-flow__edge')).toHaveCount(1)
+  // laptops 在左栏，servers 在右栏。
+  await expect(groupPoint('laptops', 1)).toHaveCount(1)
+  await expect(groupPoint('servers', 1)).toHaveCount(1)
+  await expect(page.getByTestId('group-graph').locator('.react-flow__edge')).toHaveCount(2)
   await showPolicies('list')
   // 界面上说出来：默认规则开着时别的规则不起限制作用。
   await expect(page.getByText(t.access.allOpenNotice)).toBeVisible()

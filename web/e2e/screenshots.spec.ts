@@ -155,6 +155,10 @@ test('空的网络：每个页面没有数据时的样子', async () => {
   await goTo(page, t.nav.access)
   await expect(page.getByRole('switch', { name: t.access.ruleSwitch('default') })).toBeVisible()
   await shot('access-default-rule-only')
+  await page.getByRole('radio', { name: t.access.viewGraph }).click()
+  await expect(page.getByTestId('group-graph')).toBeVisible()
+  await shot('access-graph-default-only')
+  await page.getByRole('radio', { name: t.access.viewList }).click()
 
   for (const [name, file, marker] of [
     [t.nav.exits, 'exits-empty', t.exits.emptyTitle],

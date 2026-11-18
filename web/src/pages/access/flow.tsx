@@ -39,7 +39,7 @@ function ariaLabels(): Partial<AriaLabelConfig> {
   }
 }
 
-const FIT = { padding: 0.12, maxZoom: 1.2 } as const
+const FIT = { padding: 0.12, maxZoom: 1 } as const
 
 /**
  * 画布的大小一变就重新缩放到刚好看全。

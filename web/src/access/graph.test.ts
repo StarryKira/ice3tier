@@ -10,8 +10,8 @@ import {
   type Rule,
 } from '@/api/types'
 
-import { borderPoint, curveBetween, loopAround } from './geometry'
-import { buildGroupGraph, groupPointId, layoutSignature, UNGROUPED_ID } from './groupGraph'
+import { borderPoint, curveBetween } from './geometry'
+import { buildGroupGraph, GROUP_NODE, layoutSignature, pointId } from './groupGraph'
 import { buildNodeGraph, SIDE_LIMIT } from './nodeGraph'
 import { accessDiff, isAllToAll, sameRule } from './reach'
 
@@ -56,143 +56,98 @@ function graphOf(overrides: Partial<AccessGraph> = {}): AccessGraph {
   }
 }
 
-describe('按分组的视图', () => {
-  it('每个分组一个点，带着成员；All 排在最前面、画在最上面', () => {
-    const shape = buildGroupGraph(graphOf())
-    const groups = shape.points.filter((point) => point.kind === 'group')
-    expect(groups.map((point) => point.group?.name)).toEqual(['All', 'home', 'laptops', 'servers'])
-    expect(groups.map((point) => point.members.length)).toEqual([5, 1, 2, 2])
-    expect(groups.map((point) => point.id)).toEqual(['group:1', 'group:2', 'group:3', 'group:4'])
+describe('按分组的视图：来源 → 目标两栏', () => {
+  const ssh = rule(2, LAPTOPS, SERVERS, { name: 'ssh', direction: 'one_way' })
+  const media = rule(3, LAPTOPS, HOME, { name: 'media', enabled: false })
 
-    const all = groups[0]
-    for (const other of groups.slice(1)) expect(all?.y).toBeLessThan(other.y)
-  })
-
-  it('接口没有把 All 放在第一个时也一样', () => {
-    const graph = graphOf()
-    graph.groups = [...graph.groups.slice(1), ...graph.groups.slice(0, 1)]
-    expect(buildGroupGraph(graph).points[0]?.group).toMatchObject({ name: 'All', builtin: true })
-  })
-
-  it('只在 All 里的节点合成一个点，不连线', () => {
-    const shape = buildGroupGraph(graphOf())
-    const ungrouped = shape.points.find((point) => point.kind === 'ungrouped')
-    expect(ungrouped?.id).toBe(UNGROUPED_ID)
-    expect(ungrouped?.group).toBeNull()
-    expect(ungrouped?.members).toEqual([spare])
-    expect(shape.lines.some((line) => line.source === UNGROUPED_ID || line.target === UNGROUPED_ID)).toBe(false)
-  })
-
-  it('每个节点都在别的分组里时没有"只在 All 里"的点', () => {
-    const graph = graphOf({ groups: [group(ALL, [gw, nas]), group(SERVERS, [gw, nas])] })
-    expect(buildGroupGraph(graph).points.map((point) => point.id)).toEqual(['group:1', 'group:4'])
-  })
-
-  it('没有成员的分组照样有一个点：它是一样单独的东西，不随成员消失', () => {
-    const graph = graphOf({ groups: [group(ALL, [gw]), group(SERVERS, [gw]), group(HOME, [])] })
-    expect(buildGroupGraph(graph).points.map((point) => [point.id, point.members.length])).toEqual([
-      ['group:1', 1],
-      ['group:4', 1],
-      ['group:2', 0],
-    ])
-  })
-
-  it('只有 All 一个分组时它在正中，不重复画一个"只在 All 里"', () => {
+  it('All ⇄ All：左右各一张 All 的卡片，一根线，不画环', () => {
     const shape = buildGroupGraph(graphOf({ groups: [group(ALL, [gw, nas])] }))
-    expect(shape.points).toHaveLength(1)
-    expect(shape.points[0]).toMatchObject({ group: { name: 'All' }, x: 0, y: 0 })
-  })
-
-  it('空的网络：一个没有成员的 All，一条默认规则画成环', () => {
-    const shape = buildGroupGraph(graphOf({ groups: [group(ALL, [])] }))
-    expect(shape.points).toHaveLength(1)
-    expect(shape.points[0]?.members).toEqual([])
+    expect(shape.points.map((point) => [point.id, point.side])).toEqual([
+      [pointId('src', ALL.id), 'src'],
+      [pointId('dst', ALL.id), 'dst'],
+    ])
     expect(shape.lines).toHaveLength(1)
-    expect(shape.lines[0]).toMatchObject({ ruleId: 1, loop: true, source: 'group:1', target: 'group:1' })
-  })
-
-  it('每条规则一条线，带着方向、是否启用和两端的点', () => {
-    const shape = buildGroupGraph(
-      graphOf({
-        rules: [
-          DEFAULT_RULE,
-          rule(2, LAPTOPS, SERVERS, { name: 'ssh', direction: 'one_way' }),
-          rule(3, SERVERS, SERVERS),
-          rule(4, LAPTOPS, HOME, { name: 'media', enabled: false }),
-        ],
-      }),
-    )
-    expect(shape.lines.map((line) => line.id)).toEqual(['rule:1', 'rule:2', 'rule:3', 'rule:4'])
-    expect(shape.lines[1]).toMatchObject({
-      ruleId: 2,
-      name: 'ssh',
-      source: groupPointId(LAPTOPS.id),
-      target: groupPointId(SERVERS.id),
-      direction: 'one_way',
-      enabled: true,
-      loop: false,
+    expect(shape.lines[0]).toMatchObject({
+      ruleId: 1,
+      source: pointId('src', ALL.id),
+      target: pointId('dst', ALL.id),
+      direction: 'both',
     })
-    // 同一个分组自己到自己：画成环。
-    expect(shape.lines[0]?.loop).toBe(true)
-    expect(shape.lines[2]?.loop).toBe(true)
-    // 停用的规则照样画（虚线），不丢。
-    expect(shape.lines[3]).toMatchObject({ enabled: false, direction: 'both' })
+    // 左栏在左，右栏在右，同一行。
+    const [left, right] = shape.points
+    expect((left?.x ?? 0) < (right?.x ?? 0)).toBe(true)
+    expect(left?.y).toBe(right?.y)
   })
 
-  it('分组改名之后规则照样连着：线按编号找点', () => {
-    const renamed = { ...LAPTOPS, name: 'notebooks' }
-    const graph = graphOf({ rules: [rule(2, renamed, SERVERS)] })
-    graph.groups = graph.groups.map((entry) => (entry.id === LAPTOPS.id ? { ...entry, name: 'notebooks' } : entry))
-    const shape = buildGroupGraph(graph)
-    expect(shape.lines[0]).toMatchObject({ source: 'group:3', target: 'group:4', src: renamed })
+  it('左栏是策略的来源分组，右栏是目标分组；没被策略用到的分组不画，单独列出', () => {
+    const shape = buildGroupGraph(graphOf({ rules: [DEFAULT_RULE, ssh, media] }))
+    const side = (which: 'src' | 'dst') =>
+      shape.points.filter((point) => point.side === which).map((point) => point.group.name)
+    expect(side('src')).toEqual(['All', 'laptops'])
+    expect(side('dst').sort()).toEqual(['All', 'home', 'servers'])
+    expect(shape.unused).toEqual([])
+    const fewer = buildGroupGraph(graphOf({ rules: [ssh] }))
+    expect(fewer.unused.map((group) => group.name)).toEqual(['All', 'home'])
   })
 
-  it('同一对分组之间的几条线各有编号，方向相反的也算同一对', () => {
-    const shape = buildGroupGraph(
-      graphOf({
-        rules: [
-          rule(2, LAPTOPS, SERVERS, { direction: 'one_way' }),
-          rule(3, SERVERS, LAPTOPS, { direction: 'one_way' }),
-          rule(4, LAPTOPS, HOME),
-        ],
-      }),
-    )
-    expect(shape.lines.map((line) => [line.index, line.siblings])).toEqual([
-      [0, 2],
-      [1, 2],
-      [0, 1],
+  it('每条策略一根从左到右的线，带着方向、是否启用', () => {
+    const shape = buildGroupGraph(graphOf({ rules: [ssh, media] }))
+    expect(shape.lines.map((line) => [line.source, line.target, line.direction, line.enabled])).toEqual([
+      [pointId('src', LAPTOPS.id), pointId('dst', SERVERS.id), 'one_way', true],
+      [pointId('src', LAPTOPS.id), pointId('dst', HOME.id), 'both', false],
     ])
   })
 
-  it('规则用到的分组不在列表里（列表还没刷新）时，这条线不画', () => {
+  it('右栏的卡片按连着它的左栏卡片的位置排，交叉少', () => {
+    const shape = buildGroupGraph(graphOf({ rules: [rule(2, SERVERS, HOME), rule(3, LAPTOPS, SERVERS), DEFAULT_RULE] }))
+    const right = shape.points.filter((point) => point.side === 'dst').map((point) => point.group.name)
+    // 左栏：servers、laptops、All；右栏的 home 跟着 servers（第 0 行），servers 跟着 laptops（第 1 行）。
+    expect(right).toEqual(['home', 'servers', 'All'])
+  })
+
+  it('一张卡片上进出的几根线按另一头的高低排开，不挤在同一点', () => {
+    const shape = buildGroupGraph(graphOf({ rules: [ssh, rule(4, SERVERS, SERVERS), rule(5, LAPTOPS, HOME)] }))
+    const into = shape.lines.filter((line) => line.target === pointId('dst', SERVERS.id))
+    expect(new Set(into.map((line) => line.targetOffset)).size).toBe(into.length)
+    const out = shape.lines.filter((line) => line.source === pointId('src', LAPTOPS.id))
+    expect(new Set(out.map((line) => line.sourceOffset)).size).toBe(out.length)
+    // 只有一根线的那一头在正中。
+    expect(shape.lines.find((line) => line.ruleId === 5)?.targetOffset).toBe(0)
+  })
+
+  it('分组改名之后策略照样连着：线按编号找卡片', () => {
+    const renamed = graphOf({
+      rules: [ssh],
+      groups: [group(ALL, []), group({ ...LAPTOPS, name: 'notebooks' }, [laptop]), group(SERVERS, [gw])],
+    })
+    const shape = buildGroupGraph(renamed)
+    expect(shape.points.find((point) => point.id === pointId('src', LAPTOPS.id))?.group.name).toBe('notebooks')
+    expect(shape.lines[0]?.source).toBe(pointId('src', LAPTOPS.id))
+  })
+
+  it('策略用到的分组不在列表里（列表还没刷新）时，这条线不画', () => {
     const shape = buildGroupGraph(graphOf({ rules: [DEFAULT_RULE, rule(2, LAPTOPS, { id: 99, name: 'gone' })] }))
     expect(shape.lines.map((line) => line.ruleId)).toEqual([1])
   })
 
   it('还没确认新配置的节点：按分组数出来', () => {
-    const shape = buildGroupGraph(graphOf({ unacknowledged: [office, spare] }))
-    const pending = Object.fromEntries(shape.points.map((point) => [point.id, point.pending]))
-    expect(pending).toEqual({ 'group:1': 2, 'group:2': 0, 'group:3': 1, 'group:4': 0, ungrouped: 1 })
+    const shape = buildGroupGraph(graphOf({ rules: [ssh], unacknowledged: [office, spare] }))
+    expect(shape.points.find((point) => point.id === pointId('src', LAPTOPS.id))?.pending).toBe(1)
   })
 
-  it('点的位置互不重合', () => {
-    const shape = buildGroupGraph(graphOf())
-    const seen = new Set(shape.points.map((point) => `${point.x},${point.y}`))
-    expect(seen.size).toBe(shape.points.length)
+  it('一栏里的卡片不重叠，上下居中', () => {
+    const shape = buildGroupGraph(graphOf({ rules: [DEFAULT_RULE, ssh, media] }))
+    const right = shape.points.filter((point) => point.side === 'dst').map((point) => point.y)
+    for (let index = 1; index < right.length; index += 1) {
+      expect((right[index] ?? 0) - (right[index - 1] ?? 0)).toBeGreaterThanOrEqual(GROUP_NODE.height)
+    }
+    expect((right[0] ?? 0) + (right.at(-1) ?? 0)).toBe(0)
   })
 
-  it('布局的指纹只跟有哪些点有关：规则、成员数和名字变了不重新排版', () => {
-    const before = layoutSignature(buildGroupGraph(graphOf()))
-    const moreRules = layoutSignature(buildGroupGraph(graphOf({ rules: [DEFAULT_RULE, rule(2, LAPTOPS, SERVERS)] })))
-    expect(moreRules).toBe(before)
-
-    const renamed = graphOf()
-    renamed.groups = renamed.groups.map((entry) => ({ ...entry, name: `${entry.name}-2` }))
-    expect(layoutSignature(buildGroupGraph(renamed))).toBe(before)
-
-    const graph = graphOf()
-    graph.groups.push(group({ id: 9, name: 'zoo' }, [spare]))
-    expect(layoutSignature(buildGroupGraph(graph))).not.toBe(before)
+  it('布局的指纹只跟两栏里有哪些卡片有关：名字、启用与否变了不重新排版', () => {
+    const before = layoutSignature(buildGroupGraph(graphOf({ rules: [ssh] })))
+    expect(layoutSignature(buildGroupGraph(graphOf({ rules: [{ ...ssh, enabled: false, name: 'x' }] })))).toBe(before)
+    expect(layoutSignature(buildGroupGraph(graphOf({ rules: [ssh, media] })))).not.toBe(before)
   })
 })
 
@@ -423,12 +378,5 @@ describe('连线的几何', () => {
     const forward = curveBetween(a, b, 0, 2)
     const backward = curveBetween(b, a, 1, 2)
     expect(forward.label.y).not.toBeCloseTo(backward.label.y)
-  })
-
-  it('同一个点上的几个环一个比一个大', () => {
-    const small = loopAround(a, 0)
-    const large = loopAround(a, 1)
-    expect(small.d.startsWith('M 100 ')).toBe(true)
-    expect(large.label.x).toBeGreaterThan(small.label.x)
   })
 })
