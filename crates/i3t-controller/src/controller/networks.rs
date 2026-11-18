@@ -1,6 +1,6 @@
 //! 网络的增删改查。
 
-use i3t_model::admin::{CreateNetwork, Direction, GroupRef, LogRef, Network, NetworkId, RefKind, Rule, UpdateNetwork};
+use i3t_model::admin::{CreateNetwork, Direction, GroupRef, LogRef, Network, NetworkId, RefKind, Rule, UpdateNetwork, action};
 use i3t_model::netmap::{Reach, RoutingMode};
 use ipnet::Ipv4Net;
 use serde_json::json;
@@ -70,7 +70,7 @@ impl Controller {
             store.insert_rule(id, &default_rule)?;
             let refs = [LogRef::new(RefKind::Network, id.0)];
             let params = json!({ "network": id, "network_name": name, "cidr": cidr });
-            store.log_refs(now, Some(id), "network.create", &format!("新建网络 {name}，地址段 {cidr}"), &refs, params)?;
+            store.log_refs(now, Some(id), action::NETWORK_CREATE, &format!("新建网络 {name}，地址段 {cidr}"), &refs, params)?;
             Ok(id)
         })?;
         tracing::info!(network = %id, %name, "新建网络");
@@ -112,7 +112,7 @@ impl Controller {
                 "reach": network.reach,
                 "class": network.class,
             });
-            store.log_refs(now, Some(id), "network.update", &format!("修改网络 {} 的设置", network.name), &refs, params)?;
+            store.log_refs(now, Some(id), action::NETWORK_UPDATE, &format!("修改网络 {} 的设置", network.name), &refs, params)?;
             Ok::<_, Error>(network)
         })?;
         inner.refresh(id, Seeds::All, None)?;
@@ -136,7 +136,7 @@ impl Controller {
             store.delete_network(id)?;
             let params = json!({ "network": id, "network_name": network.name });
             let refs = [LogRef::new(RefKind::Network, id.0)];
-            store.log_refs(now, None, "network.delete", &format!("删除网络 {}", network.name), &refs, params)?;
+            store.log_refs(now, None, action::NETWORK_DELETE, &format!("删除网络 {}", network.name), &refs, params)?;
             tracing::info!(network = %id, name = %network.name, "删除网络");
             Ok(())
         })

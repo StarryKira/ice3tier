@@ -359,6 +359,7 @@ impl Dialler {
 
 /// 拨一条停在对方那里的 lane，然后守着它：对方在上面开流就交给接受队列。
 async fn park(inner: Arc<Inner>, peer: NodeId, epoch: u64, events: mpsc::UnboundedSender<Event>) {
+    // 下面几处报回去的事，收的一方是这个对端的维护任务。它已经结束（本节点在关闭、不再拨这个对端）时没有人要听，发不出去不要紧。
     let Some(mut lane) = dial_one(&inner, peer, Purpose::Parked, epoch).await else {
         let _ = events.send(Event::Parked { epoch, ok: false });
         return;
@@ -398,6 +399,7 @@ async fn warm_up(inner: Arc<Inner>, peer: NodeId, epoch: u64, events: mpsc::Unbo
     if let Some(lane) = lane {
         inner.add_warm(peer, lane);
     }
+    // 维护任务已经结束（本节点在关闭、不再拨这个对端）时没有人要听，发不出去不要紧。
     let _ = events.send(Event::Own { ok });
 }
 

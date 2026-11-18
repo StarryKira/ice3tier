@@ -64,14 +64,14 @@ impl Survey {
             Err(error) if error.says("no such file or directory") => Ok(None),
             Err(error) => Err(error),
         };
-        let rules = machine.run(Program::Ip, &args(&["-j", "rule", "show"]), None).map(|json| parse_rules(&json));
+        let rules = machine.run(Program::Ip, &args(&["-j", "rule", "show"]), None).and_then(|json| parse_rules(&json));
         let routes = match machine.run(Program::Ip, &args(&["-j", "route", "show", "table", &ROUTE_TABLE.to_string()]), None) {
-            Ok(json) => Ok(parse_routes(&json)),
+            Ok(json) => parse_routes(&json),
             Err(error) if error.says("does not exist") => Ok(Vec::new()),
             Err(error) => Err(error),
         };
         let link = match machine.run(Program::Ip, &args(&["-j", "-d", "addr", "show", "dev", LINK]), None) {
-            Ok(json) => Ok(parse_link(&json)),
+            Ok(json) => parse_link(&json),
             Err(error) if error.says("does not exist") => Ok(None),
             Err(error) => Err(error),
         };
@@ -137,10 +137,20 @@ fn text(value: Option<&Value>) -> Option<String> {
     }
 }
 
+/// `ip -j` 的输出：一个 JSON 数组。什么都没有输出（有的 iproute2 版本列表为空时这样）算空数组；
+/// 读不懂的输出是错误，不是"没有"：不然留下的东西认不出来，也就拆不掉。
+fn listing(json: &str) -> Result<Vec<Value>, CommandError> {
+    if json.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str(json)
+        .map_err(|error| CommandError::Io { program: Program::Ip, detail: format!("读不懂 ip 的输出：{error}") })
+}
+
 /// `ip -j rule show` 的输出里属于自己的规则：优先级是 [`RULE_PRIORITY`]，`proto` 是 [`PROTO`]。
-fn parse_rules(json: &str) -> Vec<Rule> {
-    let rules: Vec<Value> = serde_json::from_str(json).unwrap_or_default();
-    rules
+fn parse_rules(json: &str) -> Result<Vec<Rule>, CommandError> {
+    let rules = listing(json)?;
+    let ours = rules
         .iter()
         .filter(|rule| rule.get("priority").and_then(Value::as_u64) == Some(u64::from(RULE_PRIORITY)))
         .filter(|rule| text(rule.get("protocol")).as_deref() == Some(PROTO.to_string().as_str()))
@@ -153,13 +163,14 @@ fn parse_rules(json: &str) -> Vec<Rule> {
             words.extend(["lookup".to_owned(), text(rule.get("table")).unwrap_or_default(), "proto".to_owned(), PROTO.to_string()]);
             Rule { priority: RULE_PRIORITY, text: words.join(" ") }
         })
-        .collect()
+        .collect();
+    Ok(ours)
 }
 
 /// `ip -j route show table 2033` 的输出。
-fn parse_routes(json: &str) -> Vec<Route> {
-    let routes: Vec<Value> = serde_json::from_str(json).unwrap_or_default();
-    routes
+fn parse_routes(json: &str) -> Result<Vec<Route>, CommandError> {
+    let routes = listing(json)?;
+    let parsed = routes
         .iter()
         .map(|route| {
             let protocol = text(route.get("protocol"));
@@ -175,13 +186,14 @@ fn parse_routes(json: &str) -> Vec<Route> {
             }
             Route { text: words.join(" "), ours: protocol.as_deref() == Some(PROTO.to_string().as_str()) }
         })
-        .collect()
+        .collect();
+    Ok(parsed)
 }
 
 /// `ip -j -d addr show dev i3t0` 的输出。
-fn parse_link(json: &str) -> Option<Link> {
-    let links: Vec<Value> = serde_json::from_str(json).unwrap_or_default();
-    let link = links.first()?;
+fn parse_link(json: &str) -> Result<Option<Link>, CommandError> {
+    let links = listing(json)?;
+    let Some(link) = links.first() else { return Ok(None) };
     let kind = link.get("linkinfo").and_then(|info| text(info.get("info_kind")));
     let alias = text(link.get("ifalias"));
     let addresses = link
@@ -193,7 +205,7 @@ fn parse_link(json: &str) -> Option<Link> {
         .filter(|address| address.get("family").and_then(Value::as_str) == Some("inet"))
         .filter_map(|address| Some(format!("{}/{}", text(address.get("local"))?, text(address.get("prefixlen"))?)))
         .collect();
-    Some(Link { ours: kind.as_deref() == Some("dummy") && alias.as_deref() == Some(LINK_ALIAS), kind, addresses })
+    Ok(Some(Link { ours: kind.as_deref() == Some("dummy") && alias.as_deref() == Some(LINK_ALIAS), kind, addresses }))
 }
 
 #[cfg(test)]
@@ -218,15 +230,29 @@ mod tests {
 
     #[test]
     fn only_rules_with_our_priority_and_protocol_count_as_ours() {
-        let rules = parse_rules(RULES_JSON);
+        let rules = parse_rules(RULES_JSON).unwrap();
         assert_eq!(rules.len(), 1, "同一个优先级上别人的规则不是自己的");
         assert_eq!(rules[0].text, "2033: from all fwmark 0x20000000/0x20000000 lookup 2033 proto 203");
-        assert!(parse_rules("[]").is_empty());
+        assert!(parse_rules("[]").unwrap().is_empty());
+    }
+
+    #[test]
+    fn unreadable_ip_output_is_an_error_and_empty_output_is_an_empty_list() {
+        for unreadable in ["not json", "{\"priority\": 2033}", "[{\"priority\": 2033"] {
+            assert!(matches!(parse_rules(unreadable), Err(CommandError::Io { program: Program::Ip, .. })), "{unreadable}");
+            assert!(parse_routes(unreadable).is_err(), "{unreadable}");
+            assert!(parse_link(unreadable).is_err(), "{unreadable}");
+        }
+        for empty in ["", " \n"] {
+            assert_eq!(parse_rules(empty), Ok(Vec::new()));
+            assert_eq!(parse_routes(empty), Ok(Vec::new()));
+            assert_eq!(parse_link(empty), Ok(None));
+        }
     }
 
     #[test]
     fn routes_in_our_table_are_told_apart_by_protocol() {
-        let routes = parse_routes(ROUTES_JSON);
+        let routes = parse_routes(ROUTES_JSON).unwrap();
         assert_eq!(routes.len(), 2);
         assert_eq!(routes[0], Route { text: "local default dev lo table 2033 proto 203".into(), ours: true });
         assert!(!routes[1].ours);
@@ -234,13 +260,13 @@ mod tests {
 
     #[test]
     fn the_link_is_ours_only_if_it_is_a_dummy_with_our_alias() {
-        let link = parse_link(LINK_JSON).unwrap();
+        let link = parse_link(LINK_JSON).unwrap().unwrap();
         assert!(link.ours);
         assert_eq!(link.addresses, ["10.66.0.1/32"], "只列 IPv4 地址");
         let someone_elses = LINK_JSON.replace("\"ifalias\":\"ice3tier\",", "");
-        assert!(!parse_link(&someone_elses).unwrap().ours);
+        assert!(!parse_link(&someone_elses).unwrap().unwrap().ours);
         let a_veth = LINK_JSON.replace("dummy", "veth");
-        assert!(!parse_link(&a_veth).unwrap().ours);
-        assert_eq!(parse_link("[]"), None);
+        assert!(!parse_link(&a_veth).unwrap().unwrap().ours);
+        assert_eq!(parse_link("[]"), Ok(None));
     }
 }

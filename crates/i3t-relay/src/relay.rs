@@ -527,8 +527,14 @@ impl Inner {
     /// 序号用毫秒时间戳：进程重启之后也比以前发过的大。同一毫秒里发两行、或者系统时间往回跳的时候，至少比上一个大 1。
     fn next_row_seq(&self) -> u64 {
         let wall = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
-        let previous = self.row_seq.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| Some(wall.max(last.saturating_add(1))));
-        previous.map_or(wall, |last| wall.max(last.saturating_add(1)))
+        let mut last = self.row_seq.load(Ordering::Relaxed);
+        loop {
+            let next = wall.max(last.saturating_add(1));
+            match self.row_seq.compare_exchange_weak(last, next, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return next,
+                Err(actual) => last = actual,
+            }
+        }
     }
 
     fn send_to_all(&self, bindings: &[Binding], frame: &[u8]) {
@@ -586,8 +592,14 @@ impl Inner {
     pub(crate) fn neighbour_frame(&self, neighbour: NodeId, conn: u64, frame: &Bytes) -> bool {
         let me = self.read().me;
         match Datagram::parse(frame) {
-            Ok(Datagram::Session(session)) if !session.is_request() => self.to_inbox(neighbour, conn, frame),
-            Ok(Datagram::Row(_)) => self.to_inbox(neighbour, conn, frame),
+            Ok(Datagram::Session(session)) if !session.is_request() => {
+                self.deliver_to_inbox(neighbour, conn, frame);
+                true
+            }
+            Ok(Datagram::Row(_)) => {
+                self.deliver_to_inbox(neighbour, conn, frame);
+                true
+            }
             Ok(Datagram::Relayed { header, .. }) if header.dst == me => {
                 self.deliver_locally(header.src, frame, frame.len(), RelayHeader::LEN);
                 true
@@ -602,11 +614,11 @@ impl Inner {
         }
     }
 
-    fn to_inbox(&self, neighbour: NodeId, conn: u64, frame: &Bytes) -> bool {
+    /// 交给路径层的骨干收件箱。路径层还没接上收件箱时丢掉：这帧本来就是给它的，别人也用不上。
+    fn deliver_to_inbox(&self, neighbour: NodeId, conn: u64, frame: &Bytes) {
         if let Some(inbox) = self.inbox.get() {
             inbox.frame(neighbour, conn, frame.clone());
         }
-        true
     }
 
     /// TCP 上读出来的一帧。握手成功时返回建了会话的节点。

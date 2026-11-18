@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, SocketAddr};
 
-use i3t_model::admin::{LogRef, NetworkId, Node, NodeDetail, RelaySettings, Timestamp, UpdateNode};
+use i3t_model::admin::{LogRef, NetworkId, Node, NodeDetail, RelaySettings, Timestamp, UpdateNode, action};
 use i3t_model::control::ToNode;
 use i3t_model::netmap::ExitRole;
 use i3t_proto::NodeId;
@@ -111,7 +111,7 @@ impl Controller {
             let groups = store.groups(network.id)?;
             let params = update_params(&before, &node, &groups);
             let detail = describe_update(&before, &node, &groups);
-            store.log_refs(now, Some(network.id), "node.update", &detail, &[LogRef::node(id)], params)?;
+            store.log_refs(now, Some(network.id), action::NODE_UPDATE, &detail, &[LogRef::node(id)], params)?;
             Ok::<_, Error>((before, node, groups))
         })?;
         // relay 的名字写在全网每个节点的 netmap 里；别的改动只影响 netmap 里有它的节点。
@@ -146,7 +146,7 @@ impl Controller {
     /// 节点没有声明可以作为 relay；带宽上限写了 0。
     pub fn enable_relay(&self, network: NetworkId, id: NodeId, settings: RelaySettings) -> Result<Node, Error> {
         let settings = check_relay_settings(settings)?;
-        self.set_capability(network, id, Affects::WholeNetwork, "node.relay.enable", move |node| {
+        self.set_capability(network, id, Affects::WholeNetwork, action::NODE_RELAY_ENABLE, move |node| {
             if !node.declared.relay {
                 return Err(Error::NotDeclared { node: node.name.clone(), capability: Capability::Relay });
             }
@@ -159,7 +159,7 @@ impl Controller {
     ///
     /// 这个网络里没有这个节点。
     pub fn disable_relay(&self, network: NetworkId, id: NodeId) -> Result<Node, Error> {
-        self.set_capability(network, id, Affects::WholeNetwork, "node.relay.disable", |node| {
+        self.set_capability(network, id, Affects::WholeNetwork, action::NODE_RELAY_DISABLE, |node| {
             node.relay = None;
             Ok(())
         })
@@ -172,7 +172,7 @@ impl Controller {
     /// 节点没有声明可以作为出口；端口或上游代理的地址不合法。
     pub fn enable_exit(&self, network: NetworkId, id: NodeId, settings: ExitRole) -> Result<Node, Error> {
         let settings = check_exit_settings(settings)?;
-        self.set_capability(network, id, Affects::Holders, "node.exit.enable", move |node| {
+        self.set_capability(network, id, Affects::Holders, action::NODE_EXIT_ENABLE, move |node| {
             if !node.declared.exit {
                 return Err(Error::NotDeclared { node: node.name.clone(), capability: Capability::Exit });
             }
@@ -185,7 +185,7 @@ impl Controller {
     ///
     /// 这个网络里没有这个节点。
     pub fn disable_exit(&self, network: NetworkId, id: NodeId) -> Result<Node, Error> {
-        self.set_capability(network, id, Affects::Holders, "node.exit.disable", |node| {
+        self.set_capability(network, id, Affects::Holders, action::NODE_EXIT_DISABLE, |node| {
             node.exit = None;
             Ok(())
         })
@@ -241,7 +241,7 @@ impl Controller {
             store.log_refs(
                 now,
                 Some(network),
-                "node.delete",
+                action::NODE_DELETE,
                 &format!("删除节点 {}（{}）", node.name, node.virtual_ip),
                 &[LogRef::node(id)],
                 json!({ "node": id, "node_name": node.name, "virtual_ip": node.virtual_ip }),
@@ -296,7 +296,7 @@ impl Controller {
             inherit(store, network.id, &old, &node)?;
             let node = require_node(store, network.id, id)?;
             let detail = format!("节点 {former} 继任 {}（{}）", old.name, old.virtual_ip);
-            store.log_refs(now, Some(network.id), "node.succeed", &detail, &[LogRef::node(id), LogRef::node(predecessor)], params)?;
+            store.log_refs(now, Some(network.id), action::NODE_SUCCEED, &detail, &[LogRef::node(id), LogRef::node(predecessor)], params)?;
             Ok::<_, Error>(node)
         })?;
         tracing::info!(node = %id, %predecessor, name = %node.name, "节点继任");

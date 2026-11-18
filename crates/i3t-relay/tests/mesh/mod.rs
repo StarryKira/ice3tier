@@ -497,8 +497,8 @@ impl Transfer {
 
 fn block(index: u64) -> [u8; BLOCK] {
     let mut bytes = [0u8; BLOCK];
-    for chunk in bytes.chunks_exact_mut(8) {
-        chunk.copy_from_slice(&index.to_be_bytes());
+    for chunk in bytes.as_chunks_mut::<8>().0 {
+        *chunk = index.to_be_bytes();
     }
     bytes
 }

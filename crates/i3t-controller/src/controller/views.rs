@@ -7,13 +7,13 @@ use i3t_model::control::Route;
 use i3t_proto::NodeId;
 
 use super::groups::group_view;
-use super::{Controller, Inner, count, node_ref};
+use super::{Controller, Inner, count};
 use crate::access::AccessMap;
 use crate::error::{Entity, Error};
 use crate::netmap::NetworkView;
 use crate::node_addresses;
 use crate::relay_reach::ReachIndex;
-use crate::store::is_pending;
+use crate::store::{NodeRecord, is_pending};
 
 impl Controller {
     /// 一个网络的总览。
@@ -25,7 +25,7 @@ impl Controller {
         let inner = self.lock();
         let view = inner.view(network)?;
         let now = inner.clock.now();
-        let online_nodes: Vec<NodeRef> = view.nodes.values().filter(|node| inner.is_online(node.id)).map(node_ref).collect();
+        let online_nodes: Vec<NodeRef> = view.nodes.values().filter(|node| inner.is_online(node.id)).map(NodeRecord::to_ref).collect();
         let live = inner.live.values().filter(|live| live.network == network);
         let reach = ReachIndex::new(view.nodes.values(), |id| inner.is_online(id));
         Ok(Overview {
@@ -49,7 +49,7 @@ impl Controller {
                 .flat_map(|node| {
                     let warnings = node_addresses::warnings(node, view.network.cidr);
                     let unreached = node.relay.as_ref().and_then(|_| reach.warning(node.id));
-                    warnings.into_iter().chain(unreached).map(|warning| NetworkWarning { node: node_ref(node), warning })
+                    warnings.into_iter().chain(unreached).map(|warning| NetworkWarning { node: node.to_ref(), warning })
                 })
                 .collect(),
         })
@@ -67,8 +67,8 @@ impl Controller {
         let is_connected = |id: NodeId| view.nodes.keys().any(|&other| access.allows(id, other) || access.allows(other, id));
         Ok(AccessGraph {
             groups: view.groups.iter().map(|group| group_view(&view, group)).collect(),
-            unconnected: view.nodes.values().filter(|node| !is_connected(node.id)).map(node_ref).collect(),
-            unacknowledged: view.nodes.values().filter(|node| !inner.has_acknowledged(node.id)).map(node_ref).collect(),
+            unconnected: view.nodes.values().filter(|node| !is_connected(node.id)).map(NodeRecord::to_ref).collect(),
+            unacknowledged: view.nodes.values().filter(|node| !inner.has_acknowledged(node.id)).map(NodeRecord::to_ref).collect(),
             rules: view.rules,
         })
     }
@@ -89,16 +89,11 @@ impl Controller {
                 .filter_map(|other| {
                     let (from, to) = if outbound { (id, other.id) } else { (other.id, id) };
                     let rules: Vec<u32> = access.rules_allowing(from, to).map(|rule| rule.id).collect();
-                    (!rules.is_empty()).then(|| AccessEdge { node: node_ref(other), rules })
+                    (!rules.is_empty()).then(|| AccessEdge { node: other.to_ref(), rules })
                 })
                 .collect()
         };
-        Ok(NodeAccess {
-            node: node_ref(node),
-            can_reach: edges(true),
-            reachable_by: edges(false),
-            acknowledged: inner.has_acknowledged(id),
-        })
+        Ok(NodeAccess { node: node.to_ref(), can_reach: edges(true), reachable_by: edges(false), acknowledged: inner.has_acknowledged(id) })
     }
 
     /// 访问检查：`from` 能不能访问 `to`，是哪些规则允许的。
@@ -109,7 +104,7 @@ impl Controller {
     pub fn access_check(&self, network: NetworkId, from: NodeId, to: NodeId) -> Result<AccessCheck, Error> {
         let inner = self.lock();
         let view = inner.view(network)?;
-        let node = |id: NodeId| view.nodes.get(&id).map(node_ref).ok_or(Error::NotFound(Entity::Node));
+        let node = |id: NodeId| view.nodes.get(&id).map(NodeRecord::to_ref).ok_or(Error::NotFound(Entity::Node));
         let access: AccessMap<'_> = view.access();
         let rules: Vec<_> = access.rules_allowing(from, to).cloned().collect();
         Ok(AccessCheck { from: node(from)?, to: node(to)?, allowed: !rules.is_empty(), rules })
@@ -134,7 +129,7 @@ impl Inner {
             let no_route = reported.entries.values().filter(|entry| entry.route == Route::None).map(|entry| entry.peer);
             pairs.extend(no_route.filter(|peer| self.is_online(*peer)).map(|peer| (id.min(peer), id.max(peer))));
         }
-        let pair = |(a, b): (NodeId, NodeId)| Some(NodePair { a: node_ref(view.nodes.get(&a)?), b: node_ref(view.nodes.get(&b)?) });
+        let pair = |(a, b): (NodeId, NodeId)| Some(NodePair { a: view.nodes.get(&a)?.to_ref(), b: view.nodes.get(&b)?.to_ref() });
         pairs.into_iter().filter_map(pair).collect()
     }
 }

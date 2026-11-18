@@ -4,7 +4,7 @@
 //! 访问规则要让 A 能访问 B。这几条在新建和修改时查（修改时只在会让它生效的那一下查，见 [`check`]）；
 //! 之后出口被停用、规则变了，代理留着、照样下发、照样监听，状态说明它为什么用不了。
 
-use i3t_model::admin::{CreateProxy, LogRef, NetworkId, Proxy, ProxyStatus, RefKind, UpdateProxy};
+use i3t_model::admin::{CreateProxy, LogRef, NetworkId, Proxy, ProxyStatus, RefKind, UpdateProxy, action};
 use i3t_model::control::{ListenState, ListenTraffic};
 use i3t_model::netmap::Verifier;
 use i3t_proto::NodeId;
@@ -73,7 +73,7 @@ impl Controller {
             let mut record = check(store, network, None, record)?;
             record.id = store.insert_proxy(&record)?;
             let detail = format!("节点 #{} 上新建代理 {}（{}）", record.node, record.name, record.bind);
-            store.log_refs(now, Some(network), "proxy.create", &detail, &refs(&record), params(store, &record)?)?;
+            store.log_refs(now, Some(network), action::PROXY_CREATE, &detail, &refs(&record), params(store, &record)?)?;
             Ok::<_, Error>(record)
         })?;
         inner.refresh(network, Seeds::of([record.node]), None)?;
@@ -115,7 +115,7 @@ impl Controller {
             };
             store.update_proxy(&record)?;
             let detail = format!("修改代理 {}（{}）", record.name, record.bind);
-            store.log_refs(now, Some(network), "proxy.update", &detail, &refs(&record), params(store, &record)?)?;
+            store.log_refs(now, Some(network), action::PROXY_UPDATE, &detail, &refs(&record), params(store, &record)?)?;
             Ok::<_, Error>((before, record))
         })?;
         inner.refresh(network, Seeds::of([before.node, record.node]), None)?;
@@ -136,7 +136,7 @@ impl Controller {
             store.log_refs(
                 now,
                 Some(network),
-                "proxy.delete",
+                action::PROXY_DELETE,
                 &format!("删除代理 {}（{}）", record.name, record.bind),
                 &refs(&record),
                 params,

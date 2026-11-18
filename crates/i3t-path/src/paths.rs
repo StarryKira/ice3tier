@@ -529,7 +529,7 @@ impl Paths {
             if !matches!(verdict, Verdict::Relay)
                 && let Some(span) = for_relay.take()
             {
-                self.to_local_relay(raw, &data[span], stride);
+                self.hand_to_local_relay(raw, &data[span], stride);
             }
             match verdict {
                 Verdict::Packet { slot, skip } => {
@@ -563,12 +563,12 @@ impl Paths {
             offset = end;
         }
         if let Some(span) = for_relay {
-            self.to_local_relay(raw, &data[span], stride);
+            self.hand_to_local_relay(raw, &data[span], stride);
         }
         kept.map(|run| PacketMeta { peer: run.slot.id, len: run.len, stride: run.stride, ecn: raw.ecn })
     }
 
-    fn to_local_relay(&self, raw: &RecvMeta, data: &[u8], stride: usize) {
+    fn hand_to_local_relay(&self, raw: &RecvMeta, data: &[u8], stride: usize) {
         if let Some(relay) = self.shared.local_relay.get() {
             relay.handle_udp(raw.addr, raw.ecn, data, stride);
         }
@@ -648,7 +648,7 @@ impl Paths {
             },
             // 探测只收发给本节点的、自称来自 netmap 里的对端的：别的不可能验得过签名，不值得进控制任务的队列。
             Ok(Datagram::Probe(frame)) => {
-                let (src, dst) = frame.ends();
+                let probe::Ends { src, dst } = frame.ends();
                 if dst != self.shared.me || !table.peers.contains_key(&src) {
                     return Verdict::Drop;
                 }

@@ -172,9 +172,23 @@ async fn silent_then_active(pair: &Pair, payload: Payload, report: bool) {
     wait_for("流都结束了", Duration::from_secs(10), || pair.entry.lanes.status().total.in_use == 0).await;
 }
 
+/// 同时开着的文件描述符要能有这么多：每条流两头各一个 socket，再留出池里空闲的 lane 和测试自己的零碎。
+const FDS_NEEDED: u64 = 2 * STREAMS as u64 + 1024;
+
+/// 把能同时打开的文件数的软上限抬到 [`FDS_NEEDED`]（不超过硬上限）。抬不到那么高时返回现在的上限：
+/// 很多桌面和容器的软上限只有 1024，几千条流开到一半就开不出 socket，看起来像是 lane 的池子干了。
+fn enough_open_files() -> Result<(), u64> {
+    let limit = rlimit::increase_nofile_limit(FDS_NEEDED).unwrap();
+    if limit >= FDS_NEEDED { Ok(()) } else { Err(limit) }
+}
+
 /// 两种负载方式依次跑：同一个进程里的数字才能比，所以放在一个测试里，不和别的测试并行。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn thousands_of_streams_stay_silent_and_then_all_talk() {
+    if let Err(limit) = enough_open_files() {
+        eprintln!("跳过：能同时打开的文件数最多只能是 {limit}，这个测试要 {FDS_NEEDED}（ulimit -Hn 太低）");
+        return;
+    }
     let pair = Pair::direct(quick()).await;
     pair.ready(4).await;
     silent_then_active(&pair, Payload::Sealed, false).await;

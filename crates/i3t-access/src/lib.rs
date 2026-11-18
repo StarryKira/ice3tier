@@ -38,5 +38,5 @@ pub use manager::{
 };
 pub use route::is_lan_literal;
 pub use routes::{CurrentRoute, NoRoutes, RouteAtStart, RouteLabel, RouteSpan, Routes, SharedRoutes};
-pub use udp::intercept::Diversion;
+pub use udp::intercept::{Diversion, Diverted};
 pub use usage::{ExitSnapshot, Tally};

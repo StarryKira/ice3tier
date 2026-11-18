@@ -484,9 +484,11 @@ impl Inner {
     fn handshake_failed(&self, from: SocketAddr, error: &LaneError) {
         let counter = match error {
             LaneError::Deadline(_) => &self.counters.handshake_deadline,
-            _ if error.is_unknown_key() => &self.counters.handshake_unknown_key,
+            LaneError::Tls(_) if error.is_unknown_key() => &self.counters.handshake_unknown_key,
             LaneError::Tls(_) => &self.counters.handshake_tls,
-            _ => &self.counters.handshake_protocol,
+            // 没握手完连接就断了（对方关掉、重置，socket 出错）也记在这里：上报给 controller 的原因只有这几种
+            // （`LaneHandshakeFailures`），不为它另加一种。
+            LaneError::Frame(_) | LaneError::Protocol(_) | LaneError::Io(_) | LaneError::Closed => &self.counters.handshake_protocol,
         };
         counter.bump();
         // 外人能造成的失败，每次都记 info 就能刷屏。

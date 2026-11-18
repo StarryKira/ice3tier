@@ -88,27 +88,14 @@ impl fmt::Display for Proxy {
 }
 
 /// 建立隧道失败。分开是为了在结果里区分"连不上代理""代理拒绝"和"握手中途出错"。
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
-    Connect(io::Error),
+    #[error("连不上")]
+    Connect(#[source] io::Error),
+    #[error("代理拒绝：{0}")]
     Refused(String),
-    Io(io::Error),
-}
-
-impl fmt::Display for ProxyError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Connect(err) => write!(f, "连不上：{err}"),
-            Self::Refused(detail) => write!(f, "代理拒绝：{detail}"),
-            Self::Io(err) => write!(f, "和代理握手时出错：{err}"),
-        }
-    }
-}
-
-impl From<io::Error> for ProxyError {
-    fn from(err: io::Error) -> Self {
-        Self::Io(err)
-    }
+    #[error("和代理握手时出错")]
+    Io(#[from] io::Error),
 }
 
 /// `host:port`，IPv6 地址加方括号。

@@ -11,6 +11,7 @@ use i3t_crypto::NodeKey;
 use i3t_crypto::tls;
 use i3t_model::Netmap;
 use i3t_model::control::{PeerUse, Signal};
+use i3t_model::netmap::Congestion;
 use i3t_path::Paths;
 use i3t_proto::flow::{DatagramHeader, MAX_DATAGRAM_BODY_LEN, Recipient};
 use i3t_proto::{NodeId, PublicKey};
@@ -333,7 +334,7 @@ impl Manager {
             entry.arrived.notify_waiters();
             entry.take_surplus()
         };
-        tracing::info!(%peer, %dialer, congestion = %algorithm, "和对端的连接建立");
+        tracing::info!(%peer, %dialer, congestion = %Congestion::from(algorithm), "和对端的连接建立");
         for old in surplus {
             tracing::info!(%peer, dialer = %old.dialer, "和这个对端的连接超过了 {MAX_CONNS_PER_PEER} 条，关闭最旧的一条");
             old.quic.close(VarInt::from_u32(CLOSE_SURPLUS), b"too many connections");

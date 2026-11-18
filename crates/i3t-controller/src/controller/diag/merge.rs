@@ -183,11 +183,8 @@ fn path_result(
     b_refused: Option<&TestProblem>,
 ) -> PathResult {
     let problem = measure.failure.map(|code| {
-        let node = match code {
-            // 发起方报的路径限制说的是它自己。
-            TestCode::RelayOnly | TestCode::DirectOnly => Some(a),
-            _ => None,
-        };
+        // 发起方报的路径限制说的是它自己；别的原因（路径断了、对端没回答……）说的是这条路，不怪哪一个节点，以后新加的原因也这样。
+        let node = matches!(code, TestCode::RelayOnly | TestCode::DirectOnly).then_some(a);
         TestProblem::new(code, node)
     });
     let throughput = throughput_skip.map(|skip| match (skip, &measure.throughput, &problem) {

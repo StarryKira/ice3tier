@@ -14,8 +14,8 @@ use i3t_proto::NodeId;
 use i3t_proto::flow::Host;
 use tokio::sync::oneshot;
 
+use super::Controller;
 use super::routes::Reply;
-use super::{Controller, node_ref};
 use crate::error::{Entity, Error};
 use crate::server::blocking;
 
@@ -124,7 +124,7 @@ impl Controller {
     ) -> Result<ExitTestView, Error> {
         let inner = self.lock();
         let record = inner.require_node(network, node)?;
-        Ok(ExitTestView { node: node_ref(&record), target, answered: result.is_some(), result })
+        Ok(ExitTestView { node: record.to_ref(), target, answered: result.is_some(), result })
     }
 }
 

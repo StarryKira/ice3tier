@@ -736,7 +736,7 @@ pub struct LaneHandshakeFailures {
     /// 别的 TLS 错误。
     #[serde(default)]
     pub tls: u64,
-    /// 握手之后的第一个帧不对，或者根本不是 TLS。
+    /// 握手之后的第一个帧不对，或者根本不是 TLS；没握手完连接就断了（对方关掉、重置）的也算在这里。
     #[serde(default)]
     pub protocol: u64,
     /// 还没握手完的连接太多，被挤掉的。

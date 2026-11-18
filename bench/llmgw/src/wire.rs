@@ -119,19 +119,12 @@ impl Default for Chain {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ChainError {
+    #[error("该收到第 {expected} 个事件，收到的是第 {got} 个")]
     OutOfOrder { expected: u64, got: u64 },
+    #[error("第 {seq} 个事件的内容和它带的累积哈希对不上")]
     BadHash { seq: u64 },
-}
-
-impl fmt::Display for ChainError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::OutOfOrder { expected, got } => write!(f, "该收到第 {expected} 个事件，收到的是第 {got} 个"),
-            Self::BadHash { seq } => write!(f, "第 {seq} 个事件的内容和它带的累积哈希对不上"),
-        }
-    }
 }
 
 /// 填充用的文本：只有字母和空格，放进 JSON 字符串不需要转义。

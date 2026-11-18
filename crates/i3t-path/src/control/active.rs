@@ -238,8 +238,7 @@ impl Control {
             return;
         }
         let Some(peer) = self.peers.get(&ping.src) else { return };
-        let message = TestPing::signed_message(ping.src, ping.dst, ping.test, ping.seq, ping.path);
-        if i3t_crypto::verify(&peer.key, TestPing::PURPOSE, &message, &Signature::from_bytes(ping.signature)).is_err() {
+        if i3t_crypto::verify(&peer.key, TestPing::PURPOSE, &ping.signed_message(), &Signature::from_bytes(ping.signature)).is_err() {
             tracing::debug!(test = ping.test, peer = %ping.src, "测试探测的签名不对，丢弃");
             return;
         }
@@ -333,9 +332,8 @@ impl Control {
                 let (test, peer, path) = (train.spec.test, train.spec.peer, train.spec.path);
                 // 发的时候走不了（路刚断）也记成发过了：它算作丢失，这正是测试要量的。
                 if let Some(hop) = self.test_hop(peer, path, now) {
-                    let message = TestPing::signed_message(self.shared.me, peer, test, seq, path.relays());
-                    let signature = *self.key.sign(TestPing::PURPOSE, &message).as_bytes();
-                    let ping = TestPing { src: self.shared.me, dst: peer, test, seq, path: path.relays(), signature };
+                    let mut ping = TestPing { src: self.shared.me, dst: peer, test, seq, path: path.relays(), signature: [0; 64] };
+                    ping.signature = *self.key.sign(TestPing::PURPOSE, &ping.signed_message()).as_bytes();
                     let bytes = ping.to_bytes();
                     let sent = Instant::now();
                     send_frame_via(&self.shared, peer, &hop, &bytes);
@@ -377,11 +375,11 @@ impl Control {
         let cost_of = |path: PathId| candidates.iter().find(|candidate| candidate.path == path).map(|candidate| candidate.cost_ms);
         let me = self.shared.me;
 
-        let current_chain = path_of(peer.policy_route).filter(|path| matches!(path, PathId::Relays(relays) if relays.as_slice().len() > 1));
+        let current_chain = peer.policy_route.path().filter(|path| matches!(path, PathId::Relays(relays) if relays.as_slice().len() > 1));
         let direct_first = match view.default_route(id, peer, &candidates, current_chain) {
             Some(path @ PathId::Direct(_)) => {
                 let reason = if peer.direct.is_lan_active() { ChoiceReason::Lan } else { ChoiceReason::Direct };
-                ModeChoice { route: route_of(path), reason, cost_ms: cost_of(path), cheaper: None }
+                ModeChoice { route: path.to_route(), reason, cost_ms: cost_of(path), cheaper: None }
             }
             Some(path @ PathId::Relays(relays)) => {
                 let reason = match relays.first() {
@@ -390,11 +388,11 @@ impl Control {
                     first if first == me => ChoiceReason::OwnRelay,
                     _ => ChoiceReason::PeerRelay,
                 };
-                ModeChoice { route: route_of(path), reason, cost_ms: cost_of(path), cheaper: None }
+                ModeChoice { route: path.to_route(), reason, cost_ms: cost_of(path), cheaper: None }
             }
             None => ModeChoice::none(),
         };
-        let current = path_of(peer.policy_route).and_then(|path| candidates.iter().find(|candidate| candidate.path == path));
+        let current = peer.policy_route.path().and_then(|path| candidates.iter().find(|candidate| candidate.path == path));
         let lowest_cost = lowest_cost_choice(&candidates, current);
         // 不算直连时默认模式会经的 relay：同一套规则，只是假装直连不可用。
         let without_direct = View { allow_direct: false, ..self.view(&entries, now) };
@@ -473,21 +471,6 @@ impl Control {
     }
 }
 
-fn route_of(path: PathId) -> i3t_model::control::Route {
-    match path {
-        PathId::Direct(addr) => i3t_model::control::Route::Direct { addr },
-        PathId::Relays(relays) => i3t_model::control::Route::Relay { relays: relays.as_slice().to_vec() },
-    }
-}
-
-fn path_of(route: RouteKey) -> Option<PathId> {
-    match route {
-        RouteKey::None => None,
-        RouteKey::Direct(addr) => Some(PathId::Direct(addr)),
-        RouteKey::Relay { path, .. } => Some(PathId::Relays(path)),
-    }
-}
-
 /// 延迟优先模式从这一对现在走的路（`current`，它在候选里时）出发会选哪条：局域网直连无条件优先；
 /// 代价最低的候选比现在的路便宜得够选路器换过去（[`routing::beats_by_margin`]）就是它，不够就还是现在的路，
 /// 并带上那条更便宜的。现在的路不在候选里（没有路、断了）时选路器立刻换到最低的，不看差距。
@@ -495,7 +478,7 @@ fn path_of(route: RouteKey) -> Option<PathId> {
 /// 只看差距：连续几个评估窗口、换路之后的停留期、刚重连的 relay 要等的那一段是时间上的条件，一次快照里看不出来。
 fn lowest_cost_choice(candidates: &[Candidate], current: Option<&Candidate>) -> ModeChoice {
     let chosen = |candidate: &Candidate, reason| ModeChoice {
-        route: route_of(candidate.path),
+        route: candidate.path.to_route(),
         reason,
         cost_ms: Some(candidate.cost_ms),
         cheaper: None,
@@ -506,7 +489,7 @@ fn lowest_cost_choice(candidates: &[Candidate], current: Option<&Candidate>) -> 
     match candidates.first() {
         _ if picked.lan => chosen(picked, ChoiceReason::Lan),
         Some(cheapest) if cheapest.path != path => ModeChoice {
-            cheaper: Some(CheaperPath { route: route_of(cheapest.path), cost_ms: cheapest.cost_ms }),
+            cheaper: Some(CheaperPath { route: cheapest.path.to_route(), cost_ms: cheapest.cost_ms }),
             ..chosen(picked, ChoiceReason::WithinMargin)
         },
         Some(_) | None => chosen(picked, ChoiceReason::LowestCost),
@@ -514,9 +497,9 @@ fn lowest_cost_choice(candidates: &[Candidate], current: Option<&Candidate>) -> 
 }
 
 fn candidate_report(candidate: &Candidate, current: RouteKey) -> CandidateReport {
-    let current = path_of(current);
+    let current = current.path();
     CandidateReport {
-        route: route_of(candidate.path),
+        route: candidate.path.to_route(),
         cost_ms: candidate.cost_ms,
         legs: candidate
             .legs

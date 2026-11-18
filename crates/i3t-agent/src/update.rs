@@ -14,7 +14,7 @@ use std::sync::Arc;
 use i3t_model::update::{SignedManifest, UpdateStatus, UpdateTiming};
 use i3t_update::{RestartRequired, UpdateError, Updater};
 use tokio::sync::{Notify, mpsc, watch};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinError, JoinHandle};
 
 use crate::control::UpdateCommand;
 
@@ -93,11 +93,8 @@ impl<S: i3t_update::PackageSource + Clone + 'static> Driver<S> {
                 }
                 outcome = async { (&mut running.as_mut().expect("这个分支只在有任务时才等").task).await }, if running.is_some() => {
                     running = None;
-                    match outcome {
-                        Ok(Ok(restart)) => return self.restart(restart),
-                        // 原因已经在状态里，更新库也记过日志了。
-                        Ok(Err(_)) => {}
-                        Err(error) => tracing::error!(%error, "做更新的任务异常结束"),
+                    if let Some(restart) = settled(outcome) {
+                        return self.restart(restart);
                     }
                 }
             }
@@ -120,9 +117,9 @@ impl<S: i3t_update::PackageSource + Clone + 'static> Driver<S> {
 
     /// 等一个正在做的更新做完。没有成功的话就没有什么可等的了。
     async fn finish(&self, task: JoinHandle<Result<RestartRequired, UpdateError>>) -> RestartRequired {
-        match task.await {
-            Ok(Ok(restart)) => self.restart(restart),
-            Ok(Err(_)) | Err(_) => std::future::pending().await,
+        match settled(task.await) {
+            Some(restart) => self.restart(restart),
+            None => std::future::pending().await,
         }
     }
 
@@ -134,6 +131,19 @@ impl<S: i3t_update::PackageSource + Clone + 'static> Driver<S> {
         });
         if changed {
             self.report_now.notify_one();
+        }
+    }
+}
+
+/// 一次更新任务的结局：把程序换好了时是要求重启。没有换好时原因已经在状态里，更新库也记过日志；
+/// 任务本身异常结束（panic）的原因只有这里知道，在这里记。
+fn settled(outcome: Result<Result<RestartRequired, UpdateError>, JoinError>) -> Option<RestartRequired> {
+    match outcome {
+        Ok(Ok(restart)) => Some(restart),
+        Ok(Err(_)) => None,
+        Err(error) => {
+            tracing::error!(%error, "做更新的任务异常结束");
+            None
         }
     }
 }
@@ -240,6 +250,45 @@ mod tests {
         assert!(!running.was_ordered_by(&untrusted_order(UpdateTiming::Idle)), "清单变了：有了更新的版本");
         assert!(!running.was_ordered_by(&UpdateCommand::Cancel));
         drop(flows_tx);
+    }
+
+    /// 收下日志的输出，测试看记了什么。
+    #[derive(Clone, Default)]
+    struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Logs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn an_update_task_that_panics_after_the_controller_is_gone_is_logged() {
+        let logs = Logs::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt().with_ansi(false).with_writer(move || writer.clone()).finish();
+        let _logging = tracing::subscriber::set_default(subscriber);
+        let dir = tempfile::tempdir().unwrap();
+        let updater = Arc::new(Updater::new(UpdaterConfig {
+            program: dir.path().join("i3t"),
+            state_dir: dir.path().join("state"),
+            running: Version::new(0, 1, 0),
+            self_check_args: Vec::new(),
+            blocker: None,
+        }));
+        let (_flows_tx, flows) = watch::channel(0);
+        let (reported, _reported_rx) = watch::channel(UpdateStatus::Idle);
+        let (_commands, commands_rx) = mpsc::channel(1);
+        let driver = Driver { updater, commands: commands_rx, packages: NoPackages, flows, reported, report_now: Arc::new(Notify::new()) };
+        let task: JoinHandle<Result<RestartRequired, UpdateError>> = tokio::spawn(async { panic!("更新任务里的 bug") });
+        assert!(timeout(Duration::from_millis(200), driver.finish(task)).await.is_err(), "没有换好程序，不重启");
+        let logged = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(logged.contains("做更新的任务异常结束") && logged.contains("更新任务里的 bug"), "{logged}");
     }
 
     #[tokio::test]

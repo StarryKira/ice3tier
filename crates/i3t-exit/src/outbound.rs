@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use i3t_model::Netmap;
 use i3t_model::control::exit_test::{ConnectStep, ExitTestCause, ExitTestResult, ExitVia, ResolveStep};
-use i3t_model::netmap::{self, ExitRole, IpFamily, Network};
+use i3t_model::netmap::{ExitRole, IpFamily, Network};
 use i3t_proto::NodeId;
 use i3t_proto::flow::{Host, Reply, Status};
 use ipnet::IpNet;
@@ -254,7 +254,7 @@ impl<S: System> Outbound<S> {
         let attached = self.interfaces()?.iter().any(|net| !net.addr().is_loopback() && subnet_contains(net, ip));
         let refused = if ip.is_loopback() || policy::is_link_local(ip) || policy::is_cloud_metadata(ip) {
             Some("回环、链路本地和云平台的元数据地址不算局域网")
-        } else if netmap::is_overlay_address(&netmap.network, ip) {
+        } else if netmap.network.is_overlay_address(ip) {
             Some("覆盖网的地址不算局域网")
         } else if !attached {
             Some("目标不在本机网卡直连的网段里")
@@ -391,7 +391,7 @@ impl<S: System> Outbound<S> {
     /// 端口转发写了这样的地址、或者一个域名解析成了这样的地址时直接拒绝，不当作普通的地址去连：
     /// 透明访问打开着的时候，那样的连接会被本机的拦截规则绕回组网里。
     pub(crate) fn not_overlay(&self, addr: SocketAddr) -> Result<(), Reply> {
-        if netmap::is_overlay_address(&self.inner.netmap.borrow().network, addr.ip().to_canonical()) {
+        if self.inner.netmap.borrow().network.is_overlay_address(addr.ip().to_canonical()) {
             return Err(Reply::new(Status::PolicyDenied, "目标是覆盖网的地址：要访问那个节点，开到它的流"));
         }
         Ok(())
@@ -677,7 +677,7 @@ fn internet_role(netmap: &Netmap, port: u16) -> Result<&ExitRole, Stop> {
 fn forbidden_as_internet(network: &Network, interfaces: &[IpNet], nodes: &[IpAddr], ip: IpAddr) -> Option<&'static str> {
     if let Some(what) = policy::not_public(ip) {
         Some(what)
-    } else if netmap::is_overlay_address(network, ip) {
+    } else if network.is_overlay_address(ip) {
         Some("覆盖网的地址")
     } else if interfaces.iter().any(|net| subnet_contains(net, ip)) {
         Some("本机网卡所在网段的地址")

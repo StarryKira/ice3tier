@@ -5,12 +5,14 @@
 
 use std::collections::BTreeSet;
 
-use i3t_model::admin::{CreateGroup, DeletedGroup, Group, GroupId, GroupMembers, LogRef, NetworkId, NodeRef, RefKind, Rule, UpdateGroup};
+use i3t_model::admin::{
+    CreateGroup, DeletedGroup, Group, GroupId, GroupMembers, LogRef, NetworkId, NodeRef, RefKind, Rule, UpdateGroup, action,
+};
 use i3t_proto::NodeId;
 use serde_json::{Value, json};
 
 use super::nodes::require_node;
-use super::{Controller, Inner, Seeds, count, listed, naming, node_ref};
+use super::{Controller, Inner, Seeds, count, listed, naming};
 use crate::error::{Error, InField};
 use crate::netmap::NetworkView;
 use crate::store::{BUILTIN_GROUP, GroupRecord, NodeRecord, Store};
@@ -50,7 +52,7 @@ impl Controller {
             check_group_name(store, network, &name, None)?;
             let id = store.insert_group(network, &name)?;
             let params = json!({ "group": id, "group_name": name });
-            store.log_refs(now, Some(network), "group.create", &format!("新建分组 {name}"), &[group_ref(id)], params)?;
+            store.log_refs(now, Some(network), action::GROUP_CREATE, &format!("新建分组 {name}"), &[group_ref(id)], params)?;
             Ok::<_, Error>(id)
         })?;
         tracing::info!(%network, group = %id, %name, "新建分组");
@@ -77,7 +79,7 @@ impl Controller {
             store.rename_group(id, &name)?;
             let params = json!({ "group": id, "from": group.name, "to": name });
             let detail = format!("分组 {} 改名为 {name}", group.name);
-            store.log_refs(now, Some(network), "group.rename", &detail, &[group_ref(id)], params)?;
+            store.log_refs(now, Some(network), action::GROUP_RENAME, &detail, &[group_ref(id)], params)?;
             tracing::info!(%network, group = %id, from = %group.name, to = %name, "分组改名");
             Ok::<_, Error>(())
         })?;
@@ -97,7 +99,8 @@ impl Controller {
         let deleted = inner.store.atomically(|store| {
             let group = require_group(store, network, id)?;
             refuse_builtin(&group)?;
-            let nodes: Vec<NodeRef> = store.nodes(network)?.iter().filter(|node| node.groups.contains(&id)).map(node_ref).collect();
+            let nodes: Vec<NodeRef> =
+                store.nodes(network)?.iter().filter(|node| node.groups.contains(&id)).map(NodeRecord::to_ref).collect();
             let rules: Vec<Rule> = store.rules(network)?.into_iter().filter(|rule| rule.src.id == id || rule.dst.id == id).collect();
             let tokens = store.pending_tokens_with_group(id)?;
             for rule in &rules {
@@ -115,7 +118,7 @@ impl Controller {
                 "删除分组 {}：从 {node_count} 个节点上去掉，删掉 {rule_count} 条规则，从 {token_count} 个注册令牌上去掉",
                 group.name
             );
-            store.log_refs(now, Some(network), "group.delete", &detail, &refs, params)?;
+            store.log_refs(now, Some(network), action::GROUP_DELETE, &detail, &refs, params)?;
             Ok::<_, Error>(DeletedGroup { id, name: group.name, nodes, rules, tokens })
         })?;
         tracing::info!(%network, group = %id, name = %deleted.name, nodes = deleted.nodes.len(), rules = deleted.rules.len(), "删除分组");
@@ -206,7 +209,7 @@ impl Controller {
             let detail = format!("分组 {}：{}", group.name, clauses.join("，"));
             let changed: BTreeSet<NodeId> = added.iter().chain(&removed).map(|node| node.id).collect();
             let refs: Vec<LogRef> = std::iter::once(group_ref(id)).chain(changed.iter().map(|&node| LogRef::node(node))).collect();
-            store.log_refs(now, Some(network), "group.members", &detail, &refs, params)?;
+            store.log_refs(now, Some(network), action::GROUP_MEMBERS, &detail, &refs, params)?;
             Ok::<_, Error>(changed)
         })?;
         if !changed.is_empty() {
@@ -242,7 +245,7 @@ pub(super) fn group_view(view: &NetworkView, group: &GroupRecord) -> Group {
         id: group.id,
         name: group.name.clone(),
         builtin: group.builtin,
-        nodes: members.map(node_ref).collect(),
+        nodes: members.map(NodeRecord::to_ref).collect(),
         rules: view.rules.iter().filter(|rule| rule.src.id == group.id || rule.dst.id == group.id).cloned().collect(),
     }
 }

@@ -24,7 +24,7 @@ use std::time::Instant;
 
 use i3t_model::admin::{
     ForcedUpdates, LogRef, NetworkId, NodeUpdate, PackageInfo, PackageState, PausedVersion, ReleaseCause, ReleaseInfo, SkipCause,
-    SkippedUpdate, Timestamp, UpdateCounts, UpdateFailure, UpdateOrder, UpdateOverview, UpdateSettings,
+    SkippedUpdate, Timestamp, UpdateCounts, UpdateFailure, UpdateOrder, UpdateOverview, UpdateSettings, action,
 };
 use i3t_model::update::{Artifact, FailureKind, Manifest, Platform, SignedManifest, UpdateCause, UpdateStatus, UpdateTiming, Version};
 use i3t_proto::NodeId;
@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::rollout::{Forced, Turn};
-use super::{Controller, Inner, node_ref};
+use super::{Controller, Inner};
 use crate::error::{Entity, Error, error_chain};
 use crate::release::{self, DEFAULT_SOURCE, FetchError, Source};
 use crate::store::{NodeRecord, Store};
@@ -301,7 +301,7 @@ impl Controller {
             let source = after.source.as_deref().unwrap_or(DEFAULT_SOURCE);
             let detail = format!("自动更新 {}，发布源 {source}", if after.auto_update { "开" } else { "关" });
             let params = json!({ "auto_update": after.auto_update, "source": source, "source_is_default": after.source.is_none() });
-            inner.store.log(now, None, "update.settings", &detail, params)?;
+            inner.store.log(now, None, action::UPDATE_SETTINGS, &detail, params)?;
             tracing::info!(auto_update = after.auto_update, source = after.source.as_deref().unwrap_or(DEFAULT_SOURCE), "更新的设置变了");
             let source_changed = after.source != before.source;
             inner.updates.settings = after;
@@ -385,7 +385,7 @@ impl Controller {
         inner.updates.paused.retain(|paused| paused.version != *version);
         let now = inner.clock.now();
         write_meta(&inner.store, PAUSED_META, &inner.updates.paused)?;
-        inner.store.log(now, None, "update.resume", &format!("继续版本 {version} 的自动更新"), json!({ "version": version }))?;
+        inner.store.log(now, None, action::UPDATE_RESUME, &format!("继续版本 {version} 的自动更新"), json!({ "version": version }))?;
         tracing::info!(%version, "管理员继续了这个版本的自动更新");
         inner.roll_out()?;
         self.wake_if_needed(&inner);
@@ -421,7 +421,7 @@ impl Controller {
         inner.store.log_refs(
             now,
             Some(network),
-            "update.force",
+            action::UPDATE_FORCE,
             &format!("让节点 {} 立即更新（{}）", node.name, describe_timing(timing)),
             &[LogRef::node(node.id)],
             json!({ "node": node.id, "node_name": node.name, "timing": timing }),
@@ -449,7 +449,7 @@ impl Controller {
             for node in inner.store.nodes(network.id)? {
                 match inner.cannot_force(&node) {
                     Some(Blocked { cause, error }) => {
-                        outcome.skipped.push(SkippedUpdate { node: node_ref(&node), reason: error.to_string(), cause: Some(cause) });
+                        outcome.skipped.push(SkippedUpdate { node: node.to_ref(), reason: error.to_string(), cause: Some(cause) });
                     }
                     None => {
                         let node = inner.forget_update_failure(node)?;
@@ -464,12 +464,12 @@ impl Controller {
         let now = inner.clock.now();
         let detail = format!("让全部节点立即更新（{}）：{} 个节点", describe_timing(timing), accepted.len());
         let params = json!({ "timing": timing, "nodes": accepted.len(), "skipped": outcome.skipped.len() });
-        inner.store.log(now, None, "update.force_all", &detail, params)?;
+        inner.store.log(now, None, action::UPDATE_FORCE_ALL, &detail, params)?;
         tracing::info!(?timing, nodes = accepted.len(), skipped = outcome.skipped.len(), "管理员让全部节点立即更新");
         inner.roll_out()?;
         for node in &accepted {
             let ordered = inner.live.get(&node.id).and_then(|live| live.order.as_ref()).is_some_and(|order| order.timing == timing);
-            if ordered { outcome.ordered.push(node_ref(node)) } else { outcome.queued.push(node_ref(node)) }
+            if ordered { outcome.ordered.push(node.to_ref()) } else { outcome.queued.push(node.to_ref()) }
         }
         self.wake_if_needed(&inner);
         Ok(outcome)
@@ -549,7 +549,7 @@ impl Inner {
                     self.store.log(
                         now,
                         None,
-                        "update.release",
+                        action::UPDATE_RELEASE,
                         &format!("发布源上最新的正式版是 {version}"),
                         json!({ "version": version }),
                     )?;
@@ -637,7 +637,15 @@ impl Inner {
             UpdateStatus::Idle | UpdateStatus::Downloading { .. } => {
                 tracing::debug!(node = %node.id, name = %node.name, status = %described, "节点的更新进度")
             }
-            _ => tracing::info!(node = %node.id, name = %node.name, status = %described, "节点的更新进度变了"),
+            UpdateStatus::Verifying { .. }
+            | UpdateStatus::SelfCheck { .. }
+            | UpdateStatus::WaitingForIdle { .. }
+            | UpdateStatus::Draining { .. }
+            | UpdateStatus::Installing { .. }
+            | UpdateStatus::Restarting { .. }
+            | UpdateStatus::Confirmed { .. }
+            | UpdateStatus::Failed { .. }
+            | UpdateStatus::Unknown => tracing::info!(node = %node.id, name = %node.name, status = %described, "节点的更新进度变了"),
         }
         live.update = Some(status.clone());
         let UpdateStatus::Failed { version, kind, reason, cause } = status else {
@@ -690,7 +698,7 @@ impl Inner {
             tracing::warn!(node = %node.id, name = %node.name, %version, "controller 没有让这个节点装过这个版本，它的失败不暂停自动更新");
             let detail =
                 format!("节点 {} 说版本 {version} 在它那里不能用（{reason}）；controller 没有让它装过这个版本，不因此暂停", node.name);
-            self.store.log_refs(now, Some(node.network), "update.failure", &detail, &[LogRef::node(node.id)], params)?;
+            self.store.log_refs(now, Some(node.network), action::UPDATE_FAILURE, &detail, &[LogRef::node(node.id)], params)?;
             return Ok(());
         }
         self.updates.offered.remove(&node.id);
@@ -706,7 +714,7 @@ impl Inner {
             });
             write_meta(&self.store, PAUSED_META, &self.updates.paused)?;
             let detail = format!("节点 {} 更新到 {version} 失败（{reason}），暂停这个版本在这个网络里的自动更新", node.name);
-            self.store.log_refs(now, Some(node.network), "update.pause", &detail, &[LogRef::node(node.id)], params)?;
+            self.store.log_refs(now, Some(node.network), action::UPDATE_PAUSE, &detail, &[LogRef::node(node.id)], params)?;
             tracing::warn!(%version, node = %node.id, network = %node.network, "暂停这个版本在这个网络里的自动更新，等管理员看过之后继续");
         }
         Ok(())
@@ -854,7 +862,7 @@ impl Inner {
         let paused = updates.paused.iter().map(|paused| {
             Ok(PausedVersion {
                 version: paused.version.clone(),
-                node: self.store.node(paused.node)?.as_ref().map(node_ref),
+                node: self.store.node(paused.node)?.as_ref().map(NodeRecord::to_ref),
                 network: Some(paused.network),
                 reason: paused.reason.clone(),
                 at: paused.at,

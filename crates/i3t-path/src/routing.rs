@@ -25,6 +25,7 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+use i3t_model::control::Route;
 use i3t_proto::NodeId;
 use i3t_proto::backbone::LinkQuality;
 use i3t_proto::datagram::RelayPath;
@@ -47,6 +48,16 @@ pub(crate) enum PathId {
     Direct(SocketAddr),
     /// 按顺序经过这些 relay。
     Relays(RelayPath),
+}
+
+impl PathId {
+    /// 上报和管理接口里的写法。
+    pub(crate) fn to_route(self) -> Route {
+        match self {
+            Self::Direct(addr) => Route::Direct { addr },
+            Self::Relays(relays) => Route::Relay { relays: relays.as_slice().to_vec() },
+        }
+    }
 }
 
 /// 路径上的一段：从谁到谁，测出来是多少。

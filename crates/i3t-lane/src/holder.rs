@@ -90,6 +90,7 @@ impl Holder {
     /// 不再为这个对端开 lane：停掉控制 lane，空闲的全部关掉，等着的立刻失败。
     pub(crate) fn close(&mut self) {
         if let Some(control) = self.control.take() {
+            // 守控制 lane 的任务已经自己结束（lane 断了）时没有人收：要它停的也就是这个。
             let _ = control.commands.send(Command::Replace);
         }
         self.idle.clear();
@@ -98,6 +99,7 @@ impl Holder {
 
     pub(crate) fn go_away(&self) {
         if let Some(control) = &self.control {
+            // 守控制 lane 的任务已经结束（lane 断了）时没有对方可告诉，不要紧。
             let _ = control.commands.send(Command::GoAway);
         }
     }
@@ -189,6 +191,7 @@ pub(crate) fn control_arrived(inner: &Arc<Inner>, mut lane: Lane) {
         let Some(entry) = peers.get_mut(&peer) else { return inner.refuse(peer, "没有为这个节点打开 ice3proxy") };
         let holder = &mut entry.holder;
         if let Some(old) = holder.control.take() {
+            // 旧的那条的任务已经自己结束（lane 断了）时没有人收：要它停的也就是这个。
             let _ = old.commands.send(Command::Replace);
         }
         let before = holder.idle.len();

@@ -95,6 +95,15 @@ impl Network {
             _ => name,
         }
     }
+
+    /// 一个地址是不是落在网络的虚拟地址段里。
+    #[must_use]
+    pub fn is_overlay_address(&self, addr: IpAddr) -> bool {
+        match addr {
+            IpAddr::V4(v4) => self.cidr.contains(&v4),
+            IpAddr::V6(_) => false,
+        }
+    }
 }
 
 const fn default_max_relay_hops() -> u8 {
@@ -633,7 +642,7 @@ impl<const N: usize> FromStr for Hex<N> {
             return Err(InvalidHex(2 * N));
         }
         let mut bytes = [0; N];
-        for (byte, pair) in bytes.iter_mut().zip(digits.chunks_exact(2)) {
+        for (byte, pair) in bytes.iter_mut().zip(digits.as_chunks::<2>().0) {
             let text = std::str::from_utf8(pair).map_err(|_| InvalidHex(2 * N))?;
             *byte = u8::from_str_radix(text, 16).map_err(|_| InvalidHex(2 * N))?;
         }
@@ -700,14 +709,34 @@ pub enum ProxyProtocol {
     V2,
 }
 
-/// 一个地址是不是落在网络的虚拟地址段里。
-#[must_use]
-pub fn is_overlay_address(network: &Network, addr: IpAddr) -> bool {
-    match addr {
-        IpAddr::V4(v4) => network.cidr.contains(&v4),
-        IpAddr::V6(_) => false,
+impl ProxyProtocol {
+    /// 在 netmap、管理接口和命令行里的写法。
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::V1 => "v1",
+            Self::V2 => "v2",
+        }
     }
 }
+
+impl fmt::Display for ProxyProtocol {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ProxyProtocol {
+    type Err = UnknownProxyProtocol;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        [Self::V1, Self::V2].into_iter().find(|version| version.as_str() == s).ok_or_else(|| UnknownProxyProtocol(s.to_owned()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("不认识的 PROXY protocol 版本 {0:?}：可以是 v1、v2")]
+pub struct UnknownProxyProtocol(pub String);
 
 #[cfg(test)]
 mod tests {
@@ -921,10 +950,19 @@ mod tests {
     }
 
     #[test]
+    fn proxy_protocol_versions_are_written_like_their_json() {
+        for version in [ProxyProtocol::V1, ProxyProtocol::V2] {
+            assert_eq!(serde_json::to_value(version).unwrap(), version.as_str());
+            assert_eq!(version.to_string().parse(), Ok(version));
+        }
+        assert_eq!("v3".parse::<ProxyProtocol>(), Err(UnknownProxyProtocol("v3".to_owned())));
+    }
+
+    #[test]
     fn overlay_addresses_are_recognised() {
         let network = minimal().network;
-        assert!(is_overlay_address(&network, "10.66.200.1".parse().unwrap()));
-        assert!(!is_overlay_address(&network, "10.67.0.1".parse().unwrap()));
-        assert!(!is_overlay_address(&network, "fd00::1".parse().unwrap()));
+        assert!(network.is_overlay_address("10.66.200.1".parse().unwrap()));
+        assert!(!network.is_overlay_address("10.67.0.1".parse().unwrap()));
+        assert!(!network.is_overlay_address("fd00::1".parse().unwrap()));
     }
 }

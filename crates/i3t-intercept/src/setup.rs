@@ -159,17 +159,30 @@ pub fn remove(machine: &mut impl Machine) -> Result<(), SetupError> {
     if !matches!(survey.table, Ok(None)) {
         keep(machine.run(Program::Nft, &args(&["-f", "-"]), Some(REMOVE_TABLE)).map(drop).map_err(SetupError::from));
     }
-    let rules = survey.rules.clone().unwrap_or_default();
-    for _ in &rules {
-        keep(delete_rule(machine).map_err(SetupError::from));
+    // 下面三项读不了的时候不知道留没留下东西：照实报错，不当作已经拆干净了。
+    match &survey.rules {
+        Ok(rules) => {
+            for _ in rules {
+                keep(delete_rule(machine).map_err(SetupError::from));
+            }
+        }
+        Err(error) => keep(Err(error.clone().into())),
     }
-    if survey.routes.as_ref().is_ok_and(|routes| routes.iter().any(|route| route.ours)) {
-        keep(machine.run(Program::Ip, &plan::flush_routes_args(), None).map(drop).map_err(SetupError::from));
+    match &survey.routes {
+        Ok(routes) if routes.iter().any(|route| route.ours) => {
+            keep(machine.run(Program::Ip, &plan::flush_routes_args(), None).map(drop).map_err(SetupError::from));
+        }
+        Ok(_) => {}
+        Err(error) => keep(Err(error.clone().into())),
     }
-    if matches!(survey.link, Ok(Some(Link { ours: true, .. }))) {
-        // 网卡一删，systemd-resolved 就忘了它上面的设置；先撤一下只是更干净，撤不了不要紧。
-        let _ = machine.run(Program::Resolvectl, &args(&["revert", LINK]), None);
-        keep(machine.run(Program::Ip, &plan::link_delete_args(), None).map(drop).map_err(SetupError::from));
+    match &survey.link {
+        Ok(Some(Link { ours: true, .. })) => {
+            // 网卡一删，systemd-resolved 就忘了它上面的设置；先撤一下只是更干净，撤不了不要紧。
+            let _ = machine.run(Program::Resolvectl, &args(&["revert", LINK]), None);
+            keep(machine.run(Program::Ip, &plan::link_delete_args(), None).map(drop).map_err(SetupError::from));
+        }
+        Ok(_) => {}
+        Err(error) => keep(Err(error.clone().into())),
     }
     first.map_or(Ok(()), Err)
 }
@@ -267,6 +280,8 @@ pub(crate) mod fake {
         pub(crate) no_resolver: bool,
         /// systemd-resolved 太旧，不认 `default-route`。
         pub(crate) old_resolver: bool,
+        /// `ip -j rule show` 的输出读不懂（被截断了）。
+        pub(crate) garbled_rules: bool,
         /// 别的网卡上的 IPv4 地址：（网卡，`地址/前缀`）。[`LINK`] 上的地址在 `link` 里。
         pub(crate) addresses: Vec<(&'static str, &'static str)>,
         /// `main` 表里的路由：（目的，网卡）。
@@ -318,6 +333,7 @@ pub(crate) mod fake {
                     }
                     Ok(String::new())
                 }
+                (Program::Ip, "-j rule show") if self.garbled_rules => Ok(r#"[{"priority":2033,"src":"all","fwm"#.to_owned()),
                 (Program::Ip, "-j rule show") => Ok(format!(
                     "[{}]",
                     self.rules
@@ -510,6 +526,19 @@ mod tests {
         assert!(fake.rules.contains(&(2033, "fwmark 0x1 lookup 7".to_owned())), "同一个优先级上别人的规则不动");
         remove(&mut fake).unwrap();
         assert_eq!(fake.rules, [(2033, "fwmark 0x1 lookup 7".to_owned())]);
+    }
+
+    #[test]
+    fn unreadable_rules_are_not_taken_for_no_rules() {
+        let mut fake = Fake { rules: vec![our_rule()], garbled_rules: true, ..Fake::default() };
+        let survey = Survey::take(&mut fake);
+        assert!(survey.rules.is_err());
+        assert!(!survey.is_clean(), "读不了的项不算拆干净了");
+        let error = install(&mut fake, &plan([10, 66, 0, 1], &[])).unwrap_err();
+        assert!(matches!(error, SetupError::Command(CommandError::Io { program: Program::Ip, .. })), "{error:?}");
+        assert_eq!(fake.rules, [our_rule()], "看不清有几条时不再加一条");
+        assert!(remove(&mut fake).is_err(), "拆的时候也照实说没有拆干净");
+        assert_eq!((fake.table.as_ref(), fake.link.as_ref()), (None, None), "别的项照样拆了");
     }
 
     #[test]

@@ -546,6 +546,7 @@ async fn tcp_to_raw<M: Meter>(
     progress: Progress<'_, M>,
 ) -> Result<(), Abort> {
     let Progress { started, meter, .. } = progress;
+    // 两个方向交出来的是同一条 ice3proxy，另一个方向先记下了的话这里不用再记。
     let _ = lane.set(raw.socket_handle());
     // 开流时还没交给内核的那一截密文不是用户的字节：先原样写出去，不计数、不过关卡。
     write_all(raw.socket(), raw.unsent()).await.map_err(Abort::Flow)?;
@@ -570,6 +571,7 @@ async fn raw_to_tcp<M: Meter>(
     progress: Progress<'_, M>,
 ) -> Result<(), Abort> {
     let Progress { started, meter, .. } = progress;
+    // 两个方向交出来的是同一条 ice3proxy，另一个方向先记下了的话这里不用再记。
     let _ = lane.set(raw.socket_handle());
     let received = Bytes::copy_from_slice(raw.received());
     let mut moved = 0;

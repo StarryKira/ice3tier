@@ -25,7 +25,7 @@ const HOSTS: &str = "/etc/hosts";
 
 /// `i3t set intercept on|off` 写好配置文件之后：打开时说这台机器上缺什么；关掉、节点又没在运行时，拆掉上次留下的东西。
 pub(crate) fn after_set(on: bool, running: bool) {
-    let t = &texts().ui;
+    let t = &texts().linux;
     let codes = i3t_lang::current().codes();
     if on {
         let missing: Vec<String> = [Program::Nft, Program::Ip]
@@ -50,7 +50,7 @@ fn remove_leftover(running: bool) {
     if !Survey::take(&mut Shell).found_any() {
         return;
     }
-    let t = &texts().ui;
+    let t = &texts().linux;
     match setup::remove(&mut Shell) {
         Ok(()) => println!("{}", t.intercept_removed),
         Err(_) => println!("{}", t.intercept_remove_failed),
@@ -60,17 +60,17 @@ fn remove_leftover(running: bool) {
 /// `/etc/hosts` 里还有 `i3t hosts --apply` 写的那一段时说一句，指出去掉它的命令。读不了这个文件就不说。
 fn names_left_behind() {
     if fs::read_to_string(HOSTS).is_ok_and(|hosts| remove_hosts_block(&hosts).is_some()) {
-        println!("{}", (texts().ui.hosts_left)(HOSTS));
+        println!("{}", (texts().linux.hosts_left)(HOSTS));
     }
 }
 
 /// `i3t intercept status`：运行着的节点说的状态，和系统里属于透明访问的每一样东西。
 /// `configured` 是配置文件里打开了没有，节点没在运行时按它算透明访问关没关。
 pub(crate) fn status(live: Option<&LiveStatus>, configured: bool) {
-    let t = &texts().ui;
+    let t = &texts().linux;
     let lang = i3t_lang::current();
     if let Some(report) = live.and_then(|live| live.intercept.as_ref()) {
-        println!("{}", lang.labelled(t.intercept, &crate::show::intercept_line(report)));
+        println!("{}", lang.labelled(texts().ui.intercept, &crate::show::intercept_line(report)));
     }
     let survey = Survey::take(&mut Shell);
     let mut fields = Fields::new(2);
@@ -81,18 +81,30 @@ pub(crate) fn status(live: Option<&LiveStatus>, configured: bool) {
         Ok(None) => {}
         Err(error) => fields.add(t.packet_filter, (t.unreadable)(&said(error))),
     }
-    for rule in survey.rules.iter().flatten() {
-        fields.add(t.policy_rule, rule.text.clone());
+    match &survey.rules {
+        Ok(rules) => {
+            for rule in rules {
+                fields.add(t.policy_rule, rule.text.clone());
+            }
+        }
+        Err(error) => fields.add(t.policy_rule, (t.unreadable)(&said(error))),
     }
-    for route in survey.routes.iter().flatten().filter(|route| route.ours) {
-        fields.add(t.route, route.text.clone());
+    match &survey.routes {
+        Ok(routes) => {
+            for route in routes.iter().filter(|route| route.ours) {
+                fields.add(t.route, route.text.clone());
+            }
+        }
+        Err(error) => fields.add(t.route, (t.unreadable)(&said(error))),
     }
-    if let Ok(Some(link)) = &survey.link
-        && link.ours
-    {
-        fields.add(t.link, format!("{} {}", i3t_intercept::LINK, lang.list(&link.addresses)));
+    match &survey.link {
+        Ok(Some(link)) if link.ours => fields.add(t.link, format!("{} {}", i3t_intercept::LINK, lang.list(&link.addresses))),
+        Ok(_) => {}
+        Err(error) => fields.add(t.link, (t.unreadable)(&said(error))),
     }
-    if survey.found_any() || survey.table.is_err() {
+    // 读不了的项也要列出来：那时说"什么都没装"不一定是真的。
+    let unreadable = survey.table.is_err() || survey.rules.is_err() || survey.routes.is_err() || survey.link.is_err();
+    if survey.found_any() || unreadable {
         fields.print();
     } else {
         println!("{}", t.nothing_installed);
@@ -121,7 +133,7 @@ fn said(error: &CommandError) -> String {
 
 /// `i3t hosts`：按最后一份 netmap 写出 `/etc/hosts` 的那一段；写进去时只换上次写的那一段，去掉时只去掉那一段，别的字节不动。
 pub(crate) fn hosts(state: &StateDir, action: HostsAction) -> anyhow::Result<()> {
-    let t = &texts().ui;
+    let t = &texts().linux;
     let command = if action == HostsAction::Remove { "i3t hosts --remove" } else { "i3t hosts --apply" };
     let failed = || (t.hosts_write_failed)(HOSTS, command);
     if action == HostsAction::Remove {
@@ -135,7 +147,7 @@ pub(crate) fn hosts(state: &StateDir, action: HostsAction) -> anyhow::Result<()>
         }
         return Ok(());
     }
-    let netmap = state.netmap()?.context(t.not_joined)?;
+    let netmap = state.netmap()?.context(texts().ui.not_joined)?;
     let names = names_of(&netmap);
     let block = hosts_block(&names);
     if action == HostsAction::Print {

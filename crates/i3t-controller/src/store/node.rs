@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use i3t_model::admin::{GroupId, NetworkId, RelaySettings, Timestamp, UpdateFailure};
+use i3t_model::admin::{GroupId, NetworkId, NodeRef, RelaySettings, Timestamp, UpdateFailure};
 use i3t_model::control::{Declared, SelfUpdate, TryOutcome};
 use i3t_model::netmap::{Attachment, ExitRole, Profile, Reach, RoutingMode};
 use i3t_proto::{NodeId, PublicKey};
@@ -92,6 +92,12 @@ pub struct NetmapState {
 }
 
 impl NodeRecord {
+    /// 管理 API 里指代它的写法：编号、现在的名字和虚拟 IP。
+    #[must_use]
+    pub fn to_ref(&self) -> NodeRef {
+        NodeRef { id: self.id, name: self.name.clone(), virtual_ip: self.virtual_ip }
+    }
+
     fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
             id: row.get::<_, SqlNode>("id")?.0,

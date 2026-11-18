@@ -136,7 +136,8 @@ pub(crate) fn render(runtime: &Runtime) -> String {
 
     lane_metrics(&mut out, &runtime.lanes.status(), &name_of);
 
-    out.gauge("i3t_update_state", "程序更新进行到哪一步", &[("state", update_label(&runtime.update.borrow()))], 1.0);
+    let update = update_label(&runtime.update.borrow());
+    out.gauge("i3t_update_state", "程序更新进行到哪一步", &[("state", &update)], 1.0);
     out.finish()
 }
 
@@ -216,21 +217,9 @@ fn snake_case(name: &str) -> String {
     snake
 }
 
-/// 更新状态在 JSON 里的 `state` 字段的写法，指标里用同一个。
-fn update_label(status: &UpdateStatus) -> &'static str {
-    match status {
-        UpdateStatus::Idle => "idle",
-        UpdateStatus::Downloading { .. } => "downloading",
-        UpdateStatus::Verifying { .. } => "verifying",
-        UpdateStatus::SelfCheck { .. } => "self_check",
-        UpdateStatus::WaitingForIdle { .. } => "waiting_for_idle",
-        UpdateStatus::Draining { .. } => "draining",
-        UpdateStatus::Installing { .. } => "installing",
-        UpdateStatus::Restarting { .. } => "restarting",
-        UpdateStatus::Confirmed { .. } => "confirmed",
-        UpdateStatus::Failed { .. } => "failed",
-        UpdateStatus::Unknown => "unknown",
-    }
+/// 更新状态在 JSON 里的 `state` 字段的写法，指标里用同一个：从 serde 取，名字只写在 [`UpdateStatus`] 的属性里。
+fn update_label(status: &UpdateStatus) -> String {
+    serde_json::to_value(status).ok().and_then(|value| value.get("state")?.as_str().map(str::to_owned)).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -259,8 +248,10 @@ mod tests {
     #[test]
     fn update_labels_match_the_json_spelling() {
         let version = Version::new(0, 2, 0);
-        for status in [UpdateStatus::Idle, UpdateStatus::WaitingForIdle { version: version.clone() }, UpdateStatus::SelfCheck { version }] {
-            assert_eq!(serde_json::to_value(&status).unwrap()["state"], update_label(&status));
-        }
+        let labels = [UpdateStatus::Idle, UpdateStatus::WaitingForIdle { version: version.clone() }, UpdateStatus::SelfCheck { version }]
+            .iter()
+            .map(update_label)
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["idle", "waiting_for_idle", "self_check"]);
     }
 }

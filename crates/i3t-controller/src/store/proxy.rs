@@ -45,24 +45,24 @@ impl ProxyRecord {
         let anonymous = self.username.is_empty() && self.password.is_empty();
         (!anonymous).then(|| Verifier::derive(self.salt, self.username.as_bytes(), self.password.as_bytes()))
     }
-}
 
-fn from_row(row: &Row<'_>) -> rusqlite::Result<ProxyRecord> {
-    Ok(ProxyRecord {
-        id: row.get("id")?,
-        node: row.get::<_, SqlNode>("node_id")?.0,
-        name: row.get("name")?,
-        bind: row.get::<_, Text<SocketAddr>>("bind")?.0,
-        protocol: row.get::<_, Json<ListenerProtocol>>("protocol")?.0,
-        exit: row.get::<_, Option<SqlNode>>("exit_id")?.map(|node| node.0),
-        username: row.get("username")?,
-        password: row.get("password")?,
-        salt: row.get("salt")?,
-        enabled: row.get("enabled")?,
-        allow_from: row.get::<_, Json<Vec<IpNet>>>("allow_from")?.0,
-        class: row.get::<_, Option<Json<Class>>>("class")?.map(|json| json.0),
-        optimistic: row.get("optimistic")?,
-    })
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get("id")?,
+            node: row.get::<_, SqlNode>("node_id")?.0,
+            name: row.get("name")?,
+            bind: row.get::<_, Text<SocketAddr>>("bind")?.0,
+            protocol: row.get::<_, Json<ListenerProtocol>>("protocol")?.0,
+            exit: row.get::<_, Option<SqlNode>>("exit_id")?.map(|node| node.0),
+            username: row.get("username")?,
+            password: row.get("password")?,
+            salt: row.get("salt")?,
+            enabled: row.get("enabled")?,
+            allow_from: row.get::<_, Json<Vec<IpNet>>>("allow_from")?.0,
+            class: row.get::<_, Option<Json<Class>>>("class")?.map(|json| json.0),
+            optimistic: row.get("optimistic")?,
+        })
+    }
 }
 
 impl Store {
@@ -102,7 +102,7 @@ impl Store {
         let mut statement = self.conn.prepare(
             "SELECT proxies.* FROM proxies JOIN nodes ON nodes.id = proxies.node_id WHERE nodes.network_id = ?1 ORDER BY proxies.id",
         )?;
-        let rows = statement.query_map(params![SqlNetwork(network)], from_row)?;
+        let rows = statement.query_map(params![SqlNetwork(network)], ProxyRecord::from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -113,7 +113,7 @@ impl Store {
     /// 读数据库失败。
     pub fn proxy(&self, network: NetworkId, id: u32) -> Result<Option<ProxyRecord>, StoreError> {
         let sql = "SELECT proxies.* FROM proxies JOIN nodes ON nodes.id = proxies.node_id WHERE nodes.network_id = ?1 AND proxies.id = ?2";
-        Ok(self.conn.query_row(sql, params![SqlNetwork(network), id], from_row).optional()?)
+        Ok(self.conn.query_row(sql, params![SqlNetwork(network), id], ProxyRecord::from_row).optional()?)
     }
 
     /// 整个替换编号是 `proxy.id` 的代理，包括它监听在哪个节点上。

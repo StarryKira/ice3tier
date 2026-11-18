@@ -1,7 +1,7 @@
 //! English.
 
 use i3t_lang::Lang;
-use i3t_model::admin::LogEntry;
+use i3t_model::admin::{LogEntry, action};
 use i3t_model::control::LaneCounts;
 use i3t_model::update::UpdateCause;
 
@@ -530,7 +530,7 @@ const UI: Ui = Ui {
 fn log(entry: &LogEntry) -> Option<String> {
     let p = Params::of(entry);
     let lang = Lang::English;
-    if entry.action == "admin.token" {
+    if entry.action == action::ADMIN_TOKEN {
         return Some("New admin token issued".to_owned());
     }
     if p.is_empty() {
@@ -549,14 +549,14 @@ fn log(entry: &LogEntry) -> Option<String> {
         _ => "when idle",
     };
     Some(match entry.action.as_str() {
-        "network.create" => format!("Network {} created ({})", p.thing("network_name", "network"), p.text("cidr")),
-        "network.update" => format!("Network {} changed", p.thing("network_name", "network")),
-        "network.delete" => format!("Network {} deleted", p.thing("network_name", "network")),
-        "node.enroll" if p.has("predecessor") => {
+        action::NETWORK_CREATE => format!("Network {} created ({})", p.thing("network_name", "network"), p.text("cidr")),
+        action::NETWORK_UPDATE => format!("Network {} changed", p.thing("network_name", "network")),
+        action::NETWORK_DELETE => format!("Network {} deleted", p.thing("network_name", "network")),
+        action::NODE_ENROLL if p.has("predecessor") => {
             format!("Node {} joined ({}), replacing {}", node(), p.text("virtual_ip"), p.thing("predecessor_name", "predecessor"))
         }
-        "node.enroll" => format!("Node {} joined ({})", node(), p.text("virtual_ip")),
-        "node.update" => {
+        action::NODE_ENROLL => format!("Node {} joined ({})", node(), p.text("virtual_ip")),
+        action::NODE_UPDATE => {
             let changes = p.changes().map(|changes| {
                 let mut out = Vec::new();
                 let get = |key: &str| changes.get(key);
@@ -591,27 +591,27 @@ fn log(entry: &LogEntry) -> Option<String> {
             });
             format!("Node {} changed: {}", node(), changes.unwrap_or_default())
         }
-        "node.delete" => format!("Node {} deleted", node()),
-        "node.succeed" => format!("Node {} replaced {}", node(), p.thing("predecessor_name", "predecessor")),
-        "node.relay.enable" => format!("Relay enabled on {}", node()),
-        "node.relay.disable" => format!("Relay disabled on {}", node()),
-        "node.relay.withdrawn" => format!("{} withdrew its declaration; relay disabled", node()),
-        "node.exit.enable" => format!("Exit enabled on {}", node()),
-        "node.exit.disable" => format!("Exit disabled on {}", node()),
-        "node.exit.withdrawn" => format!("{} withdrew its declaration; exit disabled", node()),
-        "node.forward.withdrawn" => format!("{} withdrew its declaration; port forwards disabled: {}", node(), p.text("forwards")),
-        "token.create" => format!("Enrollment token #{} created ({}…)", p.text("token"), p.text("prefix")),
-        "token.delete" => format!("Enrollment token #{} deleted", p.text("token")),
-        "rule.create" => format!("Rule #{} created: {} {} {}", p.text("rule"), src(), arrow(), dst()),
-        "rule.update" => {
+        action::NODE_DELETE => format!("Node {} deleted", node()),
+        action::NODE_SUCCEED => format!("Node {} replaced {}", node(), p.thing("predecessor_name", "predecessor")),
+        action::NODE_RELAY_ENABLE => format!("Relay enabled on {}", node()),
+        action::NODE_RELAY_DISABLE => format!("Relay disabled on {}", node()),
+        action::NODE_RELAY_WITHDRAWN => format!("{} withdrew its declaration; relay disabled", node()),
+        action::NODE_EXIT_ENABLE => format!("Exit enabled on {}", node()),
+        action::NODE_EXIT_DISABLE => format!("Exit disabled on {}", node()),
+        action::NODE_EXIT_WITHDRAWN => format!("{} withdrew its declaration; exit disabled", node()),
+        action::NODE_FORWARD_WITHDRAWN => format!("{} withdrew its declaration; port forwards disabled: {}", node(), p.text("forwards")),
+        action::TOKEN_CREATE => format!("Enrollment token #{} created ({}…)", p.text("token"), p.text("prefix")),
+        action::TOKEN_DELETE => format!("Enrollment token #{} deleted", p.text("token")),
+        action::RULE_CREATE => format!("Rule #{} created: {} {} {}", p.text("rule"), src(), arrow(), dst()),
+        action::RULE_UPDATE => {
             let state = if p.flag("enabled") { "enabled" } else { "disabled" };
             format!("Rule #{} changed: {} {} {} ({state})", p.text("rule"), src(), arrow(), dst())
         }
-        "rule.delete" => format!("Rule #{} deleted", p.text("rule")),
-        "group.create" => format!("Group {} created", group()),
-        "group.rename" => format!("Group {} renamed to {}", p.text("from"), p.text("to")),
-        "group.delete" => format!("Group {} deleted (nodes: {}, rules: {})", group(), p.text("nodes"), p.text("rules")),
-        "group.members" => {
+        action::RULE_DELETE => format!("Rule #{} deleted", p.text("rule")),
+        action::GROUP_CREATE => format!("Group {} created", group()),
+        action::GROUP_RENAME => format!("Group {} renamed to {}", p.text("from"), p.text("to")),
+        action::GROUP_DELETE => format!("Group {} deleted (nodes: {}, rules: {})", group(), p.text("nodes"), p.text("rules")),
+        action::GROUP_MEMBERS => {
             let mut clauses = Vec::new();
             for (key, verb) in [("added", "added"), ("removed", "removed")] {
                 let names = p.names(key, "node_name", "node");
@@ -621,21 +621,21 @@ fn log(entry: &LogEntry) -> Option<String> {
             }
             format!("Group {}: {}", group(), clauses.join("; "))
         }
-        "credential.create" => format!("Credential {} created", p.thing("credential_name", "credential")),
-        "credential.update" => format!("Credential {} changed", p.thing("credential_name", "credential")),
-        "credential.revoke" => format!("Credential {} revoked", p.thing("credential_name", "credential")),
-        "credential.delete" => format!("Credential {} deleted", p.thing("credential_name", "credential")),
-        "credential.exhausted" => format!("Credential {} reached its traffic limit", p.thing("credential_name", "credential")),
-        "listener.create" => format!("Listener {} created ({} {})", p.thing("listener_name", "listener"), node(), p.text("bind")),
-        "listener.update" => format!("Listener {} changed ({} {})", p.thing("listener_name", "listener"), node(), p.text("bind")),
-        "listener.delete" => format!("Listener {} deleted", p.thing("listener_name", "listener")),
-        "proxy.create" => format!("Proxy {} created ({} {})", p.thing("proxy_name", "proxy"), node(), p.text("bind")),
-        "proxy.update" => format!("Proxy {} changed ({} {})", p.thing("proxy_name", "proxy"), node(), p.text("bind")),
-        "proxy.delete" => format!("Proxy {} deleted", p.thing("proxy_name", "proxy")),
-        "forward.create" | "forward.update" | "forward.delete" => {
+        action::CREDENTIAL_CREATE => format!("Credential {} created", p.thing("credential_name", "credential")),
+        action::CREDENTIAL_UPDATE => format!("Credential {} changed", p.thing("credential_name", "credential")),
+        action::CREDENTIAL_REVOKE => format!("Credential {} revoked", p.thing("credential_name", "credential")),
+        action::CREDENTIAL_DELETE => format!("Credential {} deleted", p.thing("credential_name", "credential")),
+        action::CREDENTIAL_EXHAUSTED => format!("Credential {} reached its traffic limit", p.thing("credential_name", "credential")),
+        action::LISTENER_CREATE => format!("Listener {} created ({} {})", p.thing("listener_name", "listener"), node(), p.text("bind")),
+        action::LISTENER_UPDATE => format!("Listener {} changed ({} {})", p.thing("listener_name", "listener"), node(), p.text("bind")),
+        action::LISTENER_DELETE => format!("Listener {} deleted", p.thing("listener_name", "listener")),
+        action::PROXY_CREATE => format!("Proxy {} created ({} {})", p.thing("proxy_name", "proxy"), node(), p.text("bind")),
+        action::PROXY_UPDATE => format!("Proxy {} changed ({} {})", p.thing("proxy_name", "proxy"), node(), p.text("bind")),
+        action::PROXY_DELETE => format!("Proxy {} deleted", p.thing("proxy_name", "proxy")),
+        action::FORWARD_CREATE | action::FORWARD_UPDATE | action::FORWARD_DELETE => {
             let verb = match entry.action.as_str() {
-                "forward.create" => "created",
-                "forward.update" => "changed",
+                action::FORWARD_CREATE => "created",
+                action::FORWARD_UPDATE => "changed",
                 _ => "deleted",
             };
             format!(
@@ -647,19 +647,19 @@ fn log(entry: &LogEntry) -> Option<String> {
                 p.text("target_addr")
             )
         }
-        "pair.set" => format!("Node pair {}: keep alive {}, ice3proxy {}", pair(), switch("keep_alive"), p.text("lane")),
-        "pair.delete" => format!("Node pair {} reset to defaults", pair()),
-        "update.settings" => format!("Automatic updates {}, release source {}", switch("auto_update"), p.text("source")),
-        "update.release" => format!("New version {} on the release source", p.text("version")),
-        "update.pause" => format!("{} failed to update to {}; version paused: {}", node(), p.text("version"), cause()),
-        "update.failure" => format!("{} reports {} unusable: {}", node(), p.text("version"), cause()),
-        "update.resume" => format!("Automatic updates to {} resumed", p.text("version")),
-        "update.force" => format!("Update {} {}", node(), timing()),
-        "update.force_all" => format!("Update all nodes {}: {}", timing(), p.text("nodes")),
-        "test.start" => format!("Active test #{}: {} → {}", p.text("test"), p.thing("a_name", "a"), p.thing("b_name", "b")),
-        "test.cancel" => format!("Active test #{} cancelled", p.text("test")),
-        "test.matrix" => format!("Test matrix #{} started (pairs: {})", p.text("matrix"), p.text("pairs")),
-        "test.matrix.cancel" => "Test matrix cancelled".to_owned(),
+        action::PAIR_SET => format!("Node pair {}: keep alive {}, ice3proxy {}", pair(), switch("keep_alive"), p.text("lane")),
+        action::PAIR_DELETE => format!("Node pair {} reset to defaults", pair()),
+        action::UPDATE_SETTINGS => format!("Automatic updates {}, release source {}", switch("auto_update"), p.text("source")),
+        action::UPDATE_RELEASE => format!("New version {} on the release source", p.text("version")),
+        action::UPDATE_PAUSE => format!("{} failed to update to {}; version paused: {}", node(), p.text("version"), cause()),
+        action::UPDATE_FAILURE => format!("{} reports {} unusable: {}", node(), p.text("version"), cause()),
+        action::UPDATE_RESUME => format!("Automatic updates to {} resumed", p.text("version")),
+        action::UPDATE_FORCE => format!("Update {} {}", node(), timing()),
+        action::UPDATE_FORCE_ALL => format!("Update all nodes {}: {}", timing(), p.text("nodes")),
+        action::TEST_START => format!("Active test #{}: {} → {}", p.text("test"), p.thing("a_name", "a"), p.thing("b_name", "b")),
+        action::TEST_CANCEL => format!("Active test #{} cancelled", p.text("test")),
+        action::TEST_MATRIX => format!("Test matrix #{} started (pairs: {})", p.text("matrix"), p.text("pairs")),
+        action::TEST_MATRIX_CANCEL => "Test matrix cancelled".to_owned(),
         _ => return None,
     })
 }

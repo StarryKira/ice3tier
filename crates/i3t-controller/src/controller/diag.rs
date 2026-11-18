@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use i3t_model::admin::diag::{CreateTest, ItemState, TestItem, TestQuery, TestRequest, TestState, TestView};
-use i3t_model::admin::{LogRef, NetworkId};
+use i3t_model::admin::{LogRef, NetworkId, action};
 use i3t_model::control::diag::{TestCode, TestItems, TestProblem, TestRole};
 use i3t_model::control::{TEST_REVISION, TestOrder, TestReport, ToNode};
 use i3t_model::netmap::Reach;
@@ -30,7 +30,7 @@ pub(crate) use self::matrix::Matrix;
 use self::merge::{Inputs, Skips, final_state, merge};
 use serde_json::json;
 
-use super::{Controller, Inner, node_ref};
+use super::{Controller, Inner};
 use crate::error::{Entity, Error, InField};
 use crate::store::{NetworkRecord, NodeRecord};
 
@@ -169,7 +169,7 @@ impl Controller {
         inner.store.log_refs(
             inner.clock.now(),
             Some(network),
-            "test.cancel",
+            action::TEST_CANCEL,
             &detail,
             &[LogRef::node(view.a.id), LogRef::node(view.b.id)],
             json!({ "test": id, "a": view.a.id, "a_name": view.a.name, "b": view.b.id, "b_name": view.b.name }),
@@ -282,8 +282,8 @@ impl Inner {
         let mut view = TestView {
             id: 0,
             network: network.id,
-            a: node_ref(a),
-            b: node_ref(b),
+            a: a.to_ref(),
+            b: b.to_ref(),
             state: TestState::Running,
             request,
             started_at,
@@ -379,7 +379,7 @@ impl Inner {
             "throughput": view.request.throughput,
             "matrix": view.matrix,
         });
-        self.store.log_refs(view.started_at, Some(view.network), "test.start", &detail, &refs, params)?;
+        self.store.log_refs(view.started_at, Some(view.network), action::TEST_START, &detail, &refs, params)?;
         Ok(())
     }
 

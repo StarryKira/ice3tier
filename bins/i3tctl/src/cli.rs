@@ -613,11 +613,7 @@ fn parse_congestion(text: &str) -> Result<CongestionArg, String> {
 }
 
 fn parse_proxy_protocol(text: &str) -> Result<ProxyProtocol, String> {
-    match text {
-        "v1" => Ok(ProxyProtocol::V1),
-        "v2" => Ok(ProxyProtocol::V2),
-        _ => Err((texts().ui.must_be)("v1, v2")),
-    }
+    text.parse().map_err(|_| (texts().ui.must_be)("v1, v2"))
 }
 
 /// 字节数：数字加可选的单位 K、M、G、T（按 1000 进位，和网络流量的计法一样）。

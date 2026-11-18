@@ -100,6 +100,33 @@ pub struct LiveRoute {
     pub direct_status: Option<control::DirectStatus>,
 }
 
+/// 一个监听现在的状态（[`LiveListener::state`]）。JSON 里的写法和上报给 controller 的 [`control::ListenState`] 的 `state` 一样。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ListenerState {
+    Listening,
+    PortInUse,
+    Failed,
+    Virtual,
+    Unsupported,
+    /// 比这个程序新的节点报的、这里不认识的状态。
+    #[serde(other)]
+    Unknown,
+}
+
+impl From<&control::ListenState> for ListenerState {
+    fn from(state: &control::ListenState) -> Self {
+        match state {
+            control::ListenState::Listening { .. } => Self::Listening,
+            control::ListenState::PortInUse { .. } => Self::PortInUse,
+            control::ListenState::Failed { .. } => Self::Failed,
+            control::ListenState::Virtual => Self::Virtual,
+            control::ListenState::Unsupported { .. } => Self::Unsupported,
+            control::ListenState::Unknown => Self::Unknown,
+        }
+    }
+}
+
 /// 一个代理、一个组网入口，或者一条端口转发的监听一侧。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveListener {
@@ -107,8 +134,7 @@ pub struct LiveListener {
     pub name: String,
     /// 配置里写的绑定地址。
     pub bind: SocketAddr,
-    /// `listening`、`port_in_use`、`failed`、`virtual`、`unsupported`。
-    pub state: String,
+    pub state: ListenerState,
     /// `port_in_use`、`failed`、`unsupported` 时是原因；端口写 0 时是实际的端口。
     #[serde(default)]
     pub detail: Option<String>,
@@ -234,22 +260,15 @@ impl LiveStatus {
 }
 
 fn listener_of(name: String, bind: SocketAddr, state: &ListenState, active: usize) -> LiveListener {
-    let cause = match listen_state(state) {
-        control::ListenState::PortInUse { cause, .. }
-        | control::ListenState::Failed { cause, .. }
-        | control::ListenState::Unsupported { cause, .. } => cause,
-        control::ListenState::Listening { .. } | control::ListenState::Virtual | control::ListenState::Unknown => None,
+    let reported = listen_state(state);
+    let (detail, local, cause) = match &reported {
+        control::ListenState::Listening { local } => ((*local != bind).then(|| format!("实际绑定在 {local}")), Some(*local), None),
+        control::ListenState::PortInUse { detail, cause }
+        | control::ListenState::Failed { detail, cause }
+        | control::ListenState::Unsupported { detail, cause } => (Some(detail.clone()), None, *cause),
+        control::ListenState::Virtual | control::ListenState::Unknown => (None, None, None),
     };
-    let (state, detail, local) = match state {
-        ListenState::Listening { local } => ("listening", (*local != bind).then(|| format!("实际绑定在 {local}")), Some(*local)),
-        ListenState::PortInUse { reason } => ("port_in_use", Some(reason.clone()), None),
-        ListenState::Failed { reason, .. } => ("failed", Some(reason.clone()), None),
-        ListenState::Virtual => ("virtual", None, None),
-        ListenState::Unsupported { reason, .. } => ("unsupported", Some(reason.clone()), None),
-        // 入口模块以后可能有新的状态；这里认不出来的照实说认不出来。
-        _ => ("unknown", None, None),
-    };
-    LiveListener { name, bind, state: state.to_owned(), detail, local, cause, active, bytes_up: 0, bytes_down: 0 }
+    LiveListener { name, bind, state: ListenerState::from(&reported), detail, local, cause, active, bytes_up: 0, bytes_down: 0 }
 }
 
 /// 入口模块报的监听状态写成上报给 controller 的样子。
@@ -320,12 +339,12 @@ mod tests {
         let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let local: SocketAddr = "127.0.0.1:41000".parse().unwrap();
         let listening = listener_of("socks".into(), bind, &ListenState::Listening { local }, 2);
-        assert_eq!((listening.state.as_str(), listening.active), ("listening", 2));
+        assert_eq!((listening.state, listening.active), (ListenerState::Listening, 2));
         assert_eq!(listening.local, Some(local), "端口写 0 时说出实际的端口");
         assert!(listening.detail.unwrap().contains("41000"));
         assert_eq!(listener_of("socks".into(), local, &ListenState::Listening { local }, 0).detail, None);
         let in_use = listener_of("http".into(), bind, &ListenState::PortInUse { reason: "地址已经在用".into() }, 0);
-        assert_eq!((in_use.state.as_str(), in_use.detail.as_deref()), ("port_in_use", Some("地址已经在用")));
+        assert_eq!((in_use.state, in_use.detail.as_deref()), (ListenerState::PortInUse, Some("地址已经在用")));
         assert_eq!(in_use.cause, Some(BindCause::AddressInUse));
         let failed = listener_of(
             "http".into(),
@@ -333,9 +352,28 @@ mod tests {
             &ListenState::Failed { reason: "没有这个地址".into(), cause: ListenCause::AddressNotAvailable },
             0,
         );
-        assert_eq!((failed.state.as_str(), failed.detail.as_deref()), ("failed", Some("没有这个地址")));
+        assert_eq!((failed.state, failed.detail.as_deref()), (ListenerState::Failed, Some("没有这个地址")));
         assert_eq!(failed.cause, Some(BindCause::AddressNotAvailable));
-        assert_eq!(listener_of("forward-3".into(), bind, &ListenState::Virtual, 0).state, "virtual");
+        assert_eq!(listener_of("forward-3".into(), bind, &ListenState::Virtual, 0).state, ListenerState::Virtual);
+    }
+
+    #[test]
+    fn listener_states_are_written_like_the_reported_listen_states() {
+        let local: SocketAddr = "127.0.0.1:41000".parse().unwrap();
+        let reported = [
+            control::ListenState::Listening { local },
+            control::ListenState::PortInUse { detail: String::new(), cause: None },
+            control::ListenState::Failed { detail: String::new(), cause: None },
+            control::ListenState::Virtual,
+            control::ListenState::Unsupported { detail: String::new(), cause: None },
+            control::ListenState::Unknown,
+        ];
+        for state in &reported {
+            let written = serde_json::to_value(ListenerState::from(state)).unwrap();
+            assert_eq!(written, serde_json::to_value(state).unwrap()["state"], "{state:?}");
+            assert_eq!(serde_json::from_value::<ListenerState>(written).unwrap(), ListenerState::from(state));
+        }
+        assert_eq!(serde_json::from_value::<ListenerState>("something_new".into()).unwrap(), ListenerState::Unknown);
     }
 
     #[test]

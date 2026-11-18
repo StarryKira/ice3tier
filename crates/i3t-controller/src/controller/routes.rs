@@ -22,7 +22,7 @@ use i3t_model::control::{BackboneRow, ExitTestResult, PathDetail, Route, RouteAn
 use i3t_proto::NodeId;
 use tokio::sync::oneshot;
 
-use super::{Controller, Inner, Live, node_ref};
+use super::{Controller, Inner, Live};
 use crate::error::Error;
 use crate::relay_reach::ReachIndex;
 use crate::server::blocking;
@@ -127,7 +127,7 @@ impl Controller {
                 let kind = reported.kinds.get(&entry.peer);
                 let use_of = used.and_then(|used| used.get(&entry.peer));
                 Some(NodeRoute {
-                    peer: node_ref(peer),
+                    peer: peer.to_ref(),
                     route: entry.route.clone(),
                     rtt_ms: entry.rtt_ms,
                     age_secs,
@@ -143,7 +143,7 @@ impl Controller {
             });
             known.collect()
         });
-        Ok(RouteTable { node: node_ref(&record), online: inner.is_online(id), routes: routes.unwrap_or_default() })
+        Ok(RouteTable { node: record.to_ref(), online: inner.is_online(id), routes: routes.unwrap_or_default() })
     }
 
     /// 整个网络的路由矩阵，取自各个节点最近的上报。离线的节点留着它最后报的那一份，标成过期。
@@ -177,7 +177,7 @@ impl Controller {
         });
         Ok(RouteMatrix {
             entries: entries.collect(),
-            nodes: nodes.iter().map(|node| MatrixNode { node: node_ref(node), online: inner.is_online(node.id) }).collect(),
+            nodes: nodes.iter().map(|node| MatrixNode { node: node.to_ref(), online: inner.is_online(node.id) }).collect(),
         })
     }
 
@@ -283,7 +283,7 @@ impl Controller {
         let rows = nodes.iter().filter(|node| node.relay.is_some()).map(|node| {
             let found = freshest.remove(&node.id);
             BackboneRelay {
-                relay: node_ref(node),
+                relay: node.to_ref(),
                 online: inner.is_online(node.id),
                 state: found.as_ref().map(|(_, row)| row.state),
                 load_percent: found.as_ref().map(|(_, row)| row.load_percent),
@@ -293,7 +293,7 @@ impl Controller {
                 reach: reach.of(node.id),
             }
         });
-        let answered = answers.iter().filter_map(|(from, _)| nodes.iter().find(|node| node.id == *from).map(node_ref));
+        let answered = answers.iter().filter_map(|(from, _)| nodes.iter().find(|node| node.id == *from).map(NodeRecord::to_ref));
         Ok(BackboneView { relays: rows.collect(), answered: answered.collect() })
     }
 }
@@ -432,8 +432,8 @@ impl Inner {
 
     fn path_leg(&self, from: &NodeRecord, to: &NodeRecord, answer: Option<RouteAnswer>) -> PathLeg {
         let leg = |source, route, rtt_ms, age_secs, since| PathLeg {
-            from: node_ref(from),
-            to: node_ref(to),
+            from: from.to_ref(),
+            to: to.to_ref(),
             source,
             route,
             rtt_ms,

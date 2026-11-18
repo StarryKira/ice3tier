@@ -2,7 +2,7 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 
-use i3t_model::admin::{CreateEnrollToken, CreatedEnrollToken, EnrollTokenInfo, LogRef, NetworkId, RefKind, Timestamp};
+use i3t_model::admin::{CreateEnrollToken, CreatedEnrollToken, EnrollTokenInfo, LogRef, NetworkId, RefKind, Timestamp, action};
 use i3t_model::control::{EnrollToken, Hello, ToNode};
 use i3t_proto::{NodeId, PublicKey};
 use serde_json::json;
@@ -91,7 +91,7 @@ impl Controller {
             store.log_refs(
                 now,
                 Some(network.id),
-                "token.create",
+                action::TOKEN_CREATE,
                 &format!("生成注册令牌 #{id}（{prefix}…）"),
                 &[LogRef::new(RefKind::Token, id)],
                 json!({
@@ -123,7 +123,7 @@ impl Controller {
             store.log_refs(
                 now,
                 Some(network),
-                "token.delete",
+                action::TOKEN_DELETE,
                 &format!("收回注册令牌 #{id}"),
                 &[LogRef::new(RefKind::Token, id)],
                 params,
@@ -281,6 +281,13 @@ fn create_node(
         "predecessor": predecessor.as_ref().map(|old| old.id),
         "predecessor_name": predecessor.as_ref().map(|old| &old.name),
     });
-    store.log_refs(now, Some(network.id), "node.enroll", &detail, &[LogRef::node(id), LogRef::new(RefKind::Token, token.id)], params)?;
+    store.log_refs(
+        now,
+        Some(network.id),
+        action::NODE_ENROLL,
+        &detail,
+        &[LogRef::node(id), LogRef::new(RefKind::Token, token.id)],
+        params,
+    )?;
     Ok((node, predecessor.map(|old| old.id)))
 }

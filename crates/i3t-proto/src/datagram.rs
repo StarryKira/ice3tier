@@ -245,8 +245,8 @@ impl RouteHeader {
         };
         // 先放一个占位的编号，逐个换成帧里写的；这样不用为了几个编号去分配。
         let mut relays = [dst; MAX_RELAY_HOPS];
-        for (slot, id) in relays.iter_mut().zip(list.chunks_exact(NodeId::WIRE_LEN)) {
-            *slot = id.first_chunk().copied().and_then(NodeId::from_be_bytes).ok_or(DatagramError::ZeroNodeId)?;
+        for (slot, id) in relays.iter_mut().zip(list.as_chunks::<{ NodeId::WIRE_LEN }>().0) {
+            *slot = NodeId::from_be_bytes(*id).ok_or(DatagramError::ZeroNodeId)?;
         }
         let relays = RelayPath::new(&relays[..count]).map_err(|_| DatagramError::BadRoute)?;
         Ok((Self { dst, src, relays }, packet))

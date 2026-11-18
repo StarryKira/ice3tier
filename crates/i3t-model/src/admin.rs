@@ -30,6 +30,7 @@ use crate::netmap::{
 };
 use crate::update::{FailureKind, SelfUpdateBlocker, UpdateCause, UpdateStatus, UpdateTiming, Version};
 
+pub mod action;
 pub mod diag;
 pub mod stats;
 
@@ -1499,7 +1500,7 @@ pub struct LogEntry {
     pub at: Timestamp,
     /// 这次操作属于哪个网络；和网络无关的操作是 `null`。
     pub network: Option<NetworkId>,
-    /// 做了什么，例如 `node.rename`。
+    /// 做了什么：[`action`] 里的一个名字，例如 `node.update`。
     pub action: String,
     /// 给人看的说明。
     pub detail: String,

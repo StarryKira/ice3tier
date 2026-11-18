@@ -42,7 +42,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use i3t_crypto::{NodeKey, tls};
 use i3t_model::Netmap;
-use i3t_model::admin::{LogEntry, NetworkId, Node, NodeRef, RelayView, Status, Timestamp};
+use i3t_model::admin::{LogEntry, NetworkId, Node, RelayView, Status, Timestamp, action};
 use i3t_model::control::{
     ForwardReport, InterceptReport, LaneReport, ListenerReport, PeerUse, PerformanceReport, ProxyReport, RelayUse, ToNode,
 };
@@ -323,7 +323,7 @@ impl Controller {
         let hash = secret::sha256(token.as_bytes());
         let inner = self.lock();
         inner.store.set_meta(ADMIN_TOKEN_META, &hash)?;
-        inner.store.log(inner.clock.now(), None, "admin.token", "生成了新的管理令牌", serde_json::json!({}))?;
+        inner.store.log(inner.clock.now(), None, action::ADMIN_TOKEN, "生成了新的管理令牌", serde_json::json!({}))?;
         *self.admin_token.lock().expect("admin token mutex poisoned") = Some(hash);
         Ok(token)
     }
@@ -551,10 +551,6 @@ fn host_ip(public_addr: &str) -> Option<IpAddr> {
     let ip: IpAddr = host.trim_start_matches('[').trim_end_matches(']').parse().ok()?;
     let ip = ip.to_canonical();
     (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
-}
-
-pub(crate) fn node_ref(record: &NodeRecord) -> NodeRef {
-    NodeRef { id: record.id, name: record.name.clone(), virtual_ip: record.virtual_ip }
 }
 
 /// 操作记录里一个开关现在是开还是关。

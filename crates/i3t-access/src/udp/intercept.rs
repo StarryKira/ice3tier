@@ -36,8 +36,8 @@ const MAX_LOGGED_REFUSALS: usize = 64;
 
 /// 内核交过来的 UDP 报文从哪里收，回给应用的报文从哪里发。Linux 上由 `i3t_intercept::socket` 实现；测试里是普通的套接字。
 pub trait Diversion: Send + Sync + 'static {
-    /// 收下一个报文：内容写进 `buf`，返回（长度，应用的地址，它要发往的地址）。
-    fn recv(&self, buf: &mut [u8]) -> impl Future<Output = io::Result<(usize, SocketAddr, SocketAddr)>> + Send;
+    /// 收下一个报文：内容写进 `buf`，返回它有多长、从哪里来、原来要发往哪里。
+    fn recv(&self, buf: &mut [u8]) -> impl Future<Output = io::Result<Diverted>> + Send;
 
     /// 以 `local`（应用要发往的地址）为来源、发给 `client` 的套接字。要在 tokio 运行时里调用。
     ///
@@ -45,6 +45,17 @@ pub trait Diversion: Send + Sync + 'static {
     ///
     /// 没有权限，或者系统不给套接字。
     fn reply_socket(&self, local: SocketAddr, client: SocketAddr) -> io::Result<UdpSocket>;
+}
+
+/// 内核交过来的一个 UDP 报文（[`Diversion::recv`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Diverted {
+    /// 报文的长度，内容在调用方给的缓冲区里。
+    pub len: usize,
+    /// 发报文的应用的地址。
+    pub from: SocketAddr,
+    /// 应用原来要发往的地址：对端的虚拟 IP 和端口。
+    pub to: SocketAddr,
 }
 
 impl<C: Connector + Datagrams> Access<C> {
@@ -55,7 +66,7 @@ impl<C: Connector + Datagrams> Access<C> {
         let mut refused: HashSet<SocketAddr> = HashSet::new();
         let mut buf = vec![0; MAX_UDP_PAYLOAD];
         loop {
-            let (len, client, original) = match diversion.recv(&mut buf).await {
+            let Diverted { len, from: client, to: original } = match diversion.recv(&mut buf).await {
                 Ok(received) => received,
                 Err(error) => {
                     tracing::debug!(%error, "透明访问的 UDP 入口收报文出错");

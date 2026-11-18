@@ -82,7 +82,11 @@ pub async fn enroll(controller: &ControllerInfo, key: &NodeKey, secret: &str, he
             bail!((said.enroll_rejected)(&reason))
         }
         Some(ToNode::TryLater { reason }) => bail!((said.enroll_try_later)(&reason)),
-        Some(other) => bail!((said.enroll_unexpected)(kind_of(&other))),
+        Some(other) => {
+            // 消息的种类按它在 JSON 里的 `type` 说：名字只写在 `ToNode` 的 serde 属性里。
+            let kind = serde_json::to_value(&other).ok().and_then(|value| value.get("type")?.as_str().map(str::to_owned));
+            bail!((said.enroll_unexpected)(&kind.unwrap_or_default()))
+        }
         None => bail!(said.enroll_closed),
     }
 }
@@ -738,26 +742,6 @@ async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Result<Opti
 /// 退避时间上下浮动一半，免得一批节点在 controller 重启之后同时连回来。
 fn jittered(base: Duration) -> Duration {
     base.mul_f64(0.5 + rand::random::<f64>())
-}
-
-fn kind_of(message: &ToNode) -> &'static str {
-    match message {
-        ToNode::Snapshot(_) => "snapshot",
-        ToNode::Signal { .. } => "signal",
-        ToNode::Revoked => "revoked",
-        ToNode::Rejected { .. } => "rejected",
-        ToNode::Heartbeat => "heartbeat",
-        ToNode::Update { .. } => "update",
-        ToNode::UpdateCancel => "update_cancel",
-        ToNode::PackageChunk { .. } => "package_chunk",
-        ToNode::PackageUnavailable { .. } => "package_unavailable",
-        ToNode::RouteQuery { .. } => "route_query",
-        ToNode::TryLater { .. } => "try_later",
-        ToNode::BackboneQuery { .. } => "backbone_query",
-        ToNode::Test(_) => "test",
-        ToNode::TestEnd { .. } => "test_end",
-        ToNode::ExitTest { .. } => "exit_test",
-    }
 }
 
 /// 测试用的假 controller，本 crate 里别的模块的测试也用它。

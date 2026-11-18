@@ -79,8 +79,8 @@ impl Request {
         };
         let mut out = [0; REQUEST_LEN];
         out[0] = op;
-        for (slot, word) in out[8..].chunks_exact_mut(8).zip(words) {
-            slot.copy_from_slice(&word.to_be_bytes());
+        for (slot, word) in out[8..].as_chunks_mut::<8>().0.iter_mut().zip(words) {
+            *slot = word.to_be_bytes();
         }
         out
     }

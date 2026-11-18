@@ -6,8 +6,6 @@
 mod bbr;
 mod meter;
 
-use std::fmt;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use i3t_model::netmap::Congestion;
@@ -37,12 +35,17 @@ impl Algorithm {
     /// （`i3tctl pair set … --congestion`），它盖过这里。
     pub(crate) const ENV: &str = "I3T_CONGESTION";
 
-    /// 环境变量 [`Self::ENV`] 指定的那一种；没有设置或者值看不懂时用默认的。
+    /// 环境变量 [`Self::ENV`] 指定的那一种（写法同 [`Congestion`]）；没有设置或者值看不懂时用默认的。
     pub(crate) fn from_env() -> Self {
         let Ok(value) = std::env::var(Self::ENV) else { return Self::default() };
-        value.parse().unwrap_or_else(|_| {
+        Self::from_env_value(&value)
+    }
+
+    /// 环境变量 [`Self::ENV`] 的值是 `value` 时用哪一种：看不懂时用默认的，记一行日志。
+    fn from_env_value(value: &str) -> Self {
+        value.parse::<Congestion>().map(Self::from).unwrap_or_else(|_| {
             let fallback = Self::default();
-            tracing::warn!(%value, %fallback, "环境变量 {} 的值不是 cubic 或 bbr，改用默认的拥塞控制", Self::ENV);
+            tracing::warn!(%value, fallback = %Congestion::from(fallback), "环境变量 {} 的值不是 cubic 或 bbr，改用默认的拥塞控制", Self::ENV);
             fallback
         })
     }
@@ -52,13 +55,6 @@ impl Algorithm {
         match self {
             Self::Cubic => Arc::new(Metered::new(self, Arc::new(CubicConfig::default()))),
             Self::Bbr => Arc::new(Metered::new(self, Arc::new(BbrConfig))),
-        }
-    }
-
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Cubic => "cubic",
-            Self::Bbr => "bbr",
         }
     }
 }
@@ -72,22 +68,13 @@ impl From<Congestion> for Algorithm {
     }
 }
 
-impl fmt::Display for Algorithm {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// 不认识的拥塞控制名字。
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("不认识的拥塞控制 {0:?}，可以是 cubic 或 bbr")]
-pub(crate) struct UnknownAlgorithm(String);
-
-impl FromStr for Algorithm {
-    type Err = UnknownAlgorithm;
-
-    fn from_str(name: &str) -> Result<Self, Self::Err> {
-        [Self::Cubic, Self::Bbr].into_iter().find(|algorithm| algorithm.as_str() == name).ok_or_else(|| UnknownAlgorithm(name.to_owned()))
+/// 日志和对外报告里按 [`Congestion`] 的写法说是哪一种。
+impl From<Algorithm> for Congestion {
+    fn from(algorithm: Algorithm) -> Self {
+        match algorithm {
+            Algorithm::Bbr => Self::Bbr,
+            Algorithm::Cubic => Self::Cubic,
+        }
     }
 }
 
@@ -96,10 +83,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn names_round_trip() {
-        for algorithm in [Algorithm::Cubic, Algorithm::Bbr] {
-            assert_eq!(algorithm.to_string().parse(), Ok(algorithm));
+    fn names_are_read_like_the_netmap_setting_and_an_unknown_one_falls_back_to_the_default() {
+        for congestion in [Congestion::Cubic, Congestion::Bbr] {
+            assert_eq!(Congestion::from(Algorithm::from_env_value(congestion.as_str())), congestion);
         }
-        assert_eq!("reno".parse::<Algorithm>(), Err(UnknownAlgorithm("reno".to_owned())));
+        assert_eq!(Algorithm::from_env_value("reno"), Algorithm::default());
+        assert_eq!(Congestion::from(Algorithm::default()), Congestion::Bbr);
     }
 }

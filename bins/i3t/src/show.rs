@@ -5,7 +5,7 @@ use std::time::Duration;
 use i3t_agent::config::Config;
 use i3t_agent::ping::{PingOutcome, PingReport, RelayName};
 use i3t_agent::state::StateDir;
-use i3t_agent::status::{Link, LiveListener, LiveStatus};
+use i3t_agent::status::{Link, ListenerState, LiveListener, LiveStatus};
 use i3t_lang::table::{Fields, Table};
 use i3t_lang::{Lang, NONE, optional};
 use i3t_model::control::{BindCause, InterceptReport, InterceptState, LaneReport, Route};
@@ -128,14 +128,14 @@ fn listen_state(listener: &LiveListener) -> String {
     let (t, lang) = context();
     let codes = lang.codes();
     let detail = || listener.detail.clone().unwrap_or_default();
-    match listener.state.as_str() {
-        "listening" => listener.local.map_or_else(|| t.listening.to_owned(), |local| (t.listening_on)(&local.to_string())),
-        "virtual" => t.on_virtual_ip.to_owned(),
-        "port_in_use" => (codes.bind_cause)(BindCause::AddressInUse).to_owned(),
-        "failed" | "unsupported" => {
+    match listener.state {
+        ListenerState::Listening => listener.local.map_or_else(|| t.listening.to_owned(), |local| (t.listening_on)(&local.to_string())),
+        ListenerState::Virtual => t.on_virtual_ip.to_owned(),
+        ListenerState::PortInUse => (codes.bind_cause)(BindCause::AddressInUse).to_owned(),
+        ListenerState::Failed | ListenerState::Unsupported => {
             listener.cause.map_or_else(|| lang.labelled(t.not_bound, &detail()), |cause| (codes.bind_cause)(cause).to_owned())
         }
-        _ => t.unknown.to_owned(),
+        ListenerState::Unknown => t.unknown.to_owned(),
     }
 }
 
@@ -328,10 +328,10 @@ mod tests {
     #[test]
     fn listen_states_read_from_their_cause_when_the_node_gave_one() {
         let (t, lang) = context();
-        let listener = |state: &str, cause, detail: &str| LiveListener {
+        let listener = |state, cause, detail: &str| LiveListener {
             name: "socks".into(),
             bind: "127.0.0.1:1080".parse().unwrap(),
-            state: state.into(),
+            state,
             detail: Some(detail.into()),
             local: None,
             cause,
@@ -339,9 +339,9 @@ mod tests {
             bytes_up: 0,
             bytes_down: 0,
         };
-        let denied = listen_state(&listener("failed", Some(BindCause::PermissionDenied), "Permission denied (os error 13)"));
+        let denied = listen_state(&listener(ListenerState::Failed, Some(BindCause::PermissionDenied), "Permission denied (os error 13)"));
         assert_eq!(denied, (lang.codes().bind_cause)(BindCause::PermissionDenied));
-        let older = listen_state(&listener("failed", None, "boom"));
+        let older = listen_state(&listener(ListenerState::Failed, None, "boom"));
         assert!(older.contains("boom") && older.contains(t.not_bound), "旧版本的节点只给原话：{older}");
     }
 }

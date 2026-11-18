@@ -415,26 +415,35 @@ fn raise_open_file_limit() {
 
 /// 收到 Ctrl-C，或者（Unix 上）收到 SIGTERM 时完成。
 async fn shutdown_signal() {
-    let interrupt = tokio::signal::ctrl_c();
+    let interrupt = interrupted(tokio::signal::ctrl_c());
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
         match signal(SignalKind::terminate()) {
             Ok(mut terminate) => {
                 tokio::select! {
-                    _ = interrupt => {}
+                    () = interrupt => {}
                     _ = terminate.recv() => {}
                 }
             }
             Err(err) => {
                 tracing::warn!("装不上 SIGTERM 的处理（{err}），只响应 Ctrl-C");
-                let _ = interrupt.await;
+                interrupt.await;
             }
         }
     }
     #[cfg(not(unix))]
-    {
-        let _ = interrupt.await;
+    interrupt.await;
+}
+
+/// 等 Ctrl-C（`ctrl_c` 是 [`tokio::signal::ctrl_c`] 的结果）。
+///
+/// 处理装不上时它立刻以错误结束；把这当作收到了信号，节点一启动就会停下，日志里还什么都没有。
+/// 所以记下原因，然后一直等：Unix 上 SIGTERM 照样能让节点停下。
+async fn interrupted(ctrl_c: impl Future<Output = std::io::Result<()>>) {
+    if let Err(error) = ctrl_c.await {
+        tracing::error!(%error, "装不上 Ctrl-C 的处理，Ctrl-C 停不了节点");
+        std::future::pending::<()>().await;
     }
 }
 
@@ -467,6 +476,14 @@ mod tests {
     use i3t_lang::cli::{CLAP_ENGLISH, all_help, has_chinese, try_parse_from};
 
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_ctrl_c_handler_that_cannot_be_installed_does_not_stop_the_node() {
+        let hour = std::time::Duration::from_secs(3600);
+        let not_installed = async { Err(std::io::Error::other("没有信号处理")) };
+        assert!(tokio::time::timeout(hour, interrupted(not_installed)).await.is_err(), "装不上处理不等于收到了 Ctrl-C");
+        tokio::time::timeout(hour, interrupted(async { Ok(()) })).await.expect("收到 Ctrl-C 就停");
+    }
 
     #[test]
     fn the_help_of_every_command_is_written_in_each_language_without_the_other() {

@@ -1,7 +1,7 @@
 //! 简体中文。
 
 use i3t_lang::Lang;
-use i3t_model::admin::LogEntry;
+use i3t_model::admin::{LogEntry, action};
 use i3t_model::control::LaneCounts;
 use i3t_model::update::UpdateCause;
 
@@ -517,7 +517,7 @@ const UI: Ui = Ui {
 fn log(entry: &LogEntry) -> Option<String> {
     let p = Params::of(entry);
     let lang = Lang::ZhCn;
-    if entry.action == "admin.token" {
+    if entry.action == action::ADMIN_TOKEN {
         return Some("生成新的管理令牌".to_owned());
     }
     if p.is_empty() {
@@ -535,14 +535,14 @@ fn log(entry: &LogEntry) -> Option<String> {
         _ => "空闲时",
     };
     Some(match entry.action.as_str() {
-        "network.create" => format!("新建网络 {}（{}）", p.thing("network_name", "network"), p.text("cidr")),
-        "network.update" => format!("修改网络 {}", p.thing("network_name", "network")),
-        "network.delete" => format!("删除网络 {}", p.thing("network_name", "network")),
-        "node.enroll" if p.has("predecessor") => {
+        action::NETWORK_CREATE => format!("新建网络 {}（{}）", p.thing("network_name", "network"), p.text("cidr")),
+        action::NETWORK_UPDATE => format!("修改网络 {}", p.thing("network_name", "network")),
+        action::NETWORK_DELETE => format!("删除网络 {}", p.thing("network_name", "network")),
+        action::NODE_ENROLL if p.has("predecessor") => {
             format!("{} 加入（{}），继任 {}", node(), p.text("virtual_ip"), p.thing("predecessor_name", "predecessor"))
         }
-        "node.enroll" => format!("{} 加入（{}）", node(), p.text("virtual_ip")),
-        "node.update" => {
+        action::NODE_ENROLL => format!("{} 加入（{}）", node(), p.text("virtual_ip")),
+        action::NODE_UPDATE => {
             let changes = p.changes().map(|changes| {
                 let mut out = Vec::new();
                 let get = |key: &str| changes.get(key);
@@ -577,27 +577,27 @@ fn log(entry: &LogEntry) -> Option<String> {
             });
             format!("修改节点 {}：{}", node(), changes.unwrap_or_default())
         }
-        "node.delete" => format!("删除节点 {}", node()),
-        "node.succeed" => format!("{} 继任 {}", node(), p.thing("predecessor_name", "predecessor")),
-        "node.relay.enable" => format!("启用中继：{}", node()),
-        "node.relay.disable" => format!("停用中继：{}", node()),
-        "node.relay.withdrawn" => format!("{} 撤回声明，中继已停用", node()),
-        "node.exit.enable" => format!("启用出口：{}", node()),
-        "node.exit.disable" => format!("停用出口：{}", node()),
-        "node.exit.withdrawn" => format!("{} 撤回声明，出口已停用", node()),
-        "node.forward.withdrawn" => format!("{} 撤回声明，{} 条端口转发已停用", node(), p.text("forwards")),
-        "token.create" => format!("新建注册令牌 #{}（{}…）", p.text("token"), p.text("prefix")),
-        "token.delete" => format!("删除注册令牌 #{}", p.text("token")),
-        "rule.create" => format!("新建规则 #{} {} {} {}", p.text("rule"), src(), arrow(), dst()),
-        "rule.update" => {
+        action::NODE_DELETE => format!("删除节点 {}", node()),
+        action::NODE_SUCCEED => format!("{} 继任 {}", node(), p.thing("predecessor_name", "predecessor")),
+        action::NODE_RELAY_ENABLE => format!("启用中继：{}", node()),
+        action::NODE_RELAY_DISABLE => format!("停用中继：{}", node()),
+        action::NODE_RELAY_WITHDRAWN => format!("{} 撤回声明，中继已停用", node()),
+        action::NODE_EXIT_ENABLE => format!("启用出口：{}", node()),
+        action::NODE_EXIT_DISABLE => format!("停用出口：{}", node()),
+        action::NODE_EXIT_WITHDRAWN => format!("{} 撤回声明，出口已停用", node()),
+        action::NODE_FORWARD_WITHDRAWN => format!("{} 撤回声明，{} 条端口转发已停用", node(), p.text("forwards")),
+        action::TOKEN_CREATE => format!("新建注册令牌 #{}（{}…）", p.text("token"), p.text("prefix")),
+        action::TOKEN_DELETE => format!("删除注册令牌 #{}", p.text("token")),
+        action::RULE_CREATE => format!("新建规则 #{} {} {} {}", p.text("rule"), src(), arrow(), dst()),
+        action::RULE_UPDATE => {
             let state = if p.flag("enabled") { "启用" } else { "停用" };
             format!("修改规则 #{} {} {} {}（{state}）", p.text("rule"), src(), arrow(), dst())
         }
-        "rule.delete" => format!("删除规则 #{}", p.text("rule")),
-        "group.create" => format!("新建分组 {}", group()),
-        "group.rename" => format!("分组 {} 改名为 {}", p.text("from"), p.text("to")),
-        "group.delete" => format!("删除分组 {}：{} 个节点，{} 条规则", group(), p.text("nodes"), p.text("rules")),
-        "group.members" => {
+        action::RULE_DELETE => format!("删除规则 #{}", p.text("rule")),
+        action::GROUP_CREATE => format!("新建分组 {}", group()),
+        action::GROUP_RENAME => format!("分组 {} 改名为 {}", p.text("from"), p.text("to")),
+        action::GROUP_DELETE => format!("删除分组 {}：{} 个节点，{} 条规则", group(), p.text("nodes"), p.text("rules")),
+        action::GROUP_MEMBERS => {
             let mut clauses = Vec::new();
             for (key, verb) in [("added", "加入"), ("removed", "移出")] {
                 let names = p.names(key, "node_name", "node");
@@ -607,21 +607,21 @@ fn log(entry: &LogEntry) -> Option<String> {
             }
             format!("分组 {}：{}", group(), clauses.join("；"))
         }
-        "credential.create" => format!("新建凭据 {}", p.thing("credential_name", "credential")),
-        "credential.update" => format!("修改凭据 {}", p.thing("credential_name", "credential")),
-        "credential.revoke" => format!("吊销凭据 {}", p.thing("credential_name", "credential")),
-        "credential.delete" => format!("删除凭据 {}", p.thing("credential_name", "credential")),
-        "credential.exhausted" => format!("凭据 {} 流量用完", p.thing("credential_name", "credential")),
-        "listener.create" => format!("新建监听器 {}（{} {}）", p.thing("listener_name", "listener"), node(), p.text("bind")),
-        "listener.update" => format!("修改监听器 {}（{} {}）", p.thing("listener_name", "listener"), node(), p.text("bind")),
-        "listener.delete" => format!("删除监听器 {}", p.thing("listener_name", "listener")),
-        "proxy.create" => format!("新建代理 {}（{} {}）", p.thing("proxy_name", "proxy"), node(), p.text("bind")),
-        "proxy.update" => format!("修改代理 {}（{} {}）", p.thing("proxy_name", "proxy"), node(), p.text("bind")),
-        "proxy.delete" => format!("删除代理 {}", p.thing("proxy_name", "proxy")),
-        "forward.create" | "forward.update" | "forward.delete" => {
+        action::CREDENTIAL_CREATE => format!("新建凭据 {}", p.thing("credential_name", "credential")),
+        action::CREDENTIAL_UPDATE => format!("修改凭据 {}", p.thing("credential_name", "credential")),
+        action::CREDENTIAL_REVOKE => format!("吊销凭据 {}", p.thing("credential_name", "credential")),
+        action::CREDENTIAL_DELETE => format!("删除凭据 {}", p.thing("credential_name", "credential")),
+        action::CREDENTIAL_EXHAUSTED => format!("凭据 {} 流量用完", p.thing("credential_name", "credential")),
+        action::LISTENER_CREATE => format!("新建监听器 {}（{} {}）", p.thing("listener_name", "listener"), node(), p.text("bind")),
+        action::LISTENER_UPDATE => format!("修改监听器 {}（{} {}）", p.thing("listener_name", "listener"), node(), p.text("bind")),
+        action::LISTENER_DELETE => format!("删除监听器 {}", p.thing("listener_name", "listener")),
+        action::PROXY_CREATE => format!("新建代理 {}（{} {}）", p.thing("proxy_name", "proxy"), node(), p.text("bind")),
+        action::PROXY_UPDATE => format!("修改代理 {}（{} {}）", p.thing("proxy_name", "proxy"), node(), p.text("bind")),
+        action::PROXY_DELETE => format!("删除代理 {}", p.thing("proxy_name", "proxy")),
+        action::FORWARD_CREATE | action::FORWARD_UPDATE | action::FORWARD_DELETE => {
             let verb = match entry.action.as_str() {
-                "forward.create" => "新建",
-                "forward.update" => "修改",
+                action::FORWARD_CREATE => "新建",
+                action::FORWARD_UPDATE => "修改",
                 _ => "删除",
             };
             format!(
@@ -633,19 +633,19 @@ fn log(entry: &LogEntry) -> Option<String> {
                 p.text("target_addr")
             )
         }
-        "pair.set" => format!("节点对 {}：连接常驻 {}，ice3proxy {}", pair(), switch("keep_alive"), p.text("lane")),
-        "pair.delete" => format!("节点对 {} 恢复默认", pair()),
-        "update.settings" => format!("自动更新 {}，发布源 {}", switch("auto_update"), p.text("source")),
-        "update.release" => format!("发布源上有新版本 {}", p.text("version")),
-        "update.pause" => format!("{} 更新到 {} 失败，暂停这个版本：{}", node(), p.text("version"), cause()),
-        "update.failure" => format!("{} 报告 {} 不能用：{}", node(), p.text("version"), cause()),
-        "update.resume" => format!("继续 {} 的自动更新", p.text("version")),
-        "update.force" => format!("立即更新 {}（{}）", node(), timing()),
-        "update.force_all" => format!("立即更新全部节点（{}）：{} 个", timing(), p.text("nodes")),
-        "test.start" => format!("主动测试 #{}：{} → {}", p.text("test"), p.thing("a_name", "a"), p.thing("b_name", "b")),
-        "test.cancel" => format!("取消主动测试 #{}", p.text("test")),
-        "test.matrix" => format!("开始全网矩阵 #{}：{} 对", p.text("matrix"), p.text("pairs")),
-        "test.matrix.cancel" => "取消全网矩阵".to_owned(),
+        action::PAIR_SET => format!("节点对 {}：连接常驻 {}，ice3proxy {}", pair(), switch("keep_alive"), p.text("lane")),
+        action::PAIR_DELETE => format!("节点对 {} 恢复默认", pair()),
+        action::UPDATE_SETTINGS => format!("自动更新 {}，发布源 {}", switch("auto_update"), p.text("source")),
+        action::UPDATE_RELEASE => format!("发布源上有新版本 {}", p.text("version")),
+        action::UPDATE_PAUSE => format!("{} 更新到 {} 失败，暂停这个版本：{}", node(), p.text("version"), cause()),
+        action::UPDATE_FAILURE => format!("{} 报告 {} 不能用：{}", node(), p.text("version"), cause()),
+        action::UPDATE_RESUME => format!("继续 {} 的自动更新", p.text("version")),
+        action::UPDATE_FORCE => format!("立即更新 {}（{}）", node(), timing()),
+        action::UPDATE_FORCE_ALL => format!("立即更新全部节点（{}）：{} 个", timing(), p.text("nodes")),
+        action::TEST_START => format!("主动测试 #{}：{} → {}", p.text("test"), p.thing("a_name", "a"), p.thing("b_name", "b")),
+        action::TEST_CANCEL => format!("取消主动测试 #{}", p.text("test")),
+        action::TEST_MATRIX => format!("开始全网矩阵 #{}：{} 对", p.text("matrix"), p.text("pairs")),
+        action::TEST_MATRIX_CANCEL => "取消全网矩阵".to_owned(),
         _ => return None,
     })
 }

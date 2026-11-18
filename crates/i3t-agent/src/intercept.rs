@@ -37,9 +37,8 @@ pub(crate) struct Intercept {
 impl Intercept {
     /// 按 `enabled`（配置文件里的 `[intercept] enabled`）开始。装的过程在自己的任务里，状态从 [`state`](Self::state) 看。
     pub(crate) fn start(enabled: bool, netmap: watch::Receiver<Arc<Netmap>>, access: Arc<NodeAccess>, outbound: Outbound<Os>) -> Self {
-        let (state_tx, state) = watch::channel(InterceptState::Off);
         let (stop_tx, stop) = oneshot::channel();
-        let task = platform::start(enabled, netmap, access, outbound, state_tx, stop);
+        let (state, task) = platform::start(enabled, netmap, access, outbound, stop);
         Self { state, stop: Some(stop_tx), task }
     }
 
@@ -74,19 +73,21 @@ mod platform {
 
     use crate::runtime::NodeAccess;
 
+    /// 这个平台上没有透明访问：状态定下来就不会再变，发送的一端不用留着。
     pub(super) fn start(
         enabled: bool,
         _netmap: watch::Receiver<Arc<Netmap>>,
         _access: Arc<NodeAccess>,
         _outbound: Outbound<Os>,
-        state: watch::Sender<InterceptState>,
         _stop: oneshot::Receiver<()>,
-    ) -> Option<JoinHandle<()>> {
-        if enabled {
+    ) -> (watch::Receiver<InterceptState>, Option<JoinHandle<()>>) {
+        let state = if enabled {
             tracing::warn!("配置文件里打开了透明访问，这个平台上没有（只有 Linux 有），不生效");
-            state.send_replace(InterceptState::Unsupported);
-        }
-        None
+            InterceptState::Unsupported
+        } else {
+            InterceptState::Off
+        };
+        (watch::channel(state).1, None)
     }
 }
 
@@ -98,7 +99,7 @@ mod platform {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use i3t_access::Diversion;
+    use i3t_access::{Diversion, Diverted};
     use i3t_exit::{Os, Outbound};
     use i3t_intercept::machine::Shell;
     use i3t_intercept::names::Names;
@@ -122,13 +123,13 @@ mod platform {
         netmap: watch::Receiver<Arc<Netmap>>,
         access: Arc<NodeAccess>,
         outbound: Outbound<Os>,
-        state: watch::Sender<InterceptState>,
         stop: oneshot::Receiver<()>,
-    ) -> Option<JoinHandle<()>> {
+    ) -> (watch::Receiver<InterceptState>, Option<JoinHandle<()>>) {
+        let (state, receiver) = watch::channel(InterceptState::Off);
         if !enabled {
-            return Some(tokio::spawn(clean_leftover()));
+            return (receiver, Some(tokio::spawn(clean_leftover())));
         }
-        Some(tokio::spawn(supervise(Parts { netmap, access, outbound }, state, stop)))
+        (receiver, Some(tokio::spawn(supervise(Parts { netmap, access, outbound }, state, stop))))
     }
 
     /// 透明访问用到的节点的部分。
@@ -335,9 +336,9 @@ mod platform {
     struct Tproxy(UdpSocket);
 
     impl Diversion for Tproxy {
-        async fn recv(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr, SocketAddr)> {
+        async fn recv(&self, buf: &mut [u8]) -> io::Result<Diverted> {
             let diverted = socket::recv_diverted(&self.0, buf).await?;
-            Ok((diverted.len, SocketAddr::V4(diverted.from), SocketAddr::V4(diverted.to)))
+            Ok(Diverted { len: diverted.len, from: SocketAddr::V4(diverted.from), to: SocketAddr::V4(diverted.to) })
         }
 
         fn reply_socket(&self, local: SocketAddr, client: SocketAddr) -> io::Result<UdpSocket> {

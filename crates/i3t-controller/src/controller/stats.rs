@@ -23,7 +23,7 @@ use i3t_model::admin::{NetworkId, Timestamp};
 use i3t_model::control::Report;
 use i3t_proto::NodeId;
 
-use super::{Controller, Inner, node_ref};
+use super::{Controller, Inner};
 use crate::error::{Error, InField};
 use crate::store::{NodeRecord, StatPoint};
 
@@ -152,7 +152,7 @@ impl Controller {
         let inner = self.lock();
         let network = inner.require_network(network)?;
         let node = match (query.series.per_node(), query.node) {
-            (true, Some(id)) => Some(node_ref(&inner.require_node(network.id, id).in_field("node")?)),
+            (true, Some(id)) => Some(inner.require_node(network.id, id).in_field("node")?.to_ref()),
             (true, None) => return Err(Error::invalid_field("node", "required", format!("序列 {} 要写是哪个节点", query.series))),
             (false, Some(_)) => return Err(Error::invalid_field("node", "not_allowed", format!("序列 {} 是整个网络的", query.series))),
             (false, None) => None,

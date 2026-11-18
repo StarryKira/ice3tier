@@ -18,22 +18,24 @@ pub struct ForwardRecord {
     pub config: ForwardInput,
 }
 
-fn from_row(row: &Row<'_>) -> rusqlite::Result<ForwardRecord> {
-    Ok(ForwardRecord {
-        id: row.get("id")?,
-        config: ForwardInput {
-            name: row.get("name")?,
-            protocol: row.get::<_, Json<ForwardProtocol>>("protocol")?.0,
-            listen_node: row.get::<_, SqlNode>("listen_node")?.0,
-            bind: row.get::<_, Text<SocketAddr>>("bind")?.0,
-            target_node: row.get::<_, SqlNode>("target_node")?.0,
-            target_addr: row.get::<_, Text<SocketAddr>>("target_addr")?.0,
-            allow_from: row.get::<_, Json<Vec<IpNet>>>("allow_from")?.0,
-            enabled: row.get("enabled")?,
-            class: row.get::<_, Option<Json<Class>>>("class")?.map(|json| json.0),
-            proxy_protocol: row.get::<_, Option<Json<ProxyProtocol>>>("proxy_protocol")?.map(|json| json.0),
-        },
-    })
+impl ForwardRecord {
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get("id")?,
+            config: ForwardInput {
+                name: row.get("name")?,
+                protocol: row.get::<_, Json<ForwardProtocol>>("protocol")?.0,
+                listen_node: row.get::<_, SqlNode>("listen_node")?.0,
+                bind: row.get::<_, Text<SocketAddr>>("bind")?.0,
+                target_node: row.get::<_, SqlNode>("target_node")?.0,
+                target_addr: row.get::<_, Text<SocketAddr>>("target_addr")?.0,
+                allow_from: row.get::<_, Json<Vec<IpNet>>>("allow_from")?.0,
+                enabled: row.get("enabled")?,
+                class: row.get::<_, Option<Json<Class>>>("class")?.map(|json| json.0),
+                proxy_protocol: row.get::<_, Option<Json<ProxyProtocol>>>("proxy_protocol")?.map(|json| json.0),
+            },
+        })
+    }
 }
 
 impl Store {
@@ -70,7 +72,7 @@ impl Store {
     /// 读数据库失败。
     pub fn forwards(&self, network: NetworkId) -> Result<Vec<ForwardRecord>, StoreError> {
         let mut statement = self.conn.prepare("SELECT * FROM forwards WHERE network_id = ?1 ORDER BY id")?;
-        let rows = statement.query_map(params![SqlNetwork(network)], from_row)?;
+        let rows = statement.query_map(params![SqlNetwork(network)], ForwardRecord::from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -81,7 +83,7 @@ impl Store {
     /// 读数据库失败。
     pub fn forward(&self, network: NetworkId, id: u32) -> Result<Option<ForwardRecord>, StoreError> {
         let sql = "SELECT * FROM forwards WHERE network_id = ?1 AND id = ?2";
-        Ok(self.conn.query_row(sql, params![SqlNetwork(network), id], from_row).optional()?)
+        Ok(self.conn.query_row(sql, params![SqlNetwork(network), id], ForwardRecord::from_row).optional()?)
     }
 
     /// 整个替换一条转发。

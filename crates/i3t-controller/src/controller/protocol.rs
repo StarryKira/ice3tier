@@ -9,7 +9,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 
-use i3t_model::admin::LogRef;
+use i3t_model::admin::{LogRef, action};
 use i3t_model::control::{
     Hello, MAX_LOCAL_ADDRESSES, MAX_PACKAGE_CHUNK, MAX_PEER_USE, MAX_RELAY_USERS, MAX_REPORTED_SWITCHES, RelayTry, Report, RouteSwitch,
     Signal, ToController, ToNode,
@@ -308,7 +308,7 @@ impl Inner {
             tracing::warn!(node = %node.id, name = %node.name, "节点撤回了可以作为 relay 的声明，关闭它的 relay");
             let detail = format!("节点 {} 撤回了声明，中继已关闭", node.name);
             let params = json!({ "node": node.id, "node_name": node.name });
-            self.store.log_refs(now, Some(node.network), "node.relay.withdrawn", &detail, &[LogRef::node(node.id)], params)?;
+            self.store.log_refs(now, Some(node.network), action::NODE_RELAY_WITHDRAWN, &detail, &[LogRef::node(node.id)], params)?;
         }
         if node.exit.is_some() && !node.declared.exit {
             node.exit = None;
@@ -316,7 +316,7 @@ impl Inner {
             tracing::warn!(node = %node.id, name = %node.name, "节点撤回了可以作为出口的声明，关闭它的出口");
             let detail = format!("节点 {} 撤回了声明，出口已关闭", node.name);
             let params = json!({ "node": node.id, "node_name": node.name });
-            self.store.log_refs(now, Some(node.network), "node.exit.withdrawn", &detail, &[LogRef::node(node.id)], params)?;
+            self.store.log_refs(now, Some(node.network), action::NODE_EXIT_WITHDRAWN, &detail, &[LogRef::node(node.id)], params)?;
         }
         if *node != before {
             self.store.update_node(node)?;

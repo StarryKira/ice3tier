@@ -56,13 +56,12 @@ impl Reassembler {
             return None;
         }
 
-        if !self.messages.contains_key(&key) {
-            if self.messages.len() >= MAX_MESSAGES {
-                self.evict_oldest_except(key);
-            }
-            self.messages.insert(key, Partial { started: now, pieces: vec![None; count], missing: count, len: 0 });
+        // 新的报文要占一个位置：先腾出来，再放进去。
+        if self.messages.len() >= MAX_MESSAGES && !self.messages.contains_key(&key) {
+            self.evict_oldest_except(key);
         }
-        let partial = self.messages.get_mut(&key).expect("刚查过有，没有的话刚插进去");
+        let partial =
+            self.messages.entry(key).or_insert_with(|| Partial { started: now, pieces: vec![None; count], missing: count, len: 0 });
         if partial.pieces.len() != count || partial.pieces[index].is_some() {
             return None;
         }

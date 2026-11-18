@@ -206,8 +206,7 @@ impl Row {
         let (head, list) = body.split_at_checked(HEAD_LEN)?;
         let &[.., state, load_percent, _count] = head else { return None };
         let mut links = Vec::with_capacity(list.len() / LINK_LEN);
-        for entry in list.chunks_exact(LINK_LEN) {
-            let &[r0, r1, r2, r3, hi, lo, jitter_ms, loss_half_percent] = entry else { return None };
+        for &[r0, r1, r2, r3, hi, lo, jitter_ms, loss_half_percent] in list.as_chunks::<LINK_LEN>().0 {
             let relay = NodeId::from_be_bytes([r0, r1, r2, r3])?;
             if relay == origin || links.iter().any(|link: &Link| link.relay == relay) || loss_half_percent > LOSS_FULL_SCALE {
                 return None;

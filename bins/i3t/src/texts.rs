@@ -8,6 +8,8 @@ pub struct Texts {
     pub help: Help,
     pub values: Values,
     pub ui: Ui,
+    #[cfg(target_os = "linux")]
+    pub linux: Linux,
 }
 
 pub fn texts() -> &'static Texts {
@@ -170,6 +172,17 @@ pub struct Ui {
     pub receiving: &'static str,
     pub sending: &'static str,
 
+    /// 透明访问只在 Linux 上有。
+    pub intercept_linux_only: &'static str,
+    pub intercept: &'static str,
+    pub intercept_active: fn(usize, &str) -> String,
+}
+
+/// `i3t tune`、`i3t intercept status`、`i3t hosts` 和 `i3t set intercept on` 之后说的话。这些命令只在 Linux 上做事，
+/// 别的平台上只说一句只有 Linux 有（[`Ui::tune_linux_only`]、[`Ui::intercept_linux_only`]），这些文字也就只在 Linux 上编进去。
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub struct Linux {
     pub tune_title: fn(&str) -> String,
     pub tune_header: [&'static str; 5],
     pub tune_fine: &'static str,
@@ -188,6 +201,7 @@ pub struct Ui {
     pub tune_file_header: &'static str,
     pub tune_nothing: &'static str,
     pub tune_wanted: fn(usize, &str) -> String,
+    pub tune_read_failed: fn(&str) -> String,
     pub tune_persist_failed: fn(&str) -> String,
     pub tune_changed: fn(usize, &str) -> String,
     pub tune_files: fn(u64, u64) -> String,
@@ -195,10 +209,6 @@ pub struct Ui {
     pub tune_files_unknown: fn(&str) -> String,
     pub tune_rto_cap: &'static str,
     pub tune_no_rto_cap: &'static str,
-
-    /// 透明访问只在 Linux 上有。
-    pub intercept_linux_only: &'static str,
-    pub intercept: &'static str,
     /// 这台机器上缺的程序，`i3t set intercept on` 之后说。
     pub intercept_missing: fn(&str) -> String,
     pub intercept_removed: &'static str,
@@ -212,7 +222,6 @@ pub struct Ui {
     pub unreadable: fn(&str) -> String,
     pub nothing_installed: &'static str,
     pub leftover: &'static str,
-    pub intercept_active: fn(usize, &str) -> String,
     pub hosts_written: fn(usize, &str) -> String,
     /// 写 `/etc/hosts` 失败：文件，要用 sudo 再执行的命令。
     pub hosts_write_failed: fn(&str, &str) -> String,
@@ -365,6 +374,12 @@ static ZH: Texts = Texts {
         receiving: "从对端收数据",
         sending: "把标准输入发给对端",
 
+        intercept_linux_only: "透明访问只在 Linux 上有",
+        intercept: "透明访问",
+        intercept_active: |active, traffic| format!("{active} 个连接，{traffic}"),
+    },
+    #[cfg(target_os = "linux")]
+    linux: Linux {
         tune_title: |kernel| format!("内核参数（Linux {kernel}）"),
         tune_header: ["结论", "参数", "现在", "建议", "原因"],
         tune_fine: "正常",
@@ -383,6 +398,7 @@ static ZH: Texts = Texts {
         tune_file_header: "由 i3t tune --apply 写入，原因见 i3t tune 的输出。",
         tune_nothing: "没有要改的",
         tune_wanted: |count, file| format!("{count} 项建议修改。sudo i3t tune --apply：立即生效，并写进 {file}"),
+        tune_read_failed: |file| format!("读不了 {file}，什么都没改"),
         tune_persist_failed: |file| format!("已经生效，但写 {file} 失败，重启后会恢复"),
         tune_changed: |count, file| format!("改了 {count} 项，已生效，已写进 {file}"),
         tune_files: |soft, hard| format!("能同时打开的文件数：软上限 {soft}，硬上限 {hard}。i3t run 启动时会把软上限抬到硬上限"),
@@ -391,8 +407,6 @@ static ZH: Texts = Texts {
         tune_rto_cap: "TCP 重传上限：支持。ice3proxy 和 TCP 中转断网之后，路一通最多 2 秒就恢复",
         tune_no_rto_cap: "TCP 重传上限：这个内核不支持（Linux 6.15 起才有）。ice3proxy 和 TCP 中转断网之后恢复得慢，最多要再等断开时长的一半",
 
-        intercept_linux_only: "透明访问只在 Linux 上有",
-        intercept: "透明访问",
         intercept_missing: |missing| format!("这台机器上缺：{missing}"),
         intercept_removed: "拆掉了上次留下的透明访问规则",
         intercept_remove_failed: "上次留下的透明访问规则拆不掉（要 root）",
@@ -404,7 +418,6 @@ static ZH: Texts = Texts {
         unreadable: |error| format!("读不了（要 root）：{error}"),
         nothing_installed: "系统里没有透明访问装的东西",
         leftover: "节点没在运行，这些是上次留下的：下次启动时换掉，i3t set intercept off 现在就拆掉",
-        intercept_active: |active, traffic| format!("{active} 个连接，{traffic}"),
         hosts_written: |count, path| format!("{path} 里写了 {count} 个名字"),
         hosts_write_failed: |path, command| format!("写 {path}：要 root，sudo {command}"),
         hosts_removed: |path| format!("从 {path} 去掉了 i3t hosts 写的那一段"),
@@ -560,6 +573,12 @@ static EN: Texts = Texts {
         receiving: "Receiving from the peer",
         sending: "Sending stdin to the peer",
 
+        intercept_linux_only: "Transparent access is only available on Linux",
+        intercept: "Transparent access",
+        intercept_active: |active, traffic| format!("connections {active}, {traffic}"),
+    },
+    #[cfg(target_os = "linux")]
+    linux: Linux {
         tune_title: |kernel| format!("Kernel parameters (Linux {kernel})"),
         tune_header: ["VERDICT", "PARAMETER", "CURRENT", "SUGGESTED", "REASON"],
         tune_fine: "ok",
@@ -578,6 +597,7 @@ static EN: Texts = Texts {
         tune_file_header: "Written by i3t tune --apply; see i3t tune for the reasons.",
         tune_nothing: "Nothing to change",
         tune_wanted: |count, file| format!("Changes suggested: {count}. sudo i3t tune --apply applies them now and writes {file}"),
+        tune_read_failed: |file| format!("Couldn't read {file}; nothing changed"),
         tune_persist_failed: |file| format!("Applied, but writing {file} failed; a reboot reverts them"),
         tune_changed: |count, file| format!("Changed {count}, applied and written to {file}"),
         tune_files: |soft, hard| {
@@ -589,8 +609,6 @@ static EN: Texts = Texts {
         tune_no_rto_cap: "TCP retransmission cap: not supported by this kernel (Linux 6.15+). After a blackout, ice3proxy and TCP relay legs \
                           resume late, up to half the blackout's length",
 
-        intercept_linux_only: "Transparent access is only available on Linux",
-        intercept: "Transparent access",
         intercept_missing: |missing| format!("Missing on this machine: {missing}"),
         intercept_removed: "Removed transparent access rules left from the last run",
         intercept_remove_failed: "Can't remove transparent access rules left from the last run (needs root)",
@@ -602,7 +620,6 @@ static EN: Texts = Texts {
         unreadable: |error| format!("unreadable (needs root): {error}"),
         nothing_installed: "Nothing from transparent access in the system",
         leftover: "Node not running; these are left from the last run: the next start replaces them, i3t set intercept off removes them now",
-        intercept_active: |active, traffic| format!("connections {active}, {traffic}"),
         hosts_written: |count, path| format!("Names written to {path}: {count}"),
         hosts_write_failed: |path, command| format!("Writing {path}: needs root, sudo {command}"),
         hosts_removed: |path| format!("Removed the i3t hosts block from {path}"),
@@ -625,13 +642,24 @@ mod tests {
             (ui.relay_counts)(1, 1, "1 B", 1),
             (ui.handshake_failures)(1, 1, 1, 1, 1, 1),
             (ui.profile_running)("balanced", 1),
-            (ui.tune_wanted)(1, "/etc/sysctl.d/90-i3t.conf"),
-            (ui.tune_changed)(1, "/etc/sysctl.d/90-i3t.conf"),
-            (ui.tune_files)(1, 1),
-            (ui.table_summary)("table ip i3t", "intercept", 1),
             (ui.intercept_active)(1, "↑ 1 B  ↓ 1 B"),
-            (ui.hosts_written)(1, "/etc/hosts"),
             (ui.handshake_timeout)(1),
+        ];
+        for text in said {
+            assert_eq!(plural_after_one(&text), None, "{text}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn english_counts_of_the_linux_commands_read_right_for_one() {
+        let linux = &EN.linux;
+        let said = [
+            (linux.tune_wanted)(1, "/etc/sysctl.d/90-i3t.conf"),
+            (linux.tune_changed)(1, "/etc/sysctl.d/90-i3t.conf"),
+            (linux.tune_files)(1, 1),
+            (linux.table_summary)("table ip i3t", "intercept", 1),
+            (linux.hosts_written)(1, "/etc/hosts"),
         ];
         for text in said {
             assert_eq!(plural_after_one(&text), None, "{text}");

@@ -105,10 +105,7 @@ impl<S: SendStream, R: RecvStream> Pending<S, R> {
             Ok(reply) => FlowError::Refused(reply),
             Err(error) => error,
         };
-        let reason = match failure {
-            FlowError::Malformed(_) => Reason::ProtocolError,
-            _ => Reason::Cancelled,
-        };
+        let reason = failure.reset_reason();
         self.send.reset(StreamCode(reason.to_wire()));
         self.recv.stop(StreamCode(reason.to_wire()));
         Err(failure)

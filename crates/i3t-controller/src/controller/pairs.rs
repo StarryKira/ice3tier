@@ -1,6 +1,6 @@
 //! 节点对设置：连接常驻、ice3proxy（lane）和拥塞控制。
 
-use i3t_model::admin::{LaneBlock, LaneEffect, LaneOpening, LogRef, NetworkId, PairInput, PairLaneSide, PairSetting, PairView};
+use i3t_model::admin::{LaneBlock, LaneEffect, LaneOpening, LogRef, NetworkId, PairInput, PairLaneSide, PairSetting, PairView, action};
 use i3t_model::control::LANE_REVISION;
 use i3t_model::netmap::{Congestion, LaneMode};
 use i3t_proto::NodeId;
@@ -55,7 +55,7 @@ impl Controller {
             store.log_refs(
                 now,
                 Some(network),
-                "pair.set",
+                action::PAIR_SET,
                 &detail,
                 &[LogRef::node(a), LogRef::node(b)],
                 pair_params(store, a, b, params)?,
@@ -84,7 +84,7 @@ impl Controller {
             store.log_refs(
                 now,
                 Some(network),
-                "pair.delete",
+                action::PAIR_DELETE,
                 &format!("节点 #{a} 和 #{b}：去掉节点对设置"),
                 &[LogRef::node(a), LogRef::node(b)],
                 pair_params(store, a, b, json!({}))?,

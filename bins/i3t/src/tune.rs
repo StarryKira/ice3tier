@@ -101,7 +101,7 @@ pub(crate) struct Finding {
 
 /// 检查一遍。`port` 是节点的端口（配置文件里的 `port`）。
 pub(crate) fn survey(sysctl: &impl Sysctl, port: u16) -> Vec<Finding> {
-    let t = &texts().ui;
+    let t = &texts().linux;
     let check = |key: &'static str, want: Want, why: &'static str| {
         let current = sysctl.read(key);
         let verdict = match &current {
@@ -146,7 +146,7 @@ pub(crate) fn apply(sysctl: &mut impl Sysctl, findings: &[Finding]) -> anyhow::R
     let mut changed = Vec::new();
     for finding in findings {
         if let Verdict::Change(value) = &finding.verdict {
-            sysctl.write(finding.key, value).with_context(|| (texts().ui.tune_write_failed)(finding.key))?;
+            sysctl.write(finding.key, value).with_context(|| (texts().linux.tune_write_failed)(finding.key))?;
             changed.push((finding.key, value.clone()));
         }
     }
@@ -164,16 +164,28 @@ fn persisted(existing: &str, changed: &[(&'static str, String)]) -> String {
     for (key, value) in changed {
         settings.insert((*key).to_owned(), value.clone());
     }
-    let mut text = format!("# {}\n", texts().ui.tune_file_header);
+    let mut text = format!("# {}\n", texts().linux.tune_file_header);
     for (key, value) in settings {
         text.push_str(&format!("{key} = {value}\n"));
     }
     text
 }
 
+/// 记着改过的参数的那个文件现在的内容。还没有这个文件时是空的。
+///
+/// # Errors
+/// 文件在但读不了（没有权限、不是文本、是个目录）。这时不能当它是空的：接下来写进去的会盖掉以前记下的参数。
+fn read_persisted(path: &Path) -> anyhow::Result<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(error).with_context(|| (texts().linux.tune_read_failed)(&path.display().to_string())),
+    }
+}
+
 /// `i3t tune` 的全部：检查，打印，按要求修改。
 pub(crate) fn run(port: u16, apply_changes: bool) -> anyhow::Result<()> {
-    let t = &texts().ui;
+    let t = &texts().linux;
     let mut sysctl = ProcSys;
     let kernel = sysctl.read("kernel.osrelease").unwrap_or_else(|| i3t_lang::NONE.to_owned());
     println!("{}", (t.tune_title)(&kernel));
@@ -201,8 +213,9 @@ pub(crate) fn run(port: u16, apply_changes: bool) -> anyhow::Result<()> {
         println!("\n{}", (t.tune_wanted)(wanted, PERSIST_FILE));
         return Ok(());
     }
+    // 先读原来记下的：读不了时什么都不改，免得改了内核之后再把以前记下的参数整个覆盖掉。
+    let existing = read_persisted(Path::new(PERSIST_FILE))?;
     let changed = apply(&mut sysctl, &findings)?;
-    let existing = std::fs::read_to_string(PERSIST_FILE).unwrap_or_default();
     std::fs::write(PERSIST_FILE, persisted(&existing, &changed)).with_context(|| (t.tune_persist_failed)(PERSIST_FILE))?;
     println!("\n{}", (t.tune_changed)(changed.len(), PERSIST_FILE));
     Ok(())
@@ -210,13 +223,13 @@ pub(crate) fn run(port: u16, apply_changes: bool) -> anyhow::Result<()> {
 
 /// 内核能不能给 TCP 的重传定时器设上限。节点自己在 lane 和 TCP 中转的 socket 上设，不用改内核参数，这里只报告。
 fn print_rto_cap(supported: bool) {
-    let t = &texts().ui;
+    let t = &texts().linux;
     println!("{}", if supported { t.tune_rto_cap } else { t.tune_no_rto_cap });
 }
 
 /// 能同时打开的文件数。它不是内核参数，这里只报告：`i3t run` 启动时自己会把软上限抬到硬上限。
 fn print_open_file_limit() {
-    let t = &texts().ui;
+    let t = &texts().linux;
     match rlimit::Resource::NOFILE.get() {
         Ok((soft, hard)) => {
             println!("\n{}", (t.tune_files)(soft, hard));
@@ -363,6 +376,20 @@ mod tests {
         let lines: Vec<&str> = text.lines().skip(1).collect();
         assert_eq!(lines, ["net.core.rmem_max = 4194304", "net.core.wmem_max = 4194304", "net.ipv4.tcp_slow_start_after_idle = 0"]);
         assert!(text.starts_with('#'));
+    }
+
+    #[test]
+    fn only_a_missing_persisted_file_reads_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_persisted(&dir.path().join("90-i3t.conf")).unwrap(), "", "还没有记过");
+        let file = dir.path().join("written.conf");
+        std::fs::write(&file, "net.core.rmem_max = 4194304\n").unwrap();
+        assert_eq!(read_persisted(&file).unwrap(), "net.core.rmem_max = 4194304\n");
+        // 读不了的文件不能当作空的：不然接着写进去的会把以前记下的参数整个盖掉。
+        let error = read_persisted(dir.path()).unwrap_err();
+        assert!(format!("{error:#}").contains(&dir.path().display().to_string()), "{error:#}");
+        std::fs::write(&file, [0xff, 0xfe, b'\n']).unwrap();
+        assert!(read_persisted(&file).is_err(), "不是文本");
     }
 
     #[test]

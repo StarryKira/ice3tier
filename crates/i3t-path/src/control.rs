@@ -6,7 +6,7 @@
 //!
 //! 选路有两种模式（白皮书 §7.1），按 netmap 里本节点的设置（没有就用网络的默认值）：
 //!
-//! - **默认模式**：直连可用就走直连；否则只经一个 relay，按 [`relay_candidates`] 的顺序取第一个能用的；一个都用不了时
+//! - **默认模式**：直连可用就走直连；否则只经一个 relay，按 [`relay_candidates`](route::relay_candidates) 的顺序取第一个能用的；一个都用不了时
 //!   经一串 relay（`View::chain`）。每一轮都重新看，所以直连一验证通过、一个 relay 一断开，路马上跟着变。
 //! - **延迟优先**：候选路径（直连、经 1 到最大中转级数个 relay）按代价比较，规则见 [`crate::routing`]。
 //!   代价每个评估窗口（5 秒）算一次；窗口之间只看现在的路还在不在，不在了立刻换。
@@ -30,11 +30,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use i3t_crypto::{NodeKey, Signature};
+use i3t_crypto::NodeKey;
 use i3t_model::Netmap;
-use i3t_model::control::{MAX_RELAY_TRIES, RelayTry, Route, RouteCause, RouteEntry, RouteHint, Signal};
-use i3t_model::netmap::{Attachment, MAX_SHARED_RELAYS, Reach, RoutingMode};
-use i3t_proto::backbone::{Link, LinkQuality, RelayState, Row};
+use i3t_model::control::{RouteCause, RouteHint, Signal};
+use i3t_model::netmap::{Attachment, Reach, RoutingMode};
+use i3t_proto::backbone::RelayState;
 use i3t_proto::datagram::{MAX_RELAY_HOPS, RelayPath};
 use i3t_proto::probe::TestId;
 use i3t_proto::session::{Echo, Nonce, Refused};
@@ -44,25 +44,27 @@ use i3t_underlay::portmap::{GatewaySource, PortMapConfig, PortMapper};
 use i3t_underlay::{AddrQuery, ifaddr};
 use tokio::sync::{mpsc, oneshot, watch};
 
-use self::route::{Reason, RouteKey, Via, View, describe, explain, relay_candidates, relay_in_use, route_text};
-use crate::SessionLeg;
+use self::route::{Reason, RouteKey, Via, View, describe, explain, relay_in_use};
+use crate::RouteChange;
 use crate::backbone::Accepted;
 use crate::budget::Budget;
 use crate::diag::{
     DirectAttempt, HopReport, Pin, RouteDecision, Side, TestPath, TestSpec, TrainError, TrainReport, TrainRun, TrainSpec, Window,
 };
-use crate::direct::{Action, Change, DirectPath, Policy};
+use crate::direct::{DirectPath, Policy};
 use crate::matrix::Matrix;
-use crate::relays::{self, Backbone, Complaint, Identity, Leg, RelayLink, Standing, Wire};
-use crate::report::{Alternative, BackboneLink, BackboneRow, CandidateReport, LegReport, PathReport, RelayLeg};
-use crate::routing::{Candidate, Entry, PathId, Selector};
+use crate::relays::{RelayLink, Wire};
+use crate::routing::{Candidate, PathId, Selector};
 use crate::table::{self, Hop, PeerSlot, RelaySlot, Shared, Table};
 use crate::tcp::{self, TcpEvent, TcpLegHandle};
-use crate::timing::{BACKBONE_PROBE_INTERVAL, ENTRY_RELAYS, EVAL_WINDOW, MAX_TIMEOUTS, PROBE_INTERVAL, ROW_INTERVAL, Rtt, TICK};
-use crate::{RouteChange, Status};
+use crate::timing::{EVAL_WINDOW, MAX_TIMEOUTS, PROBE_INTERVAL, TICK};
 
 mod active;
+mod backbone;
+mod direct;
+mod relays;
 mod route;
+mod status;
 
 /// 多久重新看一次本机的网卡地址。
 const LOCAL_ADDRESS_REFRESH: Duration = Duration::from_secs(5);
@@ -233,7 +235,7 @@ struct PeerState {
     /// 选路规则此刻选的路。没有固定时就是 `route`；固定期间选路规则照样每一轮都选，"现在走着的 relay"这类判断看的是它，
     /// 所以测试结束之后回到的是没有这次测试时会走的那条路。
     policy_route: RouteKey,
-    /// 本节点没在用的那种选路模式此刻会选的路，给界面比较用（[`PathReport::alternative`]），不影响选路。
+    /// 本节点没在用的那种选路模式此刻会选的路，给界面比较用（[`PathReport::alternative`](crate::report::PathReport::alternative)），不影响选路。
     /// 默认模式下每个评估窗口按延迟优先的规则算一次，延迟优先模式下每一轮按默认模式的规则算。
     /// 外层是 `None`：还没有算过；里层是 `None`：那种模式此刻没有路可走。
     other_mode: Option<Option<PathId>>,
@@ -670,7 +672,7 @@ impl Control {
             peer.eager_from = match (eager.contains(&info.id), peer.eager_from) {
                 (false, _) => None,
                 (true, Some(from)) if !new_peer && !new_addresses => Some(from),
-                (true, _) => Some(now + relays::jitter(EAGER_SPREAD)),
+                (true, _) => Some(now + crate::relays::jitter(EAGER_SPREAD)),
             };
         }
         if !eager.is_empty() {
@@ -711,16 +713,6 @@ impl Control {
         self.status_refreshed = None;
     }
 
-    /// 把要认的对端和"发不发信标"告诉局域网发现。
-    fn sync_lan(&self) {
-        let lan = self.shared.lan.lock().expect("lan discovery mutex poisoned");
-        let Some(lan) = lan.as_ref() else { return };
-        // 不建立直连的节点既不找人也不让人找；只主动连接的节点照样听，但自己不出声。
-        let keys: Vec<PublicKey> = if self.allow_direct { self.peers.values().map(|peer| peer.key).collect() } else { Vec::new() };
-        lan.set_peers(&keys);
-        lan.set_announcing(self.allow_direct && !self.dial_out_only);
-    }
-
     /// 本节点自己的地址：网卡上的候选端点，端口绑在全零地址上时还有回环地址。relay 的地址里有它们的话不去试。
     fn own_addresses(&self) -> Vec<SocketAddr> {
         let local = self.shared.port.local_addr();
@@ -730,380 +722,6 @@ impl Control {
             own.extend([SocketAddr::from(([127, 0, 0, 1], local.port())), SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, local.port()))]);
         }
         own
-    }
-
-    /// 重建按来源地址认 relay 的两张表。同一个地址是几个 relay 的时，收包路径那张表里给正在用它的那个。
-    fn relay_addresses(&mut self) -> HashMap<SocketAddr, Arc<RelaySlot>> {
-        let mut by_addr: HashMap<SocketAddr, Vec<NodeId>> = HashMap::new();
-        for (&id, entry) in &self.relays {
-            for addr in entry.link.dispatch_addrs() {
-                by_addr.entry(addr).or_default().push(id);
-            }
-        }
-        let mut slots = HashMap::with_capacity(by_addr.len());
-        for (addr, ids) in &mut by_addr {
-            ids.sort_unstable();
-            let using = ids.iter().copied().find(|id| self.relays.get(id).is_some_and(|entry| entry.link.udp_target() == Some(*addr)));
-            if let Some(entry) = using.or_else(|| ids.first().copied()).and_then(|id| self.relays.get(&id)) {
-                slots.insert(*addr, Arc::clone(&entry.slot));
-            }
-        }
-        self.relay_by_addr = by_addr;
-        slots
-    }
-
-    /// 有 relay 换了在用的地址：重建按地址认 relay 的表。
-    fn sync_relay_targets(&mut self) {
-        let changed = self.relays.values_mut().fold(false, |changed, entry| entry.link.take_target_changed() | changed);
-        if changed {
-            let slots = self.relay_addresses();
-            self.shared.table_mut().relays = slots;
-        }
-    }
-
-    /// 从 `from` 来的帧是哪些 relay 的。几个 relay 都有这个地址时，正在用它的那个排在前面。
-    fn relays_at(&self, from: SocketAddr) -> Vec<NodeId> {
-        let mut ids = self.relay_by_addr.get(&from).cloned().unwrap_or_default();
-        ids.sort_by_key(|id| self.relays.get(id).is_none_or(|entry| entry.link.udp_target() != Some(from)));
-        ids
-    }
-
-    fn on_relay_frame(&mut self, from: SocketAddr, frame: &session::Frame, now: Instant) {
-        let relays_at = self.relays_at(from);
-        if relays_at.is_empty() {
-            tracing::trace!(%from, "中转会话帧不是从 netmap 里的 relay 地址来的，丢弃");
-            return;
-        }
-        // 交给有这个地址的每一个 relay：只有在等这个随机数的那个会认它（OK 还要验签名）。
-        let Self { shared, key, relays, legs, inbound, next_conn, .. } = self;
-        let who = Identity { me: shared.me, key };
-        for relay in relays_at {
-            let Some(entry) = relays.get_mut(&relay) else { continue };
-            let mut wire = LinkWire { shared, slot: &entry.slot, legs, inbound, next_conn };
-            entry.link.on_udp_frame(from, frame, now, who, &mut wire);
-        }
-        self.sync_relay_targets();
-    }
-
-    fn on_relay_refusal(&mut self, from: SocketAddr, refused: &Refused, echo: &Echo, now: Instant) {
-        // 正在用这个地址的 relay 有的话只给它；没有的话给每一个（回显对不上的不算数，见 `RelayLink::on_udp_refusal`）。
-        let mut relays_at = self.relays_at(from);
-        if let Some(&first) = relays_at.first()
-            && self.relays.get(&first).is_some_and(|entry| entry.link.udp_target() == Some(from))
-        {
-            relays_at.truncate(1);
-        }
-        let mut complaints = Vec::new();
-        let Self { shared, key, relays, legs, inbound, next_conn, .. } = self;
-        let who = Identity { me: shared.me, key };
-        for relay in relays_at {
-            let Some(entry) = relays.get_mut(&relay) else { continue };
-            let mut wire = LinkWire { shared, slot: &entry.slot, legs, inbound, next_conn };
-            if let Some(complaint) = entry.link.on_udp_refusal(refused, echo, now, who, &mut wire) {
-                complaints.push((relay, complaint));
-            }
-        }
-        for (relay, complaint) in complaints {
-            self.on_complaint(relay, complaint, now);
-        }
-        self.sync_relay_targets();
-    }
-
-    fn on_tcp(&mut self, relay: NodeId, conn: u64, event: &TcpEvent, now: Instant) {
-        // 同一个 relay 可能先后连过几次，只认现在这一条上的事件。
-        if self.legs.get(&relay).is_none_or(|leg| leg.conn != conn) {
-            return;
-        }
-        if let TcpEvent::Row(frame) = event {
-            self.on_row(relay, frame, now);
-            return;
-        }
-        let Self { shared, key, relays, legs, inbound, next_conn, .. } = self;
-        let Some(entry) = relays.get_mut(&relay) else { return };
-        let who = Identity { me: shared.me, key };
-        let complaint = match event {
-            TcpEvent::Connected(addr) => {
-                let mut wire = LinkWire { shared, slot: &entry.slot, legs, inbound, next_conn };
-                entry.link.on_tcp_connected(*addr, now, who, &mut wire);
-                None
-            }
-            TcpEvent::Frame(frame) => {
-                let mut wire = LinkWire { shared, slot: &entry.slot, legs, inbound, next_conn };
-                entry.link.on_tcp_frame(frame, now, who, &mut wire);
-                None
-            }
-            TcpEvent::Refusal(refused, echo) => {
-                let mut wire = LinkWire { shared, slot: &entry.slot, legs, inbound, next_conn };
-                entry.link.on_tcp_refusal(refused, echo, now, who, &mut wire)
-            }
-            TcpEvent::Closed => {
-                legs.remove(&relay);
-                entry.link.on_tcp_closed(now);
-                None
-            }
-            TcpEvent::Row(_) => None,
-        };
-        if let Some(complaint) = complaint {
-            self.on_complaint(relay, complaint, now);
-        }
-    }
-
-    /// relay `relay` 拨进来的第 `conn` 条 TCP 上的事（本节点的 relay 交来的，见 [`crate::backbone`]）。
-    fn on_accepted(&mut self, relay: NodeId, conn: u64, event: Accepted, now: Instant) {
-        let borrowed = self.legs.get(&relay).filter(|leg| leg.accepted() == Some(conn)).map(|leg| leg.conn);
-        match event {
-            Accepted::Opened { addr, sender } => {
-                if self.relays.contains_key(&relay) && borrowed.is_none() {
-                    tracing::debug!(%relay, %addr, conn, "这个 relay 拨进来的 TCP 上建好了它的会话，可以借来走骨干");
-                    self.inbound.insert(relay, InboundLeg { accepted: conn, addr, sender });
-                }
-            }
-            Accepted::Event(event) => match (borrowed, event) {
-                (Some(leg), event) => self.on_tcp(relay, leg, &event, now),
-                // 还没借来用的那条上来的矩阵行照样收：有没有会话、签名对不对 `on_row` 自己查。
-                (None, TcpEvent::Row(frame)) => self.on_row(relay, &frame, now),
-                (None, _) => {}
-            },
-            Accepted::Closed => {
-                if self.inbound.get(&relay).is_some_and(|leg| leg.accepted == conn) {
-                    self.inbound.remove(&relay);
-                }
-                if let Some(leg) = borrowed {
-                    self.on_tcp(relay, leg, &TcpEvent::Closed, now);
-                }
-            }
-        }
-    }
-
-    fn on_complaint(&mut self, relay: NodeId, complaint: Complaint, now: Instant) {
-        match complaint {
-            Complaint::PeerUnattached(peer) => self.mark_unattached(relay, peer, now),
-            Complaint::RouteUnavailable(next) => {
-                // 只认本节点正在用的多级路径：第一段就是 `relay`，下一个是 `next`（`next` 是它自己时表示它不肯转发多级路径）。
-                // 所以这张表的大小有上限，也就是 relay 两两组合的数目。
-                let on_route = |peer: &PeerState| {
-                    matches!(peer.route, RouteKey::Relay { path, .. }
-                        if path.first() == relay && path.as_slice().len() > 1 && (next == relay || path.as_slice().get(1) == Some(&next)))
-                };
-                if !self.peers.values().any(on_route) {
-                    tracing::debug!(%relay, %next, "relay 说多级路径走不下去，但本节点没有在走这一段，不理");
-                    return;
-                }
-                let until = now + UNATTACHED_HOLD;
-                if let Some(held) = self.broken.iter_mut().find(|(from, to, _)| (*from, *to) == (relay, next)) {
-                    held.2 = until;
-                    return;
-                }
-                tracing::info!(%relay, %next, "relay 说多级路径走不下去，这一段先不用");
-                self.broken.push((relay, next, until));
-                for peer in self.peers.values_mut().filter(|peer| on_route(peer)) {
-                    peer.hint = Some(RouteHint::RelayPathBroken);
-                }
-            }
-        }
-    }
-
-    /// relay 说 `peer` 没有挂在它上面：一段时间里先经对端挂靠的别的 relay 去找它。
-    fn mark_unattached(&mut self, relay: NodeId, peer: NodeId, now: Instant) {
-        let Some(state) = self.peers.get_mut(&peer) else { return };
-        state.unattached.retain(|(id, _)| *id != relay);
-        state.unattached.push((relay, now + UNATTACHED_HOLD));
-        state.hint = Some(RouteHint::PeerNotAttached);
-    }
-
-    /// 骨干矩阵的一行，是从 `via` 这个 relay 的会话上收到的（它自己的，或者它转来的别的 relay 的）。
-    fn on_row(&mut self, via: NodeId, frame: &Bytes, now: Instant) {
-        // 只认现在有会话的 relay 发来的：没有会话就没有核对过它的地址。
-        if self.relays.get(&via).is_none_or(|entry| entry.link.leg().is_none()) {
-            return;
-        }
-        let Some((origin, seq)) = Row::peek(frame) else { return };
-        let Some(origin_key) = self.netmap.relay(origin).map(|relay| relay.key).filter(|_| origin != self.shared.me) else { return };
-        // 不比手上的新就不用往下看了：验签名是这里唯一花钱的事。来源地址是可以伪造的，所以验的次数也有上限，
-        // 按行的主人分开算：一个 relay 不停地发新的行，花掉的只是它自己的额度。正常情况下每个 relay 几秒才有一行新的。
-        if !self.matrix.is_news(origin, seq, now) {
-            return;
-        }
-        let gate = self.row_gates.entry(origin).or_insert_with(|| RowGate::new(now));
-        if !gate.budget.take(now) {
-            tracing::debug!(%via, %origin, "这个 relay 的矩阵行来得太多，这一行不验了");
-            return;
-        }
-        let (Some((row, signature)), Some(signed)) = (Row::parse(frame), Row::signed_part(frame)) else { return };
-        if i3t_crypto::verify(&origin_key, Row::PURPOSE, signed, &Signature::from_bytes(signature)).is_err() {
-            tracing::debug!(%via, %origin, "骨干矩阵的一行签名不对，丢弃");
-            return;
-        }
-        let state = row.state;
-        if self.matrix.insert(row, frame.clone(), now) {
-            tracing::info!(relay = %origin, ?state, %via, "relay 的状态变了");
-            // 状态变了的行不等下一轮，立刻传给本节点 relay 上的会话：经它中转的节点也要尽快知道。
-            // 同一个 relay 的行转得太勤就等下一轮一起发，状态来回翻的 relay 借不了本节点放大。
-            if let Some(local) = self.shared.local_relay.get()
-                && gate.forward(now)
-            {
-                local.broadcast(frame);
-            }
-        }
-    }
-
-    fn on_signal(&mut self, from: NodeId, signal: &Signal, now: Instant) {
-        if !self.allow_direct {
-            tracing::debug!(peer = %from, "本节点不建立直连，忽略打洞信令");
-            return;
-        }
-        let Some(peer) = self.peers.get_mut(&from) else {
-            tracing::debug!(peer = %from, "信令来自不在 netmap 里的节点，忽略");
-            return;
-        };
-        let policy = direct_policy(&self.shared, self.allow_direct, self.dial_out_only, self.mode, &self.endpoints, peer, now);
-        if !policy.signal {
-            tracing::debug!(peer = %from, "本节点或者对端是只主动连接的，不参与打洞，忽略信令");
-            return;
-        }
-        // 信令是经 controller 或者已经认证的连接送来的，对端确实想和本端建立直连：把它当作活跃的，后面几轮探测才会跟上。
-        peer.slot.last_demand.touch(&self.shared.clock);
-        let actions = peer.direct.on_signal(signal, now, &policy);
-        self.perform(from, actions);
-    }
-
-    /// 对端的 PING：验签名，回 PONG，并且反过来验证它的来源地址。
-    fn on_ping(&mut self, from: SocketAddr, ping: &probe::Ping, now: Instant) {
-        let me = self.shared.me;
-        if ping.dst != me || !self.allow_direct {
-            return;
-        }
-        let Some(peer) = self.peers.get_mut(&ping.src) else {
-            tracing::trace!(%from, src = %ping.src, "PING 自称来自不在 netmap 里的节点，丢弃");
-            return;
-        };
-        if self.dial_out_only && !peer.slot.is_active(&self.shared.clock) {
-            // 只主动连接的节点不理别人主动找上来的探测，只有它自己正在连的对端除外。
-            return;
-        }
-        // 对端的候选地址来的用那个地址自己的额度；陌生地址来的先用这个对端的、再用全体的。不管签名对不对都要扣：
-        // 不验就不知道对不对。
-        let budgeted = match peer.direct.charge(from, now) {
-            Some(granted) => granted,
-            None => peer.stranger_budget.take(now) && self.verify_budget.take(now),
-        };
-        if !budgeted {
-            tracing::debug!(%from, src = %ping.src, "这个地址来的 PING 太多，这一个不验了");
-            return;
-        }
-        let message = probe::Ping::signed_message(ping.src, ping.dst, &ping.nonce);
-        if i3t_crypto::verify(&peer.key, probe::Ping::PURPOSE, &message, &Signature::from_bytes(ping.signature)).is_err() {
-            tracing::debug!(%from, src = %ping.src, "PING 的签名不对，丢弃");
-            return;
-        }
-        if peer.direct.active().is_some_and(|(addr, _)| addr == from) {
-            peer.slot.last_rx_direct.touch(&self.shared.clock);
-        }
-        let message = probe::Pong::signed_message(me, ping.src, &ping.nonce, from);
-        let signature = *self.key.sign(probe::Pong::PURPOSE, &message).as_bytes();
-        let pong = probe::Pong { src: me, dst: ping.src, nonce: ping.nonce, observed: from, signature };
-        self.shared.port.send_datagram(&pong.to_bytes(), from);
-        let reverse = peer.direct.on_ping(from, now);
-        self.perform(ping.src, reverse);
-    }
-
-    fn on_pong(&mut self, from: SocketAddr, pong: &probe::Pong, now: Instant) {
-        if pong.dst != self.shared.me || !self.allow_direct {
-            return;
-        }
-        let Some(peer) = self.peers.get_mut(&pong.src) else { return };
-        // 对端从直连回答了本端经 relay 发的路径探测（它那个方向走的是直连）。
-        if peer.probe.pending.is_some_and(|(nonce, _)| nonce == pong.nonce) {
-            self.on_path_pong(pong.src, pong);
-            return;
-        }
-        // 先看它是不是在回答本端发过的 PING，是才值得验签名。
-        if !peer.direct.expects_pong(from, &pong.nonce) {
-            return;
-        }
-        let message = probe::Pong::signed_message(pong.src, pong.dst, &pong.nonce, pong.observed);
-        if i3t_crypto::verify(&peer.key, probe::Pong::PURPOSE, &message, &Signature::from_bytes(pong.signature)).is_err() {
-            tracing::debug!(%from, src = %pong.src, "PONG 的签名不对，丢弃");
-            return;
-        }
-        let local_network = peer.direct.is_local_network(from);
-        if !observed_is_mine(pong.observed, local_network, &self.local_candidates, &self.endpoints) {
-            tracing::debug!(%from, src = %pong.src, observed = %pong.observed, "对端看到的本节点地址不是本节点的，可能有人在中间来回转发探测，不认");
-            return;
-        }
-        if peer.direct.active().is_some_and(|(addr, _)| addr == from) {
-            peer.slot.last_rx_direct.touch(&self.shared.clock);
-        }
-        if let Some(Change::Up { addr }) = peer.direct.on_pong(from, &pong.nonce, now) {
-            tracing::debug!(peer = %pong.src, %addr, "直连地址验证通过");
-        }
-    }
-
-    /// 对端经 relay 发来的端到端路径探测：验签名，然后从本节点到它的那条路回答。
-    ///
-    /// 回答走的是本节点自己选的路，不是探测来的那条路（每个节点只为自己发出的包选路），所以回答到了只说明对端的路是通的。
-    fn on_path_ping(&mut self, from: NodeId, ping: &probe::Ping, now: Instant) {
-        let me = self.shared.me;
-        let Some(peer) = self.peers.get_mut(&from) else { return };
-        if ping.src != from || ping.dst != me {
-            return;
-        }
-        if peer.probe.answered.is_some_and(|at| now.saturating_duration_since(at) < PATH_PING_MIN_GAP) {
-            return;
-        }
-        // 验签名之前就记下：这个间隔限的是验签名的次数，签名不对的也算一次。
-        peer.probe.answered = Some(now);
-        let message = probe::Ping::signed_message(ping.src, ping.dst, &ping.nonce);
-        if i3t_crypto::verify(&peer.key, probe::Ping::PURPOSE, &message, &Signature::from_bytes(ping.signature)).is_err() {
-            tracing::debug!(peer = %from, "路径探测的签名不对，丢弃");
-            return;
-        }
-        // 探测是经 relay 来的，没有"看到的来源地址"可报。
-        let observed = SocketAddr::from(([0, 0, 0, 0], 0));
-        let message = probe::Pong::signed_message(me, from, &ping.nonce, observed);
-        let signature = *self.key.sign(probe::Pong::PURPOSE, &message).as_bytes();
-        let pong = probe::Pong { src: me, dst: from, nonce: ping.nonce, observed, signature };
-        peer.slot.send_frame(&self.shared, &pong.to_bytes());
-    }
-
-    /// 对端回答了本端的路径探测：现在这条路径确实送得到。
-    fn on_path_pong(&mut self, from: NodeId, pong: &probe::Pong) {
-        let Some(peer) = self.peers.get_mut(&from) else { return };
-        if pong.src != from || pong.dst != self.shared.me || peer.probe.pending.is_none_or(|(nonce, _)| nonce != pong.nonce) {
-            return;
-        }
-        let message = probe::Pong::signed_message(pong.src, pong.dst, &pong.nonce, pong.observed);
-        if i3t_crypto::verify(&peer.key, probe::Pong::PURPOSE, &message, &Signature::from_bytes(pong.signature)).is_err() {
-            tracing::debug!(peer = %from, "路径探测的回答签名不对，丢弃");
-            return;
-        }
-        peer.probe.pending = None;
-        peer.probe.missed = 0;
-    }
-
-    /// 在本地网段上看到了一个对端的信标：它的来源地址成为一个直连候选，照样要用带签名的探测验证过才用。
-    fn on_lan(&mut self, sighting: Sighting, now: Instant) {
-        if !self.allow_direct {
-            return;
-        }
-        let Some((&id, peer)) = self.peers.iter_mut().find(|(_, peer)| peer.key == sighting.key) else { return };
-        tracing::debug!(peer = %id, addr = %sighting.addr, "在局域网里看到了对端，把这个地址加进直连的候选");
-        peer.direct.on_lan_sighting(sighting.addr, now);
-    }
-
-    /// 把直连状态机要做的事做掉：给 PING 签名发出去，把信令交给钩子。
-    fn perform(&self, peer: NodeId, actions: impl IntoIterator<Item = Action>) {
-        for action in actions {
-            match action {
-                Action::Ping { to, nonce } => {
-                    let message = probe::Ping::signed_message(self.shared.me, peer, &nonce);
-                    let signature = *self.key.sign(probe::Ping::PURPOSE, &message).as_bytes();
-                    let ping = probe::Ping { src: self.shared.me, dst: peer, nonce, signature };
-                    self.shared.port.send_datagram(&ping.to_bytes(), to);
-                }
-                Action::Signal(signal) => self.shared.send_signal(peer, &signal),
-            }
-        }
     }
 
     /// 把所有的定时器推进一步，然后重新选路。
@@ -1187,281 +805,8 @@ impl Control {
                 peer.direct.local_changed();
                 // 不等流量就试的那些也要按新的端点重试，同样错开，不在同一刻一起发。正在用的照旧马上试。
                 if peer.eager_from.is_some() && peer.direct.active().is_none() && !peer.slot.is_active(clock) {
-                    peer.eager_from = Some(now + relays::jitter(EAGER_SPREAD));
+                    peer.eager_from = Some(now + crate::relays::jitter(EAGER_SPREAD));
                 }
-            }
-        }
-    }
-
-    /// 按矩阵里各个 relay 最新的通知更新它们的状态。
-    fn sync_standing(&mut self, now: Instant) {
-        let Self { relays, matrix, attach_reviewed, peers, .. } = self;
-        for (&id, entry) in relays.iter_mut() {
-            let state = match matrix.state(id, now) {
-                // 下线的通知只管一小段时间，见 [`DRAIN_HOLD`]。
-                RelayState::Draining if matrix.age(id, now).is_some_and(|age| age >= DRAIN_HOLD) => RelayState::Serving,
-                RelayState::Overloaded => {
-                    // 每个节点各自多等一段随机的时间再回去。大家一走它就不过载了；要是一看到"恢复"又一起回去，
-                    // 它马上又过载，这样来回就是群体震荡（白皮书 §7.5）。
-                    if entry.state != RelayState::Overloaded {
-                        entry.cooling_until = Some(now + OVERLOAD_HOLD + relays::jitter(OVERLOAD_HOLD));
-                    }
-                    RelayState::Overloaded
-                }
-                RelayState::Serving if entry.cooling_until.is_some_and(|until| now < until) => RelayState::Overloaded,
-                state => state,
-            };
-            if state == entry.state {
-                continue;
-            }
-            let notice = match state {
-                RelayState::Draining => {
-                    tracing::info!(relay = %id, "relay 通知即将下线：有别的路可走的话，经它的路径和到它的挂靠马上换到别处");
-                    Some(RouteHint::RelayDraining)
-                }
-                RelayState::Overloaded => {
-                    tracing::info!(relay = %id, "relay 通知过载：有别的 relay 可走的话先改走别的，等它恢复");
-                    Some(RouteHint::RelayOverloaded)
-                }
-                RelayState::Serving => {
-                    tracing::info!(relay = %id, "relay 可以正常使用了");
-                    None
-                }
-            };
-            // 正经过它的路马上要换：把原因记下来，换路的日志里说得清是为什么。
-            for peer in peers.values_mut() {
-                if notice.is_some() && matches!(peer.route, RouteKey::Relay { path, .. } if path.as_slice().contains(&id)) {
-                    peer.hint = notice;
-                }
-            }
-            entry.state = state;
-            *attach_reviewed = None;
-        }
-    }
-
-    /// 重新考虑挂靠哪几个 relay。
-    fn review_attachments(&mut self, now: Instant) {
-        if self.attach_reviewed.is_some_and(|at| now.saturating_duration_since(at) < ATTACH_REVIEW) {
-            return;
-        }
-        self.attach_reviewed = Some(now);
-        // 按 netmap 里的顺序列出来：延迟还没测出来的时候就按这个顺序用。通知过即将下线或者过载的 relay 当作"连不上"：
-        // 有别的可换就换掉，没有就留着（只有它一个的时候，等它回来比没有 relay 强）。
-        let standings: Vec<Standing> = self
-            .netmap
-            .relays
-            .iter()
-            .filter_map(|relay| Some((relay.id, self.relays.get(&relay.id)?)))
-            .map(|(id, entry)| Standing {
-                id,
-                rtt: entry.link.estimate(now),
-                failing: entry.state != RelayState::Serving || (self.attached.contains(&id) && entry.link.is_failing(now)),
-            })
-            .collect();
-        let chosen =
-            if self.allow_relay { relays::choose_attached(&self.attached, &standings, &self.netmap.me.pinned_relays) } else { Vec::new() };
-        // controller 为了让别的节点到得了本节点而要它另外挂靠的。本节点连不上的照样留着试：连不上的结果会报上去，controller 再换一个。
-        let shared: Vec<NodeId> = if self.allow_relay {
-            let extra = self.netmap.me.shared_relays.iter().copied();
-            extra.filter(|id| self.relays.contains_key(id) && !chosen.contains(id)).take(MAX_SHARED_RELAYS).collect()
-        } else {
-            Vec::new()
-        };
-        if shared != self.shared_relays {
-            tracing::info!(from = ?self.shared_relays, to = ?shared, "另外挂靠的 relay 变了：controller 要本节点挂上去，好让连不上本节点那几个 relay 的对端也到得了");
-            self.shared_relays = shared;
-        }
-        if chosen != self.attached {
-            let avoided = |id: &NodeId| self.relays.get(id).is_some_and(|entry| entry.state != RelayState::Serving);
-            let reason = if !self.allow_relay {
-                "本节点不使用 relay"
-            } else if !self.netmap.me.pinned_relays.is_empty() {
-                "管理员固定了挂靠的 relay"
-            } else if self.attached.iter().any(avoided) {
-                "原来挂靠的 relay 通知即将下线或者过载"
-            } else {
-                "按到各个 relay 的延迟选择"
-            };
-            tracing::info!(from = ?self.attached, to = ?chosen, reason, "挂靠的 relay 变了");
-            self.attached = chosen;
-        }
-    }
-
-    /// 决定和哪些 relay 保持会话，并推进到每个 relay 的状态机。
-    fn poll_relays(&mut self, now: Instant, active: &HashSet<NodeId>) {
-        let serving = self.shared.local_relay.get().is_some_and(|local| local.status().is_some());
-        let lowest_cost = self.mode == RoutingMode::LowestCost && self.allow_relay && !active.is_empty();
-        let mut wanted: HashSet<NodeId> = self.attached.iter().chain(&self.shared_relays).copied().collect();
-        if self.allow_relay {
-            // 能通到活跃对端的 relay 都连着（对端自己是 relay 的话也包括它）：走 relay 时要经它们，走直连时它们是随时能退回去的备用路。
-            for (&id, peer) in self.peers.iter().filter(|(id, _)| active.contains(id)) {
-                wanted.extend(relay_candidates(self.shared.me, id, peer, None));
-            }
-        }
-        if lowest_cost {
-            // 延迟优先：多级路径从离本节点最近的几个 relay 进。只连这几个，探测量才有上限。
-            let mut nearest: Vec<(Duration, NodeId)> =
-                self.relays.iter().filter_map(|(&id, entry)| Some((entry.link.estimate(now)?, id))).collect();
-            nearest.sort_unstable();
-            wanted.extend(nearest.into_iter().take(ENTRY_RELAYS).map(|(_, id)| id));
-        }
-        if serving {
-            // 本节点是 relay：和别的 relay 连得上的都保持会话，这就是骨干。
-            wanted.extend(self.relays.keys().copied());
-        }
-        if self.allow_relay {
-            // 主动测试指定的路径上，本节点这一头的第一个 relay：测试期间保持会话，平时可能不连它。
-            wanted.extend(self.windows.values().filter(|window| window.is_open(now)).flat_map(|window| window.relays.iter().copied()));
-        }
-        if let Some(relay) = self.probe(now, &wanted) {
-            wanted.insert(relay);
-        }
-        let survey = self.allow_relay && self.netmap.me.pinned_relays.is_empty();
-        let Self { shared, key, relays, legs, inbound, next_conn, .. } = self;
-        let who = Identity { me: shared.me, key };
-        let local = shared.local_relay.get().filter(|_| serving);
-        for (id, entry) in relays.iter_mut() {
-            // 本节点是 relay：这一段也是骨干，它在本节点的 relay 上有没有会话、有没有拨进来，决定这一段走 UDP 还是 TCP。
-            let backbone = local.map(|local| Backbone { theirs: local.session_leg(*id), offered: inbound.get(id).map(|leg| leg.accepted) });
-            let mut wire = LinkWire { shared, slot: &entry.slot, legs, inbound, next_conn };
-            let want = wanted.contains(id);
-            entry.link.set_probe_interval(if serving { BACKBONE_PROBE_INTERVAL } else { PROBE_INTERVAL });
-            // 延迟优先模式下，会话在用的 relay 都可能是候选路径的第一段：定期发探测包列，丢包率才估得出来。
-            entry.link.set_training(lowest_cost && want);
-            if want != entry.link.is_wanted() {
-                tracing::debug!(relay = %id, want, "是否和这个 relay 保持中转会话变了");
-                entry.link.set_wanted(want, now, &mut wire);
-            }
-            let urgent = table::unanswered(&shared.clock, &entry.slot.last_tx, &entry.slot.last_rx);
-            entry.link.poll(now, who, urgent, survey, backbone, &mut wire);
-        }
-        self.sync_relay_targets();
-    }
-
-    /// 用一次会话去试一个 UDP 询问没有回答的 relay（见 [`PROBE_AGAIN`]），返回现在正在试的那个。
-    ///
-    /// 每分钟的询问只走 UDP：问不到的 relay 也许只有 TCP 连得上。用会话试一次（UDP 和 TCP 一起），结果就是三种之一，
-    /// 报给 controller 的"连得上哪些 relay"才说得准。试完就放手，同一时刻只试一个。
-    fn probe(&mut self, now: Instant, wanted: &HashSet<NodeId>) -> Option<NodeId> {
-        if let Some((relay, started)) = self.probing {
-            let finished = self.relays.get(&relay).is_none_or(|entry| {
-                let tried_since = entry.link.last_try(now).is_some_and(|(_, at)| at >= started);
-                tried_since || now.saturating_duration_since(started) >= PROBE_LIMIT
-            });
-            if !finished {
-                return Some(relay);
-            }
-            let outcome = self.relays.get(&relay).and_then(|entry| entry.link.last_try(now)).map(|(outcome, _)| outcome);
-            tracing::debug!(%relay, ?outcome, "UDP 询问没有回答的 relay 用会话试过了");
-            self.probing = None;
-        }
-        if !self.allow_relay {
-            return None;
-        }
-        let due = |entry: &RelayEntry| entry.link.last_try(now).is_none_or(|(_, at)| now.saturating_duration_since(at) >= PROBE_AGAIN);
-        let (relay, _) = self
-            .relays
-            .iter()
-            .filter(|(id, entry)| !wanted.contains(id) && entry.link.survey_silent(now) && due(entry))
-            .min_by_key(|(id, entry)| (entry.link.last_try(now).map(|(_, at)| at), **id))?;
-        let relay = *relay;
-        tracing::debug!(%relay, "这个 relay 的 UDP 询问没有回答：用会话（UDP 和 TCP 一起）试一次");
-        self.probing = Some((relay, now));
-        Some(relay)
-    }
-
-    /// 现在挂靠着、会话通着的 relay（自己挑的和另外挂的），按编号排。对外公布的挂靠就是它们。
-    fn attachment_ids(&self) -> Vec<NodeId> {
-        let mut ids: Vec<NodeId> = self
-            .attached
-            .iter()
-            .chain(&self.shared_relays)
-            .copied()
-            .filter(|id| self.relays.get(id).is_some_and(|entry| entry.link.rtt().is_some()))
-            .collect();
-        ids.sort_unstable();
-        ids
-    }
-
-    /// 本节点试过的各个 relay 连没连上，报给 controller（白皮书 §7.2）。有会话的在前，然后是连得上的、连不上的，最多 [`MAX_RELAY_TRIES`] 个。
-    fn relay_tries(&self, now: Instant) -> Vec<RelayTry> {
-        let mut tries: Vec<(bool, RelayTry)> = self
-            .relays
-            .iter()
-            .filter_map(|(&relay, entry)| {
-                let (outcome, at) = entry.link.last_try(now)?;
-                let age_secs = u32::try_from(now.saturating_duration_since(at).as_secs()).unwrap_or(u32::MAX);
-                let seen_as = entry.link.seen_as(now);
-                Some((entry.link.leg().is_some(), RelayTry { relay, outcome, age_secs, seen_as }))
-            })
-            .collect();
-        tries.sort_unstable_by_key(|(session, entry)| (!session, !entry.outcome.reached(), entry.age_secs, entry.relay));
-        tries.into_iter().take(MAX_RELAY_TRIES).map(|(_, entry)| entry).collect()
-    }
-
-    fn poll_directs(&mut self, now: Instant) {
-        let mut todo = Vec::new();
-        for (&id, peer) in &mut self.peers {
-            let policy = direct_policy(&self.shared, self.allow_direct, self.dial_out_only, self.mode, &self.endpoints, peer, now);
-            let step = peer.direct.poll(now, &policy);
-            if let Some(Change::Down { reason }) = step.change {
-                peer.hint = Some(reason.hint());
-            }
-            if !step.actions.is_empty() {
-                todo.push((id, step.actions));
-            }
-        }
-        for (id, actions) in todo {
-            self.perform(id, actions);
-        }
-    }
-
-    /// 本节点是 relay 时：把自己测到的骨干链路和手上别的 relay 的行发给会话。定期发；自己的状态变了立刻发。
-    fn publish_rows(&mut self, now: Instant) {
-        let Some(local) = self.shared.local_relay.get() else { return };
-        let Some(status) = local.status() else {
-            self.own_state = None;
-            return;
-        };
-        let state_changed = self.own_state != Some(status.state);
-        let since_sent = self.rows_sent.map(|at| now.saturating_duration_since(at));
-        let due = since_sent.is_none_or(|since| since >= ROW_INTERVAL);
-        // 有新的会话：让它马上拿到矩阵。一批节点同时挂上来时合成一次发，不是每来一个发一轮。
-        let newcomers = self.sessions_seen != status.sessions_opened && since_sent.is_none_or(|since| since >= NEWCOMER_BATCH);
-        if !due && !state_changed && !newcomers {
-            return;
-        }
-        self.own_state = Some(status.state);
-        self.sessions_seen = status.sessions_opened;
-        self.rows_sent = Some(now);
-        let me = self.shared.me;
-        let links: Vec<Link> = self
-            .netmap
-            .relays
-            .iter()
-            .filter(|relay| relay.id != me)
-            .map(|relay| {
-                // 一条骨干连接算通，要本节点在对方那里有会话（包从那里送过去），对方在本节点这里也有（它据此认本节点发的包），
-                // 两个会话还要在同一处：都走 UDP，或者都在同一条 TCP 上（见 [`crate::backbone`]）。
-                let theirs = local.session_leg(relay.id);
-                let paired = |entry: &&RelayEntry| match (entry.link.leg(), theirs) {
-                    (Some(Leg::Udp(_)), Some(SessionLeg::Udp)) => true,
-                    (Some(Leg::Tcp), Some(theirs)) => self.legs.get(&relay.id).is_some_and(|leg| leg.carries(theirs)),
-                    (Some(Leg::Udp(_) | Leg::Tcp) | None, _) => false,
-                };
-                let quality = self
-                    .relays
-                    .get(&relay.id)
-                    .filter(paired)
-                    .and_then(|entry| entry.link.quality(now))
-                    .map(|quality| LinkQuality::from_measured(quality.rtt, quality.jitter, quality.lost, quality.probes));
-                Link { relay: relay.id, quality }
-            })
-            .collect();
-        local.publish_row(&links);
-        if due || newcomers {
-            for frame in self.matrix.frames(now) {
-                local.broadcast(frame);
             }
         }
     }
@@ -1611,9 +956,9 @@ impl Control {
                 }
                 let hint = peer.hint.take();
                 let reason = if peer.pinned {
-                    Reason::new(format!("主动测试暂时把路固定在{}", route_text(key)), RouteCause::TestPinned)
+                    Reason::new(format!("主动测试暂时把路固定在{key}"), RouteCause::TestPinned)
                 } else if was_pinned {
-                    Reason::new(format!("主动测试结束，回到选路规则选的{}", route_text(key)), RouteCause::TestEnded)
+                    Reason::new(format!("主动测试结束，回到选路规则选的{key}"), RouteCause::TestEnded)
                 } else {
                     match why {
                         Some(why) => explain(why, key, peer.route, &peer.candidates, hint),
@@ -1646,180 +991,13 @@ impl Control {
         changed
     }
 
-    /// 本节点现在能把包交给它的 relay：会话是通的、延迟测出来了。
-    fn entries(&self, now: Instant) -> Vec<Entry> {
-        let mut entries: Vec<Entry> = self
-            .relays
-            .iter()
-            .filter(|(_, entry)| entry.link.leg().is_some())
-            .filter_map(|(&relay, entry)| {
-                Some(Entry { relay, segment: entry.link.quality(now)?.segment(), settled: entry.link.is_settled(now) })
-            })
-            .collect();
-        entries.sort_unstable_by_key(|entry| entry.relay);
-        entries
-    }
-
     /// 每一次换路都记一条带原因的日志，并且通知订阅的人。
     fn announce(&self, peer: NodeId, key: RouteKey, reason: Reason) {
         let route = key.to_route();
-        tracing::info!(%peer, path = %route_text(key), reason = reason.text.as_str(), "到对端的路变了");
+        tracing::info!(%peer, path = %key, reason = reason.text.as_str(), "到对端的路变了");
         // 没有人订阅时发送会失败，那就是没有人要听。
         let _subscribers = self.shared.changes.send(RouteChange { peer, route, reason: reason.text, cause: reason.cause });
         self.shared.route_changed.notify_waiters();
-    }
-
-    fn publish_status(&mut self, now: Instant) {
-        self.status_refreshed = Some(now);
-        self.published_attachments = self.attachment_ids();
-        let mut routes: Vec<RouteEntry> = self
-            .peers
-            .iter()
-            .map(|(&id, peer)| RouteEntry { peer: id, route: peer.route.to_route(), rtt_ms: self.route_rtt_ms(id, peer) })
-            .collect();
-        routes.sort_unstable_by_key(|entry| entry.peer);
-        let own = self.attached.iter().map(|id| (id, false));
-        let shared = self.shared_relays.iter().map(|id| (id, true));
-        let mut attached: Vec<Attachment> = own
-            .chain(shared)
-            .filter_map(|(id, shared)| Some(Attachment { relay: *id, rtt_ms: self.relays.get(id)?.link.rtt()?.millis(), shared }))
-            .collect();
-        attached.sort_by_key(|attachment| attachment.rtt_ms);
-
-        let mut reports: Vec<PathReport> = self.peers.iter().map(|(&id, peer)| self.report(id, peer, now)).collect();
-        reports.sort_unstable_by_key(|report| report.peer);
-        let mut backbone: Vec<BackboneRow> = self
-            .matrix
-            .rows(now)
-            .map(|(row, age)| BackboneRow {
-                relay: row.origin,
-                state: row.state,
-                load_percent: row.load_percent,
-                age_ms: u64::try_from(age.as_millis()).unwrap_or(u64::MAX),
-                links: row
-                    .links
-                    .iter()
-                    .map(|link| BackboneLink {
-                        to: link.relay,
-                        rtt_ms: link.quality.map(|quality| quality.rtt_ms),
-                        jitter_ms: link.quality.map_or(0, |quality| quality.jitter_ms),
-                        loss: link.quality.map_or(0.0, LinkQuality::loss),
-                    })
-                    .collect(),
-            })
-            .collect();
-        backbone.sort_unstable_by_key(|row| row.relay);
-        let status = Status {
-            routes,
-            endpoints: self.endpoints.clone(),
-            public_addresses: self.public_addresses.clone(),
-            mapping_varies: self.mapping_varies,
-            attached,
-            reports,
-            backbone,
-            relay_tries: self.relay_tries(now),
-        };
-        *self.shared.status.lock().expect("path status mutex poisoned") = status;
-    }
-
-    /// 现在这条路上的往返延迟。
-    fn route_rtt_ms(&self, id: NodeId, peer: &PeerState) -> Option<u32> {
-        match peer.route {
-            RouteKey::None => None,
-            RouteKey::Direct(addr) => self.path_rtt_ms(id, peer, PathId::Direct(addr)),
-            RouteKey::Relay { path, .. } => self.path_rtt_ms(id, peer, PathId::Relays(path)),
-        }
-    }
-
-    /// 一条路径上的往返延迟，和路由表里现在这条路的算法一样。
-    fn path_rtt_ms(&self, id: NodeId, peer: &PeerState, path: PathId) -> Option<u32> {
-        match path {
-            PathId::Direct(_) => peer.direct.active().map(|(_, rtt)| rtt.millis()),
-            PathId::Relays(path) => match *path.as_slice() {
-                // 经一个 relay 的延迟是两段之和：本节点到 relay 是自己测的，relay 到对端是对端上报的。
-                [relay] => {
-                    let near = self.relays.get(&relay).and_then(|entry| entry.link.rtt()).map(|rtt| rtt.millis());
-                    let far = peer.attached.iter().find(|attachment| attachment.relay == relay).map(|attachment| attachment.rtt_ms);
-                    match (near, far) {
-                        // relay 就是对端自己：只有一段。
-                        (near, None) if relay == id => near,
-                        (near, Some(far)) => Some(near.unwrap_or(0).saturating_add(far)),
-                        (_, None) => None,
-                    }
-                }
-                // 多级路径：各段相加，取最近一次算候选时的测量值。
-                _ => {
-                    let chosen = peer.candidates.iter().find(|candidate| candidate.path == PathId::Relays(path))?;
-                    let total: f64 = chosen.legs.iter().map(|leg| leg.segment.rtt_ms).sum();
-                    Some(Rtt::new(Duration::try_from_secs_f64(total / 1000.0).ok()?).millis())
-                }
-            },
-        }
-    }
-
-    /// 给界面看的：到这个对端考虑过哪些路、现在走哪条、为什么。
-    fn report(&self, id: NodeId, peer: &PeerState, now: Instant) -> PathReport {
-        let current = match peer.route {
-            RouteKey::None => None,
-            RouteKey::Direct(addr) => Some(PathId::Direct(addr)),
-            RouteKey::Relay { path, .. } => Some(PathId::Relays(path)),
-        };
-        let candidates = peer
-            .candidates
-            .iter()
-            .take(MAX_REPORTED_CANDIDATES)
-            .map(|candidate| CandidateReport {
-                route: match candidate.path {
-                    PathId::Direct(addr) => Route::Direct { addr },
-                    PathId::Relays(path) => Route::Relay { relays: path.as_slice().to_vec() },
-                },
-                cost_ms: candidate.cost_ms,
-                legs: candidate
-                    .legs
-                    .iter()
-                    .map(|leg| LegReport {
-                        from: leg.from,
-                        to: leg.to,
-                        rtt_ms: leg.segment.rtt_ms,
-                        jitter_ms: leg.segment.jitter_ms,
-                        loss: leg.segment.loss,
-                    })
-                    .collect(),
-                load_percent: candidate.load_percent,
-                current: Some(candidate.path) == current,
-                relay_leg: match candidate.path {
-                    PathId::Direct(_) => None,
-                    PathId::Relays(path) => self.relays.get(&path.first()).and_then(|entry| entry.link.leg()).map(|leg| match leg {
-                        Leg::Udp(_) => RelayLeg::Udp,
-                        Leg::Tcp => RelayLeg::Tcp,
-                    }),
-                },
-            })
-            .collect();
-        PathReport {
-            peer: id,
-            mode: self.mode,
-            route: peer.route.to_route(),
-            direct: matches!(peer.route, RouteKey::Direct(_)).then(|| peer.direct.kind()).flatten(),
-            relay_leg: match peer.route {
-                RouteKey::Relay { via: Via::Udp(_), .. } => Some(RelayLeg::Udp),
-                RouteKey::Relay { via: Via::Tcp(_), .. } => Some(RelayLeg::Tcp),
-                RouteKey::Relay { via: Via::Local, .. } | RouteKey::Direct(_) | RouteKey::None => None,
-            },
-            reason: peer.reason.text.clone(),
-            cause: Some(peer.reason.cause.clone()),
-            since_switch_ms: peer.switched.map(|at| u64::try_from(now.saturating_duration_since(at).as_millis()).unwrap_or(u64::MAX)),
-            direct_status: peer.direct.status(now),
-            alternative: peer.other_mode.filter(|other| *other != current).map(|other| Alternative {
-                route: match other {
-                    None => Route::None,
-                    Some(PathId::Direct(addr)) => Route::Direct { addr },
-                    Some(PathId::Relays(relays)) => Route::Relay { relays: relays.as_slice().to_vec() },
-                },
-                rtt_ms: other.and_then(|path| self.path_rtt_ms(id, peer, path)),
-            }),
-            candidates,
-        }
     }
 }
 
@@ -1929,7 +1107,7 @@ fn eager_direct_limit() -> usize {
 /// 去掉覆盖网的地址：透明访问打开时本节点的虚拟 IP 在一块本机的网卡上（`i3t-intercept`），它只在组网里有意义，
 /// 别的节点连不上它，也不该去试。
 fn outside_overlay(candidates: Vec<SocketAddr>, netmap: &Netmap) -> Vec<SocketAddr> {
-    candidates.into_iter().filter(|addr| !i3t_model::netmap::is_overlay_address(&netmap.network, addr.ip().to_canonical())).collect()
+    candidates.into_iter().filter(|addr| !netmap.network.is_overlay_address(addr.ip().to_canonical())).collect()
 }
 
 fn mapping_varies(observed: &[SocketAddr]) -> Option<bool> {
@@ -1958,9 +1136,13 @@ fn random_below(bound: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use i3t_crypto::Signature;
+    use i3t_proto::backbone::Link;
     use i3t_proto::probe::{TestPing, TestPong};
 
     use super::*;
+    use crate::SessionLeg;
+    use crate::relays::Complaint;
 
     fn addr(text: &str) -> SocketAddr {
         text.parse().unwrap()
@@ -2424,8 +1606,8 @@ mod tests {
 
     fn test_ping(harness: &Harness, from: u32, test: TestId, seq: u32, path: Option<RelayPath>) -> TestPing {
         let (src, dst) = (node(from), node(ME));
-        let message = TestPing::signed_message(src, dst, test, seq, path);
-        TestPing { src, dst, test, seq, path, signature: *harness.keys[&src].sign(TestPing::PURPOSE, &message).as_bytes() }
+        let ping = TestPing { src, dst, test, seq, path, signature: [0; 64] };
+        TestPing { signature: *harness.keys[&src].sign(TestPing::PURPOSE, &ping.signed_message()).as_bytes(), ..ping }
     }
 
     fn window(peer: u32, test: TestId, max_probes: u32) -> TestSpec {

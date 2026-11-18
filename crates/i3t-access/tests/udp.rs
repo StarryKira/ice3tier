@@ -487,9 +487,9 @@ struct FakeDiversion {
 }
 
 impl i3t_access::Diversion for FakeDiversion {
-    async fn recv(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr, SocketAddr)> {
+    async fn recv(&self, buf: &mut [u8]) -> std::io::Result<i3t_access::Diverted> {
         let (len, from) = self.socket.recv_from(buf).await?;
-        Ok((len, from, *self.original.lock().unwrap()))
+        Ok(i3t_access::Diverted { len, from, to: *self.original.lock().unwrap() })
     }
 
     fn reply_socket(&self, local: SocketAddr, client: SocketAddr) -> std::io::Result<UdpSocket> {

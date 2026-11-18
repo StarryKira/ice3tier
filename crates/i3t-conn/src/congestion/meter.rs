@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use i3t_model::netmap::Congestion;
 use quinn::congestion::{Controller, ControllerFactory, ControllerMetrics};
 use quinn_proto::RttEstimator;
 
@@ -80,7 +81,7 @@ impl Controller for Meter {
             self.is_dirty = false;
             tracing::debug!(
                 conn = self.id,
-                algorithm = %self.algorithm,
+                algorithm = %Congestion::from(self.algorithm),
                 sent = self.totals.sent,
                 acked = self.totals.acked,
                 lost = self.totals.lost,
@@ -141,7 +142,7 @@ impl Drop for Meter {
         if self.is_dirty {
             tracing::debug!(
                 conn = self.id,
-                algorithm = %self.algorithm,
+                algorithm = %Congestion::from(self.algorithm),
                 sent = self.totals.sent,
                 acked = self.totals.acked,
                 lost = self.totals.lost,

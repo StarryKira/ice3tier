@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use common::{Node, Peer, SOON, Transfer, View, drain_reasons, echo_once, is_direct, is_none, is_relay};
 use i3t_conn::{Acceptor, Connector, DropReason, OpenError};
 use i3t_model::control::Route;
+use i3t_model::netmap::Congestion;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// 断言"这件事不会发生"时观察多久。
@@ -499,24 +500,24 @@ async fn both_ends_use_the_pairs_congestion_control_and_a_change_applies_to_the_
     b.apply(&View { peers: &[cubic(&a)], ..View::default() });
     let _echo = b.spawn_echo();
     echo_once(&a, &b, b"over cubic").await;
-    assert_eq!(a.endpoint.congestion(b.id), "cubic", "拨出的一方按节点对的设置");
-    assert_eq!(b.endpoint.congestion(a.id), "cubic", "接受连接的一方也按节点对的设置，管它自己发出的方向");
+    assert_eq!(a.endpoint.congestion(b.id), Congestion::Cubic, "拨出的一方按节点对的设置");
+    assert_eq!(b.endpoint.congestion(a.id), Congestion::Cubic, "接受连接的一方也按节点对的设置，管它自己发出的方向");
 
     // 改回默认：已经建立的连接不换，空闲回收之后新建的连接才用默认的。
     let quick = i3t_conn::Tuning { idle_close: Some(Duration::from_millis(500)), ..i3t_conn::Tuning::default() };
     a.apply(&View { peers: &[Peer::direct(&b)], ..View::default() });
     b.apply(&View { peers: &[Peer::direct(&a)], ..View::default() });
     a.wait_knows(&b).await;
-    assert_eq!(a.endpoint.congestion(b.id), "cubic", "已有的连接不换拥塞控制");
+    assert_eq!(a.endpoint.congestion(b.id), Congestion::Cubic, "已有的连接不换拥塞控制");
     a.endpoint.tune(quick);
     b.endpoint.tune(quick);
     let deadline = Instant::now() + 3 * SOON;
-    while a.endpoint.congestion(b.id) != "bbr" || b.endpoint.congestion(a.id) != "bbr" {
+    while a.endpoint.congestion(b.id) != Congestion::Bbr || b.endpoint.congestion(a.id) != Congestion::Bbr {
         assert!(Instant::now() < deadline, "空闲的连接一直没有被回收");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     echo_once(&a, &b, b"over bbr").await;
-    assert_eq!((a.endpoint.congestion(b.id), b.endpoint.congestion(a.id)), ("bbr".to_owned(), "bbr".to_owned()));
+    assert_eq!((a.endpoint.congestion(b.id), b.endpoint.congestion(a.id)), (Congestion::Bbr, Congestion::Bbr));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

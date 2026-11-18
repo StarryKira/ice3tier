@@ -15,7 +15,7 @@ use i3t_model::admin::{
 use i3t_model::control::{ExitObservation, ExitReport, ForwardReport, ListenerReport, ProxyReport};
 use i3t_proto::NodeId;
 
-use super::{Controller, Inner, node_ref};
+use super::{Controller, Inner};
 use crate::access::AccessMap;
 use crate::error::{Entity, Error};
 use crate::netmap::NetworkView;
@@ -178,7 +178,7 @@ impl Controller {
             status: ListenStatus { state: report.state.clone(), traffic: report.traffic },
         });
         Ok(NodeListeners {
-            node: node_ref(&record),
+            node: record.to_ref(),
             online: live.is_some(),
             reported_secs_ago: live.and_then(|live| live.reported_at).map(|at| at.elapsed().as_secs()),
             listeners: listeners.collect(),
@@ -195,10 +195,10 @@ impl Inner {
         let recent = seen.map(ExitSeen::recent).unwrap_or_default();
         let observed = self.usage.observed.iter().filter(|((exit, _), _)| *exit == node.id).filter_map(|(&(_, by), observed)| {
             let by = view.nodes.get(&by)?;
-            Some(ExitObserved { by: node_ref(by), counts: observed.counts.clone(), reported_secs_ago: observed.at.elapsed().as_secs() })
+            Some(ExitObserved { by: by.to_ref(), counts: observed.counts.clone(), reported_secs_ago: observed.at.elapsed().as_secs() })
         });
         Some(ExitView {
-            node: node_ref(node),
+            node: node.to_ref(),
             online,
             settings,
             health: health(online, recent),

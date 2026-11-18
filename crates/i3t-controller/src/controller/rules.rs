@@ -1,6 +1,6 @@
 //! 访问规则的增删改。规则的两头是分组，按编号引用。
 
-use i3t_model::admin::{CreateRule, Direction, GroupId, GroupRef, LogRef, NetworkId, RefKind, Rule, UpdateRule};
+use i3t_model::admin::{CreateRule, Direction, GroupId, GroupRef, LogRef, NetworkId, RefKind, Rule, UpdateRule, action};
 use serde_json::json;
 
 use super::groups::require_group;
@@ -38,7 +38,14 @@ impl Controller {
                 enabled: request.enabled,
             };
             rule.id = store.insert_rule(network, &rule)?;
-            store.log_refs(now, Some(network), "rule.create", &describe(&rule), &[LogRef::new(RefKind::Rule, rule.id)], params(&rule))?;
+            store.log_refs(
+                now,
+                Some(network),
+                action::RULE_CREATE,
+                &describe(&rule),
+                &[LogRef::new(RefKind::Rule, rule.id)],
+                params(&rule),
+            )?;
             Ok::<_, Error>(rule)
         })?;
         let seeds = inner.members_of(network, &[rule.src.id, rule.dst.id])?;
@@ -70,7 +77,7 @@ impl Controller {
             rule.direction = request.direction.unwrap_or(rule.direction);
             rule.enabled = request.enabled.unwrap_or(rule.enabled);
             store.update_rule(&rule)?;
-            store.log_refs(now, Some(network), "rule.update", &describe(&rule), &[LogRef::new(RefKind::Rule, id)], params(&rule))?;
+            store.log_refs(now, Some(network), action::RULE_UPDATE, &describe(&rule), &[LogRef::new(RefKind::Rule, id)], params(&rule))?;
             Ok::<_, Error>((before, rule))
         })?;
         let seeds = inner.members_of(network, &[before.src.id, before.dst.id, after.src.id, after.dst.id])?;
@@ -88,7 +95,7 @@ impl Controller {
         let rule = inner.store.atomically(|store| {
             let rule = store.rule(network, id)?.ok_or(Error::NotFound(Entity::Rule))?;
             store.delete_rule(id)?;
-            store.log_refs(now, Some(network), "rule.delete", &describe(&rule), &[LogRef::new(RefKind::Rule, id)], params(&rule))?;
+            store.log_refs(now, Some(network), action::RULE_DELETE, &describe(&rule), &[LogRef::new(RefKind::Rule, id)], params(&rule))?;
             Ok::<_, Error>(rule)
         })?;
         let seeds = inner.members_of(network, &[rule.src.id, rule.dst.id])?;

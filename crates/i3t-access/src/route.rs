@@ -13,7 +13,7 @@
 use std::net::{IpAddr, SocketAddr};
 
 use i3t_model::Netmap;
-use i3t_model::netmap::{self, Peer};
+use i3t_model::netmap::Peer;
 use i3t_proto::NodeId;
 use i3t_proto::flow::{Class, Host, Target};
 
@@ -90,7 +90,7 @@ pub(crate) fn mesh_node<'a>(netmap: &'a Netmap, host: &Host) -> Option<Result<&'
     let peer = match host {
         Host::Ip(ip) => {
             let IpAddr::V4(ip) = ip.to_canonical() else { return None };
-            if !netmap::is_overlay_address(&netmap.network, IpAddr::V4(ip)) {
+            if !netmap.network.is_overlay_address(IpAddr::V4(ip)) {
                 return None;
             }
             if ip == netmap.me.virtual_ip {

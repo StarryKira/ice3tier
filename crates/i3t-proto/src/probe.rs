@@ -204,6 +204,43 @@ impl Pong {
 /// TPING 和 TPONG 开头相同的部分：类型、来源、目的、测试编号、序号。
 const TEST_HEAD_LEN: usize = 1 + 2 * NodeId::WIRE_LEN + 8 + 4;
 
+/// TPING、TPONG 类型之后的那几个字段。
+struct TestHead {
+    src: NodeId,
+    dst: NodeId,
+    test: TestId,
+    seq: u32,
+}
+
+impl TestHead {
+    /// `kind` 是 `None` 时不写类型：签名的消息里没有它，用途标签已经分开了两种帧。
+    fn put(&self, kind: Option<u8>, buf: &mut Vec<u8>) {
+        buf.extend(kind);
+        buf.extend_from_slice(&self.src.to_be_bytes());
+        buf.extend_from_slice(&self.dst.to_be_bytes());
+        buf.extend_from_slice(&self.test.to_be_bytes());
+        buf.extend_from_slice(&self.seq.to_be_bytes());
+    }
+
+    fn take(datagram: &[u8], kind: u8) -> Option<(Self, &[u8])> {
+        let (&first, rest) = datagram.split_first()?;
+        if first != kind {
+            return None;
+        }
+        let (&src, rest) = rest.split_first_chunk::<{ NodeId::WIRE_LEN }>()?;
+        let (&dst, rest) = rest.split_first_chunk::<{ NodeId::WIRE_LEN }>()?;
+        let (&test, rest) = rest.split_first_chunk::<8>()?;
+        let (&seq, rest) = rest.split_first_chunk::<4>()?;
+        let head = Self {
+            src: NodeId::from_be_bytes(src)?,
+            dst: NodeId::from_be_bytes(dst)?,
+            test: u64::from_be_bytes(test),
+            seq: u32::from_be_bytes(seq),
+        };
+        Some((head, rest))
+    }
+}
+
 /// 主动测试里的探测：`src` 经 `path` 问 `dst`（见模块文档）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TestPing {
@@ -223,18 +260,23 @@ impl TestPing {
     pub const LEN: usize = TEST_HEAD_LEN + 1 + MAX_RELAY_HOPS * NodeId::WIRE_LEN + SIGNATURE_LEN;
     pub const PURPOSE: &str = "test-ping";
 
+    /// `src` 签名的消息：除了类型、签名和填充以外的全部字段。`signature` 字段不参与，签名之前可以先填零。
     #[must_use]
-    pub fn signed_message(src: NodeId, dst: NodeId, test: TestId, seq: u32, path: Option<RelayPath>) -> Vec<u8> {
+    pub fn signed_message(&self) -> Vec<u8> {
         let mut message = Vec::with_capacity(Self::LEN);
-        put_test_head(&mut message, None, src, dst, test, seq);
-        put_path(&mut message, path);
+        self.head().put(None, &mut message);
+        put_path(&mut message, self.path);
         message
+    }
+
+    fn head(&self) -> TestHead {
+        TestHead { src: self.src, dst: self.dst, test: self.test, seq: self.seq }
     }
 
     #[must_use]
     pub fn to_bytes(&self) -> [u8; Self::LEN] {
         let mut encoded = Vec::with_capacity(Self::LEN);
-        put_test_head(&mut encoded, Some(KIND_TEST_PING), self.src, self.dst, self.test, self.seq);
+        self.head().put(Some(KIND_TEST_PING), &mut encoded);
         put_path(&mut encoded, self.path);
         encoded.extend_from_slice(&self.signature);
         let mut bytes = [0; Self::LEN];
@@ -248,14 +290,14 @@ impl TestPing {
         if datagram.len() < Self::LEN {
             return None;
         }
-        let (src, dst, test, seq, rest) = take_test_head(datagram, KIND_TEST_PING)?;
+        let (TestHead { src, dst, test, seq }, rest) = TestHead::take(datagram, KIND_TEST_PING)?;
         let (&count, rest) = rest.split_first()?;
         let count = usize::from(count);
         if count > MAX_RELAY_HOPS {
             return None;
         }
         let (list, rest) = rest.split_at_checked(count * NodeId::WIRE_LEN)?;
-        let relays: Option<Vec<NodeId>> = list.chunks_exact(NodeId::WIRE_LEN).map(|id| NodeId::from_be_bytes(*id.first_chunk()?)).collect();
+        let relays: Option<Vec<NodeId>> = list.as_chunks::<{ NodeId::WIRE_LEN }>().0.iter().map(|id| NodeId::from_be_bytes(*id)).collect();
         let path = match relays?.as_slice() {
             [] => None,
             relays => Some(RelayPath::new(relays).ok()?),
@@ -286,12 +328,17 @@ impl TestPong {
     pub const LEN: usize = TEST_HEAD_LEN + 4 + 4 + 1 + SIGNATURE_LEN;
     pub const PURPOSE: &str = "test-pong";
 
+    /// `src` 签名的消息：除了类型和签名以外的全部字段。`signature` 字段不参与，签名之前可以先填零。
     #[must_use]
     pub fn signed_message(&self) -> Vec<u8> {
         let mut message = Vec::with_capacity(Self::LEN);
-        put_test_head(&mut message, None, self.src, self.dst, self.test, self.seq);
+        self.head().put(None, &mut message);
         self.put_tail(&mut message);
         message
+    }
+
+    fn head(&self) -> TestHead {
+        TestHead { src: self.src, dst: self.dst, test: self.test, seq: self.seq }
     }
 
     fn put_tail(&self, buf: &mut Vec<u8>) {
@@ -303,7 +350,7 @@ impl TestPong {
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(Self::LEN);
-        put_test_head(&mut bytes, Some(KIND_TEST_PONG), self.src, self.dst, self.test, self.seq);
+        self.head().put(Some(KIND_TEST_PONG), &mut bytes);
         self.put_tail(&mut bytes);
         bytes.extend_from_slice(&self.signature);
         bytes
@@ -315,7 +362,7 @@ impl TestPong {
         if datagram.len() != Self::LEN {
             return None;
         }
-        let (src, dst, test, seq, rest) = take_test_head(datagram, KIND_TEST_PONG)?;
+        let (TestHead { src, dst, test, seq }, rest) = TestHead::take(datagram, KIND_TEST_PONG)?;
         let (&held, rest) = rest.split_first_chunk::<4>()?;
         let (&received, rest) = rest.split_first_chunk::<4>()?;
         let (&flags, rest) = rest.split_first()?;
@@ -332,33 +379,12 @@ impl TestPong {
     }
 }
 
-/// 写 TPING、TPONG 开头的部分。`kind` 是 `None` 时不写类型：签名的消息里没有它，用途标签已经分开了两种帧。
-fn put_test_head(buf: &mut Vec<u8>, kind: Option<u8>, src: NodeId, dst: NodeId, test: TestId, seq: u32) {
-    buf.extend(kind);
-    buf.extend_from_slice(&src.to_be_bytes());
-    buf.extend_from_slice(&dst.to_be_bytes());
-    buf.extend_from_slice(&test.to_be_bytes());
-    buf.extend_from_slice(&seq.to_be_bytes());
-}
-
 fn put_path(buf: &mut Vec<u8>, path: Option<RelayPath>) {
     let relays = path.as_ref().map_or(&[][..], RelayPath::as_slice);
     buf.push(u8::try_from(relays.len()).expect("一条路径最多 4 个 relay"));
     for relay in relays {
         buf.extend_from_slice(&relay.to_be_bytes());
     }
-}
-
-fn take_test_head(datagram: &[u8], kind: u8) -> Option<(NodeId, NodeId, TestId, u32, &[u8])> {
-    let (&first, rest) = datagram.split_first()?;
-    if first != kind {
-        return None;
-    }
-    let (&src, rest) = rest.split_first_chunk::<{ NodeId::WIRE_LEN }>()?;
-    let (&dst, rest) = rest.split_first_chunk::<{ NodeId::WIRE_LEN }>()?;
-    let (&test, rest) = rest.split_first_chunk::<8>()?;
-    let (&seq, rest) = rest.split_first_chunk::<4>()?;
-    Some((NodeId::from_be_bytes(src)?, NodeId::from_be_bytes(dst)?, u64::from_be_bytes(test), u32::from_be_bytes(seq), rest))
 }
 
 /// 任意一种探测帧。
@@ -385,14 +411,21 @@ impl Frame {
 
     /// 帧里写的来源和目的节点。
     #[must_use]
-    pub const fn ends(&self) -> (NodeId, NodeId) {
+    pub const fn ends(&self) -> Ends {
         match self {
-            Self::Ping(ping) => (ping.src, ping.dst),
-            Self::Pong(pong) => (pong.src, pong.dst),
-            Self::TestPing(ping) => (ping.src, ping.dst),
-            Self::TestPong(pong) => (pong.src, pong.dst),
+            Self::Ping(Ping { src, dst, .. })
+            | Self::Pong(Pong { src, dst, .. })
+            | Self::TestPing(TestPing { src, dst, .. })
+            | Self::TestPong(TestPong { src, dst, .. }) => Ends { src: *src, dst: *dst },
         }
     }
+}
+
+/// 一个探测帧是谁发给谁的（[`Frame::ends`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ends {
+    pub src: NodeId,
+    pub dst: NodeId,
 }
 
 const _: () = {
@@ -524,7 +557,7 @@ mod tests {
         assert_eq!(bytes.len(), TestPong::LEN);
         assert_eq!(&bytes[21..30], [0, 0, 0x05, 0xdc, 0, 0, 0, 42, 1]);
         assert_eq!(Frame::parse(&bytes), Some(Frame::TestPong(pong)));
-        assert_eq!(Frame::parse(&bytes).map(|frame| frame.ends()), Some((node(2), node(1))));
+        assert_eq!(Frame::parse(&bytes).map(|frame| frame.ends()), Some(Ends { src: node(2), dst: node(1) }));
         let other_path = TestPong { same_path: false, ..pong };
         assert_eq!(TestPong::parse(&other_path.to_bytes()), Some(other_path));
         assert_eq!(TestPong::parse(&bytes[..bytes.len() - 1]), None);
@@ -535,10 +568,12 @@ mod tests {
     #[test]
     fn a_test_ping_signs_the_test_the_sequence_number_and_the_path() {
         let path = RelayPath::new(&[node(8)]).ok();
-        let message = TestPing::signed_message(node(1), node(2), 7, 9, path);
+        let ping = TestPing { src: node(1), dst: node(2), test: 7, seq: 9, path, signature: [0; SIGNATURE_LEN] };
+        let message = ping.signed_message();
         assert_eq!(message, [0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 9, 1, 0, 0, 0, 8]);
-        assert_ne!(message, TestPing::signed_message(node(1), node(2), 7, 9, None), "换一条路径签名就不同");
-        assert_ne!(message, TestPing::signed_message(node(1), node(2), 8, 9, path));
+        assert_ne!(message, TestPing { path: None, ..ping }.signed_message(), "换一条路径签名就不同");
+        assert_ne!(message, TestPing { test: 8, ..ping }.signed_message());
+        assert_eq!(message, TestPing { signature: SIGNATURE, ..ping }.signed_message(), "签名不在签名的消息里");
     }
 
     #[test]

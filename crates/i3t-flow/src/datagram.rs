@@ -100,10 +100,7 @@ impl<C: Connector + Datagrams> Opener<C> {
             Ok(reply) => FlowError::Refused(reply),
             Err(error) => error,
         };
-        let reason = match failure {
-            FlowError::Malformed(_) => Reason::ProtocolError,
-            _ => Reason::Cancelled,
-        };
+        let reason = failure.reset_reason();
         send.reset(StreamCode(reason.to_wire()));
         recv.stop(StreamCode(reason.to_wire()));
         Err(failure)

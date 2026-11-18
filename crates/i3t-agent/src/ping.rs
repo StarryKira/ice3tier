@@ -324,7 +324,17 @@ mod tests {
         type Recv = MemoryRecv;
 
         fn open(&self, peer: NodeId) -> impl Future<Output = Result<(MemorySend, MemoryRecv), OpenError>> + Send {
-            let take = |left: &AtomicU32| left.fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| left.checked_sub(1)).is_ok();
+            // 还有余额就减一。不用 `fetch_update`：新的 clippy 说它已经过时，换上的 `try_update` 老一点的工具链又没有。
+            let take = |left: &AtomicU32| {
+                let mut current = left.load(Ordering::Acquire);
+                while let Some(next) = current.checked_sub(1) {
+                    match left.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {
+                        Ok(_) => return true,
+                        Err(actual) => current = actual,
+                    }
+                }
+                false
+            };
             let slow = take(&self.slow_opens);
             let unanswered = take(&self.unanswered);
             let dial = self.dial;

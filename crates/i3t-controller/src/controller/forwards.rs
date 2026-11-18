@@ -1,6 +1,6 @@
 //! 端口转发的增删改，和每条转发现在的状态。
 
-use i3t_model::admin::{Forward, ForwardInput, ForwardStatus, LogRef, NetworkId, RefKind};
+use i3t_model::admin::{Forward, ForwardInput, ForwardStatus, LogRef, NetworkId, RefKind, action};
 use i3t_model::netmap::ForwardProtocol;
 use serde_json::{Value, json};
 
@@ -37,7 +37,7 @@ impl Controller {
             store.log_refs(
                 now,
                 Some(network),
-                "forward.create",
+                action::FORWARD_CREATE,
                 &describe(id, &config),
                 &refs(id, &config),
                 params(store, id, &config)?,
@@ -64,7 +64,7 @@ impl Controller {
             store.log_refs(
                 now,
                 Some(network),
-                "forward.update",
+                action::FORWARD_UPDATE,
                 &describe(id, &config),
                 &refs(id, &config),
                 params(store, id, &config)?,
@@ -87,7 +87,7 @@ impl Controller {
             let record = store.forward(network, id)?.ok_or(Error::NotFound(Entity::Forward))?;
             let params = params(store, id, &record.config)?;
             store.delete_forward(id)?;
-            store.log_refs(now, Some(network), "forward.delete", &describe(id, &record.config), &refs(id, &record.config), params)?;
+            store.log_refs(now, Some(network), action::FORWARD_DELETE, &describe(id, &record.config), &refs(id, &record.config), params)?;
             Ok::<_, Error>(record)
         })?;
         inner.refresh(network, Seeds::of([record.config.listen_node, record.config.target_node]), None)?;

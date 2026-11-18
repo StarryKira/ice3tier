@@ -175,7 +175,7 @@ pub(crate) fn reached_by<'a>(
         .filter(|node| node.id != relay)
         .filter_map(|node| {
             let record = node.relay_reach.iter().find(|record| record.relay == relay)?;
-            Some(ReachEntry { node: crate::controller::node_ref(node), online: online(node.id), outcome: record.outcome, at: record.at })
+            Some(ReachEntry { node: node.to_ref(), online: online(node.id), outcome: record.outcome, at: record.at })
         })
         .collect();
     entries.sort_by_key(|entry| entry.node.id);

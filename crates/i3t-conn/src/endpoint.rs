@@ -7,7 +7,7 @@ use std::sync::{Arc, RwLock};
 use i3t_crypto::NodeKey;
 use i3t_model::Netmap;
 use i3t_model::control::{RouteEntry, Signal};
-use i3t_model::netmap::Attachment;
+use i3t_model::netmap::{Attachment, Congestion};
 use i3t_path::{
     BackboneRow, DirectAttempt, HopReport, PathConfig, PathReport, Paths, RouteChange, RouteDecision, RoutePin, Side, TestGuard, TestPath,
     TestSpec, TrainError, TrainReport, TrainSpec,
@@ -285,11 +285,11 @@ impl Endpoint {
         self.paths.hops(peer, path).await
     }
 
-    /// 到 `peer` 的连接用的拥塞控制：`"bbr"` 或者 `"cubic"`。还没有连接时是新建的连接会用的那一种（节点对的设置，
+    /// 到 `peer` 的连接用的拥塞控制。还没有连接时是新建的连接会用的那一种（节点对的设置，
     /// 没有设置时是节点的默认）。吞吐测试的结果要说明它是在哪一种下面量的。
     #[must_use]
-    pub fn congestion(&self, peer: NodeId) -> String {
-        self.manager.congestion(peer).to_string()
+    pub fn congestion(&self, peer: NodeId) -> Congestion {
+        Congestion::from(self.manager.congestion(peer))
     }
 
     /// 本节点启用为 relay 时，它在 UDP 端口的同一个端口号上听 TCP。开头是 TLS 握手记录的连接（ice3proxy）交给 `handoff`，

@@ -3,6 +3,7 @@
 //! [`View`] 是选路时能看到的全部东西的只读快照；[`RouteKey`] 是选出来的结果；剩下的是把结果写成给人看的话。
 
 use std::collections::HashMap;
+use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -43,11 +44,28 @@ pub(super) enum RouteKey {
 }
 
 impl RouteKey {
-    pub(super) fn to_route(self) -> Route {
+    /// 走的是哪条路径；没有路时是 `None`。
+    pub(super) const fn path(self) -> Option<PathId> {
         match self {
-            Self::None => Route::None,
-            Self::Direct(addr) => Route::Direct { addr },
-            Self::Relay { path, .. } => Route::Relay { relays: path.as_slice().to_vec() },
+            Self::None => None,
+            Self::Direct(addr) => Some(PathId::Direct(addr)),
+            Self::Relay { path, .. } => Some(PathId::Relays(path)),
+        }
+    }
+
+    /// 上报和管理接口里的写法。
+    pub(super) fn to_route(self) -> Route {
+        self.path().map_or(Route::None, PathId::to_route)
+    }
+}
+
+/// 一条路写给人看，日志和测试都靠它认路。
+impl fmt::Display for RouteKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => f.write_str("没有路"),
+            Self::Direct(addr) => write!(f, "直连 {addr}"),
+            Self::Relay { path, .. } => write!(f, "经 {}", relays_text(*path)),
         }
     }
 }
@@ -377,41 +395,27 @@ fn relays_text(path: RelayPath) -> String {
     format!("relay {}", hops.join(" → "))
 }
 
-/// 一条路写给人看，日志和测试都靠它认路。
-pub(super) fn route_text(key: RouteKey) -> String {
-    match key {
-        RouteKey::None => "没有路".to_owned(),
-        RouteKey::Direct(addr) => format!("直连 {addr}"),
-        RouteKey::Relay { path, .. } => format!("经 {}", relays_text(path)),
-    }
-}
-
 /// 延迟优先模式换路的原因。`candidates` 是做决定时的候选，用来写出代价。
 pub(super) fn explain(why: Why, to: RouteKey, from: RouteKey, candidates: &[Candidate], hint: Option<RouteHint>) -> Reason {
-    let chosen = match to {
-        RouteKey::None => None,
-        RouteKey::Direct(addr) => Some(PathId::Direct(addr)),
-        RouteKey::Relay { path, .. } => Some(PathId::Relays(path)),
-    };
+    let chosen = to.path();
     let cost = candidates.iter().find(|candidate| Some(candidate.path) == chosen).map_or(f64::NAN, |candidate| candidate.cost_ms);
     let count = u32::try_from(candidates.len()).unwrap_or(u32::MAX);
-    let (to_text, from_text) = (route_text(to), route_text(from));
     match why {
-        Why::Lan => Reason::new(format!("对端在同一个局域网里，局域网直连无条件优先，改走{to_text}"), RouteCause::Lan),
+        Why::Lan => Reason::new(format!("对端在同一个局域网里，局域网直连无条件优先，改走{to}"), RouteCause::Lan),
         Why::First => Reason::new(
-            format!("延迟优先：{} 条候选里{to_text}的代价最低（{cost:.0}ms）", candidates.len()),
+            format!("延迟优先：{} 条候选里{to}的代价最低（{cost:.0}ms）", candidates.len()),
             RouteCause::LowestCost { candidates: count, cost_us: micros(cost) },
         ),
         Why::Failover => {
             let hint = hint.unwrap_or(RouteHint::RouteFailed);
             Reason::new(
-                format!("{}，不等迟滞，立刻换到剩下的 {} 条候选里代价最低的{to_text}（{cost:.0}ms）", hint_text(hint), candidates.len()),
+                format!("{}，不等迟滞，立刻换到剩下的 {} 条候选里代价最低的{to}（{cost:.0}ms）", hint_text(hint), candidates.len()),
                 RouteCause::Failover { hint, candidates: count, cost_us: micros(cost) },
             )
         }
         Why::Cheaper { from_ms, to_ms } => Reason::new(
             format!(
-                "延迟优先：{to_text}的代价（{to_ms:.0}ms）连续 {SWITCH_WINDOWS} 个评估窗口都比原来的{from_text}（{from_ms:.0}ms）低至少 max(5ms, 10%)，切换"
+                "延迟优先：{to}的代价（{to_ms:.0}ms）连续 {SWITCH_WINDOWS} 个评估窗口都比原来的{from}（{from_ms:.0}ms）低至少 max(5ms, 10%)，切换"
             ),
             RouteCause::Cheaper {
                 previous: from.to_route(),
@@ -585,7 +589,7 @@ mod tests {
         assert_eq!(two_hops.to_route(), Route::Relay { relays: vec![node(8), node(9)] });
         assert_eq!(RouteKey::None.to_route(), Route::None);
         assert_eq!(
-            (route_text(direct), route_text(two_hops), route_text(RouteKey::None)),
+            (direct.to_string(), two_hops.to_string(), RouteKey::None.to_string()),
             ("直连 203.0.113.7:4000".to_owned(), "经 relay 8 → 9".to_owned(), "没有路".to_owned())
         );
     }

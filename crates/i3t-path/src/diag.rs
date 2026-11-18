@@ -23,6 +23,7 @@ use tokio::sync::oneshot;
 
 use crate::cost::{self, Segment};
 use crate::report::{CandidateReport, DirectKind, RelayLeg};
+use crate::routing::PathId;
 
 /// 一个测试最多同时有几条路径在测（直连和指定的 relay 路径都算）。
 pub const MAX_TEST_PATHS: usize = 5;
@@ -79,14 +80,15 @@ impl TestPath {
         }
     }
 
-    /// 管理接口里的写法。
+    /// 管理接口里的写法。直连要写出对端的地址，`peer_addr` 没有时是 [`Route::None`]。
     #[must_use]
     pub fn to_route(self, peer_addr: Option<std::net::SocketAddr>) -> Route {
-        match (self, peer_addr) {
-            (Self::Direct, Some(addr)) => Route::Direct { addr },
-            (Self::Direct, None) => Route::None,
-            (Self::Relays(path), _) => Route::Relay { relays: path.as_slice().to_vec() },
-        }
+        let path = match (self, peer_addr) {
+            (Self::Direct, Some(addr)) => Some(PathId::Direct(addr)),
+            (Self::Direct, None) => None,
+            (Self::Relays(path), _) => Some(PathId::Relays(path)),
+        };
+        path.map_or(Route::None, PathId::to_route)
     }
 }
 

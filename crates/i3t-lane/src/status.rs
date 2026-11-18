@@ -186,7 +186,7 @@ pub struct HandshakeFailures {
     pub unknown_key: u64,
     /// 别的 TLS 错误。
     pub tls: u64,
-    /// 握手之后的 HELLO 不对，或者根本不是 TLS。
+    /// 握手之后的 HELLO 不对，或者根本不是 TLS；没握手完连接就断了（对方关掉、重置）的也算在这里。
     pub protocol: u64,
     /// 还没握手完的连接太多（同一来源或者全部），被挤掉或者拒绝的。
     pub busy: u64,

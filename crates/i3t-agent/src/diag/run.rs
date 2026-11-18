@@ -18,7 +18,7 @@ use i3t_model::control::diag::{
     Transfer, TransferEnd,
 };
 use i3t_model::control::{Route, TestOrder, TestReport};
-use i3t_model::netmap::Reach;
+use i3t_model::netmap::{Congestion, Reach};
 use i3t_proto::NodeId;
 use i3t_proto::datagram::RelayPath;
 use i3t_proto::flow::{MeasureEnd, MeasureMode, OpenMeasure};
@@ -55,7 +55,7 @@ pub(super) async fn initiate(diag: &Diag, order: &TestOrder) -> TestReport {
         let picked = vec![PathPick::Direct];
         let measured = match direct.as_ref() {
             _ if reach == Reach::RelayOnly => failed(Route::None, picked, TestCode::RelayOnly),
-            Some(side) if side.ok => measure_path(diag, order, TestPath::Direct, picked, throughput.as_deref(), throughput_off).await,
+            Some(side) if side.ok => measure_path(diag, order, TestPath::Direct, picked, throughput, throughput_off).await,
             Some(_) | None => failed(Route::None, picked, TestCode::NoDirect),
         };
         report.paths.push(measured);
@@ -66,7 +66,7 @@ pub(super) async fn initiate(diag: &Diag, order: &TestOrder) -> TestReport {
         } else {
             for Planned { path, picked } in relay_paths(diag, order).await {
                 let measured = match path {
-                    Ok(path) => measure_path(diag, order, TestPath::Relays(path), picked, throughput.as_deref(), throughput_off).await,
+                    Ok(path) => measure_path(diag, order, TestPath::Relays(path), picked, throughput, throughput_off).await,
                     Err((route, code)) => failed(route, picked, code),
                 };
                 report.paths.push(measured);
@@ -190,7 +190,7 @@ async fn measure_path(
     order: &TestOrder,
     path: TestPath,
     picked_by: Vec<PathPick>,
-    congestion: Option<&str>,
+    congestion: Option<Congestion>,
     throughput_off: bool,
 ) -> PathMeasure {
     let (endpoint, peer) = (&*diag.endpoint, order.peer);
@@ -219,7 +219,7 @@ async fn measure_path(
             down: None,
             failure: Some(TestCode::ThroughputOff),
             transport: "quic".to_owned(),
-            congestion: endpoint.congestion(order.peer),
+            congestion: endpoint.congestion(order.peer).to_string(),
             limit_bytes: THROUGHPUT_BYTES,
             limit_ms: millis(THROUGHPUT_TIME),
             pinned: false,
@@ -284,7 +284,7 @@ fn hop(hop: &HopReport) -> Hop {
 }
 
 /// 在 `path` 上量上下行的吞吐：先把到对端的连接固定在这条路径上，量完（包括中途出错）就解除。
-async fn throughput(endpoint: &Endpoint, order: &TestOrder, path: TestPath, congestion: &str) -> Throughput {
+async fn throughput(endpoint: &Endpoint, order: &TestOrder, path: TestPath, congestion: Congestion) -> Throughput {
     let peer = order.peer;
     let limit = (THROUGHPUT_TIME + Duration::from_secs(4)) * 2;
     let pin = endpoint.pin_route(peer, path, limit);
@@ -309,7 +309,7 @@ async fn throughput(endpoint: &Endpoint, order: &TestOrder, path: TestPath, cong
         down: down.and_then(Result::ok).map(transfer),
         failure,
         transport: "quic".to_owned(),
-        congestion: congestion.to_owned(),
+        congestion: congestion.to_string(),
         limit_bytes: THROUGHPUT_BYTES,
         limit_ms: millis(THROUGHPUT_TIME),
         pinned: held,

@@ -830,6 +830,7 @@ dependencies = [
  "i3t-update",
  "libc",
  "rlimit",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -885,6 +886,7 @@ dependencies = [
  "toml",
  "toml_edit",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1030,6 +1032,7 @@ dependencies = [
  "i3t-underlay",
  "rcgen",
  "ring",
+ "rlimit",
  "rustix",
  "rustls",
  "socket2",
@@ -1066,6 +1069,7 @@ dependencies = [
  "serde",
  "serde_json",
  "socket2",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",

@@ -17,23 +17,16 @@ pub fn encode(out: &mut Vec<u8>, data: &[u8]) {
     out.extend_from_slice(b"\r\n");
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ChunkError {
+    #[error("块长度那一行不对：{0:?}")]
     BadSize(String),
+    #[error("块的数据后面不是 CRLF")]
     MissingCrlf,
+    #[error("块长度或者尾部字段的一行太长")]
     LineTooLong,
+    #[error("最后一块之后还有数据")]
     DataAfterEnd,
-}
-
-impl std::fmt::Display for ChunkError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::BadSize(line) => write!(f, "块长度那一行不对：{line:?}"),
-            Self::MissingCrlf => f.write_str("块的数据后面不是 CRLF"),
-            Self::LineTooLong => f.write_str("块长度或者尾部字段的一行太长"),
-            Self::DataAfterEnd => f.write_str("最后一块之后还有数据"),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

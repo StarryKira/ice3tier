@@ -200,6 +200,21 @@ async fn connections_that_never_finish_the_handshake_are_cut_at_the_deadline() {
 }
 
 #[tokio::test]
+async fn a_connection_that_goes_away_in_the_middle_of_the_handshake_counts_as_a_protocol_failure() {
+    let pair = Pair::new(quick()).await;
+    pair.ready(1).await;
+    let before = pair.entry.lanes.status().handshake_failures;
+    let mut stream = TcpStream::connect(pair.entry.addr.unwrap()).await.unwrap();
+    stream.write_all(&[0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00]).await.unwrap();
+    drop(stream);
+    wait_for("半截握手就断了的连接记在 protocol 下", Duration::from_secs(5), || {
+        pair.entry.lanes.status().handshake_failures.protocol > before.protocol
+    })
+    .await;
+    assert_eq!(pair.entry.lanes.status().handshake_failures.deadline, before.deadline, "不是等到时限才断的");
+}
+
+#[tokio::test]
 async fn a_crowd_of_idle_connections_from_one_source_cannot_lock_the_dialler_out() {
     let mut config = quick();
     config.handshake_deadline = Duration::from_secs(30);
