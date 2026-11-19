@@ -5,6 +5,7 @@ import { OnlineDot } from '@/components/status'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
 import { cn } from '@/lib/utils'
+import { gridWidth } from '@/topology/grid'
 import { type Pair } from '@/topology/pair'
 import { cellKey, classify, classLabel, classSymbol, entryText, indexEntries, type RouteClass } from '@/topology/route'
 
@@ -91,13 +92,16 @@ export function MatrixView({ matrix, pair, onPick }: MatrixViewProps) {
 
   return (
     <div className="overflow-auto" data-testid="route-matrix">
-      <table className="border-separate border-spacing-0 text-sm">
+      <table
+        className="table-fixed border-separate border-spacing-1 text-sm"
+        style={gridWidth(matrix.nodes.length, '9rem')}
+      >
         <caption className="sr-only">{g.matrixCaption}</caption>
         <thead>
           <tr>
             <th
               scope="col"
-              className="sticky top-0 left-0 z-20 border-b bg-card py-2 pr-4 text-left text-xs font-medium whitespace-nowrap text-muted-foreground"
+              className="sticky top-0 left-0 z-20 w-36 bg-card py-2 pr-4 text-left text-xs font-medium whitespace-nowrap text-muted-foreground"
             >
               {g.matrixFrom}
             </th>
@@ -106,7 +110,7 @@ export function MatrixView({ matrix, pair, onPick }: MatrixViewProps) {
                 key={node.id}
                 scope="col"
                 className={cn(
-                  'sticky top-0 z-10 max-w-24 border-b bg-card px-1.5 py-2 text-xs font-medium text-muted-foreground',
+                  'sticky top-0 z-10 bg-card px-1.5 py-2 text-xs font-medium text-muted-foreground',
                   (pair.a === node.id || pair.b === node.id) && 'text-primary',
                 )}
               >
@@ -123,11 +127,11 @@ export function MatrixView({ matrix, pair, onPick }: MatrixViewProps) {
               <th
                 scope="row"
                 className={cn(
-                  'sticky left-0 z-10 bg-card py-0.5 pr-4 text-left text-[13px] font-medium whitespace-nowrap',
+                  'sticky left-0 z-10 bg-card pr-4 text-left text-[13px] font-medium whitespace-nowrap',
                   (pair.a === from.id || pair.b === from.id) && 'text-primary',
                 )}
               >
-                <span className="inline-flex max-w-44 items-center gap-1.5">
+                <span className="flex min-w-0 items-center gap-1.5">
                   <OnlineDot online={from.online} />
                   <span className="truncate">{from.name}</span>
                 </span>
@@ -135,8 +139,8 @@ export function MatrixView({ matrix, pair, onPick }: MatrixViewProps) {
               {matrix.nodes.map((to) => {
                 if (from.id === to.id) {
                   return (
-                    <td key={to.id} className="p-0.5 text-center">
-                      <span className="block h-8 min-w-12 rounded-sm bg-muted/50" aria-hidden />
+                    <td key={to.id} className="p-0 text-center">
+                      <span className="block h-11 rounded-md bg-muted/40" aria-hidden />
                       <span className="sr-only">{g.cellSelf}</span>
                     </td>
                   )
@@ -144,7 +148,7 @@ export function MatrixView({ matrix, pair, onPick }: MatrixViewProps) {
                 const entry = index.get(cellKey(from.id, to.id))
                 if (entry === undefined) {
                   return (
-                    <td key={to.id} className="p-0.5 text-center text-faint" title={t.routes.classEmpty}>
+                    <td key={to.id} className="p-0 text-center text-faint" title={t.routes.classEmpty}>
                       <span aria-hidden>{t.routes.symbolEmpty}</span>
                       <span className="sr-only">{g.cellLabel(from.name, to.name, t.routes.classEmpty)}</span>
                     </td>
@@ -153,7 +157,7 @@ export function MatrixView({ matrix, pair, onPick }: MatrixViewProps) {
                 const cls = classify(entry.route)
                 const text = entryText(entry, name)
                 return (
-                  <td key={to.id} className="p-0.5">
+                  <td key={to.id} className="p-0">
                     <Tooltip content={g.cellLabel(from.name, to.name, text)}>
                       <button
                         type="button"
@@ -162,14 +166,19 @@ export function MatrixView({ matrix, pair, onPick }: MatrixViewProps) {
                         aria-pressed={selected(from.id, to.id)}
                         data-testid={`cell-${from.id}-${to.id}`}
                         className={cn(
-                          'flex h-8 w-full min-w-12 items-center justify-center gap-1 rounded-sm px-1 text-xs font-medium tabular transition-shadow hover:ring-1 hover:ring-foreground/25',
+                          'flex h-11 w-full items-center justify-center gap-1.5 rounded-md px-1.5 text-[13px] font-medium tabular transition-[box-shadow,transform] hover:-translate-y-px hover:shadow-card hover:ring-1 hover:ring-foreground/20',
                           cls === 'none' && !to.online ? NONE_OFFLINE : CELL[cls],
                           entry.stale && 'border border-dashed border-border-strong bg-transparent opacity-60',
                           selected(from.id, to.id) && 'ring-2 ring-primary hover:ring-2 hover:ring-primary',
                         )}
                       >
                         <span aria-hidden>{classSymbol(cls)}</span>
-                        {entry.rtt_ms !== null ? <span className="font-normal">{entry.rtt_ms}</span> : null}
+                        {entry.rtt_ms !== null ? (
+                          <span className="font-normal">
+                            {entry.rtt_ms}
+                            <span className="ml-0.5 text-[10px] text-muted-foreground">ms</span>
+                          </span>
+                        ) : null}
                         {/* 到 relay 退回 TCP 是值得知道的事：格子里写出来，别的细节在悬停文字里。 */}
                         {entry.route.via === 'relay' && entry.relay_leg === 'tcp' ? (
                           <span aria-hidden className="text-[10px] font-semibold text-warn">

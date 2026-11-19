@@ -14,6 +14,7 @@ import { formatAge } from '@/lib/time'
 import { useNow } from '@/lib/useNow'
 import { cn } from '@/lib/utils'
 import { linkView, relayRowView } from '@/topology/backbone'
+import { gridWidth } from '@/topology/grid'
 
 const b = t.topology.backbone
 
@@ -68,14 +69,17 @@ export function BackboneView({ network, name }: { network: Network; name: (id: N
             {data.answered.length === 0 ? <Notice tone="warn">{b.nobody}</Notice> : null}
             {data.relays.length === 1 ? <Notice>{b.oneRelay}</Notice> : null}
             <div className="overflow-x-auto">
-              {/* 和路由矩阵一样按内容定宽：relay 少的时候格子不会被拉成一长条。 */}
-              <table className="border-collapse text-sm">
+              {/* 和路由矩阵一样铺满，一列有个最宽：relay 少的时候格子不会被拉成一长条。 */}
+              <table
+                className="table-fixed border-separate border-spacing-1 text-sm"
+                style={gridWidth(data.relays.length, '11rem')}
+              >
                 <caption className="sr-only">{b.caption}</caption>
                 <thead>
                   <tr>
                     <th
                       scope="col"
-                      className="border-b bg-card py-2 pr-4 text-left text-xs font-medium whitespace-nowrap text-muted-foreground"
+                      className="w-44 bg-card py-2 pr-4 text-left text-xs font-medium whitespace-nowrap text-muted-foreground"
                     >
                       {b.from}
                     </th>
@@ -83,7 +87,7 @@ export function BackboneView({ network, name }: { network: Network; name: (id: N
                       <th
                         key={relay.relay.id}
                         scope="col"
-                        className="max-w-28 border-b bg-card px-1.5 py-2 text-xs font-medium text-muted-foreground"
+                        className="bg-card px-1.5 py-2 text-xs font-medium text-muted-foreground"
                       >
                         <span className="block truncate" title={relay.relay.name}>
                           {relay.relay.name}
@@ -96,12 +100,8 @@ export function BackboneView({ network, name }: { network: Network; name: (id: N
                   {data.relays.map((row) => {
                     const head = relayRowView(row, name)
                     return (
-                      <tr
-                        key={row.relay.id}
-                        className="border-b last:border-b-0"
-                        data-testid={`backbone-row-${row.relay.id}`}
-                      >
-                        <th scope="row" className="bg-card py-2.5 pr-4 text-left align-top font-normal">
+                      <tr key={row.relay.id} data-testid={`backbone-row-${row.relay.id}`}>
+                        <th scope="row" className="bg-card py-1.5 pr-4 text-left align-middle font-normal">
                           <span className="flex items-center gap-1.5 text-[13px] font-medium">
                             <OnlineDot online={row.online} />
                             {row.relay.name}
@@ -123,8 +123,8 @@ export function BackboneView({ network, name }: { network: Network; name: (id: N
                         {data.relays.map((column) => {
                           if (column.relay.id === row.relay.id) {
                             return (
-                              <td key={column.relay.id} className="p-0.5 text-center">
-                                <span className="block h-8 min-w-14 rounded-sm bg-muted/50" aria-hidden />
+                              <td key={column.relay.id} className="p-0 text-center">
+                                <span className="block h-14 rounded-md bg-muted/40" aria-hidden />
                                 <span className="sr-only">{t.topology.cellSelf}</span>
                               </td>
                             )
@@ -132,7 +132,7 @@ export function BackboneView({ network, name }: { network: Network; name: (id: N
                           const link = linkView(row, column.relay.id)
                           const label = t.topology.cellLabel(row.relay.name, column.relay.name, link?.text ?? b.noLink)
                           return (
-                            <td key={column.relay.id} className="p-0.5 text-center">
+                            <td key={column.relay.id} className="p-0 text-center">
                               <Tooltip content={label}>
                                 <span
                                   tabIndex={0}
@@ -140,7 +140,7 @@ export function BackboneView({ network, name }: { network: Network; name: (id: N
                                   aria-label={label}
                                   data-testid={`backbone-cell-${row.relay.id}-${column.relay.id}`}
                                   className={cn(
-                                    'flex h-8 min-w-14 items-center justify-center rounded-sm px-1 text-xs font-medium tabular',
+                                    'flex h-14 items-center justify-center rounded-md px-1.5 text-[13px] font-medium tabular',
                                     CELL[link?.tone ?? 'idle'],
                                   )}
                                 >
