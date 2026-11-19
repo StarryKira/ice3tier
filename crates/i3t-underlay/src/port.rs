@@ -9,8 +9,9 @@ use std::future;
 use std::io::{self, IoSliceMut};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Context, Poll, ready};
+use std::time::{Duration, Instant};
 
 use quinn_udp::{EcnCodepoint, UdpSocketState};
 use socket2::{Domain, Protocol, Socket, Type};
@@ -22,6 +23,9 @@ pub const BATCH_SIZE: usize = quinn_udp::BATCH_SIZE;
 
 /// 向内核要的收发缓冲区大小。默认的两百 KB 左右在高速率下本机就会溢出；内核会把它截到系统允许的上限。
 const SOCKET_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+
+/// 发送出错的日志，同一类最多多久记一条：出错的时候常常是每一个包都出错。
+const SEND_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 /// IP 头里的显式拥塞通知标记。端口原样收发它，relay 转发时也带着，这样两端的连接能看到路上的拥塞标记。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +127,54 @@ pub struct UdpPort {
     /// 没装过滤器时收发路径上只多读一个原子变量。
     filtered: AtomicBool,
     filter: RwLock<Option<PacketFilter>>,
+    unreachable_logged: Throttle,
+    send_error_logged: Throttle,
+}
+
+/// 内核不肯发一个数据报的原因，按怎么对待分的类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SendFailure {
+    /// 发送缓冲区满了：等可写之后再发。
+    Busy,
+    /// 比出去的那块网卡的 MTU 大。连接层探测路径 MTU 时发的大包会这样，是预料之中的。
+    TooLong,
+    /// 从这台机器到不了那个地址。最常见的是本机没有 IPv6，而对端公布的地址里有 IPv6：
+    /// 这是正常的状态，和发到一个不通的地址没有区别，不该是一条警告。
+    Unreachable,
+    Other,
+}
+
+impl SendFailure {
+    fn of(error: &io::Error) -> Self {
+        #[cfg(unix)]
+        const MESSAGE_TOO_LONG: i32 = libc::EMSGSIZE;
+        /// `WSAEMSGSIZE`。
+        #[cfg(windows)]
+        const MESSAGE_TOO_LONG: i32 = 10040;
+
+        match error.kind() {
+            io::ErrorKind::WouldBlock => Self::Busy,
+            io::ErrorKind::NetworkUnreachable | io::ErrorKind::HostUnreachable => Self::Unreachable,
+            _ if error.raw_os_error() == Some(MESSAGE_TOO_LONG) => Self::TooLong,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// 一类日志隔 [`SEND_ERROR_LOG_INTERVAL`] 才记一条。
+#[derive(Debug, Default)]
+struct Throttle(Mutex<Option<Instant>>);
+
+impl Throttle {
+    /// 现在该不该记。该记的话，从现在起重新计时。
+    fn ready(&self, now: Instant) -> bool {
+        let mut last = self.0.lock().expect("log throttle mutex poisoned");
+        if last.is_some_and(|last| now.saturating_duration_since(last) < SEND_ERROR_LOG_INTERVAL) {
+            return false;
+        }
+        *last = Some(now);
+        true
+    }
 }
 
 impl UdpPort {
@@ -172,7 +224,15 @@ impl UdpPort {
             }
         }
         let local = socket.local_addr()?;
-        Ok(Self { io: UdpSocket::from_std(socket)?, state, local, filtered: AtomicBool::new(false), filter: RwLock::new(None) })
+        Ok(Self {
+            io: UdpSocket::from_std(socket)?,
+            state,
+            local,
+            filtered: AtomicBool::new(false),
+            filter: RwLock::new(None),
+            unreachable_logged: Throttle::default(),
+            send_error_logged: Throttle::default(),
+        })
     }
 
     /// 实际绑定的地址。`bind` 时端口给的是 0 的话，这里是系统分配的端口。
@@ -200,7 +260,7 @@ impl UdpPort {
     /// 别的发送错误（目的不可达、包太大等）只记日志：UDP 本来就会丢包，上面的协议自己会重传。
     pub fn try_send(&self, transmit: &Transmit<'_>) -> io::Result<()> {
         let Some(transmit) = self.outgoing(transmit) else { return Ok(()) };
-        self.io.try_io(Interest::WRITABLE, || self.state.send((&self.io).into(), &transmit))
+        self.io.try_io(Interest::WRITABLE, || self.hand_to_kernel(&transmit))
     }
 
     /// 发送，内核的发送缓冲区满了就丢掉。返回有没有发出去。
@@ -209,7 +269,32 @@ impl UdpPort {
     /// 它直接问内核，不看运行时记的"可写"状态，所以刚绑定好的端口上也能立刻发。
     pub fn send_or_drop(&self, transmit: &Transmit<'_>) -> bool {
         let Some(transmit) = self.outgoing(transmit) else { return false };
-        self.state.send((&self.io).into(), &transmit).is_ok()
+        self.hand_to_kernel(&transmit).is_ok()
+    }
+
+    /// 交给内核发。只把"现在发不了"（[`io::ErrorKind::WouldBlock`]）报给调用方；别的错误在这里记一笔就算了，
+    /// 包当作丢了：UDP 本来就会丢包，上面的协议自己会重传。
+    ///
+    /// 不用底层库自带的那一层错误处理：它把所有的错误都记成警告，"从这台机器到不了那个地址"也在里面，
+    /// 于是没有 IPv6 的机器只要有一个对端公布了 IPv6 地址，日志里就每分钟一条警告。
+    fn hand_to_kernel(&self, transmit: &quinn_udp::Transmit<'_>) -> io::Result<()> {
+        let Err(error) = self.state.try_send((&self.io).into(), transmit) else { return Ok(()) };
+        let destination = SocketAddr::new(transmit.destination.ip().to_canonical(), transmit.destination.port());
+        match SendFailure::of(&error) {
+            SendFailure::Busy => return Err(error),
+            SendFailure::TooLong => {}
+            SendFailure::Unreachable => {
+                if self.unreachable_logged.ready(Instant::now()) {
+                    tracing::debug!(%destination, %error, "从这台机器到不了这个地址，发给它的包丢掉");
+                }
+            }
+            SendFailure::Other => {
+                if self.send_error_logged.ready(Instant::now()) {
+                    tracing::warn!(%destination, len = transmit.contents.len(), segment_size = ?transmit.segment_size, %error, "UDP 发送出错，包丢掉");
+                }
+            }
+        }
+        Ok(())
     }
 
     /// 用 [`send_or_drop`](Self::send_or_drop) 发一个数据报。
@@ -357,8 +442,6 @@ impl fmt::Debug for UdpPort {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
 
     const MAX_DATAGRAM: usize = 1500;
@@ -381,6 +464,38 @@ mod tests {
             }
         }
         datagrams
+    }
+
+    #[test]
+    fn an_address_this_machine_cannot_reach_is_not_a_send_error_worth_a_warning() {
+        let kind = |kind: io::ErrorKind| SendFailure::of(&io::Error::from(kind));
+        assert_eq!(kind(io::ErrorKind::WouldBlock), SendFailure::Busy);
+        assert_eq!(kind(io::ErrorKind::NetworkUnreachable), SendFailure::Unreachable);
+        assert_eq!(kind(io::ErrorKind::HostUnreachable), SendFailure::Unreachable);
+        assert_eq!(kind(io::ErrorKind::PermissionDenied), SendFailure::Other);
+    }
+
+    /// 内核给的错误码要认得出来：没有 IPv6 的机器往 IPv6 地址发时就是 `ENETUNREACH`。
+    #[cfg(unix)]
+    #[test]
+    fn kernel_error_codes_are_told_apart() {
+        let code = |code: i32| SendFailure::of(&io::Error::from_raw_os_error(code));
+        assert_eq!(code(libc::EAGAIN), SendFailure::Busy);
+        assert_eq!(code(libc::ENETUNREACH), SendFailure::Unreachable);
+        assert_eq!(code(libc::EHOSTUNREACH), SendFailure::Unreachable);
+        assert_eq!(code(libc::EMSGSIZE), SendFailure::TooLong);
+        assert_eq!(code(libc::EPERM), SendFailure::Other);
+        assert_eq!(code(libc::EINVAL), SendFailure::Other);
+    }
+
+    #[test]
+    fn a_kind_of_send_error_is_logged_once_per_interval() {
+        let throttle = Throttle::default();
+        let start = Instant::now();
+        assert!(throttle.ready(start));
+        assert!(!throttle.ready(start + SEND_ERROR_LOG_INTERVAL / 2));
+        assert!(throttle.ready(start + SEND_ERROR_LOG_INTERVAL));
+        assert!(!throttle.ready(start + SEND_ERROR_LOG_INTERVAL + Duration::from_secs(1)));
     }
 
     #[tokio::test]
