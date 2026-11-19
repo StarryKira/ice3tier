@@ -16,7 +16,7 @@ use super::{
     ATTACH_REVIEW, Control, DRAIN_HOLD, InboundLeg, LinkWire, OVERLOAD_HOLD, PROBE_AGAIN, PROBE_LIMIT, PeerState, RelayEntry,
     UNATTACHED_HOLD,
 };
-use crate::backbone::Accepted;
+use crate::backbone::{Accepted, Gate};
 use crate::relays::{self, Backbone, Complaint, Identity, Standing};
 use crate::routing::Entry;
 use crate::table::{self, RelaySlot};
@@ -75,6 +75,8 @@ impl Control {
             entry.link.on_udp_frame(from, frame, now, who, &mut wire);
         }
         self.sync_relay_targets();
+        // CHALLENGE 带来了"本节点的 UDP 到得了它"，OK 让骨干回到了 UDP：马上告诉本节点的 relay，对方的 AUTH 随时会到。
+        self.sync_gates();
     }
 
     pub(super) fn on_relay_refusal(&mut self, from: SocketAddr, refused: &Refused, echo: &Echo, now: Instant) {
@@ -137,6 +139,25 @@ impl Control {
         };
         if let Some(complaint) = complaint {
             self.on_complaint(relay, complaint, now);
+        }
+    }
+
+    /// relay `relay` 经 UDP 敲了门（本节点的 relay 挡下了它的 AUTH，见 [`crate::BackboneInbox::knocked`]）。
+    pub(super) fn on_knock(&mut self, relay: NodeId, now: Instant) {
+        let Self { shared, key, relays, legs, inbound, next_conn, .. } = self;
+        let Some(entry) = relays.get_mut(&relay) else { return };
+        let who = Identity { me: shared.me, key };
+        let mut wire = LinkWire { shared, slot: &entry.slot, legs, inbound, next_conn };
+        entry.link.on_knock(now, who, &mut wire);
+        self.sync_relay_targets();
+    }
+
+    /// 把骨干上走着 TCP 的那几段和它们的 [`Gate`] 交给本节点的 relay（[`crate::backbone::Gates`]），变了才写。
+    pub(super) fn sync_gates(&mut self) {
+        let gates: HashMap<NodeId, Gate> = self.relays.iter().filter_map(|(&id, entry)| Some((id, entry.link.udp_gate()?))).collect();
+        if gates != self.gates {
+            self.shared.gates.set(gates.clone());
+            self.gates = gates;
         }
     }
 
@@ -346,6 +367,7 @@ impl Control {
             entry.link.poll(now, who, urgent, survey, backbone, &mut wire);
         }
         self.sync_relay_targets();
+        self.sync_gates();
     }
 
     /// 用一次会话去试一个 UDP 询问没有回答的 relay（见 [`PROBE_AGAIN`]），返回现在正在试的那个。

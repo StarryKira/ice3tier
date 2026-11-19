@@ -51,7 +51,8 @@ type LocalDelivery = Box<dyn Fn(NodeId, Bytes) + Send + Sync>;
 ///
 /// 两个 relay 之间 UDP 不通时，两个会话在同一条 TCP 上（[`i3t_path::backbone`]）：对方拨进来的，由这里的 TCP 监听接住，
 /// 上面属于路径层的帧交给 [`set_backbone_inbox`](Self::set_backbone_inbox) 给的入口；本节点的路径层拨出去的，
-/// 对方在上面建会话、要转发的帧由路径层交进来（[`handle_leg_frame`](Self::handle_leg_frame)）。
+/// 对方在上面建会话、要转发的帧由路径层交进来（[`handle_leg_frame`](Self::handle_leg_frame)）。骨干上的一段走着 TCP 时，
+/// 对方经 UDP 来的 AUTH 要那个入口同意才把它的会话搬到 UDP 上（[`BackboneInbox::admits_udp`]），不同意时不回答，只告诉路径层。
 ///
 /// # 下线
 ///
@@ -691,11 +692,14 @@ impl Inner {
     }
 
     /// AUTH：先验 cookie（便宜，证明来源地址是真的），再按来源限速，再验签名（贵），都过了才建会话。
+    ///
+    /// 别的 relay 经 UDP 来的，还要路径层同意它把会话搬到 UDP 上（[`BackboneInbox::admits_udp`]）：骨干上到它的那一段走着 TCP、
+    /// 本节点又不知道自己的 UDP 到不到得了它时不建会话、不回答，只告诉路径层它敲了门。
     fn authenticate(&self, source: &Source<'_>, auth: &Auth, now: Instant) -> Option<NodeId> {
         let node = auth.node;
-        let (me, client_key) = {
+        let (me, client_key, neighbour) = {
             let state = self.read();
-            (state.me, state.clients.get(&node).copied())
+            (state.me, state.clients.get(&node).copied(), state.relays.contains(&node))
         };
         let Some(client_key) = client_key else {
             self.counters.dropped(DropReason::UnknownClient, 1);
@@ -717,6 +721,20 @@ impl Inner {
             self.counters.dropped(DropReason::BadSignature, 1);
             // 不用 warn：拿到 cookie 的人可以照着限速不停地发，每次一条 warn 就是刷屏。计数器里看得到。
             tracing::debug!(%node, from = %source.addr, "握手被忽略：签名不对");
+            return None;
+        }
+        if neighbour
+            && matches!(source.via, Via::Udp)
+            && let Some(inbox) = self.inbox.get()
+            && !inbox.admits_udp(node, now)
+        {
+            // 不算进丢弃的计数：对方没有做错什么。本节点的路径层被敲了门，马上自己经 UDP 试一次，通的话对方的下一个 AUTH 就能过。
+            tracing::debug!(
+                %node,
+                from = %source.addr,
+                "握手先搁下：骨干上到这个 relay 的一段走着 TCP，本节点还不知道自己的 UDP 到不到得了它，不把它的会话搬到 UDP 上；请路径层自己经 UDP 试一次"
+            );
+            inbox.knocked(node);
             return None;
         }
         {

@@ -101,6 +101,7 @@ impl Paths {
             inbound,
             inbound_rx: Mutex::new(inbound_rx),
             local_relay: OnceLock::new(),
+            gates: Arc::default(),
             signal_hook: RwLock::new(None),
             changes: broadcast::Sender::new(CHANGE_BACKLOG),
             route_changed: Notify::new(),
@@ -174,11 +175,11 @@ impl Paths {
         }
     }
 
-    /// 给本节点的 relay 的入口：别的 relay 拨进来的骨干 TCP 上归路径层的事从这里交进来（[`crate::backbone`]），
-    /// 交给 relay 的 `set_backbone_inbox`。它只拿着控制任务的队列，relay 拿着它不会让路径层释放不掉。
+    /// 给本节点的 relay 的入口：别的 relay 拨进来的骨干 TCP 上归路径层的事从这里交进来，骨干走着 TCP 的那几段的情况从这里问
+    /// （[`crate::backbone`]），交给 relay 的 `set_backbone_inbox`。它只拿着控制任务的队列和那张表，relay 拿着它不会让路径层释放不掉。
     #[must_use]
     pub fn backbone_inbox(&self) -> crate::BackboneInbox {
-        crate::BackboneInbox { ctrl: self.shared.ctrl.clone() }
+        crate::BackboneInbox { ctrl: self.shared.ctrl.clone(), gates: Arc::clone(&self.shared.gates) }
     }
 
     /// 信令从哪里送出去（`to` 是收信令的节点）。钩子在控制任务里被调用，不能阻塞。

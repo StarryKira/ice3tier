@@ -8,9 +8,9 @@ use i3t_proto::NodeId;
 use i3t_proto::backbone::{Link, LinkQuality, Row};
 
 use super::{Control, NEWCOMER_BATCH, RelayEntry, RowGate};
-use crate::SessionLeg;
 use crate::relays::Leg;
 use crate::timing::ROW_INTERVAL;
+use crate::{LocalRelay, SessionLeg};
 
 impl Control {
     /// 骨干矩阵的一行，是从 `via` 这个 relay 的会话上收到的（它自己的，或者它转来的别的 relay 的）。
@@ -37,19 +37,23 @@ impl Control {
             return;
         }
         let state = row.state;
-        if self.matrix.insert(row, frame.clone(), now) {
+        let brings_up = self.matrix.brings_up_links(&row, now);
+        let state_changed = self.matrix.insert(row, frame.clone(), now);
+        if state_changed {
             tracing::info!(relay = %origin, ?state, %via, "relay 的状态变了");
-            // 状态变了的行不等下一轮，立刻传给本节点 relay 上的会话：经它中转的节点也要尽快知道。
-            // 同一个 relay 的行转得太勤就等下一轮一起发，状态来回翻的 relay 借不了本节点放大。
-            if let Some(local) = self.shared.local_relay.get()
-                && gate.forward(now)
-            {
-                local.broadcast(frame);
-            }
+        }
+        // 状态变了的行、说哪一段又通了的行不等下一轮，立刻传给本节点 relay 上的会话：经它中转的节点也要尽快知道。
+        // 后一种是骨干从 TCP 回到 UDP 时那一行的更正（见 `publish_rows`），等下一轮的话经这一段的多级路径要断上几秒。
+        // 同一个 relay 的行转得太勤就等下一轮一起发，状态或者连通来回翻的 relay 借不了本节点放大。
+        if (state_changed || brings_up)
+            && let Some(local) = self.shared.local_relay.get()
+            && gate.forward(now)
+        {
+            local.broadcast(frame);
         }
     }
 
-    /// 本节点是 relay 时：把自己测到的骨干链路和手上别的 relay 的行发给会话。定期发；自己的状态变了立刻发。
+    /// 本节点是 relay 时：把自己测到的骨干链路和手上别的 relay 的行发给会话。定期发；自己的状态变了、骨干上有一段刚通了立刻发。
     pub(super) fn publish_rows(&mut self, now: Instant) {
         let Some(local) = self.shared.local_relay.get() else { return };
         let Some(status) = local.status() else {
@@ -61,15 +65,32 @@ impl Control {
         let due = since_sent.is_none_or(|since| since >= ROW_INTERVAL);
         // 有新的会话：让它马上拿到矩阵。一批节点同时挂上来时合成一次发，不是每来一个发一轮。
         let newcomers = self.sessions_seen != status.sessions_opened && since_sent.is_none_or(|since| since >= NEWCOMER_BATCH);
-        if !due && !state_changed && !newcomers {
+        let links = self.own_links(local.as_ref(), now);
+        // 上一行里断着的一段通了：也不等下一轮。骨干从 TCP 回到 UDP 时两个会话一前一后地搬，前一个一搬，对方在本节点上就算新会话，
+        // 马上发的那一行里这一段是断的；不这样的话它要到下一轮（ROW_INTERVAL）才更正，经它的多级路径这期间都不是候选。
+        // 这样多发的行不会接连出现：它前面总有一行说这一段断着，那一行只按上面几种节奏发。
+        let came_up = links.iter().any(|link| link.quality.is_some() && !self.rows_linked.contains(&link.relay));
+        if !due && !state_changed && !newcomers && !came_up {
             return;
         }
         self.own_state = Some(status.state);
-        self.sessions_seen = status.sessions_opened;
-        self.rows_sent = Some(now);
+        self.rows_linked = links.iter().filter(|link| link.quality.is_some()).map(|link| link.relay).collect();
+        local.publish_row(&links);
+        // 只多发了自己这一行的（状态变了、有一段刚通了）不算一轮：新挂上来的会话还等着整张矩阵，定期的那一轮也照原来的时候来。
+        // 不然骨干一段接一段通起来的那一阵，每多发一行就把整张矩阵往后推一轮，刚挂上来的节点迟迟拿不到别的 relay 的行。
+        if due || newcomers {
+            self.sessions_seen = status.sessions_opened;
+            self.rows_sent = Some(now);
+            for frame in self.matrix.frames(now) {
+                local.broadcast(frame);
+            }
+        }
+    }
+
+    /// 本节点测到的到每个别的 relay 的骨干链路：两个会话不在同一处的是断的。
+    fn own_links(&self, local: &dyn LocalRelay, now: Instant) -> Vec<Link> {
         let me = self.shared.me;
-        let links: Vec<Link> = self
-            .netmap
+        self.netmap
             .relays
             .iter()
             .filter(|relay| relay.id != me)
@@ -90,12 +111,6 @@ impl Control {
                     .map(|quality| LinkQuality::from_measured(quality.rtt, quality.jitter, quality.lost, quality.probes));
                 Link { relay: relay.id, quality }
             })
-            .collect();
-        local.publish_row(&links);
-        if due || newcomers {
-            for frame in self.matrix.frames(now) {
-                local.broadcast(frame);
-            }
-        }
+            .collect()
     }
 }

@@ -14,6 +14,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use i3t_crypto::{NodeKey, Signature};
 use i3t_model::Netmap;
+use i3t_path::{PacketMeta, PathConfig, Paths};
 use i3t_proto::backbone::Row;
 use i3t_proto::datagram::{RelayHeader, RelayPath, RouteHeader};
 use i3t_proto::session::{Accepted, Auth, Challenge, Frame, Init};
@@ -63,13 +64,18 @@ impl<'a> Net<'a> {
 }
 
 fn netmap(net: &Net<'_>) -> Arc<Netmap> {
-    build(net.role, &identities(net.clients), &identities(net.relays), net.max_relay_hops)
+    let relays: Vec<_> = net.relays.iter().map(|relay| (relay.id, relay.key.public(), relay.addr())).collect();
+    build(net.role, &identities(net.clients), &relays, net.max_relay_hops)
 }
 
-fn build(role: Role, clients: &[(NodeId, PublicKey)], relays: &[(NodeId, PublicKey)], max_relay_hops: u8) -> Arc<Netmap> {
+/// `relays` 是别的 relay 的编号、公钥和 UDP 地址（扮演它们的 socket 的地址）。它们没有写 TCP 地址：被测的 relay 旁边有路径层时，
+/// 它到它们的骨干只能等它们拨进来。
+fn build(role: Role, clients: &[(NodeId, PublicKey)], relays: &[(NodeId, PublicKey, SocketAddr)], max_relay_hops: u8) -> Arc<Netmap> {
     let clients: Vec<_> = clients.iter().map(|(id, key)| serde_json::json!({ "id": id, "key": key })).collect();
-    let relays: Vec<_> =
-        relays.iter().map(|(id, key)| serde_json::json!({ "id": id, "key": key, "name": format!("relay-{id}") })).collect();
+    let relays: Vec<_> = relays
+        .iter()
+        .map(|(id, key, addr)| serde_json::json!({ "id": id, "key": key, "name": format!("relay-{id}"), "udp": [addr], "tcp": [] }))
+        .collect();
     let role = match role {
         Role::Off => serde_json::Value::Null,
         Role::On => serde_json::json!({}),
@@ -90,6 +96,8 @@ pub struct TestRelay {
     pub relay: Option<Arc<Relay>>,
     pub key: Arc<NodeKey>,
     pub addr: SocketAddr,
+    /// 和 relay 同在一个节点上的路径层（[`TestRelay::start_with_paths`]）。
+    pub paths: Option<Arc<Paths>>,
     netmap: watch::Sender<Arc<Netmap>>,
     pump: JoinHandle<()>,
 }
@@ -117,7 +125,26 @@ impl TestRelay {
         let (netmap, netmap_rx) = watch::channel(netmap(net));
         let relay = Arc::new(Relay::new(Arc::clone(&key), Arc::clone(&port), netmap_rx));
         let pump = tokio::spawn(pump(port, Arc::downgrade(&relay)));
-        Self { relay: Some(relay), key, addr, netmap, pump }
+        Self { relay: Some(relay), key, addr, paths: None, netmap, pump }
+    }
+
+    /// 像 [`start_in`](Self::start_in)，另外有和它同在一个节点上的路径层，像产品里那样装在一起：端口上收到的先过路径层，
+    /// 归 relay 的再交给 relay；relay 拿着路径层的骨干入口。路径层和 `net.relays` 里的 relay 保持骨干（它们经 UDP 收得到它的握手）。
+    pub fn start_with_paths(net: &Net<'_>) -> Self {
+        let key = Arc::new(NodeKey::generate().unwrap());
+        let port = Arc::new(port_free_for_tcp_too());
+        let addr = port.local_addr();
+        let (netmap, netmap_rx) = watch::channel(netmap(net));
+        let relay = Arc::new(Relay::new(Arc::clone(&key), Arc::clone(&port), netmap_rx.clone()));
+        let paths = Arc::new(Paths::new(PathConfig { key: Arc::clone(&key), port, netmap: netmap_rx, addr_servers: Vec::new() }));
+        paths.set_local_relay(Arc::clone(&relay) as Arc<dyn i3t_path::LocalRelay>);
+        relay.set_backbone_inbox(paths.backbone_inbox());
+        let pump = tokio::spawn(pump_paths(Arc::downgrade(&paths)));
+        Self { relay: Some(relay), key, addr, paths: Some(paths), netmap, pump }
+    }
+
+    pub fn paths(&self) -> &Paths {
+        self.paths.as_ref().expect("这个 relay 旁边没有路径层")
     }
 
     pub fn relay(&self) -> &Relay {
@@ -153,6 +180,20 @@ async fn pump(port: Arc<UdpPort>, relay: std::sync::Weak<Relay>) {
     }
 }
 
+/// 产品里连接层一直在向路径层要包，路径层才会去读端口、把归 relay 的交出去。这里扔掉连接层的包。
+async fn pump_paths(paths: std::sync::Weak<Paths>) {
+    let Some(buf_len) = paths.upgrade().map(|paths| Paths::max_datagram_len() * paths.max_receive_segments()) else { return };
+    let mut storage = vec![0u8; buf_len * BATCH_SIZE];
+    let mut metas = [PacketMeta { peer: node(RELAY_ID), len: 0, stride: 0, ecn: None }; BATCH_SIZE];
+    loop {
+        let Some(paths) = paths.upgrade() else { return };
+        let mut bufs: Vec<IoSliceMut<'_>> = storage.chunks_mut(buf_len).map(IoSliceMut::new).collect();
+        if std::future::poll_fn(|cx| paths.poll_recv(cx, &mut bufs, &mut metas)).await.is_err() {
+            return;
+        }
+    }
+}
+
 /// 一个用原始 UDP socket 扮演的节点（或者别的 relay）。
 pub struct Client {
     pub id: NodeId,
@@ -177,6 +218,38 @@ impl Client {
         let mut buf = [0u8; 2048];
         let (len, _from) = tokio::time::timeout(WAIT, self.socket.recv_from(&mut buf)).await.expect("等 relay 的数据报超时").unwrap();
         buf[..len].to_vec()
+    }
+
+    /// 下一个会话帧。被测的 relay 旁边有路径层时，它扮演的 relay 也会收到路径层发来的握手，所以分开看。
+    pub async fn recv_frame(&self) -> Frame {
+        let datagram = self.recv().await;
+        Frame::parse(&datagram).unwrap_or_else(|| panic!("不是会话帧：{datagram:?}"))
+    }
+
+    /// 下一个 relay 的应答（CHALLENGE、OK、PONG、错误帧），跳过路径层发来的请求。
+    pub async fn recv_answer(&self) -> Frame {
+        loop {
+            let frame = self.recv_frame().await;
+            if !frame.is_request() {
+                return frame;
+            }
+        }
+    }
+
+    /// 等到经 UDP 来了 `wanted` 那一种请求（被测的 relay 旁边的路径层发的），跳过别的。
+    pub async fn recv_request(&self, wanted: impl Fn(&Frame) -> bool) -> Frame {
+        loop {
+            let frame = self.recv_frame().await;
+            if frame.is_request() && wanted(&frame) {
+                return frame;
+            }
+        }
+    }
+
+    /// 把这一阵收到的都扔掉，直到 [`SILENCE`] 都没有新的。
+    pub async fn drain(&self) {
+        let mut buf = [0u8; 2048];
+        while tokio::time::timeout(SILENCE, self.socket.recv_from(&mut buf)).await.is_ok() {}
     }
 
     pub async fn expect_silence(&self) {

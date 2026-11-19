@@ -10,9 +10,10 @@ use std::time::Duration;
 
 use common::{Client, Net, RELAY_ID, Role, TcpClient, TestRelay, WAIT, node, relayed, routed, verified_row};
 use i3t_crypto::NodeKey;
+use i3t_path::SessionLeg;
 use i3t_proto::backbone::{Link, LinkQuality, RelayState, Row};
 use i3t_proto::datagram::RouteHeader;
-use i3t_proto::session::{Frame, RefusalReason, Refused};
+use i3t_proto::session::{Challenge, Frame, Init, RefusalReason, Refused};
 use i3t_proto::{Datagram, MAX_CONN_PACKET_LEN};
 use i3t_relay::DropReason;
 
@@ -326,6 +327,67 @@ async fn a_neighbour_relay_opens_its_session_on_a_connection_this_node_dialled_a
     // 这条 TCP 没了：会话跟着关闭。
     relay.relay().leg_closed(7);
     assert_eq!(relay.relay().session_leg(neighbour.id), None);
+}
+
+/// 邻居 relay 拨进来、在这条 TCP 上建了会话。被测的 relay 旁边的路径层借这条 TCP 走骨干（这一段改走了 TCP），在上面反过来握手
+/// （扮演邻居的不回答）。返回这条 TCP 和邻居在被测的 relay 上的会话的位置。
+async fn neighbour_on_tcp(relay: &TestRelay, neighbour: &Client) -> (TcpClient, Option<SessionLeg>) {
+    let mut tcp = TcpClient::connect_as(neighbour.id, NodeKey::from_pem(&neighbour.key.to_pem()).unwrap(), relay).await;
+    tcp.attach(relay).await;
+    while !matches!(Frame::parse(&tcp.recv().await), Some(Frame::Init(_))) {}
+    let leg = relay.relay().session_leg(neighbour.id);
+    assert!(matches!(leg, Some(SessionLeg::Accepted(_))), "{leg:?}");
+    // 路径层借来这条 TCP 之前经 UDP 发过的握手。
+    neighbour.drain().await;
+    (tcp, leg)
+}
+
+/// 经 UDP 握手，返回 relay 对 AUTH 的回答之前的那些：CHALLENGE 照常回答，之后收到的第一个会话帧。
+async fn auth_over_udp(relay: &TestRelay, client: &Client, nonce: [u8; 8]) -> Frame {
+    client.send(&Init { node: client.id, nonce }.to_bytes(), relay).await;
+    let Frame::Challenge(challenge) = client.recv_answer().await else { panic!("relay 不记状态地回答 INIT") };
+    client.send(&client.auth(node(ME), nonce, challenge.cookie).to_bytes(), relay).await;
+    client.recv_frame().await
+}
+
+#[tokio::test]
+async fn a_neighbour_on_tcp_moves_its_session_to_udp_only_once_this_node_knows_its_own_udp_reaches_the_neighbour() {
+    let neighbour = Client::new(101).await;
+    let relay = TestRelay::start_with_paths(&Net { role: Role::On, clients: &[], relays: &[&neighbour], max_relay_hops: 2 });
+    let (_tcp, on_tcp) = neighbour_on_tcp(&relay, &neighbour).await;
+    let opened = relay.relay().status().unwrap().sessions_opened;
+
+    // 它经 UDP 来的 AUTH：本节点还不知道自己的 UDP 到不到得了它。不建会话、不回答；路径层被敲了门，马上自己经 UDP 来问。
+    let Frame::Init(asked) = auth_over_udp(&relay, &neighbour, [5; 8]).await else { panic!("没有 OK，先到的是路径层的 INIT") };
+    assert_eq!(relay.relay().session_leg(neighbour.id), on_tcp, "会话还在那条 TCP 上");
+    assert_eq!(relay.relay().status().unwrap().sessions_opened, opened);
+    assert_eq!(relay.relay().counters().dropped_total(), 0, "挡下它不算丢弃：它没有做错什么");
+
+    // 回答路径层：本节点的 UDP 到得了它。路径层接着发 AUTH（扮演邻居的不理）。
+    neighbour.send(&Challenge { nonce: asked.nonce, cookie: [7; 16] }.to_bytes(), &relay).await;
+    neighbour.recv_request(|frame| matches!(frame, Frame::Auth(_))).await;
+
+    // 现在它经 UDP 来的 AUTH 能把会话搬过来。
+    let nonce = [6; 8];
+    let Frame::Ok(ok) = auth_over_udp(&relay, &neighbour, nonce).await else { panic!("这一次应该建会话") };
+    common::verify_ok(&ok, &relay, neighbour.id, nonce);
+    assert_eq!(relay.relay().session_leg(neighbour.id), Some(SessionLeg::Udp));
+}
+
+#[tokio::test]
+async fn an_ordinary_node_moves_from_tcp_to_udp_as_before_while_a_backbone_link_runs_over_tcp() {
+    let (client, neighbour) = (Client::new(1).await, Client::new(101).await);
+    let relay = TestRelay::start_with_paths(&Net { role: Role::On, clients: &[&client], relays: &[&neighbour], max_relay_hops: 2 });
+    let (_tcp, on_tcp) = neighbour_on_tcp(&relay, &neighbour).await;
+
+    let mut client_tcp = TcpClient::connect_as(client.id, NodeKey::from_pem(&client.key.to_pem()).unwrap(), &relay).await;
+    client_tcp.attach(&relay).await;
+    assert!(matches!(relay.relay().session_leg(client.id), Some(SessionLeg::Accepted(_))));
+    let nonce = [8; 8];
+    let Frame::Ok(ok) = auth_over_udp(&relay, &client, nonce).await else { panic!("普通节点从 TCP 换回 UDP，和以前一样") };
+    common::verify_ok(&ok, &relay, client.id, nonce);
+    assert_eq!(relay.relay().session_leg(client.id), Some(SessionLeg::Udp));
+    assert_eq!(relay.relay().session_leg(neighbour.id), on_tcp);
 }
 
 #[tokio::test]

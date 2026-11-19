@@ -599,7 +599,8 @@ def two_islands(lab: Lab, work: Path, t: Checks) -> None:
     t.check(f"外面的节点用上了家里节点上的服务（{took:.1f} 秒）", served.returncode == 0 and bool(served.stdout), served.stderr.strip())
     route = wait_route(controller, o, a, "relay", timeout=10)
     t.check("o 到 a 经 P → H", route == {"via": "relay", "relays": [p.id, h.id]}, str(route))
-    back = route_of(controller, a, o)
+    # a 的路是它自己报给 controller 的（十秒一次）：服务一通就问的话，这一份常常还没到。
+    back = wait_route(controller, a, o, "relay", timeout=15)
     t.check("a 到 o 经 H → P", back == {"via": "relay", "relays": [h.id, p.id]}, str(back))
     path = controller.ctl("path", str(o.id), str(a.id))
     cause = (path.get("forward") or {}).get("cause") or {}

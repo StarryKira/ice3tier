@@ -5,7 +5,11 @@
 //! 在上面照常建自己的会话；另一方的 relay 接进这条 TCP、认出拨号的是 netmap 里的 relay 之后告诉本节点的路径层（[`BackboneInbox`]），
 //! 路径层就在这条 TCP 上反过来建自己的会话。所以一对 relay 之间最多一条 TCP，连不进来的那一方拨出去也一样成。
 //!
-//! 谁拨号、什么时候改走 TCP，见 [`crate::relays`] 里 `RelayLink` 的骨干部分。帧在两头怎么分：
+//! 谁拨号、什么时候改走 TCP、什么时候回到 UDP，见 [`crate::relays`] 里 `RelayLink` 的骨干部分。回到 UDP 时两边的两个"半个证据"
+//! 在接受的一方碰头：对方经 UDP 发来的 AUTH 说明它的 UDP 到得了本节点，本节点自己最近经 UDP 问到过它说明反过来也通。
+//! 路径层把走着 TCP 的那几段和这样的证据记在 [`Gates`] 里，relay 验过一个经 UDP 来的 AUTH 之后问它（[`BackboneInbox::admits_udp`]）。
+//!
+//! 帧在两头怎么分：
 //!
 //! | 收到的 | 拨号的一头（路径层读这条 TCP） | 接进来的一头（relay 读这条 TCP） |
 //! |---|---|---|
@@ -14,7 +18,10 @@
 //! | 发给本节点的包 | 交给连接层 | relay 交给连接层 |
 //! | 要往下转的包 | 交给本节点的 relay | relay 自己转 |
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use bytes::Bytes;
 use i3t_proto::session::{Frame, Refused};
@@ -25,13 +32,14 @@ use tokio::sync::mpsc;
 use crate::control::Ctrl;
 use crate::tcp::TcpEvent;
 
-/// 本节点的 relay 把别的 relay 拨进来的 TCP 上属于路径层的事交到这里（见模块文档）。
+/// 本节点的 relay 把别的 relay 拨进来的 TCP 上属于路径层的事交到这里（见模块文档），也在这里问骨干走着 TCP 的那几段的情况。
 ///
-/// 由 [`crate::Paths::backbone_inbox`] 给出，装配的一方交给本节点的 relay。它只拿着控制任务的队列，不让 relay 和路径层互相拿着对方不放。
-/// 队列满了的时候丢掉：交过来的都是有重试的握手、保活和矩阵行。
+/// 由 [`crate::Paths::backbone_inbox`] 给出，装配的一方交给本节点的 relay。它只拿着控制任务的队列和 [`Gates`]，
+/// 不让 relay 和路径层互相拿着对方不放。队列满了的时候丢掉：交过来的都是有重试的握手、保活和矩阵行。
 #[derive(Debug, Clone)]
 pub struct BackboneInbox {
     pub(crate) ctrl: mpsc::Sender<Ctrl>,
+    pub(crate) gates: Arc<Gates>,
 }
 
 /// relay 接进来的一条骨干 TCP 上发生的事。
@@ -49,7 +57,7 @@ pub(crate) enum Accepted {
 impl BackboneInbox {
     /// relay `relay` 在本节点的 relay 接进来的第 `conn` 条 TCP 上建好了会话。`sender` 往这条 TCP 里写，`addr` 是它的对端地址。
     pub fn opened(&self, relay: NodeId, conn: u64, addr: SocketAddr, sender: FrameSender) {
-        self.send(relay, conn, Accepted::Opened { addr, sender });
+        self.send(relay, Ctrl::Accepted { relay, conn, event: Accepted::Opened { addr, sender } });
     }
 
     /// 这条 TCP 上来了一帧会话的应答、错误帧或者矩阵行（是不是这几种由这里看）。返回它是不是归路径层的。
@@ -62,18 +70,73 @@ impl BackboneInbox {
             Ok(Datagram::Row(_)) => TcpEvent::Row(frame),
             _ => return false,
         };
-        self.send(relay, conn, Accepted::Event(event));
+        self.send(relay, Ctrl::Accepted { relay, conn, event: Accepted::Event(event) });
         true
     }
 
     /// 这条 TCP 断了。
     pub fn closed(&self, relay: NodeId, conn: u64) {
-        self.send(relay, conn, Accepted::Closed);
+        self.send(relay, Ctrl::Accepted { relay, conn, event: Accepted::Closed });
     }
 
-    fn send(&self, relay: NodeId, conn: u64, event: Accepted) {
-        if self.ctrl.try_send(Ctrl::Accepted { relay, conn, event }).is_err() {
-            tracing::debug!(%relay, conn, "控制任务忙不过来，丢掉骨干 TCP 上的一件事");
+    /// relay `relay` 经 UDP 发来的 AUTH（cookie、限速、签名都已经核对过）能不能把它在本节点的 relay 上的会话搬到 UDP 上。
+    ///
+    /// 骨干上到它的这一段走着 TCP 时，只有本节点最近经 UDP 问到过它（它回答了本节点的 INIT），或者本节点到它的 UDP 会话通着，才能搬：
+    /// 一边的会话搬到 UDP、另一边还在 TCP 上的时候，这一段什么都转不过去，只有一个方向的 UDP 通的话会这样一直断着
+    /// （见 `crate::relays` 的骨干部分）。别的时候都能，和以前一样。不能的时候 relay 不建会话、不回答，调用 [`knocked`](Self::knocked)。
+    ///
+    /// # Panics
+    ///
+    /// 路径层的控制任务 panic 过（锁中毒）。
+    #[must_use]
+    pub fn admits_udp(&self, relay: NodeId, now: Instant) -> bool {
+        self.gates.admits(relay, now)
+    }
+
+    /// relay `relay` 经 UDP 发来的 AUTH 被 [`admits_udp`](Self::admits_udp) 挡下了：它的 UDP 到得了本节点。
+    /// 路径层马上自己经 UDP 去试一次（两次之间至少隔一会儿），本节点的 UDP 也到得了它的话，它下一个 AUTH 就能搬过来。
+    pub fn knocked(&self, relay: NodeId) {
+        self.send(relay, Ctrl::Knock { relay });
+    }
+
+    fn send(&self, relay: NodeId, message: Ctrl) {
+        if self.ctrl.try_send(message).is_err() {
+            tracing::debug!(%relay, "控制任务忙不过来，丢掉骨干上的一件事");
         }
+    }
+}
+
+/// 骨干上走着 TCP 的一段，本节点的 relay 让不让对方经 UDP 把会话搬过来（见 [`BackboneInbox::admits_udp`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Gate {
+    /// 本节点的 UDP 最近到得了它：这个时刻之前让。
+    OpenUntil(Instant),
+    /// 不知道本节点的 UDP 到不到得了它：不让。
+    Closed,
+}
+
+impl Gate {
+    pub(crate) fn admits(self, now: Instant) -> bool {
+        match self {
+            Self::OpenUntil(until) => now < until,
+            Self::Closed => false,
+        }
+    }
+}
+
+/// 骨干上走着 TCP 的那几段和它们的 [`Gate`]，按对方 relay 的编号。不在里面的都让，和以前一样。
+///
+/// 控制任务在每一轮和每次处理 relay 的应答之后写（只在变了的时候），本节点的 relay 验过一个经 UDP 来的 AUTH 之后读：
+/// 两边都只是查一下或者换一张表，锁不跨过任何别的事。
+#[derive(Debug, Default)]
+pub(crate) struct Gates(Mutex<HashMap<NodeId, Gate>>);
+
+impl Gates {
+    fn admits(&self, relay: NodeId, now: Instant) -> bool {
+        self.0.lock().expect("backbone gates mutex poisoned").get(&relay).is_none_or(|gate| gate.admits(now))
+    }
+
+    pub(crate) fn set(&self, gates: HashMap<NodeId, Gate>) {
+        *self.0.lock().expect("backbone gates mutex poisoned") = gates;
     }
 }

@@ -8,14 +8,17 @@
 mod mesh;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use i3t_model::control::{Route, RouteCause, RouteHint};
 use i3t_model::netmap::RoutingMode;
-use i3t_path::{DirectKind, DirectState, RelayLeg};
+use i3t_path::{DirectKind, DirectState, RelayLeg, SessionLeg};
 use i3t_proto::backbone::RelayState;
+use i3t_proto::session::Frame;
 use i3t_relay::DropReason;
+use i3t_underlay::Direction;
 use i3t_underlay::lan::{GROUP_V4, Interfaces, LanConfig};
 use i3t_underlay::portmap::{GatewaySource, PortMapConfig};
 use mesh::{Node, Peer, SOON, Transfer, View, drain_reasons, echo_once};
@@ -126,6 +129,9 @@ async fn a_relay_without_udp_links_to_the_others_over_tcp_and_carries_a_chain_as
     })
     .await;
     assert!(!linked(&r1, &r3), "R1 和 R3 之间什么都不通");
+    // D 只够得着 R3，却要先在它挑的头两个 relay 上试满十秒才换到 R3（什么都还没测到时按编号挑）。A 那边矩阵一到就有路了，
+    // 这时开连接的话 D 还回不了话，QUIC 的重发一次比一次隔得久，可能正好错过。这里测的是经 R2 的这条链，不是 D 多快挂上去。
+    assert!(d.paths.wait_for_route(a.id, 3 * SOON).await, "D 一直没有到 A 的路");
 
     // 1 MB 经 A → R1 → R2 → R3 → D 过去再回来：两个方向都经过 R2。
     echo_once(&a, &d, &megabyte()).await;
@@ -136,6 +142,142 @@ async fn a_relay_without_udp_links_to_the_others_over_tcp_and_carries_a_chain_as
     let transfer = Transfer::start(&a, &d, 200).await;
     transfer.expect_progress(200).await;
     transfer.finish().await;
+}
+
+/// 骨干走 TCP 时在后台试 UDP 的间隔，测试里改短的（见 [`mesh::with_backbone_udp_retry`]）。产品里是 30 秒。
+const BACKBONE_RETRY: Duration = Duration::from_secs(2);
+
+/// 骨干的两个会话各在哪里：R2 在 R1 上的，R1 在 R2 上的。
+fn backbone_legs(r1: &Node, r2: &Node) -> [Option<SessionLeg>; 2] {
+    [r1.relay().session_leg(r2.id), r2.relay().session_leg(r1.id)]
+}
+
+fn both_on_udp(legs: [Option<SessionLeg>; 2]) -> bool {
+    legs == [Some(SessionLeg::Udp); 2]
+}
+
+fn both_on_tcp(legs: [Option<SessionLeg>; 2]) -> bool {
+    legs.iter().all(|leg| matches!(leg, Some(SessionLeg::Accepted(_) | SessionLeg::Dialled(_))))
+}
+
+/// 从现在起每 10 毫秒看一次，看到 `done` 成立之后再看 `after` 那么久，最多看 `limit`。返回 `done` 头一次成立用了多久（没有成立是 `None`），
+/// 和这期间流最久有多久一块都没有核对到。
+async fn watch(transfer: &Transfer, limit: Duration, after: Duration, mut done: impl FnMut() -> bool) -> (Option<Duration>, Duration) {
+    let start = Instant::now();
+    let (mut verified, mut progressed, mut longest, mut when) = (transfer.verified(), start, Duration::ZERO, None);
+    while start.elapsed() < limit && when.is_none_or(|at: Duration| start.elapsed() < at + after) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let now = Instant::now();
+        if transfer.verified() != verified {
+            (verified, progressed) = (transfer.verified(), now);
+        }
+        longest = longest.max(now - progressed);
+        if when.is_none() && done() {
+            when = Some(start.elapsed());
+        }
+    }
+    (when, longest)
+}
+
+#[test]
+fn a_backbone_link_that_fell_back_to_tcp_returns_to_udp_when_udp_works_again_and_a_chain_through_it_keeps_flowing() {
+    mesh::with_backbone_udp_retry(
+        "a_backbone_link_that_fell_back_to_tcp_returns_to_udp_when_udp_works_again_and_a_chain_through_it_keeps_flowing",
+        BACKBONE_RETRY,
+        || async {
+            let (a, d, r1, r2) = (Node::start(1), Node::start(2), Node::start(7), Node::start(8));
+            two_relay_chain(&a, &d, &r1, &r2, 2).await;
+            d.spawn_echo();
+            let legs = || backbone_legs(&r1, &r2);
+            eventually("R1 和 R2 之间的骨干走 UDP", SOON, || both_on_udp(legs())).await;
+            let transfer = Transfer::start(&a, &d, 200).await;
+            transfer.expect_progress(200).await;
+
+            // R1 和 R2 之间的 UDP 断了：骨干改走 TCP，经它的那一串照样通。在后台试的 UDP 一直没有回音，什么都不动。
+            r1.block(&[&r2]);
+            r2.block(&[&r1]);
+            eventually("R1 和 R2 之间的骨干改走 TCP", 3 * SOON, || both_on_tcp(legs())).await;
+            let on_tcp = legs();
+            transfer.expect_progress(200).await;
+            let (moved, _) = watch(&transfer, 2 * BACKBONE_RETRY + Duration::from_secs(1), Duration::ZERO, || legs() != on_tcp).await;
+            assert_eq!(moved, None, "UDP 还不通，会话一个都不该动：{:?}", legs());
+
+            // UDP 又通了：一个重试周期之内有一方在后台试，两边先后回到 UDP（敲门、各自握手，回环上是几毫秒的事）。
+            r1.unblock();
+            r2.unblock();
+            let (back, stalled) =
+                watch(&transfer, BACKBONE_RETRY + Duration::from_secs(10), Duration::from_secs(3), || both_on_udp(legs())).await;
+            println!("UDP 恢复之后 {back:?} 骨干回到 UDP；其间经它的那一串最久 {stalled:?} 没有数据过来");
+            let back = back.unwrap_or_else(|| panic!("UDP 恢复之后骨干一直没有回到 UDP：{:?}", legs()));
+            assert!(back <= BACKBONE_RETRY + Duration::from_secs(4), "回到 UDP 用了 {back:?}");
+            assert!(stalled < Duration::from_secs(2), "换回 UDP 的时候流停了 {stalled:?}");
+            transfer.expect_progress(200).await;
+            assert!(both_on_udp(legs()), "回到 UDP 之后待在那里：{:?}", legs());
+            transfer.finish().await;
+        },
+    );
+}
+
+/// `data` 是不是一个会话的请求（INIT、AUTH、PING）。
+fn is_request(data: &[u8]) -> bool {
+    matches!(i3t_proto::Datagram::parse(data), Ok(i3t_proto::Datagram::Session(frame)) if frame.is_request())
+}
+
+#[test]
+fn a_backbone_link_whose_udp_works_in_one_direction_only_stays_on_its_tcp_and_no_session_moves() {
+    mesh::with_backbone_udp_retry(
+        "a_backbone_link_whose_udp_works_in_one_direction_only_stays_on_its_tcp_and_no_session_moves",
+        BACKBONE_RETRY,
+        || async {
+            let (a, d, r1, r2) = (Node::start(1), Node::start(2), Node::start(7), Node::start(8));
+            // R2 的 UDP 到得了 R1，R1 的回答也回得来；R1 自己发给 R2 的握手和保活一个都到不了（比如 R2 的端口映射坏了）。
+            // 记下 R2 经 UDP 发了几个 AUTH（它的握手得到了 R1 的 CHALLENGE）、R1 经 UDP 发了几个 INIT。
+            let (r2_auths, r1_inits) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+            let (r1_addr, r2_addr) = (r1.addr(), r2.addr());
+            let counted = Arc::clone(&r2_auths);
+            r2.port.set_filter(Some(Arc::new(move |direction: Direction, peer: SocketAddr, data: &[u8]| {
+                match (peer == r1_addr, direction) {
+                    (true, Direction::Inbound) => !is_request(data),
+                    (true, Direction::Outbound) => {
+                        if matches!(Frame::parse(data), Some(Frame::Auth(_))) {
+                            counted.fetch_add(1, Ordering::Relaxed);
+                        }
+                        true
+                    }
+                    (false, _) => true,
+                }
+            })));
+            let counted = Arc::clone(&r1_inits);
+            r1.port.set_filter(Some(Arc::new(move |direction: Direction, peer: SocketAddr, data: &[u8]| {
+                if peer == r2_addr && direction == Direction::Outbound && matches!(Frame::parse(data), Some(Frame::Init(_))) {
+                    counted.fetch_add(1, Ordering::Relaxed);
+                }
+                true
+            })));
+            two_relay_chain(&a, &d, &r1, &r2, 2).await;
+            d.spawn_echo();
+            let legs = || backbone_legs(&r1, &r2);
+            eventually("R1 和 R2 之间的骨干改走 TCP", 3 * SOON, || both_on_tcp(legs())).await;
+            let on_tcp = legs();
+            let transfer = Transfer::start(&a, &d, 200).await;
+            transfer.expect_progress(200).await;
+
+            // 好几个重试周期：R2 每次都问到了 R1、却不能搬过去；R1 被敲门之后自己去试，到不了 R2。这条 TCP 一直在，谁的会话都不动。
+            let (auths, inits) = (r2_auths.load(Ordering::Relaxed), r1_inits.load(Ordering::Relaxed));
+            let window = 4 * BACKBONE_RETRY + Duration::from_secs(1);
+            let (moved, stalled) = watch(&transfer, window, Duration::ZERO, || legs() != on_tcp).await;
+            assert_eq!(moved, None, "会话动了：{:?}，原来是 {on_tcp:?}", legs());
+            let (auths, inits) = (r2_auths.load(Ordering::Relaxed) - auths, r1_inits.load(Ordering::Relaxed) - inits);
+            println!(
+                "{window:?} 里 R2 经 UDP 发了 {auths} 个 AUTH、R1 发了 {inits} 个 INIT；经这条 TCP 的那一串最久 {stalled:?} 没有数据过来"
+            );
+            assert!(auths >= 3, "R2 每个重试周期都该在后台试一次 UDP、问到 R1：{auths} 个 AUTH");
+            assert!(inits > 0, "R1 也在试");
+            assert!(stalled < Duration::from_secs(1), "TCP 上的流不该被后台的尝试打断：停了 {stalled:?}");
+            transfer.expect_progress(200).await;
+            transfer.finish().await;
+        },
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -547,9 +689,8 @@ async fn loopback_multicast_works(group: SocketAddrV4) -> bool {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_nodes_on_the_same_segment_find_each_other_through_beacons_and_go_direct() {
     // 用系统现挑的空闲端口当组播端口，免得和并行的测试、和本机上真的节点撞上。
-    let free = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let group = SocketAddrV4::new(GROUP_V4, free);
-    if !loopback_multicast_works(group).await {
+    let free = || std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    if !loopback_multicast_works(SocketAddrV4::new(GROUP_V4, free())).await {
         return;
     }
     let (a, b, c) = (Node::start(1), Node::start(2), Node::start(3));
@@ -558,13 +699,20 @@ async fn two_nodes_on_the_same_segment_find_each_other_through_beacons_and_go_di
     b.apply(&View { peers: &[Peer::unknown(&a)], ..View::default() });
     c.apply(&View { peers: &[Peer::unknown(&a)], ..View::default() });
     b.spawn_echo();
-    let config = LanConfig {
-        v4: group,
+    let lan = |port: u16| LanConfig {
+        v4: SocketAddrV4::new(GROUP_V4, port),
         v6: None,
         interfaces: Interfaces::Only(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]),
         interval: Duration::from_millis(100),
     };
-    a.paths.start_lan_discovery(config.clone()).unwrap();
+    // 挑到的端口放开之后、信标绑上之前，可能被别的程序拿走（并行的测试都在绑端口）：那样就另挑一个。
+    let mut config = lan(free());
+    let mut tries = 0;
+    while let Err(error) = a.paths.start_lan_discovery(config.clone()) {
+        tries += 1;
+        assert!(tries < 5, "局域网发现一直起不来：{error}");
+        config = lan(free());
+    }
     b.paths.start_lan_discovery(config).unwrap();
 
     echo_once(&a, &b, b"found on the lan").await;

@@ -20,6 +20,7 @@ use i3t_underlay::tcp_leg::FrameSender;
 use i3t_underlay::{Ecn, Transmit, UdpPort};
 use tokio::sync::{Notify, broadcast, mpsc};
 
+use crate::backbone::Gates;
 use crate::control::{Ctrl, Inbound};
 use crate::timing::{PEER_ACTIVE, SILENCE, STASH_MAX_AGE, UNANSWERED_WINDOW};
 use crate::{LocalRelay, RouteChange, Status};
@@ -422,6 +423,8 @@ pub(crate) struct Shared {
     pub(crate) inbound: mpsc::Sender<(NodeId, Bytes)>,
     pub(crate) inbound_rx: Mutex<mpsc::Receiver<(NodeId, Bytes)>>,
     pub(crate) local_relay: OnceLock<Arc<dyn LocalRelay>>,
+    /// 骨干上走着 TCP 的那几段，本节点的 relay 经 [`crate::BackboneInbox`] 问（见 [`crate::backbone`]）。
+    pub(crate) gates: Arc<Gates>,
     pub(crate) signal_hook: RwLock<Option<SignalHook>>,
     pub(crate) changes: broadcast::Sender<RouteChange>,
     /// 任何一个对端的路变了就通知一次，等路的人靠它醒来。
@@ -483,6 +486,7 @@ impl Shared {
             inbound,
             inbound_rx: Mutex::new(inbound_rx),
             local_relay: OnceLock::new(),
+            gates: Arc::default(),
             signal_hook: RwLock::new(None),
             changes: broadcast::Sender::new(16),
             route_changed: Notify::new(),

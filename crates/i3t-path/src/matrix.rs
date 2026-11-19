@@ -49,6 +49,12 @@ impl Matrix {
         changed
     }
 
+    /// `row` 里有没有一段是它的主人手上那一行（还没有过期的）里断着、现在通了的。手上没有它的行时，列着的通的都算。
+    pub(crate) fn brings_up_links(&self, row: &Row, now: Instant) -> bool {
+        let held: Vec<NodeId> = self.reported_from(row.origin, now).map(|(relay, _)| relay).collect();
+        row.links.iter().any(|link| link.quality.is_some() && !held.contains(&link.relay))
+    }
+
     /// 从 `from` 出发连得上的 relay 和这一段的质量。两头的行都要说连得上（没有过期、列了对方、不是连不上），
     /// 质量取两头测的里差的那个，见模块文档。
     pub(crate) fn links_from(&self, from: NodeId, now: Instant) -> impl Iterator<Item = (NodeId, LinkQuality)> + '_ {
@@ -186,6 +192,20 @@ mod tests {
         assert!(!matrix.is_news(node(8), 4, now), "重放的旧行");
         assert!(matrix.is_news(node(8), 6, now));
         assert!(matrix.is_news(node(9), 1, now), "别的 relay 各算各的");
+    }
+
+    #[test]
+    fn a_row_that_reports_a_link_back_up_is_told_apart_from_one_that_only_repeats_or_loses_links() {
+        let now = Instant::now();
+        let mut matrix = Matrix::default();
+        let first = row(8, 1, RelayState::Serving, &[(9, Some(140)), (7, None)]);
+        assert!(matrix.brings_up_links(&first, now), "头一行：通的都算");
+        insert(&mut matrix, first, now);
+        assert!(!matrix.brings_up_links(&row(8, 2, RelayState::Serving, &[(9, Some(150)), (7, None)]), now), "还是那几段");
+        assert!(!matrix.brings_up_links(&row(8, 2, RelayState::Serving, &[(9, None), (7, None)]), now), "只是断了一段");
+        insert(&mut matrix, row(8, 2, RelayState::Serving, &[(9, None), (7, None)]), now);
+        assert!(matrix.brings_up_links(&row(8, 3, RelayState::Serving, &[(9, Some(140)), (7, None)]), now), "断着的那段又通了");
+        assert!(matrix.brings_up_links(&row(8, 3, RelayState::Serving, &[(9, None), (7, Some(10))]), now));
     }
 
     #[test]

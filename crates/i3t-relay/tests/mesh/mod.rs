@@ -44,6 +44,30 @@ pub fn init_logging() {
     let _already_set = tracing_subscriber::fmt().with_max_level(level).with_test_writer().try_init();
 }
 
+/// 路径层的测试开关：骨干走 TCP 时在后台试 UDP 的间隔（秒），见 `i3t_path` 的 `timing::backbone_udp_retry`。
+const BACKBONE_RETRY_SWITCH: &str = "I3T_TEST_BACKBONE_UDP_RETRY";
+
+/// 在把骨干在后台试 UDP 的间隔改成 `retry` 的进程里跑测试 `name`（就是调用它的那个测试），测试的内容是 `test`。
+///
+/// 路径层在进程里头一次用到时读一次这个开关，同一个进程里别的测试不该跟着变，所以这里起一个只跑这一个测试的子进程，开关设在它的环境里；
+/// 已经在这样的子进程里时就地跑 `test`。子进程的输出在它失败时整个带出来，成功时照常交给测试框架（`--nocapture` 看得到）。
+pub fn with_backbone_udp_retry<F: Future<Output = ()>>(name: &str, retry: Duration, test: impl FnOnce() -> F) {
+    if std::env::var_os(BACKBONE_RETRY_SWITCH).is_some() {
+        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build().unwrap();
+        runtime.block_on(test());
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([name, "--exact", "--nocapture", "--test-threads=1"])
+        .env(BACKBONE_RETRY_SWITCH, retry.as_secs().to_string())
+        .output()
+        .unwrap();
+    let (stdout, stderr) = (String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(output.status.success(), "子进程里的测试失败了\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}");
+    assert!(stdout.contains("1 passed"), "子进程里没有跑到测试 {name}：\n{stdout}");
+    println!("{stdout}");
+}
+
 /// 节点在 QUIC 库眼里的地址：一个不会和真实地址混淆的 IPv6 地址，后 32 位是节点编号。
 fn virtual_addr(id: NodeId) -> SocketAddr {
     let [b0, b1, b2, b3] = id.to_be_bytes();

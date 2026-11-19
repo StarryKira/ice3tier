@@ -46,7 +46,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use self::route::{Reason, RouteKey, Via, View, describe, explain, relay_in_use};
 use crate::RouteChange;
-use crate::backbone::Accepted;
+use crate::backbone::{Accepted, Gate};
 use crate::budget::Budget;
 use crate::diag::{
     DirectAttempt, HopReport, Pin, RouteDecision, Side, TestPath, TestSpec, TrainError, TrainReport, TrainRun, TrainSpec, Window,
@@ -84,8 +84,8 @@ const STRANGER_VERIFY_BURST_PER_PEER: f64 = 10.0;
 /// 每个 relay 的矩阵行每秒最多验多少个签名，最多攒多少个。正常情况下一个 relay 几秒才有一行新的。
 const ROW_VERIFIES_PER_SEC: f64 = 2.0;
 const ROW_VERIFY_BURST: f64 = 5.0;
-/// 状态变了的行不等下一轮就转给本节点 relay 上的会话，但同一个 relay 的行最多这么频繁地转：
-/// 状态来回翻的行再多，经本节点放大出去的也有限，其余的跟着下一轮一起发。
+/// 状态变了的行、说哪一段骨干又通了的行不等下一轮就转给本节点 relay 上的会话，但同一个 relay 的行最多这么频繁地转：
+/// 状态或者连通来回翻的行再多，经本节点放大出去的也有限，其余的跟着下一轮一起发。
 const ROW_FORWARD_GAP: Duration = Duration::from_secs(1);
 /// 控制任务每一轮从每个队列最多处理多少条，免得一个队列被灌满时别的等太久。
 const BATCH: usize = 256;
@@ -136,6 +136,8 @@ pub(crate) enum Ctrl {
     Tcp { relay: NodeId, conn: u64, event: TcpEvent },
     /// relay `relay` 拨进来、本节点的 relay 接住的第 `conn` 条 TCP 上归路径层的事（骨干，见 [`crate::backbone`]）。
     Accepted { relay: NodeId, conn: u64, event: Accepted },
+    /// relay `relay` 经 UDP 敲了门：它的 AUTH 被本节点的 relay 挡下了（[`crate::BackboneInbox::knocked`]）。
+    Knock { relay: NodeId },
     /// 对端发来的信令。
     Signal { from: NodeId, signal: Signal },
     /// 在本地网段上看到了一个对端的信标。
@@ -328,6 +330,8 @@ pub(crate) struct Control {
     legs: HashMap<NodeId, TcpLegHandle>,
     /// 每个 relay 拨进来的那条 TCP（最近的一条），等着借来用。
     inbound: HashMap<NodeId, InboundLeg>,
+    /// 最近一次交给本节点的 relay 的骨干闸门（`Shared::gates`，见 [`crate::backbone`]）：变了才重写。
+    gates: HashMap<NodeId, Gate>,
     /// 按来源地址认 relay：一个地址可能是好几个 relay 的（不同局域网里的内网地址会撞），所以是一个列表。
     relay_by_addr: HashMap<SocketAddr, Vec<NodeId>>,
     /// 按延迟自己挑的挂靠对象（或者管理员固定的）。
@@ -362,6 +366,8 @@ pub(crate) struct Control {
     rows_sent: Option<Instant>,
     own_state: Option<RelayState>,
     sessions_seen: u64,
+    /// 上一次发出去的那一行里连通的 relay。
+    rows_linked: Vec<NodeId>,
     portmap: Option<PortMapper>,
     /// 打开着的主动测试。
     windows: HashMap<TestId, Window>,
@@ -432,6 +438,7 @@ impl Control {
             relays: HashMap::new(),
             legs: HashMap::new(),
             inbound: HashMap::new(),
+            gates: HashMap::new(),
             relay_by_addr: HashMap::new(),
             attached: Vec::new(),
             shared_relays: Vec::new(),
@@ -454,6 +461,7 @@ impl Control {
             rows_sent: None,
             own_state: None,
             sessions_seen: 0,
+            rows_linked: Vec::new(),
             portmap,
             windows: HashMap::new(),
             trains: Vec::new(),
@@ -563,6 +571,7 @@ impl Control {
             }
             Ctrl::Tcp { relay, conn, event } => self.on_tcp(relay, conn, &event, now),
             Ctrl::Accepted { relay, conn, event } => self.on_accepted(relay, conn, event, now),
+            Ctrl::Knock { relay } => self.on_knock(relay, now),
             Ctrl::Signal { from, signal } => self.on_signal(from, &signal, now),
             Ctrl::Lan(sighting) => self.on_lan(sighting, now),
             Ctrl::LanStarted => self.sync_lan(),

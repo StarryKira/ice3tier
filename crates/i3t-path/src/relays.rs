@@ -20,8 +20,26 @@
 //! 谁拨号：编号小的一方先拨；它连不上的话（对方连不进去），另一方等 [`DIAL_DEFER`] 没有等到它拨进来就自己拨。
 //! 第二种情况下本节点知道对方连不上自己，马上拨。两边都拨通了的话，编号小的一方留着自己拨的那条，另一方改用它，放下自己的。
 //!
-//! 改走 TCP 之后，这条 TCP 断了也照样用 TCP 重连（像节点的 TCP 退路一样），不再另外试 UDP：一边换回 UDP、另一边还在 TCP 上的那一阵，
-//! 两个会话不在同一处，骨干上转不过去。只有对方经 UDP 在本节点上建了会话（它那边在 UDP 上、而且连得上本节点）时才回到 UDP 再试。
+//! 改走 TCP 之后，这条 TCP 断了也照样用 TCP 重连（像节点的 TCP 退路一样）。一边的会话换回 UDP、另一边还在 TCP 上的那一阵，
+//! 两个会话不在同一处，骨干上什么都转不过去；只有一个方向的 UDP 通（防火墙、端口映射）时，自顾自换回去的一方每试一次就让这一段断上十几秒。
+//! 所以回到 UDP 要两个方向都有证据，两个证据在接受的一方碰头：
+//!
+//! - 走着 TCP 时（TCP 通不通都一样）每隔 [`backbone_udp_retry`] 在后台经 UDP 握一次手，TCP 照常用着。没有握上手什么都不变：
+//!   不算一次失败的尝试，不动退避，也不改报上去的结果。
+//! - 后台的握手收到对方的 CHALLENGE，就记下"本节点的 UDP 到得了它"，[`udp_evidence_ttl`] 之内算数。
+//! - 对方经 UDP 发来的 AUTH 本身说明它的 UDP 到得了本节点。本节点的 relay 只在有上面那个证据、或者本节点到它的 UDP 会话通着时，
+//!   才让它把会话搬到 UDP 上；不然不建会话、不回答，告诉路径层它敲了门（[`crate::BackboneInbox`]），路径层马上自己试一次（[`KNOCK_GAP`]）。
+//!   对方是新版本、它那个方向通的证据就是这次敲门，所以敲门总是有回应，不管下面的退避。
+//! - 后台的握手成功了（对方让本节点搬了过去），本节点离开 TCP，又是一段普通的 UDP 骨干。对方跟过来之前它的会话还在这条 TCP 上：
+//!   自己拨的那条等它的会话离开了再关（关早了它在本节点上就没有会话，这一会儿经这一段的包会被拒绝），
+//!   借来的那条一阵之内不再借（不然看上去和"它搬到了自己拨的 TCP 上"一样，本节点会马上借回去）。
+//!   对方看到本节点的会话到了 UDP 上，照下一条跟过来；它的 AUTH 这边接受，因为本节点到它的 UDP 会话已经通了。
+//! - 对方经 UDP 在本节点上建了会话（它那边在 UDP 上、而且连得上本节点），本节点的 UDP 最近也到得了它时，本节点也回到 UDP 再试。
+//!   只有前一半不算：UDP 整个断掉之后，对方原来那个 UDP 的会话还要等到过期（三十秒）才从本节点上消失。
+//!
+//! 比这个改动旧的 relay 接受每一个 AUTH，又从不在 TCP 上试 UDP。本节点的 UDP 到得了它、它的到不了本节点时，本节点每一次回到 UDP
+//! 都要等既有的规则把两边带回 TCP（几秒到十几秒）。所以回到 UDP 之后 [`RETURN_PROBATION`] 之内又改走 TCP 的话，
+//! 下一次在后台试 UDP 的间隔加倍，最多 [`BACKBONE_RETRY_MAX`]；回去之后保持住了的，间隔复原。
 
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -34,10 +52,11 @@ use i3t_proto::{NodeId, PublicKey};
 
 use crate::SessionLeg;
 use crate::attach::{Event, Send, Session, Step};
+use crate::backbone::Gate;
 use crate::estimate::{Estimate, Quality};
 use crate::timing::{
-    DIAL_DEFER, ESTIMATE_TTL, OFFER_RETRY, ONE_SIDED_GRACE, PROBE_INTERVAL, RELAY_RETRY_MAX, RELAY_SURVEY, Rtt, SETTLE, UDP_HEAD_START,
-    UDP_RETRY,
+    BACKBONE_RETRY_MAX, DIAL_DEFER, ESTIMATE_TTL, KNOCK_GAP, OFFER_RETRY, ONE_SIDED_GRACE, PROBE_INTERVAL, RELAY_RETRY_MAX, RELAY_SURVEY,
+    RETURN_PROBATION, Rtt, SETTLE, UDP_HEAD_START, UDP_RETRY, backbone_udp_retry, udp_evidence_ttl,
 };
 
 /// 挂靠几个 relay（白皮书 §7.2 的 K）。
@@ -86,6 +105,8 @@ struct TcpLink {
     since: Instant,
     /// 本节点知道它连不上本节点：不等它拨进来，本节点拨。
     must_dial: bool,
+    /// 下一次在后台经 UDP 试的时刻。
+    next_try: Instant,
 }
 
 /// relay 没有照办，原因出在某条路上而不是会话本身。
@@ -176,8 +197,19 @@ pub(crate) struct RelayLink {
     tcp_link: Option<TcpLink>,
     /// 到它的 UDP 会话通着、它在本节点的 relay 上却没有 UDP 的会话：从这个时刻起。
     one_sided_since: Option<Instant>,
-    /// 借来用、却没有用成的那条（握手没走完、会话断了），和那个时刻：[`OFFER_RETRY`] 之内不再借它。
+    /// 借来用、却没有用成的那条（握手没走完、会话断了），或者回到 UDP 时放下的那条，和那个时刻：[`OFFER_RETRY`] 之内不再借它。
     spoiled_offer: Option<(u64, Instant)>,
+    /// 本节点经 UDP 发的 INIT 最近一次得到它的 CHALLENGE 的时刻：本节点的 UDP 到得了它，它的回答也回得来。
+    /// 改走 TCP 时清掉：那之前的证据不说明现在。
+    udp_reached: Option<Instant>,
+    /// 骨干上的这一段最近一次从 TCP 回到 UDP 的时刻；之后又改走 TCP 时用掉。
+    returned: Option<Instant>,
+    /// 走着 TCP 时多久在后台试一次 UDP（见模块文档的退避）。
+    backbone_retry: Duration,
+    /// 最近一次因为它敲门而试 UDP 的时刻。
+    knock_answered: Option<Instant>,
+    /// 回到 UDP 时放下、还没有关的那条本节点拨的 TCP，和放下它的时刻（见 [`linger`](Self::linger)）。它还在 [`Wire`] 那里。
+    lingering: Option<Instant>,
 }
 
 impl RelayLink {
@@ -217,6 +249,11 @@ impl RelayLink {
             tcp_link: None,
             one_sided_since: None,
             spoiled_offer: None,
+            udp_reached: None,
+            returned: None,
+            backbone_retry: backbone_udp_retry(),
+            knock_answered: None,
+            lingering: None,
         }
     }
 
@@ -313,7 +350,8 @@ impl RelayLink {
             self.udp.stop();
             self.udp_established = false;
             self.set_target(None);
-            if self.retire_tcp().is_some() {
+            let lingering = self.lingering.take().is_some();
+            if self.retire_tcp().is_some() || lingering {
                 wire.tcp_close();
             }
             self.attempt = None;
@@ -461,6 +499,9 @@ impl RelayLink {
             // 本节点不再是 relay：这一段不再是骨干，照节点的规矩来（UDP 先试，TCP 是退路）。
             self.one_sided_since = None;
         }
+        if backbone.is_none() && self.lingering.take().is_some() && self.tcp.is_none() {
+            wire.tcp_close();
+        }
         self.backbone = backbone;
         if let Some(backbone) = backbone {
             self.review_backbone(now, who, backbone, wire);
@@ -476,8 +517,9 @@ impl RelayLink {
             }
             return;
         }
+        self.try_udp_beside_tcp(now, who, wire);
         if self.tcp.as_ref().is_some_and(|tcp| tcp.session.is_up()) {
-            // 走着 TCP：定期再试 UDP，通了就换回去。骨干改走了 TCP 时不试（见模块文档）。
+            // 走着 TCP：定期再试 UDP，通了就换回去。骨干改走了 TCP 时按骨干的规矩在后台试（上面那一步，见模块文档）。
             if self.tcp_link.is_none() && self.udp.is_idle() && now >= self.udp_retry_at && self.has_udp() {
                 self.udp_retry_at = now + UDP_RETRY;
                 self.start_udp(now, who, wire);
@@ -503,7 +545,8 @@ impl RelayLink {
                     }
                     self.send_tcp(send, who, wire);
                 }
-                if self.udp.is_idle() && self.tcp.is_none() {
+                // 骨干改走了 TCP 时这一轮只有 TCP：后台试着的 UDP 不归它管，不用等它。
+                if self.tcp.is_none() && (self.tcp_link.is_some() || self.udp.is_idle()) {
                     self.attempt_failed(now);
                 }
             }
@@ -526,6 +569,7 @@ impl RelayLink {
 
     /// 骨干上的这一段该不该、该怎样改走 TCP（见模块文档）。本节点是 relay 时每一轮都看。
     fn review_backbone(&mut self, now: Instant, who: Identity<'_>, backbone: Backbone, wire: &mut dyn Wire) {
+        self.linger(now, backbone.theirs, wire);
         let offered =
             backbone.offered.filter(|offer| self.spoiled_offer.is_none_or(|(spoiled, at)| spoiled != *offer || now >= at + OFFER_RETRY));
         let using = self.tcp.as_ref().and_then(|tcp| tcp.adopted);
@@ -540,18 +584,20 @@ impl RelayLink {
             }
         }
         if self.tcp_link.is_none() && !self.udp.is_up() && self.tcp.as_ref().is_some_and(|tcp| tcp.session.is_up()) {
-            // 本节点成为 relay 之前就照节点的规矩退到了 TCP：这一段已经在 TCP 上，照骨干的规矩接着用，不再定期试 UDP。
-            self.tcp_link = Some(TcpLink { since: now, must_dial: false });
+            // 本节点成为 relay 之前就照节点的规矩退到了 TCP：这一段已经在 TCP 上，照骨干的规矩接着用。
+            tracing::info!(relay = %self.id, "本节点成为 relay 之前就经 TCP 连着这个 relay：骨干上的这一段照骨干的规矩走这条 TCP");
+            self.enter_tcp_link(now, false);
         }
         if self.tcp_link.is_some() {
-            if backbone.theirs == Some(SessionLeg::Udp) {
-                // 它经 UDP 连得上本节点、它那边也还在 UDP 上：回到 UDP 再试。不通的话这一轮失败之后又会改走 TCP。
-                tracing::info!(relay = %self.id, "这个 relay 经 UDP 在本节点上建了会话：骨干上的这一段回到 UDP 再试");
-                self.tcp_link = None;
-                if self.retire_tcp().is_some() {
+            // 它经 UDP 连得上本节点、它那边也已经在 UDP 上，本节点的 UDP 最近也到得了它：回到 UDP 再试，不通的话这一轮失败之后又会改走 TCP。
+            // 没有后面这个证据时不算：UDP 整个断掉之后它在本节点上原来那个 UDP 的会话还要等到过期（三十秒）才消失，照它回去只会一次次握不上手，
+            // 这一段既不在 UDP 上也拨不起 TCP。本节点在后台试的 UDP 通了，证据就有了。
+            if backbone.theirs == Some(SessionLeg::Udp) && self.udp_reaches(now) {
+                tracing::info!(relay = %self.id, "这个 relay 经 UDP 在本节点上建了会话，本节点的 UDP 也到得了它：骨干上的这一段回到 UDP 再试");
+                // 它的会话已经搬走了，这条 TCP 上没有谁了。
+                if self.leave_tcp_link(now).is_some() {
                     wire.tcp_close();
                 }
-                self.attempt = None;
                 self.retry_at = now;
             }
             return;
@@ -568,15 +614,107 @@ impl RelayLink {
         }
     }
 
-    /// 骨干上的这一段改走 TCP：放下 UDP 的会话，马上按 TCP 的规矩重来。
+    /// 骨干上的这一段改走 TCP：放下 UDP 的会话，马上按 TCP 的规矩重来。之前回到 UDP 没有回成的话，后台试 UDP 的间隔加倍（见模块文档）。
     fn enter_tcp_link(&mut self, now: Instant, must_dial: bool) {
-        self.tcp_link = Some(TcpLink { since: now, must_dial });
+        self.backbone_retry = Self::next_backbone_retry(self.backbone_retry, self.returned.take(), now);
+        if self.backbone_retry > backbone_udp_retry() {
+            tracing::info!(
+                relay = %self.id,
+                wait = self.backbone_retry.as_secs(),
+                "骨干上的这一段回到 UDP 没有多久又改走 TCP：下一次在后台试 UDP 多等一倍（秒）"
+            );
+        }
+        self.tcp_link = Some(TcpLink { since: now, must_dial, next_try: now + self.backbone_retry });
+        self.udp_reached = None;
         self.one_sided_since = None;
         self.udp.stop();
         self.udp_established = false;
+        self.udp_shunned.clear();
         self.set_target(None);
         self.attempt = None;
         self.retry_at = now;
+    }
+
+    /// 改走 TCP 时，之后在后台试 UDP 的间隔：上一次回到 UDP（`returned`）不到 [`RETURN_PROBATION`] 的话是现在的两倍，
+    /// 最多 [`BACKBONE_RETRY_MAX`]；回去之后保持住了、或者从来没有回去过的，从 [`backbone_udp_retry`] 起。
+    fn next_backbone_retry(current: Duration, returned: Option<Instant>, now: Instant) -> Duration {
+        match returned {
+            Some(at) if now.saturating_duration_since(at) < RETURN_PROBATION => current.saturating_mul(2).min(BACKBONE_RETRY_MAX),
+            Some(_) | None => backbone_udp_retry(),
+        }
+    }
+
+    /// 骨干上的这一段离开 TCP、回到 UDP：本节点的会话不再用这条 TCP。返回放下的那条，关不关由调用的一方定（借来的只是不再用，
+    /// 关它是 relay 的事）。
+    ///
+    /// 借来的那条放下之后 [`OFFER_RETRY`] 之内不再借：对方还没有跟过来的那一会儿，它的会话还在这条 TCP 上，
+    /// 看上去和"它搬到了自己拨的 TCP 上"一样（[`review_backbone`](Self::review_backbone)），不这样的话本节点会马上又借回去。
+    /// 回到 UDP 真的不成时，对方拨的是新的一条，或者本节点照"它连不上本节点"自己拨。
+    fn leave_tcp_link(&mut self, now: Instant) -> Option<TcpLeg> {
+        self.tcp_link = None;
+        self.returned = Some(now);
+        self.attempt = None;
+        let tcp = self.retire_tcp()?;
+        if let Some(offer) = tcp.adopted {
+            self.spoiled_offer = Some((offer, now));
+        }
+        Some(tcp)
+    }
+
+    /// 本节点先回到 UDP、放下的又是自己拨的那条 TCP 时，先不关它：对方还没有跟过来，它在本节点的 relay 上的会话还绑在这条 TCP 上，
+    /// 一关就没了，这一会儿经这一段的包会被拒绝，发包的节点据此十来秒不走这一段。留着它，这一会儿的包只是悄悄丢掉。
+    /// 对方的会话离开它（搬到了 UDP 上，或者没了）之后再关，最多留 [`ONE_SIDED_GRACE`]：到那时对方还不来，既有的规则会另拨一条。
+    fn linger(&mut self, now: Instant, theirs: Option<SessionLeg>, wire: &mut dyn Wire) {
+        let Some(since) = self.lingering else { return };
+        if matches!(theirs, Some(SessionLeg::Dialled(_))) && now.saturating_duration_since(since) < ONE_SIDED_GRACE {
+            return;
+        }
+        self.lingering = None;
+        if self.tcp.is_none() {
+            wire.tcp_close();
+        }
+    }
+
+    /// 骨干走着 TCP：到了时候就在后台经 UDP 试一次（见模块文档）。TCP 照常用着；没有握上手的话什么都不变（见 [`apply_udp`](Self::apply_udp)）。
+    fn try_udp_beside_tcp(&mut self, now: Instant, who: Identity<'_>, wire: &mut dyn Wire) {
+        let Some(link) = &mut self.tcp_link else { return };
+        if now < link.next_try {
+            return;
+        }
+        link.next_try = now + self.backbone_retry;
+        // 敲门引出的那一次还没有结束的话，它就是这一次。
+        if self.udp.is_idle() && self.has_udp() {
+            tracing::debug!(relay = %self.id, "骨干上的这一段走着 TCP：在后台经 UDP 试一次");
+            self.start_udp(now, who, wire);
+        }
+    }
+
+    /// 这个 relay 经 UDP 敲了门：本节点的 relay 因为不知道自己的 UDP 到不到得了它，挡下了它的 AUTH（[`crate::BackboneInbox::knocked`]）。
+    ///
+    /// 骨干走着 TCP 的话马上自己经 UDP 试一次，不管后台试的间隔退到了多长：它是新版本、它那个方向通的证据就是这次敲门。
+    /// 正在试着的、或者 [`KNOCK_GAP`] 之内因为敲门试过的，不再试。没有走 TCP 时不理（本节点的 relay 手上那张表还没跟上）。
+    pub(crate) fn on_knock(&mut self, now: Instant, who: Identity<'_>, wire: &mut dyn Wire) {
+        let answered_lately = self.knock_answered.is_some_and(|at| now.saturating_duration_since(at) < KNOCK_GAP);
+        if self.tcp_link.is_none() || answered_lately || !self.udp.is_idle() || !self.has_udp() {
+            return;
+        }
+        self.knock_answered = Some(now);
+        tracing::debug!(relay = %self.id, "这个 relay 经 UDP 敲了门：骨干上的这一段走着 TCP，马上自己经 UDP 试一次");
+        self.start_udp(now, who, wire);
+    }
+
+    /// 本节点的 relay 让不让它经 UDP 把会话搬过来（[`crate::BackboneInbox::admits_udp`]）。骨干上的这一段没有走 TCP、
+    /// 或者本节点到它的 UDP 会话通着时是 `None`：都让，和以前一样。
+    pub(crate) fn udp_gate(&self) -> Option<Gate> {
+        if self.tcp_link.is_none() || self.udp.is_up() {
+            return None;
+        }
+        Some(self.udp_reached.map_or(Gate::Closed, |at| Gate::OpenUntil(at + udp_evidence_ttl())))
+    }
+
+    /// 本节点的 UDP 最近到得了它（`udp_reached`），证据还算数。
+    fn udp_reaches(&self, now: Instant) -> bool {
+        self.udp_reached.is_some_and(|at| now < at + udp_evidence_ttl())
     }
 
     /// 改用对方拨进来的第 `offer` 条 TCP，在上面建本节点的会话。自己拨的那条（有的话）放下。
@@ -592,6 +730,7 @@ impl RelayLink {
         let mut session = Session::over_tcp(self.tcp_measured.clone());
         session.set_training(self.training);
         let send = session.start(now, false);
+        self.lingering = None;
         self.tcp = Some(TcpLeg { session, connected: true, started: now, addr: Some(addr), established: false, adopted: Some(offer) });
         self.attempt = Some(now);
         self.send_tcp(send, who, wire);
@@ -619,6 +758,7 @@ impl RelayLink {
         if !tcp_addrs.is_empty() {
             let mut session = Session::over_tcp(self.tcp_measured.clone());
             session.set_training(self.training);
+            self.lingering = None;
             self.tcp = Some(TcpLeg { session, connected: false, started: now, addr: None, established: false, adopted: None });
             wire.tcp_connect(&tcp_addrs);
         }
@@ -656,6 +796,7 @@ impl RelayLink {
         self.attempt = Some(now);
         let mut session = Session::over_tcp(self.tcp_measured.clone());
         session.set_training(self.training);
+        self.lingering = None;
         self.tcp = Some(TcpLeg { session, connected: false, started: now, addr: None, established: false, adopted: None });
         wire.tcp_connect(&tcp_addrs);
     }
@@ -742,11 +883,26 @@ impl RelayLink {
                 self.session_up(now);
                 let via = self.udp_target.map(|addr| addr.to_string()).unwrap_or_default();
                 tracing::info!(relay = %self.id, %observed, %via, "到 relay 的中转会话建立（UDP）");
+                if self.tcp_link.is_some() {
+                    // 对方让本节点搬了过来（它知道自己的 UDP 到得了本节点）：这一段回到 UDP，对方看到之后跟过来。
+                    tracing::info!(relay = %self.id, "骨干上的这一段走着 TCP，在后台试的 UDP 握上了手：回到 UDP");
+                    match self.leave_tcp_link(now) {
+                        Some(TcpLeg { adopted: None, connected: true, .. }) => self.lingering = Some(now),
+                        Some(_) => wire.tcp_close(),
+                        None => {}
+                    }
+                }
             }
             Some(Event::Down { reason }) => {
                 let target = self.udp_target;
                 let established = std::mem::take(&mut self.udp_established);
                 self.set_target(None);
+                if self.tcp_link.is_some() && !established {
+                    // 骨干走着 TCP 时在后台试的 UDP 没有握上手：什么都不变。没有回答 AUTH 多半是对方还不知道它自己的 UDP 到不到得了本节点，
+                    // 它被敲了门会自己来试，所以这个地址也不记成握不完手的。
+                    tracing::debug!(relay = %self.id, reason, "骨干走着 TCP，在后台试的 UDP 没有握上手");
+                    return;
+                }
                 if !established
                     && self.wanted
                     && let Some(addr) = target
@@ -833,6 +989,7 @@ impl RelayLink {
                     let step = self.udp.on_challenge(challenge, now);
                     if matches!(step.send, Some(Send::Auth { .. })) {
                         self.set_target(Some(from));
+                        self.udp_reached = Some(now);
                     }
                     self.apply_udp(step, now, who, wire);
                 }
@@ -1326,6 +1483,44 @@ mod tests {
 
         fn udp_inits(&self) -> usize {
             self.wire.udp.iter().filter(|(_, frame)| matches!(frame, Frame::Init(_))).count()
+        }
+
+        /// 这个 relay 经 UDP 敲了门。
+        fn knock(&mut self, at: Duration) {
+            let who = Identity { me: self.me, key: &self.node_key };
+            self.link.on_knock(self.start + at, who, &mut self.wire);
+        }
+
+        /// 本节点是编号小的 relay：到它的 UDP 握不上手，骨干改走本节点马上拨的 TCP，两个会话都在上面。返回 TCP 上的会话建好的时刻。
+        fn backbone_on_tcp(&mut self) -> Duration {
+            assert!(self.me < node(RELAY), "编号小的一方马上拨");
+            let at = self.relay_until(Duration::ZERO, UDP_GIVEN_UP, backbone(None, None));
+            self.tcp_connected(at + 10 * MS);
+            self.challenge_tcp(at + 20 * MS);
+            self.complete_tcp(at + 30 * MS);
+            assert_eq!((self.link.leg(), self.wire.tcp_connects), (Some(Leg::Tcp), 1));
+            at + 30 * MS
+        }
+
+        /// 骨干走着 TCP：从 `from` 起照常回答保活，直到经 UDP 发出一个 INIT 为止。返回发出它的那一轮的时刻。
+        fn until_udp_try(&mut self, from: Duration, backbone: Backbone) -> Duration {
+            let inits = self.udp_inits();
+            let mut at = from;
+            while self.udp_inits() == inits {
+                at = self.relay_until(at, at + 50 * MS, backbone);
+                assert!(at < from + Duration::from_secs(300), "该在后台试 UDP 了");
+            }
+            at
+        }
+
+        /// 骨干改走 TCP 的时刻。
+        fn tcp_since(&self) -> Duration {
+            self.link.tcp_link.expect("骨干走着 TCP").since - self.start
+        }
+
+        /// 骨干走着 TCP 时不该被后台试的 UDP 碰到的那些：失败次数、下一次尝试的时刻、报上去的结果、TCP 的连和关。
+        fn bookkeeping(&self) -> (u32, Instant, Option<(TryOutcome, Instant)>, usize, usize) {
+            (self.link.failures, self.link.retry_at, self.link.tried, self.wire.tcp_connects, self.wire.tcp_closes)
         }
     }
 
@@ -1988,6 +2183,8 @@ mod tests {
 
     /// UDP 握手的四次重发都没有回音之后的时刻（再多一点余量）。
     const UDP_GIVEN_UP: Duration = Duration::from_millis(2500);
+    /// 骨干走着本节点拨的那条 TCP（本节点给它的编号是 1），对方的会话也在上面。
+    const ON_TCP: Backbone = Backbone { theirs: Some(SessionLeg::Dialled(1)), offered: None };
 
     #[test]
     fn between_relays_udp_is_tried_alone_and_when_it_fails_the_relay_with_the_lower_id_dials_tcp_at_once() {
@@ -2004,10 +2201,9 @@ mod tests {
         setup.complete_tcp(at + 30 * MS);
         assert_eq!(setup.link.leg(), Some(Leg::Tcp));
 
-        // 走着 TCP 的骨干不另外试 UDP：一边换回 UDP、另一边还在 TCP 上的那一阵，骨干上转不过去。
-        let inits = setup.udp_inits();
-        setup.relay_until(at + 30 * MS, at + UDP_RETRY + Duration::from_secs(5), backbone(Some(SessionLeg::Dialled(1)), None));
-        assert_eq!((setup.link.leg(), setup.udp_inits(), setup.wire.tcp_closes), (Some(Leg::Tcp), inits, 0));
+        // 之后一直用这条 TCP；在后台试的 UDP 没有回答也不碰它（见 `a_backbone_link_on_tcp_tries_udp_in_the_background_…`）。
+        setup.relay_until(at + 30 * MS, at + UDP_RETRY + Duration::from_secs(5), ON_TCP);
+        assert_eq!((setup.link.leg(), setup.wire.tcp_closes, setup.wire.tcp_connects), (Some(Leg::Tcp), 0, 1));
     }
 
     #[test]
@@ -2091,16 +2287,23 @@ mod tests {
     }
 
     #[test]
-    fn a_relay_on_tcp_goes_back_to_udp_once_the_other_relay_has_a_udp_session_here() {
+    fn a_relay_on_tcp_follows_the_other_relay_back_to_udp_once_its_own_udp_reaches_it_too() {
         let mut setup = Setup::as_node(1, &[RELAY_ADDR], &[RELAY_ADDR]);
-        let at = setup.relay_until(Duration::ZERO, UDP_GIVEN_UP, backbone(None, None));
-        setup.tcp_connected(at);
-        setup.challenge_tcp(at + 10 * MS);
-        setup.complete_tcp(at + 20 * MS);
+        let up = setup.backbone_on_tcp();
+        // 它在本节点上还有一个 UDP 的会话（UDP 整个断掉之前留下的，还没有过期）：本节点不知道自己的 UDP 到不到得了它，接着用 TCP。
+        let stale = backbone(Some(SessionLeg::Udp), None);
+        let at = setup.relay_until(up, up + Duration::from_secs(5), stale);
+        assert_eq!((setup.link.leg(), setup.wire.tcp_closes), (Some(Leg::Tcp), 0), "不照一个可能早已不通的会话回去");
+
+        // 后台试的 UDP 得到了它的回答（AUTH 它还没有回答）：两个方向都有了证据，回到 UDP 再试。
+        let tried = setup.until_udp_try(at, ON_TCP);
+        let Frame::Init(init) = setup.last_udp() else { panic!("后台试 UDP 从 INIT 开始") };
+        setup.udp_frame(Frame::Challenge(Challenge { nonce: init.nonce, cookie: [3; 16] }), tried + 10 * MS);
         let inits = setup.udp_inits();
-        setup.relay_until(at + 20 * MS, at + Duration::from_secs(1), backbone(Some(SessionLeg::Udp), None));
-        assert_eq!(setup.wire.tcp_closes, 1, "它在 UDP 上、连得上本节点：回到 UDP 再试");
+        setup.relay_until(tried + 10 * MS, tried + Duration::from_secs(1), backbone(Some(SessionLeg::Udp), None));
+        assert_eq!(setup.wire.tcp_closes, 1, "它在 UDP 上、连得上本节点，本节点的 UDP 也到得了它：回到 UDP 再试");
         assert!(setup.udp_inits() > inits);
+        assert_eq!(setup.link.udp_gate(), None);
     }
 
     #[test]
@@ -2117,6 +2320,226 @@ mod tests {
         setup.wire.offered = Some((addr("198.51.100.9:44001"), 6));
         setup.poll_as_relay(at + 10 * MS, backbone(None, Some(6)));
         assert_eq!(setup.wire.adopted, [5, 6], "新拨进来的那条照样借");
+    }
+
+    #[test]
+    fn a_backbone_link_on_tcp_tries_udp_in_the_background_and_a_try_that_fails_changes_nothing() {
+        let mut setup = Setup::as_node(1, &[RELAY_ADDR], &[RELAY_ADDR]);
+        let up = setup.backbone_on_tcp();
+        let due = setup.tcp_since() + UDP_RETRY;
+        let (inits, before) = (setup.udp_inits(), setup.bookkeeping());
+        let at = setup.relay_until(up, due - 100 * MS, ON_TCP);
+        assert_eq!(setup.udp_inits(), inits, "改走 TCP 之后 {UDP_RETRY:?} 才试");
+
+        // 对方一点回音都没有：握手两秒之后放弃，什么都不变，TCP 一直用着。
+        let tried = setup.until_udp_try(at, ON_TCP);
+        assert!(tried <= due + 50 * MS, "{tried:?}");
+        let at = setup.relay_until(tried, tried + UDP_GIVEN_UP, ON_TCP);
+        assert!(setup.link.udp.is_idle());
+        assert_eq!(setup.bookkeeping(), before, "没有握上手：不算一次失败，不动退避，也不改报上去的结果");
+        assert_eq!(setup.link.leg(), Some(Leg::Tcp));
+
+        // 下一次对方回答了 INIT，却不回答 AUTH（它还不知道自己的 UDP 到不到得了本节点）：同样什么都不变，这个地址也照样再试。
+        let tried = setup.until_udp_try(at, ON_TCP);
+        assert!(tried <= due + UDP_RETRY + 100 * MS, "每 {UDP_RETRY:?} 试一次：{tried:?}");
+        let Frame::Init(init) = setup.last_udp() else { panic!("后台试 UDP 从 INIT 开始") };
+        setup.udp_frame(Frame::Challenge(Challenge { nonce: init.nonce, cookie: [3; 16] }), tried + 10 * MS);
+        assert!(matches!(setup.last_udp(), Frame::Auth(_)));
+        let at = setup.relay_until(tried + 10 * MS, tried + 10 * MS + UDP_GIVEN_UP, ON_TCP);
+        assert!(setup.link.udp.is_idle());
+        assert_eq!(setup.bookkeeping(), before);
+        assert_eq!((setup.link.leg(), setup.link.udp_target()), (Some(Leg::Tcp), None));
+        setup.until_udp_try(at, ON_TCP);
+        assert_eq!(init_targets(&setup.wire, setup.wire.udp.len() - 1), [addr(RELAY_ADDR)], "这个地址没有被记成握不完手的");
+    }
+
+    #[test]
+    fn an_answered_udp_init_lets_the_other_relay_move_here_for_two_retry_periods_but_one_from_before_tcp_does_not() {
+        // 本节点的 UDP 到得了它（握手一路走通），它却一直没有经 UDP 在本节点上建会话：改走本节点拨的 TCP。
+        let mut setup = Setup::as_node(20, &[RELAY_ADDR], &[RELAY_ADDR]);
+        setup.poll_as_relay(Duration::ZERO, backbone(None, None));
+        setup.complete_udp(10 * MS);
+        assert_eq!(setup.link.udp_gate(), None, "没有走 TCP：都让，和以前一样");
+        let at = setup.relay_until(10 * MS, ONE_SIDED_GRACE + SECOND, backbone(None, None));
+        assert_eq!(setup.link.udp_gate(), Some(Gate::Closed), "改走 TCP 之前的回答不算：它说明不了现在");
+        setup.tcp_connected(at + 10 * MS);
+        setup.challenge_tcp(at + 20 * MS);
+        setup.complete_tcp(at + 30 * MS);
+
+        // 后台试的 UDP 得到了回答：从这一刻起两个重试周期多一点，对方可以经 UDP 把会话搬过来。
+        let tried = setup.until_udp_try(at + 30 * MS, ON_TCP);
+        let Frame::Init(init) = setup.last_udp() else { panic!("后台试 UDP 从 INIT 开始") };
+        let answered = tried + 20 * MS;
+        setup.udp_frame(Frame::Challenge(Challenge { nonce: init.nonce, cookie: [3; 16] }), answered);
+        assert_eq!(udp_evidence_ttl(), UDP_RETRY * 2 + Duration::from_secs(5));
+        let until = setup.start + answered + udp_evidence_ttl();
+        assert_eq!(setup.link.udp_gate(), Some(Gate::OpenUntil(until)));
+
+        // 下一次一点回音都没有（丢了几个包）：上一次的回答还算数，到点作废。
+        let next = setup.until_udp_try(answered, ON_TCP);
+        setup.relay_until(next, next + UDP_GIVEN_UP, ON_TCP);
+        let gate = setup.link.udp_gate().expect("还走着 TCP");
+        assert_eq!(gate, Gate::OpenUntil(until));
+        assert!(gate.admits(until - MS) && !gate.admits(until));
+        assert_eq!(setup.link.leg(), Some(Leg::Tcp));
+    }
+
+    #[test]
+    fn when_a_background_try_comes_up_the_link_leaves_tcp_and_stays_on_udp_once_the_other_relay_follows() {
+        let mut setup = Setup::as_node(1, &[RELAY_ADDR], &[RELAY_ADDR]);
+        let up = setup.backbone_on_tcp();
+        let tried = setup.until_udp_try(up, ON_TCP);
+        // 对方让本节点搬了过去（它知道自己的 UDP 到得了本节点）：又是一段普通的 UDP 骨干。
+        setup.complete_udp(tried + 10 * MS);
+        assert_eq!((setup.link.leg(), setup.link.udp_gate()), (Some(Leg::Udp(addr(RELAY_ADDR))), None));
+        assert_eq!(setup.link.last_try(setup.start + tried + 10 * MS).map(|(outcome, _)| outcome), Some(TryOutcome::Udp));
+        // 自己拨的那条先留着：对方还没有跟过来，它的会话还绑在上面，关了它就没有会话了。
+        let at = setup.relay_until(tried + 10 * MS, tried + SECOND, ON_TCP);
+        assert_eq!(setup.wire.tcp_closes, 0, "对方的会话还在这条 TCP 上");
+
+        // 对方照旧有的规则跟了过来：这条 TCP 关掉，之后一直在 UDP 上，不再拨 TCP。
+        setup.relay_until(at, tried + ONE_SIDED_GRACE * 2, backbone(Some(SessionLeg::Udp), None));
+        assert_eq!(setup.wire.tcp_closes, 1);
+        assert_eq!((setup.link.leg(), setup.wire.tcp_connects), (Some(Leg::Udp(addr(RELAY_ADDR))), 1));
+
+        // 对方一直不跟过来的话，最多留 ONE_SIDED_GRACE。
+        let mut stuck = Setup::as_node(1, &[RELAY_ADDR], &[RELAY_ADDR]);
+        let up = stuck.backbone_on_tcp();
+        let tried = stuck.until_udp_try(up, ON_TCP);
+        stuck.complete_udp(tried + 10 * MS);
+        stuck.relay_until(tried + 10 * MS, tried + ONE_SIDED_GRACE - SECOND, ON_TCP);
+        assert_eq!(stuck.wire.tcp_closes, 0);
+        stuck.relay_until(tried + ONE_SIDED_GRACE - SECOND, tried + ONE_SIDED_GRACE + SECOND, ON_TCP);
+        assert_eq!(stuck.wire.tcp_closes, 1);
+    }
+
+    #[test]
+    fn a_link_back_on_udp_does_not_borrow_again_the_connection_it_let_go_while_the_other_relay_follows() {
+        // 编号大的一方：骨干走的是对方拨进来、本节点借来的第 77 条。
+        let mut setup = Setup::as_node(20, &[RELAY_ADDR], &[RELAY_ADDR]);
+        let at = setup.relay_until(Duration::ZERO, UDP_GIVEN_UP + SECOND, backbone(None, None));
+        let borrowed = backbone(Some(SessionLeg::Accepted(77)), Some(77));
+        setup.wire.offered = Some((addr("198.51.100.9:44000"), 77));
+        setup.poll_as_relay(at + 10 * MS, borrowed);
+        setup.challenge_tcp(at + 20 * MS);
+        setup.complete_tcp(at + 30 * MS);
+        assert_eq!((setup.link.leg(), &setup.wire.adopted[..]), (Some(Leg::Tcp), &[77][..]));
+
+        // 后台试的 UDP 握上了手。对方还没有跟过来：它的会话还在这条 TCP 上，这条 TCP 也还等着借。本节点不借回去，留在 UDP 上等它。
+        let tried = setup.until_udp_try(at + 30 * MS, borrowed);
+        setup.complete_udp(tried + 10 * MS);
+        setup.wire.offered = Some((addr("198.51.100.9:44000"), 77));
+        let at = setup.relay_until(tried + 10 * MS, tried + 3 * SECOND, borrowed);
+        assert_eq!((setup.link.leg(), &setup.wire.adopted[..]), (Some(Leg::Udp(addr(RELAY_ADDR))), &[77][..]));
+        setup.relay_until(at, at + ONE_SIDED_GRACE * 2, backbone(Some(SessionLeg::Udp), None));
+        assert_eq!((setup.link.leg(), setup.wire.tcp_connects), (Some(Leg::Udp(addr(RELAY_ADDR))), 0), "它跟了过来");
+    }
+
+    #[test]
+    fn a_backbone_link_whose_tcp_cannot_connect_comes_back_over_udp_and_stops_dialling() {
+        let mut setup = Setup::as_node(1, &[RELAY_ADDR], &[RELAY_ADDR]);
+        let up = setup.backbone_on_tcp();
+        // 这条 TCP 卡死了，会话断开；之后怎么拨都连不上。
+        let mut at = up;
+        while setup.link.leg().is_some() {
+            at += 50 * MS;
+            assert!(at < up + Duration::from_secs(30), "保活没有回答，会话早该断了");
+            setup.poll_as_relay(at, ON_TCP);
+        }
+        let inits = setup.udp_inits();
+        while setup.udp_inits() == inits {
+            at += 50 * MS;
+            assert!(at < up + UDP_RETRY + Duration::from_secs(5), "TCP 不通也照样在后台试 UDP");
+            setup.poll_as_relay(at, backbone(None, None));
+        }
+        assert!(setup.wire.tcp_connects >= 3, "一直在重拨：{}", setup.wire.tcp_connects);
+        setup.complete_udp(at + 10 * MS);
+        assert_eq!(setup.link.leg(), Some(Leg::Udp(addr(RELAY_ADDR))));
+        let connects = setup.wire.tcp_connects;
+        setup.relay_until(at + 10 * MS, at + Duration::from_secs(30), backbone(Some(SessionLeg::Udp), None));
+        assert_eq!((setup.link.leg(), setup.wire.tcp_connects), (Some(Leg::Udp(addr(RELAY_ADDR))), connects), "回到了 UDP，不再拨");
+    }
+
+    #[test]
+    fn a_knock_makes_a_backbone_link_on_tcp_try_udp_at_once_but_not_more_often_than_the_gap() {
+        let mut udp = Setup::as_node(1, &[RELAY_ADDR], &[RELAY_ADDR]);
+        udp.poll_as_relay(Duration::ZERO, backbone(None, None));
+        udp.complete_udp(10 * MS);
+        let inits = udp.udp_inits();
+        udp.knock(20 * MS);
+        assert_eq!(udp.udp_inits(), inits, "没有走 TCP：不理");
+
+        let mut setup = Setup::as_node(1, &[RELAY_ADDR], &[RELAY_ADDR]);
+        let up = setup.backbone_on_tcp();
+        let inits = setup.udp_inits();
+        let knocked = up + SECOND;
+        setup.knock(knocked);
+        assert_eq!(setup.udp_inits(), inits + 1, "马上自己经 UDP 试一次，不等后台试的时候");
+        setup.knock(knocked + 100 * MS);
+        assert_eq!(setup.udp_inits(), inits + 1, "正在试着");
+        let at = setup.relay_until(knocked, knocked + UDP_GIVEN_UP, ON_TCP);
+        assert!(setup.link.udp.is_idle() && at < knocked + KNOCK_GAP);
+        let sent = setup.udp_inits();
+        setup.knock(at);
+        assert_eq!(setup.udp_inits(), sent, "两次因为敲门的尝试之间至少隔 {KNOCK_GAP:?}");
+        setup.knock(knocked + KNOCK_GAP);
+        assert_eq!(setup.udp_inits(), sent + 1);
+        assert_eq!((setup.link.leg(), setup.wire.tcp_closes), (Some(Leg::Tcp), 0));
+    }
+
+    #[test]
+    fn a_return_that_does_not_last_doubles_the_wait_for_the_next_try_and_one_that_lasts_resets_it() {
+        let mut setup = Setup::as_node(1, &[RELAY_ADDR], &[RELAY_ADDR]);
+        let up = setup.backbone_on_tcp();
+        let tried = setup.until_udp_try(up, ON_TCP);
+        setup.complete_udp(tried + 10 * MS);
+
+        // 对方（比如比这个改动旧的 relay，它的 UDP 到不了本节点）一直没有跟过来：既有的规则把这一段带回 TCP。
+        let at = setup.relay_until(tried + 10 * MS, tried + ONE_SIDED_GRACE + SECOND, backbone(None, None));
+        assert!(setup.link.tcp_link.is_some(), "又改走了 TCP");
+        setup.tcp_connected(at + 10 * MS);
+        setup.challenge_tcp(at + 20 * MS);
+        setup.complete_tcp(at + 30 * MS);
+        let since = setup.tcp_since();
+        // 敲门照样马上有回应，不管退避。
+        setup.knock(since + SECOND);
+        let at = setup.relay_until(since + SECOND, since + SECOND + UDP_GIVEN_UP, ON_TCP);
+        let tried = setup.until_udp_try(at, ON_TCP);
+        let wait = tried - since;
+        assert!(wait >= UDP_RETRY * 2 && wait <= UDP_RETRY * 2 + 50 * MS, "回到 UDP 没有回成：下一次多等一倍，{wait:?}");
+
+        // 这一次对方跟了过来，回到的 UDP 保持了 RETURN_PROBATION 以上；之后 UDP 断了，改走 TCP：间隔复原。
+        setup.complete_udp(tried + 10 * MS);
+        let at = setup.relay_until(tried + 10 * MS, tried + RETURN_PROBATION + SECOND, backbone(Some(SessionLeg::Udp), None));
+        assert_eq!(setup.link.leg(), Some(Leg::Udp(addr(RELAY_ADDR))));
+        let mut at = at;
+        while setup.link.tcp_link.is_none() {
+            at += 50 * MS;
+            assert!(at < tried + RETURN_PROBATION + Duration::from_secs(30), "UDP 断了，该改走 TCP 了");
+            setup.poll_as_relay(at, backbone(None, None));
+        }
+        let since = setup.tcp_since();
+        let connects = setup.wire.tcp_connects;
+        let at = setup.relay_until(at, at + 50 * MS, backbone(None, None));
+        assert_eq!(setup.wire.tcp_connects, connects + 1, "编号小的一方马上拨");
+        setup.tcp_connected(at + 10 * MS);
+        setup.challenge_tcp(at + 20 * MS);
+        setup.complete_tcp(at + 30 * MS);
+        let wait = setup.until_udp_try(at + 30 * MS, ON_TCP) - since;
+        assert!(wait >= UDP_RETRY && wait <= UDP_RETRY + 50 * MS, "上一次回去保持住了：间隔复原，{wait:?}");
+    }
+
+    #[test]
+    fn the_wait_between_background_tries_doubles_up_to_an_hour() {
+        let start = Instant::now();
+        let next = |current: Duration, returned: Option<Instant>, after: Duration| {
+            RelayLink::next_backbone_retry(current, returned, start + after)
+        };
+        assert_eq!(next(UDP_RETRY, None, Duration::ZERO), UDP_RETRY, "从来没有回去过");
+        assert_eq!(next(UDP_RETRY, Some(start), RETURN_PROBATION - MS), UDP_RETRY * 2);
+        assert_eq!(next(UDP_RETRY * 8, Some(start), RETURN_PROBATION), UDP_RETRY, "回去之后保持住了：复原");
+        let capped = (0..10).fold(UDP_RETRY, |wait, _| next(wait, Some(start), SECOND));
+        assert_eq!(capped, BACKBONE_RETRY_MAX);
     }
 
     #[test]

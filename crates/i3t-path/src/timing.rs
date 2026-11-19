@@ -110,6 +110,20 @@ pub(crate) const ONE_SIDED_GRACE: Duration = Duration::from_secs(10);
 pub(crate) const DIAL_DEFER: Duration = Duration::from_secs(10);
 /// 借来的 TCP 上没有建成会话（对方不在上面回答，比如它是不懂这件事的旧版本）之后，多久之内不再借同一条。
 pub(crate) const OFFER_RETRY: Duration = Duration::from_secs(60);
+/// 骨干上的一段从 TCP 回到 UDP 之后，这么久之内又改走 TCP 的话算"没有回成"：之后在后台试 UDP 的间隔加倍（见 `crate::relays`）。
+/// 回不成的样子都在这之内现出来：对方连不上本节点要 [`ONE_SIDED_GRACE`]，对方的 UDP 握不上手两秒，
+/// 再加上拨 TCP 时等对方的 [`DIAL_DEFER`]，合起来二十来秒；留一倍多的余量给忙的机器。保持过这么久的回归算成了，间隔复原。
+pub(crate) const RETURN_PROBATION: Duration = Duration::from_secs(60);
+/// 骨干在后台试 UDP 的间隔最多加倍到这么久。对方是比这个改动旧的 relay、而且只有本节点的 UDP 到得了它时，
+/// 每一次回到 UDP 都要断上几秒到十几秒（见 `crate::relays`），所以一小时最多一次。
+pub(crate) const BACKBONE_RETRY_MAX: Duration = Duration::from_secs(3600);
+/// 骨干走着 TCP 时，对方经 UDP 敲门（它的 AUTH 被本节点的 relay 挡下了）引出的 UDP 尝试至少隔这么久才再来一次。
+/// 比一次没有回答的 UDP 握手（[`HANDSHAKE_TRIES`] × [`HANDSHAKE_RETRY`]，两秒）长：对方一次尝试里的几个 AUTH 只引出一次，
+/// 一个不停敲门的 relay（或者有人重放它的 AUTH）也只能让本节点每 5 秒多握一次手。对方正常的尝试隔得比这久得多。
+pub(crate) const KNOCK_GAP: Duration = Duration::from_secs(5);
+/// 测试用的开关：环境变量 `I3T_TEST_BACKBONE_UDP_RETRY`（秒）改骨干走 TCP 时在后台试 UDP 的间隔（[`backbone_udp_retry`]），
+/// 集成测试里不用一等就是半分钟。
+const BACKBONE_RETRY_TEST_SWITCH: &str = "I3T_TEST_BACKBONE_UDP_RETRY";
 /// 给正在评估的候选路径发探测包列：多久一组，一组几个（白皮书 §7.3）。
 pub(crate) const TRAIN_INTERVAL: Duration = Duration::from_secs(30);
 pub(crate) const TRAIN_PROBES: u8 = 10;
@@ -127,6 +141,24 @@ pub(crate) const SETTLE: Duration = MIN_DWELL;
 pub(crate) const ROW_INTERVAL: Duration = Duration::from_secs(5);
 /// 延迟优先模式下，入口 relay 只在离本节点最近的这么多个里选（白皮书 §7.1），为的是限制探测量。
 pub(crate) const ENTRY_RELAYS: usize = 3;
+
+/// 骨干走着 TCP 时多久在后台试一次 UDP：从 [`UDP_RETRY`] 起，回到 UDP 没有回成时加倍（见 `crate::relays`）。
+/// 测试可以用 [`BACKBONE_RETRY_TEST_SWITCH`] 改。
+pub(crate) fn backbone_udp_retry() -> Duration {
+    static RETRY: std::sync::LazyLock<Duration> = std::sync::LazyLock::new(|| {
+        let seconds = std::env::var(BACKBONE_RETRY_TEST_SWITCH).ok().and_then(|value| value.parse().ok()).filter(|seconds| *seconds > 0);
+        seconds.map_or(UDP_RETRY, Duration::from_secs)
+    });
+    *RETRY
+}
+
+/// "本节点的 UDP 到得了那个 relay"（它回答了本节点经 UDP 发的 INIT）这件事多久之内算数：两个 [`backbone_udp_retry`] 再多 5 秒。
+///
+/// 骨干走着 TCP 时本节点每隔那么久在后台试一次 UDP，UDP 通着的话每一次都把它刷新；中间有一次没有回答（丢了几个包）也还算数，
+/// 5 秒是一次握手的时间（两秒）再加上一点余量。再长的话，早已不通的 UDP 会被当作通的，对方一搬过来骨干就断。
+pub(crate) fn udp_evidence_ttl() -> Duration {
+    backbone_udp_retry() * 2 + Duration::from_secs(5)
+}
 
 #[cfg(test)]
 mod tests {
