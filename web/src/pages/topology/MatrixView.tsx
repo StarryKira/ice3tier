@@ -1,199 +1,205 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 
-import { type NodeId, type RouteMatrix } from '@/api/types'
+import { type MatrixEntry, type MatrixNode, type NodeId, type RouteMatrix } from '@/api/types'
+import { Flag } from '@/components/flag'
 import { OnlineDot } from '@/components/status'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
 import { cn } from '@/lib/utils'
-import { gridWidth } from '@/topology/grid'
 import { type Pair } from '@/topology/pair'
-import { cellKey, classify, classLabel, classSymbol, entryText, indexEntries, type RouteClass } from '@/topology/route'
+import { cellKey, classify, entryText, indexEntries, type RouteClass } from '@/topology/route'
+
+import { type NodeLook } from './TopologyGraph'
 
 const g = t.topology
+const r = t.routes
 
 /**
  * 格子的底色和图上线的颜色是同一套：直连淡绿，经 relay 淡紫，不可达淡红。底色都很淡，
- * 格子里的字和数照常是黑的（只有不可达是红字），一眼扫过去先看到的是不正常的那几格。
+ * 延迟照常是黑字（只有不可达是红字），一眼扫过去先看到的是不正常的那几格。
  */
 const CELL: Record<RouteClass, string> = {
-  direct: 'bg-ok-soft text-foreground',
-  relay: 'bg-relay-soft text-foreground',
-  multi: 'bg-relay-soft text-foreground ring-1 ring-inset ring-relay-dot/50',
+  direct: 'bg-ok-soft',
+  relay: 'bg-relay-soft',
+  multi: 'bg-relay-soft ring-1 ring-inset ring-relay-dot/50',
   none: 'bg-danger-soft text-danger',
 }
 
-/** 对端离线时不可达是理所当然的：灰色，不和真正的不可达抢眼（悬停的文字照样写"不可达"）。 */
+/** 对端离线时不可达是理所当然的：灰色，不和真正的不可达抢眼。 */
 const NONE_OFFLINE = 'bg-muted text-muted-foreground'
 
-export function MatrixLegend() {
-  const classes: RouteClass[] = ['direct', 'relay', 'multi', 'none']
+/** 格子第二行：怎么走的，用字写（"直连""经 h2 · TCP"），不用记号；到中继那一段走 TCP 时黄字写出来。 */
+function RouteLine({ entry, to, name }: { entry: MatrixEntry; to: MatrixNode; name: (id: NodeId) => string }) {
+  const route = entry.route
+  let main: string
+  let extra: { text: string; warn: boolean } | null = null
+  if (route.via === 'direct') {
+    // 直连是怎么建立的（局域网、打洞……）在悬停里：每格都写一遍太吵。
+    main = r.direct
+  } else if (route.via === 'relay') {
+    main = r.via(route.relays.map(name).join(r.hopSeparator))
+    if (entry.relay_leg === 'tcp') extra = { text: r.legTransport.tcp, warn: true }
+  } else {
+    main = to.online ? r.none : r.noneOffline
+  }
   return (
-    <ul
-      className="flex flex-wrap items-center gap-x-5 gap-y-1.5 text-xs text-muted-foreground"
-      aria-label={t.routes.legendLabel}
-    >
-      {classes.map((cls) => (
-        <li key={cls} className="flex items-center gap-1.5">
-          <span
-            className={cn(
-              'inline-flex size-5 items-center justify-center rounded-sm text-[11px] font-semibold',
-              CELL[cls],
-            )}
-          >
-            {classSymbol(cls)}
-          </span>
-          {classLabel(cls)}
-        </li>
-      ))}
-      <li className="flex items-center gap-1.5">
-        <span
-          className={cn(
-            'inline-flex size-5 items-center justify-center rounded-sm text-[11px] font-semibold',
-            NONE_OFFLINE,
-          )}
-        >
-          {classSymbol('none')}
-        </span>
-        {t.routes.noneOffline}
-      </li>
-      <li className="flex items-center gap-1.5">
-        <span className="inline-flex size-5 items-center justify-center rounded-sm border border-dashed border-border-strong text-[11px] text-muted-foreground">
-          {classSymbol('direct')}
-        </span>
-        {t.routes.stale}
-      </li>
-      <li className="flex items-center gap-1.5">
-        <span className="inline-flex size-5 items-center justify-center text-muted-foreground">
-          {t.routes.symbolEmpty}
-        </span>
-        {t.routes.classEmpty}
-      </li>
-    </ul>
+    <span className="flex max-w-full min-w-0 items-center justify-center gap-1 text-[11px] leading-4 text-muted-foreground">
+      <span className="truncate">{main}</span>
+      {extra !== null ? (
+        <span className={cn('shrink-0', extra.warn && 'font-semibold text-warn')}>· {extra.text}</span>
+      ) : null}
+      {entry.stale ? <span className="shrink-0 rounded-sm border border-dashed px-1">{r.stale}</span> : null}
+    </span>
+  )
+}
+
+/** 行头、列头：国旗（不知道国家时不画）和名字。 */
+function NodeHead({ node, look, online }: { node: MatrixNode; look: NodeLook | undefined; online?: boolean }) {
+  return (
+    <span className="flex min-w-0 items-center gap-1.5">
+      {online !== undefined ? <OnlineDot online={online} /> : null}
+      <Flag code={look?.country} />
+      <span className="truncate">{node.name}</span>
+    </span>
   )
 }
 
 interface MatrixViewProps {
   matrix: RouteMatrix
   pair: Pair
+  /** 节点列表里的国家（画旗子），按节点编号。 */
+  looks: ReadonlyMap<NodeId, NodeLook>
   onPick: (from: NodeId, to: NodeId) => void
 }
 
 /**
  * 路由矩阵：行是发送方，列是接收方，一格是一个方向现在怎么走。和拓扑图是同一份数据，这里是精确的那一种写法。
- * 格子里有符号（直、中、多、✕，按语言）和延迟，颜色不单独承担含义；过期的格子是虚框、变淡。
+ * 横竖都铺满剩下的地方（一行最高 5.5rem，节点多了在里面滚动）；一格两行：上面是延迟，下面用字写怎么走，
+ * 所以不需要图例。悬停一格时它的行头、列头亮起来，对着读不串行。
  * 有数据的格子是按钮：点了选中这一对。没有数据的格子不能聚焦，免得几十个节点时 Tab 要按上千下。
  */
-export function MatrixView({ matrix, pair, onPick }: MatrixViewProps) {
+export function MatrixView({ matrix, pair, looks, onPick }: MatrixViewProps) {
   const index = useMemo(() => indexEntries(matrix.entries), [matrix.entries])
   const names = useMemo(() => new Map(matrix.nodes.map((node) => [node.id, node.name])), [matrix.nodes])
   const name = (id: NodeId) => names.get(id) ?? t.common.nodeMissing(id)
+  const [hover, setHover] = useState<{ from: NodeId; to: NodeId } | null>(null)
   const selected = (from: NodeId, to: NodeId) =>
     (pair.a === from && pair.b === to) || (pair.a === to && pair.b === from)
+  const picked = (id: NodeId) => pair.a === id || pair.b === id
+  const count = matrix.nodes.length
 
   return (
-    <div className="overflow-auto" data-testid="route-matrix">
-      <table
-        className="table-fixed border-separate border-spacing-1 text-sm"
-        style={gridWidth(matrix.nodes.length, '9rem')}
-      >
-        <caption className="sr-only">{g.matrixCaption}</caption>
-        <thead>
-          <tr>
-            <th
-              scope="col"
-              className="sticky top-0 left-0 z-20 w-36 bg-card py-2 pr-4 text-left text-xs font-medium whitespace-nowrap text-muted-foreground"
+    <div className="relative min-h-72 flex-1" data-testid="route-matrix">
+      <div className="absolute inset-0 overflow-auto">
+        <div
+          role="table"
+          aria-label={g.matrixCaption}
+          className="grid h-full gap-1"
+          style={{
+            gridTemplateColumns: `9.5rem repeat(${count}, minmax(5.5rem, 1fr))`,
+            gridTemplateRows: `2.25rem repeat(${count}, minmax(3.25rem, 5.5rem))`,
+            alignContent: 'start',
+          }}
+        >
+          <div role="row" className="contents">
+            <div
+              role="columnheader"
+              className="sticky top-0 left-0 z-20 flex items-center bg-card pr-3 text-xs font-medium whitespace-nowrap text-muted-foreground"
             >
               {g.matrixFrom}
-            </th>
+            </div>
             {matrix.nodes.map((node) => (
-              <th
+              <div
                 key={node.id}
-                scope="col"
+                role="columnheader"
                 className={cn(
-                  'sticky top-0 z-10 bg-card px-1.5 py-2 text-xs font-medium text-muted-foreground',
-                  (pair.a === node.id || pair.b === node.id) && 'text-primary',
+                  'sticky top-0 z-10 flex items-center justify-center rounded-md bg-card px-1.5 text-xs font-medium text-muted-foreground transition-colors',
+                  (picked(node.id) || hover?.to === node.id) && 'text-foreground',
+                  hover?.to === node.id && 'bg-muted',
                 )}
               >
-                <span className="block truncate" title={node.name}>
-                  {node.name}
-                </span>
-              </th>
+                <NodeHead node={node} look={looks.get(node.id)} />
+              </div>
             ))}
-          </tr>
-        </thead>
-        <tbody>
+          </div>
           {matrix.nodes.map((from) => (
-            <tr key={from.id}>
-              <th
-                scope="row"
+            <div key={from.id} role="row" className="contents">
+              <div
+                role="rowheader"
                 className={cn(
-                  'sticky left-0 z-10 bg-card pr-4 text-left text-[13px] font-medium whitespace-nowrap',
-                  (pair.a === from.id || pair.b === from.id) && 'text-primary',
+                  'sticky left-0 z-10 flex items-center rounded-md bg-card pr-3 pl-1 text-[13px] font-medium transition-colors',
+                  (picked(from.id) || hover?.from === from.id) && 'text-primary',
+                  hover?.from === from.id && 'bg-muted',
                 )}
               >
-                <span className="flex min-w-0 items-center gap-1.5">
-                  <OnlineDot online={from.online} />
-                  <span className="truncate">{from.name}</span>
-                </span>
-              </th>
+                <NodeHead node={from} look={looks.get(from.id)} online={from.online} />
+              </div>
               {matrix.nodes.map((to) => {
                 if (from.id === to.id) {
                   return (
-                    <td key={to.id} className="p-0 text-center">
-                      <span className="block h-11 rounded-md bg-muted/40" aria-hidden />
+                    <div key={to.id} role="cell" className="rounded-md bg-muted/40">
                       <span className="sr-only">{g.cellSelf}</span>
-                    </td>
+                    </div>
                   )
                 }
                 const entry = index.get(cellKey(from.id, to.id))
                 if (entry === undefined) {
                   return (
-                    <td key={to.id} className="p-0 text-center text-faint" title={t.routes.classEmpty}>
-                      <span aria-hidden>{t.routes.symbolEmpty}</span>
-                      <span className="sr-only">{g.cellLabel(from.name, to.name, t.routes.classEmpty)}</span>
-                    </td>
+                    <div
+                      key={to.id}
+                      role="cell"
+                      className="grid place-items-center rounded-md border border-dashed text-faint"
+                      title={r.classEmpty}
+                    >
+                      <span aria-hidden>{r.symbolEmpty}</span>
+                      <span className="sr-only">{g.cellLabel(from.name, to.name, r.classEmpty)}</span>
+                    </div>
                   )
                 }
                 const cls = classify(entry.route)
                 const text = entryText(entry, name)
                 return (
-                  <td key={to.id} className="p-0">
+                  <div key={to.id} role="cell" className="min-w-0">
                     <Tooltip content={g.cellLabel(from.name, to.name, text)}>
                       <button
                         type="button"
                         onClick={() => onPick(from.id, to.id)}
+                        onMouseEnter={() => setHover({ from: from.id, to: to.id })}
+                        onMouseLeave={() => setHover(null)}
+                        onFocus={() => setHover({ from: from.id, to: to.id })}
+                        onBlur={() => setHover(null)}
                         aria-label={g.cellLabel(from.name, to.name, text)}
                         aria-pressed={selected(from.id, to.id)}
                         data-testid={`cell-${from.id}-${to.id}`}
                         className={cn(
-                          'flex h-11 w-full items-center justify-center gap-1.5 rounded-md px-1.5 text-[13px] font-medium tabular transition-[box-shadow,transform] hover:-translate-y-px hover:shadow-card hover:ring-1 hover:ring-foreground/20',
+                          'flex size-full flex-col items-center justify-center gap-0.5 rounded-md px-2 tabular transition-[box-shadow,transform] hover:-translate-y-px hover:shadow-card hover:ring-1 hover:ring-foreground/20',
                           cls === 'none' && !to.online ? NONE_OFFLINE : CELL[cls],
-                          entry.stale && 'border border-dashed border-border-strong bg-transparent opacity-60',
+                          entry.stale && 'bg-transparent opacity-60 ring-1 ring-border-strong ring-inset',
                           selected(from.id, to.id) && 'ring-2 ring-primary hover:ring-2 hover:ring-primary',
                         )}
                       >
-                        <span aria-hidden>{classSymbol(cls)}</span>
-                        {entry.rtt_ms !== null ? (
-                          <span className="font-normal">
-                            {entry.rtt_ms}
-                            <span className="ml-0.5 text-[10px] text-muted-foreground">ms</span>
-                          </span>
-                        ) : null}
-                        {/* 到 relay 退回 TCP 是值得知道的事：格子里写出来，别的细节在悬停文字里。 */}
-                        {entry.route.via === 'relay' && entry.relay_leg === 'tcp' ? (
-                          <span aria-hidden className="text-[10px] font-semibold text-warn">
-                            {t.routes.legTransport.tcp}
-                          </span>
-                        ) : null}
+                        <span className="text-[15px] leading-5 font-semibold">
+                          {cls === 'none' ? (
+                            r.symbolNone
+                          ) : entry.rtt_ms !== null ? (
+                            <>
+                              {entry.rtt_ms}
+                              <span className="ml-0.5 text-[11px] font-normal text-muted-foreground">ms</span>
+                            </>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </span>
+                        <RouteLine entry={entry} to={to} name={name} />
                       </button>
                     </Tooltip>
-                  </td>
+                  </div>
                 )
               })}
-            </tr>
+            </div>
           ))}
-        </tbody>
-      </table>
+        </div>
+      </div>
     </div>
   )
 }

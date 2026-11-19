@@ -16,17 +16,9 @@ export const routes = {
   rttUnknown: '延迟未知',
   stale: '过期',
   age: (age: string) => `${age}上报`,
-  /** 路的种类，矩阵的图例和格子里用。 */
-  classDirect: '直连',
-  classRelay: '经 1 个中继',
-  classMulti: '经多个中继',
-  classNone: '不可达',
   classEmpty: '没有连接',
   noneOffline: '对端离线',
-  /** 矩阵格子里的符号：颜色之外还有字。 */
-  symbolDirect: '直',
-  symbolRelay: '中',
-  symbolMulti: '多',
+  /** 矩阵格子里的记号：不可达、没有连接。 */
   symbolNone: '✕',
   symbolEmpty: '·',
   legendLabel: '图例',

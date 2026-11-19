@@ -23,7 +23,7 @@ import { buildTopology, type Selection } from '@/topology/graph'
 import { nextPick, type Pair, readPair, writePair } from '@/topology/pair'
 
 import { BackboneView } from './BackboneView'
-import { MatrixLegend, MatrixView } from './MatrixView'
+import { MatrixView } from './MatrixView'
 import { PairPanel } from './PairPanel'
 import { TestMatrixView } from './TestMatrixView'
 import { LANE_DASH, TopologyGraph } from './TopologyGraph'
@@ -224,16 +224,17 @@ export function TopologyPage() {
                   {panel}
                 </div>
               ) : (
-                <div className="space-y-4">
-                  <MatrixLegend />
-                  <div
-                    className={cn('grid grid-cols-1 gap-10', panel !== null && '@4xl:grid-cols-[minmax(0,1fr)_16rem]')}
-                  >
-                    <div className="min-w-0">
-                      <MatrixView matrix={matrix.data} pair={pair} onPick={(a, b) => setPair({ a, b })} />
-                    </div>
-                    {panel}
+                // 格子里用字写怎么走，不要图例；矩阵横竖铺满剩下的地方。
+                <div
+                  className={cn(
+                    'grid flex-1 grid-cols-1 gap-10',
+                    panel !== null && '@4xl:grid-cols-[minmax(0,1fr)_16rem]',
+                  )}
+                >
+                  <div className="flex min-w-0 flex-col">
+                    <MatrixView matrix={matrix.data} pair={pair} looks={looks} onPick={(a, b) => setPair({ a, b })} />
                   </div>
+                  {panel}
                 </div>
               )}
             </div>

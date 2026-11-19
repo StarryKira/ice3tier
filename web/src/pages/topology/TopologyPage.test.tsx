@@ -46,12 +46,14 @@ function setup(extra: Routes = {}) {
 }
 
 describe('拓扑的路由矩阵', () => {
-  it('行是发送方，列是接收方；格子里有字和延迟，过期的标出来，没有数据的是一个点', async () => {
+  it('行是发送方，列是接收方；格子里是延迟和用字写的走法，过期的标出来，没有数据的是一个点', async () => {
     setup()
     renderWithApp(<TopologyPage />, { network: NETWORK, route: '/n/1/topology?view=matrix' })
     const matrix = await screen.findByTestId('route-matrix')
     const relayed = within(matrix).getByTestId('cell-2-3')
-    expect(relayed).toHaveTextContent(`${t.routes.symbolRelay}40`)
+    // 上面一行延迟，下面一行用字写怎么走。
+    expect(relayed).toHaveTextContent('40ms')
+    expect(relayed).toHaveTextContent(r.via('hk'))
     expect(relayed).toHaveAccessibleName(
       g.cellLabel('laptop', 'nas', facts(r.via('hk'), r.rtt(40), r.age(t.time.secondsAgo(4)))),
     )

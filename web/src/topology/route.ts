@@ -33,28 +33,6 @@ export function classify(route: Route): RouteClass {
 
 export const CLASS_TONE: Record<RouteClass, Tone> = { direct: 'ok', relay: 'relay', multi: 'relay', none: 'danger' }
 
-/** 路的种类的名字（矩阵的图例）。每次现取，换了语言就是新的。 */
-export function classLabel(cls: RouteClass): string {
-  const labels = {
-    direct: t.routes.classDirect,
-    relay: t.routes.classRelay,
-    multi: t.routes.classMulti,
-    none: t.routes.classNone,
-  } as const
-  return labels[cls]
-}
-
-/** 矩阵格子里的符号：颜色之外还有字。 */
-export function classSymbol(cls: RouteClass): string {
-  const symbols = {
-    direct: t.routes.symbolDirect,
-    relay: t.routes.symbolRelay,
-    multi: t.routes.symbolMulti,
-    none: t.routes.symbolNone,
-  } as const
-  return symbols[cls]
-}
-
 /** 一条路经过的节点，从发送方到接收方，两头都算。不可达时是 `null`。 */
 export function hopsOf(from: NodeId, to: NodeId, route: Route): NodeId[] | null {
   switch (route.via) {
