@@ -131,6 +131,7 @@ pub enum TestItemArg {
     DirectQuality,
     RelayQuality,
     Route,
+    Host,
 }
 
 impl From<TestItemArg> for i3t_model::admin::diag::TestItem {
@@ -140,6 +141,7 @@ impl From<TestItemArg> for i3t_model::admin::diag::TestItem {
             TestItemArg::DirectQuality => Self::DirectQuality,
             TestItemArg::RelayQuality => Self::RelayQuality,
             TestItemArg::Route => Self::Route,
+            TestItemArg::Host => Self::Host,
         }
     }
 }

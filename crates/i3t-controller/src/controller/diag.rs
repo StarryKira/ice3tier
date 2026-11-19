@@ -294,6 +294,7 @@ impl Inner {
             direct_quality: None,
             relay_quality: Vec::new(),
             route: None,
+            hosts: None,
             notes: Vec::new(),
         };
         let wants = |item| view.request.items.contains(&item);
@@ -304,13 +305,14 @@ impl Inner {
             relay_quality: wants(TestItem::RelayQuality) && skips.relay.is_none(),
             route: wants(TestItem::Route),
             throughput: false,
+            host: wants(TestItem::Host),
         };
         let items = TestItems {
             throughput: view.request.throughput && skips.throughput.is_none() && (items.direct_quality || items.relay_quality),
             ..items
         };
         let blocker = self.test_blocker(a, b);
-        let nothing_to_do = !(items.direct || items.direct_quality || items.relay_quality || items.route);
+        let nothing_to_do = !(items.direct || items.direct_quality || items.relay_quality || items.route || items.host);
         if blocker.is_some() || nothing_to_do {
             // 指令不用发：要么做不了，要么每一项都事先知道做不了。
             view.state = if blocker.is_some() { TestState::Failed } else { TestState::Done };
@@ -327,6 +329,10 @@ impl Inner {
             if let Some(route) = view.route.as_mut().filter(|route| route.state == ItemState::Pending) {
                 route.state = ItemState::Skipped;
                 route.problem.clone_from(&blocker);
+            }
+            for host in view.hosts.iter_mut().flatten().filter(|host| host.state == ItemState::Pending) {
+                host.state = ItemState::Skipped;
+                host.problem.clone_from(&blocker);
             }
             self.store.update_test(&view)?;
             self.log_test(&view)?;
@@ -364,6 +370,7 @@ impl Inner {
                 TestItem::DirectQuality => "直连质量",
                 TestItem::RelayQuality => "中继质量",
                 TestItem::Route => "选路",
+                TestItem::Host => "主机和连接",
             })
             .collect();
         let throughput = if view.request.throughput { "，含吞吐" } else { "" };
@@ -532,7 +539,7 @@ fn window_secs(items: &TestItems, request: &TestRequest) -> u32 {
 mod tests {
     use i3t_model::admin::UpdateNode;
     use i3t_model::admin::diag::{CellState, ItemState, MatrixState, TestItem};
-    use i3t_model::control::diag::{Choice, ChoiceCode, Decision, DirectSide, Latency, PathMeasure, PathPick};
+    use i3t_model::control::diag::{Choice, ChoiceCode, CpuUse, Decision, DirectSide, HostReport, Latency, PathMeasure, PathPick};
     use i3t_model::control::{Declared, DirectKind, Hello, Route, ToController};
 
     use super::*;
@@ -601,10 +608,38 @@ mod tests {
     }
 
     #[test]
+    fn each_end_s_host_report_fills_its_entry_and_an_end_without_one_is_not_supported() {
+        let (lab, network, mut a, mut b) = two_nodes();
+        let only_host = CreateTest { items: Some(vec![TestItem::Host]), ..request(&a, &b) };
+        let view = lab.controller.start_test(network, &only_host).unwrap();
+        let states = |view: &TestView| view.hosts.iter().flatten().map(|host| (host.node, host.state)).collect::<Vec<_>>();
+        assert_eq!(states(&view), [(a.id, ItemState::Pending), (b.id, ItemState::Pending)], "a 在前");
+        a.receive();
+        b.receive();
+        let order = a.tests[0].items;
+        assert!(order.host && !order.direct && !order.direct_quality && !order.relay_quality && !order.route, "{order:?}");
+        assert_eq!(b.tests[0].items, order);
+
+        let host = HostReport { cpu_peak: Some(CpuUse { system_percent: 61, process_percent: 98 }), ..HostReport::default() };
+        let last = |role, host| TestReport { test: view.id, role: Some(role), last: true, host, ..TestReport::default() };
+        send(&lab, &a, last(TestRole::Initiator, Some(host.clone())));
+        assert_eq!(states(&lab.controller.test(network, view.id).unwrap()), [(a.id, ItemState::Done), (b.id, ItemState::Pending)]);
+        // b 是没有这一项的旧版本：它最后的一次上报里什么都没带。
+        send(&lab, &b, last(TestRole::Responder, None));
+        let done = lab.controller.test(network, view.id).unwrap();
+        assert_eq!(done.state, TestState::Done);
+        let hosts = done.hosts.unwrap();
+        assert_eq!((hosts[0].state, &hosts[0].problem, &hosts[0].report), (ItemState::Done, &None, &host));
+        assert_eq!(hosts[1].state, ItemState::Skipped);
+        assert_eq!(hosts[1].problem.as_ref().map(|problem| (problem.code, problem.node)), Some((TestCode::NotSupported, Some(b.id))));
+        assert_eq!(hosts[1].report, HostReport::default());
+    }
+
+    #[test]
     fn a_test_gives_both_ends_the_same_id_and_merges_what_they_report() {
         let (lab, network, mut a, mut b) = two_nodes();
         let view = lab.controller.start_test(network, &request(&a, &b)).unwrap();
-        assert_eq!((view.state, view.request.items.len()), (TestState::Running, 4));
+        assert_eq!((view.state, view.request.items.len()), (TestState::Running, 5));
         assert_eq!(view.direct.as_ref().map(|direct| direct.state), Some(ItemState::Pending));
         a.receive();
         b.receive();

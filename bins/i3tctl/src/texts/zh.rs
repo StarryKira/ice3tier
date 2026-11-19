@@ -469,6 +469,36 @@ const UI: Ui = Ui {
     choices_header: ["方向", "模式", "现在", "默认", "延迟优先"],
     cheaper_path: |route, ms| format!("；更便宜：{route} {ms} ms"),
     note: "注意",
+    hosts_title: "主机",
+    hosts_header: ["节点", "系统", "核", "CPU 头一秒", "CPU 最忙", "负载", "内存可用/总", "进程", "连接"],
+    host_process: |memory, threads, uptime| match threads {
+        Some(threads) => format!("{memory}，{threads} 个线程，运行了 {uptime}"),
+        None => format!("{memory}，运行了 {uptime}"),
+    },
+    host_connections: |connections| {
+        let relay = connections.relay_clients.map_or_else(String::new, |clients| format!("，中继上 {clients} 个会话"));
+        format!(
+            "{} 个对端，挂靠 {} 个中继{relay}，{} 条流，ice3proxy 在用 {} 空闲 {}",
+            connections.peers, connections.relays, connections.streams, connections.lanes_in_use, connections.lanes_idle
+        )
+    },
+    cpu_note: "CPU：整台机器 / 节点进程。进程按一个核算，可以超过 100%；量吞吐时接近 100% 就是一个核跑满了",
+    peer_connection_title: "到对端的连接（计数是测试期间的）",
+    peer_connection_header: [
+        "节点",
+        "路",
+        "往返 ms",
+        "最小 ms",
+        "窗口",
+        "包长",
+        "拥塞控制",
+        "发包",
+        "丢包",
+        "丢包 %",
+        "发出 / 收到",
+        "建立了",
+    ],
+    no_connection: "没有连接",
     direct_capability: "直连",
     already_direct: "已经直连",
     reason: "原因",

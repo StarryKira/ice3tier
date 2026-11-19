@@ -9,6 +9,7 @@ mod zh;
 use i3t_lang::Lang;
 use i3t_model::admin::LogEntry;
 use i3t_model::control::LaneCounts;
+use i3t_model::control::diag::HostConnections;
 use serde_json::{Map, Value};
 
 /// 一种语言的全部文字。
@@ -512,6 +513,16 @@ pub struct Ui {
     /// 延迟优先不换路时，那条更便宜的候选：路，代价（毫秒）。接在选择的说明后面，自己带着分隔的标点。
     pub cheaper_path: fn(&str, &str) -> String,
     pub note: &'static str,
+    pub hosts_title: &'static str,
+    pub hosts_header: [&'static str; 9],
+    /// 进程：常驻内存，线程数（读不到时没有），运行了多久。
+    pub host_process: fn(&str, Option<u32>, &str) -> String,
+    /// 连接数：对端，挂靠的 relay，本节点作为 relay 的会话（不是 relay 时没有），流，ice3proxy 在用的和空闲的。
+    pub host_connections: fn(&HostConnections) -> String,
+    pub cpu_note: &'static str,
+    pub peer_connection_title: &'static str,
+    pub peer_connection_header: [&'static str; 12],
+    pub no_connection: &'static str,
     pub direct_capability: &'static str,
     pub already_direct: &'static str,
     pub reason: &'static str,

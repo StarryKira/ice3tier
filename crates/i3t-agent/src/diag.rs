@@ -13,6 +13,7 @@
 //! - **测量流不碰 ice3proxy。** 发起方直接在共用的连接上开（[`Endpoint`] 本身，不是入口用的连接层）。
 //!   接受方吞吐期间把自己发回去的方向固定在同一条路径上，流结束（包括被取消）就解除。
 
+mod host;
 mod run;
 
 use std::collections::HashMap;
@@ -32,6 +33,7 @@ use i3t_proto::flow::{Reason, Reply, Status};
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
+use crate::lanes::NodeLanes;
 use crate::runtime::NodeExit;
 
 /// 节点同时最多进行几个测试。全网矩阵分批跑，一个节点会同时出现在几对里。
@@ -71,6 +73,10 @@ pub(crate) struct Diag {
     state: Mutex<State>,
     /// 一条测量流放开"正在测"时叫醒等着的下一条。
     released: Notify,
+    /// 节点启动的时刻（这个值是节点启动时建的）。
+    started: Instant,
+    /// ice3proxy 的状况，测试项 `host` 报连接数时用。没有给时那两个数是 0。
+    lanes: Option<Arc<NodeLanes>>,
 }
 
 #[derive(Default)]
@@ -101,7 +107,22 @@ impl Diag {
         throughput: bool,
         reports: mpsc::Sender<TestReport>,
     ) -> Self {
-        Self { endpoint, netmap, throughput, reports, state: Mutex::default(), released: Notify::new() }
+        Self {
+            endpoint,
+            netmap,
+            throughput,
+            reports,
+            state: Mutex::default(),
+            released: Notify::new(),
+            started: Instant::now(),
+            lanes: None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn with_lanes(mut self, lanes: Arc<NodeLanes>) -> Self {
+        self.lanes = Some(lanes);
+        self
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -148,10 +169,14 @@ impl Diag {
         let task = tokio::spawn({
             let diag = Arc::clone(self);
             async move {
-                let report = match role {
+                let host = order.items.host.then(|| host::Watch::start(&diag.endpoint, order.peer));
+                let mut report = match role {
                     TestRole::Initiator => run::initiate(&diag, &order).await,
                     TestRole::Responder => run::respond(&diag, &order, until, ended).await,
                 };
+                if let Some(host) = host {
+                    report.host = Some(host.finish(&diag, order.peer).await);
+                }
                 drop(guard);
                 diag.report(report);
                 diag.lock().tests.remove(&order.test);
@@ -523,7 +548,7 @@ mod tests {
             async move { i3t_flow::serve(&*endpoint, handler).await }
         });
 
-        let items = TestItems { direct: true, direct_quality: true, relay_quality: false, route: true, throughput: true };
+        let items = TestItems { direct: true, direct_quality: true, relay_quality: false, route: true, throughput: true, host: true };
         b.diag.order(order(40, 1, TestRole::Responder, items));
         a.diag.order(order(40, 2, TestRole::Initiator, items));
         let report = next_report(&mut a.reports).await;
@@ -544,12 +569,35 @@ mod tests {
         assert!(up.bits_per_second.is_some() && throughput.pinned, "{throughput:?}");
         assert_eq!((throughput.transport.as_str(), throughput.limit_bytes), ("quic", THROUGHPUT_BYTES));
         assert!(report.decision.is_some());
+        // 主机的状况：到对端的那条连接是这个测试建起来的，计数里有量吞吐时两个方向的那些字节。
+        let host = report.host.as_ref().expect("要了 host，发起方最后的上报里带着");
+        let to_peer = host.to_peer.as_ref().expect("量过吞吐，连接在");
+        assert!(matches!(to_peer.route, i3t_model::control::Route::Direct { .. }), "{to_peer:?}");
+        assert!(to_peer.bytes_sent >= THROUGHPUT_BYTES && to_peer.bytes_received >= THROUGHPUT_BYTES, "{to_peer:?}");
+        assert!(to_peer.sent_packets > 0 && to_peer.mtu >= 1200 && to_peer.rtt_us > 0 && !to_peer.congestion.is_empty(), "{to_peer:?}");
+        let connections = host.connections.unwrap();
+        assert_eq!((connections.peers, connections.relays, connections.relay_clients), (1, 0, None), "{connections:?}");
+        let system = host.system.as_ref().unwrap();
+        assert!(system.cores >= 1 && !system.arch.is_empty(), "{system:?}");
+        if cfg!(target_os = "linux") {
+            // 量了十秒左右的吞吐：头一秒和最忙的一秒都有，最忙的不比头一秒闲。
+            let (first, peak) = (host.cpu.expect("Linux 上读得到 CPU"), host.cpu_peak.unwrap());
+            assert!(peak.process_percent >= first.process_percent && peak.system_percent >= first.system_percent, "{first:?} {peak:?}");
+            assert!(
+                host.memory.is_some_and(|memory| memory.process_rss_bytes > 0 && memory.available_bytes <= memory.total_bytes),
+                "{host:?}"
+            );
+            assert!(host.load_x100.is_some() && system.kernel.is_some() && system.uptime_secs.is_some(), "{host:?}");
+            assert!(host.process.is_some_and(|process| process.threads.is_some_and(|threads| threads >= 1)), "{host:?}");
+        }
 
         let first = next_report(&mut b.reports).await;
         assert!(!first.last && first.direct.as_ref().is_some_and(|direct| direct.ok), "{first:?}");
+        assert!(first.host.is_none(), "只在最后一次上报里带");
         b.diag.end(40);
         let last = next_report(&mut b.reports).await;
         assert!(last.last && last.decision.is_some(), "{last:?}");
+        assert!(last.host.as_ref().is_some_and(|host| host.to_peer.is_some() && host.connections.is_some()), "{last:?}");
         serving.abort();
     }
 }

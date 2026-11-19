@@ -482,6 +482,36 @@ const UI: Ui = Ui {
     choices_header: ["DIRECTION", "MODE", "CURRENT", "DEFAULT", "LOWEST-LATENCY"],
     cheaper_path: |route, ms| format!("; cheaper: {route} {ms} ms"),
     note: "Note",
+    hosts_title: "Hosts",
+    hosts_header: ["NODE", "SYSTEM", "CORES", "CPU-FIRST-SECOND", "CPU-BUSIEST", "LOAD", "MEMORY-FREE/TOTAL", "PROCESS", "CONNECTIONS"],
+    host_process: |memory, threads, uptime| match threads {
+        Some(threads) => format!("{memory}, {threads} threads, up {uptime}"),
+        None => format!("{memory}, up {uptime}"),
+    },
+    host_connections: |connections| {
+        let relay = connections.relay_clients.map_or_else(String::new, |clients| format!(", {clients} sessions as a relay"));
+        format!(
+            "{} peers, {} relays attached{relay}, {} streams, ice3proxy {} in use {} idle",
+            connections.peers, connections.relays, connections.streams, connections.lanes_in_use, connections.lanes_idle
+        )
+    },
+    cpu_note: "CPU: whole machine / node process. The process is counted against one core and can exceed 100%; near 100% during a throughput test means one core is saturated",
+    peer_connection_title: "Connection to the peer (counters cover the test)",
+    peer_connection_header: [
+        "NODE",
+        "ROUTE",
+        "RTT-MS",
+        "MIN-MS",
+        "WINDOW",
+        "MTU",
+        "CONGESTION",
+        "SENT",
+        "LOST",
+        "LOST-%",
+        "OUT / IN",
+        "AGE",
+    ],
+    no_connection: "no connection",
     direct_capability: "Direct",
     already_direct: "already direct",
     reason: "Reason",

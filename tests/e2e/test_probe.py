@@ -126,11 +126,12 @@ def quality_and_throughput(lab: Lab, work: Path, t: Checks) -> None:
             str(hops))
     t.check("每一段：relay 到 b 是 b 报的，约 20ms", len(hops) == 2 and hops[1]["source"] == "reported" and between(ms(hops[1]["rtt_us"]), 12, 35),
             str(hops))
+    t.check("没有要主机这一项：结果里没有", view.get("hosts") is None, str(view.get("hosts")))
 
     # 直连改成限速 20Mbit/s、不丢包，再量吞吐：直连上在时长上限处停，接近限速；relay 路径没有限速，在 20MB 处停。
     shape_between(a.host, b.host, Shape(rtt_ms=20, rate_mbit=20))
     time.sleep(10)
-    view = active_test(controller, a, b, "--only", "direct-quality,relay-quality", "--throughput", "--via", r.name)
+    view = active_test(controller, a, b, "--only", "direct-quality,relay-quality,host", "--throughput", "--via", r.name)
     throughput = (view.get("direct_quality") or {}).get("throughput") or {}
     up, down = throughput.get("up") or {}, throughput.get("down") or {}
     mbit = lambda transfer: (transfer.get("bits_per_second") or 0) / 1e6  # noqa: E731
@@ -148,6 +149,30 @@ def quality_and_throughput(lab: Lab, work: Path, t: Checks) -> None:
                                                     and (relayed.get(way) or {}).get("stopped_by") == "bytes" for way in ("up", "down")),
             str(relayed))
     t.check("relay 路径上也固定住了", relayed.get("pinned") is True, str(relayed))
+
+    # 主机这一项：两端各一份，a 在前；这台机器是 Linux，机器和进程的数都读得到。
+    hosts = view.get("hosts") or []
+    t.check("两端各报了一份主机状况，a 在前", [host.get("node") for host in hosts] == [a.id, b.id]
+            and all(host.get("state") == "done" and host.get("problem") is None for host in hosts), str(hosts)[:600])
+    for node, host in zip((a, b), hosts):
+        system, first, peak = host.get("system") or {}, host.get("cpu") or {}, host.get("cpu_peak") or {}
+        t.check(f"{node.name}：系统、内存、负载和进程", bool(system.get("os")) and bool(system.get("kernel")) and system.get("cores", 0) >= 1
+                and (host.get("memory") or {}).get("process_rss_bytes", 0) > 0 and len(host.get("load_x100") or []) == 3
+                and (host.get("process") or {}).get("threads", 0) >= 1, str(host)[:600])
+        t.check(f"{node.name}：头一秒和最忙一秒的 CPU，最忙的不比头一秒闲", between(first.get("system_percent"), 0, 100)
+                and peak.get("system_percent", -1) >= first.get("system_percent", 0)
+                and peak.get("process_percent", -1) >= first.get("process_percent", 0), f"{first} {peak}")
+        connections, to_peer = host.get("connections") or {}, host.get("to_peer") or {}
+        t.check(f"{node.name}：连着一个对端、挂靠一个中继，自己不是中继", connections.get("peers") == 1 and connections.get("relays") == 1
+                and connections.get("relay_clients") is None, str(connections))
+        # 量了三段吞吐（直连上 5 秒 20Mbit/s 的两个方向，relay 路径上各 20MB）：这条连接在测试期间每个方向都过了二十几 MB。
+        t.check(f"{node.name}：到对端的连接在测试期间的收发", to_peer.get("bytes_sent", 0) > 20_000_000
+                and to_peer.get("bytes_received", 0) > 20_000_000 and to_peer.get("sent_packets", 0) > 10_000
+                and to_peer.get("lost_packets", -1) >= 0 and between(to_peer.get("mtu"), 1200, 1500)
+                and to_peer.get("congestion") in ("bbr", "cubic") and to_peer.get("rtt_us", 0) > 0
+                and (to_peer.get("route") or {}).get("via") in ("direct", "relay"), str(to_peer))
+    shown = human(controller, "tests", "show", str(view["id"]))
+    t.check("i3tctl 打印出主机和到对端的连接", "主机" in shown and "到对端的连接" in shown and "个对端" in shown, shown[-1500:])
     t.check("测完之后 a 到 b 回到直连", wait_route(controller, a, b, "direct", timeout=15), str(forward_route(controller, a, b)))
     if t.failures:
         print(tail(a.read_log(), 30), tail(b.read_log(), 20), sep="\n  ---\n")

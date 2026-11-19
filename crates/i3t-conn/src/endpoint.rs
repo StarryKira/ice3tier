@@ -20,7 +20,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::contract::{Acceptor, Connector, Datagram, Datagrams, Incoming, OpenError};
-use crate::manager::{DATAGRAM_BACKLOG, DatagramHandle, DatagramQueues, Manager};
+use crate::manager::{ConnectionReport, DATAGRAM_BACKLOG, DatagramHandle, DatagramQueues, Manager};
 use crate::quic::{self, QuicConfigError};
 use crate::socket::PathSocket;
 use crate::stream::{RecvHalf, SendHalf};
@@ -198,6 +198,12 @@ impl Endpoint {
     #[must_use]
     pub fn connection_rtt(&self, peer: NodeId) -> Option<std::time::Duration> {
         self.manager.connection_rtt(peer)
+    }
+
+    /// 到 `peer` 的连接现在的状况：往返时间、拥塞窗口、包长和累计的收发、丢包。没有连接时是 `None`。给两个节点之间的诊断用。
+    #[must_use]
+    pub fn connection_report(&self, peer: NodeId) -> Option<ConnectionReport> {
+        self.manager.connection_report(peer)
     }
 
     /// 和各个对端之间的共用连接上现在开着几条流、本节点启动以来两个方向各走了多少字节（线上的，关掉的连接也算），

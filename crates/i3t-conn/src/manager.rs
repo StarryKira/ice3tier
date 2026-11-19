@@ -4,7 +4,7 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use i3t_crypto::NodeKey;
@@ -73,6 +73,50 @@ const CLOSE_SURPLUS: u32 = 4;
 
 type Stream = Incoming<SendHalf, RecvHalf>;
 
+/// 到一个对端的那条连接（开新流用的那一条）现在的状况，数来自 QUIC 库。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectionReport {
+    /// 握手完成的时刻。前后两次读到的不是同一个时刻，就是连接中间换过了。
+    pub established: Instant,
+    /// 平滑的往返时间，和连接建立以来见过的最小值。
+    pub rtt: Duration,
+    pub min_rtt: Duration,
+    /// 拥塞窗口。
+    pub cwnd_bytes: u64,
+    /// 现在一个包最长多少字节（路径 MTU 探测的结果）。
+    pub mtu: u16,
+    pub congestion: Congestion,
+    pub counters: ConnectionCounters,
+}
+
+/// 一条连接从建立起累计的计数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ConnectionCounters {
+    pub sent_packets: u64,
+    pub lost_packets: u64,
+    pub lost_bytes: u64,
+    /// 拥塞控制认定发生了拥塞的次数。
+    pub congestion_events: u64,
+    /// 线上的字节数（UDP 数据报的内容，含 QUIC 的头）。
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+}
+
+impl ConnectionCounters {
+    /// 从 `earlier` 到现在增加了多少。
+    #[must_use]
+    pub const fn since(self, earlier: Self) -> Self {
+        Self {
+            sent_packets: self.sent_packets.saturating_sub(earlier.sent_packets),
+            lost_packets: self.lost_packets.saturating_sub(earlier.lost_packets),
+            lost_bytes: self.lost_bytes.saturating_sub(earlier.lost_bytes),
+            congestion_events: self.congestion_events.saturating_sub(earlier.congestion_events),
+            bytes_sent: self.bytes_sent.saturating_sub(earlier.bytes_sent),
+            bytes_received: self.bytes_received.saturating_sub(earlier.bytes_received),
+        }
+    }
+}
+
 /// 对端发来的数据报排在这里等上层来取，给上下文的接受方和发起方的各一个队列。
 pub(crate) struct DatagramQueues {
     pub acceptor: mpsc::Sender<Datagram>,
@@ -97,6 +141,8 @@ struct Conn {
     key: PublicKey,
     /// 越新的越大。
     serial: u64,
+    /// 握手完成、登记进来的时刻。
+    established: Instant,
     streams: Arc<StreamCount>,
     /// 空闲够久了，却因为关掉就建不回来而留着（见 [`hold_idle`]）。只用来让开始和结束各记一行日志。
     held: AtomicBool,
@@ -215,6 +261,28 @@ impl Manager {
     /// 到 `peer` 的连接（开新流用的那一条）自己量的往返时间。没有连接时是 `None`。
     pub(crate) fn connection_rtt(&self, peer: NodeId) -> Option<Duration> {
         self.preferred(peer).map(|conn| conn.quic.rtt())
+    }
+
+    /// 到 `peer` 的连接（开新流用的那一条）现在的状况。没有连接时是 `None`。
+    pub(crate) fn connection_report(&self, peer: NodeId) -> Option<ConnectionReport> {
+        let conn = self.preferred(peer)?;
+        let stats = conn.quic.stats();
+        Some(ConnectionReport {
+            established: conn.established,
+            rtt: stats.path.rtt,
+            min_rtt: stats.path.min_rtt,
+            cwnd_bytes: stats.path.cwnd,
+            mtu: stats.path.current_mtu,
+            congestion: Congestion::from(conn.algorithm),
+            counters: ConnectionCounters {
+                sent_packets: stats.path.sent_packets,
+                lost_packets: stats.path.lost_packets,
+                lost_bytes: stats.path.lost_bytes,
+                congestion_events: stats.path.congestion_events,
+                bytes_sent: stats.udp_tx.bytes,
+                bytes_received: stats.udp_rx.bytes,
+            },
+        })
     }
 
     /// 到 `peer` 的连接现在用的拥塞控制；还没有连接时是新建的连接会用的那一种。
@@ -342,7 +410,8 @@ impl Manager {
         let serial = self.next_serial.fetch_add(1, Ordering::Relaxed);
         let Origin { dialer, key, algorithm } = origin;
         let streams = StreamCount::new();
-        let conn = Arc::new(Conn { quic, dialer, key, serial, streams, held: AtomicBool::new(false), algorithm });
+        let conn =
+            Arc::new(Conn { quic, dialer, key, serial, established: Instant::now(), streams, held: AtomicBool::new(false), algorithm });
         let surplus = {
             let mut peers = self.peers();
             let entry = peers.entry(peer).or_default();
@@ -952,6 +1021,7 @@ mod tests {
                 dialer: NodeId::new(2).unwrap(),
                 key: self.peer_key,
                 serial,
+                established: Instant::now(),
                 streams: StreamCount::new(),
                 held: AtomicBool::new(false),
                 algorithm: Algorithm::from_env(),

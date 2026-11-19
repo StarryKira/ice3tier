@@ -1,9 +1,10 @@
 //! 把两端各自的上报合成管理 API 里的一个测试结果。纯函数，不碰存储和连接。
 
 use i3t_model::admin::diag::{
-    DecisionView, DirectResult, DirectSideView, ItemState, PathResult, RouteResult, TestItem, TestState, TestView, ThroughputResult,
+    DecisionView, DirectResult, DirectSideView, HostResult, ItemState, PathResult, RouteResult, TestItem, TestState, TestView,
+    ThroughputResult,
 };
-use i3t_model::control::diag::{Decision, PathMeasure, PathPick, TestCode, TestProblem, Throughput};
+use i3t_model::control::diag::{Decision, HostReport, PathMeasure, PathPick, TestCode, TestProblem, Throughput};
 use i3t_model::control::{Route, TestReport};
 use i3t_proto::NodeId;
 
@@ -130,11 +131,26 @@ pub(crate) fn merge(inputs: &Inputs<'_>) -> TestView {
         RouteResult { state, problem, forward, reverse }
     });
 
+    // 主机的状况在每一端最后的那次上报里。
+    let hosts = requested(TestItem::Host)
+        .then(|| vec![host_result(a, initiator, finished), host_result(b, responder.filter(|report| report.last), finished)]);
+
     let mut notes = Vec::new();
     if finished && responder.is_none_or(|report| !report.last) && initiator.is_some() {
         notes.push(TestProblem::new(TestCode::NoReport, Some(b)));
     }
-    TestView { direct, direct_quality, relay_quality, route, notes, ..base.clone() }
+    TestView { direct, direct_quality, relay_quality, route, hosts, notes, ..base.clone() }
+}
+
+/// 一端的主机状况。`last` 是它最后的那次上报：到了却没有带，就是这个节点的版本没有这一项。
+fn host_result(node: NodeId, last: Option<&TestReport>, finished: bool) -> HostResult {
+    let (state, problem, report) = match last {
+        Some(TestReport { host: Some(host), .. }) => (ItemState::Done, None, host.clone()),
+        Some(_) => (ItemState::Skipped, Some(TestProblem::new(TestCode::NotSupported, Some(node))), HostReport::default()),
+        None if finished => (ItemState::Failed, Some(TestProblem::new(TestCode::NoReport, Some(node))), HostReport::default()),
+        None => (ItemState::Pending, None, HostReport::default()),
+    };
+    HostResult { node, state, problem, report }
 }
 
 /// 直连没有成功时最能说明问题的那个原因：UDP 不通、端口映射随对端变化这类说得出是哪个节点的，排在"超时"前面。
@@ -303,6 +319,7 @@ mod tests {
             direct_quality: None,
             relay_quality: Vec::new(),
             route: None,
+            hosts: None,
             notes: Vec::new(),
         }
     }

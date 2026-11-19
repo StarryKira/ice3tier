@@ -8,11 +8,14 @@ use i3t_proto::NodeId;
 use serde::{Deserialize, Serialize};
 
 use super::{NetworkId, NodeRef, Timestamp};
-use crate::control::diag::{Choice, DirectSide, Hop, Latency, PathPick, Throughput};
+use crate::control::diag::{Choice, DirectSide, Hop, HostReport, Latency, PathPick, Throughput};
 use crate::control::{DirectKind, LegTransport, PathCandidate, Route};
 use crate::netmap::RoutingMode;
 
-pub use crate::control::diag::{ChoiceCode, HopSource, TestCode, TestProblem, Transfer, TransferEnd};
+pub use crate::control::diag::{
+    ChoiceCode, CpuUse, HopSource, HostConnections, HostMemory, HostProcess, HostSystem, PeerConnection, TestCode, TestProblem, Transfer,
+    TransferEnd,
+};
 
 /// 测试项。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -26,10 +29,12 @@ pub enum TestItem {
     RelayQuality,
     /// 两种选路模式各会选哪条路。
     Route,
+    /// 两端各自的机器、进程和它们之间那条连接的状况。
+    Host,
 }
 
 impl TestItem {
-    pub const ALL: [Self; 4] = [Self::Direct, Self::DirectQuality, Self::RelayQuality, Self::Route];
+    pub const ALL: [Self; 5] = [Self::Direct, Self::DirectQuality, Self::RelayQuality, Self::Route, Self::Host];
 }
 
 /// 发起一个测试。
@@ -115,8 +120,24 @@ pub struct TestView {
     pub relay_quality: Vec<PathResult>,
     /// 两种选路模式的选择；没有要这一项时是 `null`。
     pub route: Option<RouteResult>,
+    /// 两端的主机和连接状况，`a` 在前；没有要这一项时是 `null`。
+    #[serde(default)]
+    pub hosts: Option<Vec<HostResult>>,
     /// 不影响结果、但值得说的事：一端没有按时上报、吞吐测试时别的流量也在这条路上。
     pub notes: Vec<TestProblem>,
+}
+
+/// 一端的主机和连接状况（测试项 `host`）。
+///
+/// 那一端最后一次上报到了才有内容，之前是 `pending`、各项都是 `null`。`done` 而里面有的项是 `null` 是正常的：
+/// 那台机器读不到那一样。节点的版本没有这一项时是 `skipped`、`not_supported`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostResult {
+    pub node: NodeId,
+    pub state: ItemState,
+    pub problem: Option<TestProblem>,
+    #[serde(flatten)]
+    pub report: HostReport,
 }
 
 /// 直连能力。
@@ -279,6 +300,32 @@ pub enum CellState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_host_result_is_one_flat_object_with_null_for_what_was_not_read() {
+        let pending = HostResult { node: NodeId::new(3).unwrap(), state: ItemState::Pending, problem: None, report: HostReport::default() };
+        assert_eq!(
+            serde_json::to_value(&pending).unwrap(),
+            serde_json::json!({
+                "node": 3, "state": "pending", "problem": null,
+                "system": null, "cpu": null, "cpu_peak": null, "load_x100": null,
+                "memory": null, "process": null, "connections": null, "to_peer": null
+            })
+        );
+        let report = HostReport {
+            cpu_peak: Some(CpuUse { system_percent: 61, process_percent: 98 }),
+            load_x100: Some([35, 22, 18]),
+            ..HostReport::default()
+        };
+        let done = HostResult { state: ItemState::Done, report, ..pending };
+        let wire = serde_json::to_value(&done).unwrap();
+        assert_eq!(wire["cpu_peak"], serde_json::json!({ "system_percent": 61, "process_percent": 98 }));
+        assert_eq!(wire["load_x100"], serde_json::json!([35, 22, 18]));
+        assert_eq!(serde_json::from_value::<HostResult>(wire).unwrap(), done);
+
+        assert_eq!(serde_json::to_value(TestItem::Host).unwrap(), serde_json::json!("host"));
+        assert!(TestItem::ALL.contains(&TestItem::Host), "没有写测试项时也做这一项");
+    }
 
     #[test]
     fn a_test_request_needs_only_the_two_nodes() {

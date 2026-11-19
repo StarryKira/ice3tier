@@ -4,7 +4,7 @@ use i3t_lang::table::Table;
 use i3t_lang::{NONE, optional};
 use i3t_model::admin::NodeRef;
 use i3t_model::admin::diag::{
-    DecisionView, DirectResult, ItemState, MatrixRun, PathResult, TestProblem, TestView, ThroughputResult, Transfer,
+    CpuUse, DecisionView, DirectResult, HostResult, ItemState, MatrixRun, PathResult, TestProblem, TestView, ThroughputResult, Transfer,
 };
 use i3t_model::control::diag::{Choice, Hop, Latency};
 use i3t_proto::NodeId;
@@ -101,9 +101,84 @@ pub fn test(view: &TestView, names: &Names) {
             println!("  {}", problem_text(problem, &name));
         }
     }
+    if let Some(hosts) = &view.hosts {
+        host_lines(hosts, &name);
+    }
     for note in &view.notes {
         println!("{}", lang.labelled(t.note, &problem_text(note, &name)));
     }
+}
+
+/// 两端的主机状况，和各自到对端的那条连接。读不到的写 `-`。
+fn host_lines(hosts: &[HostResult], name: &dyn Fn(NodeId) -> String) {
+    let (t, lang, codes) = context();
+    let cpu =
+        |used: Option<CpuUse>| used.map_or_else(|| NONE.to_owned(), |used| format!("{}% / {}%", used.system_percent, used.process_percent));
+    println!("\n{}", t.hosts_title);
+    let mut rows = Table::new(&t.hosts_header).indented(2);
+    for host in hosts {
+        let report = &host.report;
+        let system = report.system.as_ref();
+        let described = system
+            .map(|system| lang.list([system.os.as_deref(), system.kernel.as_deref(), Some(system.arch.as_str())].into_iter().flatten()));
+        let load = report.load_x100.map(|loads| loads.map(|load| format!("{}.{:02}", load / 100, load % 100)).join(" "));
+        let memory = report.memory.map(|memory| format!("{} / {}", lang.bytes(memory.available_bytes), lang.bytes(memory.total_bytes)));
+        let process = report.process.map(|process| {
+            let resident = report.memory.map_or_else(|| NONE.to_owned(), |memory| lang.bytes(memory.process_rss_bytes));
+            (t.host_process)(&resident, process.threads, &lang.duration(process.uptime_secs))
+        });
+        // 这一端没有内容时（还没报、版本太旧、没报上来），系统那一格写原因。
+        let state = match &host.problem {
+            Some(problem) => lang.labelled((codes.item_state)(host.state), &problem_text(problem, name)),
+            None => (codes.item_state)(host.state).to_owned(),
+        };
+        rows.row(vec![
+            name(host.node),
+            described.unwrap_or(state),
+            optional(system.map(|system| system.cores)),
+            cpu(report.cpu),
+            cpu(report.cpu_peak),
+            optional(load),
+            optional(memory),
+            optional(process),
+            optional(report.connections.as_ref().map(t.host_connections)),
+        ]);
+    }
+    rows.print();
+    println!("  {}", t.cpu_note);
+
+    println!("\n{}", t.peer_connection_title);
+    let mut rows = Table::new(&t.peer_connection_header).indented(2);
+    for host in hosts {
+        let Some(connection) = &host.report.to_peer else {
+            let mut row = vec![NONE.to_owned(); t.peer_connection_header.len()];
+            row[0] = name(host.node);
+            row[1] = if host.state == ItemState::Done { t.no_connection.to_owned() } else { (codes.item_state)(host.state).to_owned() };
+            rows.row(row);
+            continue;
+        };
+        // 丢了的包占发出去的千分之几。
+        let lost = connection
+            .lost_packets
+            .saturating_mul(1000)
+            .checked_div(connection.sent_packets)
+            .map(|lost| u16::try_from(lost).unwrap_or(1000));
+        rows.row(vec![
+            name(host.node),
+            (codes.route)(&connection.route, name),
+            lang.millis(u64::from(connection.rtt_us)),
+            optional(connection.min_rtt_us.map(|rtt| lang.millis(u64::from(rtt)))),
+            lang.bytes(connection.cwnd_bytes),
+            connection.mtu.to_string(),
+            connection.congestion.clone(),
+            connection.sent_packets.to_string(),
+            connection.lost_packets.to_string(),
+            optional(lost.map(|lost| lang.percent(lost))),
+            format!("{} / {}", lang.bytes(connection.bytes_sent), lang.bytes(connection.bytes_received)),
+            lang.duration(connection.age_secs),
+        ]);
+    }
+    rows.print();
 }
 
 fn direct_lines(direct: &DirectResult, name: &dyn Fn(NodeId) -> String) {

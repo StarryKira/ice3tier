@@ -229,7 +229,8 @@ pub async fn run(
     let follow_lanes = tokio::spawn(Arc::clone(&lanes).follow(local_rx.clone()));
     // 主动测试：测量服务和出口一起接别的节点开过来的流；结果经长连接送给 controller。
     let (test_reports_tx, test_reports) = mpsc::channel(32);
-    let diag = Arc::new(Diag::new(Arc::clone(&endpoint), local_rx.clone(), config.tests.throughput, test_reports_tx));
+    let diag = Diag::new(Arc::clone(&endpoint), local_rx.clone(), config.tests.throughput, test_reports_tx).with_lanes(Arc::clone(&lanes));
+    let diag = Arc::new(diag);
 
     let serve_exit = tokio::spawn({
         let acceptor = lanes.acceptor();

@@ -51,7 +51,7 @@ pub use i3t_path::{
 };
 pub use i3t_relay::{DropReason, RelayCounters, TcpHandoff};
 pub use i3t_underlay::{Direction, PacketFilter};
-pub use manager::{DIAL_TIMEOUT, DatagramHandle};
+pub use manager::{ConnectionCounters, ConnectionReport, DIAL_TIMEOUT, DatagramHandle};
 pub use quic::QuicConfigError;
 pub use stream::{DROPPED_STREAM_CODE, RecvHalf, SendHalf};
 pub use tuning::{MAX_STREAM_WINDOW, Tuning};

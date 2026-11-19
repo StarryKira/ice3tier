@@ -41,6 +41,8 @@ pub struct TestItems {
     pub route: bool,
     /// 在测质量的路径上另外量吞吐（要上面两项之一）。
     pub throughput: bool,
+    /// 两端各报一份这台机器、这个进程和到对端的那条连接的状况（[`HostReport`]）。旧的节点不认，也就不报。
+    pub host: bool,
 }
 
 /// controller 给两端的测试指令。两端拿到的是同一个编号、同样的测试项和路径，只是角色和对端不同。
@@ -82,6 +84,113 @@ pub struct TestReport {
     /// 接受方：被要求提供吞吐测量、却没有提供的原因（本机关掉了吞吐测试等）。
     #[serde(default)]
     pub throughput_refused: Option<TestProblem>,
+    /// 这一端的主机和连接状况。只在这一端的最后一次上报里有。
+    #[serde(default)]
+    pub host: Option<HostReport>,
+}
+
+/// 一端在一个测试期间看到的：这台机器、节点这个进程，和它到对端的那条连接。
+///
+/// 每一样读不到就是 `null`（这个平台上没有，或者读的时候出了错），不算测试失败。现在只有 Linux 读得到机器和进程的数。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HostReport {
+    pub system: Option<HostSystem>,
+    /// 测试开始的头一秒里 CPU 用了多少。
+    pub cpu: Option<CpuUse>,
+    /// 测试期间最忙的一秒（两个数各取各的最大值）。量吞吐时进程的那个数接近 100，就是一个核跑满了。
+    pub cpu_peak: Option<CpuUse>,
+    /// 系统的 1、5、15 分钟平均负载，乘了 100。
+    pub load_x100: Option<[u32; 3]>,
+    pub memory: Option<HostMemory>,
+    pub process: Option<HostProcess>,
+    pub connections: Option<HostConnections>,
+    /// 这一端到对端的那条连接。没有连接时是 `null`。
+    pub to_peer: Option<PeerConnection>,
+}
+
+/// 机器本身。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HostSystem {
+    /// 发行版的名字，比如 `Debian GNU/Linux 13 (trixie)`；读不到发行版时是系统的种类（`linux`、`windows`、`macos`）。
+    pub os: Option<String>,
+    pub kernel: Option<String>,
+    /// `x86_64`、`aarch64` 等。
+    pub arch: String,
+    pub cpu_model: Option<String>,
+    /// 这个进程用得上几个核。
+    pub cores: u32,
+    pub uptime_secs: Option<u64>,
+}
+
+/// 一秒里 CPU 用了多少。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CpuUse {
+    /// 整台机器，所有的核加在一起，0 到 100。
+    pub system_percent: u32,
+    /// 节点这个进程，按一个核算：多个线程同时忙的时候会超过 100。
+    pub process_percent: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct HostMemory {
+    pub total_bytes: u64,
+    /// 不动用交换就还能给程序用的。
+    pub available_bytes: u64,
+    /// 节点这个进程常驻的。
+    pub process_rss_bytes: u64,
+}
+
+/// 节点这个进程。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HostProcess {
+    pub uptime_secs: u64,
+    pub threads: Option<u32>,
+}
+
+/// 这个节点现在连着多少东西。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HostConnections {
+    /// 和多少个对端之间有连接。
+    pub peers: u32,
+    /// 挂靠着几个 relay。
+    pub relays: u32,
+    /// 本节点是 relay 时，它上面有多少个会话；不是 relay 时是 `null`。
+    pub relay_clients: Option<u32>,
+    /// 共用的连接上开着多少条流。
+    pub streams: u32,
+    /// ice3proxy 的连接：正在承载流的，和空闲着的。
+    pub lanes_in_use: u32,
+    pub lanes_idle: u32,
+}
+
+/// 一端到对端的那条连接。往返时间、窗口和包长是测试结束时的值；收发和丢包的计数是测试期间增加的。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerConnection {
+    pub route: Route,
+    /// 平滑的往返时间，和连接建立以来见过的最小值，微秒。
+    pub rtt_us: u32,
+    #[serde(default)]
+    pub min_rtt_us: Option<u32>,
+    /// 拥塞窗口。
+    pub cwnd_bytes: u64,
+    /// 现在一个包最长多少字节。
+    pub mtu: u32,
+    /// `"bbr"` 或 `"cubic"`。
+    pub congestion: String,
+    pub sent_packets: u64,
+    pub lost_packets: u64,
+    pub lost_bytes: u64,
+    /// 拥塞控制认定发生了拥塞的次数。
+    pub congestion_events: u64,
+    /// 线上的字节数。
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    /// 这条连接建立了多久。
+    pub age_secs: u64,
 }
 
 /// 测试里一样事做不成的原因：一个码，说的是哪个节点，和一小段给人看的话。
@@ -459,7 +568,7 @@ mod tests {
             wire,
             serde_json::json!({
                 "type": "test", "test": 12, "peer": 3, "role": "responder",
-                "items": { "direct": true, "direct_quality": false, "relay_quality": true, "route": false, "throughput": true },
+                "items": { "direct": true, "direct_quality": false, "relay_quality": true, "route": false, "throughput": true, "host": false },
                 "paths": [[8, 9]], "window_secs": 60
             })
         );
