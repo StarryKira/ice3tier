@@ -11,7 +11,7 @@
 //! 之前设，监听的 socket 在 `listen` 之前设：Linux 上接进来的连接继承监听 socket 的这一项，握手的应答里通告的就是它。
 //!
 //! 用 [`connect`] 和 [`listen`] 代替 tokio 的 `TcpStream::connect` 和 `TcpListener::bind`；自己用 socket2 建 socket 的地方
-//! 在 `connect`、`listen` 之前调用 [`clamp`]。本机回环上的连接（本机状态接口、`i3t connect`）不走这里，它们不过任何路。
+//! 在 `connect`、`listen` 之前调用 [`clamp`]。本机回环上的连接（本机状态接口）不走这里，它们不过任何路。
 //!
 //! 平台：Linux、macOS 和别的 Unix 都有 `TCP_MAXSEG`，可以在连接之前设（macOS 上接进来的连接继不继承监听 socket 的这一项
 //! 由内核决定）。Windows 只能读不能设，那里 [`clamp`] 什么都不做，用系统的 MSS。

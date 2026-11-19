@@ -197,8 +197,8 @@ relay = false
 # relay_address = "203.0.113.9:40330"
 # 也可以执行 i3t set relay-address 203.0.113.9:40330。别的地址由 controller 自己找出来。
 
-# 本机的组网入口：这台机器上的程序经它访问组网里的节点（只到节点，不经出口，不认证）。默认不开；
-# i3t connect 要用 socks5 这一个。要开就写回环上的地址，比如 socks5 = "127.0.0.1:1080"。
+# 本机的组网入口：这台机器上的程序经它访问组网里的节点（只到节点，不经出口，不认证）。默认不开：
+# 有虚拟网卡时直接连虚拟 IP 就行，装不了网卡的机器才用得上。要开就写回环上的地址，比如 socks5 = "127.0.0.1:1080"。
 # 经出口出去的代理在 WebUI 的代理里配置。
 [proxy]
 socks5 = "off"
@@ -256,7 +256,8 @@ relay = false
 # Or run: i3t set relay-address 203.0.113.9:40330. The controller finds the other addresses itself.
 
 # Local mesh entries: programs on this machine reach the nodes of the network through them (nodes only, no exit,
-# no authentication). Off by default; i3t connect needs the socks5 one. To turn one on write a loopback address,
+# no authentication). Off by default: with the virtual network programs connect to virtual IPs directly, so only
+# machines that cannot have the adapter need one. To turn one on write a loopback address,
 # e.g. socks5 = "127.0.0.1:1080". Proxies that leave through an exit are set up under Proxies in the WebUI.
 [proxy]
 socks5 = "off"

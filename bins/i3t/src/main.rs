@@ -2,7 +2,6 @@
 //!
 //! 终端上的文字跟着系统的语言（见 `i3t_lang`），日志不翻译。
 
-mod connect;
 mod network;
 mod show;
 mod texts;
@@ -10,7 +9,6 @@ mod texts;
 mod tune;
 
 use std::io::{IsTerminal, Read};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -26,7 +24,6 @@ use i3t_lang::Lang;
 use i3t_lang::table::Fields;
 use i3t_update::SelfCheckFailure;
 
-use crate::connect::Destination;
 use crate::texts::texts;
 
 /// 这个程序的版本号：报给 controller 的、`i3t --version` 显示的、更新时和发布清单比的都是它。
@@ -77,10 +74,6 @@ enum Command {
         count: u32,
     },
     Key,
-    Connect {
-        host: String,
-        port: u16,
-    },
     Tune {
         #[arg(long)]
         apply: bool,
@@ -139,11 +132,6 @@ fn command(lang: Lang) -> clap::Command {
                 .mut_arg("count", |arg| arg.help(h.ping_count).value_name(v.count))
         })
         .mut_subcommand("key", |sub| sub.about(h.key))
-        .mut_subcommand("connect", |sub| {
-            sub.about(h.connect)
-                .mut_arg("host", |arg| arg.help(h.connect_host).value_name(v.host))
-                .mut_arg("port", |arg| arg.value_name(v.port))
-        })
         .mut_subcommand("tune", |sub| sub.about(h.tune).mut_arg("apply", |arg| arg.help(h.tune_apply)))
         .mut_subcommand("network", |sub| sub.about(h.network).mut_subcommand("status", |sub| sub.about(h.network_status)))
         .mut_subcommand("hosts", |sub| {
@@ -255,17 +243,6 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             None => bail!(t.routes_not_running),
         },
         Command::Key => println!("{}", state.key_or_generate()?.public()),
-        Command::Connect { host, port } => {
-            let config = Config::load(&state.config_path())?;
-            let Some(listen) = config.proxy.socks5.addr() else { bail!(t.socks5_off) };
-            let domain = state.netmap()?.map(|netmap| netmap.network.domain);
-            let destination = Destination::new(host, port, domain.as_deref());
-            let runtime = current_thread()?;
-            let result = runtime.block_on(connect::connect(reachable_locally(listen), &destination));
-            // 读标准输入的那个线程可能还卡在读上，它是取消不了的：不等它，直接退出。
-            runtime.shutdown_background();
-            result?;
-        }
         Command::Tune { apply } => {
             let config = Config::load(&state.config_path())?;
             tune(config.port, apply)?;
@@ -313,16 +290,6 @@ fn tune(port: u16, apply: bool) -> anyhow::Result<()> {
 #[cfg(not(target_os = "linux"))]
 fn tune(_port: u16, _apply: bool) -> anyhow::Result<()> {
     bail!(texts().ui.tune_linux_only)
-}
-
-/// 从本机连一个监听地址该用的地址：绑在"所有地址"上的监听，连它的回环地址。
-fn reachable_locally(listen: SocketAddr) -> SocketAddr {
-    let ip = match listen.ip() {
-        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
-        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
-        ip => ip,
-    };
-    SocketAddr::new(ip, listen.port())
 }
 
 /// `i3t run` 的运行时：一个工作线程时是单线程的运行时，多个时是多线程的（线程数由性能档位定，见 `i3t_agent::performance`）。
@@ -480,8 +447,7 @@ mod tests {
             Command::Set { setting: Setting::Profile, .. }
         ));
         assert!(parse(&["i3t", "set", "can-fly", "on"]).is_err());
-        assert!(matches!(parse(&["i3t", "connect", "nas", "22"]).unwrap().command, Command::Connect { .. }));
-        assert!(parse(&["i3t", "connect", "nas", "22", "--via", "home"]).is_err(), "出口不再由用户名选，--via 去掉了");
+        assert!(parse(&["i3t", "connect", "nas", "22"]).is_err(), "i3t connect 去掉了：有虚拟网卡，直接连虚拟 IP");
         assert!(matches!(parse(&["i3t", "set", "network", "off"]).unwrap().command, Command::Set { setting: Setting::Network, .. }));
         assert!(matches!(parse(&["i3t", "set", "firewall", "off"]).unwrap().command, Command::Set { setting: Setting::Firewall, .. }));
         assert!(parse(&["i3t", "set", "intercept", "on"]).is_err(), "透明访问的开关没有了");

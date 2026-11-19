@@ -26,12 +26,6 @@ def socks(node: Node, url: str, via: Node | None = None, timeout: float = 8):
     return node.curl(url, via=via, timeout=timeout)
 
 
-def connect(node: Node, host: str, port: int, *, state: Path | None = None, timeout: float = 15):
-    """用 `i3t connect` 从 `node` 连到 `host:port`，发一个 HTTP 请求，返回进程的结果（标准输出是对面的应答）。"""
-    return node.host.run(binary("i3t"), "--state-dir", str(state or node.state), "connect", host, str(port),
-                         input="GET / HTTP/1.0\r\n\r\n", check=False, timeout=timeout)
-
-
 def eventually(action, ok, timeout: float = 25):
     """反复执行 `action`，直到 `ok(结果)` 为真或者超时；返回最后一次的结果。配置下发和建连都要一点时间。"""
     deadline = time.monotonic() + timeout
@@ -64,21 +58,6 @@ def node_service(lab: Lab, work: Path, t: Checks) -> None:
     outside = socks(a, "http://11.0.0.2/")
     t.check("组网入口到不了网络之外", outside.returncode != 0, outside.stdout)
 
-    piped = connect(a, "b.lab.i3t", 8080)
-    t.check("i3t connect 把标准输入输出接到 b 上的服务", piped.returncode == 0 and piped.stdout.endswith(b.host.ip),
-            f"{piped.returncode} {piped.stdout!r} {piped.stderr.strip()}")
-    short = connect(a, "b", 8080)
-    t.check("i3t connect 只写节点的名字也行", short.returncode == 0 and short.stdout.endswith(b.host.ip),
-            f"{short.returncode} {short.stdout!r} {short.stderr.strip()}")
-    refused = connect(a, b.virtual_ip, 8081)
-    t.check("i3t connect 连不上时以失败退出，标准输出上什么都没有", refused.returncode != 0 and refused.stdout == "",
-            f"{refused.returncode} {refused.stdout!r} {refused.stderr.strip()}")
-    # 配置文件里没有打开组网入口（节点默认不开）：说怎么打开。
-    bare = work / "bare-state"
-    bare.mkdir(exist_ok=True)
-    off = connect(a, "b", 8080, state=bare)
-    t.check("没有打开组网入口时 i3t connect 说怎么打开", off.returncode != 0 and 'socks5 = \"127.0.0.1:1080\"' in off.stderr,
-            f"{off.returncode} {off.stderr.strip()}")
     if t.failures:
         print(tail(a.read_log()), tail(b.read_log()), sep="\n  ---\n")
 
