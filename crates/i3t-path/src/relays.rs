@@ -434,9 +434,13 @@ impl RelayLink {
     }
 
     /// 选挂靠对象时用的延迟估计：有会话的用会话上测的，没有的用最近一次单独测的；都没有或者过期了就是 `None`。
+    ///
+    /// 会话上测的和报给别的节点的是同一个数（[`reported_rtt`](Self::reported_rtt)）：走 TCP 时是最近几分钟的平均，
+    /// 不是平滑延迟。平滑延迟撞上一次停顿就高出几成，半分钟才落回去；真实链路上一个只有 TCP 的节点到两个延迟相近的
+    /// relay，挂靠就这样一小时来回换了三十来次。
     pub(crate) fn estimate(&self, now: Instant) -> Option<Duration> {
         let surveyed = self.surveyed.filter(|(_, at)| now.saturating_duration_since(*at) < ESTIMATE_TTL).map(|(rtt, _)| rtt);
-        self.rtt().map(Rtt::get).or(surveyed)
+        self.reported_rtt(now).map(Rtt::get).or(surveyed)
     }
 
     /// 要它却一直连不上。
@@ -1703,6 +1707,7 @@ mod tests {
         let reported = setup.link.reported_rtt(setup.start + again).expect("有会话").get();
         assert!(smoothed < 40 * MS, "平滑延迟还是握手和保活那二十来毫秒：{smoothed:?}");
         assert_eq!(reported, quality.rtt, "两头用同一把尺子");
+        assert_eq!(setup.link.estimate(setup.start + again), Some(quality.rtt), "选挂靠谁也用它：一次停顿不会让平滑延迟带着挂靠来回换");
     }
 
     #[test]
