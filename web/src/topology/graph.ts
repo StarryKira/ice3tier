@@ -66,6 +66,11 @@ export interface TopoLink {
   relays: NodeId[]
   forward: boolean
   reverse: boolean
+  /**
+   * 经的 relay 就是两端之一（一端自己是 relay，另一端在它上面有会话）：中间没有别的节点，流量直接走这条会话。
+   * 发送方就是那个 relay 时，节点报不出到 relay 那一段的传输和延迟。
+   */
+  session: boolean
   /** 走它的每一格都是过期的。 */
   stale: boolean
   /** 两个方向里低的那个全程延迟。 */
@@ -353,6 +358,7 @@ export function buildTopology(
       relays: relaysOf,
       forward: false,
       reverse: false,
+      session: kind === 'relay' && relaysOf.every((id) => id === pair.source || id === pair.target),
       stale: true,
       rtt: null,
       directKind: null,
@@ -392,6 +398,7 @@ export function buildTopology(
       relays: [],
       forward: false,
       reverse: false,
+      session: false,
       stale: false,
       rtt: null,
       directKind: null,
@@ -431,7 +438,7 @@ export function buildTopology(
     return values.length === 0 ? null : Math.min(...values)
   }
   const legsOf = (link: TopoLink) => {
-    if (link.kind !== 'relay') return []
+    if (link.kind !== 'relay' || link.session) return []
     const ends = [link.entries[0]?.from, link.entries[0]?.to].sort((a, b) => (a ?? 0) - (b ?? 0))
     const path = [ends[0] ?? 0, ...link.relays, ends[1] ?? 0]
     // 经的 relay 就是终点自己时（连对端自己的 relay），没有"自己到自己"那一段。

@@ -155,6 +155,22 @@ describe('buildTopology：路由矩阵整理成拓扑图', () => {
     ])
   })
 
+  it('经的 relay 就是一端自己：是"中继会话"，中间没有别的节点，也没有一段一段的延迟', () => {
+    const matrix: RouteMatrix = {
+      nodes: [node(1, 'h1'), node(2, 'h2'), node(5, 'suq')],
+      entries: [
+        makeEntry(1, 5, viaRelays(5), { rtt_ms: 404, relay_leg: 'tcp' }),
+        makeEntry(5, 2, viaRelays(5), { rtt_ms: null, relay_leg: null }),
+        makeEntry(1, 2, viaRelays(5), { rtt_ms: 300 }),
+      ],
+    }
+    const links = new Map(buildTopology(matrix, new Set([5]), null).links.map((link) => [link.id, link]))
+    expect(links.get('link:1-5:5')).toMatchObject({ session: true, transport: 'tcp', legs: [] })
+    expect(links.get('link:2-5:5')).toMatchObject({ session: true, forward: false, reverse: true })
+    // 真的经过第三个节点的不是。
+    expect(links.get('link:1-2:5')).toMatchObject({ session: false })
+  })
+
   it('ice3proxy：一对节点之间有连接时另一条线，两头报的取大的；过期的、什么都没有的不算', () => {
     const lanes = (in_use: number, idle: number, control = true) => ({ control, in_use, idle })
     const matrix: RouteMatrix = {

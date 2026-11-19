@@ -98,7 +98,12 @@ export const topology: Messages['topology'] = {
   udp: 'UDP',
   tcp: 'TCP',
   laneInUse: (n) => `${n} in use`,
-  laneIdle: 'Idle',
+  laneIdle: (n) => `${n} idle`,
+  laneStandby: 'Standby',
+  session: 'Relay session',
+  tipSession: (a, b) => `${a} ⇄ ${b} · relay session`,
+  tipSessionHint: (peer, relay) =>
+    `${peer} holds a session on ${relay}'s relay; traffic uses it directly, with no node in between`,
   tipDirect: (a, b) => `${a} ⇄ ${b} · direct`,
   tipRelay: (a, b, relays) => `${a} ⇄ ${b} · via ${relays}`,
   tipLane: (a, b) => `${a} ⇄ ${b} · ice3proxy`,

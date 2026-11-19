@@ -127,7 +127,7 @@ function linkDescription(link: TopoLink, name: Name): string {
   if (link.stale) return g.linkStale
   const rtt = rttText(link.rtt) ?? t.routes.rttUnknown
   if (link.kind === 'direct') return g.linkDirect(rtt)
-  if (link.kind === 'relay') return g.linkRelay(relayNames(link, name), rtt)
+  if (link.kind === 'relay') return link.session ? `${g.session}，${rtt}` : g.linkRelay(relayNames(link, name), rtt)
   return g.linkLane
 }
 
@@ -138,13 +138,14 @@ function linkParts(link: TopoLink, name: Name): LabelPart[] {
   if (link.kind === 'direct') {
     parts.push({ text: g.udp, tone: 'ok' })
   } else if (link.kind === 'relay') {
-    parts.push({ text: t.routes.via(relayNames(link, name)), tone: 'relay' })
+    parts.push({ text: link.session ? g.session : t.routes.via(relayNames(link, name)), tone: 'relay' })
     if (link.transport === 'tcp') parts.push({ text: g.tcp, tone: 'warn' })
     else if (link.transport === 'udp') parts.push({ text: g.udp })
   } else {
     const inUse = link.lanes?.in_use ?? 0
+    const idle = link.lanes?.idle ?? 0
     parts.push({ text: t.routes.protocol.lane, tone: 'lane' }, { text: g.tcp })
-    parts.push({ text: inUse > 0 ? g.laneInUse(inUse) : g.laneIdle })
+    parts.push({ text: inUse > 0 ? g.laneInUse(inUse) : idle > 0 ? g.laneIdle(idle) : g.laneStandby })
     return parts
   }
   if (rtt !== null) parts.push({ text: rtt })
@@ -160,11 +161,18 @@ function LinkTip({ link, name }: { link: TopoLink; name: Name }) {
     link.kind === 'direct'
       ? g.tipDirect(a, b)
       : link.kind === 'relay'
-        ? g.tipRelay(a, b, relayNames(link, name))
+        ? link.session
+          ? g.tipSession(a, b)
+          : g.tipRelay(a, b, relayNames(link, name))
         : g.tipLane(a, b)
+  // 中继会话：relay 是哪一端，另一端在它上面有会话。
+  const relay = link.relays[0]
+  const sessionHint =
+    link.session && relay !== undefined ? g.tipSessionHint(name(pointId(relay)) === a ? b : a, byId(relay)) : null
   return (
     <div className="space-y-1">
       <p className="font-medium">{title}</p>
+      {sessionHint !== null ? <p>{sessionHint}</p> : null}
       {link.kind === 'lane' ? (
         <>
           <p>{g.tipLaneCounts(link.lanes?.in_use ?? 0, link.lanes?.idle ?? 0)}</p>

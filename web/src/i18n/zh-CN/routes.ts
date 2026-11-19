@@ -107,7 +107,13 @@ export const topology = {
   udp: 'UDP',
   tcp: 'TCP',
   laneInUse: (n: number) => `${n} 条在用`,
-  laneIdle: '空闲',
+  laneIdle: (n: number) => `空闲 ${n} 条`,
+  laneStandby: '待命',
+  /** 经的 relay 就是一端自己：中间没有别的节点。 */
+  session: '中继会话',
+  tipSession: (a: string, b: string) => `${a} ⇄ ${b} · 中继会话`,
+  tipSessionHint: (peer: string, relay: string) =>
+    `${peer} 连在 ${relay} 的中继上，两头直接走这条会话，中间没有别的节点`,
   tipDirect: (a: string, b: string) => `${a} ⇄ ${b} · 直连`,
   tipRelay: (a: string, b: string, relays: string) => `${a} ⇄ ${b} · 经 ${relays}`,
   tipLane: (a: string, b: string) => `${a} ⇄ ${b} · ice3proxy`,
