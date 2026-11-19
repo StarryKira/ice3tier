@@ -81,8 +81,8 @@ const REFUSAL_LOG_EVERY: Duration = Duration::from_secs(10);
 pub struct Timing {
     /// 节点确认之后等多久，再把因此可以继续的变更发给别的节点。一批确认并成一次下发。
     pub ack_coalesce: Duration,
-    /// 节点上报的端点或挂靠关系变了之后等多久，再发给它的对端。
-    /// 这段时间里同一个对端只会被重算一次，所以一个反复变化的节点引不起下发风暴。
+    /// 节点上报的端点或挂靠关系变了，要发给它的对端：同一个对端因此被重算的两次之间至少隔这么久，
+    /// 所以一个反复变化的节点引不起下发风暴。离上一次已经够久时不等这么久，只等很短的一下（见 `defer_report`）。
     pub report_coalesce: Duration,
     /// 在线的节点这么久不确认新的 netmap，就不再等它，免得它卡住别的节点。
     pub ack_timeout: Duration,

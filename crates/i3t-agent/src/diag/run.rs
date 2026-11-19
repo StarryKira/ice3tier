@@ -298,11 +298,7 @@ async fn throughput(endpoint: &Endpoint, order: &TestOrder, path: TestPath, cong
     };
     let held = settled && on_path(endpoint, peer, path, Duration::ZERO).await;
     drop(pin);
-    let failure = match (&up, &down) {
-        (Err(FlowError::Refused(_)), _) => Some(TestCode::Refused),
-        (Err(_), _) | (_, Some(Err(_))) => Some(TestCode::StreamFailed),
-        (Ok(_), Some(Ok(_)) | None) => None,
-    };
+    let failure = throughput_failure(&up, down.as_ref());
     tracing::info!(test = order.test, %peer, ?path, up = ?up.as_ref().ok(), down = ?down.as_ref().and_then(|down| down.as_ref().ok()), held, "吞吐量完了");
     Throughput {
         up: up.ok().map(transfer),
@@ -313,6 +309,15 @@ async fn throughput(endpoint: &Endpoint, order: &TestOrder, path: TestPath, cong
         limit_bytes: THROUGHPUT_BYTES,
         limit_ms: millis(THROUGHPUT_TIME),
         pinned: held,
+    }
+}
+
+/// 两个方向的测量流合起来算哪一种失败。哪个方向被对端拒绝了都是"拒绝"，不是流中途断了。
+fn throughput_failure(up: &Result<Measured, FlowError>, down: Option<&Result<Measured, FlowError>>) -> Option<TestCode> {
+    match (up, down) {
+        (Err(FlowError::Refused(_)), _) | (_, Some(Err(FlowError::Refused(_)))) => Some(TestCode::Refused),
+        (Err(_), _) | (_, Some(Err(_))) => Some(TestCode::StreamFailed),
+        (Ok(_), Some(Ok(_)) | None) => None,
     }
 }
 
@@ -385,6 +390,7 @@ fn decision(decision: &RouteDecision) -> Decision {
 #[cfg(test)]
 mod tests {
     use i3t_flow::measure::Steady;
+    use i3t_proto::flow::{Reply, Status};
 
     use super::*;
 
@@ -402,6 +408,18 @@ mod tests {
         assert_eq!((warmed.bytes, warmed.ms, warmed.bits_per_second), (1_000_000, 800, Some(20_000_000)));
         let instant = Measured { bytes: 10, elapsed: Duration::ZERO, end: MeasureEnd::Finished, steady: None };
         assert_eq!(super::transfer(instant).bits_per_second, None, "用时太短算不出速率");
+    }
+
+    #[test]
+    fn a_refused_measurement_stream_is_reported_as_refused_in_either_direction() {
+        let moved = || Ok(Measured { bytes: 10, elapsed: Duration::from_millis(5), end: MeasureEnd::Bytes, steady: None });
+        let refused = || Err(FlowError::Refused(Reply::new(Status::NotEnabled, "忙")));
+        let broken = || Err(FlowError::Truncated);
+        assert_eq!(throughput_failure(&moved(), Some(&moved())), None);
+        assert_eq!(throughput_failure(&refused(), None), Some(TestCode::Refused));
+        assert_eq!(throughput_failure(&moved(), Some(&refused())), Some(TestCode::Refused), "只有下行被拒绝");
+        assert_eq!(throughput_failure(&moved(), Some(&broken())), Some(TestCode::StreamFailed));
+        assert_eq!(throughput_failure(&broken(), Some(&moved())), Some(TestCode::StreamFailed));
     }
 
     #[test]
