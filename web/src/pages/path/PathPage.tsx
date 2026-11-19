@@ -168,7 +168,13 @@ export function PathPage() {
     title: d.sections.routing,
     hint: p.costHint,
     body: (
-      <div className="grid grid-cols-1 gap-x-6 gap-y-3 @5xl:grid-cols-2">
+      <div
+        className={
+          test?.route !== null && test?.route !== undefined
+            ? 'grid grid-cols-1 gap-x-6 gap-y-3 @5xl:grid-cols-2'
+            : undefined
+        }
+      >
         <CostChart path={path.data} nodes={named} />
         {test?.route !== null && test?.route !== undefined ? (
           <div className="-mx-3 -my-2.5 border-t @5xl:mx-0 @5xl:border-t-0 @5xl:border-l">

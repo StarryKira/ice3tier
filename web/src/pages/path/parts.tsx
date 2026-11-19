@@ -131,27 +131,34 @@ function qualityRows(paths: readonly PathResult[], nodes: Named): QualityRow[] {
 }
 
 /**
- * 各条路并排比：一列一条路（直连在前，经中继的在后），行是延迟、抖动、丢包、代价……
- * 还没测完、没测的那一列只有一句（占满整列）。
+ * 各条路的明细：一条路一行，列是延迟（最小 / 平均 / P95，下面是有几个探测回答了）、抖动、丢包（下面是去和回）、
+ * 代价、各段（经中继时每一段的延迟和数据从哪里来）。路名前一个颜色点，经中继且到中继走 TCP 时写 TCP；
+ * 下面一行小字是哪种选路模式会走它。还没测完、没测的那一行只有一句。
  */
 export function QualityCard({ paths, nodes }: { paths: readonly Measured[]; nodes: Named }) {
-  const rows = qualityRows(
+  const columns = qualityRows(
     paths.map((path) => path.result),
     nodes,
   )
   return (
     <div className="overflow-x-auto">
-      <table className="w-full border-collapse text-sm" data-testid="test-quality">
+      <table className="w-full min-w-[48rem] border-collapse text-[13px]" data-testid="test-quality">
         <thead>
-          <tr className="border-b">
-            <td className="w-28" />
-            {paths.map(({ result: path, direct }, column) => (
-              <th
-                key={column}
-                scope="col"
-                className="min-w-44 px-3 py-2 text-left align-top font-normal"
-                data-testid={`test-path-${column}`}
-              >
+          <tr className="border-b text-left text-xs text-muted-foreground">
+            <th scope="col" className="px-3 py-2 font-normal">
+              {s.qualityTitle}
+            </th>
+            {columns.map((column) => (
+              <th key={column.key} scope="col" className="px-3 py-2 font-normal whitespace-nowrap">
+                {column.label}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-border/70">
+          {paths.map(({ result: path, direct }, index) => (
+            <tr key={index} className="align-top">
+              <th scope="row" className="px-3 py-1.5 text-left font-normal" data-testid={`test-path-${index}`}>
                 <span className="inline-flex flex-wrap items-center gap-x-2">
                   <StatusText
                     tone={direct ? 'ok' : routeTone(path.route)}
@@ -169,7 +176,7 @@ export function QualityCard({ paths, nodes }: { paths: readonly Measured[]; node
                 </span>
                 {/* 为什么测这一条：直连不用说；经中继的写哪种选路模式会走它。 */}
                 {path.picked_by.some((why) => why !== 'direct') ? (
-                  <span className="mt-0.5 block text-xs text-muted-foreground">
+                  <span className="block text-xs text-muted-foreground">
                     {path.picked_by
                       .filter((why) => why !== 'direct')
                       .map((why) => s.pickedBy[why])
@@ -177,33 +184,16 @@ export function QualityCard({ paths, nodes }: { paths: readonly Measured[]; node
                   </span>
                 ) : null}
               </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody className="divide-y">
-          {rows.map((row, index) => (
-            <tr key={row.key}>
-              <th
-                scope="row"
-                className="px-3 py-1.5 text-left align-top text-[13px] font-normal whitespace-nowrap text-muted-foreground"
-              >
-                {row.label}
-              </th>
-              {paths.map(({ result: path }, column) =>
-                path.state === 'done' ? (
-                  <td key={column} className="px-3 py-1.5 align-top" data-testid={`test-path-${column}-${row.key}`}>
-                    {row.cell(path)}
+              {path.state === 'done' ? (
+                columns.map((column) => (
+                  <td key={column.key} className="px-3 py-1.5" data-testid={`test-path-${index}-${column.key}`}>
+                    {column.cell(path)}
                   </td>
-                ) : index === 0 ? (
-                  <td
-                    key={column}
-                    rowSpan={rows.length}
-                    className="px-3 py-1.5 align-top"
-                    data-testid={`test-path-${column}-state`}
-                  >
-                    <ItemState state={path.state} problem={path.problem} nodes={nodes} />
-                  </td>
-                ) : null,
+                ))
+              ) : (
+                <td colSpan={columns.length} className="px-3 py-1.5" data-testid={`test-path-${index}-state`}>
+                  <ItemState state={path.state} problem={path.problem} nodes={nodes} />
+                </td>
               )}
             </tr>
           ))}

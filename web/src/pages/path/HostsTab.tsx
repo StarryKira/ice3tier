@@ -403,8 +403,9 @@ export function HostsTab({ network, a, b, tested, nodes }: HostsTabProps) {
   ]
   const sourceText = { live: d.hostLive, test: d.hostTest, mixed: `${d.hostLive} · ${d.hostTest}` }
   const all = groups()
-  // 两半并排：左边节点、系统、资源，右边连接、到对端的连接、网络；每半一张表，表头都是 A、B。
-  const halves = [all.slice(0, 3), all.slice(3)]
+  // 两半并排：左边这台机器（节点、系统、资源、网络），右边连接（连接、到对端的连接）；每半一张表，表头都是 A、B。
+  const pick = (keys: readonly Group['key'][]) => all.filter((group) => keys.includes(group.key))
+  const halves = [pick(['node', 'system', 'resources', 'network']), pick(['connections', 'peer'])]
   const renderTable = (subset: Group[], first: boolean) => (
     <table className="w-full min-w-[28rem] table-fixed border-collapse text-[13px]">
       <colgroup>
