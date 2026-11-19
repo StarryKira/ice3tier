@@ -789,7 +789,7 @@ test('诊断：在路径诊断里真的诊断一对在线的节点，每个标�
   await expect(page.getByTestId('check-latency')).toHaveAttribute('data-status', 'pass')
   await shot('diagnosis-test')
   // 报告在面板里滚动，整页截图只有一屏：滚到各节再截。
-  for (const section of ['path', 'latency', 'throughput', 'routing', 'hosts'] as const) {
+  for (const section of ['path', 'latency', 'routing', 'hosts'] as const) {
     await page.locator(`#report-${section}`).scrollIntoViewIfNeeded()
     await shot(`diagnosis-${section}`, { fullPage: false })
   }

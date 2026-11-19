@@ -1,48 +1,17 @@
 import { type ReactNode } from 'react'
 
-import { InfoTip } from '@/components/info-tip'
-import { type Scale } from '@/lib/scale'
 import { Tooltip } from '@/components/ui/tooltip'
+import { type Scale } from '@/lib/scale'
 import { cn } from '@/lib/utils'
 
-/**
- * 诊断页的图表零件：面板、刻度、带网格线的横向图、图例。纯 HTML，按百分比摆，宽度跟着面板走。
- *
- * 规矩（数据可视化的那一套）：标记细（条 ≤ 8 像素、两头圆）、网格线是细的实线、轴和网格退在后面；
- * 两个以上的系列一定有图例；数只标在条的末端，别的放在悬停里；字用正文的颜色，不用系列色。
- */
+import { dimmed, useFocus } from './focus'
 
-/** 一块面板：小标题条（13 像素半粗），右边可以放这块自己的东西；内容紧凑，不留大片空白。 */
-export function Panel({
-  id,
-  title,
-  hint,
-  action,
-  className,
-  bodyClassName,
-  children,
-}: {
-  id?: string
-  title: ReactNode
-  hint?: ReactNode
-  action?: ReactNode
-  className?: string
-  bodyClassName?: string
-  children: ReactNode
-}) {
-  return (
-    <section id={id} className={cn('min-w-0 scroll-mt-4 rounded-lg border bg-card', className)}>
-      <header className="flex h-10 items-center justify-between gap-3 border-b px-4">
-        <h2 className="flex min-w-0 items-center gap-1.5 truncate text-[13px] font-semibold">
-          {title}
-          {hint !== undefined ? <InfoTip>{hint}</InfoTip> : null}
-        </h2>
-        {action !== undefined ? <div className="flex shrink-0 items-center gap-3">{action}</div> : null}
-      </header>
-      <div className={cn('px-4 py-3', bodyClassName)}>{children}</div>
-    </section>
-  )
-}
+/**
+ * 诊断报告的图表零件：横向的图、细条、点、图例。纯 HTML，按百分比摆，宽度跟着面板走，行的高度撑满面板。
+ *
+ * 规矩：标记细、两头圆；不画网格线，条形图的数写在条的末端，只有点和区间的图在下面写几个刻度；
+ * 两个以上的系列一定有图例；字用正文的颜色，不用系列色。鼠标停在一行上，别的图里同一条路也亮着（`focus.ts`）。
+ */
 
 /** 面板里没有数据时的一行灰字。 */
 export function Empty({ children }: { children: ReactNode }) {
@@ -68,6 +37,8 @@ export function Legend({ items }: { items: readonly { label: string; className: 
 
 export interface PlotRow {
   key: string
+  /** 联动用的路的键；没有就不联动。 */
+  focus?: string
   label: ReactNode
   /** 这一行的标记；`x` 把数换成横向的百分比位置。 */
   marks: (x: (value: number) => string) => ReactNode
@@ -79,8 +50,8 @@ export interface PlotRow {
 }
 
 /**
- * 横向的图：一行一项，左边名字、中间画、右边数；竖的网格线在刻度上（细实线），最下面一行刻度。
- * 行与行之间不留缝，网格线连成一条。
+ * 横向的图：一行一项，左边名字、中间画、右边数。行的高度平分面板的高度（至少 `minRow`），和旁边的面板一样高时不留空。
+ * 给了 `format` 才在下面写刻度（点和区间的图要看位置）；条形图不写刻度，数在右边。
  */
 export function Plot({
   rows,
@@ -88,72 +59,78 @@ export function Plot({
   format,
   labelWidth = '8.5rem',
   valueWidth = '5.5rem',
-  rowClassName = 'h-8',
+  minRow = 'min-h-8',
   label,
 }: {
   rows: readonly PlotRow[]
   scale: Scale
-  /** 刻度的写法；单位只写在最后一个刻度上（`last`），免得挤。 */
-  format: (tick: number, last: boolean) => string
+  format?: (tick: number, last: boolean) => string
   labelWidth?: string
   valueWidth?: string
-  rowClassName?: string
+  minRow?: string
   /** 读屏用的名字。 */
   label: string
 }) {
+  const { focus, setFocus } = useFocus()
   const span = scale.max - scale.min || 1
   const x = (value: number) => `${Math.max(0, Math.min(100, ((value - scale.min) / span) * 100))}%`
   const columns = { gridTemplateColumns: `${labelWidth} minmax(0,1fr) ${valueWidth}` }
-  const grid = (
-    <span aria-hidden className="pointer-events-none absolute inset-0">
-      {scale.ticks.map((tick) => (
-        <span key={tick} className="absolute inset-y-0 w-px bg-border" style={{ left: x(tick) }} />
-      ))}
-    </span>
-  )
   return (
-    <div role="img" aria-label={label} className="text-[13px]">
+    <div role="img" aria-label={label} className="flex h-full flex-col text-[13px]">
       {rows.map((row) => {
-        const plot = (
-          <div className={cn('relative', rowClassName)}>
-            {grid}
-            {row.marks(x)}
-          </div>
-        )
-        return (
-          <div key={row.key} className="grid items-center gap-x-3" style={columns} data-testid={row.testId}>
-            <div className="min-w-0 truncate">{row.label}</div>
-            {row.tip !== undefined ? (
-              <Tooltip content={row.tip}>
-                <div tabIndex={0} className="rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                  {plot}
-                </div>
-              </Tooltip>
-            ) : (
-              plot
+        const faded = row.focus !== undefined && dimmed(focus, row.focus)
+        const content = (
+          <div
+            className={cn(
+              'grid flex-1 items-center gap-x-3 rounded-sm transition-opacity',
+              minRow,
+              faded && 'opacity-30',
             )}
+            style={columns}
+            data-testid={row.testId}
+            onMouseEnter={row.focus === undefined ? undefined : () => setFocus(row.focus ?? null)}
+            onMouseLeave={row.focus === undefined ? undefined : () => setFocus(null)}
+          >
+            <div className="min-w-0 truncate">{row.label}</div>
+            <div className="relative h-full min-h-6">{row.marks(x)}</div>
             <div className="text-right tabular">{row.value}</div>
           </div>
         )
-      })}
-      <div className="grid gap-x-3" style={columns} aria-hidden>
-        <span />
-        <div className="relative h-4 text-[10px] text-muted-foreground tabular">
-          {scale.ticks.map((tick, index) => (
-            <span
-              key={tick}
-              className={cn(
-                'absolute top-0.5 whitespace-nowrap',
-                index === 0 ? '' : index === scale.ticks.length - 1 ? '-translate-x-full' : '-translate-x-1/2',
-              )}
-              style={{ left: x(tick) }}
+        return row.tip === undefined ? (
+          <div key={row.key} className="flex flex-1 flex-col">
+            {content}
+          </div>
+        ) : (
+          <Tooltip key={row.key} content={row.tip}>
+            <div
+              tabIndex={0}
+              className="flex flex-1 flex-col rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
-              {format(tick, index === scale.ticks.length - 1)}
-            </span>
-          ))}
+              {content}
+            </div>
+          </Tooltip>
+        )
+      })}
+      {format !== undefined ? (
+        <div className="grid gap-x-3" style={columns} aria-hidden>
+          <span />
+          <div className="relative h-4 text-[10px] text-muted-foreground tabular">
+            {scale.ticks.map((tick, index) => (
+              <span
+                key={tick}
+                className={cn(
+                  'absolute top-0.5 whitespace-nowrap',
+                  index === 0 ? '' : index === scale.ticks.length - 1 ? '-translate-x-full' : '-translate-x-1/2',
+                )}
+                style={{ left: x(tick) }}
+              >
+                {format(tick, index === scale.ticks.length - 1)}
+              </span>
+            ))}
+          </div>
+          <span />
         </div>
-        <span />
-      </div>
+      ) : null}
     </div>
   )
 }

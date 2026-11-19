@@ -1,23 +1,13 @@
 import { type ReactNode } from 'react'
 
-import { type Node, type PathResult, type Route, type TestItemState, type TestProblem } from '@/api/types'
-import { InfoTip } from '@/components/info-tip'
-import { StatusText, type Tone } from '@/components/status'
+import { type Node, type TestItemState, type TestProblem } from '@/api/types'
 import { Skeleton } from '@/components/ui/skeleton'
 import { t } from '@/i18n'
-import { nodeName } from '@/lib/nodes'
-import { msText, permilleText, problemText } from '@/lib/tests'
-import { type Measured, routeName } from '@/topology/diagnosis'
+import { problemText } from '@/lib/tests'
 
 const s = t.tests
 
 export type Named = readonly Pick<Node, 'id' | 'name'>[]
-
-function routeTone(route: Route | null): Tone {
-  if (route?.via === 'direct') return 'ok'
-  if (route?.via === 'relay') return 'relay'
-  return 'idle'
-}
 
 /** 一项还没有结果、没有做、没做成时就是这一句（带原因）。 */
 export function ItemState({
@@ -42,163 +32,5 @@ export function ItemState({
       {state === 'skipped' ? s.skipped : s.failed}
       {problem !== null ? `：${problemText(problem, nodes)}` : null}
     </p>
-  )
-}
-
-interface QualityRow {
-  key: string
-  label: ReactNode
-  cell: (path: PathResult) => ReactNode
-}
-
-const dash = <span className="text-muted-foreground">—</span>
-
-function labelWithTip(label: string, tip: string): ReactNode {
-  return (
-    <span className="inline-flex items-center gap-1">
-      {label}
-      <InfoTip>{tip}</InfoTip>
-    </span>
-  )
-}
-
-/** 表里的行：延迟、抖动、丢包、代价总有；各段、吞吐只在有一条路用得上时才有。 */
-function qualityRows(paths: readonly PathResult[], nodes: Named): QualityRow[] {
-  const rows: QualityRow[] = [
-    {
-      key: 'latency',
-      label: labelWithTip(s.latency, s.latencyHint),
-      cell: ({ latency }) =>
-        latency === null ? (
-          dash
-        ) : (
-          <>
-            <span className="font-medium tabular">
-              {s.latencyValue(msText(latency.min_us), msText(latency.avg_us), msText(latency.p95_us))}
-            </span>
-            <span className="block text-xs text-muted-foreground">{s.answered(latency.answered, latency.probes)}</span>
-          </>
-        ),
-    },
-    {
-      key: 'jitter',
-      label: s.jitter,
-      cell: ({ latency }) => (latency === null ? dash : <span className="tabular">{msText(latency.jitter_us)}</span>),
-    },
-    {
-      key: 'loss',
-      label: s.loss,
-      cell: ({ latency }) =>
-        latency === null ? (
-          dash
-        ) : (
-          <>
-            <span className="tabular">{permilleText(latency.loss_permille)}</span>
-            {latency.loss_up_permille !== null && latency.loss_down_permille !== null ? (
-              <span className="ml-2 text-xs text-muted-foreground tabular">
-                {s.lossSplit(permilleText(latency.loss_up_permille), permilleText(latency.loss_down_permille))}
-              </span>
-            ) : null}
-          </>
-        ),
-    },
-    {
-      key: 'cost',
-      label: labelWithTip(s.cost, s.costHint),
-      cell: ({ cost_us }) => (cost_us === null ? dash : <span className="tabular">{msText(cost_us)}</span>),
-    },
-  ]
-  if (paths.some((path) => path.hops.length > 1)) {
-    rows.push({
-      key: 'hops',
-      label: s.hops,
-      cell: ({ hops }) =>
-        hops.length < 2 ? (
-          dash
-        ) : (
-          <ul className="space-y-0.5 text-[13px]">
-            {hops.map((hop) => (
-              <li key={`${hop.from}-${hop.to}`} className="tabular">
-                {nodeName(nodes, hop.from)} → {nodeName(nodes, hop.to)}：{msText(hop.rtt_us)}
-                <span className="ml-1.5 text-xs text-muted-foreground">{s.hopSource[hop.source]}</span>
-              </li>
-            ))}
-          </ul>
-        ),
-    })
-  }
-  return rows
-}
-
-/**
- * 各条路的明细：一条路一行，列是延迟（最小 / 平均 / P95，下面是有几个探测回答了）、抖动、丢包（下面是去和回）、
- * 代价、各段（经中继时每一段的延迟和数据从哪里来）。路名前一个颜色点，经中继且到中继走 TCP 时写 TCP；
- * 下面一行小字是哪种选路模式会走它。还没测完、没测的那一行只有一句。
- */
-export function QualityCard({ paths, nodes }: { paths: readonly Measured[]; nodes: Named }) {
-  const columns = qualityRows(
-    paths.map((path) => path.result),
-    nodes,
-  )
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[48rem] border-collapse text-[13px]" data-testid="test-quality">
-        <thead>
-          <tr className="border-b text-left text-xs text-muted-foreground">
-            <th scope="col" className="px-3 py-2 font-normal">
-              {s.qualityTitle}
-            </th>
-            {columns.map((column) => (
-              <th key={column.key} scope="col" className="px-3 py-2 font-normal whitespace-nowrap">
-                {column.label}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-border/70">
-          {paths.map(({ result: path, direct }, index) => (
-            <tr key={index} className="align-top">
-              <th scope="row" className="px-3 py-1.5 text-left font-normal" data-testid={`test-path-${index}`}>
-                <span className="inline-flex flex-wrap items-center gap-x-2">
-                  <StatusText
-                    tone={direct ? 'ok' : routeTone(path.route)}
-                    className="text-[13px] font-semibold text-foreground"
-                  >
-                    {direct || path.route === null
-                      ? direct
-                        ? s.qualityDirect
-                        : s.qualityRelay
-                      : routeName(path.route, nodes)}
-                  </StatusText>
-                  {path.relay_leg === 'tcp' ? (
-                    <span className="text-xs text-warn">{t.routes.legTransport.tcp}</span>
-                  ) : null}
-                </span>
-                {/* 为什么测这一条：直连不用说；经中继的写哪种选路模式会走它。 */}
-                {path.picked_by.some((why) => why !== 'direct') ? (
-                  <span className="block text-xs text-muted-foreground">
-                    {path.picked_by
-                      .filter((why) => why !== 'direct')
-                      .map((why) => s.pickedBy[why])
-                      .join(t.common.listSeparator)}
-                  </span>
-                ) : null}
-              </th>
-              {path.state === 'done' ? (
-                columns.map((column) => (
-                  <td key={column.key} className="px-3 py-1.5" data-testid={`test-path-${index}-${column.key}`}>
-                    {column.cell(path)}
-                  </td>
-                ))
-              ) : (
-                <td colSpan={columns.length} className="px-3 py-1.5" data-testid={`test-path-${index}-state`}>
-                  <ItemState state={path.state} problem={path.problem} nodes={nodes} />
-                </td>
-              )}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
   )
 }

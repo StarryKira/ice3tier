@@ -311,33 +311,45 @@ describe('路径诊断：一次诊断', () => {
     if (original !== undefined) Object.defineProperty(Element.prototype, 'scrollIntoView', original)
   })
 
-  it('各条路的延迟：一条路一行，最小到 P95 的条、平均的点，右边平均和丢包；下面的明细表一列一条路', async () => {
+  it('各条路：一条路一行，延迟的分布画在格子里，后面是平均、抖动、丢包（去和回）、代价', async () => {
     setup()
     renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5' })
-    const direct = await screen.findByTestId('latency-direct')
-    expect(direct).toHaveTextContent(s.qualityDirect)
-    expect(direct).toHaveTextContent(t.common.ms(61))
-    expect(direct).toHaveTextContent(d.chart.loss('3%'))
-    expect(screen.getByTestId(`latency-${t.routes.via('hk')}`)).toHaveTextContent(t.common.ms(52))
-
-    expect(screen.getByTestId('test-path-0')).toHaveTextContent(s.qualityDirect)
+    expect(await screen.findByTestId('test-path-0')).toHaveTextContent(s.qualityDirect)
+    expect(screen.getByTestId('latency-direct')).toBeInTheDocument()
+    expect(screen.getByTestId('test-path-0-latency')).toHaveTextContent(t.common.ms(61))
+    expect(screen.getByTestId('test-path-0-loss')).toHaveTextContent('3%')
+    expect(screen.getByTestId('test-path-0-loss')).toHaveTextContent(s.lossSplit('1%', '2%'))
     expect(screen.getByTestId('test-path-1')).toHaveTextContent(t.routes.via('hk'))
     expect(screen.getByTestId('test-path-1')).toHaveTextContent(s.pickedBy.lowest_cost)
-    expect(screen.getByTestId('test-path-0-latency')).toHaveTextContent(
-      s.latencyValue(t.common.ms(58), t.common.ms(61), t.common.ms(66)),
-    )
-    expect(screen.getByTestId('test-path-0-loss')).toHaveTextContent(s.lossSplit('1%', '2%'))
-    expect(screen.getByTestId('test-path-1-hops')).toHaveTextContent(`hk → nas：${t.common.ms(20)}`)
+    expect(screen.getByTestId('test-path-1-latency')).toHaveTextContent(t.common.ms(52))
+  })
+
+  it('联动：鼠标停在一条路上，路径、各条路、候选路径里同一条路亮着，别的淡下去', async () => {
+    const user = userEvent.setup()
+    setup()
+    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5' })
+    const relayed = await screen.findByTestId('test-path-1')
+    await waitFor(() => expect(screen.getByTestId('candidate-current')).toBeInTheDocument())
+    await user.hover(relayed)
+    // 经 hk 那条亮着；现在走的直连在各处都淡下去。
+    expect(relayed.closest('tr')).not.toHaveClass('opacity-30')
+    expect(screen.getByTestId('test-path-0').closest('tr')).toHaveClass('opacity-30')
+    expect(screen.getByTestId('candidate-current')).toHaveClass('opacity-30')
+    expect(screen.getByTestId('leg-forward')).toHaveClass('opacity-30')
+    await user.unhover(relayed)
+    expect(screen.getByTestId('candidate-current')).not.toHaveClass('opacity-30')
   })
 
   it('吞吐：一条路一行，上行、下行两根条，右边是两个速率', async () => {
     setup()
     renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5' })
-    const row = await screen.findByTestId('bandwidth-direct')
-    expect(row).toHaveTextContent('19.1 Mbps')
-    expect(row).toHaveTextContent('19.5 Mbps')
-    // 经 hk 那条没有量吞吐：没有它那一行。
+    expect(await screen.findByTestId('bandwidth-direct')).toBeInTheDocument()
+    const rates = screen.getByTestId('test-path-0-throughput')
+    expect(rates).toHaveTextContent('19.1 Mbps')
+    expect(rates).toHaveTextContent('19.5 Mbps')
+    // 经 hk 那条没有量吞吐：没有条，写没测。
     expect(screen.queryByTestId(`bandwidth-${t.routes.via('hk')}`)).not.toBeInTheDocument()
+    expect(screen.getByTestId('test-path-1-throughput')).toHaveTextContent(d.chart.notMeasured)
   })
 
   it('没有测吞吐：报告里没有吞吐那一节，结果表里写怎么测', async () => {
@@ -352,14 +364,17 @@ describe('路径诊断：一次诊断', () => {
     expect(document.getElementById('report-throughput')).toBeNull()
   })
 
-  it('路由：两个方向的卡片、候选路径，和两种模式各会怎么选', async () => {
+  it('选路：候选路径一张表，两种模式各会走哪条打勾，悬停看为什么', async () => {
     setup()
     renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5' })
     expect(await screen.findByTestId('leg-forward')).toHaveTextContent(t.path.forward('laptop', 'nas'))
-    const lowest = await screen.findByTestId('decision-2-lowest_cost')
-    expect(lowest).toHaveTextContent(d.reason.within_margin)
-    expect(lowest).toHaveTextContent(d.cheaperLine(t.routes.via('hk'), t.common.ms(72)))
-    expect(screen.getByTestId('decision-2-direct_first')).toHaveTextContent(t.path.current)
+    const lowest = await screen.findByTestId('pick-2-lowest_cost')
+    expect(lowest).toHaveAccessibleName(
+      `${d.reason.within_margin}${t.common.listSeparator}${d.cheaperLine(t.routes.via('hk'), t.common.ms(72))}`,
+    )
+    // 两种模式都留在现在走的那条上。
+    expect(lowest.closest('tr')).toHaveAttribute('data-testid', 'candidate-current')
+    expect(screen.getByTestId('pick-2-direct_first').closest('tr')).toHaveAttribute('data-testid', 'candidate-current')
   })
 
   it('两端主机：诊断时的系统、CPU、内存、连接，到对端的连接；旧版本的节点说不报', async () => {

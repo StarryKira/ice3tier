@@ -417,25 +417,25 @@ export function HostsTab({ network, a, b, tested, nodes }: HostsTabProps) {
   const renderTable = (subset: Group[], first: boolean) => (
     <table className="w-full min-w-[28rem] table-fixed border-collapse text-[13px]">
       <colgroup>
-        <col className="w-32" />
+        <col className="w-28" />
         <col />
         <col />
       </colgroup>
       <thead>
         <tr className="border-b">
-          <td className="px-3 py-2" />
+          <td className="py-1.5" />
           {sides.map(({ side, label }) => (
             <th
               key={label}
               scope="col"
-              className="px-3 py-2 text-left font-normal"
+              className="pt-1.5 pr-2 pb-1.5 pl-3 text-left font-normal"
               data-testid={first ? `host-${label.toLowerCase()}` : undefined}
             >
               <span className="flex min-w-0 items-baseline gap-1.5">
                 <span className="text-xs font-semibold text-muted-foreground">{label}</span>
                 <Link
                   to={nodePath(network, side.id)}
-                  className="inline-flex min-w-0 items-center gap-0.5 rounded-sm text-[15px] font-semibold hover:text-primary"
+                  className="inline-flex min-w-0 items-center gap-0.5 rounded-sm text-[13px] font-semibold hover:text-primary"
                 >
                   <span className="truncate">{side.detail?.name ?? side.name}</span>
                   <ArrowUpRight className="size-3.5 shrink-0 self-center text-faint" aria-label={d.toNode} />
@@ -449,9 +449,9 @@ export function HostsTab({ network, a, b, tested, nodes }: HostsTabProps) {
         const reasons = sides.map(({ side }) => (group.hostOnly ? missing(side, tested, nodes) : null))
         const rows = group.rows.filter((row) => sides.some(({ side }) => row.value(side, nodes) !== null))
         return (
-          <tbody key={group.key} className="border-b last:border-b-0" data-testid={`hosts-${group.key}`}>
-            <tr className="bg-muted/40">
-              <th scope="colgroup" colSpan={3} className="px-3 py-1 text-left text-xs font-medium">
+          <tbody key={group.key} data-testid={`hosts-${group.key}`}>
+            <tr>
+              <th scope="colgroup" colSpan={3} className="pt-3 pb-0.5 text-left text-xs font-medium">
                 <span className="flex items-center justify-between gap-3">
                   {d.hostSection[group.key]}
                   <span className="font-normal text-muted-foreground">{sourceText[group.source]}</span>
@@ -462,15 +462,15 @@ export function HostsTab({ network, a, b, tested, nodes }: HostsTabProps) {
               <tr>
                 <td />
                 {reasons.map((reason, index) => (
-                  <td key={index} className="px-3 py-1 text-muted-foreground">
+                  <td key={index} className="py-1 pr-2 pl-3 text-muted-foreground">
                     {reason ?? '—'}
                   </td>
                 ))}
               </tr>
             ) : (
               rows.map((row, rowIndex) => (
-                <tr key={row.key} className="border-t border-border/60 first:border-t-0">
-                  <th scope="row" className="px-3 py-1 text-left align-top font-normal text-muted-foreground">
+                <tr key={row.key} className="hover:bg-muted/40">
+                  <th scope="row" className="py-1 pr-2 text-left align-top font-normal text-muted-foreground">
                     {row.label}
                   </th>
                   {sides.map(({ side, label }, index) => {
@@ -480,7 +480,7 @@ export function HostsTab({ network, a, b, tested, nodes }: HostsTabProps) {
                       <td
                         key={label}
                         className={cn(
-                          'px-3 py-1 align-top break-words',
+                          'py-1 pr-2 pl-3 align-top break-words',
                           row.mono === true && value !== null && 'font-mono text-xs leading-5',
                         )}
                       >
@@ -503,7 +503,7 @@ export function HostsTab({ network, a, b, tested, nodes }: HostsTabProps) {
     </table>
   )
   return (
-    <div data-testid="hosts" className="grid grid-cols-1 @5xl:grid-cols-2 @5xl:divide-x">
+    <div data-testid="hosts" className="grid grid-cols-1 gap-x-8 @5xl:grid-cols-2">
       {halves.map((subset, index) => (
         <div key={index} className="min-w-0 overflow-x-auto">
           {renderTable(subset, index === 0)}

@@ -187,12 +187,12 @@ describe('现问到时的细节：方式、模式、原因、候选路径', () =
     expect(screen.getByTestId('leg-reverse')).toHaveTextContent(t.routes.legTransport.tcp)
 
     const candidates = screen.getByTestId('candidates-forward')
-    expect(
-      within(candidates).getByRole('img', { name: `${p.candidatesTitle} ${p.forward('laptop', 'nas')}` }),
-    ).toBeVisible()
+    expect(candidates).toHaveTextContent(p.forward('laptop', 'nas'))
     const current = within(candidates).getByTestId('candidate-current')
     expect(current).toHaveTextContent(t.diagnosis.chart.current)
     expect(current).toHaveTextContent(t.common.ms(13))
+    // 现在走的那条，代价的条是主色。
+    expect(current.querySelector('.bg-primary')).not.toBeNull()
     expect(candidates).toHaveTextContent(t.routes.via('hk'))
     // 上报来的方向不知道考虑过哪些路：没有它那一张。
     expect(screen.queryByTestId('candidates-reverse')).not.toBeInTheDocument()

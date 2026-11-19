@@ -51,13 +51,7 @@ export const diagnosis = {
   },
 
   // 路由
-  decisionsTitle: '两种选路模式各会怎么选',
-  decisionsNone: '诊断后显示',
   modeNow: (mode: string) => `现在用${mode}模式`,
-  colMode: '模式',
-  colChoice: '会走',
-  colReason: '为什么',
-  colCost: '代价',
   reason: {
     lan: '局域网直连无条件优先',
     direct: '直连可用就走直连',
@@ -75,9 +69,6 @@ export const diagnosis = {
   latencyNone: '诊断后显示各条路的延迟、抖动和丢包',
 
   // 带宽
-  bandwidthNone: '这次没有测吞吐：勾上「测吞吐」再开始诊断',
-  bandwidthIdle: '诊断后显示',
-  stoppedBy: { bytes: '到字节上限', time: '到时长上限', finished: '传完' },
   congestion: '拥塞控制',
 
   // 两端主机
@@ -161,16 +152,11 @@ export const diagnosis = {
   },
   passed: (passed: number, total: number) => `测了 ${total} 项，${passed} 项通过`,
   status: { pass: '通过', warn: '注意', fail: '异常', info: '提示', skip: '未测', pending: '进行中' },
-  colCheck: '检查项',
-  colStatus: '结果',
-  colMeasured: '测得',
   colReference: '参考',
-  colNote: '说明',
   sections: {
     result: '诊断结果',
     path: '路径',
-    latency: '延迟与丢包',
-    throughput: '吞吐',
+    paths: '各条路',
     routing: '选路',
     hosts: '两端主机',
     raw: '原始数据',
@@ -262,19 +248,18 @@ export const diagnosis = {
 
   // 图表
   chart: {
-    pathTitle: '两个方向的路径',
     hop: '段',
-    waterfall: '延迟累计',
-    pathHint: '每一段按延迟的长短画；悬停一段看它的延迟、抖动、丢包',
-    segmentUnknown: '这一段的延迟不明',
-    segment: (rtt: string, jitter: string, loss: string) => `${rtt}，抖动 ${jitter}，丢包 ${loss}`,
-    latencyTitle: '各条路的延迟',
-    latencyHint: '条从最小到 P95，圆点是平均；悬停看抖动、丢包、代价',
-    loss: (value: string) => `丢包 ${value}`,
-    costTitle: '候选路径的代价',
+    direction: '方向',
+    cumulative: '累计',
+    colPath: '路径',
+    colCost: '代价',
+    colLoad: '中继负载',
+    pickDefault: '默认会走',
+    pickLowest: '延迟优先会走',
+    rangeKey: '最小 – P95',
+    avgKey: '平均',
     current: '当前',
     cpuTitle: 'CPU',
-    cpuHint: '诊断开始那一秒和最忙的一秒；i3t 按一个核算，接近 100% 就是卡在 CPU 上',
     cpuStart: '开始',
     cpuPeak: '最忙',
     cpuSystem: (name: string) => `${name} 整机`,
@@ -284,7 +269,6 @@ export const diagnosis = {
     memoryOther: '其它占用',
     memoryFree: '可用',
     memoryValue: (free: string, total: string) => `${free} / ${total}`,
-    detailsTitle: '各条路明细',
     notMeasured: '没测',
     up: (rate: string) => `上行 ${rate}`,
     down: (rate: string) => `下行 ${rate}`,

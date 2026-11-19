@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { Waypoints } from 'lucide-react'
-import { type ReactNode, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 
 import { api } from '@/api/endpoints'
@@ -21,22 +21,20 @@ import { type Pair, pairPath, readPair, writePair } from '@/topology/pair'
 import { reportJson, reportText } from '@/topology/report'
 
 import {
-  CostChart,
+  CandidatesTable,
   CPU_LEGEND,
   CpuChart,
-  LatencyChart,
   MEMORY_LEGEND,
   MemoryChart,
   PathChart,
-  THROUGHPUT_LEGEND,
-  ThroughputChart,
+  PathsLegend,
+  PathsTable,
 } from './charts'
-import { Decisions } from './Decisions'
+import { FocusContext } from './focus'
 import { HostsTab } from './HostsTab'
 import { NodeGrid } from './NodeGrid'
 import { Output } from './OutputTab'
 import { PairRow } from './PairHero'
-import { QualityCard } from './parts'
 import { ReportSectionBlock, ResultBlock } from './Report'
 import { RunRow } from './RunBar'
 import { Legend } from './viz'
@@ -45,24 +43,16 @@ const p = t.path
 const d = t.diagnosis
 const c = t.diagnosis.chart
 
-interface Block {
-  id: ReportSection | 'result' | 'details'
-  title: string
-  hint?: ReactNode
-  action?: ReactNode
-  /** 内容贴边（表格自己留边）。 */
-  flush?: boolean
-  body: ReactNode
-}
-
 /**
  * 路径诊断：两个节点的互诊断，结果是一份报告。
  *
  * - 顶上一张卡片：这一对（左 A 右 B，点一端换节点；中间两个方向现在怎么走）和诊断的状态、按钮（默认量吞吐）。
  *   没选好两个节点时下面是一格一格的节点。
- * - 报告按节编号：诊断结果（一条总评和逐项检查：结果、测得、参考、说明，量不到的写为什么），路径（像 mtr 一样一段一行，
- *   瀑布条看延迟在哪一段累起来），延迟与丢包（各条路的分布和明细），吞吐，选路（候选路径的代价、两种模式各会怎么选），
- *   两端主机（CPU、内存的图和对照表），原始数据（文本报告和 JSON）。没有数据的节不出现，结果表里写着为什么。
+ * - 报告一节一块面板，每块占满一行，宽度一样、边对齐：诊断结果（总评、建议、分三组的逐项检查，量不到的写为什么），
+ *   路径（两个方向一张表，像 mtr 一样一段一行，瀑布条看延迟在哪一段累起来），各条路（测了的每条路一行：延迟的分布、
+ *   吞吐的条画在格子里，数字成列），选路（候选路径的代价、两种模式各会走哪条），两端主机（CPU、内存的图和对照表），
+ *   原始数据（文本报告和 JSON）。没有数据的节不出现，结果里写着为什么。
+ * - 联动：鼠标停在任何一处的一条路上，所有表和图里同一条路亮着，别的淡下去（`focus.ts`）。
  * - 数据是一次诊断（文档 §19 的主动测试）量的，默认显示这一对最近的一次；路径、候选路径、节点的上报是现在的。
  *
  * 选的两个节点、看的那次诊断写在地址里（`?a=&b=&test=`）。
@@ -113,8 +103,13 @@ export function PathPage() {
     next.set('test', String(id))
     setParams(next, { replace: true })
   }
+  // 延迟和吞吐在同一节（各条路）。
   const goTo = (section: ReportSection) =>
-    document.getElementById(`report-${section}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    document
+      .getElementById(`report-${section === 'throughput' ? 'latency' : section}`)
+      ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  const [focus, setFocus] = useState<string | null>(null)
+  const focusValue = useMemo(() => ({ focus, setFocus }), [focus])
 
   const list = useMemo(() => nodes.data ?? [], [nodes.data])
   const byId = new Map(list.map((node) => [node.id, node]))
@@ -130,132 +125,6 @@ export function PathPage() {
   const results = checks(input)
   const paths = measuredPaths(test)
   const hosts = (test?.hosts ?? []).filter((host) => host.state === 'done')
-
-  // 报告的各节：没有数据的节不出现（结果表里写着为什么），编号跟着排。一行放一节或两节（宽的 7 列、窄的 5 列），
-  // 一行里只剩一节时它占满。
-  const result: Block = {
-    id: 'result',
-    title: d.sections.result,
-    flush: true,
-    body: <ResultBlock checks={results} verdict={verdict(results, test, named)} onOpen={goTo} />,
-  }
-  const pathBlock: Block = {
-    id: 'path',
-    title: d.sections.path,
-    hint: c.pathHint,
-    body: <PathChart path={path.data} test={test} nodes={named} />,
-  }
-  const latency: Block | null =
-    paths.length === 0
-      ? null
-      : {
-          id: 'latency',
-          title: d.sections.latency,
-          hint: c.latencyHint,
-          body: <LatencyChart test={test} nodes={named} />,
-        }
-  const throughputBlock: Block | null = paths.some(({ result: item }) => item.throughput !== null)
-    ? {
-        id: 'throughput',
-        title: d.sections.throughput,
-        hint: t.tests.throughputCaveat,
-        action: <Legend items={THROUGHPUT_LEGEND()} />,
-        body: <ThroughputChart test={test} nodes={named} />,
-      }
-    : null
-  const routing: Block = {
-    id: 'routing',
-    title: d.sections.routing,
-    hint: p.costHint,
-    body: (
-      <div
-        className={
-          test?.route !== null && test?.route !== undefined
-            ? 'grid grid-cols-1 gap-x-6 gap-y-3 @5xl:grid-cols-2'
-            : undefined
-        }
-      >
-        <CostChart path={path.data} nodes={named} />
-        {test?.route !== null && test?.route !== undefined ? (
-          <div className="-mx-3 -my-2.5 border-t @5xl:mx-0 @5xl:border-t-0 @5xl:border-l">
-            <Decisions test={test} nodes={named} />
-          </div>
-        ) : null}
-      </div>
-    ),
-  }
-  const hostsBlock: Block = {
-    id: 'hosts',
-    title: d.sections.hosts,
-    flush: true,
-    body: (
-      <>
-        {hosts.length > 0 ? (
-          <div className="grid grid-cols-1 gap-x-6 gap-y-3 border-b px-3 py-2.5 @4xl:grid-cols-2">
-            <div>
-              <p className="mb-1 flex items-center justify-between gap-3 text-xs font-semibold">
-                {c.cpuTitle}
-                <Legend items={CPU_LEGEND()} />
-              </p>
-              <CpuChart hosts={hosts} nodes={named} empty="" />
-            </div>
-            <div>
-              <p className="mb-1 flex items-center justify-between gap-3 text-xs font-semibold">
-                {c.memoryTitle}
-                <Legend items={MEMORY_LEGEND()} />
-              </p>
-              <MemoryChart hosts={hosts} nodes={named} empty="" />
-            </div>
-          </div>
-        ) : null}
-        <HostsTab
-          network={network.id}
-          tested={test !== undefined}
-          nodes={named}
-          a={{
-            id: a,
-            name: name(a),
-            detail: detailA.data,
-            host: hostOf(test, a),
-            toPeer: routesA.data?.routes.find((route) => route.peer.id === b),
-            direct: test?.direct?.sides.find((side) => side.node === a),
-          }}
-          b={{
-            id: b,
-            name: name(b),
-            detail: detailB.data,
-            host: hostOf(test, b),
-            toPeer: routesB.data?.routes.find((route) => route.peer.id === a),
-            direct: test?.direct?.sides.find((side) => side.node === b),
-          }}
-        />
-      </>
-    ),
-  }
-  const details: Block | null =
-    paths.length === 0
-      ? null
-      : { id: 'details', title: c.detailsTitle, flush: true, body: <QualityCard paths={paths} nodes={named} /> }
-  // 编号按报告的顺序：结果、路径、延迟、吞吐、选路、主机、明细，最后原始数据。
-  const ordered = [result, pathBlock, latency, throughputBlock, routing, hostsBlock, details].filter(
-    (block): block is Block => block !== null,
-  )
-  const order = new Map(ordered.map((block, index) => [block.id, index + 1]))
-  const sectionOf = (block: Block, className?: string) => (
-    <ReportSectionBlock
-      key={block.id}
-      id={`report-${block.id}`}
-      index={order.get(block.id) ?? 0}
-      title={block.title}
-      hint={block.hint}
-      action={block.action}
-      flush={block.flush}
-      className={className}
-    >
-      {block.body}
-    </ReportSectionBlock>
-  )
-  const side = [latency, throughputBlock].filter((block): block is Block => block !== null)
 
   return (
     <Page className="@container">
@@ -329,22 +198,71 @@ export function PathPage() {
             })}
             {current.isError && shown !== null ? <Notice tone="warn">{t.tests.testGone(shown)}</Notice> : null}
 
-            {sectionOf(result)}
-            {/* 左边两个方向的路径，右边延迟和吞吐上下叠着：两边差不多高，面板不拉长。 */}
-            <div className="grid grid-cols-1 items-start gap-3 @5xl:grid-cols-12">
-              {sectionOf(pathBlock, side.length > 0 ? '@5xl:col-span-7' : '@5xl:col-span-12')}
-              {side.length > 0 ? (
-                <div className="space-y-3 @5xl:col-span-5">{side.map((block) => sectionOf(block))}</div>
+            <FocusContext value={focusValue}>
+              <ReportSectionBlock id="report-result" title={d.sections.result}>
+                <ResultBlock checks={results} verdict={verdict(results, test, named)} onOpen={goTo} />
+              </ReportSectionBlock>
+              <ReportSectionBlock id="report-path" title={d.sections.path}>
+                <PathChart path={path.data} test={test} nodes={named} />
+              </ReportSectionBlock>
+              {paths.length > 0 ? (
+                <ReportSectionBlock id="report-latency" title={d.sections.paths} action={<PathsLegend test={test} />}>
+                  <PathsTable test={test} nodes={named} />
+                </ReportSectionBlock>
               ) : null}
-            </div>
-            {sectionOf(routing)}
-            {sectionOf(hostsBlock)}
-            {details === null ? null : sectionOf(details)}
-            <Output
-              index={order.size + 1}
-              fileBase={fileBase}
-              report={() => ({ text: reportText(input, now), json: reportJson(input, now) })}
-            />
+              <ReportSectionBlock id="report-routing" title={d.sections.routing}>
+                <CandidatesTable path={path.data} test={test} nodes={named} />
+              </ReportSectionBlock>
+              <ReportSectionBlock id="report-hosts" title={d.sections.hosts}>
+                {hosts.length > 0 ? (
+                  <div className="mb-3 grid grid-cols-1 gap-x-8 gap-y-3 @4xl:grid-cols-2">
+                    <div className="flex flex-col">
+                      <p className="mb-1 flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                        {c.cpuTitle}
+                        <Legend items={CPU_LEGEND()} />
+                      </p>
+                      <div className="flex-1">
+                        <CpuChart hosts={hosts} nodes={named} empty="" />
+                      </div>
+                    </div>
+                    <div className="flex flex-col">
+                      <p className="mb-1 flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                        {c.memoryTitle}
+                        <Legend items={MEMORY_LEGEND()} />
+                      </p>
+                      <div className="flex-1">
+                        <MemoryChart hosts={hosts} nodes={named} empty="" />
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+                <HostsTab
+                  network={network.id}
+                  tested={test !== undefined}
+                  nodes={named}
+                  a={{
+                    id: a,
+                    name: name(a),
+                    detail: detailA.data,
+                    host: hostOf(test, a),
+                    toPeer: routesA.data?.routes.find((route) => route.peer.id === b),
+                    direct: test?.direct?.sides.find((side) => side.node === a),
+                  }}
+                  b={{
+                    id: b,
+                    name: name(b),
+                    detail: detailB.data,
+                    host: hostOf(test, b),
+                    toPeer: routesB.data?.routes.find((route) => route.peer.id === a),
+                    direct: test?.direct?.sides.find((side) => side.node === b),
+                  }}
+                />
+              </ReportSectionBlock>
+              <Output
+                fileBase={fileBase}
+                report={() => ({ text: reportText(input, now), json: reportJson(input, now) })}
+              />
+            </FocusContext>
           </>
         )}
       </div>
