@@ -4,7 +4,15 @@
 
 对应的 Rust 类型在 `crates/i3t-model/src/admin.rs`，实现在 `crates/i3t-controller/src/admin.rs`。文档和代码不一致时以代码为准，并请修正文档。
 
-> **最新一次改动**（直连着的一对不因为对方"用不了 UDP"改走 ice3proxy）。接口和字段都没有变，变的是两个字段什么时候是什么值：
+> **最新一次改动**（主动测试多一项：两端的主机和连接状况）。这一次的清单：
+>
+> - 新的测试项 `"host"`（第 19 节）：两端各报一份自己这台机器（系统、CPU、负载、内存）、节点进程、现在连着多少东西，和它到对端的那条连接
+>   （往返时间、拥塞窗口、包长、测试期间的收发和丢包）。不为它多发包，测试也不因此变长。`items` 省略时带着它；全网矩阵不带。
+> - 新的字段：`TestView.hosts`，`HostResult` 的数组，`a` 在前；没有要这一项时是 `null`。新的结构 `HostResult`、`HostSystem`、`CpuUse`、
+>   `HostMemory`、`HostProcess`、`HostConnections`、`PeerConnection`。
+> - 机器和进程的数现在只有 Linux 读得到，别的平台上那几样是 `null`（不是错误）。比这一版旧的节点不报，那一端是 `skipped`、`not_supported`。
+>
+> **上一次改动**（直连着的一对不因为对方"用不了 UDP"改走 ice3proxy）。接口和字段都没有变，变的是两个字段什么时候是什么值：
 >
 > - 行为上的变化（新版本的节点）：`udp_fallback` 判断"到对方的路上有没有 UDP"时，现在走的是直连就算有，不再看对方是不是 `no_udp` 的节点：
 >   直连的整条路都是 UDP。被认定用不了 UDP 的节点，出去的 UDP 有时到得了个别对端，和它们打得通；这样的一对直连着的时候
@@ -12,14 +20,14 @@
 >   经 relay 时照旧：对方是 `no_udp` 的节点就算没有 UDP 的路。走不走直连由选路定（默认直连优先，延迟优先的节点比代价）。
 >   存下的 `"always"` 和 `"off"` 不受影响。旧版本的节点照原来的算法。
 >
-> **上一次改动**（路由矩阵的格子里带上 ice3proxy 的连接数）。这一次的清单：
+> **再上一次改动**（路由矩阵的格子里带上 ice3proxy 的连接数）。这一次的清单：
 >
 > - 新的字段：`MatrixEntry.lanes`（第 15 节），`from` 这一头看到的它和 `to` 之间的 ice3proxy：控制连接在不在、在用的和空闲的连接各多少。
 >   画拓扑时不用再逐个取节点详情。新的结构 `MatrixLanes`。应答里总是有；`from` 没有为这个对端报、或者它不在线时是 `null`。
 >
 > 别的都没有变。
 >
-> **再上一次改动**（没有设置的节点对默认用 ice3proxy：没有 UDP 的路时用）。这一次的清单：
+> **更早的改动**（没有设置的节点对默认用 ice3proxy：没有 UDP 的路时用）。这一次的清单：
 >
 > - 行为上的变化：没有存下设置的节点对，ice3proxy 是 `"udp_fallback"`，以前是 `"off"`（第 12 节）。`udp_fallback` 本身也改了：拨号的一方
 >   只在它这一段没有 UDP 的路时才拨（连续 40 秒没有才开始，UDP 回来满 10 分钟才放手），两边都有 UDP 的一对什么都不连；
@@ -2794,6 +2802,7 @@ Prometheus 的文本格式（`Content-Type: text/plain; version=0.0.4`）。**�
 | `direct_quality` | 在直连上发 100 个探测（每 20ms 一个），要了吞吐时再量上下行 | `direct_quality` |
 | `relay_quality` | 在经 relay 的路径上做同样的事；默认测两种模式会选的那两条（相同就一条），也可以用 `via` 指定 | `relay_quality` |
 | `route` | 两端各自算一遍：默认模式和延迟优先模式各会选哪条路、为什么 | `route` |
+| `host` | 「新增」两端各报一份：这台机器、节点进程、现在连着多少东西，和它到对端的那条连接。测试开着的这段时间里每秒看一次 CPU，别的在做完时读一遍；不多发包 | `hosts` |
 
 几条规矩：
 
@@ -2816,7 +2825,7 @@ Prometheus 的文本格式（`Content-Type: text/plain; version=0.0.4`）。**�
 |---|---|---|
 | `a` | 是 | 发起方：探测和测量流从它发出 |
 | `b` | 是 | 接受方 |
-| `items` | 否 | 做哪几项；省略时四项全做。写了 `via` 时自动带上 `relay_quality` |
+| `items` | 否 | 做哪几项；省略时全做（「新增」包括 `host`）。写了 `via` 时自动带上 `relay_quality` |
 | `throughput` | 否 | 量吞吐，默认 `false`。要同时做 `direct_quality` 或 `relay_quality` |
 | `via` | 否 | relay 质量测哪几条路径（最多 2 条），每条按 `a` 到 `b` 的顺序列出经过的 relay：网络里启用了的 relay，1 到网络的最大中转级数个，不重复。省略时测默认的 |
 
@@ -2899,7 +2908,44 @@ Prometheus 的文本格式（`Content-Type: text/plain; version=0.0.4`）。**�
 | `direct_quality` | `PathResult`；没有要这一项时是 `null` |
 | `relay_quality` | `PathResult` 的数组，每条测过（或者要测）的路径一项；没有要这一项时是 `[]` |
 | `route` | `RouteResult`；没有要这一项时是 `null` |
+| `hosts` | 「新增」`HostResult` 的数组，两端各一项，`a` 在前；没有要这一项时是 `null`（比这一版旧的 controller 没有这个字段） |
 | `notes` | `TestProblem` 的数组：不影响结果、但值得说的事，比如一端没有按时报最后的结果（`no_report`） |
+
+「新增」`HostResult`：一端的主机和连接状况。那一端最后一次上报到了才有内容，之前 `state` 是 `pending`、下面各项都是 `null`。
+
+```json
+{
+  "node": 2, "state": "done", "problem": null,
+  "system": { "os": "Debian GNU/Linux 13 (trixie)", "kernel": "6.12.48+deb13-amd64", "arch": "x86_64", "cpu_model": "AMD EPYC 7B13", "cores": 1, "uptime_secs": 4123456 },
+  "cpu": { "system_percent": 7, "process_percent": 2 },
+  "cpu_peak": { "system_percent": 61, "process_percent": 98 },
+  "load_x100": [35, 22, 18],
+  "memory": { "total_bytes": 1017839616, "available_bytes": 612372480, "process_rss_bytes": 28311552 },
+  "process": { "uptime_secs": 5400, "threads": 6 },
+  "connections": { "peers": 4, "relays": 2, "relay_clients": null, "streams": 3, "lanes_in_use": 0, "lanes_idle": 4 },
+  "to_peer": {
+    "route": { "via": "direct", "addr": "203.0.113.7:20330" },
+    "rtt_us": 127400, "min_rtt_us": 121900, "cwnd_bytes": 482000, "mtu": 1420, "congestion": "bbr",
+    "sent_packets": 18230, "lost_packets": 41, "lost_bytes": 52480, "congestion_events": 3,
+    "bytes_sent": 20971520, "bytes_received": 20985000, "age_secs": 12
+  }
+}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `node` | 哪个节点 |
+| `state`、`problem` | 这一项的状态和原因。`done` 而下面有的项是 `null` 是正常的：那台机器读不到那一样（现在只有 Linux 读得到机器和进程的数）。节点的版本没有这一项时是 `skipped`、`not_supported`；测试结束时那一端没有报上来是 `failed`、`no_report` |
+| `system` | `os` 发行版的名字（读不到时是系统的种类，如 `windows`）、`kernel`、`arch`、`cpu_model`、`cores`（节点进程用得上几个核）、`uptime_secs`（机器开机多久） |
+| `cpu` | 测试开始的头一秒：`system_percent` 是整台机器（所有核合计，0 到 100），`process_percent` 是节点进程、**按一个核算**（多个线程同时忙时超过 100） |
+| `cpu_peak` | 测试期间最忙的一秒，两个数各取各的最大值。量吞吐时 `process_percent` 接近 100，就是一个核跑满了：瓶颈在 CPU，不在线路 |
+| `load_x100` | 系统的 1、5、15 分钟平均负载，乘了 100（`[35, 22, 18]` 是 0.35、0.22、0.18） |
+| `memory` | `total_bytes`、`available_bytes`（不动用交换就还能给程序用的）、`process_rss_bytes`（节点进程常驻的） |
+| `process` | `uptime_secs`（节点进程运行了多久）、`threads` |
+| `connections` | 这个节点现在连着多少东西：`peers`（和多少个对端之间有连接）、`relays`（挂靠着几个 relay）、`relay_clients`（它自己是 relay 时上面有多少个会话，不是 relay 时是 `null`）、`streams`（共用的连接上开着多少条流）、`lanes_in_use` 和 `lanes_idle`（ice3proxy 正在承载流的连接和空闲的连接） |
+| `to_peer` | `PeerConnection`：这一端到对端的那条连接；没有连接时是 `null` |
+
+`PeerConnection`：`route` 是这条连接现在走的路（`Route`）；`rtt_us`（平滑的往返时间）、`min_rtt_us`（连接建立以来的最小值）、`cwnd_bytes`（拥塞窗口）、`mtu`（现在一个包最长多少字节）是测试结束时的值；`congestion` 是 `"bbr"` 或 `"cubic"`；`sent_packets`、`lost_packets`、`lost_bytes`、`congestion_events`（拥塞控制认定发生拥塞的次数）、`bytes_sent`、`bytes_received`（线上的字节数）是**测试期间增加的**，测试开始时还没有连接、或者中间换了一条时是这条连接建立以来的；`age_secs` 是这条连接建立了多久。
 
 各项的 `state`：`pending`（还没有结果）、`done`（有结果。直连能力"没成"也是结果：`ok` 是 `false`）、`skipped`（没有做，原因在 `problem`）、`failed`（做了但没量出来，原因在 `problem`）。
 
