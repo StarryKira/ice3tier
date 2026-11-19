@@ -282,10 +282,14 @@ describe('路径诊断：一次诊断', () => {
     expect(screen.getByTestId('check-loss')).toHaveTextContent(d.note.loss)
     expect(screen.getByTestId('check-throughput')).toHaveTextContent('19.1 Mbps')
     expect(screen.getByTestId('check-routing')).toHaveAttribute('data-status', 'info')
-    // 这一次没有主机数据：CPU、内存、到对端的连接并成一行，写为什么。
-    const skipped = screen.getByTestId('check-skip-cpu-memory-connection')
+    // 这一次没有主机数据：每组里没测的并成一行，写为什么。
+    const skipped = screen.getByTestId('check-skip-cpu-memory')
     expect(skipped).toHaveTextContent(d.check.cpu)
     expect(skipped).toHaveTextContent(d.hostNotReported)
+    expect(screen.getByTestId('check-skip-connection')).toHaveTextContent(d.hostNotReported)
+    // 检查分三组，每组写通过了几项；要注意的项在建议里有一句该怎么办。
+    expect(screen.getByTestId('check-group-quality')).toHaveTextContent(d.groups.quality)
+    expect(screen.getByTestId('advice')).toHaveTextContent(d.advice.loss)
     // 每一项都做完了：不再一项一项列进度。
     expect(screen.queryByTestId('step-direct')).not.toBeInTheDocument()
   })

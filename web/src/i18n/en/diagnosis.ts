@@ -115,6 +115,7 @@ export const diagnosis: Messages['diagnosis'] = {
     trafficValue: (tx, rx) => `sent ${tx} · received ${rx}`,
     route: 'Current route',
     rtt: 'Smoothed RTT',
+    minRtt: 'Minimum RTT',
     cwnd: 'Congestion window',
     mtu: 'MTU',
     congestion: 'Congestion control',
@@ -184,7 +185,7 @@ export const diagnosis: Messages['diagnosis'] = {
     loss: '< 1%',
     cpu: 'i3t < 85%',
     memory: 'free > 10%',
-    connection: 'loss < 2%',
+    connection: 'loss per side < 2%',
     report: '< 60 s',
   },
   value: {
@@ -204,6 +205,7 @@ export const diagnosis: Messages['diagnosis'] = {
     udpBlocked: (name) => `${name}: UDP blocked`,
     symmetric: (name) => `${name}: symmetric NAT`,
     side: (name, value) => `${name} ${value}`,
+    sent: (name, loss) => `${name} sends ${loss} lost`,
     memory: (name, free, total) => `${name} ${free} free of ${total}`,
     versionSame: (version) => `Both on ${version}`,
     versionDiffer: (a, av, b, bv) => `${a} ${av} · ${b} ${bv}`,
@@ -218,9 +220,35 @@ export const diagnosis: Messages['diagnosis'] = {
     loss: 'High loss slows TCP and makes real-time streams stutter',
     cpu: 'Near 100% means this side’s CPU cannot keep up',
     memory: 'Low memory makes the system reclaim and slow down',
-    connection: 'This connection lost more packets than usual during the diagnosis',
+    connection: 'Packets sent from this side were lost during the diagnosis: this direction of the line is poor',
     version: 'Some checks cannot run when the versions differ',
     stale: 'Reports are slow; the node data may be stale',
+  },
+
+  groups: { link: 'Connectivity & routing', quality: 'Link quality', host: 'Hosts' },
+  groupCount: (passed, total) => `${passed}/${total}`,
+  adviceTitle: 'What to do',
+  summary: { pass: 'passed', warn: 'warning', fail: 'problem', info: 'note', pending: 'running', skip: 'not measured' },
+  advice: {
+    offline: (name) => `Make sure i3t is running on ${name} and can reach the controller`,
+    notPeers: 'Allow these two nodes (or their groups) in Policies',
+    noRoute: 'Both are online but there is no route: query again; if it persists, check both nodes’ logs',
+    direct:
+      'Hole punching fails when both sides are behind strict NATs: forward a UDP port to one of them, or move it to a network with public IPv6',
+    directUnused: 'Default mode switches to direct once it is usable; if it never does, check the reason under Path',
+    jitter: 'Find the jittery segment under Path; if it is a relay segment, pin the node to another relay',
+    loss: 'Find the lossy segment under Path: a relay segment means pinning another relay, the first segment means the local network',
+    tcp: (name) =>
+      `UDP to the relay is blocked on ${name}: allow its outbound UDP, or turn on ice3proxy for this pair (Node pairs)`,
+    nat: (name) => `${name} is behind a symmetric NAT: forward a port to it or change networks to go direct`,
+    udp: (name) => `UDP is blocked on ${name}: check its firewall and whether the ISP restricts UDP`,
+    cpu: (name) =>
+      `i3t on ${name} used a full core: raise its performance profile (node details → Advanced) or use a faster machine`,
+    memory: (name) => `${name} is low on memory: close unused programs or add memory`,
+    connection: (direction, loss) =>
+      `${direction} lost ${loss} of the packets it sent: compare loss per segment of this direction under Path`,
+    version: 'Upgrade both sides to the same version (Settings → Updates)',
+    stale: (name) => `${name} reports slowly: check its network to the controller`,
   },
 
   chart: {

@@ -5,7 +5,7 @@ import { InfoTip } from '@/components/info-tip'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
 import { cn } from '@/lib/utils'
-import { type Check, type CheckStatus, type ReportSection, type VerdictTone } from '@/topology/checks'
+import { type Check, type CheckGroup, type CheckStatus, type ReportSection, type VerdictTone } from '@/topology/checks'
 
 const d = t.diagnosis
 
@@ -134,9 +134,90 @@ function CheckCell({ check, onOpen }: { check: Check; onOpen: (section: ReportSe
   )
 }
 
+const BAR: Record<CheckStatus, string> = {
+  pass: 'bg-ok-dot',
+  warn: 'bg-warn',
+  fail: 'bg-danger',
+  info: 'bg-primary',
+  pending: 'bg-relay',
+  skip: 'bg-border-strong',
+}
+
+const SUMMARY_ORDER: readonly CheckStatus[] = ['fail', 'warn', 'info', 'pass', 'pending', 'skip']
+
+/** 一根细的分段条：各种结果各占多少，后面一行数（"9 通过 · 4 注意"），没有的不写。 */
+function SummaryBar({ checks }: { checks: readonly Check[] }) {
+  const counts = SUMMARY_ORDER.map((status) => ({
+    status,
+    count: checks.filter((check) => check.status === status).length,
+  })).filter(({ count }) => count > 0)
+  return (
+    <div className="ml-auto flex min-w-0 items-center gap-3" data-testid="verdict-summary">
+      <div className="flex h-1.5 w-40 gap-0.5 overflow-hidden rounded-full" aria-hidden>
+        {counts.map(({ status, count }) => (
+          <span key={status} className={cn('h-full', BAR[status])} style={{ flexGrow: count }} />
+        ))}
+      </div>
+      <p className="text-xs whitespace-nowrap text-muted-foreground tabular">
+        {counts.map(({ status, count }) => `${count} ${d.summary[status]}`).join(' · ')}
+      </p>
+    </div>
+  )
+}
+
+/** 一组检查：小标题（组名，右边是通过了几项），下面一项一行；没测的按原因并成一行放在组的最后。 */
+function GroupColumn({
+  group,
+  checks,
+  onOpen,
+}: {
+  group: CheckGroup
+  checks: readonly Check[]
+  onOpen: (section: ReportSection) => void
+}) {
+  const measured = checks.filter((check) => check.status !== 'skip' && check.status !== 'pending')
+  const passed = measured.filter((check) => check.status === 'pass').length
+  const shown = checks.filter((check) => check.status !== 'skip')
+  const skipped = new Map<string, Check[]>()
+  for (const check of checks) {
+    if (check.status === 'skip') skipped.set(check.value, [...(skipped.get(check.value) ?? []), check])
+  }
+  return (
+    <div className="min-w-0" data-testid={`check-group-${group}`}>
+      <p className="flex items-center justify-between border-b bg-muted/20 px-3 py-1 text-xs font-medium">
+        {d.groups[group]}
+        {measured.length > 0 ? (
+          <span className="font-normal text-muted-foreground tabular">{d.groupCount(passed, measured.length)}</span>
+        ) : null}
+      </p>
+      {shown.map((check) => (
+        <CheckCell key={check.key} check={check} onOpen={onOpen} />
+      ))}
+      {[...skipped].map(([reason, items]) => (
+        <div
+          key={`skip:${reason}`}
+          className="flex items-start gap-2 border-b border-border/70 px-3 py-1.5 text-[13px] text-muted-foreground"
+          data-testid={`check-skip-${items.map((check) => check.key).join('-')}`}
+          data-status="skip"
+        >
+          <StatusIcon status="skip" />
+          <span className="min-w-0 flex-1">
+            <span className="font-medium text-foreground">
+              {items.map((check) => d.check[check.key]).join(t.common.listSeparator)}
+            </span>
+            <span className="block text-xs">{reason}</span>
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+const GROUPS: readonly CheckGroup[] = ['link', 'quality', 'host']
+
 /**
- * 诊断结果：一行总评（左边一道颜色、图标、一句话、测了几项几项通过），下面逐项检查排成两列（窄的时候一列）：
- * 图标、名字、测得（参考）、说明。没测的项按原因并成一格放在最后，不一项一项重复同一句话。
+ * 诊断结果：一行总评（左边一道颜色、图标、一句话、测了几项几项通过，右边一根分段条看各种结果各占多少），
+ * 下面是建议（要注意、异常的项该怎么办，按严重的在前），再下面检查按三组排开：连通与路由、链路质量、两端主机。
  */
 export function ResultBlock({
   checks,
@@ -151,51 +232,50 @@ export function ResultBlock({
   const Icon = look.icon
   const measured = checks.filter((check) => check.status !== 'skip' && check.status !== 'pending')
   const passed = measured.filter((check) => check.status === 'pass').length
-  const shown = checks.filter((check) => check.status !== 'skip')
-  const skipped = new Map<string, Check[]>()
-  for (const check of checks) {
-    if (check.status === 'skip') skipped.set(check.value, [...(skipped.get(check.value) ?? []), check])
-  }
+  const rank: Record<CheckStatus, number> = { fail: 0, warn: 1, info: 2, pass: 3, pending: 4, skip: 5 }
+  const advice = checks
+    .filter((check) => check.advice !== null && check.status !== 'pass')
+    .sort((x, y) => rank[x.status] - rank[y.status])
   return (
     <div data-testid="report-result">
       <div
-        className="relative flex flex-wrap items-baseline gap-x-2.5 border-b py-2 pr-3 pl-4"
+        className="relative flex flex-wrap items-center gap-x-2.5 gap-y-1 border-b py-2 pr-3 pl-4"
         data-testid="verdict"
         data-tone={verdict.tone}
       >
         <span aria-hidden className={cn('absolute inset-y-0 left-0 w-1', look.band)} />
         <Icon
-          className={cn(
-            'size-4 shrink-0 self-center',
-            look.text,
-            verdict.tone === 'pending' && 'motion-safe:animate-spin',
-          )}
+          className={cn('size-4 shrink-0', look.text, verdict.tone === 'pending' && 'motion-safe:animate-spin')}
           aria-hidden
         />
         <p className="text-[14px] font-semibold">{verdict.title}</p>
         <p className="text-xs text-muted-foreground">
           {verdict.tone === 'none' ? d.verdict.noneHint : d.passed(passed, measured.length)}
         </p>
+        {measured.length > 0 ? <SummaryBar checks={checks} /> : null}
       </div>
-      <div className="-mb-px grid grid-cols-1 @4xl:grid-cols-2 @4xl:[&>*:nth-child(odd)]:border-r">
-        {shown.map((check) => (
-          <CheckCell key={check.key} check={check} onOpen={onOpen} />
-        ))}
-        {[...skipped].map(([reason, group]) => (
-          <div
-            key={`skip:${reason}`}
-            className="flex items-start gap-2 border-b border-border/70 px-3 py-1.5 text-[13px] text-muted-foreground"
-            data-testid={`check-skip-${group.map((check) => check.key).join('-')}`}
-            data-status="skip"
-          >
-            <StatusIcon status="skip" />
-            <span className="min-w-0 flex-1">
-              <span className="font-medium text-foreground">
-                {group.map((check) => d.check[check.key]).join(t.common.listSeparator)}
-              </span>
-              <span className="block text-xs">{reason}</span>
-            </span>
-          </div>
+      {advice.length > 0 ? (
+        <div className="border-b px-3 py-2" data-testid="advice">
+          <p className="mb-1 text-xs font-semibold">{d.adviceTitle}</p>
+          <ol className="space-y-1">
+            {advice.map((check, index) => (
+              <li key={check.key} className="flex items-start gap-2 text-[13px]">
+                <span className="w-4 shrink-0 text-right text-xs text-muted-foreground tabular">{index + 1}</span>
+                <span className={cn('w-24 shrink-0 font-medium', STATUS_TEXT[check.status])}>{d.check[check.key]}</span>
+                <span className="min-w-0 flex-1">{check.advice}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      ) : null}
+      <div className="-mb-px grid grid-cols-1 @4xl:grid-cols-2 @6xl:grid-cols-3 @4xl:[&>*]:border-r">
+        {GROUPS.map((group) => (
+          <GroupColumn
+            key={group}
+            group={group}
+            checks={checks.filter((check) => check.group === group)}
+            onOpen={onOpen}
+          />
         ))}
       </div>
     </div>

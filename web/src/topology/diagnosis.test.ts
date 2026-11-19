@@ -275,8 +275,14 @@ describe('逐项检查', () => {
     expect(status(list, 'cpu')).toBe('warn')
     expect(value(list, 'cpu')).toBe([d.value.side('a', '99%'), d.value.side('b', '30%')].join(' · '))
     expect(status(list, 'memory')).toBe('warn')
+    // 计数是每一端发出的：b 发出的丢了 5%，是 b → a 这个方向不好。
     expect(status(list, 'connection')).toBe('warn')
-    expect(value(list, 'connection')).toBe(d.value.side('b', '5%'))
+    expect(value(list, 'connection')).toBe(d.value.sent('b', '5%'))
+    expect(list.find((item) => item.key === 'connection')?.advice).toBe(
+      d.advice.connection(t.path.forward('b', 'a'), '5%'),
+    )
+    // 要注意、异常的项都有建议。
+    expect(list.find((item) => item.key === 'cpu')?.advice).toBe(d.advice.cpu('a'))
   })
 
   it('主机数据：旧版本的节点不报、诊断还在跑，各写各的', () => {
@@ -344,6 +350,15 @@ describe('完整输出', () => {
     expect(text).toContain(d.report.test(7, t.tests.state.done))
     expect(text).toContain(t.routes.via('r'))
     expect(text).toContain(d.host.cpuValue('20%', '30%'))
+  })
+
+  it('有要注意的项时报告里有建议', () => {
+    const text = reportText(
+      input({ path: { ...PATH, reverse: { ...PATH.reverse, route: viaRelays(3), relay_leg: 'tcp' } } }),
+      1_794_000_100,
+    )
+    expect(text).toContain(d.adviceTitle)
+    expect(text).toContain(d.advice.tcp('b'))
   })
 
   it('没诊断过：报告里照实说', () => {

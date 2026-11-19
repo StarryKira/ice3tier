@@ -24,14 +24,39 @@ export type CheckKey = keyof typeof d.check
 /** 报告里讲这一项的那一节，点了跳过去；没有就是 `null`。 */
 export type ReportSection = 'path' | 'latency' | 'throughput' | 'routing' | 'hosts'
 
+/** 检查分三组：连通与路由、链路质量、两端主机。 */
+export type CheckGroup = keyof typeof d.groups
+
 export interface Check {
   key: CheckKey
+  group: CheckGroup
   status: CheckStatus
   value: string
   reference: string | null
   note: string | null
+  /** 要注意、异常时该怎么办，一句话；没有就是 `null`。 */
+  advice: string | null
   section: ReportSection | null
 }
+
+const GROUP: Record<CheckKey, CheckGroup> = {
+  connectivity: 'link',
+  direct: 'link',
+  routing: 'link',
+  transport: 'link',
+  nat: 'link',
+  latency: 'quality',
+  jitter: 'quality',
+  loss: 'quality',
+  throughput: 'quality',
+  connection: 'quality',
+  cpu: 'host',
+  memory: 'host',
+  version: 'host',
+  report: 'host',
+}
+
+const a_ = d.advice
 
 const nameOf = (nodes: Named, id: number) => nodes.find((node) => node.id === id)?.name ?? t.common.nodeMissing(id)
 const legLabel = (leg: PathLeg) => t.path.forward(leg.from.name, leg.to.name)
@@ -41,14 +66,21 @@ function check(
   key: CheckKey,
   status: CheckStatus,
   value: string,
-  extra: { reference?: string | null; note?: string | null; section?: ReportSection | null } = {},
+  extra: {
+    reference?: string | null
+    note?: string | null
+    advice?: string | null
+    section?: ReportSection | null
+  } = {},
 ): Check {
   return {
     key,
+    group: GROUP[key],
     status,
     value,
     reference: extra.reference ?? null,
     note: extra.note ?? null,
+    advice: extra.advice ?? null,
     section: extra.section ?? null,
   }
 }
@@ -69,17 +101,25 @@ function connectivity({ a, b, path, nodes }: DiagnosisInput): Check {
   if (offline.length > 0) {
     return check('connectivity', 'fail', join(offline.map((node) => v.offline(node.name))), {
       note: t.path.offline(offline[0]?.name ?? ''),
+      advice: a_.offline(offline[0]?.name ?? ''),
       section: 'path',
     })
   }
   if (path === undefined) return check('connectivity', 'pending', t.path.querying, { section: 'path' })
   const legs = [path.forward, path.reverse]
   if (legs.some((leg) => leg.source === 'not_peers')) {
-    return check('connectivity', 'fail', v.notPeers, { note: t.path.notPeersTitle, section: 'path' })
+    return check('connectivity', 'fail', v.notPeers, {
+      note: t.path.notPeersTitle,
+      advice: a_.notPeers,
+      section: 'path',
+    })
   }
   const broken = legs.filter((leg) => leg.route === null || leg.route.via === 'none')
   if (broken.length > 0) {
-    return check('connectivity', 'fail', join(broken.map((leg) => v.noRoute(legLabel(leg)))), { section: 'path' })
+    return check('connectivity', 'fail', join(broken.map((leg) => v.noRoute(legLabel(leg)))), {
+      advice: a_.noRoute,
+      section: 'path',
+    })
   }
   return check(
     'connectivity',
@@ -103,6 +143,7 @@ function direct({ test, nodes }: DiagnosisInput): Check {
   if (result.ok !== true) {
     return check('direct', 'warn', t.tests.directNo, {
       note: result.problem === null ? d.note.directNo : problemText(result.problem, nodes),
+      advice: a_.direct,
     })
   }
   const how = [
@@ -127,6 +168,7 @@ function routing({ path, test, nodes }: DiagnosisInput): Check {
         join(unused.map((leg) => v.directUnused(legLabel(leg), routeName(leg.route, nodes)))),
         {
           note: unused.map((leg) => leg.reason ?? leg.since?.reason ?? null).find((reason) => reason !== null) ?? null,
+          advice: a_.directUnused,
           section: 'routing',
         },
       )
@@ -182,6 +224,7 @@ function quality({ test, nodes }: DiagnosisInput): Check[] {
       {
         reference: d.reference.jitter,
         note: jitter !== null && jitter >= 10_000 ? d.note.jitter : null,
+        advice: jitter !== null && jitter >= 10_000 ? a_.jitter : null,
         section: 'latency',
       },
     ),
@@ -189,7 +232,12 @@ function quality({ test, nodes }: DiagnosisInput): Check[] {
       'loss',
       worst >= 50 ? 'fail' : worst >= 10 ? 'warn' : 'pass',
       join(losses.map(({ label: path, loss }) => v.side(path, permilleText(loss)))),
-      { reference: d.reference.loss, note: worst >= 10 ? d.note.loss : null, section: 'latency' },
+      {
+        reference: d.reference.loss,
+        note: worst >= 10 ? d.note.loss : null,
+        advice: worst >= 10 ? a_.loss : null,
+        section: 'latency',
+      },
     ),
   ]
 }
@@ -225,6 +273,7 @@ function transport({ path }: DiagnosisInput): Check {
   if (tcp.length > 0) {
     return check('transport', 'warn', join(tcp.map((leg) => v.tcp(legLabel(leg)))), {
       note: d.note.tcp,
+      advice: a_.tcp(tcp[0]?.from.name ?? ''),
       section: 'path',
     })
   }
@@ -233,6 +282,7 @@ function transport({ path }: DiagnosisInput): Check {
 
 function nat({ a, b, test, nodes }: DiagnosisInput): Check {
   const problems: string[] = []
+  let advice: string | null = null
   let known = false
   for (const node of [a, b]) {
     if (node === undefined) continue
@@ -240,10 +290,17 @@ function nat({ a, b, test, nodes }: DiagnosisInput): Check {
     const udp = side?.udp ?? (node.no_udp === true ? false : node.online ? true : null)
     const varies = side?.mapping_varies ?? node.mapping_varies
     if (udp !== null || varies !== null) known = true
-    if (udp === false) problems.push(v.udpBlocked(nameOf(nodes, node.id)))
-    if (varies === true) problems.push(v.symmetric(nameOf(nodes, node.id)))
+    const name = nameOf(nodes, node.id)
+    if (udp === false) {
+      problems.push(v.udpBlocked(name))
+      advice ??= a_.udp(name)
+    }
+    if (varies === true) {
+      problems.push(v.symmetric(name))
+      advice ??= a_.nat(name)
+    }
   }
-  if (problems.length > 0) return check('nat', 'warn', join(problems), { section: 'hosts' })
+  if (problems.length > 0) return check('nat', 'warn', join(problems), { advice, section: 'hosts' })
   return known ? check('nat', 'pass', v.natOk, { section: 'hosts' }) : check('nat', 'skip', d.note.notTested)
 }
 
@@ -253,7 +310,7 @@ function hostChecks({ test, nodes }: DiagnosisInput): Check[] {
     const missing = hostMissing(test, nodes)
     return (['cpu', 'memory', 'connection'] as const).map((key) => check(key, missing.status, missing.value))
   }
-  const name = (host: HostReport) => nameOf(nodes, host.node)
+  const name = (host: HostReport | undefined) => (host === undefined ? '' : nameOf(nodes, host.node))
   const peaks = hosts.flatMap((host) =>
     host.cpu_peak?.process_percent == null ? [] : [{ host, percent: host.cpu_peak.process_percent }],
   )
@@ -266,7 +323,19 @@ function hostChecks({ test, nodes }: DiagnosisInput): Check[] {
     if (sent === null || lost === null || sent === 0) return []
     return [{ host, loss: Math.round((lost / sent) * 1000) }]
   })
+  // 计数是每一端、每个方向的：哪一端的丢包高，说明从它发出的那个方向不好。
   const lossy = links.some(({ loss }) => loss >= 20)
+  // 丢得最多的那一端：从它发出去的方向。
+  const worst = links.reduce<(typeof links)[number] | undefined>(
+    (top, link) => (top === undefined || link.loss > top.loss ? link : top),
+    undefined,
+  )
+  const peerOf = (id: number) => (test?.a.id === id ? test.b.name : test?.b.id === id ? test.a.name : '')
+  const worstLink =
+    worst === undefined
+      ? undefined
+      : { loss: worst.loss, direction: t.path.forward(name(worst.host), peerOf(worst.host.node)) }
+  const severe = links.some(({ loss }) => loss >= 100)
   return [
     peaks.length === 0
       ? check('cpu', 'skip', d.hostNotReported)
@@ -277,6 +346,7 @@ function hostChecks({ test, nodes }: DiagnosisInput): Check[] {
           {
             reference: d.reference.cpu,
             note: busy ? d.note.cpu : null,
+            advice: busy ? a_.cpu(name(peaks.find(({ percent }) => percent >= 85)?.host ?? hosts[0])) : null,
             section: 'hosts',
           },
         ),
@@ -290,15 +360,34 @@ function hostChecks({ test, nodes }: DiagnosisInput): Check[] {
               v.memory(name(host), formatBytes(memory.available_bytes), formatBytes(memory.total_bytes)),
             ),
           ),
-          { reference: d.reference.memory, note: low ? d.note.memory : null, section: 'hosts' },
+          {
+            reference: d.reference.memory,
+            note: low ? d.note.memory : null,
+            advice: low
+              ? a_.memory(
+                  name(
+                    memories.find(({ memory }) => memory.available_bytes / memory.total_bytes < 0.1)?.host ?? hosts[0],
+                  ),
+                )
+              : null,
+            section: 'hosts',
+          },
         ),
     links.length === 0
       ? check('connection', 'skip', d.hostNotReported)
       : check(
           'connection',
-          lossy ? 'warn' : 'pass',
-          join(links.map(({ host, loss }) => v.side(name(host), permilleText(loss)))),
-          { reference: d.reference.connection, note: lossy ? d.note.connection : null, section: 'hosts' },
+          severe ? 'fail' : lossy ? 'warn' : 'pass',
+          join(links.map(({ host, loss }) => v.sent(name(host), permilleText(loss)))),
+          {
+            reference: d.reference.connection,
+            note: lossy ? d.note.connection : null,
+            advice:
+              worstLink === undefined || !lossy
+                ? null
+                : a_.connection(worstLink.direction, permilleText(worstLink.loss)),
+            section: 'hosts',
+          },
         ),
   ]
 }
@@ -310,6 +399,7 @@ function version({ a, b }: DiagnosisInput): Check {
   if (a.version === b.version) return check('version', 'pass', v.versionSame(a.version), { section: 'hosts' })
   return check('version', 'info', v.versionDiffer(a.name, a.version, b.name, b.version), {
     note: d.note.version,
+    advice: a_.version,
     section: 'hosts',
   })
 }
@@ -318,13 +408,15 @@ function report({ a, b }: DiagnosisInput): Check {
   const ages = [a, b].flatMap((node) =>
     node === undefined || !node.online || node.reported_secs_ago === null || node.reported_secs_ago === undefined
       ? []
-      : [node.reported_secs_ago],
+      : [{ name: node.name, age: node.reported_secs_ago }],
   )
   if (ages.length === 0) return check('report', 'skip', d.note.notTested)
-  const slowest = Math.max(...ages)
-  return check('report', slowest > 60 ? 'warn' : 'pass', v.reported(formatAge(slowest)), {
+  const slowest = ages.reduce((worst, item) => (item.age > worst.age ? item : worst))
+  const stale = slowest.age > 60
+  return check('report', stale ? 'warn' : 'pass', v.reported(formatAge(slowest.age)), {
     reference: d.reference.report,
-    note: slowest > 60 ? d.note.stale : null,
+    note: stale ? d.note.stale : null,
+    advice: stale ? a_.stale(slowest.name) : null,
     section: 'hosts',
   })
 }

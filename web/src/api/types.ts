@@ -1291,6 +1291,8 @@ export interface PeerConnection {
   route: Route | null
   /** 平滑后的往返延迟。 */
   rtt_us: number | null
+  /** 这条连接上见过的最小往返延迟。 */
+  min_rtt_us?: number | null
   cwnd_bytes: number | null
   mtu: number | null
   /** `"bbr"`、`"cubic"`。 */

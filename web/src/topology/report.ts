@@ -136,6 +136,15 @@ export function reportText(input: DiagnosisInput, at: number): string {
     const note = item.note === null ? '' : ` — ${item.note}`
     lines.push(`- [${d.status[item.status]}] ${r.line(d.check[item.key], `${item.value}${reference}`)}${note}`)
   }
+  // 建议：要注意、异常的项该怎么办，严重的在前。
+  const rank = { fail: 0, warn: 1, info: 2, pass: 3, pending: 4, skip: 5 } as const
+  const advice = results
+    .filter((item) => item.advice !== null && item.status !== 'pass')
+    .sort((x, y) => rank[x.status] - rank[y.status])
+  if (advice.length > 0) {
+    lines.push('', r.section(d.adviceTitle))
+    advice.forEach((item, index) => lines.push(`${index + 1}. ${r.line(d.check[item.key], item.advice ?? '')}`))
+  }
 
   if (path !== undefined) {
     lines.push('', r.section(r.now), legLine(path.forward, nodes), legLine(path.reverse, nodes))

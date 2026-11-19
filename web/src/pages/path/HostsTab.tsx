@@ -239,6 +239,14 @@ const groups = (): Group[] => [
         },
       },
       {
+        key: 'min-rtt',
+        label: h.minRtt,
+        value: (side) => {
+          const rtt = done(side)?.to_peer?.min_rtt_us
+          return rtt === null || rtt === undefined ? null : msText(rtt)
+        },
+      },
+      {
         key: 'cwnd',
         label: h.cwnd,
         value: (side) => {
@@ -261,7 +269,7 @@ const groups = (): Group[] => [
           if (sent === null || sent === undefined || lost === null || lost === undefined) return null
           const loss = sent === 0 ? 0 : Math.round((lost / sent) * 1000)
           const text = h.packetsValue(String(sent), String(lost), permilleText(loss))
-          return loss >= 20 ? warn(text) : text
+          return loss >= 100 ? <span className="font-medium text-danger">{text}</span> : loss >= 20 ? warn(text) : text
         },
       },
       { key: 'events', label: h.congestionEvents, value: (side) => count(done(side)?.to_peer?.congestion_events) },
