@@ -16,7 +16,7 @@
 - 主动测试多一项「主机和连接」（`host`）：两端各报一份自己这台机器（系统、CPU、负载、内存）、节点进程、现在连着多少东西，和它到对端的那条连接（往返时间、拥塞窗口、包长、测试期间的收发和丢包）。
   - 量吞吐时能看出瓶颈是不是 CPU：节点进程的 CPU 按一个核算，最忙的一秒接近 100% 就是一个核跑满了。
   - 不为它多发包，测试也不因此变长：测试开着的这段时间里每秒看一次 CPU，别的在做完时读一遍。
-  - `i3tctl test` 默认带着它，`--only host` 只做这一项（一秒多做完）；全网矩阵不带。管理 API：`TestView.hosts`（[admin-api.md](docs/admin-api.md) 第 19 节）。
+  - `i3tctl test` 默认带着它，`--only host` 只做这一项（一秒多做完）；全网矩阵不带。管理 API：`TestView.hosts`（[admin-api.md](docs/internal/admin-api.md) 第 19 节）。
   - 机器和进程的数现在只有 Linux 读得到，别的平台上是空的。节点和 controller 都要升级；旧的节点那一端显示「不支持」。
 
 ## 0.1.23 （2026-11-19）
@@ -24,7 +24,7 @@
 - 没有 IPv6 的机器的日志里不再每分钟一条警告（`quinn_udp: sendmsg error: NetworkUnreachable`）。只要有一个对端公布了 IPv6 地址，这样的机器往那个地址发包就被内核拒绝，而 UDP 库把所有的发送错误都记成警告。到不了的地址是正常的状态：现在只记 debug；探测路径 MTU 的大包发不出去不记；别的发送错误照旧是警告。每一类一分钟最多一条。
 - 没有设置的节点对（`udp_fallback`）：和对端直连着的时候，新的 TCP 流走共用的连接，不再因为 controller 认定对端「用不了 UDP」就改走 ice3proxy。被认定用不了 UDP 的节点，出去的 UDP 有时到得了个别对端、和它们打得通，这时整条路都是 UDP。直连没了、路回到经中继，才用 ice3proxy。
   - 走不走直连由选路定：默认直连优先，延迟优先的节点比代价。节点对上存下的 `always`、`off` 不受影响。
-  - 只要节点升级，controller 不用。管理 API 没有新的字段：`udp_path` 在直连时是 `true`（[admin-api.md](docs/admin-api.md) 开头的清单）。
+  - 只要节点升级，controller 不用。管理 API 没有新的字段：`udp_path` 在直连时是 `true`（[admin-api.md](docs/internal/admin-api.md) 开头的清单）。
 - 测试：同一个对端的连接上限（超过两条时关最旧的）改由一个用真的连接的单元测试管着；集成测试里旧连接多半在新的握完手之前就被重置了，走不到上限。
 
 ## 0.1.22 （2026-11-19）
