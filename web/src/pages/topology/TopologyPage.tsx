@@ -26,7 +26,7 @@ import { BackboneView } from './BackboneView'
 import { MatrixLegend, MatrixView } from './MatrixView'
 import { PairPanel } from './PairPanel'
 import { TestMatrixView } from './TestMatrixView'
-import { TopologyGraph } from './TopologyGraph'
+import { LANE_DASH, TopologyGraph } from './TopologyGraph'
 
 const g = t.topology
 
@@ -49,6 +49,10 @@ function GraphLegend() {
       <li className="flex items-center gap-1.5">
         {line(colors.relay)}
         {g.legendRelay}
+      </li>
+      <li className="flex items-center gap-1.5">
+        {line(colors.lane, LANE_DASH)}
+        {g.legendLane}
       </li>
       <li className="flex items-center gap-1.5">
         {line(colors.stale, '5 4')}

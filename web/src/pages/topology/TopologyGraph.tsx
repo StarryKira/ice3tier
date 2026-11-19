@@ -8,8 +8,18 @@ import { t, useLocale } from '@/i18n'
 import { cn } from '@/lib/utils'
 import { GraphCanvas } from '@/pages/access/flow'
 import { type LineColors, useLineColors } from '@/topology/colors'
-import { HiddenHandles, LineEdgeView, type LineFlowEdge } from '@/topology/line-edge'
-import { type HighlightHop, layoutSignature, type TopoLink, type TopologyShape, type TopoPoint } from '@/topology/graph'
+import { curveOf, type Rect } from '@/access/geometry'
+import { LABEL_HEIGHT, type LabelItem, labelWidth, placeLabels } from '@/topology/labels'
+import { HiddenHandles, type LabelPart, LineEdgeView, type LineFlowEdge } from '@/topology/line-edge'
+import { entryText } from '@/topology/route'
+import {
+  type HighlightHop,
+  layoutSignature,
+  pointId,
+  type TopoLink,
+  type TopologyShape,
+  type TopoPoint,
+} from '@/topology/graph'
 
 const g = t.topology
 
@@ -97,18 +107,137 @@ const edgeTypes = { line: LineEdgeView }
 
 /** 线不多时把直连的延迟写在线上；多了就不写，免得糊成一片（精确的数看矩阵）。 */
 const LABELS_UP_TO = 24
+/** ice3proxy 的线是长虚线：颜色之外线型也不一样。 */
+export const LANE_DASH = '9 4'
 /** 线上跑的小光点也一样：线太多时不跑，满屏乱闪。 */
 const FLOW_UP_TO = 60
 
 function linkColor(link: TopoLink, colors: LineColors): string {
   if (link.stale) return colors.stale
-  return link.direct ? colors.direct : colors.relay
+  return colors[link.kind]
 }
 
-function linkDescription(link: TopoLink): string {
+type Name = (id: string) => string
+
+const relayNames = (link: TopoLink, name: Name) =>
+  link.relays.map((id) => name(pointId(id))).join(t.routes.hopSeparator)
+const rttText = (rtt: number | null) => (rtt === null ? null : t.routes.rtt(rtt))
+
+function linkDescription(link: TopoLink, name: Name): string {
   if (link.stale) return g.linkStale
-  if (link.direct) return g.linkDirect(link.rtt === null ? t.routes.rttUnknown : t.routes.rtt(link.rtt))
-  return g.linkRelayLeg
+  const rtt = rttText(link.rtt) ?? t.routes.rttUnknown
+  if (link.kind === 'direct') return g.linkDirect(rtt)
+  if (link.kind === 'relay') return g.linkRelay(relayNames(link, name), rtt)
+  return g.linkLane
+}
+
+/** 线上的字：直连"UDP 1 ms"，经中继"经 h2 TCP 300 ms"（到第一个中继走 TCP 时黄字），ice3proxy"ice3proxy TCP 2 条在用"。 */
+function linkParts(link: TopoLink, name: Name): LabelPart[] {
+  const rtt = rttText(link.rtt)
+  const parts: LabelPart[] = []
+  if (link.kind === 'direct') {
+    parts.push({ text: g.udp, tone: 'ok' })
+  } else if (link.kind === 'relay') {
+    parts.push({ text: t.routes.via(relayNames(link, name)), tone: 'relay' })
+    if (link.transport === 'tcp') parts.push({ text: g.tcp, tone: 'warn' })
+    else if (link.transport === 'udp') parts.push({ text: g.udp })
+  } else {
+    const inUse = link.lanes?.in_use ?? 0
+    parts.push({ text: t.routes.protocol.lane, tone: 'lane' }, { text: g.tcp })
+    parts.push({ text: inUse > 0 ? g.laneInUse(inUse) : g.laneIdle })
+    return parts
+  }
+  if (rtt !== null) parts.push({ text: rtt })
+  return parts
+}
+
+/** 悬停在线上的字时：哪一对、怎么连的，两个方向各一行（节点报的原样），经中继时每一段的延迟，协议。 */
+function LinkTip({ link, name }: { link: TopoLink; name: Name }) {
+  const a = name(link.source)
+  const b = name(link.target)
+  const byId = (id: NodeId) => name(pointId(id))
+  const title =
+    link.kind === 'direct'
+      ? g.tipDirect(a, b)
+      : link.kind === 'relay'
+        ? g.tipRelay(a, b, relayNames(link, name))
+        : g.tipLane(a, b)
+  return (
+    <div className="space-y-1">
+      <p className="font-medium">{title}</p>
+      {link.kind === 'lane' ? (
+        <>
+          <p>{g.tipLaneCounts(link.lanes?.in_use ?? 0, link.lanes?.idle ?? 0)}</p>
+          <p>{g.tipLaneControl(link.lanes?.control ?? false)}</p>
+        </>
+      ) : (
+        <>
+          {link.entries.map((entry) => (
+            <p key={`${entry.from}>${entry.to}`}>
+              {t.topology.forward(byId(entry.from), byId(entry.to))}：{entryText(entry, byId)}
+            </p>
+          ))}
+          {link.legs.length > 0 ? (
+            <p>
+              {g.tipLegs(
+                link.legs
+                  .map((leg) => g.tipLeg(byId(leg.from), byId(leg.to), rttText(leg.rtt) ?? t.routes.rttUnknown))
+                  .join(' · '),
+              )}
+            </p>
+          ) : null}
+          <p>
+            {link.kind === 'direct'
+              ? g.tipProtocolDirect
+              : link.transport === 'tcp' || link.transport === 'udp'
+                ? g.tipProtocolRelay(link.transport === 'tcp' ? g.tcp : g.udp)
+                : g.tipProtocolRelayUnknown}
+          </p>
+        </>
+      )}
+    </div>
+  )
+}
+
+interface Hover {
+  kind: 'node' | 'link'
+  id: string
+}
+
+/** 悬停时亮着的点和线。 */
+interface Spot {
+  nodes: Set<string>
+  links: Set<string>
+}
+
+/**
+ * 停在节点上：连着它的线、经它中转的线，和这些线两头、经过的节点。停在线上：这条线、两头和经过的节点。
+ * 不可达的线（`none:`）只亮它自己和两头。
+ */
+function spotlight(shape: TopologyShape, hover: Hover): Spot {
+  const nodes = new Set<string>()
+  const links = new Set<string>()
+  const light = (id: string, source: string, target: string, relays: readonly NodeId[]) => {
+    links.add(id)
+    nodes.add(source)
+    nodes.add(target)
+    for (const relay of relays) nodes.add(pointId(relay))
+  }
+  for (const link of shape.links) {
+    const touches =
+      hover.kind === 'node'
+        ? link.source === hover.id ||
+          link.target === hover.id ||
+          link.relays.some((relay) => pointId(relay) === hover.id)
+        : link.id === hover.id
+    if (touches) light(link.id, link.source, link.target, link.relays)
+  }
+  for (const pair of shape.unreachable) {
+    const touches = hover.kind === 'node' ? pair.source === hover.id || pair.target === hover.id : pair.id === hover.id
+    if (touches) light(pair.id, pair.source, pair.target, [])
+  }
+  if (hover.kind === 'node') nodes.add(hover.id)
+  return { nodes, links }
 }
 
 interface TopologyGraphProps {
@@ -133,8 +262,18 @@ export function TopologyGraph({ shape, rtt, looks, onPick }: TopologyGraphProps)
   const focused = shape.involved.size > 0
   const name = (id: string) => shape.points.find((point) => point.id === id)?.node.name ?? id
   // 拖开的卡片停在哪里：只对这一套节点有效，节点的集合变了（重新排了）就作废。
-  const [moved, setMoved] = useState<{ signature: string; at: Record<string, XYPosition> }>({ signature, at: {} })
+  // `settled` 是松手时的位置：线上的字按它排，拖的时候字跟着线走、不重新排，免得乱跳。
+  const [moved, setMoved] = useState<{
+    signature: string
+    at: Record<string, XYPosition>
+    settled: Record<string, XYPosition>
+  }>({ signature, at: {}, settled: {} })
   const dragged = moved.signature === signature ? moved.at : {}
+  const settled = moved.signature === signature ? moved.settled : {}
+
+  // 鼠标停在一个节点或者一条线上：它和跟它有关的亮着，别的淡下去。选中了一对时不管悬停（那一对已经亮着了）。
+  const [hover, setHover] = useState<Hover | null>(null)
+  const spot = useMemo(() => (focused || hover === null ? null : spotlight(shape, hover)), [shape, focused, hover])
 
   const nodes = useMemo<TopoFlowNode[]>(
     () =>
@@ -144,7 +283,7 @@ export function TopologyGraph({ shape, rtt, looks, onPick }: TopologyGraphProps)
         position: dragged[point.id] ?? { x: point.x - point.width / 2, y: point.y - point.height / 2 },
         data: {
           point,
-          dimmed: focused && !shape.involved.has(point.id),
+          dimmed: (focused && !shape.involved.has(point.id)) || (spot !== null && !spot.nodes.has(point.id)),
           look: looks.get(point.node.id) ?? null,
           order,
         },
@@ -155,10 +294,10 @@ export function TopologyGraph({ shape, rtt, looks, onPick }: TopologyGraphProps)
         connectable: false,
       })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [shape, focused, locale, looks, dragged],
+    [shape, focused, locale, looks, dragged, spot],
   )
 
-  const edges = useMemo<LineFlowEdge[]>(() => {
+  const laid = useMemo<LineFlowEdge[]>(() => {
     const showLabels = shape.links.length <= LABELS_UP_TO && !focused
     const flows = shape.links.length <= FLOW_UP_TO
     // 光点跑一趟多久按排好时的线长算，拖动卡片时不跟着变：一变，正在跑的点就跳到别处、忽明忽暗。
@@ -168,29 +307,40 @@ export function TopologyGraph({ shape, rtt, looks, onPick }: TopologyGraphProps)
       const b = at.get(target)
       return a === undefined || b === undefined ? 0 : Math.hypot(b.x - a.x, b.y - a.y)
     }
-    const base: LineFlowEdge[] = shape.links.map((link) => ({
-      id: link.id,
-      type: 'line',
-      source: link.source,
-      target: link.target,
-      data: {
-        index: 0,
-        siblings: 1,
-        label: showLabels && link.direct && link.rtt !== null ? t.routes.rtt(link.rtt) : null,
-        strong: false,
-        bend: link.bend,
-        flow: flows && !focused && !link.stale ? 'both' : undefined,
-        length: lengthOf(link.source, link.target),
-      },
-      style: {
-        stroke: linkColor(link, colors),
-        strokeWidth: 1.6,
-        strokeDasharray: link.stale ? '5 4' : undefined,
-        opacity: focused ? 0.15 : 0.9,
-      },
-      focusable: false,
-      ariaLabel: g.linkLabel(name(link.source), name(link.target), linkDescription(link)),
-    }))
+    const base: LineFlowEdge[] = shape.links.map((link) => {
+      const color = linkColor(link, colors)
+      // 只有一个方向走它时线带箭头、光点只往那边跑；两个方向都走时两头各跑一个。
+      const oneWay = link.forward !== link.reverse
+      const [source, target] = oneWay && link.reverse ? [link.target, link.source] : [link.source, link.target]
+      const quiet = link.kind === 'lane' && (link.lanes?.in_use ?? 0) === 0
+      return {
+        id: link.id,
+        type: 'line',
+        source,
+        target,
+        data: {
+          index: link.index,
+          siblings: link.siblings,
+          label: null,
+          parts: showLabels ? linkParts(link, name) : undefined,
+          tip: showLabels ? <LinkTip link={link} name={name} /> : undefined,
+          strong: false,
+          bend: link.bend,
+          onHover: (on: boolean) => setHover(on ? { kind: 'link', id: link.id } : null),
+          flow: flows && !focused && !link.stale && !quiet ? (oneWay ? 'forward' : 'both') : undefined,
+          length: lengthOf(link.source, link.target),
+        },
+        markerEnd: oneWay ? { type: MarkerType.ArrowClosed, color, width: 12, height: 12 } : undefined,
+        style: {
+          stroke: color,
+          strokeWidth: 1.6,
+          strokeDasharray: link.stale ? '5 4' : link.kind === 'lane' ? LANE_DASH : undefined,
+          opacity: focused ? 0.15 : 0.9,
+        },
+        focusable: false,
+        ariaLabel: g.linkLabel(name(source), name(target), linkDescription(link, name)),
+      }
+    })
     const none: LineFlowEdge[] = shape.unreachable.map((pair) => ({
       id: pair.id,
       type: 'line',
@@ -233,10 +383,58 @@ export function TopologyGraph({ shape, rtt, looks, onPick }: TopologyGraphProps)
         focusable: false,
       }
     })
-    return [...base, ...none, ...highlight]
+    const all = [...base, ...none, ...highlight]
+    // 线上的字自动排开：按松手时卡片的位置算每条线的样子，字沿线挪到不压别的字、不压卡片的地方。
+    const rect = (id: string): Rect | null => {
+      const point = at.get(id)
+      if (point === undefined) return null
+      const position = settled[id] ?? { x: point.x - point.width / 2, y: point.y - point.height / 2 }
+      return { ...position, width: point.width, height: point.height }
+    }
+    const items: LabelItem[] = []
+    for (const edge of all) {
+      const data = edge.data
+      const text = data?.parts?.map((part) => part.text) ?? (data?.label === null ? null : [data?.label ?? ''])
+      const from = rect(edge.source)
+      const to = rect(edge.target)
+      if (data === undefined || text === null || from === null || to === null) continue
+      items.push({
+        id: edge.id,
+        curve: curveOf(from, to, data.index, data.siblings, data.bend ?? 0),
+        width: labelWidth(text),
+        height: LABEL_HEIGHT,
+      })
+    }
+    const cards = shape.points.map((point) => rect(point.id)).filter((card): card is Rect => card !== null)
+    const placement = placeLabels(items, cards)
+    return all.map((edge) =>
+      edge.data === undefined || !placement.has(edge.id)
+        ? edge
+        : { ...edge, data: { ...edge.data, labelAt: placement.get(edge.id) } },
+    )
     // name 只读 shape.points；语言变了线上的说明要换。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shape, focused, rtt.forward, rtt.reverse, locale, colors])
+  }, [shape, focused, rtt.forward, rtt.reverse, locale, colors, settled])
+
+  // 悬停时：亮着的线粗一点、字和光点照常（光点快一些），别的线淡下去、不写字、不跑光点；亮着的画在最上面。
+  const edges = useMemo<LineFlowEdge[]>(() => {
+    if (spot === null) return laid
+    const lit = (edge: LineFlowEdge) => spot.links.has(edge.id)
+    return [...laid.filter((edge) => !lit(edge)), ...laid.filter(lit)].map((edge) => {
+      const on = lit(edge)
+      const width = Number(edge.style?.strokeWidth ?? 1.6)
+      return {
+        ...edge,
+        style: { ...edge.style, opacity: on ? 1 : 0.08, strokeWidth: on ? width + 1 : width },
+        data:
+          edge.data === undefined
+            ? undefined
+            : on
+              ? { ...edge.data, strong: true }
+              : { ...edge.data, label: null, parts: undefined, tip: undefined, flow: undefined },
+      }
+    })
+  }, [laid, spot])
 
   // 用鼠标点一下，画图的库既报"点了"又报"选中了"：同一下只算一次，不然第二个点会被算成重新开始选。
   const last = useRef({ id: '', at: 0 })
@@ -260,16 +458,21 @@ export function TopologyGraph({ shape, rtt, looks, onPick }: TopologyGraphProps)
       selectNodesOnDrag={false}
       elementsSelectable
       onNodeClick={(_event, node) => pick(node.id)}
+      onNodeMouseEnter={(_event, node) => setHover({ kind: 'node', id: node.id })}
+      onNodeMouseLeave={() => setHover(null)}
+      onEdgeMouseEnter={(_event, edge) => setHover({ kind: 'link', id: edge.id })}
+      onEdgeMouseLeave={() => setHover(null)}
       onNodesChange={(changes) => {
         for (const change of changes) {
           // 用键盘选中（聚焦后按回车）和点击是一回事。
           if (change.type === 'select' && change.selected) pick(change.id)
-          if (change.type === 'position' && change.position !== undefined) {
-            const { id, position } = change
-            setMoved((previous) => ({
-              signature,
-              at: { ...(previous.signature === signature ? previous.at : {}), [id]: position },
-            }))
+          if (change.type === 'position') {
+            const { id, position, dragging } = change
+            setMoved((previous) => {
+              const mine = previous.signature === signature ? previous : { signature, at: {}, settled: {} }
+              const at = position === undefined ? mine.at : { ...mine.at, [id]: position }
+              return { signature, at, settled: dragging === false ? at : mine.settled }
+            })
           }
         }
       }}

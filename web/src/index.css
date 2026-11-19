@@ -55,6 +55,7 @@
   --idle-soft: #f4f4f5;
   --idle-dot: #a1a1aa;
   --relay: #5b45b5;
+  --lane: #0277b6;
   --relay-soft: #f3f0fd;
   --relay-dot: #7c66dc;
   --warn: #8a5a00;
@@ -115,6 +116,7 @@
   --idle-soft: #262626;
   --idle-dot: #666666;
   --relay: #b5a6ff;
+  --lane: #38bdf8;
   --relay-soft: #1e142a;
   --relay-dot: #8e7cf0;
   --warn: #f1c35b;
@@ -181,6 +183,7 @@
   --color-idle-soft: var(--idle-soft);
   --color-idle-dot: var(--idle-dot);
   --color-relay: var(--relay);
+  --color-lane: var(--lane);
   --color-relay-soft: var(--relay-soft);
   --color-relay-dot: var(--relay-dot);
   --color-warn: var(--warn);

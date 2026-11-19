@@ -1,4 +1,12 @@
-import { type MatrixEntry, type MatrixNode, type NodeId, type RouteMatrix } from '@/api/types'
+import {
+  type DirectKind,
+  type EntryLanes,
+  type LegTransport,
+  type MatrixEntry,
+  type MatrixNode,
+  type NodeId,
+  type RouteMatrix,
+} from '@/api/types'
 
 import { cellKey, hopsOf, indexEntries } from './route'
 
@@ -9,8 +17,9 @@ import { cellKey, hopsOf, indexEntries } from './route'
  *   不然全部排成一圈。
  *   两圈都横向拉宽成椭圆（画布是宽的）；外圈转一个角度，让外圈的点不和里圈的点对齐，线就少从点上穿过。
  * - 一条线笔直连过去会压到别的点时，弯成一道弧绕开（`bend`）。
- * - 线只画现在有连接的：每个方向的路拆成一段一段（直连是一段，经 relay 是"发送方 → relay → … → 接收方"几段），
- *   两个点之间不管有几条路经过，都合成一条线。所以几十个节点时线的数量跟"有连接的对数"走，不是节点数的平方。
+ * - 线只画现在有连接的：两个节点之间每一种连法一条线，直连一条，经某几个 relay 一条（线连着这两个节点，
+ *   写着经谁）。两个方向走同一种连法时合成一条，不一样时各一条、带方向，并排弯开。
+ *   所以几十个节点时线的数量跟"有连接的对数"走，不是节点数的平方。
  * - 两端都在线、两个方向却都是"无路可走"的一对，画一条表示不可达的线。
  * - 选中了一对（A、B）时，另外给出这两个方向的路，一段一段带方向，画在最上面。
  */
@@ -44,20 +53,39 @@ export interface TopoPoint {
   picked: 'a' | 'b' | null
 }
 
+/**
+ * 两个节点之间的一种连法。`source` 是编号小的那个节点；`forward` 是 source 到 target 这个方向走它，`reverse` 反过来。
+ */
 export interface TopoLink {
   id: string
   source: string
   target: string
-  /** 有一条直连的路走这一段。 */
-  direct: boolean
-  /** 这一段是某条经 relay 的路的一部分。 */
-  relayed: boolean
-  /** 经过它的每一格都是过期的。 */
+  /** `lane` 是 ice3proxy：两个节点之间单独的 TCP 连接，带它们之间的 TCP 流。 */
+  kind: 'direct' | 'relay' | 'lane'
+  /** 经过的 relay，从 source 一侧数起；直连是空的。 */
+  relays: NodeId[]
+  forward: boolean
+  reverse: boolean
+  /** 走它的每一格都是过期的。 */
   stale: boolean
-  /** 走这一段的直连里测到的最低延迟。经 relay 的路只有全程的延迟，分不到段上。 */
+  /** 两个方向里低的那个全程延迟。 */
   rtt: number | null
-  /** 经过它的格子（一个方向算一格）。 */
+  /** 直连是怎么建立的（两个方向里先报出来的那个）。 */
+  directKind: DirectKind | null
+  /** 经 relay 时到第一个 relay 那一段的传输；有一个方向走 TCP 就是 TCP。不知道是 `null`。 */
+  transport: LegTransport | null
+  /** 走它的格子（一个方向算一格），source 到 target 的在前。 */
   entries: MatrixEntry[]
+  /**
+   * 经 relay 时每一段（从 source 数起）：两头之间直连的延迟，取两个方向里低的；那一段两头之间不是直连、没有数时是 `null`。
+   * 直连是空的。
+   */
+  legs: { from: NodeId; to: NodeId; rtt: number | null }[]
+  /** ice3proxy 的连接：两头各自报的里取大的（同一批连接两头都看得到，不相加）。不是 `lane` 时是 `null`。 */
+  lanes: EntryLanes | null
+  /** 同一对节点之间的第几条、一共几条：几条时各自弯开。 */
+  index: number
+  siblings: number
   /** 绕开别的卡片要弯多少（见 `bendAround`）；0 是直线。 */
   bend: number
 }
@@ -311,28 +339,125 @@ export function buildTopology(
     // 经过一个不在这个网络里的节点（刚被删掉）的路画不出来，矩阵里照样有它。
     if (!path.every((id) => known.has(id))) continue
     connected.add(pair.key)
-    for (let step = 0; step < path.length - 1; step += 1) {
-      const hop = segment(path[step] ?? 0, path[step + 1] ?? 0)
-      const link = links.get(hop.key) ?? {
-        id: `link:${hop.key}`,
-        source: pointId(hop.source),
-        target: pointId(hop.target),
-        direct: false,
-        relayed: false,
-        stale: true,
-        rtt: null,
-        entries: [],
-        bend: 0,
-      }
-      const direct = entry.route.via === 'direct'
-      link.direct ||= direct
-      link.relayed ||= !direct
-      link.stale &&= entry.stale
-      if (direct && entry.rtt_ms !== null)
-        link.rtt = link.rtt === null ? entry.rtt_ms : Math.min(link.rtt, entry.rtt_ms)
-      link.entries.push(entry)
-      links.set(hop.key, link)
+    const forward = entry.from === pair.source
+    // 经过的 relay 按从 source 到 target 的顺序写，两个方向经同一串 relay 时是同一条线。
+    const relaysOf =
+      entry.route.via === 'relay' ? (forward ? [...entry.route.relays] : [...entry.route.relays].reverse()) : []
+    const kind = entry.route.via === 'direct' ? 'direct' : 'relay'
+    const key = `${pair.key}:${kind === 'direct' ? 'direct' : relaysOf.join('.')}`
+    const link = links.get(key) ?? {
+      id: `link:${key}`,
+      source: pointId(pair.source),
+      target: pointId(pair.target),
+      kind,
+      relays: relaysOf,
+      forward: false,
+      reverse: false,
+      stale: true,
+      rtt: null,
+      directKind: null,
+      transport: null,
+      entries: [],
+      legs: [],
+      lanes: null,
+      index: 0,
+      siblings: 1,
+      bend: 0,
     }
+    if (forward) link.forward = true
+    else link.reverse = true
+    link.stale &&= entry.stale
+    if (entry.rtt_ms !== null) link.rtt = link.rtt === null ? entry.rtt_ms : Math.min(link.rtt, entry.rtt_ms)
+    link.directKind ??= entry.direct ?? null
+    const leg = entry.relay_leg ?? null
+    if (leg === 'tcp' || (leg !== null && link.transport === null)) link.transport = leg
+    if (forward) link.entries.unshift(entry)
+    else link.entries.push(entry)
+    links.set(key, link)
+  }
+
+  // ice3proxy：一对节点之间有连接（在用的、空闲的、或者控制连接）时，另画一条。
+  for (const entry of matrix.entries) {
+    const report = entry.lanes ?? null
+    if (report === null || entry.stale) continue
+    if (!report.control && report.in_use === 0 && report.idle === 0) continue
+    if (!known.has(entry.from) || !known.has(entry.to)) continue
+    const pair = segment(entry.from, entry.to)
+    const key = `${pair.key}:lane`
+    const link = links.get(key) ?? {
+      id: `link:${key}`,
+      source: pointId(pair.source),
+      target: pointId(pair.target),
+      kind: 'lane' as const,
+      relays: [],
+      forward: false,
+      reverse: false,
+      stale: false,
+      rtt: null,
+      directKind: null,
+      transport: 'tcp' as const,
+      entries: [],
+      legs: [],
+      lanes: { control: false, in_use: 0, idle: 0 },
+      index: 0,
+      siblings: 1,
+      bend: 0,
+    }
+    // 连接是两头共用的：两个方向都算。
+    link.forward = true
+    link.reverse = true
+    const seen = link.lanes ?? { control: false, in_use: 0, idle: 0 }
+    link.lanes = {
+      control: seen.control || report.control,
+      in_use: Math.max(seen.in_use, report.in_use),
+      idle: Math.max(seen.idle, report.idle),
+    }
+    if (entry.from === pair.source) link.entries.unshift(entry)
+    else link.entries.push(entry)
+    links.set(key, link)
+  }
+
+  // 同一对节点之间有几条：直连在前，再是经 relay 的（按经过的 relay 排），ice3proxy 最后；几条时并排弯开。
+  const byPair = new Map<string, TopoLink[]>()
+  for (const link of [...links.values()].sort((a, b) => a.id.localeCompare(b.id))) {
+    const pair = `${link.source}|${link.target}`
+    byPair.set(pair, [...(byPair.get(pair) ?? []), link])
+  }
+  const cells = indexEntries(matrix.entries)
+  const directRtt = (from: NodeId, to: NodeId): number | null => {
+    const values = [cells.get(cellKey(from, to)), cells.get(cellKey(to, from))]
+      .filter((entry) => entry?.route.via === 'direct' && entry.rtt_ms !== null)
+      .map((entry) => entry?.rtt_ms ?? 0)
+    return values.length === 0 ? null : Math.min(...values)
+  }
+  const legsOf = (link: TopoLink) => {
+    if (link.kind !== 'relay') return []
+    const ends = [link.entries[0]?.from, link.entries[0]?.to].sort((a, b) => (a ?? 0) - (b ?? 0))
+    const path = [ends[0] ?? 0, ...link.relays, ends[1] ?? 0]
+    // 经的 relay 就是终点自己时（连对端自己的 relay），没有"自己到自己"那一段。
+    return path
+      .slice(1)
+      .map((to, step) => {
+        const from = path[step] ?? 0
+        return { from, to, rtt: directRtt(from, to) }
+      })
+      .filter((leg) => leg.from !== leg.to)
+  }
+  const laidOut: TopoLink[] = []
+  for (const group of byPair.values()) {
+    const rank = { direct: 0, relay: 1, lane: 2 }
+    group.sort((a, b) =>
+      a.kind === b.kind ? a.relays.join('.').localeCompare(b.relays.join('.')) : rank[a.kind] - rank[b.kind],
+    )
+    group.forEach((link, index) =>
+      laidOut.push({
+        ...link,
+        index,
+        siblings: group.length,
+        bend: bendAround(points, link.source, link.target),
+        legs: legsOf(link),
+      }),
+    )
   }
 
   // 和总览的"不可达的节点对"一个口径：两端都在线、却没有路。一端离线时没有路是理所当然的，
@@ -370,9 +495,7 @@ export function buildTopology(
 
   return {
     points,
-    links: [...links.values()]
-      .map((link) => ({ ...link, bend: bendAround(points, link.source, link.target) }))
-      .sort((a, b) => a.id.localeCompare(b.id)),
+    links: laidOut.sort((a, b) => a.id.localeCompare(b.id)),
     unreachable: unreachable.sort((a, b) => a.id.localeCompare(b.id)),
     highlight,
     forward,

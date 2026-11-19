@@ -8,8 +8,19 @@ import {
   useInternalNode,
 } from '@xyflow/react'
 
-import { curveBetween, type Rect } from '@/access/geometry'
+import { type ReactNode } from 'react'
+
+import { curveBetween, curveOf, pointOnCurve, type Rect } from '@/access/geometry'
+import { Tooltip } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
+
+/** 线上的字分几段：协议、经过的中继、延迟，各有各的颜色。 */
+export interface LabelPart {
+  text: string
+  tone?: 'ok' | 'relay' | 'lane' | 'warn'
+}
+
+const PART_TONE = { ok: 'text-ok', relay: 'text-relay', lane: 'text-lane', warn: 'text-warn' } as const
 
 /** 一条线：同一对点之间的第几条（几条时各自弯开）、线上写的字、字要不要显眼。 */
 export interface LineData extends Record<string, unknown> {
@@ -27,6 +38,14 @@ export interface LineData extends Record<string, unknown> {
   flowColor?: string
   /** 光点按这个长度定跑一趟多久（排好时两个点的距离）；没有就按现在画出来的长度。 */
   length?: number
+  /** 分段的字，有它时不用 `label`。 */
+  parts?: LabelPart[]
+  /** 悬停在字上看的详细说明。 */
+  tip?: ReactNode
+  /** 字放在线上的哪里（0 是起点、1 是终点，见 `placeLabels`）；没有就在正中。 */
+  labelAt?: number
+  /** 鼠标移到字上、移开：和停在线上一样，让这条线亮起来。 */
+  onHover?: (on: boolean) => void
 }
 
 export type LineFlowEdge = Edge<LineData, 'line'>
@@ -92,6 +111,10 @@ export function LineEdgeView({ id, source, target, data, markerEnd, style }: Edg
   const targetRect = rectOf(useInternalNode(target))
   if (sourceRect === null || targetRect === null || data === undefined) return null
   const path = curveBetween(sourceRect, targetRect, data.index, data.siblings, data.bend ?? 0)
+  const at =
+    data.labelAt === undefined
+      ? path.label
+      : pointOnCurve(curveOf(sourceRect, targetRect, data.index, data.siblings, data.bend ?? 0), data.labelAt)
   const length =
     data.length ??
     Math.hypot(
@@ -134,17 +157,32 @@ export function LineEdgeView({ id, source, target, data, markerEnd, style }: Edg
           ) : null}
         </g>
       ) : null}
-      {data.label !== null ? (
+      {data.label !== null || (data.parts?.length ?? 0) > 0 ? (
         <EdgeLabelRenderer>
-          <span
-            style={{ transform: `translate(-50%, -50%) translate(${path.label.x}px, ${path.label.y}px)` }}
-            className={cn(
-              'pointer-events-none absolute rounded-full border bg-card px-1.5 text-[11px] leading-[18px] whitespace-nowrap tabular shadow-xs',
-              data.strong ? 'border-border-strong font-medium text-foreground' : 'text-muted-foreground',
-            )}
-          >
-            {data.label}
-          </span>
+          <Tooltip content={data.tip}>
+            <span
+              style={{ transform: `translate(-50%, -50%) translate(${at.x}px, ${at.y}px)` }}
+              tabIndex={data.tip === undefined ? undefined : -1}
+              onMouseEnter={() => data.onHover?.(true)}
+              onMouseLeave={() => data.onHover?.(false)}
+              className={cn(
+                'absolute inline-flex items-center gap-1 rounded-full border bg-card px-1.5 text-[11px] leading-[18px] whitespace-nowrap tabular shadow-xs',
+                data.tip === undefined ? 'pointer-events-none' : 'nodrag nopan pointer-events-auto cursor-default',
+                data.strong ? 'border-border-strong font-medium text-foreground' : 'text-muted-foreground',
+              )}
+            >
+              {data.parts !== undefined
+                ? data.parts.map((part, index) => (
+                    <span
+                      key={index}
+                      className={cn(part.tone !== undefined && cn('font-medium', PART_TONE[part.tone]))}
+                    >
+                      {part.text}
+                    </span>
+                  ))
+                : data.label}
+            </span>
+          </Tooltip>
         </EdgeLabelRenderer>
       ) : null}
     </>

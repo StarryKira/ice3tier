@@ -100,21 +100,88 @@ describe('buildTopology：路由矩阵整理成拓扑图', () => {
     expect(bendAround([at(1, -400, 0), at(2, 400, 0), at(3, 0, 200)], pointId(1), pointId(2))).toBe(0)
   })
 
-  it('两个点之间不管有几条路经过都只画一条线；直连的标延迟，经 relay 的拆成几段', () => {
+  it('两个节点之间每种连法一条线：两个方向都直连合成一条；经 relay 的连着两端，写着经谁', () => {
     const shape = buildTopology(MATRIX, RELAYS, null)
     const byId = new Map(shape.links.map((link) => [link.id, link]))
-    expect([...byId.keys()].sort()).toEqual(['link:1-2', 'link:1-4', 'link:2-3', 'link:3-5'])
+    expect([...byId.keys()].sort()).toEqual(['link:2-3:direct', 'link:2-4:1', 'link:3-5:direct'])
     // laptop ⇄ nas 两个方向都是直连，合成一条，延迟取低的。
-    expect(byId.get('link:2-3')).toMatchObject({ direct: true, relayed: false, stale: false, rtt: 3 })
-    expect(byId.get('link:2-3')?.entries).toHaveLength(2)
-    // laptop → hk → office 和 office → hk → laptop：每一段各经过两格。
-    expect(byId.get('link:1-2')).toMatchObject({ direct: false, relayed: true, rtt: null })
-    expect(byId.get('link:1-4')?.entries).toHaveLength(2)
+    expect(byId.get('link:2-3:direct')).toMatchObject({
+      kind: 'direct',
+      forward: true,
+      reverse: true,
+      stale: false,
+      rtt: 3,
+      siblings: 1,
+    })
+    expect(byId.get('link:2-3:direct')?.entries).toHaveLength(2)
+    // laptop → hk → office 和 office → hk → laptop：一条连着 laptop 和 office 的线，经 hk，全程的延迟。
+    expect(byId.get('link:2-4:1')).toMatchObject({ kind: 'relay', relays: [1], forward: true, reverse: true, rtt: 40 })
+  })
+
+  it('两个方向走法不一样时各一条、带方向、并排弯开；经 relay 的写出每一段的延迟和到第一个 relay 的传输', () => {
+    const matrix: RouteMatrix = {
+      nodes: [node(1, 'hk'), node(2, 'laptop'), node(3, 'nas')],
+      entries: [
+        makeEntry(1, 3, direct(), { rtt_ms: 45 }),
+        makeEntry(2, 1, direct(), { rtt_ms: 30 }),
+        makeEntry(2, 3, viaRelays(1), { rtt_ms: 80, relay_leg: 'tcp' }),
+        makeEntry(3, 2, direct(), { rtt_ms: 50, direct: 'punched' }),
+      ],
+    }
+    const pair = buildTopology(matrix, new Set([1]), null).links.filter((link) => link.id.startsWith('link:2-3:'))
+    expect(pair).toEqual([
+      expect.objectContaining({
+        id: 'link:2-3:1',
+        kind: 'relay',
+        forward: true,
+        reverse: false,
+        transport: 'tcp',
+        legs: [
+          { from: 2, to: 1, rtt: 30 },
+          { from: 1, to: 3, rtt: 45 },
+        ],
+        index: 1,
+        siblings: 2,
+      }),
+      expect.objectContaining({
+        id: 'link:2-3:direct',
+        kind: 'direct',
+        forward: false,
+        reverse: true,
+        directKind: 'punched',
+        index: 0,
+        siblings: 2,
+      }),
+    ])
+  })
+
+  it('ice3proxy：一对节点之间有连接时另一条线，两头报的取大的；过期的、什么都没有的不算', () => {
+    const lanes = (in_use: number, idle: number, control = true) => ({ control, in_use, idle })
+    const matrix: RouteMatrix = {
+      nodes: [node(1, 'hk'), node(2, 'laptop'), node(3, 'nas')],
+      entries: [
+        makeEntry(1, 2, direct(), { lanes: lanes(2, 1) }),
+        makeEntry(2, 1, direct(), { lanes: lanes(1, 3) }),
+        makeEntry(1, 3, direct(), { lanes: lanes(0, 0, false) }),
+        makeEntry(3, 2, direct(), { lanes: lanes(4, 0), stale: true }),
+      ],
+    }
+    const links = buildTopology(matrix, new Set([1]), null).links
+    expect(links.filter((link) => link.kind === 'lane')).toEqual([
+      expect.objectContaining({
+        id: 'link:1-2:lane',
+        lanes: { control: true, in_use: 2, idle: 3 },
+        forward: true,
+        reverse: true,
+        index: 1,
+        siblings: 2,
+      }),
+    ])
   })
 
   it('过期的格子画出来但标成过期；两个方向都无路可走的一对画一条不可达的线', () => {
     const shape = buildTopology(MATRIX, RELAYS, null)
-    expect(shape.links.find((link) => link.id === 'link:3-5')).toMatchObject({ stale: true })
+    expect(shape.links.find((link) => link.id === 'link:3-5:direct')).toMatchObject({ stale: true })
     expect(shape.unreachable).toEqual([
       expect.objectContaining({ id: 'none:3-6', source: pointId(3), target: pointId(6), stale: false }),
     ])
@@ -190,7 +257,7 @@ describe('buildTopology：路由矩阵整理成拓扑图', () => {
     }
     const shape = buildTopology(matrix, new Set(), null)
     expect(shape.points.find((point) => point.id === pointId(3))?.relay).toBe(true)
-    expect(shape.links.map((link) => link.id).sort()).toEqual(['link:1-3', 'link:2-3'])
+    expect(shape.links.map((link) => link.id)).toEqual(['link:1-2:3'])
   })
 
   it('布局的指纹只跟点和 relay 的集合有关：路变了，点的位置不动', () => {

@@ -389,7 +389,7 @@ export type LegTransport = 'udp' | 'tcp' | 'unknown'
 export interface RouteDetail {
   /** 走直连时，直连是怎么建立起来的；不是直连或者不知道时是 `null`。 */
   direct?: DirectKind | null
-  /** 经 relay 时第一段的传输；现在的节点还报不出来，总是 `null`。 */
+  /** 经 relay 时发送方到它第一个 relay 那一段的传输（后面几段不管）；不经 relay、或者节点太旧不报时是 `null`。 */
   relay_leg?: LegTransport | null
 }
 
@@ -873,6 +873,20 @@ export interface MatrixEntry extends RouteDetail {
   age_secs: number
   /** 不是 `from` 现在这次连接报的：它不在线，或者刚重新连上还没有上报。 */
   stale: boolean
+  /**
+   * 0.1.22 起：`from` 最近一次报的、和 `to` 之间的 ice3proxy 连接。这一对现在不用 ice3proxy、发送方太旧或者不在线时是 `null`；
+   * 更早的 controller 不写。两头各自看自己那一边，同一对的两格数不一定一样，不能相加。
+   */
+  lanes?: EntryLanes | null
+}
+
+export interface EntryLanes {
+  /** 两个节点之间的控制连接在不在；不在时新的 TCP 流走共用的连接。 */
+  control: boolean
+  /** 正在带着流的连接。 */
+  in_use: number
+  /** 这一边看得到的空闲连接。 */
+  idle: number
 }
 
 export interface RouteMatrix {

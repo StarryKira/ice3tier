@@ -40,12 +40,28 @@ export interface EdgePath {
 /** 相邻两条平行线之间错开多少。 */
 const PARALLEL_GAP = 44
 
+/** 一条二次贝塞尔曲线：起点、控制点、终点。 */
+export interface Curve {
+  start: Point
+  control: Point
+  end: Point
+}
+
+/** 曲线上参数 t（0 到 1）处的点。 */
+export function pointOnCurve(curve: Curve, t: number): Point {
+  const a = (1 - t) * (1 - t)
+  const b = 2 * t * (1 - t)
+  const c = t * t
+  return {
+    x: a * curve.start.x + b * curve.control.x + c * curve.end.x,
+    y: a * curve.start.y + b * curve.control.y + c * curve.end.y,
+  }
+}
+
 /**
- * 两个矩形之间的一条线。`index` / `siblings` 说明这是同一对点之间的第几条：
- * 只有一条时是直线；多条时围绕直线对称地弯开。
+ * 两个矩形之间那条线的三个点。`bend`：控制点再沿同一条法线挪这么远（拓扑图上绕开别的卡片用）。
  */
-/** `bend`：控制点再沿同一条法线挪这么远（拓扑图上绕开别的卡片用）。 */
-export function curveBetween(source: Rect, target: Rect, index = 0, siblings = 1, bend = 0): EdgePath {
+export function curveOf(source: Rect, target: Rect, index = 0, siblings = 1, bend = 0): Curve {
   const a = center(source)
   const b = center(target)
   const dx = b.x - a.x
@@ -61,11 +77,19 @@ export function curveBetween(source: Rect, target: Rect, index = 0, siblings = 1
     x: (a.x + b.x) / 2 + nx * (offset * 2 + bend),
     y: (a.y + b.y) / 2 + ny * (offset * 2 + bend),
   }
-  const start = borderPoint(source, control)
-  const end = borderPoint(target, control)
+  return { start: borderPoint(source, control), control, end: borderPoint(target, control) }
+}
+
+/**
+ * 两个矩形之间的一条线。`index` / `siblings` 说明这是同一对点之间的第几条：
+ * 只有一条时是直线；多条时围绕直线对称地弯开。
+ */
+export function curveBetween(source: Rect, target: Rect, index = 0, siblings = 1, bend = 0): EdgePath {
+  const curve = curveOf(source, target, index, siblings, bend)
+  const { start, control, end } = curve
   return {
     d: `M ${start.x} ${start.y} Q ${control.x} ${control.y} ${end.x} ${end.y}`,
     // 二次贝塞尔曲线在 t = 0.5 处的点。
-    label: { x: 0.25 * start.x + 0.5 * control.x + 0.25 * end.x, y: 0.25 * start.y + 0.5 * control.y + 0.25 * end.y },
+    label: pointOnCurve(curve, 0.5),
   }
 }
