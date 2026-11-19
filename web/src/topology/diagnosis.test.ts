@@ -11,7 +11,8 @@ import {
 import { t } from '@/i18n'
 import { direct, makeNode, viaRelays } from '@/test/fixtures'
 
-import { type DiagnosisInput, fastest, findings, kpis, measuredPaths, routeName, steps, widest } from './diagnosis'
+import { type Check, checks, verdict } from './checks'
+import { type DiagnosisInput, fastest, measuredPaths, routeName, steps, widest } from './diagnosis'
 import { reportJson, reportText } from './report'
 
 const d = t.diagnosis
@@ -150,61 +151,59 @@ function host(node: number, extra: Partial<HostReport> = {}): HostReport {
   }
 }
 
-const texts = (list: { text: string }[]) => list.map((item) => item.text)
+describe('逐项检查', () => {
+  const status = (list: Check[], key: Check['key']) => list.find((item) => item.key === key)?.status
+  const value = (list: Check[], key: Check['key']) => list.find((item) => item.key === key)?.value
 
-describe('诊断的结论', () => {
-  it('都好：只有能直连和"没有发现问题"', () => {
-    expect(texts(findings(input()))).toEqual([
-      d.find.directOk(`${t.routes.directKind.lan} · ${t.tests.directAlready}`),
-      d.find.allGood,
-    ])
+  it('都好：每一项都有结果，总评正常；没要主机数据的三项写为什么', () => {
+    const list = checks(input())
+    expect(status(list, 'connectivity')).toBe('pass')
+    expect(value(list, 'connectivity')).toContain(t.path.forward('a', 'b'))
+    expect(status(list, 'direct')).toBe('pass')
+    expect(status(list, 'latency')).toBe('pass')
+    expect(value(list, 'latency')).toBe(d.value.latency(t.common.ms(10), t.tests.qualityDirect, t.common.ms(12)))
+    expect(status(list, 'loss')).toBe('pass')
+    expect(status(list, 'throughput')).toBe('skip')
+    expect(value(list, 'throughput')).toBe(d.note.noThroughput)
+    expect(status(list, 'cpu')).toBe('skip')
+    expect(value(list, 'cpu')).toBe(d.hostNotReported)
+    expect(verdict(list, TEST)).toEqual({ tone: 'ok', title: d.verdict.ok })
   })
 
-  it('还没诊断：只说现在知道的，不说"没有发现问题"', () => {
-    expect(findings(input({ test: undefined }))).toEqual([])
+  it('还没诊断：现在就知道的照常有结果，要量的写"还没有诊断"，总评是还没有诊断', () => {
+    const list = checks(input({ test: undefined }))
+    expect(status(list, 'connectivity')).toBe('pass')
+    expect(status(list, 'direct')).toBe('skip')
+    expect(value(list, 'latency')).toBe(d.note.notTested)
+    expect(verdict(list, undefined).tone).toBe('none')
   })
 
-  it('严重的在前：不在线、不是对端', () => {
-    const list = findings(
+  it('不在线、不是对端：连通性异常，总评异常', () => {
+    const offline = checks(input({ a: { ...A, online: false } }))
+    expect(status(offline, 'connectivity')).toBe('fail')
+    expect(value(offline, 'connectivity')).toBe(d.value.offline('a'))
+    const notPeers = checks(
+      input({ path: { ...PATH, forward: { ...PATH.forward, source: 'not_peers', route: null } } }),
+    )
+    expect(value(notPeers, 'connectivity')).toBe(d.value.notPeers)
+    expect(verdict(notPeers, TEST)).toEqual({ tone: 'fail', title: d.verdict.fail(1) })
+  })
+
+  it('能直连但现在经中继：路由选择要注意；到中继走 TCP：传输要注意', () => {
+    const list = checks(
       input({
-        a: { ...A, online: false },
-        path: { ...PATH, forward: { ...PATH.forward, source: 'not_peers', route: null } },
+        path: { ...PATH, reverse: { ...PATH.reverse, route: viaRelays(3), relay_leg: 'tcp', reason: '中继更近' } },
       }),
     )
-    expect(list[0]).toMatchObject({ tone: 'danger', text: d.find.offline('a') })
-    expect(list[1]).toMatchObject({ tone: 'danger', text: d.find.notPeers })
-    expect(texts(list)).not.toContain(d.find.allGood)
+    expect(status(list, 'routing')).toBe('warn')
+    expect(value(list, 'routing')).toBe(d.value.directUnused(t.path.forward('b', 'a'), t.routes.via('r')))
+    expect(list.find((item) => item.key === 'routing')?.note).toBe('中继更近')
+    expect(status(list, 'transport')).toBe('warn')
+    expect(value(list, 'transport')).toBe(d.value.tcp(t.path.forward('b', 'a')))
+    expect(verdict(list, TEST)).toEqual({ tone: 'warn', title: d.verdict.warn(2) })
   })
 
-  it('能直连但现在经中继：注意；到中继走 TCP：注意；两个方向不一样：提示', () => {
-    const list = findings(
-      input({
-        path: { ...PATH, reverse: { ...PATH.reverse, route: viaRelays(3), relay_leg: 'tcp' } },
-      }),
-    )
-    expect(texts(list)).toContain(d.find.directUnused(t.path.forward('b', 'a'), t.routes.via('r')))
-    expect(texts(list)).toContain(d.find.tcpLeg(t.path.forward('b', 'a')))
-    expect(texts(list)).toContain(
-      d.find.asymmetric(
-        `${t.path.forward('a', 'b')} ${t.routes.direct}`,
-        `${t.path.forward('b', 'a')} ${t.routes.via('r')}`,
-      ),
-    )
-  })
-
-  it('同一条路两个方向倒过来写是一样的', () => {
-    const list = findings(
-      input({
-        path: {
-          forward: { ...PATH.forward, route: viaRelays(3, 4) },
-          reverse: { ...PATH.reverse, route: viaRelays(4, 3) },
-        },
-      }),
-    )
-    expect(list.some((finding) => finding.key === 'asymmetric')).toBe(false)
-  })
-
-  it('UDP 不通、对称型 NAT 两个来源都说了只写一次', () => {
+  it('不能直连：直连要注意，写原因；UDP 不通、对称型 NAT：NAT 与 UDP 要注意', () => {
     const test: TestView = {
       ...TEST,
       direct: {
@@ -227,23 +226,26 @@ describe('诊断的结论', () => {
         ],
       },
     }
-    const list = findings(input({ test, b: { ...B, mapping_varies: true } }))
-    expect(list.filter((finding) => finding.key === 'nat:2')).toHaveLength(1)
-    expect(texts(list)).toContain(d.find.udpBlocked('b'))
-    expect(texts(list)).toContain(d.find.cannotDirect(t.tests.problemOf('b', t.tests.problems.mapping_varies)))
+    const list = checks(input({ test }))
+    expect(status(list, 'direct')).toBe('warn')
+    expect(list.find((item) => item.key === 'direct')?.note).toBe(
+      t.tests.problemOf('b', t.tests.problems.mapping_varies),
+    )
+    expect(status(list, 'nat')).toBe('warn')
+    expect(value(list, 'nat')).toBe([d.value.udpBlocked('b'), d.value.symmetric('b')].join(' · '))
   })
 
-  it('丢包到 1% 注意，到 5% 严重；一个都没回答是严重', () => {
-    const test = (loss: number, answered = 100): TestView => ({
+  it('丢包到 1% 注意，到 5% 异常；抖动到 10 ms 注意', () => {
+    const test = (loss: number, jitter = 500): TestView => ({
       ...TEST,
-      direct_quality: { ...DIRECT_PATH, latency: { ...latency(10, loss), answered } },
+      direct_quality: { ...DIRECT_PATH, latency: { ...latency(10, loss), jitter_us: jitter } },
     })
-    expect(findings(input({ test: test(10) })).find((finding) => finding.key.startsWith('loss'))?.tone).toBe('warn')
-    expect(findings(input({ test: test(60) })).find((finding) => finding.key.startsWith('loss'))?.tone).toBe('danger')
-    expect(texts(findings(input({ test: test(1000, 0) })))).toContain(d.find.noAnswer(t.tests.qualityDirect))
+    expect(status(checks(input({ test: test(10) })), 'loss')).toBe('warn')
+    expect(status(checks(input({ test: test(60) })), 'loss')).toBe('fail')
+    expect(status(checks(input({ test: test(0, 12_000) })), 'jitter')).toBe('warn')
   })
 
-  it('两端主机：i3t 占满一个核、内存不够、负载超过核数、到对端的连接丢包', () => {
+  it('两端主机：i3t 占满一个核、内存不够、到对端的连接丢包', () => {
     const test: TestView = {
       ...TEST,
       hosts: [
@@ -252,7 +254,6 @@ describe('诊断的结论', () => {
           memory: { total_bytes: 1000, available_bytes: 50, process_rss_bytes: null },
         }),
         host(2, {
-          load_x100: [450, 300, 200],
           to_peer: {
             route: direct('203.0.113.1:1'),
             rtt_us: 10_000,
@@ -270,47 +271,46 @@ describe('诊断的结论', () => {
         }),
       ],
     }
-    const list = texts(findings(input({ test })))
-    expect(list).toContain(d.find.cpuBound('a', 99))
-    expect(list).toContain(d.find.systemBusy('a', 95))
-    expect(list).toContain(d.find.highLoad('b', '4.50', 2))
-    expect(list).toContain(d.find.connectionLoss('b', '5%'))
-    expect(list.some((text) => text.startsWith(d.find.lowMemory('a', '').slice(0, 4)))).toBe(true)
+    const list = checks(input({ test }))
+    expect(status(list, 'cpu')).toBe('warn')
+    expect(value(list, 'cpu')).toBe([d.value.side('a', '99%'), d.value.side('b', '30%')].join(' · '))
+    expect(status(list, 'memory')).toBe('warn')
+    expect(status(list, 'connection')).toBe('warn')
+    expect(value(list, 'connection')).toBe(d.value.side('b', '5%'))
   })
 
-  it('版本不同、上报过时：提示', () => {
-    const list = texts(
-      findings(input({ a: { ...A, version: '0.1.22' }, b: { ...B, version: '0.1.23', reported_secs_ago: 300 } })),
+  it('主机数据：旧版本的节点不报、诊断还在跑，各写各的', () => {
+    const old = checks(
+      input({
+        test: {
+          ...TEST,
+          hosts: [
+            host(1, { state: 'skipped', problem: { code: 'not_supported', node: 1, message: '' } }),
+            host(2, { state: 'skipped', problem: { code: 'not_supported', node: 2, message: '' } }),
+          ],
+        },
+      }),
     )
-    expect(list).toContain(d.find.versions('a', '0.1.22', 'b', '0.1.23'))
-    expect(list).toContain(d.find.staleReport('b', t.time.minutesAgo(5)))
+    expect(value(old, 'cpu')).toBe(d.hostTooOld)
+    const running = checks(input({ test: { ...TEST, hosts: [host(1, { state: 'pending' }), host(2)] } }))
+    expect(status(running, 'memory')).not.toBe('skip')
+  })
+
+  it('版本不同：提示；上报过时：注意', () => {
+    const list = checks(
+      input({ a: { ...A, version: '0.1.22' }, b: { ...B, version: '0.1.23', reported_secs_ago: 300 } }),
+    )
+    expect(status(list, 'version')).toBe('info')
+    expect(value(list, 'version')).toBe(d.value.versionDiffer('a', '0.1.22', 'b', '0.1.23'))
+    expect(status(list, 'report')).toBe('warn')
   })
 })
 
-describe('指标和进度', () => {
+describe('测了的路和进度', () => {
   it('最低延迟取平均最低的那条；吞吐取上下行里慢的那个最高的', () => {
     const paths = measuredPaths(TEST)
     expect(fastest(paths)?.direct).toBe(true)
     expect(widest(paths)).toBeNull()
-  })
-
-  it('没诊断时每个指标都是一道横线、没有说明', () => {
-    for (const kpi of kpis(input({ test: undefined }))) {
-      expect(kpi.values).toEqual([])
-      expect(kpi.sub).toBeNull()
-    }
-  })
-
-  it('CPU 峰值两端各一行，超过 85% 的那一个标出来', () => {
-    const cpu = kpis(
-      input({
-        test: { ...TEST, hosts: [host(1, { cpu_peak: { system_percent: 50, process_percent: 90 } }), host(2)] },
-      }),
-    ).find((kpi) => kpi.key === 'cpu')
-    expect(cpu?.values).toEqual([
-      { text: d.cpuSide('a', 90), warn: true },
-      { text: d.cpuSide('b', 30), warn: false },
-    ])
   })
 
   it('进度：只列要了的项；几条中继路径合成一项，还有在测的就是在测', () => {
@@ -339,7 +339,7 @@ describe('完整输出', () => {
   it('文本报告：两端、结论、现在怎么走、这次诊断的每一项', () => {
     const text = reportText(input({ test: { ...TEST, hosts: [host(1), host(2)] } }), 1_794_000_100)
     expect(text).toContain(d.report.title)
-    expect(text).toContain(d.find.allGood)
+    expect(text).toContain(d.verdict.ok)
     expect(text).toContain(t.path.forward('a', 'b'))
     expect(text).toContain(d.report.test(7, t.tests.state.done))
     expect(text).toContain(t.routes.via('r'))

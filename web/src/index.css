@@ -58,6 +58,9 @@
   --lane: #0277b6;
   --relay-soft: #f3f0fd;
   --relay-dot: #7c66dc;
+  /* 图表的两个系列色（上行 / 下行这类）：数据可视化的类别色第 1、2 位，亮暗两套都跑过校验（色盲区分、对比度）。 */
+  --viz-1: #2a78d6;
+  --viz-2: #eb6834;
   --warn: #8a5a00;
   --warn-soft: #fdf6e3;
   --warn-line: #f0d9a0;
@@ -119,6 +122,8 @@
   --lane: #38bdf8;
   --relay-soft: #1e142a;
   --relay-dot: #8e7cf0;
+  --viz-1: #3987e5;
+  --viz-2: #d95926;
   --warn: #f1c35b;
   --warn-soft: #261e14;
   --warn-line: #574313;
@@ -186,6 +191,8 @@
   --color-lane: var(--lane);
   --color-relay-soft: var(--relay-soft);
   --color-relay-dot: var(--relay-dot);
+  --color-viz-1: var(--viz-1);
+  --color-viz-2: var(--viz-2);
   --color-warn: var(--warn);
   --color-warn-soft: var(--warn-soft);
   --color-warn-line: var(--warn-line);

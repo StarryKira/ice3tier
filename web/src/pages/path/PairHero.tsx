@@ -1,12 +1,10 @@
-import { ArrowLeftRight, ChevronsUpDown, Plus, RefreshCw } from 'lucide-react'
+import { ArrowLeftRight, ChevronDown, Plus, RefreshCw } from 'lucide-react'
 
 import { type Node, type NodeDetail, type NodeId, type PathLeg, type PathView } from '@/api/types'
 import { Combobox, type ComboOption } from '@/components/combobox'
 import { Flag } from '@/components/flag'
-import { InfoTip } from '@/components/info-tip'
 import { OsIcon } from '@/components/os-icon'
 import { OnlineDot } from '@/components/status'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip } from '@/components/ui/tooltip'
@@ -19,24 +17,15 @@ import { describeLeg } from '@/topology/path'
 const d = t.diagnosis
 const p = t.path
 
-const BADGE_TONE = { ok: 'ok', idle: 'neutral', relay: 'relay', warn: 'warn', danger: 'danger' } as const
-const LINE = { ok: 'bg-ok', relay: 'bg-relay', idle: 'bg-border-strong', warn: 'bg-warn', danger: 'bg-danger' } as const
-const HEAD = {
-  ok: 'text-ok',
-  relay: 'text-relay',
-  idle: 'text-border-strong',
-  warn: 'text-warn',
-  danger: 'text-danger',
-} as const
+const DOT = { ok: 'bg-ok', relay: 'bg-relay', idle: 'bg-idle-dot', warn: 'bg-warn', danger: 'bg-danger' } as const
 
-/** 国旗（不知道国家时是系统的图标，再不知道是名字的头一个字），右下角在线的点。 */
+/** 国旗（不知道国家时是系统的图标，再不知道是名字的头一个字），右下角在线的点。底色一律是灰的，不按角色上色。 */
 export function NodeTile({ node, size = 'lg' }: { node: Node | NodeDetail; size?: 'lg' | 'md' }) {
   return (
     <span
       className={cn(
-        'relative grid shrink-0 place-items-center',
-        size === 'lg' ? 'size-12 rounded-xl' : 'size-9 rounded-lg',
-        node.relay !== null ? 'bg-relay-soft text-relay' : 'bg-muted text-muted-foreground',
+        'relative grid shrink-0 place-items-center bg-muted text-muted-foreground',
+        size === 'lg' ? 'size-11 rounded-xl' : 'size-9 rounded-lg',
         !node.online && 'grayscale',
       )}
     >
@@ -52,8 +41,7 @@ export function NodeTile({ node, size = 'lg' }: { node: Node | NodeDetail; size?
       <span
         aria-hidden
         className={cn(
-          'absolute -right-1 -bottom-1 rounded-full ring-2 ring-card',
-          size === 'lg' ? 'size-3' : 'size-2.5',
+          'absolute -right-0.5 -bottom-0.5 size-2.5 rounded-full ring-2 ring-card',
           node.online ? 'bg-ok' : 'bg-idle-dot',
         )}
       />
@@ -61,22 +49,8 @@ export function NodeTile({ node, size = 'lg' }: { node: Node | NodeDetail; size?
   )
 }
 
-/** 圆的 A / B。 */
-function Letter({ label, muted = false }: { label: string; muted?: boolean }) {
-  return (
-    <span
-      className={cn(
-        'grid size-5 shrink-0 place-items-center rounded-full text-[11px] font-semibold',
-        muted ? 'bg-muted text-muted-foreground' : 'bg-primary text-primary-foreground',
-      )}
-    >
-      {label}
-    </span>
-  )
-}
-
 /**
- * 一端：选了节点时是它的国旗、圆的 A / B、名字、中继的标签，下面虚拟 IP、在线、版本；没选时是一个虚线的方块
+ * 一端：选了节点时是国旗、"A"和名字，下面虚拟 IP，再下面在线、中继、版本，都是灰字；没选时是一个虚线的方块
  * 和"选择节点 A"。整块是一个按钮，点了弹出可以搜索的节点列表，换一个。
  */
 function End({
@@ -111,35 +85,34 @@ function End({
   const content =
     node === undefined ? (
       <span className={cn('flex min-w-0 items-center gap-3', right && '@3xl:flex-row-reverse @3xl:text-right')}>
-        <span className="grid size-12 shrink-0 place-items-center rounded-xl border-2 border-dashed text-faint transition-colors group-hover:border-primary/50 group-hover:text-primary">
-          <Plus className="size-5" aria-hidden />
+        <span className="grid size-11 shrink-0 place-items-center rounded-xl border border-dashed border-border-strong text-muted-foreground transition-colors group-hover:border-primary group-hover:text-primary">
+          <Plus className="size-4" aria-hidden />
         </span>
-        <span className={cn('flex min-w-0 items-center gap-2', right && '@3xl:flex-row-reverse')}>
-          <Letter label={label} muted />
-          <span className="text-[15px] font-medium text-muted-foreground group-hover:text-foreground">{pick}</span>
+        <span className="min-w-0">
+          <span className="block text-xs font-medium text-muted-foreground">{label}</span>
+          <span className="block text-sm font-medium text-muted-foreground group-hover:text-foreground">{pick}</span>
         </span>
       </span>
     ) : (
       <span className={cn('flex min-w-0 items-center gap-3', right && '@3xl:flex-row-reverse @3xl:text-right')}>
         <NodeTile node={node} />
         <span className="min-w-0">
-          <span className={cn('flex min-w-0 items-center gap-2', right && '@3xl:flex-row-reverse')}>
-            <Letter label={label} />
-            <span className="truncate text-base font-semibold">{node.name}</span>
-            {node.relay !== null ? (
-              <span className="shrink-0 rounded-full bg-relay-soft px-1.5 text-[11px] leading-4 font-medium text-relay">
-                {d.relay}
-              </span>
-            ) : null}
-            <ChevronsUpDown
-              className="size-3.5 shrink-0 text-faint opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
+          <span className={cn('flex min-w-0 items-baseline gap-1.5', right && '@3xl:flex-row-reverse')}>
+            <span className="text-xs font-semibold text-muted-foreground">{label}</span>
+            <span className="truncate text-[15px] font-semibold">{node.name}</span>
+            <ChevronDown
+              className="size-3.5 shrink-0 self-center text-faint opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
               aria-hidden
             />
           </span>
-          <span className="mt-1 block truncate font-mono text-xs text-muted-foreground">{node.virtual_ip}</span>
-          <span className="mt-0.5 block truncate text-xs text-muted-foreground">
-            {[node.online ? d.online : d.offline, node.version === '' ? null : node.version, node.platform]
-              .filter((part) => part !== null && part !== '')
+          <span className="mt-0.5 block truncate font-mono text-xs text-muted-foreground">{node.virtual_ip}</span>
+          <span className="block truncate text-xs text-muted-foreground">
+            {[
+              node.online ? d.online : d.offline,
+              node.relay !== null ? d.relay : null,
+              node.version === '' ? null : node.version,
+            ]
+              .filter((part) => part !== null)
               .join(' · ')}
           </span>
         </span>
@@ -155,57 +128,54 @@ function End({
       emptyText={t.select.nodeEmpty}
       aria-label={pick}
       trigger={content}
-      className="group -m-2 min-w-0 rounded-xl p-2 transition-colors hover:bg-muted/60 data-[state=open]:bg-muted/60"
+      className="group -m-2 min-w-0 rounded-lg p-2 transition-colors hover:bg-muted/50 data-[state=open]:bg-muted/50"
     />
   )
 }
 
 /**
- * 一个方向：上面一行是方向、路（颜色跟路走）、直连的方式或者到中继的传输、延迟、数据的来源；
- * 下面一根带箭头的线，A → B 箭头朝右，B → A 朝左。不是现问到的数据线是虚的。
+ * 一个方向：一行字（方向、一个颜色点和路、直连的方式或者到中继的传输、延迟），下面一根细的带箭头的线，
+ * A → B 朝右，B → A 朝左。线一律是灰的，路的种类只看那个点；到中继走 TCP 时那几个字是琥珀色。
+ * 不是刚问到的数据线是虚的，后面写一句是什么时候的（悬停看为什么）；刚问到的"实时"只给读屏。
  */
 function Direction({ leg, name, reverse }: { leg: PathLeg; name: (id: NodeId) => string; reverse: boolean }) {
   const view = describeLeg(leg, name)
-  const tone = view.route?.tone ?? 'idle'
   const live = view.state === 'query'
   return (
     <div data-testid={reverse ? 'path-reverse' : 'path-forward'} data-source={view.state}>
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <span className="text-xs text-muted-foreground">{p.forward(leg.from.name, leg.to.name)}</span>
-        <span className={cn('text-sm font-semibold', view.route === null ? 'text-muted-foreground' : HEAD[tone])}>
-          {view.route?.text ?? t.routes.noData}
+      <div className="flex min-w-0 items-baseline gap-2 text-[13px]">
+        <span className="shrink-0 text-xs text-muted-foreground">{p.forward(leg.from.name, leg.to.name)}</span>
+        <span className="inline-flex min-w-0 items-center gap-1.5 font-medium">
+          <span aria-hidden className={cn('size-1.5 shrink-0 rounded-full', DOT[view.route?.tone ?? 'idle'])} />
+          <span className={cn('truncate', view.route === null && 'text-muted-foreground')}>
+            {view.route?.text ?? t.routes.noData}
+          </span>
         </span>
         {view.route?.detail !== null && view.route?.detail !== undefined ? (
           <Tooltip content={view.route.detailHint ?? undefined}>
-            <Badge
-              tone={leg.relay_leg === 'tcp' ? 'warn' : 'neutral'}
+            <span
               tabIndex={view.route.detailHint === null ? undefined : 0}
+              className={cn('shrink-0 rounded-sm', leg.relay_leg === 'tcp' ? 'text-warn' : 'text-muted-foreground')}
             >
               {view.route.detail}
-            </Badge>
+            </span>
           </Tooltip>
         ) : null}
-        <span className="ml-auto flex items-center gap-2">
-          {view.rtt !== null ? <span className="text-sm font-semibold tabular">{view.rtt}</span> : null}
+        {live ? (
+          <span className="sr-only">{view.sourceLabel}</span>
+        ) : (
           <Tooltip content={view.sourceHint}>
-            <Badge tone={BADGE_TONE[view.sourceTone]} tabIndex={0}>
+            <span tabIndex={0} className="shrink-0 rounded-sm text-xs text-warn">
               {view.sourceLabel}
-            </Badge>
+              {view.age !== null ? ` · ${view.age}` : null}
+            </span>
           </Tooltip>
-        </span>
+        )}
+        <span className="ml-auto shrink-0 font-semibold tabular">{view.rtt ?? '—'}</span>
       </div>
-      <div className={cn('relative mt-2 flex items-center', reverse && 'flex-row-reverse')}>
-        <span
-          className={cn(
-            'h-0.5 flex-1 rounded-full',
-            live ? LINE[tone] : 'border-t-2 border-dashed border-border-strong',
-          )}
-        />
-        <svg
-          aria-hidden
-          viewBox="0 0 10 10"
-          className={cn('size-2.5 shrink-0', live ? HEAD[tone] : 'text-border-strong', reverse && 'rotate-180')}
-        >
+      <div className={cn('mt-1.5 flex items-center text-border-strong', reverse && 'flex-row-reverse')}>
+        <span className={cn('flex-1', live ? 'h-px bg-current' : 'border-t border-dashed border-current')} />
+        <svg aria-hidden viewBox="0 0 10 10" className={cn('size-2 shrink-0', reverse && 'rotate-180')}>
           <path d="M0 0 L10 5 L0 10 Z" fill="currentColor" />
         </svg>
       </div>
@@ -213,7 +183,7 @@ function Direction({ leg, name, reverse }: { leg: PathLeg; name: (id: NodeId) =>
   )
 }
 
-interface PairHeroProps {
+interface PairRowProps {
   /** 节点列表：两端的下拉里选的就是它们。 */
   nodes: readonly Node[]
   pair: Pair
@@ -231,10 +201,10 @@ interface PairHeroProps {
 }
 
 /**
- * 顶上的一对，也是选节点的地方：左边 A、右边 B，点一端弹出节点列表换一个；中间是两个方向现在怎么走（刚问两端得到的），
- * 没选好时是一句该怎么选。选好了下面一行左边是什么时候问的，右边交换 A 和 B、重新查询。窄的时候三块上下排。
+ * 诊断头的第一行，也是选节点的地方：左边 A、右边 B，点一端换一个；中间是两个方向现在怎么走（刚问两端得到的），
+ * 上面一行小字是什么时候问的，右边两个小图标：重新查询、交换 A 和 B。没选好时中间是一句该怎么选。窄的时候三块上下排。
  */
-export function PairHero({
+export function PairRow({
   nodes,
   pair,
   onChange,
@@ -246,72 +216,78 @@ export function PairHero({
   fetching,
   queriedAgo,
   onRequery,
-}: PairHeroProps) {
+}: PairRowProps) {
   const same = pair.a !== null && pair.a === pair.b
   return (
-    <section className="rounded-xl border bg-card shadow-card" data-testid="pair-hero">
-      <div className="grid grid-cols-1 items-center gap-6 px-6 py-5 @3xl:grid-cols-[minmax(0,15rem)_minmax(0,1fr)_minmax(0,15rem)]">
-        <End
-          label={d.nodeA}
-          pick={d.pickA}
-          node={a}
-          nodes={nodes}
-          align="left"
-          onPick={(id) => onChange({ ...pair, a: id })}
-        />
-        <div className="space-y-4">
-          {!ready ? (
-            <div className="flex flex-col items-center gap-2 text-center">
-              <div className="flex w-full items-center gap-2" aria-hidden>
-                <span className="h-0 flex-1 border-t-2 border-dashed" />
-                <ArrowLeftRight className="size-4 text-faint" />
-                <span className="h-0 flex-1 border-t-2 border-dashed" />
-              </div>
-              <p className={cn('text-[13px]', same ? 'text-warn' : 'text-muted-foreground')}>
-                {same ? p.same : d.pickHint}
-              </p>
+    <div
+      className="grid grid-cols-1 items-center gap-x-8 gap-y-5 px-6 py-5 @3xl:grid-cols-[minmax(0,14rem)_minmax(0,1fr)_minmax(0,14rem)]"
+      data-testid="pair-hero"
+    >
+      <End
+        label={d.nodeA}
+        pick={d.pickA}
+        node={a}
+        nodes={nodes}
+        align="left"
+        onPick={(id) => onChange({ ...pair, a: id })}
+      />
+      <div className="min-w-0">
+        {!ready ? (
+          <p className={cn('text-center text-[13px]', same ? 'text-warn' : 'text-muted-foreground')}>
+            {same ? p.same : d.pickHint}
+          </p>
+        ) : (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+              <Tooltip content={d.liveHint}>
+                <span tabIndex={0} className="rounded-sm">
+                  {fetching
+                    ? p.querying
+                    : queriedAgo === null
+                      ? d.live
+                      : `${d.live} · ${p.queried(formatAge(queriedAgo))}`}
+                </span>
+              </Tooltip>
+              <span className="flex items-center">
+                <Tooltip content={p.query}>
+                  <Button size="icon-sm" variant="ghost" pending={fetching} onClick={onRequery} aria-label={p.query}>
+                    {fetching ? null : <RefreshCw aria-hidden />}
+                  </Button>
+                </Tooltip>
+                <Tooltip content={p.swap}>
+                  <Button
+                    size="icon-sm"
+                    variant="ghost"
+                    onClick={() => onChange({ a: pair.b, b: pair.a })}
+                    aria-label={p.swap}
+                  >
+                    <ArrowLeftRight aria-hidden />
+                  </Button>
+                </Tooltip>
+              </span>
             </div>
-          ) : path === undefined ? (
-            <>
-              <Skeleton className="h-4 w-3/4" />
-              <Skeleton className="h-4 w-2/3" />
-            </>
-          ) : (
-            <>
-              <Direction leg={path.forward} name={name} reverse={false} />
-              <Direction leg={path.reverse} name={name} reverse />
-            </>
-          )}
-        </div>
-        <End
-          label={d.nodeB}
-          pick={d.pickB}
-          node={b}
-          nodes={nodes}
-          align="right"
-          onPick={(id) => onChange({ ...pair, b: id })}
-        />
+            {path === undefined ? (
+              <>
+                <Skeleton className="h-4 w-3/4" />
+                <Skeleton className="h-4 w-2/3" />
+              </>
+            ) : (
+              <>
+                <Direction leg={path.forward} name={name} reverse={false} />
+                <Direction leg={path.reverse} name={name} reverse />
+              </>
+            )}
+          </div>
+        )}
       </div>
-      {ready ? (
-        <div className="flex min-h-11 items-center justify-between gap-3 border-t px-6 py-1.5 text-xs text-muted-foreground">
-          <span className="inline-flex items-center gap-1.5">
-            {d.live}
-            <InfoTip>{d.liveHint}</InfoTip>
-            {queriedAgo !== null && !fetching ? <span>· {p.queried(formatAge(queriedAgo))}</span> : null}
-            {fetching ? <span>· {p.querying}</span> : null}
-          </span>
-          <span className="flex items-center gap-1">
-            <Button size="sm" variant="ghost" onClick={() => onChange({ a: pair.b, b: pair.a })}>
-              <ArrowLeftRight aria-hidden />
-              {p.swap}
-            </Button>
-            <Button size="sm" variant="ghost" pending={fetching} onClick={onRequery}>
-              {fetching ? null : <RefreshCw aria-hidden />}
-              {p.query}
-            </Button>
-          </span>
-        </div>
-      ) : null}
-    </section>
+      <End
+        label={d.nodeB}
+        pick={d.pickB}
+        node={b}
+        nodes={nodes}
+        align="right"
+        onPick={(id) => onChange({ ...pair, b: id })}
+      />
+    </div>
   )
 }

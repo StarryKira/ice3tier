@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { Waypoints } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { type ReactNode, useMemo, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 
 import { api } from '@/api/endpoints'
@@ -10,42 +10,61 @@ import { Notice } from '@/components/notice'
 import { Page, PageHeader } from '@/components/page'
 import { ErrorState } from '@/components/states'
 import { Button } from '@/components/ui/button'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { t } from '@/i18n'
 import { isBoolean, readStored, writeStored } from '@/lib/storage'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { useNow } from '@/lib/useNow'
 import { networkPath, useNetwork } from '@/pages/networks/context'
-import { type DiagnosisInput, findings, hostOf, kpis, type Section, SECTIONS } from '@/topology/diagnosis'
+import { checks, type ReportSection, verdict } from '@/topology/checks'
+import { type DiagnosisInput, hostOf, measuredPaths } from '@/topology/diagnosis'
 import { type Pair, pairPath, readPair, writePair } from '@/topology/pair'
 import { reportJson, reportText } from '@/topology/report'
 
-import { BandwidthTab } from './BandwidthTab'
+import {
+  CostChart,
+  CPU_LEGEND,
+  CpuChart,
+  LatencyChart,
+  MEMORY_LEGEND,
+  MemoryChart,
+  PathChart,
+  THROUGHPUT_LEGEND,
+  ThroughputChart,
+} from './charts'
+import { Decisions } from './Decisions'
 import { HostsTab } from './HostsTab'
-import { LatencyTab } from './LatencyTab'
 import { NodeGrid } from './NodeGrid'
-import { OutputTab } from './OutputTab'
-import { PairHero } from './PairHero'
-import { DirectCard } from './parts'
-import { RouteTab } from './RouteTab'
-import { RunBar } from './RunBar'
-import { Findings, KpiStrip } from './Summary'
+import { Output } from './OutputTab'
+import { PairRow } from './PairHero'
+import { QualityCard } from './parts'
+import { ReportSectionBlock, ResultBlock } from './Report'
+import { RunRow } from './RunBar'
+import { Legend } from './viz'
 
 const p = t.path
 const d = t.diagnosis
+const c = t.diagnosis.chart
 
-const isSection = (value: string | null): value is Section => SECTIONS.includes(value as Section)
+interface Block {
+  id: ReportSection | 'result' | 'raw'
+  title: string
+  hint?: ReactNode
+  action?: ReactNode
+  bare?: boolean
+  body: ReactNode
+}
 
 /**
- * 路径诊断：两个节点的互诊断。
+ * 路径诊断：两个节点的互诊断，结果是一份报告。
  *
- * - 顶上是这一对：左 A 右 B，中间两个方向现在怎么走（打开时问两端，有"重新查询"）。
- * - 下面是诊断：一次把直连、各条路的延迟和丢包、（勾了的话）吞吐、两种选路模式的选择、两端主机都量一遍
- *   （文档 §19 的主动测试），进行中每一项到了哪一步看得见。默认显示这一对最近的一次。
- * - 一排指标（直连、最低延迟、丢包、吞吐、CPU 峰值），点了去对应的标签页。
- * - 标签页：概览（结论、直连）、路由、延迟与丢包、带宽、两端主机、完整输出（文本报告和 JSON，能复制、下载）。
+ * - 顶上一张卡片：这一对（左 A 右 B，点一端换节点；中间两个方向现在怎么走）和诊断的状态、按钮（默认量吞吐）。
+ *   没选好两个节点时下面是一格一格的节点。
+ * - 报告按节编号：诊断结果（一条总评和逐项检查：结果、测得、参考、说明，量不到的写为什么），路径（像 mtr 一样一段一行，
+ *   瀑布条看延迟在哪一段累起来），延迟与丢包（各条路的分布和明细），吞吐，选路（候选路径的代价、两种模式各会怎么选），
+ *   两端主机（CPU、内存的图和对照表），原始数据（文本报告和 JSON）。没有数据的节不出现，结果表里写着为什么。
+ * - 数据是一次诊断（文档 §19 的主动测试）量的，默认显示这一对最近的一次；路径、候选路径、节点的上报是现在的。
  *
- * 选的两个节点、看的那次诊断、在哪个标签页都写在地址里（`?a=&b=&test=&tab=`）。
+ * 选的两个节点、看的那次诊断写在地址里（`?a=&b=&test=`）。
  */
 export function PathPage() {
   useDocumentTitle(p.title)
@@ -55,8 +74,6 @@ export function PathPage() {
   const pair = readPair(params)
   const rawTest = Number(params.get('test'))
   const testParam = Number.isInteger(rawTest) && rawTest > 0 ? rawTest : null
-  const rawTab = params.get('tab')
-  const tab: Section = isSection(rawTab) ? rawTab : 'overview'
   const same = pair.a !== null && pair.a === pair.b
   const ready = pair.a !== null && pair.b !== null && !same
   const a = pair.a ?? 0
@@ -73,7 +90,8 @@ export function PathPage() {
   const current = useQuery({ ...q.test(network.id, shown ?? 0), enabled: ready && shown !== null })
   const test = current.data
 
-  const [throughput, setThroughput] = useState(() => readStored('diagnosis.throughput', false, isBoolean))
+  // 完整的诊断默认连吞吐一起量；取消了记在浏览器里。
+  const [throughput, setThroughput] = useState(() => readStored('diagnosis.throughput', true, isBoolean))
   const start = useAction(network.id, {
     mutationFn: (body: { a: NodeId; b: NodeId; throughput: boolean }) => api.createTest(network.id, body),
     success: (created) => d.started(created.a.name, created.b.name),
@@ -83,20 +101,19 @@ export function PathPage() {
     success: d.stopped,
   })
 
-  const update = (change: (next: URLSearchParams) => void) => {
-    const next = new URLSearchParams(params)
-    change(next)
-    setParams(next, { replace: true })
-  }
   // 换了节点，原来看的那次诊断就不是这一对的了。
   const setPair = (next: Pair) => {
     const updated = writePair(params, next)
     updated.delete('test')
     setParams(updated, { replace: true })
   }
-  const setTab = (next: Section) =>
-    update((query) => (next === 'overview' ? query.delete('tab') : query.set('tab', next)))
-  const openTest = (id: number) => update((query) => query.set('test', String(id)))
+  const openTest = (id: number) => {
+    const next = new URLSearchParams(params)
+    next.set('test', String(id))
+    setParams(next, { replace: true })
+  }
+  const goTo = (section: ReportSection) =>
+    document.getElementById(`report-${section}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 
   const list = useMemo(() => nodes.data ?? [], [nodes.data])
   const byId = new Map(list.map((node) => [node.id, node]))
@@ -108,6 +125,122 @@ export function PathPage() {
   const queriedAgo = path.data === undefined ? null : Math.max(0, now - Math.floor(path.dataUpdatedAt / 1000))
   const stamp = new Date(now * 1000).toISOString().slice(0, 19).replace(/[-:T]/g, '')
   const fileBase = `ice3tier-${name(a)}-${name(b)}-${stamp}`
+
+  const results = checks(input)
+  const paths = measuredPaths(test)
+  const hosts = (test?.hosts ?? []).filter((host) => host.state === 'done')
+
+  // 报告的各节：没有数据的节不出现（结果表里写着为什么），编号跟着排。
+  const blocks: Block[] = [
+    {
+      id: 'result',
+      title: d.sections.result,
+      bare: true,
+      body: <ResultBlock checks={results} verdict={verdict(results, test, named)} onOpen={goTo} />,
+    },
+    {
+      id: 'path',
+      title: d.sections.path,
+      hint: c.pathHint,
+      body: <PathChart path={path.data} test={test} nodes={named} />,
+    },
+  ]
+  if (paths.length > 0) {
+    blocks.push({
+      id: 'latency',
+      title: d.sections.latency,
+      hint: c.latencyHint,
+      body: (
+        <>
+          <LatencyChart test={test} nodes={named} />
+          <div className="-mx-4 mt-3 border-t">
+            <QualityCard paths={paths} nodes={named} />
+          </div>
+        </>
+      ),
+    })
+  }
+  if (paths.some(({ result }) => result.throughput !== null)) {
+    blocks.push({
+      id: 'throughput',
+      title: d.sections.throughput,
+      hint: t.tests.throughputCaveat,
+      action: <Legend items={THROUGHPUT_LEGEND()} />,
+      body: <ThroughputChart test={test} nodes={named} />,
+    })
+  }
+  blocks.push({
+    id: 'routing',
+    title: d.sections.routing,
+    hint: p.costHint,
+    body: (
+      <>
+        <CostChart path={path.data} nodes={named} />
+        {test?.route !== null && test?.route !== undefined ? (
+          <div className="-mx-4 mt-3 border-t pt-2">
+            <p className="px-4 pb-1 text-[13px] font-semibold">{d.decisionsTitle}</p>
+            <Decisions test={test} nodes={named} />
+          </div>
+        ) : null}
+      </>
+    ),
+  })
+  blocks.push({
+    id: 'hosts',
+    title: d.sections.hosts,
+    bare: true,
+    body: (
+      <div className="overflow-hidden rounded-lg border bg-card">
+        {hosts.length > 0 ? (
+          <div className="grid grid-cols-1 gap-x-8 gap-y-4 border-b px-4 py-3 @4xl:grid-cols-2">
+            <div>
+              <p className="mb-2 flex items-center justify-between gap-3 text-[13px] font-semibold">
+                {c.cpuTitle}
+                <Legend items={CPU_LEGEND()} />
+              </p>
+              <CpuChart hosts={hosts} nodes={named} empty="" />
+            </div>
+            <div>
+              <p className="mb-2 flex items-center justify-between gap-3 text-[13px] font-semibold">
+                {c.memoryTitle}
+                <Legend items={MEMORY_LEGEND()} />
+              </p>
+              <MemoryChart hosts={hosts} nodes={named} empty="" />
+            </div>
+          </div>
+        ) : null}
+        <HostsTab
+          network={network.id}
+          tested={test !== undefined}
+          nodes={named}
+          a={{
+            id: a,
+            name: name(a),
+            detail: detailA.data,
+            host: hostOf(test, a),
+            toPeer: routesA.data?.routes.find((route) => route.peer.id === b),
+            direct: test?.direct?.sides.find((side) => side.node === a),
+          }}
+          b={{
+            id: b,
+            name: name(b),
+            detail: detailB.data,
+            host: hostOf(test, b),
+            toPeer: routesB.data?.routes.find((route) => route.peer.id === a),
+            direct: test?.direct?.sides.find((side) => side.node === b),
+          }}
+        />
+      </div>
+    ),
+  })
+  blocks.push({
+    id: 'raw',
+    title: d.sections.raw,
+    bare: true,
+    body: (
+      <Output fileBase={fileBase} report={() => ({ text: reportText(input, now), json: reportJson(input, now) })} />
+    ),
+  })
 
   return (
     <Page className="@container">
@@ -124,23 +257,43 @@ export function PathPage() {
         }
       />
       <div className="space-y-6">
-        <PairHero
-          nodes={list}
-          pair={pair}
-          onChange={setPair}
-          a={detailA.data ?? byId.get(a)}
-          b={detailB.data ?? byId.get(b)}
-          path={ready ? path.data : undefined}
-          ready={ready}
-          name={name}
-          fetching={path.isFetching}
-          queriedAgo={queriedAgo}
-          onRequery={() => void path.refetch()}
-        />
+        {/* 这一对和诊断的按钮。 */}
+        <section className="rounded-lg border bg-card">
+          <PairRow
+            nodes={list}
+            pair={pair}
+            onChange={setPair}
+            a={detailA.data ?? byId.get(a)}
+            b={detailB.data ?? byId.get(b)}
+            path={ready ? path.data : undefined}
+            ready={ready}
+            name={name}
+            fetching={path.isFetching}
+            queriedAgo={queriedAgo}
+            onRequery={() => void path.refetch()}
+          />
+          {ready ? (
+            <RunRow
+              test={test}
+              throughput={throughput}
+              onThroughput={(on) => {
+                setThroughput(on)
+                writeStored('diagnosis.throughput', on)
+              }}
+              starting={start.isPending}
+              stopping={stop.isPending}
+              onStart={() => start.mutate({ a, b, throughput }, { onSuccess: (created) => openTest(created.id) })}
+              onStop={() => {
+                if (test !== undefined) stop.mutate(test.id)
+              }}
+            />
+          ) : null}
+        </section>
+
         {!ready ? (
           <NodeGrid nodes={list} loading={nodes.isPending} pair={pair} onChange={setPair} />
         ) : (
-          <div className="space-y-6">
+          <>
             {path.isError && path.data === undefined ? (
               <ErrorState title={p.loadFailed} error={path.error} onRetry={() => void path.refetch()} />
             ) : null}
@@ -159,84 +312,22 @@ export function PathPage() {
               const node = byId.get(id)
               return node === undefined || node.online ? null : <Notice key={id}>{p.offline(node.name)}</Notice>
             })}
-
-            <RunBar
-              test={test}
-              throughput={throughput}
-              onThroughput={(on) => {
-                setThroughput(on)
-                writeStored('diagnosis.throughput', on)
-              }}
-              starting={start.isPending}
-              stopping={stop.isPending}
-              onStart={() => start.mutate({ a, b, throughput }, { onSuccess: (created) => openTest(created.id) })}
-              onStop={() => {
-                if (test !== undefined) stop.mutate(test.id)
-              }}
-            />
             {current.isError && shown !== null ? <Notice tone="warn">{t.tests.testGone(shown)}</Notice> : null}
 
-            <KpiStrip kpis={kpis(input)} onOpen={setTab} />
-
-            <Tabs value={tab} onValueChange={(next) => setTab(isSection(next) ? next : 'overview')}>
-              <TabsList className="overflow-x-auto">
-                {SECTIONS.map((section) => (
-                  <TabsTrigger key={section} value={section} className="shrink-0">
-                    {d.tabs[section]}
-                  </TabsTrigger>
-                ))}
-              </TabsList>
-              <TabsContent value="overview" className="pt-6">
-                <div
-                  className={
-                    test?.direct !== null && test?.direct !== undefined
-                      ? 'grid grid-cols-1 items-start gap-5 @4xl:grid-cols-[minmax(0,1fr)_20rem]'
-                      : undefined
-                  }
-                >
-                  <Findings findings={findings(input)} test={test} onOpen={setTab} />
-                  {test?.direct !== null && test?.direct !== undefined ? (
-                    <DirectCard result={test.direct} nodes={named} />
-                  ) : null}
-                </div>
-              </TabsContent>
-              <TabsContent value="route" className="pt-6">
-                <RouteTab path={path.data} test={test} nodes={named} name={name} />
-              </TabsContent>
-              <TabsContent value="latency" className="pt-6">
-                <LatencyTab test={test} nodes={named} />
-              </TabsContent>
-              <TabsContent value="bandwidth" className="pt-6">
-                <BandwidthTab test={test} nodes={named} />
-              </TabsContent>
-              <TabsContent value="hosts" className="pt-6">
-                <HostsTab
-                  network={network.id}
-                  tested={test !== undefined}
-                  nodes={named}
-                  a={{
-                    id: a,
-                    name: name(a),
-                    detail: detailA.data,
-                    host: hostOf(test, a),
-                    toPeer: routesA.data?.routes.find((route) => route.peer.id === b),
-                  }}
-                  b={{
-                    id: b,
-                    name: name(b),
-                    detail: detailB.data,
-                    host: hostOf(test, b),
-                    toPeer: routesB.data?.routes.find((route) => route.peer.id === a),
-                  }}
-                />
-              </TabsContent>
-              <TabsContent value="output" className="pt-6">
-                {tab === 'output' ? (
-                  <OutputTab text={reportText(input, now)} json={reportJson(input, now)} fileBase={fileBase} />
-                ) : null}
-              </TabsContent>
-            </Tabs>
-          </div>
+            {blocks.map((block, index) => (
+              <ReportSectionBlock
+                key={block.id}
+                id={`report-${block.id}`}
+                index={index + 1}
+                title={block.title}
+                hint={block.hint}
+                action={block.action}
+                bare={block.bare}
+              >
+                {block.body}
+              </ReportSectionBlock>
+            ))}
+          </>
         )}
       </div>
     </Page>

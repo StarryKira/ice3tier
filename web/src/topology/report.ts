@@ -4,7 +4,8 @@ import { formatBytes } from '@/lib/format'
 import { msText, permilleText, problemText, rateText } from '@/lib/tests'
 import { formatDuration, formatFullTime } from '@/lib/time'
 
-import { type DiagnosisInput, findings, measuredPaths, type Named, pathLabel, routeName } from './diagnosis'
+import { checks, verdict } from './checks'
+import { type DiagnosisInput, measuredPaths, type Named, pathLabel, routeName } from './diagnosis'
 import { describeLeg } from './path'
 
 /**
@@ -127,10 +128,13 @@ export function reportText(input: DiagnosisInput, at: number): string {
   if (a !== undefined) lines.push(nodeLine(d.nodeA, a))
   if (b !== undefined) lines.push(nodeLine(d.nodeB, b))
 
-  const found = findings(input)
-  if (found.length > 0) {
-    lines.push('', r.section(r.findings))
-    for (const finding of found) lines.push(`- [${d.tone[finding.tone]}] ${finding.text}`)
+  // 诊断结果：总评，然后逐项：结果、检查项、测得（参考）、说明。
+  const results = checks(input)
+  lines.push('', r.section(d.sections.result), verdict(results, input.test, nodes).title)
+  for (const item of results) {
+    const reference = item.reference === null ? '' : r.paren(`${d.colReference} ${item.reference}`)
+    const note = item.note === null ? '' : ` — ${item.note}`
+    lines.push(`- [${d.status[item.status]}] ${r.line(d.check[item.key], `${item.value}${reference}`)}${note}`)
   }
 
   if (path !== undefined) {

@@ -2,11 +2,8 @@ import { ArrowUpRight } from 'lucide-react'
 import { type ReactNode } from 'react'
 import { Link } from 'react-router'
 
-import { type HostReport, type NodeDetail, type NodeRoute } from '@/api/types'
+import { type DirectSide, type HostReport, type NodeDetail, type NodeRoute } from '@/api/types'
 import { Flag } from '@/components/flag'
-import { OsIcon } from '@/components/os-icon'
-import { OnlineDot } from '@/components/status'
-import { BoxCard } from '@/components/ui/card'
 import { t } from '@/i18n'
 import { formatBytes } from '@/lib/format'
 import { nodePath } from '@/lib/nodes'
@@ -20,357 +17,481 @@ import { type Named } from './parts'
 const d = t.diagnosis
 const h = d.host
 
-/** 一行：名字在左（灰），值在右。值是 `null` 时不画这一行。 */
-function Row({ label, children, mono = false }: { label: string; children: ReactNode; mono?: boolean }) {
-  if (children === null || children === undefined || children === '') return null
-  return (
-    <div className="grid grid-cols-[8.5rem_minmax(0,1fr)] gap-3 px-5 py-1.5 text-[13px]">
-      <dt className="text-muted-foreground">{label}</dt>
-      <dd className={cn('min-w-0 break-words', mono && 'font-mono text-xs leading-5')}>{children}</dd>
-    </div>
-  )
+/** 一端用到的全部数据：节点的详情（上报）、诊断时的主机快照、路由表里到对端那一条、直连检测里它这一端。 */
+export interface HostSide {
+  id: number
+  name: string
+  detail: NodeDetail | undefined
+  host: HostReport | undefined
+  toPeer: NodeRoute | undefined
+  direct: DirectSide | undefined
 }
 
-/** 一组：小标题，右边写数据从哪里来（节点的上报、诊断时）。 */
-function Group({ title, source, children }: { title: string; source?: string; children: ReactNode }) {
-  return (
-    <section className="border-t py-2 first:border-t-0">
-      <h3 className="flex items-center justify-between px-5 pt-1.5 pb-1 text-xs font-medium text-muted-foreground">
-        <span className="text-foreground">{title}</span>
-        {source !== undefined ? <span className="font-normal">{source}</span> : null}
-      </h3>
-      <dl>{children}</dl>
-    </section>
-  )
+type Value = ReactNode | null
+
+interface Row {
+  key: string
+  label: string
+  value: (side: HostSide, nodes: Named) => Value
+  mono?: boolean
 }
 
-/** 诊断里这一项还没有、做不了时的一句话。 */
-function Pending({ host, tested, nodes }: { host: HostReport | undefined; tested: boolean; nodes: Named }) {
-  const text =
-    host === undefined
-      ? tested
-        ? d.hostNotReported
-        : d.hostNoTest
-      : host.problem?.code === 'not_supported'
-        ? d.hostTooOld
-        : host.state === 'pending'
-          ? t.tests.pending
-          : host.problem !== null
-            ? problemText(host.problem, nodes)
-            : t.tests.failed
-  return <p className="px-5 py-1.5 text-[13px] text-muted-foreground">{text}</p>
+interface Group {
+  key: keyof typeof d.hostSection
+  /** 数据从哪里来：节点的上报、诊断时量的，或者两样都有。 */
+  source: 'live' | 'test' | 'mixed'
+  /** 只有诊断时的主机快照才有：没有的那一端写为什么。 */
+  hostOnly: boolean
+  rows: Row[]
 }
 
 const pct = (value: number | null | undefined) => (value === null || value === undefined ? '—' : `${value}%`)
 const count = (value: number | null | undefined) => (value === null || value === undefined ? null : String(value))
+const done = (side: HostSide) => (side.host?.state === 'done' ? side.host : undefined)
+/** 空字符串（旧版本的节点不报主机名）当作没有。 */
+const text = (value: string | undefined) => (value === undefined || value === '' ? null : value)
+const warn = (text: string) => <span className="font-medium text-warn">{text}</span>
 
-interface HostCardProps {
+/** 每次画的时候现取：名字跟着语言走（不能在模块加载时取出来存着）。 */
+const groups = (): Group[] => [
+  {
+    key: 'node',
+    source: 'live',
+    hostOnly: false,
+    rows: [
+      { key: 'version', label: h.version, value: ({ detail }) => text(detail?.version) },
+      { key: 'platform', label: h.platform, value: ({ detail }) => text(detail?.platform) },
+      { key: 'hostname', label: h.hostname, value: ({ detail }) => text(detail?.hostname) },
+      {
+        key: 'reported',
+        label: h.reported,
+        value: ({ detail }) =>
+          detail?.reported_secs_ago === null || detail?.reported_secs_ago === undefined
+            ? null
+            : formatAge(detail.reported_secs_ago),
+      },
+      {
+        key: 'profile',
+        label: h.profile,
+        value: ({ detail }) =>
+          detail?.performance === null || detail?.performance === undefined
+            ? null
+            : `${detail.performance.profile} · ${h.threads} ${detail.performance.threads}`,
+      },
+    ],
+  },
+  {
+    key: 'system',
+    source: 'test',
+    hostOnly: true,
+    rows: [
+      { key: 'os', label: h.os, value: (side) => done(side)?.system?.os ?? null },
+      { key: 'kernel', label: h.kernel, value: (side) => done(side)?.system?.kernel ?? null },
+      {
+        key: 'cpu-model',
+        label: h.cpuModel,
+        value: (side) => {
+          const system = done(side)?.system
+          if (system === null || system === undefined) return null
+          return (
+            [system.cpu_model, system.cores === null ? null : h.cores(system.cores), system.arch]
+              .filter((part) => part !== null)
+              .join(' · ') || null
+          )
+        },
+      },
+      {
+        key: 'uptime',
+        label: h.uptime,
+        value: (side) => {
+          const uptime = done(side)?.system?.uptime_secs
+          return uptime === null || uptime === undefined ? null : formatDuration(uptime)
+        },
+      },
+    ],
+  },
+  {
+    key: 'resources',
+    source: 'test',
+    hostOnly: true,
+    rows: [
+      {
+        key: 'cpu',
+        label: h.cpu,
+        value: (side) => {
+          const cpu = done(side)?.cpu
+          return cpu === null || cpu === undefined
+            ? null
+            : h.cpuValue(pct(cpu.system_percent), pct(cpu.process_percent))
+        },
+      },
+      {
+        key: 'cpu-peak',
+        label: h.cpuPeak,
+        value: (side) => {
+          const peak = done(side)?.cpu_peak
+          if (peak === null || peak === undefined) return null
+          const text = h.cpuValue(pct(peak.system_percent), pct(peak.process_percent))
+          return peak.process_percent !== null && peak.process_percent >= 85 ? warn(text) : text
+        },
+      },
+      {
+        key: 'load',
+        label: h.load,
+        value: (side) => {
+          const load = done(side)?.load_x100
+          return load === null || load === undefined ? null : load.map((value) => (value / 100).toFixed(2)).join(' · ')
+        },
+      },
+      {
+        key: 'memory',
+        label: h.memory,
+        value: (side) => {
+          const memory = done(side)?.memory
+          return memory === null || memory === undefined
+            ? null
+            : h.memoryValue(formatBytes(memory.available_bytes), formatBytes(memory.total_bytes))
+        },
+      },
+      {
+        key: 'rss',
+        label: h.rss,
+        value: (side) => {
+          const rss = done(side)?.memory?.process_rss_bytes
+          return rss === null || rss === undefined ? null : formatBytes(rss)
+        },
+      },
+      {
+        key: 'process-uptime',
+        label: h.processUptime,
+        value: (side) => {
+          const uptime = done(side)?.process?.uptime_secs
+          return uptime === null || uptime === undefined ? null : formatDuration(uptime)
+        },
+      },
+      { key: 'threads', label: h.threads, value: (side) => count(done(side)?.process?.threads) },
+    ],
+  },
+  {
+    key: 'connections',
+    source: 'mixed',
+    hostOnly: false,
+    rows: [
+      { key: 'peers', label: h.peers, value: (side) => count(done(side)?.connections?.peers) },
+      { key: 'relays', label: h.relays, value: (side) => count(done(side)?.connections?.relays) },
+      {
+        key: 'relay-clients',
+        label: h.relayClients,
+        value: (side) => count(done(side)?.connections?.relay_clients),
+      },
+      {
+        key: 'streams',
+        label: h.streams,
+        value: (side) => count(done(side)?.connections?.streams ?? side.detail?.flows),
+      },
+      {
+        key: 'lanes',
+        label: h.lanes,
+        value: (side) => {
+          const inUse = done(side)?.connections?.lanes_in_use
+          const idle = done(side)?.connections?.lanes_idle
+          if (inUse !== null && inUse !== undefined && idle !== null && idle !== undefined) {
+            return h.lanesValue(inUse, idle)
+          }
+          const lanes = side.detail?.lanes
+          return lanes === null || lanes === undefined
+            ? null
+            : h.lanesValue(
+                lanes.total.in_use,
+                lanes.peers.reduce((total, lane) => total + lane.idle + lane.ready, 0),
+              )
+        },
+      },
+      {
+        key: 'traffic',
+        label: h.traffic,
+        value: ({ detail }) =>
+          detail === undefined ? null : h.trafficValue(formatBytes(detail.tx_bytes), formatBytes(detail.rx_bytes)),
+      },
+    ],
+  },
+  {
+    key: 'peer',
+    source: 'mixed',
+    hostOnly: false,
+    rows: [
+      {
+        key: 'route',
+        label: h.route,
+        value: (side, nodes) => {
+          const route = done(side)?.to_peer?.route ?? side.toPeer?.route
+          return route === undefined ? null : routeName(route, nodes)
+        },
+      },
+      {
+        key: 'rtt',
+        label: h.rtt,
+        value: (side) => {
+          const rtt = done(side)?.to_peer?.rtt_us
+          if (rtt !== null && rtt !== undefined) return msText(rtt)
+          const reported = side.toPeer?.rtt_ms
+          return reported === null || reported === undefined ? null : t.common.ms(reported)
+        },
+      },
+      {
+        key: 'cwnd',
+        label: h.cwnd,
+        value: (side) => {
+          const cwnd = done(side)?.to_peer?.cwnd_bytes
+          return cwnd === null || cwnd === undefined ? null : formatBytes(cwnd)
+        },
+      },
+      { key: 'mtu', label: h.mtu, value: (side) => count(done(side)?.to_peer?.mtu) },
+      {
+        key: 'congestion',
+        label: h.congestion,
+        value: (side) => done(side)?.to_peer?.congestion?.toUpperCase() ?? null,
+      },
+      {
+        key: 'packets',
+        label: h.packets,
+        value: (side) => {
+          const sent = done(side)?.to_peer?.sent_packets
+          const lost = done(side)?.to_peer?.lost_packets
+          if (sent === null || sent === undefined || lost === null || lost === undefined) return null
+          const loss = sent === 0 ? 0 : Math.round((lost / sent) * 1000)
+          const text = h.packetsValue(String(sent), String(lost), permilleText(loss))
+          return loss >= 20 ? warn(text) : text
+        },
+      },
+      { key: 'events', label: h.congestionEvents, value: (side) => count(done(side)?.to_peer?.congestion_events) },
+      {
+        key: 'during',
+        label: h.bytesDuring,
+        value: (side) => {
+          const sent = done(side)?.to_peer?.bytes_sent
+          const received = done(side)?.to_peer?.bytes_received
+          return sent === null || sent === undefined || received === null || received === undefined
+            ? null
+            : h.trafficValue(formatBytes(sent), formatBytes(received))
+        },
+      },
+      {
+        key: 'age',
+        label: h.connectionAge,
+        value: (side) => {
+          const age = done(side)?.to_peer?.age_secs
+          return age === null || age === undefined ? null : formatDuration(age)
+        },
+      },
+      {
+        key: 'since',
+        label: h.since,
+        value: ({ toPeer }) => (toPeer === undefined ? null : formatDuration(toPeer.since_secs)),
+      },
+      { key: 'flows', label: h.peerFlows, value: ({ toPeer }) => count(toPeer?.flows) },
+      {
+        key: 'peer-traffic',
+        label: h.peerTraffic,
+        value: ({ toPeer }) =>
+          toPeer?.tx_bytes === null ||
+          toPeer?.tx_bytes === undefined ||
+          toPeer.rx_bytes === null ||
+          toPeer.rx_bytes === undefined
+            ? null
+            : h.trafficValue(formatBytes(toPeer.tx_bytes), formatBytes(toPeer.rx_bytes)),
+      },
+    ],
+  },
+  {
+    key: 'network',
+    source: 'mixed',
+    hostOnly: false,
+    rows: [
+      {
+        key: 'egress',
+        label: h.egress,
+        value: ({ detail }) =>
+          detail?.egress_ip === null || detail?.egress_ip === undefined ? null : (
+            <span className="inline-flex items-center gap-1.5">
+              <Flag code={detail.country} />
+              <span className="font-mono text-xs">{detail.egress_ip}</span>
+            </span>
+          ),
+      },
+      {
+        key: 'observed',
+        label: h.observed,
+        value: ({ detail }) => detail?.observed_endpoint ?? null,
+        mono: true,
+      },
+      {
+        key: 'endpoints',
+        label: h.endpoints,
+        mono: true,
+        value: ({ detail, direct }) =>
+          detail === undefined || detail.endpoints.length === 0 ? (
+            direct?.candidates === null || direct?.candidates === undefined ? null : (
+              String(direct.candidates)
+            )
+          ) : (
+            <ul>
+              {detail.endpoints.map((endpoint) => (
+                <li key={endpoint}>{endpoint}</li>
+              ))}
+            </ul>
+          ),
+      },
+      {
+        key: 'nat',
+        label: h.nat,
+        value: ({ detail, direct }) => {
+          const varies = direct?.mapping_varies ?? detail?.mapping_varies
+          return varies === null || varies === undefined ? null : varies ? warn(h.natVaries) : h.natStable
+        },
+      },
+      {
+        key: 'udp',
+        label: h.udp,
+        value: ({ detail, direct }) => {
+          if (direct?.udp === false || detail?.no_udp === true) return warn(h.udpNo)
+          return direct?.udp === true || detail !== undefined ? h.udpOk : null
+        },
+      },
+      {
+        key: 'attached',
+        label: h.attached,
+        value: ({ detail }, nodes) => {
+          if (detail === undefined) return null
+          if (detail.attached.length === 0) return h.none
+          const name = (id: number) => nodes.find((node) => node.id === id)?.name ?? t.common.nodeMissing(id)
+          return detail.attached.map((relay) => `${name(relay.relay)} ${t.common.ms(relay.rtt_ms)}`).join(' · ')
+        },
+      },
+    ],
+  },
+]
+
+/** 一端没有诊断时的主机数据：为什么（还没诊断、版本太旧、在测、没报）。有数据是 `null`。 */
+function missing(side: HostSide, tested: boolean, nodes: Named): string | null {
+  const host = side.host
+  if (host?.state === 'done') return null
+  if (host === undefined) return tested ? d.hostNotReported : d.hostNoTest
+  if (host.problem?.code === 'not_supported') return d.hostTooOld
+  if (host.state === 'pending') return t.tests.pending
+  return host.problem === null ? t.tests.failed : problemText(host.problem, nodes)
+}
+
+interface HostsTabProps {
   network: number
-  label: string
-  node: NodeDetail | undefined
-  /** 节点列表里的；详情还没取到时先用它。 */
-  fallbackName: string
-  host: HostReport | undefined
-  /** 它的路由表里到对端的那一条。 */
-  toPeer: NodeRoute | undefined
+  a: HostSide
+  b: HostSide
   /** 这一对诊断过（有 `host` 时才有主机数据）。 */
   tested: boolean
   nodes: Named
 }
 
-function HostCard({ network, label, node, fallbackName, host, toPeer, tested, nodes }: HostCardProps) {
-  const done = host?.state === 'done'
-  const system = done ? host.system : null
-  const peer = done ? host.to_peer : null
-  const connections = done ? host.connections : null
-  const name = (id: number) => nodes.find((other) => other.id === id)?.name ?? t.common.nodeMissing(id)
-  const loss =
-    peer?.sent_packets !== null &&
-    peer?.sent_packets !== undefined &&
-    peer.lost_packets !== null &&
-    peer.sent_packets > 0
-      ? permilleText(Math.round((peer.lost_packets / peer.sent_packets) * 1000))
-      : '—'
-  return (
-    <BoxCard data-testid={`host-${label.toLowerCase()}`}>
-      <header className="flex items-center gap-3 border-b px-5 py-3">
-        <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-muted text-muted-foreground">
-          {node?.country !== null && node?.country !== undefined ? (
-            <Flag code={node.country} className="size-5" />
-          ) : (
-            <OsIcon
-              platform={node?.platform ?? ''}
-              className="size-4"
-              fallback={<span className="text-[13px] font-semibold">{label}</span>}
-            />
-          )}
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="flex items-center gap-2">
-            <span className="grid size-5 place-items-center rounded-full bg-primary text-[11px] font-semibold text-primary-foreground">
-              {label}
-            </span>
-            <span className="truncate text-[15px] font-semibold">{node?.name ?? fallbackName}</span>
-            {node?.relay !== null && node?.relay !== undefined ? (
-              <span className="rounded-full bg-relay-soft px-1.5 text-[11px] leading-4 font-medium text-relay">
-                {d.relay}
-              </span>
-            ) : null}
-          </p>
-          {node !== undefined ? (
-            <p className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-              <OnlineDot online={node.online} />
-              {node.online ? d.online : d.offline}
-              <span aria-hidden>·</span>
-              <span className="font-mono">{node.virtual_ip}</span>
-            </p>
-          ) : null}
-        </div>
-        {node !== undefined ? (
-          <Link
-            to={nodePath(network, node.id)}
-            className="inline-flex shrink-0 items-center gap-1 rounded-sm text-xs text-muted-foreground hover:text-foreground"
-          >
-            {d.toNode}
-            <ArrowUpRight className="size-3.5" aria-hidden />
-          </Link>
-        ) : null}
-      </header>
-
-      <Group title={d.hostSection.node} source={d.hostLive}>
-        <Row label={h.version}>{node?.version}</Row>
-        <Row label={h.platform}>{node?.platform}</Row>
-        <Row label={h.hostname}>{node?.hostname}</Row>
-        <Row label={h.reported}>
-          {node?.reported_secs_ago === null || node?.reported_secs_ago === undefined
-            ? null
-            : formatAge(node.reported_secs_ago)}
-        </Row>
-        <Row label={h.profile}>
-          {node?.performance === null || node?.performance === undefined
-            ? null
-            : `${node.performance.profile} · ${t.diagnosis.host.threads} ${node.performance.threads}`}
-        </Row>
-      </Group>
-
-      <Group title={d.hostSection.system} source={d.hostTest}>
-        {done ? (
-          <>
-            <Row label={h.os}>{system?.os}</Row>
-            <Row label={h.kernel}>{system?.kernel}</Row>
-            <Row label={h.cpuModel}>
-              {system === null
-                ? null
-                : [system.cpu_model, system.cores === null ? null : h.cores(system.cores), system.arch]
-                    .filter((part) => part !== null)
-                    .join(' · ')}
-            </Row>
-            <Row label={h.uptime}>
-              {system?.uptime_secs === null || system?.uptime_secs === undefined
-                ? null
-                : formatDuration(system.uptime_secs)}
-            </Row>
-          </>
-        ) : (
-          <Pending host={host} tested={tested} nodes={nodes} />
-        )}
-      </Group>
-
-      <Group title={d.hostSection.resources} source={d.hostTest}>
-        {done ? (
-          <>
-            <Row label={h.cpu}>
-              {host.cpu === null ? null : h.cpuValue(pct(host.cpu.system_percent), pct(host.cpu.process_percent))}
-            </Row>
-            <Row label={h.cpuPeak}>
-              {host.cpu_peak === null ? null : (
-                <span
-                  className={cn(
-                    host.cpu_peak.process_percent !== null &&
-                      host.cpu_peak.process_percent >= 85 &&
-                      'font-medium text-warn',
-                  )}
-                >
-                  {h.cpuValue(pct(host.cpu_peak.system_percent), pct(host.cpu_peak.process_percent))}
-                </span>
-              )}
-            </Row>
-            <Row label={h.load}>
-              {host.load_x100 === null ? null : host.load_x100.map((value) => (value / 100).toFixed(2)).join(' · ')}
-            </Row>
-            <Row label={h.memory}>
-              {host.memory === null
-                ? null
-                : h.memoryValue(formatBytes(host.memory.available_bytes), formatBytes(host.memory.total_bytes))}
-            </Row>
-            <Row label={h.rss}>
-              {host.memory?.process_rss_bytes === null || host.memory?.process_rss_bytes === undefined
-                ? null
-                : formatBytes(host.memory.process_rss_bytes)}
-            </Row>
-            <Row label={h.processUptime}>
-              {host.process?.uptime_secs === null || host.process?.uptime_secs === undefined
-                ? null
-                : formatDuration(host.process.uptime_secs)}
-            </Row>
-            <Row label={h.threads}>{count(host.process?.threads)}</Row>
-          </>
-        ) : (
-          <Pending host={host} tested={tested} nodes={nodes} />
-        )}
-      </Group>
-
-      <Group title={d.hostSection.connections} source={done ? d.hostTest : d.hostLive}>
-        <Row label={h.peers}>{count(connections?.peers)}</Row>
-        <Row label={h.relays}>{count(connections?.relays)}</Row>
-        <Row label={h.relayClients}>{count(connections?.relay_clients)}</Row>
-        <Row label={h.streams}>{count(connections?.streams ?? node?.flows)}</Row>
-        <Row label={h.lanes}>
-          {connections?.lanes_in_use !== null &&
-          connections?.lanes_in_use !== undefined &&
-          connections.lanes_idle !== null
-            ? h.lanesValue(connections.lanes_in_use, connections.lanes_idle)
-            : node?.lanes === null || node?.lanes === undefined
-              ? null
-              : h.lanesValue(
-                  node.lanes.total.in_use,
-                  node.lanes.peers.reduce((total, lane) => total + lane.idle + lane.ready, 0),
-                )}
-        </Row>
-        <Row label={h.traffic}>
-          {node === undefined ? null : h.trafficValue(formatBytes(node.tx_bytes), formatBytes(node.rx_bytes))}
-        </Row>
-      </Group>
-
-      <Group title={d.hostSection.peer} source={peer !== null ? d.hostTest : d.hostLive}>
-        <Row label={h.route}>
-          {peer?.route !== null && peer?.route !== undefined
-            ? routeName(peer.route, nodes)
-            : toPeer === undefined
-              ? null
-              : routeName(toPeer.route, nodes)}
-        </Row>
-        <Row label={h.rtt}>
-          {peer?.rtt_us !== null && peer?.rtt_us !== undefined
-            ? msText(peer.rtt_us)
-            : toPeer?.rtt_ms === null || toPeer?.rtt_ms === undefined
-              ? null
-              : t.common.ms(toPeer.rtt_ms)}
-        </Row>
-        {peer !== null ? (
-          <>
-            <Row label={h.cwnd}>{peer.cwnd_bytes === null ? null : formatBytes(peer.cwnd_bytes)}</Row>
-            <Row label={h.mtu}>{count(peer.mtu)}</Row>
-            <Row label={h.congestion}>{peer.congestion?.toUpperCase()}</Row>
-            <Row label={h.packets}>
-              {peer.sent_packets === null || peer.lost_packets === null
-                ? null
-                : h.packetsValue(String(peer.sent_packets), String(peer.lost_packets), loss)}
-            </Row>
-            <Row label={h.congestionEvents}>{count(peer.congestion_events)}</Row>
-            <Row label={h.bytesDuring}>
-              {peer.bytes_sent === null || peer.bytes_received === null
-                ? null
-                : h.trafficValue(formatBytes(peer.bytes_sent), formatBytes(peer.bytes_received))}
-            </Row>
-            <Row label={h.connectionAge}>{peer.age_secs === null ? null : formatDuration(peer.age_secs)}</Row>
-          </>
-        ) : null}
-        <Row label={h.since}>{toPeer === undefined ? null : formatDuration(toPeer.since_secs)}</Row>
-        <Row label={h.peerFlows}>{count(toPeer?.flows)}</Row>
-        <Row label={h.peerTraffic}>
-          {toPeer?.tx_bytes === null ||
-          toPeer?.tx_bytes === undefined ||
-          toPeer.rx_bytes === null ||
-          toPeer.rx_bytes === undefined
-            ? null
-            : h.trafficValue(formatBytes(toPeer.tx_bytes), formatBytes(toPeer.rx_bytes))}
-        </Row>
-      </Group>
-
-      <Group title={d.hostSection.network} source={d.hostLive}>
-        <Row label={h.egress}>
-          {node?.egress_ip === null || node?.egress_ip === undefined ? null : (
-            <span className="inline-flex items-center gap-1.5">
-              <Flag code={node.country} />
-              <span className="font-mono text-xs">{node.egress_ip}</span>
-            </span>
-          )}
-        </Row>
-        <Row label={h.observed} mono>
-          {node?.observed_endpoint}
-        </Row>
-        <Row label={h.endpoints} mono>
-          {node === undefined || node.endpoints.length === 0 ? null : (
-            <ul>
-              {node.endpoints.map((endpoint) => (
-                <li key={endpoint}>{endpoint}</li>
-              ))}
-            </ul>
-          )}
-        </Row>
-        <Row label={h.nat}>
-          {node?.mapping_varies === null || node?.mapping_varies === undefined ? null : node.mapping_varies ? (
-            <span className="text-warn">{h.natVaries}</span>
-          ) : (
-            h.natStable
-          )}
-        </Row>
-        <Row label={h.udp}>
-          {node === undefined ? null : node.no_udp === true ? <span className="text-warn">{h.udpNo}</span> : h.udpOk}
-        </Row>
-        <Row label={h.attached}>
-          {node === undefined
-            ? null
-            : node.attached.length === 0
-              ? h.none
-              : node.attached.map((relay) => `${name(relay.relay)} ${t.common.ms(relay.rtt_ms)}`).join(' · ')}
-        </Row>
-      </Group>
-    </BoxCard>
-  )
-}
-
-interface HostsTabProps {
-  network: number
-  a: {
-    id: number
-    name: string
-    detail: NodeDetail | undefined
-    host: HostReport | undefined
-    toPeer: NodeRoute | undefined
-  }
-  b: {
-    id: number
-    name: string
-    detail: NodeDetail | undefined
-    host: HostReport | undefined
-    toPeer: NodeRoute | undefined
-  }
-  tested: boolean
-  nodes: Named
-}
-
-/** 两端主机并排：节点、系统、资源、连接、到对端的连接、网络。每组写着数据是节点的上报还是诊断时量的。 */
+/**
+ * 两端主机：一张表，两列是 A 和 B，一行一项，按节点、系统、资源、连接、到对端的连接、网络分组；
+ * 组名右边写数据是节点的上报还是诊断时量的。两端都没有的行不画；只有诊断才有的组，没有数据的那一端写为什么。
+ * 要注意的数（CPU 占满一个核、丢包、对称型 NAT、UDP 不通）是琥珀色。
+ */
 export function HostsTab({ network, a, b, tested, nodes }: HostsTabProps) {
+  const sides = [
+    { side: a, label: d.nodeA },
+    { side: b, label: d.nodeB },
+  ]
+  const sourceText = { live: d.hostLive, test: d.hostTest, mixed: `${d.hostLive} · ${d.hostTest}` }
   return (
-    <div className="grid grid-cols-1 items-start gap-5 @3xl:grid-cols-2">
-      {[
-        { side: a, label: d.nodeA },
-        { side: b, label: d.nodeB },
-      ].map(({ side, label }) => (
-        <HostCard
-          key={label}
-          network={network}
-          label={label}
-          node={side.detail}
-          fallbackName={side.name}
-          host={side.host}
-          toPeer={side.toPeer}
-          tested={tested}
-          nodes={nodes}
-        />
-      ))}
+    <div data-testid="hosts">
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[40rem] table-fixed border-collapse text-[13px]">
+          <colgroup>
+            <col className="w-44" />
+            <col />
+            <col />
+          </colgroup>
+          <thead>
+            <tr className="border-b">
+              <td className="px-5 py-3" />
+              {sides.map(({ side, label }) => (
+                <th
+                  key={label}
+                  scope="col"
+                  className="px-5 py-3 text-left font-normal"
+                  data-testid={`host-${label.toLowerCase()}`}
+                >
+                  <span className="flex min-w-0 items-baseline gap-1.5">
+                    <span className="text-xs font-semibold text-muted-foreground">{label}</span>
+                    <Link
+                      to={nodePath(network, side.id)}
+                      className="inline-flex min-w-0 items-center gap-0.5 rounded-sm text-[15px] font-semibold hover:text-primary"
+                    >
+                      <span className="truncate">{side.detail?.name ?? side.name}</span>
+                      <ArrowUpRight className="size-3.5 shrink-0 self-center text-faint" aria-label={d.toNode} />
+                    </Link>
+                  </span>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          {groups().map((group) => {
+            const reasons = sides.map(({ side }) => (group.hostOnly ? missing(side, tested, nodes) : null))
+            const rows = group.rows.filter((row) => sides.some(({ side }) => row.value(side, nodes) !== null))
+            return (
+              <tbody key={group.key} className="border-b last:border-b-0" data-testid={`hosts-${group.key}`}>
+                <tr className="bg-muted/40">
+                  <th scope="colgroup" colSpan={3} className="px-5 py-2 text-left text-xs font-medium">
+                    <span className="flex items-center justify-between gap-3">
+                      {d.hostSection[group.key]}
+                      <span className="font-normal text-muted-foreground">{sourceText[group.source]}</span>
+                    </span>
+                  </th>
+                </tr>
+                {rows.length === 0 ? (
+                  <tr>
+                    <td />
+                    {reasons.map((reason, index) => (
+                      <td key={index} className="px-5 py-2 text-muted-foreground">
+                        {reason ?? '—'}
+                      </td>
+                    ))}
+                  </tr>
+                ) : (
+                  rows.map((row, rowIndex) => (
+                    <tr key={row.key} className="border-t border-border/60 first:border-t-0">
+                      <th scope="row" className="px-5 py-1.5 text-left align-top font-normal text-muted-foreground">
+                        {row.label}
+                      </th>
+                      {sides.map(({ side, label }, index) => {
+                        const value = row.value(side, nodes)
+                        const reason = reasons[index] ?? null
+                        return (
+                          <td
+                            key={label}
+                            className={cn(
+                              'px-5 py-1.5 align-top break-words',
+                              row.mono === true && value !== null && 'font-mono text-xs leading-5',
+                            )}
+                          >
+                            {value !== null ? (
+                              value
+                            ) : reason !== null && rowIndex === 0 ? (
+                              <span className="text-muted-foreground">{reason}</span>
+                            ) : (
+                              <span className="text-faint">—</span>
+                            )}
+                          </td>
+                        )
+                      })}
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            )
+          })}
+        </table>
+      </div>
     </div>
   )
 }

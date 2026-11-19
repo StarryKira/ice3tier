@@ -1,17 +1,8 @@
 import { type ReactNode } from 'react'
 
-import {
-  type DirectResult,
-  type Node,
-  type PathResult,
-  type Route,
-  type TestItemState,
-  type TestProblem,
-} from '@/api/types'
+import { type Node, type PathResult, type Route, type TestItemState, type TestProblem } from '@/api/types'
 import { InfoTip } from '@/components/info-tip'
 import { StatusText, type Tone } from '@/components/status'
-import { Badge } from '@/components/ui/badge'
-import { BoxCard, BoxCardHeader } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { t } from '@/i18n'
 import { nodeName } from '@/lib/nodes'
@@ -51,60 +42,6 @@ export function ItemState({
       {state === 'skipped' ? s.skipped : s.failed}
       {problem !== null ? `：${problemText(problem, nodes)}` : null}
     </p>
-  )
-}
-
-/** 直连：能不能、怎么通的、用了多久；不能时最能说明问题的原因。下面是两端各自看到的。 */
-export function DirectCard({ result, nodes }: { result: DirectResult; nodes: Named }) {
-  return (
-    <BoxCard data-testid="test-direct">
-      <BoxCardHeader title={s.directTitle} />
-      {result.state !== 'done' ? (
-        <div className="px-5 py-4">
-          <ItemState state={result.state} problem={result.problem} nodes={nodes} />
-        </div>
-      ) : (
-        <>
-          <div className="px-5 py-4">
-            <StatusText tone={result.ok === true ? 'ok' : 'danger'} className="text-[15px] font-medium">
-              {result.ok === true ? s.directOk : s.directNo}
-            </StatusText>
-            {result.ok === true && result.kind !== null ? (
-              <p className="mt-1 text-[13px] text-muted-foreground">
-                {t.routes.directKind[result.kind]}
-                {' · '}
-                {result.already === true
-                  ? s.directAlready
-                  : result.elapsed_ms !== null
-                    ? s.directIn(result.elapsed_ms)
-                    : null}
-              </p>
-            ) : null}
-            {result.ok !== true && result.problem !== null ? (
-              <p className="mt-1 text-[13px] text-muted-foreground">{problemText(result.problem, nodes)}</p>
-            ) : null}
-          </div>
-          {result.sides.length > 0 ? (
-            <ul className="divide-y border-t">
-              {result.sides.map((side) => (
-                <li key={side.node} className="px-5 py-2.5">
-                  <p className="text-[13px] font-medium">{nodeName(nodes, side.node)}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {[
-                      side.udp === true ? s.udpOk : side.udp === false ? s.udpBlocked : s.udpUnknown,
-                      side.mapping_varies === true ? s.natVaries : null,
-                      side.candidates !== null ? s.candidates(side.candidates) : null,
-                    ]
-                      .filter((part) => part !== null)
-                      .join(' · ')}
-                  </p>
-                </li>
-              ))}
-            </ul>
-          ) : null}
-        </>
-      )}
-    </BoxCard>
   )
 }
 
@@ -203,81 +140,75 @@ export function QualityCard({ paths, nodes }: { paths: readonly Measured[]; node
     nodes,
   )
   return (
-    <BoxCard>
-      <BoxCardHeader title={s.qualityTitle} />
-      <div className="overflow-x-auto">
-        <table className="w-full border-collapse text-sm" data-testid="test-quality">
-          <thead>
-            <tr className="border-b">
-              <td className="w-32" />
-              {paths.map(({ result: path, direct }, column) => (
-                <th
-                  key={column}
-                  scope="col"
-                  className="min-w-44 px-5 py-3 text-left align-top font-normal"
-                  data-testid={`test-path-${column}`}
-                >
-                  <span className="inline-flex flex-wrap items-center gap-x-2">
-                    <StatusText
-                      tone={direct ? 'ok' : routeTone(path.route)}
-                      className="text-[13px] font-semibold text-foreground"
-                    >
-                      {direct || path.route === null
-                        ? direct
-                          ? s.qualityDirect
-                          : s.qualityRelay
-                        : routeName(path.route, nodes)}
-                    </StatusText>
-                    {path.relay_leg === 'tcp' ? (
-                      <span className="text-xs text-warn">{t.routes.legTransport.tcp}</span>
-                    ) : null}
-                  </span>
-                  {/* 为什么测这一条：直连不用说；经中继的写哪种选路模式会走它。 */}
-                  {path.picked_by.some((why) => why !== 'direct') ? (
-                    <span className="mt-1.5 flex flex-wrap gap-1">
-                      {path.picked_by
-                        .filter((why) => why !== 'direct')
-                        .map((why) => (
-                          <Badge key={why} tone="outline">
-                            {s.pickedBy[why]}
-                          </Badge>
-                        ))}
-                    </span>
+    <div className="overflow-x-auto">
+      <table className="w-full border-collapse text-sm" data-testid="test-quality">
+        <thead>
+          <tr className="border-b">
+            <td className="w-32" />
+            {paths.map(({ result: path, direct }, column) => (
+              <th
+                key={column}
+                scope="col"
+                className="min-w-44 px-5 py-3 text-left align-top font-normal"
+                data-testid={`test-path-${column}`}
+              >
+                <span className="inline-flex flex-wrap items-center gap-x-2">
+                  <StatusText
+                    tone={direct ? 'ok' : routeTone(path.route)}
+                    className="text-[13px] font-semibold text-foreground"
+                  >
+                    {direct || path.route === null
+                      ? direct
+                        ? s.qualityDirect
+                        : s.qualityRelay
+                      : routeName(path.route, nodes)}
+                  </StatusText>
+                  {path.relay_leg === 'tcp' ? (
+                    <span className="text-xs text-warn">{t.routes.legTransport.tcp}</span>
                   ) : null}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="divide-y">
-            {rows.map((row, index) => (
-              <tr key={row.key}>
-                <th
-                  scope="row"
-                  className="px-5 py-2.5 text-left align-top text-[13px] font-normal whitespace-nowrap text-muted-foreground"
-                >
-                  {row.label}
-                </th>
-                {paths.map(({ result: path }, column) =>
-                  path.state === 'done' ? (
-                    <td key={column} className="px-5 py-2.5 align-top" data-testid={`test-path-${column}-${row.key}`}>
-                      {row.cell(path)}
-                    </td>
-                  ) : index === 0 ? (
-                    <td
-                      key={column}
-                      rowSpan={rows.length}
-                      className="px-5 py-2.5 align-top"
-                      data-testid={`test-path-${column}-state`}
-                    >
-                      <ItemState state={path.state} problem={path.problem} nodes={nodes} />
-                    </td>
-                  ) : null,
-                )}
-              </tr>
+                </span>
+                {/* 为什么测这一条：直连不用说；经中继的写哪种选路模式会走它。 */}
+                {path.picked_by.some((why) => why !== 'direct') ? (
+                  <span className="mt-0.5 block text-xs text-muted-foreground">
+                    {path.picked_by
+                      .filter((why) => why !== 'direct')
+                      .map((why) => s.pickedBy[why])
+                      .join(t.common.listSeparator)}
+                  </span>
+                ) : null}
+              </th>
             ))}
-          </tbody>
-        </table>
-      </div>
-    </BoxCard>
+          </tr>
+        </thead>
+        <tbody className="divide-y">
+          {rows.map((row, index) => (
+            <tr key={row.key}>
+              <th
+                scope="row"
+                className="px-5 py-2.5 text-left align-top text-[13px] font-normal whitespace-nowrap text-muted-foreground"
+              >
+                {row.label}
+              </th>
+              {paths.map(({ result: path }, column) =>
+                path.state === 'done' ? (
+                  <td key={column} className="px-5 py-2.5 align-top" data-testid={`test-path-${column}-${row.key}`}>
+                    {row.cell(path)}
+                  </td>
+                ) : index === 0 ? (
+                  <td
+                    key={column}
+                    rowSpan={rows.length}
+                    className="px-5 py-2.5 align-top"
+                    data-testid={`test-path-${column}-state`}
+                  >
+                    <ItemState state={path.state} problem={path.problem} nodes={nodes} />
+                  </td>
+                ) : null,
+              )}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   )
 }

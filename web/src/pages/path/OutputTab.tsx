@@ -1,11 +1,11 @@
-import { Download } from 'lucide-react'
+import { ChevronDown, Download } from 'lucide-react'
 import { useState } from 'react'
 
 import { CopyButton } from '@/components/copy'
 import { Button } from '@/components/ui/button'
-import { BoxCard, BoxCardHeader } from '@/components/ui/card'
 import { Segmented } from '@/components/ui/segmented'
 import { t } from '@/i18n'
+import { cn } from '@/lib/utils'
 
 const d = t.diagnosis
 
@@ -22,31 +22,51 @@ function save(name: string, content: string, type: string) {
 }
 
 /**
- * 完整输出：一份文本报告（贴给别人看）和一份 JSON（原样的数据），可以复制、下载。
- * 文件名带上两个节点和时刻，存了几份也分得开。
+ * 完整输出：一份文本报告（贴给别人看）和一份 JSON（原样的数据），可以复制、下载。平时收着，只有一行标题；
+ * 点标题展开。文件名带上两个节点和时刻，存了几份也分得开。报告是展开时才算的。
  */
-export function OutputTab({ text, json, fileBase }: { text: string; json: string; fileBase: string }) {
+export function Output({
+  report,
+  fileBase,
+  className,
+}: {
+  report: () => { text: string; json: string }
+  fileBase: string
+  className?: string
+}) {
+  const [open, setOpen] = useState(false)
   const [format, setFormat] = useState<Format>('text')
-  const content = format === 'text' ? text : json
+  const content = open ? report() : null
+  const value = content === null ? '' : format === 'text' ? content.text : content.json
   return (
-    <BoxCard data-testid="diagnosis-output">
-      <BoxCardHeader
-        title={
-          <Segmented<Format>
-            size="sm"
-            aria-label={d.tabs.output}
-            value={format}
-            onChange={setFormat}
-            options={[
-              { value: 'text', label: d.outputText },
-              { value: 'json', label: d.outputJson },
-            ]}
+    <section className={cn('min-w-0 rounded-lg border bg-card', className)} data-testid="diagnosis-output">
+      <header className="flex h-10 items-center justify-between gap-3 px-4">
+        <button
+          type="button"
+          onClick={() => setOpen(!open)}
+          aria-expanded={open}
+          className="flex min-w-0 items-center gap-1.5 rounded-sm text-[13px] font-semibold"
+        >
+          <ChevronDown
+            className={cn('size-4 text-muted-foreground transition-transform', !open && '-rotate-90')}
+            aria-hidden
           />
-        }
-        tip={d.outputHint}
-        action={
-          <>
-            <CopyButton value={content} size="sm">
+          {d.tabs.output}
+          <span className="font-normal text-muted-foreground">· {d.outputHint}</span>
+        </button>
+        {open ? (
+          <div className="flex shrink-0 items-center gap-2">
+            <Segmented<Format>
+              size="sm"
+              aria-label={d.tabs.output}
+              value={format}
+              onChange={setFormat}
+              options={[
+                { value: 'text', label: d.outputText },
+                { value: 'json', label: d.outputJson },
+              ]}
+            />
+            <CopyButton value={value} size="sm">
               {d.copy}
             </CopyButton>
             <Button
@@ -54,22 +74,24 @@ export function OutputTab({ text, json, fileBase }: { text: string; json: string
               variant="outline"
               onClick={() =>
                 format === 'text'
-                  ? save(`${fileBase}.txt`, text, 'text/plain;charset=utf-8')
-                  : save(`${fileBase}.json`, json, 'application/json')
+                  ? save(`${fileBase}.txt`, value, 'text/plain;charset=utf-8')
+                  : save(`${fileBase}.json`, value, 'application/json')
               }
             >
               <Download aria-hidden />
               {d.download}
             </Button>
-          </>
-        }
-      />
-      <pre
-        className="overflow-x-auto px-5 py-4 font-mono text-xs leading-relaxed whitespace-pre text-foreground"
-        data-testid={`diagnosis-output-${format}`}
-      >
-        {content}
-      </pre>
-    </BoxCard>
+          </div>
+        ) : null}
+      </header>
+      {open ? (
+        <pre
+          className="overflow-x-auto border-t px-4 py-3 font-mono text-xs leading-relaxed whitespace-pre text-foreground"
+          data-testid={`diagnosis-output-${format}`}
+        >
+          {value}
+        </pre>
+      ) : null}
+    </section>
   )
 }

@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
@@ -263,45 +263,60 @@ describe('写法', () => {
 })
 
 describe('路径诊断：一次诊断', () => {
-  it('顶上一排指标：直连、最低延迟、丢包、吞吐；概览里是结论和直连', async () => {
+  it('诊断结果：一条总评，下面逐项检查：结果、测得、参考、说明；没测的按原因并成一行', async () => {
     setup()
     renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5' })
     expect(await screen.findByTestId('test-state')).toHaveTextContent(s.state.done)
-    expect(screen.getByTestId('kpi-direct')).toHaveTextContent(s.directOk)
-    expect(screen.getByTestId('kpi-direct')).toHaveTextContent(s.directIn(640))
-    // 最低延迟是经 hk 的那条（52 ms），丢包也是它的。
-    expect(screen.getByTestId('kpi-latency')).toHaveTextContent(t.common.ms(52))
-    expect(screen.getByTestId('kpi-latency')).toHaveTextContent(t.routes.via('hk'))
-    expect(screen.getByTestId('kpi-loss')).toHaveTextContent('3%')
-    expect(screen.getByTestId('kpi-throughput')).toHaveTextContent('19.1 Mbps')
-    expect(screen.getByTestId('kpi-cpu')).toHaveTextContent(d.kpiNoHost)
-
-    const findings = screen.getByTestId('findings')
-    expect(findings).toHaveTextContent(d.find.directOk(`${t.routes.directKind.punched} · ${s.directIn(640)}`))
-    expect(findings).toHaveTextContent(d.find.loss(s.qualityDirect, '3%'))
-    expect(findings).toHaveTextContent(
-      d.find.cheaper(t.path.forward('laptop', 'nas'), t.routes.via('hk'), t.common.ms(72), t.common.ms(74)),
+    // 丢包 3%（两条路都是）要注意，别的都通过；延迟优先有更便宜的路是提示。
+    const verdict = await screen.findByTestId('verdict')
+    expect(verdict).toHaveAttribute('data-tone', 'warn')
+    expect(verdict).toHaveTextContent(d.verdict.warn(1))
+    expect(screen.getByTestId('check-direct')).toHaveAttribute('data-status', 'pass')
+    expect(screen.getByTestId('check-direct')).toHaveTextContent(s.directIn(640))
+    // 最低延迟是经 hk 的那条。
+    expect(screen.getByTestId('check-latency')).toHaveTextContent(
+      d.value.latency(t.common.ms(52), t.routes.via('hk'), t.common.ms(57)),
     )
-    expect(within(screen.getByTestId('test-direct')).getByText(s.directOk)).toBeVisible()
-    // 每一项一个进度的小块，都做完了。
-    expect(screen.getByTestId('step-direct')).toHaveAttribute('data-state', 'done')
-    expect(screen.getByTestId('step-throughput')).toHaveAttribute('data-state', 'done')
-    expect(screen.queryByTestId('step-host')).not.toBeInTheDocument()
+    expect(screen.getByTestId('check-loss')).toHaveAttribute('data-status', 'warn')
+    expect(screen.getByTestId('check-loss')).toHaveTextContent(d.reference.loss)
+    expect(screen.getByTestId('check-loss')).toHaveTextContent(d.note.loss)
+    expect(screen.getByTestId('check-throughput')).toHaveTextContent('19.1 Mbps')
+    expect(screen.getByTestId('check-routing')).toHaveAttribute('data-status', 'info')
+    // 这一次没有主机数据：CPU、内存、到对端的连接并成一行，写为什么。
+    const skipped = screen.getByTestId('check-skip-cpu-memory-connection')
+    expect(skipped).toHaveTextContent(d.check.cpu)
+    expect(skipped).toHaveTextContent(d.hostNotReported)
+    // 每一项都做完了：不再一项一项列进度。
+    expect(screen.queryByTestId('step-direct')).not.toBeInTheDocument()
   })
 
-  it('点一个指标去对应的标签页，地址里记着', async () => {
+  it('点一项检查滚到报告里讲它的那一节', async () => {
     const user = userEvent.setup()
     setup()
+    const scrolled: string[] = []
+    const original = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollIntoView')
+    Object.defineProperty(Element.prototype, 'scrollIntoView', {
+      configurable: true,
+      value(this: Element) {
+        scrolled.push(this.id)
+      },
+    })
     renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5' })
-    await user.click(await screen.findByTestId('kpi-latency'))
-    expect(await screen.findByTestId('test-quality')).toBeVisible()
-    expect(screen.getByRole('tab', { name: d.tabs.latency })).toHaveAttribute('aria-selected', 'true')
+    await user.click(await screen.findByTestId('check-latency'))
+    expect(scrolled).toEqual(['report-latency'])
+    if (original !== undefined) Object.defineProperty(Element.prototype, 'scrollIntoView', original)
   })
 
-  it('延迟与丢包：各条路并排比，一列一条路；下面是延迟分布', async () => {
+  it('各条路的延迟：一条路一行，最小到 P95 的条、平均的点，右边平均和丢包；下面的明细表一列一条路', async () => {
     setup()
-    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5&tab=latency' })
-    expect(await screen.findByTestId('test-path-0')).toHaveTextContent(s.qualityDirect)
+    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5' })
+    const direct = await screen.findByTestId('latency-direct')
+    expect(direct).toHaveTextContent(s.qualityDirect)
+    expect(direct).toHaveTextContent(t.common.ms(61))
+    expect(direct).toHaveTextContent(d.chart.loss('3%'))
+    expect(screen.getByTestId(`latency-${t.routes.via('hk')}`)).toHaveTextContent(t.common.ms(52))
+
+    expect(screen.getByTestId('test-path-0')).toHaveTextContent(s.qualityDirect)
     expect(screen.getByTestId('test-path-1')).toHaveTextContent(t.routes.via('hk'))
     expect(screen.getByTestId('test-path-1')).toHaveTextContent(s.pickedBy.lowest_cost)
     expect(screen.getByTestId('test-path-0-latency')).toHaveTextContent(
@@ -309,38 +324,33 @@ describe('路径诊断：一次诊断', () => {
     )
     expect(screen.getByTestId('test-path-0-loss')).toHaveTextContent(s.lossSplit('1%', '2%'))
     expect(screen.getByTestId('test-path-1-hops')).toHaveTextContent(`hk → nas：${t.common.ms(20)}`)
-    // 吞吐在带宽那一页，不在这张表里。
-    expect(screen.queryByTestId('test-path-0-throughput')).not.toBeInTheDocument()
-    expect(screen.getByTestId('latency-spread')).toHaveTextContent(
-      d.rangeLegend(t.common.ms(58), t.common.ms(61), t.common.ms(66)),
-    )
   })
 
-  it('带宽：量了吞吐的路一张卡片，上下行、搬了多少、为什么停', async () => {
+  it('吞吐：一条路一行，上行、下行两根条，右边是两个速率', async () => {
     setup()
-    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5&tab=bandwidth' })
-    const card = await screen.findByTestId('bandwidth-direct')
-    expect(card).toHaveTextContent('19.1 Mbps')
-    expect(card).toHaveTextContent('19.5 Mbps')
-    expect(card).toHaveTextContent(d.stoppedBy.time)
-    expect(card).toHaveTextContent(`${d.congestion} BBR`)
+    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5' })
+    const row = await screen.findByTestId('bandwidth-direct')
+    expect(row).toHaveTextContent('19.1 Mbps')
+    expect(row).toHaveTextContent('19.5 Mbps')
+    // 经 hk 那条没有量吞吐：没有它那一行。
+    expect(screen.queryByTestId(`bandwidth-${t.routes.via('hk')}`)).not.toBeInTheDocument()
   })
 
-  it('没有测吞吐：带宽那一页说怎么测', async () => {
+  it('没有测吞吐：报告里没有吞吐那一节，结果表里写怎么测', async () => {
     const plain: TestView = {
       ...DONE,
       request: { ...DONE.request, throughput: false },
       direct_quality: DONE.direct_quality === null ? null : { ...DONE.direct_quality, throughput: null },
     }
     setup({ 'GET /networks/1/tests': [plain], 'GET /networks/1/tests/12': plain })
-    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5&tab=bandwidth' })
-    expect(await screen.findByText(d.bandwidthNone)).toBeVisible()
-    expect(screen.getByTestId('kpi-throughput')).toHaveTextContent(d.kpiNoThroughput)
+    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5' })
+    expect(await screen.findByText(d.note.noThroughput)).toBeVisible()
+    expect(document.getElementById('report-throughput')).toBeNull()
   })
 
   it('路由：两个方向的卡片、候选路径，和两种模式各会怎么选', async () => {
     setup()
-    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5&tab=route' })
+    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5' })
     expect(await screen.findByTestId('leg-forward')).toHaveTextContent(t.path.forward('laptop', 'nas'))
     const lowest = await screen.findByTestId('decision-2-lowest_cost')
     expect(lowest).toHaveTextContent(d.reason.within_margin)
@@ -350,28 +360,34 @@ describe('路径诊断：一次诊断', () => {
 
   it('两端主机：诊断时的系统、CPU、内存、连接，到对端的连接；旧版本的节点说不报', async () => {
     setup({ 'GET /networks/1/tests': [WITH_HOSTS], 'GET /networks/1/tests/12': WITH_HOSTS })
-    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5&tab=hosts' })
-    const a = await screen.findByTestId('host-a')
-    await waitFor(() => expect(a).toHaveTextContent('Debian GNU/Linux 13 (trixie)'))
-    expect(a).toHaveTextContent(d.host.cpuValue('61%', '98%'))
-    expect(a).toHaveTextContent('0.35 · 0.22 · 0.18')
-    expect(a).toHaveTextContent(d.host.lanesValue(0, 4))
-    expect(a).toHaveTextContent(d.host.packetsValue('18230', '41', '0.2%'))
-    expect(a).toHaveTextContent('1420')
-    expect(screen.getByTestId('host-b')).toHaveTextContent(d.hostTooOld)
-    // CPU 卡住是一条结论，指标里也标出来。
-    expect(screen.getByTestId('kpi-cpu')).toHaveTextContent(d.cpuSide('laptop', 98))
-    expect(screen.getByTestId('step-host')).toHaveAttribute('data-state', 'done')
+    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5' })
+    const head = await screen.findByTestId('host-a')
+    await waitFor(() => expect(head).toHaveTextContent('laptop'))
+    await waitFor(() => expect(screen.getByTestId('hosts-system')).toHaveTextContent('Debian GNU/Linux 13 (trixie)'))
+    expect(screen.getByTestId('hosts-resources')).toHaveTextContent(d.host.cpuValue('61%', '98%'))
+    expect(screen.getByTestId('hosts-resources')).toHaveTextContent('0.35 · 0.22 · 0.18')
+    expect(screen.getByTestId('hosts-connections')).toHaveTextContent(d.host.lanesValue(0, 4))
+    expect(screen.getByTestId('hosts-peer')).toHaveTextContent(d.host.packetsValue('18230', '41', '0.2%'))
+    expect(screen.getByTestId('hosts-peer')).toHaveTextContent('1420')
+    // nas 的版本太旧：只有诊断才有的几组，它那一列写为什么。
+    expect(screen.getByTestId('hosts-system')).toHaveTextContent(d.hostTooOld)
+    // 直连检测里两端各自看到的 UDP 也在这张表里。
+    expect(screen.getByTestId('hosts-network')).toHaveTextContent(d.host.udpOk)
+    // CPU 卡住是结果表里要注意的一项；nas 不报，只有 laptop 的。
+    expect(screen.getByTestId('check-cpu')).toHaveAttribute('data-status', 'warn')
+    expect(screen.getByTestId('check-cpu')).toHaveTextContent(d.value.side('laptop', '98%'))
+    expect(screen.getByTestId('check-cpu')).not.toHaveTextContent('nas')
   })
 
   it('完整输出：文本报告和 JSON，都能复制、下载', async () => {
     const user = userEvent.setup()
     setup({ 'GET /networks/1/tests': [WITH_HOSTS], 'GET /networks/1/tests/12': WITH_HOSTS })
-    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5&tab=output' })
+    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5' })
+    await user.click(await screen.findByRole('button', { name: new RegExp(d.tabs.output) }))
     const text = await screen.findByTestId('diagnosis-output-text')
-    await waitFor(() => expect(text).toHaveTextContent(d.find.cpuBound('laptop', 98)))
+    await waitFor(() => expect(text).toHaveTextContent(d.value.side('laptop', '98%')))
     expect(text).toHaveTextContent(d.report.title)
-    expect(text).toHaveTextContent(d.find.cpuBound('laptop', 98))
+    expect(text).toHaveTextContent(`[${d.status.warn}] ${d.check.cpu}`)
     expect(text).toHaveTextContent('Debian GNU/Linux 13 (trixie)')
     await user.click(screen.getByRole('radio', { name: d.outputJson }))
     const json = JSON.parse(screen.getByTestId('diagnosis-output-json').textContent) as { test: { id: number } }
@@ -391,7 +407,7 @@ describe('路径诊断：一次诊断', () => {
     // 地址里点名了以前的那一次：看它。
     setup({ 'GET /networks/1/tests': [DONE, OLDER], 'GET /networks/1/tests/11': OLDER })
     renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5&test=11' })
-    await waitFor(() => expect(screen.getByTestId('kpi-direct')).toHaveTextContent(s.directNo))
+    await waitFor(() => expect(screen.getByTestId('check-direct')).toHaveTextContent(s.directNo))
   })
 
   it('没诊断过：说一句，按钮是"开始诊断"', async () => {
@@ -399,7 +415,7 @@ describe('路径诊断：一次诊断', () => {
     renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5' })
     expect(await screen.findByText(d.never)).toBeVisible()
     expect(screen.getByRole('button', { name: d.run })).toBeEnabled()
-    expect(screen.getByTestId('findings')).toHaveTextContent(d.findingsIdle)
+    expect(screen.getByTestId('verdict')).toHaveTextContent(d.verdict.none)
   })
 
   it('开始诊断：发出请求，接着看这一次；进行中每一项到哪一步看得见，能停', async () => {
@@ -421,7 +437,8 @@ describe('路径诊断：一次诊断', () => {
     })
     renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5' })
     expect(await screen.findByText(d.never)).toBeVisible()
-    await user.click(screen.getByRole('checkbox', { name: new RegExp(s.throughput) }))
+    // 完整的诊断默认连吞吐一起量。
+    expect(screen.getByRole('checkbox', { name: new RegExp(s.throughput) })).toBeChecked()
     await user.click(screen.getByRole('button', { name: d.run }))
     await waitFor(() => expect(api.callsTo('POST /networks/1/tests')).toHaveLength(1))
     expect(api.callsTo('POST /networks/1/tests')[0]?.body).toEqual({ a: 2, b: 5, throughput: true })
@@ -429,13 +446,13 @@ describe('路径诊断：一次诊断', () => {
     expect(await screen.findByTestId('test-state')).toHaveTextContent(s.state.running)
     expect(screen.getByTestId('step-direct')).toHaveAttribute('data-state', 'done')
     expect(screen.getByTestId('step-relay_quality')).toHaveAttribute('data-state', 'pending')
-    expect(screen.getByTestId('findings')).toHaveTextContent(d.findingsRunning)
+    expect(screen.getByTestId('verdict')).toHaveAttribute('data-tone', 'pending')
 
     await user.click(screen.getByRole('button', { name: d.stop }))
     await waitFor(() => expect(api.callsTo('POST /networks/1/tests/13/cancel')).toHaveLength(1))
   })
 
-  it('整个诊断做不了：结论里写出原因和是哪个节点', async () => {
+  it('整个诊断做不了：总评写出原因和是哪个节点', async () => {
     setup({
       'GET /networks/1/tests/12': {
         ...DONE,

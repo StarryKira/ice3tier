@@ -782,15 +782,16 @@ test('诊断：在路径诊断里真的诊断一对在线的节点，每个标�
   await shot('diagnosis-pick-a')
   await grid.getByRole('button', { name: 'gw-hk', exact: true }).click()
   await expect(page.getByTestId('path-forward')).toBeVisible()
-  await page.getByRole('checkbox', { name: new RegExp(ts.throughput) }).click()
+  // 完整的诊断默认连吞吐一起量。
+  await expect(page.getByRole('checkbox', { name: new RegExp(ts.throughput) })).toBeChecked()
   await page.getByRole('button', { name: dg.run }).click()
   await expect(page.getByTestId('test-state')).toHaveText(ts.state.done, { timeout: 60_000 })
-  await expect(page.getByTestId('kpi-latency')).not.toContainText(dg.kpiNone)
+  await expect(page.getByTestId('check-latency')).toHaveAttribute('data-status', 'pass')
   await shot('diagnosis-test')
-  for (const tab of ['route', 'latency', 'bandwidth', 'hosts', 'output'] as const) {
-    await page.getByRole('tab', { name: dg.tabs[tab] }).click()
-    await expect(page).toHaveURL(new RegExp(`tab=${tab}`))
-    await shot(`diagnosis-${tab}`)
+  // 报告在面板里滚动，整页截图只有一屏：滚到各节再截。
+  for (const section of ['path', 'latency', 'throughput', 'routing', 'hosts'] as const) {
+    await page.locator(`#report-${section}`).scrollIntoViewIfNeeded()
+    await shot(`diagnosis-${section}`, { fullPage: false })
   }
 })
 
@@ -1009,14 +1010,14 @@ test('英文：长度最要紧的几页', async ({ browser }) => {
   await expect(english.getByTestId('pair-panel')).toBeVisible()
   await enShot('topology-pair')
 
-  // 诊断：指标、结论和各条路的表在英文里最长。laptop 和 gw-hk 在前面诊断过。
+  // 诊断报告：结果表和各条路的明细在英文里最长。laptop 和 gw-hk 在前面诊断过。
   await english.goto(`${controller.baseUrl}/n/1/diagnosis?a=3&b=1`)
-  await expect(english.getByTestId('findings')).toBeVisible()
+  await expect(english.getByTestId('report-result')).toBeVisible()
   await expect(english.getByTestId('test-state')).toHaveText(en.tests.state.done)
   await enShot('diagnosis')
-  await english.goto(`${controller.baseUrl}/n/1/diagnosis?a=3&b=1&tab=latency`)
+  await english.locator('#report-latency').scrollIntoViewIfNeeded()
   await expect(english.getByTestId('test-quality')).toBeVisible()
-  await enShot('diagnosis-latency')
+  await enShot('diagnosis-latency', { fullPage: false })
 
   await english.goto(`${controller.baseUrl}/settings/updates`)
   await expect(english.getByTestId('updates-tab')).toBeVisible()
