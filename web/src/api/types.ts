@@ -344,6 +344,63 @@ export interface NodeDetail extends Node {
   reported_secs_ago?: number | null
   /** 节点实际在用的性能档位。不在线、版本太旧、还没报过是 `null`。 */
   performance?: PerformanceReport | null
+  /**
+   * 0.1.26 起：虚拟网卡的状况（取代了透明访问的 `intercept`）。不在线、版本太旧没有报、还没上报过是 `null`
+   * （界面写"未知"，不当成关着）；节点本机关着时是 `{ state: 'off', … }`。
+   */
+  vnet?: VnetReport | null
+}
+
+/** 虚拟网卡的原因。比界面新的节点可能报别的 `code`，界面写"原因不明"。 */
+export type VnetCause =
+  /** `missing`：Linux 上是能力的名字（`CAP_NET_ADMIN`），Windows 上是 `Administrator`，macOS 上是 `root`。 */
+  | { code: 'no_permission'; missing: string | string[] }
+  /** 打不开 `/dev/net/tun`，容器里常见。 */
+  | { code: 'no_device'; detail: string }
+  /** Windows：程序旁边没有 `wintun.dll`。 */
+  | { code: 'driver_missing'; path: string }
+  | { code: 'device_failed'; detail: string }
+  | { code: 'program_missing'; program: string }
+  | { code: 'command_failed'; program: string; detail: string }
+  | { code: 'port_in_use'; address: string }
+  | { code: 'bind_failed'; address: string; detail: string }
+  /** 网络的地址段和本机的一个真实网络重叠；`with` 是 `ip` 的写法，例如 `192.168.1.5/24 dev eth0`。 */
+  | { code: 'range_in_use'; with: string }
+
+/** 程序加的一条防火墙规则。不认识的 `state` 当作未知。 */
+export type RuleState =
+  { state: 'on' } | { state: 'off' } | { state: 'failed'; cause: VnetCause } | { state: 'unsupported' }
+
+/** 名字怎么解析：systemd-resolved 直接用；没有它时写进 hosts（`i3t hosts --apply`）；名字服务没开起来。 */
+export type NameService = { state: 'resolved' } | { state: 'no_resolver' } | { state: 'failed'; cause: VnetCause }
+
+export interface VnetDrops {
+  /** 对端发来的包来源不是它自己的虚拟 IP。 */
+  bad_source: number
+  /** 目的不是本节点。 */
+  bad_destination: number
+  /** 访问策略不允许对端访问本节点。 */
+  not_allowed: number
+  /** 本机发出的送不到：不是节点的地址、没有网卡或连不上的节点。 */
+  unreachable: number
+  /** 读不懂、分片拼不起来。 */
+  malformed: number
+}
+
+export interface VnetReport {
+  /** `installed` 带 `device`、`mtu`、`names`；`failed` 带 `cause`。不认识的当作未知。 */
+  state: 'installed' | 'off' | 'failed' | 'unsupported'
+  device?: string
+  mtu?: number
+  names?: NameService
+  cause?: VnetCause
+  /** `accept`：从网卡进来的放行；`guard`：防冒充（自称来自地址段、却不是从网卡进来的丢掉，只有 Linux 加）。 */
+  firewall: { accept: RuleState; guard: RuleState }
+  sent_packets: number
+  sent_bytes: number
+  received_packets: number
+  received_bytes: number
+  dropped: VnetDrops
 }
 
 export interface PerformanceReport {
