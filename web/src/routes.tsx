@@ -86,7 +86,7 @@ export function AppRoutes() {
             <Route path="forwards" element={<ForwardsPage />} />
             <Route path="topology" element={<Lazy page={TopologyPage} />} />
             <Route path="diagnosis" element={<Lazy page={PathPage} />} />
-            {/* 连通性测试页并进来了：单对测试在路径诊断里，全网测试是拓扑的一个视图。旧链接带着选的节点和测试过去。 */}
+            {/* 连通性测试页并进了路径诊断。旧链接带着选的节点和测试过去。 */}
             <Route path="tests" element={<TestsRedirect />} />
             <Route path="tokens" element={<TokensPage />} />
             <Route path="pairs" element={<PairsPage />} />
@@ -111,7 +111,6 @@ function HomeRedirect() {
 
 function TestsRedirect() {
   const [params] = useSearchParams()
-  if (params.get('tab') === 'matrix') return <Navigate to="../topology?view=tests" replace />
   const kept = new URLSearchParams()
   for (const key of ['a', 'b', 'test']) {
     const value = params.get(key)

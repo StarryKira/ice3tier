@@ -22,7 +22,6 @@ import {
   type GroupMembers,
   type LogEntry,
   type LogQuery,
-  type MatrixRun,
   type Network,
   type NetworkId,
   type Node,
@@ -137,9 +136,6 @@ export const api = {
   tests: (network: NetworkId, pair?: { a: NodeId; b: NodeId }, limit = 20) =>
     request<TestView[]>('GET', `${net(network)}/tests`, { query: { ...pair, limit } }),
   cancelTest: (network: NetworkId, id: number) => request<TestView>('POST', `${net(network)}/tests/${id}/cancel`),
-  testMatrix: (network: NetworkId) => request<MatrixRun>('GET', `${net(network)}/tests/matrix`),
-  startTestMatrix: (network: NetworkId) => request<MatrixRun>('POST', `${net(network)}/tests/matrix`),
-  cancelTestMatrix: (network: NetworkId) => request<MatrixRun>('POST', `${net(network)}/tests/matrix/cancel`),
   /** relay 之间的延迟矩阵。controller 现问几个节点，最多等 3 秒左右。 */
   backbone: (network: NetworkId, signal?: AbortSignal) =>
     request<BackboneView>('GET', `${net(network)}/backbone`, { signal }),

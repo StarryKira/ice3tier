@@ -1,9 +1,8 @@
 import { screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { Route, Routes as RouterRoutes, useLocation } from 'react-router'
 import { describe, expect, it } from 'vitest'
 
-import { type MatrixRun, type NodeRef, type RouteMatrix } from '@/api/types'
+import { type RouteMatrix } from '@/api/types'
 import { t } from '@/i18n'
 import { direct, makeEntry, makeNode, makeOverview, noRoute, viaRelays } from '@/test/fixtures'
 import { fakeApi, NETWORK, renderWithApp, type Routes } from '@/test/harness'
@@ -191,114 +190,5 @@ describe('骨干：relay 之间的延迟', () => {
     )
     const lan = screen.getByTestId('cell-3-2').getAttribute('aria-label') ?? ''
     expect(lan.includes(r.withDetail(r.direct, r.directKind.lan))).toBe(true)
-  })
-})
-
-describe('全网测试', () => {
-  const s = t.tests
-  const ref = (id: number, name: string): NodeRef => ({ id, name, virtual_ip: `10.66.0.${id}` })
-  const latency = (avgMs: number) => ({
-    probes: 100,
-    answered: 97,
-    min_us: (avgMs - 3) * 1000,
-    avg_us: avgMs * 1000,
-    p95_us: (avgMs + 5) * 1000,
-    jitter_us: 1900,
-    loss_permille: 30,
-    loss_up_permille: 10,
-    loss_down_permille: 20,
-    same_path: 97,
-    interval_ms: 20,
-    duration_ms: 4010,
-  })
-  const RUN: MatrixRun = {
-    id: 3,
-    network: 1,
-    state: 'done',
-    started_at: 1_794_798_564,
-    finished_at: 1_794_798_600,
-    concurrency: 4,
-    total: 3,
-    finished: 3,
-    nodes: [ref(1, 'hk'), ref(2, 'laptop'), ref(3, 'nas')],
-    cells: [
-      {
-        a: 1,
-        b: 2,
-        state: 'done',
-        test: 40,
-        direct_ok: true,
-        direct_kind: 'punched',
-        direct_elapsed_ms: 640,
-        route: { via: 'direct', addr: 'x' },
-        latency: latency(61),
-        problem: null,
-      },
-      {
-        a: 2,
-        b: 3,
-        state: 'done',
-        test: 12,
-        direct_ok: false,
-        direct_kind: null,
-        direct_elapsed_ms: null,
-        route: { via: 'relay', relays: [1] },
-        latency: latency(52),
-        problem: { code: 'mapping_varies', node: 3, message: '' },
-      },
-      {
-        a: 1,
-        b: 3,
-        state: 'skipped',
-        test: null,
-        direct_ok: null,
-        direct_kind: null,
-        direct_elapsed_ms: null,
-        route: null,
-        latency: null,
-        problem: { code: 'node_offline', node: 3, message: '' },
-      },
-    ],
-  }
-
-  /** 点开一格之后去了哪里。 */
-  function Landed() {
-    const location = useLocation()
-    return <p data-testid="landed">{`${location.pathname}${location.search}`}</p>
-  }
-
-  it('拓扑的第四个视图：一张节点 × 节点的表，格子里是 P2P 或中继和平均延迟，点开去路径诊断看这一对', async () => {
-    const user = userEvent.setup()
-    setup({ 'GET /networks/1/tests/matrix': RUN })
-    renderWithApp(
-      <RouterRoutes>
-        <Route path="/n/1/topology" element={<TopologyPage />} />
-        <Route path="/n/1/diagnosis" element={<Landed />} />
-      </RouterRoutes>,
-      { network: NETWORK, route: '/n/1/topology?view=tests' },
-    )
-    expect(await screen.findByTestId('matrix-progress')).toHaveTextContent(s.matrixProgress(3, 3))
-    expect(screen.getByRole('radio', { name: g.viewTests })).toBeChecked()
-    // 两半对称。
-    expect(screen.getByTestId('matrix-cell-1-2')).toHaveTextContent(`${s.matrixCellP2P}${t.common.ms(61)}`)
-    expect(screen.getByTestId('matrix-cell-2-1')).toHaveTextContent(`${s.matrixCellP2P}${t.common.ms(61)}`)
-    expect(screen.getByTestId('matrix-cell-2-3')).toHaveTextContent(`${s.matrixCellRelay}${t.common.ms(52)}`)
-    expect(screen.getByTestId('matrix-cell-1-3')).toHaveTextContent('—')
-
-    await user.click(screen.getByRole('button', { name: s.matrixCellOpen('laptop', 'nas') }))
-    expect(await screen.findByTestId('landed')).toHaveTextContent('/n/1/diagnosis?a=2&b=3&test=12')
-  })
-
-  it('还没跑过：controller 回 404 时是一句话和开始的按钮', async () => {
-    setup({
-      'GET /networks/1/tests/matrix': () =>
-        new Response(JSON.stringify({ error: { code: 'not_found', message: '' } }), {
-          status: 404,
-          headers: { 'Content-Type': 'application/json' },
-        }),
-    })
-    renderWithApp(<TopologyPage />, { network: NETWORK, route: '/n/1/topology?view=tests' })
-    expect(await screen.findByText(s.matrixEmpty)).toBeVisible()
-    expect(screen.getByRole('button', { name: s.matrixStart })).toBeEnabled()
   })
 })

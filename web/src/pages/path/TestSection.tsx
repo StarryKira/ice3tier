@@ -9,13 +9,10 @@ import { InfoTip } from '@/components/info-tip'
 import { Notice } from '@/components/notice'
 import { ErrorState, SkeletonBlock } from '@/components/states'
 import { RelativeTime, StatusText, type Tone } from '@/components/status'
-import { Table, Td, Th, Tr } from '@/components/table'
 import { Button } from '@/components/ui/button'
 import { Card, CardHeader } from '@/components/ui/card'
 import { Checkbox } from '@/components/ui/checkbox'
 import { t } from '@/i18n'
-import { msText, rateText } from '@/lib/tests'
-import { cn } from '@/lib/utils'
 
 import { TestResult } from './TestResult'
 
@@ -26,96 +23,6 @@ const STATE_TONE: Record<TestView['state'], Tone> = {
   done: 'ok',
   failed: 'danger',
   cancelled: 'idle',
-}
-
-/** 列表里一行的"直连"：能不能、怎么通的。 */
-function directCell(test: TestView): string {
-  const direct = test.direct
-  if (direct?.state !== 'done') return '—'
-  if (direct.ok !== true) return s.directNo
-  return direct.kind === null ? s.directOk : t.routes.directKind[direct.kind]
-}
-
-/** 列表里一行的"延迟"：直连的和经中继的平均延迟。 */
-function latencyCell(test: TestView): string {
-  const parts: string[] = []
-  const direct = test.direct_quality?.latency?.avg_us
-  if (direct !== undefined && direct !== null) parts.push(`${s.qualityDirect} ${msText(direct)}`)
-  const relay = test.relay_quality.find((result) => result.latency?.avg_us != null)?.latency?.avg_us
-  if (relay !== undefined && relay !== null) parts.push(`${s.qualityRelay} ${msText(relay)}`)
-  return parts.length === 0 ? '—' : parts.join(' · ')
-}
-
-/** 列表里一行的"吞吐"：量了的那条路径的上下行。 */
-function throughputCell(test: TestView): string {
-  const result = [test.direct_quality, ...test.relay_quality].find((path) => path?.throughput?.state === 'done')
-  const throughput = result?.throughput
-  if (throughput === null || throughput === undefined) return '—'
-  return `↑ ${rateText(throughput.up?.bits_per_second)} ↓ ${rateText(throughput.down?.bits_per_second)}`
-}
-
-/**
- * 最近的测试，新的在前；点一行看它。`pairs` 时多一列是哪一对（没选节点时列整个网络的）。
- */
-export function TestHistory({
-  tests,
-  shown,
-  onOpen,
-  pairs = false,
-  title,
-}: {
-  tests: readonly TestView[]
-  shown: number | null
-  onOpen: (test: TestView) => void
-  pairs?: boolean
-  title: string
-}) {
-  return (
-    <Card>
-      <CardHeader title={title} />
-      <Table aria-label={title}>
-        <thead>
-          <tr>
-            <Th>{s.colTime}</Th>
-            {pairs ? <Th>{s.colPair}</Th> : null}
-            <Th>{s.colDirect}</Th>
-            <Th>{s.colLatency}</Th>
-            <Th>{s.colThroughput}</Th>
-            <Th>{s.colState}</Th>
-          </tr>
-        </thead>
-        <tbody>
-          {tests.map((test) => (
-            <Tr
-              key={test.id}
-              onClick={() => onOpen(test)}
-              className={cn('h-11 cursor-pointer hover:bg-muted/50', test.id === shown && 'bg-accent/60 hover:bg-accent')}
-              aria-current={test.id === shown ? 'true' : undefined}
-              data-testid={`test-row-${test.id}`}
-              aria-label={s.viewTest(test.id)}
-            >
-              <Td className="text-[13px] whitespace-nowrap text-muted-foreground">
-                <RelativeTime at={test.started_at} />
-              </Td>
-              {pairs ? (
-                <Td className="whitespace-nowrap">
-                  {test.a.name} <span className="text-muted-foreground">⇄</span> {test.b.name}
-                </Td>
-              ) : null}
-              <Td className="text-[13px]">{directCell(test)}</Td>
-              <Td className="text-[13px] whitespace-nowrap tabular">{latencyCell(test)}</Td>
-              <Td className="text-[13px] whitespace-nowrap tabular">{throughputCell(test)}</Td>
-              <Td>
-                <StatusText tone={STATE_TONE[test.state]} className="text-[13px]">
-                  {s.state[test.state]}
-                </StatusText>
-              </Td>
-            </Tr>
-          ))}
-        </tbody>
-      </Table>
-    </Card>
-  )
 }
 
 interface TestSectionProps {
@@ -130,14 +37,13 @@ interface TestSectionProps {
 
 /**
  * 路径诊断里的"实测"（文档 §19）：发包测这一对能不能直连、各条路的延迟和丢包，要的话加上吞吐。
- * 默认显示这一对最近的一次；测过不止一次时下面列出来，点一行换着看。
+ * 默认显示这一对最近的一次（地址里点名了就看那一次），不列以前的。
  */
 export function TestSection({ network, nodes, a, b, test, onOpen }: TestSectionProps) {
   const throughputId = useId()
   const [throughput, setThroughput] = useState(false)
   const history = useQuery(q.tests(network.id, { a, b }))
-  const rows = history.data ?? []
-  const shown = test ?? rows[0]?.id ?? null
+  const shown = test ?? history.data?.[0]?.id ?? null
   const current = useQuery({ ...q.test(network.id, shown ?? 0), enabled: shown !== null })
 
   const start = useAction(network.id, {
@@ -176,7 +82,7 @@ export function TestSection({ network, nodes, a, b, test, onOpen }: TestSectionP
   )
 
   return (
-    <div className="space-y-10" data-testid="test-section">
+    <div data-testid="test-section">
       <Card>
         <CardHeader
           title={s.title}
@@ -221,14 +127,6 @@ export function TestSection({ network, nodes, a, b, test, onOpen }: TestSectionP
           </div>
         )}
       </Card>
-      {rows.length > 1 ? (
-        <TestHistory
-          title={s.historyTitle}
-          tests={rows}
-          shown={shown}
-          onOpen={(picked) => onOpen(picked.id)}
-        />
-      ) : null}
     </div>
   )
 }

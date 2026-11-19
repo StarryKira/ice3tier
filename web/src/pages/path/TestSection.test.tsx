@@ -236,25 +236,24 @@ describe('路径诊断里的实测', () => {
     expect(screen.queryByTestId('test-route')).not.toBeInTheDocument()
   })
 
-  it('没点名看哪一次：看这一对最近的一次；测过不止一次时列出来，点一行换着看', async () => {
-    const user = userEvent.setup()
+  it('没点名看哪一次：看这一对最近的一次，不列以前的', async () => {
     const api = setup({ 'GET /networks/1/tests': [DONE, OLDER], 'GET /networks/1/tests/11': OLDER })
-    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5' })
-    expect(await screen.findByTestId('test-current')).toBeVisible()
-    expect(api.callsTo('GET /networks/1/tests')[0]?.query.toString()).toContain('a=2&b=5')
-    expect(screen.getByTestId('test-row-12')).toHaveAttribute('aria-current', 'true')
-
-    await user.click(screen.getByTestId('test-row-11'))
-    await waitFor(() => expect(within(screen.getByTestId('test-direct')).getByText(s.directNo)).toBeVisible())
-    expect(screen.getByTestId('test-row-11')).toHaveAttribute('aria-current', 'true')
-  })
-
-  it('只测过一次：不列"最近的测试"；没测过：说一句', async () => {
-    setup()
     const { unmount } = renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5' })
     expect(await screen.findByTestId('test-current')).toBeVisible()
-    expect(screen.queryByRole('table', { name: s.historyTitle })).not.toBeInTheDocument()
+    expect(api.callsTo('GET /networks/1/tests')[0]?.query.toString()).toContain('a=2&b=5')
+    expect(api.callsTo('GET /networks/1/tests/12')).toHaveLength(1)
+    expect(api.callsTo('GET /networks/1/tests/11')).toHaveLength(0)
+    expect(document.querySelector('[data-testid^="test-row-"]')).toBeNull()
     unmount()
+
+    // 地址里点名了以前的那一次：看它。
+    setup({ 'GET /networks/1/tests': [DONE, OLDER], 'GET /networks/1/tests/11': OLDER })
+    const second = renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5&test=11' })
+    await waitFor(() => expect(within(screen.getByTestId('test-direct')).getByText(s.directNo)).toBeVisible())
+    second.unmount()
+  })
+
+  it('没测过：说一句', async () => {
     setup({ 'GET /networks/1/tests': [] })
     renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5' })
     expect(await screen.findByText(s.none)).toBeVisible()
@@ -307,16 +306,11 @@ describe('路径诊断里的实测', () => {
     expect(await screen.findByText(s.problemOf('nas', s.problems.node_offline))).toBeVisible()
   })
 
-  it('还没选两个节点：说一句，下面是整个网络最近的测试，点一行就看那一对', async () => {
-    const user = userEvent.setup()
+  it('还没选两个节点：只说一句，不列测试', async () => {
     const api = setup()
     renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis' })
     expect(await screen.findByText(t.path.pickHint)).toBeVisible()
-    const row = await screen.findByTestId('test-row-12')
-    expect(row).toHaveTextContent('laptop')
-    expect(row).toHaveTextContent('nas')
-    await user.click(row)
-    expect(await screen.findByTestId('test-current')).toBeVisible()
-    expect(api.callsTo('GET /networks/1/path')[0]?.query.toString()).toBe('from=2&to=5')
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+    expect(api.callsTo('GET /networks/1/tests')).toHaveLength(0)
   })
 })

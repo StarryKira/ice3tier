@@ -41,7 +41,6 @@ export const keys = {
   backbone: (network: NetworkId) => ['n', network, 'backbone'] as const,
   test: (network: NetworkId, id: number) => ['n', network, 'test', id] as const,
   tests: (network: NetworkId) => ['n', network, 'tests'] as const,
-  testMatrix: (network: NetworkId) => ['n', network, 'testMatrix'] as const,
   /** 更新的设置和现状是全局的，不在某个网络下面。 */
   update: ['update'] as const,
   /** 所有网络下的查询：全局的修改（全部更新、暂停和继续）会改到每个网络里的节点。 */
@@ -170,20 +169,6 @@ export const q = {
       queryKey: [...keys.tests(network), pair?.a ?? null, pair?.b ?? null],
       queryFn: () => api.tests(network, pair),
       refetchInterval: LIVE_INTERVAL,
-    }),
-  /** 最近一次全网矩阵；跑着时每秒问一次。controller 这次启动以来没有跑过时是 404，当作没有。 */
-  testMatrix: (network: NetworkId) =>
-    queryOptions({
-      queryKey: keys.testMatrix(network),
-      queryFn: async () => {
-        try {
-          return await api.testMatrix(network)
-        } catch (error) {
-          if (error instanceof ApiError && error.status === 404) return null
-          throw error
-        }
-      },
-      refetchInterval: (query) => (query.state.data?.state === 'running' ? 1000 : LIVE_INTERVAL),
     }),
   /** relay 之间的延迟矩阵。和路径一样每次都要现问节点：不轮询，页面上有"再问一次"。 */
   backbone: (network: NetworkId) =>

@@ -75,7 +75,6 @@ export const topology: Messages['topology'] = {
   viewGraph: 'Live graph',
   viewMatrix: 'Route matrix',
   viewBackbone: 'Backbone',
-  viewTests: 'Network test',
   pickA: 'Node A',
   pickB: 'Node B',
   swap: 'Swap A and B',

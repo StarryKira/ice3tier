@@ -1,4 +1,4 @@
-/** 主动测试（文档 §19）：路径诊断里的"实测"，和拓扑里的"全网测试"。 */
+/** 主动测试（文档 §19）：路径诊断里的"实测"。 */
 export const tests = {
   title: '实测',
   subtitle: '发包测能不能直连，各条路的延迟和丢包',
@@ -85,29 +85,5 @@ export const tests = {
   },
   problemOf: (node: string, text: string) => `${node}：${text}`,
 
-  historyTitle: '最近的测试',
-  historyPair: (a: string, b: string) => `${a} 和 ${b} 的测试`,
-  historyEmpty: '还没有测过',
-  colTime: '时间',
-  colPair: '节点对',
-  colDirect: '直连',
-  colLatency: '延迟',
-  colThroughput: '吞吐',
-  colState: '状态',
-  viewTest: (id: number) => `查看测试 #${id}`,
   testGone: (id: number) => `测试 #${id} 已经不在了`,
-
-  matrixStart: '开始全网测试',
-  matrixCancel: '停止',
-  matrixHint: '对每一对节点测直连和延迟，同时最多 4 对，不测吞吐',
-  matrixEmpty: '还没有跑过全网测试',
-  matrixProgress: (done: number, total: number) => `${done} / ${total} 对`,
-  matrixScope: (nodes: number, pairs: number) => `${nodes} 个节点，${pairs} 对`,
-  matrixStarted: '已开始全网测试',
-  matrixCancelled: '全网测试已停止',
-  matrixState: { running: '进行中', done: '完成', cancelled: '已停止' },
-  matrixCellP2P: 'P2P',
-  matrixCellRelay: '中继',
-  matrixCellOpen: (a: string, b: string) => `${a} 和 ${b} 的测试`,
-  matrixLegend: '格子里是延迟测在哪条路上和平均延迟；悬停看原因，点开看完整结果',
 }

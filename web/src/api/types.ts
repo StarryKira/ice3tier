@@ -1256,34 +1256,6 @@ export interface TestView {
   notes: TestProblem[]
 }
 
-export type MatrixCellState = 'pending' | 'running' | 'done' | 'failed' | 'skipped' | 'cancelled'
-
-export interface MatrixCell {
-  a: NodeId
-  b: NodeId
-  state: MatrixCellState
-  test: number | null
-  direct_ok: boolean | null
-  direct_kind: DirectKind | null
-  direct_elapsed_ms: number | null
-  route: Route | null
-  latency: Latency | null
-  problem: TestProblem | null
-}
-
-export interface MatrixRun {
-  id: number
-  network: NetworkId
-  state: 'running' | 'done' | 'cancelled'
-  started_at: Timestamp
-  finished_at: Timestamp | null
-  concurrency: number
-  total: number
-  finished: number
-  nodes: NodeRef[]
-  cells: MatrixCell[]
-}
-
 /*
  * 代理（替代原来的监听器和凭据）：在节点 `node` 上监听 `bind`，流量从出口节点 `exit` 出去，
  * 用户名和密码认证（0.1.15，文档 §10）。

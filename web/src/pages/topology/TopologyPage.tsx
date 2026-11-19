@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Plus, Waypoints } from 'lucide-react'
 import { useMemo, useState } from 'react'
-import { useNavigate, useSearchParams } from 'react-router'
+import { useSearchParams } from 'react-router'
 
 import { q } from '@/api/queries'
 import { type NodeId } from '@/api/types'
@@ -15,7 +15,7 @@ import { t } from '@/i18n'
 import { REPORT_INTERVAL_SECS } from '@/lib/product'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { cn } from '@/lib/utils'
-import { networkPath, useNetwork } from '@/pages/networks/context'
+import { useNetwork } from '@/pages/networks/context'
 import { AddNodeDialog } from '@/pages/nodes/AddNodeDialog'
 import { useLineColors } from '@/topology/colors'
 import { LineSample } from '@/topology/line-edge'
@@ -25,14 +25,13 @@ import { nextPick, type Pair, readPair, writePair } from '@/topology/pair'
 import { BackboneView } from './BackboneView'
 import { MatrixView } from './MatrixView'
 import { PairPanel } from './PairPanel'
-import { TestMatrixView } from './TestMatrixView'
 import { LANE_DASH, TopologyGraph } from './TopologyGraph'
 
 const g = t.topology
 
-type View = 'graph' | 'matrix' | 'backbone' | 'tests'
+type View = 'graph' | 'matrix' | 'backbone'
 
-const VIEWS: readonly View[] = ['graph', 'matrix', 'backbone', 'tests']
+const VIEWS: readonly View[] = ['graph', 'matrix', 'backbone']
 
 function GraphLegend() {
   const colors = useLineColors()
@@ -81,14 +80,12 @@ function GraphLegend() {
 /**
  * 拓扑：整个网络。节点、relay 和它们之间现在走的路（白皮书 §7.7）。两种看法共用同一份路由矩阵：
  * 实时图（看得快）和路由矩阵（精确）。选中的一对节点写在地址里，两种看法之间、和路径诊断之间来回切换时跟着走。
- * 另外两个视图是别的数据："骨干"是 relay 之间测的延迟，每次现问节点；"全网测试"对每一对发包实测（文档 §19），
- * 点开一格去路径诊断看那一对。
+ * 另一个视图"骨干"是别的数据：relay 之间测的延迟，每次现问节点。
  */
 export function TopologyPage() {
   useDocumentTitle(g.title)
   const network = useNetwork()
   const [params, setParams] = useSearchParams()
-  const navigate = useNavigate()
   const [adding, setAdding] = useState(false)
   const view: View = VIEWS.find((candidate) => candidate === params.get('view')) ?? 'graph'
   const pair = readPair(params)
@@ -151,7 +148,6 @@ export function TopologyPage() {
               { value: 'graph', label: g.viewGraph },
               { value: 'matrix', label: g.viewMatrix },
               { value: 'backbone', label: g.viewBackbone },
-              { value: 'tests', label: g.viewTests },
             ]}
           />
         }
@@ -160,14 +156,6 @@ export function TopologyPage() {
       {view === 'backbone' ? (
         // 骨干是另一份数据（relay 之间测的），和选中的那一对节点无关，也不看路由矩阵。
         <BackboneView network={network} name={name} looks={looks} />
-      ) : view === 'tests' ? (
-        <TestMatrixView
-          network={network}
-          nodes={nodes.data ?? []}
-          onOpen={(test, picked) =>
-            void navigate(`${networkPath(network.id, 'diagnosis')}?a=${picked.a}&b=${picked.b}&test=${test}`)
-          }
-        />
       ) : (
         <>
           {/* 选两个节点（也可以在图上、矩阵里点），右边一句多久更新一次。 */}

@@ -768,7 +768,7 @@ test('有数据时：管理区和设置', async () => {
   await shot('settings-about')
 })
 
-test('实测：在路径诊断里真的测一对在线的节点，再在拓扑里跑一次全网', async () => {
+test('实测：在路径诊断里真的测一对在线的节点', async () => {
   test.setTimeout(120_000)
   const ts = t.tests
   await goTo(page, t.nav.diagnosis)
@@ -787,12 +787,6 @@ test('实测：在路径诊断里真的测一对在线的节点，再在拓扑�
   // 正文在面板里滚动，整页截图只有一屏：滚到结果那里再截一张。
   await page.getByTestId('test-current').scrollIntoViewIfNeeded()
   await shot('diagnosis-test-result', { fullPage: false })
-
-  await goTo(page, t.nav.topology)
-  await page.getByRole('radio', { name: t.topology.viewTests }).click()
-  await page.getByRole('button', { name: ts.matrixStart }).click()
-  await expect(page.getByTestId('matrix-progress')).toContainText(ts.matrixState.done, { timeout: 90_000 })
-  await shot('topology-tests')
 })
 
 test('找不到的东西', async () => {

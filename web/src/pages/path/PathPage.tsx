@@ -25,7 +25,7 @@ import { networkPath, useNetwork } from '@/pages/networks/context'
 import { type Pair, pairPath, readPair, writePair } from '@/topology/pair'
 import { describeCandidates, describeLeg } from '@/topology/path'
 
-import { TestHistory, TestSection } from './TestSection'
+import { TestSection } from './TestSection'
 
 const p = t.path
 
@@ -237,26 +237,6 @@ function Querying() {
   )
 }
 
-/** 还没选好两个节点：说一句该做什么；测过的话，下面列出整个网络最近的测试，点一行就看那一对。 */
-function PickFirst({ network, onOpen }: { network: number; onOpen: (pair: Pair, test: number) => void }) {
-  const recent = useQuery(q.tests(network))
-  const rows = recent.data ?? []
-  return (
-    <div className="space-y-10">
-      <EmptyState icon={RouteIcon} title={p.pickHint} className="py-12" />
-      {rows.length > 0 ? (
-        <TestHistory
-          title={t.tests.historyTitle}
-          tests={rows}
-          shown={null}
-          pairs
-          onOpen={(test) => onOpen({ a: test.a.id, b: test.b.id }, test.id)}
-        />
-      ) : null}
-    </div>
-  )
-}
-
 /**
  * 路径诊断：选两个节点。
  * - 现在怎么走：controller 现问两端"到对端现在怎么走"，两个方向分开显示（路是发送方选的，经常不一样），
@@ -325,7 +305,7 @@ export function PathPage() {
 
       {!ready ? (
         same ? null : (
-          <PickFirst network={network.id} onOpen={(next, id) => setPair(next, id)} />
+          <EmptyState icon={RouteIcon} title={p.pickHint} className="py-12" />
         )
       ) : (
         <div className="space-y-12">

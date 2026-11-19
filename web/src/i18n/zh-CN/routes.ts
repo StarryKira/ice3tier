@@ -82,7 +82,6 @@ export const topology = {
   viewGraph: '实时图',
   viewMatrix: '路由矩阵',
   viewBackbone: '骨干',
-  viewTests: '全网测试',
   pickA: '节点 A',
   pickB: '节点 B',
   swap: '交换 A 和 B',
