@@ -1,6 +1,6 @@
 //! 管理 API 的数据结构：WebUI 和命令行通过它读写 controller 里的东西。
 //!
-//! 这里的类型就是请求体和应答体的 JSON 形式；路径、方法和各个错误码出现的场合写在 `docs/admin-api.md`。
+//! 这里的类型就是请求体和应答体的 JSON 形式；路径、方法和各个错误码出现的场合写在 `docs/internal/admin-api.md`。
 //!
 //! 几条通用的约定：
 //!
@@ -90,7 +90,7 @@ pub struct ApiError {
     pub message: String,
     /// 比 `code` 更具体的一层：`not_found` 时是找不到的东西（`node`、`network` 等），`conflict` 时是挡着的东西，
     /// `invalid_request` 时是哪里不对（`zero`、`too_long` 等），`cannot_self_update`、`no_update` 时是原因。
-    /// 取值见 `docs/admin-api.md` 第 2 节；controller 说不出来时是 `null`。
+    /// 取值见 `docs/internal/admin-api.md` 第 2 节；controller 说不出来时是 `null`。
     #[serde(default)]
     pub what: Option<String>,
     /// 请求里出问题的字段（请求体的字段名、查询参数名或路径参数名）；不是某一个字段的问题时是 `null`。
@@ -1554,7 +1554,7 @@ pub struct LogEntry {
     #[serde(default)]
     pub refs: Vec<LogRef>,
     /// 按名字给出的参数：只用 `action` 和它们就能把这条记录写成一句话。东西的名字是当时的名字，挨着它的编号。
-    /// 每种 `action` 有哪些参数见 `docs/admin-api.md` 第 3 节；这个字段出现之前的记录是空的。
+    /// 每种 `action` 有哪些参数见 `docs/internal/admin-api.md` 第 3 节；这个字段出现之前的记录是空的。
     #[serde(default)]
     pub params: serde_json::Map<String, serde_json::Value>,
 }

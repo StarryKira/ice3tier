@@ -1,7 +1,7 @@
 //! 收发每个包时要查的东西：到每个对端现在走哪条路，哪些来源地址是谁。
 //!
 //! 这些由控制任务（[`crate::control`]）写，由收发包的路径读。发包时只查"现在走哪条路"这一个结果，不做别的判断
-//! （docs/architecture.md §5.4）。
+//! （docs/internal/architecture.md §5.4）。
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;

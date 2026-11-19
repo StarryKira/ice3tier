@@ -1,6 +1,6 @@
 //! 性能档位（白皮书 §12.1）：三个预设加上本机配置文件里逐项的覆盖，落实成一份设置 [`Performance`]。
 //!
-//! 每一项、每个值都是量出来的（本机实验环境，release 程序；方法和全部的数在 docs/architecture.md 的性能一节）。
+//! 每一项、每个值都是量出来的（本机实验环境，release 程序；方法和全部的数在 docs/internal/architecture.md 的性能一节）。
 //! 没有量出差别的东西不进档位，在各自的 crate 里是常量。
 //!
 //! | 项（配置文件里的键） | low-footprint | balanced | high-throughput |

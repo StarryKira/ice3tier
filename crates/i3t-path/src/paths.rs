@@ -575,7 +575,7 @@ impl Paths {
         }
     }
 
-    /// 一个数据报归谁（docs/architecture.md §5.1 的那张表）。
+    /// 一个数据报归谁（docs/internal/architecture.md §5.1 的那张表）。
     fn classify<'t>(&self, table: &'t Table, from: SocketAddr, datagram: &[u8]) -> Verdict<'t> {
         let clock = &self.shared.clock;
         match Datagram::parse(datagram) {

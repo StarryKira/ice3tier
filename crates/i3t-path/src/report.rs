@@ -27,7 +27,7 @@ pub enum DirectKind {
 }
 
 /// 到一个对端的直连现在在哪一步（白皮书 §7.7）。从路径层为直连的尝试和退避记着的状态里读出来，不为它另外探测，
-/// 也不改什么时候去试：一对节点第一次用到时试，失败了按退避重试，主动测试立刻试（docs/architecture.md §5.3）。
+/// 也不改什么时候去试：一对节点第一次用到时试，失败了按退避重试，主动测试立刻试（docs/internal/architecture.md §5.3）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectStatus {
     pub state: DirectState,

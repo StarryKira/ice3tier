@@ -6,10 +6,10 @@
 这个脚本自己编译它要用的程序，不用 `target/release` 里现成的，因为更新要有三样平时没有的东西：
 
 - 一把测试用的发布签名钥匙。节点和 controller 只认编译在程序里的发布公钥，所以用
-  `I3T_RELEASE_EXTRA_KEY=<公钥>` 编译，让它们多认这一把（见 docs/releasing.md 第 3 节）。
+  `I3T_RELEASE_EXTRA_KEY=<公钥>` 编译，让它们多认这一把（见 docs/internal/releasing.md 第 3 节）。
 - "同一份代码、版本号更高"的第二个节点程序。版本号来自 `bins/i3t/Cargo.toml`，测试不去改它，
   而是用 `I3T_TEST_VERSION=<版本号>` 再编一次 `i3t`（见 `bins/i3t/src/main.rs` 里的说明）。
-- 一个发布源。这里是一个本机目录，布局照 docs/releasing.md 第 6 节，清单用 `i3t-release` 签。
+- 一个发布源。这里是一个本机目录，布局照 docs/internal/releasing.md 第 6 节，清单用 `i3t-release` 签。
 
 编译放在自己的 target 目录里（默认 `target/e2e-update`，环境变量 `I3T_E2E_TARGET` 可以改），
 免得不同的编译时环境变量把别处的缓存来回冲掉。已经编好的不会重编。
@@ -108,7 +108,7 @@ def build() -> None:
 
 
 class Release:
-    """一个本机目录里的发布源，布局见 docs/releasing.md 第 6 节。"""
+    """一个本机目录里的发布源，布局见 docs/internal/releasing.md 第 6 节。"""
 
     def __init__(self, work: Path) -> None:
         self.root = work / "releases"

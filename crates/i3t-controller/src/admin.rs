@@ -1,6 +1,6 @@
 //! 管理 API：HTTP + JSON，WebUI 和命令行都走它。
 //!
-//! 路径、请求体和应答体的说明在 `docs/admin-api.md`，数据结构在 `i3t_model::admin`。
+//! 路径、请求体和应答体的说明在 `docs/internal/admin-api.md`，数据结构在 `i3t_model::admin`。
 //! 这里每个处理函数只做三件事：取出路径和请求体，调用 [`Controller`] 上对应的方法，把结果写成 JSON。
 //!
 //! `/api/v1` 下面的请求都要带管理令牌（`Authorization: Bearer <令牌>`）。只有一个管理员，没有角色。

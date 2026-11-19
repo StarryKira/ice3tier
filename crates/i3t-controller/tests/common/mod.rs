@@ -135,7 +135,7 @@ pub fn modern_hello(version: &str, declared: Declared) -> Hello {
     Hello { version: version.to_owned(), protocol: PROTOCOL_REVISION, self_update: Some(SelfUpdate::ABLE), ..hello(declared) }
 }
 
-/// 一个照 `docs/releasing.md` 第 6 节摆的发布源目录，和签它的那把钥匙。
+/// 一个照 `docs/internal/releasing.md` 第 6 节摆的发布源目录，和签它的那把钥匙。
 pub struct Publisher {
     pub key: NodeKey,
     pub root: tempfile::TempDir,

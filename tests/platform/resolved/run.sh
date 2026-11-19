@@ -70,7 +70,7 @@ check "systemd is running in a and systemd-resolved is active" 'ina systemctl is
     wait_for 60 bash -c "docker exec $a systemctl is-active -q systemd-resolved"
 ina systemctl --version | head -1 >> "$out/environment.txt"
 ina sh -c 'nft --version; ip -V' >> "$out/environment.txt" 2>&1
-# --internal 的网络没有默认路由；透明访问要有一条盖住覆盖网地址段的路由（docs/architecture.md 5.10 的"前提"），给 a 一条。
+# --internal 的网络没有默认路由；透明访问要有一条盖住覆盖网地址段的路由（docs/internal/architecture.md 5.10 的"前提"），给 a 一条。
 ina ip route add default dev eth0
 ina resolvectl log-level debug
 # systemd-resolved 报 active 时系统总线可能还没起来，那时 resolvectl 连不上：等它答得出来再记"之前"的样子。

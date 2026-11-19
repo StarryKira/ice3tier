@@ -49,7 +49,7 @@ impl Store {
 
     /// 记一条操作，带上它说的是哪些东西。`detail` 和 `params` 里不能有令牌之类的秘密。
     ///
-    /// `params` 是一个 JSON 对象（`serde_json::json!({ … })`）：按名字给出的参数，见 `docs/admin-api.md` 第 3 节。
+    /// `params` 是一个 JSON 对象（`serde_json::json!({ … })`）：按名字给出的参数，见 `docs/internal/admin-api.md` 第 3 节。
     ///
     /// # Errors
     ///

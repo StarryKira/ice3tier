@@ -1,6 +1,6 @@
 //! 节点更新的规矩（白皮书 §10.5）：发布源、包的缓存、让谁更新、暂停与继续。
 //!
-//! 发布源是一个临时目录，照 `docs/releasing.md` 第 6 节摆；清单用测试自己的钥匙签，controller 换成只认这一把。
+//! 发布源是一个临时目录，照 `docs/internal/releasing.md` 第 6 节摆；清单用测试自己的钥匙签，controller 换成只认这一把。
 
 use std::collections::BTreeMap;
 use std::fs;

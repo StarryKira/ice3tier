@@ -641,7 +641,7 @@ mod tests {
         LogEntry { id: 1, at: 0, network: None, action: action.to_owned(), detail: "原话".to_owned(), refs: Vec::new(), params }
     }
 
-    /// controller 记的每一种操作，带着它的参数。和 `docs/admin-api.md` 第 3 节对得上。
+    /// controller 记的每一种操作，带着它的参数。和 `docs/internal/admin-api.md` 第 3 节对得上。
     fn every_action() -> Vec<LogEntry> {
         let node = json!({ "node": 2, "node_name": "laptop" });
         let pair = json!({ "a": 1, "a_name": "nas", "b": 2, "b_name": "laptop", "keep_alive": true, "lane": "always" });

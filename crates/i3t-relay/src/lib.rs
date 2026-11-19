@@ -1,4 +1,4 @@
-//! relay。见 docs/architecture.md §5.2。
+//! relay。见 docs/internal/architecture.md §5.2。
 //!
 //! relay 只转发包：节点先和它建一个中转会话，之后带着中转头的数据报被原样送到目的节点的会话上；
 //! 中转头里写着好几个 relay 时，送到路径上下一个 relay 的会话上。它不解密（也解不开）、不重传、不为流记状态，发不出去就丢。

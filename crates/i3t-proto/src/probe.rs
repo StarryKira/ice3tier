@@ -1,4 +1,4 @@
-//! 探测帧（节点和节点之间的直连验证、打洞、测延迟）。见 docs/architecture.md §5.3。
+//! 探测帧（节点和节点之间的直连验证、打洞、测延迟）。见 docs/internal/architecture.md §5.3。
 //!
 //! ```text
 //! A → B  PING  0x08 | 来源 A 4 | 目的 B 4 | 随机数 8 | 签名 64 | 填充到 100 字节

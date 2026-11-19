@@ -1,7 +1,7 @@
 //! QUIC 库眼里的"socket"：其实是路径层。
 //!
 //! 每个对端有一个固定的虚拟地址，由它的节点编号算出来。QUIC 库只见得到虚拟地址，包实际从哪条路走由路径层决定，
-//! 所以换路时 QUIC 不知道，连接和上面的流不受影响（docs/architecture.md §5.5）。
+//! 所以换路时 QUIC 不知道，连接和上面的流不受影响（docs/internal/architecture.md §5.5）。
 
 use std::fmt;
 use std::future::Future;

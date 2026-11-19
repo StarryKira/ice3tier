@@ -373,7 +373,7 @@ async fn the_command_line_drives_a_running_controller() {
     assert!(!refused.status.success() && !i3t_lang::cli::has_chinese(&said) && said.contains("network_not_empty"), "{said}");
 }
 
-/// 在 `root` 里摆一个发布源（布局见 `docs/releasing.md` 第 6 节）：`version` 的 Linux 节点程序，清单用 `key` 签，
+/// 在 `root` 里摆一个发布源（布局见 `docs/internal/releasing.md` 第 6 节）：`version` 的 Linux 节点程序，清单用 `key` 签，
 /// 写上安全下限 `security_floor`（有的话）。
 fn publish(root: &std::path::Path, key: &NodeKey, version: &str, security_floor: Option<&str>, program: &[u8]) {
     let version: i3t_model::update::Version = version.parse().unwrap();
