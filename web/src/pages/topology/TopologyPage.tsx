@@ -95,6 +95,11 @@ export function TopologyPage() {
     () => new Set((nodes.data ?? []).filter((node) => node.relay !== null).map((node) => node.id)),
     [nodes.data],
   )
+  const looks = useMemo(
+    () =>
+      new Map((nodes.data ?? []).map((node) => [node.id, { country: node.country ?? null, platform: node.platform }])),
+    [nodes.data],
+  )
   const known = (id: NodeId | null) => id !== null && matrix.data?.nodes.some((node) => node.id === id) === true
   const selection: Selection | null =
     pair.a !== null && pair.b !== null && pair.a !== pair.b && known(pair.a) && known(pair.b)
@@ -205,6 +210,7 @@ export function TopologyPage() {
                     <Canvas data-testid="topology-graph">
                       <TopologyGraph
                         shape={shape}
+                        looks={looks}
                         rtt={{ forward: shape.forward?.rtt_ms ?? null, reverse: shape.reverse?.rtt_ms ?? null }}
                         onPick={(id) => setPair(nextPick(pair, id))}
                       />

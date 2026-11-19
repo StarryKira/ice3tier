@@ -217,6 +217,9 @@
    */
   --animate-pop-in: pop-in 200ms cubic-bezier(0.16, 1, 0.3, 1);
   --animate-pop-out: pop-out 120ms cubic-bezier(0.4, 0, 1, 1) forwards;
+  /* 拓扑图：卡片进场时依次浮上来；在线的点轻轻地一圈一圈往外散。 */
+  --animate-topo-in: topo-in 420ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-topo-breathe: topo-breathe 2.6s ease-out infinite;
 
   @keyframes rise {
     from {
@@ -246,6 +249,25 @@
     to {
       opacity: 0;
       transform: translate(calc(var(--pop-x, 0px) / 2), calc(var(--pop-y, 0px) / 2)) scale(0.97);
+    }
+  }
+  @keyframes topo-in {
+    from {
+      opacity: 0;
+      transform: translateY(8px) scale(0.94);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+  @keyframes topo-breathe {
+    0% {
+      box-shadow: 0 0 0 0 color-mix(in oklab, var(--ok) 50%, transparent);
+    }
+    70%,
+    100% {
+      box-shadow: 0 0 0 6px color-mix(in oklab, var(--ok) 0%, transparent);
     }
   }
   @keyframes fade {

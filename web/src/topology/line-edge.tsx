@@ -17,6 +17,16 @@ export interface LineData extends Record<string, unknown> {
   siblings: number
   label: string | null
   strong: boolean
+  /** 绕开别的卡片要弯多少（`bendAround`）；没有是直线。 */
+  bend?: number
+  /**
+   * 线上跑的小光点：`both` 两个方向各一个（两头在通信），`forward` 只从 source 跑向 target（选中那一对的方向），
+   * 没有就不跑（过期、不可达）。颜色是 `flowColor`。
+   */
+  flow?: 'both' | 'forward'
+  flowColor?: string
+  /** 光点按这个长度定跑一趟多久（排好时两个点的距离）；没有就按现在画出来的长度。 */
+  length?: number
 }
 
 export type LineFlowEdge = Edge<LineData, 'line'>
@@ -44,22 +54,93 @@ function rectOf(node: ReturnType<typeof useInternalNode>): Rect | null {
   }
 }
 
-/** 从一个框的边连到另一个框的边；字写在线的中点上。 */
+/** 同一条线每次画都在同一个时刻起跑，不同的线错开：按编号算出一个 0 到 1 之间的数。 */
+function phaseOf(id: string): number {
+  let hash = 0
+  for (const char of id) hash = (hash * 31 + char.charCodeAt(0)) >>> 0
+  return (hash % 997) / 997
+}
+
+/** 一个沿线跑的小光点：两头淡入淡出，速度固定（长线跑得久）。 */
+function Spark({
+  d,
+  color,
+  seconds,
+  phase,
+  reverse,
+  size,
+}: {
+  d: string
+  color: string
+  seconds: number
+  phase: number
+  reverse: boolean
+  size: number
+}) {
+  const timing = { dur: `${seconds}s`, begin: `-${(phase * seconds).toFixed(2)}s`, repeatCount: 'indefinite' }
+  return (
+    <circle r={size} fill={color} opacity={0}>
+      <animateMotion path={d} {...timing} calcMode="linear" keyPoints={reverse ? '1;0' : '0;1'} keyTimes="0;1" />
+      <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.15;0.85;1" {...timing} />
+    </circle>
+  )
+}
+
+/** 从一个框的边连到另一个框的边；字写在线的中点上，线上可以跑小光点。 */
 export function LineEdgeView({ id, source, target, data, markerEnd, style }: EdgeProps<LineFlowEdge>) {
   const sourceRect = rectOf(useInternalNode(source))
   const targetRect = rectOf(useInternalNode(target))
   if (sourceRect === null || targetRect === null || data === undefined) return null
-  const path = curveBetween(sourceRect, targetRect, data.index, data.siblings)
+  const path = curveBetween(sourceRect, targetRect, data.index, data.siblings, data.bend ?? 0)
+  const length =
+    data.length ??
+    Math.hypot(
+      targetRect.x + targetRect.width / 2 - (sourceRect.x + sourceRect.width / 2),
+      targetRect.y + targetRect.height / 2 - (sourceRect.y + sourceRect.height / 2),
+    )
+  // 选中那一对的路跑得快一些、点大一些。
+  const seconds = Math.max(1.4, Math.round((length / (data.strong ? 170 : 110)) * 10) / 10)
+  const phase = phaseOf(id)
+  const color = data.flowColor ?? String(style?.stroke ?? 'currentColor')
   return (
     <>
-      <BaseEdge id={id} path={path.d} markerEnd={markerEnd} style={style} interactionWidth={14} />
+      <BaseEdge
+        id={id}
+        path={path.d}
+        markerEnd={markerEnd}
+        style={{ strokeLinecap: 'round', ...style }}
+        interactionWidth={14}
+      />
+      {data.flow !== undefined ? (
+        // 只是装饰：读屏不念；系统里关了动画时不跑。
+        <g aria-hidden className="pointer-events-none motion-reduce:hidden">
+          <Spark
+            d={path.d}
+            color={color}
+            seconds={seconds}
+            phase={phase}
+            reverse={false}
+            size={data.strong ? 3.2 : 2.4}
+          />
+          {data.flow === 'both' ? (
+            <Spark
+              d={path.d}
+              color={color}
+              seconds={seconds}
+              phase={(phase + 0.5) % 1}
+              reverse
+              size={data.strong ? 3.2 : 2.4}
+            />
+          ) : null}
+        </g>
+      ) : null}
       {data.label !== null ? (
         <EdgeLabelRenderer>
           <span
             style={{ transform: `translate(-50%, -50%) translate(${path.label.x}px, ${path.label.y}px)` }}
             className={cn(
-              'pointer-events-none absolute rounded-sm bg-sidebar px-1 text-[11px] leading-4 tabular',
-              data.strong ? 'font-medium text-foreground' : 'text-muted-foreground',
+              'pointer-events-none absolute rounded-full border bg-card px-1.5 text-[11px] leading-[18px] whitespace-nowrap tabular shadow-xs',
+              data.strong ? 'border-border-strong font-medium text-foreground' : 'text-muted-foreground',
             )}
           >
             {data.label}

@@ -44,7 +44,8 @@ const PARALLEL_GAP = 44
  * 两个矩形之间的一条线。`index` / `siblings` 说明这是同一对点之间的第几条：
  * 只有一条时是直线；多条时围绕直线对称地弯开。
  */
-export function curveBetween(source: Rect, target: Rect, index = 0, siblings = 1): EdgePath {
+/** `bend`：控制点再沿同一条法线挪这么远（拓扑图上绕开别的卡片用）。 */
+export function curveBetween(source: Rect, target: Rect, index = 0, siblings = 1, bend = 0): EdgePath {
   const a = center(source)
   const b = center(target)
   const dx = b.x - a.x
@@ -56,7 +57,10 @@ export function curveBetween(source: Rect, target: Rect, index = 0, siblings = 1
   const nx = (-dy / length) * flip
   const ny = (dx / length) * flip
   const offset = (index - (siblings - 1) / 2) * PARALLEL_GAP
-  const control: Point = { x: (a.x + b.x) / 2 + nx * offset * 2, y: (a.y + b.y) / 2 + ny * offset * 2 }
+  const control: Point = {
+    x: (a.x + b.x) / 2 + nx * (offset * 2 + bend),
+    y: (a.y + b.y) / 2 + ny * (offset * 2 + bend),
+  }
   const start = borderPoint(source, control)
   const end = borderPoint(target, control)
   return {

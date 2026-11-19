@@ -4,7 +4,7 @@ import { type MatrixNode, type RouteMatrix } from '@/api/types'
 import { t } from '@/i18n'
 import { direct, makeEntry, noRoute, viaRelays } from '@/test/fixtures'
 
-import { buildTopology, layoutSignature, pointId } from './graph'
+import { bendAround, buildTopology, layoutSignature, NODE_BOX, pointId, STRETCH_X, type TopoPoint } from './graph'
 import { nextPick, pairPath, readPair, writePair } from './pair'
 import { classify, entryText, hopsOf, relayedPairs, routeText } from './route'
 
@@ -42,10 +42,62 @@ describe('buildTopology：路由矩阵整理成拓扑图', () => {
     expect(hk).toMatchObject({ relay: true, x: 0, y: 0 })
     const outer = shape.points.filter((point) => !point.relay)
     expect(outer.map((point) => point.node.name)).toEqual(['laptop', 'nas', 'office', 'phone', 'tv'])
-    // 外圈的点离中心一样远，而且不和中间的 relay 挤在一起。
-    const radii = outer.map((point) => Math.round(Math.hypot(point.x, point.y)))
-    expect(new Set(radii).size).toBe(1)
-    expect(radii[0]).toBeGreaterThan(200)
+    // 外圈的点在同一个横向拉宽的椭圆上，而且不和中间的 relay 挤在一起。
+    const radii = outer.map((point) => Math.round(Math.hypot(point.x / STRETCH_X, point.y)))
+    expect(Math.max(...radii) - Math.min(...radii)).toBeLessThanOrEqual(1)
+    expect(radii[0]).toBeGreaterThan(NODE_BOX.height * 3)
+    expect(Math.max(...outer.map((point) => Math.abs(point.x)))).toBeGreaterThan(
+      Math.max(...outer.map((point) => Math.abs(point.y))),
+    )
+  })
+
+  it('relay 和别的节点差不多多（三个 relay、两个节点）：全部排成一圈，任意两点之间的线都不压到第三张卡片', () => {
+    const matrix: RouteMatrix = {
+      nodes: [node(1, 'h1'), node(2, 'h2'), node(3, 'tx'), node(4, 'tyo1'), node(5, 'suq')],
+      entries: [],
+    }
+    const points = buildTopology(matrix, new Set([1, 2, 5]), null).points
+    expect(points.map((point) => point.node.name)).toEqual(['h1', 'h2', 'suq', 'tx', 'tyo1'])
+    expect(points.filter((point) => point.relay).map((point) => point.node.name)).toEqual(['h1', 'h2', 'suq'])
+    const radii = points.map((point) => Math.round(Math.hypot(point.x / STRETCH_X, point.y)))
+    expect(Math.max(...radii) - Math.min(...radii)).toBeLessThanOrEqual(1)
+    for (const a of points) for (const b of points) if (a !== b) expect(bendAround(points, a.id, b.id)).toBe(0)
+  })
+
+  it('relay 少、别的节点多：relay 在里圈，外圈转开，不和里圈的点对齐', () => {
+    const matrix: RouteMatrix = {
+      nodes: [node(1, 'r1'), node(2, 'r2'), ...[3, 4, 5, 6].map((id) => node(id, `n${id}`))],
+      entries: [],
+    }
+    const points = buildTopology(matrix, new Set([1, 2]), null).points
+    const inner = points.filter((point) => point.relay)
+    const outer = points.filter((point) => !point.relay)
+    expect(inner.map((point) => point.node.name)).toEqual(['r1', 'r2'])
+    const angle = (point: TopoPoint) => Math.atan2(point.y, point.x / STRETCH_X)
+    for (const a of outer) {
+      for (const b of inner) {
+        const gap = Math.abs(angle(a) - angle(b)) % (2 * Math.PI)
+        expect(Math.min(gap, 2 * Math.PI - gap)).toBeGreaterThan(Math.PI / 8)
+      }
+    }
+  })
+
+  it('一条线笔直连过去会压到别的卡片时弯开，弯向卡片的另一边；不压到就是直线', () => {
+    const at = (id: number, x: number, y: number): TopoPoint => ({
+      id: pointId(id),
+      node: node(id, `n${id}`),
+      relay: false,
+      x,
+      y,
+      ...NODE_BOX,
+      picked: null,
+    })
+    const blocked = [at(1, -400, 0), at(2, 400, 0), at(3, 0, 10)]
+    const bend = bendAround(blocked, pointId(1), pointId(2))
+    // 卡片在线的下方（y 大）：法线朝 +y，曲线弯向 −y。弯开之后曲线的中点越过卡片的上边，还留出空隙。
+    expect(bend).toBeLessThan(0)
+    expect(Math.abs(bend) / 2).toBeGreaterThanOrEqual(NODE_BOX.height / 2 - 10 + 16)
+    expect(bendAround([at(1, -400, 0), at(2, 400, 0), at(3, 0, 200)], pointId(1), pointId(2))).toBe(0)
   })
 
   it('两个点之间不管有几条路经过都只画一条线；直连的标延迟，经 relay 的拆成几段', () => {
@@ -63,7 +115,9 @@ describe('buildTopology：路由矩阵整理成拓扑图', () => {
   it('过期的格子画出来但标成过期；两个方向都无路可走的一对画一条不可达的线', () => {
     const shape = buildTopology(MATRIX, RELAYS, null)
     expect(shape.links.find((link) => link.id === 'link:3-5')).toMatchObject({ stale: true })
-    expect(shape.unreachable).toEqual([{ id: 'none:3-6', source: pointId(3), target: pointId(6), stale: false }])
+    expect(shape.unreachable).toEqual([
+      expect.objectContaining({ id: 'none:3-6', source: pointId(3), target: pointId(6), stale: false }),
+    ])
   })
 
   it('一端离线时没有路是理所当然的，不画不可达的线（矩阵里照样有那一格）', () => {
