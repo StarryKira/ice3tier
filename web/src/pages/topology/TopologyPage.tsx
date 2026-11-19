@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
-import { Plus, Waypoints, X } from 'lucide-react'
+import { Plus, Waypoints } from 'lucide-react'
 import { useMemo, useState } from 'react'
-import { useSearchParams } from 'react-router'
+import { useNavigate, useSearchParams } from 'react-router'
 
 import { q } from '@/api/queries'
 import { type NodeId } from '@/api/types'
@@ -15,7 +15,7 @@ import { t } from '@/i18n'
 import { REPORT_INTERVAL_SECS } from '@/lib/product'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { cn } from '@/lib/utils'
-import { useNetwork } from '@/pages/networks/context'
+import { networkPath, useNetwork } from '@/pages/networks/context'
 import { AddNodeDialog } from '@/pages/nodes/AddNodeDialog'
 import { useLineColors } from '@/topology/colors'
 import { LineSample } from '@/topology/line-edge'
@@ -25,11 +25,14 @@ import { nextPick, type Pair, readPair, writePair } from '@/topology/pair'
 import { BackboneView } from './BackboneView'
 import { MatrixLegend, MatrixView } from './MatrixView'
 import { PairPanel } from './PairPanel'
+import { TestMatrixView } from './TestMatrixView'
 import { TopologyGraph } from './TopologyGraph'
 
 const g = t.topology
 
-type View = 'graph' | 'matrix' | 'backbone'
+type View = 'graph' | 'matrix' | 'backbone' | 'tests'
+
+const VIEWS: readonly View[] = ['graph', 'matrix', 'backbone', 'tests']
 
 function GraphLegend() {
   const colors = useLineColors()
@@ -72,17 +75,18 @@ function GraphLegend() {
 }
 
 /**
- * 拓扑：节点、relay 和它们之间现在走的路（白皮书 §7.7）。两种看法共用同一份路由矩阵：
+ * 拓扑：整个网络。节点、relay 和它们之间现在走的路（白皮书 §7.7）。两种看法共用同一份路由矩阵：
  * 实时图（看得快）和路由矩阵（精确）。选中的一对节点写在地址里，两种看法之间、和路径诊断之间来回切换时跟着走。
- * 第三个标签页"骨干"是另一份数据：relay 之间测的延迟，每次现问节点。
+ * 另外两个视图是别的数据："骨干"是 relay 之间测的延迟，每次现问节点；"全网测试"对每一对发包实测（文档 §19），
+ * 点开一格去路径诊断看那一对。
  */
 export function TopologyPage() {
   useDocumentTitle(g.title)
   const network = useNetwork()
   const [params, setParams] = useSearchParams()
+  const navigate = useNavigate()
   const [adding, setAdding] = useState(false)
-  const requested = params.get('view')
-  const view: View = requested === 'matrix' || requested === 'backbone' ? requested : 'graph'
+  const view: View = VIEWS.find((candidate) => candidate === params.get('view')) ?? 'graph'
   const pair = readPair(params)
 
   const matrix = useQuery(q.matrix(network.id))
@@ -138,6 +142,7 @@ export function TopologyPage() {
               { value: 'graph', label: g.viewGraph },
               { value: 'matrix', label: g.viewMatrix },
               { value: 'backbone', label: g.viewBackbone },
+              { value: 'tests', label: g.viewTests },
             ]}
           />
         }
@@ -146,36 +151,29 @@ export function TopologyPage() {
       {view === 'backbone' ? (
         // 骨干是另一份数据（relay 之间测的），和选中的那一对节点无关，也不看路由矩阵。
         <BackboneView network={network} name={name} />
+      ) : view === 'tests' ? (
+        <TestMatrixView
+          network={network}
+          nodes={nodes.data ?? []}
+          onOpen={(test, picked) =>
+            void navigate(`${networkPath(network.id, 'diagnosis')}?a=${picked.a}&b=${picked.b}&test=${test}`)
+          }
+        />
       ) : (
         <>
-          <div className="mb-6 space-y-3">
+          {/* 选两个节点（也可以在图上、矩阵里点），右边一句多久更新一次。 */}
+          <div className="mb-6 flex flex-wrap items-end justify-between gap-x-6 gap-y-2">
             <PairPicker
               nodes={nodes.data ?? []}
               pair={pair}
               onChange={setPair}
               labels={{ a: g.pickA, b: g.pickB, swap: g.swap }}
+              clearLabel={g.clearPair}
             />
-            <div className="flex min-h-7 flex-wrap items-center justify-between gap-x-6 gap-y-1 text-[13px]">
-              {nodeA !== undefined && nodeB !== undefined ? (
-                <span className="flex items-center gap-2">
-                  <span className="font-medium" data-testid="watching">
-                    {g.watching(nodeA.name, nodeB.name)}
-                  </span>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="text-muted-foreground hover:text-foreground"
-                    onClick={() => setPair({ a: null, b: null })}
-                  >
-                    <X aria-hidden />
-                    {g.clearPair}
-                  </Button>
-                </span>
-              ) : (
-                <span className="text-muted-foreground">{g.pickHint}</span>
-              )}
-              <span className="text-xs text-muted-foreground">{t.common.updatedEvery(REPORT_INTERVAL_SECS)}</span>
-            </div>
+            <p className="flex h-9 items-center text-xs text-muted-foreground">
+              {selection === null ? `${g.pickHint} · ` : null}
+              {t.common.updatedEvery(REPORT_INTERVAL_SECS)}
+            </p>
           </div>
 
           {matrix.isError && matrix.data === undefined ? (

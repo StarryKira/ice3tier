@@ -35,7 +35,7 @@ describe('describeLeg：路径诊断里一个方向怎么说', () => {
       sourceTone: 'ok',
       rtt: '12 ms',
       age: null,
-      since: p.since(t.time.minutesAgo(5)),
+      since: t.time.minutesAgo(5),
       sinceReason: '直连打通了',
     })
     expect(view.route).toEqual({
@@ -105,7 +105,7 @@ describe('现问到时的细节：直连的方式、选路模式、原因', () =
     const view = describeLeg(leg({ direct: 'punched', mode: 'lowest_cost', reason: '直连可用' }), name)
     expect(view.route?.detail).toBe(t.routes.directKind.punched)
     expect(view.route?.detailHint).toBe(t.routes.directKindHint.punched)
-    expect(view.mode).toEqual({ label: p.modeLabel(p.mode.lowest_cost), hint: p.modeHint.lowest_cost })
+    expect(view.mode).toEqual({ label: p.mode.lowest_cost, hint: p.modeHint.lowest_cost })
     expect(view.reason).toBe('直连可用')
   })
 

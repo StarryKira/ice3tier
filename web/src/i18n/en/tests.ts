@@ -1,28 +1,20 @@
 import type { Messages } from '../messages'
 
 export const tests: Messages['tests'] = {
-  title: 'Connectivity tests',
-  subtitle: 'Can two nodes connect directly, and what latency and throughput do they get directly and via relays',
-  tabPair: 'Pair',
-  tabMatrix: 'Whole network',
-
-  nodeA: 'Node A',
-  nodeB: 'Node B',
-  swap: 'Swap',
+  title: 'Test',
+  subtitle: 'Sends probes: can they connect directly, and the latency and loss of each path',
+  none: 'This pair has not been tested yet',
   throughput: 'Measure throughput',
   throughputHint: 'Up to 5 seconds or 20 MB each way; uses bandwidth',
   start: 'Start test',
   started: (a, b) => `Testing ${a} and ${b}`,
-  pickTwo: 'Pick two different nodes',
   cancel: 'Cancel',
   cancelled: 'Test cancelled',
-  again: 'Test again',
 
   state: { running: 'Running', done: 'Done', failed: 'Failed', cancelled: 'Cancelled' },
   pending: 'Measuring…',
   skipped: 'Not tested',
   failed: 'No result',
-  startedAt: (when) => `Started ${when}`,
   tookSecs: (secs) => `took ${secs} s`,
 
   directTitle: 'Direct',
@@ -30,16 +22,15 @@ export const tests: Messages['tests'] = {
   directNo: 'No direct path',
   directAlready: 'Already direct',
   directIn: (ms) => `up in ${ms} ms`,
-  sides: 'Each end',
   udpOk: 'UDP works',
   udpBlocked: 'UDP blocked',
   udpUnknown: 'UDP unknown',
   natVaries: 'Symmetric NAT',
   candidates: (n) => (n === 1 ? '1 candidate address' : `${n} candidate addresses`),
 
-  qualityDirect: 'Direct path',
-  qualityRelay: 'Relay path',
-  path: 'Path',
+  qualityTitle: 'Paths',
+  qualityDirect: 'Direct',
+  qualityRelay: 'Via relay',
   latency: 'Latency',
   latencyHint: 'Min / avg / p95',
   latencyValue: (min, avg, p95) => `${min} / ${avg} / ${p95}`,
@@ -60,28 +51,11 @@ export const tests: Messages['tests'] = {
   throughputTitle: 'Throughput',
   up: 'Up',
   down: 'Down',
-  throughputNote: (congestion, secs) => `${congestion}, ${secs} s each`,
+  throughputNote: (congestion, ms) =>
+    `${congestion}, ${ms >= 1000 ? `${Math.round(ms / 100) / 10} s` : `${ms} ms`} each`,
   throughputCaveat: 'Short runs catch congestion control still ramping up, so numbers read low',
   stoppedBy: { bytes: 'hit 20 MB', time: 'hit 5 s', finished: 'finished' },
 
-  routeTitle: 'Routing',
-  routeDirection: (from, to) => `${from} → ${to}`,
-  routeNow: 'Now',
-  modeDefault: 'Default',
-  modeLowestCost: 'Lowest latency',
-  inUse: 'in use',
-  reasons: {
-    lan: 'same LAN',
-    direct: 'direct when possible',
-    peer_is_relay: 'peer is a relay',
-    own_relay: "peer uses this node's relay",
-    peer_relay: "peer's relay",
-    no_shared_relay: 'no relay serves both ends, so a chain of relays',
-    lowest_cost: 'lowest cost',
-    within_margin: 'stays on the current path',
-    no_path: 'no path',
-  },
-  withinMargin: (route, ms) => `${route} is only ${ms} cheaper, not enough to switch`,
   noRoute: 'No path',
 
   problems: {
@@ -136,6 +110,4 @@ export const tests: Messages['tests'] = {
   matrixCellOpen: (a, b) => `Test of ${a} and ${b}`,
   matrixLegend:
     'Each cell shows where latency was measured and the average; hover for reasons, click for the full result',
-
-  testAction: 'Test',
 }

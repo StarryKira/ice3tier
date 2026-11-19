@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { type ComponentType, lazy, Suspense } from 'react'
-import { Navigate, Route, Routes } from 'react-router'
+import { Navigate, Route, Routes, useSearchParams } from 'react-router'
 
 import { q } from '@/api/queries'
 
@@ -23,7 +23,6 @@ import { NotFoundPage } from '@/pages/NotFoundPage'
 import { OverviewPage } from '@/pages/overview/OverviewPage'
 import { PairsPage } from '@/pages/pairs/PairsPage'
 import { ProxiesPage } from '@/pages/proxies/ProxiesPage'
-import { TestsPage } from '@/pages/tests/TestsPage'
 import { TokensPage } from '@/pages/tokens/TokensPage'
 
 // 访问控制页和拓扑页带着画图的库，单独成块：别的页面用不到它。
@@ -87,7 +86,8 @@ export function AppRoutes() {
             <Route path="forwards" element={<ForwardsPage />} />
             <Route path="topology" element={<Lazy page={TopologyPage} />} />
             <Route path="diagnosis" element={<Lazy page={PathPage} />} />
-            <Route path="tests" element={<TestsPage />} />
+            {/* 连通性测试页并进来了：单对测试在路径诊断里，全网测试是拓扑的一个视图。旧链接带着选的节点和测试过去。 */}
+            <Route path="tests" element={<TestsRedirect />} />
             <Route path="tokens" element={<TokensPage />} />
             <Route path="pairs" element={<PairsPage />} />
             <Route path="network" element={<NetworkPage />} />
@@ -107,4 +107,16 @@ function HomeRedirect() {
   const networks = useQuery(q.networks())
   const current = pickCurrentNetwork(networks.data ?? [])
   return current === undefined ? <Navigate to="/welcome" replace /> : <Navigate to={networkPath(current.id)} replace />
+}
+
+function TestsRedirect() {
+  const [params] = useSearchParams()
+  if (params.get('tab') === 'matrix') return <Navigate to="../topology?view=tests" replace />
+  const kept = new URLSearchParams()
+  for (const key of ['a', 'b', 'test']) {
+    const value = params.get(key)
+    if (value !== null) kept.set(key, value)
+  }
+  const query = kept.toString()
+  return <Navigate to={`../diagnosis${query === '' ? '' : `?${query}`}`} replace />
 }

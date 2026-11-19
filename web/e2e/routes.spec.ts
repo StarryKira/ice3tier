@@ -84,7 +84,6 @@ test('拓扑的实时图：三个节点、relay 画在中间，选两个节点�
 
   await pick(t.topology.pickA, nodes.laptop.ip)
   await pick(t.topology.pickB, nodes.nas.ip)
-  await expect(page.getByTestId('watching')).toHaveText(t.topology.watching('laptop', 'nas'))
   await expect(page).toHaveURL(/[?&]a=2&b=3/)
   // 两个方向各一段，画在最上面；面板上用文字再说一遍。
   await expect(graph.locator('.react-flow__edge')).toHaveCount(5)
@@ -94,9 +93,9 @@ test('拓扑的实时图：三个节点、relay 画在中间，选两个节点�
 
   // 在图上先后点两个节点，和用选择器选一样。
   await graph.locator(nodeLabel('hk', true)).click()
-  await expect(page.getByTestId('watching')).toHaveCount(0)
+  await expect(page.getByTestId('pair-panel')).toHaveCount(0)
   await graph.locator(nodeLabel('nas', false)).click()
-  await expect(page.getByTestId('watching')).toHaveText(t.topology.watching('hk', 'nas'))
+  await expect(page.getByTestId('pair-forward')).toContainText(t.topology.forward('hk', 'nas'))
   await expect(page).toHaveURL(/[?&]a=1&b=3/)
 })
 
@@ -105,7 +104,7 @@ test('路由矩阵：每个方向一格，点一格选中这一对', async () =>
   const matrix = page.getByTestId('route-matrix')
   await expect(matrix).toBeVisible()
   // 选中的那一对跟着切过来了。
-  await expect(page.getByTestId('watching')).toHaveText(t.topology.watching('hk', 'nas'))
+  await expect(page.getByTestId('pair-forward')).toContainText(t.topology.forward('hk', 'nas'))
   await expect(matrix.locator('[data-testid^="cell-"]')).toHaveCount(6)
   const cell = page.getByTestId(`cell-${nodes.laptop.id}-${nodes.hk.id}`)
   // 节点说得出直连的方式时（新的节点）写在括号里，旧的节点不写。
@@ -114,7 +113,7 @@ test('路由矩阵：每个方向一格，点一格选中这一对', async () =>
   )
   await expect(cell).toHaveAccessibleName(new RegExp(literal(t.routes.addr(''))))
   await cell.click()
-  await expect(page.getByTestId('watching')).toHaveText(t.topology.watching('laptop', 'hk'))
+  await expect(page.getByTestId('pair-forward')).toContainText(t.topology.forward('laptop', 'hk'))
   await expect(cell).toHaveAttribute('aria-pressed', 'true')
   await expect(page).toHaveURL(/view=matrix/)
 

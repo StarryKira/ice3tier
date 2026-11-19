@@ -47,18 +47,18 @@ function cellTip(cell: MatrixCell, nodes: readonly { id: NodeId; name: string }[
   return parts.length === 0 ? null : parts.join('；')
 }
 
-interface MatrixViewProps {
+interface TestMatrixViewProps {
   network: Network
   nodes: readonly Node[]
-  /** 点开一格：在单对测试里看这一对的完整结果。 */
+  /** 点开一格：在路径诊断里看这一对的完整结果。 */
   onOpen: (test: number, pair: { a: NodeId; b: NodeId }) => void
 }
 
 /**
- * 全网测试：对每一对节点测直连和延迟（不测吞吐、不算选路），controller 分批跑。结果是一张节点 × 节点的表，
- * 两半对称；点开一格看那一对的完整结果。矩阵只在 controller 的内存里，它重启之后这里是空的。
+ * 拓扑的"全网测试"：对每一对节点测直连和延迟（不测吞吐、不算选路），controller 分批跑。结果是一张节点 × 节点的表，
+ * 两半对称；点开一格去路径诊断看那一对的完整结果。矩阵只在 controller 的内存里，它重启之后这里是空的。
  */
-export function MatrixView({ network, nodes, onOpen }: MatrixViewProps) {
+export function TestMatrixView({ network, nodes, onOpen }: TestMatrixViewProps) {
   const run = useQuery(q.testMatrix(network.id))
   const start = useAction(network.id, {
     mutationFn: () => api.startTestMatrix(network.id),
@@ -101,7 +101,7 @@ export function MatrixView({ network, nodes, onOpen }: MatrixViewProps) {
       </Toolbar>
 
       {run.isError ? (
-        <ErrorState title={s.tabMatrix} error={run.error} onRetry={() => void run.refetch()} />
+        <ErrorState title={t.topology.viewTests} error={run.error} onRetry={() => void run.refetch()} />
       ) : run.isPending ? (
         <SkeletonBlock lines={4} />
       ) : data === null ? (

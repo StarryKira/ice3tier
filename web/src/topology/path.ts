@@ -46,14 +46,14 @@ export interface LegView {
     detail: string | null
     detailHint: string | null
   } | null
-  /** "选路模式：默认"和它的说明。只有现问到、发送方的版本会说时才有。 */
+  /** 选路模式的名字（"默认"）和它的说明。只有现问到、发送方的版本会说时才有。 */
   mode: { label: string; hint: string } | null
   /** 发送方的路由层说的"为什么是这条"，是节点的原话，原样显示。有没有同 `mode`。 */
   reason: string | null
   rtt: string | null
   /** "6 秒前的数据"。刚问到的不写（是现在）；没有数据时是 `null`。 */
   age: string | null
-  /** 这条路是什么时候换上的："切换于 5 分钟前"。 */
+  /** 这条路是什么时候换上的："5 分钟前"；现问到、启动以来没换过时是"启动以来没有切换"。 */
   since: string | null
   /** 换上它的原因：节点的原话，作为 `since` 下面的补充。 */
   sinceReason: string | null
@@ -88,7 +88,7 @@ export function describeLeg(leg: PathLeg, name: (id: NodeId) => string): LegView
         }
   const age = leg.age_secs === null || state === 'query' ? null : p.age(formatAge(leg.age_secs))
   let since: string | null = null
-  if (leg.since !== null) since = p.since(formatAge(leg.since.secs_ago))
+  if (leg.since !== null) since = formatAge(leg.since.secs_ago)
   else if (state === 'query' && route !== null) since = p.sinceUnknown
   const sinceReason = leg.since === null || leg.since.reason === '' ? null : leg.since.reason
   const mode = leg.mode ?? null
@@ -98,7 +98,7 @@ export function describeLeg(leg: PathLeg, name: (id: NodeId) => string): LegView
     mode:
       mode === null
         ? null
-        : { label: p.modeLabel(textFor(p.mode, mode) ?? mode), hint: textFor(p.modeHint, mode) ?? '' },
+        : { label: textFor(p.mode, mode) ?? mode, hint: textFor(p.modeHint, mode) ?? '' },
     reason: reason === null || reason === '' ? null : reason,
     sourceLabel: textFor(p.source, state) ?? p.source.unknown,
     sourceTone: SOURCE_TONE[state],

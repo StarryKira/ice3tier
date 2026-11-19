@@ -29,7 +29,6 @@ export const nav: Messages['nav'] = {
   groupDiagnose: 'Diagnostics',
   topology: 'Topology',
   diagnosis: 'Path diagnosis',
-  tests: 'Connectivity tests',
   groupManage: 'Manage',
   tokens: 'Enrollment tokens',
   pairs: 'Node pairs',

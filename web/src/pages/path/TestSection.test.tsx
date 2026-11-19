@@ -2,13 +2,13 @@ import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
-import { type MatrixRun, type NodeRef, type TestView } from '@/api/types'
+import { type NodeRef, type PathView, type TestView } from '@/api/types'
 import { t } from '@/i18n'
 import { msText, permilleText, problemText, rateText } from '@/lib/tests'
-import { makeNode } from '@/test/fixtures'
+import { direct, makeNode, makeOverview } from '@/test/fixtures'
 import { fakeApi, NETWORK, renderWithApp } from '@/test/harness'
 
-import { TestsPage } from './TestsPage'
+import { PathPage } from './PathPage'
 
 const s = t.tests
 const ref = (id: number, name: string): NodeRef => ({ id, name, virtual_ip: `10.66.0.${id}` })
@@ -141,11 +141,47 @@ const DONE: TestView = {
   notes: [],
 }
 
+/** 现在怎么走：这几个测试不看它，给一个最简单的。 */
+const PATH: PathView = {
+  forward: {
+    from: ref(2, 'laptop'),
+    to: ref(5, 'nas'),
+    source: 'query',
+    route: direct('203.0.113.7:20330'),
+    rtt_ms: 61,
+    age_secs: 0,
+    since: null,
+  },
+  reverse: {
+    from: ref(5, 'nas'),
+    to: ref(2, 'laptop'),
+    source: 'query',
+    route: direct('198.51.100.4:20330'),
+    rtt_ms: 61,
+    age_secs: 0,
+    since: null,
+  },
+}
+
+/** 同一对早一些的一次：只测了直连，不能直连。 */
+const OLDER: TestView = {
+  ...DONE,
+  id: 11,
+  started_at: DONE.started_at - 3600,
+  finished_at: DONE.started_at - 3590,
+  direct: { state: 'done', ok: false, kind: null, elapsed_ms: null, already: false, problem: null, sides: [] },
+  direct_quality: null,
+  relay_quality: [],
+  route: null,
+}
+
 function setup(extra: Record<string, unknown> = {}) {
   return fakeApi({
     'GET /networks/1/nodes': [laptop, hk, nas],
+    'GET /networks/1/path': PATH,
     'GET /networks/1/tests': [DONE],
     'GET /networks/1/tests/12': DONE,
+    'GET /update': makeOverview(),
     ...extra,
   })
 }
@@ -169,12 +205,12 @@ describe('写法', () => {
   })
 })
 
-describe('连通性测试', () => {
-  it('打开一个测试：直连、选路、直连质量和中继质量各一张卡片', async () => {
+describe('路径诊断里的实测', () => {
+  it('左边直连能不能通，右边各条路并排比：一列一条路，行是延迟、抖动、丢包、代价、各段、吞吐', async () => {
     setup()
-    renderWithApp(<TestsPage />, { network: NETWORK, route: '/n/1/tests?test=12&a=2&b=5' })
+    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5&test=12' })
     const current = await screen.findByTestId('test-current')
-    expect(await within(current).findByTestId('test-state')).toHaveTextContent(s.state.done)
+    expect(screen.getByTestId('test-state')).toHaveTextContent(s.state.done)
 
     const direct = within(current).getByTestId('test-direct')
     expect(direct).toHaveTextContent(s.directOk)
@@ -182,47 +218,77 @@ describe('连通性测试', () => {
     expect(direct).toHaveTextContent(s.directIn(640))
     expect(direct).toHaveTextContent(s.candidates(3))
 
-    const [directPath, relayPath] = within(current).getAllByTestId('test-path')
-    expect(directPath).toHaveTextContent(s.latencyValue(t.common.ms(58), t.common.ms(61), t.common.ms(66)))
-    expect(directPath).toHaveTextContent(s.lossSplit('1%', '2%'))
-    expect(directPath).toHaveTextContent('19.1 Mbps')
-    expect(directPath).toHaveTextContent(s.throughputNote('BBR', '5'))
-    expect(relayPath).toHaveTextContent(t.nodes.detail.viaRelay('hk'))
-    expect(relayPath).toHaveTextContent(s.pickedBy.lowest_cost)
-    expect(relayPath).toHaveTextContent(`hk → nas：${t.common.ms(20)}`)
-
-    // 延迟优先留在现在的路上：写出那条更便宜的差多少。
-    const route = within(current).getByTestId('test-route')
-    expect(route).toHaveTextContent(s.reasons.within_margin)
-    expect(route).toHaveTextContent(s.withinMargin(t.nodes.detail.viaRelay('hk'), t.common.ms(2.2)))
+    // 第一列是直连，第二列经 hk，并写出哪种选路模式会走它。
+    expect(screen.getByTestId('test-path-0')).toHaveTextContent(s.qualityDirect)
+    expect(screen.getByTestId('test-path-1')).toHaveTextContent(t.nodes.detail.viaRelay('hk'))
+    expect(screen.getByTestId('test-path-1')).toHaveTextContent(s.pickedBy.lowest_cost)
+    expect(screen.getByTestId('test-path-0-latency')).toHaveTextContent(
+      s.latencyValue(t.common.ms(58), t.common.ms(61), t.common.ms(66)),
+    )
+    expect(screen.getByTestId('test-path-0-loss')).toHaveTextContent(s.lossSplit('1%', '2%'))
+    expect(screen.getByTestId('test-path-0-throughput')).toHaveTextContent('19.1 Mbps')
+    expect(screen.getByTestId('test-path-0-throughput')).toHaveTextContent(s.throughputNote('BBR', 4998))
+    expect(s.throughputNote('BBR', 4998)).toContain('5')
+    expect(s.throughputNote('BBR', 38)).toContain(t.common.ms(38))
+    expect(screen.getByTestId('test-path-1-hops')).toHaveTextContent(`hk → nas：${t.common.ms(20)}`)
+    expect(screen.getByTestId('test-path-1-throughput')).toHaveTextContent('—')
+    // 选路怎么选在上面"现在怎么走"和候选路径里，这里不再列一遍。
+    expect(screen.queryByTestId('test-route')).not.toBeInTheDocument()
   })
 
-  it('选好两个节点开始：发出请求，接着看这个测试；同一个节点不能选两次', async () => {
+  it('没点名看哪一次：看这一对最近的一次；测过不止一次时列出来，点一行换着看', async () => {
     const user = userEvent.setup()
-    const api = setup({
-      'POST /networks/1/tests': {
-        ...DONE,
-        id: 13,
-        state: 'running',
-        direct: null,
-        direct_quality: null,
-        relay_quality: [],
-        route: null,
-      },
-      'GET /networks/1/tests/13': { ...DONE, id: 13 },
-    })
-    renderWithApp(<TestsPage />, { network: NETWORK, route: '/n/1/tests?a=2&b=2' })
-    expect(await screen.findByText(s.pickTwo)).toBeVisible()
-    expect(screen.getByRole('button', { name: s.start })).toBeDisabled()
+    const api = setup({ 'GET /networks/1/tests': [DONE, OLDER], 'GET /networks/1/tests/11': OLDER })
+    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5' })
+    expect(await screen.findByTestId('test-current')).toBeVisible()
+    expect(api.callsTo('GET /networks/1/tests')[0]?.query.toString()).toContain('a=2&b=5')
+    expect(screen.getByTestId('test-row-12')).toHaveAttribute('aria-current', 'true')
 
-    await user.click(screen.getByRole('combobox', { name: s.nodeB }))
-    await user.click(await screen.findByRole('option', { name: /nas/ }))
+    await user.click(screen.getByTestId('test-row-11'))
+    await waitFor(() => expect(within(screen.getByTestId('test-direct')).getByText(s.directNo)).toBeVisible())
+    expect(screen.getByTestId('test-row-11')).toHaveAttribute('aria-current', 'true')
+  })
+
+  it('只测过一次：不列"最近的测试"；没测过：说一句', async () => {
+    setup()
+    const { unmount } = renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5' })
+    expect(await screen.findByTestId('test-current')).toBeVisible()
+    expect(screen.queryByRole('table', { name: s.historyTitle })).not.toBeInTheDocument()
+    unmount()
+    setup({ 'GET /networks/1/tests': [] })
+    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5' })
+    expect(await screen.findByText(s.none)).toBeVisible()
+  })
+
+  it('开始测试：发出请求，接着看这个测试；进行中能取消', async () => {
+    const user = userEvent.setup()
+    const running: TestView = {
+      ...DONE,
+      id: 13,
+      state: 'running',
+      finished_at: null,
+      direct: null,
+      direct_quality: null,
+      relay_quality: [],
+      route: null,
+    }
+    const api = setup({
+      'GET /networks/1/tests': [],
+      'POST /networks/1/tests': running,
+      'GET /networks/1/tests/13': running,
+      'POST /networks/1/tests/13/cancel': { ...running, state: 'cancelled' },
+    })
+    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5' })
+    expect(await screen.findByText(s.none)).toBeVisible()
     await user.click(screen.getByRole('checkbox', { name: new RegExp(s.throughput) }))
     await user.click(screen.getByRole('button', { name: s.start }))
     await waitFor(() => expect(api.callsTo('POST /networks/1/tests')).toHaveLength(1))
     expect(api.callsTo('POST /networks/1/tests')[0]?.body).toEqual({ a: 2, b: 5, throughput: true })
     expect(await screen.findByText(s.started('laptop', 'nas'))).toBeVisible()
-    await waitFor(() => expect(api.callsTo('GET /networks/1/tests/13').length).toBeGreaterThan(0))
+    expect(await screen.findByTestId('test-state')).toHaveTextContent(s.state.running)
+
+    await user.click(screen.getByRole('button', { name: s.cancel }))
+    await waitFor(() => expect(api.callsTo('POST /networks/1/tests/13/cancel')).toHaveLength(1))
   })
 
   it('整个测试做不了：写出原因和是哪个节点', async () => {
@@ -237,84 +303,20 @@ describe('连通性测试', () => {
         route: null,
       },
     })
-    renderWithApp(<TestsPage />, { network: NETWORK, route: '/n/1/tests?test=12' })
+    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5&test=12' })
     expect(await screen.findByText(s.problemOf('nas', s.problems.node_offline))).toBeVisible()
   })
 
-  it('全网测试：一张节点 × 节点的表，格子里是 P2P 或中继和平均延迟，点开看这一对', async () => {
+  it('还没选两个节点：说一句，下面是整个网络最近的测试，点一行就看那一对', async () => {
     const user = userEvent.setup()
-    const run: MatrixRun = {
-      id: 3,
-      network: 1,
-      state: 'done',
-      started_at: 1_794_798_564,
-      finished_at: 1_794_798_600,
-      concurrency: 4,
-      total: 3,
-      finished: 3,
-      nodes: [ref(2, 'laptop'), ref(3, 'hk'), ref(5, 'nas')],
-      cells: [
-        {
-          a: 2,
-          b: 3,
-          state: 'done',
-          test: 40,
-          direct_ok: true,
-          direct_kind: 'punched',
-          direct_elapsed_ms: 640,
-          route: { via: 'direct', addr: 'x' },
-          latency: latency(61),
-          problem: null,
-        },
-        {
-          a: 2,
-          b: 5,
-          state: 'done',
-          test: 12,
-          direct_ok: false,
-          direct_kind: null,
-          direct_elapsed_ms: null,
-          route: { via: 'relay', relays: [3] },
-          latency: latency(52),
-          problem: { code: 'mapping_varies', node: 5, message: '' },
-        },
-        {
-          a: 3,
-          b: 5,
-          state: 'skipped',
-          test: null,
-          direct_ok: null,
-          direct_kind: null,
-          direct_elapsed_ms: null,
-          route: null,
-          latency: null,
-          problem: { code: 'node_offline', node: 5, message: '' },
-        },
-      ],
-    }
-    setup({ 'GET /networks/1/tests/matrix': run })
-    renderWithApp(<TestsPage />, { network: NETWORK, route: '/n/1/tests?tab=matrix' })
-    expect(await screen.findByTestId('matrix-progress')).toHaveTextContent(s.matrixProgress(3, 3))
-    // 两半对称。
-    expect(screen.getByTestId('matrix-cell-2-3')).toHaveTextContent(`${s.matrixCellP2P}${t.common.ms(61)}`)
-    expect(screen.getByTestId('matrix-cell-3-2')).toHaveTextContent(`${s.matrixCellP2P}${t.common.ms(61)}`)
-    expect(screen.getByTestId('matrix-cell-2-5')).toHaveTextContent(`${s.matrixCellRelay}${t.common.ms(52)}`)
-    expect(screen.getByTestId('matrix-cell-3-5')).toHaveTextContent('—')
-
-    await user.click(screen.getByRole('button', { name: s.matrixCellOpen('laptop', 'nas') }))
+    const api = setup()
+    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis' })
+    expect(await screen.findByText(t.path.pickHint)).toBeVisible()
+    const row = await screen.findByTestId('test-row-12')
+    expect(row).toHaveTextContent('laptop')
+    expect(row).toHaveTextContent('nas')
+    await user.click(row)
     expect(await screen.findByTestId('test-current')).toBeVisible()
-  })
-
-  it('还没跑过全网测试：controller 回 404 时是一句话和开始的按钮', async () => {
-    setup({
-      'GET /networks/1/tests/matrix': () =>
-        new Response(JSON.stringify({ error: { code: 'not_found', message: '' } }), {
-          status: 404,
-          headers: { 'Content-Type': 'application/json' },
-        }),
-    })
-    renderWithApp(<TestsPage />, { network: NETWORK, route: '/n/1/tests?tab=matrix' })
-    expect(await screen.findByText(s.matrixEmpty)).toBeVisible()
-    expect(screen.getByRole('button', { name: s.matrixStart })).toBeEnabled()
+    expect(api.callsTo('GET /networks/1/path')[0]?.query.toString()).toBe('from=2&to=5')
   })
 })

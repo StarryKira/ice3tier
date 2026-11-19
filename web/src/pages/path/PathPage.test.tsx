@@ -53,9 +53,9 @@ describe('路径诊断', () => {
     expect(forward).toHaveAttribute('data-source', 'query')
     expect(forward).toHaveTextContent(p.forward('laptop', 'nas'))
     expect(forward).toHaveTextContent('12 ms')
-    expect(within(forward).getByTestId('path-forward-since')).toHaveTextContent(p.since(t.time.minutesAgo(5)))
-    // 换路的原因是节点的原话，原样写在下面一行。
-    expect(within(forward).getByTestId('path-forward-since-reason')).toHaveTextContent('直连打通了')
+    expect(within(forward).getByTestId('path-forward-since')).toHaveTextContent(t.time.minutesAgo(5))
+    // 换路的原因是节点的原话，原样写在"原因"那一行。
+    expect(within(forward).getByTestId('path-forward-reason')).toHaveTextContent('直连打通了')
     expect(within(forward).getByTestId('path-forward-source')).toHaveTextContent(p.source.query)
 
     const reverse = screen.getByTestId('path-reverse')
@@ -147,15 +147,16 @@ describe('现问到时的细节：方式、模式、原因、候选路径', () =
     renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=1' })
     const forward = await screen.findByTestId('path-forward')
     expect(within(forward).getByTestId('path-forward-detail')).toHaveTextContent(t.routes.directKind.punched)
-    // 原因是节点的原话：照原样，前面一个"原因"。
-    expect(within(forward).getByTestId('path-forward-reason')).toHaveTextContent(`${p.reasonLabel} · 直连可用`)
-    expect(forward).toHaveTextContent(p.modeLabel(p.mode.direct_first))
+    // 原因是节点的原话，照原样；换路时说的不一样时跟在切换的时间下面。
+    expect(within(forward).getByTestId('path-forward-reason')).toHaveTextContent('直连可用')
+    expect(within(forward).getByTestId('path-forward-since-reason')).toHaveTextContent('直连打通了')
+    expect(within(forward).getByTestId('path-forward-mode')).toHaveTextContent(p.mode.direct_first)
     expect(within(screen.getByTestId('path-reverse')).getByTestId('path-reverse-detail')).toHaveTextContent(
       t.routes.legTransport.tcp,
     )
 
     const table = within(screen.getByTestId('candidates-forward')).getByRole('table', {
-      name: p.candidatesTitle('laptop', 'nas'),
+      name: `${p.candidatesTitle} ${p.forward('laptop', 'nas')}`,
     })
     const rows = within(table).getAllByRole('row').slice(1)
     expect(rows).toHaveLength(2)

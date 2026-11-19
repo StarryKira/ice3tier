@@ -1,27 +1,19 @@
-/** 连通性测试（文档 §19）。 */
+/** 主动测试（文档 §19）：路径诊断里的"实测"，和拓扑里的"全网测试"。 */
 export const tests = {
-  title: '连通性测试',
-  subtitle: '测一对节点能不能直连，直连和经中继的延迟、吞吐',
-  tabPair: '单对测试',
-  tabMatrix: '全网测试',
-
-  nodeA: '节点 A',
-  nodeB: '节点 B',
-  swap: '对调',
+  title: '实测',
+  subtitle: '发包测能不能直连，各条路的延迟和丢包',
+  none: '这一对还没有测过',
   throughput: '测吞吐',
   throughputHint: '每个方向最多 5 秒或 20 MB，会占用带宽',
   start: '开始测试',
   started: (a: string, b: string) => `已开始测试 ${a} 和 ${b}`,
-  pickTwo: '选择两个不同的节点',
   cancel: '取消',
   cancelled: '测试已取消',
-  again: '再测一次',
 
   state: { running: '进行中', done: '完成', failed: '失败', cancelled: '已取消' },
   pending: '测量中…',
   skipped: '没有测',
   failed: '没测出来',
-  startedAt: (when: string) => `开始于 ${when}`,
   tookSecs: (secs: number) => `用时 ${secs} 秒`,
 
   directTitle: '直连',
@@ -29,16 +21,15 @@ export const tests = {
   directNo: '不能直连',
   directAlready: '已经在直连',
   directIn: (ms: number) => `${ms} ms 打通`,
-  sides: '两端',
   udpOk: 'UDP 通',
   udpBlocked: 'UDP 不通',
   udpUnknown: 'UDP 不明',
   natVaries: '对称型 NAT',
   candidates: (n: number) => `${n} 个候选地址`,
 
-  qualityDirect: '直连质量',
-  qualityRelay: '中继质量',
-  path: '路径',
+  qualityTitle: '各条路',
+  qualityDirect: '直连',
+  qualityRelay: '经中继',
   latency: '延迟',
   latencyHint: '最小 / 平均 / P95',
   latencyValue: (min: string, avg: string, p95: string) => `${min} / ${avg} / ${p95}`,
@@ -59,28 +50,12 @@ export const tests = {
   throughputTitle: '吞吐',
   up: '上行',
   down: '下行',
-  throughputNote: (congestion: string, secs: string) => `${congestion}，各 ${secs} 秒`,
+  /** 每个方向用了多久：一秒以上写秒，不到一秒（局域网上 20 MB 一下就传完）写毫秒。 */
+  throughputNote: (congestion: string, ms: number) =>
+    `${congestion}，各 ${ms >= 1000 ? `${Math.round(ms / 100) / 10} 秒` : `${ms} ms`}`,
   throughputCaveat: '时间短时拥塞控制还在起步，数会偏低',
   stoppedBy: { bytes: '到 20 MB', time: '到 5 秒', finished: '传完' },
 
-  routeTitle: '选路',
-  routeDirection: (from: string, to: string) => `${from} → ${to}`,
-  routeNow: '现在',
-  modeDefault: '默认',
-  modeLowestCost: '延迟优先',
-  inUse: '在用',
-  reasons: {
-    lan: '同一局域网',
-    direct: '能直连就直连',
-    peer_is_relay: '对端自己是中继',
-    own_relay: '对端挂在本节点的中继上',
-    peer_relay: '对端挂靠的中继',
-    no_shared_relay: '没有两端都用得上的中继，经一串中继',
-    lowest_cost: '代价最低',
-    within_margin: '留在现在的路上',
-    no_path: '没有能走的路',
-  },
-  withinMargin: (route: string, ms: string) => `${route} 只便宜 ${ms}，不够换路`,
   noRoute: '没有能走的路',
 
   problems: {
@@ -134,6 +109,4 @@ export const tests = {
   matrixCellRelay: '中继',
   matrixCellOpen: (a: string, b: string) => `${a} 和 ${b} 的测试`,
   matrixLegend: '格子里是延迟测在哪条路上和平均延迟；悬停看原因，点开看完整结果',
-
-  testAction: '测一下',
 }

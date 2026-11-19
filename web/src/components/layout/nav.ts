@@ -1,5 +1,4 @@
 import {
-  Activity,
   Cable,
   ArrowLeftRight,
   Boxes,
@@ -74,7 +73,6 @@ export const NAV_GROUPS: readonly NavGroup[] = [
     items: [
       item('topology', () => t.nav.topology, Waypoints),
       item('diagnosis', () => t.nav.diagnosis, Route),
-      item('tests', () => t.nav.tests, Activity),
     ],
   },
   {

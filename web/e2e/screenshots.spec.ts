@@ -768,23 +768,31 @@ test('有数据时：管理区和设置', async () => {
   await shot('settings-about')
 })
 
-test('连通性测试：真的测一对在线的节点，再跑一次全网', async () => {
+test('实测：在路径诊断里真的测一对在线的节点，再在拓扑里跑一次全网', async () => {
   test.setTimeout(120_000)
   const ts = t.tests
-  await page.getByRole('navigation', { name: t.nav.label }).getByRole('link', { name: ts.title }).click()
-  await page.getByRole('combobox', { name: ts.nodeA }).click()
+  await goTo(page, t.nav.diagnosis)
+  await expect(page.getByText(t.path.pickHint)).toBeVisible()
+  await shot('diagnosis-pick')
+  await page.getByRole('combobox', { name: t.path.pickFrom }).click()
   await page.getByRole('option', { name: /laptop/ }).click()
   await expect(page.getByRole('listbox')).toHaveCount(0)
-  await page.getByRole('combobox', { name: ts.nodeB }).click()
+  await page.getByRole('combobox', { name: t.path.pickTo }).click()
   await page.getByRole('option', { name: /gw-hk/ }).click()
+  await expect(page.getByTestId('path-forward')).toBeVisible()
+  await page.getByRole('checkbox', { name: new RegExp(ts.throughput) }).click()
   await page.getByRole('button', { name: ts.start }).click()
   await expect(page.getByTestId('test-state')).toHaveText(ts.state.done, { timeout: 60_000 })
-  await shot('tests-result')
+  await shot('diagnosis-test')
+  // 正文在面板里滚动，整页截图只有一屏：滚到结果那里再截一张。
+  await page.getByTestId('test-current').scrollIntoViewIfNeeded()
+  await shot('diagnosis-test-result', { fullPage: false })
 
-  await page.getByRole('tab', { name: ts.tabMatrix }).click()
+  await goTo(page, t.nav.topology)
+  await page.getByRole('radio', { name: t.topology.viewTests }).click()
   await page.getByRole('button', { name: ts.matrixStart }).click()
   await expect(page.getByTestId('matrix-progress')).toContainText(ts.matrixState.done, { timeout: 90_000 })
-  await shot('tests-matrix')
+  await shot('topology-tests')
 })
 
 test('找不到的东西', async () => {
@@ -1001,6 +1009,12 @@ test('英文：长度最要紧的几页', async ({ browser }) => {
   await english.goto(`${controller.baseUrl}/n/1/topology?a=3&b=2`)
   await expect(english.getByTestId('pair-panel')).toBeVisible()
   await enShot('topology-pair')
+
+  // 实测结果的表：列名、行名、徽标在英文里最长。laptop 和 gw-hk 在前面测过。
+  await english.goto(`${controller.baseUrl}/n/1/diagnosis?a=3&b=1`)
+  await expect(english.getByTestId('test-current')).toBeVisible()
+  await english.getByTestId('test-current').scrollIntoViewIfNeeded()
+  await enShot('diagnosis-test-result', { fullPage: false })
 
   await english.goto(`${controller.baseUrl}/settings/updates`)
   await expect(english.getByTestId('updates-tab')).toBeVisible()

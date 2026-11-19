@@ -28,7 +28,6 @@ export const nav = {
   groupDiagnose: '诊断',
   topology: '拓扑',
   diagnosis: '路径诊断',
-  tests: '连通性测试',
   groupManage: '管理',
   tokens: '注册令牌',
   pairs: '节点对',
