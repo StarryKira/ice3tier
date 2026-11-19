@@ -45,9 +45,12 @@ describe('虚拟网卡的说法', () => {
   })
 
   it('原因：管理员、root 写成怎么运行；能力名原样；地址段重叠带上重叠的那个', () => {
-    expect(vnetCauseText({ code: 'no_permission', missing: 'Administrator' })).toBe(v.causes.administrator)
-    expect(vnetCauseText({ code: 'no_permission', missing: 'root' })).toBe(v.causes.root)
-    expect(vnetCauseText({ code: 'no_permission', missing: 'CAP_NET_ADMIN' })).toBe(v.causes.missing('CAP_NET_ADMIN'))
+    expect(vnetCauseText({ code: 'no_permission', missing: ['Administrator'] })).toBe(v.causes.administrator)
+    expect(vnetCauseText({ code: 'no_permission', missing: ['root'] })).toBe(v.causes.root)
+    expect(vnetCauseText({ code: 'no_permission', missing: ['CAP_NET_ADMIN'] })).toBe(v.causes.missing('CAP_NET_ADMIN'))
+    expect(vnetCauseText({ code: 'no_permission', missing: ['CAP_NET_BIND_SERVICE'] })).toBe(
+      v.causes.missing('CAP_NET_BIND_SERVICE'),
+    )
     expect(vnetCauseText({ code: 'range_in_use', with: '192.168.1.5/24 dev eth0' })).toBe(
       v.causes.rangeInUse('192.168.1.5/24 dev eth0'),
     )
@@ -99,7 +102,7 @@ describe('概览上的虚拟网卡', () => {
           vnet: {
             ...INSTALLED,
             state: 'failed',
-            cause: { code: 'no_permission', missing: 'CAP_NET_ADMIN' },
+            cause: { code: 'no_permission', missing: ['CAP_NET_ADMIN'] },
             firewall: { accept: { state: 'off' }, guard: { state: 'off' } },
           },
         })}

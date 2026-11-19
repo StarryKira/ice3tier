@@ -353,8 +353,11 @@ export interface NodeDetail extends Node {
 
 /** 虚拟网卡的原因。比界面新的节点可能报别的 `code`，界面写"原因不明"。 */
 export type VnetCause =
-  /** `missing`：Linux 上是能力的名字（`CAP_NET_ADMIN`），Windows 上是 `Administrator`，macOS 上是 `root`。 */
-  | { code: 'no_permission'; missing: string | string[] }
+  /**
+   * `missing`：缺的东西，现在总是一项。Linux 上是能力的名字（`CAP_NET_ADMIN`；名字服务绑不上 53 端口时是
+   * `CAP_NET_BIND_SERVICE`），Windows 上是 `Administrator`，macOS 上是 `root`。
+   */
+  | { code: 'no_permission'; missing: string[] }
   /** 打不开 `/dev/net/tun`，容器里常见。 */
   | { code: 'no_device'; detail: string }
   /** Windows：程序旁边没有 `wintun.dll`。 */

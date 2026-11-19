@@ -22,7 +22,8 @@ export function vnetCauseText(cause: VnetCause | null | undefined): string {
   if (cause === null || cause === undefined) return c.unknown
   switch (cause.code) {
     case 'no_permission': {
-      const missing = Array.isArray(cause.missing) ? cause.missing : [cause.missing]
+      // 文档早先写成过单个字符串：收到字符串也照样认。
+      const missing: readonly string[] = Array.isArray(cause.missing) ? cause.missing : [String(cause.missing)]
       if (missing.includes('Administrator')) return c.administrator
       if (missing.includes('root')) return c.root
       return c.missing(missing.join(t.common.listSeparator))
@@ -93,7 +94,9 @@ export function firewallText(firewall: VnetReport['firewall'] | null | undefined
 const DROP_KEYS = ['not_allowed', 'unreachable', 'bad_source', 'bad_destination', 'malformed'] as const
 
 /** 丢掉的包：只列不是 0 的，按要紧的在前（策略不允许、送不到最常见）。 */
-export function droppedList(dropped: VnetDrops | null | undefined): { key: (typeof DROP_KEYS)[number]; count: number }[] {
+export function droppedList(
+  dropped: VnetDrops | null | undefined,
+): { key: (typeof DROP_KEYS)[number]; count: number }[] {
   if (dropped === null || dropped === undefined) return []
   return DROP_KEYS.map((key) => ({ key, count: dropped[key] })).filter(({ count }) => count > 0)
 }
