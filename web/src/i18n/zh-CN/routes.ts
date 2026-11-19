@@ -185,7 +185,7 @@ export const topology = {
 
 export const path = {
   title: '路径诊断',
-  subtitle: '两个节点之间现在怎么走、为什么，也可以发包实测',
+  subtitle: '两个节点的互诊断：连通、路径、延迟、吞吐和两端主机',
   swap: '交换 A 和 B',
   same: '选择两个不同的节点',
   query: '重新查询',

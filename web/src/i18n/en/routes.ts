@@ -173,7 +173,7 @@ export const topology: Messages['topology'] = {
 
 export const path: Messages['path'] = {
   title: 'Path diagnosis',
-  subtitle: 'How two nodes reach each other now and why; you can also run a test',
+  subtitle: 'Diagnose a pair of nodes: connectivity, paths, latency, throughput and both hosts',
   swap: 'Swap A and B',
   same: 'Select two different nodes',
   query: 'Query again',
