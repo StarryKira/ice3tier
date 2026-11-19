@@ -902,6 +902,8 @@ impl DatagramSender for DatagramHandle {
 
 #[cfg(test)]
 mod tests {
+    use std::net::{Ipv4Addr, SocketAddr};
+
     use super::*;
 
     #[test]
@@ -910,6 +912,83 @@ mod tests {
         assert_eq!(oldest_beyond(&[3, 9, 7], MAX_CONNS_PER_PEER), [3]);
         assert_eq!(oldest_beyond(&[12, 3, 9, 7, 10], MAX_CONNS_PER_PEER), [9, 7, 3]);
         assert!(oldest_beyond(&[], MAX_CONNS_PER_PEER).is_empty());
+    }
+
+    /// 同一个对端一条接一条连进来，每一条都是回环地址上真的 QUIC 连接，本端这一头按先后编号。
+    struct Arrivals {
+        listener: quinn::Endpoint,
+        dialer: quinn::Endpoint,
+        config: quinn::ClientConfig,
+        peer_key: PublicKey,
+        next_serial: u64,
+        /// 对端那一头。放下它连接就关了，所以一直拿着。
+        far_ends: Vec<quinn::Connection>,
+    }
+
+    impl Arrivals {
+        fn new() -> Self {
+            let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+            let (me, peer) = (NodeKey::generate().unwrap(), NodeKey::generate().unwrap());
+            let transport = quic::transport(&Tuning::default(), Algorithm::from_env());
+            Self {
+                listener: quinn::Endpoint::server(quic::server(&me, |_| true).unwrap(), loopback).unwrap(),
+                dialer: quinn::Endpoint::client(loopback).unwrap(),
+                config: quic::client(&peer, me.public(), transport).unwrap(),
+                peer_key: peer.public(),
+                next_serial: 1,
+                far_ends: Vec::new(),
+            }
+        }
+
+        async fn next(&mut self) -> Arc<Conn> {
+            let to = self.listener.local_addr().unwrap();
+            let dialing = self.dialer.connect_with(self.config.clone(), to, SERVER_NAME).unwrap();
+            let (far, near) = tokio::join!(dialing, async { self.listener.accept().await.unwrap().await });
+            self.far_ends.push(far.unwrap());
+            let serial = self.next_serial;
+            self.next_serial += 1;
+            Arc::new(Conn {
+                quic: near.unwrap(),
+                dialer: NodeId::new(2).unwrap(),
+                key: self.peer_key,
+                serial,
+                streams: StreamCount::new(),
+                held: AtomicBool::new(false),
+                algorithm: Algorithm::from_env(),
+            })
+        }
+    }
+
+    fn serials(conns: &[Arc<Conn>]) -> Vec<u64> {
+        conns.iter().map(|conn| conn.serial).collect()
+    }
+
+    // 集成测试（tests/limits.rs）里很难让同一个对端的三条连接同时活着：对端重启回来之后，旧连接在新的握完手之前
+    // 就被无状态重置关掉了。这里直接拿真的连接来验证上限。
+    #[tokio::test]
+    async fn a_peer_keeps_its_two_newest_live_connections_and_closed_ones_do_not_count() {
+        let mut arrivals = Arrivals::new();
+        let mut entry = PeerEntry::default();
+
+        for _ in 0..MAX_CONNS_PER_PEER {
+            entry.conns.push(arrivals.next().await);
+            assert!(entry.take_surplus().is_empty(), "没有超过上限时一条也不动");
+        }
+
+        entry.conns.push(arrivals.next().await);
+        assert_eq!(serials(&entry.take_surplus()), [1], "超过上限时交出最旧的那条");
+        assert_eq!(serials(&entry.conns), [2, 3]);
+
+        // 已经断掉的不占名额：它留在表里（等它自己的任务收尾时拿掉），新来的不会把还活着的挤掉。
+        entry.conns[0].quic.close(VarInt::from_u32(CLOSE_SHUTDOWN), b"");
+        entry.conns.push(arrivals.next().await);
+        assert!(entry.take_surplus().is_empty(), "活着的只有两条");
+        assert_eq!(serials(&entry.conns), [2, 3, 4]);
+
+        entry.conns.push(arrivals.next().await);
+        assert_eq!(serials(&entry.take_surplus()), [3], "活着的三条里交出最旧的");
+        assert_eq!(serials(&entry.conns), [2, 4, 5]);
+        assert_eq!(entry.preferred().map(|conn| conn.serial), Some(5), "开新的流用最新的那条");
     }
 
     #[test]

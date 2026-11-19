@@ -73,7 +73,7 @@ async fn a_peer_that_keeps_coming_back_cannot_pile_up_connections() {
 
     // a 的路换到回来的它那里时，会把留底的最后几个包（路径层的 stash，最多留 20 秒）从新路补发一遍，里面常有前两条连接的包。
     // 回来的它不认得那些连接，回无状态重置，它们就在第三条握完手之前断了。所以第三条进来时 a 上多半只剩一两条，
-    // 偶尔才是三条。
+    // 偶尔才是三条。上限本身（三条都活着时关最旧的）由 manager 模块里的单元测试用真的连接管着。
     let mut buf = [0; 16];
     let second_alive = timeout(Duration::ZERO, second_held.read(&mut buf)).await.is_err();
     let read = if second_alive {
