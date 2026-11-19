@@ -256,11 +256,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_node_port_left_to_the_system_moves_on_when_the_udp_of_the_same_number_is_taken() {
-        // 系统挑的第一个端口号上，UDP 正好被别的程序占着。
-        let mut squatters = Vec::new();
+        // 系统挑的第一个端口号上，UDP 正好被别的程序占着。这里自己去占；占不上就是真有别的程序占着它（它什么时候放开不归这里管）。
+        let mut first = None;
         let bound = bind_node("127.0.0.1:0".parse().unwrap(), |addr| {
-            if squatters.is_empty() {
-                squatters.push(std::net::UdpSocket::bind(addr).unwrap());
+            if first.is_none() {
+                first = Some((addr, std::net::UdpSocket::bind(addr).ok()));
             }
             UdpSocket::bind(addr)
         })
@@ -268,7 +268,10 @@ mod tests {
         let (tcp, udp) = bound.unwrap();
         let (tcp, udp) = (tcp.local_addr().unwrap(), udp.local_addr().unwrap());
         assert_eq!(tcp, udp, "TCP 和 UDP 在同一个端口号上");
-        assert_ne!(udp, squatters[0].local_addr().unwrap(), "另挑了一个端口");
+        let (taken, squatter) = first.expect("至少试过一个端口");
+        if squatter.is_some() {
+            assert_ne!(udp, taken, "另挑了一个端口");
+        }
     }
 
     #[tokio::test]
