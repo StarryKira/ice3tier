@@ -1,4 +1,4 @@
-//! UDP 的入口：SOCKS5 的 UDP ASSOCIATE（[`association`]）、UDP 的端口转发（[`forward`]）和透明访问的 UDP（[`intercept`]）。
+//! UDP 的入口：SOCKS5 的 UDP ASSOCIATE（[`association`]）和 UDP 的端口转发（[`forward`]）。
 //!
 //! 两者到对端节点走的都是数据报上下文（[`i3t_flow::datagram`]）。上下文是用到的时候才开的，开的时候要等对端答应，
 //! 所以每个上下文有一个自己的任务：它去开上下文，开好之前到的报文在它的队列里等着，队列满了丢新来的。
@@ -6,7 +6,6 @@
 
 pub(crate) mod association;
 pub(crate) mod forward;
-pub(crate) mod intercept;
 
 use std::sync::Arc;
 use std::time::Duration;

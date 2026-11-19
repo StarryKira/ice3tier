@@ -8,8 +8,8 @@ use i3t_model::admin::{
 use i3t_model::control::diag::{ChoiceCode, HopSource, PathPick, TestCode, TransferEnd};
 use i3t_model::control::exit_test::{ExitTestCause, ExitVia};
 use i3t_model::control::{
-    BindCause, DirectCause, DirectKind, DirectState, DirectStatus, InterceptCause, InterceptState, LegTransport, ListenState, NameService,
-    RejectCause, RelayState, Route, RouteCause, RouteHint, TargetCause, TryOutcome,
+    BindCause, DirectCause, DirectKind, DirectState, DirectStatus, Firewall, LegTransport, ListenState, NameService, RejectCause,
+    RelayState, Route, RouteCause, RouteHint, RuleState, TargetCause, TryOutcome, VnetCause, VnetState,
 };
 use i3t_model::netmap::IpFamily;
 use i3t_model::update::{FailureKind, SelfUpdateBlocker, UpdateCause, UpdateStatus};
@@ -58,8 +58,9 @@ pub(super) static CODES: Codes = Codes {
     hop_source,
     path_pick,
     transfer_end,
-    intercept_state,
-    intercept_cause,
+    vnet_state,
+    vnet_cause,
+    firewall,
     name_service,
     class,
     direct_status,
@@ -670,39 +671,63 @@ const fn transfer_end(end: TransferEnd) -> &'static str {
     }
 }
 
-fn intercept_state(state: &InterceptState) -> String {
+fn vnet_state(state: &VnetState) -> String {
     match state {
-        InterceptState::Off => "off".to_owned(),
-        InterceptState::On { udp, names, .. } => format!("on ({}; {})", if *udp { "TCP, UDP" } else { "TCP" }, name_service(names)),
-        InterceptState::Failed { cause } => format!("can't start: {}", intercept_cause(cause)),
-        InterceptState::Unsupported => "not available on this platform".to_owned(),
-        InterceptState::Unknown => "unknown".to_owned(),
+        VnetState::Installed { device, mtu, names } => format!("installed ({device}, MTU {mtu}; {})", name_service(names)),
+        VnetState::Off => "off".to_owned(),
+        VnetState::Failed { cause } => format!("not installed: {}", vnet_cause(cause)),
+        VnetState::Unsupported => "not available on this platform".to_owned(),
+        VnetState::Unknown => "unknown".to_owned(),
     }
 }
 
-fn intercept_cause(cause: &InterceptCause) -> String {
+fn vnet_cause(cause: &VnetCause) -> String {
     match cause {
-        InterceptCause::NoPermission { missing } => format!("missing {}", missing.join(", ")),
-        InterceptCause::ProgramMissing { program } => match program.as_str() {
+        VnetCause::NoPermission { missing } => match missing.as_slice() {
+            [only] if only == "Administrator" => "run as administrator".to_owned(),
+            [only] if only == "root" => "needs root".to_owned(),
+            missing => format!("missing {}", missing.join(", ")),
+        },
+        VnetCause::NoDevice { detail } => format!("can't open the device for virtual adapters: {detail}"),
+        VnetCause::DriverMissing { path } => format!("wintun.dll not next to the program ({path})"),
+        VnetCause::DeviceFailed { detail } => format!("can't create the adapter: {detail}"),
+        VnetCause::ProgramMissing { program } => match program.as_str() {
             "nft" => "nft not found (install nftables)".to_owned(),
             "ip" => "ip not found (install iproute2)".to_owned(),
+            "iptables" => "iptables not found".to_owned(),
             other => format!("{other} not found"),
         },
-        InterceptCause::CommandFailed { program, detail } => format!("{program} failed: {detail}"),
-        InterceptCause::PortInUse { address } => format!("{address} in use"),
-        InterceptCause::BindFailed { address, detail } => format!("can't bind {address}: {detail}"),
-        InterceptCause::TableInUse { table } => format!("routing table {table} is used by another program"),
-        InterceptCause::LinkInUse { link } => format!("a link {link} exists that isn't ice3tier's"),
-        InterceptCause::RangeInUse { with } => format!("the network's range overlaps {with} on this machine"),
-        InterceptCause::Unknown => "unknown cause".to_owned(),
+        VnetCause::CommandFailed { program, detail } => format!("{program} failed: {detail}"),
+        VnetCause::PortInUse { address } => format!("{address} in use"),
+        VnetCause::BindFailed { address, detail } => format!("can't bind {address}: {detail}"),
+        VnetCause::RangeInUse { with } => format!("the network's range overlaps {with} on this machine"),
+        VnetCause::Unknown => "unknown cause".to_owned(),
+    }
+}
+
+fn rule_state(state: &RuleState) -> String {
+    match state {
+        RuleState::On => "on".to_owned(),
+        RuleState::Off => "off".to_owned(),
+        RuleState::Failed { cause } => format!("failed ({})", vnet_cause(cause)),
+        RuleState::Unsupported => "not added on this platform".to_owned(),
+        RuleState::Unknown => "unknown".to_owned(),
+    }
+}
+
+fn firewall(firewall: &Firewall) -> String {
+    match (&firewall.accept, &firewall.guard) {
+        (RuleState::Off, RuleState::Off) => "no rules".to_owned(),
+        (RuleState::Unsupported, RuleState::Unsupported) => "no rules on this platform".to_owned(),
+        (accept, guard) => format!("accept {}, anti-spoofing {}", rule_state(accept), rule_state(guard)),
     }
 }
 
 fn name_service(names: &NameService) -> String {
     match names {
         NameService::Resolved => "names via systemd-resolved".to_owned(),
-        NameService::NoResolver => "no systemd-resolved, names via i3t hosts".to_owned(),
-        NameService::Failed { cause } => format!("names unavailable: {}", intercept_cause(cause)),
+        NameService::NoResolver => "names via i3t hosts".to_owned(),
+        NameService::Failed { cause } => format!("names unavailable: {}", vnet_cause(cause)),
         NameService::Unknown => "names: unknown".to_owned(),
     }
 }

@@ -1142,7 +1142,7 @@ fn eager_direct_limit() -> usize {
 }
 
 /// 映射出来的端口是不是随对端变化。要有两个以上的观察点看到同一个地址族的地址才知道。
-/// 去掉覆盖网的地址：透明访问打开时本节点的虚拟 IP 在一块本机的网卡上（`i3t-intercept`），它只在组网里有意义，
+/// 去掉覆盖网的地址：本节点的虚拟 IP 在虚拟网卡上（`i3t-vnet`），它只在组网里有意义，
 /// 别的节点连不上它，也不该去试。
 fn outside_overlay(candidates: Vec<SocketAddr>, netmap: &Netmap) -> Vec<SocketAddr> {
     candidates.into_iter().filter(|addr| !netmap.network.is_overlay_address(addr.ip().to_canonical())).collect()
@@ -1198,7 +1198,7 @@ mod tests {
         assert_eq!(
             outside_overlay(local, &netmap),
             [addr("192.168.1.5:20330"), addr("[2001:db8::5]:20330"), addr("10.67.0.1:20330")],
-            "透明访问的网卡上的虚拟 IP 不公布给别人"
+            "虚拟网卡上的虚拟 IP 不公布给别人"
         );
     }
 

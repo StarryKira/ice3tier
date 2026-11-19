@@ -1,8 +1,9 @@
 //! PROXY protocol 的头（HAProxy 公开的规范，v1 和 v2）：端口转发的目标节点连上目标之后先发它，
 //! 认它的服务（nginx 的 `proxy_protocol`、HAProxy、Postfix 等）据此看到发起节点的虚拟 IP，而不是目标节点自己的地址。
+//! 出口一侧（别的节点开流过来）和入口一侧（别的节点经虚拟网卡连本节点虚拟 IP 上的转发）都用它，所以放在这里。
 //!
-//! 头里的来源只能是连接的握手认出的发起节点的虚拟 IP（调用方保证），端口是目标节点这一侧这条 TCP 的本地端口：
-//! 服务看到的就是"那个节点从这个端口连过来"，和透明访问打开时的样子一样（白皮书 §9.5）。目的是这条 TCP 实际连到的地址。
+//! 头里的来源只能是发起节点的虚拟 IP（调用方保证：来自连接的握手认出的发起节点，或者经虚拟网卡进来、来源核对过的包），
+//! 端口是那条 TCP 的一个端口：服务看到的就是"那个节点从这个端口连过来"。目的是这条 TCP 实际连到的地址。
 //! 两个地址要同一族：目标是 IPv6 时虚拟 IP 写成 IPv4 映射的 IPv6 地址。
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -17,7 +18,7 @@ const V2_TCP4: u8 = 0x11;
 const V2_TCP6: u8 = 0x21;
 
 /// `initiator` 从 `local_port` 连到 `destination` 的头。
-pub(crate) fn encode(version: ProxyProtocol, initiator: Ipv4Addr, local_port: u16, destination: SocketAddr) -> Vec<u8> {
+pub fn encode(version: ProxyProtocol, initiator: Ipv4Addr, local_port: u16, destination: SocketAddr) -> Vec<u8> {
     let destination_ip = destination.ip().to_canonical();
     let source_ip = match destination_ip {
         IpAddr::V4(_) => IpAddr::V4(initiator),

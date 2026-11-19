@@ -106,8 +106,9 @@ def port_forward(lab: Lab, work: Path, t: Checks) -> None:
     controller.ctl("forward", "add", str(c.id), f"{c.virtual_ip}:9100", str(c.id), "127.0.0.1:8081")
     seen = eventually(lambda: socks(a, f"http://{c.virtual_ip}:9100/"), lambda r: r.returncode == 0)
     t.check("监听在 c 的虚拟 IP 上的转发，组网里的节点可以访问", seen.stdout == "127.0.0.1", f"{seen.stdout!r} {seen.stderr.strip()}")
-    listening = c.host.run("ss", "-lnt").stdout
-    t.check("它不占用 c 的操作系统端口", ":9100 " not in listening)
+    # c 的虚拟网卡装着（默认打开）：这个端口也在操作系统里听着，只听虚拟 IP，经网卡来的连接也到得了；别的地址上没有它。
+    listening = [line.split()[3] for line in c.host.run("ss", "-lnt").stdout.splitlines()[1:] if line.split()[3].endswith(":9100")]
+    t.check("它在 c 的操作系统里只听虚拟 IP", listening == [f"{c.virtual_ip}:9100"], str(listening))
     other = socks(a, f"http://{c.virtual_ip}:8081/")
     t.check("没有配转发的回环端口仍然到不了", other.returncode != 0)
 

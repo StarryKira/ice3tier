@@ -195,6 +195,7 @@ mod tests {
             ],
             relays: Vec::new(),
             relay_clients: Vec::new(),
+            no_vnet: Vec::new(),
         }
     }
 

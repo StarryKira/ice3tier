@@ -353,9 +353,9 @@ pub struct Ui {
     pub from_network: &'static str,
     pub pinned: &'static str,
     pub profile: &'static str,
-    pub intercept: &'static str,
-    /// 透明访问开着时的连接数和流量。
-    pub intercept_active: fn(u32, &str) -> String,
+    pub vnet: &'static str,
+    /// 虚拟网卡装着时收发了多少：发出的包，收进的包，流量，丢掉的包。
+    pub vnet_traffic: fn(u64, u64, &str, u64) -> String,
     /// 管理员没有选档位：节点用本机配置文件里的。
     pub profile_local: &'static str,
     /// 节点报的：在用的档位、工作线程数。
@@ -768,7 +768,7 @@ mod tests {
             (ui.per_minute)(1),
             (ui.exit_requests)(1, 1, 1, 1),
             (ui.exit_seen)(1, 1, 1, 1, 1),
-            (ui.intercept_active)(1, "↑ 1 B  ↓ 1 B"),
+            (ui.vnet_traffic)(1, 1, "↑ 1 B  ↓ 1 B", 1),
             (ui.profile_running)("balanced", 1),
             (ui.netmap_versions)(1, 1, 1),
             (ui.update_counts)(1, 1, 1, 1, 1, 1),

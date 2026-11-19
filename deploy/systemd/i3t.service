@@ -22,6 +22,16 @@ SuccessExitStatus=75
 RestartForceExitStatus=75
 LimitNOFILE=1048576
 
+# 虚拟网卡（默认打开，白皮书 §9.7）要的能力，以 i3t 用户运行时由 systemd 给：CAP_NET_ADMIN 建网卡、配地址和路由、
+# 加两条防火墙规则（执行的 iptables、nft 带着它）；CAP_NET_RAW 是老的 xtables 后端的 iptables 要的；CAP_NET_BIND_SERVICE
+# 是名字服务的 53 端口（本节点虚拟 IP 上）。NoNewPrivileges=yes 不影响 ambient 的能力。不要虚拟网卡的机器：
+# i3t set network off，再删掉这两行。只有这几项能力：节点进程不是 root，碰不了别的。
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+# 老的 xtables 后端的 iptables 要一个锁文件，默认在 /run 下，ProtectSystem=strict 时 /run 不能写：放到服务自己的运行目录里。
+RuntimeDirectory=i3t
+Environment=XTABLES_LOCKFILE=/run/i3t/xtables.lock
+
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

@@ -1,8 +1,9 @@
-//! 和系统之间的接缝：执行 `nft`、`ip`、`resolvectl`，看本进程有没有需要的能力。
+//! 和系统之间的接缝：执行 `ip`、`nft`、`iptables`、`resolvectl`（Windows 上是 `powershell`），看本进程有没有需要的能力。
 //!
-//! 装、拆、读回都只经过 [`Machine`]，所以单元测试换一个假的机器就能把整个过程走一遍，不需要 root。
-//! 真的机器是 [`Shell`]：它执行系统里的程序。用程序而不是直接说 netlink，是因为 nft 的脚本是一个事务，
-//! 程序自己保证要么全换上、要么一点不动；出错时它给的说明也正是使用者该看的。
+//! 网卡的地址和 MTU、两条防火墙规则、名字的设置，装、拆、读回都只经过 [`Machine`]，所以单元测试换一个假的机器
+//! 就能把整个过程走一遍，不需要 root。真的机器是 [`Shell`]：它执行系统里的程序。用程序而不是直接说 netlink，
+//! 是因为 nft 的脚本是一个事务，程序自己保证要么全换上、要么一点不动；`iptables` 用的是这台机器的防火墙自己用的那一套
+//! （nftables 或者老的 xtables）；出错时程序给的说明也正是使用者该看的。
 
 use std::fmt;
 use std::io::Write;
@@ -14,7 +15,10 @@ use std::process::{Command, Stdio};
 pub enum Program {
     Nft,
     Ip,
+    Iptables,
     Resolvectl,
+    /// Windows PowerShell（`powershell.exe`）：Windows 防火墙的规则。
+    PowerShell,
 }
 
 impl Program {
@@ -23,7 +27,9 @@ impl Program {
         match self {
             Self::Nft => "nft",
             Self::Ip => "ip",
+            Self::Iptables => "iptables",
             Self::Resolvectl => "resolvectl",
+            Self::PowerShell => "powershell",
         }
     }
 }
@@ -71,23 +77,29 @@ pub trait Machine {
 
 /// 真的系统：在 `PATH` 和几个常见的系统目录里找程序，执行它。
 ///
-/// 系统服务的 `PATH` 里通常有 `/usr/sbin`，用户的 shell 里不一定有，所以另外看那几个目录。
+/// 系统服务的 `PATH` 里通常有 `/usr/sbin`，用户的 shell 里不一定有，所以另外看那几个目录；Windows 上另外看 `System32`。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Shell;
 
 /// `PATH` 之外再看的目录。
-const SYSTEM_DIRS: [&str; 4] = ["/usr/sbin", "/sbin", "/usr/bin", "/bin"];
+#[cfg(unix)]
+fn system_dirs() -> Vec<PathBuf> {
+    ["/usr/sbin", "/sbin", "/usr/bin", "/bin"].into_iter().map(PathBuf::from).collect()
+}
+
+#[cfg(not(unix))]
+fn system_dirs() -> Vec<PathBuf> {
+    let root = std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+    vec![root.join("System32"), root.join(r"System32\WindowsPowerShell\v1.0")]
+}
 
 impl Shell {
     /// 程序在哪里；找不到时是 `None`。
     #[must_use]
     pub fn locate(program: Program) -> Option<PathBuf> {
         let from_path = std::env::var_os("PATH").map(|path| std::env::split_paths(&path).collect::<Vec<_>>()).unwrap_or_default();
-        from_path
-            .into_iter()
-            .chain(SYSTEM_DIRS.iter().map(PathBuf::from))
-            .map(|dir| dir.join(program.name()))
-            .find(|path| is_executable(path))
+        let file = format!("{}{}", program.name(), std::env::consts::EXE_SUFFIX);
+        from_path.into_iter().chain(system_dirs()).map(|dir| dir.join(&file)).find(|path| is_executable(path))
     }
 }
 
@@ -131,12 +143,12 @@ impl Machine for Shell {
     }
 }
 
-/// 透明访问要的进程能力。
+/// 虚拟网卡要的进程能力。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Capability {
-    /// 改包过滤规则、路由、网卡；`IP_TRANSPARENT`、`SO_MARK`。
+    /// 建虚拟网卡、给它地址，改防火墙规则。没有它就装不上。
     NetAdmin,
-    /// 绑 1024 以下的端口：入口的 [`PORT`](crate::PORT) 和名字服务的 53。
+    /// 绑 1024 以下的端口：名字服务的 53（[`DNS_PORT`](crate::DNS_PORT)）。没有它网卡照装，名字解析不了。
     NetBindService,
 }
 
@@ -182,6 +194,57 @@ impl fmt::Display for Capability {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.name())
     }
+}
+
+/// 建网卡缺的权限，写成给人看的样子：Linux 上是 `CAP_NET_ADMIN`，Windows 上是 `Administrator`（要以管理员运行），
+/// macOS 上是 `root`。不缺时是 `None`。看不出来的平台按缺算。
+#[must_use]
+pub fn missing_privilege() -> Option<&'static str> {
+    if cfg!(target_os = "linux") {
+        Capability::missing().contains(&Capability::NetAdmin).then_some(Capability::NetAdmin.name())
+    } else if cfg!(windows) {
+        (!elevated()).then_some("Administrator")
+    } else {
+        (!is_root()).then_some("root")
+    }
+}
+
+#[cfg(unix)]
+fn is_root() -> bool {
+    // SAFETY: geteuid 没有参数，不会失败，只读本进程的一个数。
+    unsafe { libc::geteuid() == 0 }
+}
+
+#[cfg(not(unix))]
+fn is_root() -> bool {
+    false
+}
+
+/// Windows：本进程的令牌是不是提升过的（以管理员运行）。读不出来按没有算。
+#[cfg(windows)]
+fn elevated() -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: GetCurrentProcess 返回的是一个不用关的伪句柄；`token` 是一个局部变量，成功时系统往里写一个要关的句柄。
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) } == 0 {
+        return false;
+    }
+    let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+    let mut written = 0u32;
+    let size = u32::try_from(std::mem::size_of::<TOKEN_ELEVATION>()).expect("TOKEN_ELEVATION 只有 4 个字节");
+    // SAFETY: `token` 是上面打开的、有查询权限的句柄；缓冲区是一个 TOKEN_ELEVATION，长度给的是它自己的长度。
+    let ok = unsafe { GetTokenInformation(token, TokenElevation, (&raw mut elevation).cast(), size, &raw mut written) } != 0;
+    // SAFETY: `token` 是 OpenProcessToken 给的句柄，只关这一次。
+    unsafe { CloseHandle(token) };
+    ok && elevation.TokenIsElevated != 0
+}
+
+#[cfg(not(windows))]
+fn elevated() -> bool {
+    false
 }
 
 #[cfg(test)]

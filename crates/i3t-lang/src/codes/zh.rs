@@ -8,8 +8,8 @@ use i3t_model::admin::{
 use i3t_model::control::diag::{ChoiceCode, HopSource, PathPick, TestCode, TransferEnd};
 use i3t_model::control::exit_test::{ExitTestCause, ExitVia};
 use i3t_model::control::{
-    BindCause, DirectCause, DirectKind, DirectState, DirectStatus, InterceptCause, InterceptState, LegTransport, ListenState, NameService,
-    RejectCause, RelayState, Route, RouteCause, RouteHint, TargetCause, TryOutcome,
+    BindCause, DirectCause, DirectKind, DirectState, DirectStatus, Firewall, LegTransport, ListenState, NameService, RejectCause,
+    RelayState, Route, RouteCause, RouteHint, RuleState, TargetCause, TryOutcome, VnetCause, VnetState,
 };
 use i3t_model::netmap::IpFamily;
 use i3t_model::update::{FailureKind, SelfUpdateBlocker, UpdateCause, UpdateStatus};
@@ -58,8 +58,9 @@ pub(super) static CODES: Codes = Codes {
     hop_source,
     path_pick,
     transfer_end,
-    intercept_state,
-    intercept_cause,
+    vnet_state,
+    vnet_cause,
+    firewall,
     name_service,
     class,
     direct_status,
@@ -567,39 +568,63 @@ const fn transfer_end(end: TransferEnd) -> &'static str {
     }
 }
 
-fn intercept_state(state: &InterceptState) -> String {
+fn vnet_state(state: &VnetState) -> String {
     match state {
-        InterceptState::Off => "没开".to_owned(),
-        InterceptState::On { udp, names, .. } => format!("开着（{}；{}）", if *udp { "TCP、UDP" } else { "TCP" }, name_service(names)),
-        InterceptState::Failed { cause } => format!("开不起来：{}", intercept_cause(cause)),
-        InterceptState::Unsupported => "这个平台上没有".to_owned(),
-        InterceptState::Unknown => "未知".to_owned(),
+        VnetState::Installed { device, mtu, names } => format!("装着（{device}，MTU {mtu}；{}）", name_service(names)),
+        VnetState::Off => "关着".to_owned(),
+        VnetState::Failed { cause } => format!("装不上：{}", vnet_cause(cause)),
+        VnetState::Unsupported => "这个平台上没有".to_owned(),
+        VnetState::Unknown => "未知".to_owned(),
     }
 }
 
-fn intercept_cause(cause: &InterceptCause) -> String {
+fn vnet_cause(cause: &VnetCause) -> String {
     match cause {
-        InterceptCause::NoPermission { missing } => format!("缺 {}", missing.join("、")),
-        InterceptCause::ProgramMissing { program } => match program.as_str() {
+        VnetCause::NoPermission { missing } => match missing.as_slice() {
+            [only] if only == "Administrator" => "要以管理员运行".to_owned(),
+            [only] if only == "root" => "要 root".to_owned(),
+            missing => format!("缺 {}", missing.join("、")),
+        },
+        VnetCause::NoDevice { detail } => format!("打不开建网卡用的设备：{detail}"),
+        VnetCause::DriverMissing { path } => format!("程序旁边没有 wintun.dll（{path}）"),
+        VnetCause::DeviceFailed { detail } => format!("网卡建不起来：{detail}"),
+        VnetCause::ProgramMissing { program } => match program.as_str() {
             "nft" => "找不到 nft（装 nftables）".to_owned(),
             "ip" => "找不到 ip（装 iproute2）".to_owned(),
+            "iptables" => "找不到 iptables".to_owned(),
             other => format!("找不到 {other}"),
         },
-        InterceptCause::CommandFailed { program, detail } => format!("{program} 报错：{detail}"),
-        InterceptCause::PortInUse { address } => format!("{address} 被占用"),
-        InterceptCause::BindFailed { address, detail } => format!("绑不上 {address}：{detail}"),
-        InterceptCause::TableInUse { table } => format!("路由表 {table} 被别的程序占着"),
-        InterceptCause::LinkInUse { link } => format!("已经有一块别人的网卡 {link}"),
-        InterceptCause::RangeInUse { with } => format!("网络的地址段和本机的 {with} 重叠"),
-        InterceptCause::Unknown => "未知原因".to_owned(),
+        VnetCause::CommandFailed { program, detail } => format!("{program} 报错：{detail}"),
+        VnetCause::PortInUse { address } => format!("{address} 被占用"),
+        VnetCause::BindFailed { address, detail } => format!("绑不上 {address}：{detail}"),
+        VnetCause::RangeInUse { with } => format!("网络的地址段和本机的 {with} 重叠"),
+        VnetCause::Unknown => "未知原因".to_owned(),
+    }
+}
+
+fn rule_state(state: &RuleState) -> String {
+    match state {
+        RuleState::On => "开着".to_owned(),
+        RuleState::Off => "没加".to_owned(),
+        RuleState::Failed { cause } => format!("加不上（{}）", vnet_cause(cause)),
+        RuleState::Unsupported => "这个平台上不加".to_owned(),
+        RuleState::Unknown => "未知".to_owned(),
+    }
+}
+
+fn firewall(firewall: &Firewall) -> String {
+    match (&firewall.accept, &firewall.guard) {
+        (RuleState::Off, RuleState::Off) => "没加规则".to_owned(),
+        (RuleState::Unsupported, RuleState::Unsupported) => "这个平台上不加规则".to_owned(),
+        (accept, guard) => format!("放行{}，防冒充{}", rule_state(accept), rule_state(guard)),
     }
 }
 
 fn name_service(names: &NameService) -> String {
     match names {
         NameService::Resolved => "名字经 systemd-resolved".to_owned(),
-        NameService::NoResolver => "没有 systemd-resolved，名字用 i3t hosts".to_owned(),
-        NameService::Failed { cause } => format!("名字解析不了：{}", intercept_cause(cause)),
+        NameService::NoResolver => "名字用 i3t hosts".to_owned(),
+        NameService::Failed { cause } => format!("名字解析不了：{}", vnet_cause(cause)),
         NameService::Unknown => "名字：未知".to_owned(),
     }
 }

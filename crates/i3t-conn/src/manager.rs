@@ -13,14 +13,14 @@ use i3t_model::Netmap;
 use i3t_model::control::{PeerUse, Signal};
 use i3t_model::netmap::Congestion;
 use i3t_path::Paths;
-use i3t_proto::flow::{DatagramHeader, MAX_DATAGRAM_BODY_LEN, Recipient};
+use i3t_proto::flow::{Channel, DatagramHeader, MAX_DATAGRAM_BODY_LEN, Recipient};
 use i3t_proto::{NodeId, PublicKey};
 use quinn::rustls::pki_types::CertificateDer;
 use quinn::{ConnectError, SendDatagramError, TransportConfig, VarInt};
 use tokio::sync::{Notify, mpsc, watch};
 
 use crate::congestion::Algorithm;
-use crate::contract::{Datagram, DatagramSendError, DatagramSender, Incoming, OpenError};
+use crate::contract::{Datagram, DatagramSendError, DatagramSender, Incoming, OpenError, PacketSender};
 use crate::quic::{self, SERVER_NAME};
 use crate::socket;
 use crate::stream::{self, RecvHalf, SendHalf, StreamCount};
@@ -42,6 +42,9 @@ const SIGNAL_TIMEOUT: Duration = Duration::from_secs(5);
 const RELIABLE_DATAGRAM_TIMEOUT: Duration = Duration::from_secs(10);
 /// 对端发来、上层还没有取走的数据报，每一侧最多排多少个。
 pub(crate) const DATAGRAM_BACKLOG: usize = 1024;
+/// 对端发来、虚拟网卡还没有取走的网络包最多排多少个，满了丢新来的（和路由器的队列一样）。
+/// 每个最多一千四百字节左右，所以最多压住两三 MB；取的一方一次取走一批，正常时排不起来。
+pub(crate) const PACKET_BACKLOG: usize = 2048;
 
 /// 和同一个对端最多同时留几条连接。
 ///
@@ -117,10 +120,11 @@ impl ConnectionCounters {
     }
 }
 
-/// 对端发来的数据报排在这里等上层来取，给上下文的接受方和发起方的各一个队列。
+/// 对端发来的数据报排在这里等上层来取，给上下文的接受方和发起方的各一个队列，虚拟网卡的包另一个。
 pub(crate) struct DatagramQueues {
     pub acceptor: mpsc::Sender<Datagram>,
     pub initiator: mpsc::Sender<Datagram>,
+    pub packets: mpsc::Sender<Datagram>,
 }
 
 impl DatagramQueues {
@@ -148,6 +152,24 @@ struct Conn {
     held: AtomicBool,
     /// 这条连接建立时用的拥塞控制。连接一直用它，节点对的设置后来改了也不变。
     algorithm: Algorithm,
+    /// 最近一次在这条连接上收发网络包的时刻。只运包的连接没有流，空闲回收按它算（见 [`Manager::idle_verdict`]）。
+    packets: PacketClock,
+}
+
+/// 一条连接上最近一次收发网络包的时刻，记成连接建立之后的毫秒数加一（0 是还没有过）：每个包只写一次原子数。
+#[derive(Debug, Default)]
+struct PacketClock(AtomicU64);
+
+impl PacketClock {
+    fn touch(&self, established: Instant) {
+        let millis = u64::try_from(established.elapsed().as_millis()).unwrap_or(u64::MAX - 1);
+        self.0.store(millis + 1, Ordering::Relaxed);
+    }
+
+    fn last(&self, established: Instant) -> Option<Instant> {
+        let stored = self.0.load(Ordering::Relaxed);
+        (stored != 0).then(|| established + Duration::from_millis(stored - 1))
+    }
 }
 
 #[derive(Default)]
@@ -410,8 +432,17 @@ impl Manager {
         let serial = self.next_serial.fetch_add(1, Ordering::Relaxed);
         let Origin { dialer, key, algorithm } = origin;
         let streams = StreamCount::new();
-        let conn =
-            Arc::new(Conn { quic, dialer, key, serial, established: Instant::now(), streams, held: AtomicBool::new(false), algorithm });
+        let conn = Arc::new(Conn {
+            quic,
+            dialer,
+            key,
+            serial,
+            established: Instant::now(),
+            streams,
+            held: AtomicBool::new(false),
+            algorithm,
+            packets: PacketClock::default(),
+        });
         let surplus = {
             let mut peers = self.peers();
             let entry = peers.entry(peer).or_default();
@@ -481,7 +512,7 @@ impl Manager {
                     Err(error) => break error.to_string(),
                 },
                 received = conn.quic.read_datagram() => match received {
-                    Ok(payload) => self.deliver_datagram(peer, payload),
+                    Ok(payload) => self.deliver_datagram(peer, &conn, payload),
                     Err(error) => break error.to_string(),
                 },
                 _ = idle_check.tick() => {
@@ -497,12 +528,17 @@ impl Manager {
     }
 
     /// 把对端发来的一个不保证送达的数据报排进上层的队列。队列满了就丢：上层来不及取，留着也只会过期。
-    fn deliver_datagram(&self, peer: NodeId, payload: Bytes) {
-        let Some(recipient) = Recipient::peek(&payload) else {
-            return tracing::trace!(%peer, len = payload.len(), "丢掉一个数据报：首字节看不出它是给哪一侧的");
+    fn deliver_datagram(&self, peer: NodeId, conn: &Conn, payload: Bytes) {
+        let queue = match Channel::peek(&payload) {
+            Some(Channel::Context(recipient)) => self.datagrams.of(recipient),
+            Some(Channel::Packet) => {
+                conn.packets.touch(conn.established);
+                &self.datagrams.packets
+            }
+            None => return tracing::trace!(%peer, len = payload.len(), "丢掉一个数据报：首字节看不出它是给谁的"),
         };
-        if self.datagrams.of(recipient).try_send(Datagram { peer, payload }).is_err() {
-            tracing::trace!(%peer, ?recipient, "丢掉一个数据报：上层的队列满了，或者本端正在关闭");
+        if queue.try_send(Datagram { peer, payload }).is_err() {
+            tracing::trace!(%peer, "丢掉一个数据报：上层的队列满了，或者本端正在关闭");
         }
     }
 
@@ -560,8 +596,12 @@ impl Manager {
     }
 
     /// 这条连接该不该因为空闲而关掉；该关的话返回原因。
+    ///
+    /// 空闲是"没有流，也没有网络包"：从最后一条流结束和最后一个网络包两者里晚的那个算起。只运包的连接（虚拟网卡上的 ping、
+    /// 一条经网卡的 TCP）因此包在走就一直留着，包停了照常回收。
     fn idle_verdict(&self, peer: NodeId, conn: &Arc<Conn>) -> Option<&'static str> {
-        let idle = conn.streams.idle_since()?.elapsed();
+        let streams_ended = conn.streams.idle_since()?;
+        let idle = conn.packets.last(conn.established).map_or(streams_ended, |packet| packet.max(streams_ended)).elapsed();
         let preferred = self.preferred(peer).is_some_and(|preferred| Arc::ptr_eq(&preferred, conn));
         let keep_alive = self.netmap.borrow().peer(peer).is_some_and(|info| info.keep_alive);
         let idle_close = self.configs().tuning.idle_close;
@@ -944,6 +984,28 @@ impl DatagramHandle {
     }
 }
 
+impl PacketSender for DatagramHandle {
+    fn send_packet(&self, peer: NodeId, frame: Bytes) -> Result<(), DatagramSendError> {
+        let conn = self.connection(peer)?;
+        let len = frame.len();
+        conn.quic.send_datagram(frame).map_err(|error| match error {
+            SendDatagramError::UnsupportedByPeer | SendDatagramError::Disabled => DatagramSendError::Unsupported(peer),
+            SendDatagramError::TooLarge => DatagramSendError::TooLarge { len, max: conn.quic.max_datagram_size().unwrap_or(0) },
+            SendDatagramError::ConnectionLost(reason) => DatagramSendError::ConnectionLost { peer, reason: reason.to_string() },
+        })?;
+        conn.packets.touch(conn.established);
+        Ok(())
+    }
+
+    async fn connect(&self, peer: NodeId) -> Result<(), OpenError> {
+        let manager = self.manager.upgrade().ok_or(OpenError::Closed)?;
+        if *manager.closed.borrow() {
+            return Err(OpenError::Closed);
+        }
+        manager.connection(peer).await.map(drop)
+    }
+}
+
 impl DatagramSender for DatagramHandle {
     fn max_datagram_len(&self, peer: NodeId) -> Option<usize> {
         self.connection(peer).ok()?.quic.max_datagram_size()
@@ -1025,6 +1087,7 @@ mod tests {
                 streams: StreamCount::new(),
                 held: AtomicBool::new(false),
                 algorithm: Algorithm::from_env(),
+                packets: PacketClock::default(),
             })
         }
     }

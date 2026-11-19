@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# 透明访问的名字经一个真的 systemd-resolved 走。两个容器接在一个 --internal 的 Docker 网络上（不通外面）：
+# 虚拟网卡的名字经一个真的 systemd-resolved 走。两个容器接在一个 --internal 的 Docker 网络上（不通外面）：
 #
-# - a：以 systemd 为 1 号进程（--privileged），开着 systemd-resolved；跑 controller 和节点 a，节点 a 打开透明访问；
-# - b：只跑节点 b 和一个 HTTP 服务（8080 端口，回答它看到的来源地址）。b 在 Docker 的名字服务里另有一个名字
+# - a：以 systemd 为 1 号进程（--privileged），开着 systemd-resolved；跑 controller 和节点 a，节点 a 的虚拟网卡默认装上；
+# - b：只跑节点 b 和一个 HTTP 服务（8080 端口，回答它看到的来源地址），有 CAP_NET_ADMIN 和 /dev/net/tun，也装上虚拟网卡。
+#   b 在 Docker 的名字服务里另有一个名字
 #   web.example.test，用来确认网络的域名之外的名字照旧经容器原来的解析器。
 #
 #   tests/platform/resolved/run.sh <有 i3t、i3t-controller、i3tctl（Linux 版）的目录> <结果目录> [root|service|service-polkit]
 #
-# root（默认）：节点 a 以 root 在前台跑。service：节点 a 装成 deploy/systemd 里的系统服务（i3t 用户、沙箱设置），
-# 加上透明访问的 drop-in，看 systemd-resolved 认不认这样一个进程的设置。service-polkit：同 service，另外给 polkit
+# root（默认）：节点 a 以 root 在前台跑。service：节点 a 装成 deploy/systemd 里的系统服务（i3t 用户、沙箱设置、
+# 虚拟网卡要的那几项能力），看 systemd-resolved 认不认这样一个进程的设置。service-polkit：同 service，另外给 polkit
 # 一条规则，允许 i3t 用户做那几个动作（改网卡的 DNS、路由域、默认路线，撤销）。
 # 镜像的基础可以换：I3T_RESOLVED_BASE=ubuntu:24.04（默认 debian:trixie）。
 # 结果目录里：summary.txt（每项 PASS 或 FAIL 和原因），resolvectl、i3t、journalctl 的输出。
@@ -61,7 +62,8 @@ cleanup
 docker network create --internal "$net" > /dev/null
 docker run -d --name "$a" --hostname a --privileged --cgroupns=private --network "$net" \
     --tmpfs /run --tmpfs /run/lock -v "$bin:/programs:ro" -v "$repo/deploy/systemd:/deploy:ro" "$image" > /dev/null
-docker run -d --name "$b" --hostname b --network "$net" --network-alias web.example.test -v "$bin:/programs:ro" "$image" sleep infinity > /dev/null
+docker run -d --name "$b" --hostname b --network "$net" --network-alias web.example.test --cap-add NET_ADMIN --device /dev/net/tun \
+    -v "$bin:/programs:ro" "$image" sleep infinity > /dev/null
 ip_a=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$a")
 ip_b=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$b")
 echo "base=$base variant=$variant a=$ip_a b=$ip_b" > "$out/environment.txt"
@@ -69,9 +71,7 @@ echo "base=$base variant=$variant a=$ip_a b=$ip_b" > "$out/environment.txt"
 check "systemd is running in a and systemd-resolved is active" 'ina systemctl is-system-running; ina systemctl status systemd-resolved' \
     wait_for 60 bash -c "docker exec $a systemctl is-active -q systemd-resolved"
 ina systemctl --version | head -1 >> "$out/environment.txt"
-ina sh -c 'nft --version; ip -V' >> "$out/environment.txt" 2>&1
-# --internal 的网络没有默认路由；透明访问要有一条盖住覆盖网地址段的路由（docs/internal/architecture.md 5.10 的"前提"），给 a 一条。
-ina ip route add default dev eth0
+ina sh -c 'nft --version; ip -V; iptables --version' >> "$out/environment.txt" 2>&1
 ina resolvectl log-level debug
 # systemd-resolved 报 active 时系统总线可能还没起来，那时 resolvectl 连不上：等它答得出来再记"之前"的样子。
 wait_for 30 bash -c "docker exec $a resolvectl status > /dev/null 2>&1"
@@ -94,8 +94,7 @@ if [ "$variant" != root ]; then
     state=/var/lib/i3t
     ina sh -c 'useradd --system --home-dir /var/lib/i3t --shell /usr/sbin/nologin i3t && install -d -o i3t -g i3t -m 0700 /var/lib/i3t /var/lib/i3t/bin \
         && install -o i3t -g i3t -m 0755 /programs/i3t /var/lib/i3t/bin/i3t \
-        && install -D -m 0644 /deploy/i3t.service /etc/systemd/system/i3t.service \
-        && install -D -m 0644 /deploy/i3t.service.d/intercept.conf /etc/systemd/system/i3t.service.d/intercept.conf'
+        && install -D -m 0644 /deploy/i3t.service /etc/systemd/system/i3t.service'
     nodea() { docker exec -i "$a" runuser -u i3t -- env I3T_LANG=en I3T_STATE_DIR=$state /var/lib/i3t/bin/i3t "$@"; }
 else
     state=/srv/node-a
@@ -105,8 +104,7 @@ nodeb() { docker exec -i "$b" env I3T_LANG=en /programs/i3t --state-dir /srv/nod
 join() { enroll | "$1" join > "$out/join-$2.txt" 2>&1; }
 check "node a joins" 'cat "$out/join-a.txt"' join nodea a
 check "node b joins" 'cat "$out/join-b.txt"' join nodeb b
-intercept_switch() { nodea set intercept "$1" > "$out/set-intercept-$1.txt" 2>&1; }
-check "i3t set intercept on" 'cat "$out/set-intercept-on.txt"' intercept_switch on
+network_switch() { nodea set network "$1" > "$out/set-network-$1.txt" 2>&1; }
 
 start_a() {
     if [ "$variant" != root ]; then ina systemctl daemon-reload && ina systemctl start i3t
@@ -130,20 +128,20 @@ inb sh -c "I3T_LANG=en setsid /programs/i3t --state-dir /srv/node-b run > /srv/n
 start_a
 online() { [ "$(ctl --json node list 2>/dev/null | python3 -I -c 'import json,sys; print(sum(1 for n in json.load(sys.stdin) if n["online"]))')" = 2 ]; }
 check "both nodes online" 'ctl node list' wait_for 60 online
-intercept_open() { log_a | grep -q '透明访问已打开'; }
-check "node a: transparent access is on" 'log_a | tail -5' wait_for 30 intercept_open
+vnet_installed() { log_a | grep -q '虚拟网卡装好了'; }
+check "node a: the virtual adapter is installed" 'log_a | tail -5' wait_for 30 vnet_installed
 ctl node list > "$out/node-list.txt" 2>&1
 name_b=$(ctl --json node list | python3 -I -c 'import json,sys; print(next(n["fqdn"] for n in json.load(sys.stdin) if n["virtual_ip"] == "10.66.0.2"))')
 vip_b=10.66.0.2
 echo "peer name: $name_b" >> "$out/environment.txt"
 
-# 打开时
-nodea intercept status > "$out/intercept-status-on.txt" 2>&1
+# 装着时
+nodea network status > "$out/network-status-on.txt" 2>&1
 nodea status > "$out/status-a-on.txt" 2>&1
 sleep 11 # 节点每 10 秒报一次状态
 ctl --json node show 1 > "$out/node-show-a.json" 2>&1
 check "controller sees names served through systemd-resolved" 'cat "$out/node-show-a.json" | head -c 600' \
-    bash -c "python3 -I -c 'import json,sys; n=json.load(open(sys.argv[1])); print(n.get(\"intercept\")); sys.exit(0 if (n.get(\"intercept\") or {}).get(\"names\", {}).get(\"state\") == \"resolved\" else 1)' '$out/node-show-a.json' > '$out/node-show-a-intercept.txt'"
+    bash -c "python3 -I -c 'import json,sys; n=json.load(open(sys.argv[1])); print(n.get(\"vnet\")); sys.exit(0 if (n.get(\"vnet\") or {}).get(\"names\", {}).get(\"state\") == \"resolved\" else 1)' '$out/node-show-a.json' > '$out/node-show-a-vnet.txt'"
 save resolvectl-on.txt "$a" resolvectl status
 save resolvectl-on-link.txt "$a" resolvectl status i3t0
 check "resolvectl status i3t0: DNS server is a's virtual IP, routing domain ~lab.i3t, not a default route" 'cat "$out/resolvectl-on-link.txt"' \
@@ -155,7 +153,8 @@ check "  ... answered on link i3t0" 'cat "$out/resolvectl-query-peer.txt"' grep 
 save getent-peer.txt "$a" getent hosts "$name_b"
 check "getent hosts $name_b (nss-resolve) gives $vip_b" 'cat "$out/getent-peer.txt"' grep -q "^$vip_b " "$out/getent-peer.txt"
 save curl-peer-name.txt "$a" env -u http_proxy -u https_proxy -u all_proxy curl -sS --noproxy '*' --max-time 10 "http://$name_b:8080/"
-check "curl http://$name_b:8080/ with no proxy reaches the server on b" 'cat "$out/curl-peer-name.txt"' grep -q '^b sees ' "$out/curl-peer-name.txt"
+check "curl http://$name_b:8080/ with no proxy reaches the server on b, which sees a's virtual IP" 'cat "$out/curl-peer-name.txt"' \
+    grep -q '^b sees 10.66.0.1$' "$out/curl-peer-name.txt"
 save resolvectl-query-other.txt "$a" resolvectl query web.example.test
 check "a name outside the domain (web.example.test) still resolves through the container's resolver" 'cat "$out/resolvectl-query-other.txt"' \
     grep -q "web.example.test: $ip_b" "$out/resolvectl-query-other.txt"
@@ -168,13 +167,13 @@ check "an unknown name in the domain is NXDOMAIN from the node" 'cat "$out/resol
 
 # 关掉：停下节点（拆掉 i3t0，systemd-resolved 跟着忘掉它上面的设置），关上开关，再启动
 stop_a
-check "i3t set intercept off (node stopped)" 'cat "$out/set-intercept-off.txt"' intercept_switch off
+check "i3t set network off (node stopped)" 'cat "$out/set-network-off.txt"' network_switch off
 save resolvectl-after-stop.txt "$a" resolvectl status
 start_a
 a_running() { nodea status 2>&1 | grep -q 'Running i3t'; }
-check "node a runs again with transparent access off" 'log_a | tail -3' wait_for 30 a_running
+check "node a runs again with the virtual adapter off" 'log_a | tail -3' wait_for 30 a_running
 sleep 2
-nodea intercept status > "$out/intercept-status-off.txt" 2>&1
+nodea network status > "$out/network-status-off.txt" 2>&1
 save resolvectl-off.txt "$a" resolvectl status
 check "resolvectl status after switching off is the same as before" 'diff "$out/resolvectl-before.txt" "$out/resolvectl-off.txt"' \
     diff -q "$out/resolvectl-before.txt" "$out/resolvectl-off.txt"

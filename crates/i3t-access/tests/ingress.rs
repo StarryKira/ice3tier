@@ -84,6 +84,7 @@ fn netmap() -> Netmap {
         }],
         relays: Vec::new(),
         relay_clients: Vec::new(),
+        no_vnet: Vec::new(),
     }
 }
 
@@ -555,29 +556,36 @@ async fn accepted_client_connections_probe_an_idle_client_with_keepalives() {
     }
 }
 
+/// 监听在本节点虚拟 IP 上的端口转发：别的节点经虚拟网卡来连，所以在那个地址上真的监听。Linux 上地址还不在本机也绑得上
+/// （`IP_FREEBIND`，这里的测试机器上就没有这个地址）；别的平台上绑不上，先报 `Virtual`、只经流来访问，网卡装上之后再绑。
+/// 目标是本节点自己的 UDP 转发不监听（本节点到不了自己的数据报上下文）。
 #[tokio::test]
-async fn forwards_that_take_no_socket_are_reported_as_such() {
+async fn forwards_on_our_virtual_ip_listen_there_or_wait_for_the_address() {
     let mut netmap = netmap();
     let mut to_myself = forward(1, ForwardProtocol::Udp, "10.66.0.1:5353");
     to_myself.target = node(ME);
     netmap.me.forwards = vec![
-        // 监听在本节点自己的虚拟 IP 上：由出口模块在别的节点访问这个端口时接住。
         to_myself,
         forward(2, ForwardProtocol::Tcp, "10.66.0.1:8080"),
         forward(3, ForwardProtocol::Tcp, "127.0.0.1:0"),
         forward(4, ForwardProtocol::Udp, "127.0.0.1:0"),
-        // 目标是别的节点的 UDP 转发：和 TCP 的一样由出口接力。
         forward(5, ForwardProtocol::Udp, "10.66.0.1:5354"),
         forward(6, ForwardProtocol::Tcp, "10.66.0.1:0"),
     ];
     let world = World::start(netmap).await;
     let status = world.settled().await;
     assert_eq!(status.forwards.iter().map(|forward| forward.id).collect::<Vec<u32>>(), [1, 2, 3, 4, 5, 6]);
-    assert_eq!(status.forwards[0].state, ListenState::Virtual);
-    assert_eq!(status.forwards[1].state, ListenState::Virtual, "目标是别的节点的 TCP 转发由出口接力");
+    assert_eq!(status.forwards[0].state, ListenState::Virtual, "目标是本节点自己的 UDP 转发只经流");
+    for (at, port) in [(1, 8080), (4, 5354)] {
+        let expected = if cfg!(target_os = "linux") {
+            ListenState::Listening { local: SocketAddr::from(([10, 66, 0, 1], port)) }
+        } else {
+            ListenState::Virtual
+        };
+        assert_eq!(status.forwards[at].state, expected, "虚拟 IP 上的 {port}");
+    }
     assert!(matches!(status.forwards[2].state, ListenState::Listening { .. }));
     assert!(matches!(status.forwards[3].state, ListenState::Listening { .. }), "UDP 的端口转发和 TCP 的一样监听");
-    assert_eq!(status.forwards[4].state, ListenState::Virtual, "目标是别的节点的 UDP 转发也由出口接力");
     assert!(
         matches!(&status.forwards[5].state, ListenState::Unsupported { reason, cause: ListenCause::VirtualPortZero } if reason.contains("端口")),
         "{:?}",
@@ -1034,67 +1042,6 @@ i3t_lane::on_both_transports! {
         assert_eq!(code, 0, "代理打开了乐观回复，盖过出口的");
         world.next_open().await;
     }
-}
-
-/// 透明访问的入口：每条连接"原来要去的地址"由测试定（真的系统里是内核的 `SO_ORIGINAL_DST`）。
-async fn intercepting(world: &World) -> (SocketAddr, Arc<Mutex<SocketAddr>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let entry = listener.local_addr().unwrap();
-    let original = Arc::new(Mutex::new(entry));
-    let access = Arc::clone(&world.access);
-    let chosen = Arc::clone(&original);
-    tokio::spawn(async move { access.intercept_tcp(listener, move |_| Ok(*chosen.lock().unwrap())).await });
-    (entry, original)
-}
-
-/// 连接被重置（或者关掉），没有数据。
-async fn assert_reset(stream: &mut TcpStream) {
-    let end = timeout(PATIENCE, stream.read_to_end(&mut Vec::new())).await.expect("连接应该很快结束");
-    assert!(end.is_err() || end.unwrap() == 0);
-}
-
-i3t_lane::on_both_transports! {
-    async fn an_intercepted_connection_becomes_a_flow_to_the_node_whose_virtual_ip_it_was_for() {
-        let mut world = World::start(netmap()).await;
-        let (entry, original) = intercepting(&world).await;
-        *original.lock().unwrap() = "10.66.0.2:22".parse().unwrap();
-        let mut stream = TcpStream::connect(entry).await.unwrap();
-        assert_echo(&mut stream).await;
-        let open = world.next_open().await;
-        assert_eq!(open.target, Target::Node { port: 22 });
-        assert_eq!(open.origin, Origin { credential: None, client: None }, "本机的程序不写来源地址");
-        let status = world.access.intercept_status();
-        assert_eq!(status.active.get(), 1);
-        assert_eq!((status.traffic.up(), status.traffic.down()), (21, 21), "流量记在透明访问这一路上");
-        drop(stream);
-        timeout(PATIENCE, async {
-            while world.access.intercept_status().active.get() != 0 {
-                sleep(Duration::from_millis(2)).await;
-            }
-        })
-        .await
-        .expect("连接结束之后不再算进来");
-    }
-}
-
-#[tokio::test]
-async fn intercepted_connections_to_no_node_to_ourselves_or_straight_to_the_entry_are_reset_without_a_flow() {
-    let mut map = netmap();
-    map.peers.push(Peer { id: node(3), virtual_ip: [10, 66, 0, 3].into(), outbound: false, name: "hidden".into(), ..map.peers[0].clone() });
-    let mut world = World::start(map).await;
-    let (entry, original) = intercepting(&world).await;
-    for target in ["10.66.0.9:22", "10.66.0.1:22", "10.66.0.3:22", "192.168.1.5:22", &entry.to_string()] {
-        *original.lock().unwrap() = target.parse().unwrap();
-        let mut stream = TcpStream::connect(entry).await.unwrap();
-        assert_reset(&mut stream).await;
-    }
-    world.assert_no_open();
-
-    world.access.set_draining(Some("准备更新".to_owned()));
-    *original.lock().unwrap() = "10.66.0.2:22".parse().unwrap();
-    let mut stream = TcpStream::connect(entry).await.unwrap();
-    assert_reset(&mut stream).await;
-    world.assert_no_open();
 }
 
 /// 把一个明文 HTTP 请求发给代理，读到连接结束，返回读到的全部。

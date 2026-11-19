@@ -6,7 +6,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use i3t_access::{ForwardHealth, NoRoutes, RouteAtStart, SharedRoutes, TargetCause};
+use i3t_access::{ForwardHealth, NoRoutes, RouteAtStart, SharedRoutes, TargetCause, proxy_header};
 use i3t_conn::contract::{DatagramSender, Datagrams};
 use i3t_conn::{Connector, Endpoint, RecvStream, SendStream};
 use i3t_flow::datagram::{self, Opener, OutboundSocket};
@@ -23,7 +23,6 @@ use crate::datagrams::{ContextLimit, IDLE_TIMEOUT, MAX_CONTEXTS_PER_PEER, Sessio
 use crate::grant::Grant;
 use crate::limits::{ExitMeter, Limits, QuotaState};
 use crate::outbound::{Asker, Outbound};
-use crate::proxy_header;
 use crate::stats::{Counters, ExitStats};
 use crate::system::{Os, System};
 
@@ -58,9 +57,7 @@ const BUSY_LOG_EVERY: Duration = Duration::from_secs(60);
 ///      解析出来的地址按地址族挑过之后，每个都过出站策略；
 ///    - 局域网：本节点启用了出口并打开了局域网开关，配额和建连预算同上，地址在本机网卡直连的网段里；
 ///    - 本节点的端口：只用本机的非回环地址去连。那个端口上有监听在虚拟 IP 上的端口转发时，按那条转发处理：
-///      目标是本节点就去连它指向的地址，目标是别的节点就到那个节点开一条流，把两条流接起来。
-///      透明访问打开着时（[`Outbound::set_presenting`]），连本机的非回环地址用发起节点的虚拟 IP 做源地址，
-///      服务看到的是对端而不是本机；这个地址只取自连接的握手认出的发起节点，建流请求里写的什么都不算；
+///      目标是本节点就去连它指向的地址，目标是别的节点就到那个节点开一条流，把两条流接起来；
 ///    - 端口转发：必须是下发给本节点、并且由发起节点监听的那一条。不需要本节点是出口。
 /// 4. 连上目标之后回成功，开始搬运。访问权限被收回，或者放行这条流的能力被收回（出口、局域网开关、端口转发，
 ///    见 `grant` 模块）时，正在搬运的流被重置，原因码是 [`Reason::AccessRevoked`]。
@@ -225,13 +222,13 @@ impl<S: System, C: Connector + Datagrams> Exit<S, C> {
                 }
                 Some(forward) => {
                     let entry = virtual_forward_target(netmap, initiator, forward)?;
-                    let connected = self.outbound.forward(entry.addr, initiator.virtual_ip).await;
+                    let connected = self.outbound.forward(entry.addr).await;
                     self.forward_health.record(forward.id, connected.as_ref().map(drop).map_err(|reply| forward_cause(reply.status)));
                     let stream = present(connected?, &entry, initiator).await?;
                     let grant = Grant::VirtualForward { port: *port, id: forward.id, target: forward.target, addr: Some(entry.addr) };
                     Ok((local(stream), grant))
                 }
-                None => Ok((local(self.outbound.node_port(*port, initiator.virtual_ip).await?), Grant::NodeService)),
+                None => Ok((local(self.outbound.node_port(*port).await?), Grant::NodeService)),
             },
             Target::Forward { id } => {
                 let listed = netmap
@@ -241,7 +238,7 @@ impl<S: System, C: Connector + Datagrams> Exit<S, C> {
                     .find(|entry| entry.id == *id && entry.listener == peer && entry.protocol == ForwardProtocol::Tcp);
                 match listed {
                     Some(entry) => {
-                        let stream = self.outbound.forward(entry.addr, initiator.virtual_ip).await?;
+                        let stream = self.outbound.forward(entry.addr).await?;
                         let stream = present(stream, entry, initiator).await?;
                         Ok((local(stream), Grant::Forward { id: *id, addr: entry.addr }))
                     }
@@ -525,7 +522,7 @@ pub(crate) fn virtual_forward_target(netmap: &Netmap, initiator: &Peer, forward:
         .ok_or_else(|| Reply::new(Status::UnknownForward, "这条端口转发的目标地址没有下发给这个节点"))
 }
 
-/// 端口转发要求的话，先给刚连上的目标发 PROXY protocol 的头（[`crate::proxy_header`]）。
+/// 端口转发要求的话，先给刚连上的目标发 PROXY protocol 的头（[`i3t_access::proxy_header`]）。
 ///
 /// 头里的来源是 `initiator` 的虚拟 IP：它来自连接的握手认出的发起节点在 netmap 里的条目，建流请求里写的什么都不算。
 async fn present(mut stream: TcpStream, entry: &ForwardTarget, initiator: &Peer) -> Result<TcpStream, Reply> {

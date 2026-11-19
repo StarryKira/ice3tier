@@ -196,6 +196,7 @@ mod tests {
             peers: vec![nas],
             relays: vec![relay(3, "hk")],
             relay_clients: Vec::new(),
+            no_vnet: Vec::new(),
         }
     }
 

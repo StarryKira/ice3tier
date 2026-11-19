@@ -1,0 +1,33 @@
+[package]
+name = "i3t-vnet"
+version.workspace = true
+rust-version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "ice3tier 的虚拟网卡：本机的程序用虚拟 IP 访问别的节点，IP 包作为连接上的数据报在节点之间走"
+
+[dependencies]
+bytes.workspace = true
+i3t-conn = { path = "../i3t-conn" }
+i3t-model = { path = "../i3t-model" }
+i3t-proto = { path = "../i3t-proto" }
+ipnet.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+# 网卡本身（Linux 的 TUN、Windows 的 Wintun、macOS 的 utun）。不要默认的 address-management：它在 Linux 上多拉一个 netlink 的库，
+# 地址用内核的 ioctl 设就够了；Windows 和 macOS 设地址本来就不经它。
+tun-rs = { version = "2.8.18", default-features = false, features = ["async_tokio"] }
+if-addrs.workspace = true
+
+[lints]
+workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.191"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Security"] }

@@ -29,6 +29,11 @@ pub struct Netmap {
     /// 只有本节点启用为 relay 时才有：网络里全部节点的编号和公钥，用来认证中转会话。
     #[serde(default)]
     pub relay_clients: Vec<RelayClient>,
+    /// `peers` 里说自己没有装虚拟网卡的那些（白皮书 §9.7：关着、没有权限、地址段重叠，或者是不懂虚拟网卡的旧版本），按编号排。
+    /// 本机的程序发给它们的包当场回"主机不可达"，不白等。controller 还不知道的（这次启动以来没有报过、旧的 controller）不在里面：
+    /// 包照发，对端没有网卡就是收不到。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub no_vnet: Vec<NodeId>,
 }
 
 impl Netmap {
@@ -691,7 +696,8 @@ pub struct Forward {
     /// 转发的编号，建流请求里靠它指明是哪一条。
     pub id: u32,
     pub protocol: ForwardProtocol,
-    /// 监听地址。IP 是本节点的虚拟 IP 时不占用操作系统的端口，只对组网里被允许的节点可达。
+    /// 监听地址。IP 是本节点的虚拟 IP 时只对组网里被允许的节点可达：经虚拟网卡来的连到这个地址上的监听，
+    /// 经流来的（没有网卡的节点、SOCKS5 入口）由目标一侧接住。
     pub bind: SocketAddr,
     pub target: NodeId,
     #[serde(default)]
@@ -791,6 +797,17 @@ mod tests {
             }]
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn peers_without_a_virtual_nic_are_listed_only_when_there_are_any() {
+        let mut netmap = minimal();
+        assert!(netmap.no_vnet.is_empty(), "旧的 controller 不发：当作都有网卡");
+        assert!(serde_json::to_value(&netmap).unwrap().get("no_vnet").is_none(), "没有的时候不写");
+        netmap.no_vnet = vec![NodeId::new(2).unwrap()];
+        let json = serde_json::to_value(&netmap).unwrap();
+        assert_eq!(json["no_vnet"], serde_json::json!([2]));
+        assert_eq!(serde_json::from_value::<Netmap>(json).unwrap(), netmap);
     }
 
     #[test]

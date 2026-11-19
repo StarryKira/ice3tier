@@ -24,9 +24,6 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
-i3t-intercept = { path = "../i3t-intercept" }
-
 [dev-dependencies]
 base64.workspace = true
 i3t-flow = { path = "../i3t-flow", features = ["test-util"] }

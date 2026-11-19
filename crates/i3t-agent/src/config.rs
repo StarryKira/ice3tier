@@ -35,7 +35,10 @@ pub struct Config {
     #[serde(default)]
     pub performance: PerformanceConfig,
     #[serde(default)]
-    pub intercept: Intercept,
+    pub network: Network,
+    /// 以前的透明访问（`[intercept]`），被虚拟网卡取代了：照收、不起作用，节点启动时记一行（[`Config::retired`]）。
+    #[serde(default, rename = "intercept")]
+    retired_intercept: Option<Retired>,
     #[serde(default)]
     pub log: Log,
 }
@@ -102,7 +105,9 @@ impl Config {
             text.parse().map_err(|err| anyhow::anyhow!("{err}")).with_context(|| (texts().config_error)(path))?;
         let (section, key) = change.setting().key();
         match change {
-            Change::Declare(_, on) | Change::ThroughputTests(on) | Change::Intercept(on) => document[section][key] = toml_edit::value(on),
+            Change::Declare(_, on) | Change::ThroughputTests(on) | Change::Network(on) | Change::Firewall(on) => {
+                document[section][key] = toml_edit::value(on);
+            }
             Change::CanForward(_) => {}
             Change::Profile(profile) => document[section][key] = toml_edit::value(profile.spelling()),
             Change::RelayAddress(Some(address)) => document[section][key] = toml_edit::value(address.to_string()),
@@ -146,6 +151,12 @@ impl Config {
         }
         self.performance.validate()
     }
+
+    /// 配置文件里还写着、已经不起作用的节（以前的透明访问的 `[intercept]`）。节点启动时各记一行。
+    #[must_use]
+    pub fn retired(&self) -> Vec<&'static str> {
+        self.retired_intercept.as_ref().map(|_| "intercept").into_iter().collect()
+    }
 }
 
 impl Default for Config {
@@ -157,9 +168,20 @@ impl Default for Config {
             metrics: Metrics::default(),
             tests: Tests::default(),
             performance: PerformanceConfig::default(),
-            intercept: Intercept::default(),
+            network: Network::default(),
+            retired_intercept: None,
             log: Log::default(),
         }
+    }
+}
+
+/// 不再起作用的一节：里面写什么都照收，不看。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Retired;
+
+impl<'de> Deserialize<'de> for Retired {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        serde::de::IgnoredAny::deserialize(deserializer).map(|_| Self)
     }
 }
 
@@ -215,7 +237,7 @@ impl Capability {
     }
 }
 
-/// `i3t set` 能改的项：两项声明、声明的 relay 地址、接不接受吞吐测试、性能档位、透明访问，和不再起作用的 `can-forward`。
+/// `i3t set` 能改的项：两项声明、声明的 relay 地址、接不接受吞吐测试、性能档位、虚拟网卡和它的防火墙规则，和不再起作用的 `can-forward`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setting {
     Declare(Capability),
@@ -228,8 +250,10 @@ pub enum Setting {
     ThroughputTests,
     /// controller 没有选档位时用的性能档位（`[performance] profile`）。
     Profile,
-    /// 透明访问（`[intercept] enabled`）。
-    Intercept,
+    /// 虚拟网卡（`[network] enabled`）。
+    Network,
+    /// 虚拟网卡的两条防火墙规则（`[network] firewall`）。
+    Firewall,
 }
 
 impl Setting {
@@ -242,7 +266,8 @@ impl Setting {
             Self::RelayAddress => ("declare", "relay_address"),
             Self::ThroughputTests => ("tests", "throughput"),
             Self::Profile => ("performance", "profile"),
-            Self::Intercept => ("intercept", "enabled"),
+            Self::Network => ("network", "enabled"),
+            Self::Firewall => ("network", "firewall"),
         }
     }
 
@@ -261,7 +286,8 @@ impl Setting {
             Self::Declare(capability) => Change::Declare(capability, switch()?),
             Self::CanForward => Change::CanForward(switch()?),
             Self::ThroughputTests => Change::ThroughputTests(switch()?),
-            Self::Intercept => Change::Intercept(switch()?),
+            Self::Network => Change::Network(switch()?),
+            Self::Firewall => Change::Firewall(switch()?),
             Self::Profile => Change::Profile(value.parse().map_err(|_| anyhow::anyhow!((texts().unknown_profile)(value)))?),
             Self::RelayAddress => match value {
                 "off" => Change::RelayAddress(None),
@@ -277,7 +303,7 @@ impl Setting {
     }
 }
 
-/// 命令行上的写法：`can-exit`、`can-relay`、`can-forward`、`relay-address`、`throughput-tests`、`profile`、`intercept`。
+/// 命令行上的写法：`can-exit`、`can-relay`、`can-forward`、`relay-address`、`throughput-tests`、`profile`、`network`、`firewall`。
 impl FromStr for Setting {
     type Err = anyhow::Error;
 
@@ -287,7 +313,8 @@ impl FromStr for Setting {
             "relay-address" => Ok(Self::RelayAddress),
             "throughput-tests" => Ok(Self::ThroughputTests),
             "profile" => Ok(Self::Profile),
-            "intercept" => Ok(Self::Intercept),
+            "network" => Ok(Self::Network),
+            "firewall" => Ok(Self::Firewall),
             other => other.parse().map(Self::Declare).map_err(|_| anyhow::anyhow!((texts().unknown_setting)(other))),
         }
     }
@@ -301,7 +328,8 @@ impl fmt::Display for Setting {
             Self::RelayAddress => f.write_str("relay-address"),
             Self::ThroughputTests => f.write_str("throughput-tests"),
             Self::Profile => f.write_str("profile"),
-            Self::Intercept => f.write_str("intercept"),
+            Self::Network => f.write_str("network"),
+            Self::Firewall => f.write_str("firewall"),
         }
     }
 }
@@ -316,7 +344,8 @@ pub enum Change {
     RelayAddress(Option<SocketAddr>),
     ThroughputTests(bool),
     Profile(Profile),
-    Intercept(bool),
+    Network(bool),
+    Firewall(bool),
 }
 
 impl Change {
@@ -328,7 +357,8 @@ impl Change {
             Self::RelayAddress(_) => Setting::RelayAddress,
             Self::ThroughputTests(_) => Setting::ThroughputTests,
             Self::Profile(_) => Setting::Profile,
-            Self::Intercept(_) => Setting::Intercept,
+            Self::Network(_) => Setting::Network,
+            Self::Firewall(_) => Setting::Firewall,
         }
     }
 }
@@ -337,7 +367,7 @@ impl Change {
 impl fmt::Display for Change {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Declare(_, on) | Self::CanForward(on) | Self::ThroughputTests(on) | Self::Intercept(on) => {
+            Self::Declare(_, on) | Self::CanForward(on) | Self::ThroughputTests(on) | Self::Network(on) | Self::Firewall(on) => {
                 f.write_str(if *on { "on" } else { "off" })
             }
             Self::Profile(profile) => f.write_str(profile.spelling()),
@@ -514,15 +544,24 @@ fn profile_spelling<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result
     text.parse().map_err(|_| serde::de::Error::custom((texts().unknown_profile)(&text)))
 }
 
-/// 透明访问（`[intercept]`，只在 Linux 上）：本机的程序不配代理，直接连别的节点的虚拟 IP 或者名字。
+/// 虚拟网卡（`[network]`，白皮书 §9.7）：本机的程序用虚拟 IP 访问别的节点。默认打开。
 ///
-/// 它改这台机器的网络配置（包过滤规则、策略路由、一块 dummy 网卡），所以只能在本机打开，controller 开不了；
-/// 节点进程要有 `CAP_NET_ADMIN` 和 `CAP_NET_BIND_SERVICE`（root 都有）。做法见 `i3t_intercept`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+/// 它改这台机器的网络配置（一块网卡、它的地址和路由，两条防火墙规则），所以只在本机开关，controller 只显示状态。
+/// 权限不够、没有驱动、地址段和本机的网络重叠时不装，状态里说为什么，代理和端口转发照常。做法见 `i3t_vnet`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Intercept {
-    #[serde(default)]
+pub struct Network {
+    #[serde(default = "default_true")]
     pub enabled: bool,
+    /// 程序加不加那两条防火墙规则（像 Tailscale 的 `--netfilter-mode`）。关着时一条规则也不碰。
+    #[serde(default = "default_true")]
+    pub firewall: bool,
+}
+
+impl Default for Network {
+    fn default() -> Self {
+        Self { enabled: true, firewall: true }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -700,21 +739,32 @@ mod tests {
     }
 
     #[test]
-    fn intercept_is_off_by_default_and_switched_by_name_keeping_the_comments() {
-        assert!(!Config::default().intercept.enabled);
+    fn the_network_is_on_by_default_and_both_switches_keep_the_comments() {
+        assert_eq!(Config::default().network, Network { enabled: true, firewall: true });
+        assert_eq!(Config::parse("[network]\n").unwrap().network, Network::default(), "没写就是开着");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        let setting: Setting = "intercept".parse().unwrap();
-        assert_eq!(setting, Setting::Intercept);
-        Config::set(&path, setting.change("on").unwrap()).unwrap();
-        assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            texts().template.replace("[intercept]\nenabled = false", "[intercept]\nenabled = true")
-        );
-        assert!(Config::load(&path).unwrap().intercept.enabled);
-        Config::set(&path, setting.change("off").unwrap()).unwrap();
+        let network: Setting = "network".parse().unwrap();
+        assert_eq!((network, network.to_string()), (Setting::Network, "network".to_owned()));
+        Config::set(&path, network.change("off").unwrap()).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), texts().template.replace("enabled = true", "enabled = false"));
+        assert!(!Config::load(&path).unwrap().network.enabled);
+        let firewall: Setting = "firewall".parse().unwrap();
+        Config::set(&path, firewall.change("off").unwrap()).unwrap();
+        assert_eq!(Config::load(&path).unwrap().network, Network { enabled: false, firewall: false });
+        Config::set(&path, network.change("on").unwrap()).unwrap();
+        Config::set(&path, firewall.change("on").unwrap()).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), texts().template);
-        assert!(error_of("[intercept]\nenable = true\n").contains("enable"));
+        assert!(error_of("[network]\nenable = true\n").contains("enable"));
+        assert!("intercept".parse::<Setting>().is_err(), "透明访问的开关没有了");
+    }
+
+    #[test]
+    fn an_old_intercept_section_does_not_stop_the_node_and_is_named_as_retired() {
+        let old = Config::parse("[intercept]\nenabled = true\n").unwrap();
+        assert_eq!(old.retired(), ["intercept"]);
+        assert_eq!(old.network, Network::default(), "虚拟网卡照常默认开着");
+        assert!(Config::default().retired().is_empty());
     }
 
     #[test]

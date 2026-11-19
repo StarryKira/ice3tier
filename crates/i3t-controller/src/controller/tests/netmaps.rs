@@ -603,36 +603,49 @@ fn a_chosen_profile_reaches_only_that_node_and_its_report_shows_in_the_detail() 
 }
 
 #[test]
-fn the_reported_intercept_state_shows_in_the_node_detail_and_nothing_is_sent_back() {
-    use i3t_model::control::{InterceptCause, InterceptReport, InterceptState, NameService};
+fn the_reported_vnet_state_shows_in_the_node_detail_and_its_peers_learn_when_it_has_no_nic() {
+    use i3t_model::control::{Firewall, NameService, RuleState, VnetCause, VnetReport, VnetState};
 
     let mut lab = Lab::new();
     let network = lab.network("home");
     let mut a = lab.join(network.id, &[]);
     let mut b = lab.join(network.id, &[]);
     lab.settle(&mut [&mut a, &mut b]);
-    let version = a.netmap().version;
+    assert!(b.netmap().no_vnet.is_empty(), "还没报过的节点当作有网卡");
 
-    let on = InterceptReport {
-        state: InterceptState::On { udp: true, source_address: true, names: NameService::NoResolver },
-        active: 3,
-        up_bytes: 100,
-        down_bytes: 200,
+    let installed = VnetReport {
+        state: VnetState::Installed { device: "i3t0".into(), mtu: 1280, names: NameService::NoResolver },
+        firewall: Firewall { accept: RuleState::On, guard: RuleState::On },
+        sent_packets: 3,
+        sent_bytes: 300,
+        received_packets: 2,
+        received_bytes: 200,
+        dropped: Default::default(),
     };
-    a.send(&lab.controller, ToController::Report(Box::new(Report { intercept: Some(Box::new(on.clone())), ..Report::default() })));
-    assert_eq!(lab.controller.node(network.id, a.id).unwrap().intercept, Some(on));
-    assert_eq!(lab.controller.node(network.id, b.id).unwrap().intercept, None, "旧版本或者还没报过的节点没有");
+    let report = |vnet: Option<VnetReport>| ToController::Report(Box::new(Report { vnet: vnet.map(Box::new), ..Report::default() }));
+    a.send(&lab.controller, report(Some(installed.clone())));
+    assert_eq!(lab.controller.node(network.id, a.id).unwrap().vnet, Some(installed.clone()));
+    assert_eq!(lab.controller.node(network.id, b.id).unwrap().vnet, None, "旧版本或者还没报过的节点没有");
+    lab.settle(&mut [&mut a, &mut b]);
+    assert!(b.netmap().no_vnet.is_empty());
 
-    let failed = InterceptReport {
-        state: InterceptState::Failed { cause: InterceptCause::ProgramMissing { program: "nft".into() } },
-        active: 0,
-        up_bytes: 0,
-        down_bytes: 0,
+    let failed = VnetReport {
+        state: VnetState::Failed { cause: VnetCause::NoPermission { missing: vec!["CAP_NET_ADMIN".into()] } },
+        firewall: Firewall::default(),
+        ..installed.clone()
     };
-    a.send(&lab.controller, ToController::Report(Box::new(Report { intercept: Some(Box::new(failed.clone())), ..Report::default() })));
-    assert_eq!(lab.controller.node(network.id, a.id).unwrap().intercept, Some(failed));
-    lab.settle(&mut [&mut a]);
-    assert_eq!(a.netmap().version, version, "透明访问是本机的事，controller 不因此改 netmap");
+    a.send(&lab.controller, report(Some(failed.clone())));
+    assert_eq!(lab.controller.node(network.id, a.id).unwrap().vnet, Some(failed));
+    lab.settle(&mut [&mut a, &mut b]);
+    assert_eq!(b.netmap().no_vnet, [a.id], "对端知道它没有网卡");
+    assert!(a.netmap().no_vnet.is_empty(), "它自己的 netmap 里没有自己");
+
+    a.send(&lab.controller, report(Some(installed)));
+    lab.settle(&mut [&mut a, &mut b]);
+    assert!(b.netmap().no_vnet.is_empty(), "装上了：对端跟着知道");
+    a.send(&lab.controller, report(None));
+    lab.settle(&mut [&mut a, &mut b]);
+    assert_eq!(b.netmap().no_vnet, [a.id], "不报的是不懂虚拟网卡的旧版本：没有网卡");
 }
 
 #[test]
@@ -669,7 +682,7 @@ fn a_node_whose_relays_answer_only_over_tcp_is_held_without_udp_after_a_while_an
     use std::time::Duration;
 
     use i3t_crypto::NodeKey;
-    use i3t_model::control::{LANE_DEFAULT_REVISION, RelayTry, TryOutcome};
+    use i3t_model::control::{LANE_DEFAULT_REVISION, NameService, RelayTry, TryOutcome, VnetReport, VnetState};
 
     use crate::store::Store;
 
@@ -688,9 +701,20 @@ fn a_node_whose_relays_answer_only_over_tcp_is_held_without_udp_after_a_while_an
     for relay in [r.id, s.id] {
         lab.controller.enable_relay(network.id, relay, relay_settings()).unwrap();
     }
+    // 这里只看 no_udp，节点都报虚拟网卡装着：虚拟网卡的状况 controller 不存，重启之后到节点再报之前不知道，
+    // 没有网卡的节点那时会先从对端 netmap 的 no_vnet 里出去。
+    let vnet = VnetReport {
+        state: VnetState::Installed { device: "i3t0".into(), mtu: 1280, names: NameService::NoResolver },
+        firewall: Default::default(),
+        sent_packets: 0,
+        sent_bytes: 0,
+        received_packets: 0,
+        received_bytes: 0,
+        dropped: Default::default(),
+    };
     let tries = |entries: &[(i3t_proto::NodeId, TryOutcome)]| {
         let relays = entries.iter().map(|&(relay, outcome)| RelayTry { relay, outcome, age_secs: 0, seen_as: None }).collect();
-        ToController::Report(Box::new(Report { relays, ..Report::default() }))
+        ToController::Report(Box::new(Report { relays, vnet: Some(Box::new(vnet.clone())), ..Report::default() }))
     };
     // y 经 UDP 连得上 r（r 有 UDP），经 TCP 才连得上 s；s 连 r 也只经 TCP。
     y.send(&lab.controller, tries(&[(r.id, TryOutcome::Udp), (s.id, TryOutcome::Tcp)]));

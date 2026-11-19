@@ -86,7 +86,9 @@ static ZH: Texts = Texts {
     },
     metrics_not_loopback: |addr| format!("metrics.listen = \"{addr}\" 不是回环地址：指标接口没有认证，只能写 127.0.0.1 或 [::1]。"),
     same_proxy_address: |addr| format!("proxy.socks5 和 proxy.http 不能用同一个地址 {addr}"),
-    unknown_setting: |other| format!("没有设置项 {other}：可以写 can-exit、can-relay、relay-address、throughput-tests、profile、intercept"),
+    unknown_setting: |other| {
+        format!("没有设置项 {other}：可以写 can-exit、can-relay、relay-address、throughput-tests、profile、network、firewall")
+    },
     not_a_switch: |other| format!("\"{other}\" 不是开关的值：写 on 或 off"),
     unknown_profile: |other| format!("没有档位 \"{other}\"：可以写 low-footprint、balanced、high-throughput"),
     bad_relay_address: |text| {
@@ -143,7 +145,7 @@ static EN: Texts = Texts {
     },
     same_proxy_address: |addr| format!("proxy.socks5 and proxy.http can't share the address {addr}"),
     unknown_setting: |other| {
-        format!("No setting {other}: possible values: can-exit, can-relay, relay-address, throughput-tests, profile, intercept")
+        format!("No setting {other}: possible values: can-exit, can-relay, relay-address, throughput-tests, profile, network, firewall")
     },
     not_a_switch: |other| format!("\"{other}\" isn't a switch value: write on or off"),
     unknown_profile: |other| format!("No profile \"{other}\": possible values: low-footprint, balanced, high-throughput"),
@@ -223,11 +225,14 @@ profile = "balanced"
 # idle_close_secs = 300     # 没有流之后多久关闭连接，0 是不关
 # return_memory = false     # 每分钟把空着的内存还给系统
 
-# 透明访问（只在 Linux 上）：本机的程序不配代理，直接连别的节点的虚拟 IP 或者 <名字>.<网络的域名>。
-# 装包过滤规则、策略路由和网卡 i3t0，节点停下时拆掉；节点进程要有 CAP_NET_ADMIN 和 CAP_NET_BIND_SERVICE。
-# i3t set intercept on 改的是这一行，i3t intercept status 列出装了什么。
-[intercept]
-enabled = false
+# 虚拟网卡：本机的程序直接用虚拟 IP 或者 <名字>.<网络的域名> 访问别的节点，像一个局域网。节点停下时拆掉。
+# 要 root（Linux 上 CAP_NET_ADMIN 就够）；Windows 上要以管理员运行，程序旁边要有 wintun.dll。装不上时代理和端口转发照常。
+# i3t set network off 关掉它，i3t network status 列出装了什么。
+[network]
+enabled = true
+# 防火墙：放行从虚拟网卡进来的、丢掉从别的网卡进来却自称来自虚拟地址段的（Linux），放行虚拟地址段（Windows）。
+# 写 false（i3t set firewall off）程序就一条规则也不碰，从虚拟网卡进来的由这台机器自己的防火墙管。
+firewall = true
 
 [log]
 # 日志级别：error、warn、info、debug、trace。
@@ -278,11 +283,14 @@ profile = "balanced"
 # idle_close_secs = 300     # Close a connection this long after its last stream; 0 never
 # return_memory = false     # Give unused memory back to the system every minute
 
-# Transparent access (Linux only): programs here reach other nodes by virtual IP or <name>.<network domain>, no proxy settings.
-# Installs packet-filter rules, a routing rule and a link i3t0, removed when the node stops; needs CAP_NET_ADMIN and CAP_NET_BIND_SERVICE.
-# i3t set intercept on edits this line; i3t intercept status lists what is installed.
-[intercept]
-enabled = false
+# Virtual network adapter: programs here reach other nodes by virtual IP or <name>.<network domain>, like a LAN.
+# Removed when the node stops. Needs root (CAP_NET_ADMIN on Linux); on Windows run as administrator with wintun.dll next to
+# the program. Proxies and port forwards work without it. i3t set network off turns it off; i3t network status lists what is installed.
+[network]
+enabled = true
+# Firewall: accept what arrives on the adapter and drop packets claiming the virtual range from other interfaces (Linux),
+# accept the virtual range (Windows). false (i3t set firewall off) makes the program touch no rules at all.
+firewall = true
 
 [log]
 # Log level: error, warn, info, debug, trace.

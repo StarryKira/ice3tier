@@ -12,7 +12,7 @@ use std::path::Path;
 use i3t_model::admin::{LogRef, action};
 use i3t_model::control::{
     Hello, MAX_LOCAL_ADDRESSES, MAX_PACKAGE_CHUNK, MAX_PEER_USE, MAX_RELAY_USERS, MAX_REPORTED_SWITCHES, RelayTry, Report, RouteSwitch,
-    Signal, ToController, ToNode,
+    Signal, ToController, ToNode, VnetReport, VnetState,
 };
 use i3t_model::netmap::Attachment;
 use i3t_model::update::{Platform, Version};
@@ -23,7 +23,7 @@ use tokio::sync::mpsc;
 use super::usage::UsageReport;
 use super::{Controller, Inner, Live, Seeds};
 use crate::error::{Error, Rejection, error_chain};
-use crate::netmap::MAX_ENDPOINTS;
+use crate::netmap::{MAX_ENDPOINTS, VnetFacts};
 use crate::store::{NewSwitch, NodeRecord};
 use crate::{node_addresses, relay_reach};
 
@@ -36,6 +36,12 @@ const MAX_HOSTNAME: usize = 253;
 /// 到 relay 的延迟变化不超过这个数（毫秒）、也不超过原来的四分之一时，不算变化。
 /// 延迟每次测出来都差几毫秒，不这样就每次上报都要给全部对端重发 netmap。
 const RTT_NOISE_MS: u32 = 10;
+
+impl VnetFacts for Inner {
+    fn lacks_vnet(&self, node: NodeId) -> bool {
+        self.no_vnet.contains(&node)
+    }
+}
 
 /// 一条被接受的连接：哪个节点，第几条连接。之后这条连接上的消息都带着它交进来。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,7 +248,7 @@ impl Inner {
             forwards: Vec::new(),
             lanes: None,
             performance: None,
-            intercept: None,
+            vnet: None,
             throughput_tests: hello.throughput_tests,
             remote,
             port: hello.port,
@@ -392,7 +398,7 @@ impl Inner {
             live.rx_bytes = report.rx_bytes;
             live.lanes = report.lanes.as_deref().cloned();
             live.performance = report.performance.as_deref().cloned();
-            live.intercept = report.intercept.as_deref().cloned();
+            live.vnet = report.vnet.as_deref().cloned();
             live.peer_use = report.peer_use.iter().take(MAX_PEER_USE).map(|used| (used.peer, *used)).collect();
             live.relay_use = report.relay_use.clone().map(|mut used| {
                 used.pairs.truncate(MAX_RELAY_USERS);
@@ -409,6 +415,7 @@ impl Inner {
         }
 
         self.relay_tries_reported(&node, &report.relays)?;
+        self.vnet_reported(&node, report.vnet.as_deref());
 
         if let Some(local) = report.local_addresses {
             let mut local = local.into_vec();
@@ -480,6 +487,18 @@ impl Inner {
             self.defer(node.network, [node.id], self.timing.report_coalesce);
         }
         Ok(())
+    }
+
+    /// 节点报的虚拟网卡装没装（白皮书 §9.7）。变了的话它的对端的 netmap 要重算：本机的程序发给没有网卡的节点的包当场回"不可达"。
+    /// 不报的节点（比虚拟网卡旧的版本）没有网卡。
+    fn vnet_reported(&mut self, node: &NodeRecord, vnet: Option<&VnetReport>) {
+        let lacks = !vnet.is_some_and(|vnet| matches!(vnet.state, VnetState::Installed { .. }));
+        let changed = if lacks { self.no_vnet.insert(node.id) } else { self.no_vnet.remove(&node.id) };
+        if changed {
+            tracing::info!(node = %node.id, name = %node.name, installed = !lacks, "节点的虚拟网卡装上了或者没有了，对端的 netmap 跟着改");
+            let holders = self.holders_of(node.id);
+            self.defer_report(node.network, holders);
+        }
     }
 
     /// 节点报的网卡地址变了。它是 relay 的话，它的地址跟着变，全网的节点都要知道（白皮书 §7.2）。

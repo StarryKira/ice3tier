@@ -100,6 +100,36 @@
 //!
 //! 连接层只看首字节的 bit 0：一个节点既可能是某些上下文的发起方，也可能是另一些上下文的接受方，
 //! 两种数据报要交给不同的人处理（[`Recipient::peek`]）。
+//!
+//! # 网络包
+//!
+//! 虚拟网卡上的一个 IPv4 包（白皮书 §9.7）也走连接的数据报通道（不保证送达，不重传），首字节的 bit 2 标着它，
+//! 连接层按首字节把它交给第三个人（[`Channel::peek`]）。比它旧的节点把 bit 2 当作保留位，这样的数据报一律丢掉。
+//!
+//! ```text
+//! 完整的包
+//! +------+=======+
+//! | 0x04 | IP 包 |
+//! +------+=======+
+//!    1
+//!
+//! 一片（包装不进一个数据报时）
+//! +------+--------+--------+------+==============+
+//! | 0x06 | 包号   | 片序号 | 片数 | 这个包的一片 |
+//! +------+--------+--------+------+==============+
+//!    1       2        1       1
+//!
+//! 标志        bit 1     这是一片
+//!             bit 2     网络包，必须是 1
+//!             bit 0、3～7  必须是 0
+//! IP 包       一个完整的 IPv4 包，原样，最长 [`MAX_PACKET_LEN`] 字节
+//! 包号        同一个包的各片相同。每个方向各自往上数，到头了回到 0
+//! 片序号      从 0 开始
+//! 片数        2～[`MAX_PACKET_PIECES`]
+//! ```
+//!
+//! 一个包装得进一个数据报就不切；装不下时切成两片，第一片把帧填满，收的一方拼回去再写进自己的网卡。
+//! 包里写的来源和目的地址由收的一方核对，这一层只管怎么送。
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -107,9 +137,11 @@ use std::str::FromStr;
 
 mod dgram;
 mod measure;
+mod packet;
 
 pub use dgram::{DatagramHeader, Fragment, FrameError, Frames, MAX_DATAGRAM_BODY_LEN, Recipient, SplitError};
 pub use measure::{MeasureEnd, MeasureMode, MeasureSteady, MeasureSummary, OpenMeasure};
+pub use packet::{Channel, MAX_PACKET_LEN, MAX_PACKET_PIECES, PacketHeader, PacketPieces, PieceError};
 
 /// 域名最长多少字节。DNS 的名字写成文本最长就是这么多。
 pub const MAX_DOMAIN_LEN: usize = 253;

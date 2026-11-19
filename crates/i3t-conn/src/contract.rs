@@ -24,6 +24,10 @@
 //! 流之外，一对节点之间还可以互相发数据报（[`Datagrams`]）：一份一份的，每份有长度上限。
 //! 走 [`DatagramSender::send_datagram`] 的可能丢、可能乱序、不重传；走 [`DatagramSender::send_reliable`] 的不丢，
 //! 但同样不保证先后。数据报只在已经有的连接上发，不会为它去建连接：上层总是先开一条流，再发和这条流有关的数据报。
+//!
+//! 虚拟网卡上的 IP 包（[`Packets`]）也是不保证送达的数据报，首字节标着它是网络包（`i3t_proto::flow::PacketHeader`），
+//! 收的一方交给第三个人。它们和流不一样，没有一条流替它们撑着连接，所以：第一个包之前要先把连接建起来（[`PacketSender::connect`]）；
+//! 包在走的时候连接不因为没有流而被当作空闲回收，包停了照常回收。
 
 use std::future::Future;
 use std::io;
@@ -330,6 +334,40 @@ pub trait DatagramSender: Clone + Send + Sync + 'static {
     ///
     /// 和 `peer` 之间没有连接，或者连接在交出去之前断了。
     fn send_reliable(&self, peer: NodeId, datagram: Bytes) -> impl Future<Output = Result<(), DatagramSendError>> + Send;
+}
+
+/// 一对节点之间的网络包（虚拟网卡上的 IP 包，白皮书 §9.7）。
+///
+/// 和 [`Datagrams`] 一样收和发分开。只走共用的连接：ice3proxy 只运流，不运包。
+pub trait Packets: Send + Sync + 'static {
+    type Sender: PacketSender;
+
+    /// 发网络包用的句柄。
+    fn packet_sender(&self) -> Self::Sender;
+
+    /// 等对端发来的网络包帧，一次取走排着的若干个（最多 `limit` 个）放进 `into`，返回取了几个。本端关闭之后返回 0。
+    ///
+    /// 首字节标着网络包的数据报（`i3t_proto::flow::Channel::Packet`）排在这里，内容这一层不看。队列有上限，
+    /// 没有人来取、或者取得太慢时新到的被丢掉，和路由器的队列满了一样。只应该有一个人在等。
+    fn recv_packets(&self, into: &mut Vec<Datagram>, limit: usize) -> impl Future<Output = usize> + Send;
+}
+
+/// 往对端发网络包。
+pub trait PacketSender: Clone + Send + Sync + 'static {
+    /// 把一帧（首字节标着网络包）作为一个不保证送达的数据报发给 `peer`，不等待。发出去的包让连接不被当作空闲回收。
+    ///
+    /// # Errors
+    ///
+    /// 和 `peer` 之间没有连接（先 [`connect`](Self::connect)），或者这一帧比这条连接现在能发的长
+    /// （[`DatagramSendError::TooLarge`] 带着现在的上限：调用方切开再发）。
+    fn send_packet(&self, peer: NodeId, frame: Bytes) -> Result<(), DatagramSendError>;
+
+    /// 和 `peer` 之间还没有连接时建一条；已经有了就立刻返回。
+    ///
+    /// # Errors
+    ///
+    /// 和 [`Connector::open`] 建连接时一样：不在 netmap 里、没有路、超时、本端正在关闭。
+    fn connect(&self, peer: NodeId) -> impl Future<Output = Result<(), OpenError>> + Send;
 }
 
 /// 对端发来的一个数据报。

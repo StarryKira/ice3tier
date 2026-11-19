@@ -112,6 +112,19 @@ jobs:
             cp "$OUT_DIR/$program$exe" "dist/$program-$PLATFORM$exe"
           done
           ls -l dist
+      # Windows 上的虚拟网卡要 Wintun 的 wintun.dll 放在 i3t.exe 旁边（它不进仓库，scripts/fetch-wintun.sh 取钉死的版本、核对摘要）。
+      # 发一个 zip：i3t.exe、wintun.dll 和 Wintun 的许可原文。单独的 i3t-windows-*.exe 照旧发，节点自己更新时只换它，DLL 留着。
+      - name: Windows archive with Wintun
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          case $PLATFORM in windows-x86_64) arch=amd64 ;; windows-aarch64) arch=arm64 ;; *) echo "::error::没有 $PLATFORM 的 Wintun"; exit 1 ;; esac
+          scripts/fetch-wintun.sh "$arch" wintun
+          cp "$OUT_DIR/i3t.exe" wintun/i3t.exe
+          "$(command -v python3 || command -v python)" -I -c "import sys, zipfile; z = zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED); [z.write(f'wintun/{name}', name) for name in ('i3t.exe', 'wintun.dll', 'wintun-LICENSE.txt')]; z.close()" "dist/i3t-$PLATFORM.zip"
+          ls -l dist
       - uses: actions/upload-artifact@v4
         with:
           name: bin-${{ matrix.platform }}

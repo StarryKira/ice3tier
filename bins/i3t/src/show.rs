@@ -8,7 +8,7 @@ use i3t_agent::state::StateDir;
 use i3t_agent::status::{Link, ListenerState, LiveListener, LiveStatus};
 use i3t_lang::table::{Fields, Table};
 use i3t_lang::{Lang, NONE, optional};
-use i3t_model::control::{BindCause, InterceptReport, InterceptState, LaneReport, Route};
+use i3t_model::control::{BindCause, LaneReport, Route, VnetReport, VnetState};
 use i3t_model::update::UpdateStatus;
 use i3t_proto::NodeId;
 
@@ -84,8 +84,8 @@ pub fn status(live: &LiveStatus) {
         }
         fields.add(t.profile, summary);
     }
-    if let Some(intercept) = live.intercept.as_ref().filter(|intercept| intercept.state != InterceptState::Off) {
-        fields.add(t.intercept, intercept_line(intercept));
+    if let Some(vnet) = &live.vnet {
+        fields.add(t.vnet, vnet_line(vnet));
     }
     fields.print();
 
@@ -105,16 +105,18 @@ pub fn status(live: &LiveStatus) {
     route_table(live);
 }
 
-/// 透明访问的状态，一行：状态本身，开着时加上连接数和流量。
-pub(crate) fn intercept_line(report: &InterceptReport) -> String {
+/// 虚拟网卡的状态，一行：状态本身，装着时加上防火墙规则和收发的计数。
+pub(crate) fn vnet_line(report: &VnetReport) -> String {
     let (t, lang) = context();
-    let state = (lang.codes().intercept_state)(&report.state);
+    let codes = lang.codes();
+    let state = (codes.vnet_state)(&report.state);
     match report.state {
-        InterceptState::On { .. } => {
-            let traffic = format!("↑ {}  ↓ {}", lang.bytes(report.up_bytes), lang.bytes(report.down_bytes));
-            lang.list([state, (t.intercept_active)(usize::try_from(report.active).unwrap_or(usize::MAX), &traffic)])
+        VnetState::Installed { .. } => {
+            let traffic = format!("↑ {}  ↓ {}", lang.bytes(report.sent_bytes), lang.bytes(report.received_bytes));
+            let counts = (t.vnet_traffic)(report.sent_packets, report.received_packets, &traffic, report.dropped.total());
+            lang.list([state, (codes.firewall)(&report.firewall), counts])
         }
-        InterceptState::Off | InterceptState::Failed { .. } | InterceptState::Unsupported | InterceptState::Unknown => state,
+        VnetState::Off | VnetState::Failed { .. } | VnetState::Unsupported | VnetState::Unknown => state,
     }
 }
 

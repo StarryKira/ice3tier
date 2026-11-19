@@ -835,15 +835,10 @@ def rto_cap_supported() -> bool:
     return Path("/proc/sys/net/ipv4/tcp_rto_max_ms").exists()
 
 
-# 下面是透明访问（test_intercept.py）用的。
-
-def intercept_on(node: Node) -> None:
-    """在节点的配置文件里打开透明访问。要在节点启动之前。"""
-    add_node_config(node, "[intercept]\nenabled = true\n")
-
+# 下面是虚拟网卡（test_vnet.py）用的。
 
 def system_snapshot(host: Host) -> dict[str, str]:
-    """一台主机的包过滤规则、路由规则、全部路由表、网卡和地址。透明访问拆掉之后要和装之前一模一样。"""
+    """一台主机的包过滤规则、路由规则、全部路由表、网卡和地址。虚拟网卡拆掉之后要和装之前一模一样。"""
     return {
         "nft": host.run("nft", "list", "ruleset").stdout,
         "rules": host.run("ip", "rule", "show").stdout,
@@ -931,7 +926,7 @@ print(json.dumps(result))
 
 
 def dial(host: Host, address: str, port: int, send: str = "", limit: float = 10) -> dict:
-    """从 `host` 上不经代理直接连 `address:port`（透明访问打开时被拦截），见 `DIAL`。"""
+    """从 `host` 上不经代理直接连 `address:port`（虚拟网卡装着时经它），见 `DIAL`。"""
     done = host.run(sys.executable, "-c", DIAL, address, str(port), send, str(limit), check=False, timeout=limit + 15)
     return json.loads(done.stdout) if done.stdout.strip() else {"error": done.stderr.strip()[-300:]}
 
@@ -1015,7 +1010,7 @@ print(json.dumps({"gaps": gaps, "bytes": total, "ended": ended}))
 """
 
 
-# 数发往覆盖网的地址段、真的从 up0 出去了的包：一张只计数的表，挂在 postrouting 的最后。透明访问的规则拒绝掉的包到不了这里。
+# 数发往覆盖网的地址段、真的从 up0 出去了的包：一张只计数的表，挂在 postrouting 的最后。经虚拟网卡走的包不从 up0 出去。
 LEAK_WATCH = """
 table ip leakwatch {
     chain post {
@@ -1169,3 +1164,91 @@ def flow_routes(node: Node) -> list[tuple[str, str, str]]:
 
     pattern = re.compile(r"route_start=(.+?) route_end=(.+?) route_changed=(true|false)")
     return [match.groups() for line in node.read_log().splitlines() if "流结束" in line for match in [pattern.search(line)] if match]
+
+
+# 下面是虚拟网卡（test_vnet.py）的另外几样。
+
+def vnet_ready(node: Node, timeout: float = 15) -> str:
+    """等节点的虚拟网卡有了结果，返回 "installed" 或者 "failed"。"""
+    def outcome() -> str | None:
+        log = node.read_log()
+        if "虚拟网卡装好了" in log:
+            return "installed"
+        if "虚拟网卡装不上" in log:
+            return "failed"
+        return None
+    wait_until(lambda: outcome() is not None, timeout=timeout, what=f"{node.name} 的虚拟网卡有了结果")
+    return outcome() or "failed"
+
+
+def vnet_dropped(node: Node, reason: str) -> float:
+    """节点的虚拟网卡按原因丢掉的包（/metrics 的 i3t_vnet_dropped_total）。"""
+    return metric(node_metrics(node), "i3t_vnet_dropped_total", reason=reason)
+
+
+def firewall_rules(host: Host) -> dict[str, str]:
+    """一台主机的包过滤规则：`nft list ruleset` 和 `iptables-save`，去掉写着时间的注释行和会跟着流量变的计数。"""
+    import re
+
+    saved = host.run("iptables-save", check=False).stdout
+    saved = "\n".join(re.sub(r"\[\d+:\d+\]", "[-]", line) for line in saved.splitlines() if not line.startswith("#"))
+    ruleset = re.sub(r"counter packets \d+ bytes \d+", "counter", host.run("nft", "list", "ruleset").stdout)
+    return {"nft": ruleset, "iptables": saved}
+
+
+def without_empty_filter(ruleset: str) -> str:
+    """`nft list ruleset` 去掉一张只剩空的内置 INPUT 链（策略 accept）的 `ip filter` 表：iptables 插第一条规则时建的，
+    删掉规则之后它留着，什么都不做。"""
+    import re
+
+    empty = re.compile(r"table ip filter \{\n\tchain INPUT \{\n\t\ttype filter hook input priority filter; policy accept;\n\t\}\n\}\n?")
+    return empty.sub("", ruleset)
+
+
+# 一个收发都核对的 TCP 传输：客户端连上之后发 n 字节（按 n 做种子的伪随机），服务端收齐之后回它们的 SHA-256。
+# 服务参数：监听地址、端口。客户端参数：地址、端口、字节数；打印 JSON：摘要对不对、用了多少秒。
+DIGEST_SERVER = r"""
+import hashlib, socket, sys, threading
+def serve(conn):
+    with conn:
+        size = int.from_bytes(conn.recv(8, socket.MSG_WAITALL), "big")
+        digest, left = hashlib.sha256(), size
+        while left:
+            chunk = conn.recv(min(left, 1 << 16))
+            if not chunk:
+                return
+            digest.update(chunk)
+            left -= len(chunk)
+        conn.sendall(digest.hexdigest().encode())
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind((sys.argv[1], int(sys.argv[2])))
+s.listen(64)
+while True:
+    conn, _ = s.accept()
+    threading.Thread(target=serve, args=(conn,), daemon=True).start()
+"""
+
+DIGEST_CLIENT = r"""
+import hashlib, json, random, socket, sys, time
+address, port, size = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+data = random.Random(size).randbytes(size)
+start = time.monotonic()
+s = socket.create_connection((address, port), timeout=30)
+s.sendall(size.to_bytes(8, "big") + data)
+answer = s.recv(64).decode()
+took = time.monotonic() - start
+print(json.dumps({"ok": answer == hashlib.sha256(data).hexdigest(), "seconds": round(took, 3),
+                  "mss": s.getsockopt(socket.IPPROTO_TCP, socket.TCP_MAXSEG)}))
+"""
+
+
+def start_digest_server(host: Host, port: int) -> None:
+    host.spawn(sys.executable, "-c", DIGEST_SERVER, "0.0.0.0", str(port))
+    wait_until(lambda: f":{port} " in host.run("ss", "-lnt").stdout, what=f"{host.name} 上的核对服务启动")
+
+
+def send_checked(host: Host, address: str, port: int, size: int, timeout: float = 120) -> dict:
+    """从 `host` 不经代理把 `size` 字节发到 `address:port` 上的 `DIGEST_SERVER`，见 `DIGEST_CLIENT`。"""
+    done = host.run(sys.executable, "-c", DIGEST_CLIENT, address, str(port), str(size), check=False, timeout=timeout)
+    return json.loads(done.stdout) if done.stdout.strip() else {"ok": False, "error": done.stderr.strip()[-300:]}

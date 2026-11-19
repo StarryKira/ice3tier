@@ -1,0 +1,580 @@
+#!/usr/bin/env python3
+"""虚拟网卡（白皮书 §9.7）：每个节点一块，本机的程序用虚拟 IP 访问别的节点，IP 包作为连接上的数据报在节点之间走。
+
+    python3 tests/e2e/test_vnet.py [场景名...]
+
+实验环境的命名空间里没有特权，但在自己的用户和网络命名空间里 TUN 网卡、地址、路由和防火墙规则都建得了，节点就在这里装上、拆掉。
+客户端都是不改的程序（ping、curl、dig、Python 的套接字），不经任何代理。
+
+- basics：ping（第一个不丢）、TCP 的客户端和服务按虚拟 IP 和按名字、服务看到的来源是对端的虚拟 IP、50MB 完整、UDP、
+  不是节点的地址当场"主机不可达"、没开的端口当场"连接被拒绝"、大的 ping 照通、不许分片的大包得到正确的"太大"、
+  状态命令、节点停下之后系统和装之前一样。
+- rules：访问规则只允许 a 访问 b：a 发起的照常（TCP、ping、UDP 的问答），b 发起的连不上；对端发来的新会话在本节点被丢掉。
+- relay：两个节点之间不通，经 relay：ping 和 20MB。
+- tcp_relay：一端用不了 UDP，连接经 relay 的 TCP 中转：ping 和 20MB。
+- nat：两端都在 NAT 后面：ping 和 20MB。
+- firewall：开关开着时，默认拒绝入站的防火墙（iptables 的 INPUT 策略是 DROP）也让别的节点进来；从真网卡来、冒充虚拟 IP 的包被丢掉。
+  开关关着时 `nft list ruleset` 和 `iptables-save` 装之前、装着、拆之后都一样，冒充的包照样进来（防火墙由这台机器自己管）。
+- privilege：没有 CAP_NET_ADMIN、没有 /dev/net/tun：不装，状态说为什么，代理照常。
+- overlap：本机在一个和地址段重叠的网络里：不装，说出和谁重叠，那个网络照常。appears：装着的时候才重叠：拆掉；重叠没了再装上。
+- leftover：kill -9 之后网卡没了、规则留着；再启动换掉而不是多一份；节点没运行时 `i3t set network off` 拆掉；关着启动什么都不装。
+- restart：经虚拟网卡的 TCP 会话开着时重启节点程序，会话不断。
+- forward：监听在本节点虚拟 IP 上的端口转发（目标是本节点的回环服务、目标是另一个节点）经网卡可达；经流照旧可达。
+- managed：由 controller 管理：状态在节点详情里；一个节点关着网卡，别的节点发给它的包当场"不可达"；`i3t hosts`。
+- legacy：配置文件里的 `[intercept]` 不让节点起不来；以前的透明访问留下的规则和网卡被拆掉，网卡照常装上。
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import lab as lablib  # noqa: E402
+from harness import (  # noqa: E402
+    TICKER_DIRECT, Checks, Controller, Node, add_node_config, binary, current_route, dial, firewall_rules, private_hosts_file,
+    send_checked, settled_snapshot, snapshot_difference, start_digest_server, start_ticker, start_udp_echo, start_whoami,
+    system_snapshot, tail, udp_dial, use_nameserver, vnet_dropped, vnet_ready, without_empty_filter,
+)
+from lab import Lab, NatKind, isolate, private_link, wait_until  # noqa: E402
+
+# 当场失败的（ICMP 不可达、RST）不到一秒。
+FAST = 1.0
+MB = 1_000_000
+
+
+def i3t(node: Node, *args: str) -> subprocess.CompletedProcess:
+    return node.host.run(binary("i3t"), "--state-dir", str(node.state), *args, check=False)
+
+
+def ping(node: Node, address: str, *args: str, count: int = 3) -> subprocess.CompletedProcess:
+    return node.host.run("ping", "-c", str(count), "-W", "2", "-i", "0.2", *args, address, check=False)
+
+
+def received(done: subprocess.CompletedProcess) -> int:
+    found = re.search(r"(\d+) received", done.stdout)
+    return int(found.group(1)) if found else 0
+
+
+def installed(t: Checks, *nodes: Node) -> bool:
+    ok = True
+    for node in nodes:
+        ok &= t.check(f"{node.name} 的虚拟网卡装好了", vnet_ready(node) == "installed", tail(node.read_log()))
+    return ok
+
+
+def comparable(snapshot: dict[str, str]) -> dict[str, str]:
+    """系统快照里去掉 iptables 插第一条规则时建的、删掉规则之后空着留下的 `ip filter` 表（见 `without_empty_filter`）。"""
+    return {**snapshot, "nft": without_empty_filter(snapshot["nft"])}
+
+
+def pair(lab: Lab, work: Path) -> tuple[Node, Node]:
+    a, b = Node(lab.host("a"), work, 1), Node(lab.host("b"), work, 2)
+    return a, b
+
+
+def start_pair(a: Node, b: Node, **peer_options) -> None:
+    a.start_static(a.netmap(peers=[b.as_peer(**peer_options)]))
+    b.start_static(b.netmap(peers=[a.as_peer(**peer_options)]))
+
+
+def basics(lab: Lab, work: Path, t: Checks) -> None:
+    """两个公网节点直连。"""
+    a, b = pair(lab, work)
+    before = settled_snapshot(a.host)
+    start_whoami(b.host, 8080)
+    start_digest_server(b.host, 9000)
+    start_udp_echo(b.host, 5353)
+    start_pair(a, b)
+    if not installed(t, a, b):
+        return
+    first = ping(a, b.virtual_ip, count=1)
+    t.check("第一个 ping 就通（连接建起来的那一会儿它排着，没有丢）", received(first) == 1, first.stdout + first.stderr)
+    pings = ping(a, b.virtual_ip, count=5)
+    t.check("ping 对端的虚拟 IP：对端的内核回答", received(pings) == 5, pings.stdout)
+    back = ping(b, a.virtual_ip, count=2)
+    t.check("反方向也通", received(back) == 2, back.stdout)
+    own = ping(a, a.virtual_ip, count=1)
+    t.check("ping 自己的虚拟 IP：本机回答", received(own) == 1, own.stdout)
+
+    seen = a.host.run("curl", "-sS", "--max-time", "10", f"http://{b.virtual_ip}:8080/", check=False)
+    t.check("按虚拟 IP：curl 不配代理连到 b 上的服务", seen.returncode == 0, seen.stderr.strip())
+    t.check("b 上的服务看到的来源是 a 的虚拟 IP", seen.stdout == a.virtual_ip, f"看到 {seen.stdout!r}")
+    use_nameserver(a.virtual_ip)
+    answer = a.host.run("dig", "+short", "+time=2", "+tries=1", f"@{a.virtual_ip}", "b.lab.i3t", check=False).stdout.strip()
+    t.check("名字服务：b.lab.i3t 是 b 的虚拟 IP", answer == b.virtual_ip, answer)
+    refused = a.host.run("dig", "+time=2", "+tries=1", f"@{a.virtual_ip}", "example.com", check=False).stdout
+    t.check("名字服务只答网络自己的域名，别的名字回 REFUSED", "status: REFUSED" in refused, refused[-300:])
+    from_peer = b.host.run("dig", "+time=2", "+tries=1", f"@{a.virtual_ip}", "b.lab.i3t", check=False)
+    t.check("名字服务不回答别的节点来的查询", "status: NOERROR" not in from_peer.stdout, from_peer.stdout[-300:])
+    by_name = a.host.run("curl", "-sS", "--max-time", "10", "http://b.lab.i3t:8080/", check=False)
+    t.check("按名字：curl http://b.lab.i3t:8080/ 不配代理也能用", by_name.stdout == a.virtual_ip, f"{by_name.stdout!r} {by_name.stderr.strip()}")
+
+    big = send_checked(a.host, b.virtual_ip, 9000, 50 * MB)
+    t.check("TCP 发 50MB：一个字节不差", big.get("ok") is True, str(big))
+    t.check("TCP 的分段长度按网卡的 MTU（1280）定，应用不用管", 0 < big.get("mss", 0) <= 1240, str(big))
+    echoed = udp_dial(a.host, b.virtual_ip, 5353, b"ping")
+    t.check("UDP：报文到了 b 上的服务，它看到的来源是 a 的虚拟 IP",
+            bytes.fromhex(echoed.get("data", "")).startswith(a.virtual_ip.encode()), str(echoed))
+    t.check("UDP：回答的来源是 b 的虚拟 IP 和那个端口", echoed.get("source") == f"{b.virtual_ip}:5353", str(echoed))
+
+    nobody = dial(a.host, "10.66.0.9", 8080, limit=5)
+    t.check("不是节点的地址：当场\"主机不可达\"，不是等超时", nobody.get("error") == "OSError" and nobody["seconds"] < FAST, str(nobody))
+    unreachable = ping(a, "10.66.0.9", count=1)
+    t.check("ping 不是节点的地址：当场说不可达", "Unreachable" in unreachable.stdout, unreachable.stdout)
+    closed = dial(a.host, b.virtual_ip, 8999, limit=5)
+    t.check("对端没开的端口：对端的内核当场拒绝", closed.get("error") == "ConnectionRefusedError" and closed["seconds"] < FAST, str(closed))
+    large = ping(a, b.virtual_ip, "-s", "4000", count=2)
+    t.check("比 MTU 大的 ping（4000 字节）照通：本机的内核切开，对端拼回去", received(large) == 2, large.stdout + large.stderr)
+    dont = a.host.run("ping", "-c", "1", "-W", "2", "-M", "do", "-s", "1300", b.virtual_ip, check=False)
+    said = dont.stdout + dont.stderr
+    t.check("不许分片的大包：本机的内核当场说太大（MTU 1280），不是没有回音", "mtu=1280" in said or "Message too long" in said, said)
+    t.check("i3t ping 照常", i3t(a, "ping", "b", "--count", "2").returncode == 0)
+
+    status = i3t(a, "network", "status").stdout
+    t.check("i3t network status 列出装了什么",
+            all(part in status for part in ("装着", "i3t0 10.66.0.1/16", "table ip i3t0", "-i i3t0，INPUT 的第 1 条", "放行开着")), status)
+    overall = i3t(a, "status").stdout
+    t.check("i3t status 里有虚拟网卡的状态和计数", "虚拟网卡" in overall and "装着" in overall and "发 " in overall, overall[-600:])
+
+    a.stop()
+    after = system_snapshot(a.host)
+    t.check("节点停下之后，网卡、地址、路由和规则和装之前一样", comparable(after) == comparable(before), snapshot_difference(before, after))
+    gone = ping(b, a.virtual_ip, count=1)
+    t.check("拆掉之后不再通", received(gone) == 0)
+    if t.failures:
+        print(tail(a.read_log(), 30), tail(b.read_log()), sep="\n  ---\n")
+
+
+def rules(lab: Lab, work: Path, t: Checks) -> None:
+    """访问规则只允许 a 访问 b（a -> b）。c 自以为可以访问 a（它的 netmap 和 a 的对不上），a 照样只放回包。"""
+    a, b, c = Node(lab.host("a"), work, 1), Node(lab.host("b"), work, 2), Node(lab.host("c"), work, 3)
+    for host in (a.host, b.host):
+        start_whoami(host, 8080)
+        start_udp_echo(host, 5353)
+    a.start_static(a.netmap(peers=[b.as_peer(inbound=False), c.as_peer(inbound=False)]))
+    b.start_static(b.netmap(peers=[a.as_peer(outbound=False)]))
+    c.start_static(c.netmap(peers=[a.as_peer()]))
+    if not installed(t, a, b, c):
+        return
+    t.check("a 发起的 ping 通", received(ping(a, b.virtual_ip)) == 3)
+    seen = a.host.run("curl", "-sS", "--max-time", "10", f"http://{b.virtual_ip}:8080/", check=False)
+    t.check("a 发起的 TCP 通", seen.stdout == a.virtual_ip, f"{seen.stdout!r} {seen.stderr.strip()}")
+    echoed = udp_dial(a.host, b.virtual_ip, 5353, b"query")
+    t.check("a 发起的 UDP 问答通（回答靠本节点记下的会话进来）", echoed.get("source") == f"{b.virtual_ip}:5353", str(echoed))
+
+    syn = dial(b.host, a.virtual_ip, 8080, limit=5)
+    t.check("b 发起的 TCP：b 自己当场拒绝（被管理员禁止）", syn.get("error") == "OSError" and syn["seconds"] < FAST, str(syn))
+    t.check("b 发起的 ping 不通", received(ping(b, a.virtual_ip, count=1)) == 0)
+    dropped = vnet_dropped(a, "not_allowed")
+    unasked = udp_dial(b.host, a.virtual_ip, 5353, b"unasked", tries=2)
+    t.check("b 发起的 UDP 不通", "data" not in unasked, str(unasked))
+    sneaky = dial(c.host, a.virtual_ip, 8080, limit=3)
+    t.check("c 以为可以访问 a：它的 TCP 握手在 a 那里被丢掉，连不上", "connected" not in sneaky, str(sneaky))
+    t.check("a 数到了被丢掉的新会话", vnet_dropped(a, "not_allowed") >= dropped + 2, str(vnet_dropped(a, "not_allowed")))
+    t.check("a 发起的照常，不受影响", received(ping(a, c.virtual_ip, count=1)) == 1)
+    if t.failures:
+        print(tail(a.read_log(), 30), tail(b.read_log()), sep="\n  ---\n")
+
+
+def carried(t: Checks, a: Node, b: Node, what: str, size: int = 20 * MB) -> None:
+    """a 和 b 之间：ping 和一次核对过的传输。"""
+    start_digest_server(b.host, 9000)
+    pings = ping(a, b.virtual_ip, count=3)
+    t.check(f"{what}：ping 通", received(pings) >= 2, pings.stdout + pings.stderr)
+    sent = send_checked(a.host, b.virtual_ip, 9000, size, timeout=240)
+    t.check(f"{what}：TCP 发 {size // MB}MB 一个字节不差", sent.get("ok") is True, str(sent))
+    print(f"  {what}：{size // MB}MB 用了 {sent.get('seconds')} 秒，路是 {current_route(a, b)}")
+
+
+def relayed_pair(lab: Lab, work: Path, *, a_host, b_host) -> tuple[Node, Node, Node]:
+    r = Node(lab.host("r"), work, 9, declare=("relay",))
+    a, b = Node(a_host, work, 1), Node(b_host, work, 2)
+    r.start_static(r.netmap(me={"relay": {}}, relays=[r.as_relay()], relay_clients=[a, b, r]))
+    a.start_static(a.netmap(peers=[b.as_peer(attached=[(r, 5)])], relays=[r.as_relay()]))
+    b.start_static(b.netmap(peers=[a.as_peer(attached=[(r, 5)])], relays=[r.as_relay()]))
+    return a, b, r
+
+
+def relay(lab: Lab, work: Path, t: Checks) -> None:
+    """a 和 b 之间什么都不通，经 relay。"""
+    a_host, b_host = lab.host("a"), lab.host("b")
+    isolate(a_host, b_host)
+    isolate(b_host, a_host)
+    a, b, _ = relayed_pair(lab, work, a_host=a_host, b_host=b_host)
+    if installed(t, a, b):
+        carried(t, a, b, "经 relay")
+        t.check("走的确实是 relay", current_route(a, b).startswith("经 relay"), current_route(a, b))
+    if t.failures:
+        print(tail(a.read_log(), 20), tail(b.read_log()), sep="\n  ---\n")
+
+
+def tcp_relay(lab: Lab, work: Path, t: Checks) -> None:
+    """b 用不了 UDP：它到 relay 的那一段是 TCP，连接在那一段装进 TCP，包照样是连接上的数据报。"""
+    a_host, b_host = lab.host("a"), lab.host("b")
+    b_host.block_udp()
+    a, b, _ = relayed_pair(lab, work, a_host=a_host, b_host=b_host)
+    if installed(t, a, b):
+        wait_until(lambda: "经 TCP" in b.read_log() or "TCP" in b.read_log(), timeout=20, what="b 经 TCP 挂上 relay")
+        carried(t, a, b, "经 TCP 中转")
+    if t.failures:
+        print(tail(a.read_log(), 20), tail(b.read_log()), sep="\n  ---\n")
+
+
+def nat(lab: Lab, work: Path, t: Checks) -> None:
+    """两端都在 NAT 后面，另有一个公网上的 relay。"""
+    a_host, b_host = lab.nat("nat-a", NatKind.CONE).host("a"), lab.nat("nat-b", NatKind.CONE).host("b")
+    a, b, _ = relayed_pair(lab, work, a_host=a_host, b_host=b_host)
+    if installed(t, a, b):
+        carried(t, a, b, "两端都在 NAT 后面")
+    if t.failures:
+        print(tail(a.read_log(), 20), tail(b.read_log()), sep="\n  ---\n")
+
+
+# 收到一个 UDP 报文就把来源写一行进文件。参数：端口、文件。
+UDP_SINK = r"""
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(("0.0.0.0", int(sys.argv[1])))
+while True:
+    data, peer = s.recvfrom(2048)
+    with open(sys.argv[2], "a") as out:
+        out.write(peer[0] + "\n")
+"""
+
+# 从一个指定的来源地址发一个 UDP 报文。参数：来源、目的、端口。
+UDP_FROM = r"""
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind((sys.argv[1], 0))
+s.sendto(b"hello", (sys.argv[2], int(sys.argv[3])))
+"""
+
+
+def spoof_reaches(a: Node, lan, sink: Path, source: str) -> bool:
+    """局域网里的那台机器以 `source` 为来源发一个 UDP 报文给 a 在那个局域网里的地址，a 上的服务收到了没有。"""
+    before = sink.read_text() if sink.exists() else ""
+    lan.run(sys.executable, "-c", UDP_FROM, source, "192.168.77.1", "7777")
+    time.sleep(0.5)
+    after = sink.read_text() if sink.exists() else ""
+    return after.count(source) > before.count(source)
+
+
+def firewall(lab: Lab, work: Path, t: Checks) -> None:
+    """开关开着：默认拒绝入站的 INPUT 也让别的节点进来，冒充虚拟 IP 的包被丢掉。开关关着：规则一条也不碰。"""
+    a, b = pair(lab, work)
+    lan = private_link(lab, a.host, "lan", "192.168.77.0/24")
+    # 冒充的包要真的走到 a：a 不按来源查回去的路（很多发行版的默认是宽松的），局域网那台机器另有一个地址段里的地址。
+    for key in ("all", "default", "p-lan"):
+        a.host.run("sysctl", "-qw", f"net.ipv4.conf.{key}.rp_filter=0")
+    lan.run("ip", "addr", "add", "10.66.0.2/32", "dev", "up0")
+    sink = work / "sink"
+    a.host.spawn(sys.executable, "-c", UDP_SINK, "7777", str(sink))
+    start_whoami(a.host, 8080)
+    # 像 ufw 那样的默认拒绝：只放行回包、回环、节点自己的 UDP 端口和那个局域网（冒充的包就从那里来）。
+    for rule in (["-P", "INPUT", "DROP"], ["-A", "INPUT", "-i", "lo", "-j", "ACCEPT"],
+                 ["-A", "INPUT", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"],
+                 ["-A", "INPUT", "-p", "udp", "--dport", "20330", "-j", "ACCEPT"], ["-A", "INPUT", "-i", "p-lan", "-j", "ACCEPT"]):
+        a.host.run("iptables", *rule)
+    start_pair(a, b)
+    if installed(t, a, b):
+        seen = b.host.run("curl", "-sS", "--max-time", "10", f"http://{a.virtual_ip}:8080/", check=False)
+        t.check("INPUT 默认拒绝，别的节点经虚拟网卡照样进得来", seen.stdout == b.virtual_ip, f"{seen.stdout!r} {seen.stderr.strip()}")
+        t.check("局域网里来的正常的包照样进来（对照）", spoof_reaches(a, lan, sink, "192.168.77.2"))
+        t.check("从真网卡来、冒充虚拟 IP 的包被丢掉", not spoof_reaches(a, lan, sink, "10.66.0.2"), sink.read_text() if sink.exists() else "")
+    a.stop()
+    b.stop()
+
+    add_node_config(a, "[network]\nfirewall = false\n")
+    before = firewall_rules(a.host)
+    a.log.write_text("")
+    b.log.write_text("")
+    start_pair(a, b)
+    if installed(t, a):
+        t.check("开关关着：装着的时候规则和装之前一样", firewall_rules(a.host) == before, json.dumps(firewall_rules(a.host))[-500:])
+        t.check("开关关着：冒充的包不归程序管，照样进来", spoof_reaches(a, lan, sink, "10.66.0.2"))
+        own = ping(b, a.virtual_ip, count=1)
+        t.check("开关关着：INPUT 的默认拒绝挡住了别的节点（由这台机器自己的防火墙管）", received(own) == 0, own.stdout)
+        status = i3t(a, "network", "status").stdout
+        t.check("i3t network status 不列规则", "table ip" not in status and "INPUT" not in status, status)
+    a.stop()
+    t.check("开关关着：拆之后规则和装之前一样", firewall_rules(a.host) == before)
+    if t.failures:
+        print(tail(a.read_log(), 30), tail(b.read_log()), sep="\n  ---\n")
+
+
+def privilege(lab: Lab, work: Path, t: Checks) -> None:
+    """没有 CAP_NET_ADMIN 的节点、看不到 /dev/net/tun 的节点：不装，说为什么，经本机入口访问照常。"""
+    a, b = pair(lab, work)
+    start_whoami(b.host, 8080)
+    b.start_static(b.netmap(peers=[a.as_peer()]))
+    before = settled_snapshot(a.host)
+    path = a.state / "static-netmap.json"
+    path.write_text(json.dumps(a.netmap(peers=[b.as_peer()])))
+    a.proc = a.host.spawn("setpriv", "--bounding-set=-net_admin", "--inh-caps=-net_admin", binary("i3t"), "--state-dir", str(a.state),
+                          "run", "--static", str(path), log=a.log)
+    t.check("没有 CAP_NET_ADMIN：不装", vnet_ready(a) == "failed", tail(a.read_log()))
+    t.check("状态说缺 CAP_NET_ADMIN", "缺 CAP_NET_ADMIN" in i3t(a, "status").stdout, i3t(a, "status").stdout[-500:])
+    proxied = a.curl(f"http://{b.virtual_ip}:8080/")
+    t.check("经本机入口访问 b 照常", proxied.stdout == b.host.ip, f"{proxied.stdout!r} {proxied.stderr.strip()}")
+    t.check("系统里什么都没动", comparable(system_snapshot(a.host)) == comparable(before), snapshot_difference(before, system_snapshot(a.host)))
+    a.stop()
+
+    a.log.write_text("")
+    a.proc = a.host.spawn("unshare", "-m", "sh", "-c", f"mount -t tmpfs tmpfs /dev/net && exec {binary('i3t')} --state-dir {a.state} "
+                          f"run --static {path}", log=a.log)
+    t.check("没有 /dev/net/tun：不装", vnet_ready(a) == "failed", tail(a.read_log()))
+    status = i3t(a, "status").stdout
+    t.check("状态说打不开建网卡用的设备", "打不开建网卡用的设备" in status, status[-500:])
+    proxied = a.curl(f"http://{b.virtual_ip}:8080/")
+    t.check("经本机入口访问 b 照常", proxied.stdout == b.host.ip, f"{proxied.stdout!r} {proxied.stderr.strip()}")
+    if t.failures:
+        print(tail(a.read_log(), 30))
+
+
+def overlap(lab: Lab, work: Path, t: Checks) -> None:
+    """a 自己就在一个和地址段重叠的内网里（10.66.200.0/24）：什么都不装，说清楚为什么，别的照常。"""
+    a, b = pair(lab, work)
+    lan = private_link(lab, a.host, "lan", "10.66.200.0/24")
+    start_whoami(lan, 8080)
+    start_whoami(b.host, 8080)
+    before = settled_snapshot(a.host)
+    start_pair(a, b)
+    t.check("地址段和本机的一个真实网络重叠：不装", vnet_ready(a) == "failed", tail(a.read_log()))
+    after = system_snapshot(a.host)
+    t.check("网卡、路由和规则一样也没动", comparable(after) == comparable(before), snapshot_difference(before, after))
+    status = i3t(a, "status").stdout
+    t.check("i3t status 说出和谁重叠", "网络的地址段和本机的 10.66.200.1/24 dev p-lan 重叠" in status, status[-500:])
+    real = a.host.run("curl", "-sS", "--max-time", "10", "http://10.66.200.2:8080/", check=False)
+    t.check("发往那个真实网络的流量照常", real.stdout == "10.66.200.1", f"{real.stdout!r} {real.stderr.strip()}")
+    proxied = a.curl(f"http://{b.virtual_ip}:8080/")
+    t.check("节点别的功能照常：经本机入口访问 b", proxied.stdout == b.host.ip, f"{proxied.stdout!r} {proxied.stderr.strip()}")
+    if t.failures:
+        print(tail(a.read_log(), 30))
+
+
+def appears(lab: Lab, work: Path, t: Checks) -> None:
+    """装着的时候，另一块网卡上多了一个地址段里的地址（DHCP 换了地址、VPN 连上）：当场拆掉；地址去掉之后再装上。"""
+    a, b = pair(lab, work)
+    lan = private_link(lab, a.host, "lan", "192.168.77.0/24")
+    start_whoami(lan, 8080)
+    start_pair(a, b)
+    if not installed(t, a, b):
+        return
+
+    def device() -> bool:
+        return " i3t0:" in a.host.run("ip", "-o", "link", "show").stdout
+
+    a.host.run("ip", "addr", "add", "10.66.200.1/24", "dev", "p-lan")
+    lan.run("ip", "addr", "add", "10.66.200.2/24", "dev", "up0")
+    started = time.monotonic()
+    wait_until(lambda: not device(), timeout=20, what="a 拆掉虚拟网卡")
+    t.check("多了一个地址段里的地址：几秒之内拆掉", time.monotonic() - started < 10)
+    t.check("日志说出为什么拆", "重叠了，虚拟网卡当场拆掉" in a.read_log(), tail(a.read_log()))
+    t.check("规则也拆了", "table ip i3t0" not in a.host.run("nft", "list", "ruleset").stdout)
+    real = a.host.run("curl", "-sS", "--max-time", "10", "http://10.66.200.2:8080/", check=False)
+    t.check("那个网络照常通", real.stdout == "10.66.200.1", f"{real.stdout!r} {real.stderr.strip()}")
+
+    a.host.run("ip", "addr", "del", "10.66.200.1/24", "dev", "p-lan")
+    started = time.monotonic()
+    wait_until(device, timeout=20, what="a 再装上虚拟网卡")
+    t.check("地址去掉之后几秒之内再装上", time.monotonic() - started < 10)
+    wait_until(lambda: received(ping(a, b.virtual_ip, count=1)) == 1, timeout=10, what="再装上之后 ping 通")
+    if t.failures:
+        print(tail(a.read_log(), 30))
+
+
+def leftover(lab: Lab, work: Path, t: Checks) -> None:
+    """节点被杀掉：网卡随进程没了，规则留着；下次启动换掉；节点没运行时关掉就拆掉；关着启动什么都不装。"""
+    a, b = pair(lab, work)
+    before = settled_snapshot(a.host)
+    netmap = a.netmap(peers=[b.as_peer()])
+    b.start_static(b.netmap(peers=[a.as_peer()]))
+    a.start_static(netmap)
+    installed(t, a)
+
+    a.host.stop(a.proc, signal.SIGKILL)
+    a.proc = None
+    left = system_snapshot(a.host)
+    t.check("被杀掉：网卡和它的地址、路由跟着没了", " i3t0:" not in left["links"] and "10.66.0.0/16" not in left["routes"], left["links"])
+    t.check("被杀掉：规则留着", "table ip i3t0" in left["nft"] and "ice3tier" in firewall_rules(a.host)["iptables"], left["nft"])
+    t.check("i3t network status 说这些是上次留下的", "上次留下的" in i3t(a, "network", "status").stdout)
+
+    a.log.write_text("")
+    a.start_static(netmap)
+    installed(t, a)
+    rules_now = firewall_rules(a.host)
+    counts = (rules_now["nft"].count("table ip i3t0"), rules_now["iptables"].count("--comment ice3tier"))
+    t.check("再启动：换掉而不是多一份（一张表、一条规则）", counts == (1, 1), str(counts))
+    t.check("换掉之后照常可用", received(ping(a, b.virtual_ip, count=1)) == 1)
+
+    a.host.stop(a.proc, signal.SIGKILL)
+    a.proc = None
+    switched = i3t(a, "set", "network", "off")
+    t.check("节点没运行时 i3t set network off 拆掉留下的", "拆掉了上次留下的" in switched.stdout, switched.stdout + switched.stderr)
+    after = system_snapshot(a.host)
+    t.check("拆掉之后和装之前一样", comparable(after) == comparable(before), snapshot_difference(before, after))
+    a.log.write_text("")
+    a.start_static(netmap)
+    time.sleep(1.5)
+    t.check("关着启动：什么都不装", comparable(system_snapshot(a.host)) == comparable(before), snapshot_difference(before, system_snapshot(a.host)))
+    t.check("关着：状态说关着", "关着" in i3t(a, "status").stdout)
+    if t.failures:
+        print(tail(a.read_log(), 30))
+
+
+def restart(lab: Lab, work: Path, t: Checks) -> None:
+    """a 经虚拟网卡连着 b 上一个一直在发消息的服务；中途重启 a 的节点程序：TCP 的状态在两端的操作系统里，会话不断。"""
+    a, b = pair(lab, work)
+    start_ticker(b.host, 9000)
+    start_pair(a, b)
+    if not installed(t, a, b):
+        return
+    seconds = 25
+    client = subprocess.Popen(a.host.cmd(sys.executable, "-c", TICKER_DIRECT, b.virtual_ip, "9000", str(seconds)),
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    time.sleep(5)
+    a.stop()
+    a.log.write_text("")
+    a.start_static(a.netmap(peers=[b.as_peer()]))
+    installed(t, a)
+    out, err = client.communicate(timeout=seconds + 30)
+    result = json.loads(out) if out.strip() else {"ended": err.strip()[-300:], "gaps": [], "bytes": 0}
+    t.check("重启之后会话没有断，消息接着来", result["ended"] is None and result["bytes"] > 64 * 100 * (seconds - 15), str(result))
+    t.check("中间的停顿不长", max(result["gaps"] or [0]) < 8, str(result["gaps"]))
+    if t.failures:
+        print(tail(a.read_log(), 30), tail(b.read_log()), sep="\n  ---\n")
+
+
+def forward(lab: Lab, work: Path, t: Checks) -> None:
+    """a 的虚拟 IP 上两条端口转发：8080 转给 a 自己回环上的服务，8082 转给 b 回环上的服务。b 经虚拟网卡连它们。"""
+    a, b = pair(lab, work)
+    start_whoami(a.host, 18080, bind="127.0.0.1")
+    start_whoami(b.host, 18082, bind="127.0.0.1")
+    to_self = {"id": 7, "protocol": "tcp", "bind": f"{a.virtual_ip}:8080", "target": a.id}
+    to_b = {"id": 8, "protocol": "tcp", "bind": f"{a.virtual_ip}:8082", "target": b.id}
+    a.start_static(a.netmap(peers=[b.as_peer()], me={
+        "forwards": [to_self, to_b],
+        "forward_targets": [{"id": 7, "protocol": "tcp", "addr": "127.0.0.1:18080", "listener": a.id}],
+    }))
+    b.start_static(b.netmap(peers=[a.as_peer()], me={
+        "forward_targets": [{"id": 8, "protocol": "tcp", "addr": "127.0.0.1:18082", "listener": a.id}],
+    }))
+    if not installed(t, a, b):
+        return
+    here = b.host.run("curl", "-sS", "--max-time", "10", f"http://{a.virtual_ip}:8080/", check=False)
+    t.check("经虚拟网卡连 a 的虚拟 IP 上的转发，到 a 回环上的服务", here.stdout == "127.0.0.1", f"{here.stdout!r} {here.stderr.strip()}")
+    there = b.host.run("curl", "-sS", "--max-time", "10", f"http://{a.virtual_ip}:8082/", check=False)
+    t.check("目标是另一个节点的转发：经虚拟网卡进来，经流到目标", there.stdout == "127.0.0.1", f"{there.stdout!r} {there.stderr.strip()}")
+    streamed = b.curl(f"http://{a.virtual_ip}:8080/")
+    t.check("经流（本机入口）照旧到得了", streamed.stdout == "127.0.0.1", f"{streamed.stdout!r} {streamed.stderr.strip()}")
+    listed = a.host.run("ss", "-lnt").stdout
+    t.check("转发在虚拟 IP 上真的监听着", f"{a.virtual_ip}:8080" in listed, listed)
+    if t.failures:
+        print(tail(a.read_log(), 30), tail(b.read_log()), sep="\n  ---\n")
+
+
+def managed(lab: Lab, work: Path, t: Checks) -> None:
+    """由 controller 管理：状态在节点详情里；c 关着网卡，别的节点知道，发给它的包当场"不可达"；i3t hosts 写出名字。"""
+    controller = Controller(lab.host("ctl"), work)
+    controller.ctl("network", "create", "lab", "--cidr", "10.66.0.0/16")
+    a, b, c = Node(lab.host("a"), work), Node(lab.host("b"), work), Node(lab.host("c"), work)
+    add_node_config(c, "[network]\nenabled = false\n")
+    for node in (a, b, c):
+        node.join(controller)
+    installed(t, a, b)
+
+    def detail(node: Node) -> dict:
+        return controller.ctl("node", "show", str(node.id))
+
+    wait_until(lambda: (detail(a).get("vnet") or {}).get("state") == "installed", timeout=30, what="a 把虚拟网卡的状态报给 controller")
+    reported = detail(a)["vnet"]
+    t.check("节点详情：a 的网卡装着，防火墙两条都开着",
+            reported.get("device") == "i3t0" and reported.get("firewall") == {"accept": {"state": "on"}, "guard": {"state": "on"}}, str(reported))
+    wait_until(lambda: (detail(c).get("vnet") or {}).get("state") == "off", timeout=30, what="c 报虚拟网卡关着")
+    shown = controller.host.run(binary("i3tctl"), "--token", controller.token, "node", "show", str(a.id), check=False).stdout
+    t.check("i3tctl node show 写出虚拟网卡的状态", "虚拟网卡" in shown and "装着" in shown, shown[-500:])
+
+    wait_until(lambda: received(ping(a, b.virtual_ip, count=1)) == 1, timeout=20, what="a ping 通 b")
+    wait_until(lambda: "Unreachable" in ping(a, c.virtual_ip, count=1).stdout, timeout=30, what="a 知道 c 没有网卡")
+    started = time.monotonic()
+    to_c = dial(a.host, c.virtual_ip, 22, limit=5)
+    t.check("发给没有网卡的节点：当场\"主机不可达\"", to_c.get("error") == "OSError" and time.monotonic() - started < FAST, str(to_c))
+
+    printed = i3t(a, "hosts").stdout
+    t.check("i3t hosts 写出网络里的名字", f"{b.virtual_ip}\tb.lab.i3t" in printed and f"{a.virtual_ip}\ta.lab.i3t" in printed, printed)
+    hosts = private_hosts_file()
+    original = hosts.read_text()
+    written = i3t(a, "hosts", "--apply")
+    t.check("i3t hosts --apply 写进 /etc/hosts，原来的行留着",
+            written.returncode == 0 and hosts.read_text().startswith(original) and "b.lab.i3t" in hosts.read_text(), written.stderr)
+    resolved = a.host.run("getent", "hosts", "b.lab.i3t", check=False).stdout
+    t.check("靠 hosts 文件按名字找到 b", resolved.startswith(b.virtual_ip), resolved)
+    removed = i3t(a, "hosts", "--remove")
+    t.check("i3t hosts --remove 只去掉那一段", removed.returncode == 0 and hosts.read_text() == original, removed.stdout + removed.stderr)
+    if t.failures:
+        print(tail(a.read_log(), 30), tail(controller.log.read_text(errors="replace")), sep="\n  ---\n")
+
+
+# 以前的透明访问装好之后、进程被杀掉时留在系统里的东西（它的表的样子、策略路由、dummy 网卡），用来确认新版本会拆掉它们。
+OLD_TABLE = """
+table ip i3t {
+    chain refuse {
+        type filter hook output priority filter; policy accept;
+        ip daddr 10.66.0.0/16 ip daddr != 10.66.0.1 reject with icmp type admin-prohibited
+    }
+}
+"""
+
+
+def legacy(lab: Lab, work: Path, t: Checks) -> None:
+    """配置文件里写着 [intercept]，系统里留着以前的透明访问的表、规则、路由和 dummy 网卡 i3t0。"""
+    a, b = pair(lab, work)
+    add_node_config(a, "[intercept]\nenabled = true\n")
+    a.host.run("nft", "-f", "-", input=OLD_TABLE)
+    a.host.run("ip", "rule", "add", "priority", "2033", "fwmark", "0x20000000/0x20000000", "lookup", "2033", "proto", "203")
+    a.host.run("ip", "route", "add", "local", "0.0.0.0/0", "dev", "lo", "table", "2033", "proto", "203")
+    a.host.run("ip", "link", "add", "i3t0", "type", "dummy")
+    a.host.run("ip", "link", "set", "i3t0", "alias", "ice3tier", "up")
+    start_pair(a, b)
+    t.check("[intercept] 不让节点起不来，记一行", "这一节已经不起作用" in a.read_log(), tail(a.read_log()))
+    if installed(t, a, b):
+        left = system_snapshot(a.host)
+        t.check("以前的表、规则、路由都拆掉了", "table ip i3t {" not in left["nft"] and "2033" not in left["rules"] + left["routes"],
+                snapshot_difference(left, left))
+        t.check("以前的 dummy 网卡拆掉了，虚拟网卡用上了 i3t0", "dummy" not in a.host.run("ip", "-d", "link", "show", "i3t0").stdout)
+        t.check("ping 通", received(ping(a, b.virtual_ip, count=2)) == 2)
+    if t.failures:
+        print(tail(a.read_log(), 30))
+
+
+SCENARIOS = {
+    "basics": basics, "rules": rules, "relay": relay, "tcp_relay": tcp_relay, "nat": nat, "firewall": firewall, "privilege": privilege,
+    "overlap": overlap, "appears": appears, "leftover": leftover, "restart": restart, "forward": forward, "managed": managed,
+    "legacy": legacy,
+}
+
+
+def main() -> int:
+    lablib.enter()
+    names = sys.argv[1:] or list(SCENARIOS)
+    t = Checks()
+    for name in names:
+        print(f"== {name}：{(SCENARIOS[name].__doc__ or '').strip()}", flush=True)
+        with tempfile.TemporaryDirectory(prefix=f"i3t-e2e-{name}-") as work, Lab() as lab:
+            try:
+                SCENARIOS[name](lab, Path(work), t)
+            except Exception as err:  # noqa: BLE001 - 一个场景出错不影响后面的场景
+                t.check(f"{name} 没有跑完", False, repr(err))
+        time.sleep(0.3)
+    return t.summary()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

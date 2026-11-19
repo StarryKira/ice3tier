@@ -1,4 +1,4 @@
-# 透明访问的名字经真的 systemd-resolved 走（run.sh）。容器 a 以 systemd 为 1 号进程、开着 systemd-resolved；
+# 虚拟网卡的名字经真的 systemd-resolved 走（run.sh）。容器 a 以 systemd 为 1 号进程、开着 systemd-resolved；
 # 容器 b 用同一个镜像，只跑一个节点和一个 HTTP 服务，不起 systemd。装着 polkit：systemd-resolved 按它决定一个不是 root 的
 # 进程能不能改一块网卡的 DNS（run.sh 的 service、service-polkit 两种方式看的就是这个）。
 #
@@ -9,7 +9,7 @@ ARG BASE=debian:trixie
 FROM ${BASE}
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        systemd systemd-sysv systemd-resolved libnss-resolve dbus polkitd nftables iproute2 \
+        systemd systemd-sysv systemd-resolved libnss-resolve dbus polkitd nftables iptables iproute2 \
         curl python3 procps bind9-dnsutils ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && systemctl enable systemd-resolved

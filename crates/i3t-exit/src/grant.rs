@@ -166,6 +166,7 @@ pub(crate) mod tests {
             peers: vec![peer(LAPTOP), peer(NAS)],
             relays: Vec::new(),
             relay_clients: Vec::new(),
+            no_vnet: Vec::new(),
         }
     }
 

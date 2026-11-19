@@ -18,7 +18,6 @@ mod handler;
 mod limits;
 mod outbound;
 mod policy;
-mod proxy_header;
 mod stats;
 mod system;
 mod upstream;

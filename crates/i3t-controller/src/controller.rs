@@ -45,7 +45,7 @@ use i3t_crypto::{NodeKey, tls};
 use i3t_model::Netmap;
 use i3t_model::admin::{LogEntry, NetworkId, Node, RelayView, Status, Timestamp, action};
 use i3t_model::control::{
-    ForwardReport, InterceptReport, LaneReport, ListenerReport, PeerUse, PerformanceReport, ProxyReport, RelayUse, ToNode,
+    ForwardReport, LaneReport, ListenerReport, PeerUse, PerformanceReport, ProxyReport, RelayUse, ToNode, VnetReport,
 };
 use i3t_model::update::{UpdateStatus, Version};
 use i3t_proto::{NodeId, PublicKey};
@@ -158,6 +158,9 @@ pub(crate) struct Inner {
     pub(crate) no_udp: BTreeMap<NodeId, no_udp::NoUdp>,
     /// 有节点报的 relay 结果变了、要重新看谁用不了 UDP 的网络。
     pub(crate) no_udp_dirty: BTreeSet<NetworkId>,
+    /// 最近一次上报说自己没有装虚拟网卡的节点（白皮书 §9.7），别的节点的 netmap 里列出来（`Netmap::no_vnet`）。
+    /// 不存进存储：controller 重启之后、节点报上来之前当作都有，最坏只是那一会儿发给它的包收不到。离线时照旧记着最后的样子。
+    pub(crate) no_vnet: BTreeSet<NodeId>,
     /// 等着延后重算的节点。
     pub(crate) dirty: BTreeMap<NodeId, Deferred>,
     /// 各个节点最近上报的路由表。节点离线之后留着，界面上显示成过期的；controller 重启就没有了。
@@ -209,8 +212,8 @@ pub(crate) struct Live {
     pub(crate) lanes: Option<LaneReport>,
     /// 最近一次上报里节点实际在用的性能档位。
     pub(crate) performance: Option<PerformanceReport>,
-    /// 最近一次上报里透明访问的状况。
-    pub(crate) intercept: Option<InterceptReport>,
+    /// 最近一次上报里虚拟网卡的状况。
+    pub(crate) vnet: Option<VnetReport>,
     /// 节点说它接不接受吞吐测试（本机配置文件里的开关）。
     pub(crate) throughput_tests: bool,
     /// 这条连接的来源 IP 和节点自报的端口。controller 对外地址的主机后来才知道时，靠它们重算 controller 看到的地址。
@@ -265,6 +268,7 @@ impl Controller {
             protocols: BTreeMap::new(),
             no_udp: BTreeMap::new(),
             no_udp_dirty: BTreeSet::new(),
+            no_vnet: BTreeSet::new(),
             dirty: BTreeMap::new(),
             routes: BTreeMap::new(),
             usage: usage::Usage::default(),

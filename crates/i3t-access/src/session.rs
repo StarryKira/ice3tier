@@ -25,7 +25,7 @@ use crate::entry::{Entry, Gate, LocalEntry};
 use crate::failure::Failure;
 use crate::first_data::{self, FIRST_BYTE_WAIT};
 use crate::forward_health::{ForwardHealth, TargetCause};
-use crate::manager::{Connection, Counters, PortBook};
+use crate::manager::{Connection, PortBook};
 use crate::message::{Parsed, Parser};
 use crate::route::{self, Route};
 use crate::routes::{RouteAtStart, RouteSpan, SharedRoutes};
@@ -62,8 +62,6 @@ pub(crate) struct Shared<C: Datagrams> {
     pub drained: AtomicU64,
     /// UDP 端口转发的会话没有报文往来多久之后回收。
     pub udp_idle_timeout: Duration,
-    /// 透明访问这一路的连接数和流量。
-    pub intercept: Counters,
     /// 端口转发的目标最近连不上的记录。
     pub forward_health: ForwardHealth,
     /// 到各个对端现在走哪条路，写进每条流结束时的摘要。
@@ -489,6 +487,9 @@ pub(crate) async fn forward<C: Connector + Datagrams>(
     if shared.refuse_while_draining("端口转发的连接") {
         return reset(stream);
     }
+    if forward.target == netmap.me.id {
+        return forward_here(shared, netmap, forward, stream, from, connection).await;
+    }
     if !netmap.peer(forward.target).is_some_and(|peer| peer.outbound) {
         tracing::info!(target = %forward.target, "重置了一条端口转发的连接：目标节点不在 netmap 里，或者访问规则不允许本节点访问它");
         return reset(stream);
@@ -514,6 +515,77 @@ pub(crate) async fn forward<C: Connector + Datagrams>(
         Err(error) => {
             tracing::info!(target = %forward.target, ?error, "到目标节点建流失败，重置了端口转发的连接");
             shared.forward_health.record(forward.id, Err(TargetCause::NodeUnreachable));
+            reset(stream);
+        }
+    }
+}
+
+/// 监听在本节点虚拟 IP 上、目标也在本节点的端口转发（白皮书 §9.7 的"10.77.0.1 上回环里的服务转发到 10.77.0.1:8080"），
+/// 别的节点经虚拟网卡连进来：本节点自己去连目标，两条 TCP 接起来。和别的节点经流来访问时出口模块做的一样：
+/// 只连下发给本节点、由本节点自己监听的那一条转发指向的地址，覆盖网的地址不连，要求的话先发 PROXY protocol 的头。
+///
+/// 连进来的是谁看来源地址：经虚拟网卡进来的包的来源核对过是那个对端的虚拟 IP，访问规则不允许它访问本节点时它的 TCP 握手进不来；
+/// 来源白名单（`allow_from`）在接受连接时已经按它查过。
+async fn forward_here<C: Connector + Datagrams>(
+    shared: &Shared<C>,
+    netmap: &Netmap,
+    forward: &Forward,
+    stream: TcpStream,
+    from: SocketAddr,
+    connection: &Connection,
+) {
+    let entry = netmap
+        .me
+        .forward_targets
+        .iter()
+        .find(|entry| entry.id == forward.id && entry.listener == netmap.me.id && entry.protocol == forward.protocol)
+        .copied();
+    let Some(entry) = entry else {
+        tracing::info!(forward = forward.id, "重置了一条端口转发的连接：这条转发的目标地址没有下发给本节点");
+        shared.forward_health.record(forward.id, Err(TargetCause::NotDeclared));
+        return reset(stream);
+    };
+    if netmap.network.is_overlay_address(entry.addr.ip().to_canonical()) {
+        tracing::info!(forward = forward.id, target = %entry.addr, "重置了一条端口转发的连接：目标是覆盖网的地址，本节点不当普通地址去连");
+        return reset(stream);
+    }
+    let mut target = match i3t_underlay::tcp_mss::connect(entry.addr).await {
+        Ok(target) => target,
+        Err(error) => {
+            tracing::info!(forward = forward.id, target = %entry.addr, %error, "端口转发的目标连不上，重置了经虚拟网卡进来的连接");
+            let cause = match error.kind() {
+                io::ErrorKind::ConnectionRefused => TargetCause::Refused,
+                io::ErrorKind::TimedOut => TargetCause::Timeout,
+                io::ErrorKind::NetworkUnreachable | io::ErrorKind::HostUnreachable => TargetCause::Unreachable,
+                _ => TargetCause::Other,
+            };
+            shared.forward_health.record(forward.id, Err(cause));
+            return reset(stream);
+        }
+    };
+    shared.forward_health.record(forward.id, Ok(()));
+    if let (Some(version), std::net::IpAddr::V4(client)) = (entry.proxy_protocol, from.ip().to_canonical()) {
+        let header = crate::proxy_header::encode(version, client, from.port(), target.peer_addr().unwrap_or(entry.addr));
+        if let Err(error) = target.write_all(&header).await {
+            tracing::info!(forward = forward.id, %error, "目标在收到 PROXY protocol 的头之前断开了，重置了经虚拟网卡进来的连接");
+            return reset(stream);
+        }
+    }
+    for side in [&stream, &target] {
+        if let Err(error) = i3t_flow::keep_alive(side) {
+            tracing::debug!(%error, "打不开内核保活");
+        }
+    }
+    let mut stream = stream;
+    match tokio::io::copy_bidirectional(&mut stream, &mut target).await {
+        Ok((up, down)) => {
+            let meter = IngressMeter { listen: &connection.traffic, exit: None };
+            meter.record(true, usize::try_from(up).unwrap_or(usize::MAX));
+            meter.record(false, usize::try_from(down).unwrap_or(usize::MAX));
+            tracing::info!(forward = forward.id, sent = up, received = down, "经虚拟网卡进来的端口转发的连接结束");
+        }
+        Err(error) => {
+            tracing::info!(forward = forward.id, %error, "经虚拟网卡进来的端口转发的连接异常结束");
             reset(stream);
         }
     }

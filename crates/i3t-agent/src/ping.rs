@@ -421,6 +421,7 @@ mod tests {
             peers: vec![peer(2, "nas", true), peer(3, "phone", false)],
             relays: Vec::new(),
             relay_clients: Vec::new(),
+            no_vnet: Vec::new(),
         }
     }
 

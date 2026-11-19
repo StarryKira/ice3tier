@@ -14,8 +14,7 @@ use i3t_model::admin::{
 };
 use i3t_model::control::exit_test::ExitTestCause;
 use i3t_model::control::{
-    DirectKind, DirectStatus, InterceptReport, InterceptState, LaneCounts, LaneReport, LegTransport, PathSegment, PeerLanes,
-    PerformanceReport, Route,
+    DirectKind, DirectStatus, LaneCounts, LaneReport, LegTransport, PathSegment, PeerLanes, PerformanceReport, Route, VnetReport, VnetState,
 };
 use i3t_model::netmap::{IpFamily, ListenerProtocol, Profile};
 use i3t_model::update::UpdateTiming;
@@ -461,8 +460,8 @@ pub fn node_detail(detail: &NodeDetail, names: &Names) {
     fields.add(t.reach, node.reach.as_ref().map_or_else(|| t.from_network.to_owned(), label));
     fields.add(t.pinned, lang.list(node.pinned_relays.iter().map(|relay| names.of(*relay))));
     fields.add(t.profile, profile_summary(node.profile, detail.performance.as_ref()));
-    if let Some(intercept) = &detail.intercept {
-        fields.add(t.intercept, intercept_summary(intercept));
+    if let Some(vnet) = &detail.vnet {
+        fields.add(t.vnet, vnet_summary(vnet));
     }
     fields.add("netmap", (t.netmap_versions)(node.netmap_version, node.sent_version, node.acked_version));
     fields.add(t.endpoints, lang.list(&detail.endpoints));
@@ -519,16 +518,17 @@ pub fn node_detail(detail: &NodeDetail, names: &Names) {
     }
 }
 
-/// 节点报的透明访问：状态，开着时加上连接数和流量。
-fn intercept_summary(report: &InterceptReport) -> String {
+/// 节点报的虚拟网卡：状态，装着时加上防火墙规则和收发的计数。
+fn vnet_summary(report: &VnetReport) -> String {
     let (t, lang, codes) = context();
-    let state = (codes.intercept_state)(&report.state);
+    let state = (codes.vnet_state)(&report.state);
     match report.state {
-        InterceptState::On { .. } => {
-            let traffic = format!("↑ {}  ↓ {}", lang.bytes(report.up_bytes), lang.bytes(report.down_bytes));
-            lang.list([state, (t.intercept_active)(report.active, &traffic)])
+        VnetState::Installed { .. } => {
+            let traffic = format!("↑ {}  ↓ {}", lang.bytes(report.sent_bytes), lang.bytes(report.received_bytes));
+            let counts = (t.vnet_traffic)(report.sent_packets, report.received_packets, &traffic, report.dropped.total());
+            lang.list([state, (codes.firewall)(&report.firewall), counts])
         }
-        InterceptState::Off | InterceptState::Failed { .. } | InterceptState::Unsupported | InterceptState::Unknown => state,
+        VnetState::Off | VnetState::Failed { .. } | VnetState::Unsupported | VnetState::Unknown => state,
     }
 }
 

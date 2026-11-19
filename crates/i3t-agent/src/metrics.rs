@@ -4,13 +4,13 @@
 //!
 //! 现在有的：流（入口、出口各有多少在进行，出口一共收到过多少）、字节数、没建成的请求按归因分类、
 //! 出口的配额，按凭据的用量，经各个出口出去的流（发起这一侧看到的），relay 的转发和丢弃、
-//! 到每个对端走的是哪一种路和延迟、ice3proxy（lane）的水位和计数、和 controller 的连接、更新的状态。
+//! 到每个对端走的是哪一种路和延迟、ice3proxy（lane）的水位和计数、虚拟网卡的收发和丢包、和 controller 的连接、更新的状态。
 //! 白皮书说的"不做交叉组合"：按凭据和按出口是两组各自独立的数，没有"某个凭据经某个出口"这样的组合。
 
 use i3t_conn::DropReason;
 use i3t_lane::LaneStatus;
 use i3t_metrics::Exposition;
-use i3t_model::control::Route;
+use i3t_model::control::{Route, VnetReport, VnetState};
 use i3t_model::update::UpdateStatus;
 use i3t_proto::NodeId;
 
@@ -135,10 +135,34 @@ pub(crate) fn render(runtime: &Runtime) -> String {
     }
 
     lane_metrics(&mut out, &runtime.lanes.listed_status(), &name_of);
+    vnet_metrics(&mut out, &runtime.vnet_report());
 
     let update = update_label(&runtime.update.borrow());
     out.gauge("i3t_update_state", "程序更新进行到哪一步", &[("state", &update)], 1.0);
     out.finish()
+}
+
+/// 虚拟网卡：装没装、收发的包和字节、按原因丢掉的包。
+fn vnet_metrics(out: &mut Exposition, report: &VnetReport) {
+    let installed = matches!(report.state, VnetState::Installed { .. });
+    out.gauge("i3t_vnet_installed", "虚拟网卡装着是 1，没装（关着、装不上）是 0", &[], f64::from(u8::from(installed)));
+    let help = "经虚拟网卡发给别的节点（sent）、从别的节点收进网卡（received）的包";
+    out.counter("i3t_vnet_packets_total", help, &[("direction", "sent")], report.sent_packets);
+    out.counter("i3t_vnet_packets_total", help, &[("direction", "received")], report.received_packets);
+    let help = "经虚拟网卡发出、收进的字节（IP 包的长度）";
+    out.counter("i3t_vnet_bytes_total", help, &[("direction", "sent")], report.sent_bytes);
+    out.counter("i3t_vnet_bytes_total", help, &[("direction", "received")], report.received_bytes);
+    let dropped = report.dropped;
+    let help = "虚拟网卡丢掉的包，按原因";
+    for (reason, count) in [
+        ("bad_source", dropped.bad_source),
+        ("bad_destination", dropped.bad_destination),
+        ("not_allowed", dropped.not_allowed),
+        ("unreachable", dropped.unreachable),
+        ("malformed", dropped.malformed),
+    ] {
+        out.counter("i3t_vnet_dropped_total", help, &[("reason", reason)], count);
+    }
 }
 
 fn millis(duration: std::time::Duration) -> f64 {

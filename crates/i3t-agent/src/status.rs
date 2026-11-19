@@ -7,7 +7,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use i3t_access::{ListenCause, ListenState, TargetCause, TargetFailure};
 use i3t_model::control::{
-    self, BindCause, ExitReport, InterceptReport, LaneReport, PerformanceReport, Route, RouteSince, SelfUpdate, TargetFailureReport,
+    self, BindCause, ExitReport, LaneReport, PerformanceReport, Route, RouteSince, SelfUpdate, TargetFailureReport, VnetReport,
 };
 use i3t_model::netmap::Attachment;
 use i3t_model::update::UpdateStatus;
@@ -53,8 +53,9 @@ pub struct LiveStatus {
     pub lanes: Option<LaneReport>,
     /// 正在用的性能档位。旧版本的节点不给。
     pub performance: Option<PerformanceReport>,
-    /// 透明访问。旧版本的节点不给。
-    pub intercept: Option<InterceptReport>,
+    /// 虚拟网卡。旧版本的节点不给。
+    #[serde(default)]
+    pub vnet: Option<VnetReport>,
 }
 
 /// 和 controller 的那条长连接。
@@ -254,7 +255,7 @@ impl LiveStatus {
             exit: netmap.me.exit.is_some().then(|| exit_report(&exit)),
             lanes: lanes_used.then_some(lanes),
             performance: Some(runtime.performance.borrow().clone()),
-            intercept: Some(runtime.intercept_report()),
+            vnet: Some(runtime.vnet_report()),
         }
     }
 }

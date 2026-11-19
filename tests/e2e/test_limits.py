@@ -197,7 +197,8 @@ def virtual_forward_relay(lab: Lab, work: Path, t: Checks) -> None:
     t.check("UDP：回来的报文报成从 gw 的那个端口来的", bool(answer) and answer["source"] == gw.virtual_ip and answer["port"] == 9300, f"{answer}")
     forwards = eventually_value(lambda: controller.ctl("node", "listeners", str(gw.id))["forwards"], lambda forwards: len(forwards) == 2)
     states = {entry["bind"]: entry["state"] for entry in forwards}
-    t.check("两条转发在 gw 上都报 virtual", set(states.values()) == {"virtual"}, f"{states}")
+    # gw 的虚拟网卡装着（默认打开）：两条都在它的虚拟 IP 上真的监听，经网卡来的连接也到得了。
+    t.check("两条转发在 gw 上都报 listening", set(states.values()) == {"listening"}, f"{states}")
     if t.failures:
         print(tail(gw.read_log()), tail(target.read_log()), sep="\n  ---\n")
 

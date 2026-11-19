@@ -9,9 +9,8 @@ use i3t_conn::{Endpoint, RouteChange};
 use i3t_exit::{Exit, ExitStats, Os};
 use i3t_model::Netmap;
 use i3t_model::control::{
-    BackboneRow, ExitObservation, ExitReport, ForwardReport, InterceptReport, InterceptState, ListenTraffic, ListenerReport,
-    MAX_LOCAL_ADDRESSES, MAX_REPORTED_SWITCHES, PerformanceReport, ProxyReport, QuotaUsage, Report, Route, RouteAnswer, RouteSince,
-    RouteSwitch, SelfUpdate,
+    BackboneRow, ExitObservation, ExitReport, ForwardReport, ListenTraffic, ListenerReport, MAX_LOCAL_ADDRESSES, MAX_REPORTED_SWITCHES,
+    PerformanceReport, ProxyReport, QuotaUsage, Report, Route, RouteAnswer, RouteSince, RouteSwitch, SelfUpdate, VnetReport,
 };
 use i3t_model::update::UpdateStatus;
 use i3t_proto::NodeId;
@@ -23,6 +22,7 @@ use crate::lanes::{self, NodeLanes};
 use crate::program::Program;
 use crate::route_detail;
 use crate::status::{listen_state, target_failure};
+use crate::vnet::Vnet;
 
 /// 节点里的出口：流经共用的连接或者 lane 进来。
 pub(crate) type NodeExit = Exit<Os, lanes::Connector>;
@@ -53,8 +53,8 @@ pub(crate) struct Runtime {
     pub(crate) flows: watch::Receiver<usize>,
     /// 正在用的性能档位。
     pub(crate) performance: watch::Receiver<PerformanceReport>,
-    /// 透明访问的状态。
-    pub(crate) intercept: watch::Receiver<InterceptState>,
+    /// 虚拟网卡。
+    pub(crate) vnet: Arc<Vnet>,
     pub(crate) history: RouteHistory,
     relay_activity: Mutex<RelayActivity>,
 }
@@ -73,12 +73,12 @@ pub(crate) struct Parts {
     pub(crate) update: watch::Receiver<UpdateStatus>,
     pub(crate) flows: watch::Receiver<usize>,
     pub(crate) performance: watch::Receiver<PerformanceReport>,
-    pub(crate) intercept: watch::Receiver<InterceptState>,
+    pub(crate) vnet: Arc<Vnet>,
 }
 
 impl Runtime {
     pub(crate) fn new(parts: Parts) -> Self {
-        let Parts { program, self_update, controller, endpoint, lanes, exit, access, netmap, link, update, flows, performance, intercept } =
+        let Parts { program, self_update, controller, endpoint, lanes, exit, access, netmap, link, update, flows, performance, vnet } =
             parts;
         Self {
             program,
@@ -96,7 +96,7 @@ impl Runtime {
             update,
             flows,
             performance,
-            intercept,
+            vnet,
             history: RouteHistory::default(),
             relay_activity: Mutex::default(),
         }
@@ -111,8 +111,7 @@ impl Runtime {
             .map(|proxy| proxy.active.get())
             .chain(status.local.iter().map(|entry| entry.active.get()))
             .chain(status.forwards.iter().map(|forward| forward.active.get()))
-            .sum::<usize>()
-            + self.access.intercept_status().active.get();
+            .sum::<usize>();
         let exit = usize::try_from(self.exit.stats().active).unwrap_or(usize::MAX);
         let lanes = usize::try_from(self.lanes.status().total.in_use).unwrap_or(usize::MAX);
         let forwarding =
@@ -170,23 +169,21 @@ impl Runtime {
                 target_failure: forward.target_failure.as_ref().map(target_failure),
             })
             .collect();
-        let intercept = self.intercept_report();
+        let vnet = self.vnet_report();
         let ingress_up: u64 = proxies
             .iter()
             .map(|proxy| proxy.traffic.bytes_up)
             .chain(listeners.iter().map(|listener| listener.traffic.bytes_up))
             .chain(forwards.iter().map(|forward| forward.traffic.bytes_up))
-            .sum::<u64>()
-            .saturating_add(intercept.up_bytes);
+            .sum::<u64>();
         let ingress_down: u64 = proxies
             .iter()
             .map(|proxy| proxy.traffic.bytes_down)
             .chain(listeners.iter().map(|listener| listener.traffic.bytes_down))
             .chain(forwards.iter().map(|forward| forward.traffic.bytes_down))
-            .sum::<u64>()
-            .saturating_add(intercept.down_bytes);
+            .sum::<u64>();
         // 本机网卡上的地址，不管在不在网络的地址段里（controller 拿它找 relay 的地址、提醒地址段重叠）。
-        // 透明访问在 i3t0 上放的是本节点自己的虚拟 IP，不算这台机器所在的网络。
+        // 虚拟网卡上放的是本节点自己的虚拟 IP，不算这台机器所在的网络。
         let own = self.netmap.borrow().me.virtual_ip;
         let local_addresses = i3t_underlay::ifaddr::local_addresses()
             .into_iter()
@@ -214,7 +211,7 @@ impl Runtime {
             route_kinds: self.endpoint.path_reports().iter().map(route_detail::kind).collect(),
             lanes: Some(Box::new(self.lanes.report())),
             performance: Some(Box::new(self.performance.borrow().clone())),
-            intercept: Some(Box::new(intercept)),
+            vnet: Some(Box::new(vnet)),
             relays: self.endpoint.relay_tries(),
             peer_use: self.endpoint.peer_use(),
             relay_use: self.endpoint.relay_use(),
@@ -222,15 +219,9 @@ impl Runtime {
         }
     }
 
-    /// 透明访问的状态和这一路的计数。
-    pub(crate) fn intercept_report(&self) -> InterceptReport {
-        let status = self.access.intercept_status();
-        InterceptReport {
-            state: self.intercept.borrow().clone(),
-            active: count(status.active.get()),
-            up_bytes: status.traffic.up(),
-            down_bytes: status.traffic.down(),
-        }
+    /// 虚拟网卡的状态和这一路的计数。
+    pub(crate) fn vnet_report(&self) -> VnetReport {
+        self.vnet.report()
     }
 
     /// 本节点作为发起方，经各个出口出去的流。

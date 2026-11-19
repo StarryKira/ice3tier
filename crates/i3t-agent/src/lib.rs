@@ -12,11 +12,11 @@
 //! | `lanes` | ice3proxy（lane）：和共用的连接装成一个连接层，跟着 netmap 拨谁、接谁 |
 //! | [`drain`] | 排空：更新之前不再接新的流 |
 //! | `exit_test` | 出口测试：按本节点的出站策略试着连 controller 给的目标，一次一个 |
-//! | `intercept` | 透明访问（Linux）：按本机配置把规则装进系统、跟着 netmap 改、停下时拆掉；名字服务 |
 //! | `diag` | 主动测试：收 controller 的指令，按本机的规矩量、配合，送回结果；测量服务 |
 //! | [`selfcheck`] | 新程序的自检（`i3t self-check`） |
 //! | [`status`]、[`local`] | 运行着的节点的状态，和本机问它的接口（`i3t status`、`i3t routes`、`/metrics`） |
 //! | [`ping`] | `i3t ping`：在到另一个节点的连接上量往返 |
+//! | [`vnet`] | 虚拟网卡：按本机配置装上、跟着 netmap 走、停下时拆掉；名字服务 |
 //!
 //! 节点更新的验签、取包、替换和回退在 `i3t-update` 里，这里只是把它接到长连接和数据面上。
 
@@ -27,7 +27,6 @@ pub mod drain;
 mod exit_test;
 mod flows;
 mod http;
-pub mod intercept;
 pub mod join;
 mod lanes;
 pub mod local;
@@ -45,6 +44,7 @@ pub mod state;
 pub mod status;
 mod texts;
 mod update;
+pub mod vnet;
 
 pub use i3t_model::update::Version;
 pub use i3t_update::RESTART_EXIT_CODE;

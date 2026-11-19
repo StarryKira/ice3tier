@@ -40,7 +40,6 @@ use crate::diag::{Diag, NodeHandler};
 use crate::drain::Drain;
 use crate::exit_test::ExitTests;
 use crate::flows;
-use crate::intercept::Intercept;
 use crate::join::hello;
 use crate::lanes::NodeLanes;
 use crate::local::LocalServers;
@@ -52,6 +51,7 @@ use crate::route_detail::EndpointRoutes;
 use crate::runtime::{NodeAccess, NodeExit, Parts, Runtime};
 use crate::state::StateDir;
 use crate::update::Driver;
+use crate::vnet::Vnet;
 
 /// 进程退出之前，等最后一次上报写出去最多等多久。controller 不在线的话没有什么可等的。
 const FAREWELL_TIMEOUT: Duration = Duration::from_secs(2);
@@ -112,6 +112,9 @@ pub async fn run(
     shutdown: impl Future<Output = ()>,
 ) -> anyhow::Result<Outcome> {
     let config = Config::load(&state.config_path())?;
+    for section in config.retired() {
+        tracing::info!(section, "配置文件里的这一节已经不起作用（透明访问被虚拟网卡取代了，见 [network]），照收、忽略；可以删掉它");
+    }
     let (key, initial) = match &source {
         Source::Controller => {
             let key = state.key()?.context(NOT_JOINED)?;
@@ -214,8 +217,8 @@ pub async fn run(
         .with_port_book(ports)
         .with_routes(Arc::clone(&routes));
     let access = Arc::new(access);
-    // 透明访问打开时，出口一侧连本机的服务改用发起节点的虚拟 IP 做源地址：同一个拨号器，由它来开关。
-    let intercept = Intercept::start(config.intercept.enabled, local_rx.clone(), Arc::clone(&access), outbound.clone());
+    // 虚拟网卡：默认打开，装不上时说为什么，别的照常。
+    let vnet = Arc::new(Vnet::start(config.network, local_rx.clone(), Arc::clone(&endpoint)));
     // 出口测试和替别人连用的是同一个拨号器：同一份出站策略。
     let (exit_test_answers_tx, exit_test_answers) = mpsc::channel(4);
     let exit_tests = Arc::new(ExitTests::new(outbound.clone(), exit_test_answers_tx));
@@ -263,7 +266,7 @@ pub async fn run(
         update: update_rx,
         flows: flows_rx.clone(),
         performance: performance_rx,
-        intercept: intercept.state(),
+        vnet: Arc::clone(&vnet),
     }));
     let count_flows = tokio::spawn({
         let runtime = Arc::clone(&runtime);
@@ -351,7 +354,7 @@ pub async fn run(
     };
 
     tracing::info!("节点停止");
-    intercept.stop().await;
+    vnet.stop().await;
     drop(local_servers);
     save_quota.abort();
     persist::save_quota_now(&state_for_quota, &exit);

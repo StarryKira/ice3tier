@@ -19,8 +19,8 @@ use i3t_underlay::{PacketFilter, UdpPort};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 
-use crate::contract::{Acceptor, Connector, Datagram, Datagrams, Incoming, OpenError};
-use crate::manager::{ConnectionReport, DATAGRAM_BACKLOG, DatagramHandle, DatagramQueues, Manager};
+use crate::contract::{Acceptor, Connector, Datagram, Datagrams, Incoming, OpenError, Packets};
+use crate::manager::{ConnectionReport, DATAGRAM_BACKLOG, DatagramHandle, DatagramQueues, Manager, PACKET_BACKLOG};
 use crate::quic::{self, QuicConfigError};
 use crate::socket::PathSocket;
 use crate::stream::{RecvHalf, SendHalf};
@@ -62,7 +62,8 @@ pub enum UdpSeen {
 ///
 /// 它实现 [`Connector`] 和 [`Acceptor`]：到某个节点开一条流，接受某个节点开过来的流。包走直连还是经 relay、
 /// 什么时候换路、和对端之间有没有连接，上层都不用管。本节点在 netmap 里被启用为 relay 时，它同时转发别人的包。
-/// 它也实现 [`Datagrams`]：在已经有的连接上和对端互相发数据报（QUIC 的 DATAGRAM 帧，要保证送达的走单向流）。
+/// 它也实现 [`Datagrams`]：在已经有的连接上和对端互相发数据报（QUIC 的 DATAGRAM 帧，要保证送达的走单向流）；
+/// 和 [`Packets`]：虚拟网卡上的 IP 包，一个包一个不保证送达的数据报，走和流同一条连接。
 ///
 /// 谁能访问谁（netmap 里的 `inbound`）不在这一层检查：netmap 里有的对端都能连进来、开流，
 /// 上层收到流之后按发起节点自己查。
@@ -115,8 +116,9 @@ impl Endpoint {
         let (incoming_tx, incoming_rx) = mpsc::channel(INCOMING_BACKLOG);
         let (to_acceptor, for_acceptor) = mpsc::channel(DATAGRAM_BACKLOG);
         let (to_initiator, for_initiator) = mpsc::channel(DATAGRAM_BACKLOG);
-        let queues = DatagramQueues { acceptor: to_acceptor, initiator: to_initiator };
-        let datagrams = DatagramInbox { acceptor: for_acceptor.into(), initiator: for_initiator.into() };
+        let (to_packets, for_packets) = mpsc::channel(PACKET_BACKLOG);
+        let queues = DatagramQueues { acceptor: to_acceptor, initiator: to_initiator, packets: to_packets };
+        let datagrams = DatagramInbox { acceptor: for_acceptor.into(), initiator: for_initiator.into(), packets: for_packets.into() };
         let manager = Manager::new(key, (quic, server), Arc::clone(&paths), netmap, incoming_tx, queues);
 
         // 信令两条路都走：已经有连接的话在连接里送（有 relay 的网络因此不依赖 controller），同时交给装配方的钩子。
@@ -412,10 +414,29 @@ impl Datagrams for Endpoint {
     }
 }
 
-/// 对端发来、上层还没有取走的数据报，两侧各一个队列。
+impl Packets for Endpoint {
+    type Sender = DatagramHandle;
+
+    fn packet_sender(&self) -> DatagramHandle {
+        self.manager.datagram_handle()
+    }
+
+    async fn recv_packets(&self, into: &mut Vec<Datagram>, limit: usize) -> usize {
+        let mut closed = self.manager.subscribe_closed();
+        let mut inbox = self.datagrams.packets.lock().await;
+        tokio::select! {
+            biased;
+            taken = inbox.recv_many(into, limit) => taken,
+            _ = closed.wait_for(|closed| *closed) => 0,
+        }
+    }
+}
+
+/// 对端发来、上层还没有取走的数据报，两侧各一个队列，网络包一个。
 struct DatagramInbox {
     acceptor: tokio::sync::Mutex<mpsc::Receiver<Datagram>>,
     initiator: tokio::sync::Mutex<mpsc::Receiver<Datagram>>,
+    packets: tokio::sync::Mutex<mpsc::Receiver<Datagram>>,
 }
 
 impl DatagramInbox {

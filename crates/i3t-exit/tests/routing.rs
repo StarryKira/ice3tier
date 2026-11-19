@@ -5,6 +5,8 @@
 
 mod common;
 
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use common::{
@@ -264,30 +266,38 @@ async fn a_forward_towards_a_node_this_one_may_not_access_resets_the_connection(
     assert_eq!(world.nas.exit.stats().total, 0, "入口自己就拒绝了，没有去找目标节点");
 }
 
+/// 下面那个测试的两个变体同时跑，各用一个端口：监听在虚拟 IP 上的转发在 Linux 上真的绑那个地址（见下）。
+static VIRTUAL_FORWARD_PORT: AtomicU16 = AtomicU16::new(18_080);
+
 i3t_lane::on_both_transports! {
-    async fn a_forward_bound_to_the_virtual_ip_is_reached_through_the_mesh_without_an_os_socket() {
+    async fn a_forward_bound_to_the_virtual_ip_is_reached_through_the_mesh() {
         let world = World::new().await;
         let echo = echo_server().await;
+        let port = VIRTUAL_FORWARD_PORT.fetch_add(1, Ordering::Relaxed);
+        let bind = SocketAddr::from(([10, 66, 0, 3], port));
         let status = world
             .nas
             .update(|netmap| {
-                netmap.me.forwards.push(tcp_forward(9, "10.66.0.3:8080", NAS));
+                netmap.me.forwards.push(tcp_forward(9, &bind.to_string(), NAS));
                 netmap.me.forward_targets.push(ForwardTarget { id: 9, protocol: ForwardProtocol::Tcp, addr: echo, listener: node(NAS), proxy_protocol: None });
             })
             .await;
-        assert_eq!(status.forwards[0].state, ListenState::Virtual, "虚拟 IP 不是网卡上的地址，绑不了也不需要绑");
+        // 经虚拟网卡来的连接要它在操作系统里监听。Linux 上地址还不在本机也绑得上（IP_FREEBIND，这台测试机器上就没有这个地址）；
+        // 别的平台上绑不上，先只经流来访问。
+        let expected = if cfg!(target_os = "linux") { ListenState::Listening { local: bind } } else { ListenState::Virtual };
+        assert_eq!(status.forwards[0].state, expected);
 
-        // 别的节点访问 nas 的虚拟 IP 的这个端口，就到了 nas 回环上的服务。
-        let mut stream = socks5(world.socks().await, None, "10.66.0.3", 8080).await.connected();
+        // 别的节点经流访问 nas 的虚拟 IP 的这个端口，就到了 nas 回环上的服务。
+        let mut stream = socks5(world.socks().await, None, "10.66.0.3", port).await.connected();
         assert_echo(&mut stream).await;
-        let (status, mut stream) = http_connect(world.http().await, "nas.home.i3t:8080", None).await;
+        let (status, mut stream) = http_connect(world.http().await, &format!("nas.home.i3t:{port}"), None).await;
         assert_eq!(status, 200);
         assert_echo(&mut stream).await;
         assert_eq!(world.nas.system.connected(), [echo; 2]);
 
         // 转发的来源白名单按发起节点的虚拟 IP 判断。
         world.nas.update(|netmap| netmap.me.forwards[0].allow_from = vec!["10.66.0.2/32".parse().unwrap()]).await;
-        assert_eq!(socks5(world.socks().await, None, "10.66.0.3", 8080).await.failed(), 2);
+        assert_eq!(socks5(world.socks().await, None, "10.66.0.3", port).await.failed(), 2);
         assert_eq!(world.nas.system.connected().len(), 2);
     }
 }
@@ -296,7 +306,7 @@ i3t_lane::on_both_transports! {
 async fn a_forward_that_points_at_an_overlay_address_is_refused_instead_of_being_dialled() {
     let world = World::new().await;
     world.laptop.update(|netmap| netmap.me.forwards.push(tcp_forward(7, "127.0.0.1:0", NAS))).await;
-    // 覆盖网的地址只在组网里有意义：nas 不把它当普通地址去连，透明访问打开时那样的连接会绕回组网。
+    // 覆盖网的地址只在组网里有意义：nas 不把它当普通地址去连，它的虚拟网卡装着时那样的连接会绕回组网。
     let overlay = "10.66.0.9:80".parse().unwrap();
     world
         .nas

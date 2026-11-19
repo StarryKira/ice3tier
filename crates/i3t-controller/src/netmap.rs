@@ -31,6 +31,12 @@ pub trait NodeFacts {
     fn has_no_udp(&self, node: NodeId) -> bool;
 }
 
+/// controller 从节点的上报里知道的、和虚拟网卡有关的事。和 [`NodeFacts`] 分开放，因为它们由不同的部分记着。
+pub trait VnetFacts {
+    /// 这个节点说它没有装虚拟网卡（或者它是不懂虚拟网卡的旧版本），写进别的节点的 netmap（[`Netmap::no_vnet`]）。
+    fn lacks_vnet(&self, node: NodeId) -> bool;
+}
+
 /// 一个节点的 netmap 里，它和某个对端之间的访问关系。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Relation {
@@ -126,19 +132,19 @@ impl NetworkView {
     /// `relations` 决定它的对端列表：键是对端，值是两个方向各通不通。它通常就是规则算出来的
     /// [`NetworkView::target_relations`]，变更还在按顺序生效的途中时会暂时落后于规则。
     /// `access` 是 [`NetworkView::access`] 的结果，由调用方传进来是为了给一批节点算的时候只建一次。
-    /// `facts` 是存储里没有、controller 知道的事（见 [`NodeFacts`]）。
+    /// `facts` 是存储里没有、controller 知道的事（见 [`NodeFacts`]、[`VnetFacts`]）。
     #[must_use]
     pub fn compile(
         &self,
         access: &AccessMap<'_>,
         id: NodeId,
         relations: &BTreeMap<NodeId, Relation>,
-        facts: &impl NodeFacts,
+        facts: &(impl NodeFacts + VnetFacts),
     ) -> Option<Netmap> {
         let me = self.nodes.get(&id)?;
         let relays = self.relay_ids();
 
-        let peers = relations
+        let peers: Vec<Peer> = relations
             .iter()
             .filter(|&(&peer, relation)| peer != id && !relation.is_empty())
             .filter_map(|(peer, &relation)| Some(self.peer(me, self.nodes.get(peer)?, relation, &relays, facts)))
@@ -208,6 +214,7 @@ impl NetworkView {
             relay_reach::shared_relays(me, peers, &relays)
         };
 
+        let no_vnet = peers.iter().map(|peer| peer.id).filter(|peer| facts.lacks_vnet(*peer)).collect();
         Some(Netmap {
             version: 0,
             network: Network {
@@ -239,6 +246,7 @@ impl NetworkView {
             peers,
             relays: relay_list,
             relay_clients,
+            no_vnet,
         })
     }
 

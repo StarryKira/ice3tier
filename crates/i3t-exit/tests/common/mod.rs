@@ -121,6 +121,7 @@ pub fn netmap(me: u32) -> Netmap {
         peers: [LAPTOP, GW, NAS].into_iter().filter(|&raw| raw != me).map(|raw| peer(raw, exit_of(raw))).collect(),
         relays: Vec::new(),
         relay_clients: Vec::new(),
+        no_vnet: Vec::new(),
     }
 }
 

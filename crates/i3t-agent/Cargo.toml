@@ -23,6 +23,9 @@ i3t-model = { path = "../i3t-model" }
 i3t-proto = { path = "../i3t-proto" }
 i3t-underlay = { path = "../i3t-underlay" }
 i3t-update = { path = "../i3t-update" }
+i3t-vnet = { path = "../i3t-vnet" }
+if-addrs.workspace = true
+ipnet.workspace = true
 rand = "0.10.4"
 rustls.workspace = true
 serde.workspace = true
@@ -41,9 +44,6 @@ i3t-flow = { path = "../i3t-flow", features = ["test-util"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true
-
-[target.'cfg(target_os = "linux")'.dependencies]
-i3t-intercept = { path = "../i3t-intercept" }
 
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 libc = "0.2.191"

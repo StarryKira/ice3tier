@@ -2,8 +2,9 @@
 
 use std::slice::Chunks;
 
-const FLAG_TO_INITIATOR: u8 = 0b0000_0001;
-const FLAG_FRAGMENT: u8 = 0b0000_0010;
+pub(super) const FLAG_TO_INITIATOR: u8 = 0b0000_0001;
+pub(super) const FLAG_FRAGMENT: u8 = 0b0000_0010;
+/// 数据报上下文的帧里必须是 0 的位。bit 2 标着网络包帧（`packet` 模块），它们不交给上下文。
 const FLAG_RESERVED: u8 = 0b1111_1100;
 
 /// 一个数据报的内容（目标加载荷）最长多少字节。

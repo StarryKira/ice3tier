@@ -3,8 +3,7 @@
 //! 终端上的文字跟着系统的语言（见 `i3t_lang`），日志不翻译。
 
 mod connect;
-#[cfg(target_os = "linux")]
-mod intercept;
+mod network;
 mod show;
 mod texts;
 #[cfg(target_os = "linux")]
@@ -86,9 +85,9 @@ enum Command {
         #[arg(long)]
         apply: bool,
     },
-    Intercept {
+    Network {
         #[command(subcommand)]
-        command: InterceptCommand,
+        command: NetworkCommand,
     },
     Hosts {
         #[arg(long)]
@@ -100,11 +99,11 @@ enum Command {
 }
 
 #[derive(Subcommand)]
-enum InterceptCommand {
+enum NetworkCommand {
     Status,
 }
 
-/// `i3t hosts` 做什么：打印那一段、写进 `/etc/hosts`（`--apply`）、从里面去掉（`--remove`）。
+/// `i3t hosts` 做什么：打印那一段、写进 hosts 文件（`--apply`）、从里面去掉（`--remove`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HostsAction {
     Print,
@@ -129,7 +128,7 @@ fn command(lang: Lang) -> clap::Command {
         .mut_subcommand("run", |sub| sub.about(h.run).mut_arg("static", |arg| arg.help(h.run_static).value_name(v.file)))
         .mut_subcommand("set", |sub| {
             sub.about(h.set)
-                .mut_arg("setting", |arg| arg.value_name("can-exit|can-relay|relay-address|throughput-tests|profile|intercept"))
+                .mut_arg("setting", |arg| arg.value_name("can-exit|can-relay|relay-address|throughput-tests|profile|network|firewall"))
                 .mut_arg("value", |arg| arg.value_name("on|off|low-footprint|balanced|high-throughput|IP:PORT"))
         })
         .mut_subcommand("status", |sub| sub.about(h.status))
@@ -146,7 +145,7 @@ fn command(lang: Lang) -> clap::Command {
                 .mut_arg("port", |arg| arg.value_name(v.port))
         })
         .mut_subcommand("tune", |sub| sub.about(h.tune).mut_arg("apply", |arg| arg.help(h.tune_apply)))
-        .mut_subcommand("intercept", |sub| sub.about(h.intercept).mut_subcommand("status", |sub| sub.about(h.intercept_status)))
+        .mut_subcommand("network", |sub| sub.about(h.network).mut_subcommand("status", |sub| sub.about(h.network_status)))
         .mut_subcommand("hosts", |sub| {
             sub.about(h.hosts).mut_arg("apply", |arg| arg.help(h.hosts_apply)).mut_arg("remove", |arg| arg.help(h.hosts_remove))
         })
@@ -208,9 +207,6 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
         Command::Set { setting, value } => {
             let change = setting.change(&value)?;
-            if matches!(change, Change::Intercept(_)) && !cfg!(target_os = "linux") {
-                bail!(t.intercept_linux_only);
-            }
             if let Change::CanForward(_) = change {
                 println!("{}", t.forward_by_admin);
                 return Ok(ExitCode::SUCCESS);
@@ -226,12 +222,17 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                         println!("{}", (t.profile_chosen)(chosen.spelling()));
                     }
                 }
-                Change::Intercept(on) => {
+                Change::Network(false) | Change::Firewall(false) => {
                     // 问的时候出错也当它在运行：只有确实没有节点在运行，才去拆上次留下的东西。
                     let running = current_thread()?.block_on(local::query(&state)).map_or(true, |live| live.is_some());
-                    after_intercept_set(on, running);
+                    network::after_switch_off(running);
                 }
-                Change::Declare(_, false) | Change::CanForward(_) | Change::RelayAddress(_) | Change::ThroughputTests(_) => {}
+                Change::Declare(_, false)
+                | Change::CanForward(_)
+                | Change::RelayAddress(_)
+                | Change::ThroughputTests(_)
+                | Change::Network(true)
+                | Change::Firewall(true) => {}
             }
         }
         Command::Status => {
@@ -269,11 +270,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let config = Config::load(&state.config_path())?;
             tune(config.port, apply)?;
         }
-        Command::Intercept { command: InterceptCommand::Status } => {
+        Command::Network { command: NetworkCommand::Status } => {
             let live = current_thread()?.block_on(local::query(&state))?;
-            // 读不了配置文件只是少一句提示。
-            let configured = Config::load(&state.config_path()).is_ok_and(|config| config.intercept.enabled);
-            intercept_status(live.as_ref(), configured)?;
+            network::status(&state, live.as_ref());
         }
         Command::Hosts { apply, remove } => {
             let action = match (apply, remove) {
@@ -281,7 +280,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 (false, true) => HostsAction::Remove,
                 (false, false) => HostsAction::Print,
             };
-            hosts(&state, action)?;
+            network::hosts(&state, action)?;
         }
         Command::SelfCheck => {
             // 不初始化日志：调用它的旧程序把标准错误的最后一段当作失败的原因报给 controller，那里只该有原因本身。
@@ -314,35 +313,6 @@ fn tune(port: u16, apply: bool) -> anyhow::Result<()> {
 #[cfg(not(target_os = "linux"))]
 fn tune(_port: u16, _apply: bool) -> anyhow::Result<()> {
     bail!(texts().ui.tune_linux_only)
-}
-
-#[cfg(target_os = "linux")]
-fn after_intercept_set(on: bool, running: bool) {
-    intercept::after_set(on, running);
-}
-
-#[cfg(not(target_os = "linux"))]
-fn after_intercept_set(_on: bool, _running: bool) {}
-
-#[cfg(target_os = "linux")]
-fn intercept_status(live: Option<&i3t_agent::status::LiveStatus>, configured: bool) -> anyhow::Result<()> {
-    intercept::status(live, configured);
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn intercept_status(_live: Option<&i3t_agent::status::LiveStatus>, _configured: bool) -> anyhow::Result<()> {
-    bail!(texts().ui.intercept_linux_only)
-}
-
-#[cfg(target_os = "linux")]
-fn hosts(state: &StateDir, action: HostsAction) -> anyhow::Result<()> {
-    intercept::hosts(state, action)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn hosts(_state: &StateDir, _action: HostsAction) -> anyhow::Result<()> {
-    bail!(texts().ui.intercept_linux_only)
 }
 
 /// 从本机连一个监听地址该用的地址：绑在"所有地址"上的监听，连它的回环地址。
@@ -512,11 +482,10 @@ mod tests {
         assert!(parse(&["i3t", "set", "can-fly", "on"]).is_err());
         assert!(matches!(parse(&["i3t", "connect", "nas", "22"]).unwrap().command, Command::Connect { .. }));
         assert!(parse(&["i3t", "connect", "nas", "22", "--via", "home"]).is_err(), "出口不再由用户名选，--via 去掉了");
-        assert!(matches!(parse(&["i3t", "set", "intercept", "on"]).unwrap().command, Command::Set { setting: Setting::Intercept, .. }));
-        assert!(matches!(
-            parse(&["i3t", "intercept", "status"]).unwrap().command,
-            Command::Intercept { command: InterceptCommand::Status }
-        ));
+        assert!(matches!(parse(&["i3t", "set", "network", "off"]).unwrap().command, Command::Set { setting: Setting::Network, .. }));
+        assert!(matches!(parse(&["i3t", "set", "firewall", "off"]).unwrap().command, Command::Set { setting: Setting::Firewall, .. }));
+        assert!(parse(&["i3t", "set", "intercept", "on"]).is_err(), "透明访问的开关没有了");
+        assert!(matches!(parse(&["i3t", "network", "status"]).unwrap().command, Command::Network { command: NetworkCommand::Status }));
         assert!(matches!(parse(&["i3t", "hosts", "--apply"]).unwrap().command, Command::Hosts { apply: true, remove: false }));
         assert!(matches!(parse(&["i3t", "hosts", "--remove"]).unwrap().command, Command::Hosts { apply: false, remove: true }));
         assert!(parse(&["i3t", "hosts", "--apply", "--remove"]).is_err(), "写进去和去掉只能选一个");

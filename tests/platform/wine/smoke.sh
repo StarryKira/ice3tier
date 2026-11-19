@@ -216,6 +216,10 @@ expect "i3tctl exit list" "$out/exit-list.txt" '' ctl exit list
 expect "i3t status on a: running, controller connected, the listener" "$out/status-a.txt" "controller +connected" \
     run_program i3t --state-dir "$(winpath a)" status
 check "  ... and the route to b" 'cat "$out/status-a.txt"' grep -qE '^ +b +10\.66\.0\.2 +direct' "$out/status-a.txt"
+# 虚拟网卡默认打开。Wine 里装不上（Wintun 在 Wine 下不能用，测试里也没有放 wintun.dll），容器里没有 /dev/net/tun：
+# 节点照常运行，状态里说为什么没装。
+check "  ... and why the virtual adapter isn't installed" 'grep -i "virtual" "$out/status-a.txt"' \
+    grep -qE 'Virtual network +not installed: .+' "$out/status-a.txt"
 expect "i3t status on b" "$out/status-b.txt" "controller +connected" run_program i3t --state-dir "$(winpath b)" status
 expect "i3t routes on a" "$out/routes-a.txt" 'b .*direct' run_program i3t --state-dir "$(winpath a)" routes
 expect "i3t ping b from a" "$out/ping-a.txt" '5 back, 0 lost' run_program i3t --state-dir "$(winpath a)" ping b

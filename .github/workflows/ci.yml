@@ -37,6 +37,42 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  # 真的建一块虚拟网卡、配上地址和路由、再拆掉（`i3t-vnet` 的 `a_real_device_…` 测试）：这台开发机上只能在 Linux 上做，
+  # Windows 和 macOS 的 CI 机器以管理员 / 可以 sudo 的用户运行，在这里做。Windows 上 wintun.dll 要放在测试程序旁边
+  # （测试程序的路径写成正斜杠：Git Bash 的 dirname 不认反斜杠）。
+  vnet-device:
+    name: virtual adapter smoke test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the test
+        shell: bash
+        run: |
+          cargo test -p i3t-vnet --lib --no-run --message-format=json \
+            | "$(command -v python3 || command -v python)" -I -c "import json, sys; print([m['executable'] for m in map(json.loads, sys.stdin) if m.get('executable')][-1].replace(chr(92), '/'))" > test-program.txt
+          cat test-program.txt
+      - name: Wintun next to the test
+        if: runner.os == 'Windows'
+        shell: bash
+        run: scripts/fetch-wintun.sh amd64 "$(dirname "$(cat test-program.txt)")"
+      - name: Create, check and remove a device
+        shell: bash
+        env:
+          I3T_VNET_DEVICE_TEST: "1"
+        run: |
+          program=$(cat test-program.txt)
+          if [ "$RUNNER_OS" = macOS ]; then
+            sudo -E "$program" a_real_device --nocapture
+          else
+            "$program" a_real_device --nocapture
+          fi
+
   web:
     name: web (lint, typecheck, test, build)
     runs-on: ubuntu-latest

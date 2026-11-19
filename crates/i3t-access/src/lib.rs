@@ -5,7 +5,6 @@
 //! | 代理 | SOCKS5（`CONNECT` 和 `UDP ASSOCIATE`，用户名密码认证）、HTTP 代理（`CONNECT`，和明文 HTTP 的转发 `GET http://…`，一条流一个请求，`Proxy-Authorization: Basic`），或者在同一个端口上两种都说（按第一个字节分） |
 //! | 组网入口 | 本机配置文件里的：和代理一样，只是不认证、没有出口，只通到组网里的节点 |
 //! | 端口转发 | 监听一个端口。TCP 的每条连接变成到目标节点的一条流；UDP 的每个客户端地址是一个会话，走数据报上下文 |
-//! | 透明访问（Linux） | 内核改到本机的、发往对端虚拟 IP 的连接（[`Access::intercept_tcp`]），每条变成到那个对端的一条流；UDP 报文（[`Access::intercept_udp`]）按（应用，目标）分成会话，走数据报上下文 |
 //!
 //! 一个代理是"在本节点的一个端口上监听，经一个出口节点出去，认一对用户名和密码"（netmap 的 `me.proxies`）。
 //! 节点只拿到用户名和密码的校验值（[`i3t_model::netmap::Verifier`]）。不在回环地址上的端口一定要认证。
@@ -20,9 +19,9 @@ mod failure;
 mod first_data;
 mod forward_health;
 mod http;
-mod intercept;
 mod manager;
 mod message;
+pub mod proxy_header;
 mod route;
 mod routes;
 mod session;
@@ -32,11 +31,9 @@ mod usage;
 
 pub use entry::LocalEntry;
 pub use forward_health::{ForwardHealth, TargetCause, TargetFailure};
-pub use intercept::InterceptStatus;
 pub use manager::{
     Access, AccessStatus, Active, ForwardStatus, ListenCause, ListenState, ListenerStatus, NoPortBook, PortBook, ProxyStatus, Traffic,
 };
 pub use route::is_lan_literal;
 pub use routes::{CurrentRoute, NoRoutes, RouteAtStart, RouteLabel, RouteSpan, Routes, SharedRoutes};
-pub use udp::intercept::{Diversion, Diverted};
 pub use usage::{ExitSnapshot, Tally};

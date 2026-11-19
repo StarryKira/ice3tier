@@ -21,9 +21,9 @@ use ipnet::{IpNet, Ipv4Net};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::control::{
-    BackboneLink, BindCause, Declared, DirectCause, DirectKind, DirectState, ExitObservation, ExitReport, InterceptReport, LaneReport,
-    LegTransport, ListenState, ListenTraffic, PathCandidate, PeerLanes, PerformanceReport, RelayState, RelayUse, Route, RouteAlternative,
-    RouteCause, RouteSince, SelfUpdate, TargetCause, TryOutcome,
+    BackboneLink, BindCause, Declared, DirectCause, DirectKind, DirectState, ExitObservation, ExitReport, LaneReport, LegTransport,
+    ListenState, ListenTraffic, PathCandidate, PeerLanes, PerformanceReport, RelayState, RelayUse, Route, RouteAlternative, RouteCause,
+    RouteSince, SelfUpdate, TargetCause, TryOutcome, VnetReport,
 };
 use crate::netmap::{
     Attachment, Congestion, ExitRole, ForwardProtocol, LaneMode, ListenerProtocol, Profile, ProxyProtocol, Reach, RoutingMode,
@@ -652,9 +652,9 @@ pub struct NodeDetail {
     /// 节点本次连接期间最近一次报的、它实际在用的性能档位。不在线、旧版本、或者还没报过时是 `null`。
     #[serde(default)]
     pub performance: Option<PerformanceReport>,
-    /// 节点本次连接期间最近一次报的透明访问的状况。不在线、旧版本、或者还没报过时是 `null`。
+    /// 节点本次连接期间最近一次报的虚拟网卡的状况。不在线、旧版本、或者还没报过时是 `null`。
     #[serde(default)]
-    pub intercept: Option<InterceptReport>,
+    pub vnet: Option<VnetReport>,
     /// 这个节点是 relay 时：报过试它的结果的每个节点，按节点编号排，最多是网络里的节点数。不是 relay 时是 `null`。
     #[serde(default)]
     pub reached_by: Option<Vec<ReachEntry>>,
@@ -775,7 +775,7 @@ pub enum AddressSource {
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum NodeWarning {
     /// 节点的一个网卡地址落在网络的虚拟地址段里（白皮书 §4.6）：在这台机器上，连这个地址段里的虚拟 IP 可能连到真实网络上去，
-    /// 透明访问也装不上。`address` 是那个网卡地址。
+    /// 虚拟网卡也装不上。`address` 是那个网卡地址（本节点自己的虚拟网卡上的虚拟 IP 不报，不算）。
     RangeOverlap { address: IpAddr },
     /// 这个 relay 启用着，在线的节点里试过它的有 `tried` 个，一个也没有连上。只是如实说一句：哪天有节点连得上它，它就是那些节点的 relay。
     RelayUnreached { tried: u32 },
@@ -2020,7 +2020,7 @@ mod tests {
             lanes: None,
             reported_secs_ago: Some(4),
             performance: None,
-            intercept: None,
+            vnet: None,
             reached_by: None,
         };
         let value = serde_json::to_value(&detail).unwrap();

@@ -14,8 +14,8 @@ use i3t_model::admin::{
 use i3t_model::control::diag::{ChoiceCode, HopSource, PathPick, TestCode, TransferEnd};
 use i3t_model::control::exit_test::{ExitTestCause, ExitVia};
 use i3t_model::control::{
-    BindCause, DirectKind, DirectStatus, InterceptCause, InterceptState, LegTransport, ListenState, NameService, RejectCause, RelayState,
-    Route, RouteCause, RouteHint, TargetCause, TryOutcome,
+    BindCause, DirectKind, DirectStatus, Firewall, LegTransport, ListenState, NameService, RejectCause, RelayState, Route, RouteCause,
+    RouteHint, TargetCause, TryOutcome, VnetCause, VnetState,
 };
 use i3t_model::update::{SelfUpdateBlocker, UpdateCause, UpdateStatus};
 use i3t_proto::NodeId;
@@ -81,9 +81,11 @@ pub struct Codes {
     pub hop_source: fn(HopSource) -> &'static str,
     pub path_pick: fn(PathPick) -> &'static str,
     pub transfer_end: fn(TransferEnd) -> &'static str,
-    /// 透明访问的状态，一短句：开着（拦截什么、名字怎么解析）、没开、开不起来（为什么）。
-    pub intercept_state: fn(&InterceptState) -> String,
-    pub intercept_cause: fn(&InterceptCause) -> String,
+    /// 虚拟网卡的状态，一短句：装着（网卡、MTU、名字怎么解析）、关着、装不上（为什么）。
+    pub vnet_state: fn(&VnetState) -> String,
+    pub vnet_cause: fn(&VnetCause) -> String,
+    /// 程序加的两条防火墙规则，一短句：`放行开着，防冒充开着`。
+    pub firewall: fn(&Firewall) -> String,
     pub name_service: fn(&NameService) -> String,
     /// QoS 的一个取值的名字：`自动`、`低延迟`、`不丢包`、`后台`。配置和命令行上照旧写 `auto` 这些。
     pub class: fn(Class) -> &'static str,
@@ -115,7 +117,7 @@ fn cost_ms(micros: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use i3t_model::admin::ErrorCode;
-    use i3t_model::control::{DirectCause, DirectState};
+    use i3t_model::control::{DirectCause, DirectState, RuleState};
     use i3t_model::update::{FailureKind, Version};
 
     use super::*;
@@ -156,25 +158,40 @@ mod tests {
                 field: Some("groups[1]".into()),
             }),
         ];
-        let intercept = [
-            InterceptState::Off,
-            InterceptState::On { udp: true, source_address: true, names: NameService::Resolved },
-            InterceptState::On { udp: false, source_address: true, names: NameService::NoResolver },
-            InterceptState::Failed { cause: InterceptCause::NoPermission { missing: vec!["CAP_NET_ADMIN".into()] } },
-            InterceptState::Failed { cause: InterceptCause::ProgramMissing { program: "nft".into() } },
-            InterceptState::Failed { cause: InterceptCause::CommandFailed { program: "nft".into(), detail: "x".into() } },
-            InterceptState::Failed { cause: InterceptCause::PortInUse { address: "127.0.0.1:1".parse().expect("地址") } },
-            InterceptState::Failed {
-                cause: InterceptCause::BindFailed { address: "127.0.0.1:1".parse().expect("地址"), detail: "x".into() },
-            },
-            InterceptState::Failed { cause: InterceptCause::TableInUse { table: 2033 } },
-            InterceptState::Failed { cause: InterceptCause::LinkInUse { link: "i3t0".into() } },
-            InterceptState::Failed { cause: InterceptCause::RangeInUse { with: "192.168.1.5/24 dev eth0".into() } },
-            InterceptState::Failed { cause: InterceptCause::Unknown },
-            InterceptState::Unsupported,
-            InterceptState::Unknown,
+        let failed = |cause: VnetCause| VnetState::Failed { cause };
+        let address = || "10.66.0.1:53".parse().expect("地址");
+        let vnet = [
+            VnetState::Off,
+            VnetState::Installed { device: "i3t0".into(), mtu: 1280, names: NameService::Resolved },
+            VnetState::Installed { device: "utun7".into(), mtu: 1280, names: NameService::NoResolver },
+            failed(VnetCause::NoPermission { missing: vec!["CAP_NET_ADMIN".into()] }),
+            failed(VnetCause::NoPermission { missing: vec!["Administrator".into()] }),
+            failed(VnetCause::NoPermission { missing: vec!["root".into()] }),
+            failed(VnetCause::NoDevice { detail: "x".into() }),
+            failed(VnetCause::DriverMissing { path: "x".into() }),
+            failed(VnetCause::DeviceFailed { detail: "x".into() }),
+            failed(VnetCause::ProgramMissing { program: "nft".into() }),
+            failed(VnetCause::ProgramMissing { program: "iptables".into() }),
+            failed(VnetCause::CommandFailed { program: "nft".into(), detail: "x".into() }),
+            failed(VnetCause::PortInUse { address: address() }),
+            failed(VnetCause::BindFailed { address: address(), detail: "x".into() }),
+            failed(VnetCause::RangeInUse { with: "192.168.1.5/24 dev eth0".into() }),
+            failed(VnetCause::Unknown),
+            VnetState::Unsupported,
+            VnetState::Unknown,
         ];
-        out.extend(intercept.iter().map(codes.intercept_state));
+        out.extend(vnet.iter().map(codes.vnet_state));
+        let rules = [
+            Firewall { accept: RuleState::On, guard: RuleState::On },
+            Firewall::default(),
+            Firewall { accept: RuleState::Unsupported, guard: RuleState::Unsupported },
+            Firewall { accept: RuleState::On, guard: RuleState::Unsupported },
+            Firewall {
+                accept: RuleState::Failed { cause: VnetCause::ProgramMissing { program: "iptables".into() } },
+                guard: RuleState::Unknown,
+            },
+        ];
+        out.extend(rules.iter().map(codes.firewall));
         let targets = [
             TargetCause::Refused,
             TargetCause::Timeout,
@@ -231,7 +248,7 @@ mod tests {
         ];
         out.extend(causes.iter().map(|cause| (codes.direct_status)(&status(DirectState::Failed, Some(*cause)))));
         out.push((codes.name_service)(&NameService::Failed {
-            cause: InterceptCause::PortInUse { address: "10.66.0.1:53".parse().expect("地址") },
+            cause: VnetCause::PortInUse { address: "10.66.0.1:53".parse().expect("地址") },
         }));
         let causes = [
             RouteCause::NoRouteYet,
@@ -294,7 +311,7 @@ mod tests {
             .map(|cause| (codes.update_cause)(cause)),
         );
         said.push((codes.release_cause)(&ReleaseCause::Mismatch { file: "i3t-linux-x86_64".into(), expected_size: 1, actual_size: 1 }));
-        said.push((codes.intercept_state)(&InterceptState::Failed { cause: InterceptCause::TableInUse { table: 1 } }));
+        said.push((codes.vnet_state)(&VnetState::Installed { device: "i3t1".into(), mtu: 1, names: NameService::Resolved }));
         for text in said {
             assert_eq!(crate::cli::plural_after_one(&text), None, "{text}");
         }
