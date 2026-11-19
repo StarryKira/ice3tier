@@ -454,7 +454,7 @@ describe('路径诊断：一次诊断', () => {
   it('还没选两个节点：只说一句，不问测试', async () => {
     const api = setup()
     renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis' })
-    expect(await screen.findByText(t.path.pickHint)).toBeVisible()
+    expect(await screen.findByText(t.diagnosis.pickHint)).toBeVisible()
     expect(api.callsTo('GET /networks/1/tests')).toHaveLength(0)
   })
 })

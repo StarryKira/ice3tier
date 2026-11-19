@@ -186,10 +186,7 @@ export const topology = {
 export const path = {
   title: '路径诊断',
   subtitle: '两个节点之间现在怎么走、为什么，也可以发包实测',
-  pickFrom: '节点 A',
-  pickTo: '节点 B',
   swap: '交换 A 和 B',
-  pickHint: '选择两个节点',
   same: '选择两个不同的节点',
   query: '重新查询',
   querying: '正在查询两端…',

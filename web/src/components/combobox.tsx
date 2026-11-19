@@ -41,6 +41,8 @@ interface ComboboxProps<V extends string | number> {
   'aria-invalid'?: true
   /** 给了就允许就地新建：没有同名的项时，列表第一项是"新建 xxx"。只对字符串类型的值有意义。 */
   create?: V extends string ? CreateConfig : never
+  /** 给了就用它做按钮里的内容，按钮也不画成输入框（路径诊断里点一端的卡片换节点）。 */
+  trigger?: ReactNode
 }
 
 type Row<V> = { kind: 'option'; option: ComboOption<V> } | { kind: 'create'; text: string; error: string | null }
@@ -57,6 +59,7 @@ export function Combobox<V extends string | number>({
   disabled = false,
   className,
   create,
+  trigger,
   ...aria
 }: ComboboxProps<V>) {
   const [open, setOpen] = useState(false)
@@ -147,23 +150,29 @@ export function Combobox<V extends string | number>({
           disabled={disabled}
           {...aria}
           className={cn(
-            'flex h-9 w-full items-center justify-between gap-2 rounded-md border border-input bg-card px-3 text-left text-sm transition-colors hover:border-border-strong disabled:bg-muted disabled:text-muted-foreground aria-invalid:border-danger data-[state=open]:border-primary',
+            trigger === undefined
+              ? 'flex h-9 w-full items-center justify-between gap-2 rounded-md border border-input bg-card px-3 text-left text-sm transition-colors hover:border-border-strong disabled:bg-muted disabled:text-muted-foreground aria-invalid:border-danger data-[state=open]:border-primary'
+              : 'text-left',
             className,
           )}
         >
-          <span
-            className={cn(
-              'flex min-w-0 items-center gap-2 truncate',
-              selectedLabel === null && 'text-muted-foreground',
-            )}
-          >
-            {selected?.leading}
-            <span className="truncate">{selectedLabel ?? placeholder}</span>
-            {selected?.hint !== undefined ? (
-              <span className="truncate text-[13px] text-muted-foreground">{selected.hint}</span>
-            ) : null}
-          </span>
-          <ChevronsUpDown className="size-3.5 shrink-0 text-faint" aria-hidden />
+          {trigger ?? (
+            <>
+              <span
+                className={cn(
+                  'flex min-w-0 items-center gap-2 truncate',
+                  selectedLabel === null && 'text-muted-foreground',
+                )}
+              >
+                {selected?.leading}
+                <span className="truncate">{selectedLabel ?? placeholder}</span>
+                {selected?.hint !== undefined ? (
+                  <span className="truncate text-[13px] text-muted-foreground">{selected.hint}</span>
+                ) : null}
+              </span>
+              <ChevronsUpDown className="size-3.5 shrink-0 text-faint" aria-hidden />
+            </>
+          )}
         </button>
       </PopoverTrigger>
       <PopoverContent className="w-(--radix-popover-trigger-width) min-w-64 p-0">

@@ -93,11 +93,42 @@ describe('路径诊断', () => {
   it('没选够两个、或者两边是同一个节点：不发请求，说该怎么选', async () => {
     const api = setup()
     const { unmount } = renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2' })
-    expect(await screen.findByText(p.pickHint)).toBeVisible()
+    expect(await screen.findByText(t.diagnosis.pickHint)).toBeVisible()
     unmount()
     renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=2' })
     expect(await screen.findByText(p.same)).toBeVisible()
     expect(api.callsTo('GET /networks/1/path')).toHaveLength(0)
+  })
+
+  it('还没选：下面一格一格的节点，先点的是 A、再点的是 B，选好了就去问两端', async () => {
+    const user = userEvent.setup()
+    const api = setup()
+    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis' })
+    const grid = await screen.findByTestId('node-grid')
+    await user.click(await within(grid).findByRole('button', { name: 'laptop' }))
+    expect(within(grid).getByRole('button', { name: `laptop，${t.diagnosis.picked('A')}` })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    // 再点一次是取消。
+    await user.click(within(grid).getByRole('button', { name: `laptop，${t.diagnosis.picked('A')}` }))
+    expect(within(grid).getByRole('button', { name: 'laptop' })).toHaveAttribute('aria-pressed', 'false')
+    await user.click(within(grid).getByRole('button', { name: 'laptop' }))
+    await user.click(within(grid).getByRole('button', { name: 'nas' }))
+    expect(await screen.findByTestId('path-forward')).toHaveTextContent(p.forward('laptop', 'nas'))
+    expect(api.callsTo('GET /networks/1/path')[0]?.query.toString()).toBe('from=2&to=1')
+    expect(screen.queryByTestId('node-grid')).not.toBeInTheDocument()
+  })
+
+  it('点一端换一个节点', async () => {
+    const user = userEvent.setup()
+    const api = setup()
+    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=1' })
+    await screen.findByTestId('path-forward')
+    await user.click(screen.getByRole('combobox', { name: t.diagnosis.pickB }))
+    await user.click(await screen.findByRole('option', { name: /hk/ }))
+    await waitFor(() => expect(api.callsTo('GET /networks/1/path')).toHaveLength(2))
+    expect(api.callsTo('GET /networks/1/path')[1]?.query.toString()).toBe('from=2&to=3')
   })
 
   it('换一个节点就换地址、重新问', async () => {

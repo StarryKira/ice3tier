@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Route as RouteIcon, Waypoints } from 'lucide-react'
+import { Waypoints } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 
@@ -8,8 +8,7 @@ import { q, useAction } from '@/api/queries'
 import { type NodeId } from '@/api/types'
 import { Notice } from '@/components/notice'
 import { Page, PageHeader } from '@/components/page'
-import { PairPicker } from '@/components/pair-picker'
-import { EmptyState, ErrorState } from '@/components/states'
+import { ErrorState } from '@/components/states'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { t } from '@/i18n'
@@ -24,6 +23,7 @@ import { reportJson, reportText } from '@/topology/report'
 import { BandwidthTab } from './BandwidthTab'
 import { HostsTab } from './HostsTab'
 import { LatencyTab } from './LatencyTab'
+import { NodeGrid } from './NodeGrid'
 import { OutputTab } from './OutputTab'
 import { PairHero } from './PairHero'
 import { DirectCard } from './parts'
@@ -123,125 +123,122 @@ export function PathPage() {
           </Button>
         }
       />
-      <div className="mb-8">
-        <PairPicker nodes={list} pair={pair} onChange={setPair} labels={{ a: p.pickFrom, b: p.pickTo, swap: p.swap }} />
-        {same ? <p className="mt-2 text-[13px] text-warn">{p.same}</p> : null}
-      </div>
-
-      {!ready ? (
-        same ? null : (
-          <EmptyState icon={RouteIcon} title={p.pickHint} className="py-12" />
-        )
-      ) : (
-        <div className="space-y-6">
-          {path.isError && path.data === undefined ? (
-            <ErrorState title={p.loadFailed} error={path.error} onRetry={() => void path.refetch()} />
-          ) : (
-            <PairHero
-              network={network.id}
-              a={detailA.data ?? byId.get(a)}
-              b={detailB.data ?? byId.get(b)}
-              path={path.data}
-              name={name}
-              fetching={path.isFetching}
-              queriedAgo={queriedAgo}
-              onRequery={() => void path.refetch()}
-            />
-          )}
-          {notPeers ? (
-            <Notice
-              tone="warn"
-              title={p.notPeersTitle}
-              action={
-                <Button asChild size="sm">
-                  <Link to={`${networkPath(network.id, 'access')}?check=1&from=${a}&to=${b}`}>{p.toAccess}</Link>
-                </Button>
-              }
-            />
-          ) : null}
-          {[a, b].map((id) => {
-            const node = byId.get(id)
-            return node === undefined || node.online ? null : <Notice key={id}>{p.offline(node.name)}</Notice>
-          })}
-
-          <RunBar
-            test={test}
-            throughput={throughput}
-            onThroughput={(on) => {
-              setThroughput(on)
-              writeStored('diagnosis.throughput', on)
-            }}
-            starting={start.isPending}
-            stopping={stop.isPending}
-            onStart={() => start.mutate({ a, b, throughput }, { onSuccess: (created) => openTest(created.id) })}
-            onStop={() => {
-              if (test !== undefined) stop.mutate(test.id)
-            }}
-          />
-          {current.isError && shown !== null ? <Notice tone="warn">{t.tests.testGone(shown)}</Notice> : null}
-
-          <KpiStrip kpis={kpis(input)} onOpen={setTab} />
-
-          <Tabs value={tab} onValueChange={(next) => setTab(isSection(next) ? next : 'overview')}>
-            <TabsList className="overflow-x-auto">
-              {SECTIONS.map((section) => (
-                <TabsTrigger key={section} value={section} className="shrink-0">
-                  {d.tabs[section]}
-                </TabsTrigger>
-              ))}
-            </TabsList>
-            <TabsContent value="overview" className="pt-6">
-              <div
-                className={
-                  test?.direct !== null && test?.direct !== undefined
-                    ? 'grid grid-cols-1 items-start gap-5 @4xl:grid-cols-[minmax(0,1fr)_20rem]'
-                    : undefined
+      <div className="space-y-6">
+        <PairHero
+          nodes={list}
+          pair={pair}
+          onChange={setPair}
+          a={detailA.data ?? byId.get(a)}
+          b={detailB.data ?? byId.get(b)}
+          path={ready ? path.data : undefined}
+          ready={ready}
+          name={name}
+          fetching={path.isFetching}
+          queriedAgo={queriedAgo}
+          onRequery={() => void path.refetch()}
+        />
+        {!ready ? (
+          <NodeGrid nodes={list} loading={nodes.isPending} pair={pair} onChange={setPair} />
+        ) : (
+          <div className="space-y-6">
+            {path.isError && path.data === undefined ? (
+              <ErrorState title={p.loadFailed} error={path.error} onRetry={() => void path.refetch()} />
+            ) : null}
+            {notPeers ? (
+              <Notice
+                tone="warn"
+                title={p.notPeersTitle}
+                action={
+                  <Button asChild size="sm">
+                    <Link to={`${networkPath(network.id, 'access')}?check=1&from=${a}&to=${b}`}>{p.toAccess}</Link>
+                  </Button>
                 }
-              >
-                <Findings findings={findings(input)} test={test} onOpen={setTab} />
-                {test?.direct !== null && test?.direct !== undefined ? (
-                  <DirectCard result={test.direct} nodes={named} />
-                ) : null}
-              </div>
-            </TabsContent>
-            <TabsContent value="route" className="pt-6">
-              <RouteTab path={path.data} test={test} nodes={named} name={name} />
-            </TabsContent>
-            <TabsContent value="latency" className="pt-6">
-              <LatencyTab test={test} nodes={named} />
-            </TabsContent>
-            <TabsContent value="bandwidth" className="pt-6">
-              <BandwidthTab test={test} nodes={named} />
-            </TabsContent>
-            <TabsContent value="hosts" className="pt-6">
-              <HostsTab
-                network={network.id}
-                tested={test !== undefined}
-                nodes={named}
-                a={{
-                  id: a,
-                  name: name(a),
-                  detail: detailA.data,
-                  host: hostOf(test, a),
-                  toPeer: routesA.data?.routes.find((route) => route.peer.id === b),
-                }}
-                b={{
-                  id: b,
-                  name: name(b),
-                  detail: detailB.data,
-                  host: hostOf(test, b),
-                  toPeer: routesB.data?.routes.find((route) => route.peer.id === a),
-                }}
               />
-            </TabsContent>
-            <TabsContent value="output" className="pt-6">
-              {tab === 'output' ? (
-                <OutputTab text={reportText(input, now)} json={reportJson(input, now)} fileBase={fileBase} />
-              ) : null}
-            </TabsContent>
-          </Tabs>
-        </div>
-      )}
+            ) : null}
+            {[a, b].map((id) => {
+              const node = byId.get(id)
+              return node === undefined || node.online ? null : <Notice key={id}>{p.offline(node.name)}</Notice>
+            })}
+
+            <RunBar
+              test={test}
+              throughput={throughput}
+              onThroughput={(on) => {
+                setThroughput(on)
+                writeStored('diagnosis.throughput', on)
+              }}
+              starting={start.isPending}
+              stopping={stop.isPending}
+              onStart={() => start.mutate({ a, b, throughput }, { onSuccess: (created) => openTest(created.id) })}
+              onStop={() => {
+                if (test !== undefined) stop.mutate(test.id)
+              }}
+            />
+            {current.isError && shown !== null ? <Notice tone="warn">{t.tests.testGone(shown)}</Notice> : null}
+
+            <KpiStrip kpis={kpis(input)} onOpen={setTab} />
+
+            <Tabs value={tab} onValueChange={(next) => setTab(isSection(next) ? next : 'overview')}>
+              <TabsList className="overflow-x-auto">
+                {SECTIONS.map((section) => (
+                  <TabsTrigger key={section} value={section} className="shrink-0">
+                    {d.tabs[section]}
+                  </TabsTrigger>
+                ))}
+              </TabsList>
+              <TabsContent value="overview" className="pt-6">
+                <div
+                  className={
+                    test?.direct !== null && test?.direct !== undefined
+                      ? 'grid grid-cols-1 items-start gap-5 @4xl:grid-cols-[minmax(0,1fr)_20rem]'
+                      : undefined
+                  }
+                >
+                  <Findings findings={findings(input)} test={test} onOpen={setTab} />
+                  {test?.direct !== null && test?.direct !== undefined ? (
+                    <DirectCard result={test.direct} nodes={named} />
+                  ) : null}
+                </div>
+              </TabsContent>
+              <TabsContent value="route" className="pt-6">
+                <RouteTab path={path.data} test={test} nodes={named} name={name} />
+              </TabsContent>
+              <TabsContent value="latency" className="pt-6">
+                <LatencyTab test={test} nodes={named} />
+              </TabsContent>
+              <TabsContent value="bandwidth" className="pt-6">
+                <BandwidthTab test={test} nodes={named} />
+              </TabsContent>
+              <TabsContent value="hosts" className="pt-6">
+                <HostsTab
+                  network={network.id}
+                  tested={test !== undefined}
+                  nodes={named}
+                  a={{
+                    id: a,
+                    name: name(a),
+                    detail: detailA.data,
+                    host: hostOf(test, a),
+                    toPeer: routesA.data?.routes.find((route) => route.peer.id === b),
+                  }}
+                  b={{
+                    id: b,
+                    name: name(b),
+                    detail: detailB.data,
+                    host: hostOf(test, b),
+                    toPeer: routesB.data?.routes.find((route) => route.peer.id === a),
+                  }}
+                />
+              </TabsContent>
+              <TabsContent value="output" className="pt-6">
+                {tab === 'output' ? (
+                  <OutputTab text={reportText(input, now)} json={reportJson(input, now)} fileBase={fileBase} />
+                ) : null}
+              </TabsContent>
+            </Tabs>
+          </div>
+        )}
+      </div>
     </Page>
   )
 }

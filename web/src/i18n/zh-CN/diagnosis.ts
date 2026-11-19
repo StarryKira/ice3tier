@@ -12,6 +12,14 @@ export const diagnosis = {
   live: '实时',
   liveHint: '两个方向是刚问两端得到的；诊断里的数是开始诊断时量的',
   toNode: '节点详情',
+  pickA: '选择节点 A',
+  pickB: '选择节点 B',
+  pickHint: '点两边选节点，或者在下面点两个',
+  nodesTitle: '节点',
+  nodesHint: '先点的是 A，再点的是 B',
+  nodesSearch: '搜索名字、虚拟 IP 或分组',
+  nodesEmpty: '没有匹配的节点',
+  picked: (label: string) => `已选为 ${label}`,
 
   // 诊断的控制条
   runTitle: '诊断',

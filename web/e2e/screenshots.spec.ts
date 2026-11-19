@@ -773,13 +773,14 @@ test('诊断：在路径诊断里真的诊断一对在线的节点，每个标�
   const ts = t.tests
   const dg = t.diagnosis
   await goTo(page, t.nav.diagnosis)
-  await expect(page.getByText(t.path.pickHint)).toBeVisible()
+  await expect(page.getByText(dg.pickHint)).toBeVisible()
   await shot('diagnosis-pick')
-  await page.getByRole('combobox', { name: t.path.pickFrom }).click()
-  await page.getByRole('option', { name: /laptop/ }).click()
-  await expect(page.getByRole('listbox')).toHaveCount(0)
-  await page.getByRole('combobox', { name: t.path.pickTo }).click()
-  await page.getByRole('option', { name: /gw-hk/ }).click()
+  // 下面一格一格的节点：先点的是 A，再点的是 B。
+  const grid = page.getByTestId('node-grid')
+  await grid.getByRole('button', { name: 'laptop', exact: true }).click()
+  await expect(grid.getByRole('button', { name: /^laptop/ })).toHaveAttribute('aria-pressed', 'true')
+  await shot('diagnosis-pick-a')
+  await grid.getByRole('button', { name: 'gw-hk', exact: true }).click()
   await expect(page.getByTestId('path-forward')).toBeVisible()
   await page.getByRole('checkbox', { name: new RegExp(ts.throughput) }).click()
   await page.getByRole('button', { name: dg.run }).click()
