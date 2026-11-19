@@ -115,6 +115,8 @@ export const topology: Messages['topology'] = {
   tipLaneCounts: (inUse, idle) => `ice3proxy/TCP: ${inUse} in use, ${idle} idle`,
   tipLaneControl: (up) =>
     up ? 'Control connection up' : 'Control connection down: new TCP streams use the shared connection',
+  showLatency: 'Latency',
+  showLatencyLabel: 'Show latency on the lines',
   legendDirect: 'Direct',
   legendRelay: 'Via relay',
   legendLane: 'ice3proxy',

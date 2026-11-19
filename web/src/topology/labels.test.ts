@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { type Curve, pointOnCurve, type Rect } from '@/access/geometry'
 
-import { LABEL_HEIGHT, labelWidth, placeLabels, textWidth } from './labels'
+import { LABEL_HEIGHT, labelMode, labelWidth, placeLabels, textWidth } from './labels'
 
 /** 一条直线：控制点在正中。 */
 const straight = (x1: number, y1: number, x2: number, y2: number): Curve => ({
@@ -54,5 +54,20 @@ describe('线上的字往哪里放', () => {
     const t = placeLabels([{ id: 'a', curve: line, width: 80, height: LABEL_HEIGHT }], [card]).get('a') ?? 0.5
     expect(t).not.toBe(0.5)
     expect(overlaps(boxOf(line, t, 80), card)).toBe(false)
+  })
+})
+
+describe('线上写多少字', () => {
+  it('六个节点的网（二十五条线）照样写全：延迟、经谁、协议都在', () => {
+    expect(labelMode(25)).toBe('full')
+  })
+
+  it('线多了只写延迟，不是一个字都不写', () => {
+    expect(labelMode(46)).toBe('brief')
+    expect(labelMode(120)).toBe('brief')
+  })
+
+  it('大网才不写', () => {
+    expect(labelMode(121)).toBe('none')
   })
 })

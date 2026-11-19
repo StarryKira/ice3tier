@@ -14,6 +14,18 @@ export interface LabelItem {
   height: number
 }
 
+/**
+ * 线上写多少字：线不多时写全（协议、经谁、延迟）；多了只写延迟，悬停时亮着的线再写全；
+ * 再多（几十个节点的大网）就不写了，精确的数看矩阵。六个节点、两头走法不一样再加上 ice3proxy，就有二十五条线。
+ */
+export type LabelMode = 'full' | 'brief' | 'none'
+export const FULL_LABELS_UP_TO = 40
+export const LABELS_UP_TO = 120
+
+export function labelMode(lines: number): LabelMode {
+  return lines > LABELS_UP_TO ? 'none' : lines > FULL_LABELS_UP_TO ? 'brief' : 'full'
+}
+
 /** 胶囊的高度。 */
 export const LABEL_HEIGHT = 20
 

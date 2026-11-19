@@ -1,15 +1,18 @@
-import { MarkerType, type Node, type NodeProps, type XYPosition } from '@xyflow/react'
+import { MarkerType, type Node, type NodeProps, Panel, type XYPosition } from '@xyflow/react'
+import { Timer } from 'lucide-react'
 import { useMemo, useRef, useState } from 'react'
 
 import { type NodeId } from '@/api/types'
 import { Flag } from '@/components/flag'
 import { OsIcon } from '@/components/os-icon'
+import { Switch } from '@/components/ui/switch'
 import { t, useLocale } from '@/i18n'
+import { isBoolean, readStored, writeStored } from '@/lib/storage'
 import { cn } from '@/lib/utils'
 import { GraphCanvas } from '@/pages/access/flow'
 import { type LineColors, useLineColors } from '@/topology/colors'
 import { curveOf, type Rect } from '@/access/geometry'
-import { LABEL_HEIGHT, type LabelItem, labelWidth, placeLabels } from '@/topology/labels'
+import { LABEL_HEIGHT, type LabelItem, type LabelMode, labelMode, labelWidth, placeLabels } from '@/topology/labels'
 import { HiddenHandles, type LabelPart, LineEdgeView, type LineFlowEdge } from '@/topology/line-edge'
 import { entryText } from '@/topology/route'
 import {
@@ -105,8 +108,6 @@ function TopoNodeView({ data }: NodeProps<TopoFlowNode>) {
 const nodeTypes = { topo: TopoNodeView }
 const edgeTypes = { line: LineEdgeView }
 
-/** 线不多时把直连的延迟写在线上；多了就不写，免得糊成一片（精确的数看矩阵）。 */
-const LABELS_UP_TO = 24
 /** ice3proxy 的线是长虚线：颜色之外线型也不一样。 */
 export const LANE_DASH = '9 4'
 /** 线上跑的小光点也一样：线太多时不跑，满屏乱闪。 */
@@ -151,6 +152,46 @@ function linkParts(link: TopoLink, name: Name): LabelPart[] {
   if (rtt !== null) parts.push({ text: rtt })
   return parts
 }
+
+/** 线多时的短写法：只写延迟，颜色跟线走；ice3proxy 没有延迟，有连接在用时写几条在用。没什么可写的时候不写。 */
+function briefParts(link: TopoLink): LabelPart[] | undefined {
+  if (link.kind === 'lane') {
+    const inUse = link.lanes?.in_use ?? 0
+    return inUse > 0 ? [{ text: g.laneInUse(inUse), tone: 'lane' }] : undefined
+  }
+  const rtt = rttText(link.rtt)
+  if (rtt === null) return undefined
+  return [{ text: rtt, tone: link.stale ? undefined : link.kind === 'direct' ? 'ok' : 'relay' }]
+}
+
+type RectOf = (id: string) => Rect | null
+
+/** 线上的字自动排开：按卡片的位置算每条线的样子，字沿线挪到不压别的字、不压卡片的地方。 */
+function placeOnLines(edges: LineFlowEdge[], rect: RectOf, cards: readonly Rect[]): LineFlowEdge[] {
+  const items: LabelItem[] = []
+  for (const edge of edges) {
+    const data = edge.data
+    const text = data?.parts?.map((part) => part.text) ?? (data?.label === null ? null : [data?.label ?? ''])
+    const from = rect(edge.source)
+    const to = rect(edge.target)
+    if (data === undefined || text === null || from === null || to === null) continue
+    items.push({
+      id: edge.id,
+      curve: curveOf(from, to, data.index, data.siblings, data.bend ?? 0),
+      width: labelWidth(text),
+      height: LABEL_HEIGHT,
+    })
+  }
+  const placement = placeLabels(items, cards)
+  return edges.map((edge) =>
+    edge.data === undefined || !placement.has(edge.id)
+      ? edge
+      : { ...edge, data: { ...edge.data, labelAt: placement.get(edge.id) } },
+  )
+}
+
+/** 没拖过卡片时用同一个空的，免得每次画都是一份新的、跟着它算的东西全部重算。 */
+const NO_MOVES: Record<string, XYPosition> = {}
 
 /** 悬停在线上的字时：哪一对、怎么连的，两个方向各一行（节点报的原样），经中继时每一段的延迟，协议。 */
 function LinkTip({ link, name }: { link: TopoLink; name: Name }) {
@@ -276,8 +317,8 @@ export function TopologyGraph({ shape, rtt, looks, onPick }: TopologyGraphProps)
     at: Record<string, XYPosition>
     settled: Record<string, XYPosition>
   }>({ signature, at: {}, settled: {} })
-  const dragged = moved.signature === signature ? moved.at : {}
-  const settled = moved.signature === signature ? moved.settled : {}
+  const dragged = moved.signature === signature ? moved.at : NO_MOVES
+  const settled = moved.signature === signature ? moved.settled : NO_MOVES
 
   // 鼠标停在一个节点或者一条线上：它和跟它有关的亮着，别的淡下去。选中了一对时不管悬停（那一对已经亮着了）。
   const [hover, setHover] = useState<Hover | null>(null)
@@ -305,8 +346,27 @@ export function TopologyGraph({ shape, rtt, looks, onPick }: TopologyGraphProps)
     [shape, focused, locale, looks, dragged, spot],
   )
 
+  // 线上的字按松手时卡片的位置排（拖的时候字跟着线走、不重新排）。
+  const cards = useMemo(() => {
+    const at = new Map(shape.points.map((point) => [point.id, point]))
+    const rect: RectOf = (id) => {
+      const point = at.get(id)
+      if (point === undefined) return null
+      const position = settled[id] ?? { x: point.x - point.width / 2, y: point.y - point.height / 2 }
+      return { ...position, width: point.width, height: point.height }
+    }
+    return { rect, all: shape.points.map((point) => rect(point.id)).filter((card): card is Rect => card !== null) }
+  }, [shape, settled])
+  // 右下角的开关：线上写不写字，记在浏览器里。关了之后悬停时亮着的线照样写全。
+  const [latency, setLatency] = useState(() => readStored('topology.latency', true, isBoolean))
+  const toggleLatency = (on: boolean) => {
+    setLatency(on)
+    writeStored('topology.latency', on)
+  }
+  // 选中一对时只有那一对的路上写字（全程的延迟）。
+  const labels: LabelMode = focused || !latency ? 'none' : labelMode(shape.links.length)
+
   const laid = useMemo<LineFlowEdge[]>(() => {
-    const showLabels = shape.links.length <= LABELS_UP_TO && !focused
     const flows = shape.links.length <= FLOW_UP_TO
     // 光点跑一趟多久按排好时的线长算，拖动卡片时不跟着变：一变，正在跑的点就跳到别处、忽明忽暗。
     const at = new Map(shape.points.map((point) => [point.id, point]))
@@ -330,8 +390,9 @@ export function TopologyGraph({ shape, rtt, looks, onPick }: TopologyGraphProps)
           index: link.index,
           siblings: link.siblings,
           label: null,
-          parts: showLabels ? linkParts(link, name) : undefined,
-          tip: showLabels ? <LinkTip link={link} name={name} /> : undefined,
+          parts: labels === 'full' ? linkParts(link, name) : labels === 'brief' ? briefParts(link) : undefined,
+          // 没有字的时候不显示；悬停时补上字，说明也跟着有了。
+          tip: <LinkTip link={link} name={name} />,
           strong: false,
           bend: link.bend,
           onHover: (on: boolean) => setHover(on ? { kind: 'link', id: link.id } : null),
@@ -368,7 +429,7 @@ export function TopologyGraph({ shape, rtt, looks, onPick }: TopologyGraphProps)
       const color = hop.stale ? colors.stale : hop.kind === 'direct' ? colors.direct : colors.relay
       const total = hop.direction === 'forward' ? rtt.forward : rtt.reverse
       const label =
-        hop.step === 0
+        latency && hop.step === 0
           ? `${hop.direction === 'forward' ? g.legendForward : g.legendReverse}${total === null ? '' : ` ${t.routes.rtt(total)}`}`
           : null
       return {
@@ -391,46 +452,22 @@ export function TopologyGraph({ shape, rtt, looks, onPick }: TopologyGraphProps)
         focusable: false,
       }
     })
-    const all = [...base, ...none, ...highlight]
-    // 线上的字自动排开：按松手时卡片的位置算每条线的样子，字沿线挪到不压别的字、不压卡片的地方。
-    const rect = (id: string): Rect | null => {
-      const point = at.get(id)
-      if (point === undefined) return null
-      const position = settled[id] ?? { x: point.x - point.width / 2, y: point.y - point.height / 2 }
-      return { ...position, width: point.width, height: point.height }
-    }
-    const items: LabelItem[] = []
-    for (const edge of all) {
-      const data = edge.data
-      const text = data?.parts?.map((part) => part.text) ?? (data?.label === null ? null : [data?.label ?? ''])
-      const from = rect(edge.source)
-      const to = rect(edge.target)
-      if (data === undefined || text === null || from === null || to === null) continue
-      items.push({
-        id: edge.id,
-        curve: curveOf(from, to, data.index, data.siblings, data.bend ?? 0),
-        width: labelWidth(text),
-        height: LABEL_HEIGHT,
-      })
-    }
-    const cards = shape.points.map((point) => rect(point.id)).filter((card): card is Rect => card !== null)
-    const placement = placeLabels(items, cards)
-    return all.map((edge) =>
-      edge.data === undefined || !placement.has(edge.id)
-        ? edge
-        : { ...edge, data: { ...edge.data, labelAt: placement.get(edge.id) } },
-    )
+    return placeOnLines([...base, ...none, ...highlight], cards.rect, cards.all)
     // name 只读 shape.points；语言变了线上的说明要换。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shape, focused, rtt.forward, rtt.reverse, locale, colors, settled])
+  }, [shape, focused, labels, latency, rtt.forward, rtt.reverse, locale, colors, cards])
 
   // 悬停时：亮着的线粗一点、字和光点照常（光点快一些），别的线淡下去、不写字、不跑光点；亮着的画在最上面。
+  // 平时没写全时（线多只写延迟，或者关了延迟），亮着的线写全。停在节点上时亮着的几条重新排开（别的线不写字了，地方够）；
+  // 停在线上（或者它的字上）时那个字不挪，只是变长：挪开了鼠标就不在它上面了，会来回闪。
   const edges = useMemo<LineFlowEdge[]>(() => {
     if (spot === null) return laid
     const lit = (edge: LineFlowEdge) => spot.links.has(edge.id)
-    return [...laid.filter((edge) => !lit(edge)), ...laid.filter(lit)].map((edge) => {
+    const links = new Map(shape.links.map((link) => [link.id, link]))
+    const shown = [...laid.filter((edge) => !lit(edge)), ...laid.filter(lit)].map((edge): LineFlowEdge => {
       const on = lit(edge)
       const width = Number(edge.style?.strokeWidth ?? 1.6)
+      const link = links.get(edge.id)
       return {
         ...edge,
         style: { ...edge.style, opacity: on ? 1 : 0.08, strokeWidth: on ? width + 1 : width },
@@ -438,11 +475,18 @@ export function TopologyGraph({ shape, rtt, looks, onPick }: TopologyGraphProps)
           edge.data === undefined
             ? undefined
             : on
-              ? { ...edge.data, strong: true }
+              ? {
+                  ...edge.data,
+                  strong: true,
+                  parts: labels !== 'full' && link !== undefined ? linkParts(link, name) : edge.data.parts,
+                }
               : { ...edge.data, label: null, parts: undefined, tip: undefined, flow: undefined },
       }
     })
-  }, [laid, spot])
+    return labels !== 'full' && hover?.kind === 'node' ? placeOnLines(shown, cards.rect, cards.all) : shown
+    // name 只读 shape.points；语言变了 laid 也会变。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [laid, spot, hover, labels, cards])
 
   // 用鼠标点一下，画图的库既报"点了"又报"选中了"：同一下只算一次，不然第二个点会被算成重新开始选。
   const last = useRef({ id: '', at: 0 })
@@ -465,6 +509,8 @@ export function TopologyGraph({ shape, rtt, looks, onPick }: TopologyGraphProps)
       nodesDraggable
       selectNodesOnDrag={false}
       elementsSelectable
+      // 右下角是显示延迟的开关，画图库的署名挪到左下角（这张图左下角是空的）。
+      attributionPosition="bottom-left"
       onNodeClick={(_event, node) => pick(node.id)}
       onNodeMouseEnter={(_event, node) => setHover({ kind: 'node', id: node.id })}
       onNodeMouseLeave={() => setHover(null)}
@@ -484,6 +530,27 @@ export function TopologyGraph({ shape, rtt, looks, onPick }: TopologyGraphProps)
           }
         }
       }}
-    />
+    >
+      <Panel position="bottom-right">
+        {/* 和左上角缩放的按钮一个样子：28 像素高、一圈细边；开着时图标和字是主色。 */}
+        <label
+          className={cn(
+            'flex h-7 cursor-pointer items-center gap-1.5 rounded-md bg-card pr-1.5 pl-2 text-xs font-medium shadow-[0_0_0_1px_var(--border)] transition-colors select-none hover:bg-muted',
+            latency ? 'text-foreground' : 'text-muted-foreground',
+          )}
+        >
+          <Timer className={cn('size-3.5 transition-colors', latency && 'text-primary')} aria-hidden />
+          <span aria-hidden>{g.showLatency}</span>
+          <Switch
+            size="sm"
+            checked={latency}
+            onCheckedChange={toggleLatency}
+            aria-label={g.showLatencyLabel}
+            className="ml-0.5"
+            data-testid="topology-latency"
+          />
+        </label>
+      </Panel>
+    </GraphCanvas>
   )
 }

@@ -124,6 +124,9 @@ export const topology = {
   tipProtocolRelayUnknown: '协议：QUIC',
   tipLaneCounts: (inUse: number, idle: number) => `ice3proxy/TCP：在用 ${inUse} 条，空闲 ${idle} 条`,
   tipLaneControl: (up: boolean): string => (up ? '控制连接在' : '控制连接不在：新的 TCP 流走共用的连接'),
+  /** 图右下角的开关：线上写不写字（延迟、经谁、协议）；关了悬停时照样写。 */
+  showLatency: '延迟',
+  showLatencyLabel: '在线上显示延迟',
   legendDirect: '直连',
   legendRelay: '经中继',
   legendLane: 'ice3proxy',
