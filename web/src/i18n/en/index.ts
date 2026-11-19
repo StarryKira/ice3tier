@@ -3,6 +3,7 @@ import { access, rules } from './access'
 import { addNode } from './addNode'
 import { common, confirm, errors, select, time, validate } from './common'
 import { capability, declare } from './declare'
+import { diagnosis } from './diagnosis'
 import { exits, forwards, listen, pairs, serviceClass, tokens } from './entry'
 import { groups } from './groups'
 import { networks } from './networks'
@@ -48,5 +49,6 @@ export const en: Messages = {
   topology,
   path,
   tests,
+  diagnosis,
   proxies,
 }

@@ -340,6 +340,19 @@ export interface NodeDetail extends Node {
   lanes?: LaneReport | null
   /** 0.1.11 起，这个节点是中继时：各个节点连它连得上没有、用的什么。不是中继时是 `null`。 */
   reached_by?: ReachEntry[] | null
+  /** 节点最近一次上报是多少秒之前；`lanes`、`flows`、流量、`mapping_varies` 都是那一次报的。没报过、不在线是 `null`。 */
+  reported_secs_ago?: number | null
+  /** 节点实际在用的性能档位。不在线、版本太旧、还没报过是 `null`。 */
+  performance?: PerformanceReport | null
+}
+
+export interface PerformanceReport {
+  /** `"balanced"` 之类；不认识的照样显示。 */
+  profile: string
+  threads: number
+  /** 档位换了，线程数要等节点重启才变。 */
+  restart_pending: boolean
+  overrides: string[]
 }
 
 export interface ReachEntry {
@@ -1096,7 +1109,7 @@ export interface DeletedGroup {
 
 /* 主动测试（文档 §19）。 */
 
-export type TestItem = 'direct' | 'direct_quality' | 'relay_quality' | 'route'
+export type TestItem = 'direct' | 'direct_quality' | 'relay_quality' | 'route' | 'host'
 
 export interface CreateTest {
   a: NodeId
@@ -1254,6 +1267,81 @@ export interface TestView {
   relay_quality: PathResult[]
   route: RouteResult | null
   notes: TestProblem[]
+  /**
+   * 0.1.24 起：两端主机的快照，`a` 在前。没有要这一项时是 `null`；更早的 controller 没有这个字段。
+   */
+  hosts?: HostReport[] | null
+}
+
+/**
+ * 两个 CPU 占用，整数百分比：`system_percent` 是整台机器的（所有核合起来 0–100），
+ * `process_percent` 是 i3t 进程的、按一个核算（多线程时可能超过 100）。一条连接的数据大多在一个核上跑，
+ * 所以 `process_percent` 接近 100 就是卡在 CPU 上了。
+ */
+export interface HostCpu {
+  system_percent: number | null
+  process_percent: number | null
+}
+
+/**
+ * 这一端到对端的那条连接（QUIC）。计数是测试期间的（开始和结束时的差），`rtt_us`、`cwnd_bytes`、`mtu` 是结束时的值；
+ * `age_secs` 是这条连接已经开了多久。
+ */
+export interface PeerConnection {
+  route: Route | null
+  /** 平滑后的往返延迟。 */
+  rtt_us: number | null
+  cwnd_bytes: number | null
+  mtu: number | null
+  /** `"bbr"`、`"cubic"`。 */
+  congestion: string | null
+  sent_packets: number | null
+  lost_packets: number | null
+  lost_bytes: number | null
+  congestion_events: number | null
+  bytes_sent: number | null
+  bytes_received: number | null
+  age_secs: number | null
+}
+
+/**
+ * 测试时一端主机的快照（文档 §19 的 `host` 项）。现在只有 Linux 读得全；Windows、macOS 上只有系统、架构、核数，
+ * 别的是 `null`（不是出错）。进行中时是 `pending`、其余都是 `null`，这一端最后一次报告到了才填上。
+ */
+export interface HostReport {
+  node: NodeId
+  state: TestItemState
+  /** `not_supported`（节点早于 0.1.24）、`node_offline`、`no_report`。 */
+  problem: TestProblem | null
+  system: {
+    os: string | null
+    kernel: string | null
+    arch: string | null
+    cpu_model: string | null
+    cores: number | null
+    uptime_secs: number | null
+  } | null
+  /** 测试开始那一秒。 */
+  cpu: HostCpu | null
+  /** 整个测试里最忙的一秒（两个数各取各的最大）。 */
+  cpu_peak: HostCpu | null
+  /** 1、5、15 分钟的平均负载乘以 100。 */
+  load_x100: number[] | null
+  memory: { total_bytes: number; available_bytes: number; process_rss_bytes: number | null } | null
+  process: { uptime_secs: number | null; threads: number | null } | null
+  connections: {
+    /** 到别的节点的连接。 */
+    peers: number | null
+    /** 到中继的连接。 */
+    relays: number | null
+    /** 它作为中继在服务的会话；不是中继时是 `null`。 */
+    relay_clients: number | null
+    streams: number | null
+    lanes_in_use: number | null
+    lanes_idle: number | null
+  } | null
+  /** 这一端没有到对端的连接时是 `null`。 */
+  to_peer: PeerConnection | null
 }
 
 /*

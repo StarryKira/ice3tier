@@ -47,18 +47,18 @@ function setup(extra: Routes = {}) {
 describe('路径诊断', () => {
   it('两个节点从地址里来；两个方向分开写：现问到的带换路原因，上报的带多久之前', async () => {
     const api = setup()
-    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=1' })
-    const forward = await screen.findByTestId('path-forward')
+    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=1&tab=route' })
+    const forward = await screen.findByTestId('leg-forward')
     expect(api.callsTo('GET /networks/1/path')[0]?.query.toString()).toBe('from=2&to=1')
     expect(forward).toHaveAttribute('data-source', 'query')
     expect(forward).toHaveTextContent(p.forward('laptop', 'nas'))
     expect(forward).toHaveTextContent('12 ms')
-    expect(within(forward).getByTestId('path-forward-since')).toHaveTextContent(t.time.minutesAgo(5))
+    expect(within(forward).getByTestId('leg-forward-since')).toHaveTextContent(t.time.minutesAgo(5))
     // 换路的原因是节点的原话，原样写在"原因"那一行。
-    expect(within(forward).getByTestId('path-forward-reason')).toHaveTextContent('直连打通了')
-    expect(within(forward).getByTestId('path-forward-source')).toHaveTextContent(p.source.query)
+    expect(within(forward).getByTestId('leg-forward-reason')).toHaveTextContent('直连打通了')
+    expect(within(forward).getByTestId('leg-forward-source')).toHaveTextContent(p.source.query)
 
-    const reverse = screen.getByTestId('path-reverse')
+    const reverse = screen.getByTestId('leg-reverse')
     expect(reverse).toHaveAttribute('data-source', 'report')
     expect(reverse).toHaveTextContent(t.routes.via('hk'))
     expect(reverse).toHaveTextContent(p.age(t.time.secondsAgo(6)))
@@ -69,8 +69,8 @@ describe('路径诊断', () => {
   it('"重新查询"重新问两端', async () => {
     const user = userEvent.setup()
     const api = setup()
-    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=1' })
-    await screen.findByTestId('path-forward')
+    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=1&tab=route' })
+    await screen.findByTestId('leg-forward')
     await user.click(screen.getByRole('button', { name: p.query }))
     await waitFor(() => expect(api.callsTo('GET /networks/1/path')).toHaveLength(2))
   })
@@ -82,12 +82,12 @@ describe('路径诊断', () => {
         reverse: { ...VIEW.reverse, source: 'none', route: null, rtt_ms: null, age_secs: null },
       },
     })
-    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=1' })
+    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=1&tab=route' })
     expect(await screen.findByText(p.notPeersTitle)).toBeVisible()
-    expect(screen.getByTestId('path-forward-source')).toHaveTextContent(p.source.not_peers)
+    expect(screen.getByTestId('leg-forward-source')).toHaveTextContent(p.source.not_peers)
     expect(screen.getByRole('link', { name: p.toAccess })).toHaveAttribute('href', '/n/1/access?check=1&from=2&to=1')
-    expect(screen.getByTestId('path-forward')).toHaveAttribute('data-source', 'not_peers')
-    expect(screen.getByTestId('path-reverse')).toHaveTextContent(t.routes.noData)
+    expect(screen.getByTestId('leg-forward')).toHaveAttribute('data-source', 'not_peers')
+    expect(screen.getByTestId('leg-reverse')).toHaveTextContent(t.routes.noData)
   })
 
   it('没选够两个、或者两边是同一个节点：不发请求，说该怎么选', async () => {
@@ -103,8 +103,8 @@ describe('路径诊断', () => {
   it('换一个节点就换地址、重新问', async () => {
     const user = userEvent.setup()
     const api = setup()
-    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=1' })
-    await screen.findByTestId('path-forward')
+    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=1&tab=route' })
+    await screen.findByTestId('leg-forward')
     await user.click(screen.getByRole('button', { name: p.swap }))
     await waitFor(() => expect(api.callsTo('GET /networks/1/path')).toHaveLength(2))
     expect(api.callsTo('GET /networks/1/path')[1]?.query.toString()).toBe('from=1&to=2')
@@ -144,14 +144,14 @@ describe('现问到时的细节：方式、模式、原因、候选路径', () =
 
   it('每个方向写直连的方式、第一段的传输、选路模式和原因；候选路径一张表，现在走的标出来', async () => {
     setup({ 'GET /networks/1/path': DETAILED })
-    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=1' })
-    const forward = await screen.findByTestId('path-forward')
-    expect(within(forward).getByTestId('path-forward-detail')).toHaveTextContent(t.routes.directKind.punched)
+    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=1&tab=route' })
+    const forward = await screen.findByTestId('leg-forward')
+    expect(within(forward).getByTestId('leg-forward-detail')).toHaveTextContent(t.routes.directKind.punched)
     // 原因是节点的原话，照原样；换路时说的不一样时跟在切换的时间下面。
-    expect(within(forward).getByTestId('path-forward-reason')).toHaveTextContent('直连可用')
-    expect(within(forward).getByTestId('path-forward-since-reason')).toHaveTextContent('直连打通了')
-    expect(within(forward).getByTestId('path-forward-mode')).toHaveTextContent(p.mode.direct_first)
-    expect(within(screen.getByTestId('path-reverse')).getByTestId('path-reverse-detail')).toHaveTextContent(
+    expect(within(forward).getByTestId('leg-forward-reason')).toHaveTextContent('直连可用')
+    expect(within(forward).getByTestId('leg-forward-since-reason')).toHaveTextContent('直连打通了')
+    expect(within(forward).getByTestId('leg-forward-mode')).toHaveTextContent(p.mode.direct_first)
+    expect(within(screen.getByTestId('leg-reverse')).getByTestId('leg-reverse-detail')).toHaveTextContent(
       t.routes.legTransport.tcp,
     )
 
@@ -171,7 +171,7 @@ describe('现问到时的细节：方式、模式、原因、候选路径', () =
 
   it('问到了但发送方手上还没有测量值：照实说', async () => {
     setup({ 'GET /networks/1/path': { ...DETAILED, forward: { ...DETAILED.forward, candidates: [] } } })
-    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=1' })
+    renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=1&tab=route' })
     expect(await screen.findByText(p.candidatesEmpty)).toBeVisible()
   })
 })
