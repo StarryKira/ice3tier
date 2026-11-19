@@ -144,12 +144,12 @@ export function QualityCard({ paths, nodes }: { paths: readonly Measured[]; node
       <table className="w-full border-collapse text-sm" data-testid="test-quality">
         <thead>
           <tr className="border-b">
-            <td className="w-32" />
+            <td className="w-28" />
             {paths.map(({ result: path, direct }, column) => (
               <th
                 key={column}
                 scope="col"
-                className="min-w-44 px-5 py-3 text-left align-top font-normal"
+                className="min-w-44 px-3 py-2 text-left align-top font-normal"
                 data-testid={`test-path-${column}`}
               >
                 <span className="inline-flex flex-wrap items-center gap-x-2">
@@ -185,20 +185,20 @@ export function QualityCard({ paths, nodes }: { paths: readonly Measured[]; node
             <tr key={row.key}>
               <th
                 scope="row"
-                className="px-5 py-2.5 text-left align-top text-[13px] font-normal whitespace-nowrap text-muted-foreground"
+                className="px-3 py-1.5 text-left align-top text-[13px] font-normal whitespace-nowrap text-muted-foreground"
               >
                 {row.label}
               </th>
               {paths.map(({ result: path }, column) =>
                 path.state === 'done' ? (
-                  <td key={column} className="px-5 py-2.5 align-top" data-testid={`test-path-${column}-${row.key}`}>
+                  <td key={column} className="px-3 py-1.5 align-top" data-testid={`test-path-${column}-${row.key}`}>
                     {row.cell(path)}
                   </td>
                 ) : index === 0 ? (
                   <td
                     key={column}
                     rowSpan={rows.length}
-                    className="px-5 py-2.5 align-top"
+                    className="px-3 py-1.5 align-top"
                     data-testid={`test-path-${column}-state`}
                   >
                     <ItemState state={path.state} problem={path.problem} nodes={nodes} />

@@ -46,11 +46,12 @@ const d = t.diagnosis
 const c = t.diagnosis.chart
 
 interface Block {
-  id: ReportSection | 'result' | 'raw'
+  id: ReportSection | 'result' | 'details'
   title: string
   hint?: ReactNode
   action?: ReactNode
-  bare?: boolean
+  /** 内容贴边（表格自己留边）。 */
+  flush?: boolean
   body: ReactNode
 }
 
@@ -130,78 +131,70 @@ export function PathPage() {
   const paths = measuredPaths(test)
   const hosts = (test?.hosts ?? []).filter((host) => host.state === 'done')
 
-  // 报告的各节：没有数据的节不出现（结果表里写着为什么），编号跟着排。
-  const blocks: Block[] = [
-    {
-      id: 'result',
-      title: d.sections.result,
-      bare: true,
-      body: <ResultBlock checks={results} verdict={verdict(results, test, named)} onOpen={goTo} />,
-    },
-    {
-      id: 'path',
-      title: d.sections.path,
-      hint: c.pathHint,
-      body: <PathChart path={path.data} test={test} nodes={named} />,
-    },
-  ]
-  if (paths.length > 0) {
-    blocks.push({
-      id: 'latency',
-      title: d.sections.latency,
-      hint: c.latencyHint,
-      body: (
-        <>
-          <LatencyChart test={test} nodes={named} />
-          <div className="-mx-4 mt-3 border-t">
-            <QualityCard paths={paths} nodes={named} />
-          </div>
-        </>
-      ),
-    })
+  // 报告的各节：没有数据的节不出现（结果表里写着为什么），编号跟着排。一行放一节或两节（宽的 7 列、窄的 5 列），
+  // 一行里只剩一节时它占满。
+  const result: Block = {
+    id: 'result',
+    title: d.sections.result,
+    flush: true,
+    body: <ResultBlock checks={results} verdict={verdict(results, test, named)} onOpen={goTo} />,
   }
-  if (paths.some(({ result }) => result.throughput !== null)) {
-    blocks.push({
-      id: 'throughput',
-      title: d.sections.throughput,
-      hint: t.tests.throughputCaveat,
-      action: <Legend items={THROUGHPUT_LEGEND()} />,
-      body: <ThroughputChart test={test} nodes={named} />,
-    })
+  const pathBlock: Block = {
+    id: 'path',
+    title: d.sections.path,
+    hint: c.pathHint,
+    body: <PathChart path={path.data} test={test} nodes={named} />,
   }
-  blocks.push({
+  const latency: Block | null =
+    paths.length === 0
+      ? null
+      : {
+          id: 'latency',
+          title: d.sections.latency,
+          hint: c.latencyHint,
+          body: <LatencyChart test={test} nodes={named} />,
+        }
+  const throughputBlock: Block | null = paths.some(({ result: item }) => item.throughput !== null)
+    ? {
+        id: 'throughput',
+        title: d.sections.throughput,
+        hint: t.tests.throughputCaveat,
+        action: <Legend items={THROUGHPUT_LEGEND()} />,
+        body: <ThroughputChart test={test} nodes={named} />,
+      }
+    : null
+  const routing: Block = {
     id: 'routing',
     title: d.sections.routing,
     hint: p.costHint,
     body: (
-      <>
+      <div className="grid grid-cols-1 gap-x-6 gap-y-3 @5xl:grid-cols-2">
         <CostChart path={path.data} nodes={named} />
         {test?.route !== null && test?.route !== undefined ? (
-          <div className="-mx-4 mt-3 border-t pt-2">
-            <p className="px-4 pb-1 text-[13px] font-semibold">{d.decisionsTitle}</p>
+          <div className="-mx-3 -my-2.5 border-t @5xl:mx-0 @5xl:border-t-0 @5xl:border-l">
             <Decisions test={test} nodes={named} />
           </div>
         ) : null}
-      </>
+      </div>
     ),
-  })
-  blocks.push({
+  }
+  const hostsBlock: Block = {
     id: 'hosts',
     title: d.sections.hosts,
-    bare: true,
+    flush: true,
     body: (
-      <div className="overflow-hidden rounded-lg border bg-card">
+      <>
         {hosts.length > 0 ? (
-          <div className="grid grid-cols-1 gap-x-8 gap-y-4 border-b px-4 py-3 @4xl:grid-cols-2">
+          <div className="grid grid-cols-1 gap-x-6 gap-y-3 border-b px-3 py-2.5 @4xl:grid-cols-2">
             <div>
-              <p className="mb-2 flex items-center justify-between gap-3 text-[13px] font-semibold">
+              <p className="mb-1 flex items-center justify-between gap-3 text-xs font-semibold">
                 {c.cpuTitle}
                 <Legend items={CPU_LEGEND()} />
               </p>
               <CpuChart hosts={hosts} nodes={named} empty="" />
             </div>
             <div>
-              <p className="mb-2 flex items-center justify-between gap-3 text-[13px] font-semibold">
+              <p className="mb-1 flex items-center justify-between gap-3 text-xs font-semibold">
                 {c.memoryTitle}
                 <Legend items={MEMORY_LEGEND()} />
               </p>
@@ -230,17 +223,33 @@ export function PathPage() {
             direct: test?.direct?.sides.find((side) => side.node === b),
           }}
         />
-      </div>
+      </>
     ),
-  })
-  blocks.push({
-    id: 'raw',
-    title: d.sections.raw,
-    bare: true,
-    body: (
-      <Output fileBase={fileBase} report={() => ({ text: reportText(input, now), json: reportJson(input, now) })} />
-    ),
-  })
+  }
+  const details: Block | null =
+    paths.length === 0
+      ? null
+      : { id: 'details', title: c.detailsTitle, flush: true, body: <QualityCard paths={paths} nodes={named} /> }
+  // 编号按报告的顺序：结果、路径、延迟、吞吐、选路、主机、明细，最后原始数据。
+  const ordered = [result, pathBlock, latency, throughputBlock, routing, hostsBlock, details].filter(
+    (block): block is Block => block !== null,
+  )
+  const order = new Map(ordered.map((block, index) => [block.id, index + 1]))
+  const sectionOf = (block: Block, className?: string) => (
+    <ReportSectionBlock
+      key={block.id}
+      id={`report-${block.id}`}
+      index={order.get(block.id) ?? 0}
+      title={block.title}
+      hint={block.hint}
+      action={block.action}
+      flush={block.flush}
+      className={className}
+    >
+      {block.body}
+    </ReportSectionBlock>
+  )
+  const side = [latency, throughputBlock].filter((block): block is Block => block !== null)
 
   return (
     <Page className="@container">
@@ -256,7 +265,7 @@ export function PathPage() {
           </Button>
         }
       />
-      <div className="space-y-6">
+      <div className="space-y-3">
         {/* 这一对和诊断的按钮。 */}
         <section className="rounded-lg border bg-card">
           <PairRow
@@ -314,19 +323,22 @@ export function PathPage() {
             })}
             {current.isError && shown !== null ? <Notice tone="warn">{t.tests.testGone(shown)}</Notice> : null}
 
-            {blocks.map((block, index) => (
-              <ReportSectionBlock
-                key={block.id}
-                id={`report-${block.id}`}
-                index={index + 1}
-                title={block.title}
-                hint={block.hint}
-                action={block.action}
-                bare={block.bare}
-              >
-                {block.body}
-              </ReportSectionBlock>
-            ))}
+            {sectionOf(result)}
+            {/* 左边两个方向的路径，右边延迟和吞吐上下叠着：两边差不多高，面板不拉长。 */}
+            <div className="grid grid-cols-1 items-start gap-3 @5xl:grid-cols-12">
+              {sectionOf(pathBlock, side.length > 0 ? '@5xl:col-span-7' : '@5xl:col-span-12')}
+              {side.length > 0 ? (
+                <div className="space-y-3 @5xl:col-span-5">{side.map((block) => sectionOf(block))}</div>
+              ) : null}
+            </div>
+            {sectionOf(routing)}
+            {sectionOf(hostsBlock)}
+            {details === null ? null : sectionOf(details)}
+            <Output
+              index={order.size + 1}
+              fileBase={fileBase}
+              report={() => ({ text: reportText(input, now), json: reportJson(input, now) })}
+            />
           </>
         )}
       </div>

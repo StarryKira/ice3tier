@@ -88,7 +88,7 @@ export function Plot({
   format,
   labelWidth = '8.5rem',
   valueWidth = '5.5rem',
-  rowClassName = 'h-9',
+  rowClassName = 'h-8',
   label,
 }: {
   rows: readonly PlotRow[]
@@ -138,12 +138,12 @@ export function Plot({
       })}
       <div className="grid gap-x-3" style={columns} aria-hidden>
         <span />
-        <div className="relative h-5 text-[11px] text-muted-foreground tabular">
+        <div className="relative h-4 text-[10px] text-muted-foreground tabular">
           {scale.ticks.map((tick, index) => (
             <span
               key={tick}
               className={cn(
-                'absolute top-1 whitespace-nowrap',
+                'absolute top-0.5 whitespace-nowrap',
                 index === 0 ? '' : index === scale.ticks.length - 1 ? '-translate-x-full' : '-translate-x-1/2',
               )}
               style={{ left: x(tick) }}

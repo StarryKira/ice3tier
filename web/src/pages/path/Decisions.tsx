@@ -28,13 +28,13 @@ function DecisionRows({ decision, nodes }: { decision: DecisionView; nodes: Name
   return (
     <>
       <tr className="bg-muted/40">
-        <th colSpan={4} scope="colgroup" className="px-5 py-2 text-left text-[13px] font-medium">
+        <th colSpan={4} scope="colgroup" className="px-3 py-1 text-left text-xs font-medium">
           {p.forward(name(decision.from), name(decision.to))}
         </th>
       </tr>
       {rows.map(({ mode, choice }) => (
         <Tr key={mode} data-testid={`decision-${decision.from}-${mode}`}>
-          <Td className="whitespace-nowrap">
+          <Td className="py-1.5 whitespace-nowrap">
             <span className="text-[13px]">{p.mode[mode]}</span>
             {decision.mode === mode ? (
               <Badge tone="accent" className="ml-2">
@@ -42,12 +42,12 @@ function DecisionRows({ decision, nodes }: { decision: DecisionView; nodes: Name
               </Badge>
             ) : null}
           </Td>
-          <Td className="whitespace-nowrap">
+          <Td className="py-1.5 whitespace-nowrap">
             <StatusText tone={routeTone(choice)} className="text-[13px] font-medium">
               {routeName(choice.route, nodes)}
             </StatusText>
           </Td>
-          <Td className="text-[13px] text-muted-foreground">
+          <Td className="py-1.5 text-[13px] text-muted-foreground">
             {reasonText(choice.reason)}
             {choice.cheaper !== null && choice.cheaper !== undefined ? (
               <span className="block text-xs">
@@ -55,7 +55,7 @@ function DecisionRows({ decision, nodes }: { decision: DecisionView; nodes: Name
               </span>
             ) : null}
           </Td>
-          <Td numeric className="text-[13px] tabular">
+          <Td numeric className="py-1.5 whitespace-nowrap text-[13px] tabular">
             {choice.cost_us === null ? '—' : msText(choice.cost_us)}
           </Td>
         </Tr>
@@ -79,7 +79,7 @@ export function Decisions({ test, nodes }: { test: TestView | undefined; nodes: 
     )
   }
   return (
-    <div className="px-4 pb-1" data-testid="decisions">
+    <div className="px-3" data-testid="decisions">
       <Table aria-label={d.decisionsTitle}>
         <thead>
           <tr>

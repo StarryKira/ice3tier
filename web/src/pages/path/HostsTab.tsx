@@ -402,96 +402,104 @@ export function HostsTab({ network, a, b, tested, nodes }: HostsTabProps) {
     { side: b, label: d.nodeB },
   ]
   const sourceText = { live: d.hostLive, test: d.hostTest, mixed: `${d.hostLive} · ${d.hostTest}` }
-  return (
-    <div data-testid="hosts">
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[40rem] table-fixed border-collapse text-[13px]">
-          <colgroup>
-            <col className="w-44" />
-            <col />
-            <col />
-          </colgroup>
-          <thead>
-            <tr className="border-b">
-              <td className="px-5 py-3" />
-              {sides.map(({ side, label }) => (
-                <th
-                  key={label}
-                  scope="col"
-                  className="px-5 py-3 text-left font-normal"
-                  data-testid={`host-${label.toLowerCase()}`}
+  const all = groups()
+  // 两半并排：左边节点、系统、资源，右边连接、到对端的连接、网络；每半一张表，表头都是 A、B。
+  const halves = [all.slice(0, 3), all.slice(3)]
+  const renderTable = (subset: Group[], first: boolean) => (
+    <table className="w-full min-w-[28rem] table-fixed border-collapse text-[13px]">
+      <colgroup>
+        <col className="w-32" />
+        <col />
+        <col />
+      </colgroup>
+      <thead>
+        <tr className="border-b">
+          <td className="px-3 py-2" />
+          {sides.map(({ side, label }) => (
+            <th
+              key={label}
+              scope="col"
+              className="px-3 py-2 text-left font-normal"
+              data-testid={first ? `host-${label.toLowerCase()}` : undefined}
+            >
+              <span className="flex min-w-0 items-baseline gap-1.5">
+                <span className="text-xs font-semibold text-muted-foreground">{label}</span>
+                <Link
+                  to={nodePath(network, side.id)}
+                  className="inline-flex min-w-0 items-center gap-0.5 rounded-sm text-[15px] font-semibold hover:text-primary"
                 >
-                  <span className="flex min-w-0 items-baseline gap-1.5">
-                    <span className="text-xs font-semibold text-muted-foreground">{label}</span>
-                    <Link
-                      to={nodePath(network, side.id)}
-                      className="inline-flex min-w-0 items-center gap-0.5 rounded-sm text-[15px] font-semibold hover:text-primary"
-                    >
-                      <span className="truncate">{side.detail?.name ?? side.name}</span>
-                      <ArrowUpRight className="size-3.5 shrink-0 self-center text-faint" aria-label={d.toNode} />
-                    </Link>
-                  </span>
-                </th>
-              ))}
+                  <span className="truncate">{side.detail?.name ?? side.name}</span>
+                  <ArrowUpRight className="size-3.5 shrink-0 self-center text-faint" aria-label={d.toNode} />
+                </Link>
+              </span>
+            </th>
+          ))}
+        </tr>
+      </thead>
+      {subset.map((group) => {
+        const reasons = sides.map(({ side }) => (group.hostOnly ? missing(side, tested, nodes) : null))
+        const rows = group.rows.filter((row) => sides.some(({ side }) => row.value(side, nodes) !== null))
+        return (
+          <tbody key={group.key} className="border-b last:border-b-0" data-testid={`hosts-${group.key}`}>
+            <tr className="bg-muted/40">
+              <th scope="colgroup" colSpan={3} className="px-3 py-1 text-left text-xs font-medium">
+                <span className="flex items-center justify-between gap-3">
+                  {d.hostSection[group.key]}
+                  <span className="font-normal text-muted-foreground">{sourceText[group.source]}</span>
+                </span>
+              </th>
             </tr>
-          </thead>
-          {groups().map((group) => {
-            const reasons = sides.map(({ side }) => (group.hostOnly ? missing(side, tested, nodes) : null))
-            const rows = group.rows.filter((row) => sides.some(({ side }) => row.value(side, nodes) !== null))
-            return (
-              <tbody key={group.key} className="border-b last:border-b-0" data-testid={`hosts-${group.key}`}>
-                <tr className="bg-muted/40">
-                  <th scope="colgroup" colSpan={3} className="px-5 py-2 text-left text-xs font-medium">
-                    <span className="flex items-center justify-between gap-3">
-                      {d.hostSection[group.key]}
-                      <span className="font-normal text-muted-foreground">{sourceText[group.source]}</span>
-                    </span>
+            {rows.length === 0 ? (
+              <tr>
+                <td />
+                {reasons.map((reason, index) => (
+                  <td key={index} className="px-3 py-1 text-muted-foreground">
+                    {reason ?? '—'}
+                  </td>
+                ))}
+              </tr>
+            ) : (
+              rows.map((row, rowIndex) => (
+                <tr key={row.key} className="border-t border-border/60 first:border-t-0">
+                  <th scope="row" className="px-3 py-1 text-left align-top font-normal text-muted-foreground">
+                    {row.label}
                   </th>
-                </tr>
-                {rows.length === 0 ? (
-                  <tr>
-                    <td />
-                    {reasons.map((reason, index) => (
-                      <td key={index} className="px-5 py-2 text-muted-foreground">
-                        {reason ?? '—'}
+                  {sides.map(({ side, label }, index) => {
+                    const value = row.value(side, nodes)
+                    const reason = reasons[index] ?? null
+                    return (
+                      <td
+                        key={label}
+                        className={cn(
+                          'px-3 py-1 align-top break-words',
+                          row.mono === true && value !== null && 'font-mono text-xs leading-5',
+                        )}
+                      >
+                        {value !== null ? (
+                          value
+                        ) : reason !== null && rowIndex === 0 ? (
+                          <span className="text-muted-foreground">{reason}</span>
+                        ) : (
+                          <span className="text-faint">—</span>
+                        )}
                       </td>
-                    ))}
-                  </tr>
-                ) : (
-                  rows.map((row, rowIndex) => (
-                    <tr key={row.key} className="border-t border-border/60 first:border-t-0">
-                      <th scope="row" className="px-5 py-1.5 text-left align-top font-normal text-muted-foreground">
-                        {row.label}
-                      </th>
-                      {sides.map(({ side, label }, index) => {
-                        const value = row.value(side, nodes)
-                        const reason = reasons[index] ?? null
-                        return (
-                          <td
-                            key={label}
-                            className={cn(
-                              'px-5 py-1.5 align-top break-words',
-                              row.mono === true && value !== null && 'font-mono text-xs leading-5',
-                            )}
-                          >
-                            {value !== null ? (
-                              value
-                            ) : reason !== null && rowIndex === 0 ? (
-                              <span className="text-muted-foreground">{reason}</span>
-                            ) : (
-                              <span className="text-faint">—</span>
-                            )}
-                          </td>
-                        )
-                      })}
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            )
-          })}
-        </table>
-      </div>
+                    )
+                  })}
+                </tr>
+              ))
+            )}
+          </tbody>
+        )
+      })}
+    </table>
+  )
+  return (
+    <div data-testid="hosts" className="grid grid-cols-1 @5xl:grid-cols-2 @5xl:divide-x">
+      {halves.map((subset, index) => (
+        <div key={index} className="min-w-0 overflow-x-auto">
+          {renderTable(subset, index === 0)}
+        </div>
+      ))}
     </div>
   )
 }

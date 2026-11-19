@@ -26,10 +26,13 @@ function save(name: string, content: string, type: string) {
  * 点标题展开。文件名带上两个节点和时刻，存了几份也分得开。报告是展开时才算的。
  */
 export function Output({
+  index,
   report,
   fileBase,
   className,
 }: {
+  /** 报告里的序号。 */
+  index: number
   report: () => { text: string; json: string }
   fileBase: string
   className?: string
@@ -39,26 +42,32 @@ export function Output({
   const content = open ? report() : null
   const value = content === null ? '' : format === 'text' ? content.text : content.json
   return (
-    <section className={cn('min-w-0 rounded-lg border bg-card', className)} data-testid="diagnosis-output">
-      <header className="flex h-10 items-center justify-between gap-3 px-4">
+    <section
+      className={cn('min-w-0 overflow-hidden rounded-lg border bg-card', className)}
+      data-testid="diagnosis-output"
+    >
+      <header className={cn('flex h-9 items-center justify-between gap-3 bg-muted/30 px-3', open && 'border-b')}>
         <button
           type="button"
           onClick={() => setOpen(!open)}
           aria-expanded={open}
-          className="flex min-w-0 items-center gap-1.5 rounded-sm text-[13px] font-semibold"
+          className="flex min-w-0 items-center gap-2 rounded-sm text-[13px] font-semibold"
         >
+          <span className="text-[11px] font-medium text-muted-foreground tabular">
+            {String(index).padStart(2, '0')}
+          </span>
+          {d.sections.raw}
           <ChevronDown
-            className={cn('size-4 text-muted-foreground transition-transform', !open && '-rotate-90')}
+            className={cn('size-3.5 text-muted-foreground transition-transform', !open && '-rotate-90')}
             aria-hidden
           />
-          {d.tabs.output}
-          <span className="font-normal text-muted-foreground">· {d.outputHint}</span>
+          <span className="truncate text-xs font-normal text-muted-foreground">{d.outputHint}</span>
         </button>
         {open ? (
           <div className="flex shrink-0 items-center gap-2">
             <Segmented<Format>
               size="sm"
-              aria-label={d.tabs.output}
+              aria-label={d.sections.raw}
               value={format}
               onChange={setFormat}
               options={[
@@ -86,7 +95,7 @@ export function Output({
       </header>
       {open ? (
         <pre
-          className="overflow-x-auto border-t px-4 py-3 font-mono text-xs leading-relaxed whitespace-pre text-foreground"
+          className="overflow-x-auto px-3 py-2.5 font-mono text-xs leading-relaxed whitespace-pre text-foreground"
           data-testid={`diagnosis-output-${format}`}
         >
           {value}

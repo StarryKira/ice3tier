@@ -383,7 +383,7 @@ describe('路径诊断：一次诊断', () => {
     const user = userEvent.setup()
     setup({ 'GET /networks/1/tests': [WITH_HOSTS], 'GET /networks/1/tests/12': WITH_HOSTS })
     renderWithApp(<PathPage />, { network: NETWORK, route: '/n/1/diagnosis?a=2&b=5' })
-    await user.click(await screen.findByRole('button', { name: new RegExp(d.tabs.output) }))
+    await user.click(await screen.findByRole('button', { name: new RegExp(d.sections.raw) }))
     const text = await screen.findByTestId('diagnosis-output-text')
     await waitFor(() => expect(text).toHaveTextContent(d.value.side('laptop', '98%')))
     expect(text).toHaveTextContent(d.report.title)

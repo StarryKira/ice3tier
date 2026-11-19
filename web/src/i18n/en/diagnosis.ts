@@ -38,15 +38,6 @@ export const diagnosis: Messages['diagnosis'] = {
   stepState: { pending: 'Running', done: 'Done', skipped: 'Skipped', failed: 'Failed' },
   progress: (done, total) => `${done} / ${total}`,
 
-  tabs: {
-    overview: 'Overview',
-    route: 'Routing',
-    latency: 'Latency & loss',
-    bandwidth: 'Bandwidth',
-    hosts: 'Hosts',
-    output: 'Full output',
-  },
-
   find: {
     cheaper: (direction, route, cost, current) =>
       `${direction}: in lowest-latency mode ${route} is faster (cost ${cost}, current ${current}), but not by enough to switch`,

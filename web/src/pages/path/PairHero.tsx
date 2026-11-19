@@ -25,7 +25,7 @@ export function NodeTile({ node, size = 'lg' }: { node: Node | NodeDetail; size?
     <span
       className={cn(
         'relative grid shrink-0 place-items-center bg-muted text-muted-foreground',
-        size === 'lg' ? 'size-11 rounded-xl' : 'size-9 rounded-lg',
+        size === 'lg' ? 'size-10 rounded-xl' : 'size-9 rounded-lg',
         !node.online && 'grayscale',
       )}
     >
@@ -220,7 +220,7 @@ export function PairRow({
   const same = pair.a !== null && pair.a === pair.b
   return (
     <div
-      className="grid grid-cols-1 items-center gap-x-8 gap-y-5 px-6 py-5 @3xl:grid-cols-[minmax(0,14rem)_minmax(0,1fr)_minmax(0,14rem)]"
+      className="grid grid-cols-1 items-center gap-x-8 gap-y-3 px-5 py-3 @3xl:grid-cols-[minmax(0,14rem)_minmax(0,1fr)_minmax(0,14rem)]"
       data-testid="pair-hero"
     >
       <End
@@ -237,7 +237,7 @@ export function PairRow({
             {same ? p.same : d.pickHint}
           </p>
         ) : (
-          <div className="space-y-3">
+          <div className="space-y-2">
             <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
               <Tooltip content={d.liveHint}>
                 <span tabIndex={0} className="rounded-sm">

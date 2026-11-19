@@ -43,16 +43,6 @@ export const diagnosis = {
 
   // 指标
 
-  // 标签页
-  tabs: {
-    overview: '概览',
-    route: '路由',
-    latency: '延迟与丢包',
-    bandwidth: '带宽',
-    hosts: '两端主机',
-    output: '完整输出',
-  },
-
   // 结论
   find: {
     cheaper: (direction: string, route: string, cost: string, current: string) =>

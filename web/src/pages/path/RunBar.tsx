@@ -49,7 +49,7 @@ export function RunRow({ test, throughput, onThroughput, onStart, onStop, starti
   const finished = list.filter((step) => step.state !== 'pending').length
   const showSteps = running || list.some((step) => step.state === 'failed' || step.state === 'skipped')
   return (
-    <div className="relative flex flex-wrap items-center gap-x-6 gap-y-2 border-t px-6 py-3" data-testid="run-bar">
+    <div className="relative flex flex-wrap items-center gap-x-6 gap-y-2 border-t px-5 py-2" data-testid="run-bar">
       {running ? (
         <div className="absolute inset-x-0 -top-px h-0.5 bg-muted" aria-hidden>
           <div

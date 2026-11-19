@@ -156,12 +156,12 @@ function HopTable({
           </colgroup>
           <thead>
             <tr className="border-b text-left text-xs text-muted-foreground">
-              <th className="py-1.5 font-normal">#</th>
-              <th className="py-1.5 font-normal">{c.hop}</th>
-              <th className="py-1.5 text-right font-normal">{s.latency}</th>
-              <th className="py-1.5 text-right font-normal">{s.jitter}</th>
-              <th className="py-1.5 text-right font-normal">{s.loss}</th>
-              <th className="py-1.5 pl-4 font-normal">
+              <th className="py-1 font-normal">#</th>
+              <th className="py-1 font-normal">{c.hop}</th>
+              <th className="py-1 text-right font-normal">{s.latency}</th>
+              <th className="py-1 text-right font-normal">{s.jitter}</th>
+              <th className="py-1 text-right font-normal">{s.loss}</th>
+              <th className="py-1 pl-4 font-normal">
                 <span className="sr-only">{c.waterfall}</span>
               </th>
             </tr>
@@ -172,18 +172,18 @@ function HopTable({
               const at = (us: number) => `${total === 0 ? 0 : (us / total) * 100}%`
               return (
                 <tr key={`${hop.from}>${hop.to}`}>
-                  <td className="py-1.5 text-muted-foreground tabular">{index + 1}</td>
+                  <td className="py-1 text-muted-foreground tabular">{index + 1}</td>
                   <td className="truncate py-1.5">
                     {hop.from} → {hop.to}
                     {index === 0 && leg.relay_leg === 'tcp' ? (
                       <span className="ml-1.5 text-xs font-medium text-warn">TCP</span>
                     ) : null}
                   </td>
-                  <td className="py-1.5 text-right font-medium tabular">{msText(hop.rtt_us)}</td>
-                  <td className="py-1.5 text-right text-muted-foreground tabular">{msText(hop.jitter_us)}</td>
+                  <td className="py-1 text-right font-medium tabular">{msText(hop.rtt_us)}</td>
+                  <td className="py-1 text-right text-muted-foreground tabular">{msText(hop.jitter_us)}</td>
                   <td
                     className={cn(
-                      'py-1.5 text-right tabular',
+                      'py-1 text-right tabular',
                       hop.loss_permille !== null && hop.loss_permille >= 10
                         ? 'font-medium text-warn'
                         : 'text-muted-foreground',
@@ -191,7 +191,7 @@ function HopTable({
                   >
                     {permilleText(hop.loss_permille)}
                   </td>
-                  <td className="py-1.5 pl-4">
+                  <td className="py-1 pl-4">
                     <span className="relative block h-2 rounded-full bg-muted">
                       {hop.rtt_us === null ? null : (
                         <span
@@ -227,7 +227,7 @@ export function PathChart({
   const sum = (hops: readonly Hop[]) => hops.reduce((total, hop) => total + (hop.rtt_us ?? 0), 0)
   const total = Math.max(sum(forward), sum(reverse))
   return (
-    <div className="grid grid-cols-1 gap-x-8 gap-y-5 @4xl:grid-cols-2">
+    <div className="space-y-3">
       <HopTable leg={path.forward} hops={forward} total={total} nodes={nodes} testId="leg-forward" />
       <HopTable leg={path.reverse} hops={reverse} total={total} nodes={nodes} testId="leg-reverse" />
     </div>
@@ -243,7 +243,7 @@ export function LatencyChart({ test, nodes }: { test: TestView | undefined; node
   const top = Math.max(...paths.map(({ result }) => result.latency?.p95_us ?? 0)) / 1000
   const bottom = Math.min(...paths.map(({ result }) => result.latency?.min_us ?? top * 1000)) / 1000
   const pad = Math.max((top - bottom) * 0.1, top * 0.02, 0.5)
-  const scale = niceRange(bottom - pad, top + pad)
+  const scale = niceRange(bottom - pad, top + pad, 3)
   const rows: PlotRow[] = paths.map((path) => {
     const latency = path.result.latency
     const kind = path.direct || path.result.route?.via === 'direct' ? 'direct' : 'relay'
@@ -298,7 +298,7 @@ export function LatencyChart({ test, nodes }: { test: TestView | undefined; node
       rows={rows}
       scale={scale}
       format={(tick, last) => (last ? t.common.ms(tick) : String(tick))}
-      rowClassName="h-10"
+      rowClassName="h-9"
     />
   )
 }
@@ -376,7 +376,7 @@ export function ThroughputChart({ test, nodes }: { test: TestView | undefined; n
       rows={rows}
       scale={scale}
       format={(tick, last) => (last ? `${tick} ${giga ? 'Gbps' : 'Mbps'}` : String(tick))}
-      rowClassName="h-11"
+      rowClassName="h-10"
     />
   )
 }
@@ -387,9 +387,9 @@ export function CostChart({ path, nodes }: { path: PathView | undefined; nodes: 
   const legs = path === undefined ? [] : [path.forward, path.reverse].filter((leg) => (leg.candidates ?? []).length > 0)
   if (legs.length === 0) return <Empty>{path === undefined ? t.path.querying : t.path.candidatesEmpty}</Empty>
   const top = Math.max(...legs.flatMap((leg) => (leg.candidates ?? []).map((candidate) => candidate.cost_us)))
-  const scale = niceScale(top / 1000)
+  const scale = niceScale(top / 1000, 3)
   return (
-    <div className="space-y-4">
+    <div className="space-y-2">
       {legs.map((leg) => (
         <div key={leg.from.id} data-testid={`candidates-${leg === path?.forward ? 'forward' : 'reverse'}`}>
           <p className="mb-1 text-xs text-muted-foreground">{t.path.forward(leg.from.name, leg.to.name)}</p>
@@ -397,7 +397,7 @@ export function CostChart({ path, nodes }: { path: PathView | undefined; nodes: 
             label={`${t.path.candidatesTitle} ${t.path.forward(leg.from.name, leg.to.name)}`}
             scale={scale}
             format={(tick, last) => (last ? t.common.ms(tick) : String(tick))}
-            rowClassName="h-7"
+            rowClassName="h-6"
             rows={(leg.candidates ?? []).slice(0, 6).map((candidate) => {
               const kind = candidate.route.via === 'direct' ? 'direct' : 'relay'
               return {
@@ -518,7 +518,7 @@ export function CpuChart({ hosts, nodes, empty }: { hosts: readonly HostReport[]
       rows={rows}
       scale={niceScale(top)}
       format={(tick, last) => (last ? `${tick}%` : String(tick))}
-      rowClassName="h-7"
+      rowClassName="h-6"
       labelWidth="7.5rem"
       valueWidth="3rem"
     />
