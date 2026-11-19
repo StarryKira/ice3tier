@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Check, Plus } from 'lucide-react'
+import { CalendarDays, ChevronRight, Globe, Network as NetworkIcon, Plus, Server, Tag } from 'lucide-react'
 import { useId, useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 
@@ -8,22 +8,19 @@ import { api } from '@/api/endpoints'
 import { q, useAction } from '@/api/queries'
 import { type Network, type Reach, type RoutingMode, type ServiceClass, type UpdateNetwork } from '@/api/types'
 import { useConfirm } from '@/components/confirm'
-import { CopyText } from '@/components/copy'
+import { DateTimeValue, DetailList, DetailRow } from '@/components/detail-list'
 import { FormDialog } from '@/components/form-dialog'
-import { InfoRow, Page, PageHeader } from '@/components/page'
-import { RelativeTime } from '@/components/status'
-import { Badge } from '@/components/ui/badge'
+import { Page, PageHeader } from '@/components/page'
+import { SettingRow } from '@/components/setting-row'
 import { Button } from '@/components/ui/button'
-import { Card, CardBody, CardHeader } from '@/components/ui/card'
+import { BoxCard, BoxCardHeader } from '@/components/ui/card'
 import { Field, FormError } from '@/components/ui/field'
 import { Input, NativeSelect } from '@/components/ui/input'
-import { RadioCards } from '@/components/ui/radio-cards'
 import { ClassSelect } from '@/components/usage'
 import { t } from '@/i18n'
 import { cidrContains, formatCidr, parseCidr } from '@/lib/cidr'
 import { MAX_RELAY_HOPS } from '@/lib/product'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
-import { cn } from '@/lib/utils'
 import { validateNetworkCidr } from '@/lib/validate'
 
 import { networkPath, useNetwork } from './context'
@@ -85,18 +82,31 @@ function ExpandDialog({ network, open, onClose }: { network: Network; open: bool
   )
 }
 
+const ROUTING_DESC: Record<RoutingMode, () => string> = {
+  direct_first: () => n.routingDirectFirstDesc,
+  lowest_cost: () => n.routingLowestCostDesc,
+}
+const REACH_DESC: Record<Reach, () => string> = {
+  any: () => n.reachAnyDesc,
+  direct_only: () => n.reachDirectOnlyDesc,
+  relay_only: () => n.reachRelayOnlyDesc,
+}
+
 /**
- * 网络的设置。多个字段一起改，所以是整站少数显式保存的表单：点"保存"才生效，没有改动时"保存"是灰的。
+ * 网络的选路设置：一张卡片，一项一行（名字和说明在左，下拉在右，说明跟着选的那一项变），底边是取消和保存。
+ * 几项一起改，所以是整站少数显式保存的表单：点"保存"才生效，没有改动时按钮是灰的。
  */
-function SettingsForm({ network }: { network: Network }) {
+function RoutingCard({ network }: { network: Network }) {
   const nodes = useQuery(q.nodes(network.id))
   const [routing, setRouting] = useState<RoutingMode>(network.routing)
   const [hops, setHops] = useState(network.max_relay_hops)
   const [reach, setReach] = useState<Reach>(network.reach)
   // `null` 和 `auto` 是一回事；表单里一律写成 `auto`。
   const [serviceClass, setServiceClass] = useState<ServiceClass>(network.class ?? 'auto')
-  const routingLabel = useId()
-  const reachLabel = useId()
+  const routingId = useId()
+  const hopsId = useId()
+  const reachId = useId()
+  const classId = useId()
 
   const save = useAction(network.id, {
     mutationFn: (body: UpdateNetwork) => api.updateNetwork(network.id, body),
@@ -119,39 +129,50 @@ function SettingsForm({ network }: { network: Network }) {
   }
 
   return (
-    <form
-      noValidate
-      onSubmit={(event) => {
-        event.preventDefault()
-        if (dirty) save.mutate({ routing, max_relay_hops: hops, reach, class: serviceClass })
-      }}
-    >
-      <CardBody className="space-y-7">
-        <div>
-          <p id={routingLabel} className={cn('text-[13px] font-medium', overriding === 0 && 'mb-2')}>
-            {n.routingLabel}
-          </p>
-          {overriding > 0 ? (
-            <p className="mb-2 text-[13px] text-muted-foreground">{n.routingOverridden(overriding)}</p>
-          ) : null}
-          <RadioCards
-            aria-labelledby={routingLabel}
-            value={routing}
-            onChange={setRouting}
-            columns={2}
-            options={[
-              { value: 'direct_first', title: n.routingDirectFirst, description: n.routingDirectFirstDesc },
-              { value: 'lowest_cost', title: n.routingLowestCost, description: n.routingLowestCostDesc },
-            ]}
-          />
-        </div>
-        <Field label={n.hopsLabel} className="max-w-xs">
-          {(props) => (
+    <BoxCard>
+      <BoxCardHeader title={n.routing} />
+      <form
+        noValidate
+        aria-label={n.routing}
+        onSubmit={(event) => {
+          event.preventDefault()
+          if (dirty) save.mutate({ routing, max_relay_hops: hops, reach, class: serviceClass })
+        }}
+      >
+        <div className="divide-y">
+          <SettingRow
+            label={n.routingLabel}
+            htmlFor={routingId}
+            description={
+              <>
+                {ROUTING_DESC[routing]()}
+                {overriding > 0 ? (
+                  <Link
+                    to={networkPath(network.id, 'nodes')}
+                    className="block w-fit rounded-sm text-primary underline-offset-4 hover:underline"
+                  >
+                    {n.routingOverridden(overriding)}
+                  </Link>
+                ) : null}
+              </>
+            }
+          >
             <NativeSelect
-              {...props}
+              id={routingId}
+              className="w-48"
+              value={routing}
+              onChange={(event) => setRouting(event.target.value as RoutingMode)}
+            >
+              <option value="direct_first">{n.routingDirectFirst}</option>
+              <option value="lowest_cost">{n.routingLowestCost}</option>
+            </NativeSelect>
+          </SettingRow>
+          <SettingRow label={n.hopsLabel} htmlFor={hopsId} description={n.hopsDesc}>
+            <NativeSelect
+              id={hopsId}
+              className="w-48"
               value={hops}
               onChange={(event) => setHops(Number(event.target.value))}
-              className="w-32"
             >
               {Array.from(
                 { length: MAX_RELAY_HOPS.max - MAX_RELAY_HOPS.min + 1 },
@@ -162,48 +183,120 @@ function SettingsForm({ network }: { network: Network }) {
                 </option>
               ))}
             </NativeSelect>
-          )}
-        </Field>
-        <div>
-          <p id={reachLabel} className="mb-2 text-[13px] font-medium">
-            {n.reachLabel}
-          </p>
-          <RadioCards
-            aria-labelledby={reachLabel}
-            value={reach}
-            onChange={setReach}
-            columns={3}
-            options={[
-              { value: 'any', title: n.reachAny, description: n.reachAnyDesc },
-              { value: 'direct_only', title: n.reachDirectOnly, description: n.reachDirectOnlyDesc },
-              { value: 'relay_only', title: n.reachRelayOnly, description: n.reachRelayOnlyDesc },
-            ]}
-          />
-        </div>
-        <Field label={n.classLabel} hint={n.classHint}>
-          {(props) => (
+          </SettingRow>
+          <SettingRow label={n.reachLabel} htmlFor={reachId} description={REACH_DESC[reach]()}>
+            <NativeSelect
+              id={reachId}
+              className="w-48"
+              value={reach}
+              onChange={(event) => setReach(event.target.value as Reach)}
+            >
+              <option value="any">{n.reachAny}</option>
+              <option value="direct_only">{n.reachDirectOnly}</option>
+              <option value="relay_only">{n.reachRelayOnly}</option>
+            </NativeSelect>
+          </SettingRow>
+          <SettingRow
+            label={n.classLabel}
+            hint={n.classHint}
+            htmlFor={classId}
+            description={t.serviceClass[`${serviceClass}Desc`]}
+          >
             <ClassSelect
-              {...props}
+              id={classId}
+              compact
+              className="w-48"
               value={serviceClass}
               inheritLabel={null}
               onChange={(value) => setServiceClass(value ?? 'auto')}
             />
-          )}
-        </Field>
-        <FormError
-          message={save.isError ? formError(formFailure(save.error, {})) : null}
-          detail={save.isError ? formErrorDetail(formFailure(save.error, {})) : null}
-        />
-      </CardBody>
-      <footer className="mt-8 flex items-center justify-end gap-2 border-t pt-4">
-        <Button onClick={reset} disabled={!dirty || save.isPending}>
-          {t.common.cancel}
-        </Button>
-        <Button type="submit" variant="primary" disabled={!dirty} pending={save.isPending}>
-          {n.saveSettings}
-        </Button>
-      </footer>
-    </form>
+          </SettingRow>
+        </div>
+        {save.isError ? (
+          <div className="px-5 pb-1">
+            <FormError
+              message={formError(formFailure(save.error, {}))}
+              detail={formErrorDetail(formFailure(save.error, {}))}
+            />
+          </div>
+        ) : null}
+        <footer className="flex items-center justify-end gap-2 border-t px-5 py-3">
+          <Button size="sm" onClick={reset} disabled={!dirty || save.isPending}>
+            {t.common.cancel}
+          </Button>
+          <Button size="sm" type="submit" variant="primary" disabled={!dirty} pending={save.isPending}>
+            {n.saveSettings}
+          </Button>
+        </footer>
+      </form>
+    </BoxCard>
+  )
+}
+
+/** 基本信息：名字、域名后缀、地址段（可以扩大）、节点、创建时间，和节点详情的信息卡一个样子。 */
+function BasicsCard({ network, onExpand }: { network: Network; onExpand: () => void }) {
+  return (
+    <BoxCard>
+      <BoxCardHeader title={n.basics} />
+      <DetailList>
+        <DetailRow icon={<Tag />} label={n.nameLabel} copy={network.name}>
+          <span className="text-foreground">{network.name}</span>
+        </DetailRow>
+        <DetailRow icon={<Globe />} label={n.domainLabel} copy={network.domain}>
+          <span className="font-mono text-[13px] text-foreground">{network.domain}</span>
+        </DetailRow>
+        <DetailRow
+          icon={<NetworkIcon />}
+          label={n.cidrLabel}
+          copy={network.cidr}
+          actions={
+            <Button size="sm" variant="ghost" className="h-7 px-2 text-primary" onClick={onExpand}>
+              {n.expand}
+            </Button>
+          }
+        >
+          <span className="font-mono text-[13px] text-foreground">{network.cidr}</span>
+        </DetailRow>
+        <DetailRow icon={<Server />} label={n.nodesLabel}>
+          <Link
+            to={networkPath(network.id, 'nodes')}
+            className="rounded-sm text-foreground underline-offset-4 hover:text-primary hover:underline"
+          >
+            {n.nodes(network.nodes)}
+          </Link>
+        </DetailRow>
+        <DetailRow icon={<CalendarDays />} label={n.createdAt}>
+          <DateTimeValue at={network.created_at} />
+        </DetailRow>
+      </DetailList>
+    </BoxCard>
+  )
+}
+
+/** 其他网络：点一行切过去（顶栏的切换器也能切）。只有这一个网络时没有这张卡片。 */
+function OthersCard({ networks, current }: { networks: readonly Network[]; current: Network }) {
+  const others = networks.filter((other) => other.id !== current.id)
+  if (others.length === 0) return null
+  return (
+    <BoxCard>
+      <BoxCardHeader title={n.othersTitle} />
+      <ul className="divide-y">
+        {others.map((other) => (
+          <li key={other.id}>
+            <Link
+              to={networkPath(other.id, 'network')}
+              aria-label={n.switchTo(other.name)}
+              className="grid min-h-11 grid-cols-[minmax(0,1fr)_auto_auto_1rem] items-center gap-4 px-5 py-2 text-sm transition-colors last:rounded-b-xl hover:bg-muted/50"
+            >
+              <span className="truncate font-medium">{other.name}</span>
+              <span className="font-mono text-[13px] text-muted-foreground">{other.cidr}</span>
+              <span className="w-16 text-right text-[13px] text-muted-foreground tabular">{n.nodes(other.nodes)}</span>
+              <ChevronRight className="size-4 text-faint" aria-hidden />
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </BoxCard>
   )
 }
 
@@ -211,7 +304,7 @@ function SettingsForm({ network }: { network: Network }) {
  * 删除网络：整站唯一需要输入名字的确认，因为它一次毁掉一批东西且无法撤回。
  * controller 只删空的网络，所以网络里还有节点时按钮是灰的，旁边写明要先做什么，不等提交了再报错。
  */
-function DangerZone({ network }: { network: Network }) {
+function DangerCard({ network }: { network: Network }) {
   const confirm = useConfirm()
   const navigate = useNavigate()
   const overview = useQuery(q.overview(network.id))
@@ -234,23 +327,29 @@ function DangerZone({ network }: { network: Network }) {
   }
 
   return (
-    <Card className="border-t pt-6">
-      <div className="flex items-center justify-between gap-6">
-        <div>
-          <h2 className="text-base font-semibold">{n.dangerTitle}</h2>
+    <BoxCard aria-labelledby="network-danger-title">
+      <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 px-5 py-4">
+        <div className="min-w-0">
+          <h2 id="network-danger-title" className="text-[15px] leading-6 font-semibold">
+            {n.dangerTitle}
+          </h2>
           <p className="mt-0.5 text-[13px] text-muted-foreground">
             {network.nodes > 0 ? n.dangerNotEmpty(network.nodes) : n.dangerBody}
+            {network.nodes > 0 ? (
+              <>
+                {' · '}
+                <Link
+                  to={networkPath(network.id, 'nodes')}
+                  className="rounded-sm text-primary underline-offset-4 hover:underline"
+                >
+                  {n.viewNodes}
+                </Link>
+              </>
+            ) : null}
           </p>
-          {network.nodes > 0 ? (
-            <Link
-              to={networkPath(network.id, 'nodes')}
-              className="mt-1 inline-block rounded-sm text-[13px] text-primary underline-offset-4 hover:underline"
-            >
-              {n.viewNodes}
-            </Link>
-          ) : null}
         </div>
         <Button
+          size="sm"
           variant="danger-outline"
           disabled={network.nodes > 0}
           pending={remove.isPending}
@@ -259,10 +358,14 @@ function DangerZone({ network }: { network: Network }) {
           {n.deleteButton}
         </Button>
       </div>
-    </Card>
+    </BoxCard>
   )
 }
 
+/**
+ * 网络页：和节点详情的概览一个样子，两栏卡片。左边基本信息、其他网络、删除网络；右边选路的设置。
+ * 窄的时候一栏，选路排在基本信息后面。
+ */
 export function NetworkPage() {
   useDocumentTitle(n.title)
   const network = useNetwork()
@@ -283,70 +386,17 @@ export function NetworkPage() {
         }
       />
 
-      <section aria-label={n.listTitle} className="-mx-3 mb-12 divide-y border-y">
-        {(networks.data ?? []).map((other) => {
-          const current = other.id === network.id
-          return (
-            <Link
-              key={other.id}
-              to={networkPath(other.id, 'network')}
-              aria-current={current ? 'true' : undefined}
-              aria-label={current ? n.currentName(other.name) : n.switchTo(other.name)}
-              className={cn(
-                'grid grid-cols-[minmax(0,1fr)_10rem_6rem] items-center gap-4 px-3 py-3 transition-colors hover:bg-muted/50',
-                current && 'bg-accent/50 hover:bg-accent/70',
-              )}
-            >
-              <span className="flex min-w-0 items-center gap-2">
-                <span className="truncate text-sm font-semibold">{other.name}</span>
-                {current ? (
-                  <Badge tone="accent">
-                    <Check aria-hidden />
-                    {n.current}
-                  </Badge>
-                ) : null}
-              </span>
-              <span className="font-mono text-[13px] text-muted-foreground">{other.cidr}</span>
-              <span className="text-right text-[13px] text-muted-foreground tabular">{n.nodes(other.nodes)}</span>
-            </Link>
-          )
-        })}
-      </section>
-
-      <div className="space-y-12">
-        <Card>
-          <CardHeader title={n.settingsTitle(network.name)} />
-          <CardBody>
-            <h3 className="sr-only">{n.basics}</h3>
-            <dl>
-              <InfoRow label={n.nameLabel}>
-                <CopyText value={network.name} mono={false} />
-              </InfoRow>
-              <InfoRow label={n.domainLabel}>
-                <CopyText value={network.domain} />
-              </InfoRow>
-              <InfoRow label={n.cidrLabel}>
-                <span className="inline-flex flex-wrap items-center gap-3">
-                  <CopyText value={network.cidr} />
-                  <Button size="sm" variant="link" onClick={() => setExpanding(true)}>
-                    {n.expand}
-                  </Button>
-                </span>
-              </InfoRow>
-              <InfoRow label={n.createdAt}>
-                <RelativeTime at={network.created_at} />
-              </InfoRow>
-            </dl>
-          </CardBody>
-          <CardHeader title={n.routing} className="mt-10 mb-5" />
-          {/* key：切换网络或者保存之后，表单从最新的设置重新开始。 */}
-          <SettingsForm
-            key={`${network.id}:${network.routing}:${network.max_relay_hops}:${network.reach}:${network.class ?? 'auto'}`}
-            network={network}
-          />
-        </Card>
-
-        <DangerZone network={network} />
+      <div className="grid grid-cols-1 items-start gap-x-8 gap-y-6 @4xl:grid-cols-2">
+        <div className="space-y-6">
+          <BasicsCard network={network} onExpand={() => setExpanding(true)} />
+          <OthersCard networks={networks.data ?? []} current={network} />
+          <DangerCard network={network} />
+        </div>
+        {/* key：切换网络或者保存之后，表单从最新的设置重新开始。 */}
+        <RoutingCard
+          key={`${network.id}:${network.routing}:${network.max_relay_hops}:${network.reach}:${network.class ?? 'auto'}`}
+          network={network}
+        />
       </div>
 
       <CreateNetworkDialog open={creating} onClose={() => setCreating(false)} />

@@ -2,9 +2,6 @@
 export const networks = {
   title: '网络',
   subtitle: '这个网络的名字、地址段和选路',
-  listTitle: '全部网络',
-  current: '当前',
-  currentName: (name: string) => `${name}（当前）`,
   switchTo: (name: string) => `切换到 ${name}`,
   nodes: (n: number) => `${n} 个节点`,
   createdAt: '创建时间',
@@ -24,7 +21,6 @@ export const networks = {
   noteDefaultRule: '自带策略 all ⇄ all：所有节点互通',
   noteIsolation: '网络之间完全隔离',
 
-  settingsTitle: (name: string) => `${name} 的设置`,
   basics: '基本信息',
   domainLabel: '域名后缀',
   expand: '扩大…',
@@ -41,6 +37,9 @@ export const networks = {
   routingDirectFirstDesc: '能直连就直连，否则经一个中继',
   routingLowestCost: '延迟优先',
   routingLowestCostDesc: '按实测代价选最低的路径',
+  othersTitle: '其他网络',
+  nodesLabel: '节点',
+  hopsDesc: '一条路最多经过几个中继',
   hopsLabel: '最大中转级数',
   hops: (n: number) => `${n} 级`,
   reachLabel: '默认路径限制',

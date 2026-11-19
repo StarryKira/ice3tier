@@ -30,7 +30,7 @@ import {
   exitFormToInput,
   exitFormValid,
 } from './exitFormState'
-import { SettingRow } from './SettingRow'
+import { SettingRow } from '@/components/setting-row'
 
 /*
  * 出口页上的几块：卡片里平铺的出口设置（改了就保存，没有对话框），和旁边的两张卡片：用量、能用它的节点。

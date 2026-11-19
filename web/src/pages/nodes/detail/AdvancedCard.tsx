@@ -12,7 +12,7 @@ import { t } from '@/i18n'
 import { MAX_PINNED_RELAYS } from '@/lib/product'
 
 import { RelayPicker } from './RelayPicker'
-import { SettingRow } from './SettingRow'
+import { SettingRow } from '@/components/setting-row'
 
 const d = t.nodes.detail
 

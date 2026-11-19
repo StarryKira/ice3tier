@@ -52,12 +52,17 @@ export function DetailRow({ icon, label, children, copy, actions, multiline = fa
   )
 }
 
-/** 一个时刻：完整的日期和时分，后面是"多久以前"。 */
+/** 超过这么久，"多久以前"写的也是日期（`formatRelative`），和前面的重复，就不写了。 */
+const RELATIVE_UNTIL = 7 * 24 * 60 * 60
+
+/** 一个时刻：完整的日期和时分，一周之内后面跟着"多久以前"。 */
 export function DateTimeValue({ at }: { at: Timestamp }) {
   const now = useNow()
+  const elapsed = now - at
   return (
     <span className="tabular">
-      {formatDateTime(at)} · {formatRelative(at, now)}
+      {formatDateTime(at)}
+      {elapsed > -60 && elapsed < RELATIVE_UNTIL ? ` · ${formatRelative(at, now)}` : null}
     </span>
   )
 }

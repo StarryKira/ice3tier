@@ -108,14 +108,16 @@ interface ClassSelectProps {
   onChange: (value: ServiceClass | null) => void
   /** "不设"那一项怎么说：不设时用的是谁的。`null` 时没有这一项（网络的默认值总要有一个）。 */
   inheritLabel: string | null
+  /** 只写名字：后果写在下拉外面（设置行的说明里），下拉可以窄。 */
+  compact?: boolean
   disabled?: boolean
   className?: string
   'aria-describedby'?: string
   'aria-invalid'?: true
 }
 
-/** 服务等级的下拉。每一项后面一句话说后果。 */
-export function ClassSelect({ value, onChange, inheritLabel, className, ...props }: ClassSelectProps) {
+/** 服务等级的下拉。每一项后面一句话说后果（`compact` 时只写名字）。 */
+export function ClassSelect({ value, onChange, inheritLabel, compact = false, className, ...props }: ClassSelectProps) {
   return (
     <NativeSelect
       {...props}
@@ -129,7 +131,7 @@ export function ClassSelect({ value, onChange, inheritLabel, className, ...props
       {inheritLabel !== null ? <option value="">{inheritLabel}</option> : null}
       {SERVICE_CLASSES.map((candidate) => (
         <option key={candidate} value={candidate}>
-          {`${t.serviceClass[candidate]} · ${t.serviceClass[`${candidate}Desc`]}`}
+          {compact ? t.serviceClass[candidate] : `${t.serviceClass[candidate]} · ${t.serviceClass[`${candidate}Desc`]}`}
         </option>
       ))}
     </NativeSelect>

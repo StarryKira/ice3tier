@@ -5,9 +5,6 @@ const count = (n: number, one: string, many: string) => (n === 1 ? `1 ${one}` : 
 export const networks: Messages['networks'] = {
   title: 'Networks',
   subtitle: 'Name, address range and routing of this network',
-  listTitle: 'All networks',
-  current: 'Current',
-  currentName: (name) => `${name} (current)`,
   switchTo: (name) => `Switch to ${name}`,
   nodes: (n) => count(n, 'node', 'nodes'),
   createdAt: 'Created',
@@ -27,7 +24,6 @@ export const networks: Messages['networks'] = {
   noteDefaultRule: 'Includes policy all ⇄ all: every node can reach every other',
   noteIsolation: 'Networks are fully isolated from each other',
 
-  settingsTitle: (name) => `${name} settings`,
   basics: 'Basics',
   domainLabel: 'Domain',
   expand: 'Expand…',
@@ -44,6 +40,9 @@ export const networks: Messages['networks'] = {
   routingDirectFirstDesc: 'Direct when possible, otherwise via one relay',
   routingLowestCost: 'Lowest latency',
   routingLowestCostDesc: 'Takes the path with the lowest measured cost',
+  othersTitle: 'Other networks',
+  nodesLabel: 'Nodes',
+  hopsDesc: 'How many relays a path may pass through',
   hopsLabel: 'Max relay hops',
   hops: (n) => count(n, 'hop', 'hops'),
   reachLabel: 'Default path restriction',

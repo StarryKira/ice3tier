@@ -698,7 +698,7 @@ test('有数据时：管理区和设置', async () => {
   await shot('pairs')
 
   await goToAdmin(page, t.nav.network)
-  await expect(page.getByRole('heading', { name: t.networks.settingsTitle('home') })).toBeVisible()
+  await expect(page.getByRole('heading', { name: t.networks.routing })).toBeVisible()
   await shot('network')
   await page.getByRole('button', { name: t.networks.create }).click()
   await expect(page.getByRole('dialog', { name: t.networks.createTitle })).toBeVisible()
