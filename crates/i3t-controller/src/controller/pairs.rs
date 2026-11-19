@@ -210,7 +210,7 @@ impl Inner {
             let dialers = dialers.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join("、");
             let when = match setting.lane {
                 LaneMode::UdpFallback => {
-                    "开流的一方到对方的共用连接上没有 UDP 的路（它自己这一段没有 UDP，或者对方用不了 UDP）、\
+                    "开流的一方到对方的共用连接上没有 UDP 的路（它自己这一段没有 UDP，或者经中继而对方用不了 UDP；直连着不算）、\
                      和对方之间的 ice3proxy 建着时，新的 TCP 流（代理的 CONNECT、TCP 端口转发）每条独占一条 TCP；\
                      拨号的一方也只在这时才拨，UDP 回来一阵之后放手。"
                 }

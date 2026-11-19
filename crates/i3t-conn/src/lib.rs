@@ -42,7 +42,7 @@ pub use contract::{
     Acceptor, Connector, Datagram, DatagramSendError, DatagramSender, Datagrams, Incoming, OpenError, Payload, Priority, RawRead, RawWrite,
     RecvStream, SendStream, StreamAborted, StreamCode,
 };
-pub use endpoint::{Endpoint, EndpointConfig, EndpointError};
+pub use endpoint::{Endpoint, EndpointConfig, EndpointError, UdpSeen};
 pub use i3t_path::diag::{self, MAX_PIN, MAX_TEST_PROBES, MAX_TEST_WINDOW};
 pub use i3t_path::{
     BackboneLink, BackboneRow, CandidateReport, ChoiceReason, DirectAttempt, DirectFailure, DirectFailureCause, DirectKind, DirectState,

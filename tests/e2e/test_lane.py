@@ -636,6 +636,63 @@ def default_reaches_a_relay_without_udp(lab: Lab, work: Path, t: Checks) -> None
         m.logs(y, s)
 
 
+def default_keeps_a_direct_path_to_a_node_without_udp(lab: Lab, work: Path, t: Checks) -> None:
+    """没有节点对设置：没有 UDP 的中继 s 到各个中继都只有 TCP（controller 认定它用不了 UDP），和普通节点 y 之间的 UDP 却是通的。
+    y 和 s 直连着的时候流走共用的连接（整条路都是 UDP），谁也不拨 ice3proxy；直连没了、路回到经中继，才用 ice3proxy。"""
+    m = Managed(lab, work)
+    r, ctl = m.relay, m.controller
+    a = Node(lab.host("a"), work, declare=("relay",))
+    s = Node(lab.host("s"), work, declare=("relay", "exit"))
+    y = Node(lab.host("y"), work, declare=("exit",))
+    for one, other, rtt in ((s, a, 100), (s, r, 110), (s, y, 120), (a, r, 30), (a, y, 20), (r, y, 2)):
+        harness.shape_between(one.host, other.host, lablib.Shape(rtt_ms=rtt))
+    s.host.block_udp(except_with=y.host)
+    for node in (a, s, y):
+        node.join(ctl)
+    for node in (a, s):
+        ctl.ctl("relay", "enable", str(node.id))
+    for node in (s, y):
+        ctl.ctl("exit", "enable", str(node.id))
+    ctl.add_proxy(y, s)
+    ctl.add_proxy(s, y)
+
+    def direct(node: Node, peer: Node) -> bool:
+        return route_to(ctl, node, peer).get("via") == "direct"
+
+    flagged = waited(lambda: ctl.node(s).get("no_udp") is True, 240, 3)
+    t.check("controller 认定 s 用不了 UDP", flagged, str({node.name: ctl.node(node).get("no_udp") for node in (s, y, r, a)}))
+    ok, detail = m.intact(y, s, 1_000_000)
+    t.check("y 经 s 出去的流完整", ok, detail)
+    t.check("y 和 s 之间是直连", waited(lambda: direct(y, s) and direct(s, y), 60, 2), f"{route_to(ctl, y, s)}；{route_to(ctl, s, y)}")
+    # 认定之后再等过按需拨号的观察时间：直连着就不该拨。
+    time.sleep(40)
+    before = lane_counts(y, s)
+    ok, detail = m.intact(y, s, 1_000_000)
+    after = lane_counts(y, s)
+    t.check("直连着：y 经 s 出去的流走共用的连接，ice3proxy 上一个字节也没有，也没有拨", ok and after["carried_bytes"] == before["carried_bytes"] and
+            after["control_up"] == 0 and lane_counts(s, y)["control_up"] == 0, f"{detail}；{lane_line(y, s)}；{lane_line(s, y)}")
+    ok, detail = m.intact(s, y, 1_000_000)
+    t.check("直连着：s 经 y 出去的流也完整，也不走 ice3proxy", ok and lane_counts(s, y)["carried_bytes"] == 0, f"{detail}；{lane_line(s, y)}")
+
+    # 有 UDP 的路、什么都没连着的对端，节点不往上报：节点对视图里没有哪一边在 ice3proxy 上开流，报了的那一边路上也有 UDP。
+    opening = (m.pair(y, s).get("lane_effect") or {}).get("opening", [])
+    t.check("节点对视图：没有哪一边开新的 TCP 流走 ice3proxy",
+            all(side.get("lanes") is False and side.get("udp_path") is True for side in opening), json.dumps(m.pair(y, s))[:800])
+
+    # s 和 y 之间的 UDP 也没了：路回到经中继的那一条（y 这一段是 UDP，s 那一段是 TCP），这时才靠 controller 说的那一条去拨。
+    s.host.block_udp()
+    cut = time.monotonic()
+    t.check("直连没了：y 拨 s，s 那里有 y 的控制 lane 和停着的 lane", lanes_up(s, y, 180), f"{lane_line(s, y)}；{route_to(ctl, y, s)}")
+    print(f"  直连断开之后 {time.monotonic() - cut:.1f} 秒 s 那里有了 y 停过来的 lane", flush=True)
+    before = lane_counts(y, s)
+    ok, detail = m.intact(y, s, 1_000_000)
+    after = lane_counts(y, s)
+    t.check("直连没了：y 经 s 出去的流走 ice3proxy，完整", ok and after["carried_bytes"] - before["carried_bytes"] >= 1_000_000,
+            f"{detail}；{before} → {after}")
+    if t.failures:
+        m.logs(y, s)
+
+
 def managed_drain(lab: Lab, work: Path, t: Checks) -> None:
     """由 controller 管理：管理员打开一对节点的 ice3proxy，两边报上状况；出口排空后更新：lane 上跑着的流跑完，新的请求被拒绝，更新重启之后新的流又走 lane。"""
     import test_update as upd
@@ -711,6 +768,7 @@ SCENARIOS = {
     "default_where_udp_is_missing": default_where_udp_is_missing,
     "default_follows_udp": default_follows_udp,
     "default_reaches_a_relay_without_udp": default_reaches_a_relay_without_udp,
+    "default_keeps_a_direct_path_to_a_node_without_udp": default_keeps_a_direct_path_to_a_node_without_udp,
     "managed_drain": managed_drain,
 }
 

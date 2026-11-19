@@ -116,21 +116,27 @@ class Host:
         """改这台主机上联那条线的网络条件。`None` 表示去掉所有限制。"""
         self.lab.shape(self.name, "up0", shape)
 
-    def block_udp(self, blocked: bool = True) -> None:
-        """模拟一个用不了 UDP 的网络：这台主机发出和收到的 UDP 全部丢掉（回环除外）。"""
+    def block_udp(self, blocked: bool = True, except_with: "Host | None" = None) -> None:
+        """模拟一个用不了 UDP 的网络：这台主机发出和收到的 UDP 全部丢掉（回环除外）。
+
+        `except_with`：和这一台主机之间的 UDP 照常通。真实的例子是一个机房的 UDP 到大多数地方都不通，到个别对端却打得通。"""
         self.run("nft", "delete", "table", "inet", "noudp", check=False)
         if blocked:
-            rules = """
-table inet noudp {
-    chain out {
+            spared_out = f"ip daddr {except_with.ip} accept" if except_with else ""
+            spared_in = f"ip saddr {except_with.ip} accept" if except_with else ""
+            rules = f"""
+table inet noudp {{
+    chain out {{
         type filter hook output priority filter;
+        {spared_out}
         oifname != "lo" meta l4proto udp drop
-    }
-    chain in {
+    }}
+    chain in {{
         type filter hook input priority filter;
+        {spared_in}
         iifname != "lo" meta l4proto udp drop
-    }
-}
+    }}
+}}
 """
             self.run("nft", "-f", "-", input=rules)
 

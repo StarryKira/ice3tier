@@ -47,6 +47,17 @@ pub struct EndpointConfig {
 
 type SignalHook = Arc<dyn Fn(NodeId, &Signal) + Send + Sync>;
 
+/// 到一个对端的共用连接现在走的路上，本节点看得见多少 UDP（[`Endpoint::udp_path`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UdpSeen {
+    /// 直连：两个节点之间没有别人，整条路都是 UDP。
+    WholePath,
+    /// 经 relay，本节点这一段走 UDP。对端那一段走什么，本节点看不见。
+    OwnLeg,
+    /// 经 relay，本节点这一段走 TCP。
+    NoUdp,
+}
+
 /// 一个节点的数据面。
 ///
 /// 它实现 [`Connector`] 和 [`Acceptor`]：到某个节点开一条流，接受某个节点开过来的流。包走直连还是经 relay、
@@ -232,19 +243,20 @@ impl Endpoint {
         self.paths.subscribe()
     }
 
-    /// 到 `peer` 的共用连接现在走的路上有没有 UDP：直连，或者经 relay 时本节点这一段走 UDP 是 `Some(true)`；
-    /// 本节点自己就是 relay 时，看对端在本节点上的中转会话是不是 UDP 的。这一段是 TCP 时是 `Some(false)`，
+    /// 到 `peer` 的共用连接现在走的路上，本节点看得见多少 UDP（见 [`UdpSeen`]）：直连时整条路都是；经 relay 时只看得见
+    /// 本节点这一段；本节点自己就是 relay 时，看对端在本节点上的中转会话是不是 UDP 的。
     /// 没有路（对端不在 netmap 里、还没有路、或者到不了）时是 `None`：没有路不等于"没有 UDP 的路"，不能拿它决定去拨 ice3proxy。
     ///
-    /// "UDP 不通时才用 ice3proxy"按它来判断。经别的 relay 时只看得见本节点这一段，对端那一段走 TCP 时只有对端自己知道。
+    /// "UDP 不通时才用 ice3proxy"按它来判断。
     #[must_use]
-    pub fn udp_path(&self, peer: NodeId) -> Option<bool> {
+    pub fn udp_path(&self, peer: NodeId) -> Option<UdpSeen> {
+        let own_leg = |udp: bool| if udp { UdpSeen::OwnLeg } else { UdpSeen::NoUdp };
         let report = self.paths.path_report(peer)?;
         match (&report.route, report.relay_leg) {
-            (i3t_model::control::Route::Direct { .. }, _) => Some(true),
-            (i3t_model::control::Route::Relay { .. }, Some(leg)) => Some(leg == i3t_path::RelayLeg::Udp),
+            (i3t_model::control::Route::Direct { .. }, _) => Some(UdpSeen::WholePath),
+            (i3t_model::control::Route::Relay { .. }, Some(leg)) => Some(own_leg(leg == i3t_path::RelayLeg::Udp)),
             // 经本节点自己的 relay：最后一段是对端在本节点上的会话。
-            (i3t_model::control::Route::Relay { .. }, None) => Some(self.relay.has_udp_session(peer)),
+            (i3t_model::control::Route::Relay { .. }, None) => Some(own_leg(self.relay.has_udp_session(peer))),
             (i3t_model::control::Route::None, _) => None,
         }
     }

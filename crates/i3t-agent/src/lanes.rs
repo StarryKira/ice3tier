@@ -11,8 +11,10 @@
 //! - `always`：能拨的对端一直拨着（控制 lane 和几条空闲的）。
 //! - `udp_fallback`（没有设置的节点对默认就是它）：按需拨。到对端有路、并且路上没有 UDP 连续 [`SETTLE`] 才拨；
 //!   UDP 回来了（或者没有路了）满 [`HOLD`] 才放手，之后什么都不连。没有路不算没有 UDP：对端离线时不去拨它。
-//!   "路上没有 UDP"是：本节点自己这一段没有 UDP，或者 controller 说对端用不了 UDP（netmap 里它的 `no_udp`）。
-//!   后一样是因为节点只看得见自己这一段：经一个 UDP 的中继到一个没有 UDP 的中继时，自己这一段有 UDP，路上却有一段 TCP。
+//!   "路上没有 UDP"是：本节点自己这一段没有 UDP，或者经 relay 而 controller 说对端用不了 UDP（netmap 里它的 `no_udp`）。
+//!   后一样是因为经 relay 时节点只看得见自己这一段：经一个 UDP 的中继到一个没有 UDP 的中继时，自己这一段有 UDP，路上却有一段 TCP。
+//!   现在走的是直连时不看它：直连的整条路都是 UDP，照默认的做法走共用的连接。被认定用不了 UDP 的节点也可能和个别对端
+//!   打得通（它出去的 UDP 经运营商的地址转换到得了对方）；走不走直连由选路定（默认直连优先，延迟优先时比代价）。
 //!   开流的一方按同样的判断：路上没有 UDP、并且和对端之间的 lane 建着（控制 lane 在）时新的 TCP 流走 lane；
 //!   lane 没建着（对方还没拨上来，或者本节点刚开始拨）就直接走共用的连接，不等，也不记作改走。
 //!   剩下看不见的：两边都有 UDP、只是这条路经过的某一段（比如两个中继之间）是 TCP。
@@ -25,7 +27,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use i3t_conn::Endpoint;
+use i3t_conn::{Endpoint, UdpSeen};
 use i3t_crypto::NodeKey;
 use i3t_lane::{Choose, LaneAcceptor, LaneConfig, LaneConnector, LanePeer, LaneStatus, Lanes, PeerLaneStatus};
 use i3t_model::Netmap;
@@ -79,10 +81,15 @@ struct Setting {
 }
 
 impl Setting {
-    /// 按 `udp_fallback` 的算法，到对端的路上有没有 UDP：本节点这一段（`own`，见 [`Endpoint::udp_path`]）有 UDP、
-    /// 并且对端不是用不了 UDP 的节点。没有路时是 `None`，不管对端怎样：没有路不算没有 UDP。
-    fn udp_path(self, own: Option<bool>) -> Option<bool> {
-        own.map(|udp| udp && !self.no_udp)
+    /// 按 `udp_fallback` 的算法，到对端的路上有没有 UDP。`seen` 是本节点看得见的（[`Endpoint::udp_path`]）：
+    /// 直连时整条路都是 UDP，不管 controller 怎么说对端；经 relay 时要本节点这一段有 UDP、并且对端不是用不了 UDP 的节点。
+    /// 没有路时是 `None`，不管对端怎样：没有路不算没有 UDP。
+    fn udp_path(self, seen: Option<UdpSeen>) -> Option<bool> {
+        seen.map(|seen| match seen {
+            UdpSeen::WholePath => true,
+            UdpSeen::OwnLeg => !self.no_udp,
+            UdpSeen::NoUdp => false,
+        })
     }
 }
 
@@ -188,8 +195,13 @@ impl NodeLanes {
             return false;
         }
         let on_demand = |id: &NodeId| plan.iter().find(|(peer, setting)| peer.id == *id && setting.mode == LaneMode::UdpFallback);
-        for (peer, setting) in wanted.difference(dialled).filter_map(&on_demand) {
-            let why = if setting.no_udp { "controller 说对端用不了 UDP" } else { "本节点这一段没有 UDP" };
+        for (peer, _) in wanted.difference(dialled).filter_map(&on_demand) {
+            // 本节点这一段有 UDP 还要拨，只能是因为对端。
+            let why = if self.endpoint.udp_path(peer.id) == Some(UdpSeen::OwnLeg) {
+                "经中继，controller 说对端用不了 UDP"
+            } else {
+                "本节点这一段没有 UDP"
+            };
             tracing::info!(peer = %peer.id, settle = ?self.timing.settle, why, "到这个节点的路上已经这么久没有 UDP，开始拨 ice3proxy");
         }
         for peer in dialled.difference(&wanted).filter(|id| on_demand(id).is_some()) {
@@ -259,10 +271,10 @@ impl NodeLanes {
 
     /// 按 `udp_fallback` 的算法，到 `peer` 的路上有没有 UDP（见 [`Setting::udp_path`]）。
     fn udp_path(&self, peer: NodeId) -> Option<bool> {
-        let own = self.endpoint.udp_path(peer);
+        let seen = self.endpoint.udp_path(peer);
         match self.setting(peer) {
-            Some(setting) => setting.udp_path(own),
-            None => own,
+            Some(setting) => setting.udp_path(seen),
+            None => seen.map(|seen| seen != UdpSeen::NoUdp),
         }
     }
 }
@@ -545,14 +557,15 @@ mod tests {
     }
 
     #[test]
-    fn a_peer_known_to_have_no_udp_makes_the_path_count_as_without_udp_unless_there_is_no_route() {
+    fn a_peer_known_to_have_no_udp_makes_a_relayed_path_count_as_without_udp_but_not_a_direct_one() {
         let plain = Setting { mode: LaneMode::UdpFallback, no_udp: false };
         let without = Setting { no_udp: true, ..plain };
-        assert_eq!([Some(true), Some(false), None].map(|own| plain.udp_path(own)), [Some(true), Some(false), None]);
+        let seen = [Some(UdpSeen::WholePath), Some(UdpSeen::OwnLeg), Some(UdpSeen::NoUdp), None];
+        assert_eq!(seen.map(|seen| plain.udp_path(seen)), [Some(true), Some(true), Some(false), None]);
         assert_eq!(
-            [Some(true), Some(false), None].map(|own| without.udp_path(own)),
-            [Some(false), Some(false), None],
-            "本节点这一段有 UDP 也不算：路上总有对端的那一段 TCP；没有路照旧不算没有 UDP"
+            seen.map(|seen| without.udp_path(seen)),
+            [Some(true), Some(false), Some(false), None],
+            "直连的整条路都是 UDP，照常走共用的连接；经中继时本节点这一段有 UDP 也不算：路上总有对端的那一段 TCP；没有路照旧不算没有 UDP"
         );
 
         // 它从 netmap 来：对端那一项的 no_udp。

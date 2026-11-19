@@ -362,7 +362,8 @@ pub struct Peer {
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "tolerant_congestion")]
     pub congestion: Option<Congestion>,
     /// 对端用不了 UDP：它连上的 relay 一个也不经 UDP（controller 认定的，见管理接口的 `Node.no_udp`）。
-    /// `udp_fallback` 下本节点到它的路即使自己这一段有 UDP，也按没有 UDP 的路算：那条路上总有一段是它的 TCP。
+    /// `udp_fallback` 下本节点经 relay 到它的路即使自己这一段有 UDP，也按没有 UDP 的路算：那条路上总有一段是它的 TCP。
+    /// 和它直连着时不看这一项：直连的整条路都是 UDP（这样的节点出去的 UDP 有时到得了个别对端）。
     /// 旧的 controller 不发，读成 `false`；旧的节点不认。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_udp: bool,
