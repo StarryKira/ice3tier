@@ -1,7 +1,7 @@
 {
   "name": "ice3tier-web",
   "private": true,
-  "version": "0.1.23",
+  "version": "0.1.24",
   "type": "module",
   "license": "MIT OR Apache-2.0",
   "engines": {

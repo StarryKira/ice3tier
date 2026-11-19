@@ -817,7 +817,7 @@ dependencies = [
 
 [[package]]
 name = "i3t"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "clap",
@@ -838,7 +838,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-access"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -858,7 +858,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-agent"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "gethostname",
@@ -891,7 +891,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-conn"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "bytes",
  "i3t-crypto",
@@ -912,7 +912,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-controller"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-controller-bin"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "clap",
@@ -958,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-crypto"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "base64 0.23.1",
  "i3t-proto",
@@ -970,7 +970,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-exit"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -993,7 +993,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-flow"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "bytes",
  "i3t-conn",
@@ -1009,7 +1009,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-intercept"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "ipnet",
  "libc",
@@ -1021,7 +1021,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-lane"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "bytes",
  "i3t-conn",
@@ -1045,7 +1045,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-lang"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "clap",
  "i3t-model",
@@ -1080,11 +1080,11 @@ dependencies = [
 
 [[package]]
 name = "i3t-metrics"
-version = "0.1.23"
+version = "0.1.24"
 
 [[package]]
 name = "i3t-model"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "base64 0.23.1",
  "i3t-proto",
@@ -1097,7 +1097,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-path"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "bytes",
  "i3t-crypto",
@@ -1132,7 +1132,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-proto"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -1143,7 +1143,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-relay"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "bytes",
  "i3t-crypto",
@@ -1163,7 +1163,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-release"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "clap",
@@ -1178,7 +1178,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-underlay"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "bytes",
  "i3t-proto",
@@ -1196,7 +1196,7 @@ dependencies = [
 
 [[package]]
 name = "i3t-update"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "i3t-crypto",
  "i3t-model",
@@ -1212,7 +1212,7 @@ dependencies = [
 
 [[package]]
 name = "i3tctl"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "clap",
