@@ -45,9 +45,10 @@ const CANDIDATE_VERIFY_BURST: f64 = 50.0;
 /// 发出去的 PING 等多久还没有回答就不再等。比一次打洞尝试长，晚到的 PONG 照样算数。
 const PENDING_TTL: Duration = Duration::from_secs(5);
 const MAX_PENDING: usize = 64;
-/// 丢包率按最近这么多次探测算。
-const LOSS_WINDOW: usize = 10;
-/// 窗口满了之后，丢的超过这么多个（20%）就判为不可用。
+/// 丢包率按最近这么多次保活探测算。原来是 10 次，丢 3 个就下结论：真实链路上量过，一条丢包 3%～5%、成串地丢的直连，
+/// 一小时里被判成"丢包超过 20%"19 回。
+const LOSS_WINDOW: usize = 30;
+/// 窗口里丢的超过这么多个（20%）就判为不可用。不等窗口填满：丢得多的路几十秒里就够数了。
 const MAX_LOSSES: usize = LOSS_WINDOW / 5;
 /// 同一个地址上，对端的 PING 引出的反向验证最多这么频繁。重放一个旧的 PING 没法让本端发得更多。
 const REVERSE_PROBE_INTERVAL: Duration = Duration::from_secs(1);
@@ -212,7 +213,7 @@ impl Active {
     }
 
     fn too_lossy(&self) -> bool {
-        self.history.len() == LOSS_WINDOW && self.history.iter().filter(|&&lost| lost).count() > MAX_LOSSES
+        self.history.iter().filter(|&&lost| lost).count() > MAX_LOSSES
     }
 }
 
@@ -226,6 +227,9 @@ enum Punch {
     Backoff { round: usize, until: Instant },
     /// 一整轮都失败了。之后候选地址有变化就立刻重来，否则到 `retry_at` 再试一次。
     Exhausted { retry_at: Instant },
+    /// 在用的地址 `addr` 丢包太多，被判为不可用。它多半一直答得上来，所以到 `until` 之前它再有回答也不用它，
+    /// 之后才再试一次；候选地址有变化照样立刻重来，别的地址这期间验证通过了照样用。
+    Shunned { addr: SocketAddr, until: Instant },
 }
 
 /// 到一个对端的直连状态。
@@ -300,8 +304,8 @@ impl DirectPath {
         let state = match (self.kind(), self.punch, self.failure) {
             (Some(_), _, _) => DirectState::Verified,
             (None, Punch::Attempt { .. }, _) => DirectState::Trying,
-            (None, Punch::Idle | Punch::Backoff { .. } | Punch::Exhausted { .. }, Some(_)) => DirectState::Failed,
-            (None, Punch::Idle | Punch::Backoff { .. } | Punch::Exhausted { .. }, None) => DirectState::NotTried,
+            (None, Punch::Idle | Punch::Backoff { .. } | Punch::Exhausted { .. } | Punch::Shunned { .. }, Some(_)) => DirectState::Failed,
+            (None, Punch::Idle | Punch::Backoff { .. } | Punch::Exhausted { .. } | Punch::Shunned { .. }, None) => DirectState::NotTried,
         };
         let attempted_ms = self.attempted.map(|at| u64::try_from(now.saturating_duration_since(at).as_millis()).unwrap_or(u64::MAX));
         let failure = if state == DirectState::Verified { None } else { self.failure };
@@ -435,7 +439,10 @@ impl DirectPath {
         }
         // 信令引出的探测最多每 `PUNCH_ATTEMPT` 一轮：对端发多少信令，本节点也只按一次尝试的节奏发。
         let volley_due = self.signal_volley.is_none_or(|at| now.saturating_duration_since(at) >= PUNCH_ATTEMPT);
-        if self.active.is_none() && volley_due {
+        // 丢包太多、正搁着不用的那一阵里不跟着对端的信令去试：那个地址试通了也不用。对端换了地址的话，
+        // 它的探测会从新地址来，照样引出反向验证（见 `on_ping`）。
+        let shunning = matches!(self.punch, Punch::Shunned { until, .. } if now < until);
+        if self.active.is_none() && volley_due && !shunning {
             // 对端此刻正在向本端发探测。本端也立刻发，并把这一次尝试的节奏对齐到现在，后面两轮跟着来。
             let round = match self.punch {
                 Punch::Idle => 0,
@@ -443,7 +450,7 @@ impl DirectPath {
                 // 上一次已经失败了（或者正好到了判为失败的时候），这是下一次：退避照常推进，
                 // 信令不会让本节点一直停在同一档上。
                 Punch::Attempt { round, .. } | Punch::Backoff { round, .. } => round + 1,
-                Punch::Exhausted { .. } => PUNCH_BACKOFF.len(),
+                Punch::Exhausted { .. } | Punch::Shunned { .. } => PUNCH_BACKOFF.len(),
             };
             self.signal_volley = Some(now);
             self.punch = Punch::Attempt { round, started: now, volleys: 1 };
@@ -465,6 +472,10 @@ impl DirectPath {
             }
         }
         if self.active.as_ref().is_some_and(|active| active.addr == from) {
+            return None;
+        }
+        // 这个地址正因为丢包搁着不用：验证通过了也不会用，不白发。它发来的包照样认（上面记了 `pinged`）。
+        if self.is_shunned(from, now) {
             return None;
         }
         let recently = |pending: &Pending| pending.addr == from && now.saturating_duration_since(pending.sent) < REVERSE_PROBE_INTERVAL;
@@ -495,6 +506,7 @@ impl DirectPath {
         let answered = self.pending.remove(index)?;
         let sample = now.saturating_duration_since(answered.sent);
         self.prove(from, now);
+        let shunned = self.is_shunned(from, now);
         match &mut self.active {
             Some(active) if active.addr == from => {
                 active.rtt.update(sample);
@@ -508,6 +520,8 @@ impl DirectPath {
             }
             // 局域网直连无条件优先（白皮书 §7.1）：已经在用公网地址时，局域网地址验证通过就换过去。别的情况先到先得。
             Some(active) if !ifaddr::is_private(from.ip()) || ifaddr::is_private(active.addr.ip()) => None,
+            // 丢包太多刚搁下的地址：搁下之前发出去的探测这时才答回来，不算数。
+            None if shunned => None,
             Some(_) | None => {
                 let unsolicited = self.candidates.iter().any(|candidate| {
                     candidate.addr == from && candidate.unsolicited.is_some_and(|at| now.saturating_duration_since(at) < PENDING_TTL)
@@ -561,11 +575,14 @@ impl DirectPath {
                     None
                 };
                 if let Some(reason) = verdict {
+                    let addr = active.addr;
                     self.active = None;
                     self.failure = Some(reason.failure());
-                    // 路是断了的话马上从头重试；只是丢包多的话它多半还能验证通过，立刻重试只会来回切，所以隔一阵再说。
+                    // 路是断了的话马上从头重试；只是丢包多的话它多半还能验证通过，立刻重试只会来回切，所以搁一阵再说。
+                    // 搁着的时候它有回答也不用：对端的直连多半还在，它每 5 秒一个保活 PING 引出本端的反向验证，
+                    // 真实链路上就是这样把刚判掉的直连两三秒之后又拉了回来。
                     self.punch = match reason {
-                        DownReason::Loss => Punch::Exhausted { retry_at: now + PUNCH_IDLE_RETRY },
+                        DownReason::Loss => Punch::Shunned { addr, until: now + PUNCH_IDLE_RETRY },
                         DownReason::Timeouts | DownReason::Stale => Punch::Idle,
                     };
                     step.change = Some(Change::Down { reason });
@@ -592,7 +609,8 @@ impl DirectPath {
             Punch::Idle => Punch::Attempt { round: 0, started: now, volleys: 0 },
             Punch::Backoff { round, until } if now >= until => Punch::Attempt { round: round + 1, started: now, volleys: 0 },
             Punch::Exhausted { retry_at } if now >= retry_at => Punch::Attempt { round: PUNCH_BACKOFF.len(), started: now, volleys: 0 },
-            waiting @ (Punch::Attempt { .. } | Punch::Backoff { .. } | Punch::Exhausted { .. }) => waiting,
+            Punch::Shunned { until, .. } if now >= until => Punch::Attempt { round: PUNCH_BACKOFF.len(), started: now, volleys: 0 },
+            waiting @ (Punch::Attempt { .. } | Punch::Backoff { .. } | Punch::Exhausted { .. } | Punch::Shunned { .. }) => waiting,
         };
         let Punch::Attempt { round, started, volleys } = self.punch else { return };
         if started == now && volleys == 0 {
@@ -687,6 +705,11 @@ impl DirectPath {
 
     fn candidate_mut(&mut self, addr: SocketAddr) -> Option<&mut Candidate> {
         self.candidates.iter_mut().find(|candidate| candidate.addr == addr)
+    }
+
+    /// `addr` 是不是因为丢包太多正搁着不用（见 [`Punch::Shunned`]）。
+    fn is_shunned(&self, addr: SocketAddr, now: Instant) -> bool {
+        matches!(self.punch, Punch::Shunned { addr: shunned, until } if shunned == addr && now < until)
     }
 
     /// 任何一方的候选端点变了：之前的失败记录清掉，立刻重新尝试（白皮书 §5.3）。
@@ -948,15 +971,13 @@ mod tests {
         assert_eq!(path.active().map(|(addr, _)| addr), Some(peer));
     }
 
-    #[test]
-    fn losing_more_than_a_fifth_of_recent_probes_takes_the_path_down_and_waits_before_retrying() {
-        let peer = addr("203.0.113.7:20330");
+    /// 一条因为丢包太多刚被判掉的直连：每三个探测丢一个，从不连续超时三次，但丢包率是三分之一。
+    /// 返回它、判掉的时刻，和判掉之前最后发出去、没有等到回答的那个探测的随机数。
+    fn taken_down_for_loss(peer: SocketAddr) -> (DirectPath, Instant, Nonce) {
         let (mut path, up) = established(peer);
         let policy = policy(&[]);
         let mut now = up;
-        let mut down = None;
-        // 每三个探测丢一个：从不连续超时三次，但丢包率是三分之一。
-        for round in 0..30 {
+        for round in 0..60 {
             now += PROBE_INTERVAL;
             let step = path.poll(now, &policy);
             let (_, nonce) = pings(&step.actions)[0];
@@ -967,16 +988,97 @@ mod tests {
             now += path.active().unwrap().1.probe_timeout();
             let step = path.poll(now, &policy);
             if let Some(change) = step.change {
-                down = Some(change);
+                assert_eq!(change, Change::Down { reason: DownReason::Loss });
                 assert!(step.actions.is_empty(), "丢包多的路不立刻重试，免得来回切");
-                break;
+                return (path, now, nonce);
             }
             let (_, nonce) = pings(&step.actions)[0];
             path.on_pong(peer, &nonce, now + 5 * MS);
         }
-        assert_eq!(down, Some(Change::Down { reason: DownReason::Loss }));
-        assert!(path.poll(now + Duration::from_secs(59), &policy).actions.is_empty());
-        assert!(!path.poll(now + PUNCH_IDLE_RETRY, &policy).actions.is_empty());
+        panic!("三分之一的丢包率早该判掉了");
+    }
+
+    #[test]
+    fn losing_more_than_a_fifth_of_recent_probes_takes_the_path_down_and_waits_before_retrying() {
+        let peer = addr("203.0.113.7:20330");
+        let (mut path, down, _) = taken_down_for_loss(peer);
+        let policy = policy(&[]);
+        assert_eq!(path.active(), None);
+        assert!(path.poll(down + Duration::from_secs(59), &policy).actions.is_empty());
+        assert!(!path.poll(down + PUNCH_IDLE_RETRY, &policy).actions.is_empty());
+    }
+
+    #[test]
+    fn a_few_losses_close_together_do_not_take_a_low_loss_path_down() {
+        let peer = addr("203.0.113.7:20330");
+        let (mut path, up) = established(peer);
+        let policy = policy(&[]);
+        let mut now = up;
+        // 四十个保活里丢三个，三个挨得很近，其余都有回答。按最近 10 个探测算的时候，这样就判掉了。
+        for round in 0..40 {
+            now += PROBE_INTERVAL;
+            let step = path.poll(now, &policy);
+            let (_, mut nonce) = pings(&step.actions)[0];
+            if matches!(round, 10 | 12 | 14) {
+                now += path.active().unwrap().1.probe_timeout();
+                let step = path.poll(now, &policy);
+                assert_eq!(step.change, None);
+                nonce = pings(&step.actions)[0].1;
+            }
+            path.on_pong(peer, &nonce, now + 5 * MS);
+        }
+        assert_eq!(path.active().map(|(addr, _)| addr), Some(peer));
+    }
+
+    #[test]
+    fn a_path_taken_down_for_loss_is_not_brought_back_by_answers_until_the_wait_is_over() {
+        let peer = addr("203.0.113.7:20330");
+        let (mut path, down, unanswered) = taken_down_for_loss(peer);
+        let policy = policy(&[]);
+
+        // 判掉之前发的探测这时才答回来。
+        assert_eq!(path.on_pong(peer, &unanswered, down + 10 * MS), None);
+        // 对端的直连还在，它的保活 PING 照常来：不引出反向验证，它发来的包照样认。
+        let later = down + Duration::from_secs(1);
+        assert_eq!(path.on_ping(peer, later), None);
+        assert_eq!(path.sources(later).collect::<Vec<_>>(), [peer]);
+        // 对端请本端一起打洞：回答它，但不跟着去试。
+        let actions = path.on_signal(&Signal::PunchRequest { endpoints: vec![peer] }, later, &policy);
+        assert!(matches!(signals(&actions)[..], [Signal::PunchReply { .. }]), "{actions:?}");
+        assert!(pings(&actions).is_empty(), "{actions:?}");
+        assert_eq!(path.active(), None);
+        assert_eq!(path.status(later).failure, Some(DirectFailureCause::Loss));
+
+        // 等够了再试一次，这一次的回答算数。
+        let retry = down + PUNCH_IDLE_RETRY;
+        let step = path.poll(retry, &policy);
+        let (to, nonce) = pings(&step.actions)[0];
+        assert_eq!(path.on_pong(to, &nonce, retry + 20 * MS), Some(Change::Up { addr: peer }));
+    }
+
+    #[test]
+    fn another_address_of_the_peer_can_still_come_up_while_the_lossy_one_waits() {
+        let peer = addr("203.0.113.7:20330");
+        let moved = addr("203.0.113.7:40000");
+        let (mut path, down, _) = taken_down_for_loss(peer);
+        let at = down + Duration::from_secs(3);
+        let Some(Action::Ping { to, nonce }) = path.on_ping(moved, at) else {
+            panic!("对端从新地址来的探测应该引出反向验证")
+        };
+        assert_eq!(to, moved);
+        assert_eq!(path.on_pong(moved, &nonce, at + 20 * MS), Some(Change::Up { addr: moved }));
+    }
+
+    #[test]
+    fn a_new_candidate_ends_the_wait_after_loss_at_once() {
+        let peer = addr("203.0.113.7:20330");
+        let (mut path, down, _) = taken_down_for_loss(peer);
+        let policy = policy(&[]);
+        let at = down + Duration::from_secs(3);
+        assert!(path.set_reported(&[peer, addr("203.0.113.8:20330")], at));
+        let step = path.poll(at, &policy);
+        let (_, nonce) = pings(&step.actions).into_iter().find(|(to, _)| *to == peer).expect("两个候选都该探测");
+        assert_eq!(path.on_pong(peer, &nonce, at + 20 * MS), Some(Change::Up { addr: peer }), "候选变了就从头来，原来那个地址也算数");
     }
 
     #[test]
@@ -1060,7 +1162,7 @@ mod tests {
         let advanced = match path.punch {
             Punch::Attempt { round, .. } | Punch::Backoff { round, .. } => round >= 2,
             Punch::Exhausted { .. } => true,
-            Punch::Idle => false,
+            Punch::Idle | Punch::Shunned { .. } => false,
         };
         assert!(advanced, "退避在往前走：{:?}", path.punch);
     }
