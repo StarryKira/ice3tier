@@ -102,6 +102,7 @@ export const tests: Messages['tests'] = {
   matrixHint: 'Direct and latency for every pair, up to 4 at a time, no throughput',
   matrixEmpty: 'No whole-network test yet',
   matrixProgress: (done, total) => `${done} / ${total} pairs`,
+  matrixScope: (nodes, pairs) => `${nodes} nodes, ${pairs} pairs`,
   matrixStarted: 'Whole-network test started',
   matrixCancelled: 'Whole-network test stopped',
   matrixState: { running: 'Running', done: 'Done', cancelled: 'Stopped' },

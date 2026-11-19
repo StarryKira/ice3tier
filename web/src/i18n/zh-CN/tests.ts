@@ -102,6 +102,7 @@ export const tests = {
   matrixHint: '对每一对节点测直连和延迟，同时最多 4 对，不测吞吐',
   matrixEmpty: '还没有跑过全网测试',
   matrixProgress: (done: number, total: number) => `${done} / ${total} 对`,
+  matrixScope: (nodes: number, pairs: number) => `${nodes} 个节点，${pairs} 对`,
   matrixStarted: '已开始全网测试',
   matrixCancelled: '全网测试已停止',
   matrixState: { running: '进行中', done: '完成', cancelled: '已停止' },
