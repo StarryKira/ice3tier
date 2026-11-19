@@ -3,10 +3,10 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use i3t_model::admin::{NetworkId, PathSource, RelaySettings, UpdateNode};
+use i3t_model::admin::{MatrixLanes, NetworkId, PathSource, RelaySettings, UpdateNode};
 use i3t_model::control::{
-    BackboneLink, BackboneRow, Declared, DirectKind, Hello, LegTransport, PathCandidate, PathDetail, PathSegment, RelayState, Report,
-    Route, RouteAnswer, RouteCause, RouteEntry, RouteKind, RouteSince, ToController,
+    BackboneLink, BackboneRow, Declared, DirectKind, Hello, LaneCounts, LaneReport, LegTransport, PathCandidate, PathDetail, PathSegment,
+    PeerLanes, RelayState, Report, Route, RouteAnswer, RouteCause, RouteEntry, RouteKind, RouteSince, ToController,
 };
 use i3t_model::netmap::RoutingMode;
 use i3t_model::update::UpdateStatus;
@@ -224,6 +224,43 @@ fn kind(peer: NodeId, direct: Option<DirectKind>, relay_leg: Option<LegTransport
 fn report_with_kinds(member: &Member, controller: &Controller, routes: Vec<RouteEntry>, kinds: Vec<RouteKind>, full: bool) {
     let report = Report { routes, route_kinds: kinds, routes_full: full, update: Some(UpdateStatus::Idle), ..Report::default() };
     member.send(controller, ToController::Report(Box::new(report)));
+}
+
+#[test]
+fn matrix_cells_carry_the_senders_lanes_to_that_peer_while_it_is_online() {
+    let (lab, network, a, b, old) = three_nodes();
+    let to_b = PeerLanes {
+        peer: b.id,
+        dials: true,
+        control: true,
+        idle: 3,
+        ready: 2,
+        parked_at_peer: 1,
+        udp_path: Some(false),
+        counts: LaneCounts { in_use: 4, ..LaneCounts::default() },
+    };
+    let lanes = Some(Box::new(LaneReport { peers: vec![to_b], ..LaneReport::default() }));
+    let routes = vec![direct(b.id, 12), direct(old.id, 9)];
+    let from_a = Report { routes, routes_full: true, update: Some(UpdateStatus::Idle), lanes, ..Report::default() };
+    a.send(&lab.controller, ToController::Report(Box::new(from_a)));
+    report(&b, &lab.controller, vec![direct(a.id, 13)], true);
+
+    let lanes_of = |controller: &Controller| -> Vec<_> {
+        controller.route_matrix(network).unwrap().entries.iter().map(|entry| (entry.from, entry.to, entry.lanes)).collect()
+    };
+    let seen_by_a = MatrixLanes { control: true, in_use: 4, idle: 6 };
+    assert_eq!(
+        lanes_of(&lab.controller),
+        [(a.id, b.id, Some(seen_by_a)), (a.id, old.id, None), (b.id, a.id, None)],
+        "只有发送方为这个对端报了的格子带着，空闲的三种加在一起"
+    );
+
+    lab.controller.disconnect(a.session);
+    assert_eq!(
+        lanes_of(&lab.controller),
+        [(a.id, b.id, None), (a.id, old.id, None), (b.id, a.id, None)],
+        "离线之后格子留着（标成过期），连接数不留"
+    );
 }
 
 #[test]

@@ -4,7 +4,14 @@
 
 对应的 Rust 类型在 `crates/i3t-model/src/admin.rs`，实现在 `crates/i3t-controller/src/admin.rs`。文档和代码不一致时以代码为准，并请修正文档。
 
-> **最新一次改动**（没有设置的节点对默认用 ice3proxy：没有 UDP 的路时用）。这一次的清单：
+> **最新一次改动**（路由矩阵的格子里带上 ice3proxy 的连接数）。这一次的清单：
+>
+> - 新的字段：`MatrixEntry.lanes`（第 15 节），`from` 这一头看到的它和 `to` 之间的 ice3proxy：控制连接在不在、在用的和空闲的连接各多少。
+>   画拓扑时不用再逐个取节点详情。新的结构 `MatrixLanes`。应答里总是有；`from` 没有为这个对端报、或者它不在线时是 `null`。
+>
+> 别的都没有变。
+>
+> **上一次改动**（没有设置的节点对默认用 ice3proxy：没有 UDP 的路时用）。这一次的清单：
 >
 > - 行为上的变化：没有存下设置的节点对，ice3proxy 是 `"udp_fallback"`，以前是 `"off"`（第 12 节）。`udp_fallback` 本身也改了：拨号的一方
 >   只在它这一段没有 UDP 的路时才拨（连续 40 秒没有才开始，UDP 回来满 10 分钟才放手），两边都有 UDP 的一对什么都不连；
@@ -24,7 +31,7 @@
 >
 > 别的接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **上一次改动**（代理取代监听器和接入凭据）。代理是一样单独的东西："在节点 A 上监听，经出口节点 B（另一个启用了出口的节点）出去，
+> **再上一次改动**（代理取代监听器和接入凭据）。代理是一样单独的东西："在节点 A 上监听，经出口节点 B（另一个启用了出口的节点）出去，
 > 认一对用户名和密码"（第 10 节）。旧的写法不再收，也没有别名。这一次的清单：
 >
 > - 新接口：`GET`、`POST /networks/{network}/proxies`，`GET`、`PATCH`、`DELETE /networks/{network}/proxies/{id}`（第 10 节）。
@@ -52,7 +59,7 @@
 >
 > 别的接口的路径、请求体和应答里原有的字段都没有变。
 >
-> **再上一次改动**（一串中继；relay 之间的骨干可以走 TCP；对端不多的节点不等流量就试直连）。这一次的清单：
+> **更早的改动**（一串中继；relay 之间的骨干可以走 TCP；对端不多的节点不等流量就试直连）。这一次的清单：
 >
 > - 新的取值：`RouteCause` 多了 `no_shared_relay`（字段 `hint`，可以是 `null`）：默认模式下没有一个 relay 两端都用得上，这一对经一串 relay
 >   （第 15 节）。主动测试的路由决定 `Choice.reason` 多了 `no_shared_relay`（第 19 节）。`RouteHint` 的 `shortcut` 也说"原来经一串 relay、现在一个就够了"。
@@ -2255,11 +2262,11 @@ ice3proxy 要两个节点里至少有一个启用了 relay、有已知的 TCP �
   ],
   "entries": [
     { "from": 1, "to": 2, "route": { "via": "direct", "addr": "198.51.100.7:20330" }, "rtt_ms": 12, "age_secs": 4, "stale": false,
-      "direct": "lan", "relay_leg": null },
+      "direct": "lan", "relay_leg": null, "lanes": { "control": true, "in_use": 2, "idle": 4 } },
     { "from": 2, "to": 1, "route": { "via": "direct", "addr": "203.0.113.7:20330" }, "rtt_ms": 13, "age_secs": 7, "stale": false,
-      "direct": "lan", "relay_leg": null },
+      "direct": "lan", "relay_leg": null, "lanes": { "control": true, "in_use": 2, "idle": 4 } },
     { "from": 3, "to": 1, "route": { "via": "relay", "relays": [1] }, "rtt_ms": 40, "age_secs": 5210, "stale": true,
-      "direct": null, "relay_leg": null }
+      "direct": null, "relay_leg": null, "lanes": null }
   ]
 }
 ```
@@ -2272,6 +2279,7 @@ ice3proxy 要两个节点里至少有一个启用了 relay、有已知的 TCP �
 | `entries[].age_secs` | 这一格是多少秒之前的：`from` 最近一次上报到现在过了多久。节点每 10 秒上报一次（路由表没有变化时不重复报内容，但上报本身就说明"没有变"），在线的节点一般不超过 10 |
 | `entries[].stale` | `true` 表示这一格不是 `from` 现在这次连接报的：它不在线（这是它离线之前最后报的），或者刚重新连上还没有上报。界面应当把它标成过期 |
 | `entries[].direct`、`relay_leg` | 「新增」直连的类型、到第一个 relay 的那一段的传输，和节点路由表里的同名字段一样（第 5 节）；不知道时是 `null` |
+| `entries[].lanes` | 「新增」`from` 和 `to` 之间的 ice3proxy，取自 `from` 最近的上报（`PeerLanes`，第 12 节）：`control` 是两者之间的控制连接在不在（不在时新的 TCP 流走共用的连接），`in_use` 是正在承载流的连接数，`idle` 是 `from` 看得到的空闲连接数（对端停在它这里的、它自己留着的、它停在对端那里的，三样加在一起）。`from` 没有为这个对端报（这一对现在不用 ice3proxy，或者 `from` 的版本太旧）、`from` 不在线（过期的格子）时是 `null`。两个方向各有一格，说的是同一批连接在两头各自看到的样子，数不一定相等，不要加在一起 |
 
 矩阵的着色可以直接按 `route.via` 来：`direct` 直连、`relay` 且 `relays` 只有一个是一级中转、多于一个是多级中转、`none` 不可达。controller 重启之后矩阵是空的，节点重新连上来上报了才有。
 

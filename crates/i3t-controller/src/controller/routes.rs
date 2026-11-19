@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use i3t_model::admin::{
-    BackboneRelay, BackboneView, DirectStatusView, MatrixEntry, MatrixNode, NetworkId, NodeRoute, PathLeg, PathSource, PathView,
-    RouteMatrix, RouteTable, Timestamp,
+    BackboneRelay, BackboneView, DirectStatusView, MatrixEntry, MatrixLanes, MatrixNode, NetworkId, NodeRoute, PathLeg, PathSource,
+    PathView, RouteMatrix, RouteTable, Timestamp,
 };
 use i3t_model::control::{BackboneRow, ExitTestResult, PathDetail, Route, RouteAnswer, RouteEntry, RouteKind, ToNode};
 use i3t_proto::NodeId;
@@ -160,9 +160,12 @@ impl Controller {
         let entries = nodes.iter().filter_map(|node| Some((node.id, inner.routes.get(&node.id)?))).flat_map(|(from, reported)| {
             let age_secs = now.saturating_duration_since(reported.at).as_secs();
             let stale = inner.current_routes(from).is_none();
+            // 离线的节点没有 `live`：过期的格子里不带 lane。
+            let lanes = inner.live.get(&from).and_then(|live| live.lanes.as_ref());
             let listed = reported.entries.values().filter(|entry| members.contains(&entry.peer));
             listed.map(move |entry| {
                 let kind = reported.kinds.get(&entry.peer);
+                let lanes = lanes.and_then(|report| report.peers.iter().find(|peer| peer.peer == entry.peer));
                 MatrixEntry {
                     from,
                     to: entry.peer,
@@ -172,6 +175,7 @@ impl Controller {
                     stale,
                     direct: kind.and_then(|kind| kind.kind.direct),
                     relay_leg: kind.and_then(|kind| kind.kind.relay_leg),
+                    lanes: lanes.map(MatrixLanes::from),
                 }
             })
         });

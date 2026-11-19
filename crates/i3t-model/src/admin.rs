@@ -885,6 +885,29 @@ pub struct MatrixEntry {
     /// 同 [`NodeRoute::relay_leg`]。
     #[serde(default)]
     pub relay_leg: Option<LegTransport>,
+    /// `from` 和 `to` 之间的 ice3proxy，取自 `from` 最近的上报。`from` 没有为这个对端报（这一对现在不用 ice3proxy，
+    /// 或者 `from` 的版本太旧）、`from` 不在线时是 `None`。
+    #[serde(default)]
+    pub lanes: Option<MatrixLanes>,
+}
+
+/// 路由矩阵的一格里的 ice3proxy：`from` 这一头看到的它和 `to` 之间的那些 TCP 连接。
+///
+/// 两个方向各有一格，说的是同一批连接在两头各自看到的样子，数不一定相等，不能加在一起。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatrixLanes {
+    /// 和 `to` 之间的控制连接在不在。不在时新的 TCP 流走共用的连接。
+    pub control: bool,
+    /// 正在承载流的连接。
+    pub in_use: u64,
+    /// `from` 看得到的空闲连接：对端停在它这里的、它自己留着的、它停在对端那里的。
+    pub idle: u64,
+}
+
+impl From<&PeerLanes> for MatrixLanes {
+    fn from(lanes: &PeerLanes) -> Self {
+        Self { control: lanes.control, in_use: lanes.counts.in_use, idle: lanes.idle + lanes.ready + lanes.parked_at_peer }
+    }
 }
 
 /// 两个节点之间两个方向的当前路径。
