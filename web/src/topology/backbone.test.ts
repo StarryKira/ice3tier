@@ -64,16 +64,22 @@ describe('骨干矩阵一行的表头', () => {
 })
 
 describe('两个 relay 之间的一格', () => {
-  it('连得上：格子里是延迟，悬停有抖动和丢包', () => {
-    expect(linkView(relay(), 5)).toEqual({ short: '150', tone: 'ok', text: b.cell(150, 2, '0.5%') })
+  it('连得上：大字是延迟，第二行抖动和丢包', () => {
+    expect(linkView(relay(), 5)).toEqual({
+      rtt: 150,
+      detail: b.detail(2, '0.5%'),
+      lossy: false,
+      tone: 'ok',
+      text: b.cell(150, 2, '0.5%'),
+    })
   })
 
-  it('连不上：红色的 ✕', () => {
-    expect(linkView(relay(), 7)).toMatchObject({ tone: 'danger', text: b.unreachable })
+  it('连不上：红色的 ✕，第二行写不可达', () => {
+    expect(linkView(relay(), 7)).toMatchObject({ rtt: null, detail: b.unreachable, tone: 'danger' })
   })
 
   it('丢包到了百分之一：琥珀色', () => {
-    expect(linkView(relay(), 8)?.tone).toBe('warn')
+    expect(linkView(relay(), 8)).toMatchObject({ tone: 'warn', lossy: true })
   })
 
   it('这一行里没有到它的链路：没有数据', () => {

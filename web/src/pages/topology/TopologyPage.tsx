@@ -159,7 +159,7 @@ export function TopologyPage() {
 
       {view === 'backbone' ? (
         // 骨干是另一份数据（relay 之间测的），和选中的那一对节点无关，也不看路由矩阵。
-        <BackboneView network={network} name={name} />
+        <BackboneView network={network} name={name} looks={looks} />
       ) : view === 'tests' ? (
         <TestMatrixView
           network={network}

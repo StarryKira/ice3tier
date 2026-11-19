@@ -168,6 +168,7 @@ export const topology: Messages['topology'] = {
     unreachable: 'Unreachable',
     noLink: 'No data',
     cell: (rtt, jitter, loss) => `${rtt} ms, jitter ${jitter} ms, loss ${loss}`,
+    detail: (jitter, loss) => `jitter ${jitter} ms · loss ${loss}`,
   },
 }
 

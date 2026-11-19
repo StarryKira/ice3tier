@@ -840,8 +840,8 @@ test('拓扑的骨干', async () => {
   await page.setViewportSize({ width: 1280, height: 800 })
   await page.getByRole('button', { name: t.nav.expand }).click()
   await page.goto(`${controller.baseUrl}/n/1/topology?view=backbone`)
-  // 骨干每次现问 relay（最多 3 秒左右），等表格出来再截。
-  await expect(page.getByTestId('backbone').locator('table')).toBeVisible({ timeout: 15_000 })
+  // 骨干每次现问 relay（最多 3 秒左右），等结果出来再截。这里只有 gw-hk 一个 relay：没有矩阵，只有它的状态。
+  await expect(page.getByTestId('backbone').getByText(t.topology.backbone.oneRelay)).toBeVisible({ timeout: 15_000 })
   await shot('topology-backbone')
 })
 

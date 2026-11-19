@@ -42,8 +42,12 @@ export function relayRowView(relay: BackboneRelay, name: (id: NodeId) => string)
 }
 
 export interface LinkView {
-  /** 格子里写的：延迟的毫秒数，或者"✕"。 */
-  short: string
+  /** 格子里的大字：延迟的毫秒数；连不上时是 `null`（写"✕"）。 */
+  rtt: number | null
+  /** 格子第二行：抖动和丢包；连不上时是"不可达"。 */
+  detail: string
+  /** 丢包到了百分之一：第二行用琥珀色。 */
+  lossy: boolean
   tone: Tone
   /** 悬停和读屏的完整说法。 */
   text: string
@@ -53,11 +57,17 @@ export interface LinkView {
 export function linkView(relay: BackboneRelay, to: NodeId): LinkView | null {
   const link = relay.links.find((candidate) => candidate.to === to)
   if (link === undefined) return null
-  if (link.rtt_ms === null) return { short: t.routes.symbolNone, tone: 'danger', text: b.unreachable }
+  if (link.rtt_ms === null) {
+    return { rtt: null, detail: b.unreachable, lossy: false, tone: 'danger', text: b.unreachable }
+  }
+  // 丢包到了百分之一就值得看一眼。
+  const lossy = link.loss_permille >= 10
+  const loss = formatPermille(link.loss_permille)
   return {
-    short: String(link.rtt_ms),
-    // 丢包到了百分之一就值得看一眼。
-    tone: link.loss_permille >= 10 ? 'warn' : 'ok',
-    text: b.cell(link.rtt_ms, link.jitter_ms, formatPermille(link.loss_permille)),
+    rtt: link.rtt_ms,
+    detail: b.detail(link.jitter_ms, loss),
+    lossy,
+    tone: lossy ? 'warn' : 'ok',
+    text: b.cell(link.rtt_ms, link.jitter_ms, loss),
   }
 }

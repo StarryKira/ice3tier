@@ -180,6 +180,7 @@ export const topology = {
     unreachable: '不可达',
     noLink: '没有数据',
     cell: (rtt: number, jitter: number, loss: string) => `${rtt} ms，抖动 ${jitter} ms，丢包 ${loss}`,
+    detail: (jitter: number, loss: string) => `抖动 ${jitter} ms · 丢包 ${loss}`,
   },
 }
 

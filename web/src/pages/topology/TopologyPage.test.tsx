@@ -158,6 +158,15 @@ describe('骨干：relay 之间的延迟', () => {
     expect(api.callsTo('GET /networks/1/backbone')).toHaveLength(2)
   })
 
+  it('只有一个 relay：没有矩阵，只写它自己的状态', async () => {
+    const first = BACKBONE.relays[0]
+    setup({ 'GET /networks/1/backbone': { ...BACKBONE, relays: first === undefined ? [] : [first] } })
+    renderWithApp(<TopologyPage />, { network: NETWORK, route: '/n/1/topology?view=backbone' })
+    expect(await screen.findByText(g.backbone.oneRelay)).toBeVisible()
+    expect(screen.getByTestId('backbone-row-1')).toHaveTextContent(g.backbone.load(97))
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+  })
+
   it('没有 relay：照实说', async () => {
     setup({ 'GET /networks/1/backbone': { relays: [], answered: [] } })
     renderWithApp(<TopologyPage />, { network: NETWORK, route: '/n/1/topology?view=backbone' })
