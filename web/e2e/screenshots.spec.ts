@@ -168,10 +168,7 @@ test('空的网络：每个页面没有数据时的样子', async () => {
     await expect(page.getByText(marker).first()).toBeVisible()
     await shot(file)
   }
-  for (const [name, file, marker] of [
-    [t.nav.tokens, 'tokens-empty', t.tokens.emptyTitle],
-    [t.nav.pairs, 'pairs-empty', t.pairs.emptyTitle],
-  ] as const) {
+  for (const [name, file, marker] of [[t.nav.pairs, 'pairs-empty', t.pairs.emptyTitle]] as const) {
     await goToAdmin(page, name)
     await expect(page.getByText(marker).first()).toBeVisible()
     await shot(file)
@@ -358,8 +355,6 @@ test('准备数据', async () => {
   })
 
   await controller.api('PUT', `${net}/pairs/2/3`, { keep_alive: true })
-  await controller.api('POST', `${net}/tokens`, { groups: [group('servers')], expires_in_secs: 3600 })
-  await controller.api('POST', `${net}/tokens`, { virtual_ip: '10.66.0.50', expires_in_secs: 7 * 86400 })
   await controller.api('POST', '/networks', { name: 'lab' })
 
   // 让跑着的三个节点互相连一下，路由表里才有东西；节点每 10 秒上报一次。
@@ -698,13 +693,6 @@ test('有数据时：接入', async () => {
 })
 
 test('有数据时：管理区和设置', async () => {
-  await goToAdmin(page, t.nav.tokens)
-  await expect(page.getByTestId('token-row-7')).toBeVisible()
-  await shot('tokens')
-  await page.getByRole('radio', { name: t.tokens.showAll }).click()
-  await expect(page.getByTestId('token-row-1')).toBeVisible()
-  await shot('tokens-history')
-
   await goToAdmin(page, t.nav.pairs)
   await expect(page.getByTestId('pair-row-nas-home-laptop')).toBeVisible()
   await shot('pairs')

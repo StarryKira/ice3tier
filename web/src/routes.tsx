@@ -23,7 +23,6 @@ import { NotFoundPage } from '@/pages/NotFoundPage'
 import { OverviewPage } from '@/pages/overview/OverviewPage'
 import { PairsPage } from '@/pages/pairs/PairsPage'
 import { ProxiesPage } from '@/pages/proxies/ProxiesPage'
-import { TokensPage } from '@/pages/tokens/TokensPage'
 
 // 访问控制页和拓扑页带着画图的库，单独成块：别的页面用不到它。
 const AccessPage = lazy(() => import('@/pages/access/AccessPage').then((module) => ({ default: module.AccessPage })))
@@ -88,7 +87,8 @@ export function AppRoutes() {
             <Route path="diagnosis" element={<Lazy page={PathPage} />} />
             {/* 连通性测试页并进了路径诊断。旧链接带着选的节点和测试过去。 */}
             <Route path="tests" element={<TestsRedirect />} />
-            <Route path="tokens" element={<TokensPage />} />
+            {/* 注册令牌页去掉了：令牌在「添加节点」里生成、吊销。 */}
+            <Route path="tokens" element={<Navigate to="../nodes" replace />} />
             <Route path="pairs" element={<PairsPage />} />
             <Route path="network" element={<NetworkPage />} />
             <Route path="*" element={<NotFoundPage />} />

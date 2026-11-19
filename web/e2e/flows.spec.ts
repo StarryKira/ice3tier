@@ -215,11 +215,18 @@ test('生成注册令牌，拿到加入命令，节点加入后出现在界面�
   await expect(row).toContainText('servers')
 })
 
-test('在「注册」页新建令牌：关掉对话框后令牌留在列表里，用掉之后消失', async () => {
-  await goToAdmin(page, t.nav.tokens)
-  await expect(page.getByText(t.tokens.emptyTitle)).toBeVisible()
-  await page.getByRole('button', { name: t.tokens.addNode }).click()
+test('令牌只在「添加节点」里：不打算用了就吊销；关掉对话框后复制走的命令照样能用', async () => {
+  await goTo(page, t.nav.nodes)
+  await page.getByRole('button', { name: t.nodes.add }).click()
   const dialog = page.getByRole('dialog', { name: t.addNode.title })
+
+  // 生成了又不用：吊销之后 controller 上就没有它了，对话框回到生成之前。
+  await dialog.getByRole('button', { name: t.addNode.generate }).click()
+  await expect(joinCommand()).toHaveText(/^echo i3t-[A-Za-z0-9_-]+ \| i3t join$/)
+  await dialog.getByRole('button', { name: t.addNode.revoke, exact: true }).click()
+  await expect(joinCommand()).toHaveText(`echo ${t.addNode.tokenPlaceholder} | i3t join`)
+  expect(await controller.api<unknown[]>('GET', `${NET}/tokens`)).toHaveLength(0)
+
   await dialog.getByRole('button', { name: t.addNode.generate }).click()
   await expect(joinCommand()).toHaveText(/^echo i3t-[A-Za-z0-9_-]+ \| i3t join$/)
   const command = (await joinCommand().textContent()) ?? ''
@@ -234,11 +241,8 @@ test('在「注册」页新建令牌：关掉对话框后令牌留在列表里�
   await question.getByRole('button', { name: t.addNode.closeWhileWaitingConfirm, exact: true }).click()
   await expect(dialog).toBeHidden()
 
-  // 列表里有这个令牌，但它的文本哪里都查不回来。
-  const [pending] = await controller.api<{ id: number }[]>('GET', `${NET}/tokens`)
-  if (pending === undefined) throw new Error('controller 上没有令牌')
-  const row = page.getByTestId(`token-row-${pending.id}`)
-  await expect(row).toContainText(t.tokens.showPending)
+  // 令牌还在 controller 上，它的文本界面上哪里都查不回来。
+  expect(await controller.api<unknown[]>('GET', `${NET}/tokens`)).toHaveLength(1)
   await expect(page.getByText(secret)).toHaveCount(0)
 
   // 复制走的命令在关掉对话框之后仍然有效。
@@ -248,10 +252,8 @@ test('在「注册」页新建令牌：关掉对话框后令牌留在列表里�
   laptop = { handle, id: joined.id, name: joined.name, ip: joined.virtual_ip }
 
   // 这个节点是在界面之外加入的（对话框已经关了）：节点列表靠轮询发现它，周期是 10 秒。
-  await goTo(page, t.nav.nodes)
   await expect(page.getByTestId(`node-row-${laptop.name}`)).toBeVisible({ timeout: 20_000 })
-  await goToAdmin(page, t.nav.tokens)
-  await expect(page.getByText(t.tokens.emptyTitle)).toBeVisible()
+  expect(await controller.api<unknown[]>('GET', `${NET}/tokens`)).toHaveLength(0)
 })
 
 test('在节点列表上编辑节点的分组：只能选已有的', async () => {

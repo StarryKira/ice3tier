@@ -30,7 +30,6 @@ export const nav: Messages['nav'] = {
   topology: 'Topology',
   diagnosis: 'Path diagnosis',
   groupManage: 'Manage',
-  tokens: 'Enrollment tokens',
   pairs: 'Node pairs',
   network: 'Network',
   settings: 'Settings',

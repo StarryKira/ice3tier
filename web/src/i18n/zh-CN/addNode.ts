@@ -43,6 +43,9 @@ export const addNode = {
   regenerate: '重新生成',
   regenerateHint: '吊销当前令牌并新建一个',
   regenerated: '令牌已重新生成',
+  revoke: '吊销',
+  revokeHint: '令牌作废，持有它的机器无法加入',
+  revoked: '令牌已吊销',
   step3: '加入并启动',
   step3Join: '加入网络',
   step3Run: '启动',
@@ -67,7 +70,7 @@ export const addNode = {
   gone: '令牌已被吊销',
   done: '完成',
   closeWhileWaitingTitle: '令牌尚未使用，关闭？',
-  closeWhileWaitingBody: '令牌不再显示，已复制的命令在过期前仍有效。可在「注册令牌」页吊销。',
+  closeWhileWaitingBody: '令牌不再显示，已复制的命令在过期前仍有效。不打算用了就先吊销。',
   closeWhileWaitingConfirm: '关闭',
   closeWhileWaitingCancel: '继续等待',
 }

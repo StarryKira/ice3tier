@@ -105,7 +105,7 @@ describe('记录里提到的东西，点了去哪里', () => {
     expect(refTarget({ kind: 'proxy', id: 6 }, 1)).toBe('/n/1/proxies')
     expect(refTarget({ kind: 'forward', id: 7 }, 1)).toBe('/n/1/forwards?focus=7')
     // 用掉的令牌默认不列出，要切到"全部"。
-    expect(refTarget({ kind: 'token', id: 8 }, 1)).toBe('/n/1/tokens?show=all&focus=8')
+    expect(refTarget({ kind: 'token', id: 8 }, 1)).toBeNull()
   })
 
   it('网络本身去它的设置页，不需要记录属于哪个网络', () => {

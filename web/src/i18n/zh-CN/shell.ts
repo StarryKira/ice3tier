@@ -29,7 +29,6 @@ export const nav = {
   topology: '拓扑',
   diagnosis: '路径诊断',
   groupManage: '管理',
-  tokens: '注册令牌',
   pairs: '节点对',
   network: '网络',
   settings: '设置',

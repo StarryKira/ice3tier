@@ -44,6 +44,9 @@ export const addNode: Messages['addNode'] = {
   regenerate: 'Regenerate',
   regenerateHint: 'Revokes the current token and creates a new one',
   regenerated: 'Token regenerated',
+  revoke: 'Revoke',
+  revokeHint: 'Invalidates the token; a machine holding it cannot join',
+  revoked: 'Token revoked',
   step3: 'Join and start',
   step3Join: 'Join the network',
   step3Run: 'Start',
@@ -69,7 +72,7 @@ export const addNode: Messages['addNode'] = {
   done: 'Done',
   closeWhileWaitingTitle: 'Close while the token is unused?',
   closeWhileWaitingBody:
-    "The token won't be shown again. Copied commands stay valid until it expires; revoke it under Enrollment tokens.",
+    "The token won't be shown again. A copied command still works until it expires; revoke the token first if you won't use it.",
   closeWhileWaitingConfirm: 'Close',
   closeWhileWaitingCancel: 'Keep waiting',
 }

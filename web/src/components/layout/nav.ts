@@ -10,7 +10,6 @@ import {
   Server,
   Settings,
   ShieldCheck,
-  Ticket,
   Waypoints,
 } from 'lucide-react'
 
@@ -70,10 +69,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
     get label() {
       return t.nav.groupDiagnose
     },
-    items: [
-      item('topology', () => t.nav.topology, Waypoints),
-      item('diagnosis', () => t.nav.diagnosis, Route),
-    ],
+    items: [item('topology', () => t.nav.topology, Waypoints), item('diagnosis', () => t.nav.diagnosis, Route)],
   },
   {
     id: 'manage',
@@ -82,7 +78,6 @@ export const NAV_GROUPS: readonly NavGroup[] = [
     },
     // "设置"是全局的，其余属于当前网络。
     items: [
-      item('tokens', () => t.nav.tokens, Ticket),
       item('pairs', () => t.nav.pairs, Link2),
       item('network', () => t.nav.network, Network),
       item('settings', () => t.nav.settings, Settings, '/settings'),

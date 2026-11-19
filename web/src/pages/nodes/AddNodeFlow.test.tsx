@@ -274,6 +274,32 @@ describe('添加节点', () => {
     expect(screen.queryByText(t.addNode.waiting)).not.toBeInTheDocument()
   })
 
+  it('不打算用了就吊销：令牌作废，回到生成之前，选的分组留着，可以再生成', async () => {
+    const user = userEvent.setup()
+    const api = emptyNetwork({ 'DELETE /networks/1/tokens/7': undefined })
+    renderWithApp(<AddNodeFlow network={NETWORK} />)
+    await generate(user)
+
+    await user.click(screen.getByRole('button', { name: t.addNode.revoke }))
+    await waitFor(() => expect(api.callsTo('DELETE /networks/1/tokens/7')).toHaveLength(1))
+    await waitFor(() => expect(command()).toHaveTextContent(placeholder()))
+    expect(document.body).not.toHaveTextContent(TOKEN)
+    expect(screen.queryByRole('button', { name: t.addNode.revoke })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: t.addNode.generate })).toBeEnabled()
+  })
+
+  it('过期了没有什么可吊销的，只能重新生成', async () => {
+    const user = userEvent.setup()
+    emptyNetwork({
+      'POST /networks/1/tokens': () => ({ ...created(7, TOKEN), expires_at: Math.floor(Date.now() / 1000) - 1 }),
+    })
+    renderWithApp(<AddNodeFlow network={NETWORK} />)
+    await generate(user)
+    expect((await screen.findAllByText(t.addNode.expired)).length).toBeGreaterThan(0)
+    expect(screen.getAllByRole('button', { name: t.addNode.regenerate }).length).toBeGreaterThan(0)
+    expect(screen.queryByRole('button', { name: t.addNode.revoke })).not.toBeInTheDocument()
+  })
+
   it('重新生成会先收回刚才那个令牌', async () => {
     const user = userEvent.setup()
     const api = emptyNetwork()

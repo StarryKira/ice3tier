@@ -115,7 +115,8 @@ export function refTarget(ref: LogRef, network: NetworkId | null): string | null
     case 'rule':
       return `${networkPath(network, 'access')}?rule=${ref.id}`
     case 'token':
-      return `${networkPath(network, 'tokens')}?show=all&focus=${ref.id}`
+      // 令牌没有自己的页面了（在「添加节点」里生成、吊销），记录里只写它是哪一个。
+      return null
     case 'credential':
       // 凭据没有了：以前的记录点过去是代理页（认证现在在代理上）。
       return networkPath(network, 'proxies')

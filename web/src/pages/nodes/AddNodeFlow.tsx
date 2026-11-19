@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { CircleCheck, LoaderCircle, RotateCw, TicketPlus } from 'lucide-react'
+import { CircleCheck, LoaderCircle, RotateCw, TicketPlus, Undo2 } from 'lucide-react'
 import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router'
 
@@ -167,6 +167,20 @@ export function AddNodeFlow({ network, intro, onStateChange, onNavigate }: AddNo
       },
     })
   }
+
+  // 吊销：令牌作废，回到生成之前（分组、声明这些选择留着），可以再生成一个。
+  const revoke = useAction(network.id, {
+    mutationFn: (token: CreatedEnrollToken) => api.deleteToken(network.id, token.id),
+    success: t.addNode.revoked,
+  })
+  const onRevoke = (token: CreatedEnrollToken) =>
+    revoke.mutate(token, {
+      onSuccess: () => {
+        setCreated(null)
+        setJoined(null)
+        generate.reset()
+      },
+    })
 
   const addAnother = () => {
     setCreated(null)
@@ -354,15 +368,32 @@ export function AddNodeFlow({ network, intro, onStateChange, onNavigate }: AddNo
                   {remaining === null ? t.addNode.expired : t.addNode.generated(remaining)}
                 </p>
                 {joined === null ? (
-                  <Button
-                    size="sm"
-                    pending={generate.isPending}
-                    onClick={() => onGenerate(created)}
-                    title={t.addNode.regenerateHint}
-                  >
-                    <RotateCw aria-hidden />
-                    {t.addNode.regenerate}
-                  </Button>
+                  <>
+                    <Button
+                      size="sm"
+                      pending={generate.isPending}
+                      disabled={revoke.isPending}
+                      onClick={() => onGenerate(created)}
+                      title={t.addNode.regenerateHint}
+                    >
+                      <RotateCw aria-hidden />
+                      {t.addNode.regenerate}
+                    </Button>
+                    {/* 过期了、已经被吊销了的没有什么可吊销的。 */}
+                    {remaining !== null && !gone ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        pending={revoke.isPending}
+                        disabled={generate.isPending}
+                        onClick={() => onRevoke(created)}
+                        title={t.addNode.revokeHint}
+                      >
+                        <Undo2 aria-hidden />
+                        {t.addNode.revoke}
+                      </Button>
+                    ) : null}
+                  </>
                 ) : null}
               </div>
               <FormError
