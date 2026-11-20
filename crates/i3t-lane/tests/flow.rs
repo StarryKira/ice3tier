@@ -15,13 +15,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::{Hop, Pair, quick};
+use common::{Hop, Pair, quick, wait_for};
 use i3t_conn::{RecvStream, SendStream};
 use i3t_flow::engine::Splicer;
 use i3t_flow::{End, Handler, Request};
 use i3t_lane::{Lanes, Payload};
 use i3t_proto::NodeId;
-use i3t_proto::flow::{Class, Open, Origin, Reply, Target};
+use i3t_proto::flow::{Class, Open, Origin, Reason, Reply, Target};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
@@ -224,6 +224,52 @@ async fn the_flow_layer_passes_tls_through_and_splices_it() {
     assert!(entry.total.spliced_bytes >= 2 * 3_000_000, "{entry:?}");
     assert!(exit.total.spliced_bytes >= 2 * 3_000_000, "{exit:?}");
     assert!(entry.total.sealed_bytes < 1024, "加密的只有开流时的头：{entry:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_revocation_resets_both_ends_of_an_active_passthrough_relay() {
+    let pair = Pair::direct(quick()).await;
+    pair.ready(2).await;
+    let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let exit = Arc::new(ToTarget::new(target.local_addr().unwrap()));
+    let lanes = Arc::clone(&pair.exit.lanes);
+    tokio::spawn(async move { i3t_flow::serve(&*lanes, exit).await });
+
+    let (mut client, client_side) = tcp_pair().await;
+    let lanes = Arc::clone(&pair.entry.lanes);
+    let peer = pair.exit.id;
+    let hello = [0x16, 0x03, 0x01, 0x00, 0x04, 0x01, 0, 0, 0];
+    let relay = tokio::spawn(async move { through_flow(&lanes, peer, client_side, &hello).await });
+    let (mut target, _) = timeout(PATIENCE, target.accept()).await.unwrap().unwrap();
+
+    // 先正常搬一轮，让两边的搬运任务都已经拿到原始 socket。
+    timeout(PATIENCE, async {
+        client.write_all(b"request").await.unwrap();
+        let mut first = [0; 9];
+        target.read_exact(&mut first).await.unwrap();
+        assert_eq!(first, hello);
+        let mut body = [0; 7];
+        target.read_exact(&mut body).await.unwrap();
+        assert_eq!(&body, b"request");
+        target.write_all(b"reply").await.unwrap();
+        let mut answer = [0; 5];
+        client.read_exact(&mut answer).await.unwrap();
+        assert_eq!(&answer, b"reply");
+    })
+    .await
+    .unwrap();
+    wait_for("请求和应答都已走原始 socket", PATIENCE, || {
+        [&pair.entry.lanes, &pair.exit.lanes].iter().all(|lanes| lanes.status().total.spliced_bytes >= 12)
+    })
+    .await;
+
+    pair.entry.lanes.set_peers([]).unwrap();
+
+    let ((_, client_end), (_, target_end)) = tokio::join!(drain(&mut client), drain(&mut target));
+    assert!(client_end.is_err(), "客户端应看到连接重置，实际是 {client_end:?}");
+    assert!(target_end.is_err(), "目标应看到连接重置，实际是 {target_end:?}");
+    let entry_end = timeout(PATIENCE, relay).await.unwrap().unwrap();
+    assert!(matches!(entry_end, End::Cancelled(Reason::AccessRevoked)), "{entry_end:?}");
 }
 
 #[tokio::test]

@@ -13,8 +13,8 @@ use i3t_flow::datagram::{self, Opener, OutboundSocket};
 use i3t_flow::{Carriage, End, Flow, FlowError, Handler, Request, Screening};
 use i3t_model::Netmap;
 use i3t_model::netmap::{Forward, ForwardProtocol, ForwardTarget, Peer};
-use i3t_proto::NodeId;
 use i3t_proto::flow::{Open, Reason, Reply, Status, Target};
+use i3t_proto::{NodeId, PublicKey};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::watch;
@@ -59,8 +59,8 @@ const BUSY_LOG_EVERY: Duration = Duration::from_secs(60);
 ///    - 本节点的端口：只用本机的非回环地址去连。那个端口上有监听在虚拟 IP 上的端口转发时，按那条转发处理：
 ///      目标是本节点就去连它指向的地址，目标是别的节点就到那个节点开一条流，把两条流接起来；
 ///    - 端口转发：必须是下发给本节点、并且由发起节点监听的那一条。不需要本节点是出口。
-/// 4. 连上目标之后回成功，开始搬运。访问权限被收回，或者放行这条流的能力被收回（出口、局域网开关、端口转发，
-///    见 `grant` 模块）时，正在搬运的流被重置，原因码是 [`Reason::AccessRevoked`]。
+/// 4. 连上目标之后回成功，开始搬运。发起节点更换公钥、失去访问权限，或者放行这条流的能力被收回（出口、局域网开关、
+///    端口转发，见 `grant` 模块）时，正在搬运的流被重置，原因码是 [`Reason::AccessRevoked`]。
 ///
 /// 出口流量（互联网和局域网目标）搬运时算进配额，配额用完时正在搬运的流被断开（见 [`crate::limits`]）。
 ///
@@ -193,8 +193,8 @@ impl<S: System, C: Connector + Datagrams> Exit<S, C> {
         Some(Reply::new(Status::Draining, detail))
     }
 
-    /// 检查一个建流请求，通过的话连上它的目标（或者开好到端口转发目标节点的流），并给出放行凭的是什么。
-    async fn admit(&self, netmap: &Netmap, peer: NodeId, open: &Open) -> Result<(Admitted<C::Send, C::Recv>, Grant), Reply> {
+    /// 检查一个建流请求，通过的话连上它的目标，并返回放行凭据和本次判断使用的发起节点公钥。
+    async fn admit(&self, netmap: &Netmap, peer: NodeId, open: &Open) -> Result<(Admitted<C::Send, C::Recv>, Grant, PublicKey), Reply> {
         let Some(initiator) = netmap.peer(peer).filter(|initiator| initiator.inbound) else {
             return Err(Reply::new(Status::AccessDenied, "访问规则不允许发起节点访问这个节点"));
         };
@@ -203,7 +203,7 @@ impl<S: System, C: Connector + Datagrams> Exit<S, C> {
         }
         let exit_traffic = |stream| Admitted::Target { stream, exit_traffic: true };
         let local = |stream| Admitted::Target { stream, exit_traffic: false };
-        match &open.target {
+        let admitted = match &open.target {
             Target::Internet { host, port } => {
                 self.exit_admission(netmap, peer, &format!("{host}:{port}"))?;
                 let stream = self.outbound.internet(netmap, host, *port, Asker::Peer(peer)).await?;
@@ -245,7 +245,8 @@ impl<S: System, C: Connector + Datagrams> Exit<S, C> {
                     None => Err(Reply::new(Status::UnknownForward, "没有下发给这个节点、由发起节点监听的这条 TCP 端口转发")),
                 }
             }
-        }
+        };
+        admitted.map(|(admitted, grant)| (admitted, grant, initiator.key))
     }
 
     /// 发起节点同时开着的流太多，拒绝它的又一条。info 日志每个节点每分钟最多一行，被拒绝的流本身只记 debug：
@@ -340,7 +341,7 @@ impl<S: System, C: Connector + Datagrams> Handler for Exit<S, C> {
         let netmap = Arc::clone(&netmap_changes.borrow_and_update());
         self.limits.configure(netmap.me.exit.as_ref());
 
-        let (admitted, grant) = match self.admit(&netmap, peer, request.open()).await {
+        let (admitted, grant, key) = match self.admit(&netmap, peer, request.open()).await {
             Ok(admitted) => admitted,
             Err(reply) => {
                 self.counters.failed(reply.status);
@@ -349,7 +350,7 @@ impl<S: System, C: Connector + Datagrams> Handler for Exit<S, C> {
             }
         };
         // 连目标的这段时间里 netmap 可能已经变了：放行时看的那一版之后的每一次变化都要核对。
-        let revoked = async move { withdrawn(&mut netmap_changes, peer, grant).await };
+        let revoked = async move { withdrawn(&mut netmap_changes, peer, key, grant).await };
         match admitted {
             Admitted::Target { stream, exit_traffic } => {
                 let flow = match request.accept().await {
@@ -469,16 +470,15 @@ impl<S: System, C: Connector + Datagrams> Handler for Exit<S, C> {
     }
 }
 
-/// 等到 netmap 不再允许 `peer` 凭 `grant` 的这条流：访问规则收回了，或者放行它的能力收回了。那时已经建立的流要被重置，
-/// 不只是拒绝新的。
-async fn withdrawn(netmap: &mut watch::Receiver<Arc<Netmap>>, peer: NodeId, grant: Grant) -> Reason {
+/// 等到 `peer` 换了公钥，或者 netmap 不再允许它凭 `grant` 放行的这条流。
+async fn withdrawn(netmap: &mut watch::Receiver<Arc<Netmap>>, peer: NodeId, key: PublicKey, grant: Grant) -> Reason {
     loop {
         if netmap.changed().await.is_err() {
             // 发送端没了说明节点在关闭，不是权限变了。流留给连接的关闭去结束。
             return future::pending().await;
         }
         let current = Arc::clone(&netmap.borrow_and_update());
-        if let Some(why) = grant.withdrawn(&current, peer, ForwardProtocol::Tcp) {
+        if let Some(why) = grant.withdrawn(&current, peer, ForwardProtocol::Tcp, Some(key)) {
             tracing::info!(%peer, ?grant, why, "重置一条已经建立的流：它不再被允许");
             return Reason::AccessRevoked;
         }

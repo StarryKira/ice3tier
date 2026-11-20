@@ -11,11 +11,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use common::{Pair, read_to_end, wait_for};
-use i3t_conn::{Acceptor as _, Connector as _, SendStream as _};
+use i3t_conn::{Acceptor as _, Connector as _, RecvStream as _, SendStream as _};
+use i3t_crypto::NodeKey;
 use i3t_flow::memory::{MemoryAcceptor, MemoryConnector, MemoryMesh};
 use i3t_lane::{EitherRecv, EitherSend, LaneAcceptor, LaneConfig, LaneConnector, Lanes, Payload};
 use i3t_proto::NodeId;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::oneshot;
 use tokio::time::timeout;
 
 type Send = EitherSend<i3t_flow::memory::MemorySend>;
@@ -165,8 +167,8 @@ async fn turning_lanes_off_and_on_never_moves_a_running_stream() {
     assert!(send.is_lane());
     // 管理员把这一对改成 off：两边都不再为对方开 lane。
     side.choose.store(false, Ordering::Relaxed);
-    pair.entry.lanes.set_peers([]).unwrap();
-    pair.exit.lanes.set_peers([]).unwrap();
+    pair.entry.lanes.set_peers_with_identities([], [(pair.exit.id, pair.exit.key.public())]).unwrap();
+    pair.exit.lanes.set_peers_with_identities([], [(pair.entry.id, pair.entry.key.public())]).unwrap();
     assert!(!side.round_trip().await, "新的流走共用的连接");
     let ((mut shared_send, mut shared_recv), (mut shared_far_send, mut shared_far_recv)) = side.open(b"shared ").await;
     assert!(!shared_send.is_lane());
@@ -192,4 +194,87 @@ async fn turning_lanes_off_and_on_never_moves_a_running_stream() {
     shared_far_send.shutdown().await.unwrap();
     assert_eq!(read_to_end(&mut shared_recv).await.unwrap(), b"");
     assert_eq!(fallbacks(&pair.entry.lanes, pair.exit.id), 0);
+}
+
+#[tokio::test]
+async fn removing_or_rotating_a_peer_closes_its_draining_lane() {
+    for replacement in [None, Some(NodeKey::generate().unwrap().public())] {
+        let pair = Pair::direct(common::quick()).await;
+        pair.ready(2).await;
+        let ((send, mut recv), (mut far_send, mut far_recv)) = pair.entry_opens(b"request", Payload::Sealed).await;
+
+        // 只关闭 ice3proxy，存量流还可以传数据。
+        pair.entry.lanes.set_peers_with_identities([], [(pair.exit.id, pair.exit.key.public())]).unwrap();
+        far_send.write_all(b"r").await.unwrap();
+        far_send.flush().await.unwrap();
+        assert_eq!(timeout(Duration::from_secs(3), recv.read_u8()).await.unwrap().unwrap(), b'r');
+
+        // 在撤销前让本端开始等待读取，验证吊销信号能唤醒一个已经挂起的任务。
+        let (waiting, ready) = oneshot::channel();
+        let local = tokio::spawn(async move {
+            let end = recv.read_u8();
+            tokio::pin!(end);
+            tokio::select! {
+                biased;
+                result = &mut end => panic!("撤销前读取就结束了：{result:?}"),
+                () = tokio::task::yield_now() => {}
+            }
+            waiting.send(()).unwrap();
+            let result = end.await;
+            drop(send);
+            result
+        });
+        ready.await.unwrap();
+        pair.entry.lanes.set_peers_with_identities([], replacement.map(|key| (pair.exit.id, key))).unwrap();
+
+        let local_end = timeout(Duration::from_secs(3), local).await.expect("本端读取未被唤醒").unwrap();
+        assert!(local_end.is_err(), "撤销对端后本端应读到错误，读到了 {local_end:?}");
+        let remote_end = timeout(Duration::from_secs(3), far_recv.read(&mut [0; 1])).await.expect("远端没有看到连接断开");
+        assert!(remote_end.is_err(), "撤销对端后远端应读到错误，读到了 {remote_end:?}");
+    }
+}
+
+#[tokio::test]
+async fn revocation_signals_both_raw_halves_and_the_peer_reads_a_reset() {
+    for replacement in [None, Some(NodeKey::generate().unwrap().public())] {
+        let pair = Pair::direct(common::quick()).await;
+        pair.ready(2).await;
+        let ((mut send, mut recv), (mut far_send, mut far_recv)) = pair.entry_opens(b"request", Payload::Passthrough).await;
+        far_send.end_header(Payload::Passthrough);
+        let write = send.take_raw().unwrap();
+        let read = timeout(Duration::from_secs(3), recv.wait_raw()).await.unwrap().unwrap();
+        drop((send, recv));
+
+        pair.entry.lanes.set_peers_with_identities([], [(pair.exit.id, pair.exit.key.public())]).unwrap();
+        assert!(!write.is_revoked());
+        assert!(!read.is_revoked());
+        pair.entry.lanes.set_peers_with_identities([], replacement.map(|key| (pair.exit.id, key))).unwrap();
+
+        timeout(Duration::from_secs(3), async { tokio::join!(write.revoked(), read.revoked()) })
+            .await
+            .expect("两个原始方向都应收到吊销信号");
+        assert!(write.is_revoked() && read.is_revoked());
+        let socket = read.socket_handle();
+        drop((read, write));
+        i3t_underlay::tcp_reset::close(socket);
+        let remote_end = timeout(Duration::from_secs(3), far_recv.read(&mut [0; 1])).await.expect("远端没有看到连接断开");
+        assert!(remote_end.is_err(), "撤销后原始方向应读到重置，读到了 {remote_end:?}");
+    }
+}
+
+#[tokio::test]
+async fn accept_skips_a_queued_stream_whose_peer_has_been_revoked() {
+    let pair = Pair::direct(common::quick()).await;
+    pair.ready(2).await;
+    let (mut send, _recv) = pair.entry.lanes.open_stream(pair.exit.id).await.unwrap();
+    send.write_all(b"request").await.unwrap();
+    send.end_header(Payload::Sealed);
+    wait_for("出口登记了流", Duration::from_secs(3), || pair.exit.lanes.status().total.in_use == 1).await;
+
+    pair.exit.lanes.set_peers([]).unwrap();
+    // 两边都清掉旧连接池，再等新的一组空闲 lane。
+    pair.entry.lanes.set_peers([]).unwrap();
+    pair.introduce();
+    pair.ready(2).await;
+    let (_local, _remote) = pair.entry_opens(b"new request", Payload::Sealed).await;
 }

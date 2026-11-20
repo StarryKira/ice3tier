@@ -18,6 +18,7 @@
 //! RST 关闭，发送缓冲里还没送到的数据被丢掉：对端读到的是重置；对端也是 macOS 并且不认这个 RST 时，它一直等那些数据。
 //! 所以这样的连接用 [`shutdown_write`] 发 FIN、用 [`graceful_close`] 改回正常关闭，别直接调 `shutdown` 和 `set_linger`。
 
+use std::borrow::Borrow;
 use std::io;
 use std::net::Shutdown;
 
@@ -36,18 +37,19 @@ const POLL: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// 关掉 `stream`，对端看到的是重置（RST），不是正常结束。见模块文档。
 ///
+/// 可传 socket 或它的一个共享句柄。共享时调用方也要释放剩下的句柄。
 /// 不用等：macOS 上要等对端确认时，连接交给一个后台任务，它在 tokio 运行时里关掉连接；不在运行时里时马上关。
-pub fn close(stream: TcpStream) {
-    if let Err(error) = stream.set_zero_linger() {
+pub fn close(stream: impl Borrow<TcpStream> + Send + 'static) {
+    if let Err(error) = stream.borrow().set_zero_linger() {
         tracing::debug!(%error, "设置不了 SO_LINGER，这条连接关闭时对端可能看到正常结束");
     }
     #[cfg(target_os = "macos")]
-    if unacknowledged(&stream).is_ok_and(|bytes| bytes > 0)
+    if unacknowledged(stream.borrow()).is_ok_and(|bytes| bytes > 0)
         && let Ok(runtime) = tokio::runtime::Handle::try_current()
     {
         drop(runtime.spawn(async move {
             let deadline = tokio::time::Instant::now() + ACK_WAIT;
-            while tokio::time::Instant::now() < deadline && unacknowledged(&stream).is_ok_and(|bytes| bytes > 0) {
+            while tokio::time::Instant::now() < deadline && unacknowledged(stream.borrow()).is_ok_and(|bytes| bytes > 0) {
                 tokio::time::sleep(POLL).await;
             }
             drop(stream);

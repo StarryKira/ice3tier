@@ -16,6 +16,7 @@ use rustls::pki_types::ServerName;
 use rustls::server::NoServerSessionStorage;
 use rustls::{ClientConfig, ClientConnection, Connection, ServerConfig, ServerConnection};
 use tokio::net::TcpStream;
+use tokio::sync::watch;
 use tokio::time::{Instant, timeout_at};
 
 use crate::error::LaneError;
@@ -59,11 +60,12 @@ pub(crate) fn server_config(
 
 /// 一条握手完成、HELLO 已经发出（拨号方）或者已经读到（接受方）的 lane。
 pub(crate) struct Lane {
-    pub(crate) socket: TcpStream,
+    pub(crate) socket: Arc<TcpStream>,
     pub(crate) sealed: Sealed,
     /// 待发的密文。
     pub(crate) out: BytesMut,
     pub(crate) peer: NodeId,
+    pub(crate) membership: watch::Receiver<()>,
     pub(crate) purpose: Purpose,
     pub(crate) epoch: u64,
 }
@@ -180,6 +182,7 @@ pub(crate) struct Dial<'a> {
     pub(crate) addrs: &'a [SocketAddr],
     pub(crate) config: Arc<ClientConfig>,
     pub(crate) peer: NodeId,
+    pub(crate) membership: watch::Receiver<()>,
     pub(crate) purpose: Purpose,
     pub(crate) epoch: u64,
     pub(crate) deadline: Instant,
@@ -195,7 +198,7 @@ pub(crate) struct Dial<'a> {
 ///
 /// 都连不上、握手失败（包括对端的公钥不对），或者过了 `deadline`。
 pub(crate) async fn dial(dial: Dial<'_>) -> Result<(Lane, SocketAddr), LaneError> {
-    let Dial { addrs, config, peer, purpose, epoch, deadline } = dial;
+    let Dial { addrs, config, peer, membership, purpose, epoch, deadline } = dial;
     if addrs.is_empty() {
         return Err(LaneError::Protocol("没有可以拨的地址"));
     }
@@ -204,14 +207,21 @@ pub(crate) async fn dial(dial: Dial<'_>) -> Result<(Lane, SocketAddr), LaneError
         Ok(Err(error)) => return Err(LaneError::Io(error)),
         Err(_) => return Err(LaneError::Deadline(deadline.saturating_duration_since(Instant::now()))),
     };
-    match timeout_at(deadline, establish(socket, config, peer, purpose, epoch)).await {
+    match timeout_at(deadline, establish(socket, config, peer, membership, purpose, epoch)).await {
         Ok(Ok(lane)) => Ok((lane, addr)),
         Ok(Err(error)) => Err(error),
         Err(_) => Err(LaneError::Deadline(deadline.saturating_duration_since(Instant::now()))),
     }
 }
 
-async fn establish(socket: TcpStream, config: Arc<ClientConfig>, peer: NodeId, purpose: Purpose, epoch: u64) -> Result<Lane, LaneError> {
+async fn establish(
+    socket: TcpStream,
+    config: Arc<ClientConfig>,
+    peer: NodeId,
+    membership: watch::Receiver<()>,
+    purpose: Purpose,
+    epoch: u64,
+) -> Result<Lane, LaneError> {
     socket::configure(&socket).map_err(LaneError::Io)?;
     let name = ServerName::try_from("i3t").expect("固定的名字是合法的 DNS 名字");
     let connection = ClientConnection::new(config, name).map_err(LaneError::Tls)?;
@@ -219,7 +229,7 @@ async fn establish(socket: TcpStream, config: Arc<ClientConfig>, peer: NodeId, p
     let mut out = BytesMut::new();
     handshake(&socket, &mut sealed, &mut out).await?;
     sealed.shrink();
-    let mut lane = Lane { socket, sealed, out, peer, purpose, epoch };
+    let mut lane = Lane { socket: Arc::new(socket), sealed, out, peer, membership, purpose, epoch };
     lane.queue(&Frame::Hello { purpose, epoch });
     Ok(lane)
 }
@@ -239,7 +249,7 @@ pub(crate) async fn accept(
     socket: TcpStream,
     prefix: BytesMut,
     config: Arc<ServerConfig>,
-    resolve: impl Fn(&PublicKey) -> Option<NodeId>,
+    resolve: impl Fn(&PublicKey) -> Option<(NodeId, watch::Receiver<()>)>,
     first_record: Instant,
     deadline: Instant,
 ) -> Result<Lane, LaneError> {
@@ -264,10 +274,16 @@ pub(crate) async fn accept(
             .and_then(|certificates| certificates.first())
             .ok_or(LaneError::Protocol("对端没有出示证书"))
             .and_then(|certificate| tls::peer_key(certificate).map_err(|_| LaneError::Protocol("对端证书里的公钥不对")))?;
-        let peer = resolve(&key)
+        let (peer, membership) = resolve(&key)
             .ok_or(LaneError::Tls(rustls::Error::InvalidCertificate(rustls::CertificateError::ApplicationVerificationFailure)))?;
-        let mut lane = Lane { socket, sealed, out, peer, purpose: Purpose::Control, epoch: 0 };
-        match lane.read_frame().await? {
+        let mut removed = membership.clone();
+        let mut lane = Lane { socket: Arc::new(socket), sealed, out, peer, membership, purpose: Purpose::Control, epoch: 0 };
+        let hello = tokio::select! {
+            biased;
+            _ = removed.changed() => return Err(LaneError::Closed),
+            result = lane.read_frame() => result?,
+        };
+        match hello {
             Some(Frame::Hello { purpose, epoch }) => {
                 lane.purpose = purpose;
                 lane.epoch = epoch;

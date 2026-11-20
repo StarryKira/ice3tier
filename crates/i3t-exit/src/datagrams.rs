@@ -178,7 +178,7 @@ impl Destinations {
     /// 按新的 netmap 去掉放行凭据已经不成立的结论和来源：发往它们的报文下次重新检查（会被拒绝），
     /// 从它们回来的报文不再送回发起节点。返回去掉了几项。
     fn withdraw(&mut self, netmap: &Netmap, peer: NodeId) -> usize {
-        let holds = |grant: &Grant| grant.withdrawn(netmap, peer, ForwardProtocol::Udp).is_none();
+        let holds = |grant: &Grant| grant.withdrawn(netmap, peer, ForwardProtocol::Udp, None).is_none();
         let before = self.verdicts.len() + self.sources.len();
         self.verdicts.retain(|_, verdict| verdict.outcome.grant().is_none_or(holds));
         self.sources.retain(|_, source| holds(&source.grant));
@@ -311,7 +311,7 @@ impl<S: System, C: Connector + Datagrams> Session<'_, S, C> {
     /// netmap 变了：放行凭据不再成立的目标当场作废，接力到端口转发目标节点的上下文跟着关掉。
     fn withdraw(&self, netmap: &Netmap, destinations: &mut Destinations, legs: &mut HashMap<u32, OnwardLeg<C::Sender>>) {
         let legs_before = legs.len();
-        legs.retain(|_, leg| leg.grant.withdrawn(netmap, self.peer, ForwardProtocol::Udp).is_none());
+        legs.retain(|_, leg| leg.grant.withdrawn(netmap, self.peer, ForwardProtocol::Udp, None).is_none());
         let removed = destinations.withdraw(netmap, self.peer) + (legs_before - legs.len());
         if removed > 0 {
             tracing::info!(peer = %self.peer, removed, "放行数据报目标的能力被收回了：这些目标两个方向的报文都不再转发");

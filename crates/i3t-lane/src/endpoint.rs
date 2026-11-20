@@ -85,14 +85,18 @@ pub struct Lanes {
     _shutdown: watch::Sender<()>,
 }
 
+type AllowedKeys = HashMap<PublicKey, (NodeId, watch::Receiver<()>)>;
+
 pub(crate) struct Inner {
     identity: Identity,
     server: Arc<ServerConfig>,
     pub(crate) config: LaneConfig,
     pub(crate) counters: Arc<Counters>,
     /// 认得的公钥。TLS 的校验器在握手时查它，所以和 `peers` 分开放。
-    keys: Arc<Mutex<HashMap<PublicKey, NodeId>>>,
+    keys: Arc<Mutex<AllowedKeys>>,
     peers: Mutex<HashMap<NodeId, Peer>>,
+    /// 包括正在排空的 lane。需要同时持锁时先拿 peers，再拿 active。
+    active: Mutex<HashMap<NodeId, ActivePeer>>,
     incoming: mpsc::UnboundedSender<Incoming<LaneSend, LaneRecv>>,
     accepted: tokio::sync::Mutex<mpsc::UnboundedReceiver<Incoming<LaneSend, LaneRecv>>>,
     admission: Arc<Admission>,
@@ -104,6 +108,9 @@ pub(crate) struct Inner {
 
 pub(crate) struct Peer {
     key: PublicKey,
+    /// 移除表项会关闭这个 channel，通知旧的空闲 lane 和尚未完成的开流。
+    _enabled: watch::Sender<()>,
+    pub(crate) membership: watch::Receiver<()>,
     pub(crate) holder: Holder,
     dial: Option<DialSide>,
     /// 它拨来、等它自己开流的 lane 有几条。
@@ -112,7 +119,16 @@ pub(crate) struct Peer {
     tally: Arc<Tally>,
 }
 
+struct ActivePeer {
+    key: PublicKey,
+    revoked: watch::Sender<bool>,
+}
+
 impl Peer {
+    pub(crate) fn matches(&self, membership: &watch::Receiver<()>) -> bool {
+        self.membership.same_channel(membership)
+    }
+
     /// 本节点拨不拨这个对端。拨的话，本节点往它开流用自己拨的 lane，不需要它停 lane 过来。
     pub(crate) fn dials(&self) -> bool {
         self.dial.is_some()
@@ -123,6 +139,19 @@ impl Peer {
 pub(crate) struct DialPlan {
     pub(crate) addrs: Vec<SocketAddr>,
     pub(crate) config: Arc<ClientConfig>,
+    pub(crate) membership: watch::Receiver<()>,
+    pub(crate) book: Book,
+}
+
+impl DialPlan {
+    fn new(dial: &DialSide, membership: &watch::Receiver<()>, book: Book) -> Self {
+        Self { addrs: dial.addrs_in_order(), config: Arc::clone(&dial.config), membership: membership.clone(), book }
+    }
+}
+
+struct DialChoice {
+    generation: Arc<Notify>,
+    lane: Result<Lane, DialPlan>,
 }
 
 impl Lanes {
@@ -131,7 +160,7 @@ impl Lanes {
     /// 用节点密钥签证书失败。
     pub fn new(key: &NodeKey, config: LaneConfig) -> Result<Self, TlsError> {
         let identity = Identity::new(key)?;
-        let keys: Arc<Mutex<HashMap<PublicKey, NodeId>>> = Arc::default();
+        let keys: Arc<Mutex<AllowedKeys>> = Arc::default();
         let allowed = Arc::clone(&keys);
         let server = lane::server_config(&identity, move |key| allowed.lock().expect("lane keys mutex poisoned").contains_key(key))?;
         let (incoming, accepted) = mpsc::unbounded_channel();
@@ -143,6 +172,7 @@ impl Lanes {
             counters: Arc::default(),
             keys,
             peers: Mutex::default(),
+            active: Mutex::default(),
             incoming,
             accepted: tokio::sync::Mutex::new(accepted),
             admission: Arc::default(),
@@ -154,39 +184,66 @@ impl Lanes {
         Ok(Self { inner: Arc::new(inner), _shutdown: shutdown_sender })
     }
 
-    /// 换成新的一组打开了 ice3proxy 的对端。netmap 每次变化时整组交进来。
-    ///
-    /// 不在里面的对端：它的空闲 lane 和控制 lane 关掉，它新拨来的 lane 在握手时被拒绝；正在承载流的 lane 不受影响。
-    /// 公钥或者拨号地址变了的对端按新的重来一遍。要在 tokio 运行时里调用（拨号的任务在这里起）。
+    /// 换成新的一组对端。移除对端或更换公钥会关闭它的所有 lane。
     ///
     /// # Errors
     ///
     /// 给某个对端做 TLS 配置失败。这时什么都没有改。
     pub fn set_peers(&self, peers: impl IntoIterator<Item = LanePeer>) -> Result<(), TlsError> {
+        let peers: Vec<_> = peers.into_iter().collect();
+        let identities: Vec<_> = peers.iter().map(|peer| (peer.id, peer.key)).collect();
+        self.set_peers_with_identities(peers, identities)
+    }
+
+    /// 用完整的 netmap 身份更新 lane。仍在 netmap 中且公钥没变的对端可以关闭 ice3proxy，让存量流自然结束。
+    /// 节点离开 netmap 或公钥变化时吊销它的存量流。要在 tokio 运行时里调用。
+    ///
+    /// # Errors
+    ///
+    /// 给某个对端做 TLS 配置失败。这时什么都没有改。
+    pub fn set_peers_with_identities(
+        &self,
+        peers: impl IntoIterator<Item = LanePeer>,
+        identities: impl IntoIterator<Item = (NodeId, PublicKey)>,
+    ) -> Result<(), TlsError> {
         let inner = &self.inner;
-        let wanted: Vec<LanePeer> = peers.into_iter().collect();
+        let identities: HashMap<_, _> = identities.into_iter().collect();
+        let wanted: HashMap<_, _> =
+            peers.into_iter().filter(|peer| identities.get(&peer.id) == Some(&peer.key)).map(|peer| (peer.id, peer)).collect();
         let configs = wanted
-            .iter()
+            .values()
             .filter(|peer| !peer.dial.is_empty())
             .map(|peer| Ok((peer.id, lane::client_config(&inner.identity, peer.key)?)))
             .collect::<Result<HashMap<NodeId, Arc<ClientConfig>>, TlsError>>()?;
-        *inner.keys.lock().expect("lane keys mutex poisoned") = wanted.iter().map(|peer| (peer.key, peer.id)).collect();
         let mut peers = inner.lock_peers();
+        inner.active.lock().expect("lane active mutex poisoned").retain(|id, entry| {
+            if identities.get(id) != Some(&entry.key) {
+                // 在接受新流之前发布吊销。这里只更新信号，流自己停止 I/O 并关闭 socket。
+                entry.revoked.send_replace(true);
+                return false;
+            }
+            wanted.contains_key(id) || entry.revoked.receiver_count() != 0
+        });
         peers.retain(|id, entry| {
-            let keep = wanted.iter().any(|peer| peer.id == *id && peer.key == entry.key);
+            let keep = wanted.get(id).is_some_and(|peer| peer.key == entry.key);
             if !keep {
                 entry.holder.close();
                 tracing::info!(peer = %id, "不再为这个节点开 ice3proxy");
             }
             keep
         });
-        for peer in wanted {
-            let entry = peers.entry(peer.id).or_insert_with(|| Peer {
-                key: peer.key,
-                holder: Holder::default(),
-                dial: None,
-                own_waiting: 0,
-                tally: Arc::default(),
+        for peer in wanted.into_values() {
+            let entry = peers.entry(peer.id).or_insert_with(|| {
+                let (enabled, membership) = watch::channel(());
+                Peer {
+                    key: peer.key,
+                    _enabled: enabled,
+                    membership,
+                    holder: Holder::default(),
+                    dial: None,
+                    own_waiting: 0,
+                    tally: Arc::default(),
+                }
             });
             let same_dial = entry.dial.as_ref().is_some_and(|dial| dial.addrs == peer.dial);
             if same_dial || (peer.dial.is_empty() && entry.dial.is_none()) {
@@ -212,6 +269,8 @@ impl Lanes {
                 }
             });
         }
+        *inner.keys.lock().expect("lane keys mutex poisoned") =
+            peers.iter().map(|(&id, entry)| (entry.key, (id, entry.membership.clone()))).collect();
         Ok(())
     }
 
@@ -237,7 +296,7 @@ impl Lanes {
             async move {
                 let deadline = started + inner.config.handshake_deadline;
                 let first_record = started + FIRST_RECORD_DEADLINE;
-                let resolve = |key: &PublicKey| inner.keys.lock().expect("lane keys mutex poisoned").get(key).copied();
+                let resolve = |key: &PublicKey| inner.keys.lock().expect("lane keys mutex poisoned").get(key).cloned();
                 let accepted = lane::accept(stream, prefix, Arc::clone(&inner.server), resolve, first_record, deadline).await;
                 drop(ticket);
                 match accepted {
@@ -283,13 +342,23 @@ impl Lanes {
         if inner.is_going_away() {
             return Err(OpenLaneError::GoingAway(peer));
         }
-        let book = inner.stream_book(peer)?;
-        let lane = match inner.take_warm(peer)? {
-            Some(Ok(lane)) => lane,
-            Some(Err(plan)) => inner.dial_now(peer, plan, &book).await?,
-            None => holder::claim(inner, peer, &book).await?,
+        let (book, membership) = {
+            let peers = inner.lock_peers();
+            let entry = peers.get(&peer).ok_or(OpenLaneError::NotEnabled(peer))?;
+            (inner.stream_book(peer, entry)?, entry.membership.clone())
         };
-        Ok(stream::initiate(lane, book))
+        let (lane, generation) = match inner.take_warm(peer, &membership, &book)? {
+            Some(DialChoice { generation, lane }) => {
+                let lane = match lane {
+                    Ok(lane) => lane,
+                    Err(plan) => inner.dial_now(peer, plan, &generation).await?,
+                };
+                (lane, Some(generation))
+            }
+            None => (holder::claim(inner, peer, &membership, &book).await?, None),
+        };
+        let (book, revoked) = inner.register_stream(lane.peer, &lane.membership, generation.as_ref())?;
+        Ok(stream::initiate(lane, book, revoked))
     }
 
     /// 现在能不能在 lane 上到 `peer` 开流（不保证池里马上有）。不能的话调用方直接走共用的连接，不用试。
@@ -384,8 +453,8 @@ impl Lanes {
 
     /// 记下一条本来要走 lane、改走了共用连接的流。
     pub fn note_fallback(&self, peer: NodeId) {
-        if let Some(book) = self.inner.book(peer) {
-            book.bump(|tally| &tally.fallbacks);
+        if let Some(entry) = self.inner.lock_peers().get(&peer) {
+            self.inner.book(entry).bump(|tally| &tally.fallbacks);
         }
     }
 }
@@ -419,52 +488,61 @@ impl Inner {
         let peer = lane.peer;
         {
             let mut peers = self.lock_peers();
-            let Some(entry) = peers.get_mut(&peer) else {
+            let Some(entry) = peers.get_mut(&peer).filter(|entry| entry.matches(&lane.membership)) else {
                 drop(peers);
-                return self.refuse(peer, "没有为这个节点打开 ice3proxy");
+                return self.refuse(peer, &lane.membership, "对端的 lane 授权已经失效");
             };
             if entry.own_waiting >= MAX_OWN_WAITING_PER_PEER {
                 drop(peers);
-                return self.refuse(peer, "它等着开流的 lane 到了上限");
+                return self.refuse(peer, &lane.membership, "它等着开流的 lane 到了上限");
             }
             entry.own_waiting += 1;
         }
         let inner = Arc::clone(self);
         tokio::spawn(async move {
             let mut shutdown = inner.shutdown.clone();
+            let mut membership = lane.membership.clone();
             let opening = tokio::select! {
                 _ = shutdown.changed() => Ok(None),
+                _ = membership.changed() => return,
                 opening = dialler::await_opening(&mut lane) => opening,
             };
-            if let Some(entry) = inner.lock_peers().get_mut(&peer) {
-                entry.own_waiting -= 1;
-            }
+            inner.finish_own_wait(peer, &membership);
             match opening {
-                Ok(Some(opening)) => inner.deliver(lane, &opening),
+                Ok(Some(opening)) => inner.deliver(lane, &opening, None),
                 Ok(None) => {}
                 Err(error) => tracing::debug!(%peer, %error, "对方的一条 lane 没有开流就结束了"),
             }
         });
     }
 
+    fn finish_own_wait(&self, peer: NodeId, membership: &watch::Receiver<()>) {
+        if let Some(entry) = self.lock_peers().get_mut(&peer).filter(|entry| entry.matches(membership)) {
+            entry.own_waiting -= 1;
+        }
+    }
+
     /// 对方在一条 lane 上开了流：交给接受队列。
-    pub(crate) fn deliver(&self, lane: Lane, opening: &Opening) {
+    pub(crate) fn deliver(&self, lane: Lane, opening: &Opening, generation: Option<&Arc<Notify>>) {
         let peer = lane.peer;
-        let Ok(book) = self.stream_book(peer) else { return self.refuse(peer, "和它之间在用的 lane 到了上限") };
-        let incoming = dialler::incoming(lane, opening, book);
+        let (book, revoked) = match self.register_stream(peer, &lane.membership, generation) {
+            Ok(registered) => registered,
+            Err(error) => return self.refuse(peer, &lane.membership, &error.to_string()),
+        };
+        let (send, recv) = stream::respond(lane, opening.payload, &opening.header, book, revoked);
+        let incoming = Incoming { peer, send, recv };
         // 接受队列没有人在收（本节点在关闭）：流被丢弃，对方看到重置。
         let _ = self.incoming.send(incoming);
     }
 
-    /// 记 `peer` 的数用的：它的一份和全节点的一份。它不在时是 `None`。
-    pub(crate) fn book(&self, peer: NodeId) -> Option<Book> {
-        let peers = self.lock_peers();
-        Some(Book { node: Arc::clone(&self.counters), peer: Arc::clone(&peers.get(&peer)?.tally) })
+    /// 记当前对端的一份和全节点的一份。
+    fn book(&self, entry: &Peer) -> Book {
+        Book { node: Arc::clone(&self.counters), peer: Arc::clone(&entry.tally) }
     }
 
     /// 一条 lane 开始承载流时用的计数。和这个对端之间在用的到了上限时失败。
-    fn stream_book(&self, peer: NodeId) -> Result<Book, OpenLaneError> {
-        let book = self.book(peer).ok_or(OpenLaneError::NotEnabled(peer))?;
+    fn stream_book(&self, peer: NodeId, entry: &Peer) -> Result<Book, OpenLaneError> {
+        let book = self.book(entry);
         let in_use = usize::try_from(book.peer.in_use.get()).unwrap_or(usize::MAX);
         if in_use >= MAX_IN_USE_PER_PEER {
             return Err(OpenLaneError::TooMany(peer));
@@ -472,11 +550,31 @@ impl Inner {
         Ok(book)
     }
 
+    /// 在对端表锁内核对授权和拨号代次，并订阅吊销信号。netmap 更新不会漏掉已经登记的流。
+    fn register_stream(
+        &self,
+        peer: NodeId,
+        membership: &watch::Receiver<()>,
+        generation: Option<&Arc<Notify>>,
+    ) -> Result<(Book, watch::Receiver<bool>), OpenLaneError> {
+        let peers = self.lock_peers();
+        let entry = peers.get(&peer).filter(|entry| entry.matches(membership)).ok_or(OpenLaneError::NotEnabled(peer))?;
+        if let Some(generation) = generation
+            && !entry.dial.as_ref().is_some_and(|dial| dial.matches(generation))
+        {
+            return Err(OpenLaneError::NoControl(peer));
+        }
+        let book = self.stream_book(peer, entry)?;
+        let mut active = self.active.lock().expect("lane active mutex poisoned");
+        let active = active.entry(peer).or_insert_with(|| ActivePeer { key: entry.key, revoked: watch::Sender::new(false) });
+        Ok((book, active.revoked.subscribe()))
+    }
+
     /// 握手完成之后因为用途或者数量不对关掉一条 lane。对方是认证过的节点，但它可以一直这样做，所以只记 debug。
-    pub(crate) fn refuse(&self, peer: NodeId, reason: &str) {
-        match self.book(peer) {
-            Some(book) => book.bump(|tally| &tally.refused),
-            None => self.counters.all.refused.bump(),
+    pub(crate) fn refuse(&self, peer: NodeId, membership: &watch::Receiver<()>, reason: &str) {
+        self.counters.all.refused.bump();
+        if let Some(entry) = self.lock_peers().get(&peer).filter(|entry| entry.matches(membership)) {
+            entry.tally.refused.bump();
         }
         tracing::debug!(%peer, reason, "关掉了对方拨来的一条 lane");
     }
@@ -509,10 +607,10 @@ impl Inner {
         }
     }
 
-    /// 取一条热 lane。`Ok(None)`：本节点不拨这个对端（去它停过来的 lane 里取）；`Ok(Some(Err(_)))`：热的没有了，要当场拨。
-    fn take_warm(&self, peer: NodeId) -> Result<Option<Result<Lane, DialPlan>>, OpenLaneError> {
+    /// 先取热 lane。热的用完就当场拨，本节点不拨时则从对方停过来的 lane 里取。
+    fn take_warm(&self, peer: NodeId, membership: &watch::Receiver<()>, book: &Book) -> Result<Option<DialChoice>, OpenLaneError> {
         let mut peers = self.lock_peers();
-        let entry = peers.get_mut(&peer).ok_or(OpenLaneError::NotEnabled(peer))?;
+        let entry = peers.get_mut(&peer).filter(|entry| entry.matches(membership)).ok_or(OpenLaneError::NotEnabled(peer))?;
         let Some(dial) = &mut entry.dial else { return Ok(None) };
         if dial.peer_going_away {
             return Err(OpenLaneError::GoingAway(peer));
@@ -525,69 +623,80 @@ impl Inner {
         dial.wake.notify_one();
         while let Some(lane) = dial.warm.pop_back() {
             if lane.is_usable() {
-                return Ok(Some(Ok(lane)));
+                return Ok(Some(DialChoice { generation: Arc::clone(&dial.wake), lane: Ok(lane) }));
             }
         }
-        Ok(Some(Err(DialPlan { addrs: dial.addrs_in_order(), config: Arc::clone(&dial.config) })))
+        Ok(Some(DialChoice { generation: Arc::clone(&dial.wake), lane: Err(DialPlan::new(dial, membership, book.clone())) }))
     }
 
     /// 当场拨一条 lane 给自己开流。HELLO 留在待发的密文里，和开流的帧一起走。
-    async fn dial_now(&self, peer: NodeId, plan: DialPlan, book: &Book) -> Result<Lane, OpenLaneError> {
+    async fn dial_now(&self, peer: NodeId, plan: DialPlan, generation: &Arc<Notify>) -> Result<Lane, OpenLaneError> {
         let dial = Dial {
             addrs: &plan.addrs,
             config: plan.config,
             peer,
             purpose: Purpose::Own,
+            membership: plan.membership.clone(),
             epoch: 0,
             deadline: Instant::now() + OWN_DIAL_DEADLINE,
         };
         let started = Instant::now();
         let dialled = {
-            let _dialling = book.enter(|tally| &tally.dialling);
-            lane::dial(dial).await
+            let _dialling = plan.book.enter(|tally| &tally.dialling);
+            let mut removed = plan.membership;
+            tokio::select! {
+                biased;
+                _ = removed.changed() => return Err(OpenLaneError::NotEnabled(peer)),
+                result = lane::dial(dial) => result,
+            }
         };
         match dialled {
             Ok((lane, addr)) => {
-                self.remember_good(peer, addr);
-                self.note_dial_time(peer, started.elapsed());
+                self.remember_good(peer, generation, addr);
+                self.note_dial_time(peer, generation, started.elapsed());
                 Ok(lane)
             }
             Err(source) => {
-                book.bump(|tally| &tally.dial_failures);
-                book.bump(|tally| &tally.claims_failed);
+                plan.book.bump(|tally| &tally.dial_failures);
+                plan.book.bump(|tally| &tally.claims_failed);
                 Err(OpenLaneError::Dial { peer, source })
             }
         }
     }
 
-    pub(crate) fn dial_plan(&self, peer: NodeId) -> Option<DialPlan> {
+    pub(crate) fn dial_plan(&self, peer: NodeId, generation: &Arc<Notify>) -> Option<DialPlan> {
         let peers = self.lock_peers();
-        let dial = peers.get(&peer)?.dial.as_ref()?;
-        Some(DialPlan { addrs: dial.addrs_in_order(), config: Arc::clone(&dial.config) })
+        let entry = peers.get(&peer)?;
+        let dial = entry.dial.as_ref().filter(|dial| dial.matches(generation))?;
+        Some(DialPlan::new(dial, &entry.membership, self.book(entry)))
     }
 
-    pub(crate) fn remember_good(&self, peer: NodeId, addr: SocketAddr) {
-        if let Some(dial) = self.lock_peers().get_mut(&peer).and_then(|entry| entry.dial.as_mut()) {
+    pub(crate) fn remember_good(&self, peer: NodeId, generation: &Arc<Notify>, addr: SocketAddr) {
+        if let Some(dial) = Self::dial_mut(&mut self.lock_peers(), peer, generation) {
             dial.last_good = Some(addr);
         }
     }
 
     /// 热 lane 的条数，和对方是不是说了要走。本节点不拨它时返回 `None`。
-    pub(crate) fn warm_state(&self, peer: NodeId) -> Option<(usize, bool)> {
+    pub(crate) fn warm_state(&self, peer: NodeId, generation: &Arc<Notify>) -> Option<(usize, bool)> {
         let peers = self.lock_peers();
-        let dial = peers.get(&peer)?.dial.as_ref()?;
+        let dial = peers.get(&peer)?.dial.as_ref().filter(|dial| dial.matches(generation))?;
         Some((dial.warm.len(), dial.peer_going_away))
     }
 
-    pub(crate) fn add_warm(&self, peer: NodeId, lane: Lane) {
-        if let Some(dial) = self.lock_peers().get_mut(&peer).and_then(|entry| entry.dial.as_mut()) {
+    pub(crate) fn add_warm(&self, lane: Lane, generation: &Arc<Notify>) {
+        if let Some(dial) = Self::dial_mut(&mut self.lock_peers(), lane.peer, generation) {
             dial.warm.push_back(lane);
         }
     }
 
+    fn dial_mut<'a>(peers: &'a mut HashMap<NodeId, Peer>, peer: NodeId, generation: &Arc<Notify>) -> Option<&'a mut DialSide> {
+        peers.get_mut(&peer)?.dial.as_mut().filter(|dial| dial.matches(generation))
+    }
+
     /// 一次拨号（连上加握手）用了多久：拨号方据此估计补一条热 lane 要多久。
-    pub(crate) fn note_dial_time(&self, peer: NodeId, took: Duration) {
-        if let Some(dial) = self.lock_peers().get_mut(&peer).and_then(|entry| entry.dial.as_mut()) {
+    pub(crate) fn note_dial_time(&self, peer: NodeId, generation: &Arc<Notify>, took: Duration) {
+        if let Some(dial) = Self::dial_mut(&mut self.lock_peers(), peer, generation) {
             dial.dial_time = Some(dial.dial_time.map_or(took, |average| (average * 7 + took) / 8));
         }
     }
@@ -597,9 +706,9 @@ impl Inner {
     ///
     /// 本节点还没有往这个对端开过流时是 0：网关里出口拨入口，只为入口停 lane，自己从不往入口开流，备着的热 lane 白占连接。
     /// 第一条流当场拨，之后才按速率备。
-    pub(crate) fn size_ready(&self, peer: NodeId) -> Option<usize> {
+    pub(crate) fn size_ready(&self, peer: NodeId, generation: &Arc<Notify>) -> Option<usize> {
         let mut peers = self.lock_peers();
-        let dial = peers.get_mut(&peer)?.dial.as_mut()?;
+        let dial = Self::dial_mut(&mut peers, peer, generation)?;
         let now = std::time::Instant::now();
         let Some(demand) = dial.own.as_mut() else { return Some(0) };
         demand.update(now);
@@ -613,14 +722,14 @@ impl Inner {
         Some(target)
     }
 
-    pub(crate) fn set_parked(&self, peer: NodeId, parked: usize) {
-        if let Some(dial) = self.lock_peers().get_mut(&peer).and_then(|entry| entry.dial.as_mut()) {
+    pub(crate) fn set_parked(&self, peer: NodeId, generation: &Arc<Notify>, parked: usize) {
+        if let Some(dial) = Self::dial_mut(&mut self.lock_peers(), peer, generation) {
             dial.parked = parked;
         }
     }
 
-    pub(crate) fn set_control_up(&self, peer: NodeId, up: bool) {
-        if let Some(dial) = self.lock_peers().get_mut(&peer).and_then(|entry| entry.dial.as_mut()) {
+    pub(crate) fn set_control_up(&self, peer: NodeId, generation: &Arc<Notify>, up: bool) {
+        if let Some(dial) = Self::dial_mut(&mut self.lock_peers(), peer, generation) {
             dial.control_up = up;
             if up {
                 // "要走"只对说它的那条控制 lane 算数：新的控制 lane 被接受了，说明对方（重启过的，或者撤销了排空的）又在接新的流。
@@ -632,11 +741,12 @@ impl Inner {
         }
     }
 
-    pub(crate) fn peer_going_away(&self, peer: NodeId) {
-        if let Some(dial) = self.lock_peers().get_mut(&peer).and_then(|entry| entry.dial.as_mut()) {
-            dial.peer_going_away = true;
-            dial.warm.clear();
-        }
+    pub(crate) fn peer_going_away(&self, peer: NodeId, generation: &Arc<Notify>) {
+        let mut peers = self.lock_peers();
+        let Some(dial) = Self::dial_mut(&mut peers, peer, generation) else { return };
+        dial.peer_going_away = true;
+        dial.warm.clear();
+        drop(peers);
         tracing::info!(%peer, "对方说它要走了，不再拨新的 lane，也不再在 lane 上往它开流");
     }
 }
@@ -682,7 +792,13 @@ impl Acceptor for Lanes {
     type Recv = LaneRecv;
 
     async fn accept(&self) -> Option<Incoming<LaneSend, LaneRecv>> {
-        self.inner.accepted.lock().await.recv().await
+        let mut accepted = self.inner.accepted.lock().await;
+        loop {
+            let incoming = accepted.recv().await?;
+            if !incoming.recv.is_revoked() {
+                return Some(incoming);
+            }
+        }
     }
 }
 
@@ -715,5 +831,96 @@ impl DatagramSender for NoDatagrams {
 
     async fn send_reliable(&self, peer: NodeId, _datagram: Bytes) -> Result<(), DatagramSendError> {
         Err(DatagramSendError::Unsupported(peer))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replacing_a_peer_rejects_old_lane_memberships() {
+        for rotate_key in [false, true] {
+            let local = NodeKey::generate().unwrap();
+            let key = NodeKey::generate().unwrap().public();
+            let id = NodeId::new(1).unwrap();
+            let endpoint = Lanes::new(&local, LaneConfig::default()).unwrap();
+            let peer = LanePeer { id, key, dial: Vec::new() };
+
+            endpoint.set_peers([peer.clone()]).unwrap();
+            let before = endpoint.inner.lock_peers().get(&id).unwrap().membership.clone();
+            if rotate_key {
+                let key = NodeKey::generate().unwrap().public();
+                endpoint.set_peers([LanePeer { key, ..peer }]).unwrap();
+            } else {
+                endpoint.set_peers([]).unwrap();
+                endpoint.set_peers([peer]).unwrap();
+            }
+            assert!(before.has_changed().is_err());
+
+            let after = {
+                let mut peers = endpoint.inner.lock_peers();
+                let current = peers.get_mut(&id).unwrap();
+                assert!(!current.matches(&before));
+                assert_eq!(current.own_waiting, 0);
+                current.own_waiting = 1;
+                current.membership.clone()
+            };
+
+            // 自己的 lane 和拨出去的停车 lane 共用这道检查。
+            let old_dialler = Arc::new(Notify::new());
+            for generation in [None, Some(&old_dialler)] {
+                assert!(
+                    matches!(endpoint.inner.register_stream(id, &before, generation), Err(OpenLaneError::NotEnabled(peer)) if peer == id)
+                );
+                endpoint.inner.refuse(id, &before, "旧的 lane 授权");
+            }
+            let status = endpoint.status();
+            assert_eq!(status.total.refused, 2);
+            assert_eq!(status.peer(id).unwrap().counts.refused, 0);
+
+            endpoint.inner.finish_own_wait(id, &before);
+            assert_eq!(endpoint.inner.lock_peers().get(&id).unwrap().own_waiting, 1);
+            endpoint.inner.finish_own_wait(id, &after);
+            assert_eq!(endpoint.inner.lock_peers().get(&id).unwrap().own_waiting, 0);
+            assert!(endpoint.inner.register_stream(id, &after, None).is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn replacing_the_dialler_does_not_replace_the_membership() {
+        let local = NodeKey::generate().unwrap();
+        let key = NodeKey::generate().unwrap().public();
+        let id = NodeId::new(1).unwrap();
+        let endpoint = Lanes::new(&local, LaneConfig::default()).unwrap();
+        let peer = LanePeer { id, key, dial: vec![([127, 0, 0, 1], 1).into()] };
+        endpoint.set_peers([peer.clone()]).unwrap();
+        let (membership, first) = {
+            let peers = endpoint.inner.lock_peers();
+            let entry = peers.get(&id).unwrap();
+            (entry.membership.clone(), Arc::clone(&entry.dial.as_ref().unwrap().wake))
+        };
+
+        endpoint.address_changed();
+        let second = {
+            let peers = endpoint.inner.lock_peers();
+            let entry = peers.get(&id).unwrap();
+            assert!(entry.matches(&membership));
+            Arc::clone(&entry.dial.as_ref().unwrap().wake)
+        };
+        assert!(endpoint.inner.dial_plan(id, &first).is_none());
+        assert!(endpoint.inner.dial_plan(id, &second).is_some());
+        assert!(matches!(endpoint.inner.register_stream(id, &membership, Some(&first)), Err(OpenLaneError::NoControl(peer)) if peer == id));
+        assert!(endpoint.inner.register_stream(id, &membership, Some(&second)).is_ok());
+
+        endpoint.set_peers([LanePeer { dial: vec![([127, 0, 0, 1], 2).into()], ..peer }]).unwrap();
+        endpoint.inner.set_control_up(id, &second, true);
+        endpoint.inner.set_parked(id, &second, 1);
+        let status = endpoint.status();
+        let current = status.peer(id).unwrap();
+        assert!(current.dials);
+        assert!(!current.control);
+        assert_eq!(current.parked_at_peer, 0);
+        assert!(endpoint.inner.lock_peers().get(&id).unwrap().matches(&membership));
     }
 }

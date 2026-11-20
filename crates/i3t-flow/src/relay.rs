@@ -39,13 +39,14 @@ use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use i3t_conn::contract::Priority;
+use i3t_conn::contract::{Priority, wait_revoked};
 use i3t_conn::{RawRead, RawWrite, RecvStream, SendStream, StreamAborted, StreamCode};
 use i3t_proto::flow::{Class, Reason, Reply};
 use socket2::{SockRef, TcpKeepalive};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{ReadHalf, WriteHalf};
+use tokio::sync::watch;
 
 use crate::engine::{Gate, PumpError, Splicer};
 use crate::meter::{Direction, Meter, Unmetered};
@@ -306,6 +307,9 @@ pub(crate) async fn run<S: SendStream, R: RecvStream>(
     framing: Option<&mut (dyn Framing + Send)>,
 ) -> Summary {
     let Parts { mut send, mut recv, role, class, started, reply_pending } = parts;
+    // 直接搬的方向已经绕过流接口，仍需要和普通方向一样响应吊销。
+    let revocation = recv.revocation();
+    let cancel = cancel_on_revocation(cancel, revocation.clone());
     // 先设成"关闭时发 RST"。这个选项只管 close，中途用 shutdown 发的 FIN 不受影响。
     if let Err(error) = tcp.set_zero_linger() {
         tracing::warn!(%error, "设置不了 SO_LINGER，搬运中断时 TCP 一侧可能看到正常结束");
@@ -337,6 +341,10 @@ pub(crate) async fn run<S: SendStream, R: RecvStream>(
         outcome => outcome,
     };
 
+    // 最后一次搬运和吊销可能并发完成，恢复正常关闭前再核对一次。
+    let outcome =
+        if revocation.as_ref().is_some_and(|state| *state.borrow()) { Err(Abort::Cancelled(Reason::AccessRevoked)) } else { outcome };
+
     let end = match outcome {
         Ok(()) => {
             // 两头写的一半都是用 `tcp_reset::shutdown_write` 关的：macOS 上那时已经改回了正常关闭（见 `i3t_underlay::tcp_reset`）。
@@ -357,17 +365,25 @@ pub(crate) async fn run<S: SendStream, R: RecvStream>(
             recv.stop(code);
             // 交出来直接搬的 ice3proxy 不归流管，上面两句碰不到它。它的一个方向可能已经正常结束过，macOS 上那时改回了
             // 正常关闭：这里重新设成关闭时发 RST，对端才知道流断了。
-            if let Some(lane) = lane.get()
-                && let Err(error) = lane.set_zero_linger()
-            {
-                tracing::debug!(%error, "ice3proxy 设不回关闭时发 RST，对端可能看到正常结束");
+            // 两边刚写过数据时，macOS 上要留着 socket 等对端确认，见 `i3t_underlay::tcp_reset`。
+            if let Some(lane) = lane.into_inner() {
+                i3t_underlay::tcp_reset::close(lane);
             }
-            // 刚往 TCP 那一头写过数据就重置时，macOS 上的对端可能不认这个 RST，一直等下去（见 `i3t_underlay::tcp_reset`）。
             i3t_underlay::tcp_reset::close(tcp);
             End::from(abort)
         }
     };
     Summary { from_tcp, from_flow, end }
+}
+
+/// 流的身份吊销和调用者取消一起监听。吊销优先于继续搬运。
+pub(crate) async fn cancel_on_revocation(cancel: impl Future<Output = Reason>, revocation: Option<watch::Receiver<bool>>) -> Reason {
+    let Some(revocation) = revocation else { return cancel.await };
+    tokio::select! {
+        biased;
+        () = wait_revoked(revocation) => Reason::AccessRevoked,
+        reason = cancel => reason,
+    }
 }
 
 /// 同时跑两个方向，决定整次搬运的结局。
