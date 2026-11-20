@@ -8,9 +8,9 @@ use i3t_lang::{Lang, NONE, optional};
 use i3t_model::admin::stats::{SeriesView, Unit};
 use i3t_model::admin::{
     AccessCheck, AccessGraph, BackboneView, CreatedEnrollToken, DeletedGroup, Direction, EnrollTokenInfo, ExitTestView, ExitView,
-    ForcedUpdates, Forward, Group, GroupRef, LaneEffect, ListenStatus, LogEntry, Network, Node, NodeAccess, NodeDetail, NodeListeners,
-    NodeRef, NodeUpdate, Overview, PairLaneSide, PairView, PathLeg, PathSource, PathView, Proxy, RelayEnabled, RelayReach, RouteMatrix,
-    RouteTable, Rule, Status, UpdateOverview,
+    ForcedUpdates, Forward, Group, GroupRef, LaneSide, ListenStatus, LogEntry, Network, Node, NodeAccess, NodeDetail, NodeListeners,
+    NodeRef, NodeUpdate, Overview, PairView, PathLeg, PathSource, PathView, Proxy, RelayEnabled, RelayReach, RouteMatrix, RouteTable, Rule,
+    Status, UpdateOverview,
 };
 use i3t_model::control::exit_test::ExitTestCause;
 use i3t_model::control::{
@@ -978,6 +978,7 @@ pub fn proxies(proxies: &[Proxy], names: &Names) {
             label(&proxy.protocol),
             optional(proxy.exit.map(|exit| names.of(exit))),
             if proxy.username.is_empty() { t.no.to_owned() } else { proxy.username.clone() },
+            proxy_lane_cell(proxy),
             (codes.proxy_status)(&proxy.status),
             format!("{}  ↑ {}  ↓ {}", proxy.usage.connections, lang.bytes(proxy.usage.bytes_up), lang.bytes(proxy.usage.bytes_down)),
             proxy.name.clone(),
@@ -1008,6 +1009,22 @@ pub fn proxy(proxy: &Proxy, names: &Names) {
         t.usage,
         format!("{}  ↑ {}  ↓ {}", proxy.usage.connections, lang.bytes(proxy.usage.bytes_up), lang.bytes(proxy.usage.bytes_down)),
     );
+    fields.add(t.lanes, proxy_lane_cell(proxy));
+    if let Some(effect) = &proxy.lane_effect {
+        if !effect.dialers.is_empty() {
+            fields.add(t.dialers, lang.list(effect.dialers.iter().map(|id| names.of(*id))));
+        }
+        for block in &effect.blocked {
+            fields.add(t.no_effect, (codes.lane_block)(block, &|id| names.of(id)));
+        }
+    }
+    for LaneSide { node, lanes, reported_secs_ago } in &proxy.lanes {
+        let label = match reported_secs_ago {
+            Some(ago) => format!("{} ({})", names.of(*node), lang.ago(*ago)),
+            None => names.of(*node),
+        };
+        fields.add(&label, peer_lanes(lanes));
+    }
     // 写成网址：大多数程序的代理设置照抄就行。地址写 0.0.0.0 时换成节点上的某个地址，这里写不出来，照原样。
     let login = if anonymous { String::new() } else { format!("{}:{}@", proxy.username, proxy.password) };
     let scheme = match proxy.protocol {
@@ -1058,18 +1075,11 @@ pub fn pairs(pairs: &[PairView]) {
     let mut table = Table::new(&t.pairs_header);
     for pair in pairs {
         let setting = &pair.setting;
-        let effect = pair.lane_effect.as_ref().map_or_else(|| NONE.to_owned(), lane_effect_cell);
-        let in_use: u64 = pair.lanes.iter().map(|side| side.lanes.counts.in_use).sum();
-        let fallbacks: u64 = pair.lanes.iter().map(|side| side.lanes.counts.fallbacks).sum();
         table.row(vec![
             format!("#{}", setting.a),
             format!("#{}", setting.b),
             yes_no(setting.keep_alive),
-            setting.lane.to_string(),
             setting.congestion.map_or_else(|| t.congestion_default.to_owned(), |algorithm| algorithm.to_string()),
-            effect,
-            in_use.to_string(),
-            fallbacks.to_string(),
         ]);
     }
     print_table(&table, t.no_pairs);
@@ -1077,46 +1087,23 @@ pub fn pairs(pairs: &[PairView]) {
 }
 
 pub fn pair(pair: &PairView) {
-    let (t, lang, codes) = context();
+    let (t, lang, _) = context();
     let setting = &pair.setting;
-    println!("#{} ↔ #{}", setting.a, setting.b);
+    let title = format!("#{} ↔ #{}", setting.a, setting.b);
+    println!("{}", if pair.stored { title } else { lang.paren(&title, t.pair_default) });
     let mut fields = Fields::new(2);
     fields.add(t.keep_alive, yes_no(setting.keep_alive));
-    let lane = setting.lane.to_string();
-    fields.add(t.lanes, if pair.stored { lane } else { lang.paren(&lane, t.pair_default) });
     fields.add(t.congestion, setting.congestion.map_or_else(|| t.congestion_default.to_owned(), |algorithm| algorithm.to_string()));
-    let names = |id: NodeId| format!("#{id}");
-    if let Some(effect) = &pair.lane_effect {
-        fields.add(t.lane_effect, lane_effect_cell(effect));
-        if !effect.dialers.is_empty() {
-            fields.add(t.dialers, lang.list(effect.dialers.iter().map(|id| format!("#{id}"))));
-        }
-        for block in &effect.blocked {
-            fields.add(t.no_effect, (codes.lane_block)(block, &names));
-        }
-        for opening in &effect.opening {
-            let path = if opening.udp_path { t.udp_path } else { t.no_udp_path };
-            let lanes = if opening.lanes { t.new_streams_on_lanes } else { t.new_streams_shared };
-            fields.add(&format!("#{}", opening.node), lang.paren(lanes, path));
-        }
-    }
-    for PairLaneSide { node, lanes, reported_secs_ago } in &pair.lanes {
-        let label = match reported_secs_ago {
-            Some(ago) => format!("#{node} ({})", lang.ago(*ago)),
-            None => format!("#{node}"),
-        };
-        fields.add(&label, peer_lanes(lanes));
-    }
     fields.print();
 }
 
-fn lane_effect_cell(effect: &LaneEffect) -> String {
-    let (t, lang, codes) = context();
-    if effect.effective {
-        return t.in_effect.to_owned();
+/// 代理走不走 ice3proxy；走而起不了作用时带上"未生效"（原因在详情里）。
+fn proxy_lane_cell(proxy: &Proxy) -> String {
+    let (t, lang, _) = context();
+    match &proxy.lane_effect {
+        Some(effect) if proxy.lane && !effect.effective => lang.paren(t.yes, t.no_effect),
+        Some(_) | None => yes_no(proxy.lane),
     }
-    let names = |id: NodeId| format!("#{id}");
-    lang.paren(t.no_effect, &lang.list(effect.blocked.iter().map(|block| (codes.lane_block)(block, &names))))
 }
 
 /// 和一个对端之间的 lane，一行。

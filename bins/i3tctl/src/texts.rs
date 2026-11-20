@@ -147,6 +147,8 @@ pub struct Help {
     pub proxy_set_class: &'static str,
     pub proxy_set_optimistic: &'static str,
     pub proxy_enabled: &'static str,
+    pub proxy_ice3proxy: &'static str,
+    pub proxy_set_ice3proxy: &'static str,
     pub proxy_delete: &'static str,
     pub forward_group: &'static str,
     pub forward_list: &'static str,
@@ -161,7 +163,6 @@ pub struct Help {
     pub pair_show: &'static str,
     pub pair_set: &'static str,
     pub pair_keep_alive: &'static str,
-    pub pair_lane: &'static str,
     pub pair_congestion: &'static str,
     pub pair_unset: &'static str,
     pub access_group: &'static str,
@@ -454,7 +455,7 @@ pub struct Ui {
     pub rules_header: [&'static str; 6],
     pub no_rules: &'static str,
     pub rule: &'static str,
-    pub proxies_header: [&'static str; 9],
+    pub proxies_header: [&'static str; 10],
     pub no_proxies: &'static str,
     pub proxy: &'static str,
     pub listen_node: &'static str,
@@ -468,25 +469,19 @@ pub struct Ui {
     pub proxy_use: &'static str,
     pub forwards_header: [&'static str; 10],
     pub no_forwards: &'static str,
-    pub pairs_header: [&'static str; 8],
+    pub pairs_header: [&'static str; 4],
     pub no_pairs: &'static str,
     /// 节点对列表下面的一行：没有列出的节点对用什么。
     pub pairs_default: &'static str,
-    /// 节点对没有存下的设置，这一项是默认值。
+    /// 节点对没有存下的设置，各项是默认值。
     pub pair_default: &'static str,
     pub keep_alive: &'static str,
     pub lanes: &'static str,
     pub congestion: &'static str,
     /// 节点对没有指定拥塞控制：用节点的默认。
     pub congestion_default: &'static str,
-    pub lane_effect: &'static str,
-    pub in_effect: &'static str,
     pub no_effect: &'static str,
     pub dialers: &'static str,
-    pub udp_path: &'static str,
-    pub no_udp_path: &'static str,
-    pub new_streams_on_lanes: &'static str,
-    pub new_streams_shared: &'static str,
     pub peer_lanes: fn(bool, bool, u64, u64, u64, &str) -> String,
     pub lane_counts: fn(&LaneCounts, &str) -> String,
     pub total: &'static str,
@@ -559,6 +554,9 @@ pub struct Ui {
     pub pair_unset: fn(u32, u32) -> String,
     pub bad_version: fn(&str) -> String,
     pub must_be: fn(&str) -> String,
+    /// `proxy add` 在终端上问的一句，默认不要。后面不换行，回答接在同一行。
+    pub ask_ice3proxy: &'static str,
+    pub answer_unreadable: &'static str,
     pub too_large: &'static str,
     pub url_scheme: fn(&str) -> String,
     pub http_client: &'static str,
@@ -644,7 +642,7 @@ mod tests {
     /// controller 记的每一种操作，带着它的参数。和 `docs/internal/admin-api.md` 第 3 节对得上。
     fn every_action() -> Vec<LogEntry> {
         let node = json!({ "node": 2, "node_name": "laptop" });
-        let pair = json!({ "a": 1, "a_name": "nas", "b": 2, "b_name": "laptop", "keep_alive": true, "lane": "always" });
+        let pair = json!({ "a": 1, "a_name": "nas", "b": 2, "b_name": "laptop", "keep_alive": true, "congestion": null });
         let rule = json!({
             "rule": 3, "rule_name": "ssh", "src": 1, "src_name": "All", "dst": 4, "dst_name": "servers", "direction": "one_way", "enabled": true
         });

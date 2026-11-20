@@ -1,7 +1,9 @@
 //! 认定哪些节点用不了 UDP：管理接口里节点的 `no_udp`，别的节点的 netmap 里它那一项的 `no_udp`。
 //!
-//! 用处：没有设置的节点对（`udp_fallback`）只在路上没有 UDP 时用 ice3proxy，可节点只看得见自己到对端的那一段。
+//! 用处：`udp_fallback` 只在路上没有 UDP 时用 ice3proxy，可节点只看得见自己到对端的那一段。
 //! 普通节点经一个 UDP 的中继到一个没有 UDP 的中继时，自己这一段有 UDP，看不出路上那一段 TCP；controller 看得出来，告诉它。
+//! 这个 controller 不再下发 `udp_fallback`（ice3proxy 是代理的选项，选了就一直走），netmap 里的 `no_udp` 只对还按它走的节点有用；
+//! 管理接口里节点的 `no_udp` 照旧给人看。
 //!
 //! - 证据是节点上报的、试过的 relay 连没连上、经什么连上的（[`relay_reach::without_udp`]）。只在有节点报的结果变了之后、
 //!   在后台的下一轮重新算那个网络。
@@ -20,6 +22,7 @@ use i3t_proto::NodeId;
 
 use super::Inner;
 use crate::error::Error;
+use crate::netmap::NodeFacts;
 use crate::relay_reach;
 use crate::store::NodeRecord;
 
@@ -31,6 +34,12 @@ pub(crate) struct NoUdp {
     since: Instant,
     /// 已经算数（写进了它的对端的 netmap）。
     settled: bool,
+}
+
+impl NodeFacts for Inner {
+    fn has_no_udp(&self, node: NodeId) -> bool {
+        self.no_udp(node)
+    }
 }
 
 impl Inner {

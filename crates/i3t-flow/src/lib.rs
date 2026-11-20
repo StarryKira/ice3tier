@@ -5,7 +5,7 @@
 //!
 //! | 谁用 | 入口 | 做什么 |
 //! |---|---|---|
-//! | 发起方（入口模块） | [`open`]、[`Pending`] | 开流，把 OPEN 和首批数据一次写出去；等 REPLY，或者不等就开始搬运 |
+//! | 发起方（入口模块） | [`open`]、[`Pending`]、[`Carriage`] | 开流（只走共用的连接，或者能走 ice3proxy 时走它），把 OPEN 和首批数据一次写出去；等 REPLY，或者不等就开始搬运 |
 //! | 发起方（`i3t ping`） | [`ping`] | 在连接上量一个往返：接受方读到这种 OPEN 就回成功的 REPLY |
 //! | 接受方（出口模块） | [`serve`]、[`Handler`]、[`Request`] | 先按发起节点筛一遍，限时读 OPEN，交给处理者，由它接受或者拒绝 |
 //! | 两边 | [`Flow::relay`]、[`keep_alive`] | 在流和一条 TCP 连接之间双向搬运，如实传递半关闭和异常结束；TCP 那一头靠内核保活判断死活 |
@@ -38,7 +38,7 @@ mod splice;
 
 pub use acceptor::{Handler, OPEN_DEADLINE, Request, Screening, serve};
 pub use error::FlowError;
-pub use initiator::{Pending, open, ping};
+pub use initiator::{Carriage, Pending, open, ping};
 pub use meter::{Direction, Meter, Unmetered};
 pub use relay::{DEFAULT_BUFFER_LEN, End, Flow, Framing, KEEPALIVE, Summary, Traffic, buffer_len, keep_alive, set_buffer_len};
 pub use splice::Spliced;

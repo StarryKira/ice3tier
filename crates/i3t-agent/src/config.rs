@@ -398,6 +398,7 @@ impl fmt::Display for Capability {
 
 /// 本机的组网入口（`[proxy]`）：只通到组网里的节点，不经出口、不认证，只能绑回环地址。默认都不开：
 /// 节点不打开任何没有配过的代理端口。以前的版本默认开着 1080 和 1081，配置文件里写了这两个地址的照旧开着，意思变成了"只通到节点"。
+/// 它们不是 controller 下发的代理，没有 ice3proxy 的选项：流只走共用的连接。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Proxy {

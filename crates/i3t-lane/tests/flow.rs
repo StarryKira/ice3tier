@@ -103,7 +103,7 @@ async fn drain(stream: &mut (impl AsyncRead + Unpin)) -> (Vec<u8>, io::Result<()
 
 /// 流层：入口用 `open` + `established` + `relay`，出口用 `serve`。
 async fn through_flow(lanes: &Lanes, peer: NodeId, client_side: TcpStream, first_data: &[u8]) -> End {
-    let pending = i3t_flow::open(lanes, peer, &open_request(), first_data).await.unwrap();
+    let pending = i3t_flow::open(lanes, peer, &open_request(), first_data, i3t_flow::Carriage::Lane).await.unwrap();
     let flow = pending.established().await.unwrap();
     flow.relay(client_side, future::pending()).await.end
 }

@@ -36,6 +36,8 @@ pub struct ProxyRecord {
     pub allow_from: Vec<IpNet>,
     pub class: Option<Class>,
     pub optimistic: Option<bool>,
+    /// 这个代理的 TCP 流走 ice3proxy（白皮书 §9.7 第 9 条）。
+    pub lane: bool,
 }
 
 impl ProxyRecord {
@@ -61,6 +63,7 @@ impl ProxyRecord {
             allow_from: row.get::<_, Json<Vec<IpNet>>>("allow_from")?.0,
             class: row.get::<_, Option<Json<Class>>>("class")?.map(|json| json.0),
             optimistic: row.get("optimistic")?,
+            lane: row.get("lane")?,
         })
     }
 }
@@ -73,8 +76,8 @@ impl Store {
     /// 写数据库失败，包括同一个节点上已经有同名的代理。
     pub fn insert_proxy(&self, proxy: &ProxyRecord) -> Result<u32, StoreError> {
         self.conn.execute(
-            "INSERT INTO proxies (node_id, name, bind, protocol, exit_id, username, password, salt, enabled, allow_from, class, optimistic)
-             VALUES (:node, :name, :bind, :protocol, :exit, :username, :password, :salt, :enabled, :allow_from, :class, :optimistic)",
+            "INSERT INTO proxies (node_id, name, bind, protocol, exit_id, username, password, salt, enabled, allow_from, class, optimistic, lane)
+             VALUES (:node, :name, :bind, :protocol, :exit, :username, :password, :salt, :enabled, :allow_from, :class, :optimistic, :lane)",
             named_params! {
                 ":node": SqlNode(proxy.node),
                 ":name": proxy.name,
@@ -88,6 +91,7 @@ impl Store {
                 ":allow_from": Json(&proxy.allow_from),
                 ":class": proxy.class.map(Json),
                 ":optimistic": proxy.optimistic,
+                ":lane": proxy.lane,
             },
         )?;
         Ok(row_id(self.conn.last_insert_rowid())?)
@@ -125,7 +129,7 @@ impl Store {
         self.conn.execute(
             "UPDATE proxies SET node_id = :node, name = :name, bind = :bind, protocol = :protocol, exit_id = :exit, username = :username,
                                 password = :password, salt = :salt, enabled = :enabled, allow_from = :allow_from, class = :class,
-                                optimistic = :optimistic
+                                optimistic = :optimistic, lane = :lane
              WHERE id = :id",
             named_params! {
                 ":id": proxy.id,
@@ -141,6 +145,7 @@ impl Store {
                 ":allow_from": Json(&proxy.allow_from),
                 ":class": proxy.class.map(Json),
                 ":optimistic": proxy.optimistic,
+                ":lane": proxy.lane,
             },
         )?;
         Ok(())
@@ -175,6 +180,7 @@ mod tests {
             allow_from: vec!["192.168.1.0/24".parse().unwrap()],
             class: Some(Class::Reliable),
             optimistic: Some(false),
+            lane: true,
         }
     }
 
@@ -188,7 +194,7 @@ mod tests {
         assert_eq!(store.proxies(network).unwrap().len(), 2);
 
         let mut replacement =
-            ProxyRecord { id, protocol: ListenerProtocol::Http, enabled: false, class: None, ..record(nodes[2], "b", None) };
+            ProxyRecord { id, protocol: ListenerProtocol::Http, enabled: false, class: None, lane: false, ..record(nodes[2], "b", None) };
         replacement.username.clear();
         replacement.password.clear();
         store.update_proxy(&replacement).unwrap();

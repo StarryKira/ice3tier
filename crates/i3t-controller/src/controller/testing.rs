@@ -289,5 +289,6 @@ pub(crate) fn proxy(node: NodeId, bind: &str, exit: NodeId) -> CreateProxy {
         allow_from: Vec::new(),
         class: None,
         optimistic: None,
+        lane: false,
     }
 }

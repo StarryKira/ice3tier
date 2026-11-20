@@ -10,7 +10,7 @@ use std::time::Duration;
 use i3t_conn::contract::Priority;
 use i3t_conn::{RecvStream, SendStream};
 use i3t_flow::memory::MemoryMesh;
-use i3t_flow::{Handler, Request};
+use i3t_flow::{Carriage, Handler, Request};
 use i3t_proto::NodeId;
 use i3t_proto::flow::{Class, Open, Origin, Target};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -57,7 +57,7 @@ impl Path {
         let (client_far, _) = client_listener.accept().await.unwrap();
         let request = Open { target: Target::Node { port: 80 }, class, origin: Origin::default() };
         tokio::spawn(async move {
-            let flow = i3t_flow::open(&connector, node(EXIT), &request, b"").await.unwrap().established().await.unwrap();
+            let flow = i3t_flow::open(&connector, node(EXIT), &request, b"", Carriage::Shared).await.unwrap().established().await.unwrap();
             flow.relay(client_far, future::pending()).await;
         });
         let (target, _) = timeout(PATIENCE, target_listener.accept()).await.unwrap().unwrap();

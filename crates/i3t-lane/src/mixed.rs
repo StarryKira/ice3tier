@@ -24,7 +24,8 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::endpoint::Lanes;
 use crate::stream::{LaneRecv, LaneSend};
 
-/// 调用方决定一个对端的 TCP 流该不该走 lane：按节点对的设置，以及（"UDP 不通时用"时）现在共用连接的路有没有 UDP。
+/// 调用方决定到一个对端、要求走 ice3proxy 的流（`open_tcp`）现在该不该走 lane：和它之间备没备着，
+/// 以及（"UDP 不通时用"时）现在共用连接的路有没有 UDP。
 pub type Choose = Arc<dyn Fn(NodeId) -> bool + Send + Sync>;
 
 /// 开流：承载 TCP 连接的流按选择走 lane，其余的走共用的连接 `C`。

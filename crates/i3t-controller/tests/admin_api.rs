@@ -20,7 +20,7 @@ use i3t_model::control::{
     BackboneLink, BackboneRow, BindCause, Declared, DirectKind, EnrollToken, Hello, ListenState, ListenTraffic, PathCandidate, PathDetail,
     PathSegment, ProxyReport, RelayState, Report, Route, RouteAnswer, RouteCause, RouteEntry, RouteKind, SelfUpdate, ToController, ToNode,
 };
-use i3t_model::netmap::RoutingMode;
+use i3t_model::netmap::{LaneMode, RoutingMode};
 use i3t_model::update::{FailureKind, UpdateCause, UpdateStatus, UpdateTiming};
 use i3t_proto::{NodeId, PublicKey};
 use serde::de::DeserializeOwned;
@@ -514,15 +514,25 @@ async fn proxies_forwards_and_pairs_round_trip() {
         json!({
             "id": proxy_id, "name": format!("{gateway_name}-1080"), "node": gateway.id, "bind": "192.168.1.5:1080", "protocol": "mixed",
             "exit": exit.id, "username": username, "password": password, "enabled": true, "allow_from": ["192.168.1.0/24"],
-            "class": null, "optimistic": null, "status": { "code": "pending" }, "connections": 0, "bytes_up": 0, "bytes_down": 0
+            "class": null, "optimistic": null, "lane": false, "status": { "code": "pending" }, "lane_effect": null, "lanes": [],
+            "connections": 0, "bytes_up": 0, "bytes_down": 0
         }),
-        "节点在线、还没有报"
+        "节点在线、还没有报；没写 lane 就是不走 ice3proxy"
     );
     let shown: Value = api.ok(Method::GET, &format!("{base}/proxies/{proxy_id}"), None).await;
     assert_eq!(shown["password"], json!(password), "密码查得回来");
-    let local = json!({ "node": target.id, "name": "local", "bind": "127.0.0.1:1080", "exit": exit.id, "protocol": "http" });
+    let local = json!({ "node": target.id, "name": "local", "bind": "127.0.0.1:1080", "exit": exit.id, "protocol": "http", "lane": true });
     let local: model::Proxy = api.ok(Method::POST, &format!("{base}/proxies"), Some(local)).await;
     assert_eq!((local.username.as_str(), local.password.as_str()), ("", ""), "回环上的可以不认证");
+    // 选了 ice3proxy：两头的 netmap 里这一对是 always，代理的视图说它起不起作用（这两个节点都没有启用 relay，说的是最初那一版节点协议）。
+    assert!(local.lane);
+    let too_old = |node| model::LaneBlock::NodeTooOld { node };
+    assert_eq!(local.lane_effect.map(|effect| effect.blocked), Some(vec![model::LaneBlock::NoRelay, too_old(target.id), too_old(exit.id)]));
+    let lane_between = |a: NodeId, b| api.controller.netmap_of(a).unwrap().unwrap().peer(b).unwrap().lane;
+    assert_eq!((lane_between(target.id, exit.id), lane_between(exit.id, target.id)), (LaneMode::Always, LaneMode::Always));
+    assert_eq!(lane_between(gateway.id, exit.id), LaneMode::Off, "没选 ice3proxy 的代理那一对没有");
+    let unchosen: model::Proxy = api.ok(Method::PATCH, &format!("{base}/proxies/{}", local.id), Some(json!({ "lane": false }))).await;
+    assert_eq!((unchosen.lane, unchosen.lane_effect, lane_between(target.id, exit.id)), (false, None, LaneMode::Off));
     let all: Vec<model::Proxy> = api.ok(Method::GET, &format!("{base}/proxies"), None).await;
     assert_eq!(all.len(), 2);
     let on_gateway: Vec<model::Proxy> = api.ok(Method::GET, &format!("{base}/proxies?node={}", gateway.id), None).await;
@@ -615,17 +625,23 @@ async fn proxies_forwards_and_pairs_round_trip() {
     // 没有设置的一对也查得到：各项是默认值，`stored` 是 false。
     let (status, unset) = api.call(Method::GET, &pair_path, None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!((&unset["stored"], &unset["lane"], &unset["keep_alive"]), (&json!(false), &json!("udp_fallback"), &json!(false)), "{unset}");
+    assert_eq!(
+        unset,
+        json!({ "a": gateway.id, "b": target.id, "keep_alive": false, "congestion": null, "stored": false }),
+        "没有 ice3proxy 的东西了"
+    );
     api.fails(Method::GET, &format!("{base}/pairs/{0}/{0}", gateway.id), None, StatusCode::BAD_REQUEST).await;
     let pair: model::PairSetting = api.ok(Method::PUT, &pair_path, Some(json!({ "keep_alive": true }))).await;
     assert_eq!((pair.a, pair.b, pair.keep_alive), (gateway.id, target.id, true), "编号小的在前");
     let pairs: Vec<model::PairSetting> = api.ok(Method::GET, &format!("{base}/pairs"), None).await;
     assert_eq!(pairs, vec![pair]);
-    // 只改 ice3proxy，常驻不变；应答说明设置起不起作用。
-    let view: model::PairView = api.ok(Method::PUT, &pair_path, Some(json!({ "lane": "always" }))).await;
-    assert_eq!((view.setting.keep_alive, view.setting.lane), (true, i3t_model::netmap::LaneMode::Always));
-    assert!(view.lane_effect.is_some_and(|effect| !effect.summary.is_empty()));
-    let bad = api.fails(Method::PUT, &pair_path, Some(json!({ "lane": "sometimes" })), StatusCode::BAD_REQUEST).await;
+    // 旧的客户端还写 ice3proxy 的设置：不报错，什么都不改。
+    for old in [json!({ "lane": "always" }), json!({ "lane": "sometimes" })] {
+        let view: Value = api.ok(Method::PUT, &pair_path, Some(old.clone())).await;
+        assert_eq!(view, json!({ "a": gateway.id, "b": target.id, "keep_alive": true, "congestion": null, "stored": true }), "{old}");
+    }
+    assert_eq!(lane_between(gateway.id, target.id), LaneMode::Off);
+    let bad = api.fails(Method::PUT, &pair_path, Some(json!({ "congestion": "reno" })), StatusCode::BAD_REQUEST).await;
     assert_eq!(bad.code, model::ErrorCode::InvalidRequest);
     let same = api
         .fails(Method::PUT, &format!("{base}/pairs/{0}/{0}", gateway.id), Some(json!({ "keep_alive": true })), StatusCode::BAD_REQUEST)

@@ -10,7 +10,7 @@ use i3t_access::{ForwardHealth, NoRoutes, RouteAtStart, SharedRoutes, TargetCaus
 use i3t_conn::contract::{DatagramSender, Datagrams};
 use i3t_conn::{Connector, Endpoint, RecvStream, SendStream};
 use i3t_flow::datagram::{self, Opener, OutboundSocket};
-use i3t_flow::{End, Flow, FlowError, Handler, Request, Screening};
+use i3t_flow::{Carriage, End, Flow, FlowError, Handler, Request, Screening};
 use i3t_model::Netmap;
 use i3t_model::netmap::{Forward, ForwardProtocol, ForwardTarget, Peer};
 use i3t_proto::NodeId;
@@ -294,13 +294,14 @@ impl<S: System, C: Connector + Datagrams> Exit<S, C> {
     /// 监听在本节点虚拟 IP 上、目标是别的节点的端口转发：替发起节点到目标节点开一条流。
     ///
     /// 访问规则查两段：发起节点要能访问本节点（已经查过），本节点要能访问目标节点（目标节点自己还会按转发的编号再查一遍）。
+    /// 往目标节点去的这一段和别的端口转发一样只走共用的连接，不走 ice3proxy。
     async fn onward(&self, netmap: &Netmap, initiator: &Peer, forward: &Forward, open: &Open) -> Result<Flow<C::Send, C::Recv>, Reply> {
         check_allow_list(initiator, forward)?;
         if !netmap.peer(forward.target).is_some_and(|target| target.outbound) {
             return Err(Reply::new(Status::UnknownForward, "这条端口转发的目标节点不在本节点的 netmap 里，或者访问规则不允许本节点访问它"));
         }
         let request = Open { target: Target::Forward { id: forward.id }, class: open.class, origin: open.origin.clone() };
-        let opened = async { i3t_flow::open(&*self.connector, forward.target, &request, b"").await?.established().await };
+        let opened = async { i3t_flow::open(&*self.connector, forward.target, &request, b"", Carriage::Shared).await?.established().await };
         let (outcome, result) = match opened.await {
             Ok(flow) => (Ok(()), Ok(flow)),
             // 目标节点的拒绝原样转给发起节点：连接被拒绝、转发没有下发等，对方都该知道得和直接访问一样准确。

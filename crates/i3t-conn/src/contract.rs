@@ -266,9 +266,9 @@ pub trait Connector: Send + Sync + 'static {
     /// 到 `peer` 开一条新的流。和它之间还没有连接时先建连接（多一次握手往返）；已经有连接时不需要任何往返。
     fn open(&self, peer: NodeId) -> impl Future<Output = Result<(Self::Send, Self::Recv), OpenError>> + Send;
 
-    /// 到 `peer` 开一条承载一条 TCP 连接的流（代理的 CONNECT、TCP 端口转发）。
+    /// 到 `peer` 开一条承载一条 TCP 连接、要求走 ice3proxy 的流（选了 ice3proxy 的代理的 CONNECT 和明文 HTTP）。
     ///
-    /// 实现可以为这种流挑另一种传输（一对节点之间打开了 ice3proxy 时，每条这样的流独占一条 TCP）。默认同 [`open`](Self::open)。
+    /// 实现可以为这种流挑另一种传输（一对节点之间备着 ice3proxy 时，每条这样的流独占一条 TCP）。默认同 [`open`](Self::open)。
     fn open_tcp(&self, peer: NodeId) -> impl Future<Output = Result<(Self::Send, Self::Recv), OpenError>> + Send {
         self.open(peer)
     }

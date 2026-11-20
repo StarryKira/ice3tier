@@ -170,6 +170,10 @@ i3t_lane::on_both_transports! {
         assert!(drain(&mut stream).await.1.is_ok(), "正常结束一路传过去，也一路传回来");
         assert_eq!(world.nas.system.connected(), [echo], "是 nas 去连的目标");
         common::eventually("gw 记下接力的流", || world.gw.exit.stats().bytes_to_target >= common::ECHO_LEN).await;
+        // 跑在 lane 上的那一遍，laptop 到 gw 这一段（代理的流）走 lane；gw 往 nas 接力的那一段是端口转发，只走共用的连接。
+        let to_nas = world.gw.lanes.status().peers.into_iter().find(|peer| peer.peer == node(NAS)).map(|peer| peer.counts);
+        let carried = to_nas.map_or(0, |counts| counts.sealed_bytes + counts.passthrough_bytes + counts.spliced_bytes);
+        assert_eq!(carried, 0, "端口转发往目标节点的那一段不走 lane");
 
         // 访问规则不允许 gw 访问 nas：gw 不替它接力，客户端拿到"不允许"。
         world.gw.update(|netmap| peer_mut(netmap, NAS).outbound = false).await;

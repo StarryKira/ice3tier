@@ -26,6 +26,7 @@ pub(super) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0013_forward_target_switch.sql"),
     include_str!("migrations/0014_node_auto_update.sql"),
     include_str!("migrations/0015_proxies.sql"),
+    include_str!("migrations/0016_proxy_lane.sql"),
 ];
 
 #[cfg(test)]
@@ -432,6 +433,89 @@ mod tests {
         for id in 1..=3 {
             let raw: String = store.conn.query_row("SELECT declared FROM nodes WHERE id = ?1", [id], |row| row.get(0)).unwrap();
             assert!(serde_json::from_str::<Value>(&raw).unwrap().get("forward").is_none(), "节点 {id} 的声明里没有 forward 了");
+        }
+    }
+
+    /// 第 16 版之前：ice3proxy 是节点对的设置（`pair_settings.lane`）。
+    const BEFORE_PROXY_LANE: usize = 15;
+
+    #[test]
+    fn proxies_whose_pair_was_stored_as_always_get_ice3proxy_and_the_pair_setting_goes() {
+        use crate::store::fixtures::{home, new_node};
+        use i3t_model::admin::{NetworkId, PairSetting};
+        use i3t_model::netmap::{Congestion, LaneMode};
+
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        let nodes: Vec<i3t_proto::NodeId> = {
+            let store = Store::prepare(Connection::open(data.join("controller.db")).unwrap(), &MIGRATIONS[..BEFORE_PROXY_LANE]).unwrap();
+            let network = store.insert_network(&home()).unwrap();
+            let nodes: Vec<_> = (1..=5).map(|seed| store.insert_node(&new_node(network, seed)).unwrap()).collect();
+            let [one, two, three, four, five] = [0, 1, 2, 3, 4].map(|index| nodes[index].get());
+            store
+                .conn
+                .execute_batch(&format!(
+                    r#"
+                INSERT INTO pair_settings (node_a, node_b, keep_alive, lane, congestion) VALUES
+                    ({one}, {two}, 0, 'always', NULL),
+                    ({one}, {three}, 1, 'udp_fallback', NULL),
+                    ({one}, {four}, 0, 'off', 'cubic'),
+                    ({two}, {three}, 0, 'always', NULL);
+                INSERT INTO proxies (id, node_id, name, bind, protocol, exit_id, username, password, salt, enabled, allow_from, class, optimistic)
+                VALUES (1, {two}, 'to-one', '127.0.0.1:1081', '"mixed"', {one}, '', '', randomblob(16), 1, '[]', NULL, NULL),
+                       (2, {one}, 'to-two', '127.0.0.1:1082', '"mixed"', {two}, '', '', randomblob(16), 1, '[]', NULL, NULL),
+                       (3, {two}, 'disabled', '127.0.0.1:1083', '"mixed"', {one}, '', '', randomblob(16), 0, '[]', NULL, NULL),
+                       (4, {three}, 'fallback', '127.0.0.1:1084', '"mixed"', {one}, '', '', randomblob(16), 1, '[]', NULL, NULL),
+                       (5, {four}, 'off', '127.0.0.1:1085', '"mixed"', {one}, '', '', randomblob(16), 1, '[]', NULL, NULL),
+                       (6, {five}, 'unset', '127.0.0.1:1086', '"mixed"', {one}, '', '', randomblob(16), 1, '[]', NULL, NULL),
+                       (7, {two}, 'no-exit', '127.0.0.1:1087', '"mixed"', NULL, '', '', randomblob(16), 0, '[]', NULL, NULL);
+                "#
+                ))
+                .unwrap();
+            nodes
+        };
+        std::fs::write(data.join("controller.key"), i3t_crypto::NodeKey::generate().unwrap().to_pem()).unwrap();
+
+        // 一个 controller 在上一版的数据库上启动。
+        let controller = crate::Controller::open(&data, "ctl.example.com:20331".to_owned()).unwrap().controller;
+        let network = NetworkId(1);
+        let lanes: Vec<(String, bool)> =
+            controller.proxies(network, None).unwrap().into_iter().map(|proxy| (proxy.name, proxy.lane)).collect();
+        let expected = [
+            ("to-one", true),
+            ("to-two", true),
+            ("disabled", true),
+            ("fallback", false),
+            ("off", false),
+            ("unset", false),
+            ("no-exit", false),
+        ];
+        assert_eq!(
+            lanes,
+            expected.map(|(name, lane)| (name.to_owned(), lane)),
+            "节点对存着 always 的代理（两个方向都算，停用的也算）要 ice3proxy；udp_fallback、off、没有存下设置的不要"
+        );
+        let (one, three, four) = (nodes[0], nodes[2], nodes[3]);
+        assert_eq!(
+            controller.pairs(network).unwrap().into_iter().map(|pair| pair.setting).collect::<Vec<_>>(),
+            [
+                PairSetting { a: one, b: three, keep_alive: true, congestion: None },
+                PairSetting { a: one, b: four, keep_alive: false, congestion: Some(Congestion::Cubic) }
+            ],
+            "别的设置留着；只存过 ice3proxy 的节点对去掉了"
+        );
+        drop(controller);
+        let store = Store::open(&data.join("controller.db")).unwrap();
+        assert_eq!(store.schema_version().unwrap(), u32::try_from(MIGRATIONS.len()).unwrap());
+        assert!(store.conn.prepare("SELECT lane FROM pair_settings").is_err(), "节点对的 lane 去掉了");
+
+        // 迁移之后下发的：要 ice3proxy 的启用了的代理那一对是 always，别的是 off。
+        let view = NetworkView::load(&store, network).unwrap().unwrap();
+        let pairs = crate::netmap::LanePairs::of(&view.proxies);
+        assert_eq!(pairs.mode(nodes[1], one), LaneMode::Always);
+        for other in [three, four, nodes[4]] {
+            assert_eq!(pairs.mode(other, one), LaneMode::Off);
         }
     }
 

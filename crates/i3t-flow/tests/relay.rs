@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use i3t_conn::{Acceptor, Connector, OpenError, RecvStream, SendStream, StreamAborted, StreamCode};
 use i3t_flow::memory::{MemoryAcceptor, MemoryConnector, MemoryMesh, MemoryRecv, MemorySend};
-use i3t_flow::{End, FlowError, Handler, Request, Summary};
+use i3t_flow::{Carriage, End, FlowError, Handler, Request, Summary};
 use i3t_proto::NodeId;
 use i3t_proto::flow::{Class, Open, Origin, Reason, Reply, Status, Target};
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -135,7 +135,7 @@ async fn request_and_response_cross_with_half_close_from_the_client_first() {
     let mut world = World::new().await;
     let TcpPair { near: mut client, far } = TcpPair::new().await;
 
-    let pending = i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"GET / ").await.unwrap();
+    let pending = i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"GET / ", Carriage::Shared).await.unwrap();
     let flow = pending.established().await.unwrap();
     let ingress = tokio::spawn(flow.relay(far, future::pending()));
 
@@ -187,7 +187,12 @@ impl i3t_flow::Framing for FirstBytes {
 async fn a_framed_relay_sends_only_its_part_and_keeps_the_flow_open_until_the_answer_is_done() {
     let mut world = World::new().await;
     let TcpPair { near: mut client, far } = TcpPair::new().await;
-    let flow = i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"HEAD ").await.unwrap().established().await.unwrap();
+    let flow = i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"HEAD ", Carriage::Shared)
+        .await
+        .unwrap()
+        .established()
+        .await
+        .unwrap();
     let ingress =
         tokio::spawn(async move { flow.relay_framed(far, future::pending(), &i3t_flow::Unmetered, &mut FirstBytes { left: 4 }).await });
 
@@ -220,7 +225,8 @@ async fn a_framed_relay_sends_only_its_part_and_keeps_the_flow_open_until_the_an
 async fn a_framed_part_cut_short_by_the_client_reaches_the_target_as_a_reset() {
     let mut world = World::new().await;
     let TcpPair { near: mut client, far } = TcpPair::new().await;
-    let flow = i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"").await.unwrap().established().await.unwrap();
+    let flow =
+        i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"", Carriage::Shared).await.unwrap().established().await.unwrap();
     let ingress =
         tokio::spawn(async move { flow.relay_framed(far, future::pending(), &i3t_flow::Unmetered, &mut FirstBytes { left: 100 }).await });
 
@@ -238,7 +244,8 @@ async fn a_framed_part_cut_short_by_the_client_reaches_the_target_as_a_reset() {
 async fn half_close_from_the_target_first_leaves_the_other_direction_open() {
     let mut world = World::new().await;
     let TcpPair { near: mut client, far } = TcpPair::new().await;
-    let flow = i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"").await.unwrap().established().await.unwrap();
+    let flow =
+        i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"", Carriage::Shared).await.unwrap().established().await.unwrap();
     let ingress = tokio::spawn(flow.relay(far, future::pending()));
 
     // 目标先说话，说完关掉写的一半。
@@ -265,7 +272,12 @@ async fn half_close_from_the_target_first_leaves_the_other_direction_open() {
 async fn a_reset_by_the_target_reaches_the_client_as_a_reset_not_a_clean_end() {
     let mut world = World::new().await;
     let TcpPair { near: mut client, far } = TcpPair::new().await;
-    let flow = i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"request").await.unwrap().established().await.unwrap();
+    let flow = i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"request", Carriage::Shared)
+        .await
+        .unwrap()
+        .established()
+        .await
+        .unwrap();
     let ingress = tokio::spawn(flow.relay(far, future::pending()));
 
     let mut target = world.accept_target().await;
@@ -288,7 +300,12 @@ async fn a_reset_by_the_target_reaches_the_client_as_a_reset_not_a_clean_end() {
 async fn a_reset_by_the_client_reaches_the_target_as_a_reset() {
     let mut world = World::new().await;
     let TcpPair { near: client, far } = TcpPair::new().await;
-    let flow = i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"half a requ").await.unwrap().established().await.unwrap();
+    let flow = i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"half a requ", Carriage::Shared)
+        .await
+        .unwrap()
+        .established()
+        .await
+        .unwrap();
     let ingress = tokio::spawn(flow.relay(far, future::pending()));
 
     let mut target = world.accept_target().await;
@@ -308,7 +325,7 @@ async fn a_reset_by_the_client_reaches_the_target_as_a_reset() {
 async fn waiting_for_the_reply_reports_a_refusal_with_its_status() {
     let refusal = Reply::new(Status::PolicyDenied, "端口不允许");
     let world = World::with_refusal(Some(refusal.clone())).await;
-    let pending = i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"first data").await.unwrap();
+    let pending = i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"first data", Carriage::Shared).await.unwrap();
     match pending.established().await {
         Err(FlowError::Refused(reply)) => assert_eq!(reply, refusal),
         other => panic!("应该被拒绝，实际是 {other:?}"),
@@ -320,7 +337,7 @@ async fn without_waiting_a_refusal_resets_the_client_and_is_still_reported_preci
     let refusal = Reply::new(Status::AccessDenied, "不允许访问");
     let world = World::with_refusal(Some(refusal.clone())).await;
     let TcpPair { near: mut client, far } = TcpPair::new().await;
-    let pending = i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"").await.unwrap();
+    let pending = i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"", Carriage::Shared).await.unwrap();
     let ingress = tokio::spawn(pending.relay(far));
 
     // 客户端以为已经连上，一直在发：对端的"别发了"会先于 REPLY 被这个方向看到，结果仍然应该是 REPLY 里的状态。
@@ -342,7 +359,7 @@ async fn raw_peer(
 ) -> (MemoryConnector, i3t_conn::Incoming<MemorySend, MemoryRecv>, i3t_flow::Pending<MemorySend, MemoryRecv>) {
     let (connector, _) = mesh.join(node(INGRESS));
     let (_, acceptor) = mesh.join(node(EXIT));
-    let pending = i3t_flow::open(&connector, node(EXIT), &open_node_port(), b"").await.unwrap();
+    let pending = i3t_flow::open(&connector, node(EXIT), &open_node_port(), b"", Carriage::Shared).await.unwrap();
     let mut incoming = acceptor.accept().await.unwrap();
     // 目标是"节点端口"的 OPEN 正好 5 字节。
     incoming.recv.read_exact(&mut [0; 5]).await.unwrap();
@@ -434,7 +451,8 @@ async fn a_reply_that_cannot_be_parsed_ends_the_relay_with_a_protocol_error() {
 async fn cancelling_the_relay_resets_the_flow_with_the_given_reason_and_the_tcp_side() {
     let mut world = World::new().await;
     let TcpPair { near: mut client, far } = TcpPair::new().await;
-    let flow = i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"").await.unwrap().established().await.unwrap();
+    let flow =
+        i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"", Carriage::Shared).await.unwrap().established().await.unwrap();
     let ingress = tokio::spawn(flow.relay(far, future::pending()));
     let mut target = world.accept_target().await;
     client.write_all(b"x").await.unwrap();
@@ -454,7 +472,8 @@ async fn cancelling_the_relay_resets_the_flow_with_the_given_reason_and_the_tcp_
 async fn losing_the_connection_resets_both_tcp_sides() {
     let mut world = World::new().await;
     let TcpPair { near: mut client, far } = TcpPair::new().await;
-    let flow = i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"").await.unwrap().established().await.unwrap();
+    let flow =
+        i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"", Carriage::Shared).await.unwrap().established().await.unwrap();
     let ingress = tokio::spawn(flow.relay(far, future::pending()));
     let mut target = world.accept_target().await;
 
@@ -470,7 +489,8 @@ async fn losing_the_connection_resets_both_tcp_sides() {
 async fn dropping_the_relay_midway_resets_the_tcp_side_instead_of_closing_it_cleanly() {
     let world = World::new().await;
     let TcpPair { near: mut client, far } = TcpPair::new().await;
-    let flow = i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"").await.unwrap().established().await.unwrap();
+    let flow =
+        i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"", Carriage::Shared).await.unwrap().established().await.unwrap();
     let ingress = tokio::spawn(flow.relay(far, future::pending()));
     let mut target = world.accept_target().await;
     target.write_all(b"partial").await.unwrap();
@@ -514,10 +534,11 @@ impl SendStream for CountingSend {
     }
 }
 
-/// 数一数开了几条流、每条流上写了几次。
+/// 数一数开了几条流（其中几条是问连接层要可以走 ice3proxy 的那一种）、每条流上写了几次。
 struct CountingConnector {
     inner: MemoryConnector,
     opens: AtomicUsize,
+    tcp_opens: AtomicUsize,
     writes: Arc<AtomicUsize>,
 }
 
@@ -530,12 +551,35 @@ impl Connector for CountingConnector {
         let (send, recv) = self.inner.open(peer).await?;
         Ok((CountingSend { inner: send, writes: Arc::clone(&self.writes) }, recv))
     }
+
+    async fn open_tcp(&self, peer: NodeId) -> Result<(Self::Send, Self::Recv), OpenError> {
+        self.tcp_opens.fetch_add(1, Ordering::Relaxed);
+        let (send, recv) = self.inner.open(peer).await?;
+        Ok((CountingSend { inner: send, writes: Arc::clone(&self.writes) }, recv))
+    }
 }
 
 fn counting(mesh: &MemoryMesh) -> (CountingConnector, MemoryAcceptor) {
     let (inner, _) = mesh.join(node(INGRESS));
     let (_, acceptor) = mesh.join(node(EXIT));
-    (CountingConnector { inner, opens: AtomicUsize::new(0), writes: Arc::default() }, acceptor)
+    (CountingConnector { inner, opens: AtomicUsize::new(0), tcp_opens: AtomicUsize::new(0), writes: Arc::default() }, acceptor)
+}
+
+#[tokio::test]
+async fn only_a_stream_that_may_take_ice3proxy_asks_the_connection_layer_for_one() {
+    let mesh = MemoryMesh::new();
+    let (connector, acceptor) = counting(&mesh);
+    let _shared = i3t_flow::open(&connector, node(EXIT), &open_node_port(), b"", Carriage::Shared).await.unwrap();
+    assert_eq!(
+        (connector.opens.load(Ordering::Relaxed), connector.tcp_opens.load(Ordering::Relaxed)),
+        (1, 0),
+        "端口转发这样的流只走共用的连接"
+    );
+    let _lane = i3t_flow::open(&connector, node(EXIT), &open_node_port(), b"", Carriage::Lane).await.unwrap();
+    assert_eq!((connector.opens.load(Ordering::Relaxed), connector.tcp_opens.load(Ordering::Relaxed)), (1, 1), "选了 ice3proxy 的代理的流");
+    for _ in 0..2 {
+        acceptor.accept().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -547,7 +591,7 @@ async fn open_and_the_first_data_leave_in_a_single_write() {
         class: Class::Interactive,
         origin: Origin { credential: Some("gw".into()), client: Some("192.0.2.1:4000".parse().unwrap()) },
     };
-    let _pending = i3t_flow::open(&connector, node(EXIT), &request, b"\x16\x03\x01 client hello").await.unwrap();
+    let _pending = i3t_flow::open(&connector, node(EXIT), &request, b"\x16\x03\x01 client hello", Carriage::Shared).await.unwrap();
     assert_eq!(connector.writes.load(Ordering::Relaxed), 1);
 
     let incoming = acceptor.accept().await.unwrap();
@@ -560,7 +604,7 @@ async fn open_and_the_first_data_leave_in_a_single_write() {
 async fn an_open_is_never_replayed_after_the_connection_is_lost() {
     let mesh = MemoryMesh::new();
     let (connector, acceptor) = counting(&mesh);
-    let pending = i3t_flow::open(&connector, node(EXIT), &open_node_port(), b"POST /charge").await.unwrap();
+    let pending = i3t_flow::open(&connector, node(EXIT), &open_node_port(), b"POST /charge", Carriage::Shared).await.unwrap();
     let incoming = acceptor.accept().await.unwrap();
 
     // OPEN 已经到了对端，REPLY 还没回来，连接断了。
@@ -578,7 +622,7 @@ async fn opening_towards_an_unreachable_peer_fails_without_sending_anything() {
     let mesh = MemoryMesh::new();
     let (connector, _acceptor) = counting(&mesh);
     mesh.partition(node(INGRESS), node(EXIT));
-    let error = i3t_flow::open(&connector, node(EXIT), &open_node_port(), b"data").await.unwrap_err();
+    let error = i3t_flow::open(&connector, node(EXIT), &open_node_port(), b"data", Carriage::Shared).await.unwrap_err();
     assert!(matches!(error, FlowError::Connect(OpenError::NoRoute(peer)) if peer == node(EXIT)));
     assert_eq!(connector.writes.load(Ordering::Relaxed), 0);
 }
@@ -612,7 +656,8 @@ async fn a_malformed_open_is_answered_with_a_protocol_error_reset() {
 async fn a_large_transfer_arrives_intact_in_both_directions() {
     let mut world = World::new().await;
     let TcpPair { near: client, far } = TcpPair::new().await;
-    let flow = i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"").await.unwrap().established().await.unwrap();
+    let flow =
+        i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"", Carriage::Shared).await.unwrap().established().await.unwrap();
     let ingress = tokio::spawn(flow.relay(far, future::pending()));
     let target = world.accept_target().await;
 

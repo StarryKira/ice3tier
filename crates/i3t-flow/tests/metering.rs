@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use i3t_conn::{RecvStream, SendStream, StreamAborted, StreamCode};
 use i3t_flow::memory::{MemoryConnector, MemoryMesh};
-use i3t_flow::{Direction, End, Handler, Meter, Request};
+use i3t_flow::{Carriage, Direction, End, Handler, Meter, Request};
 use i3t_proto::NodeId;
 use i3t_proto::flow::{Class, Open, Origin, Reason, Target};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -90,7 +90,7 @@ async fn a_meter_sees_every_byte_in_both_directions() {
 
     let (mut client, far) = tcp_pair().await;
     let ingress_meter = Counting::new(u64::MAX);
-    let pending = i3t_flow::open(&connector, node(2), &open(Target::Node { port: 1 }), b"").await.unwrap();
+    let pending = i3t_flow::open(&connector, node(2), &open(Target::Node { port: 1 }), b"", Carriage::Shared).await.unwrap();
     let ingress = async { pending.relay_metered(far, future::pending(), &ingress_meter).await };
     let exchange = async {
         let (mut server, _) = target.accept().await.unwrap();
@@ -124,7 +124,7 @@ async fn a_meter_that_says_stop_ends_the_flow_abnormally_with_its_reason_on_both
     tokio::spawn(async move { i3t_flow::serve(&acceptor, handler).await });
 
     let (mut client, far) = tcp_pair().await;
-    let pending = i3t_flow::open(&connector, node(2), &open(Target::Node { port: 1 }), b"").await.unwrap();
+    let pending = i3t_flow::open(&connector, node(2), &open(Target::Node { port: 1 }), b"", Carriage::Shared).await.unwrap();
     let ingress = tokio::spawn(pending.relay(far));
     let (mut server, _) = timeout(PATIENCE, target.accept()).await.unwrap().unwrap();
     // 目标一直往回写，写满上限之后出口叫停。
@@ -154,7 +154,7 @@ struct Middle {
 
 impl Handler for Middle {
     async fn handle<S: SendStream, R: RecvStream>(&self, request: Request<S, R>) {
-        let onward = i3t_flow::open(&self.connector, self.far, &open(Target::Forward { id: 1 }), b"").await.unwrap();
+        let onward = i3t_flow::open(&self.connector, self.far, &open(Target::Forward { id: 1 }), b"", Carriage::Shared).await.unwrap();
         let onward = onward.established().await.unwrap();
         let near = request.accept().await.unwrap();
         let _ = self.done.send(near.splice(onward, future::pending()).await);
@@ -200,7 +200,7 @@ fn chain() -> Chain {
 async fn two_spliced_flows_carry_data_and_half_close_end_to_end() {
     let mut chain = chain();
     let (mut client, far) = tcp_pair().await;
-    let pending = i3t_flow::open(&chain.client, node(2), &open(Target::Node { port: 9100 }), b"hello ").await.unwrap();
+    let pending = i3t_flow::open(&chain.client, node(2), &open(Target::Node { port: 9100 }), b"hello ", Carriage::Shared).await.unwrap();
     let flow = pending.established().await.unwrap();
     let ingress = tokio::spawn(flow.relay(far, future::pending()));
     let mut target = timeout(PATIENCE, chain.targets.recv()).await.unwrap().unwrap();
@@ -226,7 +226,7 @@ async fn two_spliced_flows_carry_data_and_half_close_end_to_end() {
 async fn a_reset_at_the_far_end_reaches_the_client_as_a_reset_with_the_same_reason() {
     let mut chain = chain();
     let (mut client, far) = tcp_pair().await;
-    let pending = i3t_flow::open(&chain.client, node(2), &open(Target::Node { port: 9100 }), b"").await.unwrap();
+    let pending = i3t_flow::open(&chain.client, node(2), &open(Target::Node { port: 9100 }), b"", Carriage::Shared).await.unwrap();
     let flow = pending.established().await.unwrap();
     let ingress = tokio::spawn(flow.relay(far, future::pending()));
     let target = timeout(PATIENCE, chain.targets.recv()).await.unwrap().unwrap();

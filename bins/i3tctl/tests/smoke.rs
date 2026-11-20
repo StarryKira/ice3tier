@@ -279,6 +279,17 @@ async fn the_command_line_drives_a_running_controller() {
     let proxies = fixture.ok(&["proxy", "list", "--node", "laptop"]).await;
     // 监听的节点和出口写的是名字，不是 #1、#2。
     assert!(Fixture::has_line(&proxies, &["laptop", "192.168.1.5:1080", "nas-01", "laptop-1080"]) && !proxies.contains("#2"), "{proxies}");
+    // ice3proxy 是代理的选项：不在终端上、没写 --ice3proxy 时不问，不走；之后可以打开，详情说它起不起作用。
+    assert_eq!((&proxy["lane"], &proxy["lane_effect"]), (&json!(false), &Value::Null), "{proxy}");
+    let chosen = fixture.json(&["proxy", "set", &proxy_id, "--ice3proxy", "on"]).await;
+    // 这两个假装的节点说的是最初那一版节点协议，不懂 ice3proxy。
+    assert_eq!((&chosen["lane"], &chosen["lane_effect"]["blocked"][0]["reason"]), (&json!(true), &json!("node_too_old")), "{chosen}");
+    let shown = fixture.ok(&["proxy", "show", &proxy_id]).await;
+    assert!(Fixture::has_line(&shown, &["ice3proxy", "是", "未生效"]) && Fixture::has_line(&shown, &["laptop 的版本太旧"]), "{shown}");
+    assert!(Fixture::has_line(&fixture.ok(&["proxy", "list"]).await, &["laptop-1080", "未生效"]));
+    let second = fixture.json(&["proxy", "add", "laptop", "127.0.0.1:1090", "nas-01", "--ice3proxy"]).await;
+    assert_eq!(second["lane"], true, "写了 --ice3proxy 就走");
+    fixture.ok(&["--json", "proxy", "delete", &second["id"].to_string()]).await;
     let paused = fixture.json(&["proxy", "set", &proxy_id, "--enabled", "off", "--name", "lan"]).await;
     assert_eq!((&paused["status"]["code"], &paused["name"]), (&json!("disabled"), &json!("lan")));
     assert!(fixture.fails(&["proxy", "set", &proxy_id, "--exit", "laptop"]).await.contains("exit_is_node"));
@@ -293,25 +304,16 @@ async fn the_command_line_drives_a_running_controller() {
     assert_eq!(fixture.json(&["forward", "disable", &forward_id]).await["status"], "disabled");
     assert_eq!(fixture.json(&["forward", "enable", &forward_id]).await["enabled"], true);
     assert!(fixture.ok(&["forward", "list"]).await.contains("#2 192.168.1.10:80"));
-    // 没有设置的一对也看得到：各项都是默认值，ice3proxy 默认是 udp_fallback。
+    // 没有设置的一对也看得到：各项都是默认值。ice3proxy 不在节点对上了。
     let unset = fixture.json(&["pair", "show", "nas-01", "laptop"]).await;
-    assert_eq!((&unset["stored"], &unset["lane"], &unset["keep_alive"]), (&json!(false), &json!("udp_fallback"), &json!(false)), "{unset}");
-    assert!(Fixture::has_line(&fixture.ok(&["pair", "show", "laptop", "nas-01"]).await, &["ice3proxy", "udp_fallback（默认）"]));
+    assert_eq!(unset, json!({ "a": 1, "b": 2, "keep_alive": false, "congestion": null, "stored": false }), "{unset}");
+    assert!(Fixture::has_line(&fixture.ok(&["pair", "show", "laptop", "nas-01"]).await, &["#1 ↔ #2", "默认"]));
     assert!(fixture.ok(&["pair", "list"]).await.contains("没有列出的节点对用默认"), "列表下面说没有列出的用什么");
     fixture.ok(&["pair", "set", "nas-01", "laptop", "--keep-alive", "on"]).await;
     let pairs = fixture.json(&["pair", "list"]).await;
-    assert_eq!(
-        (&pairs[0]["a"], &pairs[0]["b"], &pairs[0]["keep_alive"], &pairs[0]["lane"], &pairs[0]["stored"]),
-        (&json!(1), &json!(2), &json!(true), &json!("udp_fallback"), &json!(true)),
-        "只设了常驻：ice3proxy 存下的是设的时候的默认值"
-    );
-    // 只改 ice3proxy，常驻不变；设置起不起作用要说出来。
-    let pair = fixture.json(&["pair", "set", "nas-01", "laptop", "--lane", "always"]).await;
-    assert_eq!((&pair["keep_alive"], &pair["lane"]), (&json!(true), &json!("always")));
-    assert!(pair["lane_effect"]["effective"].is_boolean(), "{pair}");
-    assert!(fixture.ok(&["pair", "list"]).await.contains("always"));
-    assert!(fixture.fails(&["pair", "set", "nas-01", "laptop", "--lane", "sometimes"]).await.contains("udp_fallback"));
-    assert!(fixture.fails(&["pair", "set", "nas-01", "laptop"]).await.contains("--lane"), "至少要改一项");
+    assert_eq!(pairs, json!([{ "a": 1, "b": 2, "keep_alive": true, "congestion": null, "stored": true }]));
+    assert!(fixture.fails(&["pair", "set", "nas-01", "laptop", "--lane", "always"]).await.contains("--lane"), "节点对上没有 ice3proxy 了");
+    assert!(fixture.fails(&["pair", "set", "nas-01", "laptop"]).await.contains("--keep-alive"), "至少要改一项");
 
     // 地址、令牌和网络也可以从环境变量来。
     let mut from_env = fixture.command();
@@ -345,7 +347,9 @@ async fn the_command_line_drives_a_running_controller() {
         &["token", "list", "--all"],
         &["access", "graph"],
         &["proxy", "list"],
+        &["proxy", "add", "--help"],
         &["forward", "list"],
+        &["pair", "list"],
         &["log", "--limit", "100"],
         &["--help"],
         &["node", "set", "--help"],

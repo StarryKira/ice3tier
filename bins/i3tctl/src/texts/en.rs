@@ -119,6 +119,8 @@ const HELP: Help = Help {
     proxy_set_class: "QoS: auto, interactive, reliable, bulk; default clears it",
     proxy_set_optimistic: "Optimistic reply: on, off; default clears it",
     proxy_enabled: "Enable or disable",
+    proxy_ice3proxy: "Carry TCP streams on ice3proxy (one TCP to the exit each). Asked once on a terminal when not given",
+    proxy_set_ice3proxy: "Use ice3proxy or not",
     proxy_delete: "Delete a proxy",
     forward_group: "Port forwards",
     forward_list: "List port forwards",
@@ -133,7 +135,6 @@ const HELP: Help = Help {
     pair_show: "Show a node pair, also one without settings",
     pair_set: "Set a node pair",
     pair_keep_alive: "Keep alive",
-    pair_lane: "ice3proxy; default udp_fallback (used when there is no UDP path)",
     pair_congestion: "Congestion control; default goes back to the node's default (bbr). Applies to connections made afterwards",
     pair_unset: "Reset a node pair to defaults",
     access_group: "Access",
@@ -398,7 +399,7 @@ const UI: Ui = Ui {
     rules_header: ["ID", "SRC", "", "DST", "ENABLED", "NAME"],
     no_rules: "No rules",
     rule: "Rule",
-    proxies_header: ["ID", "NODE", "LISTEN", "PROTOCOL", "EXIT", "AUTH", "STATE", "CONNECTIONS", "NAME"],
+    proxies_header: ["ID", "NODE", "LISTEN", "PROTOCOL", "EXIT", "AUTH", "ICE3PROXY", "STATE", "CONNECTIONS", "NAME"],
     no_proxies: "No proxies",
     proxy: "Proxy",
     listen_node: "Listening node",
@@ -411,22 +412,16 @@ const UI: Ui = Ui {
     proxy_use: "Use",
     forwards_header: ["ID", "PROTOCOL", "LISTEN", "TARGET", "STATUS", "LISTEN-STATE", "CONNECTIONS", "TRAFFIC", "ALLOWED", "NAME"],
     no_forwards: "No port forwards",
-    pairs_header: ["A", "B", "KEEP-ALIVE", "ICE3PROXY", "CONGESTION", "EFFECT", "IN-USE", "FALLBACKS"],
+    pairs_header: ["A", "B", "KEEP-ALIVE", "CONGESTION"],
     no_pairs: "No node pair settings",
-    pairs_default: "Pairs not listed use the defaults: ice3proxy when there is no UDP path (udp_fallback)",
+    pairs_default: "Pairs not listed use the defaults: no keep-alive, the node's congestion control",
     pair_default: "default",
     keep_alive: "Keep alive",
     lanes: "ice3proxy",
     congestion: "Congestion control",
     congestion_default: "default",
-    lane_effect: "Effect",
-    in_effect: "in effect",
     no_effect: "no effect",
     dialers: "Dials",
-    udp_path: "shared connection has UDP",
-    no_udp_path: "shared connection has no UDP",
-    new_streams_on_lanes: "New TCP streams on ice3proxy",
-    new_streams_shared: "New TCP streams on the shared connection",
     peer_lanes: |dials, control, idle, ready, parked, counts| {
         let dials = if dials { "dials" } else { "dialled" };
         let control = if control { "control up" } else { "control down" };
@@ -550,6 +545,8 @@ const UI: Ui = Ui {
     pair_unset: |a, b| format!("Node pair #{a} ↔ #{b} reset to defaults"),
     bad_version: |text| format!("Invalid version: {text}"),
     must_be: |values| format!("possible values: {values}"),
+    ask_ice3proxy: "Use ice3proxy? [y/N] ",
+    answer_unreadable: "Couldn't read the answer",
     too_large: "too large",
     url_scheme: |url| format!("The admin API address must start with http://: {url}"),
     http_client: "Starting the HTTP client",
@@ -663,7 +660,10 @@ fn log(entry: &LogEntry) -> Option<String> {
         action::LISTENER_CREATE => format!("Listener {} created ({} {})", p.thing("listener_name", "listener"), node(), p.text("bind")),
         action::LISTENER_UPDATE => format!("Listener {} changed ({} {})", p.thing("listener_name", "listener"), node(), p.text("bind")),
         action::LISTENER_DELETE => format!("Listener {} deleted", p.thing("listener_name", "listener")),
-        action::PROXY_CREATE => format!("Proxy {} created ({} {})", p.thing("proxy_name", "proxy"), node(), p.text("bind")),
+        action::PROXY_CREATE => {
+            let lane = if p.flag("lane") { ", on ice3proxy" } else { "" };
+            format!("Proxy {} created ({} {}){lane}", p.thing("proxy_name", "proxy"), node(), p.text("bind"))
+        }
         action::PROXY_UPDATE => format!("Proxy {} changed ({} {})", p.thing("proxy_name", "proxy"), node(), p.text("bind")),
         action::PROXY_DELETE => format!("Proxy {} deleted", p.thing("proxy_name", "proxy")),
         action::FORWARD_CREATE | action::FORWARD_UPDATE | action::FORWARD_DELETE => {
@@ -681,7 +681,7 @@ fn log(entry: &LogEntry) -> Option<String> {
                 p.text("target_addr")
             )
         }
-        action::PAIR_SET => format!("Node pair {}: keep alive {}, ice3proxy {}", pair(), switch("keep_alive"), p.text("lane")),
+        action::PAIR_SET => format!("Node pair {}: keep alive {}", pair(), switch("keep_alive")),
         action::PAIR_DELETE => format!("Node pair {} reset to defaults", pair()),
         action::UPDATE_SETTINGS => format!("Automatic updates {}, release source {}", switch("auto_update"), p.text("source")),
         action::UPDATE_RELEASE => format!("New version {} on the release source", p.text("version")),

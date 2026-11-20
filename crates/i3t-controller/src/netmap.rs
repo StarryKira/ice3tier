@@ -2,6 +2,7 @@
 //!
 //! 最小权限：对端只列和它有访问关系的节点；relay 列全网的（relay 不受访问规则约束）；
 //! 全网节点的编号和公钥只给 relay（认证中转会话要用）；代理只给它监听的那个节点，带着用户名和密码的校验值，不带密码。
+//! 对端之间备不备着 ice3proxy 从代理推出来（[`LanePairs`]），不再是节点对的设置。
 //!
 //! 这里算出来的内容不带版本号。版本号由下发的一方管：内容的摘要变了才加一。
 
@@ -24,11 +25,35 @@ pub(crate) const MAX_ENDPOINTS: usize = 16;
 
 /// 算 netmap 要用的、存储里没有的事：controller 从节点的连接和上报里知道的。
 pub trait NodeFacts {
-    /// 节点懂不懂按需拨 ice3proxy：没有设置的节点对，两个节点都懂才是默认的 [`LaneMode::PAIR_DEFAULT`]，否则是 `off`
-    /// （旧的节点在 `udp_fallback` 下一直拨着，不能让它因为 controller 升级就拨起来）。
-    fn dials_on_demand(&self, node: NodeId) -> bool;
     /// 认定这个节点用不了 UDP，写进别的节点的 netmap 里它那一项（[`Peer::no_udp`]）。
     fn has_no_udp(&self, node: NodeId) -> bool;
+}
+
+/// 哪些节点对之间备着 ice3proxy（白皮书 §9.7 第 9 条）：有一个启用了的、选了 ice3proxy 的代理，监听在其中一个节点上、
+/// 出口是另一个。这样的一对两边的 netmap 里都是 `always`（两边都可能是拨号的一方），别的都是 `off`。
+///
+/// 下发哪一种只在 [`LanePairs::mode`] 定：选了 ice3proxy 的代理不管路上有没有 UDP 都走它，所以是 `always`；
+/// `udp_fallback` 留在线上格式里给旧的 controller 和静态的 netmap，这里不再产生。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LanePairs(BTreeSet<(NodeId, NodeId)>);
+
+impl LanePairs {
+    /// 从一个网络的全部代理里找出来。停用的、没有出口的、没选 ice3proxy 的代理不算。
+    #[must_use]
+    pub fn of(proxies: &[ProxyRecord]) -> Self {
+        let wanted = proxies.iter().filter(|proxy| proxy.enabled && proxy.lane);
+        Self(wanted.filter_map(|proxy| proxy.exit.map(|exit| ordered(proxy.node, exit))).collect())
+    }
+
+    /// `a` 和 `b` 之间下发什么。两个节点的先后顺序无所谓。
+    #[must_use]
+    pub fn mode(&self, a: NodeId, b: NodeId) -> LaneMode {
+        if self.0.contains(&ordered(a, b)) { LaneMode::Always } else { LaneMode::Off }
+    }
+}
+
+fn ordered(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
+    (a.min(b), a.max(b))
 }
 
 /// controller 从节点的上报里知道的、和虚拟网卡有关的事。和 [`NodeFacts`] 分开放，因为它们由不同的部分记着。
@@ -143,11 +168,12 @@ impl NetworkView {
     ) -> Option<Netmap> {
         let me = self.nodes.get(&id)?;
         let relays = self.relay_ids();
+        let lanes = LanePairs::of(&self.proxies);
 
         let peers: Vec<Peer> = relations
             .iter()
             .filter(|&(&peer, relation)| peer != id && !relation.is_empty())
-            .filter_map(|(peer, &relation)| Some(self.peer(me, self.nodes.get(peer)?, relation, &relays, facts)))
+            .filter_map(|(peer, &relation)| Some(self.peer(me, self.nodes.get(peer)?, relation, &relays, &lanes, facts)))
             .collect();
 
         let deliverable = || self.forwards.iter().filter(|forward| self.forward_is_deliverable(access, forward));
@@ -190,6 +216,7 @@ impl NetworkView {
                     allow_from: proxy.allow_from.clone(),
                     class: proxy.class,
                     optimistic: proxy.optimistic,
+                    lane: proxy.lane,
                 })
             })
             .collect();
@@ -250,16 +277,19 @@ impl NetworkView {
         })
     }
 
-    fn peer(&self, me: &NodeRecord, peer: &NodeRecord, relation: Relation, relays: &BTreeSet<NodeId>, facts: &impl NodeFacts) -> Peer {
+    fn peer(
+        &self,
+        me: &NodeRecord,
+        peer: &NodeRecord,
+        relation: Relation,
+        relays: &BTreeSet<NodeId>,
+        lanes: &LanePairs,
+        facts: &impl NodeFacts,
+    ) -> Peer {
         let mut attached: Vec<_> = peer.attached.iter().copied().filter(|attachment| relays.contains(&attachment.relay)).collect();
         attached.sort_by_key(|attachment| (attachment.rtt_ms, attachment.relay));
-        let (low, high) = (me.id.min(peer.id), me.id.max(peer.id));
+        let (low, high) = ordered(me.id, peer.id);
         let stored = self.pairs.iter().find(|pair| pair.a == low && pair.b == high);
-        let lane = match stored {
-            Some(pair) => pair.lane,
-            None if facts.dials_on_demand(me.id) && facts.dials_on_demand(peer.id) => LaneMode::PAIR_DEFAULT,
-            None => LaneMode::Off,
-        };
         Peer {
             id: peer.id,
             key: peer.key,
@@ -278,7 +308,7 @@ impl NetworkView {
             }),
             dial_out_only: peer.dial_out_only,
             keep_alive: stored.is_some_and(|pair| pair.keep_alive),
-            lane,
+            lane: lanes.mode(me.id, peer.id),
             congestion: stored.and_then(|pair| pair.congestion),
             no_udp: facts.has_no_udp(peer.id),
         }
@@ -294,4 +324,56 @@ pub(crate) fn candidate_endpoints(node: &NodeRecord) -> Vec<SocketAddr> {
         }
     }
     endpoints
+}
+
+#[cfg(test)]
+mod tests {
+    use i3t_model::netmap::{ListenerProtocol, Verifier};
+
+    use super::*;
+
+    fn node(raw: u32) -> NodeId {
+        NodeId::new(raw).unwrap()
+    }
+
+    fn proxy(listening: u32, exit: Option<u32>, lane: bool, enabled: bool) -> ProxyRecord {
+        ProxyRecord {
+            id: 0,
+            node: node(listening),
+            name: String::new(),
+            bind: "127.0.0.1:1080".parse().unwrap(),
+            protocol: ListenerProtocol::Mixed,
+            exit: exit.map(node),
+            username: String::new(),
+            password: String::new(),
+            salt: [0; Verifier::SALT_LEN],
+            enabled,
+            allow_from: Vec::new(),
+            class: None,
+            optimistic: None,
+            lane,
+        }
+    }
+
+    #[test]
+    fn a_pair_gets_always_from_an_enabled_proxy_with_ice3proxy_between_its_node_and_its_exit_and_off_otherwise() {
+        let lanes = LanePairs::of(&[
+            proxy(3, Some(1), true, true),
+            // 停用的、没选 ice3proxy 的、没有出口的都不算。
+            proxy(2, Some(4), true, false),
+            proxy(2, Some(5), false, true),
+            proxy(6, None, true, true),
+        ]);
+        assert_eq!((lanes.mode(node(1), node(3)), lanes.mode(node(3), node(1))), (LaneMode::Always, LaneMode::Always), "两边一样");
+        for (a, b) in [(2, 4), (2, 5), (1, 2), (3, 6)] {
+            assert_eq!(lanes.mode(node(a), node(b)), LaneMode::Off, "{a} 和 {b}");
+        }
+        assert_eq!(LanePairs::of(&[]).mode(node(1), node(3)), LaneMode::Off);
+    }
+
+    #[test]
+    fn one_proxy_with_ice3proxy_is_enough_whichever_side_it_listens_on() {
+        let lanes = LanePairs::of(&[proxy(1, Some(2), false, true), proxy(2, Some(1), true, true)]);
+        assert_eq!(lanes.mode(node(1), node(2)), LaneMode::Always, "同一对之间还有没选它的代理，也备着");
+    }
 }

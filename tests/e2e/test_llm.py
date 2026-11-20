@@ -8,7 +8,8 @@
 
 --long   sse_long_thinking 的静默从 75 秒改成 10 分钟。
 --pair   按节点对的设置，原样合进入口和出口互相看到的对端条目（静态 netmap 的 peers）。见 apply_pair_setting。
-         例如 '{"lane": "always"}' 让入口和出口之间的 TCP 流走 ice3proxy；这时每次负载之后打出两边的 lane 计数。
+         例如 '{"lane": "always"}' 让入口和出口之间备着 ice3proxy，入口上的代理也选上它（ice3proxy 是代理的选项，
+         只有选了它的代理的流走它），代理的 TCP 流就走 ice3proxy；这时每次负载之后打出两边的 lane 计数。
 --keep   留下每个场景的工作目录：节点日志、场景文件、每次负载的结果 JSON 和表。
 
 需要 I3T_BIN_DIR 下有 i3t 和 i3t-llmgw（cargo build --release -p i3t -p i3t-llmgw）。
@@ -50,6 +51,11 @@ def apply_pair_setting(entry_sees_exit: dict, exit_sees_entry: dict) -> None:
     """
     entry_sees_exit.update(PAIR_SETTING)
     exit_sees_entry.update(PAIR_SETTING)
+
+
+def proxy_lane() -> bool:
+    """入口上的代理选不选 ice3proxy：`--pair` 让这一对备着 lane 时选上，不然备着也没有流走它。"""
+    return PAIR_SETTING.get("lane", "off") != "off"
 
 
 def pair_label() -> str:
@@ -294,7 +300,7 @@ class Gateway(Deployment):
             entry_view=exit_node.as_peer(endpoints=False, attached=[(entry, 5)], exit=True),
             exit_view=entry.as_peer())
         entry.start_static(entry.netmap(me={"relay": {}}, relays=[entry.as_relay()], relay_clients=[entry, exit_node], peers=[self.exit_peer],
-                                        proxies=[entry.proxy_to(exit_node)]))
+                                        proxies=[entry.proxy_to(exit_node, lane=proxy_lane())]))
         self.start_exit()
         self.wait_ready()
 
@@ -520,7 +526,7 @@ def tcp_only_exit_heavy(lab: Lab, work: Path, t: Checks) -> None:
     ]
     heavy = gw.load("heavy_tcp", 120, groups, label="只有 TCP，丢包 1%，重负载", stall_ms=250).wait()
     print(*key_numbers(heavy), sep="\n")
-    lanes_on = PAIR_SETTING.get("lane", "off") != "off"
+    lanes_on = proxy_lane()
     if lanes_on:
         if not all_as_expected(t, heavy, "重负载"):
             evidence(heavy, gw.watched())
@@ -577,7 +583,7 @@ def route_change_mid_stream(lab: Lab, work: Path, t: Checks) -> None:
         entry, exit_node,
         entry_view={**exit_node.as_peer(endpoints=False, attached=attached, exit=True), "endpoints": [f"{home.ip}:20330"]},
         exit_view={**entry.as_peer(endpoints=False, attached=attached), "endpoints": [f"{office.ip}:20330"]})
-    entry.start_static(entry.netmap(peers=[exit_peer], relays=relays, proxies=[entry.proxy_to(exit_node)]))
+    entry.start_static(entry.netmap(peers=[exit_peer], relays=relays, proxies=[entry.proxy_to(exit_node, lane=proxy_lane())]))
     exit_node.start_static(exit_node.netmap(peers=[entry_peer], relays=relays, me={"exit": {}}))
     gw = Deployment(lab, work, api, ca, entry, exit_node, (r1, r2))
     gw.wait_ready()

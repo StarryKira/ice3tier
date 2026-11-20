@@ -25,9 +25,7 @@ use crate::control::{
     ListenState, ListenTraffic, PathCandidate, PeerLanes, PerformanceReport, RelayState, RelayUse, Route, RouteAlternative, RouteCause,
     RouteSince, SelfUpdate, TargetCause, TryOutcome, VnetReport,
 };
-use crate::netmap::{
-    Attachment, Congestion, ExitRole, ForwardProtocol, LaneMode, ListenerProtocol, Profile, ProxyProtocol, Reach, RoutingMode,
-};
+use crate::netmap::{Attachment, Congestion, ExitRole, ForwardProtocol, ListenerProtocol, Profile, ProxyProtocol, Reach, RoutingMode};
 use crate::update::{FailureKind, SelfUpdateBlocker, UpdateCause, UpdateStatus, UpdateTiming, Version};
 
 pub mod action;
@@ -1159,7 +1157,18 @@ pub struct Proxy {
     pub class: Option<Class>,
     /// 乐观回复；`null` 时看出口的设置，再按目标的种类。
     pub optimistic: Option<bool>,
+    /// 这个代理的 TCP 流走 ice3proxy（白皮书 §9.7 第 9 条）：不管路上有没有 UDP，开得出时一律走，开不出时退回共用的连接。
+    /// 比这个字段旧的 controller 不写，读成 `false`。
+    #[serde(default)]
+    pub lane: bool,
     pub status: ProxyStatus,
+    /// `lane` 是 `true` 并且有出口时有：ice3proxy 在监听的节点和出口之间起不起作用，为什么。别的时候是 `null`。
+    #[serde(default)]
+    pub lane_effect: Option<LaneEffect>,
+    /// `lane` 是 `true` 时，监听的节点和出口各自报上来的、和对方之间的 ice3proxy。不在线、版本太旧、还没报过的节点不在里面；
+    /// `lane` 是 `false` 时是空的。同一对节点之间的 lane 由经过它们的、选了 ice3proxy 的代理共用，计数是这一对的，不是这一个代理的。
+    #[serde(default)]
+    pub lanes: Vec<LaneSide>,
     /// 节点最近一次报的连接数和流量（`connections`、`bytes_up`、`bytes_down`，这次运行以来），和代理的别的字段在同一层。
     /// 节点不在线、还没有报过时都是 0，那时 `status` 说明为什么。
     #[serde(flatten)]
@@ -1231,6 +1240,9 @@ pub struct CreateProxy {
     pub class: Option<Class>,
     #[serde(default)]
     pub optimistic: Option<bool>,
+    /// 走 ice3proxy，默认不走。新建的时候要问（`i3tctl proxy add` 在终端上问一次，WebUI 的对话框里是一个开关）。
+    #[serde(default)]
+    pub lane: bool,
 }
 
 /// 改一个代理。字段都可以省略，省略表示不改。
@@ -1261,6 +1273,8 @@ pub struct UpdateProxy {
     /// 写 `null` 表示不再指定。
     #[serde(default, deserialize_with = "nullable", skip_serializing_if = "Option::is_none")]
     pub optimistic: Option<Option<bool>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<bool>,
 }
 
 /// 节点报的一个监听（代理监听器或者端口转发的监听一侧）现在的状态、连接数和流量。
@@ -1386,15 +1400,14 @@ pub enum ForwardStatus {
 }
 
 /// 一对节点之间的设置。`a` 的编号小于 `b`。
+///
+/// 以前这里还有 ice3proxy 的 `lane`：它现在是代理的选项（[`Proxy::lane`]）。旧的 controller 给的应答里还有它，读的时候忽略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairSetting {
     pub a: NodeId,
     pub b: NodeId,
     /// 这一对节点之间的连接常驻，不因为没有流而关闭。
     pub keep_alive: bool,
-    /// 这一对节点之间承载 TCP 连接的流用不用 ice3proxy（lane）。
-    #[serde(default)]
-    pub lane: LaneMode,
     /// 这一对节点之间的连接用哪种拥塞控制；`null` 表示用节点的默认（BBR）。
     #[serde(default)]
     pub congestion: Option<Congestion>,
@@ -1404,77 +1417,53 @@ impl PairSetting {
     /// 没有存下设置的一对：各项都是默认值。两个节点的先后顺序无所谓。
     #[must_use]
     pub fn unset(a: NodeId, b: NodeId) -> Self {
-        Self { a: a.min(b), b: a.max(b), keep_alive: false, lane: LaneMode::PAIR_DEFAULT, congestion: None }
+        Self { a: a.min(b), b: a.max(b), keep_alive: false, congestion: None }
     }
 }
 
 /// 改一对节点的设置。没有写的项不变（这一对还没有设置时取默认值）。
+///
+/// 旧的客户端还会写 `lane`：不认识的字段一律忽略，不报错，也不起任何作用。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PairInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_alive: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lane: Option<LaneMode>,
     /// 写 `null` 表示改回节点的默认。
     #[serde(default, deserialize_with = "nullable", skip_serializing_if = "Option::is_none")]
     pub congestion: Option<Option<Congestion>>,
 }
 
-/// 节点对视图里的一项：设置，加上 ice3proxy 起不起作用、两边报上来的状况。
+/// 节点对视图里的一项：设置，和有没有存下。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairView {
     #[serde(flatten)]
     pub setting: PairSetting,
-    /// 这一对有没有存下的设置。没有时各项都是默认值：连接不常驻，ice3proxy 是 [`LaneMode::PAIR_DEFAULT`]（没有 UDP 的路时用），
-    /// 拥塞控制用节点的默认。比这个字段旧的 controller 只列存下的设置，读成 `true`。
+    /// 这一对有没有存下的设置。没有时各项都是默认值：连接不常驻，拥塞控制用节点的默认。
+    /// 比这个字段旧的 controller 只列存下的设置，读成 `true`。
     #[serde(default = "stored_by_default")]
     pub stored: bool,
-    /// ice3proxy 的设置起不起作用。`lane` 是 `off` 时没有。
-    #[serde(default)]
-    pub lane_effect: Option<LaneEffect>,
-    /// 两个节点各自报上来的、和对方之间的 lane（不在线或者没报的节点不在里面）。
-    #[serde(default)]
-    pub lanes: Vec<PairLaneSide>,
 }
 
 const fn stored_by_default() -> bool {
     true
 }
 
-/// ice3proxy 的设置起不起作用，为什么。
+/// 一个代理的 ice3proxy 起不起作用，为什么：看的是代理监听的节点和它的出口这一对。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaneEffect {
-    /// 至少一个节点能拨另一个节点的 TCP 端口，两个节点都懂 ice3proxy，访问规则连通了它们。
+    /// 至少一个节点能拨另一个节点的 TCP 端口，两个节点都懂 ice3proxy，访问规则让监听的节点访问出口。
     pub effective: bool,
-    /// 不起作用的原因，`effective` 为真时是空的。
+    /// 不起作用的原因，`effective` 为真时是空的。不起作用时这个代理的流都走共用的连接。
     #[serde(default)]
     pub blocked: Vec<LaneBlock>,
     /// 拨号的节点：另一个节点启用了 relay、有已知的 TCP 地址。两个都能拨时各自用自己拨的 lane。
     #[serde(default)]
     pub dialers: Vec<NodeId>,
-    /// 给人看的说明。ice3proxy 只承载 TCP 流：这一对节点之间共用的连接和它的路照常存在，UDP 应用的数据和别的流走它，
-    /// 路由视图里显示的是共用连接的路。
+    /// 给人看的一句说明（中文）。界面按 `effective`、`blocked`、`dialers` 用自己的话写，只在原因不认识时用它。
     pub summary: String,
-    /// 设置是 `udp_fallback` 时，两个节点各自开新的 TCP 流现在走不走 ice3proxy。只有在线、并且报了这一项的节点在里面；
-    /// 设置是别的值时是空的。
-    #[serde(default)]
-    pub opening: Vec<LaneOpening>,
 }
 
-/// 一个节点开新的 TCP 流现在走不走 ice3proxy（`udp_fallback` 时），按它自己看到的。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LaneOpening {
-    /// 开流的节点。
-    pub node: NodeId,
-    /// 它到对方的共用连接现在有没有 UDP 的路。
-    pub udp_path: bool,
-    /// 它现在开的新 TCP 流走 ice3proxy：设置起作用，共用连接上没有 UDP 的路，并且它和对方之间的控制连接在（它报的 `control`）。
-    /// 控制连接不在时（拨号方还没拨上来，或者拨号方那一段有 UDP、不拨）新的流直接走共用的连接；控制连接在、却取不到 lane 时
-    /// （池空了、对方在排空）也悄悄改走共用的连接，记在 `lanes` 的 `fallbacks` 里。
-    pub lanes: bool,
-}
-
-/// ice3proxy 的设置不起作用的一个原因。
+/// ice3proxy 不起作用的一个原因。比这个程序新的 controller 可能给别的 `reason`。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum LaneBlock {
@@ -1482,16 +1471,15 @@ pub enum LaneBlock {
     NoRelay,
     /// 启用了 relay 的这个节点还没有已知的地址（它还没有连上过 controller）。
     NoTcpAddress { node: NodeId },
-    /// 这个节点的版本太旧，不懂 ice3proxy；没有存下设置的一对（默认的 `udp_fallback`）是不懂按需拨号，
-    /// 见 [`LANE_DEFAULT_REVISION`](crate::control::LANE_DEFAULT_REVISION)。
+    /// 这个节点在线，但版本太旧，不懂 ice3proxy（节点协议 [`LANE_REVISION`](crate::control::LANE_REVISION) 起才懂）。
     NodeTooOld { node: NodeId },
-    /// 访问规则没有连通这两个节点：它们互相不在对方的 netmap 里。
+    /// 访问规则不让监听的节点访问出口：这时代理本身也用不了（它的状态是 `access_denied`）。
     NotConnected,
 }
 
 /// 一个节点报上来的、和对方之间的 lane。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PairLaneSide {
+pub struct LaneSide {
     /// 报的节点。
     pub node: NodeId,
     pub lanes: PeerLanes,
@@ -1900,7 +1888,10 @@ mod tests {
             allow_from: Vec::new(),
             class: None,
             optimistic: None,
+            lane: false,
             status: ProxyStatus::Listening { local: "192.168.1.5:1080".parse().unwrap() },
+            lane_effect: None,
+            lanes: Vec::new(),
             usage: ListenTraffic { connections: 2, bytes_up: 10, bytes_down: 20 },
         };
         let value = serde_json::to_value(&proxy).unwrap();
@@ -1909,7 +1900,7 @@ mod tests {
             json!({
                 "id": 3, "name": "lan", "node": 7, "bind": "192.168.1.5:1080", "protocol": "mixed", "exit": 9,
                 "username": "u-1a2b3c4d", "password": "pw", "enabled": true, "allow_from": [], "class": null, "optimistic": null,
-                "status": { "code": "listening", "local": "192.168.1.5:1080" },
+                "lane": false, "status": { "code": "listening", "local": "192.168.1.5:1080" }, "lane_effect": null, "lanes": [],
                 "connections": 2, "bytes_up": 10, "bytes_down": 20
             })
         );
@@ -1960,43 +1951,95 @@ mod tests {
 
     #[test]
     fn a_pair_view_keeps_the_setting_flat_and_a_pair_input_may_leave_things_out() {
-        let input: PairInput = serde_json::from_str(r#"{"lane": "always"}"#).unwrap();
-        assert_eq!(input, PairInput { keep_alive: None, lane: Some(LaneMode::Always), congestion: None });
-        assert_eq!(serde_json::from_str::<PairInput>(r#"{"keep_alive": true}"#).unwrap().lane, None, "旧的请求体照样能用");
-        assert!(serde_json::from_str::<PairInput>(r#"{"lane": "sometimes"}"#).is_err());
         let cubic: PairInput = serde_json::from_str(r#"{"congestion": "cubic"}"#).unwrap();
-        assert_eq!(cubic.congestion, Some(Some(Congestion::Cubic)));
+        assert_eq!(cubic, PairInput { keep_alive: None, congestion: Some(Some(Congestion::Cubic)) });
         let cleared: PairInput = serde_json::from_str(r#"{"congestion": null}"#).unwrap();
         assert_eq!(cleared.congestion, Some(None), "null 是改回默认，和没写不一样");
         assert!(serde_json::from_str::<PairInput>(r#"{"congestion": "reno"}"#).is_err());
+        // 旧的客户端还写 ice3proxy 的设置，写什么值都不报错，也不起作用。
+        for old in [r#"{"keep_alive": true, "lane": "always"}"#, r#"{"keep_alive": true, "lane": "sometimes"}"#] {
+            assert_eq!(serde_json::from_str::<PairInput>(old).unwrap(), PairInput { keep_alive: Some(true), congestion: None }, "{old}");
+        }
 
         let a = NodeId::new(1).unwrap();
         let b = NodeId::new(2).unwrap();
-        let view = PairView {
-            setting: PairSetting { a, b, keep_alive: true, lane: LaneMode::UdpFallback, congestion: Some(Congestion::Cubic) },
-            stored: false,
-            lane_effect: Some(LaneEffect {
-                effective: false,
-                blocked: vec![LaneBlock::NoRelay, LaneBlock::NodeTooOld { node: b }],
-                dialers: Vec::new(),
-                summary: "x".to_owned(),
-                opening: vec![LaneOpening { node: a, udp_path: false, lanes: false }],
-            }),
-            lanes: Vec::new(),
-        };
+        let view = PairView { setting: PairSetting { a, b, keep_alive: true, congestion: Some(Congestion::Cubic) }, stored: false };
         let value = serde_json::to_value(&view).unwrap();
-        assert_eq!((&value["a"], &value["keep_alive"], &value["lane"]), (&json!(1), &json!(true), &json!("udp_fallback")));
-        assert_eq!(value["congestion"], json!("cubic"));
-        assert_eq!(value["lane_effect"]["blocked"], json!([{ "reason": "no_relay" }, { "reason": "node_too_old", "node": 2 }]));
-        assert_eq!(value["lane_effect"]["opening"], json!([{ "node": 1, "udp_path": false, "lanes": false }]));
-        assert_eq!(value["stored"], json!(false), "没有存下的设置：各项都是默认值");
+        assert_eq!(value, json!({ "a": 1, "b": 2, "keep_alive": true, "congestion": "cubic", "stored": false }), "没有 ice3proxy 的东西了");
         assert_eq!(serde_json::from_value::<PairView>(value.clone()).unwrap(), view);
         let mut older = value;
         older.as_object_mut().unwrap().remove("stored");
         assert!(serde_json::from_value::<PairView>(older).unwrap().stored, "旧的 controller 只列存下的设置");
-        // 旧的 controller 给的节点对没有 ice3proxy 的设置。
-        let old: PairSetting = serde_json::from_value(json!({ "a": 1, "b": 2, "keep_alive": false })).unwrap();
-        assert_eq!((old.lane, old.congestion), (LaneMode::Off, None));
+        // 上一版的 controller 给的节点对还带着 ice3proxy 的设置和它的状况：忽略，照样读得出来。
+        let previous: PairView = serde_json::from_value(json!({
+            "a": 1, "b": 2, "keep_alive": false, "lane": "udp_fallback", "congestion": null, "stored": true,
+            "lane_effect": { "effective": true, "blocked": [], "dialers": [2], "summary": "x", "opening": [] }, "lanes": []
+        }))
+        .unwrap();
+        assert_eq!(previous, PairView { setting: PairSetting::unset(b, a), stored: true });
+    }
+
+    #[test]
+    fn a_proxy_carries_its_ice3proxy_option_and_older_bodies_still_read() {
+        let create: CreateProxy = serde_json::from_value(json!({ "node": 2, "bind": "192.168.1.5:1080", "exit": 1 })).unwrap();
+        assert!(!create.lane, "没写就是不走 ice3proxy");
+        let create: CreateProxy =
+            serde_json::from_value(json!({ "node": 2, "bind": "192.168.1.5:1080", "exit": 1, "lane": true })).unwrap();
+        assert!(create.lane);
+        let update: UpdateProxy = serde_json::from_value(json!({ "lane": false })).unwrap();
+        assert_eq!(update, UpdateProxy { lane: Some(false), ..UpdateProxy::default() });
+        assert_eq!(serde_json::from_value::<UpdateProxy>(json!({ "enabled": true })).unwrap().lane, None, "没写不改");
+        assert!(serde_json::to_value(UpdateProxy::default()).unwrap().get("lane").is_none());
+
+        let a = NodeId::new(1).unwrap();
+        let b = NodeId::new(2).unwrap();
+        let lanes = PeerLanes {
+            peer: a,
+            dials: true,
+            control: true,
+            idle: 0,
+            ready: 2,
+            parked_at_peer: 4,
+            udp_path: Some(true),
+            counts: crate::control::LaneCounts { in_use: 3, ..crate::control::LaneCounts::default() },
+        };
+        let proxy = Proxy {
+            id: 7,
+            name: "gw".to_owned(),
+            node: b,
+            bind: "127.0.0.1:1080".parse().unwrap(),
+            protocol: ListenerProtocol::Mixed,
+            exit: Some(a),
+            username: String::new(),
+            password: String::new(),
+            enabled: true,
+            allow_from: Vec::new(),
+            class: None,
+            optimistic: None,
+            lane: true,
+            status: ProxyStatus::Listening { local: "127.0.0.1:1080".parse().unwrap() },
+            lane_effect: Some(LaneEffect {
+                effective: false,
+                blocked: vec![LaneBlock::NoRelay, LaneBlock::NodeTooOld { node: a }],
+                dialers: Vec::new(),
+                summary: "x".to_owned(),
+            }),
+            lanes: vec![LaneSide { node: b, lanes, reported_secs_ago: Some(4) }],
+            usage: ListenTraffic { connections: 1, bytes_up: 2, bytes_down: 3 },
+        };
+        let value = serde_json::to_value(&proxy).unwrap();
+        assert_eq!(value["lane"], true);
+        assert_eq!(value["lane_effect"]["blocked"], json!([{ "reason": "no_relay" }, { "reason": "node_too_old", "node": 1 }]));
+        assert_eq!((&value["lanes"][0]["node"], &value["lanes"][0]["lanes"]["in_use"]), (&json!(2), &json!(3)), "计数平铺在 lanes 里");
+        assert_eq!(value["connections"], 1, "用量还在同一层");
+        assert_eq!(serde_json::from_value::<Proxy>(value.clone()).unwrap(), proxy);
+        // 旧的 controller 给的代理没有这三项。
+        let mut older = value;
+        for field in ["lane", "lane_effect", "lanes"] {
+            older.as_object_mut().unwrap().remove(field);
+        }
+        let older: Proxy = serde_json::from_value(older).unwrap();
+        assert_eq!((older.lane, older.lane_effect, older.lanes.len()), (false, None, 0));
     }
 
     #[test]

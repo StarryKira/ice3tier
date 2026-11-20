@@ -346,7 +346,7 @@ fn lane_block(block: &LaneBlock, names: Names<'_>) -> String {
         LaneBlock::NoRelay => "两个节点都没有启用中继".to_owned(),
         LaneBlock::NoTcpAddress { node } => format!("{} 还没有已知的地址", names(*node)),
         LaneBlock::NodeTooOld { node } => format!("{} 的版本太旧", names(*node)),
-        LaneBlock::NotConnected => "访问规则没有连通这两个节点".to_owned(),
+        LaneBlock::NotConnected => "访问规则不让监听的节点访问出口".to_owned(),
     }
 }
 

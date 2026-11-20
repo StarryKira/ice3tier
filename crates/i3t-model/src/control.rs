@@ -63,20 +63,17 @@ pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 /// - 2：认识 [`ToNode::TryLater`]、[`ToNode::BackboneQuery`]；回答路由查询时带 [`RouteAnswer::detail`]，
 ///   上报时带 [`Report::route_kinds`]。
 /// - 3：认识 netmap 里对端的 [`lane`](crate::netmap::Peer::lane)（ice3proxy），上报时带 [`Report::lanes`]。
-///   比它旧的节点不懂 ice3proxy，controller 据此说明节点对的设置为什么不起作用。
+///   比它旧的节点不懂 ice3proxy，controller 据此说明代理的 ice3proxy 为什么不起作用。
 /// - 4：认识 [`ToNode::Test`]、[`ToNode::TestEnd`]，会回 [`ToController::TestReport`]（主动测试），
 ///   在 [`Hello::throughput_tests`] 里说本机接不接受吞吐测试。
 /// - 5：`udp_fallback` 的拨号方按需拨：到对端的路上本节点这一段没有 UDP 时才拨，UDP 回来一阵之后放手。
-///   比它旧的节点在 `udp_fallback` 下一直拨着，所以 controller 只给这一版起的节点下发没有设置的节点对的默认值
-///   （[`LaneMode::PAIR_DEFAULT`](crate::netmap::LaneMode::PAIR_DEFAULT)，见 [`LANE_DEFAULT_REVISION`]）。
+///
+/// 代理的 [`lane`](crate::netmap::Proxy::lane)（只有选了 ice3proxy 的代理的流走它）没有升版：认识 ice3proxy 的旧节点拿到
+/// `always` 时照它自己的做法，把到那个对端的 TCP 流（端口转发也在内）都放到 ice3proxy 上，代理的流照样走 ice3proxy。
 pub const PROTOCOL_REVISION: u32 = 5;
 
 /// 从这一版节点协议起节点懂 ice3proxy。
 pub const LANE_REVISION: u32 = 3;
-
-/// 从这一版节点协议起，`udp_fallback` 只在需要时拨：没有设置的节点对，两个节点都到了这一版，controller 才按默认的
-/// `udp_fallback` 下发；有一个比它旧，这一对照旧是 `off`。
-pub const LANE_DEFAULT_REVISION: u32 = 5;
 
 /// 从这一版节点协议起节点懂主动测试。
 pub const TEST_REVISION: u32 = 4;

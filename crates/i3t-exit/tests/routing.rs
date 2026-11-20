@@ -194,61 +194,65 @@ fn tcp_forward(id: u32, bind: &str, target: u32) -> Forward {
     Forward { id, protocol: ForwardProtocol::Tcp, bind: bind.parse().unwrap(), target: node(target), allow_from: Vec::new(), class: None }
 }
 
-i3t_lane::on_both_transports! {
-    async fn a_port_forward_carries_each_connection_to_the_address_on_the_target_node() {
-        let world = World::new().await;
-        // 目标在 nas 的回环上：平时不可达，端口转发是访问它的显式途径。nas 也不需要是出口。
-        let echo = echo_server().await;
-        world.laptop.update(|netmap| netmap.me.forwards.push(tcp_forward(7, "127.0.0.1:0", NAS))).await;
-        world
-            .nas
-            .update(|netmap| {
-                netmap.me.forward_targets.push(ForwardTarget { id: 7, protocol: ForwardProtocol::Tcp, addr: echo, listener: node(LAPTOP), proxy_protocol: None });
-            })
-            .await;
+#[tokio::test]
+async fn a_port_forward_carries_each_connection_to_the_address_on_the_target_node() {
+    let world = World::new().await;
+    // 目标在 nas 的回环上：平时不可达，端口转发是访问它的显式途径。nas 也不需要是出口。
+    let echo = echo_server().await;
+    world.laptop.update(|netmap| netmap.me.forwards.push(tcp_forward(7, "127.0.0.1:0", NAS))).await;
+    world
+        .nas
+        .update(|netmap| {
+            netmap.me.forward_targets.push(ForwardTarget {
+                id: 7,
+                protocol: ForwardProtocol::Tcp,
+                addr: echo,
+                listener: node(LAPTOP),
+                proxy_protocol: None,
+            });
+        })
+        .await;
 
-        for _ in 0..3 {
-            let mut stream = TcpStream::connect(world.laptop.forward(7).await).await.unwrap();
-            assert_echo(&mut stream).await;
-        }
-        assert_eq!(world.nas.system.connected(), [echo; 3]);
-        assert_eq!(world.nas.exit.stats().total, 3);
+    for _ in 0..3 {
+        let mut stream = TcpStream::connect(world.laptop.forward(7).await).await.unwrap();
+        assert_echo(&mut stream).await;
     }
+    assert_eq!(world.nas.system.connected(), [echo; 3]);
+    assert_eq!(world.nas.exit.stats().total, 3);
 }
 
-i3t_lane::on_both_transports! {
-    async fn a_forward_is_only_served_to_the_node_it_was_issued_for() {
-        let world = World::new().await;
-        let target = Target::bind("127.0.0.1").await;
-        world.laptop.update(|netmap| netmap.me.forwards.push(tcp_forward(7, "127.0.0.1:0", NAS))).await;
-        let forward = world.laptop.forward(7).await;
+#[tokio::test]
+async fn a_forward_is_only_served_to_the_node_it_was_issued_for() {
+    let world = World::new().await;
+    let target = Target::bind("127.0.0.1").await;
+    world.laptop.update(|netmap| netmap.me.forwards.push(tcp_forward(7, "127.0.0.1:0", NAS))).await;
+    let forward = world.laptop.forward(7).await;
 
-        // nas 上没有这一条：连接被重置。
-        let mut stream = TcpStream::connect(forward).await.unwrap();
-        assert_reset(&drain(&mut stream).await.1);
+    // nas 上没有这一条：连接被重置。
+    let mut stream = TcpStream::connect(forward).await.unwrap();
+    assert_reset(&drain(&mut stream).await.1);
 
-        // nas 上有这一条，但它是下发给 gw 监听的；UDP 的那一条也不算。
-        world
-            .nas
-            .update(|netmap| {
-                netmap.me.forward_targets = vec![
-                    ForwardTarget { id: 7, protocol: ForwardProtocol::Tcp, addr: target.addr(), listener: node(GW), proxy_protocol: None },
-                    ForwardTarget { id: 7, protocol: ForwardProtocol::Udp, addr: target.addr(), listener: node(LAPTOP), proxy_protocol: None },
-                ];
-            })
-            .await;
-        let mut stream = TcpStream::connect(forward).await.unwrap();
-        assert_reset(&drain(&mut stream).await.1);
-        target.assert_untouched(Duration::from_millis(50)).await;
-        assert_eq!((world.nas.exit.stats().refused, world.nas.exit.stats().total), (2, 2));
+    // nas 上有这一条，但它是下发给 gw 监听的；UDP 的那一条也不算。
+    world
+        .nas
+        .update(|netmap| {
+            netmap.me.forward_targets = vec![
+                ForwardTarget { id: 7, protocol: ForwardProtocol::Tcp, addr: target.addr(), listener: node(GW), proxy_protocol: None },
+                ForwardTarget { id: 7, protocol: ForwardProtocol::Udp, addr: target.addr(), listener: node(LAPTOP), proxy_protocol: None },
+            ];
+        })
+        .await;
+    let mut stream = TcpStream::connect(forward).await.unwrap();
+    assert_reset(&drain(&mut stream).await.1);
+    target.assert_untouched(Duration::from_millis(50)).await;
+    assert_eq!((world.nas.exit.stats().refused, world.nas.exit.stats().total), (2, 2));
 
-        // gw 监听同一条转发时可以用。
-        world.gw.update(|netmap| netmap.me.forwards.push(tcp_forward(7, "127.0.0.1:0", NAS))).await;
-        let mut stream = TcpStream::connect(world.gw.forward(7).await).await.unwrap();
-        let echo = target.echo();
-        assert_echo(&mut stream).await;
-        assert_eq!(world.nas.system.connected(), [echo]);
-    }
+    // gw 监听同一条转发时可以用。
+    world.gw.update(|netmap| netmap.me.forwards.push(tcp_forward(7, "127.0.0.1:0", NAS))).await;
+    let mut stream = TcpStream::connect(world.gw.forward(7).await).await.unwrap();
+    let echo = target.echo();
+    assert_echo(&mut stream).await;
+    assert_eq!(world.nas.system.connected(), [echo]);
 }
 
 #[tokio::test]

@@ -151,9 +151,6 @@ pub(crate) struct Inner {
     pub(crate) sync: BTreeMap<NodeId, NodeSync>,
     /// 现在连着的节点。
     pub(crate) live: BTreeMap<NodeId, Live>,
-    /// 每个节点最近一次说的节点协议是第几版。节点离线之后留着；controller 重启就没有了，节点重新连上来时再知道。
-    /// 没有设置的节点对给不给默认的 ice3proxy 看它（见 `pairs`）。
-    pub(crate) protocols: BTreeMap<NodeId, u32>,
     /// 报的结果说它用不了 UDP 的节点，和从什么时候起（见 `no_udp`）。controller 重启时按存储里的结果重新建。
     pub(crate) no_udp: BTreeMap<NodeId, no_udp::NoUdp>,
     /// 有节点报的 relay 结果变了、要重新看谁用不了 UDP 的网络。
@@ -265,7 +262,6 @@ impl Controller {
             clock: Clock::default(),
             sync: BTreeMap::new(),
             live: BTreeMap::new(),
-            protocols: BTreeMap::new(),
             no_udp: BTreeMap::new(),
             no_udp_dirty: BTreeSet::new(),
             no_vnet: BTreeSet::new(),

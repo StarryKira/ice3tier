@@ -27,7 +27,7 @@ use i3t_access::{Access, AccessStatus, ListenState};
 use i3t_exit::{Exit, Os, Outbound, ResolveError, System};
 use i3t_flow::memory::{MemoryAcceptor, MemoryConnector, MemoryMesh};
 use i3t_lane::testing::LaneMesh;
-use i3t_lane::{LaneAcceptor, LaneConnector};
+use i3t_lane::{LaneAcceptor, LaneConnector, Lanes};
 use i3t_model::Netmap;
 use i3t_model::netmap::{ExitRole, LaneMode, ListenerProtocol, LocalNode, Network, Peer, PeerExit, Proxy, Verifier};
 use i3t_proto::{NodeId, PublicKey};
@@ -143,6 +143,8 @@ pub fn proxy(id: u32, protocol: ListenerProtocol, bind: &str, exit: u32) -> Prox
         allow_from: Vec::new(),
         class: None,
         optimistic: None,
+        // 跑在 lane 上的那一遍，代理选了 ice3proxy：只有这样的代理的流才走 lane。
+        lane: i3t_lane::testing::transport() == i3t_lane::testing::Transport::Lanes,
     }
 }
 
@@ -288,6 +290,8 @@ pub struct Node {
     pub own_endpoints: Arc<Mutex<Vec<SocketAddr>>>,
     pub access: Arc<Access<LaneConnector<MemoryConnector>>>,
     pub exit: Arc<Exit<FakeSystem, LaneConnector<MemoryConnector>>>,
+    /// 本节点的 lane：看和哪个对端之间经过了多少字节。
+    pub lanes: Arc<Lanes>,
     netmap: watch::Sender<Arc<Netmap>>,
 }
 
@@ -302,7 +306,7 @@ impl Node {
         let (connector, acceptor) = mesh.join(id);
         let lanes = lane_mesh.join(id).await;
         let connector = Arc::new(LaneConnector::new(Arc::new(connector), Arc::clone(&lanes), lane_mesh.choose()));
-        let acceptor: LaneAcceptor<MemoryAcceptor> = LaneAcceptor::new(Arc::new(acceptor), lanes);
+        let acceptor: LaneAcceptor<MemoryAcceptor> = LaneAcceptor::new(Arc::new(acceptor), Arc::clone(&lanes));
         let (sender, receiver) = watch::channel(Arc::new(netmap));
         let system = FakeSystem::default();
         let own_endpoints: Arc<Mutex<Vec<SocketAddr>>> = Arc::default();
@@ -326,7 +330,7 @@ impl Node {
             let exit = Arc::clone(&exit);
             async move { i3t_flow::serve(&acceptor, exit).await }
         });
-        Self { id, system, own_endpoints, access, exit, netmap: sender }
+        Self { id, system, own_endpoints, access, exit, lanes, netmap: sender }
     }
 
     /// 改这个节点的 netmap 并下发（版本号加一），等入口把监听调整完。

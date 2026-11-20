@@ -449,7 +449,7 @@ fn lane_block(block: &LaneBlock, names: Names<'_>) -> String {
         LaneBlock::NoRelay => "Neither node is a relay".to_owned(),
         LaneBlock::NoTcpAddress { node } => format!("{} has no known address yet", names(*node)),
         LaneBlock::NodeTooOld { node } => format!("{} is too old", names(*node)),
-        LaneBlock::NotConnected => "No rule connects these nodes".to_owned(),
+        LaneBlock::NotConnected => "No rule lets the listening node reach the exit".to_owned(),
     }
 }
 

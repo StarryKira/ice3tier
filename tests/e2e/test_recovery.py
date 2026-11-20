@@ -111,7 +111,7 @@ def with_switch(off: bool):
 
 
 def lane(lab: Lab, work: Path, t: Checks) -> None:
-    """lane（总是用）上的一条流：出口在家用 NAT 后面拨公网上的入口，断开加在入口和出口的 NAT 之间。"""
+    """lane（总是用，代理选了 ice3proxy）上的一条流：出口在家用 NAT 后面拨公网上的入口，断开加在入口和出口的 NAT 之间。"""
     web = lab.host("web")
     start_ticker(web)
     entry = Node(lab.host("entry"), work, 1, declare=("relay",))
@@ -119,7 +119,7 @@ def lane(lab: Lab, work: Path, t: Checks) -> None:
     exit_node = Node(home.host("exit"), work, 2, declare=("exit",))
     entry_netmap = entry.netmap(me={"relay": {}}, relays=[entry.as_relay()], relay_clients=[entry, exit_node],
                                 peers=[lane_peer(exit_node, lane="always", endpoints=False, attached=[(entry, 5)], exit=True)],
-                                proxies=[entry.proxy_to(exit_node)])
+                                proxies=[entry.proxy_to(exit_node, lane=True)])
     exit_netmap = exit_node.netmap(me={"exit": {}}, relays=[entry.as_relay()], peers=[lane_peer(entry, lane="always")])
     blackout_between(entry.host, home, BASE, False)
     results = {}

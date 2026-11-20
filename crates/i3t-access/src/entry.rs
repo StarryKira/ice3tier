@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 
+use i3t_flow::Carriage;
 use i3t_model::netmap::{ListenerProtocol, Proxy, Verifier};
 use i3t_proto::NodeId;
 use i3t_proto::flow::Class;
@@ -12,6 +13,7 @@ use crate::message::ProxyAuth;
 /// 本机配置文件里的一个组网入口（`config.toml` 的 `[proxy]`）：不认证，没有出口，只通到组网里的节点。
 ///
 /// 它是给本机的程序用的，配置文件只收回环地址。万一不是回环地址，它和没有用户名密码的代理一样谁都不让用。
+/// 它不是 controller 下发的代理，没有 ice3proxy 的选项：它的流只走共用的连接。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalEntry {
     /// 上报和日志里的名字（`local-socks5`、`local-http`）。
@@ -29,6 +31,8 @@ pub(crate) struct Entry {
     pub gate: Gate,
     pub class: Option<Class>,
     pub optimistic: Option<bool>,
+    /// 这个端口上的 TCP 流能不能走 ice3proxy：只有选了它的代理（[`Proxy::lane`]）能。
+    pub carriage: Carriage,
 }
 
 impl Entry {
@@ -39,11 +43,19 @@ impl Entry {
             gate: Gate::of(proxy.bind, proxy.auth),
             class: proxy.class,
             optimistic: proxy.optimistic,
+            carriage: if proxy.lane { Carriage::Lane } else { Carriage::Shared },
         }
     }
 
     pub(crate) fn local(entry: &LocalEntry) -> Self {
-        Self { protocol: entry.protocol, exit: None, gate: Gate::of(entry.bind, None), class: None, optimistic: None }
+        Self {
+            protocol: entry.protocol,
+            exit: None,
+            gate: Gate::of(entry.bind, None),
+            class: None,
+            optimistic: None,
+            carriage: Carriage::Shared,
+        }
     }
 }
 

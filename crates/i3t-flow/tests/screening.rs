@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use i3t_conn::{Connector, RecvStream, SendStream, StreamAborted, StreamCode};
 use i3t_flow::memory::{MemoryConnector, MemoryMesh, MemoryRecv, MemorySend};
-use i3t_flow::{FlowError, Handler, Request, Screening};
+use i3t_flow::{Carriage, FlowError, Handler, Request, Screening};
 use i3t_proto::NodeId;
 use i3t_proto::flow::{Class, Open, Origin, Reason, Reply, Status, Target};
 use tokio::sync::Semaphore;
@@ -78,7 +78,7 @@ impl World {
 
     /// 开一条流、发 OPEN，等接受方的结论。
     async fn ask(&self, connector: &MemoryConnector) -> Result<(), FlowError> {
-        let pending = i3t_flow::open(connector, node(EXIT), &request(), b"first data").await?;
+        let pending = i3t_flow::open(connector, node(EXIT), &request(), b"first data", Carriage::Shared).await?;
         timeout(PATIENCE, pending.established()).await.expect("接受方应该很快给出结论").map(drop)
     }
 
@@ -86,7 +86,7 @@ impl World {
     fn hold(&self, connector: &MemoryConnector) {
         let connector = connector.clone();
         tokio::spawn(async move {
-            let pending = i3t_flow::open(&connector, node(EXIT), &request(), b"").await.unwrap();
+            let pending = i3t_flow::open(&connector, node(EXIT), &request(), b"", Carriage::Shared).await.unwrap();
             let _ = pending.established().await;
         });
     }

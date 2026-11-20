@@ -207,7 +207,7 @@ pub async fn run(
     let quota =
         quota.map_or_else(QuotaState::default, |record| QuotaState { period_start: record.period_start, used_bytes: record.used_bytes });
     let ports = Arc::new(StatePorts::open(state.clone()));
-    // 入口和出口用的连接层：共用的连接，加上按节点对的设置给 TCP 流用的 ice3proxy。
+    // 入口和出口用的连接层：共用的连接，加上 controller 让备着的 ice3proxy（只给选了它的代理的 TCP 流用）。
     let lanes = Arc::new(NodeLanes::new(&key, Arc::clone(&endpoint))?);
     let connector = lanes.connector();
     // 每条流结束时的摘要里写这对节点的连接走的路，入口和出口问的是同一个。

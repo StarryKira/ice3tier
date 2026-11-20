@@ -199,7 +199,7 @@ relay = false
 
 # 本机的组网入口：这台机器上的程序经它访问组网里的节点（只到节点，不经出口，不认证）。默认不开：
 # 有虚拟网卡时直接连虚拟 IP 就行，装不了网卡的机器才用得上。要开就写回环上的地址，比如 socks5 = "127.0.0.1:1080"。
-# 经出口出去的代理在 WebUI 的代理里配置。
+# 它们的流只走共用的连接，不走 ice3proxy。经出口出去的代理（和它的 ice3proxy 选项）在 WebUI 的代理里配置。
 [proxy]
 socks5 = "off"
 http = "off"
@@ -258,7 +258,8 @@ relay = false
 # Local mesh entries: programs on this machine reach the nodes of the network through them (nodes only, no exit,
 # no authentication). Off by default: with the virtual network programs connect to virtual IPs directly, so only
 # machines that cannot have the adapter need one. To turn one on write a loopback address,
-# e.g. socks5 = "127.0.0.1:1080". Proxies that leave through an exit are set up under Proxies in the WebUI.
+# e.g. socks5 = "127.0.0.1:1080". They always use the shared connection, never ice3proxy. Proxies that leave
+# through an exit (and their ice3proxy option) are set up under Proxies in the WebUI.
 [proxy]
 socks5 = "off"
 http = "off"

@@ -26,7 +26,7 @@ use crate::vnet::Vnet;
 
 /// 节点里的出口：流经共用的连接或者 lane 进来。
 pub(crate) type NodeExit = Exit<Os, lanes::Connector>;
-/// 节点里的入口：TCP 流按节点对的设置走 lane 或者共用的连接。
+/// 节点里的入口：选了 ice3proxy 的代理的 TCP 流在备着 lane 时走 lane，别的走共用的连接。
 pub(crate) type NodeAccess = Access<lanes::Connector>;
 
 /// 一个运行着的节点。

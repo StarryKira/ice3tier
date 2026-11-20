@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""ice3proxy（lane）的端到端测试：一对入口—出口之间每条 TCP 流独占一条 TCP。
+"""ice3proxy（lane）的端到端测试：入口上选了 ice3proxy 的代理，它到出口的每条 TCP 流独占一条 TCP。
 
     python3 tests/e2e/test_lane.py [场景名...]
 
-前几个场景的节点用静态的 netmap 运行：两边互相看到的对端条目里写着 `"lane"`，
-启用了 relay 的那一边在 netmap 的 relays 里带着它的 TCP 地址，另一边拨它。计数从节点本机的 /metrics 读。
+前几个场景的节点用静态的 netmap 运行：两边互相看到的对端条目里写着 `"lane"`（controller 给有这种代理的一对下发 `always`），
+入口上的代理写着 `"lane": true`（ice3proxy 是代理的选项，只有选了它的代理的流走它）。启用了 relay 的那一边在 netmap 的
+relays 里带着它的 TCP 地址，另一边拨它。udp_fallback 这个取值 controller 不再下发，节点照旧认，静态的场景还测它。
+计数从节点本机的 /metrics 读。
 
-default_where_udp_is_missing、default_follows_udp 由 controller 管理，节点对都没有设置（默认的 udp_fallback，
-存下的设置只用来对照），用 I3T_BIN_DIR 里的程序。managed_drain 也由 controller 管理（节点对设置、排空、更新），
-要用 test_update.py 编的那一套程序（第一次会编译几分钟）。
+proxy_option 由 controller 管理（代理的选项、没选的代理、端口转发），用 I3T_BIN_DIR 里的程序。managed_drain 也由 controller
+管理（代理的选项、排空、更新），要用 test_update.py 编的那一套程序（第一次会编译几分钟）。
 """
 
 from __future__ import annotations
@@ -87,7 +88,7 @@ def public_entry(lab: Lab, work: Path, lane: str, *, tcp_blocked: bool = False, 
         exit_node.env = {HOLD_SWITCH: str(hold)}
     entry.start_static(entry.netmap(me={"relay": {}}, relays=[entry.as_relay()], relay_clients=[entry, exit_node],
                                     peers=[lane_peer(exit_node, lane=lane, endpoints=False, attached=[(entry, 5)], exit=True)],
-                                    proxies=[entry.proxy_to(exit_node)]))
+                                    proxies=[entry.proxy_to(exit_node, lane=lane != "off")]))
     entry_peer = {**lane_peer(entry, lane=lane), **(exit_view_of_entry or {})}
     exit_node.start_static(exit_node.netmap(me={"exit": {}}, relays=[entry.as_relay()], peers=[entry_peer]))
     pair = Pair(lab, work, entry, exit_node, web, cert)
@@ -105,7 +106,7 @@ def public_exit(lab: Lab, work: Path, lane: str) -> Pair:
     exit_node.start_static(exit_node.netmap(me={"exit": {}, "relay": {}}, relays=[exit_node.as_relay()], relay_clients=[entry, exit_node],
                                             peers=[lane_peer(entry, lane=lane, endpoints=False, attached=[(exit_node, 5)])]))
     entry.start_static(entry.netmap(relays=[exit_node.as_relay()], peers=[lane_peer(exit_node, lane=lane, exit=True)],
-                                    proxies=[entry.proxy_to(exit_node)]))
+                                    proxies=[entry.proxy_to(exit_node, lane=lane != "off")]))
     return Pair(lab, work, entry, exit_node, web, cert)
 
 
@@ -397,14 +398,8 @@ def silent_stream_outlives_nat_mapping(lab: Lab, work: Path, t: Checks) -> None:
     p.report()
 
 
-def established_to(host: Host, ip: str, port: int = 20330) -> list[str]:
-    """`host` 上连到 `ip:port`、建立着的 TCP 连接，一条一行。"""
-    done = host.run("ss", "-Htn", "state", "established", f"( dst {ip} and dport = :{port} )", check=False)
-    return [line for line in done.stdout.splitlines() if line.strip()]
-
-
 class Managed:
-    """由 controller 管理的一个小网络：公网上的 relay（兼做出口），和场景自己加的节点。节点对都没有设置，除非场景自己设。"""
+    """由 controller 管理的一个小网络：公网上的 relay（兼做出口），和场景自己加的节点。"""
 
     def __init__(self, lab: Lab, work: Path) -> None:
         self.lab, self.work = lab, work
@@ -417,11 +412,9 @@ class Managed:
         self.controller.ctl("relay", "enable", str(self.relay.id))
         self.controller.ctl("exit", "enable", str(self.relay.id))
 
-    def node(self, host: Host, *, udp: bool = True, exit: bool = False, hold: int | None = None) -> Node:
-        """加一个节点。`udp` 是假时它加入之前就用不了 UDP；`exit` 时启用它的出口；`hold` 见 `public_entry`。"""
+    def node(self, host: Host, *, udp: bool = True, exit: bool = False) -> Node:
+        """加一个节点。`udp` 是假时它加入之前就用不了 UDP；`exit` 时启用它的出口。"""
         node = Node(host, self.work, declare=("exit",) if exit else ())
-        if hold is not None:
-            node.env = {HOLD_SWITCH: str(hold)}
         if not udp:
             host.block_udp()
         node.join(self.controller)
@@ -437,7 +430,7 @@ class Managed:
         return code == 0 and digest == blob_digest(size), f"curl 退出码 {code}，{err.strip()[-300:]}"
 
     def pair(self, a: Node, b: Node) -> dict:
-        """`i3tctl pair show`：这一对的设置和状况，没有设置的也有。旧的 i3tctl 没有这个命令时是空的。"""
+        """`i3tctl pair show`：这一对的设置，没有设置的也有。旧的 i3tctl 没有这个命令时是空的。"""
         done = self.controller.ctl("pair", "show", a.name, b.name, check=False)
         return json.loads(done.stdout) if done.returncode == 0 and done.stdout.strip() else {}
 
@@ -450,251 +443,105 @@ def lanes_up(holder: Node, dialler: Node, timeout: float) -> bool:
     return waited(lambda: (c := lane_counts(holder, dialler))["control_up"] == 1 and c["parked_here"] >= 1, timeout)
 
 
-def default_where_udp_is_missing(lab: Lab, work: Path, t: Checks) -> None:
-    """没有节点对设置（默认的 udp_fallback）：没有 UDP 的节点和它拨得到的 relay 之间，TCP 流走 ice3proxy，头一条流不因为取 lane 耽误；
-    有 UDP 的一对一分钟之后什么 lane 都没有（存下 udp_fallback 的也一样）；存下 off 的一对没有 UDP 也不拨。"""
+# 端口转发在 relay 上监听的端口。
+FORWARD_PORT = 9180
+
+
+def forward_intact(node: Node, size: int) -> tuple[bool, str]:
+    """在 `node` 那台机器上经它监听在 127.0.0.1:FORWARD_PORT 的端口转发取 /blob/<size>，字节一个不差。"""
+    script = f"curl -sS --max-time 60 http://127.0.0.1:{FORWARD_PORT}/blob/{size} | sha256sum | cut -d' ' -f1"
+    done = node.host.run("bash", "-c", script, check=False, timeout=70)
+    return done.stdout.strip() == blob_digest(size), done.stderr.strip()[-300:]
+
+
+def carried(holder: Node, peer: Node) -> float:
+    return lane_counts(holder, peer)["carried_bytes"]
+
+
+def proxy_option(lab: Lab, work: Path, t: Checks) -> None:
+    """由 controller 管理：ice3proxy 是代理的选项（白皮书 §9.7 第 9 条）。选了的代理不管路上有没有 UDP，TCP 流都走 ice3proxy；
+    同一对节点之间没选的代理和端口转发走共用的连接；没有哪个代理选它的一对什么 lane 都没有，路上没有 UDP 也一样。关掉选项，lane 跟着关掉。"""
     m = Managed(lab, work)
     relay, ctl = m.relay, m.controller
-    started = time.monotonic()
-    # s：用不了 UDP（像宿迁那台），兼做出口。n、q：公网上，UDP 好好的；q 和 relay 存下了 udp_fallback。
-    # o：存下了 off，之后 UDP 也被挡住。
+    # s：用不了 UDP（像宿迁那台），兼做出口和端口转发的目标。n：公网上，UDP 好好的。o：也用不了 UDP，兼做出口。
     s = m.node(lab.nat("home", NatKind.CONE).host("s"), udp=False, exit=True)
     n = m.node(lab.host("n"))
-    q = m.node(lab.host("q"))
-    o = m.node(lab.nat("office", NatKind.CONE).host("o"), exit=True)
-    ctl.ctl("pair", "set", relay.name, q.name, "--lane", "udp_fallback")
-    ctl.ctl("pair", "set", relay.name, o.name, "--lane", "off")
-    o.host.block_udp()
-    ctl.add_proxy(relay, s)
-    ctl.add_proxy(s, relay)
+    o = m.node(lab.nat("office", NatKind.CONE).host("o"), udp=False, exit=True)
+    chosen = ctl.add_proxy(relay, s, "--ice3proxy")
+    plain = ctl.add_proxy(s, relay)
+    ctl.add_proxy(n, relay, "--ice3proxy")
     ctl.add_proxy(relay, o)
-    ctl.add_proxy(n, relay)
+    t.check("新建时写了 --ice3proxy 的代理走 ice3proxy，没写的（--json，不问）不走", chosen["lane"] is True and plain["lane"] is False,
+            f"{chosen['lane']} {plain['lane']}")
+    start_blob_server(s.host, work)
+    ctl.forward_target(s)
+    ctl.ctl("forward", "add", relay.name, f"127.0.0.1:{FORWARD_PORT}", s.name, "127.0.0.1:80")
+    wait_until(lambda: f":{FORWARD_PORT} " in relay.host.run("ss", "-lnt").stdout, what="relay 上的端口转发开始监听")
 
-    # 头一条流：这时 s 多半还没拨上来，流直接走共用的连接，不等 lane、不记失败。
-    first = None
-    deadline = time.monotonic() + 60
-    while first is None and time.monotonic() < deadline:
-        began = time.monotonic()
-        if m.intact(relay, s, 100_000, timeout=20)[0]:
-            first = time.monotonic() - began
-        else:
-            time.sleep(0.5)
-    c = lane_counts(relay, s)
-    t.check("经没有 UDP 的出口访问得到", first is not None)
-    t.check("头一条流没有取 lane 失败、没有等补拨、没有记作改走", c["claims_failed"] == 0 and c["claim_wait_ms"] < 500 and c["fallbacks"] == 0,
-            str(c))
-    print(f"  头一条流用了 {first or 0:.2f} 秒", flush=True)
-
-    # (a) s 这一段没有 UDP：连续 40 秒之后它拨 relay，之后的流走 ice3proxy。
-    t.check("s 拨起来：relay 那里有了它的控制 lane 和停着的 lane", lanes_up(relay, s, 120), lane_line(relay, s))
-    print(f"  加入之后 {time.monotonic() - started:.1f} 秒 relay 那里有了 s 停过来的 lane", flush=True)
-    before, s_before = lane_counts(relay, s), lane_counts(s, relay)
+    # (a) 选了 ice3proxy 的代理，路上没有 UDP：s 拨 relay，relay 经 s 出去的流走 ice3proxy。
+    t.check("relay 和 s 之间备着 ice3proxy：relay 那里有 s 拨来的控制 lane 和停着的 lane", lanes_up(relay, s, 60), lane_line(relay, s))
+    before = lane_counts(relay, s)
     ok, detail = m.intact(relay, s, 2_000_000)
     after = lane_counts(relay, s)
-    t.check("经 s 出去的下载走 ice3proxy（relay 取了 lane，lane 上搬了 2MB），完整", ok and after["claims"] > before["claims"] and
-            after["carried_bytes"] - before["carried_bytes"] >= 2_000_000, f"{detail}；{before} → {after}")
+    t.check("选了 ice3proxy 的代理（relay 经 s 出去）：流走 ice3proxy（取了 lane，lane 上搬了 2MB），完整，没有改走", ok and
+            after["claims"] > before["claims"] and after["carried_bytes"] - before["carried_bytes"] >= 2_000_000 and
+            after["fallbacks"] == before["fallbacks"], f"{detail}；{before} → {after}")
+
+    # (b) 同一对之间、没选 ice3proxy 的代理：lane 备着也不用。
+    s_before, relay_before = carried(s, relay), carried(relay, s)
+    fallbacks = lane_counts(s, relay)["fallbacks"]
     ok, detail = m.intact(s, relay, 2_000_000)
-    s_after = lane_counts(s, relay)
-    t.check("s 自己经 relay 出去的下载走它自己拨的 lane，完整", ok and s_after["carried_bytes"] - s_before["carried_bytes"] >= 2_000_000,
-            f"{detail}；{s_before} → {s_after}")
-    t.check("没有流改走、没有取 lane 失败", lane_counts(relay, s)["fallbacks"] == 0 and lane_counts(relay, s)["claims_failed"] == 0 and
-            lane_counts(s, relay)["fallbacks"] == 0, f"{lane_line(relay, s)}；{lane_line(s, relay)}")
+    t.check("同一对之间没选 ice3proxy 的代理（s 经 relay 出去）：走共用的连接，两边的 lane 上一个字节也没有多，也不算改走",
+            ok and carried(s, relay) == s_before and carried(relay, s) == relay_before and lane_counts(s, relay)["fallbacks"] == fallbacks,
+            f"{detail}；{lane_line(s, relay)}；{lane_line(relay, s)}")
 
-    def in_use_by_default() -> bool:
-        view = m.pair(relay, s)
-        opening = {side["node"]: side for side in (view.get("lane_effect") or {}).get("opening", [])}
-        return view.get("stored") is False and view.get("lane") == "udp_fallback" and opening.get(relay.id, {}).get("lanes") is True
-    t.check("节点对视图：没有设置、用默认的 udp_fallback，relay 现在在 ice3proxy 上开新的 TCP 流", waited(in_use_by_default, 30, 2),
-            json.dumps(m.pair(relay, s))[:800])
+    # (c) 端口转发：不管两边之间备没备着 ice3proxy 都走共用的连接。
+    s_before, relay_before = carried(s, relay), carried(relay, s)
+    ok, detail = forward_intact(relay, 2_000_000)
+    t.check("端口转发（relay 监听，s 去连）：完整，走共用的连接，两边的 lane 上一个字节也没有多",
+            ok and carried(s, relay) == s_before and carried(relay, s) == relay_before, f"{detail}；{lane_line(relay, s)}；{lane_line(s, relay)}")
 
-    # (c) 存下 off 的一对：没有 UDP 也不拨，流照常走共用的连接。
+    # (d) 选了 ice3proxy 的代理，路上有 UDP：照样走（一直走，不只在没有 UDP 时）。
+    t.check("有 UDP 的 n 选了 ice3proxy：n 拨 relay，relay 那里有它的控制 lane", lanes_up(relay, n, 60), lane_line(relay, n))
+    before = carried(n, relay)
+    ok, detail = m.intact(n, relay, 2_000_000)
+    t.check("有 UDP 的 n 上选了 ice3proxy 的代理：流照样走 ice3proxy（n 拨的 lane 上搬了 2MB），完整",
+            ok and carried(n, relay) - before >= 2_000_000, f"{detail}；{lane_line(n, relay)}")
+
+    # (e) 路上没有 UDP、代理没选 ice3proxy：以前会自己走 ice3proxy，现在走共用的连接（经 TCP 中转），什么 lane 都没有。
     ok, detail = m.intact(relay, o, 1_000_000)
-    t.check("存下 off、没有 UDP 的 o：下载完整", ok, detail)
+    t.check("没有 UDP 的 o、代理没选 ice3proxy：下载完整", ok, detail)
     co, oc = lane_counts(relay, o), lane_counts(o, relay)
-    t.check("存下 off 的一对什么 lane 都没有，也没有改走", no_lanes(relay, o) and no_lanes(o, relay) and co["claims"] + co["fallbacks"] +
-            oc["dial_failures"] == 0, f"{co}；{oc}")
+    t.check("这一对什么 lane 都没有，没有改走，也没有拨号失败", no_lanes(relay, o) and no_lanes(o, relay) and
+            co["claims"] + co["fallbacks"] + co["carried_bytes"] + oc["dial_failures"] + oc["carried_bytes"] == 0, f"{co}；{oc}")
 
-    # (b) 有 UDP 的一对：一分钟之后什么 lane 都没有，存下 udp_fallback 的也一样。
-    ok, detail = m.intact(n, relay, 1_000_000)
-    t.check("有 UDP 的 n 经 relay 出去：下载完整，不碰 lane", ok and lane_counts(n, relay)["carried_bytes"] == 0, detail)
-    time.sleep(max(0.0, started + 60 - time.monotonic()))
-    for node, how in ((n, "没有设置"), (q, "存下 udp_fallback")):
-        t.check(f"有 UDP 的 {node.name}（{how}）一分钟之后：没有控制 lane、没有空闲的、没有在拨的，两边都是",
-                no_lanes(node, relay) and no_lanes(relay, node) and lane_counts(node, relay)["dial_failures"] == 0,
-                f"{lane_line(node, relay)}；{lane_line(relay, node)}")
-        connections = established_to(node.host, relay.host.ip)
-        t.check(f"{node.name} 到 relay 的节点端口没有一条 TCP 连接", connections == [], "\n".join(connections))
-    if t.failures:
-        m.logs(relay, s, q)
+    # (f) 代理的视图说 ice3proxy 起不起作用、谁拨，带着两头报的 lane；节点对的视图里没有 ice3proxy 了。
+    def reported() -> bool:
+        view = ctl.proxy(chosen["id"])
+        effect = view.get("lane_effect") or {}
+        sides = {side["node"] for side in view.get("lanes", [])}
+        return effect.get("effective") is True and effect.get("dialers") == [s.id] and sides == {relay.id, s.id}
+    t.check("代理的视图：起作用，由 s 拨，两头报上来的 lane 都在", waited(reported, 30, 2), json.dumps(ctl.proxy(chosen["id"]))[:800])
+    view = ctl.proxy(plain["id"])
+    t.check("没选 ice3proxy 的代理的视图里没有这些", view["lane_effect"] is None and view["lanes"] == [], json.dumps(view)[:400])
+    pair = m.pair(relay, s)
+    t.check("节点对的视图里没有 ice3proxy 的东西", bool(pair) and not {"lane", "lane_effect", "lanes"} & set(pair), json.dumps(pair))
 
-
-def default_follows_udp(lab: Lab, work: Path, t: Checks) -> None:
-    """没有节点对设置：节点的 UDP 回来之后，过了保持时间它放开拨的 lane；UDP 又没了，一阵之后 lane 又回来。"""
-    hold = 30
-    m = Managed(lab, work)
-    relay = m.relay
-    s = m.node(lab.nat("home", NatKind.CONE).host("s"), udp=False, exit=True, hold=hold)
-    m.controller.add_proxy(relay, s)
-    wait_until(lambda: m.intact(relay, s, 10, timeout=5)[0], timeout=60, what="经 s 访问到数据服务")
-    t.check("没有 UDP：s 拨起来", lanes_up(relay, s, 120), lane_line(relay, s))
-
-    def on_lane() -> bool:
-        claims = lane_counts(relay, s)["claims"]
-        return m.intact(relay, s, 1_000_000)[0] and lane_counts(relay, s)["claims"] > claims
-
-    t.check("没有 UDP：流走 ice3proxy", waited(on_lane, 30, 1), lane_line(relay, s))
-
-    s.host.block_udp(False)
-    opened = time.monotonic()
-
-    def off_lane() -> bool:
-        claims = lane_counts(relay, s)["claims"]
-        return m.intact(relay, s, 1_000_000)[0] and lane_counts(relay, s)["claims"] == claims
-
-    t.check("UDP 回来之后新的流回到共用的连接", waited(off_lane, 150, 2), lane_line(relay, s))
-    print(f"  UDP 放开之后 {time.monotonic() - opened:.1f} 秒新的流回到共用的连接", flush=True)
-    let_go = waited(lambda: no_lanes(relay, s) and no_lanes(s, relay), 150 + hold, 1)
-    released = time.monotonic() - opened
-    t.check(f"UDP 回来之后 s 放开拨的 lane，两边什么都不连着", let_go, f"{lane_line(relay, s)}；{lane_line(s, relay)}")
-    t.check(f"放手不早于保持时间（{hold} 秒）", released >= hold - 2, f"UDP 放开之后 {released:.1f} 秒就放手了")
-    print(f"  UDP 放开之后 {released:.1f} 秒 s 放手", flush=True)
-    # 到 relay 的中转会话走着 TCP 时，最多 30 秒之后再试 UDP；那之后 s 到 relay 的节点端口上一条 TCP 都不该有。
-    gone = waited(lambda: established_to(s.host, relay.host.ip) == [], 45, 1)
-    t.check("放手之后 s 到 relay 的节点端口上没有 TCP 连接（lane 都关了，中转会话也回到 UDP）", gone,
-            "\n".join(established_to(s.host, relay.host.ip)))
-
-    s.host.block_udp()
-    blocked = time.monotonic()
-    t.check("UDP 又没了：一阵之后 s 又拨起来", lanes_up(relay, s, 150), lane_line(relay, s))
-    print(f"  UDP 挡住之后 {time.monotonic() - blocked:.1f} 秒 s 又拨起来", flush=True)
-    t.check("之后的流又走 ice3proxy", waited(on_lane, 30, 1), lane_line(relay, s))
-    t.check("始终没有流改走、没有取 lane 失败、没有拨号失败", lane_counts(relay, s)["fallbacks"] + lane_counts(relay, s)["claims_failed"] +
-            lane_counts(s, relay)["dial_failures"] == 0, f"{lane_line(relay, s)}；{lane_line(s, relay)}")
-    if t.failures:
-        m.logs(relay, s)
-
-
-def route_to(controller: Controller, node: Node, peer: Node) -> dict:
-    """`node` 最近上报的、到 `peer` 的路。"""
-    routes = controller.ctl("node", "routes", str(node.id))["routes"]
-    return next((route["route"] for route in routes if route["peer"]["id"] == peer.id), {})
-
-
-def default_reaches_a_relay_without_udp(lab: Lab, work: Path, t: Checks) -> None:
-    """没有节点对设置：普通节点 y（UDP 好好的，挂靠在离它近的两个 UDP 中继上）和没有 UDP 的中继 s（像宿迁那台）之间，
-    闲了一分多钟之后两个方向的头一条 TCP 流都走 ice3proxy。y 到 s 的路是 y → 中继（UDP）→ s（TCP）：y 自己这一段有 UDP，
-    要靠 controller 认定 s 用不了 UDP。"""
-    m = Managed(lab, work)
-    r, ctl = m.relay, m.controller
-    started = time.monotonic()
-    a = Node(lab.host("a"), work, declare=("relay",))
-    s = Node(lab.host("s"), work, declare=("relay", "exit"))
-    y = Node(lab.host("y"), work, declare=("exit",))
-    # y 离 r、a 近，挂靠的是它们两个；s 离谁都是 100 ms 以上。s 的机房挡掉了 UDP。
-    for one, other, rtt in ((s, a, 100), (s, r, 110), (s, y, 120), (a, r, 30), (a, y, 20), (r, y, 2)):
-        harness.shape_between(one.host, other.host, lablib.Shape(rtt_ms=rtt))
-    s.host.block_udp()
-    for node in (a, s, y):
-        node.join(ctl)
-    for node in (a, s):
-        ctl.ctl("relay", "enable", str(node.id))
-    for node in (s, y):
-        ctl.ctl("exit", "enable", str(node.id))
-    ctl.add_proxy(y, s)
-    ctl.add_proxy(s, y)
-
-    flagged = waited(lambda: ctl.node(s).get("no_udp") is True, 240, 3)
-    t.check("controller 认定 s 用不了 UDP，y 和中继都不算", flagged and not any(ctl.node(node).get("no_udp") for node in (y, r, a)),
-            str({node.name: ctl.node(node).get("no_udp") for node in (s, y, r, a)}))
-    up = lanes_up(s, y, 120)
-    t.check("y 拨 s：s 那里有 y 的控制 lane 和停着的 lane", up, lane_line(s, y))
-    print(f"  加入之后 {time.monotonic() - started:.1f} 秒 s 那里有了 y 停过来的 lane", flush=True)
-    # 闲一分多钟：y 到 s 的临时会话回收，路回到经 UDP 中继的那一条。
-    time.sleep(70)
-    route = route_to(ctl, y, s)
-    print(f"  闲了一分多钟之后 y 到 s 的路：{route}", flush=True)
-    t.check("闲了一分多钟：y 到 s 的路的第一段是 UDP 中继，不是 s 自己", route.get("via") == "relay" and
-            (route.get("relays") or [s.id])[0] != s.id, str(route))
-    y_before, s_before = lane_counts(y, s), lane_counts(s, y)
-    ok, detail = m.intact(y, s, 1_000_000)
-    y_after = lane_counts(y, s)
-    t.check("y 经 s 出去的头一条流走 ice3proxy（y 自己拨的 lane 上搬了 1MB），完整", ok and
-            y_after["carried_bytes"] - y_before["carried_bytes"] >= 1_000_000, f"{detail}；{y_before} → {y_after}")
-    ok, detail = m.intact(s, y, 1_000_000)
-    s_after = lane_counts(s, y)
-    t.check("s 经 y 出去的头一条流走 ice3proxy（s 取了 y 停过来的 lane），完整", ok and s_after["claims"] > s_before["claims"] and
-            s_after["carried_bytes"] - s_before["carried_bytes"] >= 1_000_000, f"{detail}；{s_before} → {s_after}")
-    t.check("没有流改走、没有取 lane 失败", y_after["fallbacks"] + s_after["fallbacks"] + s_after["claims_failed"] == 0,
-            f"{lane_line(y, s)}；{lane_line(s, y)}")
-
-    def both_open_on_lanes() -> bool:
-        opening = {side["node"]: side for side in (m.pair(y, s).get("lane_effect") or {}).get("opening", [])}
-        return all(opening.get(node.id, {}).get("lanes") is True for node in (y, s))
-    t.check("节点对视图：两边开新的 TCP 流都走 ice3proxy（y 的 udp_path 因为 s 用不了 UDP 是 false）", waited(both_open_on_lanes, 30, 2),
-            json.dumps(m.pair(y, s))[:800])
-    if t.failures:
-        m.logs(y, s)
-
-
-def default_keeps_a_direct_path_to_a_node_without_udp(lab: Lab, work: Path, t: Checks) -> None:
-    """没有节点对设置：没有 UDP 的中继 s 到各个中继都只有 TCP（controller 认定它用不了 UDP），和普通节点 y 之间的 UDP 却是通的。
-    y 和 s 直连着的时候流走共用的连接（整条路都是 UDP），谁也不拨 ice3proxy；直连没了、路回到经中继，才用 ice3proxy。"""
-    m = Managed(lab, work)
-    r, ctl = m.relay, m.controller
-    a = Node(lab.host("a"), work, declare=("relay",))
-    s = Node(lab.host("s"), work, declare=("relay", "exit"))
-    y = Node(lab.host("y"), work, declare=("exit",))
-    for one, other, rtt in ((s, a, 100), (s, r, 110), (s, y, 120), (a, r, 30), (a, y, 20), (r, y, 2)):
-        harness.shape_between(one.host, other.host, lablib.Shape(rtt_ms=rtt))
-    s.host.block_udp(except_with=y.host)
-    for node in (a, s, y):
-        node.join(ctl)
-    for node in (a, s):
-        ctl.ctl("relay", "enable", str(node.id))
-    for node in (s, y):
-        ctl.ctl("exit", "enable", str(node.id))
-    ctl.add_proxy(y, s)
-    ctl.add_proxy(s, y)
-
-    def direct(node: Node, peer: Node) -> bool:
-        return route_to(ctl, node, peer).get("via") == "direct"
-
-    flagged = waited(lambda: ctl.node(s).get("no_udp") is True, 240, 3)
-    t.check("controller 认定 s 用不了 UDP", flagged, str({node.name: ctl.node(node).get("no_udp") for node in (s, y, r, a)}))
-    ok, detail = m.intact(y, s, 1_000_000)
-    t.check("y 经 s 出去的流完整", ok, detail)
-    t.check("y 和 s 之间是直连", waited(lambda: direct(y, s) and direct(s, y), 60, 2), f"{route_to(ctl, y, s)}；{route_to(ctl, s, y)}")
-    # 认定之后再等过按需拨号的观察时间：直连着就不该拨。
-    time.sleep(40)
-    before = lane_counts(y, s)
-    ok, detail = m.intact(y, s, 1_000_000)
-    after = lane_counts(y, s)
-    t.check("直连着：y 经 s 出去的流走共用的连接，ice3proxy 上一个字节也没有，也没有拨", ok and after["carried_bytes"] == before["carried_bytes"] and
-            after["control_up"] == 0 and lane_counts(s, y)["control_up"] == 0, f"{detail}；{lane_line(y, s)}；{lane_line(s, y)}")
-    ok, detail = m.intact(s, y, 1_000_000)
-    t.check("直连着：s 经 y 出去的流也完整，也不走 ice3proxy", ok and lane_counts(s, y)["carried_bytes"] == 0, f"{detail}；{lane_line(s, y)}")
-
-    # 有 UDP 的路、什么都没连着的对端，节点不往上报：节点对视图里没有哪一边在 ice3proxy 上开流，报了的那一边路上也有 UDP。
-    opening = (m.pair(y, s).get("lane_effect") or {}).get("opening", [])
-    t.check("节点对视图：没有哪一边开新的 TCP 流走 ice3proxy",
-            all(side.get("lanes") is False and side.get("udp_path") is True for side in opening), json.dumps(m.pair(y, s))[:800])
-
-    # s 和 y 之间的 UDP 也没了：路回到经中继的那一条（y 这一段是 UDP，s 那一段是 TCP），这时才靠 controller 说的那一条去拨。
-    s.host.block_udp()
-    cut = time.monotonic()
-    t.check("直连没了：y 拨 s，s 那里有 y 的控制 lane 和停着的 lane", lanes_up(s, y, 180), f"{lane_line(s, y)}；{route_to(ctl, y, s)}")
-    print(f"  直连断开之后 {time.monotonic() - cut:.1f} 秒 s 那里有了 y 停过来的 lane", flush=True)
-    before = lane_counts(y, s)
-    ok, detail = m.intact(y, s, 1_000_000)
-    after = lane_counts(y, s)
-    t.check("直连没了：y 经 s 出去的流走 ice3proxy，完整", ok and after["carried_bytes"] - before["carried_bytes"] >= 1_000_000,
+    # (g) 关掉选项：这一对不再备着 lane，之后的流走共用的连接。
+    ctl.ctl("proxy", "set", str(chosen["id"]), "--ice3proxy", "off")
+    closed = waited(lambda: no_lanes(relay, s) and no_lanes(s, relay), 30)
+    t.check("关掉选项之后 relay 和 s 之间的 lane 关掉，两边什么都不连着", closed, f"{lane_line(relay, s)}；{lane_line(s, relay)}")
+    before = lane_counts(relay, s)
+    ok, detail = m.intact(relay, s, 1_000_000)
+    after = lane_counts(relay, s)
+    t.check("之后这个代理的流走共用的连接，完整，不算改走", ok and after["claims"] == before["claims"] and after["fallbacks"] == before["fallbacks"],
             f"{detail}；{before} → {after}")
     if t.failures:
-        m.logs(y, s)
+        m.logs(relay, s, n)
 
 
 def managed_drain(lab: Lab, work: Path, t: Checks) -> None:
-    """由 controller 管理：管理员打开一对节点的 ice3proxy，两边报上状况；出口排空后更新：lane 上跑着的流跑完，新的请求被拒绝，更新重启之后新的流又走 lane。"""
+    """由 controller 管理：管理员新建选了 ice3proxy 的代理，两边报上状况；出口排空后更新：lane 上跑着的流跑完，新的请求被拒绝，更新重启之后新的流又走 lane。"""
     import test_update as upd
 
     harness.BIN_DIR = upd.STAGE / "old"
@@ -707,20 +554,19 @@ def managed_drain(lab: Lab, work: Path, t: Checks) -> None:
         node.join(controller)
     controller.ctl("relay", "enable", str(entry.id))
     controller.ctl("exit", "enable", str(exit_node.id))
-    controller.add_proxy(entry, exit_node)
-    view = controller.ctl("pair", "set", entry.name, exit_node.name, "--lane", "always")
+    view = controller.add_proxy(entry, exit_node, "--ice3proxy")
     effect = view.get("lane_effect") or {}
-    t.check("节点对视图说设置起作用，由出口拨入口", effect.get("effective") is True and effect.get("dialers") == [exit_node.id], json.dumps(view))
+    t.check("代理的视图说 ice3proxy 起作用，由出口拨入口", view.get("lane") is True and effect.get("effective") is True and
+            effect.get("dialers") == [exit_node.id], json.dumps(view))
     url = f"http://{web.ip}/"
     t.check("经出口访问得到", upd.reaches(entry, url, exit_node, home.ip))
     ready = waited(lambda: lane_counts(entry, exit_node)["parked_here"] >= 1, 40)
     t.check("两个节点按 controller 下发的设置拨好了 lane", ready, lane_line(entry, exit_node))
 
     def reported() -> bool:
-        pairs = controller.ctl("pair", "list")
-        sides = {side["node"]: side["lanes"] for pair in pairs for side in pair.get("lanes", [])}
+        sides = {side["node"]: side["lanes"] for side in controller.proxy(view["id"]).get("lanes", [])}
         return entry.id in sides and exit_node.id in sides and sides[entry.id]["control"]
-    t.check("节点对视图里有两边报上来的 lane 状况", waited(reported, 30), json.dumps(controller.ctl("pair", "list"))[:600])
+    t.check("代理的视图里有两边报上来的 lane 状况", waited(reported, 30), json.dumps(controller.proxy(view["id"]))[:600])
     detail = controller.ctl("node", "show", entry.name)
     t.check("节点详情里有它的 lane 状况", bool(detail.get("lanes")) and detail["lanes"]["peers"][0]["peer"] == exit_node.id,
             json.dumps(detail.get("lanes"))[:300])
@@ -746,9 +592,9 @@ def managed_drain(lab: Lab, work: Path, t: Checks) -> None:
     back = waited(lambda: upd.reaches(entry, url, exit_node, home.ip, timeout=5) and lane_counts(entry, exit_node)["claims"] > claims, 40)
     t.check("更新重启之后新的流又走 lane", back, lane_line(entry, exit_node))
     print(f"  {lane_line(entry, exit_node)}\n  {lane_line(exit_node, entry)}", flush=True)
-    controller.ctl("pair", "unset", entry.name, exit_node.name)
+    controller.ctl("proxy", "set", str(view["id"]), "--ice3proxy", "off")
     off = waited(lambda: lane_counts(entry, exit_node)["control_up"] == 0 and lane_counts(entry, exit_node)["parked_here"] == 0, 30)
-    t.check("去掉节点对设置回到默认（udp_fallback）：两边都有 UDP 的路，lane 关掉", off, lane_line(entry, exit_node))
+    t.check("代理关掉 ice3proxy 之后这一对的 lane 关掉", off, lane_line(entry, exit_node))
     if t.failures:
         print(tail(entry.read_log(), 30), tail(exit_node.read_log(), 30), sep="\n  ---\n")
     for node in upd.RUNNING:
@@ -765,10 +611,7 @@ SCENARIOS = {
     "access_denied": access_denied,
     "exit_restart": exit_restart,
     "silent_stream_outlives_nat_mapping": silent_stream_outlives_nat_mapping,
-    "default_where_udp_is_missing": default_where_udp_is_missing,
-    "default_follows_udp": default_follows_udp,
-    "default_reaches_a_relay_without_udp": default_reaches_a_relay_without_udp,
-    "default_keeps_a_direct_path_to_a_node_without_udp": default_keeps_a_direct_path_to_a_node_without_udp,
+    "proxy_option": proxy_option,
     "managed_drain": managed_drain,
 }
 

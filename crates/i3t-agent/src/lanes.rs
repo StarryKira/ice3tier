@@ -1,15 +1,17 @@
 //! ice3proxy（lane）在节点里的接法。
 //!
 //! - 入口和出口用的连接层是共用的连接（[`Endpoint`]）和 lane 装在一起的（[`LaneConnector`]、[`LaneAcceptor`]）：
-//!   承载 TCP 连接的流按节点对的设置走 lane，别的流和数据报一律走共用的连接；两种流进同一个 `serve`，
+//!   要求走 ice3proxy 的流（选了它的代理的 TCP 流，见 `i3t_flow::Carriage`）在和对端之间备着 lane 时走 lane，
+//!   别的流（端口转发、本机的组网入口、没选它的代理）和数据报一律走共用的连接；两种流进同一个 `serve`，
 //!   计量、配额、带宽、凭据、每个对端的上限、访问规则和排空对它们一视同仁。
-//! - 跟着 netmap：设置不是 `off` 的对端交给 [`Lanes::set_peers`]。本节点能拨的是 netmap 里启用了 relay、
+//! - 跟着 netmap：对端的 `lane` 不是 `off` 的交给 [`Lanes::set_peers`]。controller 只给有选了 ice3proxy 的代理的一对
+//!   （代理监听的节点和它的出口）下发 `always`，别的是 `off`。本节点能拨的是 netmap 里启用了 relay、
 //!   有 TCP 地址的对端（relay 在节点端口上听 TCP）；本节点自己是 relay 时，relay 的 TCP 端口把以 TLS 握手开头的连接交给 lane。
 //!   两边都不能被拨的一对当作 `off`：开不出 lane 的流不该被记成"改走了共用的连接"。
 //! - 两个节点都能拨对方时，各自用自己拨的 lane 开流：补 lane 是本地的事，不用经过对方的 POOL 往返，
 //!   每边的池跟着它自己开流的速率走；代价是两边各有一条控制 lane。
 //! - `always`：能拨的对端一直拨着（控制 lane 和几条空闲的）。
-//! - `udp_fallback`（没有设置的节点对默认就是它）：按需拨。到对端有路、并且路上没有 UDP 连续 [`SETTLE`] 才拨；
+//! - `udp_fallback`（controller 不再下发，旧的 controller 和静态的 netmap 还会写）：按需拨。到对端有路、并且路上没有 UDP 连续 [`SETTLE`] 才拨；
 //!   UDP 回来了（或者没有路了）满 [`HOLD`] 才放手，之后什么都不连。没有路不算没有 UDP：对端离线时不去拨它。
 //!   "路上没有 UDP"是：本节点自己这一段没有 UDP，或者经 relay 而 controller 说对端用不了 UDP（netmap 里它的 `no_udp`）。
 //!   后一样是因为经 relay 时节点只看得见自己这一段：经一个 UDP 的中继到一个没有 UDP 的中继时，自己这一段有 UDP，路上却有一段 TCP。
@@ -65,7 +67,7 @@ const HOLD_TEST_SWITCH: &str = "I3T_TEST_LANE_HOLD";
 pub(crate) struct NodeLanes {
     lanes: Arc<Lanes>,
     endpoint: Arc<Endpoint>,
-    /// 每个打开了 lane、并且至少一边能被拨的对端的设置。开流时按它选。
+    /// 每个打开了 lane、并且至少一边能被拨的对端的设置。要求走 ice3proxy 的流开流时按它选。
     settings: Arc<RwLock<HashMap<NodeId, Setting>>>,
     /// netmap 给的计划，和现在拨着谁。
     dialling: Mutex<Dialling>,
@@ -125,7 +127,7 @@ impl NodeLanes {
         Arc::new(LaneAcceptor::new(Arc::clone(&self.endpoint), Arc::clone(&self.lanes)))
     }
 
-    /// 一条到 `peer` 的 TCP 流该不该走 lane。
+    /// 一条要求走 ice3proxy 的、到 `peer` 的 TCP 流该不该走 lane（别的流不问它，直接走共用的连接）。
     fn choose(&self) -> Choose {
         let (settings, endpoint, lanes) = (Arc::clone(&self.settings), Arc::clone(&self.endpoint), Arc::clone(&self.lanes));
         Arc::new(move |peer| {
@@ -295,8 +297,8 @@ fn takes_lane(mode: Option<LaneMode>, udp_path: impl FnOnce() -> Option<bool>, l
 /// 一个对端值不值得列出来（上报、`i3t status`、本机的 `/metrics`）。`always` 的都列；`udp_fallback` 的只列现在要用或者正在用的：
 /// 拨着、控制 lane 在、有空闲的、在用的或者在拨的 lane，或者到它的路上没有 UDP。
 ///
-/// 默认的设置下网络里每个 relay 都和别的节点"打开"了 ice3proxy，两边都有 UDP 的一对什么都没连，列出来只是一屏的零。
-/// 累计的计数不让它留着：它们在全节点的合计里。
+/// 以前的 controller 给没有设置的每一对下发 `udp_fallback`，网络里每个 relay 都和别的节点"打开"了 ice3proxy，两边都有 UDP 的一对
+/// 什么都没连，列出来只是一屏的零。累计的计数不让它留着：它们在全节点的合计里。
 fn listed(peer: &PeerLaneStatus, mode: Option<LaneMode>, udp_path: impl FnOnce() -> Option<bool>) -> bool {
     let live = peer.dials
         || peer.control
@@ -491,8 +493,8 @@ mod tests {
         let public = with_peer(&mut map, 3, LaneMode::Always);
         let nobody = with_peer(&mut map, 4, LaneMode::UdpFallback);
         let relay_without_tcp = with_peer(&mut map, 5, LaneMode::Always);
-        // 没有设置的一对（默认的 udp_fallback）和设了的一样计划：能拨就记下地址，拨不拨按需。
-        let by_default = with_peer(&mut map, 6, LaneMode::PAIR_DEFAULT);
+        // udp_fallback（旧的 controller、静态的 netmap）和别的一样计划：能拨就记下地址，拨不拨按需。
+        let by_default = with_peer(&mut map, 6, LaneMode::UdpFallback);
         relay(&mut map, off, &["203.0.113.2:20330"]);
         relay(&mut map, public, &["203.0.113.3:20330"]);
         relay(&mut map, relay_without_tcp, &[]);
@@ -570,7 +572,7 @@ mod tests {
 
         // 它从 netmap 来：对端那一项的 no_udp。
         let mut map = netmap(1);
-        let relay_without_udp = with_peer(&mut map, 2, LaneMode::PAIR_DEFAULT);
+        let relay_without_udp = with_peer(&mut map, 2, LaneMode::UdpFallback);
         map.peers[0].no_udp = true;
         relay(&mut map, relay_without_udp, &["203.0.113.2:20330"]);
         let planned: Vec<_> = plan(&map).into_iter().map(|(peer, setting)| (peer.id, setting)).collect();

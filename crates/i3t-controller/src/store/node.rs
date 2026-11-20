@@ -420,9 +420,9 @@ impl Store {
         self.conn.execute("UPDATE forwards SET listen_node = ?2 WHERE listen_node = ?1", ids)?;
         self.conn.execute("UPDATE forwards SET target_node = ?2 WHERE target_node = ?1", ids)?;
         self.conn.execute(
-            "INSERT OR IGNORE INTO pair_settings (node_a, node_b, keep_alive, lane, congestion)
-             SELECT MIN(peer, ?2), MAX(peer, ?2), keep_alive, lane, congestion
-             FROM (SELECT CASE WHEN node_a = ?1 THEN node_b ELSE node_a END AS peer, keep_alive, lane, congestion
+            "INSERT OR IGNORE INTO pair_settings (node_a, node_b, keep_alive, congestion)
+             SELECT MIN(peer, ?2), MAX(peer, ?2), keep_alive, congestion
+             FROM (SELECT CASE WHEN node_a = ?1 THEN node_b ELSE node_a END AS peer, keep_alive, congestion
                    FROM pair_settings WHERE node_a = ?1 OR node_b = ?1)
              WHERE peer <> ?2",
             ids,

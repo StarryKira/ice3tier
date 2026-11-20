@@ -3,9 +3,13 @@
 //! 一个代理是"在节点 A 上监听，经出口节点 B 出去，认一对用户名和密码"。B 必须是另一个、启用了出口的节点，
 //! 访问规则要让 A 能访问 B。这几条在新建和修改时查（修改时只在会让它生效的那一下查，见 [`check`]）；
 //! 之后出口被停用、规则变了，代理留着、照样下发、照样监听，状态说明它为什么用不了。
+//!
+//! 代理可以选 ice3proxy（`lane`，白皮书 §9.7 第 9 条）：选了的代理的 TCP 流不管路上有没有 UDP 都走它，开不出时退回共用的连接。
+//! A 和 B 之间因此备着 ice3proxy（`crate::netmap::LanePairs`）；代理的视图说它在这一对之间起不起作用、为什么，
+//! 和两个节点报上来的、和对方之间的 lane。
 
-use i3t_model::admin::{CreateProxy, LogRef, NetworkId, Proxy, ProxyStatus, RefKind, UpdateProxy, action};
-use i3t_model::control::{ListenState, ListenTraffic};
+use i3t_model::admin::{CreateProxy, LaneBlock, LaneEffect, LaneSide, LogRef, NetworkId, Proxy, ProxyStatus, RefKind, UpdateProxy, action};
+use i3t_model::control::{LANE_REVISION, ListenState, ListenTraffic};
 use i3t_model::netmap::Verifier;
 use i3t_proto::NodeId;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -16,7 +20,8 @@ use super::{Controller, Inner, Seeds, naming};
 use crate::access::AccessMap;
 use crate::error::{Entity, Error, InField};
 use crate::netmap::NetworkView;
-use crate::store::{ProxyRecord, Store};
+use crate::node_addresses;
+use crate::store::{NodeRecord, ProxyRecord, Store};
 
 /// 用户名和密码最长多少字节：SOCKS5 的认证报文里各有一个字节的长度。
 const MAX_CREDENTIAL_LEN: usize = 255;
@@ -68,15 +73,18 @@ impl Controller {
             allow_from: input.allow_from,
             class: input.class,
             optimistic: input.optimistic,
+            lane: input.lane,
         };
         let record = inner.store.atomically(|store| {
             let mut record = check(store, network, None, record)?;
             record.id = store.insert_proxy(&record)?;
-            let detail = format!("节点 #{} 上新建代理 {}（{}）", record.node, record.name, record.bind);
+            let lane = if record.lane { "，走 ice3proxy" } else { "" };
+            let detail = format!("节点 #{} 上新建代理 {}（{}）{lane}", record.node, record.name, record.bind);
             store.log_refs(now, Some(network), action::PROXY_CREATE, &detail, &refs(&record), params(store, &record)?)?;
             Ok::<_, Error>(record)
         })?;
-        inner.refresh(network, Seeds::of([record.node]), None)?;
+        // 出口那一边的 netmap 里有这一对的 ice3proxy（`Peer::lane`），也要重算。
+        inner.refresh(network, Seeds::of(ends(&record)), None)?;
         self.wake_if_needed(&inner);
         inner.proxy_status(network, &record)
     }
@@ -94,7 +102,7 @@ impl Controller {
         let (before, record) = inner.store.atomically(|store| {
             let before = store.proxy(network, id)?.ok_or(Error::NotFound(Entity::Proxy))?;
             let mut next = before.clone();
-            let UpdateProxy { node, name, bind, exit, protocol, username, password, enabled, allow_from, class, optimistic } = input;
+            let UpdateProxy { node, name, bind, exit, protocol, username, password, enabled, allow_from, class, optimistic, lane } = input;
             next.node = node.unwrap_or(next.node);
             next.name = name.unwrap_or(next.name);
             next.bind = bind.unwrap_or(next.bind);
@@ -106,6 +114,7 @@ impl Controller {
             next.allow_from = allow_from.unwrap_or(next.allow_from);
             next.class = class.unwrap_or(next.class);
             next.optimistic = optimistic.unwrap_or(next.optimistic);
+            next.lane = lane.unwrap_or(next.lane);
             let record = check(store, network, Some(&before), next)?;
             // 用户名或者密码变了就换一个盐：旧的校验值对新的一对没有用，也看不出两次是不是同一个密码。
             let record = if (&record.username, &record.password) == (&before.username, &before.password) {
@@ -118,7 +127,7 @@ impl Controller {
             store.log_refs(now, Some(network), action::PROXY_UPDATE, &detail, &refs(&record), params(store, &record)?)?;
             Ok::<_, Error>((before, record))
         })?;
-        inner.refresh(network, Seeds::of([before.node, record.node]), None)?;
+        inner.refresh(network, Seeds::of(ends(&before).chain(ends(&record))), None)?;
         self.wake_if_needed(&inner);
         inner.proxy_status(network, &record)
     }
@@ -143,7 +152,7 @@ impl Controller {
             )?;
             Ok::<_, Error>(record)
         })?;
-        inner.refresh(network, Seeds::of([record.node]), None)?;
+        inner.refresh(network, Seeds::of(ends(&record)), None)?;
         self.wake_if_needed(&inner);
         Ok(())
     }
@@ -155,11 +164,20 @@ impl Inner {
         Ok(self.proxy_view(&view, &view.access(), record))
     }
 
-    /// 管理接口里的一个代理：存着的设置，加上按 controller 知道的算出来的状态和监听节点报的用量。
+    /// 管理接口里的一个代理：存着的设置，加上按 controller 知道的算出来的状态和监听节点报的用量；
+    /// 选了 ice3proxy 的，还有它起不起作用、两边报的 lane。
     pub(crate) fn proxy_view(&self, view: &NetworkView, access: &AccessMap<'_>, record: &ProxyRecord) -> Proxy {
         let report = self.live.get(&record.node).and_then(|live| live.proxies.iter().find(|report| report.id == record.id));
         // 节点报的是它手上那一版的：地址刚改过、它还没换过来时，那份状态说的是旧地址。
         let report = report.filter(|report| report.bind == record.bind);
+        let ends = record.exit.and_then(|exit| Some((view.nodes.get(&record.node)?, view.nodes.get(&exit)?)));
+        let (lane_effect, lanes) = match ends.filter(|_| record.lane) {
+            Some((node, exit)) => (
+                Some(self.lane_effect(view, access, node, exit)),
+                [self.lane_side(node.id, exit.id), self.lane_side(exit.id, node.id)].into_iter().flatten().collect(),
+            ),
+            None => (None, Vec::new()),
+        };
         Proxy {
             id: record.id,
             name: record.name.clone(),
@@ -173,9 +191,60 @@ impl Inner {
             allow_from: record.allow_from.clone(),
             class: record.class,
             optimistic: record.optimistic,
+            lane: record.lane,
             status: self.status_of(view, access, record, report.map(|report| &report.state)),
+            lane_effect,
+            lanes,
             usage: report.map_or(ListenTraffic { connections: 0, bytes_up: 0, bytes_down: 0 }, |report| report.traffic),
         }
+    }
+
+    /// ice3proxy 在代理监听的节点 `node` 和它的出口 `exit` 之间起不起作用。
+    ///
+    /// 要一边能被拨（另一边启用了 relay、有已知的地址：relay 在它的端口上听 TCP），两个节点都懂 ice3proxy
+    /// （只看在线的：离线的不知道它说的是第几版，等它上线再说），访问规则让监听的节点访问出口。
+    fn lane_effect(&self, view: &NetworkView, access: &AccessMap<'_>, node: &NodeRecord, exit: &NodeRecord) -> LaneEffect {
+        let has_address = |end: &NodeRecord| !node_addresses::relay_addresses(end, view.network.cidr).is_empty();
+        let dialable = |end: &NodeRecord| end.relay.is_some() && has_address(end);
+        let mut dialers: Vec<NodeId> =
+            [(node, exit), (exit, node)].into_iter().filter(|(_, other)| dialable(other)).map(|(dialer, _)| dialer.id).collect();
+        dialers.sort_unstable();
+        let mut blocked = Vec::new();
+        if node.relay.is_none() && exit.relay.is_none() {
+            blocked.push(LaneBlock::NoRelay);
+        }
+        for end in [node, exit] {
+            if end.relay.is_some() && !has_address(end) && dialers.is_empty() {
+                blocked.push(LaneBlock::NoTcpAddress { node: end.id });
+            }
+        }
+        for end in [node, exit] {
+            if self.live.get(&end.id).is_some_and(|live| live.protocol < LANE_REVISION) {
+                blocked.push(LaneBlock::NodeTooOld { node: end.id });
+            }
+        }
+        if !access.allows(node.id, exit.id) {
+            blocked.push(LaneBlock::NotConnected);
+        }
+        let effective = blocked.is_empty();
+        let summary = if effective {
+            let dialers = dialers.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join("、");
+            format!(
+                "由 {dialers} 拨对方的 TCP 端口；这个代理的每条 TCP 流独占一条 TCP，取不到时悄悄改走共用的连接。\
+                 两个节点之间共用的连接照常保持：UDP 的数据报和别的流（端口转发、没选 ice3proxy 的代理）走它，\
+                 路由视图显示的是它的路；走 ice3proxy 的流不换路。"
+            )
+        } else {
+            "ice3proxy 不起作用，这个代理的流都走共用的连接（见 blocked）。".to_owned()
+        };
+        LaneEffect { effective, blocked, dialers, summary }
+    }
+
+    /// `node` 报的、和 `other` 之间的 lane。不在线、没报、没有为对方打开时没有。
+    fn lane_side(&self, node: NodeId, other: NodeId) -> Option<LaneSide> {
+        let live = self.live.get(&node)?;
+        let lanes = live.lanes.as_ref()?.peers.iter().find(|peer| peer.peer == other)?.clone();
+        Some(LaneSide { node, lanes, reported_secs_ago: live.reported_at.map(|at| at.elapsed().as_secs()) })
     }
 
     /// 排在前面的先看：没有出口、停用了的不看别的；节点不在线、没有报、监听不上的不看出口；在监听才看出口用不用得了。
@@ -304,6 +373,11 @@ fn generated_credentials() -> Result<(String, String), Error> {
     Ok((format!("u-{}", hex(&name)), hex(&secret)))
 }
 
+/// 一个代理的两头：监听的节点和出口（有的话）。它们的 netmap 里有这个代理（监听的节点）和这一对的 ice3proxy（两边）。
+fn ends(record: &ProxyRecord) -> impl Iterator<Item = NodeId> {
+    std::iter::once(record.node).chain(record.exit)
+}
+
 /// 操作记录里一个代理说到的东西：它自己、监听的节点、出口。
 fn refs(record: &ProxyRecord) -> Vec<LogRef> {
     let mut refs = vec![LogRef::new(RefKind::Proxy, record.id), LogRef::node(record.node)];
@@ -324,6 +398,7 @@ fn params(store: &Store, record: &ProxyRecord) -> Result<Value, Error> {
         "exit": record.exit,
         "exit_name": name(record.exit)?,
         "enabled": record.enabled,
+        "lane": record.lane,
     }))
 }
 
@@ -356,6 +431,7 @@ mod tests {
             allow_from: Vec::new(),
             class: None,
             optimistic: None,
+            lane: false,
         };
         assert_eq!(default_name("gw", 1080, &[]), "gw-1080");
         assert_eq!(default_name("gw", 1080, &[proxy("gw-1080"), proxy("gw-1080-2")]), "gw-1080-3");

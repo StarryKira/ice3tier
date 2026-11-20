@@ -11,7 +11,7 @@ use std::time::Duration;
 use i3t_conn::Connector;
 use i3t_conn::contract::Datagrams;
 use i3t_flow::datagram::Opener;
-use i3t_flow::{End, FlowError, Framing, Summary};
+use i3t_flow::{Carriage, End, FlowError, Framing, Summary};
 use i3t_model::Netmap;
 use i3t_model::netmap::{Forward, ListenerProtocol};
 use i3t_proto::NodeId;
@@ -366,8 +366,9 @@ pub(crate) async fn proxy<C: Connector + Datagrams>(
     let meter = IngressMeter { listen: &connection.traffic, exit: exit.as_deref().map(ExitTally::traffic) };
     let origin = Origin { credential: None, client: origin_address(from) };
     let request = Open { target, class, origin };
-    tracing::debug!(%peer, kind = request.target.kind(), ?class, optimistic, "代理请求经对端节点出去");
-    let flow = Outbound { peer, request: &request, meter, exit: exit.as_deref() };
+    let carriage = entry.carriage;
+    tracing::debug!(%peer, kind = request.target.kind(), ?class, optimistic, ?carriage, "代理请求经对端节点出去");
+    let flow = Outbound { peer, request: &request, meter, exit: exit.as_deref(), carriage };
     // 明文 HTTP 总是等 REPLY：目标的应答本来就在 REPLY 之后才到，等它不多花时间，被拒绝时客户端还能拿到状态码。
     if optimistic && plain.is_none() {
         without_waiting(shared, client, front, flow).await;
@@ -383,11 +384,13 @@ struct Outbound<'a> {
     meter: IngressMeter<'a>,
     /// 对端是出口时，发起这一侧看到的计数记在这里。
     exit: Option<&'a ExitTally>,
+    /// 能不能走 ice3proxy：代理选了它才能。
+    carriage: Carriage,
 }
 
 /// 乐观回复：先告诉客户端连上了，读到它的首批数据，和 OPEN 一起发出去，不等对端的 REPLY。
 async fn without_waiting<C: Connector + Datagrams>(shared: &Shared<C>, mut client: Client, front: Front, flow: Outbound<'_>) {
-    let Outbound { peer, request, meter, exit } = flow;
+    let Outbound { peer, request, meter, exit, carriage } = flow;
     if let Err(error) = client.stream.write_all(&front.established()).await {
         return tracing::debug!(%error, "客户端在应答写出去之前断开了");
     }
@@ -399,7 +402,7 @@ async fn without_waiting<C: Connector + Datagrams>(shared: &Shared<C>, mut clien
     // 首批数据随 OPEN 一起发出，不经过搬运时的关卡，在这里补记。
     meter.record(true, first_data.len());
     let route = RouteAtStart::now(&*shared.routes, peer);
-    match i3t_flow::open(&*shared.connector, peer, request, &first_data).await {
+    match i3t_flow::open(&*shared.connector, peer, request, &first_data, carriage).await {
         Ok(pending) => {
             let summary = pending.relay_metered(client.stream, future::pending::<Reason>(), &meter).await;
             if let (Some(exit), End::Refused(reply)) = (exit, &summary.end) {
@@ -428,7 +431,7 @@ async fn after_reply<C: Connector + Datagrams>(
     flow: Outbound<'_>,
     plain: Option<Plain>,
 ) {
-    let Outbound { peer, request, meter, exit } = flow;
+    let Outbound { peer, request, meter, exit, carriage } = flow;
     // 客户端这时还没有收到应答，通常什么都没有发；万一握手时多读进来了一点，就当作首批数据。
     let (first_data, mut body) = match plain {
         Some(Plain { first, body }) => (first, Some(body)),
@@ -436,7 +439,7 @@ async fn after_reply<C: Connector + Datagrams>(
     };
     meter.record(true, first_data.len());
     let route = RouteAtStart::now(&*shared.routes, peer);
-    let opened = match i3t_flow::open(&*shared.connector, peer, request, &first_data).await {
+    let opened = match i3t_flow::open(&*shared.connector, peer, request, &first_data, carriage).await {
         Ok(pending) => pending.established().await,
         Err(error) => {
             if let Some(exit) = exit {
@@ -476,6 +479,7 @@ async fn after_reply<C: Connector + Datagrams>(
 /// 处理端口转发监听上的一条连接：它整个变成到目标节点的一条流。
 ///
 /// 端口转发没有地方告诉客户端错误码，所以不等对端的 REPLY：失败一律表现为连接被重置。
+/// 它的流只走共用的连接，和目标节点之间备着 ice3proxy 也不用（白皮书 §9.7 第 9 条：ice3proxy 只归选了它的代理）。
 pub(crate) async fn forward<C: Connector + Datagrams>(
     shared: &Shared<C>,
     netmap: &Netmap,
@@ -504,7 +508,7 @@ pub(crate) async fn forward<C: Connector + Datagrams>(
     let class = forward.class.or(netmap.network.class).unwrap_or_default();
     let request = Open { target: Target::Forward { id: forward.id }, class, origin };
     let route = RouteAtStart::now(&*shared.routes, forward.target);
-    match i3t_flow::open(&*shared.connector, forward.target, &request, &first_data).await {
+    match i3t_flow::open(&*shared.connector, forward.target, &request, &first_data, Carriage::Shared).await {
         Ok(pending) => {
             let summary = pending.relay_metered(stream, future::pending(), &meter).await;
             if let Some(outcome) = TargetCause::of_summary(&summary) {

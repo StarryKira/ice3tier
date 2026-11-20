@@ -96,6 +96,7 @@ fn socks(id: u32) -> Proxy {
         allow_from: Vec::new(),
         class: None,
         optimistic: None,
+        lane: false,
     }
 }
 

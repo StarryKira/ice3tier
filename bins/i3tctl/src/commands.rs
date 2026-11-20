@@ -1,5 +1,6 @@
 //! 每个子命令做什么：解析出网络和节点，发请求，交给 [`crate::render`] 打印。
 
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::net::Ipv4Addr;
 
 use anyhow::{Context, anyhow, bail};
@@ -102,6 +103,27 @@ struct Session {
     /// `--network` 的值：名字或编号。
     network: Option<String>,
     json: bool,
+}
+
+/// `proxy add` 的代理要不要 ice3proxy：写了 `--ice3proxy` 就要；没写时只在终端上问一次（默认不要）。
+/// 不是终端、或者 `--json`（给脚本用的）时不问，不要：脚本不会因为等一个回答而卡住。
+fn wants_ice3proxy(flag: bool, json: bool, terminal: bool, ask: impl FnOnce() -> io::Result<bool>) -> io::Result<bool> {
+    if flag {
+        return Ok(true);
+    }
+    if json || !terminal {
+        return Ok(false);
+    }
+    ask()
+}
+
+/// 问一次"要不要 ice3proxy"，读一行回答：`y`、`yes`（不分大小写）、`要`、`是` 是要，别的（直接回车、读到头）是不要。
+fn ask_ice3proxy(input: &mut impl BufRead, output: &mut impl Write) -> io::Result<bool> {
+    output.write_all(texts().ui.ask_ice3proxy.as_bytes())?;
+    output.flush()?;
+    let mut answer = String::new();
+    input.read_line(&mut answer)?;
+    Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes" | "要" | "是"))
 }
 
 impl Session {
@@ -542,12 +564,30 @@ impl Session {
                 let names = self.names(network).await?;
                 self.show(self.get(&format!("{proxies}/{id}")).await?, |proxy| render::proxy(proxy, &names))
             }
-            ProxyCommand::Add { node, bind, exit, name, protocol, username, password, allow_from, class, optimistic, disabled } => {
+            ProxyCommand::Add {
+                node,
+                bind,
+                exit,
+                name,
+                protocol,
+                username,
+                password,
+                allow_from,
+                class,
+                optimistic,
+                disabled,
+                ice3proxy,
+            } => {
+                let (node, exit) = (self.node(network, &node).await?.id, self.node(network, &exit).await?.id);
+                // 节点都找到了再问：写错了节点不该先答一个问题。
+                let terminal = io::stdin().is_terminal() && io::stderr().is_terminal();
+                let lane = wants_ice3proxy(ice3proxy, self.json, terminal, || ask_ice3proxy(&mut io::stdin().lock(), &mut io::stderr()))
+                    .context(texts().ui.answer_unreadable)?;
                 let request = CreateProxy {
-                    node: self.node(network, &node).await?.id,
+                    node,
                     name,
                     bind,
-                    exit: self.node(network, &exit).await?.id,
+                    exit,
                     protocol: protocol.map(Into::into).unwrap_or_default(),
                     username,
                     password,
@@ -555,11 +595,26 @@ impl Session {
                     allow_from,
                     class: class.map(Into::into),
                     optimistic: optimistic.map(|on| on.0),
+                    lane,
                 };
                 let names = self.names(network).await?;
                 self.show(self.send(Method::POST, &proxies, &request).await?, |proxy| render::proxy(proxy, &names))
             }
-            ProxyCommand::Set { id, node, name, bind, exit, protocol, username, password, allow_from, class, optimistic, enabled } => {
+            ProxyCommand::Set {
+                id,
+                node,
+                name,
+                bind,
+                exit,
+                protocol,
+                username,
+                password,
+                allow_from,
+                class,
+                optimistic,
+                enabled,
+                ice3proxy,
+            } => {
                 let node = match node {
                     Some(reference) => Some(self.node(network, &reference).await?.id),
                     None => None,
@@ -580,6 +635,7 @@ impl Session {
                     allow_from,
                     class: class.map(crate::cli::Inherit::into_override),
                     optimistic: optimistic.map(crate::cli::Inherit::into_override),
+                    lane: ice3proxy.map(|on| on.0),
                 };
                 let names = self.names(network).await?;
                 self.show(self.send(Method::PATCH, &format!("{proxies}/{id}"), &request).await?, |proxy| render::proxy(proxy, &names))
@@ -650,9 +706,9 @@ impl Session {
                 let (a, b) = (self.node(network, &a).await?.id, self.node(network, &b).await?.id);
                 self.show(self.get(&format!("{pairs}/{a}/{b}")).await?, render::pair)
             }
-            PairCommand::Set { a, b, keep_alive, lane, congestion } => {
+            PairCommand::Set { a, b, keep_alive, congestion } => {
                 let (a, b) = (self.node(network, &a).await?.id, self.node(network, &b).await?.id);
-                let input = PairInput { keep_alive: keep_alive.map(|on| on.0), lane, congestion: congestion.map(|arg| arg.0) };
+                let input = PairInput { keep_alive: keep_alive.map(|on| on.0), congestion: congestion.map(|arg| arg.0) };
                 self.show(self.send(Method::PUT, &format!("{pairs}/{a}/{b}"), &input).await?, render::pair)
             }
             PairCommand::Unset { a, b } => {
@@ -734,4 +790,47 @@ fn pick_network(networks: Vec<Network>, reference: &str) -> anyhow::Result<Netwo
     let by_id = reference.parse::<NetworkId>().ok();
     let found = networks.into_iter().find(|network| network.name.eq_ignore_ascii_case(reference) || Some(network.id) == by_id);
     found.ok_or_else(|| anyhow!((texts().ui.no_such_network)(reference)))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::io::Cursor;
+
+    use super::*;
+
+    #[test]
+    fn proxy_add_asks_about_ice3proxy_only_on_a_terminal_without_the_flag_or_json() {
+        let asked = Cell::new(0);
+        let ask = |answer: bool| {
+            let asked = &asked;
+            move || {
+                asked.set(asked.get() + 1);
+                Ok(answer)
+            }
+        };
+        assert!(wants_ice3proxy(true, false, true, ask(false)).unwrap(), "写了 --ice3proxy：要，不问");
+        assert!(!wants_ice3proxy(false, true, true, ask(true)).unwrap(), "--json：不问，不要");
+        assert!(!wants_ice3proxy(false, false, false, ask(true)).unwrap(), "不是终端：不问，不要");
+        assert_eq!(asked.get(), 0);
+        assert!(wants_ice3proxy(false, false, true, ask(true)).unwrap(), "终端上没写：问，按回答");
+        assert!(!wants_ice3proxy(false, false, true, ask(false)).unwrap());
+        assert_eq!(asked.get(), 2, "只问一次");
+    }
+
+    #[test]
+    fn the_ice3proxy_question_defaults_to_no() {
+        let answer = |typed: &str| {
+            let mut shown = Vec::new();
+            let wanted = ask_ice3proxy(&mut Cursor::new(typed.as_bytes()), &mut shown).unwrap();
+            assert_eq!(String::from_utf8(shown).unwrap(), texts().ui.ask_ice3proxy, "问的是这一句");
+            wanted
+        };
+        for yes in ["y\n", "Y\n", "yes\n", " YES \n", "要\n", "是\n"] {
+            assert!(answer(yes), "{yes:?}");
+        }
+        for no in ["\n", "", "n\n", "no\n", "sure\n"] {
+            assert!(!answer(no), "{no:?}：直接回车、读到头和别的回答都是不要");
+        }
+    }
 }

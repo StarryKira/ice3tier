@@ -119,6 +119,8 @@ const HELP: Help = Help {
     proxy_set_class: "QoS：auto、interactive、reliable、bulk，default 是不再指定",
     proxy_set_optimistic: "乐观回复：on、off，default 是不再指定",
     proxy_enabled: "启用或停用",
+    proxy_ice3proxy: "TCP 流走 ice3proxy（每条独占一条到出口的 TCP）。不写时在终端上问一次",
+    proxy_set_ice3proxy: "走不走 ice3proxy",
     proxy_delete: "删除代理",
     forward_group: "端口转发",
     forward_list: "端口转发列表",
@@ -133,7 +135,6 @@ const HELP: Help = Help {
     pair_show: "查看一对节点，没有设置的也行",
     pair_set: "设置节点对",
     pair_keep_alive: "连接常驻",
-    pair_lane: "ice3proxy，默认 udp_fallback（没有 UDP 的路时用）",
     pair_congestion: "拥塞控制，default 是改回节点的默认（bbr）。对之后建立的连接生效",
     pair_unset: "节点对恢复默认",
     access_group: "访问关系",
@@ -398,7 +399,7 @@ const UI: Ui = Ui {
     rules_header: ["编号", "源", "", "目的", "启用", "名字"],
     no_rules: "没有规则",
     rule: "规则",
-    proxies_header: ["编号", "节点", "监听地址", "协议", "出口", "认证", "状态", "连接", "名字"],
+    proxies_header: ["编号", "节点", "监听地址", "协议", "出口", "认证", "ice3proxy", "状态", "连接", "名字"],
     no_proxies: "没有代理",
     proxy: "代理",
     listen_node: "监听节点",
@@ -411,22 +412,16 @@ const UI: Ui = Ui {
     proxy_use: "用法",
     forwards_header: ["编号", "协议", "监听", "目标", "状态", "监听状态", "连接", "流量", "来源白名单", "名字"],
     no_forwards: "没有端口转发",
-    pairs_header: ["A", "B", "连接常驻", "ice3proxy", "拥塞控制", "生效", "使用中", "回退"],
+    pairs_header: ["A", "B", "连接常驻", "拥塞控制"],
     no_pairs: "没有节点对设置",
-    pairs_default: "没有列出的节点对用默认：ice3proxy 在没有 UDP 的路时用（udp_fallback）",
+    pairs_default: "没有列出的节点对用默认：连接不常驻，拥塞控制用节点的默认",
     pair_default: "默认",
     keep_alive: "连接常驻",
     lanes: "ice3proxy",
     congestion: "拥塞控制",
     congestion_default: "默认",
-    lane_effect: "生效",
-    in_effect: "生效",
     no_effect: "未生效",
     dialers: "拨号",
-    udp_path: "共用的连接有 UDP",
-    no_udp_path: "共用的连接没有 UDP",
-    new_streams_on_lanes: "新的 TCP 流走 ice3proxy",
-    new_streams_shared: "新的 TCP 流走共用的连接",
     peer_lanes: |dials, control, idle, ready, parked, counts| {
         let dials = if dials { "拨号" } else { "被拨" };
         let control = if control { "控制连接在" } else { "控制连接不在" };
@@ -537,6 +532,8 @@ const UI: Ui = Ui {
     pair_unset: |a, b| format!("节点对 #{a} ↔ #{b} 已恢复默认"),
     bad_version: |text| format!("版本号不对：{text}"),
     must_be: |values| format!("可以写：{values}"),
+    ask_ice3proxy: "要不要 ice3proxy？[y/N] ",
+    answer_unreadable: "读不到回答",
     too_large: "太大",
     url_scheme: |url| format!("管理 API 地址要以 http:// 开头：{url}"),
     http_client: "初始化 HTTP 客户端",
@@ -649,7 +646,10 @@ fn log(entry: &LogEntry) -> Option<String> {
         action::LISTENER_CREATE => format!("新建监听器 {}（{} {}）", p.thing("listener_name", "listener"), node(), p.text("bind")),
         action::LISTENER_UPDATE => format!("修改监听器 {}（{} {}）", p.thing("listener_name", "listener"), node(), p.text("bind")),
         action::LISTENER_DELETE => format!("删除监听器 {}", p.thing("listener_name", "listener")),
-        action::PROXY_CREATE => format!("新建代理 {}（{} {}）", p.thing("proxy_name", "proxy"), node(), p.text("bind")),
+        action::PROXY_CREATE => {
+            let lane = if p.flag("lane") { "，走 ice3proxy" } else { "" };
+            format!("新建代理 {}（{} {}）{lane}", p.thing("proxy_name", "proxy"), node(), p.text("bind"))
+        }
         action::PROXY_UPDATE => format!("修改代理 {}（{} {}）", p.thing("proxy_name", "proxy"), node(), p.text("bind")),
         action::PROXY_DELETE => format!("删除代理 {}", p.thing("proxy_name", "proxy")),
         action::FORWARD_CREATE | action::FORWARD_UPDATE | action::FORWARD_DELETE => {
@@ -667,7 +667,7 @@ fn log(entry: &LogEntry) -> Option<String> {
                 p.text("target_addr")
             )
         }
-        action::PAIR_SET => format!("节点对 {}：连接常驻 {}，ice3proxy {}", pair(), switch("keep_alive"), p.text("lane")),
+        action::PAIR_SET => format!("节点对 {}：连接常驻 {}", pair(), switch("keep_alive")),
         action::PAIR_DELETE => format!("节点对 {} 恢复默认", pair()),
         action::UPDATE_SETTINGS => format!("自动更新 {}，发布源 {}", switch("auto_update"), p.text("source")),
         action::UPDATE_RELEASE => format!("发布源上有新版本 {}", p.text("version")),

@@ -3,11 +3,11 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
 use i3t_model::admin::{
-    AddressSource, CreateEnrollToken, CreateNetwork, Direction, ErrorCode, ForwardInput, ForwardStatus, PairInput, RelayAddress,
-    RelaySettings, UpdateNetwork, UpdateNode, UpdateProxy,
+    AddressSource, CreateEnrollToken, CreateNetwork, CreateProxy, Direction, ErrorCode, ForwardInput, ForwardStatus, PairInput,
+    RelayAddress, RelaySettings, UpdateNetwork, UpdateNode, UpdateProxy,
 };
 use i3t_model::control::{Declared, EnrollToken, ToController};
-use i3t_model::netmap::{ExitRole, ForwardProtocol, LaneMode};
+use i3t_model::netmap::{ExitRole, ForwardProtocol};
 use i3t_proto::NodeId;
 
 use super::super::COOLDOWN_SECS;
@@ -124,7 +124,7 @@ fn things_in_another_network_are_not_found_through_this_one() {
     not_found(controller.create_proxy(home.id, proxy(ours, "127.0.0.1:1080", theirs)).unwrap_err());
     not_found(controller.create_forward(home.id, forward(ours, theirs)).unwrap_err());
     not_found(controller.create_forward(home.id, forward(theirs, ours)).unwrap_err());
-    not_found(controller.set_pair(home.id, ours, theirs, PairInput { keep_alive: Some(true), lane: None, congestion: None }).unwrap_err());
+    not_found(controller.set_pair(home.id, ours, theirs, PairInput { keep_alive: Some(true), congestion: None }).unwrap_err());
     not_found(
         controller.create_token(home.id, &CreateEnrollToken { successor_of: Some(theirs), ..CreateEnrollToken::default() }).unwrap_err(),
     );
@@ -485,12 +485,13 @@ fn a_successor_enrolled_by_token_inherits_identity_and_configuration() {
     lab.controller.enable_exit(network.id, old.id, ExitRole::default()).unwrap();
     lab.controller.enable_exit(network.id, other, ExitRole::default()).unwrap();
     let own_proxy = lab.controller.create_proxy(network.id, proxy(old.id, "127.0.0.1:1080", other)).unwrap();
-    let referring_proxy = lab.controller.create_proxy(network.id, proxy(other, "127.0.0.1:1081", old.id)).unwrap();
+    let referring_proxy =
+        lab.controller.create_proxy(network.id, CreateProxy { lane: true, ..proxy(other, "127.0.0.1:1081", old.id) }).unwrap();
     lab.switch_on_forward_target(network.id, old.id);
     lab.switch_on_forward_target(network.id, other);
     let to_old = lab.controller.create_forward(network.id, forward(other, old.id)).unwrap();
     let from_old = lab.controller.create_forward(network.id, forward(old.id, other)).unwrap();
-    lab.controller.set_pair(network.id, old.id, other, PairInput { keep_alive: Some(true), lane: None, congestion: None }).unwrap();
+    lab.controller.set_pair(network.id, old.id, other, PairInput { keep_alive: Some(true), congestion: None }).unwrap();
     let pin = UpdateNode { pinned_relays: Some(vec![old.id]), ..UpdateNode::default() };
     lab.controller.update_node(network.id, other, &pin).unwrap();
     lab.settle(&mut [&mut old]);
@@ -523,13 +524,10 @@ fn a_successor_enrolled_by_token_inherits_identity_and_configuration() {
     let inherited_target = forwards.iter().find(|f| f.id == to_old.id).unwrap();
     assert_eq!((inherited_target.target_node, inherited_target.enabled), (new.id, true), "转发照常");
     assert_eq!(forwards.iter().find(|f| f.id == from_old.id).unwrap().listen_node, new.id);
+    assert!(referring.lane, "代理的 ice3proxy 跟着代理走");
     let pairs = lab.controller.pairs(network.id).unwrap();
     let settings: Vec<_> = pairs.into_iter().map(|pair| pair.setting).collect();
-    // 只设过常驻：ice3proxy 是设的时候的默认值，存下来跟着身份交给继任者。
-    assert_eq!(
-        settings,
-        vec![i3t_model::admin::PairSetting { a: other, b: new.id, keep_alive: true, lane: LaneMode::PAIR_DEFAULT, congestion: None }]
-    );
+    assert_eq!(settings, vec![i3t_model::admin::PairSetting { a: other, b: new.id, keep_alive: true, congestion: None }]);
     assert!(lab.controller.node(network.id, other).unwrap().node.pinned_relays.is_empty(), "原来的 relay 没了，固定它的节点解除固定");
 
     assert_eq!(new.netmap().me.forward_targets.len(), 1);
@@ -704,16 +702,21 @@ fn every_log_entry_carries_the_named_values_its_sentence_needs() {
     let regroup = UpdateNode { groups: Some(vec![servers]), ..UpdateNode::default() };
     lab.controller.update_node(network.id, laptop, &regroup).unwrap();
     let mut local = proxy(laptop, "127.0.0.1:1080", nas);
-    (local.name, local.enabled) = ("local".into(), false);
+    (local.name, local.enabled, local.lane) = ("local".into(), false, true);
     let entry = lab.controller.create_proxy(network.id, local).unwrap();
-    let moved = UpdateProxy { bind: Some("127.0.0.1:1081".parse().unwrap()), ..UpdateProxy::default() };
+    let moved = UpdateProxy { bind: Some("127.0.0.1:1081".parse().unwrap()), lane: Some(false), ..UpdateProxy::default() };
     lab.controller.update_proxy(network.id, entry.id, moved).unwrap();
     lab.controller.delete_proxy(network.id, entry.id).unwrap();
     let web = lab.controller.create_forward(network.id, forward(laptop, nas)).unwrap();
     lab.controller.replace_forward(network.id, web.id, ForwardInput { enabled: false, ..forward(laptop, nas) }).unwrap();
     lab.controller.delete_forward(network.id, web.id).unwrap();
     lab.controller
-        .set_pair(network.id, nas, laptop, PairInput { keep_alive: Some(true), lane: Some(LaneMode::Always), congestion: None })
+        .set_pair(
+            network.id,
+            nas,
+            laptop,
+            PairInput { keep_alive: Some(true), congestion: Some(Some(i3t_model::netmap::Congestion::Cubic)) },
+        )
         .unwrap();
     lab.controller.delete_pair(network.id, laptop, nas).unwrap();
     lab.controller.enable_relay(network.id, nas, RelaySettings::default()).unwrap();
@@ -769,7 +772,8 @@ fn every_log_entry_carries_the_named_values_its_sentence_needs() {
         (&json!("laptop"), &json!("127.0.0.1:1080"), &json!("local"), &nas_id, &json!(false))
     );
     assert!(created.get("password").is_none() && created.get("username").is_none(), "用户名和密码不进操作记录");
-    assert_eq!(params("proxy.update")["bind"], "127.0.0.1:1081");
+    assert_eq!(created["lane"], true, "ice3proxy 和别的设置一样记下来");
+    assert_eq!((&params("proxy.update")["bind"], &params("proxy.update")["lane"]), (&json!("127.0.0.1:1081"), &json!(false)));
     assert_eq!(params("proxy.delete")["proxy"], json!(entry.id));
     let forwarded = params("forward.create");
     assert_eq!(
@@ -780,7 +784,8 @@ fn every_log_entry_carries_the_named_values_its_sentence_needs() {
     assert_eq!(params("forward.delete")["forward"], json!(web.id));
     let pair = params("pair.set");
     let (a, b) = (nas.min(laptop), nas.max(laptop));
-    assert_eq!((&pair["a"], &pair["b"], &pair["lane"], &pair["keep_alive"]), (&json!(a), &json!(b), &json!("always"), &json!(true)));
+    assert_eq!((&pair["a"], &pair["b"], &pair["congestion"], &pair["keep_alive"]), (&json!(a), &json!(b), &json!("cubic"), &json!(true)));
+    assert!(pair.get("lane").is_none(), "节点对没有 ice3proxy 了");
     assert_eq!(params("pair.delete")["a_name"], if a == laptop { json!("laptop") } else { params("node.enroll")["node_name"].clone() });
     for action in ["node.relay.enable", "node.relay.disable", "node.exit.enable", "node.exit.disable"] {
         assert_eq!(params(action)["node"], nas_id, "{action}");

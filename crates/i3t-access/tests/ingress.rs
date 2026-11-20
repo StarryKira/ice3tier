@@ -18,7 +18,7 @@ use i3t_conn::{RecvStream, SendStream};
 use i3t_flow::memory::{MemoryAcceptor, MemoryConnector, MemoryMesh};
 use i3t_flow::{Handler, Request};
 use i3t_lane::testing::LaneMesh;
-use i3t_lane::{LaneAcceptor, LaneConnector};
+use i3t_lane::{LaneAcceptor, LaneConnector, Lanes};
 use i3t_model::Netmap;
 use i3t_model::netmap::{Forward, ForwardProtocol, LaneMode, ListenerProtocol, LocalNode, Network, Peer, PeerExit, Proxy, Verifier};
 use i3t_proto::flow::{Class, Open, Origin, Reply, Status, Target};
@@ -100,6 +100,8 @@ fn proxy(id: u32, protocol: ListenerProtocol, bind: &str) -> Proxy {
         allow_from: Vec::new(),
         class: None,
         optimistic: None,
+        // 跑在 lane 上的那一遍，代理选了 ice3proxy：只有这样的代理的流才走 lane。
+        lane: i3t_lane::testing::transport() == i3t_lane::testing::Transport::Lanes,
     }
 }
 
@@ -203,6 +205,8 @@ struct World {
     /// 对端收到的建流请求，按到达的顺序。
     opens: mpsc::UnboundedReceiver<Open>,
     manager: JoinHandle<()>,
+    /// 本节点的 lane：看有多少字节经过了它。
+    lanes: Arc<Lanes>,
 }
 
 impl World {
@@ -221,7 +225,7 @@ impl World {
         let (_, acceptor) = mesh.join(node(GW));
         let my_lanes = lane_mesh.join(node(ME)).await;
         let peer_lanes = lane_mesh.join(node(GW)).await;
-        let connector = LaneConnector::new(Arc::new(connector), my_lanes, lane_mesh.choose());
+        let connector = LaneConnector::new(Arc::new(connector), Arc::clone(&my_lanes), lane_mesh.choose());
         let acceptor = LaneAcceptor::<MemoryAcceptor>::new(Arc::new(acceptor), peer_lanes);
         let (opens_sender, opens) = mpsc::unbounded_channel();
         let peer = Arc::new(EchoPeer { opens: opens_sender, echo: echo_server().await, origin: origin_server().await });
@@ -233,7 +237,7 @@ impl World {
             let access = Arc::clone(&access);
             async move { access.run().await }
         });
-        let world = Self { netmap: sender, access, opens, manager };
+        let world = Self { netmap: sender, access, opens, manager, lanes: my_lanes };
         world.settled().await;
         world
     }
@@ -441,76 +445,120 @@ fn non_loopback_address() -> Option<IpAddr> {
     socket.local_addr().ok().map(|addr| addr.ip()).filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
 }
 
-i3t_lane::on_both_transports! {
-    async fn a_port_forward_turns_each_connection_into_a_flow_for_its_id() {
-        let mut netmap = netmap();
+#[tokio::test]
+async fn a_port_forward_turns_each_connection_into_a_flow_for_its_id() {
+    let mut netmap = netmap();
+    netmap.me.forwards = vec![forward(7, ForwardProtocol::Tcp, "127.0.0.1:0")];
+    let mut world = World::start(netmap).await;
+
+    let mut stream = TcpStream::connect(world.forward(7).await).await.unwrap();
+    assert_echo(&mut stream).await;
+    assert_eq!(world.next_open().await, Open { target: Target::Forward { id: 7 }, class: Class::Auto, origin: Origin::default() });
+    assert_eq!(world.settled().await.forwards[0].active.get(), 1);
+    drop(stream);
+    let active = world.settled().await.forwards[0].active.clone();
+    timeout(PATIENCE, async {
+        while active.get() != 0 {
+            sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("连接结束之后计数应该归零");
+}
+
+/// 和对端之间备着 ice3proxy 时，只有选了它的代理的流走 lane（白皮书 §9.7 第 9 条）：端口转发、本机的组网入口、
+/// 没有选它的代理都走共用的连接。
+#[tokio::test]
+async fn on_a_pair_with_lanes_only_a_proxy_that_chose_ice3proxy_takes_one() {
+    i3t_lane::testing::run(i3t_lane::testing::Transport::Lanes, async {
+        let mut with_lanes = netmap();
+        with_lanes.peers[0].lane = LaneMode::Always;
+        let carried = |world: &World| {
+            let total = world.lanes.status().total;
+            total.sealed_bytes + total.passthrough_bytes + total.spliced_bytes
+        };
+
+        // 本机的组网入口单独一个入口：和代理绑在同一个地址上时它让给代理。
+        let local =
+            LocalEntry { name: "local-socks5".to_owned(), bind: "127.0.0.1:0".parse().unwrap(), protocol: ListenerProtocol::Socks5 };
+        let mut entries = World::start_with(with_lanes.clone(), |access| access.with_local_entries(vec![local])).await;
+        let (code, mut through_local) = socks5_connect(entries.local_entry("local-socks5").await, "gw.home.i3t", 22).await;
+        assert_eq!(code, 0);
+        assert_echo(&mut through_local).await;
+        assert_eq!(entries.next_open().await.target, Target::Node { port: 22 });
+        assert_eq!(carried(&entries), 0, "本机的组网入口不走 lane");
+
+        let mut netmap = with_lanes;
+        let plain = Proxy { lane: false, ..proxy(1, ListenerProtocol::Socks5, "127.0.0.1:0") };
+        let chosen = Proxy { lane: true, ..proxy(2, ListenerProtocol::Socks5, "127.0.0.1:0") };
+        netmap.me.proxies = vec![plain, chosen];
         netmap.me.forwards = vec![forward(7, ForwardProtocol::Tcp, "127.0.0.1:0")];
         let mut world = World::start(netmap).await;
+        let mut forwarded = TcpStream::connect(world.forward(7).await).await.unwrap();
+        assert_echo(&mut forwarded).await;
+        assert_eq!(world.next_open().await.target, Target::Forward { id: 7 });
+        let (code, mut proxied) = socks5_connect(world.proxy(1).await, "example.com", 443).await;
+        assert_eq!(code, 0);
+        assert_echo(&mut proxied).await;
+        assert_eq!(world.next_open().await.target, internet("example.com", 443));
+        assert_eq!(carried(&world), 0, "端口转发和没选 ice3proxy 的代理不走 lane");
 
-        let mut stream = TcpStream::connect(world.forward(7).await).await.unwrap();
-        assert_echo(&mut stream).await;
-        assert_eq!(world.next_open().await, Open { target: Target::Forward { id: 7 }, class: Class::Auto, origin: Origin::default() });
-        assert_eq!(world.settled().await.forwards[0].active.get(), 1);
-        drop(stream);
-        let active = world.settled().await.forwards[0].active.clone();
+        let (code, mut chosen) = socks5_connect(world.proxy(2).await, "example.com", 443).await;
+        assert_eq!(code, 0);
+        assert_echo(&mut chosen).await;
+        assert!(carried(&world) > 0, "选了 ice3proxy 的代理的流走 lane");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_forward_says_why_its_target_cannot_be_reached_until_a_stream_gets_through() {
+    let mut netmap = netmap();
+    let mut offline = netmap.peers[0].clone();
+    (offline.id, offline.name, offline.virtual_ip, offline.key) =
+        (node(3), "nas".into(), [10, 66, 0, 3].into(), PublicKey::from_bytes([3; 32]));
+    netmap.peers.push(offline);
+    let mut to_offline = forward(8, ForwardProtocol::Tcp, "127.0.0.1:0");
+    to_offline.target = node(3);
+    netmap.me.forwards = vec![forward(7, ForwardProtocol::Tcp, "127.0.0.1:0"), forward(9, ForwardProtocol::Tcp, "127.0.0.1:0"), to_offline];
+    let mut world = World::start(netmap).await;
+    let cause = |world: &World, id: u32| {
+        world.access.status().forwards.iter().find(|forward| forward.id == id).unwrap().target_failure.map(|failure| failure.cause)
+    };
+    let eventually = async |world: &World, id: u32, expected: Option<TargetCause>| {
         timeout(PATIENCE, async {
-            while active.get() != 0 {
-                sleep(Duration::from_millis(2)).await;
+            while cause(world, id) != expected {
+                sleep(Duration::from_millis(5)).await;
             }
         })
         .await
-        .expect("连接结束之后计数应该归零");
-    }
-}
+        .unwrap_or_else(|_| panic!("转发 {id} 应该是 {expected:?}，现在是 {:?}", cause(world, id)));
+    };
 
-i3t_lane::on_both_transports! {
-    async fn a_forward_says_why_its_target_cannot_be_reached_until_a_stream_gets_through() {
-        let mut netmap = netmap();
-        let mut offline = netmap.peers[0].clone();
-        (offline.id, offline.name, offline.virtual_ip, offline.key) = (node(3), "nas".into(), [10, 66, 0, 3].into(), PublicKey::from_bytes([3; 32]));
-        netmap.peers.push(offline);
-        let mut to_offline = forward(8, ForwardProtocol::Tcp, "127.0.0.1:0");
-        to_offline.target = node(3);
-        netmap.me.forwards = vec![forward(7, ForwardProtocol::Tcp, "127.0.0.1:0"), forward(9, ForwardProtocol::Tcp, "127.0.0.1:0"), to_offline];
-        let mut world = World::start(netmap).await;
-        let cause = |world: &World, id: u32| {
-            world.access.status().forwards.iter().find(|forward| forward.id == id).unwrap().target_failure.map(|failure| failure.cause)
-        };
-        let eventually = async |world: &World, id: u32, expected: Option<TargetCause>| {
-            timeout(PATIENCE, async {
-                while cause(world, id) != expected {
-                    sleep(Duration::from_millis(5)).await;
-                }
-            })
-            .await
-            .unwrap_or_else(|_| panic!("转发 {id} 应该是 {expected:?}，现在是 {:?}", cause(world, id)));
-        };
+    let mut stream = TcpStream::connect(world.forward(7).await).await.unwrap();
+    assert_echo(&mut stream).await;
+    drop(stream);
+    let _ = world.next_open().await;
 
-        let mut stream = TcpStream::connect(world.forward(7).await).await.unwrap();
-        assert_echo(&mut stream).await;
-        drop(stream);
-        let _ = world.next_open().await;
+    // 目标拒绝：客户端的连接被重置，转发记下原因。
+    let mut refused = TcpStream::connect(world.forward(9).await).await.unwrap();
+    refused.write_all(b"hello").await.unwrap();
+    let _ = timeout(PATIENCE, refused.read_to_end(&mut Vec::new())).await.unwrap();
+    assert_eq!(world.next_open().await.target, Target::Forward { id: 9 });
+    eventually(&world, 9, Some(TargetCause::Refused)).await;
 
-        // 目标拒绝：客户端的连接被重置，转发记下原因。
-        let mut refused = TcpStream::connect(world.forward(9).await).await.unwrap();
-        refused.write_all(b"hello").await.unwrap();
-        let _ = timeout(PATIENCE, refused.read_to_end(&mut Vec::new())).await.unwrap();
-        assert_eq!(world.next_open().await.target, Target::Forward { id: 9 });
-        eventually(&world, 9, Some(TargetCause::Refused)).await;
+    // 目标节点开不出流。
+    let mut unreachable = TcpStream::connect(world.forward(8).await).await.unwrap();
+    let _ = timeout(PATIENCE, unreachable.read_to_end(&mut Vec::new())).await.unwrap();
+    eventually(&world, 8, Some(TargetCause::NodeUnreachable)).await;
+    assert_eq!(cause(&world, 7), None, "通着的转发没有记录");
 
-        // 目标节点开不出流。
-        let mut unreachable = TcpStream::connect(world.forward(8).await).await.unwrap();
-        let _ = timeout(PATIENCE, unreachable.read_to_end(&mut Vec::new())).await.unwrap();
-        eventually(&world, 8, Some(TargetCause::NodeUnreachable)).await;
-        assert_eq!(cause(&world, 7), None, "通着的转发没有记录");
-
-        // 那条转发改成指向一个通着的目标之后，一条流成功了，记录就清掉。
-        world.update(|netmap| netmap.me.forwards[2].target = node(GW)).await;
-        let mut stream = TcpStream::connect(world.forward(8).await).await.unwrap();
-        assert_echo(&mut stream).await;
-        drop(stream);
-        eventually(&world, 8, None).await;
-    }
+    // 那条转发改成指向一个通着的目标之后，一条流成功了，记录就清掉。
+    world.update(|netmap| netmap.me.forwards[2].target = node(GW)).await;
+    let mut stream = TcpStream::connect(world.forward(8).await).await.unwrap();
+    assert_echo(&mut stream).await;
+    drop(stream);
+    eventually(&world, 8, None).await;
 }
 
 /// 本进程里一条 TCP 连接（按本端和对端的端口找）的保活计时器还有多久到；没有在走的保活计时器时是 `None`。
@@ -621,8 +669,9 @@ i3t_lane::on_both_transports! {
             })
             .await;
         assert_eq!((world.proxy(1).await, world.forward(7).await), (socks, forwarded));
-        let (code, _stream) = socks5_connect(socks, "example.com", 443).await;
+        let (code, mut proxied) = socks5_connect(socks, "example.com", 443).await;
         assert_eq!(code, 0);
+        assert_echo(&mut proxied).await;
         let mut stream = TcpStream::connect(forwarded).await.unwrap();
         assert_echo(&mut stream).await;
     }
@@ -710,35 +759,34 @@ async fn unsupported_and_malformed_http_requests_get_the_right_status() {
     world.assert_no_open();
 }
 
-i3t_lane::on_both_transports! {
-    async fn the_local_mesh_entry_reaches_only_nodes_and_asks_for_no_password() {
-        let local = |name: &str, protocol| LocalEntry { name: name.to_owned(), bind: "127.0.0.1:0".parse().unwrap(), protocol };
-        let entries = vec![local("local-socks5", ListenerProtocol::Socks5), local("local-http", ListenerProtocol::Http)];
-        let mut world = World::start_with(netmap(), |access| access.with_local_entries(entries)).await;
-        let (socks, http) = (world.local_entry("local-socks5").await, world.local_entry("local-http").await);
+#[tokio::test]
+async fn the_local_mesh_entry_reaches_only_nodes_and_asks_for_no_password() {
+    let local = |name: &str, protocol| LocalEntry { name: name.to_owned(), bind: "127.0.0.1:0".parse().unwrap(), protocol };
+    let entries = vec![local("local-socks5", ListenerProtocol::Socks5), local("local-http", ListenerProtocol::Http)];
+    let mut world = World::start_with(netmap(), |access| access.with_local_entries(entries)).await;
+    let (socks, http) = (world.local_entry("local-socks5").await, world.local_entry("local-http").await);
 
-        // 组网里的节点：握手、首批数据和应答一次写出去，多读进来的数据不能丢。
-        let mut stream = TcpStream::connect(socks).await.unwrap();
-        stream.write_all(&[5, 1, 0, 5, 1, 0, 1, 10, 66, 0, 2, 0, 22]).await.unwrap();
-        let mut answer = [0; 12];
-        timeout(PATIENCE, stream.read_exact(&mut answer)).await.unwrap().unwrap();
-        assert_eq!(answer, [5, 0, 5, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
-        assert_echo(&mut stream).await;
-        assert_eq!(world.next_open().await.target, Target::Node { port: 22 });
-        let answer = plain_http(http, b"GET http://gw.home.i3t/x HTTP/1.1\r\n\r\n").await;
-        assert!(answer.starts_with("HTTP/1.1 200 OK\r\n") && answer.contains("GET /x HTTP/1.1\r\nHost: gw.home.i3t\r\n"), "{answer:?}");
-        assert_eq!(world.next_open().await.target, Target::Node { port: 80 });
+    // 组网里的节点：握手、首批数据和应答一次写出去，多读进来的数据不能丢。
+    let mut stream = TcpStream::connect(socks).await.unwrap();
+    stream.write_all(&[5, 1, 0, 5, 1, 0, 1, 10, 66, 0, 2, 0, 22]).await.unwrap();
+    let mut answer = [0; 12];
+    timeout(PATIENCE, stream.read_exact(&mut answer)).await.unwrap().unwrap();
+    assert_eq!(answer, [5, 0, 5, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+    assert_echo(&mut stream).await;
+    assert_eq!(world.next_open().await.target, Target::Node { port: 22 });
+    let answer = plain_http(http, b"GET http://gw.home.i3t/x HTTP/1.1\r\n\r\n").await;
+    assert!(answer.starts_with("HTTP/1.1 200 OK\r\n") && answer.contains("GET /x HTTP/1.1\r\nHost: gw.home.i3t\r\n"), "{answer:?}");
+    assert_eq!(world.next_open().await.target, Target::Node { port: 80 });
 
-        // 不在组网里的目标：没有出口，拒绝。用户名里写出口也不行。
-        assert_eq!(socks5_connect(socks, "example.com", 443).await.0, 2);
-        assert_eq!(socks5_login(socks, "gw", "", "192.168.1.10", 80).await.unwrap().0, 2);
-        let answer = plain_http(http, b"GET http://example.com/ HTTP/1.1\r\n\r\n").await;
-        assert!(answer.starts_with("HTTP/1.1 403 Forbidden\r\n"), "{answer:?}");
-        world.assert_no_open();
-        let status = world.settled().await;
-        assert!(status.proxies.is_empty());
-        assert_eq!(status.local.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(), ["local-socks5", "local-http"]);
-    }
+    // 不在组网里的目标：没有出口，拒绝。用户名里写出口也不行。
+    assert_eq!(socks5_connect(socks, "example.com", 443).await.0, 2);
+    assert_eq!(socks5_login(socks, "gw", "", "192.168.1.10", 80).await.unwrap().0, 2);
+    let answer = plain_http(http, b"GET http://example.com/ HTTP/1.1\r\n\r\n").await;
+    assert!(answer.starts_with("HTTP/1.1 403 Forbidden\r\n"), "{answer:?}");
+    world.assert_no_open();
+    let status = world.settled().await;
+    assert!(status.proxies.is_empty());
+    assert_eq!(status.local.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(), ["local-socks5", "local-http"]);
 }
 
 i3t_lane::on_both_transports! {
@@ -836,37 +884,36 @@ async fn squat(addr: SocketAddr) -> TcpListener {
     .unwrap_or_else(|_| panic!("端口 {addr} 一直被别的程序占着"))
 }
 
-i3t_lane::on_both_transports! {
-    async fn a_forward_on_port_zero_gets_a_port_that_survives_a_restart() {
-        let book = MemoryPortBook::default();
-        let mut map = netmap();
-        map.me.forwards = vec![forward(7, ForwardProtocol::Tcp, "127.0.0.1:0"), forward(8, ForwardProtocol::Udp, "127.0.0.1:0")];
-        let first = World::start_with(map.clone(), |access| access.with_port_book(Arc::new(book.clone()))).await;
-        let (tcp, udp) = (first.forward(7).await, first.forward(8).await);
-        assert_ne!(tcp.port(), 0);
-        assert_eq!(book.port(7), Some(tcp.port()), "挑定的端口记下来了");
-        assert_eq!(book.port(8), Some(udp.port()));
-        let mut stream = TcpStream::connect(tcp).await.unwrap();
-        assert_echo(&mut stream).await;
-        drop(stream);
-        first.manager.abort();
-        let _ = first.manager.await;
+#[tokio::test]
+async fn a_forward_on_port_zero_gets_a_port_that_survives_a_restart() {
+    let book = MemoryPortBook::default();
+    let mut map = netmap();
+    map.me.forwards = vec![forward(7, ForwardProtocol::Tcp, "127.0.0.1:0"), forward(8, ForwardProtocol::Udp, "127.0.0.1:0")];
+    let first = World::start_with(map.clone(), |access| access.with_port_book(Arc::new(book.clone()))).await;
+    let (tcp, udp) = (first.forward(7).await, first.forward(8).await);
+    assert_ne!(tcp.port(), 0);
+    assert_eq!(book.port(7), Some(tcp.port()), "挑定的端口记下来了");
+    assert_eq!(book.port(8), Some(udp.port()));
+    let mut stream = TcpStream::connect(tcp).await.unwrap();
+    assert_echo(&mut stream).await;
+    drop(stream);
+    first.manager.abort();
+    let _ = first.manager.await;
 
-        // 像重启那样从头开一个入口：还是同一个端口。
-        let second = World::start_with(map.clone(), |access| access.with_port_book(Arc::new(book.clone()))).await;
-        second.listening_again(7, tcp).await;
-        second.listening_again(8, udp).await;
-        second.manager.abort();
-        let _ = second.manager.await;
+    // 像重启那样从头开一个入口：还是同一个端口。
+    let second = World::start_with(map.clone(), |access| access.with_port_book(Arc::new(book.clone()))).await;
+    second.listening_again(7, tcp).await;
+    second.listening_again(8, udp).await;
+    second.manager.abort();
+    let _ = second.manager.await;
 
-        // 记着的端口被别的程序占了：不换端口，照实报"端口被占用"；让出来之后绑回同一个端口。
-        let squatter = squat(tcp).await;
-        let third = World::start_with(map, |access| access.with_port_book(Arc::new(book.clone()))).await;
-        let status = third.settled().await;
-        assert!(matches!(&status.forwards[0].state, ListenState::PortInUse { .. }), "{:?}", status.forwards[0].state);
-        drop(squatter);
-        third.listening_again(7, tcp).await;
-    }
+    // 记着的端口被别的程序占了：不换端口，照实报"端口被占用"；让出来之后绑回同一个端口。
+    let squatter = squat(tcp).await;
+    let third = World::start_with(map, |access| access.with_port_book(Arc::new(book.clone()))).await;
+    let status = third.settled().await;
+    assert!(matches!(&status.forwards[0].state, ListenState::PortInUse { .. }), "{:?}", status.forwards[0].state);
+    drop(squatter);
+    third.listening_again(7, tcp).await;
 }
 
 #[tokio::test]

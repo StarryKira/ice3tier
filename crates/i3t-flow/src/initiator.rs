@@ -14,7 +14,18 @@ use crate::meter::{Meter, Unmetered};
 use crate::relay::{self, Flow, Parts, Summary, TcpRole};
 use crate::{FlowError, header};
 
-/// 到 `peer` 开一条承载 TCP 连接的流（[`Connector::open_tcp`]），把 OPEN 和调用者的首批数据一次写出去。
+/// 一条承载 TCP 连接的流可以怎么走（白皮书 §9.7 第 9 条：ice3proxy 只归选了它的代理）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Carriage {
+    /// 只走这一对节点之间共用的连接（[`Connector::open`]）：端口转发（监听的一侧和中间节点往目标去的那一段）、
+    /// 本机配置文件里的组网入口、没有选 ice3proxy 的代理。和对端之间备着 ice3proxy 也不用。
+    Shared,
+    /// 和对端之间备着 ice3proxy、开得出 lane 时走 lane，开不出时退回共用的连接（[`Connector::open_tcp`]，由连接层决定）。
+    /// 选了 ice3proxy 的代理的流。
+    Lane,
+}
+
+/// 到 `peer` 开一条承载 TCP 连接的流，把 OPEN 和调用者的首批数据一次写出去。`carriage` 说它能不能走 ice3proxy。
 ///
 /// 和 `peer` 之间已经有连接时不加任何往返：OPEN 和首批数据在同一次写里。
 /// 这一端往对端发数据的优先级按 OPEN 里的服务等级来，首批数据也是。
@@ -30,9 +41,13 @@ pub async fn open<C: Connector>(
     peer: NodeId,
     request: &Open,
     first_data: &[u8],
+    carriage: Carriage,
 ) -> Result<Pending<C::Send, C::Recv>, FlowError> {
     let started = Instant::now();
-    let (mut send, recv) = connector.open_tcp(peer).await?;
+    let (mut send, recv) = match carriage {
+        Carriage::Shared => connector.open(peer).await?,
+        Carriage::Lane => connector.open_tcp(peer).await?,
+    };
     send.set_priority(relay::priority_of(request.class));
     let mut bytes = Vec::with_capacity(Open::MAX_LEN + first_data.len());
     request.encode(&mut bytes);

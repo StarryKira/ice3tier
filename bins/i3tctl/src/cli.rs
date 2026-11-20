@@ -8,7 +8,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use i3t_lang::Lang;
 use i3t_model::admin::stats::Series;
-use i3t_model::netmap::{Congestion, IpFamily, LaneMode, ListenerProtocol, Profile, ProxyProtocol, Reach, RoutingMode};
+use i3t_model::netmap::{Congestion, IpFamily, ListenerProtocol, Profile, ProxyProtocol, Reach, RoutingMode};
 use i3t_proto::flow::Class;
 use ipnet::{IpNet, Ipv4Net};
 
@@ -379,10 +379,13 @@ pub enum ProxyCommand {
         optimistic: Option<OnOff>,
         #[arg(long)]
         disabled: bool,
+        // 不写时在终端上问一次（不是终端、或者 --json 时不问，不走）。
+        #[arg(long)]
+        ice3proxy: bool,
     },
     // 至少要改一项。
     #[command(group(clap::ArgGroup::new("change").required(true).multiple(true).args([
-        "node", "name", "bind", "exit", "protocol", "username", "password", "allow_from", "class", "optimistic", "enabled"
+        "node", "name", "bind", "exit", "protocol", "username", "password", "allow_from", "class", "optimistic", "enabled", "ice3proxy"
     ])))]
     Set {
         id: u32,
@@ -408,6 +411,8 @@ pub enum ProxyCommand {
         optimistic: Option<Inherit<OnOffArg>>,
         #[arg(long)]
         enabled: Option<OnOff>,
+        #[arg(long)]
+        ice3proxy: Option<OnOff>,
     },
     Delete {
         id: u32,
@@ -485,14 +490,12 @@ pub enum PairCommand {
         b: String,
     },
     // 至少要改一项。
-    #[command(group(clap::ArgGroup::new("setting").required(true).multiple(true).args(["keep_alive", "lane", "congestion"])))]
+    #[command(group(clap::ArgGroup::new("setting").required(true).multiple(true).args(["keep_alive", "congestion"])))]
     Set {
         a: String,
         b: String,
         #[arg(long)]
         keep_alive: Option<OnOff>,
-        #[arg(long, value_parser = parse_lane)]
-        lane: Option<LaneMode>,
         #[arg(long, value_parser = parse_congestion)]
         congestion: Option<CongestionArg>,
     },
@@ -600,11 +603,6 @@ impl From<FamilyArg> for IpFamily {
             FamilyArg::Ipv6 => Self::Ipv6,
         }
     }
-}
-
-/// ice3proxy 的设置。模型里的解析报的是中文，这里按语言说。
-fn parse_lane(text: &str) -> Result<LaneMode, String> {
-    text.parse().map_err(|_| (texts().ui.must_be)("off, udp_fallback, always"))
 }
 
 /// `--congestion` 的值：一种拥塞控制，或者 `default`（改回节点的默认）。
@@ -930,6 +928,7 @@ fn describe(command: clap::Command, h: &Help, v: &Values) -> clap::Command {
                         .mut_arg("allow_from", |arg| arg.help(h.allow_from).value_name(v.cidr))
                         .mut_arg("class", |arg| class(arg.help(h.class)))
                         .mut_arg("optimistic", |arg| on_off(arg.help(h.proxy_optimistic)))
+                        .mut_arg("ice3proxy", |arg| arg.help(h.proxy_ice3proxy))
                         .mut_arg("disabled", |arg| arg.help(h.create_disabled))
                 })
                 .mut_subcommand("set", |sub| {
@@ -946,6 +945,7 @@ fn describe(command: clap::Command, h: &Help, v: &Values) -> clap::Command {
                         .mut_arg("class", |arg| arg.help(h.proxy_set_class).value_name("auto|interactive|reliable|bulk|default"))
                         .mut_arg("optimistic", |arg| arg.help(h.proxy_set_optimistic).value_name("on|off|default"))
                         .mut_arg("enabled", |arg| on_off(arg.help(h.proxy_enabled)))
+                        .mut_arg("ice3proxy", |arg| on_off(arg.help(h.proxy_set_ice3proxy)))
                 })
                 .mut_subcommand("delete", |sub| sub.about(h.proxy_delete).mut_arg("id", id))
         })
@@ -978,7 +978,6 @@ fn describe(command: clap::Command, h: &Help, v: &Values) -> clap::Command {
                         .mut_arg("a", node)
                         .mut_arg("b", node)
                         .mut_arg("keep_alive", |arg| on_off(arg.help(h.pair_keep_alive)))
-                        .mut_arg("lane", |arg| arg.help(h.pair_lane).value_name("off|udp_fallback|always"))
                         .mut_arg("congestion", |arg| arg.help(h.pair_congestion).value_name("bbr|cubic|default"))
                 })
                 .mut_subcommand("unset", |sub| sub.about(h.pair_unset).mut_arg("a", node).mut_arg("b", node))
@@ -1154,8 +1153,17 @@ mod tests {
         assert!("10X".parse::<ByteSize>().is_err() && "lots".parse::<ByteSize>().is_err());
         assert!(matches!(
             parse(&["proxy", "add", "laptop", "0.0.0.0:1080", "gw", "--protocol", "socks5"]).command,
-            Command::Proxy(ProxyCommand::Add { protocol: Some(ProtocolArg::Socks5), disabled: false, .. })
+            Command::Proxy(ProxyCommand::Add { protocol: Some(ProtocolArg::Socks5), disabled: false, ice3proxy: false, .. })
         ));
+        assert!(matches!(
+            parse(&["proxy", "add", "laptop", "0.0.0.0:1080", "gw", "--ice3proxy"]).command,
+            Command::Proxy(ProxyCommand::Add { ice3proxy: true, .. })
+        ));
+        assert!(matches!(
+            parse(&["proxy", "set", "3", "--ice3proxy", "off"]).command,
+            Command::Proxy(ProxyCommand::Set { id: 3, ice3proxy: Some(OnOff(false)), enabled: None, .. })
+        ));
+        assert!(fails(&["proxy", "set", "3", "--ice3proxy"]), "改的时候要写 on 或者 off");
         assert!(matches!(
             parse(&["proxy", "set", "3", "--enabled", "off", "--class", "default", "--optimistic", "on"]).command,
             Command::Proxy(ProxyCommand::Set {
@@ -1196,8 +1204,11 @@ mod tests {
         assert!(matches!(parse(&["token", "list", "--all"]).command, Command::Token(TokenCommand::List { all: true })));
         assert!(matches!(parse(&["log", "--ref", "node:3", "--action", "node"]).command, Command::Log { .. }));
         assert!(matches!(parse(&["node", "listeners", "gw"]).command, Command::Node(NodeCommand::Listeners { .. })));
-        assert!(matches!(parse(&["pair", "set", "a", "b", "--lane", "always"]).command, Command::Pair(PairCommand::Set { .. })));
-        assert!(fails(&["pair", "set", "a", "b", "--lane", "sometimes"]));
+        assert!(fails(&["pair", "set", "a", "b", "--lane", "always"]), "ice3proxy 是代理的选项了，节点对上没有");
+        assert!(matches!(
+            parse(&["pair", "set", "a", "b", "--keep-alive", "on"]).command,
+            Command::Pair(PairCommand::Set { keep_alive: Some(OnOff(true)), congestion: None, .. })
+        ));
         let Command::Pair(PairCommand::Set { congestion, .. }) = parse(&["pair", "set", "a", "b", "--congestion", "cubic"]).command else {
             panic!("应该是 pair set")
         };

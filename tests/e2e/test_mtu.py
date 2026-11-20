@@ -103,7 +103,7 @@ def tcp_only_node_behind_a_black_hole(lab: Lab, work: Path, t: Checks) -> None:
         seen = controller.node(s)
         return seen["online"] and seen["acked_version"] > 0 and seen["acked_version"] == seen["netmap_version"]
     t.check("黑洞后面的节点拿到了 netmap、在线", waited(netmap_applied, 60), tail(s.read_log(), 8))
-    controller.add_proxy(s, exit_node)
+    proxy = controller.add_proxy(s, exit_node)
     attached = waited(lambda: attached_over_tcp(s, relay) and attached_over_tcp(s, exit_node), 60)
     t.check("它经 TCP 挂上了两个 relay", attached, tail(s.read_log(), 8))
     reached = waited(lambda: any("中转会话建立" in line and f"node={s.id}" in line for line in exit_node.read_log().splitlines()), 60)
@@ -112,7 +112,8 @@ def tcp_only_node_behind_a_black_hole(lab: Lab, work: Path, t: Checks) -> None:
     both_ways(t, s, web, exit_node, "经 TCP 中转")
     t.check("这时还没有 lane", lane_counts(s, exit_node)["carried_bytes"] == 0, lane_line(s, exit_node))
 
-    controller.ctl("pair", "set", s.name, exit_node.name, "--lane", "always")
+    # ice3proxy 是代理的选项：打开之后这一对两边都备着 lane，这个代理的流走它。
+    controller.ctl("proxy", "set", str(proxy["id"]), "--ice3proxy", "on")
     ready = waited(lambda: lane_counts(s, exit_node)["control_up"] >= 1, 60)
     t.check("两边拨好了 lane", ready, lane_line(s, exit_node))
     carried = lane_counts(s, exit_node)["carried_bytes"]
@@ -122,7 +123,7 @@ def tcp_only_node_behind_a_black_hole(lab: Lab, work: Path, t: Checks) -> None:
     t.check("这两次走的是 lane", counts["carried_bytes"] >= carried + 1.9 * MEGABYTE and counts["fallbacks"] == 0, lane_line(s, exit_node))
 
     # 冷的一对节点：重启之后马上 ping，第一个往返不卡在黑洞里。
-    controller.ctl("pair", "unset", s.name, exit_node.name)
+    controller.ctl("proxy", "set", str(proxy["id"]), "--ice3proxy", "off")
     s.stop()
     s.start()
     waited(lambda: attached_over_tcp(s, exit_node), 30)
