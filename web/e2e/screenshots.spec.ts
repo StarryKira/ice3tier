@@ -834,13 +834,16 @@ test('拓扑的骨干', async () => {
 })
 
 /**
- * ice3proxy：gw-hk 的 relay 换一个这台机器上真的连得上的 TCP 地址（它在回环上的节点端口），gw-hk 和 laptop 这一对
- * 设成"总是用"，经 laptop 本机的入口访问 gw-hk 上的服务：一条一直开着的连接，加一次下载。nas-home 和 laptop
- * 这一对设成"UDP 不通时用"：两个都不是 relay，不起作用。放在中文这一组的最后，前面截图的编号不变。
+ * ice3proxy（0.1.26 起是代理的一个选项）：gw-hk 的 relay 换一个这台机器上真的连得上的 TCP 地址（它在回环上的节点端口）；
+ * gw-hk 上开一个经 nas-home 出去、打开了 ice3proxy 的代理，经它访问本机局域网地址上的服务：一条一直开着的连接，
+ * 加一次下载。laptop 上再开一个经 nas-home、也打开了的：两端都不是 relay，不起作用。节点对上只剩连接常驻和拥塞控制。
+ * 放在中文这一组的最后，前面截图的编号不变。
  */
 test('ice3proxy', async () => {
   test.setTimeout(150_000)
   const net = '/networks/1'
+  const px = t.proxies
+  const l = px.lane
   const port = Number(/^port = (\d+)$/m.exec(readFileSync(join(nodes.gw?.dir ?? '', 'config.toml'), 'utf8'))?.[1] ?? 0)
   await controller.api('PUT', `${net}/nodes/1/relay`, {
     udp: ['203.0.113.7:20330'],
@@ -848,33 +851,49 @@ test('ice3proxy', async () => {
     region: 'hk',
     bandwidth_mbps: 200,
   })
-  await controller.api('PUT', `${net}/pairs/1/3`, { keep_alive: false, lane: 'always' })
-  await controller.api('PUT', `${net}/pairs/2/3`, { lane: 'udp_fallback' })
-  interface LanePair {
-    a: number
-    b: number
+  // 出口 nas-home：目标端口不限、不限配额，截图的下载不被前面的设置挡住。
+  await controller.api('PUT', `${net}/nodes/2/exit`, { ports: null, lan: true, quota_bytes: null })
+  const lanePort = await freePort()
+  await controller.api('POST', `${net}/proxies`, {
+    name: 'hk-nas',
+    node: 1,
+    bind: `127.0.0.1:${lanePort}`,
+    protocol: 'socks5',
+    exit: 2,
+    username: 'lane',
+    password: 'lane-password',
+    lane: true,
+  })
+  await controller.api('POST', `${net}/proxies`, {
+    name: 'laptop-nas',
+    node: 3,
+    bind: `127.0.0.1:${await freePort()}`,
+    protocol: 'socks5',
+    exit: 2,
+    username: 'lane',
+    password: 'lane-password',
+    lane: true,
+  })
+  await controller.api('PUT', `${net}/pairs/1/3`, { keep_alive: false, congestion: 'cubic' })
+  interface LaneProxy {
+    name: string
     lanes: { lanes: { in_use: number; sealed_bytes: number } }[]
   }
   const sides = async () =>
-    (await controller.api<LanePair[]>('GET', `${net}/pairs`)).find((item) => item.a === 1 && item.b === 3)?.lanes ?? []
+    (await controller.api<LaneProxy[]>('GET', `${net}/proxies`)).find((item) => item.name === 'hk-nas')?.lanes ?? []
   await expect.poll(async () => (await sides()).length, { timeout: 40_000 }).toBe(2)
 
   if (lanIp !== undefined) {
-    // gw-hk 上的服务：节点把访问它虚拟 IP 的连接接到它本机的非回环地址上，所以两个服务都听 0.0.0.0。
     holder = createHttpServer((_request, response) => {
       response.writeHead(200, { 'Content-Type': 'text/plain' })
       response.write('holding\n')
     })
     const holdPort = await listenOn(holder, '0.0.0.0')
-    const proxy = `socks5h://127.0.0.1:${nodes.laptop?.socksPort ?? 0}`
-    hold = spawn('curl', ['-s', '-m', '170', '-o', '/dev/null', '-x', proxy, `http://10.66.0.1:${holdPort}/`], {
+    const proxy = `socks5h://lane:lane-password@127.0.0.1:${lanePort}`
+    hold = spawn('curl', ['-s', '-m', '170', '-o', '/dev/null', '-x', proxy, `http://${lanIp}:${holdPort}/`], {
       stdio: 'ignore',
     })
-    await new Promise<void>((done) =>
-      execFile('curl', ['-s', '-m', '20', '-o', '/dev/null', '-x', proxy, `http://10.66.0.1:${targetPort}/`], () =>
-        done(),
-      ),
-    )
+    await download(proxy)
     await expect
       .poll(async () => (await sides()).some((side) => side.lanes.in_use > 0 && side.lanes.sealed_bytes > 0), {
         timeout: 40_000,
@@ -882,16 +901,26 @@ test('ice3proxy', async () => {
       .toBe(true)
   }
 
-  const l = t.pairs.lane
-  await goToAdmin(page, t.nav.pairs)
-  await expect(page.getByTestId('lane-effect-gw-hk-laptop')).toContainText(l.effective)
-  await expect(page.getByTestId('lane-blocked-nas-home-laptop')).toBeVisible()
-  await shot('pairs-lanes')
-  await page.getByRole('button', { name: l.detailsFor('gw-hk', 'laptop') }).click()
-  await expect(page.getByTestId('lane-details-gw-hk-laptop')).toBeVisible()
-  await shot('pairs-lanes-details')
+  await goTo(page, t.nav.proxies)
+  await expect(page.getByTestId('proxy-lane-hk-nas')).toContainText(lanIp === undefined ? l.effective : l.inUse, {
+    timeout: 20_000,
+  })
+  await expect(page.getByTestId('proxy-lane-laptop-nas')).toContainText(l.blocked)
+  await shot('proxies-lanes')
+  await page.getByRole('button', { name: l.detailsFor('gw-hk', 'nas-home') }).click()
+  await expect(page.getByTestId('lane-details-hk-nas')).toBeVisible()
+  await shot('proxies-lanes-details')
   await page.getByRole('button', { name: l.detailsHide, exact: true }).click()
 
+  await page.getByRole('button', { name: px.create }).first().click()
+  const create = page.getByRole('dialog', { name: px.dialog.createTitle })
+  await create.getByRole('switch', { name: l.title }).click()
+  await shot('proxies-dialog-lane', { fullPage: false })
+  await create.getByRole('button', { name: t.common.cancel, exact: true }).click()
+  await page.getByRole('button', { name: t.common.discardConfirm }).click()
+
+  await goToAdmin(page, t.nav.pairs)
+  await expect(page.getByTestId('pair-row-gw-hk-laptop')).toBeVisible()
   await page.getByRole('button', { name: t.pairs.add }).click()
   const dialog = page.getByRole('dialog', { name: t.pairs.dialogTitle })
   await dialog.getByRole('combobox', { name: t.pairs.nodeA }).click()
@@ -899,7 +928,7 @@ test('ice3proxy', async () => {
   await expect(page.getByRole('listbox')).toHaveCount(0)
   await dialog.getByRole('combobox', { name: t.pairs.nodeB }).click()
   await page.getByRole('option', { name: /gw-hk/ }).click()
-  await dialog.getByRole('radio', { name: l.modes.udp_fallback }).click()
+  await dialog.getByRole('combobox', { name: t.pairs.colCongestion }).selectOption('cubic')
   await shot('pairs-add-dialog', { fullPage: false })
   await dialog.getByRole('button', { name: t.common.cancel, exact: true }).click()
   await page.getByRole('button', { name: t.common.discardConfirm }).click()

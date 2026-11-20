@@ -654,34 +654,37 @@ export interface ForwardInput {
 }
 
 /**
- * ice3proxy（lane）：一对节点之间承载 TCP 连接的流各用一条只属于它的 TCP，而不是共用那一条连接里的一条流。
- * `udp_fallback`：开流的一方到对方的路上没有 UDP 时才用（0.1.19 起是没有设置的节点对的默认）。
+ * 0.1.26 起节点对只有这两项：连接常驻、拥塞控制。ice3proxy 挪到了代理上（`Proxy.lane`）；
+ * 比界面旧的 controller 还会写 `lane`、`lane_effect`、`lanes`，界面不读。
  */
-export type LaneMode = 'off' | 'udp_fallback' | 'always'
-
 export interface PairSetting {
   a: NodeId
   b: NodeId
   keep_alive: boolean
-  /** 比界面旧的 controller 不写，按 `off` 算。 */
-  lane?: LaneMode
+  /** 这一对节点之间的连接用哪种拥塞控制；`null` 是节点的默认（BBR）。比界面旧的 controller 不写，按 `null` 算。 */
+  congestion?: PairCongestion | null
 }
 
-/** 每一项都可以省略：没写的项保持原样（这一对还没有设置时取默认值）。 */
+/** `bbr`：不把随机丢包当作拥塞；`cubic`：每次丢包都减速。比界面新的 controller 存了不认识的值时读成 `null`。 */
+export type PairCongestion = 'bbr' | 'cubic'
+
+/** 每一项都可以省略：没写的项保持原样（这一对还没有设置时取默认值）。`congestion` 写 `null` 是改回默认。 */
 export interface PairInput {
   keep_alive?: boolean
-  lane?: LaneMode
+  congestion?: PairCongestion | null
 }
 
-/** ice3proxy 的设置不起作用的一个原因。`node` 是说的那一个节点。比界面新的 controller 可能写别的 `reason`。 */
+/** ice3proxy 不起作用的一个原因。`node` 是说的那一个节点。比界面新的 controller 可能写别的 `reason`。 */
 export type LaneBlock =
   | { reason: 'no_relay' }
   | { reason: 'no_tcp_address'; node: NodeId }
   | { reason: 'node_too_old'; node: NodeId }
+  /** 访问规则不让监听的节点访问出口。 */
   | { reason: 'not_connected' }
 
+/** 一个选了 ice3proxy 的代理，它的 ice3proxy 起不起作用。 */
 export interface LaneEffect {
-  /** 至少一边能被拨，两个节点都懂 ice3proxy，访问规则连通了它们。 */
+  /** 至少一边能被拨，两个节点都懂 ice3proxy，访问规则让监听的节点访问出口。 */
   effective: boolean
   /** 不起作用的原因；起作用时是 `[]`。 */
   blocked: LaneBlock[]
@@ -689,18 +692,6 @@ export interface LaneEffect {
   dialers: NodeId[]
   /** controller 写的一句中文。界面按 `blocked` 用自己的话写，只在原因不认识时用它。 */
   summary: string
-  /** 设置是 `udp_fallback` 时，两个节点各自开新的 TCP 流现在走不走 ice3proxy；别的设置是 `[]`。旧的 controller 不写。 */
-  opening?: LaneOpening[]
-}
-
-/** `udp_fallback` 下一个节点开新的 TCP 流现在走哪里。没报过的节点（有 UDP、什么都没连着）不在里面。 */
-export interface LaneOpening {
-  /** 开流的节点。 */
-  node: NodeId
-  /** 它到对方的路上现在有没有 UDP（对方用不了 UDP 时是 `false`）。 */
-  udp_path: boolean
-  /** 它现在开的新 TCP 流走 ice3proxy：设置起作用，没有 UDP，和对方之间的控制连接在。 */
-  lanes: boolean
 }
 
 /** ice3proxy 的计数，从节点启动算起的累计；`in_use`、`dialling` 是现在的值。 */
@@ -746,23 +737,22 @@ export interface PeerLanes extends LaneCounts {
   udp_path?: boolean | null
 }
 
-export interface PairLaneSide {
+/** 一个节点报的、和一个对端之间的 ice3proxy（代理的两端：监听的节点和出口）。 */
+export interface LaneSide {
   /** 报的节点。 */
   node: NodeId
   lanes: PeerLanes
+  /** 这一份是多少秒之前报的；没报过是 `null`。 */
+  reported_secs_ago?: number | null
 }
 
-/** 节点对的接口应答的：设置，加上 ice3proxy 起不起作用、两个节点各自报的状况。 */
+/** 节点对的接口应答的：设置，加上有没有存下。 */
 export interface PairView extends PairSetting {
   /**
    * 0.1.19 起：这一对有没有存下的设置。`false` 时各项都是默认值，只有 `GET …/pairs/{a}/{b}` 会这样答；
    * 列表和 `PUT` 的应答里总是 `true`。更早的 controller 没有这个字段，按 `true` 算。
    */
   stored?: boolean
-  /** `lane` 是 `off` 时是 `null`。比界面旧的 controller 不写。 */
-  lane_effect?: LaneEffect | null
-  /** 不在线、版本太旧、没有为对方打开的节点不在里面。比界面旧的 controller 不写。 */
-  lanes?: PairLaneSide[]
 }
 
 /** 别人拨进来、没有握手成功的连接，按原因分。分不到对端名下，只有全节点的。 */
@@ -1452,7 +1442,16 @@ export interface Proxy {
   allow_from: string[]
   class: ServiceClass | null
   optimistic: boolean | null
+  /**
+   * 0.1.26 起：这个代理的流一直走 ice3proxy（监听的节点和出口之间一条连接一条 TCP），开不了时退回共用连接；
+   * `false` 时永远不走。比界面旧的 controller 不写，按 `false` 算。
+   */
+  lane?: boolean
   status: ProxyStatus | null
+  /** `lane` 是 `true` 并且有出口时才有，别的时候是 `null`。 */
+  lane_effect?: LaneEffect | null
+  /** 两端报的 ice3proxy（`lane` 是 `true` 时才有内容）。计数属于这一对节点，同一对之间选了 ice3proxy 的代理共用。 */
+  lanes?: LaneSide[]
   /** 入口节点不在线或者还没报过时是 0。 */
   connections: number
   bytes_up: number
@@ -1468,4 +1467,6 @@ export interface ProxyInput {
   username: string
   password: string
   enabled?: boolean
+  /** 0.1.26 起：要不要 ice3proxy，新建时不写是 `false`。 */
+  lane?: boolean
 }

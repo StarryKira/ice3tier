@@ -51,7 +51,7 @@ export const routes = {
     quic: 'QUIC',
     lane: 'ice3proxy',
     over: (app: string, transport: string) => `${app}/${transport}`,
-    laneHint: '这一对节点之间的 TCP 连接各走一条单独的 TCP。点开看这一对的设置',
+    laneHint: '有选了 ice3proxy 的代理经过这一对：它的连接各走一条单独的 TCP。点开看代理',
   },
   /** 经中继的那一行，悬停在"中继"上说直连怎么样了。 */
   directState: {

@@ -126,7 +126,7 @@ export const diagnosis: Messages['diagnosis'] = {
     natStable: 'Mapping stays the same per peer',
     udp: 'UDP',
     udpOk: 'Usable',
-    udpNo: 'Unusable: TCP connections go over ice3proxy',
+    udpNo: 'Unusable: TCP via a relay',
     attached: 'Attached relays',
     none: 'None',
   },
@@ -225,7 +225,7 @@ export const diagnosis: Messages['diagnosis'] = {
     jitter: 'Find the jittery segment under Path; if it is a relay segment, pin the node to another relay',
     loss: 'Find the lossy segment under Path: a relay segment means pinning another relay, the first segment means the local network',
     tcp: (name) =>
-      `UDP to the relay is blocked on ${name}: allow its outbound UDP, or turn on ice3proxy for this pair (Node pairs)`,
+      `UDP from ${name} to its relay is blocked: allow outbound UDP there; proxies through it can turn on ice3proxy`,
     nat: (name) => `${name} is behind a symmetric NAT: forward a port to it or change networks to go direct`,
     udp: (name) => `UDP is blocked on ${name}: check its firewall and whether the ISP restricts UDP`,
     cpu: (name) =>

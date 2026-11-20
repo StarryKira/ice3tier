@@ -82,7 +82,7 @@ target/release/i3t run
 - 列表页共用的部件：搜索框（`components/search-box.tsx`，Ctrl K 跳到它）、行末的「⋮」（`components/row-actions.tsx`）、表格里能点开改的一格和「共 N 项」（`components/table.tsx` 的 `CellButton`、`RowsTotal`）、分组 / 节点 / 策略的小标签和「+N」（`components/chip.tsx` 的 `Chip`、`ChipList`，`GroupList`、`NodeList`、`PolicyList` 都用它）。新的列表页用这些，不另写一份。
 - 分组（`docs/admin-api.md` §18）只能从已有的里选：节点、注册令牌上用 `GroupPicker`（`src/components/groups.tsx`）：框里是选中的分组，点开是一个能搜索的列表，每行一个分组、它有几个节点、一个勾选框，勾上、取消都不收起列表；搜索只是筛选，不会因此新建分组，旁边一个安静的链接去分组页。分组到处是同一个样子（`GroupChip`：分组的图标加名字）；规则的两头也只从已有的分组里选。内置的 `All` 总在最前面、勾着、移不掉；认它看分组引用上的 `builtin`，比 0.1.8 旧的 controller 不给这个字段，这时按名字认（`isAllGroup`，`src/lib/groups.ts`）。请求里一律写分组的编号，地址里也写编号（节点列表的 `group`、总览的 `group`、分组页的 `focus`），改名之后链接还是同一个分组。删除分组之前现取这个分组（`GET …/groups/{group}`），确认框写它从几个节点上移除、几条规则一起删掉。分组的错误按 `code` 和 `what` 写（`src/api/client.ts`），名字的写法不对按 `what` 写在名字下面（`groupNameFailure`）。
 - 节点更新的暂停按网络算：同一个版本在几个网络里被暂停时，设置里是一条横幅，写明是哪几个网络，"继续"一次继续全部。
-- ice3proxy（节点对的一项设置）在节点对页里用同一套说法，出自 `src/lib/lanes.ts`。起不起作用按 controller 给的原因码（`lane_effect.blocked`）用界面自己的话写，每个原因带修好它的那一步（在哪个节点上启用 relay、填 TCP 地址、更新节点、检查访问）；controller 的 `summary` 只在原因码不认识时原样显示。一对节点的数由两边各自报的合起来：在用的连接两头都算，取大的；空闲的按停在哪一边相加；回退和拨号失败相加。没有节点报上来时不画计数，也没有详情。节点详情的「ice3proxy」标签页只在和哪个对端打开了 ice3proxy 时出现。路由视图不因 ice3proxy 改变（共用的连接和它的路照常保留），节点对页上说一次。
+- ice3proxy 是代理的一个选项（0.1.26 起；以前是节点对的设置，节点对上现在只有连接常驻和拥塞控制）。新建、修改代理的对话框里一个开关，默认关：打开时这个代理的流一直走 ice3proxy（监听的节点和出口之间一条连接一条 TCP），开不了时退回共用连接；关着的永远不走。代理列表在有代理打开它时多一列 ice3proxy：关、生效（下面一行谁拨号，有在用的连接时写在用）、未生效（一条一条原因，每个带修好它的那一步：在哪个节点上启用 relay、填 TCP 地址、更新节点、检查监听的节点能不能访问出口）；两端报了计数时能展开看两端并排的数（这两个节点之间选了 ice3proxy 的代理共用这些计数）。说法出自 `src/lib/lanes.ts`，按 controller 给的原因码（`lane_effect.blocked`）用界面自己的话写，controller 的 `summary` 只在原因码不认识时原样显示；比界面旧的 controller 不写 `lane`、`lane_effect`、`lanes`，按关着算。节点详情的路由里，和哪个对端之间有 ice3proxy（控制连接在或者有在用的）时协议下面多一行，点了去代理页。
 
 ## 界面的样子
 
@@ -190,12 +190,9 @@ target/release/i3t run
 | 监听地址         | listen address           |                 |                                                           |
 | 固定出口         | fixed exit               |                 |                                                           |
 | 连接常驻         | keep alive               |                 |                                                           |
-| ice3proxy        | ice3proxy                | `--lane`        | 节点对的设置：承载 TCP 连接的流各用一条自己的 TCP（lane） |
-| 不用             | off                      | `off`           | ice3proxy 的取值                                           |
-| UDP 不通时用     | when UDP fails           | `udp_fallback`  | ice3proxy 的取值                                           |
-| 总是用           | always                   | `always`        | ice3proxy 的取值                                           |
+| ice3proxy        | ice3proxy                | `--lane`        | 代理的选项：这个代理的连接各用一条自己的 TCP（lane）     |
 | 共用的连接       | shared connection        |                 | 一对节点之间的那一条连接，ice3proxy 之外的流都走它         |
-| 生效、未生效     | in effect, no effect     |                 | ice3proxy 的设置起不起作用                                 |
+| 生效、未生效     | in effect, no effect     |                 | 代理上的 ice3proxy 起不起作用                                 |
 | 拨号             | dial                     |                 | ice3proxy 由连得上对方 TCP 端口的一方拨                    |
 | 回退             | fallback                 |                 | 本该走 ice3proxy、改走了共用连接的流                        |
 | 控制连接         | control connection       |                 | ice3proxy 的两端之间管事的那一条                           |

@@ -198,13 +198,13 @@ describe('路由', () => {
             parked_at_peer: 0,
             udp_path: false,
           },
-          // UDP 回来了，控制连接还留着：没有设置的一对，新的连接已经不走 ice3proxy。
+          // 和 nas 之间没有选了 ice3proxy 的代理：没有控制连接、没有在用的，就不写。
           {
             ...LANE_COUNTS,
             in_use: 0,
             peer: 2,
-            dials: true,
-            control: true,
+            dials: false,
+            control: false,
             idle: 0,
             ready: 0,
             parked_at_peer: 0,
@@ -241,7 +241,7 @@ describe('路由', () => {
       (await screen.findAllByText(t.routes.directState.failed(t.routes.directCause.no_answer))).length,
     ).toBeGreaterThan(0)
 
-    // 报了 null：和现在一样，照常写出来。这一对开着 ice3proxy，协议下面多一行。
+    // 报了 null：和现在一样，照常写出来。有选了 ice3proxy 的代理经过这一对，协议下面多一行。
     const pc = screen.getByText('10.66.0.4').closest('tr')
     if (pc === null) throw new Error('没有 pc 那一行')
     const lane = `QUIC/UDP${t.routes.protocol.over(t.routes.protocol.lane, 'TCP')}`
@@ -259,10 +259,10 @@ describe('路由', () => {
       '1',
       t.common.ms(2),
     ])
-    // ice3proxy 那一行点了去节点对页看这一对。
+    // ice3proxy 那一行点了去代理页（它属于代理，节点对上没有了）。
     expect(
       within(pc).getAllByRole('link', { name: t.routes.protocol.over(t.routes.protocol.lane, 'TCP') })[0],
-    ).toHaveAttribute('href', '/n/1/pairs?a=1&b=4')
+    ).toHaveAttribute('href', '/n/1/proxies')
     expect(within(nas).queryByRole('link', { name: t.routes.protocol.over(t.routes.protocol.lane, 'TCP') })).toBeNull()
     expect(api.callsTo('GET /networks/1/path')).toHaveLength(0)
     expect(screen.queryByRole('button', { name: d.routesRecompute(d.routingLowestCost) })).toBeNull()

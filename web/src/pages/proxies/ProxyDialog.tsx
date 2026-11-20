@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { Eye, EyeOff, RefreshCw } from 'lucide-react'
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import { Link } from 'react-router'
 
 import { api } from '@/api/endpoints'
@@ -15,6 +15,7 @@ import { Button } from '@/components/ui/button'
 import { Field } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Segmented } from '@/components/ui/segmented'
+import { Switch } from '@/components/ui/switch'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
 import { formatSocketAddr, isLoopbackHost, parseIpv4, parseSocketAddr } from '@/lib/cidr'
@@ -44,8 +45,8 @@ interface ProxyDialogProps {
 
 /**
  * 新建或修改一个代理，按顺序填：出口（只能选打开了出口的节点）、入口（不能和出口是同一台）、协议、监听地址、端口、
- * 用户名和密码（开在本机以外时必填，能随机生成，能看）。底下直接写出设备里要填的代理地址；
- * 策略不允许入口访问出口时当场说。
+ * 用户名和密码（开在本机以外时必填，能随机生成，能看）、要不要 ice3proxy（默认关：打开时这个代理的流一直走它，
+ * 开不了时退回共用连接）。底下直接写出设备里要填的代理地址；策略不允许入口访问出口时当场说。
  */
 export function ProxyDialog({ network, proxy, onClose }: ProxyDialogProps) {
   const nodes = useQuery(q.nodes(network.id))
@@ -64,6 +65,10 @@ export function ProxyDialog({ network, proxy, onClose }: ProxyDialogProps) {
   const [username, setUsername] = useState(proxy?.username ?? (proxy === null ? randomSecret(6) : ''))
   const [password, setPassword] = useState(proxy?.password ?? (proxy === null ? randomSecret(16) : ''))
   const [showPassword, setShowPassword] = useState(proxy === null)
+  // ice3proxy：新建时默认关；比界面旧的 controller 不写，按关着算。
+  const [lane, setLane] = useState(proxy?.lane === true)
+  const laneId = useId()
+  const laneHintId = useId()
   const [touched, setTouched] = useState(false)
   const [dirty, setDirty] = useState(false)
 
@@ -130,6 +135,7 @@ export function ProxyDialog({ network, proxy, onClose }: ProxyDialogProps) {
         exit,
         username: username.trim(),
         password,
+        lane,
       },
       { onSuccess: onClose },
     )
@@ -301,6 +307,18 @@ export function ProxyDialog({ network, proxy, onClose }: ProxyDialogProps) {
             </div>
           )}
         </Field>
+      </div>
+
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <label htmlFor={laneId} className="text-[13px] font-medium">
+            {s.lane.title}
+          </label>
+          <p id={laneHintId} className="mt-0.5 text-[13px] text-muted-foreground">
+            {s.lane.switchHint}
+          </p>
+        </div>
+        <Switch id={laneId} aria-describedby={laneHintId} checked={lane} onCheckedChange={change(setLane)} />
       </div>
 
       <Field label={d.name} error={fieldError(failure, 'name')}>

@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 import { type Proxy } from '@/api/types'
 import { t } from '@/i18n'
 import { proxyUrl } from '@/lib/proxy'
-import { makeNode } from '@/test/fixtures'
+import { makeNode, makePeerLanes } from '@/test/fixtures'
 import { fakeApi, NETWORK, renderWithApp } from '@/test/harness'
 
 import { ProxiesPage } from './ProxiesPage'
@@ -142,6 +142,8 @@ describe('代理页', () => {
       exit: 3,
       username: 'phone',
       password: 'pw',
+      // ice3proxy 默认关。
+      lane: false,
     })
   })
 
@@ -187,5 +189,102 @@ describe('代理页', () => {
     await user.click(within(dialog).getByRole('combobox', { name: d.entry }))
     await user.click(await screen.findByRole('option', { name: /nas/ }))
     expect(await within(dialog).findByText(d.accessDenied('nas', 'tokyo'), { exact: false })).toBeVisible()
+  })
+})
+
+describe('代理上的 ice3proxy', () => {
+  const l = s.lane
+  const ON = proxy({
+    lane: true,
+    lane_effect: { effective: true, blocked: [], dialers: [2], summary: '由 #2 拨对方的 TCP 端口' },
+    lanes: [
+      { node: 2, lanes: makePeerLanes(3, { dials: true, in_use: 2, claims_waited: 3, claim_wait_ms: 412 }) },
+      { node: 3, lanes: makePeerLanes(2, { idle: 4 }), reported_secs_ago: 7 },
+    ],
+  })
+
+  function setup(proxies: Proxy[]) {
+    return fakeApi({
+      'GET /networks/1/proxies': proxies,
+      'GET /networks/1/nodes': [nas, tokyo],
+      'GET /networks/1/nodes/2': {
+        ...nas,
+        lanes: {
+          total: makePeerLanes(0),
+          handshake_failures: { deadline: 0, unknown_key: 2, tls: 0, protocol: 0, busy: 0 },
+          peers: [],
+        },
+      },
+      'GET /networks/1/nodes/3': { ...tokyo, lanes: null },
+      'GET /networks/1/access/check': { from: nas, to: tokyo, allowed: true, rules: [] },
+      'PATCH /networks/1/proxies/1': (call) => ({ ...proxy(), ...(call.body as object) }),
+    })
+  }
+
+  it('没有代理打开它时没有这一列；比界面旧的 controller 不写，也按关着', async () => {
+    setup([proxy()])
+    renderWithApp(<ProxiesPage />, { network: NETWORK })
+    await screen.findByTestId('proxy-row-phone')
+    expect(screen.queryByRole('columnheader', { name: l.title })).toBeNull()
+  })
+
+  it('打开了、生效：写在用和谁拨号；详情里两端的计数并排，握手失败取自节点详情', async () => {
+    const user = userEvent.setup()
+    setup([ON, proxy({ id: 2, name: 'tv' })])
+    renderWithApp(<ProxiesPage />, { network: NETWORK })
+    const cell = await screen.findByTestId('proxy-lane-phone')
+    expect(cell).toHaveTextContent(l.inUse)
+    expect(cell).toHaveTextContent(l.dials('nas'))
+    // 没打开的那一行写"关"。
+    expect(screen.getByTestId('proxy-row-tv')).toHaveTextContent(l.off)
+
+    await user.click(within(cell).getByRole('button', { name: l.detailsFor('nas', 'tokyo') }))
+    const table = screen.getByRole('table', { name: l.detailsTitle('nas', 'tokyo') })
+    expect(within(table).getByRole('columnheader', { name: 'nas' })).toBeVisible()
+    expect(within(table).getByRole('columnheader', { name: 'tokyo' })).toBeVisible()
+    expect(within(table).getByText(l.row.waitedValue(3, t.common.ms(412)))).toBeVisible()
+    await waitFor(() => expect(within(table).getByText(l.causeCount(l.handshakeCause.unknown_key, 2))).toBeVisible())
+    expect(screen.getByText(l.sharedNote)).toBeVisible()
+  })
+
+  it('不生效：一条一条原因和修好它的那一步，用的是原因码而不是 controller 的原话', async () => {
+    const summary = 'ice3proxy 不起作用，这个代理的流都走共用的连接（见 blocked）。'
+    setup([
+      proxy({
+        lane: true,
+        lane_effect: {
+          effective: false,
+          blocked: [{ reason: 'no_relay' }, { reason: 'node_too_old', node: 2 }],
+          dialers: [],
+          summary,
+        },
+        lanes: [],
+      }),
+    ])
+    renderWithApp(<ProxiesPage />, { network: NETWORK })
+    const cell = await screen.findByTestId('proxy-lane-phone')
+    expect(cell).toHaveTextContent(l.blocked)
+    expect(cell).toHaveTextContent(l.reason.noRelay('nas', 'tokyo'))
+    expect(cell).toHaveTextContent(l.reason.nodeTooOld('nas'))
+    expect(cell).not.toHaveTextContent(summary)
+    expect(within(cell).getByRole('link', { name: l.fix.update('nas') })).toHaveAttribute('href', '/n/1/nodes/2')
+    // 两端都没报：没有详情。
+    expect(within(cell).queryByRole('button', { name: l.detailsFor('nas', 'tokyo') })).toBeNull()
+  })
+
+  it('修改：开关在对话框里，和别的一起提交', async () => {
+    const user = userEvent.setup()
+    const api = setup([proxy()])
+    renderWithApp(<ProxiesPage />, { network: NETWORK })
+    await user.click(await screen.findByRole('button', { name: t.common.actionsFor('phone') }))
+    await user.click(await screen.findByRole('menuitem', { name: s.menuEdit }))
+    const dialog = await screen.findByRole('dialog', { name: d.editTitle('phone') })
+    const toggle = within(dialog).getByRole('switch', { name: l.title })
+    expect(toggle).not.toBeChecked()
+    expect(toggle).toHaveAccessibleDescription(l.switchHint)
+    await user.click(toggle)
+    await user.click(within(dialog).getByRole('button', { name: t.common.save }))
+    await waitFor(() => expect(api.callsTo('PATCH /networks/1/proxies/1')).toHaveLength(1))
+    expect(api.callsTo('PATCH /networks/1/proxies/1')[0]?.body).toMatchObject({ lane: true })
   })
 })

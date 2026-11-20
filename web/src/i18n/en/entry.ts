@@ -1,7 +1,5 @@
 import type { Messages } from '../messages'
 
-import { afterColon } from './text'
-
 const count = (n: number, one: string, many: string) => (n === 1 ? `1 ${one}` : `${n} ${many}`)
 
 export const exits: Messages['exits'] = {
@@ -178,7 +176,7 @@ export const serviceClass: Messages['serviceClass'] = {
 
 export const pairs: Messages['pairs'] = {
   title: 'Node pairs',
-  subtitle: 'Connection settings for a pair of nodes, such as dedicated TCP',
+  subtitle: 'Connection settings for a pair of nodes: keep alive and congestion control',
   add: 'Add node pair',
   loadFailed: "Couldn't load node pairs",
   colPair: 'Pair',
@@ -193,7 +191,7 @@ export const pairs: Messages['pairs'] = {
   removed: (a, b) => `${a} ⇄ ${b} reset to default`,
   emptyTitle: 'All pairs use defaults',
   emptyNeedTwo: 'Needs at least two nodes',
-  defaultNote: 'Pairs without settings use ice3proxy when there is no UDP',
+  defaultNote: "Pairs not listed use the defaults: no keep alive, and the node's default congestion control (BBR)",
   defaultBadge: 'Default',
   defaultBadgeTip: 'This pair has no settings and uses the defaults',
   dialogTitle: 'Add node pair',
@@ -203,80 +201,10 @@ export const pairs: Messages['pairs'] = {
   exists: 'This pair already has a setting',
   nothingSet: 'Same as the defaults',
   submit: 'Add',
-
-  lane: {
-    title: 'ice3proxy',
-    tip: "Each stream that carries a TCP connection gets a TCP connection of its own instead of sharing the pair's connection. Needs relay enabled on one of the two nodes.",
-    hint: 'Needs relay enabled on one of the two nodes',
-    modes: { off: 'Off', udp_fallback: 'Without UDP', always: 'Always' },
-    select: (a, b) => `ice3proxy between ${a} and ${b}`,
-    changed: (a, b, mode) => `${a} ⇄ ${b}: ice3proxy ${afterColon(mode)}`,
-    routeNote: 'With ice3proxy on, the shared connection and its route stay as they are',
-    colState: 'Status',
-    effective: 'In effect',
-    inUse: 'In use',
-    standby: 'Standby',
-    hasUdp: 'Not needed while UDP works',
-    connecting: 'No UDP, connecting',
-    blocked: 'No effect',
-    dials: (name) => `${name} dials`,
-    bothDial: 'Both dial',
-    colInUse: 'In use',
-    colIdle: 'Idle',
-    colFallbacks: 'Fallbacks',
-    fallbacksTip: 'Streams meant for ice3proxy that went over the shared connection instead',
-    colDialFailures: 'Failed dials',
-    countsTip: 'Both nodes, since they started',
-    reason: {
-      noRelay: (a, b) => `Neither ${a} nor ${b} has relay enabled`,
-      noTcpAddress: (node) => `${node}'s relay has no TCP address`,
-      nodeTooOld: (node) => `${node} runs a version without ice3proxy`,
-      notConnected: (a, b) => `No access policy connects ${a} and ${b}`,
-    },
-    fix: {
-      enableRelay: (node) => `Enable relay on ${node}`,
-      tcpAddress: (node) => `Add a TCP address for ${node}`,
-      update: (node) => `Update ${node}`,
-      access: 'Check access',
-    },
-    details: 'Details',
-    detailsHide: 'Hide',
-    detailsFor: (a, b) => `ice3proxy details for ${a} ⇄ ${b}`,
-    notReported: '—',
-    row: {
-      udpPath: 'UDP',
-      udpPathTip:
-        'Whether the path to the other node has UDP. With "Without UDP", ice3proxy is used only when it has none',
-      udpPathYes: 'Yes',
-      udpPathNo: 'No',
-      control: 'Control connection',
-      controlTip: 'While it is down, new TCP streams use the shared connection',
-      controlUp: 'Connected',
-      controlDown: 'Not connected',
-      dialling: 'Dialling',
-      claims: 'Claims',
-      claimsTip: 'Lanes taken from those the peer dialled and parked here',
-      waited: 'Waited for a dial',
-      waitedValue: (n, wait) => `${n}, ${wait} in total`,
-      claimsFailed: 'Failed claims',
-      refused: 'Refused',
-      refusedTip: 'Closed after the handshake because of their purpose or count',
-      sealed: 'Encrypted',
-      sealedTip: 'Bytes carried inside the ice3proxy TLS, both directions',
-      passthrough: 'Passthrough',
-      passthroughTip: 'Data that already was TLS, carried as is by the program',
-      spliced: 'Kernel splice',
-      splicedTip: 'Data that already was TLS, carried as is by the kernel',
-      handshake: 'Failed handshakes',
-      handshakeTip: 'Incoming connections to this node that failed the handshake. Whole node, not per peer',
-    },
-    handshakeCause: {
-      deadline: 'Timed out',
-      unknown_key: 'Unknown key',
-      tls: 'TLS error',
-      protocol: 'Protocol error',
-      busy: 'Busy',
-    },
-    causeCount: (cause, n) => `${cause} ${n}`,
-  },
+  colCongestion: 'Congestion control',
+  congestionTip:
+    'BBR does not treat random loss as congestion; CUBIC slows down on every loss. Applies to connections opened afterwards',
+  congestion: { default: 'Default (BBR)', bbr: 'BBR', cubic: 'CUBIC' },
+  congestionSelect: (a, b) => `Congestion control between ${a} and ${b}`,
+  congestionChanged: (a, b, value) => `${a} ⇄ ${b}: congestion control ${value}`,
 }

@@ -46,7 +46,8 @@ export const routes: Messages['routes'] = {
     quic: 'QUIC',
     lane: 'ice3proxy',
     over: (app, transport) => `${app}/${transport}`,
-    laneHint: 'TCP connections between this pair each get their own TCP. Open to see the pair settings',
+    laneHint:
+      'A proxy with ice3proxy runs between this pair: its connections each get their own TCP. Open to see proxies',
   },
   directState: {
     not_tried: "Direct not tried yet: this pair hasn't talked, or one side limits direct",

@@ -187,7 +187,7 @@ export function makePeerLanes(peer: number, extra: Partial<PeerLanes> = {}): Pee
   }
 }
 
-/** 一对节点的设置：默认是连接常驻、不用 ice3proxy。 */
+/** 一对节点的设置：默认是连接常驻、拥塞控制用节点的默认。 */
 export function makePair(a: number, b: number, extra: Partial<PairView> = {}): PairView {
-  return { a, b, keep_alive: true, lane: 'off', lane_effect: null, lanes: [], ...extra }
+  return { a, b, keep_alive: true, congestion: null, ...extra }
 }
