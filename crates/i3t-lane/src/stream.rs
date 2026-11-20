@@ -38,6 +38,7 @@
 use std::fmt;
 use std::io;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker, ready};
 use std::time::Duration;
@@ -101,6 +102,7 @@ struct Shared {
     socket: Arc<TcpStream>,
     peer: NodeId,
     state: Mutex<State>,
+    revoked: Arc<AtomicBool>,
     /// 两个方向都被丢弃了：后台的发送任务不用再等。
     closed: Notify,
     book: Book,
@@ -108,6 +110,17 @@ struct Shared {
 }
 
 impl Shared {
+    fn is_revoked(&self) -> bool {
+        self.revoked.load(Ordering::Acquire)
+    }
+
+    fn check_revoked(&self) -> io::Result<()> {
+        if self.is_revoked() {
+            return Err(io::Error::new(io::ErrorKind::ConnectionReset, "对端的 lane 授权已经吊销"));
+        }
+        Ok(())
+    }
+
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().expect("lane stream mutex poisoned")
     }
@@ -195,6 +208,10 @@ impl LaneSend {
 }
 
 impl LaneRecv {
+    pub(crate) fn is_revoked(&self) -> bool {
+        self.shared.is_revoked()
+    }
+
     /// 这个方向已经离开 TLS 时，把它交出去，让调用方直接读 socket（见 [`RawRead`]）。还在 TLS 里、已经结束或者已经交出去时返回 `None`。
     /// 不等待；要等对端的切换用 [`RecvStream::wait_raw`]。
     ///
@@ -204,6 +221,9 @@ impl LaneRecv {
     pub fn take_raw(&mut self) -> Option<RawRead> {
         let shared = &self.shared;
         let mut state = shared.lock();
+        if shared.is_revoked() {
+            return None;
+        }
         while matches!(&state.recv, RecvState::Sealed(data) if data.is_empty()) {
             if !matches!(state.poll_sealed_step(&shared.socket, Read::Now), Poll::Ready(Ok(()))) {
                 break;
@@ -228,7 +248,7 @@ impl LaneRecv {
 }
 
 /// 把一条刚取到的 lane 变成本端发起的一条流。
-pub(crate) fn initiate(lane: Lane, book: Book) -> (LaneSend, LaneRecv) {
+pub(crate) fn initiate(lane: Lane, book: Book, revoked: Arc<AtomicBool>) -> (LaneSend, LaneRecv) {
     let Lane { socket, mut sealed, out, peer, .. } = lane;
     sealed.shrink();
     socket::rst_on_close(&socket);
@@ -249,13 +269,13 @@ pub(crate) fn initiate(lane: Lane, book: Book) -> (LaneSend, LaneRecv) {
         abort_sent: false,
         heard_from_peer: false,
     };
-    split(socket, peer, state, book)
+    split(socket, peer, state, book, revoked)
 }
 
 /// 对端在一条 lane 上开过来的流：它的 OPENING 已经读到了，`header` 是里面流的头。
 ///
 /// passthrough 时 OPENING 所在的记录之后就是原始字节，调用方已经确认这条记录在这个帧的末尾结束。
-pub(crate) fn respond(lane: Lane, payload: Payload, header: &[u8], book: Book) -> (LaneSend, LaneRecv) {
+pub(crate) fn respond(lane: Lane, payload: Payload, header: &[u8], book: Book, revoked: Arc<AtomicBool>) -> (LaneSend, LaneRecv) {
     let Lane { socket, mut sealed, out, peer, .. } = lane;
     socket::rst_on_close(&socket);
     socket::set_user_timeout(&socket, socket::STREAM_USER_TIMEOUT);
@@ -279,12 +299,13 @@ pub(crate) fn respond(lane: Lane, payload: Payload, header: &[u8], book: Book) -
         abort_sent: false,
         heard_from_peer: true,
     };
-    split(socket, peer, state, book)
+    split(socket, peer, state, book, revoked)
 }
 
-fn split(socket: TcpStream, peer: NodeId, state: State, book: Book) -> (LaneSend, LaneRecv) {
+fn split(socket: Arc<TcpStream>, peer: NodeId, state: State, book: Book, revoked: Arc<AtomicBool>) -> (LaneSend, LaneRecv) {
     let shared = Arc::new(Shared {
-        socket: Arc::new(socket),
+        socket,
+        revoked,
         peer,
         state: Mutex::new(state),
         closed: Notify::new(),
@@ -515,6 +536,7 @@ impl AsyncRead for LaneRecv {
     fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
         let shared = &self.shared;
         let mut state = shared.lock();
+        shared.check_revoked()?;
         if state.role == Role::Initiator && matches!(state.send, SendState::Header(_)) {
             // 发起方开始等回复了，头一定已经写完。
             state.end_header(Payload::Sealed);
@@ -567,6 +589,7 @@ impl AsyncWrite for LaneSend {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, data: &[u8]) -> Poll<io::Result<usize>> {
         let shared = &self.shared;
         let mut state = shared.lock();
+        shared.check_revoked()?;
         if let Some(refused) = state.send_refused {
             return Poll::Ready(Err(refused.into()));
         }
@@ -620,6 +643,7 @@ impl AsyncWrite for LaneSend {
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let shared = &self.shared;
         let mut state = shared.lock();
+        shared.check_revoked()?;
         if matches!(state.send, SendState::Header(_)) {
             state.end_header(Payload::Sealed);
         }
@@ -629,6 +653,7 @@ impl AsyncWrite for LaneSend {
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let shared = &self.shared;
         let mut state = shared.lock();
+        shared.check_revoked()?;
         loop {
             match state.send {
                 SendState::Header(_) => state.end_header(Payload::Sealed),
@@ -675,6 +700,9 @@ impl SendStream for LaneSend {
     /// 攒下的头按 sealed 送出。
     fn end_header(&mut self, payload: Payload) {
         let mut state = self.shared.lock();
+        if self.shared.is_revoked() {
+            return;
+        }
         state.end_header(payload);
         push(&self.shared, &mut state);
     }
@@ -685,7 +713,7 @@ impl SendStream for LaneSend {
     fn take_raw(&mut self) -> Option<RawWrite> {
         let shared = &self.shared;
         let mut state = shared.lock();
-        if !matches!(state.send, SendState::Raw) || state.aborted {
+        if shared.is_revoked() || !matches!(state.send, SendState::Raw) || state.aborted {
             return None;
         }
         state.send = SendState::Handed;
@@ -734,6 +762,9 @@ impl RecvStream for LaneRecv {
         std::future::poll_fn(|cx| {
             let shared = &self.shared;
             let mut state = shared.lock();
+            if shared.is_revoked() {
+                return Poll::Ready(());
+            }
             loop {
                 match &state.recv {
                     RecvState::Raw(_) => break,

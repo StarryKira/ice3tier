@@ -4,8 +4,8 @@
 //!   要求走 ice3proxy 的流（选了它的代理的 TCP 流，见 `i3t_flow::Carriage`）在和对端之间备着 lane 时走 lane，
 //!   别的流（端口转发、本机的组网入口、没选它的代理）和数据报一律走共用的连接；两种流进同一个 `serve`，
 //!   计量、配额、带宽、凭据、每个对端的上限、访问规则和排空对它们一视同仁。
-//! - 跟着 netmap：对端的 `lane` 不是 `off` 的交给 [`Lanes::set_peers`]。controller 只给有选了 ice3proxy 的代理的一对
-//!   （代理监听的节点和它的出口）下发 `always`，别的是 `off`。本节点能拨的是 netmap 里启用了 relay、
+//! - 跟着 netmap：用 [`Lanes::set_peers_with_identities`] 更新 lane 的对端和仍有效的节点公钥。controller 只给有选了 ice3proxy 的
+//!   代理的一对（代理监听的节点和它的出口）下发 `always`，别的是 `off`。本节点能拨的是 netmap 里启用了 relay、
 //!   有 TCP 地址的对端（relay 在节点端口上听 TCP）；本节点自己是 relay 时，relay 的 TCP 端口把以 TLS 握手开头的连接交给 lane。
 //!   两边都不能被拨的一对当作 `off`：开不出 lane 的流不该被记成"改走了共用的连接"。
 //! - 两个节点都能拨对方时，各自用自己拨的 lane 开流：补 lane 是本地的事，不用经过对方的 POOL 往返，
@@ -35,7 +35,7 @@ use i3t_lane::{Choose, LaneAcceptor, LaneConfig, LaneConnector, LanePeer, LaneSt
 use i3t_model::Netmap;
 use i3t_model::control::{LaneCounts, LaneHandshakeFailures, LaneReport, PeerLanes};
 use i3t_model::netmap::LaneMode;
-use i3t_proto::NodeId;
+use i3t_proto::{NodeId, PublicKey};
 use tokio::sync::watch;
 
 /// 入口和出口用的连接层。
@@ -100,8 +100,10 @@ impl Setting {
 struct Dialling {
     /// 要开 lane 的对端和它们的设置。本节点能拨的带着它的地址，不管现在拨不拨。
     plan: Vec<(LanePeer, Setting)>,
+    /// netmap 里仍有效的对端公钥，包含已经关闭 lane、但可能还有存量流的对端。
+    identities: Vec<(NodeId, PublicKey)>,
     on_demand: OnDemand,
-    /// 上一次交给 [`Lanes::set_peers`] 时拨着的对端。
+    /// 上一次更新 lane 设置时拨着的对端。
     dialled: BTreeSet<NodeId>,
     /// relay 的 TCP 端口现在是不是把 lane 交过来。
     handoff: bool,
@@ -149,6 +151,7 @@ impl NodeLanes {
         let settings: HashMap<NodeId, Setting> = plan.iter().map(|(peer, setting)| (peer.id, *setting)).collect();
         dialling.on_demand.retain(|peer| settings.get(&peer).is_some_and(|setting| setting.mode == LaneMode::UdpFallback));
         dialling.plan = plan;
+        dialling.identities = netmap.peers.iter().map(|peer| (peer.id, peer.key)).collect();
         if !self.dial(&mut dialling, Instant::now(), true) {
             return;
         }
@@ -170,7 +173,7 @@ impl NodeLanes {
 
     /// 算出现在拨谁，有变化（或者 `changed`：计划本身变了）时交给 lane。交不出去时返回 `false`，原来的设置留着。
     fn dial(&self, dialling: &mut Dialling, now: Instant, changed: bool) -> bool {
-        let Dialling { plan, on_demand, dialled, .. } = dialling;
+        let Dialling { plan, identities, on_demand, dialled, .. } = dialling;
         let wanted: BTreeSet<NodeId> = plan
             .iter()
             .filter(|(peer, setting)| {
@@ -191,7 +194,7 @@ impl NodeLanes {
         let peers = plan
             .iter()
             .map(|(peer, _)| LanePeer { dial: if wanted.contains(&peer.id) { peer.dial.clone() } else { Vec::new() }, ..peer.clone() });
-        if let Err(error) = self.lanes.set_peers(peers) {
+        if let Err(error) = self.lanes.set_peers_with_identities(peers, identities.iter().copied()) {
             // 签不了 TLS 配置是本机的问题，不会因为重试好起来；保留原来的设置，流照常走共用的连接。
             tracing::error!(%error, "ice3proxy 的设置没能生效");
             return false;

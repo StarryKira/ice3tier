@@ -19,10 +19,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use i3t_conn::Incoming;
 use i3t_proto::NodeId;
 use rustls::ClientConfig;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, mpsc, watch};
+use tokio::task::JoinSet;
 use tokio::time::{self, Instant, MissedTickBehavior};
 
 use crate::demand::{Demand, MAX_IDLE_TARGET};
@@ -68,13 +68,13 @@ pub(crate) struct DialSide {
 
 impl DialSide {
     /// 停掉维护任务（连同控制 lane 和在拨的），换一个新的 epoch 从控制 lane 重新拨。手上的热 lane 不要了。
-    pub(crate) fn redial(&mut self, inner: &Arc<Inner>, peer: NodeId) {
+    pub(crate) fn redial(&mut self, inner: &Arc<Inner>, peer: NodeId, membership: &watch::Receiver<()>) {
         self.task.abort();
         self.warm.clear();
         self.last_good = None;
         self.control_up = false;
         self.parked = 0;
-        self.task = tokio::spawn(run(Arc::clone(inner), peer, Arc::clone(&self.wake))).abort_handle();
+        self.task = tokio::spawn(run(Arc::clone(inner), peer, membership.clone(), Arc::clone(&self.wake))).abort_handle();
     }
 
     pub(crate) fn addrs_in_order(&self) -> Vec<SocketAddr> {
@@ -105,9 +105,11 @@ enum Event {
 }
 
 /// 为 `peer` 跑维护任务，直到本节点关闭或者不再拨它（任务被取消）。
-pub(crate) async fn run(inner: Arc<Inner>, peer: NodeId, wake: Arc<Notify>) {
+pub(crate) async fn run(inner: Arc<Inner>, peer: NodeId, membership: watch::Receiver<()>, wake: Arc<Notify>) {
     let (events, mut receiver) = mpsc::unbounded_channel();
-    let mut state = Dialler::new(&inner, peer, events);
+    let mut state = Dialler::new(&inner, peer, membership, events);
+    // 维护任务撤销时，拨号和守着停车 lane 的任务也随 JoinSet 一起被撤销。
+    let mut tasks = JoinSet::new();
     let mut shutdown = inner.shutdown.clone();
     let mut tick = time::interval(TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -119,19 +121,20 @@ pub(crate) async fn run(inner: Arc<Inner>, peer: NodeId, wake: Arc<Notify>) {
                 () = time::sleep(pause) => continue,
             }
         }
-        state.top_up(&inner);
+        state.top_up(&inner, &mut tasks);
         let control = state.control.as_mut().expect("上面刚确认过控制 lane 在");
         let step = tokio::select! {
             _ = shutdown.changed() => return,
             frame = control.read_frame() => Step::Frame(frame),
             event = receiver.recv() => Step::Event(event),
+            _ = tasks.join_next(), if !tasks.is_empty() => continue,
             () = wake.notified() => Step::Wake,
             _ = tick.tick() => Step::Tick,
         };
         if let Err(reason) = state.handle(&inner, step).await {
             state.lose_control(&inner, &reason);
         }
-        inner.set_parked(peer, state.parked_idle);
+        inner.set_parked(peer, &state.membership, state.parked_idle);
     }
 }
 
@@ -144,6 +147,7 @@ enum Step {
 
 struct Dialler {
     peer: NodeId,
+    membership: watch::Receiver<()>,
     events: mpsc::UnboundedSender<Event>,
     epoch: u64,
     control: Option<Lane>,
@@ -162,10 +166,11 @@ struct Dialler {
 }
 
 impl Dialler {
-    fn new(inner: &Inner, peer: NodeId, events: mpsc::UnboundedSender<Event>) -> Self {
+    fn new(inner: &Inner, peer: NodeId, membership: watch::Receiver<()>, events: mpsc::UnboundedSender<Event>) -> Self {
         let now = Instant::now();
         Self {
             peer,
+            membership,
             events,
             epoch: inner.random_u64(),
             control: None,
@@ -203,11 +208,12 @@ impl Dialler {
         if self.paused() || inner.is_going_away() {
             return false;
         }
-        let Some(plan) = inner.dial_plan(self.peer) else { return false };
+        let Some(plan) = inner.dial_plan(self.peer, &self.membership) else { return false };
         let dial = Dial {
             addrs: &plan.addrs,
             config: plan.config,
             peer: self.peer,
+            membership: plan.membership,
             purpose: Purpose::Control,
             epoch: self.epoch,
             deadline: Instant::now() + DIAL_DEADLINE,
@@ -219,7 +225,7 @@ impl Dialler {
             lane::dial(dial).await
         };
         if dialled.is_ok() {
-            inner.note_dial_time(self.peer, started.elapsed());
+            inner.note_dial_time(self.peer, &self.membership, started.elapsed());
         }
         let confirmed = match dialled {
             Ok((mut lane, addr)) => {
@@ -239,14 +245,14 @@ impl Dialler {
         };
         match confirmed {
             Ok((lane, addr, extra)) => {
-                inner.remember_good(self.peer, addr);
+                inner.remember_good(self.peer, &self.membership, addr);
                 self.succeeded();
                 let now = Instant::now();
                 (self.heard, self.ping_sent) = (now, now);
                 self.control = Some(lane);
                 self.goaway_sent = false;
                 self.add_pending(usize::from(extra));
-                inner.set_control_up(self.peer, true);
+                inner.set_control_up(self.peer, &self.membership, true);
                 tracing::info!(peer = %self.peer, %addr, "到对方的控制 lane 建立了");
                 true
             }
@@ -271,7 +277,7 @@ impl Dialler {
         self.epoch = inner.random_u64();
         self.pending = 0;
         self.parked_idle = 0;
-        inner.set_control_up(self.peer, false);
+        inner.set_control_up(self.peer, &self.membership, false);
         tracing::info!(peer = %self.peer, %reason, "到对方的控制 lane 断了，换一个新的 epoch 重新拨");
     }
 
@@ -285,7 +291,7 @@ impl Dialler {
                     Frame::Pool { extra, .. } => self.add_pending(usize::from(extra)),
                     Frame::Ping(nonce) => control.send(&Frame::Pong(nonce)).await.map_err(|error| error.to_string())?,
                     Frame::Pong(_) | Frame::Unknown(_) => {}
-                    Frame::GoAway => inner.peer_going_away(self.peer),
+                    Frame::GoAway => inner.peer_going_away(self.peer, &self.membership),
                     _ => return Err("控制 lane 上不该出现的帧".to_owned()),
                 }
             }
@@ -332,11 +338,11 @@ impl Dialler {
     }
 
     /// 拨对方要的、补不够的热 lane。
-    fn top_up(&mut self, inner: &Arc<Inner>) {
+    fn top_up(&mut self, inner: &Arc<Inner>, tasks: &mut JoinSet<()>) {
         if self.paused() || inner.is_going_away() || self.control.is_none() {
             return;
         }
-        let Some((warm, peer_going_away)) = inner.warm_state(self.peer) else { return };
+        let Some((warm, peer_going_away)) = inner.warm_state(self.peer, &self.membership) else { return };
         if peer_going_away {
             return;
         }
@@ -345,22 +351,22 @@ impl Dialler {
         for _ in 0..parked {
             self.pending -= 1;
             self.dialling_parked += 1;
-            tokio::spawn(park(Arc::clone(inner), self.peer, self.epoch, self.events.clone()));
+            tasks.spawn(park(Arc::clone(inner), self.peer, self.membership.clone(), self.epoch, self.events.clone()));
         }
         let slots = MAX_CONCURRENT_DIALS.saturating_sub(self.dialling_parked + self.dialling_own);
-        let ready = inner.size_ready(self.peer).unwrap_or(0);
+        let ready = inner.size_ready(self.peer, &self.membership).unwrap_or(0);
         let own = ready.saturating_sub(warm + self.dialling_own).min(slots);
         for _ in 0..own {
             self.dialling_own += 1;
-            tokio::spawn(warm_up(Arc::clone(inner), self.peer, self.epoch, self.events.clone()));
+            tasks.spawn(warm_up(Arc::clone(inner), self.peer, self.membership.clone(), self.epoch, self.events.clone()));
         }
     }
 }
 
 /// 拨一条停在对方那里的 lane，然后守着它：对方在上面开流就交给接受队列。
-async fn park(inner: Arc<Inner>, peer: NodeId, epoch: u64, events: mpsc::UnboundedSender<Event>) {
+async fn park(inner: Arc<Inner>, peer: NodeId, membership: watch::Receiver<()>, epoch: u64, events: mpsc::UnboundedSender<Event>) {
     // 下面几处报回去的事，收的一方是这个对端的维护任务。它已经结束（本节点在关闭、不再拨这个对端）时没有人要听，发不出去不要紧。
-    let Some(mut lane) = dial_one(&inner, peer, Purpose::Parked, epoch).await else {
+    let Some(mut lane) = dial_one(&inner, peer, &membership, Purpose::Parked, epoch).await else {
         let _ = events.send(Event::Parked { epoch, ok: false });
         return;
     };
@@ -384,8 +390,8 @@ async fn park(inner: Arc<Inner>, peer: NodeId, epoch: u64, events: mpsc::Unbound
 }
 
 /// 拨一条热 lane，放进对端表项里给自己开流时取。
-async fn warm_up(inner: Arc<Inner>, peer: NodeId, epoch: u64, events: mpsc::UnboundedSender<Event>) {
-    let lane = match dial_one(&inner, peer, Purpose::Own, epoch).await {
+async fn warm_up(inner: Arc<Inner>, peer: NodeId, membership: watch::Receiver<()>, epoch: u64, events: mpsc::UnboundedSender<Event>) {
+    let lane = match dial_one(&inner, peer, &membership, Purpose::Own, epoch).await {
         Some(mut lane) => match lane.flush().await {
             Ok(()) => Some(lane),
             Err(error) => {
@@ -397,16 +403,24 @@ async fn warm_up(inner: Arc<Inner>, peer: NodeId, epoch: u64, events: mpsc::Unbo
     };
     let ok = lane.is_some();
     if let Some(lane) = lane {
-        inner.add_warm(peer, lane);
+        inner.add_warm(lane);
     }
     // 维护任务已经结束（本节点在关闭、不再拨这个对端）时没有人要听，发不出去不要紧。
     let _ = events.send(Event::Own { ok });
 }
 
-async fn dial_one(inner: &Arc<Inner>, peer: NodeId, purpose: Purpose, epoch: u64) -> Option<Lane> {
-    let plan = inner.dial_plan(peer)?;
+async fn dial_one(inner: &Arc<Inner>, peer: NodeId, membership: &watch::Receiver<()>, purpose: Purpose, epoch: u64) -> Option<Lane> {
+    let plan = inner.dial_plan(peer, membership)?;
     let book = inner.book(peer)?;
-    let dial = Dial { addrs: &plan.addrs, config: plan.config, peer, purpose, epoch, deadline: Instant::now() + DIAL_DEADLINE };
+    let dial = Dial {
+        addrs: &plan.addrs,
+        config: plan.config,
+        peer,
+        membership: plan.membership,
+        purpose,
+        epoch,
+        deadline: Instant::now() + DIAL_DEADLINE,
+    };
     let started = Instant::now();
     let dialled = {
         let _dialling = book.enter(|tally| &tally.dialling);
@@ -414,8 +428,8 @@ async fn dial_one(inner: &Arc<Inner>, peer: NodeId, purpose: Purpose, epoch: u64
     };
     match dialled {
         Ok((lane, addr)) => {
-            inner.remember_good(peer, addr);
-            inner.note_dial_time(peer, started.elapsed());
+            inner.remember_good(peer, membership, addr);
+            inner.note_dial_time(peer, membership, started.elapsed());
             Some(lane)
         }
         Err(error) => {
@@ -449,15 +463,4 @@ pub(crate) async fn await_opening(lane: &mut Lane) -> Result<Option<Opening>, La
         Ok(None) | Err(LaneError::Closed) => Ok(None),
         Err(error) => Err(error),
     }
-}
-
-/// 把一条刚开了流的 lane 包成接受队列里的一项。
-pub(crate) fn incoming(
-    lane: Lane,
-    opening: &Opening,
-    book: crate::status::Book,
-) -> Incoming<crate::stream::LaneSend, crate::stream::LaneRecv> {
-    let peer = lane.peer;
-    let (send, recv) = crate::stream::respond(lane, opening.payload, &opening.header, book);
-    Incoming { peer, send, recv }
 }

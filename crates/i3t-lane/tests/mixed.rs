@@ -6,16 +6,18 @@
 
 mod common;
 
+use std::io::ErrorKind;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use common::{Pair, read_to_end, wait_for};
-use i3t_conn::{Acceptor as _, Connector as _, SendStream as _};
+use i3t_conn::{Acceptor as _, Connector as _, RecvStream as _, SendStream as _};
+use i3t_crypto::NodeKey;
 use i3t_flow::memory::{MemoryAcceptor, MemoryConnector, MemoryMesh};
 use i3t_lane::{EitherRecv, EitherSend, LaneAcceptor, LaneConfig, LaneConnector, Lanes, Payload};
 use i3t_proto::NodeId;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
 
 type Send = EitherSend<i3t_flow::memory::MemorySend>;
@@ -165,8 +167,8 @@ async fn turning_lanes_off_and_on_never_moves_a_running_stream() {
     assert!(send.is_lane());
     // 管理员把这一对改成 off：两边都不再为对方开 lane。
     side.choose.store(false, Ordering::Relaxed);
-    pair.entry.lanes.set_peers([]).unwrap();
-    pair.exit.lanes.set_peers([]).unwrap();
+    pair.entry.lanes.set_peers_with_identities([], [(pair.exit.id, pair.exit.key.public())]).unwrap();
+    pair.exit.lanes.set_peers_with_identities([], [(pair.entry.id, pair.entry.key.public())]).unwrap();
     assert!(!side.round_trip().await, "新的流走共用的连接");
     let ((mut shared_send, mut shared_recv), (mut shared_far_send, mut shared_far_recv)) = side.open(b"shared ").await;
     assert!(!shared_send.is_lane());
@@ -192,4 +194,61 @@ async fn turning_lanes_off_and_on_never_moves_a_running_stream() {
     shared_far_send.shutdown().await.unwrap();
     assert_eq!(read_to_end(&mut shared_recv).await.unwrap(), b"");
     assert_eq!(fallbacks(&pair.entry.lanes, pair.exit.id), 0);
+}
+
+#[tokio::test]
+async fn removing_or_rotating_a_peer_closes_its_draining_lane() {
+    for replacement in [None, Some(NodeKey::generate().unwrap().public())] {
+        let pair = Pair::direct(common::quick()).await;
+        pair.ready(2).await;
+        let ((_send, mut recv), (mut far_send, mut far_recv)) = pair.entry_opens(b"request", Payload::Sealed).await;
+
+        // 只关闭 ice3proxy，存量流还可以传数据。
+        pair.entry.lanes.set_peers_with_identities([], [(pair.exit.id, pair.exit.key.public())]).unwrap();
+        far_send.write_all(b"r").await.unwrap();
+        far_send.flush().await.unwrap();
+        assert_eq!(timeout(Duration::from_secs(3), recv.read_u8()).await.unwrap().unwrap(), b'r');
+
+        // 移除节点或者换钥之后，即使 lane 已经在排空，两个方向也都应当异常结束。
+        pair.entry.lanes.set_peers_with_identities([], replacement.map(|key| (pair.exit.id, key))).unwrap();
+        for recv in [&mut recv, &mut far_recv] {
+            let end = timeout(Duration::from_secs(3), recv.read(&mut [0; 1])).await.expect("撤销对端后 lane 仍未关闭");
+            assert!(end.is_err(), "撤销对端后 lane 应异常结束，读到了 {end:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn revocation_closes_a_socket_handed_off_for_raw_io() {
+    let pair = Pair::direct(common::quick()).await;
+    pair.ready(2).await;
+    let ((mut send, mut recv), (mut far_send, _far_recv)) = pair.entry_opens(b"request", Payload::Passthrough).await;
+    far_send.end_header(Payload::Passthrough);
+    let write = send.take_raw().unwrap();
+    let read = timeout(Duration::from_secs(3), recv.wait_raw()).await.unwrap().unwrap();
+    drop((send, recv));
+
+    pair.entry.lanes.set_peers([]).unwrap();
+
+    let write = async {
+        loop {
+            write.socket().writable().await?;
+            match write.socket().try_write(b"data") {
+                Err(error) if error.kind() == ErrorKind::WouldBlock => continue,
+                result => return result,
+            }
+        }
+    };
+    assert!(timeout(Duration::from_secs(3), write).await.unwrap().is_err());
+
+    let read = async {
+        loop {
+            read.socket().readable().await?;
+            match read.socket().try_read(&mut [0; 1]) {
+                Err(error) if error.kind() == ErrorKind::WouldBlock => continue,
+                result => return result,
+            }
+        }
+    };
+    assert!(!matches!(timeout(Duration::from_secs(3), read).await.unwrap(), Ok(1..)));
 }

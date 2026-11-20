@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use i3t_proto::NodeId;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{self, Instant, MissedTickBehavior};
 
 use crate::demand::{Demand, MAX_IDLE_TARGET};
@@ -133,10 +133,10 @@ impl Holder {
 }
 
 /// 从 `peer` 停在本节点的 lane 里取一条。
-pub(crate) async fn claim(inner: &Arc<Inner>, peer: NodeId, book: &Book) -> Result<Lane, OpenLaneError> {
+pub(crate) async fn claim(inner: &Arc<Inner>, peer: NodeId, membership: &watch::Receiver<()>, book: &Book) -> Result<Lane, OpenLaneError> {
     let waiter = {
         let mut peers = inner.lock_peers();
-        let holder = &mut peers.get_mut(&peer).ok_or(OpenLaneError::NotEnabled(peer))?.holder;
+        let holder = &mut peers.get_mut(&peer).filter(|entry| entry.matches(membership)).ok_or(OpenLaneError::NotEnabled(peer))?.holder;
         let silent = holder.silent(inner.config.ping_interval);
         let Some(control) = holder.control.as_ref().filter(|_| !silent) else {
             book.bump(|tally| &tally.claims_failed);
@@ -188,7 +188,10 @@ pub(crate) fn control_arrived(inner: &Arc<Inner>, mut lane: Lane) {
     let (commands, receiver) = mpsc::unbounded_channel();
     let generation = {
         let mut peers = inner.lock_peers();
-        let Some(entry) = peers.get_mut(&peer) else { return inner.refuse(peer, "没有为这个节点打开 ice3proxy") };
+        let Some(entry) = peers.get_mut(&peer).filter(|entry| entry.matches(&lane.membership)) else {
+            drop(peers);
+            return inner.refuse(peer, "对端的 lane 授权已经失效");
+        };
         let holder = &mut entry.holder;
         if let Some(old) = holder.control.take() {
             // 旧的那条的任务已经自己结束（lane 断了）时没有人收：要它停的也就是这个。
@@ -215,9 +218,9 @@ pub(crate) fn control_arrived(inner: &Arc<Inner>, mut lane: Lane) {
 pub(crate) fn parked_arrived(inner: &Arc<Inner>, lane: Lane) {
     let peer = lane.peer;
     let mut peers = inner.lock_peers();
-    let Some(entry) = peers.get_mut(&peer) else {
+    let Some(entry) = peers.get_mut(&peer).filter(|entry| entry.matches(&lane.membership)) else {
         drop(peers);
-        return inner.refuse(peer, "没有为这个节点打开 ice3proxy");
+        return inner.refuse(peer, "对端的 lane 授权已经失效");
     };
     let holder = &mut entry.holder;
     let refusal = match &holder.control {
@@ -246,12 +249,18 @@ pub(crate) fn parked_arrived(inner: &Arc<Inner>, lane: Lane) {
 /// 服务一条控制 lane，直到它断开、被新的替换，或者本节点关闭。
 async fn serve_control(inner: Arc<Inner>, mut lane: Lane, generation: u64, mut commands: mpsc::UnboundedReceiver<Command>) {
     let peer = lane.peer;
-    let reason = match Pool::new(&inner, peer).run(&inner, &mut lane, &mut commands).await {
-        Ok(reason) => reason.to_owned(),
-        Err(error) => error.to_string(),
+    let mut removed = lane.membership.clone();
+    let pool = Pool::new(&inner, peer, lane.membership.clone(), generation);
+    let reason = tokio::select! {
+        _ = removed.changed() => return,
+        result = pool.run(&inner, &mut lane, &mut commands) => match result {
+            Ok(reason) => reason.to_owned(),
+            Err(error) => error.to_string(),
+        },
     };
     let mut peers = inner.lock_peers();
     if let Some(entry) = peers.get_mut(&peer)
+        && entry.matches(&removed)
         && entry.holder.control.as_ref().is_some_and(|control| control.generation == generation)
     {
         entry.holder.control = None;
@@ -267,6 +276,8 @@ async fn serve_control(inner: Arc<Inner>, mut lane: Lane, generation: u64, mut c
 /// 控制 lane 上这一侧的状态：目标、往返时间、保活。
 struct Pool {
     peer: NodeId,
+    membership: watch::Receiver<()>,
+    generation: u64,
     config: LaneConfig,
     /// 上一次告诉对方的目标。
     announced: Option<u16>,
@@ -287,9 +298,23 @@ enum Event {
 }
 
 impl Pool {
-    fn new(inner: &Inner, peer: NodeId) -> Self {
+    fn new(inner: &Inner, peer: NodeId, membership: watch::Receiver<()>, generation: u64) -> Self {
         let now = Instant::now();
-        Self { peer, config: inner.config.clone(), announced: None, trimmed_at: now, rtt: None, ping: None, heard: now }
+        Self {
+            peer,
+            membership,
+            generation,
+            config: inner.config.clone(),
+            announced: None,
+            trimmed_at: now,
+            rtt: None,
+            ping: None,
+            heard: now,
+        }
+    }
+
+    fn is_current(&self, entry: &crate::endpoint::Peer) -> bool {
+        entry.matches(&self.membership) && entry.holder.control.as_ref().is_some_and(|control| control.generation == self.generation)
     }
 
     async fn run(
@@ -323,7 +348,7 @@ impl Pool {
                 Event::Command(Some(Command::Want)) => self.request(inner, lane, false).await?,
                 Event::Frame(frame) => {
                     self.heard = Instant::now();
-                    if let Some(entry) = inner.lock_peers().get_mut(&self.peer) {
+                    if let Some(entry) = inner.lock_peers().get_mut(&self.peer).filter(|entry| self.is_current(entry)) {
                         entry.holder.heard = Some(self.heard);
                     }
                     match frame? {
@@ -363,7 +388,7 @@ impl Pool {
         let now = Instant::now();
         let refill = self.refill();
         let mut peers = inner.lock_peers();
-        let Some(entry) = peers.get_mut(&self.peer) else { return };
+        let Some(entry) = peers.get_mut(&self.peer).filter(|entry| self.is_current(entry)) else { return };
         let min_idle = if entry.dials() { 0 } else { self.config.min_idle };
         let holder = &mut entry.holder;
         let demand = holder.demand.get_or_insert_with(|| Demand::new(now.into_std()));
@@ -382,7 +407,7 @@ impl Pool {
         let refill = self.refill();
         let (target, extra) = {
             let mut peers = inner.lock_peers();
-            let Some(entry) = peers.get_mut(&self.peer) else { return Ok(()) };
+            let Some(entry) = peers.get_mut(&self.peer).filter(|entry| self.is_current(entry)) else { return Ok(()) };
             let min_idle = if entry.dials() { 0 } else { self.config.min_idle };
             let holder = &mut entry.holder;
             if holder.going_away {
@@ -407,7 +432,7 @@ impl Pool {
 
     fn peer_going_away(&self, inner: &Inner) {
         let mut peers = inner.lock_peers();
-        if let Some(entry) = peers.get_mut(&self.peer) {
+        if let Some(entry) = peers.get_mut(&self.peer).filter(|entry| self.is_current(entry)) {
             entry.holder.going_away = true;
             entry.holder.idle.clear();
             entry.holder.waiters.clear();

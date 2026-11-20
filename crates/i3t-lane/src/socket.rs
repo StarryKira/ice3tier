@@ -103,6 +103,13 @@ pub(crate) fn reset_now(stream: &TcpStream) {
     }
 }
 
+/// 吊销仍被流或 splice 持有的连接。没有立即重置的系统上也要停止两个方向的 I/O。
+pub(crate) fn revoke(stream: &TcpStream) {
+    reset_now(stream);
+    // Linux 重置成功时连接已断开。若重置不可用，shutdown 仍能唤醒在等 I/O 的任务。
+    let _ = SockRef::from(stream).shutdown(std::net::Shutdown::Both);
+}
+
 /// 关掉写的一半（发 FIN），关闭时照样发 RST：异常结束之后用。
 pub(crate) fn shutdown_write(stream: &TcpStream) -> io::Result<()> {
     SockRef::from(stream).shutdown(std::net::Shutdown::Write)

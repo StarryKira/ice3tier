@@ -14,13 +14,14 @@ use std::net::{IpAddr, SocketAddr};
 
 use i3t_model::Netmap;
 use i3t_model::netmap::Peer;
-use i3t_proto::NodeId;
 use i3t_proto::flow::{Class, Host, Target};
+use i3t_proto::{NodeId, PublicKey};
 
 /// 请求最后怎么走：到 `peer` 开一条流。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Route {
     pub peer: NodeId,
+    pub key: PublicKey,
     pub target: Target,
     /// 按目标的种类，不等对端的 REPLY 就告诉客户端连上了。互联网目标默认这样做，省一个全程往返；
     /// 组网目标要等，客户端才能拿到准确的错误（比如端口没开时是"连接被拒绝"）。
@@ -47,7 +48,8 @@ pub(crate) enum Denied {
 /// 决定一个请求怎么走。`exit` 是代理的出口；本机的组网入口没有出口，是 `None`。
 pub(crate) fn decide(netmap: &Netmap, exit: Option<NodeId>, host: &Host, port: u16) -> Result<Route, Denied> {
     if let Some(node) = mesh_node(netmap, host) {
-        return Ok(Route { peer: node?.id, target: Target::Node { port }, optimistic: false });
+        let node = node?;
+        return Ok(Route { peer: node.id, key: node.key, target: Target::Node { port }, optimistic: false });
     }
     let exit = exit.ok_or(Denied::MeshOnly)?;
     let exit = netmap.peer(exit).filter(|peer| peer.outbound).ok_or(Denied::NoSuchExit)?;
@@ -64,9 +66,9 @@ pub(crate) fn decide(netmap: &Netmap, exit: Option<NodeId>, host: &Host, port: u
             if !role.lan {
                 return Err(Denied::LanNotEnabled);
             }
-            Ok(Route { peer: exit.id, target: Target::Lan { addr: SocketAddr::new(ip, port) }, optimistic: false })
+            Ok(Route { peer: exit.id, key: exit.key, target: Target::Lan { addr: SocketAddr::new(ip, port) }, optimistic: false })
         }
-        host => Ok(Route { peer: exit.id, target: Target::Internet { host, port }, optimistic: true }),
+        host => Ok(Route { peer: exit.id, key: exit.key, target: Target::Internet { host, port }, optimistic: true }),
     }
 }
 
@@ -129,7 +131,6 @@ pub fn is_lan_literal(ip: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use i3t_model::netmap::{LaneMode, LocalNode, Network, PeerExit};
-    use i3t_proto::PublicKey;
 
     use super::*;
 
@@ -203,12 +204,17 @@ mod tests {
         decide(netmap, exit.map(node), &host.parse().unwrap(), port)
     }
 
-    fn internet(peer: u32, host: &str, port: u16) -> Result<Route, Denied> {
-        Ok(Route { peer: node(peer), target: Target::Internet { host: host.parse().unwrap(), port }, optimistic: true })
+    fn internet(peer: u8, host: &str, port: u16) -> Result<Route, Denied> {
+        Ok(Route {
+            peer: node(u32::from(peer)),
+            key: PublicKey::from_bytes([peer; 32]),
+            target: Target::Internet { host: host.parse().unwrap(), port },
+            optimistic: true,
+        })
     }
 
-    fn service(peer: u32, port: u16) -> Result<Route, Denied> {
-        Ok(Route { peer: node(peer), target: Target::Node { port }, optimistic: false })
+    fn service(peer: u8, port: u16) -> Result<Route, Denied> {
+        Ok(Route { peer: node(u32::from(peer)), key: PublicKey::from_bytes([peer; 32]), target: Target::Node { port }, optimistic: false })
     }
 
     #[test]
@@ -239,7 +245,8 @@ mod tests {
         let netmap = netmap();
         for host in ["192.168.1.10", "172.16.5.5", "10.1.2.3", "169.254.1.1", "fd00::10", "fe80::1", "::ffff:192.168.1.10"] {
             let addr = SocketAddr::new(host.parse::<IpAddr>().unwrap().to_canonical(), 80);
-            let expected = Ok(Route { peer: node(2), target: Target::Lan { addr }, optimistic: false });
+            let expected =
+                Ok(Route { peer: node(2), key: PublicKey::from_bytes([2; 32]), target: Target::Lan { addr }, optimistic: false });
             assert_eq!(route(&netmap, Some(2), host, 80), expected, "{host}");
         }
         // 域名和别的地址一律按互联网目标发：解析出内网地址时由出口的策略拒绝。

@@ -4,14 +4,14 @@
 //! 已经建立的流要跟着断开，不能只拒绝新的。所以放行时记下凭的是什么，
 //! 每次 netmap 变了按新的 netmap 再核对一遍，不成立了就重置。
 //!
-//! 只核对能力和访问规则这些"给不给"的东西。出站策略里随机器而变的部分（网卡的网段、本节点的公网地址）不在 netmap 里，
-//! 放行时已经按当时的情况查过，这里不再查。
+//! TCP 流还会核对发起节点放行时的公钥。出站策略里随机器而变的部分（网卡的网段、本节点的公网地址）不在 netmap 里，
+//! 放行时已按当时的情况查过。
 
 use std::net::SocketAddr;
 
 use i3t_model::Netmap;
 use i3t_model::netmap::{ExitRole, ForwardProtocol};
-use i3t_proto::NodeId;
+use i3t_proto::{NodeId, PublicKey};
 
 use crate::handler::{check_allow_list, forward_on_virtual_ip};
 
@@ -34,11 +34,20 @@ pub(crate) enum Grant {
 impl Grant {
     /// 按 `netmap`，`peer` 凭这一条的流还成不成立；不成立时返回给人看的原因。访问规则先查。
     ///
-    /// `protocol` 是这条流用的端口转发的协议：流是 TCP，数据报上下文是 UDP。
-    pub(crate) fn withdrawn(&self, netmap: &Netmap, peer: NodeId, protocol: ForwardProtocol) -> Option<&'static str> {
+    /// `key` 是 TCP 流放行时的对端公钥。UDP 上下文的公钥吊销由底层连接处理。
+    pub(crate) fn withdrawn(
+        &self,
+        netmap: &Netmap,
+        peer: NodeId,
+        protocol: ForwardProtocol,
+        key: Option<PublicKey>,
+    ) -> Option<&'static str> {
         let Some(initiator) = netmap.peer(peer).filter(|initiator| initiator.inbound) else {
             return Some("访问规则不再允许发起节点访问本节点");
         };
+        if key.is_some_and(|key| initiator.key != key) {
+            return Some("发起节点的公钥已变更");
+        }
         match *self {
             Self::Internet { port } => match &netmap.me.exit {
                 None => Some("本节点不再是出口"),
@@ -84,7 +93,6 @@ impl Grant {
 #[cfg(test)]
 pub(crate) mod tests {
     use i3t_model::netmap::{Forward, ForwardTarget, LaneMode, LocalNode, Network, Peer};
-    use i3t_proto::PublicKey;
 
     use super::*;
 
@@ -177,7 +185,8 @@ pub(crate) mod tests {
     }
 
     fn withdrawn(grant: Grant, netmap: &Netmap, protocol: ForwardProtocol) -> Option<&'static str> {
-        grant.withdrawn(netmap, node(LAPTOP), protocol)
+        let key = (protocol == TCP).then(|| peer(LAPTOP).key);
+        grant.withdrawn(netmap, node(LAPTOP), protocol, key)
     }
 
     const TCP: ForwardProtocol = ForwardProtocol::Tcp;
@@ -192,6 +201,14 @@ pub(crate) mod tests {
             assert!(withdrawn(grant, &revoked, TCP).is_some(), "{grant:?}");
             assert!(withdrawn(grant, &gone, TCP).is_some(), "{grant:?}");
         }
+    }
+
+    #[test]
+    fn a_tcp_grant_is_bound_to_the_initiators_key() {
+        let current = after(|netmap| netmap.peers[0].key = PublicKey::from_bytes([42; 32]));
+        assert!(withdrawn(Grant::NodeService, &current, TCP).is_some());
+        let key = current.peers[0].key;
+        assert_eq!(Grant::NodeService.withdrawn(&current, node(LAPTOP), TCP, Some(key)), None);
     }
 
     #[test]
@@ -222,7 +239,7 @@ pub(crate) mod tests {
         assert!(withdrawn(listed, &moved, TCP).is_some());
         assert!(withdrawn(listed, &netmap(), ForwardProtocol::Udp).is_some(), "协议也要对得上");
         // 由别的节点监听的那一条，不是 laptop 的。
-        assert!(listed.withdrawn(&netmap(), node(NAS), TCP).is_some());
+        assert!(listed.withdrawn(&netmap(), node(NAS), TCP, Some(peer(NAS).key)).is_some());
 
         let to_self = Grant::VirtualForward { port: 9100, id: 7, target: node(GW), addr: Some("127.0.0.1:8081".parse().unwrap()) };
         assert_eq!(withdrawn(to_self, &netmap(), TCP), None);

@@ -14,8 +14,8 @@ use i3t_flow::datagram::Opener;
 use i3t_flow::{Carriage, End, FlowError, Framing, Summary};
 use i3t_model::Netmap;
 use i3t_model::netmap::{Forward, ListenerProtocol};
-use i3t_proto::NodeId;
 use i3t_proto::flow::{Host, Open, Origin, Reason, Target};
+use i3t_proto::{NodeId, PublicKey};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
@@ -358,7 +358,7 @@ pub(crate) async fn proxy<C: Connector + Datagrams>(
         Command::Forward(plain) => Some(plain),
         Command::Connect | Command::UdpAssociate => None,
     };
-    let Route { peer, target, .. } = route;
+    let Route { peer, key, target, .. } = route;
     let exit = target.needs_exit().then(|| shared.usage.exit(peer));
     if let Some(exit) = &exit {
         exit.started();
@@ -368,7 +368,7 @@ pub(crate) async fn proxy<C: Connector + Datagrams>(
     let request = Open { target, class, origin };
     let carriage = entry.carriage;
     tracing::debug!(%peer, kind = request.target.kind(), ?class, optimistic, ?carriage, "代理请求经对端节点出去");
-    let flow = Outbound { peer, request: &request, meter, exit: exit.as_deref(), carriage };
+    let flow = Outbound { peer, key, request: &request, meter, exit: exit.as_deref(), carriage };
     // 明文 HTTP 总是等 REPLY：目标的应答本来就在 REPLY 之后才到，等它不多花时间，被拒绝时客户端还能拿到状态码。
     if optimistic && plain.is_none() {
         without_waiting(shared, client, front, flow).await;
@@ -380,6 +380,7 @@ pub(crate) async fn proxy<C: Connector + Datagrams>(
 /// 一条到对端节点的流要用到的东西。
 struct Outbound<'a> {
     peer: NodeId,
+    key: PublicKey,
     request: &'a Open,
     meter: IngressMeter<'a>,
     /// 对端是出口时，发起这一侧看到的计数记在这里。
@@ -388,9 +389,18 @@ struct Outbound<'a> {
     carriage: Carriage,
 }
 
+/// 目标节点被移除或换钥时停止这条流。先核对当前 netmap，以免错过从选路到开流之间的变化。
+async fn peer_revoked(mut netmap: watch::Receiver<Arc<Netmap>>, peer: NodeId, key: PublicKey) -> Reason {
+    if netmap.wait_for(|current| current.peer(peer).is_none_or(|entry| entry.key != key)).await.is_ok() {
+        return Reason::AccessRevoked;
+    }
+    // 发送端没了表示节点正在关闭，交给连接层结束流。
+    future::pending().await
+}
+
 /// 乐观回复：先告诉客户端连上了，读到它的首批数据，和 OPEN 一起发出去，不等对端的 REPLY。
 async fn without_waiting<C: Connector + Datagrams>(shared: &Shared<C>, mut client: Client, front: Front, flow: Outbound<'_>) {
-    let Outbound { peer, request, meter, exit, carriage } = flow;
+    let Outbound { peer, key, request, meter, exit, carriage } = flow;
     if let Err(error) = client.stream.write_all(&front.established()).await {
         return tracing::debug!(%error, "客户端在应答写出去之前断开了");
     }
@@ -402,9 +412,16 @@ async fn without_waiting<C: Connector + Datagrams>(shared: &Shared<C>, mut clien
     // 首批数据随 OPEN 一起发出，不经过搬运时的关卡，在这里补记。
     meter.record(true, first_data.len());
     let route = RouteAtStart::now(&*shared.routes, peer);
-    match i3t_flow::open(&*shared.connector, peer, request, &first_data, carriage).await {
+    let revoked = peer_revoked(shared.netmap.clone(), peer, key);
+    tokio::pin!(revoked);
+    let opened = tokio::select! {
+        biased;
+        _ = &mut revoked => return client.reset(),
+        opened = i3t_flow::open(&*shared.connector, peer, request, &first_data, carriage) => opened,
+    };
+    match opened {
         Ok(pending) => {
-            let summary = pending.relay_metered(client.stream, future::pending::<Reason>(), &meter).await;
+            let summary = pending.relay_metered(client.stream, revoked, &meter).await;
             if let (Some(exit), End::Refused(reply)) = (exit, &summary.end) {
                 exit.refused_with(reply.status);
             }
@@ -431,7 +448,7 @@ async fn after_reply<C: Connector + Datagrams>(
     flow: Outbound<'_>,
     plain: Option<Plain>,
 ) {
-    let Outbound { peer, request, meter, exit, carriage } = flow;
+    let Outbound { peer, key, request, meter, exit, carriage } = flow;
     // 客户端这时还没有收到应答，通常什么都没有发；万一握手时多读进来了一点，就当作首批数据。
     let (first_data, mut body) = match plain {
         Some(Plain { first, body }) => (first, Some(body)),
@@ -439,14 +456,23 @@ async fn after_reply<C: Connector + Datagrams>(
     };
     meter.record(true, first_data.len());
     let route = RouteAtStart::now(&*shared.routes, peer);
-    let opened = match i3t_flow::open(&*shared.connector, peer, request, &first_data, carriage).await {
-        Ok(pending) => pending.established().await,
-        Err(error) => {
-            if let Some(exit) = exit {
-                exit.unreachable();
+    let establish = async {
+        match i3t_flow::open(&*shared.connector, peer, request, &first_data, carriage).await {
+            Ok(pending) => pending.established().await,
+            Err(error) => {
+                if let Some(exit) = exit {
+                    exit.unreachable();
+                }
+                Err(error)
             }
-            Err(error)
         }
+    };
+    let revoked = peer_revoked(shared.netmap.clone(), peer, key);
+    tokio::pin!(revoked);
+    let opened = tokio::select! {
+        biased;
+        _ = &mut revoked => return client.fail(front, Failure::Denied).await,
+        opened = establish => opened,
     };
     let flow = match opened {
         Ok(flow) => flow,
@@ -464,13 +490,13 @@ async fn after_reply<C: Connector + Datagrams>(
         }
     };
     let summary = match &mut body {
-        Some(body) => flow.relay_framed(client.stream, future::pending::<Reason>(), &meter, body).await,
+        Some(body) => flow.relay_framed(client.stream, revoked, &meter, body).await,
         None => {
             if let Err(error) = client.stream.write_all(&front.established()).await {
                 tracing::debug!(%error, "客户端在应答写出去之前断开了");
                 return flow.abort(Reason::ClientReset);
             }
-            flow.relay_metered(client.stream, future::pending::<Reason>(), &meter).await
+            flow.relay_metered(client.stream, revoked, &meter).await
         }
     };
     log_summary(peer, request, &summary, &route.ended(&*shared.routes), &shared.netmap.borrow());

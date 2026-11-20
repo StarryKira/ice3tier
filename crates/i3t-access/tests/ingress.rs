@@ -1091,6 +1091,40 @@ i3t_lane::on_both_transports! {
     }
 }
 
+i3t_lane::on_both_transports! {
+    async fn a_proxy_closes_active_flows_when_the_peer_identity_is_revoked() {
+        for remove_peer in [false, true] {
+            let mut map = netmap();
+            map.peers[0].lane = LaneMode::Always;
+            let mut careful = proxy(2, ListenerProtocol::Socks5, "127.0.0.1:0");
+            careful.optimistic = Some(false);
+            map.me.proxies = vec![proxy(1, ListenerProtocol::Socks5, "127.0.0.1:0"), careful];
+            let world = World::start(map).await;
+            let (optimistic_code, mut optimistic) = socks5_connect(world.proxy(1).await, "example.com", 443).await;
+            let (careful_code, mut careful) = socks5_connect(world.proxy(2).await, "example.com", 443).await;
+            assert_eq!((optimistic_code, careful_code), (0, 0));
+            assert_echo(&mut optimistic).await;
+            assert_echo(&mut careful).await;
+
+            world.update(|map| map.peers[0].lane = LaneMode::Off).await;
+            assert_echo(&mut optimistic).await;
+            assert_echo(&mut careful).await;
+
+            world
+                .update(|map| {
+                    if remove_peer {
+                        map.peers.clear();
+                    } else {
+                        map.peers[0].key = PublicKey::from_bytes([3; 32]);
+                    }
+                })
+                .await;
+            assert_closed(&mut optimistic).await;
+            assert_closed(&mut careful).await;
+        }
+    }
+}
+
 /// 把一个明文 HTTP 请求发给代理，读到连接结束，返回读到的全部。
 async fn plain_http(proxy: SocketAddr, request: &[u8]) -> String {
     let mut stream = TcpStream::connect(proxy).await.unwrap();
