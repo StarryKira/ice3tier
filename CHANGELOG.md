@@ -2,6 +2,11 @@
 
 The node, the controller, the command line and the web UI share one version number.
 
+## 0.1.32 (2026-11-20)
+
+- Web UI: the virtual network card of a node says "Ready" when the adapter is installed.
+- Upgrade the controller.
+
 ## 0.1.31 (2026-11-20)
 
 - Web UI: the node detail no longer shows the virtual adapter's firewall rules. They are local to each node; `i3t network status` on the node shows them.
