@@ -107,7 +107,7 @@ function SubjectView({ data }: NodeProps<SubjectNode>) {
       <DropdownMenu>
         <DropdownMenuTrigger
           aria-label={`${data.view === 'node' ? m.pickNode : m.pickGroup}（${data.title}）`}
-          className="nodrag nopan flex size-full items-center gap-3 rounded-xl border bg-card px-3 text-left shadow-card transition-colors outline-none hover:border-border-strong focus-visible:ring-2 focus-visible:ring-ring data-[state=open]:border-border-strong"
+          className="nodrag nopan pointer-events-auto flex size-full items-center gap-3 rounded-xl border bg-card px-3 text-left shadow-card transition-colors outline-none hover:border-border-strong focus-visible:ring-2 focus-visible:ring-ring data-[state=open]:border-border-strong"
         >
           <IconBox kind={data.view} online={data.online} />
           <span className="min-w-0 flex-1">
@@ -151,7 +151,7 @@ function PillView({ data }: NodeProps<PillNode>) {
         to={data.href}
         aria-label={data.label}
         className={cn(
-          'nodrag nopan flex size-full items-center gap-2 rounded-full border bg-card pr-3 pl-3 text-[13px] shadow-card transition-colors hover:border-border-strong',
+          'nodrag nopan pointer-events-auto flex size-full items-center gap-2 rounded-full border bg-card pr-3 pl-3 text-[13px] shadow-card transition-colors hover:border-border-strong',
           !entry.rule.enabled && 'border-dashed text-muted-foreground',
         )}
       >
@@ -179,7 +179,7 @@ function TargetView({ data }: NodeProps<TargetNode>) {
         type="button"
         onClick={() => data.onOpen(target.group.id)}
         aria-label={m.groupLabel(target.group.name, target.members)}
-        className="nodrag nopan flex size-full items-center gap-3 rounded-xl border bg-card px-3 text-left shadow-card transition-colors hover:border-border-strong"
+        className="nodrag nopan pointer-events-auto flex size-full items-center gap-3 rounded-xl border bg-card px-3 text-left shadow-card transition-colors hover:border-border-strong"
       >
         <IconBox kind="group" online={null} />
         <span className="min-w-0 flex-1">
@@ -434,6 +434,8 @@ export function AccessMap({ network, nodes }: { network: Network; nodes: readonl
             maxZoom={1.5}
             nodesConnectable={false}
             nodesDraggable={false}
+            // 不能选、不能拖、没有 onNodeClick 的节点，React Flow 给外层写 pointer-events: none：
+            // 卡片里能点的东西自己写 pointer-events-auto。
             elementsSelectable={false}
             zoomOnDoubleClick={false}
             deleteKeyCode={null}

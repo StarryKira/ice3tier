@@ -394,6 +394,18 @@ test('有数据时：总览、节点', async () => {
   await expect(page.getByTestId('overview-status')).toBeVisible()
   await shot('overview')
 
+  // 访问地图上的卡片真的点得动（React Flow 给不能选、不能拖的节点写了 pointer-events: none）：
+  // 左边的下拉打开，右边的分组换成看那个分组，中间的策略去策略页。
+  const om = t.overview.map
+  const members = (await controller.api<unknown[]>('GET', '/networks/1/nodes')).length
+  await page.getByRole('button', { name: new RegExp(`^${literal(om.pickNode)}`) }).click()
+  await expect(page.getByRole('menu')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await page.getByRole('button', { name: om.groupLabel('All', members) }).click()
+  await expect(page).toHaveURL(/view=group/)
+  await page.getByRole('link', { name: new RegExp(`^${literal(om.ruleLabel('default', ''))}`) }).click()
+  await expect(page).toHaveURL(/\/access/)
+
   await goTo(page, t.nav.nodes)
   await expect(page.getByTestId('node-row-gw-hk')).toBeVisible()
   await shot('nodes')
@@ -494,6 +506,12 @@ test('有数据时：节点详情', async () => {
   await shot('node-detail-routes-star', { fullPage: false })
   await page.setViewportSize({ width: 1280, height: 800 })
   await shot('node-detail-routes-star-narrow', { fullPage: false })
+  // 星状图上的对端点得动：去那个节点的路由，再回来。
+  const here = page.url()
+  await page.getByTestId('routes-star').locator('.react-flow__node-peer a').first().click()
+  await expect(page).not.toHaveURL(here)
+  await expect(page).toHaveURL(/tab=routes&view=star/)
+  await page.goBack()
   await page.getByRole('radio', { name: d.routesViewTable }).click()
 
   await page.getByRole('tab', { name: d.tabOverview }).click()

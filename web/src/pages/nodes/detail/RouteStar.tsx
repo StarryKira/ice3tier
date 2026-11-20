@@ -90,7 +90,8 @@ function PeerView({ data }: NodeProps<PeerFlowNode>) {
       aria-label={label}
       style={PEER}
       className={cn(
-        'flex flex-col justify-center rounded-lg border border-border-strong bg-card px-3 transition-[border-color] hover:border-foreground/40',
+        // 不能选、不能拖的节点 React Flow 写了 pointer-events: none，链接自己要接住点击。
+        'pointer-events-auto flex flex-col justify-center rounded-lg border border-border-strong bg-card px-3 transition-[border-color] hover:border-foreground/40',
         !online && 'border-dashed bg-transparent',
       )}
     >
