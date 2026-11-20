@@ -6,6 +6,13 @@
 export const RELEASE_BASE = 'https://github.com/fuqiuluo/ice3tier/releases/latest/download'
 export const RELEASES_PAGE = 'https://github.com/fuqiuluo/ice3tier/releases'
 
+/** 安装脚本：在 Linux 和 macOS 上把节点装成系统服务，架构由它自己认。 */
+export const INSTALL_SCRIPT = 'https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh'
+
+/** 添加节点时选的系统。Linux 和 macOS 走安装脚本；Windows 没有脚本，下载程序。 */
+export const INSTALL_SYSTEMS = ['linux', 'macos', 'windows'] as const
+export type InstallSystem = (typeof INSTALL_SYSTEMS)[number]
+
 /** 节点绑定的端口的默认值。启用为 relay 的节点还在同一个端口号上监听 TCP。 */
 export const DEFAULT_NODE_PORT = 20330
 

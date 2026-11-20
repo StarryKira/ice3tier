@@ -66,6 +66,6 @@ export const overview = {
     waiting: '等待加入…',
     notYet: '等待上一步',
     joinedOnline: '在线',
-    joinedOffline: '已加入，运行 i3t run 后上线',
+    joinedOffline: '已加入，尚未上线',
   },
 }

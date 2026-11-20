@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { type CreatedEnrollToken, type EnrollTokenInfo, type Group, type Node } from '@/api/types'
 import { setLocale, t } from '@/i18n'
+import { INSTALL_SCRIPT } from '@/lib/product'
 import { makeNode, makeToken } from '@/test/fixtures'
 import { apiFailure, fakeApi, type FakeApi, NETWORK, renderWithApp, type Routes } from '@/test/harness'
 
@@ -69,6 +70,11 @@ function containing(text: string): RegExp {
 /** 令牌生成之前命令里的占位符。测试开始时语言才固定下来，所以现取。 */
 const placeholder = () => t.addNode.tokenPlaceholder
 
+/** 写在令牌上的选项默认收着：点开第 2 步标题右端的"选项"。 */
+async function openOptions(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+  await user.click(screen.getByRole('button', { name: t.addNode.optionsTitle }))
+}
+
 async function generate(user: ReturnType<typeof userEvent.setup>): Promise<void> {
   await user.click(screen.getByRole('button', { name: t.addNode.generate }))
   await waitFor(() => expect(command()).toHaveTextContent(TOKEN))
@@ -78,10 +84,25 @@ describe('添加节点', () => {
   it('令牌生成之前：命令里是占位符，让人先看懂结构；没有东西可以复制', () => {
     emptyNetwork()
     renderWithApp(<AddNodeFlow network={NETWORK} />)
-    expect(command()).toHaveTextContent(`echo ${placeholder()} | i3t join`)
+    expect(command()).toHaveTextContent(`echo ${placeholder()} | sudo i3t join`)
     expect(screen.getByRole('button', { name: t.addNode.copyCommand })).toBeDisabled()
     expect(screen.queryByRole('button', { name: t.addNode.copyToken })).not.toBeInTheDocument()
     expect(screen.queryByText(t.addNode.waiting)).not.toBeInTheDocument()
+  })
+
+  it('默认只有三步要做的事：写在令牌上的选项收着，点"选项"才展开', async () => {
+    const user = userEvent.setup()
+    emptyNetwork()
+    renderWithApp(<AddNodeFlow network={NETWORK} />)
+    const toggle = screen.getByRole('button', { name: t.addNode.optionsTitle })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('combobox', { name: containing(t.addNode.groupsLabel) })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(t.addNode.ttlLabel)).not.toBeInTheDocument()
+
+    await user.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('combobox', { name: containing(t.addNode.groupsLabel) })).toBeEnabled()
+    expect(screen.getByLabelText(t.addNode.ttlLabel)).toBeEnabled()
   })
 
   it('打开界面不会自己生成令牌：要点了按钮才发请求', () => {
@@ -95,22 +116,37 @@ describe('添加节点', () => {
     emptyNetwork()
     renderWithApp(<AddNodeFlow network={NETWORK} />)
     await user.click(screen.getByRole('checkbox', { name: containing(t.addNode.declareRelay) }))
-    expect(command()).toHaveTextContent(`echo ${placeholder()} | i3t join --can-relay`)
+    expect(command()).toHaveTextContent(`echo ${placeholder()} | sudo i3t join --can-relay`)
     await user.click(screen.getByRole('checkbox', { name: containing(t.addNode.declareExit) }))
-    expect(command()).toHaveTextContent(`echo ${placeholder()} | i3t join --can-exit --can-relay`)
+    expect(command()).toHaveTextContent(`echo ${placeholder()} | sudo i3t join --can-exit --can-relay`)
     await user.click(screen.getByRole('checkbox', { name: containing(t.addNode.declareRelay) }))
-    expect(command()).toHaveTextContent(`echo ${placeholder()} | i3t join --can-exit`)
+    expect(command()).toHaveTextContent(`echo ${placeholder()} | sudo i3t join --can-exit`)
     // 端口转发的目标在节点详情里打开，不在这里勾。
     expect(screen.getAllByRole('checkbox')).toHaveLength(2)
   })
 
-  it('换平台，命令跟着变', async () => {
+  it('Linux 和 macOS：第 1 步是安装脚本，加入之后服务自己启动，没有启动那一行', async () => {
+    const user = userEvent.setup()
+    emptyNetwork()
+    renderWithApp(<AddNodeFlow network={NETWORK} />)
+    for (const name of ['Linux', 'macOS']) {
+      await user.click(screen.getByRole('radio', { name }))
+      expect(screen.getByTestId('install-command')).toHaveTextContent(`curl -fsSL ${INSTALL_SCRIPT} | sh`)
+      expect(command()).toHaveTextContent(`echo ${placeholder()} | sudo i3t join`)
+      expect(screen.queryByTestId('start-command')).not.toBeInTheDocument()
+      expect(screen.queryByText(t.addNode.step1Releases)).not.toBeInTheDocument()
+    }
+  })
+
+  it('Windows 没有脚本：下载程序，加入之后自己启动', async () => {
     const user = userEvent.setup()
     emptyNetwork()
     renderWithApp(<AddNodeFlow network={NETWORK} />)
     await user.click(screen.getByRole('radio', { name: 'Windows' }))
+    expect(screen.getByTestId('install-command')).toHaveTextContent(/^curl\.exe -fLo i3t\.exe /)
     expect(command()).toHaveTextContent(`echo ${placeholder()} | .\\i3t.exe join`)
-    expect(screen.getByText(/curl\.exe -fLo i3t\.exe/)).toBeVisible()
+    expect(screen.getByTestId('start-command')).toHaveTextContent('.\\i3t.exe run')
+    expect(screen.getByRole('link', { name: t.addNode.step1Releases })).toBeVisible()
   })
 
   it('生成之后：真正的令牌出现在命令里，可以整行复制；说明只显示这一次；开始等节点', async () => {
@@ -120,14 +156,14 @@ describe('添加节点', () => {
     await user.click(screen.getByRole('checkbox', { name: containing(t.addNode.declareRelay) }))
     await generate(user)
 
-    expect(command()).toHaveTextContent(`echo ${TOKEN} | i3t join --can-relay`)
+    expect(command()).toHaveTextContent(`echo ${TOKEN} | sudo i3t join --can-relay`)
     expect(screen.getByText(t.addNode.shownOnce)).toBeVisible()
     expect(screen.getByText(t.addNode.waiting)).toBeVisible()
     // 声明是命令的参数，不写在令牌上。
     expect(api.callsTo('POST /networks/1/tokens')[0]?.body).toEqual({ expires_in_secs: 86_400, groups: [] })
 
     await user.click(screen.getByRole('button', { name: t.addNode.copyCommand }))
-    expect(await navigator.clipboard.readText()).toBe(`echo ${TOKEN} | i3t join --can-relay`)
+    expect(await navigator.clipboard.readText()).toBe(`echo ${TOKEN} | sudo i3t join --can-relay`)
     await user.click(screen.getByRole('button', { name: t.addNode.copyToken }))
     expect(await navigator.clipboard.readText()).toBe(TOKEN)
   })
@@ -138,6 +174,7 @@ describe('添加节点', () => {
       const user = userEvent.setup()
       const api = emptyNetwork()
       renderWithApp(<AddNodeFlow network={NETWORK} />)
+      await openOptions(user)
       await user.click(screen.getByRole('combobox', { name: containing(t.addNode.groupsLabel) }))
       const search = screen.getByRole('textbox', { name: t.groups.picker.search })
       // 搜索只是筛选：没有同名的分组时什么也不会新建。
@@ -161,7 +198,7 @@ describe('添加节点', () => {
     renderWithApp(<AddNodeFlow network={NETWORK} />)
     await generate(user)
     await user.click(screen.getByRole('checkbox', { name: containing(t.addNode.declareExit) }))
-    expect(command()).toHaveTextContent(`echo ${TOKEN} | i3t join --can-exit`)
+    expect(command()).toHaveTextContent(`echo ${TOKEN} | sudo i3t join --can-exit`)
     expect(api.callsTo('POST /networks/1/tokens')).toHaveLength(1)
   })
 
@@ -169,6 +206,7 @@ describe('添加节点', () => {
     const user = userEvent.setup()
     emptyNetwork()
     renderWithApp(<AddNodeFlow network={NETWORK} />)
+    await openOptions(user)
     expect(screen.queryByText(t.addNode.lockedNote)).not.toBeInTheDocument()
     await generate(user)
     expect(screen.getByRole('combobox', { name: containing(t.addNode.groupsLabel) })).toBeDisabled()
@@ -181,6 +219,7 @@ describe('添加节点', () => {
     const user = userEvent.setup()
     const api = emptyNetwork()
     renderWithApp(<AddNodeFlow network={NETWORK} />)
+    await openOptions(user)
     const ip = screen.getByLabelText(containing(t.addNode.ipLabel))
     await user.type(ip, '10.99.0.5')
     expect(screen.getByText(t.validate.ipOutOfRange('10.66.0.0/16'))).toBeInTheDocument()
@@ -201,7 +240,7 @@ describe('添加节点', () => {
     await user.click(screen.getByRole('button', { name: t.addNode.generate }))
     expect(await screen.findByText(t.errors.codes.address_taken)).toBeVisible()
     expect(screen.getByRole('button', { name: t.addNode.generate })).toBeEnabled()
-    expect(command()).toHaveTextContent(`echo ${placeholder()} | i3t join`)
+    expect(command()).toHaveTextContent(`echo ${placeholder()} | sudo i3t join`)
   })
 
   it('节点用令牌加入之后，等待区自己变成结果；令牌不再显示', async () => {
@@ -219,6 +258,19 @@ describe('添加节点', () => {
     expect(screen.queryByText(t.addNode.shownOnce)).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: t.addNode.copyToken })).not.toBeInTheDocument()
     expect(screen.getByRole('link', { name: t.addNode.viewNode })).toHaveAttribute('href', '/n/1/nodes/5')
+    // 服务自己启动，不提醒去启动。
+    expect(screen.queryByText(t.addNode.joinedHint)).not.toBeInTheDocument()
+  })
+
+  it('Windows 上加入之后还要自己启动：结果里提醒一句', async () => {
+    const user = userEvent.setup()
+    const api = emptyNetwork()
+    renderWithApp(<AddNodeFlow network={NETWORK} />)
+    await user.click(screen.getByRole('radio', { name: 'Windows' }))
+    await generate(user)
+    api.use({ 'GET /networks/1/tokens': [], 'GET /networks/1/nodes': [node(5, 'nas-01')] })
+    await screen.findByTestId('node-joined')
+    expect(screen.getByText(t.addNode.joinedHint)).toBeVisible()
   })
 
   it('结果在最下面：节点加入时把它带进视野，免得对话框比屏幕高时看不到', async () => {
@@ -248,7 +300,7 @@ describe('添加节点', () => {
     await screen.findByTestId('node-joined')
 
     await user.click(screen.getByRole('button', { name: t.addNode.addAnother }))
-    expect(command()).toHaveTextContent(`echo ${placeholder()} | i3t join --can-relay`)
+    expect(command()).toHaveTextContent(`echo ${placeholder()} | sudo i3t join --can-relay`)
     expect(document.body).not.toHaveTextContent(TOKEN)
     expect(screen.getByRole('button', { name: t.addNode.generate })).toBeEnabled()
   })

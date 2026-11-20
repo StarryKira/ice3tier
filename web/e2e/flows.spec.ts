@@ -161,11 +161,12 @@ test('生成注册令牌，拿到加入命令，节点加入后出现在界面�
   await expect(dialog).toBeVisible()
 
   // 生成之前：命令里是占位符，没有东西可以复制，controller 上也没有令牌。
-  await expect(joinCommand()).toHaveText(`echo ${t.addNode.tokenPlaceholder} | i3t join`)
+  await expect(joinCommand()).toHaveText(`echo ${t.addNode.tokenPlaceholder} | sudo i3t join`)
   await expect(dialog.getByRole('button', { name: t.addNode.copyCommand })).toBeDisabled()
   expect(await controller.api<unknown[]>('GET', `${NET}/tokens`)).toHaveLength(0)
 
   // 分组写在令牌上，只能从已有的里面选；"可以承担"是命令的参数。
+  await dialog.getByRole('button', { name: t.addNode.optionsTitle }).click()
   await dialog.getByRole('combobox', { name: t.addNode.groupsLabel }).click()
   await page.getByRole('textbox', { name: t.groups.picker.search }).fill('serv')
   await page.keyboard.press('Enter')
@@ -173,12 +174,12 @@ test('生成注册令牌，拿到加入命令，节点加入后出现在界面�
   await expect(page.getByRole('listbox')).toHaveCount(0)
   const relayBox = dialog.getByRole('checkbox', { name: new RegExp(t.addNode.declareRelay) })
   await relayBox.check()
-  await expect(joinCommand()).toHaveText(`echo ${t.addNode.tokenPlaceholder} | i3t join --can-relay`)
+  await expect(joinCommand()).toHaveText(`echo ${t.addNode.tokenPlaceholder} | sudo i3t join --can-relay`)
   await relayBox.uncheck()
-  await expect(joinCommand()).toHaveText(`echo ${t.addNode.tokenPlaceholder} | i3t join`)
+  await expect(joinCommand()).toHaveText(`echo ${t.addNode.tokenPlaceholder} | sudo i3t join`)
 
   await dialog.getByRole('button', { name: t.addNode.generate }).click()
-  await expect(joinCommand()).toHaveText(/^echo i3t-[A-Za-z0-9_-]+ \| i3t join$/)
+  await expect(joinCommand()).toHaveText(/^echo i3t-[A-Za-z0-9_-]+ \| sudo i3t join$/)
   await expect(dialog.getByText(t.addNode.shownOnce)).toBeVisible()
   await expect(dialog.getByText(t.addNode.waiting)).toBeVisible()
   const tokens = await controller.api<{ groups: { name: string }[] }[]>('GET', `${NET}/tokens`)
@@ -222,13 +223,13 @@ test('令牌只在「添加节点」里：不打算用了就吊销；关掉对�
 
   // 生成了又不用：吊销之后 controller 上就没有它了，对话框回到生成之前。
   await dialog.getByRole('button', { name: t.addNode.generate }).click()
-  await expect(joinCommand()).toHaveText(/^echo i3t-[A-Za-z0-9_-]+ \| i3t join$/)
+  await expect(joinCommand()).toHaveText(/^echo i3t-[A-Za-z0-9_-]+ \| sudo i3t join$/)
   await dialog.getByRole('button', { name: t.addNode.revoke, exact: true }).click()
-  await expect(joinCommand()).toHaveText(`echo ${t.addNode.tokenPlaceholder} | i3t join`)
+  await expect(joinCommand()).toHaveText(`echo ${t.addNode.tokenPlaceholder} | sudo i3t join`)
   expect(await controller.api<unknown[]>('GET', `${NET}/tokens`)).toHaveLength(0)
 
   await dialog.getByRole('button', { name: t.addNode.generate }).click()
-  await expect(joinCommand()).toHaveText(/^echo i3t-[A-Za-z0-9_-]+ \| i3t join$/)
+  await expect(joinCommand()).toHaveText(/^echo i3t-[A-Za-z0-9_-]+ \| sudo i3t join$/)
   const command = (await joinCommand().textContent()) ?? ''
   const secret = command.split(' ')[1] ?? ''
 

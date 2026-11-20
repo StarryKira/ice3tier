@@ -2,6 +2,8 @@ import {
   type Capability,
   CAPABILITY_CONFIG_KEY,
   CAPABILITY_FLAG,
+  INSTALL_SCRIPT,
+  type InstallSystem,
   PLATFORMS,
   type PlatformId,
   RELEASE_BASE,
@@ -27,13 +29,15 @@ export function joinFlags(declare: JoinDeclarations): string[] {
   return order.filter((capability) => declare[capability]).map((capability) => `--${CAPABILITY_FLAG[capability]}`)
 }
 
-function platform(id: PlatformId) {
-  return PLATFORMS.find((candidate) => candidate.id === id) ?? PLATFORMS[0]
-}
+/** Windows 上发布的只有这一个平台的程序。 */
+const WINDOWS_PLATFORM: PlatformId = 'windows-x86_64'
 
-/** 这个平台上怎么调用节点程序：Unix 上装进了 PATH；Windows 上在下载到的目录里直接执行。 */
-export function programFor(id: PlatformId): string {
-  return platform(id).windows ? '.\\i3t.exe' : 'i3t'
+/**
+ * 加入命令里怎么调用节点程序。脚本把节点装成了系统服务，它的状态只有 root 能动；
+ * Windows 上在下载到的目录里直接执行。
+ */
+export function programFor(system: InstallSystem): string {
+  return system === 'windows' ? '.\\i3t.exe' : 'sudo i3t'
 }
 
 /** 不含引号也不会被 shell 误解的字符。注册令牌是 `i3t-` 加 base64url，都在这里面。 */
@@ -49,8 +53,27 @@ export interface TokenPlaceholder {
   placeholder: string
 }
 
+/** 加入命令的三段：令牌前面的、令牌（或占位符）、令牌后面的。界面上令牌那一段的样子和别的不一样。 */
+export interface JoinCommandParts {
+  before: string
+  token: string
+  after: string
+}
+
+export function joinCommandParts(
+  token: string | TokenPlaceholder,
+  declare: JoinDeclarations,
+  system: InstallSystem = 'linux',
+): JoinCommandParts {
+  return {
+    before: 'echo ',
+    token: typeof token === 'string' ? quote(token, system === 'windows') : token.placeholder,
+    after: ` | ${[programFor(system), 'join', ...joinFlags(declare)].join(' ')}`,
+  }
+}
+
 /**
- * 加入网络的那一行命令：`echo <令牌> | i3t join [--can-exit] [--can-relay] [--can-forward]`。
+ * 加入网络的那一行命令：`echo <令牌> | sudo i3t join [--can-exit] [--can-relay] [--can-forward]`。
  *
  * 令牌从标准输入读，所以用 echo 接管道，整行可以一次复制。
  * 令牌生成之前传占位符：先让用户看懂命令的结构，令牌会出现在哪里。
@@ -58,21 +81,29 @@ export interface TokenPlaceholder {
 export function buildJoinCommand(
   token: string | TokenPlaceholder,
   declare: JoinDeclarations,
-  platformId: PlatformId = 'linux-x86_64',
+  system: InstallSystem = 'linux',
 ): string {
-  const windows = platform(platformId).windows
-  const shown = typeof token === 'string' ? quote(token, windows) : token.placeholder
-  return ['echo', shown, '|', programFor(platformId), 'join', ...joinFlags(declare)].join(' ')
+  const { before, token: shown, after } = joinCommandParts(token, declare, system)
+  return `${before}${shown}${after}`
 }
 
-/** 启动节点。 */
-export function runCommand(platformId: PlatformId = 'linux-x86_64'): string {
-  return `${programFor(platformId)} run`
+/**
+ * 安装的那一行。Linux 和 macOS 是安装脚本：装好程序，登记为系统服务，加入之后服务自己启动。
+ * Windows 是把程序下载到当前目录。
+ */
+export function installCommand(system: InstallSystem): string {
+  if (system === 'windows') return downloadCommands(WINDOWS_PLATFORM).join(' && ')
+  return `curl -fsSL ${INSTALL_SCRIPT} | sh`
 }
 
-/** 下载节点程序并放到能直接执行的地方。每个平台是一行或两行。 */
-export function installCommands(platformId: PlatformId): string[] {
-  const target = platform(platformId)
+/** 加入之后还要自己启动节点的系统上，启动的命令；服务会自己启动的系统上没有这一步。 */
+export function startCommand(system: InstallSystem): string | null {
+  return system === 'windows' ? `${programFor(system)} run` : null
+}
+
+/** 只下载节点程序、放到能直接执行的地方，不装服务：手动替换程序时用。每个平台是一行或两行。 */
+export function downloadCommands(platformId: PlatformId): string[] {
+  const target = PLATFORMS.find((candidate) => candidate.id === platformId) ?? PLATFORMS[0]
   const url = `${RELEASE_BASE}/${target.file}`
   if (target.windows) return [`curl.exe -fLo i3t.exe ${url}`]
   return [`curl -fLo i3t ${url}`, 'sudo install -m 755 i3t /usr/local/bin/i3t']

@@ -433,6 +433,7 @@ test('有数据时：总览、节点', async () => {
   await page.getByRole('button', { name: t.nodes.batchCancel }).click()
 
   await page.getByRole('button', { name: t.nodes.add }).click()
+  await page.getByRole('button', { name: t.addNode.optionsTitle }).click()
   await page.getByRole('combobox', { name: t.addNode.groupsLabel }).click()
   await page.getByRole('textbox', { name: t.groups.picker.search }).fill('serv')
   await page.keyboard.press('Enter')

@@ -67,6 +67,6 @@ export const overview: Messages['overview'] = {
     waiting: 'Waiting to join…',
     notYet: 'After step 1',
     joinedOnline: 'Online',
-    joinedOffline: 'Joined. Online after i3t run',
+    joinedOffline: 'Joined, not online yet',
   },
 }

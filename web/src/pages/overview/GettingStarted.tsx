@@ -1,5 +1,4 @@
 import { Check } from 'lucide-react'
-import { type ReactNode } from 'react'
 import { Link } from 'react-router'
 
 import { type Network, type Node } from '@/api/types'
@@ -7,7 +6,6 @@ import { nodePath } from '@/lib/nodes'
 import { Notice } from '@/components/notice'
 import { Page, PageHeader } from '@/components/page'
 import { OnlineDot } from '@/components/status'
-import { Card } from '@/components/ui/card'
 import { t } from '@/i18n'
 import { cn } from '@/lib/utils'
 import { AddNodeFlow } from '@/pages/nodes/AddNodeFlow'
@@ -16,43 +14,47 @@ const g = t.overview.guide
 
 type StepState = 'done' | 'current' | 'upcoming'
 
-function Step({
-  index,
-  title,
-  state,
-  children,
-}: {
-  index: number
-  title: string
-  state: StepState
-  children?: ReactNode
-}) {
+/**
+ * 引导走到哪了：三个名字横着排成一行，做完的打勾，正在做的加粗。
+ * 不编号：下面添加节点的流程自己有 1、2、3，两套编号叠在一起分不清。
+ */
+function Progress({ current }: { current: number }) {
+  const titles = [g.step1, g.step2, g.step3]
   return (
-    <li aria-current={state === 'current' ? 'step' : undefined} className="relative pb-8 last:pb-0">
-      <div className="flex items-center gap-3">
-        <span
-          aria-hidden
-          className={cn(
-            'flex size-7 shrink-0 items-center justify-center rounded-full text-[13px] font-semibold tabular',
-            state === 'done' && 'bg-muted text-foreground',
-            state === 'current' && 'bg-primary text-primary-foreground',
-            state === 'upcoming' && 'border border-border-strong text-muted-foreground',
-          )}
-        >
-          {state === 'done' ? <Check className="size-4" /> : index}
-        </span>
-        <h2 className={cn('text-base font-semibold', state === 'upcoming' && 'font-medium text-muted-foreground')}>
-          {title}
-        </h2>
-        {state === 'done' ? <span className="text-[13px] text-muted-foreground">{g.done}</span> : null}
-        {state === 'current' ? <span className="sr-only">{g.current}</span> : null}
-      </div>
-      {children !== undefined && state !== 'done' ? <div className="mt-4 pl-10">{children}</div> : null}
-    </li>
+    <ol className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
+      {titles.map((title, position) => {
+        const index = position + 1
+        const state: StepState = index < current ? 'done' : index === current ? 'current' : 'upcoming'
+        return (
+          <li key={title} aria-current={state === 'current' ? 'step' : undefined} className="flex items-center gap-x-3">
+            {position > 0 ? <span aria-hidden className="h-px w-8 bg-border-strong" /> : null}
+            <span className="flex items-center gap-2">
+              <span aria-hidden className="flex size-4 items-center justify-center">
+                {state === 'done' ? (
+                  <span className="flex size-4 items-center justify-center rounded-full bg-ok-soft text-ok">
+                    <Check className="size-3" style={{ strokeWidth: 3 }} />
+                  </span>
+                ) : (
+                  <span
+                    className={cn(
+                      'size-2 rounded-full',
+                      state === 'current' ? 'bg-primary ring-4 ring-primary/20' : 'bg-border-strong',
+                    )}
+                  />
+                )}
+              </span>
+              <span className={state === 'current' ? 'font-semibold' : 'text-muted-foreground'}>{title}</span>
+              {state === 'done' ? <span className="sr-only">{g.done}</span> : null}
+              {state === 'current' ? <span className="sr-only">{g.current}</span> : null}
+            </span>
+          </li>
+        )
+      })}
+    </ol>
   )
 }
 
-/** 右侧的节点卡片：节点没来时是虚线框，来了之后变成实卡。 */
+/** 画布上的一个节点：节点没来时是虚线框，来了之后变成实卡。 */
 function Slot({
   network,
   label,
@@ -64,9 +66,10 @@ function Slot({
   node: Node | undefined
   waiting: string
 }) {
+  const box = 'flex min-h-24 w-full max-w-60 flex-col justify-center rounded-lg px-4 py-3'
   if (node === undefined) {
     return (
-      <div className="flex h-24 flex-col items-center justify-center rounded-lg border border-dashed border-border-strong px-4 text-center">
+      <div className={cn(box, 'items-center border border-dashed border-border-strong text-center')}>
         <span className="text-xs text-muted-foreground">{label}</span>
         <span className="mt-1 text-[13px] text-muted-foreground">{waiting}</span>
       </div>
@@ -75,7 +78,10 @@ function Slot({
   return (
     <Link
       to={nodePath(network.id, node.id)}
-      className="flex h-24 animate-rise flex-col justify-center rounded-lg border border-border-strong bg-card px-4 transition-colors hover:border-foreground/30"
+      className={cn(
+        box,
+        'animate-rise border border-border-strong bg-card transition-colors hover:border-foreground/30',
+      )}
       data-testid={`guide-node-${node.name}`}
     >
       <span className="flex items-center gap-2 text-sm font-semibold">
@@ -92,8 +98,9 @@ function Slot({
 
 /**
  * 节点不足两个时，总览页就是引导：不另做一个全屏向导。
- * 左边是编号的步骤，右边是实况。用户走开再回来它还在原地，进度由数据决定，不需要记"做到第几步"；
- * 用命令行加的节点这里一样会发现。
+ * 左边是添加节点的流程，宽度到一行命令放得下为止，不跟着窗口拉长；右边的画布占掉剩下的地方，
+ * 上面是这两个节点的实况：没来的是虚线框，来了变成实卡。画布宽的时候两个节点横着排，窄的时候竖着排。
+ * 用户走开再回来它还在原地，进度由数据决定，不需要记"做到第几步"；用命令行加的节点这里一样会发现。
  */
 export function GettingStarted({ network, nodes }: { network: Network; nodes: readonly Node[] }) {
   const ordered = [...nodes].sort((a, b) => a.created_at - b.created_at || a.id - b.id)
@@ -101,32 +108,27 @@ export function GettingStarted({ network, nodes }: { network: Network; nodes: re
   const current = first === undefined ? 1 : 2
 
   return (
-    <Page>
-      <PageHeader title={g.title} />
-      <div className="grid grid-cols-[minmax(0,1fr)_16rem] items-start gap-12">
-        <ol>
-          <Step index={1} title={g.step1} state={current === 1 ? 'current' : 'done'}>
-            <AddNodeFlow key="first" network={network} />
-          </Step>
-          <Step index={2} title={g.step2} state={current === 2 ? 'current' : 'upcoming'}>
-            {current === 2 ? (
-              <AddNodeFlow
-                key="second"
-                network={network}
-                intro={<Notice>{g.step2Tip(t.capability.relay.full)}</Notice>}
-              />
-            ) : undefined}
-          </Step>
-          <Step index={3} title={g.step3} state="upcoming">
-            <p className="text-sm text-muted-foreground">{g.step3Body}</p>
-          </Step>
-        </ol>
+    <Page fill>
+      <PageHeader title={g.title} description={g.step3Body} />
+      <div className="grid flex-1 grid-cols-[minmax(0,54rem)_minmax(16rem,1fr)] gap-10">
+        <div className="min-w-0 space-y-7">
+          <Progress current={current} />
+          {/* 换了一个节点就是一份新的流程：上一个节点的令牌不留在这里。 */}
+          <AddNodeFlow
+            key={current}
+            network={network}
+            intro={current === 2 ? <Notice>{g.step2Tip(t.capability.relay.full)}</Notice> : undefined}
+          />
+        </div>
 
-        <Card className="sticky top-8" aria-label={g.live}>
-          <h2 className="mb-3 text-xs font-medium text-muted-foreground">{g.live}</h2>
-          <div aria-live="polite">
+        <section aria-label={g.live} className="@container flex min-h-72 flex-col rounded-xl bg-sidebar p-5">
+          <h2 className="text-xs font-medium text-muted-foreground">{g.live}</h2>
+          <div aria-live="polite" className="flex flex-1 flex-col items-center justify-center py-6 @2xl:flex-row">
             <Slot network={network} label={g.slotFirst} node={first} waiting={g.waiting} />
-            <div aria-hidden className="mx-auto h-6 w-px border-l border-dashed border-border-strong" />
+            <span
+              aria-hidden
+              className="h-8 w-0 shrink-0 border-l border-dashed border-border-strong @2xl:h-0 @2xl:w-20 @2xl:border-t @2xl:border-l-0"
+            />
             <Slot
               network={network}
               label={g.slotSecond}
@@ -134,7 +136,7 @@ export function GettingStarted({ network, nodes }: { network: Network; nodes: re
               waiting={first === undefined ? g.notYet : g.waiting}
             />
           </div>
-        </Card>
+        </section>
       </div>
     </Page>
   )

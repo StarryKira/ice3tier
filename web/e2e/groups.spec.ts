@@ -284,6 +284,7 @@ test('注册令牌带着分组：用它加入的节点就在那个分组里', as
   await goTo(page, t.nav.nodes)
   await page.getByRole('button', { name: t.nodes.add }).click()
   const dialog = page.getByRole('dialog', { name: t.addNode.title })
+  await dialog.getByRole('button', { name: t.addNode.optionsTitle }).click()
   await dialog.getByRole('combobox', { name: t.addNode.groupsLabel }).click()
   await page.getByRole('textbox', { name: t.groups.picker.search }).fill('serv')
   await page.keyboard.press('Enter')
@@ -291,7 +292,7 @@ test('注册令牌带着分组：用它加入的节点就在那个分组里', as
   await expect(page.getByRole('listbox')).toHaveCount(0)
   await dialog.getByRole('button', { name: t.addNode.generate }).click()
   const command = page.getByTestId('join-command')
-  await expect(command).toHaveText(/^echo i3t-[A-Za-z0-9_-]+ \| i3t join$/)
+  await expect(command).toHaveText(/^echo i3t-[A-Za-z0-9_-]+ \| sudo i3t join$/)
   const tokens = await controller.api<{ groups: ApiRef[] }[]>('GET', `${NET}/tokens`)
   expect(tokens.map((token) => token.groups.map((group) => group.name))).toEqual([['servers']])
 

@@ -9,7 +9,7 @@ import { StatusText } from '@/components/status'
 import { Button, type ButtonProps } from '@/components/ui/button'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
-import { installCommands } from '@/lib/commands'
+import { downloadCommands } from '@/lib/commands'
 import { type SelfUpdateBlock, type UpdateMark, updateMark, type UpdateView } from '@/lib/nodeUpdate'
 import { PLATFORMS, type PlatformId } from '@/lib/product'
 import { useUpdateView } from '@/lib/useUpdateView'
@@ -125,7 +125,7 @@ export function ManualUpdate({ block, platform }: { block: SelfUpdateBlock; plat
         isPlatform(platform) ? (
           <>
             <p className="text-[13px] text-muted-foreground">{u.detail.manualDownload(platform)}</p>
-            <CodeBlock copy={installCommands(platform).join('\n')}>{installCommands(platform).join('\n')}</CodeBlock>
+            <CodeBlock copy={downloadCommands(platform).join('\n')}>{downloadCommands(platform).join('\n')}</CodeBlock>
           </>
         ) : (
           <p className="text-[13px] text-muted-foreground">{u.detail.manualNoPlatform}</p>

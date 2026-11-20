@@ -208,7 +208,20 @@ export class Controller {
   }
 
   /**
-   * 在一个新的状态目录里执行界面上给出的那一行加入命令（`echo <令牌> | i3t join …`），原样交给 shell。
+   * 测试里的"那台机器"上的 `sudo`：原样执行后面的命令。界面给出的加入命令带着 sudo（节点是系统服务），
+   * 测试里的节点是当前用户的一个普通进程，不需要、也不该真的提权。
+   */
+  private sudoDir(): string {
+    const dir = join(this.dir, 'sudo')
+    if (!existsSync(dir)) {
+      mkdirSync(dir)
+      writeFileSync(join(dir, 'sudo'), '#!/bin/sh\nexec "$@"\n', { mode: 0o755 })
+    }
+    return dir
+  }
+
+  /**
+   * 在一个新的状态目录里执行界面上给出的那一行加入命令（`echo <令牌> | sudo i3t join …`），原样交给 shell。
    * join 只和 controller 说话，不需要把节点跑起来。
    */
   join(command: string): NodeHandle {
@@ -216,7 +229,11 @@ export class Controller {
     const dir = join(this.dir, `node-${this.nodeCount}`)
     mkdirSync(dir, { recursive: true })
     const result = spawnSync('sh', ['-c', command], {
-      env: { ...process.env, PATH: `${this.bins}:${process.env.PATH ?? ''}`, I3T_STATE_DIR: dir },
+      env: {
+        ...process.env,
+        PATH: `${this.sudoDir()}:${this.bins}:${process.env.PATH ?? ''}`,
+        I3T_STATE_DIR: dir,
+      },
       encoding: 'utf8',
     })
     if (result.status !== 0)

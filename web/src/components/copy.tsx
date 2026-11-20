@@ -1,5 +1,5 @@
 import { Check, Copy } from 'lucide-react'
-import { type ReactNode, useEffect, useState } from 'react'
+import { Fragment, type ReactNode, useEffect, useState } from 'react'
 
 import { Button, type ButtonProps } from '@/components/ui/button'
 import { toast } from '@/components/ui/toast'
@@ -127,7 +127,24 @@ interface CodeBlockProps {
   testId?: string
 }
 
-/** 一段要照着执行的命令，或者一个要原样保存的密钥。等宽、完整显示、右侧带复制。 */
+/**
+ * 在每个斜杠后面留一个可以折行的地方：浏览器把整个地址当成一个词，不留的话它要么整个掉到下一行，
+ * 要么断在词中间。复制出去的内容不受影响。
+ */
+function breakable(text: string): ReactNode {
+  return text.split(/(?<=\/)(?=[^/])/).map((piece, index) => (
+    // 片段的顺序不会变，用位置作键没有问题。
+    <Fragment key={index}>
+      {index > 0 ? <wbr /> : null}
+      {piece}
+    </Fragment>
+  ))
+}
+
+/**
+ * 一段要照着执行的命令，或者一个要原样保存的密钥。等宽、完整显示、右侧带复制。
+ * 一行放不下时先在空格和斜杠处折，实在没有地方折才在词中间断开。
+ */
 export function CodeBlock({
   children,
   copy,
@@ -143,9 +160,9 @@ export function CodeBlock({
         aria-label={label}
         data-testid={testId}
         tabIndex={0}
-        className="min-w-0 flex-1 overflow-x-auto py-1 font-mono text-[13px] leading-relaxed break-all whitespace-pre-wrap"
+        className="min-w-0 flex-1 overflow-x-auto py-1 font-mono text-[13px] leading-relaxed wrap-anywhere whitespace-pre-wrap"
       >
-        {children}
+        {typeof children === 'string' ? breakable(children) : children}
       </pre>
       {copy === null ? (
         <Tooltip content={disabledReason}>
