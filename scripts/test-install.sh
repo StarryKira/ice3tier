@@ -25,7 +25,11 @@ finish() {
             sudo tail -n 80 /var/log/i3t.log || true
         fi
         printf -- '--- the controller says:\n'
-        tail -n 40 "$work/ctl.err" || true
+        if [ -n "$ctl_pid" ] || [ "$os" != "Linux" ]; then
+            tail -n 40 "$work/ctl.err" || true
+        else
+            sudo journalctl -u i3t-controller --no-pager -n 40 || true
+        fi
     fi
     if [ -n "$ctl_pid" ]; then
         kill "$ctl_pid" 2>/dev/null || true
@@ -124,6 +128,14 @@ step "install over the joined node"
 sudo sh "$repo/deploy/install.sh" --from "$dir"
 sleep 3
 wait_online
+if [ "$os" = "Darwin" ]; then
+    step "install over the joined node with a changed launchd plist"
+    printf '<!-- old -->\n' | sudo tee -a "/Library/LaunchDaemons/$label.plist" >/dev/null
+    sudo sh "$repo/deploy/install.sh" --from "$dir"
+    if grep -q '<!-- old -->' "/Library/LaunchDaemons/$label.plist"; then fail "launchd plist was not replaced"; fi
+    sleep 3
+    wait_online
+fi
 
 step "uninstall --purge"
 sudo sh "$repo/deploy/install.sh" --uninstall --purge
@@ -131,5 +143,22 @@ for path in /usr/local/bin/i3t /var/lib/i3t /etc/systemd/system/i3t.service "/Li
     [ ! -e "$path" ] || fail "$path is still there"
 done
 if pgrep -x i3t >/dev/null; then fail "an i3t process is still running"; fi
+
+if [ "$os" = "Linux" ]; then
+    step "install controller and print its first-start admin token across TZ"
+    kill "$ctl_pid" 2>/dev/null || true
+    wait "$ctl_pid" 2>/dev/null || true
+    ctl_pid=""
+    TZ=Asia/Shanghai sh "$repo/deploy/install.sh" --from "$dir" --controller --public-addr 127.0.0.1:20331 >"$work/ctl-install.out"
+    cat "$work/ctl-install.out"
+    grep -q '^    [^ ]' "$work/ctl-install.out" || fail "controller install did not print the initial admin token"
+    systemctl is-active -q i3t-controller || fail "i3t-controller.service is not active"
+
+    step "uninstall controller --purge"
+    sudo sh "$repo/deploy/install.sh" --uninstall --controller --purge
+    for path in /usr/local/bin/i3t-controller /usr/local/bin/i3tctl /var/lib/i3t-controller /etc/i3t /etc/systemd/system/i3t-controller.service; do
+        [ ! -e "$path" ] || fail "$path is still there"
+    done
+fi
 
 step "ok"

@@ -697,9 +697,33 @@ install_node_plain() {
     printf '  sudo i3t run   # keep it running with your init system\n'
 }
 
+launchd_wait_stopped() {
+    # bootout returns while the node is still shutting down (it removes its adapter first): wait for both the process
+    # and the launchd job record to clear before bootstrapping again or deleting its program, as `systemctl disable
+    # --now` does on Linux.
+    i=0
+    while pgrep -f "${NODE_BIN_DIR}/i3t run" >/dev/null 2>&1 ||
+        $SUDO launchctl print "system/${LAUNCHD_LABEL}" >/dev/null 2>&1; do
+        i=$((i + 1))
+        if [ "$i" -gt 30 ]; then
+            warn "the node is still running 30 s after it was told to stop"
+            break
+        fi
+        sleep 1
+    done
+}
+
 launchd_start() {
+    reload="${1:-0}"
     if $SUDO launchctl print "system/${LAUNCHD_LABEL}" >/dev/null 2>&1; then
-        $SUDO launchctl kickstart -k "system/${LAUNCHD_LABEL}"
+        if [ "$reload" -eq 1 ]; then
+            $SUDO launchctl bootout "system/${LAUNCHD_LABEL}" 2>/dev/null || true
+            launchd_wait_stopped
+            $SUDO launchctl enable "system/${LAUNCHD_LABEL}" 2>/dev/null || true
+            $SUDO launchctl bootstrap system "$LAUNCHD_PLIST"
+        else
+            $SUDO launchctl kickstart -k "system/${LAUNCHD_LABEL}"
+        fi
     else
         $SUDO launchctl enable "system/${LAUNCHD_LABEL}" 2>/dev/null || true
         $SUDO launchctl bootstrap system "$LAUNCHD_PLIST"
@@ -718,8 +742,14 @@ install_node_launchd() {
     log "Installing ${LAUNCHD_PLIST}"
     write_launchd_plist "${WORK}/i3t.plist"
     plutil -lint "${WORK}/i3t.plist" >/dev/null || die "the generated launchd plist is invalid"
+    plist_changed=1
+    if $SUDO cmp -s "${WORK}/i3t.plist" "$LAUNCHD_PLIST" 2>/dev/null; then
+        plist_changed=0
+    fi
     $SUDO install -o 0 -g 0 -m 0644 "${WORK}/i3t.plist" "$LAUNCHD_PLIST"
-    printf '%s\t644\t5\t10240\t*\tJ\n' "$LAUNCHD_LOG" > "${WORK}/newsyslog.conf"
+    # Flag N: do not signal syslogd on rotation. Because launchd holds the log file open as stdout/stderr, a running
+    # node keeps writing to the old file descriptor until it restarts (or self-updates).
+    printf '%s\t644\t5\t10240\t*\tJN\n' "$LAUNCHD_LOG" > "${WORK}/newsyslog.conf"
     $SUDO install -d -m 0755 "$(dirname "$NEWSYSLOG_CONF")"
     $SUDO install -o 0 -g 0 -m 0644 "${WORK}/newsyslog.conf" "$NEWSYSLOG_CONF"
 
@@ -730,13 +760,15 @@ install_node_launchd() {
         I3T_SERVICE=i3t
         join_node run_as_root "${NODE_BIN_DIR}/i3t"
         log "Starting ${LAUNCHD_LABEL}"
-        launchd_start
+        launchd_start "$plist_changed"
         log "i3t is running (check with: sudo i3t status)"
     elif $SUDO test -f "${STATE_DIR}/controller.json"; then
         log "Existing enrollment found; restarting ${LAUNCHD_LABEL}"
-        launchd_start
+        launchd_start "$plist_changed"
         log "i3t upgraded and running (check with: sudo i3t status)"
     else
+        # Keep launchd from loading an unjoined daemon at boot (and retrying every 10 s); `i3t join` re-enables it.
+        $SUDO launchctl disable "system/${LAUNCHD_LABEL}" 2>/dev/null || true
         log "Installation complete!"
         printf '\nNext step (joins and starts the daemon):\n'
         printf '  echo <enrollment-token> | sudo i3t join   # add --can-relay or --can-exit if needed\n'
@@ -783,6 +815,7 @@ EOF
         $SUDO install -D -m 0644 "${WORK}/bin-dir.conf" /etc/systemd/system/i3t.service.d/bin-dir.conf
     fi
 
+    vnet_disabled="$NO_VNET"
     if [ "$NO_VNET" -eq 1 ]; then
         cat <<'EOF' > "${WORK}/no-vnet.conf"
 [Service]
@@ -791,9 +824,11 @@ CapabilityBoundingSet=
 EOF
         $SUDO install -D -m 0644 "${WORK}/no-vnet.conf" /etc/systemd/system/i3t.service.d/no-vnet.conf
         run_as_i3t "$node_bin" set network off
+    elif $SUDO test -f /etc/systemd/system/i3t.service.d/no-vnet.conf; then
+        vnet_disabled=1
     fi
 
-    if [ "$INSTALL_POLKIT" -eq 1 ] && [ "$NO_VNET" -eq 0 ]; then
+    if [ "$INSTALL_POLKIT" -eq 1 ] && [ "$vnet_disabled" -eq 0 ]; then
         if [ -d /etc/polkit-1/rules.d ]; then
             log "Installing /etc/polkit-1/rules.d/50-i3t-resolved.rules"
             write_polkit_rule "${WORK}/50-i3t-resolved.rules"
@@ -825,7 +860,7 @@ EOF
         printf '  echo <enrollment-token> | sudo i3t join   # add --can-relay or --can-exit if needed\n'
     fi
 
-    if [ "$NO_VNET" -eq 0 ] && systemctl is-active -q firewalld 2>/dev/null; then
+    if [ "$vnet_disabled" -eq 0 ] && systemctl is-active -q firewalld 2>/dev/null; then
         adapter=$(adapter_name)
         warn "firewalld is active; if peers cannot reach services on this node over ${adapter}, run:"
         printf '  sudo firewall-cmd --permanent --zone=trusted --add-interface=%s && sudo firewall-cmd --reload\n' "$adapter" >&2
@@ -843,14 +878,20 @@ install_node() {
     fi
 }
 
-# Prints the controller's log from `since` on once the one-time admin token is in it (a line indented by four spaces),
-# the service has failed, or 30 seconds have passed.
+# Prints the controller's log for this start once the one-time admin token is in it (a line indented by four spaces),
+# the service has failed, or 30 seconds have passed. Uses the invocation ID when available, falling back to a UTC
+# timestamp so a caller's TZ cannot drift from the system journal's timezone.
 show_first_start() {
-    since="$1"
+    invocation="$1"
+    since="$2"
     out=""
     i=0
     while [ "$i" -lt 30 ]; do
-        out=$($SUDO journalctl -u i3t-controller --since "$since" --no-pager -o cat 2>/dev/null || true)
+        if [ -n "$invocation" ]; then
+            out=$($SUDO journalctl _SYSTEMD_INVOCATION_ID="$invocation" --no-pager -o cat 2>/dev/null || true)
+        else
+            out=$($SUDO journalctl -u i3t-controller --since "$since" --no-pager -o cat 2>/dev/null || true)
+        fi
         if printf '%s\n' "$out" | grep -q '^    [^ ]'; then
             log "First start output (contains the one-time admin token):"
             printf '%s\n' "$out"
@@ -920,10 +961,11 @@ EOF
     if [ -n "$PUBLIC_ADDR" ]; then
         log "Enabling and starting i3t-controller.service"
         $SUDO systemctl enable i3t-controller >/dev/null
-        since=$(date '+%Y-%m-%d %H:%M:%S')
+        since=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
         $SUDO systemctl restart i3t-controller
         if [ "$first_start" -eq 1 ]; then
-            show_first_start "$since"
+            invocation=$($SUDO systemctl show -p InvocationID --value i3t-controller 2>/dev/null || true)
+            show_first_start "$invocation" "$since"
         else
             log "i3t-controller upgraded and running"
         fi
@@ -944,17 +986,7 @@ uninstall_node() {
     if [ "$OS" = "macos" ]; then
         log "Stopping and removing the launchd daemon"
         $SUDO launchctl bootout "system/${LAUNCHD_LABEL}" 2>/dev/null || true
-        # bootout returns while the node is still shutting down (it removes its adapter first): wait for it to exit
-        # before its program is deleted, as `systemctl disable --now` does on Linux.
-        i=0
-        while pgrep -f "${NODE_BIN_DIR}/i3t run" >/dev/null 2>&1; do
-            i=$((i + 1))
-            if [ "$i" -gt 30 ]; then
-                warn "the node is still running 30 s after it was told to stop"
-                break
-            fi
-            sleep 1
-        done
+        launchd_wait_stopped
         $SUDO rm -f "$LAUNCHD_PLIST" "$NEWSYSLOG_CONF"
     elif has_systemd; then
         log "Stopping and disabling i3t.service"
