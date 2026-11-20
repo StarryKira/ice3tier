@@ -104,12 +104,17 @@ impl Config {
         let mut document: toml_edit::DocumentMut =
             text.parse().map_err(|err| anyhow::anyhow!("{err}")).with_context(|| (texts().config_error)(path))?;
         let (section, key) = change.setting().key();
+        // 文件里还没有这一节（更早的版本写的、手写的）：加成一节。直接按下标写会写成一行 `节 = { 键 = 值 }`。
+        if document.get(section).is_none() && change != Change::RelayAddress(None) {
+            document[section] = toml_edit::table();
+        }
         match change {
             Change::Declare(_, on) | Change::ThroughputTests(on) | Change::Network(on) | Change::Firewall(on) => {
                 document[section][key] = toml_edit::value(on);
             }
             Change::CanForward(_) => {}
             Change::Profile(profile) => document[section][key] = toml_edit::value(profile.spelling()),
+            Change::Mtu(mtu) => document[section][key] = toml_edit::value(i64::from(mtu)),
             Change::RelayAddress(Some(address)) => document[section][key] = toml_edit::value(address.to_string()),
             Change::RelayAddress(None) => {
                 if let Some(table) = document.get_mut(section).and_then(toml_edit::Item::as_table_like_mut) {
@@ -148,6 +153,9 @@ impl Config {
             && socks5 == http
         {
             bail!((texts().same_proxy_address)(&socks5.to_string()));
+        }
+        if !i3t_vnet::MTU_RANGE.contains(&self.network.mtu) {
+            bail!((texts().bad_mtu)(&self.network.mtu.to_string()));
         }
         self.performance.validate()
     }
@@ -237,7 +245,7 @@ impl Capability {
     }
 }
 
-/// `i3t set` 能改的项：两项声明、声明的 relay 地址、接不接受吞吐测试、性能档位、虚拟网卡和它的防火墙规则，和不再起作用的 `can-forward`。
+/// `i3t set` 能改的项：两项声明、声明的 relay 地址、接不接受吞吐测试、性能档位、虚拟网卡、它的防火墙规则和 MTU，和不再起作用的 `can-forward`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setting {
     Declare(Capability),
@@ -254,6 +262,8 @@ pub enum Setting {
     Network,
     /// 虚拟网卡的两条防火墙规则（`[network] firewall`）。
     Firewall,
+    /// 虚拟网卡的 MTU（`[network] mtu`）。
+    Mtu,
 }
 
 impl Setting {
@@ -268,10 +278,12 @@ impl Setting {
             Self::Profile => ("performance", "profile"),
             Self::Network => ("network", "enabled"),
             Self::Firewall => ("network", "firewall"),
+            Self::Mtu => ("network", "mtu"),
         }
     }
 
-    /// 这一项改成命令行上写的 `value`：开关写 `on` 或 `off`，档位写它的名字，relay 地址写 `地址:端口` 或者 `off`（不再声明）。
+    /// 这一项改成命令行上写的 `value`：开关写 `on` 或 `off`，档位写它的名字，relay 地址写 `地址:端口` 或者 `off`（不再声明），
+    /// MTU 写字节数（[`i3t_vnet::MTU_RANGE`] 里的）。
     ///
     /// # Errors
     ///
@@ -288,6 +300,10 @@ impl Setting {
             Self::ThroughputTests => Change::ThroughputTests(switch()?),
             Self::Network => Change::Network(switch()?),
             Self::Firewall => Change::Firewall(switch()?),
+            Self::Mtu => match value.parse::<u16>() {
+                Ok(mtu) if i3t_vnet::MTU_RANGE.contains(&mtu) => Change::Mtu(mtu),
+                Ok(_) | Err(_) => bail!((texts().bad_mtu)(value)),
+            },
             Self::Profile => Change::Profile(value.parse().map_err(|_| anyhow::anyhow!((texts().unknown_profile)(value)))?),
             Self::RelayAddress => match value {
                 "off" => Change::RelayAddress(None),
@@ -303,7 +319,7 @@ impl Setting {
     }
 }
 
-/// 命令行上的写法：`can-exit`、`can-relay`、`can-forward`、`relay-address`、`throughput-tests`、`profile`、`network`、`firewall`。
+/// 命令行上的写法：`can-exit`、`can-relay`、`can-forward`、`relay-address`、`throughput-tests`、`profile`、`network`、`firewall`、`mtu`。
 impl FromStr for Setting {
     type Err = anyhow::Error;
 
@@ -315,6 +331,7 @@ impl FromStr for Setting {
             "profile" => Ok(Self::Profile),
             "network" => Ok(Self::Network),
             "firewall" => Ok(Self::Firewall),
+            "mtu" => Ok(Self::Mtu),
             other => other.parse().map(Self::Declare).map_err(|_| anyhow::anyhow!((texts().unknown_setting)(other))),
         }
     }
@@ -330,6 +347,7 @@ impl fmt::Display for Setting {
             Self::Profile => f.write_str("profile"),
             Self::Network => f.write_str("network"),
             Self::Firewall => f.write_str("firewall"),
+            Self::Mtu => f.write_str("mtu"),
         }
     }
 }
@@ -346,6 +364,7 @@ pub enum Change {
     Profile(Profile),
     Network(bool),
     Firewall(bool),
+    Mtu(u16),
 }
 
 impl Change {
@@ -359,11 +378,12 @@ impl Change {
             Self::Profile(_) => Setting::Profile,
             Self::Network(_) => Setting::Network,
             Self::Firewall(_) => Setting::Firewall,
+            Self::Mtu(_) => Setting::Mtu,
         }
     }
 }
 
-/// 命令行上的写法：`on`、`off`，档位的名字，或者地址。
+/// 命令行上的写法：`on`、`off`，档位的名字，地址，或者字节数。
 impl fmt::Display for Change {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -371,6 +391,7 @@ impl fmt::Display for Change {
                 f.write_str(if *on { "on" } else { "off" })
             }
             Self::Profile(profile) => f.write_str(profile.spelling()),
+            Self::Mtu(mtu) => mtu.fmt(f),
             Self::RelayAddress(Some(address)) => address.fmt(f),
             Self::RelayAddress(None) => f.write_str("off"),
         }
@@ -557,11 +578,19 @@ pub struct Network {
     /// 程序加不加那两条防火墙规则（像 Tailscale 的 `--netfilter-mode`）。关着时一条规则也不碰。
     #[serde(default = "default_true")]
     pub firewall: bool,
+    /// 网卡的 MTU，字节（`i3t set mtu`）。默认 [`i3t_vnet::DEFAULT_MTU`]，要在 [`i3t_vnet::MTU_RANGE`] 里。
+    /// 只管这台机器的网卡：别的节点设得不一样也通。重启之后生效。
+    #[serde(default = "default_mtu")]
+    pub mtu: u16,
+}
+
+const fn default_mtu() -> u16 {
+    i3t_vnet::DEFAULT_MTU
 }
 
 impl Default for Network {
     fn default() -> Self {
-        Self { enabled: true, firewall: true }
+        Self { enabled: true, firewall: true, mtu: default_mtu() }
     }
 }
 
@@ -741,7 +770,7 @@ mod tests {
 
     #[test]
     fn the_network_is_on_by_default_and_both_switches_keep_the_comments() {
-        assert_eq!(Config::default().network, Network { enabled: true, firewall: true });
+        assert_eq!(Config::default().network, Network { enabled: true, firewall: true, mtu: 1280 });
         assert_eq!(Config::parse("[network]\n").unwrap().network, Network::default(), "没写就是开着");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -752,12 +781,54 @@ mod tests {
         assert!(!Config::load(&path).unwrap().network.enabled);
         let firewall: Setting = "firewall".parse().unwrap();
         Config::set(&path, firewall.change("off").unwrap()).unwrap();
-        assert_eq!(Config::load(&path).unwrap().network, Network { enabled: false, firewall: false });
+        assert_eq!(Config::load(&path).unwrap().network, Network { enabled: false, firewall: false, mtu: 1280 });
         Config::set(&path, network.change("on").unwrap()).unwrap();
         Config::set(&path, firewall.change("on").unwrap()).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), texts().template);
         assert!(error_of("[network]\nenable = true\n").contains("enable"));
         assert!("intercept".parse::<Setting>().is_err(), "透明访问的开关没有了");
+    }
+
+    #[test]
+    fn the_adapter_mtu_is_a_local_setting_within_its_range() {
+        assert_eq!(Config::parse("[network]\nmtu = 1400\n").unwrap().network, Network { mtu: 1400, ..Network::default() });
+        for bad in ["575", "1501", "0"] {
+            let error = error_of(&format!("[network]\nmtu = {bad}\n"));
+            assert!(error.contains(&(texts().bad_mtu)(bad)), "{bad}: {error}");
+        }
+        let mtu: Setting = "mtu".parse().unwrap();
+        assert_eq!((mtu, mtu.to_string()), (Setting::Mtu, "mtu".to_owned()));
+        assert_eq!(mtu.change("576").unwrap(), Change::Mtu(576));
+        assert_eq!(mtu.change("1500").unwrap().to_string(), "1500");
+        for bad in ["575", "1501", "on", "-1", "70000", ""] {
+            assert_eq!(mtu.change(bad).unwrap_err().to_string(), (texts().bad_mtu)(bad), "{bad}");
+        }
+
+        // 模板里的那一行原地改，别的字节不动。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::set(&path, mtu.change("1400").unwrap()).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), texts().template.replace("mtu = 1280", "mtu = 1400"));
+        assert_eq!(Config::load(&path).unwrap().network.mtu, 1400);
+    }
+
+    #[test]
+    fn a_setting_whose_section_is_missing_gets_a_section_of_its_own() {
+        // 更早的版本写的配置文件里没有 [network]：加成一节，不是一行 `network = { … }`；已经写成那样的照样改得了。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "# 我的节点\nport = 20444\n\n[log]\nlevel = \"info\"\n").unwrap();
+        Config::set(&path, Change::Network(false)).unwrap();
+        Config::set(&path, Change::Mtu(1400)).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.ends_with("[network]\nenabled = false\nmtu = 1400\n"), "{text}");
+        assert!(text.starts_with("# 我的节点\nport = 20444\n\n[log]\n"), "原来的内容不动：{text}");
+        assert_eq!(Config::load(&path).unwrap().network, Network { enabled: false, firewall: true, mtu: 1400 });
+
+        fs::write(&path, "network = { enabled = false, firewall = false }\n").unwrap();
+        Config::set(&path, Change::Network(true)).unwrap();
+        Config::set(&path, Change::Mtu(1200)).unwrap();
+        assert_eq!(Config::load(&path).unwrap().network, Network { enabled: true, firewall: false, mtu: 1200 });
     }
 
     #[test]

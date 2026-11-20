@@ -34,10 +34,6 @@ use tokio::task::JoinHandle;
 
 use crate::config::Network;
 
-/// 换掉网卡的 MTU（[`i3t_vnet::MTU`]），只给对比测量用：同一条路上量不同的 MTU，网卡的 MTU 怎么定的数就是这样量出来的
-/// （和 `I3T_CONGESTION` 一样，不是给使用者的设置）。不在 68 到 9000 之间的值不认。
-const MTU_SWITCH: &str = "I3T_VNET_MTU";
-
 /// 装着、或者因为重叠或网卡坏了没装的时候，隔多久再查一次。读一遍网卡的地址（Linux 上再加一个 `ip` 命令），几毫秒的 CPU；
 /// 机器后来进了一个重叠的网络时，最多这么久它就不再被切断。
 const RECHECK: Duration = Duration::from_secs(5);
@@ -77,7 +73,7 @@ impl Vnet {
             status_tx.send_replace(Status::of(VnetState::Unsupported));
             None
         } else {
-            let parts = Parts { netmap, endpoint, counters: Arc::clone(&counters), firewall: network.firewall };
+            let parts = Parts { netmap, endpoint, counters: Arc::clone(&counters), firewall: network.firewall, mtu: network.mtu };
             Some(tokio::spawn(supervise(parts, status_tx, stop)))
         };
         Self { status, counters, stop: Mutex::new(Some(stop_tx)), task: Mutex::new(task) }
@@ -163,6 +159,8 @@ struct Parts {
     endpoint: Arc<Endpoint>,
     counters: Arc<Counters>,
     firewall: bool,
+    /// 网卡的 MTU（本机配置的 `[network] mtu`）。
+    mtu: u16,
 }
 
 /// 装上、跟着 netmap 改、隔一阵再查地址段的重叠、收到停止就拆掉。
@@ -301,13 +299,7 @@ impl Session {
             Ok(None) => {}
             Err(error) => return Err(setup::cause(error)),
         }
-        let mut spec = DeviceSpec::new(platform, own, cidr, std::env::current_exe().ok().as_deref());
-        if let Some(mtu) =
-            std::env::var(MTU_SWITCH).ok().and_then(|value| value.parse::<u16>().ok()).filter(|mtu| (68..=9000).contains(mtu))
-        {
-            tracing::info!(mtu, "按 {MTU_SWITCH} 换了网卡的 MTU（对比测量用）");
-            spec.mtu = mtu;
-        }
+        let spec = DeviceSpec::new(platform, own, cidr, std::env::current_exe().ok().as_deref()).with_mtu(parts.mtu);
         let mtu = spec.mtu;
         let tun = tokio::task::spawn_blocking(move || Tun::create(&spec))
             .await
@@ -554,7 +546,7 @@ mod tests {
         let key = Arc::new(i3t_crypto::NodeKey::generate().unwrap());
         let config = i3t_conn::EndpointConfig { key, bind: "127.0.0.1:0".parse().unwrap(), netmap: rx.clone(), addr_servers: Vec::new() };
         let endpoint = Arc::new(Endpoint::bind(config).unwrap());
-        let vnet = Vnet::start(Network { enabled: false, firewall: true }, rx, endpoint);
+        let vnet = Vnet::start(Network { enabled: false, ..Network::default() }, rx, endpoint);
         assert_eq!(vnet.report().state, VnetState::Off);
         assert_eq!(vnet.report().firewall, Firewall::default());
         vnet.stop().await;

@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use ipnet::Ipv4Net;
 
-use crate::{DEVICE_PATTERN, MTU};
+use crate::{DEFAULT_MTU, DEVICE_PATTERN};
 
 /// 引擎和网卡之间的接缝：一次读一个包，一次写一个包。
 pub trait Device: Send + Sync + 'static {
@@ -67,6 +67,7 @@ pub struct DeviceSpec {
     pub address: Ipv4Addr,
     /// 网络地址段的前缀长度：地址带着它，系统就有一条地址段走这块网卡的路由。
     pub prefix: u8,
+    /// 默认是 [`DEFAULT_MTU`]，本机另外设了时是设的值（[`DeviceSpec::with_mtu`]）。
     pub mtu: u16,
     /// Windows：Wintun 的驱动文件在哪里（程序旁边）。
     pub driver: Option<PathBuf>,
@@ -86,7 +87,14 @@ impl DeviceSpec {
             Platform::Windows => program.map(|program| program.with_file_name(WINTUN_DLL)),
             Platform::Linux | Platform::MacOs | Platform::Other => None,
         };
-        Self { platform, name, address: own, prefix: cidr.prefix_len(), mtu: MTU, driver }
+        Self { platform, name, address: own, prefix: cidr.prefix_len(), mtu: DEFAULT_MTU, driver }
+    }
+
+    /// 换一个 MTU（本机配置里设的）。调用方保证它在 [`crate::MTU_RANGE`] 里：配置文件读进来时查过。
+    #[must_use]
+    pub const fn with_mtu(mut self, mtu: u16) -> Self {
+        self.mtu = mtu;
+        self
     }
 
     /// 装上之后系统里那条路由：地址段走这块网卡。
@@ -240,6 +248,8 @@ mod tests {
         assert_eq!(linux.name.as_deref(), Some("i3t%d"), "Linux 上内核挑编号");
         assert_eq!((linux.address, linux.prefix, linux.mtu, linux.driver.as_ref()), (own, 16, 1280, None));
         assert_eq!(linux.route(), cidr());
+        assert_eq!(linux.clone().with_mtu(1400), DeviceSpec { mtu: 1400, ..linux.clone() }, "本机设了别的 MTU：只有它变");
+        assert!(crate::MTU_RANGE.contains(&DEFAULT_MTU) && *crate::MTU_RANGE.end() == 1500);
 
         let windows = DeviceSpec::new(Platform::Windows, own, cidr(), Some(Path::new(r"C:\ice3tier\i3t.exe")));
         assert_eq!(windows.name.as_deref(), Some("i3t0"));

@@ -82,7 +82,7 @@ pub(crate) fn status(state: &StateDir, live: Option<&LiveStatus>) {
                 fields.add(t.guard_table, format!("table ip {table}"));
             }
         }
-        Err(error) => fields.add(t.guard_table, (t.unreadable)(&said(error))),
+        Err(error) => fields.add(t.guard_table, unreadable(error)),
     }
     match &survey.accept {
         Ok(rules) => {
@@ -90,7 +90,7 @@ pub(crate) fn status(state: &StateDir, live: Option<&LiveStatus>) {
                 fields.add(t.accept_rule, (t.accept_at)(&rule.device, rule.position));
             }
         }
-        Err(error) => fields.add(t.accept_rule, (t.unreadable)(&said(error))),
+        Err(error) => fields.add(t.accept_rule, unreadable(error)),
     }
     let legacy = (platform == Platform::Linux).then(|| legacy::Leftover::find(&mut Shell).ok()).flatten().filter(|found| !found.is_empty());
     if let Some(found) = legacy {
@@ -114,6 +114,14 @@ pub(crate) fn status(state: &StateDir, live: Option<&LiveStatus>) {
 }
 
 /// 一个命令为什么失败：程序自己的原话；没有这个程序时按代码写。
+/// 一样东西读不出来时写什么。系统里没有那个程序时只说它没有：那不是权限的事。
+fn unreadable(error: &CommandError) -> String {
+    match error {
+        CommandError::Missing(_) => said(error),
+        CommandError::Failed { .. } | CommandError::Io { .. } => (texts().network.unreadable)(&said(error)),
+    }
+}
+
 fn said(error: &CommandError) -> String {
     match error {
         CommandError::Missing(program) => {

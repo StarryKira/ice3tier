@@ -122,8 +122,8 @@ fn command(lang: Lang) -> clap::Command {
         .mut_subcommand("run", |sub| sub.about(h.run).mut_arg("static", |arg| arg.help(h.run_static).value_name(v.file)))
         .mut_subcommand("set", |sub| {
             sub.about(h.set)
-                .mut_arg("setting", |arg| arg.value_name("can-exit|can-relay|relay-address|throughput-tests|profile|network|firewall"))
-                .mut_arg("value", |arg| arg.value_name("on|off|low-footprint|balanced|high-throughput|IP:PORT"))
+                .mut_arg("setting", |arg| arg.value_name("can-exit|can-relay|relay-address|throughput-tests|profile|network|firewall|mtu"))
+                .mut_arg("value", |arg| arg.value_name("on|off|low-footprint|balanced|high-throughput|IP:PORT|576-1500"))
         })
         .mut_subcommand("status", |sub| sub.about(h.status))
         .mut_subcommand("routes", |sub| sub.about(h.routes))
@@ -221,7 +221,8 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 | Change::RelayAddress(_)
                 | Change::ThroughputTests(_)
                 | Change::Network(true)
-                | Change::Firewall(true) => {}
+                | Change::Firewall(true)
+                | Change::Mtu(_) => {}
             }
         }
         Command::Status => {
@@ -451,6 +452,7 @@ mod tests {
         assert!(parse(&["i3t", "connect", "nas", "22"]).is_err(), "i3t connect 去掉了：有虚拟网卡，直接连虚拟 IP");
         assert!(matches!(parse(&["i3t", "set", "network", "off"]).unwrap().command, Command::Set { setting: Setting::Network, .. }));
         assert!(matches!(parse(&["i3t", "set", "firewall", "off"]).unwrap().command, Command::Set { setting: Setting::Firewall, .. }));
+        assert!(matches!(parse(&["i3t", "set", "mtu", "1400"]).unwrap().command, Command::Set { setting: Setting::Mtu, .. }));
         assert!(parse(&["i3t", "set", "intercept", "on"]).is_err(), "透明访问的开关没有了");
         assert!(matches!(parse(&["i3t", "network", "status"]).unwrap().command, Command::Network { command: NetworkCommand::Status }));
         assert!(matches!(parse(&["i3t", "hosts", "--apply"]).unwrap().command, Command::Hosts { apply: true, remove: false }));

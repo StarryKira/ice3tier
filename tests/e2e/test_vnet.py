@@ -452,6 +452,40 @@ def restart(lab: Lab, work: Path, t: Checks) -> None:
         print(tail(a.read_log(), 30), tail(b.read_log()), sep="\n  ---\n")
 
 
+def mtu(lab: Lab, work: Path, t: Checks) -> None:
+    """a 把网卡的 MTU 设成允许的最大值 1500（`i3t set mtu`），b 用默认的 1280：两头设得不一样也通，满长的包也送得到。"""
+    a, b = pair(lab, work)
+    for bad in ("575", "1501", "big"):
+        refused = i3t(a, "set", "mtu", bad)
+        t.check(f"i3t set mtu {bad}：不收，说得出范围", refused.returncode != 0 and "576" in refused.stderr and "1500" in refused.stderr,
+                refused.stdout + refused.stderr)
+    done = i3t(a, "set", "mtu", "1500")
+    t.check("i3t set mtu 1500：写下了", done.returncode == 0 and "1500" in done.stdout, done.stdout + done.stderr)
+    start_pair(a, b)
+    if not installed(t, a, b):
+        return
+
+    def link_mtu(node: Node) -> int | None:
+        found = re.search(r"mtu (\d+)", node.host.run("ip", "-o", "link", "show", "i3t0", check=False).stdout)
+        return int(found.group(1)) if found else None
+
+    t.check("a 的网卡是 1500，b 的是默认的 1280", (link_mtu(a), link_mtu(b)) == (1500, 1280), f"{link_mtu(a)} {link_mtu(b)}")
+    status = i3t(a, "network", "status").stdout
+    t.check("a 的状态里写着 MTU 1500", "MTU 1500" in status, status)
+    # 1472 字节的数据加 28 字节的头正好 1500：a 这边不许分片地发出去，连接上一个数据报装不下，切成两片；
+    # b 的网卡只有 1280，照样收得下，回答由 b 的内核切开发回来。
+    full = ping(a, b.virtual_ip, "-M", "do", "-s", "1472")
+    t.check("a 发满 1500 字节、不许分片的 ping：b 收得到，回得来", received(full) == 3, full.stdout + full.stderr)
+    over = ping(a, b.virtual_ip, "-M", "do", "-s", "1473", count=1)
+    t.check("再大一个字节：a 自己的内核就说太大，不发", received(over) == 0, over.stdout + over.stderr)
+    back = ping(b, a.virtual_ip, "-M", "do", "-s", "1252")
+    t.check("b 发满 1280 字节的 ping：通", received(back) == 3, back.stdout + back.stderr)
+    carried(t, a, b, "两头 MTU 不一样（1500 → 1280）")
+    carried(t, b, a, "两头 MTU 不一样（1280 → 1500）")
+    if t.failures:
+        print(tail(a.read_log(), 30), tail(b.read_log()), sep="\n  ---\n")
+
+
 def forward(lab: Lab, work: Path, t: Checks) -> None:
     """a 的虚拟 IP 上两条端口转发：8080 转给 a 自己回环上的服务，8082 转给 b 回环上的服务。b 经虚拟网卡连它们。"""
     a, b = pair(lab, work)
@@ -556,8 +590,8 @@ def legacy(lab: Lab, work: Path, t: Checks) -> None:
 
 SCENARIOS = {
     "basics": basics, "rules": rules, "relay": relay, "tcp_relay": tcp_relay, "nat": nat, "firewall": firewall, "privilege": privilege,
-    "overlap": overlap, "appears": appears, "leftover": leftover, "restart": restart, "forward": forward, "managed": managed,
-    "legacy": legacy,
+    "overlap": overlap, "appears": appears, "leftover": leftover, "restart": restart, "mtu": mtu, "forward": forward,
+    "managed": managed, "legacy": legacy,
 }
 
 

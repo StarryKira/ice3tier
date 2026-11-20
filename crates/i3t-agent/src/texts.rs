@@ -25,6 +25,7 @@ pub(crate) struct Texts {
     pub(crate) not_a_switch: fn(&str) -> String,
     pub(crate) unknown_profile: fn(&str) -> String,
     pub(crate) bad_relay_address: fn(&str) -> String,
+    pub(crate) bad_mtu: fn(&str) -> String,
     pub(crate) performance_range: fn(&str, u64, u64) -> String,
     pub(crate) not_an_address: fn(&str) -> String,
     pub(crate) create_state_dir: fn(&Path) -> String,
@@ -87,13 +88,14 @@ static ZH: Texts = Texts {
     metrics_not_loopback: |addr| format!("metrics.listen = \"{addr}\" 不是回环地址：指标接口没有认证，只能写 127.0.0.1 或 [::1]。"),
     same_proxy_address: |addr| format!("proxy.socks5 和 proxy.http 不能用同一个地址 {addr}"),
     unknown_setting: |other| {
-        format!("没有设置项 {other}：可以写 can-exit、can-relay、relay-address、throughput-tests、profile、network、firewall")
+        format!("没有设置项 {other}：可以写 can-exit、can-relay、relay-address、throughput-tests、profile、network、firewall、mtu")
     },
     not_a_switch: |other| format!("\"{other}\" 不是开关的值：写 on 或 off"),
     unknown_profile: |other| format!("没有档位 \"{other}\"：可以写 low-footprint、balanced、high-throughput"),
     bad_relay_address: |text| {
         format!("\"{text}\" 不能作为中继地址：写别的节点连得上的“地址:端口”，比如 \"203.0.113.9:40330\"，或者 \"off\"")
     },
+    bad_mtu: |text| format!("虚拟网卡的 MTU 不能是 \"{text}\"：写 576 到 1500 之间的字节数（默认 1280）"),
     performance_range: |key, low, high| format!("performance.{key} 要在 {low} 到 {high} 之间"),
     not_an_address: |text| format!("\"{text}\" 不是地址：写成 \"127.0.0.1:1080\" 这样的“地址:端口”，或者 \"off\""),
     create_state_dir: |path| format!("创建状态目录 {}", path.display()),
@@ -145,13 +147,16 @@ static EN: Texts = Texts {
     },
     same_proxy_address: |addr| format!("proxy.socks5 and proxy.http can't share the address {addr}"),
     unknown_setting: |other| {
-        format!("No setting {other}: possible values: can-exit, can-relay, relay-address, throughput-tests, profile, network, firewall")
+        format!(
+            "No setting {other}: possible values: can-exit, can-relay, relay-address, throughput-tests, profile, network, firewall, mtu"
+        )
     },
     not_a_switch: |other| format!("\"{other}\" isn't a switch value: write on or off"),
     unknown_profile: |other| format!("No profile \"{other}\": possible values: low-footprint, balanced, high-throughput"),
     bad_relay_address: |text| {
         format!("\"{text}\" can't be a relay address: write an address:port other nodes can reach, e.g. \"203.0.113.9:40330\", or \"off\"")
     },
+    bad_mtu: |text| format!("The virtual adapter's MTU can't be \"{text}\": write a number of bytes from 576 to 1500 (default 1280)"),
     performance_range: |key, low, high| format!("performance.{key} must be between {low} and {high}"),
     not_an_address: |text| format!("\"{text}\" isn't an address: write \"127.0.0.1:1080\" (address:port) or \"off\""),
     create_state_dir: |path| format!("Creating the state directory {}", path.display()),
@@ -233,6 +238,9 @@ enabled = true
 # 防火墙：放行从虚拟网卡进来的、丢掉从别的网卡进来却自称来自虚拟地址段的（Linux），放行虚拟地址段（Windows）。
 # 写 false（i3t set firewall off）程序就一条规则也不碰，从虚拟网卡进来的由这台机器自己的防火墙管。
 firewall = true
+# 网卡的 MTU（字节，576 到 1500；i3t set mtu 1280）。只管这台机器的网卡，别的节点设得不一样也通。
+# 一般不用动：比 1280 大，包多半要切成两片发，反而慢；底下的线路包长特别小时才值得调小。
+mtu = 1280
 
 [log]
 # 日志级别：error、warn、info、debug、trace。
@@ -293,6 +301,9 @@ enabled = true
 # Firewall: accept what arrives on the adapter and drop packets claiming the virtual range from other interfaces (Linux),
 # accept the virtual range (Windows). false (i3t set firewall off) makes the program touch no rules at all.
 firewall = true
+# The adapter's MTU (bytes, 576 to 1500; i3t set mtu 1280). It is this machine's adapter only: other nodes may differ.
+# Rarely worth changing: above 1280 most packets go as two pieces and get slower; go lower only on lines with very small packets.
+mtu = 1280
 
 [log]
 # Log level: error, warn, info, debug, trace.
@@ -329,6 +340,7 @@ mod tests {
             (EN.proxy_not_loopback)("proxy.http", "0.0.0.0:1081"),
             (EN.metrics_not_loopback)("0.0.0.0:1"),
             (EN.unknown_setting)("x"),
+            (EN.bad_mtu)("x"),
             (EN.enroll_rejected)("x"),
             (EN.connect.tcp)("ctl:1"),
             EN.not_a_token.to_owned(),
