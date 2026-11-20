@@ -2,6 +2,14 @@
 
 The node, the controller, the command line and the web UI share one version number.
 
+## 0.1.33 (2026-11-20)
+
+- One-line install on Linux and macOS: `curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh` installs the node as a service (a systemd unit running as its own user on Linux, a launchd daemon on macOS); `sudo i3t join` then joins and starts it. `--controller` installs the controller as a systemd unit.
+- New `i3t network cleanup`: removes firewall rules left by a node that was killed. The systemd unit runs it whenever the node stops.
+- A node that cannot run (not joined, invalid `config.toml`, revoked or no longer known to the controller) exits with status 78, and the systemd unit no longer restarts it every 2 seconds.
+- Web UI: node pickers show each node's flag; a node that cannot be picked is listed last, with the reason on its row.
+- Upgrade nodes and the controller.
+
 ## 0.1.32 (2026-11-20)
 
 - Web UI: the virtual network card of a node says "Ready" when the adapter is installed.
