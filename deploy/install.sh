@@ -936,6 +936,17 @@ uninstall_node() {
     if [ "$OS" = "macos" ]; then
         log "Stopping and removing the launchd daemon"
         $SUDO launchctl bootout "system/${LAUNCHD_LABEL}" 2>/dev/null || true
+        # bootout returns while the node is still shutting down (it removes its adapter first): wait for it to exit
+        # before its program is deleted, as `systemctl disable --now` does on Linux.
+        i=0
+        while pgrep -f "${NODE_BIN_DIR}/i3t run" >/dev/null 2>&1; do
+            i=$((i + 1))
+            if [ "$i" -gt 30 ]; then
+                warn "the node is still running 30 s after it was told to stop"
+                break
+            fi
+            sleep 1
+        done
         $SUDO rm -f "$LAUNCHD_PLIST" "$NEWSYSLOG_CONF"
     elif has_systemd; then
         log "Stopping and disabling i3t.service"
