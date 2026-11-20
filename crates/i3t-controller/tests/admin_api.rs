@@ -1246,7 +1246,10 @@ async fn enabling_a_relay_answers_with_a_reachability_check_that_only_advises() 
     assert!(enabled.reachability[0].rtt_ms.is_some() && enabled.reachability[1].error.is_some());
     assert_eq!(enabled.reachability[0].cause, None);
     assert_eq!(enabled.reachability[1].cause, Some(model::ReachCause::Timeout), "UDP 的地址查询没有回答");
-    assert_eq!(enabled.reachability[3].cause, Some(model::ReachCause::Refused), "TCP 端口上没有程序在听");
+    // 127.0.0.2 在 Linux 和 Windows 上是本机的回环地址，端口上没有程序在听，连接被拒绝（Windows 上要两秒左右才报出来）。
+    // macOS 的回环网卡上只有 127.0.0.1，发往 127.0.0.2 的连接没有回音，等到超时。
+    let closed_tcp = if cfg!(target_os = "macos") { model::ReachCause::Timeout } else { model::ReachCause::Refused };
+    assert_eq!(enabled.reachability[3].cause, Some(closed_tcp), "TCP 端口上没有程序在听");
 }
 
 #[tokio::test]

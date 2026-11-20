@@ -77,27 +77,29 @@ async fn ask_address(addr: SocketAddr) -> Result<(), (String, ReachCause)> {
 }
 
 async fn check_tcp(addr: SocketAddr) -> Reachability {
-    let started = Instant::now();
+    // 最近一次连接失败的原因，时限到了拿它说明为什么连不上。不在时限到了之后另试一次短的：Windows 上被拒绝的连接
+    // 要两秒左右才报出来，短的那一次只会看到"超时"。
+    let mut last_error = None;
     let attempt = async {
         loop {
             let tried = Instant::now();
             match TcpStream::connect(addr).await {
                 Ok(_stream) => return tried.elapsed(),
-                Err(_) => time::sleep(TCP_RETRY).await,
+                Err(error) => {
+                    last_error = Some(error);
+                    time::sleep(TCP_RETRY).await;
+                }
             }
         }
     };
-    match time::timeout(CHECK_TIMEOUT, attempt).await {
+    let outcome = time::timeout(CHECK_TIMEOUT, attempt).await;
+    match outcome {
         Ok(rtt) => reached(Transport::Tcp, addr, rtt),
-        Err(_) => {
-            // 时限到了，再试一次拿到具体的原因。
-            let (reason, cause) = match time::timeout(Duration::from_millis(500), TcpStream::connect(addr)).await {
-                Ok(Err(error)) => (error.to_string(), cause_of(&error)),
-                Ok(Ok(_)) => return reached(Transport::Tcp, addr, started.elapsed()),
-                Err(_) => ("连接超时".to_owned(), ReachCause::Timeout),
-            };
-            failed(Transport::Tcp, addr, reason, cause)
-        }
+        // 一次失败都没有等到：连接一直没有回音。
+        Err(_) => match last_error {
+            Some(error) => failed(Transport::Tcp, addr, error.to_string(), cause_of(&error)),
+            None => failed(Transport::Tcp, addr, "连接超时".to_owned(), ReachCause::Timeout),
+        },
     }
 }
 
