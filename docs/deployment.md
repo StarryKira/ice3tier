@@ -16,7 +16,7 @@ This guide takes you from nothing to a working network. Follow the steps in orde
 | -------------------------------------------- | ------------------------------------------------------------------------ | --------------- |
 | Controller (`i3t-controller`) and `i3tctl`   | A Linux machine every node can reach, usually a server with a public address | One             |
 | Node (`i3t`)                                 | Every machine you want in the network                                    | One per machine |
-| Relay                                        | A node that other nodes can reach, usually on the same server            | At least one    |
+| Relay                                        | A node that other nodes can reach                                        | At least one    |
 
 ## Before you start
 
