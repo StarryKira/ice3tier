@@ -231,10 +231,14 @@ async fn a_framed_part_cut_short_by_the_client_reaches_the_target_as_a_reset() {
         tokio::spawn(async move { flow.relay_framed(far, future::pending(), &i3t_flow::Unmetered, &mut FirstBytes { left: 100 }).await });
 
     client.write_all(b"only part").await.unwrap();
-    client.shutdown().await.unwrap();
     let mut target = world.accept_target().await;
-    let (received, end) = drain(&mut target).await;
-    assert_eq!(received, b"only part");
+    let mut received = [0; 9];
+    timeout(PATIENCE, target.read_exact(&mut received)).await.unwrap().unwrap();
+    assert_eq!(&received, b"only part");
+    // 目标先读走已经到的部分，客户端才结束：Windows 收到 RST 时会丢掉还没读走的数据，那样就看不到这一部分了。
+    client.shutdown().await.unwrap();
+    let (rest, end) = drain(&mut target).await;
+    assert!(rest.is_empty(), "{rest:?}");
     assert_reset(&end);
     assert!(matches!(ingress.await.unwrap().end, End::Tcp(ref error) if error.kind() == io::ErrorKind::UnexpectedEof));
     assert!(!world.exit_summary().await.end.is_clean());
@@ -406,9 +410,11 @@ async fn a_peer_that_stops_reading_ends_the_relay_abnormally_even_after_a_comple
     peer.send.write_all(&encoded(&Reply::ok())).await.unwrap();
     peer.send.write_all(b"complete response").await.unwrap();
     peer.send.shutdown().await.unwrap();
-    let mut response = [0; 17];
-    client.read_exact(&mut response).await.unwrap();
-    assert_eq!(&response, b"complete response");
+    // 回复那个方向正常结束，客户端读到的就是正常结束。要在下面的重置之前读：FIN 之后又收到 RST 时，
+    // Linux 照样报正常结束，macOS 报连接被重置。
+    let (response, end) = drain(&mut client).await;
+    assert_eq!(response, b"complete response");
+    end.expect("回复是完整的");
     peer.recv.stop(code(Reason::TargetError));
     client.write_all(b"upload that goes nowhere").await.unwrap();
 
@@ -416,10 +422,7 @@ async fn a_peer_that_stops_reading_ends_the_relay_abnormally_even_after_a_comple
     assert!(matches!(summary.end, End::Aborted(StreamAborted::Stopped(c)) if c == code(Reason::TargetError)), "{:?}", summary.end);
     assert_eq!(summary.from_flow.bytes, 17);
 
-    // 回复那个方向在这之前已经正常结束，客户端读到的就是正常结束；被重置的是它的上传，再写就会出错。
-    let (rest, end) = drain(&mut client).await;
-    assert!(rest.is_empty());
-    end.expect("回复是完整的");
+    // 被重置的是客户端的上传，再写就会出错。Windows 报的是 ConnectionAborted。
     let broken = timeout(PATIENCE, async {
         loop {
             if let Err(error) = client.write_all(b"more upload").await {
@@ -430,7 +433,8 @@ async fn a_peer_that_stops_reading_ends_the_relay_abnormally_even_after_a_comple
     })
     .await
     .expect("客户端的上传方向应该已经被重置");
-    assert!(matches!(broken.kind(), io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset), "{broken:?}");
+    let reset_kinds = [io::ErrorKind::BrokenPipe, io::ErrorKind::ConnectionReset, io::ErrorKind::ConnectionAborted];
+    assert!(reset_kinds.contains(&broken.kind()), "{broken:?}");
 }
 
 #[tokio::test]

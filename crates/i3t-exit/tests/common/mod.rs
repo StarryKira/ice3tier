@@ -165,8 +165,7 @@ pub struct FakeSystem {
 }
 
 struct FakeState {
-    /// `None` 时用真的网卡。
-    interfaces: Option<Vec<IpNet>>,
+    interfaces: Vec<IpNet>,
     names: HashMap<String, Result<Vec<IpAddr>, ResolveError>>,
     redirects: HashMap<SocketAddr, SocketAddr>,
     resolved: Vec<String>,
@@ -179,7 +178,7 @@ impl Default for FakeSystem {
     fn default() -> Self {
         let interfaces = vec!["127.0.0.1/8".parse().unwrap(), "192.168.77.5/24".parse().unwrap()];
         let state = FakeState {
-            interfaces: Some(interfaces),
+            interfaces,
             names: HashMap::new(),
             redirects: HashMap::new(),
             resolved: Vec::new(),
@@ -191,13 +190,9 @@ impl Default for FakeSystem {
 }
 
 impl FakeSystem {
-    /// 用这台机器真的网卡：测"本节点自己的服务"时要真的连到本机的非回环地址上。
-    pub fn use_real_interfaces(&self) {
-        self.state.lock().unwrap().interfaces = None;
-    }
-
+    /// 换掉网卡的地址。连接照样只看地址是不是这台机器真的有：要测"本节点自己的服务"时，放进去一个真的非回环地址。
     pub fn set_interfaces(&self, interfaces: &[&str]) {
-        self.state.lock().unwrap().interfaces = Some(interfaces.iter().map(|net| net.parse().unwrap()).collect());
+        self.state.lock().unwrap().interfaces = interfaces.iter().map(|net| net.parse().unwrap()).collect();
     }
 
     /// 让 `name` 解析成这些地址。没有安排过的域名一律"不存在"。
@@ -233,10 +228,7 @@ impl FakeSystem {
 
 impl System for FakeSystem {
     fn interfaces(&self) -> io::Result<Vec<IpNet>> {
-        match self.state.lock().unwrap().interfaces.clone() {
-            Some(interfaces) => Ok(interfaces),
-            None => Os.interfaces(),
-        }
+        Ok(self.state.lock().unwrap().interfaces.clone())
     }
 
     async fn resolve(&self, name: &str) -> Result<Vec<IpAddr>, ResolveError> {
@@ -484,14 +476,17 @@ pub async fn echo_server() -> SocketAddr {
 
 /// 一个没有人监听、连过去被拒绝的本机端口，在这个测试进程结束之前一直如此。
 ///
-/// 端口由一个只绑定、不监听的 socket 占着：连它被内核当场拒绝，别的 socket 也绑不到它。以前是绑一下就放掉，
-/// 跑满整个工作区的测试时偶尔有别的测试的监听正好拿到这个端口，连过去就连上了，对面随后正常关掉，
-/// 客户端看到的是正常结束而不是"被拒绝"之后的重置。socket 故意不关：几个文件描述符，换来端口不会被别人拿走。
+/// 端口由一条本机连接的发起那一头占着：连接一直开着，别的 socket 绑不到这个端口；发到这个端口的新连接找不到监听，
+/// 三个系统的内核都回 RST（Windows 要重试两秒左右才报出来）。不用只绑定、不监听的 socket 占着：Linux 和 Windows
+/// 对它回 RST，macOS 却把 SYN 悄悄丢掉，连接一直等到超时。也不能绑一下就放掉：跑满整个工作区的测试时偶尔有别的测试的
+/// 监听正好拿到这个端口，连过去就连上了，客户端看到的是正常结束而不是"被拒绝"之后的重置。
+/// 两头的 socket 故意不关：几个文件描述符，换来端口不会被别人拿走。用阻塞的 socket：回环上建连当场完成。
 pub async fn closed_port() -> SocketAddr {
-    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
-    socket.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into()).unwrap();
-    let addr = socket.local_addr().unwrap().as_socket().unwrap();
-    std::mem::forget(socket);
+    let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let holder = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (accepted, _) = listener.accept().unwrap();
+    let addr = holder.local_addr().unwrap();
+    std::mem::forget((holder, accepted));
     addr
 }
 

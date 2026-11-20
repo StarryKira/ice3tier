@@ -5,19 +5,19 @@
 
 mod common;
 
-use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use common::{Running, fast_timing};
 use i3t_controller::node_server::CLIENT_HELLO_TIMEOUT;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpSocket, TcpStream};
+use tokio::net::TcpStream;
 use tokio::time::timeout;
 
-/// 从回环网段里的 `source` 这个地址连 `to`。Linux 上整个 127.0.0.0/8 都是本机，可以拿来装成不同的来源。
-async fn connect_from(source: [u8; 4], to: SocketAddr) -> TcpStream {
-    let socket = TcpSocket::new_v4().unwrap();
-    socket.bind(SocketAddr::from((source, 0))).unwrap();
+/// 从回环网段里的 `source` 这个地址连 `to`。Linux 和 Windows 上整个 127.0.0.0/8 都是本机，可以拿来装成不同的来源。
+#[cfg(not(target_os = "macos"))]
+async fn connect_from(source: [u8; 4], to: std::net::SocketAddr) -> TcpStream {
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind(std::net::SocketAddr::from((source, 0))).unwrap();
     socket.connect(to).await.unwrap()
 }
 
@@ -65,6 +65,9 @@ async fn idle_connections_do_not_lock_registered_nodes_out() {
     assert!(count_closed(&mut idle).await >= 300 - 16, "同一个来源最多留 16 条还没报到的连接");
 }
 
+/// 要两个不同的本机来源。macOS 的回环网卡上只有 127.0.0.1，没有第二个回环地址可用，那里不跑；
+/// 按来源记账的逻辑在 `gate` 的单元测试里，各个系统上都查。
+#[cfg(not(target_os = "macos"))]
 #[tokio::test]
 async fn a_flood_from_one_source_is_trimmed_without_touching_other_sources() {
     let running = Running::start(fast_timing()).await;

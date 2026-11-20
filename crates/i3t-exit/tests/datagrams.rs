@@ -356,9 +356,12 @@ async fn only_the_client_that_made_the_association_may_use_its_relay_port() {
     let (_, exit_port) = target.recv().await;
     let other_port = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     other_port.send_to(&packet, client.relay).await.unwrap();
-    // 别的地址发来的更不认（这里是回环上的另一个地址）。
-    let other_address = UdpSocket::bind("127.0.0.2:0").await.unwrap();
-    other_address.send_to(&packet, client.relay).await.unwrap();
+    // 别的地址发来的更不认（这里是回环上的另一个地址）。macOS 的回环网卡上只有 127.0.0.1，绑不了别的回环地址，
+    // 那里只查别的端口。
+    if !cfg!(target_os = "macos") {
+        let other_address = UdpSocket::bind("127.0.0.2:0").await.unwrap();
+        other_address.send_to(&packet, client.relay).await.unwrap();
+    }
     target.assert_untouched(QUIET).await;
 
     // 回来的报文只发给客户端，不会发给那两个。
@@ -604,6 +607,10 @@ async fn a_udp_forward_on_the_virtual_ip_is_reached_through_the_node_port_withou
     assert_eq!(world.nas.system.udp_destinations(), [service], "去的是转发指向的地址，不是本机的非回环地址");
 }
 
+/// 129 个 SOCKS5 关联同时开着，两头加起来要七百个左右的 socket。macOS 给测试进程的打开文件数的软上限比这低
+/// （Linux 上把上限压到这个范围，失败的样子和那边一模一样），测试进程自己又抬不了（节点程序启动时会抬到系统允许的最大值），
+/// 所以那里不跑。上限的逻辑和系统无关，Linux 和 Windows 上照样查。
+#[cfg(not(target_os = "macos"))]
 #[tokio::test]
 async fn a_peer_may_hold_only_so_many_contexts_at_once() {
     let world = World::new().await;

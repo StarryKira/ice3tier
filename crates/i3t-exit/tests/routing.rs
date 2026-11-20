@@ -87,7 +87,10 @@ i3t_lane::on_both_transports! {
             return;
         };
         let world = World::new().await;
-        world.nas.system.use_real_interfaces();
+        // nas 的网卡只报回环和这一个真的地址（连接照样真的连过去）。出口挨个试本机的非回环地址，Windows 上每个关着的地址
+        // 要两秒左右才报"被拒绝"：机器上的地址一多，下面那个被拒绝的请求就超过了等应答的时限。
+        let lan = format!("{address}/32");
+        world.nas.system.set_interfaces(&["127.0.0.1/8", "::1/128", lan.as_str()]);
         let on_lan_address = Target::bind(&address.to_string()).await.echo();
         let on_loopback_only = echo_server().await;
 

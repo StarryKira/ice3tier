@@ -14,7 +14,7 @@ use common::{
 use i3t_access::ListenState;
 use i3t_model::netmap::ListenerProtocol;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 
 fn public(port: u16) -> String {
@@ -243,10 +243,11 @@ i3t_lane::on_both_transports! {
         assert_echo(&mut through_socks).await;
         assert_eq!(world.socks().await, socks_before);
 
-        // 改地址：旧的关掉，新的起来。
-        world.laptop.update(|netmap| netmap.me.proxies[0].bind = "127.0.0.2:0".parse().unwrap()).await;
+        // 改地址：旧的关掉，新的起来。换的是端口：macOS 的回环网卡上只有 127.0.0.1，换不了 IP。
+        let moved = TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap();
+        world.laptop.update(|netmap| netmap.me.proxies[0].bind = moved).await;
         let socks_after = world.socks().await;
-        assert_eq!(socks_after.ip().to_string(), "127.0.0.2");
+        assert_eq!(socks_after, moved);
         assert!(TcpStream::connect(socks_before).await.is_err());
         let mut through_moved = socks5(socks_after, None, PUBLIC_IP, 443).await.connected();
         assert_echo(&mut through_moved).await;

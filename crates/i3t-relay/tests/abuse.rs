@@ -153,7 +153,10 @@ async fn one_source_cannot_hold_more_than_a_few_tcp_legs_without_a_session() {
     }
     assert_eq!(refused, 12, "同一个来源只留 8 条");
 
-    // 只能走 TCP 的节点从另一个地址来：照样握得上手。
+    // 只能走 TCP 的节点从另一个地址来：照样握得上手。macOS 的回环网卡上只有 127.0.0.1，没有另一个地址可以来，那里只查上面这一半。
+    if cfg!(target_os = "macos") {
+        return;
+    }
     let stream = connect_from("127.0.0.2:0", &relay).await;
     assert_eq!(stream.local_addr().unwrap().ip().to_string(), "127.0.0.2");
     let (read_half, mut write_half) = stream.into_split();
