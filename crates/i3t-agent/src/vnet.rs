@@ -378,6 +378,7 @@ fn log_firewall(firewall: &Firewall) {
                 tracing::warn!(rule, ?cause, "虚拟网卡的防火墙规则装不上，网卡照常；这一条管的事由这台机器自己的防火墙定")
             }
             RuleState::Unsupported => tracing::info!(rule, "这个平台上程序不加这条防火墙规则"),
+            RuleState::NotNeeded => tracing::info!(rule, "这台机器上不需要这条防火墙规则"),
             RuleState::Off | RuleState::Unknown => {}
         }
     }

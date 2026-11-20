@@ -190,6 +190,12 @@ mod tests {
                 accept: RuleState::Failed { cause: VnetCause::ProgramMissing { program: "iptables".into() } },
                 guard: RuleState::Unknown,
             },
+            Firewall { accept: RuleState::NotNeeded, guard: RuleState::On },
+            Firewall {
+                accept: RuleState::NotNeeded,
+                guard: RuleState::Failed { cause: VnetCause::ProgramMissing { program: "nft".into() } },
+            },
+            Firewall { accept: RuleState::NotNeeded, guard: RuleState::Unsupported },
         ];
         out.extend(rules.iter().map(codes.firewall));
         let targets = [
@@ -358,6 +364,21 @@ mod tests {
         let en = Lang::English.codes();
         assert_eq!((en.route_cause)(&RouteCause::NoSharedRelay { hint: None }, names), "No relay serves both ends, via a chain of relays");
         assert_eq!((zh.choice)(ChoiceCode::NoSharedRelay), "没有两端都用得上的中继，经多个中继");
+    }
+
+    #[test]
+    fn a_rule_this_machine_does_not_need_is_said_to_be_not_needed_not_failed() {
+        let without_iptables = Firewall { accept: RuleState::NotNeeded, guard: RuleState::On };
+        let neither = Firewall {
+            accept: RuleState::NotNeeded,
+            guard: RuleState::Failed { cause: VnetCause::ProgramMissing { program: "nft".into() } },
+        };
+        let zh = Lang::ZhCn.codes();
+        assert_eq!((zh.firewall)(&without_iptables), "放行不需要，防冒充开着");
+        assert_eq!((zh.firewall)(&neither), "放行不需要，防冒充加不上（找不到 nft（装 nftables））");
+        let en = Lang::English.codes();
+        assert_eq!((en.firewall)(&without_iptables), "accept not needed, anti-spoofing on");
+        assert_eq!((en.firewall)(&neither), "accept not needed, anti-spoofing failed (nft not found (install nftables))");
     }
 
     #[test]

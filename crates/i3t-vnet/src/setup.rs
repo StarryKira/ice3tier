@@ -2,10 +2,14 @@
 //!
 //! 规矩：
 //!
-//! - 每条规则各自装：一条装不上（没有 `iptables`、内核不认）不妨碍另一条和网卡，状态里说清楚哪条为什么（[`RuleState::Failed`]）。
-//! - 不会多出一份。Linux 的表整张换（一个 nft 事务）；放行的那条正好一条、排在 INPUT 的第一条，不是的话（崩溃留下的、
-//!   被别人挤到了后面的）全删掉再插一条。Windows 的规则按名字先删再加，在同一段脚本里。
-//! - 只动认得出是自己的东西（见 [`crate::plan`]）。拆的时候每一样各自拆，一样失败不妨碍别的。
+//! - 每条规则各自装：一条装不上（内核不认、没有权限）不妨碍另一条和网卡，状态里说清楚哪条为什么（[`RuleState::Failed`]）。
+//! - 开箱即用，不要求装哪个程序。Linux 上防冒充有 `nft` 用 nftables 的表，没有就用 `iptables` 在 `raw` 表里加一条，
+//!   两个都没有才装不上；放行的那条没有 `iptables` 时用不着（[`RuleState::NotNeeded`]），不算失败。
+//! - 不会多出一份。Linux 的表整张换（一个 nft 事务）；放行的那条、raw 表里防冒充的那条都正好一条、排在链的第一条，
+//!   不是的话（崩溃留下的、地址段变了的、被别人挤到了后面的）全删掉再插一条。表装上了，以前（还没有 `nft` 时）加的那条 raw 规则拆掉。
+//!   Windows 的规则按名字先删再加，在同一段脚本里。
+//! - 只动认得出是自己的东西（见 [`crate::plan`]）。拆的时候每一样各自拆，一样失败不妨碍别的；没有那个程序、链所在的表不在时，
+//!   那一类东西本来就没有，不算失败（[`CommandError::means_absent`]）。
 //! - 崩溃留下的、它的网卡已经不在了的规则（这台机器上没有在跑的节点用着它），下次启动或者关着启动时拆掉（[`remove_leftovers`]）。
 
 use std::net::Ipv4Addr;
@@ -17,7 +21,7 @@ use i3t_model::control::{Firewall, NameService, RuleState, VnetCause};
 use crate::device::Platform;
 use crate::machine::{CommandError, Machine, Program};
 use crate::plan::{Plan, linux, windows};
-use crate::survey::Survey;
+use crate::survey::{AcceptRule, GuardRule, Survey};
 
 /// 一个程序的失败写成状态里的原因。
 #[must_use]
@@ -42,18 +46,25 @@ pub fn install_firewall(machine: &mut impl Machine, platform: Platform, plan: &P
     match platform {
         Platform::Linux => {
             let survey = Survey::take(machine, platform, &plan.device);
-            let guard = machine.run(Program::Nft, &args(&["-f", "-"]), Some(&linux::guard_script(&plan.device, plan.cidr))).map(drop);
-            let accept = survey.accept.and_then(|rules| {
-                let ours: Vec<usize> = rules.iter().filter(|rule| rule.device == plan.device).map(|rule| rule.position).collect();
-                if ours == [1] {
-                    return Ok(());
+            let guard = match machine.run(Program::Nft, &args(&["-f", "-"]), Some(&linux::guard_script(&plan.device, plan.cidr))) {
+                Ok(_) => {
+                    // 表装上了：还没有 nft 时加的那条 raw 规则拆掉。读不了 raw 表（没有 iptables、内核里没有这张表、没有权限）时
+                    // 那里也就没有拆得了的；拆不掉也不要紧，它和表管的是同一件事。表照样算装上了。
+                    if let Ok(found) = &survey.guard_rules {
+                        for rule in found.iter().filter(|rule| rule.device == plan.device) {
+                            let _stale = delete_guard_rule(machine, rule);
+                        }
+                    }
+                    Ok(())
                 }
-                for _ in &ours {
-                    delete_accept(machine, &plan.device)?;
-                }
-                machine.run(Program::Iptables, &linux::insert_accept(&plan.device), None).map(drop)
-            });
-            Firewall { accept: state(accept), guard: state(guard) }
+                Err(CommandError::Missing(Program::Nft)) => install_raw_guard(machine, plan, survey.guard_rules),
+                Err(error) => Err(error),
+            };
+            let accept = match survey.accept {
+                Err(CommandError::Missing(Program::Iptables)) => RuleState::NotNeeded,
+                found => state(found.and_then(|rules| install_accept(machine, &plan.device, &rules))),
+            };
+            Firewall { accept, guard: state(guard) }
         }
         Platform::Windows => {
             let script = windows::install_script(&plan.device, plan.own, plan.cidr);
@@ -64,40 +75,19 @@ pub fn install_firewall(machine: &mut impl Machine, platform: Platform, plan: &P
     }
 }
 
-/// 拆掉 `device` 的两条规则。返回第一个失败（多半是没有权限）。
+/// 拆掉 `device` 的规则：放行的那条，防冒充的表和 raw 规则（哪种都可能在：`nft` 可能是后来装上的）。返回第一个失败（多半是没有权限）。
 ///
 /// # Errors
 ///
-/// 某一条拆不掉，或者读不了现在有哪些。别的照样拆了。
+/// 某一条拆不掉，或者读不了现在有哪些。别的照样拆了。没有那个程序、链所在的表不在不算：那一类东西本来就没有。
 pub fn remove_firewall(machine: &mut impl Machine, platform: Platform, device: &str) -> Result<(), CommandError> {
     match platform {
         Platform::Linux => {
             let survey = Survey::take(machine, platform, device);
-            let mut first = None;
-            match survey.tables {
-                Ok(tables) if tables.iter().any(|table| table == device) => {
-                    if let Err(error) = machine.run(Program::Nft, &args(&["-f", "-"]), Some(&linux::remove_table_script(device))) {
-                        first.get_or_insert(error);
-                    }
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    first.get_or_insert(error);
-                }
-            }
-            match survey.accept {
-                Ok(rules) => {
-                    for _ in rules.iter().filter(|rule| rule.device == device) {
-                        if let Err(error) = delete_accept(machine, device) {
-                            first.get_or_insert(error);
-                        }
-                    }
-                }
-                Err(error) => {
-                    first.get_or_insert(error);
-                }
-            }
-            first.map_or(Ok(()), Err)
+            let tables = remove_each(survey.tables, |table| table == device, |table| remove_table(machine, table));
+            let accept = remove_each(survey.accept, |rule| rule.device == device, |_| delete_accept(machine, device));
+            let guards = remove_each(survey.guard_rules, |rule| rule.device == device, |rule| delete_guard_rule(machine, rule));
+            tables.and(accept).and(guards).map(drop)
         }
         Platform::Windows => delete_windows_rule(machine, device),
         Platform::MacOs | Platform::Other => Ok(()),
@@ -109,22 +99,16 @@ pub fn remove_firewall(machine: &mut impl Machine, platform: Platform, device: &
 ///
 /// # Errors
 ///
-/// 读不了或者拆不掉。
+/// 读不了或者拆不掉（Linux 上别的项照样拆了）。没有那个程序、链所在的表不在不算：那一类东西本来就没有。
 pub fn remove_leftovers(machine: &mut impl Machine, platform: Platform, present: &[String]) -> Result<usize, CommandError> {
     match platform {
         Platform::Linux => {
             let survey = Survey::take(machine, platform, "");
             let orphan = |device: &str| !present.iter().any(|name| name == device);
-            let mut removed = 0;
-            for table in survey.tables?.iter().filter(|table| orphan(table)) {
-                machine.run(Program::Nft, &args(&["-f", "-"]), Some(&linux::remove_table_script(table)))?;
-                removed += 1;
-            }
-            for rule in survey.accept?.iter().filter(|rule| orphan(&rule.device)) {
-                delete_accept(machine, &rule.device)?;
-                removed += 1;
-            }
-            Ok(removed)
+            let tables = remove_each(survey.tables, |table| orphan(table), |table| remove_table(machine, table));
+            let accept = remove_each(survey.accept, |rule| orphan(&rule.device), |rule| delete_accept(machine, &rule.device));
+            let guards = remove_each(survey.guard_rules, |rule| orphan(&rule.device), |rule| delete_guard_rule(machine, rule));
+            Ok(tables? + accept? + guards?)
         }
         Platform::Windows => {
             let device = crate::device::WINDOWS_NAME;
@@ -141,9 +125,71 @@ pub fn remove_leftovers(machine: &mut impl Machine, platform: Platform, present:
     }
 }
 
+/// Linux 上放行的那条正好一条、排在 INPUT 的第一条；不是的话（崩溃留下的、被别人挤到了后面的）全删掉再插一条。
+fn install_accept(machine: &mut impl Machine, device: &str, found: &[AcceptRule]) -> Result<(), CommandError> {
+    let ours: Vec<usize> = found.iter().filter(|rule| rule.device == device).map(|rule| rule.position).collect();
+    if ours == [1] {
+        return Ok(());
+    }
+    for _ in &ours {
+        delete_accept(machine, device)?;
+    }
+    machine.run(Program::Iptables, &linux::insert_accept(device), None).map(drop)
+}
+
+/// 没有 `nft` 时的防冒充：`raw` 表 PREROUTING 链的第一条正好是这块网卡的、地址段是现在的那一条；不是的话（崩溃留下的、
+/// 地址段变了的、被别人挤到了后面的）这块网卡的全删掉再插一条。`found` 是读回来的这条链。
+///
+/// 两个程序都没有时说缺 `nft`：装上它就是本来的做法，状态里写的是要装 nftables。
+fn install_raw_guard(machine: &mut impl Machine, plan: &Plan, found: Result<Vec<GuardRule>, CommandError>) -> Result<(), CommandError> {
+    let found = found.map_err(|error| match error {
+        CommandError::Missing(_) => CommandError::Missing(Program::Nft),
+        other => other,
+    })?;
+    let ours: Vec<&GuardRule> = found.iter().filter(|rule| rule.device == plan.device).collect();
+    if let [only] = ours.as_slice()
+        && only.position == 1
+        && only.range == Some(plan.cidr.trunc())
+    {
+        return Ok(());
+    }
+    for rule in ours {
+        delete_guard_rule(machine, rule)?;
+    }
+    machine.run(Program::Iptables, &linux::insert_guard(&plan.device, plan.cidr), None).map(drop)
+}
+
+/// 拆掉读回来的一项里 `pick` 挑出来的每一样，返回拆了几样。要读的东西根本不在（没有那个程序、链所在的表不在）时一样也没有。
+fn remove_each<T>(
+    found: Result<Vec<T>, CommandError>,
+    pick: impl Fn(&T) -> bool,
+    mut remove: impl FnMut(&T) -> Result<(), CommandError>,
+) -> Result<usize, CommandError> {
+    let found = match found {
+        Err(error) if error.means_absent() => Vec::new(),
+        found => found?,
+    };
+    found.iter().filter(|thing| pick(thing)).try_fold(0, |removed, thing| remove(thing).map(|()| removed + 1))
+}
+
+/// 拆掉 Linux 上自己的一张表。
+fn remove_table(machine: &mut impl Machine, name: &str) -> Result<(), CommandError> {
+    machine.run(Program::Nft, &args(&["-f", "-"]), Some(&linux::remove_table_script(name))).map(drop)
+}
+
 /// 删一条 Linux 上自己的放行规则。规则已经不在了不算错。
 fn delete_accept(machine: &mut impl Machine, device: &str) -> Result<(), CommandError> {
-    match machine.run(Program::Iptables, &linux::delete_accept(device), None) {
+    delete_iptables_rule(machine, &linux::delete_accept(device))
+}
+
+/// 删一条 Linux 上自己的防冒充规则，按读回来的样子。规则已经不在了不算错。
+fn delete_guard_rule(machine: &mut impl Machine, rule: &GuardRule) -> Result<(), CommandError> {
+    delete_iptables_rule(machine, &linux::delete_guard(&rule.rule))
+}
+
+/// 删一条 iptables 规则：已经不在了（别人删了，同样的两条删第二遍）不算错。
+fn delete_iptables_rule(machine: &mut impl Machine, args: &[String]) -> Result<(), CommandError> {
+    match machine.run(Program::Iptables, args, None) {
         Err(error) if !error.says("does a matching rule exist") && !error.says("bad rule") => Err(error),
         Ok(_) | Err(_) => Ok(()),
     }
@@ -215,6 +261,8 @@ pub(crate) mod fake {
         pub(crate) tables: BTreeSet<String>,
         /// INPUT 链，按先后：每条是 `iptables -S` 去掉 `-A INPUT ` 的样子。
         pub(crate) input: Vec<String>,
+        /// `raw` 表的 PREROUTING 链，按先后：每条是 `iptables -S` 去掉 `-A PREROUTING ` 的样子。
+        pub(crate) raw: Vec<String>,
         /// Windows 防火墙里的规则名。
         pub(crate) windows: Vec<String>,
         pub(crate) resolver: Vec<String>,
@@ -222,12 +270,54 @@ pub(crate) mod fake {
         pub(crate) missing: Vec<Program>,
         /// 没有权限：写的命令一律失败。
         pub(crate) unprivileged: bool,
+        /// 内核里没有 `raw` 表（老的 xtables 后端、没有这个模块）：碰它的命令一律失败。
+        pub(crate) no_raw_table: bool,
         pub(crate) no_resolver: bool,
         pub(crate) log: Vec<String>,
     }
 
     fn failed(program: Program, status: i32, detail: &str) -> CommandError {
         CommandError::Failed { program, status: Some(status), detail: detail.to_owned() }
+    }
+
+    /// `iptables -S` 写出来的样子：`-s` 排在 `! -i` 前面，不管插的时候怎么写。删的时候也按这个样子比，和真的一样不看次序。
+    fn as_listed(rule: &str) -> String {
+        let words: Vec<&str> = rule.split(' ').collect();
+        match words.as_slice() {
+            ["!", "-i", device, "-s", source, rest @ ..] => [&["-s", *source, "!", "-i", *device][..], rest].concat().join(" "),
+            _ => rule.to_owned(),
+        }
+    }
+
+    impl Fake {
+        /// iptables 的两条链：INPUT，和 `raw` 表的 PREROUTING。读、插在第一条、按写全了的规则删。
+        fn iptables(&mut self, line: &str) -> Result<String, CommandError> {
+            let (name, chain, command) = match line.strip_prefix("-w 5 -t raw ") {
+                Some(_) if self.no_raw_table => {
+                    let detail =
+                        "iptables v1.8.9 (legacy): can't initialize iptables table `raw': Table does not exist (do you need to insmod?)";
+                    return Err(failed(Program::Iptables, 3, detail));
+                }
+                Some(command) => ("PREROUTING", &mut self.raw, command),
+                None => ("INPUT", &mut self.input, line.strip_prefix("-w 5 ").expect("总是等 xtables 的锁")),
+            };
+            if command == format!("-S {name}") {
+                let listed = chain.iter().map(|rule| format!("-A {name} {rule}"));
+                return Ok(std::iter::once(format!("-P {name} ACCEPT")).chain(listed).collect::<Vec<_>>().join("\n"));
+            }
+            if let Some(rule) = command.strip_prefix(&format!("-I {name} 1 ")) {
+                chain.insert(0, as_listed(rule));
+                return Ok(String::new());
+            }
+            let rule = as_listed(command.strip_prefix(&format!("-D {name} ")).expect("只会读、插和删"));
+            match chain.iter().position(|existing| *existing == rule) {
+                Some(at) => {
+                    chain.remove(at);
+                    Ok(String::new())
+                }
+                None => Err(failed(Program::Iptables, 1, "iptables: Bad rule (does a matching rule exist in that chain?).")),
+            }
+        }
     }
 
     impl Machine for Fake {
@@ -258,24 +348,7 @@ pub(crate) mod fake {
                     }
                     Ok(String::new())
                 }
-                Program::Iptables if line == "-w 5 -S INPUT" => Ok(std::iter::once("-P INPUT ACCEPT".to_owned())
-                    .chain(self.input.iter().map(|rule| format!("-A INPUT {rule}")))
-                    .collect::<Vec<_>>()
-                    .join("\n")),
-                Program::Iptables => {
-                    if let Some(rule) = line.strip_prefix("-w 5 -I INPUT 1 ") {
-                        self.input.insert(0, rule.to_owned());
-                        return Ok(String::new());
-                    }
-                    let rule = line.strip_prefix("-w 5 -D INPUT ").expect("只会插和删");
-                    match self.input.iter().position(|existing| existing == rule) {
-                        Some(at) => {
-                            self.input.remove(at);
-                            Ok(String::new())
-                        }
-                        None => Err(failed(program, 1, "iptables: Bad rule (does a matching rule exist in that chain?).")),
-                    }
-                }
+                Program::Iptables => self.iptables(&line),
                 Program::PowerShell => {
                     let name = line.split("-Name '").nth(1).and_then(|rest| rest.split('\'').next()).unwrap_or_default().to_owned();
                     if line.contains("$rules.Count") {
@@ -311,6 +384,11 @@ mod tests {
     }
 
     const OURS: &str = "-i i3t0 -m comment --comment ice3tier -j ACCEPT";
+    /// 没有 nft 时防冒充的那条，`iptables -S` 写出来的样子。
+    const GUARD: &str = "-s 10.66.0.0/16 ! -i i3t0 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP";
+    const GUARD_I3T1: &str = "-s 10.66.0.0/16 ! -i i3t1 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP";
+    /// Docker 在 raw 表里加的那种规则：别人的，不动。
+    const DOCKER: &str = "-d 172.17.0.2/32 ! -i docker0 -j DROP";
 
     #[test]
     fn on_linux_both_rules_go_in_and_come_out_and_nothing_else_is_touched() {
@@ -353,25 +431,145 @@ mod tests {
         let mut fake = Fake::default();
         install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
         install_firewall(&mut fake, Platform::Linux, &plan("i3t1"));
-        assert_eq!(remove_leftovers(&mut fake, Platform::Linux, &["i3t1".into()]).unwrap(), 2, "i3t0 的表和规则");
+        // 还没有 nft 时 i3t0 加的那条 raw 规则也留着。
+        fake.raw.push(GUARD.into());
+        assert_eq!(remove_leftovers(&mut fake, Platform::Linux, &["i3t1".into()]).unwrap(), 3, "i3t0 的表、放行和 raw 规则");
         assert_eq!(fake.input, ["-i i3t1 -m comment --comment ice3tier -j ACCEPT"]);
         assert_eq!(fake.tables.iter().collect::<Vec<_>>(), ["i3t1"]);
+        assert!(fake.raw.is_empty());
         assert_eq!(remove_leftovers(&mut fake, Platform::Linux, &["i3t1".into()]).unwrap(), 0);
+
+        // 没有 nft 的机器：防冒充是 raw 规则，在的网卡的不动。
+        let mut fake = Fake { missing: vec![Program::Nft], raw: vec![DOCKER.into()], ..Fake::default() };
+        install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
+        install_firewall(&mut fake, Platform::Linux, &plan("i3t1"));
+        assert_eq!(remove_leftovers(&mut fake, Platform::Linux, &["i3t1".into()]).unwrap(), 2, "i3t0 的放行和 raw 规则");
+        assert_eq!(fake.raw, [GUARD_I3T1, DOCKER]);
+        assert_eq!(fake.input, ["-i i3t1 -m comment --comment ice3tier -j ACCEPT"]);
+        assert_eq!(remove_leftovers(&mut fake, Platform::Linux, &[]).unwrap(), 2);
+        assert_eq!(fake.raw, [DOCKER], "别人的规则不动");
     }
 
     #[test]
-    fn without_iptables_the_guard_still_goes_in_and_the_state_says_which_rule_failed() {
+    fn without_iptables_the_accept_rule_is_not_needed_and_the_guard_goes_in_with_nft() {
         let mut fake = Fake { missing: vec![Program::Iptables], ..Fake::default() };
         let firewall = install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
-        assert_eq!(firewall.guard, RuleState::On);
-        assert_eq!(firewall.accept, RuleState::Failed { cause: VnetCause::ProgramMissing { program: "iptables".into() } });
+        assert_eq!(firewall, Firewall { accept: RuleState::NotNeeded, guard: RuleState::On });
+        assert!(fake.tables.contains("i3t0"));
+        let tried: Vec<&String> = fake.log.iter().filter(|line| line.starts_with("iptables ")).collect();
+        assert!(!tried.is_empty() && tried.iter().all(|line| line.contains(" -S ")), "iptables 只读过一下，发现没有：{tried:?}");
+
+        // 别的失败（没有权限）还是失败。
         let mut fake = Fake { unprivileged: true, ..Fake::default() };
         let firewall = install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
         assert!(matches!(firewall.guard, RuleState::Failed { cause: VnetCause::CommandFailed { .. } }));
+        assert!(matches!(firewall.accept, RuleState::Failed { cause: VnetCause::CommandFailed { .. } }));
+        let mut fake = Fake { unprivileged: true, missing: vec![Program::Nft], ..Fake::default() };
+        let firewall = install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
+        assert!(
+            matches!(firewall.guard, RuleState::Failed { cause: VnetCause::CommandFailed { ref program, .. } } if program == "iptables")
+        );
         assert!(
             remove_firewall(&mut Fake { unprivileged: true, input: vec![OURS.into()], ..Fake::default() }, Platform::Linux, "i3t0")
                 .is_err()
         );
+        assert!(
+            remove_firewall(&mut Fake { unprivileged: true, raw: vec![GUARD.into()], ..Fake::default() }, Platform::Linux, "i3t0").is_err()
+        );
+    }
+
+    #[test]
+    fn without_nft_the_guard_is_one_rule_first_in_raw_prerouting() {
+        let mut fake = Fake { missing: vec![Program::Nft], raw: vec![DOCKER.into()], ..Fake::default() };
+        let firewall = install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
+        assert_eq!(firewall, Firewall { accept: RuleState::On, guard: RuleState::On });
+        assert_eq!(fake.raw, [GUARD, DOCKER], "插在最前面");
+        let inserted = format!("iptables {}", linux::insert_guard("i3t0", plan("i3t0").cidr).join(" "));
+        assert!(fake.log.contains(&inserted), "{:?}", fake.log);
+
+        // 再装一遍：已经在最前面、地址段对的不动。
+        fake.log.clear();
+        install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
+        assert_eq!(fake.raw, [GUARD, DOCKER]);
+        assert!(!fake.log.iter().any(|line| line.contains(" -I ") || line.contains(" -D ")), "{:?}", fake.log);
+
+        // 被别人挤到了后面：回到最前面，还是一条。
+        fake.raw.insert(0, "-s 192.0.2.9/32 -j DROP".into());
+        install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
+        assert_eq!(fake.raw, [GUARD, "-s 192.0.2.9/32 -j DROP", DOCKER]);
+
+        // 两份（更早的版本被杀掉两次）收成一份。
+        fake.raw.push(GUARD.into());
+        install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
+        assert_eq!(fake.raw, [GUARD, "-s 192.0.2.9/32 -j DROP", DOCKER]);
+
+        // 拆：只拆自己的。
+        remove_firewall(&mut fake, Platform::Linux, "i3t0").unwrap();
+        assert_eq!(fake.raw, ["-s 192.0.2.9/32 -j DROP", DOCKER]);
+        assert!(fake.input.is_empty());
+    }
+
+    #[test]
+    fn without_nft_a_changed_range_replaces_the_raw_rule_and_other_adapters_keep_theirs() {
+        let mut fake = Fake { missing: vec![Program::Nft], ..Fake::default() };
+        install_firewall(&mut fake, Platform::Linux, &plan("i3t1"));
+        install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
+        let moved = Plan { cidr: "10.77.0.0/16".parse().unwrap(), ..plan("i3t0") };
+        let firewall = install_firewall(&mut fake, Platform::Linux, &moved);
+        assert_eq!(firewall.guard, RuleState::On);
+        assert_eq!(
+            fake.raw,
+            ["-s 10.77.0.0/16 ! -i i3t0 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP", GUARD_I3T1],
+            "旧地址段的那条换掉了，i3t1 的不动"
+        );
+    }
+
+    #[test]
+    fn once_nft_is_there_the_table_takes_over_from_the_raw_rule_left_from_before() {
+        let mut fake = Fake { raw: vec![GUARD.into(), GUARD_I3T1.into(), DOCKER.into()], ..Fake::default() };
+        let firewall = install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
+        assert_eq!(firewall, Firewall { accept: RuleState::On, guard: RuleState::On });
+        assert!(fake.tables.contains("i3t0"));
+        assert_eq!(fake.raw, [GUARD_I3T1, DOCKER], "只拆这块网卡的");
+
+        // raw 表读不了、拆不掉：表照样算装上了。
+        let mut fake = Fake { no_raw_table: true, ..Fake::default() };
+        assert_eq!(install_firewall(&mut fake, Platform::Linux, &plan("i3t0")), Firewall { accept: RuleState::On, guard: RuleState::On });
+        assert!(!fake.log.iter().any(|line| line.contains(" -t raw -D ")), "读不出来就不删：{:?}", fake.log);
+    }
+
+    #[test]
+    fn with_neither_program_the_guard_fails_for_want_of_nft_and_the_accept_rule_is_not_needed() {
+        let mut fake = Fake { missing: vec![Program::Nft, Program::Iptables], ..Fake::default() };
+        assert_eq!(
+            install_firewall(&mut fake, Platform::Linux, &plan("i3t0")),
+            Firewall {
+                accept: RuleState::NotNeeded,
+                guard: RuleState::Failed { cause: VnetCause::ProgramMissing { program: "nft".into() } }
+            }
+        );
+        remove_firewall(&mut fake, Platform::Linux, "i3t0").unwrap();
+        assert_eq!(remove_leftovers(&mut fake, Platform::Linux, &[]).unwrap(), 0);
+    }
+
+    #[test]
+    fn removing_where_a_program_or_the_raw_table_is_missing_succeeds_and_removes_what_is_there() {
+        let mut fake = Fake { missing: vec![Program::Nft], ..Fake::default() };
+        install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
+        remove_firewall(&mut fake, Platform::Linux, "i3t0").unwrap();
+        assert!(fake.raw.is_empty() && fake.input.is_empty());
+
+        let mut fake = Fake { missing: vec![Program::Iptables], ..Fake::default() };
+        install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
+        remove_firewall(&mut fake, Platform::Linux, "i3t0").unwrap();
+        assert!(fake.tables.is_empty());
+
+        let mut fake = Fake { no_raw_table: true, ..Fake::default() };
+        install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
+        remove_firewall(&mut fake, Platform::Linux, "i3t0").unwrap();
+        assert!(fake.tables.is_empty() && fake.input.is_empty());
+        install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
+        assert_eq!(remove_leftovers(&mut fake, Platform::Linux, &[]).unwrap(), 2, "表和放行的那条");
     }
 
     #[test]

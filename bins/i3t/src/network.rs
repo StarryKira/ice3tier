@@ -15,7 +15,7 @@ use i3t_model::control::{VnetCause, VnetState};
 use i3t_vnet::device::Platform;
 use i3t_vnet::machine::{Shell, missing_privilege};
 use i3t_vnet::names::{hosts_block, remove_hosts_block, replace_hosts_block};
-use i3t_vnet::{CommandError, Survey, legacy, setup};
+use i3t_vnet::{CommandError, Program, Survey, legacy, setup};
 
 use crate::HostsAction;
 use crate::texts::texts;
@@ -76,13 +76,26 @@ pub(crate) fn status(state: &StateDir, live: Option<&LiveStatus>) {
     }
     let platform = Platform::CURRENT;
     let survey = Survey::take(&mut Shell, platform, i3t_vnet::device::WINDOWS_NAME);
-    match &survey.tables {
-        Ok(tables) => {
-            for table in tables {
-                fields.add(t.guard_table, format!("table ip {table}"));
-            }
+    // 防冒充：有 nft 时是 nftables 的表，没有时是 raw 表 PREROUTING 链里的规则。
+    if let Ok(tables) = &survey.tables {
+        for table in tables {
+            fields.add(t.guard_rule, format!("table ip {table}"));
         }
-        Err(error) => fields.add(t.guard_table, unreadable(error)),
+    }
+    if let Ok(rules) = &survey.guard_rules {
+        for rule in rules {
+            let matched = match rule.range {
+                Some(range) => format!("! -i {} -s {range}", rule.device),
+                None => format!("! -i {}", rule.device),
+            };
+            fields.add(t.guard_rule, (t.guard_at)(rule.position, &matched));
+        }
+    }
+    let guard_note = guard_note(&survey);
+    // 读不了的项也要列出来：那时说"什么都没装"不一定是真的。缺了程序时说的话（用不着、缺哪个）也一样列出来。
+    let noted = guard_note.is_some() || survey.accept.is_err();
+    if let Some(note) = guard_note {
+        fields.add(t.guard_rule, note);
     }
     match &survey.accept {
         Ok(rules) => {
@@ -90,16 +103,16 @@ pub(crate) fn status(state: &StateDir, live: Option<&LiveStatus>) {
                 fields.add(t.accept_rule, (t.accept_at)(&rule.device, rule.position));
             }
         }
+        // 没有 iptables 就没有 ufw 这类防火墙经它填的 INPUT 链要抢在前面：节点不加这一条，不是加不上。
+        Err(CommandError::Missing(Program::Iptables)) => fields.add(t.accept_rule, t.accept_not_needed),
         Err(error) => fields.add(t.accept_rule, unreadable(error)),
     }
     let legacy = (platform == Platform::Linux).then(|| legacy::Leftover::find(&mut Shell).ok()).flatten().filter(|found| !found.is_empty());
     if let Some(found) = legacy {
         fields.add(t.legacy, lang.list(found.items()));
     }
-    // 读不了的项也要列出来：那时说"什么都没装"不一定是真的。
-    let unreadable = survey.tables.is_err() || survey.accept.is_err();
     let found = !found_devices.is_empty() || survey.found_any() || legacy.is_some();
-    if found || unreadable {
+    if found || noted {
         fields.print();
     } else {
         println!("{}", t.nothing_installed);
@@ -110,6 +123,21 @@ pub(crate) fn status(state: &StateDir, live: Option<&LiveStatus>) {
     let installed = live.and_then(|live| live.vnet.as_ref()).is_some_and(|report| matches!(report.state, VnetState::Installed { .. }));
     if !installed {
         names_left_behind();
+    }
+}
+
+/// 防冒充那一项在表和 raw 规则之外还要说的话。
+///
+/// 有 nft 时防冒充是那张表，raw 表里只会有换成表之前留下的，读不了也不用说。没有 nft 时防冒充是 raw 表里的规则：
+/// 两个程序都没有就说缺 nft（和节点的状态说的一样，装上它就行）；raw 表里没有（或者内核里没有这张表）就说两样都没有。
+fn guard_note(survey: &Survey) -> Option<String> {
+    let t = &texts().network;
+    match (&survey.tables, &survey.guard_rules) {
+        (Ok(_), _) => None,
+        (Err(nft @ CommandError::Missing(Program::Nft)), Err(CommandError::Missing(Program::Iptables))) => Some(unreadable(nft)),
+        (Err(CommandError::Missing(Program::Nft)), Ok(rules)) => rules.is_empty().then(|| t.guard_none.to_owned()),
+        (Err(CommandError::Missing(Program::Nft)), Err(error)) if error.means_absent() => Some(t.guard_none.to_owned()),
+        (Err(CommandError::Missing(Program::Nft)), Err(error)) | (Err(error), _) => Some(unreadable(error)),
     }
 }
 
@@ -160,4 +188,36 @@ pub(crate) fn hosts(state: &StateDir, action: HostsAction) -> anyhow::Result<()>
     fs::write(&path, replace_hosts_block(&existing, &block)).with_context(failed)?;
     println!("{}", (t.hosts_written)(names.len(), &shown));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use i3t_vnet::survey::GuardRule;
+
+    use super::*;
+
+    fn survey(tables: Result<Vec<String>, CommandError>, guard_rules: Result<Vec<GuardRule>, CommandError>) -> Survey {
+        Survey { tables, accept: Ok(Vec::new()), guard_rules }
+    }
+
+    #[test]
+    fn the_guard_line_says_neither_is_there_only_without_nft_and_without_a_raw_rule() {
+        let t = &texts().network;
+        let no_nft = || Err(CommandError::Missing(Program::Nft));
+        let refused = |detail: &str| CommandError::Failed { program: Program::Iptables, status: Some(3), detail: detail.into() };
+        let no_raw_table = || refused("iptables v1.8.9 (legacy): can't initialize iptables table `raw': Table does not exist");
+        let rule = GuardRule { device: "i3t0".into(), position: 1, range: Some("10.66.0.0/16".parse().unwrap()), rule: String::new() };
+
+        assert_eq!(guard_note(&survey(Ok(Vec::new()), Err(no_raw_table()))), None, "有 nft：防冒充是表，raw 表读不了不用说");
+        assert_eq!(guard_note(&survey(no_nft(), Ok(Vec::new()))).as_deref(), Some(t.guard_none));
+        assert_eq!(guard_note(&survey(no_nft(), Err(no_raw_table()))).as_deref(), Some(t.guard_none));
+        assert_eq!(guard_note(&survey(no_nft(), Ok(vec![rule]))), None, "规则那一行已经说了");
+        assert_eq!(
+            guard_note(&survey(no_nft(), Err(CommandError::Missing(Program::Iptables)))),
+            Some(unreadable(&CommandError::Missing(Program::Nft))),
+            "两个都没有：说缺 nft"
+        );
+        let denied = refused("iptables v1.8.9 (legacy): can't initialize iptables table `raw': Permission denied (you must be root)");
+        assert_eq!(guard_note(&survey(no_nft(), Err(denied.clone()))), Some(unreadable(&denied)));
+    }
 }

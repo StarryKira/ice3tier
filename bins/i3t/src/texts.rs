@@ -166,10 +166,16 @@ pub struct Ui {
 #[derive(Debug)]
 pub struct Net {
     pub device: &'static str,
-    pub guard_table: &'static str,
+    pub guard_rule: &'static str,
+    /// 一条 raw 表 PREROUTING 链里的防冒充规则：第几条，规则管的是什么（`! -i i3t0 -s 10.66.0.0/16`）。
+    pub guard_at: fn(usize, &str) -> String,
+    /// 没有 nft，raw 表里也没有防冒充的规则。
+    pub guard_none: &'static str,
     pub accept_rule: &'static str,
     /// 一条 INPUT 规则：网卡，第几条。
     pub accept_at: fn(&str, usize) -> String,
+    /// 没有 iptables 的机器上不加放行的那条。
+    pub accept_not_needed: &'static str,
     pub legacy: &'static str,
     pub unreadable: fn(&str) -> String,
     pub nothing_installed: &'static str,
@@ -342,9 +348,12 @@ static ZH: Texts = Texts {
     },
     network: Net {
         device: "网卡",
-        guard_table: "防冒充的表",
+        guard_rule: "防冒充的规则",
+        guard_at: |position, rule| format!("raw PREROUTING 的第 {position} 条，{rule}"),
+        guard_none: "没有：没有 nft，raw PREROUTING 里也没有",
         accept_rule: "放行的规则",
         accept_at: |device, position| format!("-i {device}，INPUT 的第 {position} 条"),
+        accept_not_needed: "不需要：这台机器上没有 iptables",
         legacy: "以前的透明访问留下的",
         unreadable: |error| format!("读不了（要 root）：{error}"),
         nothing_installed: "系统里没有虚拟网卡装的东西",
@@ -516,9 +525,12 @@ static EN: Texts = Texts {
     },
     network: Net {
         device: "Adapter",
-        guard_table: "Anti-spoofing table",
+        guard_rule: "Anti-spoofing rule",
+        guard_at: |position, rule| format!("raw PREROUTING rule {position}, {rule}"),
+        guard_none: "none: no nft, and none in raw PREROUTING",
         accept_rule: "Accept rule",
         accept_at: |device, position| format!("-i {device}, INPUT rule {position}"),
+        accept_not_needed: "not needed: this machine has no iptables",
         legacy: "Left by the old transparent access",
         unreadable: |error| format!("unreadable (needs root): {error}"),
         nothing_installed: "Nothing from the virtual adapter in the system",

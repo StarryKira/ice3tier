@@ -10,8 +10,8 @@
 //! | 东西 | 做什么 |
 //! |---|---|
 //! | 虚拟网卡，MTU 默认 [`DEFAULT_MTU`]（本机可以改，见 [`MTU_RANGE`]）：Linux 上是一块 TUN（名字是 [`DEVICE_PATTERN`] 里第一个没人用的，通常是 `i3t0`），Windows 上是 Wintun 的适配器 `i3t0`，macOS 上是一块 utun（系统挑编号） | 本节点的虚拟 IP 和网络的地址段（因此有一条"地址段走它"的路由）。不是持久的：进程一退出（包括被杀掉）它就连同地址和路由一起没了 |
-//! | Linux：系统 INPUT 链最前面一条 `-i <网卡> -m comment --comment ice3tier -j ACCEPT`（`iptables`）。Windows：Windows 防火墙里限定在这块网卡上的入站规则 `ice3tier-i3t0` | 从网卡进来的放行：默认拒绝入站的防火墙（ufw 之类、Windows 的"公用"网络）因此不把别的节点挡在外面 |
-//! | Linux：nftables 的表 `ip <网卡名>`，一条链 `guard` | 自称来自网络地址段、却不是从这块网卡进来的包丢掉（回环除外）：同一个局域网里的机器冒充不了虚拟 IP。Windows 和 macOS 上不加，见 [`plan`] |
+//! | Linux：系统 INPUT 链最前面一条 `-i <网卡> -m comment --comment ice3tier -j ACCEPT`（`iptables`；没有 `iptables` 的机器上用不着，不加）。Windows：Windows 防火墙里限定在这块网卡上的入站规则 `ice3tier-i3t0` | 从网卡进来的放行：默认拒绝入站的防火墙（ufw 之类、Windows 的"公用"网络）因此不把别的节点挡在外面 |
+//! | Linux：nftables 的表 `ip <网卡名>`，一条链 `guard`；没有 `nft` 时是 `raw` 表 PREROUTING 链最前面的一条 `iptables` 规则 | 自称来自网络地址段、却不是从这块网卡进来的包丢掉（回环除外）：同一个局域网里的机器冒充不了虚拟 IP。Windows 和 macOS 上不加，见 [`plan`] |
 //! | Linux：systemd-resolved 在网卡上的设置（有它时） | 只有网络的域名下的查询发给本节点的名字服务；只在内存里，网卡一删就没了。别的平台上名字用 `i3t hosts` |
 //!
 //! macOS 上程序不加任何防火墙规则（不碰 pf）。防火墙规则一个开关就能完全不碰（`[network] firewall`）。每一样都认得出是自己的
@@ -67,7 +67,7 @@ pub const DEFAULT_MTU: u16 = 1280;
 /// 而且超过一千三百多之后每个满包都要切，只会更慢。
 pub const MTU_RANGE: std::ops::RangeInclusive<u16> = 576..=1500;
 
-/// 程序加的那条 INPUT 规则的注释，认自己的规则靠它（加上 `-i <网卡>`）。
+/// 程序加的 iptables 规则的注释，认自己的规则靠它（加上 `-i <网卡>`，raw 表里防冒充的那条是 `! -i <网卡>`）。
 pub const COMMENT: &str = "ice3tier";
 
 /// 名字服务的端口，在本节点自己的虚拟 IP 上。

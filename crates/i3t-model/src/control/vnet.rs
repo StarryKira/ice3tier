@@ -97,9 +97,11 @@ pub enum VnetCause {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Firewall {
     /// 从虚拟网卡进来的放行：插在系统 INPUT 链的最前面（iptables），默认拒绝入站的防火墙因此不挡别的节点。
+    /// 没有 `iptables` 的 Linux 上是 [`RuleState::NotNeeded`]。
     #[serde(default)]
     pub accept: RuleState,
-    /// 自称来自网络地址段、却不是从虚拟网卡进来的包丢掉：在程序自己的一张 nftables 表里，不改用户的规则。
+    /// 自称来自网络地址段、却不是从虚拟网卡进来的包丢掉：在程序自己的一张 nftables 表里，不改用户的规则；
+    /// 没有 `nft` 的 Linux 上是 `raw` 表 PREROUTING 链最前面的一条 iptables 规则。
     #[serde(default)]
     pub guard: RuleState,
 }
@@ -118,6 +120,10 @@ pub enum RuleState {
     },
     /// 这个平台上程序不加这条规则：macOS 上两条都不加（不碰 pf）；Windows 上不加防冒充的那条（它默认按强主机模型收包）。
     Unsupported,
+    /// 这台机器上用不着这条规则，没有加。只有 Linux 上的放行会这样：这条规则是为了抢在 ufw 这类防火墙经 `iptables`
+    /// 填满的 INPUT 链前面，没有 `iptables` 的机器上没有这样的链可抢。手写的 nftables 规则集挡住入站，那是机器主人自己的防火墙，
+    /// 另一张表里的规则本来也越不过它。
+    NotNeeded,
     #[serde(other)]
     Unknown,
 }
@@ -181,6 +187,10 @@ mod tests {
             })
         );
         assert_eq!(serde_json::from_value::<VnetReport>(json).unwrap(), installed);
+        let without_iptables = Firewall { accept: RuleState::NotNeeded, guard: RuleState::On };
+        let json = serde_json::to_value(&without_iptables).unwrap();
+        assert_eq!(json, serde_json::json!({ "accept": { "state": "not_needed" }, "guard": { "state": "on" } }));
+        assert_eq!(serde_json::from_value::<Firewall>(json).unwrap(), without_iptables);
 
         let failed = VnetState::Failed { cause: VnetCause::NoPermission { missing: vec!["CAP_NET_ADMIN".into()] } };
         let json = serde_json::to_value(&failed).unwrap();

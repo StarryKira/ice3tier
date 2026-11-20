@@ -2,11 +2,12 @@
 //!
 //! | 平台 | 放行从网卡进来的（`accept`） | 丢掉冒充虚拟 IP 的（`guard`） |
 //! |---|---|---|
-//! | Linux | `iptables -I INPUT 1 -i <网卡> -m comment --comment ice3tier -j ACCEPT`：插在系统 INPUT 链的最前面，ufw 这类默认拒绝入站的防火墙因此不挡别的节点 | nftables 的表 `ip <网卡名>`：从别的网卡（回环除外）进来、来源却在网络地址段里的包丢掉 |
+//! | Linux | `iptables -I INPUT 1 -i <网卡> -m comment --comment ice3tier -j ACCEPT`：插在系统 INPUT 链的最前面，ufw 这类默认拒绝入站的防火墙因此不挡别的节点。没有 `iptables` 的机器上不加：没有经它填的 INPUT 链要抢在前面 | 有 `nft` 时是 nftables 的表 `ip <网卡名>`：从别的网卡（回环除外）进来、来源却在网络地址段里的包丢掉。没有 `nft`、有 `iptables` 时是 `raw` 表 PREROUTING 链的第一条 `! -i <网卡> -s <地址段> -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP`，做同样的事 |
 //! | Windows | Windows 防火墙的入站规则 `ice3tier-<网卡>`：只管从这块网卡进来的，目的是本节点的虚拟 IP、来源在网络地址段里的放行。新的网卡归在"公用"网络里，默认挡住一切入站 | 不加：Windows（Vista 起）默认每块网卡都按强主机模型收包，发往虚拟 IP 的包只在有这个地址的那块网卡上收，从真网卡进来的被丢掉；上面那条也只认从这块网卡进来的。管理员给真网卡打开 `weakhostreceive` 或者转发时，前一半不成立，后一半还在 |
 //! | macOS | 不加：程序不碰包过滤（pf），macOS 上它默认不开、也不挡入站 | 不加：macOS 默认（`net.inet.ip.check_interface` = 1，"混合"模型）对 utun 这样的隧道网卡按强主机模型收包，发往虚拟 IP、从真网卡进来的被丢掉；打开了转发（比如"互联网共享"）时退回弱主机模型，这时没有东西挡 |
 //!
-//! 每一条都认得出是自己的：Linux 上是注释 [`COMMENT`] 加上 `-i <网卡>`、表名就是网卡名；Windows 上是规则的名字（分组是 [`COMMENT`]）。
+//! 每一条都认得出是自己的：Linux 上是注释 [`COMMENT`] 加上 `-i <网卡>`（放行）或者 `! -i <网卡>`（防冒充）、表名就是网卡名；
+//! Windows 上是规则的名字（分组是 [`COMMENT`]）。
 
 use std::fmt::Write;
 use std::net::Ipv4Addr;
@@ -73,6 +74,63 @@ pub mod linux {
     #[must_use]
     pub fn list_tables() -> Vec<String> {
         args(&["-j", "list", "tables", "ip"])
+    }
+
+    /// 没有 `nft` 时的防冒充，一条 iptables 规则：不是从网卡 `device` 进来、来源却在地址段 `cidr` 里的包丢掉。
+    /// 在 `raw` 表的 PREROUTING 链里，和那张表一样在连接跟踪之前，转发的包也管。
+    ///
+    /// 一条 iptables 规则只写得了一块网卡，回环没法像那张表里（`iifname "lo" return`）那样另外放过；可本机的程序用本节点的虚拟 IP
+    /// 连本机时，包走回环、来源在地址段里，不能丢。这样的包来源是本机自己的地址，`addrtype ! --src-type LOCAL` 把它们留下。
+    /// 从别的网卡进来、冒充本机地址的包内核自己就丢（martian，`accept_local` 默认关着）。
+    ///
+    /// `iptables` 存的是地址段的网络地址，这里也写网络地址，读回来才比得上。
+    fn guard_rule(device: &str, cidr: Ipv4Net) -> Vec<String> {
+        let spoofed = args(&["!", "-i", device, "-s", &cidr.trunc().to_string()]);
+        let not_local = args(&["-m", "addrtype", "!", "--src-type", "LOCAL"]);
+        [spoofed, not_local, args(&["-m", "comment", "--comment", COMMENT, "-j", "DROP"])].concat()
+    }
+
+    /// 防冒充的那条插在 `raw` 表 PREROUTING 链的第一条。
+    #[must_use]
+    pub fn insert_guard(device: &str, cidr: Ipv4Net) -> Vec<String> {
+        [args(&["-w", LOCK_WAIT, "-t", "raw", "-I", "PREROUTING", "1"]), guard_rule(device, cidr)].concat()
+    }
+
+    /// 删一条防冒充的规则：`listed` 是 `iptables -S` 写出来的那一行去掉 `-A PREROUTING`，原样交回去。
+    /// 按读到的样子删，旧的地址段、以前的写法也删得掉，`iptables` 写出来的次序和 [`insert_guard`] 的不一样也不要紧。
+    #[must_use]
+    pub fn delete_guard(listed: &str) -> Vec<String> {
+        [args(&["-w", LOCK_WAIT, "-t", "raw", "-D", "PREROUTING"]), split_listed(listed)].concat()
+    }
+
+    /// 列出 `raw` 表的 PREROUTING 链。
+    #[must_use]
+    pub fn list_raw_prerouting() -> Vec<String> {
+        args(&["-w", LOCK_WAIT, "-t", "raw", "-S", "PREROUTING"])
+    }
+
+    /// `iptables -S` 写出来的一条规则拆回参数。词之间是空白；带空格、引号这类字符的值（注释）写在双引号里，
+    /// 里面的 `"`、`\`、`'` 前面加了 `\`（`iptables-save` 的写法）。拆出来的词不带引号，正是执行程序时的参数。
+    #[must_use]
+    pub fn split_listed(listed: &str) -> Vec<String> {
+        let mut words = Vec::new();
+        // 正在拼的词。一对空的双引号也是一个词（空的），所以用 `Option` 而不是看字符串空不空。
+        let mut word: Option<String> = None;
+        let mut quoted = false;
+        let mut chars = listed.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => {
+                    quoted = !quoted;
+                    word.get_or_insert_default();
+                }
+                '\\' if quoted => word.get_or_insert_default().extend(chars.next()),
+                c if c.is_whitespace() && !quoted => words.extend(word.take()),
+                c => word.get_or_insert_default().push(c),
+            }
+        }
+        words.extend(word);
+        words
     }
 }
 
@@ -165,6 +223,35 @@ mod tests {
         assert_eq!(linux::delete_accept("i3t0").join(" "), "-w 5 -D INPUT -i i3t0 -m comment --comment ice3tier -j ACCEPT");
         assert_eq!(linux::list_input().join(" "), "-w 5 -S INPUT");
         assert_eq!(linux::list_tables().join(" "), "-j list tables ip");
+    }
+
+    #[test]
+    fn without_nft_the_linux_guard_is_the_first_rule_in_raw_prerouting_and_is_deleted_as_listed() {
+        let cidr = "10.66.0.0/16".parse().unwrap();
+        assert_eq!(
+            linux::insert_guard("i3t0", cidr).join(" "),
+            "-w 5 -t raw -I PREROUTING 1 ! -i i3t0 -s 10.66.0.0/16 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP"
+        );
+        assert_eq!(linux::list_raw_prerouting().join(" "), "-w 5 -t raw -S PREROUTING");
+        let listed = "-s 10.66.0.0/16 ! -i i3t0 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP";
+        assert_eq!(
+            linux::delete_guard(listed).join(" "),
+            "-w 5 -t raw -D PREROUTING -s 10.66.0.0/16 ! -i i3t0 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP"
+        );
+        assert!(
+            linux::insert_guard("i3t0", "10.66.3.4/16".parse().unwrap()).join(" ").contains(" -s 10.66.0.0/16 "),
+            "写的是网络地址，和 iptables 读回来的一样"
+        );
+    }
+
+    #[test]
+    fn a_listed_rule_splits_back_into_arguments_and_a_quoted_value_is_one_argument() {
+        assert_eq!(
+            linux::split_listed(r#"-s 10.0.0.0/8 -m comment --comment "a \"b\" \\c" -j  DROP"#),
+            ["-s", "10.0.0.0/8", "-m", "comment", "--comment", r#"a "b" \c"#, "-j", "DROP"]
+        );
+        assert_eq!(linux::split_listed(r#"--comment "" -j ACCEPT"#), ["--comment", "", "-j", "ACCEPT"]);
+        assert!(linux::split_listed("  ").is_empty());
     }
 
     #[test]

@@ -608,6 +608,7 @@ fn rule_state(state: &RuleState) -> String {
         RuleState::Off => "没加".to_owned(),
         RuleState::Failed { cause } => format!("加不上（{}）", vnet_cause(cause)),
         RuleState::Unsupported => "这个平台上不加".to_owned(),
+        RuleState::NotNeeded => "不需要".to_owned(),
         RuleState::Unknown => "未知".to_owned(),
     }
 }

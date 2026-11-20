@@ -63,6 +63,17 @@ impl CommandError {
             Self::Missing(_) | Self::Io { .. } => false,
         }
     }
+
+    /// 读防火墙里有什么时的这个失败说明要读的东西根本不在，当作一样都没有，不当作读不了：没有这个程序（没有它就装不了这一类东西），
+    /// 或者链所在的表不在（内核里没有 `raw` 表的模块、容器里，`iptables` 说 "Table does not exist"）。没有权限这类失败不算。
+    #[must_use]
+    pub fn means_absent(&self) -> bool {
+        match self {
+            Self::Missing(_) => true,
+            Self::Failed { .. } => self.says("does not exist"),
+            Self::Io { .. } => false,
+        }
+    }
 }
 
 /// 执行程序的地方。真的是 [`Shell`]，测试里是一个按命令应答的假机器。
@@ -268,6 +279,20 @@ mod tests {
         let error = CommandError::Failed { program: Program::Ip, status: Some(2), detail: "Error: ipv4: FIB table does not exist.".into() };
         assert!(error.says("fib table does not exist"));
         assert!(!CommandError::Missing(Program::Ip).says("does not exist"));
+    }
+
+    #[test]
+    fn a_missing_program_or_table_means_nothing_is_there_and_a_refusal_does_not() {
+        let failed = |detail: &str| CommandError::Failed { program: Program::Iptables, status: Some(3), detail: detail.into() };
+        assert!(CommandError::Missing(Program::Nft).means_absent());
+        assert!(
+            failed("iptables v1.8.9 (legacy): can't initialize iptables table `raw': Table does not exist (do you need to insmod?)")
+                .means_absent()
+        );
+        assert!(
+            !failed("iptables v1.8.9 (legacy): can't initialize iptables table `raw': Permission denied (you must be root)").means_absent()
+        );
+        assert!(!CommandError::Io { program: Program::Iptables, detail: "broken pipe".into() }.means_absent());
     }
 
     #[cfg(unix)]

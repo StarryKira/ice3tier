@@ -711,6 +711,7 @@ fn rule_state(state: &RuleState) -> String {
         RuleState::Off => "off".to_owned(),
         RuleState::Failed { cause } => format!("failed ({})", vnet_cause(cause)),
         RuleState::Unsupported => "not added on this platform".to_owned(),
+        RuleState::NotNeeded => "not needed".to_owned(),
         RuleState::Unknown => "unknown".to_owned(),
     }
 }
