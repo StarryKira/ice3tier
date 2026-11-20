@@ -53,6 +53,21 @@ ice3tier connects the machines you own into one private network. Every node gets
 
 ## Installation
 
+### One-line install (Linux / macOS)
+
+On Linux, [`deploy/install.sh`](deploy/install.sh) installs the binary, creates the system user, configures the systemd unit (and the `systemd-resolved` polkit rule and SELinux label when applicable), and installs an `i3t` CLI wrapper:
+
+```sh
+# Node
+curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh
+
+# Node (install, join, and start in one step)
+curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh -s -- --token <enrollment-token>
+
+# Controller + i3tctl
+curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh -s -- --controller --public-addr <public-address>:20331
+```
+
 ### Prebuilt binaries
 
 Download the programs for your platform from the [latest release](https://github.com/fuqiuluo/ice3tier/releases/latest):
@@ -65,14 +80,7 @@ Download the programs for your platform from the [latest release](https://github
 | macOS (Apple silicon) | `i3t-macos-aarch64`     | `i3t-controller-macos-aarch64`     | `i3tctl-macos-aarch64`     |
 | macOS (Intel)         | `i3t-macos-x86_64`      | `i3t-controller-macos-x86_64`      | `i3tctl-macos-x86_64`      |
 
-For example, on Linux:
-
-```sh
-curl -fLo i3t https://github.com/fuqiuluo/ice3tier/releases/latest/download/i3t-linux-x86_64
-sudo install -m 755 i3t /usr/local/bin/i3t
-```
-
-systemd units for the node and the controller are in [`deploy/systemd`](deploy/systemd).
+Raw systemd units and the polkit rule are in [`deploy/systemd`](deploy/systemd) and [`deploy/polkit`](deploy/polkit).
 
 ### Build from source
 
@@ -129,7 +137,7 @@ curl -x socks5h://127.0.0.1:1080 https://example.com
 
 | Platform | Architectures       | Virtual network needs                                                 |
 | -------- | ------------------- | --------------------------------------------------------------------- |
-| Linux    | x86_64, aarch64     | `CAP_NET_ADMIN` (granted by the systemd unit)                         |
+| Linux    | x86_64, aarch64     | `CAP_NET_ADMIN`, `CAP_NET_RAW`, `CAP_NET_BIND_SERVICE` (granted by [`deploy/systemd/i3t.service`](deploy/systemd/i3t.service)); [`deploy/polkit/50-i3t-resolved.rules`](deploy/polkit/50-i3t-resolved.rules) for non-root `systemd-resolved` DNS |
 | Windows  | x86_64              | Run as administrator; `wintun.dll` next to `i3t.exe` (in the release zip) |
 | macOS    | Apple silicon, Intel | Run as root                                                          |
 

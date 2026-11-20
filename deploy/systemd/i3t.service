@@ -3,12 +3,16 @@ Description=ice3tier node
 # 更新失败回退时会连续重启几次，不能被 systemd 默认的启动次数限制（10 秒内 5 次）拦住。
 StartLimitIntervalSec=0
 Documentation=https://github.com/fuqiuluo/ice3tier
-After=network-online.target
+After=network-online.target systemd-resolved.service
 Wants=network-online.target
 
 [Service]
 # 程序放在状态目录里，服务账号对它可写，节点自己更新时不需要提权。
+# 一键部署（建用户、装程序与命令行包装脚本、polkit 规则、SELinux）见 deploy/install.sh。
 ExecStart=/var/lib/i3t/bin/i3t run
+# 进程被 SIGKILL 或 OOM 杀掉时，内核会收回 TUN 网卡，但防火墙规则还在；在这里立刻拆掉孤儿规则，不留到下次启动。
+# 加上 "-" 前缀：即使去掉了下面的能力或者程序是旧版本，也不影响服务正常停止和重启。
+ExecStopPost=-/var/lib/i3t/bin/i3t network cleanup
 Environment=I3T_STATE_DIR=/var/lib/i3t
 User=i3t
 Group=i3t
@@ -20,12 +24,16 @@ RestartSec=2
 # 就算以后有人把上面的 Restart= 改成 on-failure，这个退出码也照样重启，更新才不会停在半路。
 SuccessExitStatus=75
 RestartForceExitStatus=75
+# 配置文件有错、还没有加入网络，或者被 controller 吊销、拒绝时以 78（EX_CONFIG）退出：重启也救不了，直接停下。
+RestartPreventExitStatus=78
 LimitNOFILE=1048576
 
 # 虚拟网卡（默认打开）要的能力，以 i3t 用户运行时由 systemd 给：CAP_NET_ADMIN 建网卡、配地址和路由、
 # 加两条防火墙规则（执行的 iptables、nft 带着它）；CAP_NET_RAW 是老的 xtables 后端的 iptables 要的；CAP_NET_BIND_SERVICE
-# 是名字服务的 53 端口（本节点虚拟 IP 上）。NoNewPrivileges=yes 不影响 ambient 的能力。不要虚拟网卡的机器：
-# i3t set network off，再删掉这两行。只有这几项能力：节点进程不是 root，碰不了别的。
+# 是名字服务的 53 端口（本节点虚拟 IP 上）。NoNewPrivileges=yes 不影响 ambient 的能力。
+# 让 systemd-resolved 接受非 root 进程的 DNS 设置，还要安装 deploy/polkit/50-i3t-resolved.rules。
+# 不要虚拟网卡的机器：i3t set network off，删掉 AmbientCapabilities=，并把 CapabilityBoundingSet= 留空。
+# 只有这几项能力：节点进程不是 root，碰不了别的。
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
 # 老的 xtables 后端的 iptables 要一个锁文件，默认在 /run 下，ProtectSystem=strict 时 /run 不能写：放到服务自己的运行目录里。

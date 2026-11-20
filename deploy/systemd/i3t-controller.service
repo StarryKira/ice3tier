@@ -5,9 +5,12 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-# 对外地址等写在 /etc/i3t/controller.env 里，比如：
-#   I3T_CONTROLLER_ARGS=--data-dir /var/lib/i3t-controller --public-addr ctl.example.com:20331
-# 别的选项见 i3t-controller --help。
+# 数据目录默认和 StateDirectory= 一致，由 ProtectSystem=strict 放行写入；若改用别的目录，需另加 ReadWritePaths=。
+Environment=I3T_DATA_DIR=/var/lib/i3t-controller
+# 对外地址和额外选项写在 /etc/i3t/controller.env 里，比如：
+#   I3T_PUBLIC_ADDR=ctl.example.com:20331
+#   I3T_CONTROLLER_ARGS=--listen 0.0.0.0:20331
+# 也兼容直接把 --data-dir / --public-addr 写在 I3T_CONTROLLER_ARGS 里。别的选项见 i3t-controller --help。
 EnvironmentFile=/etc/i3t/controller.env
 ExecStart=/usr/local/bin/i3t-controller $I3T_CONTROLLER_ARGS
 User=i3t-controller
@@ -18,12 +21,18 @@ Restart=always
 RestartSec=2
 LimitNOFILE=1048576
 
+CapabilityBoundingSet=
 NoNewPrivileges=yes
+PrivateDevices=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
 ProtectControlGroups=yes
+ProtectClock=yes
+RestrictNamespaces=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
 

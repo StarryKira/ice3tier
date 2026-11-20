@@ -53,9 +53,24 @@ ice3tier 把你自己的机器连成一个私有网络。每个节点有一块�
 
 ## 安装
 
-### 下载
+### 一键安装（Linux / macOS）
 
-从 [最新的发布](https://github.com/fuqiuluo/ice3tier/releases/latest) 下载对应平台的程序：
+在 Linux 上，[`deploy/install.sh`](deploy/install.sh) 会自动下载程序、创建系统用户、配置 systemd 服务（并按需装好 `systemd-resolved` 的 polkit 规则和 SELinux 上下文）以及 `i3t` 命令行入口：
+
+```sh
+# 安装节点
+curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh
+
+# 安装节点并一步加入网络、启动服务
+curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh -s -- --token <注册令牌>
+
+# 安装 controller 和 i3tctl
+curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh -s -- --controller --public-addr <公网地址>:20331
+```
+
+### 手动下载
+
+也可以从 [最新的发布](https://github.com/fuqiuluo/ice3tier/releases/latest) 直接下载对应平台的程序：
 
 | 平台                  | 节点                     | controller                          | 命令行                      |
 | --------------------- | ------------------------ | ----------------------------------- | --------------------------- |
@@ -65,14 +80,7 @@ ice3tier 把你自己的机器连成一个私有网络。每个节点有一块�
 | macOS（Apple 芯片）   | `i3t-macos-aarch64`      | `i3t-controller-macos-aarch64`      | `i3tctl-macos-aarch64`      |
 | macOS（Intel）        | `i3t-macos-x86_64`       | `i3t-controller-macos-x86_64`       | `i3tctl-macos-x86_64`       |
 
-比如在 Linux 上：
-
-```sh
-curl -fLo i3t https://github.com/fuqiuluo/ice3tier/releases/latest/download/i3t-linux-x86_64
-sudo install -m 755 i3t /usr/local/bin/i3t
-```
-
-节点和 controller 的 systemd 单元在 [`deploy/systemd`](deploy/systemd)。
+systemd 单元和 polkit 规则文件在 [`deploy/systemd`](deploy/systemd) 与 [`deploy/polkit`](deploy/polkit)。
 
 ### 从源码构建
 
@@ -129,7 +137,7 @@ curl -x socks5h://127.0.0.1:1080 https://example.com
 
 | 平台    | 架构                | 虚拟网卡需要                                              |
 | ------- | ------------------- | --------------------------------------------------------- |
-| Linux   | x86_64、aarch64     | `CAP_NET_ADMIN`（systemd 单元里已经给了）                 |
+| Linux   | x86_64、aarch64     | `CAP_NET_ADMIN`、`CAP_NET_RAW`、`CAP_NET_BIND_SERVICE`（[`deploy/systemd/i3t.service`](deploy/systemd/i3t.service) 里已授予）；非 root 配合 `systemd-resolved` 解析名字另装 [`deploy/polkit/50-i3t-resolved.rules`](deploy/polkit/50-i3t-resolved.rules) |
 | Windows | x86_64              | 以管理员运行；`i3t.exe` 旁边要有 `wintun.dll`（发布的 zip 里带着） |
 | macOS   | Apple 芯片、Intel   | 以 root 运行                                              |
 
