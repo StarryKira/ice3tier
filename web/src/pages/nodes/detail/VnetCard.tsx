@@ -1,4 +1,4 @@
-import { ArrowDownUp, AtSign, Ban, CircleAlert, MemoryStick, ShieldCheck } from 'lucide-react'
+import { ArrowDownUp, AtSign, Ban, CircleAlert, MemoryStick, Ruler, ShieldCheck } from 'lucide-react'
 
 import { type NodeDetail } from '@/api/types'
 import { DetailList, DetailRow } from '@/components/detail-list'
@@ -22,7 +22,7 @@ function Label({ text, hint }: { text: string; hint?: string }) {
 
 /**
  * 虚拟网卡（0.1.26 起每个节点默认一块）：标题条右边是状态（装好了、关着、装不上、不支持、未知）。
- * 装好了：网卡和 MTU、名字怎么解析、防火墙的两条规则、这次运行以来的流量、丢掉的包（只有不是 0 时）。
+ * 装好了：网卡、MTU（在节点上用 `i3t set mtu` 改，默认 1280）、名字怎么解析、防火墙的两条规则、这次运行以来的流量、丢掉的包（只有不是 0 时）。
  * 装不上：原因，醒目。关着是本机有意的，不是毛病。没有报（旧版本、离线、还没上报）写"未知"，不当成关着。
  * 没有管理接口的开关：底边一句在节点上怎么开关。
  */
@@ -68,8 +68,13 @@ export function VnetCard({ node }: { node: NodeDetail }) {
         <DetailList>
           {report.device !== undefined ? (
             <DetailRow icon={<MemoryStick />} label={v.device}>
-              <span className="font-mono text-[13px] text-foreground">
-                {v.deviceValue(report.device, report.mtu ?? 0)}
+              <span className="font-mono text-[13px] text-foreground">{report.device}</span>
+            </DetailRow>
+          ) : null}
+          {report.mtu !== undefined ? (
+            <DetailRow icon={<Ruler />} label={<Label text={v.mtu} hint={v.mtuHint} />}>
+              <span className="text-foreground tabular" data-testid="vnet-mtu">
+                {v.mtuValue(report.mtu)}
               </span>
             </DetailRow>
           ) : null}

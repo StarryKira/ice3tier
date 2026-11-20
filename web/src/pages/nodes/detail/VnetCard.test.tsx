@@ -87,7 +87,9 @@ describe('概览上的虚拟网卡', () => {
     const card = screen.getByTestId('vnet')
     expect(card).toHaveAttribute('data-state', 'installed')
     expect(card).toHaveTextContent(v.state.installed)
-    expect(card).toHaveTextContent(v.deviceValue('i3t0', 1280))
+    expect(card).toHaveTextContent('i3t0')
+    // MTU 单独一行（在节点上用 i3t set mtu 改，这里只显示）。
+    expect(screen.getByTestId('vnet-mtu')).toHaveTextContent(v.mtuValue(1280))
     expect(card).toHaveTextContent(v.namesResolved)
     expect(screen.getByTestId('vnet-firewall')).toHaveTextContent(v.firewallOn)
     expect(screen.getByTestId('vnet-dropped')).toHaveTextContent(v.dropValue(v.drop.not_allowed, '12'))
@@ -116,6 +118,8 @@ describe('概览上的虚拟网卡', () => {
   it('关着是本机有意的：写怎么打开', () => {
     renderWithApp(<VnetCard node={detail({ vnet: { ...INSTALLED, state: 'off' } })} />)
     expect(screen.getByTestId('vnet')).toHaveTextContent(v.offDesc)
+    // 关着时报里没有 MTU，没有那一行。
+    expect(screen.queryByTestId('vnet-mtu')).not.toBeInTheDocument()
     expect(screen.getByTestId('vnet-how')).toHaveTextContent(v.howOn)
   })
 
