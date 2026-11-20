@@ -2,6 +2,12 @@
 
 The node, the controller, the command line and the web UI share one version number.
 
+## 0.1.30 (2026-11-20)
+
+- Fixed on macOS: a node closed the connections it relays with a reset even when they ended normally. The last part of a transfer could be cut off with "connection reset by peer", or the transfer could hang near its end. Upgrade every node that runs on macOS.
+- Fixed: a default 24-hour `i3tctl stats` query (`GET /networks/{n}/stats`) sometimes returned hourly points instead of five-minute points.
+- Upgrade nodes and the controller.
+
 ## 0.1.29 (2026-11-20)
 
 - Linux: the virtual adapter's two firewall rules are added with whichever of `nft` and `iptables` the machine has. Nothing has to be installed.
