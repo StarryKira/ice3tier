@@ -2,6 +2,27 @@
 
 每次迭代升一个小版本：只动最后一位（0.1.1、0.1.2……）。节点、controller、命令行和 WebUI 用同一个版本号，用 `scripts/bump-version.sh` 修改。
 
+## 0.1.26 （2026-11-20）
+
+**虚拟网卡默认打开；ice3proxy 变成代理的选项。**controller、节点、命令行和 WebUI 一起升级。
+
+- 虚拟网卡：每个节点默认装一块，拿着它的虚拟 IP。本机的程序直接连别的节点的虚拟 IP，像在一个局域网里：`ping`、TCP、UDP，IPv4 上的都行。别的节点访问本机的服务时，服务看到的来源是对方的虚拟 IP。
+  - Linux（TUN）、Windows（Wintun）、macOS（utun）都默认打开。Linux 上要 `CAP_NET_ADMIN`（systemd 单元里加了）；Windows 要以管理员运行，`i3t.exe` 旁边要有 `wintun.dll`（发布的 zip 里带着，自己编译的用 `scripts/fetch-wintun.sh` 取）；macOS 要 root。装不上时节点说明原因，代理和端口转发照常。
+  - 包走这一对节点之间已有的连接，经中继、经 TCP 中转都一样；MTU 1280。两头核对每个包的来源和目的，访问规则按包管：不让访问本机的节点只收得到回包。送不到的回 ICMP 不可达，本机的程序马上知道。
+  - 防火墙照 Tailscale 的做法：Linux 上加两条（放行从网卡进来的；丢掉来源是组网地址、却不是从网卡进来的），Windows 上加一条放行，macOS 不加。要限制别的节点能访问本机的什么，用系统自己的防火墙。`i3t set firewall off` 一条都不加，`i3t set network off` 不装网卡，`i3t network status` 看现在的状况。
+  - 监听在节点自己虚拟 IP 上的端口转发现在在系统里真的监听。
+  - 已知的限制：没有 IPv6；Windows 和 macOS 只编译、跑过逻辑测试，没有在真机上验证过；用 firewalld 的机器上放行的那一条不起作用，要把网卡放进 trusted 区（`firewall-cmd --permanent --zone=trusted --add-interface=i3t0 && firewall-cmd --reload`）；一条 TCP 流经网卡的吞吐是经代理的三分之一多（本机实验 2.4 对 6.6 Gbit/s）。
+- 去掉透明访问（Linux 上用 nftables 把连接重定向进节点）：有了网卡用不着，它还要动机器上的规则。`i3t set intercept`、`i3t intercept status` 没有了；配置文件里的 `[intercept]` 忽略；以前留在机器上的规则在启动时清掉。管理 API 的节点详情里 `intercept` 换成 `vnet`。
+- 去掉 `i3t connect`：直接连虚拟 IP（`ssh <虚拟 IP>`）。
+- ice3proxy 从节点对的设置变成代理的选项。
+  - 新建代理时问要不要：`i3tctl proxy add` 在终端上问一次（默认不要），或者写 `--ice3proxy`；`i3tctl proxy set <编号> --ice3proxy on|off` 改；WebUI 新建代理的对话框里是一个开关。
+  - 选了的代理，它的 TCP 流一直走 ice3proxy，不管路上有没有 UDP；开不出时悄悄退回共用的连接。没选的代理和端口转发都不走。
+  - 节点对只剩连接常驻和拥塞控制，`i3tctl pair set` 没有 `--lane` 了。ice3proxy 起不起作用、为什么、两头的计数挪到代理的详情里。
+  - **升级时注意**：节点对存着 `always` 的，它上面的代理自动带上这个选项；别的都不带。以前没有设置的节点对在没有 UDP 的路上自己会走 ice3proxy，现在不会：要用就在代理上打开。没打开的代理在没有 UDP 的路上走共用的连接（经 TCP 中转）。
+  - 管理 API：代理多了 `lane`、`lane_effect`、`lanes`；节点对的 `lane`、`lane_effect`、`lanes` 去掉，请求里还写着 `lane` 时忽略（[admin-api.md](docs/internal/admin-api.md) 开头的清单）。
+  - controller 先升级、节点还没升级的那一段，旧的节点会把到「带着这个选项的代理」那一对的端口转发也放到 ice3proxy 上；都升级完就没有了。
+- WebUI：节点概览里有「虚拟网络」（装没装上、为什么、防火墙规则）；代理的新建和编辑对话框里有 ice3proxy 开关，列表里看得到它起不起作用，详情里有两头的计数；节点对页面只剩连接常驻和拥塞控制（拥塞控制以前只能在命令行里设）。
+
 ## 0.1.25 （2026-11-19）
 
 - 直连不再因为少量丢包每隔一两分钟跳到中继再跳回来。
