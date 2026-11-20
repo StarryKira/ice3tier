@@ -16,6 +16,8 @@ jobs:
   check:
     name: fmt, clippy, test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # 一个卡住的测试不让任务跑到平台的上限（6 小时）：全部测试正常在十几分钟里跑完。
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -44,6 +46,7 @@ jobs:
   vnet-device:
     name: virtual adapter smoke test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -77,6 +80,7 @@ jobs:
   web:
     name: web (lint, typecheck, test, build)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: web
