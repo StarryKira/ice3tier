@@ -77,6 +77,35 @@ jobs:
             "$program" a_real_device --nocapture
           fi
 
+  # 安装脚本在真的 systemd（ubuntu）和 launchd（macOS）上装一遍：不带令牌装、sudo i3t join 加入并启动、
+  # 覆盖重装、卸载干净。controller 起在同一台机器的回环上。
+  installer:
+    name: install.sh (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Lint, and the copies inside match deploy/
+        if: runner.os == 'Linux'
+        run: |
+          shellcheck -s sh -S warning deploy/install.sh scripts/test-install.sh
+          for pair in "write_node_service deploy/systemd/i3t.service" \
+                      "write_controller_service deploy/systemd/i3t-controller.service" \
+                      "write_polkit_rule deploy/polkit/50-i3t-resolved.rules"; do
+            set -- $pair
+            awk -v f="$1() {" '$0 == f { getline; on = 1; next } on && /^EOF$/ { exit } on' deploy/install.sh | diff -u "$2" -
+          done
+      - name: Build
+        run: cargo build -p i3t -p i3t-controller-bin -p i3tctl
+      - name: Install, join, reinstall, uninstall
+        run: scripts/test-install.sh target/debug
+
   web:
     name: web (lint, typecheck, test, build)
     runs-on: ubuntu-latest
