@@ -51,26 +51,54 @@ ice3tier 把你自己的机器连成一个私有网络。每个节点有一块�
 - 节点之间、节点和 controller 之间按 Ed25519 公钥互相认证。
 - controller 只负责下发配置；它不在线时，已经在线的节点照常工作。
 
-## 安装
+## 快速上手
 
-### 一键安装（Linux / macOS）
+先部署 controller，再装节点：节点要拿 controller 发的令牌才能加入。每一步的细节，以及端口、Windows、升级和备份，见 [部署指南](docs/deployment.zh-CN.md)。
 
-[`deploy/install.sh`](deploy/install.sh) 把节点装成系统服务：Linux 上是以专用系统用户运行的 systemd 服务（按需装好 `systemd-resolved` 的 polkit 规则和 SELinux 上下文），macOS 上是 launchd 守护进程。装好之后 `i3t` 命令操作的就是这个服务，`sudo i3t join` 加入后会自动启动它。controller 在 Linux 上装成 systemd 服务：
+**1. 安装 controller**，放在一台各个节点都连得上的 Linux 服务器上，放行 TCP 和 UDP 的 20331 端口：
 
 ```sh
-# 安装节点
-curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh
-
-# 安装节点并一步加入网络、启动服务
-curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh -s -- --token <注册令牌>
-
-# 安装 controller 和 i3tctl
 curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh -s -- --controller --public-addr <公网地址>:20331
 ```
 
+它装成 systemd 服务，并打印一次管理令牌，登录 Web 界面和 `i3tctl` 都用它。Web 界面只监听 `127.0.0.1:20332`，从别的机器打开要用 SSH 转发端口：
+
+```sh
+ssh -L 20332:127.0.0.1:20332 <controller 所在的机器>
+```
+
+**2. 建网络，新建注册令牌。** 在 Web 界面里新建网络，点「添加节点」，新建一个令牌。用命令行的话，在服务器上：
+
+```sh
+export I3T_ADMIN_TOKEN=<管理令牌>
+i3tctl network create home
+i3tctl token create   # 每台机器用一个
+```
+
+**3. 在每台机器上安装节点。** Linux 和 macOS：
+
+```sh
+# 可以当中继或出口的，加 --can-relay 或 --can-exit
+curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh -s -- --token <注册令牌>
+sudo i3t status
+```
+
+它把节点装成系统服务、加入网络并启动：Linux 上是以专用系统用户运行的 systemd 服务，macOS 上是 launchd 守护进程。Windows 见 [部署指南](docs/deployment.zh-CN.md#第-3-步添加节点)。
+
+**4. 启用中继和出口，建代理和端口转发。** 在 Web 界面里做，或者用命令行。连不通的节点之间要经中继转发，所以至少启用一个，通常就放在 controller 那台服务器上：
+
+```sh
+i3tctl relay enable <节点>
+i3tctl exit enable <节点>
+i3tctl proxy add <监听的节点> 127.0.0.1:1080 <出口节点>
+curl -x socks5h://127.0.0.1:1080 https://example.com
+```
+
+## 其他安装方式
+
 ### 手动下载
 
-也可以从 [最新的发布](https://github.com/fuqiuluo/ice3tier/releases/latest) 直接下载对应平台的程序：
+从 [最新的发布](https://github.com/fuqiuluo/ice3tier/releases/latest) 下载对应平台的程序：
 
 | 平台                  | 节点                     | controller                          | 命令行                      |
 | --------------------- | ------------------------ | ----------------------------------- | --------------------------- |
@@ -79,6 +107,14 @@ curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/insta
 | Windows x86_64        | `i3t-windows-x86_64.zip` | `i3t-controller-windows-x86_64.exe` | `i3tctl-windows-x86_64.exe` |
 | macOS（Apple 芯片）   | `i3t-macos-aarch64`      | `i3t-controller-macos-aarch64`      | `i3tctl-macos-aarch64`      |
 | macOS（Intel）        | `i3t-macos-x86_64`       | `i3t-controller-macos-x86_64`       | `i3tctl-macos-x86_64`       |
+
+不用安装脚本、直接运行的话，顺序相同：
+
+```sh
+i3t-controller --data-dir /var/lib/i3t-controller --public-addr <公网地址>:20331
+echo <注册令牌> | i3t join
+i3t run
+```
 
 systemd 单元和 polkit 规则文件在 [`deploy/systemd`](deploy/systemd) 与 [`deploy/polkit`](deploy/polkit)。
 
@@ -94,44 +130,6 @@ cargo build --release
 ```
 
 程序在 `target/release/` 下。
-
-## 快速上手
-
-**1. 启动 controller**，放在一台各个节点都连得上的机器上：
-
-```sh
-i3t-controller --data-dir /var/lib/i3t-controller --public-addr <公网地址>:20331
-```
-
-第一次启动时会打印管理令牌，登录 Web 界面和 `i3tctl` 都用它。Web 界面只监听 `127.0.0.1:20332`，从别的机器打开要用 SSH 转发端口：
-
-```sh
-ssh -L 20332:127.0.0.1:20332 <controller 所在的机器>
-```
-
-**2. 建网络、加节点。** 在 Web 界面里新建网络，点「添加节点」，在每台机器上执行它给出的命令。用命令行的话：
-
-```sh
-export I3T_ADMIN_TOKEN=<管理令牌>
-i3tctl network create home
-i3tctl token create
-```
-
-在要加入的机器上：
-
-```sh
-echo <注册令牌> | i3t join   # 可以当中继或出口的，加 --can-relay 或 --can-exit
-i3t run
-```
-
-**3. 启用中继和出口，建代理和端口转发。** 在 Web 界面里做，或者用命令行：
-
-```sh
-i3tctl relay enable <节点>
-i3tctl exit enable <节点>
-i3tctl proxy add <监听的节点> 127.0.0.1:1080 <出口节点>
-curl -x socks5h://127.0.0.1:1080 https://example.com
-```
 
 ## 平台支持
 

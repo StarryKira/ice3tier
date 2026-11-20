@@ -51,22 +51,50 @@ ice3tier connects the machines you own into one private network. Every node gets
 - Nodes authenticate each other and the controller by their Ed25519 public keys.
 - The controller only distributes configuration. Nodes that are already online keep working while it is down.
 
-## Installation
+## Quick start
 
-### One-line install (Linux / macOS)
+Deploy the controller first, then the nodes: a node joins with a token that the controller issues. The [deployment guide](docs/deployment.md) covers every step in detail, with ports, Windows, upgrades and backups.
 
-[`deploy/install.sh`](deploy/install.sh) installs the node as a service: on Linux a systemd unit under its own system user (with the `systemd-resolved` polkit rule and SELinux label when applicable), on macOS a launchd daemon. Either way `i3t` becomes a command that talks to that service, and `sudo i3t join` starts it. The controller is installed as a systemd unit on Linux:
+**1. Install the controller** on a Linux server that every node can reach, with TCP and UDP port 20331 open:
 
 ```sh
-# Node
-curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh
-
-# Node (install, join, and start in one step)
-curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh -s -- --token <enrollment-token>
-
-# Controller + i3tctl
 curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh -s -- --controller --public-addr <public-address>:20331
 ```
+
+It runs as a systemd service and prints the admin token once. Use the token to sign in to the web UI and `i3tctl`. The web UI listens on `127.0.0.1:20332` only. To open it from another machine, forward the port over SSH:
+
+```sh
+ssh -L 20332:127.0.0.1:20332 <controller-host>
+```
+
+**2. Create a network and an enrollment token.** In the web UI, create a network, then click **Add node** and create a token. With the CLI, on the server:
+
+```sh
+export I3T_ADMIN_TOKEN=<admin-token>
+i3tctl network create home
+i3tctl token create   # one token per machine
+```
+
+**3. Install a node on each machine.** On Linux and macOS:
+
+```sh
+# add --can-relay or --can-exit if the machine may serve as one
+curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh -s -- --token <enrollment-token>
+sudo i3t status
+```
+
+This installs the node as a service, joins the network and starts it: a systemd unit under its own system user on Linux, a launchd daemon on macOS. For Windows, see the [deployment guide](docs/deployment.md#step-3-add-nodes).
+
+**4. Enable relays and exits, then add proxies and port forwards** in the web UI, or with the CLI. Nodes that cannot connect directly talk through a relay, so enable at least one, usually on the controller's server:
+
+```sh
+i3tctl relay enable <node>
+i3tctl exit enable <node>
+i3tctl proxy add <listening-node> 127.0.0.1:1080 <exit-node>
+curl -x socks5h://127.0.0.1:1080 https://example.com
+```
+
+## Other ways to install
 
 ### Prebuilt binaries
 
@@ -79,6 +107,14 @@ Download the programs for your platform from the [latest release](https://github
 | Windows x86_64        | `i3t-windows-x86_64.zip` | `i3t-controller-windows-x86_64.exe` | `i3tctl-windows-x86_64.exe` |
 | macOS (Apple silicon) | `i3t-macos-aarch64`     | `i3t-controller-macos-aarch64`     | `i3tctl-macos-aarch64`     |
 | macOS (Intel)         | `i3t-macos-x86_64`      | `i3t-controller-macos-x86_64`      | `i3tctl-macos-x86_64`      |
+
+Run them without the install script, in the same order:
+
+```sh
+i3t-controller --data-dir /var/lib/i3t-controller --public-addr <public-address>:20331
+echo <enrollment-token> | i3t join
+i3t run
+```
 
 Raw systemd units and the polkit rule are in [`deploy/systemd`](deploy/systemd) and [`deploy/polkit`](deploy/polkit).
 
@@ -94,44 +130,6 @@ cargo build --release
 ```
 
 The programs are in `target/release/`.
-
-## Quick start
-
-**1. Start the controller** on a machine that every node can reach:
-
-```sh
-i3t-controller --data-dir /var/lib/i3t-controller --public-addr <public-address>:20331
-```
-
-On first start it prints the admin token. Use it to sign in to the web UI and `i3tctl`. The web UI listens on `127.0.0.1:20332` only. To open it from another machine, forward the port over SSH:
-
-```sh
-ssh -L 20332:127.0.0.1:20332 <controller-host>
-```
-
-**2. Create a network and add nodes.** In the web UI, create a network, then click **Add node** and run the commands it shows on each machine. With the CLI:
-
-```sh
-export I3T_ADMIN_TOKEN=<admin-token>
-i3tctl network create home
-i3tctl token create
-```
-
-On each machine that joins:
-
-```sh
-echo <enrollment-token> | i3t join   # add --can-relay or --can-exit if it may serve as one
-i3t run
-```
-
-**3. Enable relays and exits, then add proxies and port forwards** in the web UI, or with the CLI:
-
-```sh
-i3tctl relay enable <node>
-i3tctl exit enable <node>
-i3tctl proxy add <listening-node> 127.0.0.1:1080 <exit-node>
-curl -x socks5h://127.0.0.1:1080 https://example.com
-```
 
 ## Platform support
 
