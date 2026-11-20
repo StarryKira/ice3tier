@@ -919,19 +919,11 @@ test('ice3proxy', async () => {
   await create.getByRole('button', { name: t.common.cancel, exact: true }).click()
   await page.getByRole('button', { name: t.common.discardConfirm }).click()
 
+  // 节点对：每一对都列出来，gw-hk ⇄ laptop 改过（自定义），其余写默认。
   await goToAdmin(page, t.nav.pairs)
-  await expect(page.getByTestId('pair-row-gw-hk-laptop')).toBeVisible()
-  await page.getByRole('button', { name: t.pairs.add }).click()
-  const dialog = page.getByRole('dialog', { name: t.pairs.dialogTitle })
-  await dialog.getByRole('combobox', { name: t.pairs.nodeA }).click()
-  await page.getByRole('option', { name: /office-pc/ }).click()
-  await expect(page.getByRole('listbox')).toHaveCount(0)
-  await dialog.getByRole('combobox', { name: t.pairs.nodeB }).click()
-  await page.getByRole('option', { name: /gw-hk/ }).click()
-  await dialog.getByRole('combobox', { name: t.pairs.colCongestion }).selectOption('cubic')
-  await shot('pairs-add-dialog', { fullPage: false })
-  await dialog.getByRole('button', { name: t.common.cancel, exact: true }).click()
-  await page.getByRole('button', { name: t.common.discardConfirm }).click()
+  await expect(page.getByTestId('pair-setting-gw-hk-laptop')).toContainText(t.pairs.settingCustom)
+  await expect(page.getByTestId('pair-setting-nas-home-office-pc')).toContainText(t.pairs.settingDefault)
+  await shot('pairs-all')
 })
 
 /**

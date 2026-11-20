@@ -6,7 +6,6 @@ import {
   type LaneSide,
   type Node,
   type NodeId,
-  type PairView,
   type PeerLanes,
   type Proxy,
 } from '@/api/types'
@@ -24,11 +23,6 @@ import { nodeName } from './nodes'
  */
 
 const l = t.proxies.lane
-
-/** 比 0.1.19 旧的 controller 不写 `stored`：那时只有存下的才答得出来。 */
-export function pairStored(pair: Pick<PairView, 'stored'>): boolean {
-  return pair.stored ?? true
-}
 
 /** 一个代理的 ice3proxy：比界面旧的 controller 不写这三个字段，按关着、`null`、`[]` 算。 */
 export function proxyLane(proxy: Pick<Proxy, 'lane' | 'lane_effect' | 'lanes'>): {

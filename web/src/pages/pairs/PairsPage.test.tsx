@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 
 import { type PairView } from '@/api/types'
 import { t } from '@/i18n'
+import { allPairs } from '@/lib/pairs'
 import { makeNode, makePair } from '@/test/fixtures'
 import { fakeApi, NETWORK, renderWithApp, type Routes } from '@/test/harness'
 
@@ -15,7 +16,14 @@ const HK = makeNode(1, 'hk')
 const LAPTOP = makeNode(2, 'laptop')
 const NAS = makeNode(3, 'nas')
 
-function setup(pairs: PairView[], extra: Routes = {}) {
+/** 0.1.28 起的接口：每一对都给，没有设置的 stored 是 false。 */
+const ALL: PairView[] = [
+  makePair(1, 2, { keep_alive: true, congestion: 'cubic', stored: true }),
+  makePair(1, 3, { keep_alive: false, congestion: null, stored: false }),
+  makePair(2, 3, { keep_alive: false, congestion: null, stored: false }),
+]
+
+function setup(pairs: PairView[] = ALL, extra: Routes = {}) {
   return fakeApi({
     'GET /networks/1/pairs': pairs,
     'GET /networks/1/nodes': [HK, LAPTOP, NAS],
@@ -23,92 +31,105 @@ function setup(pairs: PairView[], extra: Routes = {}) {
   })
 }
 
+describe('补齐每一对', () => {
+  it('接口给了的照用；没给的（比 0.1.28 旧的 controller）补成默认；按 a、b 排', () => {
+    const rows = allPairs([NAS, HK, LAPTOP], [makePair(3, 1, { keep_alive: true })])
+    expect(rows.map((row) => [row.a, row.b, row.keep_alive, row.stored])).toEqual([
+      [1, 2, false, false],
+      [3, 1, true, undefined],
+      [2, 3, false, false],
+    ])
+  })
+})
+
 describe('节点对页', () => {
-  it('一对一行：连接常驻和拥塞控制，没有 ice3proxy（它在代理上）', async () => {
-    setup([makePair(1, 2, { congestion: 'cubic' })])
+  it('默认列出每一对：没有特殊设置的写默认，有的写自定义、能恢复默认；没有 ice3proxy', async () => {
+    setup()
     renderWithApp(<PairsPage />, { network: NETWORK })
-    const row = await screen.findByTestId('pair-row-hk-laptop')
-    expect(within(row).getByRole('switch', { name: p.toggle('hk', 'laptop') })).toBeChecked()
-    expect(within(row).getByRole('combobox', { name: p.congestionSelect('hk', 'laptop') })).toHaveValue('cubic')
+    const custom = await screen.findByTestId('pair-row-hk-laptop')
+    expect(within(custom).getByRole('switch', { name: p.toggle('hk', 'laptop') })).toBeChecked()
+    expect(within(custom).getByRole('combobox', { name: p.congestionSelect('hk', 'laptop') })).toHaveValue('cubic')
+    expect(screen.getByTestId('pair-setting-hk-laptop')).toHaveTextContent(p.settingCustom)
+    expect(within(custom).getByRole('button', { name: p.removeFor('hk', 'laptop') })).toBeVisible()
+
+    const plain = screen.getByTestId('pair-row-laptop-nas')
+    expect(screen.getByTestId('pair-setting-laptop-nas')).toHaveTextContent(p.settingDefault)
+    expect(within(plain).queryByRole('button', { name: p.removeFor('laptop', 'nas') })).toBeNull()
+    expect(screen.getAllByTestId(/^pair-row-/)).toHaveLength(3)
     expect(screen.queryByText('ice3proxy')).toBeNull()
-    expect(screen.getByText(p.defaultNote)).toBeVisible()
+    // 不用先添加：没有添加的按钮。
+    expect(screen.queryByRole('button', { name: /添加/ })).toBeNull()
   })
 
-  it('比界面旧的 controller 不写拥塞控制：是默认', async () => {
+  it('比 0.1.28 旧的 controller 只给有设置的：用节点列表补齐，其余写默认', async () => {
     setup([{ a: 1, b: 2, keep_alive: true }])
     renderWithApp(<PairsPage />, { network: NETWORK })
-    const row = await screen.findByTestId('pair-row-hk-laptop')
-    expect(within(row).getByRole('combobox', { name: p.congestionSelect('hk', 'laptop') })).toHaveValue('')
+    expect(await screen.findByTestId('pair-row-hk-nas')).toBeVisible()
+    expect(screen.getByTestId('pair-setting-hk-nas')).toHaveTextContent(p.settingDefault)
+    expect(screen.getByTestId('pair-setting-hk-laptop')).toHaveTextContent(p.settingCustom)
+    // 不写拥塞控制的是默认。
+    expect(screen.getByRole('combobox', { name: p.congestionSelect('hk', 'laptop') })).toHaveValue('')
   })
 
-  it('改拥塞控制只发这一项，默认是 null；拨连接常驻的开关也只发那一项', async () => {
-    const api = setup([makePair(1, 2, { congestion: 'cubic' })], {
-      'PUT /networks/1/pairs/1/2': (call) => ({ ...makePair(1, 2), ...(call.body as object) }),
+  it('默认的一对直接改：只发改的那一项', async () => {
+    const api = setup(ALL, {
+      'PUT /networks/1/pairs/2/3': (call) => ({ ...makePair(2, 3), stored: true, ...(call.body as object) }),
     })
     renderWithApp(<PairsPage />, { network: NETWORK })
-    const select = await screen.findByRole('combobox', { name: p.congestionSelect('hk', 'laptop') })
-    await userEvent.selectOptions(select, '')
-    await waitFor(() => expect(api.callsTo('PUT /networks/1/pairs/1/2')).toHaveLength(1))
-    expect(api.callsTo('PUT /networks/1/pairs/1/2')[0]?.body).toEqual({ congestion: null })
-    expect(await screen.findByText(p.congestionChanged('hk', 'laptop', p.congestion.default))).toBeVisible()
-
-    await userEvent.click(screen.getByRole('switch', { name: p.toggle('hk', 'laptop') }))
-    await waitFor(() => expect(api.callsTo('PUT /networks/1/pairs/1/2')).toHaveLength(2))
-    expect(api.callsTo('PUT /networks/1/pairs/1/2')[1]?.body).toEqual({ keep_alive: false })
-  })
-
-  it('从节点详情过来的那一对没有设置：单独取来，标着默认，没有恢复默认；改一项就存下来', async () => {
-    const unset = makePair(2, 3, { stored: false, keep_alive: false })
-    const api = setup([], {
-      'GET /networks/1/pairs/3/2': unset,
-      'PUT /networks/1/pairs/2/3': (call) => ({ ...unset, stored: true, ...(call.body as object) }),
-    })
-    renderWithApp(<PairsPage />, { network: NETWORK, route: '/n/1/pairs?a=3&b=2' })
-    const row = await screen.findByTestId('pair-row-laptop-nas')
-    expect(within(row).getByText(p.defaultBadge)).toBeVisible()
-    expect(within(row).queryByRole('button', { name: p.removeFor('laptop', 'nas') })).toBeNull()
-
     await userEvent.selectOptions(
-      within(row).getByRole('combobox', { name: p.congestionSelect('laptop', 'nas') }),
+      await screen.findByRole('combobox', { name: p.congestionSelect('laptop', 'nas') }),
       'bbr',
     )
     await waitFor(() => expect(api.callsTo('PUT /networks/1/pairs/2/3')).toHaveLength(1))
     expect(api.callsTo('PUT /networks/1/pairs/2/3')[0]?.body).toEqual({ congestion: 'bbr' })
-  })
-})
+    expect(await screen.findByText(p.congestionChanged('laptop', 'nas', 'BBR'))).toBeVisible()
 
-describe('添加节点对', () => {
-  async function pick(dialog: HTMLElement) {
-    await userEvent.click(within(dialog).getByRole('combobox', { name: p.nodeA }))
-    await userEvent.click(screen.getByRole('option', { name: /laptop/ }))
-    await userEvent.click(within(dialog).getByRole('combobox', { name: p.nodeB }))
-    await userEvent.click(screen.getByRole('option', { name: /nas/ }))
-  }
-
-  it('两个节点和两项设置一起提交：连接常驻默认开着，拥塞控制默认', async () => {
-    const api = setup([], { 'PUT /networks/1/pairs/2/3': makePair(2, 3) })
-    renderWithApp(<PairsPage />, { network: NETWORK })
-    await screen.findByText(p.emptyTitle)
-    expect(screen.getByText(p.defaultNote)).toBeVisible()
-    await userEvent.click(screen.getByRole('button', { name: p.add }))
-    const dialog = screen.getByRole('dialog', { name: p.dialogTitle })
-    await pick(dialog)
-    await userEvent.selectOptions(within(dialog).getByRole('combobox', { name: p.colCongestion }), 'cubic')
-    await userEvent.click(within(dialog).getByRole('button', { name: p.submit }))
-    await waitFor(() => expect(api.callsTo('PUT /networks/1/pairs/2/3')).toHaveLength(1))
-    expect(api.callsTo('PUT /networks/1/pairs/2/3')[0]?.body).toEqual({ keep_alive: true, congestion: 'cubic' })
+    await userEvent.click(screen.getByRole('switch', { name: p.toggle('laptop', 'nas') }))
+    await waitFor(() => expect(api.callsTo('PUT /networks/1/pairs/2/3')).toHaveLength(2))
+    expect(api.callsTo('PUT /networks/1/pairs/2/3')[1]?.body).toEqual({ keep_alive: true })
   })
 
-  it('两项都和默认一样时不提交，说出来', async () => {
-    const api = setup([])
+  it('改回默认值：拥塞控制写 null', async () => {
+    const api = setup(ALL, { 'PUT /networks/1/pairs/1/2': (call) => ({ ...ALL[0], ...(call.body as object) }) })
     renderWithApp(<PairsPage />, { network: NETWORK })
-    await screen.findByText(p.emptyTitle)
-    await userEvent.click(screen.getByRole('button', { name: p.add }))
-    const dialog = screen.getByRole('dialog', { name: p.dialogTitle })
-    await pick(dialog)
-    await userEvent.click(within(dialog).getByRole('switch', { name: p.colKeepAlive }))
-    await userEvent.click(within(dialog).getByRole('button', { name: p.submit }))
-    expect(within(dialog).getByText(p.nothingSet)).toBeVisible()
-    expect(api.callsTo('PUT /networks/1/pairs/2/3')).toHaveLength(0)
+    await userEvent.selectOptions(await screen.findByRole('combobox', { name: p.congestionSelect('hk', 'laptop') }), '')
+    await waitFor(() => expect(api.callsTo('PUT /networks/1/pairs/1/2')).toHaveLength(1))
+    expect(api.callsTo('PUT /networks/1/pairs/1/2')[0]?.body).toEqual({ congestion: null })
+  })
+
+  it('恢复默认：删掉这一对的设置', async () => {
+    const api = setup(ALL, { 'DELETE /networks/1/pairs/1/2': undefined })
+    renderWithApp(<PairsPage />, { network: NETWORK })
+    await userEvent.click(await screen.findByRole('button', { name: p.removeFor('hk', 'laptop') }))
+    await waitFor(() => expect(api.callsTo('DELETE /networks/1/pairs/1/2')).toHaveLength(1))
+    expect(await screen.findByText(p.removed('hk', 'laptop'))).toBeVisible()
+  })
+
+  it('按节点名搜索，或者只看有设置的；一对也不剩时能清除', async () => {
+    setup()
+    renderWithApp(<PairsPage />, { network: NETWORK })
+    await screen.findByTestId('pair-row-hk-laptop')
+    await userEvent.type(screen.getByRole('searchbox', { name: p.searchPlaceholder }), 'nas')
+    expect(screen.getAllByTestId(/^pair-row-/).map((row) => row.dataset.testid)).toEqual([
+      'pair-row-hk-nas',
+      'pair-row-laptop-nas',
+    ])
+    await userEvent.click(screen.getByRole('radio', { name: new RegExp(p.showCustom) }))
+    expect(screen.queryAllByTestId(/^pair-row-/)).toHaveLength(0)
+    await userEvent.click(screen.getByRole('button', { name: t.common.clearFilters }))
+    expect(screen.getAllByTestId(/^pair-row-/)).toHaveLength(3)
+  })
+
+  it('从节点详情过来（a、b 在地址里）：那一对亮出来，没有设置也在列表里', async () => {
+    setup()
+    renderWithApp(<PairsPage />, { network: NETWORK, route: '/n/1/pairs?a=3&b=2' })
+    const row = await screen.findByTestId('pair-row-laptop-nas')
+    expect(row.className).toMatch(/bg-/)
+  })
+
+  it('不到两个节点：说一句', async () => {
+    fakeApi({ 'GET /networks/1/pairs': [], 'GET /networks/1/nodes': [HK] })
+    renderWithApp(<PairsPage />, { network: NETWORK })
+    expect(await screen.findByText(p.emptyTitle)).toBeVisible()
   })
 })

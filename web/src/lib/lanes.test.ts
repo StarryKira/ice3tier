@@ -12,7 +12,6 @@ import {
   laneEffectView,
   lanesReported,
   pairGlance,
-  pairStored,
   peerGlance,
   peerUsesLanes,
   proxyLane,
@@ -141,11 +140,6 @@ describe('代理上的 ice3proxy', () => {
       label: en.proxies.lane.effective,
       detail: en.proxies.lane.dials('laptop'),
     })
-  })
-
-  it('节点对：比 0.1.19 旧的 controller 不写 stored，按存下的算', () => {
-    expect(pairStored({})).toBe(true)
-    expect(pairStored({ stored: false })).toBe(false)
   })
 })
 
