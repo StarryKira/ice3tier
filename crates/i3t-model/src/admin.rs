@@ -1419,6 +1419,12 @@ impl PairSetting {
     pub fn unset(a: NodeId, b: NodeId) -> Self {
         Self { a: a.min(b), b: a.max(b), keep_alive: false, congestion: None }
     }
+
+    /// 各项是不是都是默认值。
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::unset(self.a, self.b)
+    }
 }
 
 /// 改一对节点的设置。没有写的项不变（这一对还没有设置时取默认值）。
@@ -1433,12 +1439,12 @@ pub struct PairInput {
     pub congestion: Option<Option<Congestion>>,
 }
 
-/// 节点对视图里的一项：设置，和有没有存下。
+/// 节点对视图里的一项：设置，和它是不是默认的。网络里任意两个节点都是一对，列表里全都有。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairView {
     #[serde(flatten)]
     pub setting: PairSetting,
-    /// 这一对有没有存下的设置。没有时各项都是默认值：连接不常驻，拥塞控制用节点的默认。
+    /// 这一对有没有存下的设置。存下的都和默认不一样；没有时各项都是默认值：连接不常驻，拥塞控制用节点的默认。
     /// 比这个字段旧的 controller 只列存下的设置，读成 `true`。
     #[serde(default = "stored_by_default")]
     pub stored: bool,

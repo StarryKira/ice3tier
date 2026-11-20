@@ -1075,15 +1075,12 @@ pub fn pairs(pairs: &[PairView]) {
     let mut table = Table::new(&t.pairs_header);
     for pair in pairs {
         let setting = &pair.setting;
-        table.row(vec![
-            format!("#{}", setting.a),
-            format!("#{}", setting.b),
-            yes_no(setting.keep_alive),
-            setting.congestion.map_or_else(|| t.congestion_default.to_owned(), |algorithm| algorithm.to_string()),
-        ]);
+        // 没有设置的一对两项都写"默认"，一眼分得出哪几对是特意设过的。
+        let keep_alive = if pair.stored { yes_no(setting.keep_alive) } else { t.pair_default.to_owned() };
+        let congestion = setting.congestion.map_or_else(|| t.congestion_default.to_owned(), |algorithm| algorithm.to_string());
+        table.row(vec![format!("#{}", setting.a), format!("#{}", setting.b), keep_alive, congestion]);
     }
     print_table(&table, t.no_pairs);
-    println!("{}", t.pairs_default);
 }
 
 pub fn pair(pair: &PairView) {

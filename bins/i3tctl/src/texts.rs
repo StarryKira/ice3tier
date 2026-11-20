@@ -471,8 +471,6 @@ pub struct Ui {
     pub no_forwards: &'static str,
     pub pairs_header: [&'static str; 4],
     pub no_pairs: &'static str,
-    /// 节点对列表下面的一行：没有列出的节点对用什么。
-    pub pairs_default: &'static str,
     /// 节点对没有存下的设置，各项是默认值。
     pub pair_default: &'static str,
     pub keep_alive: &'static str,

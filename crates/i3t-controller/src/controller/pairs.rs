@@ -1,7 +1,9 @@
 //! 节点对设置：连接常驻和拥塞控制。
 //!
-//! 没有存下设置的一对用默认值：连接不常驻，拥塞控制用节点的默认。ice3proxy 以前也是这里的一项，现在是代理的选项
-//! （白皮书 §9.7 第 9 条，见 `proxies`）；旧的客户端在请求里还写着它时忽略，不报错。
+//! 网络里任意两个节点都是一对。没有存下设置的一对用默认值：连接不常驻，拥塞控制用节点的默认；存下的都是和默认不一样的设置。
+//! ice3proxy 以前也是这里的一项，现在是代理的选项（白皮书 §9.7 第 9 条，见 `proxies`）；旧的客户端在请求里还写着它时忽略，不报错。
+
+use std::collections::HashMap;
 
 use i3t_model::admin::{LogRef, NetworkId, PairInput, PairSetting, PairView, action};
 use i3t_model::netmap::Congestion;
@@ -14,7 +16,8 @@ use crate::error::{Entity, Error, InField};
 use crate::store::{PairOptions, Store};
 
 impl Controller {
-    /// 一个网络里全部存下的节点对设置。没有列出的节点对用默认值。
+    /// 一个网络里全部的节点对，按两个节点的编号排：存着设置的带着设置，其余的是默认值（`stored` 是 `false`）。
+    /// 行数随节点数的平方长（100 个节点是 4950 行）。
     ///
     /// # Errors
     ///
@@ -22,8 +25,12 @@ impl Controller {
     pub fn pairs(&self, network: NetworkId) -> Result<Vec<PairView>, Error> {
         let inner = self.lock();
         inner.require_network(network)?;
-        let settings = inner.store.pairs(network)?;
-        Ok(settings.into_iter().map(|setting| PairView { setting, stored: true }).collect())
+        // 按编号排着，所以下面每一对里 `a` 小于 `b`。
+        let nodes: Vec<NodeId> = inner.store.nodes(network)?.into_iter().map(|node| node.id).collect();
+        let stored: HashMap<(NodeId, NodeId), PairSetting> =
+            inner.store.pairs(network)?.into_iter().map(|setting| ((setting.a, setting.b), setting)).collect();
+        let pairs = nodes.iter().enumerate().flat_map(|(index, &a)| nodes.iter().skip(index + 1).map(move |&b| (a, b)));
+        Ok(pairs.map(|(a, b)| view(stored.get(&(a, b)).copied(), a, b)).collect())
     }
 
     /// 一对节点的设置，有没有存下设置都有：没有的是默认值（`stored` 是 `false`）。两个节点的先后顺序无所谓。
@@ -38,13 +45,11 @@ impl Controller {
         let inner = self.lock();
         require_node(&inner.store, network, a).in_field("a")?;
         require_node(&inner.store, network, b).in_field("b")?;
-        Ok(match inner.store.pair(a, b)? {
-            Some(setting) => PairView { setting, stored: true },
-            None => PairView { setting: PairSetting::unset(a, b), stored: false },
-        })
+        Ok(view(inner.store.pair(a, b)?, a, b))
     }
 
     /// 改一对节点的设置：请求里写了的项改掉，没写的不变（这一对还没有设置时取默认值）。两个节点的先后顺序无所谓。
+    /// 改完各项都是默认值的一对不留着设置，应答里 `stored` 是 `false`。
     ///
     /// # Errors
     ///
@@ -55,13 +60,19 @@ impl Controller {
         }
         let mut inner = self.lock();
         let now = inner.clock.now();
-        let setting = inner.store.atomically(|store| {
+        let view = inner.store.atomically(|store| {
             require_node(store, network, a).in_field("a")?;
             require_node(store, network, b).in_field("b")?;
             let before = store.pair(a, b)?.unwrap_or_else(|| PairSetting::unset(a, b));
             let keep_alive = input.keep_alive.unwrap_or(before.keep_alive);
             let congestion = input.congestion.unwrap_or(before.congestion);
-            store.set_pair(a, b, PairOptions { keep_alive, congestion })?;
+            let setting = PairSetting { a: a.min(b), b: a.max(b), keep_alive, congestion };
+            let stored = !setting.is_default();
+            if stored {
+                store.set_pair(a, b, PairOptions { keep_alive, congestion })?;
+            } else {
+                store.delete_pair(a, b)?;
+            }
             let congestion_text = congestion.map_or("节点的默认", Congestion::as_str);
             let detail = format!("节点 #{a} 和 #{b}：连接常驻 {}，拥塞控制 {congestion_text}", switch(keep_alive));
             let params = json!({ "keep_alive": keep_alive, "congestion": congestion });
@@ -73,11 +84,11 @@ impl Controller {
                 &[LogRef::node(a), LogRef::node(b)],
                 pair_params(store, a, b, params)?,
             )?;
-            Ok::<_, Error>(PairSetting { a: a.min(b), b: a.max(b), keep_alive, congestion })
+            Ok::<_, Error>(PairView { setting, stored })
         })?;
         inner.refresh(network, Seeds::of([a, b]), None)?;
         self.wake_if_needed(&inner);
-        Ok(PairView { setting, stored: true })
+        Ok(view)
     }
 
     /// 去掉一对节点的设置，回到默认。
@@ -108,6 +119,12 @@ impl Controller {
         self.wake_if_needed(&inner);
         Ok(())
     }
+}
+
+/// 一对节点的视图。各项都是默认值的一行（比「不留默认值的行」早的版本写得进去）和没有行一样，算没有设置。
+fn view(found: Option<PairSetting>, a: NodeId, b: NodeId) -> PairView {
+    let setting = found.unwrap_or_else(|| PairSetting::unset(a, b));
+    PairView { setting, stored: !setting.is_default() }
 }
 
 /// 操作记录里一对节点的参数：`a` 是编号小的那个，两个都带着当时的名字；`extra` 里的项加在后面。

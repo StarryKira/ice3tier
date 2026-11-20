@@ -526,7 +526,7 @@ fn a_successor_enrolled_by_token_inherits_identity_and_configuration() {
     assert_eq!(forwards.iter().find(|f| f.id == from_old.id).unwrap().listen_node, new.id);
     assert!(referring.lane, "代理的 ice3proxy 跟着代理走");
     let pairs = lab.controller.pairs(network.id).unwrap();
-    let settings: Vec<_> = pairs.into_iter().map(|pair| pair.setting).collect();
+    let settings: Vec<_> = pairs.into_iter().filter(|pair| pair.stored).map(|pair| pair.setting).collect();
     assert_eq!(settings, vec![i3t_model::admin::PairSetting { a: other, b: new.id, keep_alive: true, congestion: None }]);
     assert!(lab.controller.node(network.id, other).unwrap().node.pinned_relays.is_empty(), "原来的 relay 没了，固定它的节点解除固定");
 

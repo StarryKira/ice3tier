@@ -308,8 +308,9 @@ async fn the_command_line_drives_a_running_controller() {
     let unset = fixture.json(&["pair", "show", "nas-01", "laptop"]).await;
     assert_eq!(unset, json!({ "a": 1, "b": 2, "keep_alive": false, "congestion": null, "stored": false }), "{unset}");
     assert!(Fixture::has_line(&fixture.ok(&["pair", "show", "laptop", "nas-01"]).await, &["#1 ↔ #2", "默认"]));
-    assert!(fixture.ok(&["pair", "list"]).await.contains("没有列出的节点对用默认"), "列表下面说没有列出的用什么");
+    assert!(Fixture::has_line(&fixture.ok(&["pair", "list"]).await, &["#1", "#2", "默认"]), "没有设置的一对也在列表里，是默认");
     fixture.ok(&["pair", "set", "nas-01", "laptop", "--keep-alive", "on"]).await;
+    assert!(Fixture::has_line(&fixture.ok(&["pair", "list"]).await, &["#1", "#2", "是", "默认"]));
     let pairs = fixture.json(&["pair", "list"]).await;
     assert_eq!(pairs, json!([{ "a": 1, "b": 2, "keep_alive": true, "congestion": null, "stored": true }]));
     assert!(fixture.fails(&["pair", "set", "nas-01", "laptop", "--lane", "always"]).await.contains("--lane"), "节点对上没有 ice3proxy 了");

@@ -633,8 +633,14 @@ async fn proxies_forwards_and_pairs_round_trip() {
     api.fails(Method::GET, &format!("{base}/pairs/{0}/{0}", gateway.id), None, StatusCode::BAD_REQUEST).await;
     let pair: model::PairSetting = api.ok(Method::PUT, &pair_path, Some(json!({ "keep_alive": true }))).await;
     assert_eq!((pair.a, pair.b, pair.keep_alive), (gateway.id, target.id, true), "编号小的在前");
-    let pairs: Vec<model::PairSetting> = api.ok(Method::GET, &format!("{base}/pairs"), None).await;
-    assert_eq!(pairs, vec![pair]);
+    // 列表里是网络里的每一对：存着设置的只有刚写的那一对，别的是默认值。
+    let (_, listed) = api.call(Method::GET, &format!("{base}/pairs"), None).await;
+    let nodes: Vec<model::Node> = api.ok(Method::GET, &format!("{base}/nodes"), None).await;
+    let listed = listed.as_array().unwrap();
+    assert_eq!(listed.len(), nodes.len() * (nodes.len() - 1) / 2);
+    let (stored, defaults): (Vec<&Value>, Vec<&Value>) = listed.iter().partition(|pair| pair["stored"] == json!(true));
+    assert_eq!(stored, [&json!({ "a": pair.a, "b": pair.b, "keep_alive": true, "congestion": null, "stored": true })]);
+    assert!(defaults.iter().all(|pair| pair["keep_alive"] == json!(false) && pair["congestion"].is_null()), "{defaults:?}");
     // 旧的客户端还写 ice3proxy 的设置：不报错，什么都不改。
     for old in [json!({ "lane": "always" }), json!({ "lane": "sometimes" })] {
         let view: Value = api.ok(Method::PUT, &pair_path, Some(old.clone())).await;

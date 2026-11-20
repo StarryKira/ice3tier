@@ -1,8 +1,8 @@
 //! 每个节点拿到的 netmap：最小权限，内容变了才动版本号，只发给受影响的节点。
 
-use i3t_model::admin::{Direction, ForwardInput, LaneBlock, PairInput, RelaySettings, UpdateNode, UpdateProxy};
+use i3t_model::admin::{Direction, ForwardInput, LaneBlock, PairInput, PairSetting, RelaySettings, UpdateNode, UpdateProxy};
 use i3t_model::control::{Declared, Hello, PROTOCOL_REVISION, Report, ToController};
-use i3t_model::netmap::{self, Attachment, ExitRole, ForwardProtocol, LaneMode, ListenerProtocol, Reach, Verifier};
+use i3t_model::netmap::{self, Attachment, Congestion, ExitRole, ForwardProtocol, LaneMode, ListenerProtocol, Reach, Verifier};
 
 use super::super::Controller;
 use super::super::testing::{CAN_DO_ALL, Lab, REMOTE, proxy};
@@ -528,6 +528,42 @@ fn join_speaking(lab: &mut Lab, network: i3t_model::admin::NetworkId, protocol: 
 }
 
 #[test]
+fn the_pair_list_holds_every_pair_and_only_special_settings_are_stored() {
+    let mut lab = Lab::new();
+    let network = lab.network("home");
+    let nodes: Vec<_> = (0..4).map(|_| lab.join_offline(network.id, &[], Declared::default())).collect();
+    let other = lab.network("work");
+    lab.join_offline(other.id, &[], Declared::default());
+
+    let listed = || lab.controller.pairs(network.id).unwrap();
+    let all: Vec<_> = listed().iter().map(|pair| (pair.setting.a, pair.setting.b)).collect();
+    let [one, two, three, four] = [0, 1, 2, 3].map(|index| nodes[index]);
+    assert_eq!(all, [(one, two), (one, three), (one, four), (two, three), (two, four), (three, four)], "这个网络里的每一对，按编号排");
+    assert!(listed().iter().all(|pair| !pair.stored && pair.setting.is_default()), "没有设置过的都是默认");
+
+    let cubic = PairInput { congestion: Some(Some(Congestion::Cubic)), ..PairInput::default() };
+    lab.controller.set_pair(network.id, four, two, cubic).unwrap();
+    let special: Vec<_> = listed().into_iter().filter(|pair| pair.stored).collect();
+    assert_eq!(special.len(), 1);
+    assert_eq!(special[0].setting, PairSetting { a: two, b: four, keep_alive: false, congestion: Some(Congestion::Cubic) });
+    assert_eq!(listed().len(), 6, "有设置的还是那一行，不多出一行");
+
+    // 改回各项都是默认值：不留着设置，和没有设置过一样。
+    let back = PairInput { congestion: Some(None), ..PairInput::default() };
+    let view = lab.controller.set_pair(network.id, two, four, back).unwrap();
+    assert!(!view.stored && view.setting.is_default());
+    assert!(listed().iter().all(|pair| !pair.stored));
+    assert_eq!(
+        lab.controller.delete_pair(network.id, two, four).unwrap_err().code(),
+        i3t_model::admin::ErrorCode::NotFound,
+        "已经是默认的一对没有可去掉的设置"
+    );
+    // 对一对默认的节点写默认值：什么都不留。
+    let plain = lab.controller.set_pair(network.id, one, two, PairInput { keep_alive: Some(false), congestion: None }).unwrap();
+    assert!(!plain.stored);
+}
+
+#[test]
 fn the_view_of_a_pair_without_a_setting_says_it_is_the_default() {
     let mut lab = Lab::new();
     let network = lab.network("home");
@@ -539,7 +575,7 @@ fn the_view_of_a_pair_without_a_setting_says_it_is_the_default() {
     let setting = view.setting;
     assert_eq!((setting.a, setting.b), (relay.min(member), relay.max(member)), "先后顺序无所谓");
     assert_eq!((setting.keep_alive, setting.congestion), (false, None), "各项都是默认值");
-    assert!(lab.controller.pairs(network.id).unwrap().is_empty(), "默认值不是存下的设置，列表里没有");
+    assert_eq!(lab.controller.pairs(network.id).unwrap(), vec![view], "列表里也有它，是默认的");
 
     let keep = PairInput { keep_alive: Some(true), congestion: None };
     let view = lab.controller.set_pair(network.id, member, relay, keep).unwrap();

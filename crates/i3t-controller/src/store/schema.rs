@@ -498,7 +498,7 @@ mod tests {
         );
         let (one, three, four) = (nodes[0], nodes[2], nodes[3]);
         assert_eq!(
-            controller.pairs(network).unwrap().into_iter().map(|pair| pair.setting).collect::<Vec<_>>(),
+            controller.pairs(network).unwrap().into_iter().filter(|pair| pair.stored).map(|pair| pair.setting).collect::<Vec<_>>(),
             [
                 PairSetting { a: one, b: three, keep_alive: true, congestion: None },
                 PairSetting { a: one, b: four, keep_alive: false, congestion: Some(Congestion::Cubic) }
