@@ -34,8 +34,9 @@ jobs:
         run: scripts/bump-version.sh --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # 一个测试程序失败了也把剩下的跑完：一次运行就看得到这个平台上全部的失败。
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
 
   # 真的建一块虚拟网卡、配上地址和路由、再拆掉（`i3t-vnet` 的 `a_real_device_…` 测试）：这台开发机上只能在 Linux 上做，
   # Windows 和 macOS 的 CI 机器以管理员 / 可以 sudo 的用户运行，在这里做。Windows 上 wintun.dll 要放在测试程序旁边
