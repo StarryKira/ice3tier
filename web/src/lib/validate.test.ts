@@ -22,7 +22,7 @@ import {
 
 const v = t.validate
 
-/** 这里的规则照着 docs/admin-api.md §1.3：界面提前指出来的，都是 controller 会拒绝的。 */
+/** 界面提前指出来的，都是 controller 会拒绝的。 */
 
 describe('网络和节点的名字', () => {
   it('字母、数字、连字符都可以', () => {

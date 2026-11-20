@@ -34,7 +34,7 @@ export function formFailure<F extends string>(
 }
 
 /**
- * 新建、改名分组被拒绝时（文档 §18.1）：名字的写法不对、被占用，写在名字下面，用和提交之前的校验一样的话；
+ * 新建、改名分组被拒绝时：名字的写法不对、被占用，写在名字下面，用和提交之前的校验一样的话；
  * 别的写在表单底部。
  */
 export function groupNameFailure(error: unknown): FormFailure<'name'> | null {

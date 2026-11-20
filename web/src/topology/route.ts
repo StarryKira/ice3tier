@@ -17,7 +17,7 @@ export function textFor<K extends string>(map: Readonly<Record<K, string>>, key:
   return Object.hasOwn(map, key) ? map[key as K] : undefined
 }
 
-/** 矩阵着色用的四类（文档 §15）：直连、一级中转、多级中转、不可达。 */
+/** 矩阵着色用的四类：直连、一级中转、多级中转、不可达。 */
 export type RouteClass = 'direct' | 'relay' | 'multi' | 'none'
 
 export function classify(route: Route): RouteClass {

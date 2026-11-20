@@ -53,9 +53,9 @@ import {
 } from './types'
 
 /**
- * 管理 API 的每个接口一个函数，名字和 `docs/admin-api.md` §13 的表一一对应。
+ * 管理 API 的每个接口一个函数，名字和管理 API 的路径一一对应。
  *
- * 唯一没有对应函数的是 `GET /metrics`（§16）：它不在 `/api/v1` 下面，是给 Prometheus 抓的文本，界面只写出它的地址。
+ * 唯一没有对应函数的是 `GET /metrics`：它不在 `/api/v1` 下面，是给 Prometheus 抓的文本，界面只写出它的地址。
  */
 
 const net = (network: NetworkId) => `/networks/${network}`
@@ -130,7 +130,7 @@ export const api = {
   /** controller 先向两端各问一次，问不到的方向退回到上报的数据，所以最多要等 3 秒左右。 */
   path: (network: NetworkId, from: NodeId, to: NodeId, signal?: AbortSignal) =>
     request<PathView>('GET', `${net(network)}/path`, { query: { from, to }, signal }),
-  /** 主动测试（§19）：发起马上应答，测试在后台进行；进行中每秒问一次。 */
+  /** 主动测试：发起马上应答，测试在后台进行；进行中每秒问一次。 */
   createTest: (network: NetworkId, body: CreateTest) => request<TestView>('POST', `${net(network)}/tests`, { body }),
   test: (network: NetworkId, id: number) => request<TestView>('GET', `${net(network)}/tests/${id}`),
   tests: (network: NetworkId, pair?: { a: NodeId; b: NodeId }, limit = 20) =>

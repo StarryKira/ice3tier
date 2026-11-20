@@ -1,7 +1,7 @@
 /**
- * 管理 API 的数据结构。照着 `docs/admin-api.md` 手写，和 `crates/i3t-model/src/admin.rs` 一一对应。
+ * 管理 API 的数据结构。手写，和 `crates/i3t-model/src/admin.rs` 一一对应。
  *
- * 约定（文档 §1）：时间是 Unix 秒；应答里的字段总是全的，没有值写 `null`；请求里标了"可省略"的字段可以不写。
+ * 约定：时间是 Unix 秒；应答里的字段总是全的，没有值写 `null`；请求里标了"可省略"的字段可以不写。
  * 名字以 `Create`、`Update` 开头或以 `Input` 结尾的是请求体，其余是应答体。
  */
 
@@ -25,7 +25,7 @@ export type Direction = 'both' | 'one_way'
 export type ForwardProtocol = 'tcp' | 'udp'
 
 /**
- * 服务等级（文档 §4 `Network.class`）。一条流的等级按这个顺序取第一个有的：代理用户名里的 `+c-` 标记、
+ * 服务等级（`Network.class`）。一条流的等级按这个顺序取第一个有的：代理用户名里的 `+c-` 标记、
  * 监听器（或端口转发）的、出口的（只有经出口出去的流）、网络的；都没有时是 `auto`。
  */
 export type ServiceClass = 'auto' | 'interactive' | 'reliable' | 'bulk'
@@ -33,7 +33,7 @@ export type ServiceClass = 'auto' | 'interactive' | 'reliable' | 'bulk'
 /** 出口连互联网目标时只用哪一种地址。 */
 export type IpFamily = 'any' | 'ipv4' | 'ipv6'
 
-/** 文档 §2 列出的错误码。以后可能增加，所以收到的值按字符串处理，不认识的按 HTTP 状态显示。 */
+/** 管理 API 的错误码。以后可能增加，所以收到的值按字符串处理，不认识的按 HTTP 状态显示。 */
 export type KnownErrorCode =
   | 'unauthorized'
   | 'not_found'
@@ -55,7 +55,7 @@ export type KnownErrorCode =
   | 'node_offline'
   | 'cannot_self_update'
   | 'no_update'
-  /** §19：同一对节点刚测过 / 正在测，或者矩阵正在跑。 */
+  /** 同一对节点刚测过 / 正在测，或者矩阵正在跑。 */
   | 'too_soon'
   | 'busy'
   /** 代理（新的 `/proxies`）：出口没打开、出口就是入口、策略不允许入口访问出口、用户名和密码只填了一个。 */
@@ -69,7 +69,7 @@ export interface ErrorBody {
   error: {
     code: string
     message: string
-    /** 比 `code` 更具体的一层（文档 §2）：找不到的东西、哪里不对。说不出来、或者 controller 比这个字段旧时是 `null` 或没有。 */
+    /** 比 `code` 更具体的一层：找不到的东西、哪里不对。说不出来、或者 controller 比这个字段旧时是 `null` 或没有。 */
     what?: string | null
     /** 请求里出问题的那一项；分组编号的列表里是 `groups[序号]`。 */
     field?: string | null
@@ -456,7 +456,7 @@ export type DirectKind = 'lan' | 'ipv6' | 'reachable' | 'punched' | 'unknown'
 export type LegTransport = 'udp' | 'tcp' | 'unknown'
 
 /**
- * 每条路的细节（文档 §5、§15）。controller 的文档说它们总是写出来、不知道时是 `null`；
+ * 每条路的细节。controller 的文档说它们总是写出来、不知道时是 `null`；
  * 比这个界面旧的 controller 不写这几个字段，所以这里是可省略的，读的时候缺了按 `null` 算。
  */
 export interface RouteDetail {
@@ -588,7 +588,7 @@ export interface AccessCheck {
 }
 
 /**
- * 一个监听现在的样子（文档 §11.1）。`listening` 的 `local` 是实际绑定的地址：端口写 0 时是节点挑定的端口。
+ * 一个监听现在的样子。`listening` 的 `local` 是实际绑定的地址：端口写 0 时是节点挑定的端口。
  * `unknown` 是比 controller 新的节点报的、它不认识的状态。
  */
 export type ListenState =
@@ -773,7 +773,7 @@ export interface LaneReport {
   peers: PeerLanes[]
 }
 
-/* 节点更新（文档 §14）。设置和发布全局只有一份，不分网络。 */
+/* 节点更新。设置和发布全局只有一份，不分网络。 */
 
 /** 节点不能自己更新的原因。 */
 export type SelfUpdateBlocker = 'container' | 'package_manager' | 'read_only_dir'
@@ -920,7 +920,7 @@ export interface ForcedUpdates {
   skipped: SkippedUpdate[]
 }
 
-/* 路由视图（文档 §15）。数据都来自节点的上报；路是发送方选的，两个方向可以不一样。 */
+/* 路由视图。数据都来自节点的上报；路是发送方选的，两个方向可以不一样。 */
 
 export interface MatrixNode extends NodeRef {
   online: boolean
@@ -1036,7 +1036,7 @@ export interface BackboneRelay {
   links: BackboneLink[]
 }
 
-/** relay 之间的延迟矩阵（文档 §15）。controller 每次现问几个节点，最多等 3 秒左右。 */
+/** relay 之间的延迟矩阵。controller 每次现问几个节点，最多等 3 秒左右。 */
 export interface BackboneView {
   relays: BackboneRelay[]
   /** 这次回答了的节点。是空的时候每个 relay 的行都是空的。 */
@@ -1050,7 +1050,7 @@ export interface PathView {
   reverse: PathLeg
 }
 
-/* 出口（文档 §17）。计数只在 controller 的内存里：节点离线之后留着最后报的那一份，controller 重启之后等节点重新上报。 */
+/* 出口。计数只在 controller 的内存里：节点离线之后留着最后报的那一份，controller 重启之后等节点重新上报。 */
 
 /**
  * 只看出口自己报的、归因于它自己的失败（解析器出错、出口内部出错）：最近 5 分钟里至少 3 次、并且占请求的一成以上是
@@ -1116,7 +1116,7 @@ export interface ExitView {
   proxies?: Proxy[]
 }
 
-/* 分组（文档 §18）。 */
+/* 分组。 */
 
 /** 列表、单个分组、新建、改名和每次增减成员的应答都是它；访问关系图的 `groups` 也是。 */
 export interface Group {
@@ -1157,7 +1157,7 @@ export interface DeletedGroup {
   tokens: number[]
 }
 
-/* 主动测试（文档 §19）。 */
+/* 主动测试。 */
 
 export type TestItem = 'direct' | 'direct_quality' | 'relay_quality' | 'route' | 'host'
 
@@ -1357,7 +1357,7 @@ export interface PeerConnection {
 }
 
 /**
- * 测试时一端主机的快照（文档 §19 的 `host` 项）。现在只有 Linux 读得全；Windows、macOS 上只有系统、架构、核数，
+ * 测试时一端主机的快照（`host` 项）。现在只有 Linux 读得全；Windows、macOS 上只有系统、架构、核数，
  * 别的是 `null`（不是出错）。进行中时是 `pending`、其余都是 `null`，这一端最后一次报告到了才填上。
  */
 export interface HostReport {
@@ -1398,7 +1398,7 @@ export interface HostReport {
 
 /*
  * 代理（替代原来的监听器和凭据）：在节点 `node` 上监听 `bind`，流量从出口节点 `exit` 出去，
- * 用户名和密码认证（0.1.15，文档 §10）。
+ * 用户名和密码认证（0.1.15）。
  */
 
 /** `mixed`：同一个端口上 SOCKS5 和 HTTP 都认（按第一个字节分辨）。 */

@@ -552,7 +552,7 @@ function ForceResult({ result, onDismiss }: { result: ForcedUpdates; onDismiss: 
 }
 
 /**
- * 设置里的「节点更新」（白皮书 §10.5）。从上到下：被暂停的版本、版本和"立即检查"、自动更新的开关、
+ * 设置里的「节点更新」。从上到下：被暂停的版本、版本和"立即检查"、自动更新的开关、
  * 发布源、每个节点的更新状态和"全部更新"。更新是全局的，不分网络。
  */
 export function UpdatesTab() {

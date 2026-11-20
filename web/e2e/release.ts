@@ -52,7 +52,7 @@ export function platformName(): string {
   return `${system}-${arch}`
 }
 
-/** 一个本机目录里的发布源，布局见 docs/releasing.md 第 6 节。 */
+/** 一个本机目录里的发布源。 */
 export class ReleaseSource {
   readonly root: string
   private readonly kit: ReleaseKit

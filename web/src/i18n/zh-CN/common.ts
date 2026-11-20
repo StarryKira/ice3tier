@@ -77,7 +77,7 @@ export const errors = {
   connectionLost: '与 controller 的连接已断开，正在重试',
   crashedTitle: '页面出错',
   reload: '刷新页面',
-  /** 管理 API 的错误码（`docs/admin-api.md` §2）。controller 的原话只在码太笼统时作为补充显示。 */
+  /** 管理 API 的错误码。controller 的原话只在码太笼统时作为补充显示。 */
   codes: {
     unauthorized: '管理令牌无效',
     not_found: '对象不存在',
@@ -106,7 +106,7 @@ export const errors = {
     credentials_incomplete: '用户名和密码要么都填，要么都不填',
     internal: 'controller 内部错误',
   },
-  /** 分组的错误（§18.1）：码加上 `what` 才说得清。 */
+  /** 分组的错误：码加上 `what` 才说得清。 */
   group: {
     notFound: '分组不存在',
     nameTaken: '已有同名的分组',

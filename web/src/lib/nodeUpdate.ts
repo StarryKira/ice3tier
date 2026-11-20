@@ -210,7 +210,7 @@ export function describeUpdate(
 }
 
 /**
- * 能不能对它点"立即更新"。规矩和 controller 的一样（文档 §14）：有可以更新到的版本、能自己更新、在线。
+ * 能不能对它点"立即更新"。规矩和 controller 的一样：有可以更新到的版本、能自己更新、在线。
  * 不能时给一句原因（按钮置灰、悬停显示它）和一个短语（菜单项里放得下的）。
  */
 export type ForceAbility = { ok: true; version: Version } | { ok: false; reason: string; short: string }

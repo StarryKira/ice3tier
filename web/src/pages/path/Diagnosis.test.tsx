@@ -32,7 +32,7 @@ const latency = (avgMs: number) => ({
   duration_ms: 4010,
 })
 
-/** 文档 §19 里的那个例子：打洞成功的直连、经 hk 的中继、两种模式的选择。 */
+/** 一个例子：打洞成功的直连、经 hk 的中继、两种模式的选择。 */
 const DONE: TestView = {
   id: 12,
   network: 1,

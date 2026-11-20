@@ -5,7 +5,7 @@ import { type ErrorBody, type KnownErrorCode } from './types'
 /** 管理 API 所有路径的前缀。WebUI 和 API 同源，所以这里没有主机名。 */
 export const API_PREFIX = '/api/v1'
 
-/** Prometheus 的指标（文档 §16）。不在 `API_PREFIX` 下面，也不要管理令牌。 */
+/** Prometheus 的指标。不在 `API_PREFIX` 下面，也不要管理令牌。 */
 export const METRICS_PATH = '/metrics'
 
 /**
@@ -19,7 +19,7 @@ export class ApiError extends Error {
   readonly code: string
   /** controller 给的原话；它没有给（连不上、不是约定的应答）时是 `null`。 */
   readonly server: string | null
-  /** 比 `code` 更具体的一层（文档 §2）；controller 说不出来、或者它比这个字段旧时是 `null`。 */
+  /** 比 `code` 更具体的一层；controller 说不出来、或者它比这个字段旧时是 `null`。 */
   readonly what: string | null
   /** 请求里出问题的那一项；不是某一项的问题时是 `null`。 */
   readonly field: string | null
@@ -138,7 +138,7 @@ export async function request<T>(method: Method, path: string, options: RequestO
 
   let body: string | undefined
   if (method !== 'GET' && method !== 'DELETE') {
-    // 文档 §1.2：POST、PUT、PATCH 都要带 JSON 请求体，没有要写的字段时写 {}。
+    // POST、PUT、PATCH 都要带 JSON 请求体，没有要写的字段时写 {}。
     headers['Content-Type'] = 'application/json'
     body = JSON.stringify(options.body ?? {})
   }
@@ -178,7 +178,7 @@ function codeText(code: string): string | undefined {
 }
 
 /**
- * 码加上 `what` 才说得清的几种（文档 §18.1 分组的错误）。`what` 是 `group`、`builtin` 时只会是分组的事，
+ * 码加上 `what` 才说得清的几种（分组的错误）。`what` 是 `group`、`builtin` 时只会是分组的事，
  * 所以不必知道是哪个请求。分组名字的写法不对（`what` 是 `empty`、`too_long`、`malformed`）不在这里：
  * 别的名字也用这几个 `what`，由分组的表单自己写（`groupNameFailure`）。
  */

@@ -8,7 +8,7 @@ import { clearToasts, expectToast, goTo, goToAdmin, literal, signIn, t } from '.
 import { platformName, type ReleaseKit, releaseKit, ReleaseSource } from './release'
 
 /**
- * 节点更新（白皮书 §10.5），对着一个发布源是本机目录的 controller：
+ * 节点更新，对着一个发布源是本机目录的 controller：
  * 发布用 `i3t-release` 和一把测试钥匙签，controller 和节点都认这把钥匙（`pnpm e2e:kit` 编的）。
  *
  * 三个真的跑着的节点：able 能自己更新（有自己的一份程序文件，由看护的循环拉起来，换了程序能重启）；

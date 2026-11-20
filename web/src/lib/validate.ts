@@ -13,7 +13,7 @@ import {
 } from './cidr'
 
 /**
- * 提交之前的校验。规则照着 `docs/admin-api.md` §1.3 写，和 controller 的一致；
+ * 提交之前的校验。规则和 controller 的一致；
  * 每个函数返回一句可以直接显示在输入框下面的话，没有问题时返回 `null`。
  */
 
@@ -33,7 +33,7 @@ export function validateName(raw: string): string | null {
 }
 
 /**
- * 分组的名字（文档 §18）：去掉首尾空白之后 1 到 32 个字符，字母（任何文字的）、数字、连字符、下划线。
+ * 分组的名字：去掉首尾空白之后 1 到 32 个字符，字母（任何文字的）、数字、连字符、下划线。
  * 和 controller 一样按 Unicode 数字符（码点，不是 UTF-16 的单元），字母和数字按 Unicode 的属性认
  * （Rust 的 `char::is_alphanumeric`：Alphabetic 或者 Numeric），所以要用 `\p{Alphabetic}` 而不是 `\p{L}`。
  * 大小写保留；不分大小写的重名（包括内置的 `All`）由 controller 判断，它知道网络里现在有哪些分组。

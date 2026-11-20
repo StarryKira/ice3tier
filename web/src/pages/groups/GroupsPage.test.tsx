@@ -27,7 +27,7 @@ const ALL: Group = { id: 1, name: 'All', builtin: true, nodes: [ref(gw), ref(lap
 const LAPTOPS: Group = { id: 3, name: 'laptops', builtin: false, nodes: [ref(laptop)], rules: [ssh] }
 const SERVERS: Group = { id: 4, name: 'servers', builtin: false, nodes: [], rules: [ssh] }
 
-/** controller 拒绝时的应答，带着 `what` 和 `field`（文档 §2、§18.1）。 */
+/** controller 拒绝时的应答，带着 `what` 和 `field`。 */
 function refusal(status: number, code: string, what: string, field: string | null): Response {
   return new Response(JSON.stringify({ error: { code, message: '原话', what, field } }), {
     status,

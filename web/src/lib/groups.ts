@@ -1,7 +1,7 @@
 import { type Group, type GroupId, type GroupRef } from '@/api/types'
 
 /**
- * 分组的几件小事（文档 §18）。
+ * 分组的几件小事。
  *
  * 内置分组 `All`：每个网络都有，每个节点都在里面，不能改名、删除、增减成员；节点和注册令牌的 `groups` 里不列出它。
  */

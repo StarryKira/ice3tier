@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils'
 
 /**
  * 放在名字旁边的一个小图标，悬停或键盘聚焦时显示一段较长的说明。页面上常驻的字只留必要的，
- * 值得留下的解释放在这里（见 README 的「界面上的文字」）。
+ * 值得留下的解释放在这里。
  */
 export function InfoTip({ children, label, className }: { children: ReactNode; label?: string; className?: string }) {
   return (
