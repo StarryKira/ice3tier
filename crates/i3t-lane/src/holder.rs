@@ -190,7 +190,7 @@ pub(crate) fn control_arrived(inner: &Arc<Inner>, mut lane: Lane) {
         let mut peers = inner.lock_peers();
         let Some(entry) = peers.get_mut(&peer).filter(|entry| entry.matches(&lane.membership)) else {
             drop(peers);
-            return inner.refuse(peer, "对端的 lane 授权已经失效");
+            return inner.refuse(peer, &lane.membership, "对端的 lane 授权已经失效");
         };
         let holder = &mut entry.holder;
         if let Some(old) = holder.control.take() {
@@ -220,7 +220,7 @@ pub(crate) fn parked_arrived(inner: &Arc<Inner>, lane: Lane) {
     let mut peers = inner.lock_peers();
     let Some(entry) = peers.get_mut(&peer).filter(|entry| entry.matches(&lane.membership)) else {
         drop(peers);
-        return inner.refuse(peer, "对端的 lane 授权已经失效");
+        return inner.refuse(peer, &lane.membership, "对端的 lane 授权已经失效");
     };
     let holder = &mut entry.holder;
     let refusal = match &holder.control {
@@ -232,7 +232,7 @@ pub(crate) fn parked_arrived(inner: &Arc<Inner>, lane: Lane) {
     };
     if let Some(reason) = refusal {
         drop(peers);
-        return inner.refuse(peer, reason);
+        return inner.refuse(peer, &lane.membership, reason);
     }
     holder.arrived();
     let mut lane = lane;

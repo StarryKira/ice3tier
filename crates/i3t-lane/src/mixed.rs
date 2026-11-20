@@ -234,6 +234,13 @@ impl<R: RecvStream> RecvStream for EitherRecv<R> {
         }
     }
 
+    fn revocation(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
+        match self {
+            Self::Shared(recv) => recv.revocation(),
+            Self::Lane(recv) => recv.revocation(),
+        }
+    }
+
     async fn wait_raw(&mut self) -> Option<RawRead> {
         match self {
             Self::Shared(recv) => recv.wait_raw().await,

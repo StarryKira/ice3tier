@@ -452,8 +452,12 @@ fn counts(counts: &i3t_lane::LaneCounts) -> LaneCounts {
 
 #[cfg(test)]
 mod tests {
+    use i3t_conn::{Acceptor as _, EndpointConfig, SendStream as _};
+    use i3t_lane::Payload;
     use i3t_model::netmap::{Peer, Relay, RelayRole};
     use i3t_proto::PublicKey;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::time::{sleep, timeout};
 
     use super::*;
     use crate::control::testing::netmap;
@@ -633,6 +637,75 @@ mod tests {
             peer(&|status| status.counts.dialling = 1),
         ] {
             assert!(listed(&live, fallback, || Some(true)), "拨着、连着、用着的都列：{live:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn netmap_revokes_a_lane_that_was_already_draining() {
+        for rotated in [None, Some(NodeKey::generate().unwrap().public())] {
+            timeout(Duration::from_secs(10), async {
+                let key = Arc::new(NodeKey::generate().unwrap());
+                let peer_key = NodeKey::generate().unwrap();
+                let mut map = netmap(1);
+                let me = map.me.id;
+                map.me.relay = Some(RelayRole::default());
+                let peer_id = with_peer(&mut map, 2, LaneMode::Always);
+                map.peers[0].key = peer_key.public();
+                let (netmap_tx, netmap_rx) = watch::channel(Arc::new(map));
+                let endpoint = Arc::new(
+                    Endpoint::bind(EndpointConfig {
+                        key: Arc::clone(&key),
+                        bind: "127.0.0.1:0".parse().unwrap(),
+                        netmap: netmap_rx.clone(),
+                        addr_servers: Vec::new(),
+                    })
+                    .unwrap(),
+                );
+                let lanes = Arc::new(NodeLanes::new(&key, Arc::clone(&endpoint)).unwrap());
+                let acceptor = lanes.acceptor();
+                let follow = tokio::spawn(Arc::clone(&lanes).follow(netmap_rx));
+                let peer = Lanes::new(&peer_key, LaneConfig::default()).unwrap();
+                peer.set_peers([LanePeer { id: me, key: key.public(), dial: vec![endpoint.local_addr()] }]).unwrap();
+                while !peer.can_open(me) {
+                    sleep(Duration::from_millis(10)).await;
+                }
+
+                let (mut send, mut recv) = peer.open_stream(me).await.unwrap();
+                send.write_u8(1).await.unwrap();
+                send.end_header(Payload::Sealed);
+                let incoming = acceptor.accept().await.unwrap();
+                assert_eq!(incoming.peer, peer_id);
+                assert!(incoming.send.is_lane());
+                let (mut local_send, mut local_recv) = (incoming.send, incoming.recv);
+                assert_eq!(local_recv.read_u8().await.unwrap(), 1);
+
+                netmap_tx.send_modify(|map| Arc::make_mut(map).peers[0].lane = LaneMode::Off);
+                while lanes.setting(peer_id).is_some() {
+                    sleep(Duration::from_millis(10)).await;
+                }
+                send.write_u8(2).await.unwrap();
+                send.flush().await.unwrap();
+                assert_eq!(local_recv.read_u8().await.unwrap(), 2);
+                local_send.write_u8(3).await.unwrap();
+                local_send.flush().await.unwrap();
+                assert_eq!(recv.read_u8().await.unwrap(), 3);
+
+                netmap_tx.send_modify(|map| {
+                    let map = Arc::make_mut(map);
+                    if let Some(key) = rotated {
+                        map.peers[0].key = key;
+                    } else {
+                        map.peers.clear();
+                    }
+                });
+                assert!(local_recv.read(&mut [0]).await.is_err(), "授权吊销时应中断本端的读");
+                drop((local_send, local_recv));
+                assert!(recv.read(&mut [0]).await.is_err(), "对端也应看到异常结束");
+                drop(netmap_tx);
+                follow.await.unwrap();
+            })
+            .await
+            .expect("lane 应当在身份吊销时结束");
         }
     }
 

@@ -18,7 +18,7 @@
 //! - 写完流的头（发起方的 OPEN 连同首批数据、接受方的 REPLY）时调 [`SendStream::end_header`]，发起方顺便选定
 //!   [`Payload`]：首批数据本身就是 TLS 时，头之后的字节可以不再加密；
 //! - 搬运之前用 [`SendStream::take_raw`]、[`RecvStream::wait_raw`] 问一下这个方向是不是已经是一条原始的 TCP，
-//!   是的话直接在两条 TCP 之间搬（Linux 上用 splice）；
+//!   是的话直接在两条 TCP 之间搬（Linux 上用 splice），同时监听流的吊销信号；
 //! - 开一条承载 TCP 连接的流用 [`Connector::open_tcp`]：实现可以为它挑独占的 TCP，别的流（数据报上下文等）照常用 [`Connector::open`]。
 //!
 //! 流之外，一对节点之间还可以互相发数据报（[`Datagrams`]）：一份一份的，每份有长度上限。
@@ -39,6 +39,7 @@ use i3t_proto::NodeId;
 use i3t_proto::flow::Recipient;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
+use tokio::sync::watch;
 
 /// 流异常结束时带给对端的原因码。各个值的含义由上层定义，这一层只负责送达。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -91,12 +92,24 @@ pub trait RecvStream: AsyncRead + Unpin + Send + 'static {
     /// 不再读了，请对端停止发送。对端之后的写会出错并拿到 `code`。
     fn stop(&mut self, code: StreamCode);
 
+    /// 整条流的吊销信号，包括已经交给调用方直接搬运的两个方向。默认由底层连接负责终止读写。
+    fn revocation(&self) -> Option<watch::Receiver<bool>> {
+        None
+    }
+
     /// 等到知道这个方向接下来是什么：底下已经是一条不再加密的 TCP（见 [`RawRead`]）就交出来，之后这个 [`RecvStream`] 不再能读；
     /// 不是（接下来还是加密的数据、或者已经结束），返回 `None`，照常读。
     ///
     /// 发起方读完 REPLY 之后调：对端在 REPLY 后面紧跟着切换，切换的标记可能还在路上。默认立刻返回 `None`。
     fn wait_raw(&mut self) -> impl Future<Output = Option<RawRead>> + Send {
         std::future::ready(None)
+    }
+}
+
+/// 等到流被吊销。发送端只在吊销时设为 `true`，直接关闭代表连接管理器退出，存量流可以继续。
+pub async fn wait_revoked(mut revocation: watch::Receiver<bool>) {
+    if revocation.wait_for(|revoked| *revoked).await.is_err() {
+        std::future::pending::<()>().await
     }
 }
 
@@ -129,6 +142,7 @@ impl Payload {
 ///
 /// - 先写 [`unsent`](Self::unsent)，再写自己的数据。
 /// - 正常结束时发 FIN（`shutdown(Write)`）；异常结束时绝不能发 FIN，而是重置连接。
+/// - 搬运时监听 [`revoked`](Self::revoked)。吊销时停止两个方向并按异常结束处理。
 /// - socket 处在"关闭时发 RST"的状态。交出去之后底下的传输不再管它怎么关：调用方在整条流两个方向都正常结束时
 ///   才恢复正常关闭（`SO_LINGER` 关掉），否则保持原样，丢弃时对端看到重置。macOS 上两个方向都关了之后改不了，
 ///   要在发 FIN 时就改、出错时再设回来（`i3t_underlay::tcp_reset` 的 `shutdown_write`、`graceful_close` 就是这样做的）。
@@ -137,13 +151,42 @@ pub struct RawWrite {
     socket: Arc<TcpStream>,
     unsent: Bytes,
     counters: Vec<Arc<AtomicU64>>,
+    revocation: Option<watch::Receiver<bool>>,
 }
 
 impl RawWrite {
     /// 调用方每搬一段就往 `counters` 上各加一次，底下的传输用它们计数。
     #[must_use]
     pub fn new(socket: Arc<TcpStream>, unsent: Bytes, counters: Vec<Arc<AtomicU64>>) -> Self {
-        Self { socket, unsent, counters }
+        Self { socket, unsent, counters, revocation: None }
+    }
+
+    /// 附上整条流的吊销信号。
+    #[must_use]
+    pub fn with_revocation(mut self, revocation: watch::Receiver<bool>) -> Self {
+        self.revocation = Some(revocation);
+        self
+    }
+
+    /// 复制吊销信号，可在取出 socket 后继续监听。
+    #[must_use]
+    pub fn revocation(&self) -> Option<watch::Receiver<bool>> {
+        self.revocation.clone()
+    }
+
+    /// 当前是否已被吊销。
+    #[must_use]
+    pub fn is_revoked(&self) -> bool {
+        self.revocation.as_ref().is_some_and(|revocation| *revocation.borrow())
+    }
+
+    /// 被吊销时唤醒搬运任务。没有独立吊销信号时由 socket 自己报告断开。
+    pub async fn revoked(&self) {
+        if let Some(revocation) = &self.revocation {
+            wait_revoked(revocation.clone()).await;
+        } else {
+            std::future::pending::<()>().await;
+        }
     }
 
     #[must_use]
@@ -171,6 +214,7 @@ impl RawWrite {
         }
     }
 
+    /// 取出 socket 和缓冲的字节。搬运前先取 [`Self::revocation`]，被吊销时停止读写并以重置关闭 socket。
     #[must_use]
     pub fn into_parts(self) -> (Arc<TcpStream>, Bytes) {
         (self.socket, self.unsent)
@@ -178,19 +222,48 @@ impl RawWrite {
 }
 
 /// 一个已经不再加密的接收方向：先交出 [`received`](Self::received)（已经从 socket 读进来、还没交出去的原始字节），再读 socket。
-/// FIN 是正常结束，RST 或者出错是异常结束。关闭的规矩和 [`RawWrite`] 一样。
+/// FIN 是正常结束，RST 或者出错是异常结束。搬运时监听 [`revoked`](Self::revoked)，关闭的规矩和 [`RawWrite`] 一样。
 #[derive(Debug)]
 pub struct RawRead {
     socket: Arc<TcpStream>,
     received: Bytes,
     counters: Vec<Arc<AtomicU64>>,
+    revocation: Option<watch::Receiver<bool>>,
 }
 
 impl RawRead {
     /// 调用方每搬一段就往 `counters` 上各加一次，底下的传输用它们计数。
     #[must_use]
     pub fn new(socket: Arc<TcpStream>, received: Bytes, counters: Vec<Arc<AtomicU64>>) -> Self {
-        Self { socket, received, counters }
+        Self { socket, received, counters, revocation: None }
+    }
+
+    /// 附上整条流的吊销信号。
+    #[must_use]
+    pub fn with_revocation(mut self, revocation: watch::Receiver<bool>) -> Self {
+        self.revocation = Some(revocation);
+        self
+    }
+
+    /// 复制吊销信号，可在取出 socket 后继续监听。
+    #[must_use]
+    pub fn revocation(&self) -> Option<watch::Receiver<bool>> {
+        self.revocation.clone()
+    }
+
+    /// 当前是否已被吊销。
+    #[must_use]
+    pub fn is_revoked(&self) -> bool {
+        self.revocation.as_ref().is_some_and(|revocation| *revocation.borrow())
+    }
+
+    /// 被吊销时唤醒搬运任务。没有独立吊销信号时由 socket 自己报告断开。
+    pub async fn revoked(&self) {
+        if let Some(revocation) = &self.revocation {
+            wait_revoked(revocation.clone()).await;
+        } else {
+            std::future::pending::<()>().await;
+        }
     }
 
     #[must_use]
@@ -217,6 +290,7 @@ impl RawRead {
         }
     }
 
+    /// 取出 socket 和缓冲的字节。搬运前先取 [`Self::revocation`]，被吊销时停止读写并以重置关闭 socket。
     #[must_use]
     pub fn into_parts(self) -> (Arc<TcpStream>, Bytes) {
         (self.socket, self.received)
@@ -410,6 +484,26 @@ pub enum OpenError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn dropping_the_revocation_sender_does_not_revoke_a_stream() {
+        let (sender, receiver) = watch::channel(false);
+        drop(sender);
+        tokio::select! {
+            biased;
+            () = wait_revoked(receiver) => panic!("关闭信号不能吊销流"),
+            () = std::future::ready(()) => {}
+        }
+
+        let (sender, receiver) = watch::channel(false);
+        sender.send_replace(true);
+        drop(sender);
+        tokio::select! {
+            biased;
+            () = wait_revoked(receiver) => {}
+            () = std::future::ready(()) => panic!("已经吊销的流应当立即结束"),
+        }
+    }
 
     #[test]
     fn only_a_complete_client_hello_goes_unencrypted() {

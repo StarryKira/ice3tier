@@ -38,17 +38,17 @@
 use std::fmt;
 use std::io;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker, ready};
 use std::time::Duration;
 
 use bytes::{Buf, Bytes, BytesMut};
+use i3t_conn::contract::wait_revoked;
 use i3t_conn::{Payload, RawRead, RawWrite, RecvStream, SendStream, StreamAborted, StreamCode};
 use i3t_proto::NodeId;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 
 use crate::frame::{Frame, MAX_DATA_LEN, MAX_HEADER_LEN, data_header};
 use crate::lane::Lane;
@@ -76,14 +76,18 @@ enum Role {
     Responder,
 }
 
+type RevocationWait = Pin<Box<dyn Future<Output = ()> + Send + Sync>>;
+
 /// 一条流的发送方向。实现 [`SendStream`]。
 pub struct LaneSend {
     shared: Arc<Shared>,
+    wait_revoked: RevocationWait,
 }
 
 /// 一条流的接收方向。实现 [`RecvStream`]。
 pub struct LaneRecv {
     shared: Arc<Shared>,
+    wait_revoked: RevocationWait,
 }
 
 impl fmt::Debug for LaneSend {
@@ -102,7 +106,7 @@ struct Shared {
     socket: Arc<TcpStream>,
     peer: NodeId,
     state: Mutex<State>,
-    revoked: Arc<AtomicBool>,
+    revoked: watch::Receiver<bool>,
     /// 两个方向都被丢弃了：后台的发送任务不用再等。
     closed: Notify,
     book: Book,
@@ -111,11 +115,11 @@ struct Shared {
 
 impl Shared {
     fn is_revoked(&self) -> bool {
-        self.revoked.load(Ordering::Acquire)
+        *self.revoked.borrow()
     }
 
-    fn check_revoked(&self) -> io::Result<()> {
-        if self.is_revoked() {
+    fn check_revoked(&self, wait: &mut RevocationWait, cx: &mut Context<'_>) -> io::Result<()> {
+        if self.is_revoked() || wait.as_mut().poll(cx).is_ready() {
             return Err(io::Error::new(io::ErrorKind::ConnectionReset, "对端的 lane 授权已经吊销"));
         }
         Ok(())
@@ -237,7 +241,7 @@ impl LaneRecv {
         state.recv = RecvState::Handed;
         state.raw_taken = true;
         state.drop_tls_if_unused();
-        Some(RawRead::new(Arc::clone(&shared.socket), received, shared.book.spliced()))
+        Some(RawRead::new(Arc::clone(&shared.socket), received, shared.book.spliced()).with_revocation(shared.revoked.clone()))
     }
 
     /// 这条流的负载方式。发起方在头写完之前是 `None`。
@@ -248,7 +252,7 @@ impl LaneRecv {
 }
 
 /// 把一条刚取到的 lane 变成本端发起的一条流。
-pub(crate) fn initiate(lane: Lane, book: Book, revoked: Arc<AtomicBool>) -> (LaneSend, LaneRecv) {
+pub(crate) fn initiate(lane: Lane, book: Book, revoked: watch::Receiver<bool>) -> (LaneSend, LaneRecv) {
     let Lane { socket, mut sealed, out, peer, .. } = lane;
     sealed.shrink();
     socket::rst_on_close(&socket);
@@ -275,7 +279,7 @@ pub(crate) fn initiate(lane: Lane, book: Book, revoked: Arc<AtomicBool>) -> (Lan
 /// 对端在一条 lane 上开过来的流：它的 OPENING 已经读到了，`header` 是里面流的头。
 ///
 /// passthrough 时 OPENING 所在的记录之后就是原始字节，调用方已经确认这条记录在这个帧的末尾结束。
-pub(crate) fn respond(lane: Lane, payload: Payload, header: &[u8], book: Book, revoked: Arc<AtomicBool>) -> (LaneSend, LaneRecv) {
+pub(crate) fn respond(lane: Lane, payload: Payload, header: &[u8], book: Book, revoked: watch::Receiver<bool>) -> (LaneSend, LaneRecv) {
     let Lane { socket, mut sealed, out, peer, .. } = lane;
     socket::rst_on_close(&socket);
     socket::set_user_timeout(&socket, socket::STREAM_USER_TIMEOUT);
@@ -302,7 +306,7 @@ pub(crate) fn respond(lane: Lane, payload: Payload, header: &[u8], book: Book, r
     split(socket, peer, state, book, revoked)
 }
 
-fn split(socket: Arc<TcpStream>, peer: NodeId, state: State, book: Book, revoked: Arc<AtomicBool>) -> (LaneSend, LaneRecv) {
+fn split(socket: Arc<TcpStream>, peer: NodeId, state: State, book: Book, revoked: watch::Receiver<bool>) -> (LaneSend, LaneRecv) {
     let shared = Arc::new(Shared {
         socket,
         revoked,
@@ -312,7 +316,9 @@ fn split(socket: Arc<TcpStream>, peer: NodeId, state: State, book: Book, revoked
         _in_use: book.enter(|tally| &tally.in_use),
         book,
     });
-    (LaneSend { shared: Arc::clone(&shared) }, LaneRecv { shared })
+    let send = LaneSend { shared: Arc::clone(&shared), wait_revoked: Box::pin(wait_revoked(shared.revoked.clone())) };
+    let recv = LaneRecv { wait_revoked: Box::pin(wait_revoked(shared.revoked.clone())), shared };
+    (send, recv)
 }
 
 impl State {
@@ -492,6 +498,9 @@ enum Read<'a, 'b> {
 
 /// 把待发的密文交给内核；交不完时让后台任务等 socket 可写再送，调用方不必再管。
 fn push(shared: &Arc<Shared>, state: &mut State) {
+    if shared.is_revoked() {
+        return;
+    }
     match state.drain_now(&shared.socket) {
         Ok(true) => {}
         Ok(false) => {
@@ -509,34 +518,33 @@ fn push(shared: &Arc<Shared>, state: &mut State) {
 
 /// 后台送出待发的密文。只在写的一方已经返回、没有人会再来推一把时才需要。
 async fn flush_later(shared: Arc<Shared>) {
+    let revoked = wait_revoked(shared.revoked.clone());
+    tokio::pin!(revoked);
     loop {
         {
             let mut state = shared.lock();
-            let done = state.halves == 0 || !matches!(state.drain_now(&shared.socket), Ok(false));
-            if done {
-                state.flushing = false;
-                state.wake_sender();
-                return;
+            if shared.is_revoked() || state.halves == 0 || !matches!(state.drain_now(&shared.socket), Ok(false)) {
+                break;
             }
         }
         tokio::select! {
-            ready = shared.socket.writable() => if ready.is_err() {
-                shared.lock().flushing = false;
-                return;
-            },
-            () = shared.closed.notified() => {
-                shared.lock().flushing = false;
-                return;
-            }
+            biased;
+            () = &mut revoked => break,
+            () = shared.closed.notified() => break,
+            ready = shared.socket.writable() => if ready.is_err() { break; },
         }
     }
+    let mut state = shared.lock();
+    state.flushing = false;
+    state.wake_sender();
 }
 
 impl AsyncRead for LaneRecv {
     fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
-        let shared = &self.shared;
+        let this = self.get_mut();
+        let shared = &this.shared;
         let mut state = shared.lock();
-        shared.check_revoked()?;
+        shared.check_revoked(&mut this.wait_revoked, cx)?;
         if state.role == Role::Initiator && matches!(state.send, SendState::Header(_)) {
             // 发起方开始等回复了，头一定已经写完。
             state.end_header(Payload::Sealed);
@@ -587,9 +595,10 @@ impl AsyncRead for LaneRecv {
 
 impl AsyncWrite for LaneSend {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, data: &[u8]) -> Poll<io::Result<usize>> {
-        let shared = &self.shared;
+        let this = self.get_mut();
+        let shared = &this.shared;
         let mut state = shared.lock();
-        shared.check_revoked()?;
+        shared.check_revoked(&mut this.wait_revoked, cx)?;
         if let Some(refused) = state.send_refused {
             return Poll::Ready(Err(refused.into()));
         }
@@ -641,9 +650,10 @@ impl AsyncWrite for LaneSend {
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let shared = &self.shared;
+        let this = self.get_mut();
+        let shared = &this.shared;
         let mut state = shared.lock();
-        shared.check_revoked()?;
+        shared.check_revoked(&mut this.wait_revoked, cx)?;
         if matches!(state.send, SendState::Header(_)) {
             state.end_header(Payload::Sealed);
         }
@@ -651,9 +661,10 @@ impl AsyncWrite for LaneSend {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let shared = &self.shared;
+        let this = self.get_mut();
+        let shared = &this.shared;
         let mut state = shared.lock();
-        shared.check_revoked()?;
+        shared.check_revoked(&mut this.wait_revoked, cx)?;
         loop {
             match state.send {
                 SendState::Header(_) => state.end_header(Payload::Sealed),
@@ -667,6 +678,7 @@ impl AsyncWrite for LaneSend {
                 SendState::Raw => state.send = SendState::Closing,
                 SendState::Closing => {
                     ready!(state.poll_drain(&shared.socket, cx))?;
+                    shared.check_revoked(&mut this.wait_revoked, cx)?;
                     socket::finish_write(&shared.socket)?;
                     state.send = SendState::Finished;
                     state.drop_tls_if_unused();
@@ -720,11 +732,14 @@ impl SendStream for LaneSend {
         state.raw_taken = true;
         let unsent = std::mem::take(&mut state.out).freeze();
         state.drop_tls_if_unused();
-        Some(RawWrite::new(Arc::clone(&shared.socket), unsent, shared.book.spliced()))
+        Some(RawWrite::new(Arc::clone(&shared.socket), unsent, shared.book.spliced()).with_revocation(shared.revoked.clone()))
     }
 }
 
 fn reset(shared: &Shared, state: &mut State, code: StreamCode) {
+    if shared.is_revoked() {
+        return;
+    }
     let raw = match state.send {
         SendState::Finished | SendState::Aborted | SendState::Handed => return,
         // 头还没发出去：对端还不知道有这条流，重置连接就够了。
@@ -754,6 +769,10 @@ impl RecvStream for LaneRecv {
         stop(shared, &mut state, code);
     }
 
+    fn revocation(&self) -> Option<watch::Receiver<bool>> {
+        Some(self.shared.revoked.clone())
+    }
+
     /// 等到知道这个方向接下来是什么：离开了 TLS（对端发了 SWITCH，或者发起方选了 passthrough）就交出来，和
     /// [`take_raw`](Self::take_raw) 一样；接下来是 TLS 里的数据、或者这个方向结束了、出错了，返回 `None`，调用方照常读。
     ///
@@ -762,7 +781,7 @@ impl RecvStream for LaneRecv {
         std::future::poll_fn(|cx| {
             let shared = &self.shared;
             let mut state = shared.lock();
-            if shared.is_revoked() {
+            if shared.check_revoked(&mut self.wait_revoked, cx).is_err() {
                 return Poll::Ready(());
             }
             loop {
@@ -790,7 +809,7 @@ impl RecvStream for LaneRecv {
 }
 
 fn stop(shared: &Arc<Shared>, state: &mut State, code: StreamCode) {
-    if matches!(state.recv, RecvState::Eof | RecvState::Stopped | RecvState::Failed(_) | RecvState::Handed) {
+    if shared.is_revoked() || matches!(state.recv, RecvState::Eof | RecvState::Stopped | RecvState::Failed(_) | RecvState::Handed) {
         return;
     }
     state.recv = RecvState::Stopped;
@@ -840,7 +859,11 @@ fn release(shared: &Arc<Shared>, state: &mut State) {
     }
     shared.closed.notify_one();
     if state.raw_taken {
-        // 交出去的方向怎么结束由调用方决定，见 `RawWrite`。
+        // 原始方向的搬运方监听同一个吊销信号，并负责重置 socket。
+        return;
+    }
+    if shared.is_revoked() {
+        i3t_underlay::tcp_reset::close(Arc::clone(&shared.socket));
         return;
     }
     let send_clean = matches!(state.send, SendState::Finished);

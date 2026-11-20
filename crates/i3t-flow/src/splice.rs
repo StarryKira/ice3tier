@@ -13,7 +13,7 @@ use i3t_conn::{RecvStream, SendStream, StreamAborted, StreamCode};
 use i3t_proto::flow::Reason;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::relay::{End, Flow, Parts, buffer_len};
+use crate::relay::{End, Flow, Parts, buffer_len, cancel_on_revocation};
 
 /// 一次对接的结果。
 #[derive(Debug)]
@@ -40,11 +40,20 @@ impl<S: SendStream, R: RecvStream> Flow<S, R> {
     pub async fn splice<S2: SendStream, R2: RecvStream>(self, other: Flow<S2, R2>, cancel: impl Future<Output = Reason>) -> Spliced {
         let Parts { send: mut near_send, recv: mut near_recv, .. } = self.parts;
         let Parts { send: mut far_send, recv: mut far_recv, .. } = other.parts;
+        let near_revocation = near_recv.revocation();
+        let far_revocation = far_recv.revocation();
+        let cancel = cancel_on_revocation(cancel, near_revocation.clone());
+        let cancel = cancel_on_revocation(cancel, far_revocation.clone());
         let (mut near_to_far, mut far_to_near) = (0, 0);
         let outcome = {
             let up = pump(&mut near_recv, &mut far_send, &mut near_to_far);
             let down = pump(&mut far_recv, &mut near_send, &mut far_to_near);
             both(up, down, cancel).await
+        };
+        let outcome = if [near_revocation.as_ref(), far_revocation.as_ref()].into_iter().flatten().any(|state| *state.borrow()) {
+            Err(Broken::Cancelled(Reason::AccessRevoked))
+        } else {
+            outcome
         };
         let end = match outcome {
             Ok(()) => End::Clean,

@@ -13,6 +13,7 @@ use common::{
 };
 use i3t_access::ListenState;
 use i3t_model::netmap::ListenerProtocol;
+use i3t_proto::PublicKey;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
@@ -327,6 +328,37 @@ i3t_lane::on_both_transports! {
         let mut again = socks5(world.socks().await, None, PUBLIC_IP, 443).await.connected();
         assert_echo(&mut again).await;
         assert_echo(&mut from_nas).await;
+    }
+}
+
+i3t_lane::on_both_transports! {
+    async fn rotating_the_initiators_key_resets_both_tcp_ends() {
+        let world = World::new().await;
+        let target = Target::bind("127.0.0.1").await;
+        world.gw.system.redirect(&public(443), target.addr());
+        let mut client = socks5(world.socks().await, None, PUBLIC_IP, 443).await.connected();
+        // 首批字节是一条 ClientHello 记录，让 ice3proxy 测试走 passthrough。
+        let hello = *b"\x16\x03\x01\x00\x04\x01\x00\x00\x00";
+        client.write_all(&hello).await.unwrap();
+        let mut server = target.accept().await;
+        let mut received = [0; 9];
+        timeout(PATIENCE, server.read_exact(&mut received)).await.unwrap().unwrap();
+        assert_eq!(received, hello);
+        server.write_all(b"reply").await.unwrap();
+        let mut reply = [0; 5];
+        timeout(PATIENCE, client.read_exact(&mut reply)).await.unwrap().unwrap();
+        assert_eq!(&reply, b"reply");
+        if i3t_lane::testing::transport() == i3t_lane::testing::Transport::Lanes {
+            assert!(world.gw.lanes.status().total.spliced_bytes > 0, "出口应当走原始 TCP 搬运");
+        }
+        assert_eq!(world.gw.exit.stats().active, 1);
+
+        // 只改出口用于检查放行凭据的 netmap。测试 transport 的节点表保持原样。
+        world.gw.update(|netmap| peer_mut(netmap, LAPTOP).key = PublicKey::from_bytes([0x42; 32])).await;
+        let ((_, client_end), (_, server_end)) = tokio::join!(drain(&mut client), drain(&mut server));
+        assert_reset(&client_end);
+        assert_reset(&server_end);
+        eventually("出口记录了主动吊销", || world.gw.exit.stats().aborted == 1).await;
     }
 }
 
