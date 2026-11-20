@@ -1,8 +1,9 @@
 #!/bin/sh
 # Runs deploy/install.sh for real on a throwaway machine (CI): installs the node from DIR as a system service (systemd
 # on Linux, launchd on macOS), joins it to a controller started here on loopback with `sudo i3t join`, checks that it
-# comes online and that `sudo i3t run` points at the service, installs over it, then uninstalls and checks nothing is
-# left. Needs passwordless sudo and changes the machine: do not run it on yours.
+# comes online, that `sudo i3t run` points at the service and that asking for help does not restart it, installs over
+# it, then uninstalls and checks nothing is left. Needs passwordless sudo and changes the machine: do not run it on
+# yours.
 #
 # Usage: scripts/test-install.sh <dir with i3t, i3t-controller and i3tctl>
 set -eu
@@ -68,6 +69,12 @@ wait_online() {
     done
 }
 
+# `sudo ARGS` must point at the service instead of starting a node.
+points_at_service() {
+    if sudo "$@" 2>"$work/run.err"; then fail "sudo $* started a node"; fi
+    grep -q "system service" "$work/run.err" || fail "sudo $*: unexpected answer: $(cat "$work/run.err")"
+}
+
 step "controller on loopback"
 "$dir/i3t-controller" --data-dir "$work/ctl" --public-addr 127.0.0.1:20331 --listen 127.0.0.1:20331 >"$work/ctl.out" 2>"$work/ctl.err" &
 ctl_pid=$!
@@ -93,8 +100,9 @@ else
 fi
 
 step "sudo i3t run points at the service"
-if sudo i3t run 2>"$work/run.err"; then fail "sudo i3t run started a node"; fi
-grep -q "system service" "$work/run.err" || fail "unexpected answer: $(cat "$work/run.err")"
+points_at_service i3t run
+points_at_service i3t --state-dir /var/lib/i3t/ run
+points_at_service env I3T_STATE_DIR="$work/elsewhere" i3t --state-dir /var/lib/i3t run
 
 step "sudo i3t join joins and starts the service"
 printf '%s\n' "$token" | sudo i3t join --can-relay
@@ -104,6 +112,13 @@ if [ "$os" = "Linux" ]; then
     pid=$(systemctl show -p MainPID --value i3t)
     [ "$(ps -o user= -p "$pid" | tr -d ' ')" = "i3t" ] || fail "the node does not run as user i3t"
 fi
+
+step "asking for help leaves the service alone"
+before=$(pgrep -x i3t) || fail "no node process"
+sudo i3t join --help >/dev/null
+sudo i3t --help join >/dev/null
+sudo i3t run --help >/dev/null
+[ "$(pgrep -x i3t)" = "$before" ] || fail "asking for help restarted the service"
 
 step "install over the joined node"
 sudo sh "$repo/deploy/install.sh" --from "$dir"

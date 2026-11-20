@@ -534,17 +534,13 @@ if [ ! -x "$BIN" ]; then
 fi
 
 sub=""
-custom_dir=0
-if [ -n "${I3T_STATE_DIR:-}" ] && [ "$I3T_STATE_DIR" != "$STATE" ]; then
-    custom_dir=1
-fi
-
+info=0
+# --state-dir wins over I3T_STATE_DIR, as it does in the program.
+dir="${I3T_STATE_DIR:-}"
 skip_next=0
 for arg in "$@"; do
     if [ "$skip_next" -eq 1 ]; then
-        if [ "$arg" != "$STATE" ]; then
-            custom_dir=1
-        fi
+        dir="$arg"
         skip_next=0
         continue
     fi
@@ -553,9 +549,10 @@ for arg in "$@"; do
             skip_next=1
             ;;
         --state-dir=*)
-            if [ "${arg#*=}" != "$STATE" ]; then
-                custom_dir=1
-            fi
+            dir="${arg#*=}"
+            ;;
+        -h | --help | -V | --version)
+            info=1
             ;;
         -*)
             ;;
@@ -566,6 +563,16 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+# The directory a path names, with links and trailing slashes resolved; the path itself when it cannot be entered.
+real_dir() {
+    (CDPATH='' cd -- "$1" 2>/dev/null && pwd -P) || printf '%s\n' "$1"
+}
+
+custom_dir=0
+if [ -n "$dir" ] && [ "$(real_dir "$dir")" != "$(real_dir "$STATE")" ]; then
+    custom_dir=1
+fi
 
 case "$sub" in
     hosts | tune | network | "")
@@ -618,7 +625,8 @@ restart_service() {
     exit 1
 }
 
-if [ "$(id -u)" -eq 0 ] && [ "$custom_dir" -eq 0 ]; then
+# Asking for help or the version neither joins nor runs.
+if [ "$(id -u)" -eq 0 ] && [ "$custom_dir" -eq 0 ] && [ "$info" -eq 0 ]; then
     case "$sub" in
         run)
             printf 'i3t: the node runs as a system service on this machine; start it with: %s\n' "$(start_command)" >&2
