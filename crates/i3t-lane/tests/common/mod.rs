@@ -167,13 +167,17 @@ pub async fn read_to_end(recv: &mut (impl AsyncReadExt + Unpin)) -> std::io::Res
     Ok(all)
 }
 
-/// 一条经过中间一跳的连接，两个方向各录下了什么。
+/// 一条经过中间一跳的连接，两个方向各录下了什么、是怎么结束的。
 #[derive(Debug, Default)]
 pub struct Recording {
     /// 从拨号的一方发往被拨的一方的字节。
     pub forward: Vec<u8>,
     /// 反方向。
     pub backward: Vec<u8>,
+    /// 中间一跳在 `forward` 这个方向上读到了什么结局：FIN 是 [`End::Clean`]，RST 或者出错是 [`End::Reset`]。还没结束时是 `None`。
+    pub forward_end: Option<End>,
+    /// 反方向。
+    pub backward_end: Option<End>,
 }
 
 /// 中间一跳：把连上来的连接转发到 `target`，录下两个方向的字节；可以把已有的连接全部掐断（RST）或者让它们装死
@@ -281,8 +285,16 @@ async fn forward(
         // 一个方向正常结束时另一个继续；一个方向被重置时两头都重置，不能把重置变成 FIN。
         while !(there_done && back_done) {
             let end = tokio::select! {
-                end = &mut there, if !there_done => { there_done = true; end }
-                end = &mut back, if !back_done => { back_done = true; end }
+                end = &mut there, if !there_done => {
+                    there_done = true;
+                    recording.lock().unwrap().forward_end = Some(end);
+                    end
+                }
+                end = &mut back, if !back_done => {
+                    back_done = true;
+                    recording.lock().unwrap().backward_end = Some(end);
+                    end
+                }
             };
             if end == End::Reset {
                 return true;
@@ -309,8 +321,9 @@ async fn forward(
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum End {
+/// 中间一跳的一个方向是怎么结束的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum End {
     Clean,
     Reset,
 }

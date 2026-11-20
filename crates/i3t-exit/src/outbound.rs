@@ -24,7 +24,10 @@ use crate::{policy, upstream};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 连本机自己的地址最多等多久。本机不会丢包，等不到就是没有。
-const LOCAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+///
+/// 要比 Windows 报出"被拒绝"的时间长：那里连一个没有人监听的端口，收到 RST 之后还会重发 SYN，两秒左右才报错。
+/// 时限比这短的话，关着的端口在 Windows 上报成超时（客户端看到"主机不可达"），而不是"连接被拒绝"。
+const LOCAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// 解析一个域名最多等多久。
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -766,6 +769,31 @@ mod tests {
             assert_eq!(socket.tcp_keepalive_time().unwrap(), Duration::from_secs(25));
             assert_eq!(socket.tcp_keepalive_interval().unwrap(), Duration::from_secs(25));
         }
+    }
+
+    /// 像 Windows 那样，连一个关着的端口要两秒多才报"被拒绝"的系统。网卡是回环和一个局域网地址。
+    struct SlowRefusal;
+
+    impl System for SlowRefusal {
+        fn interfaces(&self) -> io::Result<Vec<IpNet>> {
+            Ok(vec!["127.0.0.1/8".parse().unwrap(), "192.168.1.5/24".parse().unwrap()])
+        }
+
+        async fn resolve(&self, _name: &str) -> Result<Vec<IpAddr>, ResolveError> {
+            Err(ResolveError::NotFound)
+        }
+
+        async fn connect(&self, _addr: SocketAddr) -> io::Result<TcpStream> {
+            time::sleep(Duration::from_millis(2500)).await;
+            Err(io::ErrorKind::ConnectionRefused.into())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_closed_port_of_this_node_reads_as_refused_even_where_the_system_takes_seconds_to_say_so() {
+        let (_netmap, receiver) = watch::channel(Arc::new(crate::grant::tests::netmap()));
+        let reply = Outbound::new(receiver, SlowRefusal).node_port(22).await.unwrap_err();
+        assert_eq!(reply.status, Status::ConnectionRefused, "{reply:?}");
     }
 
     #[test]

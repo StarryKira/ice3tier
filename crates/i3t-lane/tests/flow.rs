@@ -12,6 +12,7 @@ use std::future;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use common::{Hop, Pair, quick};
@@ -152,20 +153,58 @@ async fn the_flow_layer_passes_tls_through_and_splices_it() {
     let relay = tokio::spawn(async move { through_flow(&lanes, peer, client_side, &hello).await });
     let body: Vec<u8> = (0..3_000_000u32).map(|i| u8::try_from(i % 239).unwrap()).collect();
     let (mut from_target, mut to_target) = client.split();
-    let ((), (echoed, end)) = tokio::join!(
-        async {
-            to_target.write_all(&body).await.unwrap();
-            to_target.shutdown().await.unwrap();
-        },
-        async {
-            let mut echoed = Vec::new();
-            let end = from_target.read_to_end(&mut echoed).await;
-            (echoed, end)
-        }
-    );
+    // 一边发一边收，各自记下走到了哪里：macOS 上这里曾经一直不结束，等不到时要能看出卡在哪一段。
+    let (sent, received) = (AtomicUsize::new(0), AtomicUsize::new(0));
+    let exchange = async {
+        tokio::join!(
+            async {
+                for piece in body.chunks(64 * 1024) {
+                    to_target.write_all(piece).await.unwrap();
+                    sent.fetch_add(piece.len(), Ordering::Relaxed);
+                }
+                to_target.shutdown().await.unwrap();
+            },
+            async {
+                let (mut echoed, mut buf) = (Vec::new(), vec![0; 64 * 1024]);
+                let end = loop {
+                    match from_target.read(&mut buf).await {
+                        Ok(0) => break Ok(()),
+                        Ok(len) => {
+                            echoed.extend_from_slice(&buf[..len]);
+                            received.fetch_add(len, Ordering::Relaxed);
+                        }
+                        Err(error) => break Err(error),
+                    }
+                };
+                (echoed, end)
+            }
+        )
+    };
+    let Ok(((), (echoed, end))) = timeout(PATIENCE, exchange).await else {
+        let hop: Vec<_> = pair
+            .hop
+            .recordings
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|recording| {
+                let recording = recording.lock().unwrap();
+                (recording.forward.len(), recording.forward_end, recording.backward.len(), recording.backward_end)
+            })
+            .collect();
+        panic!(
+            "{PATIENCE:?} 之内没有回显完：客户端发出 {} 字节、收回 {} 字节，入口的搬运{}结束；入口 {:?}；出口 {:?}；\
+             中间一跳每条连接的（出口到入口的字节、结局，入口到出口的字节、结局）{hop:?}",
+            sent.load(Ordering::Relaxed),
+            received.load(Ordering::Relaxed),
+            if relay.is_finished() { "已经" } else { "还没有" },
+            pair.entry.lanes.status().total,
+            pair.exit.lanes.status().total,
+        );
+    };
     end.unwrap();
     assert!(echoed == [&hello[..], &body].concat(), "回显的字节不一样");
-    assert!(relay.await.unwrap().is_clean());
+    assert!(timeout(PATIENCE, relay).await.expect("客户端读完之后入口的搬运应该结束").unwrap().is_clean());
     let entry = pair.entry.lanes.status();
     let exit = pair.exit.lanes.status();
     // 两头都把不再加密的方向交给了搬运引擎：每个方向的数据都过了 splice（非 Linux 上是用户态拷贝，同样经引擎）。

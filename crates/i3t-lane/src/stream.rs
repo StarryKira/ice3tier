@@ -15,7 +15,7 @@
 //!
 //! | 本端做了什么 | 对端看到什么 |
 //! |---|---|
-//! | [`SendStream::reset`]，这个方向还在 TLS 里 | ABORT 帧（带原因码），随后 RST |
+//! | [`SendStream::reset`]，这个方向还在 TLS 里 | ABORT 帧（带原因码），随后 FIN；两个方向都丢弃之后等对端关掉再关，那时发 RST |
 //! | [`SendStream::reset`]，这个方向已经是原始字节 | RST（Linux 上立刻发，别处在关闭时） |
 //! | [`RecvStream::stop`]，本端的发送方向还在 TLS 里 | STOP 帧（带原因码），对端之后的写出错；lane 不断，本端的发送照常 |
 //! | [`RecvStream::stop`]，本端的发送方向已经不在 TLS 里 | RST |
@@ -24,6 +24,10 @@
 //! lane 从开流起就设成"关闭时发 RST"，只有两个方向都正常结束才改回去，所以任务被取消、进程退出也一样。
 //! 收到的 RST 在读写时是一个不带原因码的连接错误（分不清是对端重置了流，还是路上断了），ABORT 帧是带原因码的
 //! [`StreamAborted::Reset`]，STOP 帧让本端之后的写返回 [`StreamAborted::Stopped`]。
+//!
+//! 发了 ABORT 帧的一端不在丢弃时马上关：Windows 收到 RST 时把还没读走的数据扔掉，紧跟在 ABORT 后面的 RST
+//! 会让对端连 ABORT 和原因码一起丢掉。所以它先发 FIN，把对端还在路上的数据收下扔掉，等对端关掉（最多
+//! [`LINGER_AFTER_STOP`]）再关。ABORT 后面的 FIN 不会被当成正常结束：sealed 的方向上正常结束要有 close_notify。
 //!
 //! # 写不需要 flush
 //!
@@ -58,8 +62,9 @@ const DROPPED_RECV: StreamCode = StreamCode(0);
 /// 一次从 socket 读多少（sealed 的方向）。
 const READ_CHUNK: usize = 64 * 1024;
 
-/// 本端叫停了对端、自己这一侧已经正常写完时，关闭之前最多再收多久（收到就扔）：
-/// 关闭时接收缓冲里还有没读的数据，内核会发 RST 并丢掉还没发出去的数据，刚写完的 REPLY 可能就此丢了。
+/// 本端叫停了对端、自己这一侧已经正常写完，或者本端发了 ABORT 帧时，关闭之前最多再收多久（收到就扔）：
+/// 关闭时接收缓冲里还有没读的数据，内核会发 RST 并丢掉还没发出去的数据，刚写完的 REPLY 可能就此丢了；
+/// 对端是 Windows 时，它收到 RST 也会丢掉还没读走的 ABORT。
 const LINGER_AFTER_STOP: Duration = Duration::from_secs(5);
 
 /// 这一端在流里是哪一方。
@@ -175,6 +180,8 @@ struct State {
     raw_taken: bool,
     /// 本端或对端异常结束了这条流：关闭时发 RST。
     aborted: bool,
+    /// 本端用 ABORT 帧重置了发送方向，这个帧已经全部交给了内核：关闭之前要等对端读到它（[`close_after_abort`]）。
+    abort_sent: bool,
     heard_from_peer: bool,
 }
 
@@ -238,6 +245,7 @@ pub(crate) fn initiate(lane: Lane, book: Book) -> (LaneSend, LaneRecv) {
         halves: 2,
         raw_taken: false,
         aborted: false,
+        abort_sent: false,
         heard_from_peer: false,
     };
     split(socket, peer, state, book)
@@ -267,6 +275,7 @@ pub(crate) fn respond(lane: Lane, payload: Payload, header: &[u8], book: Book) -
         halves: 2,
         raw_taken: false,
         aborted: false,
+        abort_sent: false,
         heard_from_peer: true,
     };
     split(socket, peer, state, book)
@@ -696,7 +705,7 @@ fn reset(shared: &Shared, state: &mut State, code: StreamCode) {
             sealed.seal_frame(&Frame::Abort(code.0));
             sealed.take_output(&mut state.out);
             // 尽力而为：ABORT 进得了内核就送得到，进不去对端也会看到 RST。
-            let _ = state.drain_now(&shared.socket);
+            state.abort_sent = matches!(state.drain_now(&shared.socket), Ok(true));
             false
         }
         SendState::Raw => true,
@@ -806,6 +815,7 @@ fn release(shared: &Arc<Shared>, state: &mut State) {
     match (&state.recv, send_clean, state.aborted) {
         (RecvState::Eof, true, false) => socket::graceful_close(&shared.socket),
         (RecvState::Stopped, true, false) => linger_then_close(shared),
+        _ if state.abort_sent => close_after_abort(shared),
         _ => {}
     }
 }
@@ -816,20 +826,37 @@ fn linger_then_close(shared: &Arc<Shared>) {
     let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
     socket::graceful_close(&socket);
     drop(runtime.spawn(async move {
-        let discard = async {
-            let mut scratch = [0; 4096];
-            loop {
-                if socket.readable().await.is_err() {
-                    return;
-                }
-                match socket.try_read(&mut scratch) {
-                    Ok(0) => return,
-                    Ok(_) => {}
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                    Err(_) => return,
-                }
-            }
-        };
-        let _ = tokio::time::timeout(LINGER_AFTER_STOP, discard).await;
+        let _ = tokio::time::timeout(LINGER_AFTER_STOP, discard(&socket)).await;
     }));
+}
+
+/// 本端发了 ABORT 帧、两个方向都丢弃了：发 FIN，把对端还在路上的数据收下扔掉，等对端关掉（最多 [`LINGER_AFTER_STOP`]）再关。
+/// socket 还设着"关闭时发 RST"，那时对端看到的是重置。见模块文档的异常结束一节。
+///
+/// 对端读到 ABORT 之后会关掉它那一头；两头都发了 ABORT 时，各自的 FIN 让对方的等待马上结束。
+fn close_after_abort(shared: &Arc<Shared>) {
+    let socket = Arc::clone(&shared.socket);
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
+    if let Err(error) = socket::shutdown_write(&socket) {
+        tracing::debug!(%error, "ABORT 之后发不了 FIN，对端读完 ABORT 之后要等关闭时的 RST");
+    }
+    drop(runtime.spawn(async move {
+        let _ = tokio::time::timeout(LINGER_AFTER_STOP, discard(&socket)).await;
+    }));
+}
+
+/// 把收到的都读出来扔掉，直到对端结束或者出错。
+async fn discard(socket: &TcpStream) {
+    let mut scratch = [0; 4096];
+    loop {
+        if socket.readable().await.is_err() {
+            return;
+        }
+        match socket.try_read(&mut scratch) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(_) => return,
+        }
+    }
 }

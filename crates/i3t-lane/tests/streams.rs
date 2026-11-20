@@ -8,7 +8,7 @@ mod common;
 use std::io;
 use std::time::Duration;
 
-use common::{Pair, quick, read_to_end};
+use common::{End as HopEnd, Pair, quick, read_to_end, wait_for};
 use i3t_conn::{RecvStream, SendStream, StreamAborted, StreamCode};
 use i3t_lane::Payload;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -139,6 +139,29 @@ async fn a_reset_reaches_the_other_side_as_an_abort_never_as_a_clean_end() {
         assert_eq!(StreamAborted::of(&error), Some(StreamAborted::Reset(StreamCode(5))), "{payload:?}");
     })
     .await;
+}
+
+/// 发了 ABORT 的一端丢弃流之后，不紧跟着用 RST 关掉 lane：Windows 收到 RST 时会扔掉还没读走的数据，对端就读不到 ABORT
+/// 和它的原因码了。Linux 先交出 RST 之前到的数据，从对端看不出区别，所以在中间一跳上看那个方向是怎么结束的。
+#[tokio::test]
+async fn an_abort_is_followed_by_a_fin_while_the_peer_has_not_read_it_yet() {
+    for entry_initiates in [true, false] {
+        let pair = Pair::new(quick()).await;
+        pair.ready(1).await;
+        let ((mut send, recv), (_far_send, mut far_recv)) = open(&pair, entry_initiates, Payload::Sealed).await;
+        send.write_all(b"partial").await.unwrap();
+        send.reset(StreamCode(7));
+        drop((send, recv));
+        // 中间一跳上，从入口出来的方向是 backward（出口是拨号的一方）。池里多余的空闲 lane 这时也可能被关掉，所以不数条数，
+        // 只看结束了的方向里没有 RST。
+        let ended = |recording: &common::Recording| if entry_initiates { recording.backward_end } else { recording.forward_end };
+        let ends = || -> Vec<HopEnd> { pair.hop.recordings.lock().unwrap().iter().filter_map(|r| ended(&r.lock().unwrap())).collect() };
+        wait_for("重置的一端发完 ABORT 之后结束它的方向", Duration::from_secs(5), || !ends().is_empty()).await;
+        let ends = ends();
+        assert!(!ends.contains(&HopEnd::Reset), "对端还没读，ABORT 后面跟的是 FIN 而不是 RST（入口开流：{entry_initiates}）：{ends:?}");
+        let error = assert_aborted(&mut far_recv, "发起方重置").await;
+        assert_eq!(StreamAborted::of(&error), Some(StreamAborted::Reset(StreamCode(7))));
+    }
 }
 
 /// Linux 上原始字节的方向一重置就发 RST，不等另一个方向也被丢弃。
