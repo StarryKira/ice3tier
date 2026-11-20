@@ -2,6 +2,19 @@
 
 The node, the controller, the command line and the web UI share one version number.
 
+## 0.1.29 (2026-11-20)
+
+- Linux: the virtual adapter's two firewall rules are added with whichever of `nft` and `iptables` the machine has. Nothing has to be installed.
+  - Without `nft`, the anti-spoofing rule is an `iptables` rule in the `raw` table.
+  - Without `iptables`, the accept rule is not needed and is reported as `not_needed` (admin API: a new value of `vnet.firewall.accept.state`).
+- Fixed on Windows: access refused by the other node over ice3proxy was reported as a broken connection instead of "not allowed".
+- Fixed on Windows: a closed port was reported as unreachable or timed out instead of refused, on the exit's own node and in the controller's relay reachability check.
+- Fixed on macOS: the TCP segment size limit (`tcp_mss`) had no effect. It now limits what the node sends; what a peer that is not ice3tier sends cannot be limited on macOS.
+- Fixed on macOS: a local program using the node's proxy could hang after its connection was reset.
+- Web UI: the overview access map and the route star view can be clicked again.
+- The tests now pass on Windows and macOS as well as on Linux.
+- Upgrade nodes, the controller and the command line.
+
 ## 0.1.28 (2026-11-20)
 
 - The node pair list shows every pair of nodes in the network. Pairs nobody configured show as default, and any pair can be edited directly (web UI, `i3tctl pair list`).
