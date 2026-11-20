@@ -246,10 +246,17 @@ impl Node {
         let id = NodeId::new(id).unwrap();
         let key = Arc::new(NodeKey::generate().unwrap());
         let (netmap, netmap_rx) = watch::channel(build_netmap(id, &View::default()));
-        // 节点启用为 relay 时要在同一个端口号上监听 TCP，所以挑一个 TCP 和 UDP 都空着的端口。
-        let port = (0..50).find_map(|_| {
-            let probe = std::net::TcpListener::bind((ip, 0)).ok()?;
-            UdpPort::bind(probe.local_addr().ok()?).ok()
+        // 节点启用为 relay 时要在同一个端口号上监听 TCP，所以挑一个 TCP 和 UDP 都空着的端口。两种挑法轮着来：系统分的
+        // TCP 端口号可能接连落在 Windows 给 UDP 保留的那一段里，系统分的 UDP 端口号也可能正被 TCP 占着（详见 i3t-conn 的
+        // 测试里同样的挑法）。
+        let port = (0..100).find_map(|attempt| {
+            if attempt % 2 == 0 {
+                let probe = std::net::TcpListener::bind((ip, 0)).ok()?;
+                UdpPort::bind(probe.local_addr().ok()?).ok()
+            } else {
+                let port = UdpPort::bind(SocketAddr::new(ip.parse().ok()?, 0)).ok()?;
+                std::net::TcpListener::bind(port.local_addr()).ok().map(|_| port)
+            }
         })?;
         let port = Arc::new(port);
         let paths = Arc::new(Paths::new(PathConfig {

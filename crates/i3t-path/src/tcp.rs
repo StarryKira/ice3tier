@@ -245,15 +245,22 @@ mod tests {
 
     use super::*;
 
-    /// 一个不回答握手的地址：监听着、却从不接受连接，等着接受的队列已经满了，再来的 SYN 内核直接丢掉。
-    /// 返回那个地址和占着队列的东西（丢掉它们地址就不"死"了）。
-    async fn silent_address() -> (SocketAddr, tokio::net::TcpListener, TcpStream) {
+    /// 一个不回答握手的地址，和让它不回答的东西（丢掉之后地址就不"死"了）。
+    ///
+    /// 两种系统做法不同，各用各的：
+    /// - Linux、Windows：监听着、却从不接受连接，等着接受的队列已经满了，再来的 SYN 内核直接丢掉。
+    ///   只绑定、不监听的 socket 在这两个系统上会回 RST，不行。
+    /// - macOS：队列满了照样回应握手（CI 上量到 300 毫秒之内就有了结果），不行；只绑定、不监听的 socket 收到 SYN 什么都不回，正好。
+    async fn silent_address() -> (SocketAddr, Box<dyn std::any::Any + Send>) {
         let socket = tokio::net::TcpSocket::new_v4().unwrap();
         socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = socket.local_addr().unwrap();
+        if cfg!(target_os = "macos") {
+            return (addr, Box::new(socket));
+        }
         let listener = socket.listen(0).unwrap();
-        let addr = listener.local_addr().unwrap();
         let filler = TcpStream::connect(addr).await.unwrap();
-        (addr, listener, filler)
+        (addr, Box::new((listener, filler)))
     }
 
     #[tokio::test]
@@ -261,20 +268,23 @@ mod tests {
         // 排在前面的地址不回答：错开一点时间就去连下一个，不等它超时。
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let live = listener.local_addr().unwrap();
-        let (dead, _queue, _filler) = silent_address().await;
+        let (dead, _silence) = silent_address().await;
         assert!(tokio::time::timeout(Duration::from_millis(300), TcpStream::connect(dead)).await.is_err(), "这个地址应该不回答");
         let started = tokio::time::Instant::now();
         let (stream, addr) = connect_first(&[dead, live]).await.unwrap();
         assert_eq!(addr, live);
         assert!(started.elapsed() < Duration::from_secs(1), "等了 {:?}", started.elapsed());
 
-        // 连上的那一条通告压低的 MSS：对端（这里是一个什么都不设的监听者）发过来的分段不超过它。回环上不压的话是六万多。
+        // 连上的那一条压低了 MSS：本端发出去的分段不超过它；系统能通告时（`tcp_mss::ADVERTISED`，macOS 不能），对端
+        // （这里是一个什么都不设的监听者）发过来的也不超过它。回环上不压的话是一万多到六万多。
         #[cfg(unix)]
         {
             let accepted = listener.accept().await.unwrap().0;
             let clamped = u32::from(tcp_mss::DEFAULT);
             assert!(socket2::SockRef::from(&stream).tcp_mss().unwrap() <= clamped);
-            assert!(socket2::SockRef::from(&accepted).tcp_mss().unwrap() <= clamped, "对端按本端通告的 MSS 发");
+            if tcp_mss::ADVERTISED {
+                assert!(socket2::SockRef::from(&accepted).tcp_mss().unwrap() <= clamped, "对端按本端通告的 MSS 发");
+            }
         }
         drop(stream);
 

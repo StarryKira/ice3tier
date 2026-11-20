@@ -337,13 +337,18 @@ async fn lanes_come_back_after_a_drain_is_called_off_or_the_draining_node_restar
 
 #[tokio::test]
 async fn an_address_that_never_answers_does_not_hold_up_the_dial() {
-    // relay 的地址有好几个，只有一部分连得上。排在前面的这个不回答握手：监听着、却从不接受连接，
-    // 等着接受的队列已经满了，再来的 SYN 内核直接丢掉。
+    // relay 的地址有好几个，只有一部分连得上。排在前面的这个不回答握手。Linux 和 Windows 上：监听着、却从不接受连接，
+    // 等着接受的队列已经满了，再来的 SYN 内核直接丢掉（只绑定、不监听的 socket 在那里会回 RST）。macOS 上队列满了照样
+    // 回应握手，只绑定、不监听的 socket 却什么都不回，就用它。
     let socket = tokio::net::TcpSocket::new_v4().unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    let silent = socket.listen(0).unwrap();
-    let dead = silent.local_addr().unwrap();
-    let _queue_full = TcpStream::connect(dead).await.unwrap();
+    let dead = socket.local_addr().unwrap();
+    let _silence: Box<dyn std::any::Any + Send> = if cfg!(target_os = "macos") {
+        Box::new(socket)
+    } else {
+        let listener = socket.listen(0).unwrap();
+        Box::new((listener, TcpStream::connect(dead).await.unwrap()))
+    };
     assert!(timeout(Duration::from_millis(300), TcpStream::connect(dead)).await.is_err(), "这个地址应该不回答");
 
     let mut entry = Node::new(id(1), quick());

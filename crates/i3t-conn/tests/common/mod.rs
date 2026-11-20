@@ -101,21 +101,31 @@ impl Node {
         init_logging();
         let id = NodeId::new(id).unwrap();
         let (netmap, netmap_rx) = watch::channel(build_netmap(id, &View::default()));
-        // 节点启用为 relay 时要在同一个端口号上监听 TCP，所以挑一个 TCP 和 UDP 都空着的端口：
-        // 先让系统分一个空闲的 TCP 端口，再去绑同号的 UDP，绑不上就换一个。
-        let endpoint = (0..50)
-            .find_map(|_| {
+        let config = |bind| EndpointConfig { key: Arc::clone(&key), bind, netmap: netmap_rx.clone(), addr_servers: addr_servers.to_vec() };
+        // 节点启用为 relay 时要在同一个端口号上监听 TCP，所以挑一个 TCP 和 UDP 都空着的端口。两种挑法轮着来：
+        // 系统分一个空闲的 TCP 端口、去绑同号的 UDP；或者系统分一个空闲的 UDP 端口、看同号的 TCP 绑不绑得上。
+        // 只用前一种，Windows 上曾经一连 50 次都不成：那里 UDP 和 TCP 各有一些成段保留、不让绑的端口（`netsh int ipv4
+        // show excludedportrange protocol=udp`，Hyper-V、WinNAT 占的），系统分给 TCP 的端口号可能接连落在 UDP 保留的那一段里。
+        // 每一边的分配器都躲开自己那边保留的端口，轮着来就不会一直卡在同一段上。
+        let mut last_error = String::new();
+        for attempt in 0..100 {
+            let bound = if attempt % 2 == 0 {
                 let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-                let config = EndpointConfig {
-                    key: Arc::clone(&key),
-                    bind: probe.local_addr().unwrap(),
-                    netmap: netmap_rx.clone(),
-                    addr_servers: addr_servers.to_vec(),
-                };
-                Endpoint::bind(config).ok()
-            })
-            .expect("找不到 TCP 和 UDP 都空闲的端口");
-        Self { id, key, endpoint: Arc::new(endpoint), netmap }
+                Endpoint::bind(config(probe.local_addr().unwrap())).map_err(|error| format!("{error:?}"))
+            } else {
+                Endpoint::bind(config("127.0.0.1:0".parse().unwrap())).map_err(|error| format!("{error:?}")).and_then(|endpoint| {
+                    match std::net::TcpListener::bind(endpoint.local_addr()) {
+                        Ok(_) => Ok(endpoint),
+                        Err(error) => Err(format!("TCP {}：{error}", endpoint.local_addr())),
+                    }
+                })
+            };
+            match bound {
+                Ok(endpoint) => return Self { id, key, endpoint: Arc::new(endpoint), netmap },
+                Err(error) => last_error = error,
+            }
+        }
+        panic!("找不到 TCP 和 UDP 都空闲的端口，最后一次失败：{last_error}");
     }
 
     pub fn addr(&self) -> SocketAddr {

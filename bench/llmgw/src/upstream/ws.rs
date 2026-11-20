@@ -67,7 +67,7 @@ where
         Ending::Abort => {
             counters.aborted.fetch_add(1, Ordering::Relaxed);
             tracing::debug!(stream = %state.session.stream, events = state.events.count(), "按请求中途重置连接");
-            reset_on_close(ws.get_ref().tcp())?;
+            reset_on_close(ws.get_ref().tcp()).await?;
             Ok(())
         }
         Ending::Stall => {

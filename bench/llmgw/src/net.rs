@@ -29,13 +29,26 @@ impl TcpSocket for tokio_rustls::client::TlsStream<TcpStream> {
     }
 }
 
-/// 让这条连接关闭时发 RST 而不是 FIN：上游中途出错时就是这样断的。设置之后把流丢掉即可。
+/// macOS 上重置之前等多久，见 [`reset_on_close`]。
+const MACOS_ACK_GRACE: Duration = Duration::from_millis(300);
+
+/// 让这条连接关闭时发 RST 而不是 FIN：上游中途出错时就是这样断的。返回之后把流丢掉即可。
+///
+/// macOS 上先等一会儿再返回。对端刚收到数据、还欠着一个延迟确认时，RST 的序号和它最后确认到的位置对不上：macOS 不认这样的
+/// RST，回一个挑战 ACK，而本端（也是 macOS 时）刚关掉的连接把挑战 ACK 悄悄丢掉，对端就一直等下去，看不到重置。
+/// Linux 上的对端拿 RST 和它下一个要收的字节比，认；Linux 上的本端也会回应挑战 ACK。延迟确认最多一两百毫秒，等过它再关，
+/// 对端已经确认完，序号就对得上了。产品里是等发送缓冲空了再关（`i3t_underlay::tcp_reset`）；这个工具不用产品的代码，
+/// 也不为这一点去调系统接口，等一个固定的时间。
 ///
 /// # Errors
 ///
 /// 设置 `SO_LINGER` 失败。
-pub fn reset_on_close(tcp: &TcpStream) -> io::Result<()> {
-    SockRef::from(tcp).set_linger(Some(Duration::ZERO))
+pub async fn reset_on_close(tcp: &TcpStream) -> io::Result<()> {
+    SockRef::from(tcp).set_linger(Some(Duration::ZERO))?;
+    if cfg!(target_os = "macos") {
+        tokio::time::sleep(MACOS_ACK_GRACE).await;
+    }
+    Ok(())
 }
 
 /// 一条连接是怎么断的。
@@ -74,7 +87,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut conn, _) = listener.accept().await.unwrap();
             conn.write_all(b"partial").await.unwrap();
-            reset_on_close(&conn).unwrap();
+            reset_on_close(&conn).await.unwrap();
         });
         let mut client = TcpStream::connect(addr).await.unwrap();
         server.await.unwrap();
