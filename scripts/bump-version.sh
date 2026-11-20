@@ -4,7 +4,8 @@
 #   scripts/bump-version.sh <新版本>      例如 scripts/bump-version.sh 0.1.1
 #   scripts/bump-version.sh --check       只检查各处的版本是不是一致（CI 用）
 #
-# 每次迭代升一个小版本，只动最后一位（0.1.1、0.1.2……），并在 CHANGELOG.md 最上面加一节说明这一版有什么。
+# 每次迭代升一个小版本，只动最后一位（0.1.1、0.1.2……），并在 CHANGELOG.md 最上面加一节（`## <版本> (<日期>)`），
+# 用几行说明这一版对使用的人有什么变化。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -34,4 +35,4 @@ sed -i "s/^  \"version\": \".*\",$/  \"version\": \"$new\",/" web/package.json
 cargo update --workspace --quiet
 cargo update --manifest-path fuzz/Cargo.toml --workspace --quiet
 echo "版本从 $old 改成了 $new。"
-grep -q "^## $new " CHANGELOG.md || echo "记得在 CHANGELOG.md 最上面加一节：## $new （日期）"
+grep -q "^## $new " CHANGELOG.md || echo "记得在 CHANGELOG.md 最上面加一节：## $new ($(date +%F))"

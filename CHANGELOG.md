@@ -1,329 +1,233 @@
-# 更新记录
-
-每次迭代升一个小版本：只动最后一位（0.1.1、0.1.2……）。节点、controller、命令行和 WebUI 用同一个版本号，用 `scripts/bump-version.sh` 修改。
-
-## 0.1.28 （2026-11-20）
-
-- 节点对的列表列出网络里的每一对节点，不用先添加。没有设置过的显示「默认」（连接不常驻，拥塞控制用节点的默认），任何一对都可以直接改。
-  - WebUI 的节点对页面：每一行上直接开关连接常驻、选拥塞控制；有设置的可以恢复默认；可以按节点名搜索，可以只看有设置的。「添加节点对」的对话框去掉了。
-  - `i3tctl pair list` 也列出每一对，没有设置的两项写「默认」。
-  - 管理 API：`GET /networks/{network}/pairs` 返回每一对，没有设置的 `stored` 是 `false`；`PUT` 把一对改回各项都是默认值时不留设置，应答里 `stored` 是 `false`。字段没有变。
-  - 拥塞控制管的是一对节点之间那条连接往外发得多快：代理和端口转发的流、虚拟网卡的包都走这条连接，都受它管。
-- controller 和命令行要升级；节点没有变化。
-
-## 0.1.27 （2026-11-20）
-
-- 虚拟网卡的 MTU 可以在节点本机设：`i3t set mtu <576～1500>`，写在配置文件的 `[network] mtu`，重启节点后生效。默认还是 1280。
-  - 只管这台机器的网卡，两个节点设得不一样也通：TCP 按小的一头定分段，满长的包也送得到。
-  - 一般不用动：比 1280 大，包多半要切成两片发，反而慢；底下的线路包长特别小时才值得调小。
-  - `i3t network status`、管理 API 的节点详情（`vnet` 的 `mtu`）和 WebUI 的节点详情显示现在用着的值；WebUI 里 MTU 单列一行。
-- `i3t set` 改一项配置文件里还没有它那一节的设置时（更早的版本写的配置文件），现在加成一节（比如 `[network]`），不再写成一行 `network = { … }`。已经写成那样的照样读、照样改。
-- `i3t network status`：系统里没有 `iptables` 或 `nft` 时只说找不到这个程序，不再写「要 root」。
-- 节点和命令行升级；controller 只有内嵌的 WebUI 变了。线上的格式和管理 API 没有变。
-
-## 0.1.26 （2026-11-20）
-
-**虚拟网卡默认打开；ice3proxy 变成代理的选项。**controller、节点、命令行和 WebUI 一起升级。
-
-- 虚拟网卡：每个节点默认装一块，拿着它的虚拟 IP。本机的程序直接连别的节点的虚拟 IP，像在一个局域网里：`ping`、TCP、UDP，IPv4 上的都行。别的节点访问本机的服务时，服务看到的来源是对方的虚拟 IP。
-  - Linux（TUN）、Windows（Wintun）、macOS（utun）都默认打开。Linux 上要 `CAP_NET_ADMIN`（systemd 单元里加了）；Windows 要以管理员运行，`i3t.exe` 旁边要有 `wintun.dll`（发布的 zip 里带着，自己编译的用 `scripts/fetch-wintun.sh` 取）；macOS 要 root。装不上时节点说明原因，代理和端口转发照常。
-  - 包走这一对节点之间已有的连接，经中继、经 TCP 中转都一样；MTU 1280。两头核对每个包的来源和目的，访问规则按包管：不让访问本机的节点只收得到回包。送不到的回 ICMP 不可达，本机的程序马上知道。
-  - 防火墙照 Tailscale 的做法：Linux 上加两条（放行从网卡进来的；丢掉来源是组网地址、却不是从网卡进来的），Windows 上加一条放行，macOS 不加。要限制别的节点能访问本机的什么，用系统自己的防火墙。`i3t set firewall off` 一条都不加，`i3t set network off` 不装网卡，`i3t network status` 看现在的状况。
-  - 监听在节点自己虚拟 IP 上的端口转发现在在系统里真的监听。
-  - 已知的限制：没有 IPv6；Windows 和 macOS 只编译、跑过逻辑测试，没有在真机上验证过；用 firewalld 的机器上放行的那一条不起作用，要把网卡放进 trusted 区（`firewall-cmd --permanent --zone=trusted --add-interface=i3t0 && firewall-cmd --reload`）；一条 TCP 流经网卡的吞吐是经代理的三分之一多（本机实验 2.4 对 6.6 Gbit/s）。
-- 去掉透明访问（Linux 上用 nftables 把连接重定向进节点）：有了网卡用不着，它还要动机器上的规则。`i3t set intercept`、`i3t intercept status` 没有了；配置文件里的 `[intercept]` 忽略；以前留在机器上的规则在启动时清掉。管理 API 的节点详情里 `intercept` 换成 `vnet`。
-- 去掉 `i3t connect`：直接连虚拟 IP（`ssh <虚拟 IP>`）。
-- ice3proxy 从节点对的设置变成代理的选项。
-  - 新建代理时问要不要：`i3tctl proxy add` 在终端上问一次（默认不要），或者写 `--ice3proxy`；`i3tctl proxy set <编号> --ice3proxy on|off` 改；WebUI 新建代理的对话框里是一个开关。
-  - 选了的代理，它的 TCP 流一直走 ice3proxy，不管路上有没有 UDP；开不出时悄悄退回共用的连接。没选的代理和端口转发都不走。
-  - 节点对只剩连接常驻和拥塞控制，`i3tctl pair set` 没有 `--lane` 了。ice3proxy 起不起作用、为什么、两头的计数挪到代理的详情里。
-  - **升级时注意**：节点对存着 `always` 的，它上面的代理自动带上这个选项；别的都不带。以前没有设置的节点对在没有 UDP 的路上自己会走 ice3proxy，现在不会：要用就在代理上打开。没打开的代理在没有 UDP 的路上走共用的连接（经 TCP 中转）。
-  - 管理 API：代理多了 `lane`、`lane_effect`、`lanes`；节点对的 `lane`、`lane_effect`、`lanes` 去掉，请求里还写着 `lane` 时忽略（[admin-api.md](docs/internal/admin-api.md) 开头的清单）。
-  - controller 先升级、节点还没升级的那一段，旧的节点会把到「带着这个选项的代理」那一对的端口转发也放到 ice3proxy 上；都升级完就没有了。
-- WebUI：节点概览里有「虚拟网络」（装没装上、为什么、防火墙规则）；代理的新建和编辑对话框里有 ice3proxy 开关，列表里看得到它起不起作用，详情里有两头的计数；节点对页面只剩连接常驻和拥塞控制（拥塞控制以前只能在命令行里设）。
-
-## 0.1.25 （2026-11-19）
-
-- 直连不再因为少量丢包每隔一两分钟跳到中继再跳回来。
-  - 「直连丢包超过 20%」原来按最近 10 个探测算，丢 3 个就下结论。真实线路上量过：一条丢包 3%～5%、成串地丢的线路，一小时被判了 19 次。现在按最近 30 个探测算（丢了超过 6 个）。
-  - 判了之后本该等一分钟再试直连，实际两三秒就回去了：对端的保活探测引出本节点的反向验证，验证一通过直连就又用上。现在这一分钟里那个地址有回答也不用；对端换了地址、候选地址有变化时照旧立刻试。
-  - 探测连续 3 次超时的判断和处理没有变（马上重试）。
-- 只能走 TCP 的节点不再在两个延迟相近的中继之间来回换挂靠（真实线路上一小时三十来次）。挑挂靠时比的延迟，走 TCP 的一段改用最近 4 分钟的平均（和报给别的节点的是同一个数），不再用撞上一次停顿就高出几成的平滑延迟。
-- 只要节点升级，controller 不用。线上的格式和管理 API 没有变。
-
-## 0.1.24 （2026-11-19）
-
-- 主动测试多一项「主机和连接」（`host`）：两端各报一份自己这台机器（系统、CPU、负载、内存）、节点进程、现在连着多少东西，和它到对端的那条连接（往返时间、拥塞窗口、包长、测试期间的收发和丢包）。
-  - 量吞吐时能看出瓶颈是不是 CPU：节点进程的 CPU 按一个核算，最忙的一秒接近 100% 就是一个核跑满了。
-  - 不为它多发包，测试也不因此变长：测试开着的这段时间里每秒看一次 CPU，别的在做完时读一遍。
-  - `i3tctl test` 默认带着它，`--only host` 只做这一项（一秒多做完）；全网矩阵不带。管理 API：`TestView.hosts`（[admin-api.md](docs/internal/admin-api.md) 第 19 节）。
-  - 机器和进程的数现在只有 Linux 读得到，别的平台上是空的。节点和 controller 都要升级；旧的节点那一端显示「不支持」。
-
-## 0.1.23 （2026-11-19）
-
-- 没有 IPv6 的机器的日志里不再每分钟一条警告（`quinn_udp: sendmsg error: NetworkUnreachable`）。只要有一个对端公布了 IPv6 地址，这样的机器往那个地址发包就被内核拒绝，而 UDP 库把所有的发送错误都记成警告。到不了的地址是正常的状态：现在只记 debug；探测路径 MTU 的大包发不出去不记；别的发送错误照旧是警告。每一类一分钟最多一条。
-- 没有设置的节点对（`udp_fallback`）：和对端直连着的时候，新的 TCP 流走共用的连接，不再因为 controller 认定对端「用不了 UDP」就改走 ice3proxy。被认定用不了 UDP 的节点，出去的 UDP 有时到得了个别对端、和它们打得通，这时整条路都是 UDP。直连没了、路回到经中继，才用 ice3proxy。
-  - 走不走直连由选路定：默认直连优先，延迟优先的节点比代价。节点对上存下的 `always`、`off` 不受影响。
-  - 只要节点升级，controller 不用。管理 API 没有新的字段：`udp_path` 在直连时是 `true`（[admin-api.md](docs/internal/admin-api.md) 开头的清单）。
-- 测试：同一个对端的连接上限（超过两条时关最旧的）改由一个用真的连接的单元测试管着；集成测试里旧连接多半在新的握完手之前就被重置了，走不到上限。
-
-## 0.1.22 （2026-11-19）
-
-- 管理 API：路由矩阵（`GET /networks/{network}/routes`）的每一格多了 `lanes`，是发送方看到的它和对端之间的 ice3proxy：控制连接在不在、在用的和空闲的连接各多少。画拓扑的界面一次请求就能把每一对的 ice3proxy 连接画出来，不用逐个取节点详情。发送方没有为这个对端报、或者不在线时是 `null`。别的字段没有变。
-
-## 0.1.21 （2026-11-19）
-
-- `i3t tune` 不再建议打开内核的路径 MTU 黑洞探测（`net.ipv4.tcp_mtu_probing`）；0.1.13 到 0.1.20 的 `--apply` 会打开它。它开着时，一条 TCP 大约 3 秒没有进展之后，每次重传超时都被内核当成黑洞，分段减半，一直减到 48 字节，丢包重的线路上很难加回去：经 TCP 的流（没有 UDP 的节点的代理和端口转发、TCP 中转）变慢甚至中断。节点自己的 TCP 早就压低了分段，不靠它。
-  - 以前的 `i3t tune --apply` 打开的：再运行一次 `sudo i3t tune --apply`，会改回 0。
-  - 别的原因开着的：不动它，只把分段的下限（`net.ipv4.tcp_mtu_probe_floor`）从默认的 48 字节提到 1024。
-  - 本机实验（往返 250 毫秒，一个方向丢包 30%，经 ice3proxy 把 256 KB 发过去再收回来，90 秒为限，每种 12 次）：关着传完 9 次，开着 3 次，开着并提高下限 7 次。
-
-## 0.1.20 （2026-11-19）
-
-- 两个中继之间改走 TCP 的那一段，UDP 恢复之后自己回到 UDP。以前两个中继之间的 UDP 握手失败一次（两秒没有回音）就改走 TCP，之后一直留在 TCP 上，直到其中一个重启；TCP 也连不上的话，UDP 恢复了这一段仍然不通。
-  - 走 TCP 期间两边各自每 30 秒在后台经 UDP 试一次，TCP 照常用着。两个方向的 UDP 都通了才换回去，一般在 UDP 恢复后半分钟之内；换的那一下经这一段的多中继路径停几十毫秒。
-  - 只有一个方向的 UDP 通（防火墙、端口映射）时不换，TCP 一直不断。
-  - UDP 整个断掉时改走 TCP 快了：以前有大约 30 秒什么都过不去，现在几秒。
-  - 中继之间的一段通了，矩阵马上通告出去，经它的多中继路径不用再等下一轮（最多 5 秒）。
-  - 两个中继都要升级。另一头是旧版本、又只有本机的 UDP 到得了它时，每试一次这一段会断几秒到十几秒；间隔每次加倍，最多一小时一次。两头都升级就没有了。线上的格式没有变。
-- 主动测试里下行的测量流被对端拒绝时，结果写「被拒绝」，不再写成「测量中途断开」。
-
-## 0.1.19 （2026-11-18）
-
-**ice3proxy 默认用在没有 UDP 的路的节点对之间。**controller、节点和命令行一起升级；节点协议升到 5。
-
-- 没有设置的一对节点现在按 `udp_fallback`：两个节点之间的路上没有 UDP 时，新的 TCP 流（代理的 CONNECT、TCP 端口转发）走 ice3proxy，取不到时照旧悄悄走共用的连接。以前默认是关的，要逐对打开。
-  - `udp_fallback` 改成按需拨：路上没有 UDP 满 40 秒才开始拨，UDP 回来 10 分钟之后放手。有 UDP 的节点对什么都不连。以前它不管有没有 UDP 都一直拨着。`always` 不变。
-  - 「路上没有 UDP」看两样：节点自己到对端的那一段没有 UDP；或者 controller 认定对端用不了 UDP（它连得上的中继没有一个经 UDP，而其中有别人经 UDP 连得上的，这样持续两分钟）。后一种在节点的列表和详情里是 `no_udp`，`i3tctl node show` 也写出来。
-  - 代价：用不了 UDP 的中继会被每个能访问它的节点拨上，每个节点大约 5 条空闲的 TCP 连接。两个节点都有 UDP、只是中间某一段（比如两个中继之间）走 TCP 的，不在此列。
-  - 升级时：已有的节点对设置原样保留，存着 `off` 的一对仍然是关的。想让它用默认，`i3tctl pair unset`（它别的设置也一起去掉）或者 `i3tctl pair set … --lane udp_fallback`。默认要两个节点都升级了才生效，旧版本的节点照原样。
-  - 新增 `i3tctl pair show <a> <b>` 和接口 `GET /networks/{n}/pairs/{a}/{b}`（没有设置的一对也回答，`stored` 是 `false`）。节点上报的 ice3proxy 状况里只列有连接的、或者路上没有 UDP 的对端。
-- 修了几个机器忙的时候才出现的问题（把每个测试程序八份一起跑查出来的）：
-  - 两个节点同时向对方建连接时，一方会丢掉自己拨到一半的那条：对方正在上面开的流跟着断，或者两边都没有连接可用、开流报「没有路」。
-  - 主动测试量下行时偶尔被对端当成「忙」拒绝，结果显示成测量中途断开。
-  - 换路的原因偶尔记错：探测早就恢复了，后来因为别的原因换路，记录里仍然写「探测没有回音」。
-  - controller 的节点端口写 0（让系统挑）时，同一个端口号的 UDP 被别的程序占着就启动失败。写明端口的照旧报错。
-- `i3tctl` 的 `proxy`、`exit list`、`node show`、`path`、`test` 里，节点写的是名字，不再是 `#4` 这样的编号。`--json` 的输出不变。
-- README 多了「平台」一节：Linux 是开发和测试用的平台；Windows、macOS 能构建，还没有在这两个系统上实际运行验证过。
-
-## 0.1.18 （2026-11-18）
-
-- 修了一个从 0.1.14 开始有的问题：没有流量的一对节点，如果直连永远打不通（比如其中一个没有 UDP），到对方的路每分钟来回换两次。原因是小网络里两边每分钟不等流量地再试一次直连，收到对方打洞请求的一边把它当成了「有流量」：为它临时建一个中转会话、把路换过去，45 秒后会话回收，路又换回来，一直这样。每一对这样的节点每分钟多一次 TCP 拨号、两条换路的日志，路由表的换路历史被它填满；对端是延迟优先模式的中继时，它那边还会因此按代价换到一条半分钟后就断的路上。现在打洞请求只让直连的尝试继续，不建中转会话，也不动路。
-
-## 0.1.17 （2026-11-18）
-
-- 节点报给别人的延迟（挂靠表里的那个数），走 TCP 的一段改成和它自己算代价用的同一个数：最近 4 分钟的平均，卡住的那几次算在里面。0.1.16 只改了节点自己这一头的算法，对端报来的还是平滑延迟，总是偏低。真实网络上因此看到：一个节点连过来的 TCP 会话一会儿一断，它报的延迟却一直最低，延迟优先的选路每次按代价换到经它的路上，半分钟后又因为会话断了换走。要两头都升级才有效果。走 UDP 的照旧。
-
-## 0.1.16 （2026-11-18）
-
-- 延迟优先的选路在走 TCP 的线路上估得准了。在一条 250～350 毫秒、丢包 5～8%、全程走 TCP 的真实线路上量过：选路器走的路只有四分之一的时候是实测最好的，它推算的代价和实测差 400～700 毫秒。
-  - 走 TCP 的一段现在按最近 4 分钟探测往返的平均值算，卡住的那几次按实际等了多久算进去。以前是平滑延迟加四倍抖动，一次卡顿就让代价跳几百毫秒，路跟着来回换。
-  - 对端挂在本节点自己的中继上时，「自己的中继 → 对端」这一段以前没量过就按 1 毫秒算，这条路于是比什么都便宜，每次起步和每次换路都先选它。现在用量到的数（自己在同一条连接上测的、对端报的，或者经这个会话探测的）；还没量到时按 1.5 秒算。
-  - 走 UDP 的路和选路的各个门槛没有变。
-- 修了四处把错误当成没事的地方：
-  - `i3t run` 装不上 Ctrl-C 的处理时不再一启动就悄悄退出（记一条日志，照常运行）。
-  - `i3t tune --apply` 读不了它记参数的文件时不再把文件当成空的重写一遍（报错，什么都不改）。
-  - 透明访问读不懂 `ip` 的输出时不再当成「什么都没装」（`i3t intercept status` 显示读不了，拆除时报错）。
-  - 做更新的任务异常结束时总会记日志。
-- 节点装成系统服务（`i3t` 用户）时，透明访问的名字要另外装一条 polkit 规则才能经 systemd-resolved 直接用：`deploy/polkit/50-i3t-resolved.rules`，装法和代价写在文件里。以前的文档说直接能用，实际上只有以 root 运行时才行。不装的话照旧用 `sudo i3t hosts --apply`。
-- 构建：要 Rust 1.91 或更新（文档里原来写的 1.88 编不过）。最新的稳定版（1.100）上和 Windows、macOS 上的 lint 警告清掉了；`scripts/build-linux.sh` 按 `Cargo.lock` 构建。新增 `tests/platform/`：Windows 版在 Wine 里、流水线的 Linux 部分在本机、名字经真的 systemd-resolved 的检查。
-- 要知道的：默认选路模式的节点不做这种探测，它的路由表里「经自己的中继」这个候选在没量到时显示 1.5 秒左右，意思是还没量，不是真的这么慢；默认模式不按这个数选路。
-
-## 0.1.15 （2026-11-18）
-
-**不兼容的改动：代理重新设计了。**界面、命令行和 controller 要一起升级；要用代理的节点也要升级。数据库自动迁移（版本 15）。
-
-- 一个代理就是：在节点 A 上监听，从出口节点 B 出去，认一对用户名和密码。代理是单独管理的东西（`i3tctl proxy list|show|add|set|delete`，接口 `/networks/{n}/proxies`）。
-  - 每个代理有自己的用户名和密码。不在回环地址上的必须有，不填就由 controller 生成；之后还能再看到、能复制（`i3tctl proxy show`）。
-  - 出口必填，而且不能是监听的那个节点自己。组网里的目标（节点的虚拟 IP、名字）照旧直接去那个节点，不经出口。
-  - 一个端口同时认 SOCKS5 和 HTTP（`mixed`，默认）。
-  - 代理的状态会说明它为什么用不了：出口没有启用、出口不在线、访问规则不让这个节点访问出口。出口的详情里列出经它出去的代理。
-- 没有了的：全局的接入凭据（连同流量上限、并发上限和吊销）、`i3tctl listener` 和 `i3tctl credential`、用代理的用户名选出口、用户名里的 `+c-` 后缀、从监听的节点自己出去。
-- 升级时：
-  - 原来的每个监听器变成同一个编号的代理。没有固定出口的变成停用，选好出口才能启用。
-  - 原来要求凭据的监听器得到一对生成的用户名和密码，原来的凭据作废，客户端要换成新的。
-  - 节点不再默认监听 127.0.0.1:1080 和 :1081。配置文件里明确写了这两个地址的照旧监听，但只能访问组网里的目标（`i3t connect` 用的就是它）；想要就在节点的 `config.toml` 的 `[proxy]` 里写上。
-  - 指标 `i3t_credential_*` 换成了 `i3t_proxy_bytes_total` 和 `i3t_proxy_connections`。
-- 要知道的：代理的密码原样存在 controller 的数据库里（文件只有属主可读），管理接口会返回它；监听的节点拿到的只是校验用的摘要。
-
-## 0.1.14 （2026-11-18）
-
-- 两个中继之间 UDP 不通时改用 TCP 相连（一条连接承载两个方向）。没有 UDP 的中继现在也能当多级中转里的一跳。新旧版本的中继之间没有这条 TCP 链路，要两边都升级。
-- 默认的选路模式下，一对节点没有直连、也没有两边都连得上的同一个中继时，改走多个中继（中转级数以内代价最低的那一串），路由表里的原因写着「没有两端都用得上的中继」。有了直连或者一个中继就够时立刻换回去。只连得上各自那边中继的两组节点（比如一边在国内、一边在境外，或者一边在一个局域网里）现在能互通了。
-- 对端不多（不超过 32 个）的节点，启动之后不等有流量就把到每个对端的直连试一遍。路由表一上来就显示直连通不通，第一个请求不用先绕中继。这不会多开连接；对端更多的网络还是用到才试。
-
-## 0.1.13 （2026-11-17）
-
-- 修了一个在真实网络上才出现的问题：有的线路收不到满尺寸的包（1500 字节），又不回任何提示。小的消息都过得去，所以看起来时好时坏：配置一大就再也收不到（节点每 90 秒断开重连一次，一直是「尚未确认新配置」），经 TCP 的中转和 ice3proxy 卡在第一个满的包上，新连接的第一个往返要等好几秒。
-  - 现在程序自己开的和接受的 TCP 连接都把每段的大小压到 1360 字节（对端发来的包不超过 1400 字节），这类线路上照常通。多出来的包大约 7%。可以改：节点的 `[performance] tcp_mss`，controller 的 `--tcp-mss`，写 0 就用系统默认的。
-  - `i3t tune` 多了一项 `net.ipv4.tcp_mtu_probing`，`--apply` 会打开它：对端不是本程序的连接（出口连出去的、别人连进来的）靠它恢复。
-- 节点重启之后的头几个请求不再偶尔多等一两秒（对端在节点还没挂靠上的中继上回的那个包，现在换路时会补发）。
-- `i3t ping`：连接建起来了、往返却没回来时，按丢了算，不再说成「连接没有及时建起来」。
-- 「独占 TCP」改叫 ice3proxy（英文原来叫 TCP lanes），命令行、消息、日志和文档里都是；选项和字段名还是 `lane`。
-
-## 0.1.12 （2026-11-17）
-
-数据库自动迁移（版本 14）。
-
-- 自动更新可以按节点关掉：`i3tctl node set <节点> --auto-update off`。全局开关和节点自己的开关都开着，节点才会自动更新；管理员点的「立即更新」不看这两个开关。关掉时，还没换上的自动更新会被撤回。关掉了自动更新的中继不占「中继逐个更新」的位置，不挡别的中继。
-- 安全更新：发布的清单可以写「安全下限」，比它旧的版本有已知的安全问题（`i3t-release manifest --security-floor <版本>`，流水线里是 `SECURITY_FLOOR`）。controller 把低于下限的节点标出来（节点的 `update.security`，`i3tctl node show` 和 `update nodes` 写着「安全更新」），`i3tctl update show` 显示下限。只是告诉人，不会因此强制更新。旧的节点和 controller 照样认带下限的清单。
-
-## 0.1.11 （2026-11-17）
-
-管理接口有不兼容的改动（端口转发目标的声明没有了），界面、命令行和 controller 要一起升级。数据库自动迁移（版本 13）。
-
-- QoS（原来叫「服务等级」）：默认质量优先，UDP 的数据不再丢。取值的名字是 自动（`auto`）、低延迟（`interactive`）、不丢包（`reliable`）、后台（`bulk`），字段名和取值不变。只有「低延迟」会在链路跟不上时丢掉过期的 UDP 数据，要自己选；TCP 在哪个取值下都不丢。
-- 端口转发的目标由管理员打开，不用在节点上声明了：`i3tctl node set <节点> --forward-target on`。以前声明过的节点升级后自动是开的；`--can-forward` 和 `i3t set can-forward` 还收，不起作用。中继和出口照旧要节点自己声明。要知道的是：管 controller 的人可以经端口转发连到目标机器连得到的任何地方。
-- 中继：
-  - 节点上报自己连得上哪些中继（UDP、只有 TCP、连不上）。`i3tctl relay list` 和节点详情里看得到每个中继有多少在线节点连得上、谁连不上。只有一部分节点连得上的中继是正常的中继，不算故障。
-  - 两个节点各自挑的中继没有共同的时，controller 指一个两边都连得上的，两边都去挂靠：只连得上本地中继的节点，别处的节点也找得到它。
-  - 中继显示谁在用它（每 10 秒流量最大的 16 对）。
-  - 独占 TCP 连中继的地址和中继会话一样试：先试上次连上的，不在连不上的地址上干等。
-- 节点的国旗按出口地址算（`egress_ip`）：controller 看到的是公网地址就用它，不然用中继看到的。和 controller 在同一个内网里的节点也有国旗了。
-- 路由：
-  - 路由表说明直连的状态：未尝试、尝试中、已通、失败和原因。直连是一对节点第一次用到时才试的，「未尝试」不是故障；`i3tctl test` 会马上试。
-  - 路由表多了每个对端的流数和流量，以及另一种选路模式会走的路。`i3tctl path` 并排给出推算的延迟和连接自己量到的延迟，还有最近的换路记录。
-  - 两个节点刚上线后，第一个经中继的请求不再多等一秒。
-  - 显示路由的地方，中继都用名字。
-- 拥塞控制可以按节点对设置：`i3tctl pair set <a> <b> --congestion bbr|cubic|default`，对之后建立的连接生效。
-- controller 连不上、这对节点又没有中继可用时，空闲的连接先不回收（回收了就建不回来）。
-- `i3t ping`：连接还没建起来时等够建连的时间；建不起来时说「连接没有及时建起来」，不再说对方不在线。
-
-## 0.1.10 （2026-11-17）
-
-管理接口有不兼容的改动（中继的地址和区域、出口的带宽上限没有了），界面、命令行和 controller 要一起升级。数据库自动迁移（版本 11）。
-
-- 中继的地址不用填了，自动找出来：controller 看到的这台机器的地址，加上它网卡上的地址。`i3tctl relay enable <节点>` 就够了，`--udp`、`--tcp`、`--region` 没有了。地址变了自动跟着变，节点详情里只读地列出每个地址和它的来源。
-  - 谁连得上，它就是谁的中继：不要求人人连得上，也不要求公网地址。只有国内连得上、只在一个局域网里连得上的服务器，是那些节点的中继。
-  - 在机房或者路由器的端口映射后面的服务器（别人连进来用的是另一个地址），在这台机器上说一声：`i3t set relay-address <地址:端口>`，重启 i3t 生效。升级前手填过这种地址的中继要做这一步。
-  - 一个中继有几个地址时，节点同时去试，用先应答的那个；UDP 过不去的中继自动走 TCP。
-  - 中继没有「区域」了。
-- 出口没有带宽上限了（整个去掉；中继的带宽上限还在）。
-- 以前启用的出口，端口还停在旧默认值 80、443 的，升级时自动改成不限。特意填的别的端口列表不动。
-- 节点自己所在的网络和组网的地址段重叠时，节点和总览上有提醒：这种机器上连虚拟 IP 可能连到别处，透明访问也装不上。
-- 给界面画图的数据：controller 留一份在线节点数、流量、流数的时间序列（5 分钟一个点留一天，小时平均留一周），`GET /networks/{n}/stats`，命令行 `i3tctl stats`。
-- `i3t ping` 用名字说中继；开始和结束时走的路不一样才写「开始 → 结束」。`i3tctl exit test`：出口正忙时单独说明，不到 1 毫秒的写成 `<1 ms`。
-- 数据库的迁移从代码里的长字符串改成 `crates/i3t-controller/src/store/migrations/` 下的 SQL 文件。
-
-## 0.1.9 （2026-11-17）
-
-- 出口的目标端口默认不限（原来默认只放行 80、443）。想收紧就填一个端口白名单（`i3tctl exit enable <节点> --ports 80,443`）；已经启用的出口保留原来的设置。不管端口都拒绝的目标（内网、回环、云元数据、节点和虚拟地址段）不变。
-- HTTP 入口也转发普通的 `http://` 请求，不只是 CONNECT：把 `http_proxy` 指到节点就能用。一个请求一条连接；写法含糊、可能让代理和网站对请求的边界理解不一样的请求一律拒绝。
-- 端口转发：
-  - 目标连不上时显示出来，带原因和时间（`i3tctl forward list`，接口里的 `target_failure`），下一次连上就消掉。
-  - TCP 转发可以给目标发 PROXY protocol 的头（`--proxy-protocol v1|v2`）：认它的服务（nginx、HAProxy 等）看到的来源就是发起节点的虚拟 IP。
-- `i3tctl exit test <节点> <目标>`：让出口去连一个目标，报告解析、建连、TLS 握手各花了多久，或者卡在哪一步、为什么。守出口自己的策略。
-- `i3t ping <节点>`：量到另一个节点的往返时间。走的是两个节点之间自己的连接，同时说出现在走哪条路。
-- 「乐观回复」可以按出口设置（`i3tctl exit enable --optimistic on|off`），监听器上的设置优先。
-- 流日志：每条流结束的那一行带上开始和结束时走的路，以及中途有没有换过。
-- controller 的备份和恢复：`i3t-controller --data-dir <目录> --backup-to <新目录>`，controller 开着也能做，得到的是一致的快照；恢复就是用备份的目录启动。controller 开着的时候直接拷数据库文件会丢最近的改动。
-- controller 的数据库文件只有属主可读，已有的在启动时收紧。
-- 中文的叫法：relay 叫「中继」，`dial_out_only` 叫「只主动连接」。命令、参数和字段的名字不变。
-- 协议解码里两处小问题（fuzz 找到的）：同一个 IPv4 地址不再有两种写法；空的数据报在上限过小时不再切出超限的一帧。仓库里多了 `fuzz/`（各个解析器的 fuzz 目标）和按 NAT 类型统计打洞成功率的脚本。
-- 数据库自动迁移（版本 9）。
-
-## 0.1.8 （2026-11-17）
-
-- 发给用户的程序改用带链接期优化的构建（构建档位 `dist`）：节点程序小了 2.6 MB，空闲时常驻内存少 1 到 2 MB，吞吐和 CPU 不变。低占用档位的节点在真机上是 13 到 14.2 MB。
-- 透明访问：
-  - `i3t hosts --remove` 去掉 `--apply` 写进 hosts 文件的那一段；透明访问关着而那一段还在时，`i3t intercept status` 会提醒。
-  - 运行期间也盯着地址段有没有和真实网络重叠：机器后来拿到一个重叠的地址或者路由（换了 DHCP 网段、VPN 起来了），立刻拆掉，重叠没了再装上。
-  - 用 systemd 跑节点的：`deploy/systemd/i3t.service.d/intercept.conf` 是透明访问要的那两项能力。
-- 主动测试：路由决定按这对节点现在走的路来说。最便宜的候选没有便宜到选路器肯换的程度时，结论是留在现在的路上，同时给出那条更便宜的路和两边的代价。
-- 发布工具 `i3t-release` 有了简体中文和英文。
-- 管理接口：分组的引用带 `builtin`，界面不用再靠名字认 `All`。
-- 命令行：英文里带数量的话不再出现 "1 nodes" 这样的写法。
-
-## 0.1.7 （2026-11-17）
-
-- 透明访问（Linux）：`i3t set intercept on` 之后，节点上的普通程序直接连另一个节点的虚拟 IP 或者名字就能通（`ssh 10.66.0.5`、`curl http://nas.home.i3t:8080`），不用配代理。默认关，是这台机器自己的决定，需要 root 或者 `CAP_NET_ADMIN`。
-  - 没有承载数据包的虚拟网卡：连接在建立的那一刻被改到本机入口，之后就是到那个节点的一条普通的流，访问规则、限额、计量和别的流一样。TCP 和 UDP 都支持。
-  - 装进系统的东西（一张 nft 表 `ip i3t`、一条策略路由、一块只放本机虚拟 IP 的 dummy 网卡 `i3t0`）用 `i3t intercept status` 能列出来，节点停下时全部拆掉，崩溃之后留下的下次启动时换掉。
-  - 网络的地址段和这台机器所在的真实网络重叠时不装，并说出和谁重叠：装了会把机器从那个网络上切下来。
-  - 名字：有 systemd-resolved 的机器上节点只回答本网络域名的查询；没有的用 `i3t hosts --apply` 维护 hosts 文件里自己的那一段。
-  - 目标节点也打开时，本机上的服务看到的来源是对端的虚拟 IP，不是 127.0.0.1。
-  - 没做：IPv6；UDP 服务和只监听回环地址的服务看到的来源还是本机。
-- 节点详情多了透明访问的状态（`intercept`）；`i3tctl node show` 也显示。
-- 命令行：线程数的英文写法不再是 "1 worker threads"。
-
-## 0.1.6 （2026-11-17）
-
-- 性能档位：低占用、均衡（默认）、高吞吐三个预设，在节点的 `config.toml` 的 `[performance]` 里选（`i3t set profile …`），也可以由 controller 按节点下发（`i3tctl node set … --profile`）；每一项都能在本机单独覆盖。各档位设什么是量出来的：低占用一个线程、小缓冲、空闲连接一分钟关掉，空闲时约 13 到 14 MB；均衡两个线程；高吞吐四个线程，只有同时有好几个繁忙的对端时才比均衡快。线程数改了要重启节点才生效，节点会报告"待重启"。加密算法跟着 CPU 走（有 AES 指令用 AES，没有用 ChaCha20）。
-- 断网之后恢复得更快：独占 TCP 和到 relay 的 TCP 连接遇到一段完全不通之后，路一通两秒之内就恢复，不用等内核加倍了的重传定时器（Linux 6.15 起；更老的内核和以前一样）。`i3t tune` 会说这台机器的内核支不支持。
-- 经 TCP 中转的连接能撑过 20 秒的断网：对端一有回音就把留着的包补发，不再干等到空闲超时。
-- 节点更新：自检到一半被撤回的更新不再把没验过的新程序留在程序旁边。
-- 命令行：帮助里位置参数按输入的顺序列；`All` 叫"内置"；规则表的表头有了中文。
-
-## 0.1.5 （2026-11-16）
-
-管理接口有不兼容的改动（标签没有了，换成分组），界面、命令行和 controller 要一起升级。数据库自动迁移。
-
-- 分组取代标签：分组是有编号的对象，一个节点可以在多个分组里。每个网络自带分组 `All`（所有节点都在，不能改），新网络的默认规则是 All 可以访问 All。节点、注册令牌、访问规则只能引用已有的分组，写一个不存在的会报错并指出是哪一个。删除分组会把它从节点上去掉，并删掉用到它的规则。原来的标签各成为一个同名的分组。界面多了分组页面；命令行是 `i3tctl group list|show|create|rename|delete|add|remove`、`i3tctl node groups`、`i3tctl token create --group`。
-- 命令行说两种语言：`i3t`、`i3tctl`、`i3t-controller` 的帮助、表格、提示和错误都有简体中文和英文，跟着系统语言走，`I3T_LANG=zh-CN|en` 可以指定。文字比以前短。`--json` 的输出不变。
-- 管理接口里原来只有一句话的地方，旁边多了代码和具名的值，界面可以用任何语言来写：错误的 `what` 和 `field`，操作记录的 `params`，更新失败、监听失败、relay 试连、换路原因的 `cause`。独占 TCP 的计数带上了多久之前报的，以及"UDP 不通时用"的节点对此刻走不走独占 TCP。
-- 节点多了所在的国家或地区（`country`）：controller 查自带的离线地址库得出，不联网。
-- 主动测试：吞吐的速率不再把连接刚开始爬升的那一段算进去（原来先量的路径会偏低四成）；结果里的"现在走的路"是选路规则选的那一条，不再是测试自己临时固定的。
-
-## 0.1.4 （2026-11-16）
-
-- 主动测试：对任意两个节点问"能不能直连、直连和经 relay 各是什么质量"。直连能力（成不成、哪一种、多久、不成的原因）、直连和经 relay 的延迟、抖动、丢包，每一跳各占多少，两种选路模式各会选哪条路；吞吐要单独要求，每个方向 5 秒或 20 MB。`i3tctl test A B [--throughput] [--via r1,r2]`，全网矩阵 `i3tctl tests matrix`。上限和开关都在节点自己这边：只经 relay 的节点不参加直连测试，吞吐测试可以在本机关掉（`i3t set throughput-tests off`）。节点和 controller 之间的协议升了一版，旧节点会被标成"不支持"。
-- 界面：两种语言（简体中文、English），从登录页起就能切换；文字整体精简，出错时按错误码用当前语言写；登录页重做。
-- 界面：节点对上的独占 TCP 设置和状态，节点详情里的 lane。
-- 界面：新的外壳。浅灰的底，正文在一块白色的圆角面板里，内容铺满。
-
-## 0.1.3 （2026-11-16）
-
-- 独占 TCP（lane）：可以按节点对打开的另一种传输，每条流独占一条 TCP 连接，不再和别的流共用那一条 QUIC 连接。给"入口和出口之间挂着很多长时间 HTTPS 流"的用法准备（比如网关）：流之间互不拖累，本身已经是 TLS 的流量不再加密第二遍，Linux 上在内核里搬运。三个取值：不用（默认）、UDP 不通时用、总是用；开不出来时自动退回共用的连接。`i3tctl pair set A B --lane always`。
-- 界面重新设计：干净、留白、信息优先。
-- 新的测试工具 `bench/llmgw`：复现网关的负载（SSE 和 WebSocket、长时间静默、高速输出、突发到达、上游中途断开），逐条流验证。
-- 出口对单个对端同时处理的流数上限从 1024 提到 16384。
-- 节点崩溃重启之后，对端立刻知道旧连接没了并重新连接（原先要等 30 秒）。
-- 只能走 TCP 的节点：握手在 TCP 里不重发、等得更久；连不上 relay 时最多隔 10 秒重试。
-- `i3t connect` 可以只写节点的名字；`i3t tune` 多检查一项端口复用的设置。
-
-## 0.1.2 （2026-11-16）
-
-一次独立的安全审查之后的加固，加上界面和命令行的一批补全。节点之间的协议有不兼容的改动（中转的错误帧），节点和 controller 要一起升级。
-
-- 加固，对付网络里心怀不轨的对端：
-  - 一条连接上对端压过来、本端还没读走的数据有了上限（64 MB）；同一个对端最多 2 条连接，进来的握手限并发。
-  - 没有访问规则允许的对端，它开的流在读任何内容之前就被重置；每个对端同时处理的流有上限。
-  - 出口不替别人连本节点自己和其他节点的公网地址（否则关着"局域网访问"也能摸到路由器的管理界面）；域名解析限并发。
-  - 节点失去一项能力或者访问规则收紧时，靠它放行的、正在进行的流立刻断开。
-- 加固，对付路径外能伪造来源地址的人：
-  - relay 的错误帧带回显，伪造不了；拿着一个 cookie 不能让 relay 无休止地验签名；占着 TCP 连接不握手会被按时断开。
-  - 重放别人签过名的探测包不能再让两个节点之间的直连长期不通。
-  - 256 条空连接不能再把所有节点挡在 controller 外面；管理接口有了超时和连接数限制。
-- 一个节点谎报更新失败不能再让所有网络暂停更新：只有 controller 确实让它装过那个版本才算数，并且只暂停它所在的网络。
-- controller 内部出错时节点改为稍后重试，不再当成"被吊销"而退出。
-- 流没有空闲超时，改为两头的 TCP 都开保活：安静的长连接（等模型思考的请求、SSH）不会被掐断。
-- 选路的细节可以查了：两个节点之间考虑过哪些路径、各自的代价、为什么选了现在这条；relay 之间的延迟矩阵；直连是怎么建立的、到 relay 的那一段走 UDP 还是 TCP（界面、`i3tctl path`、`i3tctl backbone`）。
-- 界面：出口的配额和用量、健康状况；凭据的用量和限额；每个节点上监听器和端口转发的实际状态；注册令牌的历史；操作记录的筛选和翻页；标签改名。
-- `i3t connect`：给 ssh 这类不会用代理的工具当 ProxyCommand。`i3t tune`：检查 Linux 上影响节点表现的内核参数。
-- 自研 BBR 之外不再考虑 KCP：对比测试里它没有延迟优势，线上多发两到六成的字节。
-
-## 0.1.1 （2026-11-16）
-
-- 选路：延迟优先模式（按延迟、抖动、丢包和 relay 负载算代价，带迟滞）；经多个 relay 的路径和 relay 之间的延迟矩阵；relay 下线和过载时通知节点换路。
-- 直连：同一个局域网里的节点自动发现；路由器上的端口映射（UPnP、NAT-PMP、PCP）；IPv6。
-- 只能用 TCP 的节点：到 relay 的 TCP 断了重连之后保留测量值；刚断过又连上的会话要保持一段时间才把流量换回去，来回换路时停留期逐次加倍。
-- 拥塞控制默认用自己实现的 BBR：有丢包的长距离链路上吞吐是 Cubic 的几十倍，路径切换和断流之后 1 秒左右恢复。
-- UDP 应用：SOCKS5 的 UDP ASSOCIATE、UDP 端口转发；服务等级（交互、可靠、大流量）。
-- 出口：带宽上限、按周期的流量配额、对同一目标的新建连接限额、出站地址族；排空时明确拒绝新的流。
-- 凭据：流量上限、用量统计、不换令牌修改限制、吊销之后仍然可见。
-- 节点自动更新：发布包签名验证、经 controller 分发、失败自动回退、管理员可以强制更新或排空后更新。
-- 管理界面：显示 controller 和界面的版本；节点更新页；拓扑图、路由矩阵、两个节点之间的路径；监听器和端口转发的状态。
-- 管理 API：路由查询、出口用量与健康、监听器状态、操作记录的翻页和筛选、标签改名；节点的 `/metrics`。
-- 端口转发可以写端口 0 让节点自己挑；绑在虚拟 IP 上的转发可以指向另一个节点。
-
-## 0.1.0 （2026-11-15）
-
-第一个能用的版本。
-
-- 节点之间一条端到端的 QUIC 连接，每条用户连接是其中的一个流；包走直连或经 relay，换路时连接和流不断。
-- relay：带签名的中转会话，只转发数据包；UDP 用不了的节点经 TCP 连 relay。
-- 直连：候选地址经带签名的探测验证之后才使用；NAT 后面的节点打洞。
-- 入口：SOCKS5 和 HTTP CONNECT，代理的用户名指定出口节点；TCP 端口转发。
-- 出口：访问规则和出站策略，域名在出口上解析。
-- controller：注册令牌、固定分配的虚拟 IP、标签式的访问规则、按最小权限给每个节点下发配置、管理 API；命令行 `i3tctl`。
-- 节点命令行 `i3t`：加入、运行、本地声明；带注释的配置文件。
+# Changelog
+
+The node, the controller, the command line and the web UI share one version number.
+
+## 0.1.28 (2026-11-20)
+
+- The node pair list shows every pair of nodes in the network. Pairs nobody configured show as default, and any pair can be edited directly (web UI, `i3tctl pair list`).
+- Web UI: keep-alive and congestion control are edited inline on the node pairs page, with reset to default, search by node name and a filter for configured pairs.
+- Admin API: `GET /networks/{network}/pairs` returns every pair; unconfigured ones have `stored: false`.
+- Upgrade the controller and the command line. Nodes are unchanged.
+
+## 0.1.27 (2026-11-20)
+
+- The virtual adapter's MTU is a local setting: `i3t set mtu <576-1500>`, applied after a node restart, default 1280. Two nodes may use different values.
+- `i3t network status`, the admin API and the web UI's node detail show the MTU in use.
+- Fixed: `i3t set` wrote a setting as an inline table into older configuration files; it now writes a section.
+- Fixed: `i3t network status` no longer says root is needed when `iptables` or `nft` is simply not installed.
+- Upgrade nodes and the command line.
+
+## 0.1.26 (2026-11-20)
+
+**The virtual adapter is on by default; ice3proxy becomes an option of the proxy.** Upgrade the controller, nodes, command line and web UI together.
+
+- Virtual adapter: every node gets one by default. Local programs reach other nodes by their virtual IP (`ping`, TCP, UDP; IPv4 only).
+  - Linux needs `CAP_NET_ADMIN` (already in the systemd unit). Windows needs administrator rights and `wintun.dll` next to `i3t.exe`. macOS needs root. When the adapter cannot be installed, proxies and port forwards keep working.
+  - Firewall: two rules on Linux (accept what arrives on the adapter, drop packets that fake a network address) and one accept rule on Windows. `i3t set firewall off` adds none, `i3t set network off` installs no adapter, `i3t network status` shows the state.
+  - Limits: not yet verified on real Windows and macOS machines; with firewalld the adapter has to be put into the trusted zone.
+- Removed transparent access (`i3t set intercept`, `i3t intercept status`) and `i3t connect`: connect to the virtual IP instead. In the admin API's node detail `intercept` is replaced by `vnet`.
+- ice3proxy moved from the node pair to the proxy: `i3tctl proxy add … --ice3proxy`, `i3tctl proxy set <id> --ice3proxy on|off`, a switch on the proxy in the web UI. TCP streams of a proxy with the option use ice3proxy; other proxies and port forwards do not.
+  - **When upgrading**: proxies on a pair stored as `always` get the option; all others do not, so turn it on for the proxies that should use it.
+  - Admin API: proxies gain `lane`, `lane_effect` and `lanes`; node pairs lose them.
+- Node pairs keep two settings: keep-alive and congestion control.
+
+## 0.1.25 (2026-11-19)
+
+- A direct path no longer flips between direct and relay because of light packet loss.
+- TCP-only nodes no longer switch back and forth between two relays with similar latency.
+- Upgrade nodes.
+
+## 0.1.24 (2026-11-19)
+
+- Active tests gain a `host` item: system, CPU, load and memory of both ends, and the state of the connection between them. `i3tctl test` includes it; `--only host` runs it alone. Host data is available on Linux only.
+- Upgrade nodes and the controller.
+
+## 0.1.23 (2026-11-19)
+
+- Machines without IPv6 no longer log a send-failure warning every minute.
+- While two nodes are connected directly, TCP streams use the shared connection instead of ice3proxy.
+- Upgrade nodes.
+
+## 0.1.22 (2026-11-19)
+
+- Admin API: each cell of the route matrix (`GET /networks/{network}/routes`) gains `lanes`, the ice3proxy connection counts of that pair.
+
+## 0.1.21 (2026-11-19)
+
+- `i3t tune` no longer turns on `net.ipv4.tcp_mtu_probing`: it slows down or stalls TCP on lossy lines. If `i3t tune --apply` of 0.1.13 to 0.1.20 turned it on, run `sudo i3t tune --apply` again to turn it off.
+
+## 0.1.20 (2026-11-19)
+
+- A relay-to-relay link that fell back to TCP returns to UDP by itself once UDP works again. Both relays need the upgrade.
+- Relay-to-relay links fall back to TCP faster when UDP stops.
+- Active tests: a downlink measurement refused by the peer is reported as refused, not as interrupted.
+
+## 0.1.19 (2026-11-18)
+
+**ice3proxy is used by default between node pairs without a UDP path.** Upgrade the controller, nodes and command line together.
+
+- For a pair without settings, new TCP streams use ice3proxy when the path has no UDP. Stored pair settings are unchanged. (Since 0.1.26 ice3proxy is an option of the proxy.)
+- New: `i3tctl pair show <a> <b>` and `GET /networks/{n}/pairs/{a}/{b}`.
+- Node list and node detail gain `no_udp`: the controller found that the node cannot use UDP.
+- Fixed: streams broke when two nodes connected to each other at the same moment.
+- Fixed: a downlink measurement of an active test was sometimes refused as busy.
+- Fixed: the reason of a route switch was sometimes recorded wrongly.
+- Fixed: the controller sometimes failed to start with node port 0.
+- `i3tctl` prints node names instead of numbers. `--json` output is unchanged.
+
+## 0.1.18 (2026-11-18)
+
+- Fixed (since 0.1.14): between two idle nodes that can never connect directly, the route switched twice a minute.
+
+## 0.1.17 (2026-11-18)
+
+- Latency-first routing: the latency a node reports for a TCP leg is now the average of the last 4 minutes. Both ends need the upgrade.
+
+## 0.1.16 (2026-11-18)
+
+- Latency-first routing estimates TCP legs more accurately.
+- Fixed: `i3t run` exited silently when it could not install its Ctrl-C handler.
+- Fixed: `i3t tune --apply` rewrote its record file when it could not read it; it now reports the error.
+- A node running as the `i3t` user needs a polkit rule to register names with systemd-resolved: `deploy/polkit/50-i3t-resolved.rules`.
+- Building needs Rust 1.91 or newer.
+
+## 0.1.15 (2026-11-18)
+
+**Breaking: proxies were redesigned.** Upgrade the web UI, command line, controller and every node that runs a proxy together. The database migrates automatically.
+
+- A proxy listens on node A, leaves through exit node B, and has its own username and password (`i3tctl proxy list|show|add|set|delete`, API `/networks/{n}/proxies`). One port accepts both SOCKS5 and HTTP.
+- A proxy's status says why it cannot be used: exit not enabled, exit offline, or not allowed by the access rules.
+- Removed: global access credentials, `i3tctl listener`, `i3tctl credential`, choosing the exit by proxy username.
+- When upgrading:
+  - Every listener becomes a proxy with the same number. One without a fixed exit is disabled until an exit is chosen.
+  - A listener that required credentials gets a newly generated username and password; clients have to switch to them.
+  - Nodes no longer listen on 127.0.0.1:1080 and :1081 by default.
+  - The metrics `i3t_credential_*` are replaced by `i3t_proxy_bytes_total` and `i3t_proxy_connections`.
+- Note: proxy passwords are stored as they are in the controller's database and returned by the admin API.
+
+## 0.1.14 (2026-11-18)
+
+- Two relays connect over TCP when UDP between them does not work. Both relays need the upgrade.
+- Two nodes with no direct path and no relay in common are routed through several relays automatically.
+- A node with at most 32 peers tries the direct path to each of them right after it starts.
+
+## 0.1.13 (2026-11-17)
+
+- Fixed: unstable connections on lines that drop full-size packets. The program's TCP connections now use segments of 1360 bytes; configurable with `[performance] tcp_mss` on a node and `--tcp-mss` on the controller, 0 for the system default.
+- The first requests after a node restart no longer wait an extra second or two now and then.
+- `i3t ping`: a round trip that never returns counts as lost.
+- "TCP lanes" are now called ice3proxy; option and field names stay `lane`.
+
+## 0.1.12 (2026-11-17)
+
+The database migrates automatically.
+
+- Automatic updates can be turned off per node: `i3tctl node set <node> --auto-update off`.
+- A release manifest can carry a security floor (`i3t-release manifest --security-floor <version>`). Nodes below it are marked as needing a security update; nothing is forced.
+
+## 0.1.11 (2026-11-17)
+
+**Breaking: nodes no longer declare themselves as port-forward targets.** Upgrade the web UI, command line and controller together. The database migrates automatically.
+
+- QoS (formerly service class): UDP data is not dropped by default. Only "low latency" drops stale UDP data when the link cannot keep up.
+- The administrator turns a node into a port-forward target: `i3tctl node set <node> --forward-target on`. Note: whoever runs the controller can reach anything the target machine can reach through a port forward.
+- Relays: nodes report which relays they can reach (`i3tctl relay list`); when two nodes have no relay in common the controller assigns one both can reach; a relay shows who is using it.
+- The route table shows the state of the direct path and the streams and traffic per peer. `i3tctl path` shows estimated and measured latency and recent route switches.
+- Congestion control can be set per node pair: `i3tctl pair set <a> <b> --congestion bbr|cubic|default`.
+- A node's country flag follows its egress address.
+
+## 0.1.10 (2026-11-17)
+
+**Breaking: relay addresses and regions and the exit bandwidth limit are gone.** Upgrade the web UI, command line and controller together. The database migrates automatically.
+
+- Relay addresses are found automatically; `i3tctl relay enable <node>` is enough. A server behind a port mapping states the address others use with `i3t set relay-address <address:port>`.
+- Whoever can reach a relay uses it. A relay need not be reachable by everyone, nor have a public address.
+- Exits have no bandwidth limit any more. Exits still on the old default ports 80 and 443 become unrestricted.
+- A warning appears when a node's own network overlaps the virtual network's address range.
+- Time series of online nodes, traffic and streams: `GET /networks/{n}/stats`, `i3tctl stats`.
+
+## 0.1.9 (2026-11-17)
+
+The database migrates automatically.
+
+- Exits allow any destination port by default. Restrict them with a port list: `i3tctl exit enable <node> --ports 80,443`.
+- The HTTP entry also forwards plain `http://` requests, not only CONNECT.
+- Port forwards: an unreachable target is shown with its reason; TCP forwards can send a PROXY protocol header to the target (`--proxy-protocol v1|v2`).
+- New commands: `i3tctl exit test <node> <target>`, `i3t ping <node>`.
+- Controller backup: `i3t-controller --data-dir <dir> --backup-to <new dir>`, also while the controller is running.
+- The controller's database file is readable by its owner only.
+- The flow log records the route at the start and at the end of each stream.
+
+## 0.1.8 (2026-11-17)
+
+- Released programs are smaller and use less memory when idle.
+- Transparent access: `i3t hosts --remove`; it is taken down automatically while the address range overlaps a real network.
+- Admin API: group references carry `builtin`.
+- The release tool `i3t-release` speaks Simplified Chinese and English.
+
+## 0.1.7 (2026-11-17)
+
+- Transparent access (Linux, off by default): after `i3t set intercept on`, ordinary programs connect to another node's virtual IP or name directly. (Replaced by the virtual adapter in 0.1.26.)
+
+## 0.1.6 (2026-11-17)
+
+- Performance profiles: low footprint, balanced (default) and high throughput. Choose locally with `i3t set profile …` or per node with `i3tctl node set … --profile`.
+- Faster recovery after a network outage; connections through a TCP relay survive a 20-second outage.
+- Fixed: an update withdrawn during its self-check no longer leaves the unverified program behind.
+
+## 0.1.5 (2026-11-16)
+
+**Breaking: groups replace tags.** Upgrade the web UI, command line and controller together. The database migrates automatically.
+
+- Groups: a node can be in several groups; every network has the built-in group `All`; each former tag becomes a group of the same name. Commands: `i3tctl group …`, `i3tctl node groups`, `i3tctl token create --group`.
+- The command line speaks Simplified Chinese and English, following the system language; `I3T_LANG=zh-CN|en` overrides it.
+- Errors and audit log entries in the admin API carry codes and named values, so a client can render them in any language.
+- Nodes gain a country or region (`country`).
+
+## 0.1.4 (2026-11-16)
+
+- Active tests: `i3tctl test A B [--throughput] [--via r1,r2]`, and the whole-network matrix `i3tctl tests matrix`. A node can refuse throughput tests: `i3t set throughput-tests off`.
+- Web UI: Simplified Chinese and English; a new shell.
+
+## 0.1.3 (2026-11-16)
+
+- TCP lanes (later renamed ice3proxy): can be turned on per node pair, one TCP connection per stream: `i3tctl pair set A B --lane always`.
+- The web UI was redesigned.
+- An exit handles up to 16384 concurrent streams per peer.
+- After a node crashes and restarts, its peers reconnect at once.
+
+## 0.1.2 (2026-11-16)
+
+Security hardening. The protocol between nodes changed incompatibly; upgrade nodes and the controller together.
+
+- Limits on the data a peer can queue, on connections per peer and on concurrent streams; streams from a peer that no access rule allows are reset at once.
+- An exit does not connect to its own node's or other nodes' public addresses on behalf of others.
+- When a node loses a capability or the access rules tighten, the streams that depended on it are closed at once.
+- Relay error frames cannot be forged; replayed probes can no longer keep a direct path down; idle connections can no longer lock nodes out of the controller.
+- A node falsely reporting a failed update can no longer pause updates for every network.
+- Streams have no idle timeout; TCP keep-alive is on at both ends.
+- Routing decisions can be inspected: `i3tctl path`, `i3tctl backbone`.
+- New commands: `i3t connect`, `i3t tune`.
+
+## 0.1.1 (2026-11-16)
+
+- Routing: latency-first mode; paths through several relays.
+- Direct paths: LAN discovery, router port mapping (UPnP, NAT-PMP, PCP), IPv6.
+- BBR is the default congestion control.
+- UDP: SOCKS5 UDP ASSOCIATE and UDP port forwards; service classes.
+- Exits: traffic quota, outbound address family and other policies.
+- Automatic node updates: signature verification, distribution through the controller, automatic rollback on failure.
+- Web UI: topology graph, route matrix, node update page.
+- `/metrics` on the node.
+
+## 0.1.0 (2026-11-15)
+
+The first usable version.
+
+- One end-to-end QUIC connection between two nodes, one stream per user connection. Packets travel directly or through a relay; connections and streams survive a route switch.
+- Relays only forward packets. Nodes that cannot use UDP reach a relay over TCP.
+- Direct paths: candidate addresses are verified before use; nodes behind NAT punch holes.
+- Entry: SOCKS5 and HTTP CONNECT; TCP port forwards.
+- Exits: access rules and outbound policy; names are resolved at the exit.
+- Controller: enrollment tokens, fixed virtual IPs, access rules, admin API; command line `i3tctl`.
+- Node command line `i3t`: join, run, local declarations.
