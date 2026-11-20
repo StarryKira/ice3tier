@@ -26,6 +26,11 @@
 #   -h, --help                Show this help
 set -eu
 
+# Debian and some other distros omit sbin from a non-root user's PATH; append it so `command -v` finds useradd,
+# groupadd, runuser, semanage, and ip before invoking them through sudo.
+PATH="${PATH:+${PATH}:}/usr/local/sbin:/usr/sbin:/sbin"
+export PATH
+
 REPO="fuqiuluo/ice3tier"
 RELEASE_BASE="${I3T_RELEASE_BASE:-https://github.com/${REPO}/releases}"
 VERSION="${I3T_VERSION:-}"
@@ -524,6 +529,9 @@ PLIST="${LAUNCHD_PLIST}"
 EOF
     cat <<'EOF' >> "$dest"
 
+PATH="${PATH:+${PATH}:}/usr/sbin:/sbin"
+export PATH
+
 if [ ! -x "$BIN" ]; then
     if [ "$(id -u)" -ne 0 ]; then
         printf 'i3t: cannot run %s as this user (try: sudo i3t ...)\n' "$BIN" >&2
@@ -590,7 +598,7 @@ as_node() {
         elif command -v sudo >/dev/null 2>&1; then
             $how sudo -u i3t -- env I3T_STATE_DIR="$STATE" ${I3T_LANG:+"I3T_LANG=$I3T_LANG"} ${I3T_LOG:+"I3T_LOG=$I3T_LOG"} ${I3T_SERVICE:+"I3T_SERVICE=$I3T_SERVICE"} "$BIN" "$@"
         else
-            $how su -s /bin/sh i3t -c 'state=$1; service=$2; bin=$3; shift 3; exec env I3T_STATE_DIR="$state" I3T_SERVICE="$service" "$bin" "$@"' -- sh "$STATE" "${I3T_SERVICE:-}" "$BIN" "$@"
+            $how su -s /bin/sh -c 'state=$1; service=$2; bin=$3; shift 3; exec env I3T_STATE_DIR="$state" I3T_SERVICE="$service" "$bin" "$@"' i3t -- sh "$STATE" "${I3T_SERVICE:-}" "$BIN" "$@"
         fi
     else
         $how "$BIN" "$@"
@@ -654,7 +662,7 @@ run_as_i3t() {
     elif command -v sudo >/dev/null 2>&1; then
         $SUDO sudo -u i3t -- env I3T_STATE_DIR="$STATE_DIR" ${I3T_LANG:+"I3T_LANG=$I3T_LANG"} ${I3T_SERVICE:+"I3T_SERVICE=$I3T_SERVICE"} "$node_bin" "$@"
     else
-        $SUDO su -s /bin/sh i3t -c 'state=$1; service=$2; bin=$3; shift 3; exec env I3T_STATE_DIR="$state" I3T_SERVICE="$service" "$bin" "$@"' -- sh "$STATE_DIR" "${I3T_SERVICE:-}" "$node_bin" "$@"
+        $SUDO su -s /bin/sh -c 'state=$1; service=$2; bin=$3; shift 3; exec env I3T_STATE_DIR="$state" I3T_SERVICE="$service" "$bin" "$@"' i3t -- sh "$STATE_DIR" "${I3T_SERVICE:-}" "$node_bin" "$@"
     fi
 }
 

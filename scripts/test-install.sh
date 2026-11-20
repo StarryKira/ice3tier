@@ -149,7 +149,7 @@ if [ "$os" = "Linux" ]; then
     kill "$ctl_pid" 2>/dev/null || true
     wait "$ctl_pid" 2>/dev/null || true
     ctl_pid=""
-    TZ=Asia/Shanghai sh "$repo/deploy/install.sh" --from "$dir" --controller --public-addr 127.0.0.1:20331 >"$work/ctl-install.out"
+    PATH=/usr/local/bin:/usr/bin:/bin TZ=Asia/Shanghai sh "$repo/deploy/install.sh" --from "$dir" --controller --public-addr 127.0.0.1:20331 >"$work/ctl-install.out"
     cat "$work/ctl-install.out"
     grep -q '^    [^ ]' "$work/ctl-install.out" || fail "controller install did not print the initial admin token"
     systemctl is-active -q i3t-controller || fail "i3t-controller.service is not active"
