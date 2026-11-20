@@ -1,0 +1,65 @@
+name: Stress
+
+# 手动触发：在选定的系统上把一个测试反复跑很多遍，抓时有时无的失败，量它失败的比例。
+# 开发用的机器只有 Linux，Windows 和 macOS 上的行为只能在这里看。
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: Runner
+        type: choice
+        options: [macos-latest, windows-latest, ubuntu-latest]
+        default: macos-latest
+      package:
+        description: Package (cargo test -p)
+        required: true
+      test:
+        description: Integration test program (--test); empty for the library's own tests
+        required: false
+        default: ""
+      filter:
+        description: Test name filter
+        required: true
+      runs:
+        description: How many times
+        required: false
+        default: "50"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  stress:
+    name: ${{ inputs.filter }} x${{ inputs.runs }} (${{ inputs.os }})
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # 输入只经环境变量进脚本，不拼进命令里。
+      - name: Run the test repeatedly
+        shell: bash
+        env:
+          PACKAGE: ${{ inputs.package }}
+          TEST: ${{ inputs.test }}
+          FILTER: ${{ inputs.filter }}
+          RUNS: ${{ inputs.runs }}
+        run: |
+          target=(--lib)
+          if [ -n "$TEST" ]; then target=(--test "$TEST"); fi
+          cargo test -p "$PACKAGE" "${target[@]}" --no-run
+          failed=0
+          for i in $(seq 1 "$RUNS"); do
+            if ! cargo test -p "$PACKAGE" "${target[@]}" -- "$FILTER" > run.log 2>&1; then
+              failed=$((failed + 1))
+              echo "::group::run $i failed"
+              cat run.log
+              echo "::endgroup::"
+            fi
+          done
+          echo "$failed of $RUNS runs failed"
+          [ "$failed" = 0 ]
