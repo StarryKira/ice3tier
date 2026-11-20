@@ -8,6 +8,7 @@
 //! | [`tcp_leg`] | TCP 中转的一条 TCP：限制积压的写、按帧读。节点和 relay 两头共用 |
 //! | [`tcp_recovery`] | 节点之间的 TCP 断网之后尽快恢复：重传上限和放弃时限一起设 |
 //! | [`tcp_mss`] | 本进程开出去、接进来的 TCP 都通告一个压低的 MSS，躲开路径 MTU 黑洞 |
+//! | [`tcp_reset`] | 异常结束一条 TCP：关闭时发 RST，并且让对端认它 |
 //! | [`lan`] | 局域网发现：组播信标 |
 //! | [`portmap`] | 自动端口映射：PCP、NAT-PMP、UPnP-IGD |
 
@@ -19,6 +20,7 @@ pub mod portmap;
 pub mod tcp_leg;
 pub mod tcp_mss;
 pub mod tcp_recovery;
+pub mod tcp_reset;
 
 pub use addr_query::{AddrQuery, Observation};
 pub use port::{BATCH_SIZE, Direction, Ecn, PacketFilter, RecvMeta, Transmit, UdpPort};

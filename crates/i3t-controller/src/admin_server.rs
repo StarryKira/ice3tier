@@ -42,7 +42,7 @@ pub(crate) async fn serve(listener: TcpListener, router: Router, mut shutdown: w
     let mut connections = JoinSet::new();
     loop {
         tokio::select! {
-            accepted = listener.accept() => match accepted {
+            accepted = i3t_underlay::tcp_mss::accept(&listener) => match accepted {
                 Ok((stream, remote)) => {
                     let pass = gate.admit(remote.ip());
                     connections.spawn(serve_connection(stream, remote, router.clone(), pass, shutdown.clone()));

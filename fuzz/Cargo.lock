@@ -675,6 +675,7 @@ dependencies = [
  "i3t-conn",
  "i3t-model",
  "i3t-proto",
+ "i3t-underlay",
  "rustix",
  "socket2",
  "thiserror",

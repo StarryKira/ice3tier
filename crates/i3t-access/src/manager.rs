@@ -636,7 +636,7 @@ fn free_bind(_socket: &socket2::SockRef<'_>) -> io::Result<()> {
 
 async fn accept_loop<C: Connector + Datagrams>(shared: Arc<Shared<C>>, key: Key, listener: TcpListener, counters: Counters) {
     loop {
-        match listener.accept().await {
+        match i3t_underlay::tcp_mss::accept(&listener).await {
             Ok((stream, from)) => {
                 let connection = Connection::enter(&counters);
                 let span = tracing::info_span!("access", listen = %key, %from);

@@ -72,6 +72,7 @@ fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
     socket.set_reuse_address(true)?;
     socket.set_nonblocking(true)?;
     // 接进来的中转和 lane 都继承它：对端发过来的分段不超过压低的 MSS（路径 MTU 黑洞，见 `i3t_underlay::tcp_mss`）。
+    // 只在 Linux 上管用；别的 Unix 在接进来之后才能设，而且只压得住本端发的（[`accept`] 里的 `tcp_mss::accept`）。
     i3t_underlay::tcp_mss::clamp(&socket);
     socket.bind(&addr.into())?;
     socket.listen(LISTEN_BACKLOG)?;
@@ -90,7 +91,7 @@ async fn accept(inner: Arc<Inner>, listener: TcpListener) {
         let accepted = tokio::select! {
             // relay 被停用，或者整个 relay 被丢弃了：不再监听。
             _ = enabled.wait_for(|enabled| !enabled) => return,
-            accepted = listener.accept() => accepted,
+            accepted = i3t_underlay::tcp_mss::accept(&listener) => accepted,
         };
         let (stream, addr) = match accepted {
             Ok(accepted) => accepted,
@@ -346,14 +347,19 @@ mod tests {
 
     #[tokio::test]
     async fn connections_accepted_by_the_relay_port_are_told_the_clamped_segment_size() {
-        // 连上来的一方自己什么都不设（像别的程序那样）：它发过来的分段照样不超过 relay 通告的 MSS。回环的 MTU 是 65536，
-        // 不压的话是六万多。lane 也是这个端口接进来的。
+        // 连上来的一方自己什么都不设（像别的程序那样）：它发过来的分段照样不超过 relay 通告的 MSS。回环的 MTU 很大
+        // （Linux 65536，macOS 16384），不压的话是一万多到六万多。lane 也是这个端口接进来的。接的做法和 [`accept`] 里一样。
         let listener = bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let (dialled, accepted) = tokio::join!(TcpStream::connect(listener.local_addr().unwrap()), listener.accept());
+        let (dialled, accepted) =
+            tokio::join!(TcpStream::connect(listener.local_addr().unwrap()), i3t_underlay::tcp_mss::accept(&listener));
         let (dialled, (accepted, _)) = (dialled.unwrap(), accepted.unwrap());
         let mss = |stream: &TcpStream| socket2::SockRef::from(stream).tcp_mss().unwrap();
         let clamped = u32::from(i3t_underlay::tcp_mss::DEFAULT);
-        assert!(mss(&dialled) <= clamped, "连上来的一方的 MSS 是 {}", mss(&dialled));
         assert!(mss(&accepted) <= clamped, "接进来的连接的 MSS 是 {}", mss(&accepted));
+        // macOS 上通告的 MSS 压不低（`i3t_underlay::tcp_mss::ADVERTISED`，那边的测试确认了这一点）：连上来的若不是本程序，
+        // 从它那里过来的方向遇到路径 MTU 黑洞还是会卡。本程序的节点连上来时它自己会压住它发的。
+        if i3t_underlay::tcp_mss::ADVERTISED {
+            assert!(mss(&dialled) <= clamped, "连上来的一方的 MSS 是 {}", mss(&dialled));
+        }
     }
 }

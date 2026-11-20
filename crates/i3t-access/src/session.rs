@@ -144,10 +144,10 @@ impl Client {
     }
 }
 
-/// 用 RST 关掉一条连接。设不上 SO_LINGER 时退化成普通的关闭，没有更好的办法。
+/// 用 RST 关掉一条连接，客户端是 macOS 上的程序时也让它认（见 `i3t_underlay::tcp_reset`）。
+/// 设不上 SO_LINGER 时退化成普通的关闭，没有更好的办法。
 pub(crate) fn reset(stream: TcpStream) {
-    let _ = stream.set_zero_linger();
-    drop(stream);
+    i3t_underlay::tcp_reset::close(stream);
 }
 
 /// 第一个字节，不从缓冲区里取走。

@@ -65,7 +65,7 @@ pub async fn serve(
     let mut connections = JoinSet::new();
     loop {
         tokio::select! {
-            accepted = listener.accept() => match accepted {
+            accepted = i3t_underlay::tcp_mss::accept(&listener) => match accepted {
                 Ok((stream, remote)) => {
                     let pass = pending.admit(remote.ip());
                     let connection = Connection { controller: Arc::clone(&controller), remote, shutdown: shutdown.clone() };

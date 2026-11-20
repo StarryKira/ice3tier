@@ -13,6 +13,7 @@ bytes.workspace = true
 i3t-conn = { path = "../i3t-conn" }
 i3t-model = { path = "../i3t-model" }
 i3t-proto = { path = "../i3t-proto" }
+i3t-underlay = { path = "../i3t-underlay" }
 socket2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

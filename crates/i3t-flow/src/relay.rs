@@ -346,16 +346,18 @@ pub(crate) async fn run<S: SendStream, R: RecvStream>(
             {
                 tracing::warn!(%error, "恢复不了 ice3proxy 的 SO_LINGER，正常结束的流会以 RST 关闭");
             }
+            drop(tcp);
             End::Clean
         }
         Err(abort) => {
             let code = StreamCode(abort.reason(role).to_wire());
             send.reset(code);
             recv.stop(code);
+            // 刚往 TCP 那一头写过数据就重置时，macOS 上的对端可能不认这个 RST，一直等下去（见 `i3t_underlay::tcp_reset`）。
+            i3t_underlay::tcp_reset::close(tcp);
             End::from(abort)
         }
     };
-    drop(tcp);
     Summary { from_tcp, from_flow, end }
 }
 

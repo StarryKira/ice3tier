@@ -1142,6 +1142,7 @@ dependencies = [
  "i3t-flow",
  "i3t-model",
  "i3t-proto",
+ "i3t-underlay",
  "rustix",
  "socket2",
  "thiserror 2.0.21",
