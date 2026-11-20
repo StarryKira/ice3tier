@@ -1,4 +1,4 @@
-import { type NameService, type RuleState, type VnetCause, type VnetDrops, type VnetReport } from '@/api/types'
+import { type NameService, type VnetCause, type VnetDrops, type VnetReport } from '@/api/types'
 import { type Tone } from '@/components/status'
 import { t } from '@/i18n'
 
@@ -63,31 +63,6 @@ export function namesText(names: NameService | null | undefined): string | null 
       return v.namesFailed(vnetCauseText(names.cause))
     default:
       return null
-  }
-}
-
-type RuleKey = keyof typeof RULE_KEYS
-const RULE_KEYS = { on: true, off: true, failed: true, unsupported: true } as const
-
-function ruleState(rule: RuleState | null | undefined): RuleKey | 'unknown' {
-  return rule !== null && rule !== undefined && Object.hasOwn(RULE_KEYS, rule.state) ? rule.state : 'unknown'
-}
-
-/** 防火墙的两条规则写成一句：两条一样时合起来写，不一样时逐条写，装不上的带原因。`problem` 是有一条装不上。 */
-export function firewallText(firewall: VnetReport['firewall'] | null | undefined): { text: string; problem: boolean } {
-  const v = t.nodes.detail.vnet
-  const accept = ruleState(firewall?.accept)
-  const guard = ruleState(firewall?.guard)
-  if (accept === guard) {
-    if (accept === 'on') return { text: v.firewallOn, problem: false }
-    if (accept === 'off') return { text: v.firewallOff, problem: false }
-    if (accept === 'unsupported') return { text: v.firewallUnsupported, problem: false }
-  }
-  const one = (label: string, state: RuleKey | 'unknown', rule: RuleState | undefined) =>
-    rule?.state === 'failed' ? v.ruleFailed(label, vnetCauseText(rule.cause)) : `${label} ${v.rule[state]}`
-  return {
-    text: [one(v.accept, accept, firewall?.accept), one(v.guard, guard, firewall?.guard)].join(' · '),
-    problem: accept === 'failed' || guard === 'failed',
   }
 }
 

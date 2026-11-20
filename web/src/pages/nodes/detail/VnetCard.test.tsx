@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 
 import { type NodeDetail, type VnetReport } from '@/api/types'
 import { setLocale, t } from '@/i18n'
-import { firewallText, namesText, vnetCauseText, vnetState } from '@/lib/vnet'
+import { namesText, vnetCauseText, vnetState } from '@/lib/vnet'
 import { makeNode } from '@/test/fixtures'
 import { renderWithApp } from '@/test/harness'
 
@@ -60,20 +60,6 @@ describe('虚拟网卡的说法', () => {
     expect(vnetCauseText({ code: 'later' } as never)).toBe(v.causes.unknown)
   })
 
-  it('防火墙：两条一样时合起来写，不一样时逐条写，装不上的带原因', () => {
-    expect(firewallText(INSTALLED.firewall)).toEqual({ text: v.firewallOn, problem: false })
-    expect(firewallText({ accept: { state: 'off' }, guard: { state: 'off' } }).text).toBe(v.firewallOff)
-    expect(firewallText({ accept: { state: 'unsupported' }, guard: { state: 'unsupported' } }).text).toBe(
-      v.firewallUnsupported,
-    )
-    const mixed = firewallText({
-      accept: { state: 'on' },
-      guard: { state: 'failed', cause: { code: 'program_missing', program: 'iptables' } },
-    })
-    expect(mixed.problem).toBe(true)
-    expect(mixed.text).toBe(`${v.accept} ${v.rule.on} · ${v.ruleFailed(v.guard, v.causes.programMissing('iptables'))}`)
-  })
-
   it('名字', () => {
     expect(namesText({ state: 'resolved' })).toBe(v.namesResolved)
     expect(namesText({ state: 'no_resolver' })).toBe(v.namesNoResolver)
@@ -82,7 +68,7 @@ describe('虚拟网卡的说法', () => {
 })
 
 describe('概览上的虚拟网卡', () => {
-  it('装好了：网卡和 MTU、名字、防火墙、流量；丢掉的包只写不是 0 的；底边写怎么关', () => {
+  it('装好了：网卡和 MTU、名字、流量；丢掉的包只写不是 0 的；底边写怎么关；防火墙的规则不在界面上', () => {
     renderWithApp(<VnetCard node={detail({ vnet: INSTALLED })} />)
     const card = screen.getByTestId('vnet')
     expect(card).toHaveAttribute('data-state', 'installed')
@@ -91,7 +77,8 @@ describe('概览上的虚拟网卡', () => {
     // MTU 单独一行（在节点上用 i3t set mtu 改，这里只显示）。
     expect(screen.getByTestId('vnet-mtu')).toHaveTextContent(v.mtuValue(1280))
     expect(card).toHaveTextContent(v.namesResolved)
-    expect(screen.getByTestId('vnet-firewall')).toHaveTextContent(v.firewallOn)
+    // 防火墙的两条规则是节点本机的事（在节点上用 i3t network status 看），界面不写。
+    expect(screen.queryByTestId('vnet-firewall')).toBeNull()
     expect(screen.getByTestId('vnet-dropped')).toHaveTextContent(v.dropValue(v.drop.not_allowed, '12'))
     expect(screen.getByTestId('vnet-dropped')).not.toHaveTextContent(v.drop.unreachable)
     expect(screen.getByTestId('vnet-how')).toHaveTextContent(v.howOff)

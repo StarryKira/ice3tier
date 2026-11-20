@@ -176,16 +176,6 @@ export const nodes: Messages['nodes'] = {
       namesNoResolverHint:
         'No systemd-resolved on this machine: run i3t hosts --apply on the node to write names into hosts. Virtual IPs work as usual',
       namesFailed: (cause) => `Name service not running: ${cause}`,
-      firewall: 'Firewall',
-      firewallHint:
-        "Two rules: accept (lets in traffic from the virtual network) and anti-spoofing (drops packets claiming the network's range that didn't come from it; Linux only). To keep i3t away from the firewall, run i3t set firewall off on the node and restart i3t",
-      firewallOn: 'On',
-      firewallOff: 'Left alone',
-      firewallUnsupported: 'Not added on this platform',
-      accept: 'Accept',
-      guard: 'Anti-spoofing',
-      rule: { on: 'on', off: 'left alone', failed: 'failed', unsupported: 'not added', unknown: 'unknown' },
-      ruleFailed: (rule, cause) => `${rule} failed: ${cause}`,
       traffic: 'Traffic',
       sent: (bytes, packets) => `Sent ${bytes} (${packets} packets)`,
       received: (bytes, packets) => `Received ${bytes} (${packets} packets)`,

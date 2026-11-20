@@ -160,16 +160,6 @@ export const nodes = {
       namesNoResolverHint:
         '这台机器上没有 systemd-resolved：在节点上执行 i3t hosts --apply 把名字写进 hosts，按虚拟 IP 照常可用',
       namesFailed: (cause: string) => `名字服务没开起来：${cause}`,
-      firewall: '防火墙',
-      firewallHint:
-        '两条规则：放行（从虚拟网卡进来的放行）、防冒充（自称来自网络地址段、却不是从虚拟网卡进来的包丢掉，只有 Linux 加）。不让程序碰防火墙：在节点上执行 i3t set firewall off，然后重启 i3t',
-      firewallOn: '开着',
-      firewallOff: '不碰',
-      firewallUnsupported: '这个平台上不加',
-      accept: '放行',
-      guard: '防冒充',
-      rule: { on: '开着', off: '不碰', failed: '装不上', unsupported: '不加', unknown: '未知' },
-      ruleFailed: (rule: string, cause: string) => `${rule}装不上：${cause}`,
       traffic: '流量',
       sent: (bytes: string, packets: string) => `发 ${bytes}（${packets} 个包）`,
       received: (bytes: string, packets: string) => `收 ${bytes}（${packets} 个包）`,

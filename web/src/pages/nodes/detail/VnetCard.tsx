@@ -1,4 +1,4 @@
-import { ArrowDownUp, AtSign, Ban, CircleAlert, MemoryStick, Ruler, ShieldCheck } from 'lucide-react'
+import { ArrowDownUp, AtSign, Ban, CircleAlert, MemoryStick, Ruler } from 'lucide-react'
 
 import { type NodeDetail } from '@/api/types'
 import { DetailList, DetailRow } from '@/components/detail-list'
@@ -8,7 +8,7 @@ import { BoxCard, BoxCardHeader } from '@/components/ui/card'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
 import { formatBytes, formatNumber } from '@/lib/format'
-import { droppedList, firewallText, namesText, vnetCauseText, vnetState, vnetTone } from '@/lib/vnet'
+import { droppedList, namesText, vnetCauseText, vnetState, vnetTone } from '@/lib/vnet'
 
 /** 名字加一个悬停的说明。 */
 function Label({ text, hint }: { text: string; hint?: string }) {
@@ -22,7 +22,8 @@ function Label({ text, hint }: { text: string; hint?: string }) {
 
 /**
  * 虚拟网卡（0.1.26 起每个节点默认一块）：标题条右边是状态（装好了、关着、装不上、不支持、未知）。
- * 装好了：网卡、MTU（在节点上用 `i3t set mtu` 改，默认 1280）、名字怎么解析、防火墙的两条规则、这次运行以来的流量、丢掉的包（只有不是 0 时）。
+ * 装好了：网卡、MTU（在节点上用 `i3t set mtu` 改，默认 1280）、名字怎么解析、这次运行以来的流量、丢掉的包（只有不是 0 时）。
+ * 防火墙的规则不在这里：那是节点本机的事，在节点上用 `i3t network status` 看。
  * 装不上：原因，醒目。关着是本机有意的，不是毛病。没有报（旧版本、离线、还没上报）写"未知"，不当成关着。
  * 没有管理接口的开关：底边一句在节点上怎么开关。
  */
@@ -31,7 +32,6 @@ export function VnetCard({ node }: { node: NodeDetail }) {
   const report = node.vnet ?? null
   const state = vnetState(report)
   const count = (value: number) => formatNumber(value)
-  const firewall = firewallText(report?.firewall)
   const names = namesText(report?.names)
   const dropped = droppedList(report?.dropped)
   const unknownWhy = !node.online
@@ -92,11 +92,6 @@ export function VnetCard({ node }: { node: NodeDetail }) {
               <span className={report.names?.state === 'failed' ? 'text-warn' : undefined}>{names}</span>
             </DetailRow>
           ) : null}
-          <DetailRow icon={<ShieldCheck />} label={<Label text={v.firewall} hint={v.firewallHint} />} multiline>
-            <span className={firewall.problem ? 'text-warn' : undefined} data-testid="vnet-firewall">
-              {firewall.text}
-            </span>
-          </DetailRow>
           <DetailRow icon={<ArrowDownUp />} label={v.traffic} multiline>
             <span className="block tabular">{v.sent(formatBytes(report.sent_bytes), count(report.sent_packets))}</span>
             <span className="block tabular">
