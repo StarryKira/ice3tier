@@ -152,7 +152,7 @@ export const nodes: Messages['nodes'] = {
     vnet: {
       title: 'Virtual network',
       state: {
-        installed: 'Installed',
+        installed: 'Ready',
         off: 'Off',
         failed: 'Not installed',
         unsupported: 'Unsupported',

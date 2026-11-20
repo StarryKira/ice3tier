@@ -142,7 +142,7 @@ export const nodes = {
 
     vnet: {
       title: '虚拟网卡',
-      state: { installed: '装好了', off: '关着', failed: '装不上', unsupported: '不支持', unknown: '未知' },
+      state: { installed: 'Ready', off: '关着', failed: '装不上', unsupported: '不支持', unknown: '未知' },
       unknownOffline: '节点上线后显示',
       unknownWaiting: '等待节点上报',
       unknownOld: '这个版本的节点不报虚拟网卡',
