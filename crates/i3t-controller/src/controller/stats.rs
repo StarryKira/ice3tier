@@ -166,7 +166,10 @@ impl Controller {
         let step = match query.step {
             Some(step @ (FINE_STEP | COARSE_STEP)) => step,
             Some(_) => return Err(Error::invalid_field("step", "out_of_range", format!("步长只能是 {FINE_STEP} 或 {COARSE_STEP} 秒"))),
-            None if from >= now.saturating_sub(FINE_KEEP) => FINE_STEP,
+            // 开始的时间比细的一档的保留期早不到一段，也用细的一档。客户端按它自己的钟算"24 小时之前"（命令行默认就查这么久），
+            // 算完还要先查别的，请求到这里时这里的钟已经过了零点几秒到几秒，两边的钟也可能差一点：严格地比，同一条命令时而
+            // 得到 5 分钟一个的点，时而得到 1 小时一个。早出来的不到一段，最多让最早那个点落在已经清掉的一段里，是空的。
+            None if from >= now.saturating_sub(FINE_KEEP + u64::from(FINE_STEP)) => FINE_STEP,
             None => COARSE_STEP,
         };
         let span = u64::from(step);
@@ -327,6 +330,22 @@ mod tests {
         let inner = lab.controller.lock();
         assert_eq!(inner.store.stats(kept.id, Series::Online, None, FINE_STEP, (bucket, bucket)).unwrap(), [(bucket, 0.0)]);
         assert_eq!(inner.store.stats_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_range_that_starts_a_moment_before_the_fine_retention_still_gets_fine_points() {
+        // 命令行按它自己的钟算"24 小时之前"，再查一两样别的，请求到这里时这里的钟已经过了一两秒：同一条命令不能因为
+        // 这一两秒，时而得到 5 分钟一个的点，时而得到 1 小时一个（Windows 上冒烟测试就这样时不时失败过）。
+        let lab = crate::controller::testing::Lab::new();
+        let network = lab.network("home");
+        let now = lab.controller.lock().clock.now();
+        let step = |from| {
+            let query = SeriesQuery { series: Series::Online, node: None, from: Some(from), to: None, step: None };
+            lab.controller.series(network.id, &query).unwrap().step
+        };
+        assert_eq!(step(now - FINE_KEEP), FINE_STEP);
+        assert_eq!(step(now - FINE_KEEP - 2), FINE_STEP, "早了两秒还是同一档");
+        assert_eq!(step(now - FINE_KEEP - u64::from(FINE_STEP) - 2), COARSE_STEP, "早了一段以上，要的是更久的历史");
     }
 
     #[test]

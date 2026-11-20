@@ -126,7 +126,8 @@ pub struct SeriesQuery {
     /// 时间范围的结束，Unix 秒；省略时是现在。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to: Option<Timestamp>,
-    /// 点的间隔，秒：300 或 3600。省略时范围的开始还在 300 秒那一档的保留期里就用 300，否则用 3600。
+    /// 点的间隔，秒：300 或 3600。省略时范围的开始还在 300 秒那一档的保留期里（或者早不到 300 秒：客户端的钟、
+    /// 请求路上花的时间）就用 300，否则用 3600。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<u32>,
 }
