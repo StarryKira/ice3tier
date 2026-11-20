@@ -10,6 +10,8 @@ cd "$(dirname "$0")/.."
 
 workspace_version() { sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml; }
 web_version() { sed -n 's/^  "version": "\(.*\)",$/\1/p' web/package.json; }
+# fuzz/ 自成一个 workspace，有自己的 Cargo.lock：里面本项目各个包（i3t-fuzz 自己除外）记着的版本，去重。
+fuzz_versions() { awk '/^name = "i3t-/ && !/"i3t-fuzz"/ { getline; print }' fuzz/Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p' | sort -u; }
 
 if [[ ${1:-} == --check ]]; then
     cargo_v=$(workspace_version); web_v=$(web_version)
@@ -18,6 +20,7 @@ if [[ ${1:-} == --check ]]; then
     [[ $cargo_v == "$web_v" ]] || { echo "版本不一致：Cargo.toml 是 $cargo_v，web/package.json 是 $web_v" >&2; status=1; }
     [[ -z $not_inherited ]] || { echo "下面这些 crate 没有用工作区的版本（应该写 version.workspace = true）：" >&2; echo "$not_inherited" >&2; status=1; }
     grep -q "^## $cargo_v " CHANGELOG.md || { echo "CHANGELOG.md 里没有 $cargo_v 这一节" >&2; status=1; }
+    [[ $(fuzz_versions) == "$cargo_v" ]] || { echo "fuzz/Cargo.lock 里的版本没有跟上 $cargo_v：$(fuzz_versions | tr '\n' ' ')" >&2; status=1; }
     [[ $status == 0 ]] && echo "版本 $cargo_v，各处一致"
     exit $status
 fi
@@ -27,7 +30,8 @@ new=${1:?用法：scripts/bump-version.sh <新版本> | --check}
 old=$(workspace_version)
 sed -i "/^\[workspace.package\]/,/^\[/s/^version = \".*\"$/version = \"$new\"/" Cargo.toml
 sed -i "s/^  \"version\": \".*\",$/  \"version\": \"$new\",/" web/package.json
-# 让 Cargo.lock 里本项目各个包的版本跟上。
+# 让 Cargo.lock 里本项目各个包的版本跟上；fuzz/ 的那一份也是。
 cargo update --workspace --quiet
+cargo update --manifest-path fuzz/Cargo.toml --workspace --quiet
 echo "版本从 $old 改成了 $new。"
 grep -q "^## $new " CHANGELOG.md || echo "记得在 CHANGELOG.md 最上面加一节：## $new （日期）"
