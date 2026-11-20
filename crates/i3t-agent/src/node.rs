@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use i3t_access::{Access, LocalEntry, SharedRoutes};
 use i3t_conn::{Endpoint, EndpointConfig};
 use i3t_exit::{Exit, Os, Outbound, QuotaState};
@@ -65,6 +65,23 @@ pub enum Source {
     Controller,
     /// 静态模式，给测试用：netmap 来自一个 JSON 文件，不连 controller，也不更新。
     Static(PathBuf),
+}
+
+/// 重启也救不了的退出码（sysexits 的 `EX_CONFIG`）：配置文件有错、还没有加入网络，或者被 controller 吊销、拒绝。
+///
+/// systemd 单元里用 `RestartPreventExitStatus=78` 拦住它，免得 `Restart=always` 加 `StartLimitIntervalSec=0`
+/// 每两秒白白重启一次、刷日志或者反复打 controller。
+pub const NO_RESTART_EXIT_CODE: u8 = 78;
+
+/// 节点碰到了重启也救不了的错误：改好配置、重新加入网络，或者由管理员处理之前，再启动多少次都会同样失败。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum StopError {
+    #[error("{NOT_JOINED}")]
+    NotJoined,
+    #[error("controller 吊销了这个节点")]
+    Revoked,
+    #[error("controller 不认这个节点了（它可能已经被删除）。要重新加入网络：echo <令牌> | i3t join")]
+    Rejected,
 }
 
 /// 节点是怎么停下来的。
@@ -117,13 +134,13 @@ pub async fn run(
     }
     let (key, initial) = match &source {
         Source::Controller => {
-            let key = state.key()?.context(NOT_JOINED)?;
-            (key, state.netmap()?.context(NOT_JOINED)?)
+            let key = state.key()?.ok_or(StopError::NotJoined)?;
+            (key, state.netmap()?.ok_or(StopError::NotJoined)?)
         }
         Source::Static(path) => (state.key_or_generate()?, read_static(path)?),
     };
     let controller = match source {
-        Source::Controller => Some(state.controller()?.context(NOT_JOINED)?),
+        Source::Controller => Some(state.controller()?.ok_or(StopError::NotJoined)?),
         Source::Static(_) => None,
     };
 
@@ -522,8 +539,8 @@ impl Managed<'_> {
                     link_state.send_replace(state);
                     endpoint.set_controller_online(state == LinkState::Online);
                     match state {
-                        LinkState::Revoked => bail!("controller 吊销了这个节点"),
-                        LinkState::Rejected => bail!("controller 不认这个节点了（它可能已经被删除）。要重新加入网络：echo <令牌> | i3t join"),
+                        LinkState::Revoked => return Err(StopError::Revoked.into()),
+                        LinkState::Rejected => return Err(StopError::Rejected.into()),
                         LinkState::Online => {
                             tracing::info!("已连上 controller");
                             if let Some(updater) = updater {
@@ -662,5 +679,14 @@ mod tests {
         assert_eq!(summary, [("local-socks5", 1080, ListenerProtocol::Socks5), ("local-http", 1081, ListenerProtocol::Http)]);
         let only_http = Config::parse("[proxy]\nsocks5 = \"off\"\nhttp = \"127.0.0.1:1081\"\n").unwrap();
         assert_eq!(local_entries(&only_http).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn running_before_joining_returns_stop_error_not_joined() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateDir::open(dir.path()).unwrap();
+        let program = Program { version: crate::Version::new(0, 1, 0), path: PathBuf::from("/usr/local/bin/i3t"), blocker: None };
+        let error = run(state, Source::Controller, program, 1, std::future::pending()).await.unwrap_err();
+        assert_eq!(error.downcast_ref::<StopError>(), Some(&StopError::NotJoined), "{error:#}");
     }
 }

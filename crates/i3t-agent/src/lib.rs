@@ -48,3 +48,4 @@ pub mod vnet;
 
 pub use i3t_model::update::Version;
 pub use i3t_update::RESTART_EXIT_CODE;
+pub use node::NO_RESTART_EXIT_CODE;

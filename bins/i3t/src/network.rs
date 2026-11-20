@@ -1,4 +1,4 @@
-//! 虚拟网卡在本机的几个命令：`i3t network status`、`i3t set network|firewall off` 之后的清理、`i3t hosts`。
+//! 虚拟网卡在本机的几个命令：`i3t network status`、`i3t network cleanup`、`i3t set network|firewall off` 之后的清理、`i3t hosts`。
 //!
 //! 装、拆都是运行着的节点做的（`i3t_agent::vnet`）；这里只读系统里有什么，以及节点没在运行时把上次留下的规则拆掉。
 //! hosts 文件里 `i3t hosts --apply` 写的那一段不随虚拟网卡拆掉：那是管理员写进去的文件，只有 `i3t hosts --remove` 去掉它。
@@ -6,14 +6,14 @@
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use i3t_agent::state::StateDir;
 use i3t_agent::status::LiveStatus;
 use i3t_agent::vnet::{devices, names_of, present_devices};
 use i3t_lang::table::Fields;
 use i3t_model::control::{VnetCause, VnetState};
 use i3t_vnet::device::Platform;
-use i3t_vnet::machine::{Shell, missing_privilege};
+use i3t_vnet::machine::{Machine, Shell, missing_privilege};
 use i3t_vnet::names::{hosts_block, remove_hosts_block, replace_hosts_block};
 use i3t_vnet::{CommandError, Program, Survey, legacy, setup};
 
@@ -27,6 +27,55 @@ fn hosts_file() -> PathBuf {
         root.join(r"System32\drivers\etc\hosts")
     } else {
         PathBuf::from("/etc/hosts")
+    }
+}
+
+/// `i3t network cleanup`：拆掉崩溃或被强制终止后留下的防火墙规则（以及旧版透明访问的残留）。
+///
+/// 在跑的节点程序的网卡还存在，它的规则不动。systemd 单元的 `ExecStopPost` 也会调用它。
+pub(crate) fn cleanup() -> anyhow::Result<()> {
+    let t = &texts().network;
+    if let Some(missing) = missing_privilege() {
+        bail!((t.cleanup_no_privilege)(missing));
+    }
+    let removed = cleanup_with(&mut Shell, Platform::CURRENT, &present_devices()).context(t.leftover_remove_failed)?;
+    if removed == 0 {
+        println!("{}", t.cleanup_nothing);
+    } else {
+        println!("{}", (t.leftover_removed)(removed));
+    }
+    Ok(())
+}
+
+/// 在 `machine` 上拆掉 `present` 之外的孤儿规则和旧版透明访问残留，返回拆掉的条数。
+fn cleanup_with(machine: &mut impl Machine, platform: Platform, present: &[String]) -> Result<usize, CommandError> {
+    let mut first_error = None;
+    let mut removed = match setup::remove_leftovers(machine, platform, present) {
+        Ok(count) => count,
+        Err(error) => {
+            first_error = Some(error);
+            0
+        }
+    };
+    if platform == Platform::Linux {
+        match legacy::Leftover::find(machine) {
+            Ok(found) if !found.is_empty() => match found.remove(machine) {
+                Ok(()) => removed += found.items().len(),
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            },
+            Ok(_) => {}
+            // 没有 nft 或 ip 的机器上本来就没有过透明访问，不当作清理失败。
+            Err(error) if error.means_absent() => {}
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(removed),
     }
 }
 
@@ -219,5 +268,61 @@ mod tests {
         );
         let denied = refused("iptables v1.8.9 (legacy): can't initialize iptables table `raw': Permission denied (you must be root)");
         assert_eq!(guard_note(&survey(no_nft(), Err(denied.clone()))), Some(unreadable(&denied)));
+    }
+
+    #[test]
+    fn cleanup_removes_orphaned_rules_and_keeps_running_adapters_untouched() {
+        struct FakeMachine {
+            answers: Vec<(Program, &'static str, Result<String, CommandError>)>,
+            log: Vec<String>,
+        }
+
+        impl Machine for FakeMachine {
+            fn run(&mut self, program: Program, args: &[String], _input: Option<&str>) -> Result<String, CommandError> {
+                let line = format!("{program} {}", args.join(" "));
+                self.log.push(line.clone());
+                match self.answers.iter().position(|(p, prefix, _)| *p == program && line.starts_with(prefix)) {
+                    Some(at) => self.answers.remove(at).2,
+                    None => Ok(String::new()),
+                }
+            }
+        }
+
+        let mut machine = FakeMachine {
+            answers: vec![
+                // remove_leftovers 的 Survey::take
+                (Program::Nft, "nft -j list tables ip", Ok(r#"{"nftables": [{"table": {"family": "ip", "name": "i3t0"}}, {"table": {"family": "ip", "name": "i3t1"}}]}"#.into())),
+                (Program::Iptables, "iptables -w 5 -S INPUT", Ok("-P INPUT ACCEPT\n-A INPUT -i i3t0 -m comment --comment ice3tier -j ACCEPT\n-A INPUT -i i3t1 -m comment --comment ice3tier -j ACCEPT\n".into())),
+                (Program::Iptables, "iptables -w 5 -t raw -S PREROUTING", Ok("-P PREROUTING ACCEPT\n".into())),
+                // legacy::Leftover::find
+                (Program::Nft, "nft -j list tables ip", Ok(r#"{"nftables": []}"#.into())),
+                (Program::Ip, "ip -j rule show", Ok("[]".into())),
+                (Program::Ip, "ip -j route show table 2033", Err(CommandError::Failed { program: Program::Ip, status: Some(2), detail: "Error: ipv4: FIB table does not exist.".into() })),
+                (Program::Ip, "ip -j -d link show dev i3t0", Err(CommandError::Failed { program: Program::Ip, status: Some(1), detail: "Device \"i3t0\" does not exist.".into() })),
+            ],
+            log: Vec::new(),
+        };
+
+        let removed = cleanup_with(&mut machine, Platform::Linux, &["i3t1".into()]).unwrap();
+        assert_eq!(removed, 2, "只拆掉不在的 i3t0 的表和 INPUT 规则");
+        assert!(machine.log.iter().any(|cmd| cmd.contains("-D INPUT -i i3t0")), "i3t0 的放行规则应该被删：{:?}", machine.log);
+        assert!(!machine.log.iter().any(|cmd| cmd.contains("i3t1")), "在跑的 i3t1 不该被动：{:?}", machine.log);
+    }
+
+    #[test]
+    fn cleanup_succeeds_on_linux_without_nft_binary() {
+        struct MissingNft;
+
+        impl Machine for MissingNft {
+            fn run(&mut self, program: Program, args: &[String], _input: Option<&str>) -> Result<String, CommandError> {
+                match program {
+                    Program::Nft => Err(CommandError::Missing(Program::Nft)),
+                    Program::Iptables if args.contains(&"-S".to_owned()) => Ok("-P INPUT ACCEPT\n".into()),
+                    _ => Ok(String::new()),
+                }
+            }
+        }
+
+        assert_eq!(cleanup_with(&mut MissingNft, Platform::Linux, &[]).unwrap(), 0, "没有 nft 时不应因为查不到旧表而报错");
     }
 }

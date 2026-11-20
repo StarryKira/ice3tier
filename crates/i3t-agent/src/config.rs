@@ -19,6 +19,11 @@ use serde::Deserialize;
 
 use crate::texts::texts;
 
+/// 配置文件的内容有错（语法不对、不认识的配置项、值不合规矩）。和读文件失败分开：内容不对重启多少次都不会好。
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct InvalidConfig(String);
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -63,8 +68,8 @@ impl Config {
     /// 同 [`load`](Self::load)，只是没有文件名。
     pub fn parse(text: &str) -> anyhow::Result<Self> {
         // toml 的错误信息自带行号、列号和出错的那一行，原样给使用者看。
-        let config: Self = toml::from_str(text).map_err(|err| anyhow::anyhow!("{err}"))?;
-        config.validate()?;
+        let config: Self = toml::from_str(text).map_err(|err| InvalidConfig(err.to_string()))?;
+        config.validate().map_err(|err| InvalidConfig(err.to_string()))?;
         Ok(config)
     }
 
@@ -884,5 +889,23 @@ mod tests {
         Config::set(&path, setting.change("on").unwrap()).unwrap();
         assert!(!path.exists(), "什么也不写");
         assert!(setting.change("yes").is_err(), "值照旧要写 on 或 off");
+    }
+
+    #[test]
+    fn invalid_config_content_is_distinguished_from_io_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad_syntax = dir.path().join("bad-syntax.toml");
+        fs::write(&bad_syntax, "port = \"not-a-number\"\n").unwrap();
+        let error = Config::load(&bad_syntax).unwrap_err();
+        assert!(error.chain().any(|cause| cause.is::<InvalidConfig>()), "语法错误应标为 InvalidConfig：{error:#}");
+
+        let bad_value = dir.path().join("bad-value.toml");
+        fs::write(&bad_value, "port = 0\n").unwrap();
+        let error = Config::load(&bad_value).unwrap_err();
+        assert!(error.chain().any(|cause| cause.is::<InvalidConfig>()), "配置值错误应标为 InvalidConfig：{error:#}");
+
+        // 路径本身是目录时读文件会报 IO 错误，不是配置文件内容有错。
+        let io_error = Config::load(dir.path()).unwrap_err();
+        assert!(!io_error.chain().any(|cause| cause.is::<InvalidConfig>()), "IO 错误不应标为 InvalidConfig：{io_error:#}");
     }
 }

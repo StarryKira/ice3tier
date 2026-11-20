@@ -14,12 +14,12 @@ use std::process::ExitCode;
 
 use anyhow::{Context, bail};
 use clap::{CommandFactory, Parser, Subcommand};
-use i3t_agent::config::{Change, Config, Setting};
+use i3t_agent::config::{Change, Config, InvalidConfig, Setting};
 use i3t_agent::join::{JoinOptions, join};
-use i3t_agent::node::{self, Outcome, Source};
+use i3t_agent::node::{self, Outcome, Source, StopError};
 use i3t_agent::program::Program;
 use i3t_agent::state::StateDir;
-use i3t_agent::{RESTART_EXIT_CODE, Version, local, selfcheck};
+use i3t_agent::{NO_RESTART_EXIT_CODE, RESTART_EXIT_CODE, Version, local, selfcheck};
 use i3t_lang::Lang;
 use i3t_lang::table::Fields;
 use i3t_update::SelfCheckFailure;
@@ -95,6 +95,7 @@ enum Command {
 #[derive(Subcommand)]
 enum NetworkCommand {
     Status,
+    Cleanup,
 }
 
 /// `i3t hosts` 做什么：打印那一段、写进 hosts 文件（`--apply`）、从里面去掉（`--remove`）。
@@ -134,7 +135,11 @@ fn command(lang: Lang) -> clap::Command {
         })
         .mut_subcommand("key", |sub| sub.about(h.key))
         .mut_subcommand("tune", |sub| sub.about(h.tune).mut_arg("apply", |arg| arg.help(h.tune_apply)))
-        .mut_subcommand("network", |sub| sub.about(h.network).mut_subcommand("status", |sub| sub.about(h.network_status)))
+        .mut_subcommand("network", |sub| {
+            sub.about(h.network)
+                .mut_subcommand("status", |sub| sub.about(h.network_status))
+                .mut_subcommand("cleanup", |sub| sub.about(h.network_cleanup))
+        })
         .mut_subcommand("hosts", |sub| {
             sub.about(h.hosts).mut_arg("apply", |arg| arg.help(h.hosts_apply)).mut_arg("remove", |arg| arg.help(h.hosts_remove))
         })
@@ -153,6 +158,11 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
+    // 清理残留规则不需要状态目录，免得状态目录打不开时 systemd 的 ExecStopPost 也跟着失败。
+    if matches!(cli.command, Command::Network { command: NetworkCommand::Cleanup }) {
+        network::cleanup()?;
+        return Ok(ExitCode::SUCCESS);
+    }
     let t = &texts().ui;
     let version: Version = VERSION.parse().context(t.bad_version)?;
     let state = StateDir::open(match cli.state_dir {
@@ -178,22 +188,14 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             fields.print();
             println!("{}", t.start_with_run);
         }
-        Command::Run { r#static } => {
-            let config = Config::load(&state.config_path())?;
-            init_logging(config.log.level.as_str());
-            #[cfg(unix)]
-            raise_open_file_limit();
-            // 程序文件在哪里要趁早查：更新换过文件之后，系统报出来的就不是原来的位置了。
-            let program = Program::detect(version)?;
-            let source = r#static.map_or(Source::Controller, Source::Static);
-            let threads = node::starting_performance(&state, &source)?.threads;
-            let runtime = runtime(threads).context(t.start_runtime)?;
-            return Ok(match runtime.block_on(node::run(state, source, program, threads, shutdown_signal()))? {
-                Outcome::Stopped => ExitCode::SUCCESS,
-                // 程序文件换过了：请看护程序（systemd 之类）把进程重新拉起来。
-                Outcome::Restart => ExitCode::from(RESTART_EXIT_CODE),
-            });
-        }
+        Command::Run { r#static } => match run_node(&state, &version, r#static) {
+            Ok(code) => return Ok(code),
+            Err(error) if is_unrecoverable(&error) => {
+                eprintln!("i3t: {}", i3t_lang::current().chain(error.chain()));
+                return Ok(ExitCode::from(NO_RESTART_EXIT_CODE));
+            }
+            Err(error) => return Err(error),
+        },
         Command::Set { setting, value } => {
             let change = setting.change(&value)?;
             if let Change::CanForward(_) = change {
@@ -253,6 +255,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let live = current_thread()?.block_on(local::query(&state))?;
             network::status(&state, live.as_ref());
         }
+        Command::Network { command: NetworkCommand::Cleanup } => unreachable!("Cleanup 已在打开状态目录之前处理"),
         Command::Hosts { apply, remove } => {
             let action = match (apply, remove) {
                 (true, _) => HostsAction::Apply,
@@ -271,6 +274,30 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// 启动并运行节点，返回应该交给看护程序的退出码。
+fn run_node(state: &StateDir, version: &Version, r#static: Option<PathBuf>) -> anyhow::Result<ExitCode> {
+    let t = &texts().ui;
+    let config = Config::load(&state.config_path())?;
+    init_logging(config.log.level.as_str());
+    #[cfg(unix)]
+    raise_open_file_limit();
+    // 程序文件在哪里要趁早查：更新换过文件之后，系统报出来的就不是原来的位置了。
+    let program = Program::detect(version.clone())?;
+    let source = r#static.map_or(Source::Controller, Source::Static);
+    let threads = node::starting_performance(state, &source)?.threads;
+    let runtime = runtime(threads).context(t.start_runtime)?;
+    Ok(match runtime.block_on(node::run(state.clone(), source, program, threads, shutdown_signal()))? {
+        Outcome::Stopped => ExitCode::SUCCESS,
+        // 程序文件换过了：请看护程序（systemd 之类）把进程重新拉起来。
+        Outcome::Restart => ExitCode::from(RESTART_EXIT_CODE),
+    })
+}
+
+/// 这条错误重启也救不了：`i3t run` 应以 [`NO_RESTART_EXIT_CODE`]（78 / `EX_CONFIG`）退出，让 systemd 停止自动重启。
+fn is_unrecoverable(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.is::<InvalidConfig>() || cause.is::<StopError>())
 }
 
 /// 自检没有通过的原因，按这个程序的语言写。它会被旧程序收下、报给 controller。
@@ -455,9 +482,25 @@ mod tests {
         assert!(matches!(parse(&["i3t", "set", "mtu", "1400"]).unwrap().command, Command::Set { setting: Setting::Mtu, .. }));
         assert!(parse(&["i3t", "set", "intercept", "on"]).is_err(), "透明访问的开关没有了");
         assert!(matches!(parse(&["i3t", "network", "status"]).unwrap().command, Command::Network { command: NetworkCommand::Status }));
+        assert!(matches!(parse(&["i3t", "network", "cleanup"]).unwrap().command, Command::Network { command: NetworkCommand::Cleanup }));
         assert!(matches!(parse(&["i3t", "hosts", "--apply"]).unwrap().command, Command::Hosts { apply: true, remove: false }));
         assert!(matches!(parse(&["i3t", "hosts", "--remove"]).unwrap().command, Command::Hosts { apply: false, remove: true }));
         assert!(parse(&["i3t", "hosts", "--apply", "--remove"]).is_err(), "写进去和去掉只能选一个");
+    }
+
+    #[test]
+    fn permanent_run_errors_are_marked_unrecoverable_and_transient_errors_are_not() {
+        for stop in [StopError::NotJoined, StopError::Revoked, StopError::Rejected] {
+            let err = anyhow::Error::from(stop).context("外层上下文");
+            assert!(is_unrecoverable(&err), "{stop:?} 应该判为重启也救不了");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bad_config = dir.path().join("config.toml");
+        std::fs::write(&bad_config, "port = 0\n").unwrap();
+        assert!(is_unrecoverable(&Config::load(&bad_config).unwrap_err()), "配置文件有错应该判为重启也救不了");
+
+        let transient = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::AddrInUse)).context("绑定端口 20330");
+        assert!(!is_unrecoverable(&transient), "临时性绑定失败应该继续允许重启");
     }
 
     #[cfg(unix)]
