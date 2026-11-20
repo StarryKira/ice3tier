@@ -219,6 +219,7 @@ export function Combobox<V extends string | number>({
             }
             const { option } = row
             const isSelected = option.value === value
+            const reason = option.disabled === true ? option.disabledReason : undefined
             return (
               <li
                 key={String(option.value)}
@@ -229,22 +230,36 @@ export function Combobox<V extends string | number>({
                 onMouseEnter={() => setActive(index)}
                 onClick={() => choose(row)}
                 className={cn(
-                  'flex cursor-pointer flex-col rounded-md px-2 py-1.5 text-sm',
+                  'flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm',
                   isActive && 'bg-muted',
                   option.disabled === true && 'cursor-not-allowed',
                 )}
               >
-                <span className={cn('flex items-center gap-2', option.disabled === true && 'opacity-55')}>
+                <span
+                  className={cn('flex min-w-0 flex-1 items-center gap-2', option.disabled === true && 'opacity-55')}
+                >
                   {option.leading}
                   <span className="min-w-0 flex-1 truncate">{option.label}</span>
-                  {option.hint !== undefined ? (
-                    <span className="shrink-0 text-[13px] text-muted-foreground tabular">{option.hint}</span>
-                  ) : null}
-                  <Check className={cn('size-3.5 shrink-0 text-primary', !isSelected && 'invisible')} aria-hidden />
                 </span>
-                {option.disabled === true && option.disabledReason !== undefined ? (
-                  <span className="mt-0.5 text-[13px] leading-snug text-warn">{option.disabledReason}</span>
+                {/* 不能选的那一项在同一行的右边写原因，代替灰色小字：写在下面一行，看着像下一组的标题。 */}
+                {reason !== undefined ? (
+                  <span
+                    title={typeof reason === 'string' ? reason : undefined}
+                    className="max-w-[60%] shrink-0 truncate text-[13px] text-muted-foreground"
+                  >
+                    {reason}
+                  </span>
+                ) : option.hint !== undefined ? (
+                  <span
+                    className={cn(
+                      'shrink-0 text-[13px] text-muted-foreground tabular',
+                      option.disabled === true && 'opacity-55',
+                    )}
+                  >
+                    {option.hint}
+                  </span>
                 ) : null}
+                <Check className={cn('size-3.5 shrink-0 text-primary', !isSelected && 'invisible')} aria-hidden />
               </li>
             )
           })}

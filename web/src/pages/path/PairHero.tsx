@@ -1,10 +1,9 @@
 import { ArrowLeftRight, ChevronDown, Plus, RefreshCw } from 'lucide-react'
 
 import { type Node, type NodeDetail, type NodeId, type PathLeg, type PathView } from '@/api/types'
-import { Combobox, type ComboOption } from '@/components/combobox'
 import { Flag } from '@/components/flag'
+import { NodeSelect } from '@/components/node'
 import { OsIcon } from '@/components/os-icon'
-import { OnlineDot } from '@/components/status'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip } from '@/components/ui/tooltip'
@@ -69,18 +68,6 @@ function End({
   align: 'left' | 'right'
   onPick: (id: NodeId) => void
 }) {
-  const options: ComboOption<NodeId>[] = nodes.map((option) => ({
-    value: option.id,
-    label: option.name,
-    hint: option.online ? option.virtual_ip : `${option.virtual_ip} · ${t.common.offline}`,
-    keywords: option.groups.map((group) => group.name).join(' '),
-    leading: (
-      <span className="flex items-center gap-1.5">
-        <OnlineDot online={option.online} />
-        <Flag code={option.country} />
-      </span>
-    ),
-  }))
   const right = align === 'right'
   const content =
     node === undefined ? (
@@ -119,13 +106,11 @@ function End({
       </span>
     )
   return (
-    <Combobox<NodeId>
+    <NodeSelect
+      nodes={nodes}
       value={node?.id ?? null}
       onChange={onPick}
-      options={options}
       placeholder={pick}
-      searchPlaceholder={t.select.nodeSearch}
-      emptyText={t.select.nodeEmpty}
       aria-label={pick}
       trigger={content}
       className="group -m-2 min-w-0 rounded-lg p-2 transition-colors hover:bg-muted/50 data-[state=open]:bg-muted/50"
