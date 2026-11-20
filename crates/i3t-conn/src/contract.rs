@@ -130,7 +130,8 @@ impl Payload {
 /// - 先写 [`unsent`](Self::unsent)，再写自己的数据。
 /// - 正常结束时发 FIN（`shutdown(Write)`）；异常结束时绝不能发 FIN，而是重置连接。
 /// - socket 处在"关闭时发 RST"的状态。交出去之后底下的传输不再管它怎么关：调用方在整条流两个方向都正常结束时
-///   才恢复正常关闭（`SO_LINGER` 关掉），否则保持原样，丢弃时对端看到重置。
+///   才恢复正常关闭（`SO_LINGER` 关掉），否则保持原样，丢弃时对端看到重置。macOS 上两个方向都关了之后改不了，
+///   要在发 FIN 时就改、出错时再设回来（`i3t_underlay::tcp_reset` 的 `shutdown_write`、`graceful_close` 就是这样做的）。
 #[derive(Debug)]
 pub struct RawWrite {
     socket: Arc<TcpStream>,

@@ -83,9 +83,9 @@ pub(crate) fn rst_on_close(stream: &TcpStream) {
     }
 }
 
-/// 两个方向都正常结束了：关闭时按正常的 FIN 走。
+/// 两个方向都正常结束了：关闭时按正常的 FIN 走。本端写的一半要已经用 [`finish_write`] 关掉。
 pub(crate) fn graceful_close(stream: &TcpStream) {
-    if let Err(error) = SockRef::from(stream).set_linger(None) {
+    if let Err(error) = i3t_underlay::tcp_reset::graceful_close(stream) {
         tracing::debug!(%error, "恢复不了 SO_LINGER，正常结束的 lane 会以 RST 关闭");
     }
 }
@@ -103,7 +103,12 @@ pub(crate) fn reset_now(stream: &TcpStream) {
     }
 }
 
-/// 关掉写的一半（发 FIN）。
+/// 关掉写的一半（发 FIN），关闭时照样发 RST：异常结束之后用。
 pub(crate) fn shutdown_write(stream: &TcpStream) -> io::Result<()> {
     SockRef::from(stream).shutdown(std::net::Shutdown::Write)
+}
+
+/// 正常结束写的一半（发 FIN）。macOS 上要赶在两个方向都关了之前改回正常关闭，见 `i3t_underlay::tcp_reset::shutdown_write`。
+pub(crate) fn finish_write(stream: &TcpStream) -> io::Result<()> {
+    i3t_underlay::tcp_reset::shutdown_write(stream)
 }

@@ -40,7 +40,6 @@ impl Counter {
 
 /// 两条 TCP 上的关闭方式。
 mod socket {
-    use socket2::SockRef;
     use tokio::net::TcpStream;
 
     /// 关闭时发 RST 而不是 FIN。
@@ -52,7 +51,7 @@ mod socket {
 
     /// 两个方向都正常结束了：关闭时按正常的 FIN 走。
     pub(super) fn graceful_close(stream: &TcpStream) {
-        if let Err(error) = SockRef::from(stream).set_linger(None) {
+        if let Err(error) = i3t_underlay::tcp_reset::graceful_close(stream) {
             tracing::debug!(%error, "恢复不了 SO_LINGER，正常结束的连接会以 RST 关闭");
         }
     }
@@ -67,9 +66,10 @@ mod socket {
         }
     }
 
-    /// 关掉写的一半（发 FIN）。
+    /// 关掉写的一半（发 FIN）：这个方向正常结束了。macOS 上要赶在两个方向都关了之前改回正常关闭，见
+    /// `i3t_underlay::tcp_reset::shutdown_write`。
     pub(super) fn shutdown_write(stream: &TcpStream) -> std::io::Result<()> {
-        SockRef::from(stream).shutdown(std::net::Shutdown::Write)
+        i3t_underlay::tcp_reset::shutdown_write(stream)
     }
 }
 
@@ -211,7 +211,8 @@ impl Splicer {
 
     /// 双向搬运，直到两个方向都结束，或者有一个方向出错。`to_a`、`to_b` 是先写给 `a`、`b` 的字节。
     ///
-    /// 开始时把两头都设成"关闭时发 RST"。两个方向都正常结束时改回正常关闭；有一个方向出错时两头立刻重置。
+    /// 开始时把两头都设成"关闭时发 RST"。两个方向都正常结束时改回正常关闭（macOS 上在各自发 FIN 时就改了，见
+    /// `i3t_underlay::tcp_reset`）；有一个方向出错时两头立刻重置。
     pub async fn relay(&self, a: &TcpStream, to_a: Bytes, b: &TcpStream, to_b: Bytes) -> Relayed {
         socket::rst_on_close(a);
         socket::rst_on_close(b);

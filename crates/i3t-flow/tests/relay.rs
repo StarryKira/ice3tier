@@ -166,6 +166,42 @@ async fn request_and_response_cross_with_half_close_from_the_client_first() {
     assert!(exit.from_tcp.first_byte.is_some(), "出口应该记下目标的首字节时间");
 }
 
+#[tokio::test]
+async fn a_response_still_queued_when_the_relay_ends_reaches_the_client_with_a_clean_end() {
+    // 客户端发完请求先半关闭，回复的结束就是整次搬运的结束。客户端的接收缓冲小、入口这一头的发送缓冲大，客户端等搬运
+    // 结束了才读：那时回复的大半还在入口的内核里没发出去。正常关闭时内核接着发完；以 RST 关闭时它们被丢掉，客户端读到的
+    // 是重置或者一直等。macOS 上一条 socket 两个方向都关了之后改不回正常关闭，就会这样（见 `i3t_underlay::tcp_reset`）。
+    let mut world = World::new().await;
+    let TcpPair { near: mut client, far } = TcpPair::new().await;
+    socket2::SockRef::from(&client).set_recv_buffer_size(16 * 1024).unwrap();
+    socket2::SockRef::from(&far).set_send_buffer_size(1024 * 1024).unwrap();
+    let flow = i3t_flow::open(&world.connector, node(EXIT), &open_node_port(), b"GET / ", Carriage::Shared)
+        .await
+        .unwrap()
+        .established()
+        .await
+        .unwrap();
+    let ingress = tokio::spawn(flow.relay(far, future::pending()));
+    client.write_all(b"HTTP/1.0\r\n\r\n").await.unwrap();
+    client.shutdown().await.unwrap();
+
+    let mut target = world.accept_target().await;
+    let (request, end) = drain(&mut target).await;
+    assert_eq!(request, b"GET / HTTP/1.0\r\n\r\n");
+    end.unwrap();
+    // 发送缓冲在 Linux 上有上限（`net.core.wmem_max`，常见的是 208 KB，内核给两倍）：回复要放得进去，搬运才能结束。
+    let response: Vec<u8> = (0..192 * 1024u32).map(|i| u8::try_from(i % 253).unwrap()).collect();
+    target.write_all(&response).await.unwrap();
+    drop(target);
+
+    let ingress = timeout(PATIENCE, ingress).await.expect("回复都交给了内核，入口的搬运应该结束").unwrap();
+    assert!(ingress.end.is_clean(), "{:?}", ingress.end);
+    let (received, end) = drain(&mut client).await;
+    assert!(end.is_ok(), "收到 {} 字节之后结束的方式是 {end:?}，应该是正常结束", received.len());
+    assert!(received == response, "收到 {} 字节，应该是 {}", received.len(), response.len());
+    assert!(world.exit_summary().await.end.is_clean());
+}
+
 /// 划分：只有前 `left` 个字节属于这条流，内容随便。
 struct FirstBytes {
     left: usize,
@@ -668,28 +704,38 @@ async fn a_large_transfer_arrives_intact_in_both_directions() {
     let upload: Vec<u8> = (0..=u8::MAX).cycle().take(3_000_001).collect();
     let download: Vec<u8> = (0..=u8::MAX).rev().cycle().take(2_000_003).collect();
 
-    async fn exchange(mut stream: TcpStream, outgoing: Vec<u8>) -> Vec<u8> {
+    /// 一头同时发和收。返回 (发的结局, 收到的字节, 收的结局)：出错时不在这里失败，好让下面说清楚是哪一头、在哪里断的。
+    async fn exchange(mut stream: TcpStream, outgoing: Vec<u8>) -> (io::Result<()>, Vec<u8>, io::Result<()>) {
         let (mut read, mut write) = stream.split();
         let send = async {
-            write.write_all(&outgoing).await.unwrap();
-            write.shutdown().await.unwrap();
+            write.write_all(&outgoing).await?;
+            write.shutdown().await
         };
         let receive = async {
             let mut incoming = Vec::new();
-            read.read_to_end(&mut incoming).await.unwrap();
-            incoming
+            let end = read.read_to_end(&mut incoming).await.map(drop);
+            (incoming, end)
         };
-        tokio::join!(send, receive).1
+        let (sent, (incoming, end)) = tokio::join!(send, receive);
+        (sent, incoming, end)
     }
 
     let client_side = tokio::spawn(exchange(client, upload.clone()));
     let target_side = tokio::spawn(exchange(target, download.clone()));
-    assert_eq!(timeout(PATIENCE, target_side).await.unwrap().unwrap(), upload);
-    assert_eq!(timeout(PATIENCE, client_side).await.unwrap().unwrap(), download);
-
-    let ingress = ingress.await.unwrap();
-    assert!(ingress.end.is_clean());
-    assert_eq!((ingress.from_tcp.bytes, ingress.from_flow.bytes), (3_000_001, 2_000_003));
+    let (target_sent, at_target, target_end) = timeout(PATIENCE, target_side).await.expect("目标那一头应该收发完").unwrap();
+    let (client_sent, at_client, client_end) = timeout(PATIENCE, client_side).await.expect("客户端那一头应该收发完").unwrap();
+    let ingress = timeout(PATIENCE, ingress).await.expect("入口的搬运应该结束").unwrap();
     let exit = world.exit_summary().await;
+    // macOS 上这里曾经时不时有一头读到重置：失败时把两头收发的结局和两侧搬运的结局一起说出来。
+    let report = format!(
+        "目标：发 {target_sent:?}，收到 {} 字节、{target_end:?}；客户端：发 {client_sent:?}，收到 {} 字节、{client_end:?}；\
+         入口 {ingress:?}；出口 {exit:?}",
+        at_target.len(),
+        at_client.len(),
+    );
+    assert!(target_sent.is_ok() && client_sent.is_ok() && target_end.is_ok() && client_end.is_ok(), "{report}");
+    assert!(at_target == upload && at_client == download, "{report}");
+    assert!(ingress.end.is_clean() && exit.end.is_clean(), "{report}");
+    assert_eq!((ingress.from_tcp.bytes, ingress.from_flow.bytes), (3_000_001, 2_000_003));
     assert_eq!((exit.from_flow.bytes, exit.from_tcp.bytes), (3_000_001, 2_000_003));
 }

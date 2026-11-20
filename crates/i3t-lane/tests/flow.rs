@@ -11,8 +11,8 @@ mod common;
 use std::future;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::{Hop, Pair, quick};
@@ -34,16 +34,24 @@ fn open_request() -> Open {
     Open { target: Target::Node { port: 443 }, class: Class::Auto, origin: Origin::default() }
 }
 
-/// 出口：每条流都连到 `target`，然后用流层自己的搬运。
+/// 出口：每条流都连到 `target`，然后用流层自己的搬运。每次搬运的结局记在 `ends` 里，测试失败时说出来。
 struct ToTarget {
     target: SocketAddr,
+    ends: Arc<Mutex<Vec<String>>>,
+}
+
+impl ToTarget {
+    fn new(target: SocketAddr) -> Self {
+        Self { target, ends: Arc::default() }
+    }
 }
 
 impl Handler for ToTarget {
     async fn handle<S: SendStream, R: RecvStream>(&self, request: Request<S, R>) {
         let target = TcpStream::connect(self.target).await.unwrap();
         let flow = request.accept().await.unwrap();
-        let _ = flow.relay(target, future::pending()).await;
+        let summary = flow.relay(target, future::pending()).await;
+        self.ends.lock().unwrap().push(format!("{:?}", summary.end));
     }
 }
 
@@ -116,7 +124,7 @@ async fn the_flow_layer_runs_sealed_on_lanes_in_both_directions_of_initiative() 
     let target = echo_target().await;
     for lanes in [&pair.entry.lanes, &pair.exit.lanes] {
         let lanes = Arc::clone(lanes);
-        tokio::spawn(async move { i3t_flow::serve(&*lanes, Arc::new(ToTarget { target })).await });
+        tokio::spawn(async move { i3t_flow::serve(&*lanes, Arc::new(ToTarget::new(target))).await });
     }
     for (from, to) in [(&pair.entry, &pair.exit), (&pair.exit, &pair.entry)] {
         let (mut client, client_side) = tcp_pair().await;
@@ -145,7 +153,9 @@ async fn the_flow_layer_passes_tls_through_and_splices_it() {
     pair.ready(1).await;
     let target = echo_target().await;
     let lanes = Arc::clone(&pair.exit.lanes);
-    tokio::spawn(async move { i3t_flow::serve(&*lanes, Arc::new(ToTarget { target })).await });
+    let exit = Arc::new(ToTarget::new(target));
+    let exit_ends = Arc::clone(&exit.ends);
+    tokio::spawn(async move { i3t_flow::serve(&*lanes, exit).await });
     let (mut client, client_side) = tcp_pair().await;
     let lanes = Arc::clone(&pair.entry.lanes);
     let peer = pair.exit.id;
@@ -194,15 +204,18 @@ async fn the_flow_layer_passes_tls_through_and_splices_it() {
             .collect();
         panic!(
             "{PATIENCE:?} 之内没有回显完：客户端发出 {} 字节、收回 {} 字节，入口的搬运{}结束；入口 {:?}；出口 {:?}；\
-             中间一跳每条连接的（出口到入口的字节、结局，入口到出口的字节、结局）{hop:?}",
+             出口的搬运的结局 {:?}；中间一跳每条连接的（出口到入口的字节、结局，入口到出口的字节、结局）{hop:?}",
             sent.load(Ordering::Relaxed),
             received.load(Ordering::Relaxed),
             if relay.is_finished() { "已经" } else { "还没有" },
             pair.entry.lanes.status().total,
             pair.exit.lanes.status().total,
+            exit_ends.lock().unwrap(),
         );
     };
-    end.unwrap();
+    if let Err(error) = end {
+        panic!("回显收到 {} 字节之后读出错 {error:?}；出口的搬运的结局 {:?}", echoed.len(), exit_ends.lock().unwrap());
+    }
     assert!(echoed == [&hello[..], &body].concat(), "回显的字节不一样");
     assert!(timeout(PATIENCE, relay).await.expect("客户端读完之后入口的搬运应该结束").unwrap().is_clean());
     let entry = pair.entry.lanes.status();
@@ -219,7 +232,7 @@ async fn an_upstream_reset_in_the_middle_of_an_answer_reaches_the_client_as_a_re
     pair.ready(1).await;
     let target = resetting_target().await;
     let lanes = Arc::clone(&pair.exit.lanes);
-    tokio::spawn(async move { i3t_flow::serve(&*lanes, Arc::new(ToTarget { target })).await });
+    tokio::spawn(async move { i3t_flow::serve(&*lanes, Arc::new(ToTarget::new(target))).await });
     let (mut client, client_side) = tcp_pair().await;
     let lanes = Arc::clone(&pair.entry.lanes);
     let peer = pair.exit.id;
@@ -487,6 +500,38 @@ async fn splice_and_user_space_copy_move_identical_bytes() {
         assert!(got[6..] == data[..], "引擎 {splicer:?} 搬出来的字节不一样");
         let moved = splicer.spliced_bytes() + splicer.copied_bytes();
         assert_eq!(moved, u64::try_from(data.len() + 6).unwrap());
+    }
+}
+
+#[tokio::test]
+async fn both_engines_deliver_what_is_still_queued_when_the_relay_ends() {
+    // 一头先结束（它的 FIN 先到），另一头再发一大块并结束。收的那一头接收缓冲小、搬运那一侧的发送缓冲大，并且等搬运结束、
+    // 两条连接都关了才读：那时这一块的大半还在内核里没发出去。正常关闭时内核接着发完；以 RST 关闭时它们被丢掉，读到的是
+    // 重置或者一直等。macOS 上一条 socket 两个方向都关了之后改不回正常关闭，就会这样（见 `i3t_underlay::tcp_reset`）。
+    for splicer in [Splicer::new(), Splicer::copying()] {
+        let (mut source, source_side) = tcp_pair().await;
+        let (mut sink, sink_side) = tcp_pair().await;
+        socket2::SockRef::from(&sink).set_recv_buffer_size(16 * 1024).unwrap();
+        socket2::SockRef::from(&sink_side).set_send_buffer_size(1024 * 1024).unwrap();
+        sink.shutdown().await.unwrap();
+        // 发送缓冲在 Linux 上有上限（`net.core.wmem_max`，常见的是 208 KB，内核给两倍）：这一块要放得进去，搬运才能结束。
+        let block: Vec<u8> = (0..192 * 1024u32).map(|i| u8::try_from(i % 233).unwrap()).collect();
+        let relay = async {
+            let relayed = splicer.relay(&source_side, bytes::Bytes::new(), &sink_side, bytes::Bytes::new()).await;
+            drop((source_side, sink_side));
+            relayed
+        };
+        let send = async {
+            source.write_all(&block).await.unwrap();
+            source.shutdown().await.unwrap();
+            let (rest, end) = drain(&mut source).await;
+            assert!(rest.is_empty() && end.is_ok(), "另一头先正常结束了：{rest:?} {end:?}");
+        };
+        let (relayed, ()) = tokio::join!(relay, send);
+        assert!(relayed.error.is_none(), "引擎 {splicer:?}：{:?}", relayed.error);
+        let (got, end) = drain(&mut sink).await;
+        assert!(end.is_ok(), "引擎 {splicer:?}：收到 {} 字节之后结束的方式是 {end:?}，应该是正常结束", got.len());
+        assert!(got == block, "引擎 {splicer:?}：收到 {} 字节，应该是 {}", got.len(), block.len());
     }
 }
 

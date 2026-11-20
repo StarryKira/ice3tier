@@ -22,6 +22,7 @@
 //! | 没有 `shutdown` 就丢弃发送方向 | 同 `reset` |
 //!
 //! lane 从开流起就设成"关闭时发 RST"，只有两个方向都正常结束才改回去，所以任务被取消、进程退出也一样。
+//! macOS 上是在发送方向正常结束、发 FIN 时就改回去：那里两个方向都关了之后改不了（见 `i3t_underlay::tcp_reset`）。
 //! 收到的 RST 在读写时是一个不带原因码的连接错误（分不清是对端重置了流，还是路上断了），ABORT 帧是带原因码的
 //! [`StreamAborted::Reset`]，STOP 帧让本端之后的写返回 [`StreamAborted::Stopped`]。
 //!
@@ -641,7 +642,7 @@ impl AsyncWrite for LaneSend {
                 SendState::Raw => state.send = SendState::Closing,
                 SendState::Closing => {
                     ready!(state.poll_drain(&shared.socket, cx))?;
-                    socket::shutdown_write(&shared.socket)?;
+                    socket::finish_write(&shared.socket)?;
                     state.send = SendState::Finished;
                     state.drop_tls_if_unused();
                     return Poll::Ready(Ok(()));
@@ -816,7 +817,8 @@ fn release(shared: &Arc<Shared>, state: &mut State) {
         (RecvState::Eof, true, false) => socket::graceful_close(&shared.socket),
         (RecvState::Stopped, true, false) => linger_then_close(shared),
         _ if state.abort_sent => close_after_abort(shared),
-        _ => {}
+        // 异常结束。发送方向可能正常结束过，macOS 上那时已经改回了正常关闭（`socket::finish_write`）：重新设成关闭时发 RST。
+        _ => socket::rst_on_close(&shared.socket),
     }
 }
 

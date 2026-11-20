@@ -10,7 +10,8 @@
 //! | 流被对端重置或叫停、连接断开、搬运被取消 | TCP 被重置（RST），不是 FIN |
 //!
 //! 被截断的数据不能看起来像正常结束。所以搬运一开始就把 TCP 设成"关闭时发 RST"，只有两个方向都正常结束了才改回去：
-//! 中途不管是出错、任务被取消还是进程退出，TCP 那一头看到的都是重置。
+//! 中途不管是出错、任务被取消还是进程退出，TCP 那一头看到的都是重置。macOS 上等不到那时：一条 socket 两个方向都关了
+//! 之后就改不了了，所以那里在往它发 FIN 的时候改回去，之后出错再设回来（见 `i3t_underlay::tcp_reset`）。
 //!
 //! 静默不是断开的理由：经端口转发的 SSH 会话、数据库连接池里的空闲连接，一连几个小时不说话都是正当的。
 //! 所以流没有"多久没有数据就切断"的时限，而是和 TCP 的保活一样，静默久了去探一探两头还在不在，不在了才断：
@@ -338,11 +339,12 @@ pub(crate) async fn run<S: SendStream, R: RecvStream>(
 
     let end = match outcome {
         Ok(()) => {
-            if let Err(error) = SockRef::from(&tcp).set_linger(None) {
+            // 两头写的一半都是用 `tcp_reset::shutdown_write` 关的：macOS 上那时已经改回了正常关闭（见 `i3t_underlay::tcp_reset`）。
+            if let Err(error) = i3t_underlay::tcp_reset::graceful_close(&tcp) {
                 tracing::warn!(%error, "恢复不了 SO_LINGER，正常结束的连接会以 RST 关闭");
             }
             if let Some(lane) = lane.get()
-                && let Err(error) = SockRef::from(&**lane).set_linger(None)
+                && let Err(error) = i3t_underlay::tcp_reset::graceful_close(lane)
             {
                 tracing::warn!(%error, "恢复不了 ice3proxy 的 SO_LINGER，正常结束的流会以 RST 关闭");
             }
@@ -353,6 +355,13 @@ pub(crate) async fn run<S: SendStream, R: RecvStream>(
             let code = StreamCode(abort.reason(role).to_wire());
             send.reset(code);
             recv.stop(code);
+            // 交出来直接搬的 ice3proxy 不归流管，上面两句碰不到它。它的一个方向可能已经正常结束过，macOS 上那时改回了
+            // 正常关闭：这里重新设成关闭时发 RST，对端才知道流断了。
+            if let Some(lane) = lane.get()
+                && let Err(error) = lane.set_zero_linger()
+            {
+                tracing::debug!(%error, "ice3proxy 设不回关闭时发 RST，对端可能看到正常结束");
+            }
             // 刚往 TCP 那一头写过数据就重置时，macOS 上的对端可能不认这个 RST，一直等下去（见 `i3t_underlay::tcp_reset`）。
             i3t_underlay::tcp_reset::close(tcp);
             End::from(abort)
@@ -497,7 +506,8 @@ async fn flow_to_tcp<R: RecvStream, M: Meter>(
     loop {
         let len = recv.read(&mut buf).await.map_err(Abort::Flow)?;
         if len == 0 {
-            return tcp.shutdown().await.map_err(Abort::Tcp);
+            // 不用 `tcp.shutdown()`：TCP 设着关闭时发 RST，macOS 上要赶在发 FIN 之前改回正常关闭（见 `i3t_underlay::tcp_reset`）。
+            return i3t_underlay::tcp_reset::shutdown_write(tcp.as_ref()).map_err(Abort::Tcp);
         }
         traffic.arrived(started);
         meter.pass(Direction::FromFlow, len).await.map_err(Abort::Cancelled)?;
