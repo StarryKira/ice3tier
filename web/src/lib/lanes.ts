@@ -166,6 +166,20 @@ export function laneEffectView(
   return { kind: 'blocked', label: l.blocked, reasons }
 }
 
+/**
+ * 代理列表里 ice3proxy 那一格的样子。没打开是 `null`；打开了但没有出口（controller 不说）是 `off`；
+ * 其余按 `lane_effect` 说起不起作用。
+ */
+export function proxyLaneView(
+  proxy: Pick<Proxy, 'node' | 'exit' | 'lane' | 'lane_effect' | 'lanes'>,
+  nodes: readonly NodeInfo[],
+): LaneEffectView | null {
+  const lane = proxyLane(proxy)
+  if (!lane.on) return null
+  if (proxy.exit === null) return { kind: 'off' }
+  return laneEffectView(lane.effect, { listen: proxy.node, exit: proxy.exit }, lane.sides, nodes)
+}
+
 /** 一眼要看的几个数。 */
 export interface LaneGlance {
   inUse: number

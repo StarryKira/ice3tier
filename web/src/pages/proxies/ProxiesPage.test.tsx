@@ -247,7 +247,7 @@ describe('代理上的 ice3proxy', () => {
     expect(screen.getByText(l.sharedNote)).toBeVisible()
   })
 
-  it('不生效：一条一条原因和修好它的那一步，用的是原因码而不是 controller 的原话', async () => {
+  it('不生效：格子里写未生效，下面横跨整张表的一行是原因和修好它的那一步，用的是原因码而不是 controller 的原话', async () => {
     const summary = 'ice3proxy 不起作用，这个代理的流都走共用的连接（见 blocked）。'
     setup([
       proxy({
@@ -264,10 +264,11 @@ describe('代理上的 ice3proxy', () => {
     renderWithApp(<ProxiesPage />, { network: NETWORK })
     const cell = await screen.findByTestId('proxy-lane-phone')
     expect(cell).toHaveTextContent(l.blocked)
-    expect(cell).toHaveTextContent(l.reason.noRelay('nas', 'tokyo'))
-    expect(cell).toHaveTextContent(l.reason.nodeTooOld('nas'))
-    expect(cell).not.toHaveTextContent(summary)
-    expect(within(cell).getByRole('link', { name: l.fix.update('nas') })).toHaveAttribute('href', '/n/1/nodes/2')
+    const blocked = screen.getByTestId('proxy-lane-blocked-phone')
+    expect(blocked).toHaveTextContent(l.reason.noRelay('nas', 'tokyo'))
+    expect(blocked).toHaveTextContent(l.reason.nodeTooOld('nas'))
+    expect(blocked).not.toHaveTextContent(summary)
+    expect(within(blocked).getByRole('link', { name: l.fix.update('nas') })).toHaveAttribute('href', '/n/1/nodes/2')
     // 两端都没报：没有详情。
     expect(within(cell).queryByRole('button', { name: l.detailsFor('nas', 'tokyo') })).toBeNull()
   })

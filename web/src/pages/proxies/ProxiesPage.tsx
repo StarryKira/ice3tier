@@ -29,14 +29,14 @@ import { t } from '@/i18n'
 import { copyText } from '@/lib/clipboard'
 import { parseSocketAddr } from '@/lib/cidr'
 import { nodeName } from '@/lib/nodes'
-import { lanesReported, proxyLane } from '@/lib/lanes'
+import { lanesReported, proxyLane, proxyLaneView } from '@/lib/lanes'
 import { proxyStatus, type ProxyStatusView, proxyUrl } from '@/lib/proxy'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { cn } from '@/lib/utils'
 import { useNetwork } from '@/pages/networks/context'
 
 import { ProxyDialog } from './ProxyDialog'
-import { LaneCell, LaneDetails, TipLabel } from './ProxyLane'
+import { LaneCell, LaneDetails, LaneReasons, TipLabel } from './ProxyLane'
 
 const s = t.proxies
 
@@ -181,11 +181,13 @@ export function ProxiesPage() {
                 const reported =
                   status.code === 'port_in_use' || status.code === 'bind_failed' ? (proxy.status?.detail ?? null) : null
                 const expanded = open === proxy.id && lanesReported(proxy)
+                const lane = laneShown ? proxyLaneView(proxy, all) : null
+                const reasons = lane?.kind === 'blocked' ? lane.reasons : []
                 return (
                   <Fragment key={proxy.id}>
                     <EntryRow
                       dimmed={!proxy.enabled}
-                      className={cn(expanded && 'border-b-0')}
+                      className={cn((expanded || reasons.length > 0) && 'border-b-0')}
                       data-testid={`proxy-row-${proxy.name}`}
                     >
                       <Td>
@@ -247,13 +249,14 @@ export function ProxiesPage() {
                             ) : undefined
                           }
                           reported={reported}
+                          narrow={laneShown}
                         />
                       </Td>
                       {laneShown ? (
                         <Td data-keep>
                           <LaneCell
-                            network={network}
                             proxy={proxy}
+                            view={lane}
                             nodes={all}
                             expanded={expanded}
                             onToggle={() => setOpen(expanded ? null : proxy.id)}
@@ -293,6 +296,17 @@ export function ProxiesPage() {
                         </RowActions>
                       </Td>
                     </EntryRow>
+                    {reasons.length > 0 ? (
+                      <tr className={cn(!expanded && 'border-b last:border-b-0', !proxy.enabled && 'opacity-55')}>
+                        <td
+                          colSpan={columns}
+                          className="px-3 pt-0 pb-3"
+                          data-testid={`proxy-lane-blocked-${proxy.name}`}
+                        >
+                          <LaneReasons network={network} reasons={reasons} />
+                        </td>
+                      </tr>
+                    ) : null}
                     {expanded ? (
                       <tr className="border-b last:border-b-0">
                         <td colSpan={columns} className="px-3 pt-0 pb-4">

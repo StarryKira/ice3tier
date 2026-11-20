@@ -13,8 +13,9 @@ import { formatBytes } from '@/lib/format'
 import {
   handshakeParts,
   handshakeTotal,
+  type LaneEffectView,
   type LaneFix,
-  laneEffectView,
+  type LaneReason,
   lanesReported,
   peerGlance,
   proxyLane,
@@ -50,55 +51,34 @@ function fixPath(network: number, fix: LaneFix): string {
 }
 
 /**
- * 代理列表里 ice3proxy 那一格：没打开是"关"；打开了写起不起作用（起作用时下面是谁拨号，不起作用时一条一条原因和
- * 修好它的那一步）；两端报了计数时有"详情"，展开看两端的数。
+ * 代理列表里 ice3proxy 那一格：没打开是"关"；打开了写起不起作用，起作用时下面一行是谁拨号（不换行，列不被撑宽）；
+ * 两端报了计数时有"详情"，展开看两端的数。不起作用的原因写在这一行下面横跨整张表的一行里（`LaneReasons`）。
  */
 export function LaneCell({
-  network,
   proxy,
+  view,
   nodes,
   expanded,
   onToggle,
 }: {
-  network: Network
   proxy: Proxy
+  view: LaneEffectView | null
   nodes: readonly Node[]
   expanded: boolean
   onToggle: () => void
 }) {
-  const lane = proxyLane(proxy)
-  if (!lane.on) return <span className="text-[13px] text-muted-foreground">{l.off}</span>
-  const view =
-    proxy.exit === null
-      ? ({ kind: 'off' } as const)
-      : laneEffectView(lane.effect, { listen: proxy.node, exit: proxy.exit }, lane.sides, nodes)
+  if (view === null) return <span className="text-[13px] text-muted-foreground">{l.off}</span>
   const name = nodeName(nodes, proxy.node)
   const exit = proxy.exit === null ? '' : nodeName(nodes, proxy.exit)
   return (
-    <div className="text-[13px]" data-testid={`proxy-lane-${proxy.name}`}>
+    <div className="text-[13px] whitespace-nowrap" data-testid={`proxy-lane-${proxy.name}`}>
       {view.kind === 'off' ? (
         <span>{l.on}</span>
       ) : (
-        <StatusText tone={view.kind === 'blocked' ? 'warn' : 'ok'} className="whitespace-nowrap">
-          {view.label}
-        </StatusText>
+        <StatusText tone={view.kind === 'blocked' ? 'warn' : 'ok'}>{view.label}</StatusText>
       )}
       {view.kind === 'effective' && view.detail !== null ? (
         <div className="mt-0.5 text-xs text-muted-foreground">{view.detail}</div>
-      ) : null}
-      {view.kind === 'blocked' ? (
-        <ul className="mt-0.5 max-w-72 space-y-0.5 text-xs leading-snug">
-          {view.reasons.map((reason) => (
-            <li key={reason.text}>
-              <span className="text-muted-foreground">{reason.text}</span>
-              {reason.fix !== null && reason.fixLabel !== null ? (
-                <Link to={fixPath(network.id, reason.fix)} className="ml-2 rounded-sm text-primary hover:underline">
-                  {reason.fixLabel}
-                </Link>
-              ) : null}
-            </li>
-          ))}
-        </ul>
       ) : null}
       {lanesReported(proxy) ? (
         <Button
@@ -114,6 +94,26 @@ export function LaneCell({
         </Button>
       ) : null}
     </div>
+  )
+}
+
+/** ice3proxy 不起作用的原因：一条一行，后面是修好它的那一步。 */
+export function LaneReasons({ network, reasons }: { network: Network; reasons: readonly LaneReason[] }) {
+  return (
+    <ul className="space-y-0.5 text-[13px] leading-snug">
+      {reasons.map((reason) => (
+        <li key={reason.text} className="flex flex-wrap gap-x-3">
+          <span className="text-muted-foreground">
+            <span className="font-medium text-foreground">{l.title}</span> · {reason.text}
+          </span>
+          {reason.fix !== null && reason.fixLabel !== null ? (
+            <Link to={fixPath(network.id, reason.fix)} className="rounded-sm text-primary hover:underline">
+              {reason.fixLabel}
+            </Link>
+          ) : null}
+        </li>
+      ))}
+    </ul>
   )
 }
 

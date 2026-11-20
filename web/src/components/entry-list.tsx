@@ -75,12 +75,15 @@ export function StatusCell({
   detail,
   action,
   reported,
+  narrow = false,
 }: {
   tone: Tone
   label: string
   detail?: string | null
   action?: ReactNode
   reported?: string | null
+  /** 表里列多的时候（代理开着 ice3proxy 那一列）：原因那一行窄一些，悬停看全文。 */
+  narrow?: boolean
 }) {
   const line = detail ?? reported ?? null
   const full = [detail, reported].filter((text) => text !== undefined && text !== null).join('\n')
@@ -90,7 +93,12 @@ export function StatusCell({
         {label}
       </StatusText>
       {line !== null ? (
-        <div className="mt-0.5 flex max-w-64 items-center gap-1.5 text-xs text-muted-foreground">
+        <div
+          className={cn(
+            'mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground',
+            narrow ? 'max-w-48' : 'max-w-64',
+          )}
+        >
           <span className="truncate" title={full}>
             {line}
           </span>
