@@ -26,7 +26,7 @@ use crate::socket;
 use crate::stream::{self, RecvHalf, SendHalf, StreamCount};
 use crate::tuning::Tuning;
 
-/// 建立连接的时限（白皮书 §5.4）：等到一条路，加上握手，一共这么久。没有 relay 可走时，这段时间花在等直连打通上。
+/// 建立连接的时限：等到一条路，加上握手，一共这么久。没有 relay 可走时，这段时间花在等直连打通上。
 /// 上层要等"连接建起来"时按它算（`i3t ping` 的第一个往返）。
 pub const DIAL_TIMEOUT: Duration = Duration::from_secs(5);
 /// 对端连进来时握手的时限。
@@ -274,7 +274,7 @@ impl Manager {
         *self.configs() = configs;
     }
 
-    /// 和 `peer` 之间新建的连接用哪种拥塞控制：节点对设置了的话用它，否则用节点的默认（白皮书 §6.3）。
+    /// 和 `peer` 之间新建的连接用哪种拥塞控制：节点对设置了的话用它，否则用节点的默认。
     pub(crate) fn algorithm_for(&self, peer: NodeId) -> Algorithm {
         let chosen = self.netmap.borrow().peer(peer).and_then(|info| info.congestion);
         chosen.map_or(self.default_algorithm, Algorithm::from)
@@ -900,7 +900,7 @@ impl HandshakeGate {
 ///
 /// `preferred`：到这个对端开新的流用的就是这一条。不是的话它是两边同时拨号多出来的那一条，很快就关。
 /// `keep_alive`：netmap 把这个对端设成了常驻。它可能连不进去，关掉之后只能等它再连过来，所以不回收。
-/// `idle_close`：档位定的空闲回收时间（白皮书 §6.5），默认 5 分钟，这样 N 个节点不会留下 N² 条常驻连接和保活流量；`None` 不回收。
+/// `idle_close`：档位定的空闲回收时间，默认 5 分钟，这样 N 个节点不会留下 N² 条常驻连接和保活流量；`None` 不回收。
 fn idle_limit(preferred: bool, keep_alive: bool, idle_close: Option<Duration>) -> Option<(Duration, &'static str)> {
     match (preferred, keep_alive, idle_close) {
         (false, _, _) => Some((DUPLICATE_IDLE_CLOSE, "到同一个对端有两条连接，多出来的这一条空闲了")),
@@ -909,7 +909,7 @@ fn idle_limit(preferred: bool, keep_alive: bool, idle_close: Option<Duration>) -
     }
 }
 
-/// 到了空闲回收的时间，这条连接是不是要先留着（白皮书 §5.4）。
+/// 到了空闲回收的时间，这条连接是不是要先留着。
 ///
 /// 关掉的连接要重建，握手的包得有路走：经 relay，或者重新打洞，而打洞的信令要经 controller。两样都没有的时候
 /// （controller 连不上，到这个对端也没有经 relay 的路），关掉的连接就建不回来了，所以先留着；controller 又连上了、

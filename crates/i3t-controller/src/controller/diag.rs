@@ -1,4 +1,4 @@
-//! 主动测试（白皮书 §7.6）在 controller 这一侧：管理员发起测试，controller 检查、给两端下发同一个编号和参数，
+//! 主动测试在 controller 这一侧：管理员发起测试，controller 检查、给两端下发同一个编号和参数，
 //! 两端各自上报，controller 合成结果、存下来（每对节点留最近的 [`crate::store::KEEP_PER_PAIR`] 个），以及全网矩阵（`matrix`）。
 //!
 //! 规矩：

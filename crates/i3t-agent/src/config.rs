@@ -209,7 +209,7 @@ pub struct Declare {
     /// 写着它的旧配置文件照样读得进来。
     #[serde(default, rename = "forward")]
     _forward: bool,
-    /// 作为 relay 时，别的节点还可以经这个地址连它（白皮书 §7.2）：只有人知道的那一种，机房或者路由器把另一个地址上的端口
+    /// 作为 relay 时，别的节点还可以经这个地址连它：只有人知道的那一种，机房或者路由器把另一个地址上的端口
     /// 映射到这台机器。只一个：一台机器的端口映射到外面通常就是一个地址；controller 从网卡和连接上找出来的地址照样都用。
     #[serde(default)]
     pub relay_address: Option<SocketAddr>,
@@ -566,7 +566,7 @@ fn profile_spelling<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result
     text.parse().map_err(|_| serde::de::Error::custom((texts().unknown_profile)(&text)))
 }
 
-/// 虚拟网卡（`[network]`，白皮书 §9.7）：本机的程序用虚拟 IP 访问别的节点。默认打开。
+/// 虚拟网卡（`[network]`）：本机的程序用虚拟 IP 访问别的节点。默认打开。
 ///
 /// 它改这台机器的网络配置（一块网卡、它的地址和路由，两条防火墙规则），所以只在本机开关，controller 只显示状态。
 /// 权限不够、没有驱动、地址段和本机的网络重叠时不装，状态里说为什么，代理和端口转发照常。做法见 `i3t_vnet`。

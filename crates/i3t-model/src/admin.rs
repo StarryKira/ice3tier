@@ -1,6 +1,6 @@
 //! 管理 API 的数据结构：WebUI 和命令行通过它读写 controller 里的东西。
 //!
-//! 这里的类型就是请求体和应答体的 JSON 形式；路径、方法和各个错误码出现的场合写在 `docs/internal/admin-api.md`。
+//! 这里的类型就是请求体和应答体的 JSON 形式；路径和方法在 `i3t_controller::admin`。
 //!
 //! 几条通用的约定：
 //!
@@ -88,7 +88,7 @@ pub struct ApiError {
     pub message: String,
     /// 比 `code` 更具体的一层：`not_found` 时是找不到的东西（`node`、`network` 等），`conflict` 时是挡着的东西，
     /// `invalid_request` 时是哪里不对（`zero`、`too_long` 等），`cannot_self_update`、`no_update` 时是原因。
-    /// 取值见 `docs/internal/admin-api.md` 第 2 节；controller 说不出来时是 `null`。
+    /// controller 说不出来时是 `null`。
     #[serde(default)]
     pub what: Option<String>,
     /// 请求里出问题的字段（请求体的字段名、查询参数名或路径参数名）；不是某一个字段的问题时是 `null`。
@@ -331,7 +331,7 @@ pub struct Node {
     /// controller 才自动让它更新；管理员点的"立即更新"不看它。比这个字段旧的 controller 不给，读成 `true`。
     #[serde(default = "enabled_by_default")]
     pub auto_update: bool,
-    /// 这个节点的程序更新（白皮书 §10.5）。
+    /// 这个节点的程序更新。
     #[serde(default)]
     pub update: NodeUpdate,
     /// 节点挂靠的 relay 和到它们的延迟，取自它最近的上报（离线时是它离线前报的）。
@@ -697,7 +697,7 @@ fn nullable<'de, T: Deserialize<'de>, D: Deserializer<'de>>(deserializer: D) -> 
 
 /// relay 的设置：启用 relay 时的请求体（`PUT …/relay`），也是 controller 存着的那一份。
 ///
-/// 地址不在这里：controller 自己找出来（白皮书 §7.2），见 [`RelayView::addresses`]。
+/// 地址不在这里：controller 自己找出来，见 [`RelayView::addresses`]。
 /// 早先的请求体里的 `udp`、`tcp`、`region` 照收，没有作用（不认识的字段一律忽略）。
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RelaySettings {
@@ -714,7 +714,7 @@ pub struct RelayView {
     pub addresses: Vec<RelayAddress>,
     /// 转发的带宽上限；`null` 表示不限。
     pub bandwidth_mbps: Option<u32>,
-    /// 在线的节点里有几个连得上它（白皮书 §7.2，节点自己上报的）。只是情况，不是毛病：只有一部分节点连得上的 relay 照样是那些节点的 relay。
+    /// 在线的节点里有几个连得上它（节点自己上报的）。只是情况，不是毛病：只有一部分节点连得上的 relay 照样是那些节点的 relay。
     #[serde(default)]
     pub reach: RelayReach,
     /// 谁在用它：最近一个统计时段里它替哪些节点对转发了多少，取自它最近一次上报。不在线、版本太旧不报时是 `null`。
@@ -753,7 +753,7 @@ pub struct RelayAddress {
     pub source: AddressSource,
 }
 
-/// relay 的地址是从哪里来的（白皮书 §7.2）。
+/// relay 的地址是从哪里来的。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AddressSource {
@@ -772,7 +772,7 @@ pub enum AddressSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum NodeWarning {
-    /// 节点的一个网卡地址落在网络的虚拟地址段里（白皮书 §4.6）：在这台机器上，连这个地址段里的虚拟 IP 可能连到真实网络上去，
+    /// 节点的一个网卡地址落在网络的虚拟地址段里：在这台机器上，连这个地址段里的虚拟 IP 可能连到真实网络上去，
     /// 虚拟网卡也装不上。`address` 是那个网卡地址（本节点自己的虚拟网卡上的虚拟 IP 不报，不算）。
     RangeOverlap { address: IpAddr },
     /// 这个 relay 启用着，在线的节点里试过它的有 `tried` 个，一个也没有连上。只是如实说一句：哪天有节点连得上它，它就是那些节点的 relay。
@@ -850,7 +850,7 @@ pub struct DirectStatusView {
     pub attempted_at: Option<Timestamp>,
 }
 
-/// 整个网络的路由矩阵：每个节点到它的各个对端现在怎么走，取自各节点最近的上报（白皮书 §7.7）。
+/// 整个网络的路由矩阵：每个节点到它的各个对端现在怎么走，取自各节点最近的上报。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteMatrix {
     /// 网络里的全部节点，按编号排。
@@ -971,7 +971,7 @@ pub struct SwitchView {
     pub cause: RouteCause,
 }
 
-/// 网络里 relay 之间的延迟矩阵（白皮书 §7.7），每个 relay 一行。
+/// 网络里 relay 之间的延迟矩阵，每个 relay 一行。
 ///
 /// 这些行是 relay 自己测、自己签名之后发给别的 relay 和挂靠它的节点的；controller 现问几个在线的节点，取每个 relay 最新的那一行。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1157,7 +1157,7 @@ pub struct Proxy {
     pub class: Option<Class>,
     /// 乐观回复；`null` 时看出口的设置，再按目标的种类。
     pub optimistic: Option<bool>,
-    /// 这个代理的 TCP 流走 ice3proxy（白皮书 §9.7 第 9 条）：不管路上有没有 UDP，开得出时一律走，开不出时退回共用的连接。
+    /// 这个代理的 TCP 流走 ice3proxy：不管路上有没有 UDP，开得出时一律走，开不出时退回共用的连接。
     /// 比这个字段旧的 controller 不写，读成 `false`。
     #[serde(default)]
     pub lane: bool,
@@ -1548,7 +1548,7 @@ pub struct LogEntry {
     #[serde(default)]
     pub refs: Vec<LogRef>,
     /// 按名字给出的参数：只用 `action` 和它们就能把这条记录写成一句话。东西的名字是当时的名字，挨着它的编号。
-    /// 每种 `action` 有哪些参数见 `docs/internal/admin-api.md` 第 3 节；这个字段出现之前的记录是空的。
+    /// 这个字段出现之前的记录是空的。
     #[serde(default)]
     pub params: serde_json::Map<String, serde_json::Value>,
 }

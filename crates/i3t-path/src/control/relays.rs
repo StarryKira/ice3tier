@@ -233,7 +233,7 @@ impl Control {
                 RelayState::Draining if matrix.age(id, now).is_some_and(|age| age >= DRAIN_HOLD) => RelayState::Serving,
                 RelayState::Overloaded => {
                     // 每个节点各自多等一段随机的时间再回去。大家一走它就不过载了；要是一看到"恢复"又一起回去，
-                    // 它马上又过载，这样来回就是群体震荡（白皮书 §7.5）。
+                    // 它马上又过载，这样来回就是群体震荡。
                     if entry.state != RelayState::Overloaded {
                         entry.cooling_until = Some(now + OVERLOAD_HOLD + relays::jitter(OVERLOAD_HOLD));
                     }

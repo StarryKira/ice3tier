@@ -3,7 +3,7 @@
 //! 一个 [`RelayLink`] 管到一个 relay 的全部事情。它不直接碰 socket：要发的东西交给 [`Wire`]，
 //! 所以整套"先试谁、什么时候换"的规则可以脱离网络来测。
 //!
-//! 一个 relay 可以有好几个地址（controller 找出来的，白皮书 §7.2），不一定每个都连得上。UDP 的握手把 INIT 同时发给每个地址，
+//! 一个 relay 可以有好几个地址（controller 找出来的），不一定每个都连得上。UDP 的握手把 INIT 同时发给每个地址，
 //! 谁先回答 CHALLENGE 就用谁，之后的握手和保活都只走它；会话断了，下一次又是每个地址一起试。所以连不上的地址不多花时间。
 //! 回答了 CHALLENGE、握手却走不完的地址（地址和别的 relay 撞了，回答的是另一台机器）这一轮里不再试，剩下的地址马上接着试。
 //! TCP 一个接一个地错开一点时间去连（见 [`crate::tcp`]），上一次握手成功的地址排在最前，失败的排在最后。
@@ -59,7 +59,7 @@ use crate::timing::{
     RETURN_PROBATION, Rtt, SETTLE, UDP_HEAD_START, UDP_RETRY, backbone_udp_retry, udp_evidence_ttl,
 };
 
-/// 挂靠几个 relay（白皮书 §7.2 的 K）。
+/// 挂靠几个 relay。
 pub(crate) const ATTACH_COUNT: usize = 2;
 /// 挂靠的 relay 连不上超过这么久，就可以被别的顶替。
 const FAILING_AFTER: Duration = Duration::from_secs(10);
@@ -257,7 +257,7 @@ impl RelayLink {
         }
     }
 
-    /// UDP 上的会话多久保活一次。本节点是 relay 时，到别的 relay 的会话就是骨干上的连接，探测得更勤（白皮书 §7.3）。
+    /// UDP 上的会话多久保活一次。本节点是 relay 时，到别的 relay 的会话就是骨干上的连接，探测得更勤。
     ///
     /// TCP 上的会话不跟着变，骨干改走 TCP 时也一样：TCP 不丢帧，探测得再勤也只多测出几个延迟样本，
     /// 反倒让一条丢包的 TCP 更容易被判为断开（一个探测卡在重传里，后面的全跟着超时）。所以走 TCP 的骨干每 5 秒测一次。
@@ -1173,7 +1173,7 @@ pub(crate) struct Standing {
     pub(crate) failing: bool,
 }
 
-/// 决定挂靠哪几个 relay（白皮书 §7.2）。
+/// 决定挂靠哪几个 relay。
 ///
 /// - 管理员固定了的话就是固定的那几个。
 /// - 否则保留现在挂靠的，不足 [`ATTACH_COUNT`] 个时补上延迟最低的；延迟还不知道的按 netmap 里的顺序排在后面，

@@ -1,4 +1,4 @@
--- 节点更新（白皮书 §10.5）要记在节点上的东西，和节点上报的主机名。
+-- 节点更新要记在节点上的东西，和节点上报的主机名。
 
 ALTER TABLE nodes ADD COLUMN hostname TEXT NOT NULL DEFAULT '';
 -- 节点自己报的能不能自己更新（JSON）。空值表示它没有报过：版本太旧，不懂更新。

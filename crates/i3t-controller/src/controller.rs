@@ -155,7 +155,7 @@ pub(crate) struct Inner {
     pub(crate) no_udp: BTreeMap<NodeId, no_udp::NoUdp>,
     /// 有节点报的 relay 结果变了、要重新看谁用不了 UDP 的网络。
     pub(crate) no_udp_dirty: BTreeSet<NetworkId>,
-    /// 最近一次上报说自己没有装虚拟网卡的节点（白皮书 §9.7），别的节点的 netmap 里列出来（`Netmap::no_vnet`）。
+    /// 最近一次上报说自己没有装虚拟网卡的节点，别的节点的 netmap 里列出来（`Netmap::no_vnet`）。
     /// 不存进存储：controller 重启之后、节点报上来之前当作都有，最坏只是那一会儿发给它的包收不到。离线时照旧记着最后的样子。
     pub(crate) no_vnet: BTreeSet<NodeId>,
     /// 等着延后重算的节点。
@@ -173,7 +173,7 @@ pub(crate) struct Inner {
     pub(crate) counters: metrics::Counters,
     /// 给界面画图的时间序列：这一段里攒着、还没写进存储的数。
     pub(crate) stats: stats::Collector,
-    /// controller 对外地址（`--public-addr`）里的主机是哪个 IP：节点走回环连过来时，别的机器要用它找到这个节点（白皮书 §7.2）。
+    /// controller 对外地址（`--public-addr`）里的主机是哪个 IP：节点走回环连过来时，别的机器要用它找到这个节点。
     /// 主机是域名、还没有解析出来时是 `None`。
     pub(crate) public_host: Option<IpAddr>,
     next_conn: u64,

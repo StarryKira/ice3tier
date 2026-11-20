@@ -1,4 +1,4 @@
-//! 主动测试（白皮书 §7.6）在路径层的部分：测试的时间窗、探测包列、把到一个对端的路暂时固定住，以及它们给出的结果。
+//! 主动测试在路径层的部分：测试的时间窗、探测包列、把到一个对端的路暂时固定住，以及它们给出的结果。
 //!
 //! 这里只有状态和算法，收发都在控制任务里（[`crate::control`]）。几条规矩：
 //!
@@ -325,7 +325,7 @@ impl TrainReport {
 }
 
 impl LatencySummary {
-    /// 按白皮书 §7.4 的公式用这次测到的值算出来的代价，毫秒。`relays` 是路径上的 relay 数。没有回答时是 `None`。
+    /// 按代价公式（`crate::cost`）用这次测到的值算出来的代价，毫秒。`relays` 是路径上的 relay 数。没有回答时是 `None`。
     #[must_use]
     pub fn cost_ms(&self, relays: usize) -> Option<f64> {
         let rtt_ms = f64::from(self.avg_us?) / 1000.0;

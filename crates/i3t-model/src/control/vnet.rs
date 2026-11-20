@@ -1,4 +1,4 @@
-//! 虚拟网卡（白皮书 §9.7）在一个节点上的状况：节点在上报里带着，controller 原样放进管理接口的节点详情，本机的状态接口也是它。
+//! 虚拟网卡在一个节点上的状况：节点在上报里带着，controller 原样放进管理接口的节点详情，本机的状态接口也是它。
 //!
 //! 默认打开，所以没有装上时也报，用代码说清楚为什么（[`VnetCause`]），界面按自己的语言写。
 
@@ -93,7 +93,7 @@ pub enum VnetCause {
     Unknown,
 }
 
-/// 程序加的两条防火墙规则（白皮书 §9.7，做法同 Tailscale）。本机一个开关（`[network] firewall`）关掉之后一条也不碰。
+/// 程序加的两条防火墙规则（做法同 Tailscale）。本机一个开关（`[network] firewall`）关掉之后一条也不碰。
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Firewall {
     /// 从虚拟网卡进来的放行：插在系统 INPUT 链的最前面（iptables），默认拒绝入站的防火墙因此不挡别的节点。

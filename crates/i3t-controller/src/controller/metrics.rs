@@ -1,4 +1,4 @@
-//! controller 的指标，Prometheus 的文本格式（白皮书 §13）。
+//! controller 的指标，Prometheus 的文本格式。
 //!
 //! 只有合计的数，没有按节点分的标签：这个接口不要管理令牌（见 `crate::admin`），所以不能从它看出网络里有谁。
 

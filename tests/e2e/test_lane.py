@@ -459,7 +459,7 @@ def carried(holder: Node, peer: Node) -> float:
 
 
 def proxy_option(lab: Lab, work: Path, t: Checks) -> None:
-    """由 controller 管理：ice3proxy 是代理的选项（白皮书 §9.7 第 9 条）。选了的代理不管路上有没有 UDP，TCP 流都走 ice3proxy；
+    """由 controller 管理：ice3proxy 是代理的选项。选了的代理不管路上有没有 UDP，TCP 流都走 ice3proxy；
     同一对节点之间没选的代理和端口转发走共用的连接；没有哪个代理选它的一对什么 lane 都没有，路上没有 UDP 也一样。关掉选项，lane 跟着关掉。"""
     m = Managed(lab, work)
     relay, ctl = m.relay, m.controller

@@ -1,4 +1,4 @@
-//! 主动测试（白皮书 §7.6）在节点协议里的样子：controller 给两端的指令，和两端各自的上报。
+//! 主动测试在节点协议里的样子：controller 给两端的指令，和两端各自的上报。
 //!
 //! ```text
 //! controller → 两端   Test { 编号, 对端, 发起方还是接受方, 测试项, 指定的路径, 时间窗 }
@@ -342,7 +342,7 @@ pub struct PathMeasure {
     pub failure: Option<TestCode>,
     #[serde(default)]
     pub latency: Option<Latency>,
-    /// 按白皮书 §7.4 的公式、用这次量到的延迟、抖动和丢包算的代价，微秒。
+    /// 按代价公式（`i3t_path::cost`）、用这次量到的延迟、抖动和丢包算的代价，微秒。
     #[serde(default)]
     pub cost_us: Option<u64>,
     /// 各段的测量值，按经过的顺序。

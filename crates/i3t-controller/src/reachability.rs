@@ -1,4 +1,4 @@
-//! 启用 relay 时从 controller 这边试连它的地址（白皮书 §10.4；地址是 controller 找出来的，见 `crate::node_addresses`）。
+//! 启用 relay 时从 controller 这边试连它的地址（地址是 controller 找出来的，见 `crate::node_addresses`）。
 //!
 //! 只是参考，不挡着启用，也不说明 relay 坏了：谁连得上它，它就是谁的 relay。controller 和别的节点不在同一个网络位置上，
 //! 它连得上不等于别人连得上，它连不上也不等于别人连不上（比如 relay 只在某个局域网里连得上，controller 不在那里）。

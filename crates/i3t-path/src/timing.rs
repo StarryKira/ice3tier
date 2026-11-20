@@ -36,7 +36,7 @@ pub(crate) const PROBE_TIMEOUT_MAX: Duration = Duration::from_millis(1500);
 /// 控制任务多久把所有的定时器过一遍。各种超时的精度就是这么多。
 pub(crate) const TICK: Duration = Duration::from_millis(50);
 
-/// 在用的直连地址、挂靠的 relay 多久探测一次（白皮书 §7.3）。
+/// 在用的直连地址、挂靠的 relay 多久探测一次。
 pub(crate) const PROBE_INTERVAL: Duration = Duration::from_secs(5);
 /// 探测连续几次没有回答就判为不可用。
 pub(crate) const MAX_TIMEOUTS: u8 = 3;
@@ -52,7 +52,7 @@ pub(crate) const PEER_ACTIVE: Duration = Duration::from_secs(45);
 /// 没有路或者路可疑时留着的最后几个包，最多放这么久。再旧的重放出去只会让对面算出离谱的延迟。
 pub(crate) const STASH_MAX_AGE: Duration = Duration::from_secs(20);
 
-/// 打洞失败之后隔多久再试（白皮书 §5.3）。
+/// 打洞失败之后隔多久再试。
 pub(crate) const PUNCH_BACKOFF: [Duration; 8] = [
     Duration::from_secs(1),
     Duration::from_secs(1),
@@ -95,12 +95,12 @@ pub(crate) const UDP_RETRY: Duration = Duration::from_secs(30);
 /// 连不上的 relay 隔多久重试：从 1 秒起每次加倍，到这个数为止。
 /// 试一次只是一个 TCP 连接加几个 UDP 包，而一个 relay 都连不上的节点和别人是断开的，所以不让它等太久。
 pub(crate) const RELAY_RETRY_MAX: Duration = Duration::from_secs(10);
-/// 没有挂靠的 relay 多久测一次延迟（白皮书 §7.3）。
+/// 没有挂靠的 relay 多久测一次延迟。
 pub(crate) const RELAY_SURVEY: Duration = Duration::from_secs(60);
-/// 测量结果的有效期，过期作废（白皮书 §7.3）。
+/// 测量结果的有效期，过期作废。
 pub(crate) const ESTIMATE_TTL: Duration = Duration::from_secs(120);
 
-/// relay 和 relay 之间多久探测一次（白皮书 §7.3）。只管 UDP 上的会话，骨干走 TCP 时照 [`PROBE_INTERVAL`]（见 `crate::relays`）。
+/// relay 和 relay 之间多久探测一次。只管 UDP 上的会话，骨干走 TCP 时照 [`PROBE_INTERVAL`]（见 `crate::relays`）。
 pub(crate) const BACKBONE_PROBE_INTERVAL: Duration = Duration::from_secs(2);
 /// 骨干上：到对方的 UDP 会话通着、对方却这么久都没有经 UDP 在本节点上建会话，就当它连不上本节点，这一段改走本节点拨出去的 TCP。
 /// 对方的 netmap 晚到几秒、它的握手重试几次都在这之内；比它短的话，对方重启的那一阵会被误判。
@@ -124,10 +124,10 @@ pub(crate) const KNOCK_GAP: Duration = Duration::from_secs(5);
 /// 测试用的开关：环境变量 `I3T_TEST_BACKBONE_UDP_RETRY`（秒）改骨干走 TCP 时在后台试 UDP 的间隔（[`backbone_udp_retry`]），
 /// 集成测试里不用一等就是半分钟。
 const BACKBONE_RETRY_TEST_SWITCH: &str = "I3T_TEST_BACKBONE_UDP_RETRY";
-/// 给正在评估的候选路径发探测包列：多久一组，一组几个（白皮书 §7.3）。
+/// 给正在评估的候选路径发探测包列：多久一组，一组几个。
 pub(crate) const TRAIN_INTERVAL: Duration = Duration::from_secs(30);
 pub(crate) const TRAIN_PROBES: u8 = 10;
-/// 延迟优先模式多久比较一次候选路径的代价（白皮书 §7.5 的评估窗口）。
+/// 延迟优先模式多久比较一次候选路径的代价（评估窗口）。
 pub(crate) const EVAL_WINDOW: Duration = Duration::from_secs(5);
 /// 新的路要连续几个评估窗口都更优才换过去。
 pub(crate) const SWITCH_WINDOWS: u8 = 3;
@@ -139,7 +139,7 @@ pub(crate) const MAX_DWELL: Duration = Duration::from_secs(480);
 pub(crate) const SETTLE: Duration = MIN_DWELL;
 /// relay 多久把骨干矩阵发给它的会话一次。状态变了的时候不等这个间隔。
 pub(crate) const ROW_INTERVAL: Duration = Duration::from_secs(5);
-/// 延迟优先模式下，入口 relay 只在离本节点最近的这么多个里选（白皮书 §7.1），为的是限制探测量。
+/// 延迟优先模式下，入口 relay 只在离本节点最近的这么多个里选，为的是限制探测量。
 pub(crate) const ENTRY_RELAYS: usize = 3;
 
 /// 骨干走着 TCP 时多久在后台试一次 UDP：从 [`UDP_RETRY`] 起，回到 UDP 没有回成时加倍（见 `crate::relays`）。

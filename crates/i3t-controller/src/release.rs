@@ -1,4 +1,4 @@
-//! 发布源：controller 从哪里取发布清单和节点程序。见白皮书 §10.5 和 `docs/internal/releasing.md`。
+//! 发布源：controller 从哪里取发布清单和节点程序。
 //!
 //! 发布源是一个地址前缀，下面的布局和 GitHub Release 的下载地址一样：
 //!
@@ -241,7 +241,7 @@ mod tests {
         Artifact { file: file.to_owned(), size: u64::try_from(content.len()).unwrap(), sha256: Sha256::from_bytes(hash) }
     }
 
-    /// 一个照着 `docs/internal/releasing.md` 第 6 节摆的发布目录。
+    /// 一个照着模块开头的布局摆的发布目录。
     fn mirror(version: &Version, files: &[(&str, &[u8])]) -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         let release = root.path().join(version.release_dir());

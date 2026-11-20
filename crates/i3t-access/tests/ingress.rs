@@ -466,7 +466,7 @@ async fn a_port_forward_turns_each_connection_into_a_flow_for_its_id() {
     .expect("连接结束之后计数应该归零");
 }
 
-/// 和对端之间备着 ice3proxy 时，只有选了它的代理的流走 lane（白皮书 §9.7 第 9 条）：端口转发、本机的组网入口、
+/// 和对端之间备着 ice3proxy 时，只有选了它的代理的流走 lane：端口转发、本机的组网入口、
 /// 没有选它的代理都走共用的连接。
 #[tokio::test]
 async fn on_a_pair_with_lanes_only_a_proxy_that_chose_ice3proxy_takes_one() {

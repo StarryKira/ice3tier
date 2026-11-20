@@ -14,7 +14,7 @@ pub struct ChunkRequest<'a> {
     pub len: u32,
 }
 
-/// 节点取包的来路。节点不连发布源，包由 controller 缓存，节点经控制链路一段一段地取（白皮书 §10.5）；
+/// 节点取包的来路。节点不连发布源，包由 controller 缓存，节点经控制链路一段一段地取；
 /// 这个 trait 就是那条链路在更新这一层眼里的样子。
 pub trait PackageSource: Send + Sync {
     /// 取 `[offset, offset + len)` 这一段。

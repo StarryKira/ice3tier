@@ -365,7 +365,7 @@ impl Paths {
         self.status().attached.clone()
     }
 
-    /// 本节点试过的各个 relay 连没连上、它们看到的本节点 IP，报给 controller 用（白皮书 §7.2）。
+    /// 本节点试过的各个 relay 连没连上、它们看到的本节点 IP，报给 controller 用。
     ///
     /// 试的是 netmap 里的每个 relay：挂靠的、经过的用会话（UDP 和 TCP 一起），别的每分钟用 UDP 问一次延迟，问不到的每十分钟
     /// 用会话试一次（同一时刻只试一个）。有会话的排在前面，最多 [`i3t_model::control::MAX_RELAY_TRIES`] 个。
@@ -380,7 +380,7 @@ impl Paths {
         self.shared.changes.subscribe()
     }
 
-    /// 到每个对端的选路情况：考虑过的候选路径和各自测出来的代价、现在走的是哪一条、为什么（白皮书 §7.7）。
+    /// 到每个对端的选路情况：考虑过的候选路径和各自测出来的代价、现在走的是哪一条、为什么。
     /// 没有连接的对端也在里面，候选是按手上现有的测量值算的。
     #[must_use]
     pub fn path_reports(&self) -> Vec<PathReport> {
@@ -395,7 +395,7 @@ impl Paths {
 
     /// 到 `peer` 有没有经 relay 的路：现在就走着，或者最近一次算的候选里有（本节点有会话的 relay 接得上对端挂靠的 relay）。
     ///
-    /// 连接层靠它判断一条空闲的连接关掉之后还建不建得回来（白皮书 §5.4）：直连要靠信令重新打洞，经 relay 的不用。
+    /// 连接层靠它判断一条空闲的连接关掉之后还建不建得回来：直连要靠信令重新打洞，经 relay 的不用。
     #[must_use]
     pub fn has_relay_path(&self, peer: NodeId) -> bool {
         let relayed = |route: &Route| matches!(route, Route::Relay { .. });
@@ -412,7 +412,7 @@ impl Paths {
         self.status().backbone.clone()
     }
 
-    /// 打开一个主动测试的时间窗（白皮书 §7.6）：在窗内回答对端带着这个编号的测试探测，和指定的 relay 保持会话，
+    /// 打开一个主动测试的时间窗：在窗内回答对端带着这个编号的测试探测，和指定的 relay 保持会话，
     /// 对端算作活跃的。丢弃返回的值就关掉它；不丢也会在时间窗到了时自己关掉。
     #[must_use]
     pub fn open_test(&self, spec: TestSpec) -> TestGuard {
@@ -575,7 +575,7 @@ impl Paths {
         }
     }
 
-    /// 一个数据报归谁（docs/internal/architecture.md §5.1 的那张表）。
+    /// 一个数据报归谁。
     fn classify<'t>(&self, table: &'t Table, from: SocketAddr, datagram: &[u8]) -> Verdict<'t> {
         let clock = &self.shared.clock;
         match Datagram::parse(datagram) {

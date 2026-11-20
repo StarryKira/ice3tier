@@ -1,4 +1,4 @@
-//! 测量流：主动测试（白皮书 §7.6）量吞吐用的流。格式见 [`i3t_proto::flow::OpenMeasure`]。
+//! 测量流：主动测试量吞吐用的流。格式见 [`i3t_proto::flow::OpenMeasure`]。
 //!
 //! - 发起方用 [`measure`] 开一条测量流，量一个方向：[`MeasureMode::Sink`] 是自己发、对端收（上行），
 //!   [`MeasureMode::Source`] 是对端发、自己收（下行）。要用共用的连接开（不经 ice3proxy）：量的是那条连接现在走的路。

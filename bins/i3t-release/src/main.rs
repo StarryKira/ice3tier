@@ -1,6 +1,6 @@
 //! `i3t-release`：发布时用的工具。生成发布签名密钥，为一个发布目录生成清单并签名，核对一个发布目录。
 //!
-//! 发布目录是平铺的，里面的东西原样上传到 GitHub Release，镜像也照这个样子放（见 `docs/internal/releasing.md`）：
+//! 发布目录是平铺的，里面的东西原样上传到 GitHub Release，镜像也照这个样子放：
 //!
 //! ```text
 //! i3t-linux-x86_64            各个平台的节点程序，名字是 i3t-<平台>，Windows 上加 .exe

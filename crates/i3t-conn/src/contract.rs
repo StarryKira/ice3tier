@@ -336,7 +336,7 @@ pub trait DatagramSender: Clone + Send + Sync + 'static {
     fn send_reliable(&self, peer: NodeId, datagram: Bytes) -> impl Future<Output = Result<(), DatagramSendError>> + Send;
 }
 
-/// 一对节点之间的网络包（虚拟网卡上的 IP 包，白皮书 §9.7）。
+/// 一对节点之间的网络包（虚拟网卡上的 IP 包）。
 ///
 /// 和 [`Datagrams`] 一样收和发分开。只走共用的连接：ice3proxy 只运流，不运包。
 pub trait Packets: Send + Sync + 'static {

@@ -13,7 +13,7 @@ const BURST: Duration = Duration::from_millis(100);
 
 /// 负载按多长的时间片统计。
 const LOAD_SLICE: Duration = Duration::from_secs(1);
-/// 负载的平滑系数：每个时间片新的测量值占这么多。负载惩罚要带平滑（白皮书 §7.5），不然节点会跟着瞬时的起伏来回换路。
+/// 负载的平滑系数：每个时间片新的测量值占这么多。负载惩罚要带平滑，不然节点会跟着瞬时的起伏来回换路。
 const LOAD_SMOOTHING: f64 = 0.3;
 /// 平滑之后的占用到了上限的这个比例算过载，回落到 [`OVERLOAD_CLEAR`] 以下才算恢复。两个门槛之间不变，免得反复通知。
 ///

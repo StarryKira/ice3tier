@@ -365,7 +365,7 @@ async fn both_sides_dialling_at_the_same_time_both_get_their_streams() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_node_whose_udp_is_blocked_reaches_a_peer_that_is_itself_a_relay_over_tcp() {
-    // 白皮书 §5.5 的情形 3：R 有公网端口并启用为 relay，A 的 UDP 用不了。A 用一条 TCP 连到 R，R 本身就是目的地。
+    // R 有公网端口并启用为 relay，A 的 UDP 用不了。A 用一条 TCP 连到 R，R 本身就是目的地。
     let (a, r) = (Node::start(1), Node::start(9));
     a.block(&[&r]);
     r.apply(&View { peers: &[Peer { endpoints: false, ..Peer::direct(&a) }], relay_clients: Some(&[&a]), ..View::default() });

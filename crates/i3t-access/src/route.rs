@@ -70,14 +70,14 @@ pub(crate) fn decide(netmap: &Netmap, exit: Option<NodeId>, host: &Host, port: u
     }
 }
 
-/// 一条流的服务等级（白皮书 §8.4），优先级从高到低：代理或端口转发自己的设置、出口的默认值（只有经出口出去的流才看它）、
+/// 一条流的服务等级，优先级从高到低：代理或端口转发自己的设置、出口的默认值（只有经出口出去的流才看它）、
 /// 网络的默认值。都没有时是 `auto`。
 pub(crate) fn class_for(netmap: &Netmap, configured: Option<Class>, route: &Route) -> Class {
     let exit = route.target.needs_exit().then(|| netmap.peer(route.peer).and_then(|peer| peer.exit).and_then(|exit| exit.class)).flatten();
     configured.or(exit).or(netmap.network.class).unwrap_or_default()
 }
 
-/// 一条流用不用乐观回复（白皮书 §8.1），先看到哪一个设置用哪一个：代理的、出口的（只有经出口出去的流才看它）、
+/// 一条流用不用乐观回复，先看到哪一个设置用哪一个：代理的、出口的（只有经出口出去的流才看它）、
 /// 按目标种类的默认值（[`Route::optimistic`]）。代理排在出口前面：它是为这一个入口定的，出口的设置管的是经它出去的所有代理。
 pub(crate) fn optimistic_for(netmap: &Netmap, configured: Option<bool>, route: &Route) -> bool {
     let exit =

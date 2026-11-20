@@ -20,7 +20,7 @@
 //! - 最初那一版的节点做不到上一条，收到不认识的消息会断开重连。所以 controller 只对 [`Hello::protocol`] 够新的节点
 //!   发后来加的消息（见 [`PROTOCOL_REVISION`]）。
 //!
-//! 节点更新（白皮书 §10.5）在这条连接上的样子：
+//! 节点更新在这条连接上的样子：
 //!
 //! ```text
 //! controller → 节点   Update { 清单与签名, 时机 }
@@ -30,7 +30,7 @@
 //! controller → 节点   UpdateCancel                                       还没换上去的话就不要换了
 //! ```
 //!
-//! 主动测试（白皮书 §7.6）在这条连接上的样子见 [`diag`]。
+//! 主动测试在这条连接上的样子见 [`diag`]。
 
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
@@ -243,7 +243,7 @@ pub enum ToNode {
     TryLater {
         reason: String,
     },
-    /// 问节点手上的 relay 骨干矩阵（白皮书 §7.7），节点用 [`ToController::BackboneAnswer`] 回答。
+    /// 问节点手上的 relay 骨干矩阵，节点用 [`ToController::BackboneAnswer`] 回答。
     /// 只发给 [`Hello::protocol`] 至少是 2 的节点。
     BackboneQuery {
         request: u64,
@@ -299,7 +299,7 @@ pub struct Hello {
     /// 节点说的节点协议是第几版，见 [`PROTOCOL_REVISION`]。最初那一版的节点不报，读成 0。
     #[serde(default)]
     pub protocol: u32,
-    /// 节点能不能自己更新（白皮书 §10.5）。不懂更新的旧版本节点不报，读成 `None`。
+    /// 节点能不能自己更新。不懂更新的旧版本节点不报，读成 `None`。
     #[serde(default)]
     pub self_update: Option<SelfUpdate>,
     /// 节点接不接受吞吐测试（本机配置文件里的开关，默认接受）。只有节点协议至少是 [`TEST_REVISION`] 时才有意义。
@@ -344,7 +344,7 @@ pub struct Declared {
     #[serde(default)]
     pub relay: bool,
     /// 节点上声明的 relay 地址（`i3t set relay-address`）：只有人知道的那一种，机房或者路由器上映射进来的地址。
-    /// 节点启用为 relay 时，它排在 controller 找出来的地址前面（白皮书 §7.2）。旧版本的节点不报。
+    /// 节点启用为 relay 时，它排在 controller 找出来的地址前面。旧版本的节点不报。
     #[serde(default)]
     pub relay_address: Option<SocketAddr>,
 }
@@ -372,8 +372,8 @@ pub struct Report {
     #[serde(default)]
     pub endpoints: Vec<SocketAddr>,
     /// 本机网卡上的地址（回环和链路本地的除外），不管它们在不在网络的地址段里，最多 [`MAX_LOCAL_ADDRESSES`] 个。
-    /// `endpoints` 里分不出哪些是网卡上的，也去掉了地址段里的那些，所以另报：controller 拿它当 relay 的地址（白皮书 §7.2），
-    /// 并且在它落进网络的地址段时提醒（§4.6）。旧版本的节点不报，读成 `None`。是切片不是 `Vec`，同上，为了消息的枚举不至于太大。
+    /// `endpoints` 里分不出哪些是网卡上的，也去掉了地址段里的那些，所以另报：controller 拿它当 relay 的地址，
+    /// 并且在它落进网络的地址段时提醒。旧版本的节点不报，读成 `None`。是切片不是 `Vec`，同上，为了消息的枚举不至于太大。
     #[serde(default)]
     pub local_addresses: Option<Box<[IpAddr]>>,
     /// 映射出来的端口是不是随对端变化。只有问过两个以上的观察点才知道；是的话这台机器所在的网络基本打不了洞。
@@ -397,7 +397,7 @@ pub struct Report {
     /// 之后的上报只带变化的条目。
     #[serde(default)]
     pub routes_full: bool,
-    /// 节点上的更新进行到哪一步（白皮书 §10.5）。每次上报都带着；一有变化节点就马上报一次，不等定时上报。
+    /// 节点上的更新进行到哪一步。每次上报都带着；一有变化节点就马上报一次，不等定时上报。
     /// 不懂更新的旧版本节点不报，读成 `None`。
     #[serde(default)]
     pub update: Option<UpdateStatus>,
@@ -432,19 +432,19 @@ pub struct Report {
     /// 节点正在用的性能档位。旧版本的节点不报。装在 `Box` 里只是为了让消息的枚举不至于太大，JSON 里没有区别。
     #[serde(default)]
     pub performance: Option<Box<PerformanceReport>>,
-    /// 虚拟网卡的状况（白皮书 §9.7）。没有装上时也报，说清楚为什么；旧版本的节点不报。装在 `Box` 里，同上。
+    /// 虚拟网卡的状况。没有装上时也报，说清楚为什么；旧版本的节点不报。装在 `Box` 里，同上。
     /// 比它更旧的节点报的是透明访问（`intercept`），透明访问去掉了，没有人再看它。
     #[serde(default)]
     pub vnet: Option<Box<VnetReport>>,
-    /// 节点试过的 relay 连没连上（白皮书 §7.2：谁连得上，它就是谁的 relay），最多 [`MAX_RELAY_TRIES`] 个，有会话的排在前面。
+    /// 节点试过的 relay 连没连上（谁连得上，它就是谁的 relay），最多 [`MAX_RELAY_TRIES`] 个，有会话的排在前面。
     /// 每次上报都是完整的一份。旧版本的节点不报。
     #[serde(default)]
     pub relays: Vec<RelayTry>,
-    /// 到各个对端的共用连接上现在开着几条流、两个方向各走了多少字节（白皮书 §7.7），只有现在有连接的对端，
+    /// 到各个对端的共用连接上现在开着几条流、两个方向各走了多少字节，只有现在有连接的对端，
     /// 最多 [`MAX_PEER_USE`] 个，流量大的在前。每次上报都是完整的一份。旧版本的节点不报。
     #[serde(default)]
     pub peer_use: Vec<PeerUse>,
-    /// 本节点是 relay 时：上一个统计时段里它替哪些节点对转发了多少（白皮书 §7.7 的"谁在用这个 relay"）。不是 relay、旧版本的节点不报。
+    /// 本节点是 relay 时：上一个统计时段里它替哪些节点对转发了多少（"谁在用这个 relay"）。不是 relay、旧版本的节点不报。
     #[serde(default)]
     pub relay_use: Option<RelayUse>,
     /// 上一次上报之后的换路，最多 [`MAX_REPORTED_SWITCHES`] 条，早的在前。报过就不再报。旧版本的节点不报。
@@ -469,7 +469,7 @@ pub struct PeerUse {
 /// [`RelayUse::pairs`] 最多报几对。
 pub const MAX_RELAY_USERS: usize = 16;
 
-/// relay 在一个统计时段里替各个节点对转发了多少（白皮书 §7.7）。
+/// relay 在一个统计时段里替各个节点对转发了多少。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelayUse {
     /// 统计时段多长（秒）。
@@ -493,7 +493,7 @@ pub struct RelayPairUse {
 /// [`Report::switches`] 最多报几条。
 pub const MAX_REPORTED_SWITCHES: usize = 64;
 
-/// 一次换路（白皮书 §7.5、§13 的决策日志）：到这个对端的路从什么换成了什么、为什么。
+/// 一次换路（决策日志）：到这个对端的路从什么换成了什么、为什么。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteSwitch {
     pub peer: NodeId,
@@ -548,7 +548,7 @@ impl TryOutcome {
     }
 }
 
-/// 节点正在用的性能档位（白皮书 §12.1）。
+/// 节点正在用的性能档位。
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PerformanceReport {
     /// 现在生效的档位：管理员选了的话是它，否则是本机配置文件里的。比本程序新的节点报了不认识的档位时读成 `balanced`。
@@ -776,7 +776,7 @@ pub struct ForwardReport {
     pub target_failure: Option<TargetFailureReport>,
 }
 
-/// 端口转发的流最近一次在目标那里失败（白皮书 §9.6 的"目标连不上"）。
+/// 端口转发的流最近一次在目标那里失败（"目标连不上"）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetFailureReport {
     pub cause: TargetCause,
@@ -932,7 +932,7 @@ pub struct RouteAnswer {
     #[serde(default)]
     pub detail: Option<PathDetail>,
     /// 到这个对端的连接自己量的往返时间（毫秒，QUIC 的平滑 RTT），这对节点之间没有连接时没有。`rtt_ms` 是路由层按各段的探测
-    /// 推算的，两个放在一起看：差得多说明哪一段的测量失真（白皮书 §13）。旧版本的节点不报。
+    /// 推算的，两个放在一起看：差得多说明哪一段的测量失真。旧版本的节点不报。
     #[serde(default)]
     pub connection_rtt_ms: Option<u32>,
 }
@@ -965,7 +965,7 @@ pub struct RouteAlternative {
     pub rtt_ms: Option<u32>,
 }
 
-/// 到一个对端的直连现在在哪一步（白皮书 §7.7）：取自路径层为直连的尝试和退避记着的状态，不为它另外探测。
+/// 到一个对端的直连现在在哪一步：取自路径层为直连的尝试和退避记着的状态，不为它另外探测。
 /// 直连在一对节点第一次用到时才去试，所以两个从没说过话的节点之间是"还没有试过"，不是"失败了"。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectStatus {
@@ -1017,7 +1017,7 @@ pub enum DirectCause {
     Unknown,
 }
 
-/// 直连是怎么建立起来的（白皮书 §7.7）。
+/// 直连是怎么建立起来的。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DirectKind {
@@ -1073,7 +1073,7 @@ pub struct PathDetail {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PathCandidate {
     pub route: Route,
-    /// 按白皮书 §7.4 算出来的代价，微秒。默认模式不拿它做选择，但照样算出来给人看。
+    /// 按代价公式（`i3t_path::cost`）算出来的代价，微秒。默认模式不拿它做选择，但照样算出来给人看。
     pub cost_us: u64,
     /// 各段的测量值，按经过的顺序。
     #[serde(default)]

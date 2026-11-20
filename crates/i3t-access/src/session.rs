@@ -479,7 +479,7 @@ async fn after_reply<C: Connector + Datagrams>(
 /// 处理端口转发监听上的一条连接：它整个变成到目标节点的一条流。
 ///
 /// 端口转发没有地方告诉客户端错误码，所以不等对端的 REPLY：失败一律表现为连接被重置。
-/// 它的流只走共用的连接，和目标节点之间备着 ice3proxy 也不用（白皮书 §9.7 第 9 条：ice3proxy 只归选了它的代理）。
+/// 它的流只走共用的连接，和目标节点之间备着 ice3proxy 也不用（ice3proxy 只归选了它的代理）。
 pub(crate) async fn forward<C: Connector + Datagrams>(
     shared: &Shared<C>,
     netmap: &Netmap,
@@ -524,7 +524,7 @@ pub(crate) async fn forward<C: Connector + Datagrams>(
     }
 }
 
-/// 监听在本节点虚拟 IP 上、目标也在本节点的端口转发（白皮书 §9.7 的"10.77.0.1 上回环里的服务转发到 10.77.0.1:8080"），
+/// 监听在本节点虚拟 IP 上、目标也在本节点的端口转发（比如"10.77.0.1 上回环里的服务转发到 10.77.0.1:8080"），
 /// 别的节点经虚拟网卡连进来：本节点自己去连目标，两条 TCP 接起来。和别的节点经流来访问时出口模块做的一样：
 /// 只连下发给本节点、由本节点自己监听的那一条转发指向的地址，覆盖网的地址不连，要求的话先发 PROXY protocol 的头。
 ///
@@ -601,7 +601,7 @@ pub(crate) fn origin_address(from: SocketAddr) -> Option<SocketAddr> {
     (!ip.is_loopback()).then(|| SocketAddr::new(ip, from.port()))
 }
 
-/// 每条流结束时的一行摘要（白皮书 §13）。不记目标地址，只记它是哪一类；记这对节点的连接开始和结束时走的路（relay 写名字，
+/// 每条流结束时的一行摘要。不记目标地址，只记它是哪一类；记这对节点的连接开始和结束时走的路（relay 写名字，
 /// 从 `netmap` 里找）、中间换没换过。不采样。
 pub(crate) fn log_summary(peer: NodeId, request: &Open, summary: &Summary, route: &RouteSpan, netmap: &Netmap) {
     tracing::info!(

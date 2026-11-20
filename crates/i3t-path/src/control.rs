@@ -4,7 +4,7 @@
 //! netmap 的更新，并且每隔一小段时间把各个状态机的定时器推进一步。每处理完一批，就重新看一遍到每个对端该走哪条路，
 //! 有变化才去改收发路径上的那张表。
 //!
-//! 选路有两种模式（白皮书 §7.1），按 netmap 里本节点的设置（没有就用网络的默认值）：
+//! 选路有两种模式，按 netmap 里本节点的设置（没有就用网络的默认值）：
 //!
 //! - **默认模式**：直连可用就走直连；否则只经一个 relay，按 [`relay_candidates`](route::relay_candidates) 的顺序取第一个能用的；一个都用不了时
 //!   经一串 relay（`View::chain`）。每一轮都重新看，所以直连一验证通过、一个 relay 一断开，路马上跟着变。
@@ -805,13 +805,13 @@ impl Control {
             self.status_refreshed = None;
         }
 
-        // 两边的公网地址相同，说明在同一个 NAT 后面：对端的私有地址多半就在本节点的局域网里（白皮书 §5.3）。
+        // 两边的公网地址相同，说明在同一个 NAT 后面：对端的私有地址多半就在本节点的局域网里。
         let public: Vec<IpAddr> = observed.iter().chain(&mapped).map(SocketAddr::ip).filter(|ip| !ifaddr::is_private(*ip)).collect();
         for peer in self.peers.values_mut() {
             peer.direct.set_same_nat(shares_public_address(&public, &peer.endpoints));
         }
 
-        // 不建立直连的节点不向别人暴露自己的地址（白皮书 §7.1 的 relay-only）。
+        // 不建立直连的节点不向别人暴露自己的地址（relay-only）。
         let mut endpoints: Vec<SocketAddr> =
             if self.allow_direct { self.local_candidates.iter().chain(&observed).chain(&mapped).copied().collect() } else { Vec::new() };
         endpoints.sort_unstable();

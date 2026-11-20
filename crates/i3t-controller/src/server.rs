@@ -16,7 +16,7 @@ use crate::{addr_server, admin, admin_server, node_server};
 /// 后台工作出错之后多久再试。
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
-/// 多久查一次发布源（白皮书 §10.5）。
+/// 多久查一次发布源。
 const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// [`Server::bind`] 要的东西。
@@ -174,8 +174,8 @@ async fn maintain(controller: Arc<Controller>, mut shutdown: watch::Receiver<boo
     }
 }
 
-/// 后台任务：controller 对外地址里的主机是域名时，定期解析它，告诉 controller 它是哪个 IP（白皮书 §7.2：
-/// 走回环连过来的节点，别的机器要靠这个 IP 找到它）。回环地址不算：controller 自己的机器上的 `/etc/hosts` 常把本机的名字指向回环。
+/// 后台任务：controller 对外地址里的主机是域名时，定期解析它，告诉 controller 它是哪个 IP（走回环连过来的节点，
+/// 别的机器要靠这个 IP 找到它）。回环地址不算：controller 自己的机器上的 `/etc/hosts` 常把本机的名字指向回环。
 async fn resolve_public_host(controller: Arc<Controller>) {
     let Some(host) = controller.public_host_name() else { return };
     let address = controller.public_addr().to_owned();

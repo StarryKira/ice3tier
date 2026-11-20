@@ -1,4 +1,4 @@
-//! 给界面画图的时间序列（白皮书 §13）：每个点一行。
+//! 给界面画图的时间序列：每个点一行。
 
 use i3t_model::admin::stats::Series;
 use i3t_model::admin::{NetworkId, Timestamp};

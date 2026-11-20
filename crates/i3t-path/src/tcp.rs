@@ -149,7 +149,7 @@ struct Leg {
 /// 别的放下。每个地址最多等 4 秒。所以排在前面的地址连不上（不回答）时，后面的好地址不用等它超时。
 /// 握手里通告压低的 MSS（[`tcp_mss`]）。
 ///
-/// relay 的几个地址（controller 找出来的，白皮书 §7.2）不一定都连得上：到 relay 的 TCP 中转和 ice3proxy（`i3t-lane`）
+/// relay 的几个地址（controller 找出来的）不一定都连得上：到 relay 的 TCP 中转和 ice3proxy（`i3t-lane`）
 /// 都这样连。调用方按"上一次连上的排最前"排好 `addrs`。
 ///
 /// # Errors

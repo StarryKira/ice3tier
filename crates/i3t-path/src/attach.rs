@@ -82,7 +82,7 @@ pub(crate) struct Session {
     train: Train,
     /// 这段链路是不是在正在评估的候选路径上：是的话定期发探测包列。
     training: bool,
-    /// 保活的间隔。挂靠的 relay 是 5 秒，relay 和 relay 之间是 2 秒（白皮书 §7.3）。
+    /// 保活的间隔。挂靠的 relay 是 5 秒，relay 和 relay 之间是 2 秒。
     interval: Duration,
     /// 上一次因为一个核对不了的"没有会话"提前发 PING 的时刻。
     checked: Option<Instant>,
@@ -580,7 +580,7 @@ mod tests {
     }
 
     /// 一条 TCP 的中转腿：每个探测都会被回答（TCP 不丢包），但 `stalls` 为真时每三个里有一个要等一次重传，迟到 900ms。
-    /// 跑一分钟，返回这段链路按白皮书 §7.4 算出来的代价。
+    /// 跑一分钟，返回这段链路按代价公式（`crate::cost`）算出来的代价。
     fn leg_cost(stalls: bool) -> f64 {
         let (mut session, up) = established();
         session.set_training(true);

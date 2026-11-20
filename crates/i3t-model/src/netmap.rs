@@ -29,7 +29,7 @@ pub struct Netmap {
     /// 只有本节点启用为 relay 时才有：网络里全部节点的编号和公钥，用来认证中转会话。
     #[serde(default)]
     pub relay_clients: Vec<RelayClient>,
-    /// `peers` 里说自己没有装虚拟网卡的那些（白皮书 §9.7：关着、没有权限、地址段重叠，或者是不懂虚拟网卡的旧版本），按编号排。
+    /// `peers` 里说自己没有装虚拟网卡的那些（关着、没有权限、地址段重叠，或者是不懂虚拟网卡的旧版本），按编号排。
     /// 本机的程序发给它们的包当场回"主机不可达"，不白等。controller 还不知道的（这次启动以来没有报过、旧的 controller）不在里面：
     /// 包照发，对端没有网卡就是收不到。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -174,7 +174,7 @@ pub struct LocalNode {
     /// 也读成没有值。
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "tolerant_profile")]
     pub profile: Option<Profile>,
-    /// 除了自己按延迟挑的之外还要挂靠的 relay（白皮书 §7.2）：有的对端连不上本节点挑的那几个、本节点也连不上它们挂靠的，
+    /// 除了自己按延迟挑的之外还要挂靠的 relay：有的对端连不上本节点挑的那几个、本节点也连不上它们挂靠的，
     /// controller 按各节点上报的"连得上哪些 relay"找一个两边都连得上的，让两边都挂上去。最多 [`MAX_SHARED_RELAYS`] 个。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shared_relays: Vec<NodeId>,
@@ -183,7 +183,7 @@ pub struct LocalNode {
 /// [`LocalNode::shared_relays`] 最多几个：加上自己挑的两个，一个节点同时保持的中转会话不超过六个。
 pub const MAX_SHARED_RELAYS: usize = 4;
 
-/// 性能档位（白皮书 §12.1）：一组预设，节点按它定线程数、缓冲和空闲回收的时间。各项的值在节点上定（`i3t-agent`）。
+/// 性能档位：一组预设，节点按它定线程数、缓冲和空闲回收的时间。各项的值在节点上定（`i3t-agent`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Profile {
@@ -362,7 +362,7 @@ pub struct Peer {
     /// 端口转发和别的流照旧走共用的连接。比本程序新的 controller 下发了这里不认识的值时按 `off` 处理。
     #[serde(default, deserialize_with = "tolerant_lane_mode")]
     pub lane: LaneMode,
-    /// 和这个对端之间的连接用哪种拥塞控制（白皮书 §6.3）；没有值时用节点自己的默认（BBR）。一对节点各自的 netmap 里互相看到同一个值，
+    /// 和这个对端之间的连接用哪种拥塞控制；没有值时用节点自己的默认（BBR）。一对节点各自的 netmap 里互相看到同一个值，
     /// 两边各自按它管自己往外发的那个方向。只对之后建立的连接生效。比本程序新的 controller 下发了不认识的值时按没有值处理。
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "tolerant_congestion")]
     pub congestion: Option<Congestion>,
@@ -380,7 +380,7 @@ fn tolerant_congestion<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Res
     Ok(text.and_then(|text| text.parse().ok()))
 }
 
-/// 连接用哪种拥塞控制（白皮书 §6.3）。只有程序里已经有的两种。
+/// 连接用哪种拥塞控制。只有程序里已经有的两种。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Congestion {
@@ -430,8 +430,8 @@ fn tolerant_lane_mode<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Resu
 /// 要两个节点里至少有一个启用了 relay、它的 TCP 端口另一个连得上（见 [`Relay::tcp`]），否则不起作用，按 `off` 走。
 /// 只有要求走 ice3proxy 的流（选了它的代理的 TCP 流）会用它；UDP 应用的数据、端口转发和别的流始终走共用的连接。
 ///
-/// `Default` 是 `Off`：netmap 里没有这一项（旧的 controller）时就是不用。controller 现在只下发 `off` 和 `always`
-/// （白皮书 §9.7 第 9 条）；`udp_fallback` 留在线上格式里，旧的 controller 和静态的 netmap 还会写它，节点照旧认。
+/// `Default` 是 `Off`：netmap 里没有这一项（旧的 controller）时就是不用。controller 现在只下发 `off` 和 `always`；
+/// `udp_fallback` 留在线上格式里，旧的 controller 和静态的 netmap 还会写它，节点照旧认。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LaneMode {
@@ -506,7 +506,7 @@ pub struct Relay {
     pub id: NodeId,
     pub key: PublicKey,
     pub name: String,
-    /// 它的 UDP 地址，按要试的顺序。由 controller 下发时和 `tcp` 是同一组：controller 找出来的地址（白皮书 §7.2），
+    /// 它的 UDP 地址，按要试的顺序。由 controller 下发时和 `tcp` 是同一组：controller 找出来的地址，
     /// 节点并行地试，用回答的那个。不一定每个都连得上：谁连得上它，它就是谁的 relay。
     #[serde(default)]
     pub udp: Vec<SocketAddr>,
@@ -544,11 +544,11 @@ pub struct Proxy {
     /// 这个代理上的流的服务等级；没有值时看出口和网络的默认值。
     #[serde(default)]
     pub class: Option<Class>,
-    /// 乐观回复（白皮书 §8.1）：`true` 时不等对端的应答就告诉客户端连上了，`false` 时一律等。
+    /// 乐观回复：`true` 时不等对端的应答就告诉客户端连上了，`false` 时一律等。
     /// 没有值时看出口的设置，出口也没有设时按目标的种类：互联网目标不等，组网目标（节点的服务、局域网）等。
     #[serde(default)]
     pub optimistic: Option<bool>,
-    /// 这个代理的 TCP 流（CONNECT 和明文 HTTP 的转发）走 ice3proxy（白皮书 §9.7 第 9 条）：和对端之间备着 lane
+    /// 这个代理的 TCP 流（CONNECT 和明文 HTTP 的转发）走 ice3proxy：和对端之间备着 lane
     /// （那个对端的 [`Peer::lane`] 不是 `off`）就一律走它，开不出 lane 时退回共用的连接。controller 给这个代理的节点和出口之间
     /// 下发 `always`，所以经出口的流都走 ice3proxy；去组网里别的节点的流，那一对一般没有 lane，照旧走共用的连接。
     /// UDP 的数据报不走 ice3proxy。旧的 controller 不发，读成 `false`：节点什么都不放到 ice3proxy 上，直到 controller 也更新。

@@ -1,4 +1,4 @@
-//! 给界面看的选路情况（白皮书 §7.7 的路由视图和路径诊断）：到一个对端考虑过哪些候选路径、各自测出来的代价、
+//! 给界面看的选路情况（路由视图和路径诊断）：到一个对端考虑过哪些候选路径、各自测出来的代价、
 //! 现在走的是哪一条、为什么。还有本节点手上的骨干矩阵。
 //!
 //! 这些都是某一时刻的快照，由控制任务定期刷新；[`crate::Paths::path_reports`] 等方法读的就是最近的一份。
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// 直连是怎么建立起来的。
 ///
-/// 白皮书 §7.7 还列了"端口映射"这一种。对端的候选端点在 netmap 里不分来源，本节点看不出某个地址是不是它的路由器上
+/// 设计里还列了"端口映射"这一种。对端的候选端点在 netmap 里不分来源，本节点看不出某个地址是不是它的路由器上
 /// 映射出来的，所以这里归在 [`DirectKind::Reachable`] 里。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -26,8 +26,8 @@ pub enum DirectKind {
     Punched,
 }
 
-/// 到一个对端的直连现在在哪一步（白皮书 §7.7）。从路径层为直连的尝试和退避记着的状态里读出来，不为它另外探测，
-/// 也不改什么时候去试：一对节点第一次用到时试，失败了按退避重试，主动测试立刻试（docs/internal/architecture.md §5.3）。
+/// 到一个对端的直连现在在哪一步。从路径层为直连的尝试和退避记着的状态里读出来，不为它另外探测，
+/// 也不改什么时候去试：一对节点第一次用到时试，失败了按退避重试，主动测试立刻试。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectStatus {
     pub state: DirectState,
@@ -98,7 +98,7 @@ pub struct LegReport {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CandidateReport {
     pub route: Route,
-    /// 按白皮书 §7.4 算出来的代价，毫秒。默认模式不拿它做选择，但照样算出来给人看。
+    /// 按代价公式（`crate::cost`）算出来的代价，毫秒。默认模式不拿它做选择，但照样算出来给人看。
     pub cost_ms: f64,
     /// 各段的测量值，按经过的顺序。
     pub legs: Vec<LegReport>,

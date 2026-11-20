@@ -301,7 +301,7 @@ fn count(value: usize) -> u32 {
 
 /// 到每个对端的路上一次是什么时候、因为什么换的。路由层只在换路的那一刻说一次原因，这里把它记下来。
 ///
-/// 另外攒着还没有报给 controller 的换路（controller 给每对节点留一段历史，白皮书 §7.7），最多
+/// 另外攒着还没有报给 controller 的换路（controller 给每对节点留一段历史），最多
 /// [`MAX_REPORTED_SWITCHES`] 条：controller 连不上的时候满了就丢最早的。
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RouteHistory {

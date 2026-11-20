@@ -1,11 +1,11 @@
-//! 节点的指标，Prometheus 的文本格式（白皮书 §13）。
+//! 节点的指标，Prometheus 的文本格式。
 //!
 //! 各层的计数都是它们自己的原子变量，这里只在被抓的时候读一遍、排成文本，没有后台任务。
 //!
 //! 现在有的：流（入口、出口各有多少在进行，出口一共收到过多少）、字节数、没建成的请求按归因分类、
 //! 出口的配额，按凭据的用量，经各个出口出去的流（发起这一侧看到的），relay 的转发和丢弃、
 //! 到每个对端走的是哪一种路和延迟、ice3proxy（lane）的水位和计数、虚拟网卡的收发和丢包、和 controller 的连接、更新的状态。
-//! 白皮书说的"不做交叉组合"：按凭据和按出口是两组各自独立的数，没有"某个凭据经某个出口"这样的组合。
+//! 不做交叉组合：按凭据和按出口是两组各自独立的数，没有"某个凭据经某个出口"这样的组合。
 
 use i3t_conn::DropReason;
 use i3t_lane::LaneStatus;
@@ -123,7 +123,7 @@ pub(crate) fn render(runtime: &Runtime) -> String {
             );
         }
     }
-    // 预测和实际（白皮书 §13）：路由层按各段的探测推算的延迟，和连接自己量的往返时间。只有到对端有连接时才有。
+    // 预测和实际：路由层按各段的探测推算的延迟，和连接自己量的往返时间。只有到对端有连接时才有。
     for entry in &routes {
         let Some(actual) = runtime.endpoint.connection_rtt(entry.peer) else { continue };
         let peer = name_of(entry.peer);

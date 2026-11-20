@@ -1,4 +1,4 @@
-//! 虚拟网卡（白皮书 §9.7）在节点里的接法：默认打开，按本机配置装上，跟着 netmap 走，节点停下时拆掉。
+//! 虚拟网卡在节点里的接法：默认打开，按本机配置装上，跟着 netmap 走，节点停下时拆掉。
 //!
 //! 网卡、搬包、防火墙规则、认出自己的东西都在 `i3t_vnet` 里；这里只管什么时候做：
 //!
@@ -114,7 +114,7 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce(&mut Shell) -> T + Send +
     tokio::task::spawn_blocking(move || work(&mut Shell)).await.expect("执行系统命令的任务不会被取消，panic 了就让它传上来")
 }
 
-/// 这台机器上现在有的网卡的名字：有节点程序在用的虚拟网卡（同一台机器上可以跑几个节点程序，白皮书 §4.7）的规则不归别人拆。
+/// 这台机器上现在有的网卡的名字：有节点程序在用的虚拟网卡（同一台机器上可以跑几个节点程序）的规则不归别人拆。
 #[must_use]
 pub fn present_devices() -> Vec<String> {
     if_addrs::get_if_addrs().map(|interfaces| interfaces.into_iter().map(|interface| interface.name).collect()).unwrap_or_default()
@@ -395,7 +395,7 @@ fn device_cause(error: DeviceError) -> VnetCause {
 }
 
 /// 开名字服务（本节点虚拟 IP 的 53 端口），Linux 上再让 systemd-resolved 把网络的域名交给它。
-/// Windows 和 macOS 上不碰系统的解析器，名字用 `i3t hosts`（白皮书 §9.7）。
+/// Windows 和 macOS 上不碰系统的解析器，名字用 `i3t hosts`。
 async fn start_names(
     netmap: watch::Receiver<Arc<Netmap>>,
     own: Ipv4Addr,

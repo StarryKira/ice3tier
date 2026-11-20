@@ -1,4 +1,4 @@
-//! 节点上报的"连得上哪些 relay"在 controller 这一侧（白皮书 §7.2：谁连得上，它就是谁的 relay）。
+//! 节点上报的"连得上哪些 relay"在 controller 这一侧（谁连得上，它就是谁的 relay）。
 //!
 //! # Responsibilities
 //! - 把节点每次上报的结果并进存着的那一份（每个节点对每个 relay 只留最近一次）。

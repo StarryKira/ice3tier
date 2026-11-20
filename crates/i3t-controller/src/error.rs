@@ -21,7 +21,7 @@ pub enum Error {
     /// 分组不存在。原话写出编号：请求里常常一次引用好几个分组。
     #[error("没有分组 #{0}")]
     NoSuchGroup(GroupId),
-    /// 请求不合法。`what` 是哪里不对的代码，取值见 `docs/internal/admin-api.md` 第 2 节。
+    /// 请求不合法。`what` 是哪里不对的代码。
     #[error("{message}")]
     Invalid { what: &'static str, message: String },
     #[error("名字 {0} 已经被占用")]

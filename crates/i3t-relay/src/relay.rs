@@ -287,7 +287,7 @@ impl Relay {
         }
     }
 
-    /// 谁在用它：上一个统计时段（10 秒）里替哪些节点对转发了多少，最多的十几对，其余的合成一个数（白皮书 §7.7）。
+    /// 谁在用它：上一个统计时段（10 秒）里替哪些节点对转发了多少，最多的十几对，其余的合成一个数。
     /// 本节点没有启用 relay 时是 `None`。
     ///
     /// # Panics
@@ -801,7 +801,7 @@ impl Inner {
         }
     }
 
-    /// 架构文档 §5.2 的核对：来源节点有会话，并且数据报就是从会话绑定的地方来的；目的节点也有会话。
+    /// 核对：来源节点有会话，并且数据报就是从会话绑定的地方来的；目的节点也有会话。
     ///
     /// `payload` 是这个数据报去掉中转头之后的前几个字节，来源没有会话时错误帧回显它；有会话时回显会话握手的随机数。
     fn next_hop(&self, source: &Source<'_>, header: RelayHeader, payload: &Echo, now: Instant) -> Result<NextHop, Refusal> {
@@ -950,7 +950,7 @@ impl Inner {
 
 /// 从 `data` 开头起，连续多少字节的数据报带着同一个中转头（最多 `max_segments` 个数据报）。`header_len` 是第一个数据报的头的长度。
 ///
-/// 内核一次交上来的一批数据报可能发往不同的节点（实现前测试里见到过），所以要逐个看。
+/// 内核一次交上来的一批数据报可能发往不同的节点（实测时见到过），所以要逐个看。
 /// 中转头相同的一段可以用一次带分段卸载的发送转出去，不用逐个调内核。
 fn same_route_run(data: &[u8], stride: usize, header_len: usize, max_segments: usize) -> usize {
     let header = data.get(..header_len);

@@ -14,7 +14,7 @@ use crate::meter::{Meter, Unmetered};
 use crate::relay::{self, Flow, Parts, Summary, TcpRole};
 use crate::{FlowError, header};
 
-/// 一条承载 TCP 连接的流可以怎么走（白皮书 §9.7 第 9 条：ice3proxy 只归选了它的代理）。
+/// 一条承载 TCP 连接的流可以怎么走（ice3proxy 只归选了它的代理）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Carriage {
     /// 只走这一对节点之间共用的连接（[`Connector::open`]）：端口转发（监听的一侧和中间节点往目标去的那一段）、

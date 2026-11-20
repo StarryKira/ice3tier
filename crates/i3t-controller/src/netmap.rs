@@ -29,7 +29,7 @@ pub trait NodeFacts {
     fn has_no_udp(&self, node: NodeId) -> bool;
 }
 
-/// 哪些节点对之间备着 ice3proxy（白皮书 §9.7 第 9 条）：有一个启用了的、选了 ice3proxy 的代理，监听在其中一个节点上、
+/// 哪些节点对之间备着 ice3proxy：有一个启用了的、选了 ice3proxy 的代理，监听在其中一个节点上、
 /// 出口是另一个。这样的一对两边的 netmap 里都是 `always`（两边都可能是拨号的一方），别的都是 `off`。
 ///
 /// 下发哪一种只在 [`LanePairs::mode`] 定：选了 ice3proxy 的代理不管路上有没有 UDP 都走它，所以是 `always`；
@@ -222,7 +222,7 @@ impl NetworkView {
             .collect();
 
         let other_nodes = || self.nodes.values().filter(|node| node.id != id);
-        // relay 的地址是 controller 找出来的（白皮书 §7.2），UDP 和 TCP 是同一组：节点自己挑连得上的那个。
+        // relay 的地址是 controller 找出来的，UDP 和 TCP 是同一组：节点自己挑连得上的那个。
         let relay_list = other_nodes()
             .filter(|node| node.relay.is_some())
             .map(|node| {

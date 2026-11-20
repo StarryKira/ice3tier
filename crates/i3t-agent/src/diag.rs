@@ -1,4 +1,4 @@
-//! 主动测试（白皮书 §7.6）在节点里的部分：收 controller 的指令，按自己的规矩决定做不做，发起方量、接受方配合，各自上报。
+//! 主动测试在节点里的部分：收 controller 的指令，按自己的规矩决定做不做，发起方量、接受方配合，各自上报。
 //!
 //! 节点自己守的规矩（controller 被攻破时也不能让节点做它本来不肯做的事）：
 //!
@@ -45,7 +45,7 @@ const MIN_INTERVAL: Duration = Duration::from_secs(8);
 const THROUGHPUT_INTERVAL: Duration = Duration::from_secs(25);
 /// 时间窗最长多久，不管指令里写多少。
 const MAX_WINDOW: Duration = Duration::from_secs(150);
-/// 吞吐测试每个方向的上限，先到为止（白皮书 §7.6）。
+/// 吞吐测试每个方向的上限，先到为止。
 pub(crate) const THROUGHPUT_BYTES: u64 = 20_000_000;
 pub(crate) const THROUGHPUT_TIME: Duration = Duration::from_secs(5);
 /// 一个测试最多接受几条测量流：每条路径上行下行各一条，最多三条路径（直连，加上两条经 relay 的）。

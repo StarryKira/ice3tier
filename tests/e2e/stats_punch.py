@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""打洞的统计：对实验环境搭得出的每一对网络位置重复建立直连，数成功率和耗时（白皮书 §15.2，M2 的验收门槛）。
+"""打洞的统计：对实验环境搭得出的每一对网络位置重复建立直连，数成功率和耗时。
 
     python3 tests/e2e/stats_punch.py [--reps N] [--out 目录] [--pairs 组合,...] [--variants 条件,...]
     python3 tests/e2e/stats_punch.py --table 目录        # 只按已有的原始数据重新出表
@@ -58,7 +58,7 @@ PLACE_TEXT = {
     "lan": "同一个局域网",
 }
 
-# 一对节点的网络位置，a 在前，a 是发起访问的一方。不对称的组合两个方向都有：谁先发起，走的是不同的路（§5.3 的"反方向发起"）。
+# 一对节点的网络位置，a 在前，a 是发起访问的一方。不对称的组合两个方向都有：谁先发起，走的是不同的路。
 PAIRS = {
     "public-public": ("public", "public"),
     "public-cone": ("public", "cone"),
@@ -120,7 +120,7 @@ class Row:
 
 
 def expected(pair: str, variant: str) -> str:
-    """§5.3 说这一对应该怎么连。"""
+    """这一对应该怎么连。"""
     a, b = PAIRS[pair]
     if a == "lan":
         return "直连（lan）"
@@ -305,7 +305,7 @@ def table(rows: list[Row]) -> str:
     for row in rows:
         cells.setdefault((row.pair, row.variant, row.rtt_ms), []).append(row)
     lines = [
-        "| a | b | 条件 | §5.3 的预期 | 次数 | 直连 | 成功率（95% 区间） | 耗时 中位 / p90 / 最大（秒） | 直连的种类 a→b / b→a | 第一个请求成功 | 出错 |",
+        "| a | b | 条件 | 预期 | 次数 | 直连 | 成功率（95% 区间） | 耗时 中位 / p90 / 最大（秒） | 直连的种类 a→b / b→a | 第一个请求成功 | 出错 |",
         "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     order = {name: index for index, name in enumerate(PAIRS)}
@@ -342,9 +342,9 @@ def write_outputs(out: Path, rows: list[Row]) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--reps", type=int, default=20, help="§5.3 说能直连的格子每格重复几次（默认 20）")
+    parser.add_argument("--reps", type=int, default=20, help="预期能直连的格子每格重复几次（默认 20）")
     parser.add_argument("--reps-without", type=int, default=10,
-                        help="§5.3 说不能直连的格子每格重复几次（默认 10；每次都要等满 WINDOW 秒）")
+                        help="预期不能直连的格子每格重复几次（默认 10；每次都要等满 WINDOW 秒）")
     parser.add_argument("--rtt-ms", type=float, default=20, help="每条上联线的往返延迟，毫秒（默认 20）")
     parser.add_argument("--out", help="原始数据和表写在哪里（默认新建一个临时目录）")
     parser.add_argument("--pairs", help="只跑这些组合，逗号分隔：" + ", ".join(PAIRS))

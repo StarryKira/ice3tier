@@ -1,4 +1,4 @@
-//! 到一个对端的直连：候选地址、验证、打洞的重试、在用地址的保活。见 docs/internal/architecture.md §5.3。
+//! 到一个对端的直连：候选地址、验证、打洞的重试、在用地址的保活。
 //!
 //! 这里是一台不做 I/O 的状态机：外面告诉它时间和收到了什么，它回答该发什么、直连现在可不可用。
 //! 签名和验签都在外面做，交进来的 PING / PONG 都是已经验过签名的。
@@ -312,13 +312,13 @@ impl DirectPath {
         DirectStatus { state, kind: self.kind(), failure, attempted_ms }
     }
 
-    /// 在用的直连是不是局域网直连。两种模式下它都无条件优先（白皮书 §7.1）。
+    /// 在用的直连是不是局域网直连。两种模式下它都无条件优先。
     pub(crate) fn is_lan_active(&self) -> bool {
         self.active.as_ref().is_some_and(|active| self.is_lan(active.addr))
     }
 
     /// `addr` 是不是对端在本节点所在局域网里的地址：它是私有地址，并且要么对端的信标就是在本地网段上从它发来的，
-    /// 要么两边的公网地址相同（白皮书 §5.3 的推断）。只凭"是私有地址"不算：两个不相干的网络可以用同一个私有网段。
+    /// 要么两边的公网地址相同。只凭"是私有地址"不算：两个不相干的网络可以用同一个私有网段。
     fn is_lan(&self, addr: SocketAddr) -> bool {
         ifaddr::is_private(addr.ip()) && (self.same_nat || self.came_from_beacon(addr))
     }
@@ -370,7 +370,7 @@ impl DirectPath {
         self.candidates.len()
     }
 
-    /// 主动测试要试一次直连：没有可用的直连时不等退避，下一次推进就从头尝试（白皮书 §7.6 的"直连能力"）。
+    /// 主动测试要试一次直连：没有可用的直连时不等退避，下一次推进就从头尝试。
     /// 和候选地址变了时的做法一样，之前的失败记录不再算数。
     pub(crate) fn retry_now(&mut self) {
         self.candidates_changed();
@@ -518,7 +518,7 @@ impl DirectPath {
                 }
                 None
             }
-            // 局域网直连无条件优先（白皮书 §7.1）：已经在用公网地址时，局域网地址验证通过就换过去。别的情况先到先得。
+            // 局域网直连无条件优先：已经在用公网地址时，局域网地址验证通过就换过去。别的情况先到先得。
             Some(active) if !ifaddr::is_private(from.ip()) || ifaddr::is_private(active.addr.ip()) => None,
             // 丢包太多刚搁下的地址：搁下之前发出去的探测这时才答回来，不算数。
             None if shunned => None,
@@ -712,7 +712,7 @@ impl DirectPath {
         matches!(self.punch, Punch::Shunned { addr: shunned, until } if shunned == addr && now < until)
     }
 
-    /// 任何一方的候选端点变了：之前的失败记录清掉，立刻重新尝试（白皮书 §5.3）。
+    /// 任何一方的候选端点变了：之前的失败记录清掉，立刻重新尝试。
     fn candidates_changed(&mut self) {
         if self.active.is_none() {
             self.punch = Punch::Idle;

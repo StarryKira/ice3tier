@@ -1,4 +1,4 @@
-//! relay 和 relay 之间走 TCP 的骨干连接（docs/internal/architecture.md §5.2 的"骨干"）。
+//! relay 和 relay 之间走 TCP 的骨干连接。
 //!
 //! 骨干上的一条连接是两个会话：本节点在对方 relay 上的，对方在本节点 relay 上的。UDP 通的时候两个会话各走各的 UDP，和以前一样。
 //! 两个 relay 之间的 UDP 有一个方向不通时，两个会话都放进**同一条** TCP：一方拨号（路径层到 relay 的 TCP，[`crate::tcp`]），

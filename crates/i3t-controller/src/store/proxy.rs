@@ -36,7 +36,7 @@ pub struct ProxyRecord {
     pub allow_from: Vec<IpNet>,
     pub class: Option<Class>,
     pub optimistic: Option<bool>,
-    /// 这个代理的 TCP 流走 ice3proxy（白皮书 §9.7 第 9 条）。
+    /// 这个代理的 TCP 流走 ice3proxy。
     pub lane: bool,
 }
 

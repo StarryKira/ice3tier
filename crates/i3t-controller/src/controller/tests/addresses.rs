@@ -1,4 +1,4 @@
-//! relay 的地址是找出来的（白皮书 §7.2），网卡地址落进虚拟地址段时有提醒（§4.6）。
+//! relay 的地址是找出来的，网卡地址落进虚拟地址段时有提醒。
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 

@@ -1,4 +1,4 @@
-//! 发布清单：一个版本有哪些文件，以及它们的签名。见白皮书 §10.5。
+//! 发布清单：一个版本有哪些文件，以及它们的签名。
 //!
 //! 一次发布是一组文件加一份清单（[`Manifest`]）。清单写明版本号，以及每个平台的节点程序是哪个文件、多大、SHA-256 是多少。
 //! 清单的原文带着一个 Ed25519 签名一起传（[`SignedManifest`]），节点用编译在程序里的公钥验。
@@ -392,7 +392,7 @@ macro_rules! serde_as_text {
 
 serde_as_text!(Version, Platform, Sha256, ManifestSignature);
 
-/// 换程序的时机，由 controller 决定（白皮书 §10.5）。
+/// 换程序的时机，由 controller 决定。
 ///
 /// 下载、验签和自检不等时机，拿到清单就做；这里说的只是"什么时候换程序并重启"。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

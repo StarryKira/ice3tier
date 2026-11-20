@@ -1,4 +1,4 @@
-//! 路由视图（白皮书 §7.7）和按主机名起名字。
+//! 路由视图和按主机名起名字。
 
 use std::net::Ipv4Addr;
 use std::time::Duration;

@@ -149,7 +149,7 @@ impl Endpoint {
 
     /// controller 现在连不连得上。装配方在长连接的状态变化时告诉它；从没告诉过时当作连得上。
     ///
-    /// 连不上、到某个对端又没有经 relay 的路时，到它的空闲连接先不回收：关掉之后打洞的信令无路可走，连接建不回来（白皮书 §5.4）。
+    /// 连不上、到某个对端又没有经 relay 的路时，到它的空闲连接先不回收：关掉之后打洞的信令无路可走，连接建不回来。
     /// 连上之后下一次检查（一秒之内）照常回收。
     pub fn set_controller_online(&self, online: bool) {
         self.manager.set_controller_online(online);
@@ -196,7 +196,7 @@ impl Endpoint {
     /// 到 `peer` 的连接自己量的往返时间（QUIC 的平滑 RTT）。没有连接时是 `None`。
     ///
     /// 路由层按各段的探测推算一条路的延迟（[`routes`](Self::routes) 里的 `rtt_ms`）；这个是真实的数据走完全程量出来的，
-    /// 两个对着看能发现测量失真（白皮书 §13）。只读，不影响选路。
+    /// 两个对着看能发现测量失真。只读，不影响选路。
     #[must_use]
     pub fn connection_rtt(&self, peer: NodeId) -> Option<std::time::Duration> {
         self.manager.connection_rtt(peer)
@@ -209,7 +209,7 @@ impl Endpoint {
     }
 
     /// 和各个对端之间的共用连接上现在开着几条流、本节点启动以来两个方向各走了多少字节（线上的，关掉的连接也算），
-    /// 只有现在有连接的对端，流量大的在前，最多 [`MAX_PEER_USE`](i3t_model::control::MAX_PEER_USE) 个。给路由视图用（白皮书 §7.7）。
+    /// 只有现在有连接的对端，流量大的在前，最多 [`MAX_PEER_USE`](i3t_model::control::MAX_PEER_USE) 个。给路由视图用。
     #[must_use]
     pub fn peer_use(&self) -> Vec<i3t_model::control::PeerUse> {
         self.manager.peer_use(i3t_model::control::MAX_PEER_USE)
@@ -269,7 +269,7 @@ impl Endpoint {
         }
     }
 
-    /// 主动测试（白皮书 §7.6）：打开一个测试的时间窗，见 [`Paths::open_test`]。丢弃返回的值就关掉。
+    /// 主动测试：打开一个测试的时间窗，见 [`Paths::open_test`]。丢弃返回的值就关掉。
     #[must_use]
     pub fn open_test(&self, spec: TestSpec) -> TestGuard {
         self.paths.open_test(spec)

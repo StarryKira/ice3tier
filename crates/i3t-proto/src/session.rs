@@ -1,4 +1,4 @@
-//! 中转会话的帧（节点和 relay 之间）。见 docs/internal/architecture.md §5.2。
+//! 中转会话的帧（节点和 relay 之间）。
 //!
 //! 节点要经某个 relay 收发包，先和它建一个中转会话。走 UDP 时每一帧是一个数据报；走 TCP 时同样的帧装在
 //! [`crate::tcp_frame`] 里，握手完全一样。

@@ -15,7 +15,7 @@ use crate::port::UdpPort;
 const QUERY_INTERVAL: Duration = Duration::from_secs(25);
 /// 还没有得到过回答的服务器问得勤一些，尽快拿到第一个反射地址。
 const RETRY_INTERVAL: Duration = Duration::from_secs(2);
-/// 回答的有效期。过期的估计不能一直沿用（白皮书 §7.3）。
+/// 回答的有效期。过期的估计不能一直沿用。
 const OBSERVATION_TTL: Duration = Duration::from_secs(120);
 
 /// 某个服务器看到的本节点地址。

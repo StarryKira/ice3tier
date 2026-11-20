@@ -1,4 +1,4 @@
-//! 可达层。见 docs/internal/architecture.md。
+//! 可达层。
 //!
 //! | 模块 | 内容 |
 //! |---|---|

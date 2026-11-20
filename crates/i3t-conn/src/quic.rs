@@ -1,4 +1,4 @@
-//! QUIC 的参数。数值的来历见白皮书 §6.3～§6.5 和实现前测试的结论。
+//! QUIC 的参数。数值有的是设计时定的，有的是实测的结论。
 
 use std::sync::Arc;
 use std::time::Duration;

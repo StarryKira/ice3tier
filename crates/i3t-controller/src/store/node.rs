@@ -66,7 +66,7 @@ pub struct NodeRecord {
     pub enrolled_with: Option<[u8; DIGEST_LEN]>,
 }
 
-/// 节点最近一次试一个 relay 的结果（白皮书 §7.2），controller 存着的样子。
+/// 节点最近一次试一个 relay 的结果，controller 存着的样子。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReachRecord {
     pub relay: NodeId,

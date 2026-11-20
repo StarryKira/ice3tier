@@ -335,7 +335,7 @@ impl Inner {
             let holders = self.holders_of(node.id);
             self.defer(node.network, holders, self.timing.report_coalesce);
         }
-        // relay 的地址写在全网每个节点的 netmap 里（白皮书 §7.2）：声明的或者 controller 看到的地址变了，大家都要知道。
+        // relay 的地址写在全网每个节点的 netmap 里：声明的或者 controller 看到的地址变了，大家都要知道。
         if node.relay.is_some() && node_addresses::relay_addresses(node, cidr) != addresses_before {
             tracing::info!(node = %node.id, name = %node.name, "relay 的地址变了");
             whole_network = true;
@@ -345,8 +345,8 @@ impl Inner {
 
     /// controller 看到的节点地址：这条连接的来源 IP 加上节点自报的 UDP 端口，节点没报端口时是 `None`。
     ///
-    /// 节点和 controller 在同一台机器上、走回环连过来时，回环地址对别的机器没有用，换成 controller 对外地址里的主机
-    /// （白皮书 §7.2）；那个主机是域名、还没解析出来时照旧用回环地址：同一台机器上的节点还用得上它。
+    /// 节点和 controller 在同一台机器上、走回环连过来时，回环地址对别的机器没有用，换成 controller 对外地址里的主机；
+    /// 那个主机是域名、还没解析出来时照旧用回环地址：同一台机器上的节点还用得上它。
     fn observed_endpoint(&self, remote: IpAddr, port: u16) -> Option<SocketAddr> {
         let remote = remote.to_canonical();
         let ip = if remote.is_loopback() { self.public_host.unwrap_or(remote) } else { remote };
@@ -440,7 +440,7 @@ impl Inner {
         Ok(())
     }
 
-    /// 节点报的换路记进历史（白皮书 §7.7）。只记对端还是这个网络里的节点的；一次最多 [`MAX_REPORTED_SWITCHES`] 条。
+    /// 节点报的换路记进历史。只记对端还是这个网络里的节点的；一次最多 [`MAX_REPORTED_SWITCHES`] 条。
     fn switches_reported(&mut self, node: &NodeRecord, switches: &[RouteSwitch]) -> Result<(), Error> {
         let now = self.clock.now();
         for switch in switches.iter().take(MAX_REPORTED_SWITCHES) {
@@ -460,7 +460,7 @@ impl Inner {
         Ok(())
     }
 
-    /// 节点报的"试过的 relay 连没连上"（白皮书 §7.2），并进存着的那一份。连得上与否变了时，它和它的对端的 netmap 要重算：
+    /// 节点报的"试过的 relay 连没连上"，并进存着的那一份。连得上与否变了时，它和它的对端的 netmap 要重算：
     /// 两个节点之间缺不缺一个共同的 relay 跟着变。
     fn relay_tries_reported(&mut self, node: &NodeRecord, tries: &[RelayTry]) -> Result<(), Error> {
         if tries.is_empty() && node.relay_reach.is_empty() {
@@ -482,7 +482,7 @@ impl Inner {
         Ok(())
     }
 
-    /// 节点报的虚拟网卡装没装（白皮书 §9.7）。变了的话它的对端的 netmap 要重算：本机的程序发给没有网卡的节点的包当场回"不可达"。
+    /// 节点报的虚拟网卡装没装。变了的话它的对端的 netmap 要重算：本机的程序发给没有网卡的节点的包当场回"不可达"。
     /// 不报的节点（比虚拟网卡旧的版本）没有网卡。
     fn vnet_reported(&mut self, node: &NodeRecord, vnet: Option<&VnetReport>) {
         let lacks = !vnet.is_some_and(|vnet| matches!(vnet.state, VnetState::Installed { .. }));
@@ -494,7 +494,7 @@ impl Inner {
         }
     }
 
-    /// 节点报的网卡地址变了。它是 relay 的话，它的地址跟着变，全网的节点都要知道（白皮书 §7.2）。
+    /// 节点报的网卡地址变了。它是 relay 的话，它的地址跟着变，全网的节点都要知道。
     fn local_addresses_reported(&mut self, node: &mut NodeRecord, local: Vec<IpAddr>) -> Result<(), Error> {
         let cidr = self.require_network(node.network)?.cidr;
         let before = node_addresses::relay_addresses(node, cidr);
