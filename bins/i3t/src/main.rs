@@ -31,6 +31,7 @@ use crate::texts::texts;
 /// 它就是这个包在 `Cargo.toml` 里的版本号。唯一的例外是编译时设了环境变量 `I3T_TEST_VERSION`：
 /// 端到端测试要有"同一份代码、版本号不同"的两个程序才能把更新跑一遍，用它编出第二个。
 /// 发布不用它：发布流水线会核对标签和 `Cargo.toml`，清单上的版本号和程序自己报的对不上时，节点的自检也不会放行。
+//noinspection ALL
 const VERSION: &str = match option_env!("I3T_TEST_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
@@ -312,7 +313,7 @@ fn return_memory_promptly() {
         // SAFETY: `mallopt` 只改分配器的参数，不碰任何调用方的内存；两个参数都是 glibc 认识的选项，值在它允许的范围里。
         // 这时还没有别的线程。
         if unsafe { libc::mallopt(option, THRESHOLD) } == 0 {
-            tracing::debug!(option = name, "glibc 不接受这个分配器参数");
+            tracing::warn!(option = name, "glibc 不接受这个分配器参数");
         }
     }
 }
@@ -346,7 +347,7 @@ fn init_logging(level: &str) {
 fn raise_open_file_limit() {
     match rlimit::increase_nofile_limit(u64::MAX) {
         Ok(limit) => tracing::info!(limit, "能同时打开的文件数的上限"),
-        Err(error) => tracing::warn!(%error, "抬不高能同时打开的文件数的上限，流多的时候可能打不开新的连接"),
+        Err(error) => tracing::warn!(%error, "无法抬高能同时打开的文件数的上限，流多时可能打不开新的连接"),
     }
 }
 
@@ -466,7 +467,7 @@ mod tests {
         let low = hard.min(256);
         Resource::NOFILE.set(low, hard).unwrap();
 
-        super::raise_open_file_limit();
+        raise_open_file_limit();
 
         let (soft, still_hard) = Resource::NOFILE.get().unwrap();
         assert_eq!(still_hard, hard, "硬上限不动");
