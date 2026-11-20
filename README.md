@@ -55,7 +55,7 @@ ice3tier connects the machines you own into one private network. Every node gets
 
 ### One-line install (Linux / macOS)
 
-On Linux, [`deploy/install.sh`](deploy/install.sh) installs the binary, creates the system user, configures the systemd unit (and the `systemd-resolved` polkit rule and SELinux label when applicable), and installs an `i3t` CLI wrapper:
+[`deploy/install.sh`](deploy/install.sh) installs the node as a service: on Linux a systemd unit under its own system user (with the `systemd-resolved` polkit rule and SELinux label when applicable), on macOS a launchd daemon. Either way `i3t` becomes a command that talks to that service, and `sudo i3t join` starts it. The controller is installed as a systemd unit on Linux:
 
 ```sh
 # Node

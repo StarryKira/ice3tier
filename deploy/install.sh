@@ -1,7 +1,7 @@
 #!/bin/sh
 # One-line installer for ice3tier (node or controller) on Linux and macOS.
 #
-# Install node (default, sets up systemd service + polkit rule on Linux):
+# Install node (default; a systemd service on Linux, a launchd daemon on macOS):
 #   curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh
 #
 # Install, join, and start node in one command:
@@ -40,13 +40,22 @@ FROM_DIR=""
 UNINSTALL=0
 PURGE=0
 SUDO=""
-TMPDIR=""
+# Scratch directory for downloads. Not called TMPDIR: that one is exported on macOS and read by mktemp and others.
+WORK=""
+
+STATE_DIR="/var/lib/i3t"
+NODE_BIN_DIR="${STATE_DIR}/bin"
+LAUNCHD_LABEL="com.github.fuqiuluo.ice3tier"
+LAUNCHD_PLIST="/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist"
+LAUNCHD_LOG="/var/log/i3t.log"
+NEWSYSLOG_CONF="/etc/newsyslog.d/i3t.conf"
 
 usage() {
     cat <<'EOF'
 Usage: install.sh [OPTIONS]
 
-Install ice3tier node (default) or controller as a systemd service on Linux.
+Install the ice3tier node (default) as a systemd service on Linux or a launchd daemon on macOS,
+or the controller as a systemd service on Linux.
 
 Node options:
   --token TOKEN             Join the network and start the service (or set I3T_TOKEN)
@@ -82,9 +91,9 @@ die() {
     exit 1
 }
 
-cleanup_tmp() {
-    if [ -n "$TMPDIR" ] && [ -d "$TMPDIR" ]; then
-        rm -rf "$TMPDIR"
+cleanup_work() {
+    if [ -n "$WORK" ] && [ -d "$WORK" ]; then
+        rm -rf "$WORK"
     fi
 }
 
@@ -187,6 +196,10 @@ detect_platform() {
         aarch64 | arm64) ARCH="aarch64" ;;
         *) die "unsupported architecture: $arch_raw (supported: x86_64, aarch64)" ;;
     esac
+    # A shell running under Rosetta reports x86_64 on Apple silicon: take the native program.
+    if [ "$OS" = "macos" ] && [ "$ARCH" = "x86_64" ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" = "1" ]; then
+        ARCH="aarch64"
+    fi
     PLATFORM="${OS}-${ARCH}"
 }
 
@@ -452,27 +465,71 @@ polkit.addRule(function(action, subject) {
 EOF
 }
 
+# The node on macOS: a launchd daemon running as root (the adapter needs it). launchd cannot be told to leave one exit
+# status alone the way systemd's RestartPreventExitStatus=78 does, so a node that cannot start retries every 10 s.
+write_launchd_plist() {
+    cat <<EOF > "$1"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${LAUNCHD_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${NODE_BIN_DIR}/i3t</string>
+        <string>run</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>I3T_STATE_DIR</key>
+        <string>${STATE_DIR}</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>${LAUNCHD_LOG}</string>
+    <key>StandardErrorPath</key>
+    <string>${LAUNCHD_LOG}</string>
+</dict>
+</plist>
+EOF
+}
+
+# The `i3t` command for service installs (systemd or launchd): runs the self-updating program in the state directory.
 write_cli_wrapper() {
     dest="$1"
-    node_bin="$2"
+    service="$2"
+    bin_dir="$3"
     cat <<EOF > "$dest"
 #!/bin/sh
-# Wrapper installed by ice3tier deploy/install.sh.
-# Always invokes the self-updating binary at ${node_bin}, and drops to user i3t
-# for state-modifying commands invoked via sudo so /var/lib/i3t files keep i3t:i3t ownership.
+# Installed by ice3tier's deploy/install.sh. Runs the self-updating program at ${bin_dir}/i3t.
+# As root it switches to the service's user for commands that touch the state directory, so its files keep their
+# owner; \`i3t join\` restarts the service afterwards, and \`i3t run\` points at the service instead of starting a
+# second node.
 set -eu
 
-BIN="${node_bin}"
-STATE="/var/lib/i3t"
+BIN="${bin_dir}/i3t"
+STATE="${STATE_DIR}"
+SERVICE="${service}"
+LABEL="${LAUNCHD_LABEL}"
+PLIST="${LAUNCHD_PLIST}"
 EOF
     cat <<'EOF' >> "$dest"
 
 if [ ! -x "$BIN" ]; then
     if [ "$(id -u)" -ne 0 ]; then
-        printf 'i3t: permission denied reading %s (try: sudo i3t ...)\n' "$BIN" >&2
+        printf 'i3t: cannot run %s as this user (try: sudo i3t ...)\n' "$BIN" >&2
         exit 1
     fi
-    printf 'i3t: binary not found at %s\n' "$BIN" >&2
+    printf 'i3t: program not found at %s\n' "$BIN" >&2
     exit 1
 fi
 
@@ -516,16 +573,68 @@ case "$sub" in
         ;;
 esac
 
-if [ "$(id -u)" -eq 0 ] && [ "$custom_dir" -eq 0 ] && id i3t >/dev/null 2>&1; then
-    if command -v runuser >/dev/null 2>&1; then
-        exec runuser -u i3t -- env I3T_STATE_DIR="$STATE" ${I3T_LANG:+"I3T_LANG=$I3T_LANG"} ${I3T_LOG:+"I3T_LOG=$I3T_LOG"} "$BIN" "$@"
-    elif command -v sudo >/dev/null 2>&1; then
-        exec sudo -u i3t -- env I3T_STATE_DIR="$STATE" ${I3T_LANG:+"I3T_LANG=$I3T_LANG"} ${I3T_LOG:+"I3T_LOG=$I3T_LOG"} "$BIN" "$@"
+# Runs the program; the first argument is "exec" or "". On systemd installs root runs it as user i3t.
+as_node() {
+    how="$1"
+    shift
+    if [ "$SERVICE" = "systemd" ] && [ "$(id -u)" -eq 0 ] && [ "$custom_dir" -eq 0 ] && id i3t >/dev/null 2>&1; then
+        if command -v runuser >/dev/null 2>&1; then
+            $how runuser -u i3t -- env I3T_STATE_DIR="$STATE" ${I3T_LANG:+"I3T_LANG=$I3T_LANG"} ${I3T_LOG:+"I3T_LOG=$I3T_LOG"} ${I3T_SERVICE:+"I3T_SERVICE=$I3T_SERVICE"} "$BIN" "$@"
+        elif command -v sudo >/dev/null 2>&1; then
+            $how sudo -u i3t -- env I3T_STATE_DIR="$STATE" ${I3T_LANG:+"I3T_LANG=$I3T_LANG"} ${I3T_LOG:+"I3T_LOG=$I3T_LOG"} ${I3T_SERVICE:+"I3T_SERVICE=$I3T_SERVICE"} "$BIN" "$@"
+        else
+            $how su -s /bin/sh i3t -c 'state=$1; service=$2; bin=$3; shift 3; exec env I3T_STATE_DIR="$state" I3T_SERVICE="$service" "$bin" "$@"' -- sh "$STATE" "${I3T_SERVICE:-}" "$BIN" "$@"
+        fi
+    else
+        $how "$BIN" "$@"
     fi
-    exec su -s /bin/sh i3t -c 'state=$1; bin=$2; shift 2; exec env I3T_STATE_DIR="$state" "$bin" "$@"' -- sh "$STATE" "$BIN" "$@"
+}
+
+start_command() {
+    if [ "$SERVICE" = "systemd" ]; then
+        printf 'sudo systemctl restart i3t'
+    else
+        printf 'sudo launchctl kickstart -k system/%s' "$LABEL"
+    fi
+}
+
+restart_service() {
+    if [ "$SERVICE" = "systemd" ]; then
+        systemctl restart i3t
+        sleep 2
+        systemctl is-active -q i3t && return 0
+        printf 'i3t: the service is not running; see: journalctl -u i3t\n' >&2
+    else
+        if launchctl print "system/$LABEL" >/dev/null 2>&1; then
+            launchctl kickstart -k "system/$LABEL"
+        else
+            launchctl enable "system/$LABEL" 2>/dev/null || true
+            launchctl bootstrap system "$PLIST"
+        fi
+        sleep 2
+        launchctl print "system/$LABEL" 2>/dev/null | grep -q 'state = running' && return 0
+        printf 'i3t: the service is not running; see /var/log/i3t.log\n' >&2
+    fi
+    exit 1
+}
+
+if [ "$(id -u)" -eq 0 ] && [ "$custom_dir" -eq 0 ]; then
+    case "$sub" in
+        run)
+            printf 'i3t: the node runs as a system service on this machine; start it with: %s\n' "$(start_command)" >&2
+            exit 1
+            ;;
+        join)
+            I3T_SERVICE=i3t
+            export I3T_SERVICE
+            as_node "" "$@"
+            restart_service
+            exit 0
+            ;;
+    esac
 fi
 
-exec "$BIN" "$@"
+as_node exec "$@"
 EOF
 }
 
@@ -533,43 +642,108 @@ run_as_i3t() {
     node_bin="$1"
     shift
     if command -v runuser >/dev/null 2>&1; then
-        $SUDO runuser -u i3t -- env I3T_STATE_DIR=/var/lib/i3t ${I3T_LANG:+"I3T_LANG=$I3T_LANG"} "$node_bin" "$@"
+        $SUDO runuser -u i3t -- env I3T_STATE_DIR="$STATE_DIR" ${I3T_LANG:+"I3T_LANG=$I3T_LANG"} ${I3T_SERVICE:+"I3T_SERVICE=$I3T_SERVICE"} "$node_bin" "$@"
     elif command -v sudo >/dev/null 2>&1; then
-        $SUDO sudo -u i3t -- env I3T_STATE_DIR=/var/lib/i3t ${I3T_LANG:+"I3T_LANG=$I3T_LANG"} "$node_bin" "$@"
+        $SUDO sudo -u i3t -- env I3T_STATE_DIR="$STATE_DIR" ${I3T_LANG:+"I3T_LANG=$I3T_LANG"} ${I3T_SERVICE:+"I3T_SERVICE=$I3T_SERVICE"} "$node_bin" "$@"
     else
-        $SUDO su -s /bin/sh i3t -c 'bin=$1; shift; exec env I3T_STATE_DIR=/var/lib/i3t "$bin" "$@"' -- sh "$node_bin" "$@"
+        $SUDO su -s /bin/sh i3t -c 'state=$1; service=$2; bin=$3; shift 3; exec env I3T_STATE_DIR="$state" I3T_SERVICE="$service" "$bin" "$@"' -- sh "$STATE_DIR" "${I3T_SERVICE:-}" "$node_bin" "$@"
     fi
 }
 
-install_node() {
-    fetch_binary "i3t" "${TMPDIR}/i3t"
+# Runs the node program as root (macOS and Linux without systemd: the adapter needs root there).
+run_as_root() {
+    node_bin="$1"
+    shift
+    $SUDO env I3T_STATE_DIR="$STATE_DIR" ${I3T_LANG:+"I3T_LANG=$I3T_LANG"} ${I3T_SERVICE:+"I3T_SERVICE=$I3T_SERVICE"} "$node_bin" "$@"
+}
 
-    if ! has_systemd; then
-        log "Installing i3t to /usr/local/bin/i3t (systemd not detected)"
-        $SUDO install -d -m 0755 /usr/local/bin
-        install_binary_atomic "${TMPDIR}/i3t" /usr/local/bin/i3t 0 0
-        if [ -n "$TOKEN" ]; then
-            join_args=""
-            [ "$CAN_RELAY" -eq 1 ] && join_args="$join_args --can-relay"
-            [ "$CAN_EXIT" -eq 1 ] && join_args="$join_args --can-exit"
-            # shellcheck disable=SC2086
-            printf '%s\n' "$TOKEN" | /usr/local/bin/i3t join $join_args
-        fi
-        log "Installed /usr/local/bin/i3t"
-        printf '\nNext steps:\n'
-        [ -z "$TOKEN" ] && printf '  echo <enrollment-token> | i3t join\n'
-        printf '  i3t run\n'
-        return
+join_node() {
+    runner="$1"
+    node_bin="$2"
+    set -- join
+    [ "$CAN_RELAY" -eq 1 ] && set -- "$@" --can-relay
+    [ "$CAN_EXIT" -eq 1 ] && set -- "$@" --can-exit
+    printf '%s\n' "$TOKEN" | "$runner" "$node_bin" "$@"
+}
+
+# The name of the node's adapter for messages: the one present, else the first the node would take.
+adapter_name() {
+    name=$(ip -o link show 2>/dev/null | sed -n 's/^[0-9]*: \(i3t[0-9]*\)[:@].*/\1/p' | head -n 1)
+    printf '%s\n' "${name:-i3t0}"
+}
+
+# Linux without systemd: the program in /usr/local/bin, run by hand as root. The state directory is created here so
+# that `sudo i3t join` and `sudo i3t run` agree on it whatever HOME sudo passes on.
+install_node_plain() {
+    log "Installing i3t to /usr/local/bin/i3t (systemd not detected)"
+    $SUDO install -d -m 0755 /usr/local/bin
+    install_binary_atomic "${WORK}/i3t" /usr/local/bin/i3t 0 0
+    $SUDO install -d -m 0700 "$STATE_DIR"
+    [ "$NO_VNET" -eq 1 ] && run_as_root /usr/local/bin/i3t set network off
+    if [ -n "$TOKEN" ]; then
+        join_node run_as_root /usr/local/bin/i3t
     fi
+    log "Installed /usr/local/bin/i3t (state in ${STATE_DIR})"
+    printf '\nNext steps:\n'
+    [ -z "$TOKEN" ] && printf '  echo <enrollment-token> | sudo i3t join\n'
+    printf '  sudo i3t run   # keep it running with your init system\n'
+}
 
-    log "Setting up system user i3t and /var/lib/i3t"
-    ensure_system_user "i3t" "/var/lib/i3t"
-    $SUDO install -d -o i3t -g i3t -m 0700 /var/lib/i3t
+launchd_start() {
+    if $SUDO launchctl print "system/${LAUNCHD_LABEL}" >/dev/null 2>&1; then
+        $SUDO launchctl kickstart -k "system/${LAUNCHD_LABEL}"
+    else
+        $SUDO launchctl enable "system/${LAUNCHD_LABEL}" 2>/dev/null || true
+        $SUDO launchctl bootstrap system "$LAUNCHD_PLIST"
+    fi
+}
+
+install_node_launchd() {
+    log "Installing i3t to ${NODE_BIN_DIR}/i3t (root, self-updating)"
+    $SUDO install -d -o 0 -g 0 -m 0700 "$STATE_DIR" "$NODE_BIN_DIR"
+    install_binary_atomic "${WORK}/i3t" "${NODE_BIN_DIR}/i3t" 0 0
+
+    write_cli_wrapper "${WORK}/i3t-wrapper" launchd "$NODE_BIN_DIR"
+    $SUDO install -d -m 0755 /usr/local/bin
+    install_binary_atomic "${WORK}/i3t-wrapper" /usr/local/bin/i3t 0 0
+
+    log "Installing ${LAUNCHD_PLIST}"
+    write_launchd_plist "${WORK}/i3t.plist"
+    plutil -lint "${WORK}/i3t.plist" >/dev/null || die "the generated launchd plist is invalid"
+    $SUDO install -o 0 -g 0 -m 0644 "${WORK}/i3t.plist" "$LAUNCHD_PLIST"
+    printf '%s\t644\t5\t10240\t*\tJ\n' "$LAUNCHD_LOG" > "${WORK}/newsyslog.conf"
+    $SUDO install -d -m 0755 "$(dirname "$NEWSYSLOG_CONF")"
+    $SUDO install -o 0 -g 0 -m 0644 "${WORK}/newsyslog.conf" "$NEWSYSLOG_CONF"
+
+    [ "$NO_VNET" -eq 1 ] && run_as_root "${NODE_BIN_DIR}/i3t" set network off
+
+    if [ -n "$TOKEN" ]; then
+        log "Joining network"
+        I3T_SERVICE=i3t
+        join_node run_as_root "${NODE_BIN_DIR}/i3t"
+        log "Starting ${LAUNCHD_LABEL}"
+        launchd_start
+        log "i3t is running (check with: sudo i3t status)"
+    elif $SUDO test -f "${STATE_DIR}/controller.json"; then
+        log "Existing enrollment found; restarting ${LAUNCHD_LABEL}"
+        launchd_start
+        log "i3t upgraded and running (check with: sudo i3t status)"
+    else
+        log "Installation complete!"
+        printf '\nNext step (joins and starts the daemon):\n'
+        printf '  echo <enrollment-token> | sudo i3t join   # add --can-relay or --can-exit if needed\n'
+    fi
+}
+
+install_node_systemd() {
+    log "Setting up system user i3t and ${STATE_DIR}"
+    ensure_system_user "i3t" "$STATE_DIR"
+    $SUDO install -d -o i3t -g i3t -m 0700 "$STATE_DIR"
 
     # /var mounted noexec cannot execute /var/lib/i3t/bin/i3t; relocate to /opt/i3t/bin with a systemd drop-in.
-    node_bin_dir="/var/lib/i3t/bin"
+    node_bin_dir="$NODE_BIN_DIR"
     custom_bin_dir=0
-    if is_mount_noexec /var/lib/i3t; then
+    if is_mount_noexec "$STATE_DIR"; then
         warn "/var is mounted noexec; installing i3t binary to /opt/i3t/bin instead"
         node_bin_dir="/opt/i3t/bin"
         custom_bin_dir=1
@@ -578,19 +752,19 @@ install_node() {
     $SUDO install -d -o i3t -g i3t -m 0700 "$node_bin_dir"
 
     log "Installing i3t binary to ${node_bin} (writable by user i3t for self-updates)"
-    install_binary_atomic "${TMPDIR}/i3t" "$node_bin" i3t i3t
+    install_binary_atomic "${WORK}/i3t" "$node_bin" i3t i3t
     relabel_selinux_bin "$node_bin_dir"
 
-    write_cli_wrapper "${TMPDIR}/i3t-wrapper" "$node_bin"
+    write_cli_wrapper "${WORK}/i3t-wrapper" systemd "$node_bin_dir"
     $SUDO install -d -m 0755 /usr/local/bin
-    install_binary_atomic "${TMPDIR}/i3t-wrapper" /usr/local/bin/i3t 0 0
+    install_binary_atomic "${WORK}/i3t-wrapper" /usr/local/bin/i3t 0 0
 
     log "Installing /etc/systemd/system/i3t.service"
-    write_node_service "${TMPDIR}/i3t.service"
-    $SUDO install -D -m 0644 "${TMPDIR}/i3t.service" /etc/systemd/system/i3t.service
+    write_node_service "${WORK}/i3t.service"
+    $SUDO install -D -m 0644 "${WORK}/i3t.service" /etc/systemd/system/i3t.service
 
     if [ "$custom_bin_dir" -eq 1 ]; then
-        cat <<EOF > "${TMPDIR}/bin-dir.conf"
+        cat <<EOF > "${WORK}/bin-dir.conf"
 [Service]
 ExecStart=
 ExecStart=${node_bin} run
@@ -598,24 +772,24 @@ ExecStopPost=
 ExecStopPost=-${node_bin} network cleanup
 ReadWritePaths=${node_bin_dir}
 EOF
-        $SUDO install -D -m 0644 "${TMPDIR}/bin-dir.conf" /etc/systemd/system/i3t.service.d/bin-dir.conf
+        $SUDO install -D -m 0644 "${WORK}/bin-dir.conf" /etc/systemd/system/i3t.service.d/bin-dir.conf
     fi
 
     if [ "$NO_VNET" -eq 1 ]; then
-        cat <<'EOF' > "${TMPDIR}/no-vnet.conf"
+        cat <<'EOF' > "${WORK}/no-vnet.conf"
 [Service]
 AmbientCapabilities=
 CapabilityBoundingSet=
 EOF
-        $SUDO install -D -m 0644 "${TMPDIR}/no-vnet.conf" /etc/systemd/system/i3t.service.d/no-vnet.conf
+        $SUDO install -D -m 0644 "${WORK}/no-vnet.conf" /etc/systemd/system/i3t.service.d/no-vnet.conf
         run_as_i3t "$node_bin" set network off
     fi
 
     if [ "$INSTALL_POLKIT" -eq 1 ] && [ "$NO_VNET" -eq 0 ]; then
         if [ -d /etc/polkit-1/rules.d ]; then
             log "Installing /etc/polkit-1/rules.d/50-i3t-resolved.rules"
-            write_polkit_rule "${TMPDIR}/50-i3t-resolved.rules"
-            $SUDO install -m 0644 "${TMPDIR}/50-i3t-resolved.rules" /etc/polkit-1/rules.d/50-i3t-resolved.rules
+            write_polkit_rule "${WORK}/50-i3t-resolved.rules"
+            $SUDO install -m 0644 "${WORK}/50-i3t-resolved.rules" /etc/polkit-1/rules.d/50-i3t-resolved.rules
         elif systemctl is-active -q systemd-resolved 2>/dev/null; then
             warn "systemd-resolved is active but /etc/polkit-1/rules.d was not found; install polkit or use 'sudo i3t hosts --apply' for DNS names"
         fi
@@ -625,16 +799,13 @@ EOF
 
     if [ -n "$TOKEN" ]; then
         log "Joining network as user i3t"
-        join_args=""
-        [ "$CAN_RELAY" -eq 1 ] && join_args="$join_args --can-relay"
-        [ "$CAN_EXIT" -eq 1 ] && join_args="$join_args --can-exit"
-        # shellcheck disable=SC2086
-        printf '%s\n' "$TOKEN" | run_as_i3t "$node_bin" join $join_args
+        I3T_SERVICE=i3t
+        join_node run_as_i3t "$node_bin"
         log "Enabling and starting i3t.service"
         $SUDO systemctl enable i3t >/dev/null
         $SUDO systemctl restart i3t
         log "i3t is running (check with: sudo i3t status)"
-    elif $SUDO test -f /var/lib/i3t/controller.json; then
+    elif $SUDO test -f "${STATE_DIR}/controller.json"; then
         log "Existing enrollment found; restarting i3t.service"
         $SUDO systemctl enable i3t >/dev/null
         $SUDO systemctl restart i3t
@@ -642,25 +813,59 @@ EOF
     else
         $SUDO systemctl enable i3t >/dev/null
         log "Installation complete!"
-        printf '\nNext steps:\n'
+        printf '\nNext step (joins and starts the service):\n'
         printf '  echo <enrollment-token> | sudo i3t join   # add --can-relay or --can-exit if needed\n'
-        printf '  sudo systemctl start i3t\n'
     fi
 
     if [ "$NO_VNET" -eq 0 ] && systemctl is-active -q firewalld 2>/dev/null; then
-        warn "firewalld is active; if peers cannot reach services on this node over i3t0, run:"
-        printf '  sudo firewall-cmd --permanent --zone=trusted --add-interface=i3t0 && sudo firewall-cmd --reload\n' >&2
+        adapter=$(adapter_name)
+        warn "firewalld is active; if peers cannot reach services on this node over ${adapter}, run:"
+        printf '  sudo firewall-cmd --permanent --zone=trusted --add-interface=%s && sudo firewall-cmd --reload\n' "$adapter" >&2
     fi
 }
 
+install_node() {
+    fetch_binary "i3t" "${WORK}/i3t"
+    if [ "$OS" = "macos" ]; then
+        install_node_launchd
+    elif has_systemd; then
+        install_node_systemd
+    else
+        install_node_plain
+    fi
+}
+
+# Prints the controller's log from `since` on once the one-time admin token is in it (a line indented by four spaces),
+# the service has failed, or 30 seconds have passed.
+show_first_start() {
+    since="$1"
+    out=""
+    i=0
+    while [ "$i" -lt 30 ]; do
+        out=$($SUDO journalctl -u i3t-controller --since "$since" --no-pager -o cat 2>/dev/null || true)
+        if printf '%s\n' "$out" | grep -q '^    [^ ]'; then
+            log "First start output (contains the one-time admin token):"
+            printf '%s\n' "$out"
+            return
+        fi
+        if $SUDO systemctl is-failed -q i3t-controller 2>/dev/null; then
+            break
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+    printf '%s\n' "$out"
+    warn "the admin token did not show up; check: sudo journalctl -u i3t-controller --no-pager"
+}
+
 install_controller() {
-    fetch_binary "i3t-controller" "${TMPDIR}/i3t-controller"
-    fetch_binary "i3tctl" "${TMPDIR}/i3tctl"
+    fetch_binary "i3t-controller" "${WORK}/i3t-controller"
+    fetch_binary "i3tctl" "${WORK}/i3tctl"
 
     $SUDO install -d -m 0755 /usr/local/bin
     log "Installing i3t-controller and i3tctl to /usr/local/bin"
-    install_binary_atomic "${TMPDIR}/i3t-controller" /usr/local/bin/i3t-controller 0 0
-    install_binary_atomic "${TMPDIR}/i3tctl" /usr/local/bin/i3tctl 0 0
+    install_binary_atomic "${WORK}/i3t-controller" /usr/local/bin/i3t-controller 0 0
+    install_binary_atomic "${WORK}/i3tctl" /usr/local/bin/i3tctl 0 0
 
     if ! has_systemd; then
         log "Installed /usr/local/bin/i3t-controller and /usr/local/bin/i3tctl (systemd not detected)"
@@ -671,8 +876,8 @@ install_controller() {
 
     log "Setting up system user i3t-controller and systemd service"
     ensure_system_user "i3t-controller" "/var/lib/i3t-controller"
-    write_controller_service "${TMPDIR}/i3t-controller.service"
-    $SUDO install -D -m 0644 "${TMPDIR}/i3t-controller.service" /etc/systemd/system/i3t-controller.service
+    write_controller_service "${WORK}/i3t-controller.service"
+    $SUDO install -D -m 0644 "${WORK}/i3t-controller.service" /etc/systemd/system/i3t-controller.service
 
     first_start=0
     if ! $SUDO test -f /var/lib/i3t-controller/controller.db; then
@@ -684,22 +889,22 @@ install_controller() {
             {
                 printf 'I3T_PUBLIC_ADDR=%s\n' "$PUBLIC_ADDR"
                 $SUDO grep -v '^[[:space:]]*I3T_PUBLIC_ADDR=' /etc/i3t/controller.env || true
-            } > "${TMPDIR}/controller.env"
+            } > "${WORK}/controller.env"
         else
-            cat <<EOF > "${TMPDIR}/controller.env"
+            cat <<EOF > "${WORK}/controller.env"
 I3T_PUBLIC_ADDR=${PUBLIC_ADDR}
 # Optional extra flags, see \`i3t-controller --help\`:
 # I3T_CONTROLLER_ARGS=--listen 0.0.0.0:20331
 EOF
         fi
-        $SUDO install -D -m 0644 "${TMPDIR}/controller.env" /etc/i3t/controller.env
+        $SUDO install -D -m 0644 "${WORK}/controller.env" /etc/i3t/controller.env
     elif ! $SUDO test -f /etc/i3t/controller.env; then
-        cat <<'EOF' > "${TMPDIR}/controller.env"
+        cat <<'EOF' > "${WORK}/controller.env"
 # Set the public address reachable by all nodes before starting i3t-controller:
 # I3T_PUBLIC_ADDR=ctl.example.com:20331
 # I3T_CONTROLLER_ARGS=--listen 0.0.0.0:20331
 EOF
-        $SUDO install -D -m 0644 "${TMPDIR}/controller.env" /etc/i3t/controller.env
+        $SUDO install -D -m 0644 "${WORK}/controller.env" /etc/i3t/controller.env
     fi
 
     $SUDO systemctl daemon-reload
@@ -707,11 +912,10 @@ EOF
     if [ -n "$PUBLIC_ADDR" ]; then
         log "Enabling and starting i3t-controller.service"
         $SUDO systemctl enable i3t-controller >/dev/null
+        since=$(date '+%Y-%m-%d %H:%M:%S')
         $SUDO systemctl restart i3t-controller
         if [ "$first_start" -eq 1 ]; then
-            sleep 1
-            log "First start output (contains the one-time admin token):"
-            $SUDO journalctl -u i3t-controller -n 25 --no-pager -o cat || true
+            show_first_start "$since"
         else
             log "i3t-controller upgraded and running"
         fi
@@ -729,24 +933,31 @@ EOF
 }
 
 uninstall_node() {
-    if has_systemd; then
+    if [ "$OS" = "macos" ]; then
+        log "Stopping and removing the launchd daemon"
+        $SUDO launchctl bootout "system/${LAUNCHD_LABEL}" 2>/dev/null || true
+        $SUDO rm -f "$LAUNCHD_PLIST" "$NEWSYSLOG_CONF"
+    elif has_systemd; then
         log "Stopping and disabling i3t.service"
         $SUDO systemctl disable --now i3t 2>/dev/null || true
-        if [ -x /usr/local/bin/i3t ]; then
-            $SUDO /usr/local/bin/i3t network cleanup 2>/dev/null || true
-        fi
         $SUDO rm -f /etc/systemd/system/i3t.service
         $SUDO rm -rf /etc/systemd/system/i3t.service.d
         $SUDO rm -f /etc/polkit-1/rules.d/50-i3t-resolved.rules
         $SUDO systemctl daemon-reload
     fi
+    if [ -x /usr/local/bin/i3t ]; then
+        $SUDO /usr/local/bin/i3t network cleanup >/dev/null 2>&1 || true
+    fi
     $SUDO rm -f /usr/local/bin/i3t
-    $SUDO rm -rf /var/lib/i3t/bin /opt/i3t/bin
+    $SUDO rm -rf "$NODE_BIN_DIR" /opt/i3t/bin
     if [ "$PURGE" -eq 1 ]; then
-        log "Purging /var/lib/i3t"
-        $SUDO rm -rf /var/lib/i3t /opt/i3t
+        log "Purging ${STATE_DIR}"
+        $SUDO rm -rf "$STATE_DIR" /opt/i3t
+        if [ "$OS" = "macos" ]; then
+            $SUDO rm -f "$LAUNCHD_LOG" "$LAUNCHD_LOG".*
+        fi
     else
-        log "Removed i3t service and binaries (state kept in /var/lib/i3t; pass --purge to remove)"
+        log "Removed the i3t service and program (state kept in ${STATE_DIR}; pass --purge to remove)"
     fi
 }
 
@@ -781,8 +992,8 @@ main() {
         return
     fi
 
-    TMPDIR=$(mktemp -d)
-    trap cleanup_tmp EXIT HUP INT TERM
+    WORK=$(mktemp -d)
+    trap cleanup_work EXIT HUP INT TERM
 
     if [ "$MODE" = "controller" ]; then
         install_controller

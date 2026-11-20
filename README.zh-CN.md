@@ -55,7 +55,7 @@ ice3tier 把你自己的机器连成一个私有网络。每个节点有一块�
 
 ### 一键安装（Linux / macOS）
 
-在 Linux 上，[`deploy/install.sh`](deploy/install.sh) 会自动下载程序、创建系统用户、配置 systemd 服务（并按需装好 `systemd-resolved` 的 polkit 规则和 SELinux 上下文）以及 `i3t` 命令行入口：
+[`deploy/install.sh`](deploy/install.sh) 把节点装成系统服务：Linux 上是以专用系统用户运行的 systemd 服务（按需装好 `systemd-resolved` 的 polkit 规则和 SELinux 上下文），macOS 上是 launchd 守护进程。装好之后 `i3t` 命令操作的就是这个服务，`sudo i3t join` 加入后会自动启动它。controller 在 Linux 上装成 systemd 服务：
 
 ```sh
 # 安装节点

@@ -186,7 +186,11 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             fields.add(t.virtual_ip, netmap.me.virtual_ip.to_string());
             fields.add(t.config_file, state.config_path().display().to_string());
             fields.print();
-            println!("{}", t.start_with_run);
+            // 安装脚本装的 `i3t` 包装脚本在加入之后自己重启系统服务，这时不该再叫人去 `i3t run`。
+            match std::env::var("I3T_SERVICE") {
+                Ok(service) if !service.is_empty() => println!("{}", (t.start_service)(&service)),
+                _ => println!("{}", t.start_with_run),
+            }
         }
         Command::Run { r#static } => match run_node(&state, &version, r#static) {
             Ok(code) => return Ok(code),
