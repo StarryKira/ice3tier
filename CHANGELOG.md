@@ -2,6 +2,11 @@
 
 The node, the controller, the command line and the web UI share one version number.
 
+## 0.1.31 (2026-11-20)
+
+- Web UI: the node detail no longer shows the virtual adapter's firewall rules. They are local to each node; `i3t network status` on the node shows them.
+- Upgrade the controller.
+
 ## 0.1.30 (2026-11-20)
 
 - Fixed on macOS: a node closed the connections it relays with a reset even when they ended normally. The last part of a transfer could be cut off with "connection reset by peer", or the transfer could hang near its end. Upgrade every node that runs on macOS.
