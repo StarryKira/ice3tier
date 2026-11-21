@@ -9,7 +9,8 @@
 - basics：ping（第一个不丢）、TCP 的客户端和服务按虚拟 IP 和按名字、服务看到的来源是对端的虚拟 IP、50MB 完整、UDP、
   不是节点的地址当场"主机不可达"、没开的端口当场"连接被拒绝"、大的 ping 照通、不许分片的大包得到正确的"太大"、
   状态命令、节点停下之后系统和装之前一样。
-- rules：访问规则只允许 a 访问 b：a 发起的照常（TCP、ping、UDP 的问答），b 发起的连不上；对端发来的新会话在本节点被丢掉。
+- rules：访问规则只允许 a 访问 b：a 发起的照常（TCP、ping、UDP 的问答，比 MTU 大、切成了片的也通），b 发起的连不上；
+  对端发来的新会话在本节点被丢掉。
 - relay：两个节点之间不通，经 relay：ping 和 20MB。
 - tcp_relay：一端用不了 UDP，连接经 relay 的 TCP 中转：ping 和 20MB。
 - nat：两端都在 NAT 后面：ping 和 20MB。
@@ -20,20 +21,31 @@
 - leftover：kill -9 之后网卡没了、规则留着；再启动换掉而不是多一份；节点没运行时 `i3t set network off` 拆掉；关着启动什么都不装。
 - restart：经虚拟网卡的 TCP 会话开着时重启节点程序，会话不断。
 - forward：监听在本节点虚拟 IP 上的端口转发（目标是本节点的回环服务、目标是另一个节点）经网卡可达；经流照旧可达。
+- lan：Linux 的弱主机模型。局域网里的机器用它自己的地址、把虚拟 IP 指到 a（`rp_filter` 开着）：连不上 a 虚拟 IP 上的服务和端口转发，
+  UDP 也进不来；像 Docker 那样接在 a 后面、经 a 伪装出去的"容器"访问别的节点照常，连不了 a 自己的虚拟 IP。防火墙开关关着时，
+  虚拟 IP 上的服务由这台机器自己管（进得来），端口转发自己不收从别的网卡来的连接。lan_iptables：同 lan，a 找不到 nft，
+  防冒充是 raw 表里的两条 iptables 规则（读回来的写法和程序认的一样，停下之后拆干净）。
+- hostile：b 不能访问 a，它在自己的机器上用原始套接字经虚拟网卡往 a 发拼不齐的 IP 分片（还有切开的 TCP）和伪造的 ICMP"需要分片"
+  （说的是 a 发往别处的包）：a 的内核拼片缓存不被占用，a 到别处的路径 MTU 不被改成 552；b 的内核回给 a 的真的"端口不可达"照常。
 - managed：由 controller 管理：状态在节点详情里；一个节点关着网卡，别的节点发给它的包当场"不可达"；`i3t hosts`。
 - legacy：配置文件里的 `[intercept]` 不让节点起不来；以前的透明访问留下的规则和网卡被拆掉，网卡照常装上。
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import re
 import signal
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Iterator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lab as lablib  # noqa: E402
@@ -168,6 +180,11 @@ def rules(lab: Lab, work: Path, t: Checks) -> None:
     t.check("a 发起的 TCP 通", seen.stdout == a.virtual_ip, f"{seen.stdout!r} {seen.stderr.strip()}")
     echoed = udp_dial(a.host, b.virtual_ip, 5353, b"query")
     t.check("a 发起的 UDP 问答通（回答靠本节点记下的会话进来）", echoed.get("source") == f"{b.virtual_ip}:5353", str(echoed))
+    # 比 MTU 大的：两个方向都被内核切成片，b 那边攒齐了才交给内核，a 这边按第一片认出是回答。
+    large = udp_dial(a.host, b.virtual_ip, 5353, b"q" * 4000)
+    answer = bytes.fromhex(large.get("data", ""))
+    t.check("a 发起的 UDP 问答，比 MTU 大（切成了片）也通", answer == a.virtual_ip.encode() + b"|" + b"q" * 4000, str(large)[:300])
+    t.check("a 发起的大 ping（切成了片）通", received(ping(a, b.virtual_ip, "-s", "3000", count=2)) == 2)
 
     syn = dial(b.host, a.virtual_ip, 8080, limit=5)
     t.check("b 发起的 TCP：b 自己当场拒绝（被管理员禁止）", syn.get("error") == "OSError" and syn["seconds"] < FAST, str(syn))
@@ -514,6 +531,232 @@ def forward(lab: Lab, work: Path, t: Checks) -> None:
         print(tail(a.read_log(), 30), tail(b.read_log()), sep="\n  ---\n")
 
 
+def lan_reaches(a: Node, lan, sink: Path, destination: str) -> bool:
+    """局域网里的那台机器用它自己的地址（192.168.77.2）发一个 UDP 报文给 `destination` 的 7777 端口，a 上监听 0.0.0.0 的服务收到了没有。"""
+    before = sink.read_text().count("192.168.77.2") if sink.exists() else 0
+    lan.run(sys.executable, "-c", UDP_FROM, "192.168.77.2", destination, "7777")
+    time.sleep(0.5)
+    return (sink.read_text().count("192.168.77.2") if sink.exists() else 0) > before
+
+
+def fetch(host, url: str, *extra: str) -> subprocess.CompletedProcess:
+    return host.run("curl", "-sS", "--max-time", "3", *extra, url, check=False)
+
+
+@contextlib.contextmanager
+def nft_hidden(work: Path) -> Iterator[None]:
+    """这一段时间里谁都找不到 nft：每个找得到的 nft 上盖一个不能执行的空文件。盖在实验环境自己的挂载命名空间里，不碰真的系统。"""
+    blank = work / "not-nft"
+    blank.write_text("")
+    places = os.environ["PATH"].split(":") + ["/usr/sbin", "/sbin", "/usr/bin", "/bin"]
+    covered = sorted({os.path.realpath(Path(place) / "nft") for place in places if (Path(place) / "nft").exists()})
+    for path in covered:
+        lablib.sh("mount", "--bind", str(blank), path)
+    try:
+        yield
+    finally:
+        for path in covered:
+            lablib.sh("umount", path, check=False)
+
+
+def lan(lab: Lab, work: Path, t: Checks, *, nft: bool = True) -> None:
+    """局域网里的机器和接在 a 后面的"容器"都把虚拟 IP 指到 a：连不上 a 的虚拟 IP；容器经 a 访问别的节点照常。"""
+    a, b = pair(lab, work)
+    lan = private_link(lab, a.host, "lan", "192.168.77.0/24")
+    lan.run("ip", "route", "add", "10.66.0.0/16", "via", "192.168.77.1", "src", "192.168.77.2")
+    # 按来源查回去的路开着：局域网那台机器的地址本来就从那块网卡回得去，挡不住它。
+    for key in ("all", "default", "p-lan"):
+        a.host.run("sysctl", "-qw", f"net.ipv4.conf.{key}.rp_filter=1")
+    # 像 Docker 的 docker0：a 转发、出虚拟网卡时伪装成 a 的虚拟 IP。
+    box = private_link(lab, a.host, "box", "172.30.0.0/24")
+    box.run("ip", "route", "add", "10.66.0.0/16", "via", "172.30.0.1")
+    a.host.run("sysctl", "-qw", "net.ipv4.ip_forward=1")
+    a.host.run("nft", "-f", "-", input="table ip box {\n chain post {\n type nat hook postrouting priority srcnat;\n"
+                                       ' oifname "i3t0" ip saddr 172.30.0.0/24 masquerade\n }\n}\n')
+    sink = work / "sink"
+    a.host.spawn(sys.executable, "-c", UDP_SINK, "7777", str(sink))
+    start_whoami(a.host, 18080, bind="127.0.0.1")
+    start_whoami(b.host, 8080)
+    to_self = {"id": 7, "protocol": "tcp", "bind": f"{a.virtual_ip}:8080", "target": a.id}
+    with contextlib.nullcontext() if nft else nft_hidden(work):
+        lan_checks(a, b, lan, box, sink, to_self, t, nft=nft)
+
+
+def lan_checks(a: Node, b: Node, lan, box, sink: Path, to_self: dict, t: Checks, *, nft: bool) -> None:
+    """[`lan`] 的节点部分：启动、核对；开关关上再来一遍。"""
+    def start() -> bool:
+        a.start_static(a.netmap(peers=[b.as_peer()], me={
+            "forwards": [to_self], "forward_targets": [{"id": 7, "protocol": "tcp", "addr": "127.0.0.1:18080", "listener": a.id}],
+        }))
+        b.start_static(b.netmap(peers=[a.as_peer()]))
+        if not installed(t, a, b):
+            return False
+        if f"{a.virtual_ip}:8081 " not in a.host.run("ss", "-lnt").stdout:
+            start_whoami(a.host, 8081, bind=a.virtual_ip)
+        return True
+
+    if start():
+        seen = fetch(b.host, f"http://{a.virtual_ip}:8081/")
+        t.check("别的节点经虚拟网卡连 a 的虚拟 IP 上的服务（对照）", seen.stdout == b.virtual_ip, f"{seen.stdout!r} {seen.stderr.strip()}")
+        seen = fetch(b.host, f"http://{a.virtual_ip}:8080/")
+        t.check("别的节点经虚拟网卡连 a 的虚拟 IP 上的端口转发（对照）", seen.stdout == "127.0.0.1", f"{seen.stdout!r} {seen.stderr.strip()}")
+        t.check("局域网里的机器发给 a 在局域网里的地址的 UDP 照常（对照）", lan_reaches(a, lan, sink, "192.168.77.1"))
+        seen = fetch(lan, f"http://{a.virtual_ip}:8081/", "--interface", "192.168.77.2")
+        t.check("局域网里的机器用自己的地址连不上 a 的虚拟 IP 上的服务", seen.returncode != 0, f"{seen.stdout!r}")
+        seen = fetch(lan, f"http://{a.virtual_ip}:8080/", "--interface", "192.168.77.2")
+        t.check("  ……也连不上 a 的虚拟 IP 上的端口转发", seen.returncode != 0, f"{seen.stdout!r}")
+        t.check("  ……UDP 也进不来", not lan_reaches(a, lan, sink, a.virtual_ip))
+        seen = fetch(box, f"http://{b.virtual_ip}:8080/")
+        t.check("接在 a 后面的容器经 a 访问别的节点照常（伪装成 a 的虚拟 IP）", seen.stdout == a.virtual_ip, f"{seen.stdout!r} {seen.stderr.strip()}")
+        seen = fetch(box, f"http://{a.virtual_ip}:8081/")
+        t.check("接在 a 后面的容器连不了 a 自己的虚拟 IP（和局域网里的机器分不开）", seen.returncode != 0, f"{seen.stdout!r}")
+        if nft:
+            dropped = a.host.run("nft", "list", "table", "ip", "i3t0").stdout
+            t.check("丢掉它们的是防冒充的表里按目的的那条", re.search(r"fib daddr type local drop$", dropped, re.M) is not None, dropped)
+        else:
+            raw = a.host.run("iptables", "-t", "raw", "-S", "PREROUTING").stdout
+            ours = [line for line in raw.splitlines() if "ice3tier" in line]
+            t.check("没有 nft：丢掉它们的是 raw 表 PREROUTING 的前两条，按来源的在前、按目的的在后", ours == raw.splitlines()[1:3] == [
+                "-A PREROUTING -s 10.66.0.0/16 ! -i i3t0 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP",
+                "-A PREROUTING -d 10.66.0.0/16 ! -i i3t0 -m addrtype ! --src-type LOCAL --dst-type LOCAL -m comment --comment ice3tier -j DROP",
+            ], raw)
+            status = i3t(a, "network", "status").stdout
+            t.check("  ……i3t network status 列出这两条", "-s 10.66.0.0/16" in status and "-d 10.66.0.0/16" in status, status)
+    a.stop()
+    b.stop()
+    if not nft:
+        raw = a.host.run("iptables", "-t", "raw", "-S", "PREROUTING").stdout
+        t.check("  ……停下之后拆干净了", "ice3tier" not in raw, raw)
+
+    add_node_config(a, "[network]\nfirewall = false\n")
+    if start():
+        seen = fetch(lan, f"http://{a.virtual_ip}:8081/", "--interface", "192.168.77.2")
+        t.check("开关关着：虚拟 IP 上别的服务由这台机器自己管，内核照样收", seen.stdout == "192.168.77.2", f"{seen.stdout!r} {seen.stderr.strip()}")
+        seen = fetch(lan, f"http://{a.virtual_ip}:8080/", "--interface", "192.168.77.2")
+        t.check("  ……虚拟 IP 上的端口转发自己不收从别的网卡来的连接", seen.stdout != "127.0.0.1", f"{seen.stdout!r} {seen.stderr.strip()}")
+        t.check("  ……节点记下了为什么", "来源既不是本机，也不是可以访问本节点的节点" in a.read_log(), tail(a.read_log()))
+        seen = fetch(b.host, f"http://{a.virtual_ip}:8080/")
+        t.check("  ……别的节点照常", seen.stdout == "127.0.0.1", f"{seen.stdout!r} {seen.stderr.strip()}")
+    if t.failures:
+        print(tail(a.read_log(), 30), tail(b.read_log()), sep="\n  ---\n")
+
+
+def lan_iptables(lab: Lab, work: Path, t: Checks) -> None:
+    """同 lan，节点 a 找不到 nft：防冒充是 raw 表里的两条 iptables 规则。"""
+    lan(lab, work, t, nft=False)
+
+
+# 从标准输入读一行一个十六进制的 IPv4 包（头自己写好），用原始套接字原样发出去。打印发了几个。
+INJECT = r"""
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
+sent = 0
+for line in sys.stdin:
+    packet = bytes.fromhex(line.strip())
+    try:
+        s.sendto(packet, (socket.inet_ntoa(packet[16:20]), 0))
+        sent += 1
+    except OSError:
+        pass
+print(sent)
+"""
+
+# 连上一个 UDP 端口发一个报文，打印收到了什么：对端回了"端口不可达"时是 ConnectionRefusedError。参数：地址、端口。
+UDP_REFUSED = r"""
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(3)
+s.connect((sys.argv[1], int(sys.argv[2])))
+for _ in range(3):
+    s.send(b"anyone?")
+    try:
+        s.recv(100)
+        print("answered")
+        break
+    except socket.timeout:
+        continue
+    except OSError as error:
+        print(type(error).__name__)
+        break
+"""
+
+
+def internet_checksum(data: bytes) -> int:
+    data += b"\0" * (len(data) % 2)
+    total = sum(struct.unpack(f"!{len(data) // 2}H", data))
+    while total >> 16:
+        total = (total & 0xFFFF) + (total >> 16)
+    return ~total & 0xFFFF
+
+
+def ipv4_packet(source: str, destination: str, protocol: int, payload: bytes, *, ident: int = 0x4242, offset: int = 0,
+                more: bool = False) -> bytes:
+    """一个 IPv4 包，头 20 字节。`offset` 是片在原包里的字节偏移（8 的倍数），`more` 是 MF。"""
+    flags = (0x2000 if more else 0) | (offset // 8)
+    header = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 20 + len(payload), ident, flags, 64, protocol, 0,
+                         socket.inet_aton(source), socket.inet_aton(destination))
+    return header[:10] + struct.pack("!H", internet_checksum(header)) + header[12:] + payload
+
+
+def icmp_message(kind: int, code: int, rest: bytes, data: bytes) -> bytes:
+    body = struct.pack("!BBH", kind, code, 0) + rest + data
+    return body[:2] + struct.pack("!H", internet_checksum(body)) + body[4:]
+
+
+def inject(host, packets: list[bytes]) -> int:
+    done = host.run(sys.executable, "-c", INJECT, input="".join(packet.hex() + "\n" for packet in packets))
+    return int(done.stdout.strip() or 0)
+
+
+def reassembly_cache(host) -> tuple[int, int]:
+    """内核拼片缓存（这个网络命名空间的）：正在拼的包有几个，占多少字节。"""
+    found = re.search(r"FRAG: inuse (\d+) memory (\d+)", host.run("cat", "/proc/net/sockstat").stdout)
+    return (int(found.group(1)), int(found.group(2))) if found else (-1, -1)
+
+
+def hostile(lab: Lab, work: Path, t: Checks) -> None:
+    """b 不能访问 a，往 a 发拼不齐的片和伪造的 ICMP 差错报文：a 的内核不受影响，真的差错报文照常。"""
+    a, b = pair(lab, work)
+    a.start_static(a.netmap(peers=[b.as_peer(inbound=False)]))
+    b.start_static(b.netmap(peers=[a.as_peer(outbound=False)]))
+    if not installed(t, a, b):
+        return
+    t.check("a 发起的 ping 通（连接建好了）", received(ping(a, b.virtual_ip, count=2)) == 2)
+    refused = a.host.run(sys.executable, "-c", UDP_REFUSED, b.virtual_ip, "9", check=False)
+    t.check("a 连 b 上没开的 UDP 端口：b 的内核回的“端口不可达”照常进来", refused.stdout.strip() == "ConnectionRefusedError",
+            refused.stdout + refused.stderr)
+
+    before = reassembly_cache(a.host)
+    packets = []
+    for ident in range(1, 1201):
+        # 后面的片，第一片永远不来；任何协议都行（GRE）。
+        packets.append(ipv4_packet(b.virtual_ip, a.virtual_ip, 47, b"g" * 64, ident=ident, offset=1480, more=True))
+        # 第一片（ping 的回答，"回包"），后面的永远不来。
+        echo_reply = icmp_message(0, 0, struct.pack("!HH", 7, ident), b"r" * 48)
+        packets.append(ipv4_packet(b.virtual_ip, a.virtual_ip, 1, echo_reply, ident=ident, more=True))
+        # RFC 1858：16 个字节的 TCP 第一片，标志是 ACK。
+        segment = struct.pack("!HHIIBB", 40000, 22, 1, 1, 0x50, 0x10) + b"\0\0"
+        packets.append(ipv4_packet(b.virtual_ip, a.virtual_ip, 6, segment, ident=ident, more=True))
+    sent = inject(b.host, packets)
+    time.sleep(1.5)
+    after = reassembly_cache(a.host)
+    t.check(f"b 发了 {sent} 个拼不齐的片：a 的内核拼片缓存里一个也没有", sent > 0 and after == before == (0, 0), f"之前 {before}，之后 {after}")
+
+    # 伪造的"需要分片，下一跳 MTU 552"，说的是 a 从它 53 端口（名字服务）发往别处的一个 UDP 包。
+    targets = ("203.0.113.5", "10.66.0.9")
+    forged = []
+    for target in targets:
+        quoted = ipv4_packet(a.virtual_ip, target, 17, struct.pack("!HHHH", 53, 5353, 16, 0) + b"q" * 8)
+        forged.append(ipv4_packet(b.virtual_ip, a.virtual_ip, 1, icmp_message(3, 4, struct.pack("!HH", 0, 552), quoted[:28])))
+    inject(b.host, forged)
+    time.sleep(1)
+    for target in targets:
+        route = a.host.run("ip", "route", "get", target, check=False).stdout
+        t.check(f"伪造的“需要分片”没有把 a 到 {target} 的路径 MTU 改成 552", "mtu 552" not in route, route.strip())
+    if t.failures:
+        print(tail(a.read_log(), 30), tail(b.read_log()), sep="\n  ---\n")
+
+
 def managed(lab: Lab, work: Path, t: Checks) -> None:
     """由 controller 管理：状态在节点详情里；c 关着网卡，别的节点知道，发给它的包当场"不可达"；i3t hosts 写出名字。"""
     controller = Controller(lab.host("ctl"), work)
@@ -591,7 +834,7 @@ def legacy(lab: Lab, work: Path, t: Checks) -> None:
 SCENARIOS = {
     "basics": basics, "rules": rules, "relay": relay, "tcp_relay": tcp_relay, "nat": nat, "firewall": firewall, "privilege": privilege,
     "overlap": overlap, "appears": appears, "leftover": leftover, "restart": restart, "mtu": mtu, "forward": forward,
-    "managed": managed, "legacy": legacy,
+    "lan": lan, "lan_iptables": lan_iptables, "hostile": hostile, "managed": managed, "legacy": legacy,
 }
 
 
