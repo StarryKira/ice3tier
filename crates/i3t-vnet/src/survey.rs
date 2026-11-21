@@ -40,7 +40,7 @@ pub struct GuardRule {
     pub position: usize,
     /// 丢掉的来源地址段（`-s`）。没有或者读不出来时是 `None`：这样的规则也是自己的，装的时候按需要换掉。
     pub range: Option<Ipv4Net>,
-    /// 丢掉的目的地址段（`-d`，目的是本机地址的那一条）。
+    /// 丢掉的目的地址（`-d`，目的是本节点虚拟 IP 的那一条，`/32`）。
     pub destination: Option<Ipv4Net>,
     /// `iptables -S` 写出来的那一行去掉 `-A PREROUTING `：删的时候原样交回去（[`linux::delete_guard`]）。
     pub rule: String,
@@ -220,7 +220,7 @@ mod tests {
     const RAW: &str = "-P PREROUTING ACCEPT\n\
                        -A PREROUTING -d 172.17.0.2/32 ! -i docker0 -j DROP\n\
                        -A PREROUTING -s 10.66.0.0/16 ! -i i3t0 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP\n\
-                       -A PREROUTING -d 10.66.0.0/16 ! -i i3t0 -m addrtype ! --src-type LOCAL --dst-type LOCAL -m comment --comment ice3tier -j DROP\n\
+                       -A PREROUTING -d 10.66.0.1/32 ! -i i3t0 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP\n\
                        -A PREROUTING -p udp -m udp --dport 53 -j CT --notrack\n\
                        -A PREROUTING -s 10.66.0.0/16 ! -i i3t0 -m comment --comment \"ice3tier \\\"old\\\"\" -j DROP\n\
                        -A PREROUTING -s 10.99.0.0/16 ! -i i3t1 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP\n\
@@ -237,7 +237,7 @@ mod tests {
             destination: None,
             rule: text.into(),
         };
-        let to_us = "-d 10.66.0.0/16 ! -i i3t0 -m addrtype ! --src-type LOCAL --dst-type LOCAL -m comment --comment ice3tier -j DROP";
+        let to_us = "-d 10.66.0.1/32 ! -i i3t0 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP";
         assert_eq!(
             parse_raw_prerouting(RAW),
             [
@@ -247,7 +247,7 @@ mod tests {
                     "10.66.0.0/16",
                     "-s 10.66.0.0/16 ! -i i3t0 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP"
                 ),
-                GuardRule { range: None, destination: Some("10.66.0.0/16".parse().unwrap()), ..rule("i3t0", 3, "0.0.0.0/0", to_us) },
+                GuardRule { range: None, destination: Some("10.66.0.1/32".parse().unwrap()), ..rule("i3t0", 3, "0.0.0.0/0", to_us) },
                 rule(
                     "i3t1",
                     6,

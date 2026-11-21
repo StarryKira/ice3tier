@@ -24,7 +24,9 @@ const TCP_ACK: u8 = 0x10;
 /// TCP 头最短多少字节。
 const TCP_HEADER_MIN: usize = 20;
 
-/// IP 头里"后面还有片"（MF）的那一位，和片偏移占的那 13 位。
+/// IP 头里的保留位、"不许分片"（DF）、"后面还有片"（MF），和片偏移占的那 13 位。
+const RESERVED_FLAG: u16 = 0x8000;
+const DONT_FRAGMENT: u16 = 0x4000;
 const MORE_FRAGMENTS: u16 = 0x2000;
 const FRAGMENT_OFFSET: u16 = 0x1fff;
 
@@ -91,6 +93,29 @@ impl<'a> Ipv4<'a> {
     #[must_use]
     pub fn protocol(&self) -> u8 {
         self.bytes[9]
+    }
+
+    /// 头有多长（字节）：20，带 IP 选项时更长。
+    #[must_use]
+    pub fn header_len(&self) -> usize {
+        self.header_len
+    }
+
+    #[must_use]
+    pub fn ttl(&self) -> u8 {
+        self.bytes[8]
+    }
+
+    /// 头的校验和对不对。读包时不核对它（见模块的说明），只有要先替内核把关的地方（[`crate::fragments`]）问。
+    #[must_use]
+    pub fn header_checksum_ok(&self) -> bool {
+        checksum(&self.bytes[..self.header_len]) == 0
+    }
+
+    /// 标志里有没有置"不许分片"（DF）或者保留位。
+    #[must_use]
+    pub fn dont_fragment_or_reserved(&self) -> bool {
+        self.flags_and_offset() & (DONT_FRAGMENT | RESERVED_FLAG) != 0
     }
 
     #[must_use]
@@ -175,15 +200,21 @@ impl<'a> Ipv4<'a> {
     }
 
     /// 是不是一个 ICMP 的差错报文（不可达、超时、参数问题）。对差错报文不再回差错报文（RFC 1122 3.2.2）。
+    /// 被切开的包的后面几片看不出来（头后面是原包中间的任意字节），不算。
     #[must_use]
     pub fn is_icmp_error(&self) -> bool {
-        self.protocol() == ICMP && matches!(self.payload().first(), Some(&(ICMP_UNREACHABLE | ICMP_TIME_EXCEEDED | ICMP_PARAMETER_PROBLEM)))
+        matches!(self.icmp_type(), Some(ICMP_UNREACHABLE | ICMP_TIME_EXCEEDED | ICMP_PARAMETER_PROBLEM))
     }
 
-    /// 是不是一个 ICMP 重定向：路由器告诉主机去某个地址换一个下一跳。
+    /// 是不是一个 ICMP 重定向：路由器告诉主机去某个地址换一个下一跳。后面几片同上，不算。
     #[must_use]
     pub fn is_icmp_redirect(&self) -> bool {
-        self.protocol() == ICMP && self.payload().first() == Some(&ICMP_REDIRECT)
+        self.icmp_type() == Some(ICMP_REDIRECT)
+    }
+
+    /// ICMP 的类型：协议是 ICMP、不是被切开的包的后面几片、读得到类型时才有。
+    fn icmp_type(&self) -> Option<u8> {
+        (self.protocol() == ICMP && !self.is_later_fragment()).then(|| self.payload().first().copied()).flatten()
     }
 
     /// ICMP 差错报文里带回来的原包：只有它开头的一段，至少要有完整的 IP 头。读它的来源、目的、协议，和头后面的端口
@@ -322,6 +353,11 @@ pub(crate) mod testing {
         packet(ICMP, source, destination, &payload)
     }
 
+    /// IP 头的校验和（校验和那两个字节要先清零）。
+    pub(crate) fn header_checksum(header: &[u8]) -> u16 {
+        checksum(header)
+    }
+
     /// 改写一个包（[`packet`] 造的）的分片字段：标识 `id`，片偏移 `offset`（字节，8 的倍数），`more` 是 MF。
     pub(crate) fn refragment(mut bytes: Vec<u8>, id: u16, offset: usize, more: bool) -> Vec<u8> {
         let field = u16::try_from(offset / 8).unwrap() | if more { 0x2000 } else { 0 };
@@ -422,6 +458,29 @@ mod tests {
     }
 
     #[test]
+    fn the_header_tells_its_length_ttl_checksum_and_flags() {
+        let mut bytes = udp(A, B, (5000, 53), b"x");
+        let ip = Ipv4::parse(&bytes).unwrap();
+        assert_eq!((ip.header_len(), ip.ttl()), (20, 64));
+        assert!(ip.header_checksum_ok());
+        assert!(ip.dont_fragment_or_reserved(), "测试造的整包置了 DF");
+        let cut = refragment(bytes.clone(), 1, 0, true);
+        assert!(!Ipv4::parse(&cut).unwrap().dont_fragment_or_reserved(), "切开的片没有 DF");
+        bytes[11] ^= 1;
+        assert!(!Ipv4::parse(&bytes).unwrap().header_checksum_ok());
+        bytes[6] = 0x80;
+        assert!(Ipv4::parse(&bytes).unwrap().dont_fragment_or_reserved(), "保留位");
+        // 带 4 个字节的选项（一个 NOP 和三个"选项结束"）。
+        let mut with_options = vec![0x46, 0, 0, 28, 0, 1, 0x20, 0, 64, UDP, 0, 0, 10, 66, 0, 2, 10, 66, 0, 1, 1, 0, 0, 0];
+        with_options.extend_from_slice(&[0, 53, 19, 136]);
+        let sum = checksum(&with_options[..24]);
+        with_options[10..12].copy_from_slice(&sum.to_be_bytes());
+        let ip = Ipv4::parse(&with_options).unwrap();
+        assert_eq!(ip.header_len(), 24);
+        assert!(ip.header_checksum_ok());
+    }
+
+    #[test]
     fn a_tcp_segment_that_is_cut_or_too_short_for_its_header_is_not_judged_by_its_flags() {
         let kind = |bytes: &[u8]| Ipv4::parse(bytes).unwrap().conversation();
         // RFC 1858 的手法：第一片短得只有 16 个字节、标志是 ACK，后面偏移 8 的一片把标志改写成 SYN。
@@ -457,6 +516,12 @@ mod tests {
         let redirect = icmp_error(B, A, ICMP_REDIRECT, 1, &sent[..28]);
         assert!(Ipv4::parse(&redirect).unwrap().is_icmp_redirect());
         assert!(!ip.is_icmp_redirect());
+        // 后面几片头后面是原包中间的字节，碰巧是 3 或者 5 也不算。
+        let later_error = refragment(icmp_error(B, A, ICMP_UNREACHABLE, 3, &sent[..28]), 5, 8, false);
+        assert!(!Ipv4::parse(&later_error).unwrap().is_icmp_error());
+        assert!(Ipv4::parse(&later_error).unwrap().quoted().is_none());
+        let later_redirect = refragment(redirect, 5, 8, false);
+        assert!(!Ipv4::parse(&later_redirect).unwrap().is_icmp_redirect());
     }
 
     #[test]

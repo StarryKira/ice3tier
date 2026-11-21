@@ -18,6 +18,7 @@ use std::thread;
 use std::time::Duration;
 
 use i3t_model::control::{Firewall, NameService, RuleState, VnetCause};
+use ipnet::Ipv4Net;
 
 use crate::device::Platform;
 use crate::machine::{CommandError, Machine, Program};
@@ -47,7 +48,8 @@ pub fn install_firewall(machine: &mut impl Machine, platform: Platform, plan: &P
     match platform {
         Platform::Linux => {
             let survey = Survey::take(machine, platform, &plan.device);
-            let guard = match machine.run(Program::Nft, &args(&["-f", "-"]), Some(&linux::guard_script(&plan.device, plan.cidr))) {
+            let guard = match machine.run(Program::Nft, &args(&["-f", "-"]), Some(&linux::guard_script(&plan.device, plan.own, plan.cidr)))
+            {
                 Ok(_) => {
                     // 表装上了：还没有 nft 时加的那条 raw 规则拆掉。读不了 raw 表（没有 iptables、内核里没有这张表、没有权限）时
                     // 那里也就没有拆得了的；拆不掉也不要紧，它和表管的是同一件事。表照样算装上了。
@@ -138,8 +140,9 @@ fn install_accept(machine: &mut impl Machine, device: &str, found: &[AcceptRule]
     machine.run(Program::Iptables, &linux::insert_accept(device), None).map(drop)
 }
 
-/// 没有 `nft` 时的防冒充：`raw` 表 PREROUTING 链的第一、二条正好是这块网卡的、地址段是现在的那两条（按来源的在前，按目的的在后）；
-/// 不是的话（崩溃留下的、地址段变了的、被别人挤到了后面的、以前的版本只有按来源的一条）这块网卡的全删掉再插。
+/// 没有 `nft` 时的防冒充：`raw` 表 PREROUTING 链的第一、二条正好是这块网卡的、地址段和虚拟 IP 是现在的那两条（按来源的在前，
+/// 按目的的在后）；不是的话（崩溃留下的、地址段或者虚拟 IP 变了的、被别人挤到了后面的、以前的版本只有按来源的一条）这块网卡的
+/// 全删掉再插。
 /// `found` 是读回来的这条链。
 ///
 /// 两个程序都没有时说缺 `nft`：装上它就是本来的做法，状态里写的是要装 nftables。
@@ -149,17 +152,17 @@ fn install_raw_guard(machine: &mut impl Machine, plan: &Plan, found: Result<Vec<
         other => other,
     })?;
     let ours: Vec<&GuardRule> = found.iter().filter(|rule| rule.device == plan.device).collect();
-    let range = Some(plan.cidr.trunc());
+    let (range, own) = (Some(plan.cidr.trunc()), Some(Ipv4Net::from(plan.own)));
     if let [spoofed, to_us] = ours.as_slice()
         && (spoofed.position, spoofed.range, spoofed.destination) == (1, range, None)
-        && (to_us.position, to_us.range, to_us.destination) == (2, None, range)
+        && (to_us.position, to_us.range, to_us.destination) == (2, None, own)
     {
         return Ok(());
     }
     for rule in ours {
         delete_guard_rule(machine, rule)?;
     }
-    for insert in linux::insert_guards(&plan.device, plan.cidr) {
+    for insert in linux::insert_guards(&plan.device, plan.own, plan.cidr) {
         machine.run(Program::Iptables, &insert, None)?;
     }
     Ok(())
@@ -397,10 +400,9 @@ mod tests {
     /// 没有 nft 时防冒充的那条，`iptables -S` 写出来的样子。
     const GUARD: &str = "-s 10.66.0.0/16 ! -i i3t0 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP";
     /// 防冒充的第二条：目的是本机的地址。
-    const TO_US: &str = "-d 10.66.0.0/16 ! -i i3t0 -m addrtype ! --src-type LOCAL --dst-type LOCAL -m comment --comment ice3tier -j DROP";
+    const TO_US: &str = "-d 10.66.0.1/32 ! -i i3t0 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP";
     const GUARD_I3T1: &str = "-s 10.66.0.0/16 ! -i i3t1 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP";
-    const TO_US_I3T1: &str =
-        "-d 10.66.0.0/16 ! -i i3t1 -m addrtype ! --src-type LOCAL --dst-type LOCAL -m comment --comment ice3tier -j DROP";
+    const TO_US_I3T1: &str = "-d 10.66.0.1/32 ! -i i3t1 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP";
     /// Docker 在 raw 表里加的那种规则：别人的，不动。
     const DOCKER: &str = "-d 172.17.0.2/32 ! -i docker0 -j DROP";
 
@@ -498,7 +500,7 @@ mod tests {
         let firewall = install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
         assert_eq!(firewall, Firewall { accept: RuleState::On, guard: RuleState::On });
         assert_eq!(fake.raw, [GUARD, TO_US, DOCKER], "插在最前面，按来源的在前");
-        for insert in linux::insert_guards("i3t0", plan("i3t0").cidr) {
+        for insert in linux::insert_guards("i3t0", plan("i3t0").own, plan("i3t0").cidr) {
             let inserted = format!("iptables {}", insert.join(" "));
             assert!(fake.log.contains(&inserted), "{:?}", fake.log);
         }
@@ -534,6 +536,15 @@ mod tests {
     }
 
     #[test]
+    fn without_nft_a_changed_virtual_ip_replaces_the_rule_for_it() {
+        let mut fake = Fake { missing: vec![Program::Nft], ..Fake::default() };
+        install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
+        let renumbered = Plan { own: Ipv4Addr::new(10, 66, 0, 9), ..plan("i3t0") };
+        assert_eq!(install_firewall(&mut fake, Platform::Linux, &renumbered).guard, RuleState::On);
+        assert_eq!(fake.raw, [GUARD, "-d 10.66.0.9/32 ! -i i3t0 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP"]);
+    }
+
+    #[test]
     fn without_nft_the_single_rule_of_an_earlier_version_gets_its_second_rule() {
         let mut fake = Fake { missing: vec![Program::Nft], raw: vec![GUARD.into(), DOCKER.into()], ..Fake::default() };
         assert_eq!(install_firewall(&mut fake, Platform::Linux, &plan("i3t0")).guard, RuleState::On);
@@ -545,14 +556,14 @@ mod tests {
         let mut fake = Fake { missing: vec![Program::Nft], ..Fake::default() };
         install_firewall(&mut fake, Platform::Linux, &plan("i3t1"));
         install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
-        let moved = Plan { cidr: "10.77.0.0/16".parse().unwrap(), ..plan("i3t0") };
+        let moved = Plan { own: Ipv4Addr::new(10, 77, 0, 1), cidr: "10.77.0.0/16".parse().unwrap(), ..plan("i3t0") };
         let firewall = install_firewall(&mut fake, Platform::Linux, &moved);
         assert_eq!(firewall.guard, RuleState::On);
         assert_eq!(
             fake.raw,
             [
                 "-s 10.77.0.0/16 ! -i i3t0 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP",
-                "-d 10.77.0.0/16 ! -i i3t0 -m addrtype ! --src-type LOCAL --dst-type LOCAL -m comment --comment ice3tier -j DROP",
+                "-d 10.77.0.1/32 ! -i i3t0 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP",
                 GUARD_I3T1,
                 TO_US_I3T1
             ],

@@ -135,7 +135,7 @@ pub(crate) fn status(state: &StateDir, live: Option<&LiveStatus>) {
         for rule in rules {
             let matched = match (rule.range, rule.destination) {
                 (Some(range), _) => format!("! -i {} -s {range}", rule.device),
-                (None, Some(range)) => format!("! -i {} -d {range} --dst-type LOCAL", rule.device),
+                (None, Some(own)) => format!("! -i {} -d {own}", rule.device),
                 (None, None) => format!("! -i {}", rule.device),
             };
             fields.add(t.guard_rule, (t.guard_at)(rule.position, &matched));

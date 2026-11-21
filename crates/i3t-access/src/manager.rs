@@ -679,8 +679,9 @@ async fn serve<C: Connector + Datagrams>(shared: Arc<Shared<C>>, key: Key, strea
     if let Err(error) = i3t_flow::keep_alive(&stream) {
         tracing::debug!(%error, "客户端连接打不开内核保活，客户端悄悄消失时这条连接要等到有数据要发才会发现");
     }
+    // 防火墙开关关着时，局域网里一次端口扫描就是一串这样的连接：只记在 debug 里，不刷屏。
     if !virtual_ip_admits(&netmap, key.bind(), from) {
-        return tracing::info!(
+        return tracing::debug!(
             "拒绝了一条连接：监听在本节点的虚拟 IP 上，来源既不是本机，也不是可以访问本节点的节点（多半是从别的网卡进来的）"
         );
     }

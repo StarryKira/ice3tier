@@ -570,6 +570,13 @@ impl<D: Device, P: Packets> Inbound<D, P> {
         if ip.protocol() == TCP {
             return self.log.note(&self.counters, Loss::Malformed, &format!("节点 {peer} 发来的 TCP 被切成了片"));
         }
+        // 差错报文和重定向齐了也不放（见 [`Self::judge`]），第一片一到就扔，不用攒。
+        if ip.is_icmp_error() {
+            return self.log.note(&self.counters, Loss::Malformed, &format!("节点 {peer}：ICMP 差错报文被切成了片"));
+        }
+        if ip.is_icmp_redirect() {
+            return self.log.note(&self.counters, Loss::NotAllowed, &format!("节点 {peer} 发来一个 ICMP 重定向"));
+        }
         match self.fragments.accept(&ip, packet.clone(), Instant::now()) {
             Gathered::Waiting => {}
             Gathered::Broken(why) => self.log.note(&self.counters, Loss::Malformed, &format!("节点 {peer} 发来的 IP 分片拼不起来：{why}")),

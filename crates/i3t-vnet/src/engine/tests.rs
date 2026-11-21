@@ -387,6 +387,32 @@ async fn ip_fragments_go_in_together_once_complete_and_never_alone() {
     world.peer_sends(2, whole(&pieces[2]));
     world.nothing_to_kernel().await;
     assert_eq!(world.snapshot().dropped.malformed, 1, "重叠的那一片");
+
+    // 后一片是内核拼片之前就会扔的（头的校验和不对）：前一片也不交给内核，不然它会留在内核的拼片缓存里。
+    let pair = split(&udp(B, ME, (7, 5000), &[2; 1500]), 43, 1232);
+    let mut broken = pair[1].clone();
+    broken[11] ^= 0xff;
+    world.peer_sends(2, whole(&pair[0]));
+    world.peer_sends(2, whole(&broken));
+    world.nothing_to_kernel().await;
+    assert_eq!(world.snapshot().dropped.malformed, 2);
+}
+
+#[tokio::test]
+async fn a_fragmented_icmp_error_or_redirect_is_dropped_at_its_first_piece() {
+    let mut world = world(netmap(&serde_json::json!([peer(2, true, true)]), &[]), &[2], Duration::ZERO);
+    let quoted = udp(ME, B, (5000, 53), &[1; 64]);
+    let error = split(&icmp_error(B, ME, 3, 3, &quoted), 50, 48);
+    let redirect = split(&icmp_error(B, ME, 5, 1, &quoted), 51, 48);
+    world.peer_sends(2, whole(&error[0]));
+    world.peer_sends(2, whole(&redirect[0]));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let dropped = world.snapshot().dropped;
+    assert_eq!((dropped.malformed, dropped.not_allowed), (1, 1), "第一片一到就扔，不等后面的：{dropped:?}");
+    for piece in error[1..].iter().chain(&redirect[1..]) {
+        world.peer_sends(2, whole(piece));
+    }
+    world.nothing_to_kernel().await;
 }
 
 #[tokio::test]
@@ -397,9 +423,13 @@ async fn tcp_fragments_are_dropped_from_every_peer() {
         let ack = tcp(from, ME, (40000, 22), 0x10);
         let mut head = ack[..36].to_vec();
         head[2..4].copy_from_slice(&36u16.to_be_bytes());
-        world.peer_sends(raw, whole(&refragment(head, 7, 0, true)));
         let syn = tcp(from, ME, (40000, 22), 0x02);
-        world.peer_sends(raw, whole(&refragment(syn[..20].iter().chain(&syn[28..]).copied().collect(), 7, 8, false)));
+        let mut tail: Vec<u8> = syn[..20].iter().chain(&syn[28..]).copied().collect();
+        tail[2..4].copy_from_slice(&32u16.to_be_bytes());
+        for piece in [refragment(head, 7, 0, true), refragment(tail, 7, 8, false)] {
+            assert!(Ipv4::parse(&piece).is_ok_and(|ip| ip.is_fragment()), "是读得懂的片，扔掉它的是“TCP 被切开了”");
+            world.peer_sends(raw, whole(&piece));
+        }
     }
     world.nothing_to_kernel().await;
     assert_eq!(world.snapshot().dropped.malformed, 4);

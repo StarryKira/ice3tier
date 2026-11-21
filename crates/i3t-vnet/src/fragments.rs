@@ -9,6 +9,10 @@
 //! 后面的片不会单独溜进去。重叠的片整个扔掉：有的系统拼片时让后到的盖掉先到的，后面的片因此能改写第一片里的端口和标志
 //! （RFC 1858、RFC 3128）。TCP 不该被切，切开的 TCP 在这之前就扔了。
 //!
+//! 齐了的片是原样写进网卡的，所以每一片都要是内核会收进拼片缓存的样子：内核在拼片之前就扔的片（头的校验和不对、带着不合规矩的
+//! IP 选项）要是混在里面，它前面的片照样留在内核的缓存里，又是一个拼不齐的包。因此片上不许有选项（头正好 20 字节，内核发出的片
+//! 都是这样，要带的选项在第一片里）、头的校验和要对、不许置"不许分片"和保留位、TTL 不是 0，有一条不符合，这个包整个扔掉。
+//!
 //! 内存的上限：每个对端最多同时攒 [`MAX_PER_PEER`] 个包、[`PEER_BYTES`] 字节，超出时扔它自己最早的；所有对端加起来最多
 //! [`TOTAL_BYTES`] 字节，超出时扔攒得最多的那个对端最早的。一个包从先到的那片算起最多等 [`FRAGMENT_WAIT`]。
 
@@ -38,7 +42,7 @@ pub const MAX_PIECES: usize = 192;
 /// 每一片除了它自己的字节，记账时另外算这么多：很小的片攒不了太多。
 const PIECE_OVERHEAD: usize = 64;
 
-/// 拼起来的内容（头后面的部分）最长多少：IPv4 的包最长 65535 字节，头至少 20 字节。
+/// 拼起来的内容（头后面的部分）最长多少：IPv4 的包最长 65535 字节，片的头正好 20 字节。
 const MAX_CONTENT: usize = 65535 - 20;
 
 /// 多久扫一次过期的包。
@@ -114,7 +118,7 @@ impl Fragments {
         let start = ip.fragment_offset();
         let end = start + ip.payload().len();
         let last = !ip.more_fragments();
-        if let Err(why) = check_alone(start, end, last) {
+        if let Err(why) = check_alone(ip, start, end, last) {
             self.remove(source, key);
             return Gathered::Broken(why);
         }
@@ -205,8 +209,20 @@ impl Fragments {
     }
 }
 
-/// 只看这一片自己就知道不对的。
-fn check_alone(start: usize, end: usize, last: bool) -> Result<(), &'static str> {
+/// 只看这一片自己就知道不对的：头是内核拼片之前就会扔的样子，或者内容的长度、位置不对。
+fn check_alone(ip: &Ipv4<'_>, start: usize, end: usize, last: bool) -> Result<(), &'static str> {
+    if ip.header_len() != 20 {
+        return Err("片上带着 IP 选项");
+    }
+    if !ip.header_checksum_ok() {
+        return Err("IP 头的校验和不对");
+    }
+    if ip.dont_fragment_or_reserved() {
+        return Err("片上置了“不许分片”或者保留位");
+    }
+    if ip.ttl() == 0 {
+        return Err("TTL 是 0");
+    }
     if end == start {
         return Err("空的片");
     }
@@ -263,7 +279,7 @@ impl Datagram {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ipv4::testing::{icmp, refragment, split, udp};
+    use crate::ipv4::testing::{header_checksum, icmp, refragment, split, udp};
 
     const ME: [u8; 4] = [10, 66, 0, 1];
     const B: [u8; 4] = [10, 66, 0, 2];
@@ -349,6 +365,52 @@ mod tests {
         let huge = refragment(udp(B, ME, (53, 5000), &[1; 40]), 4, 65512, false);
         assert_eq!(give(&mut fragments, &huge, now), Gathered::Broken("拼起来比 IPv4 的包能有的还长"));
         assert_eq!(fragments.pending(), 0);
+    }
+
+    #[test]
+    fn a_piece_the_kernel_would_drop_before_reassembly_breaks_the_whole_packet() {
+        let now = Instant::now();
+        let pieces = split(&icmp(B, ME, 0).into_iter().chain([7; 8]).collect::<Vec<u8>>(), 9, 8);
+        assert_eq!(pieces.len(), 2);
+        // 第二片带上不合规矩的选项（记录路由，长度写 0），头的校验和是对的：内核在拼片之前就扔掉它，第一片会留在缓存里。
+        let mut options = pieces[1][..20].to_vec();
+        options[0] = 0x46;
+        options[2..4].copy_from_slice(&32u16.to_be_bytes());
+        options.extend_from_slice(&[7, 0, 0, 0]);
+        options.extend_from_slice(&pieces[1][20..]);
+        options[10..12].fill(0);
+        let sum = header_checksum(&options[..24]);
+        options[10..12].copy_from_slice(&sum.to_be_bytes());
+        let mut bad_sum = pieces[1].clone();
+        bad_sum[11] ^= 0xff;
+        let mut df = pieces[1].clone();
+        df[6] |= 0x40;
+        let mut reserved = pieces[1].clone();
+        reserved[6] |= 0x80;
+        let mut no_ttl = pieces[1].clone();
+        no_ttl[8] = 0;
+        // 改了头之后把校验和重新算对：只让要测的那一条不对。
+        let resum = |mut bytes: Vec<u8>| {
+            bytes[10..12].fill(0);
+            let sum = header_checksum(&bytes[..20]);
+            bytes[10..12].copy_from_slice(&sum.to_be_bytes());
+            bytes
+        };
+        for (piece, why) in [
+            (options, "片上带着 IP 选项"),
+            (bad_sum, "IP 头的校验和不对"),
+            (resum(df), "片上置了“不许分片”或者保留位"),
+            (resum(reserved), "片上置了“不许分片”或者保留位"),
+            (resum(no_ttl), "TTL 是 0"),
+        ] {
+            let mut fragments = Fragments::default();
+            assert_eq!(give(&mut fragments, &pieces[0], now), Gathered::Waiting);
+            assert_eq!(give(&mut fragments, &piece, now), Gathered::Broken(why));
+            assert_eq!(fragments.pending(), 0, "{why}：第一片也扔了，不会交给内核");
+        }
+        let mut fragments = Fragments::default();
+        give(&mut fragments, &pieces[0], now);
+        assert_eq!(give(&mut fragments, &pieces[1], now), complete(&pieces), "对照：两片都是好的");
     }
 
     #[test]

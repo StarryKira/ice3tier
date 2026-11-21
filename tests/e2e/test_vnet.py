@@ -25,7 +25,8 @@
   UDP 也进不来；像 Docker 那样接在 a 后面、经 a 伪装出去的"容器"访问别的节点照常，连不了 a 自己的虚拟 IP。防火墙开关关着时，
   虚拟 IP 上的服务由这台机器自己管（进得来），端口转发自己不收从别的网卡来的连接。lan_iptables：同 lan，a 找不到 nft，
   防冒充是 raw 表里的两条 iptables 规则（读回来的写法和程序认的一样，停下之后拆干净）。
-- hostile：b 不能访问 a，它在自己的机器上用原始套接字经虚拟网卡往 a 发拼不齐的 IP 分片（还有切开的 TCP）和伪造的 ICMP"需要分片"
+- hostile：b 不能访问 a，它在自己的机器上用原始套接字经虚拟网卡往 a 发拼不齐的 IP 分片（还有切开的 TCP、凑得齐但后一片带着
+  内核会先扔掉的坏选项的）和伪造的 ICMP"需要分片"
   （说的是 a 发往别处的包）：a 的内核拼片缓存不被占用，a 到别处的路径 MTU 不被改成 552；b 的内核回给 a 的真的"端口不可达"照常。
 - managed：由 controller 管理：状态在节点详情里；一个节点关着网卡，别的节点发给它的包当场"不可达"；`i3t hosts`。
 - legacy：配置文件里的 `[intercept]` 不让节点起不来；以前的透明访问留下的规则和网卡被拆掉，网卡照常装上。
@@ -612,16 +613,17 @@ def lan_checks(a: Node, b: Node, lan, box, sink: Path, to_self: dict, t: Checks,
         t.check("接在 a 后面的容器连不了 a 自己的虚拟 IP（和局域网里的机器分不开）", seen.returncode != 0, f"{seen.stdout!r}")
         if nft:
             dropped = a.host.run("nft", "list", "table", "ip", "i3t0").stdout
-            t.check("丢掉它们的是防冒充的表里按目的的那条", re.search(r"fib daddr type local drop$", dropped, re.M) is not None, dropped)
+            t.check("丢掉它们的是防冒充的表里按目的的那条", re.search(rf"ip daddr {re.escape(a.virtual_ip)} drop$", dropped, re.M) is not None,
+                    dropped)
         else:
             raw = a.host.run("iptables", "-t", "raw", "-S", "PREROUTING").stdout
             ours = [line for line in raw.splitlines() if "ice3tier" in line]
             t.check("没有 nft：丢掉它们的是 raw 表 PREROUTING 的前两条，按来源的在前、按目的的在后", ours == raw.splitlines()[1:3] == [
                 "-A PREROUTING -s 10.66.0.0/16 ! -i i3t0 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP",
-                "-A PREROUTING -d 10.66.0.0/16 ! -i i3t0 -m addrtype ! --src-type LOCAL --dst-type LOCAL -m comment --comment ice3tier -j DROP",
+                "-A PREROUTING -d 10.66.0.1/32 ! -i i3t0 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP",
             ], raw)
             status = i3t(a, "network", "status").stdout
-            t.check("  ……i3t network status 列出这两条", "-s 10.66.0.0/16" in status and "-d 10.66.0.0/16" in status, status)
+            t.check("  ……i3t network status 列出这两条", "-s 10.66.0.0/16" in status and "-d 10.66.0.1/32" in status, status)
     a.stop()
     b.stop()
     if not nft:
@@ -690,11 +692,11 @@ def internet_checksum(data: bytes) -> int:
 
 
 def ipv4_packet(source: str, destination: str, protocol: int, payload: bytes, *, ident: int = 0x4242, offset: int = 0,
-                more: bool = False) -> bytes:
-    """一个 IPv4 包，头 20 字节。`offset` 是片在原包里的字节偏移（8 的倍数），`more` 是 MF。"""
+                more: bool = False, options: bytes = b"") -> bytes:
+    """一个 IPv4 包，头 20 字节加上 `options`（4 的倍数）。`offset` 是片在原包里的字节偏移（8 的倍数），`more` 是 MF。"""
     flags = (0x2000 if more else 0) | (offset // 8)
-    header = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 20 + len(payload), ident, flags, 64, protocol, 0,
-                         socket.inet_aton(source), socket.inet_aton(destination))
+    header = struct.pack("!BBHHHBBH4s4s", 0x45 + len(options) // 4, 0, 20 + len(options) + len(payload), ident, flags, 64,
+                         protocol, 0, socket.inet_aton(source), socket.inet_aton(destination)) + options
     return header[:10] + struct.pack("!H", internet_checksum(header)) + header[12:] + payload
 
 
@@ -741,6 +743,17 @@ def hostile(lab: Lab, work: Path, t: Checks) -> None:
     time.sleep(1.5)
     after = reassembly_cache(a.host)
     t.check(f"b 发了 {sent} 个拼不齐的片：a 的内核拼片缓存里一个也没有", sent > 0 and after == before == (0, 0), f"之前 {before}，之后 {after}")
+
+    # 两片凑得齐，可后一片带着不合规矩的选项（记录路由，长度写 0）：内核在拼片之前就扔掉它，前一片要是交给了内核就留在缓存里。
+    pairs = []
+    for ident in range(2001, 3201):
+        echo_reply = icmp_message(0, 0, struct.pack("!HH", 7, ident), b"")
+        pairs.append(ipv4_packet(b.virtual_ip, a.virtual_ip, 1, echo_reply, ident=ident, more=True))
+        pairs.append(ipv4_packet(b.virtual_ip, a.virtual_ip, 1, b"p" * 8, ident=ident, offset=8, options=bytes([7, 0, 0, 0])))
+    sent = inject(b.host, pairs)
+    time.sleep(1.5)
+    after = reassembly_cache(a.host)
+    t.check(f"b 发了 {sent // 2} 对后一片带坏选项的片：a 的内核拼片缓存里也一个都没有", sent > 0 and after == (0, 0), f"之后 {after}")
 
     # 伪造的"需要分片，下一跳 MTU 552"，说的是 a 从它 53 端口（名字服务）发往别处的一个 UDP 包。
     targets = ("203.0.113.5", "10.66.0.9")

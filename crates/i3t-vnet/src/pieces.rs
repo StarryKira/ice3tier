@@ -5,7 +5,7 @@
 //! [`PIECE_WAIT`]，超出时扔最早的。一个对端最多占 [`MAX_PENDING_PER_PEER`] 个，超出时扔它自己最早的：一个对端发来一堆凑不成对的片，
 //! 挤不掉别的对端正在等的。
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
@@ -21,12 +21,10 @@ pub const MAX_PENDING_PER_PEER: usize = MAX_PENDING / 4;
 /// 一片最多等另一片多久。两片是一前一后发出去的，正常时差不了一个往返；等不到多半是丢了，上面的协议自己重发。
 pub const PIECE_WAIT: Duration = Duration::from_secs(2);
 
-/// 没拼完的包：（对端，包号）到已经到了的那一片。
+/// 没拼完的包：（对端，包号）到已经到了的那一片。最多 [`MAX_PENDING`] 个，过期的和最早的都直接扫这张表找，不另外记先后。
 #[derive(Debug, Default)]
 pub struct Reassembly {
     pending: HashMap<(NodeId, u16), Partial>,
-    /// 按到的先后，扔最早的用。和 `pending` 里的不一定一一对应：拼完的包从 `pending` 里拿掉，这里的留到被扫过去。
-    order: VecDeque<(Instant, NodeId, u16)>,
 }
 
 #[derive(Debug)]
@@ -51,17 +49,16 @@ pub enum Assembled {
 impl Reassembly {
     /// 收下 `peer` 发来的一片。
     pub fn accept(&mut self, peer: NodeId, fragment: Fragment, bytes: Bytes, now: Instant) -> Assembled {
-        self.expire(now);
+        self.pending.retain(|_, partial| now.saturating_duration_since(partial.arrived) < PIECE_WAIT);
         let key = (peer, fragment.message);
         let Some(first) = self.pending.remove(&key) else {
             if self.pending.keys().filter(|(from, _)| *from == peer).count() >= MAX_PENDING_PER_PEER {
-                self.drop_oldest_of(peer);
+                self.drop_oldest(Some(peer));
             }
-            while self.pending.len() >= MAX_PENDING {
-                self.drop_oldest();
+            if self.pending.len() >= MAX_PENDING {
+                self.drop_oldest(None);
             }
             self.pending.insert(key, Partial { arrived: now, count: fragment.count, index: fragment.index, bytes });
-            self.order.push_back((now, peer, fragment.message));
             return Assembled::Waiting;
         };
         // 切片最多两片（`MAX_PACKET_PIECES`），所以另一片一到就齐了。
@@ -84,35 +81,16 @@ impl Reassembly {
         self.pending.len()
     }
 
-    fn expire(&mut self, now: Instant) {
-        while let Some(&(arrived, peer, message)) = self.order.front() {
-            let stale = now.saturating_duration_since(arrived) >= PIECE_WAIT;
-            let gone = self.pending.get(&(peer, message)).is_none_or(|partial| partial.arrived != arrived);
-            if !stale && !gone {
-                break;
-            }
-            self.order.pop_front();
-            if stale && !gone {
-                self.pending.remove(&(peer, message));
-            }
-        }
-    }
-
-    /// 扔掉 `peer` 最早的那个。只在它占满了自己的份额时用，最多扫 [`MAX_PENDING`] 个。
-    fn drop_oldest_of(&mut self, peer: NodeId) {
-        let oldest =
-            self.pending.iter().filter(|((from, _), _)| *from == peer).min_by_key(|(_, partial)| partial.arrived).map(|(key, _)| *key);
+    /// 扔掉最早到的那一片：`peer` 有值时只在它的里面挑。表最多 [`MAX_PENDING`] 个，直接扫。
+    fn drop_oldest(&mut self, peer: Option<NodeId>) {
+        let oldest = self
+            .pending
+            .iter()
+            .filter(|((from, _), _)| peer.is_none_or(|peer| *from == peer))
+            .min_by_key(|(_, partial)| partial.arrived)
+            .map(|(key, _)| *key);
         if let Some(key) = oldest {
             self.pending.remove(&key);
-        }
-    }
-
-    fn drop_oldest(&mut self) {
-        while let Some((arrived, peer, message)) = self.order.pop_front() {
-            if self.pending.get(&(peer, message)).is_some_and(|partial| partial.arrived == arrived) {
-                self.pending.remove(&(peer, message));
-                return;
-            }
         }
     }
 }
