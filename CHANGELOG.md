@@ -2,6 +2,18 @@
 
 The node, the controller, the command line and the web UI share one version number.
 
+## 0.1.34 (2026-11-21)
+
+- Fixed: a node that was removed, or whose key changed, could keep a connection that was being set up at that moment, and its ice3proxy connections stayed open. Both are closed at once now.
+- Install script: `sudo i3t join --help` no longer restarts the service; installs without root work on Debian, where `/usr/sbin` is not on `PATH`; macOS reloads a changed service definition on upgrade; the controller's first admin token is found whatever the caller's time zone.
+- `i3t-controller --reset-admin-token` needs only `--data-dir`, and refuses a directory that is not a controller's data directory instead of creating a new controller in it.
+- New deployment guide: `docs/deployment.md`.
+- Web UI: works on phone screens.
+- Web UI: adding a node uses the install script, in three steps.
+- Web UI: the activity log is paged, and search covers every entry instead of the ones loaded so far.
+- Web UI: the command to reset the admin token comes filled in with the controller's data directory; the sign-in and node update settings no longer stretch across a wide window.
+- Upgrade nodes and the controller.
+
 ## 0.1.33 (2026-11-20)
 
 - One-line install on Linux and macOS: `curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh` installs the node as a service (a systemd unit running as its own user on Linux, a launchd daemon on macOS); `sudo i3t join` then joins and starts it. `--controller` installs the controller as a systemd unit.
