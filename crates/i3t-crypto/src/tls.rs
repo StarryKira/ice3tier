@@ -140,7 +140,7 @@ pub fn peer_key(end_entity: &CertificateDer<'_>) -> Result<PublicKey, TlsError> 
 /// 优先用哪一种加密。
 ///
 /// CPU 有 AES 指令时 AES-GCM 最省：本机实验环境里（有 AES 和向量指令的 x86）满速传输每 GB 0.67 秒 CPU，ChaCha20-Poly1305 是 1.02 秒，
-/// 吞吐也低三分之一；AES-128 和 AES-256 量不出差别。没有 AES 指令的 CPU（不少 ARM 板子）上 AES-GCM 要用软件慢慢算，ChaCha20 快得多，
+/// 吞吐也低三分之一。没有 AES 指令的 CPU（不少 ARM 板子）上 AES-GCM 要用软件慢慢算，ChaCha20 快得多，
 /// 这一点本机量不了，是这类 CPU 上的通行做法。所以按 CPU 能力选，不分性能档位。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Cipher {
@@ -174,11 +174,17 @@ fn aes_in_hardware() -> bool {
 }
 
 /// TLS 1.3 的三个套件都留着，只排先后。AES-128-GCM 一定要在：QUIC 的 Initial 包用它。
+///
+/// 两种 AES 里 AES-128-GCM 在前，主要是握手快。握手里的密钥派生和摘要用套件配的哈希：AES-128-GCM 配 SHA-256，AES-256-GCM 配 SHA-384，
+/// 常见 CPU 上 SHA-384 比 SHA-256 慢得多（ring 在 x86 上只给 SHA-256 用了专门指令）。本机实验环境里（Intel 大小核）一次双向认证的握手，
+/// 大核上快约 8%，小核上快约一倍。数据面差得不多：单看加解密，AES-128 少四轮，1360 字节的包快 13%～25%，满速传输每 GB 的 CPU 只省百分之几。
+/// 密钥交换 X25519 和节点密钥 Ed25519 都是 128 位强度，AES-256 多出的强度用不上。
+/// 旧版本把 AES-256-GCM 排在前面：三个套件两边都有，握手照样成；有 AES 指令的服务端照客户端的顺序挑，所以旧版本拨进来时还是 AES-256。
 fn provider(cipher: Cipher) -> Arc<CryptoProvider> {
     use rustls::crypto::ring::cipher_suite::{TLS13_AES_128_GCM_SHA256, TLS13_AES_256_GCM_SHA384, TLS13_CHACHA20_POLY1305_SHA256};
     let mut provider = ring::default_provider();
     provider.cipher_suites = match cipher {
-        Cipher::AesGcm => vec![TLS13_AES_256_GCM_SHA384, TLS13_AES_128_GCM_SHA256, TLS13_CHACHA20_POLY1305_SHA256],
+        Cipher::AesGcm => vec![TLS13_AES_128_GCM_SHA256, TLS13_AES_256_GCM_SHA384, TLS13_CHACHA20_POLY1305_SHA256],
         Cipher::ChaCha20 => vec![TLS13_CHACHA20_POLY1305_SHA256, TLS13_AES_128_GCM_SHA256, TLS13_AES_256_GCM_SHA384],
     };
     Arc::new(provider)
@@ -390,7 +396,7 @@ mod tests {
             assert_eq!(Some(suite), server.negotiated_cipher_suite().map(|suite| suite.suite()));
             suite
         };
-        use rustls::CipherSuite::{TLS13_AES_256_GCM_SHA384 as AES, TLS13_CHACHA20_POLY1305_SHA256 as CHACHA};
+        use rustls::CipherSuite::{TLS13_AES_128_GCM_SHA256 as AES, TLS13_CHACHA20_POLY1305_SHA256 as CHACHA};
         assert_eq!(negotiated(Cipher::AesGcm, Cipher::AesGcm), AES);
         assert_eq!(negotiated(Cipher::ChaCha20, Cipher::AesGcm), CHACHA, "客户端缺 AES 指令");
         assert_eq!(negotiated(Cipher::AesGcm, Cipher::ChaCha20), CHACHA, "服务端缺 AES 指令");
