@@ -9,9 +9,11 @@
 //! 每个节点的 netmap 里现在实际写着什么（[`NodeSync::relations`]），以及它还欠着哪些确认。
 //!
 //! 确认有三个来源：节点发来 `Ack`；节点不在线（它没法确认，等它没有意义）；等得太久（不让一个不回话的节点卡住别人）。
+//! "太久"从开始等的那一刻算起，每一项分开算：之后再给节点发多少份 netmap、节点换多少次连接都不往后推，
+//! 否则一个不回话的节点只要不停地让 controller 给它发东西，就能让一次撤销永远生效不了。
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use i3t_proto::NodeId;
 
@@ -24,13 +26,25 @@ pub(crate) struct NodeSync {
     /// 这个节点当前版本的 netmap 里和各个对端的关系。
     pub relations: BTreeMap<NodeId, Relation>,
     /// 新认下的发起节点 → 第一次带着它的版本。节点确认到这个版本之前，对方还不能来访问。
-    awaiting_accept: BTreeMap<NodeId, u64>,
+    awaiting_accept: BTreeMap<NodeId, Pending>,
     /// 刚被收回许可的目的节点 → 去掉它的那个版本。节点确认到这个版本之前，它可能还在访问对方。
-    awaiting_undial: BTreeMap<NodeId, u64>,
-    /// 最近一次给它发 netmap 的时刻，用来判断确认是不是等得太久了。
-    pub sent_at: Option<Instant>,
+    awaiting_undial: BTreeMap<NodeId, Pending>,
     /// 最近一次因为别的节点的上报（端点、挂靠、连得上哪些 relay）给它排的重算的时刻，见 `Inner::defer_report`。
     pub report_due: Option<Instant>,
+}
+
+/// 一项还欠着的确认。
+#[derive(Debug, Clone, Copy)]
+struct Pending {
+    /// 节点确认到这个版本才算数。
+    version: u64,
+    /// 开始等的时刻。等没等太久从这里算起。
+    since: Instant,
+}
+
+/// 开始等 `peer` 这一项确认到 `version`。已经在等的沿用原来开始等的时刻：重新登记不能让它多等。
+fn start_waiting(awaiting: &mut BTreeMap<NodeId, Pending>, peer: NodeId, version: u64, now: Instant) {
+    awaiting.entry(peer).and_modify(|pending| pending.version = version).or_insert(Pending { version, since: now });
 }
 
 impl NodeSync {
@@ -63,17 +77,17 @@ impl NodeSync {
     }
 
     /// 授权的第一步：这个节点从下一个版本起认 `peer`。在线的节点要确认过才算数。
-    pub(crate) fn begin_accepting(&mut self, peer: NodeId, online: bool) {
+    pub(crate) fn begin_accepting(&mut self, peer: NodeId, online: bool, now: Instant) {
         self.relations.entry(peer).or_default().inbound = true;
         if online {
-            self.awaiting_accept.insert(peer, self.state.version + 1);
+            start_waiting(&mut self.awaiting_accept, peer, self.state.version + 1, now);
         }
     }
 
     /// 撤销的第一步：这个节点从下一个版本起不再访问 `peer`。在线的节点要确认过，`peer` 那边才能不认它。
-    pub(crate) fn begin_undialing(&mut self, peer: NodeId, online: bool) {
+    pub(crate) fn begin_undialing(&mut self, peer: NodeId, online: bool, now: Instant) {
         if online {
-            self.awaiting_undial.insert(peer, self.state.version + 1);
+            start_waiting(&mut self.awaiting_undial, peer, self.state.version + 1, now);
         }
     }
 
@@ -87,15 +101,15 @@ impl NodeSync {
         let mut released = BTreeSet::new();
         // 等待登记的是"下一个版本"。内容其实没变、版本号没有加的话，那个版本永远不会被确认，不能留着。
         // 关系又变回去的（刚认下又不认了、刚收回又给了）也不用再等。
-        self.awaiting_accept.retain(|peer, awaited| {
-            let keep = *awaited <= version && relations.get(peer).is_some_and(|relation| relation.inbound);
+        self.awaiting_accept.retain(|peer, pending| {
+            let keep = pending.version <= version && relations.get(peer).is_some_and(|relation| relation.inbound);
             if !keep {
                 released.insert(*peer);
             }
             keep
         });
-        self.awaiting_undial.retain(|peer, awaited| {
-            let keep = *awaited <= version && !relations.get(peer).is_some_and(|relation| relation.outbound);
+        self.awaiting_undial.retain(|peer, pending| {
+            let keep = pending.version <= version && !relations.get(peer).is_some_and(|relation| relation.outbound);
             if !keep {
                 released.insert(*peer);
             }
@@ -106,22 +120,32 @@ impl NodeSync {
 
     /// 节点确认了 `version`。返回因此可以继续下一步的对端：它们的 netmap 要重新算。
     pub(crate) fn confirm(&mut self, version: u64) -> BTreeSet<NodeId> {
+        self.release(|pending| pending.version <= version)
+    }
+
+    /// 开始等了 `timeout` 还没确认的不再等。后来才开始等的照旧等满它自己的时间。返回可以继续下一步的对端。
+    pub(crate) fn give_up_waiting(&mut self, now: Instant, timeout: Duration) -> BTreeSet<NodeId> {
+        self.release(|pending| now.saturating_duration_since(pending.since) >= timeout)
+    }
+
+    /// 不再等这个节点确认（它下线了）。返回可以继续下一步的对端。
+    pub(crate) fn confirm_all(&mut self) -> BTreeSet<NodeId> {
+        self.confirm(u64::MAX)
+    }
+
+    /// 去掉 `done` 的等待，返回它们的对端。
+    fn release(&mut self, done: impl Fn(&Pending) -> bool) -> BTreeSet<NodeId> {
         let mut released = BTreeSet::new();
         for awaiting in [&mut self.awaiting_accept, &mut self.awaiting_undial] {
-            awaiting.retain(|peer, awaited| {
-                let confirmed = *awaited <= version;
-                if confirmed {
+            awaiting.retain(|peer, pending| {
+                let done = done(pending);
+                if done {
                     released.insert(*peer);
                 }
-                !confirmed
+                !done
             });
         }
         released
-    }
-
-    /// 不再等这个节点确认（它下线了，或者等得太久）。返回可以继续下一步的对端。
-    pub(crate) fn confirm_all(&mut self) -> BTreeSet<NodeId> {
-        self.confirm(u64::MAX)
     }
 
     pub(crate) fn is_waiting(&self) -> bool {
@@ -148,10 +172,16 @@ mod tests {
         Relation { inbound: true, outbound: false }
     }
 
+    /// 测试开始之后第 `secs` 秒。
+    fn at(secs: u64) -> Instant {
+        static START: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+        *START + Duration::from_secs(secs)
+    }
+
     #[test]
     fn an_online_node_must_confirm_before_the_peer_may_come() {
         let mut sync = NodeSync::default();
-        sync.begin_accepting(id(2), true);
+        sync.begin_accepting(id(2), true, at(0));
         assert!(sync.accepts(id(2)) && !sync.has_confirmed_accepting(id(2)));
 
         sync.state.version = 1;
@@ -165,9 +195,9 @@ mod tests {
     #[test]
     fn an_offline_node_counts_as_confirmed_at_once() {
         let mut sync = NodeSync::default();
-        sync.begin_accepting(id(2), false);
+        sync.begin_accepting(id(2), false, at(0));
         assert!(sync.has_confirmed_accepting(id(2)));
-        sync.begin_undialing(id(3), false);
+        sync.begin_undialing(id(3), false, at(0));
         assert!(!sync.may_still_dial(id(3)));
     }
 
@@ -177,7 +207,7 @@ mod tests {
             NetmapState { version: 4, ..NetmapState::default() },
             [(id(2), Relation { inbound: false, outbound: true })].into(),
         );
-        sync.begin_undialing(id(2), true);
+        sync.begin_undialing(id(2), true, at(0));
         sync.state.version = 5;
         assert!(sync.settle(BTreeMap::new()).is_empty());
         assert!(sync.may_still_dial(id(2)));
@@ -189,7 +219,7 @@ mod tests {
     #[test]
     fn waiting_for_a_version_that_was_never_issued_is_dropped() {
         let mut sync = NodeSync::default();
-        sync.begin_accepting(id(2), true);
+        sync.begin_accepting(id(2), true, at(0));
         // 内容没变，版本号没有加：还是 0。
         assert_eq!(sync.settle([(id(2), inbound())].into()), [id(2)].into());
         assert!(sync.has_confirmed_accepting(id(2)));
@@ -198,12 +228,43 @@ mod tests {
     #[test]
     fn going_offline_releases_everything_and_a_deleted_peer_is_forgotten() {
         let mut sync = NodeSync::default();
-        sync.begin_accepting(id(2), true);
-        sync.begin_accepting(id(3), true);
-        sync.begin_undialing(id(4), true);
+        sync.begin_accepting(id(2), true, at(0));
+        sync.begin_accepting(id(3), true, at(0));
+        sync.begin_undialing(id(4), true, at(0));
         sync.forget(id(3));
         assert!(!sync.knows(id(3)));
         assert_eq!(sync.confirm_all(), [id(2), id(4)].into());
         assert!(!sync.is_waiting());
+    }
+
+    #[test]
+    fn each_wait_times_out_on_its_own_counted_from_when_it_began() {
+        let timeout = Duration::from_secs(10);
+        let mut sync = NodeSync::default();
+        sync.begin_undialing(id(2), true, at(0));
+        sync.state.version = 1;
+        assert!(sync.settle(BTreeMap::new()).is_empty());
+        sync.begin_accepting(id(3), true, at(6));
+        sync.state.version = 2;
+        assert!(sync.settle([(id(3), inbound())].into()).is_empty());
+
+        assert!(sync.give_up_waiting(at(9), timeout).is_empty());
+        assert_eq!(sync.give_up_waiting(at(10), timeout), [id(2)].into(), "后来开始的等待不推迟先开始的");
+        assert!(!sync.may_still_dial(id(2)));
+        assert!(!sync.has_confirmed_accepting(id(3)), "先开始的超时了，后来开始的还要等满它自己的时间");
+        assert!(sync.give_up_waiting(at(15), timeout).is_empty());
+        assert_eq!(sync.give_up_waiting(at(16), timeout), [id(3)].into());
+        assert!(!sync.is_waiting());
+    }
+
+    #[test]
+    fn registering_a_wait_again_does_not_restart_its_clock() {
+        let timeout = Duration::from_secs(10);
+        let mut sync = NodeSync::default();
+        sync.begin_undialing(id(2), true, at(0));
+        sync.begin_undialing(id(2), true, at(8));
+        sync.state.version = 1;
+        assert!(sync.settle(BTreeMap::new()).is_empty());
+        assert_eq!(sync.give_up_waiting(at(10), timeout), [id(2)].into());
     }
 }
