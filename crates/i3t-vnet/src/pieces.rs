@@ -2,9 +2,10 @@
 //!
 //! 只在连接刚建立、路径 MTU 还没有探测上去的那一会儿，或者路上的包长一直上不去时才有（网卡的 MTU 见 [`crate::DEFAULT_MTU`]）。
 //! 片会丢、会乱序：先到的一片存着，等另一片；等不到就扔。内存有上限：同时最多 [`MAX_PENDING`] 个没拼完的包，每个最多等
-//! [`PIECE_WAIT`]，超出时扔最早的。
+//! [`PIECE_WAIT`]，超出时扔最早的。一个对端最多占 [`MAX_PENDING_PER_PEER`] 个，超出时扔它自己最早的：一个对端发来一堆凑不成对的片，
+//! 挤不掉别的对端正在等的。
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
@@ -14,15 +15,16 @@ use i3t_proto::flow::{Fragment, MAX_PACKET_LEN};
 /// 同时最多攒多少个还没拼完的包（所有对端加起来）。每个至多一片，一千多字节：上限是几百 KB。
 pub const MAX_PENDING: usize = 256;
 
+/// 一个对端最多同时占多少个。
+pub const MAX_PENDING_PER_PEER: usize = MAX_PENDING / 4;
+
 /// 一片最多等另一片多久。两片是一前一后发出去的，正常时差不了一个往返；等不到多半是丢了，上面的协议自己重发。
 pub const PIECE_WAIT: Duration = Duration::from_secs(2);
 
-/// 没拼完的包：（对端，包号）到已经到了的那一片。
+/// 没拼完的包：（对端，包号）到已经到了的那一片。最多 [`MAX_PENDING`] 个，过期的和最早的都直接扫这张表找，不另外记先后。
 #[derive(Debug, Default)]
 pub struct Reassembly {
     pending: HashMap<(NodeId, u16), Partial>,
-    /// 按到的先后，扔最早的用。和 `pending` 里的不一定一一对应：拼完的包从 `pending` 里拿掉，这里的留到被扫过去。
-    order: VecDeque<(Instant, NodeId, u16)>,
 }
 
 #[derive(Debug)]
@@ -47,14 +49,16 @@ pub enum Assembled {
 impl Reassembly {
     /// 收下 `peer` 发来的一片。
     pub fn accept(&mut self, peer: NodeId, fragment: Fragment, bytes: Bytes, now: Instant) -> Assembled {
-        self.expire(now);
+        self.pending.retain(|_, partial| now.saturating_duration_since(partial.arrived) < PIECE_WAIT);
         let key = (peer, fragment.message);
         let Some(first) = self.pending.remove(&key) else {
-            while self.pending.len() >= MAX_PENDING {
-                self.drop_oldest();
+            if self.pending.keys().filter(|(from, _)| *from == peer).count() >= MAX_PENDING_PER_PEER {
+                self.drop_oldest(Some(peer));
+            }
+            if self.pending.len() >= MAX_PENDING {
+                self.drop_oldest(None);
             }
             self.pending.insert(key, Partial { arrived: now, count: fragment.count, index: fragment.index, bytes });
-            self.order.push_back((now, peer, fragment.message));
             return Assembled::Waiting;
         };
         // 切片最多两片（`MAX_PACKET_PIECES`），所以另一片一到就齐了。
@@ -77,26 +81,16 @@ impl Reassembly {
         self.pending.len()
     }
 
-    fn expire(&mut self, now: Instant) {
-        while let Some(&(arrived, peer, message)) = self.order.front() {
-            let stale = now.saturating_duration_since(arrived) >= PIECE_WAIT;
-            let gone = self.pending.get(&(peer, message)).is_none_or(|partial| partial.arrived != arrived);
-            if !stale && !gone {
-                break;
-            }
-            self.order.pop_front();
-            if stale && !gone {
-                self.pending.remove(&(peer, message));
-            }
-        }
-    }
-
-    fn drop_oldest(&mut self) {
-        while let Some((arrived, peer, message)) = self.order.pop_front() {
-            if self.pending.get(&(peer, message)).is_some_and(|partial| partial.arrived == arrived) {
-                self.pending.remove(&(peer, message));
-                return;
-            }
+    /// 扔掉最早到的那一片：`peer` 有值时只在它的里面挑。表最多 [`MAX_PENDING`] 个，直接扫。
+    fn drop_oldest(&mut self, peer: Option<NodeId>) {
+        let oldest = self
+            .pending
+            .iter()
+            .filter(|((from, _), _)| peer.is_none_or(|peer| *from == peer))
+            .min_by_key(|(_, partial)| partial.arrived)
+            .map(|(key, _)| *key);
+        if let Some(key) = oldest {
+            self.pending.remove(&key);
         }
     }
 }
@@ -163,13 +157,34 @@ mod tests {
         let piece = Fragment { message: 0, index: 0, count: 2 };
         for message in 0..u16::try_from(MAX_PENDING + 10).unwrap() {
             let at = now + Duration::from_millis(u64::from(message));
-            assert_eq!(reassembly.accept(node(2), Fragment { message, ..piece }, Bytes::from_static(b"x"), at), Assembled::Waiting);
+            let peer = node(2 + u32::from(message) % 4);
+            assert_eq!(reassembly.accept(peer, Fragment { message, ..piece }, Bytes::from_static(b"x"), at), Assembled::Waiting);
         }
         assert_eq!(reassembly.pending(), MAX_PENDING);
+        let mut reassembly = Reassembly::default();
+        for message in 0..u16::try_from(MAX_PENDING + 10).unwrap() {
+            let at = now + Duration::from_millis(u64::from(message));
+            assert_eq!(reassembly.accept(node(2), Fragment { message, ..piece }, Bytes::from_static(b"x"), at), Assembled::Waiting);
+        }
         let at = now + Duration::from_millis(300);
         let second = Fragment { message: 0, index: 1, count: 2 };
         assert_eq!(reassembly.accept(node(2), second, Bytes::from_static(b"y"), at), Assembled::Waiting, "最早的那个已经被挤掉了");
         let newest = Fragment { message: u16::try_from(MAX_PENDING + 9).unwrap(), index: 1, count: 2 };
         assert_eq!(reassembly.accept(node(2), newest, Bytes::from_static(b"y"), at), Assembled::Packet(Bytes::from_static(b"xy")));
+    }
+
+    #[test]
+    fn one_peer_cannot_push_out_the_pieces_another_is_waiting_for() {
+        let now = Instant::now();
+        let mut reassembly = Reassembly::default();
+        let first = Fragment { message: 1, index: 0, count: 2 };
+        assert_eq!(reassembly.accept(node(3), first, Bytes::from_static(b"a"), now), Assembled::Waiting);
+        for message in 0..u16::try_from(MAX_PENDING * 2).unwrap() {
+            let at = now + Duration::from_millis(u64::from(message));
+            reassembly.accept(node(2), Fragment { message, index: 0, count: 2 }, Bytes::from_static(b"x"), at);
+        }
+        assert_eq!(reassembly.pending(), MAX_PENDING_PER_PEER + 1, "node 2 只占得了自己的份额");
+        let second = Fragment { message: 1, index: 1, count: 2 };
+        assert_eq!(reassembly.accept(node(3), second, Bytes::from_static(b"b"), now), Assembled::Packet(Bytes::from_static(b"ab")));
     }
 }

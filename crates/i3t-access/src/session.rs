@@ -555,7 +555,8 @@ pub(crate) async fn forward<C: Connector + Datagrams>(
 /// 只连下发给本节点、由本节点自己监听的那一条转发指向的地址，覆盖网的地址不连，要求的话先发 PROXY protocol 的头。
 ///
 /// 连进来的是谁看来源地址：经虚拟网卡进来的包的来源核对过是那个对端的虚拟 IP，访问规则不允许它访问本节点时它的 TCP 握手进不来；
-/// 来源白名单（`allow_from`）在接受连接时已经按它查过。
+/// 接受连接时已经查过来源是可以访问本节点的节点或者本机（[`crate::manager::virtual_ip_admits`]：从别的网卡进来的不收），
+/// 和来源白名单（`allow_from`）。
 async fn forward_here<C: Connector + Datagrams>(
     shared: &Shared<C>,
     netmap: &Netmap,

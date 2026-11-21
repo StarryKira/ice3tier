@@ -7,7 +7,7 @@ use i3t_proto::flow::Fragment;
 use tokio::sync::Mutex as AsyncMutex;
 
 use super::*;
-use crate::ipv4::testing::{icmp, tcp, udp};
+use crate::ipv4::testing::{icmp, icmp_error, packet, refragment, split, tcp, udp};
 
 const ME: [u8; 4] = [10, 66, 0, 1];
 const B: [u8; 4] = [10, 66, 0, 2];
@@ -356,4 +356,148 @@ async fn the_engine_follows_the_netmap_and_stops_when_the_device_fails() {
     world.app.send(Err(io::Error::other("网卡没了"))).unwrap();
     let stopped = tokio::time::timeout(SOON, world.engine).await.unwrap().unwrap();
     assert!(matches!(stopped, Stopped::Device(_)), "{stopped:?}");
+}
+
+#[tokio::test]
+async fn ip_fragments_go_in_together_once_complete_and_never_alone() {
+    let mut world = world(netmap(&serde_json::json!([peer(2, true, true)]), &[]), &[2], Duration::ZERO);
+    let big = udp(B, ME, (7, 5000), &[0x5a; 3000]);
+    let pieces = split(&big, 41, 1232);
+    assert_eq!(pieces.len(), 3);
+    world.peer_sends(2, whole(&pieces[1]));
+    world.peer_sends(2, whole(&pieces[2]));
+    world.nothing_to_kernel().await;
+    world.peer_sends(2, whole(&pieces[0]));
+    for piece in &pieces {
+        assert_eq!(&world.kernel_gets().await, piece, "齐了才写进网卡，按先后，第一片在前");
+    }
+    assert_eq!(world.snapshot().received_packets, 3);
+
+    // 只有后面的片，第一片一直不来：一片也不写进网卡（不占内核的拼片缓存）。
+    let orphan = split(&udp(B, ME, (7, 5000), &[1; 3000]), 42, 1232);
+    world.peer_sends(2, whole(&orphan[1]));
+    world.peer_sends(2, whole(&orphan[2]));
+    world.nothing_to_kernel().await;
+    // 重叠的片整个扔掉。
+    let mut overlap = big[..20 + 1232].to_vec();
+    overlap[2..4].copy_from_slice(&1252u16.to_be_bytes());
+    world.peer_sends(2, whole(&pieces[0]));
+    world.peer_sends(2, whole(&refragment(overlap, 41, 8, true)));
+    world.peer_sends(2, whole(&pieces[1]));
+    world.peer_sends(2, whole(&pieces[2]));
+    world.nothing_to_kernel().await;
+    assert_eq!(world.snapshot().dropped.malformed, 1, "重叠的那一片");
+
+    // 后一片是内核拼片之前就会扔的（头的校验和不对）：前一片也不交给内核，不然它会留在内核的拼片缓存里。
+    let pair = split(&udp(B, ME, (7, 5000), &[2; 1500]), 43, 1232);
+    let mut broken = pair[1].clone();
+    broken[11] ^= 0xff;
+    world.peer_sends(2, whole(&pair[0]));
+    world.peer_sends(2, whole(&broken));
+    world.nothing_to_kernel().await;
+    assert_eq!(world.snapshot().dropped.malformed, 2);
+}
+
+#[tokio::test]
+async fn a_fragmented_icmp_error_or_redirect_is_dropped_at_its_first_piece() {
+    let mut world = world(netmap(&serde_json::json!([peer(2, true, true)]), &[]), &[2], Duration::ZERO);
+    let quoted = udp(ME, B, (5000, 53), &[1; 64]);
+    let error = split(&icmp_error(B, ME, 3, 3, &quoted), 50, 48);
+    let redirect = split(&icmp_error(B, ME, 5, 1, &quoted), 51, 48);
+    world.peer_sends(2, whole(&error[0]));
+    world.peer_sends(2, whole(&redirect[0]));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let dropped = world.snapshot().dropped;
+    assert_eq!((dropped.malformed, dropped.not_allowed), (1, 1), "第一片一到就扔，不等后面的：{dropped:?}");
+    for piece in error[1..].iter().chain(&redirect[1..]) {
+        world.peer_sends(2, whole(piece));
+    }
+    world.nothing_to_kernel().await;
+}
+
+#[tokio::test]
+async fn tcp_fragments_are_dropped_from_every_peer() {
+    let mut world = world(netmap(&serde_json::json!([peer(2, true, true), peer(3, false, true)]), &[]), &[2, 3], Duration::ZERO);
+    for (raw, from) in [(2, B), (3, C)] {
+        // RFC 1858：第一片 16 个字节、标志 ACK；偏移 8 的一片把标志改成 SYN。
+        let ack = tcp(from, ME, (40000, 22), 0x10);
+        let mut head = ack[..36].to_vec();
+        head[2..4].copy_from_slice(&36u16.to_be_bytes());
+        let syn = tcp(from, ME, (40000, 22), 0x02);
+        let mut tail: Vec<u8> = syn[..20].iter().chain(&syn[28..]).copied().collect();
+        tail[2..4].copy_from_slice(&32u16.to_be_bytes());
+        for piece in [refragment(head, 7, 0, true), refragment(tail, 7, 8, false)] {
+            assert!(Ipv4::parse(&piece).is_ok_and(|ip| ip.is_fragment()), "是读得懂的片，扔掉它的是“TCP 被切开了”");
+            world.peer_sends(raw, whole(&piece));
+        }
+    }
+    world.nothing_to_kernel().await;
+    assert_eq!(world.snapshot().dropped.malformed, 4);
+}
+
+#[tokio::test]
+async fn a_peer_that_may_not_reach_us_gets_in_only_fragmented_answers() {
+    let mut world = world(netmap(&serde_json::json!([peer(2, false, true)]), &[]), &[2], Duration::ZERO);
+    // 没问过它：切开的 UDP、别的协议，齐了也不放；单独的后面几片更不放。
+    let unasked = split(&udp(B, ME, (53, 5000), &[1; 3000]), 1, 1232);
+    let gre = split(&packet(47, B, ME, &[2; 3000]), 2, 1232);
+    for piece in unasked.iter().chain(&gre) {
+        world.peer_sends(2, whole(piece));
+    }
+    world.peer_sends(2, whole(&refragment(udp(B, ME, (53, 5000), &[3; 100]), 3, 1232, false)));
+    world.nothing_to_kernel().await;
+    assert_eq!(world.snapshot().dropped.not_allowed, 2, "齐了的两个包按第一片判断，不放");
+
+    world.app_sends(udp(ME, B, (5000, 53), b"query"));
+    world.on_wire().await;
+    let answer = split(&udp(B, ME, (53, 5000), &[4; 3000]), 4, 1232);
+    for piece in &answer {
+        world.peer_sends(2, whole(piece));
+    }
+    for piece in &answer {
+        assert_eq!(&world.kernel_gets().await, piece, "本节点问过的：切开的回答进来");
+    }
+}
+
+#[tokio::test]
+async fn an_icmp_error_must_be_about_a_packet_we_sent_to_that_peer() {
+    for inbound in [true, false] {
+        let mut world = world(netmap(&serde_json::json!([peer(2, inbound, true), peer(3, true, true)]), &[]), &[2, 3], Duration::ZERO);
+        let query = udp(ME, B, (5000, 53), b"query");
+        world.app_sends(query.clone());
+        world.on_wire().await;
+        let about = |quoted: &[u8]| icmp_error(B, ME, 3, 4, &quoted[..28]);
+        // 对端借差错报文说别的节点、外面的地址：本机的内核会照着改到那里的路径 MTU。
+        world.peer_sends(2, whole(&about(&udp(ME, C, (53, 53), b"x"))));
+        world.peer_sends(2, whole(&about(&udp(ME, [192, 0, 2, 7], (53, 53), b"x"))));
+        world.peer_sends(2, whole(&about(&udp(C, B, (5000, 53), b"x"))));
+        world.peer_sends(2, whole(&icmp_error(B, ME, 11, 0, &query[..12])));
+        let error = about(&query);
+        let pieces = split(&error, 9, 16);
+        for piece in &pieces {
+            world.peer_sends(2, whole(piece));
+        }
+        world.peer_sends(2, whole(&icmp_error(B, ME, 5, 1, &query[..28])));
+        world.nothing_to_kernel().await;
+        let dropped = world.snapshot().dropped;
+        assert_eq!(
+            (dropped.bad_source, dropped.bad_destination, dropped.malformed, dropped.not_allowed),
+            (2, 1, 2, 1),
+            "inbound = {inbound}: {dropped:?}"
+        );
+
+        world.peer_sends(2, whole(&error));
+        assert_eq!(world.kernel_gets().await, error, "说的是本节点发给它的包：照常进来");
+        let ttl = icmp_error(B, ME, 11, 0, &tcp(ME, B, (40000, 22), 0x02)[..28]);
+        world.peer_sends(2, whole(&ttl));
+        assert_eq!(world.kernel_gets().await, ttl);
+        let not_sent = about(&udp(ME, B, (5001, 53), b"x"));
+        world.peer_sends(2, whole(&not_sent));
+        if inbound {
+            assert_eq!(world.kernel_gets().await, not_sent, "它可以访问本节点：本机的端口不核对");
+        } else {
+            world.nothing_to_kernel().await;
+            assert_eq!(world.snapshot().dropped.not_allowed, 2, "它不能访问本节点：UDP 要是本节点发起的会话");
+        }
+    }
 }

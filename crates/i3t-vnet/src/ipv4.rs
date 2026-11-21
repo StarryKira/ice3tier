@@ -12,6 +12,7 @@ pub const UDP: u8 = 17;
 /// ICMP 的类型和"不可达"的几个代码。
 const ICMP_ECHO_REPLY: u8 = 0;
 const ICMP_UNREACHABLE: u8 = 3;
+const ICMP_REDIRECT: u8 = 5;
 const ICMP_ECHO_REQUEST: u8 = 8;
 const ICMP_TIME_EXCEEDED: u8 = 11;
 const ICMP_PARAMETER_PROBLEM: u8 = 12;
@@ -19,6 +20,15 @@ const ICMP_PARAMETER_PROBLEM: u8 = 12;
 /// TCP 的标志位。
 const TCP_SYN: u8 = 0x02;
 const TCP_ACK: u8 = 0x10;
+
+/// TCP 头最短多少字节。
+const TCP_HEADER_MIN: usize = 20;
+
+/// IP 头里的保留位、"不许分片"（DF）、"后面还有片"（MF），和片偏移占的那 13 位。
+const RESERVED_FLAG: u16 = 0x8000;
+const DONT_FRAGMENT: u16 = 0x4000;
+const MORE_FRAGMENTS: u16 = 0x2000;
+const FRAGMENT_OFFSET: u16 = 0x1fff;
 
 /// "不可达"的 ICMP 包里带回原来那个包的多少字节：IP 头加上它后面的一段，整个 ICMP 包不超过 576 字节（RFC 1812）。
 /// 收的内核靠带回来的 IP 头和端口（TCP 的还有序号）找到是哪个套接字的包。
@@ -85,6 +95,29 @@ impl<'a> Ipv4<'a> {
         self.bytes[9]
     }
 
+    /// 头有多长（字节）：20，带 IP 选项时更长。
+    #[must_use]
+    pub fn header_len(&self) -> usize {
+        self.header_len
+    }
+
+    #[must_use]
+    pub fn ttl(&self) -> u8 {
+        self.bytes[8]
+    }
+
+    /// 头的校验和对不对。读包时不核对它（见模块的说明），只有要先替内核把关的地方（[`crate::fragments`]）问。
+    #[must_use]
+    pub fn header_checksum_ok(&self) -> bool {
+        checksum(&self.bytes[..self.header_len]) == 0
+    }
+
+    /// 标志里有没有置"不许分片"（DF）或者保留位。
+    #[must_use]
+    pub fn dont_fragment_or_reserved(&self) -> bool {
+        self.flags_and_offset() & (DONT_FRAGMENT | RESERVED_FLAG) != 0
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.bytes.len()
@@ -95,10 +128,38 @@ impl<'a> Ipv4<'a> {
         self.bytes.is_empty()
     }
 
+    /// 标识：同一个包切出来的片标识相同（加上来源、目的和协议，内核按这几样把片拼回去）。
+    #[must_use]
+    pub fn identification(&self) -> u16 {
+        u16::from_be_bytes([self.bytes[4], self.bytes[5]])
+    }
+
+    fn flags_and_offset(&self) -> u16 {
+        u16::from_be_bytes([self.bytes[6], self.bytes[7]])
+    }
+
+    /// 后面还有片（MF）：这是一个被切开的包的一片，不是最后一片。
+    #[must_use]
+    pub fn more_fragments(&self) -> bool {
+        self.flags_and_offset() & MORE_FRAGMENTS != 0
+    }
+
+    /// 这一片的内容在原来那个包里从第几个字节开始（头后面的部分算起；片偏移乘 8）。没切开的包是 0。
+    #[must_use]
+    pub fn fragment_offset(&self) -> usize {
+        usize::from(self.flags_and_offset() & FRAGMENT_OFFSET) * 8
+    }
+
     /// 片偏移不是 0：这是一个被切开的包的后面几片，里面没有端口。
     #[must_use]
     pub fn is_later_fragment(&self) -> bool {
-        u16::from_be_bytes([self.bytes[6], self.bytes[7]]) & 0x1fff != 0
+        self.flags_and_offset() & FRAGMENT_OFFSET != 0
+    }
+
+    /// 这是一个被切开的包的一片（第一片、中间的或者最后一片）。
+    #[must_use]
+    pub fn is_fragment(&self) -> bool {
+        self.more_fragments() || self.is_later_fragment()
     }
 
     /// 头后面的部分。
@@ -115,10 +176,12 @@ impl<'a> Ipv4<'a> {
         }
         let payload = self.payload();
         match self.protocol() {
-            TCP => match payload.get(13) {
-                Some(&flags) if flags & TCP_SYN != 0 && flags & TCP_ACK == 0 => Conversation::TcpOpen,
-                Some(_) => Conversation::TcpOngoing,
-                None => Conversation::Other,
+            // 被切开的 TCP 不认：两端按网卡的 MTU 定段长，节点之间的 TCP 不会被切；切开的第一片可以短得连完整的头都没有，
+            // 标志还能被后面重叠的片改写（RFC 1858）。头不完整的也不认。
+            TCP if self.more_fragments() || payload.len() < TCP_HEADER_MIN => Conversation::Other,
+            TCP => match payload[13] {
+                flags if flags & TCP_SYN != 0 && flags & TCP_ACK == 0 => Conversation::TcpOpen,
+                _ => Conversation::TcpOngoing,
             },
             UDP => match payload.first_chunk::<4>() {
                 Some(&[s0, s1, d0, d1]) => {
@@ -137,8 +200,36 @@ impl<'a> Ipv4<'a> {
     }
 
     /// 是不是一个 ICMP 的差错报文（不可达、超时、参数问题）。对差错报文不再回差错报文（RFC 1122 3.2.2）。
-    fn is_icmp_error(&self) -> bool {
-        self.protocol() == ICMP && matches!(self.payload().first(), Some(&(ICMP_UNREACHABLE | ICMP_TIME_EXCEEDED | ICMP_PARAMETER_PROBLEM)))
+    /// 被切开的包的后面几片看不出来（头后面是原包中间的任意字节），不算。
+    #[must_use]
+    pub fn is_icmp_error(&self) -> bool {
+        matches!(self.icmp_type(), Some(ICMP_UNREACHABLE | ICMP_TIME_EXCEEDED | ICMP_PARAMETER_PROBLEM))
+    }
+
+    /// 是不是一个 ICMP 重定向：路由器告诉主机去某个地址换一个下一跳。后面几片同上，不算。
+    #[must_use]
+    pub fn is_icmp_redirect(&self) -> bool {
+        self.icmp_type() == Some(ICMP_REDIRECT)
+    }
+
+    /// ICMP 的类型：协议是 ICMP、不是被切开的包的后面几片、读得到类型时才有。
+    fn icmp_type(&self) -> Option<u8> {
+        (self.protocol() == ICMP && !self.is_later_fragment()).then(|| self.payload().first().copied()).flatten()
+    }
+
+    /// ICMP 差错报文里带回来的原包：只有它开头的一段，至少要有完整的 IP 头。读它的来源、目的、协议，和头后面的端口
+    /// （带回来的够长的话：RFC 792 要求至少带回头后面的 8 个字节）。不是差错报文，或者带回来的连头都不完整，是 `None`。
+    ///
+    /// 返回的包只有带回来的那一段：头里写的总长度说的是原来那个包，比它长。
+    #[must_use]
+    pub fn quoted(&self) -> Option<Ipv4<'a>> {
+        if !self.is_icmp_error() {
+            return None;
+        }
+        let inner = self.payload().get(8..)?;
+        let &first = inner.first()?;
+        let header_len = usize::from(first & 0x0f) * 4;
+        (first >> 4 == 4 && header_len >= 20 && inner.len() >= header_len).then_some(Ipv4 { bytes: inner, header_len })
     }
 }
 
@@ -157,9 +248,9 @@ pub enum Conversation {
         source: u16,
         destination: u16,
     },
-    /// 被切开的包的后面几片：没有端口可看。它单独开不了会话，第一片没进来的话内核拼不成包，过一会儿就扔了。
+    /// 被切开的包的后面几片：没有端口可看，单看它判断不了。对端发来的片在 [`crate::fragments`] 里攒齐了、按第一片判断。
     LaterFragment,
-    /// 别的协议，或者看不出来的包。
+    /// 别的协议，或者看不出来的包（包括被切开的 TCP、头不完整的 TCP）。
     Other,
 }
 
@@ -254,11 +345,51 @@ pub(crate) mod testing {
     pub(crate) fn icmp(source: [u8; 4], destination: [u8; 4], kind: u8) -> Vec<u8> {
         packet(ICMP, source, destination, &[kind, 0, 0, 0, 0, 1, 0, 1])
     }
+
+    /// 一个 ICMP 差错报文（`kind` 是类型，`code` 是代码），带回 `original` 的开头（最多头加 8 个字节之外的 `extra` 个）。
+    pub(crate) fn icmp_error(source: [u8; 4], destination: [u8; 4], kind: u8, code: u8, original: &[u8]) -> Vec<u8> {
+        let mut payload = vec![kind, code, 0, 0, 0, 0, 0x02, 0x28];
+        payload.extend_from_slice(original);
+        packet(ICMP, source, destination, &payload)
+    }
+
+    /// IP 头的校验和（校验和那两个字节要先清零）。
+    pub(crate) fn header_checksum(header: &[u8]) -> u16 {
+        checksum(header)
+    }
+
+    /// 改写一个包（[`packet`] 造的）的分片字段：标识 `id`，片偏移 `offset`（字节，8 的倍数），`more` 是 MF。
+    pub(crate) fn refragment(mut bytes: Vec<u8>, id: u16, offset: usize, more: bool) -> Vec<u8> {
+        let field = u16::try_from(offset / 8).unwrap() | if more { 0x2000 } else { 0 };
+        bytes[4..6].copy_from_slice(&id.to_be_bytes());
+        bytes[6..8].copy_from_slice(&field.to_be_bytes());
+        bytes[10..12].fill(0);
+        let sum = checksum(&bytes[..20]);
+        bytes[10..12].copy_from_slice(&sum.to_be_bytes());
+        bytes
+    }
+
+    /// 像内核那样把一个包（头 20 字节）切成片：每片头后面最多 `size` 个字节（8 的倍数），标识 `id`。
+    pub(crate) fn split(whole: &[u8], id: u16, size: usize) -> Vec<Vec<u8>> {
+        let (header, payload) = whole.split_at(20);
+        let chunks: Vec<&[u8]> = payload.chunks(size).collect();
+        let last = chunks.len() - 1;
+        chunks
+            .into_iter()
+            .enumerate()
+            .map(|(index, chunk)| {
+                let mut bytes = header.to_vec();
+                bytes[2..4].copy_from_slice(&u16::try_from(20 + chunk.len()).unwrap().to_be_bytes());
+                bytes.extend_from_slice(chunk);
+                refragment(bytes, id, index * size, index != last)
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::testing::{icmp, packet, tcp, udp};
+    use super::testing::{icmp, icmp_error, packet, refragment, split, tcp, udp};
     use super::*;
 
     const A: [u8; 4] = [10, 66, 0, 1];
@@ -306,6 +437,91 @@ mod tests {
         let mut later = udp(A, B, (1, 2), b"rest");
         later[6..8].copy_from_slice(&0x00b9u16.to_be_bytes());
         assert_eq!(kind(later), Conversation::LaterFragment);
+    }
+
+    #[test]
+    fn fragments_tell_their_identification_offset_and_whether_more_follow() {
+        let whole = udp(A, B, (5000, 53), &[1; 100]);
+        let ip = Ipv4::parse(&whole).unwrap();
+        assert!(!ip.is_fragment(), "不许分片（DF）的整包");
+        assert_eq!((ip.identification(), ip.fragment_offset(), ip.more_fragments()), (0x1234, 0, false));
+        let pieces = split(&whole, 77, 48);
+        assert_eq!(pieces.len(), 3);
+        let parsed: Vec<Ipv4<'_>> = pieces.iter().map(|piece| Ipv4::parse(piece).unwrap()).collect();
+        let fields: Vec<_> =
+            parsed.iter().map(|ip| (ip.identification(), ip.fragment_offset(), ip.more_fragments(), ip.payload().len())).collect();
+        assert_eq!(fields, [(77, 0, true, 48), (77, 48, true, 48), (77, 96, false, 12)]);
+        assert!(parsed.iter().all(Ipv4::is_fragment));
+        assert_eq!(parsed[0].conversation(), Conversation::Udp { source: 5000, destination: 53 }, "第一片里有端口");
+        assert_eq!(parsed[1].conversation(), Conversation::LaterFragment);
+        assert_eq!(parsed[2].conversation(), Conversation::LaterFragment, "最后一片");
+    }
+
+    #[test]
+    fn the_header_tells_its_length_ttl_checksum_and_flags() {
+        let mut bytes = udp(A, B, (5000, 53), b"x");
+        let ip = Ipv4::parse(&bytes).unwrap();
+        assert_eq!((ip.header_len(), ip.ttl()), (20, 64));
+        assert!(ip.header_checksum_ok());
+        assert!(ip.dont_fragment_or_reserved(), "测试造的整包置了 DF");
+        let cut = refragment(bytes.clone(), 1, 0, true);
+        assert!(!Ipv4::parse(&cut).unwrap().dont_fragment_or_reserved(), "切开的片没有 DF");
+        bytes[11] ^= 1;
+        assert!(!Ipv4::parse(&bytes).unwrap().header_checksum_ok());
+        bytes[6] = 0x80;
+        assert!(Ipv4::parse(&bytes).unwrap().dont_fragment_or_reserved(), "保留位");
+        // 带 4 个字节的选项（一个 NOP 和三个"选项结束"）。
+        let mut with_options = vec![0x46, 0, 0, 28, 0, 1, 0x20, 0, 64, UDP, 0, 0, 10, 66, 0, 2, 10, 66, 0, 1, 1, 0, 0, 0];
+        with_options.extend_from_slice(&[0, 53, 19, 136]);
+        let sum = checksum(&with_options[..24]);
+        with_options[10..12].copy_from_slice(&sum.to_be_bytes());
+        let ip = Ipv4::parse(&with_options).unwrap();
+        assert_eq!(ip.header_len(), 24);
+        assert!(ip.header_checksum_ok());
+    }
+
+    #[test]
+    fn a_tcp_segment_that_is_cut_or_too_short_for_its_header_is_not_judged_by_its_flags() {
+        let kind = |bytes: &[u8]| Ipv4::parse(bytes).unwrap().conversation();
+        // RFC 1858 的手法：第一片短得只有 16 个字节、标志是 ACK，后面偏移 8 的一片把标志改写成 SYN。
+        let ack = tcp(A, B, (40000, 22), TCP_ACK);
+        let mut head = ack[..36].to_vec();
+        head[2..4].copy_from_slice(&36u16.to_be_bytes());
+        assert_eq!(kind(&refragment(head, 9, 0, true)), Conversation::Other, "切开的 TCP 的第一片");
+        assert_eq!(kind(&refragment(ack.clone(), 9, 8, false)), Conversation::LaterFragment);
+        assert_eq!(kind(&packet(TCP, A, B, &ack[20..39])), Conversation::Other, "头不够 20 个字节");
+        assert_eq!(kind(&ack), Conversation::TcpOngoing, "对照：完整的");
+    }
+
+    #[test]
+    fn an_icmp_error_gives_the_packet_it_quotes() {
+        let sent = udp(A, B, (5000, 53), b"query");
+        let error = icmp_error(B, A, ICMP_UNREACHABLE, 3, &sent[..28]);
+        let ip = Ipv4::parse(&error).unwrap();
+        assert!(ip.is_icmp_error());
+        let quoted = ip.quoted().unwrap();
+        assert_eq!((quoted.source(), quoted.destination(), quoted.protocol()), (A.into(), B.into(), UDP));
+        assert_eq!(quoted.conversation(), Conversation::Udp { source: 5000, destination: 53 });
+        let header_only = icmp_error(B, A, ICMP_TIME_EXCEEDED, 0, &sent[..20]);
+        assert_eq!(
+            Ipv4::parse(&header_only).unwrap().quoted().map(|quoted| quoted.conversation()),
+            Some(Conversation::Other),
+            "头后面没带"
+        );
+        let cut = icmp_error(B, A, ICMP_UNREACHABLE, 3, &sent[..19]);
+        assert!(Ipv4::parse(&cut).unwrap().quoted().is_none(), "头都不完整");
+        let not_ipv4 = icmp_error(B, A, ICMP_PARAMETER_PROBLEM, 0, &[0x60; 28]);
+        assert!(Ipv4::parse(&not_ipv4).unwrap().quoted().is_none());
+        assert!(Ipv4::parse(&icmp(B, A, ICMP_ECHO_REPLY)).unwrap().quoted().is_none(), "ping 的回答不是差错报文");
+        let redirect = icmp_error(B, A, ICMP_REDIRECT, 1, &sent[..28]);
+        assert!(Ipv4::parse(&redirect).unwrap().is_icmp_redirect());
+        assert!(!ip.is_icmp_redirect());
+        // 后面几片头后面是原包中间的字节，碰巧是 3 或者 5 也不算。
+        let later_error = refragment(icmp_error(B, A, ICMP_UNREACHABLE, 3, &sent[..28]), 5, 8, false);
+        assert!(!Ipv4::parse(&later_error).unwrap().is_icmp_error());
+        assert!(Ipv4::parse(&later_error).unwrap().quoted().is_none());
+        let later_redirect = refragment(redirect, 5, 8, false);
+        assert!(!Ipv4::parse(&later_redirect).unwrap().is_icmp_redirect());
     }
 
     #[test]

@@ -16,6 +16,14 @@
 //!
 //! **进来**（对端发来的包）：来源必须是发来它的那个对端的虚拟 IP（连接是按公钥认证的，冒充不了别的节点），目的必须是本节点的
 //! 虚拟 IP；对端不被允许访问本节点时只放行回包。不符合的丢掉并计数（[`Counters`]），符合的原样写进网卡，剩下的全是操作系统的事。
+//! 另外几条，不管对端能不能访问本节点：
+//!
+//! - 被切开的 IPv4 包（IP 分片）先攒齐（[`crate::fragments`]），齐了按第一片判断，让进来的几片一起写进网卡：拼不齐的片
+//!   不占内核里整台机器共用的拼片缓存，后面的片也不会绕过判断单独进来。切开的 TCP 丢掉（节点之间的 TCP 不会被切）。
+//! - ICMP 差错报文（不可达、超时、参数问题）说的必须是本节点发给这个对端的包：覆盖网里节点之间没有路由器，对端只会对
+//!   本节点发给它的包回差错报文。不核对的话，对端可以说"到某某（别的节点，甚至这台机器在别的网卡外面要连的地址）的路径 MTU
+//!   只有 552"，本机内核照着改路由缓存；也可以让本机别的 UDP 套接字收到一个"连接被拒绝"。被切开的差错报文丢掉。
+//! - ICMP 重定向丢掉：没有路由器，也就没有谁该说"换一个下一跳"。
 //!
 //! 每个包不另外记日志：丢掉的每一种原因第一次记一行，之后每分钟最多一行，带着这段时间丢了多少。
 
@@ -37,7 +45,8 @@ use tokio::sync::{mpsc, watch};
 
 use crate::device::Device;
 use crate::filter::{Replies, Verdict};
-use crate::ipv4::{Conversation, Ipv4, Malformed, Unreachable, unreachable};
+use crate::fragments::{Fragments, Gathered};
+use crate::ipv4::{Conversation, Ipv4, Malformed, TCP, Unreachable, unreachable};
 use crate::pieces::{Assembled, Reassembly};
 
 /// 连接还没建起来时，发往一个对端的包最多排多少个。几个 ping、一次 TCP 握手和 DNS 的往返绰绰有余；多出来的丢掉，
@@ -91,11 +100,13 @@ impl Loss {
 
     const fn reason(self) -> &'static str {
         match self {
-            Self::BadSource => "来源不对：对端发来的不是它自己的虚拟 IP，或者本机发出的不是本节点的虚拟 IP",
-            Self::BadDestination => "对端发来的包目的不是本节点的虚拟 IP",
-            Self::NotAllowed => "访问规则不允许：对端发起的新会话，或者本节点发起的、对端不让访问的",
+            Self::BadSource => {
+                "来源不对：对端发来的不是它自己的虚拟 IP，或者它的 ICMP 差错报文说的是发往别处的包；或者本机发出的不是本节点的虚拟 IP"
+            }
+            Self::BadDestination => "目的不对：对端发来的包不是给本节点的虚拟 IP 的，或者它的 ICMP 差错报文说的不是本节点发出的包",
+            Self::NotAllowed => "访问规则不允许：对端发起的新会话，或者本节点发起的、对端不让访问的；还有对端发来的 ICMP 重定向",
             Self::Unreachable => "送不到：地址段里没有这个节点、它没有网卡、连不上，或者等连接时排不下",
-            Self::Malformed => "读不懂：不是一个完整的 IPv4 包，或者片拼不起来",
+            Self::Malformed => "读不懂：不是一个完整的 IPv4 包、片拼不起来，或者是不该被切开的包（TCP、ICMP 差错报文）",
         }
     }
 }
@@ -268,6 +279,7 @@ impl<D: Device, P: Packets> Engine<D, P> {
             counters: self.counters,
             replies,
             reassembly: Reassembly::default(),
+            fragments: Fragments::default(),
             log: DropLog::default(),
         };
         tokio::select! {
@@ -495,19 +507,22 @@ struct Inbound<D, P> {
     counters: Arc<Counters>,
     replies: Arc<Mutex<Replies>>,
     reassembly: Reassembly,
+    fragments: Fragments,
     log: DropLog,
 }
 
 impl<D: Device, P: Packets> Inbound<D, P> {
     async fn run(&mut self) -> Stopped {
         let mut batch: Vec<Datagram> = Vec::with_capacity(INBOUND_BATCH);
+        let mut admitted: Vec<Bytes> = Vec::new();
         loop {
             if self.packets.recv_packets(&mut batch, INBOUND_BATCH).await == 0 {
                 return Stopped::Closed;
             }
             self.index.follow(&mut self.netmap);
             for datagram in batch.drain(..) {
-                if let Some(packet) = self.admit(datagram) {
+                self.admit(datagram, &mut admitted);
+                for packet in admitted.drain(..) {
                     let len = packet.len();
                     match self.device.send(&packet).await {
                         Ok(()) => self.counters.received(len),
@@ -518,51 +533,98 @@ impl<D: Device, P: Packets> Inbound<D, P> {
         }
     }
 
-    /// 对端发来的一帧：拼好、核对，能写进网卡的返回那个包。
-    fn admit(&mut self, datagram: Datagram) -> Option<Bytes> {
+    /// 对端发来的一帧：拼好、核对，能写进网卡的包放进 `admitted`。一个 IP 分片的包齐了的时候是好几个（它的每一片）。
+    fn admit(&mut self, datagram: Datagram, admitted: &mut Vec<Bytes>) {
         let Datagram { peer, payload } = datagram;
         let packet = match PacketHeader::decode(&payload) {
             Ok((PacketHeader::Whole, _)) => payload.slice(PacketHeader::WHOLE_LEN..),
             Ok((PacketHeader::Piece(fragment), _)) => {
                 match self.reassembly.accept(peer, fragment, payload.slice(PacketHeader::PIECE_LEN..), Instant::now()) {
                     Assembled::Packet(packet) => packet,
-                    Assembled::Waiting => return None,
-                    Assembled::Broken => {
-                        self.log.note(&self.counters, Loss::Malformed, &"片拼不起来");
-                        return None;
-                    }
+                    Assembled::Waiting => return,
+                    Assembled::Broken => return self.log.note(&self.counters, Loss::Malformed, &"片拼不起来"),
                 }
             }
-            Err(error) => {
-                self.log.note(&self.counters, Loss::Malformed, &error);
-                return None;
-            }
+            Err(error) => return self.log.note(&self.counters, Loss::Malformed, &error),
         };
         let ip = match Ipv4::parse(&packet) {
             Ok(ip) => ip,
-            Err(error) => {
-                self.log.note(&self.counters, Loss::Malformed, &error);
-                return None;
-            }
+            Err(error) => return self.log.note(&self.counters, Loss::Malformed, &error),
         };
         let Some(sender) = self.index.by_id.get(&peer).copied() else {
-            self.log.note(&self.counters, Loss::BadSource, &format!("节点 {peer} 不在 netmap 里"));
-            return None;
+            return self.log.note(&self.counters, Loss::BadSource, &format!("节点 {peer} 不在 netmap 里"));
         };
         if ip.source() != sender.ip {
-            self.log.note(&self.counters, Loss::BadSource, &format!("节点 {peer}（{}）发来的包写的来源是 {}", sender.ip, ip.source()));
-            return None;
+            let detail = format!("节点 {peer}（{}）发来的包写的来源是 {}", sender.ip, ip.source());
+            return self.log.note(&self.counters, Loss::BadSource, &detail);
         }
         if ip.destination() != self.index.own {
-            self.log.note(&self.counters, Loss::BadDestination, &format!("节点 {peer} 发来的包要去 {}", ip.destination()));
-            return None;
+            return self.log.note(&self.counters, Loss::BadDestination, &format!("节点 {peer} 发来的包要去 {}", ip.destination()));
         }
-        if !sender.inbound && self.replies.lock().expect("replies mutex poisoned").admit(&ip, Instant::now()) == Verdict::NewConversation {
-            self.log.note(&self.counters, Loss::NotAllowed, &format!("节点 {peer} 不能访问本节点，它发来的不是回包"));
-            return None;
+        if !ip.is_fragment() {
+            if self.judge(peer, sender, &ip) {
+                admitted.push(packet);
+            }
+            return;
         }
-        Some(packet)
+        if ip.protocol() == TCP {
+            return self.log.note(&self.counters, Loss::Malformed, &format!("节点 {peer} 发来的 TCP 被切成了片"));
+        }
+        // 差错报文和重定向齐了也不放（见 [`Self::judge`]），第一片一到就扔，不用攒。
+        if ip.is_icmp_error() {
+            return self.log.note(&self.counters, Loss::Malformed, &format!("节点 {peer}：ICMP 差错报文被切成了片"));
+        }
+        if ip.is_icmp_redirect() {
+            return self.log.note(&self.counters, Loss::NotAllowed, &format!("节点 {peer} 发来一个 ICMP 重定向"));
+        }
+        match self.fragments.accept(&ip, packet.clone(), Instant::now()) {
+            Gathered::Waiting => {}
+            Gathered::Broken(why) => self.log.note(&self.counters, Loss::Malformed, &format!("节点 {peer} 发来的 IP 分片拼不起来：{why}")),
+            Gathered::Complete(pieces) => {
+                let first = Ipv4::parse(&pieces[0]).expect("攒下的片都读过");
+                if self.judge(peer, sender, &first) {
+                    admitted.extend(pieces);
+                }
+            }
+        }
     }
+
+    /// 来源、目的都对的一个包（被切开的包是它的第一片）让不让进来；不让的记下原因。
+    fn judge(&mut self, peer: NodeId, sender: PeerInfo, ip: &Ipv4<'_>) -> bool {
+        if let Some((kind, detail)) = quote_problem(ip, self.index.own, sender.ip) {
+            self.log.note(&self.counters, kind, &format!("节点 {peer}：{detail}"));
+            return false;
+        }
+        if ip.is_icmp_redirect() {
+            self.log.note(&self.counters, Loss::NotAllowed, &format!("节点 {peer} 发来一个 ICMP 重定向"));
+            return false;
+        }
+        if !sender.inbound && self.replies.lock().expect("replies mutex poisoned").admit(ip, Instant::now()) == Verdict::NewConversation {
+            self.log.note(&self.counters, Loss::NotAllowed, &format!("节点 {peer} 不能访问本节点，它发来的不是回包"));
+            return false;
+        }
+        true
+    }
+}
+
+/// 对端 `sender` 发来的 ICMP 差错报文有什么不对：它说的必须是本节点（`own`）发给它的一个包。不是差错报文的没有问题。
+fn quote_problem(ip: &Ipv4<'_>, own: Ipv4Addr, sender: Ipv4Addr) -> Option<(Loss, String)> {
+    if !ip.is_icmp_error() {
+        return None;
+    }
+    if ip.is_fragment() {
+        return Some((Loss::Malformed, "ICMP 差错报文被切成了片".to_owned()));
+    }
+    let Some(quoted) = ip.quoted() else {
+        return Some((Loss::Malformed, "ICMP 差错报文带回来的原包连头都不完整".to_owned()));
+    };
+    if quoted.source() != own {
+        return Some((Loss::BadDestination, format!("ICMP 差错报文说的是 {} 发出的包", quoted.source())));
+    }
+    if quoted.destination() != sender {
+        return Some((Loss::BadSource, format!("ICMP 差错报文说的是发往 {} 的包", quoted.destination())));
+    }
+    None
 }
 
 #[cfg(test)]

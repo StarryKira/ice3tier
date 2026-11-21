@@ -1,7 +1,7 @@
 //! 监听的管理：按 netmap 开关代理和端口转发的监听，加上本机配置文件里的组网入口。
 
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -679,6 +679,12 @@ async fn serve<C: Connector + Datagrams>(shared: Arc<Shared<C>>, key: Key, strea
     if let Err(error) = i3t_flow::keep_alive(&stream) {
         tracing::debug!(%error, "客户端连接打不开内核保活，客户端悄悄消失时这条连接要等到有数据要发才会发现");
     }
+    // 防火墙开关关着时，局域网里一次端口扫描就是一串这样的连接：只记在 debug 里，不刷屏。
+    if !virtual_ip_admits(&netmap, key.bind(), from) {
+        return tracing::debug!(
+            "拒绝了一条连接：监听在本节点的虚拟 IP 上，来源既不是本机，也不是可以访问本节点的节点（多半是从别的网卡进来的）"
+        );
+    }
     match key {
         Key::Proxy { id, bind } => {
             // 找不到说明它刚从 netmap 里删掉，监听马上就会关。
@@ -703,6 +709,24 @@ async fn serve<C: Connector + Datagrams>(shared: Arc<Shared<C>>, key: Key, strea
     }
 }
 
+/// 监听在本节点虚拟 IP 上的（端口转发、代理、组网入口）只收经虚拟网卡来的和本机自己的：来源是可以访问本节点的节点的虚拟 IP、
+/// 本节点的虚拟 IP 或者回环。监听在别的地址上的不管。和来源白名单（[`allowed`]）都要过。
+///
+/// 经虚拟网卡进来的包，来源核对过是那个节点的虚拟 IP，访问规则不允许它访问本节点时它开不了会话。可 Linux 按"弱主机模型"收包：
+/// 发往虚拟 IP 的包从别的网卡进来也收，同一个局域网里的机器（或者上游的路由器）把虚拟 IP 指到这台机器，就能用它自己的真实地址
+/// 连上这里，访问规则管不到它。虚拟网卡的防火墙规则挡在前面；这里再挡一道：防火墙的开关关着、规则装不上、别的系统打开了转发时
+/// 也挡得住。Docker 桥接网络里的容器连宿主机的虚拟 IP 也因此不行（它们和局域网里的机器分不开）。
+pub(crate) fn virtual_ip_admits(netmap: &Netmap, bind: SocketAddr, from: SocketAddr) -> bool {
+    let own = netmap.me.virtual_ip;
+    if bind.ip().to_canonical() != IpAddr::V4(own) {
+        return true;
+    }
+    match from.ip().to_canonical() {
+        IpAddr::V4(ip) => ip.is_loopback() || ip == own || netmap.peer_by_ip(ip).is_some_and(|peer| peer.inbound),
+        IpAddr::V6(ip) => ip.is_loopback(),
+    }
+}
+
 /// 来源白名单。空的表示不限制。
 pub(crate) fn allowed(allow_from: &[IpNet], from: SocketAddr) -> bool {
     let ip = from.ip().to_canonical();
@@ -723,6 +747,26 @@ mod tests {
         assert_eq!(ListenCause::from(again.kind()), ListenCause::AddressInUse, "{again}");
         assert_eq!(ListenCause::from(io::ErrorKind::PermissionDenied), ListenCause::PermissionDenied);
         assert_eq!(ListenCause::from(io::ErrorKind::InvalidInput), ListenCause::Other);
+    }
+
+    #[test]
+    fn on_our_virtual_ip_only_nodes_that_may_reach_us_and_this_machine_get_in() {
+        let mut netmap = crate::route::tests::netmap();
+        netmap.peers[1].inbound = false;
+        let at = |text: &str| text.parse::<SocketAddr>().unwrap();
+        let ours = at("10.66.0.1:8080");
+        assert!(virtual_ip_admits(&netmap, ours, at("10.66.0.2:40000")), "可以访问本节点的节点");
+        assert!(!virtual_ip_admits(&netmap, ours, at("10.66.0.3:40000")), "不能访问本节点的节点");
+        assert!(!virtual_ip_admits(&netmap, ours, at("10.66.0.9:40000")), "地址段里不是节点的地址");
+        assert!(virtual_ip_admits(&netmap, ours, at("10.66.0.1:40000")), "本机的程序连虚拟 IP");
+        assert!(virtual_ip_admits(&netmap, ours, at("127.0.0.1:40000")));
+        assert!(virtual_ip_admits(&netmap, ours, at("[::ffff:10.66.0.2]:40000")), "双栈 socket 上的 IPv4 来源按 IPv4 比对");
+        assert!(!virtual_ip_admits(&netmap, ours, at("192.168.1.99:40000")), "局域网里的机器用它自己的地址连进来");
+        assert!(!virtual_ip_admits(&netmap, ours, at("172.17.0.2:40000")), "Docker 桥接网络里的容器");
+        assert!(!virtual_ip_admits(&netmap, ours, at("[2001:db8::1]:40000")));
+        for elsewhere in ["0.0.0.0:8080", "127.0.0.1:8080", "192.168.1.5:8080", "10.66.0.7:8080"] {
+            assert!(virtual_ip_admits(&netmap, at(elsewhere), at("192.168.1.99:40000")), "监听在 {elsewhere} 上的不管");
+        }
     }
 
     #[test]

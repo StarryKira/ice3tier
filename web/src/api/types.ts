@@ -386,7 +386,7 @@ export interface VnetDrops {
   not_allowed: number
   /** 本机发出的送不到：不是节点的地址、没有网卡或连不上的节点。 */
   unreachable: number
-  /** 读不懂、分片拼不起来。 */
+  /** 读不懂、分片拼不起来，或者是不该被切开的包（TCP、ICMP 差错报文）。 */
   malformed: number
 }
 

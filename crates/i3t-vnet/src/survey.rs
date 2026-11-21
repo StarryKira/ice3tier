@@ -31,15 +31,17 @@ pub struct AcceptRule {
     pub position: usize,
 }
 
-/// 一条自己的防冒充的规则（Linux 上 `raw` 表的 PREROUTING 链里）。
+/// 一条自己的防冒充的规则（Linux 上 `raw` 表的 PREROUTING 链里）。每块网卡两条：一条按来源（`-s`），一条按目的（`-d`）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuardRule {
     /// 管的是哪块网卡（规则里的 `! -i <网卡>`）。
     pub device: String,
     /// 在 PREROUTING 链里排第几（从 1 数）。
     pub position: usize,
-    /// 丢掉的来源地址段（`-s`）。读不出来时是 `None`：这样的规则也是自己的，装的时候换掉。
+    /// 丢掉的来源地址段（`-s`）。没有或者读不出来时是 `None`：这样的规则也是自己的，装的时候按需要换掉。
     pub range: Option<Ipv4Net>,
+    /// 丢掉的目的地址（`-d`，目的是本节点虚拟 IP 的那一条，`/32`）。
+    pub destination: Option<Ipv4Net>,
     /// `iptables -S` 写出来的那一行去掉 `-A PREROUTING `：删的时候原样交回去（[`linux::delete_guard`]）。
     pub rule: String,
 }
@@ -141,7 +143,8 @@ fn parse_raw_prerouting(text: &str) -> Vec<GuardRule> {
         .filter_map(|rule| {
             let device = rule.after_negated("-i").filter(|device| is_device_name(device))?;
             let range = rule.after("-s").and_then(|source| source.parse().ok());
-            Some(GuardRule { device: device.to_owned(), position: rule.position, range, rule: rule.text.to_owned() })
+            let destination = rule.after("-d").and_then(|destination| destination.parse().ok());
+            Some(GuardRule { device: device.to_owned(), position: rule.position, range, destination, rule: rule.text.to_owned() })
         })
         .collect()
 }
@@ -212,11 +215,12 @@ mod tests {
         assert!(parse_input("-P INPUT ACCEPT\n").is_empty());
     }
 
-    // -t raw -S PREROUTING：Docker 的、别人的、注释带引号的规则夹着自己的两条（i3t1 那条是地址段变了之前的）。
-    // 按 iptables 1.8 写规则的次序（-s、! -i、各个 -m、-j）写的，不是从真机上抓的。
+    // -t raw -S PREROUTING：Docker 的、别人的、注释带引号的规则夹着自己的三条（i3t0 的两条，i3t1 那条是地址段变了之前、
+    // 还没有按目的的那条时的）。按 iptables 1.8 写规则的次序（-s、-d、! -i、各个 -m、-j）写的。
     const RAW: &str = "-P PREROUTING ACCEPT\n\
                        -A PREROUTING -d 172.17.0.2/32 ! -i docker0 -j DROP\n\
                        -A PREROUTING -s 10.66.0.0/16 ! -i i3t0 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP\n\
+                       -A PREROUTING -d 10.66.0.1/32 ! -i i3t0 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP\n\
                        -A PREROUTING -p udp -m udp --dport 53 -j CT --notrack\n\
                        -A PREROUTING -s 10.66.0.0/16 ! -i i3t0 -m comment --comment \"ice3tier \\\"old\\\"\" -j DROP\n\
                        -A PREROUTING -s 10.99.0.0/16 ! -i i3t1 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP\n\
@@ -230,8 +234,10 @@ mod tests {
             device: device.into(),
             position,
             range: Some(range.parse().unwrap()),
+            destination: None,
             rule: text.into(),
         };
+        let to_us = "-d 10.66.0.1/32 ! -i i3t0 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP";
         assert_eq!(
             parse_raw_prerouting(RAW),
             [
@@ -241,9 +247,10 @@ mod tests {
                     "10.66.0.0/16",
                     "-s 10.66.0.0/16 ! -i i3t0 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP"
                 ),
+                GuardRule { range: None, destination: Some("10.66.0.1/32".parse().unwrap()), ..rule("i3t0", 3, "0.0.0.0/0", to_us) },
                 rule(
                     "i3t1",
-                    5,
+                    6,
                     "10.99.0.0/16",
                     "-s 10.99.0.0/16 ! -i i3t1 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP"
                 ),
@@ -253,7 +260,7 @@ mod tests {
         assert!(parse_raw_prerouting("-P PREROUTING ACCEPT\n").is_empty());
         let without_source = parse_raw_prerouting("-A PREROUTING ! -i i3t0 -m comment --comment ice3tier -j DROP\n");
         assert_eq!(without_source.len(), 1, "没有地址段的也是自己的：装的时候换掉");
-        assert_eq!(without_source[0].range, None);
+        assert_eq!((without_source[0].range, without_source[0].destination), (None, None));
     }
 
     #[derive(Default)]
@@ -281,7 +288,7 @@ mod tests {
         let survey = Survey::take(&mut machine, Platform::Linux, "i3t0");
         assert_eq!(survey.tables.as_deref(), Ok(&["i3t0".to_owned()][..]));
         assert!(survey.accept.is_err());
-        assert_eq!(survey.guard_rules.as_ref().map(Vec::len), Ok(2));
+        assert_eq!(survey.guard_rules.as_ref().map(Vec::len), Ok(3));
         assert!(survey.found_any() && !survey.is_clean());
 
         let no_raw_table = "iptables v1.8.9 (legacy): can't initialize iptables table `raw': Table does not exist (do you need to insmod?)";
