@@ -9,7 +9,8 @@
 //!   互联网上的一台主机换着来源端口发，占不满一条转发，别人还连得上。回环上的来源是本机的程序，不受这一条限制：
 //!   本机的 DNS 解析器这类程序每个请求换一个来源端口，限得太紧它们就用不了。伪造来源地址的人挡不住，要挡得配来源白名单。
 //! - 目标节点按转发编号找到要发往的地址；它回来的报文从监听端口发回那个客户端。
-//! - 来源白名单逐个报文检查。UDP 没有地方回错误，不通过的报文只是丢掉。
+//! - 来源白名单逐个报文检查。UDP 没有地方回错误，不通过的报文只是丢掉。监听在本节点虚拟 IP 上的转发另外只收经虚拟网卡来的和本机的
+//!   （[`crate::manager::virtual_ip_admits`]）。
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
@@ -29,7 +30,7 @@ use tracing::Instrument;
 
 use super::{MAX_UDP_PAYLOAD, OUTGOING_BACKLOG, open_context, owned};
 use crate::forward_health::TargetCause;
-use crate::manager::{Counters, allowed};
+use crate::manager::{Counters, allowed, virtual_ip_admits};
 use crate::session::{Shared, origin_address};
 use crate::usage::Tally;
 
@@ -73,6 +74,12 @@ pub(crate) async fn serve<C: Connector + Datagrams>(
         if !allowed(&forward.allow_from, from) {
             if refused.len() < MAX_LOGGED_REFUSALS && refused.insert(from.ip()) {
                 tracing::info!(%from, "丢掉了一个 UDP 报文：来源不在这条端口转发的白名单里（这个来源之后的不再记）");
+            }
+            continue;
+        }
+        if !virtual_ip_admits(&netmap, forward.bind, from) {
+            if refused.len() < MAX_LOGGED_REFUSALS && refused.insert(from.ip()) {
+                tracing::info!(%from, "丢掉了一个 UDP 报文：监听在本节点的虚拟 IP 上，来源既不是本机，也不是可以访问本节点的节点（这个来源之后的不再记）");
             }
             continue;
         }

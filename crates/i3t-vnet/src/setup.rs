@@ -5,8 +5,9 @@
 //! - 每条规则各自装：一条装不上（内核不认、没有权限）不妨碍另一条和网卡，状态里说清楚哪条为什么（[`RuleState::Failed`]）。
 //! - 开箱即用，不要求装哪个程序。Linux 上防冒充有 `nft` 用 nftables 的表，没有就用 `iptables` 在 `raw` 表里加一条，
 //!   两个都没有才装不上；放行的那条没有 `iptables` 时用不着（[`RuleState::NotNeeded`]），不算失败。
-//! - 不会多出一份。Linux 的表整张换（一个 nft 事务）；放行的那条、raw 表里防冒充的那条都正好一条、排在链的第一条，
-//!   不是的话（崩溃留下的、地址段变了的、被别人挤到了后面的）全删掉再插一条。表装上了，以前（还没有 `nft` 时）加的那条 raw 规则拆掉。
+//! - 不会多出一份。Linux 的表整张换（一个 nft 事务）；放行的那条正好一条、排在链的第一条，raw 表里防冒充的正好两条、排在链的
+//!   第一、二条，不是的话（崩溃留下的、地址段变了的、被别人挤到了后面的、以前的版本只有一条的）全删掉再插。表装上了，
+//!   以前（还没有 `nft` 时）加的 raw 规则拆掉。
 //!   Windows 的规则按名字先删再加，在同一段脚本里。
 //! - 只动认得出是自己的东西（见 [`crate::plan`]）。拆的时候每一样各自拆，一样失败不妨碍别的；没有那个程序、链所在的表不在时，
 //!   那一类东西本来就没有，不算失败（[`CommandError::means_absent`]）。
@@ -137,8 +138,9 @@ fn install_accept(machine: &mut impl Machine, device: &str, found: &[AcceptRule]
     machine.run(Program::Iptables, &linux::insert_accept(device), None).map(drop)
 }
 
-/// 没有 `nft` 时的防冒充：`raw` 表 PREROUTING 链的第一条正好是这块网卡的、地址段是现在的那一条；不是的话（崩溃留下的、
-/// 地址段变了的、被别人挤到了后面的）这块网卡的全删掉再插一条。`found` 是读回来的这条链。
+/// 没有 `nft` 时的防冒充：`raw` 表 PREROUTING 链的第一、二条正好是这块网卡的、地址段是现在的那两条（按来源的在前，按目的的在后）；
+/// 不是的话（崩溃留下的、地址段变了的、被别人挤到了后面的、以前的版本只有按来源的一条）这块网卡的全删掉再插。
+/// `found` 是读回来的这条链。
 ///
 /// 两个程序都没有时说缺 `nft`：装上它就是本来的做法，状态里写的是要装 nftables。
 fn install_raw_guard(machine: &mut impl Machine, plan: &Plan, found: Result<Vec<GuardRule>, CommandError>) -> Result<(), CommandError> {
@@ -147,16 +149,20 @@ fn install_raw_guard(machine: &mut impl Machine, plan: &Plan, found: Result<Vec<
         other => other,
     })?;
     let ours: Vec<&GuardRule> = found.iter().filter(|rule| rule.device == plan.device).collect();
-    if let [only] = ours.as_slice()
-        && only.position == 1
-        && only.range == Some(plan.cidr.trunc())
+    let range = Some(plan.cidr.trunc());
+    if let [spoofed, to_us] = ours.as_slice()
+        && (spoofed.position, spoofed.range, spoofed.destination) == (1, range, None)
+        && (to_us.position, to_us.range, to_us.destination) == (2, None, range)
     {
         return Ok(());
     }
     for rule in ours {
         delete_guard_rule(machine, rule)?;
     }
-    machine.run(Program::Iptables, &linux::insert_guard(&plan.device, plan.cidr), None).map(drop)
+    for insert in linux::insert_guards(&plan.device, plan.cidr) {
+        machine.run(Program::Iptables, &insert, None)?;
+    }
+    Ok(())
 }
 
 /// 拆掉读回来的一项里 `pick` 挑出来的每一样，返回拆了几样。要读的东西根本不在（没有那个程序、链所在的表不在）时一样也没有。
@@ -280,11 +286,13 @@ pub(crate) mod fake {
         CommandError::Failed { program, status: Some(status), detail: detail.to_owned() }
     }
 
-    /// `iptables -S` 写出来的样子：`-s` 排在 `! -i` 前面，不管插的时候怎么写。删的时候也按这个样子比，和真的一样不看次序。
+    /// `iptables -S` 写出来的样子：`-s`、`-d` 排在 `! -i` 前面，不管插的时候怎么写。删的时候也按这个样子比，和真的一样不看次序。
     fn as_listed(rule: &str) -> String {
         let words: Vec<&str> = rule.split(' ').collect();
         match words.as_slice() {
-            ["!", "-i", device, "-s", source, rest @ ..] => [&["-s", *source, "!", "-i", *device][..], rest].concat().join(" "),
+            ["!", "-i", device, flag @ ("-s" | "-d"), range, rest @ ..] => {
+                [&[*flag, *range, "!", "-i", *device][..], rest].concat().join(" ")
+            }
             _ => rule.to_owned(),
         }
     }
@@ -305,8 +313,10 @@ pub(crate) mod fake {
                 let listed = chain.iter().map(|rule| format!("-A {name} {rule}"));
                 return Ok(std::iter::once(format!("-P {name} ACCEPT")).chain(listed).collect::<Vec<_>>().join("\n"));
             }
-            if let Some(rule) = command.strip_prefix(&format!("-I {name} 1 ")) {
-                chain.insert(0, as_listed(rule));
+            if let Some((position, rule)) = command.strip_prefix(&format!("-I {name} ")).and_then(|rest| rest.split_once(' ')) {
+                let position: usize = position.parse().expect("插在第几条");
+                assert!(position <= chain.len() + 1, "iptables 不让插在链的末尾之后：{line}");
+                chain.insert(position - 1, as_listed(rule));
                 return Ok(String::new());
             }
             let rule = as_listed(command.strip_prefix(&format!("-D {name} ")).expect("只会读、插和删"));
@@ -386,7 +396,11 @@ mod tests {
     const OURS: &str = "-i i3t0 -m comment --comment ice3tier -j ACCEPT";
     /// 没有 nft 时防冒充的那条，`iptables -S` 写出来的样子。
     const GUARD: &str = "-s 10.66.0.0/16 ! -i i3t0 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP";
+    /// 防冒充的第二条：目的是本机的地址。
+    const TO_US: &str = "-d 10.66.0.0/16 ! -i i3t0 -m addrtype ! --src-type LOCAL --dst-type LOCAL -m comment --comment ice3tier -j DROP";
     const GUARD_I3T1: &str = "-s 10.66.0.0/16 ! -i i3t1 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP";
+    const TO_US_I3T1: &str =
+        "-d 10.66.0.0/16 ! -i i3t1 -m addrtype ! --src-type LOCAL --dst-type LOCAL -m comment --comment ice3tier -j DROP";
     /// Docker 在 raw 表里加的那种规则：别人的，不动。
     const DOCKER: &str = "-d 172.17.0.2/32 ! -i docker0 -j DROP";
 
@@ -443,10 +457,10 @@ mod tests {
         let mut fake = Fake { missing: vec![Program::Nft], raw: vec![DOCKER.into()], ..Fake::default() };
         install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
         install_firewall(&mut fake, Platform::Linux, &plan("i3t1"));
-        assert_eq!(remove_leftovers(&mut fake, Platform::Linux, &["i3t1".into()]).unwrap(), 2, "i3t0 的放行和 raw 规则");
-        assert_eq!(fake.raw, [GUARD_I3T1, DOCKER]);
+        assert_eq!(remove_leftovers(&mut fake, Platform::Linux, &["i3t1".into()]).unwrap(), 3, "i3t0 的放行和两条 raw 规则");
+        assert_eq!(fake.raw, [GUARD_I3T1, TO_US_I3T1, DOCKER]);
         assert_eq!(fake.input, ["-i i3t1 -m comment --comment ice3tier -j ACCEPT"]);
-        assert_eq!(remove_leftovers(&mut fake, Platform::Linux, &[]).unwrap(), 2);
+        assert_eq!(remove_leftovers(&mut fake, Platform::Linux, &[]).unwrap(), 3);
         assert_eq!(fake.raw, [DOCKER], "别人的规则不动");
     }
 
@@ -479,34 +493,51 @@ mod tests {
     }
 
     #[test]
-    fn without_nft_the_guard_is_one_rule_first_in_raw_prerouting() {
+    fn without_nft_the_guard_is_two_rules_first_in_raw_prerouting() {
         let mut fake = Fake { missing: vec![Program::Nft], raw: vec![DOCKER.into()], ..Fake::default() };
         let firewall = install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
         assert_eq!(firewall, Firewall { accept: RuleState::On, guard: RuleState::On });
-        assert_eq!(fake.raw, [GUARD, DOCKER], "插在最前面");
-        let inserted = format!("iptables {}", linux::insert_guard("i3t0", plan("i3t0").cidr).join(" "));
-        assert!(fake.log.contains(&inserted), "{:?}", fake.log);
+        assert_eq!(fake.raw, [GUARD, TO_US, DOCKER], "插在最前面，按来源的在前");
+        for insert in linux::insert_guards("i3t0", plan("i3t0").cidr) {
+            let inserted = format!("iptables {}", insert.join(" "));
+            assert!(fake.log.contains(&inserted), "{:?}", fake.log);
+        }
 
         // 再装一遍：已经在最前面、地址段对的不动。
         fake.log.clear();
         install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
-        assert_eq!(fake.raw, [GUARD, DOCKER]);
+        assert_eq!(fake.raw, [GUARD, TO_US, DOCKER]);
         assert!(!fake.log.iter().any(|line| line.contains(" -I ") || line.contains(" -D ")), "{:?}", fake.log);
 
-        // 被别人挤到了后面：回到最前面，还是一条。
+        // 被别人挤到了后面：回到最前面，还是两条。
         fake.raw.insert(0, "-s 192.0.2.9/32 -j DROP".into());
         install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
-        assert_eq!(fake.raw, [GUARD, "-s 192.0.2.9/32 -j DROP", DOCKER]);
+        assert_eq!(fake.raw, [GUARD, TO_US, "-s 192.0.2.9/32 -j DROP", DOCKER]);
+        fake.raw.insert(1, "-s 192.0.2.9/32 -j DROP".into());
+        install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
+        assert_eq!(fake.raw, [GUARD, TO_US, "-s 192.0.2.9/32 -j DROP", "-s 192.0.2.9/32 -j DROP", DOCKER], "两条中间插进了别的");
+        fake.raw.drain(2..3);
+        fake.raw.swap(0, 1);
+        install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
+        assert_eq!(fake.raw, [GUARD, TO_US, "-s 192.0.2.9/32 -j DROP", DOCKER], "次序反了");
 
         // 两份（更早的版本被杀掉两次）收成一份。
         fake.raw.push(GUARD.into());
+        fake.raw.push(TO_US.into());
         install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
-        assert_eq!(fake.raw, [GUARD, "-s 192.0.2.9/32 -j DROP", DOCKER]);
+        assert_eq!(fake.raw, [GUARD, TO_US, "-s 192.0.2.9/32 -j DROP", DOCKER]);
 
         // 拆：只拆自己的。
         remove_firewall(&mut fake, Platform::Linux, "i3t0").unwrap();
         assert_eq!(fake.raw, ["-s 192.0.2.9/32 -j DROP", DOCKER]);
         assert!(fake.input.is_empty());
+    }
+
+    #[test]
+    fn without_nft_the_single_rule_of_an_earlier_version_gets_its_second_rule() {
+        let mut fake = Fake { missing: vec![Program::Nft], raw: vec![GUARD.into(), DOCKER.into()], ..Fake::default() };
+        assert_eq!(install_firewall(&mut fake, Platform::Linux, &plan("i3t0")).guard, RuleState::On);
+        assert_eq!(fake.raw, [GUARD, TO_US, DOCKER]);
     }
 
     #[test]
@@ -519,14 +550,19 @@ mod tests {
         assert_eq!(firewall.guard, RuleState::On);
         assert_eq!(
             fake.raw,
-            ["-s 10.77.0.0/16 ! -i i3t0 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP", GUARD_I3T1],
-            "旧地址段的那条换掉了，i3t1 的不动"
+            [
+                "-s 10.77.0.0/16 ! -i i3t0 -m addrtype ! --src-type LOCAL -m comment --comment ice3tier -j DROP",
+                "-d 10.77.0.0/16 ! -i i3t0 -m addrtype ! --src-type LOCAL --dst-type LOCAL -m comment --comment ice3tier -j DROP",
+                GUARD_I3T1,
+                TO_US_I3T1
+            ],
+            "旧地址段的两条换掉了，i3t1 的不动"
         );
     }
 
     #[test]
     fn once_nft_is_there_the_table_takes_over_from_the_raw_rule_left_from_before() {
-        let mut fake = Fake { raw: vec![GUARD.into(), GUARD_I3T1.into(), DOCKER.into()], ..Fake::default() };
+        let mut fake = Fake { raw: vec![GUARD.into(), TO_US.into(), GUARD_I3T1.into(), DOCKER.into()], ..Fake::default() };
         let firewall = install_firewall(&mut fake, Platform::Linux, &plan("i3t0"));
         assert_eq!(firewall, Firewall { accept: RuleState::On, guard: RuleState::On });
         assert!(fake.tables.contains("i3t0"));

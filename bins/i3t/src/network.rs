@@ -133,9 +133,10 @@ pub(crate) fn status(state: &StateDir, live: Option<&LiveStatus>) {
     }
     if let Ok(rules) = &survey.guard_rules {
         for rule in rules {
-            let matched = match rule.range {
-                Some(range) => format!("! -i {} -s {range}", rule.device),
-                None => format!("! -i {}", rule.device),
+            let matched = match (rule.range, rule.destination) {
+                (Some(range), _) => format!("! -i {} -s {range}", rule.device),
+                (None, Some(range)) => format!("! -i {} -d {range} --dst-type LOCAL", rule.device),
+                (None, None) => format!("! -i {}", rule.device),
             };
             fields.add(t.guard_rule, (t.guard_at)(rule.position, &matched));
         }
@@ -255,7 +256,13 @@ mod tests {
         let no_nft = || Err(CommandError::Missing(Program::Nft));
         let refused = |detail: &str| CommandError::Failed { program: Program::Iptables, status: Some(3), detail: detail.into() };
         let no_raw_table = || refused("iptables v1.8.9 (legacy): can't initialize iptables table `raw': Table does not exist");
-        let rule = GuardRule { device: "i3t0".into(), position: 1, range: Some("10.66.0.0/16".parse().unwrap()), rule: String::new() };
+        let rule = GuardRule {
+            device: "i3t0".into(),
+            position: 1,
+            range: Some("10.66.0.0/16".parse().unwrap()),
+            destination: None,
+            rule: String::new(),
+        };
 
         assert_eq!(guard_note(&survey(Ok(Vec::new()), Err(no_raw_table()))), None, "有 nft：防冒充是表，raw 表读不了不用说");
         assert_eq!(guard_note(&survey(no_nft(), Ok(Vec::new()))).as_deref(), Some(t.guard_none));

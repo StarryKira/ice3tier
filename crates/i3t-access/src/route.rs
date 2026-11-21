@@ -129,7 +129,7 @@ pub fn is_lan_literal(ip: IpAddr) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use i3t_model::netmap::{LaneMode, LocalNode, Network, PeerExit};
 
     use super::*;
@@ -157,8 +157,9 @@ mod tests {
         }
     }
 
-    /// 本节点是 1 号 `laptop`；2 号 `gw` 是出口并开了局域网；3 号 `web` 是出口；4 号 `nas` 不是出口；5 号 `hidden` 不允许访问。
-    fn netmap() -> Netmap {
+    /// 本节点是 1 号 `laptop`（10.66.0.1）；2 号 `gw` 是出口并开了局域网；3 号 `web` 是出口；4 号 `nas` 不是出口；
+    /// 5 号 `hidden` 不允许访问。对端的虚拟 IP 是 10.66.0.<编号>，都可以访问本节点。
+    pub(crate) fn netmap() -> Netmap {
         let mut hidden = peer(5, "hidden", Some(PeerExit { lan: true, class: None, optimistic: None }));
         hidden.outbound = false;
         Netmap {
