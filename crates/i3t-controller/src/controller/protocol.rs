@@ -265,7 +265,9 @@ impl Inner {
         let outcome = if enrolling { Ok(()) } else { self.store.set_node_last_seen(node.id, self.clock.now()).map_err(Error::from) };
         let outcome = outcome.and_then(|()| self.refresh(node.network, seeds, Some(node.id)));
         if let Err(err) = outcome {
+            // 它没能上线，就不在线：不再等它确认。不然它欠着的确认没人放，`give_up_on_slow_acks` 只看在线的节点。
             self.live.remove(&node.id);
+            self.stop_waiting_for(node.network, node.id);
             return Err(err);
         }
         // 更新的指令不在这里发：要等它的第一次上报，才知道它是带着什么回来的（见 `rollout`）。
