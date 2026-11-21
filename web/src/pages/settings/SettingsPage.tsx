@@ -1,20 +1,16 @@
 import { useQuery } from '@tanstack/react-query'
-import { LogOut } from 'lucide-react'
-import { Navigate, NavLink, useNavigate, useParams } from 'react-router'
+import { Navigate, NavLink, useParams } from 'react-router'
 
 import { q } from '@/api/queries'
-import { session } from '@/auth/session'
-import { CodeBlock } from '@/components/copy'
 import { Page, PageHeader } from '@/components/page'
 import { StatusDot } from '@/components/status'
-import { Button } from '@/components/ui/button'
-import { Card, CardBody, CardHeader } from '@/components/ui/card'
 import { t } from '@/i18n'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { cn } from '@/lib/utils'
 
 import { AboutTab } from './AboutTab'
 import { LogTab } from './LogTab'
+import { SessionTab } from './SessionTab'
 import { UpdatesTab } from './UpdatesTab'
 
 const s = t.settings
@@ -34,41 +30,6 @@ function tabLabel(id: TabId): string {
     case 'about':
       return s.tabAbout
   }
-}
-
-function SessionTab() {
-  const navigate = useNavigate()
-  return (
-    <div className="space-y-12">
-      <Card>
-        <CardHeader
-          title={s.session.title}
-          action={
-            <Button
-              size="sm"
-              onClick={() => {
-                session.signOut('manual')
-                void navigate('/login', { replace: true })
-              }}
-            >
-              <LogOut aria-hidden />
-              {s.session.signOut}
-            </Button>
-          }
-        />
-        <CardBody>
-          <p className="text-[13px] text-muted-foreground">{s.session.stored}</p>
-        </CardBody>
-      </Card>
-      <Card>
-        <CardHeader title={s.session.resetTitle} />
-        <CardBody className="space-y-3">
-          <p className="text-[13px] text-muted-foreground">{t.signIn.lostBody}</p>
-          <CodeBlock copy={t.signIn.lostCommand}>{t.signIn.lostCommand}</CodeBlock>
-        </CardBody>
-      </Card>
-    </div>
-  )
 }
 
 /** 全局设置。左侧竖排的分区（窄的时候是上面的一行），每个分区有自己的地址。 */

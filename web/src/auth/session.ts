@@ -51,6 +51,15 @@ export const session = {
     set(next)
   },
 
+  /** 登录时勾了"保持登录"：令牌在 localStorage 里，关掉浏览器之后还在。 */
+  remembered: (): boolean => {
+    try {
+      return window.localStorage.getItem(KEY) !== null
+    } catch {
+      return false
+    }
+  },
+
   /** `expired`：带着令牌的请求被 controller 拒绝了（令牌被重新生成过）。 */
   signOut: (reason: SignOutReason): void => {
     forget()

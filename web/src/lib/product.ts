@@ -9,6 +9,17 @@ export const RELEASES_PAGE = 'https://github.com/fuqiuluo/ice3tier/releases'
 /** 安装脚本：在 Linux 和 macOS 上把节点装成系统服务，架构由它自己认。 */
 export const INSTALL_SCRIPT = 'https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh'
 
+/**
+ * 安装脚本（`--controller`）装出来的 controller：systemd 服务的名字、它自己的用户、程序和数据目录的位置。
+ * 和部署文档里写的一致。
+ */
+export const CONTROLLER_SERVICE = {
+  unit: 'i3t-controller',
+  user: 'i3t-controller',
+  program: '/usr/local/bin/i3t-controller',
+  dataDir: '/var/lib/i3t-controller',
+} as const
+
 /** 添加节点时选的系统。Linux 和 macOS 走安装脚本；Windows 没有脚本，下载程序。 */
 export const INSTALL_SYSTEMS = ['linux', 'macos', 'windows'] as const
 export type InstallSystem = (typeof INSTALL_SYSTEMS)[number]

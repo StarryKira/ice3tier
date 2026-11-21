@@ -16,8 +16,10 @@ export const settings = {
   session: {
     title: '管理令牌',
     stored: '令牌保存在此浏览器中，退出登录后清除',
+    tabOnly: '令牌只保存在此标签页，关闭后需重新登录',
     signOut: '退出登录',
     resetTitle: '重置管理令牌',
+    resetService: '在 controller 所在的机器上执行。新令牌打印在终端里，旧令牌作废。',
   },
 
   log: {

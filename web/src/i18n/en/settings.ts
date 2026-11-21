@@ -13,8 +13,11 @@ export const settings: Messages['settings'] = {
   session: {
     title: 'Admin token',
     stored: 'The token is kept in this browser until sign-out',
+    tabOnly: 'The token is kept for this tab only; closing it signs you out',
     signOut: 'Sign out',
     resetTitle: 'Reset admin token',
+    resetService:
+      'Run on the machine the controller is on. The new token is printed in the terminal; the old one stops working.',
   },
 
   log: {
