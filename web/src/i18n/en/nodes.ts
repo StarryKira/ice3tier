@@ -188,11 +188,11 @@ export const nodes: Messages['nodes'] = {
         malformed: 'malformed',
       },
       dropHint: {
-        bad_source: "A peer sent packets whose source isn't its own virtual IP",
+        bad_source: "A peer sent packets whose source isn't its own virtual IP, or ICMP errors about someone else's packets",
         bad_destination: 'Packets addressed to someone other than this node',
         not_allowed: "Peers tried to reach things they aren't allowed to",
         unreachable: 'Programs here tried nodes that are offline, have no virtual network, or cannot be reached',
-        malformed: "Unreadable packets or fragments that didn't reassemble",
+        malformed: "Unreadable packets, fragments that didn't reassemble, or fragments that shouldn't exist",
       },
       dropValue: (label, count) => `${label} ${count}`,
       howOff: 'Run i3t set network off on the node, then restart i3t',

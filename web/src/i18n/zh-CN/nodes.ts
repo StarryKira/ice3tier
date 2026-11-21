@@ -172,11 +172,11 @@ export const nodes = {
         malformed: '读不懂',
       },
       dropHint: {
-        bad_source: '对端发来的包来源不是它自己的虚拟 IP',
+        bad_source: '对端发来的包来源不是它自己的虚拟 IP，或者它的 ICMP 差错报文说的是别处的包',
         bad_destination: '包的目的不是这个节点',
         not_allowed: '有对端在访问它没被允许访问的东西',
         unreachable: '本机的程序在连不在线、没有虚拟网卡或者连不上的节点',
-        malformed: '读不懂、分片拼不起来',
+        malformed: '读不懂、分片拼不起来，或者是不该被切开的包',
       },
       dropValue: (label: string, count: string) => `${label} ${count}`,
       howOff: '在节点上执行 i3t set network off，然后重启 i3t',

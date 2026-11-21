@@ -131,19 +131,20 @@ pub enum RuleState {
 /// 丢掉的包，按原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct VnetDrops {
-    /// 对端发来的包，来源不是那个对端自己的虚拟 IP。
+    /// 对端发来的包，来源不是那个对端自己的虚拟 IP；或者它的 ICMP 差错报文说的是发往别处（不是它）的包。
     #[serde(default)]
     pub bad_source: u64,
-    /// 对端发来的包，目的不是本节点的虚拟 IP。
+    /// 对端发来的包，目的不是本节点的虚拟 IP；或者它的 ICMP 差错报文说的不是本节点发出的包。
     #[serde(default)]
     pub bad_destination: u64,
     /// 访问规则不允许对端访问本节点：它发起的新会话（TCP 的第一个握手包、ping 的请求、没有先例的 UDP 和别的协议）。
+    /// 对端发来的 ICMP 重定向也算在这里。
     #[serde(default)]
     pub not_allowed: u64,
     /// 本机发出的包送不到：地址段里不是节点的地址、没有网卡的节点、连不上的节点，等连接的时候排不下。
     #[serde(default)]
     pub unreachable: u64,
-    /// 读不懂的：不是 IPv4、头不对、片拼不起来。
+    /// 读不懂的：不是 IPv4、头不对、片拼不起来（重叠、对不上），和不该被切开的包（TCP、ICMP 差错报文）。
     #[serde(default)]
     pub malformed: u64,
 }

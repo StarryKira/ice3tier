@@ -21,7 +21,7 @@
 //!
 //! - [`device`]：网卡本身，平台之间的接缝（[`device::Device`]）；
 //! - [`engine`]：网卡和连接之间搬包：核对、按包的访问规则、等连接时的小队列、切片和拼片、ICMP 的"不可达"；
-//! - [`ipv4`]、[`filter`]、[`pieces`]：上面要用的几样，都不碰系统；
+//! - [`ipv4`]、[`filter`]、[`fragments`]、[`pieces`]：上面要用的几样，都不碰系统；
 //! - [`plan`]：要装的规则写成 `nft`、`iptables` 的参数和脚本、PowerShell 的脚本；[`survey`]：读回系统里现在有的、属于自己的东西；
 //! - [`setup`]：装、拆，和遇到上次留下的东西时怎么办；[`legacy`]：去掉以前的透明访问留下的东西；
 //! - [`machine`]：和系统之间的接缝（执行程序，看本进程有没有需要的能力）；
@@ -31,6 +31,7 @@
 pub mod device;
 pub mod engine;
 pub mod filter;
+pub mod fragments;
 pub mod ipv4;
 pub mod legacy;
 pub mod machine;
