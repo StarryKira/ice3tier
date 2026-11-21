@@ -3,7 +3,7 @@
 //! 这里只做装配：读参数，打开数据目录，绑端口，等退出信号。逻辑都在 `i3t-controller` 这个库里。
 //! 终端上的文字（帮助、管理令牌、备份的结果、启动时的错误）跟着系统的语言，日志不翻译。
 //!
-//! 除了运行，还有两种做完就退出的用法：`--reset-admin-token` 和 `--backup-to`。
+//! 除了运行，还有两种做完就退出的用法：`--reset-admin-token` 和 `--backup-to`。它们不需要 `--public-addr`，也不起运行时。
 
 mod texts;
 
@@ -33,7 +33,7 @@ struct Args {
     #[arg(long, env = "I3T_DATA_DIR")]
     data_dir: PathBuf,
 
-    #[arg(long, env = "I3T_PUBLIC_ADDR", required_unless_present = "backup_to")]
+    #[arg(long, env = "I3T_PUBLIC_ADDR", required_unless_present_any = ["backup_to", "reset_admin_token"])]
     public_addr: Option<String>,
 
     #[arg(long, default_value = "0.0.0.0:20331")]
@@ -84,6 +84,7 @@ fn main() -> ExitCode {
     let args: Args = i3t_lang::cli::parse(command(lang), lang);
     let outcome = match &args.backup_to {
         Some(to) => back_up(&args.data_dir, to),
+        None if args.reset_admin_token => reset_admin_token(&args.data_dir),
         None => match tokio::runtime::Runtime::new() {
             Ok(runtime) => runtime.block_on(serve(args)),
             Err(error) => {
@@ -122,11 +123,26 @@ fn back_up(data_dir: &Path, to: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 重新生成管理令牌，打在标准输出上。和备份一样不需要对外地址，也不会在写错的目录里建出一个新的 controller。
+fn reset_admin_token(data_dir: &Path) -> anyhow::Result<()> {
+    init_logging("warn");
+    let token = Controller::reset_admin_token(data_dir).context(texts::texts().reset_token)?;
+    print_admin_token(&token);
+    Ok(())
+}
+
+/// 令牌只在这里出现一次，直接写到标准输出，不进日志。
+fn print_admin_token(token: &str) {
+    let t = texts::texts();
+    println!("{}\n\n    {token}\n", t.admin_token);
+    println!("{}", t.admin_token_note);
+}
+
 async fn serve(args: Args) -> anyhow::Result<()> {
     let t = texts::texts();
     init_logging("info");
     abort_on_panic();
-    let public_addr = args.public_addr.expect("clap 保证：没有 --backup-to 时 --public-addr 是必须写的");
+    let public_addr = args.public_addr.expect("clap 保证：运行时 --public-addr 是必须写的");
     check_public_addr(&public_addr)?;
     // 在监听之前：节点连进来的控制连接和管理 API 都按它通告 MSS（见 `i3t_underlay::tcp_mss`）。
     i3t_underlay::tcp_mss::set(args.tcp_mss);
@@ -142,18 +158,8 @@ async fn serve(args: Args) -> anyhow::Result<()> {
     // 发布清单里的"需要的 controller 最低版本"是和可执行文件的版本比的。
     let version = env!("CARGO_PKG_VERSION").parse().context(t.bad_version)?;
     let controller = opened.controller.with_version(version);
-    let fresh_token = match opened.admin_token {
-        Some(token) => Some(token),
-        None if args.reset_admin_token => Some(controller.issue_admin_token().context(t.reset_token)?),
-        None => None,
-    };
-    if let Some(token) = fresh_token {
-        // 令牌只在这里出现一次，直接写到标准输出，不进日志。
-        println!("{}\n\n    {token}\n", t.admin_token);
-        println!("{}", t.admin_token_note);
-    }
-    if args.reset_admin_token {
-        return Ok(());
+    if let Some(token) = opened.admin_token {
+        print_admin_token(&token);
     }
 
     let webui = match args.static_dir {

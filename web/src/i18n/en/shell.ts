@@ -12,7 +12,7 @@ export const signIn: Messages['signIn'] = {
   signedOut: 'Signed out',
   lostTitle: 'Lost the token?',
   lostBody: 'Stop the controller, then run it once as below. It prints a new token; the old one stops working.',
-  lostCommand: 'i3t-controller --data-dir <data-dir> --public-addr <host:port> --reset-admin-token',
+  lostCommand: 'i3t-controller --data-dir <data-dir> --reset-admin-token',
 }
 
 export const nav: Messages['nav'] = {

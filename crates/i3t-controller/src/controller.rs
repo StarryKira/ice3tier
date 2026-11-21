@@ -336,12 +336,32 @@ impl Controller {
     ///
     /// 随机数源不可用，或者写存储失败。
     pub fn issue_admin_token(&self) -> Result<String, Error> {
-        let token = secret::generate()?;
-        let hash = secret::sha256(token.as_bytes());
         let inner = self.lock();
-        inner.store.set_meta(ADMIN_TOKEN_META, &hash)?;
-        inner.store.log(inner.clock.now(), None, action::ADMIN_TOKEN, "生成了新的管理令牌", serde_json::json!({}))?;
+        let (token, hash) = store_admin_token(&inner.store, inner.clock.now())?;
         *self.admin_token.lock().expect("admin token mutex poisoned") = Some(hash);
+        Ok(token)
+    }
+
+    /// 给数据目录 `data_dir` 里的 controller 生成一个新的管理令牌，原来的随即作废。返回的明文只有这一次能拿到。
+    ///
+    /// 换的是数据库里管理令牌的哈希，另记一条操作；不建 controller，所以不需要对外地址。
+    /// 正运行着的 controller 记着原来的哈希，不知道令牌换了，所以要在它停着时做。
+    ///
+    /// 和 [`Controller::open`] 一样：密钥读不懂的话不做；数据库的权限会收紧，表结构会升到这个程序的版本，
+    /// 之后更旧的程序就打不开它了。和它不一样的是这里不建任何东西：`data_dir` 写错了的话不会在那里生成一个新的空 controller。
+    ///
+    /// # Errors
+    ///
+    /// `data_dir` 里没有密钥或者数据库（[`Error::NotDataDir`]），密钥读不懂，读写数据库失败，或者随机数源不可用。
+    pub fn reset_admin_token(data_dir: &Path) -> Result<String, Error> {
+        let key = required(data_dir, KEY_FILE)?;
+        let database = required(data_dir, DATABASE_FILE)?;
+        // 密钥读不懂的话 controller 启动不了，换了令牌也用不上：现在就说，别等到启动时。
+        let pem = fs::read_to_string(&key).map_err(|source| Error::Io { path: key.clone(), source })?;
+        NodeKey::from_pem(&pem).map_err(|source| Error::Key { path: key, source })?;
+        keep_private(&database)?;
+        let store = Store::open(&database)?;
+        let (token, _) = store_admin_token(&store, Clock::default().now())?;
         Ok(token)
     }
 
@@ -609,6 +629,25 @@ impl Clock {
     #[cfg(test)]
     fn advance(&self, secs: u64) {
         self.skew.fetch_add(secs, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// 生成一个新的管理令牌，把它的哈希写进存储，记一条操作。返回明文和哈希。
+fn store_admin_token(store: &Store, now: Timestamp) -> Result<(String, [u8; DIGEST_LEN]), Error> {
+    let token = secret::generate()?;
+    let hash = secret::sha256(token.as_bytes());
+    store.set_meta(ADMIN_TOKEN_META, &hash)?;
+    store.log(now, None, action::ADMIN_TOKEN, "生成了新的管理令牌", serde_json::json!({}))?;
+    Ok((token, hash))
+}
+
+/// 数据目录里一定要有的文件。不在时说这不是一个数据目录。
+fn required(dir: &Path, name: &'static str) -> Result<PathBuf, Error> {
+    let path = dir.join(name);
+    match fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() => Ok(path),
+        Err(source) if source.kind() != std::io::ErrorKind::NotFound => Err(Error::Io { path, source }),
+        Ok(_) | Err(_) => Err(Error::NotDataDir { dir: dir.to_owned(), missing: name }),
     }
 }
 

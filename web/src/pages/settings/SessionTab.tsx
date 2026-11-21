@@ -19,15 +19,14 @@ const s = t.settings.session
  * 内容排成一栏，宽度是最长的那条命令一行写下来要的（窗口窄时才折行），不跟着面板拉宽：
  * 退出登录的按钮和命令的右边对齐，而不是远在面板的另一头。
  *
- * 重置的命令填好了这个 controller 的数据目录和公开地址，复制了就能执行；
+ * 重置的命令填好了这个 controller 的数据目录，复制了就能执行；
  * 取不到（controller 没应答、不是从数据目录打开的）时退回登录页上那条带占位符的。
  */
 export function SessionTab() {
   const navigate = useNavigate()
   const status = useQuery(q.status())
   const dataDir = status.data?.data_dir ?? null
-  const commands =
-    status.data === undefined || dataDir === null ? null : resetTokenCommands(dataDir, status.data.public_addr)
+  const commands = dataDir === null ? null : resetTokenCommands(dataDir)
   const command = commands?.join('\n') ?? t.signIn.lostCommand
   // 三条的那一种自己带着停和启动，说明里不再让人去停。
   const steps = commands !== null && commands.length > 1

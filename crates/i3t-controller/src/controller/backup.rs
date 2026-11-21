@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use i3t_crypto::NodeKey;
 
-use super::{Controller, DATABASE_FILE, KEY_FILE, create_private_file, write_synced};
+use super::{Controller, DATABASE_FILE, KEY_FILE, create_private_file, required, write_synced};
 use crate::error::Error;
 use crate::store::Store;
 
@@ -136,16 +136,6 @@ impl Written {
         {
             tracing::warn!(path = %self.dir.display(), "备份没有做完，建的目录删不掉：{error}");
         }
-    }
-}
-
-/// 数据目录里一定要有的文件。不在时说这不是一个数据目录。
-fn required(dir: &Path, name: &'static str) -> Result<PathBuf, Error> {
-    let path = dir.join(name);
-    match fs::metadata(&path) {
-        Ok(metadata) if metadata.is_file() => Ok(path),
-        Err(source) if source.kind() != ErrorKind::NotFound => Err(Error::Io { path, source }),
-        Ok(_) | Err(_) => Err(Error::NotDataDir { dir: dir.to_owned(), missing: name }),
     }
 }
 

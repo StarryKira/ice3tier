@@ -219,6 +219,16 @@ mod tests {
     }
 
     #[test]
+    fn a_new_admin_token_needs_only_the_data_dir() {
+        let parse = |args: &[&str]| {
+            let args = ["i3t-controller", "--data-dir", "/var/lib/x"].iter().chain(args).map(OsString::from);
+            try_parse_from::<crate::Args>(crate::command(Lang::English), Lang::English, args)
+        };
+        assert!(parse(&["--reset-admin-token"]).unwrap().reset_admin_token);
+        assert!(parse(&["--public-addr", "ctl:20331", "--reset-admin-token"]).is_ok(), "原来带着 --public-addr 的写法照样能用");
+    }
+
+    #[test]
     fn backup_refusals_are_written_in_the_language() {
         let error = anyhow::Error::new(i3t_controller::Error::BackupTargetNotEmpty("/backup/x".into())).context((EN.back_up)("/var/lib/x"));
         let said = describe(&error);
