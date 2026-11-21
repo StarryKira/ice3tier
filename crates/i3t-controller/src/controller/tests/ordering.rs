@@ -152,6 +152,70 @@ fn a_node_that_never_acknowledges_stops_being_waited_for() {
     assert!(lab.controller.node(network, destination.id).unwrap().node.online, "只是不再等它，不断开它");
 }
 
+/// 延后的下发不等待，确认最多等 `ack_timeout`。
+fn impatient(ack_timeout: Duration) -> Timing {
+    Timing { ack_coalesce: Duration::ZERO, report_coalesce: Duration::ZERO, ack_timeout, ..Timing::default() }
+}
+
+#[test]
+fn reconnecting_without_acknowledging_does_not_keep_a_revocation_pending() {
+    let timeout = Duration::from_millis(200);
+    let mut lab = Lab::with_timing(impatient(timeout));
+    let (network, mut source, mut destination) = two_unconnected(&mut lab);
+    let rule = add_rule(&lab, network, "src", "dst", Direction::OneWay);
+    lab.settle(&mut [&mut source, &mut destination]);
+
+    lab.controller.delete_rule(network, rule).unwrap();
+    let revoked = Instant::now();
+    source.receive();
+    assert!(source.netmap().peers.is_empty());
+    // 发起端收下 netmap 但从不确认，每隔不到一个超时就换一条新连接：每条新连接上都会重发一份 netmap。
+    let mut reconnects = 0;
+    while revoked.elapsed() < timeout * 3 {
+        std::thread::sleep(timeout / 4);
+        source = lab.connect(source.key, Declared::default()).unwrap();
+        reconnects += 1;
+        lab.controller.tick().unwrap();
+        destination.receive_and_ack(&lab.controller);
+    }
+    assert!(reconnects >= 4);
+    lab.settle(&mut [&mut destination]);
+    assert!(destination.netmap().peers.is_empty(), "等满一个超时就不再认发起端，换连接推迟不了");
+}
+
+#[test]
+fn a_netmap_that_keeps_changing_does_not_keep_a_revocation_pending() {
+    let timeout = Duration::from_millis(200);
+    let mut lab = Lab::with_timing(impatient(timeout));
+    let network = lab.network("home");
+    drop_default_rule(&lab, network.id);
+    let rule = add_rule(&lab, network.id, "src", "dst", Direction::OneWay);
+    add_rule(&lab, network.id, "pal", "src", Direction::OneWay);
+    let mut source = lab.join(network.id, &["src"]);
+    let mut destination = lab.join(network.id, &["dst"]);
+    let mut pal = lab.join(network.id, &["pal"]);
+    lab.settle(&mut [&mut source, &mut destination, &mut pal]);
+
+    lab.controller.delete_rule(network.id, rule).unwrap();
+    let revoked = Instant::now();
+    source.receive();
+    let before = source.snapshots.len();
+    // 发起端一直在线、从不确认；它的另一个对端不停地报新的端点，发起端的 netmap 跟着一直在变、一直在重发。
+    let mut port = 0;
+    while revoked.elapsed() < timeout * 3 {
+        port += 1;
+        report_endpoints(&lab, &pal, &format!("203.0.113.7:{port}"));
+        std::thread::sleep(timeout / 4);
+        lab.controller.tick().unwrap();
+        source.receive();
+        destination.receive_and_ack(&lab.controller);
+        pal.receive_and_ack(&lab.controller);
+    }
+    assert!(source.snapshots.len() >= before + 4, "这期间发起端不断收到新的 netmap");
+    lab.settle(&mut [&mut destination, &mut pal]);
+    assert!(destination.netmap().peers.is_empty(), "等满一个超时就不再认发起端，重发推迟不了");
+}
+
 #[test]
 fn report_changes_reach_peers_once_however_often_the_node_flaps() {
     let window = Duration::from_millis(150);

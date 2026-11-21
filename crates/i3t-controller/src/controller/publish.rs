@@ -79,19 +79,21 @@ impl Inner {
     /// 先把访问关系变更的第一步登记到所有相关节点上，再去算任何一份 netmap。
     /// 这样算的时候不管先算哪个节点，看到的都是同一套"谁在等谁确认"。返回要重算的节点。
     fn reconcile(&mut self, view: &NetworkView, access: &AccessMap<'_>, seeds: &BTreeSet<NodeId>) -> BTreeSet<NodeId> {
+        let now = Instant::now();
         let mut batch = seeds.clone();
         for &seed in seeds {
             let others = view.nodes.keys().copied().filter(|&other| other != seed);
             for other in others {
-                self.reconcile_direction(access, seed, other, &mut batch);
-                self.reconcile_direction(access, other, seed, &mut batch);
+                self.reconcile_direction(access, seed, other, now, &mut batch);
+                self.reconcile_direction(access, other, seed, now, &mut batch);
             }
         }
         batch
     }
 
     /// 看 `from` 访问 `to` 这一个方向：规则说的和两个节点的 netmap 里写的是否一致，不一致就推进一步。
-    fn reconcile_direction(&mut self, access: &AccessMap<'_>, from: NodeId, to: NodeId, batch: &mut BTreeSet<NodeId>) {
+    /// 推进时登记的等待从 `now` 开始算超时：登记完马上就会下发。
+    fn reconcile_direction(&mut self, access: &AccessMap<'_>, from: NodeId, to: NodeId, now: Instant, batch: &mut BTreeSet<NodeId>) {
         let allowed = access.allows(from, to);
         let dials = self.sync.get(&from).is_some_and(|sync| sync.dials(to));
         let accepts = self.sync.get(&to).is_some_and(|sync| sync.accepts(from));
@@ -100,7 +102,7 @@ impl Inner {
             // 新的授权：目的端先认。目的端不在线时没有可等的，发起端这一轮就可以用。
             (true, false, _) => {
                 let online = self.is_online(to);
-                self.sync.entry(to).or_default().begin_accepting(from, online);
+                self.sync.entry(to).or_default().begin_accepting(from, online, now);
                 batch.insert(to);
                 if !online {
                     batch.insert(from);
@@ -115,7 +117,7 @@ impl Inner {
             // 撤销：发起端先停。发起端不在线时没有可等的，目的端这一轮就不认它。
             (false, _, true) => {
                 let online = self.is_online(from);
-                self.sync.entry(from).or_default().begin_undialing(to, online);
+                self.sync.entry(from).or_default().begin_undialing(to, online, now);
                 batch.insert(from);
                 if !online {
                     batch.insert(to);
@@ -171,7 +173,6 @@ impl Inner {
                 self.counters.snapshots_sent += 1;
                 let sync = self.sync.entry(id).or_default();
                 sync.state.sent = version;
-                sync.sent_at = Some(Instant::now());
                 self.store.set_node_sent(id, version)?;
             }
         }
@@ -273,18 +274,22 @@ impl Inner {
     }
 
     /// 在线的节点太久不确认时不再等它，免得它卡住别的节点。
+    ///
+    /// 每一项等待从登记的那一刻算起，满了 `ack_timeout` 就不再等。这期间节点收到多少份 netmap、换了多少次连接都不算：
+    /// 不然一个不回话的节点只要不停地重连，或者不停地让自己的 netmap 变一变，就能让一次撤销一直生效不了。
     pub(crate) fn give_up_on_slow_acks(&mut self, now: Instant) {
         let timeout = self.timing.ack_timeout;
-        let is_slow = |sync: &NodeSync| sync.is_waiting() && sync.sent_at.is_some_and(|sent| now.duration_since(sent) >= timeout);
-        let slow: Vec<(NodeId, NetworkId)> = self
-            .live
-            .iter()
-            .filter(|(node, _)| self.sync.get(node).is_some_and(is_slow))
-            .map(|(node, live)| (*node, live.network))
-            .collect();
-        for (node, network) in slow {
-            tracing::warn!(%node, ?timeout, "节点迟迟不确认新的 netmap，不再等它");
-            self.stop_waiting_for(network, node);
+        let mut given_up = Vec::new();
+        for (node, live) in &self.live {
+            let Some(sync) = self.sync.get_mut(node) else { continue };
+            let peers = sync.give_up_waiting(now, timeout);
+            if !peers.is_empty() {
+                tracing::warn!(%node, ?timeout, ?peers, "节点迟迟不确认新的 netmap，不再等它");
+                given_up.push((live.network, peers));
+            }
+        }
+        for (network, peers) in given_up {
+            self.defer(network, peers, self.timing.ack_coalesce);
         }
     }
 }

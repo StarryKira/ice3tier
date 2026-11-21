@@ -84,7 +84,8 @@ pub struct Timing {
     /// 节点上报的端点或挂靠关系变了，要发给它的对端：同一个对端因此被重算的两次之间至少隔这么久，
     /// 所以一个反复变化的节点引不起下发风暴。离上一次已经够久时不等这么久，只等很短的一下（见 `defer_report`）。
     pub report_coalesce: Duration,
-    /// 在线的节点这么久不确认新的 netmap，就不再等它，免得它卡住别的节点。
+    /// 访问关系变更的一项等待，从登记的那一刻起这么久还没等到在线的节点确认，就不再等，免得它卡住别的节点。
+    /// 这期间给它发了多少份 netmap、它换了多少次连接都不往后推。
     pub ack_timeout: Duration,
     /// controller 连续这么久没有东西要发给一个节点时，发一个心跳。
     pub heartbeat_idle: Duration,
