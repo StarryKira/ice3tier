@@ -1,18 +1,20 @@
 import { keepPreviousData, useInfiniteQuery, useQueries, useQuery } from '@tanstack/react-query'
 import { Filter, History, Search, X } from 'lucide-react'
-import { useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { Link, useSearchParams } from 'react-router'
 
 import { q } from '@/api/queries'
 import { type LogEntry, type LogRef, type Network } from '@/api/types'
+import { Pagination } from '@/components/pagination'
 import { EmptyState, ErrorState, NoMatches, SkeletonRows } from '@/components/states'
 import { RelativeTime } from '@/components/status'
-import { Table, TableFooter, Td, Th, Toolbar, Tr } from '@/components/table'
+import { RowsTotal, Table, TableFooter, Td, Th, Toolbar, Tr } from '@/components/table'
 import { Button } from '@/components/ui/button'
 import { Card, CardHeader } from '@/components/ui/card'
 import { fieldBase, NativeSelect } from '@/components/ui/input'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/i18n'
+import { paginate, readPage, withPage } from '@/lib/paginate'
 import { networkPath } from '@/pages/networks/context'
 import { cn } from '@/lib/utils'
 
@@ -33,8 +35,10 @@ import {
 
 const s = t.settings.log
 
-/** 一页取多少条。controller 一次最多给一千条；一百条一页翻起来不慢，也不会一次拉太多。 */
-const PAGE_SIZE = 100
+/** 一次向 controller 取多少条：它一次最多给这么多。 */
+const FETCH_SIZE = 1000
+/** 一页显示多少条。 */
+const PAGE_SIZE = 25
 
 /** 一条记录里要显示的对象：不认识的种类忽略；网络本身就是"网络"那一列，不再重复。 */
 function shownRefs(entry: LogEntry): LogRef[] {
@@ -107,8 +111,11 @@ function Refs({ entry, names, networks, onFilter }: RefsProps) {
 }
 
 /**
- * 操作记录。网络、操作、对象交给 controller 筛，一页一页往前翻；搜索只在取回来的记录里找。
- * 筛选条件写在地址里。
+ * 操作记录，分页显示。网络、操作、对象交给 controller 筛；搜索在取回来的全部记录里找。
+ * 筛选条件和页码写在地址里，改了条件回到第一页。
+ *
+ * 分页要知道一共几页，controller 不给总数，所以符合条件的记录全部取回来：一次一千条接着取，
+ * 它最多留一万条。第一批到了就显示，剩下的在后面取，取完之前写"已加载 N 条"。
  *
  * 每一行先写界面自己按 `action` 和 `refs` 写的话（操作的名字、对象的链接），按当前的语言；
  * controller 记下的说明（`detail`，中文原话）放在下面一行，字小一号，作为补充。
@@ -117,10 +124,18 @@ export function LogTab() {
   const [params, setParams] = useSearchParams()
   const filter = parseLogFilter(params)
   const query = logFilterToQuery(filter)
-  const log = useInfiniteQuery({ ...q.logPages(query, PAGE_SIZE), placeholderData: keepPreviousData })
+  const log = useInfiniteQuery({ ...q.logPages(query, FETCH_SIZE), placeholderData: keepPreviousData })
   const networks = useQuery(q.networks())
+  const toolbar = useRef<HTMLDivElement>(null)
 
   const setFilter = (next: LogFilter) => setParams(logFilterToParams(next), { replace: true })
+  const setPage = (next: number) => setParams(withPage(logFilterToParams(filter), next), { replace: true })
+
+  // 还有更早的就接着取，直到取完。取失败了停下，页脚上有「重试」。
+  const { hasNextPage, isFetching, isFetchNextPageError, fetchNextPage } = log
+  useEffect(() => {
+    if (hasNextPage && !isFetching && !isFetchNextPageError) void fetchNextPage()
+  }, [hasNextPage, isFetching, isFetchNextPageError, fetchNextPage])
 
   const entries = useMemo(() => log.data?.pages.flat() ?? [], [log.data])
 
@@ -140,7 +155,7 @@ export function LogTab() {
 
   const allNetworks = networks.data ?? []
   // 搜索也找界面写的字（操作的名字、对象），所以每次渲染现算：换了语言就按新的语言找。
-  const rows = entries.filter((entry) =>
+  const matched = entries.filter((entry) =>
     matchesSearch(
       entry,
       filter.search,
@@ -149,6 +164,7 @@ export function LogTab() {
       ),
     ),
   )
+  const { page, pages, rows } = paginate(matched, readPage(params), PAGE_SIZE)
   const kinds = Object.entries(s.kinds).filter((entry): entry is [string, string] => entry[1] !== undefined)
   const actions = Object.keys(s.actions)
 
@@ -175,7 +191,7 @@ export function LogTab() {
         <EmptyState icon={History} title={s.emptyTitle} />
       ) : (
         <>
-          <Toolbar>
+          <Toolbar ref={toolbar}>
             <div className="relative w-full sm:w-60">
               <Search
                 className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-faint"
@@ -298,21 +314,28 @@ export function LogTab() {
               ))}
             </tbody>
           </Table>
-          {log.isSuccess && rows.length === 0 ? (
+          {log.isSuccess && !hasNextPage && matched.length === 0 ? (
             <NoMatches message={s.noMatches} onClear={() => setFilter(EMPTY_LOG_FILTER)} />
           ) : null}
-          <TableFooter className="gap-4">
-            <span className="tabular" data-testid="log-count">
-              {s.showing(rows.length, entries.length)}
-            </span>
-            {log.hasNextPage ? (
-              <Button size="sm" pending={log.isFetchingNextPage} onClick={() => void log.fetchNextPage()}>
-                {s.loadMore}
-              </Button>
-            ) : entries.length > 0 ? (
-              <span>{s.noMore}</span>
-            ) : null}
-          </TableFooter>
+          {matched.length > 0 || hasNextPage ? (
+            <TableFooter className="gap-4">
+              <span className="flex items-center gap-2" data-testid="log-count">
+                {hasNextPage ? (
+                  <>
+                    <span className="tabular">{s.loaded(entries.length)}</span>
+                    {isFetchNextPageError && !isFetching ? (
+                      <Button variant="link" size="sm" onClick={() => void fetchNextPage()}>
+                        {t.common.retry}
+                      </Button>
+                    ) : null}
+                  </>
+                ) : (
+                  <RowsTotal shown={matched.length} total={entries.length} />
+                )}
+              </span>
+              <Pagination page={page} pages={pages} onPage={setPage} top={toolbar} />
+            </TableFooter>
+          ) : null}
         </>
       )}
     </Card>

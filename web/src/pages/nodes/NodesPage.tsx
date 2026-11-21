@@ -28,6 +28,7 @@ import { ForceUpdateDialog } from '@/components/force-update'
 import { FormDialog } from '@/components/form-dialog'
 import { attachedCount, nodePath } from '@/lib/nodes'
 import { Page, PageHeader } from '@/components/page'
+import { Pagination } from '@/components/pagination'
 import { EmptyState, ErrorState, NoMatches, SkeletonRows } from '@/components/states'
 import { Flag } from '@/components/flag'
 import { IssueIcon, RelativeTime, StatusDot } from '@/components/status'
@@ -48,6 +49,7 @@ import { SearchBox } from '@/components/search-box'
 import { t } from '@/i18n'
 import { nodeIssues } from '@/lib/nodeIssues'
 import { forceAbility } from '@/lib/nodeUpdate'
+import { paginate, readPage, withPage } from '@/lib/paginate'
 import { formatList } from '@/lib/format'
 import { readStored, writeStored } from '@/lib/storage'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
@@ -258,7 +260,6 @@ export function NodesPage() {
 
   const [params, setParams] = useSearchParams()
   const filters = useMemo(() => parseFilters(params), [params])
-  const page = Math.max(1, Number(params.get('page') ?? '1') || 1)
 
   const [sort, setSort] = useState<Sort>(() => readStored(SORT_KEY, DEFAULT_SORT, isSort))
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set())
@@ -307,15 +308,12 @@ export function NodesPage() {
       ),
     [all, filters, sort],
   )
-  const pages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE))
-  const currentPage = Math.min(page, pages)
-  const rows = visible.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE)
+  const { page, pages, rows } = paginate(visible, readPage(params), PAGE_SIZE)
+  const toolbar = useRef<HTMLDivElement>(null)
   const selectedNodes = all.filter((node) => selected.has(node.id))
 
   const setPage = (next: number) => {
-    const updated = writeFilters(filters)
-    if (next > 1) updated.set('page', String(next))
-    setParams(updated, { replace: true })
+    setParams(withPage(writeFilters(filters), next), { replace: true })
   }
 
   const onSort = (key: SortKey) => {
@@ -446,7 +444,7 @@ export function NodesPage() {
           />
         ) : (
           <>
-            <Toolbar>
+            <Toolbar ref={toolbar}>
               <SearchBox value={searchText} onChange={setSearchText} placeholder={t.nodes.searchPlaceholder} />
               <Segmented
                 aria-label={t.nodes.filterStatus}
@@ -707,17 +705,7 @@ export function NodesPage() {
             {visible.length > 0 ? (
               <TableFooter>
                 <RowsTotal shown={visible.length} total={hasActiveFilters(filters) ? all.length : undefined} />
-                {pages > 1 ? (
-                  <div className="flex items-center gap-2">
-                    <Button size="sm" disabled={currentPage <= 1} onClick={() => setPage(currentPage - 1)}>
-                      {t.common.prevPage}
-                    </Button>
-                    <span className="tabular">{t.common.pageOf(currentPage, pages)}</span>
-                    <Button size="sm" disabled={currentPage >= pages} onClick={() => setPage(currentPage + 1)}>
-                      {t.common.nextPage}
-                    </Button>
-                  </div>
-                ) : null}
+                <Pagination page={page} pages={pages} onPage={setPage} top={toolbar} />
               </TableFooter>
             ) : null}
           </>

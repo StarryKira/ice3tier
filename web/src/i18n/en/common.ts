@@ -52,6 +52,7 @@ export const common: Messages['common'] = {
   node: 'Node',
   nodeMissing: (id) => `Node #${id} (deleted)`,
   pageOf: (page, pages) => `Page ${page} of ${pages}`,
+  pagination: 'Pages',
   prevPage: 'Previous',
   nextPage: 'Next',
   rowsTotal: (n) => plural(n, 'item', 'items'),

@@ -49,6 +49,7 @@ export const common = {
   node: '节点',
   nodeMissing: (id: number) => `节点 #${id}（已删除）`,
   pageOf: (page: number, pages: number) => `第 ${page} / ${pages} 页`,
+  pagination: '翻页',
   prevPage: '上一页',
   nextPage: '下一页',
   rowsTotal: (n: number) => `共 ${n} 项`,

@@ -129,9 +129,12 @@ export function TableFooter({ className, ...props }: ComponentProps<'footer'>) {
   )
 }
 
-/** 表格上面的一行：搜索、筛选、切换。不放在框里，和表格之间留 16 像素。 */
+/**
+ * 表格上面的一行：搜索、筛选、切换。不放在框里，和表格之间留 16 像素。
+ * 翻页之后滚回这里（`Pagination` 的 `top`），上面留 16 像素，不贴着面板的边。
+ */
 export function Toolbar({ className, ...props }: ComponentProps<'div'>) {
-  return <div className={cn('mb-4 flex flex-wrap items-center gap-2', className)} {...props} />
+  return <div className={cn('mb-4 flex scroll-mt-4 flex-wrap items-center gap-2', className)} {...props} />
 }
 
 /** 表格下面常驻的一句说明（数据从哪来、多久更新一次）。和表格之间一条细线，灰色小字。 */
