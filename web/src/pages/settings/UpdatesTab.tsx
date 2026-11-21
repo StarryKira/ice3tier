@@ -451,7 +451,7 @@ function NodesCard({ overview, onForceAll }: { overview: UpdateOverview; onForce
         title={u.nodes.title}
         description={<span data-testid="update-summary">{u.nodes.summary(overview.nodes)}</span>}
         action={
-          <ReasonButton reason={forceAllReason} onClick={onForceAll}>
+          <ReasonButton size="sm" reason={forceAllReason} onClick={onForceAll}>
             <CircleArrowUp aria-hidden />
             {u.nodes.updateAll}
           </ReasonButton>
@@ -558,6 +558,10 @@ function ForceResult({ result, onDismiss }: { result: ForcedUpdates; onDismiss: 
 /**
  * 设置里的「节点更新」。从上到下：被暂停的版本、版本和"立即检查"、自动更新的开关、
  * 发布源、每个节点的更新状态和"全部更新"。更新是全局的，不分网络。
+ *
+ * 宽的时候分两栏：左边一栏是版本和怎么更新的那几项，宽度够一行地址、一张包的表就行，
+ * 开关、按钮和输入框不跟着面板拉到另一头；剩下的宽度给右边的节点列表。
+ * 放不下两栏时还是从上到下一栏，左边那几项照样不拉宽。
  */
 export function UpdatesTab() {
   const overview = useQuery({
@@ -578,16 +582,23 @@ export function UpdatesTab() {
   const data = overview.data
 
   return (
-    <div className="space-y-12" data-testid="updates-tab">
-      {groupPaused(data.paused).map((group) => (
-        <PausedBanner key={group.version} group={group} networks={networks.data ?? []} />
-      ))}
-      <ReleaseCard overview={data} />
-      <AutoUpdateCard overview={data} />
-      {/* 发布源变了（别处改的）时重新填表。 */}
-      <SourceCard key={`${data.source_is_default}:${data.source}`} overview={data} />
-      {result !== null ? <ForceResult result={result} onDismiss={() => setResult(null)} /> : null}
-      <NodesCard overview={data} onForceAll={() => setForcingAll(true)} />
+    <div className="@container/updates" data-testid="updates-tab">
+      {/* 两栏要左边 44rem、右边的表不到 42rem 就排成块，所以这一块够 89rem 才分。 */}
+      <div className="grid grid-cols-1 gap-12 @[89rem]/updates:grid-cols-[44rem_minmax(0,1fr)]">
+        <div className="max-w-[44rem] min-w-0 space-y-12">
+          {groupPaused(data.paused).map((group) => (
+            <PausedBanner key={group.version} group={group} networks={networks.data ?? []} />
+          ))}
+          <ReleaseCard overview={data} />
+          <AutoUpdateCard overview={data} />
+          {/* 发布源变了（别处改的）时重新填表。 */}
+          <SourceCard key={`${data.source_is_default}:${data.source}`} overview={data} />
+        </div>
+        <div className="min-w-0 space-y-12">
+          {result !== null ? <ForceResult result={result} onDismiss={() => setResult(null)} /> : null}
+          <NodesCard overview={data} onForceAll={() => setForcingAll(true)} />
+        </div>
+      </div>
       {forcingAll && data.release !== null ? (
         <ForceAllDialog
           version={data.release.version}
