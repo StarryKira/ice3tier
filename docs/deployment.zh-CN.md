@@ -209,7 +209,7 @@ sudo systemctl start i3t-controller
 
 ```sh
 sudo systemctl stop i3t-controller
-sudo -u i3t-controller /usr/local/bin/i3t-controller --data-dir /var/lib/i3t-controller --public-addr <公网地址>:20331 --reset-admin-token
+sudo -u i3t-controller /usr/local/bin/i3t-controller --data-dir /var/lib/i3t-controller --reset-admin-token
 sudo systemctl start i3t-controller
 ```
 

@@ -209,7 +209,7 @@ Nodes reconnect by themselves as long as the public address still leads to the c
 
 ```sh
 sudo systemctl stop i3t-controller
-sudo -u i3t-controller /usr/local/bin/i3t-controller --data-dir /var/lib/i3t-controller --public-addr <public-address>:20331 --reset-admin-token
+sudo -u i3t-controller /usr/local/bin/i3t-controller --data-dir /var/lib/i3t-controller --reset-admin-token
 sudo systemctl start i3t-controller
 ```
 

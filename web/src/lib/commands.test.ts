@@ -109,19 +109,16 @@ describe('其余给用户执行的命令', () => {
   })
 
   it('重置管理令牌：安装脚本装出来的 controller 是停、以服务的用户执行、再启动三条', () => {
-    expect(resetTokenCommands('/var/lib/i3t-controller', 'ctl.example.com:20331')).toEqual([
+    expect(resetTokenCommands('/var/lib/i3t-controller')).toEqual([
       'sudo systemctl stop i3t-controller',
-      'sudo -u i3t-controller /usr/local/bin/i3t-controller --data-dir /var/lib/i3t-controller --public-addr ctl.example.com:20331 --reset-admin-token',
+      'sudo -u i3t-controller /usr/local/bin/i3t-controller --data-dir /var/lib/i3t-controller --reset-admin-token',
       'sudo systemctl start i3t-controller',
     ])
   })
 
-  it('重置管理令牌：别的装法只给执行的那一条；目录、地址里有 shell 会误解的字符时加引号', () => {
-    expect(resetTokenCommands('/srv/i3t', '203.0.113.7:20331')).toEqual([
-      'i3t-controller --data-dir /srv/i3t --public-addr 203.0.113.7:20331 --reset-admin-token',
-    ])
-    expect(resetTokenCommands('/srv/my data', '[2001:db8::1]:20331')).toEqual([
-      `i3t-controller --data-dir '/srv/my data' --public-addr '[2001:db8::1]:20331' --reset-admin-token`,
-    ])
+  it('重置管理令牌：别的装法只给执行的那一条；目录里有 shell 会误解的字符时加引号', () => {
+    expect(resetTokenCommands('/srv/i3t')).toEqual(['i3t-controller --data-dir /srv/i3t --reset-admin-token'])
+    expect(resetTokenCommands('/srv/my data')).toEqual([`i3t-controller --data-dir '/srv/my data' --reset-admin-token`])
+    expect(resetTokenCommands("/srv/it's")).toEqual([`i3t-controller --data-dir '/srv/it'\\''s' --reset-admin-token`])
   })
 })

@@ -110,7 +110,7 @@ pub enum Error {
     },
     #[error("网络端口出错")]
     Socket(#[source] std::io::Error),
-    /// 要备份的目录不是 controller 的数据目录：缺了 `missing` 这个文件。
+    /// 要备份或者重新生成管理令牌的目录不是 controller 的数据目录：缺了 `missing` 这个文件。
     #[error("{} 里没有 {missing}，不是 controller 的数据目录", dir.display())]
     NotDataDir { dir: PathBuf, missing: &'static str },
     /// 备份只写进新的或者空的目录，不覆盖已有的东西。

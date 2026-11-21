@@ -49,20 +49,13 @@ function quote(value: string, windows: boolean): string {
   return windows ? `"${value.replaceAll('"', '`"')}"` : `'${value.replaceAll("'", `'\\''`)}'`
 }
 
-/** sh 里不加引号也不会被误解的字符：比令牌的多一个冒号（地址里的端口）。 */
-const SH_SAFE = /^[A-Za-z0-9_.=+/:-]+$/
-
-function shArg(value: string): string {
-  return SH_SAFE.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`
-}
-
 /**
- * 重置管理令牌要执行的命令，一行一条，填好了这个 controller 的数据目录和公开地址。
+ * 重置管理令牌要执行的命令，一行一条，填好了这个 controller 的数据目录。重置只要数据目录，不要公开地址。
  * 数据目录是安装脚本装出来的那个时，照部署文档给三条：停服务、以服务的用户执行、再启动。
  * 别的装法不知道它是怎么跑起来的，只给执行的那一条，停和启动由用户自己做。
  */
-export function resetTokenCommands(dataDir: string, publicAddr: string): string[] {
-  const args = `--data-dir ${shArg(dataDir)} --public-addr ${shArg(publicAddr)} --reset-admin-token`
+export function resetTokenCommands(dataDir: string): string[] {
+  const args = `--data-dir ${quote(dataDir, false)} --reset-admin-token`
   if (dataDir !== CONTROLLER_SERVICE.dataDir) return [`i3t-controller ${args}`]
   const { unit, user, program } = CONTROLLER_SERVICE
   return [`sudo systemctl stop ${unit}`, `sudo -u ${user} ${program} ${args}`, `sudo systemctl start ${unit}`]

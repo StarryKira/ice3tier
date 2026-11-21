@@ -11,7 +11,7 @@ export const signIn = {
   signedOut: '已退出登录',
   lostTitle: '令牌丢失？',
   lostBody: '停止 controller，再用下面的参数运行一次。它会打印新令牌，旧令牌作废。',
-  lostCommand: 'i3t-controller --data-dir <数据目录> --public-addr <主机:端口> --reset-admin-token',
+  lostCommand: 'i3t-controller --data-dir <数据目录> --reset-admin-token',
 }
 
 export const nav = {
