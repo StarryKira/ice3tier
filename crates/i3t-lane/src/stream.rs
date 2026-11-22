@@ -831,6 +831,11 @@ impl RecvStream for LaneRecv {
     ///
     /// 发起方读完 REPLY 之后用它：接受方紧接着发 SWITCH，但它可能还在路上。
     async fn wait_raw(&mut self) -> Option<RawRead> {
+        // 发起方选了一直加密的流，哪个方向都不会离开 TLS：直接返回，不去推进 TLS、也不再为 `take_raw` 拿一次锁。
+        // 流层每读一段之前都会问一次（i3t-flow 的 `flow_to_tcp`），这样加密的流上每段只多拿一次锁。
+        if self.shared.lock().payload == Some(Payload::Sealed) {
+            return None;
+        }
         std::future::poll_fn(|cx| {
             let shared = &self.shared;
             let mut state = shared.lock();
