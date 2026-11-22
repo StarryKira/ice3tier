@@ -17,7 +17,9 @@ use super::{DIGEST_LEN, Store, StoreError};
 const SELECT: &str = "SELECT nodes.*, (SELECT json_group_array(group_id) FROM group_members WHERE node_id = nodes.id) AS groups FROM nodes";
 
 /// [`Store::exits_among`]：`?1` 是编号的 JSON 数组。从数组出发按主键找，问几个查几行。
-const EXITS_AMONG: &str = "SELECT nodes.id FROM json_each(?1) AS asked JOIN nodes ON nodes.id = asked.value WHERE nodes.network_id = ?2 AND nodes.exit IS NOT NULL";
+/// `CROSS JOIN` 让 SQLite 照写的顺序连：库里没有统计信息时，它会以为先按网络的索引读整个网络更省。
+const EXITS_AMONG: &str = "SELECT nodes.id FROM json_each(?1) AS asked CROSS JOIN nodes ON nodes.id = asked.value \
+                           WHERE nodes.network_id = ?2 AND nodes.exit IS NOT NULL";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeRecord {
@@ -568,6 +570,27 @@ mod tests {
         assert_eq!(store.exits_among(ours, asked).unwrap(), [exit].into(), "{plain} 没有启用出口，{other} 在别的网络，{unknown} 没有");
         assert_eq!(store.exits_among(theirs, asked).unwrap(), [other].into());
         assert!(store.exits_among(ours, [plain]).unwrap().is_empty(), "只看问到的");
+    }
+
+    #[test]
+    fn exits_among_looks_up_the_asked_ids_by_key_and_never_reads_the_whole_network() {
+        let store = Store::open_in_memory().unwrap();
+        let network = store.insert_network(&home()).unwrap();
+        for seed in 1..=200 {
+            store.insert_node(&new_node(network, seed)).unwrap();
+        }
+        let plan = || -> Vec<String> {
+            let mut statement = store.conn.prepare(&format!("EXPLAIN QUERY PLAN {EXITS_AMONG}")).unwrap();
+            let rows = statement.query_map(params![Json(&[1u32, 2]), SqlNetwork(network)], |row| row.get::<_, String>(3)).unwrap();
+            rows.map(Result::unwrap).collect()
+        };
+        let by_key = |plan: &[String]| matches!(plan, [outer, inner] if outer.starts_with("SCAN asked") && inner.starts_with("SEARCH nodes USING INTEGER PRIMARY KEY"));
+        // controller 不跑 ANALYZE，库里没有统计信息：这时 SQLite 会以为按网络的索引更省，要靠写法把顺序定住。
+        let plan_without_stats = plan();
+        assert!(by_key(&plan_without_stats), "{plan_without_stats:?}");
+        store.conn.execute_batch("ANALYZE").unwrap();
+        let plan_with_stats = plan();
+        assert!(by_key(&plan_with_stats), "有了统计信息也一样：{plan_with_stats:?}");
     }
 
     #[test]
