@@ -1,6 +1,6 @@
 //! 给界面画图的时间序列：每 5 分钟一个点，整点汇总，读的时候缺的段是空的。
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use i3t_model::admin::stats::{Series, SeriesQuery, Unit};
 use i3t_model::admin::{ErrorCode, RelaySettings};
@@ -98,18 +98,29 @@ fn a_node_counts_once_on_a_relay_and_only_for_the_attachments_that_are_kept() {
 
     lab.controller.lock().stats_tick(start, hour_start + 10).unwrap();
     lab.controller.lock().stats_tick(start, hour_start + 300).unwrap();
+
+    // 下一段里 a 报它不挂靠了：不用读 relay 的那条路，统计和存下来的照样清空。
+    a.send(&lab.controller, ToController::Report(Box::default()));
+    let nodes = lab.controller.nodes(network.id).unwrap();
+    assert!(nodes.iter().find(|node| node.id == a.id).unwrap().attached.is_empty());
+    let later = start + Duration::from_secs(60);
+    lab.controller.lock().stats_tick(later, hour_start + 310).unwrap();
+    lab.controller.lock().stats_tick(later, hour_start + 600).unwrap();
+
     lab.controller.advance_clock(hour_start + 3_600 - wall);
-    let attached_to = |relay| {
+    let attached_to = |relay, at| {
         let view = lab.controller.series(network.id, &query(Series::RelayAttached, Some(relay))).unwrap();
-        view.points.into_iter().find(|(at, _)| *at == hour_start).and_then(|point| point.1)
+        view.points.into_iter().find(|point| point.0 == at).and_then(|point| point.1)
     };
-    assert_eq!(attached_to(relays[0]), Some(2.0), "a 报了两次也只算一个，加上 b");
+    assert_eq!(attached_to(relays[0], hour_start), Some(2.0), "a 报了两次也只算一个，加上 b");
     for relay in &relays[1..16] {
-        assert_eq!(attached_to(*relay), Some(1.0), "{relay}");
+        assert_eq!(attached_to(*relay, hour_start), Some(1.0), "{relay}");
     }
-    assert_eq!(attached_to(relays[16]), Some(0.0), "没留下的不算：和存下来的是同一份");
-    assert_eq!(attached_to(relays[17]), Some(0.0));
-    assert_eq!(attached_to(a.id), Some(0.0), "自己挂靠自己不算");
+    assert_eq!(attached_to(relays[16], hour_start), Some(0.0), "没留下的不算：和存下来的是同一份");
+    assert_eq!(attached_to(relays[17], hour_start), Some(0.0));
+    assert_eq!(attached_to(a.id, hour_start), Some(0.0), "自己挂靠自己不算");
+    assert_eq!(attached_to(relays[0], hour_start + 300), Some(1.0), "只剩 b");
+    assert_eq!(attached_to(relays[1], hour_start + 300), Some(0.0));
 }
 
 #[test]

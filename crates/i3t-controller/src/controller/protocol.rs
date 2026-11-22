@@ -410,7 +410,12 @@ impl Inner {
         }
 
         // 挂靠关系和试 relay 的结果都拿本网络的 relay 核对。挂靠关系只留核对过的那一份：统计、判断变没变、存下来的都是它。
-        let relays = self.store.relays_in(node.network)?;
+        // 三样都没有时用不着（`relay_tries_reported` 这时也什么都不做），不去读：没有 relay 的网络、只直连的节点每次上报都是这样。
+        let relays = if report.attached.is_empty() && report.relays.is_empty() && node.relay_reach.is_empty() {
+            BTreeSet::new()
+        } else {
+            self.store.relays_in(node.network)?
+        };
         let attached = usable_attachments(report.attached, id, &relays);
         self.stats_attached(&node, &attached);
         self.relay_tries_reported(&node, &report.relays, &relays)?;
@@ -564,18 +569,33 @@ fn same_endpoints(old: &[SocketAddr], new: &[SocketAddr]) -> bool {
 /// 节点报的挂靠关系里留下的那些：只要本网络的 relay（`relays`），不要它自己；按报的顺序最多留 [`MAX_ATTACHMENTS`] 个，
 /// 不算数的条目不占名额。同一个 relay 报了几次只留一条，在它第一次出现的位置：有一条说是节点自己挑的（`shared` 为假）
 /// 就留那一条，不然留第一条。controller 只把 `shared` 为假的当成节点自己挑的，留错了会以为它和对端缺一个共同的 relay。
+///
+/// 这是在 controller 的锁里做的，一帧最多能塞几十万条：留满了以后只看还能不能把留下的另外挂靠的换成自己挑的，
+/// 留下的都是自己挑的就不再往后看。
 fn usable_attachments(reported: Vec<Attachment>, me: NodeId, relays: &BTreeSet<NodeId>) -> Vec<Attachment> {
+    if relays.is_empty() {
+        return Vec::new();
+    }
     let mut usable: Vec<Attachment> = Vec::with_capacity(reported.len().min(MAX_ATTACHMENTS));
+    // 留下的里面另外挂靠的有几条。
+    let mut shared = 0;
     for attachment in reported {
-        let relay = attachment.relay;
-        if relay == me || !relays.contains(&relay) {
+        let full = usable.len() == MAX_ATTACHMENTS;
+        if full && shared == 0 {
+            break;
+        }
+        if full && attachment.shared {
             continue;
         }
+        let relay = attachment.relay;
+        // 留下的都核对过：和其中一条重复的不用再核对。
         if let Some(kept) = usable.iter_mut().find(|kept| kept.relay == relay) {
             if kept.shared && !attachment.shared {
                 *kept = attachment;
+                shared -= 1;
             }
-        } else if usable.len() < MAX_ATTACHMENTS {
+        } else if !full && relay != me && relays.contains(&relay) {
+            shared += usize::from(attachment.shared);
             usable.push(attachment);
         }
     }
@@ -624,6 +644,8 @@ mod tests {
         assert_eq!(kept.len(), MAX_ATTACHMENTS);
         assert_eq!(kept[0], attachment(1, 3));
         assert!(kept.iter().all(|attachment| attachment.relay != NodeId::new(17).unwrap()));
+
+        assert!(usable_attachments(vec![attachment(1, 5)], me, &BTreeSet::new()).is_empty(), "网络里没有 relay");
     }
 
     #[test]

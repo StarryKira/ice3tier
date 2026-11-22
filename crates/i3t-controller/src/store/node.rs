@@ -540,6 +540,24 @@ mod tests {
     }
 
     #[test]
+    fn the_relays_of_a_network_are_its_nodes_with_relay_enabled() {
+        let store = Store::open_in_memory().unwrap();
+        let first = store.insert_network(&home()).unwrap();
+        let second = store.insert_network(&NewNetwork { name: "work".to_owned(), ..home() }).unwrap();
+        let enable = |id| {
+            let mut node = store.node(id).unwrap().unwrap();
+            node.relay = Some(RelaySettings::default());
+            store.update_node(&node).unwrap();
+            id
+        };
+        let relay = enable(store.insert_node(&new_node(first, 1)).unwrap());
+        store.insert_node(&new_node(first, 2)).unwrap();
+        let elsewhere = enable(store.insert_node(&new_node(second, 3)).unwrap());
+        assert_eq!(store.relays_in(first).unwrap(), BTreeSet::from([relay]), "没启用的、别的网络的都不算");
+        assert_eq!(store.relays_in(second).unwrap(), BTreeSet::from([elsewhere]));
+    }
+
+    #[test]
     fn node_ids_are_never_reused() {
         let store = Store::open_in_memory().unwrap();
         let network = store.insert_network(&home()).unwrap();
