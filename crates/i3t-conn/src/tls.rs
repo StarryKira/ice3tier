@@ -4,9 +4,9 @@
 //! 而是把握手消息按 RFC 8446 的格式整个走一遍：每个长度都对得上、不越界，没有多余的字节。
 //!
 //! - 发起方（[`crate::Payload::for_first_data`]）：首批数据里的 ClientHello 要提供 TLS 1.3（§4.1.2）。
-//! - 接受方（[`ServerHelloWatch`]）：目标回的 ServerHello 要选定 TLS 1.3，而且不是 HelloRetryRequest（§4.1.3）。
-//!   只有这样，它后面的握手（证书等）才是加密的。目标选了 TLS 1.2 时证书接着就明文回来；回了 HelloRetryRequest 时，
-//!   在 ServerHello 之前切换会让路上的人能冒充目标再要一次 ClientHello。
+//! - 接受方（[`ServerHelloWatch`]）：目标回的 ServerHello 要选定 TLS 1.3 和一个加密的套件，而且不是 HelloRetryRequest（§4.1.3）。
+//!   只有这样，它后面的握手（证书等）才是加密的。目标选了 TLS 1.2、或者只校验不加密的套件（RFC 9150）时证书接着就明文回来；
+//!   回了 HelloRetryRequest 时，在 ServerHello 之前切换会让路上的人能冒充目标再要一次 ClientHello。
 
 /// 明文的 TLS 记录最长 2^14 字节（RFC 8446 §5.1）。
 const MAX_RECORD_LEN: usize = 1 << 14;
@@ -46,7 +46,8 @@ fn supported_versions(first: &[u8]) -> Option<&[u8]> {
     let compression_methods = hello.vec8()?;
     let mut extensions = Reader(hello.vec16()?);
     hello.end()?;
-    if session_id.len() > 32 || cipher_suites.is_empty() || !cipher_suites.len().is_multiple_of(2) || compression_methods.is_empty() {
+    // TLS 1.3 的 ClientHello 只能写 null 压缩这一个字节（§4.1.2）。
+    if session_id.len() > 32 || cipher_suites.is_empty() || !cipher_suites.len().is_multiple_of(2) || compression_methods != [0] {
         return None;
     }
 
@@ -188,7 +189,7 @@ enum ServerHello {
     RetryRequest,
 }
 
-/// 一条完整的记录（含记录头）里正好是一条选定 TLS 1.3 的 ServerHello 时，看它是不是 HelloRetryRequest。别的都是 `None`。
+/// 一条完整的记录（含记录头）里正好是一条选定 TLS 1.3 和加密套件的 ServerHello 时，看它是不是 HelloRetryRequest。别的都是 `None`。
 fn server_hello(record: &[u8]) -> Option<ServerHello> {
     let mut record = Reader(record);
     let [CONTENT_HANDSHAKE, 0x03, 0x03] = record.array()? else { return None };
@@ -204,7 +205,9 @@ fn server_hello(record: &[u8]) -> Option<ServerHello> {
     }
     let random: [u8; 32] = hello.array()?;
     let session_id = hello.vec8()?;
-    hello.take(2)?; // cipher_suite
+    // cipher_suite：只认 TLS 1.3 里加密的套件（RFC 8446 §B.4，AES-GCM、ChaCha20-Poly1305、AES-CCM）。只校验不加密的
+    // （RFC 9150 的 TLS_SHA256_SHA256、TLS_SHA384_SHA384）选了之后证书还是明文；不认识的也一样当作不加密，宁可一直加密。
+    let [0x13, 0x01..=0x05] = hello.array()? else { return None };
     let [0] = hello.array()? else { return None }; // legacy_compression_method
     let mut extensions = Reader(hello.vec16()?);
     hello.end()?;
@@ -404,9 +407,11 @@ mod tests {
         let mut no_suites = Hello::tls13();
         no_suites.cipher_suites.clear();
         assert!(!offers_tls13(&no_suites.record()));
-        let mut no_compression = Hello::tls13();
-        no_compression.compression_methods.clear();
-        assert!(!offers_tls13(&no_compression.record()));
+        for methods in [&[][..], &[0x01], &[0x00, 0x01], &[0x01, 0x00]] {
+            let mut compression = Hello::tls13();
+            compression.compression_methods = methods.to_vec();
+            assert!(!offers_tls13(&compression.record()), "TLS 1.3 的压缩方法只能是 [0]，不能是 {methods:?}");
+        }
 
         let twice =
             [extension(EXTENSION_SUPPORTED_VERSIONS, &supported(&[TLS13])), extension(EXTENSION_SUPPORTED_VERSIONS, &supported(&[TLS13]))];
@@ -554,6 +559,26 @@ mod tests {
         let at = 5 + 4 + 2 + 32 + 1 + 32 + 2;
         compressed[at] = 1;
         assert_eq!(verdict(&compressed), ServerHelloVerdict::Sealed, "TLS 1.3 不压缩");
+    }
+
+    #[test]
+    fn only_a_server_hello_that_picks_an_encrypting_suite_lets_passthrough_start() {
+        /// 把 `hello` 里选定的套件换成 `suite`。
+        fn with_suite(mut hello: Vec<u8>, suite: [u8; 2]) -> Vec<u8> {
+            let at = 5 + 4 + 2 + 32 + 1 + 32;
+            hello[at..at + 2].copy_from_slice(&suite);
+            hello
+        }
+        for suite in [[0x13, 0x01], [0x13, 0x02], [0x13, 0x03], [0x13, 0x04], [0x13, 0x05]] {
+            let hello = with_suite(server_hello_13(), suite);
+            assert_eq!(verdict(&hello), ServerHelloVerdict::PassthroughAfter(hello.len()), "套件 {suite:02x?}");
+        }
+        // RFC 9150 只校验不加密（证书会明文回来），和不认识的套件（这里是 RFC 8998 的 SM4 和一个没分配的值）：一直加密。
+        for suite in [[0xc0, 0xb4], [0xc0, 0xb5], [0x00, 0xc6], [0x13, 0x06]] {
+            assert_eq!(verdict(&with_suite(server_hello_13(), suite)), ServerHelloVerdict::Sealed, "套件 {suite:02x?}");
+            let retry = with_suite(hello_retry_request(), suite);
+            assert_eq!(verdict(&retry), ServerHelloVerdict::Sealed, "HelloRetryRequest 选了套件 {suite:02x?}");
+        }
     }
 
     #[test]
