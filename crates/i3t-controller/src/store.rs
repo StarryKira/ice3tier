@@ -128,6 +128,12 @@ impl Store {
         Ok(value)
     }
 
+    /// 测试用：让数据库只能读，或者恢复成能写，模拟磁盘暂时写不进去。
+    #[cfg(test)]
+    pub(crate) fn set_read_only(&self, read_only: bool) {
+        self.conn.pragma_update(None, "query_only", read_only).unwrap();
+    }
+
     /// 读一项全局设置（管理令牌的哈希之类）。
     ///
     /// # Errors
