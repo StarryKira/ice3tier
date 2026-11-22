@@ -18,7 +18,7 @@ const TLS13: [u8; 2] = [0x03, 0x04];
 
 /// `first` 以一条完整的 TLS 记录开头，记录里正好是一条格式正确、提供 TLS 1.3 的 ClientHello。记录后面还有什么不管。
 pub(crate) fn offers_tls13(first: &[u8]) -> bool {
-    supported_versions(first).is_some_and(|versions| versions.chunks_exact(2).any(|version| version == TLS13))
+    supported_versions(first).is_some_and(|versions| versions.as_chunks::<2>().0.contains(&TLS13))
 }
 
 /// 第一条记录里的 ClientHello 的 supported_versions 扩展里列出的版本（每个 2 字节）。
