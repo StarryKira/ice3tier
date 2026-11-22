@@ -27,7 +27,7 @@ use crate::netmap::{MAX_ENDPOINTS, VnetFacts};
 use crate::store::{NewSwitch, NodeRecord};
 use crate::{node_addresses, relay_reach};
 
-/// 一个节点最多报这么多个挂靠的 relay。默认只挂靠 2 个。
+/// 一个节点的挂靠关系最多留这么多个 relay。默认只挂靠 2 个；管理员固定的和 controller 要它另外挂靠的加起来也到不了这么多。
 const MAX_ATTACHMENTS: usize = 16;
 /// 节点自报的版本号、平台最长留这么多个字符。
 const MAX_HELLO_TEXT: usize = 64;
@@ -409,7 +409,11 @@ impl Inner {
             self.update_reported(&node, status)?;
         }
 
-        self.relay_tries_reported(&node, &report.relays)?;
+        // 挂靠关系和试 relay 的结果都拿本网络的 relay 核对。挂靠关系只留核对过的那一份：统计、判断变没变、存下来的都是它。
+        let relays = self.store.relays_in(node.network)?;
+        let attached = usable_attachments(report.attached, id, &relays);
+        self.stats_attached(&node, &attached);
+        self.relay_tries_reported(&node, &report.relays, &relays)?;
         self.vnet_reported(&node, report.vnet.as_deref());
 
         if let Some(local) = report.local_addresses {
@@ -426,8 +430,6 @@ impl Inner {
                 endpoints.push(endpoint);
             }
         }
-        let mut attached = report.attached;
-        attached.truncate(MAX_ATTACHMENTS);
 
         if same_endpoints(&node.endpoints, &endpoints) && !attachments_differ(&node.attached, &attached) {
             return Ok(());
@@ -464,13 +466,12 @@ impl Inner {
 
     /// 节点报的"试过的 relay 连没连上"，并进存着的那一份。连得上与否变了时，它和它的对端的 netmap 要重算：
     /// 两个节点之间缺不缺一个共同的 relay 跟着变。
-    fn relay_tries_reported(&mut self, node: &NodeRecord, tries: &[RelayTry]) -> Result<(), Error> {
+    /// `relays` 是它所在网络的 relay。
+    fn relay_tries_reported(&mut self, node: &NodeRecord, tries: &[RelayTry], relays: &BTreeSet<NodeId>) -> Result<(), Error> {
         if tries.is_empty() && node.relay_reach.is_empty() {
             return Ok(());
         }
-        let relays: BTreeSet<NodeId> =
-            self.store.relay_nodes()?.into_iter().filter(|(network, _)| *network == node.network).map(|(_, id)| id).collect();
-        let Some(merged) = relay_reach::merge(&node.relay_reach, tries, node.id, &relays, self.clock.now()) else { return Ok(()) };
+        let Some(merged) = relay_reach::merge(&node.relay_reach, tries, node.id, relays, self.clock.now()) else { return Ok(()) };
         self.store.set_node_relay_reach(node.id, &merged.records)?;
         // UDP 换成 TCP（或者反过来）不改变连不连得上，下面不重算；用不用得了 UDP 另外看（见 `no_udp`）。
         self.no_udp_dirty.insert(node.network);
@@ -560,6 +561,27 @@ fn same_endpoints(old: &[SocketAddr], new: &[SocketAddr]) -> bool {
     old.len() == new.len() && new.iter().all(|endpoint| old.contains(endpoint))
 }
 
+/// 节点报的挂靠关系里留下的那些：只要本网络的 relay（`relays`），不要它自己；按报的顺序最多留 [`MAX_ATTACHMENTS`] 个，
+/// 不算数的条目不占名额。同一个 relay 报了几次只留一条，在它第一次出现的位置：有一条说是节点自己挑的（`shared` 为假）
+/// 就留那一条，不然留第一条。controller 只把 `shared` 为假的当成节点自己挑的，留错了会以为它和对端缺一个共同的 relay。
+fn usable_attachments(reported: Vec<Attachment>, me: NodeId, relays: &BTreeSet<NodeId>) -> Vec<Attachment> {
+    let mut usable: Vec<Attachment> = Vec::with_capacity(reported.len().min(MAX_ATTACHMENTS));
+    for attachment in reported {
+        let relay = attachment.relay;
+        if relay == me || !relays.contains(&relay) {
+            continue;
+        }
+        if let Some(kept) = usable.iter_mut().find(|kept| kept.relay == relay) {
+            if kept.shared && !attachment.shared {
+                *kept = attachment;
+            }
+        } else if usable.len() < MAX_ATTACHMENTS {
+            usable.push(attachment);
+        }
+    }
+    usable
+}
+
 /// 挂靠关系有没有值得告诉对端的变化：挂靠的 relay 换了（包括从自己挑的变成另外挂的），或者到某个 relay 的延迟变了不少。
 fn attachments_differ(old: &[Attachment], new: &[Attachment]) -> bool {
     old.len() != new.len()
@@ -585,6 +607,23 @@ mod tests {
         assert!(attachments_differ(&old, &[attachment(1, 20), attachment(2, 260)]));
         assert!(attachments_differ(&old, &[attachment(1, 20), attachment(3, 200)]));
         assert!(attachments_differ(&old, &[attachment(1, 20)]));
+    }
+
+    #[test]
+    fn a_relay_reported_twice_is_kept_once_and_as_the_node_s_own_choice_if_either_entry_says_so() {
+        let shared = |relay, rtt_ms| Attachment { shared: true, ..attachment(relay, rtt_ms) };
+        let me = NodeId::new(99).unwrap();
+        let relays: BTreeSet<NodeId> = (1..=17).chain([99]).map(|raw| NodeId::new(raw).unwrap()).collect();
+        let reported = vec![shared(1, 5), attachment(2, 6), attachment(99, 1), attachment(1, 7), shared(2, 8)];
+        assert_eq!(usable_attachments(reported, me, &relays), [attachment(1, 7), attachment(2, 6)]);
+
+        // 已经留满了：多出来的 relay 不要，但是排在后面的"自己挑的"照样换掉前面那条另外挂靠的。
+        let mut reported: Vec<Attachment> = (1..=16).map(|relay| shared(relay, 10)).collect();
+        reported.extend([attachment(17, 1), attachment(1, 3)]);
+        let kept = usable_attachments(reported, me, &relays);
+        assert_eq!(kept.len(), MAX_ATTACHMENTS);
+        assert_eq!(kept[0], attachment(1, 3));
+        assert!(kept.iter().all(|attachment| attachment.relay != NodeId::new(17).unwrap()));
     }
 
     #[test]

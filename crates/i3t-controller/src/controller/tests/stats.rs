@@ -2,10 +2,11 @@
 
 use std::time::Instant;
 
-use i3t_model::admin::ErrorCode;
 use i3t_model::admin::stats::{Series, SeriesQuery, Unit};
+use i3t_model::admin::{ErrorCode, RelaySettings};
 use i3t_model::control::{Report, ToController};
 use i3t_model::netmap::Attachment;
+use i3t_proto::NodeId;
 
 use super::super::testing::{CAN_DO_ALL, Lab};
 
@@ -18,7 +19,7 @@ fn reports_become_points_every_five_minutes_and_hours_are_averaged() {
     let mut lab = Lab::new();
     let network = lab.network("home");
     let relay = lab.join_with(network.id, &[], CAN_DO_ALL);
-    lab.controller.enable_relay(network.id, relay.id, i3t_model::admin::RelaySettings::default()).unwrap();
+    lab.controller.enable_relay(network.id, relay.id, RelaySettings::default()).unwrap();
     let a = lab.join(network.id, &[]);
     let wall = lab.controller.lock().clock.now();
     // 一个整点之后的第一段：这样过完两段之后正好跨过下一个整点之前，不汇总；再往后拨一个小时才汇总。
@@ -60,6 +61,55 @@ fn reports_become_points_every_five_minutes_and_hours_are_averaged() {
     lab.controller.lock().stats_tick(start, hour_start + 3_600).unwrap();
     let hourly = SeriesQuery { step: Some(3600), from: Some(hour_start), to: Some(hour_start), ..query(Series::NodeFlows, Some(a.id)) };
     assert_eq!(lab.controller.series(network.id, &hourly).unwrap().points, [(hour_start, Some(3.0))], "整点时汇总出上一个小时的点");
+}
+
+#[test]
+fn a_node_counts_once_on_a_relay_and_only_for_the_attachments_that_are_kept() {
+    let mut lab = Lab::new();
+    let network = lab.network("home");
+    // 不用 `join_offline`：它要 `settle`，会顺带数一次；这里要在都报完之后才数。
+    let relay = |lab: &mut Lab, network| {
+        let member = lab.join_with(network, &[], CAN_DO_ALL);
+        lab.controller.enable_relay(network, member.id, RelaySettings::default()).unwrap();
+        member
+    };
+    let relays: Vec<NodeId> = (0..18).map(|_| relay(&mut lab, network.id).id).collect();
+    let not_enabled = lab.join_with(network.id, &[], CAN_DO_ALL);
+    let elsewhere = lab.network("work");
+    let foreign = relay(&mut lab, elsewhere.id);
+    // a 自己也是 relay：报自己的那一条不能靠"不是 relay"挡掉。
+    let a = relay(&mut lab, network.id);
+    let b = lab.join(network.id, &[]);
+    let wall = lab.controller.lock().clock.now();
+    let hour_start = wall - wall % 3600;
+    let start = Instant::now();
+
+    let attach = |relay, rtt_ms| Attachment { relay, rtt_ms, shared: false };
+    // 重复的、自己、没启用 relay 的、别的网络的 relay 排在最前面：都不算数，也不占名额。后面还有 17 个能用的。
+    let mut reported = vec![attach(relays[0], 5), attach(relays[0], 99), attach(a.id, 1), attach(not_enabled.id, 1), attach(foreign.id, 1)];
+    reported.extend(relays[1..].iter().map(|&relay| attach(relay, 10)));
+    a.send(&lab.controller, ToController::Report(Box::new(Report { attached: reported, ..Report::default() })));
+    b.send(&lab.controller, ToController::Report(Box::new(Report { attached: vec![attach(relays[0], 7)], ..Report::default() })));
+
+    let nodes = lab.controller.nodes(network.id).unwrap();
+    let stored = &nodes.iter().find(|node| node.id == a.id).unwrap().attached;
+    assert_eq!(stored.iter().map(|attachment| attachment.relay).collect::<Vec<_>>(), relays[..16], "按报的顺序留前 16 个能用的");
+    assert_eq!(stored[0].rtt_ms, 5, "重复的留第一次报的");
+
+    lab.controller.lock().stats_tick(start, hour_start + 10).unwrap();
+    lab.controller.lock().stats_tick(start, hour_start + 300).unwrap();
+    lab.controller.advance_clock(hour_start + 3_600 - wall);
+    let attached_to = |relay| {
+        let view = lab.controller.series(network.id, &query(Series::RelayAttached, Some(relay))).unwrap();
+        view.points.into_iter().find(|(at, _)| *at == hour_start).and_then(|point| point.1)
+    };
+    assert_eq!(attached_to(relays[0]), Some(2.0), "a 报了两次也只算一个，加上 b");
+    for relay in &relays[1..16] {
+        assert_eq!(attached_to(*relay), Some(1.0), "{relay}");
+    }
+    assert_eq!(attached_to(relays[16]), Some(0.0), "没留下的不算：和存下来的是同一份");
+    assert_eq!(attached_to(relays[17]), Some(0.0));
+    assert_eq!(attached_to(a.id), Some(0.0), "自己挂靠自己不算");
 }
 
 #[test]

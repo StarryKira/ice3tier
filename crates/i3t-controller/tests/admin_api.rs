@@ -1402,6 +1402,7 @@ async fn status_overview_node_list_routes_and_groups_carry_what_the_web_ui_asked
     let network = api.network("home").await;
     let base = format!("/networks/{}", network.id);
     let relay = api.join(network.id, CAN_DO_ALL).await;
+    api.ok::<model::Node>(Method::PUT, &format!("{base}/nodes/{}/relay", relay.id), Some(json!({}))).await;
     let member = api.join(network.id, Declared::default()).await;
 
     let status: Value = api.ok(Method::GET, "/status", None).await;

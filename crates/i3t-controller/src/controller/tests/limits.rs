@@ -392,6 +392,7 @@ fn the_node_list_carries_the_relays_each_node_is_attached_to() {
     let mut lab = Lab::new();
     let network = lab.network("home");
     let relay = lab.join_with(network.id, &[], CAN_DO_ALL);
+    lab.controller.enable_relay(network.id, relay.id, i3t_model::admin::RelaySettings::default()).unwrap();
     let member = lab.join(network.id, &[]);
     let attached = vec![netmap::Attachment { relay: relay.id, rtt_ms: 12, shared: false }];
     member.send(&lab.controller, ToController::Report(Box::new(Report { attached: attached.clone(), ..Report::default() })));

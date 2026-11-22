@@ -217,6 +217,17 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// 一个网络里启用了 relay 的节点。
+    ///
+    /// # Errors
+    ///
+    /// 读数据库失败。
+    pub fn relays_in(&self, network: NetworkId) -> Result<BTreeSet<NodeId>, StoreError> {
+        let mut statement = self.conn.prepare("SELECT id FROM nodes WHERE network_id = ?1 AND relay IS NOT NULL")?;
+        let rows = statement.query_map(params![SqlNetwork(network)], |row| Ok(row.get::<_, SqlNode>(0)?.0))?;
+        Ok(rows.collect::<rusqlite::Result<BTreeSet<_>>>()?)
+    }
+
     /// 全部启用了 relay 的节点：所在的网络和节点编号。
     ///
     /// # Errors
