@@ -595,7 +595,7 @@ impl Inner {
         }
         // 还有节点欠着确认时，隔一会儿要回来看它们是不是等得太久了。
         let waiting = self.sync.values().any(NodeSync::is_waiting).then(|| now + self.timing.ack_timeout.min(SWEEP_INTERVAL));
-        let tests = self.tests_tick(now)?;
+        let tests = self.tests_tick(now);
         Ok([next, no_udp, waiting, self.updates.next_rollout, tests].into_iter().flatten().min())
     }
 }
