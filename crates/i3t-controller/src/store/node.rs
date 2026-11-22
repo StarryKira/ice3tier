@@ -16,6 +16,11 @@ use super::{DIGEST_LEN, Store, StoreError};
 /// 读节点时顺带取出它所在的分组（成员表里的分组编号，JSON 数组）。
 const SELECT: &str = "SELECT nodes.*, (SELECT json_group_array(group_id) FROM group_members WHERE node_id = nodes.id) AS groups FROM nodes";
 
+/// [`Store::exits_among`]：`?1` 是编号的 JSON 数组。从数组出发按主键找，问几个查几行。
+/// `CROSS JOIN` 让 SQLite 照写的顺序连：库里没有统计信息时，它会以为先按网络的索引读整个网络更省。
+const EXITS_AMONG: &str = "SELECT nodes.id FROM json_each(?1) AS asked CROSS JOIN nodes ON nodes.id = asked.value \
+                           WHERE nodes.network_id = ?2 AND nodes.exit IS NOT NULL";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeRecord {
     pub id: NodeId,
@@ -237,6 +242,21 @@ impl Store {
         let mut statement = self.conn.prepare("SELECT network_id, id FROM nodes WHERE relay IS NOT NULL ORDER BY id")?;
         let rows = statement.query_map([], |row| Ok((row.get::<_, SqlNetwork>(0)?.0, row.get::<_, SqlNode>(1)?.0)))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// `ids` 里哪些是 `network` 里启用了出口的节点。一条语句按编号查，不读整个网络。
+    ///
+    /// # Errors
+    ///
+    /// 读数据库失败。
+    pub fn exits_among(&self, network: NetworkId, ids: impl IntoIterator<Item = NodeId>) -> Result<BTreeSet<NodeId>, StoreError> {
+        let ids: Vec<u32> = ids.into_iter().map(NodeId::get).collect();
+        if ids.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        let mut statement = self.conn.prepare_cached(EXITS_AMONG)?;
+        let rows = statement.query_map(params![Json(&ids), SqlNetwork(network)], |row| Ok(row.get::<_, SqlNode>(0)?.0))?;
+        Ok(rows.collect::<rusqlite::Result<BTreeSet<_>>>()?)
     }
 
     /// # Errors
@@ -555,6 +575,51 @@ mod tests {
         let elsewhere = enable(store.insert_node(&new_node(second, 3)).unwrap());
         assert_eq!(store.relays_in(first).unwrap(), BTreeSet::from([relay]), "没启用的、别的网络的都不算");
         assert_eq!(store.relays_in(second).unwrap(), BTreeSet::from([elsewhere]));
+    }
+
+    #[test]
+    fn exits_among_are_the_given_nodes_of_one_network_with_the_exit_switched_on() {
+        let store = Store::open_in_memory().unwrap();
+        let ours = store.insert_network(&home()).unwrap();
+        let theirs = store.insert_network(&NewNetwork { name: "office".to_owned(), ..home() }).unwrap();
+        let switch_on = |id| {
+            let mut node = store.node(id).unwrap().unwrap();
+            node.exit = Some(ExitRole::default());
+            store.update_node(&node).unwrap();
+        };
+        let (plain, exit, other) = (
+            store.insert_node(&new_node(ours, 1)).unwrap(),
+            store.insert_node(&new_node(ours, 2)).unwrap(),
+            store.insert_node(&new_node(theirs, 3)).unwrap(),
+        );
+        switch_on(exit);
+        switch_on(other);
+        let unknown = NodeId::new(999).unwrap();
+        let asked = [plain, exit, other, unknown];
+        assert_eq!(store.exits_among(ours, asked).unwrap(), [exit].into(), "{plain} 没有启用出口，{other} 在别的网络，{unknown} 没有");
+        assert_eq!(store.exits_among(theirs, asked).unwrap(), [other].into());
+        assert!(store.exits_among(ours, [plain]).unwrap().is_empty(), "只看问到的");
+    }
+
+    #[test]
+    fn exits_among_looks_up_the_asked_ids_by_key_and_never_reads_the_whole_network() {
+        let store = Store::open_in_memory().unwrap();
+        let network = store.insert_network(&home()).unwrap();
+        for seed in 1..=200 {
+            store.insert_node(&new_node(network, seed)).unwrap();
+        }
+        let plan = || -> Vec<String> {
+            let mut statement = store.conn.prepare(&format!("EXPLAIN QUERY PLAN {EXITS_AMONG}")).unwrap();
+            let rows = statement.query_map(params![Json(&[1u32, 2]), SqlNetwork(network)], |row| row.get::<_, String>(3)).unwrap();
+            rows.map(Result::unwrap).collect()
+        };
+        let by_key = |plan: &[String]| matches!(plan, [outer, inner] if outer.starts_with("SCAN asked") && inner.starts_with("SEARCH nodes USING INTEGER PRIMARY KEY"));
+        // controller 不跑 ANALYZE，库里没有统计信息：这时 SQLite 会以为按网络的索引更省，要靠写法把顺序定住。
+        let plan_without_stats = plan();
+        assert!(by_key(&plan_without_stats), "{plan_without_stats:?}");
+        store.conn.execute_batch("ANALYZE").unwrap();
+        let plan_with_stats = plan();
+        assert!(by_key(&plan_with_stats), "有了统计信息也一样：{plan_with_stats:?}");
     }
 
     #[test]

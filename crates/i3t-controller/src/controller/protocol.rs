@@ -329,6 +329,9 @@ impl Inner {
         if *node != before {
             self.store.update_node(node)?;
         }
+        if before.exit.is_some() && node.exit.is_none() {
+            self.usage.exit_disabled(node.id);
+        }
 
         let observed = self.observed_endpoint(remote, hello.port);
         if observed != node.observed {
