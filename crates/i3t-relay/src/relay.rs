@@ -38,7 +38,7 @@ type LocalDelivery = Box<dyn Fn(NodeId, Bytes) + Send + Sync>;
 /// 一个节点的 relay 角色。
 ///
 /// 只有 netmap 里 `me.relay` 有值时它才工作；没有值时交给它的东西一律丢掉，不回应。netmap 可以随时变：
-/// 启用、停用、允许的节点名单变化都立即生效，被去掉的节点的会话当场删除。
+/// 启用、停用、允许的节点名单变化都立即生效，被去掉的节点、换了公钥的节点的会话当场删除。
 ///
 /// UDP 上的数据报由收包的一方（路径层）交进来（[`handle_udp`](Self::handle_udp)）；同一个端口号上的 TCP 由它自己监听。
 ///
@@ -478,8 +478,8 @@ impl Inner {
             }
         }
         let State { clients, sessions, .. } = &mut *state;
-        for node in sessions.retain_clients(|node| clients.contains_key(&node)) {
-            tracing::info!(%node, "节点不在允许的名单里了，它的中转会话关闭");
+        for node in sessions.retain_clients(|node| clients.get(&node).copied()) {
+            tracing::info!(%node, "节点不在允许的名单里了，或者换了公钥：它的中转会话关闭");
         }
         let bandwidth_mbps = role.and_then(|role| role.bandwidth_mbps);
         if state.bandwidth_mbps != bandwidth_mbps {
@@ -587,11 +587,22 @@ impl Inner {
         self.inbox.get()
     }
 
-    /// 别的 relay 拨进来的骨干 TCP（第 `conn` 条，`neighbour` 在上面有会话）上的一帧，属于本节点自己的那些：
-    /// 本节点在对方那里的会话的应答和矩阵行交给路径层；对方送给本节点的包交给连接层（它替来源节点担保，
-    /// 和 UDP 上 relay 的地址来的包一样）。返回这一帧是不是就此处理完了；别的（对方的握手和保活、要往下转的包）照常由 relay 处理。
+    /// 接进来的第 `conn` 条 TCP 上的一帧，这条 TCP 是在上面握手成功的 `neighbour` 的。`neighbour` 是别的 relay、它的会话现在就在
+    /// 这条 TCP 上的话，这条 TCP 是骨干上的一段，属于本节点自己的那些帧在这里处理：本节点在对方那里的会话的应答和矩阵行交给路径层；
+    /// 对方送给本节点的包交给连接层（它替来源节点担保，和 UDP 上 relay 的地址来的包一样）。
+    /// 返回这一帧是不是就此处理完了；别的（对方的握手和保活、要往下转的包）照常由 relay 处理。
+    ///
+    /// 会话在不在，每一帧都在这里现看：一条 TCP 等下一帧可以等很久，这期间那个 relay 可能已经被去掉、换了公钥，
+    /// 或者把会话搬到了别处，它在这条 TCP 上说的话就不再作数。
     pub(crate) fn neighbour_frame(&self, neighbour: NodeId, conn: u64, frame: &Bytes) -> bool {
-        let me = self.read().me;
+        let me = {
+            let state = self.read();
+            let on_this_tcp = state.sessions.owned_by(neighbour, Origin::Tcp(TcpConn::Accepted(conn)), Instant::now());
+            if !on_this_tcp || !state.relays.contains(&neighbour) {
+                return false;
+            }
+            state.me
+        };
         match Datagram::parse(frame) {
             Ok(Datagram::Session(session)) if !session.is_request() => {
                 self.deliver_to_inbox(neighbour, conn, frame);
@@ -697,6 +708,15 @@ impl Inner {
     /// 别的 relay 经 UDP 来的，还要路径层同意它把会话搬到 UDP 上（[`BackboneInbox::admits_udp`]）：骨干上到它的那一段走着 TCP、
     /// 本节点又不知道自己的 UDP 到不到得了它时不建会话、不回答，只告诉路径层它敲了门。
     fn authenticate(&self, source: &Source<'_>, auth: &Auth, now: Instant) -> Option<NodeId> {
+        let key = self.check_auth(source, auth, now)?;
+        self.open_session(source, auth, key, now)
+    }
+
+    /// 握手的前一半：这个 AUTH 该不该建会话。该的话返回它的签名是照哪把公钥验过的。
+    ///
+    /// 验签名的时候不拿着状态的锁（它是收包的路径上最贵的一步），所以这里看到的名单到建会话时可能已经换了：
+    /// 后一半（[`open_session`](Self::open_session)）要照这把公钥再核对一次。
+    fn check_auth(&self, source: &Source<'_>, auth: &Auth, now: Instant) -> Option<PublicKey> {
         let node = auth.node;
         let (me, client_key, neighbour) = {
             let state = self.read();
@@ -738,14 +758,23 @@ impl Inner {
             inbox.knocked(node);
             return None;
         }
-        {
+        Some(client_key)
+    }
+
+    /// 握手的后一半：给签名照 `key` 验过的 AUTH（[`check_auth`](Self::check_auth)）建会话、回 OK。
+    ///
+    /// 验签名的那段时间里 netmap 可能变了，所以拿着写锁再看一次：relay 还启用着，这个节点在名单里的公钥还是 `key`。
+    /// 节点被去掉了，或者换了公钥（那签名就是照一把已经不作数的公钥验的），都不建会话。
+    fn open_session(&self, source: &Source<'_>, auth: &Auth, key: PublicKey, now: Instant) -> Option<NodeId> {
+        let node = auth.node;
+        let me = {
             let mut state = self.write();
-            // 验签名的这段时间里 netmap 可能变了。
-            if !state.enabled || !state.clients.contains_key(&node) {
+            if !state.enabled || state.clients.get(&node) != Some(&key) {
                 return None;
             }
-            state.sessions.open(node, source.binding(), auth.nonce, now);
-        }
+            state.sessions.open(node, key, source.binding(), auth.nonce, now);
+            state.me
+        };
         self.counters.session_opened();
         let valid_for = u16::try_from(SESSION_TTL.as_secs()).unwrap_or(u16::MAX);
         let message = Accepted::signed_message(me, node, &auth.nonce, valid_for, source.addr);
@@ -1059,5 +1088,48 @@ mod tests {
         let header_len = datagram::forwarding_header_len(&data).unwrap();
         assert_eq!(header_len, 18);
         assert_eq!(same_route_run(&data, stride, header_len, 64), 2 * stride, "同样的两个 relay 换了顺序就是另一条路径");
+    }
+
+    /// 本节点是 relay（编号 100）的 netmap，允许 `clients` 里的节点。
+    fn netmap(clients: &[(NodeId, PublicKey)]) -> Netmap {
+        let clients: Vec<_> = clients.iter().map(|(id, key)| serde_json::json!({ "id": id, "key": key })).collect();
+        let netmap = serde_json::json!({
+            "version": 1,
+            "network": { "name": "test", "domain": "test.i3t", "cidr": "10.66.0.0/16", "max_relay_hops": 2 },
+            "me": { "id": 100, "name": "relay", "virtual_ip": "10.66.0.100", "relay": {} },
+            "relays": [],
+            "relay_clients": clients,
+        });
+        serde_json::from_value(netmap).unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_auth_checked_against_a_key_the_netmap_has_since_replaced_opens_no_session() {
+        let node = NodeId::new(1).unwrap();
+        let (old, new) = (NodeKey::generate().unwrap(), NodeKey::generate().unwrap());
+        let port = Arc::new(UdpPort::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+        let (_netmap, updates) = watch::channel(Arc::new(netmap(&[(node, old.public())])));
+        let relay = Relay::new(Arc::new(NodeKey::generate().unwrap()), port, updates);
+        let me = relay.inner.read().me;
+
+        // 一个样样都对的 AUTH：cookie 是发给这个地址的，签名是 netmap 里现在这把公钥的主人签的。
+        let client = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let source = Source { addr: client.local_addr().unwrap(), via: Via::Udp };
+        let (now, nonce) = (Instant::now(), [7; 8]);
+        let cookie = relay.inner.cookies.issue(source.addr, node, now);
+        let signature = *old.sign(Auth::PURPOSE, &Auth::signed_message(me, node, &nonce, &cookie)).as_bytes();
+        let auth = Auth { node, nonce, cookie, signature };
+
+        // 握手的前一半验过了签名，后一半还没有开始：这期间 netmap 里这个节点换了公钥。
+        assert_eq!(relay.inner.check_auth(&source, &auth, now), Some(old.public()));
+        relay.inner.apply(&netmap(&[(node, new.public())]));
+        assert_eq!(relay.inner.open_session(&source, &auth, old.public(), now), None, "签名是照已经换掉的公钥验的，不该建会话");
+        assert!(!relay.has_session(node));
+        assert_eq!(relay.counters().sessions_opened, 0);
+
+        // 名单里还是那把公钥的话，同样的后一半是建得了会话的。
+        relay.inner.apply(&netmap(&[(node, old.public())]));
+        assert_eq!(relay.inner.open_session(&source, &auth, old.public(), now), Some(node));
+        assert!(relay.has_session(node));
     }
 }
