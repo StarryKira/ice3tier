@@ -246,6 +246,24 @@ impl Paths {
         }
     }
 
+    /// 到 `peer` 现在是不是直连：包直接发到它的地址上，不经任何 relay。不认识这个对端、没有路时是 `false`。
+    #[must_use]
+    pub fn is_direct(&self, peer: NodeId) -> bool {
+        self.shared.table().peers.get(&peer).is_some_and(|slot| slot.is_direct())
+    }
+
+    /// 把一批丢了也没关系的包直接发到 `peer` 的地址上，不等。到它现在不是直连，或者端口忙着，这一批就丢掉。
+    /// 返回发出去了没有。
+    ///
+    /// 这种包没有人管它的量，所以只走直连；到对端的路经 relay 时（先问 [`is_direct`](Self::is_direct)），
+    /// 调用方该把东西交给有拥塞控制的连接，经 [`try_send`](Self::try_send) 发。
+    ///
+    /// 不等 [`writable`](Self::writable) 的调用方用这个，不用 [`try_send`](Self::try_send)：那个入口说过一次"现在发不了"之后，
+    /// 要等到有人等来了可写才会再去问内核。
+    pub fn send_direct(&self, peer: NodeId, packets: &Packets<'_>) -> bool {
+        self.shared.table().peers.get(&peer).is_some_and(|slot| slot.send_direct(&self.shared, packets))
+    }
+
     /// 等到可以再发。可以有多个任务同时等。
     ///
     /// # Errors
@@ -579,8 +597,9 @@ impl Paths {
     fn classify<'t>(&self, table: &'t Table, from: SocketAddr, datagram: &[u8]) -> Verdict<'t> {
         let clock = &self.shared.clock;
         match Datagram::parse(datagram) {
-            // 直连的连接包：来源地址不是任何对端已验证的直连地址时丢掉。
-            Ok(Datagram::Conn(_)) => match table.direct.get(&from) {
+            // 直连的连接包，或者封好的网络包（它和连接包走同一条路，一样交给连接层）：
+            // 来源地址不是任何对端已验证的直连地址时丢掉。
+            Ok(Datagram::Conn(_) | Datagram::Sealed(_)) => match table.direct.get(&from) {
                 Some(slot) => {
                     slot.last_rx_direct.touch(clock);
                     slot.received(&self.shared);

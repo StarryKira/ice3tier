@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use i3t_conn::{Acceptor, Connector, Direction, Endpoint, EndpointConfig, PacketFilter, RecvHalf, SendHalf};
+use i3t_conn::{Acceptor, Connector, Direction, Endpoint, EndpointConfig, PacketFilter, PacketTransport, RecvHalf, SendHalf};
 use i3t_crypto::NodeKey;
 use i3t_model::Netmap;
 use i3t_model::control::Route;
@@ -91,15 +91,38 @@ impl Node {
 
     /// 同 [`Node::start`]，另外给它几个地址查询的服务器。
     pub fn start_with(id: u32, addr_servers: &[SocketAddr]) -> Self {
-        Self::start_inner(id, Arc::new(NodeKey::generate().unwrap()), addr_servers)
+        Self::start_inner(id, Arc::new(NodeKey::generate().unwrap()), addr_servers, PacketTransport::Sealed)
     }
 
     /// 用一把已有的密钥起一个节点：同一个节点重启之后的样子（端口换了，身份还是它）。
     pub fn start_with_key(id: u32, key: Arc<NodeKey>) -> Self {
-        Self::start_inner(id, key, &[])
+        Self::start_inner(id, key, &[], PacketTransport::Sealed)
     }
 
-    fn start_inner(id: u32, key: Arc<NodeKey>, addr_servers: &[SocketAddr]) -> Self {
+    /// 同一个节点崩溃之后在原来的地址 `addr` 上回来（节点的端口是配置里定的，重启不换），密钥也是原来那把。
+    /// 原来那个节点要已经丢掉了：它的端口等它的任务收了场才放出来，所以绑不上就等一下再试。
+    pub async fn restart_at(id: u32, key: Arc<NodeKey>, addr: SocketAddr) -> Self {
+        init_logging();
+        let id = NodeId::new(id).unwrap();
+        let (netmap, netmap_rx) = watch::channel(build_netmap(id, &View::default()));
+        let deadline = Instant::now() + SOON;
+        loop {
+            let config = EndpointConfig { key: Arc::clone(&key), bind: addr, netmap: netmap_rx.clone(), addr_servers: Vec::new() };
+            match Endpoint::bind_with(config, PacketTransport::Sealed) {
+                Ok(endpoint) => return Self { id, key, endpoint: Arc::new(endpoint), netmap },
+                Err(error) => assert!(Instant::now() < deadline, "原来的地址 {addr} 一直绑不上：{error:?}"),
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// 同 [`Node::start`]，只是网络包一律走连接的数据报：不认识封好的包的旧节点就是这样。
+    pub fn start_datagram_only(id: u32) -> Self {
+        Self::start_inner(id, Arc::new(NodeKey::generate().unwrap()), &[], PacketTransport::Datagram)
+    }
+
+    // 网络包怎么走写明在这里，不看环境变量：测试的结果不该跟着跑测试的环境变。
+    fn start_inner(id: u32, key: Arc<NodeKey>, addr_servers: &[SocketAddr], packets: PacketTransport) -> Self {
         init_logging();
         let id = NodeId::new(id).unwrap();
         let (netmap, netmap_rx) = watch::channel(build_netmap(id, &View::default()));
@@ -113,14 +136,14 @@ impl Node {
         for attempt in 0..100 {
             let bound = if attempt % 2 == 0 {
                 let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-                Endpoint::bind(config(probe.local_addr().unwrap())).map_err(|error| format!("{error:?}"))
+                Endpoint::bind_with(config(probe.local_addr().unwrap()), packets).map_err(|error| format!("{error:?}"))
             } else {
-                Endpoint::bind(config("127.0.0.1:0".parse().unwrap())).map_err(|error| format!("{error:?}")).and_then(|endpoint| {
-                    match std::net::TcpListener::bind(endpoint.local_addr()) {
+                Endpoint::bind_with(config("127.0.0.1:0".parse().unwrap()), packets).map_err(|error| format!("{error:?}")).and_then(
+                    |endpoint| match std::net::TcpListener::bind(endpoint.local_addr()) {
                         Ok(_) => Ok(endpoint),
                         Err(error) => Err(format!("TCP {}：{error}", endpoint.local_addr())),
-                    }
-                })
+                    },
+                )
             };
             match bound {
                 Ok(endpoint) => return Self { id, key, endpoint: Arc::new(endpoint), netmap },

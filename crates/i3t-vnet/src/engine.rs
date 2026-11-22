@@ -64,6 +64,8 @@ const INBOUND_BATCH: usize = 64;
 
 /// 网卡上读出来的包最长多少（Linux 的 TUN 不会给比 MTU 大的包；留够 IPv4 的上限）。
 const READ_BUFFER: usize = u16::MAX as usize;
+/// 网卡上现成的包一口气最多读几个再交下去。一条跑满的流因此成批地走，别的事（建好的连接、进来的包）也轮得到。
+const OUTBOUND_BURST: usize = 32;
 
 /// 丢掉的包按原因的计数，和收发的计数。上报和本机的状态都读它。
 #[derive(Debug, Default)]
@@ -353,16 +355,34 @@ impl<D: Device, S: PacketSender> Outbound<D, S> {
                 Some((peer, result)) = dialed.recv() => Event::Dialed(peer, result),
             };
             match event {
-                Event::Read(Ok(len)) => {
-                    let frame = Bytes::copy_from_slice(&buf[..=len]);
-                    if let Some(peer) = self.route(&frame).await {
-                        self.send(peer, frame, &dialed_tx).await;
+                Event::Read(read) => {
+                    // 网卡上紧跟着还有现成的包就接着读，一口气交下去：连接层把一样长的凑成一批发，少几次系统调用。
+                    // 只取现成的，不等：没有了就把手上的发掉。
+                    let mut read = Some(read);
+                    let mut taken = 0;
+                    while let Some(result) = read.take() {
+                        match result {
+                            Ok(len) => {
+                                let frame = Bytes::copy_from_slice(&buf[..=len]);
+                                if let Some(peer) = self.route(&frame).await {
+                                    self.send(peer, frame, &dialed_tx).await;
+                                }
+                            }
+                            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                            Err(error) => {
+                                self.sender.flush();
+                                return Stopped::Device(error);
+                            }
+                        }
+                        taken += 1;
+                        if taken < OUTBOUND_BURST {
+                            read = self.device.try_recv(&mut buf[1..]);
+                        }
                     }
                 }
-                Event::Read(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {}
-                Event::Read(Err(error)) => return Stopped::Device(error),
                 Event::Dialed(peer, result) => self.dialed(peer, result).await,
             }
+            self.sender.flush();
         }
     }
 
@@ -411,9 +431,10 @@ impl<D: Device, S: PacketSender> Outbound<D, S> {
         if !self.icmp.take(Instant::now()) {
             return;
         }
-        if let Some(answer) = unreachable(ip, code)
-            && let Err(error) = self.device.send(&answer).await
-        {
+        let Some(answer) = unreachable(ip, code) else { return };
+        // 写网卡可能要等（它的队列满着的时候）。同一阵里排在前面、交下去还没发的包先发掉，不让它们陪着等。
+        self.sender.flush();
+        if let Err(error) = self.device.send(&answer).await {
             tracing::debug!(%error, "回给本机程序的不可达写不进网卡");
         }
     }
@@ -423,7 +444,7 @@ impl<D: Device, S: PacketSender> Outbound<D, S> {
             return Self::queue(waiting, frame, &self.counters, &mut self.log);
         }
         let len = frame.len() - 1;
-        match self.sender.send_packet(peer, frame.clone()) {
+        match self.sender.queue_packet(peer, frame.clone()) {
             Ok(()) => self.counters.sent(len),
             Err(DatagramSendError::NotConnected(_) | DatagramSendError::ConnectionLost { .. }) => {
                 let mut waiting = Waiting::default();
@@ -461,7 +482,7 @@ impl<D: Device, S: PacketSender> Outbound<D, S> {
             Err(error) => return self.log.note(&self.counters, Loss::Unreachable, &error),
         };
         for piece in pieces {
-            if let Err(error) = self.sender.send_packet(peer, Bytes::from(piece)) {
+            if let Err(error) = self.sender.queue_packet(peer, Bytes::from(piece)) {
                 return self.log.note(&self.counters, Loss::Unreachable, &error);
             }
         }
@@ -477,7 +498,7 @@ impl<D: Device, S: PacketSender> Outbound<D, S> {
                 tracing::debug!(%peer, queued = waiting.frames.len(), "和对端的连接建好了，排着的包发出去");
                 for frame in waiting.frames {
                     let len = frame.len() - 1;
-                    match self.sender.send_packet(peer, frame.clone()) {
+                    match self.sender.queue_packet(peer, frame.clone()) {
                         Ok(()) => self.counters.sent(len),
                         Err(DatagramSendError::TooLarge { max, .. }) => self.send_pieces(peer, &frame[1..], max),
                         Err(error) => self.log.note(&self.counters, Loss::Unreachable, &error),

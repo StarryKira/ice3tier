@@ -194,6 +194,8 @@ pub(crate) struct PeerSlot {
     contact: Stamp,
     /// 当前的路可疑（探测没有回答），或者根本没有路。这时发的包多留一份，见 [`PeerSlot::flush`]。
     doubt: AtomicBool,
+    /// 当前的路是直连。和 `inner` 里的路一起改；发包的路径上不拿锁就要看它（[`PeerSlot::is_direct`]）。
+    direct: AtomicBool,
     inner: Mutex<SlotInner>,
 }
 
@@ -207,6 +209,7 @@ impl PeerSlot {
             last_rx: Stamp::default(),
             contact: Stamp::default(),
             doubt: AtomicBool::new(true),
+            direct: AtomicBool::new(false),
             inner: Mutex::new(SlotInner { hop: Hop::None, scratch: Vec::new(), stash: VecDeque::new() }),
         })
     }
@@ -216,7 +219,9 @@ impl PeerSlot {
     }
 
     pub(crate) fn set_hop(&self, hop: Hop) {
-        self.lock().hop = hop;
+        let mut inner = self.lock();
+        self.direct.store(matches!(hop, Hop::Direct(_)), Ordering::Relaxed);
+        inner.hop = hop;
     }
 
     /// 这个对端是不是活跃的：最近有包要发给它，或者有人要和它通信。
@@ -305,6 +310,37 @@ impl PeerSlot {
                 }
                 Ok(())
             }
+        }
+    }
+
+    /// 现在是不是直连：包直接发到它的地址上，不经任何 relay。
+    pub(crate) fn is_direct(&self) -> bool {
+        self.direct.load(Ordering::Relaxed)
+    }
+
+    /// 把一批丢了也没关系的包（封好的网络包）直接发到它的地址上，不等，也不留底。现在不是直连，或者端口忙着，
+    /// 这一批就丢掉。返回发出去了没有。
+    ///
+    /// 只走直连：经 relay 的路上可能有一段是 TCP（本节点到 relay 的、对端到 relay 的、relay 和 relay 之间的），发的一方看不全。
+    /// 那样的一段是可靠的流，这种没有人管量的包把它灌满之后，数据一直排到线路的缓冲区里，同一条 TCP 上的东西都跟着晚到几秒，
+    /// 到 relay 的保活等不到回答，那条 TCP 还会被当作断了拆掉（实测：2 Mbit/s 的 TCP 中转上灌 20 Mbit/s，每六七秒拆一次）。
+    /// 经 relay 的路上，量要有人管着，所以调用方在不是直连时照旧用 [`send`](Self::send)（连接自己的包）。
+    ///
+    /// 它直接问内核，不走 [`send`](Self::send) 用的那个入口。那个入口是给会等"可写"的连接用的：内核说过一次
+    /// "现在发不了"之后，运行时记下端口不可写，到它收到下一次可写的通知之前，再来的包不问内核就当作发不了。
+    /// 连接会等；不等的调用方在这段时间里一个包也发不出去，尽管内核一有地方就能收。
+    ///
+    /// 不留底：这样的包本来就不保证送达，补发一个过了时的没有用，还会把连接自己的包从留底里挤出去。
+    pub(crate) fn send_direct(&self, shared: &Shared, packets: &Packets<'_>) -> bool {
+        self.last_tx.touch(&shared.clock);
+        match self.lock().hop {
+            Hop::Direct(destination) => shared.port.send_or_drop(&Transmit {
+                destination,
+                contents: packets.contents,
+                segment_size: packets.segment_size,
+                ecn: packets.ecn,
+            }),
+            Hop::None | Hop::RelayUdp { .. } | Hop::RelayTcp { .. } | Hop::Local => false,
         }
     }
 
@@ -625,6 +661,51 @@ mod tests {
         shared.port.writable().await.unwrap();
         slot.send(&shared, &Packets { contents: &[5; 100], segment_size: None, ecn: None }).unwrap();
         assert!(slot.lock().stash.is_empty(), "连接正常时不留底");
+    }
+
+    #[tokio::test]
+    async fn packets_that_may_be_dropped_go_straight_to_the_kernel_and_are_never_kept_for_resending() {
+        let shared = shared();
+        let receiver = UdpPort::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        // 刚建的对端的路是可疑的：连接包这时都留底。
+        let slot = PeerSlot::new(NodeId::new(2).unwrap());
+        slot.set_hop(Hop::Direct(receiver.local_addr()));
+        // 端口刚绑定，运行时还没有收到它的头一次"可写"通知，在它看来端口是不可写的，和内核说过一次"现在发不了"之后一样。
+        // 这里故意不等可写：经过运行时的那个入口这时一个包也发不出去。
+        let packets = Packets { contents: &[6; 100], segment_size: None, ecn: None };
+        assert!(slot.send_direct(&shared, &packets));
+        assert_eq!(receive(&receiver).await, Some(vec![6; 100]));
+        assert!(slot.lock().stash.is_empty(), "丢了也没关系的包不留底");
+        slot.send(&shared, &Packets { contents: &[0x40; 100], segment_size: None, ecn: None }).unwrap();
+        assert_eq!(slot.lock().stash.len(), 1, "同样的时候连接包是留的");
+    }
+
+    #[tokio::test]
+    async fn packets_that_may_be_dropped_only_ever_leave_on_a_direct_route() {
+        let shared = shared();
+        let receiver = UdpPort::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let slot = PeerSlot::new(NodeId::new(2).unwrap());
+        let packets = Packets { contents: &[6; 250], segment_size: Some(100), ecn: None };
+        let header = FrameHeader::single(RelayHeader { dst: slot.id, src: shared.me });
+        let relay = || RelaySlot::new(NodeId::new(9).unwrap());
+        assert!(!slot.is_direct() && !slot.send_direct(&shared, &packets), "没有路");
+
+        // 经 relay 的路，不管到 relay 的那一段是 UDP 还是 TCP：这种包不交给 relay，也不占 TCP 的待发队列。
+        slot.set_hop(Hop::RelayUdp { relay: relay(), addr: receiver.local_addr(), header });
+        assert!(!slot.is_direct() && !slot.send_direct(&shared, &packets));
+        assert_eq!(receive(&receiver).await, None, "什么都没有发给 relay");
+        let (sender, _queue) = i3t_underlay::tcp_leg::frame_queue();
+        slot.set_hop(Hop::RelayTcp { relay: relay(), sender: sender.clone(), header });
+        assert!(!slot.is_direct() && !slot.send_direct(&shared, &packets));
+        let room = (0..i3t_underlay::tcp_leg::SEND_QUEUE_PACKETS + 1).filter(|_| sender.try_send(Bytes::new())).count();
+        assert_eq!(room, i3t_underlay::tcp_leg::SEND_QUEUE_PACKETS, "TCP 的待发队列一个位置都没有被占");
+        slot.set_hop(Hop::Local);
+        assert!(!slot.is_direct() && !slot.send_direct(&shared, &packets), "对端挂在本节点自己的 relay 上");
+
+        slot.set_hop(Hop::Direct(receiver.local_addr()));
+        assert!(slot.is_direct() && slot.send_direct(&shared, &packets), "直连");
+        slot.set_hop(Hop::None);
+        assert!(!slot.is_direct(), "路没了，直连的标记跟着清掉");
     }
 
     #[tokio::test]

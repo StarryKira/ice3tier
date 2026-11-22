@@ -22,14 +22,28 @@ fn node(raw: u32) -> NodeId {
 struct FakeDevice {
     from_kernel: AsyncMutex<mpsc::UnboundedReceiver<io::Result<Vec<u8>>>>,
     to_kernel: mpsc::UnboundedSender<Vec<u8>>,
+    /// 引擎开始了几次"等下一个包"。真的网卡上每一次都不便宜（Windows：一个内核事件加一个阻塞线程的任务）。
+    waits: AtomicUsize,
+}
+
+impl FakeDevice {
+    fn copy(packet: io::Result<Vec<u8>>, buf: &mut [u8]) -> io::Result<usize> {
+        let packet = packet?;
+        buf[..packet.len()].copy_from_slice(&packet);
+        Ok(packet.len())
+    }
 }
 
 impl Device for FakeDevice {
     async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.waits.fetch_add(1, Ordering::Relaxed);
         let Some(packet) = self.from_kernel.lock().await.recv().await else { return std::future::pending().await };
-        let packet = packet?;
-        buf[..packet.len()].copy_from_slice(&packet);
-        Ok(packet.len())
+        Self::copy(packet, buf)
+    }
+
+    fn try_recv(&self, buf: &mut [u8]) -> Option<io::Result<usize>> {
+        let packet = self.from_kernel.try_lock().ok()?.try_recv().ok()?;
+        Some(Self::copy(packet, buf))
     }
 
     async fn send(&self, packet: &[u8]) -> io::Result<()> {
@@ -48,6 +62,9 @@ struct NetState {
     refuse: std::sync::Mutex<HashSet<NodeId>>,
     dial_delay: Duration,
     sent: mpsc::UnboundedSender<(NodeId, Bytes)>,
+    /// 每次"把攒着的发出去"时，到那时为止一共交下来多少帧。
+    flushed_at: std::sync::Mutex<Vec<usize>>,
+    queued: AtomicUsize,
     inbox: AsyncMutex<mpsc::UnboundedReceiver<Datagram>>,
 }
 
@@ -73,7 +90,12 @@ impl PacketSender for FakeNet {
             return Err(DatagramSendError::TooLarge { len: frame.len(), max });
         }
         self.0.sent.send((peer, frame)).unwrap();
+        self.0.queued.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+
+    fn flush(&self) {
+        self.0.flushed_at.lock().unwrap().push(self.0.queued.load(Ordering::Relaxed));
     }
 
     async fn connect(&self, peer: NodeId) -> Result<(), OpenError> {
@@ -97,6 +119,7 @@ struct World {
     /// 对端发来的帧从这里进来。
     peers: mpsc::UnboundedSender<Datagram>,
     net: FakeNet,
+    device: Arc<FakeDevice>,
     netmap: watch::Sender<Arc<Netmap>>,
     counters: Arc<Counters>,
     engine: tokio::task::JoinHandle<Stopped>,
@@ -131,13 +154,15 @@ fn world(map: Netmap, connected: &[u32], dial_delay: Duration) -> World {
         refuse: std::sync::Mutex::default(),
         dial_delay,
         sent,
+        flushed_at: std::sync::Mutex::default(),
+        queued: AtomicUsize::new(0),
         inbox: AsyncMutex::new(inbox),
     }));
-    let device = Arc::new(FakeDevice { from_kernel: AsyncMutex::new(from_kernel), to_kernel });
+    let device = Arc::new(FakeDevice { from_kernel: AsyncMutex::new(from_kernel), to_kernel, waits: AtomicUsize::new(0) });
     let (netmap, netmap_rx) = watch::channel(Arc::new(map));
     let counters = Arc::new(Counters::default());
-    let engine = tokio::spawn(Engine::new(device, Arc::new(net.clone()), netmap_rx, Arc::clone(&counters)).run());
-    World { app, kernel, wire, peers, net, netmap, counters, engine }
+    let engine = tokio::spawn(Engine::new(Arc::clone(&device), Arc::new(net.clone()), netmap_rx, Arc::clone(&counters)).run());
+    World { app, kernel, wire, peers, net, device, netmap, counters, engine }
 }
 
 impl World {
@@ -182,6 +207,47 @@ fn icmp_answer(packet: &[u8]) -> (u8, u8, Vec<u8>) {
     let ip = Ipv4::parse(packet).unwrap();
     let payload = ip.payload();
     (payload[0], payload[1], payload[8..].to_vec())
+}
+
+#[tokio::test]
+async fn packets_already_waiting_on_the_device_are_handed_down_together_and_then_flushed() {
+    let mut world = world(netmap(&serde_json::json!([peer(2, true, true)]), &[]), &[2], Duration::ZERO);
+    // 引擎还没有轮到跑，五个包已经都在网卡上了。
+    for _ in 0..5 {
+        world.app_sends(icmp(ME, B, 8));
+    }
+    for _ in 0..5 {
+        world.on_wire().await;
+    }
+    let flushed = || world.net.0.flushed_at.lock().unwrap().clone();
+    let deadline = tokio::time::Instant::now() + SOON;
+    while flushed().last() != Some(&5) {
+        assert!(tokio::time::Instant::now() < deadline, "交下去的包一直没有被发掉：{:?}", flushed());
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(flushed(), [5], "五个现成的包一口气交下去，然后发一次，不是每个包发一次");
+    let waits = world.device.waits.load(Ordering::Relaxed);
+    assert!(waits <= 2, "只等两次：开头等到第一个包，取完现成的之后等下一个。中间和末尾不为了看一眼就开始等：{waits} 次");
+}
+
+#[tokio::test]
+async fn packets_handed_down_are_sent_before_the_engine_stops_to_answer_one_it_cannot_deliver() {
+    let mut world = world(netmap(&serde_json::json!([peer(2, true, true)]), &[]), &[2], Duration::ZERO);
+    // 同一阵里三个包：给 b 的，给一个不存在的节点的（要往网卡里写一个"不可达"，那可能要等），又一个给 b 的。
+    world.app_sends(icmp(ME, B, 8));
+    world.app_sends(tcp(ME, [10, 66, 0, 9], (40000, 22), 0x02));
+    world.app_sends(icmp(ME, B, 8));
+    world.kernel_gets().await;
+    for _ in 0..2 {
+        world.on_wire().await;
+    }
+    let flushed = || world.net.0.flushed_at.lock().unwrap().clone();
+    let deadline = tokio::time::Instant::now() + SOON;
+    while flushed().last() != Some(&2) {
+        assert!(tokio::time::Instant::now() < deadline, "交下去的包一直没有被发掉：{:?}", flushed());
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(flushed(), [1, 2], "去写不可达之前，前面那个已经交下去的包先发掉了");
 }
 
 #[tokio::test]
