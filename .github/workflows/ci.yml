@@ -42,7 +42,8 @@ jobs:
 
   # 真的建一块虚拟网卡、配上地址和路由、再拆掉（`i3t-vnet` 的 `a_real_device_…` 测试）：这台开发机上只能在 Linux 上做，
   # Windows 和 macOS 的 CI 机器以管理员 / 可以 sudo 的用户运行，在这里做。Windows 上 wintun.dll 要放在测试程序旁边
-  # （测试程序的路径写成正斜杠：Git Bash 的 dirname 不认反斜杠）。
+  # （测试程序的路径写成正斜杠：Git Bash 的 dirname 不认反斜杠）。Linux 上另有一个：开了分段卸载的网卡和内核对着收发，
+  # 切包、合包、补校验和都在这台机器的内核上走一遍。
   vnet-device:
     name: virtual adapter smoke test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -50,7 +51,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -71,11 +72,14 @@ jobs:
           I3T_VNET_DEVICE_TEST: "1"
         run: |
           program=$(cat test-program.txt)
-          if [ "$RUNNER_OS" = macOS ]; then
-            sudo -E "$program" a_real_device --nocapture
-          else
-            "$program" a_real_device --nocapture
-          fi
+          # Ubuntu 的 sudo 不把环境变量带过去（-E 也不带），所以经 env 设。
+          case "$RUNNER_OS" in
+            Linux) sudo env I3T_VNET_DEVICE_TEST=1 "$program" a_real_device --nocapture | tee device-test.txt ;;
+            macOS) sudo -E "$program" a_real_device --nocapture | tee device-test.txt ;;
+            *) "$program" a_real_device --nocapture | tee device-test.txt ;;
+          esac
+          # 没带上那个环境变量的话测试什么也不做就通过：看它真的建了网卡。
+          grep -q '网卡 ' device-test.txt
 
   # 安装脚本在真的 systemd（ubuntu）和 launchd（macOS）上装一遍：不带令牌装、sudo i3t join 加入并启动、
   # 覆盖重装、卸载干净。controller 起在同一台机器的回环上。

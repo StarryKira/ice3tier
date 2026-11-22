@@ -88,7 +88,7 @@ static ZH: Texts = Texts {
     metrics_not_loopback: |addr| format!("metrics.listen = \"{addr}\" 不是回环地址：指标接口没有认证，只能写 127.0.0.1 或 [::1]。"),
     same_proxy_address: |addr| format!("proxy.socks5 和 proxy.http 不能用同一个地址 {addr}"),
     unknown_setting: |other| {
-        format!("没有设置项 {other}：可以写 can-exit、can-relay、relay-address、throughput-tests、profile、network、firewall、mtu")
+        format!("没有设置项 {other}：可以写 can-exit、can-relay、relay-address、throughput-tests、profile、network、firewall、mtu、offload")
     },
     not_a_switch: |other| format!("\"{other}\" 不是开关的值：写 on 或 off"),
     unknown_profile: |other| format!("没有档位 \"{other}\"：可以写 low-footprint、balanced、high-throughput"),
@@ -148,7 +148,7 @@ static EN: Texts = Texts {
     same_proxy_address: |addr| format!("proxy.socks5 and proxy.http can't share the address {addr}"),
     unknown_setting: |other| {
         format!(
-            "No setting {other}: possible values: can-exit, can-relay, relay-address, throughput-tests, profile, network, firewall, mtu"
+            "No setting {other}: possible values: can-exit, can-relay, relay-address, throughput-tests, profile, network, firewall, mtu, offload"
         )
     },
     not_a_switch: |other| format!("\"{other}\" isn't a switch value: write on or off"),
@@ -238,9 +238,14 @@ enabled = true
 # 防火墙：放行从虚拟网卡进来的、丢掉从别的网卡进来却自称来自虚拟地址段的（Linux），放行虚拟地址段（Windows）。
 # 写 false（i3t set firewall off）程序就一条规则也不碰，从虚拟网卡进来的由这台机器自己的防火墙管。
 firewall = true
-# 网卡的 MTU（字节，576 到 1500；i3t set mtu 1280）。只管这台机器的网卡，别的节点设得不一样也通。
+# 网卡的 MTU（字节，576 到 1500；i3t set mtu 1280）。写 1280 是跟着网络的默认值（管理员在 controller 上定）；
+# 写别的值就用它，只管这台机器的网卡，别的节点设得不一样也通。
 # 一般不用动：比 1280 大，包多半要切成两片发，反而慢；底下的线路包长特别小时才值得调小。
 mtu = 1280
+# Linux：网卡和内核之间一次交接一大块数据，不是一个个的包，流量大时省 CPU；内核不给时程序自己退回去。
+# 一般不用动：经网卡的传输卡住或者内容不对时，写 false（i3t set offload off）看是不是它。
+# 管理员在 controller 上把网络的这一项关了的话，这里开着也不用。
+offload = true
 
 [log]
 # 日志级别：error、warn、info、debug、trace。
@@ -301,9 +306,15 @@ enabled = true
 # Firewall: accept what arrives on the adapter and drop packets claiming the virtual range from other interfaces (Linux),
 # accept the virtual range (Windows). false (i3t set firewall off) makes the program touch no rules at all.
 firewall = true
-# The adapter's MTU (bytes, 576 to 1500; i3t set mtu 1280). It is this machine's adapter only: other nodes may differ.
+# The adapter's MTU (bytes, 576 to 1500; i3t set mtu 1280). 1280 follows the network's default (set by the admin on
+# the controller); any other value is used as written, for this machine's adapter only: other nodes may differ.
 # Rarely worth changing: above 1280 most packets go as two pieces and get slower; go lower only on lines with very small packets.
 mtu = 1280
+# Linux: the adapter and the kernel exchange large blocks instead of single packets, which saves CPU under load; the
+# program falls back by itself where the kernel refuses. Rarely worth changing: write false (i3t set offload off) to see
+# whether it is the cause when transfers over the adapter stall or arrive damaged. Where the admin turned this off for
+# the network on the controller, it stays off whatever is written here.
+offload = true
 
 [log]
 # Log level: error, warn, info, debug, trace.
