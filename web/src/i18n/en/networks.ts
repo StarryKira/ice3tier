@@ -59,16 +59,23 @@ export const networks: Messages['networks'] = {
   saveSettings: 'Save',
   settingsSaved: 'Settings saved',
   connection: 'Connections',
-  connectionNote: 'Applies to connections made from now on',
-  ackThresholdLabel: 'ACK threshold',
-  ackThresholdDesc: 'A peer sends an ACK only after more than this many packets',
+  ackThresholdLabel: 'QUIC ACK threshold',
+  ackThresholdDesc:
+    'A peer sends an ACK only after more than this many packets. Higher: fewer packets on the way back, so downloads get faster on a line with little upload',
   ackThresholdHint:
-    "Higher means fewer ACK packets on the way back. Above 3, throughput depends on how precise the peer's timer is: it drops sharply towards Windows peers.",
+    "QUIC learns from the peer's ACKs that data arrived. Above 3, throughput depends on how precise the peer's timer is: it drops sharply towards Windows peers. The default suits nearly every line.",
   ackThresholdUnit: 'packets',
-  ackDelayLabel: 'Max ACK delay',
-  ackDelayDesc: 'How long a peer waits below the threshold',
+  ackDelayLabel: 'QUIC max ACK delay',
+  ackDelayDesc:
+    'Below the threshold, a peer waits at most this long. Higher: fewer packets on the way back, but loss is noticed later',
   ackDelayHint: 'A high threshold with a long delay tends to drop one-way traffic.',
   ackDelayUnit: 'ms',
+  bundleLabel: 'Bundle small packets',
+  bundleDesc: 'On a direct route, small packets going to the same node at the same moment leave in one packet',
+  bundleHint:
+    'A download then sends far fewer ACK packets back, which helps a lot on a line that limits packets per second. When small packets come thick, each may wait a millisecond or two; sparse ones never wait. Nodes apply it as soon as they get the setting.',
+  bundleOn: 'On',
+  bundleOff: 'Off',
   wholeNumberBetween: (min, max) => `Must be a whole number from ${min} to ${max}`,
 
   danger: 'Danger zone',

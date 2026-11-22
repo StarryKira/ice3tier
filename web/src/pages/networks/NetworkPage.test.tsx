@@ -1,6 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { Route, Routes } from 'react-router'
+import { useState } from 'react'
 import { describe, expect, it } from 'vitest'
 
 import { type Network } from '@/api/types'
@@ -8,6 +9,7 @@ import { t } from '@/i18n'
 import { makeNode } from '@/test/fixtures'
 import { fakeApi, NETWORK, renderWithApp } from '@/test/harness'
 
+import { NetworkContext } from './context'
 import { NetworkPage } from './NetworkPage'
 
 const n = t.networks
@@ -141,7 +143,7 @@ describe('网络', () => {
     expect(api.callsTo('PATCH /networks/1')[0]?.body).toMatchObject({ max_relay_hops: 2, class: 'bulk' })
   })
 
-  it('连接：两项确认设置一起保存，只提交这两项；写着只对新建的连接生效', async () => {
+  it('连接：两项确认设置一起保存，只提交这两项', async () => {
     const user = userEvent.setup()
     const api = setup()
     open('connection')
@@ -151,7 +153,6 @@ describe('网络', () => {
     expect(threshold).toHaveValue('3')
     expect(delay).toHaveValue('2')
     expect(save).toBeDisabled()
-    expect(screen.getByText(n.connectionNote)).toBeVisible()
     expect(screen.queryByText(t.common.modified)).not.toBeInTheDocument()
 
     await user.clear(threshold)
@@ -190,6 +191,71 @@ describe('网络', () => {
     await user.click(screen.getByRole('button', { name: n.saveSettings }))
     await waitFor(() => expect(api.callsTo('PATCH /networks/1')).toHaveLength(1))
     expect(api.callsTo('PATCH /networks/1')[0]?.body).toEqual({ ack_eliciting_threshold: 4, max_ack_delay_ms: 2 })
+  })
+
+  it('连接：合并小包是一个开关，关掉之后只提交这一项；恢复默认把它打开', async () => {
+    const user = userEvent.setup()
+    const api = setup()
+    open('connection')
+    const bundling = screen.getByRole('switch', { name: n.bundleLabel })
+    expect(bundling).toBeChecked()
+    expect(screen.getByText(n.bundleDesc)).toBeVisible()
+    expect(screen.getByRole('button', { name: n.saveSettings })).toBeDisabled()
+
+    await user.click(bundling)
+    expect(bundling).not.toBeChecked()
+    expect(screen.getByText(t.common.defaultIs(n.bundleOn), { exact: false })).toBeVisible()
+    await user.click(screen.getByRole('button', { name: n.saveSettings }))
+    await waitFor(() => expect(api.callsTo('PATCH /networks/1')).toHaveLength(1))
+    expect(api.callsTo('PATCH /networks/1')[0]?.body).toEqual({ bundle_small_packets: false })
+
+    await user.click(screen.getByRole('button', { name: t.common.restoreDefaultOf(n.bundleLabel) }))
+    expect(bundling).toBeChecked()
+  })
+
+  it('连接：关着的合并小包标着已修改；controller 不报这一项时没有这一行，也不提交它', async () => {
+    const user = userEvent.setup()
+    const api = setup()
+    const { unmount } = open('connection', { ...NETWORK, bundle_small_packets: false })
+    expect(screen.getByRole('switch', { name: n.bundleLabel })).not.toBeChecked()
+    expect(screen.getByText(t.common.modified)).toBeVisible()
+    unmount()
+
+    const older: Network = { ...NETWORK }
+    delete older.bundle_small_packets
+    open('connection', older)
+    expect(screen.queryByRole('switch', { name: n.bundleLabel })).not.toBeInTheDocument()
+    const threshold = screen.getByLabelText(n.ackThresholdLabel)
+    await user.clear(threshold)
+    await user.type(threshold, '4')
+    await user.click(screen.getByRole('button', { name: n.saveSettings }))
+    await waitFor(() => expect(api.callsTo('PATCH /networks/1')).toHaveLength(1))
+    expect(api.callsTo('PATCH /networks/1')[0]?.body).toEqual({ ack_eliciting_threshold: 4, max_ack_delay_ms: 2 })
+  })
+
+  it('连接：别处改了合并小包，开关跟着变，不算有没保存的改动', async () => {
+    const user = userEvent.setup()
+    setup()
+    // 网络的设置是从外面给进来的：别的标签页或者 i3tctl 改了之后，重新取到的就是新的。按钮代替"重新取到了"。
+    function Page() {
+      const [network, setNetwork] = useState(NETWORK)
+      return (
+        <NetworkContext value={network}>
+          <button type="button" onClick={() => setNetwork({ ...NETWORK, bundle_small_packets: false })}>
+            changed elsewhere
+          </button>
+          <Routes>
+            <Route path="/n/:network/network/:section" element={<NetworkPage />} />
+          </Routes>
+        </NetworkContext>
+      )
+    }
+    renderWithApp(<Page />, { route: '/n/1/network/connection' })
+    expect(screen.getByRole('switch', { name: n.bundleLabel })).toBeChecked()
+
+    await user.click(screen.getByRole('button', { name: 'changed elsewhere' }))
+    expect(screen.getByRole('switch', { name: n.bundleLabel })).not.toBeChecked()
+    expect(screen.getByRole('button', { name: n.saveSettings })).toBeDisabled()
   })
 
   it('危险操作：网络里还有节点时删除是灰的，写着要先删节点', () => {
