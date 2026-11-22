@@ -211,6 +211,9 @@ impl Controller {
             Ok::<_, Error>(node)
         })?;
         tracing::info!(node = %id, name = %node.name, action, "修改节点的能力");
+        if node.exit.is_none() {
+            inner.usage.exit_disabled(id);
+        }
         let seeds = match affects {
             Affects::WholeNetwork => Seeds::All,
             Affects::Holders => inner.holders_and(id),
