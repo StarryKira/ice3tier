@@ -1,6 +1,6 @@
 //! 还认不出是谁的连接占的名额。
 //!
-//! 节点协议的连接在报到之前、管理 API 的连接在整个存续期间，controller 都不知道对方是谁，只能按来源地址给它们记账：
+//! 节点协议在握手阶段（含首帧）、管理 API 在连接的整个存续期间，用 `Gate` 按来源地址给连接记账：
 //!
 //! - 每个来源最多 [`Limits::per_source`] 条，再来一条就挤掉这个来源最老的那条；
 //! - 全部加起来最多 [`Limits::total`] 条，再来一条就挤掉占得最多的那个来源最老的那条。
@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
 /// 被挤掉、被拒绝这一类日志，同一个入口多久最多记一条。洪泛的时候每条连接记一行只会把日志刷满。
-const LOG_EVERY: Duration = Duration::from_secs(10);
+pub(crate) const LOG_EVERY: Duration = Duration::from_secs(10);
 
 /// 名额。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +54,7 @@ struct Slot {
 
 /// 记账用的来源：IPv4 地址，或者 IPv6 地址所在的 /64。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct Source(IpAddr);
+pub(crate) struct Source(IpAddr);
 
 impl From<IpAddr> for Source {
     fn from(ip: IpAddr) -> Self {
@@ -82,11 +82,21 @@ pub(crate) struct Pass {
     gate: Arc<Gate>,
     source: Source,
     id: u64,
-    /// 被挤掉之后是 `None`：tokio 的 oneshot 结束之后不能再等。
+    /// 名额已经交还，或者已经收到淘汰通知后是 `None`。
     evicted: Option<oneshot::Receiver<()>>,
 }
 
 impl Pass {
+    pub(crate) fn source(&self) -> Source {
+        self.source
+    }
+
+    /// 归还名额。返回 `false` 表示 Gate 已经将它淘汰，即使连接还没收到通知。
+    pub(crate) fn finish(mut self) -> bool {
+        self.evicted = None;
+        self.gate.release(self.source, self.id)
+    }
+
     /// 等到这条连接被挤掉。已经被挤掉的马上返回。
     pub(crate) async fn evicted(&mut self) {
         if let Some(evicted) = &mut self.evicted {
@@ -99,7 +109,9 @@ impl Pass {
 
 impl Drop for Pass {
     fn drop(&mut self) {
-        self.gate.release(self.source, self.id);
+        if self.evicted.is_some() {
+            self.gate.release(self.source, self.id);
+        }
     }
 }
 
@@ -142,16 +154,17 @@ impl Gate {
         Pass { gate: Arc::clone(self), source, id, evicted: Some(evicted) }
     }
 
-    fn release(&self, source: Source, id: u64) {
+    fn release(&self, source: Source, id: u64) -> bool {
         let mut slots = self.lock();
-        let Some(queue) = slots.by_source.get_mut(&source) else { return };
+        let Some(queue) = slots.by_source.get_mut(&source) else { return false };
         // 被挤掉的那条已经不在队列里了。
-        let Some(index) = queue.iter().position(|slot| slot.id == id) else { return };
+        let Some(index) = queue.iter().position(|slot| slot.id == id) else { return false };
         queue.remove(index);
         if queue.is_empty() {
             slots.by_source.remove(&source);
         }
         slots.total -= 1;
+        true
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Slots> {
@@ -232,6 +245,17 @@ mod tests {
     fn is_evicted(pass: &mut Pass) -> bool {
         let mut evicted = pin!(pass.evicted());
         matches!(evicted.as_mut().poll(&mut Context::from_waker(Waker::noop())), Poll::Ready(()))
+    }
+
+    #[test]
+    fn a_removed_slot_cannot_finish_even_before_its_eviction_notification() {
+        let gate = Gate::new("测试", SMALL);
+        let mut old = gate.admit(ip("192.0.2.1"));
+        // admit 先从名额表移除旧连接，放开锁以后才丢掉通知的发送端。
+        let victim = gate.lock().pop_oldest(old.source()).unwrap();
+        assert!(!is_evicted(&mut old));
+        assert!(!old.finish());
+        drop(victim);
     }
 
     #[test]

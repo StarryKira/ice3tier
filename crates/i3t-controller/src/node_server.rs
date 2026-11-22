@@ -5,11 +5,12 @@
 //! 一条连接上的顺序：节点先发 `Enroll` 或 `Hello`；controller 回 `Snapshot`，不认它时回 `Rejected` 然后断开，
 //! 自己出了错时回 `TryLater` 然后断开（节点会按退避重连）。之后节点上报、确认、发信令，controller 下发 netmap、转信令。
 //!
-//! 报到之前的连接谁都能开，所以它们占的名额按来源地址记账（[`crate::gate`]）：一个来源占不满，满了挤掉最老的，
-//! 不拒绝新来的。连上之后 [`CLIENT_HELLO_TIMEOUT`] 之内要收到 TLS 的 ClientHello，从连上算起 [`Timing::handshake_timeout`]
-//! 之内要完成握手并发来第一条消息。
+//! 握手和成员资格核验分别按来源地址记账（[`crate::gate`]）。握手名额满了挤掉老连接，核验名额满了让新来的稍后重试。
+//! 连上之后 [`CLIENT_HELLO_TIMEOUT`] 之内要收到 TLS 的 ClientHello，从连上算起 [`Timing::handshake_timeout`] 之内要完成握手并发来第一条消息。
 //!
 //! [`Timing::handshake_timeout`]: crate::Timing::handshake_timeout
+
+mod verification;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -18,11 +19,11 @@ use std::time::Duration;
 use i3t_crypto::tls;
 use i3t_model::control::{MAX_FRAME_LEN, ToController, ToNode};
 use i3t_proto::PublicKey;
-use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio::io::{AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
-use tokio::time::{Instant, sleep_until, timeout, timeout_at};
+use tokio::time::{Instant, sleep, sleep_until, timeout, timeout_at};
 use tokio_rustls::LazyConfigAcceptor;
 use tokio_rustls::server::TlsStream;
 
@@ -31,21 +32,25 @@ use crate::error::{Rejection, error_chain};
 use crate::frame::{FrameError, read_frame, write_frame};
 use crate::gate::{Gate, Limits, Pass, Throttle};
 use crate::server::blocking;
+use verification::AdmissionError;
+pub(crate) use verification::VerificationQuota;
 
 /// 还没报到的连接上，一帧最长这么多字节。`Enroll` 和 `Hello` 都只有几百字节。
 const FIRST_FRAME_LIMIT: usize = 64 * 1024;
-/// 还没报到的连接的名额：每个来源最多 16 条，全部最多 256 条，满了挤掉最老的（见 [`crate::gate`]）。
+/// 握手和核验各用一组名额：每个来源最多 16 条，全部最多 256 条。
 ///
 /// 正常的节点连上来几个往返就报到完了，同一个家用 NAT 后面的节点在 controller 重启之后带着随机的退避陆续连回来，
 /// 同时在握手的远到不了 16 条。
-const PENDING: Limits = Limits { per_source: 16, total: 256 };
+pub(crate) const PENDING: Limits = Limits { per_source: 16, total: 256 };
 /// 连上之后这么久还没有收到 TLS 的 ClientHello 就断开。正常的节点连上就发；只连不说话的连接不值得等满整个握手时限。
 pub const CLIENT_HELLO_TIMEOUT: Duration = Duration::from_secs(3);
 /// 接受连接失败（多半是文件描述符用完了）的日志多久最多记一条。
 const ACCEPT_ERROR_LOG_EVERY: Duration = Duration::from_secs(10);
 /// 每个节点的发送队列有多少格。满了说明节点不读，controller 会断开它。
 const OUTBOX_CAPACITY: usize = 64;
-/// 一帧写这么久还没写完，就认为连接已经死了。
+/// 报到失败的应答很小，写入和关闭合计最多占用名额这么久。之前的核验耗时另计。
+const ADMISSION_REPLY_TIMEOUT: Duration = Duration::from_secs(2);
+/// 已报到节点的一帧写这么久还没写完，就认为连接已经死了。
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// 关闭时最多等连接收尾这么久。
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
@@ -68,7 +73,7 @@ pub async fn serve(
             accepted = i3t_underlay::tcp_mss::accept(&listener) => match accepted {
                 Ok((stream, remote)) => {
                     let pass = pending.admit(remote.ip());
-                    let connection = Connection { controller: Arc::clone(&controller), remote, shutdown: shutdown.clone() };
+                    let mut connection = Connection { controller: Arc::clone(&controller), remote, shutdown: shutdown.clone() };
                     let tls = Arc::clone(&tls);
                     connections.spawn(async move {
                         let Some(established) = connection.establish(tls, stream, pass).await else { return };
@@ -111,8 +116,8 @@ struct Established {
 impl Connection {
     /// 握手，读第一条消息，让 controller 决定认不认这个节点。不认时回 `Rejected`（或者 `TryLater`）并返回 `None`。
     ///
-    /// `pass` 是这条连接在报到之前占的名额，读到第一条消息就交还；在那之前被挤掉的话直接断开。
-    async fn establish(&self, tls: Arc<rustls::ServerConfig>, stream: TcpStream, mut pass: Pass) -> Option<Established> {
+    /// `pass` 在取得核验名额后交还。满额或首帧不合要求时，应答仍受握手名额和时限约束。
+    async fn establish(&mut self, tls: Arc<rustls::ServerConfig>, stream: TcpStream, mut pass: Pass) -> Option<Established> {
         let remote = self.remote;
         let deadline = Instant::now() + self.controller.timing().handshake_timeout;
         let handshake = timeout_at(deadline, handshake(tls, stream));
@@ -123,7 +128,6 @@ impl Connection {
                 return None;
             }
         };
-        drop(pass);
         let (key, first, reader, mut writer) = match outcome {
             Ok(Ok(parts)) => parts,
             Ok(Err(reason)) => {
@@ -136,11 +140,10 @@ impl Connection {
             }
         };
 
-        let (outbox, inbox) = mpsc::channel(OUTBOX_CAPACITY);
         let ip = remote.ip();
-        let admitted = blocking(&self.controller, move |controller| match first {
-            ToController::Enroll { token, hello } => controller.enroll(key, &token, &hello, ip, outbox),
-            ToController::Hello(hello) => controller.hello(key, &hello, ip, outbox),
+        let (hello, token) = match first {
+            ToController::Enroll { token, hello } => (hello, Some(token)),
+            ToController::Hello(hello) => (hello, None),
             ToController::Report(_)
             | ToController::Ack { .. }
             | ToController::Signal { .. }
@@ -150,21 +153,22 @@ impl Connection {
             | ToController::BackboneAnswer { .. }
             | ToController::TestReport(_)
             | ToController::ExitTestAnswer { .. } => {
-                if let Some(suppressed) = controller.refusal_log.allow() {
+                if let Some(suppressed) = self.controller.refusal_log.allow() {
                     tracing::warn!(key = ?key, remote = %ip, suppressed, "拒绝连接：第一条消息不是 enroll 也不是 hello");
                 }
-                Err(Rejection::UnexpectedFirstMessage)
+                AdmissionError::UnexpectedFirstMessage(pass).reply(&mut writer, remote, deadline, &mut self.shutdown).await;
+                return None;
             }
-        })
-        .await;
-        match admitted {
+        };
+        let (outbox, inbox) = mpsc::channel(OUTBOX_CAPACITY);
+        let check = move |controller: &Controller| match token {
+            Some(token) => controller.enroll(key, &token, &hello, ip, outbox),
+            None => controller.hello(key, &hello, ip, outbox),
+        };
+        match self.controller.verify_node(pass, check).await {
             Ok(session) => Some(Established { session, reader, writer, outbox: inbox }),
-            Err(rejection) => {
-                let reply = rejection.reply();
-                if let Ok(Err(err)) = timeout(WRITE_TIMEOUT, write_frame(&mut writer, &reply)).await {
-                    tracing::debug!(%remote, "拒绝的原因没能发给对方：{}", error_chain(&err));
-                }
-                close(&mut writer).await;
+            Err(error) => {
+                error.reply(&mut writer, remote, deadline, &mut self.shutdown).await;
                 None
             }
         }
@@ -270,8 +274,52 @@ fn spawn_reader(mut reader: Reader) -> (mpsc::Receiver<Result<ToController, Fram
     (rx, task)
 }
 
+impl AdmissionError {
+    async fn reply(
+        self,
+        writer: &mut (impl AsyncWrite + Unpin),
+        remote: SocketAddr,
+        deadline: Instant,
+        shutdown: &mut watch::Receiver<bool>,
+    ) {
+        let (mut pass, reply) = match self {
+            Self::Evicted => {
+                tracing::debug!(%remote, "握手名额已被挤掉，跳过成员资格核验");
+                return;
+            }
+            Self::Rejected(reason, _permit) => {
+                reply_and_close(writer, reason.reply(), remote, shutdown).await;
+                return;
+            }
+            Self::Busy(pass) => (pass, ToNode::TryLater { reason: "正在核验的节点太多，稍后再试".to_owned() }),
+            Self::UnexpectedFirstMessage(pass) => (pass, Rejection::UnexpectedFirstMessage.reply()),
+        };
+        tokio::select! {
+            biased;
+            () = pass.evicted() => tracing::debug!(%remote, "发送报到应答时握手名额被挤掉"),
+            () = sleep_until(deadline) => tracing::debug!(%remote, "发送报到应答时已到握手时限"),
+            () = reply_and_close(writer, reply, remote, shutdown) => {}
+        }
+    }
+}
+
+async fn reply_and_close(writer: &mut (impl AsyncWrite + Unpin), reply: ToNode, remote: SocketAddr, shutdown: &mut watch::Receiver<bool>) {
+    let send = async {
+        match write_frame(writer, &reply).await {
+            Ok(()) => close(writer).await,
+            Err(err) => tracing::debug!(%remote, "拒绝的原因没能发给对方：{}", error_chain(&err)),
+        }
+    };
+    tokio::select! {
+        biased;
+        _ = shutdown.wait_for(|&stopping| stopping) => {}
+        () = sleep(ADMISSION_REPLY_TIMEOUT) => tracing::debug!(%remote, "拒绝应答没有在 {ADMISSION_REPLY_TIMEOUT:?} 内写完并关闭连接"),
+        () = send => {}
+    }
+}
+
 /// 尽量体面地关掉连接。对方不配合也不多等。
-async fn close(writer: &mut Writer) {
+async fn close(writer: &mut (impl AsyncWrite + Unpin)) {
     // 关不关得干净不影响任何状态：连接反正要丢弃了。
     let _ = timeout(Duration::from_secs(1), writer.shutdown()).await;
 }
