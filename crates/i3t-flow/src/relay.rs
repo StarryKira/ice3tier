@@ -485,6 +485,8 @@ async fn tcp_to_flow<S: SendStream, M: Meter>(
             send.end_header(Payload::Passthrough);
             if let Some(raw) = send.take_raw() {
                 let rest = Bytes::copy_from_slice(&buf[sealed..len]);
+                // 不再加密之后用不着这块缓冲，不能让它跟着 `tcp_to_raw` 一直占到连接结束。
+                drop(buf);
                 return tcp_to_raw(tcp, raw, rest, lane, traffic, Progress { started, class, meter }).await;
             }
             deliver(send, meter, traffic, &buf[sealed..len]).await?;
@@ -558,10 +560,16 @@ async fn flow_to_tcp<R: RecvStream, M: Meter>(
             Err(error) => return Err(Abort::BadReply(error)),
         }
     }
+    // 一开始就不再加密的（出口收发起方的方向）用不着缓冲：先问，切换了就不分配。
+    if let Some(raw) = recv.wait_raw().await {
+        return raw_to_tcp(raw, tcp, lane, traffic, progress).await;
+    }
     let mut buf = vec![0; buffer_len()];
     loop {
         // 对端可能先加密地送一段、之后才切换（出口要先把目标的 ServerHello 加密地送回来）：每一段之前都问一下。
         if let Some(raw) = recv.wait_raw().await {
+            // 不再加密之后用不着这块缓冲，不能让它跟着 `raw_to_tcp` 一直占到连接结束。
+            drop(buf);
             return raw_to_tcp(raw, tcp, lane, traffic, progress).await;
         }
         let len = recv.read(&mut buf).await.map_err(Abort::Flow)?;
