@@ -344,12 +344,18 @@ i3t_lane::on_both_transports! {
         let mut received = vec![0; hello.len()];
         timeout(PATIENCE, server.read_exact(&mut received)).await.unwrap().unwrap();
         assert_eq!(received, hello);
-        server.write_all(b"reply").await.unwrap();
-        let mut reply = [0; 5];
-        timeout(PATIENCE, client.read_exact(&mut reply)).await.unwrap().unwrap();
-        assert_eq!(&reply, b"reply");
-        if i3t_lane::testing::transport() == i3t_lane::testing::Transport::Lanes {
-            assert!(world.gw.lanes.status().total.spliced_bytes > 0, "出口应当走原始 TCP 搬运");
+        let lanes = i3t_lane::testing::transport() == i3t_lane::testing::Transport::Lanes;
+        let spliced = || world.gw.lanes.status().total.spliced_bytes;
+        let spliced_before = lanes.then(spliced);
+        // 目标回 TLS 1.3 的 ServerHello，出口往回的方向也跟着不再加密：吊销时两个方向都已经是原始 TCP。
+        let reply = [&i3t_flow::testing::server_hello()[..], b"reply"].concat();
+        server.write_all(&reply).await.unwrap();
+        let mut received = vec![0; reply.len()];
+        timeout(PATIENCE, client.read_exact(&mut received)).await.unwrap().unwrap();
+        assert_eq!(received, reply);
+        if let Some(before) = spliced_before {
+            // ServerHello 还是加密地送回去，它后面的字节走原始 TCP。
+            assert!(spliced() >= before + b"reply".len() as u64, "出口往回的方向应当在 ServerHello 之后走原始 TCP 搬运");
         }
         assert_eq!(world.gw.exit.stats().active, 1);
 
