@@ -5,11 +5,14 @@
 //!
 //! 结束方式如实传过去：一条流的一个方向正常结束，另一条流对应的方向也正常结束；一个方向被对端重置或者叫停，
 //! 两条流的四个方向全部带着同一个原因码异常结束，被截断的数据不会看起来像正常结束。
+//!
+//! 开过来的那条流在 ice3proxy 上、发起方选了不再加密时，往回的方向和 [`Flow::relay`] 一样，看到目标回的 TLS 1.3
+//! ServerHello 之后才跟着不再加密（[`ServerHelloWatch`]）。
 
 use std::future::Future;
 use std::io;
 
-use i3t_conn::{RecvStream, SendStream, StreamAborted, StreamCode};
+use i3t_conn::{Payload, RecvStream, SendStream, ServerHelloVerdict, ServerHelloWatch, StreamAborted, StreamCode};
 use i3t_proto::flow::Reason;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -46,8 +49,8 @@ impl<S: SendStream, R: RecvStream> Flow<S, R> {
         let cancel = cancel_on_revocation(cancel, far_revocation.clone());
         let (mut near_to_far, mut far_to_near) = (0, 0);
         let outcome = {
-            let up = pump(&mut near_recv, &mut far_send, &mut near_to_far);
-            let down = pump(&mut far_recv, &mut near_send, &mut far_to_near);
+            let up = pump(&mut near_recv, &mut far_send, &mut near_to_far, None);
+            let down = pump(&mut far_recv, &mut near_send, &mut far_to_near, Some(ServerHelloWatch::new()));
             both(up, down, cancel).await
         };
         let outcome = if [near_revocation.as_ref(), far_revocation.as_ref()].into_iter().flatten().any(|state| *state.borrow()) {
@@ -101,14 +104,32 @@ async fn both(
     Ok(())
 }
 
-async fn pump(recv: &mut impl RecvStream, send: &mut impl SendStream, count: &mut u64) -> Result<(), Broken> {
+/// 从 `recv` 搬到 `send`。给了 `watch` 时，目标的 TLS 1.3 ServerHello 写完就告诉 `send` 可以不再加密。
+async fn pump(
+    recv: &mut impl RecvStream,
+    send: &mut impl SendStream,
+    count: &mut u64,
+    mut watch: Option<ServerHelloWatch>,
+) -> Result<(), Broken> {
     let mut buf = vec![0; buffer_len()];
     loop {
         let len = recv.read(&mut buf).await.map_err(Broken::Io)?;
         if len == 0 {
             return send.shutdown().await.map_err(Broken::Io);
         }
-        send.write_all(&buf[..len]).await.map_err(Broken::Io)?;
+        match watch.as_mut().map(|watch| watch.feed(&buf[..len])) {
+            None | Some(ServerHelloVerdict::Undecided) => send.write_all(&buf[..len]).await.map_err(Broken::Io)?,
+            Some(ServerHelloVerdict::Sealed) => {
+                watch = None;
+                send.write_all(&buf[..len]).await.map_err(Broken::Io)?;
+            }
+            Some(ServerHelloVerdict::PassthroughAfter(at)) => {
+                watch = None;
+                send.write_all(&buf[..at]).await.map_err(Broken::Io)?;
+                send.end_header(Payload::Passthrough);
+                send.write_all(&buf[at..len]).await.map_err(Broken::Io)?;
+            }
+        }
         // usize 不会比 u64 宽，这里不会截断。
         *count += len as u64;
     }

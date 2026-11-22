@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use i3t_conn::contract::{DatagramSender, Datagrams};
-use i3t_conn::{Acceptor, Incoming, Payload, RecvStream, SendStream, StreamCode};
+use i3t_conn::{Acceptor, Incoming, RecvStream, SendStream, StreamCode};
 use i3t_proto::NodeId;
 use i3t_proto::flow::{Open, OpenDatagrams, Opening, Reason, Recipient, Reply, Status};
 use tokio::io::AsyncWriteExt;
@@ -62,7 +62,7 @@ impl<S: SendStream, R: RecvStream> Arrival<S, R> {
     /// 从对端开过来的流上读 OPEN，最多等 `deadline`。出错时流已经被重置，原因码是 [`Reason::ProtocolError`]。
     pub(crate) async fn read(incoming: Incoming<S, R>, deadline: Duration) -> Result<Self, FlowError> {
         let Incoming { peer, mut send, mut recv } = incoming;
-        let outcome = time::timeout(deadline, header::read(&mut recv, Opening::decode)).await;
+        let outcome = time::timeout(deadline, header::read_open(&mut recv)).await;
         match outcome.unwrap_or(Err(FlowError::Deadline(deadline))) {
             Ok(Opening::Stream(open)) => Ok(Self::Stream(Request { peer, open, send, recv, received: Instant::now() })),
             Ok(Opening::Datagrams(open)) => Ok(Self::Datagrams(DatagramArrival { peer, open, send, recv })),
@@ -120,6 +120,9 @@ impl<S: SendStream, R: RecvStream> Request<S, R> {
     ///
     /// 这一端往发起方发数据的优先级从这里起按 OPEN 里的服务等级来。
     ///
+    /// 发起方选了不再加密（它的首批数据是 TLS 1.3 的 ClientHello）时，这个方向不在这里跟着：目标会怎么回还不知道。
+    /// 搬运时看到目标回了 TLS 1.3 的 ServerHello 才跟着（[`i3t_conn::ServerHelloWatch`]）。
+    ///
     /// # Errors
     ///
     /// REPLY 没有写出去（发起方已经放弃了这条流，或者连接断了）。
@@ -129,8 +132,6 @@ impl<S: SendStream, R: RecvStream> Request<S, R> {
         let mut bytes = Vec::with_capacity(Reply::MAX_LEN);
         Reply::ok().encode(&mut bytes);
         self.send.write_all(&bytes).await.map_err(FlowError::Write)?;
-        // 发起方选了不再加密（它的首批数据是 TLS）时，这个方向也跟着。
-        self.send.end_header(Payload::Passthrough);
         let (send, recv) = (self.send, self.recv);
         Ok(Flow::new(Parts { send, recv, role: TcpRole::Target, class, started: self.received, reply_pending: false }))
     }

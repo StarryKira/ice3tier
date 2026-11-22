@@ -27,6 +27,10 @@
 //! （[`SendStream::take_raw`]、[`RecvStream::wait_raw`]）直接在两条 TCP 之间搬（[`crate::engine`]，Linux 上是 splice），
 //! 不再经过流的接口。结局的传法和上表一样：EOF 对 FIN，出错对 RST；计量和配额照样在每一段上记。
 //!
+//! 发起方的方向在 OPEN 之后就不再加密（它的首批数据是 TLS 1.3 的 ClientHello）。出口往回的方向要等看到目标回了 TLS 1.3 的
+//! ServerHello（[`ServerHelloWatch`]）：ServerHello 照常加密地送回去，之后才跟着不再加密；目标用的是 TLS 1.2（证书会明文回来）、
+//! 或者根本不是 TLS 时一直加密。所以入口一侧往客户端搬的方向每一段之前都问一下切换了没有。
+//!
 //! 流往对端节点发数据的优先级跟着服务等级（[`priority_of`]）：同一条连接上，interactive 的流先于 bulk 的流发出。
 //! `auto` 的流开始时按 interactive 对待，这一端在它上面发出的数据累计超过 [`AUTO_DEMOTE_AFTER`] 之后降到 bulk 的优先级。
 //! 优先级只管本端发出去的方向，所以两端各数各的：下载时降级的是出口那一端，上传时是入口这一端。
@@ -40,7 +44,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use i3t_conn::contract::{Priority, wait_revoked};
-use i3t_conn::{RawRead, RawWrite, RecvStream, SendStream, StreamAborted, StreamCode};
+use i3t_conn::{Payload, RawRead, RawWrite, RecvStream, SendStream, ServerHelloVerdict, ServerHelloWatch, StreamAborted, StreamCode};
 use i3t_proto::flow::{Class, Reason, Reply};
 use socket2::{SockRef, TcpKeepalive};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -327,8 +331,12 @@ pub(crate) async fn run<S: SendStream, R: RecvStream>(
             match framing {
                 Some(framing) => tcp_to_flow_framed(tcp_read, &mut send, &mut from_tcp, progress, framing).await,
                 None => match send.take_raw() {
-                    Some(raw) => tcp_to_raw(tcp_read, raw, &lane, &mut from_tcp, progress).await,
-                    None => tcp_to_flow(tcp_read, &mut send, &mut from_tcp, progress).await,
+                    Some(raw) => tcp_to_raw(tcp_read, raw, Bytes::new(), &lane, &mut from_tcp, progress).await,
+                    None => {
+                        // 出口一侧：看目标回的是不是 TLS 1.3，是的话 ServerHello 之后跟着发起方不再加密。
+                        let watch = (role == TcpRole::Target).then(ServerHelloWatch::new);
+                        tcp_to_flow(tcp_read, &mut send, watch, &lane, &mut from_tcp, progress).await
+                    }
                 },
             }
         };
@@ -439,9 +447,15 @@ struct Progress<'m, M> {
     meter: &'m M,
 }
 
+/// TCP 读到的写进流。
+///
+/// 给了 `watch`（出口一侧）时，目标回的 TLS 1.3 ServerHello 一写完就告诉流这个方向可以不再加密（[`SendStream::end_header`]）；
+/// 流交得出原始的 socket 时，剩下的交给 [`tcp_to_raw`]。流不在 ice3proxy 上、发起方没选不再加密时照样写进流。
 async fn tcp_to_flow<S: SendStream, M: Meter>(
     mut tcp: ReadHalf<'_>,
     send: &mut S,
+    mut watch: Option<ServerHelloWatch>,
+    lane: &OnceLock<Arc<TcpStream>>,
     traffic: &mut Traffic,
     progress: Progress<'_, M>,
 ) -> Result<(), Abort> {
@@ -454,15 +468,44 @@ async fn tcp_to_flow<S: SendStream, M: Meter>(
             return send.shutdown().await.map_err(Abort::Flow);
         }
         traffic.arrived(started);
-        meter.pass(Direction::FromTcp, len).await.map_err(Abort::Cancelled)?;
-        send.write_all(&buf[..len]).await.map_err(Abort::Flow)?;
-        traffic.delivered(len);
+        let switch_at = match watch.as_mut().map(|watch| watch.feed(&buf[..len])) {
+            None | Some(ServerHelloVerdict::Undecided) => None,
+            Some(ServerHelloVerdict::Sealed) => {
+                watch = None;
+                None
+            }
+            Some(ServerHelloVerdict::PassthroughAfter(at)) => {
+                watch = None;
+                Some(at)
+            }
+        };
+        let sealed = switch_at.unwrap_or(len);
+        deliver(send, meter, traffic, &buf[..sealed]).await?;
+        if switch_at.is_some() {
+            send.end_header(Payload::Passthrough);
+            if let Some(raw) = send.take_raw() {
+                let rest = Bytes::copy_from_slice(&buf[sealed..len]);
+                return tcp_to_raw(tcp, raw, rest, lane, traffic, Progress { started, class, meter }).await;
+            }
+            deliver(send, meter, traffic, &buf[sealed..len]).await?;
+        }
         if demotable && traffic.bytes > AUTO_DEMOTE_AFTER {
             // 这条流原来是在传大块的数据：往后让交互的流先走。
             send.set_priority(priority_of(Class::Bulk));
             demotable = false;
         }
     }
+}
+
+/// 把从 TCP 读到的一段写进流：先过关卡，写完再记数。
+async fn deliver<S: SendStream, M: Meter>(send: &mut S, meter: &M, traffic: &mut Traffic, bytes: &[u8]) -> Result<(), Abort> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    meter.pass(Direction::FromTcp, bytes.len()).await.map_err(Abort::Cancelled)?;
+    send.write_all(bytes).await.map_err(Abort::Flow)?;
+    traffic.delivered(bytes.len());
+    Ok(())
 }
 
 /// 只把 `framing` 划出来的那一段从 TCP 搬进流。这一段完整了就返回，不读 TCP 剩下的、也不结束流的发送方向（[`run`] 在最后结束它）。
@@ -515,11 +558,12 @@ async fn flow_to_tcp<R: RecvStream, M: Meter>(
             Err(error) => return Err(Abort::BadReply(error)),
         }
     }
-    if let Some(raw) = recv.wait_raw().await {
-        return raw_to_tcp(raw, tcp, lane, traffic, progress).await;
-    }
     let mut buf = vec![0; buffer_len()];
     loop {
+        // 对端可能先加密地送一段、之后才切换（出口要先把目标的 ServerHello 加密地送回来）：每一段之前都问一下。
+        if let Some(raw) = recv.wait_raw().await {
+            return raw_to_tcp(raw, tcp, lane, traffic, progress).await;
+        }
         let len = recv.read(&mut buf).await.map_err(Abort::Flow)?;
         if len == 0 {
             // 不用 `tcp.shutdown()`：TCP 设着关闭时发 RST，macOS 上要赶在发 FIN 之前改回正常关闭（见 `i3t_underlay::tcp_reset`）。
@@ -565,10 +609,11 @@ impl<M: Meter> Gate for MeterGate<'_, M> {
     }
 }
 
-/// TCP 读到的，直接写进不再加密的 ice3proxy。
+/// TCP 读到的，直接写进不再加密的 ice3proxy。`rest` 是已经从 TCP 读出来、还没写出去的用户字节，最先写。
 async fn tcp_to_raw<M: Meter>(
     tcp: ReadHalf<'_>,
     raw: RawWrite,
+    rest: Bytes,
     lane: &OnceLock<Arc<TcpStream>>,
     traffic: &mut Traffic,
     progress: Progress<'_, M>,
@@ -581,7 +626,7 @@ async fn tcp_to_raw<M: Meter>(
     let mut moved = 0;
     let mut gate =
         MeterGate { meter, direction: Direction::FromTcp, started, first_byte: &mut traffic.first_byte, counter: Counter::Write(&raw) };
-    let pumped = ENGINE.pump(tcp.as_ref(), raw.socket(), Bytes::new(), &mut gate, &mut moved).await;
+    let pumped = ENGINE.pump(tcp.as_ref(), raw.socket(), rest, &mut gate, &mut moved).await;
     traffic.bytes += moved;
     pumped.map_err(|error| match error {
         PumpError::Read(error) => Abort::Tcp(error),

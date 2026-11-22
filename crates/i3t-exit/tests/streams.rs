@@ -338,10 +338,10 @@ i3t_lane::on_both_transports! {
         world.gw.system.redirect(&public(443), target.addr());
         let mut client = socks5(world.socks().await, None, PUBLIC_IP, 443).await.connected();
         // 首批字节是一条 ClientHello 记录，让 ice3proxy 测试走 passthrough。
-        let hello = *b"\x16\x03\x01\x00\x04\x01\x00\x00\x00";
+        let hello = i3t_flow::testing::client_hello(b"");
         client.write_all(&hello).await.unwrap();
         let mut server = target.accept().await;
-        let mut received = [0; 9];
+        let mut received = vec![0; hello.len()];
         timeout(PATIENCE, server.read_exact(&mut received)).await.unwrap().unwrap();
         assert_eq!(received, hello);
         server.write_all(b"reply").await.unwrap();
