@@ -84,7 +84,7 @@ pub(crate) struct Collector {
     acc: BTreeMap<Key, Acc>,
     /// 过完了、还没写下的段：每段的开始和它的点。写成功了才清掉；写不进去（数据库暂时出错）就留着下次再写。
     unwritten: BTreeMap<Timestamp, Vec<StatPoint>>,
-    /// 上次没写成功：这个时刻之前不再试，免得数据库出错时每次叫都试一遍、报一遍错。
+    /// 上次没写成功：这个时刻之前不再试，免得数据库出错时每次叫都试一遍、报一遍错。过完了的段都写下了（或者丢了）时是 `None`。
     write_after: Option<Instant>,
     counters: BTreeMap<(NodeId, Series), Counter>,
     /// 每个节点最近一次报的挂靠的 relay。数 relay 上挂着几个在线节点要用。
@@ -158,6 +158,9 @@ impl Collector {
         let expired = std::mem::replace(&mut self.unwritten, kept);
         if let Some(first) = expired.keys().next() {
             tracing::warn!(from = first, segments = expired.len(), "时间序列有几段一直没能写下，过了保留期，不要了");
+        }
+        if self.unwritten.is_empty() {
+            self.write_after = None;
         }
     }
 }
@@ -260,9 +263,10 @@ impl Inner {
             self.stats.write_after = None;
         }
         let boundary = now + Duration::from_secs(bucket + span - wall);
-        // 还有没写完的（数据库很久没写进去，攒了好几个小时）：马上再来写下一个小时，这中间锁让出去。
-        let more = (!self.stats.unwritten.is_empty() && self.stats.write_after.is_none()).then_some(now);
-        Ok([self.stats.next_sample, self.stats.write_after, more].into_iter().flatten().fold(boundary, Instant::min))
+        // 还有没写下的段时：上次没写成功的话到点再试；不然是攒了好几个小时（数据库很久没写进去），马上再来写下一个小时，
+        // 这中间锁让出去。都写下了（或者过了保留期丢了）就不用为它回来。
+        let write = (!self.stats.unwritten.is_empty()).then(|| self.stats.write_after.unwrap_or(now));
+        Ok([self.stats.next_sample, write].into_iter().flatten().fold(boundary, Instant::min))
     }
 
     /// 数一次在线的节点和每个 relay 上挂着的在线节点。
@@ -292,7 +296,7 @@ impl Inner {
         Ok(())
     }
 
-    /// 写下过完了的段里最早的那个小时的；这个小时过完了的话，顺带汇总它、清掉过了保留期的点。
+    /// 写下过完了的段里最早的那个小时的；这个小时过完了的话，顺带汇总它。过完了的小时都写下了，再清掉过了保留期的点。
     /// 都在一个事务里：提交了才从内存里清掉，没提交就原样留着下次再写。一次只写一个小时，
     /// 数据库很久没写进去、攒了很多段时，不在一个事务里拿着锁写上十几秒。
     fn write_oldest_hour(&mut self) -> Result<(), Error> {
@@ -300,8 +304,12 @@ impl Inner {
         let hour = u64::from(COARSE_STEP);
         let this_hour = oldest - oldest % hour;
         let next_hour = this_hour + hour;
-        let hour_over = next_hour <= now_bucket;
+        let current_hour = now_bucket - now_bucket % hour;
+        let hour_over = next_hour <= current_hour;
         let unwritten = &self.stats.unwritten;
+        // 后面还有过完了的小时没写下（攒了一天左右，一次写一个小时）的话先不清：写下一个小时时还要再汇总一次这个小时，
+        // 它的 5 分钟的点清掉了一部分的话，就拿剩下的那些算错了，换掉这次算对了的。也省得每写一个小时就把整张表扫两遍。
+        let prune = hour_over && unwritten.range(next_hour..current_hour).next().is_none();
         let written = self.store.atomically(|store| {
             // 这几段里删掉了的网络，它的点不写：存储里没有它了（外键也不让写）。
             let networks: BTreeSet<NetworkId> = store.networks()?.into_iter().map(|network| network.id).collect();
@@ -313,16 +321,19 @@ impl Inner {
                 .collect();
             store.insert_stats(FINE_STEP, &points)?;
             if hour_over {
-                // 这个小时，和再上一个（controller 正好在整点前后重启过的话那一个还没有汇总）。重复汇总只是换成同样的值。
+                // 这个小时，和再上一个（controller 正好在整点前后重启过的话那一个还没有汇总）。重复汇总只是换成同样的值：
+                // 清理要等到过完了的小时都写下，那之前它们的 5 分钟的点都还在。
                 store.roll_up_stats(FINE_STEP, COARSE_STEP, this_hour)?;
                 store.roll_up_stats(FINE_STEP, COARSE_STEP, this_hour.saturating_sub(hour))?;
+            }
+            if prune {
                 store.prune_stats(FINE_STEP, now_bucket.saturating_sub(FINE_KEEP))?;
                 store.prune_stats(COARSE_STEP, now_bucket.saturating_sub(COARSE_KEEP))?;
             }
             Ok::<_, Error>(points.len())
         })?;
         let segments = unwritten.range(..next_hour).count();
-        tracing::debug!(hour = this_hour, segments, points = written, hour_over, "写下了时间序列过完了的段");
+        tracing::debug!(hour = this_hour, segments, points = written, hour_over, prune, "写下了时间序列过完了的段");
         self.stats.unwritten = self.stats.unwritten.split_off(&next_hour);
         Ok(())
     }
@@ -331,6 +342,7 @@ impl Inner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::controller::testing::Lab;
 
     const NET: NetworkId = NetworkId(1);
 
@@ -357,7 +369,7 @@ mod tests {
 
     #[test]
     fn points_of_a_network_deleted_during_the_bucket_are_dropped_and_the_rest_written() {
-        let lab = crate::controller::testing::Lab::new();
+        let lab = Lab::new();
         let kept = lab.network("home");
         let gone = lab.network("lab");
         let now = Instant::now();
@@ -376,7 +388,7 @@ mod tests {
 
     #[test]
     fn a_segment_the_store_would_not_take_is_written_once_it_takes_writes_again() {
-        let mut lab = crate::controller::testing::Lab::new();
+        let mut lab = Lab::new();
         let network = lab.network("home");
         let _a = lab.join(network.id, &[]);
         let start = Instant::now();
@@ -385,7 +397,7 @@ mod tests {
         let hour_start = wall - wall % u64::from(COARSE_STEP);
         let ended = hour_start + u64::from(COARSE_STEP - FINE_STEP);
         let next = hour_start + u64::from(COARSE_STEP);
-        let tick = |lab: &crate::controller::testing::Lab, after: Duration, wall| lab.controller.lock().stats_tick(start + after, wall);
+        let tick = |lab: &Lab, after: Duration, wall| lab.controller.lock().stats_tick(start + after, wall);
         tick(&lab, Duration::ZERO, ended).unwrap();
         // 这一段数过了；再来一个节点，下一段数到的是两个。
         let _b = lab.join(network.id, &[]);
@@ -406,7 +418,7 @@ mod tests {
 
     #[test]
     fn segments_left_unwritten_past_the_fine_retention_are_let_go() {
-        let lab = crate::controller::testing::Lab::new();
+        let lab = Lab::new();
         lab.network("home");
         let start = Instant::now();
         let mut inner = lab.controller.lock();
@@ -423,7 +435,7 @@ mod tests {
     #[test]
     fn a_segment_closed_more_than_a_day_late_still_counts_towards_its_hour() {
         // 主机睡了一天多（或者时钟往前跳了）：刚过完的那一段已经过了 5 分钟的点的保留期，它的小时还是要汇总。
-        let lab = crate::controller::testing::Lab::new();
+        let lab = Lab::new();
         let network = lab.network("home");
         let start = Instant::now();
         let mut inner = lab.controller.lock();
@@ -438,7 +450,7 @@ mod tests {
 
     #[test]
     fn a_backlog_is_written_an_hour_at_a_time_coming_straight_back_for_the_next() {
-        let lab = crate::controller::testing::Lab::new();
+        let lab = Lab::new();
         let network = lab.network("home");
         let start = Instant::now();
         let mut inner = lab.controller.lock();
@@ -463,6 +475,141 @@ mod tests {
         assert!(inner.stats.unwritten.is_empty());
         assert_eq!(online(&inner, FINE_STEP, h1), [(h1, 0.0)]);
         assert!(online(&inner, COARSE_STEP, h1).is_empty(), "h1 还没过完，不汇总");
+    }
+
+    #[test]
+    fn a_failed_write_is_not_tried_again_before_the_retry_is_due() {
+        let lab = Lab::new();
+        lab.network("home");
+        let start = Instant::now();
+        let mut inner = lab.controller.lock();
+        let wall = inner.clock.now();
+        let fine = u64::from(FINE_STEP);
+        let next = wall - wall % fine + fine;
+        let secs = Duration::from_secs;
+        inner.stats_tick(start, next - 30).unwrap();
+        inner.store.set_read_only(true);
+        assert!(inner.stats_tick(start + secs(30), next).is_err());
+        assert_eq!(
+            inner.stats_tick(start + secs(70), next + 40).unwrap(),
+            start + secs(30) + WRITE_RETRY,
+            "隔了不到一分钟：数照样数，不再试着写、也不报错，到点再来"
+        );
+        assert_eq!(inner.stats.unwritten.keys().copied().collect::<Vec<_>>(), [next - fine]);
+        assert!(inner.stats_tick(start + secs(30) + WRITE_RETRY, next + 60).is_err(), "到点了再试");
+    }
+
+    #[test]
+    fn letting_go_of_every_unwritten_segment_leaves_nothing_to_come_back_for() {
+        // 主机睡了一天多，醒来时数据库正好写不进去：刚过完的那一段过了保留期，丢了之后没有要写的了，不能一直说马上回来。
+        let lab = Lab::new();
+        lab.network("home");
+        let start = Instant::now();
+        let mut inner = lab.controller.lock();
+        let wall = inner.clock.now();
+        let fine = u64::from(FINE_STEP);
+        let first = wall - wall % fine;
+        inner.stats_tick(start, first).unwrap();
+        inner.store.set_read_only(true);
+        let late = first + fine + FINE_KEEP;
+        assert!(inner.stats_tick(start, late).is_err());
+        assert!(inner.stats.unwritten.is_empty());
+        let now = start + WRITE_RETRY;
+        assert!(inner.stats_tick(now, late + 60).unwrap() > now);
+    }
+
+    #[test]
+    fn a_day_long_backlog_written_an_hour_at_a_time_keeps_each_hour_s_roll_up() {
+        // 写不进去了一天左右，在不是整点的时候恢复：最早那个小时的前半个小时的点早就写下了，已经过了保留期。
+        // 写第二个小时时要再汇总一次第一个小时，那时它前半个小时的点还得在。
+        let lab = Lab::new();
+        let network = lab.network("home");
+        let start = Instant::now();
+        let mut inner = lab.controller.lock();
+        let wall = inner.clock.now();
+        let fine = u64::from(FINE_STEP);
+        let h0 = wall - wall % u64::from(COARSE_STEP);
+        let half = h0 + 6 * fine;
+        // 前半个小时在线的有 10 个，故障之前写下了；后半个小时一个都没有，没写进去。
+        let before: Vec<StatPoint> = (0..6)
+            .map(|index| StatPoint { network: network.id, series: Series::Online, node: None, at: h0 + index * fine, value: 10.0 })
+            .collect();
+        inner.store.insert_stats(FINE_STEP, &before).unwrap();
+        inner.stats_tick(start, half).unwrap();
+        inner.store.set_read_only(true);
+        let back = half + FINE_KEEP;
+        let mut now = start;
+        for at in (half + fine..back).step_by(usize::try_from(fine).unwrap()) {
+            now += Duration::from_secs(fine);
+            assert!(inner.stats_tick(now, at).is_err());
+        }
+        inner.store.set_read_only(false);
+        now += Duration::from_secs(fine);
+
+        let online = |inner: &Inner, step, range| inner.store.stats(network.id, Series::Online, None, step, range).unwrap();
+        assert_eq!(inner.stats_tick(now, back).unwrap(), now, "写了 h0 的，马上再来");
+        assert_eq!(online(&inner, COARSE_STEP, (h0, h0)), [(h0, 5.0)]);
+        assert_eq!(inner.stats_tick(now, back).unwrap(), now, "写了 h1 的，马上再来");
+        assert_eq!(online(&inner, COARSE_STEP, (h0, h0)), [(h0, 5.0)], "写 h1 时又汇总了一次 h0，前半个小时的点还在");
+        assert_eq!(online(&inner, FINE_STEP, (h0, half - fine)).len(), 6, "过完了的小时还没都写下，先不清");
+        for _ in 0..30 {
+            if inner.stats.unwritten.is_empty() {
+                break;
+            }
+            inner.stats_tick(now, back).unwrap();
+        }
+        assert!(inner.stats.unwritten.is_empty());
+        assert_eq!(online(&inner, COARSE_STEP, (h0, h0)), [(h0, 5.0)]);
+        assert!(online(&inner, FINE_STEP, (h0, half - fine)).is_empty(), "都写下了，过了保留期的清掉");
+        assert_eq!(online(&inner, FINE_STEP, (half, back - fine)).len(), 288, "没过保留期的一段不少");
+    }
+
+    #[test]
+    fn a_network_deleted_while_the_store_would_not_take_writes_does_not_hold_up_the_rest() {
+        let lab = Lab::new();
+        let kept = lab.network("home");
+        let gone = lab.network("lab");
+        let start = Instant::now();
+        let fine = u64::from(FINE_STEP);
+        let wall = lab.controller.lock().clock.now();
+        let h1 = wall - wall % u64::from(COARSE_STEP) + u64::from(COARSE_STEP);
+        let tick = |after: Duration, wall| lab.controller.lock().stats_tick(start + after, wall);
+        // 两个网络都数到了：上一个小时的最后一段和这个小时的第一段都没写进去。
+        tick(Duration::ZERO, h1 - fine).unwrap();
+        lab.controller.lock().store.set_read_only(true);
+        assert!(tick(MINUTE, h1).is_err());
+        assert!(tick(2 * MINUTE, h1 + fine).is_err());
+        lab.controller.lock().store.set_read_only(false);
+        // 等着再试的这一会儿里删了一个网络。
+        lab.controller.delete_network(gone.id).unwrap();
+
+        assert_eq!(tick(3 * MINUTE, h1 + fine).unwrap(), start + 3 * MINUTE, "写了上一个小时的，马上再来");
+        tick(3 * MINUTE, h1 + fine).unwrap();
+        let inner = lab.controller.lock();
+        assert!(inner.stats.unwritten.is_empty());
+        let online = |step, range| inner.store.stats(kept.id, Series::Online, None, step, range).unwrap();
+        assert_eq!(online(FINE_STEP, (h1 - fine, h1)), [(h1 - fine, 0.0), (h1, 0.0)]);
+        assert_eq!(online(COARSE_STEP, (h1 - u64::from(COARSE_STEP), h1)), [(h1 - u64::from(COARSE_STEP), 0.0)]);
+        assert_eq!(inner.store.stats_count().unwrap(), 3, "删了的网络的点没写");
+    }
+
+    #[test]
+    fn the_segment_moves_on_when_other_background_work_fails_first() {
+        // 数据库写不进去时，清理过期令牌这些排在前面的后台工作先出错。时间序列照样要切段，不然这期间上报的数都算进上一段。
+        let lab = Lab::new();
+        lab.network("home");
+        let start = Instant::now();
+        let mut inner = lab.controller.lock();
+        let wall = inner.clock.now();
+        let fine = u64::from(FINE_STEP);
+        let first = wall - wall % fine;
+        inner.tick(start, first).unwrap();
+        inner.store.set_read_only(true);
+        assert!(inner.tick(start + MINUTE, first + fine).is_err());
+        assert_eq!(inner.stats.bucket, Some(first + fine));
+        assert_eq!(inner.stats.unwritten.keys().copied().collect::<Vec<_>>(), [first]);
+        let second = Duration::from_secs(1);
+        assert!(inner.tick(start + MINUTE + second, first + fine + 1).is_ok(), "清理和写时间序列都还没到再试的时候，一秒之后不再报错");
     }
 
     #[test]

@@ -51,7 +51,7 @@ use i3t_model::update::{UpdateStatus, Version};
 use i3t_proto::{NodeId, PublicKey};
 use tokio::sync::{Notify, mpsc};
 
-use crate::error::{Entity, Error};
+use crate::error::{Entity, Error, error_chain};
 use crate::gate::Throttle;
 use crate::netmap::NetworkView;
 use crate::relay_reach::{self, ReachIndex};
@@ -542,6 +542,21 @@ impl Inner {
     }
 
     fn tick(&mut self, now: Instant, wall: Timestamp) -> Result<Option<Instant>, Error> {
+        let work = self.tick_work(now, wall);
+        // 时间序列不跟着别的工作出错停下：它要按时切段，不然这期间上报的数都算进上一段。它写不进存储时自己隔一会儿再试。
+        let stats = self.stats_tick(now, wall);
+        match (work, stats) {
+            (Ok(next), Ok(stats)) => Ok(next.into_iter().chain([stats]).min()),
+            (Err(err), Ok(_)) | (Ok(_), Err(err)) => Err(err),
+            (Err(err), Err(stats)) => {
+                tracing::error!("时间序列出错，稍后再试：{}", error_chain(&stats));
+                Err(err)
+            }
+        }
+    }
+
+    /// 时间序列以外的后台工作。返回下一次要做的时刻。
+    fn tick_work(&mut self, now: Instant, wall: Timestamp) -> Result<Option<Instant>, Error> {
         self.give_up_on_slow_acks(now);
         let no_udp = self.no_udp_tick(now)?;
         let next = self.flush_due(now)?;
@@ -556,8 +571,7 @@ impl Inner {
         // 还有节点欠着确认时，隔一会儿要回来看它们是不是等得太久了。
         let waiting = self.sync.values().any(NodeSync::is_waiting).then(|| now + self.timing.ack_timeout.min(SWEEP_INTERVAL));
         let tests = self.tests_tick(now)?;
-        let stats = self.stats_tick(now, wall)?;
-        Ok([next, no_udp, waiting, self.updates.next_rollout, tests, Some(stats)].into_iter().flatten().min())
+        Ok([next, no_udp, waiting, self.updates.next_rollout, tests].into_iter().flatten().min())
     }
 }
 
