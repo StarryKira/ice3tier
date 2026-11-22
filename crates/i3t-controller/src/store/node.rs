@@ -16,6 +16,9 @@ use super::{DIGEST_LEN, Store, StoreError};
 /// 读节点时顺带取出它所在的分组（成员表里的分组编号，JSON 数组）。
 const SELECT: &str = "SELECT nodes.*, (SELECT json_group_array(group_id) FROM group_members WHERE node_id = nodes.id) AS groups FROM nodes";
 
+/// [`Store::exits_among`]：`?1` 是编号的 JSON 数组。从数组出发按主键找，问几个查几行。
+const EXITS_AMONG: &str = "SELECT nodes.id FROM json_each(?1) AS asked JOIN nodes ON nodes.id = asked.value WHERE nodes.network_id = ?2 AND nodes.exit IS NOT NULL";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeRecord {
     pub id: NodeId,
@@ -228,20 +231,19 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// `ids` 里哪些是 `network` 里启用了出口的节点。按编号一个个查，不读整个网络。
+    /// `ids` 里哪些是 `network` 里启用了出口的节点。一条语句按编号查，不读整个网络。
     ///
     /// # Errors
     ///
     /// 读数据库失败。
     pub fn exits_among(&self, network: NetworkId, ids: impl IntoIterator<Item = NodeId>) -> Result<BTreeSet<NodeId>, StoreError> {
-        let mut statement = self.conn.prepare_cached("SELECT 1 FROM nodes WHERE id = ?1 AND network_id = ?2 AND exit IS NOT NULL")?;
-        let mut exits = BTreeSet::new();
-        for id in ids {
-            if statement.exists(params![SqlNode(id), SqlNetwork(network)])? {
-                exits.insert(id);
-            }
+        let ids: Vec<u32> = ids.into_iter().map(NodeId::get).collect();
+        if ids.is_empty() {
+            return Ok(BTreeSet::new());
         }
-        Ok(exits)
+        let mut statement = self.conn.prepare_cached(EXITS_AMONG)?;
+        let rows = statement.query_map(params![Json(&ids), SqlNetwork(network)], |row| Ok(row.get::<_, SqlNode>(0)?.0))?;
+        Ok(rows.collect::<rusqlite::Result<BTreeSet<_>>>()?)
     }
 
     /// # Errors

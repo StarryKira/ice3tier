@@ -126,7 +126,7 @@ impl Usage {
         }
     }
 
-    /// 去掉一条观测。`observed` 和 `observers` 只在这里和 [`Usage::observed`] 里改，两边一起改。
+    /// 去掉一条观测。`observed` 和 `observers` 一起改，只在这里、[`Usage::observed`] 和 [`Usage::forget`] 里改。
     fn remove_observed(&mut self, exit: NodeId, by: NodeId) {
         self.observed.remove(&(exit, by));
         if let Some(mine) = self.observers.get_mut(&by) {
@@ -137,7 +137,11 @@ impl Usage {
         }
     }
 
-    /// `exit` 不再是出口了（停用了，或者节点撤回了声明）：别人看到的经它出去的都丢掉，再启用时从头记。
+    /// `exit` 不再是出口了（停用了，或者节点撤回了声明）：controller 这边留着的经它出去的观测都丢掉，
+    /// 不再占地方，已经离线、重启过的发起节点的旧数也不再留着。
+    ///
+    /// 这不等于再启用时从零算起：发起节点报的是它这次运行以来的累计，停用期间照报（只是不收），
+    /// 再启用之后，还在线、没重启过的发起节点下一次上报就带着停用之前的数回来。
     pub(crate) fn exit_disabled(&mut self, exit: NodeId) {
         let observers: Vec<NodeId> = self.observed.range(about(exit)).map(|(&(_, by), _)| by).collect();
         for by in observers {
@@ -159,8 +163,8 @@ impl Usage {
     pub(crate) fn forget(&mut self, node: NodeId) {
         self.exits.remove(&node);
         self.exit_disabled(node);
-        for exit in self.observers.get(&node).cloned().unwrap_or_default() {
-            self.remove_observed(exit, node);
+        for exit in self.observers.remove(&node).unwrap_or_default() {
+            self.observed.remove(&(exit, node));
         }
     }
 }
@@ -296,7 +300,8 @@ impl Inner {
 
     /// 记下一个节点上报里的用量和状态。
     ///
-    /// 出口的观测只看前 [`MAX_EXITS`] 项，只收经它自己网络里启用了出口的节点出去的：别的编号报上来也用不着留，留着只占地方。
+    /// 出口的观测只看前 [`MAX_EXITS`] 项，只收经它自己网络里启用了出口的别的节点出去的：别的编号报上来也用不着留，留着只占地方。
+    /// 节点不会经自己出去（代理不许把自己设成出口，netmap 里也没有它自己），报了也不收。
     /// 读存储失败、说不清哪些是出口时，这次的观测不记，别的照记。
     pub(super) fn usage_reported(&mut self, node: &NodeRecord, report: UsageReport) {
         let UsageReport { run, exit, exits, proxies, listeners, forwards } = report;
@@ -311,7 +316,8 @@ impl Inner {
             self.usage.exit_reported(node.id, run, *exit, now);
         }
         // 同一个出口报了几遍的，留最后那一遍。
-        let exits: BTreeMap<NodeId, ExitObservation> = exits.into_iter().take(MAX_EXITS).map(|seen| (seen.exit, seen)).collect();
+        let exits: BTreeMap<NodeId, ExitObservation> =
+            exits.into_iter().take(MAX_EXITS).filter(|seen| seen.exit != node.id).map(|seen| (seen.exit, seen)).collect();
         if exits.is_empty() {
             return;
         }

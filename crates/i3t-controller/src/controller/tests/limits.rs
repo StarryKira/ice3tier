@@ -117,6 +117,9 @@ fn only_observations_of_enabled_exits_in_the_reporters_own_network_are_kept_unti
     let exits = vec![seen(exit.id, 2), seen(unknown, 1), seen(plain.id, 1), seen(elsewhere.id, 1), seen(exit.id, 3)];
     laptop.send(&lab.controller, ToController::Report(Box::new(Report { exits, ..report(1) })));
     assert_eq!(lab.controller.lock().usage.observed_keys(), [(exit.id, laptop.id)], "没有编号、没启用出口、别的网络的都不收");
+    // 出口报经它自己出去的：节点不会这样用自己，不收。
+    exit.send(&lab.controller, ToController::Report(Box::new(Report { exits: vec![seen(exit.id, 9)], ..report(3) })));
+    assert_eq!(lab.controller.lock().usage.observed_keys(), [(exit.id, laptop.id)]);
 
     // 之后才启用的出口不带着之前没收的观测。
     lab.controller.enable_exit(network.id, plain.id, ExitRole::default()).unwrap();
@@ -133,16 +136,27 @@ fn only_observations_of_enabled_exits_in_the_reporters_own_network_are_kept_unti
         views.iter().flat_map(|view| view.observed.iter().map(|seen| (view.node.id, seen.by.id, seen.counts.flows))).collect();
     assert_eq!(observed, [(exit.id, laptop.id, 1)]);
 
-    // 停用出口：经它出去的观测跟着丢掉，再启用时从头记。
+    // 停用出口：controller 留着的经它出去的观测跟着丢掉。再启用之后是空的，
+    // 直到发起节点下一次上报（报的是它这次运行以来的累计，带着停用之前的数）。
     lab.controller.disable_exit(network.id, exit.id).unwrap();
     assert!(lab.controller.lock().usage.observed_keys().is_empty());
     lab.controller.enable_exit(network.id, exit.id, ExitRole::default()).unwrap();
-    assert!(lab.controller.exit(network.id, exit.id).unwrap().observed.is_empty(), "不带着停用之前的");
+    assert!(lab.controller.exit(network.id, exit.id).unwrap().observed.is_empty(), "停用时留着的已经丢掉");
 
     // 节点撤回了出口的声明，出口随之关闭，观测也一样丢掉。
     laptop.send(&lab.controller, ToController::Report(Box::new(Report { exits: vec![seen(exit.id, 5)], ..report(2) })));
     assert_eq!(lab.controller.lock().usage.observed_keys(), [(exit.id, laptop.id)]);
     exit.send(&lab.controller, ToController::Hello(hello(Declared::default())));
+    assert_eq!(lab.controller.node(network.id, exit.id).unwrap().node.exit, None);
+    assert!(lab.controller.lock().usage.observed_keys().is_empty());
+
+    // 断线之后带着撤回了的声明重新连上来，也一样。
+    exit.send(&lab.controller, ToController::Hello(hello(CAN_DO_ALL)));
+    lab.controller.enable_exit(network.id, exit.id, ExitRole::default()).unwrap();
+    laptop.send(&lab.controller, ToController::Report(Box::new(Report { exits: vec![seen(exit.id, 6)], ..report(2) })));
+    assert_eq!(lab.controller.lock().usage.observed_keys(), [(exit.id, laptop.id)]);
+    lab.controller.disconnect(exit.session);
+    lab.connect(exit.key, Declared::default()).unwrap();
     assert_eq!(lab.controller.node(network.id, exit.id).unwrap().node.exit, None);
     assert!(lab.controller.lock().usage.observed_keys().is_empty());
 }
