@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use i3t_model::admin::stats::{Series, SeriesQuery, SeriesView};
 use i3t_model::admin::{NetworkId, Timestamp};
 use i3t_model::control::Report;
+use i3t_model::netmap::Attachment;
 use i3t_proto::NodeId;
 
 use super::{Controller, Inner};
@@ -87,7 +88,7 @@ pub(crate) struct Collector {
     /// 上次没写成功：这个时刻之前不再试，免得数据库出错时每次叫都试一遍、报一遍错。过完了的段都写下了（或者丢了）时是 `None`。
     write_after: Option<Instant>,
     counters: BTreeMap<(NodeId, Series), Counter>,
-    /// 每个节点最近一次报的挂靠的 relay。数 relay 上挂着几个在线节点要用。
+    /// 每个节点最近一次报的挂靠的 relay，和存下来的是同一份（核对过、去掉了重复的）。数 relay 上挂着几个在线节点要用。
     attached: BTreeMap<NodeId, (NetworkId, Vec<NodeId>)>,
     next_sample: Option<Instant>,
 }
@@ -219,7 +220,7 @@ impl Controller {
 }
 
 impl Inner {
-    /// 一个节点的上报里给时间序列用的数。
+    /// 一个节点的上报里给时间序列用的数，挂靠的 relay 除外（见 [`Self::stats_attached`]）。
     pub(super) fn stats_reported(&mut self, node: &NodeRecord, report: &Report) {
         let now = Instant::now();
         let (network, id) = (node.network, Some(node.id));
@@ -231,7 +232,11 @@ impl Inner {
             stats.counter((network, Series::ExitTx, id), report.run, exit.bytes_to_target, now);
             stats.counter((network, Series::ExitRx, id), report.run, exit.bytes_from_target, now);
         }
-        stats.attached.insert(node.id, (network, report.attached.iter().map(|attachment| attachment.relay).collect()));
+    }
+
+    /// 一个节点最近一次报的挂靠的 relay。`attached` 是核对过、去掉了重复的那一份，和存下来的是同一份。
+    pub(super) fn stats_attached(&mut self, node: &NodeRecord, attached: &[Attachment]) {
+        self.stats.attached.insert(node.id, (node.network, attached.iter().map(|attachment| attachment.relay).collect()));
     }
 
     /// 节点删掉了：它的计数不用再记着。已经写下的点留到过了保留期。

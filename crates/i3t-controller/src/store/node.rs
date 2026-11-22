@@ -222,6 +222,17 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// 一个网络里启用了 relay 的节点。
+    ///
+    /// # Errors
+    ///
+    /// 读数据库失败。
+    pub fn relays_in(&self, network: NetworkId) -> Result<BTreeSet<NodeId>, StoreError> {
+        let mut statement = self.conn.prepare("SELECT id FROM nodes WHERE network_id = ?1 AND relay IS NOT NULL")?;
+        let rows = statement.query_map(params![SqlNetwork(network)], |row| Ok(row.get::<_, SqlNode>(0)?.0))?;
+        Ok(rows.collect::<rusqlite::Result<BTreeSet<_>>>()?)
+    }
+
     /// 全部启用了 relay 的节点：所在的网络和节点编号。
     ///
     /// # Errors
@@ -546,6 +557,24 @@ mod tests {
         assert_eq!((node.hostname.as_str(), node.self_update, node.update_failure), ("", None, None));
         assert!(node.auto_update, "新节点的自动更新是开着的");
         assert_eq!(node.local_addresses, None, "没报过网卡地址和报了一个空表不一样");
+    }
+
+    #[test]
+    fn the_relays_of_a_network_are_its_nodes_with_relay_enabled() {
+        let store = Store::open_in_memory().unwrap();
+        let first = store.insert_network(&home()).unwrap();
+        let second = store.insert_network(&NewNetwork { name: "work".to_owned(), ..home() }).unwrap();
+        let enable = |id| {
+            let mut node = store.node(id).unwrap().unwrap();
+            node.relay = Some(RelaySettings::default());
+            store.update_node(&node).unwrap();
+            id
+        };
+        let relay = enable(store.insert_node(&new_node(first, 1)).unwrap());
+        store.insert_node(&new_node(first, 2)).unwrap();
+        let elsewhere = enable(store.insert_node(&new_node(second, 3)).unwrap());
+        assert_eq!(store.relays_in(first).unwrap(), BTreeSet::from([relay]), "没启用的、别的网络的都不算");
+        assert_eq!(store.relays_in(second).unwrap(), BTreeSet::from([elsewhere]));
     }
 
     #[test]
