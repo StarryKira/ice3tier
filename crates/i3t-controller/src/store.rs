@@ -134,6 +134,12 @@ impl Store {
         self.conn.pragma_update(None, "query_only", read_only).unwrap();
     }
 
+    /// 测试用：直接执行几条 SQL，比如装一个让某张表写不进去的触发器，模拟一串写里只有前面的写进去了。
+    #[cfg(test)]
+    pub(crate) fn execute_batch(&self, sql: &str) {
+        self.conn.execute_batch(sql).unwrap();
+    }
+
     /// 读一项全局设置（管理令牌的哈希之类）。
     ///
     /// # Errors
