@@ -338,18 +338,24 @@ i3t_lane::on_both_transports! {
         world.gw.system.redirect(&public(443), target.addr());
         let mut client = socks5(world.socks().await, None, PUBLIC_IP, 443).await.connected();
         // 首批字节是一条 ClientHello 记录，让 ice3proxy 测试走 passthrough。
-        let hello = *b"\x16\x03\x01\x00\x04\x01\x00\x00\x00";
+        let hello = i3t_flow::testing::client_hello(b"");
         client.write_all(&hello).await.unwrap();
         let mut server = target.accept().await;
-        let mut received = [0; 9];
+        let mut received = vec![0; hello.len()];
         timeout(PATIENCE, server.read_exact(&mut received)).await.unwrap().unwrap();
         assert_eq!(received, hello);
-        server.write_all(b"reply").await.unwrap();
-        let mut reply = [0; 5];
-        timeout(PATIENCE, client.read_exact(&mut reply)).await.unwrap().unwrap();
-        assert_eq!(&reply, b"reply");
-        if i3t_lane::testing::transport() == i3t_lane::testing::Transport::Lanes {
-            assert!(world.gw.lanes.status().total.spliced_bytes > 0, "出口应当走原始 TCP 搬运");
+        let lanes = i3t_lane::testing::transport() == i3t_lane::testing::Transport::Lanes;
+        let spliced = || world.gw.lanes.status().total.spliced_bytes;
+        let spliced_before = lanes.then(spliced);
+        // 目标回 TLS 1.3 的 ServerHello，出口往回的方向也跟着不再加密：吊销时两个方向都已经是原始 TCP。
+        let reply = [&i3t_flow::testing::server_hello()[..], b"reply"].concat();
+        server.write_all(&reply).await.unwrap();
+        let mut received = vec![0; reply.len()];
+        timeout(PATIENCE, client.read_exact(&mut received)).await.unwrap().unwrap();
+        assert_eq!(received, reply);
+        if let Some(before) = spliced_before {
+            // ServerHello 还是加密地送回去，它后面的字节走原始 TCP。
+            assert!(spliced() >= before + b"reply".len() as u64, "出口往回的方向应当在 ServerHello 之后走原始 TCP 搬运");
         }
         assert_eq!(world.gw.exit.stats().active, 1);
 

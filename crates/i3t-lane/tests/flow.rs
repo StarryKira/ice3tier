@@ -16,12 +16,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::{Hop, Pair, quick, wait_for};
-use i3t_conn::{RecvStream, SendStream};
+use i3t_conn::{RecvStream, SendStream, StreamAborted, StreamCode};
 use i3t_flow::engine::Splicer;
-use i3t_flow::{End, Handler, Request};
+use i3t_flow::testing::{client_hello, server_hello};
+use i3t_flow::{End, FlowError, Handler, Request};
 use i3t_lane::{Lanes, Payload};
 use i3t_proto::NodeId;
-use i3t_proto::flow::{Class, Open, Origin, Reason, Reply, Target};
+use i3t_proto::flow::{Class, Open, Origin, Reason, Reply, Status, Target};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
@@ -70,6 +71,23 @@ async fn echo_target() -> SocketAddr {
     tokio::spawn(async move {
         while let Ok((mut stream, _)) = listener.accept().await {
             tokio::spawn(async move {
+                let (mut read, mut write) = stream.split();
+                let _ = tokio::io::copy(&mut read, &mut write).await;
+                let _ = write.shutdown().await;
+            });
+        }
+    });
+    addr
+}
+
+/// 一个 TLS 1.3 目标的替身：先回一个 ServerHello（出口往回的方向在它之后才不再加密），然后把收到的每个字节原样送回去。
+async fn tls13_echo_target() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                stream.write_all(&server_hello()).await.unwrap();
                 let (mut read, mut write) = stream.split();
                 let _ = tokio::io::copy(&mut read, &mut write).await;
                 let _ = write.shutdown().await;
@@ -151,7 +169,7 @@ async fn the_flow_layer_runs_sealed_on_lanes_in_both_directions_of_initiative() 
 async fn the_flow_layer_passes_tls_through_and_splices_it() {
     let pair = Pair::new(quick()).await;
     pair.ready(1).await;
-    let target = echo_target().await;
+    let target = tls13_echo_target().await;
     let lanes = Arc::clone(&pair.exit.lanes);
     let exit = Arc::new(ToTarget::new(target));
     let exit_ends = Arc::clone(&exit.ends);
@@ -159,8 +177,9 @@ async fn the_flow_layer_passes_tls_through_and_splices_it() {
     let (mut client, client_side) = tcp_pair().await;
     let lanes = Arc::clone(&pair.entry.lanes);
     let peer = pair.exit.id;
-    let hello = [0x16, 0x03, 0x01, 0x00, 0x04, 0x01, 0, 0, 0];
-    let relay = tokio::spawn(async move { through_flow(&lanes, peer, client_side, &hello).await });
+    let hello = client_hello(b"");
+    let first = hello.clone();
+    let relay = tokio::spawn(async move { through_flow(&lanes, peer, client_side, &first).await });
     let body: Vec<u8> = (0..3_000_000u32).map(|i| u8::try_from(i % 239).unwrap()).collect();
     let (mut from_target, mut to_target) = client.split();
     // 一边发一边收，各自记下走到了哪里：macOS 上这里曾经一直不结束，等不到时要能看出卡在哪一段。
@@ -216,14 +235,14 @@ async fn the_flow_layer_passes_tls_through_and_splices_it() {
     if let Err(error) = end {
         panic!("回显收到 {} 字节之后读出错 {error:?}；出口的搬运的结局 {:?}", echoed.len(), exit_ends.lock().unwrap());
     }
-    assert!(echoed == [&hello[..], &body].concat(), "回显的字节不一样");
+    assert!(echoed == [&server_hello()[..], &hello, &body].concat(), "回显的字节不一样");
     assert!(timeout(PATIENCE, relay).await.expect("客户端读完之后入口的搬运应该结束").unwrap().is_clean());
     let entry = pair.entry.lanes.status();
     let exit = pair.exit.lanes.status();
     // 两头都把不再加密的方向交给了搬运引擎：每个方向的数据都过了 splice（非 Linux 上是用户态拷贝，同样经引擎）。
     assert!(entry.total.spliced_bytes >= 2 * 3_000_000, "{entry:?}");
     assert!(exit.total.spliced_bytes >= 2 * 3_000_000, "{exit:?}");
-    assert!(entry.total.sealed_bytes < 1024, "加密的只有开流时的头：{entry:?}");
+    assert!(entry.total.sealed_bytes < 1024, "加密的只有开流时的头、REPLY 和目标的 ServerHello：{entry:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -238,23 +257,25 @@ async fn peer_revocation_resets_both_ends_of_an_active_passthrough_relay() {
     let (mut client, client_side) = tcp_pair().await;
     let lanes = Arc::clone(&pair.entry.lanes);
     let peer = pair.exit.id;
-    let hello = [0x16, 0x03, 0x01, 0x00, 0x04, 0x01, 0, 0, 0];
-    let relay = tokio::spawn(async move { through_flow(&lanes, peer, client_side, &hello).await });
+    let hello = client_hello(b"");
+    let first = hello.clone();
+    let relay = tokio::spawn(async move { through_flow(&lanes, peer, client_side, &first).await });
     let (mut target, _) = timeout(PATIENCE, target.accept()).await.unwrap().unwrap();
 
     // 先正常搬一轮，让两边的搬运任务都已经拿到原始 socket。
     timeout(PATIENCE, async {
         client.write_all(b"request").await.unwrap();
-        let mut first = [0; 9];
+        let mut first = vec![0; hello.len()];
         target.read_exact(&mut first).await.unwrap();
         assert_eq!(first, hello);
         let mut body = [0; 7];
         target.read_exact(&mut body).await.unwrap();
         assert_eq!(&body, b"request");
-        target.write_all(b"reply").await.unwrap();
-        let mut answer = [0; 5];
+        // 目标先回 ServerHello：之后往回的方向才不再加密。
+        target.write_all(&[&server_hello()[..], b"reply"].concat()).await.unwrap();
+        let mut answer = vec![0; server_hello().len() + 5];
         client.read_exact(&mut answer).await.unwrap();
-        assert_eq!(&answer, b"reply");
+        assert_eq!(answer, [&server_hello()[..], b"reply"].concat());
     })
     .await
     .unwrap();
@@ -291,24 +312,88 @@ async fn an_upstream_reset_in_the_middle_of_an_answer_reaches_the_client_as_a_re
     assert!(!relay.await.unwrap().is_clean());
 }
 
+/// 出口：只数见过几个请求，然后拒绝。
+struct Watching(Arc<AtomicUsize>);
+
+impl Handler for Watching {
+    async fn handle<S: SendStream, R: RecvStream>(&self, request: Request<S, R>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        request.refuse(&Reply::new(Status::AccessDenied, "测试")).await;
+    }
+}
+
+/// 流层的 OPEN 只能来自 TLS 里面。passthrough 的 OPENING 里只有 OPEN 的前一半、后一半跟在原始字节里时（路上的人改得了的就是这一半），
+/// 出口的流层以协议错误重置流，处理者见不到这个请求（issue #17）。
+#[tokio::test]
+async fn the_flow_layer_does_not_complete_an_open_with_bytes_from_outside_tls() {
+    let pair = Pair::new(quick()).await;
+    pair.ready(1).await;
+    let seen = Arc::new(AtomicUsize::new(0));
+    let lanes = Arc::clone(&pair.exit.lanes);
+    let handler = Arc::new(Watching(Arc::clone(&seen)));
+    tokio::spawn(async move { i3t_flow::serve(&*lanes, handler).await });
+
+    let mut open = Vec::new();
+    open_request().encode(&mut open);
+    let (sealed, raw) = open.split_at(open.len() / 2);
+    let (mut send, mut recv) = pair.entry.lanes.open_stream(pair.exit.id).await.unwrap();
+    send.write_all(sealed).await.unwrap();
+    send.end_header(Payload::Passthrough);
+    send.write_all(raw).await.unwrap();
+    send.write_all(&client_hello(b"")).await.unwrap();
+    let (_, end) = drain(&mut recv).await;
+    let error = end.expect_err("出口应该重置这条流");
+    assert_eq!(StreamAborted::of(&error), Some(StreamAborted::Reset(StreamCode(Reason::ProtocolError.to_wire()))), "{error}");
+    assert_eq!(seen.load(Ordering::Relaxed), 0, "处理者不该见到这个请求");
+}
+
+/// 发起方同样：接受方在 REPLY 写完之前就发了 SWITCH，REPLY 的后一半跟在原始字节里时，发起方的流层不把它当作对端的回复。
+#[tokio::test]
+async fn the_flow_layer_does_not_complete_a_reply_with_bytes_from_outside_tls() {
+    let pair = Pair::new(quick()).await;
+    pair.ready(1).await;
+    let exit = Arc::clone(&pair.exit.lanes);
+    let responder = tokio::spawn(async move {
+        use i3t_conn::Acceptor;
+        let incoming = exit.accept().await.unwrap();
+        let (mut send, mut recv) = (incoming.send, incoming.recv);
+        let _open = stand_in::read_header(&mut recv, i3t_proto::flow::Opening::decode).await;
+        let mut reply = Vec::new();
+        Reply::ok().encode(&mut reply);
+        let (sealed, raw) = reply.split_at(reply.len() / 2);
+        send.write_all(sealed).await.unwrap();
+        send.end_header(Payload::Passthrough);
+        send.write_all(raw).await.unwrap();
+        (send, recv)
+    });
+    let pending =
+        i3t_flow::open(&*pair.entry.lanes, pair.exit.id, &open_request(), &client_hello(b""), i3t_flow::Carriage::Lane).await.unwrap();
+    let error = pending.established().await.expect_err("REPLY 的后一半不在 TLS 里，不能当作对端答应了");
+    assert!(matches!(error, FlowError::Read(_)), "{error:?}");
+    drop(responder.await.unwrap());
+}
+
 /// 下一阶段流层要做的事的替身。
 mod stand_in {
     use std::sync::Arc;
 
-    use i3t_conn::{RecvStream as _, SendStream as _};
+    use i3t_conn::{RecvStream, SendStream as _};
     use i3t_flow::engine::Splicer;
     use i3t_lane::{LaneRecv, LaneSend, Lanes, Payload};
     use i3t_proto::NodeId;
     use i3t_proto::flow::{DecodeError, Decoded, Opening, Reply};
-    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
-    /// 照流层的 `header::read`：一次只读解析器要的字节，不多读。
-    pub async fn read_header<T>(recv: &mut (impl AsyncRead + Unpin), decode: fn(&[u8]) -> Result<Decoded<T>, DecodeError>) -> T {
+    /// 照流层的 `header::read`：一次只读解析器要的字节，不多读；读完了告诉流。
+    pub async fn read_header<T>(recv: &mut impl RecvStream, decode: fn(&[u8]) -> Result<Decoded<T>, DecodeError>) -> T {
         let mut buf = Vec::new();
         loop {
             match decode(&buf).unwrap() {
-                Decoded::Complete { value, .. } => return value,
+                Decoded::Complete { value, .. } => {
+                    recv.end_header();
+                    return value;
+                }
                 Decoded::Incomplete { more } => {
                     let have = buf.len();
                     buf.resize(have + more, 0);
@@ -380,6 +465,7 @@ mod stand_in {
 mod user_tls {
     use std::sync::Arc;
 
+    use rustls::crypto::CryptoProvider;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
     use rustls::{ClientConfig, RootCertStore, ServerConfig};
     use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -387,11 +473,18 @@ mod user_tls {
     pub const NAME: &str = "secret-hostname.example";
 
     pub fn configs() -> (TlsConnector, TlsAcceptor) {
+        configs_with(|_| {})
+    }
+
+    /// 和 [`configs`] 一样，只是服务器用的密码学套件先交给 `adjust_server` 改一改（比如只留 P-256，逼出 HelloRetryRequest）。
+    pub fn configs_with(adjust_server: impl FnOnce(&mut CryptoProvider)) -> (TlsConnector, TlsAcceptor) {
         let issued = rcgen::generate_simple_self_signed(vec![NAME.to_owned()]).unwrap();
         let cert = CertificateDer::from(issued.cert.der().to_vec());
         let key = PrivateKeyDer::try_from(issued.signing_key.serialize_der()).unwrap();
         let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let server = ServerConfig::builder_with_provider(Arc::clone(&provider))
+        let mut server_provider = rustls::crypto::ring::default_provider();
+        adjust_server(&mut server_provider);
+        let server = ServerConfig::builder_with_provider(Arc::new(server_provider))
             .with_safe_default_protocol_versions()
             .unwrap()
             .with_no_client_auth()
@@ -488,6 +581,184 @@ fn first_record_len(bytes: &[u8]) -> usize {
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|window| window == needle)
+}
+
+/// 经过流层（入口 `i3t_flow::open`、出口 `serve` 和 `Flow::relay`）的一条流，两头是真的 TLS 客户端和服务器。
+/// 客户端发一段，服务器倒着发回来。
+struct TlsThroughFlow {
+    /// 服务器发出的全部字节。
+    server_sent: Vec<u8>,
+    /// lane 上每条连接从出口到入口的字节。
+    lanes_down: Vec<Vec<u8>>,
+    entry: i3t_lane::LaneCounts,
+}
+
+async fn tls_through_the_flow_layer(connector: tokio_rustls::TlsConnector, acceptor: tokio_rustls::TlsAcceptor) -> TlsThroughFlow {
+    let pair = Pair::new(quick()).await;
+    pair.ready(1).await;
+    let to_server = Hop::start(tls_server(acceptor).await).await;
+    let lanes = Arc::clone(&pair.exit.lanes);
+    let exit = Arc::new(ToTarget::new(to_server.addr));
+    tokio::spawn(async move { i3t_flow::serve(&*lanes, exit).await });
+
+    let (client, mut client_side) = tcp_pair().await;
+    let lanes = Arc::clone(&pair.entry.lanes);
+    let peer = pair.exit.id;
+    let entry = tokio::spawn(async move {
+        let first = stand_in::first_data(&mut client_side).await;
+        through_flow(&lanes, peer, client_side, &first).await
+    });
+    let mut tls = connector.connect(user_tls::name(), client).await.unwrap();
+    let request: Vec<u8> = (0..BULK).map(|i| u8::try_from(i % 241).unwrap()).collect();
+    tls.write_all(&request).await.unwrap();
+    tls.shutdown().await.unwrap();
+    let mut answer = Vec::new();
+    timeout(PATIENCE, tls.read_to_end(&mut answer)).await.unwrap().unwrap();
+    assert!(answer.iter().eq(request.iter().rev()), "经过 lane 之后 TLS 里的内容不一样");
+    assert!(timeout(PATIENCE, entry).await.unwrap().unwrap().is_clean(), "入口一侧的搬运应该正常结束");
+
+    let server_sent = to_server.recordings.lock().unwrap()[0].lock().unwrap().backward.clone();
+    let lanes_down = pair.hop.recordings.lock().unwrap().iter().map(|recording| recording.lock().unwrap().forward.clone()).collect();
+    TlsThroughFlow { server_sent, lanes_down, entry: pair.entry.lanes.status().total }
+}
+
+/// 出口往回的方向在目标的 TLS 1.3 ServerHello 之后才离开 lane 的 TLS：ServerHello 本身（里面有服务器的密钥交换）还加密，
+/// 之后的全是用户自己的 TLS 记录，原样走、由内核搬（issue #17）。
+#[tokio::test]
+async fn the_return_direction_leaves_tls_right_after_a_tls13_server_hello() {
+    let (connector, acceptor) = user_tls::configs();
+    let flow = tls_through_the_flow_layer(connector, acceptor).await;
+    let hello = first_record_len(&flow.server_sent);
+    assert_eq!(flow.server_sent[5], 0x02, "服务器的第一条记录是 ServerHello");
+    let lane =
+        flow.lanes_down.iter().find(|down| down.ends_with(&flow.server_sent[hello..])).expect("ServerHello 之后的字节应该原样走在 lane 上");
+    assert!(!contains(lane, &flow.server_sent[..hello]), "ServerHello 不该明文出现在 lane 上");
+    assert!(flow.entry.sealed_bytes < 4096, "往回的方向在 ServerHello 之后就不再加密：{:?}", flow.entry);
+}
+
+/// 目标回了 HelloRetryRequest：出口不在它之后切换（不然路上的人能冒充目标再要一次 ClientHello），等真正的 ServerHello。
+#[tokio::test]
+async fn after_a_hello_retry_request_the_return_direction_waits_for_the_real_server_hello() {
+    // 客户端先给 X25519 的密钥，服务器只肯用 P-256：它会先回 HelloRetryRequest。
+    let (connector, acceptor) = user_tls::configs_with(|server| server.kx_groups = vec![rustls::crypto::ring::kx_group::SECP256R1]);
+    let flow = tls_through_the_flow_layer(connector, acceptor).await;
+    let sent = &flow.server_sent;
+    let retry = first_record_len(sent);
+    const HELLO_RETRY_REQUEST: [u8; 4] = [0xcf, 0x21, 0xad, 0x74];
+    assert_eq!(sent[11..15], HELLO_RETRY_REQUEST, "服务器先回 HelloRetryRequest");
+    let mut at = retry;
+    if sent[at] == 0x14 {
+        at += first_record_len(&sent[at..]);
+    }
+    assert_eq!(sent[at + 5], 0x02, "然后是真正的 ServerHello");
+    let hello_end = at + first_record_len(&sent[at..]);
+    let lane = flow.lanes_down.iter().find(|down| down.ends_with(&sent[hello_end..])).expect("ServerHello 之后的字节应该原样走在 lane 上");
+    assert!(!contains(lane, &sent[..retry]), "HelloRetryRequest 不该明文出现在 lane 上");
+    assert!(!contains(lane, &sent[at..hello_end]), "ServerHello 不该明文出现在 lane 上");
+    assert!(flow.entry.sealed_bytes < 8192, "往回的方向在真正的 ServerHello 之后就不再加密：{:?}", flow.entry);
+}
+
+/// 出口：把开过来的流接到另一条开往 `peer` 的流上（`Flow::splice`，监听在虚拟 IP 上、目标是别的节点的端口转发就是这样）。
+struct Onward {
+    lanes: Arc<Lanes>,
+    peer: NodeId,
+}
+
+impl Handler for Onward {
+    async fn handle<S: SendStream, R: RecvStream>(&self, request: Request<S, R>) {
+        let pending = i3t_flow::open(&*self.lanes, self.peer, &open_request(), b"", i3t_flow::Carriage::Lane).await.unwrap();
+        let onward = pending.established().await.unwrap();
+        let flow = request.accept().await.unwrap();
+        let _ = flow.splice(onward, future::pending()).await;
+    }
+}
+
+/// 接到另一条流上的流也一样：往回的方向在目标的 TLS 1.3 ServerHello 之后才不再加密。
+#[tokio::test]
+async fn a_spliced_flow_leaves_tls_after_the_server_hello_too() {
+    let pair = Pair::new(quick()).await;
+    pair.ready(2).await;
+    let target = tls13_echo_target().await;
+    let lanes = Arc::clone(&pair.entry.lanes);
+    tokio::spawn(async move { i3t_flow::serve(&*lanes, Arc::new(ToTarget::new(target))).await });
+    let lanes = Arc::clone(&pair.exit.lanes);
+    let onward = Arc::new(Onward { lanes: Arc::clone(&pair.exit.lanes), peer: pair.entry.id });
+    tokio::spawn(async move { i3t_flow::serve(&*lanes, onward).await });
+
+    let (mut client, client_side) = tcp_pair().await;
+    let lanes = Arc::clone(&pair.entry.lanes);
+    let peer = pair.exit.id;
+    let relay = tokio::spawn(async move { through_flow(&lanes, peer, client_side, &client_hello(b"")).await });
+    let body: Vec<u8> = (0..BULK).map(|i| u8::try_from(i % 233).unwrap()).collect();
+    let (mut from_target, mut to_target) = client.split();
+    let ((), (echoed, end)) = tokio::join!(
+        async {
+            to_target.write_all(&body).await.unwrap();
+            to_target.shutdown().await.unwrap();
+        },
+        drain(&mut from_target)
+    );
+    end.unwrap();
+    assert!(echoed == [&server_hello()[..], &client_hello(b""), &body].concat(), "回显的字节不一样");
+    assert!(timeout(PATIENCE, relay).await.unwrap().unwrap().is_clean());
+    // 出口上，开过来的那条流两个方向都是原始字节：上行是客户端的、下行是目标在 ServerHello 之后回的。
+    let exit = pair.exit.lanes.status().total;
+    assert!(exit.passthrough_bytes >= 2 * u64::from(BULK), "{exit:?}");
+}
+
+/// 目标用的是 TLS 1.2：它的证书（带着要访问的名字）紧跟着 ServerHello 明文发回来。出口往回的方向一直加密，
+/// lane 上看不到它；发起方的方向照样不再加密（issue #17）。
+#[tokio::test]
+async fn the_return_direction_stays_sealed_when_the_target_answers_with_tls12() {
+    // TLS 1.2 的 ServerHello（没有 supported_versions），后面是一条带着名字的 Certificate。
+    let mut flight = vec![0x16, 0x03, 0x03, 0x00, 0x2a, 0x02, 0x00, 0x00, 0x26, 0x03, 0x03];
+    flight.extend_from_slice(&[0x42; 32]);
+    flight.extend_from_slice(&[0x00, 0xc0, 0x2f, 0x00]);
+    let name = user_tls::NAME.as_bytes();
+    let certificate = u8::try_from(name.len() + 4).unwrap();
+    flight.extend_from_slice(&[0x16, 0x03, 0x03, 0x00, certificate, 0x0b, 0x00, 0x00, certificate - 4]);
+    flight.extend_from_slice(name);
+
+    let pair = Pair::new(quick()).await;
+    pair.ready(1).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = listener.local_addr().unwrap();
+    let answer = flight.clone();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut hello = vec![0; client_hello(b"").len()];
+        stream.read_exact(&mut hello).await.unwrap();
+        stream.write_all(&answer).await.unwrap();
+        let (mut read, mut write) = stream.split();
+        let _ = tokio::io::copy(&mut read, &mut write).await;
+        let _ = write.shutdown().await;
+    });
+    let lanes = Arc::clone(&pair.exit.lanes);
+    tokio::spawn(async move { i3t_flow::serve(&*lanes, Arc::new(ToTarget::new(target))).await });
+
+    let (mut client, client_side) = tcp_pair().await;
+    let lanes = Arc::clone(&pair.entry.lanes);
+    let peer = pair.exit.id;
+    let relay = tokio::spawn(async move { through_flow(&lanes, peer, client_side, &client_hello(b"")).await });
+    let mut got = vec![0; flight.len()];
+    timeout(PATIENCE, client.read_exact(&mut got)).await.unwrap().unwrap();
+    assert_eq!(got, flight);
+    client.write_all(b"client key exchange").await.unwrap();
+    client.shutdown().await.unwrap();
+    let (echoed, end) = drain(&mut client).await;
+    end.unwrap();
+    assert_eq!(echoed, b"client key exchange");
+    assert!(timeout(PATIENCE, relay).await.unwrap().unwrap().is_clean());
+
+    let recordings = pair.hop.recordings.lock().unwrap();
+    for recording in recordings.iter() {
+        let recording = recording.lock().unwrap();
+        assert!(!contains(&recording.forward, name), "TLS 1.2 的证书不该明文出现在 lane 上");
+    }
+    assert!(
+        recordings.iter().any(|recording| contains(&recording.lock().unwrap().backward, b"client key exchange")),
+        "发起方的方向照样不再加密"
+    );
 }
 
 #[tokio::test]
@@ -593,8 +864,8 @@ async fn an_upstream_reset_in_the_middle_of_an_answer_reaches_the_client_as_a_re
         let lanes = Arc::clone(&pair.entry.lanes);
         let peer = pair.exit.id;
         let entry = tokio::spawn(async move { stand_in::initiate(&lanes, peer, client_side, &splicer).await });
-        // 看上去像 ClientHello 的首批数据，让入口选 passthrough。
-        client.write_all(&[0x16, 0x03, 0x01, 0x00, 0x04, 0x01, 0, 0, 0]).await.unwrap();
+        // ClientHello 做首批数据，让入口选 passthrough。
+        client.write_all(&client_hello(b"")).await.unwrap();
         let (got, end) = drain(&mut client).await;
         assert_eq!(got, b"half of the ans");
         let error = end.expect_err("半截的回答之后必须是重置，不能是正常结束");

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{Pair, accept_next, quick, wait_for};
-use i3t_conn::SendStream as _;
+use i3t_conn::{RecvStream as _, SendStream as _};
 use i3t_lane::{LaneRecv, LaneSend, Lanes, Payload};
 use i3t_proto::NodeId;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -92,6 +92,7 @@ async fn open_many(entry: &Arc<Lanes>, peer: NodeId, exit: &Arc<Lanes>, count: u
                 send.end_header(payload);
                 let mut reply = [0; 1];
                 recv.read_exact(&mut reply).await.unwrap();
+                recv.end_header();
                 (index, (send, recv))
             });
         }
@@ -99,6 +100,7 @@ async fn open_many(entry: &Arc<Lanes>, peer: NodeId, exit: &Arc<Lanes>, count: u
             let (mut send, mut recv) = accept_next(exit).await;
             let mut header = [0; 9];
             recv.read_exact(&mut header).await.unwrap();
+            recv.end_header();
             let index = usize::try_from(u32::from_be_bytes([0, header[6], header[7], header[8]])).unwrap();
             send.write_all(b"R").await.unwrap();
             send.end_header(Payload::Passthrough);

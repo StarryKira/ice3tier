@@ -13,10 +13,12 @@
 //!
 //! # ice3proxy（lane）要上层多做的事
 //!
-//! 一条流也可能跑在一条只属于它的 TCP 上（`i3t-lane`）。那时上层多做三件事，跑在共用连接上的流全部是空操作：
+//! 一条流也可能跑在一条只属于它的 TCP 上（`i3t-lane`）。那时上层多做四件事，跑在共用连接上的流全部是空操作：
 //!
-//! - 写完流的头（发起方的 OPEN 连同首批数据、接受方的 REPLY）时调 [`SendStream::end_header`]，发起方顺便选定
-//!   [`Payload`]：首批数据本身就是 TLS 时，头之后的字节可以不再加密；
+//! - 发起方写完 OPEN 连同首批数据时调 [`SendStream::end_header`]，顺便选定 [`Payload`]：首批数据是一个提供 TLS 1.3 的
+//!   ClientHello 时，头之后的字节可以不再加密。接受方的方向要等目标回了 TLS 1.3 的 ServerHello（[`ServerHelloWatch`]）
+//!   才跟着不再加密，那时它调 [`SendStream::end_header`]；
+//! - 读完对端的头时调 [`RecvStream::end_header`]：在这之前只读得到加密送来的字节，头不会混进未经认证的原始字节；
 //! - 搬运之前用 [`SendStream::take_raw`]、[`RecvStream::wait_raw`] 问一下这个方向是不是已经是一条原始的 TCP，
 //!   是的话直接在两条 TCP 之间搬（Linux 上用 splice），同时监听流的吊销信号；
 //! - 开一条承载 TCP 连接的流用 [`Connector::open_tcp`]：实现可以为它挑独占的 TCP，别的流（数据报上下文等）照常用 [`Connector::open`]。
@@ -40,6 +42,8 @@ use i3t_proto::flow::Recipient;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
+
+pub use crate::tls::{ServerHelloVerdict, ServerHelloWatch};
 
 /// 流异常结束时带给对端的原因码。各个值的含义由上层定义，这一层只负责送达。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -71,9 +75,11 @@ pub trait SendStream: AsyncWrite + Unpin + Send + 'static {
         let _ = priority;
     }
 
-    /// 流的头写完了：发起方是 OPEN 连同首批数据，接受方是 REPLY。
+    /// 发起方：流的头（OPEN 连同首批数据）写完了，用 `payload` 选这条流头之后的负载方式。
     ///
-    /// 发起方用 `payload` 选这条流头之后的负载方式；接受方传 [`Payload::Passthrough`] 表示"发起方选了不加密的话，我这个方向也跟着"。
+    /// 接受方：传 [`Payload::Passthrough`] 表示"发起方选了不加密的话，我这个方向从这里起也跟着"。它在 REPLY 之后、
+    /// 目标的 TLS 1.3 ServerHello 写完之后调（[`ServerHelloWatch`]），之前写的都还加密。
+    ///
     /// 跑在共用连接上的流不需要知道头在哪里结束，默认什么都不做。不用等，也不用再 `flush`。
     fn end_header(&mut self, payload: Payload) {
         let _ = payload;
@@ -96,6 +102,15 @@ pub trait RecvStream: AsyncRead + Unpin + Send + 'static {
     fn revocation(&self) -> Option<watch::Receiver<bool>> {
         None
     }
+
+    /// 对端的头读完了：接受方读完 OPEN、发起方读完 REPLY 时调。
+    ///
+    /// 头里的东西（要连谁、对端答应了没有）只能来自对端本人，所以跑在 ice3proxy 上的流在这之前只交出还在加密里的字节：
+    /// 对端的方向已经离开加密、头却还没读完时，读返回错误，未经认证的原始字节不会被当作头读进来。这之后才接着交出原始字节。
+    /// 交出原始字节（[`wait_raw`](Self::wait_raw)）也算头已经读完。
+    ///
+    /// 跑在共用连接上的流整条都是加密的，默认什么都不做。
+    fn end_header(&mut self) {}
 
     /// 等到知道这个方向接下来是什么：底下已经是一条不再加密的 TCP（见 [`RawRead`]）就交出来，之后这个 [`RecvStream`] 不再能读；
     /// 不是（接下来还是加密的数据、或者已经结束），返回 `None`，照常读。
@@ -124,17 +139,14 @@ pub enum Payload {
 }
 
 impl Payload {
-    /// 首批数据是一条完整的 TLS 握手记录、内容是 ClientHello 时选 [`Payload::Passthrough`]，其余选 [`Payload::Sealed`]。
+    /// 首批数据以一条完整的 TLS 记录开头、记录里是一条提供 TLS 1.3 的 ClientHello 时选 [`Payload::Passthrough`]，其余选 [`Payload::Sealed`]。
     ///
-    /// 只看开头：记录头是握手类型、版本是 3.x、长度在 TLS 允许的范围里并且整条都在，记录里第一条握手消息是 ClientHello。
-    /// 不完整的不算，宁可多加密一次，也不能把不是 TLS 的数据明文送出去。
+    /// ClientHello 整个解析一遍：每个字段的长度都对得上、不越界，supported_versions 扩展里有 TLS 1.3。
+    /// 只是开头几个字节像、记录不完整、只会 TLS 1.2 及以前（后面的握手是明文的）的都不算：宁可多加密一次，
+    /// 也不能把不是 TLS 1.3 的数据明文送出去。记录后面的字节（比如 0-RTT 的早期数据）不看，它们和 ClientHello 一起在加密的头里。
     #[must_use]
     pub fn for_first_data(first: &[u8]) -> Self {
-        const HANDSHAKE: u8 = 0x16;
-        const CLIENT_HELLO: u8 = 0x01;
-        let Some(&[HANDSHAKE, 0x03, _minor, hi, lo, CLIENT_HELLO]) = first.first_chunk::<6>() else { return Self::Sealed };
-        let len = usize::from(u16::from_be_bytes([hi, lo]));
-        if (4..=1 << 14).contains(&len) && first.len() >= 5 + len { Self::Passthrough } else { Self::Sealed }
+        if crate::tls::offers_tls13(first) { Self::Passthrough } else { Self::Sealed }
     }
 }
 
@@ -531,14 +543,22 @@ mod tests {
     }
 
     #[test]
-    fn only_a_complete_client_hello_goes_unencrypted() {
-        let mut hello = vec![0x16, 0x03, 0x01, 0x00, 0x08, 0x01, 0, 0, 4, 3, 3, 0, 0];
+    fn only_a_complete_tls13_client_hello_goes_unencrypted() {
+        // 最小的一条：TLS 1.3 的 legacy_version、32 字节 random、空 session_id、一个密码套件、不压缩，扩展只有 supported_versions = TLS 1.3。
+        let mut hello = vec![0x16, 0x03, 0x01, 0x00, 0x36, 0x01, 0x00, 0x00, 0x32, 0x03, 0x03];
+        hello.extend_from_slice(&[0; 32]);
+        hello.extend_from_slice(&[0x00, 0x00, 0x02, 0x13, 0x01, 0x01, 0x00, 0x00, 0x07, 0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04]);
         assert_eq!(Payload::for_first_data(&hello), Payload::Passthrough);
-        hello.extend_from_slice(b"more records");
-        assert_eq!(Payload::for_first_data(&hello), Payload::Passthrough);
-        assert_eq!(Payload::for_first_data(&hello[..12]), Payload::Sealed, "记录不完整");
+        assert_eq!(Payload::for_first_data(&[&hello[..], b"more records"].concat()), Payload::Passthrough);
+        assert_eq!(Payload::for_first_data(&hello[..hello.len() - 1]), Payload::Sealed, "记录不完整");
+        let mut tls12 = hello.clone();
+        *tls12.last_mut().unwrap() = 0x03;
+        assert_eq!(Payload::for_first_data(&tls12), Payload::Sealed, "只会 TLS 1.2 的不算");
         assert_eq!(Payload::for_first_data(b"GET / HTTP/1.1\r\n\r\n"), Payload::Sealed);
         assert_eq!(Payload::for_first_data(&[]), Payload::Sealed);
+        // 只有开头几个字节像 ClientHello：后面跟着什么都不算（issue #17）。
+        assert_eq!(Payload::for_first_data(&[0x16, 0x03, 0x01, 0x00, 0x04, 0x01, 0, 0, 0]), Payload::Sealed);
+        assert_eq!(Payload::for_first_data(b"\x16\x03\x01\x00\x04\x01\x00\x00\x00AUTH PLAIN secret\r\n"), Payload::Sealed);
         assert_eq!(Payload::for_first_data(&[0x16, 0x03, 0x01, 0x00, 0x04, 0x02, 0, 0, 0]), Payload::Sealed, "ServerHello 不算");
         assert_eq!(Payload::for_first_data(&[0x17, 0x03, 0x03, 0x00, 0x04, 0x01, 0, 0, 0]), Payload::Sealed, "应用数据记录不算");
     }

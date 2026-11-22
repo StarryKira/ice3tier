@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use i3t_conn::SendStream as _;
+use i3t_conn::{RecvStream as _, SendStream as _};
 use i3t_crypto::NodeKey;
 use i3t_lane::{LaneConfig, LanePeer, LaneRecv, LaneSend, Lanes, Payload};
 use i3t_proto::NodeId;
@@ -132,7 +132,7 @@ impl Pair {
     }
 }
 
-/// `from` 到 `peer` 开一条流，写下 `header` 并结束头；`to` 那边接到它，读出 `header`。
+/// `from` 到 `peer` 开一条流，写下 `header` 并结束头；`to` 那边接到它，读出 `header` 并告诉流头读完了。
 pub async fn open(from: &Lanes, peer: NodeId, to: &Lanes, header: &[u8], payload: Payload) -> ((LaneSend, LaneRecv), (LaneSend, LaneRecv)) {
     let (mut send, recv) = from.open_stream(peer).await.unwrap();
     send.write_all(header).await.unwrap();
@@ -141,6 +141,7 @@ pub async fn open(from: &Lanes, peer: NodeId, to: &Lanes, header: &[u8], payload
     let mut got = vec![0; header.len()];
     far_recv.read_exact(&mut got).await.unwrap();
     assert_eq!(got, header, "对端读到的头");
+    far_recv.end_header();
     ((send, recv), (far_send, far_recv))
 }
 

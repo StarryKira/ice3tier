@@ -8,7 +8,7 @@ mod common;
 use std::io;
 use std::time::Duration;
 
-use common::{End as HopEnd, Pair, quick, read_to_end, wait_for};
+use common::{End as HopEnd, Pair, accept_next, quick, read_to_end, wait_for};
 use i3t_conn::{RecvStream, SendStream, StreamAborted, StreamCode};
 use i3t_lane::Payload;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -33,7 +33,11 @@ async fn open(
 ) -> ((i3t_lane::LaneSend, i3t_lane::LaneRecv), (i3t_lane::LaneSend, i3t_lane::LaneRecv)) {
     let mut header = b"OPEN".to_vec();
     header.extend_from_slice(CLIENT_HELLO);
-    if entry_initiates { pair.entry_opens(&header, payload).await } else { pair.exit_opens(&header, payload).await }
+    let ((send, mut recv), far) =
+        if entry_initiates { pair.entry_opens(&header, payload).await } else { pair.exit_opens(&header, payload).await };
+    // 这里接受方回的不是流层的 REPLY，发起方把收到的都当数据读：一开始就算读完了头。
+    recv.end_header();
+    ((send, recv), far)
 }
 
 #[tokio::test]
@@ -221,6 +225,65 @@ async fn a_refusal_gets_its_reply_through_and_stops_the_initiator() {
         drop((far_send, far_recv));
     })
     .await;
+}
+
+/// 流层的头只能来自 TLS 里面：头还没读完时对端的方向就离开了 TLS，读出错，不会把后面的原始字节当作头交出来（issue #17）。
+#[tokio::test]
+async fn a_header_cannot_be_completed_with_bytes_from_outside_tls() {
+    let pair = Pair::new(quick()).await;
+    pair.ready(2).await;
+    for entry_initiates in [true, false] {
+        let (from, to) = if entry_initiates { (&pair.entry, &pair.exit) } else { (&pair.exit, &pair.entry) };
+
+        // 接受方：passthrough 的 OPENING 里只有半个头，另一半跟在后面的原始字节里。
+        let (mut send, mut recv) = from.lanes.open_stream(to.id).await.unwrap();
+        send.write_all(b"OP").await.unwrap();
+        send.end_header(Payload::Passthrough);
+        send.write_all(b"EN, then data").await.unwrap();
+        let (mut far_send, mut far_recv) = accept_next(&to.lanes).await;
+        let mut got = [0; 2];
+        far_recv.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"OP");
+        let error = far_recv.read_exact(&mut got).await.expect_err("头的另一半不在 TLS 里，不能交出来");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+
+        // 发起方：接受方在 REPLY 写完之前就发了 SWITCH，REPLY 的另一半跟在后面的原始字节里。
+        far_send.write_all(b"RE").await.unwrap();
+        far_send.end_header(Payload::Passthrough);
+        far_send.write_all(b"PLY, then data").await.unwrap();
+        recv.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"RE");
+        let error = recv.read_exact(&mut got).await.expect_err("REPLY 的另一半不在 TLS 里，不能交出来");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+    }
+}
+
+#[tokio::test]
+async fn once_the_header_is_read_the_bytes_behind_it_follow_in_order() {
+    let pair = Pair::new(quick()).await;
+    pair.ready(1).await;
+    let (mut send, mut recv) = pair.entry.lanes.open_stream(pair.exit.id).await.unwrap();
+    send.write_all(b"OPEN first data").await.unwrap();
+    send.end_header(Payload::Passthrough);
+    send.write_all(b", raw data").await.unwrap();
+    send.shutdown().await.unwrap();
+    let (mut far_send, mut far_recv) = accept_next(&pair.exit.lanes).await;
+    let mut open = [0; 4];
+    far_recv.read_exact(&mut open).await.unwrap();
+    assert_eq!(&open, b"OPEN");
+    far_recv.end_header();
+    // 头之后：OPENING 里剩下的首批数据在前，原始字节在后。
+    assert_eq!(read_to_end(&mut far_recv).await.unwrap(), b" first data, raw data");
+
+    far_send.write_all(b"REPLY").await.unwrap();
+    far_send.end_header(Payload::Passthrough);
+    far_send.write_all(b" raw answer").await.unwrap();
+    far_send.shutdown().await.unwrap();
+    let mut reply = [0; 5];
+    recv.read_exact(&mut reply).await.unwrap();
+    assert_eq!(&reply, b"REPLY");
+    recv.end_header();
+    assert_eq!(read_to_end(&mut recv).await.unwrap(), b" raw answer");
 }
 
 #[tokio::test]

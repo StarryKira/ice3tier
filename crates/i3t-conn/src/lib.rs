@@ -37,11 +37,12 @@ mod quic;
 mod sealed;
 mod socket;
 mod stream;
+mod tls;
 mod tuning;
 
 pub use contract::{
     Acceptor, Connector, Datagram, DatagramSendError, DatagramSender, Datagrams, Incoming, OpenError, PacketSender, Packets, Payload,
-    Priority, RawRead, RawWrite, RecvStream, SendStream, StreamAborted, StreamCode,
+    Priority, RawRead, RawWrite, RecvStream, SendStream, ServerHelloVerdict, ServerHelloWatch, StreamAborted, StreamCode,
 };
 pub use endpoint::{Endpoint, EndpointConfig, EndpointError, UdpSeen};
 pub use i3t_path::diag::{self, MAX_PIN, MAX_TEST_PROBES, MAX_TEST_WINDOW};

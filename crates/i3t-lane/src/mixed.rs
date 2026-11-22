@@ -241,6 +241,13 @@ impl<R: RecvStream> RecvStream for EitherRecv<R> {
         }
     }
 
+    fn end_header(&mut self) {
+        match self {
+            Self::Shared(recv) => recv.end_header(),
+            Self::Lane(recv) => recv.end_header(),
+        }
+    }
+
     async fn wait_raw(&mut self) -> Option<RawRead> {
         match self {
             Self::Shared(recv) => recv.wait_raw().await,

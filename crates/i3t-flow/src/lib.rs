@@ -21,7 +21,7 @@
 //! 数据报按等级选不可靠的通道还是逐个可靠送达。
 //!
 //! 这一层只依赖连接层的契约（[`i3t_conn::contract`]），不知道下面是不是 QUIC。
-//! 打开 `test-util` 特性之后有一个内存里的连接层（`memory` 模块），测试不需要真的连接。
+//! 打开 `test-util` 特性之后有一个内存里的连接层（`memory` 模块），测试不需要真的连接；`testing` 模块里是测试用的首批数据。
 
 mod acceptor;
 pub mod datagram;
@@ -35,6 +35,8 @@ pub mod memory;
 mod meter;
 mod relay;
 mod splice;
+#[cfg(feature = "test-util")]
+pub mod testing;
 
 pub use acceptor::{Handler, OPEN_DEADLINE, Request, Screening, serve};
 pub use error::FlowError;

@@ -147,12 +147,13 @@ impl Side {
     }
 }
 
-/// 出口：接受流、读头、连 `sink`、回 REPLY、结束头，然后搬运。
-async fn exit_side(lanes: Arc<Lanes>, sink: SocketAddr, splicer: Option<Arc<Splicer>>) {
+/// 出口：接受流、读 `header_len` 字节的头、连 `sink`、回 REPLY、结束头，然后搬运。
+async fn exit_side(lanes: Arc<Lanes>, sink: SocketAddr, splicer: Option<Arc<Splicer>>, header_len: usize) {
     while let Some(incoming) = lanes.accept().await {
         let (mut send, mut recv) = (incoming.send, incoming.recv);
-        let mut header = [0; 9];
+        let mut header = vec![0; header_len];
         recv.read_exact(&mut header).await.unwrap();
+        recv.end_header();
         let target = TcpStream::connect(sink).await.unwrap();
         target.set_nodelay(true).unwrap();
         send.write_all(b"R").await.unwrap();
@@ -199,21 +200,24 @@ async fn relay(mut send: LaneSend, mut recv: LaneRecv, user: TcpStream, splicer:
 }
 
 /// 入口：接受客户端、读首批数据、开流、读 REPLY，然后搬运。
-async fn entry_side(lanes: Arc<Lanes>, listener: TcpListener, peer: i3t_proto::NodeId, splicer: Option<Arc<Splicer>>) {
+async fn entry_side(lanes: Arc<Lanes>, listener: TcpListener, peer: i3t_proto::NodeId, splicer: Option<Arc<Splicer>>, first_len: usize) {
     let (mut client, _) = listener.accept().await.unwrap();
     client.set_nodelay(true).unwrap();
-    let mut first = [0; 9];
+    let mut first = vec![0; first_len];
     client.read_exact(&mut first).await.unwrap();
     let (mut send, mut recv) = lanes.open_stream(peer).await.unwrap();
     send.write_all(&first).await.unwrap();
     send.end_header(Payload::for_first_data(&first));
     let mut reply = [0; 1];
     recv.read_exact(&mut reply).await.unwrap();
+    recv.end_header();
     relay(send, recv, client, splicer.as_deref()).await;
 }
 
 /// 经入口、lane、出口把 `total` 字节从客户端送到目标，返回两边各用了多少 CPU。
-fn cpu_for(total: usize, first: [u8; 9], engine: Engine) -> (Duration, Duration, Duration) {
+fn cpu_for(total: usize, first: &[u8], engine: Engine) -> (Duration, Duration, Duration) {
+    let first = first.to_vec();
+    let first_len = first.len();
     let entry = Side::start();
     let exit = Side::start();
     let entry_key = NodeKey::generate().unwrap();
@@ -250,7 +254,7 @@ fn cpu_for(total: usize, first: [u8; 9], engine: Engine) -> (Duration, Duration,
             lanes.set_peers([LanePeer { id: id(2), key: exit_public, dial: Vec::new() }]).unwrap();
             let serving = Arc::clone(&lanes);
             tokio::spawn(async move { serving.serve(lane_listener).await });
-            tokio::spawn(entry_side(lanes, user, id(2), splicer));
+            tokio::spawn(entry_side(lanes, user, id(2), splicer, first_len));
             (lane_addr, user_addr)
         })
     });
@@ -258,7 +262,7 @@ fn cpu_for(total: usize, first: [u8; 9], engine: Engine) -> (Duration, Duration,
     exit.run(move |runtime| {
         runtime.block_on(async move {
             lanes.set_peers([LanePeer { id: id(1), key: entry_public, dial: vec![entry_addr] }]).unwrap();
-            tokio::spawn(exit_side(lanes, sink_addr, splicer));
+            tokio::spawn(exit_side(lanes, sink_addr, splicer, first_len));
         });
     });
     // 让两边各自的运行时转起来：它们的线程在等下一个命令时不跑任务，所以给它们各一个一直跑的命令。
@@ -319,12 +323,12 @@ fn cpu_for(total: usize, first: [u8; 9], engine: Engine) -> (Duration, Duration,
 fn cpu_seconds_per_gigabyte() {
     const TOTAL: usize = 2 << 30;
     let gigabytes = TOTAL as f64 / f64::from(1 << 30);
-    let hello = [0x16, 0x03, 0x01, 0x00, 0x04, 0x01, 0, 0, 0];
-    let plain = *b"GET / HTT";
-    let cases: [(&str, [u8; 9], Engine); 3] = [
-        ("sealed", plain, None),
-        ("passthrough + splice", hello, Some(Splicer::new)),
-        ("passthrough + 用户态拷贝", hello, Some(Splicer::copying)),
+    let hello = i3t_flow::testing::client_hello(b"");
+    let plain = b"GET / HTTP/1.1\r\n\r\n".to_vec();
+    let cases: [(&str, &[u8], Engine); 3] = [
+        ("sealed", &plain, None),
+        ("passthrough + splice", &hello, Some(Splicer::new)),
+        ("passthrough + 用户态拷贝", &hello, Some(Splicer::copying)),
     ];
     for (name, first, engine) in cases {
         let (entry, exit, wall) = cpu_for(TOTAL, first, engine);

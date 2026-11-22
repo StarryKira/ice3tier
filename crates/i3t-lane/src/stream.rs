@@ -6,8 +6,13 @@
 //!
 //! - sealed：两个方向一直在 TLS 里，数据是 DATA 帧，正常结束是 close_notify 加 FIN。没有 close_notify 的 FIN 是截断，按异常结束算。
 //! - passthrough：发起方的方向在 OPENING 所在的记录之后离开 TLS，接受方的方向在它的 SWITCH 所在的记录之后离开 TLS
-//!   （接受方写完 REPLY 后调 [`LaneSend::end_header`] 时发出；不调就一直留在 TLS 里，对端照样读得懂）。
+//!   （接受方在 REPLY 之后、确认可以不再加密时调 [`LaneSend::end_header`] 发出，流层是在目标的 TLS 1.3 ServerHello 之后；
+//!   不调就一直留在 TLS 里，对端照样读得懂）。
 //!   离开之后是用户的原始字节，FIN 就是结束，RST 或者出错就是异常结束。
+//!
+//! 流层的头（OPEN、REPLY）决定连谁、连上了没有，只能来自认证过的对端，所以它们必须完整地在 TLS 里：
+//! 收的一方读完对端的头（[`RecvStream::end_header`]）之前，接收方向只交出 TLS 里收到的字节；对端的方向离开了 TLS、
+//! 头却还没读完时读出错（对端不守协议），不会拿后面未经认证的原始字节去凑。
 //!
 //! # 异常结束
 //!
@@ -146,6 +151,13 @@ enum SendState {
 enum RecvState {
     /// 在 TLS 里，里面是收到了、还没交出去的数据。
     Sealed(Bytes),
+    /// 对端的方向已经离开 TLS，本端还没读完对端的头（[`RecvStream::end_header`]）。`sealed` 是 TLS 里收到、还没交出去的最后一点，
+    /// `raw` 是那之后已经从 socket 读进来的原始字节。这时只交出 `sealed`：它读完了头还没完，就是对端不守协议，
+    /// 不能拿未经认证的原始字节去凑对端的头。头读完时并成 [`RecvState::Raw`]。
+    Leaving {
+        sealed: Bytes,
+        raw: Bytes,
+    },
     /// 原始字节，里面是已经从 socket 读进来、还没交出去的部分。
     Raw(Bytes),
     Eof,
@@ -189,6 +201,8 @@ struct State {
     out: BytesMut,
     send: SendState,
     recv: RecvState,
+    /// 本端读完了对端的头（[`RecvStream::end_header`]，或者交出了原始的接收方向）：之后接收方向离开 TLS 时可以接着读原始字节。
+    header_read: bool,
     /// 对端叫停了本端的发送（STOP），或者异常结束了整条流（ABORT）：本端之后的写都返回它。
     send_refused: Option<StreamAborted>,
     /// 写在等的任务。对端叫停时要叫醒它，不然它会一直等一个不会再变得可写的 socket。
@@ -222,6 +236,8 @@ impl LaneRecv {
     /// 交出去之后这个 [`LaneRecv`] 不再能读，丢弃它也不会叫停流。
     ///
     /// 已经收到、还没处理的记录先处理掉（不等待）：接受方的 REPLY 和 SWITCH 往往一起到，读完 REPLY 时 SWITCH 已经在缓冲里了。
+    ///
+    /// 要原始字节说明调用方已经读完了对端的头：交得出来时同时算作 [`RecvStream::end_header`]。
     pub fn take_raw(&mut self) -> Option<RawRead> {
         let shared = &self.shared;
         let mut state = shared.lock();
@@ -235,6 +251,9 @@ impl LaneRecv {
         }
         if !state.out.is_empty() {
             push(shared, &mut state);
+        }
+        if matches!(state.recv, RecvState::Leaving { .. }) {
+            state.finish_header();
         }
         let RecvState::Raw(pending) = &mut state.recv else { return None };
         let received = std::mem::take(pending);
@@ -264,6 +283,7 @@ pub(crate) fn initiate(lane: Lane, book: Book, revoked: watch::Receiver<bool>) -
         out,
         send: SendState::Header(Vec::new()),
         recv: RecvState::Sealed(Bytes::new()),
+        header_read: false,
         send_refused: None,
         send_waker: None,
         flushing: false,
@@ -279,13 +299,14 @@ pub(crate) fn initiate(lane: Lane, book: Book, revoked: watch::Receiver<bool>) -
 /// 对端在一条 lane 上开过来的流：它的 OPENING 已经读到了，`header` 是里面流的头。
 ///
 /// passthrough 时 OPENING 所在的记录之后就是原始字节，调用方已经确认这条记录在这个帧的末尾结束。
+/// 流层的 OPEN 只能从 `header` 里读，读完之前不接着读后面的原始字节（[`RecvState::Leaving`]）。
 pub(crate) fn respond(lane: Lane, payload: Payload, header: &[u8], book: Book, revoked: watch::Receiver<bool>) -> (LaneSend, LaneRecv) {
     let Lane { socket, mut sealed, out, peer, .. } = lane;
     socket::rst_on_close(&socket);
     socket::set_user_timeout(&socket, socket::STREAM_USER_TIMEOUT);
     let recv = match payload {
         Payload::Sealed => RecvState::Sealed(compact(header)),
-        Payload::Passthrough => RecvState::Raw(compact(&[header, &sealed.take_inbound()].concat())),
+        Payload::Passthrough => RecvState::Leaving { sealed: compact(header), raw: compact(&sealed.take_inbound()) },
     };
     let state = State {
         role: Role::Responder,
@@ -294,6 +315,7 @@ pub(crate) fn respond(lane: Lane, payload: Payload, header: &[u8], book: Book, r
         out,
         send: SendState::Sealed,
         recv,
+        header_read: false,
         send_refused: None,
         send_waker: None,
         flushing: false,
@@ -343,6 +365,19 @@ impl State {
                 self.drop_tls_if_unused();
             }
             _ => {}
+        }
+    }
+
+    /// 本端读完了对端的头：之后可以从 TLS 里收到的字节接着读原始字节。
+    fn finish_header(&mut self) {
+        self.header_read = true;
+        if let RecvState::Leaving { sealed, raw } = &mut self.recv {
+            let pending = match (sealed.is_empty(), raw.is_empty()) {
+                (true, _) => std::mem::take(raw),
+                (false, true) => std::mem::take(sealed),
+                (false, false) => compact(&[&sealed[..], &raw[..]].concat()),
+            };
+            self.recv = RecvState::Raw(pending);
         }
     }
 
@@ -430,7 +465,11 @@ impl State {
                 }
                 self.heard(socket);
                 let leftover = self.sealed.as_mut().map(Sealed::take_inbound).unwrap_or_default();
-                self.recv = RecvState::Raw(compact(&leftover));
+                // 流层的 REPLY 要在 SWITCH 之前完整地送到：还没读完它时，后面的原始字节先不交出去。
+                self.recv = RecvState::Leaving { sealed: Bytes::new(), raw: compact(&leftover) };
+                if self.header_read {
+                    self.finish_header();
+                }
                 self.drop_tls_if_unused();
             }
             Ok(Next::Frame(Frame::Stop(code))) => {
@@ -560,6 +599,15 @@ impl AsyncRead for LaneRecv {
                     let len = take_into(data, buf);
                     shared.book.add(|tally| &tally.sealed_bytes, len);
                     return Poll::Ready(Ok(()));
+                }
+                RecvState::Leaving { sealed, .. } if !sealed.is_empty() => {
+                    let len = take_into(sealed, buf);
+                    shared.book.add(|tally| &tally.sealed_bytes, len);
+                    return Poll::Ready(Ok(()));
+                }
+                // 本端还在读对端的头，TLS 里的字节却已经读完了：头没有完整地在 TLS 里。
+                RecvState::Leaving { .. } => {
+                    return Poll::Ready(Err(state.fail_recv(Failure::Protocol("流的头还没完，对端的方向就离开了 TLS".to_owned()))));
                 }
                 RecvState::Raw(pending) if !pending.is_empty() => {
                     let len = take_into(pending, buf);
@@ -699,12 +747,12 @@ impl SendStream for LaneSend {
         reset(shared, &mut state, code);
     }
 
-    /// 头写完了：发起方是 OPEN 连同首批数据，接受方是 REPLY。
+    /// 头写完了，或者接受方这个方向可以不再加密了。
     ///
-    /// - 发起方：`payload` 选定这条流的负载方式，攒下的头作为一个 OPENING 帧送出；
+    /// - 发起方：OPEN 连同首批数据写完了。`payload` 选定这条流的负载方式，攒下的头作为一个 OPENING 帧送出；
     ///   选了 [`Payload::Passthrough`] 时，之后这个方向是原始字节。
     /// - 接受方：发起方选了 passthrough、并且这里也传 [`Payload::Passthrough`] 时，发一个 SWITCH，之后这个方向是原始字节；
-    ///   别的情况什么都不做，这个方向留在 TLS 里。
+    ///   别的情况什么都不做，这个方向留在 TLS 里。在这之前可以已经发过任意多的数据（流层先加密地送出目标的 ServerHello）。
     ///
     /// 不用等：密文立刻交给内核，交不完的由后台送出。头已经结束之后再调用没有效果。
     ///
@@ -773,11 +821,21 @@ impl RecvStream for LaneRecv {
         Some(self.shared.revoked.clone())
     }
 
+    /// 读完了对端的头（OPEN 或 REPLY）。在这之前接收方向只交出 TLS 里收到的字节，见 [`RecvState::Leaving`]。
+    fn end_header(&mut self) {
+        self.shared.lock().finish_header();
+    }
+
     /// 等到知道这个方向接下来是什么：离开了 TLS（对端发了 SWITCH，或者发起方选了 passthrough）就交出来，和
     /// [`take_raw`](Self::take_raw) 一样；接下来是 TLS 里的数据、或者这个方向结束了、出错了，返回 `None`，调用方照常读。
     ///
     /// 发起方读完 REPLY 之后用它：接受方紧接着发 SWITCH，但它可能还在路上。
     async fn wait_raw(&mut self) -> Option<RawRead> {
+        // 发起方选了一直加密的流，哪个方向都不会离开 TLS：直接返回，不去推进 TLS、也不再为 `take_raw` 拿一次锁。
+        // 流层每读一段之前都会问一次（i3t-flow 的 `flow_to_tcp`），这样加密的流上每段只多拿一次锁。
+        if self.shared.lock().payload == Some(Payload::Sealed) {
+            return None;
+        }
         std::future::poll_fn(|cx| {
             let shared = &self.shared;
             let mut state = shared.lock();
@@ -786,7 +844,7 @@ impl RecvStream for LaneRecv {
             }
             loop {
                 match &state.recv {
-                    RecvState::Raw(_) => break,
+                    RecvState::Raw(_) | RecvState::Leaving { .. } => break,
                     RecvState::Sealed(data) if data.is_empty() => {
                         let step = state.poll_sealed_step(&shared.socket, Read::Wait(cx));
                         if !state.out.is_empty() {
