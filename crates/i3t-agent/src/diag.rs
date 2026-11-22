@@ -368,7 +368,7 @@ mod tests {
 
     use i3t_conn::EndpointConfig;
     use i3t_crypto::NodeKey;
-    use i3t_model::control::diag::{TestItems, TransferEnd};
+    use i3t_model::control::diag::{TestItems, Transfer, TransferEnd};
     use i3t_proto::datagram::RelayPath;
     use i3t_proto::flow::{MeasureMode, OpenMeasure};
 
@@ -559,23 +559,34 @@ mod tests {
     const EVERYTHING: TestItems =
         TestItems { direct: true, direct_quality: true, relay_quality: false, route: true, throughput: true, host: true };
 
+    /// 在一对新的节点之间做一次全套的主动测试，返回吞吐的两个方向（上行、下行）。`settings` 改网络的设置。
+    async fn measured_throughput(settings: impl Fn(&mut i3t_model::netmap::Network)) -> (Transfer, Transfer) {
+        let (mut a, b, serving) = measuring_pair(settings);
+        b.diag.order(order(41, 1, TestRole::Responder, EVERYTHING));
+        a.diag.order(order(41, 2, TestRole::Initiator, EVERYTHING));
+        let report = next_report(&mut a.reports).await;
+        serving.abort();
+        let throughput = report.paths[0].throughput.as_ref().unwrap();
+        (throughput.up.unwrap(), throughput.down.unwrap())
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn the_throughput_of_a_connection_does_not_hang_on_the_peers_acknowledgement_timer() {
         // 网络默认的确认阈值下，对端等确认的定时器再慢，吞吐也不受影响：窗口里总有够数的包，对端不等定时器就确认。
         // 这里把等待调到最长，代替定时器不准的对端：Windows 默认的粒度是十几毫秒，说好等 2 毫秒，实际等的是这个数。
-        let (mut a, b, serving) = measuring_pair(|network| network.max_ack_delay_ms = 25);
-        b.diag.order(order(41, 1, TestRole::Responder, EVERYTHING));
-        a.diag.order(order(41, 2, TestRole::Initiator, EVERYTHING));
-        let report = next_report(&mut a.reports).await;
-        let throughput = report.paths[0].throughput.as_ref().unwrap();
-        let (up, down) = (throughput.up.unwrap(), throughput.down.unwrap());
-        assert_eq!((up.bytes, up.stopped_by), (THROUGHPUT_BYTES, TransferEnd::Bytes), "{up:?}");
-        assert_eq!((down.bytes, down.stopped_by), (THROUGHPUT_BYTES, TransferEnd::Bytes), "{down:?}");
-        // 阈值比拥塞控制的最小窗口大的时候（默认值曾经是 10），不是每次都传不完，更多的时候是慢十倍以上：
-        // 实测回环上这二十兆正常不到 0.2 秒，那时十次里有七八次至少一个方向要 1.4 到 5 秒。
-        let unhurried = THROUGHPUT_TIME.as_millis() / 2;
-        assert!(u128::from(up.ms) < unhurried && u128::from(down.ms) < unhurried, "对端等得久，传得就慢了：{up:?} {down:?}");
-        serving.abort();
+        //
+        // 快慢和同一次运行里默认等待的那一对比，不和钟表比：这二十兆在回环上要多久看机器，
+        // 开发机上不到 0.2 秒，CI 上跑调试构建的 macOS 要一两秒，有一次用了 2.8 秒。
+        let usual = measured_throughput(|_| {}).await;
+        let patient = measured_throughput(|network| network.max_ack_delay_ms = 25).await;
+        for (patient, usual) in [(patient.0, usual.0), (patient.1, usual.1)] {
+            assert_eq!((usual.bytes, usual.stopped_by), (THROUGHPUT_BYTES, TransferEnd::Bytes), "{usual:?}");
+            assert_eq!((patient.bytes, patient.stopped_by), (THROUGHPUT_BYTES, TransferEnd::Bytes), "{patient:?}");
+            // 阈值比拥塞控制的最小窗口大的时候（默认值曾经是 10），不是每次都传不完，更多的时候是慢十倍上下：
+            // 开发机上十次里有七八次至少一个方向要 1.4 到 5 秒。慢的机器上那就是传不完，上面一句已经管了。
+            let unhurried = u64::from(usual.ms) * 4 + 500;
+            assert!(u64::from(patient.ms) < unhurried, "对端等得久，传得就慢了：{patient:?}，平时是 {usual:?}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
