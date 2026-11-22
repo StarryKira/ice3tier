@@ -228,6 +228,22 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// `ids` 里哪些是 `network` 里启用了出口的节点。按编号一个个查，不读整个网络。
+    ///
+    /// # Errors
+    ///
+    /// 读数据库失败。
+    pub fn exits_among(&self, network: NetworkId, ids: impl IntoIterator<Item = NodeId>) -> Result<BTreeSet<NodeId>, StoreError> {
+        let mut statement = self.conn.prepare_cached("SELECT 1 FROM nodes WHERE id = ?1 AND network_id = ?2 AND exit IS NOT NULL")?;
+        let mut exits = BTreeSet::new();
+        for id in ids {
+            if statement.exists(params![SqlNode(id), SqlNetwork(network)])? {
+                exits.insert(id);
+            }
+        }
+        Ok(exits)
+    }
+
     /// # Errors
     ///
     /// 读数据库失败。
@@ -526,6 +542,30 @@ mod tests {
         assert_eq!((node.hostname.as_str(), node.self_update, node.update_failure), ("", None, None));
         assert!(node.auto_update, "新节点的自动更新是开着的");
         assert_eq!(node.local_addresses, None, "没报过网卡地址和报了一个空表不一样");
+    }
+
+    #[test]
+    fn exits_among_are_the_given_nodes_of_one_network_with_the_exit_switched_on() {
+        let store = Store::open_in_memory().unwrap();
+        let ours = store.insert_network(&home()).unwrap();
+        let theirs = store.insert_network(&NewNetwork { name: "office".to_owned(), ..home() }).unwrap();
+        let switch_on = |id| {
+            let mut node = store.node(id).unwrap().unwrap();
+            node.exit = Some(ExitRole::default());
+            store.update_node(&node).unwrap();
+        };
+        let (plain, exit, other) = (
+            store.insert_node(&new_node(ours, 1)).unwrap(),
+            store.insert_node(&new_node(ours, 2)).unwrap(),
+            store.insert_node(&new_node(theirs, 3)).unwrap(),
+        );
+        switch_on(exit);
+        switch_on(other);
+        let unknown = NodeId::new(999).unwrap();
+        let asked = [plain, exit, other, unknown];
+        assert_eq!(store.exits_among(ours, asked).unwrap(), [exit].into(), "{plain} 没有启用出口，{other} 在别的网络，{unknown} 没有");
+        assert_eq!(store.exits_among(theirs, asked).unwrap(), [other].into());
+        assert!(store.exits_among(ours, [plain]).unwrap().is_empty(), "只看问到的");
     }
 
     #[test]

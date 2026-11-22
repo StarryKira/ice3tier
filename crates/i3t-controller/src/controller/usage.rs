@@ -6,7 +6,8 @@
 //!
 //! 这些都只在内存里：节点离线之后留着它最后报的那一份，controller 重启就没有了，等节点重新上报。
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
 
 use i3t_model::admin::{
@@ -17,7 +18,7 @@ use i3t_proto::NodeId;
 
 use super::{Controller, Inner};
 use crate::access::AccessMap;
-use crate::error::{Entity, Error};
+use crate::error::{Entity, Error, error_chain};
 use crate::netmap::NetworkView;
 use crate::store::NodeRecord;
 
@@ -26,16 +27,26 @@ const HEALTH_WINDOW: Duration = Duration::from_secs(5 * 60);
 /// 归因于出口自己的失败至少这么多次、并且占请求的这么大比例，才算不健康。偶尔一次解析器超时不算。
 const DEGRADED_MIN_FAILURES: u64 = 3;
 const DEGRADED_RATIO_PERCENT: u64 = 10;
-/// 一个节点最多报这么多个监听、这么多个出口。乱报的节点占不了太多内存。
+/// 一个节点最多报这么多个监听。乱报的节点占不了太多内存。
 const MAX_LISTENS: usize = 256;
+/// 一次上报里最多看这么多项出口的观测。观测是一次次报上来累积的，跨多次上报也替一个节点最多留这么多个出口的。
 const MAX_EXITS: usize = 256;
 
 /// 出口和用出口的节点报的计数。
 #[derive(Debug, Default)]
 pub(crate) struct Usage {
     exits: BTreeMap<NodeId, ExitSeen>,
-    /// （出口，发起节点）→ 发起节点看到的。
+    /// （出口，发起节点）→ 发起节点看到的。按出口排，看一个出口的只扫它自己的那一段。
     observed: BTreeMap<(NodeId, NodeId), Observed>,
+    /// 发起节点 → 它的观测留在 `observed` 里的那些出口。和 `observed` 的键一一对应。
+    observers: BTreeMap<NodeId, BTreeSet<NodeId>>,
+}
+
+/// `observed` 里关于 `exit` 的那一段。
+fn about(exit: NodeId) -> RangeInclusive<(NodeId, NodeId)> {
+    const FIRST: NodeId = NodeId::new(1).unwrap();
+    const LAST: NodeId = NodeId::new(u32::MAX).unwrap();
+    (exit, FIRST)..=(exit, LAST)
 }
 
 /// 一个出口最近报的计数，和最近几分钟的样本。
@@ -89,15 +100,68 @@ impl Usage {
         }
     }
 
-    fn observed(&mut self, by: NodeId, observations: Vec<ExitObservation>, now: Instant) {
+    /// 记下 `by` 这次报的观测，最多 [`MAX_EXITS`] 个。要不要收（出口在不在它的网络里）由调用的一方先筛过。
+    ///
+    /// 之前报过、这次没报的留着，离线之后也能看。替它留的出口超过 [`MAX_EXITS`] 个时，
+    /// 这次报的都留下，别的从最久没有更新的去掉。
+    fn observed(&mut self, by: NodeId, observations: impl IntoIterator<Item = ExitObservation>, now: Instant) {
+        let mut fresh = BTreeSet::new();
         for counts in observations.into_iter().take(MAX_EXITS) {
+            fresh.insert(counts.exit);
             self.observed.insert((counts.exit, by), Observed { counts, at: now });
         }
+        if fresh.is_empty() {
+            return;
+        }
+        let mine = self.observers.entry(by).or_default();
+        mine.extend(&fresh);
+        let excess = mine.len().saturating_sub(MAX_EXITS);
+        if excess > 0 {
+            let mut stale: Vec<(Instant, NodeId)> =
+                mine.difference(&fresh).filter_map(|&exit| Some((self.observed.get(&(exit, by))?.at, exit))).collect();
+            stale.sort_unstable();
+            for (_, exit) in stale.into_iter().take(excess) {
+                self.remove_observed(exit, by);
+            }
+        }
+    }
+
+    /// 去掉一条观测。`observed` 和 `observers` 只在这里和 [`Usage::observed`] 里改，两边一起改。
+    fn remove_observed(&mut self, exit: NodeId, by: NodeId) {
+        self.observed.remove(&(exit, by));
+        if let Some(mine) = self.observers.get_mut(&by) {
+            mine.remove(&exit);
+            if mine.is_empty() {
+                self.observers.remove(&by);
+            }
+        }
+    }
+
+    /// `exit` 不再是出口了（停用了，或者节点撤回了声明）：别人看到的经它出去的都丢掉，再启用时从头记。
+    pub(crate) fn exit_disabled(&mut self, exit: NodeId) {
+        let observers: Vec<NodeId> = self.observed.range(about(exit)).map(|(&(_, by), _)| by).collect();
+        for by in observers {
+            self.remove_observed(exit, by);
+        }
+    }
+
+    /// 发起节点各自看到的经 `exit` 出去的流。
+    fn observed_about(&self, exit: NodeId) -> impl Iterator<Item = (NodeId, &Observed)> {
+        self.observed.range(about(exit)).map(|(&(_, by), observed)| (by, observed))
+    }
+
+    /// 留着的观测的键：（出口，发起节点）。
+    #[cfg(test)]
+    pub(crate) fn observed_keys(&self) -> Vec<(NodeId, NodeId)> {
+        self.observed.keys().copied().collect()
     }
 
     pub(crate) fn forget(&mut self, node: NodeId) {
         self.exits.remove(&node);
-        self.observed.retain(|&(exit, by), _| exit != node && by != node);
+        self.exit_disabled(node);
+        for exit in self.observers.get(&node).cloned().unwrap_or_default() {
+            self.remove_observed(exit, node);
+        }
     }
 }
 
@@ -193,7 +257,7 @@ impl Inner {
         let online = self.is_online(node.id);
         let seen = self.usage.exits.get(&node.id);
         let recent = seen.map(ExitSeen::recent).unwrap_or_default();
-        let observed = self.usage.observed.iter().filter(|((exit, _), _)| *exit == node.id).filter_map(|(&(_, by), observed)| {
+        let observed = self.usage.observed_about(node.id).filter_map(|(by, observed)| {
             let by = view.nodes.get(&by)?;
             Some(ExitObserved { by: by.to_ref(), counts: observed.counts.clone(), reported_secs_ago: observed.at.elapsed().as_secs() })
         });
@@ -231,6 +295,9 @@ impl Inner {
     }
 
     /// 记下一个节点上报里的用量和状态。
+    ///
+    /// 出口的观测只看前 [`MAX_EXITS`] 项，只收经它自己网络里启用了出口的节点出去的：别的编号报上来也用不着留，留着只占地方。
+    /// 读存储失败、说不清哪些是出口时，这次的观测不记，别的照记。
     pub(super) fn usage_reported(&mut self, node: &NodeRecord, report: UsageReport) {
         let UsageReport { run, exit, exits, proxies, listeners, forwards } = report;
         let now = Instant::now();
@@ -243,7 +310,15 @@ impl Inner {
         if let Some(exit) = exit {
             self.usage.exit_reported(node.id, run, *exit, now);
         }
-        self.usage.observed(node.id, exits, now);
+        // 同一个出口报了几遍的，留最后那一遍。
+        let exits: BTreeMap<NodeId, ExitObservation> = exits.into_iter().take(MAX_EXITS).map(|seen| (seen.exit, seen)).collect();
+        if exits.is_empty() {
+            return;
+        }
+        match self.store.exits_among(node.network, exits.keys().copied()) {
+            Ok(enabled) => self.usage.observed(node.id, exits.into_values().filter(|seen| enabled.contains(&seen.exit)), now),
+            Err(err) => tracing::warn!(node = %node.id, "读不出哪些节点是出口，这次报的出口观测不记：{}", error_chain(&err)),
+        }
     }
 }
 
@@ -263,6 +338,26 @@ mod tests {
 
     fn report(total: u64, failed_by_exit: u64) -> ExitReport {
         ExitReport { total, failed_by_exit, ..ExitReport::default() }
+    }
+
+    fn id(raw: u32) -> NodeId {
+        NodeId::new(raw).unwrap()
+    }
+
+    fn seen(exit: NodeId, flows: u64) -> ExitObservation {
+        ExitObservation { exit, flows, bytes_up: 0, bytes_down: 0, failed_by_target: 0, refused: 0, failed_by_exit: 0, unreachable: 0 }
+    }
+
+    /// 按发起节点记的和 `observed` 的键对得上，也没有空着的。
+    fn assert_indexed(usage: &Usage) {
+        let indexed: BTreeSet<(NodeId, NodeId)> =
+            usage.observers.iter().flat_map(|(&by, exits)| exits.iter().map(move |&exit| (exit, by))).collect();
+        assert_eq!(indexed, usage.observed.keys().copied().collect());
+        assert!(usage.observers.values().all(|exits| !exits.is_empty()));
+    }
+
+    fn kept_by(usage: &Usage, by: NodeId) -> BTreeSet<u32> {
+        usage.observed.keys().filter(|key| key.1 == by).map(|key| key.0.get()).collect()
     }
 
     #[test]
@@ -293,25 +388,55 @@ mod tests {
     #[test]
     fn observations_are_kept_per_exit_and_initiator_and_forgotten_with_either() {
         let mut usage = Usage::default();
-        let (gw, laptop, phone) = (NodeId::new(2).unwrap(), NodeId::new(1).unwrap(), NodeId::new(3).unwrap());
-        let seen = |exit, flows| ExitObservation {
-            exit,
-            flows,
-            bytes_up: 0,
-            bytes_down: 0,
-            failed_by_target: 0,
-            refused: 0,
-            failed_by_exit: 0,
-            unreachable: 0,
-        };
-        usage.observed(laptop, vec![seen(gw, 3)], Instant::now());
+        let (laptop, gw, phone, hk) = (id(1), id(2), id(3), id(4));
+        usage.observed(laptop, vec![seen(gw, 3), seen(hk, 7)], Instant::now());
         usage.observed(phone, vec![seen(gw, 5)], Instant::now());
         usage.observed(laptop, vec![seen(gw, 4)], Instant::now());
-        assert_eq!(usage.observed.len(), 2);
+        assert_eq!(usage.observed.len(), 3, "这次没报的 hk 还留着");
         assert_eq!(usage.observed[&(gw, laptop)].counts.flows, 4, "同一个发起节点的新报的顶替旧的");
+        let about_gw: Vec<_> = usage.observed_about(gw).map(|(by, observed)| (by, observed.counts.flows)).collect();
+        assert_eq!(about_gw, [(laptop, 4), (phone, 5)], "一个出口只看到经它出去的");
+        assert_indexed(&usage);
+
         usage.forget(phone);
-        assert_eq!(usage.observed.len(), 1);
+        assert_eq!(usage.observed.len(), 2);
+        assert_indexed(&usage);
+        usage.exit_disabled(gw);
+        assert_eq!(usage.observed_keys(), [(hk, laptop)], "停用的出口的观测丢掉");
+        assert_indexed(&usage);
+        usage.observed(laptop, vec![seen(gw, 1)], Instant::now());
         usage.forget(gw);
-        assert!(usage.observed.is_empty());
+        assert_eq!(usage.observed_keys(), [(hk, laptop)]);
+        assert_indexed(&usage);
+        usage.forget(laptop);
+        assert!(usage.observed.is_empty() && usage.observers.is_empty());
+    }
+
+    #[test]
+    fn an_initiator_keeps_at_most_max_exits_observations_and_the_longest_untouched_ones_go_first() {
+        let mut usage = Usage::default();
+        let (laptop, phone) = (id(100_001), id(100_002));
+        let max = u32::try_from(MAX_EXITS).unwrap();
+        let start = Instant::now();
+        let at = |secs| start + Duration::from_secs(secs);
+        usage.observed(laptop, (1..=max).map(|exit| seen(id(exit), 1)), at(0));
+        usage.observed(phone, vec![seen(id(1), 1)], at(0));
+        usage.observed(laptop, vec![seen(id(1), 2), seen(id(3), 2)], at(10));
+        assert_eq!(kept_by(&usage, laptop).len(), MAX_EXITS);
+
+        // 满了之后又报了 3 个新的：去掉最久没有更新的 3 个，刚更新过的 1 和 3 留着。
+        usage.observed(laptop, (1001..=1003).map(|exit| seen(id(exit), 1)), at(20));
+        let kept = kept_by(&usage, laptop);
+        assert_eq!(kept.len(), MAX_EXITS);
+        assert!(kept.is_superset(&[1, 3, 1001, 1002, 1003].into()), "{kept:?}");
+        assert!(kept.is_disjoint(&[2, 4, 5].into()), "{kept:?}");
+        assert_eq!(usage.observed[&(id(1), laptop)].counts.flows, 2);
+        assert_eq!(kept_by(&usage, phone), [1].into(), "别的发起节点的不受影响");
+        assert_indexed(&usage);
+
+        // 一次报得比上限还多：只收前面那些，之前留的全让给它们。
+        usage.observed(laptop, (5001..=max + 5010).map(|exit| seen(id(exit), 1)), at(30));
+        assert_eq!(kept_by(&usage, laptop), (5001..5001 + max).collect());
+        assert_indexed(&usage);
     }
 }

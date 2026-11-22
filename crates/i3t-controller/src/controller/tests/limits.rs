@@ -9,7 +9,7 @@ use i3t_model::control::{
 use i3t_model::netmap::{self, ExitRole, ForwardProtocol, ListenerProtocol};
 use i3t_proto::flow::Class;
 
-use super::super::testing::{CAN_DO_ALL, Lab, proxy};
+use super::super::testing::{CAN_DO_ALL, Lab, hello, proxy};
 use crate::store::LogFilter;
 
 fn forward(listen_node: i3t_proto::NodeId, target_node: i3t_proto::NodeId, bind: &str) -> ForwardInput {
@@ -89,6 +89,62 @@ fn an_exit_keeps_its_own_counts_and_the_initiators_view_for_cross_checking_and_h
     exit.send(&lab.controller, ToController::Report(Box::new(Report { exit: Some(Box::new(counts(50, 5, 25))), ..report(1) })));
     assert_eq!(lab.controller.exit(network.id, exit.id).unwrap().health, ExitHealth::Degraded, "40 个请求里 5 个是出口自己的问题");
     assert!(lab.controller.exit(network.id, laptop.id).is_err(), "不是出口的节点没有出口的视图");
+}
+
+#[test]
+fn only_observations_of_enabled_exits_in_the_reporters_own_network_are_kept_until_the_exit_is_switched_off() {
+    let mut lab = Lab::new();
+    let network = lab.network("home");
+    let office = lab.network("office");
+    let exit = lab.join_with(network.id, &[], CAN_DO_ALL);
+    let plain = lab.join_with(network.id, &[], CAN_DO_ALL);
+    let elsewhere = lab.join_with(office.id, &[], CAN_DO_ALL);
+    let laptop = lab.join(network.id, &[]);
+    lab.controller.enable_exit(network.id, exit.id, ExitRole::default()).unwrap();
+    lab.controller.enable_exit(office.id, elsewhere.id, ExitRole::default()).unwrap();
+
+    let seen = |exit, flows| ExitObservation {
+        exit,
+        flows,
+        bytes_up: 0,
+        bytes_down: 0,
+        failed_by_target: 0,
+        refused: 0,
+        failed_by_exit: 0,
+        unreachable: 0,
+    };
+    let unknown = i3t_proto::NodeId::new(999_999).unwrap();
+    let exits = vec![seen(exit.id, 2), seen(unknown, 1), seen(plain.id, 1), seen(elsewhere.id, 1), seen(exit.id, 3)];
+    laptop.send(&lab.controller, ToController::Report(Box::new(Report { exits, ..report(1) })));
+    assert_eq!(lab.controller.lock().usage.observed_keys(), [(exit.id, laptop.id)], "没有编号、没启用出口、别的网络的都不收");
+
+    // 之后才启用的出口不带着之前没收的观测。
+    lab.controller.enable_exit(network.id, plain.id, ExitRole::default()).unwrap();
+    assert!(lab.controller.exit(network.id, plain.id).unwrap().observed.is_empty());
+
+    // 断线之后还看得到，重连再报的顶替它。
+    lab.controller.disconnect(laptop.session);
+    let view = lab.controller.exit(network.id, exit.id).unwrap();
+    assert_eq!(view.observed.iter().map(|seen| (seen.by.id, seen.counts.flows)).collect::<Vec<_>>(), [(laptop.id, 3)]);
+    let laptop = lab.connect(laptop.key, Declared::default()).unwrap();
+    laptop.send(&lab.controller, ToController::Report(Box::new(Report { exits: vec![seen(exit.id, 1)], ..report(2) })));
+    let views = lab.controller.exits(network.id).unwrap();
+    let observed: Vec<_> =
+        views.iter().flat_map(|view| view.observed.iter().map(|seen| (view.node.id, seen.by.id, seen.counts.flows))).collect();
+    assert_eq!(observed, [(exit.id, laptop.id, 1)]);
+
+    // 停用出口：经它出去的观测跟着丢掉，再启用时从头记。
+    lab.controller.disable_exit(network.id, exit.id).unwrap();
+    assert!(lab.controller.lock().usage.observed_keys().is_empty());
+    lab.controller.enable_exit(network.id, exit.id, ExitRole::default()).unwrap();
+    assert!(lab.controller.exit(network.id, exit.id).unwrap().observed.is_empty(), "不带着停用之前的");
+
+    // 节点撤回了出口的声明，出口随之关闭，观测也一样丢掉。
+    laptop.send(&lab.controller, ToController::Report(Box::new(Report { exits: vec![seen(exit.id, 5)], ..report(2) })));
+    assert_eq!(lab.controller.lock().usage.observed_keys(), [(exit.id, laptop.id)]);
+    exit.send(&lab.controller, ToController::Hello(hello(Declared::default())));
+    assert_eq!(lab.controller.node(network.id, exit.id).unwrap().node.exit, None);
+    assert!(lab.controller.lock().usage.observed_keys().is_empty());
 }
 
 #[test]
