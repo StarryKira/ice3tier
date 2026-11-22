@@ -12,10 +12,10 @@ use i3t_model::admin::{LogRef, NetworkId, RefKind, action};
 use i3t_proto::NodeId;
 use serde_json::json;
 
-use super::{MIN_INTERVAL, pair};
+use super::{MIN_INTERVAL, STORE_RETRY, pair};
 use crate::controller::{Controller, Inner, count};
 use crate::error::{Entity, Error};
-use crate::store::NodeRecord;
+use crate::store::{NetworkRecord, NodeRecord};
 
 /// 同时最多跑几个测试。一个节点同时出现在几对里也不会超过节点自己的上限（8 个）。
 pub(crate) const CONCURRENCY: usize = 4;
@@ -28,8 +28,14 @@ pub(crate) struct Matrix {
     started: Instant,
     /// 还没开始的节点对，按顺序。
     pending: Vec<(NodeId, NodeId)>,
-    /// 正在跑的测试和它们的节点对。
+    /// 正在跑的测试和它们的节点对，包括已经结束、结果还没存下来的：它们都存下来了矩阵才算结束。
     running: BTreeMap<u64, (NodeId, NodeId)>,
+    /// 管理员取消了，还有测试没有收尾：不再开始新的；测试都收尾了才算取消完，这之前不能开始下一次。
+    cancelling: bool,
+    /// 开始下一对时存储出错了：这个时刻之前不再排。
+    retry_at: Option<Instant>,
+    /// 正在排。开始一对时节点掉线、别的测试随之结束，不再从那里重入，外面那一圈接着排。
+    scheduling: bool,
 }
 
 impl Matrix {
@@ -45,6 +51,19 @@ impl Matrix {
         let finished = self.run.cells.iter().filter(|cell| !matches!(cell.state, CellState::Pending | CellState::Running)).count();
         self.run.finished = count(finished);
     }
+
+    /// 现在可以排：没有在排，也没有在等存储出错之后再试的时刻。
+    fn may_schedule(&self, now: Instant) -> bool {
+        !self.is_finished() && !self.cancelling && !self.scheduling && self.retry_at.is_none_or(|at| at <= now)
+    }
+
+    /// 测试用：当作这次矩阵开始以来已经过了两次矩阵之间的间隔。
+    #[cfg(test)]
+    pub(super) fn interval_passed(&mut self) {
+        if let Some(started) = self.started.checked_sub(MATRIX_INTERVAL) {
+            self.started = started;
+        }
+    }
 }
 
 impl Controller {
@@ -57,6 +76,9 @@ impl Controller {
         let mut inner = self.lock();
         let record = inner.require_network(network)?;
         if let Some(matrix) = inner.diag.matrices.get(&network) {
+            if matrix.cancelling {
+                return Err(Error::Busy("这个网络的全网矩阵正在取消，还有测试的结果没存下来，稍后再试".to_owned()));
+            }
             if !matrix.is_finished() {
                 return Err(Error::Busy("这个网络正在跑全网矩阵，等它结束或者取消它".to_owned()));
             }
@@ -105,19 +127,22 @@ impl Controller {
         };
         let detail = format!("开始全网矩阵：{} 个节点，{} 对，其中 {} 对要测", nodes.len(), run.total, pending.len());
         let params = json!({ "matrix": id, "nodes": nodes.len(), "pairs": run.total, "testing": pending.len() });
-        inner.store.log_refs(
-            run.started_at,
-            Some(network),
-            action::TEST_MATRIX,
-            &detail,
-            &[LogRef::new(RefKind::Network, network.0)],
-            params,
-        )?;
+        let refs = [LogRef::new(RefKind::Network, network.0)];
+        // 操作记录和它顺带的清理在一个事务里：写不进去时什么都没有变，可以再试。
+        inner.store.atomically(|store| store.log_refs(run.started_at, Some(network), action::TEST_MATRIX, &detail, &refs, params))?;
         tracing::info!(network = %network, matrix = id, pairs = run.total, testing = pending.len(), "开始全网矩阵");
-        let mut matrix = Matrix { run, started: Instant::now(), pending, running: BTreeMap::new() };
+        let mut matrix = Matrix {
+            run,
+            started: Instant::now(),
+            pending,
+            running: BTreeMap::new(),
+            cancelling: false,
+            retry_at: None,
+            scheduling: false,
+        };
         matrix.count_finished();
         inner.diag.matrices.insert(network, matrix);
-        inner.schedule_matrix(&record)?;
+        inner.schedule_matrix(&record, Instant::now());
         let run = inner.matrix_run(network)?;
         self.wake_if_needed(&inner);
         Ok(run)
@@ -136,38 +161,65 @@ impl Controller {
 
     /// 取消正在跑的全网矩阵：正在跑的测试取消，还没开始的不再开始。
     ///
+    /// 测试都收尾了矩阵才算取消完。有测试的结果存不下来时，它们的结果已经定成取消，后台任务接着存，存下来了矩阵才算取消完；
+    /// 这期间可以再取消一次，不能开始下一次。
+    ///
     /// # Errors
     ///
-    /// 没有这个网络、没有矩阵（`not_found`），或者它已经结束了（`busy`）。
+    /// 没有这个网络、没有矩阵（`not_found`），或者它已经结束了（`busy`）；读写存储失败。
     pub fn cancel_matrix(&self, network: NetworkId) -> Result<MatrixRun, Error> {
         let mut inner = self.lock();
         inner.require_network(network)?;
-        let Some(matrix) = inner.diag.matrices.get_mut(&network) else { return Err(Error::NotFound(Entity::Matrix)) };
+        let Some(matrix) = inner.diag.matrices.get(&network) else { return Err(Error::NotFound(Entity::Matrix)) };
         if matrix.is_finished() {
             return Err(Error::Busy("全网矩阵已经结束了".to_owned()));
         }
-        // 先标成取消：下面结束各个测试时不会再开始新的。
-        matrix.run.state = MatrixState::Cancelled;
-        for &(a, b) in &std::mem::take(&mut matrix.pending) {
-            if let Some(cell) = matrix.cell_mut(a, b) {
-                cell.state = CellState::Cancelled;
+        // 已经在取消的是再取消一次：操作记过了，只是接着收尾。
+        if !matrix.cancelling {
+            let (id, at) = (matrix.run.id, inner.clock.now());
+            let refs = [LogRef::new(RefKind::Network, network.0)];
+            let params = json!({ "matrix": id });
+            // 操作记录和它顺带的清理在一个事务里：写不进去时什么都没有变，可以再试。
+            inner
+                .store
+                .atomically(|store| store.log_refs(at, Some(network), action::TEST_MATRIX_CANCEL, "取消了全网矩阵", &refs, params))?;
+            tracing::info!(network = %network, "取消全网矩阵");
+            if let Some(matrix) = inner.diag.matrices.get_mut(&network) {
+                // 先标成在取消：下面结束各个测试时不会再开始新的。
+                matrix.cancelling = true;
+                for &(a, b) in &std::mem::take(&mut matrix.pending) {
+                    if let Some(cell) = matrix.cell_mut(a, b) {
+                        cell.state = CellState::Cancelled;
+                    }
+                }
+                matrix.count_finished();
             }
         }
-        let running: Vec<u64> = matrix.running.keys().copied().collect();
-        for test in running {
-            inner.finish_test(test, true)?;
+        let tests: Vec<u64> = inner.diag.matrices.get(&network).map(|matrix| matrix.running.keys().copied().collect()).unwrap_or_default();
+        // 先把结果都定成取消（已经定下的不变），再一个个存：存下来时给节点发结束，节点可能因此掉线，
+        // 那时它参与的别的测试按掉线结束，定下的结果照样是取消。
+        for &test in &tests {
+            inner.fix_outcome(test, true);
         }
-        let now = inner.clock.now();
-        let mut id = None;
-        if let Some(matrix) = inner.diag.matrices.get_mut(&network) {
-            matrix.run.finished_at = Some(now);
-            matrix.count_finished();
-            id = Some(matrix.run.id);
+        // 一个存不下来不耽误别的；存不下来的后台任务接着存。
+        let mut failed = None;
+        for test in tests {
+            // 前面结束的测试给节点发结束时，节点可能掉线，连带结束了这一个。
+            if !inner.diag.running.contains_key(&test) {
+                continue;
+            }
+            if let Err(error) = inner.finish_test(test, true) {
+                tracing::warn!(test, "取消主动测试时存储出错，稍后再试：{error}");
+                failed.get_or_insert(error);
+            }
         }
-        let refs = [LogRef::new(RefKind::Network, network.0)];
-        inner.store.log_refs(now, Some(network), action::TEST_MATRIX_CANCEL, "取消了全网矩阵", &refs, json!({ "matrix": id }))?;
-        tracing::info!(network = %network, "取消全网矩阵");
-        inner.matrix_run(network)
+        // 一个测试都没有在跑时，上面不会有测试结束来带着它收尾。
+        inner.finish_matrix_if_done(network);
+        self.wake_if_needed(&inner);
+        match failed {
+            Some(error) => Err(error),
+            None => inner.matrix_run(network),
+        }
     }
 }
 
@@ -176,20 +228,55 @@ impl Inner {
         self.diag.matrices.get(&network).map(|matrix| matrix.run.clone()).ok_or(Error::NotFound(Entity::Matrix))
     }
 
-    /// 有空位就开始矩阵里排着的节点对。刚单独测过的对先跳过，等它过了间隔。
-    pub(super) fn schedule_matrices(&mut self) -> Result<(), Error> {
+    /// 有空位就开始矩阵里排着的节点对。刚单独测过的对先跳过，等它过了间隔。一个网络出错不耽误别的网络。
+    pub(super) fn schedule_matrices(&mut self, now: Instant) {
         let networks: Vec<NetworkId> =
-            self.diag.matrices.iter().filter(|(_, matrix)| !matrix.is_finished()).map(|(network, _)| *network).collect();
+            self.diag.matrices.iter().filter(|(_, matrix)| matrix.may_schedule(now)).map(|(network, _)| *network).collect();
         for network in networks {
-            if let Some(record) = self.store.network(network)? {
-                self.schedule_matrix(&record)?;
-            }
+            self.schedule_network_matrix(network, now);
         }
-        Ok(())
     }
 
-    fn schedule_matrix(&mut self, network: &crate::store::NetworkRecord) -> Result<(), Error> {
-        let now = Instant::now();
+    /// 排一个网络的矩阵。
+    fn schedule_network_matrix(&mut self, network: NetworkId, now: Instant) {
+        if !self.diag.matrices.get(&network).is_some_and(|matrix| matrix.may_schedule(now)) {
+            return;
+        }
+        match self.store.network(network) {
+            Ok(Some(record)) => self.schedule_matrix(&record, now),
+            Ok(None) => {}
+            Err(error) => self.retry_matrix_later(network, now, &error.into()),
+        }
+    }
+
+    /// 有空位就开始排着的节点对。存储出错时记下日志，隔 [`STORE_RETRY`] 再排；正在排的时候不重入。
+    fn schedule_matrix(&mut self, network: &NetworkRecord, now: Instant) {
+        let Some(matrix) = self.diag.matrices.get_mut(&network.id).filter(|matrix| matrix.may_schedule(now)) else { return };
+        matrix.scheduling = true;
+        let scheduled = self.try_schedule_matrix(network, now);
+        if let Some(matrix) = self.diag.matrices.get_mut(&network.id) {
+            matrix.scheduling = false;
+            if scheduled.is_ok() {
+                matrix.retry_at = None;
+            }
+        }
+        if let Err(error) = scheduled {
+            self.retry_matrix_later(network.id, now, &error);
+        }
+    }
+
+    fn retry_matrix_later(&mut self, network: NetworkId, now: Instant, error: &Error) {
+        tracing::warn!(network = %network, "全网矩阵开始下一对时出错，{} 秒后再试：{error}", STORE_RETRY.as_secs());
+        if let Some(matrix) = self.diag.matrices.get_mut(&network) {
+            matrix.retry_at = Some(now + STORE_RETRY);
+        }
+    }
+
+    /// 出错时排着的还排着：这一对开始了（或者知道它不用测了）才从排着的里面拿掉。
+    ///
+    /// 开始不了的一对排到最后，这一轮就停下：下一轮先排别的对，一对一直开始不了也挡不住后面的；
+    /// 存储整个写不进去时一轮也只多试一次，不会把排着的每一对都试一遍。
+    fn try_schedule_matrix(&mut self, network: &NetworkRecord, now: Instant) -> Result<(), Error> {
         loop {
             let Some(matrix) = self.diag.matrices.get(&network.id).filter(|matrix| !matrix.is_finished()) else { return Ok(()) };
             if matrix.running.len() >= CONCURRENCY {
@@ -200,55 +287,72 @@ impl Inner {
                 self.diag.running.values().any(|running| pair(running.base.a.id, running.base.b.id) == key)
                     || self.diag.last.get(&key).is_some_and(|(started, _)| now.saturating_duration_since(*started) < MIN_INTERVAL)
             };
-            let Some(index) = matrix.pending.iter().position(|&(a, b)| !busy(a, b)) else {
+            let Some(&(a, b)) = matrix.pending.iter().find(|&&(a, b)| !busy(a, b)) else {
                 self.finish_matrix_if_done(network.id);
                 return Ok(());
             };
             let matrix_id = matrix.run.id;
-            let (a, b) = self
-                .diag
-                .matrices
-                .get_mut(&network.id)
-                .map(|matrix| matrix.pending.remove(index))
-                .ok_or(Error::NotFound(Entity::Matrix))?;
-            let (Some(a_record), Some(b_record)) = (self.store.node(a)?, self.store.node(b)?) else {
-                // 节点在矩阵开始之后被删掉了。
-                if let Some(cell) = self.diag.matrices.get_mut(&network.id).and_then(|matrix| matrix.cell_mut(a, b)) {
-                    cell.state = CellState::Skipped;
+            let view = match self.start_pair(network, matrix_id, a, b) {
+                Ok(Some(view)) => view,
+                Ok(None) => {
+                    // 节点在矩阵开始之后被删掉了。
+                    if let Some(matrix) = self.diag.matrices.get_mut(&network.id) {
+                        matrix.pending.retain(|&queued| queued != (a, b));
+                        if let Some(cell) = matrix.cell_mut(a, b) {
+                            cell.state = CellState::Skipped;
+                        }
+                        matrix.count_finished();
+                    }
+                    continue;
                 }
-                continue;
+                Err(error) => {
+                    if let Some(matrix) = self.diag.matrices.get_mut(&network.id) {
+                        matrix.pending.retain(|&queued| queued != (a, b));
+                        matrix.pending.push((a, b));
+                    }
+                    return Err(error);
+                }
             };
-            // 矩阵只测直连能力和延迟：有直连时量直连，没有时量默认会经的 relay。不量吞吐，不算选路。
-            let request = TestRequest {
-                items: vec![TestItem::Direct, TestItem::DirectQuality, TestItem::RelayQuality],
-                throughput: false,
-                via: Vec::new(),
-            };
-            let view = self.begin_test(network, &a_record, &b_record, request, Some(matrix_id))?;
+            // 还在进行中的（包括结果定下了、还没存下来的）记进矩阵，格子里显示它在测；存下来时矩阵才填上结果。
+            let shown = self.diag.running.get(&view.id).map(|running| running.view(false));
             if let Some(matrix) = self.diag.matrices.get_mut(&network.id) {
-                if view.state == TestState::Running {
+                // 按值拿掉，不靠找它时的位置：开始一对时节点可能掉线、别的测试随之结束，不去假设这中间 `pending` 没被动过。
+                matrix.pending.retain(|&queued| queued != (a, b));
+                if shown.is_some() {
                     matrix.running.insert(view.id, (a, b));
                 }
                 if let Some(cell) = matrix.cell_mut(a, b) {
-                    fill_cell(cell, &view);
+                    fill_cell(cell, shown.as_ref().unwrap_or(&view));
                 }
                 matrix.count_finished();
             }
         }
     }
 
+    /// 开始矩阵里的一对。两个节点有一个已经被删掉时返回 `None`。出错时什么都没有变。
+    fn start_pair(&mut self, network: &NetworkRecord, matrix: u64, a: NodeId, b: NodeId) -> Result<Option<TestView>, Error> {
+        let (Some(a), Some(b)) = (self.store.node(a)?, self.store.node(b)?) else { return Ok(None) };
+        // 矩阵只测直连能力和延迟：有直连时量直连，没有时量默认会经的 relay。不量吞吐，不算选路。
+        let request = TestRequest {
+            items: vec![TestItem::Direct, TestItem::DirectQuality, TestItem::RelayQuality],
+            throughput: false,
+            via: Vec::new(),
+        };
+        self.begin_test(network, &a, &b, request, Some(matrix)).map(Some)
+    }
+
     /// 矩阵里的一个测试结束了：记下摘要，空出来的位置给排着的。
-    pub(super) fn matrix_test_finished(&mut self, network: NetworkId, matrix: u64, view: &TestView) -> Result<(), Error> {
-        let Some(state) = self.diag.matrices.get_mut(&network).filter(|state| state.run.id == matrix) else { return Ok(()) };
+    pub(super) fn matrix_test_finished(&mut self, network: NetworkId, matrix: u64, view: &TestView) {
+        let Some(state) = self.diag.matrices.get_mut(&network).filter(|state| state.run.id == matrix) else { return };
         state.running.remove(&view.id);
         if let Some(cell) = state.cell_mut(view.a.id, view.b.id) {
             fill_cell(cell, view);
         }
         state.count_finished();
-        if let Some(record) = self.store.network(network)? {
-            self.schedule_matrix(&record)?;
-        }
-        Ok(())
+        // 最后一个测试存下来了，矩阵就结束了（在取消的就算取消完了），不用等下面读存储。
+        self.finish_matrix_if_done(network);
+        // 已经做成了的事之后接着排，排不上不算它失败：排着的还排着，后台任务隔一会儿再排。
+        self.schedule_network_matrix(network, Instant::now());
     }
 
     fn finish_matrix_if_done(&mut self, network: NetworkId) {
@@ -257,16 +361,22 @@ impl Inner {
         if matrix.is_finished() || !matrix.pending.is_empty() || !matrix.running.is_empty() {
             return;
         }
-        matrix.run.state = MatrixState::Done;
+        matrix.run.state = if matrix.cancelling { MatrixState::Cancelled } else { MatrixState::Done };
+        matrix.cancelling = false;
         matrix.run.finished_at = Some(now);
         matrix.count_finished();
-        tracing::info!(network = %network, matrix = matrix.run.id, "全网矩阵做完了");
+        tracing::info!(network = %network, matrix = matrix.run.id, state = ?matrix.run.state, "全网矩阵结束了");
     }
 
-    /// 矩阵里有排着的节点对在等间隔过去时，什么时候再来看。
+    /// 矩阵里有排着的节点对时，什么时候再来看：在等间隔过去的隔一秒，开始不了的到再试的时刻。
     pub(super) fn matrix_wake(&self, now: Instant) -> Option<Instant> {
-        let waiting = self.diag.matrices.values().any(|matrix| !matrix.is_finished() && !matrix.pending.is_empty());
-        waiting.then(|| now + Duration::from_secs(1))
+        let soon = now + Duration::from_secs(1);
+        self.diag
+            .matrices
+            .values()
+            .filter(|matrix| !matrix.is_finished() && !matrix.pending.is_empty())
+            .map(|matrix| matrix.retry_at.map_or(soon, |at| at.max(soon)))
+            .min()
     }
 }
 

@@ -32,7 +32,7 @@ use serde_json::json;
 
 use super::{Controller, Inner};
 use crate::error::{Entity, Error, InField};
-use crate::store::{NetworkRecord, NodeRecord};
+use crate::store::{NetworkRecord, NodeRecord, Store};
 
 /// 同一对节点两次测试至少隔多久，带吞吐的至少隔多久。
 const MIN_INTERVAL: Duration = Duration::from_secs(10);
@@ -48,6 +48,9 @@ const DEFAULT_LIST: u32 = 20;
 const MAX_LIST: u32 = 200;
 /// 一个测试最多指定几条 relay 路径：和默认测的条数一样，加上直连，一个带吞吐的测试最多量三条路径、六条测量流。
 const MAX_VIA: usize = 2;
+/// 测试的结果、矩阵的下一对写不进存储时，隔多久再试。节点的每条消息都会叫醒后台任务，
+/// 不隔开的话数据库出错期间每来一条消息就试一次、记一遍日志。
+const STORE_RETRY: Duration = Duration::from_secs(5);
 
 /// 进行中的测试和全网矩阵，只在内存里：controller 重启之后，进行中的测试在存储里显示成失败。
 #[derive(Default)]
@@ -73,9 +76,12 @@ struct Running {
     skips: Skips,
     initiator: Option<TestReport>,
     responder: Option<TestReport>,
+    /// 到这个时刻还没报完就按手上有的结束。结果定下了、还没存下来时，是下一次再存的时刻。
     deadline: Instant,
     /// 发起方报完、controller 发出结束的时刻。
     ended: Option<Instant>,
+    /// 第一次结束时定下的结果，连同结束的时刻。存不下来时它还留在进行中，后台任务原样再存，这期间来的上报不算数。
+    outcome: Option<TestView>,
 }
 
 impl Running {
@@ -87,6 +93,19 @@ impl Running {
             responder: self.responder.as_ref(),
             finished,
         })
+    }
+
+    /// 给人看的样子：结束了的是定下的结果（还没存下来也一样），没结束的是到现在为止的。
+    fn current(&self) -> TestView {
+        self.outcome.clone().unwrap_or_else(|| self.view(false))
+    }
+
+    /// 后台任务什么时候要为它回来：结束它，或者再存一次定下的结果。
+    fn due_at(&self) -> Instant {
+        match (&self.outcome, self.ended) {
+            (None, Some(ended)) => (ended + RESPONDER_GRACE).min(self.deadline),
+            _ => self.deadline,
+        }
     }
 }
 
@@ -120,7 +139,7 @@ impl Controller {
         let inner = self.lock();
         inner.require_network(network)?;
         if let Some(running) = inner.diag.running.get(&id).filter(|running| running.base.network == network) {
-            return Ok(running.view(false));
+            return Ok(running.current());
         }
         inner.store.test(network, id)?.map(|view| inner.settled(view)).ok_or(Error::NotFound(Entity::Test))
     }
@@ -144,7 +163,7 @@ impl Controller {
         Ok(stored
             .into_iter()
             .map(|view| match inner.diag.running.get(&view.id) {
-                Some(running) => running.view(false),
+                Some(running) => running.current(),
                 None => inner.settled(view),
             })
             .collect())
@@ -152,30 +171,43 @@ impl Controller {
 
     /// 取消一个进行中的测试。已经有的结果照样留着。
     ///
+    /// 操作记录和取消的结果在一个事务里存下来，存不下来时什么都没有变，可以再试。
+    /// 随矩阵一起取消了、结果还没存下来的，再取消一次就是接着存。
+    ///
     /// # Errors
     ///
-    /// 这个网络里没有这个测试（`not_found`）；它已经结束了（`busy`）。
+    /// 这个网络里没有这个测试（`not_found`）；它已经结束了（`busy`）；读写存储失败。
     pub fn cancel_test(&self, network: NetworkId, id: u64) -> Result<TestView, Error> {
         let mut inner = self.lock();
         inner.require_network(network)?;
-        if inner.diag.running.get(&id).is_none_or(|running| running.base.network != network) {
+        let Some(running) = inner.diag.running.get(&id).filter(|running| running.base.network == network) else {
             return match inner.store.test(network, id)? {
                 Some(_) => Err(Error::Busy(format!("测试 #{id} 已经结束了"))),
                 None => Err(Error::NotFound(Entity::Test)),
             };
-        }
-        let view = inner.finish_test(id, true)?;
-        let detail = format!("取消了节点 {} 和 {} 之间的主动测试 #{id}", view.a.name, view.b.name);
-        inner.store.log_refs(
-            inner.clock.now(),
-            Some(network),
-            action::TEST_CANCEL,
-            &detail,
-            &[LogRef::node(view.a.id), LogRef::node(view.b.id)],
-            json!({ "test": id, "a": view.a.id, "a_name": view.a.name, "b": view.b.id, "b_name": view.b.name }),
-        )?;
+        };
+        let finished = match running.outcome.as_ref().map(|outcome| outcome.state) {
+            // 随矩阵一起取消了，结果还没存下来：接着存。
+            Some(TestState::Cancelled) => inner.finish_test(id, true),
+            // 已经因为别的原因结束了，只是结果还没存下来。
+            Some(_) => return Err(Error::Busy(format!("测试 #{id} 已经结束了"))),
+            None => {
+                let (a, b) = (running.base.a.clone(), running.base.b.clone());
+                let detail = format!("取消了节点 {} 和 {} 之间的主动测试 #{id}", a.name, b.name);
+                let refs = [LogRef::node(a.id), LogRef::node(b.id)];
+                let params = json!({ "test": id, "a": a.id, "a_name": a.name, "b": b.id, "b_name": b.name });
+                let view = inner.outcome(id, true).ok_or(Error::NotFound(Entity::Test))?;
+                let at = view.finished_at.unwrap_or_default();
+                inner.store.atomically(|store| {
+                    store.log_refs(at, Some(network), action::TEST_CANCEL, &detail, &refs, params)?;
+                    store.update_test(&view)
+                })?;
+                inner.test_stored(&view);
+                Ok(view)
+            }
+        };
         self.wake_if_needed(&inner);
-        Ok(view)
+        finished
     }
 }
 
@@ -270,6 +302,8 @@ impl Inner {
     }
 
     /// 建起一个测试并下发指令。调用前已经查过间隔。
+    ///
+    /// 出错时什么都没有变：存储里没有这个测试，没有指令发出去，可以原样再试。
     pub(super) fn begin_test(
         &mut self,
         network: &NetworkRecord,
@@ -318,13 +352,20 @@ impl Inner {
             view.state = if blocker.is_some() { TestState::Failed } else { TestState::Done };
             view.error.clone_from(&blocker);
             view.finished_at = Some(started_at);
-            view.id = self.store.insert_test(&view)?;
             // 整个测试做不了时，每一项都是"没有做"，原因就是那一条。
             let skips = match &blocker {
                 Some(problem) => Skips { direct: Some(problem.clone()), relay: Some(problem.clone()), throughput: Some(problem.clone()) },
                 None => skips,
             };
-            let running = Running { base: view.clone(), skips, initiator: None, responder: None, deadline: Instant::now(), ended: None };
+            let running = Running {
+                base: view.clone(),
+                skips,
+                initiator: None,
+                responder: None,
+                deadline: Instant::now(),
+                ended: None,
+                outcome: None,
+            };
             let mut view = TestView { state: view.state, error: view.error.clone(), finished_at: view.finished_at, ..running.view(false) };
             if let Some(route) = view.route.as_mut().filter(|route| route.state == ItemState::Pending) {
                 route.state = ItemState::Skipped;
@@ -334,33 +375,48 @@ impl Inner {
                 host.state = ItemState::Skipped;
                 host.problem.clone_from(&blocker);
             }
-            self.store.update_test(&view)?;
-            self.log_test(&view)?;
+            // 编号要等插进去才有，所以插完再改一次。几笔写在一个事务里，出错时什么都没有留下。
+            self.store.atomically(|store| {
+                view.id = store.insert_test(&view)?;
+                store.update_test(&view)?;
+                Self::log_test(store, &view)
+            })?;
             return Ok(view);
         }
-        view.id = self.store.insert_test(&view)?;
+        // 插进去的这一行和操作记录在一个事务里：出错时存储里没有这个测试，矩阵再排这一对时不会多出一条"没做完"的。
+        self.store.atomically(|store| {
+            view.id = store.insert_test(&view)?;
+            Self::log_test(store, &view)
+        })?;
         let window = window_secs(&items, &view.request);
         let (id, paths) = (view.id, view.request.via.clone());
         let order = |peer: NodeId, role| TestOrder { test: id, peer, role, items, paths: paths.clone(), window_secs: window };
         tracing::info!(test = view.id, a = %a.id, b = %b.id, ?items, window_secs = window, "开始主动测试");
         let now = Instant::now();
-        let deadline = now + Duration::from_secs(u64::from(window)) + REPORT_GRACE;
-        let running = Running { base: view, skips, initiator: None, responder: None, deadline, ended: None };
-        let started = running.view(false);
-        self.log_test(&started)?;
         self.diag.last.insert(pair(a.id, b.id), (now, items.throughput.then_some(now)));
-        self.diag.running.insert(id, running);
         // 接受方先拿到指令：发起方的第一个探测到的时候，它的时间窗已经开着了。
         let sent = self.send(b.id, ToNode::Test(Box::new(order(a.id, TestRole::Responder))))
             && self.send(a.id, ToNode::Test(Box::new(order(b.id, TestRole::Initiator))));
-        if !sent && self.diag.running.contains_key(&id) {
-            // 发的时候节点刚好掉线（发送失败会把它记为离线，测试也就随之结束了；这里只是兜底）。
-            return self.finish_test(id, false);
+        // 发送失败会把那个节点记为离线。测试发完了才算进行中，所以不会在发的时候就被掉线结束掉，返回一个已经不在的"进行中"；
+        // 发不出去的测试下面就结束它。
+        let deadline = now + Duration::from_secs(u64::from(window)) + REPORT_GRACE;
+        let running = Running { base: view, skips, initiator: None, responder: None, deadline, ended: None, outcome: None };
+        let started = running.view(false);
+        self.diag.running.insert(id, running);
+        if sent {
+            return Ok(started);
         }
-        Ok(self.diag.running.get(&id).map_or(started, |running| running.view(false)))
+        match self.finish_test(id, false) {
+            Ok(view) => Ok(view),
+            // 测试已经建起来了，不算开始失败：结果定下了，后台任务接着存。
+            Err(error) => {
+                tracing::warn!(test = id, "存发不出去的主动测试的结果时出错，{} 秒后再试：{error}", STORE_RETRY.as_secs());
+                Ok(self.diag.running.get(&id).map_or(started, Running::current))
+            }
+        }
     }
 
-    fn log_test(&self, view: &TestView) -> Result<(), Error> {
+    fn log_test(store: &Store, view: &TestView) -> Result<(), Error> {
         let items: Vec<&str> = view
             .request
             .items
@@ -386,7 +442,7 @@ impl Inner {
             "throughput": view.request.throughput,
             "matrix": view.matrix,
         });
-        self.store.log_refs(view.started_at, Some(view.network), action::TEST_START, &detail, &refs, params)?;
+        store.log_refs(view.started_at, Some(view.network), action::TEST_START, &detail, &refs, params)?;
         Ok(())
     }
 
@@ -397,6 +453,10 @@ impl Inner {
             tracing::debug!(%node, test = id, "丢掉一份测试结果：没有在进行这个测试（多半已经结束了）");
             return Ok(());
         };
+        if running.outcome.is_some() {
+            tracing::debug!(%node, test = id, "丢掉一份测试结果：这个测试已经结束了，结果在等着存下来");
+            return Ok(());
+        }
         let role = if node == running.base.a.id {
             TestRole::Initiator
         } else if node == running.base.b.id {
@@ -442,23 +502,52 @@ impl Inner {
     }
 
     /// 结束一个测试：合成最后的结果、存下来、告诉两端结束。`cancelled` 是管理员取消的。
+    ///
+    /// 结果在第一次结束时定下来，连同结束的时刻；之后再调用只是把它再存一次，`cancelled` 不再起作用。
+    /// 存不下来时别的都没有变：它还在进行中，过 [`STORE_RETRY`] 后台任务再存，这期间来的上报不算数。
     pub(super) fn finish_test(&mut self, id: u64, cancelled: bool) -> Result<TestView, Error> {
-        let Some(running) = self.diag.running.remove(&id) else { return Err(Error::NotFound(Entity::Test)) };
+        let view = self.fix_outcome(id, cancelled).ok_or(Error::NotFound(Entity::Test))?;
+        if let Err(error) = self.store.update_test(&view) {
+            if let Some(running) = self.diag.running.get_mut(&id) {
+                running.deadline = Instant::now() + STORE_RETRY;
+            }
+            return Err(error.into());
+        }
+        self.test_stored(&view);
+        Ok(view)
+    }
+
+    /// 测试现在结束的话是什么结果：合成到现在为止的上报，结束的时刻是现在。
+    fn outcome(&self, id: u64, cancelled: bool) -> Option<TestView> {
+        let running = self.diag.running.get(&id)?;
         let (state, error) = final_state(cancelled, running.initiator.as_ref(), running.responder.as_ref());
-        let finished_at = self.clock.now();
         let error = error.or_else(|| (state == TestState::Failed).then(|| TestProblem::new(TestCode::NoReport, Some(running.base.a.id))));
-        let view = TestView { state, error, finished_at: Some(finished_at), ..running.view(true) };
-        self.store.update_test(&view)?;
-        tracing::info!(test = id, ?state, "主动测试结束");
-        for node in [running.base.a.id, running.base.b.id] {
+        Some(TestView { state, error, finished_at: Some(self.clock.now()), ..running.view(true) })
+    }
+
+    /// 把测试的结果定下来，已经定下的不变。
+    pub(super) fn fix_outcome(&mut self, id: u64, cancelled: bool) -> Option<TestView> {
+        if let Some(outcome) = &self.diag.running.get(&id)?.outcome {
+            return Some(outcome.clone());
+        }
+        let outcome = self.outcome(id, cancelled)?;
+        self.diag.running.get_mut(&id)?.outcome = Some(outcome.clone());
+        Some(outcome)
+    }
+
+    /// 测试的结果存下来了：从进行中拿掉，告诉两端结束，记进矩阵。
+    fn test_stored(&mut self, view: &TestView) {
+        let id = view.id;
+        self.diag.running.remove(&id);
+        tracing::info!(test = id, state = ?view.state, "主动测试结束");
+        for node in [view.a.id, view.b.id] {
             if self.live.contains_key(&node) {
                 self.send(node, ToNode::TestEnd { test: id });
             }
         }
         if let Some(matrix) = view.matrix {
-            self.matrix_test_finished(view.network, matrix, &view)?;
+            self.matrix_test_finished(view.network, matrix, view);
         }
-        Ok(view)
     }
 
     /// 存储里的一个测试：进行中的却不在内存里，是 controller 重启前没做完的，显示成失败。
@@ -471,29 +560,27 @@ impl Inner {
         TestView { state: TestState::Failed, error: Some(problem), ..view }
     }
 
-    /// 到点了的：过了时间窗还没报完的测试按手上有的结束；接受方迟迟不报最后一份的也结束；矩阵里排着的接着开始。
-    /// 返回下一次最晚什么时候再来看。
-    pub(super) fn tests_tick(&mut self, now: Instant) -> Result<Option<Instant>, Error> {
-        let due: Vec<u64> = self
-            .diag
-            .running
-            .iter()
-            .filter(|(_, running)| now >= running.deadline || running.ended.is_some_and(|ended| now >= ended + RESPONDER_GRACE))
-            .map(|(id, _)| *id)
-            .collect();
+    /// 到点了的：过了时间窗还没报完的测试按手上有的结束；接受方迟迟不报最后一份的也结束；结果没存下来的再存；
+    /// 矩阵里排着的接着开始。返回下一次最晚什么时候再来看。
+    ///
+    /// 存储出错不算这里出错：记下日志，存不下来的测试、开始不了的矩阵各自隔 [`STORE_RETRY`] 再试，
+    /// 一个出错不耽误别的，也不让后台任务丢掉别的工作要它回来的时刻。
+    pub(super) fn tests_tick(&mut self, now: Instant) -> Option<Instant> {
+        let due: Vec<u64> = self.diag.running.iter().filter(|(_, running)| now >= running.due_at()).map(|(id, _)| *id).collect();
         for id in due {
-            tracing::info!(test = id, "主动测试到时间了，按手上的结果结束");
-            self.finish_test(id, false)?;
+            // 前面结束的测试给节点发结束时，节点可能掉线，连带结束了这一个。
+            let Some(running) = self.diag.running.get(&id) else { continue };
+            if running.outcome.is_none() {
+                tracing::info!(test = id, "主动测试到时间了，按手上的结果结束");
+            }
+            if let Err(error) = self.finish_test(id, false) {
+                tracing::warn!(test = id, "存主动测试的结果时出错，{} 秒后再试：{error}", STORE_RETRY.as_secs());
+            }
         }
-        self.schedule_matrices()?;
-        let next = self
-            .diag
-            .running
-            .values()
-            .map(|running| running.ended.map_or(running.deadline, |ended| (ended + RESPONDER_GRACE).min(running.deadline)))
-            .min();
+        self.schedule_matrices(now);
+        let next = self.diag.running.values().map(Running::due_at).min();
         let cooling = self.matrix_wake(now);
-        Ok([next, cooling].into_iter().flatten().min())
+        [next, cooling].into_iter().flatten().min()
     }
 
     /// 节点掉线了：它参与的测试不会再有它的结果，按手上有的结束。
@@ -506,9 +593,13 @@ impl Inner {
             .map(|(id, _)| *id)
             .collect();
         for id in involved {
+            // 前面结束的测试给另一端发结束时，那一端也可能掉线，连带结束了这一个。
+            if !self.diag.running.contains_key(&id) {
+                continue;
+            }
             tracing::info!(test = id, %node, "节点掉线，主动测试按手上的结果结束");
             if let Err(error) = self.finish_test(id, false) {
-                tracing::warn!(test = id, "结束主动测试时存储出错：{error}");
+                tracing::warn!(test = id, "存主动测试的结果时出错，{} 秒后再试：{error}", STORE_RETRY.as_secs());
             }
         }
     }
@@ -543,7 +634,7 @@ mod tests {
     use i3t_model::control::{Declared, DirectKind, Hello, Route, ToController};
 
     use super::*;
-    use crate::controller::testing::{Lab, Member, hello, modern_hello};
+    use crate::controller::testing::{Lab, Member, REMOTE, hello, modern_hello};
 
     fn two_nodes() -> (Lab, NetworkId, Member, Member) {
         let mut lab = Lab::new();
@@ -842,5 +933,444 @@ mod tests {
         assert!(lab.controller.lock().diag.running.is_empty());
         lab.controller.tick().unwrap();
         assert!(lab.controller.lock().diag.running.is_empty(), "取消之后不再开始新的");
+    }
+
+    /// 报一份结果，controller 处理时出的错原样返回（存储写不进去时会出错）。
+    fn try_send(lab: &Lab, member: &Member, report: TestReport) -> Result<(), Error> {
+        lab.controller.handle(member.session, REMOTE, ToController::TestReport(Box::new(report)))
+    }
+
+    /// 过了 `times` 次再存、再排的间隔之后。
+    fn later(times: u32) -> Instant {
+        Instant::now() + STORE_RETRY * times
+    }
+
+    /// 这几个节点里，`test` 的发起方和接受方。
+    fn ends<'a>(lab: &Lab, network: NetworkId, test: u64, members: &[&'a Member]) -> (&'a Member, &'a Member) {
+        let view = lab.controller.test(network, test).unwrap();
+        let member = |id| members.iter().copied().find(|member| member.id == id).unwrap();
+        (member(view.a.id), member(view.b.id))
+    }
+
+    #[test]
+    fn a_test_whose_end_cannot_be_stored_keeps_running_and_ends_once_the_store_can_write() {
+        let (lab, network, mut a, mut b) = two_nodes();
+        let view = lab.controller.start_test(network, &request(&a, &b)).unwrap();
+        send(&lab, &a, initiator_report(view.id));
+        // 接受方一直不报最后一份，过了宽限要按手上有的结束，这时数据库写不进去。
+        let past = Instant::now().checked_sub(RESPONDER_GRACE).unwrap();
+        {
+            let mut inner = lab.controller.lock();
+            inner.diag.running.get_mut(&view.id).unwrap().ended = Some(past);
+            inner.store.set_read_only(true);
+            inner.tests_tick(Instant::now());
+            assert!(inner.diag.running.contains_key(&view.id), "结果没存下来：还在进行中，下次接着存");
+            // 后台任务被叫醒得再勤，没到再存的时刻也不去存。
+            inner.store.set_read_only(false);
+            let next = inner.tests_tick(Instant::now());
+            assert!(inner.diag.running.contains_key(&view.id), "还没到再存的时刻");
+            assert!(next.is_some_and(|at| at > Instant::now()), "到那时再来");
+        }
+        a.receive();
+        assert!(a.test_ends.is_empty(), "存下来之前不告诉两端结束");
+
+        lab.controller.lock().tests_tick(later(1));
+        assert!(lab.controller.lock().diag.running.is_empty());
+        let stored = lab.controller.lock().store.test(network, view.id).unwrap().unwrap();
+        assert_eq!((stored.state, stored.finished_at.is_some()), (TestState::Done, true));
+        a.receive();
+        b.receive();
+        assert_eq!(a.test_ends, [view.id]);
+        assert_eq!(b.test_ends, [view.id, view.id], "发起方报完时一次，结束时一次");
+    }
+
+    #[test]
+    fn a_matrix_test_whose_result_cannot_be_stored_keeps_its_place_and_the_matrix_still_finishes() {
+        let (lab, network, a, b) = two_nodes();
+        let run = lab.controller.start_matrix(network).unwrap();
+        let test = run.cells[0].test.unwrap();
+        let (initiator, responder) = ends(&lab, network, test, &[&a, &b]);
+        lab.controller.lock().store.set_read_only(true);
+        try_send(&lab, initiator, initiator_report(test)).unwrap();
+        assert!(try_send(&lab, responder, responder_report(test, true)).is_err(), "两端都报完了，结果存不下来");
+        {
+            let mut inner = lab.controller.lock();
+            assert!(inner.diag.running.contains_key(&test), "还在进行中");
+            inner.tests_tick(later(1));
+            assert!(inner.diag.running.contains_key(&test), "后台任务到点再存，还是存不下来");
+            inner.store.set_read_only(false);
+            inner.tests_tick(later(2));
+        }
+        assert_eq!(lab.controller.test(network, test).unwrap().state, TestState::Done);
+        let run = lab.controller.matrix(network).unwrap();
+        assert_eq!((run.state, run.finished, run.cells[0].state), (MatrixState::Done, 1, CellState::Done));
+    }
+
+    #[test]
+    fn a_matrix_pair_that_cannot_start_stays_queued_and_starts_once_the_store_can_write() {
+        let (lab, network, a, b) = two_nodes();
+        // 这一对刚单独测过：矩阵开始时它排着，等间隔过去。
+        lab.controller.lock().diag.last.insert(pair(a.id, b.id), (Instant::now(), None));
+        lab.controller.start_matrix(network).unwrap();
+        {
+            let mut inner = lab.controller.lock();
+            inner.diag.last.clear();
+            inner.store.set_read_only(true);
+            inner.tests_tick(Instant::now());
+            assert!(inner.diag.running.is_empty(), "开始一个测试要写数据库");
+            inner.store.set_read_only(false);
+            let next = inner.tests_tick(Instant::now());
+            assert!(inner.diag.running.is_empty(), "隔一会儿再排");
+            assert!(next.is_some_and(|at| at > Instant::now() + Duration::from_secs(2)), "到再排的时刻再来");
+            inner.tests_tick(later(1));
+        }
+        let cell = lab.controller.matrix(network).unwrap().cells[0].clone();
+        assert_eq!(cell.state, CellState::Running, "写得进去之后这一对照样开始");
+        let test = cell.test.unwrap();
+        let (initiator, responder) = ends(&lab, network, test, &[&a, &b]);
+        send(&lab, initiator, initiator_report(test));
+        send(&lab, responder, responder_report(test, true));
+        let run = lab.controller.matrix(network).unwrap();
+        assert_eq!((run.state, run.finished, run.cells[0].state), (MatrixState::Done, 1, CellState::Done));
+    }
+
+    #[test]
+    fn a_test_whose_start_cannot_be_logged_leaves_nothing_behind() {
+        let (mut lab, network, a, b) = two_nodes();
+        let offline = lab.join_offline(network, &[], Declared::default());
+        // 测试那一行写得进去，操作记录写不进去。
+        lab.controller.lock().store.execute_batch("CREATE TRIGGER no_log BEFORE INSERT ON oplog BEGIN SELECT RAISE(ABORT, 'no log'); END;");
+        assert!(lab.controller.start_test(network, &request(&a, &b)).is_err());
+        assert!(lab.controller.start_test(network, &CreateTest { b: offline, ..request(&a, &b) }).is_err(), "做不了的测试也一样");
+        assert!(lab.controller.tests(network, &TestQuery::default()).unwrap().is_empty(), "开始不了的测试不留一行");
+        assert!(lab.controller.lock().diag.running.is_empty());
+
+        lab.controller.lock().store.execute_batch("DROP TRIGGER no_log;");
+        let view = lab.controller.start_test(network, &request(&a, &b)).unwrap();
+        assert_eq!(view.state, TestState::Running, "马上可以再试，不用等间隔");
+    }
+
+    #[test]
+    fn a_matrix_test_whose_order_cannot_be_delivered_ends_at_once_and_frees_its_place() {
+        let mut lab = Lab::new();
+        let network = lab.network("home").id;
+        let mut members: Vec<Member> = (0..3).map(|_| lab.join_as(network, &modern_hello("0.2.0"))).collect();
+        lab.settle(&mut members.iter_mut().collect::<Vec<_>>());
+        // 最后一个节点的连接已经断了，controller 还不知道：发给它的指令发不出去，它随之被记为离线。
+        let gone = members.pop().unwrap().id;
+        lab.controller.start_matrix(network).unwrap();
+        let running: Vec<u64> = lab.controller.lock().diag.running.keys().copied().collect();
+        assert_eq!(running.len(), 1, "只有两个在线的节点那一对在测");
+        let (initiator, responder) = ends(&lab, network, running[0], &[&members[0], &members[1]]);
+        send(&lab, initiator, initiator_report(running[0]));
+        send(&lab, responder, responder_report(running[0], true));
+        let run = lab.controller.matrix(network).unwrap();
+        assert_eq!((run.state, run.finished), (MatrixState::Done, 3), "{:?}", run.cells);
+        for cell in &run.cells {
+            let expected = if cell.a == gone || cell.b == gone { CellState::Failed } else { CellState::Done };
+            assert_eq!(cell.state, expected, "{cell:?}");
+        }
+    }
+
+    #[test]
+    fn what_already_happened_does_not_fail_because_the_next_matrix_pair_cannot_start() {
+        let mut lab = Lab::new();
+        let network = lab.network("home").id;
+        let mut members: Vec<Member> = (0..3).map(|_| lab.join_as(network, &modern_hello("0.2.0"))).collect();
+        lab.settle(&mut members.iter_mut().collect::<Vec<_>>());
+        // 结果照样更新得进去，新的测试插不进去。
+        let block = "CREATE TRIGGER no_new_test BEFORE INSERT ON tests BEGIN SELECT RAISE(ABORT, 'no new test'); END;";
+        let unblock = "DROP TRIGGER no_new_test;";
+        lab.controller.lock().store.execute_batch(block);
+        let run = lab.controller.start_matrix(network).unwrap();
+        assert!(run.cells.iter().all(|cell| cell.state == CellState::Pending), "矩阵开始了，一对都还没开始：{:?}", run.cells);
+
+        // 最后一对刚单独测过，先开始另外两对。
+        let last = pair(members[1].id, members[2].id);
+        lab.controller.lock().diag.last.insert(last, (Instant::now(), None));
+        lab.controller.lock().store.execute_batch(unblock);
+        lab.controller.lock().tests_tick(later(1));
+        let running: Vec<u64> = lab.controller.lock().diag.running.keys().copied().collect();
+        assert_eq!(running.len(), 2);
+
+        lab.controller.lock().diag.last.clear();
+        lab.controller.lock().store.execute_batch(block);
+        let test = running[0];
+        let (initiator, responder) = ends(&lab, network, test, &members.iter().collect::<Vec<_>>());
+        send(&lab, initiator, initiator_report(test));
+        send(&lab, responder, responder_report(test, true));
+        assert_eq!(lab.controller.test(network, test).unwrap().state, TestState::Done, "测试照常结束，下一对开始不了不算它的错");
+        let queued = |lab: &Lab| lab.controller.matrix(network).unwrap().cells.into_iter().find(|cell| (cell.a, cell.b) == last).unwrap();
+        assert_eq!(queued(&lab).state, CellState::Pending);
+
+        lab.controller.lock().store.execute_batch(unblock);
+        lab.controller.lock().tests_tick(later(1));
+        assert_eq!(queued(&lab).state, CellState::Running, "后台任务接着排");
+    }
+
+    /// 三个在线节点的网络，全网矩阵三对都在测。
+    fn three_testing(lab: &mut Lab, name: &str) -> (NetworkId, Vec<Member>) {
+        let network = lab.network(name).id;
+        let mut members: Vec<Member> = (0..3).map(|_| lab.join_as(network, &modern_hello("0.2.0"))).collect();
+        lab.settle(&mut members.iter_mut().collect::<Vec<_>>());
+        lab.controller.start_matrix(network).unwrap();
+        assert_eq!(lab.controller.lock().diag.running.len(), 3);
+        (network, members)
+    }
+
+    /// 让这几个测试的结果写不进去，别的照常。
+    fn stick(lab: &Lab, tests: &[u64]) {
+        let ids = tests.iter().map(u64::to_string).collect::<Vec<_>>().join(", ");
+        let sql = format!("CREATE TRIGGER stuck BEFORE UPDATE ON tests WHEN OLD.id IN ({ids}) BEGIN SELECT RAISE(ABORT, 'stuck'); END;");
+        lab.controller.lock().store.execute_batch(&sql);
+    }
+
+    fn unstick(lab: &Lab) {
+        lab.controller.lock().store.execute_batch("DROP TRIGGER stuck;");
+    }
+
+    #[test]
+    fn a_matrix_cancel_that_cannot_be_logged_changes_nothing_and_can_be_tried_again() {
+        let (lab, network, _a, _b) = two_nodes();
+        lab.controller.start_matrix(network).unwrap();
+        lab.controller.lock().store.set_read_only(true);
+        assert!(lab.controller.cancel_matrix(network).is_err());
+        let run = lab.controller.matrix(network).unwrap();
+        assert_eq!((run.state, run.cells[0].state), (MatrixState::Running, CellState::Running), "什么都没有变");
+
+        lab.controller.lock().store.set_read_only(false);
+        let run = lab.controller.cancel_matrix(network).unwrap();
+        assert_eq!((run.state, run.cells[0].state), (MatrixState::Cancelled, CellState::Cancelled));
+    }
+
+    #[test]
+    fn a_matrix_is_cancelled_only_once_every_test_s_cancellation_is_stored() {
+        let mut lab = Lab::new();
+        let (network, _members) = three_testing(&mut lab, "home");
+        let tests: Vec<u64> = lab.controller.lock().diag.running.keys().copied().collect();
+        stick(&lab, &tests[..2]);
+        assert!(lab.controller.cancel_matrix(network).is_err(), "两个测试的结果存不下来");
+        let state = |lab: &Lab, test: u64| lab.controller.test(network, test).unwrap().state;
+        assert_eq!(state(&lab, tests[2]), TestState::Cancelled, "存得下来的照样取消");
+        assert_eq!(state(&lab, tests[0]), TestState::Cancelled, "存不下来的结果也已经定成取消");
+        let run = lab.controller.matrix(network).unwrap();
+        assert_eq!((run.state, run.finished_at), (MatrixState::Running, None), "还没取消完");
+        assert!(matches!(lab.controller.start_matrix(network), Err(Error::Busy(_))), "取消完之前不能开始下一次");
+        assert!(lab.controller.cancel_matrix(network).is_err(), "可以再取消一次，还是存不下来");
+
+        // 后台任务接着存：一个存得下来了，另一个还存不下来。
+        unstick(&lab);
+        stick(&lab, &tests[1..2]);
+        lab.controller.lock().tests_tick(later(1));
+        let stored = lab.controller.lock().store.test(network, tests[0]).unwrap().unwrap();
+        assert_eq!(stored.state, TestState::Cancelled, "存下来的是取消，不是照常做完");
+        assert_eq!(lab.controller.matrix(network).unwrap().state, MatrixState::Running);
+        // 单独再取消剩下的那个，这次存得下来，矩阵取消完了。
+        unstick(&lab);
+        assert_eq!(lab.controller.cancel_test(network, tests[1]).unwrap().state, TestState::Cancelled);
+        let run = lab.controller.matrix(network).unwrap();
+        assert_eq!((run.state, run.finished, run.finished_at.is_some()), (MatrixState::Cancelled, 3, true));
+        assert!(run.cells.iter().all(|cell| cell.state == CellState::Cancelled), "{:?}", run.cells);
+        assert!(lab.controller.lock().diag.running.is_empty());
+        assert!(matches!(lab.controller.cancel_matrix(network), Err(Error::Busy(_))), "取消完了");
+        let logged = |action: &str| lab.controller.oplog(50).unwrap().into_iter().filter(|entry| entry.action == action).count();
+        assert_eq!((logged(action::TEST_MATRIX_CANCEL), logged(action::TEST_CANCEL)), (1, 0), "再取消一次不重复记");
+    }
+
+    #[test]
+    fn a_network_can_start_another_matrix_once_one_was_cancelled() {
+        let (lab, network, _a, _b) = two_nodes();
+        lab.controller.start_matrix(network).unwrap();
+        lab.controller.cancel_matrix(network).unwrap();
+        assert!(matches!(lab.controller.start_matrix(network), Err(Error::TooSoon(_))), "和做完了的一样，只等间隔");
+        lab.controller.lock().diag.matrices.get_mut(&network).unwrap().interval_passed();
+        assert_eq!(lab.controller.start_matrix(network).unwrap().state, MatrixState::Running);
+    }
+
+    #[test]
+    fn a_matrix_cancel_cancels_every_test_even_when_telling_a_node_finds_it_gone() {
+        let mut lab = Lab::new();
+        let (network, mut members) = three_testing(&mut lab, "home");
+        let tests: Vec<u64> = lab.controller.lock().diag.running.keys().copied().collect();
+        // 第一个节点的连接已经断了，controller 还不知道：告诉它第一个测试结束时它被记为离线，
+        // 它参与的另一个测试随之按掉线结束。
+        drop(members.remove(0));
+        assert_eq!(lab.controller.cancel_matrix(network).unwrap().state, MatrixState::Cancelled);
+        for test in tests {
+            assert_eq!(lab.controller.lock().store.test(network, test).unwrap().unwrap().state, TestState::Cancelled, "测试 #{test}");
+        }
+    }
+
+    #[test]
+    fn a_matrix_cell_shows_its_test_as_running_until_the_result_is_stored() {
+        let (lab, network, _a, b) = two_nodes();
+        // 接受方的连接已经断了，指令发不出去；测试的结果也写不进去。
+        drop(b);
+        lab.controller.lock().store.execute_batch("CREATE TRIGGER stuck BEFORE UPDATE ON tests BEGIN SELECT RAISE(ABORT, 'stuck'); END;");
+        let run = lab.controller.start_matrix(network).unwrap();
+        assert_eq!((run.state, run.finished, run.cells[0].state), (MatrixState::Running, 0, CellState::Running), "{:?}", run.cells);
+        let test = run.cells[0].test.unwrap();
+        assert_eq!(lab.controller.test(network, test).unwrap().state, TestState::Failed, "测试本身的结果已经定下了");
+
+        unstick(&lab);
+        lab.controller.lock().tests_tick(later(1));
+        let run = lab.controller.matrix(network).unwrap();
+        assert_eq!((run.state, run.finished, run.cells[0].state), (MatrixState::Done, 1, CellState::Failed));
+    }
+
+    #[test]
+    fn a_matrix_with_nothing_running_is_cancelled_at_once() {
+        let (lab, network, a, b) = two_nodes();
+        lab.controller.lock().diag.last.insert(pair(a.id, b.id), (Instant::now(), None));
+        lab.controller.start_matrix(network).unwrap();
+        let run = lab.controller.cancel_matrix(network).unwrap();
+        assert_eq!((run.state, run.cells[0].state, run.finished_at.is_some()), (MatrixState::Cancelled, CellState::Cancelled, true));
+    }
+
+    #[test]
+    fn a_test_cancel_that_cannot_be_stored_changes_nothing_and_can_be_tried_again() {
+        let (lab, network, a, mut b) = two_nodes();
+        let view = lab.controller.start_test(network, &request(&a, &b)).unwrap();
+        stick(&lab, &[view.id]);
+        assert!(lab.controller.cancel_test(network, view.id).is_err());
+        assert_eq!(lab.controller.test(network, view.id).unwrap().state, TestState::Running, "什么都没有变");
+        let logged = |lab: &Lab| lab.controller.oplog(50).unwrap().into_iter().filter(|entry| entry.action == action::TEST_CANCEL).count();
+        assert_eq!(logged(&lab), 0, "操作记录和结果一起没写进去");
+
+        unstick(&lab);
+        assert_eq!(lab.controller.cancel_test(network, view.id).unwrap().state, TestState::Cancelled);
+        assert!(matches!(lab.controller.cancel_test(network, view.id), Err(Error::Busy(_))));
+        assert_eq!(logged(&lab), 1);
+        b.receive();
+        assert_eq!(b.test_ends, [view.id]);
+    }
+
+    #[test]
+    fn a_test_that_ended_before_its_result_could_be_stored_takes_no_more_reports() {
+        let (lab, network, a, mut b) = two_nodes();
+        let view = lab.controller.start_test(network, &request(&a, &b)).unwrap();
+        // 时间窗过了，什么都没报，结果存不下来。
+        stick(&lab, &[view.id]);
+        let past = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        lab.controller.lock().diag.running.get_mut(&view.id).unwrap().deadline = past;
+        lab.controller.lock().tests_tick(Instant::now());
+        assert_eq!(lab.controller.test(network, view.id).unwrap().state, TestState::Failed, "结果已经定下了");
+        // 发起方的最后一份这时才到：不算数，也不因此告诉接受方结束。
+        try_send(&lab, &a, initiator_report(view.id)).unwrap();
+        b.receive();
+        assert!(b.test_ends.is_empty(), "存下来之前不告诉两端结束");
+        assert!(matches!(lab.controller.cancel_test(network, view.id), Err(Error::Busy(_))), "已经结束了");
+
+        unstick(&lab);
+        lab.controller.lock().tests_tick(later(1));
+        assert_eq!(lab.controller.lock().store.test(network, view.id).unwrap().unwrap().state, TestState::Failed);
+        b.receive();
+        assert_eq!(b.test_ends, [view.id]);
+    }
+
+    #[test]
+    fn a_report_that_comes_after_a_test_ended_does_not_change_the_result_waiting_to_be_stored() {
+        let (lab, network, a, b) = two_nodes();
+        let view = lab.controller.start_test(network, &request(&a, &b)).unwrap();
+        lab.controller.lock().store.set_read_only(true);
+        // 接受方掉线：发起方还什么都没报，测试按手上有的结束，是失败。结果存不下来。
+        lab.controller.disconnect(b.session);
+        let ended = lab.controller.test(network, view.id).unwrap();
+        assert_eq!((ended.state, ended.finished_at.is_some()), (TestState::Failed, true), "结果已经定下了");
+        // 发起方的结果这时才到。
+        try_send(&lab, &a, initiator_report(view.id)).unwrap();
+        assert_eq!(lab.controller.test(network, view.id).unwrap(), ended, "不算数");
+
+        lab.controller.advance_clock(30);
+        lab.controller.lock().store.set_read_only(false);
+        lab.controller.lock().tests_tick(later(1));
+        let stored = lab.controller.lock().store.test(network, view.id).unwrap().unwrap();
+        assert_eq!((stored.state, stored.finished_at), (TestState::Failed, ended.finished_at), "存下来的是当时定下的结果和时刻");
+    }
+
+    #[test]
+    fn an_operation_whose_log_entry_cannot_be_written_in_full_changes_nothing() {
+        let (mut lab, network, _a, _b) = two_nodes();
+        let other = lab.network("lab").id;
+        let mut c = lab.join_as(other, &modern_hello("0.2.0"));
+        let mut d = lab.join_as(other, &modern_hello("0.2.0"));
+        lab.settle(&mut [&mut c, &mut d]);
+        let test = lab.controller.start_matrix(network).unwrap().cells[0].test.unwrap();
+        // 操作记录满了：记一条要顺带清掉最老的，清不掉。
+        lab.controller.lock().store.execute_batch(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10000) \
+             INSERT INTO oplog (at, network_id, action, detail) SELECT 0, NULL, 'filler', '' FROM n; \
+             CREATE TRIGGER no_trim BEFORE DELETE ON oplog BEGIN SELECT RAISE(ABORT, 'no trim'); END;",
+        );
+        assert!(lab.controller.start_matrix(other).is_err());
+        assert!(matches!(lab.controller.matrix(other), Err(Error::NotFound(_))), "矩阵没有开始");
+        assert!(lab.controller.cancel_matrix(network).is_err());
+        assert_eq!(lab.controller.matrix(network).unwrap().cells[0].state, CellState::Running, "矩阵没有取消");
+        assert!(lab.controller.cancel_test(network, test).is_err());
+        assert_eq!(lab.controller.test(network, test).unwrap().state, TestState::Running, "测试没有取消");
+        let logged = |lab: &Lab| lab.controller.oplog(10).unwrap().into_iter().filter(|entry| entry.action != "filler").count();
+        assert_eq!(logged(&lab), 0, "操作记录里也没有");
+
+        lab.controller.lock().store.execute_batch("DROP TRIGGER no_trim;");
+        assert_eq!(lab.controller.cancel_matrix(network).unwrap().state, MatrixState::Cancelled);
+        assert_eq!(logged(&lab), 1);
+    }
+
+    #[test]
+    fn one_test_that_cannot_be_stored_does_not_hold_up_the_rest_of_the_background_work() {
+        let mut lab = Lab::new();
+        let (_network, _members) = three_testing(&mut lab, "home");
+        // 另一个网络的矩阵有一对排着，这一轮该开始了。
+        let other = lab.network("lab").id;
+        let mut a = lab.join_as(other, &modern_hello("0.2.0"));
+        let mut b = lab.join_as(other, &modern_hello("0.2.0"));
+        lab.settle(&mut [&mut a, &mut b]);
+        lab.controller.lock().diag.last.insert(pair(a.id, b.id), (Instant::now(), None));
+        lab.controller.start_matrix(other).unwrap();
+        lab.controller.lock().diag.last.remove(&pair(a.id, b.id));
+
+        let tests: Vec<u64> = lab.controller.lock().diag.running.keys().copied().collect();
+        stick(&lab, &tests[..1]);
+        let past = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        lab.controller.lock().diag.running.values_mut().for_each(|running| running.deadline = past);
+        // 整个后台任务照常做完，不因为第一个存不下来出错、丢掉别的工作要它回来的时刻。
+        assert!(lab.controller.tick().is_ok());
+        let running: Vec<u64> = lab.controller.lock().diag.running.keys().copied().collect();
+        assert_eq!(running.len(), 2, "到点的另外两个照样结束了，另一个网络的那一对照样开始了：{running:?}");
+        assert_eq!(running[0], tests[0]);
+        assert_eq!(lab.controller.matrix(other).unwrap().cells[0].state, CellState::Running);
+    }
+
+    #[test]
+    fn a_matrix_pair_that_keeps_failing_to_start_does_not_hold_up_the_pairs_behind_it() {
+        let mut lab = Lab::new();
+        let network = lab.network("home").id;
+        let mut members: Vec<Member> = (0..3).map(|_| lab.join_as(network, &modern_hello("0.2.0"))).collect();
+        lab.settle(&mut members.iter_mut().collect::<Vec<_>>());
+        // 后建的网络也有一个矩阵，它那一对排着，这一轮该开始了。
+        let other = lab.network("lab").id;
+        let mut a = lab.join_as(other, &modern_hello("0.2.0"));
+        let mut b = lab.join_as(other, &modern_hello("0.2.0"));
+        lab.settle(&mut [&mut a, &mut b]);
+        // 前一个网络排在最前面的那一对一直插不进去。
+        let (first, second) = (members[0].id.get(), members[1].id.get());
+        let block = format!(
+            "CREATE TRIGGER stuck BEFORE INSERT ON tests WHEN NEW.node_a = {first} AND NEW.node_b = {second} \
+             BEGIN SELECT RAISE(ABORT, 'stuck'); END;"
+        );
+        lab.controller.lock().store.execute_batch(&block);
+        lab.controller.start_matrix(network).unwrap();
+        lab.controller.lock().diag.last.insert(pair(a.id, b.id), (Instant::now(), None));
+        lab.controller.start_matrix(other).unwrap();
+        lab.controller.lock().diag.last.remove(&pair(a.id, b.id));
+
+        lab.controller.lock().tests_tick(later(1));
+        let states = |lab: &Lab| lab.controller.matrix(network).unwrap().cells.iter().map(|cell| cell.state).collect::<Vec<_>>();
+        assert_eq!(states(&lab), [CellState::Pending, CellState::Running, CellState::Running], "后面的两对照样开始");
+        assert_eq!(lab.controller.matrix(other).unwrap().cells[0].state, CellState::Running, "别的网络也照样排");
+
+        lab.controller.lock().store.execute_batch("DROP TRIGGER stuck;");
+        lab.controller.lock().tests_tick(later(2));
+        assert_eq!(states(&lab), [CellState::Running; 3]);
     }
 }
