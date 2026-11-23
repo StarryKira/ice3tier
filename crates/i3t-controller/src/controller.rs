@@ -475,8 +475,8 @@ impl Controller {
     ///
     /// # Errors
     ///
-    /// 读写存储失败。到期的工作留在队列里，下次再试。
-    pub fn tick(&self) -> Result<Option<Instant>, Error> {
+    /// 有工作读写存储失败（[`TickFailed`]）。别的工作照样做了，出错的留着下次再做；下一次的时刻也照样算出来了。
+    pub fn tick(&self) -> Result<Option<Instant>, TickFailed> {
         let mut inner = self.lock();
         let wall = inner.clock.now();
         let next = inner.tick(Instant::now(), wall);
@@ -616,30 +616,23 @@ impl Inner {
         }
     }
 
-    fn tick(&mut self, now: Instant, wall: Timestamp) -> Result<Option<Instant>, Error> {
-        let work = self.tick_work(now, wall);
+    fn tick(&mut self, now: Instant, wall: Timestamp) -> Result<Option<Instant>, TickFailed> {
+        let mut failures = Failures::default();
+        let work = self.tick_work(now, wall, &mut failures);
         // 时间序列不跟着别的工作出错停下：它要按时切段，不然这期间上报的数都算进上一段。它写不进存储时自己隔一会儿再试。
-        let stats = self.stats_tick(now, wall);
-        match (work, stats) {
-            (Ok(next), Ok(stats)) => Ok(next.into_iter().chain([stats]).min()),
-            (Err(err), Ok(_)) | (Ok(_), Err(err)) => Err(err),
-            (Err(err), Err(stats)) => {
-                tracing::error!("时间序列出错，稍后再试：{}", error_chain(&stats));
-                Err(err)
-            }
-        }
+        let stats = failures.keep(self.stats_tick(now, wall).map(Some));
+        failures.into_tick(now, work.into_iter().chain(stats).min())
     }
 
-    /// 时间序列以外的后台工作。返回下一次要做的时刻。
+    /// 时间序列以外的后台工作。返回下一次要做的时刻，出的错记进 `failures`。
     ///
     /// 一样工作出错不耽误后面的：每一样出错时都自己留着下次再做（排着的重算、要重新看谁用不了 UDP 的网络、`next_rollout`），
-    /// 这里把第一个错误报出去（后面的打日志），调用方过一会儿再来。
+    /// 别的工作要它回来的时刻照样算，调用方过一会儿再来（见 [`Failures::into_tick`]）。
     ///
     /// 只有整个数据库都读写不了时（连不上、只读了、盘满了）例外：后面不急的清理、存测试结果、开始矩阵里排着的测试这一轮不做，
     /// 退避期间（见 [`Inner::flush_after`]）的每一轮也都不做。它们每写一次存储都要拿着 controller 的锁等满一次超时，
     /// 所有连接和管理请求都被拖住；退避期间不做，是因为排上重试的重算刚叫醒了后台任务，它马上就会再来一轮。
-    fn tick_work(&mut self, now: Instant, wall: Timestamp) -> Result<Option<Instant>, Error> {
-        let mut failures = Failures::default();
+    fn tick_work(&mut self, now: Instant, wall: Timestamp, failures: &mut Failures) -> Option<Instant> {
         self.give_up_on_slow_acks(now);
         let unsettled = failures.keep(self.settle_commits(now));
         let no_udp = failures.keep(self.no_udp_tick(now));
@@ -670,34 +663,58 @@ impl Inner {
         } else {
             self.tests_tick(now)
         };
-        failures.into_result()?;
-        Ok([next, no_udp, waiting, self.updates.next_rollout, tests, unsettled].into_iter().flatten().min())
+        [next, no_udp, waiting, self.updates.next_rollout, tests, unsettled].into_iter().flatten().min()
     }
+}
+
+/// 后台的一轮里有工作出了错（[`Controller::tick`]）。别的工作照样做了，出错的留着下次再做。
+#[derive(Debug)]
+pub struct TickFailed {
+    /// 出的错，先出的在前，至少有一个。
+    pub errors: Vec<Error>,
+    /// 下一次最晚什么时候再来：别的工作要它回来的时刻照样算在里面，最晚是出错的工作过一会儿再试的时候。
+    pub next: Instant,
 }
 
 /// 一连做了好几样工作、每一样都可能出错时，记下出了什么错。
 #[derive(Default)]
 struct Failures {
-    first: Option<Error>,
+    /// 出的错，先出的在前。
+    errors: Vec<Error>,
     /// 出过整个数据库都读写不了的错（连不上、只读了、盘满了）：后面要写存储的不急的事就不去试了。
     database_wide: bool,
 }
 
 impl Failures {
-    /// 记下一样工作的结果，出错时交回默认值。第一个错误留给调用方，后面的打日志：调用方只拿得到一个，不然就看不到了。
+    /// 记下一样工作的结果，出错时交回默认值。
     fn keep<T: Default>(&mut self, outcome: Result<T, Error>) -> T {
         outcome.unwrap_or_else(|err| {
             self.database_wide |= err.is_database_wide();
-            match &self.first {
-                None => self.first = Some(err),
-                Some(_) => tracing::error!("同时还出了一个错，稍后再试：{}", error_chain(&err)),
-            }
+            self.errors.push(err);
             T::default()
         })
     }
 
+    /// 第一个错误留给调用方，后面的打日志：调用方只拿得到一个，不然就看不到了。
     fn into_result(self) -> Result<(), Error> {
-        self.first.map_or(Ok(()), Err)
+        let mut errors = self.errors.into_iter();
+        let first = errors.next();
+        for err in errors {
+            tracing::error!("同时还出了一个错，稍后再试：{}", error_chain(&err));
+        }
+        first.map_or(Ok(()), Err)
+    }
+
+    /// 后台的一轮做完了，`next` 是各样工作要它回来的时刻。出了错时错误都交给调用方（它来决定打多少日志），
+    /// 并且最晚过 [`TICK_RETRY`] 再来：出错的工作有的自己排了再试的时刻（重算、更新指令），有的没有
+    /// （要重新看谁用不了 UDP 的网络、照数据库补齐），没排的就等这一次。
+    fn into_tick(self, now: Instant, next: Option<Instant>) -> Result<Option<Instant>, TickFailed> {
+        if self.errors.is_empty() {
+            return Ok(next);
+        }
+        // 从做完的时候算：读写存储可能等了很久（比如连数据库等到了超时），从开始算的话这时已经到点了。
+        let retry = Instant::now().max(now) + TICK_RETRY;
+        Err(TickFailed { errors: self.errors, next: next.map_or(retry, |next| next.min(retry)) })
     }
 }
 
@@ -713,6 +730,8 @@ pub(crate) fn first_failure(first: Result<(), Error>, then: Result<(), Error>) -
 const PURGE_INTERVAL: Duration = Duration::from_secs(60);
 /// 有节点欠着确认时多久查一次超时。
 const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+/// 后台的一轮有工作出了错时，最晚过多久再来一轮。
+const TICK_RETRY: Duration = Duration::from_secs(1);
 
 /// `主机:端口` 里的主机，是 IP 地址的话。回环和全零的地址对别的机器没有用，不算。
 fn host_ip(public_addr: &str) -> Option<IpAddr> {

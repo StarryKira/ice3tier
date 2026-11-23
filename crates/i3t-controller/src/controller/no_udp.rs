@@ -60,15 +60,20 @@ impl Inner {
     ///
     /// # Errors
     ///
-    /// 读存储失败。没算完的网络留到下一轮。
+    /// 读存储失败，交回第一个错误。读不出来的网络留到下一轮，别的网络照常算，算出来的变化照常通知对端。
     pub(crate) fn no_udp_tick(&mut self, now: Instant) -> Result<Option<Instant>, Error> {
         let mut changed: Vec<(NetworkId, NodeId)> = Vec::new();
+        let mut unread = BTreeSet::new();
+        let mut first_error = None;
         while let Some(network) = self.no_udp_dirty.pop_first() {
             let nodes = match self.store.nodes(network) {
                 Ok(nodes) => nodes,
+                // 一个网络读不出来不耽误别的：不然前面的网络算出来的变化没人通知（它们已经不在 `no_udp_dirty` 里了），
+                // 一直读不出来的话排在它后面的网络也一直轮不到。整个数据库出错时也接着读：读不用等写锁，失败都是马上返回的。
                 Err(error) => {
-                    self.no_udp_dirty.insert(network);
-                    return Err(error.into());
+                    unread.insert(network);
+                    first_error.get_or_insert(error.into());
+                    continue;
                 }
             };
             let without: BTreeSet<NodeId> = relay_reach::without_udp(&nodes);
@@ -91,6 +96,8 @@ impl Inner {
             let present: BTreeSet<NodeId> = nodes.iter().map(|node| node.id).collect();
             self.no_udp.retain(|id, entry| entry.network != network || present.contains(id));
         }
+        // 循环结束之后才放回去，不然同一轮里又会把它取出来。
+        self.no_udp_dirty.append(&mut unread);
         let settle = self.timing.no_udp_settle;
         for (id, entry) in &mut self.no_udp {
             if !entry.settled && now.saturating_duration_since(entry.since) >= settle {
@@ -103,6 +110,9 @@ impl Inner {
             let holders = self.holders_of(node);
             self.defer_report(network, holders);
         }
-        Ok(self.no_udp.values().filter(|entry| !entry.settled).map(|entry| entry.since + settle).min())
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(self.no_udp.values().filter(|entry| !entry.settled).map(|entry| entry.since + settle).min()),
+        }
     }
 }

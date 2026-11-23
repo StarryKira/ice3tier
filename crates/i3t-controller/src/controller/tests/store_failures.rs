@@ -1,14 +1,16 @@
 //! 存储暂时读写不了的时候，改了一半的不留下，改完了的不丢下后面该做的事：要重算的照样重算，该发的更新指令照样发。
 
+use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use i3t_model::admin::{CreateEnrollToken, CreateRule, Direction, NetworkId, RelaySettings, UpdateNode};
-use i3t_model::control::{Declared, Hello, ToNode};
+use i3t_model::control::{Declared, Hello, PROTOCOL_REVISION, RelayTry, Report, ToController, ToNode, TryOutcome};
 use i3t_proto::NodeId;
 use tokio::sync::mpsc;
 
 use super::super::testing::{CAN_DO_ALL, Lab, Member, hello};
+use super::super::{Failures, Timing};
 use super::ordering::{block_column_of, report_endpoints, two_unconnected};
 use super::{is_woken, relations};
 
@@ -174,7 +176,9 @@ fn a_database_that_takes_no_writes_is_tried_once_by_the_background_work_and_then
     let work = |lab: &Lab, after: Duration| {
         let mut inner = lab.controller.lock();
         let wall = inner.clock.now();
-        inner.tick_work(Instant::now() + after, wall)
+        let mut failures = Failures::default();
+        inner.tick_work(Instant::now() + after, wall, &mut failures);
+        failures.into_result()
     };
     let past_back_off = Duration::from_secs(2);
 
@@ -227,4 +231,110 @@ fn an_update_rollout_that_could_not_read_the_store_is_tried_again() {
     assert!(inner.updates.next_rollout.is_some(), "没做完，过一会儿再做");
     drop(inner);
     restore(&lab, "nodes");
+}
+
+/// 节点报的试过的 relay 和连上的方式。
+fn relay_tries(entries: &[(NodeId, TryOutcome)]) -> ToController {
+    let relays = entries.iter().map(|&(relay, outcome)| RelayTry { relay, outcome, age_secs: 0, seen_as: None }).collect();
+    ToController::Report(Box::new(Report { relays, ..Report::default() }))
+}
+
+/// 网络里两个 relay r、s 和一个普通节点 y：y 经 UDP 连得上 r、经 TCP 才连得上 s，s 连 r 也只经 TCP，
+/// 所以 s 被认定用不了 UDP，y 的 netmap 里写着。`lab` 的 `no_udp_settle` 要是零，下一轮后台工作就算数。
+fn held_without_udp(lab: &mut Lab, network: NetworkId) -> [Member; 3] {
+    let relay_hello = Hello { protocol: PROTOCOL_REVISION, ..hello(CAN_DO_ALL) };
+    let [mut r, mut s, mut y] = [(); 3].map(|()| lab.join_as(network, &relay_hello));
+    for relay in [r.id, s.id] {
+        lab.controller.enable_relay(network, relay, RelaySettings { bandwidth_mbps: Some(100) }).unwrap();
+    }
+    y.send(&lab.controller, relay_tries(&[(r.id, TryOutcome::Udp), (s.id, TryOutcome::Tcp)]));
+    s.send(&lab.controller, relay_tries(&[(r.id, TryOutcome::Tcp)]));
+    lab.settle(&mut [&mut r, &mut s, &mut y]);
+    assert!(y.netmap().peer(s.id).unwrap().no_udp, "s 用不了 UDP，y 知道");
+    [r, s, y]
+}
+
+/// 让存储里这个节点的那一行读不出来（"本机的网卡地址"那一列里不是一张地址表），它所在网络的节点也就读不出来；`readable` 改回来。
+fn unreadable(lab: &Lab, node: NodeId) {
+    lab.controller.lock().store.execute_batch(&format!("UPDATE nodes SET local_addresses = '\"unreadable\"' WHERE id = {};", node.get()));
+}
+
+fn readable(lab: &Lab, node: NodeId) {
+    lab.controller.lock().store.execute_batch(&format!("UPDATE nodes SET local_addresses = NULL WHERE id = {};", node.get()));
+}
+
+/// 一个网络的节点一直读不出来时，别的网络照样重新看谁用不了 UDP，变化照样告诉对端；读不出来的那个能读了再看。
+/// `broken_first`：读不出来的网络先取出来（编号小）还是后取出来。
+fn other_networks_go_on_finding_who_has_no_udp(broken_first: bool) {
+    let timing =
+        Timing { ack_coalesce: Duration::ZERO, report_coalesce: Duration::ZERO, no_udp_settle: Duration::ZERO, ..Timing::default() };
+    let mut lab = Lab::with_timing(timing);
+    let (broken, home) = if broken_first {
+        let broken = lab.network("broken").id;
+        (broken, lab.network("home").id)
+    } else {
+        let home = lab.network("home").id;
+        (lab.network("broken").id, home)
+    };
+    assert_eq!(broken < home, broken_first, "`no_udp_dirty` 按网络的编号取");
+    let [mut r, mut s, mut y] = held_without_udp(&mut lab, home);
+    let mut other = lab.join(broken, &[]);
+    unreadable(&lab, other.id);
+
+    // s 又经 UDP 连上了 r。那个网络里也有节点报了试过的 relay，要重新看，可它的节点读不出来。
+    s.send(&lab.controller, relay_tries(&[(r.id, TryOutcome::Udp)]));
+    lab.controller.lock().no_udp_dirty.insert(broken);
+    assert!(lab.controller.tick().is_err(), "读不出来照样报错");
+    assert_eq!(lab.controller.lock().no_udp_dirty, BTreeSet::from([broken]), "读不出来的留到下一轮，读得出来的这一轮就看了");
+    assert!(!lab.controller.node(home, s.id).unwrap().node.no_udp, "s 马上不再算用不了 UDP");
+
+    // 告诉 s 的对端的重算排着，到点就做：那个网络还是读不出来，不耽误它。
+    let due = lab.controller.lock().dirty.values().map(|deferred| deferred.due).min().expect("要告诉 s 的对端");
+    std::thread::sleep(due.saturating_duration_since(Instant::now()));
+    assert!(lab.controller.tick().is_err());
+    assert_eq!(y.receive(), 1);
+    assert!(!y.netmap().peer(s.id).unwrap().no_udp, "y 知道 s 又用得了 UDP");
+
+    readable(&lab, other.id);
+    lab.settle(&mut [&mut r, &mut s, &mut y, &mut other]);
+    assert!(lab.controller.lock().no_udp_dirty.is_empty(), "能读了，那个网络也看过了");
+}
+
+#[test]
+fn a_network_that_cannot_be_read_does_not_lose_what_was_found_in_the_networks_before_it() {
+    other_networks_go_on_finding_who_has_no_udp(false);
+}
+
+#[test]
+fn a_network_that_cannot_be_read_does_not_hold_up_the_networks_after_it() {
+    other_networks_go_on_finding_who_has_no_udp(true);
+}
+
+#[test]
+fn background_work_that_fails_still_says_when_to_come_back_and_hands_over_every_error() {
+    let mut lab = Lab::new();
+    let (home, broken) = (lab.network("home").id, lab.network("broken").id);
+    let a = lab.join(home, &[]);
+    let b = lab.join(broken, &[]);
+    unreadable(&lab, b.id);
+    let soon = Duration::from_millis(300);
+    {
+        let mut inner = lab.controller.lock();
+        // 那个网络要重新看谁用不了 UDP，可它的节点读不出来；到点的更新指令读到它也读不出来。
+        inner.no_udp_dirty.insert(broken);
+        inner.updates.next_rollout = Some(Instant::now());
+        // 别的网络有一个节点的重算一会儿就到点，比出错之后再来的时候早。
+        inner.defer(home, [a.id], soon);
+    }
+    let started = Instant::now();
+    let failed = lab.controller.tick().unwrap_err();
+    assert_eq!(failed.errors.len(), 2, "重新看谁用不了 UDP 的、发更新指令的，出的错都交出来，不只是第一个：{:?}", failed.errors);
+    assert!(failed.next <= started + soon, "排着的重算到点就要回来，不等出错之后的再试：{:?}", failed.next - started);
+
+    // 没有别的事要早回来时，最晚过一会儿再试出错的那几样。
+    lab.controller.lock().dirty.clear();
+    let started = Instant::now();
+    let failed = lab.controller.tick().unwrap_err();
+    assert!(failed.next > started + soon && failed.next <= Instant::now() + Duration::from_secs(1), "{:?}", failed.next - started);
+    readable(&lab, b.id);
 }

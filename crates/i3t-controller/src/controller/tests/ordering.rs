@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 
 use super::super::publish::Seeds;
 use super::super::testing::{Lab, Member, REMOTE, hello};
-use super::super::{Controller, Timing};
+use super::super::{Controller, TickFailed, Timing};
 use super::{add_rule, drop_default_rule, is_woken, peer_ids, relations};
 use crate::error::{Error, Rejection};
 use crate::store::{NetmapState, Scratch, Store};
@@ -223,7 +223,7 @@ fn a_netmap_that_keeps_changing_does_not_keep_a_revocation_pending() {
 const PAST_RETRY: Duration = Duration::from_secs(2);
 
 /// 做一遍后台工作，时间算作 `after` 之后。
-fn tick_after(lab: &Lab, after: Duration) -> Result<Option<Instant>, Error> {
+fn tick_after(lab: &Lab, after: Duration) -> Result<Option<Instant>, TickFailed> {
     let mut inner = lab.controller.lock();
     let wall = inner.clock.now();
     inner.tick(Instant::now() + after, wall)

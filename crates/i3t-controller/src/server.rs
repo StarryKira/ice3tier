@@ -10,13 +10,14 @@ use ring::rand::{SecureRandom, SystemRandom};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::watch;
 
-use crate::controller::Controller;
+use crate::controller::{Controller, TickFailed};
 use crate::error::{Error, error_chain};
+use crate::gate::Throttle;
 use crate::webui::WebUi;
 use crate::{addr_server, admin, admin_server, node_server};
 
-/// 后台工作出错之后多久再试。
-const RETRY_DELAY: Duration = Duration::from_secs(1);
+/// 后台工作一直出错时，多久最多打一轮它的错误。
+const TICK_ERROR_LOG_EVERY: Duration = Duration::from_secs(60);
 
 /// 多久查一次发布源。
 const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -178,17 +179,18 @@ fn any_dynamic_port() -> Result<u16, Error> {
 
 /// 后台任务：到点做延后的下发，不再等迟迟不确认的节点，清理过期的东西。
 async fn maintain(controller: Arc<Controller>, mut shutdown: watch::Receiver<bool>) {
+    let errors = Throttle::new(TICK_ERROR_LOG_EVERY);
     loop {
         let next = match blocking(&controller, Controller::tick).await {
-            Ok(next) => next.map(tokio::time::Instant::from_std),
-            Err(err) => {
-                tracing::error!("后台工作出错，稍后再试：{}", error_chain(&err));
-                Some(tokio::time::Instant::now() + RETRY_DELAY)
+            Ok(next) => next,
+            Err(failed) => {
+                log_failure(&errors, &failed);
+                Some(failed.next)
             }
         };
         let until_next = async {
             match next {
-                Some(at) => tokio::time::sleep_until(at).await,
+                Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
                 None => std::future::pending().await,
             }
         };
@@ -196,6 +198,21 @@ async fn maintain(controller: Arc<Controller>, mut shutdown: watch::Receiver<boo
             () = until_next => {}
             () = controller.wait_for_work() => {}
             _ = shutdown.changed() => return,
+        }
+    }
+}
+
+/// 后台的一轮出的错，打进日志。一直出错的时候（比如数据库停了）后台每秒都要再试，每一轮都打的话日志很快就被刷满：
+/// 每 [`TICK_ERROR_LOG_EVERY`] 最多打一轮，说出这期间省掉了几轮，省掉的打在 debug 里。
+///
+/// 中间有一轮没出错也照样限着：整个数据库读写不了时后台退避，退避期间的那几轮不碰数据库，也就不出错，
+/// 不能当作好了。
+fn log_failure(errors: &Throttle, failed: &TickFailed) {
+    let suppressed = errors.allow();
+    for err in &failed.errors {
+        match suppressed {
+            Some(suppressed) => tracing::error!(suppressed, "后台工作出错，稍后再试：{}", error_chain(err)),
+            None => tracing::debug!("后台工作出错，稍后再试：{}", error_chain(err)),
         }
     }
 }
@@ -365,5 +382,39 @@ mod tests {
         let taken = squatter.local_addr().unwrap();
         let bound = bind_node(taken, UdpSocket::bind).await;
         assert!(matches!(&bound, Err(Error::Bind { address, .. }) if *address == taken), "{:?}", bound.err());
+    }
+
+    /// `run` 期间这个线程打的日志，每一行一条。
+    fn logged(run: impl FnOnce()) -> Vec<String> {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let writer = std::sync::Mutex::new(file.reopen().unwrap());
+        let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false).with_writer(writer).finish();
+        tracing::subscriber::with_default(subscriber, run);
+        std::fs::read_to_string(file.path()).unwrap().lines().map(str::to_owned).collect()
+    }
+
+    fn failed(errors: usize) -> TickFailed {
+        let errors = (0..errors).map(|_| Error::NotFound(crate::error::Entity::Network)).collect();
+        TickFailed { errors, next: std::time::Instant::now() }
+    }
+
+    #[test]
+    fn background_work_that_keeps_failing_is_logged_once_a_while_with_every_error_of_that_round() {
+        let errors = Throttle::new(Duration::from_secs(3600));
+        let lines = logged(|| {
+            log_failure(&errors, &failed(2));
+            log_failure(&errors, &failed(1));
+            log_failure(&errors, &failed(2));
+        });
+        let shown: Vec<_> = lines.iter().filter(|line| line.contains("ERROR")).collect();
+        assert_eq!(shown.len(), 2, "第一轮的两个错都打，接着的两轮不打：{lines:#?}");
+        assert!(shown.iter().all(|line| line.contains("suppressed=0")), "{lines:#?}");
+
+        let errors = Throttle::new(Duration::ZERO);
+        let lines = logged(|| {
+            log_failure(&errors, &failed(1));
+            log_failure(&errors, &failed(1));
+        });
+        assert_eq!(lines.iter().filter(|line| line.contains("ERROR")).count(), 2, "过了限着的时间就再打：{lines:#?}");
     }
 }
