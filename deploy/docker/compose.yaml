@@ -1,0 +1,69 @@
+# ice3tier control plane: the controller and the PostgreSQL database it stores everything in.
+#
+# Start (replace the address with one every node can reach). The address goes into a .env file next to this file,
+# so that later docker compose commands find it too:
+#   echo 'I3T_PUBLIC_ADDR=<public address>:20331' > .env
+#   docker compose up -d
+# The admin token is printed once, on the first start:
+#   docker compose logs controller
+#
+# Settings, from that .env file or the environment:
+#   I3T_PUBLIC_ADDR   required: HOST:PORT nodes use to reach the controller
+#   I3T_VERSION       controller version to run (default: latest)
+#
+# The database has no password to set. It does not listen on the network at all: it listens on a Unix socket in a
+# volume that only these two containers mount, so nothing else, on this machine or in another container, can reach it.
+
+name: i3t
+
+services:
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    # The health check below looks at PID 1. A Docker daemon set up to give every container an init process would put
+    # that there instead.
+    init: false
+    # No TCP: only the socket in /var/run/postgresql, which is the postgres-socket volume.
+    command: ["postgres", "-c", "listen_addresses="]
+    environment:
+      POSTGRES_USER: i3t
+      POSTGRES_DB: i3t
+      # Whoever can open the socket is let in. That is the controller, and nobody else has the socket.
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - postgres:/var/lib/postgresql
+      - postgres-socket:/var/run/postgresql
+    healthcheck:
+      # On an empty volume the image first runs a temporary server, on this same socket, to create the user and the
+      # database, and stops it again. PID 1 is the image's start script meanwhile; it becomes postgres when the real
+      # server takes over. A server that answers before that is not the one to wait for.
+      test: ["CMD-SHELL", "[ \"$$(cat /proc/1/comm)\" = postgres ] && pg_isready --username i3t --dbname i3t"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
+  controller:
+    image: ghcr.io/fuqiuluo/ice3tier-controller:${I3T_VERSION:-latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      I3T_PUBLIC_ADDR: ${I3T_PUBLIC_ADDR:?set I3T_PUBLIC_ADDR to the HOST:PORT nodes use to reach the controller, e.g. 203.0.113.7:20331}
+      # The socket directory, written with %2F for each slash.
+      I3T_DATABASE_URL: postgres://i3t@%2Fvar%2Frun%2Fpostgresql/i3t
+    ports:
+      # Node protocol (TCP) and address queries (UDP).
+      - "20331:20331/tcp"
+      - "20331:20331/udp"
+      # Admin API and WebUI: plain HTTP, so only on this machine. Reach it from elsewhere through an SSH tunnel.
+      - "127.0.0.1:20332:20332"
+    volumes:
+      # The controller's key and the cache of update packages.
+      - controller:/data
+      - postgres-socket:/var/run/postgresql
+
+volumes:
+  postgres:
+  postgres-socket:
+  controller:

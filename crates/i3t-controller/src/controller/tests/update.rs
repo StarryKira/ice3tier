@@ -20,7 +20,7 @@ use ring::digest;
 
 use super::super::testing::{CAN_DO_ALL, Lab, Member, REMOTE, hello, modern_hello};
 use super::super::{Controller, Timing};
-use super::ordering::is_woken;
+use super::is_woken;
 use crate::store::Store;
 
 const LINUX: &str = "linux-x86_64";
@@ -128,12 +128,11 @@ impl Fleet {
         let publisher = Publisher::new();
         let cache = tempfile::tempdir().unwrap();
         let timing = Timing { ack_coalesce: Duration::ZERO, report_coalesce: Duration::ZERO, relay_settle, ..Timing::default() };
-        let controller =
-            Controller::new(Store::open_in_memory().unwrap(), NodeKey::generate().unwrap(), "ctl.example.com:20331".to_owned(), timing)
-                .unwrap()
-                .with_release_keys(TrustedKeys::from(publisher.key.public()))
-                .unwrap()
-                .with_release_cache(cache.path().to_owned());
+        let controller = Controller::new(Store::temporary(), NodeKey::generate().unwrap(), "ctl.example.com:20331".to_owned(), timing)
+            .unwrap()
+            .with_release_keys(TrustedKeys::from(publisher.key.public()))
+            .unwrap()
+            .with_release_cache(cache.path().to_owned());
         let controller = adjust(controller);
         let settings = UpdateSettings { source: Some(Some(publisher.source())), ..UpdateSettings::default() };
         controller.set_update_settings(&settings).unwrap();
@@ -427,6 +426,41 @@ fn packages_are_served_in_chunks_from_the_cache_and_a_download_can_resume() {
 }
 
 #[test]
+fn a_failure_reason_with_a_nul_in_it_is_recorded_like_any_other() {
+    let mut fleet = Fleet::new();
+    fleet.release();
+    let mut victim = fleet.node(OLD);
+    assert!(fleet.last_order(&mut victim).is_some());
+
+    // 节点报上来的原因里有一个 NUL。它要写进节点的失败记录（JSON）、暂停的记录，还有操作记录的说明（文本列）：
+    // 哪一处存不进去，这次上报就半途而废，同样的上报再来也不会重做。
+    let status = UpdateStatus::Failed {
+        version: Some(version(NEW)),
+        kind: FailureKind::VersionRejected,
+        reason: "自检没有通过：\0坏了".to_owned(),
+        cause: None,
+    };
+    victim.report_update(fleet.controller(), status);
+
+    assert_eq!(fleet.update_of(&victim).failure.expect("失败记下来了").reason, "自检没有通过：坏了");
+    let overview = fleet.controller().update_overview().unwrap();
+    assert_eq!(overview.paused.len(), 1, "这个版本照样暂停了");
+    let log = fleet.controller().oplog(10).unwrap();
+    let paused = log.iter().find(|entry| entry.action == "update.pause").expect("暂停记进了操作记录");
+    assert!(paused.detail.contains("自检没有通过：坏了"), "{}", paused.detail);
+}
+
+#[test]
+fn a_release_source_with_a_control_character_is_refused_before_anything_is_stored() {
+    let fleet = Fleet::new();
+    let before = fleet.controller().update_overview().unwrap();
+    let bad = UpdateSettings { source: Some(Some("https://mirror.lan/a\0b".to_owned())), ..UpdateSettings::default() };
+    assert_eq!(fleet.controller().set_update_settings(&bad).unwrap_err().code(), ErrorCode::InvalidRequest);
+    let after = fleet.controller().update_overview().unwrap();
+    assert_eq!((after.source, after.source_is_default), (before.source, before.source_is_default), "设置没有动");
+}
+
+#[test]
 fn a_version_failure_pauses_the_rollout_until_an_admin_resumes_it() {
     let mut fleet = Fleet::new();
     fleet.release();
@@ -565,14 +599,14 @@ fn switching_auto_update_off_withdraws_the_order_even_if_recomputing_netmaps_fai
     assert_eq!(pending.cancels, 1);
 }
 
-/// 让存储里这个节点的那一行读不出来（"最近在线"的时间不是数），别的节点照常；`readable` 改回来。
+/// 让存储里这个节点的那一行读不出来（"本机的网卡地址"那一列里不是一张地址表），别的节点照常；`readable` 改回来。
 fn unreadable(fleet: &Fleet, member: &Member) {
-    let sql = format!("UPDATE nodes SET last_seen_at = 'unreadable' WHERE id = {};", member.id.get());
+    let sql = format!("UPDATE nodes SET local_addresses = '\"unreadable\"' WHERE id = {};", member.id.get());
     fleet.controller().lock().store.execute_batch(&sql);
 }
 
 fn readable(fleet: &Fleet, member: &Member) {
-    let sql = format!("UPDATE nodes SET last_seen_at = NULL WHERE id = {};", member.id.get());
+    let sql = format!("UPDATE nodes SET local_addresses = NULL WHERE id = {};", member.id.get());
     fleet.controller().lock().store.execute_batch(&sql);
 }
 
@@ -640,7 +674,7 @@ fn queued_relays_wait_while_a_node_that_may_still_hold_the_turn_cannot_be_read()
     // 排队的 relay 先不开始，不然可能两个 relay 同时在更新。
     {
         let inner = &mut *fleet.controller().lock();
-        inner.store.execute_batch(&format!("UPDATE nodes SET auto_update = 0 WHERE id = {};", holder.id.get()));
+        inner.store.execute_batch(&format!("UPDATE nodes SET auto_update = FALSE WHERE id = {};", holder.id.get()));
         inner.updates.relay_turns.clear();
         inner.updates.next_rollout = Some(Instant::now());
     }
@@ -970,11 +1004,12 @@ fn a_newer_release_replaces_what_nodes_were_told_and_drops_the_old_packages() {
 
 #[test]
 fn settings_the_known_release_pauses_and_failures_survive_a_restart() {
-    let dir = tempfile::tempdir().unwrap();
+    let scratch = crate::store::Scratch::new();
+    let database = scratch.database();
     let publisher = Publisher::new();
     let cache = tempfile::tempdir().unwrap();
     let open = || {
-        let store = Store::open(&dir.path().join("controller.db")).unwrap();
+        let store = Store::open(&database).unwrap();
         Controller::new(store, NodeKey::generate().unwrap(), "ctl.example.com:20331".to_owned(), Timing::default())
             .unwrap()
             .with_release_keys(TrustedKeys::from(publisher.key.public()))
@@ -1020,7 +1055,7 @@ fn settings_the_known_release_pauses_and_failures_survive_a_restart() {
 
     // 换了一把钥匙之后，存下来的那份清单验不过，不再相信它。
     drop(controller);
-    let store = Store::open(&dir.path().join("controller.db")).unwrap();
+    let store = Store::open(&database).unwrap();
     let controller = Controller::new(store, NodeKey::generate().unwrap(), "ctl.example.com:20331".to_owned(), Timing::default()).unwrap();
     assert_eq!(controller.update_overview().unwrap().release, None);
 }

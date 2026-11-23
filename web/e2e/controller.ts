@@ -23,6 +23,9 @@ import { kitDir } from './release'
  * 节点更新的测试要它），仓库里的 `target/agent-web/release`、`target/release` 和 `target/lead/release`，
  * 用第一个两样程序都在的目录。
  * 界面用的是 `pnpm build` 的产物，由 controller 自己从 `--static-dir` 提供，和正式部署时一样。
+ *
+ * controller 的数据存在 PostgreSQL 里：每个 controller 在测试用的服务器上用一个新的空库。服务器在哪里由环境变量
+ * `I3T_TEST_DATABASE_URL` 说，先在仓库的根目录执行 `export $(scripts/test-postgres.sh start)`。
  */
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -65,6 +68,9 @@ interface Running {
   /** 看护的循环和节点在一个单独的进程组里，停的时候一起停。 */
   group: boolean
 }
+
+/** controller 没有绑上交给它的端口：有别的进程先占了。 */
+class PortTaken extends Error {}
 
 function freePort(): Promise<number> {
   return new Promise((resolvePort, reject) => {
@@ -161,13 +167,31 @@ export class Controller {
   /**
    * 启动一个全新的、空的 controller。管理令牌从它第一次启动时打印的内容里取。
    * `bins` 指定程序所在的目录；节点更新的测试要用认测试钥匙的那一组。
+   *
+   * 端口是先挑好再交给它去绑的，中间隔着一小会儿，挑的时候也只试了 TCP（节点端口它 TCP、UDP 都要）：
+   * 偶尔会被别的进程拿走。那样就换一组端口从头再来。
    */
   static async start(options: { bins?: string } = {}): Promise<Controller> {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await Controller.startOnce(options)
+      } catch (error) {
+        if (!(error instanceof PortTaken) || attempt >= 5) throw error
+      }
+    }
+  }
+
+  private static async startOnce(options: { bins?: string }): Promise<Controller> {
     const bins = options.bins ?? binDir()
     const dist = join(webRoot, 'dist')
     if (!existsSync(join(dist, 'index.html'))) throw new Error('web/dist 里没有构建产物，先执行 pnpm build')
 
     const dir = mkdtempSync(join(tmpdir(), 'i3t-web-e2e-'))
+    const created = spawnSync('sh', [join(repoRoot, 'scripts', 'test-postgres.sh'), 'database', 'web_e2e'], {
+      encoding: 'utf8',
+    })
+    if (created.status !== 0) throw new Error(`建不了测试用的数据库：${created.stderr.trim()}`)
+    const database = created.stdout.trim()
     const nodePort = await freePort()
     const adminPort = await freePort()
     const child = spawn(
@@ -184,23 +208,32 @@ export class Controller {
         '--static-dir',
         dist,
       ],
-      { stdio: ['ignore', 'pipe', 'pipe'] },
+      { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, I3T_DATABASE_URL: database } },
     )
     let stdout = ''
     let stderr = ''
     child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString()))
     child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()))
     let exited: number | null = null
-    child.on('exit', (code) => (exited = code ?? -1))
+    // `close` 在它的输出都读完之后才来，`exit` 可能比最后一段标准错误早：下面要看标准错误里说了什么。
+    child.on('close', (code) => (exited = code ?? -1))
+    /** controller 已经退出的话抛出来。没绑上端口的单独认出来，好换一组端口重来。 */
+    const failIfExited = () => {
+      if (exited === null) return
+      const message = `controller 启动后就退出了（${exited}）：\n${stderr}`
+      throw /Address already in use/.test(stderr) ? new PortTaken(message) : new Error(message)
+    }
 
     const baseUrl = `http://127.0.0.1:${adminPort}`
     try {
       // 令牌单独占一行，前面有缩进：43 个 base64url 字符。
       const adminToken = await waitFor('controller 打印管理令牌', () => {
-        if (exited !== null) throw new Error(`controller 启动后就退出了（${exited}）：\n${stderr}`)
+        failIfExited()
         return /^\s+([A-Za-z0-9_-]{43})\s*$/m.exec(stdout)?.[1]
       })
       await waitFor('管理 API 开始应答', async () => {
+        // 令牌是先打出来的，端口后绑：绑不上多半到这一步才看得出来。
+        failIfExited()
         try {
           const response = await fetch(`${baseUrl}/api/v1/status`, {
             headers: { Authorization: `Bearer ${adminToken}` },

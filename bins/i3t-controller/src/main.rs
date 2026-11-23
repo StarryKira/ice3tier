@@ -1,9 +1,9 @@
 //! ice3tier 的 controller：节点协议、管理 API 和内嵌的 WebUI，一个进程。
 //!
-//! 这里只做装配：读参数，打开数据目录，绑端口，等退出信号。逻辑都在 `i3t-controller` 这个库里。
-//! 终端上的文字（帮助、管理令牌、备份的结果、启动时的错误）跟着系统的语言，日志不翻译。
+//! 这里只做装配：读参数，打开数据目录和数据库，绑端口，等退出信号。逻辑都在 `i3t-controller` 这个库里。
+//! 终端上的文字（帮助、管理令牌、启动时的错误）跟着系统的语言，日志不翻译。
 //!
-//! 除了运行，还有两种做完就退出的用法：`--reset-admin-token` 和 `--backup-to`。它们不需要 `--public-addr`，也不起运行时。
+//! 除了运行，还有一种做完就退出的用法：`--reset-admin-token`。它不需要 `--public-addr`，也不起运行时。
 
 mod texts;
 
@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use clap::{CommandFactory, Parser};
+use i3t_controller::store::Database;
 use i3t_controller::webui::{Asset, WebUi};
 use i3t_controller::{Controller, ServeOptions, Server};
 use i3t_lang::Lang;
@@ -26,6 +27,10 @@ static WEBUI: &[Asset] = include!(concat!(env!("OUT_DIR"), "/webui_assets.rs"));
 /// 日志级别用这个环境变量调，写法和 `RUST_LOG` 相同，例如 `I3T_LOG=debug`。
 const LOG_ENV: &str = "I3T_LOG";
 
+/// 数据库的连接串也可以放在数据目录里的这个文件里，`--database-url` 和环境变量都没有给时读它。
+/// 安装脚本把连接串写在这里（只有 controller 的用户读得了），所以只凭数据目录就能启动、就能重新生成管理令牌。
+const DATABASE_URL_FILE: &str = "database.url";
+
 // 帮助的文字在文字目录里（`texts`），由 `command` 按语言装上去，所以这里不写文档注释：clap 会把它们当成说明。
 #[derive(Parser)]
 #[command(name = "i3t-controller", version)]
@@ -33,7 +38,11 @@ struct Args {
     #[arg(long, env = "I3T_DATA_DIR")]
     data_dir: PathBuf,
 
-    #[arg(long, env = "I3T_PUBLIC_ADDR", required_unless_present_any = ["backup_to", "reset_admin_token"])]
+    /// 连接串里有密码：帮助里不显示环境变量的值，也不交给 clap 解析（它报错时会把值原样打出来），由 [`database`] 来读。
+    #[arg(long, env = "I3T_DATABASE_URL", hide_env_values = true)]
+    database_url: Option<String>,
+
+    #[arg(long, env = "I3T_PUBLIC_ADDR", required_unless_present = "reset_admin_token")]
     public_addr: Option<String>,
 
     #[arg(long, default_value = "0.0.0.0:20331")]
@@ -47,9 +56,6 @@ struct Args {
 
     #[arg(long)]
     reset_admin_token: bool,
-
-    #[arg(long, conflicts_with = "reset_admin_token")]
-    backup_to: Option<PathBuf>,
 
     #[arg(long, default_value_t = i3t_underlay::tcp_mss::DEFAULT, value_parser = parse_mss)]
     tcp_mss: u16,
@@ -70,28 +76,28 @@ fn command(lang: Lang) -> clap::Command {
     Args::command()
         .about(t.about)
         .mut_arg("data_dir", |arg| arg.help(t.data_dir).value_name(t.dir))
+        .mut_arg("database_url", |arg| arg.help(t.database_url).value_name(t.url))
         .mut_arg("public_addr", |arg| arg.help(t.public_addr).value_name(t.host_port))
         .mut_arg("listen", |arg| arg.help(t.listen).value_name(t.address))
         .mut_arg("admin_listen", |arg| arg.help(t.admin_listen).value_name(t.address))
         .mut_arg("static_dir", |arg| arg.help(t.static_dir).value_name(t.dir))
         .mut_arg("reset_admin_token", |arg| arg.help(t.reset_admin_token))
-        .mut_arg("backup_to", |arg| arg.help(t.backup_to).value_name(t.dir))
         .mut_arg("tcp_mss", |arg| arg.help(t.tcp_mss).value_name(t.bytes))
 }
 
 fn main() -> ExitCode {
     let lang = i3t_lang::set(Lang::detect());
     let args: Args = i3t_lang::cli::parse(command(lang), lang);
-    let outcome = match &args.backup_to {
-        Some(to) => back_up(&args.data_dir, to),
-        None if args.reset_admin_token => reset_admin_token(&args.data_dir),
-        None => match tokio::runtime::Runtime::new() {
+    let outcome = if args.reset_admin_token {
+        reset_admin_token(&args)
+    } else {
+        match tokio::runtime::Runtime::new() {
             Ok(runtime) => runtime.block_on(serve(args)),
             Err(error) => {
                 eprintln!("i3t-controller: {}", lang.labelled(texts::texts().start_runtime, &error.to_string()));
                 return ExitCode::FAILURE;
             }
-        },
+        }
     };
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
@@ -109,24 +115,32 @@ fn init_logging(default: &str) {
     tracing_subscriber::fmt().with_env_filter(filter).with_ansi(std::io::stderr().is_terminal()).with_writer(std::io::stderr).init();
 }
 
-/// 备份数据目录，把写了什么打在标准输出上。不需要 controller 停着，也不需要运行时才要的参数。
-fn back_up(data_dir: &Path, to: &Path) -> anyhow::Result<()> {
-    // 写了什么由这里打出来，库里那条"备份写好了"的日志在终端上是重复的，所以默认只看警告。
-    init_logging("warn");
+/// 连到哪个数据库：`--database-url`（或者环境变量）给的，没有给就读数据目录里的 [`DATABASE_URL_FILE`]。
+/// 读不懂时只说哪里不对，不把连接串打出来：里面有密码。
+fn database(data_dir: &Path, given: Option<&str>) -> anyhow::Result<Database> {
     let t = texts::texts();
-    let backup = Controller::back_up(data_dir, to).with_context(|| (t.back_up)(&data_dir.display().to_string()))?;
-    println!("{}", (t.backup_written)(&backup.dir.display().to_string()));
-    let width = backup.files.iter().map(|file| file.name.len()).max().unwrap_or(0);
-    for file in &backup.files {
-        println!("    {:width$}  {}", file.name, i3t_lang::current().bytes(file.bytes));
-    }
-    Ok(())
+    // 空的环境变量当作没有给。
+    let text = match given.map(str::trim).filter(|url| !url.is_empty()) {
+        Some(url) => url.to_owned(),
+        None => {
+            let path = data_dir.join(DATABASE_URL_FILE);
+            match std::fs::read_to_string(&path) {
+                // 一个空文件等于没有说：现在就讲，不等到连的时候才说没有主机。
+                Ok(text) if text.trim().is_empty() => bail!((t.no_database_url)(&path.display().to_string())),
+                Ok(text) => text.trim().to_owned(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => bail!((t.no_database_url)(&path.display().to_string())),
+                Err(error) => return Err(anyhow::Error::new(error).context((t.io)(&path.display().to_string()))),
+            }
+        }
+    };
+    text.parse().map_err(|error| anyhow::Error::new(error).context(t.read_database_url))
 }
 
-/// 重新生成管理令牌，打在标准输出上。和备份一样不需要对外地址，也不会在写错的目录里建出一个新的 controller。
-fn reset_admin_token(data_dir: &Path) -> anyhow::Result<()> {
+/// 重新生成管理令牌，打在标准输出上。不需要对外地址，也不会在写错的目录或者空的库里建出一个新的 controller。
+fn reset_admin_token(args: &Args) -> anyhow::Result<()> {
     init_logging("warn");
-    let token = Controller::reset_admin_token(data_dir).context(texts::texts().reset_token)?;
+    let database = database(&args.data_dir, args.database_url.as_deref())?;
+    let token = Controller::reset_admin_token(&args.data_dir, &database).context(texts::texts().reset_token)?;
     print_admin_token(&token);
     Ok(())
 }
@@ -153,8 +167,9 @@ async fn serve(args: Args) -> anyhow::Result<()> {
         }
     }
 
-    let opened =
-        Controller::open(&args.data_dir, public_addr.clone()).with_context(|| (t.open_data_dir)(&args.data_dir.display().to_string()))?;
+    let database = database(&args.data_dir, args.database_url.as_deref())?;
+    let opened = Controller::open(&args.data_dir, &database, public_addr.clone())
+        .with_context(|| (t.open_data_dir)(&args.data_dir.display().to_string()))?;
     // 发布清单里的"需要的 controller 最低版本"是和可执行文件的版本比的。
     let version = env!("CARGO_PKG_VERSION").parse().context(t.bad_version)?;
     let controller = opened.controller.with_version(version);

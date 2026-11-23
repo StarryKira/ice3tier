@@ -6,7 +6,6 @@
 //! 方法里有数据库读写，重算一个大网络也要花时间，所以异步代码要经 `spawn_blocking` 调用它们。
 
 mod address;
-mod backup;
 mod diag;
 mod enrollment;
 mod exit_test;
@@ -56,11 +55,10 @@ use crate::gate::Throttle;
 use crate::netmap::NetworkView;
 use crate::node_server::{PENDING, VerificationQuota};
 use crate::relay_reach::{self, ReachIndex};
-use crate::store::{DIGEST_LEN, GroupRecord, LogFilter, NetworkRecord, NodeRecord, Store};
+use crate::store::{DIGEST_LEN, Database, GroupRecord, LogFilter, NetworkRecord, NodeRecord, Store, StoreError};
 use crate::sync::NodeSync;
 use crate::{node_addresses, secret};
 
-pub use backup::{Backup, BackupFile};
 pub use protocol::Admitted;
 pub(crate) use publish::Seeds;
 pub use routes::RouteAnswers;
@@ -69,8 +67,11 @@ pub use routes::RouteAnswers;
 pub const ALPN: &[u8] = b"i3t-ctl/1";
 
 const KEY_FILE: &str = "controller.key";
-const DATABASE_FILE: &str = "controller.db";
+/// 用 SQLite 的版本（0.1.34 和更早）留在数据目录里的数据库文件。
+const OLD_DATABASE_FILE: &str = "controller.db";
 const ADMIN_TOKEN_META: &str = "admin_token_hash";
+/// 这个库是哪个 controller 的：它的公钥。数据目录里的密钥要和它是一对（见 [`bound_key`]）。
+const CONTROLLER_KEY_META: &str = "controller_key";
 
 /// 删掉的节点的虚拟 IP 和名字多久之后才能再分出去。
 const COOLDOWN_SECS: u64 = 90 * 24 * 60 * 60;
@@ -125,8 +126,8 @@ pub struct Controller {
     /// 从数据目录打开时是那个目录。
     data_dir: Option<PathBuf>,
     timing: Timing,
-    /// 管理令牌的哈希。每个管理请求都要查它，所以不放在大锁里。
-    admin_token: Mutex<Option<[u8; DIGEST_LEN]>>,
+    /// 管理令牌的哈希。每个管理请求都要查它，所以不放在大锁里。`Inner` 手上也有一份。
+    admin_token: Arc<Mutex<Option<[u8; DIGEST_LEN]>>>,
     inner: Mutex<Inner>,
     /// 有延后的下发时叫醒后台任务。`Inner` 手上也有一份。
     wake: Arc<Notify>,
@@ -167,10 +168,15 @@ pub(crate) struct Inner {
     /// 叫醒后台任务，和 [`Controller::wake_if_needed`] 用的是同一个。重算没做成、排了重试时在这里叫：
     /// 那时调用方多半带着错误提前返回了，轮不到它来叫。
     pub(crate) wake: Arc<Notify>,
-    /// 后台工作时整个数据库读写不了：这个时刻之前后台不再去重算，也不做别的要写存储的不急的事（见 `Inner::tick_work`）。
-    /// 不然到期时间错开的节点、被叫醒的后台任务会让它一次接一次地去碰数据库，别的进程占着写锁时每一次都是
-    /// 拿着 controller 的锁等满超时。
+    /// 后台工作时整个数据库读写不了（连不上、只读了、盘满了）：这个时刻之前后台不再去重算，也不做别的要写存储的
+    /// 不急的事（见 `Inner::tick_work`）。不然到期时间错开的节点、被叫醒的后台任务会让它一次接一次地去碰数据库。
+    /// 只是某一行、某张表被别的连接占着不算，那由存储限着等多久。
     pub(crate) flush_after: Option<Instant>,
+    /// 有一次提交当时不知道结果、后来查出来是算了数的：提交之后该做的事（重算 netmap、断开被删的节点）那时没有做，
+    /// 内存里的状态和数据库对不上，要照数据库补齐（见 [`Inner::settle_commits`]）。
+    pub(crate) out_of_step: bool,
+    /// 管理令牌的哈希，和 [`Controller::is_admin_token`] 查的是同一个。照数据库补齐时按库里记的改它。
+    pub(crate) admin_token: Arc<Mutex<Option<[u8; DIGEST_LEN]>>>,
     /// 各个节点最近上报的路由表。节点离线之后留着，界面上显示成过期的；controller 重启就没有了。
     pub(crate) routes: BTreeMap<NodeId, routes::Reported>,
     /// 出口和用出口的节点报的计数，算健康和交叉核对用。节点离线之后留着；controller 重启就没有了。
@@ -239,19 +245,28 @@ pub(crate) struct Deferred {
 }
 
 impl Controller {
-    /// 打开数据目录：第一次启动时在里面生成 controller 的密钥、数据库和管理令牌。
+    /// 打开数据目录和数据库：第一次启动时生成 controller 的密钥，在库里建表，生成管理令牌。
+    ///
+    /// 数据目录里只有 controller 的密钥和更新包的缓存；网络、节点和各项设置都在 `database` 里。
+    /// 两样要配着用：节点认的是这把密钥，库里记的是这把密钥名下的节点。库里记着它是哪把密钥的，
+    /// 对不上的不开：拿错了数据目录、连错了库，或者恢复时忘了把密钥放回来，都不会悄悄变成另一个 controller。
     ///
     /// `public_addr` 是节点连 controller 用的 `主机:端口`，会写进每个注册令牌。
     ///
     /// # Errors
     ///
-    /// 目录建不了、密钥文件或数据库读不出来。
-    pub fn open(data_dir: &Path, public_addr: String) -> Result<Opened, Error> {
+    /// 目录建不了、密钥文件读不出来，连不上数据库、读写它失败，或者密钥和数据库对不上
+    /// （[`Error::KeyMismatch`]、[`Error::KeyMissing`]）。
+    pub fn open(data_dir: &Path, database: &Database, public_addr: String) -> Result<Opened, Error> {
         fs::create_dir_all(data_dir).map_err(|source| Error::Io { path: data_dir.to_owned(), source })?;
-        let key = load_or_create_key(&data_dir.join(KEY_FILE))?;
-        let database = data_dir.join(DATABASE_FILE);
-        keep_private(&database)?;
-        let store = Store::open(&database)?;
+        // 先连数据库，再碰密钥：连不上的话不在数据目录里留下一把新生成的密钥。
+        let store = Store::open(database)?;
+        let key = bound_key(&store, &data_dir.join(KEY_FILE))?;
+        // 早先的版本把数据存在数据目录里的这个文件里。现在不读它了：升级上来的人看到一个空的 controller 时，日志里有原因。
+        let old = data_dir.join(OLD_DATABASE_FILE);
+        if old.exists() {
+            tracing::warn!(path = %old.display(), "数据目录里有旧版本的数据库文件：这个版本的数据在 PostgreSQL 里，不再读它，里面的数据也不会搬过来");
+        }
         let mut controller = Self::new(store, key, public_addr, Timing::default())?.with_release_cache(data_dir.join(update::CACHE_DIR));
         controller.data_dir = Some(data_dir.to_owned());
         let admin_token = if controller.has_admin_token() { None } else { Some(controller.issue_admin_token()?) };
@@ -263,11 +278,12 @@ impl Controller {
     /// # Errors
     ///
     /// 读存储失败。
-    pub fn new(store: Store, key: NodeKey, public_addr: String, timing: Timing) -> Result<Self, Error> {
-        let admin_token = store.meta(ADMIN_TOKEN_META)?.and_then(|hash| <[u8; DIGEST_LEN]>::try_from(hash).ok());
+    pub fn new(mut store: Store, key: NodeKey, public_addr: String, timing: Timing) -> Result<Self, Error> {
+        let admin_token = Arc::new(Mutex::new(admin_token_hash(&store)?));
         let version: Version = env!("CARGO_PKG_VERSION").parse().expect("Cargo 保证包的版本号是合法的语义化版本");
         let updates = update::Updates::load(&store, version)?;
         let wake = Arc::new(Notify::new());
+        store.wake_on_unsettled_commit(Arc::clone(&wake));
         let mut inner = Inner {
             store,
             timing,
@@ -280,6 +296,8 @@ impl Controller {
             dirty: BTreeMap::new(),
             wake: Arc::clone(&wake),
             flush_after: None,
+            out_of_step: false,
+            admin_token: Arc::clone(&admin_token),
             routes: BTreeMap::new(),
             usage: usage::Usage::default(),
             route_queries: BTreeMap::new(),
@@ -298,7 +316,7 @@ impl Controller {
             public_addr,
             data_dir: None,
             timing,
-            admin_token: Mutex::new(admin_token),
+            admin_token,
             inner: Mutex::new(inner),
             wake,
             release_wake: Notify::new(),
@@ -351,32 +369,46 @@ impl Controller {
     ///
     /// 随机数源不可用，或者写存储失败。
     pub fn issue_admin_token(&self) -> Result<String, Error> {
-        let inner = self.lock();
-        let (token, hash) = store_admin_token(&inner.store, inner.clock.now())?;
+        let mut inner = self.lock();
+        let now = inner.clock.now();
+        let (token, hash) = new_admin_token()?;
+        inner.store.atomically(|store| record_admin_token(store, &hash, now))?;
         *self.admin_token.lock().expect("admin token mutex poisoned") = Some(hash);
         Ok(token)
     }
 
-    /// 给数据目录 `data_dir` 里的 controller 生成一个新的管理令牌，原来的随即作废。返回的明文只有这一次能拿到。
+    /// 给数据目录 `data_dir`、数据库 `database` 的 controller 生成一个新的管理令牌，原来的随即作废。
+    /// 返回的明文只有这一次能拿到。
     ///
     /// 换的是数据库里管理令牌的哈希，另记一条操作；不建 controller，所以不需要对外地址。
     /// 正运行着的 controller 记着原来的哈希，不知道令牌换了，所以要在它停着时做。
     ///
-    /// 和 [`Controller::open`] 一样：密钥读不懂的话不做；数据库的权限会收紧，表结构会升到这个程序的版本，
-    /// 之后更旧的程序就打不开它了。和它不一样的是这里不建任何东西：`data_dir` 写错了的话不会在那里生成一个新的空 controller。
+    /// 和 [`Controller::open`] 一样：密钥读不懂的话不做；表结构会升到这个程序的版本，之后更旧的程序就打不开它了。
+    /// 和它不一样的是这里不建任何东西：`data_dir` 写错了、或者连到了一个空的库，不会在那里生成一个新的空 controller。
+    /// 库是另一个 controller 的（它记的不是这个数据目录里的密钥）时也不做：不会拿着这一个的数据目录换掉那一个的令牌。
     ///
     /// # Errors
     ///
-    /// `data_dir` 里没有密钥或者数据库（[`Error::NotDataDir`]），密钥读不懂，读写数据库失败，或者随机数源不可用。
-    pub fn reset_admin_token(data_dir: &Path) -> Result<String, Error> {
+    /// `data_dir` 里没有密钥（[`Error::NotDataDir`]）或者密钥读不懂，库里没有 controller 的表
+    /// （[`StoreError::Empty`](crate::store::StoreError::Empty)），库不是这把密钥的（[`Error::KeyMismatch`]），
+    /// 连不上或者读写数据库失败，或者随机数源不可用。
+    pub fn reset_admin_token(data_dir: &Path, database: &Database) -> Result<String, Error> {
         let key = required(data_dir, KEY_FILE)?;
-        let database = required(data_dir, DATABASE_FILE)?;
         // 密钥读不懂的话 controller 启动不了，换了令牌也用不上：现在就说，别等到启动时。
         let pem = fs::read_to_string(&key).map_err(|source| Error::Io { path: key.clone(), source })?;
-        NodeKey::from_pem(&pem).map_err(|source| Error::Key { path: key, source })?;
-        keep_private(&database)?;
-        let store = Store::open(&database)?;
-        let (token, _) = store_admin_token(&store, Clock::default().now())?;
+        let node_key = NodeKey::from_pem(&pem).map_err(|source| Error::Key { path: key.clone(), source })?;
+        let mut store = Store::open_existing(database)?;
+        let public = node_key.public();
+        let (token, hash) = new_admin_token()?;
+        let now = Clock::default().now();
+        store.atomically(|store| {
+            // controller 在一个库上启动过，库里就记着它的公钥。没有记的库没有哪个 controller 用过，也算对不上。
+            // 和换令牌在同一个事务里核对。
+            if store.meta(CONTROLLER_KEY_META)?.as_deref() != Some(public.as_bytes().as_slice()) {
+                return Err(Error::KeyMismatch { path: key.clone() });
+            }
+            Ok(record_admin_token(store, &hash, now)?)
+        })?;
         Ok(token)
     }
 
@@ -603,12 +635,13 @@ impl Inner {
     /// 一样工作出错不耽误后面的：每一样出错时都自己留着下次再做（排着的重算、要重新看谁用不了 UDP 的网络、`next_rollout`），
     /// 这里把第一个错误报出去（后面的打日志），调用方过一会儿再来。
     ///
-    /// 只有整个数据库都读写不了时（比如别的进程占着写锁）例外：后面不急的清理、存测试结果、开始矩阵里排着的测试这一轮不做，
+    /// 只有整个数据库都读写不了时（连不上、只读了、盘满了）例外：后面不急的清理、存测试结果、开始矩阵里排着的测试这一轮不做，
     /// 退避期间（见 [`Inner::flush_after`]）的每一轮也都不做。它们每写一次存储都要拿着 controller 的锁等满一次超时，
     /// 所有连接和管理请求都被拖住；退避期间不做，是因为排上重试的重算刚叫醒了后台任务，它马上就会再来一轮。
     fn tick_work(&mut self, now: Instant, wall: Timestamp) -> Result<Option<Instant>, Error> {
         let mut failures = Failures::default();
         self.give_up_on_slow_acks(now);
+        let unsettled = failures.keep(self.settle_commits(now));
         let no_udp = failures.keep(self.no_udp_tick(now));
         let next = failures.keep(self.flush_due(now));
         // 下发、撤回更新指令只读存储，照样做：该撤回的（比如管理员刚关掉了自动更新）不该等数据库。
@@ -638,7 +671,7 @@ impl Inner {
             self.tests_tick(now)
         };
         failures.into_result()?;
-        Ok([next, no_udp, waiting, self.updates.next_rollout, tests].into_iter().flatten().min())
+        Ok([next, no_udp, waiting, self.updates.next_rollout, tests, unsettled].into_iter().flatten().min())
     }
 }
 
@@ -646,7 +679,7 @@ impl Inner {
 #[derive(Default)]
 struct Failures {
     first: Option<Error>,
-    /// 出过整个数据库都读写不了的错（比如别的进程占着写锁）：后面要写存储的不急的事就不去试了。
+    /// 出过整个数据库都读写不了的错（连不上、只读了、盘满了）：后面要写存储的不急的事就不去试了。
     database_wide: bool,
 }
 
@@ -727,13 +760,23 @@ impl Clock {
     }
 }
 
-/// 生成一个新的管理令牌，把它的哈希写进存储，记一条操作。返回明文和哈希。
-fn store_admin_token(store: &Store, now: Timestamp) -> Result<(String, [u8; DIGEST_LEN]), Error> {
+/// 数据库里记着的管理令牌的哈希。
+pub(crate) fn admin_token_hash(store: &Store) -> Result<Option<[u8; DIGEST_LEN]>, StoreError> {
+    Ok(store.meta(ADMIN_TOKEN_META)?.and_then(|hash| <[u8; DIGEST_LEN]>::try_from(hash).ok()))
+}
+
+/// 一个新的管理令牌：明文，和存进数据库的哈希。
+fn new_admin_token() -> Result<(String, [u8; DIGEST_LEN]), Error> {
     let token = secret::generate()?;
     let hash = secret::sha256(token.as_bytes());
-    store.set_meta(ADMIN_TOKEN_META, &hash)?;
-    store.log(now, None, action::ADMIN_TOKEN, "生成了新的管理令牌", serde_json::json!({}))?;
     Ok((token, hash))
+}
+
+/// 换上哈希是 `hash` 的管理令牌，并记一条操作。要放在一个事务里（[`Store::atomically`]）：记不下来的话原来的令牌
+/// 照旧有效，不会出现"原来的已经作废、新的却没有交到调用方手上"。
+fn record_admin_token(store: &Store, hash: &[u8; DIGEST_LEN], now: Timestamp) -> Result<(), StoreError> {
+    store.set_meta(ADMIN_TOKEN_META, hash)?;
+    store.log(now, None, action::ADMIN_TOKEN, "生成了新的管理令牌", serde_json::json!({}))
 }
 
 /// 数据目录里一定要有的文件。不在时说这不是一个数据目录。
@@ -746,22 +789,53 @@ fn required(dir: &Path, name: &'static str) -> Result<PathBuf, Error> {
     }
 }
 
-fn load_or_create_key(path: &Path) -> Result<NodeKey, Error> {
+/// 数据目录里的密钥，核对过它就是这个库的 controller 的那一把。
+///
+/// | 数据目录里 | 库里记着 | |
+/// |---|---|---|
+/// | 有密钥 | 同一把 | 平时的启动 |
+/// | 有密钥 | 没有记 | 这个库头一次有 controller 启动（新装，或者数据目录是从早先的版本留下来的）：记下它 |
+/// | 有密钥 | 另一把 | 数据目录和库对不上：不开 |
+/// | 没有 | 没有记 | 新装：生成一把，记下它 |
+/// | 没有 | 记着一把 | 库是一个已有的 controller 的，它的密钥没有带过来：不开，更不生成新的。节点认的是原来那一把，
+/// 换了它，已经加入的节点一个都连不回来 |
+fn bound_key(store: &Store, path: &Path) -> Result<NodeKey, Error> {
+    let recorded = store.meta(CONTROLLER_KEY_META)?;
+    let key = match (read_key(path)?, &recorded) {
+        (Some(key), _) => key,
+        (None, Some(_)) => return Err(Error::KeyMissing { path: path.to_owned() }),
+        (None, None) => create_key(path)?,
+    };
+    let public = key.public();
+    let recorded = match recorded {
+        Some(recorded) => recorded,
+        // 两个数据目录同时头一次连上同一个空库的话，只有一个记得上：另一个在这里读到的是别人的那一把。
+        None => store.set_meta_once(CONTROLLER_KEY_META, public.as_bytes())?,
+    };
+    if recorded != public.as_bytes() {
+        return Err(Error::KeyMismatch { path: path.to_owned() });
+    }
+    Ok(key)
+}
+
+fn read_key(path: &Path) -> Result<Option<NodeKey>, Error> {
     match fs::read_to_string(path) {
-        Ok(pem) => NodeKey::from_pem(&pem).map_err(|source| Error::Key { path: path.to_owned(), source }),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            let key = NodeKey::generate().map_err(Error::KeyGeneration)?;
-            create_private_file(path)
-                .and_then(|file| write_synced(file, key.to_pem().as_bytes()))
-                .map_err(|source| Error::Io { path: path.to_owned(), source })?;
-            tracing::info!(path = %path.display(), public = %key.public(), "生成了 controller 的密钥");
-            Ok(key)
-        }
+        Ok(pem) => NodeKey::from_pem(&pem).map(Some).map_err(|source| Error::Key { path: path.to_owned(), source }),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(source) => Err(Error::Io { path: path.to_owned(), source }),
     }
 }
 
-/// 新建一个只有属主可读的文件，已经有了就失败，不覆盖。密钥、数据库和它们的备份都用它，所以权限处处一样。
+fn create_key(path: &Path) -> Result<NodeKey, Error> {
+    let key = NodeKey::generate().map_err(Error::KeyGeneration)?;
+    create_private_file(path)
+        .and_then(|file| write_synced(file, key.to_pem().as_bytes()))
+        .map_err(|source| Error::Io { path: path.to_owned(), source })?;
+    tracing::info!(path = %path.display(), public = %key.public(), "生成了 controller 的密钥");
+    Ok(key)
+}
+
+/// 新建一个只有属主可读的文件，已经有了就失败，不覆盖。密钥用它。
 fn create_private_file(path: &Path) -> std::io::Result<fs::File> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -774,32 +848,6 @@ fn create_private_file(path: &Path) -> std::io::Result<fs::File> {
 /// 只有属主可读写。
 #[cfg(unix)]
 const PRIVATE_MODE: u32 = 0o600;
-
-/// 数据库只有属主可读：里面有令牌和凭据的摘要、每个节点的地址。
-///
-/// 还没有数据库时先建一个空文件（SQLite 肯在空文件里建库），已经有了就把权限收紧，早先的版本建的是谁都可读的。
-/// 旁边的 `-wal`、`-shm` 是 SQLite 照主文件的权限建的，上次没有正常退出留下来的也一起收紧。
-fn keep_private(database: &Path) -> Result<(), Error> {
-    match create_private_file(database) {
-        Ok(_) => return Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(source) => return Err(Error::Io { path: database.to_owned(), source }),
-    }
-    #[cfg(unix)]
-    for suffix in ["", "-wal", "-shm"] {
-        use std::os::unix::fs::PermissionsExt;
-
-        let mut path = database.as_os_str().to_owned();
-        path.push(suffix);
-        let path = PathBuf::from(path);
-        match fs::set_permissions(&path, fs::Permissions::from_mode(PRIVATE_MODE)) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => return Err(Error::Io { path, source }),
-        }
-    }
-    Ok(())
-}
 
 /// 写完并且落盘之后才算写好。
 fn write_synced(mut file: fs::File, content: &[u8]) -> std::io::Result<()> {

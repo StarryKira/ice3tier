@@ -5,6 +5,8 @@
 # it, then uninstalls and checks nothing is left. Needs passwordless sudo and changes the machine: do not run it on
 # yours.
 #
+# The controllers need a PostgreSQL: start the test one first (scripts/test-postgres.sh start) and export what it prints.
+#
 # Usage: scripts/test-install.sh <dir with i3t, i3t-controller and i3tctl>
 set -eu
 
@@ -14,6 +16,8 @@ work=$(mktemp -d)
 os=$(uname -s)
 ctl_pid=""
 https_pid=""
+# A temporary directory mounted noexec for one step: unmounted there, or on the way out when that step fails.
+noexec=""
 label="com.github.fuqiuluo.ice3tier"
 
 finish() {
@@ -37,6 +41,10 @@ finish() {
     fi
     if [ -n "$ctl_pid" ]; then
         kill "$ctl_pid" 2>/dev/null || true
+    fi
+    if [ -n "$noexec" ]; then
+        sudo umount "$noexec" 2>/dev/null || true
+        sudo rmdir "$noexec" 2>/dev/null || true
     fi
     rm -rf "$work"
     exit "$status"
@@ -128,8 +136,16 @@ points_at_service() {
     grep -q "system service" "$work/run.err" || fail "sudo $*: unexpected answer: $(cat "$work/run.err")"
 }
 
+# A new empty database on the test PostgreSQL. Over TCP: the installed controller service is sandboxed away from
+# /tmp and /home, where that server keeps its socket.
+new_database() {
+    I3T_TEST_DATABASE_URL="${I3T_TEST_DATABASE_TCP_URL:?start the test PostgreSQL first: export \$(scripts/test-postgres.sh start)}" \
+        sh "$repo/scripts/test-postgres.sh" database "$1"
+}
+
 step "controller on loopback"
-"$dir/i3t-controller" --data-dir "$work/ctl" --public-addr 127.0.0.1:20331 --listen 127.0.0.1:20331 >"$work/ctl.out" 2>"$work/ctl.err" &
+I3T_DATABASE_URL=$(new_database install_test) "$dir/i3t-controller" --data-dir "$work/ctl" --public-addr 127.0.0.1:20331 \
+    --listen 127.0.0.1:20331 >"$work/ctl.out" 2>"$work/ctl.err" &
 ctl_pid=$!
 i=0
 until grep -q '^    [^ ]' "$work/ctl.out" 2>/dev/null; do
@@ -352,11 +368,31 @@ if [ "$os" = "Linux" ]; then
     kill "$ctl_pid" 2>/dev/null || true
     wait "$ctl_pid" 2>/dev/null || true
     ctl_pid=""
-    PATH=/usr/local/bin:/usr/bin:/bin TZ=Asia/Shanghai sh "$repo/deploy/install.sh" --from "$dir" --controller --public-addr 127.0.0.1:20331 >"$work/ctl-install.out"
+    if sh "$repo/deploy/install.sh" --from "$dir" --controller --public-addr 127.0.0.1:20331 >"$work/ctl-refused.out" 2>&1; then
+        fail "controller install without a database went through"
+    fi
+    grep -q -- '--database-url' "$work/ctl-refused.out" || fail "the refusal does not name --database-url: $(cat "$work/ctl-refused.out")"
+    [ ! -e /usr/local/bin/i3t-controller ] || fail "a refused controller install left the program behind"
+
+    ctl_database=$(new_database install_service)
+    PATH=/usr/local/bin:/usr/bin:/bin TZ=Asia/Shanghai sh "$repo/deploy/install.sh" --from "$dir" --controller --public-addr 127.0.0.1:20331 \
+        --database-url "$ctl_database" >"$work/ctl-install.out"
     cat "$work/ctl-install.out"
     ctl_token=$(sed -n 's/^    \([^ ]*\)$/\1/p' "$work/ctl-install.out" | head -n 1)
     [ -n "$ctl_token" ] || fail "controller install did not print the initial admin token"
     systemctl is-active -q i3t-controller || fail "i3t-controller.service is not active"
+    # The connection string holds the database password: only the service reads it.
+    [ "$(sudo stat -c '%a %U' /var/lib/i3t-controller/database.url)" = "600 i3t-controller" ] \
+        || fail "/var/lib/i3t-controller/database.url is readable by others"
+    [ "$(sudo cat /var/lib/i3t-controller/database.url)" = "$ctl_database" ] || fail "the connection string is not in database.url"
+
+    step "a new admin token with only the data directory, as the WebUI and the docs say"
+    sudo systemctl stop i3t-controller
+    new_token=$(sudo -u i3t-controller /usr/local/bin/i3t-controller --data-dir /var/lib/i3t-controller --reset-admin-token \
+        | sed -n 's/^    \([^ ]*\)$/\1/p' | head -n 1)
+    [ -n "$new_token" ] && [ "$new_token" != "$ctl_token" ] || fail "no new admin token was printed"
+    ctl_token=$new_token
+    sudo systemctl start i3t-controller
 
     step "upgrade installed controller in place without losing state"
     i=0
@@ -381,11 +417,208 @@ if [ "$os" = "Linux" ]; then
         sleep 1
     done
 
+    step "back up and restore with the commands of the deployment guide"
+    mkdir "$work/backup"
+    # Left over from an older backup and readable by everyone: the new files must not inherit that.
+    : > "$work/backup/controller.dump"
+    : > "$work/backup/controller.key"
+    chmod 644 "$work/backup/controller.dump" "$work/backup/controller.key"
+    (
+        cd "$work/backup"
+        sudo sh -c 'set -e; umask 077; rm -f controller.dump; pg_dump --format custom --file controller.dump "$(cat /var/lib/i3t-controller/database.url)"'
+        sudo install -m 600 /var/lib/i3t-controller/controller.key controller.key
+    )
+    for file in controller.dump controller.key; do
+        [ "$(sudo stat -c '%a %U' "$work/backup/$file")" = "600 root" ] || fail "the backup's $file is not root's and private"
+    done
+    # Into another empty database on this server. The dump is root's, so root reads it.
+    restored_database=$(new_database install_restored)
+    sudo pg_restore --no-owner --dbname "$restored_database" "$work/backup/controller.dump" \
+        || fail "the backup could not be restored with the documented command"
+    sudo systemctl stop i3t-controller
+    sudo install -o i3t-controller -g i3t-controller -m 600 "$work/backup/controller.key" /var/lib/i3t-controller/controller.key
+    sudo sh "$repo/deploy/install.sh" --from "$dir" --controller --public-addr 127.0.0.1:20331 --database-url "$restored_database" >/dev/null
+    ctl_database=$restored_database
+    i=0
+    until I3T_ADMIN_TOKEN="$ctl_token" "$dir/i3tctl" --json network list 2>/dev/null \
+        | python3 -I -c 'import json, sys; sys.exit(0 if any(n["name"] == "upgrade-check" for n in json.load(sys.stdin)) else 1)'; do
+        i=$((i + 1))
+        [ "$i" -lt 30 ] || fail "the restored controller does not answer with the old admin token, or lost its networks"
+        sleep 1
+    done
+
+    step "an upgrade that fails halfway does not leave the controller stopped"
+    # The script stops the service before it changes what the service starts from. Here a later step fails
+    # (systemctl daemon-reload, through a stand-in that refuses just that): the controller was up before, so it is
+    # up afterwards.
+    mkdir "$work/fakebin"
+    real_systemctl=$(command -v systemctl)
+    printf '#!/bin/sh\n[ "${1:-}" != daemon-reload ] || exit 1\nexec %s "$@"\n' "$real_systemctl" > "$work/fakebin/systemctl"
+    chmod 755 "$work/fakebin/systemctl"
+    if sudo env "PATH=$work/fakebin:$PATH" sh "$repo/deploy/install.sh" --from "$dir" --controller >/dev/null 2>&1; then
+        fail "the install went through although a step of it failed"
+    fi
+    i=0
+    until systemctl is-active -q i3t-controller; do
+        i=$((i + 1))
+        [ "$i" -lt 15 ] || fail "a failed upgrade left the controller stopped"
+        sleep 1
+    done
+
+    step "a signal in the middle of an upgrade ends it there, and the controller is started again"
+    # The stand-in writes down every call, and holds daemon-reload for a while after saying which shell called it:
+    # the signal goes to that shell while the upgrade is in the middle. A shell that only ran its handler would carry
+    # on with the steps after daemon-reload, and restart the service itself as if nothing had happened.
+    # shellcheck disable=SC2016
+    printf '#!/bin/sh\necho "$*" >> %s\nif [ "${1:-}" = daemon-reload ]; then echo "$PPID" > %s; sleep 5; fi\nexec %s "$@"\n' \
+        "$work/systemctl.calls" "$work/systemctl.reached" "$real_systemctl" > "$work/fakebin/systemctl"
+    sudo env "PATH=$work/fakebin:$PATH" sh "$repo/deploy/install.sh" --from "$dir" --controller >/dev/null 2>&1 &
+    install_pid=$!
+    i=0
+    until [ -s "$work/systemctl.reached" ]; do
+        i=$((i + 1))
+        [ "$i" -lt 60 ] || fail "the install never got to daemon-reload"
+        sleep 1
+    done
+    sudo kill -TERM "$(cat "$work/systemctl.reached")"
+    install_status=0
+    wait "$install_pid" || install_status=$?
+    [ "$install_status" -eq 143 ] || fail "the install did not end on the signal (exit status $install_status)"
+    if grep -q -x 'restart i3t-controller' "$work/systemctl.calls"; then
+        fail "the install carried on after the signal: $(tr '\n' ';' < "$work/systemctl.calls")"
+    fi
+    i=0
+    until systemctl is-active -q i3t-controller; do
+        i=$((i + 1))
+        [ "$i" -lt 15 ] || fail "an interrupted upgrade left the controller stopped"
+        sleep 1
+    done
+
+    step "/etc/i3t/controller.env stays root's and private when the address is set again"
+    # What an admin puts there by hand may be a secret; an older install left the file readable by everyone.
+    [ "$(sudo stat -c '%a %U' /etc/i3t/controller.env)" = "600 root" ] || fail "controller.env is not root's and private after install"
+    sudo chmod 644 /etc/i3t/controller.env
+    sudo sh "$repo/deploy/install.sh" --from "$dir" --controller --public-addr 127.0.0.1:20331 >/dev/null
+    [ "$(sudo stat -c '%a %U' /etc/i3t/controller.env)" = "600 root" ] || fail "setting the address again left controller.env readable by others"
+    sudo chmod 644 /etc/i3t/controller.env
+    sudo sh "$repo/deploy/install.sh" --from "$dir" --controller >/dev/null
+    [ "$(sudo stat -c '%a %U' /etc/i3t/controller.env)" = "600 root" ] || fail "a plain upgrade left controller.env readable by others"
+
+    step "one place says which database: a second one is refused"
+    echo "I3T_DATABASE_URL=$ctl_database" | sudo tee -a /etc/i3t/controller.env >/dev/null
+    # The runs whose output is kept go without sudo, like the first install above: the script asks for it itself, and
+    # the output is this user's file.
+    if sh "$repo/deploy/install.sh" --from "$dir" --controller --database-url "$(new_database install_other)" >"$work/ctl-two.out" 2>&1; then
+        fail "a second place for the database was accepted"
+    fi
+    grep -q '/etc/i3t/controller.env' "$work/ctl-two.out" || fail "the refusal does not name controller.env: $(cat "$work/ctl-two.out")"
+    [ "$(sudo cat /var/lib/i3t-controller/database.url)" = "$ctl_database" ] || fail "database.url was rewritten by a refused run"
+    sudo sed -i '/^I3T_DATABASE_URL=/d' /etc/i3t/controller.env
+
+    step "a controller that was set up here is not replaced by one that cannot start"
+    # Stopped by hand, and its database setting gone or empty: the script still knows a controller lives here.
+    # Nothing but a line end in the file, and an empty value in controller.env: the controller reads both as "no
+    # database", so the script must too.
+    sudo systemctl stop i3t-controller
+    sudo sh -c 'echo > /var/lib/i3t-controller/database.url'
+    echo 'I3T_DATABASE_URL=""' | sudo tee -a /etc/i3t/controller.env >/dev/null
+    if sh "$repo/deploy/install.sh" --from "$dir" --controller >"$work/ctl-stopped.out" 2>&1; then
+        fail "a stopped controller without a database was upgraded anyway"
+    fi
+    grep -q -- '--database-url' "$work/ctl-stopped.out" || fail "the refusal does not name --database-url: $(cat "$work/ctl-stopped.out")"
+
     step "uninstall controller --purge"
     sudo sh "$repo/deploy/install.sh" --uninstall --controller --purge
     for path in /usr/local/bin/i3t-controller /usr/local/bin/i3tctl /var/lib/i3t-controller /etc/i3t /etc/systemd/system/i3t-controller.service; do
         [ ! -e "$path" ] || fail "$path is still there"
     done
+
+    step "a first start that cannot reach its database, then one that can: the token is shown on the second"
+    # Nothing listens on port 1. The controller connects before it creates its key, so the retry is a first start.
+    # systemd starts the failing service again and again: here ten times a second instead of every two seconds, so
+    # that one of those starts is sure to fall into the middle of the retry if the script lets it. That start would
+    # get the new database and print the token, and the start the script watches would have none to show.
+    sudo mkdir -p /etc/systemd/system/i3t-controller.service.d
+    printf '[Unit]\nStartLimitIntervalSec=0\n[Service]\nRestartSec=100ms\n' \
+        | sudo tee /etc/systemd/system/i3t-controller.service.d/restart-fast.conf >/dev/null
+    sh "$repo/deploy/install.sh" --from "$dir" --controller --public-addr 127.0.0.1:20331 \
+        --database-url postgres://i3t@127.0.0.1:1/i3t >"$work/ctl-nodb.out" 2>&1 || true
+    [ -z "$(sed -n 's/^    \([A-Za-z0-9_-]\{43\}\)$/\1/p' "$work/ctl-nodb.out")" ] || fail "a token without a database?"
+    sudo test ! -e /var/lib/i3t-controller/controller.key || fail "a key was created although the database could not be reached"
+    retry_database=$(new_database install_retry)
+    sh "$repo/deploy/install.sh" --from "$dir" --controller --database-url "$retry_database" >"$work/ctl-retry.out" 2>&1 \
+        || fail "the retry failed: $(cat "$work/ctl-retry.out")"
+    [ -n "$(sed -n 's/^    \([A-Za-z0-9_-]\{43\}\)$/\1/p' "$work/ctl-retry.out")" ] \
+        || fail "the retry did not show the admin token: $(cat "$work/ctl-retry.out")"
+    sudo rm -r /etc/systemd/system/i3t-controller.service.d
+    sudo sh "$repo/deploy/install.sh" --uninstall --controller --purge >/dev/null
+
+    step "a controller whose log level hides the line that says it is up is not reported as down"
+    # Installed without starting, then the log level set by hand, then started for the first time.
+    quiet_database=$(new_database install_quiet)
+    sudo sh "$repo/deploy/install.sh" --from "$dir" --controller --database-url "$quiet_database" >/dev/null
+    echo 'I3T_LOG=warn' | sudo tee -a /etc/i3t/controller.env >/dev/null
+    sh "$repo/deploy/install.sh" --from "$dir" --controller --public-addr 127.0.0.1:20331 >"$work/ctl-quiet.out" 2>&1 \
+        || fail "the install failed: $(cat "$work/ctl-quiet.out")"
+    systemctl is-active -q i3t-controller || fail "i3t-controller.service is not active"
+    if sudo journalctl _SYSTEMD_INVOCATION_ID="$(systemctl show -p InvocationID --value i3t-controller)" --no-pager -o cat \
+        | grep -q 'controller 已启动'; then
+        fail "the log was not quiet: this step proves nothing"
+    fi
+    if grep -q 'did not come up' "$work/ctl-quiet.out"; then
+        fail "a running controller was reported as down: $(cat "$work/ctl-quiet.out")"
+    fi
+    [ -n "$(sed -n 's/^    \([A-Za-z0-9_-]\{43\}\)$/\1/p' "$work/ctl-quiet.out")" ] \
+        || fail "the first start with a quiet log did not show the admin token: $(cat "$work/ctl-quiet.out")"
+    sudo sh "$repo/deploy/install.sh" --uninstall --controller --purge >/dev/null
+
+    step "this script installs release 0.1.34, which takes no database, even from a noexec temporary directory"
+    # The script may be newer than the programs it is given. 0.1.34 keeps its data in a file: it is installed as it
+    # always was. With the temporary directory mounted noexec the copy there cannot be asked whether it takes a
+    # database, so the one it was copied from is.
+    case "$(uname -m)" in
+        x86_64) old_arch=x86_64 old_sums="7e867bdec23e05f86d200209ed43927c9758eb74d50b8371ac9ea0ebf181f9b5 7730ef4421faa46051d3fc5782311cb315678583a5edd348189e1244682243a6" ;;
+        aarch64 | arm64) old_arch=aarch64 old_sums="0db2ae42e4367d928d0124cf8e5e7bdc109ee5e9b4154148e6690e4e5ef8e24b e7a60a0708120392ab1ed3baaddeea806c01f41f9e309fce09ead1c413a42d67" ;;
+        *) fail "no 0.1.34 release for $(uname -m)" ;;
+    esac
+    mkdir "$work/old"
+    for program in i3t-controller i3tctl; do
+        curl -fsSL --retry 3 -o "$work/old/$program" \
+            "https://github.com/fuqiuluo/ice3tier/releases/download/v0.1.34/${program}-linux-${old_arch}" \
+            || fail "could not download ${program} 0.1.34"
+        chmod 755 "$work/old/$program"
+    done
+    [ "$(sha256sum "$work/old/i3t-controller" "$work/old/i3tctl" | cut -d' ' -f1 | tr '\n' ' ')" = "$old_sums " ] \
+        || fail "the downloaded 0.1.34 programs are not the released ones"
+    noexec=$(sudo mktemp -d)
+    sudo mount -t tmpfs -o noexec,mode=1777 tmpfs "$noexec"
+    old_database=$(new_database install_old)
+    TMPDIR="$noexec" sh "$repo/deploy/install.sh" --from "$work/old" --controller --public-addr 127.0.0.1:20331 \
+        --database-url "$old_database" >"$work/ctl-old.out" 2>&1 || fail "installing 0.1.34 failed: $(cat "$work/ctl-old.out")"
+    sudo umount "$noexec"
+    sudo rmdir "$noexec"
+    noexec=""
+    [ "$(/usr/local/bin/i3t-controller --version)" = "i3t-controller 0.1.34" ] || fail "not 0.1.34: $(/usr/local/bin/i3t-controller --version)"
+    # The connection string was given, so the install goes through either way: what shows that the script found out
+    # that this release takes no database is that it said so.
+    grep -q 'does not use PostgreSQL' "$work/ctl-old.out" \
+        || fail "the script did not see that 0.1.34 takes no database: $(cat "$work/ctl-old.out")"
+    old_token=$(sed -n 's/^    \([A-Za-z0-9_-]\{43\}\)$/\1/p' "$work/ctl-old.out" | head -n 1)
+    [ -n "$old_token" ] || fail "0.1.34 did not print its admin token: $(cat "$work/ctl-old.out")"
+    sudo test -f /var/lib/i3t-controller/controller.db || fail "0.1.34 did not create its database file"
+    [ "$(sudo cat /var/lib/i3t-controller/database.url)" = "$old_database" ] || fail "the connection string was not kept for later"
+
+    step "upgrading it to this build: the database was given earlier, and the new admin token is shown"
+    sh "$repo/deploy/install.sh" --from "$dir" --controller >"$work/ctl-new.out" 2>&1 || fail "the upgrade failed: $(cat "$work/ctl-new.out")"
+    new_token=$(sed -n 's/^    \([A-Za-z0-9_-]\{43\}\)$/\1/p' "$work/ctl-new.out" | head -n 1)
+    [ -n "$new_token" ] && [ "$new_token" != "$old_token" ] || fail "the new admin token was not shown: $(cat "$work/ctl-new.out")"
+    i=0
+    until I3T_ADMIN_TOKEN="$new_token" "$dir/i3tctl" --json status >/dev/null 2>&1; do
+        i=$((i + 1))
+        [ "$i" -lt 30 ] || fail "the upgraded controller does not answer with its new token"
+        sleep 1
+    done
+    sudo sh "$repo/deploy/install.sh" --uninstall --controller --purge >/dev/null
 fi
 
 step "ok"

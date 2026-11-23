@@ -110,12 +110,15 @@ pub enum Error {
     },
     #[error("网络端口出错")]
     Socket(#[source] std::io::Error),
-    /// 要备份或者重新生成管理令牌的目录不是 controller 的数据目录：缺了 `missing` 这个文件。
+    /// 数据目录里的密钥和数据库里记的不是同一把：数据目录和数据库不是同一个 controller 的。
+    #[error("{} 不是这个数据库的 controller 的密钥：数据目录和数据库对不上", path.display())]
+    KeyMismatch { path: PathBuf },
+    /// 数据库里是一个已有的 controller 的数据，数据目录里却没有它的密钥。不生成新的：节点认的是原来那一把。
+    #[error("数据库里是一个已有的 controller 的数据，可是没有它的密钥 {}：把备份的密钥放回来", path.display())]
+    KeyMissing { path: PathBuf },
+    /// 要重新生成管理令牌的目录不是 controller 的数据目录：缺了 `missing` 这个文件。
     #[error("{} 里没有 {missing}，不是 controller 的数据目录", dir.display())]
     NotDataDir { dir: PathBuf, missing: &'static str },
-    /// 备份只写进新的或者空的目录，不覆盖已有的东西。
-    #[error("{} 已经存在，并且不是空目录", .0.display())]
-    BackupTargetNotEmpty(PathBuf),
     /// 请求里的 `field` 这一项引起的错误。只是给 [`Error::field`] 带上字段名，别的都和 `error` 一样。
     /// 内部错误不会被这样包起来（见 [`Error::in_field`]），所以不用往下转来由。
     #[error("{error}")]
@@ -165,8 +168,9 @@ impl Error {
             | Self::Tls(_)
             | Self::Bind { .. }
             | Self::Socket(_)
-            | Self::NotDataDir { .. }
-            | Self::BackupTargetNotEmpty(_) => ErrorCode::Internal,
+            | Self::KeyMismatch { .. }
+            | Self::KeyMissing { .. }
+            | Self::NotDataDir { .. } => ErrorCode::Internal,
             Self::InField { error, .. } => error.code(),
         }
     }
@@ -196,10 +200,10 @@ impl Error {
             Self::Encode(_) => "encode",
             Self::Random => "random",
             Self::Io { .. } => "io",
-            Self::Key { .. } | Self::KeyGeneration(_) => "key",
+            Self::Key { .. } | Self::KeyGeneration(_) | Self::KeyMismatch { .. } | Self::KeyMissing { .. } => "key",
             Self::Tls(_) => "tls",
             Self::Bind { .. } | Self::Socket(_) => "socket",
-            Self::NotDataDir { .. } | Self::BackupTargetNotEmpty(_) => "backup",
+            Self::NotDataDir { .. } => "data_dir",
             Self::InField { error, .. } => return error.what(),
             Self::NotDeclared { capability, .. } => capability.code(),
             Self::NameTaken(_)

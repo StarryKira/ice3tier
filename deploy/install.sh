@@ -7,12 +7,15 @@
 # Install, join, and start node in one command:
 #   curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh -s -- --token <TOKEN> [--can-relay] [--can-exit]
 #
-# Install and start controller (+ i3tctl):
-#   curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh -s -- --controller --public-addr <HOST:PORT>
+# Install and start controller (+ i3tctl). The controller stores its data in a PostgreSQL database you provide;
+# to get both with one command use deploy/docker/compose.yaml instead:
+#   curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh -s -- --controller --public-addr <HOST:PORT> --database-url <URL>
 #
 # Options:
 #   --controller              Install i3t-controller + i3tctl instead of the node
 #   --public-addr HOST:PORT   Controller public address (writes /etc/i3t/controller.env and starts service)
+#   --database-url URL        Controller database, postgres://USER:PASSWORD@HOST/DBNAME (or set I3T_DATABASE_URL);
+#                             written to /var/lib/i3t-controller/database.url
 #   --token TOKEN             Enrollment token (or set I3T_TOKEN); joins and starts the node immediately
 #   --can-relay               Declare relay capability during join
 #   --can-exit                Declare exit capability during join
@@ -41,6 +44,7 @@ VERSION="${I3T_VERSION:-}"
 TOKEN="${I3T_TOKEN:-}"
 MODE="node"
 PUBLIC_ADDR=""
+DATABASE_URL="${I3T_DATABASE_URL:-}"
 CAN_RELAY=0
 CAN_EXIT=0
 INSTALL_POLKIT=1
@@ -80,6 +84,10 @@ Node options:
 Controller options:
   --controller              Install i3t-controller and i3tctl (systemd service on Linux)
   --public-addr HOST:PORT   Set I3T_PUBLIC_ADDR in /etc/i3t/controller.env and start the service
+  --database-url URL        PostgreSQL database the controller stores its data in, e.g.
+                            postgres://USER:PASSWORD@HOST/DBNAME (or set I3T_DATABASE_URL).
+                            Written to /var/lib/i3t-controller/database.url, readable by the
+                            service only. This script does not install PostgreSQL
 
 Common options:
   --version TAG             Install a specific release tag (e.g. v0.1.31; default: latest)
@@ -111,6 +119,17 @@ cleanup_work() {
     fi
 }
 
+# 1 while this script has stopped a controller service that was up, and has not started it again yet.
+CONTROLLER_STOPPED=0
+
+on_exit() {
+    if [ "$CONTROLLER_STOPPED" -eq 1 ]; then
+        CONTROLLER_STOPPED=0
+        ${SUDO:-} systemctl start i3t-controller 2>/dev/null || true
+    fi
+    cleanup_work
+}
+
 parse_args() {
     while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -124,6 +143,14 @@ parse_args() {
                 ;;
             --public-addr=*)
                 PUBLIC_ADDR="${1#*=}"
+                ;;
+            --database-url)
+                [ "$#" -ge 2 ] || die "--database-url requires an argument"
+                DATABASE_URL="$2"
+                shift
+                ;;
+            --database-url=*)
+                DATABASE_URL="${1#*=}"
                 ;;
             --token)
                 [ "$#" -ge 2 ] || die "--token requires an argument"
@@ -795,11 +822,13 @@ write_controller_service() {
 [Unit]
 Description=ice3tier controller
 Documentation=https://github.com/fuqiuluo/ice3tier
-After=network-online.target
+# 数据库在本机时等它先起来；不在本机、或者叫别的名字时这一项没有作用，连不上会隔两秒再试。
+After=network-online.target postgresql.service
 Wants=network-online.target
 
 [Service]
 # 数据目录默认和 StateDirectory= 一致，由 ProtectSystem=strict 放行写入；若改用别的目录，需另加 ReadWritePaths=。
+# 里面是 controller 的密钥、更新包的缓存，和 database.url：数据库的连接串（有密码，只有这个服务的用户可读）。
 Environment=I3T_DATA_DIR=/var/lib/i3t-controller
 # 对外地址和额外选项写在 /etc/i3t/controller.env 里，比如：
 #   I3T_PUBLIC_ADDR=ctl.example.com:20331
@@ -1341,38 +1370,196 @@ install_node() {
     fi
 }
 
-# Prints the controller's log for this start once the one-time admin token is in it (a line indented by four spaces),
-# the service has failed, or 30 seconds have passed. Uses the invocation ID when available, falling back to a UTC
+# The controller's log for one start of the service: by invocation ID when systemd gives one, falling back to a UTC
 # timestamp so a caller's TZ cannot drift from the system journal's timezone.
-show_first_start() {
-    invocation="$1"
-    since="$2"
+controller_log() {
+    if [ -n "$1" ]; then
+        $SUDO journalctl _SYSTEMD_INVOCATION_ID="$1" --no-pager -o cat 2>/dev/null || true
+    else
+        $SUDO journalctl -u i3t-controller --since "$2" --no-pager -o cat 2>/dev/null || true
+    fi
+}
+
+# Says that the controller is up. `$1` is what this start printed: with the one-time admin token in it (a line
+# indented by four spaces), it is shown.
+report_controller_up() {
+    if printf '%s\n' "$1" | grep -q '^    [^ ]'; then
+        log "First start output (contains the one-time admin token):"
+        printf '%s\n' "$1"
+    else
+        log "i3t-controller is running"
+    fi
+}
+
+# Whether the controller's log level was set by hand in /etc/i3t/controller.env. With I3T_LOG=warn, say, the line
+# that says it is up is not logged. Nor is it with an empty value: that is a filter that lets nothing through.
+controller_log_level_is_set() {
+    $SUDO test -f /etc/i3t/controller.env \
+        && $SUDO grep -q '^[[:space:]]*I3T_LOG=' /etc/i3t/controller.env
+}
+
+# Whether the service is still running the start with invocation ID `$1` (systemd starts it again when it exits).
+controller_still_in_start() {
+    [ "$($SUDO systemctl show -p ActiveState --value i3t-controller 2>/dev/null || true)" = active ] \
+        && [ "$($SUDO systemctl show -p InvocationID --value i3t-controller 2>/dev/null || true)" = "$1" ]
+}
+
+# Restarts the controller service and watches this start in its log, for up to 30 seconds.
+#
+# Whether to show the one-time admin token is read off what the controller actually printed, not guessed from files:
+# it prints one whenever it starts on a database that has no controller yet. That is a new install, but also an
+# install that kept its data in a file and now gets its database, or a retry after the database could not be
+# reached the first time.
+restart_controller() {
+    # From here on this function looks after the service: nothing to make up for on the way out.
+    CONTROLLER_STOPPED=0
+    since=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+    # A service that kept failing (no database to reach) may have run into systemd's start limit: start counting anew.
+    $SUDO systemctl reset-failed i3t-controller 2>/dev/null || true
+    $SUDO systemctl restart i3t-controller
+    invocation=$($SUDO systemctl show -p InvocationID --value i3t-controller 2>/dev/null || true)
+    # With the log level set by hand the controller may never say that it is up. A controller that cannot start says
+    # so whatever the level, and gives up on a database it cannot reach after 10 seconds: one that is still in the
+    # same start after 15 is taken to be up.
+    patience=30
+    quiet=0
+    if controller_log_level_is_set; then
+        patience=15
+        quiet=1
+    fi
     out=""
+    failed=0
     i=0
-    while [ "$i" -lt 30 ]; do
-        if [ -n "$invocation" ]; then
-            out=$($SUDO journalctl _SYSTEMD_INVOCATION_ID="$invocation" --no-pager -o cat 2>/dev/null || true)
-        else
-            out=$($SUDO journalctl -u i3t-controller --since "$since" --no-pager -o cat 2>/dev/null || true)
-        fi
-        if printf '%s\n' "$out" | grep -q '^    [^ ]'; then
-            log "First start output (contains the one-time admin token):"
-            printf '%s\n' "$out"
+    while [ "$i" -lt "$patience" ]; do
+        out=$(controller_log "$invocation" "$since")
+        # It is up (the log is not translated). The token, when there is one, was printed just before this line, on
+        # the other stream: read once more so that it cannot be missed.
+        if printf '%s\n' "$out" | grep -q 'controller 已启动'; then
+            sleep 1
+            report_controller_up "$(controller_log "$invocation" "$since")"
             return
         fi
-        if $SUDO systemctl is-failed -q i3t-controller 2>/dev/null; then
+        # It gave up with an error, or systemd did.
+        if printf '%s\n' "$out" | grep -q '^i3t-controller: ' || $SUDO systemctl is-failed -q i3t-controller 2>/dev/null; then
+            failed=1
             break
         fi
         sleep 1
         i=$((i + 1))
     done
+    if [ "$failed" -eq 0 ] && [ "$quiet" -eq 1 ] && controller_still_in_start "$invocation"; then
+        out=$(controller_log "$invocation" "$since")
+        if printf '%s\n' "$out" | grep -q '^    [^ ]'; then
+            report_controller_up "$out"
+        else
+            # Not "is running": with this log level the script cannot see it come up, only that it has not given up.
+            log "i3t-controller has been running for ${patience} seconds (its log level, I3T_LOG, hides the line that says it is up)"
+        fi
+        return
+    fi
     printf '%s\n' "$out"
-    warn "the admin token did not show up; check: sudo journalctl -u i3t-controller --no-pager"
+    warn "i3t-controller did not come up; check: sudo journalctl -u i3t-controller --no-pager"
+}
+
+# Whether /etc/i3t/controller.env says which database to use (someone put it there by hand: this script never does).
+# A setting there wins over database.url, because the service gets it in its environment. An empty value, quoted or
+# not, says nothing: the controller takes it the same way.
+controller_env_sets_database() {
+    $SUDO test -f /etc/i3t/controller.env \
+        && $SUDO grep -q -e "^[[:space:]]*I3T_DATABASE_URL=[\"']\{0,1\}[^\"'[:space:]]" \
+            -e '^[[:space:]]*I3T_CONTROLLER_ARGS=.*--database-url' /etc/i3t/controller.env
+}
+
+# Whether the installed controller already knows which database to use: the file this script writes (with more in it
+# than blanks and line ends, which is all the controller ignores), or a setting in /etc/i3t/controller.env.
+controller_has_database() {
+    $SUDO grep -q '[^[:space:]]' /var/lib/i3t-controller/database.url 2>/dev/null || controller_env_sets_database
+}
+
+# Whether the service is up or is meant to be: running, starting, waiting for systemd to start it again, or given up
+# on after failing (it could not reach its database, say). Stopped by hand or never started, it is left alone.
+controller_meant_to_run() {
+    case "$($SUDO systemctl show -p ActiveState --value i3t-controller 2>/dev/null || true)" in
+        active | activating | reloading | failed) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Whether a controller has been installed and started here before, running or not.
+controller_was_installed() {
+    $SUDO test -f /var/lib/i3t-controller/controller.key \
+        || $SUDO test -f /var/lib/i3t-controller/controller.db \
+        || $SUDO systemctl is-enabled -q i3t-controller 2>/dev/null
+}
+
+# Whether the controller program about to be installed takes a database. Releases up to 0.1.34 keep their data in a
+# file and take none, and this script may be newer than the program it is given (`--from DIR`), so the program is
+# asked. The copy in the temporary directory cannot be run when that directory is mounted noexec: then the one it
+# was copied from is asked. A downloaded program that cannot be asked is taken to need one: every release this
+# script can download (its signed manifest has to cover the controller) does.
+controller_needs_database() {
+    chmod 0755 "${WORK}/i3t-controller"
+    set -- "${WORK}/i3t-controller"
+    if [ -n "$FROM_DIR" ]; then
+        set -- "$@" "${FROM_DIR}/i3t-controller" "${FROM_DIR}/i3t-controller-${PLATFORM}"
+    fi
+    for _n_program in "$@"; do
+        if _n_help=$("$_n_program" --help 2>/dev/null); then
+            printf '%s\n' "$_n_help" | grep -q -- '--database-url'
+            return
+        fi
+    done
+    return 0
 }
 
 install_controller() {
+    case "$DATABASE_URL" in
+        *"
+"*) die "invalid --database-url value (it must be a single line)" ;;
+    esac
+
+    # One place says which database: when /etc/i3t/controller.env does, a new database.url would be ignored by the
+    # service and used by `--reset-admin-token`, which would then be working on another database.
+    if [ -n "$DATABASE_URL" ] && controller_env_sets_database; then
+        die "/etc/i3t/controller.env already says which database to use (I3T_DATABASE_URL, or --database-url in I3T_CONTROLLER_ARGS), and the service follows that file. Change it there, or remove it from that file and run this again."
+    fi
+
     fetch_binary "i3t-controller" "${WORK}/i3t-controller"
     fetch_binary "i3tctl" "${WORK}/i3tctl"
+
+    needs_database=1
+    if ! controller_needs_database; then
+        needs_database=0
+    fi
+
+    # Stop before installing anything when this would leave a controller that cannot start: one that is about to be
+    # started, is running, or was set up here before, and has no database to go to.
+    if [ "$needs_database" -eq 1 ] && has_systemd && [ -z "$DATABASE_URL" ] && ! controller_has_database; then
+        if [ -n "$PUBLIC_ADDR" ] || controller_meant_to_run || controller_was_installed; then
+            die "the controller stores its data in PostgreSQL: pass --database-url postgres://USER:PASSWORD@HOST/DBNAME (or set I3T_DATABASE_URL). This script does not install PostgreSQL; deploy/docker/compose.yaml starts the controller together with one. Data of an older install (/var/lib/i3t-controller/controller.db) is not carried over."
+        fi
+    fi
+    if [ "$needs_database" -eq 0 ] && [ -n "$DATABASE_URL" ]; then
+        warn "this release of the controller keeps its data in a file and does not use PostgreSQL; the connection string is saved for the release that does"
+    fi
+
+    # Whether the service is started at the end. Found out now, and the service stopped now, before anything it
+    # starts from is changed: systemd starts a failing service again every two seconds, and one that comes up on its
+    # own in the middle prints the one-time admin token in a start this script is not watching.
+    start_at_end=0
+    if has_systemd; then
+        if controller_meant_to_run; then
+            start_at_end=1
+            # Should a later step fail, the service is started again on the way out (see on_exit): a failed upgrade
+            # must not leave a controller down that was up before.
+            CONTROLLER_STOPPED=1
+        elif [ -n "$PUBLIC_ADDR" ]; then
+            start_at_end=1
+        fi
+        if [ "$start_at_end" -eq 1 ]; then
+            $SUDO systemctl stop i3t-controller 2>/dev/null || true
+        fi
+    fi
 
     $SUDO install -d -m 0755 /usr/local/bin
     log "Installing i3t-controller and i3tctl to /usr/local/bin"
@@ -1382,6 +1569,9 @@ install_controller() {
     if ! has_systemd; then
         log "Installed /usr/local/bin/i3t-controller and /usr/local/bin/i3tctl (systemd not detected)"
         printf '\nNext steps:\n'
+        if [ "$needs_database" -eq 1 ]; then
+            printf '  export I3T_DATABASE_URL=postgres://USER:PASSWORD@HOST/DBNAME\n'
+        fi
         printf '  i3t-controller --data-dir /var/lib/i3t-controller --public-addr <public-address>:20331\n'
         return
     fi
@@ -1391,11 +1581,17 @@ install_controller() {
     write_controller_service "${WORK}/i3t-controller.service"
     $SUDO install -D -m 0644 "${WORK}/i3t-controller.service" /etc/systemd/system/i3t-controller.service
 
-    first_start=0
-    if ! $SUDO test -f /var/lib/i3t-controller/controller.db; then
-        first_start=1
+    if [ -n "$DATABASE_URL" ]; then
+        # The connection string holds the database password: it goes into the data directory, readable by the service
+        # user only, where the controller looks for it when it is not given on the command line.
+        log "Writing the database connection string to /var/lib/i3t-controller/database.url"
+        printf '%s\n' "$DATABASE_URL" > "${WORK}/database.url"
+        $SUDO install -d -o i3t-controller -g i3t-controller -m 0700 /var/lib/i3t-controller
+        $SUDO install -o i3t-controller -g i3t-controller -m 0600 "${WORK}/database.url" /var/lib/i3t-controller/database.url
     fi
 
+    # /etc/i3t/controller.env is root's and readable by root only (systemd reads it as root): what is put there by
+    # hand may be a secret, a connection string for one.
     if [ -n "$PUBLIC_ADDR" ]; then
         if $SUDO test -f /etc/i3t/controller.env; then
             {
@@ -1409,14 +1605,17 @@ I3T_PUBLIC_ADDR=${PUBLIC_ADDR}
 # I3T_CONTROLLER_ARGS=--listen 0.0.0.0:20331
 EOF
         fi
-        $SUDO install -D -m 0644 "${WORK}/controller.env" /etc/i3t/controller.env
+        $SUDO install -D -o 0 -g 0 -m 0600 "${WORK}/controller.env" /etc/i3t/controller.env
     elif ! $SUDO test -f /etc/i3t/controller.env; then
         cat <<'EOF' > "${WORK}/controller.env"
 # Set the public address reachable by all nodes before starting i3t-controller:
 # I3T_PUBLIC_ADDR=ctl.example.com:20331
 # I3T_CONTROLLER_ARGS=--listen 0.0.0.0:20331
 EOF
-        $SUDO install -D -m 0644 "${WORK}/controller.env" /etc/i3t/controller.env
+        $SUDO install -D -o 0 -g 0 -m 0600 "${WORK}/controller.env" /etc/i3t/controller.env
+    else
+        $SUDO chown 0:0 /etc/i3t/controller.env
+        $SUDO chmod 0600 /etc/i3t/controller.env
     fi
 
     $SUDO systemctl daemon-reload
@@ -1424,22 +1623,17 @@ EOF
     if [ -n "$PUBLIC_ADDR" ]; then
         log "Enabling and starting i3t-controller.service"
         $SUDO systemctl enable i3t-controller >/dev/null
-        since=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
-        $SUDO systemctl restart i3t-controller
-        if [ "$first_start" -eq 1 ]; then
-            invocation=$($SUDO systemctl show -p InvocationID --value i3t-controller 2>/dev/null || true)
-            show_first_start "$invocation" "$since"
-        else
-            log "i3t-controller upgraded and running"
-        fi
-    elif $SUDO systemctl is-active -q i3t-controller 2>/dev/null; then
+        restart_controller
+    elif [ "$start_at_end" -eq 1 ]; then
         log "Restarting i3t-controller.service"
-        $SUDO systemctl restart i3t-controller
-        log "i3t-controller upgraded and running"
+        restart_controller
     else
         log "Installation complete!"
         printf '\nNext steps:\n'
-        printf '  Edit /etc/i3t/controller.env and set I3T_PUBLIC_ADDR=<public-address>:20331\n'
+        printf '  Edit /etc/i3t/controller.env (as root) and set I3T_PUBLIC_ADDR=<public-address>:20331\n'
+        if [ "$needs_database" -eq 1 ] && ! controller_has_database; then
+            printf '  Run this script again with --controller --database-url postgres://USER:PASSWORD@HOST/DBNAME\n'
+        fi
         printf '  sudo systemctl enable --now i3t-controller\n'
         printf '  sudo journalctl -u i3t-controller -n 30 --no-pager   # get the initial admin token\n'
     fi
@@ -1491,10 +1685,10 @@ uninstall_controller() {
     fi
     $SUDO rm -f /usr/local/bin/i3t-controller /usr/local/bin/i3tctl
     if [ "$PURGE" -eq 1 ]; then
-        log "Purging /var/lib/i3t-controller and /etc/i3t"
+        log "Purging /var/lib/i3t-controller and /etc/i3t (the PostgreSQL database is left as it is)"
         $SUDO rm -rf /var/lib/i3t-controller /etc/i3t
     else
-        log "Removed i3t-controller service and binaries (data kept in /var/lib/i3t-controller and /etc/i3t; pass --purge to remove)"
+        log "Removed i3t-controller service and binaries (the key and settings are kept in /var/lib/i3t-controller and /etc/i3t; pass --purge to remove. The PostgreSQL database is left as it is)"
     fi
 }
 
@@ -1513,7 +1707,13 @@ main() {
     fi
 
     WORK=$(mktemp -d)
-    trap cleanup_work EXIT HUP INT TERM
+    # A signal ends the script. Left to run the handler alone, the shell would carry on afterwards with the step that
+    # follows the interrupted one: the handler would have started the controller again and removed the work
+    # directory, and the install would go on regardless. The EXIT trap runs on the way out in either case.
+    trap on_exit EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
 
     if [ "$MODE" = "controller" ]; then
         install_controller

@@ -1,8 +1,6 @@
 //! 存储暂时读写不了的时候，改了一半的不留下，改完了的不丢下后面该做的事：要重算的照样重算，该发的更新指令照样发。
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use i3t_model::admin::{CreateEnrollToken, CreateRule, Direction, NetworkId, RelaySettings, UpdateNode};
@@ -11,18 +9,16 @@ use i3t_proto::NodeId;
 use tokio::sync::mpsc;
 
 use super::super::testing::{CAN_DO_ALL, Lab, Member, hello};
-use super::super::{Controller, DATABASE_FILE};
-use super::ordering::{block_column_of, is_woken, report_endpoints, two_unconnected};
-use super::relations;
+use super::ordering::{block_column_of, report_endpoints, two_unconnected};
+use super::{is_woken, relations};
 
-/// 让存储里 `nodes` 表的这一列写不进去，模拟磁盘暂时写不进去；别的写照常。
+/// 让存储里 `nodes` 表的这一列写不进去，模拟这一列暂时写不进去；别的写照常。
 fn block(lab: &Lab, column: &str) {
-    let sql = format!("CREATE TRIGGER no_{column} BEFORE UPDATE OF {column} ON nodes BEGIN SELECT RAISE(ABORT, 'disk full'); END;");
-    lab.controller.lock().store.execute_batch(&sql);
+    lab.controller.lock().store.block(&format!("no_{column}"), &format!("UPDATE OF {column} ON nodes"), None);
 }
 
 fn unblock(lab: &Lab, column: &str) {
-    lab.controller.lock().store.execute_batch(&format!("DROP TRIGGER no_{column};"));
+    lab.controller.lock().store.unblock(&format!("no_{column}"), "nodes");
 }
 
 /// 让这张表读不出来（改个名字），模拟数据库暂时读不了；`restore` 改回来。
@@ -163,15 +159,11 @@ fn a_public_host_applied_to_only_some_nodes_leaves_none_of_them_behind_whichever
 }
 
 #[test]
-fn a_busy_database_is_waited_for_once_by_the_background_work() {
-    let dir = tempfile::tempdir().unwrap();
-    let data = dir.path().join("data");
-    let mut lab = Lab::around(Controller::open(&data, "ctl.example.com:20331".to_owned()).unwrap().controller);
-    let waits = Arc::new(AtomicUsize::new(0));
-    let seen = Arc::clone(&waits);
-    lab.controller.lock().store.fail_when_busy(move || {
-        seen.fetch_add(1, Ordering::Relaxed);
-    });
+fn a_database_that_takes_no_writes_is_tried_once_by_the_background_work_and_then_left_alone_for_a_while() {
+    let mut lab = Lab::new();
+    // 整个数据库写不进去（这里是变成了只读；连不上、盘满了也一样）。只是某一行、某张表被别的连接占着是另一回事：
+    // 那种时候等多久由存储自己限着，见 `ordering` 里等锁的那几个测试。
+    let read_only = |lab: &Lab, on: bool| lab.controller.lock().store.set_read_only(on);
     let network = lab.network("home").id;
     let (mut reporter, mut peer) = (lab.join(network, &[]), lab.join(network, &[]));
     lab.settle(&mut [&mut reporter, &mut peer]);
@@ -185,33 +177,27 @@ fn a_busy_database_is_waited_for_once_by_the_background_work() {
         inner.tick_work(Instant::now() + after, wall)
     };
     let past_back_off = Duration::from_secs(2);
-    let waited = || waits.load(Ordering::Relaxed);
 
-    // 别的进程占着写锁。重算等过一次就够了：接着去清理的话每写一次又要拿着 controller 的锁等满一次超时。
-    let other = rusqlite::Connection::open(data.join(DATABASE_FILE)).unwrap();
-    other.execute_batch("BEGIN IMMEDIATE").unwrap();
+    // 重算撞上了：这一轮不再接着去清理，那只会再撞一次。
+    read_only(&lab, true);
     assert!(work(&lab, past_back_off).is_err());
-    assert_eq!(waited(), 1);
     assert!(lab.controller.lock().last_purge.is_none(), "清理没做，下次接着做");
     // 重算排上重试时叫醒了后台任务，它马上又来一轮：还在退避，什么都不去写，也就不出错。
     assert!(is_woken(&lab));
     work(&lab, Duration::ZERO).unwrap();
-    assert_eq!(waited(), 1);
     assert!(lab.controller.lock().last_purge.is_none());
 
-    other.execute_batch("ROLLBACK").unwrap();
+    read_only(&lab, false);
     work(&lab, past_back_off).unwrap();
     assert!(lab.controller.lock().last_purge.is_some());
-    assert_eq!(peer.receive(), 1, "放开之后补发");
+    assert_eq!(peer.receive(), 1, "写得进去之后补发");
 
-    // 没有要重算的，是清理先撞上了写锁：一样退避，紧接着的一轮不再去撞。
-    other.execute_batch("BEGIN IMMEDIATE").unwrap();
+    // 没有要重算的，是清理先撞上了：一样退避，紧接着的一轮不再去撞（去撞的话这一轮会带着错误回来）。
+    read_only(&lab, true);
     lab.controller.lock().last_purge = None;
     assert!(work(&lab, past_back_off).is_err());
-    assert_eq!(waited(), 2);
     work(&lab, Duration::ZERO).unwrap();
-    assert_eq!(waited(), 2);
-    other.execute_batch("ROLLBACK").unwrap();
+    read_only(&lab, false);
 }
 
 #[test]
