@@ -1,14 +1,18 @@
 //! 存储暂时读写不了的时候，改了一半的不留下，改完了的不丢下后面该做的事：要重算的照样重算，该发的更新指令照样发。
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use i3t_model::admin::{CreateEnrollToken, CreateRule, Direction, NetworkId, RelaySettings, UpdateNode};
-use i3t_model::control::{Declared, Hello};
+use i3t_model::control::{Declared, Hello, ToNode};
+use i3t_proto::NodeId;
 use tokio::sync::mpsc;
 
 use super::super::testing::{CAN_DO_ALL, Lab, Member, hello};
-use super::ordering::two_unconnected;
+use super::super::{Controller, DATABASE_FILE};
+use super::ordering::{block_column_of, report_endpoints, two_unconnected};
 use super::relations;
 
 /// 让存储里 `nodes` 表的这一列写不进去，模拟磁盘暂时写不进去；别的写照常。
@@ -120,6 +124,77 @@ fn a_public_host_that_could_not_be_applied_to_every_node_is_applied_again() {
     // 后台任务过一会儿又解析出同一个 IP：上次没改完，这次要接着改，不能当作"没变"。
     lab.controller.set_public_host(Some(public)).unwrap();
     assert_eq!(observed(), Some(SocketAddr::new(public, 20330)));
+}
+
+/// 一个和 controller 在同一台机器上、走回环连上来的节点。收件箱要留着：丢了的话它的连接就算断了。
+fn looped_node(lab: &mut Lab, network: NetworkId) -> (NodeId, mpsc::Receiver<ToNode>) {
+    let secret = lab.secret(network, &CreateEnrollToken::default());
+    let key = lab.fresh_key();
+    let (outbox, inbox) = mpsc::channel(64);
+    let session = lab.controller.enroll(key, &secret, &hello(CAN_DO_ALL), IpAddr::V4(Ipv4Addr::LOCALHOST), outbox).unwrap();
+    (session.node, inbox)
+}
+
+#[test]
+fn a_public_host_applied_to_only_some_nodes_leaves_none_of_them_behind_whichever_ip_comes_next() {
+    let mut lab = Lab::new();
+    let network = lab.network("home").id;
+    let (a, _a) = looped_node(&mut lab, network);
+    let (b, _b) = looped_node(&mut lab, network);
+    // 节点按编号的顺序改：后改的那个写不进去时，先改的那个已经改过了。
+    let (first, second) = (a.min(b), a.max(b));
+    let hosts = || {
+        let host = |node| lab.controller.node(network, node).unwrap().observed_endpoint.map(|endpoint| endpoint.ip());
+        (host(first), host(second))
+    };
+    let (old, new): (IpAddr, IpAddr) = ("203.0.113.1".parse().unwrap(), "203.0.113.2".parse().unwrap());
+    lab.controller.set_public_host(Some(old)).unwrap();
+
+    block_column_of(&lab, "observed", second);
+    assert!(lab.controller.set_public_host(Some(new)).is_err());
+    unblock(&lab, "observed");
+    assert_eq!(hosts(), (Some(old), Some(old)), "要么都改，要么都不改");
+
+    // 下次解析又回到了旧的 IP（DNS 抖了一下）：和记着的一样，什么都不用做，也不能有节点停在新的 IP 上。
+    lab.controller.set_public_host(Some(old)).unwrap();
+    assert_eq!(hosts(), (Some(old), Some(old)));
+    lab.controller.set_public_host(Some(new)).unwrap();
+    assert_eq!(hosts(), (Some(new), Some(new)));
+}
+
+#[test]
+fn a_busy_database_is_waited_for_once_by_the_background_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let mut lab = Lab::around(Controller::open(&data, "ctl.example.com:20331".to_owned()).unwrap().controller);
+    let waits = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&waits);
+    lab.controller.lock().store.fail_when_busy(move || {
+        seen.fetch_add(1, Ordering::Relaxed);
+    });
+    let network = lab.network("home").id;
+    let (mut reporter, mut peer) = (lab.join(network, &[]), lab.join(network, &[]));
+    lab.settle(&mut [&mut reporter, &mut peer]);
+    // 对端的 netmap 要变（要写存储），过期的记录也到了该清的时候。
+    report_endpoints(&lab, &reporter, "203.0.113.9:1");
+    lab.controller.lock().last_purge = None;
+    let work = |lab: &Lab| {
+        let mut inner = lab.controller.lock();
+        let wall = inner.clock.now();
+        inner.tick_work(Instant::now() + Duration::from_secs(2), wall)
+    };
+
+    // 别的进程占着写锁。重算等过一次就够了：接着去清理的话每写一次又要拿着 controller 的锁等满一次超时。
+    let other = rusqlite::Connection::open(data.join(DATABASE_FILE)).unwrap();
+    other.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert!(work(&lab).is_err());
+    assert_eq!(waits.load(Ordering::Relaxed), 1);
+    assert!(lab.controller.lock().last_purge.is_none(), "清理没做，下次接着做");
+
+    other.execute_batch("ROLLBACK").unwrap();
+    work(&lab).unwrap();
+    assert!(lab.controller.lock().last_purge.is_some());
+    assert_eq!(peer.receive(), 1, "放开之后补发");
 }
 
 #[test]
