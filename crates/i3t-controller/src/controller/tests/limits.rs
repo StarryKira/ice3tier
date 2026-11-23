@@ -9,7 +9,7 @@ use i3t_model::control::{
 use i3t_model::netmap::{self, ExitRole, ForwardProtocol, ListenerProtocol};
 use i3t_proto::flow::Class;
 
-use super::super::testing::{CAN_DO_ALL, Lab, hello, proxy};
+use super::super::testing::{CAN_DO_ALL, Lab, Member, hello, proxy};
 use crate::store::LogFilter;
 
 fn forward(listen_node: i3t_proto::NodeId, target_node: i3t_proto::NodeId, bind: &str) -> ForwardInput {
@@ -112,6 +112,47 @@ fn an_exit_that_reports_absurdly_large_counts_still_gets_the_right_health() {
     // 请求数的 10 倍放不进 64 位，失败只有 3 次：远不到一成。
     jump_to(2, u64::MAX / 10 + 1, 3);
     assert_eq!(lab.controller.exit(network.id, exit.id).unwrap().health, ExitHealth::Ok);
+}
+
+#[test]
+fn only_an_enabled_exit_keeps_its_own_counts_and_switching_it_off_drops_them() {
+    let mut lab = Lab::new();
+    let network = lab.network("home");
+    let exit = lab.join_with(network.id, &[], CAN_DO_ALL);
+    let laptop = lab.join(network.id, &[]);
+    let counts = |total, failed_by_exit| Some(Box::new(ExitReport { total, failed_by_exit, ..ExitReport::default() }));
+    let send = |node: &Member, total, failed_by_exit| {
+        node.send(&lab.controller, ToController::Report(Box::new(Report { exit: counts(total, failed_by_exit), ..report(1) })));
+    };
+
+    // 没声明的、声明了还没启用的，报了都不收。
+    send(&laptop, 10, 10);
+    send(&exit, 10, 10);
+    assert!(lab.controller.lock().usage.exit_keys().is_empty());
+    lab.controller.enable_exit(network.id, exit.id, ExitRole::default()).unwrap();
+    let view = lab.controller.exit(network.id, exit.id).unwrap();
+    assert_eq!((view.usage, view.reported_secs_ago, view.health), (None, None, ExitHealth::Unknown), "不带着启用之前报的");
+
+    send(&exit, 20, 10);
+    send(&exit, 30, 20);
+    let view = lab.controller.exit(network.id, exit.id).unwrap();
+    assert_eq!((view.recent_requests, view.recent_failures, view.health), (10, 10, ExitHealth::Degraded));
+
+    // 停用：留着的计数丢掉，停用期间报的也不收。再启用、再报，从头算起，停用之前的失败不算。
+    lab.controller.disable_exit(network.id, exit.id).unwrap();
+    assert!(lab.controller.lock().usage.exit_keys().is_empty());
+    send(&exit, 40, 20);
+    assert!(lab.controller.lock().usage.exit_keys().is_empty());
+    lab.controller.enable_exit(network.id, exit.id, ExitRole::default()).unwrap();
+    send(&exit, 50, 20);
+    send(&exit, 80, 20);
+    let view = lab.controller.exit(network.id, exit.id).unwrap();
+    assert_eq!((view.recent_requests, view.recent_failures, view.health), (30, 0, ExitHealth::Ok));
+
+    // 节点撤回了出口的声明，出口随之关闭，计数也一样丢掉。
+    exit.send(&lab.controller, ToController::Hello(hello(Declared::default())));
+    assert_eq!(lab.controller.node(network.id, exit.id).unwrap().node.exit, None);
+    assert!(lab.controller.lock().usage.exit_keys().is_empty());
 }
 
 #[test]
