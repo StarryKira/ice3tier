@@ -20,7 +20,7 @@ use std::time::Instant;
 use i3t_model::admin::NetworkId;
 use i3t_proto::NodeId;
 
-use super::Inner;
+use super::{Failures, Inner};
 use crate::error::Error;
 use crate::netmap::NodeFacts;
 use crate::relay_reach;
@@ -58,21 +58,26 @@ impl Inner {
 
     /// 后台的一轮：重新算报的结果变了的网络，证据成立满了等待时间的算数，换了的通知它的对端。返回下一个要算数的时刻。
     ///
-    /// # Errors
-    ///
-    /// 读存储失败，交回第一个错误。读不出来的网络留到下一轮，别的网络照常算，算出来的变化照常通知对端。
-    pub(crate) fn no_udp_tick(&mut self, now: Instant) -> Result<Option<Instant>, Error> {
+    /// 读存储出的错记进 `failures`。读不出来的网络留到下一轮，别的网络照常算，算出来的变化照常通知对端；
+    /// 读不出来的网络里的节点这一轮不算数，也不算它们的时刻：它们报的结果可能已经变了，读到之前不知道。
+    pub(crate) fn no_udp_tick(&mut self, now: Instant, failures: &mut Failures) -> Option<Instant> {
         let mut changed: Vec<(NetworkId, NodeId)> = Vec::new();
         let mut unread = BTreeSet::new();
-        let mut first_error = None;
         while let Some(network) = self.no_udp_dirty.pop_first() {
             let nodes = match self.store.nodes(network) {
                 Ok(nodes) => nodes,
                 // 一个网络读不出来不耽误别的：不然前面的网络算出来的变化没人通知（它们已经不在 `no_udp_dirty` 里了），
-                // 一直读不出来的话排在它后面的网络也一直轮不到。整个数据库出错时也接着读：读不用等写锁，失败都是马上返回的。
+                // 一直读不出来的话排在它后面的网络也一直轮不到。
+                //
+                // 整个数据库都读不了时剩下的网络不去试，留在 `no_udp_dirty` 里：连接没有回应时每读一次都要等满一次期限，
+                // 是拿着 controller 的锁等的。
                 Err(error) => {
                     unread.insert(network);
-                    first_error.get_or_insert(error.into());
+                    let database_wide = error.is_database_wide();
+                    failures.keep(Err::<(), Error>(error.into()));
+                    if database_wide {
+                        break;
+                    }
                     continue;
                 }
             };
@@ -99,7 +104,8 @@ impl Inner {
         // 循环结束之后才放回去，不然同一轮里又会把它取出来。
         self.no_udp_dirty.append(&mut unread);
         let settle = self.timing.no_udp_settle;
-        for (id, entry) in &mut self.no_udp {
+        let unread = &self.no_udp_dirty;
+        for (id, entry) in self.no_udp.iter_mut().filter(|(_, entry)| !unread.contains(&entry.network)) {
             if !entry.settled && now.saturating_duration_since(entry.since) >= settle {
                 entry.settled = true;
                 tracing::info!(node = %id, ?settle, "节点连得上的 relay 这么久都只经 TCP，认定它用不了 UDP");
@@ -110,9 +116,8 @@ impl Inner {
             let holders = self.holders_of(node);
             self.defer_report(network, holders);
         }
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(self.no_udp.values().filter(|entry| !entry.settled).map(|entry| entry.since + settle).min()),
-        }
+        // 没读成的网络等它读成了再说：出了错的一轮，后台本来就会过一会儿再来。
+        let unread = &self.no_udp_dirty;
+        self.no_udp.values().filter(|entry| !entry.settled && !unread.contains(&entry.network)).map(|entry| entry.since + settle).min()
     }
 }

@@ -296,6 +296,7 @@ pub(crate) async fn blocking<T: Send + 'static>(controller: &Arc<Controller>, ca
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::controller::testing::logged;
 
     #[tokio::test]
     async fn a_node_port_left_to_the_system_moves_on_when_the_udp_of_the_same_number_is_taken() {
@@ -384,15 +385,6 @@ mod tests {
         assert!(matches!(&bound, Err(Error::Bind { address, .. }) if *address == taken), "{:?}", bound.err());
     }
 
-    /// `run` 期间这个线程打的日志，每一行一条。
-    fn logged(run: impl FnOnce()) -> Vec<String> {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        let writer = std::sync::Mutex::new(file.reopen().unwrap());
-        let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false).with_writer(writer).finish();
-        tracing::subscriber::with_default(subscriber, run);
-        std::fs::read_to_string(file.path()).unwrap().lines().map(str::to_owned).collect()
-    }
-
     fn failed(errors: usize) -> TickFailed {
         let errors = (0..errors).map(|_| Error::NotFound(crate::error::Entity::Network)).collect();
         TickFailed { errors, next: std::time::Instant::now() }
@@ -410,11 +402,18 @@ mod tests {
         assert_eq!(shown.len(), 2, "第一轮的两个错都打，接着的两轮不打：{lines:#?}");
         assert!(shown.iter().all(|line| line.contains("suppressed=0")), "{lines:#?}");
 
-        let errors = Throttle::new(Duration::ZERO);
+        // 过了限着的时间就再打，说出中间省掉了几轮。
+        let window = Duration::from_secs(1);
+        let errors = Throttle::new(window);
         let lines = logged(|| {
             log_failure(&errors, &failed(1));
             log_failure(&errors, &failed(1));
+            log_failure(&errors, &failed(1));
+            std::thread::sleep(window);
+            log_failure(&errors, &failed(1));
         });
-        assert_eq!(lines.iter().filter(|line| line.contains("ERROR")).count(), 2, "过了限着的时间就再打：{lines:#?}");
+        let shown: Vec<_> = lines.iter().filter(|line| line.contains("ERROR")).collect();
+        assert_eq!(shown.len(), 2, "{lines:#?}");
+        assert!(shown[0].contains("suppressed=0") && shown[1].contains("suppressed=2"), "{lines:#?}");
     }
 }

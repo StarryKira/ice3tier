@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 
 use super::super::publish::Seeds;
 use super::super::testing::{Lab, Member, REMOTE, hello};
-use super::super::{Controller, TickFailed, Timing};
+use super::super::{Controller, Failures, TickFailed, Timing};
 use super::{add_rule, drop_default_rule, is_woken, peer_ids, relations};
 use crate::error::{Error, Rejection};
 use crate::store::{NetmapState, Scratch, Store};
@@ -221,6 +221,13 @@ fn a_netmap_that_keeps_changing_does_not_keep_a_revocation_pending() {
 
 /// 比"失败之后多久再试"长：把后台工作的时间往后拨这么多，排着重试的就都到期了，测试不用真的等。
 const PAST_RETRY: Duration = Duration::from_secs(2);
+
+/// 像后台那样重算到期的节点，时间算作 `now`。出了错交回第一个。
+fn flush_due(lab: &Lab, now: Instant) -> Result<(), Error> {
+    let mut failures = Failures::default();
+    lab.controller.lock().flush_due(now, &mut failures);
+    failures.into_result()
+}
 
 /// 做一遍后台工作，时间算作 `after` 之后。
 fn tick_after(lab: &Lab, after: Duration) -> Result<Option<Instant>, TickFailed> {
@@ -609,7 +616,7 @@ fn a_locked_table_is_waited_for_once_however_many_nodes_and_networks_are_due() {
     // 不能每个节点、每个网络各等一次。
     let other = Store::open(&database).unwrap();
     other.execute_batch("BEGIN; LOCK TABLE nodes IN EXCLUSIVE MODE");
-    let flush = |lab: &Lab| lab.controller.lock().flush_due(Instant::now() + PAST_RETRY);
+    let flush = |lab: &Lab| flush_due(lab, Instant::now() + PAST_RETRY);
     assert!(flush(&lab).is_err());
     assert_eq!(waits(&lab), 1, "四个节点都写不进去，只有头一个把期限等满了，后面的马上失败");
     assert_eq!(queued(&lab), 4, "每个网络里头一个节点内容没变、不用写，算做完了；其余的排回队列");
@@ -619,7 +626,7 @@ fn a_locked_table_is_waited_for_once_however_many_nodes_and_networks_are_due() {
     assert!(is_woken(&lab));
     lab.controller.lock().defer(networks[0], [members[1].id], Duration::ZERO);
     let started = Instant::now();
-    assert!(lab.controller.lock().flush_due(Instant::now()).is_err());
+    assert!(flush_due(&lab, Instant::now()).is_err());
     assert!(started.elapsed() < LOCK_PATIENCE, "{:?}", started.elapsed());
     assert_eq!(waits(&lab), 1, "存储刚等满过一次，这一会儿里不再等");
     assert_eq!(queued(&lab), 4);
@@ -642,7 +649,7 @@ fn a_locked_row_holds_up_only_its_own_node() {
     let (lab, _networks, mut members) = two_networks_with_changes_due(&database, dir.path());
     let waits = |lab: &Lab| lab.controller.lock().store.lock_waits();
     let queued = |lab: &Lab| lab.controller.lock().dirty.len();
-    let flush = |lab: &Lab| lab.controller.lock().flush_due(Instant::now() + PAST_RETRY);
+    let flush = |lab: &Lab| flush_due(lab, Instant::now() + PAST_RETRY);
 
     // 别的连接开着事务，改了一个节点的那一行还没有提交：只有这一行写不进去。它在第一个网络里排在前面。
     let other = Store::open(&database).unwrap();
@@ -676,7 +683,7 @@ fn a_locked_node_that_is_hit_again_and_again_does_not_hold_back_what_is_due_in_a
     // 第一个网络里一个节点的那一行被别的连接占着。头一轮过后只剩它没做成。
     let other = Store::open(&database).unwrap();
     other.execute_batch(&format!("BEGIN; UPDATE nodes SET hostname = hostname WHERE id = {}", members[1].id.get()));
-    assert!(lab.controller.lock().flush_due(Instant::now() + PAST_RETRY).is_err());
+    assert!(flush_due(&lab, Instant::now() + PAST_RETRY).is_err());
     assert_eq!(members.iter_mut().map(Member::receive).collect::<Vec<_>>(), vec![0, 0, 1, 0, 1, 1]);
 
     // 第二个网络里又有了变化，到期了。同时前台的请求（管理操作、节点的上报）一次接一次地碰上被占着的那个节点。
@@ -687,7 +694,7 @@ fn a_locked_node_that_is_hit_again_and_again_does_not_hold_back_what_is_due_in_a
         // 前台每碰一次都让后台"过一会儿再来"的话，这里到期的就一直轮不到：现在就做，不等。
         lab.controller.lock().defer(networks[1], [members[4].id, members[5].id], Duration::ZERO);
         // 被占着的那个节点要是也到了再试的时候，这一轮会带着它的错误回来：不管，只看第二个网络的发没发。
-        let _ = lab.controller.lock().flush_due(Instant::now());
+        let _ = flush_due(&lab, Instant::now());
     }
     assert_eq!(members.iter_mut().map(Member::receive).collect::<Vec<_>>(), vec![0, 0, 0, 0, 1, 1], "第二个网络的照常发了");
     other.execute_batch("ROLLBACK");

@@ -635,11 +635,11 @@ impl Inner {
     fn tick_work(&mut self, now: Instant, wall: Timestamp, failures: &mut Failures) -> Option<Instant> {
         self.give_up_on_slow_acks(now);
         let unsettled = failures.keep(self.settle_commits(now));
-        let no_udp = failures.keep(self.no_udp_tick(now));
-        let next = failures.keep(self.flush_due(now));
+        let no_udp = self.no_udp_tick(now, failures);
+        let next = self.flush_due(now, failures);
         // 下发、撤回更新指令只读存储，照样做：该撤回的（比如管理员刚关掉了自动更新）不该等数据库。
         if self.updates.next_rollout.is_some_and(|at| at <= now) {
-            failures.keep(self.roll_out());
+            failures.keep(self.roll_out_in_background());
         }
         let backing_off = failures.database_wide || self.flush_after.is_some_and(|after| now < after);
         if !backing_off && self.last_purge.is_none_or(|last| now.duration_since(last) >= PURGE_INTERVAL) {
@@ -678,7 +678,7 @@ pub struct TickFailed {
 
 /// 一连做了好几样工作、每一样都可能出错时，记下出了什么错。
 #[derive(Default)]
-struct Failures {
+pub(crate) struct Failures {
     /// 出的错，先出的在前。
     errors: Vec<Error>,
     /// 出过整个数据库都读写不了的错（连不上、只读了、盘满了）：后面要写存储的不急的事就不去试了。
@@ -701,6 +701,17 @@ impl Failures {
         let first = errors.next();
         for err in errors {
             tracing::error!("同时还出了一个错，稍后再试：{}", error_chain(&err));
+        }
+        first.map_or(Ok(()), Err)
+    }
+
+    /// 和 [`Self::into_result`] 一样，只是后面的错误只打在 debug 里：后台每一轮都可能再碰上它们，
+    /// 后台的错误日志由调用方限着频，见 [`Self::into_tick`]。
+    fn into_first(self) -> Result<(), Error> {
+        let mut errors = self.errors.into_iter();
+        let first = errors.next();
+        for err in errors {
+            tracing::debug!("同时还出了一个错，稍后再试：{}", error_chain(&err));
         }
         first.map_or(Ok(()), Err)
     }
