@@ -30,7 +30,8 @@ const TYPE_ABORT: u8 = 0x13;
 const TYPE_STOP: u8 = 0x14;
 
 const MODE_SEALED: u8 = 0;
-const MODE_PASSTHROUGH: u8 = 1;
+const MODE_EARLY: u8 = 1;
+const MODE_MUTUAL: u8 = 2;
 
 /// 一条 lane 拨出来是做什么用的。拨号的一方在 HELLO 里说明，之后不变，所以两边永远不会争用同一条 lane。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -62,19 +63,44 @@ impl Purpose {
     }
 }
 
-/// 负载方式在 OPENING 里的编码。
-const fn payload_to_wire(payload: Payload) -> u8 {
-    match payload {
-        Payload::Sealed => MODE_SEALED,
-        Payload::Passthrough => MODE_PASSTHROUGH,
-    }
+/// OPENING 里的负载方式：两个方向什么时候离开 TLS。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Mode {
+    /// 两个方向一直在 TLS 里。
+    Sealed,
+    /// `i3t-lane/1` 的 passthrough：发起方的方向在 OPENING 所在的记录之后就离开 TLS，接受方的在它的 SWITCH 之后。
+    /// 那时目标会怎么回还不知道，发起方后面的字节（HelloRetryRequest 之后的第二个 ClientHello、TLS 1.2 的客户端证书）
+    /// 就明文出去了。所以本端不再发它，只为没升级的发起方收它（issue #34）。
+    Early,
+    /// `i3t-lane/2` 的 passthrough：两个方向都等 SWITCH。接受方看到目标回了 TLS 1.3 的 ServerHello 时先发，
+    /// 发起方收到之后回一个，各自在自己的 SWITCH 所在的记录之后离开 TLS。接受方不发时两个方向都一直在 TLS 里。
+    Mutual,
 }
 
-const fn payload_from_wire(raw: u8) -> Option<Payload> {
-    match raw {
-        MODE_SEALED => Some(Payload::Sealed),
-        MODE_PASSTHROUGH => Some(Payload::Passthrough),
-        _ => None,
+impl Mode {
+    const fn to_wire(self) -> u8 {
+        match self {
+            Self::Sealed => MODE_SEALED,
+            Self::Early => MODE_EARLY,
+            Self::Mutual => MODE_MUTUAL,
+        }
+    }
+
+    const fn from_wire(raw: u8) -> Option<Self> {
+        match raw {
+            MODE_SEALED => Some(Self::Sealed),
+            MODE_EARLY => Some(Self::Early),
+            MODE_MUTUAL => Some(Self::Mutual),
+            _ => None,
+        }
+    }
+
+    /// 对流层说的负载方式：`Early` 和 `Mutual` 都是 passthrough，只是什么时候切换不同。
+    pub(crate) const fn payload(self) -> Payload {
+        match self {
+            Self::Sealed => Payload::Sealed,
+            Self::Early | Self::Mutual => Payload::Passthrough,
+        }
     }
 }
 
@@ -96,14 +122,15 @@ pub(crate) enum Frame {
     /// 发的一方要走了（排空）：对方不再用和它之间的 lane 开新的流，空闲的关掉。
     GoAway,
     /// 发起方在一条 lane 上开流：选定的负载方式，和流的头（流层的 OPEN 连同首批数据）。
-    /// 负载方式是 passthrough 时，发起方这个方向在这个帧所在的记录之后就离开 TLS。
+    /// 负载方式是 [`Mode::Early`] 时，发起方这个方向在这个帧所在的记录之后就离开 TLS。
     Opening {
-        payload: Payload,
+        mode: Mode,
         header: Bytes,
     },
     /// 流的数据（sealed 的方向）。
     Data(Bytes),
-    /// 接受方这个方向在这个帧所在的记录之后离开 TLS。只在发起方选了 passthrough 时允许。
+    /// 发的一方这个方向在这个帧所在的记录之后离开 TLS。只在 passthrough 的流上允许：接受方在 [`Mode::Early`] 和
+    /// [`Mode::Mutual`] 的流上都可以发；发起方只在 [`Mode::Mutual`] 的流上、收到接受方的 SWITCH 之后发，作为回应。
     Switch,
     /// 发的一方异常结束了这条流，带原因码。之后这条 lane 被重置。
     Abort(u32),
@@ -136,10 +163,10 @@ impl Frame {
                 buf.extend_from_slice(&nonce.to_be_bytes());
             }
             Self::GoAway => put_header(buf, TYPE_GOAWAY, 0),
-            Self::Opening { payload, header } => {
+            Self::Opening { mode, header } => {
                 assert!(header.len() <= MAX_HEADER_LEN, "流的头 {} 字节，调用方应该已经限制在 {MAX_HEADER_LEN} 以内", header.len());
                 put_header(buf, TYPE_OPENING, 1 + header.len());
-                buf.push(payload_to_wire(*payload));
+                buf.push(mode.to_wire());
                 buf.extend_from_slice(header);
             }
             Self::Data(data) => {
@@ -198,8 +225,8 @@ impl Frame {
             TYPE_PONG => Self::Pong(body.get_u64()),
             TYPE_GOAWAY => Self::GoAway,
             TYPE_OPENING => {
-                let payload = payload_from_wire(body.get_u8()).ok_or(FrameError::Invalid("OPENING 里的负载方式"))?;
-                Self::Opening { payload, header: body.freeze() }
+                let mode = Mode::from_wire(body.get_u8()).ok_or(FrameError::Invalid("OPENING 里的负载方式"))?;
+                Self::Opening { mode, header: body.freeze() }
             }
             TYPE_DATA => Self::Data(body.freeze()),
             TYPE_SWITCH => Self::Switch,
@@ -256,8 +283,9 @@ mod tests {
             Frame::Ping(7),
             Frame::Pong(u64::MAX),
             Frame::GoAway,
-            Frame::Opening { payload: Payload::Passthrough, header: Bytes::from_static(b"open and first data") },
-            Frame::Opening { payload: Payload::Sealed, header: Bytes::new() },
+            Frame::Opening { mode: Mode::Early, header: Bytes::from_static(b"open and first data") },
+            Frame::Opening { mode: Mode::Mutual, header: Bytes::from_static(b"open and first data") },
+            Frame::Opening { mode: Mode::Sealed, header: Bytes::new() },
             Frame::Data(Bytes::from(vec![9; MAX_DATA_LEN])),
             Frame::Switch,
             Frame::Abort(5),
@@ -268,10 +296,20 @@ mod tests {
         }
     }
 
+    /// 0 和 1 是 `i3t-lane/1` 就有的，没升级的节点还在用：编码不能变。
+    #[test]
+    fn opening_modes_keep_their_wire_values() {
+        for (mode, wire) in [(Mode::Sealed, 0), (Mode::Early, 1), (Mode::Mutual, 2)] {
+            let mut buf = Vec::new();
+            Frame::Opening { mode, header: Bytes::from_static(b"open") }.encode(&mut buf);
+            assert_eq!(buf[..4], [TYPE_OPENING, 0, 5, wire], "{mode:?}");
+        }
+    }
+
     #[test]
     fn a_frame_is_not_taken_before_all_of_it_arrived() {
         let mut buf = Vec::new();
-        Frame::Opening { payload: Payload::Sealed, header: Bytes::from_static(b"0123456789") }.encode(&mut buf);
+        Frame::Opening { mode: Mode::Sealed, header: Bytes::from_static(b"0123456789") }.encode(&mut buf);
         for cut in 0..buf.len() {
             let mut bytes = BytesMut::from(&buf[..cut]);
             assert_eq!(Frame::decode(&mut bytes, false), Ok(None), "前 {cut} 字节");
@@ -305,7 +343,7 @@ mod tests {
     fn bad_contents_are_refused() {
         let mut bytes = BytesMut::from(&[TYPE_HELLO, 0, 9, 3, 0, 0, 0, 0, 0, 0, 0, 0][..]);
         assert!(matches!(Frame::decode(&mut bytes, false), Err(FrameError::Invalid(_))));
-        let mut bytes = BytesMut::from(&[TYPE_OPENING, 0, 1, 2][..]);
+        let mut bytes = BytesMut::from(&[TYPE_OPENING, 0, 1, 3][..]);
         assert!(matches!(Frame::decode(&mut bytes, false), Err(FrameError::Invalid(_))));
     }
 }

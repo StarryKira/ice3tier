@@ -241,8 +241,9 @@ async fn revocation_signals_both_raw_halves_and_the_peer_reads_a_reset() {
         pair.ready(2).await;
         let ((mut send, mut recv), (mut far_send, mut far_recv)) = pair.entry_opens(b"request", Payload::Passthrough).await;
         far_send.end_header(Payload::Passthrough);
-        let write = send.take_raw().unwrap();
+        // 发起方收到接受方的 SWITCH 时自己的方向才跟着切换：先等接收方向。
         let read = timeout(Duration::from_secs(3), recv.wait_raw()).await.unwrap().unwrap();
+        let write = send.take_raw().unwrap();
         drop((send, recv));
 
         pair.entry.lanes.set_peers_with_identities([], [(pair.exit.id, pair.exit.key.public())]).unwrap();

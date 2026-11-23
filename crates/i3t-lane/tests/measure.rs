@@ -165,8 +165,9 @@ async fn exit_side(lanes: Arc<Lanes>, sink: SocketAddr, splicer: Option<Arc<Spli
 /// 一条流和一条 TCP 之间的双向搬运：两个方向都离开了 TLS 就交给搬运引擎，否则经流的两个方向在用户态拷贝。
 async fn relay(mut send: LaneSend, mut recv: LaneRecv, user: TcpStream, splicer: Option<&Splicer>) {
     if let Some(splicer) = splicer {
+        // 先等接收方向：发起方收到接受方的 SWITCH 时，自己的方向才跟着离开 TLS。
+        let raw_recv = recv.wait_raw().await.expect("对端切换之后它的方向离开 TLS");
         let raw_send = send.take_raw().expect("passthrough 的这个方向已经离开 TLS");
-        let raw_recv = recv.wait_raw().await.expect("对端结束头之后它的方向也离开 TLS");
         let (lane, unsent) = raw_send.into_parts();
         let (_, received) = raw_recv.into_parts();
         let relayed = splicer.relay(&user, received, &lane, unsent).await;

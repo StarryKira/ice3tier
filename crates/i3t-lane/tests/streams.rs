@@ -40,6 +40,18 @@ async fn open(
     ((send, recv), far)
 }
 
+/// 接受方回一点东西并切换（passthrough 时），发起方读到切换之后的第一个字节：这时发起方已经回了它的 SWITCH，
+/// 两个方向都离开了 TLS（sealed 时都还在）。
+#[cfg(target_os = "linux")]
+async fn both_switch(recv: &mut i3t_lane::LaneRecv, far_send: &mut i3t_lane::LaneSend) {
+    far_send.write_all(b"REPLY").await.unwrap();
+    far_send.end_header(Payload::Passthrough);
+    far_send.write_all(b"!").await.unwrap();
+    let mut reply = [0; 6];
+    recv.read_exact(&mut reply).await.unwrap();
+    assert_eq!(&reply, b"REPLY!");
+}
+
 #[tokio::test]
 async fn a_stream_carries_data_both_ways_in_each_mode_and_direction() {
     both_ways_both_modes(async |pair, entry_initiates, payload| {
@@ -173,7 +185,9 @@ async fn an_abort_is_followed_by_a_fin_while_the_peer_has_not_read_it_yet() {
 #[tokio::test]
 async fn on_linux_a_raw_reset_goes_out_at_once() {
     both_ways_both_modes(async |pair, entry_initiates, payload| {
-        let ((mut send, _recv), (_far_send, mut far_recv)) = open(pair, entry_initiates, payload).await;
+        let ((mut send, mut recv), (mut far_send, mut far_recv)) = open(pair, entry_initiates, payload).await;
+        // 发起方的方向要等接受方切换了才是原始字节。
+        both_switch(&mut recv, &mut far_send).await;
         send.write_all(b"partial").await.unwrap();
         send.reset(StreamCode(7));
         assert_aborted(&mut far_recv, "发起方重置，接收方向还留着").await;
@@ -227,30 +241,27 @@ async fn a_refusal_gets_its_reply_through_and_stops_the_initiator() {
     .await;
 }
 
-/// 流层的头只能来自 TLS 里面：头还没读完时对端的方向就离开了 TLS，读出错，不会把后面的原始字节当作头交出来（issue #17）。
+/// 流层的头只能来自 TLS 里面：接受方在 REPLY 写完之前就发了 SWITCH、REPLY 的另一半跟在后面的原始字节里时，发起方读出错，
+/// 不会把后面的原始字节当作头交出来（issue #17）。反方向（OPEN 的另一半不在 TLS 里）只有没升级的发起方做得出来：
+/// 升级了的发起方在接受方切换之前不离开 TLS，见 `i3t-lane` 里流的单元测试。
 #[tokio::test]
 async fn a_header_cannot_be_completed_with_bytes_from_outside_tls() {
     let pair = Pair::new(quick()).await;
     pair.ready(2).await;
     for entry_initiates in [true, false] {
         let (from, to) = if entry_initiates { (&pair.entry, &pair.exit) } else { (&pair.exit, &pair.entry) };
-
-        // 接受方：passthrough 的 OPENING 里只有半个头，另一半跟在后面的原始字节里。
         let (mut send, mut recv) = from.lanes.open_stream(to.id).await.unwrap();
-        send.write_all(b"OP").await.unwrap();
+        send.write_all(b"OPEN").await.unwrap();
         send.end_header(Payload::Passthrough);
-        send.write_all(b"EN, then data").await.unwrap();
         let (mut far_send, mut far_recv) = accept_next(&to.lanes).await;
-        let mut got = [0; 2];
-        far_recv.read_exact(&mut got).await.unwrap();
-        assert_eq!(&got, b"OP");
-        let error = far_recv.read_exact(&mut got).await.expect_err("头的另一半不在 TLS 里，不能交出来");
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        let mut open = [0; 4];
+        far_recv.read_exact(&mut open).await.unwrap();
+        far_recv.end_header();
 
-        // 发起方：接受方在 REPLY 写完之前就发了 SWITCH，REPLY 的另一半跟在后面的原始字节里。
         far_send.write_all(b"RE").await.unwrap();
         far_send.end_header(Payload::Passthrough);
         far_send.write_all(b"PLY, then data").await.unwrap();
+        let mut got = [0; 2];
         recv.read_exact(&mut got).await.unwrap();
         assert_eq!(&got, b"RE");
         let error = recv.read_exact(&mut got).await.expect_err("REPLY 的另一半不在 TLS 里，不能交出来");
@@ -258,6 +269,7 @@ async fn a_header_cannot_be_completed_with_bytes_from_outside_tls() {
     }
 }
 
+/// 头读完之后，后面的字节按顺序接着交出来：先是还在 TLS 里的（OPENING 里头后面的首批数据、切换之前写的），再是切换之后的原始字节。
 #[tokio::test]
 async fn once_the_header_is_read_the_bytes_behind_it_follow_in_order() {
     let pair = Pair::new(quick()).await;
@@ -265,15 +277,12 @@ async fn once_the_header_is_read_the_bytes_behind_it_follow_in_order() {
     let (mut send, mut recv) = pair.entry.lanes.open_stream(pair.exit.id).await.unwrap();
     send.write_all(b"OPEN first data").await.unwrap();
     send.end_header(Payload::Passthrough);
-    send.write_all(b", raw data").await.unwrap();
-    send.shutdown().await.unwrap();
+    send.write_all(b", sealed data").await.unwrap();
     let (mut far_send, mut far_recv) = accept_next(&pair.exit.lanes).await;
     let mut open = [0; 4];
     far_recv.read_exact(&mut open).await.unwrap();
     assert_eq!(&open, b"OPEN");
     far_recv.end_header();
-    // 头之后：OPENING 里剩下的首批数据在前，原始字节在后。
-    assert_eq!(read_to_end(&mut far_recv).await.unwrap(), b" first data, raw data");
 
     far_send.write_all(b"REPLY").await.unwrap();
     far_send.end_header(Payload::Passthrough);
@@ -284,6 +293,10 @@ async fn once_the_header_is_read_the_bytes_behind_it_follow_in_order() {
     assert_eq!(&reply, b"REPLY");
     recv.end_header();
     assert_eq!(read_to_end(&mut recv).await.unwrap(), b" raw answer");
+    // 发起方读到接受方的 SWITCH 时已经回了自己的：这之后写的是原始字节。
+    send.write_all(b", raw data").await.unwrap();
+    send.shutdown().await.unwrap();
+    assert_eq!(read_to_end(&mut far_recv).await.unwrap(), b" first data, sealed data, raw data");
 }
 
 #[tokio::test]
@@ -292,27 +305,28 @@ async fn raw_halves_can_be_taken_once_both_directions_left_tls() {
     pair.ready(1).await;
     let ((mut send, mut recv), (mut far_send, mut far_recv)) = pair.entry_opens(b"OPEN", Payload::Passthrough).await;
     assert!(recv.take_raw().is_none(), "回复还没读到时这个方向还在 TLS 里");
-    let raw_send = send.take_raw().expect("发起方的方向在 OPENING 之后就离开了 TLS");
+    assert!(send.take_raw().is_none(), "接受方切换之前发起方的方向也还在 TLS 里");
+    assert!(far_recv.take_raw().is_none(), "发起方还没回 SWITCH");
     far_send.write_all(b"REPLY").await.unwrap();
     far_send.end_header(Payload::Passthrough);
     far_send.write_all(b"raw after switch").await.unwrap();
     let mut reply = [0; 5];
     recv.read_exact(&mut reply).await.unwrap();
-    // SWITCH 跟在 REPLY 后面发出；读到 REPLY 时它多半已经到了，没到的话稍等一下再要。
-    let mut raw_recv = None;
-    for _ in 0..100 {
-        raw_recv = recv.take_raw();
-        if raw_recv.is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    let raw_recv = raw_recv.expect("SWITCH 到了之后接收方向可以交出去");
-    let far_raw_recv = far_recv.take_raw().expect("接受方读到 passthrough 的 OPENING 之后它的接收方向就是原始字节");
+    // SWITCH 跟在 REPLY 后面发出，读到 REPLY 时可能还在路上。发起方收到它时回一个 SWITCH，自己的方向跟着离开 TLS。
+    let patience = Duration::from_secs(5);
+    let raw_recv = tokio::time::timeout(patience, recv.wait_raw()).await.unwrap().expect("SWITCH 到了之后接收方向可以交出去");
+    let raw_send = send.take_raw().expect("回了 SWITCH 之后发起方的方向也离开了 TLS");
+    let far_raw_recv =
+        tokio::time::timeout(patience, far_recv.wait_raw()).await.unwrap().expect("发起方的 SWITCH 之后接受方的接收方向是原始字节");
     let (socket, unsent) = raw_send.into_parts();
-    assert!(unsent.is_empty());
-    socket.writable().await.unwrap();
-    socket.try_write(b"spliced up").unwrap();
+    // 发起方的 SWITCH 可能还没全部交给内核：交出来的 socket 上先写它。
+    let mut out = [&unsent[..], b"spliced up"].concat();
+    while !out.is_empty() {
+        socket.writable().await.unwrap();
+        if let Ok(len) = socket.try_write(&out) {
+            out.drain(..len);
+        }
+    }
     let (far_socket, already) = far_raw_recv.into_parts();
     let mut got = already.to_vec();
     while got.len() < b"spliced up".len() {

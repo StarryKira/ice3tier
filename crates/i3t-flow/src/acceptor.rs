@@ -120,8 +120,8 @@ impl<S: SendStream, R: RecvStream> Request<S, R> {
     ///
     /// 这一端往发起方发数据的优先级从这里起按 OPEN 里的服务等级来。
     ///
-    /// 发起方选了不再加密（它的首批数据是 TLS 1.3 的 ClientHello）时，这个方向不在这里跟着：目标会怎么回还不知道。
-    /// 搬运时看到目标回了 TLS 1.3 的 ServerHello 才跟着（[`i3t_conn::ServerHelloWatch`]）。
+    /// 发起方选了不再加密（它的首批数据是 TLS 1.3 的 ClientHello）时，这个方向不在这里切换：目标会怎么回还不知道。
+    /// 搬运时看到目标回了 TLS 1.3 的 ServerHello 才切换（[`i3t_conn::ServerHelloWatch`]），发起方的方向再跟着它。
     ///
     /// # Errors
     ///

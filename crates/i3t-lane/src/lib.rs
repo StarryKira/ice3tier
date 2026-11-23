@@ -19,8 +19,11 @@
 //!
 //! # 线上格式
 //!
-//! lane 是 TCP 上的 TLS 1.3，ALPN 是 [`ALPN`]。双方用节点密钥自签的证书互相认证，按 netmap 里的公钥比对，
+//! lane 是 TCP 上的 TLS 1.3，ALPN 是 [`ALPN`]（`i3t-lane/2`）。双方用节点密钥自签的证书互相认证，按 netmap 里的公钥比对，
 //! 不认识或者已经吊销的公钥在握手时就被拒绝。没有会话票据，也不做会话恢复。
+//!
+//! 两边都还提供上一个版本 `i3t-lane/1`，服务端先挑 `/2`：和没升级的节点之间谈定 `/1`，照样拨、照样开流，
+//! 只是本端发起的流一律 sealed（`/1` 的 passthrough 让发起方在 OPENING 之后马上离开 TLS，见下面的负载方式 1）。
 //!
 //! TLS 里面是一串帧，多字节整数都是大端：
 //!
@@ -37,9 +40,10 @@
 //! 0x04   PONG     双方             PING 里的随机数（8）               8      只在控制 lane 上
 //! 0x05   GOAWAY   双方             无                                 0      只在控制 lane 上
 //! 0x10   OPENING  发起方           负载方式（1）| 流的头              1～32769
-//!                                  负载方式：0 sealed，1 passthrough
+//!                                  负载方式：0 sealed，1 passthrough（只有 /1 的发起方发），
+//!                                  2 passthrough、两边都等 SWITCH（/2）
 //! 0x11   DATA     双方             流的数据                           1～16381
-//! 0x12   SWITCH   接受方           无                                 0
+//! 0x12   SWITCH   双方             无                                 0
 //! 0x13   ABORT    双方             原因码（4）                        4
 //! 0x14   STOP     双方             原因码（4）                        4
 //! ```
@@ -54,9 +58,14 @@
 //!   接受方随之关掉旧 epoch 的空闲 lane。
 //! - 一条流：发起方发 OPENING（流层的 OPEN 连同首批数据），接受方回流层的 REPLY 和数据。
 //!   - sealed：之后两个方向都是 DATA 帧。一个方向的正常结束是 TLS 的 close_notify 加 FIN；没有 close_notify 的 FIN 是截断，算异常结束。
-//!   - passthrough：发起方的方向在 OPENING 所在的 TLS 记录之后、接受方的方向在 SWITCH 所在的记录之后，
-//!     离开 TLS，原样传用户的字节（用户的 TLS 记录）；之后 FIN 是正常结束，RST 是异常结束。
-//!     OPENING 和 SWITCH 都必须是它所在记录里的最后一个帧。接受方不发 SWITCH 时它的方向一直是 sealed。
+//!   - passthrough（负载方式 2）：每个方向在自己的 SWITCH 所在的 TLS 记录之后离开 TLS，原样传用户的字节（用户的 TLS 记录）；
+//!     之后 FIN 是正常结束，RST 是异常结束。接受方先发：它看到目标回了 TLS 1.3 的 ServerHello、确认后面的握手都由用户的
+//!     TLS 加密了的时候。发起方收到之后回一个，在那之前它的方向一直是 sealed。接受方不发时两个方向都一直是 sealed：
+//!     目标回 HelloRetryRequest、用 TLS 1.2 或者根本不是 TLS 时，客户端接下来的字节（第二个 ClientHello、客户端证书）
+//!     不会明文出现在 lane 上。SWITCH 只能在 passthrough 的流上；发起方的 SWITCH 只能是回应，在接受方的之前到是协议错误。
+//!   - 负载方式 1（`/1` 的 passthrough）：发起方的方向在 OPENING 所在的记录之后就离开 TLS，只有接受方发 SWITCH。
+//!     本端不再发它，只为没升级的发起方收它。
+//!   - OPENING（负载方式 1 时）和 SWITCH 都必须是它所在记录里的最后一个帧。
 //!   - ABORT：发的一方异常结束了这条流，之后 RST。STOP：发的一方不再读了，请对方停止发送。两者都只能在还在 TLS 里的方向上发。
 //!   - 流的 lane 上出现别的帧、不认识的帧，都是协议错误，lane 被重置。
 //!

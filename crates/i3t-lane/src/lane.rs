@@ -24,8 +24,37 @@ use crate::frame::{Frame, Purpose};
 use crate::sealed::{Next, Sealed, complete_record};
 use crate::socket;
 
-/// lane 的 ALPN。和节点之间的 QUIC（`i3t/1`）、节点到 controller（`i3t-ctl/1`）分开，一种连接的握手不能冒充另一种。
-pub const ALPN: &[u8] = b"i3t-lane/1";
+/// lane 的 ALPN，也是它的版本。和节点之间的 QUIC（`i3t/1`）、节点到 controller（`i3t-ctl/1`）分开，一种连接的握手不能冒充另一种。
+///
+/// 从 `i3t-lane/2` 起，passthrough 的流上发起方的方向也要等接受方的 SWITCH 才离开 TLS（见 crate 文档）。
+pub const ALPN: &[u8] = b"i3t-lane/2";
+
+/// 上一个版本。还认它，和没升级的节点之间照样拨得通、开得了流，只是本端开的流一律 sealed：
+/// 那边的接受方不认"等 SWITCH"，passthrough 只能是发起方在 OPENING 之后马上离开 TLS（[`Mode::Early`]），本端不再那样做。
+///
+/// [`Mode::Early`]: crate::frame::Mode::Early
+pub(crate) const ALPN_V1: &[u8] = b"i3t-lane/1";
+
+/// 一条 lane 握手时谈定的版本。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Version {
+    /// `i3t-lane/1`：对端是没升级的节点。
+    V1,
+    /// `i3t-lane/2`。
+    V2,
+}
+
+impl Version {
+    /// 握手完成之后看谈定的 ALPN。两边都认 `/2` 时服务端选它（它排在前面）；谈不出 `/2` 的都按 `/1` 算。
+    fn of(connection: &Connection) -> Self {
+        if connection.alpn_protocol() == Some(ALPN) { Self::V2 } else { Self::V1 }
+    }
+}
+
+/// 两边都提供、服务端按这个顺序挑：新的在前。
+fn alpn_protocols() -> Vec<Vec<u8>> {
+    vec![ALPN.to_vec(), ALPN_V1.to_vec()]
+}
 
 /// 一次从 socket 读多少。
 const READ_CHUNK: usize = 16 * 1024;
@@ -37,6 +66,7 @@ const READ_CHUNK: usize = 16 * 1024;
 /// TLS 库不接受这份配置。
 pub(crate) fn client_config(identity: &Identity, expected: PublicKey) -> Result<Arc<ClientConfig>, TlsError> {
     let mut config = tls::client_config_with(identity, expected, ALPN)?;
+    config.alpn_protocols = alpn_protocols();
     config.resumption = Resumption::disabled();
     // 名字不参与校验（只认公钥），也就不必在明文的 ClientHello 里带一个。
     config.enable_sni = false;
@@ -53,6 +83,7 @@ pub(crate) fn server_config(
     is_allowed: impl Fn(&PublicKey) -> bool + Send + Sync + 'static,
 ) -> Result<Arc<ServerConfig>, TlsError> {
     let mut config = tls::server_config_with(identity, is_allowed, ALPN)?;
+    config.alpn_protocols = alpn_protocols();
     config.send_tls13_tickets = 0;
     config.session_storage = Arc::new(NoServerSessionStorage {});
     Ok(Arc::new(config))
@@ -68,6 +99,7 @@ pub(crate) struct Lane {
     pub(crate) membership: watch::Receiver<()>,
     pub(crate) purpose: Purpose,
     pub(crate) epoch: u64,
+    pub(crate) version: Version,
 }
 
 impl Lane {
@@ -229,7 +261,8 @@ async fn establish(
     let mut out = BytesMut::new();
     handshake(&socket, &mut sealed, &mut out).await?;
     sealed.shrink();
-    let mut lane = Lane { socket: Arc::new(socket), sealed, out, peer, membership, purpose, epoch };
+    let version = Version::of(sealed.connection());
+    let mut lane = Lane { socket: Arc::new(socket), sealed, out, peer, membership, purpose, epoch, version };
     lane.queue(&Frame::Hello { purpose, epoch });
     Ok(lane)
 }
@@ -277,7 +310,8 @@ pub(crate) async fn accept(
         let (peer, membership) = resolve(&key)
             .ok_or(LaneError::Tls(rustls::Error::InvalidCertificate(rustls::CertificateError::ApplicationVerificationFailure)))?;
         let mut removed = membership.clone();
-        let mut lane = Lane { socket: Arc::new(socket), sealed, out, peer, membership, purpose: Purpose::Control, epoch: 0 };
+        let version = Version::of(sealed.connection());
+        let mut lane = Lane { socket: Arc::new(socket), sealed, out, peer, membership, purpose: Purpose::Control, epoch: 0, version };
         let hello = tokio::select! {
             biased;
             _ = removed.changed() => return Err(LaneError::Closed),

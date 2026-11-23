@@ -7,7 +7,7 @@
 //! 两条流的四个方向全部带着同一个原因码异常结束，被截断的数据不会看起来像正常结束。
 //!
 //! 开过来的那条流在 ice3proxy 上、发起方选了不再加密时，往回的方向和 [`Flow::relay`] 一样，看到目标回的 TLS 1.3
-//! ServerHello 之后才跟着不再加密（[`ServerHelloWatch`]）。
+//! ServerHello 之后才不再加密（[`ServerHelloWatch`]），发起方的方向再跟着它。
 
 use std::future::Future;
 use std::io;
