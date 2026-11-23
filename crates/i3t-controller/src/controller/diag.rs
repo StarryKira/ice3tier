@@ -590,6 +590,11 @@ impl Inner {
             if self.diag.running.get(&id).is_some_and(|running| running.outcome.is_none()) {
                 tracing::info!(test = id, "主动测试到时间了，按手上的结果结束");
                 self.fix_outcome(id, false);
+                // 定下之后它只看 `deadline`（见 `Running::due_at`）。因为接受方过了宽限期才结束的，原来的时间窗可能还早：
+                // 收到现在，能存了马上就存，不用等到时间窗结束才放开这一对节点。
+                if let Some(running) = self.diag.running.get_mut(&id) {
+                    running.deadline = running.deadline.min(now);
+                }
             }
         }
         due
@@ -1302,6 +1307,32 @@ mod tests {
         lab.controller.lock().tests_tick(later(1));
         let stored = lab.controller.lock().store.test(network, view.id).unwrap().unwrap();
         assert_eq!((stored.state, stored.error.map(|problem| problem.code)), (TestState::Failed, Some(TestCode::NoReport)));
+    }
+
+    #[test]
+    fn a_test_whose_responder_ran_late_while_the_whole_store_was_unusable_is_stored_as_soon_as_it_can_be() {
+        let (lab, network, a, b) = two_nodes();
+        let view = lab.controller.start_test(network, &request(&a, &b)).unwrap();
+        // 发起方报完了，controller 叫接受方结束；接受方过了宽限期还没报最后一份，离时间窗结束还早。
+        try_send(&lab, &a, initiator_report(view.id)).unwrap();
+        let late = Instant::now() + RESPONDER_GRACE + Duration::from_secs(1);
+        assert!(late < lab.controller.lock().diag.running[&view.id].deadline);
+        // 这时整个数据库都写不进去：结果先定下来，不存。
+        {
+            let mut inner = lab.controller.lock();
+            inner.store.set_read_only(true);
+            inner.last_purge = None;
+            let wall = inner.clock.now();
+            assert!(inner.tick_work(late, wall).unwrap_err().is_database_wide());
+            inner.store.set_read_only(false);
+        }
+        let fixed = lab.controller.test(network, view.id).unwrap();
+        assert!(fixed.finished_at.is_some(), "结果定下了");
+
+        // 能写了：马上存下来，放开这一对节点，不用等到原来的时间窗结束。
+        lab.controller.lock().tests_tick(late);
+        assert!(!lab.controller.lock().diag.running.contains_key(&view.id));
+        assert_eq!(lab.controller.lock().store.test(network, view.id).unwrap().unwrap(), fixed);
     }
 
     #[test]

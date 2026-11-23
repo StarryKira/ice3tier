@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use super::super::testing::{CAN_DO_ALL, Lab, Member, hello};
 use super::super::{Controller, DATABASE_FILE};
-use super::ordering::{block_column_of, report_endpoints, two_unconnected};
+use super::ordering::{block_column_of, is_woken, report_endpoints, two_unconnected};
 use super::relations;
 
 /// 让存储里 `nodes` 表的这一列写不进去，模拟磁盘暂时写不进去；别的写照常。
@@ -178,23 +178,40 @@ fn a_busy_database_is_waited_for_once_by_the_background_work() {
     // 对端的 netmap 要变（要写存储），过期的记录也到了该清的时候。
     report_endpoints(&lab, &reporter, "203.0.113.9:1");
     lab.controller.lock().last_purge = None;
-    let work = |lab: &Lab| {
+    // 做一遍后台工作，时间算作 `after` 之后：过了退避的那一会儿，或者就是现在。
+    let work = |lab: &Lab, after: Duration| {
         let mut inner = lab.controller.lock();
         let wall = inner.clock.now();
-        inner.tick_work(Instant::now() + Duration::from_secs(2), wall)
+        inner.tick_work(Instant::now() + after, wall)
     };
+    let past_back_off = Duration::from_secs(2);
+    let waited = || waits.load(Ordering::Relaxed);
 
     // 别的进程占着写锁。重算等过一次就够了：接着去清理的话每写一次又要拿着 controller 的锁等满一次超时。
     let other = rusqlite::Connection::open(data.join(DATABASE_FILE)).unwrap();
     other.execute_batch("BEGIN IMMEDIATE").unwrap();
-    assert!(work(&lab).is_err());
-    assert_eq!(waits.load(Ordering::Relaxed), 1);
+    assert!(work(&lab, past_back_off).is_err());
+    assert_eq!(waited(), 1);
     assert!(lab.controller.lock().last_purge.is_none(), "清理没做，下次接着做");
+    // 重算排上重试时叫醒了后台任务，它马上又来一轮：还在退避，什么都不去写，也就不出错。
+    assert!(is_woken(&lab));
+    work(&lab, Duration::ZERO).unwrap();
+    assert_eq!(waited(), 1);
+    assert!(lab.controller.lock().last_purge.is_none());
 
     other.execute_batch("ROLLBACK").unwrap();
-    work(&lab).unwrap();
+    work(&lab, past_back_off).unwrap();
     assert!(lab.controller.lock().last_purge.is_some());
     assert_eq!(peer.receive(), 1, "放开之后补发");
+
+    // 没有要重算的，是清理先撞上了写锁：一样退避，紧接着的一轮不再去撞。
+    other.execute_batch("BEGIN IMMEDIATE").unwrap();
+    lab.controller.lock().last_purge = None;
+    assert!(work(&lab, past_back_off).is_err());
+    assert_eq!(waited(), 2);
+    work(&lab, Duration::ZERO).unwrap();
+    assert_eq!(waited(), 2);
+    other.execute_batch("ROLLBACK").unwrap();
 }
 
 #[test]

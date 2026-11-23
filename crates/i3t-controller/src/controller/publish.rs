@@ -147,7 +147,7 @@ impl Inner {
     }
 
     /// 整个数据库刚读写不了：后台的重算过一会儿再碰它，见 [`Inner::flush_after`]。
-    fn back_off(&mut self) {
+    pub(crate) fn back_off(&mut self) {
         self.flush_after = Some(Instant::now() + RETRY_DELAY);
     }
 

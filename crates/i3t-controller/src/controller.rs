@@ -167,8 +167,9 @@ pub(crate) struct Inner {
     /// 叫醒后台任务，和 [`Controller::wake_if_needed`] 用的是同一个。重算没做成、排了重试时在这里叫：
     /// 那时调用方多半带着错误提前返回了，轮不到它来叫。
     pub(crate) wake: Arc<Notify>,
-    /// 重算时整个数据库读写不了：这个时刻之前后台不再去重算。不然到期时间错开的节点、被叫醒的后台任务会让它
-    /// 一次接一次地去碰数据库，别的进程占着写锁时每一次都是拿着 controller 的锁等满超时。
+    /// 后台工作时整个数据库读写不了：这个时刻之前后台不再去重算，也不做别的要写存储的不急的事（见 `Inner::tick_work`）。
+    /// 不然到期时间错开的节点、被叫醒的后台任务会让它一次接一次地去碰数据库，别的进程占着写锁时每一次都是
+    /// 拿着 controller 的锁等满超时。
     pub(crate) flush_after: Option<Instant>,
     /// 各个节点最近上报的路由表。节点离线之后留着，界面上显示成过期的；controller 重启就没有了。
     pub(crate) routes: BTreeMap<NodeId, routes::Reported>,
@@ -602,9 +603,9 @@ impl Inner {
     /// 一样工作出错不耽误后面的：每一样出错时都自己留着下次再做（排着的重算、要重新看谁用不了 UDP 的网络、`next_rollout`），
     /// 这里把第一个错误报出去（后面的打日志），调用方过一会儿再来。
     ///
-    /// 只有整个数据库都读写不了时（比如别的进程占着写锁）例外：后面不急的清理、存测试结果、开始矩阵里排着的测试这一轮不做。
-    /// 它们每写一次存储都要拿着 controller 的锁等满一次超时，所有连接和管理请求都被拖住（见 [`Inner::flush_after`]）；
-    /// 调用方过一会儿就再来。
+    /// 只有整个数据库都读写不了时（比如别的进程占着写锁）例外：后面不急的清理、存测试结果、开始矩阵里排着的测试这一轮不做，
+    /// 退避期间（见 [`Inner::flush_after`]）的每一轮也都不做。它们每写一次存储都要拿着 controller 的锁等满一次超时，
+    /// 所有连接和管理请求都被拖住；退避期间不做，是因为排上重试的重算刚叫醒了后台任务，它马上就会再来一轮。
     fn tick_work(&mut self, now: Instant, wall: Timestamp) -> Result<Option<Instant>, Error> {
         let mut failures = Failures::default();
         self.give_up_on_slow_acks(now);
@@ -614,7 +615,8 @@ impl Inner {
         if self.updates.next_rollout.is_some_and(|at| at <= now) {
             failures.keep(self.roll_out());
         }
-        if !failures.database_wide && self.last_purge.is_none_or(|last| now.duration_since(last) >= PURGE_INTERVAL) {
+        let backing_off = failures.database_wide || self.flush_after.is_some_and(|after| now < after);
+        if !backing_off && self.last_purge.is_none_or(|last| now.duration_since(last) >= PURGE_INTERVAL) {
             self.last_purge = Some(now);
             // 两张表各清各的：一张出错不耽误另一张。
             failures.keep(self.store.purge_expired_tokens(wall).map(drop).map_err(Error::from));
@@ -622,9 +624,13 @@ impl Inner {
                 failures.keep(self.store.purge_cooldowns(wall).map(drop).map_err(Error::from));
             }
         }
+        // 不管是哪一样遇到的，都退避一会儿：重算也先不碰数据库。
+        if failures.database_wide {
+            self.back_off();
+        }
         // 还有节点欠着确认时，隔一会儿要回来看它们是不是等得太久了。
         let waiting = self.sync.values().any(NodeSync::is_waiting).then(|| now + self.timing.ack_timeout.min(SWEEP_INTERVAL));
-        let tests = if failures.database_wide {
+        let tests = if backing_off || failures.database_wide {
             // 测试结果这一轮不存，到点了的测试的结果照样先定下来：不然迟到的上报会把超时的测试记成做完了。
             self.time_out_tests(now);
             None
