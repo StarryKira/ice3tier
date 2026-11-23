@@ -16,13 +16,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::{Hop, Pair, quick, wait_for};
-use i3t_conn::{RecvStream, SendStream, StreamAborted, StreamCode};
+use i3t_conn::{RecvStream, SendStream};
 use i3t_flow::engine::Splicer;
 use i3t_flow::testing::{client_hello, server_hello};
 use i3t_flow::{End, FlowError, Handler, Request};
 use i3t_lane::{Lanes, Payload};
 use i3t_proto::NodeId;
-use i3t_proto::flow::{Class, Open, Origin, Reason, Reply, Status, Target};
+use i3t_proto::flow::{Class, Open, Origin, Reason, Reply, Target};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
@@ -115,6 +115,27 @@ async fn resetting_target() -> SocketAddr {
     addr
 }
 
+/// 回 ServerHello 之后、密文回到一半时重置的 TLS 1.3 目标给的那一半。
+const HALF_ANSWER: &[u8] = b"\x17\x03\x03\x00\x40half of an encrypted answer";
+
+/// 一个 TLS 1.3 目标：读到 ClientHello 之后回 ServerHello 和半截密文，过 `pause` 之后用 RST 断开。
+async fn tls13_resetting_target(pause: Duration) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut hello = vec![0; client_hello(b"").len()];
+                let _ = stream.read_exact(&mut hello).await;
+                stream.write_all(&[&server_hello()[..], HALF_ANSWER].concat()).await.unwrap();
+                tokio::time::sleep(pause).await;
+                stream.set_zero_linger().unwrap();
+            });
+        }
+    });
+    addr
+}
+
 /// 读到 EOF 或者出错。返回读到的字节，和是不是正常结束的。
 async fn drain(stream: &mut (impl AsyncRead + Unpin)) -> (Vec<u8>, io::Result<()>) {
     let mut all = Vec::new();
@@ -180,6 +201,11 @@ async fn the_flow_layer_passes_tls_through_and_splices_it() {
     let hello = client_hello(b"");
     let first = hello.clone();
     let relay = tokio::spawn(async move { through_flow(&lanes, peer, client_side, &first).await });
+    // 像真的 TLS 客户端一样，等到服务器的第一批回答（这里是 ServerHello 和回显的 ClientHello）再往下发：
+    // 入口的方向要等出口切换了才跟着切换，在那之前发的照样加密。
+    let mut flight = vec![0; server_hello().len() + hello.len()];
+    timeout(PATIENCE, client.read_exact(&mut flight)).await.unwrap().unwrap();
+    assert!(flight == [&server_hello()[..], &hello].concat(), "服务器的第一批回答不一样");
     let body: Vec<u8> = (0..3_000_000u32).map(|i| u8::try_from(i % 239).unwrap()).collect();
     let (mut from_target, mut to_target) = client.split();
     // 一边发一边收，各自记下走到了哪里：macOS 上这里曾经一直不结束，等不到时要能看出卡在哪一段。
@@ -235,7 +261,7 @@ async fn the_flow_layer_passes_tls_through_and_splices_it() {
     if let Err(error) = end {
         panic!("回显收到 {} 字节之后读出错 {error:?}；出口的搬运的结局 {:?}", echoed.len(), exit_ends.lock().unwrap());
     }
-    assert!(echoed == [&server_hello()[..], &hello, &body].concat(), "回显的字节不一样");
+    assert!(echoed == body, "回显的字节不一样");
     assert!(timeout(PATIENCE, relay).await.expect("客户端读完之后入口的搬运应该结束").unwrap().is_clean());
     let entry = pair.entry.lanes.status();
     let exit = pair.exit.lanes.status();
@@ -264,18 +290,18 @@ async fn peer_revocation_resets_both_ends_of_an_active_passthrough_relay() {
 
     // 先正常搬一轮，让两边的搬运任务都已经拿到原始 socket。
     timeout(PATIENCE, async {
-        client.write_all(b"request").await.unwrap();
         let mut first = vec![0; hello.len()];
         target.read_exact(&mut first).await.unwrap();
         assert_eq!(first, hello);
-        let mut body = [0; 7];
-        target.read_exact(&mut body).await.unwrap();
-        assert_eq!(&body, b"request");
-        // 目标先回 ServerHello：之后往回的方向才不再加密。
+        // 目标先回 ServerHello：之后往回的方向才不再加密，入口那边跟着切换。
         target.write_all(&[&server_hello()[..], b"reply"].concat()).await.unwrap();
         let mut answer = vec![0; server_hello().len() + 5];
         client.read_exact(&mut answer).await.unwrap();
         assert_eq!(answer, [&server_hello()[..], b"reply"].concat());
+        client.write_all(b"request").await.unwrap();
+        let mut body = [0; 7];
+        target.read_exact(&mut body).await.unwrap();
+        assert_eq!(&body, b"request");
     })
     .await
     .unwrap();
@@ -312,42 +338,33 @@ async fn an_upstream_reset_in_the_middle_of_an_answer_reaches_the_client_as_a_re
     assert!(!relay.await.unwrap().is_clean());
 }
 
-/// 出口：只数见过几个请求，然后拒绝。
-struct Watching(Arc<AtomicUsize>);
-
-impl Handler for Watching {
-    async fn handle<S: SendStream, R: RecvStream>(&self, request: Request<S, R>) {
-        self.0.fetch_add(1, Ordering::Relaxed);
-        request.refuse(&Reply::new(Status::AccessDenied, "测试")).await;
+/// 不再加密的流也一样：目标回了 TLS 1.3 的 ServerHello 和半截密文之后重置，客户端看到的是重置，不是正常结束。
+/// 立刻重置时，入口回应出口的 SWITCH 那一刻 lane 可能已经被重置了：Linux 上那次写拿走的错误不能让读的一方当成 FIN。
+#[tokio::test]
+async fn an_upstream_reset_after_a_tls13_server_hello_reaches_the_client_as_a_reset_through_the_flow_layer() {
+    for pause in [Duration::ZERO, Duration::from_millis(50)] {
+        for _ in 0..3 {
+            let pair = Pair::new(quick()).await;
+            pair.ready(1).await;
+            let target = tls13_resetting_target(pause).await;
+            let lanes = Arc::clone(&pair.exit.lanes);
+            tokio::spawn(async move { i3t_flow::serve(&*lanes, Arc::new(ToTarget::new(target))).await });
+            let (mut client, client_side) = tcp_pair().await;
+            let lanes = Arc::clone(&pair.entry.lanes);
+            let peer = pair.exit.id;
+            let relay = tokio::spawn(async move { through_flow(&lanes, peer, client_side, &client_hello(b"")).await });
+            let (got, end) = drain(&mut client).await;
+            let answer = [&server_hello()[..], HALF_ANSWER].concat();
+            assert!(answer.starts_with(&got), "停 {pause:?}：客户端收到的不是目标回的开头");
+            let error = end.expect_err("半截的回答之后必须是重置，不能是正常结束");
+            assert_eq!(error.kind(), io::ErrorKind::ConnectionReset, "停 {pause:?}：{error}");
+            assert!(!timeout(PATIENCE, relay).await.unwrap().unwrap().is_clean(), "停 {pause:?}");
+        }
     }
 }
 
-/// 流层的 OPEN 只能来自 TLS 里面。passthrough 的 OPENING 里只有 OPEN 的前一半、后一半跟在原始字节里时（路上的人改得了的就是这一半），
-/// 出口的流层以协议错误重置流，处理者见不到这个请求（issue #17）。
-#[tokio::test]
-async fn the_flow_layer_does_not_complete_an_open_with_bytes_from_outside_tls() {
-    let pair = Pair::new(quick()).await;
-    pair.ready(1).await;
-    let seen = Arc::new(AtomicUsize::new(0));
-    let lanes = Arc::clone(&pair.exit.lanes);
-    let handler = Arc::new(Watching(Arc::clone(&seen)));
-    tokio::spawn(async move { i3t_flow::serve(&*lanes, handler).await });
-
-    let mut open = Vec::new();
-    open_request().encode(&mut open);
-    let (sealed, raw) = open.split_at(open.len() / 2);
-    let (mut send, mut recv) = pair.entry.lanes.open_stream(pair.exit.id).await.unwrap();
-    send.write_all(sealed).await.unwrap();
-    send.end_header(Payload::Passthrough);
-    send.write_all(raw).await.unwrap();
-    send.write_all(&client_hello(b"")).await.unwrap();
-    let (_, end) = drain(&mut recv).await;
-    let error = end.expect_err("出口应该重置这条流");
-    assert_eq!(StreamAborted::of(&error), Some(StreamAborted::Reset(StreamCode(Reason::ProtocolError.to_wire()))), "{error}");
-    assert_eq!(seen.load(Ordering::Relaxed), 0, "处理者不该见到这个请求");
-}
-
-/// 发起方同样：接受方在 REPLY 写完之前就发了 SWITCH，REPLY 的后一半跟在原始字节里时，发起方的流层不把它当作对端的回复。
+/// 流层的头只能来自 TLS 里面：接受方在 REPLY 写完之前就发了 SWITCH，REPLY 的后一半跟在原始字节里时，发起方的流层不把它当作
+/// 对端的回复（issue #17）。反方向（发起方的 OPEN 后一半不在 TLS 里）只有没升级的节点做得出来，见 `i3t-lane` 里流的单元测试。
 #[tokio::test]
 async fn the_flow_layer_does_not_complete_a_reply_with_bytes_from_outside_tls() {
     let pair = Pair::new(quick()).await;
@@ -414,17 +431,23 @@ mod stand_in {
         record
     }
 
-    /// 两个原始方向交给 splice。接收方向用 `wait_raw`：对端的 SWITCH 可能还在路上。
-    pub async fn relay(splicer: &Splicer, mut send: LaneSend, mut recv: LaneRecv, user: TcpStream) -> Option<std::io::Error> {
-        match (send.take_raw(), recv.wait_raw().await) {
-            (Some(raw_send), Some(raw_recv)) => {
-                let (lane, unsent) = raw_send.into_parts();
-                let (_, received) = raw_recv.into_parts();
-                let relayed = splicer.relay(&user, received, &lane, unsent).await;
-                relayed.error.map(|error| std::io::Error::other(error.to_string()))
+    /// 两个方向离开 TLS 之后交给 splice。接收方向先照常读、写给 `user`，直到它离开 TLS（`wait_raw`）：接受方这边先是 OPENING 里
+    /// 头后面的首批数据，发起方的 SWITCH 跟在后面；发起方这边对端的 SWITCH 可能还在路上，收到时自己的方向才跟着切换。
+    pub async fn relay(splicer: &Splicer, mut send: LaneSend, mut recv: LaneRecv, mut user: TcpStream) -> Option<std::io::Error> {
+        let raw_recv = loop {
+            if let Some(raw) = recv.wait_raw().await {
+                break raw;
             }
-            _ => panic!("这个替身只用在两个方向都已经是原始字节的流上"),
-        }
+            let mut buf = [0; 4096];
+            let len = recv.read(&mut buf).await.unwrap();
+            assert!(len > 0, "这个替身只用在两个方向都会离开 TLS 的流上");
+            user.write_all(&buf[..len]).await.unwrap();
+        };
+        let raw_send = send.take_raw().expect("对端切换之后，发起方的方向跟着切换；接受方的方向在 end_header 时就切换了");
+        let (lane, unsent) = raw_send.into_parts();
+        let (_, received) = raw_recv.into_parts();
+        let relayed = splicer.relay(&user, received, &lane, unsent).await;
+        relayed.error.map(|error| std::io::Error::other(error.to_string()))
     }
 
     /// 入口：开流、写 OPEN 和首批数据、选负载方式、读 REPLY，然后搬运。
@@ -590,6 +613,8 @@ struct TlsThroughFlow {
     server_sent: Vec<u8>,
     /// lane 上每条连接从出口到入口的字节。
     lanes_down: Vec<Vec<u8>>,
+    /// lane 上每条连接从入口到出口的字节。
+    lanes_up: Vec<Vec<u8>>,
     entry: i3t_lane::LaneCounts,
 }
 
@@ -618,8 +643,10 @@ async fn tls_through_the_flow_layer(connector: tokio_rustls::TlsConnector, accep
     assert!(timeout(PATIENCE, entry).await.unwrap().unwrap().is_clean(), "入口一侧的搬运应该正常结束");
 
     let server_sent = to_server.recordings.lock().unwrap()[0].lock().unwrap().backward.clone();
-    let lanes_down = pair.hop.recordings.lock().unwrap().iter().map(|recording| recording.lock().unwrap().forward.clone()).collect();
-    TlsThroughFlow { server_sent, lanes_down, entry: pair.entry.lanes.status().total }
+    let recordings = pair.hop.recordings.lock().unwrap();
+    let lanes_down = recordings.iter().map(|recording| recording.lock().unwrap().forward.clone()).collect();
+    let lanes_up = recordings.iter().map(|recording| recording.lock().unwrap().backward.clone()).collect();
+    TlsThroughFlow { server_sent, lanes_down, lanes_up, entry: pair.entry.lanes.status().total }
 }
 
 /// 出口往回的方向在目标的 TLS 1.3 ServerHello 之后才离开 lane 的 TLS：ServerHello 本身（里面有服务器的密钥交换）还加密，
@@ -637,6 +664,7 @@ async fn the_return_direction_leaves_tls_right_after_a_tls13_server_hello() {
 }
 
 /// 目标回了 HelloRetryRequest：出口不在它之后切换（不然路上的人能冒充目标再要一次 ClientHello），等真正的 ServerHello。
+/// 入口那边也就一直加密：客户端的第二个 ClientHello（里面有要访问的名字）不会明文出现在 lane 上（issue #34）。
 #[tokio::test]
 async fn after_a_hello_retry_request_the_return_direction_waits_for_the_real_server_hello() {
     // 客户端先给 X25519 的密钥，服务器只肯用 P-256：它会先回 HelloRetryRequest。
@@ -655,7 +683,10 @@ async fn after_a_hello_retry_request_the_return_direction_waits_for_the_real_ser
     let lane = flow.lanes_down.iter().find(|down| down.ends_with(&sent[hello_end..])).expect("ServerHello 之后的字节应该原样走在 lane 上");
     assert!(!contains(lane, &sent[..retry]), "HelloRetryRequest 不该明文出现在 lane 上");
     assert!(!contains(lane, &sent[at..hello_end]), "ServerHello 不该明文出现在 lane 上");
-    assert!(flow.entry.sealed_bytes < 8192, "往回的方向在真正的 ServerHello 之后就不再加密：{:?}", flow.entry);
+    for up in &flow.lanes_up {
+        assert!(!contains(up, user_tls::NAME.as_bytes()), "第二个 ClientHello 不该明文出现在 lane 上");
+    }
+    assert!(flow.entry.sealed_bytes < 8192, "两个方向在真正的 ServerHello 之后就不再加密：{:?}", flow.entry);
 }
 
 /// 出口：把开过来的流接到另一条开往 `peer` 的流上（`Flow::splice`，监听在虚拟 IP 上、目标是别的节点的端口转发就是这样）。
@@ -689,6 +720,10 @@ async fn a_spliced_flow_leaves_tls_after_the_server_hello_too() {
     let lanes = Arc::clone(&pair.entry.lanes);
     let peer = pair.exit.id;
     let relay = tokio::spawn(async move { through_flow(&lanes, peer, client_side, &client_hello(b"")).await });
+    // 和真的 TLS 客户端一样，等到 ServerHello（和回显的 ClientHello）再发：入口的方向在出口切换之后才跟着切换。
+    let mut flight = vec![0; server_hello().len() + client_hello(b"").len()];
+    timeout(PATIENCE, client.read_exact(&mut flight)).await.unwrap().unwrap();
+    assert!(flight == [&server_hello()[..], &client_hello(b"")].concat(), "服务器的第一批回答不一样");
     let body: Vec<u8> = (0..BULK).map(|i| u8::try_from(i % 233).unwrap()).collect();
     let (mut from_target, mut to_target) = client.split();
     let ((), (echoed, end)) = tokio::join!(
@@ -699,25 +734,44 @@ async fn a_spliced_flow_leaves_tls_after_the_server_hello_too() {
         drain(&mut from_target)
     );
     end.unwrap();
-    assert!(echoed == [&server_hello()[..], &client_hello(b""), &body].concat(), "回显的字节不一样");
+    assert!(echoed == body, "回显的字节不一样");
     assert!(timeout(PATIENCE, relay).await.unwrap().unwrap().is_clean());
     // 出口上，开过来的那条流两个方向都是原始字节：上行是客户端的、下行是目标在 ServerHello 之后回的。
     let exit = pair.exit.lanes.status().total;
     assert!(exit.passthrough_bytes >= 2 * u64::from(BULK), "{exit:?}");
 }
 
-/// 目标用的是 TLS 1.2：它的证书（带着要访问的名字）紧跟着 ServerHello 明文发回来。出口往回的方向一直加密，
-/// lane 上看不到它；发起方的方向照样不再加密（issue #17）。
+/// 一条握手记录，里面正好一个类型是 `kind`、内容是 `body` 的握手消息。
+fn handshake_record(kind: u8, body: &[u8]) -> Vec<u8> {
+    let mut record = vec![0x16, 0x03, 0x03];
+    record.extend_from_slice(&u16::try_from(body.len() + 4).unwrap().to_be_bytes());
+    record.push(kind);
+    record.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes()[1..]);
+    record.extend_from_slice(body);
+    record
+}
+
+/// 目标用的是 TLS 1.2、还要客户端证书：它的证书（带着要访问的名字）紧跟着 ServerHello 明文回来，客户端的证书（带着它自己的名字）
+/// 在客户端的第二批里明文过去。出口往回的方向一直加密（issue #17），入口那边没有 SWITCH 可回应，也一直加密（issue #34）：
+/// 两张证书都不会明文出现在 lane 上。
 #[tokio::test]
-async fn the_return_direction_stays_sealed_when_the_target_answers_with_tls12() {
-    // TLS 1.2 的 ServerHello（没有 supported_versions），后面是一条带着名字的 Certificate。
-    let mut flight = vec![0x16, 0x03, 0x03, 0x00, 0x2a, 0x02, 0x00, 0x00, 0x26, 0x03, 0x03];
-    flight.extend_from_slice(&[0x42; 32]);
-    flight.extend_from_slice(&[0x00, 0xc0, 0x2f, 0x00]);
-    let name = user_tls::NAME.as_bytes();
-    let certificate = u8::try_from(name.len() + 4).unwrap();
-    flight.extend_from_slice(&[0x16, 0x03, 0x03, 0x00, certificate, 0x0b, 0x00, 0x00, certificate - 4]);
-    flight.extend_from_slice(name);
+async fn both_directions_stay_sealed_when_a_tls12_target_asks_for_a_client_certificate() {
+    // TLS 1.2 的 ServerHello（没有 supported_versions），后面是带着名字的 Certificate、CertificateRequest、ServerHelloDone。
+    let mut hello = vec![0x03, 0x03];
+    hello.extend_from_slice(&[0x42; 32]);
+    hello.extend_from_slice(&[0x00, 0xc0, 0x2f, 0x00]);
+    let flight = [
+        handshake_record(0x02, &hello),
+        handshake_record(0x0b, user_tls::NAME.as_bytes()),
+        handshake_record(0x0d, &[0x01, 0x01, 0x00, 0x02, 0x04, 0x03, 0x00, 0x00]),
+        handshake_record(0x0e, &[]),
+    ]
+    .concat();
+    // 客户端的第二批：Certificate（带着客户端自己的名字）、ClientKeyExchange、CertificateVerify。
+    const CLIENT_NAME: &[u8] = b"client-identity.example";
+    let second =
+        [handshake_record(0x0b, CLIENT_NAME), handshake_record(0x10, &[0x20; 33]), handshake_record(0x0f, &[0x04, 0x03, 0x00, 0x01, 0x30])]
+            .concat();
 
     let pair = Pair::new(quick()).await;
     pair.ready(1).await;
@@ -743,29 +797,62 @@ async fn the_return_direction_stays_sealed_when_the_target_answers_with_tls12() 
     let mut got = vec![0; flight.len()];
     timeout(PATIENCE, client.read_exact(&mut got)).await.unwrap().unwrap();
     assert_eq!(got, flight);
-    client.write_all(b"client key exchange").await.unwrap();
+    client.write_all(&second).await.unwrap();
     client.shutdown().await.unwrap();
     let (echoed, end) = drain(&mut client).await;
     end.unwrap();
-    assert_eq!(echoed, b"client key exchange");
+    assert_eq!(echoed, second);
     assert!(timeout(PATIENCE, relay).await.unwrap().unwrap().is_clean());
 
-    let recordings = pair.hop.recordings.lock().unwrap();
-    for recording in recordings.iter() {
+    for recording in pair.hop.recordings.lock().unwrap().iter() {
         let recording = recording.lock().unwrap();
-        assert!(!contains(&recording.forward, name), "TLS 1.2 的证书不该明文出现在 lane 上");
+        assert!(!contains(&recording.forward, user_tls::NAME.as_bytes()), "TLS 1.2 的服务器证书不该明文出现在 lane 上");
+        assert!(!contains(&recording.backward, CLIENT_NAME), "客户端证书不该明文出现在 lane 上");
+        assert!(!contains(&recording.forward, CLIENT_NAME), "回显的客户端证书也不该");
     }
-    assert!(
-        recordings.iter().any(|recording| contains(&recording.lock().unwrap().backward, b"client key exchange")),
-        "发起方的方向照样不再加密"
-    );
+    let entry = pair.entry.lanes.status().total;
+    assert_eq!(entry.passthrough_bytes + entry.spliced_bytes, 0, "两个方向都一直加密：{entry:?}");
+}
+
+/// 客户端发了一个提供 TLS 1.3 的 ClientHello，后面跟着明文，目标却根本不是 TLS（这里把收到的原样送回去）：出口不发 SWITCH，
+/// 入口也就不切换，客户端后面的明文不会出现在 lane 上（issue #34）。
+#[tokio::test]
+async fn plaintext_after_a_client_hello_stays_sealed_when_the_target_is_not_tls() {
+    let pair = Pair::new(quick()).await;
+    pair.ready(1).await;
+    let target = echo_target().await;
+    let lanes = Arc::clone(&pair.exit.lanes);
+    tokio::spawn(async move { i3t_flow::serve(&*lanes, Arc::new(ToTarget::new(target))).await });
+    let (mut client, client_side) = tcp_pair().await;
+    let lanes = Arc::clone(&pair.entry.lanes);
+    let peer = pair.exit.id;
+    let relay = tokio::spawn(async move { through_flow(&lanes, peer, client_side, &client_hello(b"")).await });
+    // 等目标回了点什么（回显的 ClientHello）再发明文：出口要切换的话这时已经切换了。
+    let mut echoed_hello = vec![0; client_hello(b"").len()];
+    timeout(PATIENCE, client.read_exact(&mut echoed_hello)).await.unwrap().unwrap();
+    const PLAINTEXT: &[u8] = b"GET /secret HTTP/1.1\r\nAuthorization: Bearer plaintext-token\r\n\r\n";
+    client.write_all(PLAINTEXT).await.unwrap();
+    client.shutdown().await.unwrap();
+    let (echoed, end) = drain(&mut client).await;
+    end.unwrap();
+    assert_eq!(echoed, PLAINTEXT);
+    assert!(timeout(PATIENCE, relay).await.unwrap().unwrap().is_clean());
+
+    for recording in pair.hop.recordings.lock().unwrap().iter() {
+        let recording = recording.lock().unwrap();
+        assert!(!contains(&recording.backward, PLAINTEXT), "客户端的明文不该出现在 lane 上");
+        assert!(!contains(&recording.forward, PLAINTEXT), "回显的明文也不该");
+    }
+    let entry = pair.entry.lanes.status().total;
+    assert_eq!(entry.passthrough_bytes + entry.spliced_bytes, 0, "两个方向都一直加密：{entry:?}");
 }
 
 #[tokio::test]
 async fn passthrough_carries_the_inner_tls_records_unchanged_after_the_opening_exchange() {
     let (client_sent, server_sent, exit_to_entry, entry_to_exit) = passthrough_with_recordings(Splicer::new(), 0, BULK).await;
     let hello = first_record_len(&client_sent);
-    // 入口到出口：lane 自己的 TLS（握手、OPENING，里面装着 ClientHello）之后，正好是客户端在 ClientHello 之后发出的全部字节。
+    // 入口到出口：lane 自己的 TLS（握手、装着 ClientHello 的 OPENING、回应出口的 SWITCH）之后，正好是客户端在 ClientHello
+    // 之后发出的全部字节：真的 TLS 客户端在收到服务器的第一批回答之前不再发东西，那时入口已经跟着切换了。
     assert!(entry_to_exit.ends_with(&client_sent[hello..]), "入口到出口的方向在开流之后必须是客户端的原始字节");
     // 出口到入口：lane 自己的 TLS（握手、HELLO、REPLY、SWITCH）之后，正好是服务器发出的全部字节。
     assert!(exit_to_entry.ends_with(&server_sent));
@@ -876,7 +963,7 @@ async fn an_upstream_reset_in_the_middle_of_an_answer_reaches_the_client_as_a_re
 
 #[tokio::test]
 async fn sealed_mode_still_runs_when_the_responder_never_switches() {
-    // 发起方选了 passthrough，接受方不调 end_header：接受方的方向一直在 TLS 里，照样读得懂。
+    // 发起方选了 passthrough，接受方不调 end_header：两个方向都一直在 TLS 里（发起方没有 SWITCH 可回应），照样读得懂。
     let pair = Pair::new(quick()).await;
     pair.ready(1).await;
     let exit = Arc::clone(&pair.exit.lanes);

@@ -16,11 +16,13 @@
 //! 一条流也可能跑在一条只属于它的 TCP 上（`i3t-lane`）。那时上层多做四件事，跑在共用连接上的流全部是空操作：
 //!
 //! - 发起方写完 OPEN 连同首批数据时调 [`SendStream::end_header`]，顺便选定 [`Payload`]：首批数据是一个提供 TLS 1.3 的
-//!   ClientHello 时，头之后的字节可以不再加密。接受方的方向要等目标回了 TLS 1.3 的 ServerHello（[`ServerHelloWatch`]）
-//!   才跟着不再加密，那时它调 [`SendStream::end_header`]；
+//!   ClientHello 时，这条流可以不再加密第二次。但目标会怎么回还不知道，所以两个方向都先加密：接受方看到目标回了 TLS 1.3 的
+//!   ServerHello（[`ServerHelloWatch`]）才不再加密它的方向，那时它调 [`SendStream::end_header`]；发起方的方向由底下的传输
+//!   在对端切换之后跟着切换，上层不用做什么；
 //! - 读完对端的头时调 [`RecvStream::end_header`]：在这之前只读得到加密送来的字节，头不会混进未经认证的原始字节；
 //! - 搬运之前用 [`SendStream::take_raw`]、[`RecvStream::wait_raw`] 问一下这个方向是不是已经是一条原始的 TCP，
-//!   是的话直接在两条 TCP 之间搬（Linux 上用 splice），同时监听流的吊销信号；
+//!   是的话直接在两条 TCP 之间搬（Linux 上用 splice），同时监听流的吊销信号。发起方的发送方向是在读的那一侧看到对端切换之后
+//!   才变成原始的，所以搬运时每一段之前都可以再问一次 [`SendStream::take_raw`]；
 //! - 开一条承载 TCP 连接的流用 [`Connector::open_tcp`]：实现可以为它挑独占的 TCP，别的流（数据报上下文等）照常用 [`Connector::open`]。
 //!
 //! 流之外，一对节点之间还可以互相发数据报（[`Datagrams`]）：一份一份的，每份有长度上限。
@@ -75,7 +77,8 @@ pub trait SendStream: AsyncWrite + Unpin + Send + 'static {
         let _ = priority;
     }
 
-    /// 发起方：流的头（OPEN 连同首批数据）写完了，用 `payload` 选这条流头之后的负载方式。
+    /// 发起方：流的头（OPEN 连同首批数据）写完了，用 `payload` 选这条流头之后的负载方式。选了 [`Payload::Passthrough`]
+    /// 时这个方向也先加密，等接受方先不再加密了才跟着（之后 [`take_raw`](Self::take_raw) 交得出来）。
     ///
     /// 接受方：传 [`Payload::Passthrough`] 表示"发起方选了不加密的话，我这个方向从这里起也跟着"。它在 REPLY 之后、
     /// 目标的 TLS 1.3 ServerHello 写完之后调（[`ServerHelloWatch`]），之前写的都还加密。
@@ -134,7 +137,8 @@ pub enum Payload {
     /// 一直加密。
     #[default]
     Sealed,
-    /// 头之后原样传用户的字节，不再加密第二次。只在用户的数据本身就是 TLS 时用。
+    /// 不再加密第二次，原样传用户的字节。只在用户的数据本身就是 TLS 时用：接受方确认了目标回的是 TLS 1.3 之后，
+    /// 两个方向先后切换过去，在那之前照样加密。
     Passthrough,
 }
 

@@ -75,14 +75,14 @@ const HELLO_RETRY_REQUEST: [u8; 32] = [
     0x8c, 0x5e, 0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c,
 ];
 
-/// 接受方的方向什么时候可以跟着发起方不再加密：看目标回的头几条 TLS 记录。
+/// 接受方的方向什么时候可以不再加密（发起方的方向随后跟着它）：看目标回的头几条 TLS 记录。
 ///
 /// 发起方选了 passthrough 只说明它的首批数据是一个提供 TLS 1.3 的 ClientHello，目标会怎么回还不知道。所以接受方先照常加密，
 /// 把目标发来的字节按顺序喂给 [`feed`](Self::feed)，直到看出结果：
 ///
 /// - 第一条记录是一个选定 TLS 1.3 的 ServerHello：它之后的握手和数据都由用户自己的 TLS 加密了，这条记录一结束就可以不再加密；
 /// - 第一条是 HelloRetryRequest：再等一次，它后面（可以隔着一个兼容中间设备的 ChangeCipherSpec）的 ServerHello 照上一条判断；
-/// - 别的（TLS 1.2 及以前、第二个 HelloRetryRequest、格式不对、不是 TLS）：这个方向一直加密。
+/// - 别的（TLS 1.2 及以前、第二个 HelloRetryRequest、格式不对、不是 TLS）：这个方向一直加密，发起方的方向也是。
 ///
 /// 只缓冲正在看的那一条记录（最长 16 KB），看出结果之后什么都不留。
 #[derive(Debug, Default)]

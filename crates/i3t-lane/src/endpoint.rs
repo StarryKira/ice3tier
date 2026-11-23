@@ -529,7 +529,7 @@ impl Inner {
             Ok(registered) => registered,
             Err(error) => return self.refuse(peer, &lane.membership, &error.to_string()),
         };
-        let (send, recv) = stream::respond(lane, opening.payload, &opening.header, book, revoked);
+        let (send, recv) = stream::respond(lane, opening.mode, &opening.header, book, revoked);
         let incoming = Incoming { peer, send, recv };
         // 接受队列没有人在收（本节点在关闭）：流被丢弃，对方看到重置。
         let _ = self.incoming.send(incoming);

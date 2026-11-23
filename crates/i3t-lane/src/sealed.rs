@@ -190,9 +190,8 @@ mod tests {
     use rustls::{ClientConnection, ServerConnection};
 
     use super::*;
-    use crate::frame::Purpose;
+    use crate::frame::{Mode, Purpose};
     use crate::lane::{client_config, server_config};
-    use i3t_conn::Payload;
 
     /// 在内存里握完手的一对：拨号方（客户端）和接受方（服务端）。
     fn pair() -> (Sealed, Sealed) {
@@ -250,11 +249,11 @@ mod tests {
         panic!("没有看到切换帧，收到 {frames:?}");
     }
 
-    /// 发起方这个方向在线上的样子：HELLO、OPENING（passthrough），然后是原始字节。
+    /// 没升级的发起方这个方向在线上的样子：HELLO、OPENING（[`Mode::Early`]），然后是原始字节。
     fn initiator_wire(dialler: &mut Sealed, header: &[u8], raw: &[u8]) -> (Vec<u8>, usize) {
         let mut wire = BytesMut::new();
         dialler.seal_frame(&Frame::Hello { purpose: Purpose::Own, epoch: 9 });
-        dialler.seal_frame(&Frame::Opening { payload: Payload::Passthrough, header: Bytes::copy_from_slice(header) });
+        dialler.seal_frame(&Frame::Opening { mode: Mode::Early, header: Bytes::copy_from_slice(header) });
         dialler.take_output(&mut wire);
         let tls_len = wire.len();
         wire.extend_from_slice(raw);
@@ -278,7 +277,7 @@ mod tests {
         let cuts = cuts(wire.len(), tls_len);
         let (frames, rest) = deliver(&mut acceptor, &wire, &cuts, is_opening);
         assert!(
-            matches!(frames.as_slice(), [Frame::Hello { .. }, Frame::Opening { payload: Payload::Passthrough, header: got }] if got[..] == header[..])
+            matches!(frames.as_slice(), [Frame::Hello { .. }, Frame::Opening { mode: Mode::Early, header: got }] if got[..] == header[..])
         );
         assert_eq!(rest, raw, "切法 {cuts:?}：OPENING 之后的字节必须一个不少、原样交出");
     }

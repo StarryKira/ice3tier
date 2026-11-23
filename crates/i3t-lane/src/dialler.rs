@@ -28,7 +28,7 @@ use tokio::time::{self, Instant, MissedTickBehavior};
 use crate::demand::{Demand, MAX_IDLE_TARGET};
 use crate::endpoint::Inner;
 use crate::error::LaneError;
-use crate::frame::{Frame, Purpose};
+use crate::frame::{Frame, Mode, Purpose};
 use crate::holder::MAX_BURST;
 use crate::lane::{self, Dial, Lane};
 
@@ -447,7 +447,7 @@ async fn dial_one(inner: &Arc<Inner>, peer: NodeId, generation: &Arc<Notify>, pu
 
 /// 开流请求：对方在一条 lane 上发来的 OPENING。
 pub(crate) struct Opening {
-    pub(crate) payload: i3t_conn::Payload,
+    pub(crate) mode: Mode,
     pub(crate) header: bytes::Bytes,
 }
 
@@ -455,14 +455,14 @@ pub(crate) struct Opening {
 ///
 /// # Errors
 ///
-/// lane 出错，或者对方发来的第一个帧不是 OPENING、passthrough 的 OPENING 后面同一条记录里还有东西。
+/// lane 出错，或者对方发来的第一个帧不是 OPENING、[`Mode::Early`] 的 OPENING 后面同一条记录里还有东西。
 pub(crate) async fn await_opening(lane: &mut Lane) -> Result<Option<Opening>, LaneError> {
     match lane.read_frame().await {
-        Ok(Some(Frame::Opening { payload, header })) => {
-            if payload == i3t_conn::Payload::Passthrough && !lane.sealed.at_record_boundary() {
+        Ok(Some(Frame::Opening { mode, header })) => {
+            if mode == Mode::Early && !lane.sealed.at_record_boundary() {
                 return Err(LaneError::Protocol("passthrough 的 OPENING 后面同一条记录里还有东西"));
             }
-            Ok(Some(Opening { payload, header }))
+            Ok(Some(Opening { mode, header }))
         }
         Ok(Some(_)) => Err(LaneError::Protocol("空闲 lane 上的第一个帧不是 OPENING")),
         Ok(None) | Err(LaneError::Closed) => Ok(None),

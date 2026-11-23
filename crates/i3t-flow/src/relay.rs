@@ -27,9 +27,10 @@
 //! （[`SendStream::take_raw`]、[`RecvStream::wait_raw`]）直接在两条 TCP 之间搬（[`crate::engine`]，Linux 上是 splice），
 //! 不再经过流的接口。结局的传法和上表一样：EOF 对 FIN，出错对 RST；计量和配额照样在每一段上记。
 //!
-//! 发起方的方向在 OPEN 之后就不再加密（它的首批数据是 TLS 1.3 的 ClientHello）。出口往回的方向要等看到目标回了 TLS 1.3 的
-//! ServerHello（[`ServerHelloWatch`]）：ServerHello 照常加密地送回去，之后才跟着不再加密；目标用的是 TLS 1.2（证书会明文回来）、
-//! 或者根本不是 TLS 时一直加密。所以入口一侧往客户端搬的方向每一段之前都问一下切换了没有。
+//! 发起方选了不再加密（它的首批数据是 TLS 1.3 的 ClientHello）也只是可以：两个方向都要等出口看到目标回了 TLS 1.3 的
+//! ServerHello（[`ServerHelloWatch`]）。ServerHello 照常加密地送回去，之后出口往回的方向不再加密，入口那边的 lane 收到这个切换
+//! 时它的方向跟着切换；目标回了 HelloRetryRequest、用的是 TLS 1.2（证书会明文来回）、或者根本不是 TLS 时，两个方向一直加密。
+//! 所以入口一侧两个方向每一段之前都问一下切换了没有。
 //!
 //! 流往对端节点发数据的优先级跟着服务等级（[`priority_of`]）：同一条连接上，interactive 的流先于 bulk 的流发出。
 //! `auto` 的流开始时按 interactive 对待，这一端在它上面发出的数据累计超过 [`AUTO_DEMOTE_AFTER`] 之后降到 bulk 的优先级。
@@ -333,9 +334,12 @@ pub(crate) async fn run<S: SendStream, R: RecvStream>(
                 None => match send.take_raw() {
                     Some(raw) => tcp_to_raw(tcp_read, raw, Bytes::new(), &lane, &mut from_tcp, progress).await,
                     None => {
-                        // 出口一侧：看目标回的是不是 TLS 1.3，是的话 ServerHello 之后跟着发起方不再加密。
-                        let watch = (role == TcpRole::Target).then(ServerHelloWatch::new);
-                        tcp_to_flow(tcp_read, &mut send, watch, &lane, &mut from_tcp, progress).await
+                        // 出口一侧：看目标回的是不是 TLS 1.3，是的话 ServerHello 之后不再加密。入口一侧：出口切换了就跟着。
+                        let leave = match role {
+                            TcpRole::Target => Leave::AfterServerHello(ServerHelloWatch::new()),
+                            TcpRole::Client => Leave::AfterPeer,
+                        };
+                        tcp_to_flow(tcp_read, &mut send, leave, &lane, &mut from_tcp, progress).await
                     }
                 },
             }
@@ -447,14 +451,24 @@ struct Progress<'m, M> {
     meter: &'m M,
 }
 
+/// 往对端节点写的这个方向什么时候可能不再加密（流在 ice3proxy 上、发起方选了不再加密时才会）。
+enum Leave {
+    /// 出口一侧：目标回的 TLS 1.3 ServerHello 一写完就由这一端告诉流（[`SendStream::end_header`]）。
+    AfterServerHello(ServerHelloWatch),
+    /// 入口一侧：出口先切换，流收到时自己跟着切换（读的那一侧在推进），这里每一段之前问一下（[`SendStream::take_raw`]）。
+    AfterPeer,
+    /// 不会了。
+    Never,
+}
+
 /// TCP 读到的写进流。
 ///
-/// 给了 `watch`（出口一侧）时，目标回的 TLS 1.3 ServerHello 一写完就告诉流这个方向可以不再加密（[`SendStream::end_header`]）；
-/// 流交得出原始的 socket 时，剩下的交给 [`tcp_to_raw`]。流不在 ice3proxy 上、发起方没选不再加密时照样写进流。
+/// 流交得出原始的 socket 时（`leave` 说什么时候），剩下的交给 [`tcp_to_raw`]。流不在 ice3proxy 上、发起方没选不再加密、
+/// 目标回的不是 TLS 1.3 时照样写进流。
 async fn tcp_to_flow<S: SendStream, M: Meter>(
     mut tcp: ReadHalf<'_>,
     send: &mut S,
-    mut watch: Option<ServerHelloWatch>,
+    mut leave: Leave,
     lane: &OnceLock<Arc<TcpStream>>,
     traffic: &mut Traffic,
     progress: Progress<'_, M>,
@@ -468,14 +482,26 @@ async fn tcp_to_flow<S: SendStream, M: Meter>(
             return send.shutdown().await.map_err(Abort::Flow);
         }
         traffic.arrived(started);
-        let switch_at = match watch.as_mut().map(|watch| watch.feed(&buf[..len])) {
-            None | Some(ServerHelloVerdict::Undecided) => None,
-            Some(ServerHelloVerdict::Sealed) => {
-                watch = None;
+        if matches!(leave, Leave::AfterPeer)
+            && let Some(raw) = send.take_raw()
+        {
+            let rest = Bytes::copy_from_slice(&buf[..len]);
+            // 同下：不能让这块缓冲跟着 `tcp_to_raw` 一直占到连接结束。
+            drop(buf);
+            return tcp_to_raw(tcp, raw, rest, lane, traffic, Progress { started, class, meter }).await;
+        }
+        let verdict = match &mut leave {
+            Leave::AfterServerHello(watch) => watch.feed(&buf[..len]),
+            Leave::AfterPeer | Leave::Never => ServerHelloVerdict::Undecided,
+        };
+        let switch_at = match verdict {
+            ServerHelloVerdict::Undecided => None,
+            ServerHelloVerdict::Sealed => {
+                leave = Leave::Never;
                 None
             }
-            Some(ServerHelloVerdict::PassthroughAfter(at)) => {
-                watch = None;
+            ServerHelloVerdict::PassthroughAfter(at) => {
+                leave = Leave::Never;
                 Some(at)
             }
         };
