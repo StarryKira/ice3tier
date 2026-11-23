@@ -1,4 +1,5 @@
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process'
+import { createSocket, type Socket as UdpSocket } from 'node:dgram'
 import {
   chmodSync,
   copyFileSync,
@@ -9,7 +10,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs'
-import { createServer } from 'node:net'
+import { createServer, type Server as TcpServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -64,27 +65,155 @@ export interface RunOptions {
 }
 
 interface Running {
+  /** 节点的状态目录，定位哪一个节点出了问题时用。 */
+  dir: string
   child: ChildProcess
   /** 看护的循环和节点在一个单独的进程组里，停的时候一起停。 */
   group: boolean
+  /** 进程退出时的退出码（被信号杀掉时是 -1）；还在跑时是 null。 */
+  exited: number | null
+  /** 标准错误的最后一段，用来定位启动失败或上线超时。 */
+  stderr: () => string
 }
 
-/** controller 没有绑上交给它的端口：有别的进程先占了。 */
+/** controller 或节点没有绑上交给它的端口：有别的进程先占了。 */
 class PortTaken extends Error {}
 
-function freePort(): Promise<number> {
-  return new Promise((resolvePort, reject) => {
+const STDERR_LIMIT = 32 * 1024
+const PORT_PICK_TRIES = 32
+const PORT_TAKEN_RE = /address already in use|地址已在使用|os error (?:98|48|10048)\b/i
+
+function isPortTaken(stderr: string): boolean {
+  return PORT_TAKEN_RE.test(stderr)
+}
+
+function appendTail(current: string, chunk: string): string {
+  const combined = current + chunk
+  return combined.length > STDERR_LIMIT ? combined.slice(-STDERR_LIMIT) : combined
+}
+
+function errnoCode(error: unknown): string | undefined {
+  return error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code : undefined
+}
+
+function isIpv6Unsupported(error: unknown): boolean {
+  const code = errnoCode(error)
+  return code === 'EAFNOSUPPORT' || code === 'EPROTONOSUPPORT' || code === 'EADDRNOTAVAIL' || code === 'EINVAL'
+}
+
+function isBindBusy(error: unknown): boolean {
+  const code = errnoCode(error)
+  return code === 'EADDRINUSE' || code === 'EACCES'
+}
+
+function bindTcp(host: string, port: number, ipv6Only?: boolean): Promise<TcpServer> {
+  return new Promise((resolveServer, reject) => {
     const server = createServer()
     server.unref()
-    server.on('error', reject)
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address()
-      server.close(() => {
-        if (address !== null && typeof address === 'object') resolvePort(address.port)
-        else reject(new Error('拿不到空闲端口'))
-      })
+    const onError = (error: Error) => reject(error)
+    server.once('error', onError)
+    server.listen({ host, port, ...(ipv6Only !== undefined ? { ipv6Only } : {}) }, () => {
+      server.off('error', onError)
+      resolveServer(server)
     })
   })
+}
+
+function closeTcp(server: TcpServer): Promise<void> {
+  if (!server.listening) return Promise.resolve()
+  return new Promise((done) => server.close(() => done()))
+}
+
+function bindUdp(type: 'udp4' | 'udp6', host: string, port: number): Promise<UdpSocket> {
+  return new Promise((resolveSocket, reject) => {
+    const socket = type === 'udp6' ? createSocket({ type: 'udp6', ipv6Only: false }) : createSocket('udp4')
+    socket.unref()
+    const onError = (error: Error) => {
+      void closeUdp(socket).finally(() => reject(error))
+    }
+    socket.once('error', onError)
+    try {
+      socket.bind(port, host, () => {
+        socket.off('error', onError)
+        resolveSocket(socket)
+      })
+    } catch (error) {
+      socket.off('error', onError)
+      void closeUdp(socket).finally(() => reject(error instanceof Error ? error : new Error(String(error))))
+    }
+  })
+}
+
+function closeUdp(socket: UdpSocket): Promise<void> {
+  return new Promise((done) => {
+    try {
+      socket.close(() => done())
+    } catch {
+      done()
+    }
+  })
+}
+
+/** 挑一个空闲的 TCP 端口，避开 `exclude` 里已经分出去的号。 */
+async function freeTcpPort(host = '127.0.0.1', exclude?: ReadonlySet<number>): Promise<number> {
+  const held: TcpServer[] = []
+  try {
+    for (let attempt = 0; attempt < PORT_PICK_TRIES; attempt += 1) {
+      const server = await bindTcp(host, 0)
+      held.push(server)
+      const address = server.address()
+      if (address === null || typeof address !== 'object') throw new Error('拿不到空闲端口')
+      if (exclude?.has(address.port) !== true) return address.port
+    }
+    throw new Error(`尝试 ${PORT_PICK_TRIES} 次后仍拿不到不冲突的 TCP 端口`)
+  } finally {
+    await Promise.all(held.map(closeTcp))
+  }
+}
+
+/**
+ * 挑一个 TCP、UDP 都空闲的端口，避开 `exclude` 里已经分出去的号。
+ *
+ * controller 的节点端口同时听 `127.0.0.1` 的 TCP 和 UDP（`loopback`）；
+ * 节点的端口按 `UdpPort::bind` 的口径绑双栈 `[::]`（没有 IPv6 时退回 `0.0.0.0`），启用为 relay 时
+ * 在同一个地址和端口号上还要听 TCP（`any`）。
+ */
+async function freeDualPort(scope: 'loopback' | 'any', exclude?: ReadonlySet<number>): Promise<number> {
+  let type: 'udp4' | 'udp6' = scope === 'any' ? 'udp6' : 'udp4'
+  let host = scope === 'any' ? '::' : '127.0.0.1'
+  let ipv6Only: boolean | undefined = scope === 'any' ? false : undefined
+  const held: UdpSocket[] = []
+  try {
+    for (let attempt = 0; attempt < PORT_PICK_TRIES; attempt += 1) {
+      let udp: UdpSocket
+      try {
+        udp = await bindUdp(type, host, 0)
+      } catch (error) {
+        if (type === 'udp6' && isIpv6Unsupported(error)) {
+          type = 'udp4'
+          host = '0.0.0.0'
+          ipv6Only = undefined
+          udp = await bindUdp(type, host, 0)
+        } else {
+          throw error
+        }
+      }
+      held.push(udp)
+      const { port } = udp.address()
+      if (exclude?.has(port) === true) continue
+      try {
+        const tcp = await bindTcp(host, port, ipv6Only)
+        await closeTcp(tcp)
+        return port
+      } catch (error) {
+        if (isBindBusy(error)) continue
+        throw error
+      }
+    }
+    throw new Error(`尝试 ${PORT_PICK_TRIES} 次后仍拿不到 TCP、UDP 都空闲的端口`)
+  } finally {
+    await Promise.all(held.map(closeUdp))
+  }
 }
 
 function sendSignal(child: ChildProcess, group: boolean, signal: NodeJS.Signals): void {
@@ -116,6 +245,8 @@ async function terminate(child: ChildProcess, group: boolean, timeoutMs = 5_000)
   })
 }
 
+class WaitTimeout extends Error {}
+
 async function waitFor<T>(
   what: string,
   probe: () => Promise<T | undefined> | T | undefined,
@@ -125,7 +256,7 @@ async function waitFor<T>(
   for (;;) {
     const value = await probe()
     if (value !== undefined) return value
-    if (Date.now() > deadline) throw new Error(`等了 ${timeoutMs} 毫秒，${what}还是没有发生`)
+    if (Date.now() > deadline) throw new WaitTimeout(`等了 ${timeoutMs} 毫秒，${what}还是没有发生`)
     await new Promise((done) => setTimeout(done, 100))
   }
 }
@@ -146,6 +277,9 @@ export class Controller {
   /** 这次用的 `i3t-controller` 和 `i3t` 所在的目录。 */
   readonly bins: string
   private readonly process: ChildProcess
+  private readonly stderr: () => string
+  private readonly exited: () => number | null
+  private readonly usedPorts: Set<number>
   private readonly nodes: Running[] = []
   private readonly readOnly: string[] = []
   private nodeCount = 0
@@ -156,32 +290,38 @@ export class Controller {
     dir: string
     bins: string
     process: ChildProcess
+    stderr: () => string
+    exited: () => number | null
+    usedPorts: Set<number>
   }) {
     this.baseUrl = options.baseUrl
     this.adminToken = options.adminToken
     this.dir = options.dir
     this.bins = options.bins
     this.process = options.process
+    this.stderr = options.stderr
+    this.exited = options.exited
+    this.usedPorts = options.usedPorts
   }
 
   /**
    * 启动一个全新的、空的 controller。管理令牌从它第一次启动时打印的内容里取。
    * `bins` 指定程序所在的目录；节点更新的测试要用认测试钥匙的那一组。
    *
-   * 端口是先挑好再交给它去绑的，中间隔着一小会儿，挑的时候也只试了 TCP（节点端口它 TCP、UDP 都要）：
-   * 偶尔会被别的进程拿走。那样就换一组端口从头再来。
+   * 端口是先挑好再交给它去绑的，中间隔着一小会儿：偶尔会被别的进程拿走。那样就换一组端口从头再来。
    */
   static async start(options: { bins?: string } = {}): Promise<Controller> {
+    const usedPorts = new Set<number>()
     for (let attempt = 1; ; attempt += 1) {
       try {
-        return await Controller.startOnce(options)
+        return await Controller.startOnce(options, usedPorts)
       } catch (error) {
         if (!(error instanceof PortTaken) || attempt >= 5) throw error
       }
     }
   }
 
-  private static async startOnce(options: { bins?: string }): Promise<Controller> {
+  private static async startOnce(options: { bins?: string }, usedPorts: Set<number>): Promise<Controller> {
     const bins = options.bins ?? binDir()
     const dist = join(webRoot, 'dist')
     if (!existsSync(join(dist, 'index.html'))) throw new Error('web/dist 里没有构建产物，先执行 pnpm build')
@@ -192,8 +332,10 @@ export class Controller {
     })
     if (created.status !== 0) throw new Error(`建不了测试用的数据库：${created.stderr.trim()}`)
     const database = created.stdout.trim()
-    const nodePort = await freePort()
-    const adminPort = await freePort()
+    const nodePort = await freeDualPort('loopback', usedPorts)
+    usedPorts.add(nodePort)
+    const adminPort = await freeTcpPort('127.0.0.1', usedPorts)
+    usedPorts.add(adminPort)
     const child = spawn(
       join(bins, 'i3t-controller'),
       [
@@ -211,17 +353,26 @@ export class Controller {
       { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, I3T_DATABASE_URL: database } },
     )
     let stdout = ''
+    let captureStdout = true
     let stderr = ''
-    child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString()))
-    child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()))
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (captureStdout) stdout += chunk.toString()
+    })
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr = appendTail(stderr, chunk.toString())
+    })
     let exited: number | null = null
+    child.on('error', (error) => {
+      stderr = appendTail(stderr, `\nspawn error: ${error.message}\n`)
+      exited = -1
+    })
     // `close` 在它的输出都读完之后才来，`exit` 可能比最后一段标准错误早：下面要看标准错误里说了什么。
     child.on('close', (code) => (exited = code ?? -1))
     /** controller 已经退出的话抛出来。没绑上端口的单独认出来，好换一组端口重来。 */
     const failIfExited = () => {
       if (exited === null) return
       const message = `controller 启动后就退出了（${exited}）：\n${stderr}`
-      throw /Address already in use/.test(stderr) ? new PortTaken(message) : new Error(message)
+      throw isPortTaken(stderr) ? new PortTaken(message) : new Error(message)
     }
 
     const baseUrl = `http://127.0.0.1:${adminPort}`
@@ -231,6 +382,8 @@ export class Controller {
         failIfExited()
         return /^\s+([A-Za-z0-9_-]{43})\s*$/m.exec(stdout)?.[1]
       })
+      captureStdout = false
+      stdout = ''
       await waitFor('管理 API 开始应答', async () => {
         // 令牌是先打出来的，端口后绑：绑不上多半到这一步才看得出来。
         failIfExited()
@@ -243,7 +396,16 @@ export class Controller {
           return undefined
         }
       })
-      const controller = new Controller({ baseUrl, adminToken, dir, bins, process: child })
+      const controller = new Controller({
+        baseUrl,
+        adminToken,
+        dir,
+        bins,
+        process: child,
+        stderr: () => stderr,
+        exited: () => exited,
+        usedPorts,
+      })
       // 发布源默认是项目的 GitHub Release。测试不该连外网，更不该让节点被真的发布更新掉：换成一个空目录。
       // 要测更新的地方自己再把它指到准备好的发布上。
       const empty = join(dir, 'no-releases')
@@ -338,13 +500,30 @@ export class Controller {
 
   /**
    * 把一个已经加入的节点跑起来，让它在界面上显示为在线。
-   * 一台机器上跑好几个节点，所以先把它的端口改成不冲突的。
+   * 一台机器上跑好几个节点，所以先把它的端口改成不冲突的；挑完到真正绑定之间偶尔会被别的进程拿走，
+   * 那样换一组端口重来。
    */
   async run(node: NodeHandle, options: RunOptions = {}): Promise<void> {
+    // 每个节点用自己的一份程序文件：万一它被更新了，换掉的也只是这一份，不是构建出来的那一个。
+    const program = options.program ?? this.ownProgram(node)
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await this.runOnce(node, program, options)
+        return
+      } catch (error) {
+        if (!(error instanceof PortTaken) || attempt >= 5) throw error
+      }
+    }
+  }
+
+  private async runOnce(node: NodeHandle, program: string, options: RunOptions): Promise<void> {
     const configPath = join(node.dir, 'config.toml')
-    const udp = await freePort()
-    const socks = await freePort()
-    const http = await freePort()
+    const udp = await freeDualPort('any', this.usedPorts)
+    this.usedPorts.add(udp)
+    const socks = await freeTcpPort('127.0.0.1', this.usedPorts)
+    this.usedPorts.add(socks)
+    const http = await freeTcpPort('127.0.0.1', this.usedPorts)
+    this.usedPorts.add(http)
     // 本机的组网入口（`[proxy]`）0.1.15 起默认关着，只通到组网里的节点：测试用它去连别的节点（`touch`）。
     // 去互联网要经代理（`/proxies`）。
     let config = readFileSync(configPath, 'utf8').replace(/^port = \d+$/m, `port = ${udp}`)
@@ -354,18 +533,44 @@ export class Controller {
           .replace(/^http = .*$/m, `http = "127.0.0.1:${http}"`)
       : `${config.trimEnd()}\n\n[proxy]\nsocks5 = "127.0.0.1:${socks}"\nhttp = "127.0.0.1:${http}"\n`
     writeFileSync(configPath, config)
-    // 每个节点用自己的一份程序文件：万一它被更新了，换掉的也只是这一份，不是构建出来的那一个。
-    const program = options.program ?? this.ownProgram(node)
+    const localJson = join(node.dir, 'local.json')
+    rmSync(localJson, { force: true })
     const env = { ...process.env, ...options.env }
-    const child =
-      options.supervised === true
-        ? spawn('sh', ['-c', SUPERVISOR], {
-            stdio: 'ignore',
-            env: { ...env, PROGRAM: program, STATE: node.dir },
-            detached: true,
-          })
-        : spawn(program, ['--state-dir', node.dir, 'run'], { stdio: 'ignore', env })
-    this.nodes.push({ child, group: options.supervised === true })
+    const group = options.supervised === true
+    const child = group
+      ? spawn('sh', ['-c', SUPERVISOR], {
+          stdio: ['ignore', 'ignore', 'pipe'],
+          env: { ...env, PROGRAM: program, STATE: node.dir },
+          detached: true,
+        })
+      : spawn(program, ['--state-dir', node.dir, 'run'], { stdio: ['ignore', 'ignore', 'pipe'], env })
+    let stderr = ''
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr = appendTail(stderr, chunk.toString())
+    })
+    const running: Running = { dir: node.dir, child, group, exited: null, stderr: () => stderr }
+    child.on('error', (error) => {
+      stderr = appendTail(stderr, `\nspawn error: ${error.message}\n`)
+      running.exited = -1
+    })
+    // `close` 在标准错误读完之后才来：下面要看是不是端口被占。
+    child.on('close', (code) => {
+      running.exited = code ?? -1
+    })
+    try {
+      await waitFor(`节点 ${node.dir} 启动`, () => {
+        if (running.exited !== null) {
+          const message = `节点 ${node.dir} 启动后就退出了（${running.exited}）：\n${stderr}`
+          throw isPortTaken(stderr) ? new PortTaken(message) : new Error(message)
+        }
+        // `Endpoint::bind` 成功后会立刻打出“数据面启动”；随后本地状态接口写出 `local.json`（调高日志级别时也会写）。
+        return stderr.includes('数据面启动') || existsSync(localJson) ? true : undefined
+      })
+    } catch (error) {
+      await terminate(child, group, 1_000)
+      throw error
+    }
+    this.nodes.push(running)
     node.socksPort = socks
   }
 
@@ -389,10 +594,38 @@ export class Controller {
 
   /** 等到 controller 看到这么多节点在线。 */
   async waitOnline(count: number, network = 1): Promise<void> {
-    await waitFor(`${count} 个节点在线`, async () => {
-      const overview = await this.api<{ online: number }>('GET', `/networks/${network}/overview`)
-      return overview.online >= count ? true : undefined
-    })
+    let lastOnline = 0
+    try {
+      await waitFor(`${count} 个节点在线`, async () => {
+        const controllerExit = this.exited()
+        if (controllerExit !== null) {
+          throw new Error(`controller 提前退出了（${controllerExit}）：\n${this.stderr()}`)
+        }
+        for (const node of this.nodes) {
+          if (node.exited !== null) {
+            throw new Error(
+              `节点 ${node.dir} 提前退出了（${node.exited}）：\n${node.stderr()}\ncontroller 日志：\n${this.stderr()}`,
+            )
+          }
+        }
+        const overview = await this.api<{ online: number }>('GET', `/networks/${network}/overview`)
+        lastOnline = overview.online
+        return overview.online >= count ? true : undefined
+      })
+    } catch (error) {
+      if (!(error instanceof WaitTimeout)) throw error
+      const details = this.nodes
+        .map((node) => {
+          const status = node.exited === null ? '运行中' : `已退出 ${node.exited}`
+          return `--- ${node.dir}（${status}）---\n${node.stderr()}`
+        })
+        .join('\n')
+      const controllerStatus = this.exited() === null ? '运行中' : `已退出 ${this.exited()}`
+      throw new Error(
+        `${error.message}（当前在线 ${lastOnline}/${count}）\n${details}\n--- controller（${controllerStatus}）---\n${this.stderr()}`,
+        { cause: error },
+      )
+    }
   }
 
   async stop(): Promise<void> {
