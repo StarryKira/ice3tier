@@ -37,6 +37,14 @@ impl Seeds {
     }
 }
 
+/// 一次重算没有全做成。没做成的节点已经排上了重试。
+pub(crate) struct Unfinished {
+    /// 头一个错误；整个数据库都写不进去时是那一个。
+    pub(crate) error: Error,
+    /// 做成了的节点：netmap 算好了、记下了，该发的也发了。
+    pub(crate) done: BTreeSet<NodeId>,
+}
+
 impl Inner {
     /// 启动时建立下发状态。假定每个节点手上的 netmap 和规则一致，没有谁欠着确认：
     /// 上次运行期间没走完的顺序已经无从得知，节点重新连上来时会拿到当前的内容。
@@ -59,8 +67,31 @@ impl Inner {
 
     /// 重算 `seeds` 和被它们牵连的节点的 netmap，内容变了的下发。
     /// `force` 指定的节点即使内容没变也发一份：它刚连上来，不知道它手上是哪一版。
+    ///
+    /// 一个节点没做成不耽误别的。没做成的节点已经排上了重试，后台任务也叫醒了，
+    /// 调用方把错误交回去就行，不用自己再排。
     pub(crate) fn refresh(&mut self, network: NetworkId, seeds: Seeds, force: Option<NodeId>) -> Result<(), Error> {
-        let Some(view) = NetworkView::load(&self.store, network)? else { return Ok(()) };
+        self.refresh_reporting(network, seeds, force).map_err(|unfinished| unfinished.error)
+    }
+
+    /// 和 [`Self::refresh`] 一样，没有全做成时把哪些节点做成了也交回去。
+    pub(crate) fn refresh_reporting(&mut self, network: NetworkId, seeds: Seeds, force: Option<NodeId>) -> Result<(), Unfinished> {
+        let view = match NetworkView::load(&self.store, network) {
+            Ok(Some(view)) => view,
+            Ok(None) => return Ok(()),
+            Err(err) => {
+                let nodes = match seeds {
+                    Seeds::Nodes(nodes) => nodes,
+                    // 网络读不出来，说不出"全部"是哪些：排上在线的。不在线的回来时拿到的本来就是那时的内容。
+                    Seeds::All => self.live.iter().filter(|(_, live)| live.network == network).map(|(node, _)| *node).collect(),
+                };
+                if err.is_database_wide() {
+                    self.back_off();
+                }
+                self.retry_later(network, nodes);
+                return Err(Unfinished { error: err.into(), done: BTreeSet::new() });
+            }
+        };
         let access = view.access();
         let seeds: BTreeSet<NodeId> = match seeds {
             Seeds::All => view.nodes.keys().copied().collect(),
@@ -70,10 +101,54 @@ impl Inner {
             self.sync.entry(*node).or_default();
         }
         let batch = self.reconcile(&view, &access, &seeds);
-        for node in batch {
-            self.publish(&view, &access, node, force == Some(node))?;
+        let mut done = BTreeSet::new();
+        let mut failed = BTreeSet::new();
+        let mut error = None;
+        for &node in &batch {
+            match self.publish(&view, &access, node, force == Some(node)) {
+                Ok(()) => {
+                    done.insert(node);
+                }
+                // 整个数据库都写不进去：别的节点也是一样的结果，不往下试。别的进程占着写锁时，每试一次都是
+                // 拿着 controller 的锁等满超时，一个节点等一次，所有连接和管理请求就都被拖住了。
+                Err(err) if err.is_database_wide() => {
+                    failed.extend(batch.range(node..).copied());
+                    error = Some(err);
+                    self.back_off();
+                    break;
+                }
+                // 只是这一个节点没做成，不耽误同一批里别的：各算各的，看到的是同一套"谁在等谁确认"。
+                // 不然一个一直记不下来的节点会把排在它后面的都挡住，比如等它停下来才能不认它的目的端。
+                Err(err) => {
+                    failed.insert(node);
+                    error.get_or_insert(err);
+                }
+            }
         }
-        Ok(())
+        // `reconcile` 已经替没做成的登记了等待，不重试的话它们要到下一次碰巧有别的变化才会拿到新的 netmap。
+        self.retry_later(network, failed);
+        error.map_or(Ok(()), |error| Err(Unfinished { error, done }))
+    }
+
+    /// 这些节点的重算没做成：过一会儿再试，并且叫醒后台任务，让它到点来做。做成之前它们算"还在重试"。
+    /// 一个节点都没有时（都做成了；或者要重算整个网络，网络读不出来，又没有谁在线）没有排上谁，就不叫。
+    fn retry_later(&mut self, network: NetworkId, nodes: impl IntoIterator<Item = NodeId>) {
+        let nodes: BTreeSet<NodeId> = nodes.into_iter().collect();
+        if nodes.is_empty() {
+            return;
+        }
+        for node in &nodes {
+            if let Some(sync) = self.sync.get_mut(node) {
+                sync.retrying = true;
+            }
+        }
+        self.defer(network, nodes, RETRY_DELAY);
+        self.wake.notify_one();
+    }
+
+    /// 整个数据库刚读写不了：后台的重算过一会儿再碰它，见 [`Inner::flush_after`]。
+    fn back_off(&mut self) {
+        self.flush_after = Some(Instant::now() + RETRY_DELAY);
     }
 
     /// 先把访问关系变更的第一步登记到所有相关节点上，再去算任何一份 netmap。
@@ -155,15 +230,16 @@ impl Inner {
 
         let sync = self.sync.entry(id).or_default();
         let changed = sync.state.digest != Some(digest);
+        let version = sync.state.version + u64::from(changed);
         if changed {
-            sync.state.version += 1;
-            sync.state.digest = Some(digest);
-        }
-        let version = sync.state.version;
-        let released = sync.settle(relations);
-        if changed {
+            // 新的版本号先记进存储，记下了才算数。记不下来时这里什么都没动，调用方过一会儿重试，算出来的还是"内容变了"。
+            // 反过来先改这里的话，重试时摘要已经对得上，这一版就既记不下来也发不出去。
             self.store.set_node_netmap(id, version, &digest)?;
+            sync.state.version = version;
+            sync.state.digest = Some(digest);
+            sync.version_issued(Instant::now());
         }
+        let released = sync.settle(relations);
         self.defer(view.network.id, released, Duration::ZERO);
 
         if (changed || force) && self.is_online(id) {
@@ -171,11 +247,13 @@ impl Inner {
             tracing::debug!(node = %id, version, peers = netmap.peers.len(), relays = netmap.relays.len(), "下发 netmap");
             if self.send(id, ToNode::Snapshot(Box::new(netmap))) {
                 self.counters.snapshots_sent += 1;
+                // 发出去了就是发出去了，先记在这里：节点的确认要拿它来对。存储里的记不下来只是旧一些，下一次发的时候补上。
                 let sync = self.sync.entry(id).or_default();
                 sync.state.sent = version;
                 self.store.set_node_sent(id, version)?;
             }
         }
+        self.sync.entry(id).or_default().retrying = false;
         Ok(())
     }
 
@@ -251,6 +329,10 @@ impl Inner {
 
     /// 重算到期的节点。返回剩下的里面最早的到期时间。
     pub(crate) fn flush_due(&mut self, now: Instant) -> Result<Option<Instant>, Error> {
+        // 整个数据库刚读写不了，还没到再试的时候：到期的先放着，不碰数据库。
+        if let Some(after) = self.flush_after.filter(|after| now < *after) {
+            return Ok(Some(after));
+        }
         let mut due: BTreeMap<NetworkId, BTreeSet<NodeId>> = BTreeMap::new();
         self.dirty.retain(|node, deferred| {
             let is_due = deferred.due <= now;
@@ -260,12 +342,20 @@ impl Inner {
             !is_due
         });
         let mut first_error = None;
-        for (network, nodes) in due {
-            // 一个网络失败不耽误别的网络；失败的放回队列，过一会儿再试。
-            if let Err(err) = self.refresh(network, Seeds::Nodes(nodes.clone()), None) {
-                self.defer(network, nodes, RETRY_DELAY);
+        let mut due = due.into_iter();
+        for (network, nodes) in due.by_ref() {
+            // 一个网络失败不耽误别的网络；没做成的 `refresh` 自己放回了队列，过一会儿再试。
+            if let Err(err) = self.refresh(network, Seeds::Nodes(nodes), None) {
+                let database_wide = err.is_database_wide();
                 first_error.get_or_insert(err);
+                if database_wide {
+                    break;
+                }
             }
+        }
+        // 整个数据库都读写不了时，剩下的网络不去试（见 `refresh_reporting`），放回队列等下一次。
+        for (network, nodes) in due {
+            self.retry_later(network, nodes);
         }
         match first_error {
             Some(err) => Err(err),

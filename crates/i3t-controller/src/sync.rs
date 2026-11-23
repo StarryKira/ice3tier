@@ -12,6 +12,7 @@
 //! "太久"从开始等的那一刻算起，每一项分开算：之后再给节点发多少份 netmap、节点换多少次连接都不往后推，
 //! 否则一个不回话的节点只要不停地让 controller 给它发东西，就能让一次撤销永远生效不了。
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
@@ -31,6 +32,8 @@ pub(crate) struct NodeSync {
     awaiting_undial: BTreeMap<NodeId, Pending>,
     /// 最近一次因为别的节点的上报（端点、挂靠、连得上哪些 relay）给它排的重算的时刻，见 `Inner::defer_report`。
     pub report_due: Option<Instant>,
+    /// 它的重算没做成，还排着重试：它手上的 netmap 可能已经跟不上规则了，哪怕它确认过的就是当前这个版本号。
+    pub retrying: bool,
 }
 
 /// 一项还欠着的确认。
@@ -45,6 +48,19 @@ struct Pending {
 /// 开始等 `peer` 这一项确认到 `version`。已经在等的沿用原来开始等的时刻：重新登记不能让它多等。
 fn start_waiting(awaiting: &mut BTreeMap<NodeId, Pending>, peer: NodeId, version: u64, now: Instant) {
     awaiting.entry(peer).and_modify(|pending| pending.version = version).or_insert(Pending { version, since: now });
+}
+
+/// 去掉 `awaiting` 里 `done` 的等待，返回它们的对端。
+fn take(awaiting: &mut BTreeMap<NodeId, Pending>, done: impl Fn(&Pending) -> bool) -> BTreeSet<NodeId> {
+    let mut released = BTreeSet::new();
+    awaiting.retain(|peer, pending| {
+        let done = done(pending);
+        if done {
+            released.insert(*peer);
+        }
+        !done
+    });
+    released
 }
 
 impl NodeSync {
@@ -85,9 +101,30 @@ impl NodeSync {
     }
 
     /// 撤销的第一步：这个节点从下一个版本起不再访问 `peer`。在线的节点要确认过，`peer` 那边才能不认它。
+    ///
+    /// 和 [`Self::begin_accepting`] 一样，关系在这里就改掉，不等新的一版定下来。不然这一版一直定不下来时，
+    /// 等待超时之后看到的还是"它在访问 `peer`"，同一项等待又被登记一遍，`peer` 那边永远等不到头。
     pub(crate) fn begin_undialing(&mut self, peer: NodeId, online: bool, now: Instant) {
+        if let Entry::Occupied(mut relation) = self.relations.entry(peer) {
+            relation.get_mut().outbound = false;
+            if relation.get().is_empty() {
+                relation.remove();
+            }
+        }
         if online {
             start_waiting(&mut self.awaiting_undial, peer, self.state.version + 1, now);
+        }
+    }
+
+    /// 现在这个版本号刚定下来（每个版本号只有这一次）。等它确认的授权从这一刻起算等了多久。
+    ///
+    /// 登记和定下来通常是同一刻。版本号一时记不进存储时会差出很久，那段时间节点没有可确认的东西：
+    /// 还从登记算起的话，这一版刚发出去就已经"超时"，对端马上被放开，节点连收下的工夫都没有。
+    /// 撤销不动：它的期限从登记起算，不取决于这一版什么时候定下来。
+    pub(crate) fn version_issued(&mut self, now: Instant) {
+        let version = self.state.version;
+        for pending in self.awaiting_accept.values_mut().filter(|pending| pending.version == version) {
+            pending.since = now;
         }
     }
 
@@ -124,8 +161,18 @@ impl NodeSync {
     }
 
     /// 开始等了 `timeout` 还没确认的不再等。后来才开始等的照旧等满它自己的时间。返回可以继续下一步的对端。
+    ///
+    /// 等的那一版还没定下来时（版本号记不进存储，还在重试），两种等待都往严的一边靠：
+    ///
+    /// - 授权接着等。节点没有可确认的东西，这时放开发起端，它就先于目的端拿到许可。
+    /// - 撤销到点就不等。目的端多久之后不认发起端，不能取决于发起端那一版记不记得下来；
+    ///   发起端晚一点才停，只是它那几次访问被拒绝。
     pub(crate) fn give_up_waiting(&mut self, now: Instant, timeout: Duration) -> BTreeSet<NodeId> {
-        self.release(|pending| now.saturating_duration_since(pending.since) >= timeout)
+        let issued = self.state.version;
+        let overdue = |pending: &Pending| now.saturating_duration_since(pending.since) >= timeout;
+        let mut released = take(&mut self.awaiting_accept, |pending| pending.version <= issued && overdue(pending));
+        released.extend(take(&mut self.awaiting_undial, overdue));
+        released
     }
 
     /// 不再等这个节点确认（它下线了）。返回可以继续下一步的对端。
@@ -135,16 +182,8 @@ impl NodeSync {
 
     /// 去掉 `done` 的等待，返回它们的对端。
     fn release(&mut self, done: impl Fn(&Pending) -> bool) -> BTreeSet<NodeId> {
-        let mut released = BTreeSet::new();
-        for awaiting in [&mut self.awaiting_accept, &mut self.awaiting_undial] {
-            awaiting.retain(|peer, pending| {
-                let done = done(pending);
-                if done {
-                    released.insert(*peer);
-                }
-                !done
-            });
-        }
+        let mut released = take(&mut self.awaiting_accept, &done);
+        released.extend(take(&mut self.awaiting_undial, &done));
         released
     }
 
@@ -255,6 +294,60 @@ mod tests {
         assert!(sync.give_up_waiting(at(15), timeout).is_empty());
         assert_eq!(sync.give_up_waiting(at(16), timeout), [id(3)].into());
         assert!(!sync.is_waiting());
+    }
+
+    #[test]
+    fn before_its_version_has_gone_out_a_grant_keeps_waiting_and_a_revocation_still_times_out() {
+        let timeout = Duration::from_secs(10);
+        let mut sync = NodeSync::with_state(NetmapState::default(), [(id(3), Relation { inbound: false, outbound: true })].into());
+        sync.begin_accepting(id(2), true, at(0));
+        sync.begin_undialing(id(3), true, at(0));
+        // 新的一版还没定下来。撤销到点就不等，不然对端永远等不到头；授权等多久都谈不上它迟迟不确认。
+        assert!(sync.give_up_waiting(at(9), timeout).is_empty());
+        assert_eq!(sync.give_up_waiting(at(60), timeout), [id(3)].into());
+        assert!(!sync.may_still_dial(id(3)) && !sync.has_confirmed_accepting(id(2)));
+
+        sync.state.version = 1;
+        assert!(sync.settle([(id(2), inbound())].into()).is_empty());
+        assert_eq!(sync.give_up_waiting(at(60), timeout), [id(2)].into(), "定下来之后照旧从开始等的那一刻算");
+    }
+
+    #[test]
+    fn a_grant_counts_its_wait_from_when_its_version_went_out() {
+        let timeout = Duration::from_secs(10);
+        let mut sync = NodeSync::with_state(NetmapState::default(), [(id(3), Relation { inbound: false, outbound: true })].into());
+        sync.begin_accepting(id(2), true, at(0));
+        sync.begin_undialing(id(3), true, at(0));
+        // 版本号过了很久才定下来。
+        sync.state.version = 1;
+        sync.version_issued(at(60));
+        assert!(sync.settle([(id(2), inbound())].into()).is_empty());
+        assert_eq!(sync.give_up_waiting(at(65), timeout), [id(3)].into(), "撤销照旧从登记算起；授权刚发出去五秒，还没到");
+        assert_eq!(sync.give_up_waiting(at(70), timeout), [id(2)].into());
+
+        // 之后的版本不再动它：只有它等的那一版定下来的那一次。
+        let mut sync = NodeSync::default();
+        sync.begin_accepting(id(2), true, at(0));
+        sync.state.version = 1;
+        sync.version_issued(at(0));
+        sync.state.version = 2;
+        sync.version_issued(at(8));
+        assert_eq!(sync.give_up_waiting(at(10), timeout), [id(2)].into());
+    }
+
+    #[test]
+    fn a_revocation_counts_as_not_dialing_from_the_moment_it_is_registered() {
+        let both = Relation { inbound: true, outbound: true };
+        let mut sync =
+            NodeSync::with_state(NetmapState::default(), [(id(2), Relation { inbound: false, outbound: true }), (id(3), both)].into());
+        sync.begin_undialing(id(2), true, at(0));
+        sync.begin_undialing(id(3), true, at(0));
+        assert!(!sync.dials(id(2)) && !sync.knows(id(2)), "只有这一个方向的关系，收回了就没有关系了");
+        assert!(!sync.dials(id(3)) && sync.accepts(id(3)), "另一个方向不受影响");
+        assert!(sync.may_still_dial(id(2)) && sync.may_still_dial(id(3)), "它确认之前可能还在访问");
+        // 没有这个对端的关系时登记也不出错。
+        sync.begin_undialing(id(4), false, at(0));
+        assert!(!sync.knows(id(4)));
     }
 
     #[test]
