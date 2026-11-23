@@ -149,10 +149,53 @@ fn only_an_enabled_exit_keeps_its_own_counts_and_switching_it_off_drops_them() {
     let view = lab.controller.exit(network.id, exit.id).unwrap();
     assert_eq!((view.recent_requests, view.recent_failures, view.health), (30, 0, ExitHealth::Ok));
 
+    // 已经启用的出口改设置不算停用，留着的照旧。
+    let quota = ExitRole { quota_bytes: Some(1_000_000), ..ExitRole::default() };
+    lab.controller.enable_exit(network.id, exit.id, quota).unwrap();
+    let view = lab.controller.exit(network.id, exit.id).unwrap();
+    assert_eq!((view.recent_requests, view.recent_failures, view.settings.quota_bytes), (30, 0, Some(1_000_000)));
+
     // 节点撤回了出口的声明，出口随之关闭，计数也一样丢掉。
     exit.send(&lab.controller, ToController::Hello(hello(Declared::default())));
     assert_eq!(lab.controller.node(network.id, exit.id).unwrap().node.exit, None);
     assert!(lab.controller.lock().usage.exit_keys().is_empty());
+
+    // 断线之后带着撤回了的声明重新连上来，也一样。
+    exit.send(&lab.controller, ToController::Hello(hello(CAN_DO_ALL)));
+    lab.controller.enable_exit(network.id, exit.id, ExitRole::default()).unwrap();
+    send(&exit, 90, 20);
+    assert_eq!(lab.controller.lock().usage.exit_keys(), [exit.id]);
+    lab.controller.disconnect(exit.session);
+    lab.connect(exit.key, Declared::default()).unwrap();
+    assert_eq!(lab.controller.node(network.id, exit.id).unwrap().node.exit, None);
+    assert!(lab.controller.lock().usage.exit_keys().is_empty());
+}
+
+#[test]
+fn an_exits_own_counts_go_with_the_node_when_it_is_deleted_or_succeeded_and_the_successor_keeps_its_own() {
+    let mut lab = Lab::new();
+    let network = lab.network("home");
+    let old = lab.join_with(network.id, &[], CAN_DO_ALL);
+    let successor = lab.join_with(network.id, &[], CAN_DO_ALL);
+    let deleted = lab.join_with(network.id, &[], CAN_DO_ALL);
+    for member in [&old, &successor, &deleted] {
+        lab.controller.enable_exit(network.id, member.id, ExitRole::default()).unwrap();
+        for total in [10, 30] {
+            let counts = ExitReport { total, ..ExitReport::default() };
+            member.send(&lab.controller, ToController::Report(Box::new(Report { exit: Some(Box::new(counts)), ..report(1) })));
+        }
+    }
+    assert_eq!(lab.controller.lock().usage.exit_keys(), [old.id, successor.id, deleted.id]);
+
+    lab.controller.delete_node(network.id, deleted.id).unwrap();
+    assert_eq!(lab.controller.lock().usage.exit_keys(), [old.id, successor.id]);
+
+    // 继任者不继承出口：前任的计数丢掉，继任者自己启用了出口的，留着它自己的。
+    lab.controller.disconnect(old.session);
+    lab.controller.succeed(network.id, successor.id, old.id).unwrap();
+    assert_eq!(lab.controller.lock().usage.exit_keys(), [successor.id]);
+    let view = lab.controller.exit(network.id, successor.id).unwrap();
+    assert_eq!((view.recent_requests, view.recent_failures, view.health), (20, 0, ExitHealth::Ok));
 }
 
 #[test]

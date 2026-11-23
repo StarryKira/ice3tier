@@ -459,8 +459,98 @@ mod tests {
     }
 
     /// 隔一个的两个样本至少隔 SAMPLE_GAP：窗口里每 SAMPLE_GAP 最多两个，加上窗口外的起点。
+    /// 窗口不是 SAMPLE_GAP 的整数倍时，零头里也能放两个。
     fn max_samples() -> usize {
-        2 * usize::try_from(HEALTH_WINDOW.as_secs() / SAMPLE_GAP.as_secs()).unwrap() + 1
+        2 * usize::try_from(HEALTH_WINDOW.as_nanos().div_ceil(SAMPLE_GAP.as_nanos())).unwrap() + 1
+    }
+
+    /// 一个样本的全部内容：同一时刻可以有好几份上报，只比时间分不出来。
+    fn whole(sample: &Sample) -> (Instant, u64, u64) {
+        (sample.at, sample.total, sample.failed_by_exit)
+    }
+
+    #[test]
+    fn an_exit_that_reports_every_half_gap_keeps_every_report_and_reaches_the_bound_exactly() {
+        // 隔一个的两份正好隔 SAMPLE_GAP：一份都不顶替，样本数正好顶到上限，之后从前面去掉一个、后面加一个。
+        let mut usage = Usage::default();
+        let exit = id(2);
+        let start = Instant::now();
+        let every = SAMPLE_GAP / 2;
+        for i in 0..=400 {
+            usage.exit_reported(exit, 1, report(u64::from(i), 0), start + every * i);
+            let kept = usage.exits[&exit].samples.len();
+            assert!(kept <= max_samples(), "{:?} 时留着 {kept} 个", every * i);
+            if every * i >= HEALTH_WINDOW {
+                assert_eq!(kept, max_samples(), "{:?} 时窗口里的每一份和窗口外的起点都在", every * i);
+            }
+        }
+        assert_eq!(usage.exits[&exit].recent(), (120, 0), "一份都没顶替，和每一份都留着时一样");
+    }
+
+    #[test]
+    fn exactly_a_gap_apart_is_far_enough_and_exactly_five_minutes_ago_is_outside_the_window() {
+        let start = Instant::now();
+        let (secs, nano) = (Duration::from_secs, Duration::from_nanos(1));
+        let times = |usage: &Usage, exit| -> Vec<Duration> { usage.exits[&exit].samples.iter().map(|sample| sample.at - start).collect() };
+
+        // 离倒数第二个差 1 纳秒不到 SAMPLE_GAP：顶替最后一个；正好 SAMPLE_GAP：另加一个。
+        let mut usage = Usage::default();
+        let (close, apart) = (id(2), id(3));
+        for exit in [close, apart] {
+            usage.exit_reported(exit, 1, report(0, 0), start);
+            usage.exit_reported(exit, 1, report(1, 0), start + secs(1));
+        }
+        usage.exit_reported(close, 1, report(2, 0), start + SAMPLE_GAP - nano);
+        usage.exit_reported(apart, 1, report(2, 0), start + SAMPLE_GAP);
+        assert_eq!(times(&usage, close), [Duration::ZERO, SAMPLE_GAP - nano]);
+        assert_eq!(times(&usage, apart), [Duration::ZERO, secs(1), SAMPLE_GAP]);
+
+        // 第二个样本离现在差 1 纳秒不到 5 分钟：第一个还是起点；正好 5 分钟：第二个接过来。
+        let mut usage = Usage::default();
+        let exit = id(2);
+        usage.exit_reported(exit, 1, report(0, 0), start);
+        usage.exit_reported(exit, 1, report(10, 0), start + secs(10));
+        usage.exit_reported(exit, 1, report(10, 0), start + secs(10) + HEALTH_WINDOW - nano);
+        assert_eq!(usage.exits[&exit].recent(), (10, 0));
+        usage.exit_reported(exit, 1, report(10, 0), start + secs(10) + HEALTH_WINDOW);
+        assert_eq!(usage.exits[&exit].recent(), (0, 0));
+
+        // 同一时刻报了很多份：只多留一个，最后一个总是最新的那份。
+        let mut usage = Usage::default();
+        usage.exit_reported(exit, 1, report(0, 0), start);
+        for total in 1..=1000 {
+            usage.exit_reported(exit, 1, report(total, 0), start + secs(10));
+        }
+        let kept: Vec<_> = usage.exits[&exit].samples.iter().map(|sample| (sample.at - start, sample.total)).collect();
+        assert_eq!(kept, [(Duration::ZERO, 0), (secs(10), 1), (secs(10), 1000)]);
+        assert_eq!(usage.exits[&exit].recent(), (1000, 0));
+    }
+
+    #[test]
+    fn a_replaced_report_moves_the_start_back_by_less_than_a_gap_and_only_until_the_one_after_it_is_five_minutes_old() {
+        // 第 2 秒的那份顶替了第 1 秒的。到第 301 秒，每一份都留着时起点是第 1 秒，这里是第 0 秒，
+        // 多算了第 0 到 1 秒之间的，健康可能因此翻过来，两个方向都有。下一份到的时候第 2 秒那份已经满 5 分钟，起点就一样了。
+        let start = Instant::now();
+        let at = |secs| start + Duration::from_secs(secs);
+        let cases = [
+            // 窗口外的 3 次失败算了进来；每一份都留着时是 (0, 0)、unknown。
+            ([(0, 0), (3, 3), (3, 3), (3, 3)], ((3, 3), ExitHealth::Degraded), ((0, 0), ExitHealth::Unknown)),
+            // 窗口外的 30 个成功的请求把失败稀释了；每一份都留着时是 (3, 3)、degraded。
+            ([(0, 0), (30, 0), (30, 0), (33, 3)], ((33, 3), ExitHealth::Ok), ((3, 3), ExitHealth::Degraded)),
+        ];
+        for (counts, at_301, at_302) in cases {
+            let mut usage = Usage::default();
+            let exit = id(2);
+            for (secs, (total, failed)) in [0, 1, 2, 301].into_iter().zip(counts) {
+                usage.exit_reported(exit, 1, report(total, failed), at(secs));
+            }
+            let recent = usage.exits[&exit].recent();
+            assert_eq!((recent, health(true, recent)), at_301);
+            let (total, failed) = counts[3];
+            usage.exit_reported(exit, 1, report(total, failed), at(302));
+            let recent = usage.exits[&exit].recent();
+            assert_eq!((recent, health(true, recent)), at_302);
+        }
     }
 
     #[test]
@@ -481,9 +571,10 @@ mod tests {
         let (mut usage, mut all, exit) = (Usage::default(), VecDeque::new(), id(2));
         let (mut at, mut run, mut total) = (Duration::ZERO, 1, 0);
         for _ in 0..200_000 {
-            // 多数挤在一起，也有正常的间隔、断线几分钟，偶尔重启。
+            // 多数挤在一起（也有同一时刻的），也有正常的间隔、断线几分钟，偶尔重启。
             at += Duration::from_millis(match next(100) {
-                0..60 => next(2_000),
+                0..5 => 0,
+                5..60 => next(2_000),
                 60..95 => 10_000 + next(1_000),
                 95..99 => next(400_000),
                 _ => {
@@ -502,10 +593,10 @@ mod tests {
             assert!(kept.len() <= max_samples(), "{} 个", kept.len());
             let (first, last) = (kept.front().unwrap(), kept.back().unwrap());
             let (want_first, want_last) = (all.front().unwrap(), all.back().unwrap());
-            assert_eq!((last.at, last.total), (want_last.at, want_last.total));
+            assert_eq!(whole(last), whole(want_last));
             assert!(first.at <= want_first.at, "起点不会比每一份都留着时晚");
             assert!(
-                first.at == want_first.at || sample.at - first.at < HEALTH_WINDOW + SAMPLE_GAP,
+                whole(first) == whole(want_first) || sample.at - first.at < HEALTH_WINDOW + SAMPLE_GAP,
                 "起点是 {:?} 之前的，每一份都留着时是 {:?} 之前的",
                 sample.at - first.at,
                 sample.at - want_first.at,
