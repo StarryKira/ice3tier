@@ -55,12 +55,16 @@ async fn dial(key: &NodeKey, to: PublicKey, addr: SocketAddr, alpn: &[&[u8]]) ->
 
 /// 回环上握完手的一条 lane 的两头：拨号方提供 `dialler` 里的版本，接受方认 `acceptor` 里的。返回（拨号方的，接受方的）。
 async fn ends(dialler: &[&[u8]], acceptor: &[&[u8]]) -> (Lane, Lane) {
+    ends_on(TcpListener::bind("127.0.0.1:0").await.unwrap(), dialler, acceptor).await
+}
+
+/// 和 [`ends`] 一样，接受方在 `listener` 上接（调用方可以先给它设好接收缓冲，接进来的连接从握手起就照它通告窗口）。
+async fn ends_on(listener: TcpListener, dialler: &[&[u8]], acceptor: &[&[u8]]) -> (Lane, Lane) {
     let (dialler_key, acceptor_key) = (NodeKey::generate().unwrap(), NodeKey::generate().unwrap());
     let dialler_public = dialler_key.public();
     let mut server =
         Arc::unwrap_or_clone(lane::server_config(&Identity::new(&acceptor_key).unwrap(), move |key| *key == dialler_public).unwrap());
     server.alpn_protocols = acceptor.iter().map(|alpn| alpn.to_vec()).collect();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     // 接受方读 HELLO 时也看着它：发送的一头丢了就当作对端被拿掉了。
     let (_members, membership) = watch::channel(());
@@ -213,6 +217,77 @@ async fn an_initiator_switch_that_answers_nothing_is_a_protocol_error() {
     recv.end_header();
     let error = read_to_end(&mut recv).await.expect_err("没有人要的 SWITCH");
     assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+}
+
+/// 发起方回应的 SWITCH 还没交给内核（发送缓冲满着）时，接收方向不交出去：那时由后台任务去写它，撞上对端的重置时拿走的
+/// 错误（Linux 上只报一次）只记在流里，交出去的接收方向读到的只是 EOF，会被当成正常结束。排空之后照常交出去。
+///
+/// 只在 Linux 上跑：要写满得靠对端的小接收缓冲，Linux 设了 `SO_RCVBUF` 就照它，别的系统还会自己往大里调，窗口慢慢打开，
+/// 排着的回应随后就写出去了，"写不动"等不稳。只报一次错的也正是 Linux。
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn the_read_side_stays_in_the_stream_while_the_answering_switch_is_still_queued() {
+    use socket2::SockRef;
+
+    // 缓冲调小：接受方不读时，发起方很快就写不动。接收缓冲要在接受连接之前设，窗口从握手起就是小的。
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    SockRef::from(&listener).set_recv_buffer_size(4096).unwrap();
+    let (dialled, accepted) = ends_on(listener, NEW, NEW).await;
+    SockRef::from(&*dialled.socket).set_send_buffer_size(4096).unwrap();
+    let (mut send, mut recv) = initiate(dialled);
+    send.write_all(b"OPEN").await.unwrap();
+    send.end_header(Payload::Passthrough);
+    let (mut far_send, mut far_recv, _) = respond(accepted).await;
+    let mut open = [0; 4];
+    far_recv.read_exact(&mut open).await.unwrap();
+    far_recv.end_header();
+    // 写到写不动为止：连着两次、隔一会儿都写不进去才算满了（刚写进去的还在路上时，发送缓冲会腾出一点地方）。
+    let chunk = vec![7; 16 * 1024];
+    let mut stuck = 0;
+    while stuck < 2 {
+        if tokio::time::timeout(Duration::from_millis(100), send.write_all(&chunk)).await.is_ok() {
+            stuck = 0;
+        } else {
+            stuck += 1;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    far_send.write_all(b"REPLY").await.unwrap();
+    far_send.end_header(Payload::Passthrough);
+    let mut reply = [0; 5];
+    recv.read_exact(&mut reply).await.unwrap();
+    recv.end_header();
+    // SWITCH 跟在 REPLY 后面，可能还在路上。收到时发起方回应，回应排在写不动的密文后面。
+    tokio::time::timeout(PATIENCE, async {
+        while !recv.shared.lock().switched {
+            assert!(recv.wait_raw().await.is_none(), "回应的 SWITCH 还没交给内核时，接收方向不交出去");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("发起方没有回应接受方的 SWITCH");
+    assert!(!recv.shared.lock().out.is_empty(), "发送缓冲满着，回应应该还排在待发的密文里");
+    assert!(recv.wait_raw().await.is_none(), "回应的 SWITCH 还没交给内核时，接收方向不交出去");
+
+    // 接受方读走之后，后台任务把回应写完，两头的接收方向都交得出去。
+    let far = tokio::spawn(async move {
+        let mut buf = vec![0; 64 * 1024];
+        loop {
+            if let Some(raw) = far_recv.wait_raw().await {
+                return raw;
+            }
+            assert!(far_recv.read(&mut buf).await.unwrap() > 0, "发起方的 SWITCH 之前不该结束");
+        }
+    });
+    tokio::time::timeout(PATIENCE, async {
+        while recv.wait_raw().await.is_none() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("回应写完之后接收方向应该交得出去");
+    tokio::time::timeout(PATIENCE, far).await.expect("接受方没有等到发起方的 SWITCH").unwrap();
 }
 
 /// 出口：只数见过几个请求，然后拒绝。

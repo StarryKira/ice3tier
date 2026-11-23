@@ -244,6 +244,8 @@ async fn a_refusal_gets_its_reply_through_and_stops_the_initiator() {
 /// 流层的头只能来自 TLS 里面：接受方在 REPLY 写完之前就发了 SWITCH、REPLY 的另一半跟在后面的原始字节里时，发起方读出错，
 /// 不会把后面的原始字节当作头交出来（issue #17）。反方向（OPEN 的另一半不在 TLS 里）只有没升级的发起方做得出来：
 /// 升级了的发起方在接受方切换之前不离开 TLS，见 `i3t-lane` 里流的单元测试。
+///
+/// 这样的 SWITCH 发起方也不回应：它的方向留在 TLS 里，重置时原因码照样用 ABORT 送到。
 #[tokio::test]
 async fn a_header_cannot_be_completed_with_bytes_from_outside_tls() {
     let pair = Pair::new(quick()).await;
@@ -266,6 +268,10 @@ async fn a_header_cannot_be_completed_with_bytes_from_outside_tls() {
         assert_eq!(&got, b"RE");
         let error = recv.read_exact(&mut got).await.expect_err("REPLY 的另一半不在 TLS 里，不能交出来");
         assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        // 发起方的方向还在 TLS 里的话，原因码用 ABORT 送得到；跟着切换了的话只剩 RST，带不了原因码。
+        send.reset(StreamCode(9));
+        let error = assert_aborted(&mut far_recv, "发起方以协议错误重置").await;
+        assert_eq!(StreamAborted::of(&error), Some(StreamAborted::Reset(StreamCode(9))), "原因码要送到：{error}");
     }
 }
 

@@ -115,6 +115,27 @@ async fn resetting_target() -> SocketAddr {
     addr
 }
 
+/// 回 ServerHello 之后、密文回到一半时重置的 TLS 1.3 目标给的那一半。
+const HALF_ANSWER: &[u8] = b"\x17\x03\x03\x00\x40half of an encrypted answer";
+
+/// 一个 TLS 1.3 目标：读到 ClientHello 之后回 ServerHello 和半截密文，过 `pause` 之后用 RST 断开。
+async fn tls13_resetting_target(pause: Duration) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut hello = vec![0; client_hello(b"").len()];
+                let _ = stream.read_exact(&mut hello).await;
+                stream.write_all(&[&server_hello()[..], HALF_ANSWER].concat()).await.unwrap();
+                tokio::time::sleep(pause).await;
+                stream.set_zero_linger().unwrap();
+            });
+        }
+    });
+    addr
+}
+
 /// 读到 EOF 或者出错。返回读到的字节，和是不是正常结束的。
 async fn drain(stream: &mut (impl AsyncRead + Unpin)) -> (Vec<u8>, io::Result<()>) {
     let mut all = Vec::new();
@@ -315,6 +336,31 @@ async fn an_upstream_reset_in_the_middle_of_an_answer_reaches_the_client_as_a_re
     let error = end.expect_err("半截的回答之后必须是重置，不能是正常结束");
     assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
     assert!(!relay.await.unwrap().is_clean());
+}
+
+/// 不再加密的流也一样：目标回了 TLS 1.3 的 ServerHello 和半截密文之后重置，客户端看到的是重置，不是正常结束。
+/// 立刻重置时，入口回应出口的 SWITCH 那一刻 lane 可能已经被重置了：Linux 上那次写拿走的错误不能让读的一方当成 FIN。
+#[tokio::test]
+async fn an_upstream_reset_after_a_tls13_server_hello_reaches_the_client_as_a_reset_through_the_flow_layer() {
+    for pause in [Duration::ZERO, Duration::from_millis(50)] {
+        for _ in 0..3 {
+            let pair = Pair::new(quick()).await;
+            pair.ready(1).await;
+            let target = tls13_resetting_target(pause).await;
+            let lanes = Arc::clone(&pair.exit.lanes);
+            tokio::spawn(async move { i3t_flow::serve(&*lanes, Arc::new(ToTarget::new(target))).await });
+            let (mut client, client_side) = tcp_pair().await;
+            let lanes = Arc::clone(&pair.entry.lanes);
+            let peer = pair.exit.id;
+            let relay = tokio::spawn(async move { through_flow(&lanes, peer, client_side, &client_hello(b"")).await });
+            let (got, end) = drain(&mut client).await;
+            let answer = [&server_hello()[..], HALF_ANSWER].concat();
+            assert!(answer.starts_with(&got), "停 {pause:?}：客户端收到的不是目标回的开头");
+            let error = end.expect_err("半截的回答之后必须是重置，不能是正常结束");
+            assert_eq!(error.kind(), io::ErrorKind::ConnectionReset, "停 {pause:?}：{error}");
+            assert!(!timeout(PATIENCE, relay).await.unwrap().unwrap().is_clean(), "停 {pause:?}");
+        }
+    }
 }
 
 /// 流层的头只能来自 TLS 里面：接受方在 REPLY 写完之前就发了 SWITCH，REPLY 的后一半跟在原始字节里时，发起方的流层不把它当作

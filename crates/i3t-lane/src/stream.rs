@@ -241,7 +241,8 @@ impl LaneRecv {
         self.shared.is_revoked()
     }
 
-    /// 这个方向已经离开 TLS 时，把它交出去，让调用方直接读 socket（见 [`RawRead`]）。还在 TLS 里、已经结束或者已经交出去时返回 `None`。
+    /// 这个方向已经离开 TLS 时，把它交出去，让调用方直接读 socket（见 [`RawRead`]）。还在 TLS 里、已经结束或者已经交出去时返回 `None`；
+    /// 本端还有待发的密文没交给内核（比如刚回应了对端的 SWITCH）、或者写的时候已经发现连接断了，也返回 `None`，调用方照常读。
     /// 不等待；要等对端的切换用 [`RecvStream::wait_raw`]。
     ///
     /// 交出去之后这个 [`LaneRecv`] 不再能读，丢弃它也不会叫停流。
@@ -260,14 +261,16 @@ impl LaneRecv {
                 break;
             }
         }
-        if !state.out.is_empty() {
-            push(shared, &mut state);
-        }
         if matches!(state.recv, RecvState::Leaving { .. }) {
             state.finish_header();
         }
+        if !state.out.is_empty() {
+            push(shared, &mut state);
+        }
         // 写的时候已经知道连接断了：交出去的话，搬运的一方读到的只是 EOF。留在这里读，读到 EOF 时报那个错误。
-        if state.write_failed.is_some() {
+        // 待发的密文（比如回应对端的 SWITCH）还没全部交给内核时也不交：之后由后台任务去写（[`flush_later`]），它撞上对端的
+        // 重置时拿走的那个错误（Linux 上只报一次）就只记在这里，交出去的接收方向读到的又只是 EOF。排空之后下一次再交。
+        if state.write_failed.is_some() || !state.out.is_empty() {
             return None;
         }
         let RecvState::Raw(pending) = &mut state.recv else { return None };
@@ -406,6 +409,10 @@ impl State {
     }
 
     /// 本端读完了对端的头：之后可以从 TLS 里收到的字节接着读原始字节。
+    ///
+    /// 发起方这时如果已经收到接受方的 SWITCH（接受方看过目标的回答、先切换了），回一个 SWITCH，自己的方向跟着离开 TLS。
+    /// 要等头读完：接受方在 REPLY 还没完的时候就切换是不守协议，那时不跟，这个方向留在 TLS 里，重置时还能用 ABORT 带上原因码。
+    /// 已经在结束、已经重置的方向也不用跟。回应排在待发的密文里，调用方随后送出（[`push`]）。
     fn finish_header(&mut self) {
         self.header_read = true;
         if let RecvState::Leaving { sealed, raw } = &mut self.recv {
@@ -415,6 +422,10 @@ impl State {
                 (false, false) => compact(&[&sealed[..], &raw[..]].concat()),
             };
             self.recv = RecvState::Raw(pending);
+            // 发起方的接收方向只会因为接受方的 SWITCH 离开 TLS（[`Mode::Mutual`]）；接受方的（没升级的发起方、或者发起方的回应）不用回。
+            if self.role == Role::Initiator && matches!(self.send, SendState::Sealed) {
+                self.switch();
+            }
         }
     }
 
@@ -484,7 +495,13 @@ impl State {
     /// 原始字节的方向上不能插进 TLS 的字节。
     fn collect_tls_output(&mut self) {
         let Some(sealed) = self.sealed.as_mut() else { return };
-        if matches!(self.send, SendState::Header(_) | SendState::Sealed | SendState::Closing) {
+        let in_tls = match self.send {
+            SendState::Header(_) | SendState::Sealed => true,
+            // 原始字节的方向结束时也经过 Closing（等待发的密文写完再发 FIN）。
+            SendState::Closing => !self.switched,
+            _ => false,
+        };
+        if in_tls {
             sealed.take_output(&mut self.out);
         } else {
             sealed.take_output(&mut BytesMut::new());
@@ -512,11 +529,6 @@ impl State {
                 self.recv = RecvState::Leaving { sealed: Bytes::new(), raw: compact(&leftover) };
                 if self.header_read {
                     self.finish_header();
-                }
-                // 接受方看过目标的回答、先切换了：发起方回一个 SWITCH，自己的方向跟着离开 TLS。已经在结束、已经重置的方向不用跟。
-                // 回应排在待发的密文里，调用方随后送出（[`push`]）。
-                if self.role == Role::Initiator && matches!(self.send, SendState::Sealed) {
-                    self.switch();
                 }
                 self.drop_tls_if_unused();
             }
@@ -878,7 +890,12 @@ impl RecvStream for LaneRecv {
 
     /// 读完了对端的头（OPEN 或 REPLY）。在这之前接收方向只交出 TLS 里收到的字节，见 [`RecvState::Leaving`]。
     fn end_header(&mut self) {
-        self.shared.lock().finish_header();
+        let shared = &self.shared;
+        let mut state = shared.lock();
+        state.finish_header();
+        if !state.out.is_empty() {
+            push(shared, &mut state);
+        }
     }
 
     /// 等到知道这个方向接下来是什么：离开了 TLS（对端发了 SWITCH，或者没升级的发起方选了 passthrough）就交出来，和
