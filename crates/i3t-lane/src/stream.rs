@@ -223,6 +223,9 @@ struct State {
     /// 本端用 ABORT 帧重置了发送方向，这个帧已经全部交给了内核：关闭之前要等对端读到它（[`close_after_abort`]）。
     abort_sent: bool,
     heard_from_peer: bool,
+    /// 往 socket 写的时候出过错：连接已经断了，多半是对端重置了。Linux 上一次重置只报一次错，被写拿走之后读只看到 EOF，
+    /// 所以记在这里：之后读到 EOF 时按它异常结束，不当作对端正常结束了（见 [`State::drain_now`]）。
+    write_failed: Option<Failure>,
 }
 
 impl LaneSend {
@@ -263,6 +266,10 @@ impl LaneRecv {
         if matches!(state.recv, RecvState::Leaving { .. }) {
             state.finish_header();
         }
+        // 写的时候已经知道连接断了：交出去的话，搬运的一方读到的只是 EOF。留在这里读，读到 EOF 时报那个错误。
+        if state.write_failed.is_some() {
+            return None;
+        }
         let RecvState::Raw(pending) = &mut state.recv else { return None };
         let received = std::mem::take(pending);
         state.recv = RecvState::Handed;
@@ -302,6 +309,7 @@ pub(crate) fn initiate(lane: Lane, book: Book, revoked: watch::Receiver<bool>) -
         aborted: false,
         abort_sent: false,
         heard_from_peer: false,
+        write_failed: None,
     };
     split(socket, peer, state, book, revoked)
 }
@@ -336,6 +344,7 @@ pub(crate) fn respond(lane: Lane, mode: Mode, header: &[u8], book: Book, revoked
         aborted: false,
         abort_sent: false,
         heard_from_peer: true,
+        write_failed: None,
     };
     split(socket, peer, state, book, revoked)
 }
@@ -419,12 +428,18 @@ impl State {
     }
 
     /// 尽量把待发的密文交给内核，不等待。全部交完返回 `true`。
+    ///
+    /// 写出错时记下来（[`State::write_failed`]）：这里的写有时是读的那一侧顺手做的（回应对端的 SWITCH），或者在后台，
+    /// 错误没有人接，读的那一侧却要靠它知道连接是被重置的。
     fn drain_now(&mut self, socket: &TcpStream) -> io::Result<bool> {
         while !self.out.is_empty() {
             match socket.try_write(&self.out) {
                 Ok(written) => self.out.advance(written),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
-                Err(error) => return Err(error),
+                Err(error) => {
+                    self.write_failed.get_or_insert_with(|| Failure::of(&error));
+                    return Err(error);
+                }
             }
         }
         if self.out.capacity() > 0 {
@@ -649,6 +664,9 @@ impl AsyncRead for LaneRecv {
                 }
                 RecvState::Raw(_) => match shared.socket.try_read(buf.initialize_unfilled()) {
                     Ok(0) => {
+                        if let Some(failure) = state.write_failed.clone() {
+                            return Poll::Ready(Err(state.fail_recv(failure)));
+                        }
                         state.recv = RecvState::Eof;
                         return Poll::Ready(Ok(()));
                     }
@@ -718,7 +736,10 @@ impl AsyncWrite for LaneSend {
                             state.send_waker = Some(cx.waker().clone());
                             ready!(shared.socket.poll_write_ready(cx))?;
                         }
-                        Err(error) => return Poll::Ready(Err(error)),
+                        Err(error) => {
+                            state.write_failed.get_or_insert_with(|| Failure::of(&error));
+                            return Poll::Ready(Err(error));
+                        }
                     }
                 }
                 SendState::Closing | SendState::Finished => {
