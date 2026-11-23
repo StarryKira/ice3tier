@@ -1299,7 +1299,7 @@ mod tests {
         // 两端的最后一份在这之后才到：不算数，不然超时的测试被记成做完了。
         try_send(&lab, &a, initiator_report(view.id)).unwrap();
         try_send(&lab, &b, responder_report(view.id, true)).unwrap();
-        lab.controller.lock().tests_tick(Instant::now());
+        lab.controller.lock().tests_tick(later(1));
         let stored = lab.controller.lock().store.test(network, view.id).unwrap().unwrap();
         assert_eq!((stored.state, stored.error.map(|problem| problem.code)), (TestState::Failed, Some(TestCode::NoReport)));
     }
