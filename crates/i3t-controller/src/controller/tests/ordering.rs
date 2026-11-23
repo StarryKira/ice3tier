@@ -19,7 +19,7 @@ use crate::error::{Error, Rejection};
 use crate::store::NetmapState;
 
 /// 两个在线的节点，一个带标签 `src`，一个带标签 `dst`，之间没有任何规则，都已经确认了当前的 netmap。
-fn two_unconnected(lab: &mut Lab) -> (i3t_model::admin::NetworkId, Member, Member) {
+pub(super) fn two_unconnected(lab: &mut Lab) -> (i3t_model::admin::NetworkId, Member, Member) {
     let network = lab.network("home");
     drop_default_rule(lab, network.id);
     let mut source = lab.join(network.id, &["src"]);

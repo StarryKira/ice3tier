@@ -547,6 +547,22 @@ fn switch_auto_update(fleet: &Fleet, member: &Member, on: bool) {
 }
 
 #[test]
+fn switching_auto_update_off_withdraws_the_order_even_if_recomputing_netmaps_fails() {
+    let mut fleet = Fleet::new();
+    let mut pending = fleet.node(OLD);
+    fleet.release();
+    assert!(fleet.last_order(&mut pending).is_some());
+
+    // 开关改完之后重算 netmap 时读不出这个网络。开关已经改了，撤回照样要发：不然节点会装上管理员刚关掉的更新。
+    fleet.controller().lock().store.execute_batch("ALTER TABLE pair_settings RENAME TO pair_settings_away;");
+    let request = UpdateNode { auto_update: Some(false), ..UpdateNode::default() };
+    assert!(fleet.controller().update_node(fleet.network, pending.id, &request).is_err());
+    fleet.controller().lock().store.execute_batch("ALTER TABLE pair_settings_away RENAME TO pair_settings;");
+    pending.receive();
+    assert_eq!(pending.cancels, 1);
+}
+
+#[test]
 fn a_node_with_its_own_switch_off_is_left_alone_until_an_admin_forces_it() {
     let mut fleet = Fleet::new();
     let mut kept = fleet.node(OLD);

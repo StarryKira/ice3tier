@@ -71,7 +71,7 @@ impl Controller {
         let mut inner = self.lock();
         let network = inner.require_network(network)?;
         let now = inner.clock.now();
-        let (before, after, groups) = inner.store.atomically(|store| {
+        let (before, after, groups, listeners) = inner.store.atomically(|store| {
             let before = require_node(store, network.id, id)?;
             let mut node = before.clone();
             if let Some(name) = &request.name {
@@ -112,27 +112,32 @@ impl Controller {
             let params = update_params(&before, &node, &groups);
             let detail = describe_update(&before, &node, &groups);
             store.log_refs(now, Some(network.id), action::NODE_UPDATE, &detail, &[LogRef::node(id)], params)?;
-            Ok::<_, Error>((before, node, groups))
+            // 改完之后要用的也在这里读：提交之后再读，读不出来时改动已经生效，却没人去重算。
+            let listeners: Vec<NodeId> = if node.forward_target == before.forward_target {
+                Vec::new()
+            } else {
+                let forwards = store.forwards(network.id)?.into_iter();
+                forwards.filter(|forward| forward.config.target_node == id).map(|forward| forward.config.listen_node).collect()
+            };
+            Ok::<_, Error>((before, node, groups, listeners))
         })?;
         // relay 的名字写在全网每个节点的 netmap 里；别的改动只影响 netmap 里有它的节点。
         // 开关只管指向它的转发：两端的节点（监听节点不一定在它的 netmap 里，比如访问规则不允许时）。
         let seeds = if after.relay.is_some() && before.name != after.name {
             Seeds::All
         } else if after.forward_target != before.forward_target {
-            let listeners = inner.store.forwards(network.id)?.into_iter().filter(|forward| forward.config.target_node == id);
             let mut seeds = inner.holders_of(id);
             seeds.insert(id);
-            seeds.extend(listeners.map(|forward| forward.config.listen_node));
+            seeds.extend(listeners);
             Seeds::Nodes(seeds)
         } else {
             inner.holders_and(id)
         };
-        inner.refresh(network.id, seeds, None)?;
-        // 开关关掉时撤回还没换上去的自动更新，打开时轮到它；和全局的开关一样。
-        if after.auto_update != before.auto_update {
-            inner.roll_out()?;
-        }
+        let refreshed = inner.refresh(network.id, seeds, None);
+        // 开关关掉时撤回还没换上去的自动更新，打开时轮到它；和全局的开关一样。重算没成也要做：开关已经改了。
+        let rolled = if after.auto_update == before.auto_update { Ok(()) } else { inner.roll_out() };
         self.wake_if_needed(&inner);
+        refreshed.and(rolled)?;
         Ok(inner.node_view(&network, &groups, &after, now, &inner.reach_index(network.id)?))
     }
 
@@ -218,10 +223,11 @@ impl Controller {
             Affects::WholeNetwork => Seeds::All,
             Affects::Holders => inner.holders_and(id),
         };
-        inner.refresh(network.id, seeds, None)?;
-        // relay 的更新要排队，是不是 relay 变了，该轮到谁也跟着变。
-        inner.roll_out()?;
+        let refreshed = inner.refresh(network.id, seeds, None);
+        // relay 的更新要排队，是不是 relay 变了，该轮到谁也跟着变。重算没成也要做：能力已经改了。
+        let rolled = inner.roll_out();
         self.wake_if_needed(&inner);
+        refreshed.and(rolled)?;
         Ok(inner.node_view(&network, &inner.store.groups(network.id)?, &node, now, &inner.reach_index(network.id)?))
     }
 
@@ -255,10 +261,11 @@ impl Controller {
         // 先告诉它自己，再从别人那里去掉它。它的连接随着发送队列的关闭而结束。
         inner.send(id, ToNode::Revoked);
         inner.forget_node(id);
-        inner.refresh(network, Seeds::All, None)?;
-        inner.roll_out()?;
+        let refreshed = inner.refresh(network, Seeds::All, None);
+        // 它占着 relay 的更新轮次的话，轮到下一个。重算没成也要做：它已经删掉了。
+        let rolled = inner.roll_out();
         self.wake_if_needed(&inner);
-        Ok(())
+        refreshed.and(rolled)
     }
 
     /// 把 `id` 指定为已下线节点 `predecessor` 的继任：继承它的虚拟 IP、名字、所在的分组（和自己的合并），
@@ -304,10 +311,11 @@ impl Controller {
         })?;
         tracing::info!(node = %id, %predecessor, name = %node.name, "节点继任");
         inner.forget_node(predecessor);
-        inner.refresh(network.id, Seeds::All, None)?;
-        // 继任者可能接过了关掉的自动更新：撤回已经给它的自动更新。
-        inner.roll_out()?;
+        let refreshed = inner.refresh(network.id, Seeds::All, None);
+        // 继任者可能接过了关掉的自动更新：撤回已经给它的自动更新。重算没成也要做：继任已经生效了。
+        let rolled = inner.roll_out();
         self.wake_if_needed(&inner);
+        refreshed.and(rolled)?;
         Ok(inner.node_view(&network, &inner.store.groups(network.id)?, &node, now, &inner.reach_index(network.id)?))
     }
 }

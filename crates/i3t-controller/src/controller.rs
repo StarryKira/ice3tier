@@ -590,22 +590,35 @@ impl Inner {
     }
 
     /// 时间序列以外的后台工作。返回下一次要做的时刻。
+    ///
+    /// 一样工作出错不耽误后面的：每一样出错时都自己留着下次再做（排着的重算、要重新看谁用不了 UDP 的网络、`next_rollout`），
+    /// 这里只把第一个错误报出去，调用方过一会儿再来。
     fn tick_work(&mut self, now: Instant, wall: Timestamp) -> Result<Option<Instant>, Error> {
+        let mut first_error = None;
+        let mut keep = |outcome: Result<Option<Instant>, Error>| {
+            outcome.unwrap_or_else(|err| {
+                first_error.get_or_insert(err);
+                None
+            })
+        };
         self.give_up_on_slow_acks(now);
-        let no_udp = self.no_udp_tick(now)?;
-        let next = self.flush_due(now)?;
+        let no_udp = keep(self.no_udp_tick(now));
+        let next = keep(self.flush_due(now));
         if self.updates.next_rollout.is_some_and(|at| at <= now) {
-            self.roll_out()?;
+            keep(self.roll_out().map(|()| None));
         }
         if self.last_purge.is_none_or(|last| now.duration_since(last) >= PURGE_INTERVAL) {
             self.last_purge = Some(now);
-            self.store.purge_expired_tokens(wall)?;
-            self.store.purge_cooldowns(wall)?;
+            let purged = self.store.purge_expired_tokens(wall).and_then(|_| self.store.purge_cooldowns(wall));
+            keep(purged.map(|_| None).map_err(Error::from));
         }
         // 还有节点欠着确认时，隔一会儿要回来看它们是不是等得太久了。
         let waiting = self.sync.values().any(NodeSync::is_waiting).then(|| now + self.timing.ack_timeout.min(SWEEP_INTERVAL));
         let tests = self.tests_tick(now);
-        Ok([next, no_udp, waiting, self.updates.next_rollout, tests].into_iter().flatten().min())
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok([next, no_udp, waiting, self.updates.next_rollout, tests].into_iter().flatten().min()),
+        }
     }
 }
 

@@ -22,7 +22,7 @@
 //!
 //! 离线的节点什么都不用记：它重新连上来的时候和别的节点一样过一遍这些规矩。
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use i3t_model::admin::UpdateWait;
 use i3t_model::control::ToNode;
@@ -33,6 +33,9 @@ use super::update::Package;
 use super::{Inner, Live};
 use crate::error::Error;
 use crate::store::NodeRecord;
+
+/// 下发更新指令没做完（读不出存储）时，过多久再做一遍。
+const ROLLOUT_RETRY: Duration = Duration::from_secs(1);
 
 /// 这次连接上发给一个节点的更新指令。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,9 +127,21 @@ impl Inner {
 
     /// 按现在的情况给该更新的节点下发指令，撤回不该再做的。任何可能改变结论的事情之后都要调用一次：
     /// 节点上线、节点报了失败、查到了新的发布、包取回来了、设置变了、管理员点了按钮、轮到的 relay 站稳了。
+    ///
+    /// 读不出存储、没做完时过 [`ROLLOUT_RETRY`] 再做一遍：不然要等下一件可能改变结论的事，这期间该下发的指令发不出去，
+    /// 该撤回的（比如管理员刚关掉了自动更新）也撤不回来。
     pub(crate) fn roll_out(&mut self) -> Result<(), Error> {
         let now = Instant::now();
         self.updates.next_rollout = None;
+        let outcome = self.roll_out_at(now);
+        if outcome.is_err() {
+            let retry = now + ROLLOUT_RETRY;
+            self.updates.next_rollout = Some(self.updates.next_rollout.map_or(retry, |at| at.min(retry)));
+        }
+        outcome
+    }
+
+    fn roll_out_at(&mut self, now: Instant) -> Result<(), Error> {
         self.settle_relay_turns(now)?;
 
         let online: Vec<NodeId> = self.live.keys().copied().collect();
