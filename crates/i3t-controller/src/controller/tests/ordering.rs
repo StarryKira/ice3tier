@@ -19,7 +19,7 @@ use crate::error::{Error, Rejection};
 use crate::store::NetmapState;
 
 /// 两个在线的节点，一个带标签 `src`，一个带标签 `dst`，之间没有任何规则，都已经确认了当前的 netmap。
-fn two_unconnected(lab: &mut Lab) -> (i3t_model::admin::NetworkId, Member, Member) {
+pub(super) fn two_unconnected(lab: &mut Lab) -> (i3t_model::admin::NetworkId, Member, Member) {
     let network = lab.network("home");
     drop_default_rule(lab, network.id);
     let mut source = lab.join(network.id, &["src"]);
@@ -29,7 +29,7 @@ fn two_unconnected(lab: &mut Lab) -> (i3t_model::admin::NetworkId, Member, Membe
     (network.id, source, destination)
 }
 
-fn report_endpoints(lab: &Lab, member: &Member, endpoint: &str) {
+pub(super) fn report_endpoints(lab: &Lab, member: &Member, endpoint: &str) {
     let report = Report { endpoints: vec![endpoint.parse().unwrap()], ..Report::default() };
     lab.controller.handle(member.session, REMOTE, ToController::Report(Box::new(report))).unwrap();
 }
@@ -250,7 +250,7 @@ fn sql(lab: &Lab, sql: &str) {
 }
 
 /// 只有这一个节点的那一列写不进存储，别的节点照常。用 `unblock` 恢复。
-fn block_column_of(lab: &Lab, column: &str, node: NodeId) {
+pub(super) fn block_column_of(lab: &Lab, column: &str, node: NodeId) {
     let id = node.get();
     sql(
         lab,
@@ -265,7 +265,7 @@ fn unblock(lab: &Lab, column: &str) {
 }
 
 /// 后台任务现在是不是被叫醒了。问一次就算它醒过一次。
-fn is_woken(lab: &Lab) -> bool {
+pub(super) fn is_woken(lab: &Lab) -> bool {
     let mut work = pin!(lab.controller.wait_for_work());
     matches!(work.as_mut().poll(&mut Context::from_waker(Waker::noop())), Poll::Ready(()))
 }

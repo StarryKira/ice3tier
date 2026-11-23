@@ -11,6 +11,7 @@ mod ordering;
 mod proxies;
 mod routes;
 mod stats;
+mod store_failures;
 mod update;
 
 use i3t_model::Netmap;
