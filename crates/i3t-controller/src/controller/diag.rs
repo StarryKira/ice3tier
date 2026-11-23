@@ -651,6 +651,7 @@ mod tests {
     use i3t_model::control::{Declared, DirectKind, Hello, Route, ToController};
 
     use super::*;
+    use crate::controller::Failures;
     use crate::controller::testing::{Lab, Member, REMOTE, hello, modern_hello};
 
     fn two_nodes() -> (Lab, NetworkId, Member, Member) {
@@ -1295,7 +1296,9 @@ mod tests {
             inner.store.set_read_only(true);
             inner.last_purge = None;
             let wall = inner.clock.now();
-            assert!(inner.tick_work(Instant::now(), wall).unwrap_err().is_database_wide());
+            let mut failures = Failures::default();
+            inner.tick_work(Instant::now(), wall, &mut failures);
+            assert!(failures.database_wide);
             inner.store.set_read_only(false);
         }
         assert_eq!(lab.controller.test(network, view.id).unwrap().state, TestState::Failed, "结果照样定下了");
@@ -1322,7 +1325,9 @@ mod tests {
             inner.store.set_read_only(true);
             inner.last_purge = None;
             let wall = inner.clock.now();
-            assert!(inner.tick_work(late, wall).unwrap_err().is_database_wide());
+            let mut failures = Failures::default();
+            inner.tick_work(late, wall, &mut failures);
+            assert!(failures.database_wide);
             inner.store.set_read_only(false);
         }
         let fixed = lab.controller.test(network, view.id).unwrap();

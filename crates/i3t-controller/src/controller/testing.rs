@@ -292,3 +292,13 @@ pub(crate) fn proxy(node: NodeId, bind: &str, exit: NodeId) -> CreateProxy {
         lane: false,
     }
 }
+
+/// `run` 期间这个线程打的日志（info 及以上），每一行一条。
+pub(crate) fn logged(run: impl FnOnce()) -> Vec<String> {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let writer = std::sync::Mutex::new(file.reopen().unwrap());
+    let subscriber =
+        tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).without_time().with_ansi(false).with_writer(writer).finish();
+    tracing::subscriber::with_default(subscriber, run);
+    std::fs::read_to_string(file.path()).unwrap().lines().map(str::to_owned).collect()
+}

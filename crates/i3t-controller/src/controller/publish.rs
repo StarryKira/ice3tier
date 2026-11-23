@@ -12,7 +12,7 @@ use i3t_model::control::ToNode;
 use i3t_proto::NodeId;
 use tokio::sync::mpsc::error::TrySendError;
 
-use super::{Deferred, Inner, admin_token_hash};
+use super::{Deferred, Failures, Inner, admin_token_hash};
 use crate::access::AccessMap;
 use crate::error::Error;
 use crate::netmap::{NetworkView, Relation};
@@ -388,11 +388,11 @@ impl Inner {
         }
     }
 
-    /// 重算到期的节点。返回剩下的里面最早的到期时间。
-    pub(crate) fn flush_due(&mut self, now: Instant) -> Result<Option<Instant>, Error> {
+    /// 重算到期的节点，出的错记进 `failures`。返回剩下的里面最早的到期时间。
+    pub(crate) fn flush_due(&mut self, now: Instant, failures: &mut Failures) -> Option<Instant> {
         // 整个数据库刚读写不了，还没到再试的时候：到期的先放着，不碰数据库。
         if let Some(after) = self.flush_after.filter(|after| now < *after) {
-            return Ok(Some(after));
+            return Some(after);
         }
         let mut due: BTreeMap<NetworkId, BTreeSet<NodeId>> = BTreeMap::new();
         self.dirty.retain(|node, deferred| {
@@ -402,26 +402,23 @@ impl Inner {
             }
             !is_due
         });
-        let mut first_error = None;
         let mut due = due.into_iter();
         for (network, nodes) in due.by_ref() {
             // 一个网络失败不耽误别的网络；没做成的 `refresh` 自己放回了队列，过一会儿再试。
-            if let Err(err) = self.refresh(network, Seeds::Nodes(nodes), None) {
-                let database_wide = err.is_database_wide();
-                first_error.get_or_insert(err);
-                if database_wide {
-                    break;
-                }
+            let refreshed = self.refresh(network, Seeds::Nodes(nodes), None);
+            let database_wide = refreshed.as_ref().is_err_and(Error::is_database_wide);
+            failures.keep(refreshed);
+            if database_wide {
+                break;
             }
         }
         // 整个数据库都读写不了时，剩下的网络不去试（见 `refresh_reporting`），放回队列等下一次。
         for (network, nodes) in due {
             self.retry_later(network, nodes);
         }
-        match first_error {
-            Some(err) => Err(err),
-            None => Ok(self.dirty.values().map(|deferred| deferred.due).min()),
-        }
+        // 这一轮刚开始退避的话，退避完之前来了也不做：不用为它白来。
+        let after = self.flush_after.filter(|after| now < *after);
+        self.dirty.values().map(|deferred| deferred.due).min().map(|due| after.map_or(due, |after| due.max(after)))
     }
 
     /// 在线的节点太久不确认时不再等它，免得它卡住别的节点。

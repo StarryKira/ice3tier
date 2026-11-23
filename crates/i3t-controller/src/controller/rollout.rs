@@ -131,9 +131,24 @@ impl Inner {
     ///
     /// 读不出存储、没做完时过 [`ROLLOUT_RETRY`] 再做一遍：不然要等下一件可能改变结论的事，这期间该下发的指令发不出去，
     /// 该撤回的（比如管理员刚关掉了自动更新）也撤不回来。
+    ///
+    /// 有好几个节点读不出来时交回第一个错误，别的打日志。
     pub(crate) fn roll_out(&mut self) -> Result<(), Error> {
+        self.roll_out_reporting(Failures::into_result)
+    }
+
+    /// 后台到点时做的 [`Self::roll_out`]：有好几个节点读不出来时，别的只打在 debug 里。它们一直读不出来的话，
+    /// 后台每 [`ROLLOUT_RETRY`] 就要再碰上一遍；后台的错误日志由调用方限着频（见 `server::maintain`），
+    /// 在这里每次都打就绕过去了。
+    pub(crate) fn roll_out_in_background(&mut self) -> Result<(), Error> {
+        self.roll_out_reporting(Failures::into_first)
+    }
+
+    /// `report` 决定一个以上的节点读不出来时，第一个以外的错误怎么打。
+    fn roll_out_reporting(&mut self, report: fn(Failures) -> Result<(), Error>) -> Result<(), Error> {
         self.updates.next_rollout = None;
-        let outcome = self.roll_out_at(Instant::now());
+        let mut failures = Failures::default();
+        let outcome = self.roll_out_at(Instant::now(), &mut failures).and_then(|()| report(failures));
         if outcome.is_err() {
             // 从出错的时候算：读存储可能等了很久（数据库被别的进程锁着时要等满超时），从开始算的话这时已经到点了。
             let retry = Instant::now() + ROLLOUT_RETRY;
@@ -156,9 +171,10 @@ impl Inner {
     /// 只是某一个节点读不出来时跳过它，别的照常：不然它一直读不出的话，每次重做都卡在它这里，谁都拿不到指令，
     /// 管理员强制更新别的节点也不行。它手上还有没撤回的指令时，不知道该不该撤回，它可能正在更新、占着这个网络的轮次：
     /// 这个网络里排队的 relay 这一轮不开始。整个数据库都读不了时不往下试，别的节点也读不出来。
-    fn roll_out_at(&mut self, now: Instant) -> Result<(), Error> {
-        let mut failures = Failures::default();
-        self.settle_relay_turns(now, &mut failures)?;
+    ///
+    /// 只和某一个节点有关的错误记进 `failures`；整个数据库都读不了时提前交回那个错误。
+    fn roll_out_at(&mut self, now: Instant, failures: &mut Failures) -> Result<(), Error> {
+        self.settle_relay_turns(now, failures)?;
 
         let online: Vec<NodeId> = self.live.keys().copied().collect();
         let mut wanted = Vec::new();
@@ -207,7 +223,7 @@ impl Inner {
                 Some(UpdateWait::RelayTurn | UpdateWait::Unknown) => {}
             }
         }
-        failures.into_result()
+        Ok(())
     }
 
     fn order(&mut self, node: &NodeRecord, version: Version, timing: UpdateTiming) {
