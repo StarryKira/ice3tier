@@ -867,7 +867,7 @@ fn bound_key(store: &Store, path: &Path) -> Result<NodeKey, Error> {
     let key = match (read_key(path)?, &recorded) {
         (Some(key), _) => key,
         (None, Some(_)) => return Err(Error::KeyMissing { path: path.to_owned() }),
-        (None, None) => create_key(path, "controller 的密钥")?,
+        (None, None) => create_key(path, "生成了 controller 的密钥")?,
     };
     let public = key.public();
     let recorded = match recorded {
@@ -889,13 +889,13 @@ fn read_key(path: &Path) -> Result<Option<NodeKey>, Error> {
     }
 }
 
-/// 生成一把密钥，写进 `path`。`what` 是日志里怎么叫它。
-fn create_key(path: &Path, what: &str) -> Result<NodeKey, Error> {
+/// 生成一把密钥，写进 `path`。`said` 是日志里说的那句话。
+fn create_key(path: &Path, said: &str) -> Result<NodeKey, Error> {
     let key = NodeKey::generate().map_err(Error::KeyGeneration)?;
     create_private_file(path)
         .and_then(|file| write_synced(file, key.to_pem().as_bytes()))
         .map_err(|source| Error::Io { path: path.to_owned(), source })?;
-    tracing::info!(path = %path.display(), public = %key.public(), "生成了{what}");
+    tracing::info!(path = %path.display(), public = %key.public(), "{said}");
     Ok(key)
 }
 

@@ -952,7 +952,7 @@ fn describe(command: clap::Command, h: &Help, v: &Values) -> clap::Command {
                     .mut_subcommand("create", |sub| {
                         sub.about(h.mcp_token_create)
                             .mut_arg("name", |arg| arg.help(h.mcp_token_name).value_name(v.name))
-                            .mut_arg("scopes", |arg| arg.help(h.mcp_token_scope).value_name(SCOPES))
+                            .mut_arg("scopes", |arg| arg.help(h.mcp_token_scope).value_name(v.scope))
                             .mut_arg("expires_in", |arg| arg.help(h.mcp_token_expires_in).value_name(v.duration))
                     })
                     .mut_subcommand("revoke", |sub| sub.about(h.mcp_token_revoke).mut_arg("id", id))

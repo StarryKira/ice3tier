@@ -235,6 +235,8 @@ pub struct Values {
     pub count: &'static str,
     pub size: &'static str,
     pub duration: &'static str,
+    /// MCP 令牌的权限。
+    pub scope: &'static str,
     pub day: &'static str,
     pub ports: &'static str,
     pub action: &'static str,

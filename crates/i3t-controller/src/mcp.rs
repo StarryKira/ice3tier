@@ -195,16 +195,19 @@ fn check_origin(headers: &HeaderMap) -> Result<(), Refused> {
     if same { Ok(()) } else { Err(Refusal::new(StatusCode::FORBIDDEN, FORBIDDEN, "Origin not allowed")) }
 }
 
-/// `WWW-Authenticate` 头的值。`description` 只能有 ASCII，而且不能有引号和反斜杠。
-fn challenge(error: Option<&str>, scope: Option<McpScope>, description: &str) -> String {
+/// `WWW-Authenticate` 头的值。`error` 是哪里不对和一句说明（只能有 ASCII，不能有引号和反斜杠）；
+/// 请求根本没带令牌时没有它：RFC 6750 说这时不给错误信息，只说要 Bearer。
+fn challenge(error: Option<(&str, &str)>, scope: Option<McpScope>) -> String {
     let mut value = "Bearer realm=\"i3t-mcp\"".to_owned();
-    if let Some(error) = error {
+    if let Some((error, _)) = error {
         value.push_str(&format!(", error=\"{error}\""));
     }
     if let Some(scope) = scope {
         value.push_str(&format!(", scope=\"{scope}\""));
     }
-    value.push_str(&format!(", error_description=\"{description}\""));
+    if let Some((_, description)) = error {
+        value.push_str(&format!(", error_description=\"{description}\""));
+    }
     value
 }
 
@@ -221,7 +224,7 @@ fn authenticate(app: &Controller, headers: &HeaderMap) -> Result<McpGrant, (Stri
         None => ("请求未携带 MCP 令牌".to_owned(), None, "An MCP token is required: Authorization: Bearer <JWT>"),
     };
     let mut refusal = Refusal::new(StatusCode::UNAUTHORIZED, UNAUTHORIZED, description);
-    refusal.challenge = Some(challenge(error, None, description));
+    refusal.challenge = Some(challenge(error.map(|error| (error, description)), None));
     Err((reason, refusal))
 }
 
@@ -406,7 +409,7 @@ async fn call(app: &App, grant: &McpGrant, params: &Map<String, Value>) -> Resul
         };
         let mut refusal = Refusal::new(StatusCode::FORBIDDEN, FORBIDDEN, description.clone());
         refusal.data = Some(json!({ "error": "insufficient_scope", "scope": tool.scope }));
-        refusal.challenge = Some(challenge(Some("insufficient_scope"), Some(tool.scope), &description));
+        refusal.challenge = Some(challenge(Some(("insufficient_scope", &description)), Some(tool.scope)));
         return Err(refusal);
     }
     tracing::debug!(tool = name, token = %grant.name, jti = %grant.jti, "MCP 调用工具");

@@ -473,7 +473,7 @@ async fn only_an_mcp_token_opens_the_endpoint_and_it_opens_nothing_else() {
     // 没带令牌：401，不说哪里错了。
     let missing = server.post(None, &[], &ping).await;
     assert_eq!((missing.status, missing.error_code()), (StatusCode::UNAUTHORIZED, 401));
-    assert!(missing.challenge().starts_with("Bearer ") && !missing.challenge().contains("error="), "{}", missing.challenge());
+    assert_eq!(missing.challenge(), r#"Bearer realm="i3t-mcp""#, "没带令牌时只说要什么，不说错在哪");
 
     // 不算数的令牌：管理令牌、乱写的、改过内容的、去掉签名的、别的 controller 签的。应答都一个样。
     let parts: Vec<&str> = jwt.split('.').collect();

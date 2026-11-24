@@ -343,7 +343,7 @@ impl Inner {
 pub(super) fn bound_mcp_key(store: &mut Store, path: &Path, now: Timestamp) -> Result<NodeKey, Error> {
     let key = match read_key(path)? {
         Some(key) => key,
-        None => create_key(path, "签 MCP 令牌的密钥")?,
+        None => create_key(path, "生成了签 MCP 令牌的密钥")?,
     };
     let public = key.public();
     store.atomically(|store| {
