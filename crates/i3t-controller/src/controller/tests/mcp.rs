@@ -35,7 +35,7 @@ fn an_issued_token_says_who_it_is_for_and_what_it_may_do_and_its_text_is_kept_no
     assert_eq!((info.name.as_str(), info.network, info.state), ("claude-code", Some(home), McpTokenState::Active));
     assert_eq!(info.scopes, [McpScope::Read, McpScope::NodesEnroll], "去掉重复，按固定的顺序");
     assert_eq!((info.expires_at, info.revoked_at), (info.created_at + HOUR, None));
-    assert_eq!(lab.controller.mcp_tokens().unwrap(), [info.clone()]);
+    assert_eq!(lab.controller.mcp_tokens().unwrap(), std::slice::from_ref(info));
 
     let grant = lab.controller.mcp_grant(&created.token).unwrap();
     assert_eq!((grant.name.as_str(), grant.jti.as_str(), grant.network), ("claude-code", info.jti.as_str(), Some(home)));

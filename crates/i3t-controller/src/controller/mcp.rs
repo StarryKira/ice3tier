@@ -306,7 +306,7 @@ impl Controller {
                 store.log(now, token.network, action::MCP_TOKEN_REVOKE, &detail, params)?;
                 tracing::info!(token = id, name = %token.name, jti = %token.jti, "撤销 MCP 令牌");
             }
-            Ok::<_, Error>(store.mcp_token(id)?.ok_or(Error::NotFound(Entity::McpToken))?)
+            store.mcp_token(id)?.ok_or(Error::NotFound(Entity::McpToken))
         });
         let settled = !matches!(outcome, Err(Error::Store(StoreError::CommitUnknown(_))));
         if let Some(jti) = jti.filter(|_| outcome.is_ok() || !settled)
