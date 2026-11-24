@@ -243,14 +243,18 @@ impl Connection {
             None => None,
         };
         drop(worker);
-        blocking(&self.controller, move |controller| controller.disconnect(session)).await;
-        close(&mut writer).await;
-        // controller 里的 panic 是 bug，收尾之后照原样传出去（见 [`blocking`]）。
-        if let Some(Err(err)) = worker_ended
-            && let Ok(panic) = err.try_into_panic()
-        {
+        let panic = match worker_ended {
+            Some(Err(err)) => err.try_into_panic().ok(),
+            Some(Ok(())) | None => None,
+        };
+        // controller 里的 panic 是 bug，收尾之后照原样传出去（见 [`blocking`]）。panic 时 controller 的锁可能已经中毒，
+        // 不再去拿它记离线（那会再 panic 一次、盖住原来的那个）：发送队列的接收端随这里退出而关闭，之后给它发消息时会断开它。
+        if let Some(panic) = panic {
+            close(&mut writer).await;
             std::panic::resume_unwind(panic);
         }
+        blocking(&self.controller, move |controller| controller.disconnect(session)).await;
+        close(&mut writer).await;
     }
 }
 

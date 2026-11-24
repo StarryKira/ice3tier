@@ -434,9 +434,9 @@ impl Inner {
         Ok(())
     }
 
-    fn report(&mut self, id: NodeId, report: Report) -> Result<(), Error> {
-        let Some(mut node) = self.store.node(id)? else { return Ok(()) };
-        self.stats_reported(&node, &report);
+    fn report(&mut self, id: NodeId, mut report: Report) -> Result<(), Error> {
+        // 只依赖内存的部分先记下，存储读写失败时也不丢：上报没有确认，节点不会重发；路由表按增量上报，漏掉一份之后
+        // 会一直和节点对不上，之后不带变化的上报还会把它显示成最新的。
         if let Some(live) = self.live.get_mut(&id) {
             live.mapping_varies = report.mapping_varies;
             live.flows = report.flows;
@@ -451,11 +451,14 @@ impl Inner {
                 used
             });
         }
+        self.routes_reported(id, std::mem::take(&mut report.routes), std::mem::take(&mut report.route_kinds), report.routes_full);
+
+        let Some(mut node) = self.store.node(id)? else { return Ok(()) };
+        self.stats_reported(&node, &report);
         self.switches_reported(&node, &report.switches)?;
         let Report { run, exit, exits, proxies, listeners, forwards, .. } = report;
         self.usage_reported(&node, UsageReport { run, exit, exits, proxies, listeners, forwards });
         let report = Report { exits: Vec::new(), proxies: Vec::new(), listeners: Vec::new(), forwards: Vec::new(), exit: None, ..report };
-        self.routes_reported(id, report.routes, report.route_kinds, report.routes_full);
         if let Some(status) = report.update {
             self.update_reported(&node, status)?;
         }

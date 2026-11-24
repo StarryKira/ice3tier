@@ -525,6 +525,8 @@ impl Store {
                 }
             }
         }
+        // 重新开始的那一次连上之后也马上断了：数据库那边一连上就断开。同样退避，不让每次读写都去连。
+        self.reconnect_after.set(Some(Instant::now() + RECONNECT_PAUSE.0));
         Err(StoreError::Disconnected)
     }
 
@@ -896,9 +898,14 @@ mod tests {
 
     /// 接了连接、之后一个字节都不回的"数据库"。
     fn silent_server() -> (std::net::TcpListener, Database) {
+        silent_server_with(1)
+    }
+
+    /// 同 [`silent_server`]，连接串里的建连超时是 `connect_timeout` 秒。
+    fn silent_server_with(connect_timeout: u32) -> (std::net::TcpListener, Database) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let database = format!("postgres://i3t@127.0.0.1:{port}/i3t?connect_timeout=1").parse().unwrap();
+        let database = format!("postgres://i3t@127.0.0.1:{port}/i3t?connect_timeout={connect_timeout}").parse().unwrap();
         (listener, database)
     }
 
@@ -1066,12 +1073,14 @@ mod tests {
         assert!(matches!(store.meta("k"), Err(StoreError::ConnectTimedOut(_))));
         let first = started.elapsed();
 
-        // 退避过后再试：数据库此前就连不上，只等 `RETRY_WAIT`，不等到这一次建连超时。
+        // 退避过后再试，这一次建连要 30 秒才放弃：数据库此前就连不上，只等 `RETRY_WAIT`，明显短于原本可用的连接断开时的等待。
+        let (_held, slower) = silent_server_with(30);
+        store.database = slower;
         std::thread::sleep(first);
         let started = Instant::now();
         assert!(matches!(store.meta("k"), Err(StoreError::Reconnecting)));
         let waited = started.elapsed();
-        assert!(waited >= RETRY_WAIT && waited < RETRY_WAIT + Duration::from_millis(400), "{waited:?}");
+        assert!(waited < RECONNECT_WAIT, "{waited:?}");
         drop(listener);
     }
 
