@@ -677,16 +677,24 @@ install_binary_atomic() {
 # Runs `/bin/sh -c SCRIPT sh ARGS...` as user `$1` (`sh_as_user USER SCRIPT ARGS...`), standard input passed through.
 # For what is done in a directory that user owns: root must not do it there itself, because whoever runs as that user
 # can put a link in the place of a file, and root would follow it to anywhere.
+#
+# In a session of its own, without the admin's terminal as its controlling terminal: whoever runs as that user can
+# attach to its own processes, and from one in the admin's session push commands into the admin's shell (TIOCSTI).
 sh_as_user() {
     _su_user="$1"
     _su_script="$2"
     shift 2
     if command -v runuser >/dev/null 2>&1; then
-        $SUDO runuser -u "$_su_user" -- /bin/sh -c "$_su_script" sh "$@"
+        set -- runuser -u "$_su_user" -- /bin/sh -c "$_su_script" sh "$@"
     elif command -v sudo >/dev/null 2>&1; then
-        $SUDO sudo -u "$_su_user" -- /bin/sh -c "$_su_script" sh "$@"
+        set -- sudo -u "$_su_user" -- /bin/sh -c "$_su_script" sh "$@"
     else
-        $SUDO su -s /bin/sh -c "$_su_script" -- "$_su_user" sh "$@"
+        set -- su -s /bin/sh -c "$_su_script" -- "$_su_user" sh "$@"
+    fi
+    if command -v setsid >/dev/null 2>&1; then
+        $SUDO setsid -w "$@"
+    else
+        $SUDO "$@"
     fi
 }
 
@@ -1473,14 +1481,17 @@ controller_env_sets_database() {
 # Whether the installed controller already knows which database to use: the file this script writes (with more in it
 # than blanks and line ends, which is all the controller ignores), or a setting in /etc/i3t/controller.env.
 #
-# The file is read as the service user, who owns the directory it is in: in its place may be a link to a file only
-# root should read, or to a device that does something when root opens it. A pipe there would keep the read waiting
-# forever: `-D skip` opens without waiting and skips it, so there is no moment to swap one in after a check.
-# Without that user (not created yet) there is nothing to read as; asking for it would only leave a line in the log.
+# The file is read as whoever owns the data directory: the service user once it has been set up (it is the service's
+# StateDirectory=), root when root put the file there before the first install. Whoever owns the directory decides
+# what is in it, so reading as them gives them nothing. Reading as root could, in a directory the service user owns:
+# in the place of the file may be a link to a file only root should read, or to a device that does something when
+# root opens it. A pipe there would keep the read waiting forever: `-D skip` opens without waiting and skips it, so
+# there is no moment to swap one in after a check.
 controller_has_database() {
+    _hd_owner=$($SUDO stat -L -c %U /var/lib/i3t-controller 2>/dev/null || true)
     # shellcheck disable=SC2016
-    if id i3t-controller >/dev/null 2>&1 \
-        && sh_as_user i3t-controller 'grep -D skip -q "[^[:space:]]" "$1"' /var/lib/i3t-controller/database.url 2>/dev/null; then
+    if [ -n "$_hd_owner" ] && id "$_hd_owner" >/dev/null 2>&1 \
+        && sh_as_user "$_hd_owner" 'grep -D skip -q "[^[:space:]]" "$1"' /var/lib/i3t-controller/database.url 2>/dev/null; then
         return 0
     fi
     controller_env_sets_database
@@ -1546,10 +1557,11 @@ check_controller_data_dir() {
 # root writes nothing in that directory. Into a new file next to it first (mktemp makes it readable by its owner only),
 # which then takes the place of whatever has that name: `mv -T` replaces a link instead of following it, and fails on
 # a directory instead of moving the file into it. The string holds the database password: it is not put on a command
-# line, where every user could read it.
+# line, where every user could read it. New files left behind by an interrupted run are removed first.
 write_controller_database_url() {
     # shellcheck disable=SC2016
-    sh_as_user i3t-controller 'stage=$(mktemp "$1/.database.url.XXXXXX") || exit 1
+    sh_as_user i3t-controller 'rm -f "$1"/.database.url.??????
+        stage=$(mktemp "$1/.database.url.XXXXXX") || exit 1
         if cat > "$stage" && mv -fT "$stage" "$1/database.url"; then exit 0; fi
         rm -f "$stage"
         exit 1' /var/lib/i3t-controller

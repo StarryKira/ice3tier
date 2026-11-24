@@ -551,6 +551,13 @@ if [ "$os" = "Linux" ]; then
     SUDO=sudo
     eval "$(awk '/^sh_as_user\(\) \{$/,/^}$/' "$repo/deploy/install.sh")"
     eval "$(awk '/^write_controller_database_url\(\) \{$/,/^}$/' "$repo/deploy/install.sh")"
+    # Nor do they run in the admin's terminal session: from a process there, whoever runs as the service user could push
+    # commands into the admin's shell. Run under a terminal of its own (script), a process as that user has none.
+    printf '%s\n' 'SUDO=sudo' "$(awk '/^sh_as_user\(\) \{$/,/^}$/' "$repo/deploy/install.sh")" \
+        "sh_as_user i3t-controller 'ps -o tty= -p \$\$'" > "$work/tty-check.sh"
+    [ "$(script -qec 'sh -c "ps -o tty= -p \$\$"' /dev/null | tr -d '\r ')" != "?" ] || fail "script gave no terminal: this check proves nothing"
+    tty_seen=$(script -qec "sh $work/tty-check.sh" /dev/null | tr -d '\r ')
+    [ "$tty_seen" = "?" ] || fail "a process run as the service user has the admin's terminal: $tty_seen"
     printf '%s\n' "$ctl_database" | write_controller_database_url || fail "database.url could not be written in the place of a link"
     [ -z "$(sudo ls -A "$link_target")" ] || fail "database.url was written where the link led: $(sudo ls -lA "$link_target")"
     sudo test ! -L /var/lib/i3t-controller/database.url || fail "the link in the place of database.url is still there"
@@ -595,6 +602,19 @@ if [ "$os" = "Linux" ]; then
     for path in /usr/local/bin/i3t-controller /usr/local/bin/i3tctl /var/lib/i3t-controller /etc/i3t /etc/systemd/system/i3t-controller.service; do
         [ ! -e "$path" ] || fail "$path is still there"
     done
+
+    step "a connection string root put in database.url before the install is found"
+    # The README says to keep it off the command line by writing it into database.url in the data directory. Done by
+    # root before the first install, the directory is root's: the script reads the file as root, and systemd hands the
+    # directory over to the service user when it starts the service.
+    seeded_database=$(new_database install_seeded)
+    sudo install -d -m 0700 /var/lib/i3t-controller
+    printf '%s\n' "$seeded_database" | sudo tee /var/lib/i3t-controller/database.url >/dev/null
+    sh "$repo/deploy/install.sh" --from "$dir" --controller --public-addr 127.0.0.1:20331 >"$work/ctl-seeded.out" 2>&1 \
+        || fail "the connection string in database.url was not found: $(cat "$work/ctl-seeded.out")"
+    [ -n "$(sed -n 's/^    \([A-Za-z0-9_-]\{43\}\)$/\1/p' "$work/ctl-seeded.out")" ] \
+        || fail "the controller did not come up on the connection string in database.url: $(cat "$work/ctl-seeded.out")"
+    sudo sh "$repo/deploy/install.sh" --uninstall --controller --purge >/dev/null
 
     step "a first start that cannot reach its database, then one that can: the token is shown on the second"
     # Nothing listens on port 1. The controller connects before it creates its key, so the retry is a first start.
