@@ -463,7 +463,7 @@ fn all() -> Vec<Tool> {
             &[],
             Run::Network(|controller, network, _| reply(controller.network(network))),
         ),
-        spec("overview", Read, Reads, "Network overview", "Counts for one network (nodes online, relays, exits, rules, pending tokens, update state) and what needs attention.").with(
+        spec("overview", Read, Reads, "Network overview", "Counts for one network (nodes, online, relays, exits, rules, proxies, forwards, pending tokens), the pairs that cannot reach each other, traffic, and warnings.").with(
             vec![],
             &[],
             Run::Network(|controller, network, _| reply(controller.overview(network))),
