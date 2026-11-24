@@ -427,9 +427,10 @@ if [ "$os" = "Linux" ]; then
     # service user and written by this one: the redirections are meant to be outside sudo.
     (
         cd "$work/backup"
-        set -e; umask 077; rm -f controller.dump controller.key
-        # shellcheck disable=SC2024
-        sudo -u i3t-controller sh -c 'exec pg_dump --format custom "$(cat /var/lib/i3t-controller/database.url)"' > controller.dump
+        set -e; umask 077; rm -f controller.dump
+        # shellcheck disable=SC2016,SC2024
+        sudo -u i3t-controller sh -c 'url=$(cat /var/lib/i3t-controller/database.url) && [ -n "$url" ] && exec pg_dump --format custom --dbname="$url"' > controller.dump
+        rm -f controller.key
         # shellcheck disable=SC2024
         sudo -u i3t-controller cat /var/lib/i3t-controller/controller.key > controller.key
     )
@@ -442,7 +443,7 @@ if [ "$os" = "Linux" ]; then
     pg_restore --no-owner --dbname "$restored_database" "$work/backup/controller.dump" \
         || fail "the backup could not be restored with the documented command"
     sudo systemctl stop i3t-controller
-    sudo -u i3t-controller sh -c 'umask 077; rm -f "$1"; cat > "$1"' sh /var/lib/i3t-controller/controller.key < "$work/backup/controller.key"
+    sudo -u i3t-controller sh -c 'umask 077; rm -f "$1" && cat > "$1"' sh /var/lib/i3t-controller/controller.key < "$work/backup/controller.key"
     sudo sh "$repo/deploy/install.sh" --from "$dir" --controller --public-addr 127.0.0.1:20331 --database-url "$restored_database" >/dev/null
     # Written again over the one that was there, by the service user and for it only.
     [ "$(sudo stat -c '%a %U %G' /var/lib/i3t-controller/database.url)" = "600 i3t-controller i3t-controller" ] \
@@ -532,7 +533,8 @@ if [ "$os" = "Linux" ]; then
     sudo -u i3t-controller mv /var/lib/i3t-controller/database.url /var/lib/i3t-controller/database.url.kept
     sudo -u i3t-controller mkfifo /var/lib/i3t-controller/database.url
     fifo_status=0
-    timeout 120 sh "$repo/deploy/install.sh" --from "$dir" --controller >"$work/ctl-fifo.out" 2>&1 || fifo_status=$?
+    # A read left hanging would be in a session of its own (sh_as_user): kill it too, or the script waits for it.
+    timeout -k 5 120 sh "$repo/deploy/install.sh" --from "$dir" --controller >"$work/ctl-fifo.out" 2>&1 || fifo_status=$?
     [ "$fifo_status" -ne 124 ] || fail "the install hangs on a pipe in the place of database.url"
     [ "$fifo_status" -ne 0 ] || fail "a pipe was taken for the connection string"
     grep -q -- '--database-url' "$work/ctl-fifo.out" || fail "the refusal does not name --database-url: $(cat "$work/ctl-fifo.out")"
@@ -555,7 +557,8 @@ if [ "$os" = "Linux" ]; then
     # commands into the admin's shell. Run under a terminal of its own (script), a process as that user has none.
     printf '%s\n' 'SUDO=sudo' "$(awk '/^sh_as_user\(\) \{$/,/^}$/' "$repo/deploy/install.sh")" \
         "sh_as_user i3t-controller 'ps -o tty= -p \$\$'" > "$work/tty-check.sh"
-    [ "$(script -qec 'sh -c "ps -o tty= -p \$\$"' /dev/null | tr -d '\r ')" != "?" ] || fail "script gave no terminal: this check proves nothing"
+    own_tty=$(script -qec 'sh -c "ps -o tty= -p \$\$"' /dev/null | tr -d '\r ')
+    [ -n "$own_tty" ] && [ "$own_tty" != "?" ] || fail "script gave no terminal: this check proves nothing"
     tty_seen=$(script -qec "sh $work/tty-check.sh" /dev/null | tr -d '\r ')
     [ "$tty_seen" = "?" ] || fail "a process run as the service user has the admin's terminal: $tty_seen"
     printf '%s\n' "$ctl_database" | write_controller_database_url || fail "database.url could not be written in the place of a link"

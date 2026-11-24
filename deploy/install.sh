@@ -691,7 +691,16 @@ sh_as_user() {
     else
         set -- su -s /bin/sh -c "$_su_script" -- "$_su_user" sh "$@"
     fi
-    if command -v setsid >/dev/null 2>&1; then
+    # `setsid -w` is in util-linux 2.26 and later: asked once. Without it (CentOS 7, say) the processes stay in this
+    # session, as they always did there.
+    if [ -z "${SETSID_WAIT:-}" ]; then
+        if setsid -w true >/dev/null 2>&1; then
+            SETSID_WAIT=1
+        else
+            SETSID_WAIT=0
+        fi
+    fi
+    if [ "$SETSID_WAIT" -eq 1 ]; then
         $SUDO setsid -w "$@"
     else
         $SUDO "$@"

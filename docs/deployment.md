@@ -236,8 +236,9 @@ A backup is two files: a dump of the database, and the controller's key `control
  docker compose exec -T controller cat /data/controller.key > controller.key)
 
 # Install script
-(set -e; umask 077; rm -f controller.dump controller.key
- sudo -u i3t-controller sh -c 'exec pg_dump --format custom "$(cat /var/lib/i3t-controller/database.url)"' > controller.dump
+(set -e; umask 077; rm -f controller.dump
+ sudo -u i3t-controller sh -c 'url=$(cat /var/lib/i3t-controller/database.url) && [ -n "$url" ] && exec pg_dump --format custom --dbname="$url"' > controller.dump
+ rm -f controller.key
  sudo -u i3t-controller cat /var/lib/i3t-controller/controller.key > controller.key)
 ```
 
@@ -264,7 +265,7 @@ With the install script, first create an empty database as in step 1, then:
 pg_restore --no-owner --dbname postgres://i3t:<password>@127.0.0.1/i3t controller.dump
 # install without starting, put the key in place, then start
 curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh -s -- --controller --database-url postgres://i3t:<password>@127.0.0.1/i3t
-sudo -u i3t-controller sh -c 'umask 077; rm -f "$1"; cat > "$1"' sh /var/lib/i3t-controller/controller.key < controller.key
+sudo -u i3t-controller sh -c 'umask 077; rm -f "$1" && cat > "$1"' sh /var/lib/i3t-controller/controller.key < controller.key
 curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh -s -- --controller --public-addr <public-address>:20331
 ```
 

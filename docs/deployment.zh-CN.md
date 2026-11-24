@@ -236,8 +236,9 @@ ssh <节点>.<网络>.i3t        # 按名字，比如 nas.home.i3t
  docker compose exec -T controller cat /data/controller.key > controller.key)
 
 # 安装脚本
-(set -e; umask 077; rm -f controller.dump controller.key
- sudo -u i3t-controller sh -c 'exec pg_dump --format custom "$(cat /var/lib/i3t-controller/database.url)"' > controller.dump
+(set -e; umask 077; rm -f controller.dump
+ sudo -u i3t-controller sh -c 'url=$(cat /var/lib/i3t-controller/database.url) && [ -n "$url" ] && exec pg_dump --format custom --dbname="$url"' > controller.dump
+ rm -f controller.key
  sudo -u i3t-controller cat /var/lib/i3t-controller/controller.key > controller.key)
 ```
 
@@ -264,7 +265,7 @@ docker compose up -d
 pg_restore --no-owner --dbname postgres://i3t:<密码>@127.0.0.1/i3t controller.dump
 # 先装上但不启动，把密钥放好，再启动
 curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh -s -- --controller --database-url postgres://i3t:<密码>@127.0.0.1/i3t
-sudo -u i3t-controller sh -c 'umask 077; rm -f "$1"; cat > "$1"' sh /var/lib/i3t-controller/controller.key < controller.key
+sudo -u i3t-controller sh -c 'umask 077; rm -f "$1" && cat > "$1"' sh /var/lib/i3t-controller/controller.key < controller.key
 curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh -s -- --controller --public-addr <公网地址>:20331
 ```
 
