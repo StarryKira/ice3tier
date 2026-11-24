@@ -646,7 +646,16 @@ mod tests {
 
     fn entry(action: &str, params: Value) -> LogEntry {
         let Value::Object(params) = params else { panic!("参数要是对象") };
-        LogEntry { id: 1, at: 0, network: None, action: action.to_owned(), detail: "原话".to_owned(), refs: Vec::new(), params }
+        LogEntry {
+            id: 1,
+            at: 0,
+            network: None,
+            action: action.to_owned(),
+            detail: "原话".to_owned(),
+            refs: Vec::new(),
+            params,
+            actor: None,
+        }
     }
 
     /// controller 记的每一种操作，带着它的参数。
