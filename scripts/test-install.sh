@@ -423,21 +423,31 @@ if [ "$os" = "Linux" ]; then
     : > "$work/backup/controller.dump"
     : > "$work/backup/controller.key"
     chmod 644 "$work/backup/controller.dump" "$work/backup/controller.key"
+    # Run in a directory the service user cannot enter, as an admin's home directory may be. The files are read as the
+    # service user and written by this one: the redirections are meant to be outside sudo.
     (
         cd "$work/backup"
-        sudo sh -c 'set -e; umask 077; rm -f controller.dump; pg_dump --format custom --file controller.dump "$(cat /var/lib/i3t-controller/database.url)"'
-        sudo install -m 600 /var/lib/i3t-controller/controller.key controller.key
+        set -e; umask 077; rm -f controller.dump controller.key
+        # shellcheck disable=SC2024
+        sudo -u i3t-controller sh -c 'exec pg_dump --format custom "$(cat /var/lib/i3t-controller/database.url)"' > controller.dump
+        # shellcheck disable=SC2024
+        sudo -u i3t-controller cat /var/lib/i3t-controller/controller.key > controller.key
     )
     for file in controller.dump controller.key; do
-        [ "$(sudo stat -c '%a %U' "$work/backup/$file")" = "600 root" ] || fail "the backup's $file is not root's and private"
+        [ "$(stat -c '%a %U' "$work/backup/$file")" = "600 $(id -un)" ] || fail "the backup's $file is not this user's and private"
+        [ -s "$work/backup/$file" ] || fail "the backup's $file is empty"
     done
-    # Into another empty database on this server. The dump is root's, so root reads it.
+    # Into another empty database on this server.
     restored_database=$(new_database install_restored)
-    sudo pg_restore --no-owner --dbname "$restored_database" "$work/backup/controller.dump" \
+    pg_restore --no-owner --dbname "$restored_database" "$work/backup/controller.dump" \
         || fail "the backup could not be restored with the documented command"
     sudo systemctl stop i3t-controller
-    sudo install -o i3t-controller -g i3t-controller -m 600 "$work/backup/controller.key" /var/lib/i3t-controller/controller.key
+    sudo -u i3t-controller sh -c 'umask 077; cat > /var/lib/i3t-controller/controller.key' < "$work/backup/controller.key"
     sudo sh "$repo/deploy/install.sh" --from "$dir" --controller --public-addr 127.0.0.1:20331 --database-url "$restored_database" >/dev/null
+    # Written again over the one that was there, by the service user and for it only.
+    [ "$(sudo stat -c '%a %U %G' /var/lib/i3t-controller/database.url)" = "600 i3t-controller i3t-controller" ] \
+        || fail "database.url is not the service user's and private after it was written again"
+    [ "$(sudo cat /var/lib/i3t-controller/database.url)" = "$restored_database" ] || fail "the new connection string is not in database.url"
     ctl_database=$restored_database
     i=0
     until I3T_ADMIN_TOKEN="$ctl_token" "$dir/i3tctl" --json network list 2>/dev/null \
@@ -515,12 +525,45 @@ if [ "$os" = "Linux" ]; then
     [ "$(sudo cat /var/lib/i3t-controller/database.url)" = "$ctl_database" ] || fail "database.url was rewritten by a refused run"
     sudo sed -i '/^I3T_DATABASE_URL=/d' /etc/i3t/controller.env
 
+    step "what the service user put in its data directory does not lead root anywhere"
+    # Whoever runs as i3t-controller can change that directory. In the place of database.url: a pipe, which would keep
+    # a read waiting forever, and a link to a directory only root can write to (as /etc/logrotate.d is), into which
+    # root would have written a file for i3t-controller to change.
+    sudo -u i3t-controller mv /var/lib/i3t-controller/database.url /var/lib/i3t-controller/database.url.kept
+    sudo -u i3t-controller mkfifo /var/lib/i3t-controller/database.url
+    fifo_status=0
+    timeout 120 sh "$repo/deploy/install.sh" --from "$dir" --controller >"$work/ctl-fifo.out" 2>&1 || fifo_status=$?
+    [ "$fifo_status" -ne 124 ] || fail "the install hangs on a pipe in the place of database.url"
+    [ "$fifo_status" -ne 0 ] || fail "a pipe was taken for the connection string"
+    grep -q -- '--database-url' "$work/ctl-fifo.out" || fail "the refusal does not name --database-url: $(cat "$work/ctl-fifo.out")"
+    link_target=$(sudo mktemp -d)
+    sudo -u i3t-controller sh -c 'rm -f "$1" && ln -s "$2" "$1"' sh /var/lib/i3t-controller/database.url "$link_target"
+    if sh "$repo/deploy/install.sh" --from "$dir" --controller --database-url "$ctl_database" >"$work/ctl-link.out" 2>&1; then
+        fail "database.url was written through a link"
+    fi
+    grep -q 'symbolic link' "$work/ctl-link.out" || fail "the refusal does not say why: $(cat "$work/ctl-link.out")"
+    [ -z "$(sudo ls -A "$link_target")" ] || fail "root wrote where the link led: $(sudo ls -lA "$link_target")"
+    systemctl is-active -q i3t-controller || fail "a refused run left the controller stopped"
+    sudo -u i3t-controller sh -c 'rm "$1" && mv "$1.kept" "$1"' sh /var/lib/i3t-controller/database.url
+    sudo rmdir "$link_target"
+    # The data directory itself can only have been made a link by root, but it is not written through either.
+    sudo systemctl stop i3t-controller
+    sudo mv /var/lib/i3t-controller /var/lib/i3t-controller.moved
+    sudo ln -s /var/lib/i3t-controller.moved /var/lib/i3t-controller
+    if sh "$repo/deploy/install.sh" --from "$dir" --controller --database-url "$ctl_database" >"$work/ctl-dirlink.out" 2>&1; then
+        fail "database.url was written into a data directory that is a link"
+    fi
+    grep -q 'symbolic link' "$work/ctl-dirlink.out" || fail "the refusal does not say why: $(cat "$work/ctl-dirlink.out")"
+    sudo rm /var/lib/i3t-controller
+    sudo mv /var/lib/i3t-controller.moved /var/lib/i3t-controller
+    [ "$(sudo cat /var/lib/i3t-controller/database.url)" = "$ctl_database" ] || fail "database.url was changed by a refused run"
+
     step "a controller that was set up here is not replaced by one that cannot start"
     # Stopped by hand, and its database setting gone or empty: the script still knows a controller lives here.
     # Nothing but a line end in the file, and an empty value in controller.env: the controller reads both as "no
     # database", so the script must too.
     sudo systemctl stop i3t-controller
-    sudo sh -c 'echo > /var/lib/i3t-controller/database.url'
+    sudo -u i3t-controller sh -c 'echo > /var/lib/i3t-controller/database.url'
     echo 'I3T_DATABASE_URL=""' | sudo tee -a /etc/i3t/controller.env >/dev/null
     if sh "$repo/deploy/install.sh" --from "$dir" --controller >"$work/ctl-stopped.out" 2>&1; then
         fail "a stopped controller without a database was upgraded anyway"

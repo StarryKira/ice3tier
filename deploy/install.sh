@@ -674,6 +674,22 @@ install_binary_atomic() {
     fi
 }
 
+# Runs `/bin/sh -c SCRIPT sh ARGS...` as user `$1` (`sh_as_user USER SCRIPT ARGS...`), standard input passed through.
+# For what is done in a directory that user owns: root must not do it there itself, because whoever runs as that user
+# can put a link in the place of a file, and root would follow it to anywhere.
+sh_as_user() {
+    _su_user="$1"
+    _su_script="$2"
+    shift 2
+    if command -v runuser >/dev/null 2>&1; then
+        $SUDO runuser -u "$_su_user" -- /bin/sh -c "$_su_script" sh "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        $SUDO sudo -u "$_su_user" -- /bin/sh -c "$_su_script" sh "$@"
+    else
+        $SUDO su -s /bin/sh -c "$_su_script" -- "$_su_user" sh "$@"
+    fi
+}
+
 # Install the self-updating binary into the i3t-owned bin directory AS user i3t, so root never writes into an
 # unprivileged-owned directory (preventing symlink-following hazards during upgrades).
 install_binary_as_i3t() {
@@ -685,14 +701,8 @@ install_binary_as_i3t() {
         die "refusing to install through symbolic link: ${_ia_dest}"
     fi
     # shellcheck disable=SC2016
-    _ia_script='dir=$1; base=$2; src=$3; dest=$4; stage=$(mktemp "$dir/.$base.install.XXXXXX") || exit 1; if cp "$src" "$stage" && chmod 0755 "$stage" && mv -f "$stage" "$dest"; then exit 0; else rm -f "$stage"; exit 1; fi'
-    if command -v runuser >/dev/null 2>&1; then
-        $SUDO runuser -u i3t -- /bin/sh -c "$_ia_script" sh "$_ia_dir" "$_ia_base" "$_ia_src" "$_ia_dest"
-    elif command -v sudo >/dev/null 2>&1; then
-        $SUDO sudo -u i3t -- /bin/sh -c "$_ia_script" sh "$_ia_dir" "$_ia_base" "$_ia_src" "$_ia_dest"
-    else
-        $SUDO su -s /bin/sh -c "$_ia_script" -- i3t sh "$_ia_dir" "$_ia_base" "$_ia_src" "$_ia_dest"
-    fi
+    sh_as_user i3t 'dir=$1; base=$2; src=$3; dest=$4; stage=$(mktemp "$dir/.$base.install.XXXXXX") || exit 1; if cp "$src" "$stage" && chmod 0755 "$stage" && mv -f "$stage" "$dest"; then exit 0; else rm -f "$stage"; exit 1; fi' \
+        "$_ia_dir" "$_ia_base" "$_ia_src" "$_ia_dest"
 }
 
 nologin_shell() {
@@ -1472,8 +1482,17 @@ controller_env_sets_database() {
 
 # Whether the installed controller already knows which database to use: the file this script writes (with more in it
 # than blanks and line ends, which is all the controller ignores), or a setting in /etc/i3t/controller.env.
+#
+# The file is read as the service user, who owns the directory it is in: in its place may be a link to a file only
+# root should read, or to a device that does something when root opens it. A pipe would keep the read waiting forever:
+# only a regular file is read.
 controller_has_database() {
-    $SUDO grep -q '[^[:space:]]' /var/lib/i3t-controller/database.url 2>/dev/null || controller_env_sets_database
+    # shellcheck disable=SC2016
+    if id i3t-controller >/dev/null 2>&1 \
+        && sh_as_user i3t-controller '[ -f "$1" ] && grep -q "[^[:space:]]" "$1"' /var/lib/i3t-controller/database.url 2>/dev/null; then
+        return 0
+    fi
+    controller_env_sets_database
 }
 
 # Whether the service is up or is meant to be: running, starting, waiting for systemd to start it again, or given up
@@ -1512,6 +1531,39 @@ controller_needs_database() {
     return 0
 }
 
+# Where database.url is to be written. The data directory is in /var/lib, which only root can change: a link or a file
+# in its place was put there by root, and is refused as the node's state directory is. database.url is in the service
+# user's own directory: a link there may have been put by whoever runs as that user, to have the file written somewhere
+# else. It is written as that user (see write_controller_database_url) whatever is found here; this says why it would
+# fail, before anything is installed or stopped.
+check_controller_data_dir() {
+    if $SUDO test -L /var/lib/i3t-controller; then
+        die "refusing to use symbolic link as the controller's data directory: /var/lib/i3t-controller"
+    fi
+    if $SUDO test -e /var/lib/i3t-controller && ! $SUDO test -d /var/lib/i3t-controller; then
+        die "the controller's data path exists and is not a directory: /var/lib/i3t-controller"
+    fi
+    if $SUDO test -L /var/lib/i3t-controller/database.url; then
+        die "refusing to write through symbolic link: /var/lib/i3t-controller/database.url (the service user i3t-controller can change that directory: find out who put the link there, remove it and run this again)"
+    fi
+    if $SUDO test -e /var/lib/i3t-controller/database.url && ! $SUDO test -f /var/lib/i3t-controller/database.url; then
+        die "/var/lib/i3t-controller/database.url exists and is not a regular file"
+    fi
+}
+
+# Writes the connection string, given on standard input, to /var/lib/i3t-controller/database.url as the service user:
+# root writes nothing in that directory. Into a new file next to it first, which then takes its place; not through a
+# link, nor into a directory that took its place. The string holds the database password: it is not put on a command
+# line, where every user could read it, and the file is readable by the service user only.
+write_controller_database_url() {
+    # shellcheck disable=SC2016
+    sh_as_user i3t-controller 'umask 077; dest=$1/database.url
+        stage=$(mktemp "$1/.database.url.XXXXXX") || exit 1
+        if cat > "$stage" && [ ! -L "$dest" ] && [ ! -d "$dest" ] && mv -f "$stage" "$dest"; then exit 0; fi
+        rm -f "$stage"
+        exit 1' /var/lib/i3t-controller
+}
+
 install_controller() {
     case "$DATABASE_URL" in
         *"
@@ -1522,6 +1574,9 @@ install_controller() {
     # service and used by `--reset-admin-token`, which would then be working on another database.
     if [ -n "$DATABASE_URL" ] && controller_env_sets_database; then
         die "/etc/i3t/controller.env already says which database to use (I3T_DATABASE_URL, or --database-url in I3T_CONTROLLER_ARGS), and the service follows that file. Change it there, or remove it from that file and run this again."
+    fi
+    if [ -n "$DATABASE_URL" ] && has_systemd; then
+        check_controller_data_dir
     fi
 
     fetch_binary "i3t-controller" "${WORK}/i3t-controller"
@@ -1585,9 +1640,9 @@ install_controller() {
         # The connection string holds the database password: it goes into the data directory, readable by the service
         # user only, where the controller looks for it when it is not given on the command line.
         log "Writing the database connection string to /var/lib/i3t-controller/database.url"
-        printf '%s\n' "$DATABASE_URL" > "${WORK}/database.url"
         $SUDO install -d -o i3t-controller -g i3t-controller -m 0700 /var/lib/i3t-controller
-        $SUDO install -o i3t-controller -g i3t-controller -m 0600 "${WORK}/database.url" /var/lib/i3t-controller/database.url
+        printf '%s\n' "$DATABASE_URL" | write_controller_database_url \
+            || die "failed to write /var/lib/i3t-controller/database.url"
     fi
 
     # /etc/i3t/controller.env is root's and readable by root only (systemd reads it as root): what is put there by
