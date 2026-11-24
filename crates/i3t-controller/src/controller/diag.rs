@@ -12,8 +12,10 @@
 //!   接受方 [`RESPONDER_GRACE`] 之内没有报，或者整个测试过了时间窗还没有报完，就按手上有的结束，缺的那一端在结果里写明。
 //! - 节点掉线时，它参与的测试按手上有的结束。管理员可以取消进行中的测试，已经有的结果照样留着。
 //! - 定时重复测试不做：这是个人用的工具，管理员需要时再点一次；历史结果留着可以对比。
-//! - 开始、取消测试和矩阵时，提交的回答没有回来（[`StoreError::CommitUnknown`]）的，当场按已提交处理（[`commit_unknown`]），
-//!   不把这个错误交给调用方。
+//! - 开始、取消测试和矩阵时，提交的回答没有回来（[`StoreError::CommitUnknown`]）的，当场按已提交处理（[`Inner::commit_unknown`]），
+//!   不把这个错误交给调用方。数据库可能正卡着提交，这一次调用随后不再写存储，余下要写的交给后台任务。
+//! - 每写一次存储都要拿着 controller 的锁等它回答：整个数据库读写失败之后（包括提交的回答没有回来），同一次持锁内不再写别的测试、
+//!   不再开始矩阵里排着的节点对，退避一会儿（[`Inner::back_off`]）再来。
 
 mod matrix;
 mod merge;
@@ -33,7 +35,7 @@ use self::merge::{Inputs, Skips, final_state, merge};
 use serde_json::json;
 
 use super::{Controller, Inner};
-use crate::error::{Entity, Error, InField};
+use crate::error::{Entity, Error, InField, error_chain};
 use crate::store::{NetworkRecord, NodeRecord, Store, StoreError};
 
 /// 同一对节点两次测试至少隔多久，带吞吐的至少隔多久。
@@ -118,21 +120,11 @@ fn pair(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
     (a.min(b), a.max(b))
 }
 
-/// 一个事务的结果：提交了，返回 `Ok(false)`；提交的回答没有回来（[`StoreError::CommitUnknown`]），返回 `Ok(true)`；别的错误原样交回。
-///
-/// 回答没有回来的提交，数据库那边可能已经算了数。这里不等问出结果，当场按已提交处理，提交之后该做的照做：
-/// 后台按存储补齐的那一步（[`Inner::settle_commits`]）不管测试和矩阵，而且等它问出结果时，节点的上报、超时、掉线
-/// 可能已经按"没有提交"把那一行改掉了。按已提交处理而事务其实没有算数的话，少的只是操作记录里的那一条
-/// （新建的测试则连那一行也没有，它的结果无处可存）。
-fn commit_unknown<T>(outcome: Result<T, Error>, what: &str) -> Result<bool, Error> {
-    match outcome {
-        Ok(_) => Ok(false),
-        Err(Error::Store(error @ StoreError::CommitUnknown(_))) => {
-            tracing::warn!("{what}：{error}，按已提交处理");
-            Ok(true)
-        }
-        Err(error) => Err(error),
-    }
+/// 建起的一个测试（[`Inner::begin_test`]）。
+pub(super) struct Begun {
+    view: TestView,
+    /// 建测试记录的提交没有回答，按已提交处理了（见 [`Inner::commit_unknown`]）：调用方这一次不再写存储。
+    unsettled: bool,
 }
 
 impl Controller {
@@ -147,9 +139,9 @@ impl Controller {
         let (a, b) = (inner.require_node(network, input.a)?, inner.require_node(network, input.b)?);
         let request = inner.test_request(&record, input)?;
         inner.check_interval(a.id, b.id, request.throughput)?;
-        let view = inner.begin_test(&record, &a, &b, request, None)?;
+        let begun = inner.begin_test(&record, &a, &b, request, None)?;
         self.wake_if_needed(&inner);
-        Ok(view)
+        Ok(begun.view)
     }
 
     /// 查询单条测试记录：进行中的返回当前视图，已结束的返回持久化结果。
@@ -194,7 +186,7 @@ impl Controller {
     /// 取消一个进行中的测试。已经有的结果照样留着。
     ///
     /// 操作记录与取消结果在同一事务中持久化；若持久化失败则状态不变，可安全重试。提交的回答没有回来时按已提交处理
-    /// （见 `commit_unknown`）：结果当场定为取消并照常返回，由后台任务问出提交结果之后原样再写一次、告诉两端结束。
+    /// （见 `Inner::commit_unknown`）：结果当场定为取消并照常返回，由后台任务问出提交结果之后原样再写一次、告诉两端结束。
     /// 对随矩阵取消、或者像这样结果尚未持久化的测试，再次调用取消将继续尝试持久化，不再记操作记录。
     ///
     /// # Errors
@@ -210,7 +202,7 @@ impl Controller {
             };
         };
         let finished = match running.outcome.as_ref().map(|outcome| outcome.state) {
-            // 随矩阵取消但结果尚未持久化：继续尝试持久化。
+            // 已定为取消（随矩阵取消，或者取消的提交没有回答）但结果尚未持久化：继续尝试持久化，不再记操作记录。
             Some(TestState::Cancelled) => inner.finish_test(id, true),
             // 已因其他原因结束，仅结果尚未持久化。
             Some(_) => return Err(Error::Busy(format!("测试 #{id} 已经结束了"))),
@@ -226,7 +218,7 @@ impl Controller {
                     store.log_refs(at, Some(network), action::TEST_CANCEL, &detail, &refs, params)?;
                     store.update_test(&view)
                 });
-                if commit_unknown(stored.map_err(Error::from), &format!("取消主动测试 #{id}"))? {
+                if inner.commit_unknown(stored.map_err(Error::from), &format!("取消主动测试 #{id}"))? {
                     // 取消就此定下：之后的上报不算数，超时、掉线不改它（见 `fix_outcome`）。后台任务等问出提交结果之后
                     // 原样再写一次，再告诉两端结束；管理员再取消一次也只是接着写它。
                     if let Some(running) = inner.diag.running.get_mut(&id) {
@@ -338,7 +330,7 @@ impl Inner {
     /// 建起一个测试并下发指令。调用前已经查过间隔。
     ///
     /// 出错时不产生任何副作用：存储中无此测试记录，也未向节点下发指令，可原样重试。
-    /// 建测试记录的提交没有回答时按已提交处理（见 [`commit_unknown`]），照常下发、照常返回。
+    /// 建测试记录的提交没有回答时按已提交处理（见 [`Inner::commit_unknown`]），照常下发、照常返回，并在返回值里注明。
     pub(super) fn begin_test(
         &mut self,
         network: &NetworkRecord,
@@ -346,7 +338,7 @@ impl Inner {
         b: &NodeRecord,
         request: TestRequest,
         matrix: Option<u64>,
-    ) -> Result<TestView, Error> {
+    ) -> Result<Begun, Error> {
         let started_at = self.clock.now();
         let mut view = TestView {
             id: 0,
@@ -412,8 +404,8 @@ impl Inner {
                 host.problem.clone_from(&blocker);
             }
             // 插入的这一行里已经是最终的结果，之后不再写它：提交的回答没有回来也没有要等的。
-            self.store_new_test(&mut view)?;
-            return Ok(view);
+            let unsettled = self.store_new_test(&mut view)?;
+            return Ok(Begun { view, unsettled });
         }
         let unsettled = self.store_new_test(&mut view)?;
         let window = window_secs(&items, &view.request);
@@ -432,28 +424,50 @@ impl Inner {
         let started = running.view(false);
         self.diag.running.insert(id, running);
         if sent {
-            return Ok(started);
+            return Ok(Begun { view: started, unsettled });
         }
-        match self.finish_test(id, false) {
-            Ok(view) => Ok(view),
+        // 提交的回答没有回来时，这里不会去写存储：那一行要等问出提交结果（见 `Inner::wait_for_commit`）。
+        let view = match self.finish_test(id, false) {
+            Ok(view) => view,
             // 测试记录已创建，不视为发起失败：最终结果已确定，由后台任务继续持久化。
             Err(error) => {
                 tracing::warn!(test = id, "指令发送失败，持久化该主动测试结果出错，{} 秒后重试：{error}", STORE_RETRY.as_secs());
-                Ok(self.diag.running.get(&id).map_or(started, Running::current))
+                self.diag.running.get(&id).map_or(started, Running::current)
             }
-        }
+        };
+        Ok(Begun { view, unsettled })
     }
 
     /// 插入测试记录并取得编号，与操作记录在一个事务里：出错时存储里没有这个测试，矩阵再排这一对时不会多出一条"没做完"的。
     ///
-    /// 提交的回答没有回来时按已提交处理（见 [`commit_unknown`]），返回 `true`：编号在提交之前已经拿到了，
+    /// 提交的回答没有回来时按已提交处理（见 [`Inner::commit_unknown`]），返回 `true`：编号在提交之前已经拿到了，
     /// 这一行在数据库那边可能还没有建成，问出提交结果之前写它的结果等于没写（见 [`Inner::wait_for_commit`]）。
     fn store_new_test(&mut self, view: &mut TestView) -> Result<bool, Error> {
         let stored = self.store.atomically(|store| {
             view.id = store.insert_test(view)?;
             Self::log_test(store, view)
         });
-        commit_unknown(stored, &format!("开始主动测试 #{}", view.id))
+        self.commit_unknown(stored, &format!("开始主动测试 #{}", view.id))
+    }
+
+    /// 一个事务的结果：提交了，返回 `Ok(false)`；提交的回答没有回来（[`StoreError::CommitUnknown`]），返回 `Ok(true)`；别的错误原样交回。
+    ///
+    /// 回答没有回来的提交，数据库那边可能已经算了数。这里不等问出结果，当场按已提交处理，提交之后该做的照做：
+    /// 后台按存储补齐的那一步（[`Inner::settle_commits`]）不管测试和矩阵，而且等它问出结果时，节点的上报、超时、掉线
+    /// 可能已经按"没有提交"把那一行改掉了。按已提交处理而事务其实没有算数的话，少的只是操作记录里的那一条
+    /// （新建的测试则连那一行也没有，它的结果无处可存）。
+    ///
+    /// 返回 `true` 时同时开始退避（[`Inner::back_off`]）：数据库可能正卡着提交，调用方这一次不再写存储，余下的交给后台任务。
+    fn commit_unknown<T>(&mut self, outcome: Result<T, Error>, what: &str) -> Result<bool, Error> {
+        match outcome {
+            Ok(_) => Ok(false),
+            Err(Error::Store(error @ StoreError::CommitUnknown(_))) => {
+                tracing::warn!("{what}：{}，按已提交处理", error_chain(&error));
+                self.back_off();
+                Ok(true)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn log_test(store: &Store, view: &TestView) -> Result<(), Error> {
@@ -572,6 +586,17 @@ impl Inner {
         Ok(())
     }
 
+    /// 这几个测试的结果已经定下，这一次不写，交给后台任务：最晚 [`STORE_RETRY`] 之后写
+    /// （结果定下之后后台任务只看 `deadline`，见 [`Running::due_at`]，原来的时间窗可能还早）。
+    fn store_later(&mut self, tests: impl IntoIterator<Item = u64>) {
+        let at = Instant::now() + STORE_RETRY;
+        for test in tests {
+            if let Some(running) = self.diag.running.get_mut(&test) {
+                running.deadline = running.deadline.min(at);
+            }
+        }
+    }
+
     /// 测试现在结束的话是什么结果：合成到现在为止的上报，结束的时刻是现在。
     fn outcome(&self, id: u64, cancelled: bool) -> Option<TestView> {
         let running = self.diag.running.get(&id)?;
@@ -618,8 +643,9 @@ impl Inner {
     /// 处理到期任务：结束超过时间窗或接受方宽限期未完成的测试、重试持久化失败的结果，
     /// 并继续调度矩阵中排队的节点对。返回下一次最晚唤醒时刻。
     ///
-    /// 存储错误不向上传播：仅记录日志，持久化失败的测试与启动失败的矩阵各自间隔 [`STORE_RETRY`] 后重试，
-    /// 互不阻塞，也不影响后台任务其他工作的调度时刻。
+    /// 存储错误不向上传播：仅记录日志，持久化失败的测试与启动失败的矩阵各自间隔 [`STORE_RETRY`] 后重试，互不阻塞。
+    /// 整个数据库读写失败时例外：这一轮其余到期的测试不写、矩阵不排，开始退避（[`Inner::back_off`]），
+    /// 和后台其他工作遇到这种错误时一样。
     pub(super) fn tests_tick(&mut self, now: Instant) -> Option<Instant> {
         for id in self.time_out_tests(now) {
             // 前面结束的测试给节点发结束时，节点可能掉线，连带结束了这一个。
@@ -628,6 +654,11 @@ impl Inner {
             }
             if let Err(error) = self.finish_test(id, false) {
                 tracing::warn!(test = id, "持久化主动测试结果失败，{} 秒后重试：{error}", STORE_RETRY.as_secs());
+                // 其余的每写一个都要拿着 controller 的锁等满一次超时。它们的结果已经定下，退避过后照样到期。
+                if error.is_database_wide() {
+                    self.back_off();
+                    break;
+                }
             }
         }
         self.schedule_matrices(now);
@@ -1267,6 +1298,88 @@ mod tests {
         assert!(matches!(lab.controller.cancel_matrix(network), Err(Error::Busy(_))), "取消完了");
         let logged = |action: &str| lab.controller.oplog(50).unwrap().into_iter().filter(|entry| entry.action == action).count();
         assert_eq!((logged(action::TEST_MATRIX_CANCEL), logged(action::TEST_CANCEL)), (1, 0), "再取消一次不重复记");
+    }
+
+    /// 写测试结果时数据库报盘满了（整个数据库读写失败的一种），并且数着去写了几次。
+    fn fill_disk(lab: &Lab) {
+        lab.controller.lock().store.execute_batch(
+            "CREATE SEQUENCE result_writes;
+             CREATE FUNCTION disk_full() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+                 PERFORM nextval('result_writes');
+                 RAISE EXCEPTION '测试：盘满了' USING ERRCODE = 'disk_full';
+             END $$;
+             CREATE TRIGGER disk_full BEFORE UPDATE ON tests FOR EACH ROW EXECUTE FUNCTION disk_full();",
+        );
+    }
+
+    fn free_disk(lab: &Lab) {
+        lab.controller.lock().store.execute_batch("DROP TRIGGER disk_full ON tests");
+    }
+
+    /// 盘满了以后去写了几次测试结果。
+    fn result_writes(store: &Store) -> i64 {
+        store.query_i64("SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM result_writes")
+    }
+
+    #[test]
+    fn a_full_database_holds_back_the_other_results_and_matrices_of_the_round() {
+        let mut lab = Lab::new();
+        let (home, _members) = three_testing(&mut lab, "home");
+        // 另一个网络的矩阵有一对排着：刚单独测过，等间隔过去。
+        let work = lab.network("work").id;
+        let mut others: Vec<Member> = (0..2).map(|_| lab.join_as(work, &modern_hello("0.2.0"))).collect();
+        lab.settle(&mut others.iter_mut().collect::<Vec<_>>());
+        lab.controller.lock().diag.last.insert(pair(others[0].id, others[1].id), (Instant::now(), None));
+        lab.controller.start_matrix(work).unwrap();
+        fill_disk(&lab);
+        {
+            let mut inner = lab.controller.lock();
+            inner.diag.last.clear();
+            // 三个测试都到了时间窗，结果都定下来；写第一个时数据库说盘满了。
+            let now = Instant::now();
+            for running in inner.diag.running.values_mut() {
+                running.deadline = now;
+            }
+            inner.tests_tick(now);
+            assert_eq!(result_writes(&inner.store), 1, "其余的这一轮不写：每写一个都要拿着 controller 的锁等满一次超时");
+            assert!(inner.diag.running.values().all(|running| running.outcome.is_some()), "结果都定下了，等着写");
+            assert!(inner.flush_after.is_some_and(|after| after > now), "开始退避");
+        }
+        assert_eq!(lab.controller.matrix(work).unwrap().cells[0].state, CellState::Pending, "别的网络的矩阵这一轮也不排");
+
+        free_disk(&lab);
+        lab.controller.lock().tests_tick(later(1));
+        assert_eq!(lab.controller.matrix(home).unwrap().state, MatrixState::Done, "退避过后照样写");
+        assert_eq!(lab.controller.matrix(work).unwrap().cells[0].state, CellState::Running, "也照样排");
+    }
+
+    #[test]
+    fn a_matrix_cancel_that_finds_the_database_full_leaves_the_other_results_to_the_background() {
+        let mut lab = Lab::new();
+        let (network, _members) = three_testing(&mut lab, "home");
+        let tests: Vec<u64> = lab.controller.lock().diag.running.keys().copied().collect();
+        fill_disk(&lab);
+        assert!(lab.controller.cancel_matrix(network).is_err(), "测试的结果存不下来");
+        {
+            let inner = lab.controller.lock();
+            assert_eq!(result_writes(&inner.store), 1, "其余的这一次不写：每写一个都要拿着 controller 的锁等满一次超时");
+            assert!(inner.flush_after.is_some(), "开始退避");
+            for test in &tests {
+                let running = &inner.diag.running[test];
+                assert_eq!(running.outcome.as_ref().map(|outcome| outcome.state), Some(TestState::Cancelled), "结果已经定成取消");
+                assert!(running.deadline <= Instant::now() + STORE_RETRY, "过一会儿由后台任务写，不等到时间窗结束");
+            }
+        }
+
+        free_disk(&lab);
+        lab.controller.lock().tests_tick(later(1));
+        let run = lab.controller.matrix(network).unwrap();
+        assert_eq!((run.state, run.finished), (MatrixState::Cancelled, 3), "{:?}", run.cells);
+        for test in tests {
+            assert_eq!(lab.controller.lock().store.test(network, test).unwrap().unwrap().state, TestState::Cancelled);
+        }
+        let logged = lab.controller.oplog(50).unwrap().into_iter().filter(|entry| entry.action == action::TEST_MATRIX_CANCEL).count();
+        assert_eq!(logged, 1);
     }
 
     #[test]
