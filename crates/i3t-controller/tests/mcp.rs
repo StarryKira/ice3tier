@@ -1112,3 +1112,37 @@ async fn every_change_the_admin_api_can_make_can_be_made_through_a_tool_with_the
         "{unattributed:?}"
     );
 }
+
+#[tokio::test]
+async fn a_jwt_is_never_written_to_the_log_whether_it_is_accepted_or_refused() {
+    let server = Server::new();
+    let home = server.network("home");
+    let jwt = server.jwt(&[McpScope::Read], None);
+    let parts: Vec<&str> = jwt.split('.').collect();
+    let tampered = format!("{}.{}.{}", parts[0], parts[1], "A".repeat(parts[2].len()));
+
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let writer = std::sync::Mutex::new(file.reopen().unwrap());
+    let subscriber =
+        tracing_subscriber::fmt().with_max_level(tracing::Level::DEBUG).without_time().with_ansi(false).with_writer(writer).finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    let ping = json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" });
+    assert_eq!(server.post(None, &[], &ping).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(server.post(Some(&tampered), &[], &ping).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(server.post(Some(&server.admin_token), &[], &ping).await.status, StatusCode::UNAUTHORIZED);
+    server.tool(&jwt, "node_list", json!({ "network": home })).await.done();
+    server.tool(&jwt, "node_show", json!({ "network": home, "node": 9 })).await.failed();
+    let forbidden = server.legacy(&jwt, "tools/call", json!({ "name": "node_delete", "arguments": { "network": home, "node": 9 } })).await;
+    assert_eq!(forbidden.status, StatusCode::FORBIDDEN);
+    drop(guard);
+
+    let log = std::fs::read_to_string(file.path()).unwrap();
+    assert_eq!(log.matches("拒绝 MCP 请求").count(), 4, "三次没过令牌这一关，一次权限不够，都记了：\n{log}");
+    assert!(log.contains("签名不对") && log.contains("不是一个 JWT") && log.contains("needs the scope nodes:write"), "{log}");
+    // 被拒绝的调用记着是哪个令牌（名字和 jti），不是令牌本身。
+    let jti = server.controller.mcp_tokens().unwrap().remove(0).jti;
+    assert!(log.contains("claude-code") && log.contains(&jti), "{log}");
+    for secret in [jwt.as_str(), parts[1], parts[2], tampered.as_str(), server.admin_token.as_str()] {
+        assert!(!log.contains(secret), "日志里有令牌：\n{log}");
+    }
+}
