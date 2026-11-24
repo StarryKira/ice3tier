@@ -339,8 +339,8 @@ impl Store {
         Ok(settled)
     }
 
-    /// 测试用：有没有提交的结果还不知道。
-    #[cfg(test)]
+    /// 还有没有提交结果不明、还没问出结果的事务（[`StoreError::CommitUnknown`]）。没有了的话，那些事务在数据库那边都已经做完了，
+    /// 算了数的改动别的连接都看得见。
     pub(crate) fn has_unsettled_commits(&self) -> bool {
         !self.unsettled.borrow().is_empty()
     }

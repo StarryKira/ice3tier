@@ -1,10 +1,18 @@
 //! 提交发出去了、回答没有回来（[`StoreError::CommitUnknown`]）：操作当时只能报错，可是数据库里后来可能已经是改过的样子。
 //! controller 过后要把结果问出来，算了数的话把当时没做的事补上：重算 netmap、断开被删的节点、换管理令牌。
+//!
+//! 主动测试和全网矩阵不等问出来：当场按已提交处理，提交之后该做的照做。
 
 use std::time::{Duration, Instant};
 
+use i3t_model::admin::NetworkId;
+use i3t_model::admin::action;
+use i3t_model::admin::diag::{CellState, CreateTest, MatrixState, TestQuery, TestState};
+use i3t_model::control::diag::TestRole;
+use i3t_model::control::{Declared, TestReport, ToController};
+
 use super::super::Controller;
-use super::super::testing::{Lab, Member};
+use super::super::testing::{Lab, Member, REMOTE, modern_hello};
 use super::is_woken;
 use crate::error::Error;
 use crate::store::{Database, Scratch, Store, StoreError};
@@ -171,4 +179,207 @@ fn a_commit_whose_answer_was_lost_and_that_did_not_count_changes_nothing() {
     assert_eq!(lab.controller.rules(network).unwrap().len(), 1, "规则还在");
     assert!(a.netmap().peer(b.id).is_some() && b.netmap().peer(a.id).is_some(), "节点照旧互相看得见");
     assert_eq!(a.snapshots.len() + b.snapshots.len(), sent, "没有因此多发一份 netmap");
+}
+
+/// 一个网络，里面两个懂主动测试的节点。
+fn two_testers(database: &Database, dir: &std::path::Path) -> (Lab, NetworkId, Member, Member) {
+    let mut lab = Lab::around(Controller::open(dir, database, ADDR.to_owned()).unwrap().controller);
+    let network = lab.network("home").id;
+    let mut a = lab.join_as(network, &modern_hello("0.2.0"));
+    let mut b = lab.join_as(network, &modern_hello("0.2.0"));
+    lab.settle(&mut [&mut a, &mut b]);
+    (lab, network, a, b)
+}
+
+fn test_between(a: &Member, b: &Member) -> CreateTest {
+    CreateTest { a: a.id, b: b.id, items: None, throughput: false, via: Vec::new() }
+}
+
+/// `member` 报它在测试 `test` 里最后的一份。处理时出的错不管：结果写不进存储时会有。
+fn report_last(lab: &Lab, member: &Member, test: u64, role: TestRole) {
+    let report = TestReport { test, role: Some(role), last: true, ..TestReport::default() };
+    let _ = lab.controller.handle(member.session, REMOTE, ToController::TestReport(Box::new(report)));
+}
+
+/// 测试 `test` 的两端各报最后的一份，发起方先报。
+fn both_report_last(lab: &Lab, network: NetworkId, test: u64, members: [&Member; 2]) {
+    let view = lab.controller.test(network, test).unwrap();
+    let member = |id| members.into_iter().find(|member| member.id == id).unwrap();
+    report_last(lab, member(view.a.id), test, TestRole::Initiator);
+    report_last(lab, member(view.b.id), test, TestRole::Responder);
+}
+
+/// 过了所有测试的时间窗、也过了结果再存的时刻之后，后台任务处理测试的那一部分。
+fn tests_overdue(lab: &Lab) {
+    lab.controller.lock().tests_tick(Instant::now() + Duration::from_secs(600));
+}
+
+/// 操作记录里有几条 `action`。
+fn logged(lab: &Lab, action: &str) -> usize {
+    lab.controller.oplog(100).unwrap().into_iter().filter(|entry| entry.action == action).count()
+}
+
+/// 取消一个测试的提交没有回答之后，接着发生的事。
+#[derive(Debug, Clone, Copy)]
+enum AfterCancel {
+    /// 两端照样报完了最后的结果。
+    Reports,
+    /// 谁也没再报，测试的时间窗过了。
+    TimesOut,
+    /// 接受方掉线了。
+    NodeGone,
+    /// 管理员没看到结果，又取消了一次。
+    CancelAgain,
+}
+
+#[test]
+fn a_test_cancel_whose_answer_was_lost_stays_a_cancel_whatever_happens_next() {
+    for next in [AfterCancel::Reports, AfterCancel::TimesOut, AfterCancel::NodeGone, AfterCancel::CancelAgain] {
+        let dir = tempfile::tempdir().unwrap();
+        let scratch = Scratch::new();
+        let database = scratch.database();
+        let (lab, network, mut a, mut b) = two_testers(&database, dir.path());
+        let test = lab.controller.start_test(network, &test_between(&a, &b)).unwrap().id;
+
+        let stalled = stall_commits(&database, "UPDATE", "tests");
+        be_impatient(&lab);
+        let cancelled = lab.controller.cancel_test(network, test).expect("提交的回答没有回来：按已提交处理，照常返回");
+        assert!(lab.controller.lock().store.has_unsettled_commits(), "{next:?}：取消的提交确实没有回答");
+        assert_eq!(cancelled.state, TestState::Cancelled);
+        // 提交还卡着，数据库那边还没有做完。
+        match next {
+            AfterCancel::Reports => both_report_last(&lab, network, test, [&a, &b]),
+            AfterCancel::TimesOut => tests_overdue(&lab),
+            AfterCancel::NodeGone => lab.controller.disconnect(b.session),
+            AfterCancel::CancelAgain => {
+                let again = lab.controller.cancel_test(network, test);
+                assert!(matches!(again, Err(Error::Busy(_))), "{next:?}：提交的结果问出来之前不写那一行：{again:?}");
+            }
+        }
+        assert_eq!(lab.controller.test(network, test).unwrap(), cancelled, "{next:?}：取消已经定下了，不因此改变");
+        assert_eq!(lab.controller.lock().store.lock_waits(), 0, "{next:?}：那一行被卡着的提交锁着，没有拿着 controller 的锁去等它");
+
+        stalled.release();
+        tick_until_settled(&lab);
+        if let AfterCancel::CancelAgain = next {
+            let again = lab.controller.cancel_test(network, test).unwrap();
+            assert_eq!(again, cancelled, "再取消一次只是把定下的结果存下来，结束的时刻不变");
+        }
+        tests_overdue(&lab);
+        let stored = Store::open(&database).unwrap().test(network, test).unwrap().unwrap();
+        assert_eq!((stored.state, stored.finished_at), (TestState::Cancelled, cancelled.finished_at), "{next:?}：存下来的是那一次取消");
+        assert_eq!(lab.controller.test(network, test).unwrap(), stored, "{next:?}");
+        assert_eq!(logged(&lab, action::TEST_CANCEL), 1, "{next:?}：取消只记一次");
+        a.receive();
+        b.receive();
+        assert!(a.test_ends.contains(&test), "{next:?}：发起方被告知结束");
+        if !matches!(next, AfterCancel::NodeGone) {
+            assert!(b.test_ends.contains(&test), "{next:?}：接受方被告知结束");
+        }
+        assert!(matches!(lab.controller.cancel_test(network, test), Err(Error::Busy(_))), "{next:?}：已经结束了");
+        assert_eq!(logged(&lab, action::TEST_CANCEL), 1, "{next:?}");
+    }
+}
+
+#[test]
+fn a_test_whose_creation_answer_was_lost_runs_and_its_result_is_stored_in_its_own_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = Scratch::new();
+    let database = scratch.database();
+    let (lab, network, mut a, mut b) = two_testers(&database, dir.path());
+
+    let stalled = stall_commits(&database, "INSERT", "tests");
+    be_impatient(&lab);
+    let started = lab.controller.start_test(network, &test_between(&a, &b)).expect("提交的回答没有回来：按已提交处理，照常开始");
+    assert!(lab.controller.lock().store.has_unsettled_commits(), "建测试记录的提交确实没有回答");
+    assert_eq!(started.state, TestState::Running);
+    a.receive();
+    b.receive();
+    assert_eq!((a.tests.len(), b.tests.len()), (1, 1), "两端都拿到了指令");
+    assert!(matches!(lab.controller.start_test(network, &test_between(&a, &b)), Err(Error::Busy(_))), "这一对正在测");
+    // 两端在提交还卡着的时候就报完了：那一行在数据库那边还没有建成，这时写它等于没写。
+    both_report_last(&lab, network, started.id, [&a, &b]);
+    assert_eq!(lab.controller.test(network, started.id).unwrap().state, TestState::Done, "结果已经定下了");
+
+    stalled.release();
+    tick_until_settled(&lab);
+    tests_overdue(&lab);
+    let listed: Vec<(u64, TestState)> =
+        lab.controller.tests(network, &TestQuery::default()).unwrap().iter().map(|view| (view.id, view.state)).collect();
+    assert_eq!(listed, [(started.id, TestState::Done)], "就这一行，存下来的是两端报的结果，不是\"controller 已重启\"");
+    assert_eq!(logged(&lab, action::TEST_START), 1);
+    a.receive();
+    b.receive();
+    assert!(a.test_ends.contains(&started.id) && b.test_ends.contains(&started.id), "两端被告知结束");
+}
+
+#[test]
+fn a_matrix_pair_whose_creation_answer_was_lost_is_tested_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = Scratch::new();
+    let database = scratch.database();
+    let (lab, network, a, b) = two_testers(&database, dir.path());
+
+    let stalled = stall_commits(&database, "INSERT", "tests");
+    be_impatient(&lab);
+    let run = lab.controller.start_matrix(network).unwrap();
+    assert!(lab.controller.lock().store.has_unsettled_commits(), "建测试记录的提交确实没有回答");
+    assert_eq!(run.cells[0].state, CellState::Running, "这一对照常开始，不重排：{:?}", run.cells);
+    let test = run.cells[0].test.unwrap();
+
+    stalled.release();
+    tick_until_settled(&lab);
+    both_report_last(&lab, network, test, [&a, &b]);
+    tests_overdue(&lab);
+    let run = lab.controller.matrix(network).unwrap();
+    assert_eq!((run.state, run.finished, run.cells[0].state), (MatrixState::Done, 1, CellState::Done));
+    let listed: Vec<(u64, TestState)> =
+        lab.controller.tests(network, &TestQuery::default()).unwrap().iter().map(|view| (view.id, view.state)).collect();
+    assert_eq!(listed, [(test, TestState::Done)], "这一对只测了一次");
+    assert_eq!(logged(&lab, action::TEST_START), 1);
+}
+
+#[test]
+fn a_matrix_cancel_whose_answer_was_lost_cancels_the_matrix_and_is_logged_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = Scratch::new();
+    let database = scratch.database();
+    let (lab, network, _a, _b) = two_testers(&database, dir.path());
+    let test = lab.controller.start_matrix(network).unwrap().cells[0].test.unwrap();
+
+    let stalled = stall_commits(&database, "INSERT", "oplog");
+    be_impatient(&lab);
+    let run = lab.controller.cancel_matrix(network).expect("提交的回答没有回来：按已提交处理，照常取消");
+    assert!(lab.controller.lock().store.has_unsettled_commits(), "记取消的提交确实没有回答");
+    assert_eq!((run.state, run.cells[0].state), (MatrixState::Cancelled, CellState::Cancelled));
+
+    stalled.release();
+    tick_until_settled(&lab);
+    assert_eq!(lab.controller.matrix(network).unwrap().state, MatrixState::Cancelled);
+    assert_eq!(lab.controller.test(network, test).unwrap().state, TestState::Cancelled);
+    assert!(matches!(lab.controller.cancel_matrix(network), Err(Error::Busy(_))), "已经取消完了");
+    assert_eq!(logged(&lab, action::TEST_MATRIX_CANCEL), 1, "取消只记一次");
+}
+
+#[test]
+fn a_matrix_whose_start_answer_was_lost_is_there_as_its_log_entry_says() {
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = Scratch::new();
+    let database = scratch.database();
+    let mut lab = Lab::around(Controller::open(dir.path(), &database, ADDR.to_owned()).unwrap().controller);
+    let network = lab.network("home").id;
+    // 一个节点不在线：唯一的一对不用测，矩阵开始就做完了，不会再去写数据库。
+    let mut online = lab.join_as(network, &modern_hello("0.2.0"));
+    lab.join_offline(network, &[], Declared::default());
+    lab.settle(&mut [&mut online]);
+
+    let stalled = stall_commits(&database, "INSERT", "oplog");
+    be_impatient(&lab);
+    let run = lab.controller.start_matrix(network).expect("提交的回答没有回来：按已提交处理，照常开始");
+    assert!(lab.controller.lock().store.has_unsettled_commits(), "记开始的提交确实没有回答");
+
+    stalled.release();
+    tick_until_settled(&lab);
+    assert_eq!(logged(&lab, action::TEST_MATRIX), 1);
+    assert_eq!(lab.controller.matrix(network).unwrap(), run, "操作记录里记着开始了的矩阵确实有");
 }

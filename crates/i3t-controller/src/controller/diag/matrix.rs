@@ -12,7 +12,7 @@ use i3t_model::admin::{LogRef, NetworkId, RefKind, action};
 use i3t_proto::NodeId;
 use serde_json::json;
 
-use super::{MIN_INTERVAL, STORE_RETRY, pair};
+use super::{MIN_INTERVAL, STORE_RETRY, commit_unknown, pair};
 use crate::controller::{Controller, Inner, count};
 use crate::error::{Entity, Error};
 use crate::store::{NetworkRecord, NodeRecord};
@@ -128,8 +128,11 @@ impl Controller {
         let detail = format!("开始全网矩阵：{} 个节点，{} 对，其中 {} 对要测", nodes.len(), run.total, pending.len());
         let params = json!({ "matrix": id, "nodes": nodes.len(), "pairs": run.total, "testing": pending.len() });
         let refs = [LogRef::new(RefKind::Network, network.0)];
-        // 操作记录与顺带的清理操作在同一事务中执行：写入失败时状态保持不变，可重试。
-        inner.store.atomically(|store| store.log_refs(run.started_at, Some(network), action::TEST_MATRIX, &detail, &refs, params))?;
+        // 操作记录与顺带的清理操作在同一事务中执行：写入失败时状态保持不变，可重试。提交的回答没有回来时按已提交处理，
+        // 照常开始（见 `commit_unknown`）：不然操作记录里有一次开始了的矩阵，却没有这个矩阵。
+        let logged =
+            inner.store.atomically(|store| store.log_refs(run.started_at, Some(network), action::TEST_MATRIX, &detail, &refs, params));
+        commit_unknown(logged.map_err(Error::from), "开始全网矩阵")?;
         tracing::info!(network = %network, matrix = id, pairs = run.total, testing = pending.len(), "开始全网矩阵");
         let mut matrix = Matrix {
             run,
@@ -162,7 +165,7 @@ impl Controller {
     /// 取消进行中的全网矩阵：取消运行中的测试，不再调度尚未开始的节点对。
     ///
     /// 全部测试完成收尾后矩阵才视为取消完成。若有测试结果持久化失败，其状态已固定为已取消，由后台任务继续重试持久化，全部持久化后矩阵才结束取消；
-    /// 在此期间可再次调用取消接口，但不能启动新的全网矩阵。
+    /// 在此期间可再次调用取消接口（不再记操作记录），但不能启动新的全网矩阵。记操作记录的提交没有回答时按已提交处理（见 `commit_unknown`）。
     ///
     /// # Errors
     ///
@@ -179,10 +182,12 @@ impl Controller {
             let (id, at) = (matrix.run.id, inner.clock.now());
             let refs = [LogRef::new(RefKind::Network, network.0)];
             let params = json!({ "matrix": id });
-            // 操作记录与顺带的清理操作在同一事务中执行：写入失败时状态保持不变，可重试。
-            inner
+            // 操作记录与顺带的清理操作在同一事务中执行：写入失败时状态保持不变，可重试。提交的回答没有回来时按已提交处理，
+            // 照常取消（见 `commit_unknown`）：不然矩阵接着跑完，管理员再取消一次又记一条。
+            let logged = inner
                 .store
-                .atomically(|store| store.log_refs(at, Some(network), action::TEST_MATRIX_CANCEL, "取消了全网矩阵", &refs, params))?;
+                .atomically(|store| store.log_refs(at, Some(network), action::TEST_MATRIX_CANCEL, "取消了全网矩阵", &refs, params));
+            commit_unknown(logged.map_err(Error::from), "取消全网矩阵")?;
             tracing::info!(network = %network, "取消全网矩阵");
             if let Some(matrix) = inner.diag.matrices.get_mut(&network) {
                 // 先标成在取消：下面结束各个测试时不会再开始新的。

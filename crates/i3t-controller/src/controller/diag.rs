@@ -12,6 +12,8 @@
 //!   接受方 [`RESPONDER_GRACE`] 之内没有报，或者整个测试过了时间窗还没有报完，就按手上有的结束，缺的那一端在结果里写明。
 //! - 节点掉线时，它参与的测试按手上有的结束。管理员可以取消进行中的测试，已经有的结果照样留着。
 //! - 定时重复测试不做：这是个人用的工具，管理员需要时再点一次；历史结果留着可以对比。
+//! - 开始、取消测试和矩阵时，提交的回答没有回来（[`StoreError::CommitUnknown`]）的，当场按已提交处理（[`commit_unknown`]），
+//!   不把这个错误交给调用方。
 
 mod matrix;
 mod merge;
@@ -32,7 +34,7 @@ use serde_json::json;
 
 use super::{Controller, Inner};
 use crate::error::{Entity, Error, InField};
-use crate::store::{NetworkRecord, NodeRecord, Store};
+use crate::store::{NetworkRecord, NodeRecord, Store, StoreError};
 
 /// 同一对节点两次测试至少隔多久，带吞吐的至少隔多久。
 const MIN_INTERVAL: Duration = Duration::from_secs(10);
@@ -82,6 +84,9 @@ struct Running {
     ended: Option<Instant>,
     /// 首次结束时确定的最终结果及其结束时刻。持久化失败时该测试保留在运行集合中，由后台任务原样重试，期间收到的上报一律忽略。
     outcome: Option<TestView>,
+    /// 这个测试的那一行最近一次是在提交结果不明的事务里写的（建出来的那一次，或者写成取消的那一次）：
+    /// 问出那个事务的结果之前不再写它的结果，见 [`Inner::wait_for_commit`]。
+    unsettled: bool,
 }
 
 impl Running {
@@ -111,6 +116,23 @@ impl Running {
 
 fn pair(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
     (a.min(b), a.max(b))
+}
+
+/// 一个事务的结果：提交了，返回 `Ok(false)`；提交的回答没有回来（[`StoreError::CommitUnknown`]），返回 `Ok(true)`；别的错误原样交回。
+///
+/// 回答没有回来的提交，数据库那边可能已经算了数。这里不等问出结果，当场按已提交处理，提交之后该做的照做：
+/// 后台按存储补齐的那一步（[`Inner::settle_commits`]）不管测试和矩阵，而且等它问出结果时，节点的上报、超时、掉线
+/// 可能已经按"没有提交"把那一行改掉了。按已提交处理而事务其实没有算数的话，少的只是操作记录里的那一条
+/// （新建的测试则连那一行也没有，它的结果无处可存）。
+fn commit_unknown<T>(outcome: Result<T, Error>, what: &str) -> Result<bool, Error> {
+    match outcome {
+        Ok(_) => Ok(false),
+        Err(Error::Store(error @ StoreError::CommitUnknown(_))) => {
+            tracing::warn!("{what}：{error}，按已提交处理");
+            Ok(true)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 impl Controller {
@@ -171,12 +193,13 @@ impl Controller {
 
     /// 取消一个进行中的测试。已经有的结果照样留着。
     ///
-    /// 操作记录与取消结果在同一事务中持久化；若持久化失败则状态不变，可安全重试。
-    /// 对随矩阵取消但结果尚未持久化的测试，再次调用取消将继续尝试持久化。
+    /// 操作记录与取消结果在同一事务中持久化；若持久化失败则状态不变，可安全重试。提交的回答没有回来时按已提交处理
+    /// （见 `commit_unknown`）：结果当场定为取消并照常返回，由后台任务问出提交结果之后原样再写一次、告诉两端结束。
+    /// 对随矩阵取消、或者像这样结果尚未持久化的测试，再次调用取消将继续尝试持久化，不再记操作记录。
     ///
     /// # Errors
     ///
-    /// 这个网络里没有这个测试（`not_found`）；它已经结束了（`busy`）；读写存储失败。
+    /// 这个网络里没有这个测试（`not_found`）；它已经结束了，或者它的那一行还在等一个提交结果不明的事务（`busy`）；读写存储失败。
     pub fn cancel_test(&self, network: NetworkId, id: u64) -> Result<TestView, Error> {
         let mut inner = self.lock();
         inner.require_network(network)?;
@@ -196,13 +219,24 @@ impl Controller {
                 let detail = format!("取消了节点 {} 和 {} 之间的主动测试 #{id}", a.name, b.name);
                 let refs = [LogRef::node(a.id), LogRef::node(b.id)];
                 let params = json!({ "test": id, "a": a.id, "a_name": a.name, "b": b.id, "b_name": b.name });
+                inner.wait_for_commit(id)?;
                 let view = inner.outcome(id, true).ok_or(Error::NotFound(Entity::Test))?;
                 let at = view.finished_at.unwrap_or_default();
-                inner.store.atomically(|store| {
+                let stored = inner.store.atomically(|store| {
                     store.log_refs(at, Some(network), action::TEST_CANCEL, &detail, &refs, params)?;
                     store.update_test(&view)
-                })?;
-                inner.test_stored(&view);
+                });
+                if commit_unknown(stored.map_err(Error::from), &format!("取消主动测试 #{id}"))? {
+                    // 取消就此定下：之后的上报不算数，超时、掉线不改它（见 `fix_outcome`）。后台任务等问出提交结果之后
+                    // 原样再写一次，再告诉两端结束；管理员再取消一次也只是接着写它。
+                    if let Some(running) = inner.diag.running.get_mut(&id) {
+                        running.outcome = Some(view.clone());
+                        running.deadline = Instant::now() + STORE_RETRY;
+                        running.unsettled = true;
+                    }
+                } else {
+                    inner.test_stored(&view);
+                }
                 Ok(view)
             }
         };
@@ -304,6 +338,7 @@ impl Inner {
     /// 建起一个测试并下发指令。调用前已经查过间隔。
     ///
     /// 出错时不产生任何副作用：存储中无此测试记录，也未向节点下发指令，可原样重试。
+    /// 建测试记录的提交没有回答时按已提交处理（见 [`commit_unknown`]），照常下发、照常返回。
     pub(super) fn begin_test(
         &mut self,
         network: &NetworkRecord,
@@ -365,6 +400,7 @@ impl Inner {
                 deadline: Instant::now(),
                 ended: None,
                 outcome: None,
+                unsettled: false,
             };
             let mut view = TestView { state: view.state, error: view.error.clone(), finished_at: view.finished_at, ..running.view(false) };
             if let Some(route) = view.route.as_mut().filter(|route| route.state == ItemState::Pending) {
@@ -375,10 +411,11 @@ impl Inner {
                 host.state = ItemState::Skipped;
                 host.problem.clone_from(&blocker);
             }
+            // 插入的这一行里已经是最终的结果，之后不再写它：提交的回答没有回来也没有要等的。
             self.store_new_test(&mut view)?;
             return Ok(view);
         }
-        self.store_new_test(&mut view)?;
+        let unsettled = self.store_new_test(&mut view)?;
         let window = window_secs(&items, &view.request);
         let (id, paths) = (view.id, view.request.via.clone());
         let order = |peer: NodeId, role| TestOrder { test: id, peer, role, items, paths: paths.clone(), window_secs: window };
@@ -391,7 +428,7 @@ impl Inner {
         // 发送失败会把那个节点记为离线。测试发完了才算进行中，所以不会在发的时候就被掉线结束掉，返回一个已经不在的"进行中"；
         // 发不出去的测试下面就结束它。
         let deadline = now + Duration::from_secs(u64::from(window)) + REPORT_GRACE;
-        let running = Running { base: view, skips, initiator: None, responder: None, deadline, ended: None, outcome: None };
+        let running = Running { base: view, skips, initiator: None, responder: None, deadline, ended: None, outcome: None, unsettled };
         let started = running.view(false);
         self.diag.running.insert(id, running);
         if sent {
@@ -408,11 +445,15 @@ impl Inner {
     }
 
     /// 插入测试记录并取得编号，与操作记录在一个事务里：出错时存储里没有这个测试，矩阵再排这一对时不会多出一条"没做完"的。
-    fn store_new_test(&mut self, view: &mut TestView) -> Result<(), Error> {
-        self.store.atomically(|store| {
+    ///
+    /// 提交的回答没有回来时按已提交处理（见 [`commit_unknown`]），返回 `true`：编号在提交之前已经拿到了，
+    /// 这一行在数据库那边可能还没有建成，问出提交结果之前写它的结果等于没写（见 [`Inner::wait_for_commit`]）。
+    fn store_new_test(&mut self, view: &mut TestView) -> Result<bool, Error> {
+        let stored = self.store.atomically(|store| {
             view.id = store.insert_test(view)?;
             Self::log_test(store, view)
-        })
+        });
+        commit_unknown(stored, &format!("开始主动测试 #{}", view.id))
     }
 
     fn log_test(store: &Store, view: &TestView) -> Result<(), Error> {
@@ -504,16 +545,31 @@ impl Inner {
     ///
     /// 结果与结束时刻在首次结束时确定；后续重试仅重新写入该结果，`cancelled` 不再生效。
     /// 若持久化失败，其余状态不变：测试仍留在进行中集合，间隔 [`STORE_RETRY`] 后由后台任务重试，期间收到的上报一律忽略。
+    /// 那一行还在等提交结果不明的事务时（[`Inner::wait_for_commit`]）也是这样。
     pub(super) fn finish_test(&mut self, id: u64, cancelled: bool) -> Result<TestView, Error> {
         let view = self.fix_outcome(id, cancelled).ok_or(Error::NotFound(Entity::Test))?;
-        if let Err(error) = self.store.update_test(&view) {
+        if let Err(error) = self.wait_for_commit(id).and_then(|()| self.store.update_test(&view).map_err(Error::from)) {
             if let Some(running) = self.diag.running.get_mut(&id) {
                 running.deadline = Instant::now() + STORE_RETRY;
             }
-            return Err(error.into());
+            return Err(error);
         }
         self.test_stored(&view);
         Ok(view)
+    }
+
+    /// 测试的那一行最近一次是在提交结果不明的事务里写的（[`Running::unsettled`]）：存储里还有没问出结果的提交时
+    /// （[`Store::has_unsettled_commits`]，不分是哪一个事务的）不写它，返回 `busy`；都问出了结果就不再等。
+    ///
+    /// 那个事务在数据库那边可能还没有做完。这时它新插入的行别的连接看不见，写进去的结果等于没写，等它提交了，
+    /// 那一行就一直是"进行中"，显示成 controller 重启过；它改过的行被它锁着，写它要拿着 controller 的锁等满等锁的期限。
+    fn wait_for_commit(&mut self, id: u64) -> Result<(), Error> {
+        let Some(running) = self.diag.running.get_mut(&id).filter(|running| running.unsettled) else { return Ok(()) };
+        if self.store.has_unsettled_commits() {
+            return Err(Error::Busy(format!("测试 #{id} 的记录还在等数据库确认上一次写入，请稍后再试")));
+        }
+        running.unsettled = false;
+        Ok(())
     }
 
     /// 测试现在结束的话是什么结果：合成到现在为止的上报，结束的时刻是现在。
