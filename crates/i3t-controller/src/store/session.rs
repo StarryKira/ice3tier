@@ -85,7 +85,6 @@ type Outcome = (Result<Session, StoreError>, Instant);
 pub(super) struct Connecting {
     receiver: mpsc::Receiver<Outcome>,
     started: Instant,
-    limit: Duration,
     /// 到这个时刻仍无结果，即不再等待驱动线程，按建连超时处理。连接串中的超时极大、算不出时刻时为 `None`。
     deadline: Option<Instant>,
 }
@@ -99,19 +98,11 @@ impl Connecting {
     /// 最多等待 `patience`；已有结果时返回结果及得出结果的时刻，仍在进行中时返回 `None`。`patience` 为零时只查询不等待。
     pub(super) fn wait(&mut self, patience: Duration) -> Option<Outcome> {
         let patience = self.deadline.map_or(patience, |deadline| patience.min(deadline.saturating_duration_since(Instant::now())));
-        let received = if patience.is_zero() {
-            self.receiver.try_recv().map_err(|error| match error {
-                mpsc::TryRecvError::Empty => mpsc::RecvTimeoutError::Timeout,
-                mpsc::TryRecvError::Disconnected => mpsc::RecvTimeoutError::Disconnected,
-            })
-        } else {
-            self.receiver.recv_timeout(patience)
-        };
-        match received {
+        match self.receiver.recv_timeout(patience) {
             Ok(outcome) => Some(outcome),
             Err(mpsc::RecvTimeoutError::Timeout) if self.deadline.is_none_or(|deadline| Instant::now() < deadline) => None,
             // 驱动线程到期会自行报告失败；超过期限仍无结果，不再等待。
-            Err(mpsc::RecvTimeoutError::Timeout) => Some((Err(StoreError::ConnectTimedOut(self.limit)), Instant::now())),
+            Err(mpsc::RecvTimeoutError::Timeout) => Some((Err(StoreError::ConnectTimedOut(self.started.elapsed())), Instant::now())),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 Some((Err(StoreError::Driver(io::Error::other("数据库驱动线程异常退出，未返回连接结果"))), Instant::now()))
             }
@@ -179,7 +170,7 @@ impl Session {
         };
         thread::Builder::new().name("i3t-postgres".to_owned()).spawn(drive).map_err(StoreError::Driver)?;
         let deadline = started.checked_add(limit.saturating_add(setup_limit).saturating_add(HANDOVER_MARGIN));
-        Ok(Connecting { receiver, started, limit, deadline })
+        Ok(Connecting { receiver, started, deadline })
     }
 
     /// 连接已经不能用了：之后的请求都会失败，要换一条新的。

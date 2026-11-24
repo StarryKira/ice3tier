@@ -183,17 +183,27 @@ impl Connection {
     async fn run(mut self, established: Established) {
         let Established { session, reader, mut writer, mut outbox } = established;
         let timing = self.controller.timing();
-        let (heard, last_heard) = watch::channel(Instant::now());
+        let (heard, last_heard) = watch::channel(Some(Instant::now()));
         let (inbound, queue) = mpsc::channel(INBOUND_CAPACITY);
-        let mut reader_task = spawn_reader(reader, session.node, heard, inbound);
-        let worker = spawn_worker(Arc::clone(&self.controller), session, self.remote.ip(), queue);
+        let mut reader = Owned(spawn_reader(reader, session.node, heard, inbound));
+        let mut worker = Owned(spawn_worker(Arc::clone(&self.controller), session, self.remote.ip(), queue));
+        // 处理任务在连接结束之前就结束时的结果。
+        let mut worker_ended = None;
         let mut last_sent = Instant::now();
 
         // 第二项：连接是否因读取结束而结束。是的话，节点在关闭连接之前发来的消息仍要处理完。
         let (reason, read_to_end) = loop {
-            let silent_until = *last_heard.borrow() + timing.liveness_timeout;
+            let silent_until = silent_since(*last_heard.borrow()) + timing.liveness_timeout;
             tokio::select! {
-                ended = &mut reader_task => break (ended.unwrap_or_else(|_| "读取任务意外结束".to_owned()), true),
+                ended = &mut reader.0 => break (ended.unwrap_or_else(|_| "读取任务意外结束".to_owned()), true),
+                ended = &mut worker.0, if worker_ended.is_none() => {
+                    let failed = ended.is_err();
+                    worker_ended = Some(ended);
+                    // 处理任务只在 panic 或队列关闭时结束。队列关闭说明读取任务已结束，下一轮从读取任务取得结束原因。
+                    if failed {
+                        break ("处理节点消息的任务意外结束".to_owned(), false);
+                    }
+                }
                 outgoing = outbox.recv() => match outgoing {
                     Some(message) => match timeout(WRITE_TIMEOUT, write_frame(&mut writer, &message)).await {
                         Ok(Ok(())) => last_sent = Instant::now(),
@@ -210,8 +220,8 @@ impl Connection {
                     }
                 }
                 () = sleep_until(silent_until) => {
-                    // 等待期间读取任务可能刚收到过消息：按最新的时刻重新判断。
-                    if Instant::now() >= *last_heard.borrow() + timing.liveness_timeout {
+                    // 等待期间读取任务可能刚收到过消息：按最新的状态重新判断。
+                    if Instant::now() >= silent_since(*last_heard.borrow()) + timing.liveness_timeout {
                         break (format!("{:?} 没有收到节点的任何消息", timing.liveness_timeout), false);
                     }
                 }
@@ -220,22 +230,43 @@ impl Connection {
         };
 
         tracing::info!(node = %session.node, remote = %self.remote, %reason, "和节点的连接结束");
-        reader_task.abort();
-        let panicked = if read_to_end {
-            // 读取任务已退出，处理任务处理完队列里剩下的消息后自行结束。
-            worker.await.err().and_then(|err| err.try_into_panic().ok())
-        } else {
+        drop(reader);
+        let worker_ended = match worker_ended {
+            Some(ended) => Some(ended),
+            // 读取任务已退出，处理任务处理完队列里剩下的消息后自行结束。controller 正在关闭时不再等待。
+            None if read_to_end => tokio::select! {
+                ended = &mut worker.0 => Some(ended),
+                _ = self.shutdown.wait_for(|&stopping| stopping) => None,
+            },
             // 其余情况下剩下的消息不再处理：连接已被顶替、节点已沉默或 controller 正在关闭。
-            worker.abort();
-            None
+            None if worker.0.is_finished() => Some((&mut worker.0).await),
+            None => None,
         };
+        drop(worker);
         blocking(&self.controller, move |controller| controller.disconnect(session)).await;
         close(&mut writer).await;
         // controller 里的 panic 是 bug，收尾之后照原样传出去（见 [`blocking`]）。
-        if let Some(panic) = panicked {
+        if let Some(Err(err)) = worker_ended
+            && let Ok(panic) = err.try_into_panic()
+        {
             std::panic::resume_unwind(panic);
         }
     }
+}
+
+/// 连接派生的任务。被丢弃时取消该任务：连接任务本身被取消时（例如关闭时等不及），不留下仍在读连接、处理消息的任务。
+struct Owned<T>(JoinHandle<T>);
+
+impl<T> Drop for Owned<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// 从何时起算节点沉默：最近一次收到消息的时刻。读取任务因积压暂停读取时（`None`）按现在算：
+/// 这段时间读不到节点的消息是因为 controller 还没处理完之前的消息，不是节点沉默。
+fn silent_since(heard: Option<Instant>) -> Instant {
+    heard.unwrap_or_else(Instant::now)
 }
 
 /// TLS 握手，取出对端的公钥，读第一条消息。失败时返回给日志看的原因。
@@ -267,27 +298,37 @@ async fn handshake(tls: Arc<rustls::ServerConfig>, stream: TcpStream) -> Result<
 ///
 /// 读一帧不能被打断（长度和内容分两次读），所以不能直接放在 `select!` 里。心跳只说明节点还在，不进队列，也不占用 controller 的锁；
 /// 无法解析的帧（通常为更高版本节点发来的未知消息类型）同样计入存活，跳过即可。
+///
+/// 队列满时暂停读取，直到处理任务跟上，期间 `heard` 为 `None`（见 [`silent_since`]）。
 fn spawn_reader(
     mut reader: Reader,
     node: NodeId,
-    heard: watch::Sender<Instant>,
+    heard: watch::Sender<Option<Instant>>,
     inbound: mpsc::Sender<ToController>,
 ) -> JoinHandle<String> {
+    const WORKER_GONE: &str = "处理节点消息的任务意外结束";
     tokio::spawn(async move {
         loop {
             match read_frame(&mut reader, MAX_FRAME_LEN).await {
                 Ok(Some(message)) => {
-                    heard.send_replace(Instant::now());
+                    heard.send_replace(Some(Instant::now()));
                     if matches!(message, ToController::Heartbeat) {
                         continue;
                     }
+                    let message = match inbound.try_send(message) {
+                        Ok(()) => continue,
+                        Err(mpsc::error::TrySendError::Full(message)) => message,
+                        Err(mpsc::error::TrySendError::Closed(_)) => return WORKER_GONE.to_owned(),
+                    };
+                    heard.send_replace(None);
                     if inbound.send(message).await.is_err() {
-                        return "处理节点消息的任务意外结束".to_owned();
+                        return WORKER_GONE.to_owned();
                     }
+                    heard.send_replace(Some(Instant::now()));
                 }
                 Ok(None) => return "节点关闭了连接".to_owned(),
                 Err(FrameError::Json(err)) => {
-                    heard.send_replace(Instant::now());
+                    heard.send_replace(Some(Instant::now()));
                     tracing::debug!(%node, "无法解析节点消息，已忽略：{err}");
                 }
                 Err(err) => return format!("读取失败：{}", error_chain(&err)),
@@ -296,7 +337,7 @@ fn spawn_reader(
     })
 }
 
-/// 处理任务：按收到的顺序把消息逐条交给 controller 处理。队列的发送端全部关闭且队列为空时结束。
+/// 处理任务：按收到的顺序把消息逐条交给 controller 处理。队列的发送端全部关闭且队列为空时结束；controller 处理消息时 panic 也会结束。
 fn spawn_worker(controller: Arc<Controller>, session: Admitted, remote: IpAddr, mut queue: mpsc::Receiver<ToController>) -> JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(message) = queue.recv().await {

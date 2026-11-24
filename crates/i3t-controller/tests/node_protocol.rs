@@ -374,7 +374,10 @@ async fn a_node_stays_online_while_the_controller_is_stuck_handling_its_messages
     holding.await.unwrap();
 
     // 卡住期间节点照常上报、发心跳：上报要等锁才能处理，但不影响心跳的收发和存活判定。
-    node.send(ToController::Report(Box::default())).await;
+    // 上报多到待处理的队列装不下：读取因此暂停，同样不算节点沉默。
+    for _ in 0..32 {
+        node.send(ToController::Report(Box::default())).await;
+    }
     let mut heartbeats = 0;
     while !stuck.is_finished() {
         node.send(ToController::Heartbeat).await;
