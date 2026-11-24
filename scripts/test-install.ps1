@@ -403,6 +403,38 @@ httpd.serve_forever()
         }
     }
 
+    # Without the installer (the zip run by hand, `i3t service install`) the node is on its own.
+    Step 'the node itself refuses a %ProgramData%\i3t that ordinary users can write to or that one of them owns'
+    $node = Join-Path $dir 'i3t.exe'
+    # Made like this, it inherits from C:\ProgramData: Users may read it and add files and directories to it.
+    New-Item -ItemType Directory -Path $state | Out-Null
+    try {
+        foreach ($case in 'writable by Users', 'owned by Users') {
+            if ($case -eq 'owned by Users') {
+                & icacls.exe $state /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+                & icacls.exe $state /setowner '*S-1-5-32-545' | Out-Null
+                if ($LASTEXITCODE -ne 0) { Fail 'failed to set untrusted owner on test state directory' }
+            }
+            & cmd.exe /c "`"$node`" key > nul 2>&1"
+            if ($LASTEXITCODE -eq 0) { Fail "the node used a %ProgramData%\i3t $case" }
+            if (Test-Path -LiteralPath (Join-Path $state 'node.key')) { Fail "node.key was written into a %ProgramData%\i3t $case" }
+        }
+    } finally {
+        & icacls.exe $state /setowner '*S-1-5-32-544' | Out-Null
+        Remove-Item -LiteralPath $state -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Step 'the node creates a missing state directory closed to ordinary users, files included'
+    & cmd.exe /c "`"$node`" --state-dir `"$state`" key > nul 2>&1"
+    if ($LASTEXITCODE -ne 0) { Fail "the node could not create $state" }
+    try {
+        foreach ($path in $state, (Join-Path $state 'node.key')) {
+            $access = (& icacls.exe $path | Out-String)
+            if ($access -match 'BUILTIN\\Users|Authenticated Users|Everyone') { Fail "ordinary users can reach ${path}:`n$access" }
+        }
+    } finally {
+        Remove-Item -LiteralPath $state -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
     Step 'ok'
 } catch {
     Write-Host "`n--- failed; the node says:"
