@@ -21,6 +21,7 @@ use tracing::Instrument;
 use crate::admission::{HandshakeLimits, Handshakes, Pass, RefusalLog};
 use crate::entry::{Entry, LocalEntry};
 use crate::forward_health::{ForwardHealth, TargetFailure};
+use crate::own_listeners::{Claim, OwnListener, OwnListeners};
 use crate::routes::{NoRoutes, SharedRoutes};
 use crate::session::{self, Shared};
 use crate::udp;
@@ -91,6 +92,7 @@ impl<C: Connector + Datagrams> Access<C> {
             drained: AtomicU64::new(0),
             udp_idle_timeout: UDP_IDLE_TIMEOUT,
             forward_health: ForwardHealth::default(),
+            own_listeners: OwnListeners::default(),
             routes: Arc::new(NoRoutes),
             handshakes: Handshakes::new(HandshakeLimits::default()),
         };
@@ -212,6 +214,13 @@ impl<C: Connector + Datagrams> Access<C> {
         self.shared.forward_health.clone()
     }
 
+    /// 本节点的程序自己在监听的地址的那张表：入口的代理、组网入口和端口转发登记在里面。出口模块凭它不去连这些地址，
+    /// 装配层往里登记程序里别处的监听（虚拟网卡的名字服务）。
+    #[must_use]
+    pub fn own_listeners(&self) -> OwnListeners {
+        self.shared.own_listeners.clone()
+    }
+
     /// 开始或者结束排空。`Some(说明)` 时新的连接得到拒绝（见类型的文档），说明写进日志。
     pub fn set_draining(&self, draining: Option<String>) {
         *self.shared.draining.lock().expect("draining mutex poisoned") = draining;
@@ -253,20 +262,20 @@ impl<C: Connector + Datagrams> Access<C> {
             match kept.iter_mut().find(|existing| existing.key == key) {
                 Some(existing) => {
                     if let Some(previous) = existing.state.failure().map(str::to_owned) {
-                        (existing.state, existing.task) = self.listen(&key, &existing.counters, Some(&previous)).await;
+                        (existing.state, existing.serving) = self.listen(&key, &existing.counters, Some(&previous)).await;
                     } else if existing.awaiting_address {
-                        (existing.state, existing.task, existing.awaiting_address) = self.listen_virtual(&key, &existing.counters).await;
+                        (existing.state, existing.serving, existing.awaiting_address) = self.listen_virtual(&key, &existing.counters).await;
                     }
                 }
                 None => {
                     let counters = Counters::default();
                     let mut awaiting_address = false;
-                    let (state, task) = match plan {
+                    let (state, serving) = match plan {
                         Plan::Bind => self.listen(&key, &counters, None).await,
                         Plan::Virtual { listener: true } => {
-                            let (state, task, awaiting) = self.listen_virtual(&key, &counters).await;
+                            let (state, serving, awaiting) = self.listen_virtual(&key, &counters).await;
                             awaiting_address = awaiting;
-                            (state, task)
+                            (state, serving)
                         }
                         Plan::Virtual { listener: false } => {
                             tracing::info!(listen = %key, "这条 UDP 端口转发监听在本节点的虚拟 IP 上、目标是本节点自己：只经流来访问，不占用操作系统的端口");
@@ -277,7 +286,7 @@ impl<C: Connector + Datagrams> Access<C> {
                             (ListenState::Unsupported { reason: reason.to_owned(), cause }, None)
                         }
                     };
-                    kept.push(Bound { key, state, counters, task, awaiting_address });
+                    kept.push(Bound { key, state, counters, serving, awaiting_address });
                 }
             }
         }
@@ -312,17 +321,17 @@ impl<C: Connector + Datagrams> Access<C> {
     ///
     /// Linux 上用 `IP_FREEBIND`：地址还不在网卡上（网卡还没装好、或者装不了）也绑得上，网卡装好的那一刻就收得到连接。
     /// 别的平台没有它：地址不在本机时（第三项是真）状态是 [`ListenState::Virtual`]，之后隔一阵再试，网卡装好之后就绑上了。
-    async fn listen_virtual(&self, key: &Key, counters: &Counters) -> (ListenState, Option<JoinHandle<()>>, bool) {
+    async fn listen_virtual(&self, key: &Key, counters: &Counters) -> (ListenState, Option<Serving>, bool) {
         match self.listen(key, counters, None).await {
             (ListenState::Failed { cause: ListenCause::AddressNotAvailable, .. }, None) => {
                 tracing::info!(listen = %key, "这条端口转发监听在本节点的虚拟 IP 上，虚拟网卡还没有装上：先只经流来访问，网卡装上之后再监听");
                 (ListenState::Virtual, None, true)
             }
-            (state, task) => (state, task, false),
+            (state, serving) => (state, serving, false),
         }
     }
 
-    async fn listen(&self, key: &Key, counters: &Counters, previous_failure: Option<&str>) -> (ListenState, Option<JoinHandle<()>>) {
+    async fn listen(&self, key: &Key, counters: &Counters, previous_failure: Option<&str>) -> (ListenState, Option<Serving>) {
         let configured = key.bind();
         // 端口写 0 的端口转发：用上次挑定的端口；还没挑过就让系统挑一个，记下来。
         let (bind, chosen_now) = match key {
@@ -333,29 +342,41 @@ impl<C: Connector + Datagrams> Access<C> {
             Key::Forward { .. } | Key::Proxy { .. } | Key::Local { .. } => (configured, false),
         };
         // 本节点的虚拟 IP 在虚拟网卡上，网卡可能还没装好。
-        let free = bind.ip() == self.shared.netmap.borrow().me.virtual_ip;
+        let free = bind.ip().to_canonical() == IpAddr::V4(self.shared.netmap.borrow().me.virtual_ip);
+        let (protocol, forward) = match key {
+            Key::Forward { id, protocol, .. } => (*protocol, Some(*id)),
+            Key::Proxy { .. } | Key::Local { .. } => (ForwardProtocol::Tcp, None),
+        };
+        let claim = |local| self.shared.own_listeners.claim(OwnListener { protocol, local, forward });
+        // 只登记绑上了的（[`OwnListeners::claim`]）：绑不上的隔一阵重试一次，那个端口多半在别的程序手里。
         let started = match key {
             Key::Forward { id, protocol: ForwardProtocol::Udp, .. } => udp_socket(bind, free).map(|socket| {
                 let local = socket.local_addr().unwrap_or(bind);
+                // UDP 的端口一绑上就在收，绑上马上登记。
+                let claim = claim(local);
                 let span = tracing::info_span!("access", listen = %key);
                 let sessions = udp::forward::serve(Arc::clone(&self.shared), *id, configured, socket, counters.clone());
-                (local, tokio::spawn(sessions.instrument(span)))
+                (local, Serving { task: tokio::spawn(sessions.instrument(span)), _claim: claim })
             }),
             Key::Forward { protocol: ForwardProtocol::Tcp, .. } | Key::Proxy { .. } | Key::Local { .. } => {
-                tcp_listener(bind, free).map(|listener| {
-                    let local = listener.local_addr().unwrap_or(bind);
-                    (local, tokio::spawn(accept_loop(Arc::clone(&self.shared), key.clone(), listener, counters.clone())))
+                tcp_bound(bind, free).and_then(|socket| {
+                    let local = socket.local_addr().unwrap_or(bind);
+                    // 绑上了、还没有开始监听，这时连不进来：先登记，再开始监听。
+                    let claim = claim(local);
+                    let listener = socket.listen(TCP_BACKLOG)?;
+                    let task = tokio::spawn(accept_loop(Arc::clone(&self.shared), key.clone(), listener, counters.clone()));
+                    Ok((local, Serving { task, _claim: claim }))
                 })
             }
         };
         match started {
-            Ok((local, task)) => {
+            Ok((local, serving)) => {
                 if let (true, Key::Forward { id, .. }) = (chosen_now, key) {
                     tracing::info!(listen = %key, port = local.port(), "端口转发的端口写的是 0，挑定了这个端口，之后重启也用它");
                     self.shared.ports.remember(*id, local.port());
                 }
                 tracing::info!(listen = %key, %local, "开始监听");
-                (ListenState::Listening { local }, Some(task))
+                (ListenState::Listening { local }, Some(serving))
             }
             Err(error) => {
                 let reason = error.to_string();
@@ -562,7 +583,7 @@ fn wanted(netmap: &Netmap, local: &[LocalEntry]) -> Vec<(Key, Plan)> {
         .filter(|entry| !netmap.me.proxies.iter().any(|proxy| proxy.bind == entry.bind))
         .map(|entry| (Key::Local { name: entry.name.clone(), bind: entry.bind, protocol: entry.protocol }, Plan::Bind));
     let forwards = netmap.me.forwards.iter().map(|forward| {
-        let plan = if forward.bind.ip() != netmap.me.virtual_ip {
+        let plan = if forward.bind.ip().to_canonical() != IpAddr::V4(netmap.me.virtual_ip) {
             Plan::Bind
         } else if forward.bind.port() == 0 {
             Plan::Unsupported { reason: "监听在虚拟 IP 上的端口转发要写明端口号", cause: ListenCause::VirtualPortZero }
@@ -586,16 +607,23 @@ struct Bound {
     key: Key,
     state: ListenState,
     counters: Counters,
-    /// 接受连接的任务，监听的 socket 在它手里。
-    task: Option<JoinHandle<()>>,
+    /// 开着时有值。
+    serving: Option<Serving>,
     /// 监听在虚拟 IP 上、这个地址还不在本机（虚拟网卡没装上，没有 `IP_FREEBIND` 的平台上）：隔一阵再试。
     awaiting_address: bool,
+}
+
+/// 一个开着的监听：接受连接的任务（监听的 socket 在它手里），和这个监听在"程序自己的监听"里的登记。
+struct Serving {
+    task: JoinHandle<()>,
+    /// 监听关掉之后才撤销（[`Bound::close`] 先等任务结束）。
+    _claim: Claim,
 }
 
 impl Bound {
     /// 关掉监听，等到 socket 真的关上再返回，这样紧接着绑同一个地址不会撞上自己。
     async fn close(mut self) {
-        if let Some(task) = self.task.take() {
+        if let Some(Serving { task, _claim }) = self.serving.take() {
             task.abort();
             // 任务是被取消的，它的结果只会是"已取消"。
             let _ = task.await;
@@ -605,24 +633,27 @@ impl Bound {
 
 impl Drop for Bound {
     fn drop(&mut self) {
-        if let Some(task) = &self.task {
-            task.abort();
+        if let Some(serving) = &self.serving {
+            serving.task.abort();
         }
     }
 }
 
-/// TCP 的监听。`free` 时（地址是本节点的虚拟 IP）地址还不在网卡上也绑得上（[`free_bind`]）。
-fn tcp_listener(bind: SocketAddr, free: bool) -> io::Result<TcpListener> {
-    if !free {
-        return i3t_underlay::tcp_mss::listen(bind);
-    }
+/// TCP 的监听上排队的连接最多这么多条，和 `i3t_underlay::tcp_mss::listen` 一样。
+const TCP_BACKLOG: u32 = 1024;
+
+/// 绑好了、还没有开始监听的 TCP socket，开始监听留给调用方：这中间连不进来，调用方趁这时把它登记成程序自己的监听。
+/// 别的和 `i3t_underlay::tcp_mss::listen` 做的一样。`free` 时（地址是本节点的虚拟 IP）地址还不在网卡上也绑得上（[`free_bind`]）。
+fn tcp_bound(bind: SocketAddr, free: bool) -> io::Result<TcpSocket> {
     let socket = if bind.is_ipv4() { TcpSocket::new_v4()? } else { TcpSocket::new_v6()? };
     #[cfg(unix)]
     socket.set_reuseaddr(true)?;
-    free_bind(&socket2::SockRef::from(&socket))?;
+    if free {
+        free_bind(&socket2::SockRef::from(&socket))?;
+    }
     i3t_underlay::tcp_mss::clamp(&socket);
     socket.bind(bind)?;
-    socket.listen(1024)
+    Ok(socket)
 }
 
 /// UDP 的监听，`free` 同上。
@@ -830,6 +861,33 @@ mod tests {
         assert_eq!(ListenCause::from(again.kind()), ListenCause::AddressInUse, "{again}");
         assert_eq!(ListenCause::from(io::ErrorKind::PermissionDenied), ListenCause::PermissionDenied);
         assert_eq!(ListenCause::from(io::ErrorKind::InvalidInput), ListenCause::Other);
+    }
+
+    #[test]
+    fn a_forward_on_our_virtual_ip_is_planned_as_one_however_the_address_is_spelled() {
+        use i3t_model::netmap::Forward;
+
+        let mut netmap = crate::route::tests::netmap();
+        let forward = |id, bind: &str| Forward {
+            id,
+            protocol: ForwardProtocol::Tcp,
+            bind: bind.parse().unwrap(),
+            target: netmap.peers[0].id,
+            allow_from: Vec::new(),
+            class: None,
+        };
+        netmap.me.forwards = vec![
+            forward(1, "10.66.0.1:8080"),
+            forward(2, "[::ffff:10.66.0.1]:8081"),
+            forward(3, "[::ffff:10.66.0.1]:0"),
+            forward(4, "0.0.0.0:8082"),
+            forward(5, "[::ffff:192.168.1.5]:8083"),
+        ];
+        let plans: Vec<Plan> = wanted(&netmap, &[]).into_iter().map(|(_, plan)| plan).collect();
+        let on_virtual_ip = Plan::Virtual { listener: true };
+        assert_eq!(plans[..2], [on_virtual_ip, on_virtual_ip]);
+        assert!(matches!(plans[2], Plan::Unsupported { cause: ListenCause::VirtualPortZero, .. }), "{:?}", plans[2]);
+        assert_eq!(plans[3..], [Plan::Bind, Plan::Bind]);
     }
 
     #[test]
