@@ -66,6 +66,6 @@ i3tctl log                     # changes made through MCP name the token that ma
 ## Also worth knowing
 
 - An MCP token works only on the MCP endpoint; it is not an admin token. Issuing, listing and revoking tokens takes the admin token, so an agent cannot do it and cannot give itself more rights.
-- Tools that delete things, such as deleting a node or a rule, are marked as destructive, and the client asks you before running them. When you let an agent change things, look at what it is about to call.
+- Tools that delete things, such as deleting a node or a rule, are marked as destructive (MCP's `destructiveHint`), so that the client can ask you before running them. When you let an agent change things, look at what it is about to call, and do not set the destructive tools to run without asking.
 - Tokens are signed with `mcp.key` in the data directory, not with `controller.key`. Take it along when you back up, see [Backup and restore](../backup/). To void every token issued so far: stop the controller, delete `mcp.key`, start it again. It generates a new key; the earlier tokens are no longer accepted and are listed as revoked.
 - The MCP protocol revisions served are 2025-03-26, 2025-06-18, 2025-11-25 and 2026-07-28, over Streamable HTTP. There is no OAuth: you issue the token and put it in the client.
