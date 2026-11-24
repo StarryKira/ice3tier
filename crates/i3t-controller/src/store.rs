@@ -11,8 +11,9 @@
 //!
 //! 调用方是拿着 controller 的锁调用这里的，所以每一种等都有期限：
 //!
-//! - 连接失败（包括已连通端口但对端无响应）受总超时限制；刚重连失败后会在冷却期内跳过重连，期间读写立即失败
-//!   （[`StoreError::Disconnected`]），避免每次请求都等待完整超时。
+//! - 断线后的重连在后台进行（见下文「连接断了」），调用方最多等待 [`RECONNECT_WAIT`]，上一次重连失败后最多等待 [`RETRY_WAIT`]。
+//!   建连本身受总超时限制（包括已连通端口但对端无响应）；刚重连失败后会在冷却期内跳过重连，期间读写立即失败
+//!   （[`StoreError::Disconnected`]）。
 //! - 一条语句等回答有期限，过了就当这条连接坏了。启动时执行的表结构迁移期限更长（[`MIGRATION_TIMEOUT`]）。
 //! - 其他连接持有锁时（例如外部事务正在修改同一行或锁表），单条语句最多等待 [`LOCK_TIMEOUT`]。刚触发锁超时后，在随后的同等
 //!   时长内不再等待：涉及被锁资源的语句立即失败，未受影响的资源仍正常写入。长期不释放的锁因此最多占用 controller 一半的等待时间，
@@ -20,7 +21,12 @@
 //!
 //! # 连接断了
 //!
-//! 连接断了（数据库重启、网络闪断）时，下一次读写会换一条新的连接再做。断的那一刻正在做的读写报错。
+//! 连接断了（数据库重启、网络闪断）时，下一次读写会开始建立新连接。建连连同初始设置都在驱动线程上进行，不占用调用方：
+//! 调用方（持有 controller 锁）只在建连开始后的一小段时间内等待结果（[`RECONNECT_WAIT`]，上一次重连失败后为 [`RETRY_WAIT`]），
+//! 数据库可达时通常在此期间完成，读写照常进行；
+//! 超出这段时间仍未连上则返回 [`StoreError::Reconnecting`]，建连继续在后台进行，此后的读写立即失败，直到建连有了结果。
+//! 若在持锁期间同步等待建连（多主机时可达数十秒），会冻结整个 controller，使所有节点连接因长时间无法处理而被判定离线。
+//! 断的那一刻正在做的读写报错。
 //! 若断开发生在事务中，事务不会生效且数据库侧会自动回滚，仅有一种情况结果不确定：连接断在发出提交指令之后、收到响应之前。
 //! 此时数据库可能已提交也可能未提交，此处返回 [`StoreError::CommitUnknown`]，调用方不可按未执行处理。
 //! 最终提交结果可在后续查明：提交前已记录事务编号，待连接恢复后可向数据库查询确认（[`Store::settle_commits`]）。
@@ -74,7 +80,7 @@ pub use test::KEEP_PER_PAIR;
 pub use token::{NewToken, RETENTION_SECS, TokenRecord, is_pending, token_at};
 
 use codec::{Int, Read};
-use session::{CONNECT_TIMEOUT, Params, Session};
+use session::{CONNECT_TIMEOUT, Connecting, Params, Session, lock_timeout_sql};
 
 /// SHA-256 的长度。令牌和 netmap 的摘要都是它。
 pub const DIGEST_LEN: usize = 32;
@@ -86,8 +92,16 @@ pub const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const NO_LOCK_WAIT: Duration = Duration::from_millis(1);
 
 /// 重连失败后的最小、最大退避间隔。具体时长取决于本次建连耗时：立即被拒绝的可较快重试，耗时触达超时的则退避更久，
-/// 避免在数据库不可达期间 controller 持续阻塞在建连上。
+/// 避免在数据库不可达期间反复建连。
 const RECONNECT_PAUSE: (Duration, Duration) = (Duration::from_secs(1), Duration::from_secs(30));
+
+/// 原本可用的连接断开后，一次后台重连开始后调用方合计最多等待多久。数据库可达时重连通常在毫秒级完成，此期间内完成则
+/// 调用方无感知；超出后调用方立即返回，不再等待。调用方持有 controller 锁等待，因此需远短于节点的存活期限。
+pub const RECONNECT_WAIT: Duration = Duration::from_secs(2);
+
+/// 上一次重连失败后再次重连时，调用方合计最多等待多久。数据库此前就连不上，这一次多半也连不上，不值得持锁久等；
+/// 数据库已经恢复时，重连通常也在此期间内完成。
+pub const RETRY_WAIT: Duration = Duration::from_millis(500);
 
 /// 连接串里没有另外写的话，连接闲着这么久就发 TCP 保活，发出去的数据这么久没人确认就当连接断了。
 /// 数据库在别的机器上、中间的网络悄悄断掉时，靠它才不会一直等一个不会来的回答。
@@ -180,6 +194,8 @@ pub struct Store {
     /// 当前活跃的连接。一旦检测到失效便立即丢弃并置空，而非等到下次建连才替换：丢弃会关闭套接字，促使数据库侧尽快回滚
     /// 未完成事务并释放持有的锁；若保留失效连接，在该 `Store` 空闲或持续无法重连期间，这些锁将被长期占用。
     session: RefCell<Option<Session>>,
+    /// 正在后台进行的重连（见 [`Store::reconnect_if_closed`]），以及调用方为它合计最多等待多久。
+    connecting: RefCell<Option<(Connecting, Duration)>>,
     transaction: Cell<Transaction>,
     /// 等锁平时肯等多久。
     lock_patience: Cell<Duration>,
@@ -241,6 +257,7 @@ impl Store {
         Ok(Self {
             database: database.clone(),
             session: RefCell::new(Some(session)),
+            connecting: RefCell::new(None),
             transaction: Cell::new(Transaction::None),
             lock_patience: Cell::new(LOCK_TIMEOUT),
             impatient_until: Cell::new(None),
@@ -453,38 +470,64 @@ impl Store {
         result
     }
 
-    /// 若当前无可用连接则建立新连接。在近期重连失败后的退避窗口内不发起建连，直接返回连接断开错误。
+    /// 若当前无可用连接则建立新连接。建连在驱动线程上进行，调用方只在建连开始后的一小段时间内等待（[`RECONNECT_WAIT`]，
+    /// 上一次重连失败后为 [`RETRY_WAIT`]）：期间连上则照常返回；仍未连上则返回 [`StoreError::Reconnecting`]，建连继续进行，
+    /// 由之后的调用接收结果。近期重连失败后的退避窗口内不发起建连，直接返回 [`StoreError::Disconnected`]。
     fn reconnect_if_closed(&self) -> Result<(), StoreError> {
-        {
-            let mut current = self.session.borrow_mut();
-            if current.as_ref().is_some_and(|session| !session.is_closed()) {
-                return Ok(());
+        // 收到的结果已经过时时重新开始一次：失败发生在较早之前、退避期已过，或者连上之后无人来取、连接在等待期间已断开。
+        for _ in 0..2 {
+            {
+                let mut current = self.session.borrow_mut();
+                if current.as_ref().is_some_and(|session| !session.is_closed()) {
+                    return Ok(());
+                }
+                // 闲着的时候断的，现在才看见。
+                *current = None;
             }
-            // 闲着的时候断的，现在才看见。
-            *current = None;
-        }
-        if self.reconnect_after.get().is_some_and(|after| Instant::now() < after) {
-            return Err(StoreError::Disconnected);
-        }
-        let started = Instant::now();
-        let connected = Session::connect(&self.database.0).and_then(|session| {
-            session.set_lock_timeout(self.lock_patience.get())?;
-            Ok(session)
-        });
-        match connected {
-            Ok(session) => {
-                *self.session.borrow_mut() = Some(session);
-                self.reconnect_after.set(None);
-                self.impatient.set(false);
-                tracing::info!("已重新连接数据库");
-                Ok(())
+            let mut connecting = self.connecting.borrow_mut();
+            let (attempt, patience) = match connecting.as_mut() {
+                Some(reconnect) => reconnect,
+                None => {
+                    let retry = match self.reconnect_after.get() {
+                        Some(after) if Instant::now() < after => return Err(StoreError::Disconnected),
+                        Some(_) => true,
+                        None => false,
+                    };
+                    match Session::start(&self.database.0, Some(lock_timeout_sql(self.lock_patience.get()))) {
+                        Ok(attempt) => connecting.insert((attempt, if retry { RETRY_WAIT } else { RECONNECT_WAIT })),
+                        Err(error) => {
+                            self.reconnect_after.set(Some(Instant::now() + RECONNECT_PAUSE.0));
+                            return Err(error);
+                        }
+                    }
+                }
+            };
+            // 同一次建连，所有调用方合计只等这么久：后来的调用方在建连仍未完成时不再等待。
+            let left = (attempt.started() + *patience).saturating_duration_since(Instant::now());
+            let Some((outcome, finished)) = attempt.wait(left) else { return Err(StoreError::Reconnecting) };
+            let took = finished.saturating_duration_since(attempt.started());
+            *connecting = None;
+            match outcome {
+                Ok(session) if !session.is_closed() => {
+                    *self.session.borrow_mut() = Some(session);
+                    self.reconnect_after.set(None);
+                    self.impatient.set(false);
+                    tracing::info!("已重新连接数据库");
+                    return Ok(());
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    let after = finished + took.clamp(RECONNECT_PAUSE.0, RECONNECT_PAUSE.1);
+                    self.reconnect_after.set(Some(after));
+                    if Instant::now() < after {
+                        return Err(error);
+                    }
+                }
             }
-            Err(error) => {
-                let pause = started.elapsed().clamp(RECONNECT_PAUSE.0, RECONNECT_PAUSE.1);
-                self.reconnect_after.set(Some(Instant::now() + pause));
-                Err(error)
-            }
         }
+        // 重新开始的那一次连上之后也马上断了：数据库那边一连上就断开。同样退避，不让每次读写都去连。
+        self.reconnect_after.set(Some(Instant::now() + RECONNECT_PAUSE.0));
+        Err(StoreError::Disconnected)
     }
 
     /// 让连接上等锁的期限和现在该有的一致：刚等满过一次的那段时间里是"不等"，过了就恢复。
@@ -660,6 +703,10 @@ pub enum StoreError {
     /// 连接已断开且近期重连失败：将在短暂间隔后再次尝试重连，期间的读写请求直接返回此错误。
     #[error("数据库连接已断开且近期重连失败，请稍后重试")]
     Disconnected,
+    /// 连接已断开，重连正在后台进行且未在调用方可等待的时间（[`RECONNECT_WAIT`]、[`RETRY_WAIT`]）内完成：
+    /// 期间的读写请求直接返回此错误。
+    #[error("数据库连接已断开，正在重新连接，请稍后重试")]
+    Reconnecting,
     #[error("无法启动数据库连接驱动线程")]
     Driver(#[source] io::Error),
     #[error("数据库操作失败")]
@@ -691,6 +738,7 @@ impl StoreError {
             Self::Connect(_)
             | Self::ConnectTimedOut(_)
             | Self::Disconnected
+            | Self::Reconnecting
             | Self::Driver(_)
             | Self::Unresponsive(_)
             | Self::CommitUnknown(_) => true,
@@ -850,9 +898,14 @@ mod tests {
 
     /// 接了连接、之后一个字节都不回的"数据库"。
     fn silent_server() -> (std::net::TcpListener, Database) {
+        silent_server_with(1)
+    }
+
+    /// 同 [`silent_server`]，连接串里的建连超时是 `connect_timeout` 秒。
+    fn silent_server_with(connect_timeout: u32) -> (std::net::TcpListener, Database) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let database = format!("postgres://i3t@127.0.0.1:{port}/i3t?connect_timeout=1").parse().unwrap();
+        let database = format!("postgres://i3t@127.0.0.1:{port}/i3t?connect_timeout={connect_timeout}").parse().unwrap();
         (listener, database)
     }
 
@@ -937,6 +990,139 @@ mod tests {
         std::thread::sleep(first);
         assert_eq!(store.meta("k").unwrap().as_deref(), Some(b"v".as_slice()));
         drop(listener);
+    }
+
+    /// 连接断了，重连去的 `nowhere` 一直给不出结果；调用方只等一小会儿，之后的调用不再等。
+    /// 然后 `hang_up` 让那边挂断、数据库回到原处，`Store` 自己连回去。
+    fn reconnecting_in_the_background(nowhere: Database, hang_up: impl FnOnce()) {
+        let scratch = Scratch::new();
+        let mut store = Store::open(&scratch.database()).unwrap();
+        store.set_meta("k", b"v").unwrap();
+        let real = std::mem::replace(&mut store.database, nowhere);
+        assert!(store.execute("SELECT pg_terminate_backend(pg_backend_pid())", &[]).is_err());
+
+        let started = Instant::now();
+        let error = store.meta("k").unwrap_err();
+        assert!(matches!(error, StoreError::Reconnecting) && error.is_database_wide(), "{error:?}");
+        assert!(started.elapsed() < RECONNECT_WAIT + Duration::from_secs(1), "只等一小会儿：{:?}", started.elapsed());
+
+        // 建连仍在后台进行：之后的读写立即失败，不再等它。
+        let started = Instant::now();
+        for _ in 0..5 {
+            assert!(matches!(store.meta("k"), Err(StoreError::Reconnecting)));
+        }
+        assert!(started.elapsed() < Duration::from_millis(500), "{:?}", started.elapsed());
+
+        // 那边挂断，这次建连失败；退避之后连上已经回来的数据库。
+        store.database = real;
+        hang_up();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let value = loop {
+            match store.meta("k") {
+                Ok(value) => break value,
+                Err(error) => assert!(error.is_database_wide() && Instant::now() < deadline, "应当重新连上：{error:?}"),
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert_eq!(value.as_deref(), Some(b"v".as_slice()));
+    }
+
+    #[test]
+    fn a_reconnect_stuck_on_connecting_goes_on_in_the_background() {
+        // 端口连得上，之后一个字节都不回：建连要到连接串里的期限（30 秒）才放弃。
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let nowhere = format!("postgres://i3t@127.0.0.1:{port}/i3t?connect_timeout=30").parse().unwrap();
+        let held = std::thread::spawn(move || listener.accept().map(|(stream, _)| stream));
+        reconnecting_in_the_background(nowhere, || drop(held.join().unwrap()));
+    }
+
+    #[test]
+    fn a_reconnect_stuck_on_its_first_statement_goes_on_in_the_background() {
+        use std::io::{Read as _, Write as _};
+
+        // 连接建得起来、打完招呼之后什么都不回：新连接上设置等锁期限的语句等不到响应。
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let nowhere = format!("postgres://i3t@127.0.0.1:{port}/i3t").parse().unwrap();
+        let (hang_up, hung_up) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut chunk = [0; 1024];
+            assert!(stream.read(&mut chunk).unwrap() > 0, "启动消息");
+            // "认证通过"，"可以发语句了"。
+            stream.write_all(b"R\0\0\0\x08\0\0\0\0Z\0\0\0\x05I").unwrap();
+            let _ = hung_up.recv();
+        });
+        reconnecting_in_the_background(nowhere, move || {
+            hang_up.send(()).unwrap();
+            server.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn after_a_failed_reconnect_the_next_attempt_holds_up_the_caller_for_less_time() {
+        let scratch = Scratch::new();
+        let mut store = Store::open(&scratch.database()).unwrap();
+        let (listener, nowhere) = silent_server();
+        store.database = nowhere;
+        assert!(store.execute("SELECT pg_terminate_backend(pg_backend_pid())", &[]).is_err());
+
+        // 原本可用的连接断了：等这一次建连的结果（1 秒超时）。
+        let started = Instant::now();
+        assert!(matches!(store.meta("k"), Err(StoreError::ConnectTimedOut(_))));
+        let first = started.elapsed();
+
+        // 退避过后再试，这一次建连要 30 秒才放弃：数据库此前就连不上，只等 `RETRY_WAIT`，明显短于原本可用的连接断开时的等待。
+        let (_held, slower) = silent_server_with(30);
+        store.database = slower;
+        std::thread::sleep(first);
+        let started = Instant::now();
+        assert!(matches!(store.meta("k"), Err(StoreError::Reconnecting)));
+        let waited = started.elapsed();
+        assert!(waited < RECONNECT_WAIT, "{waited:?}");
+        drop(listener);
+    }
+
+    #[test]
+    fn a_connection_that_closed_before_anyone_picked_it_up_is_not_used() {
+        use std::io::{Read as _, Write as _};
+
+        let scratch = Scratch::new();
+        let mut store = Store::open(&scratch.database()).unwrap();
+        store.set_meta("k", b"v").unwrap();
+        // 连接建得起来，初始设置迟迟没有响应：调用方等不到，先走了。
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let slow = format!("postgres://i3t@127.0.0.1:{port}/i3t").parse().unwrap();
+        let real = std::mem::replace(&mut store.database, slow);
+        let (next, step) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut chunk = [0; 1024];
+            assert!(stream.read(&mut chunk).unwrap() > 0, "启动消息");
+            // "认证通过"，"可以发语句了"。
+            stream.write_all(b"R\0\0\0\x08\0\0\0\0Z\0\0\0\x05I").unwrap();
+            assert!(stream.read(&mut chunk).unwrap() > 0, "初始设置");
+            step.recv().unwrap();
+            // 设置完成："SET"，"可以发语句了"。
+            stream.write_all(b"C\0\0\0\x08SET\0Z\0\0\0\x05I").unwrap();
+            // 之后关闭连接。
+            step.recv().unwrap();
+        });
+        assert!(store.execute("SELECT pg_terminate_backend(pg_backend_pid())", &[]).is_err());
+        assert!(matches!(store.meta("k"), Err(StoreError::Reconnecting)));
+
+        // 设置完成，连接交了出来，却在无人来取的这段时间里断了。
+        next.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        next.send(()).unwrap();
+        server.join().unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+
+        // 下一次读写不用这条已经断了的连接，重新连接（数据库已回到原处）。
+        store.database = real;
+        assert_eq!(store.meta("k").unwrap().as_deref(), Some(b"v".as_slice()));
     }
 
     #[test]

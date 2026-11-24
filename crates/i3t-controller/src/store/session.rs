@@ -7,6 +7,9 @@
 //! 这样 [`Store`](super::Store) 的方法在哪里调用都行：普通线程、`spawn_blocking` 的线程，或者异步任务里
 //! （和读写本地文件一样，会占住那条线程一小会儿）。
 //!
+//! 建连在驱动线程上进行（[`Session::start`]），连同建连之后的初始设置：调用方可以随时查询是否已完成，无需全程等待。
+//! 断线重连因此不必让持有 controller 锁的调用方等待整个建连过程（见 [`Store`](super::Store) 的重连）。
+//!
 //! 所有等待均有超时限制：建连超时（包括端口已连上但对端无响应）上限为 [`connect_limit`]，单条语句等待响应的上限为
 //! [`RESPONSE_TIMEOUT`]。调用方持有 controller 锁进行等待，若无超时限制，无响应的数据库会导致整个 controller 阻塞。
 //!
@@ -18,7 +21,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
 use std::io;
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::sync::{Arc, mpsc};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
@@ -57,6 +60,11 @@ pub(super) fn connect_limit(config: &Config) -> Duration {
     each.saturating_mul(u32::try_from(hosts).unwrap_or(u32::MAX).max(1))
 }
 
+/// 设置等锁期限的语句：其他连接持有锁时最多等待 `timeout`，超时则该语句失败。
+pub(super) fn lock_timeout_sql(timeout: Duration) -> String {
+    format!("SET lock_timeout = {}", timeout.as_millis().max(1))
+}
+
 pub(super) struct Session {
     client: Client,
     /// 准备好的语句，按 SQL 的文字找：同一句话从第二次起只要一次往返。
@@ -70,55 +78,99 @@ pub(super) struct Session {
     _in_use: oneshot::Sender<Infallible>,
 }
 
+/// 驱动线程交回的建连结果，以及得出结果的时刻。
+type Outcome = (Result<Session, StoreError>, Instant);
+
+/// 正在驱动线程上进行的一次建连（[`Session::start`]）。丢弃即放弃：驱动线程建连完成后发现无人接收，随即关闭连接。
+pub(super) struct Connecting {
+    receiver: mpsc::Receiver<Outcome>,
+    started: Instant,
+    /// 到这个时刻仍无结果，即不再等待驱动线程，按建连超时处理。连接串中的超时极大、算不出时刻时为 `None`。
+    deadline: Option<Instant>,
+}
+
+impl Connecting {
+    /// 这次建连从何时开始。
+    pub(super) const fn started(&self) -> Instant {
+        self.started
+    }
+
+    /// 最多等待 `patience`；已有结果时返回结果及得出结果的时刻，仍在进行中时返回 `None`。`patience` 为零时只查询不等待。
+    pub(super) fn wait(&mut self, patience: Duration) -> Option<Outcome> {
+        let patience = self.deadline.map_or(patience, |deadline| patience.min(deadline.saturating_duration_since(Instant::now())));
+        match self.receiver.recv_timeout(patience) {
+            Ok(outcome) => Some(outcome),
+            Err(mpsc::RecvTimeoutError::Timeout) if self.deadline.is_none_or(|deadline| Instant::now() < deadline) => None,
+            // 驱动线程到期会自行报告失败；超过期限仍无结果，不再等待。
+            Err(mpsc::RecvTimeoutError::Timeout) => Some((Err(StoreError::ConnectTimedOut(self.started.elapsed())), Instant::now())),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Some((Err(StoreError::Driver(io::Error::other("数据库驱动线程异常退出，未返回连接结果"))), Instant::now()))
+            }
+        }
+    }
+}
+
 impl Session {
-    /// 连接数据库。连接失败、认证失败等错误均在此处返回。
+    /// 连接数据库，等到连上或失败为止。连接失败、认证失败等错误均在此处返回。
     pub(super) fn connect(config: &Config) -> Result<Self, StoreError> {
+        let mut connecting = Self::start(config, None)?;
+        loop {
+            if let Some((outcome, _)) = connecting.wait(Duration::MAX) {
+                return outcome;
+            }
+        }
+    }
+
+    /// 在驱动线程上开始连接数据库，不等待结果。连上之后先在驱动线程上执行 `setup`（初始设置，如等锁期限），
+    /// 执行成功才交出连接：初始设置无响应时，同样只占用驱动线程。
+    pub(super) fn start(config: &Config, setup: Option<String>) -> Result<Connecting, StoreError> {
         let limit = connect_limit(config);
         let (sender, receiver) = mpsc::channel();
         let (in_use, dropped) = oneshot::channel();
         let config = config.clone();
+        let setup_limit = if setup.is_some() { RESPONSE_TIMEOUT } else { Duration::ZERO };
+        let started = Instant::now();
         let drive = move || {
             let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                 Ok(runtime) => runtime,
                 Err(error) => {
-                    let _ = sender.send(Err(StoreError::Driver(error)));
+                    let _ = sender.send((Err(StoreError::Driver(error)), Instant::now()));
                     return;
                 }
             };
             runtime.block_on(async move {
                 // 到了期限就丢掉这次建连：套接字随之关掉，这条线程退出。
-                match tokio::time::timeout(limit, config.connect(NoTls)).await {
+                let failed = match tokio::time::timeout(limit, config.connect(NoTls)).await {
                     Ok(Ok((client, connection))) => {
-                        // 等的人已经不在了的话，`client` 随着这次发送失败被丢掉，连接不用留。
-                        if sender.send(Ok(client)).is_err() {
-                            return;
+                        let mut connection = pin!(connection);
+                        match set_up(&client, connection.as_mut(), setup.as_deref()).await {
+                            Ok(()) => {
+                                let session = Self {
+                                    client,
+                                    statements: RefCell::default(),
+                                    broken: Cell::new(false),
+                                    response_timeout: Cell::new(RESPONSE_TIMEOUT),
+                                    _in_use: in_use,
+                                };
+                                // 等的人已经不在了的话，`session` 随着这次发送失败被丢掉，连接不用留。
+                                if sender.send((Ok(session), Instant::now())).is_err() {
+                                    return;
+                                }
+                                drive(connection, dropped).await;
+                                return;
+                            }
+                            Err(error) => error,
                         }
-                        drive(connection, dropped).await;
                     }
-                    Ok(Err(error)) => {
-                        let _ = sender.send(Err(StoreError::Connect(error)));
-                    }
-                    Err(_) => {
-                        let _ = sender.send(Err(StoreError::ConnectTimedOut(limit)));
-                    }
-                }
+                    Ok(Err(error)) => StoreError::Connect(error),
+                    Err(_) => StoreError::ConnectTimedOut(limit),
+                };
+                let _ = sender.send((Err(failed), Instant::now()));
             });
         };
         thread::Builder::new().name("i3t-postgres".to_owned()).spawn(drive).map_err(StoreError::Driver)?;
-        let client = match receiver.recv_timeout(limit.saturating_add(HANDOVER_MARGIN)) {
-            Ok(client) => client?,
-            Err(mpsc::RecvTimeoutError::Timeout) => return Err(StoreError::ConnectTimedOut(limit)),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(StoreError::Driver(io::Error::other("数据库驱动线程异常退出，未返回连接结果")));
-            }
-        };
-        Ok(Self {
-            client,
-            statements: RefCell::default(),
-            broken: Cell::new(false),
-            response_timeout: Cell::new(RESPONSE_TIMEOUT),
-            _in_use: in_use,
-        })
+        let deadline = started.checked_add(limit.saturating_add(setup_limit).saturating_add(HANDOVER_MARGIN));
+        Ok(Connecting { receiver, started, deadline })
     }
 
     /// 连接已经不能用了：之后的请求都会失败，要换一条新的。
@@ -203,7 +255,7 @@ impl Session {
 
     /// 等别的连接放开锁最多等多久，过了就让那条语句失败。
     pub(super) fn set_lock_timeout(&self, timeout: Duration) -> Result<(), StoreError> {
-        self.batch(&format!("SET lock_timeout = {}", timeout.as_millis().max(1)))
+        self.batch(&lock_timeout_sql(timeout))
     }
 }
 
@@ -223,6 +275,22 @@ async fn drive(connection: impl Future<Output = Result<(), tokio_postgres::Error
         Some(Ok(())) => {}
         Some(Err(error)) => tracing::warn!(%error, "数据库连接已断开"),
         None => tracing::warn!("数据库长期无响应，放弃等待并关闭连接"),
+    }
+}
+
+/// 在刚建好的连接上执行初始设置 `setup`，最多等待 [`RESPONSE_TIMEOUT`]。请求要靠连接的另一半推进，所以同时驱动 `connection`。
+async fn set_up<C>(client: &Client, connection: Pin<&mut C>, setup: Option<&str>) -> Result<(), StoreError>
+where
+    C: Future<Output = Result<(), tokio_postgres::Error>>,
+{
+    let Some(setup) = setup else { return Ok(()) };
+    tokio::select! {
+        done = tokio::time::timeout(RESPONSE_TIMEOUT, client.batch_execute(setup)) => match done {
+            Ok(result) => result.map_err(StoreError::Postgres),
+            Err(_) => Err(StoreError::Unresponsive(RESPONSE_TIMEOUT)),
+        },
+        // 连接先结束了：设置语句不会再有响应。
+        ended = connection => Err(ended.map_or_else(StoreError::Postgres, |()| StoreError::Disconnected)),
     }
 }
 

@@ -12,7 +12,7 @@ use i3t_model::netmap::RoutingMode;
 use i3t_model::update::UpdateStatus;
 use i3t_proto::NodeId;
 
-use super::super::testing::{CAN_DO_ALL, Lab, Member, hello, modern_hello};
+use super::super::testing::{CAN_DO_ALL, Lab, Member, REMOTE, hello, modern_hello};
 use super::super::{COOLDOWN_SECS, Controller};
 
 fn direct(peer: NodeId, rtt_ms: u32) -> RouteEntry {
@@ -65,6 +65,20 @@ fn the_matrix_follows_full_and_partial_reports() {
     // 节点报了它的 netmap 里没有的对端：不记。
     report(&a, &lab.controller, vec![direct(NodeId::new(99).unwrap(), 1)], false);
     assert_eq!(cells(&lab, network).len(), 2);
+}
+
+#[test]
+fn routes_reported_while_the_store_cannot_be_read_are_not_lost() {
+    let (lab, network, a, b, old) = three_nodes();
+    report(&a, &lab.controller, vec![direct(b.id, 12), via(old.id, b.id)], true);
+
+    // 数据库暂时读不了：这一份增量上报处理不完，路由表的变化照样记下。节点不会重发它。
+    lab.controller.lock().store.execute_batch("ALTER TABLE nodes RENAME TO nodes_away;");
+    let changed = Report { routes: vec![direct(old.id, 20)], update: Some(UpdateStatus::Idle), ..Report::default() };
+    assert!(lab.controller.handle(a.session, REMOTE, ToController::Report(Box::new(changed))).is_err());
+    lab.controller.lock().store.execute_batch("ALTER TABLE nodes_away RENAME TO nodes;");
+
+    assert_eq!(cells(&lab, network), [(a.id, b.id, true, false), (a.id, old.id, true, false)]);
 }
 
 #[test]
