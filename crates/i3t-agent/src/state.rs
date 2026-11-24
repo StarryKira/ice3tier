@@ -13,8 +13,8 @@
 //!
 //! 所有文件都是先写临时文件再改名，所以断电不会留下写了一半的文件。
 //!
-//! 目录和里面的文件只有属主能访问：Unix 上是 0700 和 0600；Windows 上是 SYSTEM、Administrators，进程没有提权时
-//! 再加上当前用户（见 [`windows`]）。
+//! 目录和里面的文件只有属主能访问：Unix 上是 0700 和 0600；Windows 上是 SYSTEM、Administrators，进程令牌中
+//! Administrators 组未启用时再加上当前账户（见 [`windows`]）。
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -90,6 +90,7 @@ impl StateDir {
     /// 状态目录创建或权限设置失败；Windows 上还有：已有的目录属主不可信，或者别的账户能写。
     pub fn open(root: impl Into<PathBuf>) -> anyhow::Result<Self> {
         let root = root.into();
+        let root = without_trailing_separator(&root).with_context(|| (texts().create_state_dir)(&root))?;
         ensure_not_reparse_or_symlink(&root).with_context(|| (texts().create_state_dir)(&root))?;
         make_private_dir(&root)?;
         Ok(Self { root })
@@ -262,6 +263,15 @@ impl StateDir {
     }
 }
 
+/// 去掉末尾的分隔符和 `.`（根目录本身保留）：带着它们时系统会跟随最后一级的符号链接或重解析点，检查看到的
+/// 将是链接所指的目录而不是链接本身。Windows 上先按系统打开文件时的规则展开为绝对路径，最后一级末尾的空格和点
+/// 随之去掉，否则 `i3t\ ` 交给系统时仍以分隔符结尾。
+fn without_trailing_separator(root: &Path) -> io::Result<PathBuf> {
+    #[cfg(windows)]
+    let root = &std::path::absolute(root)?;
+    Ok(root.components().collect())
+}
+
 /// 拒绝符号链接以及 Windows 重解析点（含 NTFS Junction），防止被诱导跨目录读写或删改。
 pub(crate) fn ensure_not_reparse_or_symlink(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
@@ -309,7 +319,7 @@ fn make_private_dir(root: &Path) -> anyhow::Result<()> {
 }
 
 /// 建出状态目录，或者确认已有的那个能用并收紧它的权限。上级目录照常继承；状态目录本身连同访问控制一起建，
-/// 不先建出来再改：中间那一会儿它用着继承来的权限，别的用户可以在里面放东西。
+/// 而不是先建出再修改：两步之间该目录使用继承的权限，其他用户可在其中放入文件。
 #[cfg(windows)]
 fn make_private_dir(root: &Path) -> anyhow::Result<()> {
     if let Some(parent) = root.parent() {
@@ -435,13 +445,15 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn the_state_directory_and_its_files_are_private_on_windows() {
-        use windows::tests::access_of;
+        use windows::tests::{access_of, me, owner_of, privileged};
 
         let (_dir, state) = state();
         state.key_or_generate().unwrap();
         state.save_local(&LocalEndpoint { addr: "127.0.0.1:40123".parse().unwrap(), token: "s3cret-token".to_owned() }).unwrap();
         state.save_forward_ports(&BTreeMap::from([(7, 41_000)])).unwrap();
         crate::config::Config::write_template_if_missing(&state.config_path()).unwrap();
+        // Administrators 组已启用时属主是 Administrators，不随「默认所有者」策略变成管理员本人；否则是当前账户。
+        let owner = if privileged() { "S-1-5-32-544".to_owned() } else { me() };
         for path in [
             state.path().to_owned(),
             state.path().join(KEY_FILE),
@@ -450,6 +462,7 @@ mod tests {
             state.config_path(),
         ] {
             assert_eq!(access_of(&path), (true, true), "{}", path.display());
+            assert_eq!(owner_of(&path), owner, "{}", path.display());
         }
         // 日志、更新自己新建的文件和目录继承状态目录的。
         fs::create_dir(state.path().join("update")).unwrap();
@@ -516,6 +529,25 @@ mod tests {
         assert!(!access_of(&elsewhere.join("secret")).0, "联接那头的东西没有被改");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a_trailing_separator_does_not_make_a_junction_usable_as_the_state_directory() {
+        use windows::tests::access_of;
+
+        let outer = tempfile::tempdir().unwrap();
+        let elsewhere = outer.path().join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        let link = outer.path().join("i3t");
+        let output = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&link).arg(&elsewhere).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let link = link.display();
+        for spelled in [format!("{link}\\"), format!("{link}/"), format!("{link}\\."), format!("{link}\\ "), format!("{link}\\...")] {
+            assert!(StateDir::open(&spelled).is_err(), "{spelled}");
+        }
+        assert!(!access_of(&elsewhere).0, "联接所指的目录未被收紧");
+        assert!(fs::read_dir(&elsewhere).unwrap().next().is_none(), "联接所指的目录中未写入任何文件");
+    }
+
     #[cfg(unix)]
     #[test]
     fn state_dir_and_files_reject_symlinks() {
@@ -543,5 +575,23 @@ mod tests {
 
         symlink(&decoy, state.path().join(KEY_FILE)).unwrap();
         assert!(state.key().is_err(), "拒绝读取符号链接私钥文件");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_trailing_separator_does_not_make_a_symlink_usable_as_the_state_directory() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let outer = tempfile::tempdir().unwrap();
+        let real = outer.path().join("real");
+        fs::create_dir(&real).unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o755)).unwrap();
+        let link = outer.path().join("link");
+        symlink(&real, &link).unwrap();
+        let link = link.display();
+        for spelled in [format!("{link}/"), format!("{link}//"), format!("{link}/.")] {
+            assert!(StateDir::open(&spelled).is_err(), "{spelled}");
+        }
+        assert_eq!(fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o755, "链接所指的目录权限未被改动");
     }
 }

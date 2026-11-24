@@ -3,8 +3,9 @@
 //! Unix 上状态目录是 0700、里面的文件是 0600。Windows 上新建的目录和文件默认继承上级目录的访问控制，而
 //! `C:\ProgramData` 让本机所有用户都能读，还能在里面新建文件和目录。所以这里不靠继承：
 //!
-//! - 目录和文件都用受保护（不继承上级）的访问控制列表，只给 SYSTEM 和 Administrators；进程没有提权时再加上当前用户，
-//!   否则自己也进不去。和 `deploy/install.ps1` 给 `%ProgramData%\i3t` 设的一样。
+//! - 目录和文件都用受保护（不继承上级）的访问控制列表，只给 SYSTEM 和 Administrators，属主为 Administrators，与
+//!   `deploy/install.ps1` 给 `%ProgramData%\i3t` 设的一致。进程令牌中 Administrators 组未启用时（未提权的管理员、
+//!   普通用户、不属于该组的服务账户）另加当前账户、属主为当前账户，否则进程自身无法访问。
 //! - 目录不存在时连同访问控制一起建出来，中间没有一段时间用着继承来的权限。
 //! - 目录已经存在时先查：属主不是 SYSTEM、Administrators 或当前用户，或者别的账户能写、能改它的权限，就不用它。
 //!   别人可能已经改过里面的 `controller.json`、`config.toml`，这时再收紧权限也晚了。查过没问题、但还有别的账户能读
@@ -22,14 +23,14 @@ use std::ptr;
 
 use windows_sys::Win32::Foundation::{ERROR_SUCCESS, GENERIC_ALL, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree, WIN32_ERROR};
 use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
-    SetSecurityInfo,
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW, GetSecurityInfo, SDDL_REVISION_1,
+    SE_FILE_OBJECT, SetSecurityInfo,
 };
 use windows_sys::Win32::Security::{
-    ACE_HEADER, ACE_INHERITED_OBJECT_TYPE_PRESENT, ACE_OBJECT_TYPE_PRESENT, ACL, DACL_SECURITY_INFORMATION, GetAce,
+    ACE_HEADER, ACE_INHERITED_OBJECT_TYPE_PRESENT, ACE_OBJECT_TYPE_PRESENT, ACL, CheckTokenMembership, DACL_SECURITY_INFORMATION, GetAce,
     GetSecurityDescriptorControl, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, GetTokenInformation, OWNER_SECURITY_INFORMATION,
-    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, TOKEN_ELEVATION,
-    TOKEN_INFORMATION_CLASS, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenUser,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, TOKEN_INFORMATION_CLASS,
+    TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CREATE_NEW, CreateDirectoryW, CreateFileW, DELETE, FILE_APPEND_DATA, FILE_ATTRIBUTE_NORMAL, FILE_DELETE_CHILD,
@@ -68,15 +69,19 @@ const WRITE_RIGHTS: u32 = FILE_WRITE_DATA
 pub(super) fn create_private_dir(path: &Path) -> io::Result<bool> {
     let descriptor = Descriptor::from_sddl(&sddl(&Account::current()?, true))?;
     let attributes = security_attributes(&descriptor);
-    let path = wide(path.as_os_str())?;
-    // SAFETY: `path` 以 0 结尾；`attributes` 和它指向的描述符在调用期间都有效。
-    if unsafe { CreateDirectoryW(path.as_ptr(), &raw const attributes) } != 0 {
+    let name = wide(path.as_os_str())?;
+    // SAFETY: `name` 以 0 结尾；`attributes` 和它指向的描述符在调用期间都有效。
+    if unsafe { CreateDirectoryW(name.as_ptr(), &raw const attributes) } != 0 {
         return Ok(true);
     }
-    match io::Error::last_os_error() {
-        error if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
-        error => Err(error),
-    }
+    let error = io::Error::last_os_error();
+    if already_there(&error, path) { Ok(false) } else { Err(error) }
+}
+
+/// 建目录失败后，该名称是否已存在。不只看错误码：卷的根目录、挂载卷的目录，以及部分网络或第三方文件系统，
+/// 对已存在的名称报告拒绝访问而不是已存在。已存在的项一律交由调用方检查。
+fn already_there(error: &io::Error, path: &Path) -> bool {
+    error.kind() == io::ErrorKind::AlreadyExists || fs::symlink_metadata(path).is_ok()
 }
 
 /// 查已经有的目录能不能用；能用但还有别的账户能读、或者还继承着上级目录的权限时，收紧它和里面的每一项。
@@ -132,7 +137,8 @@ pub(super) fn create_private_file(path: &Path) -> io::Result<File> {
 struct Account {
     /// 当前用户的 SID，写成 `S-1-5-…`。
     user: String,
-    /// 已提权的管理员或者 SYSTEM：访问控制里只有 SYSTEM 和 Administrators，不单独给这个用户。
+    /// 令牌中 Administrators 组已启用（已提权的管理员、SYSTEM）：访问控制里只有 SYSTEM 和 Administrators，属主为
+    /// Administrators，不单独给这个账户。
     privileged: bool,
 }
 
@@ -148,18 +154,37 @@ impl Account {
         let user = token_information(&token, TokenUser)?;
         // SAFETY: 系统在缓冲区开头写了一个 TOKEN_USER，其中的 SID 指向同一个缓冲区里面，缓冲区这时还在。
         let user = sid_string(unsafe { user.as_ptr().cast::<TOKEN_USER>().read() }.User.Sid)?;
-        // 查不到是否提权时当作没有提权：访问控制里多一个当前用户，不会把自己关在外面。
-        let elevated = token_information(&token, TokenElevation).is_ok_and(|elevation| {
-            // SAFETY: 系统在缓冲区开头写了一个 TOKEN_ELEVATION。
-            unsafe { elevation.as_ptr().cast::<TOKEN_ELEVATION>().read() }.TokenIsElevated != 0
-        });
-        Ok(Self { privileged: elevated || user == SYSTEM, user })
+        // 查询失败时按未启用处理：访问控制里多一个当前账户，进程不会失去对自身状态目录的访问。
+        let privileged = user == SYSTEM || administrators_enabled().unwrap_or(false);
+        Ok(Self { user, privileged })
     }
 
     /// SYSTEM、Administrators 和当前用户。
     fn trusts(&self, sid: &str) -> bool {
         sid == SYSTEM || sid == ADMINISTRATORS || sid == self.user
     }
+}
+
+/// 进程令牌中 Administrators 组已启用。
+///
+/// 不以令牌是否已提权判断：Backup Operators 等组的成员提权运行时，以及以 LOCAL SERVICE、NETWORK SERVICE 或虚拟
+/// 服务账户运行的服务，令牌可标为已提权，却不在 Administrators 组中，只给 SYSTEM 和 Administrators 的访问控制会使
+/// 这些进程无法访问自己建的目录。未提权的管理员令牌中该组仅用于拒绝访问，同样按未启用处理。
+fn administrators_enabled() -> io::Result<bool> {
+    let administrators = wide(OsStr::new(ADMINISTRATORS))?;
+    let mut sid: PSID = ptr::null_mut();
+    // SAFETY: `administrators` 以 0 结尾；成功时系统分配 SID，地址写进 `sid`。
+    if unsafe { ConvertStringSidToSidW(administrators.as_ptr(), &raw mut sid) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let sid = Local(sid);
+    let mut member = 0;
+    // SAFETY: 令牌句柄为空时检查当前线程的令牌，线程未模拟其他账户时即为进程令牌；`sid` 有效；系统只往局部变量
+    // `member` 里写。
+    if unsafe { CheckTokenMembership(ptr::null_mut(), sid.0, &raw mut member) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(member != 0)
 }
 
 /// 令牌里的一项信息，放在按 8 字节对齐的缓冲区里。
@@ -175,13 +200,19 @@ fn token_information(token: &OwnedHandle, class: TOKEN_INFORMATION_CLASS) -> io:
     Ok(buffer)
 }
 
-/// 只给 SYSTEM、Administrators（进程没有提权时再加上当前用户）的访问控制列表，受保护：不继承上级目录的。
+/// 只给 SYSTEM、Administrators（Administrators 组未启用时再加上当前账户）的访问控制列表，受保护：不继承上级目录的。
 /// 目录的各项让里面新建的文件和目录继承（OICI），所以节点、更新和日志后来新建的文件也是这样。
+///
+/// Administrators 组已启用时属主明确设为 Administrators，与 `deploy/install.ps1` 一致：本地安全策略
+/// "System objects: Default owner for objects created by members of the Administrators group" 设为
+/// "Object creator" 时，不指定则属主为该管理员本人，以 SYSTEM 运行的服务和其他管理员将拒绝使用该目录。
+/// 组未启用时不指定，属主为当前账户。
 fn sddl(account: &Account, directory: bool) -> String {
     let inherit = if directory { "OICI" } else { "" };
+    let owner = if account.privileged { "O:BA" } else { "" };
     let user = (!account.privileged).then_some(account.user.as_str());
     let aces: String = ["SY", "BA"].into_iter().chain(user).map(|sid| format!("(A;{inherit};FA;;;{sid})")).collect();
-    format!("D:P{aces}")
+    format!("{owner}D:P{aces}")
 }
 
 /// 只为读、改访问控制打开 `path`，不跟随重解析点：打开的是链接本身。
@@ -194,7 +225,7 @@ fn open_for_acl(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
-/// 所在的卷保存访问控制（NTFS、ReFS 保存，FAT、exFAT 不保存）。查不出来时当作保存，照常查。
+/// 所在的卷保存访问控制（NTFS、ReFS 保存，FAT、exFAT 不保存）。查询失败时按保存处理，照常检查。
 fn keeps_acls(file: &File) -> bool {
     let mut flags = 0u32;
     // SAFETY: 句柄有效；卷名和文件系统名都不要，系统只往局部变量 `flags` 里写。
@@ -410,11 +441,17 @@ impl Descriptor {
             let ace = ace.cast::<u8>().cast_const();
             // SAFETY: 每一项都以 ACE_HEADER 开头。
             let header = unsafe { ace.cast::<ACE_HEADER>().read_unaligned() };
+            let size = usize::from(header.AceSize);
+            let damaged = || io::Error::new(io::ErrorKind::InvalidData, "访问控制列表中有损坏的项");
             // 允许访问的几种项都是：头（4 字节）、权限（4 字节），对象项再有标志（4 字节）和标志说有的一两个 GUID，然后是 SID。
+            // 每次读取之前先确认所读的字节在这一项的 `AceSize` 之内。
             let sid_at = match u32::from(header.AceType) {
                 ACCESS_ALLOWED_ACE_TYPE | ACCESS_ALLOWED_CALLBACK_ACE_TYPE => 8,
                 ACCESS_ALLOWED_OBJECT_ACE_TYPE | ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE => {
-                    // SAFETY: 对象项的第 8 到 11 字节是标志。
+                    if size < 12 {
+                        return Err(damaged());
+                    }
+                    // SAFETY: 对象项的第 8 到 11 字节是标志，上面已确认在这一项之内。
                     let flags = unsafe { ace.add(8).cast::<u32>().read_unaligned() };
                     let guids =
                         [ACE_OBJECT_TYPE_PRESENT, ACE_INHERITED_OBJECT_TYPE_PRESENT].iter().filter(|&&flag| flags & flag != 0).count();
@@ -422,13 +459,18 @@ impl Descriptor {
                 }
                 _ => continue,
             };
-            // SID 至少 8 个字节。
-            if sid_at + 8 > usize::from(header.AceSize) {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "访问控制列表中有损坏的项"));
+            // SID 的固定部分为 8 个字节，其中第 1 个字节是子授权的个数，每个子授权再占 4 个字节。
+            if sid_at + 8 > size {
+                return Err(damaged());
             }
-            // SAFETY: 第 4 到 7 字节是权限。
+            // SAFETY: 第 `sid_at + 1` 个字节在上面确认过的范围之内。
+            let sub_authorities = usize::from(unsafe { ace.add(sid_at + 1).read() });
+            if sid_at + 8 + 4 * sub_authorities > size {
+                return Err(damaged());
+            }
+            // SAFETY: 第 4 到 7 字节是权限，`sid_at` 不小于 8，已在这一项之内。
             let rights = unsafe { ace.add(4).cast::<u32>().read_unaligned() };
-            // SAFETY: SID 从 `sid_at` 开始，在这一项里面；`sid_string` 会先检查它。
+            // SAFETY: 整个 SID 在这一项之内（上面已核对长度）；`sid_string` 还会检查它的格式。
             let sid = sid_string(unsafe { ace.add(sid_at) }.cast_mut().cast())?;
             grants.push(Grant { sid, rights });
         }
@@ -448,7 +490,7 @@ struct Grant {
 enum Verdict {
     /// 只有可信的账户能访问，访问控制也不继承上级：不用改。
     Private,
-    /// 别的账户写不了，但还能读，或者访问控制还继承着上级目录的：收紧。
+    /// 其他账户无写入权限，但仍可读取，或者访问控制仍继承自上级目录：收紧。
     Tighten,
 }
 
@@ -509,6 +551,16 @@ pub(super) mod tests {
         Account::current().unwrap().user
     }
 
+    /// 进程令牌中 Administrators 组已启用。
+    pub(in crate::state) fn privileged() -> bool {
+        Account::current().unwrap().privileged
+    }
+
+    /// 属主的 SID。
+    pub(in crate::state) fn owner_of(path: &Path) -> String {
+        Descriptor::of(&open_for_acl(path).unwrap()).unwrap().owner().unwrap()
+    }
+
     /// 按 SDDL 建一个目录（不检查，就像别的程序或者别的用户建的那样）。
     pub(in crate::state) fn make_dir_with(path: &Path, sddl: &str) {
         let descriptor = Descriptor::from_sddl(sddl).unwrap();
@@ -528,18 +580,32 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn a_failed_create_leaves_an_existing_name_to_the_caller_whatever_the_error() {
+        use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS};
+
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        let denied = io::Error::from_raw_os_error(ERROR_ACCESS_DENIED.cast_signed());
+        let exists = io::Error::from_raw_os_error(ERROR_ALREADY_EXISTS.cast_signed());
+        // 卷的根目录等对已存在的名称报告拒绝访问。
+        assert!(already_there(&denied, dir.path()));
+        assert!(!already_there(&denied, &missing));
+        assert!(already_there(&exists, dir.path()));
+    }
+
+    #[test]
     fn the_write_rights_are_the_same_as_the_installers() {
         assert_eq!(WRITE_RIGHTS, 0x500D_0156);
     }
 
     #[test]
-    fn the_access_list_has_the_current_user_only_when_not_elevated() {
+    fn the_access_list_has_the_current_user_only_when_administrators_is_not_enabled() {
         let user = Account { user: USER.to_owned(), privileged: false };
         let admin = Account { user: USER.to_owned(), privileged: true };
         assert_eq!(sddl(&user, true), format!("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{USER})"));
         assert_eq!(sddl(&user, false), format!("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{USER})"));
-        assert_eq!(sddl(&admin, true), "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
-        assert_eq!(sddl(&admin, false), "D:P(A;;FA;;;SY)(A;;FA;;;BA)");
+        assert_eq!(sddl(&admin, true), "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
+        assert_eq!(sddl(&admin, false), "O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)");
     }
 
     #[test]
