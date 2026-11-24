@@ -236,11 +236,13 @@ ssh <节点>.<网络>.i3t        # 按名字，比如 nas.home.i3t
  docker compose exec -T controller cat /data/controller.key > controller.key)
 
 # 安装脚本
-sudo sh -c 'set -e; umask 077; rm -f controller.dump; pg_dump --format custom --file controller.dump "$(cat /var/lib/i3t-controller/database.url)"'
-sudo install -m 600 /var/lib/i3t-controller/controller.key controller.key
+(set -e; umask 077; rm -f controller.dump
+ sudo -u i3t-controller sh -c 'url=$(cat /var/lib/i3t-controller/database.url) && [ -n "$url" ] && exec pg_dump --format custom --dbname="$url"' > controller.dump
+ rm -f controller.key
+ sudo -u i3t-controller cat /var/lib/i3t-controller/controller.key > controller.key)
 ```
 
-转储里有全部的网络、节点和设置，以及管理令牌。两个文件都是秘密：转储里有代理的密码，密钥就是 controller 的身份。上面的命令把它们重新写出来，只有属主可读（用安装脚本装的，属主是 root），保存时也别放宽。两个文件缺一不可：节点认的是这把密钥，数据库里记着在它名下加入的节点。
+转储里有全部的网络、节点和设置，以及管理令牌。两个文件都是秘密：转储里有代理的密码，密钥就是 controller 的身份。上面的命令把它们重新写出来，只有你自己可读，保存时也别放宽。用安装脚本装的，数据目录归服务的用户 `i3t-controller`，备份和恢复都以它的身份读写里面的文件，不用 root：那里的文件可能被换成了链接，root 会跟着它读写别处。两个文件缺一不可：节点认的是这把密钥，数据库里记着在它名下加入的节点。
 
 恢复在一台新的服务器上做，公网地址和原来的一样。
 
@@ -260,14 +262,16 @@ docker compose up -d
 用安装脚本的话，先按第 1 步建一个空的数据库，然后：
 
 ```sh
-sudo pg_restore --no-owner --dbname postgres://i3t:<密码>@127.0.0.1/i3t controller.dump
+pg_restore --no-owner --dbname postgres://i3t:<密码>@127.0.0.1/i3t controller.dump
 # 先装上但不启动，把密钥放好，再启动
 curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh -s -- --controller --database-url postgres://i3t:<密码>@127.0.0.1/i3t
-sudo install -o i3t-controller -g i3t-controller -m 600 controller.key /var/lib/i3t-controller/controller.key
+sudo -u i3t-controller sh -c 'umask 077; rm -f "$1" && cat > "$1"' sh /var/lib/i3t-controller/controller.key < controller.key
 curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh -s -- --controller --public-addr <公网地址>:20331
 ```
 
-在原来的服务器上恢复的话：先停服务（`sudo systemctl stop i3t-controller`），把库删掉、重新建一个空的，执行上面 `pg_restore` 和 `sudo install` 那两条，再启动服务。
+在原来的服务器上恢复的话：先停服务（`sudo systemctl stop i3t-controller`），把库删掉、重新建一个空的，执行上面 `pg_restore` 和 `sudo -u i3t-controller` 那两条，再启动服务。
+
+按这份说明以前的版本做的备份归 root，你自己读不了：先 `sudo chown "$(id -un)" controller.dump controller.key`。
 
 密钥要在 controller 启动之前放好：库已经是某个 controller 的了，没有它的密钥 controller 不启动，也不会生成一把新的。
 

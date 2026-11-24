@@ -18,11 +18,13 @@ With Docker:
 With the install script:
 
 ```sh
-sudo sh -c 'set -e; umask 077; rm -f controller.dump; pg_dump --format custom --file controller.dump "$(cat /var/lib/i3t-controller/database.url)"'
-sudo install -m 600 /var/lib/i3t-controller/controller.key controller.key
+(set -e; umask 077; rm -f controller.dump
+ sudo -u i3t-controller sh -c 'url=$(cat /var/lib/i3t-controller/database.url) && [ -n "$url" ] && exec pg_dump --format custom --dbname="$url"' > controller.dump
+ rm -f controller.key
+ sudo -u i3t-controller cat /var/lib/i3t-controller/controller.key > controller.key)
 ```
 
-The dump holds all networks, nodes and settings and the admin token. Both files are secrets: the dump has the proxy passwords in it, and the key is the controller's identity. The commands above write them anew, readable by their owner only (with the install script that is root); keep them that way.
+The dump holds all networks, nodes and settings and the admin token. Both files are secrets: the dump has the proxy passwords in it, and the key is the controller's identity. The commands above write them anew, readable by you only; keep them that way. With the install script, the data directory belongs to the service user `i3t-controller`: backup and restore read and write the files in it as that user, not as root, which would follow a link put there in the place of a file.
 
 :::caution
 Both files are needed: nodes trust this key, and the database lists the nodes enrolled under it.
@@ -48,17 +50,18 @@ To restore on the same server, run `docker compose down --volumes` in place of t
 With the install script, first create an empty database as in [Install the controller](../../deploy/controller/), then:
 
 ```sh
-sudo pg_restore --no-owner --dbname postgres://i3t:<password>@127.0.0.1/i3t controller.dump
+pg_restore --no-owner --dbname postgres://i3t:<password>@127.0.0.1/i3t controller.dump
 # install without starting, put the key in place, then start
 curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh |
   sh -s -- --controller --database-url postgres://i3t:<password>@127.0.0.1/i3t
-sudo install -o i3t-controller -g i3t-controller -m 600 controller.key \
-  /var/lib/i3t-controller/controller.key
+sudo -u i3t-controller sh -c 'umask 077; rm -f "$1" && cat > "$1"' sh /var/lib/i3t-controller/controller.key < controller.key
 curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh |
   sh -s -- --controller --public-addr <public-address>:20331
 ```
 
-To restore on the same server: stop the service (`sudo systemctl stop i3t-controller`), drop the database and create it again empty, run the `pg_restore` and `sudo install` lines above, then start the service.
+To restore on the same server: stop the service (`sudo systemctl stop i3t-controller`), drop the database and create it again empty, run the `pg_restore` and `sudo -u i3t-controller` lines above, then start the service.
+
+A backup made with an earlier version of this guide is root's, and you cannot read it: `sudo chown "$(id -un)" controller.dump controller.key` first.
 
 Put the key in place before the controller starts: on a database that already belongs to a controller, it refuses to start without that controller's key rather than make a new one.
 
