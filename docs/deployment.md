@@ -264,11 +264,13 @@ With the install script, first create an empty database as in step 1, then:
 pg_restore --no-owner --dbname postgres://i3t:<password>@127.0.0.1/i3t controller.dump
 # install without starting, put the key in place, then start
 curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh -s -- --controller --database-url postgres://i3t:<password>@127.0.0.1/i3t
-sudo -u i3t-controller sh -c 'umask 077; cat > /var/lib/i3t-controller/controller.key' < controller.key
+sudo -u i3t-controller sh -c 'umask 077; rm -f "$1"; cat > "$1"' sh /var/lib/i3t-controller/controller.key < controller.key
 curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh -s -- --controller --public-addr <public-address>:20331
 ```
 
 To restore on the same server: stop the service (`sudo systemctl stop i3t-controller`), drop the database and create it again empty, run the `pg_restore` and `sudo -u i3t-controller` lines above, then start the service.
+
+A backup made with an earlier version of this guide is root's, and you cannot read it: `sudo chown "$(id -un)" controller.dump controller.key` first.
 
 Put the key in place before the controller starts: on a database that already belongs to a controller, it refuses to start without that controller's key rather than make a new one.
 

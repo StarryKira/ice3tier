@@ -264,11 +264,13 @@ docker compose up -d
 pg_restore --no-owner --dbname postgres://i3t:<密码>@127.0.0.1/i3t controller.dump
 # 先装上但不启动，把密钥放好，再启动
 curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh -s -- --controller --database-url postgres://i3t:<密码>@127.0.0.1/i3t
-sudo -u i3t-controller sh -c 'umask 077; cat > /var/lib/i3t-controller/controller.key' < controller.key
+sudo -u i3t-controller sh -c 'umask 077; rm -f "$1"; cat > "$1"' sh /var/lib/i3t-controller/controller.key < controller.key
 curl -fsSL https://raw.githubusercontent.com/fuqiuluo/ice3tier/main/deploy/install.sh | sh -s -- --controller --public-addr <公网地址>:20331
 ```
 
 在原来的服务器上恢复的话：先停服务（`sudo systemctl stop i3t-controller`），把库删掉、重新建一个空的，执行上面 `pg_restore` 和 `sudo -u i3t-controller` 那两条，再启动服务。
+
+按这份说明以前的版本做的备份归 root，你自己读不了：先 `sudo chown "$(id -un)" controller.dump controller.key`。
 
 密钥要在 controller 启动之前放好：库已经是某个 controller 的了，没有它的密钥 controller 不启动，也不会生成一把新的。
 

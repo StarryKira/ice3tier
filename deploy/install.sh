@@ -1124,13 +1124,8 @@ EOF
 run_as_i3t() {
     node_bin="$1"
     shift
-    if command -v runuser >/dev/null 2>&1; then
-        $SUDO runuser -u i3t -- env I3T_STATE_DIR="$STATE_DIR" ${I3T_LANG:+"I3T_LANG=$I3T_LANG"} ${I3T_SERVICE:+"I3T_SERVICE=$I3T_SERVICE"} "$node_bin" "$@"
-    elif command -v sudo >/dev/null 2>&1; then
-        $SUDO sudo -u i3t -- env I3T_STATE_DIR="$STATE_DIR" ${I3T_LANG:+"I3T_LANG=$I3T_LANG"} ${I3T_SERVICE:+"I3T_SERVICE=$I3T_SERVICE"} "$node_bin" "$@"
-    else
-        $SUDO su -s /bin/sh -c 'state=$1; service=$2; bin=$3; shift 3; exec env I3T_STATE_DIR="$state" I3T_SERVICE="$service" "$bin" "$@"' -- i3t sh "$STATE_DIR" "${I3T_SERVICE:-}" "$node_bin" "$@"
-    fi
+    # shellcheck disable=SC2016
+    sh_as_user i3t 'exec env "$@"' I3T_STATE_DIR="$STATE_DIR" ${I3T_LANG:+"I3T_LANG=$I3T_LANG"} ${I3T_SERVICE:+"I3T_SERVICE=$I3T_SERVICE"} "$node_bin" "$@"
 }
 
 # Runs the node program as root (macOS and Linux without systemd: the adapter needs root there).
@@ -1277,13 +1272,8 @@ install_node_systemd() {
     fi
     node_bin="${node_bin_dir}/i3t"
     if [ "$custom_bin_dir" -eq 0 ]; then
-        if command -v runuser >/dev/null 2>&1; then
-            $SUDO runuser -u i3t -- mkdir -p -m 0700 "$node_bin_dir"
-        elif command -v sudo >/dev/null 2>&1; then
-            $SUDO sudo -u i3t -- mkdir -p -m 0700 "$node_bin_dir"
-        else
-            $SUDO su -s /bin/sh -c 'mkdir -p -m 0700 "$1"' -- i3t sh "$node_bin_dir"
-        fi
+        # shellcheck disable=SC2016
+        sh_as_user i3t 'mkdir -p -m 0700 "$1"' "$node_bin_dir"
     else
         $SUDO install -d -o 0 -g 0 -m 0755 "$(dirname "$node_bin_dir")"
         $SUDO install -d -o i3t -g i3t -m 0700 "$node_bin_dir"
@@ -1484,12 +1474,13 @@ controller_env_sets_database() {
 # than blanks and line ends, which is all the controller ignores), or a setting in /etc/i3t/controller.env.
 #
 # The file is read as the service user, who owns the directory it is in: in its place may be a link to a file only
-# root should read, or to a device that does something when root opens it. A pipe would keep the read waiting forever:
-# only a regular file is read.
+# root should read, or to a device that does something when root opens it. A pipe there would keep the read waiting
+# forever: `-D skip` opens without waiting and skips it, so there is no moment to swap one in after a check.
+# Without that user (not created yet) there is nothing to read as; asking for it would only leave a line in the log.
 controller_has_database() {
     # shellcheck disable=SC2016
     if id i3t-controller >/dev/null 2>&1 \
-        && sh_as_user i3t-controller '[ -f "$1" ] && grep -q "[^[:space:]]" "$1"' /var/lib/i3t-controller/database.url 2>/dev/null; then
+        && sh_as_user i3t-controller 'grep -D skip -q "[^[:space:]]" "$1"' /var/lib/i3t-controller/database.url 2>/dev/null; then
         return 0
     fi
     controller_env_sets_database
@@ -1534,8 +1525,8 @@ controller_needs_database() {
 # Where database.url is to be written. The data directory is in /var/lib, which only root can change: a link or a file
 # in its place was put there by root, and is refused as the node's state directory is. database.url is in the service
 # user's own directory: a link there may have been put by whoever runs as that user, to have the file written somewhere
-# else. It is written as that user (see write_controller_database_url) whatever is found here; this says why it would
-# fail, before anything is installed or stopped.
+# else. The file is written as that user (see write_controller_database_url), which is safe whatever is found there by
+# then; what is checked here is refused before anything is installed or stopped, as a sign that someone else was there.
 check_controller_data_dir() {
     if $SUDO test -L /var/lib/i3t-controller; then
         die "refusing to use symbolic link as the controller's data directory: /var/lib/i3t-controller"
@@ -1552,14 +1543,14 @@ check_controller_data_dir() {
 }
 
 # Writes the connection string, given on standard input, to /var/lib/i3t-controller/database.url as the service user:
-# root writes nothing in that directory. Into a new file next to it first, which then takes its place; not through a
-# link, nor into a directory that took its place. The string holds the database password: it is not put on a command
-# line, where every user could read it, and the file is readable by the service user only.
+# root writes nothing in that directory. Into a new file next to it first (mktemp makes it readable by its owner only),
+# which then takes the place of whatever has that name: `mv -T` replaces a link instead of following it, and fails on
+# a directory instead of moving the file into it. The string holds the database password: it is not put on a command
+# line, where every user could read it.
 write_controller_database_url() {
     # shellcheck disable=SC2016
-    sh_as_user i3t-controller 'umask 077; dest=$1/database.url
-        stage=$(mktemp "$1/.database.url.XXXXXX") || exit 1
-        if cat > "$stage" && [ ! -L "$dest" ] && [ ! -d "$dest" ] && mv -f "$stage" "$dest"; then exit 0; fi
+    sh_as_user i3t-controller 'stage=$(mktemp "$1/.database.url.XXXXXX") || exit 1
+        if cat > "$stage" && mv -fT "$stage" "$1/database.url"; then exit 0; fi
         rm -f "$stage"
         exit 1' /var/lib/i3t-controller
 }

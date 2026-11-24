@@ -442,7 +442,7 @@ if [ "$os" = "Linux" ]; then
     pg_restore --no-owner --dbname "$restored_database" "$work/backup/controller.dump" \
         || fail "the backup could not be restored with the documented command"
     sudo systemctl stop i3t-controller
-    sudo -u i3t-controller sh -c 'umask 077; cat > /var/lib/i3t-controller/controller.key' < "$work/backup/controller.key"
+    sudo -u i3t-controller sh -c 'umask 077; rm -f "$1"; cat > "$1"' sh /var/lib/i3t-controller/controller.key < "$work/backup/controller.key"
     sudo sh "$repo/deploy/install.sh" --from "$dir" --controller --public-addr 127.0.0.1:20331 --database-url "$restored_database" >/dev/null
     # Written again over the one that was there, by the service user and for it only.
     [ "$(sudo stat -c '%a %U %G' /var/lib/i3t-controller/database.url)" = "600 i3t-controller i3t-controller" ] \
@@ -544,18 +544,38 @@ if [ "$os" = "Linux" ]; then
     grep -q 'symbolic link' "$work/ctl-link.out" || fail "the refusal does not say why: $(cat "$work/ctl-link.out")"
     [ -z "$(sudo ls -A "$link_target")" ] || fail "root wrote where the link led: $(sudo ls -lA "$link_target")"
     systemctl is-active -q i3t-controller || fail "a refused run left the controller stopped"
-    sudo -u i3t-controller sh -c 'rm "$1" && mv "$1.kept" "$1"' sh /var/lib/i3t-controller/database.url
+    # That check is made before anything is installed, and the file is written later: the link may be put there in
+    # between. The function that writes it, taken out of install.sh and run here without the check, must not follow
+    # the link either (it replaces it), nor put the file into a directory that took the place of database.url.
+    # shellcheck disable=SC2034  # used by the functions taken out of install.sh
+    SUDO=sudo
+    eval "$(awk '/^sh_as_user\(\) \{$/,/^}$/' "$repo/deploy/install.sh")"
+    eval "$(awk '/^write_controller_database_url\(\) \{$/,/^}$/' "$repo/deploy/install.sh")"
+    printf '%s\n' "$ctl_database" | write_controller_database_url || fail "database.url could not be written in the place of a link"
+    [ -z "$(sudo ls -A "$link_target")" ] || fail "database.url was written where the link led: $(sudo ls -lA "$link_target")"
+    sudo test ! -L /var/lib/i3t-controller/database.url || fail "the link in the place of database.url is still there"
+    [ "$(sudo stat -c '%a %U' /var/lib/i3t-controller/database.url)" = "600 i3t-controller" ] \
+        || fail "database.url written in the place of a link is not the service user's and private"
+    [ "$(sudo cat /var/lib/i3t-controller/database.url)" = "$ctl_database" ] || fail "the connection string is not in database.url"
+    sudo -u i3t-controller sh -c 'rm "$1" && mkdir "$1"' sh /var/lib/i3t-controller/database.url
+    if printf 'postgres://elsewhere\n' | write_controller_database_url 2>/dev/null; then
+        fail "the connection string was put into a directory in the place of database.url"
+    fi
+    [ -z "$(sudo ls -A /var/lib/i3t-controller/database.url)" ] || fail "something was put into the directory in the place of database.url"
+    [ -z "$(sudo find /var/lib/i3t-controller -maxdepth 1 -name '.database.url.*')" ] || fail "a failed write left its temporary file behind"
+    sudo -u i3t-controller sh -c 'rmdir "$1" && mv "$1.kept" "$1"' sh /var/lib/i3t-controller/database.url
     sudo rmdir "$link_target"
-    # The data directory itself can only have been made a link by root, but it is not written through either.
+    # The data directory itself can only have been made a link by root, but it is not written through either. Put
+    # back before anything is checked, so that a failed check does not leave it a link.
     sudo systemctl stop i3t-controller
     sudo mv /var/lib/i3t-controller /var/lib/i3t-controller.moved
     sudo ln -s /var/lib/i3t-controller.moved /var/lib/i3t-controller
-    if sh "$repo/deploy/install.sh" --from "$dir" --controller --database-url "$ctl_database" >"$work/ctl-dirlink.out" 2>&1; then
-        fail "database.url was written into a data directory that is a link"
-    fi
-    grep -q 'symbolic link' "$work/ctl-dirlink.out" || fail "the refusal does not say why: $(cat "$work/ctl-dirlink.out")"
+    dirlink_status=0
+    sh "$repo/deploy/install.sh" --from "$dir" --controller --database-url "$ctl_database" >"$work/ctl-dirlink.out" 2>&1 || dirlink_status=$?
     sudo rm /var/lib/i3t-controller
     sudo mv /var/lib/i3t-controller.moved /var/lib/i3t-controller
+    [ "$dirlink_status" -ne 0 ] || fail "database.url was written into a data directory that is a link"
+    grep -q 'symbolic link' "$work/ctl-dirlink.out" || fail "the refusal does not say why: $(cat "$work/ctl-dirlink.out")"
     [ "$(sudo cat /var/lib/i3t-controller/database.url)" = "$ctl_database" ] || fail "database.url was changed by a refused run"
 
     step "a controller that was set up here is not replaced by one that cannot start"
