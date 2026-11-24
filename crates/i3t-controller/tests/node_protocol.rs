@@ -6,6 +6,7 @@
 mod common;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use common::{Link, Node, PATIENCE, Publisher, Running, eventually, fast_timing, hello, settle};
@@ -17,6 +18,7 @@ use i3t_model::control::{Declared, MAX_PACKAGE_CHUNK, Report, Route, RouteAnswer
 use i3t_model::update::{UpdateStatus, UpdateTiming, Version};
 use i3t_proto::addr::{Query, Reply};
 use tokio::net::UdpSocket;
+use tokio::sync::oneshot;
 use tokio::time::timeout;
 
 fn peer_ids(node: &Node) -> Vec<i3t_proto::NodeId> {
@@ -348,6 +350,44 @@ async fn the_controller_sends_heartbeats_when_idle_and_drops_silent_nodes() {
         node.send(ToController::Report(Box::default())).await;
     }
     assert!(running.controller.node(network.id, id).unwrap().node.online);
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_node_stays_online_while_the_controller_is_stuck_handling_its_messages() {
+    /// controller 卡住的时长，远超存活期限。
+    const STALL: Duration = Duration::from_millis(1500);
+    let timing = Timing { heartbeat_idle: Duration::from_millis(100), liveness_timeout: Duration::from_millis(600), ..fast_timing() };
+    let running = Running::start(timing).await;
+    let network = running.network("home");
+    let mut node = running.join(network.id, &[]).await;
+    let id = node.id();
+
+    // controller 卡在锁上，例如等待无响应的数据库。
+    let controller = Arc::clone(&running.controller);
+    let (held, holding) = oneshot::channel();
+    let stuck = tokio::task::spawn_blocking(move || {
+        let _stalled = controller.stall();
+        held.send(()).unwrap();
+        std::thread::sleep(STALL);
+    });
+    holding.await.unwrap();
+
+    // 卡住期间节点照常上报、发心跳：上报要等锁才能处理，但不影响心跳的收发和存活判定。
+    node.send(ToController::Report(Box::default())).await;
+    let mut heartbeats = 0;
+    while !stuck.is_finished() {
+        node.send(ToController::Heartbeat).await;
+        if let Some(message) = node.link().recv_within(Duration::from_millis(100)).await {
+            assert_eq!(message, ToNode::Heartbeat);
+            heartbeats += 1;
+        }
+    }
+    stuck.await.unwrap();
+    assert!(heartbeats >= 5, "卡住期间 controller 应照常发送心跳，只收到 {heartbeats} 个");
+    assert!(running.controller.node(network.id, id).unwrap().node.online, "一直在说话的节点不应被判为离线");
+    node.send(ToController::Heartbeat).await;
+    assert_eq!(node.link().recv().await, Some(ToNode::Heartbeat), "连接仍然可用");
     running.shutdown().await;
 }
 

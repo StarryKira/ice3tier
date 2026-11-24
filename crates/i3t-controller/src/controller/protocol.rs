@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::net::{IpAddr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use i3t_model::admin::{LogRef, action};
 use i3t_model::control::{
@@ -89,10 +89,12 @@ impl Controller {
             return Ok(());
         }
         let outcome = match message {
-            // 取包要读文件，不能拿着锁做。
+            // 取包要读文件，不能拿着锁做：这里只查出缓存在哪里。
             ToController::PackageRequest { request, version, platform, offset, len } => {
+                let cached =
+                    inner.updates.cached_package(&version, platform.as_str()).map(|(path, artifact)| (path.to_owned(), artifact.size));
                 drop(inner);
-                self.package_request(session, request, &version, &platform, PackageRange { offset, len });
+                self.package_request(session, request, &version, &platform, cached, PackageRange { offset, len });
                 return Ok(());
             }
             ToController::RouteAnswer { request, answer } => {
@@ -155,15 +157,17 @@ impl Controller {
     }
 
     /// 节点要更新包里的一段。包是公开的发布文件，所以只要是已经报到的节点就给，不看它有没有收到过更新指令。
-    fn package_request(&self, session: Admitted, request: u64, version: &Version, platform: &Platform, range: PackageRange) {
+    /// `cached` 是调用方在锁内查到的缓存文件及其大小，读文件在锁外进行，回复时再取一次锁。
+    fn package_request(
+        &self,
+        session: Admitted,
+        request: u64,
+        version: &Version,
+        platform: &Platform,
+        cached: Option<(PathBuf, u64)>,
+        range: PackageRange,
+    ) {
         let is_current = |inner: &Inner| inner.live.get(&session.node).is_some_and(|live| live.conn == session.conn);
-        let cached = {
-            let inner = self.lock();
-            if !is_current(&inner) {
-                return;
-            }
-            inner.updates.cached_package(version, platform.as_str()).map(|(path, artifact)| (path.to_owned(), artifact.size))
-        };
         let chunk = match cached {
             Some((path, size)) => range.read(&path, size),
             None => Err(format!("controller 未缓存 {version} 版本 {platform} 平台的更新包")),

@@ -520,6 +520,14 @@ impl Controller {
         }
     }
 
+    /// 测试用：持有 controller 的锁直到返回值被丢弃，模拟一次卡在数据库上的操作。
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    #[must_use = "丢弃返回值即释放锁"]
+    pub fn stall(&self) -> impl Sized + '_ {
+        self.lock()
+    }
+
     #[cfg(test)]
     pub(crate) fn advance_clock(&self, secs: u64) {
         self.lock().clock.advance(secs);
