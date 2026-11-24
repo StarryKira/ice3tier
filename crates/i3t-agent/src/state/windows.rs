@@ -3,9 +3,10 @@
 //! Unix 上状态目录是 0700、里面的文件是 0600。Windows 上新建的目录和文件默认继承上级目录的访问控制，而
 //! `C:\ProgramData` 让本机所有用户都能读，还能在里面新建文件和目录。所以这里不靠继承：
 //!
-//! - 目录和文件都用受保护（不继承上级）的访问控制列表，只给 SYSTEM 和 Administrators，属主为 Administrators，与
-//!   `deploy/install.ps1` 给 `%ProgramData%\i3t` 设的一致。进程令牌中 Administrators 组未启用时（未提权的管理员、
-//!   普通用户、不属于该组的服务账户）另加当前账户、属主为当前账户，否则进程自身无法访问。
+//! - 目录和文件都用受保护（不继承上级）的访问控制列表，给 SYSTEM 和 Administrators，与 `deploy/install.ps1` 给
+//!   `%ProgramData%\i3t` 设的一致。进程令牌中 Administrators 组未启用时（未提权的管理员、普通用户、不属于该组的
+//!   服务账户）另加当前账户，否则进程自身无法访问；组已启用时，状态目录位于当前账户自己的目录中（例如
+//!   `%LOCALAPPDATA%`）也另加当前账户，见 [`Account::grantees_in`]。
 //! - 目录不存在时连同访问控制一起建出来，中间没有一段时间用着继承来的权限。
 //! - 目录已经存在时先查：属主不是 SYSTEM、Administrators 或当前用户，或者别的账户能写、能改它的权限，就不用它。
 //!   别人可能已经改过里面的 `controller.json`、`config.toml`，这时再收紧权限也晚了。查过没问题、但还有别的账户能读
@@ -18,7 +19,7 @@ use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{ERROR_SUCCESS, GENERIC_ALL, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree, WIN32_ERROR};
@@ -67,9 +68,10 @@ const WRITE_RIGHTS: u32 = FILE_WRITE_DATA
 
 /// 建出只有可信的账户能访问的目录，上级目录要已经有了。已经有这个名字时什么也不做，返回 `false`。
 pub(super) fn create_private_dir(path: &Path) -> io::Result<bool> {
-    let descriptor = Descriptor::from_sddl(&sddl(&Account::current()?, true))?;
+    let account = Account::current()?;
+    let descriptor = Descriptor::from_sddl(&sddl(&account, account.grantees_in(path.parent()), true))?;
     let attributes = security_attributes(&descriptor);
-    let name = wide(path.as_os_str())?;
+    let name = wide_path(path)?;
     // SAFETY: `name` 以 0 结尾；`attributes` 和它指向的描述符在调用期间都有效。
     if unsafe { CreateDirectoryW(name.as_ptr(), &raw const attributes) } != 0 {
         return Ok(true);
@@ -98,8 +100,9 @@ pub(super) fn secure_existing_dir(path: &Path) -> io::Result<()> {
     // 先把里面的每一项都查一遍、什么都不改：有一项不能用，整个目录就不用，也不留下改了一半的权限。
     let mut entries = Vec::new();
     collect(path, &account, &mut entries)?;
-    let dir_dacl = Descriptor::from_sddl(&sddl(&account, true))?;
-    let file_dacl = Descriptor::from_sddl(&sddl(&account, false))?;
+    let grantees = account.grantees_in(path.parent());
+    let dir_dacl = Descriptor::from_sddl(&sddl(&account, grantees, true))?;
+    let file_dacl = Descriptor::from_sddl(&sddl(&account, grantees, false))?;
     set_dacl(&dir, &dir_dacl)?;
     for entry in &entries {
         set_dacl(&entry.file, if entry.directory { &dir_dacl } else { &file_dacl }).map_err(|error| at(&entry.path, &error))?;
@@ -109,9 +112,10 @@ pub(super) fn secure_existing_dir(path: &Path) -> io::Result<()> {
 
 /// 新建一个只有可信的账户能访问的文件，已经有了就失败。
 pub(super) fn create_private_file(path: &Path) -> io::Result<File> {
-    let descriptor = Descriptor::from_sddl(&sddl(&Account::current()?, false))?;
+    let account = Account::current()?;
+    let descriptor = Descriptor::from_sddl(&sddl(&account, account.grantees_in(path.parent()), false))?;
     let attributes = security_attributes(&descriptor);
-    let path = wide(path.as_os_str())?;
+    let path = wide_path(path)?;
     // SAFETY: `path` 以 0 结尾；`attributes` 和它指向的描述符在调用期间都有效；不用模板文件。共享方式和
     // `fs::OpenOptions` 默认的一样：文件开着也能被改名，写完之后要把它改名成正式的文件。
     let handle = unsafe {
@@ -137,9 +141,18 @@ pub(super) fn create_private_file(path: &Path) -> io::Result<File> {
 struct Account {
     /// 当前用户的 SID，写成 `S-1-5-…`。
     user: String,
-    /// 令牌中 Administrators 组已启用（已提权的管理员、SYSTEM）：访问控制里只有 SYSTEM 和 Administrators，属主为
-    /// Administrators，不单独给这个账户。
+    /// 令牌中 Administrators 组已启用（已提权的管理员、SYSTEM）：新建的项属主为 Administrators；是否另给这个账户
+    /// 见 [`Account::grantees_in`]。
     privileged: bool,
+}
+
+/// 访问控制中给哪些账户。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Grantees {
+    /// 只给 SYSTEM 与 Administrators。
+    Administrators,
+    /// 另给当前账户。
+    AlsoCurrent,
 }
 
 impl Account {
@@ -162,6 +175,29 @@ impl Account {
     /// SYSTEM、Administrators 和当前用户。
     fn trusts(&self, sid: &str) -> bool {
         sid == SYSTEM || sid == ADMINISTRATORS || sid == self.user
+    }
+
+    /// 在目录 `place` 中新建或收紧的项给哪些账户。
+    ///
+    /// Administrators 组未启用时必须另给当前账户，否则进程自身无法访问。组已启用时，若 `place` 的访问控制明确给
+    /// 当前账户写入权限（该账户自己的目录，例如默认状态目录所在的 `%LOCALAPPDATA%`），同样另给当前账户：该账户
+    /// 本可替换整个状态目录，不给它不增加安全性，只会使它未提权运行的节点和 `i3t status` 无法访问。其他位置
+    /// （例如以 SYSTEM 运行的服务所用的 `%ProgramData%\i3t`）只给 SYSTEM 与 Administrators，与 `deploy/install.ps1`
+    /// 一致，未提权的进程无法改动以 SYSTEM 运行的节点所读的配置。
+    fn grantees_in(&self, place: Option<&Path>) -> Grantees {
+        let own_place = || self.user != SYSTEM && place.is_some_and(|place| self.may_write(place));
+        if !self.privileged || own_place() { Grantees::AlsoCurrent } else { Grantees::Administrators }
+    }
+
+    /// `place` 的访问控制列表中有按 SID 给当前账户（不经所属的组）写入权限的项。读取失败时按没有处理。
+    fn may_write(&self, place: &Path) -> bool {
+        let grants = fs::OpenOptions::new()
+            .access_mode(READ_CONTROL)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(place)
+            .and_then(|dir| Descriptor::of(&dir)?.grants());
+        matches!(grants, Ok(Some(grants)) if grants.iter().any(|grant| grant.sid == self.user && grant.rights & WRITE_RIGHTS != 0))
     }
 }
 
@@ -200,17 +236,17 @@ fn token_information(token: &OwnedHandle, class: TOKEN_INFORMATION_CLASS) -> io:
     Ok(buffer)
 }
 
-/// 只给 SYSTEM、Administrators（Administrators 组未启用时再加上当前账户）的访问控制列表，受保护：不继承上级目录的。
-/// 目录的各项让里面新建的文件和目录继承（OICI），所以节点、更新和日志后来新建的文件也是这样。
+/// 给 SYSTEM、Administrators（`grantees` 为 [`Grantees::AlsoCurrent`] 时另给当前账户）的访问控制列表，受保护：不继承
+/// 上级目录的。目录的各项让里面新建的文件和目录继承（OICI），所以节点、更新和日志后来新建的文件也是这样。
 ///
 /// Administrators 组已启用时属主明确设为 Administrators，与 `deploy/install.ps1` 一致：本地安全策略
 /// "System objects: Default owner for objects created by members of the Administrators group" 设为
 /// "Object creator" 时，不指定则属主为该管理员本人，以 SYSTEM 运行的服务和其他管理员将拒绝使用该目录。
 /// 组未启用时不指定，属主为当前账户。
-fn sddl(account: &Account, directory: bool) -> String {
+fn sddl(account: &Account, grantees: Grantees, directory: bool) -> String {
     let inherit = if directory { "OICI" } else { "" };
     let owner = if account.privileged { "O:BA" } else { "" };
-    let user = (!account.privileged).then_some(account.user.as_str());
+    let user = (grantees == Grantees::AlsoCurrent && account.user != SYSTEM).then_some(account.user.as_str());
     let aces: String = ["SY", "BA"].into_iter().chain(user).map(|sid| format!("(A;{inherit};FA;;;{sid})")).collect();
     format!("{owner}D:P{aces}")
 }
@@ -310,9 +346,33 @@ fn security_attributes(descriptor: &Descriptor) -> SECURITY_ATTRIBUTES {
     }
 }
 
+/// 路径写成以 0 结尾的 UTF-16，给 CreateDirectoryW、CreateFileW 用。与 std 相同，达到 248 个字符（建目录时的上限）
+/// 的路径先展开为绝对路径，再改写为 `\\?\` 形式，不受 MAX_PATH 的限制。
+fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
+    const LEGACY_MAX_PATH: usize = 248;
+    if path.as_os_str().encode_wide().count() < LEGACY_MAX_PATH {
+        return wide(path.as_os_str());
+    }
+    let full = std::path::absolute(path)?;
+    let text = full.as_os_str().encode_wide();
+    let verbatim: Vec<u16> = match full.components().next() {
+        Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_)) => r"\\?\".encode_utf16().chain(text).collect(),
+        // `\\server\share\…` 写成 `\\?\UNC\server\share\…`。
+        Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::UNC(..)) => {
+            r"\\?\UNC".encode_utf16().chain(text.skip(1)).collect()
+        }
+        // 已是 `\\?\` 形式或设备路径。
+        _ => text.collect(),
+    };
+    terminated(verbatim)
+}
+
 /// 以 0 结尾的 UTF-16，给 Win32 函数用。中间有 0 时报错，免得被截成另一个路径。
 fn wide(text: &OsStr) -> io::Result<Vec<u16>> {
-    let mut wide: Vec<u16> = text.encode_wide().collect();
+    terminated(text.encode_wide().collect())
+}
+
+fn terminated(mut wide: Vec<u16>) -> io::Result<Vec<u16>> {
     if wide.contains(&0) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "路径中有空字符"));
     }
@@ -556,6 +616,12 @@ pub(super) mod tests {
         Account::current().unwrap().privileged
     }
 
+    /// 访问控制列表中有给当前账户（按 SID）的项。
+    pub(in crate::state) fn grants_me(path: &Path) -> bool {
+        let me = me();
+        Descriptor::of(&open_for_acl(path).unwrap()).unwrap().grants().unwrap().unwrap().iter().any(|grant| grant.sid == me)
+    }
+
     /// 属主的 SID。
     pub(in crate::state) fn owner_of(path: &Path) -> String {
         Descriptor::of(&open_for_acl(path).unwrap()).unwrap().owner().unwrap()
@@ -599,13 +665,20 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn the_access_list_has_the_current_user_only_when_administrators_is_not_enabled() {
+    fn the_access_list_has_the_current_user_unless_administrators_alone_are_wanted() {
         let user = Account { user: USER.to_owned(), privileged: false };
         let admin = Account { user: USER.to_owned(), privileged: true };
-        assert_eq!(sddl(&user, true), format!("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{USER})"));
-        assert_eq!(sddl(&user, false), format!("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{USER})"));
-        assert_eq!(sddl(&admin, true), "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
-        assert_eq!(sddl(&admin, false), "O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)");
+        let system = Account { user: SYSTEM.to_owned(), privileged: true };
+        // 未启用 Administrators 组时无论在哪里都另给当前账户；启用时没有可查的上级目录则只给 SYSTEM 与 Administrators。
+        assert_eq!(user.grantees_in(None), Grantees::AlsoCurrent);
+        assert_eq!(admin.grantees_in(None), Grantees::Administrators);
+        assert_eq!(system.grantees_in(None), Grantees::Administrators);
+        assert_eq!(sddl(&user, Grantees::AlsoCurrent, true), format!("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{USER})"));
+        assert_eq!(sddl(&user, Grantees::AlsoCurrent, false), format!("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{USER})"));
+        assert_eq!(sddl(&admin, Grantees::Administrators, true), "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
+        assert_eq!(sddl(&admin, Grantees::Administrators, false), "O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)");
+        assert_eq!(sddl(&admin, Grantees::AlsoCurrent, true), format!("O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{USER})"));
+        assert_eq!(sddl(&system, Grantees::AlsoCurrent, false), "O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)");
     }
 
     #[test]

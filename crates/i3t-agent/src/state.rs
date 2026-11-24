@@ -14,7 +14,8 @@
 //! 所有文件都是先写临时文件再改名，所以断电不会留下写了一半的文件。
 //!
 //! 目录和里面的文件只有属主能访问：Unix 上是 0700 和 0600；Windows 上是 SYSTEM、Administrators，进程令牌中
-//! Administrators 组未启用时再加上当前账户（见 [`windows`]）。
+//! Administrators 组未启用时，或状态目录位于当前账户自己的目录（例如 `%LOCALAPPDATA%`）中时，再加上当前账户
+//! （见 [`windows`]）。
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -445,15 +446,17 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn the_state_directory_and_its_files_are_private_on_windows() {
-        use windows::tests::{access_of, me, owner_of, privileged};
+        use windows::tests::{access_of, grants_me, me, owner_of, privileged};
 
-        let (_dir, state) = state();
+        let (dir, state) = state();
         state.key_or_generate().unwrap();
         state.save_local(&LocalEndpoint { addr: "127.0.0.1:40123".parse().unwrap(), token: "s3cret-token".to_owned() }).unwrap();
         state.save_forward_ports(&BTreeMap::from([(7, 41_000)])).unwrap();
         crate::config::Config::write_template_if_missing(&state.config_path()).unwrap();
         // Administrators 组已启用时属主是 Administrators，不随「默认所有者」策略变成管理员本人；否则是当前账户。
         let owner = if privileged() { "S-1-5-32-544".to_owned() } else { me() };
+        // 临时目录在当前账户自己的用户配置目录中，已提权时同样另给当前账户，未提权的同一账户仍可访问。
+        let mine = !privileged() || grants_me(dir.path());
         for path in [
             state.path().to_owned(),
             state.path().join(KEY_FILE),
@@ -463,6 +466,7 @@ mod tests {
         ] {
             assert_eq!(access_of(&path), (true, true), "{}", path.display());
             assert_eq!(owner_of(&path), owner, "{}", path.display());
+            assert_eq!(grants_me(&path), mine, "{}", path.display());
         }
         // 日志、更新自己新建的文件和目录继承状态目录的。
         fs::create_dir(state.path().join("update")).unwrap();
@@ -488,7 +492,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn an_existing_directory_other_users_can_only_read_is_tightened_with_everything_inside() {
-        use windows::tests::{access_of, make_dir_with, me};
+        use windows::tests::{access_of, grants_me, make_dir_with, me};
 
         let outer = tempfile::tempdir().unwrap();
         let root = outer.path().join("i3t");
@@ -504,8 +508,45 @@ mod tests {
         StateDir::open(&root).unwrap();
         for path in &inside {
             assert_eq!(access_of(path), (true, true), "{}", path.display());
+            // 旧版本在用户配置目录中留下的目录：已提权收紧后，同一账户未提权运行时仍可访问。
+            assert!(grants_me(path), "{}", path.display());
         }
         StateDir::open(&root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_elevated_node_gives_a_place_that_is_not_its_accounts_own_to_system_and_administrators_only() {
+        use windows::tests::{access_of, grants_me, make_dir_with, privileged};
+
+        if !privileged() {
+            return;
+        }
+        // 与 %ProgramData% 一样，上级目录没有按 SID 给当前账户的项。
+        let outer = tempfile::tempdir().unwrap();
+        let machine = outer.path().join("machine");
+        make_dir_with(&machine, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
+        let state = StateDir::open(machine.join("i3t")).unwrap();
+        state.key_or_generate().unwrap();
+        for path in [state.path().to_owned(), state.path().join(KEY_FILE)] {
+            assert_eq!(access_of(&path), (true, true), "{}", path.display());
+            assert!(!grants_me(&path), "{}", path.display());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_state_directory_with_a_long_path_works() {
+        let outer = tempfile::tempdir().unwrap();
+        let deep = outer.path().join("a".repeat(100)).join("b".repeat(100));
+        fs::create_dir_all(&deep).unwrap();
+        let root = deep.join("i3t");
+        assert!(root.as_os_str().len() >= 248, "{}", root.display());
+        let state = StateDir::open(&root).unwrap();
+        state.key_or_generate().unwrap();
+        state.save_controller(&ControllerInfo { address: "c:1".to_owned(), key: PublicKey::from_bytes([5; 32]) }).unwrap();
+        crate::config::Config::write_template_if_missing(&state.config_path()).unwrap();
+        assert!(StateDir::open(&root).unwrap().key().unwrap().is_some());
     }
 
     #[cfg(windows)]
