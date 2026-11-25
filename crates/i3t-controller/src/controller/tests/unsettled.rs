@@ -5,13 +5,13 @@
 
 use std::time::{Duration, Instant};
 
-use i3t_model::admin::NetworkId;
-use i3t_model::admin::action;
 use i3t_model::admin::diag::{CellState, CreateTest, MatrixRun, MatrixState, TestQuery, TestState};
+use i3t_model::admin::{NetworkId, action};
 use i3t_model::control::diag::TestRole;
 use i3t_model::control::{Declared, TestReport, ToController};
 
 use super::super::Controller;
+use super::super::diag::{MIN_INTERVAL, STORE_RETRY};
 use super::super::testing::{Lab, Member, REMOTE, modern_hello};
 use super::is_woken;
 use crate::error::Error;
@@ -48,7 +48,12 @@ fn stall_commits(database: &Database, change: &str, table: &str) -> Stalled {
 /// 从现在起 controller 等回答只等这么一会儿：卡住的提交等不到，平常的语句（哪怕机器很慢）等得到。
 /// 换了新连接之后恢复平时的期限。
 fn be_impatient(lab: &Lab) {
-    lab.controller.lock().store.set_response_timeout(Duration::from_secs(2));
+    be_impatient_for(lab, Duration::from_secs(2));
+}
+
+/// 与 [`be_impatient`] 相同，等待响应的期限为 `timeout`。
+fn be_impatient_for(lab: &Lab, timeout: Duration) {
+    lab.controller.lock().store.set_response_timeout(timeout);
 }
 
 fn is_unknown(error: &Error) -> bool {
@@ -71,8 +76,24 @@ fn tick_until_settled(lab: &Lab) {
     }
 }
 
+/// 仅查明结果未知的提交并据此补齐，不执行后台的其他工作：进行中的测试不会被后台任务写入并结束。
+fn settle_only(lab: &Lab) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let mut inner = lab.controller.lock();
+        // 退避期间与数据库尚未完成提交时不会有结果，也可能返回其他错误：均继续等待。
+        let _ = inner.settle_commits(Instant::now());
+        if !inner.store.has_unsettled_commits() && !inner.out_of_step {
+            return;
+        }
+        drop(inner);
+        assert!(Instant::now() < deadline, "结果未知的提交始终未能查明");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// 一个网络，里面两个互相看得见的节点。
-fn two_members(database: &Database, dir: &std::path::Path) -> (Lab, i3t_model::admin::NetworkId, Member, Member) {
+fn two_members(database: &Database, dir: &std::path::Path) -> (Lab, NetworkId, Member, Member) {
     let mut lab = Lab::around(Controller::open(dir, database, ADDR.to_owned()).unwrap().controller);
     let network = lab.network("home").id;
     let (mut a, mut b) = (lab.join(network, &[]), lab.join(network, &[]));
@@ -227,9 +248,9 @@ fn unsettled_commits(lab: &Lab) -> usize {
     lab.controller.lock().store.unsettled_commits()
 }
 
-/// 过了矩阵再排的时刻（提交结果不明之后隔 5 秒），还没过任何测试的时间窗：后台任务处理测试的那一部分。
+/// 已过矩阵再次调度的时刻（[`STORE_RETRY`] 之后），尚未超过任何测试的时间窗：执行后台任务中处理测试的部分。
 fn matrix_retry_due(lab: &Lab) {
-    lab.controller.lock().tests_tick(Instant::now() + Duration::from_secs(6));
+    lab.controller.lock().tests_tick(Instant::now() + STORE_RETRY + Duration::from_secs(1));
 }
 
 /// 过了所有测试的时间窗、也过了结果再存的时刻之后，后台任务处理测试的那一部分。
@@ -283,10 +304,13 @@ fn a_test_cancel_whose_answer_was_lost_stays_a_cancel_whatever_happens_next() {
         assert_eq!(lab.controller.lock().store.lock_waits(), 0, "{next:?}：那一行被卡着的提交锁着，没有拿着 controller 的锁去等它");
 
         stalled.release();
-        tick_until_settled(&lab);
-        if let AfterCancel::CancelAgain = next {
+        if matches!(next, AfterCancel::CancelAgain) {
+            // 仅查明提交结果，不运行后台任务：测试仍在进行中，再次取消走继续持久化的路径。
+            settle_only(&lab);
             let again = lab.controller.cancel_test(network, test).unwrap();
-            assert_eq!(again, cancelled, "再取消一次只是把定下的结果存下来，结束的时刻不变");
+            assert_eq!(again, cancelled, "再次取消仅持久化已确定的结果，结束时刻不变");
+        } else {
+            tick_until_settled(&lab);
         }
         tests_overdue(&lab);
         let stored = Store::open(&database).unwrap().test(network, test).unwrap().unwrap();
@@ -396,21 +420,25 @@ fn a_matrix_round_stops_at_a_pair_whose_creation_answer_was_lost() {
     let (lab, network, members) = testers(&database, dir.path(), 3);
 
     let stalled = stall_commits(&database, "INSERT", "tests");
-    be_impatient(&lab);
+    // 等待期限长于 STORE_RETRY：再次调度的时刻须从提交返回时算起，而非从本轮调度开始时算起。
+    be_impatient_for(&lab, STORE_RETRY + Duration::from_secs(1));
     let run = lab.controller.start_matrix(network).unwrap();
-    // 这一对照常开始，不重排。数据库可能正卡着提交，其余的这一轮不开始：每开始一对都要拿着 controller 的锁等满一次超时。
-    assert_eq!(unsettled_commits(&lab), 1, "开始了一对就停下了");
+    // 该节点对仍视为已开始，不重新排队。提交可能仍阻塞在数据库中，本轮不再开始其余节点对：每开始一对均需持锁等待一次完整的响应超时。
+    assert_eq!(unsettled_commits(&lab), 1, "开始一对后即结束本轮调度");
     let started: Vec<_> =
         run.cells.iter().filter(|cell| cell.state == CellState::Running).map(|cell| (cell.a, cell.b, cell.test)).collect();
     let pending = run.cells.iter().filter(|cell| cell.state == CellState::Pending).count();
     assert_eq!((started.len(), pending), (1, 2), "{:?}", run.cells);
+    // 退避已结束，再次调度的时刻尚未到达。
+    lab.controller.lock().tests_tick(Instant::now() + Duration::from_secs(2));
+    assert_eq!(unsettled_commits(&lab), 1, "再次调度的时刻从提交返回时算起");
 
     stalled.release();
     tick_until_settled(&lab);
     matrix_retry_due(&lab);
     let run = lab.controller.matrix(network).unwrap();
-    assert!(run.cells.iter().all(|cell| cell.state == CellState::Running), "其余的隔一会儿再开始：{:?}", run.cells);
-    assert!(run.cells.iter().any(|cell| (cell.a, cell.b, cell.test) == started[0]), "开始了的那一对没有重排");
+    assert!(run.cells.iter().all(|cell| cell.state == CellState::Running), "其余节点对在 STORE_RETRY 之后开始：{:?}", run.cells);
+    assert!(run.cells.iter().any(|cell| (cell.a, cell.b, cell.test) == started[0]), "已开始的节点对未重新排队");
     let members: Vec<&Member> = members.iter().collect();
     for cell in &run.cells {
         both_report_last(&lab, network, cell.test.unwrap(), &members);
@@ -440,9 +468,9 @@ fn a_matrix_round_also_stops_at_a_pair_that_ends_at_once_when_its_creation_answe
 
     let stalled = stall_commits(&database, "INSERT", "tests");
     be_impatient(&lab);
-    // 过了两次测试之间的间隔，还没过 a 和 b 那个测试的时间窗。
-    lab.controller.lock().tests_tick(Instant::now() + Duration::from_secs(11));
-    assert_eq!(unsettled_commits(&lab), 1, "结束了一对就停下了，没有接着去写下一对");
+    // 已超过两次测试之间的间隔，尚未超过 a 与 b 之间测试的时间窗。
+    lab.controller.lock().tests_tick(Instant::now() + MIN_INTERVAL + Duration::from_secs(1));
+    assert_eq!(unsettled_commits(&lab), 1, "结束一对后即结束本轮调度，未继续写入下一对");
     let run = lab.controller.matrix(network).unwrap();
     let mut ends = [cell(&run, a, d).0, cell(&run, b, d).0];
     ends.sort_unstable_by_key(|state| *state == CellState::Pending);
@@ -450,7 +478,8 @@ fn a_matrix_round_also_stops_at_a_pair_that_ends_at_once_when_its_creation_answe
 
     stalled.release();
     tick_until_settled(&lab);
-    lab.controller.lock().tests_tick(Instant::now() + Duration::from_secs(17));
+    // 已超过再次调度的时刻与另一对的测试间隔。
+    lab.controller.lock().tests_tick(Instant::now() + MIN_INTERVAL + Duration::from_secs(1));
     let test = cell(&lab.controller.matrix(network).unwrap(), a, b).1.unwrap();
     both_report_last(&lab, network, test, &[a, b]);
     let run = lab.controller.matrix(network).unwrap();
@@ -485,7 +514,8 @@ fn a_matrix_cancel_whose_answer_was_lost_cancels_the_matrix_and_is_logged_once()
 
     stalled.release();
     tick_until_settled(&lab);
-    tests_overdue(&lab);
+    // 后台任务在 STORE_RETRY 之后写入，不等待各测试的时间窗结束。
+    matrix_retry_due(&lab);
     let run = lab.controller.matrix(network).unwrap();
     assert_eq!(run.state, MatrixState::Cancelled);
     assert!(run.cells.iter().all(|cell| cell.state == CellState::Cancelled), "{:?}", run.cells);
@@ -549,4 +579,111 @@ fn a_matrix_whose_start_answer_was_lost_is_there_as_its_log_entry_says() {
     tick_until_settled(&lab);
     assert_eq!(logged(&lab, action::TEST_MATRIX), 1);
     assert_eq!(lab.controller.matrix(network).unwrap(), run, "操作记录里记着开始了的矩阵确实有");
+}
+
+#[test]
+fn a_lost_commit_while_scheduling_one_matrix_holds_back_the_other_matrices_for_the_round() {
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = Scratch::new();
+    let database = scratch.database();
+    let mut lab = Lab::around(Controller::open(dir.path(), &database, ADDR.to_owned()).unwrap().controller);
+    let mut networks = Vec::new();
+    for name in ["home", "work"] {
+        let network = lab.network(name).id;
+        let mut members: Vec<Member> = (0..2).map(|_| lab.join_as(network, &modern_hello("0.2.0"))).collect();
+        lab.settle(&mut members.iter_mut().collect::<Vec<_>>());
+        // 该节点对刚单独测试过：矩阵开始时排队等待间隔结束。
+        let test = lab.controller.start_test(network, &test_between(&members[0], &members[1])).unwrap().id;
+        both_report_last(&lab, network, test, &[&members[0], &members[1]]);
+        assert_eq!(lab.controller.start_matrix(network).unwrap().cells[0].state, CellState::Pending);
+        networks.push((network, members));
+    }
+
+    let stalled = stall_commits(&database, "INSERT", "tests");
+    be_impatient(&lab);
+    {
+        let mut inner = lab.controller.lock();
+        inner.intervals_passed();
+        inner.tests_tick(Instant::now());
+    }
+    // 先调度的矩阵开始一对时提交未收到响应，随即开始退避：本轮不再调度另一个网络的矩阵。
+    assert_eq!(unsettled_commits(&lab), 1, "本轮仅开始了一对");
+    let mut states: Vec<CellState> = networks.iter().map(|(network, _)| lab.controller.matrix(*network).unwrap().cells[0].state).collect();
+    states.sort_unstable_by_key(|state| *state == CellState::Pending);
+    assert_eq!(states, [CellState::Running, CellState::Pending]);
+
+    stalled.release();
+    tick_until_settled(&lab);
+    matrix_retry_due(&lab);
+    for (network, _) in &networks {
+        assert_eq!(lab.controller.matrix(*network).unwrap().cells[0].state, CellState::Running, "退避结束后正常调度");
+    }
+}
+
+#[test]
+fn a_lost_commit_while_a_node_s_tests_end_leaves_its_other_results_to_the_background() {
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = Scratch::new();
+    let database = scratch.database();
+    let (lab, network, members) = testers(&database, dir.path(), 3);
+    let [x, y, z] = [&members[0], &members[1], &members[2]];
+    // y 与 z 刚单独测试过：矩阵开始时该节点对排队等待间隔结束。
+    let test = lab.controller.start_test(network, &test_between(y, z)).unwrap().id;
+    both_report_last(&lab, network, test, &[y, z]);
+    let run = lab.controller.start_matrix(network).unwrap();
+    assert_eq!([cell(&run, x, y).0, cell(&run, x, z).0, cell(&run, y, z).0], [CellState::Running, CellState::Running, CellState::Pending]);
+    let ended = [cell(&run, x, y).1.unwrap(), cell(&run, x, z).1.unwrap()];
+
+    let stalled = stall_commits(&database, "INSERT", "tests");
+    be_impatient(&lab);
+    lab.controller.lock().intervals_passed();
+    // x 离线：先写入的测试结束后，矩阵开始 y 与 z 这一对，其提交未收到响应并开始退避。
+    lab.controller.disconnect(x.session);
+    assert_eq!(unsettled_commits(&lab), 1, "y 与 z 这一对已开始");
+    let elsewhere = Store::open(&database).unwrap();
+    let mut stored: Vec<TestState> = ended.iter().map(|&test| elsewhere.test(network, test).unwrap().unwrap().state).collect();
+    stored.sort_unstable_by_key(|state| *state == TestState::Running);
+    assert!(stored[0] != TestState::Running && stored[1] == TestState::Running, "另一个测试的结果本次未写入：{stored:?}");
+    for test in ended {
+        assert_ne!(lab.controller.test(network, test).unwrap().state, TestState::Running, "两个测试的结果均已确定");
+    }
+
+    stalled.release();
+    tick_until_settled(&lab);
+    matrix_retry_due(&lab);
+    for test in ended {
+        assert_ne!(elsewhere.test(network, test).unwrap().unwrap().state, TestState::Running, "后台任务写入了其余结果");
+    }
+}
+
+#[test]
+fn a_test_whose_order_cannot_be_delivered_after_a_lost_commit_writes_no_other_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = Scratch::new();
+    let database = scratch.database();
+    let (lab, network, mut members) = testers(&database, dir.path(), 3);
+    let c = members.pop().unwrap();
+    let b = members.pop().unwrap();
+    let a = members.pop().unwrap();
+    let other = lab.controller.start_test(network, &test_between(&c, &b)).unwrap().id;
+    // b 的连接已断开，controller 尚未察觉：向它下发指令时失败，它随之被记为离线。
+    let b_id = b.id;
+    drop(b);
+
+    let stalled = stall_commits(&database, "INSERT", "tests");
+    be_impatient(&lab);
+    let request = CreateTest { a: a.id, b: b_id, items: None, throughput: false, via: Vec::new() };
+    let started = lab.controller.start_test(network, &request).expect("提交未收到响应：按已提交处理，照常返回");
+    assert_eq!(unsettled_commits(&lab), 1, "创建测试记录的提交未收到响应");
+    assert_ne!(started.state, TestState::Running, "指令无法下发的测试在此结束");
+    // 提交可能仍阻塞在数据库中：b 参与的另一个测试的结果已经确定，本次不写入。
+    let elsewhere = Store::open(&database).unwrap();
+    assert_eq!(elsewhere.test(network, other).unwrap().unwrap().state, TestState::Running, "本次未写入另一个测试的结果");
+    assert_ne!(lab.controller.test(network, other).unwrap().state, TestState::Running, "另一个测试的结果已经确定");
+
+    stalled.release();
+    tick_until_settled(&lab);
+    matrix_retry_due(&lab);
+    assert_ne!(elsewhere.test(network, other).unwrap().unwrap().state, TestState::Running, "后台任务写入了另一个测试的结果");
+    assert_eq!(elsewhere.test(network, started.id).unwrap().unwrap().state, started.state, "新测试的结果写入了它自己的那一行");
 }

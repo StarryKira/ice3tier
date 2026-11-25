@@ -156,6 +156,11 @@ impl Inner {
         self.flush_after = Some(Instant::now() + RETRY_DELAY);
     }
 
+    /// 到 `now` 为止仍处于退避期（见 [`Self::back_off`]）。`now` 取自本次调用开始时，调用期间开始的退避同样计入。
+    pub(crate) fn backing_off(&self, now: Instant) -> bool {
+        self.flush_after.is_some_and(|after| now < after)
+    }
+
     /// 提交的回答没有回来的那些事务（[`StoreError::CommitUnknown`](crate::store::StoreError::CommitUnknown)）：
     /// 问数据库它们后来算了数没有。算了数的话，数据库里已经是改过的样子，而提交之后才做的那些事当时没有做
     /// （调用方带着错误返回了）：照数据库现在的样子补上。不补的话，一条删掉了的规则、一个删掉了的节点会一直留在
