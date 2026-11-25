@@ -339,13 +339,13 @@ impl Store {
         Ok(settled)
     }
 
-    /// 还有没有提交结果不明、还没问出结果的事务（[`StoreError::CommitUnknown`]）。没有了的话，那些事务在数据库那边都已经做完了，
-    /// 算了数的改动别的连接都看得见。
+    /// 是否仍有提交结果未知且尚未查明的事务（[`StoreError::CommitUnknown`]）。返回 `false` 时，此前提交结果未知的事务在数据库侧均已完成，
+    /// 已生效的变更对其他连接均可见。
     pub(crate) fn has_unsettled_commits(&self) -> bool {
         !self.unsettled.borrow().is_empty()
     }
 
-    /// 测试用：提交结果不明、还没问出结果的事务有几个。
+    /// 测试用：提交结果未知且尚未查明的事务数量。
     #[cfg(test)]
     pub(crate) fn unsettled_commits(&self) -> usize {
         self.unsettled.borrow().len()
@@ -392,7 +392,7 @@ impl Store {
         self.run(|session| session.batch(sql)).unwrap();
     }
 
-    /// 测试用：执行一条只返回一个 `bigint` 的查询。
+    /// 测试用：执行一条仅返回单个 `bigint` 值的查询。
     #[cfg(test)]
     pub(crate) fn query_i64(&self, sql: &str) -> i64 {
         self.query_one(sql, &[], |row| row.try_get(0)).unwrap()

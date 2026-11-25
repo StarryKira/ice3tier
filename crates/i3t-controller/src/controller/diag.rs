@@ -12,10 +12,10 @@
 //!   接受方 [`RESPONDER_GRACE`] 之内没有报，或者整个测试过了时间窗还没有报完，就按手上有的结束，缺的那一端在结果里写明。
 //! - 节点掉线时，它参与的测试按手上有的结束。管理员可以取消进行中的测试，已经有的结果照样留着。
 //! - 定时重复测试不做：这是个人用的工具，管理员需要时再点一次；历史结果留着可以对比。
-//! - 开始、取消测试和矩阵时，提交的回答没有回来（[`StoreError::CommitUnknown`]）的，当场按已提交处理（[`Inner::commit_unknown`]），
-//!   不把这个错误交给调用方。数据库可能正卡着提交，这一次调用随后不再写存储，余下要写的交给后台任务。
-//! - 每写一次存储都要拿着 controller 的锁等它回答：整个数据库读写失败之后（包括提交的回答没有回来），同一次持锁内不再写别的测试、
-//!   不再开始矩阵里排着的节点对，退避一会儿（[`Inner::back_off`]）再来。
+//! - 开始、取消测试和矩阵时，若提交未收到响应（[`StoreError::CommitUnknown`]），当场按已提交处理（[`Inner::commit_unknown`]），
+//!   不将该错误返回给调用方。提交可能仍阻塞在数据库中，本次调用随后不再写入存储，其余写入交由后台任务完成。
+//! - 每次写入存储都须持有 controller 锁等待响应：整个数据库读写失败之后（包括提交未收到响应），同一次持锁内不再写入其他测试、
+//!   不再开始矩阵中排队的节点对，短暂退避（[`Inner::back_off`]）后再继续。
 
 mod matrix;
 mod merge;
@@ -87,8 +87,8 @@ struct Running {
     ended: Option<Instant>,
     /// 首次结束时确定的最终结果及其结束时刻。持久化失败时该测试保留在运行集合中，由后台任务原样重试，期间收到的上报一律忽略。
     outcome: Option<TestView>,
-    /// 这个测试的那一行最近一次是在提交结果不明的事务里写的（建出来的那一次，或者写成取消的那一次）：
-    /// 问出那个事务的结果之前不再写它的结果，见 [`Inner::ensure_settled`]。
+    /// 该测试的记录最近一次由提交结果未知的事务写入（创建记录时，或写入取消结果时）：
+    /// 查明该事务的提交结果之前不再写入其结果，见 [`Inner::ensure_settled`]。
     unsettled: bool,
 }
 
@@ -186,13 +186,13 @@ impl Controller {
 
     /// 取消一个进行中的测试。已经有的结果照样留着。
     ///
-    /// 操作记录与取消结果在同一事务中持久化；若持久化失败则状态不变，可安全重试。提交的回答没有回来时按已提交处理
-    /// （见 `Inner::commit_unknown`）：结果当场定为取消并照常返回，由后台任务问出提交结果之后原样再写一次、告诉两端结束。
-    /// 对随矩阵取消、或者像这样结果尚未持久化的测试，再次调用取消将继续尝试持久化，不再记操作记录。
+    /// 操作记录与取消结果在同一事务中持久化；若持久化失败则状态不变，可安全重试。提交未收到响应时按已提交处理
+    /// （见 `Inner::commit_unknown`）：结果当场确定为取消并正常返回，由后台任务在查明提交结果后重新写入同一结果，并通知两端结束。
+    /// 对随矩阵取消、或如上所述结果尚未持久化的测试，再次调用取消将继续尝试持久化，不再写入操作记录。
     ///
     /// # Errors
     ///
-    /// 这个网络里没有这个测试（`not_found`）；它已经结束了，或者它的那一行还在等一个提交结果不明的事务（`busy`）；读写存储失败。
+    /// 该网络中不存在此测试（`not_found`）；测试已结束，或其记录仍在等待一个提交结果未知的事务（`busy`）；读写存储失败。
     pub fn cancel_test(&self, network: NetworkId, id: u64) -> Result<TestView, Error> {
         let mut inner = self.lock();
         inner.require_network(network)?;
@@ -203,7 +203,7 @@ impl Controller {
             };
         };
         let finished = match running.outcome.as_ref().map(|outcome| outcome.state) {
-            // 已定为取消（随矩阵取消，或者取消的提交没有回答）但结果尚未持久化：继续尝试持久化，不再记操作记录。
+            // 已确定为取消（随矩阵取消，或取消的提交未收到响应）但结果尚未持久化：继续尝试持久化，不再写入操作记录。
             Some(TestState::Cancelled) => inner.finish_test(id, true),
             // 已因其他原因结束，仅结果尚未持久化。
             Some(_) => return Err(Error::Busy(format!("测试 #{id} 已经结束了"))),
@@ -220,8 +220,8 @@ impl Controller {
                     store.update_test(&view)
                 });
                 if inner.commit_unknown(stored, format_args!("取消主动测试 #{id}"))? {
-                    // 取消就此定下：之后的上报不算数，超时、掉线不改它（见 `fix_outcome`）。后台任务等问出提交结果之后
-                    // 原样再写一次，再告诉两端结束；管理员再取消一次也只是接着写它。
+                    // 取消结果就此确定：之后的上报不再生效，超时、节点离线也不改变它（见 `fix_outcome`）。
+                    // 后台任务在查明提交结果后重新写入同一结果，再通知两端结束；管理员再次取消时也仅继续写入该结果。
                     if let Some(running) = inner.diag.running.get_mut(&id) {
                         running.outcome = Some(view.clone());
                         running.deadline = Instant::now() + STORE_RETRY;
@@ -331,7 +331,7 @@ impl Inner {
     /// 建起一个测试并下发指令。调用前已经查过间隔。
     ///
     /// 出错时不产生任何副作用：存储中无此测试记录，也未向节点下发指令，可原样重试。
-    /// 建测试记录的提交没有回答时按已提交处理（见 [`Inner::commit_unknown`]），照常下发、照常返回，并在返回值里注明。
+    /// 创建测试记录的提交未收到响应时按已提交处理（见 [`Inner::commit_unknown`]），仍下发指令、正常返回，并在返回值中注明。
     pub(super) fn begin_test(
         &mut self,
         network: &NetworkRecord,
@@ -404,7 +404,7 @@ impl Inner {
                 host.state = ItemState::Skipped;
                 host.problem.clone_from(&blocker);
             }
-            // 插入的这一行里已经是最终的结果，之后不再写它：提交的回答没有回来也没有要等的。
+            // 插入的记录已包含最终结果，之后不再写入：即使提交未收到响应也无需等待。
             let unsettled = self.store_new_test(&mut view)?;
             return Ok(NewTest { view, unsettled });
         }
@@ -435,8 +435,8 @@ impl Inner {
 
     /// 插入测试记录并取得编号，与操作记录在一个事务里：出错时存储里没有这个测试，矩阵再排这一对时不会多出一条"没做完"的。
     ///
-    /// 提交的回答没有回来时按已提交处理（见 [`Inner::commit_unknown`]），返回 `true`：编号在提交之前已经拿到了，
-    /// 这一行在数据库那边可能还没有建成，问出提交结果之前写它的结果等于没写（见 [`Inner::ensure_settled`]）。
+    /// 提交未收到响应时按已提交处理（见 [`Inner::commit_unknown`]），返回 `true`：编号在提交之前已经取得，
+    /// 但该行在数据库侧可能尚未创建，查明提交结果之前写入其结果不会生效（见 [`Inner::ensure_settled`]）。
     fn store_new_test(&mut self, view: &mut TestView) -> Result<bool, Error> {
         let stored = self.store.atomically(|store| {
             view.id = store.insert_test(view)?;
@@ -446,12 +446,12 @@ impl Inner {
         self.commit_unknown(stored, format_args!("开始主动测试 #{id}"))
     }
 
-    /// 一个事务的结果：提交了，返回 `Ok(false)`；提交的回答没有回来（[`StoreError::CommitUnknown`]），返回 `Ok(true)`；别的错误原样交回。
+    /// 处理一个事务的结果：已提交时返回 `Ok(false)`；提交未收到响应（[`StoreError::CommitUnknown`]）时返回 `Ok(true)`；其他错误原样返回。
     ///
-    /// 回答没有回来的提交，数据库那边可能已经算了数。这里不等问出结果，当场按已提交处理，提交之后该做的照做：
-    /// 后台按存储补齐的那一步（[`Inner::settle_commits`]）不管测试和矩阵，而且等它问出结果时，节点的上报、超时、掉线
-    /// 可能已经按"没有提交"把那一行改掉了。按已提交处理而事务其实没有算数的话，少的只是操作记录里的那一条
-    /// （新建的测试则连那一行也没有，它的结果无处可存）。
+    /// 未收到响应的提交在数据库侧可能已经生效。此处不等待查明结果，当场按已提交处理，并正常执行提交之后的步骤：
+    /// 后台依据存储补齐状态的步骤（[`Inner::settle_commits`]）不处理测试和矩阵，而且在其查明结果时，节点的上报、超时、离线
+    /// 可能已按"未提交"修改了该行。若按已提交处理而事务实际未生效，缺少的仅是操作记录中的对应条目
+    /// （新建的测试则连该行也不存在，其结果无处持久化）。
     ///
     /// 返回 `true` 时同时开始退避（[`Inner::back_off`]）：提交可能仍阻塞在数据库中，本次调用随后不再写入其余测试的结果，
     /// 也不再开始矩阵中排队的节点对，由后台任务在退避结束后继续。
@@ -556,7 +556,7 @@ impl Inner {
     ///
     /// 结果与结束时刻在首次结束时确定；后续重试仅重新写入该结果，`cancelled` 不再生效。
     /// 若持久化失败，其余状态不变：测试仍留在进行中集合，间隔 [`STORE_RETRY`] 后由后台任务重试，期间收到的上报一律忽略。
-    /// 那一行还在等提交结果不明的事务时（[`Inner::ensure_settled`]）也是这样。
+    /// 该测试的记录仍在等待提交结果未知的事务时（[`Inner::ensure_settled`]）同样如此。
     pub(super) fn finish_test(&mut self, id: u64, cancelled: bool) -> Result<TestView, Error> {
         let view = self.fix_outcome(id, cancelled).ok_or(Error::NotFound(Entity::Test))?;
         if let Err(error) = self.ensure_settled(id).and_then(|()| self.store.update_test(&view).map_err(Error::from)) {
@@ -569,11 +569,11 @@ impl Inner {
         Ok(view)
     }
 
-    /// 测试的那一行最近一次是在提交结果不明的事务里写的（[`Running::unsettled`]）：存储里还有没问出结果的提交时
-    /// （[`Store::has_unsettled_commits`]，不分是哪一个事务的）不写它，返回 `busy`；都问出了结果就不再等。
+    /// 测试的记录最近一次由提交结果未知的事务写入（[`Running::unsettled`]）：存储中仍有尚未查明结果的提交时
+    /// （[`Store::has_unsettled_commits`]，不区分属于哪个事务）不写入该记录，返回 `busy`；全部查明结果后不再等待。
     ///
-    /// 那个事务在数据库那边可能还没有做完。这时它新插入的行别的连接看不见，写进去的结果等于没写，等它提交了，
-    /// 那一行就一直是"进行中"，显示成 controller 重启过；它改过的行被它锁着，写它要拿着 controller 的锁等满等锁的期限。
+    /// 该事务在数据库侧可能尚未完成。此时其新插入的行对其他连接不可见，写入的结果不会生效；待其提交后，
+    /// 该行将一直处于"进行中"，显示为 controller 已重启；其修改过的行被其锁定，写入该行须持有 controller 锁等待至锁超时。
     fn ensure_settled(&mut self, id: u64) -> Result<(), Error> {
         let Some(running) = self.diag.running.get_mut(&id).filter(|running| running.unsettled) else { return Ok(()) };
         if self.store.has_unsettled_commits() {
@@ -583,7 +583,7 @@ impl Inner {
         Ok(())
     }
 
-    /// 这几个测试的结果已经确定，本次不写入，交由后台任务最迟在 [`STORE_RETRY`] 之后写入
+    /// 这些测试的结果已确定，本次不写入，交由后台任务最迟在 [`STORE_RETRY`] 之后写入
     /// （结果确定之后后台任务仅依据 `deadline` 处理，见 [`Running::due_at`]，原时间窗的结束时刻可能更晚）。
     fn store_later(&mut self, tests: impl IntoIterator<Item = u64>) {
         let at = Instant::now() + STORE_RETRY;
@@ -594,7 +594,7 @@ impl Inner {
         }
     }
 
-    /// 逐个写入这几个测试已经确定的结果（[`Inner::finish_test`]），返回遇到的第一个错误。已不在进行中的测试跳过：
+    /// 逐个写入这些测试已确定的结果（[`Inner::finish_test`]），返回遇到的第一个错误。已不在进行中的测试跳过：
     /// 前面的测试结束时会通知两端，节点可能因此离线，其参与的后续测试随之结束。
     ///
     /// 单个测试写入失败不影响其余测试。每次写入均在持有 controller 锁期间等待数据库响应，因此一旦处于退避期（[`Inner::back_off`]，
@@ -711,8 +711,8 @@ impl Inner {
     /// 节点掉线了：它参与的测试不会再有它的结果，按手上有的结束。
     ///
     /// 先确定全部结果再逐个写入（[`Inner::store_outcomes`]）：已开始退避时其余结果交由后台任务写入，之后的上报一律忽略。
-    pub(crate) fn tests_node_gone(&mut self, node: NodeId) {
-        let now = Instant::now();
+    /// `now` 取自调用方开始处理该节点离线时，此后开始的退避同样计入。
+    pub(crate) fn tests_node_gone(&mut self, node: NodeId, now: Instant) {
         let involved: Vec<u64> = self
             .diag
             .running
@@ -1437,6 +1437,73 @@ mod tests {
         for test in tests {
             assert_ne!(lab.controller.lock().store.test(network, test).unwrap().unwrap().state, TestState::Running, "退避结束后正常写入");
         }
+    }
+
+    #[test]
+    fn a_back_off_started_while_starting_a_matrix_pair_ends_the_round() {
+        let mut lab = Lab::new();
+        let network = lab.network("home").id;
+        let mut members: Vec<Member> = (0..3).map(|_| lab.join_as(network, &modern_hello("0.2.0"))).collect();
+        lab.settle(&mut members.iter_mut().collect::<Vec<_>>());
+        // 三对均刚单独测试过：矩阵开始时全部排队等待间隔结束。
+        {
+            let mut inner = lab.controller.lock();
+            for (index, x) in members.iter().enumerate() {
+                for y in &members[index + 1..] {
+                    inner.diag.last.insert(pair(x.id, y.id), (Instant::now(), None));
+                }
+            }
+        }
+        let run = lab.controller.start_matrix(network).unwrap();
+        assert!(run.cells.iter().all(|cell| cell.state == CellState::Pending), "{:?}", run.cells);
+        // 第一对的一端连接已断开，controller 尚未察觉：指令无法下发，该测试就此结束，写入其结果时数据库报告磁盘已满。
+        let gone = run.cells[0].a;
+        members.retain(|member| member.id != gone);
+        fill_disk(&lab, "UPDATE");
+        {
+            let mut inner = lab.controller.lock();
+            inner.diag.last.clear();
+            let now = Instant::now();
+            inner.tests_tick(now);
+            assert_eq!(refused_writes(&inner.store), 1);
+            assert!(inner.flush_after.is_some_and(|after| after > now), "已开始退避");
+        }
+        let run = lab.controller.matrix(network).unwrap();
+        let pending = run.cells.iter().filter(|cell| cell.state == CellState::Pending).count();
+        assert_eq!(pending, 2, "开始第一对期间进入退避，本轮不再开始其余节点对：{:?}", run.cells);
+    }
+
+    #[test]
+    fn a_test_whose_order_cannot_be_delivered_and_whose_result_finds_the_database_full_starts_a_back_off() {
+        let (lab, network, a, b) = two_nodes();
+        // b 的连接已断开，controller 尚未察觉。
+        let request = CreateTest { a: a.id, b: b.id, items: None, throughput: false, via: Vec::new() };
+        drop(b);
+        fill_disk(&lab, "UPDATE");
+        let view = lab.controller.start_test(network, &request).unwrap();
+        assert_ne!(view.state, TestState::Running, "指令无法下发的测试在此结束");
+        let inner = lab.controller.lock();
+        assert_eq!(refused_writes(&inner.store), 1);
+        assert!(inner.flush_after.is_some(), "写入结果时整个数据库读写失败，已开始退避");
+    }
+
+    #[test]
+    fn a_test_whose_order_cannot_be_delivered_while_backing_off_leaves_its_result_to_the_background() {
+        let (lab, network, a, b) = two_nodes();
+        // b 的连接已断开，controller 尚未察觉。
+        let request = CreateTest { a: a.id, b: b.id, items: None, throughput: false, via: Vec::new() };
+        drop(b);
+        lab.controller.lock().back_off();
+        let view = lab.controller.start_test(network, &request).unwrap();
+        assert_ne!(view.state, TestState::Running, "指令无法下发的测试在此结束");
+        {
+            let inner = lab.controller.lock();
+            let stored = inner.store.test(network, view.id).unwrap().unwrap();
+            assert_eq!(stored.state, TestState::Running, "退避期内本次不写入结果");
+            assert!(inner.diag.running[&view.id].deadline <= Instant::now() + STORE_RETRY, "由后台任务在 STORE_RETRY 之内写入");
+        }
+        lab.controller.lock().tests_tick(later(1));
+        assert_eq!(lab.controller.lock().store.test(network, view.id).unwrap().unwrap().state, view.state, "退避结束后正常写入");
     }
 
     #[test]

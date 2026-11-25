@@ -32,7 +32,7 @@ pub(crate) struct Matrix {
     running: BTreeMap<u64, (NodeId, NodeId)>,
     /// 管理员取消了，还有测试没有收尾：不再开始新的；测试都收尾了才算取消完，这之前不能开始下一次。
     cancelling: bool,
-    /// 此时刻之前不再调度：开始某一对时存储出错，或者开始矩阵、开始某一对的提交未收到响应（见 `Inner::commit_unknown`），
+    /// 此时刻之前不再调度：开始某一对时存储出错，或开始矩阵、开始某一对的提交未收到响应（见 `Inner::commit_unknown`），
     /// 本轮已提前结束。
     retry_at: Option<Instant>,
     /// 调度重入保护标记：启动某对节点时若发生节点掉线并触发其他测试结束，不从回调重入调度，而是由外层循环继续调度。
@@ -53,7 +53,7 @@ impl Matrix {
         self.run.finished = count(finished);
     }
 
-    /// 现在可以调度：没有正在调度，也没有在等待再次调度的时刻（见 [`Matrix::retry_at`]）。
+    /// 当前可以调度：未处于调度中，也未在等待再次调度的时刻（见 [`Matrix::retry_at`]）。
     fn may_schedule(&self, now: Instant) -> bool {
         !self.is_finished() && !self.cancelling && !self.scheduling && self.retry_at.is_none_or(|at| at <= now)
     }
@@ -129,8 +129,8 @@ impl Controller {
         let detail = format!("开始全网矩阵：{} 个节点，{} 对，其中 {} 对要测", nodes.len(), run.total, pending.len());
         let params = json!({ "matrix": id, "nodes": nodes.len(), "pairs": run.total, "testing": pending.len() });
         let refs = [LogRef::new(RefKind::Network, network.0)];
-        // 操作记录与顺带的清理操作在同一事务中执行：写入失败时状态保持不变，可重试。提交的回答没有回来时按已提交处理，
-        // 照常开始（见 `Inner::commit_unknown`）：不然操作记录里有一次开始了的矩阵，却没有这个矩阵。
+        // 操作记录与顺带的清理操作在同一事务中执行：写入失败时状态保持不变，可重试。提交未收到响应时按已提交处理，
+        // 正常开始（见 `Inner::commit_unknown`）：否则操作记录中有一次已开始的矩阵，该矩阵却不存在。
         let logged =
             inner.store.atomically(|store| store.log_refs(run.started_at, Some(network), action::TEST_MATRIX, &detail, &refs, params));
         let unsettled = inner.commit_unknown(logged, format_args!("开始全网矩阵"))?;
@@ -171,14 +171,15 @@ impl Controller {
     /// 取消进行中的全网矩阵：取消运行中的测试，不再调度尚未开始的节点对。
     ///
     /// 全部测试完成收尾后矩阵才视为取消完成。若有测试结果持久化失败，其状态已固定为已取消，由后台任务继续重试持久化，全部持久化后矩阵才结束取消；
-    /// 在此期间可再次调用取消接口（不再记操作记录），但不能启动新的全网矩阵。记操作记录的提交未收到响应时按已提交处理
-    /// （见 `Inner::commit_unknown`）：照常进入取消，各测试的结果已确定为已取消，但本次不写入，由后台任务稍后持久化，
-    /// 因此返回的矩阵可能仍处于进行中。
+    /// 在此期间可再次调用取消接口（不再写入操作记录），但不能启动新的全网矩阵。写入操作记录的提交未收到响应时按已提交处理
+    /// （见 `Inner::commit_unknown`）并开始退避。处于退避期时（包括上述情形，以及此前其他写入遇到整个数据库读写失败），
+    /// 仍进入取消流程，各测试的结果已确定为已取消，但本次不写入，由后台任务最迟在 STORE_RETRY 之后持久化，
+    /// 因此返回的矩阵可能仍处于进行中；退避期内再次调用取消同样不写入测试结果。
     ///
     /// # Errors
     ///
-    /// 没有这个网络、没有矩阵（`not_found`），或者它已经结束了（`busy`）；记操作记录失败（读写存储失败，状态不变，可重试）；
-    /// 有测试的结果写入失败：读写存储失败，或者该测试的记录仍在等待一个提交结果未知的事务（`busy`）。
+    /// 网络或矩阵不存在（`not_found`），或矩阵已结束（`busy`）；写入操作记录失败（读写存储失败，状态不变，可重试）；
+    /// 有测试结果写入失败：读写存储失败，或该测试的记录仍在等待一个提交结果未知的事务（`busy`）。
     pub fn cancel_matrix(&self, network: NetworkId) -> Result<MatrixRun, Error> {
         let mut inner = self.lock();
         let now = Instant::now();
@@ -193,7 +194,7 @@ impl Controller {
             let refs = [LogRef::new(RefKind::Network, network.0)];
             let params = json!({ "matrix": id });
             // 操作记录与顺带的清理操作在同一事务中执行：写入失败时状态保持不变，可重试。提交未收到响应时按已提交处理，
-            // 照常取消并开始退避（见 `Inner::commit_unknown`），下面各测试的结果本次不写入。
+            // 仍执行取消并开始退避（见 `Inner::commit_unknown`），下方各测试的结果本次不写入。
             let logged = inner
                 .store
                 .atomically(|store| store.log_refs(at, Some(network), action::TEST_MATRIX_CANCEL, "取消了全网矩阵", &refs, params));
@@ -232,7 +233,7 @@ impl Inner {
         self.diag.matrices.get(&network).map(|matrix| matrix.run.clone()).ok_or(Error::NotFound(Entity::Matrix))
     }
 
-    /// 有空位就开始矩阵里排着的节点对。刚单独测过的对先跳过，等它过了间隔。一个网络出错不耽误别的网络，
+    /// 有空位时开始矩阵中排队的节点对。刚单独测试过的节点对先跳过，待其间隔结束。单个网络出错不影响其他网络，
     /// 整个数据库读写失败、开始退避时除外（见 [`Inner::schedule_network_matrix`]）。
     pub(super) fn schedule_matrices(&mut self, now: Instant) {
         let networks: Vec<NetworkId> =
@@ -242,7 +243,7 @@ impl Inner {
         }
     }
 
-    /// 排一个网络的矩阵。处于退避期（[`Inner::back_off`]）时不排：每开始一对均需在持有 controller 锁期间等待数据库响应，
+    /// 调度一个网络的矩阵。处于退避期（[`Inner::back_off`]）时不调度：每开始一对均需在持有 controller 锁期间等待数据库响应，
     /// 退避结束后由后台任务继续调度（见 [`Inner::matrix_wake`]）。
     fn schedule_network_matrix(&mut self, network: NetworkId, now: Instant) {
         if self.backing_off(now) || !self.diag.matrices.get(&network).is_some_and(|matrix| matrix.may_schedule(now)) {
@@ -255,11 +256,9 @@ impl Inner {
         }
     }
 
-    /// 有空位就开始排着的节点对。存储出错时记下日志，隔 [`STORE_RETRY`] 再排；正在排的时候不重入，处于退避期时不排。
+    /// 有空位时开始排队的节点对。存储出错时记录日志，间隔 [`STORE_RETRY`] 后再次调度；调度期间不重入，
+    /// 处于退避期时不开始节点对（见 [`Inner::try_schedule_matrix`]）。
     fn schedule_matrix(&mut self, network: &NetworkRecord, now: Instant) {
-        if self.backing_off(now) {
-            return;
-        }
         let Some(matrix) = self.diag.matrices.get_mut(&network.id).filter(|matrix| matrix.may_schedule(now)) else { return };
         matrix.scheduling = true;
         // 可以调度即表示再次调度的时刻已过；本轮若需推迟，将在下方重新设定。
@@ -273,7 +272,7 @@ impl Inner {
         }
     }
 
-    /// 本轮调度提前结束，[`STORE_RETRY`] 之后再排。时刻从现在算起：此前的存储操作可能已等待一次完整的响应超时。
+    /// 本轮调度提前结束，[`STORE_RETRY`] 之后再次调度。该时刻自当前起算：此前的存储操作可能已等待一次完整的响应超时。
     fn delay_matrix(&mut self, network: NetworkId) {
         if let Some(matrix) = self.diag.matrices.get_mut(&network) {
             matrix.retry_at = Some(Instant::now() + STORE_RETRY);
@@ -294,7 +293,7 @@ impl Inner {
     /// 无法启动的节点对移至队尾并结束本轮调度：下一轮优先尝试其余节点对，避免单对持续失败阻塞队列；
     /// 当整个存储不可写时，每轮也仅额外尝试一次，不会遍历重试全部待测节点对。
     /// 创建某一对测试记录的提交未收到响应时（见 `Inner::commit_unknown`），该节点对仍视为已开始，本轮同样在此结束，
-    /// [`STORE_RETRY`] 之后再排。开始某一对期间开始了退避（例如节点离线后写入其其他测试失败）时，本轮同样结束。
+    /// [`STORE_RETRY`] 之后再次调度。开始某一对期间进入退避（例如节点离线后写入其参与的其他测试失败）时，本轮同样结束。
     fn try_schedule_matrix(&mut self, network: &NetworkRecord, now: Instant) -> Result<(), Error> {
         loop {
             if self.backing_off(now) {
@@ -397,7 +396,7 @@ impl Inner {
         tracing::info!(network = %network, matrix = matrix.run.id, state = ?matrix.run.state, "全网矩阵已结束");
     }
 
-    /// 矩阵里有排着的节点对时，什么时候再来看：在等间隔过去的隔一秒，暂缓调度的（存储出错或提交结果未知之后）到再次调度的时刻。
+    /// 矩阵中有排队的节点对时，返回下次检查的时刻：等待间隔结束的在 1 秒后，暂缓调度的（存储出错或提交结果未知之后）在再次调度的时刻。
     pub(super) fn matrix_wake(&self, now: Instant) -> Option<Instant> {
         let soon = now + Duration::from_secs(1);
         self.diag
